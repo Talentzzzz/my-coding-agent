@@ -52,3 +52,9 @@ Blocked by: 05
 2. **`hub.claim()` 收紧成 `claim(sessionId)`**（无 id 的回落删掉，票 09 决定 6），所以 `scripts/smoke-sessions.ts:89,90,123` 三处要先 `currentSessionId()` 再 `claim(id)`——它同时让"每页加载只调一次 `/api/sessions/current`"这条客户端约束有一个可断言的版本（票 09 决定 7）。
 3. **"订阅不拿 claim"有了可断言的形式**：订阅路径上**不得出现 `hub.claim` 调用**，照 `docs/notes.md:59` 那条"要验证就数 `hub.claim` 的调用次数"办；`smoke-stream.ts:391` 那种"直接 `hub.claim` 给测试台自己用"的用法不受影响。
 4. **`smoke-api.ts` 那个顺序假设不再需要脚本自己撑**：notes §五 bug 3 是"脚本必须在移动期间另持一条流的 claim"，因为 leaf 只在内存；票 09 给 `hub.reap()` 加了守卫（不关闭有未落盘 leaf 的会话，决定 8），所以"移动之后不 attach 任何东西也能让移动生效"变成了**可断言的正确行为**——这一点在 leaf 可持久化（票 18）落地后要重新表述。
+
+**2026-10-12，票 10 解决时追加（本票仍 open，这里登记新帧种类与一条类型变化）**：
+
+1. **连接级（`streamId: null`）上共有三类载荷，外加一个已定义未实现的信封级形状**（票 05 / 07 / 10 定下之后；今天树上还没有）：票 07 的 `heartbeat`，票 10 的 `sessions`（每连接一次的基线，`SessionRow[]`）与 `session_row`（一行变了），以及票 05 第 2 条那个"先定义、不实现"的 `{ streamId: null, error: { message } }`（与 `item` 平级）。所以票 07 那条"先丢掉 `streamId: null` 的帧"的过滤器要一并认识它们——尤其**基线可能先于心跳到达**，把"第一帧是心跳"写进断言同样会随机失败。
+2. **REST 列表的应答类型从 `SessionRef` 变成 `SessionRow`**（多了 `modified` / `running` / `pending`），而且它从此由服务端的投影 store 答：冷会话的 `running` / `pending` 是 `false` / `0`（构造上如此），`modified` 是最后一条带时间戳的 user/assistant 消息。冒烟里凡手工构造过 `SessionRef` 期望值的地方都要跟着改。
+3. **一条可以断言的验收**（票 10 第 4 节的机制）：**没有任何会话订阅时，一条会话仍会产出概况帧**——`POST /api/sessions/:id/messages` 之后不 `open` 任何逻辑流，通道上仍应收到那一行的 `session_row`（`running: true`，随后 `modified` 与 `running: false`）。这是"后台会话那一行照常更新"唯一的可判定形式，本票值得给它一条。

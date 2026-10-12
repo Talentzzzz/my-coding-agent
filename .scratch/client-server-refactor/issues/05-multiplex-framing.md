@@ -276,3 +276,9 @@ export type ClientFrame =
 ## Comments
 
 **2026-10-12，票 07 解决时追加（本票的 Answer 一字未改，只登记它修正了哪半句）**：上面第 4 条那半句"服务端**不承诺任何应用层心跳帧**"**已被票 07 修正**——票 07 判定客户端一侧没有可观察的判活信号（pong 不可见、WebSocket 无 ping 超时、空闲连接本来就没有帧），因此**服务端新增一条连接级应用层心跳** `{ streamId: null, item: { type: "heartbeat", everyMs } }`（间隔 5000 ms）。它占的正是第 2 条给票 07 留出的那个座位，所以信封、帧的三分法、`streamId: null` 的语义、以及"心跳本身仍是协议层 Ping/Pong"这四条**都不变**；被改的是"服务端不发应用层帧"这个判断——它当时的论证是"发一个**没有人读**的应用帧是硬造 `ready`"，而票 07 查明**有人读**。本票的其余八条决定与落点表（尤其"票 07 要连接级可观察信号就占 `streamId: null`"那一行）不受影响，只不过票 07 确实来占了这个座位。
+
+**2026-10-12，票 10 解决时追加（本票的 Answer 一字未改，只登记座位上的第二类载荷与一处双份）**：
+
+1. **第 2 条留出的 `streamId: null` 座位上有三类载荷，外加第 2 条那个"先定义、不实现"的信封级形状**（票 05 / 07 / 10 定下之后；**今天树上一条都还没有**，三票都只产出决定）：票 07 的心跳、票 10 的连接级概况——`{ streamId: null, item: { type: "sessions", sessions } }`（每连接一次的基线，`SessionRow[]`）与 `{ streamId: null, item: { type: "session_row", session } }`（一行变了，整行替换）——以及本票第 2 条自己定的 `{ streamId: null, error: { message } }`（与 `item` 平级，不属那三类载荷）。第 2 条"连接级只保留一个形状"与第 4 条那句"多一类载荷不占第二个座位"原样成立：同一个座位，客户端按 `streamId === null` 全部路由到"不属于任何一栏"的处理，且**只校验信封**（第 6 条）。
+2. **一处双份要写明**：`running` 与 `pending` 在两条流上各有一份——本票第 2 条的 `status.submitting`（逻辑流）与基线里的 `pendingApprovals` / 逐审批差值帧，对票 10 概况帧里的 `session.running` / `session.pending`（连接级）。不是矛盾：概况行必须与"有没有人订阅"无关，而栏的状态只在那一栏订阅着的时候才有意义；两者在服务端同源于同一个 `snapshot`，分歧窗口只有一帧。**两个方向都不要走**：不要为了去重删掉 `status` 里的 `submitting`（那是重开本票的载荷），也不要把概况行改成从内容流算（后台会话那一行会又冻住）。
+3. **第 2 条禁止的那件事没有被违反**：抬到连接级的只有 `id / cwd / createdAt / title / parentId / modified / running / pending`（`SessionRow`），`usage` / `cost` / `contextTokens` 仍然只在逻辑流上——票 10 特意把 `usage` 留在逻辑流，理由与本票第 2 条一字不差。

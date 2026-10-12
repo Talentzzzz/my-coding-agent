@@ -30,3 +30,7 @@ Status: open
 ## Answer
 
 <!-- 解决时在下面追加。 -->
+
+## Comments
+
+**2026-10-12，票 10 解决时追加（本票仍 open，这里登记落点清单与一处顺手的旧账）**：票 10 只产出决定、代码一行未动，落点清单在它 §7 的表里，本票落地时要接的有：`packages/core/src/protocol.ts`（新增 `SessionRow`，`WorkspaceGroup.sessions` 的元素类型换成它，两个连接级载荷类型）；`packages/core/src/session/session-manager.ts`（`newestAt` 改读 `modified`，`:1612-1614`；包一个"一个文件 → 一行"的探针）；新文件 `packages/server/src/projection.ts`；`packages/server/src/hub.ts`（host 级观察点）；`packages/server/src/boot.ts`；`packages/server/src/controllers/sessions.ts`（列表应答改由投影答）；mux / 连接层两帧；`packages/web/src/main.ts`（连接级行 store、`refreshLists()` 退成兜底）；`packages/web/src/render/sidebar.ts`（行读 `modified` + 第二行状态 + 顶部连接指示器 + 原地改行）；`docs/architecture.md` 的 `## wire` / `## API` / 侧边栏与列表那一段。另外一处**只登记、不要求动**的旧账：`packages/web/src/state.ts:84` 的 `ViewState.sessions` 今天**没有任何读者**（侧边栏只读 `workspaces`，而 `api.ts:89` 那个列表请求的应答只被写进这里）——落地时它要么被删、要么改由投影喂，两种都行。
