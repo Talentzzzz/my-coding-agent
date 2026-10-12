@@ -34,3 +34,8 @@ Status: open
 ## Comments
 
 **2026-10-12，票 10 解决时追加（本票仍 open，这里登记落点清单与一处顺手的旧账）**：票 10 只产出决定、代码一行未动，落点清单在它 §7 的表里，本票落地时要接的有：`packages/core/src/protocol.ts`（新增 `SessionRow`，`WorkspaceGroup.sessions` 的元素类型换成它，两个连接级载荷类型）；`packages/core/src/session/session-manager.ts`（`newestAt` 改读 `modified`，`:1612-1614`；包一个"一个文件 → 一行"的探针）；新文件 `packages/server/src/projection.ts`；`packages/server/src/hub.ts`（host 级观察点）；`packages/server/src/boot.ts`；`packages/server/src/controllers/sessions.ts`（列表应答改由投影答）；mux / 连接层两帧；`packages/web/src/main.ts`（连接级行 store、`refreshLists()` 退成兜底）；`packages/web/src/render/sidebar.ts`（行读 `modified` + 第二行状态 + 顶部连接指示器 + 原地改行）；`docs/architecture.md` 的 `## wire` / `## API` / 侧边栏与列表那一段。另外一处**只登记、不要求动**的旧账：`packages/web/src/state.ts:84` 的 `ViewState.sessions` 今天**没有任何读者**（侧边栏只读 `workspaces`，而 `api.ts:89` 那个列表请求的应答只被写进这里）——落地时它要么被删、要么改由投影喂，两种都行。
+
+**2026-10-12，票 11 解决时追加（本票仍 open，这里登记它的两条落点与一处要写进架构文档的性质）**：
+
+1. **票 11 没有动任何已定类型的形状，落点是纯新增**：删掉 `packages/server/src/http/event-stream.ts` 那条裸 `response.write(...)`（本来就随票 05 §7 整条删除）；在有界队列 + 停滞判据**落在新的 mux 连接层写侧**（票 05 §6 说的"信封的构造点"），两个常量与注释就在那里。`packages/core/src/protocol.ts` **一行不改**（没有新帧、没有新载荷、`send()` 的签名仍是同步 `void`），`stream-registry.ts` 的调用点也不改形状。
+2. **一条要进 `docs/architecture.md` 的承重事实**：今天 `:263` 那句"一条泄漏的流就是一台关不掉的服务器"讲的是**响应**的寿命；新模型下要补的另一半是**写侧**的——一条常驻连接是一个 `Writable`，对端不读时"继续写"的官方后果是无界缓冲直到进程被自己的内存压垮，所以写侧必须有界（票 11 的 4 MiB / 10 秒）。票 05 §7 已把 `## wire` / `## API` 两节列进重写范围，**`## 谁拥有一个会话`（`:232-263`）那一节要加的正是这一条**——它今天只讲了"谁持有会话"，没讲"谁限制写"。`AGENTS.md` 的 `transport` 术语同样要带上这半句。

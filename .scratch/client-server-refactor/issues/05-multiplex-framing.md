@@ -282,3 +282,8 @@ export type ClientFrame =
 1. **第 2 条留出的 `streamId: null` 座位上有三类载荷，外加第 2 条那个"先定义、不实现"的信封级形状**（票 05 / 07 / 10 定下之后；**今天树上一条都还没有**，三票都只产出决定）：票 07 的心跳、票 10 的连接级概况——`{ streamId: null, item: { type: "sessions", sessions } }`（每连接一次的基线，`SessionRow[]`）与 `{ streamId: null, item: { type: "session_row", session } }`（一行变了，整行替换）——以及本票第 2 条自己定的 `{ streamId: null, error: { message } }`（与 `item` 平级，不属那三类载荷）。第 2 条"连接级只保留一个形状"与第 4 条那句"多一类载荷不占第二个座位"原样成立：同一个座位，客户端按 `streamId === null` 全部路由到"不属于任何一栏"的处理，且**只校验信封**（第 6 条）。
 2. **一处双份要写明**：`running` 与 `pending` 在两条流上各有一份——本票第 2 条的 `status.submitting`（逻辑流）与基线里的 `pendingApprovals` / 逐审批差值帧，对票 10 概况帧里的 `session.running` / `session.pending`（连接级）。不是矛盾：概况行必须与"有没有人订阅"无关，而栏的状态只在那一栏订阅着的时候才有意义；两者在服务端同源于同一个 `snapshot`，分歧窗口只有一帧。**两个方向都不要走**：不要为了去重删掉 `status` 里的 `submitting`（那是重开本票的载荷），也不要把概况行改成从内容流算（后台会话那一行会又冻住）。
 3. **第 2 条禁止的那件事没有被违反**：抬到连接级的只有 `id / cwd / createdAt / title / parentId / modified / running / pending`（`SessionRow`），`usage` / `cost` / `contextTokens` 仍然只在逻辑流上——票 10 特意把 `usage` 留在逻辑流，理由与本票第 2 条一字不差。
+
+**2026-10-12，票 11 解决时追加（本票的 Answer 一字未改，只登记它从本票拿走的两条各自被怎么用）**：
+
+1. **第 6 条的 `send(frame: ServerFrame): void` 原样成立**，票 11 没有把它改成 `boolean` / `Promise`：背压完全落在 mux 的**写侧内部**，队列只在 `write()` 返回 `false` 之后才启用，所以"写边界不做运行时校验、热路径上不加一层"这条理由继续成立，而且更强了——`send()` 的每一个调用点（`stream-registry.ts` 十余处、`announce`、将来的投影）**都不需要知道背压存在**。
+2. **"信封的构造点与分道键在同一边"（第 6 条末尾）因此落到了实处**：有界队列、停滞判据、超限关闭连接全部长在那一个点上。反过来也说明为什么它们不能长在 `StreamRegistry`：注册表看到的是"这条会话有哪些订阅者"，而"这条连接写不动了"是连接的知识。**本票第 2 条禁止"发明新载荷"那条也约束了票 11**：它对客户端**什么都不发**，只写一条服务端日志；客户端从 WebSocket 的 `close` 事件（`1013`）知道发生了什么——这不是发明通道，`close` 是协议自带的。

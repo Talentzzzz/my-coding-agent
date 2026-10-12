@@ -58,3 +58,9 @@ Blocked by: 05
 1. **连接级（`streamId: null`）上共有三类载荷，外加一个已定义未实现的信封级形状**（票 05 / 07 / 10 定下之后；今天树上还没有）：票 07 的 `heartbeat`，票 10 的 `sessions`（每连接一次的基线，`SessionRow[]`）与 `session_row`（一行变了），以及票 05 第 2 条那个"先定义、不实现"的 `{ streamId: null, error: { message } }`（与 `item` 平级）。所以票 07 那条"先丢掉 `streamId: null` 的帧"的过滤器要一并认识它们——尤其**基线可能先于心跳到达**，把"第一帧是心跳"写进断言同样会随机失败。
 2. **REST 列表的应答类型从 `SessionRef` 变成 `SessionRow`**（多了 `modified` / `running` / `pending`），而且它从此由服务端的投影 store 答：冷会话的 `running` / `pending` 是 `false` / `0`（构造上如此），`modified` 是最后一条带时间戳的 user/assistant 消息。冒烟里凡手工构造过 `SessionRef` 期望值的地方都要跟着改。
 3. **一条可以断言的验收**（票 10 第 4 节的机制）：**没有任何会话订阅时，一条会话仍会产出概况帧**——`POST /api/sessions/:id/messages` 之后不 `open` 任何逻辑流，通道上仍应收到那一行的 `session_row`（`running: true`，随后 `modified` 与 `running: false`）。这是"后台会话那一行照常更新"唯一的可判定形式，本票值得给它一条。
+
+**2026-10-12，票 11 解决时追加（本票仍 open，这里登记一条要写的冒烟与两处别写进断言的东西）**：
+
+1. **票 11 的写侧策略需要一条冒烟，而装置已经有了**：判据是"**一个真的不读的对端会让服务端在预算内关掉这条连接，而不是无界增长**"。可直接搬的实验脚本是 `.scratch/client-server-refactor/prototype/backpressure-stalled-peer.mjs`（`node:http` 服务器 + 一个真不读的对端；跑 10 秒能看到"继续写"涨到 961 MiB RSS、"遵守背压"停在 24 KB）。冒烟版要改成：**用新的 mux 层**（`send()` 写若干帧 → 对端 `pause()` → 断言连接在停滞上限**之后**的容差内被关闭，且服务端内存有界）。**不要把 4 MiB / 10 秒写成被测常量**——它们是可注入的 `options`（照 `StreamRegistryOptions.idleGraceMs` 与 `HubOptions.approvalGraceMs` 的惯例），冒烟用毫秒级的值驱动，否则一条冒烟要跑 10 秒。
+2. **`scripts/smoke-stream.ts:15` / `smoke-approval.ts:15` 自建 `EventController`**（票 05 §7 已登记）在新模型里连"这个类不存在"都算不上了：票 11 的队列与停滞策略落在**新 mux 的写侧**，而这些脚本要断言的是**传输表面**，所以它们要么改用真 mux 客户端，要么改测"帧是怎么产出的"。本票的清单因此多一条：**哪些断言属于 wire（走真客户端）、哪些属于注册表（直接调）**。
+3. **一处别写进断言的东西**：票 11 在停滞超限时用 close code `1013` 关连接。这个取值的对齐（浏览器与 `ws` 是否都认）是**票 17 的待核实事实**（票 17 的 `## Comments` 里 2026-10-12 票 11 那一条的第 3 点），所以在票 17 给答案之前，冒烟只断言"**连接被关闭**（`close` 事件到达、且不早于停滞上限）"，**不要**断言 `code === 1013`。

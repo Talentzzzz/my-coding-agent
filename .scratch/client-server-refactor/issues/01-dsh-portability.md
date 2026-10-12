@@ -43,3 +43,5 @@ Status: resolved
 总结 §6 的 50/500/2-turn 数字、§7 的退避序列、§2 的"SSE 只用于 `/plugins/events`"三条**与源码一致**；总结 §8 与 §1 未逐行核对，标未确认。
 
 **可搬 / 需重写 / 搬不动**：完整表、逐条理由与重写形状见资产文件 §五。该表按 SSE 前提写成，传输换 WebSocket 后哪些判定翻转，见 `map.md` Notes 的声明。
+
+**2026-10-12，票 11 解决时追加（本票仍 open，这里登记一条本票顺手核实的 DSH 事实：它下行的写侧不处理背压）**：票 11 要回答"`write()` 返回 `false` 之后怎么办"，于是把 DSH 的对应位置读了一遍——`deepseek-harness-master/packages/api/gateway/src/stream-server.ts:274-293` 的 `RemoteStreamMuxConnection.send()`：它把每个下行帧串到一条 `this.writes` 的 Promise 链上，并**等 `ws.send(text, cb)` 的回调**才算这次写完成。这条链**是**一种背压（上游 `await` 它，所以逻辑流的泵会在写不出去时停住），但它**没有任何字节或时间上限**：等待者会一直堆，而 `bufferedAmount` 一次都没被检查过。也就是说 DSH 把"无界缓冲"从 socket 的队列搬进了自己那条 Promise 链，**不能当作"背压已经解决"的先例**。本仓库的写侧路径不同（`send()` 同步、不 `await`），所以票 11 另定了一对有界参数（4 MiB / 10 秒，超限关连接）——见 `issues/11-backpressure.md` 的 `## Answer`。**本票的十五条判定不受影响**（它回答的是"能不能搬"，而这一条根本不在可搬清单里）。
