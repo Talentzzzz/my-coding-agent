@@ -236,3 +236,9 @@ export interface SessionRow extends SessionRef {
 1. **概况通道不需要任何特殊待遇，也不需要淘汰机制。** 票 11 判定：停滞期间**不丢帧**（超字节预算就结束整条连接），所以本票那两类连接级帧（`sessions` 基线、`session_row` 整行替换）既不必进任何白名单、也不必为"丢了怎么补"设计——它们**要么按序送达，要么随整条连接一起结束并由重连重建**。票 11 记下了它们"可以丢"这条性质（整行替换幂等），但没有使用它；**唯一绝不能被丢的是基线**，而本票的两条基线（连接级 `sessions` 与逻辑流 `baseline`）在票 11 的规则下都不会被丢。
 2. **写量的量级被实测了**：一张连接级概况的写量与"每 token 一帧"的内容帧完全不在一个量级（本票 §4 已说"不随 token 变"），票 11 用 11 B 的小帧实测出**小帧要 ~143 KB 才把 16384 的窗口填满**——也就是说填满通道的从来是内容帧，概况帧与心跳一样是**最后**被卡住的那一类。
 3. **一处落点补充给落地**：票 11 的队列与停滞策略落在**新 mux 的连接层写侧**（票 05 §6 的"信封的构造点"），`packages/server/src/projection.ts` 与 `stream-registry.ts` 的帧产出**不受影响**——它们继续只发 `StreamFrame`，"这条连接写不写得动"由连接层一个人管。本票 §7 那张落点表不需要改。
+
+**2026-10-13，票 15 解决时追加（本票的 Answer 一字未改；这里登记 §7 里"`scripts/smoke-*.ts`"那一行的内容，以及本票 Comment 3 那条可断言验收的落点）**：
+
+1. **Comment 3 那条（没有任何会话订阅时仍应收到那一行的 `session_row`）有了家**：新脚本 `scripts/smoke-mux.ts`，装置是共享的 wire 客户端（`scripts/wire/client.ts`）；做法是**一个逻辑流都不开**、POST 一次、断言连接级收到 `running: true` → `running: false` 且 `modified` 前进。它是"后台会话那一行照常更新"唯一的可判定形式。
+2. **连接级三类载荷的到达顺序不许写进断言**：票 15 要求"`sessions` 基线与 `heartbeat` **都到**即可，不断言谁先"，并且共享客户端的 `waitFor(sessionId, …)` **永不返回 `streamId: null` 的帧**——否则一帧心跳就能让"第一帧是基线"随机失败。
+3. **`SessionRow` 上线的连带面**：`GET /api/workspaces` / `/api/sessions` / `/current` 与 `POST /sessions` / `forks` 的应答体一起换成 `SessionRow[]`——票 15 不改这些断言的形状，但 `smoke-api.ts` 与 `smoke-sessions.ts` 里凡手工构造过 `SessionRef` 期望值的地方都要跟着改。

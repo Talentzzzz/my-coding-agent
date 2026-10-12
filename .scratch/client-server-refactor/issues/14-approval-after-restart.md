@@ -162,3 +162,9 @@ Blocked by: 05
 - **票 07**：订阅集合的 `status: "subscribed" | "ended"` 就是本票第 2 节那条 `end` 规则的服务端对应物；本票不新增任何帧，也不改心跳与 watchdog。
 - **票 10**：概况行的 `pending`（票 10 的 `SessionRow.pending`）与逻辑流上的 `pendingApprovals` **仍然是两份**（票 05 Comments 已登记这条双份）；本票只钉住**栏里那张横幅**由基线说话，行上的计数照旧由投影说话。
 - **票 15**：本票给冒烟留了两条可断言的行为——① 重启（或换一个进程）之后 `open` 拿到的基线里 `pendingApprovals` 为空，且**不需要新帧**；② 对一个不在 `pendingApprovals` 里的 `toolCallId` 调审批端点答 **409**（今天答 200）。两条都只依赖 REST 与基线，不依赖 WS 侧任何未核实的事实。
+
+**2026-10-13，票 15 解决时追加（本票的 Answer 一字未改；这里登记它留给冒烟的那两条各自的装置）**：
+
+1. **"换一个进程之后基线里 `pendingApprovals` 为空"**：落在 `scripts/smoke-approval.ts`——第一段用脚本化模型传输把一次运行停在审批上，关掉；第二个进程用**真子进程**（`spawn(process.execPath, ["packages/server/src/main.ts", "--cwd", root, "--port", p], { stdio: "ignore", env: { ...process.env, MY_AGENT_HOME: home } })`，端口先 bind-to-0 探一个空闲的，就绪判据是轮询 `/api/health`、**不解析子进程 stdout**），然后在**新进程**上 `open` 那个会话，断言那条流的**第一帧（基线）里 `pendingApprovals` 为空**，且 transcript 里那次工具调用还在。这条断言真正杀死的是"有人顺手把待审批落盘"：新进程根本没有那次运行，所以它对"落了盘但没恢复运行"这种半吊子实现是红的。
+2. **"未知 `toolCallId` 答 409"**：断言 409 + 响应体说明它不是待回答的审批，**顺手再断言真答案仍是 200**，并确认失败请求没有污染差量帧（票 13 那条 `[true,false,false]` 的反面）。**不写 404 断言。**
+3. **本票第 2 节那条"三个写者"在冒烟里的形式**：票 13 那段"三条流都听到同一个答案"改成**三条连接**（票 05 第 1 条：一条连接上一个会话至多一条逻辑流），其余逐字不变；`end` 清空 `approvals` 那一条落在客户端，票 15 **没有为它建装置**（登记为未覆盖）。

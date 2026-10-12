@@ -25,3 +25,7 @@ Blocked by: 17
 ## Answer
 
 <!-- 解决时在下面追加。 -->
+
+## Comments
+
+**2026-10-13，票 15 解决时追加（本票仍 open；这里登记冒烟侧与本票相关的一条边界）**：票 15 的冒烟最多同时开**三条连接**（`smoke-approval.ts` 那段"三条流"改成三条连接），远在 Chromium 的 kWebSocket 组上限（255，未实测）之下——所以**没有任何冒烟会撞上本票第 1 问那道上限**，本票的结论只能从票 17 的实测里得到，不能从冒烟里得到。另外 `GET /api/health` 今天报的 `live` / `streaming`（`packages/server/src/controllers/routes.ts:35`）：票 15 不给它加断言（`streaming` 这个词在新模型里本来就要重命名或退场），本票第 5 问若要把它用起来，那是记录层与客户端的事。
