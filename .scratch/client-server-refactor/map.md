@@ -56,6 +56,7 @@ Status: charting
 
 ## Decisions so far
 
+- [窗口的多会话形态](issues/03-window-multi-session-prototype.md)：**用户 2026-10-12 看着实物拍了板——并排两栏**。一个窗口同时显示两个会话，左右各一栏，各有标题条、输入框与模型座位、状态行；未聚焦那一栏只变暗不隐藏，审批横幅画在它自己那一栏；侧边栏每行加第二行状态（运行中 / 待审批 / 失败 / 已打开·空闲，颜色只用 `--dsw-state-warn` 与 `--dsw-state-error`）。**窗口形态从此不是下游的未知数**：票 04 的"引用来源有哪几类"按"两栏、每栏一个会话"算，票 06 的"一份基线够不够"按两栏各一份算。没答的：第三个在跑的会话怎么表示（并排画不下）、窗口级单条输入框那条候选、"我在看谁"要恢复成两份。
 - [DSH 的哪些传输机制可以直接搬到这里](issues/01-dsh-portability.md)：引用计数**不是服务端机制**（计数器在浏览器对象层、不持久化；归零只关该会话的逻辑流，Host 不回收会话、agent 不停）；概况/内容/通知是**三条**逻辑流而非同一条流上的两类帧；客户端开窗大小由**客户端**给（DSH 取 `maxMessages: 500` / `minMessages: 50` / `minTurns: 2`，服务端兜底 50）；**客户端窗口确认没有淘汰机制**；可搬 13 条、需重写 8 条、搬不动 6 条，另两条带限定——"窗口不淘汰"可搬但要自觉承担、"省内存"只部分可搬（详见资产文件 §五）。
 - [把一条 SSE 当作多路复用通道时的既有陷阱](issues/02-sse-multiplex-pitfalls.md)：正常结束与掉线对 `EventSource` **不可区分**；重连间隔 Chromium **3000 ms** / Firefox **5000 ms**（于是 `RELEASE_GRACE_MS = 2000` 那条"覆盖重连"的说法**是错的**）；注释心跳在 JS 里**零可观察效果**，命名心跳**必须带 `data:`**；"别再连了"只有 **204 / 非 200 / 错误 Content-Type** 三个信号；`write()` 返回 `false` 后必须等 `'drain'`（默认 HWM **16384**）；**只要有一条响应没结束，`server.close()` 的回调就不发生**（出口是 `closeAllConnections()`）；连接上限是**每 origin 6 条**且**同源 `fetch` 一起被饿死**；回环背压窗口约 **1 ms**。（**2026-10-12 传输改为 WebSocket mux 后**：本票的 Q1/Q2 降级为参考对照，Q3/Q5 原样承重；WS 侧的平台事实由票 17 补。）
 
@@ -63,7 +64,7 @@ Status: charting
 
 - **`docs/architecture.md` 的哪几节要重写**：`## 谁拥有一个会话`、`## wire`、`## API`、`## 与原计划的偏离` 至少四节。
 - **leaf 在内存**（`docs/notes.md:67-80`）这个未决问题在新模型下的命运：流常驻意味着"回退分支再输入"永远有一个持有者，但"关掉窗口之后移动"仍然悬着。
-- **D1 的连带面**：`GET /api/sessions/current` 继续创建会话、且"读形状的请求带写副作用"（`:44`、`:48`）。审计发现刷新会丢掉"我在看哪个会话"，而 `docs/architecture.md:244` 声称这件事由 URL 记住——代码不这样做。这会不会顶到 D1，取决于票 03 与票 04。
+- **D1 的连带面**：`GET /api/sessions/current` 继续创建会话、且"读形状的请求带写副作用"（`:44`、`:48`）。审计发现刷新会丢掉"我在看哪个会话"，而 `docs/architecture.md:244` 声称这件事由 URL 记住——代码不这样做。这会不会顶到 D1，取决于票 03 与票 04。**票 03 已答**：窗口形态是并排两栏，所以要恢复的不再是"一个会话"，而是**两栏各自在看谁**——这个连带面因此变重了，不是变轻。
 - **客户端遗留**：`packages/web/src/api.ts` 的 `exists()` 无调用者（`docs/notes.md:118`）；`packages/server/package.json` 那句过时的 `description: "HTTP and WebSocket transport…"`——全仓库唯一把 WebSocket 说成本项目传输的地方。
 - **投影 store 的 seed 清除规则**：DSH 的"概况全量 baseline"必须连带搬一条"新 baseline 到达时丢掉哪些 cached 值"的规则（依据 `dsh-portability.md` §3.2：baseline 走 `store.seed(...)`，cached 行让位 sequenced）。本仓库要不要投影 store 取决于票 10，这条在它之后才谈得上。
 
