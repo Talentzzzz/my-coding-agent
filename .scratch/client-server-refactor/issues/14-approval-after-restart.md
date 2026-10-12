@@ -23,3 +23,7 @@ Blocked by: 05
 ## Answer
 
 <!-- 解决时在下面追加。 -->
+
+## Comments
+
+**2026-10-12，票 08 解决时追加（本票仍 open，这里只登记它回答了本票的哪一问，免得重复决定）**：本票的第 3 问（`denyAllApprovals` 的 reason 要不要进 transcript）**已由票 08 回答并定了形状**——reason 骑着那次解答走（`pendingApprovals` 的解答从 `Promise<boolean>` 变成 `{ approved, reason }`），落点是 `beforeTool` 的 block reason，也就是 transcript 里的 toolResult 文本与客户端那张工具卡片，**不新增 entry kind、不改 `tool_approval_settled` 那帧**。票 08 顺带更正了一处比"丢弃"更重的事实：`authorize()`（`packages/core/src/agent.ts:1243-1256`）在 `denyAllApprovals` 路径上返回的是写死的 `The user denied permission to run X.`，所以今天写进文件的是"用户拒绝了"这句假话；`abort()` 传的 reason 则永远到不了那里（循环在块分支之前先判信号，`packages/agent/src/agent-loop.ts:675-681`），那条不动。**本票的第 1、2 问（待审批要不要跨重启存活、未知 `toolCallId` 答 409 还是 404）不受影响**，仍归本票；票 08 明确不碰它们。
