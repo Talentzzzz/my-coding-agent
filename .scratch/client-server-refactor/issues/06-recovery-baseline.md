@@ -187,3 +187,5 @@ Status: resolved
 ## Comments
 
 **2026-10-12，票 10 解决时追加（本票的 Answer 一字未改，只登记一个同名概念要分开读）**：票 10 给**连接级概况通道**一条自己的基线——`{ streamId: null, item: { type: "sessions", sessions } }`，每连接一次、整表替换全部行（"这台机器上有哪些会话、各自什么状态"）。它与本票第 2 条钉的那个逻辑流 `baseline`（一份 `SessionSnapshot`，一条逻辑流看着的那个会话的全部状态）**是两个东西**，读"基线"时按 `streamId` 区分：`null` 是行表，会话 id 是会话内容。另外，客户端的行 store 是**连接级**的、不进 `ViewState`、因此不受本票第 5 条那张"跟着基线替换 / 不动"的表影响——与本票把 `sessions` / `workspaces` 判在"不动"那一列是同一条理由：**基线的范围是会话，不是连接**。
+
+**2026-10-12，票 14 解决时追加（本票的 Answer 与第 5 条那张表一字未改，只补一个**出口**）**：本票第 5 条管的是**基线到达时**换什么、不动什么；票 14 查明 `approvals` 还缺**一个基线之外的出口**——一条逻辑流收到 `end` 时，那一栏的 `approvals` 要清空（`packages/web/src/state.ts:139` 整表替换今天就已经在工作，所以"重启后新基线里没有它"这一半不需要新代码；缺的正是"此后不会再有基线到达这条订阅"那一半）。三条边界与第 5 条保持一致并明确下来：**只清 `approvals`**（`items` 是 transcript，必须留着）；`streaming: false` 那一半今天在 `onStreamEnd` 里（`main.ts:142-147`），改写时别丢；**非终帧的 `error` 不清它**（那是这条流自己的错误，票 05 §5 已定 `error` 非终帧）。完整理由见 [`14-approval-after-restart.md`](14-approval-after-restart.md) 第 2 节。
