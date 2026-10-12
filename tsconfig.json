@@ -1,0 +1,16 @@
+{
+	"extends": "./tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"baseUrl": ".",
+		"paths": {
+			"@my-agent/ai": ["./packages/ai/src/index.ts"],
+			"@my-agent/ai/api/*": ["./packages/ai/src/api/*.ts"],
+			"@my-agent/agent": ["./packages/agent/src/index.ts"],
+			"@my-agent/core": ["./packages/core/src/index.ts"],
+			"@my-agent/core/protocol": ["./packages/core/src/protocol.ts"],
+			"@my-agent/core/tools": ["./packages/core/src/tools/index.ts"]
+		}
+	},
+	"include": ["packages/core/src/**/*.ts", "packages/server/src/**/*.ts"]
+}

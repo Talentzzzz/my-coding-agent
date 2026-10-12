@@ -1,0 +1,1293 @@
+<!doctype html>
+<html lang="zh-CN">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>原型：窗口的多会话形态</title>
+		<!--
+			这是一个弃件（票 03），用来回答一个问题：一个窗口同时持有多个会话时，画面长什么样、
+			用户怎么在它们之间移动。
+
+			两条硬约束决定了它的形状：
+			  1. 它必须是这个仓库的真实视觉语言，所以它链接真实的 `tokens.css` 与 `style.css`，
+			     只补上"多会话"这一层需要的规则。它不复制既有窗口的任何一行标记语言——真的客户
+			     端由 `src/main.ts` 等模块在运行时构建 DOM，这里是静态 HTML。
+			  2. 它必须是静态的：没有传输层，没有 agent，数据全是假的，形态切换只是本地开关。
+			     所以它可以直接用浏览器打开（`file://` 也能工作）。如果浏览器拒绝了 `file://` 下
+			     的样式表，就在仓库根目录跑 `npx vite packages/web`，然后访问
+			     `/prototype/multi-session.html`。
+
+			形态与主题可以从地址栏钉住，截图因此可复现：
+			  ?view=single|tabs|split   默认 tabs
+			  ?theme=light|dark         默认跟随系统
+			  &notes=1                  打开页面右上角的批注（截图时关掉）
+		-->
+		<link rel="stylesheet" href="../src/tokens.css" />
+		<link rel="stylesheet" href="../src/style.css" />
+		<style>
+			/*
+			 * 本原型自己的规则。
+			 *
+			 * 一个字面颜色仍然是 bug：能用的都从 `tokens.css` 取。找不到合适角色的地方（运行中的
+			 * 琥珀色、状态点的大小）刻意走已有的角色与既有标记的形状，而不是发明新值。
+			 *
+			 * 类名一律以 `proto-` 开头：它们是"多会话"这一层还没有名字的部分，与既有窗口的标记
+			 * 分开，才看得清哪些是原样、哪些是新提的东西。唯一的例外写在它自己的规则旁边。
+			 */
+
+			body {
+				overflow: hidden;
+			}
+
+			html,
+			body {
+				height: 100%;
+			}
+
+			/* ---------------------------------------------------------- 演示开关 */
+
+			/*
+			 * 真实产品里没有这一条：它是原型的控制台，不是窗口的一部分，因此边框更重、字号更小、
+			 * 并且说清自己是什么。
+			 */
+			.proto-switcher {
+				display: flex;
+				align-items: center;
+				gap: 10px;
+				height: 46px;
+				padding: 0 14px;
+				background: var(--dsw-bg-layer-2);
+				border-bottom: 1px solid var(--dsw-border-l2);
+			}
+
+			.proto-switcher-label {
+				color: var(--dsw-label-caption);
+				font-size: 12px;
+				font-weight: 600;
+				white-space: nowrap;
+			}
+
+			.proto-switcher .segmented {
+				padding: 2px;
+			}
+
+			.proto-switcher .segment {
+				padding: 4px 10px;
+				font-size: 12px;
+			}
+
+			.proto-switcher-note {
+				margin-left: auto;
+				color: var(--dsw-label-caption);
+				font-size: 11px;
+				white-space: nowrap;
+			}
+
+			/* -------------------------------------------------------------- 外壳 */
+
+			/*
+			 * 窗口本体：与 `#app` 同样的两列，只是把 `100vh` 换成"开关之下的剩余高度"。
+			 */
+			.proto-shell {
+				display: grid;
+				grid-template-columns: 232px minmax(0, 1fr);
+				height: calc(100vh - 46px);
+			}
+
+			/* ---------------------------------------------------------- 侧边栏 */
+
+			/*
+			 * 会话行的第二行状态。
+			 *
+			 * 今天这一行只有标题与 `createdAt`（`src/render/sidebar.ts:180-183`）。多会话活着之后
+			 * 它必须再说什么，这是本原型第一个要人拍板的地方。
+			 */
+			.proto-row-state {
+				display: flex;
+				align-items: center;
+				gap: 5px;
+				margin-top: 2px;
+				color: var(--dsw-label-caption);
+				font-size: 10.5px;
+				line-height: 1.2;
+			}
+
+			.proto-dot {
+				flex: none;
+				width: 6px;
+				height: 6px;
+				border-radius: 50%;
+				background: var(--dsw-label-caption);
+			}
+
+			.proto-dot.run {
+				background: var(--dsw-state-warn);
+				animation: pulse 1.2s var(--dsw-ease) infinite;
+			}
+
+			.proto-dot.wait {
+				background: var(--dsw-state-warn);
+			}
+
+			.proto-dot.error {
+				background: var(--dsw-state-error);
+			}
+
+			.proto-row-state.run,
+			.proto-row-state.wait {
+				color: var(--dsw-state-warn-label);
+			}
+
+			.proto-row-state.error {
+				color: var(--dsw-state-error);
+			}
+
+			/*
+			 * 标题与状态上下两行。
+			 *
+			 * 这是本原型**唯一**一处给真实客户端的类名写样式（`span.session-item-title`，见
+			 * `src/style.css:230` 与 `src/render/sidebar.ts:180-183`）。理由：那一行今天只有标题与
+			 * `createdAt`，而"多会话活着时它该显示什么"正是要回答的问题之一，加一行状态就得改这个
+			 * 元素的排版。原型不加载真实客户端的 DOM，所以这里不会与原样式冲突；其余类名一律以
+			 * `proto-` 开头。
+			 */
+			.session-item-title {
+				display: flex;
+				flex-direction: column;
+				justify-content: center;
+			}
+
+			/* 分栏里已经打开的会话：谁被"打开着"是窗口的事实，与它在跑没有关系。 */
+			.proto-row-open {
+				flex: none;
+				width: 3px;
+				align-self: stretch;
+				border-radius: 999px;
+				background: var(--dsw-label-caption);
+			}
+
+			/* ------------------------------------------- 窗格（标签 / 分栏共用） */
+
+			/* 每个会话自己的那一列：今天 `.conversation` 的内容，原样塞进一个窗格。 */
+			.proto-pane {
+				display: grid;
+				grid-template-rows: auto 1fr auto auto auto;
+				/* 一个窗格挨着另一个窗格，谁也不许把邻居挤出去。 */
+				overflow: hidden;
+				min-width: 0;
+				min-height: 0;
+				background: var(--dsw-bg-base);
+			}
+
+			/* 单栏时它撑满格子，于是 transcript 是唯一会长的那一行，其余各行都按内容。 */
+			.proto-shell[data-view="single"] .proto-pane,
+			.proto-shell[data-view="tabs"] .proto-pane {
+				height: 100%;
+			}
+
+			.proto-pane-head {
+				display: flex;
+				align-items: center;
+				gap: 10px;
+				height: var(--desktop-titlebar);
+				min-height: 46px;
+				padding: 0 16px;
+				border-bottom: 1px solid var(--dsw-border-l1);
+				/* 并排时窗格只有约 600px。这里不许溢出：一溢出，标题右边的状态就被裁掉，而"未聚焦
+				   的会话还在跑"正是最不能丢的那条信息。 */
+				overflow: hidden;
+			}
+
+			.proto-pane-title {
+				display: flex;
+				flex-direction: column;
+				justify-content: center;
+				min-width: 0;
+				flex: 1;
+			}
+
+			.proto-pane-title h1 {
+				margin: 0;
+				font-size: calc(var(--app-font-size) + 1px);
+				font-weight: 600;
+				line-height: 1.35;
+				white-space: nowrap;
+				overflow: hidden;
+				text-overflow: ellipsis;
+			}
+
+			.proto-pane-sub {
+				color: var(--dsw-label-caption);
+				font-size: calc(var(--app-font-size) - 2px);
+				line-height: 1.3;
+				white-space: nowrap;
+				overflow: hidden;
+				text-overflow: ellipsis;
+			}
+
+			/* 窗格标题右侧的状态：未聚焦的会话还在跑时，靠它说清楚。 */
+			.proto-pane-state {
+				display: flex;
+				align-items: center;
+				gap: 6px;
+				flex: none;
+				padding: 3px 8px;
+				border-radius: 999px;
+				background: var(--dsw-bg-hover);
+				color: var(--dsw-label-secondary);
+				font-size: 11px;
+				white-space: nowrap;
+			}
+
+			.proto-pane-state.run,
+			.proto-pane-state.wait {
+				color: var(--dsw-state-warn-label);
+			}
+
+			.proto-pane-state.error {
+				color: var(--dsw-state-error);
+			}
+
+			/*
+			 * 未聚焦的窗格。
+			 *
+			 * 只是变暗，不是禁用：它照样在流式，只是键盘与输入不在这里。审批横幅仍然画在它自己
+			 * 那一栏里——那是本原型要人确认的第二个地方。
+			 */
+			.proto-pane.blur .proto-pane-head {
+				background: var(--dsw-bg-sidebar);
+			}
+
+			.proto-pane.blur .proto-pane-title h1 {
+				font-weight: 500;
+				color: var(--dsw-label-secondary);
+			}
+
+			/* 窄栏里 46rem 的阅读宽度与 24px 内边距都放不下，必须让开。 */
+			.proto-pane.narrow .transcript > * {
+				max-width: 100%;
+				padding-inline: 14px;
+			}
+
+			.proto-pane.narrow .banners,
+			.proto-pane.narrow .composer-wrap {
+				max-width: 100%;
+				padding-inline: 14px;
+			}
+
+			/*
+			 * 窄栏里的信息密度。
+			 *
+			 * 两个"最窄"在这里撞上：状态行的三个数字与输入框那一行都不换行，于是它们的**最小内容
+			 * 宽度**比半栏还宽。网格项默认不会缩到最小内容宽度以下，结果是整栏溢出到隔壁栏上面——
+			 * 屏幕上表现为两个窗格的输入框和状态行叠在一起。所以窄栏里必须让出信息，而不是让布局
+			 * 撑破：提示语与排队计数让位，模型座位收窄。
+			 */
+			.proto-pane.narrow .composer-hint {
+				display: none;
+			}
+
+			.proto-pane.narrow .composer-queued {
+				display: none;
+			}
+
+			.proto-pane.narrow .composer-seat {
+				min-width: 0;
+			}
+
+			.proto-pane.narrow .composer-select {
+				/* 再窄一点就会把行首的模型名切成 "Claude Sonnet 4.5 ("，读不出是哪个模型。 */
+				max-width: 9.5rem;
+			}
+
+			.proto-pane.narrow .composer-bar {
+				min-width: 0;
+			}
+
+			/* 目标标签不许被挤扁：它是这一栏答案的落点，截断了就说不清"发到哪"。 */
+			.proto-pane.narrow .proto-target {
+				display: block;
+				flex: none;
+				max-width: none;
+				line-height: 22px;
+			}
+
+			/*
+			 * 状态行的两处光学偏移是为 46rem 的阅读栏调出来的（`src/style.css:1311`、`:1341`）：
+			 * 窄栏里它们只会让三个数字偏离自己的座位，所以整组取消。
+			 */
+			.proto-pane.narrow .status-bar,
+			.proto-pane.narrow .status-bar > .status-stat:nth-child(2) {
+				transform: none;
+			}
+
+			.proto-pane.narrow .status-bar {
+				max-width: 100%;
+				padding-inline: 14px;
+				/* 三个座位在半栏里读起来挤，字号与间距各收一点；数字仍然是等宽字体。 */
+				gap: 6px;
+				font-size: 10.5px;
+			}
+
+			/* ---------------------------------------------------------- 标签形态 */
+
+			.proto-tabs {
+				display: flex;
+				align-items: stretch;
+				gap: 2px;
+				min-height: 44px;
+				padding: 0 8px;
+				background: var(--dsw-bg-sidebar);
+				border-bottom: 1px solid var(--dsw-border-l1);
+				overflow-x: auto;
+			}
+
+			.proto-tab {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				max-width: 15rem;
+				padding: 0 10px 0 12px;
+				border: none;
+				/* 一个"活页"的形状：只有右边一道分隔，当前的那个把底色接到内容上。 */
+				border-right: 1px solid var(--dsw-border-l1);
+				background: transparent;
+				color: var(--dsw-label-secondary);
+				font: inherit;
+				font-size: 13px;
+				cursor: pointer;
+			}
+
+			.proto-tab:last-child {
+				border-right: none;
+			}
+
+			.proto-tab:hover {
+				background: var(--dsw-bg-hover);
+				color: var(--dsw-label-primary);
+			}
+
+			.proto-tab.active {
+				background: var(--dsw-bg-base);
+				color: var(--dsw-label-primary);
+				font-weight: 500;
+			}
+
+			.proto-tab-label {
+				min-width: 0;
+				white-space: nowrap;
+				overflow: hidden;
+				text-overflow: ellipsis;
+			}
+
+			.proto-tab-mark {
+				flex: none;
+				color: var(--dsw-label-caption);
+				font-size: 10.5px;
+			}
+
+			.proto-tab-mark.run,
+			.proto-tab-mark.wait {
+				display: flex;
+				align-items: center;
+				gap: 4px;
+				color: var(--dsw-state-warn-label);
+			}
+
+			.proto-tab-mark.error {
+				color: var(--dsw-state-error);
+			}
+
+			/* ------------------------------------------------- 三种形态的骨架 */
+
+			/*
+			 * 右半列是三种形态互相替换的地方：标签条（有或没有）、窗格区、可能存在的窗口级输入框。
+			 *
+			 * 形态只写在 `#shell` 一个地方（`data-view`），下面所有规则都从它选下来——把同一份形态
+			 * 也写一份到右半列上，只会让两边有机会说不一样的话（而布局只认其中一份）。
+			 *
+			 * 网格的行数必须和这一形态真的有几个孩子一致：少一行，多出来的孩子会落进一个隐式的
+			 * `auto` 行，把窗格挤出去。
+			 *
+			 * 单会话与多标签是同一个骨架：标签条 + 窗格区，下面只有一个窗格是可见的（不可见的那些
+			 * 带 `hidden`，因此不占行）。并排没有标签条，窗格区一行分成两列。
+			 */
+			.proto-shell[data-view="single"] .conversation,
+			.proto-shell[data-view="tabs"] .conversation {
+				grid-template-rows: auto minmax(0, 1fr);
+			}
+
+			/*
+			 * 并排时第三行是空的：两个窗格各自管自己的输入框与状态行，右半列只有标签条与窗格区两个
+			 * 孩子。留着第三行为的是"输入框属于窗口"那条候选——它一旦画出来就落在这一行，不必再
+			 * 改网格。
+			 */
+			.proto-shell[data-view="split"] .conversation {
+				grid-template-rows: auto minmax(0, 1fr) auto;
+			}
+
+			.proto-shell[data-view="single"] .proto-tabs,
+			.proto-shell[data-view="split"] .proto-tabs {
+				display: none;
+			}
+
+			/*
+			 * 窗格区。
+			 *
+			 * 它是一个普通的块（`display: block`），不是一个网格。一次只显示一个窗格时，网格只会
+			 * 帮倒忙：`grid-row: 2` 在这一层上不生效（这一层的孩子参与的是这一层自己的网格），于是
+			 * 窗格落进一个按内容撑开的 `auto` 行，下面留一条按视口高度算出来的空带。一个块加一个
+			 * 撑满高度的行就没有这种行。
+			 *
+			 * 并排时才需要列，那一份写在下面。
+			 */
+			.proto-body {
+				grid-row: 2;
+				/* 撑满"右半列"的第二行，好让上面的 `height: 100%` 有一个确定的父高度可算。 */
+				align-self: stretch;
+				min-width: 0;
+				min-height: 0;
+			}
+
+			/* 并排：这一层里两个窗格各占一列，各自撑满格子的高度。 */
+			.proto-shell[data-view="split"] .proto-body {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+			}
+
+			.proto-shell[data-view="split"] .proto-body .proto-pane {
+				min-height: 0;
+			}
+
+			.proto-shell[data-view="split"] .proto-body .proto-pane + .proto-pane {
+				border-left: 1px solid var(--dsw-border-l2);
+			}
+
+			/* ------------------------------------------------------ 输入框的归属 */
+
+			/*
+			 * "这条输入框属于哪个会话"。
+			 *
+			 * 本原型把输入框画在每一栏里（跟随会话，符合 `AGENTS.md` 的划分），并且额外钉一个目标
+			 * 标签，因为"跟随焦点"这个猜测有一半会错：焦点会跑到侧边栏、跑到另一个窗格、或者窗口
+			 * 刚被切回来还没点过任何东西。标签是把这个归属**读出来**，而不是让人推断。
+			 */
+			.proto-target {
+				display: flex;
+				align-items: center;
+				gap: 5px;
+				max-width: 16rem;
+				padding: 0 8px;
+				height: 22px;
+				border-radius: 999px;
+				background: var(--dsw-bg-hover);
+				color: var(--dsw-label-secondary);
+				font-size: 11.5px;
+				white-space: nowrap;
+				overflow: hidden;
+				text-overflow: ellipsis;
+			}
+
+			.proto-target b {
+				color: var(--dsw-label-primary);
+				font-weight: 600;
+			}
+
+			/*
+			 * 第二候选留了一条路：输入框只有一条、属于窗口，它上面的目标标签成为唯一的路标。
+			 *
+			 * 本原型没有把它画出来——一次只回答一个问题，而这是另一个问题："输入框属于每一栏"与
+			 * "输入框属于窗口"哪个更不容易发错，得先把第一个看完再谈。真要画，是一条
+			 * `.proto-window-composer` 挂在右半列的第三行（那一行已经为它留在网格里了）。
+			 */
+
+			/* ---------------------------------------------------------- 页面批注 */
+
+			.proto-notes {
+				position: fixed;
+				top: 58px;
+				right: 14px;
+				width: 21rem;
+				max-height: calc(100vh - 76px);
+				overflow: auto;
+				padding: 12px 14px;
+				border: 1px solid var(--dsw-border-l2);
+				border-radius: var(--dsw-radius-md);
+				background: var(--dsw-bg-layer-1);
+				box-shadow: var(--dsw-shadow-panel);
+				color: var(--dsw-label-secondary);
+				font-size: 12px;
+				line-height: 1.55;
+			}
+
+			.proto-notes[hidden] {
+				display: none;
+			}
+
+			.proto-notes h3 {
+				margin: 0 0 6px;
+				color: var(--dsw-label-primary);
+				font-size: 12.5px;
+			}
+
+			.proto-notes h3:not(:first-child) {
+				margin-top: 12px;
+			}
+
+			.proto-notes ol {
+				margin: 0;
+				padding-left: 18px;
+			}
+
+			.proto-notes li {
+				margin-bottom: 5px;
+			}
+
+			.proto-notes code {
+				font-family: var(--dsw-font-mono);
+				font-size: 11.5px;
+			}
+
+			/*
+			 * `hidden` 必须赢过本文件里的每一条 `display`。
+			 *
+			 * 本原型的 `<style>` 在外链 `style.css` 之后，而行内规则只按自己出现的顺序比较，于是
+			 * `.proto-pane { display: grid }` 会盖掉 `[hidden]` 的 `display: none`——屏幕上表现为
+			 * "所有窗格同时可见"。`style.css` 里那条 `!important` 只管对话框（`.dialog[hidden]`），
+			 * 在这里插不上手，所以这一份要自带一条。形态切换、标签条、窗格可见性全靠它。
+			 */
+			[hidden] {
+				display: none !important;
+			}
+
+			/* 截图要的是静态画面：运行中的圆点靠颜色与"运行中"三个字也已经说清楚了。 */
+			@media (prefers-reduced-motion: reduce) {
+				.proto-dot.run {
+					animation: none;
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<header class="proto-switcher">
+			<span class="proto-switcher-label">原型 · 窗口的多会话形态</span>
+			<div class="segmented" role="tablist" aria-label="窗口形态">
+				<button class="segment active" type="button" data-view="single" role="tab">单会话</button>
+				<button class="segment" type="button" data-view="tabs" role="tab">窗口内多标签</button>
+				<button class="segment" type="button" data-view="split" role="tab">并排两栏</button>
+			</div>
+			<div class="segmented" role="group" aria-label="主题">
+				<button class="segment active" type="button" data-theme-set="light">浅色</button>
+				<button class="segment" type="button" data-theme-set="dark">深色</button>
+			</div>
+			<span class="proto-switcher-note">假数据、静态标记、没有传输层 · 只读原型</span>
+		</header>
+
+		<!--
+			窗口本体。`data-view` 是形态；`data-focus` 是聚焦的会话 id，输入框与窗格高亮都读它。
+		-->
+		<div class="proto-shell" id="shell" data-view="tabs" data-focus="a">
+			<aside class="sidebar">
+				<div class="sidebar-top">
+					<div class="brand">
+						<span class="brand-mark">M</span>
+						<span class="brand-name">my-agent</span>
+					</div>
+					<button class="icon-button" type="button" title="切换侧边栏" aria-label="切换侧边栏">
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+							<rect x="3" y="4" width="18" height="16" rx="3" />
+							<path d="M9 4v16" />
+						</svg>
+					</button>
+				</div>
+
+				<button class="new-session" type="button">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+						<path d="M12 5v14M5 12h14" />
+					</svg>
+					<span>新建会话</span>
+				</button>
+
+				<nav class="session-list" aria-label="会话列表">
+					<div class="session-list-heading">工作区</div>
+
+					<div class="workspace">
+						<div class="workspace-head" title="C:\Users\a1368\Desktop\my-coding-agent">
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+							</svg>
+							<span class="workspace-name">my-coding-agent</span>
+							<span class="workspace-current">当前</span>
+						</div>
+
+						<!-- A：聚焦、运行中 -->
+						<button class="session-item" type="button" data-session="a" aria-current="true">
+							<span class="session-item-title">
+								序列号 vs 基线
+								<span class="proto-row-state run"><span class="proto-dot run"></span>运行中 · 读文件</span>
+							</span>
+							<span class="session-item-time">刚刚</span>
+						</button>
+
+						<!-- B：未聚焦、停在审批 -->
+						<button class="session-item" type="button" data-session="b">
+							<span class="session-item-title">
+								重写 sidebar 的状态行
+								<span class="proto-row-state wait"><span class="proto-dot wait"></span>待审批</span>
+							</span>
+							<span class="session-item-time">6分钟</span>
+						</button>
+
+						<!-- C：未聚焦、还在跑 -->
+						<button class="session-item" type="button" data-session="c" data-depth="1">
+							<span class="session-fork-mark" title="派生自 序列号 vs 基线">
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+									<path d="M6 4v7a4 4 0 0 0 4 4h7" />
+									<path d="M14 12l3 3-3 3" />
+								</svg>
+							</span>
+							<span class="session-item-title">
+								SSE 心跳在 JS 里不可观察
+								<span class="proto-row-state run"><span class="proto-dot run"></span>运行中 · 12 秒前</span>
+							</span>
+							<span class="session-item-time">12分钟</span>
+						</button>
+
+						<!-- D：空闲，但这一栏正开着 -->
+						<button class="session-item" type="button" data-session="d">
+							<span class="session-item-title">
+								tokens.css 的角色边界
+								<span class="proto-row-state"><span class="proto-row-open"></span>已打开 · 空闲</span>
+							</span>
+							<span class="session-item-time">2小时</span>
+						</button>
+
+						<!-- E：失败 -->
+						<button class="session-item" type="button" data-session="e">
+							<span class="session-item-title">
+								smoke-api 挂了
+								<span class="proto-row-state error"><span class="proto-dot error"></span>上一次运行失败</span>
+							</span>
+							<span class="session-item-time">昨天</span>
+						</button>
+
+						<button class="session-more" type="button">展开其余 6 个会话</button>
+					</div>
+
+					<div class="workspace">
+						<div class="workspace-head" title="C:\Users\a1368\Desktop\pi-main">
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+							</svg>
+							<span class="workspace-name">pi-main</span>
+						</div>
+						<button class="session-item" type="button">
+							<span class="session-item-title">vendored 循环的 retry 接缝</span>
+							<span class="session-item-time">3天</span>
+						</button>
+					</div>
+				</nav>
+
+				<div class="sidebar-foot">
+					<button class="settings-entry" type="button" title="设置">
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+							<circle cx="12" cy="12" r="3.2" />
+							<path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+						</svg>
+						<span>设置</span>
+					</button>
+				</div>
+			</aside>
+
+			<!-- 下面是"右半列"。三种形态在这里互相替换。 -->
+			<div class="conversation" id="stage">
+				<!-- 标签形态的标签条（`data-view="tabs"` 时才显示）。 -->
+				<div class="proto-tabs" id="tabs" role="tablist" aria-label="打开的会话">
+					<button class="proto-tab" type="button" data-tab="a" role="tab">
+						<span class="proto-tab-label">序列号 vs 基线</span>
+						<span class="proto-tab-mark run"><span class="proto-dot run"></span>运行中</span>
+					</button>
+					<button class="proto-tab" type="button" data-tab="b" role="tab">
+						<span class="proto-tab-label">重写 sidebar 的状态行</span>
+						<span class="proto-tab-mark wait"><span class="proto-dot wait"></span>待审批</span>
+					</button>
+					<button class="proto-tab" type="button" data-tab="c" role="tab">
+						<span class="proto-tab-label">SSE 心跳在 JS 里不可观察</span>
+						<span class="proto-tab-mark run"><span class="proto-dot run"></span>运行中</span>
+					</button>
+					<button class="proto-tab" type="button" data-tab="d" role="tab">
+						<span class="proto-tab-label">tokens.css 的角色边界</span>
+					</button>
+				</div>
+
+				<!--
+					窗格区：三种形态共用同一份标记。
+					单会话只显示 A；多标签显示 A/B/C/D 里当前的那个；并排显示 A 与 B 且两栏并排。
+				-->
+				<div class="proto-body">
+					<!-- ================================================================ A -->
+					<section class="proto-pane" data-pane="a" aria-label="序列号 vs 基线">
+						<header class="proto-pane-head">
+							<div class="proto-pane-title">
+								<h1>序列号 vs 基线</h1>
+								<div class="proto-pane-sub">my-coding-agent · 客户端-服务端重构</div>
+							</div>
+							<span class="proto-pane-state run"><span class="proto-dot run"></span>运行中</span>
+						</header>
+
+						<main class="transcript">
+							<section class="turn" data-role="user">
+								<div class="turn-role"><span class="avatar">你</span><span class="role-name">你</span></div>
+								<div class="turn-body">
+									<p>恢复到底要不要序列号？票 06 说不要，我要一个能反驳它的理由。</p>
+								</div>
+							</section>
+
+							<section class="turn" data-role="assistant">
+								<div class="turn-role">
+									<span class="avatar">智</span><span class="role-name">智能体</span>
+									<span class="branch-nav" hidden><span class="branch-count">1/1</span></span>
+								</div>
+								<div class="turn-body">
+									<p>先把结论放前面：序列号解决的是"我错过了什么"，而基线的恢复只回答"现在长什么样"。这两件事在一条常驻通道上只有一件事是真的——快照永远比缺口清单便宜，因为 transcript 的真相在服务端，不在流上。</p>
+								</div>
+							</section>
+
+							<div class="tool-group">
+								<details class="tool" open>
+									<summary>
+										<span class="tool-chevron">
+											<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6" /></svg>
+										</span>
+										<span class="tool-status"></span>
+										<span class="tool-name">read</span>
+										<span class="tool-preview">docs/architecture.md</span>
+									</summary>
+									<pre class="tool-output">## 谁拥有一个会话
+
+活跃会话由 `SessionHub` 持有；一个会话同时只有一个持有者。
+读 transcript 不拿 claim。</pre>
+								</details>
+
+								<details class="tool running">
+									<summary>
+										<span class="tool-chevron">
+											<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6" /></svg>
+										</span>
+										<span class="tool-status"></span>
+										<span class="tool-name">grep</span>
+										<span class="tool-preview">"cursor|sequence" .scratch/</span>
+									</summary>
+									<pre class="tool-output">（运行中…）</pre>
+								</details>
+							</div>
+
+							<section class="turn" data-role="assistant">
+								<div class="turn-role"><span class="avatar">智</span><span class="role-name">智能体</span></div>
+								<div class="turn-body">
+									<p>抓到一处反证：地图里"不做游标"那条是**不重开**的，而它和票 06 是同一件事的两面。</p>
+								</div>
+							</section>
+						</main>
+
+						<div class="banners"></div>
+
+						<div class="composer-wrap">
+							<div class="error-bar" hidden></div>
+							<form class="composer">
+								<textarea rows="1" placeholder="描述要改的地方、要修的 bug，或要解释的内容…" aria-label="消息"></textarea>
+								<div class="composer-bar">
+									<div class="composer-seat">
+										<select class="composer-select" aria-label="模型"><option>Claude Sonnet 4.5</option></select>
+										<select class="composer-select" aria-label="思考档位"><option>high</option></select>
+									</div>
+									<span class="proto-target">发送到 <b>序列号 vs 基线</b></span>
+									<div class="composer-hint">Enter 排队 · Ctrl+Enter 插话 · Esc 停止</div>
+									<span class="composer-queued">已排队 1 条</span>
+									<button class="button danger" type="button">
+										<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2" /></svg>
+										<span>停止</span>
+									</button>
+									<button class="button primary" type="button">
+										<span>排队</span>
+										<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M12 6l6 6-6 6" /></svg>
+									</button>
+								</div>
+							</form>
+						</div>
+
+						<div class="status-bar" data-state="up">
+							<span class="status-stat" title="84.2k tokens this session">total 84.2k</span>
+							<span class="status-stat" title="cache read 77.4k of 84.0k prompt">cache 92%</span>
+							<span class="status-group">
+								<span class="status-stat" title="84.0k of 200k tokens">context 42%</span>
+								<span class="status-meter"><span class="status-meter-fill" style="width: 42%"></span></span>
+							</span>
+						</div>
+					</section>
+
+					<!-- ================================================================ B -->
+					<section class="proto-pane" data-pane="b" aria-label="重写 sidebar 的状态行" hidden>
+						<header class="proto-pane-head">
+							<div class="proto-pane-title">
+								<h1>重写 sidebar 的状态行</h1>
+								<div class="proto-pane-sub">my-coding-agent · 前端</div>
+							</div>
+							<span class="proto-pane-state wait"><span class="proto-dot wait"></span>待审批</span>
+						</header>
+
+						<main class="transcript">
+							<section class="turn" data-role="user">
+								<div class="turn-role"><span class="avatar">你</span><span class="role-name">你</span></div>
+								<div class="turn-body"><p>把 sidebar 那一行改成能在多个会话同时活着时说清楚状态：跑、等审批、还是空闲。</p></div>
+							</section>
+
+							<section class="turn" data-role="assistant">
+								<div class="turn-role"><span class="avatar">智</span><span class="role-name">智能体</span></div>
+								<div class="turn-body">
+									<p>先确认一件事：今天这一行根本没有"运行中"这个状态，它只有标题和 `createdAt`。所以在动手之前，状态从哪来是第一个问题——它现在是客户端的推断，还是服务端会告诉我们的东西。</p>
+								</div>
+							</section>
+
+							<div class="tool-group">
+								<details class="tool">
+									<summary>
+										<span class="tool-chevron">
+											<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6" /></svg>
+										</span>
+										<span class="tool-status"></span>
+										<span class="tool-name">read</span>
+										<span class="tool-preview">packages/web/src/render/sidebar.ts</span>
+									</summary>
+									<pre class="tool-output">180	button.append(
+181		element("span", "session-item-title", session.title),
+182		element("span", "session-item-time", relativeTime(session.createdAt)),
+183	);</pre>
+								</details>
+							</div>
+						</main>
+
+						<!-- 审批横幅画在它自己那一栏里：即使这一栏不是聚焦的。 -->
+						<div class="banners">
+							<div class="approval">
+								<div class="approval-title">
+									<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+										<path d="M12 3l7 3v6c0 4.4-2.9 7.9-7 9-4.1-1.1-7-4.6-7-9V6z" />
+										<path d="M12 9v4M12 16h.01" />
+									</svg>
+									<span>允许运行 bash？</span>
+								</div>
+								<pre class="approval-body">git diff --stat HEAD -- packages/web/src/render/sidebar.ts</pre>
+								<div class="approval-actions">
+									<button class="button" type="button">拒绝</button>
+									<button class="button primary" type="button">允许</button>
+								</div>
+							</div>
+						</div>
+
+						<div class="composer-wrap">
+							<div class="error-bar" hidden></div>
+							<form class="composer">
+								<textarea rows="1" placeholder="描述要改的地方、要修的 bug，或要解释的内容…" aria-label="消息"></textarea>
+								<div class="composer-bar">
+									<div class="composer-seat">
+										<select class="composer-select" aria-label="模型"><option>Claude Sonnet 4.5</option></select>
+										<select class="composer-select" aria-label="思考档位"><option>medium</option></select>
+									</div>
+									<span class="proto-target">发送到 <b>重写 sidebar 的状态行</b></span>
+									<div class="composer-hint">Enter 排队 · Ctrl+Enter 插话 · Esc 停止</div>
+									<button class="button danger" type="button">
+										<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2" /></svg>
+										<span>停止</span>
+									</button>
+									<button class="button primary" type="button">
+										<span>排队</span>
+										<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M12 6l6 6-6 6" /></svg>
+									</button>
+								</div>
+							</form>
+						</div>
+
+						<div class="status-bar" data-state="up">
+							<span class="status-stat">total 31.7k</span>
+							<span class="status-stat">cache 88%</span>
+							<span class="status-group">
+								<span class="status-stat">context 16%</span>
+								<span class="status-meter"><span class="status-meter-fill" style="width: 16%"></span></span>
+							</span>
+						</div>
+					</section>
+
+					<!-- ================================================================ C -->
+					<section class="proto-pane" data-pane="c" aria-label="SSE 心跳在 JS 里不可观察" hidden>
+						<header class="proto-pane-head">
+							<div class="proto-pane-title">
+								<h1>SSE 心跳在 JS 里不可观察</h1>
+								<div class="proto-pane-sub">my-coding-agent · 派生自 序列号 vs 基线</div>
+							</div>
+							<span class="proto-pane-state run"><span class="proto-dot run"></span>运行中</span>
+						</header>
+
+						<main class="transcript">
+							<section class="turn" data-role="user">
+								<div class="turn-role"><span class="avatar">你</span><span class="role-name">你</span></div>
+								<div class="turn-body"><p>从这个分支去查：注释行心跳在浏览器里到底能不能被观察到。</p></div>
+							</section>
+
+							<section class="turn" data-role="assistant">
+								<div class="turn-role"><span class="avatar">智</span><span class="role-name">智能体</span></div>
+								<div class="turn-body">
+									<p>结论是零可观察效果：注释行只喂给解析器，不产生事件，脚本里没有回调可以挂。要判活只有两个选择——命名事件带 `data:`，或者干脆换传输。</p>
+								</div>
+							</section>
+
+							<div class="tool-group">
+								<details class="tool">
+									<summary>
+										<span class="tool-chevron">
+											<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6" /></svg>
+										</span>
+										<span class="tool-status"></span>
+										<span class="tool-name">web_search</span>
+										<span class="tool-preview">EventSource comment heartbeat observable</span>
+									</summary>
+									<pre class="tool-output">3 sources · WHATWG HTML §9.2 server-sent events</pre>
+								</details>
+								<details class="tool running">
+									<summary>
+										<span class="tool-chevron">
+											<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6" /></svg>
+										</span>
+										<span class="tool-status"></span>
+										<span class="tool-name">write</span>
+										<span class="tool-preview">.scratch/client-server-refactor/research/ws-platform.md</span>
+									</summary>
+									<pre class="tool-output">（运行中…）</pre>
+								</details>
+							</div>
+						</main>
+
+						<div class="banners"></div>
+
+						<div class="composer-wrap">
+							<div class="error-bar" hidden></div>
+							<form class="composer">
+								<textarea rows="1" placeholder="描述要改的地方、要修的 bug，或要解释的内容…" aria-label="消息"></textarea>
+								<div class="composer-bar">
+									<div class="composer-seat">
+										<select class="composer-select" aria-label="模型"><option>DeepSeek V3.2</option></select>
+										<select class="composer-select" aria-label="思考档位"><option>low</option></select>
+									</div>
+									<span class="proto-target">发送到 <b>SSE 心跳在 JS 里不可观察</b></span>
+									<div class="composer-hint">Enter 排队 · Ctrl+Enter 插话 · Esc 停止</div>
+									<button class="button danger" type="button">
+										<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2" /></svg>
+										<span>停止</span>
+									</button>
+									<button class="button primary" type="button">
+										<span>排队</span>
+										<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M12 6l6 6-6 6" /></svg>
+									</button>
+								</div>
+							</form>
+						</div>
+
+						<div class="status-bar" data-state="up">
+							<span class="status-stat">total 12.4k</span>
+							<span class="status-stat">cache 61%</span>
+							<span class="status-group">
+								<span class="status-stat">context 9%</span>
+								<span class="status-meter"><span class="status-meter-fill" style="width: 9%"></span></span>
+							</span>
+						</div>
+					</section>
+
+					<!-- ================================================================ D -->
+					<section class="proto-pane" data-pane="d" aria-label="tokens.css 的角色边界" hidden>
+						<header class="proto-pane-head">
+							<div class="proto-pane-title">
+								<h1>tokens.css 的角色边界</h1>
+								<div class="proto-pane-sub">my-coding-agent · 前端 · 空闲</div>
+							</div>
+							<span class="proto-pane-state">已空闲 2 小时</span>
+						</header>
+
+						<main class="transcript">
+							<section class="turn" data-role="user">
+								<div class="turn-role"><span class="avatar">你</span><span class="role-name">你</span></div>
+								<div class="turn-body"><p>侧边栏那一行的状态色该用哪个 token？</p></div>
+							</section>
+
+							<section class="turn" data-role="assistant">
+								<div class="turn-role"><span class="avatar">智</span><span class="role-name">智能体</span></div>
+								<div class="turn-body">
+									<p>运行中是 `--dsw-state-warn`，不是 `--dsw-state-business`：蓝色在这个界面里一直是"可点的东西"，把它用在"正在发生"上会让两者再也分不开。失败用 `--dsw-state-error`，空闲什么都不用——没有颜色本身就是这个状态。</p>
+								</div>
+							</section>
+						</main>
+
+						<div class="banners"></div>
+
+						<div class="composer-wrap">
+							<div class="error-bar" hidden></div>
+							<form class="composer">
+								<textarea rows="1" placeholder="描述要改的地方、要修的 bug，或要解释的内容…" aria-label="消息"></textarea>
+								<div class="composer-bar">
+									<div class="composer-seat">
+										<select class="composer-select" aria-label="模型"><option>Claude Haiku 4.5</option></select>
+										<select class="composer-select" aria-label="思考档位" hidden><option>off</option></select>
+									</div>
+									<span class="proto-target">发送到 <b>tokens.css 的角色边界</b></span>
+									<div class="composer-hint">Enter 发送 · Shift+Enter 换行</div>
+									<button class="button primary" type="button">
+										<span>发送</span>
+										<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M12 6l6 6-6 6" /></svg>
+									</button>
+								</div>
+							</form>
+						</div>
+
+						<div class="status-bar" data-state="up">
+							<span class="status-stat">total 6.8k</span>
+							<span class="status-stat">cache —</span>
+							<span class="status-group">
+								<span class="status-stat">context 5%</span>
+								<span class="status-meter"><span class="status-meter-fill" style="width: 5%"></span></span>
+							</span>
+						</div>
+					</section>
+
+					<!-- ================================================================ E -->
+					<section class="proto-pane" data-pane="e" aria-label="smoke-api 挂了" hidden>
+						<header class="proto-pane-head">
+							<div class="proto-pane-title">
+								<h1>smoke-api 挂了</h1>
+								<div class="proto-pane-sub">my-coding-agent · 冒烟</div>
+							</div>
+							<span class="proto-pane-state error"><span class="proto-dot error"></span>失败</span>
+						</header>
+
+						<main class="transcript">
+							<section class="turn" data-role="user">
+								<div class="turn-role"><span class="avatar">你</span><span class="role-name">你</span></div>
+								<div class="turn-body"><p>跑一下 API 的冒烟，挂了就把栈贴出来。</p></div>
+							</section>
+
+							<section class="turn notice">
+								<div class="turn-role"><span class="avatar">•</span><span class="role-name">系统</span></div>
+								<div class="turn-body"><p>这次运行以失败结束：工具 bash 返回非零退出码。</p></div>
+							</section>
+
+							<div class="tool-group">
+								<details class="tool error" open>
+									<summary>
+										<span class="tool-chevron">
+											<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6" /></svg>
+										</span>
+										<span class="tool-status"></span>
+										<span class="tool-name">bash</span>
+										<span class="tool-preview">node scripts/smoke-api.ts</span>
+									</summary>
+									<pre class="tool-output">TypeError: Cannot read properties of undefined (reading 'name')
+    at routes.ts:412:19
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)</pre>
+								</details>
+							</div>
+						</main>
+
+						<div class="banners"></div>
+
+						<div class="composer-wrap">
+							<div class="error-bar">上一次运行失败：bash 退出码 1（见上面的工具卡片）。</div>
+							<form class="composer">
+								<textarea rows="1" placeholder="描述要改的地方、要修的 bug，或要解释的内容…" aria-label="消息"></textarea>
+								<div class="composer-bar">
+									<div class="composer-seat">
+										<select class="composer-select" aria-label="模型"><option>Claude Sonnet 4.5</option></select>
+										<select class="composer-select" aria-label="思考档位"><option>high</option></select>
+									</div>
+									<span class="proto-target">发送到 <b>smoke-api 挂了</b></span>
+									<div class="composer-hint">Enter 发送 · Shift+Enter 换行</div>
+									<button class="button primary" type="button">
+										<span>发送</span>
+										<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M12 6l6 6-6 6" /></svg>
+									</button>
+								</div>
+							</form>
+						</div>
+
+						<div class="status-bar" data-state="up">
+							<span class="status-stat">total 3.1k</span>
+							<span class="status-stat">cache —</span>
+							<span class="status-group">
+								<span class="status-stat">context 2%</span>
+								<span class="status-meter"><span class="status-meter-fill" style="width: 2%"></span></span>
+							</span>
+						</div>
+					</section>
+				</div>
+			</div>
+		</div>
+
+		<!--
+			批注：给看实物的人用的。截图时用 `&notes=0` 关掉，免得盖住界面。
+		-->
+		<aside class="proto-notes" id="notes" hidden>
+			<h3>这个原型在回答什么</h3>
+			<ol>
+				<li>输入框与模型座位属于谁：<b>每一栏各有一套</b>（都画在窗格内），另外每套都钉一个"发送到 ⟨本栏会话⟩"标签——所以"跟随会话"这件事是被画出来的，不是靠焦点推断的；反过来，这也让"一个窗口一条输入框"成了一个还没被否掉的候选。</li>
+				<li>侧边栏那一行：多会话活着时，它显示会话标题 + 一行状态（运行中 / 待审批 / 失败 / 已打开 · 空闲 / 无标记）。</li>
+				<li>未聚焦还在跑：并排时未聚焦那栏的标题条变暗但<b>不隐藏</b>，状态徽章照旧可见；侧边栏那一行也有琥珀色点 + 文字；多标签形态则由标签条承担。</li>
+				<li>审批横幅：画在它<b>自己那一栏</b>里。并排的初始画面就是"聚焦右栏（在跑）、左栏停在审批上"，所以它<b>不是</b>聚焦的那一栏。</li>
+				<li>状态行：每栏一条（每栏说的是自己那个会话的数）。</li>
+			</ol>
+			<h3>换一个形态试试</h3>
+			<ol>
+				<li>"单会话"= 今天的基线：标签条与"窄栏"处理都消失、每栏只剩一栏，但侧边栏那行状态与输入框的目标标签<b>不会</b>消失——它们是这次提案里唯一进了基线的两样东西，正好拿来判断"值不值"。</li>
+				<li>"窗口内多标签"= 一个会话占满右半列，标签条负责"谁在跑"，未聚焦窗格整栏隐藏。</li>
+				<li>"并排两栏"= 右栏聚焦且在跑，左栏停在审批上（横幅在左栏）。</li>
+			</ol>
+			<h3>我不确定的地方</h3>
+			<ol>
+				<li>一行状态够不够？五个会话里三个在动，侧边栏会不会变成一片琥珀色。</li>
+				<li>输入框跟随焦点，会不会发错会话——"发送到"这个标签是补丁还是必需。</li>
+				<li>并排只有两栏时，第三个在跑的会话在并排画面里没有任何记号（并排不画标签条），只剩侧边栏一个信号，够不够。</li>
+				<li>每栏一条状态行，两栏并排时这两条数字会不会互相打岔。</li>
+				<li>审批横幅留在自己那一栏，是否会让人找不到——还是必须做一个"跳过去"的入口。</li>
+			</ol>
+		</aside>
+
+		<script>
+			/*
+			 * 形态开关。
+			 *
+			 * 这是原型的脚手架，不是提案：真实客户端里"哪个形态"由窗口自己决定，不由地址栏决定。
+			 * `?view=` / `?theme=` 存在的唯一理由是让截图可复现。
+			 */
+			(() => {
+				const query = new URLSearchParams(location.search);
+				const shell = document.getElementById("shell");
+				const notes = document.getElementById("notes");
+
+				/**
+				 * 三种形态。
+				 *
+				 * `open` 是"这个形态里开着哪些会话"——标签条按它显示；`show` 是"哪几栏同时可见"。
+				 * 两者必须分开：多标签形态里四个会话都开着，但只有一个是可见的那一栏。把这两件事
+				 * 混成一个列表，就会得到"四个窗格同时可见"——这不是某个形态，是没形态。
+				 *
+				 * 每个形态自带一份初值，切换形态时整份重置（见 `setView`）。
+				 */
+				const VIEWS = {
+					single: { open: ["a"], show: ["a"], focus: "a" },
+					tabs: { open: ["a", "b", "c", "d"], show: ["a"], focus: "a" },
+					split: { open: ["a", "b"], show: ["a", "b"], focus: "b" },
+				};
+
+				const themeButtons = [...document.querySelectorAll("[data-theme-set]")];
+				const viewButtons = [...document.querySelectorAll("[data-view]")];
+				const tabs = [...document.querySelectorAll("[data-tab]")];
+				const rows = [...document.querySelectorAll("[data-session]")];
+				const panes = [...document.querySelectorAll("[data-pane]")];
+
+				function setTheme(theme) {
+					document.documentElement.dataset.theme = theme;
+					for (const button of themeButtons) button.classList.toggle("active", button.dataset.themeSet === theme);
+				}
+
+				/** 形态被显式选中时的样子，用来把"点过的 open/show"还原回去。 */
+				const RESET = JSON.parse(JSON.stringify(VIEWS));
+
+				/**
+				 * 切换形态。
+				 *
+				 * 顺序是有讲究的：`applyFocus` 从 `data-view` 上读回那一份规格，所以先写形态再算可见性，
+				 * 否则它按上一个形态算，屏幕上表现为"切过去以后还留着上一个形态的窗格"。
+				 */
+				function setView(view) {
+					const spec = VIEWS[view];
+					// 切换形态＝回到那个形态的初值。不重置的话，点过几个侧边栏之后，"单会话"就不再是
+					// 那条基线，而这个原型存在的理由之一正是拿基线做参照。
+					spec.open = [...RESET[view].open];
+					spec.show = [...RESET[view].show];
+					spec.focus = RESET[view].focus;
+					shell.dataset.view = view;
+					applyFocus(spec.focus);
+					for (const button of viewButtons) button.classList.toggle("active", button.dataset.view === view);
+					// 标签条只列"这个形态里开着的会话"，所以标签的数量本身就是形态的一部分。
+					for (const tab of tabs) tab.hidden = !spec.open.includes(tab.dataset.tab);
+					// 并排时两栏都窄，阅读宽度要让开。
+					for (const pane of panes) pane.classList.toggle("narrow", view === "split");
+				}
+
+				/** 换掉"哪几栏可见"，不动形态与标签条。 */
+				function setShown(shown) {
+					VIEWS[shell.dataset.view].show = shown;
+				}
+
+				function applyFocus(focus) {
+					const view = shell.dataset.view;
+					const spec = VIEWS[view];
+					// 焦点必须落在一个真的可见的会话上：并排时点了一个不在两栏里的标签，就回到第一栏。
+					const shown = spec.show.includes(focus) ? focus : spec.show[0];
+					shell.dataset.focus = shown;
+					for (const pane of panes) {
+						pane.hidden = !spec.show.includes(pane.dataset.pane);
+						pane.classList.toggle("blur", view === "split" && pane.dataset.pane !== shown);
+					}
+					for (const tab of tabs) {
+						tab.classList.toggle("active", tab.dataset.tab === shown);
+						tab.setAttribute("aria-selected", String(tab.dataset.tab === shown));
+					}
+					for (const row of rows) row.setAttribute("aria-current", String(row.dataset.session === shown));
+				}
+
+				for (const button of viewButtons) {
+					button.addEventListener("click", () => setView(button.dataset.view));
+				}
+				for (const button of themeButtons) {
+					button.addEventListener("click", () => setTheme(button.dataset.themeSet));
+				}
+				for (const tab of tabs) {
+					tab.addEventListener("click", () => {
+						// 这一形态里本来没开着的会话：先作为标签打开（`setView` 会把规格重置成初值，
+						// 所以要在它之后再写 `show`——在它之前写的会被那次重置抹掉）。
+						const view = shell.dataset.view;
+						if (!VIEWS[view].open.includes(tab.dataset.tab)) {
+							VIEWS[view].open.push(tab.dataset.tab);
+							setView(view);
+						}
+						setShown([tab.dataset.tab]);
+						applyFocus(tab.dataset.tab);
+					});
+				}
+				for (const row of rows) {
+					row.addEventListener("click", () => {
+						// 侧边栏点一个会话：多标签形态里它进标签条并显示；单会话形态里它就是那一栏；
+						// 并排形态里它换到左栏，右栏留着原来那一个。
+						const view = shell.dataset.view;
+						if (view === "tabs" && !VIEWS.tabs.open.includes(row.dataset.session)) {
+							VIEWS.tabs.open.push(row.dataset.session);
+							setView("tabs");
+						}
+						const others = VIEWS[view].show.filter((id) => id !== row.dataset.session);
+						setShown(view === "split" ? [row.dataset.session, ...others].slice(0, 2) : [row.dataset.session]);
+						applyFocus(row.dataset.session);
+					});
+				}
+
+				const wantedTheme = query.get("theme");
+				const systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+				setTheme(wantedTheme === "dark" || wantedTheme === "light" ? wantedTheme : systemDark ? "dark" : "light");
+				notes.hidden = query.get("notes") !== "1";
+				setView(query.get("view") ?? "tabs");
+				// 关掉动效，截图才有确定的样子。
+				if (query.get("still") === "1") {
+					const style = document.createElement("style");
+					style.textContent = "* { animation: none !important; transition: none !important; }";
+					document.head.append(style);
+				}
+			})();
+		</script>
+	</body>
+</html>

@@ -1,0 +1,1824 @@
+/*
+ * The application shell.
+ *
+ * Two columns: a sidebar that owns navigation, and a conversation column that owns one session. The
+ * sidebar is `--dsw-bg-sidebar` and never scrolls as a whole — its list does — so the brand and the
+ * new-session control stay put while the history moves, which is what makes the list feel like a
+ * panel rather than a page.
+ *
+ * The conversation column is four stacked rows: the title, the transcript (the only one that
+ * scrolls), the composer, and the status line. Nothing sits beside the transcript, because the one
+ * thing this window is for is reading it.
+ *
+ * Everything here reads a token from `tokens.css`. A literal color in this file is a bug: it would
+ * be the one value that does not follow the theme.
+ */
+
+:root {
+	/*
+	 * The reading size, overridden at runtime by the settings panel. It lives here rather than in
+	 * `tokens.css` because it is not part of the design system: the design system says what the sizes
+	 * are relative to each other, and this says how large the whole scale is drawn.
+	 */
+	--app-font-size: 14px;
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	height: 100%;
+	margin: 0;
+}
+
+body {
+	background: var(--dsw-bg-base);
+	color: var(--dsw-label-primary);
+	font-family: var(--dsw-font-family);
+	font-size: var(--app-font-size);
+	line-height: 1.6;
+	-webkit-font-smoothing: antialiased;
+	overflow: hidden;
+}
+
+#app {
+	display: grid;
+	grid-template-columns: 232px minmax(0, 1fr);
+	height: 100vh;
+}
+
+/* A collapsed rail keeps the app usable in a narrow window. */
+#app[data-sidebar="rail"] {
+	grid-template-columns: 52px minmax(0, 1fr);
+}
+
+/* ------------------------------------------------------------------ sidebar */
+
+.sidebar {
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	padding: 6px 12px;
+	background: var(--dsw-bg-sidebar);
+	border-right: 1px solid var(--dsw-border-l1);
+	font-size: 14px;
+}
+
+/* The drag strip. Electron needs `app-region` here or the window cannot be moved by its top. */
+.sidebar-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	height: 40px;
+	padding-left: calc(var(--desktop-traffic-light-inset) + 4px);
+	-webkit-app-region: drag;
+}
+
+.sidebar-top button {
+	-webkit-app-region: no-drag;
+}
+
+.brand {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+}
+
+.brand-mark {
+	display: grid;
+	place-items: center;
+	width: 22px;
+	height: 22px;
+	flex: none;
+	border-radius: 6px;
+	background: var(--dsw-bg-inverse);
+	color: var(--dsw-label-inverse);
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.brand-name {
+	font-size: 15px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* One control shape for every icon button, so they line up on the same grid. */
+.icon-button {
+	display: grid;
+	place-items: center;
+	width: 28px;
+	height: 28px;
+	flex: none;
+	padding: 0;
+	border: none;
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.icon-button:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.icon-button svg {
+	width: 16px;
+	height: 16px;
+}
+
+.new-session {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	width: 100%;
+	height: 38px;
+	margin: 4px 0 10px;
+	padding: 8px 12px;
+	flex: none;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-md);
+	background: transparent;
+	color: var(--dsw-label-primary);
+	font: inherit;
+	font-weight: 500;
+	cursor: pointer;
+	transition:
+		background var(--dsw-duration-fast) var(--dsw-ease),
+		border-color var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.new-session:hover {
+	background: var(--dsw-bg-hover-solid);
+	border-color: var(--dsw-border-l3);
+}
+
+.new-session svg {
+	width: 16px;
+	height: 16px;
+	flex: none;
+}
+
+.session-list {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	min-height: 0;
+	flex: 1;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	/*
+	 * Where a workspace's sessions start.
+	 *
+	 * Under the folder's *name*, not under its icon: a row that lines up with the folder's own left
+	 * edge reads as a sibling of the folder rather than as one of the sessions written under it. The
+	 * folder's side of this number is its padding plus the icon plus the gap; the two are stated
+	 * together so a change to either is noticed here.
+	 */
+	--session-indent: 27px;
+}
+
+.session-list-heading {
+	padding: 6px 8px 4px;
+	color: var(--dsw-label-caption);
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.session-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	min-height: 32px;
+	padding: 6px 8px 6px var(--session-indent);
+	border: none;
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.session-item:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.session-item[aria-current="true"] {
+	background: var(--dsw-bg-active);
+	color: var(--dsw-label-primary);
+	font-weight: 500;
+}
+
+.session-item-title {
+	min-width: 0;
+	flex: 1;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.session-item-time {
+	flex: none;
+	color: var(--dsw-label-caption);
+	font-size: 11px;
+}
+
+/*
+ * A fork, drawn under the conversation it came from.
+ *
+ * The rows stay one flat level of buttons and the generation travels as a number, so a taller tree is
+ * still walked by the keyboard in the order it reads, and indentation is nothing but a style.
+ */
+.session-item[data-depth] {
+	/* Zero here so the indent has a defined default; the row itself sets its own generation. */
+	--depth: 0;
+	position: relative;
+	padding-left: calc(var(--session-indent) + var(--depth) * 12px);
+}
+
+/* One line down the left of a run of forks, so they read as a family rather than as a gap. */
+.session-item[data-depth]::before {
+	content: "";
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: calc(var(--session-indent) + 3px + (var(--depth) - 1) * 12px);
+	width: 1px;
+	background: var(--dsw-border-l2);
+}
+
+.session-fork-mark {
+	display: inline-flex;
+	flex: none;
+	align-items: center;
+	color: var(--dsw-label-caption);
+}
+
+.session-fork-mark svg {
+	width: 12px;
+	height: 12px;
+}
+
+.session-item[aria-current="true"] .session-fork-mark {
+	color: var(--dsw-label-secondary);
+}
+
+/* The grouped list. A workspace is a heading and the sessions written under it. */
+.workspace {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	margin-bottom: 6px;
+}
+
+.workspace-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 26px;
+	padding: 4px 8px 2px;
+	color: var(--dsw-label-tertiary);
+	font-size: 11.5px;
+	font-weight: 600;
+}
+
+.workspace-head svg {
+	width: 13px;
+	height: 13px;
+	flex: none;
+	opacity: 0.75;
+}
+
+.workspace-name {
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+/* Which group the new-session button writes into, said once rather than discovered by surprise. */
+.workspace-current {
+	margin-left: auto;
+	padding: 0 5px;
+	border-radius: 999px;
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-caption);
+	font-size: 10px;
+	font-weight: 500;
+	letter-spacing: 0.02em;
+}
+
+.session-list-empty {
+	padding: 8px;
+	color: var(--dsw-label-caption);
+	font-size: 12px;
+}
+
+/* Opens one workspace's list without opening the others. */
+.session-more {
+	align-self: flex-start;
+	padding: 4px 8px;
+	/* Its own 8px of padding is subtracted, so the label lands on the rows' left edge. */
+	margin-left: calc(var(--session-indent) - 8px);
+	border: none;
+	border-radius: var(--dsw-radius-xs);
+	background: transparent;
+	color: var(--dsw-label-caption);
+	font: inherit;
+	font-size: 11.5px;
+	cursor: pointer;
+}
+
+.session-more:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.sidebar-foot {
+	display: flex;
+	flex-direction: column;
+	padding-top: 8px;
+	margin-top: 8px;
+	border-top: 1px solid var(--dsw-border-l1);
+	flex: none;
+}
+
+.settings-entry {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	height: 34px;
+	padding: 0 8px;
+	border: none;
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.settings-entry:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.settings-entry svg {
+	width: 16px;
+	height: 16px;
+	flex: none;
+}
+
+/* ---------------------------------------------------------------- app region */
+
+.conversation {
+	display: grid;
+	/* title · transcript · banners · composer · status line. Only the transcript flexes. */
+	grid-template-rows: auto 1fr auto auto auto;
+	min-width: 0;
+	min-height: 0;
+	background: var(--dsw-bg-base);
+}
+
+/*
+ * The title row, and nothing else.
+ *
+ * It used to carry the model picker, the thinking level, the tool set, and a retry chip. All of that
+ * is a setting now, and settings live behind one button in the sidebar: a control that is touched
+ * once a week does not get to sit in the row the conversation is read from.
+ */
+.header {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	height: var(--desktop-titlebar);
+	min-height: 52px;
+	padding: 0 20px;
+	border-bottom: 1px solid var(--dsw-border-l1);
+	-webkit-app-region: drag;
+}
+
+.header > * {
+	-webkit-app-region: no-drag;
+}
+
+.header-title {
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	min-width: 0;
+	flex: 1;
+}
+
+.header-title h1 {
+	margin: 0;
+	font-size: calc(var(--app-font-size) + 1px);
+	font-weight: 600;
+	line-height: 1.4;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.header-subtitle {
+	color: var(--dsw-label-caption);
+	font-size: calc(var(--app-font-size) - 2px);
+	line-height: 1.3;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+@keyframes pulse {
+	50% {
+		opacity: 0.3;
+	}
+}
+
+.select:focus-visible,
+button:focus-visible,
+textarea:focus-visible,
+input:focus-visible {
+	outline: 2px solid var(--dsw-state-business);
+	outline-offset: 1px;
+}
+
+/* ----------------------------------------------------------------- transcript */
+
+.transcript {
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding: 22px 0 8px;
+}
+
+/* The reading column: wide enough for code, narrow enough to read prose. */
+.transcript > * {
+	width: 100%;
+	max-width: 46rem;
+	margin-inline: auto;
+	padding-inline: 24px;
+}
+
+.welcome {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 10px;
+	flex: 1;
+	color: var(--dsw-label-caption);
+	text-align: center;
+}
+
+.welcome-mark {
+	display: grid;
+	place-items: center;
+	width: 44px;
+	height: 44px;
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-bg-layer-2);
+	border: 1px solid var(--dsw-border-l1);
+	color: var(--dsw-label-tertiary);
+}
+
+.welcome-mark svg {
+	width: 22px;
+	height: 22px;
+}
+
+.welcome h2 {
+	margin: 0;
+	color: var(--dsw-label-primary);
+	font-size: 17px;
+	font-weight: 600;
+}
+
+.welcome p {
+	margin: 0;
+	max-width: 34rem;
+	font-size: 13px;
+}
+
+.turn {
+	margin-bottom: 20px;
+}
+
+/*
+ * A user message is a bubble against the right margin; the agent's work runs the full width of the
+ * column. The asymmetry is the point: one is what was asked and is already known, the other is what
+ * is being read.
+ */
+.turn[data-role="user"] {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+}
+
+.turn-role {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 6px;
+	color: var(--dsw-label-caption);
+	font-size: calc(var(--app-font-size) - 2px);
+	font-weight: 600;
+}
+
+.turn-role .avatar {
+	display: grid;
+	place-items: center;
+	width: 20px;
+	height: 20px;
+	border-radius: 50%;
+	background: var(--dsw-bg-layer-2);
+	border: 1px solid var(--dsw-border-l1);
+	font-size: 10px;
+	font-weight: 600;
+	color: var(--dsw-label-secondary);
+}
+
+/* The row that holds the two ways on from a message, which are only worth the space while the pointer
+   or the keyboard is there. */
+.turn-actions {
+	display: flex;
+	justify-content: flex-end;
+	align-items: center;
+	gap: 2px;
+	height: 18px;
+}
+
+.turn-action {
+	padding: 0 8px;
+	border: 1px solid transparent;
+	border-radius: var(--dsw-radius-xs);
+	background: transparent;
+	color: var(--dsw-label-caption);
+	font: inherit;
+	font-size: 11px;
+	line-height: 18px;
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.turn:hover .turn-action,
+.turn-action:focus-visible {
+	opacity: 1;
+}
+
+.turn-action:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+/* A message whose entry is not known yet, or a turn that cannot move: nothing to offer, so nothing
+   shown — including on hover, which is why this is stated after the rule above. */
+.turn .turn-action:disabled {
+	opacity: 0;
+	cursor: default;
+}
+
+/*
+ * A branch point's alternatives.
+ *
+ * Kept visible rather than revealed on hover: which alternative is on screen is a fact about where
+ * this turn sits in the conversation, and the reader is the one who asked for the other one.
+ */
+.branch-nav {
+	display: flex;
+	align-items: center;
+	opacity: 1;
+}
+
+.branch-nav[hidden] {
+	display: none;
+}
+
+.branch-step {
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	border: none;
+	border-radius: var(--dsw-radius-xs);
+	background: transparent;
+	color: var(--dsw-label-tertiary);
+	font: inherit;
+	font-size: 13px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.branch-step:hover:not(:disabled) {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.branch-step:disabled {
+	color: var(--dsw-label-caption);
+	opacity: 0.45;
+	cursor: default;
+}
+
+.branch-count {
+	padding: 0 1px;
+	color: var(--dsw-label-caption);
+	font-size: 10.5px;
+	font-variant-numeric: tabular-nums;
+}
+
+/* An agent turn's switcher rides in the role row, which is already a flex row. */
+.turn-role .branch-nav {
+	margin-left: 2px;
+}
+
+/* Nothing may move the branch while a run is still filing its turn into one. */
+.transcript.streaming .branch-nav {
+	pointer-events: none;
+	opacity: 0.4;
+}
+
+.transcript.streaming .turn-action {
+	pointer-events: none;
+}
+
+.turn-body {
+	font-size: var(--app-font-size);
+	line-height: 1.7;
+	word-break: break-word;
+	min-width: 0;
+}
+
+/* A user turn is a bubble; the agent's answer is the page itself. */
+.turn[data-role="user"] .turn-body {
+	max-width: 80%;
+	padding: 9px 14px;
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-bubble);
+	border: 1px solid var(--dsw-border-l1);
+}
+
+.turn.notice .turn-body {
+	color: var(--dsw-label-tertiary);
+	font-size: 13px;
+	font-style: italic;
+}
+
+.turn-body > :first-child {
+	margin-top: 0;
+}
+
+.turn-body > :last-child {
+	margin-bottom: 0;
+}
+
+.turn-body p {
+	margin: 0 0 0.75em;
+	white-space: pre-wrap;
+}
+
+.turn-body h1,
+.turn-body h2,
+.turn-body h3,
+.turn-body h4 {
+	margin: 1.4em 0 0.5em;
+	font-weight: 600;
+	line-height: 1.3;
+}
+
+.turn-body h1 {
+	font-size: 1.35em;
+}
+
+.turn-body h2 {
+	font-size: 1.2em;
+}
+
+.turn-body h3 {
+	font-size: 1.05em;
+}
+
+.turn-body ul,
+.turn-body ol {
+	margin: 0 0 0.75em;
+	padding-left: 1.4em;
+}
+
+.turn-body li {
+	margin-bottom: 0.25em;
+}
+
+.turn-body blockquote {
+	margin: 0 0 0.75em;
+	padding: 2px 0 2px 12px;
+	border-left: 3px solid var(--dsw-border-l3);
+	color: var(--dsw-label-secondary);
+}
+
+.turn-body a {
+	color: var(--dsw-state-business);
+	text-decoration: none;
+}
+
+.turn-body a:hover {
+	text-decoration: underline;
+}
+
+.turn-body code {
+	padding: 0.1em 0.35em;
+	border-radius: var(--dsw-radius-xs);
+	background: var(--dsw-code-inline);
+	font-family: var(--dsw-font-mono);
+	font-size: 0.88em;
+}
+
+.turn-body table {
+	width: 100%;
+	margin: 0 0 0.75em;
+	border-collapse: collapse;
+	font-size: 0.94em;
+}
+
+.turn-body th,
+.turn-body td {
+	padding: 6px 10px;
+	border: 1px solid var(--dsw-border-l2);
+	text-align: left;
+}
+
+.turn-body th {
+	background: var(--dsw-bg-layer-2);
+	font-weight: 600;
+}
+
+.turn-body hr {
+	margin: 1.2em 0;
+	border: none;
+	border-top: 1px solid var(--dsw-border-l2);
+}
+
+/* A code block carries its language; the copy button sits in the same row. */
+.code-block {
+	margin: 0 0 0.85em;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-code-block);
+	overflow: hidden;
+}
+
+.code-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	height: 30px;
+	padding: 0 10px;
+	border-bottom: 1px solid var(--dsw-border-l1);
+	color: var(--dsw-label-caption);
+	font-size: 11px;
+	font-family: var(--dsw-font-mono);
+}
+
+.code-copy {
+	padding: 2px 6px;
+	border: none;
+	border-radius: var(--dsw-radius-xs);
+	background: transparent;
+	color: var(--dsw-label-caption);
+	font: inherit;
+	font-size: 11px;
+	cursor: pointer;
+}
+
+.code-copy:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.code-block pre {
+	margin: 0;
+	padding: 12px 14px;
+	overflow-x: auto;
+}
+
+.code-block code {
+	display: block;
+	padding: 0;
+	background: none;
+	color: var(--dsw-label-primary);
+	font-family: var(--dsw-font-mono);
+	font-size: 12.5px;
+	line-height: 1.6;
+	white-space: pre;
+}
+
+/* Diff lines, so a patch in a tool result or a code block reads as a change. */
+.code-block code .diff-add,
+.diff-add {
+	display: block;
+	background: var(--dsw-diff-added);
+}
+
+.code-block code .diff-del,
+.diff-del {
+	display: block;
+	background: var(--dsw-diff-deleted);
+}
+
+.streaming .turn:last-of-type .turn-body::after {
+	content: "";
+	display: inline-block;
+	width: 7px;
+	height: 15px;
+	margin-left: 2px;
+	vertical-align: text-bottom;
+	background: var(--dsw-label-primary);
+	animation: blink 1s steps(2, start) infinite;
+}
+
+@keyframes blink {
+	to {
+		visibility: hidden;
+	}
+}
+
+/* --------------------------------------------------------------- tool cards */
+
+.tool-group {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-bottom: 20px;
+}
+
+.tool {
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-bg-layer-1);
+	overflow: hidden;
+}
+
+.tool > summary {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: 36px;
+	padding: 6px 12px;
+	cursor: pointer;
+	list-style: none;
+	font-size: 13px;
+}
+
+.tool > summary::-webkit-details-marker {
+	display: none;
+}
+
+.tool > summary:hover {
+	background: var(--dsw-bg-hover);
+}
+
+.tool-chevron {
+	flex: none;
+	width: 12px;
+	color: var(--dsw-label-caption);
+	transition: transform var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.tool[open] .tool-chevron {
+	transform: rotate(90deg);
+}
+
+/* The running dot is the only thing on the card that moves, so a glance finds the live call. */
+.tool-status {
+	flex: none;
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--dsw-state-success);
+}
+
+.tool.running .tool-status {
+	background: var(--dsw-state-warn);
+	animation: pulse 1.2s var(--dsw-ease) infinite;
+}
+
+.tool.error .tool-status {
+	background: var(--dsw-state-error);
+}
+
+.tool-name {
+	flex: none;
+	color: var(--dsw-label-primary);
+	font-family: var(--dsw-font-mono);
+	font-size: 12.5px;
+	font-weight: 500;
+}
+
+.tool-preview {
+	min-width: 0;
+	flex: 1;
+	color: var(--dsw-label-tertiary);
+	font-family: var(--dsw-font-mono);
+	font-size: 12px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.tool-output {
+	margin: 0;
+	padding: 10px 12px;
+	border-top: 1px solid var(--dsw-border-l1);
+	background: var(--dsw-code-block);
+	color: var(--dsw-label-secondary);
+	font-family: var(--dsw-font-mono);
+	font-size: 12px;
+	line-height: 1.55;
+	max-height: 24rem;
+	overflow: auto;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+/* ---------------------------------------------------------------- diff view */
+
+/*
+ * What a file-changing call did, as the body of its card.
+ *
+ * A row is four columns: the number the line had, the number it has now, the sign, and the text. Both
+ * number columns are the same width — set per report by the renderer, three digits until it says
+ * otherwise — because a gutter that grows partway down the diff reads as a second table rather than
+ * as one file.
+ */
+.diff {
+	--diff-number-width: 3ch;
+
+	max-height: 24rem;
+	overflow: auto;
+	padding: 4px 0;
+	border-top: 1px solid var(--dsw-border-l1);
+	background: var(--dsw-code-block);
+	font-family: var(--dsw-font-mono);
+	font-size: 12px;
+	line-height: 1.55;
+}
+
+.diff-stat {
+	flex: none;
+	display: flex;
+	gap: 6px;
+}
+
+.diff-count.add {
+	color: var(--dsw-state-success);
+}
+
+.diff-count.del {
+	color: var(--dsw-state-error);
+}
+
+.diff-row {
+	display: grid;
+	grid-template-columns: var(--diff-number-width) var(--diff-number-width) 1.6ch 1fr;
+	gap: 0 6px;
+	padding-inline: 12px;
+	color: var(--dsw-label-secondary);
+}
+
+.diff-row.add {
+	background: var(--dsw-diff-added);
+}
+
+.diff-row.remove {
+	background: var(--dsw-diff-deleted);
+}
+
+/* An elided run and a cut-off report are facts about the view, not lines of the file: no columns. */
+.diff-row.skip,
+.diff-row.omitted {
+	display: block;
+	padding: 2px 12px;
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-caption);
+	font-size: 11.5px;
+}
+
+.diff-num {
+	color: var(--dsw-label-caption);
+	text-align: right;
+	user-select: none;
+}
+
+.diff-sign {
+	color: var(--dsw-label-tertiary);
+	text-align: center;
+	user-select: none;
+}
+
+.diff-row.add .diff-sign {
+	color: var(--dsw-state-success);
+}
+
+.diff-row.remove .diff-sign {
+	color: var(--dsw-state-error);
+}
+
+/* The text is the one column allowed to run past the card: code does not wrap into sense. */
+.diff-text {
+	white-space: pre;
+	color: var(--dsw-label-primary);
+}
+
+.diff-mark {
+	background: var(--dsw-diff-added-strong);
+	color: inherit;
+}
+
+.diff-row.remove .diff-mark {
+	background: var(--dsw-diff-deleted-strong);
+}
+
+/* ------------------------------------------------------------------- banners */
+
+.banners:empty {
+	display: none;
+}
+
+.banners {
+	max-width: 46rem;
+	margin-inline: auto;
+	padding: 0 24px 8px;
+}
+
+.approval {
+	margin-bottom: 8px;
+	padding: 12px 14px;
+	border: 1px solid var(--dsw-state-warn);
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-bg-layer-1);
+	box-shadow: var(--dsw-shadow-panel);
+}
+
+.approval-title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 6px;
+	font-weight: 600;
+}
+
+.approval-title svg {
+	width: 16px;
+	height: 16px;
+	color: var(--dsw-state-warn);
+}
+
+.approval-body {
+	margin: 0 0 10px;
+	color: var(--dsw-label-secondary);
+	font-family: var(--dsw-font-mono);
+	font-size: 12px;
+	line-height: 1.5;
+	white-space: pre-wrap;
+	word-break: break-word;
+	max-height: 8rem;
+	overflow: auto;
+}
+
+.approval-actions {
+	display: flex;
+	gap: 8px;
+	justify-content: flex-end;
+}
+
+/* ------------------------------------------------------------------ composer */
+
+.composer-wrap {
+	max-width: 46rem;
+	width: 100%;
+	margin-inline: auto;
+	padding: 0 24px 20px;
+}
+
+.error-bar {
+	margin-bottom: 8px;
+	padding: 8px 12px;
+	border: 1px solid var(--dsw-state-error);
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-bg-hover-danger);
+	color: var(--dsw-state-error);
+	font-size: 13px;
+}
+
+.composer {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 10px 12px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-lg);
+	background: var(--dsw-input-fill);
+	box-shadow: var(--dsw-shadow-panel);
+	transition: border-color var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.composer:focus-within {
+	border-color: var(--dsw-border-l4);
+}
+
+.composer textarea {
+	width: 100%;
+	min-height: 44px;
+	max-height: 16rem;
+	padding: 0;
+	border: none;
+	background: transparent;
+	color: var(--dsw-label-primary);
+	font: inherit;
+	font-size: 14px;
+	line-height: 1.6;
+	resize: none;
+	outline: none;
+}
+
+.composer textarea::placeholder {
+	color: var(--dsw-label-caption);
+}
+
+.composer-bar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+/*
+ * The model seat: which row answers, and how hard it is asked to think.
+ *
+ * On the bar rather than in the settings panel because it follows the session — it is read while
+ * working and changed mid-conversation, so it has to be where the writing happens. Both selects are
+ * deliberately quiet: a control read on every glance should not compete with the answer above it.
+ */
+.composer-seat {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+}
+
+.composer-select {
+	max-width: 12rem;
+	height: 26px;
+	padding: 0 6px;
+	border: 1px solid transparent;
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: 12px;
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.composer-select:hover {
+	background: var(--dsw-bg-hover-solid);
+}
+
+.composer-select:focus-visible {
+	border-color: var(--dsw-border-l4);
+	outline: none;
+}
+
+.composer-hint {
+	min-width: 0;
+	flex: 1;
+	color: var(--dsw-label-caption);
+	font-size: 11px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.button {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	height: 32px;
+	padding: 0 14px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-primary);
+	font: inherit;
+	font-size: 13px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.button:hover {
+	background: var(--dsw-bg-hover-solid);
+}
+
+.button svg {
+	width: 15px;
+	height: 15px;
+}
+
+.button.primary {
+	border-color: transparent;
+	background: var(--dsw-button-primary-fill);
+	color: var(--dsw-button-primary-label);
+}
+
+.button.primary:hover {
+	background: var(--dsw-button-primary-hover);
+}
+
+.button.danger {
+	border-color: var(--dsw-state-error);
+	color: var(--dsw-state-error);
+}
+
+.button.danger:hover {
+	background: var(--dsw-bg-hover-danger);
+}
+
+.button:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+.button:disabled:hover {
+	background: transparent;
+}
+
+.button.primary:disabled:hover {
+	background: var(--dsw-button-primary-fill);
+}
+
+/*
+ * `display: inline-flex` above would otherwise win over the browser's own `[hidden]` rule, leaving
+ * the Stop button on screen next to Send.
+ */
+[hidden] {
+	display: none !important;
+}
+
+/* --------------------------------------------------------------- status line */
+
+/*
+ * Three numbers and a bar, under the composer.
+ *
+ * Each reading owns a third of the line and centers inside its own third. Left to itself the row
+ * gathers at the left edge, which reads as an unfinished line rather than a line about the request;
+ * divided three ways, the figures sit where the composer above them is read from.
+ *
+ * The line is a little narrower than the composer it sits under, so the three figures read as one
+ * cluster about the middle rather than as a row pinned to the composer's two corners.
+ *
+ * Deliberately not in the header: the header is where the conversation starts, and a figure that
+ * moves on every turn would pull the eye to it. Down here it is read when it is being looked for.
+ */
+.status-bar {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	max-width: 40rem;
+	width: 100%;
+	margin-inline: auto;
+	padding: 0 24px 10px;
+	/* A little left of the composer's centre, which is the axis the line is read from. Like the
+	   middle reading's own nudge below, this is optical: the layout is untouched. */
+	transform: translateX(-24px);
+	color: var(--dsw-label-caption);
+	font-family: var(--dsw-font-mono);
+	font-size: 11px;
+}
+
+.status-stat {
+	white-space: nowrap;
+}
+
+/* The line's three seats: the session total, the cache reading, and context with its bar. */
+.status-bar > .status-stat,
+.status-group {
+	flex: 1;
+	min-width: 0;
+}
+
+.status-bar > .status-stat {
+	text-align: center;
+}
+
+/*
+ * The middle reading sits a little left of its own middle.
+ *
+ * The figure to its right carries a bar, so the three even out only when the middle one gives that
+ * side some room. It is a transform rather than padding because padding would widen this seat and so
+ * move the two readings beside it: this is optical, and the seats stay where they are.
+ */
+.status-bar > .status-stat:nth-child(2) {
+	transform: translateX(-24px);
+}
+
+.status-group {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 10px;
+}
+
+/* The bar is capped, so what the group does not use stays as the space that centers it. */
+.status-meter {
+	position: relative;
+	flex: 1;
+	max-width: 120px;
+	height: 3px;
+	border-radius: 999px;
+	background: var(--dsw-bg-skeleton);
+	overflow: hidden;
+}
+
+.status-meter-fill {
+	display: block;
+	width: 0;
+	height: 100%;
+	border-radius: 999px;
+	background: var(--dsw-state-business);
+	transition: width var(--dsw-duration) var(--dsw-ease);
+}
+
+.status-bar.warn .status-meter-fill {
+	background: var(--dsw-state-warn);
+}
+
+/* While the stream is down there is one true thing to say, so it replaces the three stale ones. */
+.status-bar[data-state="down"] .status-stat {
+	color: var(--dsw-state-error);
+}
+
+.status-bar[data-state="down"] .status-meter {
+	opacity: 0.3;
+}
+
+/* ------------------------------------------------------------ notices */
+
+.notice-card {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 12px 14px;
+	margin-bottom: 8px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-bg-layer-2);
+}
+
+.notice-mark {
+	display: grid;
+	place-items: center;
+	width: 32px;
+	height: 32px;
+	flex: none;
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-secondary);
+}
+
+.notice-mark svg {
+	width: 17px;
+	height: 17px;
+}
+
+.notice-text {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 0;
+	flex: 1;
+	font-size: 13px;
+}
+
+.notice-text span {
+	color: var(--dsw-label-caption);
+	font-size: 12px;
+}
+
+/* --------------------------------------------------------------- settings */
+
+.settings-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 40;
+	display: grid;
+	place-items: center;
+	padding: 24px;
+	background: rgb(0 0 0 / 32%);
+	backdrop-filter: blur(2px);
+}
+
+.settings {
+	display: flex;
+	flex-direction: column;
+	width: min(720px, 100%);
+	max-height: min(760px, 100%);
+	min-height: 0;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-lg);
+	background: var(--dsw-bg-layer-1);
+	box-shadow: var(--dsw-shadow-panel);
+	overflow: hidden;
+}
+
+.settings-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	padding: 14px 16px 12px;
+}
+
+.settings-head h2 {
+	margin: 0;
+	font-size: calc(var(--app-font-size) + 2px);
+	font-weight: 600;
+}
+
+.settings-tabs {
+	display: flex;
+	gap: 2px;
+	padding: 0 12px;
+	border-bottom: 1px solid var(--dsw-border-l1);
+}
+
+.settings-tab {
+	padding: 8px 12px;
+	border: none;
+	border-bottom: 2px solid transparent;
+	background: transparent;
+	color: var(--dsw-label-tertiary);
+	font: inherit;
+	font-size: 13px;
+	cursor: pointer;
+	transition: color var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.settings-tab:hover {
+	color: var(--dsw-label-primary);
+}
+
+.settings-tab.active {
+	border-bottom-color: var(--dsw-state-business);
+	color: var(--dsw-label-primary);
+	font-weight: 500;
+}
+
+.settings-body {
+	min-height: 0;
+	overflow-y: auto;
+	padding: 16px;
+}
+
+.settings-section {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.settings-hint {
+	margin: 0;
+	color: var(--dsw-label-caption);
+	font-size: 12px;
+	line-height: 1.6;
+}
+
+.settings-hint.empty {
+	padding: 14px;
+	border: 1px dashed var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-sm);
+	text-align: center;
+}
+
+.settings-field {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.settings-field.stack {
+	gap: 4px;
+}
+
+.settings-label {
+	color: var(--dsw-label-secondary);
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.settings-value {
+	color: var(--dsw-label-caption);
+	font-family: var(--dsw-font-mono);
+	font-size: 12px;
+	min-width: 40px;
+	text-align: right;
+}
+
+.settings-control {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.settings-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	padding-top: 4px;
+}
+
+.settings-note {
+	padding: 0 16px;
+	color: var(--dsw-label-caption);
+	font-size: 12px;
+}
+
+.settings-note:not(:empty) {
+	padding-bottom: 12px;
+}
+
+.settings-note[data-tone="ok"] {
+	color: var(--dsw-state-success);
+}
+
+.settings-note[data-tone="error"] {
+	color: var(--dsw-state-error);
+}
+
+.settings-check {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 4px 2px;
+	color: var(--dsw-label-secondary);
+	font-family: var(--dsw-font-mono);
+	font-size: 12.5px;
+	cursor: pointer;
+}
+
+.settings-check input {
+	accent-color: var(--dsw-state-business);
+}
+
+/* --------------------------------------------------------- appearance bits */
+
+.segmented {
+	display: flex;
+	gap: 4px;
+	padding: 3px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-bg-layer-2);
+	width: fit-content;
+}
+
+.segment {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 12px;
+	border: none;
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: 12.5px;
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.segment:hover {
+	background: var(--dsw-bg-hover);
+}
+
+.segment.active {
+	background: var(--dsw-bg-layer-3);
+	color: var(--dsw-label-primary);
+	box-shadow: 0 1px 2px rgb(0 0 0 / 18%);
+}
+
+.segment svg {
+	width: 15px;
+	height: 15px;
+}
+
+.slider {
+	flex: 1;
+	max-width: 260px;
+	accent-color: var(--dsw-state-business);
+}
+
+.input {
+	width: 100%;
+	height: 32px;
+	padding: 0 10px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-input-fill);
+	color: var(--dsw-label-primary);
+	font: inherit;
+	font-size: 13px;
+}
+
+select.input {
+	cursor: pointer;
+}
+
+/* ---------------------------------------------------------------- models */
+
+.model-card {
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-bg-layer-2);
+	overflow: hidden;
+}
+
+.model-card > summary {
+	display: flex;
+	align-items: baseline;
+	gap: 10px;
+	padding: 10px 12px;
+	cursor: pointer;
+	list-style: none;
+}
+
+.model-card > summary::-webkit-details-marker {
+	display: none;
+}
+
+.model-card[open] > summary {
+	border-bottom: 1px solid var(--dsw-border-l1);
+}
+
+.model-label {
+	font-weight: 500;
+}
+
+.model-ref {
+	color: var(--dsw-label-caption);
+	font-family: var(--dsw-font-mono);
+	font-size: 11.5px;
+}
+
+.model-form {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding: 12px;
+}
+
+.model-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.model-hint {
+	color: var(--dsw-label-caption);
+	font-size: 11.5px;
+}
+
+.model-check {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	color: var(--dsw-label-secondary);
+	font-size: 12.5px;
+	cursor: pointer;
+}
+
+.model-check input {
+	accent-color: var(--dsw-state-business);
+}
+
+.model-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	padding-top: 2px;
+}
+
+/* ----------------------------------------------------------------- scrollbars */
+
+.transcript,
+.session-list,
+.tool-output,
+.diff,
+.settings-body,
+.approval-body {
+	scrollbar-width: thin;
+	scrollbar-color: var(--dsw-scrollbar-thumb) transparent;
+}
+
+.transcript::-webkit-scrollbar,
+.session-list::-webkit-scrollbar,
+.tool-output::-webkit-scrollbar,
+.diff::-webkit-scrollbar,
+.settings-body::-webkit-scrollbar,
+.approval-body::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+
+.transcript::-webkit-scrollbar-thumb,
+.session-list::-webkit-scrollbar-thumb,
+.tool-output::-webkit-scrollbar-thumb,
+.diff::-webkit-scrollbar-thumb,
+.settings-body::-webkit-scrollbar-thumb,
+.approval-body::-webkit-scrollbar-thumb {
+	border: 3px solid transparent;
+	border-radius: 999px;
+	background: var(--dsw-scrollbar-thumb);
+	background-clip: content-box;
+}
+
+.transcript::-webkit-scrollbar-thumb:hover,
+.session-list::-webkit-scrollbar-thumb:hover,
+.tool-output::-webkit-scrollbar-thumb:hover,
+.diff::-webkit-scrollbar-thumb:hover,
+.settings-body::-webkit-scrollbar-thumb:hover,
+.approval-body::-webkit-scrollbar-thumb:hover {
+	background: var(--dsw-scrollbar-thumb-hover);
+	background-clip: content-box;
+}
+
+/* --------------------------------------------------------------------- rail */
+
+#app[data-sidebar="rail"] .sidebar {
+	padding: 6px 8px;
+}
+
+#app[data-sidebar="rail"] .brand-name,
+#app[data-sidebar="rail"] .new-session span,
+#app[data-sidebar="rail"] .session-list-heading,
+#app[data-sidebar="rail"] .workspace-head,
+#app[data-sidebar="rail"] .session-item-title,
+#app[data-sidebar="rail"] .session-item-time,
+#app[data-sidebar="rail"] .session-fork-mark,
+#app[data-sidebar="rail"] .settings-entry span {
+	display: none;
+}
+
+#app[data-sidebar="rail"] .sidebar-top {
+	flex-direction: column;
+	height: auto;
+	gap: 6px;
+	padding: 0;
+}
+
+#app[data-sidebar="rail"] .new-session {
+	width: 36px;
+	height: 36px;
+	margin-inline: auto;
+	padding: 0;
+}
+
+#app[data-sidebar="rail"] .session-item {
+	justify-content: center;
+	padding: 6px 0;
+}
+
+#app[data-sidebar="rail"] .settings-entry {
+	justify-content: center;
+	padding: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+	}
+}

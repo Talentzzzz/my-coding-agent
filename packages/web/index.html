@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>my-coding-agent</title>
+		<link rel="stylesheet" href="/src/tokens.css" />
+		<link rel="stylesheet" href="/src/style.css" />
+		<!--
+			The theme is picked before the first paint, from the source that knows it: the desktop shell's
+			own native theme when there is one, the OS preference otherwise. Leaving it to a stylesheet
+			would mean either one fixed theme or a flash of the wrong one on every launch.
+		-->
+		<script>
+			(() => {
+				const desktop = window.desktop;
+				const query = window.matchMedia("(prefers-color-scheme: dark)");
+				const dark = typeof desktop?.theme === "boolean" ? desktop.theme : query.matches;
+				document.documentElement.dataset.theme = dark ? "dark" : "light";
+				if (desktop) {
+					document.documentElement.dataset.desktop = "true";
+					if (desktop.platform) document.documentElement.dataset.platform = desktop.platform;
+					if (desktop.platform === "win32") document.documentElement.dataset.desktopCaption = "win";
+				}
+				query.addEventListener("change", (event) => {
+					// With a shell attached, the shell owns the answer and reports it itself.
+					if (window.desktop) return;
+					document.documentElement.dataset.theme = event.matches ? "dark" : "light";
+				});
+			})();
+		</script>
+	</head>
+	<body>
+		<div id="app"></div>
+		<script type="module" src="/src/main.ts"></script>
+	</body>
+</html>

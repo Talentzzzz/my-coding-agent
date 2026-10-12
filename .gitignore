@@ -1,0 +1,17 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# Two third-party reference trees live in the working copy to be read, not to be carried:
+# `deepseek-harness-master` is the DSH checkout the client-server map borrows properties from, and
+# `pi-main` is upstream pi's source (see docs/README.md). Together they are ~140MB of code that is
+# not ours, so no commit picks them up.
+deepseek-harness-master/
+pi-main/
+
+# Tarball cache used by scripts/install-deps.ts
+.npm-tarball-cache/
+
+# Agent state, when the agent home is pointed at the repo with MY_AGENT_HOME
+.my-agent/

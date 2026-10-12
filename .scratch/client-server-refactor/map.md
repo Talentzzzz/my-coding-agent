@@ -1,0 +1,83 @@
+# Map：客户端-服务端模式重构
+
+Status: charting
+
+## Destination
+
+把"**每个会话一条、只为一次运行而开的 SSE**"换成"**每标签页一条常驻的多路复用流式通道 + 客户端显式订阅决定的逻辑流 + 以基线为准的恢复**"，让一个窗口能同时持有多个会话。
+
+终点形态是**决策 + 就地落地**：这张地图既要钉死每个决定，也要把代码、`docs/architecture.md`、`AGENTS.md` 术语与冒烟脚本一起改掉。
+
+**验收边**（本图唯一的可判定边界）：
+
+1. 一个标签页能同时订阅 N 个会话，各自的 transcript 逐条更新。
+2. 一条逻辑流被丢弃后重新挂上，收敛到"现在长什么样"。
+3. 发送不再依赖"先 attach 再 POST"——无人观看时的失败不会丢失。
+4. 客户端能在**不发请求**的情况下发现连接已死。
+
+这四条是只读审计里"当前代码结构上做不到的 10 件事"的前四条之改写。**该清单第 4 条（流上承载命令）被排除**：命令面继续走 REST 资源式。
+
+## Notes
+
+**参考物**：工作区里的 `deepseek-harness-master/` 是**第三方参考树，不是本仓库**（`docs/README.md:51`）。它的传输是"HTTP 一元 RPC + 一条 WebSocket mux"。本次只借它的**性质**，不借它的 Cordis 插件图与 Typert 代码生成。
+
+**关于那份二手总结**：`deepseek-harness-master/tmp/dsh-client-server-summary.md` 是学习笔记，**已被逐条对账并发现 6 处错误**（对账表见[DSH 的哪些传输机制可以直接搬到这里](issues/01-dsh-portability.md)，出处散见 `research/dsh-portability.md` 各节的证实/证伪标注）。它的 §5（引用计数归属）、§7（"通知类不重放"）、§9（"窗口预算"）、§10（"上行没有生产消费方"）**都不要直接引用**。凡是涉及 DSH 的断言，一律以 `research/dsh-portability.md` 为准。
+
+**动手前必读**：`docs/architecture.md:232-263`（谁拥有一个会话）、`docs/notes.md` 全篇（尤其 §一、§二、§六），以及两份已落地的研究资产：`research/dsh-portability.md`、`research/sse-multiplex.md`。**平台事实以它们为准，不要再靠记忆或猜测**——每条结论标了证据等级，并明确列了"未确认"清单。注意传输已于 2026-10-12 改为 WebSocket mux：`sse-multiplex.md` 里 Node 写侧（Q3、Q5）的事实仍然承重，`EventSource` 语义（Q1、Q2）降级为参考对照；**WebSocket 侧的平台事实还没有对应的研究票**——票 17 补上这个空，在此之前一切浏览器 WS 行为按"未确认"对待。同理，`dsh-portability.md` §五 的判定表是按 SSE 前提写的：**事实承重，判定重读**——"物理心跳"（需重写→可照抄）、"退避与物理替换职责划分"（合并到订阅层→可照抄三方分工）、"多路复用省内存"（连接上限前提）三行已随传输切换翻转。
+
+**这次明确重开了 `docs/notes.md:9-46` 的哪几条。** 该节标着"与用户共同作出、不得重开"，所以重开必须是**明说**的，不能顺手：
+
+| `docs/notes.md` 原文 | 本次 |
+|---|---|
+| 「不做多路复用」（`:16`） | **重开**。这是验收第 1 条的地基。 |
+| 「每个标签页最多一条流」（`:17`） | **重开**。上一条的直接后果。 |
+| 「`/events` 这个 URL 不改」（`:16`） | **重开**。需要一个新端点承载信封；保留旧端点会变成"第二条流式端点"，恰是被禁的那一件事。 |
+| D0「流随运行存活」（`:43`） | **重开**。流改随**订阅者**存活。D0 明知并接受的代价——"看不到其他客户端在你看别处时启动的运行"——正是 `:112` 认定的多路复用唯一收益。 |
+| D3「发送路径无法挂上流时报告失败且不发送」（`:46`） | **重开**。它的理由只有一个：`announce` 不缓冲，瞬时失败只在已挂上的流上可见。验收第 3 条把那个理由拆掉了，规则随之失去依据。 |
+| D2「合用一个终帧 `stream_end`」（`:45`） | **失效**。常驻通道里没有"结束这条流"这回事；它的去处由票 05 决定。 |
+| 「不用 WebSocket」（`:16`） | **重开**（2026-10-12 用户拍板）：传输改为一条常驻 WebSocket mux，对齐 DSH 的形状。理由与随之背上代价见下一段。 |
+| 「不做序列号、游标、重放缓冲或缺口修复」（`:19-21`） | **不重开**。恢复继续靠基线 + 快照替换，不引入 cursor。 |
+| 「`claim` 保留原义」（`:23-25`） | **不重开**。订阅与 claim 是**两个不同的问题**：订阅回答"这条连接要不要这个会话的内容"，claim 回答"这个请求必须跑在活跃会话上"。不重命名 `claim`/`HostedSession`/`SessionHub`。 |
+| 「`packages/ai`/`agent` 一行都不改」、「测试一次运行不需要供应商密钥」、「不要顺手修好 `smoke-approval.ts` 前半段那个怪异」（`:27-37`） | **不重开**。 |
+
+**为什么改回 WebSocket**（2026-10-12 用户拍板，重开上表那条）：当初否决它的三条理由，这次逐条重新称过。①"双向性买不到东西"——**对命令面仍然成立**：DSH 的 mux 上行帧在生产中没有消费方（研究票 01）、真正的上行走一元请求，这个结论不变；命令面继续走 REST，DSH 自己也是这么做的。但 WebSocket 让 `open/cancel` 上行帧**顺手可用**（DSH 帧协议的判定是"可搬"，`dsh-portability.md` §五），订阅与取消订阅因此多了一个运载选项——归票 04 钉。②"`ws` 依赖或手写 RFC6455 的成本"——**这次接受**：要么加 `ws` 依赖（走 `AGENTS.md` 的依赖规则：删一个或解释为什么），要么手写（决定未做，见 Not yet specified）。③压过它的砝码是 SSE 侧判活与重连的结构性缺陷，换到 WebSocket 一并换掉四条：注释行心跳 JS 读不到（研究票 02 Q2）、正常结束与掉线不可区分、重连节奏归浏览器且跨实现分歧（Chromium 3000 / Firefox 5000 ms）、服务端永远无法主动判客户端死——RFC6455 的 Ping/Pong 是协议层控制帧，服务端能**主动判客户端死**（DSH 的心跳形状可直接照抄：`ws` 的 `socket.ping()`、`MAX_MISSED_HEARTBEATS = 2`、第三次 tick `terminate()`、默认间隔 2000 ms，`dsh-portability.md` §4）。
+
+**换传输新背上的代价（都要有人接）**：①浏览器**不会**自动重连 WebSocket——退避、"代"、断代后的收敛全部归客户端自建；DSH §4.1 的三方分工表（`ConnectionController` 独占退避时间轴、mux 客户端只做物理替换、每条逻辑流自己的重开节奏）就是蓝图，票 07。②`server.close()` 对 upgrade 之后的 socket 的记账**要重新核实**——DSH 的 WebServer 把 upgrade 的 socket 自己记入 `upgradedSockets`、服务关闭时统一 `destroy()`（`dsh-portability.md` §4 末尾），这正是"关不掉的服务器"换了形态回来；票 15/17 接。③研究票 02 的 Q1/Q2（`EventSource` 语义）从承重降级为参考对照，Q3/Q5（写侧背压、`server.close()`）原样承重。**不因换传输而变的**：不做游标/序列号（票 06）、`claim` 原义、命令面 REST、`packages/ai`/`agent` 一行不改。
+
+**多路复用真正的代价是"隔离性"，不是吞吐。** 研究票 02 的结论（`sse-multiplex.md` Q5）：一条连接就是一个 `Writable`、共用一个 `writableLength`（SSE 的 `ServerResponse` 与 WebSocket 的 socket 同样），所以一个停住不读的消费端会让**整条通道上所有会话一起停**——今天这个半径是"一个会话"，新模型把它放大到"整页"。回环上背压窗口只约 1 ms，所以**吞吐不是现实风险，不要为性能做设计**；但**背压必须处理**，因为 `write()` 返回 `false` 之后继续写的官方后果是无界缓冲直到 "abort unconditionally"。这条对 SSE 与 WebSocket **同样成立**（单条 TCP 连接 + 串行是 TCP 的性质，DSH 自己就把这个代价列在 WS 名下），换传输不会消掉它，而它换来的是验收第 1 条。**定位：硬设计约束，票 11。**
+
+**一处措辞要收紧**：本图早期写过"按订阅者计数的**发布**"。研究票 01 查实 DSH 的计数器是**浏览器侧的对象所有权计数**，不持久化，归零只关掉该会话的**逻辑流**，Host 不回收会话、agent 不停（`dsh-portability.md` §1.1、§1.2）。所以正确说法是"**客户端显式订阅决定开不开这条逻辑流**"，而不是"服务端按引用计数保活"。服务端仍需要一份"这条连接订阅了哪些会话"的表（否则不知道往哪发），但**它与会话的生命周期无关**——这正是票 09 要钉的东西。
+
+**一处早期判断被推翻**：本图早期写过"那个 HTTP/1.1 同源 6 连接上限由'每标签页一条连接'解决"。研究票 02 查实上限是**每 origin 6 条**（不是每标签页 6 条），同一 origin 的所有标签页**共享**这 6 个名额，达到上限**排队而不是失败**，而且**同源的普通 `fetch` 会和流一起被饿死**（Node 的各个超时都不会掐断一条正在写的响应，所以它会一直等）。改成每标签页一条常驻连接**只解决了一半**：它把洞从"4 个标签页"推迟到"6 个标签页"，并不填上。**【2026-10-12 传输切换后的更新】上面这条分析是 SSE 特有的**：Chromium 对 WebSocket 组的池上限是 **255**（`g_max_sockets_per_group` 的 kWebSocket 值，源码常量、**未实测**），6 连接的压力大概率蒸发，但要票 17 核实后才算数；票 16 的前提随之改写。
+
+**一处 DSH 的先例不可抄**：总结 §9 说 DSH 有"明确上限（上行 inbox 缓冲、窗口预算），超了是响亮失败而不是悄悄降级"。研究票 01 查实**后半句是错的**——上行 inbox 确有上限（`streamInboxBytes`，默认 262144），而**客户端会话窗口没有任何淘汰机制**。别把一个不存在的上限当成可以照抄的先例。
+
+**惯例**：文档与注释用中文，标识符/路径/命令/协议名保持英文；改完跑 `npm run check` 与对应 smoke（都不需要供应商密钥）；`scripts/fake-transport.ts` 伪造的是**模型**传输层，**不是** wire 传输层，别拿它当传输替身。
+
+## Decisions so far
+
+- [DSH 的哪些传输机制可以直接搬到这里](issues/01-dsh-portability.md)：引用计数**不是服务端机制**（计数器在浏览器对象层、不持久化；归零只关该会话的逻辑流，Host 不回收会话、agent 不停）；概况/内容/通知是**三条**逻辑流而非同一条流上的两类帧；客户端开窗大小由**客户端**给（DSH 取 `maxMessages: 500` / `minMessages: 50` / `minTurns: 2`，服务端兜底 50）；**客户端窗口确认没有淘汰机制**；可搬 13 条、需重写 8 条、搬不动 6 条，另两条带限定——"窗口不淘汰"可搬但要自觉承担、"省内存"只部分可搬（详见资产文件 §五）。
+- [把一条 SSE 当作多路复用通道时的既有陷阱](issues/02-sse-multiplex-pitfalls.md)：正常结束与掉线对 `EventSource` **不可区分**；重连间隔 Chromium **3000 ms** / Firefox **5000 ms**（于是 `RELEASE_GRACE_MS = 2000` 那条"覆盖重连"的说法**是错的**）；注释心跳在 JS 里**零可观察效果**，命名心跳**必须带 `data:`**；"别再连了"只有 **204 / 非 200 / 错误 Content-Type** 三个信号；`write()` 返回 `false` 后必须等 `'drain'`（默认 HWM **16384**）；**只要有一条响应没结束，`server.close()` 的回调就不发生**（出口是 `closeAllConnections()`）；连接上限是**每 origin 6 条**且**同源 `fetch` 一起被饿死**；回环背压窗口约 **1 ms**。（**2026-10-12 传输改为 WebSocket mux 后**：本票的 Q1/Q2 降级为参考对照，Q3/Q5 原样承重；WS 侧的平台事实由票 17 补。）
+
+## Not yet specified
+
+- **`docs/architecture.md` 的哪几节要重写**：`## 谁拥有一个会话`、`## wire`、`## API`、`## 与原计划的偏离` 至少四节。
+- **leaf 在内存**（`docs/notes.md:67-80`）这个未决问题在新模型下的命运：流常驻意味着"回退分支再输入"永远有一个持有者，但"关掉窗口之后移动"仍然悬着。
+- **D1 的连带面**：`GET /api/sessions/current` 继续创建会话、且"读形状的请求带写副作用"（`:44`、`:48`）。审计发现刷新会丢掉"我在看哪个会话"，而 `docs/architecture.md:244` 声称这件事由 URL 记住——代码不这样做。这会不会顶到 D1，取决于票 03 与票 04。
+- **客户端遗留**：`packages/web/src/api.ts` 的 `exists()` 无调用者（`docs/notes.md:118`）；`packages/server/package.json` 那句过时的 `description: "HTTP and WebSocket transport…"`——全仓库唯一把 WebSocket 说成本项目传输的地方。
+- **投影 store 的 seed 清除规则**：DSH 的"概况全量 baseline"必须连带搬一条"新 baseline 到达时丢掉哪些 cached 值"的规则（依据 `dsh-portability.md` §3.2：baseline 走 `store.seed(...)`，cached 行让位 sequenced）。本仓库要不要投影 store 取决于票 10，这条在它之后才谈得上。
+
+**仍然未确认、不许当已知用的平台事实**：研究票 02 遗留的——真正"对端停止读取"的慢消费者实验（票 11 要么补做，要么明确接受按规范推理）；开着代理时回环是否被截；Node 22.19（引擎下限）而非实测的 v24.15 上的 `server.close()` 记账。传输切换后**随 `EventSource` 一起退场**的——h2c 支持状态、`backgroundThrottling` 对 `EventSource` 的影响、Firefox 重连间隔与 `RELEASE_GRACE_MS` 的关系。传输切换后**新增**的——Chromium WebSocket 池上限 255 未实测、Firefox 的 WS 上限未知、`backgroundThrottling` 对隐藏窗口 WebSocket 的影响、`server.close()` 与 upgrade 后 socket 的关系、`ws` 的 socket 高水位与 `ping()` 在 Node 22.19 上的行为：全部归**票 17**。
+
+**还有一个未决决定**：WS 服务端用 `ws` 依赖还是手写 RFC6455（握手、帧、掩码、Ping/Pong、close）。加依赖要走 `AGENTS.md` 的规则（删一个运行时依赖、或在提交里解释为什么）；手写的代价是研究票 01 判定过的那一份。这个决定在票 17 给完平台事实之后做。
+
+## Out of scope
+
+- **本机信任栅栏**（Host/Origin 校验、一次性 token + 签名 cookie）：本图之外。已知代价照旧——任何你访问的网页都能往 `http://127.0.0.1:8080` 发请求，而 `bash` 工具会真的执行命令。
+- **`packages/ai` 与 `packages/agent` 的任何改动**（vendored）。
+- **供应商侧 transport 选项**（`packages/ai/src/types.ts:62` 的 `"websocket"`）：那是 vendored 的模型传输表面，与本仓库的 wire 无关。
+- **命令面改成命名空间 RPC 信封**：选定保留 REST 资源式。**注意例外**：票 16 被允许重新摆一次这个取舍，但它要回到地图上重开，不能顺手改。
+- **插件 / MCP 机制**。
+- **`scripts/smoke-approval.ts` 前半段那个怪异**（`new SessionHub({ workspaceRoot: root })`）：明令保持原样。
+- **`@Remote` 装饰器、Typert 代码生成、`ctx.remote.$on` 签名派生、Cordis per-call invocation 上下文、PeerScope 准入、`/plugins/events`**：研究票 01 判定为"搬不动"，且本仓库没有这些依赖。
+- **`RemoteStream<Out, In>` 的上行消费者面**：DSH 生产无消费方；本仓库命令面走 REST，不引入。

@@ -1,0 +1,19 @@
+{
+	"name": "@my-agent/desktop",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"description": "Electron desktop shell for my-coding-agent",
+	"main": "main.cjs",
+	"scripts": {
+		"start": "node scripts/launch.mjs",
+		"dev": "node scripts/launch.mjs --dev",
+		"screenshot": "node scripts/launch.mjs --screenshot ui.png"
+	},
+	"dependencies": {
+		"@my-agent/server": "workspace:*"
+	},
+	"devDependencies": {
+		"electron": "^44.5.1"
+	}
+}

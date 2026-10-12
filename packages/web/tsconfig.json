@@ -1,0 +1,19 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"lib": ["ES2023", "DOM", "DOM.Iterable"],
+		// `node`, although this package runs in a browser: `@my-agent/core/protocol` is the wire
+		// vocabulary, and it names `AgentSessionEvent` from `core/src/agent.ts` and `BashSettings` from
+		// `core/src/config.ts`, which reach `node:fs`, `node:os`, and `Buffer` in their own source. The
+		// imports are type-only and never bundled, but a check that cannot see Node's types cannot see
+		// those modules either.
+		"types": ["node"],
+		"moduleResolution": "bundler",
+		"module": "ESNext",
+		"baseUrl": "../..",
+		"paths": {
+			"@my-agent/core/protocol": ["./packages/core/src/protocol.ts"]
+		}
+	},
+	"include": ["src/**/*.ts"]
+}

@@ -1,0 +1,303 @@
+import type { AgentMessage } from "@my-agent/agent";
+import type { Usage } from "@my-agent/ai";
+import type { AgentSessionEvent } from "./agent.ts";
+import type { AppearanceSettings, BashSettings } from "./config.ts";
+import type { BranchPoint } from "./session/session-manager.ts";
+
+export type { AgentSessionEvent } from "./agent.ts";
+export type { BranchOption, BranchPoint } from "./session/session-manager.ts";
+export type { BashSettings } from "./config.ts";
+
+export interface SessionRef {
+	id: string;
+	cwd: string;
+	createdAt: number;
+	title: string;
+	/**
+	 * The session this one was forked from, when that session is stored beside it.
+	 *
+	 * Absent for a root session, and for a fork whose parent is not in the same list — another
+	 * workspace's directory, or a file moved by hand. A client draws a missing parent as a root rather
+	 * than inventing a place for it.
+	 */
+	parentId?: string;
+}
+
+/**
+ * The stored sessions of one workspace, for the sidebar's groups.
+ *
+ * The groups come from the store rather than from the server's own root: one process is bound to one
+ * workspace, but every workspace this machine has ever run in has its sessions on disk beside it.
+ */
+export interface WorkspaceGroup {
+	cwd: string;
+	sessions: SessionRef[];
+}
+
+/**
+ * One model the user entered, as a client sees it.
+ *
+ * The API key is deliberately absent — a client may add or replace one, but it is never sent one
+ * back, so a key cannot leak through a page that merely renders the list. `hasApiKey` is what the
+ * form shows instead, so "a key is stored" and "this row has no key" stay distinguishable.
+ *
+ * `name` is the row's identity, so it is both what the panel shows and what the client sends back to
+ * name this row. `api` is reported for the transcript's sake and is always the same value: this app
+ * speaks one transport, so it is a fact about the build rather than a field the form edits.
+ */
+export interface ModelOption {
+	name: string;
+	api: string;
+	baseUrl: string;
+	modelId: string;
+	contextWindow: number;
+	maxTokens: number;
+	reasoning: boolean;
+	/**
+	 * Every level a session on this row can be in, lowest first, "off" included when the model has it.
+	 *
+	 * Travelled with the row rather than derived by the client, which has no way to know what an
+	 * endpoint takes: a composer that moves the model needs the new row's own list, and it needs it
+	 * before the move reaches the server.
+	 */
+	thinkingLevels: string[];
+	/** The level a session opened on this row starts at. */
+	defaultThinkingLevel: string;
+	hasApiKey: boolean;
+}
+
+/** One row as a client submits it. An omitted `apiKey` leaves whatever is stored in place. */
+export interface ModelInput {
+	name?: string;
+	baseUrl?: string;
+	apiKey?: string;
+	modelId?: string;
+	contextWindow?: number;
+	maxTokens?: number;
+	reasoning?: boolean;
+	defaultThinkingLevel?: string;
+}
+
+/**
+ * Which model answers a message, and how hard it is asked to think.
+ *
+ * It travels with the message rather than as a session command of its own, because neither half is
+ * true until a request is made with it: a choice that was never used is not something that happened,
+ * so it is not an entry in the transcript and not a config change. Absent fields leave that half as
+ * the session already has it.
+ */
+export interface ModelSelection {
+	/** `<name>/<wire id>`, the ref the settings panel and the transcript both use. */
+	model?: string;
+	thinkingLevel?: string;
+}
+
+/** What the settings panel reads and writes. */
+export interface SettingsSnapshot {
+	appearance: AppearanceSettings;
+	approval: Record<ToolApprovalKey, boolean>;
+	/** How long the `bash` tool lets one command run. */
+	bash: BashSettings;
+	model?: string;
+}
+
+export interface UsageTotals {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+	/** Tokens of the most recent request's prompt, for the context meter. */
+	contextTokens: number;
+	contextWindow: number;
+}
+
+export interface PendingApproval {
+	toolCallId: string;
+	toolName: string;
+	args: unknown;
+	summary: string;
+}
+
+/**
+ * One line of a file a tool changed.
+ *
+ * The numbers are the file's own: 1-based, in the old file and in the new one, so a window can show
+ * where a change landed without reading anything back. A line only the old file has carries no new
+ * number, and the other way round; a `skip` row stands for unchanged lines the report left out.
+ */
+export interface DiffLine {
+	kind: "add" | "remove" | "context" | "skip";
+	oldLine: number | null;
+	newLine: number | null;
+	text: string;
+	/**
+	 * The half-open range of `text` that changed, when one removed line and the added line that
+	 * follows it are the same line rewritten. Absent when the line changed as a whole, where the
+	 * row's own color already says everything the mark would.
+	 */
+	changed?: [number, number];
+	/** Unchanged lines this `skip` row stands in for. */
+	skipped?: number;
+}
+
+/**
+ * What one tool call did to one file.
+ *
+ * A tool that changes a file answers with this in `AgentToolResult.details`, beside the text the
+ * model reads: the text is written for a model, and this is written for the window. Both are the
+ * same change, so the view never has to parse the text — and the tool's text stays short, which for
+ * a whole-file `write` is the difference between naming the file and paying for it twice.
+ *
+ * It rides inside the loop's own `tool_execution_end` event, so the wire needed no member for it, and
+ * the loop records the whole result — so the transcript keeps the report beside the tool's text. No
+ * provider ever sees it: a request carries a tool result's content and only its content.
+ */
+export interface FileDiff {
+	/** The file as the workspace displays it, the same path the tool's own text names. */
+	path: string;
+	lines: DiffLine[];
+	added: number;
+	removed: number;
+	/** True when the file did not exist before, so every line is an addition. */
+	created: boolean;
+	/** Rows left out of `lines` because the change was longer than the report's bound. */
+	omitted: number;
+}
+
+export interface SessionSnapshot {
+	id: string;
+	cwd: string;
+	createdAt: number;
+	title: string;
+	model: string;
+	thinkingLevel: string;
+	/** Thinking levels this model accepts, including "off". */
+	thinkingLevels: string[];
+	/** Tools that currently require approval. */
+	approvals: Record<ToolApprovalKey, boolean>;
+	/** Every tool the session registered, in registration order, for the header's tool toggles. */
+	allTools: string[];
+	/** Tools the model may call right now. */
+	activeTools: string[];
+	messages: AgentMessage[];
+	/**
+	 * The entry id behind each message in `messages`, in the same order.
+	 *
+	 * A transcript that did not watch a message being written still needs to name the entry a fork
+	 * starts from, so the session fills this from its session manager. The compaction summary has no
+	 * message entry of its own.
+	 */
+	messageEntryIds: (string | null)[];
+	/**
+	 * Where the active chain carried on from a message in more than one way.
+	 *
+	 * The entries have always been a tree, so a chain is one path through it; this is what a window
+	 * needs to draw the rest of the tree and to move through it. Only the entry ids of the alternatives
+	 * travel, not where they lead: those ids are written once, while a branch grows at its tip, so a
+	 * remembered tip would be a place the conversation had already left.
+	 */
+	branchPoints: BranchPoint[];
+	/** The session this one was forked from, if it is a fork; absent for a root session. */
+	parentSession?: string;
+	/** The entry the session is on: the tip of its chain, or null before the first entry. */
+	leafId: string | null;
+	submitting: boolean;
+	/** User messages accepted mid-run that the loop has not drained yet. */
+	queued: number;
+	/** True while a transient provider failure is waiting out its backoff. */
+	isRetrying: boolean;
+	/** The 1-based retry attempt in flight, or 0 when no retry is pending. */
+	retryAttempt: number;
+	usage: UsageTotals;
+	pendingApprovals: PendingApproval[];
+}
+
+/**
+ * A change to what the session holds without a message: the approval map and the two queue modes.
+ *
+ * The model and the thinking level are deliberately absent. Both are chosen in the composer and both
+ * arrive with the message they belong to ({@link ModelSelection}), because recording one that no
+ * request was made with would put a decision in the transcript that never took effect.
+ */
+export type ConfigPatch = {
+	approval?: Partial<Record<ToolApprovalKey, boolean>>;
+	steeringMode?: QueueMode;
+	followUpMode?: QueueMode;
+};
+
+export type ToolApprovalKey = "read" | "write" | "edit" | "glob" | "grep" | "bash";
+
+/**
+ * Every tool an approval key can name, in the order the window offers them.
+ *
+ * The map is keyed by *tool*, not by the tools a session happens to have active, so the set of keys is
+ * the loadout's and not the session's: a prompt that says which tools are gated, or a settings file
+ * that is normalised on write, iterates this rather than the active names.
+ */
+export const APPROVAL_TOOLS: readonly ToolApprovalKey[] = ["read", "write", "edit", "glob", "grep", "bash"];
+
+/** How many queued messages one drain point injects. Mirrors pi-agent-core's `QueueMode`. */
+export type QueueMode = "all" | "one-at-a-time";
+
+/** What a message sent while the agent is streaming does to the run. */
+export type PromptBehavior = "steer" | "followUp";
+
+export type ServerMessage =
+	| { type: "session"; session: SessionSnapshot }
+	| { type: "session_event"; event: AgentSessionEvent }
+	/**
+	 * The entry behind a message the session just wrote.
+	 *
+	 * `entry_appended` names an entry but not the message it holds, and a transcript needs the pairing
+	 * to offer "fork from here" on a message that never appeared in a snapshot. It is sent beside the
+	 * event, not instead of it, so a client that ignores this frame behaves exactly as before.
+	 */
+	| { type: "entry"; entryId: string; messageTimestamp?: number }
+	| { type: "tool_approval_request"; request: PendingApproval }
+	| { type: "tool_approval_settled"; toolCallId: string; approved: boolean }
+	| { type: "status"; usage: UsageTotals; submitting: boolean; queued: number; isRetrying: boolean; retryAttempt: number }
+	/**
+	 * Something failed outside any request's reach.
+	 *
+	 * A run that could not start, mainly: the request that accepted its prompt was answered 202 long
+	 * before the failure, so this stream is the only place left to say so.
+	 */
+	| { type: "error"; message: string }
+	/**
+	 * This stream is over, and the response ends immediately after this frame.
+	 *
+	 * The client must close rather than let `EventSource` reconnect: a normal end and a dropped
+	 * connection look identical to the browser, and a reconnect here would put a stream back on an
+	 * idle session — the exact 15-second heartbeat this frame exists to prevent.
+	 *
+	 * One frame for both cases, because the client's obligation is the same in both: a run this
+	 * stream watched has ended, or the stream arrived on a session with nothing running and waited
+	 * out its grace. Neither is a "run end" in the transcript's sense, and no run at all may have
+	 * started, so the name says what it means rather than which case is commoner.
+	 */
+	| { type: "stream_end" };
+
+export const EMPTY_USAGE: UsageTotals = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	cost: 0,
+	contextTokens: 0,
+	contextWindow: 0,
+};
+
+/** Fold one assistant message's usage into the session totals. */
+export function addUsage(totals: UsageTotals, usage: Usage, contextWindow: number): UsageTotals {
+	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+	return {
+		input: totals.input + usage.input,
+		output: totals.output + usage.output,
+		cacheRead: totals.cacheRead + usage.cacheRead,
+		cacheWrite: totals.cacheWrite + usage.cacheWrite,
+		cost: totals.cost + usage.cost.total,
+		contextTokens: promptTokens + usage.output,
+		contextWindow,
+	};
+}

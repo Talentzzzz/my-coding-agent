@@ -1,0 +1,190 @@
+/*
+ * The design tokens, ported from DeepSeek Harness's client theme.
+ *
+ * Names are kept as the reference spells them (`--dsw-*`) so a value can be traced back to the sheet
+ * it came from, and so an alias added later does not have to be invented. Static ramps and alias
+ * roles are separate for the same reason: a component picks a role, and only this file decides what
+ * that role is made of.
+ *
+ * Two selectors, not three: the default sheet is light, and `[data-theme="dark"]` on the document
+ * element replaces the roles. The static ramps contain a few values that differ between the sheets
+ * (`neutral-bluish-60`, and `deepseek-400`'s brightening), so they are restated rather than assumed
+ * identical.
+ */
+
+:root {
+	/* Static ramps — the raw palette. */
+	--dsw-static-amber-100: rgb(254, 245, 231);
+	--dsw-static-amber-400: rgb(247, 173, 49);
+	--dsw-static-amber-500: rgb(245, 158, 11);
+	--dsw-static-amber-600: rgb(221, 134, 41);
+	--dsw-static-amber-900: rgb(39, 36, 31);
+	--dsw-static-blue-300: rgb(147, 197, 253);
+	--dsw-static-blue-500: rgb(59, 130, 246);
+	--dsw-static-blue-950: rgb(23, 37, 84);
+	--dsw-static-deepseek-50: rgb(237, 243, 254);
+	--dsw-static-deepseek-100: rgb(228, 237, 253);
+	--dsw-static-deepseek-200: rgb(211, 226, 255);
+	--dsw-static-deepseek-400: rgb(122, 170, 255);
+	--dsw-static-deepseek-450: rgb(86, 134, 254);
+	--dsw-static-deepseek-500: rgb(65, 118, 230);
+	--dsw-static-deepseek-800: rgb(52, 65, 91);
+	--dsw-static-green-400: rgb(78, 209, 126);
+	--dsw-static-green-500: rgb(34, 197, 94);
+	--dsw-static-green-500-a08: rgb(34 197 94 / 8%);
+	--dsw-static-green-500-a12: rgb(34 197 94 / 12%);
+	--dsw-static-green-900: rgb(35, 60, 44);
+	--dsw-static-neutral-00: rgb(255, 255, 255);
+	--dsw-static-neutral-300: rgb(212, 212, 212);
+	--dsw-static-neutral-1000: rgb(0, 0, 0);
+	--dsw-static-neutral-bluish-00: rgb(255, 255, 255);
+	--dsw-static-neutral-bluish-1000: rgb(15, 17, 21);
+	--dsw-static-neutral-bluish-950: rgb(21, 21, 23);
+	--dsw-static-neutral-bluish-900: rgb(27, 27, 28);
+	--dsw-static-neutral-bluish-875: rgb(35, 35, 36);
+	--dsw-static-neutral-bluish-850: rgb(44, 44, 46);
+	--dsw-static-neutral-bluish-800: rgb(53, 54, 56);
+	--dsw-static-neutral-bluish-750: rgb(67, 69, 74);
+	--dsw-static-neutral-bluish-700: rgb(97, 102, 107);
+	--dsw-static-neutral-bluish-600: rgb(129, 133, 140);
+	--dsw-static-neutral-bluish-500: rgb(151, 157, 166);
+	--dsw-static-neutral-bluish-400: rgb(173, 178, 184);
+	--dsw-static-neutral-bluish-300: rgb(207, 211, 214);
+	--dsw-static-neutral-bluish-200: rgb(225, 229, 238);
+	--dsw-static-neutral-bluish-100: rgb(235, 238, 242);
+	--dsw-static-neutral-bluish-75: rgb(241, 243, 245);
+	--dsw-static-neutral-bluish-60: rgb(245, 246, 247);
+	--dsw-static-neutral-bluish-50: rgb(249, 250, 251);
+	--dsw-static-red-400: rgb(242, 90, 90);
+	--dsw-static-red-400-a12: rgb(242 90 90 / 12%);
+	--dsw-static-red-600: rgb(236, 19, 19);
+	--dsw-static-red-900: rgb(87, 12, 12);
+
+	/* Type, motion, and radius. */
+	--dsw-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+		"Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+	--dsw-font-mono: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", Menlo, Courier,
+		"PingFang SC", "Microsoft YaHei", monospace;
+	--dsw-ease: cubic-bezier(0.4, 0, 0.2, 1);
+	--dsw-duration: 0.2s;
+	--dsw-duration-fast: 0.1s;
+	--dsw-radius-xs: 4px;
+	--dsw-radius-sm: 8px;
+	--dsw-radius-md: 12px;
+	--dsw-radius-lg: 16px;
+	--dsw-radius-panel: 28px;
+
+	/* Alias roles — light. */
+	--dsw-bg-base: var(--dsw-static-neutral-bluish-00);
+	--dsw-bg-layer-1: var(--dsw-static-neutral-bluish-00);
+	--dsw-bg-layer-2: var(--dsw-static-neutral-bluish-00);
+	--dsw-bg-layer-3: var(--dsw-static-neutral-bluish-00);
+	--dsw-bg-sidebar: var(--dsw-static-neutral-bluish-50);
+	--dsw-bg-hover: rgba(38, 49, 72, 0.06);
+	--dsw-bg-active: rgba(38, 49, 72, 0.1);
+	--dsw-bg-hover-solid: var(--dsw-static-neutral-bluish-75);
+	--dsw-bg-hover-danger: rgba(236, 19, 19, 0.05);
+	--dsw-bg-skeleton: rgba(0, 0, 0, 0.04);
+	--dsw-bg-inverse: var(--dsw-static-neutral-bluish-1000);
+	--dsw-border-l1: rgba(0, 0, 0, 0.04);
+	--dsw-border-l2: rgba(0, 0, 0, 0.1);
+	--dsw-border-l3: rgba(0, 0, 0, 0.12);
+	--dsw-border-l4: rgba(0, 0, 0, 0.16);
+	--dsw-label-primary: var(--dsw-static-neutral-bluish-1000);
+	--dsw-label-secondary: var(--dsw-static-neutral-bluish-700);
+	--dsw-label-tertiary: var(--dsw-static-neutral-bluish-600);
+	--dsw-label-caption: var(--dsw-static-neutral-bluish-400);
+	--dsw-label-inverse: var(--dsw-static-neutral-bluish-00);
+	--dsw-state-business: var(--dsw-static-deepseek-500);
+	--dsw-state-success: var(--dsw-static-green-500);
+	--dsw-state-error: var(--dsw-static-red-600);
+	--dsw-state-warn: var(--dsw-static-amber-500);
+	--dsw-state-warn-label: var(--dsw-static-amber-600);
+	--dsw-button-primary-fill: var(--dsw-static-neutral-bluish-1000);
+	--dsw-button-primary-hover: var(--dsw-static-neutral-bluish-750);
+	--dsw-button-primary-label: var(--dsw-static-neutral-bluish-00);
+	--dsw-button-info-fill: var(--dsw-static-deepseek-500);
+	--dsw-button-info-hover: var(--dsw-static-deepseek-400);
+	--dsw-button-elevated-fill: var(--dsw-static-neutral-bluish-00);
+	--dsw-input-fill: var(--dsw-static-neutral-bluish-00);
+	--dsw-bubble: var(--dsw-static-deepseek-50);
+	--dsw-bubble-highlight: var(--dsw-static-deepseek-200);
+	--dsw-code-block: var(--dsw-static-neutral-bluish-50);
+	--dsw-code-inline: var(--dsw-static-neutral-bluish-75);
+	--dsw-diff-added: var(--dsw-static-green-500-a08);
+	--dsw-diff-deleted: rgb(236 19 19 / 8%);
+	/* The stronger pair marks the part of a rewritten line that differs, inside a row that is already
+	   tinted; at the row's own strength the mark would be invisible. */
+	--dsw-diff-added-strong: rgb(34 197 94 / 24%);
+	--dsw-diff-deleted-strong: rgb(236 19 19 / 22%);
+	--dsw-shadow-panel: 0 8px 24px rgba(15, 17, 21, 0.12), 0 1px 2px rgba(15, 17, 21, 0.08);
+	--dsw-scrollbar-thumb: var(--dsw-static-neutral-300);
+	--dsw-scrollbar-thumb-hover: var(--dsw-static-neutral-300);
+
+	color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+	--dsw-static-deepseek-400: rgb(122, 170, 255);
+	--dsw-static-neutral-bluish-60: rgb(249, 250, 251);
+
+	--dsw-bg-base: var(--dsw-static-neutral-bluish-950);
+	--dsw-bg-layer-1: var(--dsw-static-neutral-bluish-875);
+	--dsw-bg-layer-2: var(--dsw-static-neutral-bluish-850);
+	--dsw-bg-layer-3: var(--dsw-static-neutral-bluish-800);
+	--dsw-bg-sidebar: var(--dsw-static-neutral-bluish-900);
+	--dsw-bg-hover: rgba(255, 255, 255, 0.08);
+	--dsw-bg-active: rgba(255, 255, 255, 0.14);
+	--dsw-bg-hover-solid: var(--dsw-static-neutral-bluish-800);
+	--dsw-bg-hover-danger: rgba(242, 90, 90, 0.15);
+	--dsw-bg-skeleton: rgba(255, 255, 255, 0.08);
+	--dsw-bg-inverse: var(--dsw-static-neutral-bluish-50);
+	--dsw-border-l1: rgba(255, 255, 255, 0.06);
+	--dsw-border-l2: rgba(255, 255, 255, 0.12);
+	--dsw-border-l3: rgba(255, 255, 255, 0.16);
+	--dsw-border-l4: rgba(255, 255, 255, 0.2);
+	--dsw-label-primary: var(--dsw-static-neutral-bluish-50);
+	--dsw-label-secondary: var(--dsw-static-neutral-bluish-300);
+	--dsw-label-tertiary: var(--dsw-static-neutral-bluish-400);
+	--dsw-label-caption: var(--dsw-static-neutral-bluish-600);
+	--dsw-label-inverse: var(--dsw-static-neutral-bluish-1000);
+	--dsw-state-business: var(--dsw-static-deepseek-400);
+	--dsw-state-success: var(--dsw-static-green-500);
+	--dsw-state-error: var(--dsw-static-red-400);
+	--dsw-state-warn: var(--dsw-static-amber-500);
+	--dsw-state-warn-label: var(--dsw-static-amber-600);
+	--dsw-button-primary-fill: var(--dsw-static-neutral-bluish-50);
+	--dsw-button-primary-hover: var(--dsw-static-neutral-bluish-100);
+	--dsw-button-primary-label: var(--dsw-static-neutral-bluish-1000);
+	--dsw-button-info-fill: var(--dsw-static-deepseek-400);
+	--dsw-button-info-hover: var(--dsw-static-deepseek-500);
+	--dsw-button-elevated-fill: var(--dsw-static-neutral-bluish-750);
+	--dsw-input-fill: var(--dsw-static-neutral-bluish-850);
+	--dsw-bubble: var(--dsw-static-neutral-bluish-850);
+	--dsw-bubble-highlight: var(--dsw-static-neutral-bluish-750);
+	--dsw-code-block: var(--dsw-static-neutral-bluish-900);
+	--dsw-code-inline: var(--dsw-static-neutral-bluish-800);
+	--dsw-diff-added: var(--dsw-static-green-500-a12);
+	--dsw-diff-deleted: var(--dsw-static-red-400-a12);
+	--dsw-diff-added-strong: rgb(34 197 94 / 32%);
+	--dsw-diff-deleted-strong: rgb(242 90 90 / 30%);
+	--dsw-shadow-panel: 0 8px 24px rgba(0, 0, 0, 0.44), 0 1px 2px rgba(0, 0, 0, 0.32);
+	--dsw-scrollbar-thumb: var(--dsw-static-neutral-bluish-700);
+	--dsw-scrollbar-thumb-hover: var(--dsw-static-neutral-bluish-600);
+
+	color-scheme: dark;
+}
+
+/* Windows draws its caption inset into the page, so the sidebar has to clear the buttons. */
+:root {
+	--desktop-titlebar: 0px;
+	--desktop-traffic-light-inset: 0px;
+}
+
+:root[data-desktop-caption="win"] {
+	--desktop-titlebar: 40px;
+}
+
+:root[data-platform="darwin"] {
+	--desktop-traffic-light-inset: 78px;
+}

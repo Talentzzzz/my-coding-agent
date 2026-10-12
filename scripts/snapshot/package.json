@@ -1,0 +1,6 @@
+{
+	"name": "snapshot-runner",
+	"private": true,
+	"//": "这两个文件是 CommonJS，而仓库其余部分是纯 ESM（AGENTS.md 的约定）。原因只有一个：Electron 在加载入口脚本与 preload 时先于任何工具链，`require(\"electron\")` 在那里是唯一可用的形式。这个文件就是那条例外的书面记录，同时也保证 `loadURL` 的入口无论从哪里被拉起都不会被当作 ESM 解析。",
+	"type": "commonjs"
+}

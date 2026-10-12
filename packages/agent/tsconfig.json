@@ -1,0 +1,14 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		// pi's own tsconfig compiles without this flag; the vendored source is kept byte-identical
+		// to upstream rather than re-edited, so it is checked under the same setting.
+		"noUncheckedIndexedAccess": false,
+		"baseUrl": ".",
+		"paths": {
+			"@my-agent/ai": ["../ai/src/index.ts"]
+		}
+	},
+	"include": ["src/**/*.ts"]
+}

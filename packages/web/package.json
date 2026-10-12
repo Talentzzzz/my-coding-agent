@@ -1,0 +1,19 @@
+{
+	"name": "@my-agent/web",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"description": "Browser client for my-coding-agent",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"preview": "vite preview"
+	},
+	"dependencies": {
+		"@my-agent/core": "workspace:*"
+	},
+	"devDependencies": {
+		"typescript": "^7.0.2",
+		"vite": "^7.1.0"
+	}
+}
