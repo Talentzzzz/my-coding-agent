@@ -205,6 +205,96 @@ try {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// One answer, every stream showing the question.
+//
+// The defect this pins: how an approval was answered used to be read out of one registry-wide set and
+// deleted as it was read, so the first stream to run its difference reported the grant and every other
+// one reported a denial — an answer that changed with the number of windows, and a plain lie in all
+// but one of them. One stream is what the section above attaches, and one stream is why the suite
+// could not see this; three is what makes "the number of streams does not matter" the thing asserted.
+//
+// The ticket's other half — an answer given with nobody watching leaves nothing behind rather than
+// waiting in this process — has no frame to observe it on: a stream that never showed the request is
+// never told about it either way. It is structural rather than asserted here: `remember` refuses an
+// approval no stream is showing, so such an answer is never written down in the first place.
+// ---------------------------------------------------------------------------------------------------
+
+process.stdout.write("\nevery stream on a session hears how an approval was answered\n");
+
+const sharedWatchdog = setTimeout(() => {
+	process.stdout.write("\nFAIL the shared-answer checks did not settle within 60 s\n");
+	process.exit(1);
+}, 60_000);
+
+try {
+	const shared = await openRig(60_000, 8091);
+	try {
+		// Every window is attached before anything runs, so the request is a difference frame on each
+		// of them rather than part of a baseline — which is the path under test.
+		const windows: Stream[] = [];
+		const opened: (Record<string, unknown> | undefined)[] = [];
+		for (let index = 0; index < 3; index++) {
+			const window = await attach(`${shared.url}/api/sessions/${shared.session.id}/events`);
+			opened.push(await window.pump((frame) => frame.type === "session"));
+			windows.push(window);
+		}
+		check("three windows are open on the one session", opened.every((frame) => frame !== undefined), JSON.stringify(opened));
+
+		const accepted = await fetch(`${shared.url}/api/sessions/${shared.session.id}/messages`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ text: "read the notes" }),
+		});
+		check("the prompt was accepted", accepted.status === 202, `status ${accepted.status}`);
+
+		const asked = await Promise.all(
+			windows.map((window) => window.pump((frame) => frame.type === "tool_approval_request")),
+		);
+		check(
+			"every stream was shown the approval",
+			asked.every((frame) => frame !== undefined),
+			JSON.stringify(windows.map((window) => window.approvals)),
+		);
+		if (windows.some((window) => window.approvals.length === 0)) {
+			throw new Error("the approval request never reached one of the streams");
+		}
+
+		const toolCallId = windows[0]?.approvals[0]?.toolCallId ?? "";
+		const answered = await fetch(
+			`${shared.url}/api/sessions/${shared.session.id}/approvals/${encodeURIComponent(toolCallId)}`,
+			{ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ approved: true }) },
+		);
+		check("the answer was accepted", answered.status === 200, `status ${answered.status}`);
+
+		// Reading each stream to the end of the run is what puts the frame the answer produced in hand:
+		// that frame goes out before the run continues, so the run's own last event is after all of them.
+		await Promise.all(
+			windows.map((window) => window.pump((frame) => frame.type === "session_event" && window.state.runEnded)),
+		);
+
+		const reported = windows.map(
+			(window) => window.settled.find((frame) => frame.toolCallId === toolCallId)?.approved,
+		);
+		check(
+			"every stream was told the approval was settled",
+			reported.every((approved) => approved !== undefined),
+			JSON.stringify(windows.map((window) => window.settled)),
+		);
+		check(
+			"and every stream was told the same answer: the one that was given",
+			reported.every((approved) => approved === true),
+			JSON.stringify(reported),
+		);
+
+		await Promise.all(windows.map((window) => window.cancel()));
+	} finally {
+		await shared.close();
+	}
+} finally {
+	clearTimeout(sharedWatchdog);
+}
+
+// ---------------------------------------------------------------------------------------------------
 // An approval outlives the last claim, up to the hub's grace.
 //
 // The phase this covers: a claim answers "is anyone watching", which is not the question "will anyone

@@ -74,11 +74,13 @@ export interface StreamRegistry {
 	 */
 	announce(sessionId: string, message: string): void;
 	/**
-	 * Note how an approval was answered, for the frame that reports it back.
+	 * Note how an approval was answered, for the frames that report it back.
 	 *
-	 * The session only keeps answers, not the question's history, so without this every
-	 * `tool_approval_settled` would read as a denial. Set by the approvals endpoint, read when the
-	 * frame goes out, so a second tab or a script learns the answer it did not give.
+	 * Nothing else holds this by the time those frames go out: answering takes the request out of the
+	 * session, so the change that publishes it says only that something left, and every stream would
+	 * otherwise read its own difference as a denial. Set by the approvals endpoint, read by *every*
+	 * stream still showing that request — a second window or a script learns the answer it did not
+	 * give — and kept only while one of them is.
 	 */
 	rememberApproval(toolCallId: string, approved: boolean): void;
 	/** End every stream and let go of every claim, so a closing process waits for nothing. */
@@ -119,8 +121,8 @@ export function createStreamRegistry(hub: SessionHub, options: StreamRegistryOpt
 		else attached.set(sessionId, remaining);
 	};
 
-	/** Which approvals were granted, so a settled frame can say so rather than guess. */
-	const granted = new Set<string>();
+	/** How the approvals currently on screen were answered, and which streams are showing them. */
+	const answers = createApprovalAnswers();
 
 	return {
 		async open(sessionId: string, attach: () => EventStream): Promise<void> {
@@ -148,10 +150,17 @@ export function createStreamRegistry(hub: SessionHub, options: StreamRegistryOpt
 			/** The session's state as this stream sees it open, and what the opening frame carries. */
 			const opening = host.session.snapshot;
 
-			/** The approvals this stream has told the browser about, so it can report the difference. */
-			const pending = new Map<string, PendingApproval>(
-				opening.pendingApprovals.map((approval) => [approval.toolCallId, approval]),
-			);
+			/**
+			 * The approvals this stream has told the browser about, so it can report the difference.
+			 *
+			 * Every one of them is registered as shown: this stream is now a reader of the answer to
+			 * it, which is the only thing that keeps an answer around.
+			 */
+			const pending = new Map<string, PendingApproval>();
+			for (const approval of opening.pendingApprovals) {
+				pending.set(approval.toolCallId, approval);
+				answers.show(approval.toolCallId);
+			}
 
 			let released = false;
 			const release = (): void => {
@@ -159,6 +168,9 @@ export function createStreamRegistry(hub: SessionHub, options: StreamRegistryOpt
 				released = true;
 				clearTimeout(idleTimer);
 				for (const off of unsubscribe) off();
+				// Whatever this stream was still showing, nobody here will report it now: an answer
+				// waiting only for readers that are gone is an answer with no reason to be kept.
+				for (const toolCallId of pending.keys()) answers.hide(toolCallId);
 				detach(host.id, stream);
 				hub.release(host);
 			};
@@ -229,7 +241,7 @@ export function createStreamRegistry(hub: SessionHub, options: StreamRegistryOpt
 					// A pending approval is published by the session as a change like any other, so this
 					// is where the browser learns to show the banner. The snapshot above only seeds the
 					// approvals that were already waiting when this stream attached.
-					sendApprovalChanges(stream, pending, snapshot, granted);
+					sendApprovalChanges(stream, pending, snapshot, answers);
 
 					// Rule 1: the run this stream was following is over, so the stream is too. The change
 					// that reports `submitting: false` is the last one a run produces, so this lands after
@@ -265,8 +277,7 @@ export function createStreamRegistry(hub: SessionHub, options: StreamRegistryOpt
 		},
 
 		rememberApproval(toolCallId: string, approved: boolean): void {
-			if (approved) granted.add(toolCallId);
-			else granted.delete(toolCallId);
+			answers.remember(toolCallId, approved);
 		},
 
 		async close(): Promise<void> {
@@ -312,25 +323,87 @@ function sendEntry(host: HostedSession, stream: EventStream, entryId: string): v
  * The snapshot is the state; these frames are the difference since the last one, which is what lets a
  * client that is already attached learn about an approval instead of only finding it by reloading. An
  * approval that appeared is a request; one that disappeared is settled, and it is settled *denied*
- * unless it left because someone approved it. An abort and a closing session both deny, so that
+ * unless something recorded an answer for it. An abort and a closing session both deny, so that
  * default is the honest one, and the browser only uses this frame to take the banner down.
+ *
+ * Nothing here is consumed for the session as a whole: an approval is read and let go of per stream,
+ * so each stream watching it reports the same answer rather than racing the others for one copy.
  */
 function sendApprovalChanges(
 	stream: EventStream,
 	pending: Map<string, PendingApproval>,
 	snapshot: SessionSnapshot,
-	granted: Set<string>,
+	answers: ApprovalAnswers,
 ): void {
 	const current = new Map(snapshot.pendingApprovals.map((approval) => [approval.toolCallId, approval]));
 
 	for (const [toolCallId, approval] of current) {
-		if (!pending.has(toolCallId)) stream.send({ type: "tool_approval_request", request: approval });
+		if (pending.has(toolCallId)) continue;
+		stream.send({ type: "tool_approval_request", request: approval });
+		answers.show(toolCallId);
 	}
 	for (const toolCallId of pending.keys()) {
 		if (current.has(toolCallId)) continue;
-		stream.send({ type: "tool_approval_settled", toolCallId, approved: granted.delete(toolCallId) || false });
+		stream.send({ type: "tool_approval_settled", toolCallId, approved: answers.wasApproved(toolCallId) });
+		answers.hide(toolCallId);
 	}
 
 	pending.clear();
 	for (const [toolCallId, approval] of current) pending.set(toolCallId, approval);
+}
+
+/**
+ * How the approvals on screen were answered, and which streams are showing them.
+ *
+ * One entry per approval some stream has on screen, because that is one fact: a stream showing an
+ * approval is the only reader its answer will ever have — the frame that reports the answer is that
+ * stream's own difference — so an answer is worth holding exactly as long as the count is above zero.
+ * That is why {@link ApprovalAnswers.remember} refuses an approval nobody has: an answer given to an
+ * empty room has no frame to be reported on, and holding one would only make it outlive the process
+ * that was told, one unanswered question at a time. The same count is what lets go of an answer that
+ * was given while a window was open, once every window showing it has reported it.
+ */
+interface ApprovalAnswers {
+	/** Note an answer, for the streams that will report it — and only when one of them can. */
+	remember(toolCallId: string, approved: boolean): void;
+	/** How this approval was answered. Denied is the answer when nothing recorded one. */
+	wasApproved(toolCallId: string): boolean;
+	/** One more stream is showing this approval. */
+	show(toolCallId: string): void;
+	/** One stream is done with it, dropping it once no stream is left to report the answer. */
+	hide(toolCallId: string): void;
+}
+
+/** One approval a stream has on screen: the answer to report, and how many streams will report it. */
+interface ShownApproval {
+	/** How it was answered, or denied while nothing has said otherwise. */
+	approved: boolean;
+	/** How many streams have told their browsers about it and are still showing it. */
+	showing: number;
+}
+
+function createApprovalAnswers(): ApprovalAnswers {
+	const shown = new Map<string, ShownApproval>();
+
+	return {
+		remember(toolCallId, approved) {
+			const approval = shown.get(toolCallId);
+			if (approval === undefined) return;
+			approval.approved = approved;
+		},
+		wasApproved(toolCallId) {
+			return shown.get(toolCallId)?.approved ?? false;
+		},
+		show(toolCallId) {
+			const approval = shown.get(toolCallId);
+			if (approval === undefined) shown.set(toolCallId, { approved: false, showing: 1 });
+			else approval.showing += 1;
+		},
+		hide(toolCallId) {
+			const approval = shown.get(toolCallId);
+			if (approval === undefined) return;
+			approval.showing -= 1;
+			if (approval.showing <= 0) shown.delete(toolCallId);
+		},
+	};
 }
