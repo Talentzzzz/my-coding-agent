@@ -1,0 +1,457 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>ws probe renderer</title>
+<body>
+<script>
+	const params = new URLSearchParams(location.search);
+	const SCENARIO = params.get("scenario");
+	const PORT = Number(params.get("port"));
+	const PORT2 = Number(params.get("port2"));
+	const CONNS = Number(params.get("conns") ?? "0");
+	const URL_WS = `ws://127.0.0.1:${PORT}/ws`;
+	const URL_WS2 = `ws://127.0.0.1:${PORT2}/ws`;
+	const T0 = performance.now();
+	const report = (payload) => window.probe.report({ scenario: SCENARIO, ...JSON.parse(JSON.stringify(payload)) });
+	const done = (payload) => window.probe.done({ scenario: SCENARIO, ...payload });
+	const now = () => Math.round(performance.now() - T0);
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+	const settle = (ms) => sleep(ms);
+
+	// 打开一条连接；把每个事件的形状（含 close 的 code/reason/wasClean）都记下来。
+	// 返回的对象在 open 时 resolve，之后事件继续追加（close 用 `record.closed` 等）。
+	function trace(label, configure, url = URL_WS) {
+		const record = { label, events: [], messages: 0 };
+		const ws = new WebSocket(url);
+		const push = (kind, extra = {}) =>
+			record.events.push({ kind, t: now(), readyState: ws.readyState, ...extra });
+		let resolveClosed;
+		record.closed = new Promise((r) => {
+			resolveClosed = r;
+		});
+		const opened = new Promise((resolveOpen) => {
+			ws.onopen = () => {
+				push("open");
+				resolveOpen();
+				if (configure) configure(ws, record);
+			};
+			ws.onerror = () => push("error");
+			ws.onmessage = () => {
+				record.messages += 1;
+			};
+			ws.onclose = (event) => {
+				push("close", { code: event.code, reason: event.reason, wasClean: event.wasClean });
+				record.readyStateAfterClose = ws.readyState;
+				resolveClosed();
+			};
+		});
+		return { record, ws, opened };
+	}
+
+	async function open2(label) {
+		const t = trace(label);
+		const outcome = await Promise.race([
+			t.opened.then(() => "open"),
+			t.record.closed.then(() => "closed-before-open"),
+			sleep(6000).then(() => "open-timeout"),
+		]);
+		t.record.openOutcome = outcome;
+		if (outcome !== "open") report({ phase: "open-failed", label, outcome, events: t.record.events });
+		return t;
+	}
+
+	window.onerror = (message, source, line) => report({ phase: "window-error", message: String(message), line });
+	window.onunhandledrejection = (event) =>
+		report({ phase: "unhandled-rejection", message: String((event.reason && event.reason.stack) || event.reason) });
+	// 整段场景的兜底：任何一步卡住都要有输出。
+	setTimeout(() => done({ phase: "scenario-watchdog" }), 150000);
+
+	async function errorCases() {
+		const out = [];
+		const run = async (label, url, cmd) => {
+			report({ phase: "step", label });
+			const t = trace(label, cmd ? (ws) => setTimeout(() => ws.send(JSON.stringify(cmd)), 200) : undefined, url);
+			await Promise.race([t.opened, t.record.closed, sleep(6000)]);
+			await Promise.race([t.record.closed, sleep(2500)]);
+			await settle(100);
+			out.push(t.record);
+		};
+		// 连不上（没有监听者）
+		await run("refused-tcp", "ws://127.0.0.1:9/ws");
+		// 握手被 HTTP 404 拒绝
+		await run("handshake-404", `ws://127.0.0.1:${PORT}/health`);
+		// 握手返回 200 但没有 Upgrade
+		await run("handshake-200-no-upgrade", `ws://127.0.0.1:${PORT}/`);
+		// 协议违规
+		await run("protocol-bad-opcode", URL_WS, { cmd: "badopcode" });
+		await run("protocol-rsv1", URL_WS, { cmd: "rsv1" });
+		await run("protocol-bad-utf8", URL_WS, { cmd: "badutf8" });
+		await run("protocol-bad-close-code", URL_WS, { cmd: "badclose" });
+		await run("clean-close-1013", URL_WS, { cmd: "close", code: 1013, reason: "try again later" });
+		await run("abnormal-destroy", URL_WS, { cmd: "destroy" });
+		report({ phase: "errors", cases: out, visibilityState: document.visibilityState });
+		done({ phase: "errors-complete" });
+	}
+
+	async function poolLimit2() {
+		// 1) 打满 origin A（期望 255）
+		const openedA = [];
+		const overLimit = [];
+		for (let i = 1; i <= 260; i += 1) {
+			const events = [];
+			const ws = new WebSocket(URL_WS);
+			ws.onerror = () => events.push({ kind: "error", t: now(), readyState: ws.readyState });
+			ws.onclose = (event) =>
+				events.push({ kind: "close", t: now(), code: event.code, reason: event.reason, wasClean: event.wasClean });
+			const result = await new Promise((resolve) => {
+				const timer = setTimeout(() => resolve("stalled"), 2500);
+				ws.onopen = () => {
+					clearTimeout(timer);
+					resolve("open");
+				};
+				ws.onerror = () => {
+					clearTimeout(timer);
+					events.push({ kind: "error", t: now(), readyState: ws.readyState });
+					resolve("error");
+				};
+				ws.onclose = (event) => {
+					clearTimeout(timer);
+					events.push({ kind: "close", t: now(), code: event.code, reason: event.reason, wasClean: event.wasClean });
+					resolve("close");
+				};
+			});
+			if (result === "open") openedA.push(i);
+			else {
+				overLimit.push({ index: i, result, events, readyState: ws.readyState, at: now() });
+				if (overLimit.length >= 2) break;
+			}
+			if (i % 50 === 0) report({ phase: "pool-limit2-progress", index: i, opened: openedA.length });
+		}
+		// 2) origin B 还能不能开（per-origin vs per-profile）
+		const originB = [];
+		for (let i = 1; i <= 2; i += 1) {
+			const outcome = await new Promise((resolve) => {
+				const ws = new WebSocket(URL_WS2);
+				const timer = setTimeout(() => resolve("stalled"), 2500);
+				ws.onopen = () => {
+					clearTimeout(timer);
+					resolve("open");
+				};
+				ws.onerror = () => {
+					clearTimeout(timer);
+					resolve("error");
+				};
+			});
+			originB.push({ index: i, outcome });
+		}
+		// 3) 打满时普通 HTTP 请求是否被饿死
+		const httpTimings = [];
+		for (let i = 0; i < 3; i += 1) {
+			const started = now();
+			const outcome = await Promise.race([
+				fetch(`http://127.0.0.1:${PORT}/health`).then((r) => `status-${r.status}`),
+				sleep(5000).then(() => "timeout"),
+			]);
+			httpTimings.push({ attempt: i + 1, outcome, ms: now() - started });
+		}
+		report({
+			phase: "pool-limit2",
+			openedCount: openedA.length,
+			openedLast: openedA.slice(-3),
+			overLimit,
+			originB,
+			httpTimings,
+			visibilityState: document.visibilityState,
+		});
+		done({ phase: "pool-limit2-complete" });
+	}
+
+	async function poolLimit3() {
+		// 「上限是每 origin，还是每个 WebSocket 池（≈ 一个 profile 的网络栈）？」
+		const openOne = async (url) =>
+			new Promise((resolve) => {
+				const ws = new WebSocket(url);
+				const timer = setTimeout(() => resolve({ outcome: "stalled", ws }), 2500);
+				ws.onopen = () => {
+					clearTimeout(timer);
+					resolve({ outcome: "open", ws });
+				};
+				ws.onerror = () => {
+					clearTimeout(timer);
+					resolve({ outcome: "error", ws });
+				};
+			});
+
+		// 1) 控制：origin B 单独一条能不能开
+		const controlB = await openOne(URL_WS2);
+
+		// 2) 把 origin A 打满
+		const held = [];
+		let consecutiveFailures = 0;
+		for (let i = 1; i <= 300 && consecutiveFailures < 2; i += 1) {
+			const { outcome, ws } = await openOne(URL_WS);
+			if (outcome === "open") {
+				held.push(ws);
+				consecutiveFailures = 0;
+			} else {
+				consecutiveFailures += 1;
+				try {
+					ws.close();
+				} catch {}
+			}
+		}
+		const openA = held.length;
+		report({ phase: "pool-limit3-progress", stage: "saturated-A", openA });
+
+		// 3) 池满时 origin B 还能开吗
+		const bWhenFull = await openOne(URL_WS2);
+
+		// 4) 在 A 上关掉 5 条，再看 B 能补开几条
+		for (let i = 0; i < 5 && held.length > 0; i += 1) held.pop().close();
+		await settle(600);
+		const openAAfterClose = held.length;
+		let bAfterClose = 0;
+		consecutiveFailures = 0;
+		for (let i = 1; i <= 20 && consecutiveFailures < 2; i += 1) {
+			const { outcome, ws } = await openOne(URL_WS2);
+			if (outcome === "open") {
+				consecutiveFailures = 0;
+				bAfterClose += 1;
+				held.push(ws);
+			} else {
+				consecutiveFailures += 1;
+				try {
+					ws.close();
+				} catch {}
+			}
+		}
+		report({
+			phase: "pool-limit3",
+			controlB: controlB.outcome,
+			openA,
+			bWhenFull: bWhenFull.outcome,
+			openAAfterClose,
+			bAfterClose,
+			impliedPoolCap: openAAfterClose + bAfterClose,
+			visibilityState: document.visibilityState,
+		});
+		done({ phase: "pool-limit3-complete" });
+	}
+
+	async function closeCodes() {
+		const out = [];
+		const cases = [
+			{ label: "server-close-1000", cmd: { cmd: "close", code: 1000, reason: "bye" } },
+			{ label: "server-close-1013", cmd: { cmd: "close", code: 1013, reason: "try again later" } },
+			{ label: "server-close-1001", cmd: { cmd: "close", code: 1001, reason: "going away" } },
+			{ label: "server-close-4000", cmd: { cmd: "close", code: 4000, reason: "reconnect requested" } },
+			{ label: "server-destroy-tcp", cmd: { cmd: "destroy" } },
+		];
+		for (const c of cases) {
+			report({ phase: "step", label: c.label });
+			const t = trace(c.label, (ws) => {
+				setTimeout(() => ws.send(JSON.stringify(c.cmd)), 150);
+			});
+			await t.opened;
+			await Promise.race([t.record.closed, sleep(2500)]);
+			await settle(120);
+			out.push(t.record);
+		}
+
+		// 客户端自己关：合法与非法取值，逐个记下抛不抛、抛什么。
+		const clientCases = [1000, 4000, 4999, 1001, 2999, 3000, 5000, 1234, 999, 1005, 1006, 1015];
+		for (const code of clientCases) {
+			report({ phase: "step", label: `client-close-${code}` });
+			const { record, ws } = await open2(`client-close-${code}`);
+			const entry = { label: `client-close-${code}`, threw: null, readyStateAfterCall: null, closed: false };
+			try {
+				ws.close(code, `reason-${code}`);
+				entry.readyStateAfterCall = ws.readyState;
+			} catch (error) {
+				entry.threw = { name: error.name, message: error.message };
+			}
+			await Promise.race([record.closed, settle(1200)]);
+			await settle(120);
+			entry.closed = ws.readyState === WebSocket.CLOSED;
+			entry.trace = record.events;
+			entry.readyStateAfterClose = record.readyStateAfterClose;
+			out.push(entry);
+			try {
+				ws.close();
+			} catch {}
+		}
+
+		// reason 长度上限：123 字节。
+		const reasonCases = [
+			{ label: "reason-124-ascii", code: 1000, reason: "x".repeat(124) },
+			{ label: "reason-123-ascii", code: 1000, reason: "x".repeat(123) },
+			{ label: "reason-123-bytes-cjk", code: 1000, reason: "中".repeat(41) },
+			{ label: "reason-126-bytes-cjk", code: 1000, reason: "中".repeat(42) },
+		];
+		for (const c of reasonCases) {
+			report({ phase: "step", label: c.label });
+			const { record, ws } = await open2(c.label);
+			const entry = { label: c.label, threw: null };
+			try {
+				ws.close(c.code, c.reason);
+			} catch (error) {
+				entry.threw = { name: error.name, message: error.message };
+			}
+			await Promise.race([record.closed, settle(1200)]);
+			entry.trace = record.events;
+			out.push(entry);
+			try {
+				ws.close();
+			} catch {}
+			await settle(120);
+		}
+
+		// 自动重连？等服务端视角的证据。
+		const stats = await new Promise((resolve) => {
+			const ws = new WebSocket(URL_WS);
+			ws.onopen = () => ws.send(JSON.stringify({ cmd: "stats" }));
+			ws.onmessage = (event) => {
+				const value = JSON.parse(event.data);
+				if (value.cmd === "stats") resolve(value);
+			};
+			ws.onerror = () => resolve({ error: "stats failed" });
+			setTimeout(() => resolve({ error: "stats timeout" }), 3000);
+		});
+		report({ phase: "close-codes", cases: out, serverStats: stats, visibilityState: document.visibilityState });
+		done({ phase: "close-codes-complete" });
+	}
+
+	async function poolLimit() {
+		const target = CONNS > 0 ? CONNS : 300;
+		const opened = [];
+		const stalled = [];
+		for (let i = 1; i <= target; i += 1) {
+			const record = { index: i, outcome: null, at: now() };
+			const ws = new WebSocket(URL_WS);
+			const result = await new Promise((resolve) => {
+				const timer = setTimeout(() => resolve("stalled"), 2500);
+				ws.onopen = () => {
+					clearTimeout(timer);
+					resolve("open");
+				};
+				ws.onerror = () => {
+					clearTimeout(timer);
+					resolve("error");
+				};
+				ws.onclose = (event) => {
+					clearTimeout(timer);
+					resolve(`close-${event.code}`);
+				};
+			});
+			record.outcome = result;
+			record.atEnd = now();
+			record.readyState = ws.readyState;
+			if (result === "open") opened.push(i);
+			else stalled.push(record);
+			if (i % 25 === 0 || result !== "open") {
+				report({ phase: "pool-limit-progress", index: i, result, opened: opened.length, stalled: stalled.length });
+			}
+			if (result !== "open" && stalled.length >= 2) {
+				report({ phase: "pool-limit-stop", index: i, reason: "two consecutive non-open outcomes" });
+				break;
+			}
+		}
+		// 池被占满时普通 HTTP 请求会不会被饿死
+		const httpTimings = [];
+		for (let i = 0; i < 3; i += 1) {
+			const started = now();
+			const outcome = await Promise.race([
+				fetch(`http://127.0.0.1:${PORT}/health`).then((r) => `status-${r.status}`),
+				sleep(5000).then(() => "timeout"),
+			]);
+			httpTimings.push({ attempt: i + 1, outcome, ms: now() - started });
+		}
+		const stats = await new Promise((resolve) => {
+			const ws = new WebSocket(URL_WS);
+			ws.onopen = () => ws.send(JSON.stringify({ cmd: "stats" }));
+			ws.onmessage = (event) => {
+				const value = JSON.parse(event.data);
+				if (value.cmd === "stats") resolve(value);
+			};
+			ws.onerror = () => resolve({ error: "stats failed" });
+			setTimeout(() => resolve({ error: "stats timeout" }), 3000);
+		});
+		report({
+			phase: "pool-limit",
+			openedCount: opened.length,
+			openedLast: opened.slice(-3),
+			stalled,
+			httpTimings,
+			serverStats: stats,
+			visibilityState: document.visibilityState,
+		});
+		done({ phase: "pool-limit-complete" });
+	}
+
+	async function throttle() {
+		const bins = new Map();
+		const bump = (key) => {
+			const second = Math.floor(now() / 1000);
+			const b = bins.get(second) ?? { second, frames: 0, ticks: 0, visibility: document.visibilityState };
+			b[key] += 1;
+			b.visibility = document.visibilityState;
+			bins.set(second, b);
+		};
+		const arrivalTimes = [];
+		const ws = new WebSocket(URL_WS);
+		ws.onmessage = () => {
+			bump("frames");
+			arrivalTimes.push(now());
+		};
+		ws.onclose = (event) => report({ phase: "throttle-close", code: event.code, reason: event.reason, t: now() });
+		ws.onerror = () => report({ phase: "throttle-error", t: now() });
+		const timer = setInterval(() => bump("ticks"), 100);
+		let rafTicks = 0;
+		const raf = () => {
+			rafTicks += 1;
+			bump("raf");
+			requestAnimationFrame(raf);
+		};
+		requestAnimationFrame(raf);
+		const visibilityLog = [];
+		document.addEventListener("visibilitychange", () =>
+			visibilityLog.push({ t: now(), state: document.visibilityState }),
+		);
+		// 服务端每 200 ms 一帧（--say-ms 200）与每 200 ms 一次 ping（--ping-ms 200）。
+		window.probe.onSummarize(() => {
+			clearInterval(timer);
+			const ordered = [...bins.values()].sort((a, b) => a.second - b.second);
+			const gaps = [];
+			for (let i = 1; i < arrivalTimes.length; i += 1) gaps.push(arrivalTimes[i] - arrivalTimes[i - 1]);
+			gaps.sort((a, b) => a - b);
+			report({
+				phase: "throttle",
+				bins: ordered,
+				frameCount: arrivalTimes.length,
+				gapMin: gaps[0] ?? null,
+				gapMedian: gaps[Math.floor(gaps.length / 2)] ?? null,
+				gapMax: gaps[gaps.length - 1] ?? null,
+				rafTicks,
+				timerTicks: ordered.reduce((sum, b) => sum + b.ticks, 0),
+				visibilityLog,
+				visibilityState: document.visibilityState,
+				readyState: ws.readyState,
+			});
+			done({ phase: "throttle-complete" });
+		});
+	}
+
+	(async () => {
+		try {
+			if (SCENARIO === "close-codes") await closeCodes();
+			else if (SCENARIO === "errors") await errorCases();
+			else if (SCENARIO === "pool-limit") await poolLimit();
+			else if (SCENARIO === "pool-limit2") await poolLimit2();
+			else if (SCENARIO === "pool-limit3") await poolLimit3();
+			else if (SCENARIO === "throttle") await throttle();
+			else done({ error: `unknown scenario ${SCENARIO}` });
+		} catch (error) {
+			done({ error: String((error && error.stack) || error) });
+		}
+	})();
+</script>
+</body>
