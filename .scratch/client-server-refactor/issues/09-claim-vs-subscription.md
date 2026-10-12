@@ -1,7 +1,7 @@
 # `claim` 与订阅计数的关系
 
 Type: grilling
-Status: open
+Status: resolved
 Blocked by: 04
 
 ## Question
@@ -23,7 +23,185 @@ Blocked by: 04
 
 ## Answer
 
-<!-- 解决时在下面追加。 -->
+### 结论（一句话）
+
+**只有 `claim` 是计数器；订阅是连接上的一张集合，两者回答不同的问题、永不互相换算。** `hub.reap()`
+的**唯一计数输入**是 claim（订阅集合的任何状态都不能阻止一次回收；第 5 节那条守卫不是第二个输入，
+它不计数、也不因订阅而触发），而 claim 的持有者在新模型里只剩**两类**：会改变会话的请求（一次调用的
+长度）与**在飞的运行**（claim 在运行的第一次写之前就拿到，随启动它的那次 `prompt` 调用 settle）——
+今天那第三类「每条事件流一条 claim」随本票消失。订阅因此必须**活过它的宿主**：`SessionHub` 新增一个按会话 id 的观察点（`observe()`，
+连接层每条记录叫 `Subscription`），否则任何一次"看着空闲会话、然后发消息"都会静默冻住。`claim` 那个
+写副作用的频率**不变**（每页一次 `/api/sessions/current`），因为常驻通道与订阅都不拿 claim。重命名
+的禁令允许**新增**类型，不允许改那三个名字。
+
+下面按票面四问回答。第 5 节记本票答案带出的一处洞（leaf 在内存）与它的守则。
+
+---
+
+### 1. 两个计数器还是一个：一个计数器、两张表
+
+**订阅计数不是一个计数器。** 拆开看，今天与将来一共三个结构，只有一个是计数器：
+
+| 结构 | 在哪 | 记什么 | 是计数器吗 | 读者 |
+|---|---|---|---|---|
+| `HostedSession.claims` | hub | 谁在跑着、改着这个会话 | **是**（唯一的） | `hub.reap()` |
+| 连接 × 会话的订阅条目 | 每条连接（`Subscription`） | 这条连接要不要这个会话的内容（含它自己那份 `pending` 审批差值） | 不是，是集合 | 路由 |
+| 会话 → 订阅者的集合 | hub（本票新增，`observe()` 持有） | 同一个会话现在有哪些条目 | 不是，是上表的镜像 | 路由；票 08 的遗弃计时器读它的空/非空 |
+
+**两者不等价，两个方向都能举出例子。** 一个窗口在看一个停着的会话 = **0 claim + 1 条订阅**（它不组装
+`Agent`，基线从磁盘回答，票 04 第 2 条）；一次 `curl` 发起的、没人看的运行 = **1 claim + 0 条订阅**。
+前者不进 `Agent`，后者不进任何订阅表——所以"最后一条 claim 释放"与"订阅归零"是两个事实，谁也不能
+推出谁。
+
+**`hub.reap()` 只听 claim。** 这是票 04 那条约束（"订阅条目**不得**成为 `hub.reap()` 的输入"）的落地
+读法，也是票 08 那句"空的订阅集合可以**开启**一次遗弃判断，任何订阅集合都不能**阻止**一次回收"的
+另一半：它们不是同一个对象的两种读法，是**两个对象**。于是"谁会因为被订阅而活下来"的答案是
+**没有人**——看着一个会话不让它活着，只有跑或改才让它活着。
+
+**"运行下面不被回收"改由运行自己的 claim 保证。** 今天这条保证由 `reap()` 里的
+`await host.session.settle()` 承担（`hub.ts:354`）：最后一个 claim 走后 reap 停在 settle 上。本票把它
+换成一个**计数事实**（第 2 节；前提是这条 claim 在运行的**第一次写之前**就拿到——为什么"观察
+`submitting`"做不到这件事，见第 2 节）；`reap()` 里那次 `await settle()` 保留（它是 `close()` 的前置，
+`Agent.close()` 自己也走一次，`agent.ts:1087-1090`），但它不再是"运行下面不回收"的实现者——若它还
+担着这件事，停在审批上的运行就会让一次 reap 挂在一个人身上，那正是票 08 决定 5 要拆掉的形状。
+
+---
+
+### 2. 谁还该拿 claim：两类持有者，流完全不拿
+
+| 持有者 | 寿命 | 今天 | 新模型 |
+|---|---|---|---|
+| 会改变会话、或必须跑在活跃会话上的请求 | 一次调用的长度（`claiming()`，`controllers/sessions.ts:475-484`） | 有 | **不变** |
+| **在飞的运行** | 从运行的第一次写之前到它 settle | 无（靠注视着它的那条流） | **新增** |
+| 每条事件流 | 流的寿命 | 有：`open()` 里的 `hub.claim`（`stream-registry.ts:129`），由那条流持有到它自己 `release()`（`:163`） | **消失**（没有"流"这个对象了；订阅不拿 claim） |
+| 读 transcript | —— | 无 | 不变（`snapshotOf()` 的冷读，`hub.ts:171-179`） |
+
+**运行那条 claim 由启动它的那次 `prompt` 调用持有，直到那次调用 settle。** 今天的 `claiming()` 在**应答时**就释放（`controllers/sessions.ts:475-484`）；新模型里 `prompt` 那条路径的 claim 要活到它启动的那个 `session.prompt()` 结束，配对的落点仍留在 `claiming()` 这一处（给它一个"这次调用的 claim 交给运行"的形态），**不新增第二个 claim/release 配对点**，`HostedSession.claims` 仍是唯一那个计数器、也不需要内部标记。
+
+**为什么不是"hub 观察 `submitting` 收放"（本票起初想这么做，查代码后作废）。** `Agent.prompt()` 在 `await this.loop.prompt(...)` **之前**就发布了一次（`agent.ts:826` 的 `publish()` 排在 `:827` 之前），而那一刻 `submitting` 还是**假**；第一次带着 `submitting: true` 的快照要等循环的第一个事件——`handleEvent` 只在 `message_start` / `message_end` / `turn_end` 上发布（`agent.ts:1358-1359`），也就是要等供应商的第一个字节。而那条 POST **不**等运行（`void session.prompt(...)`，`controllers/sessions.ts:362`）并在 `finally` 里释放（`:481-483`）。于是"观察 `submitting`"会在一次慢首字节的请求上留下**claims 已经归零、运行还在跑**的窗口，而那一刻唯一还护着 host 的东西正是 `reap()` 里那句 `await settle()`——也就是第 1 节声称被取代掉的那一句。**claim 必须在运行的第一次写之前就拿到**，第 1 节那句话才成立。
+
+**边界就是 `submitting`，不另立"运行"概念——这一点本票查过了。** `isStreaming` 在 `runWithLifecycle`
+里置真（`packages/agent/src/loop.ts:480`）、只在 `finishRun()` 里置假（`:510`），而排队的 followUp 由
+`runAgentLoop` 在**同一次** `prompt()` 内 drain（`getFollowUpMessages`，`:464`），所以排队消息的轮次
+之间 `submitting` **不会**闪断；`Agent.prompt()` 结尾那次 `publish()`（`packages/core/src/agent.ts:827-833`）
+就是"运行结束"那一帧。`settle()` 的 `do/while`（`:1076-1080`）因此不是这条 claim 的边界依据，它是
+"transcript 完整"的保证。**但 claim 挂在那个 `Promise` 上、不挂在那帧上**：形状 C 里调用会 reject、
+`submitting: false` 却永不发布（票 08 §1.4），挂在帧上就泄漏，挂在 Promise 上不会。
+
+**两条释放条件因此分在两处，别混。** 客户端的 `send` 引用靠票 08 那帧 `submitting: false`（票 04 第 1 条）；服务端的运行 claim 靠这次调用的 Promise settle。**票 08 那个统一 `finally` 仍然是必须修的**——不修它，形状 C 上泄漏的是**客户端**那条 `send` 引用（`cancel` 永远不发）；服务端这条因为挂在 Promise 上，不依赖那次修复。**一条诚实的限度**：这条规则落在服务端唯一启动运行的地方（`SessionController.prompt`）；绕过控制器直接调 `Agent.prompt()` 的调用方（今天的冒烟有）不会拿到 claim——可以接受，因为那种调用方自己 `await` 着那个 Promise，它本来就是持有者。
+
+---
+
+### 3. `claim` 的副作用：频率不变，生产者收成一个
+
+三句话。
+
+1. **常驻通道不新增任何一次头文件写入。** 连接建立不拿 claim（票 05 第 2 条那条"不硬造 `ready`"与
+   票 07 的"第一帧是心跳"合起来就是这个结论），订阅也不拿（第 2 节）。所以"连上就写下一个 JSONL
+   头文件"**不会发生**——这正是票面那一问要问的东西。
+2. **今天唯一的写副作用生产者是 `GET /api/sessions/current`，不是 `claim()`。** 生产代码里没有一处
+   省略 id（`stream-registry.ts:129`、`controllers/sessions.ts:478` 都带 id），所以票面那句
+   "`hub.claim()` 不带 id 时会经 `currentId()` 解析"描述的是**旧传输**的形状（当时的流就是那个不带
+   id 落地的消费者）；今天这条路径只被 `scripts/smoke-sessions.ts:89,90,123` 用到。
+3. **决定：收紧签名，`claim(sessionId: string)`。** D1 明知并接受的那笔"读形状的请求带写副作用"因此
+   只剩下**一个可审计的生产者**（`currentSessionId()` → `resolveCurrentId()`，`hub.ts:189-191`、
+   `:379-390`），而不是藏在一个可选参数的回退里。这不是重命名，是删掉一条没有生产调用者的分支；
+   代价是那三处冒烟改成先 `currentSessionId()` 再 `claim(id)`（登记给票 15）。
+
+**客户端一侧的约束跟着写下来**（它决定频率，不决定生产者）：**每页加载只调一次
+`/api/sessions/current`**；两栏不各调一次（栏 2 没有会话时不产生引用，票 04 第 2 条）；通道重连只按
+已持有的 id 逐条重新 `open`，**绝不**重调 `/current`。无历史时"打开应用写下一个头文件"因此仍然是
+**一次**。"两栏各自在看谁"要恢复成两份仍是 D1 的连带面，不由订阅表承担。
+
+---
+
+### 4. 重命名禁令的边界：可以新增，改名不行
+
+禁令管的是那三个名字与它们的意思，**不是冻结对象图**。本票要加的东西一个都不落在那三个名字上：
+
+| 新东西 | 名字 | 落在哪 |
+|---|---|---|
+| 一条订阅（服务端半边） | `Subscription` | 连接的订阅表（`Map<sessionId, Subscription>`）——**落在连接层、不在 `HostedSession` 上**（订阅是连接的状态，票 04 第 1 条；挂到会话上就是 04 拆掉的那件事）。名字避开了 `*Registry` 那一类：票 04 的理由是 `StreamRegistry` 已经占了 "stream" |
+| 一条订阅（客户端半边） | 同名 `Subscription`，但带 `refs` 与 `status` | 客户端的订阅集合（计数与 source 在客户端，票 04 第 1 条）；`status` 的语义见下一小节 |
+| 按会话的观察者集合与观察点 | `SessionHub.observe(sessionId, observer)`；`observer` 的类型叫 `SessionObserver` | `SessionHub` 上一个新方法 + 一张镜像表。`observer` 拿到的是**原始** `onEvent` / `onChange`；帧仍由每条 `Subscription` 自己构造，因为审批差值是逐订阅的状态（`stream-registry.ts:318-336`） |
+| 运行那条 claim | 无新名 | 复用 `HostedSession.claims`；变的只是它的**寿命**（随启动运行的那次 `prompt` 调用 settle 释放，见第 2 节），不需要新类型，也不需要内部标记 |
+| reap 的守卫 | `SessionManager.hasUnrecordedLeaf()` | `SessionManager` 上一个谓词（第 5 节），`hub.reap()` 读它 |
+
+**`observe` 为什么必须在 hub，而不是让订阅绑死在开流那一刻的 `Agent` 上。** 今天 `StreamRegistry` 绑的
+是那**一个** `Agent`（`stream-registry.ts:212-240`），它不失效只因为流的 claim 恰好不让 host 被回收。
+订阅不拿 claim 之后，host 会在"没人跑、没人改"时被回收，下一次 prompt 建出**新的** `Agent`；绑死的
+条目会静默冻住——而"看着空闲会话、然后发消息"是最常见的路径，验收第 1 条会因此不成立。`SessionHub`
+已经是"一个会话 id 的稳定地址"（读路径 `snapshotOf()` 就是这个意思，`hub.ts:171-179`），本票只是把
+这件事从读扩到事件。
+
+**票 07 那笔账落在哪：客户端订阅记录上的一个 `status` 位。** 本票 Comments 里票 07 登记的第二件事是把它指给本票的：客户端必须分得开"引用还在、但这条流已被判终"与"引用还在、只是连接断过"。**两条事实在两层**——后者是**连接级**的（`MuxClient` 的 `channel`，票 07 决定 3 已定：不进 reducer、不随基线替换）；前者是**会话级**的，落在客户端那条订阅记录上：客户端的 `Subscription` 除了 `refs`（按 source 计数，票 04 第 1 条）之外多一个 `status: "subscribed" | "ended"`。
+
+| 事件 | 对客户端那条记录做什么 | 重连时重放 `open` 吗 |
+|---|---|---|
+| `open` 发出、收到基线 | `status = "subscribed"` | 是（票 07 那笔"每次通道重新 `live` 逐条重放"） |
+| 收到 `end`，**这条流上见过基线** | `status = "ended"`；删掉该会话的本地视图（票 07 决定 9）；**不发 `cancel`**（没有东西可取消），但 `refs` 原样留着——那一栏还指着它 | **不重放**（票 05：重开一次不会得到不同答案） |
+| 收到 `end`，**没见过基线** | 不是"判终"，是这次 `open` 没成功（票 05 的归因规则）；`status` 不动 | 是（它还是一条正常的订阅意图） |
+| 通道断了（`channel: "down"`） | 记录**不动**（没有 `end`，流没被判终） | 是 |
+| 引用归零（那栏关掉或改指） | 整条记录丢掉（`refs` 为零时本来就发 `cancel`）；此后要再看它等于一次全新的 `open` → 新基线 | —— |
+
+**为什么这个位不进 `ViewState`/reducer**：它记的是**订阅意图**，属于订阅集合那一层；`ViewState` 是渲染状态，票 06 已定基线替换作用于它，而 `end` 要删的恰恰是它——意图与视图不是一回事，别把意图画进视图里。**为什么它与 `channel` 必须分开**：一次通道断开要重放**所有** `subscribed` 的会话，而一条判终的流**恰好是唯一不重放的那种**；把两者合成一个位，要么每次重连都拿到第二份"没有这个会话"（票 07 点名的后果），要么一次判终就永远不再订阅。
+
+**顺带一条对称要说清**：这张集合与票 04 禁止的"服务端引用计数"不是一回事。它不计数、不带 source、
+不持久化、**不能阻止任何一次回收**，只做两件事：把事件路由到订阅者，以及让票 08 的遗弃计时器读到
+"空/非空"这一个转移（08 的原话是那处落在连接层维护表的地方；集合搬进 hub 之后两处合成一处，
+**触发条件一字不改**）。
+
+---
+
+### 5. 本票答案带出的一处洞：leaf 在内存（守卫 + 票 18）
+
+**先说这一节的归属。** 它不是另起一题，而是本票答案的直接后果：票 04 拿掉了唯一那个"有人恰好持着会话"的持有者，而 leaf 只在内存，于是"回退分支再输入"会**静默失效**——那会让本票自己的答案变成一句不成立的话。处置范围在票面讨论中定过：**守卫留在本票**（判据明确、不需要新协议），根修（leaf 可持久化）开成票 18。
+
+**先更正 map 里一句已经作废的话。** `map.md` 的 Not yet specified 写着"流常驻意味着'回退分支再输入'
+永远有一个持有者"。票 04 定了订阅不拿 claim，这句话的前提就没了——新模型下那个序列**没有**持有者，
+而且比今天更糟（今天至少还有一条流的 claim 在那段窗口里）。
+
+**事实**：leaf 只在内存（`SessionManager.buildIndex()` 每次加载都把 `leafId` 设成最后一条 entry，
+`session-manager.ts:928-936`；`branch()` 只改内存，`:1386-1389`）。`branch` 命令的 claim 在应答时就
+释放，`reap()` 随即 `close()` 掉那个 host → 那次移动丢失。冒烟今天能过，只因为脚本在移动期间**另持
+一条流的 claim**（`docs/notes.md:102`，notes §五 bug 3）；票 15 重写 `smoke-api.ts` 时会直接撞上它。
+
+**决定（本票内）：`hub.reap()` 不关闭"会丢掉内存状态"的会话**，判据由
+`SessionManager.hasUnrecordedLeaf()` 给出——`getLeafId()` 不在文件最后一条 entry 上（这个谓词必须落在
+`SessionManager` 上：`fileEntries` 是私有的，`session-manager.ts:835`，hub 只是问它）。（名字说的是它持有
+**什么**：一个文件里没有任何 entry 记着的 leaf 位置；不是"有一次待执行的移动"，那会与 leaf 一旦可持久化
+之后的含义脱节——那时这个谓词本来就该删。）今天它是唯一
+的实例（配置与工具集合都已经是 entry：`applyConfig` 写 `tool_config`，`agent.ts:1028-1032`，审批映射
+随它走）。下一条命令（prompt）一落盘这个条件自然消失，回收照常。
+
+**诚实的限度**：这是一个**没有计时器的钉子**——点过分支又走开，那个 `Agent` 会一直组装着，直到进程
+退出或有人再动这个会话。它换来的是"回退分支再输入"在常驻订阅模型下仍然成立。真正的修法是让 leaf
+可持久化（一条状态 entry 或 header 字段，`buildIndex` 认它），那样这条守卫就能删掉；**本票把它开成
+票 18**（`18-leaf-durability.md`，Type: grilling，Blocked by: 09），map 的那条 Not yet specified 改成
+指向它。"关掉窗口之后移动"那半个悬案随之归票 18。
+
+---
+
+### 决定记录（下游可以直接依赖的）
+
+| # | 决定 | 归属 | 直接约束谁 |
+|---|---|---|---|
+| 1 | 只有 `claims` 是计数器；订阅是集合；`hub.reap()` 的**唯一计数输入**是 claim，订阅集合的任何状态都不能阻止一次回收（第 8 条那条守卫不是第二个输入：它不计数、也不因订阅触发） | 本票 | 08、10、15 |
+| 2 | 在飞的运行有一条 claim：**由启动它的那次 `prompt` 调用持有，直到该调用 settle**（不是"观察 `submitting`"——第一次带 `submitting: true` 的发布要等供应商第一个字节，中间会留下 claims 归零的窗口）；`submitting` 仍是运行对客户端的边界，不另立"运行"概念 | 本票 | 04、08、11、15 |
+| 3 | 每条事件流一条 claim **消失**；请求那条 claim 不变；读不拿 claim | 本票 | 05、15 |
+| 4 | `SessionHub.observe(sessionId, observer)` + 按会话的观察者集合（`observer` 的类型叫 `SessionObserver`）；订阅绑会话 id、**活过 host 被回收**；`Subscription` 落在连接层（客户端那半同名，带 `refs` / `status`），不在 `HostedSession` 上 | 本票 | 04、05、10、11 |
+| 5 | 那张集合不是引用计数、不持久化、不能阻止回收；它同时是票 08 遗弃计时器的读点（触发条件不变） | 本票 | 08 |
+| 6 | `hub.claim(sessionId)` 收紧签名（删掉无 id 回落）；D1 的写副作用只剩 `GET /api/sessions/current` 一个生产者 | 本票 | 12、15 |
+| 7 | 客户端每页加载只调一次 `/current`；重连只按 id 重放 `open` | 本票 | 03、06、15 |
+| 8 | `hub.reap()` 不关闭有未落盘 leaf 的会话（`SessionManager.hasUnrecordedLeaf()`） | 本票 | 15、18 |
+| 9 | leaf 可持久化归票 18；map 那句"流常驻 = 分支移动永远有持有者"作废 | 本票 | 18 |
+| 10 | 客户端那条订阅记录带 `status: "subscribed" \| "ended"`：只有 `subscribed` 的会话在通道重新 `live` 时重放 `open`；`end`（已见基线）置 `ended`、删本地视图、不发 `cancel`，`end`（未见基线）不动它 | 本票 | 05、07、15 |
+
+**本票没有回答的**（别当成已定）：帧的种类与名字、`end` 的归因（票 05 已定）；基线内容与窗口上限
+（票 06 已定）；退避、心跳参数、`server.close()` 与升级后 socket 的记账（票 07、17）；`item.error`
+与 `send` 在写侧被丢时的行为（票 11）；`stream-registry.ts` 这个文件与类型（含 `IDLE_GRACE_MS`、
+`holdForReconnect`）具体怎么退场（归落地阶段）；两栏各自在看谁怎么恢复（D1 的连带面）；leaf 怎么
+持久化（票 18）。
 
 ## Comments
 

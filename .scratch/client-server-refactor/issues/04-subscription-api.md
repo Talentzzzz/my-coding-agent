@@ -286,3 +286,9 @@ Not yet specified 已经记着它们。
 
 1. **本票第 1 条那笔 `send` 引用多了一个必须一起修的释放条件**。票 08 查明形状 C（运行的机械部分失败，`session.prompt()` reject）今天**永远不发 `submitting: false`**（`packages/core/src/agent.ts:827-833` 的 `publish()` 排在 await 之后；循环的 `finishRun()` 只改状态，`packages/agent/src/loop.ts:510-516`）。于是本票第 1 条"`send` 持有到这次运行 settle，也就是 `submitting` 在这条逻辑流上转 false 的那一次"在形状 C 上永远不成立——`send` 引用会永久泄漏，`cancel` 永远不发。票 08 已把它定成必须修的 bug（运行结束统一走一个 `finally`：先 `item.error`、再一帧 `submitting: false`）。
 2. **本票第 3 条否掉的那个"服务端按计数"没有以本票禁止的形式回来，但订阅表多了一个非路由读者**。票 08 把 `approvalGraceMs` 从 `hub.reap()` 里搬出来，改由"存在待回答的审批 ∧ 该会话的订阅集合为空"触发——也就是说这张表的**空/非空转移**成了那个计时器的输入。本票第 1 条禁止的方向（订阅条目**延长**会话寿命、成为 `hub.reap()` 的输入）**原样成立**：空的订阅集合只能**开启**一次遗弃判断，任何订阅集合都不能**阻止**一次回收；表里仍然不存计数、不存 source。票 08 已把这处登记写进它的 Answer。
+
+**2026-10-12，票 09 解决时追加（本票的 Answer 一字未改，只回答本票明确留给它的那个命名问题、并登记一处实现约束）**：
+
+1. **本票第 2 条末尾那句"本票刻意不给这个新东西起名……归票 09"已经答了**：类型叫 `Subscription`，落在**连接**的订阅表里（`Map<sessionId, Subscription>`），**不落在 `HostedSession` 上**——订阅是连接的状态（本票第 1 条），挂到会话上就是本票拆掉的那件事。禁令管的是 `claim` / `HostedSession` / `SessionHub` 这三个名字与它们的意思，**新增**类型不受它约束。
+2. **本票第 2 条那条约束带来一个实现后果，票 09 定了形状**：订阅不拿 claim ⇒ host 会在"没人跑、没人改"时被回收 ⇒ 下一次 prompt 建出**新的** `Agent`。今天 `StreamRegistry` 把监听器绑在那**一个** `Agent` 上（`stream-registry.ts:212-240`），它不失效只因为流的 claim 恰好不让 host 被回收；新模型下绑死的条目会静默冻住。所以 `SessionHub` 新增 `observe(sessionId, observer)` 与一张按会话的观察者集合，订阅绑**会话 id**而不是某个 `Agent`。这张集合不是引用计数（不计数、不带 source、不持久化、**不能阻止任何一次回收**），它只做路由，并同时成为票 08 遗弃计时器的读点。
+3. **本票第 1 条 `send` 引用的释放条件在形状 C 上要靠票 08 的 `finally`**（已在票 08 的 Comment 里登记）。票 09 把**服务端**运行 claim 的寿命挂在启动运行的那次 `prompt` 调用上、**不**挂在那帧 `submitting: false` 上，所以服务端这条不依赖形状 C 的修复；被形状 C 卡住的仍然只有客户端这条 `send` 引用。
