@@ -2,6 +2,8 @@
 
 一个 Node 进程，一个窗口。agent、会话文件、以及供应商密钥都活在进程里；窗口只是它所服务的 REST API 的一个客户端。
 
+> **状态预告（2026-10-13）**：传输已决定改为一条常驻的 WebSocket mux（[ADR-0001](adr/0001-transport-websocket-mux.md)）；命令面留在 REST，abort 不帧化、不引入 ack/requestId，mux 上行 `cancel` 帧只用于取消订阅（边界见 `.scratch/mux-landing/issues/01-wire-boundary.md`）。本文写的仍是**现行 SSE 实况**，随落地票 `09-docs-rewrite` 一起改写。
+
 ```
 窗口 (packages/web)  --REST 命令-->  server (packages/server)  -->  core (packages/core)  -->  @my-agent/ai  -->  供应商
                      <--一条 SSE 流--  每个 id 一个 Agent        @my-agent/agent 循环、工具、hook
@@ -194,14 +196,15 @@ type AgentSessionEvent =
 
 `Agent` 自己不保留 transcript。`SessionManager`（`core/src/session/session-manager.ts`）保留，而且它是会话 config 里的**一个对象**，不是会话记得去写的一个文件：会话通过 `session.sessionManager` 追加，并从它那里读回每一次请求，所以"发给供应商的"、"恢复的进程看到的"、"磁盘上的"是同一件东西，而不是三件需要保持同步的东西。
 
-在磁盘上，一个会话是一个 JSONL 文件，位于 `<agent home>/sessions/--<把分隔符换成短横的 cwd>--/<ISO 时间戳>_<id>.jsonl`。每个工作区一个目录，以**绝对路径**命名而不是哈希，所以一个文件不必打开就能追溯到它的项目。文件以一条 header 开头——`{type, version, id, timestamp, cwd, parentSession}`，`version` 为 `CURRENT_SESSION_VERSION = 3`——它之后的每一行是一条 **entry**，携带 `id`、`parentId`、`timestamp` 和一种 kind。父链接是让这个文件成为一棵树的东西；`leafId` 是对话当前所在之处，而移动它就是窗口在这棵树上行走的方式——见*会话树*。存在七种 kind：
+在磁盘上，一个会话是一个 JSONL 文件，位于 `<agent home>/sessions/--<把分隔符换成短横的 cwd>--/<ISO 时间戳>_<id>.jsonl`。每个工作区一个目录，以**绝对路径**命名而不是哈希，所以一个文件不必打开就能追溯到它的项目。文件以一条 header 开头——`{type, version, id, timestamp, cwd, parentSession}`，`version` 为 `CURRENT_SESSION_VERSION = 3`——它之后的每一行是一条 **entry**，携带 `id`、`parentId`、`timestamp` 和一种 kind。父链接是让这个文件成为一棵树的东西；`leafId` 是对话当前所在之处，而移动它就是窗口在这棵树上行走的方式——见*会话树*。存在八种 kind：
 
 - `message`，持有循环产生的或用户发出的 `AgentMessage`；
 - `thinking_level_change` 和 `model_change`，会话自己的配置历史——记录为 **entry** 而不是一条元数据记录，所以 transcript 本身就能回答"这个会话当时在哪个模型上"。两者都由 `recordSelection` 写在 `prepareRequest` 的开头，也就是说：**在带着它们发出请求时**。用户指向过、却从未用它发过的模型什么也没回答，所以它不在文件里。`model_change` 用那一行**唯一的名字**来命名它；而由于文件从不被重写，读取方取这个字段，并回落到旧构建写在它位置上的 `provider`。assistant 消息的 wire id 是回到某一行的第二条路，用于没有记录过变更的 transcript；但一条消息除了 wire id 之外不携带任何行身份，所以它只有在用户**没给那一行命名**时才能指出是哪一行——两者都没有的会话，启动时没有模型，并提示去挑一个；
 - `tool_config`，那份配置历史的另一半：活跃工具集合与审批映射，**两者整份**，截至那次变更（见下）；
 - `compaction`，一个检查点（见下）；
 - `prune`，它命名那些其文本被从视图中清掉的工作结果（见下）；
-- `argtrim`，它命名那些其记录的 tool-call 参数被缩短的 assistant 消息（见下）。
+- `argtrim`，它命名那些其记录的 tool-call 参数被缩短的 assistant 消息（见下）；
+- `leaf`，对话**去了哪里**的记录——`branch()` / `resetLeaf()` 在位置真的移动时写出的一条状态 entry，`buildIndex()` 重放它，让一次移动活过回收与进程退出（见*会话树*）。
 
 别的任何东西都整份保留并原样交回：**这个构建不认识的 kind 必须能活过一次读取**，因为是更新的构建写了它，而文件从不被重写。唯一的例外是**完全读不了**的文件，`loadEntriesFromFile` 会拒绝它而不是修复它。读取是逐行独立解析的，所以一行读不了不会让会话的其余部分也读不了。
 
@@ -270,7 +273,7 @@ entry 自格式变更起就携带 `id` / `parentId`，所以一个会话的文�
 
 `SessionManager.branch(entryId)` 把 leaf 移到更早的一条 entry，于是下一次追加成为它的子节点，而原来在那里的 entry 就不再处于活跃链上。什么都不被重写、删除或复制。`Agent.branchTo(entryId, descend)` 是窗口移动的**唯一**方式：当它选择对话**已经有的**另一条走法时，它落在 `entryId` 最新的 tip 上——这正是切换分支的含义；当它回退去写一条新的时，它落在这条 entry 本身。它在一次运行正在飞时拒绝执行，因为循环会往 leaf 上追加：在它下面做一次移动，会把那一轮剩下的部分归到该轮并未在回答的一条分支下。
 
-让这棵树可导航的是 `getBranchPoints()`：一条对话从它**以多于一种方式继续过**的消息，每种继续方式一个选项。一个子节点只在**有一条消息能通过它抵达**时才算数。`model_change`、`tool_config`、`prune`、`compaction` entry 是状态，而不是对话可以被恢复到的位置，所以一条位于消息之前的状态 entry 会被**穿过去**，而不是被当作一个空选项提供出来——回退、切换模型、再问一次是**一条**继续，不是两条。每个选项用它下方最早的那条消息（连同它的 role）来打标签，这正是让窗口能说出"它**没有**展示的那个选项通向哪里"的东西。
+让这棵树可导航的是 `getBranchPoints()`：一条对话从它**以多于一种方式继续过**的消息，每种继续方式一个选项。一个子节点只在**有一条消息能通过它抵达**时才算数。`model_change`、`tool_config`、`prune`、`compaction`、`leaf` entry 是状态，而不是对话可以被恢复到的位置，所以一条位于消息之前的状态 entry 会被**穿过去**，而不是被当作一个空选项提供出来——回退、切换模型、再问一次是**一条**继续，不是两条。每个选项用它下方最早的那条消息（连同它的 role）来打标签，这正是让窗口能说出"它**没有**展示的那个选项通向哪里"的东西。
 
 **工具选择也属于分支。** 哪些工具是激活的、哪些要请求审批，是关于 leaf 在哪里的**事实**，与对话本身一样，所以 `branchTo` 在移动后重放目标分支的 `tool_config` entry——`applyRecordedToolConfig` 是唯一的读取方，从那里和从 `openAgent` 被调用。一条什么都没记录的分支不动注册表的活跃集合（设置文件关于"哪些工具是激活的"什么都没说，所以没有默认集合可恢复），并把审批映射放回设置上。没有这次重放，一个会话会用两种说法回答：活会话保持它离开的那条分支的选择，而重新打开同一个文件却恢复目标分支的。
 
@@ -278,7 +281,9 @@ entry 自格式变更起就携带 `id` / `parentId`，所以一个会话的文�
 
 在 HTTP 上，一次移动是 `POST /api/sessions/{id}/branch`，带 `{ entryId, descend? }`，用会话的新状态作答。一棵变了的树不只是发问客户端的私事，所以 `Agent` 发出 `branch_changed`，而每条流用一帧新的 `session` 来回应它。有两样东西发出它，而它们是同一件事从两侧看：一个移动了的 leaf（一个窗口选了另一条走法——否则显示旧链的第二个标签页会把它的下一条 prompt 发往一条它并未在展示的分支），以及在一条**已有继续**的消息**之后**追加（回退再问一次就是这样把那条消息变成一个分支点的）。没有第二种情况，窗口会一直留着它从旧快照读到的分支点，而它刚写下的那条走法的切换器要等到重载才出现。
 
-leaf 本身活在内存里：文件记录**写了什么**，从不记录窗口**当时在看哪里**。窗口在它的流持有该会话的 claim 期间保住自己的位置——包括穿过流宽限期内的那次重连——而一个关闭的会话会忘掉它，所以下一个读取方从文件的最后一条 entry 恢复。因此重新打开一段对话，可能落在**最后被写下的**那条分支上，而不是当时正在读的那条，一次点击就能把它放回去。让 leaf 持久化意味着在视图变化时写入，而这是这种格式**唯一**不做的事；另一条路无论如何都原封未动。
+leaf 自己也在文件里。一次**真的移动了位置**的移动——`branch()` / `resetLeaf()`，也就是 `Agent.branchTo` 落到存储层的那个动作——写出一条 `leaf` 状态 entry：`leafId` 字段记对话**去了哪里**（一个 entry id，或 null 意为"第一条 entry 之前"），而 entry 自己以移动前那个 leaf 为父节点追加、且这次追加**不推进** leafId——树的位置记"这次追加发生在哪"，`leafId` 字段记"对话去了哪"，两个事实各占一个字段。移动到当前所在之处不写（`recordSelection` 同款守卫），所以连续的空移动不增长文件；普通的追加推着 leaf 走，不需要记录——文件最后一条 entry 就是位置。`buildIndex()` 按文件序重放：`leaf` entry 把 leafId 设成它记录的位置，其余每种 entry 把 leafId 设成自己——后写的是最后的话，一条旧记录像一条旧的 `model_change` 一样自然过期；记录的目标不在文件里时（只有手改的文件能造出来）回落到 entry 自己的树位置。`CURRENT_SESSION_VERSION` 保持 3——它钉的是线格式的代，kind 集合本来就是开放的。
+
+老文件**不补写**：读路径不得为补一条记录而开始写（"Reading a transcript must not be an event in it"），第一条 `leaf` entry 由升级后的第一次移动写出；在那之前，老文件按最后一条 entry 读，行为与从前逐字节相同。而这份记录让一次移动第一次活过了回收与进程退出：一个关闭的会话不再忘掉它，下一个读取方——冷读的快照、重开的进程——从文件记录的位置恢复，而不是从最后被写下的那条分支。
 
 ### 派生子会话（fork）
 
@@ -426,14 +431,4 @@ type ServerMessage =
 插件、扩展、MCP、skills、图像输入、多用户访问、部署、桌面打包。每一样都会在循环配得上之前先给循环加一个概念。
 
 **第一次真实的模型往返也仍未验证**，因为这台机器上没有配置供应商密钥：token 流式、一次重试退避、压缩的摘要调用，都从未被真实供应商回答过。它们周围的一切由 `scripts/fake-transport.ts` 覆盖；见 `README.md` 里的 *Verifying a build*。
-
-## 未决：会话无持有者时发生的分支移动
-
-`Agent.branchTo()` 移动的是 leaf，而 leaf 在内存里。leaf 不是一条 entry，所以存储层不记录它，重新加载会从文件的最后一条 entry 恢复。
-
-因为一条流现在只在一次运行期间存活（见*会话树*与*谁拥有一个会话*），运行结束就结束它的流，最后一个 claim 随之而去，会话在重连宽限内被回收。**在这段窗口期内做出的分支移动会被静默丢弃**，下一个 prompt 会从文件末尾继续，而不是从被选中的那个分支点。`scripts/smoke-api.ts` 的绕法是：为移动之后的那次运行 attach 一条流——这正是窗口的实际行为，也让移动得以生效——所以 smoke 是绿的，并且诚实地反映了客户端**必须**使用的顺序。
-
-**服务端是否应该负责这件事，是一个未决的决定，不是一次修复**：要么让 leaf 变成持久的，要么让分支移动自己拿一个寿命长于回收期的 claim。
-
-`docs/notes.md` 把这件事与已删除的 handoff 文档所持有的其余记录放在一起——那些与用户共同作出、不得重开的决定，那些针对代码验证过的陷阱，以及 `packages/core/src/agent.ts` 是忠实重建而非原文这件事。
 

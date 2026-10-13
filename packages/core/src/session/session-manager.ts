@@ -163,6 +163,21 @@ export interface ToolConfigEntry extends SessionEntryBase {
 	approval: Record<ToolApprovalKey, boolean>;
 }
 
+/**
+ * A record of where the conversation moved: the position {@link SessionManager.branch} or
+ * {@link SessionManager.resetLeaf} left the leaf at, written when the position actually moved.
+ *
+ * Appends push the leaf along and need no record — the file's last entry is the position — so this
+ * entry is the one exception, and it is what lets a move outlive the process that made it. Like
+ * every state entry it is not transcript: it reaches no message, and a fresh reader replays it to
+ * put the leaf back where the conversation went.
+ */
+export interface LeafEntry extends SessionEntryBase {
+	type: "leaf";
+	/** The position the conversation moved to: an entry id, or null for "before the first entry". */
+	leafId: string | null;
+}
+
 export type SessionEntry =
 	| SessionMessageEntry
 	| ThinkingLevelChangeEntry
@@ -170,7 +185,8 @@ export type SessionEntry =
 	| CompactionEntry
 	| PruneEntry
 	| ArgTrimEntry
-	| ToolConfigEntry;
+	| ToolConfigEntry
+	| LeafEntry;
 
 /** One line of the file, header included. */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -876,10 +892,10 @@ function previewOfMessage(message: AgentMessage): { label: string; role: string 
  *
  * Every entry carries an id and its parent's id, so the file reads as a tree and `leafId` is where the
  * conversation currently is. Appending creates a child of the leaf; {@link branch} moves the leaf to
- * an earlier entry, so a new line of work continues from there without touching what was already
- * written. Files are never rewritten — the one exception is a file this build has to repair to be
- * readable at all — which is what lets an entry kind or a field this build does not understand be
- * carried through untouched.
+ * an earlier entry — and records the move as a {@link LeafEntry}, so a fresh reader restores it — so a
+ * new line of work continues from there without touching what was already written. Files are never
+ * rewritten — the one exception is a file this build has to repair to be readable at all — which is
+ * what lets an entry kind or a field this build does not understand be carried through untouched.
  *
  * Use {@link buildSessionContext} to get the messages a provider should be sent: it follows the branch
  * from root to leaf and folds in the newest compaction.
@@ -991,7 +1007,18 @@ export class SessionManager {
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session") continue;
 			this.byId.set(entry.id, entry);
-			this.leafId = entry.id;
+			if (entry.type === "leaf") {
+				// The record names where the conversation went; every other kind *is* where it went, by
+				// having been appended. File order is the last word, so a later entry of any kind
+				// supersedes what an earlier record said, the way an old `model_change` expires. A
+				// recorded null is a position of its own — "before the first entry" — and only a target
+				// the file does not hold (only a hand-edited file can manage that) falls back to the
+				// record's own tree position, the same family of answer `buildSessionPath` gives an
+				// unknown id.
+				this.leafId = entry.leafId === null || this.byId.has(entry.leafId) ? entry.leafId : (entry.parentId ?? null);
+			} else {
+				this.leafId = entry.id;
+			}
 		}
 	}
 
@@ -1226,10 +1253,10 @@ export class SessionManager {
 	 * The branch points of the active chain, in chain order.
 	 *
 	 * A child counts as an alternative only when a message is reachable through it: this format carries
-	 * state entries too — a model change, a prune, a compaction — and a conversation cannot be resumed
-	 * at one of those, so counting them would offer an empty alternative. A state entry in front of a
-	 * message is descended through for the same reason: rewinding, switching the model, and asking
-	 * again is one alternative, not two.
+	 * state entries too — a model change, a tool config, a prune, a compaction, a leaf record — and a
+	 * conversation cannot be resumed at one of those, so counting them would offer an empty
+	 * alternative. A state entry in front of a message is descended through for the same reason:
+	 * rewinding, switching the model, and asking again is one alternative, not two.
 	 */
 	getBranchPoints(): BranchPoint[] {
 		const chain = this.getBranch();
@@ -1442,15 +1469,46 @@ export class SessionManager {
 	 *
 	 * Nothing is modified or deleted: the entries after the old leaf are still in the file, still
 	 * reachable by id, and are simply no longer on the active branch.
+	 *
+	 * A move that actually changes the position is recorded as one {@link LeafEntry}, which is what
+	 * lets a process that reopens the file put the leaf back where the conversation went. The record
+	 * is appended as a child of the leaf it leaves behind and does not advance it — the tree position
+	 * says where the append happened, the `leafId` field says where the conversation went. Moving to
+	 * the position already held writes nothing, the same guard `recordSelection` applies to its own
+	 * entries: a run of no-op moves costs no file.
 	 */
 	branch(branchFromId: string): void {
 		if (!this.byId.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
+		if (this.leafId === branchFromId) return;
+		this.appendLeafRecord(branchFromId);
 		this.leafId = branchFromId;
 	}
 
 	/** Move the leaf before the first entry, so the next append becomes a new root. */
 	resetLeaf(): void {
+		if (this.leafId === null) return;
+		this.appendLeafRecord(null);
 		this.leafId = null;
+	}
+
+	/**
+	 * Write one leaf record as a child of the leaf it leaves behind, without moving the leaf.
+	 *
+	 * The caller sets {@link leafId} right after: an append advances the leaf, and this one must not —
+	 * the record's place in the tree and the position it reports are two facts, each with its own
+	 * field.
+	 */
+	private appendLeafRecord(leafId: string | null): void {
+		const entry: LeafEntry = {
+			type: "leaf",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			leafId,
+		};
+		this.fileEntries.push(entry);
+		this.byId.set(entry.id, entry);
+		this.persistEntry(entry);
 	}
 
 	// =========================================================================

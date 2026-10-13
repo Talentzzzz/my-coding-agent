@@ -33,6 +33,7 @@ Status: charting
 
 - [abort 与 ack 的边界（用户 2026-10-13 拍板）](issues/01-wire-boundary.md)：abort 留 REST、不引入 ack/requestId、`cancel`=取消订阅 / `abort`=中止运行。本票在用户当面拍板时即时解决，作为其余票的命名与边界前提。
 - [WS 服务端手写 RFC6455，不引入 `ws` 依赖（用户 2026-10-13 拍板）](issues/02-transport-deps.md)：两条路线要自己接的层相同，差别只在编解码/握手；`ws` 的写侧语义与票 11 打架、prototype 的手写服务器已被整轮实测消化、仓库运行时第三方依赖保持为零。票 04 与票 08 由此解阻。
+- [leaf 可持久化落地（2026-10-13）](issues/06-leaf-durability.md)：leaf 落盘为一条状态 entry（kind `leaf`），由 `branch()` / `resetLeaf()` 在位置真的移动时写出，`buildIndex()` 重放；老文件不补写，`CURRENT_SESSION_VERSION` 保持 3。唯一的生产代码文件是 `session-manager.ts`；设计全在旧图票 18 的 Answer。票 09 的"未落盘 leaf 不回收"守卫随决定 8 划掉、永不落地——旧图票 09 那条指针里"（后面那条守卫不是第二个输入：它不计数、也不因订阅触发）"的括号已在旧图 map.md 随之交代。
 
 ## Not yet specified
 

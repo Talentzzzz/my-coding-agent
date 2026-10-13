@@ -1657,6 +1657,7 @@ try {
 	await exerciseFileDiffReport();
 	await exerciseBranching();
 	await exerciseBranchToolConfig();
+	await exerciseLeafDurability();
 
 /**
  * The diff a file-changing tool reports reaches the event stream.
@@ -2097,6 +2098,81 @@ async function exerciseBranchToolConfig(): Promise<void> {
 		JSON.stringify(fallback.settingsManager.getApprovals()),
 	);
 	await fallback.close();
+}
+
+/**
+ * A branch move outlives the session that made it.
+ *
+ * A move that actually changes the position writes one `leaf` entry, and `buildIndex` replays it on
+ * load, so close → reopen restores where the conversation went rather than the file's last entry.
+ * Also checked on the way: a move to the position already held writes nothing, the record reaches no
+ * message, and `resetLeaf`'s "before the first entry" survives a reopen too. A file with no such
+ * record — every file written before this build, or written by hand — reads exactly as it always
+ * did, which is what keeps "no migration" true.
+ */
+async function exerciseLeafDurability(): Promise<void> {
+	process.stdout.write("leaf durability\n");
+	const session = await openSession();
+	const sent: SentRequest[] = [];
+	recordRequests(sent, [fakeAssistantMessage("answer one"), fakeAssistantMessage("answer two")]);
+
+	await within("the first turn", 15_000, session.prompt("durable question one"));
+	await within("the second turn", 15_000, session.prompt("durable question two"));
+	const firstId = entryIdsFor(session, "durable question one")[0] ?? "";
+
+	// --- A real move writes one record; a no-op move writes none ---------------------------------
+	const entriesBefore = entriesOf(session).length;
+	session.branchTo(firstId, false);
+	check("a real move writes exactly one entry", entriesOf(session).length === entriesBefore + 1, String(entriesOf(session).length - entriesBefore));
+	check("and that entry is a leaf record", entriesOf(session).at(-1)?.type === "leaf", String(entriesOf(session).at(-1)?.type));
+	session.branchTo(firstId, false);
+	check("moving to the position already held writes nothing", entriesOf(session).length === entriesBefore + 1, String(entriesOf(session).length - entriesBefore));
+
+	const file = session.sessionManager.getSessionFile() ?? "";
+	await session.close();
+
+	// --- The move is where the file says it is, not where the file ends --------------------------
+	const reopened = SessionManager.open(file);
+	check("the move survived close", reopened.getLeafId() === firstId, `${reopened.getLeafId()} vs ${firstId}`);
+	check(
+		"and the reopened context is the branch through it, the record reaching no message",
+		JSON.stringify(reopened.buildSessionContext().messages.map(textOf)) === JSON.stringify(["durable question one"]),
+		JSON.stringify(reopened.buildSessionContext().messages.map(textOf)),
+	);
+
+	// The next append is a child of the recorded position, which is what turns it into a branch point.
+	reopened.appendMessage({ role: "user", content: [{ type: "text", text: "carried on" }] } as AgentMessage);
+	const points = reopened.getBranchPoints();
+	check(
+		"the next append continued from the moved leaf",
+		points.length === 1 && points[0]?.entryId === firstId && points[0]?.options.length === 2,
+		JSON.stringify(points),
+	);
+
+	// --- "Before the first entry" is a position like any other ----------------------------------
+	reopened.resetLeaf();
+	check("resetLeaf moved the leaf before the first entry", reopened.getLeafId() === null, String(reopened.getLeafId()));
+	const rereopened = SessionManager.open(file);
+	check("and that position survived the reopen too", rereopened.getLeafId() === null, String(rereopened.getLeafId()));
+
+	// --- A file with no leaf record reads as it always did: the last entry is the position -------
+	// Handwritten, because no build that writes this format would ever produce one — the format never
+	// rewrites a line, so old files keep the shape their writer gave them.
+	const fixture = join(root, "fixture-no-leaf.jsonl");
+	const lines = [
+		{ type: "session", version: 3, id: "fixture-no-leaf", timestamp: new Date().toISOString(), cwd: root },
+		{ type: "message", id: "fx-u1", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: [{ type: "text", text: "fixture one" }] } },
+		{ type: "message", id: "fx-a1", parentId: "fx-u1", timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "text", text: "fixture answer" }] } },
+		{ type: "message", id: "fx-u2", parentId: "fx-u1", timestamp: new Date().toISOString(), message: { role: "user", content: [{ type: "text", text: "fixture two" }] } },
+	];
+	await writeFile(fixture, lines.map((line) => `${JSON.stringify(line)}\n`).join(""));
+	const legacy = SessionManager.open(fixture);
+	check("a file without a leaf record reads its last entry", legacy.getLeafId() === "fx-u2", String(legacy.getLeafId()));
+	check(
+		"and its tree is read whole, the second child a branch option",
+		legacy.getBranchPoints().length === 1 && legacy.getBranchPoints()[0]?.options.length === 2,
+		JSON.stringify(legacy.getBranchPoints()),
+	);
 }
 
 	await exerciseSubagent();

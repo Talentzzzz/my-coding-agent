@@ -1408,6 +1408,9 @@ export class Agent {
 		// rather than a continuation of its tip — which is what rewinding and asking again is. The tree
 		// gained a branch point there, so the windows are told where the leaf is, exactly as a move does:
 		// their branch points came from a snapshot and this append changed them.
+		// The count is the raw child count, so a `leaf` entry — the record a branch move writes — counts
+		// too, the same way a `model_change` written in front of a message already does. The cost is one
+		// extra full-snapshot frame that shows no extra branch point, which is harmless.
 		const parent = this.sessionManager.getLeafId();
 		const continued = parent !== null && this.sessionManager.getChildren(parent).length > 0;
 

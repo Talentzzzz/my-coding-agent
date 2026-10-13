@@ -370,7 +370,16 @@ function exerciseBranchPoints(): void {
 		JSON.stringify(points[0]?.options),
 	);
 	check("a branch resumes at its newest tip", manager.getBranchTip(modelEntryId) === secondId, `${manager.getBranchTip(modelEntryId)} vs ${secondId}`);
-	check("which for the other alternative is where that one stopped", manager.getBranchTip(points[0]?.options[0]?.entryId ?? "") === answerId);
+	// The move this exercise made is a real move, so it wrote its record as a child of the answer, and
+	// the subtree's newest tip is that record. Landing on it is landing on the answer's branch — the
+	// next append continues under it, and the replay takes the file's last word.
+	const otherTip = manager.getBranchTip(points[0]?.options[0]?.entryId ?? "");
+	const otherEntry = manager.getEntry(otherTip);
+	check(
+		"which for the other alternative ends at the record its move wrote",
+		otherEntry?.type === "leaf" && otherEntry.parentId === answerId,
+		`${otherTip} vs ${answerId}`,
+	);
 	check(
 		"an entry the session does not have is refused",
 		(() => {

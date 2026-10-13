@@ -1,5 +1,6 @@
-// Ad-hoc transport check: read a session snapshot over server-sent events, accept a prompt over
-// HTTP, feed the stream back, stop a run with an abort request, and start a replacement session.
+// Ad-hoc transport check: read a session snapshot off the mux, accept a prompt over HTTP, feed the
+// run back, stop it with an abort request, and start a replacement session — then prove a branch
+// move survives the reap with nothing attached at all.
 //
 //   node scripts/smoke-api.ts
 //
@@ -36,6 +37,8 @@ function pass(message: string): void {
 	process.stdout.write(`${message}\n`);
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function request(method: string, path: string, body?: unknown): Promise<{ status: number; payload: unknown }> {
 	const headers: Record<string, string> = { accept: "application/json" };
 	if (body !== undefined) headers["content-type"] = "application/json";
@@ -48,45 +51,55 @@ async function request(method: string, path: string, body?: unknown): Promise<{ 
 	return { status: response.status, payload: text.length === 0 ? undefined : (JSON.parse(text) as unknown) };
 }
 
-/** Turn a byte stream into whole SSE frames: one JSON document per `data:` line, blocks split on a blank line. */
-async function readStream(body: ReadableStream<Uint8Array>): Promise<void> {
-	const decoder = new TextDecoder();
-	const reader = body.getReader();
-	let buffer = "";
+// --- The mux ------------------------------------------------------------------------------------
 
-	for (;;) {
-		const { value, done } = await reader.read();
-		if (done) return;
-		buffer += decoder.decode(value, { stream: true });
-
-		let boundary = buffer.indexOf("\n\n");
-		while (boundary >= 0) {
-			const block = buffer.slice(0, boundary);
-			buffer = buffer.slice(boundary + 2);
-			// A `:` line is the keep-alive comment; anything else is not a payload.
-			const line = block.split("\n").find((candidate) => candidate.startsWith("data:"));
-			if (line !== undefined) {
-				const settled = await handleFrame(JSON.parse(line.slice(5).trim()) as { type: string; [key: string]: unknown });
-				if (settled) {
-					await reader.cancel();
-					return;
-				}
-			}
-			boundary = buffer.indexOf("\n\n");
-		}
-	}
+/**
+ * One envelope off the mux: a logical stream's frame, or a connection-level payload at `streamId: null`.
+ *
+ * The connection-level frames — heartbeat, session rows — belong to no session this script reads, so
+ * the sequential reader below skips them rather than asserting anything about their order: a heartbeat
+ * may arrive before the first baseline, and a row may arrive at any time.
+ */
+interface Envelope {
+	streamId: string | null;
+	item?: { type: string; [key: string]: unknown };
+	end?: true;
+	error?: { message: string };
 }
 
-/** Open an event stream for one session and read it. */
-async function watch(watching: string): Promise<void> {
-	sessionId = watching;
-	const events = await fetch(`${base}/api/sessions/${encodeURIComponent(watching)}/events`, {
-		headers: { accept: "text/event-stream" },
-	});
-	if (events.status !== 200) throw new Error(`event stream answered ${events.status}`);
-	pass(`stream ${events.status} ${events.headers.get("content-type")}`);
-	if (!events.body) throw new Error("the event stream had no body");
-	await readStream(events.body);
+const frames: Envelope[] = [];
+const ws = new WebSocket(`${base.replace(/^http/, "ws")}/mux`);
+const channelOpen = new Promise<void>((resolve, reject) => {
+	ws.addEventListener("open", () => resolve());
+	ws.addEventListener("error", () => reject(new Error("the mux connection failed")));
+});
+ws.addEventListener("message", (event) => {
+	frames.push(JSON.parse(String(event.data)) as Envelope);
+});
+
+/** Send one uplink frame. Commands stay on REST; the only two actions here are subscribe and cancel. */
+function send(frame: { type: string; [key: string]: unknown }): void {
+	ws.send(JSON.stringify(frame));
+}
+
+/** Frames already consumed by the sequential reader below. */
+let cursor = 0;
+
+/**
+ * The next frame on one session's stream, in arrival order.
+ *
+ * One cursor rather than one per watcher, because this script watches one session at a time: a watch
+ * consumes until it returns, and the next watch picks up where it left off.
+ */
+async function nextEnvelope(id: string, deadline: number): Promise<Envelope | undefined> {
+	for (;;) {
+		while (cursor < frames.length) {
+			const frame = frames[cursor++]!;
+			if (frame.streamId === id) return frame;
+		}
+		if (Date.now() > deadline) return undefined;
+		await sleep(25);
+	}
 }
 
 /**
@@ -103,7 +116,7 @@ async function settleRun(id: string, ms = 30_000): Promise<boolean> {
 		const session = (read.payload as { session?: { submitting?: boolean } }).session;
 		if (session?.submitting === false) return true;
 		if (Date.now() > deadline) return false;
-		await new Promise((resolve) => setTimeout(resolve, 100));
+		await sleep(100);
 	}
 }
 
@@ -115,65 +128,10 @@ interface TreeSession {
 	branchPoints: { entryId: string; options: { entryId: string; label: string; role: string; active: boolean }[] }[];
 }
 
-/**
- * Collect a stream's frames in the background.
- *
- * `readStream` above is the blocking half of this: it drives a session and returns when the run is over.
- * A check that has to *hold* a session open while it sends requests needs the same frames without
- * blocking, which is what this is — one claim, kept for as long as the check needs it, exactly the way a
- * window's own stream keeps one.
- */
-function collectFrames(body: ReadableStream<Uint8Array>): {
-	frames: { type: string; [key: string]: unknown }[];
-	stop: () => Promise<void>;
-} {
-	const frames: { type: string; [key: string]: unknown }[] = [];
-	const reader = body.getReader();
-	const decoder = new TextDecoder();
-	let buffer = "";
-
-	void (async () => {
-		try {
-			for (;;) {
-				const { value, done } = await reader.read();
-				if (done) return;
-				buffer += decoder.decode(value, { stream: true });
-				let boundary = buffer.indexOf("\n\n");
-				while (boundary >= 0) {
-					const block = buffer.slice(0, boundary);
-					buffer = buffer.slice(boundary + 2);
-					const line = block.split("\n").find((candidate) => candidate.startsWith("data:"));
-					if (line !== undefined) frames.push(JSON.parse(line.slice(5).trim()) as { type: string });
-					boundary = buffer.indexOf("\n\n");
-				}
-			}
-		} catch {
-			// A cancelled reader is one of the ways this loop ends.
-		}
-	})();
-
-	return { frames, stop: () => reader.cancel().then(() => undefined) };
-}
-
-/** Wait for a collected frame to match. Waiting on the stream beats sleeping and hoping. */
-async function awaitFrame(
-	frames: readonly { type: string; [key: string]: unknown }[],
-	match: (frame: { type: string; [key: string]: unknown }) => boolean,
-	ms = 10_000,
-): Promise<{ type: string; [key: string]: unknown } | undefined> {
-	const deadline = Date.now() + ms;
-	for (;;) {
-		const found = frames.find(match);
-		if (found !== undefined) return found;
-		if (Date.now() > deadline) return undefined;
-		await new Promise((resolve) => setTimeout(resolve, 25));
-	}
-}
-
-/** Returns true once the stream should be abandoned. */
-async function handleFrame(message: { type: string; [key: string]: unknown }): Promise<boolean> {
-	if (message.type === "session") {
-		const session = message.session as {
+/** Handle one payload from the watched session's stream. Returns true once the watch should end. */
+async function handleItem(id: string, item: { type: string; [key: string]: unknown }): Promise<boolean> {
+	if (item.type === "baseline") {
+		const session = item.session as {
 			id: string;
 			cwd: string;
 			model: string;
@@ -182,15 +140,15 @@ async function handleFrame(message: { type: string; [key: string]: unknown }): P
 			messages: unknown[];
 		};
 		pass(
-			`\nsession ${session.id}\n  cwd=${session.cwd}\n  model=${session.model}\n  thinking=${session.thinkingLevels.join(",")}\n  approvals=${JSON.stringify(session.approvals)}\n  messages=${session.messages.length}`,
+			`\nbaseline ${session.id}\n  cwd=${session.cwd}\n  model=${session.model}\n  thinking=${session.thinkingLevels.join(",")}\n  approvals=${JSON.stringify(session.approvals)}\n  messages=${session.messages.length}`,
 		);
 
-		// The second stream is the point of it: the server named a session, and this script attached to
-		// it over HTTP exactly as a tab would. Nothing left to wait for.
+		// The second stream is the point of it: the server named a session, and this script attached
+		// to it over the mux exactly as a tab would. Nothing left to wait for.
 		if (replacementId !== undefined && session.id === replacementId) return true;
 
 		// A prompt is accepted, never awaited: this is the whole reason the transport is HTTP plus a
-		// stream rather than one long request.
+		// resident channel rather than one long request.
 		const accepted = await request("POST", `/api/sessions/${encodeURIComponent(session.id)}/messages`, {
 			text: "Reply with exactly: transport ok",
 		});
@@ -209,8 +167,8 @@ async function handleFrame(message: { type: string; [key: string]: unknown }): P
 		return false;
 	}
 
-	if (message.type === "tool_approval_request") {
-		const approval = message.request as { toolName: string; toolCallId: string };
+	if (item.type === "approval_request") {
+		const approval = item.request as { toolName: string; toolCallId: string };
 		pass(`approval requested for ${approval.toolName}`);
 		await request("POST", `/api/sessions/${encodeURIComponent(sessionId)}/approvals/${encodeURIComponent(approval.toolCallId)}`, {
 			approved: false,
@@ -218,8 +176,8 @@ async function handleFrame(message: { type: string; [key: string]: unknown }): P
 		return false;
 	}
 
-	if (message.type === "session_event") {
-		const event = message.event as {
+	if (item.type === "event") {
+		const event = item.event as {
 			type: string;
 			assistantMessageEvent?: { type: string; delta?: string };
 			message?: { role?: string; errorMessage?: string; stopReason?: string };
@@ -238,7 +196,7 @@ async function handleFrame(message: { type: string; [key: string]: unknown }): P
 		if (event.type !== "agent_end") return false;
 
 		// The stop path, on the same session, on a request of its own. It must be answered without
-		// touching the stream, which is the whole difference from sending a command over the stream.
+		// touching the stream, which is the whole difference from sending a command over the channel.
 		const stopped = await request("POST", `/api/sessions/${encodeURIComponent(sessionId)}/abort`);
 		if (stopped.status !== 200) fail(`abort answered ${stopped.status}, expected 200`);
 		else pass("abort accepted (200)");
@@ -254,15 +212,45 @@ async function handleFrame(message: { type: string; [key: string]: unknown }): P
 		return true;
 	}
 
-	if (message.type === "error") {
-		fail(`server error: ${String(message.message)}`);
+	if (item.type === "error") {
+		fail(`server error: ${String(item.message)}`);
 		return true;
 	}
 	return false;
 }
 
+/** Open one logical stream for a session and read it until its turn ends. */
+async function watch(watching: string): Promise<void> {
+	sessionId = watching;
+	send({ type: "open", sessionId: watching });
+	const deadline = Date.now() + 120_000;
+	for (;;) {
+		const frame = await nextEnvelope(watching, deadline);
+		if (frame === undefined) {
+			fail(`the stream for ${watching} went quiet`);
+			return;
+		}
+		if (frame.error !== undefined) {
+			fail(`the stream for ${watching} failed: ${frame.error.message}`);
+			return;
+		}
+		if (frame.end === true) {
+			pass(`stream ${watching} ended`);
+			return;
+		}
+		if (frame.item !== undefined && (await handleItem(watching, frame.item))) return;
+	}
+}
+
 async function main(): Promise<void> {
 	pass(`target ${base}`);
+	try {
+		await channelOpen;
+		pass("mux channel open");
+	} catch (error) {
+		fail(String(error));
+		process.exit(1);
+	}
 
 	const health = await request("GET", "/api/health");
 	pass(`health ${health.status} ${JSON.stringify(health.payload)}`);
@@ -302,24 +290,19 @@ async function main(): Promise<void> {
 	if (first.status !== 201) throw new Error(`could not create a session: ${first.status}`);
 	pass(`created ${(first.payload as { sessionId: string }).sessionId}`);
 
-	// A session that does not exist must be a 404 on the stream URL too, not a stream that opens.
+	// A session that does not exist must be a 404 on the read URL, not a snapshot of nothing.
 	const missing = await request("GET", "/api/sessions/does-not-exist");
 	if (missing.status !== 404) fail(`an unknown session answered ${missing.status}, expected 404`);
 
-	// The tree over HTTP, under a stream held the way a window holds one: attached with the prompt whose
-	// run it watches, because that is the shape this phase gives a stream. The claim it takes is what
-	// keeps the leaf alive long enough for the move below to stay in memory.
+	// The tree over HTTP, with nothing attached at any point. A move is recorded by the store the
+	// moment it happens, so it survives the reap that follows the run — no stream has to hold the
+	// session's hand, and the run below doubles as the acceptance edge that says sending does not
+	// depend on attaching first: its frames go nowhere, and it is recorded all the same.
 	const tree = await request("POST", "/api/sessions");
 	const treeId = (tree.payload as { sessionId: string }).sessionId;
 
 	// A prompt is persisted before its run fails, and the failure does record an assistant message, so
 	// the message this branches at is on the chain with one continuation behind it already.
-	const held = await fetch(`${base}/api/sessions/${encodeURIComponent(treeId)}/events`, {
-		headers: { accept: "text/event-stream" },
-	});
-	if (held.status !== 200 || !held.body) throw new Error(`the stream for the tree session answered ${held.status}`);
-	const collected = collectFrames(held.body);
-
 	const asked = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/messages`, { text: "branch at this message" });
 	if (asked.status !== 202) fail(`a prompt on the session to branch answered ${asked.status}, expected 202`);
 	if (!(await settleRun(treeId))) fail("the run never settled, so the branch could not be checked");
@@ -330,15 +313,6 @@ async function main(): Promise<void> {
 	if (entry === undefined) {
 		fail("the session to branch at has no message entry");
 	} else {
-		// The move has to be made inside a claim, because the leaf lives in memory and the run above
-		// ended the stream that was holding one: the window that rewinds and asks again is the window
-		// whose next run takes the claim, and this attaches for that run the way it does.
-		const againHeld = await fetch(`${base}/api/sessions/${encodeURIComponent(treeId)}/events`, {
-			headers: { accept: "text/event-stream" },
-		});
-		if (againHeld.status !== 200 || !againHeld.body) throw new Error(`the second stream answered ${againHeld.status}`);
-		const againFrames = collectFrames(againHeld.body);
-
 		const moved = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/branch`, { entryId: entry, descend: false });
 		const after = (moved.payload as { session?: TreeSession }).session;
 		if (moved.status !== 200) fail(`a branch move answered ${moved.status}, expected 200`);
@@ -349,17 +323,25 @@ async function main(): Promise<void> {
 		else if (after.branchPoints.length > 0) fail(`one chain reported ${after.branchPoints.length} branch point(s)`);
 		else pass("a snapshot reports the branch points it has, none for one chain");
 
-		// The move has to reach the window as a fresh snapshot, which is what stops a second window
-		// showing the old chain.
-		const reported = await awaitFrame(
-			againFrames.frames,
-			(frame) => frame.type === "session" && (frame.session as { leafId?: string | null } | undefined)?.leafId === entry,
-		);
-		if (reported === undefined) fail("no stream frame reported the moved leaf, so a second window would keep showing the old chain");
-		else pass("the move was sent to the stream as a fresh snapshot");
+		// Nothing is attached, so nothing holds the session: the move's own request was the last claim,
+		// and the host closes as soon as it settles — within milliseconds, there being no grace period
+		// left (the one the SSE streams served went with them). This wait is what makes the cold read
+		// below honest: a session still hosted would answer with the same live snapshot and prove
+		// nothing.
+		await sleep(2_000);
 
-		// Asking again from the entry it was rewound to is what turns that entry into a branch point: the
-		// new message is a child of it rather than a continuation of its tip.
+		// The cold read answers from the file, and the leafId it reports is the moved entry — "because
+		// the leaf is persisted" made observable: the move lives in the file, not in some resident
+		// Agent. Were the leaf memory-only, a reaped session would answer with its file's last entry —
+		// the leaf record itself, not the entry it names.
+		const cold = await request("GET", `/api/sessions/${encodeURIComponent(treeId)}`);
+		const coldLeaf = (cold.payload as { session: TreeSession }).session.leafId;
+		if (coldLeaf !== entry) fail(`the cold read reports leafId ${String(coldLeaf)}, expected the moved ${entry}`);
+		else pass("the move survived the reap: a cold read reports the leaf the file recorded");
+
+		// The next prompt is assembled from the file by a brand-new host, and it continues from the
+		// recorded position: the message it writes is a child of the moved entry, which is what turns
+		// that entry into a branch point.
 		const again = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/messages`, { text: "and another way" });
 		if (again.status !== 202) fail(`the second prompt answered ${again.status}, expected 202`);
 		if (!(await settleRun(treeId))) fail("the second run never settled");
@@ -370,19 +352,7 @@ async function main(): Promise<void> {
 		if (points.length !== 1 || point === undefined) fail(`the entry became ${points.length} branch point(s), not one`);
 		else if (point.options.length !== 2) fail(`the branch point has ${point.options.length} options, expected 2`);
 		else if (point.options.filter((option) => option.active).length !== 1) fail("no single option is marked active");
-		else pass(`the rewound entry is a branch point: ${point.options.map((option) => `${option.role}:${option.label}`).join(" | ")}`);
-
-		const announced = await awaitFrame(
-			againFrames.frames,
-			(frame) =>
-				frame.type === "session" &&
-				((frame.session as { branchPoints?: { entryId: string }[] } | undefined)?.branchPoints ?? []).some(
-					(candidate) => candidate.entryId === entry,
-				),
-		);
-		if (announced === undefined) fail("the stream never reported the new branch point, so a window's switcher would wait for a reload");
-		else pass("the append that made a branch point was sent to the stream too");
-		await againFrames.stop();
+		else pass(`the next prompt continued from the moved leaf: ${point.options.map((option) => `${option.role}:${option.label}`).join(" | ")}`);
 
 		const noEntry = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/branch`, {});
 		if (noEntry.status !== 400) fail(`a branch with no entryId answered ${noEntry.status}, expected 400`);
@@ -405,8 +375,6 @@ async function main(): Promise<void> {
 		}
 	}
 
-	await collected.stop();
-
 	await watch((first.payload as { sessionId: string }).sessionId);
 
 	// Reaching here means the first stream was abandoned for the replacement session it asked for.
@@ -417,6 +385,7 @@ async function main(): Promise<void> {
 		await watch(replacementId);
 	}
 
+	ws.close();
 	clearTimeout(timer);
 	pass(`\n${failed ? "FAILED" : "api ok"}`);
 	process.exit(failed ? 1 : 0);
