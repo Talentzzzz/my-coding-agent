@@ -24,6 +24,27 @@ export interface SessionRef {
 }
 
 /**
+ * One sidebar row: the stored identity plus the activity facts only a running process knows.
+ *
+ * The last three fields are what separates this from {@link SessionRef}. `modified` was already
+ * computed by the store for ordering and simply never sent; `running` and `pending` have no stored
+ * form at all, because they are facts about *this* process's loop rather than about the transcript.
+ *
+ * A field earns its place here only when it stays true with nothing subscribed to any content: a row
+ * that freezes the moment nobody is watching is the exact failure this type exists to prevent. Token
+ * counts deliberately do not qualify — they belong to the session's own stream, and lifting them here
+ * would send every pane one column's numbers.
+ */
+export interface SessionRow extends SessionRef {
+	/** Last activity: the newest timestamped user or assistant message, or `createdAt` if none. */
+	modified: number;
+	/** This process is running it right now. */
+	running: boolean;
+	/** Approvals waiting for an answer. */
+	pending: number;
+}
+
+/**
  * The stored sessions of one workspace, for the sidebar's groups.
  *
  * The groups come from the store rather than from the server's own root: one process is bound to one
@@ -31,7 +52,7 @@ export interface SessionRef {
  */
 export interface WorkspaceGroup {
 	cwd: string;
-	sessions: SessionRef[];
+	sessions: SessionRow[];
 }
 
 /**
@@ -277,6 +298,74 @@ export type ServerMessage =
 	 * started, so the name says what it means rather than which case is commoner.
 	 */
 	| { type: "stream_end" };
+
+/**
+ * One logical stream's identity on one connection: the session id itself.
+ *
+ * A session has at most one logical stream per connection, so the id is the whole address — there is
+ * no separate subscription handle to keep in sync with it. `null` is the one reserved seat for
+ * payloads that belong to the connection rather than to any stream.
+ */
+export type StreamId = string;
+
+/**
+ * A failure attributed to one logical stream (or to the connection itself).
+ *
+ * Not a terminal frame: the stream stays open, and what the client does next depends on whether the
+ * stream ever carried a baseline rather than on why it failed.
+ */
+export interface StreamFailure {
+	/** For a person to read — today the one string `announce(sessionId, message)` carries. */
+	message: string;
+}
+
+/**
+ * Payloads that ride the connection-level seat, `streamId: null`.
+ *
+ * They are a separate union rather than more `ServerMessage` members because every one of them names
+ * no session: a heartbeat is about the channel, and a row is about the whole machine. A client routes
+ * by `streamId` first, so everything here lands on the store that belongs to no column.
+ */
+export type ConnectionItem =
+	/** How often the server emits this, so the client can size its own read timeout. */
+	| { type: "heartbeat"; everyMs: number }
+	/** Every row this process knows, once per connection. A replacement, not an append. */
+	| { type: "sessions"; sessions: SessionRow[] }
+	/** One row changed. The whole row, because a row is small and idempotent beats a diff here. */
+	| { type: "session_row"; session: SessionRow };
+
+/**
+ * One logical stream's frame: its content, its end, or a failure attributed to it.
+ *
+ * Three shapes at one level, told apart by field name rather than by a discriminant — `item` carries
+ * its own `type`, so an outer `type` would say the same thing twice and make "outer and inner
+ * disagree" a representable state.
+ */
+export type StreamFrame =
+	| { item: ServerMessage | ConnectionItem }
+	| { end: true }
+	| { error: StreamFailure };
+
+/**
+ * One WebSocket message: an envelope around a stream frame.
+ *
+ * `streamId: null` is what a connection-level payload travels on. The envelope is deliberately
+ * outside {@link ServerMessage} rather than a field inside each of its members: several callers
+ * construct protocol messages with no stream behind them at all (a REST read, a fork), and inlining
+ * the id would force them to invent one.
+ */
+export type ServerFrame = { streamId: StreamId | null } & StreamFrame;
+
+/**
+ * What a client may send. Two actions, no envelope — the frame is the protocol.
+ *
+ * Commands stay on REST. A frame that arrives with an unknown `type` is dropped and logged rather
+ * than closing the connection: the only two actions here cannot be abused into anything, and turning
+ * a stray frame into a dead page costs more than a log line.
+ */
+export type ClientFrame =
+	| { type: "open"; sessionId: string; window?: unknown }
+	| { type: "cancel"; sessionId: string };
 
 export const EMPTY_USAGE: UsageTotals = {
 	input: 0,

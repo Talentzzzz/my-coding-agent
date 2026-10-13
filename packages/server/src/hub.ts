@@ -1,5 +1,7 @@
+import type { ChatTransport } from "@my-agent/ai";
 import {
 	type Agent,
+	type AgentSessionEvent,
 	type ModelSource,
 	openAgent,
 	readSessionSnapshot,
@@ -30,17 +32,50 @@ export interface HubOptions {
 	 * to a question" is a different question with a different answer.
 	 */
 	approvalGraceMs?: number;
+	/**
+	 * The transport every session this hub opens talks to.
+	 *
+	 * Omitted in the real process, where it means Anthropic Messages. A smoke passes a scripted
+	 * transport so a live session's rows can be driven with no provider key — without it the only
+	 * events a session ever publishes are the ones that need no model at all.
+	 */
+	api?: ChatTransport;
 }
 
 /** How long an unanswered approval is given before the last claim's departure is read as abandonment. */
 const DEFAULT_APPROVAL_GRACE_MS = 10 * 60_000;
 
 /**
+ * One session's own two feeds, handed over exactly as the running session has them.
+ *
+ * Raw rather than a finished frame: approval differences are per-subscriber state, so each subscriber
+ * builds its own frames from these. Each subscribe returns the way to stop, which is what lets a
+ * subscriber drop the pair when the host it was attached to goes away.
+ */
+export interface SessionFeeds {
+	/** Every event the session publishes, in order. */
+	onEvent(listener: (event: AgentSessionEvent) => void): () => void;
+	/** The session's state, each time something published a new snapshot of it. */
+	onChange(listener: (snapshot: SessionSnapshot) => void): () => void;
+}
+
+/**
+ * Something watching one session *by id*, told when there is a live session to watch and when there
+ * is not.
+ *
+ * Called with the feeds whenever this process runs the session and with `undefined` when it stops —
+ * including for a session that is only being watched, which gets the second call with nothing having
+ * been attached in the first place. A subscriber told only about sessions it already had open would be
+ * blind to exactly the case that matters: watching an idle one and having it start running when a
+ * message arrives. Binding to the id rather than to an `Agent` is what makes that survivable.
+ */
+export type SessionObserver = (feeds: SessionFeeds | undefined) => void;
+
+/**
  * One conversation this process keeps open, plus how many claims are on it.
  *
- * The count is what makes ownership work: a stream that goes away must not stop a turn another
- * stream — or a request — is watching, and the last claim to go must not leave the session running
- * forever.
+ * The count is what makes ownership work: a request that goes away must not stop a turn another
+ * request is watching, and the last claim to go must not leave the session running forever.
  *
  * The workspace is per session rather than per process. A sidebar that lists every workspace this
  * machine has used can open any of them, and the tools of the session that opens must resolve inside
@@ -51,7 +86,7 @@ export class HostedSession {
 	readonly session: Agent;
 	/** The directory this session's tools may touch. */
 	readonly workspaceRoot: string;
-	/** Callers currently holding this session open: one per event stream, plus requests in flight. */
+	/** Callers currently holding this session open: one per in-flight request or run. */
 	claims = 0;
 	/** Set while the hub is deciding whether an unclaimed session can be closed. */
 	reaping = false;
@@ -62,6 +97,17 @@ export class HostedSession {
 		this.workspaceRoot = workspaceRoot;
 	}
 }
+
+/**
+ * Told when this process gains or loses a session: one created, one forked, one opened, one closed.
+ *
+ * A different question from {@link SessionHub.observe}, and the two are kept apart on purpose. This
+ * one answers "what does this process know about", so it fires with no connection involved at all;
+ * `observe` answers "who is watching this session right now", and is the mirror an abandonment timer
+ * reads. A reader that wanted the first and subscribed to the second would find itself never called
+ * for a session nobody was watching — which is precisely the case it exists to notice.
+ */
+export type HostListener = (sessionId: string, host: HostedSession | undefined) => void;
 
 /**
  * The sessions this process owns, keyed by session id.
@@ -100,6 +146,16 @@ export class SessionHub {
 	private readonly opening = new Map<string, Promise<HostedSession>>();
 	/** Closes in flight, so a new caller cannot open a file that is still being written. */
 	private readonly closing = new Map<string, Promise<void>>();
+	/**
+	 * Who is watching each session, by id — the mirror a host's coming and going is written through.
+	 *
+	 * Never a count and never a reason to keep a session alive: watching a session does not keep it
+	 * running, and running it does not mean anyone is watching. Two things read this table and nothing
+	 * else — routing, and the abandonment timer that wants to know when a session stopped being watched.
+	 */
+	private readonly observers = new Map<string, Set<SessionObserver>>();
+	/** The process-level listeners, told about every session this process gains or loses. */
+	private readonly hostListeners = new Set<HostListener>();
 	private current?: Promise<string>;
 
 	constructor(options: HubOptions) {
@@ -235,6 +291,52 @@ export class SessionHub {
 	}
 
 	/**
+	 * Watch one session's events and state, whether or not this process is running it yet.
+	 *
+	 * Returns the way to stop watching. The observation is keyed by id and re-bound whenever a host
+	 * for that id appears, so "look at an idle session, then send it a message" keeps working: the
+	 * moment the message assembles a host, the same observer is attached to it.
+	 *
+	 * Attaching is not claiming. An observer on an idle session neither keeps it assembled nor costs
+	 * what running it costs — a read leaves no trace, and so does a watch.
+	 */
+	observe(sessionId: string, observer: SessionObserver): () => void {
+		const watching = this.observers.get(sessionId) ?? new Set<SessionObserver>();
+		if (!this.observers.has(sessionId)) this.observers.set(sessionId, watching);
+		watching.add(observer);
+
+		const host = this.hosts.get(sessionId);
+		observer(host === undefined ? undefined : feedsOf(host));
+
+		return () => {
+			watching.delete(observer);
+			if (watching.size === 0) this.observers.delete(sessionId);
+		};
+	}
+
+	/** How many observers a session has right now — what an abandonment timer reads, empty or not. */
+	watchersOf(sessionId: string): number {
+		return this.observers.get(sessionId)?.size ?? 0;
+	}
+
+	/**
+	 * Be told about every session this process gains or loses.
+	 *
+	 * Fires for a session created or forked (with no host, because none is running yet), for one whose
+	 * host opens, and for one whose host closes. Returns the way to stop listening.
+	 *
+	 * The reason this is a separate seam from {@link observe}: a caller that wants "every session I
+	 * know about" must not have to also be a subscriber, or a session nobody watches would never be
+	 * reported at all.
+	 */
+	onHostChange(listener: HostListener): () => void {
+		this.hostListeners.add(listener);
+		return () => {
+			this.hostListeners.delete(listener);
+		};
+	}
+
+	/**
 	 * Start a conversation and make it what an unnamed connection lands on next.
 	 *
 	 * Returns an id rather than a claimed session so that claiming happens in exactly one place:
@@ -243,6 +345,7 @@ export class SessionHub {
 	async newSession(): Promise<string> {
 		const id = SessionManager.create(this.cwd).getSessionId();
 		this.current = Promise.resolve(id);
+		this.announceHost(id, undefined);
 		return id;
 	}
 
@@ -267,6 +370,7 @@ export class SessionHub {
 		const targetCwd = hosted?.workspaceRoot ?? SessionManager.open(sourcePath).getCwd();
 		const id = SessionManager.forkFrom(sourcePath, targetCwd, entryId).getSessionId();
 		this.current = Promise.resolve(id);
+		this.announceHost(id, undefined);
 		return id;
 	}
 
@@ -282,6 +386,10 @@ export class SessionHub {
 		const hosts = [...this.hosts.values()];
 		await Promise.all(hosts.map((host) => host.session.abort()));
 		await Promise.all(hosts.map((host) => host.session.close()));
+		for (const host of hosts) {
+			for (const observer of this.observers.get(host.id) ?? []) observer(undefined);
+			this.announceHost(host.id, undefined);
+		}
 		this.hosts.clear();
 	}
 
@@ -305,7 +413,17 @@ export class SessionHub {
 		const session = await this.sessionOver(manager, workspaceRoot);
 		const host = new HostedSession(session, workspaceRoot);
 		this.hosts.set(id, host);
+		// Observers first, then the listeners: a subscriber told "a host opened" and reaching for the
+		// session must find it already handed over.
+		const feeds = feedsOf(host);
+		for (const observer of this.observers.get(id) ?? []) observer(feeds);
+		this.announceHost(id, host);
 		return host;
+	}
+
+	/** Tell the process-level listeners that a session appeared, started, or went away. */
+	private announceHost(sessionId: string, host: HostedSession | undefined): void {
+		for (const listener of this.hostListeners) listener(sessionId, host);
 	}
 
 	/**
@@ -324,6 +442,7 @@ export class SessionHub {
 			settingsManager: this.settingsFor(workspaceRoot),
 			...(this.options.model === undefined ? {} : { model: this.options.model }),
 			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),
+			...(this.options.api === undefined ? {} : { api: this.options.api }),
 		};
 	}
 
@@ -355,6 +474,10 @@ export class SessionHub {
 			if (host.claims > 0) return;
 
 			if (this.hosts.get(host.id) === host) this.hosts.delete(host.id);
+			// Tell the observers before the listeners: a subscriber dropping its half-finished work needs
+			// the feeds to be gone first, and a listener reacting to the loss is the later of the two.
+			for (const observer of this.observers.get(host.id) ?? []) observer(undefined);
+			this.announceHost(host.id, undefined);
 			const closing = host.session.close();
 			this.closing.set(host.id, closing);
 			try {
@@ -388,6 +511,20 @@ export class SessionHub {
 		}
 		return SessionManager.create(this.cwd).getSessionId();
 	}
+}
+
+/**
+ * A live host's own two feeds, wrapped so a subscriber can hold on to the pair.
+ *
+ * The session is the only thing that publishes events, so this is as deep as the hub reaches —
+ * whatever a subscriber builds from the two feeds is its own business. Binding is the subscriber's to
+ * undo, because both feeds hand back their own way out.
+ */
+function feedsOf(host: HostedSession): SessionFeeds {
+	return {
+		onEvent: (listener) => host.session.onEvent(listener),
+		onChange: (listener) => host.session.onChange(listener),
+	};
 }
 
 /**

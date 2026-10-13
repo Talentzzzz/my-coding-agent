@@ -4,6 +4,7 @@ import { EventController } from "./controllers/events.ts";
 import { SessionController, SystemController } from "./controllers/sessions.ts";
 import { createRoutes } from "./controllers/routes.ts";
 import { Router } from "./http/routing.ts";
+import { createSessionProjection, type SessionProjection } from "./projection.ts";
 import { createStreamRegistry } from "./stream-registry.ts";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -46,6 +47,14 @@ export interface BootedServer {
 	port: number;
 	cwd: string;
 	hub: SessionHub;
+	/**
+	 * What this process knows about every session, as sidebar rows.
+	 *
+	 * Built here rather than inside the hub because it is a *reader* of the hub's two observation
+	 * points, not a part of session lifetime: a caller that wants the rows asks this, and nothing about
+	 * a claim, a reap or a host's closing depends on it having asked.
+	 */
+	projection: SessionProjection;
 	server: HttpServerHandle;
 	/** Close the event streams first, then the sessions, then the listener. */
 	close(): Promise<void>;
@@ -83,6 +92,9 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 	// except for the two things only a stream can report — a run that failed to start, and an approval
 	// answered in one tab that every other tab has to hear about.
 	const streams = createStreamRegistry(hub, { ...(options.idleGraceMs === undefined ? {} : { idleGraceMs: options.idleGraceMs }) });
+	// Built against the hub, not wired into it: the projection observes which sessions exist and what
+	// they are doing, and neither of those is allowed to keep a session alive or hurry its closing.
+	const projection = createSessionProjection(hub);
 	const router = new Router(
 		createRoutes({
 			system: new SystemController(hub),
@@ -108,10 +120,13 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 		port: bound,
 		cwd,
 		hub,
+		projection,
 		server,
 		close: async () => {
 			// Streams first: ending them lets go of the claims, so the hub's own close does not wait for
-			// a response that is never going to end.
+			// a response that is never going to end. The projection is released before either, since it
+			// only listens — nothing it holds can delay what comes after.
+			projection.close();
 			await streams.close();
 			await hub.close();
 			await server.close();

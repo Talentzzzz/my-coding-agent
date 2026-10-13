@@ -21,7 +21,7 @@ import { getCurrentSystemMessage, type SystemMessage, type Usage, uuidv7 } from 
 import { APP_NAME } from "../config.ts";
 import { trimToolCallArgs } from "../context/argtrim.ts";
 import { clearToolResult } from "../context/pruning.ts";
-import type { SessionRef, ToolApprovalKey } from "../protocol.ts";
+import type { SessionRef, SessionRow, ToolApprovalKey } from "../protocol.ts";
 import { createCompactionSummaryMessage } from "./messages.ts";
 import { normalizePath, resolvePath, sessionPath, sessionsDir, workspaceDir } from "./paths.ts";
 
@@ -198,6 +198,15 @@ export interface SessionInfo {
 	created: Date;
 	modified: Date;
 	messageCount: number;
+	/**
+	 * The conversation's name, derived exactly as a live session derives it.
+	 *
+	 * One derivation for a row's title, whether or not this process is running it: the first user
+	 * message with text on the active branch, shortened to 72 characters. It is not the file's first
+	 * user message — that one is `firstMessage`, and the two differ once the leaf has moved, so reading
+	 * a title that changes when a host is reaped would be a visible flicker for no reason.
+	 */
+	title: string;
 	firstMessage: string;
 	allMessagesText: string;
 }
@@ -237,7 +246,7 @@ export interface BranchPoint {
 /** One workspace the sidebar groups under, and the sessions stored for it. */
 export interface WorkspaceSessions {
 	cwd: string;
-	sessions: SessionRef[];
+	sessions: SessionRow[];
 }
 
 function createSessionId(): string {
@@ -652,6 +661,21 @@ async function buildSessionInfo(filePath: string, signal?: AbortSignal, fileStat
 		let firstMessage = "";
 		const allMessages: string[] = [];
 		let lastActivityTime: number | undefined;
+		/**
+		 * The branch, as two tables, read in the loop that was already reading every entry.
+		 *
+		 * A title has to name the branch the session is *on*, not the first message the file happens
+		 * to hold, so the scan needs the same parent links a reader follows. Collecting them here costs
+		 * one `Map` in a pass that already parses each line — as against a second read of the file.
+		 *
+		 * Every entry records its parent, not only the messages: a branch runs through model and tool
+		 * changes on its way back to the root, and a walk that stopped at the first one would never
+		 * reach the messages before it.
+		 */
+		const parentOf = new Map<string, string | null>();
+		const userTextOf = new Map<string, string>();
+		/** The last entry of any kind, which is where a branch read from the file starts. */
+		let leafId: string | undefined;
 
 		const lines = createInterface({
 			input: createReadStream(filePath, { encoding: "utf8", signal }),
@@ -666,6 +690,10 @@ async function buildSessionInfo(filePath: string, signal?: AbortSignal, fileStat
 				header = entry;
 				continue;
 			}
+			leafId = entry.id;
+			// The header has already been consumed above, so this is one of the id-bearing kinds — and
+			// the ones a branch walks through (model and tool changes) are recorded here too.
+			parentOf.set(entry.id, (entry as { parentId?: string | null }).parentId ?? null);
 			if (entry.type !== "message") continue;
 			messageCount++;
 
@@ -680,6 +708,7 @@ async function buildSessionInfo(filePath: string, signal?: AbortSignal, fileStat
 			if (!text) continue;
 			allMessages.push(text);
 			if (!firstMessage && message.role === "user") firstMessage = text;
+			if (message.role === "user" && !userTextOf.has(entry.id)) userTextOf.set(entry.id, text);
 		}
 
 		if (!header) return null;
@@ -700,6 +729,7 @@ async function buildSessionInfo(filePath: string, signal?: AbortSignal, fileStat
 			created: new Date(header.timestamp),
 			modified,
 			messageCount,
+			title: titleOfBranch(parentOf, userTextOf, leafId),
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText: allMessages.join(" "),
 		};
@@ -707,6 +737,36 @@ async function buildSessionInfo(filePath: string, signal?: AbortSignal, fileStat
 		signal?.throwIfAborted();
 		return null;
 	}
+}
+
+/**
+ * The first user message on the branch that ends at `leafId`, shortened — or the placeholder.
+ *
+ * Walked from the leaf back to the root and then reversed, which is the same path
+ * {@link SessionManager.getBranch} reports for a live session, so a scanned row and a running one
+ * name the same conversation. An entry with no recorded parent ends the walk, and so does one the
+ * tables do not hold: a file written by another build can name a parent this scan never saw, and a
+ * shorter title is a better answer than none.
+ */
+function titleOfBranch(
+	parentOf: ReadonlyMap<string, string | null>,
+	userTextOf: ReadonlyMap<string, string>,
+	leafId: string | undefined,
+): string {
+	const walked: string[] = [];
+	let current = leafId;
+	while (current !== undefined && parentOf.has(current)) {
+		walked.push(current);
+		current = parentOf.get(current) ?? undefined;
+	}
+	walked.reverse();
+	for (const id of walked) {
+		const text = userTextOf.get(id);
+		if (text === undefined) continue;
+		const title = shortenTitle(text);
+		if (title.length > 0) return title;
+	}
+	return "New session";
 }
 
 const MAX_CONCURRENT_SESSION_INFO_LOADS = 10;
@@ -1568,12 +1628,38 @@ export class SessionManager {
 			const cwd = header === null ? undefined : getSessionHeaderCwd(header);
 			if (cwd === undefined || cwd === "") continue;
 
-			const sessions = (await SessionManager.list(cwd, dir, signal)).map(toSessionRef);
-			if (sessions.length === 0) continue;
-			groups.push({ cwd, sessions });
-		}
+const sessions = (await SessionManager.list(cwd, dir, signal)).map(toSessionRow);
+		if (sessions.length === 0) continue;
+		groups.push({ cwd, sessions });
+	}
 
-		return groups.sort((a, b) => newestAt(b) - newestAt(a));
+	return groups.sort((a, b) => newestAt(b) - newestAt(a));
+	}
+
+	/**
+	 * The one row a single session file describes, or `undefined` when it is not one.
+	 *
+	 * The listing answers the same question for every session at once, which is the wrong cost when
+	 * exactly one file is what changed — a session just created, or just forked. This reads that one
+	 * file and stops, so a session appearing costs one parse rather than a scan of the machine.
+	 */
+	static async rowFor(filePath: string, signal?: AbortSignal): Promise<SessionRow | undefined> {
+		const info = await buildSessionInfo(filePath, signal);
+		if (info === null) return undefined;
+		// A fork's parent id is only knowable where both ends are listed together, so one file alone
+		// cannot name one. The row is still right about everything else.
+		return toSessionRow(info);
+	}
+
+	/**
+	 * The one row a session id names, from whichever workspace holds it.
+	 *
+	 * The id-addressed half of {@link rowFor}, for a caller holding an id rather than a path.
+	 */
+	static async rowForId(id: string, signal?: AbortSignal): Promise<SessionRow | undefined> {
+		const path = SessionManager.findAnywhere(id);
+		if (path === undefined) return undefined;
+		return SessionManager.rowFor(path, signal);
 	}
 
 	/**
@@ -1610,7 +1696,7 @@ export class SessionManager {
 
 /** The most recent activity in a group, for ordering the sidebar's workspaces. */
 function newestAt(group: WorkspaceSessions): number {
-	return group.sessions.reduce((newest, session) => Math.max(newest, session.createdAt), 0);
+	return group.sessions.reduce((newest, session) => Math.max(newest, session.modified), 0);
 }
 
 /**
@@ -1624,8 +1710,26 @@ export function toSessionRef(info: SessionInfo): SessionRef {
 		id: info.id,
 		cwd: info.cwd,
 		createdAt: info.created.getTime(),
-		title: info.firstMessage,
+		title: info.title,
 		...(info.parentId === undefined ? {} : { parentId: info.parentId }),
+	};
+}
+
+/**
+ * One row of the sidebar, for a session nothing is running.
+ *
+ * A file can say where a session was last active and what it is called; it cannot say whether this
+ * process is running it, because that fact was never written down. So the two live fields are
+ * structurally `false` and `0` here — not a guess, and not "unknown": a session with no host is not
+ * running and has no approval waiting, and a caller that wants the live values overlays them from the
+ * snapshot rather than reading them off the disk.
+ */
+export function toSessionRow(info: SessionInfo): SessionRow {
+	return {
+		...toSessionRef(info),
+		modified: info.modified.getTime(),
+		running: false,
+		pending: 0,
 	};
 }
 
@@ -1638,10 +1742,22 @@ export function toSessionRef(info: SessionInfo): SessionRef {
 export function deriveTitle(messages: readonly AgentMessage[]): string {
 	for (const message of messages) {
 		if (message.role !== "user") continue;
-		const text = textOf((message as { content?: unknown }).content).replace(/\s+/g, " ").trim();
-		if (text.length > 0) return text.length > 72 ? `${text.slice(0, 69)}...` : text;
+		const text = shortenTitle(textOf((message as { content?: unknown }).content));
+		if (text.length > 0) return text;
 	}
 	return "New session";
+}
+
+/**
+ * The one rule for shortening a title: collapse its whitespace, then cut it at 72 characters.
+ *
+ * Shared rather than written twice because the two callers answer different questions about *which*
+ * message they are shortening — a live session walks its branch, a scan walks the file — and a row
+ * whose title jumped the moment its host was reaped would be the flicker this sharing exists to stop.
+ */
+function shortenTitle(text: string): string {
+	const collapsed = text.replace(/\s+/g, " ").trim();
+	return collapsed.length > 72 ? `${collapsed.slice(0, 69)}...` : collapsed;
 }
 
 function textOf(content: unknown): string {

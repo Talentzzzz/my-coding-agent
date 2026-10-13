@@ -269,7 +269,10 @@ async function streamWithDeltas(
 			return;
 		}
 
+		// The index is this loop's own counter over `message.content`, so the entry is there; saying so
+		// once keeps every narrowing below from having to re-prove it.
 		const block = message.content[index];
+		if (block === undefined) continue;
 
 		if (block.type === "thinking") {
 			partial.content = [...partial.content, { type: "thinking", thinking: "" }];
