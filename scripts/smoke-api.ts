@@ -361,6 +361,15 @@ async function main(): Promise<void> {
 		const unknownSession = await request("POST", "/api/sessions/does-not-exist/branch", { entryId: "x" });
 		if (unknownSession.status !== 404) fail(`a branch on an unknown session answered ${unknownSession.status}, expected 404`);
 
+		// An approval answer for an id nothing is waiting on is a conflict, not a silent no-op: the
+		// request was understood and refused. This session is idle, so every id is unanswerable here —
+		// and a refused attempt must reach nothing, which the run staying settled confirms on the REST
+		// face alone.
+		const unknownApproval = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/approvals/no-such-call`, { approved: true });
+		if (unknownApproval.status !== 409) fail(`an approval for an unanswerable id answered ${unknownApproval.status}, expected 409`);
+		else if (!JSON.stringify(unknownApproval.payload).includes("not a pending approval")) fail(`the 409 body does not say what was refused: ${JSON.stringify(unknownApproval.payload)}`);
+		else pass("an approval for an id nothing waits on is refused (409)");
+
 		const fork = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/forks`, { entryId: entry });
 		const forkedId = (fork.payload as { sessionId?: string }).sessionId;
 		if (fork.status !== 201 || forkedId === undefined) {

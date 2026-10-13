@@ -140,7 +140,14 @@ export type ResolvedMuxOptions = Required<MuxOptions>;
  * idle conversation would keep an `Agent` assembled for nobody, forever.
  */
 interface Subscription {
-	/** The approvals this subscription has already told its browser about. */
+	/**
+	 * The approvals this subscription has already told its browser about, by `toolCallId`.
+	 *
+	 * Keyed on the assumption that a `toolCallId` is unique within one session — the same assumption
+	 * `Agent.pendingApprovals` is built on, backed by the provider's `tool_use` id semantics. Two
+	 * sessions happening to share an id is a different fact and no defect: the answers table is keyed
+	 * by session first, so one session's answer never reaches the other's window.
+	 */
 	pending: Map<string, PendingApproval>;
 	/**
 	 * Frames produced before the baseline went out, or `null` once it has.

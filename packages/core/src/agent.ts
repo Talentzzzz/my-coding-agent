@@ -249,7 +249,24 @@ export type SessionEventListener = (event: AgentSessionEvent) => void;
 /** One unanswered approval: what the banner shows, and the promise the tool call is parked on. */
 interface PendingApprovalEntry {
 	approval: PendingApproval;
-	resolve(approved: boolean): void;
+	resolve(answer: ApprovalAnswer): void;
+}
+
+/**
+ * How one approval was answered, and — when it was denied by something other than a person pressing
+ * "deny" — the sentence the tool result should carry.
+ *
+ * The reason is what keeps an abandonment from being recorded as a user's choice: a grace timer that
+ * denies an approval nobody answered used to leave the same "The user denied permission" line in the
+ * transcript as a press of the button, which was a lie about who answered. `approve()` carries no
+ * reason — a person really did answer — so a denial there falls back to that sentence, where it is
+ * true. An abort's denial never reaches the transcript through here at all: the loop normalizes an
+ * aborted call's result itself, before the block branch is ever taken.
+ */
+interface ApprovalAnswer {
+	approved: boolean;
+	/** Why the call was denied, when the denial came from somewhere other than the approve endpoint. */
+	reason?: string;
 }
 
 /**
@@ -724,6 +741,19 @@ export class Agent {
 		return this.pendingApprovals.size > 0;
 	}
 
+	/**
+	 * Whether this id names an approval that is waiting for an answer. Read-only.
+	 *
+	 * The approvals endpoint checks this before answering, because the check has to happen without
+	 * answering: `approve` publishes synchronously, and the frame that reports a settlement is built
+	 * from that publication — running it first would make every grant read as a denial by whatever
+	 * reads the answer back. An unknown id is the endpoint's 409, not a silent no-op: a button that
+	 * answers nothing and says so to no one is worse than an error the client can show.
+	 */
+	hasPendingApproval(toolCallId: string): boolean {
+		return this.pendingApprovals.has(toolCallId);
+	}
+
 	/** True while a transient provider failure is waiting out its backoff. */
 	get isRetrying(): boolean {
 		return this.retrying;
@@ -1045,18 +1075,23 @@ export class Agent {
 		const entry = this.pendingApprovals.get(toolCallId);
 		if (!entry) return;
 		this.pendingApprovals.delete(toolCallId);
-		entry.resolve(approved);
+		entry.resolve({ approved });
 		this.publish();
 	}
 
-	/** Deny every waiting approval, for example when the socket that owns them disconnects. */
+	/**
+	 * Deny every waiting approval, for example when the socket that owns them disconnects.
+	 *
+	 * The reason rides the answer into the transcript: each denied call's tool result says what
+	 * actually happened — the run was aborted, the session closed, no window answered — rather than
+	 * the same sentence a press of "deny" writes, which would record an abandonment as a choice.
+	 */
 	denyAllApprovals(reason: string): void {
 		if (this.pendingApprovals.size === 0) return;
 		for (const [toolCallId, entry] of [...this.pendingApprovals]) {
 			this.pendingApprovals.delete(toolCallId);
-			entry.resolve(false);
+			entry.resolve({ approved: false, reason });
 		}
-		void reason;
 		this.publish();
 	}
 
@@ -1244,7 +1279,7 @@ export class Agent {
 		const key = name as ToolApprovalKey;
 		if (!this.getApprovals()[key]) return undefined;
 
-		const approved = await new Promise<boolean>((resolve) => {
+		const answer = await new Promise<ApprovalAnswer>((resolve) => {
 			this.pendingApprovals.set(toolCallId, {
 				approval: { toolCallId, toolName: name, args, summary: describeToolCall(name, args) },
 				resolve,
@@ -1252,7 +1287,10 @@ export class Agent {
 			this.publish();
 		});
 
-		return approved ? undefined : `The user denied permission to run ${name}.`;
+		if (answer.approved) return undefined;
+		// An answer with no reason of its own is a person pressing "deny" — the sentence below is true
+		// for exactly that case, which is why only the endpoint's denial falls back to it.
+		return answer.reason ?? `The user denied permission to run ${name}.`;
 	}
 
 	/**

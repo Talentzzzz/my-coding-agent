@@ -440,10 +440,17 @@ export class SessionController {
 	/**
 	 * Answer one approval prompt.
 	 *
-	 * A prompt that is no longer pending is not an error: one already denied by an abort, or answered
-	 * twice by an impatient client, is a no-op rather than a failure worth showing someone. The answer
-	 * is reported to the transport either way, because the frame that takes the banner down goes to
-	 * every stream watching this session — including the tab that did not give the answer.
+	 * A prompt that is no longer pending — already answered, denied by an abort, or gone because the
+	 * server restarted — is a conflict rather than a no-op: the request was understood and refused,
+	 * which is what 409 says. The client sees that error, and that is the point — a button that
+	 * answers nothing and says so to no one is the failure this replaces. The answer the client needs
+	 * about what *did* happen to the call comes from the baseline and the tool result, not from this
+	 * status code, which claims only "nobody is waiting for this answer now".
+	 *
+	 * The order below is load-bearing. The read-only check comes first because only an answerable
+	 * request may be recorded; `onApproval` comes before `approve` because answering publishes the
+	 * change, and the frame that reports the answer is built from the session's own change
+	 * notification — which therefore runs before this method gets control back.
 	 */
 	async approve(
 		sessionId: string,
@@ -454,9 +461,11 @@ export class SessionController {
 		if (typeof approved !== "boolean") throw httpStatus.badRequest("`approved` must be a boolean");
 
 		return this.claiming(sessionId, (session) => {
-			// Recorded before the session is told, not after: answering publishes the change, and the
-			// frame that reports the answer is built from the session's own change notification — which
-			// therefore runs before this method gets control back.
+			// Refused before anything is recorded: an id this session is not waiting on gets a 409, and
+			// neither the answer table nor the session hears about the attempt.
+			if (!session.hasPendingApproval(toolCallId)) {
+				throw httpStatus.conflict(`${toolCallId} is not a pending approval`);
+			}
 			this.listeners.onApproval?.(sessionId, toolCallId, approved);
 			session.approve(toolCallId, approved);
 			return { toolCallId, approved };

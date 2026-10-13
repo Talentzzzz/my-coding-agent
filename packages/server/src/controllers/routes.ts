@@ -126,6 +126,8 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 		}),
 		route({
 			method: "POST",
+			// A toolCallId the session is not waiting on is a 409, not a silent no-op — the controller
+			// refuses before either the answers table or the session hears about the attempt.
 			path: "/api/sessions/:id/approvals/:toolCallId",
 			params: { id: stringParam, toolCallId: stringParam },
 			handle: async (params, request, response) =>

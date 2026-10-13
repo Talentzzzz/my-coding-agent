@@ -167,6 +167,16 @@ async function whenStreaming(session: Agent, gate: Gate, ms = 5_000): Promise<vo
 	check("a run reached the provider", false, `streaming=${session.isStreaming} held=${gate.held} after ${ms} ms`);
 }
 
+/** Poll until `ready` holds, so a check reads a state the loop reaches asynchronously. */
+async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
+	const started = Date.now();
+	while (Date.now() - started < ms) {
+		if (ready()) return true;
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	return ready();
+}
+
 /**
  * The retry policy these checks run with.
  *
@@ -893,6 +903,77 @@ async function exerciseApprovalPrompt(): Promise<void> {
 	check("the approval is in the snapshot too", session.snapshot.approvals.bash === true, JSON.stringify(session.snapshot.approvals));
 
 	await session.close();
+}
+
+/**
+ * A denial that came from somewhere other than a pressed "deny" says so in the transcript.
+ *
+ * The reason rides the answer into the tool result, so an approval a grace timer denied is recorded
+ * as what happened — not as the same sentence a press of the button writes, which would record an
+ * abandonment as a user's choice. A denial through `approve` itself carries no reason, and that is
+ * the one case the fallback sentence is true for, so it keeps it.
+ */
+async function exerciseApprovalDenial(): Promise<void> {
+	process.stdout.write("approval denial reason\n");
+
+	const script = [fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("done")];
+
+	// Denied by the abandonment path: the reason rides the answer into the tool result.
+	const abandoned = await openSession({ approval: { read: true } });
+	recordRequests([], script);
+	const parked = within("the run to the gate", 10_000, abandoned.prompt("read the notes"));
+	check(
+		"the run parked at the approval",
+		await until(() => abandoned.snapshot.pendingApprovals.length === 1),
+		JSON.stringify(abandoned.snapshot.pendingApprovals),
+	);
+	const waiting = abandoned.snapshot.pendingApprovals[0]?.toolCallId ?? "";
+	check("the predicate names the waiting call", abandoned.hasPendingApproval(waiting), waiting);
+	check("an id nothing waits on is not pending", !abandoned.hasPendingApproval("no-such-call"));
+
+	abandoned.denyAllApprovals("No window answered this approval.");
+	check("the predicate cleared once the answer arrived", !abandoned.hasPendingApproval(waiting));
+	const deniedRun = await parked;
+	check("the denied run finished", deniedRun.ok);
+	await within("settle()", 10_000, abandoned.settle());
+
+	const denialResults = toolResultTexts(abandoned);
+	check(
+		"the tool result carries the denial's own reason",
+		denialResults.some((text) => text.includes("No window answered this approval.")),
+		JSON.stringify(denialResults),
+	);
+	check(
+		"and not the sentence a pressed deny writes",
+		denialResults.every((text) => !text.includes("The user denied permission to run")),
+		JSON.stringify(denialResults),
+	);
+	check("the run carried on to an answer", abandoned.snapshot.messages.some((message) => message.role === "assistant" && textOf(message) === "done"));
+
+	await abandoned.close();
+
+	// Denied by a pressed "deny": no reason rides the answer, so the fallback sentence is the truth.
+	const refused = await openSession({ approval: { read: true } });
+	recordRequests([], script);
+	const refusedRun = within("the second run to the gate", 10_000, refused.prompt("read the notes"));
+	check(
+		"the second run parked at the approval",
+		await until(() => refused.snapshot.pendingApprovals.length === 1),
+		JSON.stringify(refused.snapshot.pendingApprovals),
+	);
+	refused.approve(refused.snapshot.pendingApprovals[0]?.toolCallId ?? "", false);
+	const refusedResult = await refusedRun;
+	check("the refused run finished", refusedResult.ok);
+	await within("settle()", 10_000, refused.settle());
+
+	const refusedResults = toolResultTexts(refused);
+	check(
+		"a pressed deny still says the user denied it",
+		refusedResults.some((text) => text.includes("The user denied permission to run read.")),
+		JSON.stringify(refusedResults),
+	);
+
+	await refused.close();
 }
 
 /**
@@ -2176,6 +2257,7 @@ async function exerciseLeafDurability(): Promise<void> {
 }
 
 	await exerciseSubagent();
+	await exerciseApprovalDenial();
 	await exerciseUnknownTool();
 	await exerciseEmptyToolSet();
 	await exerciseRetry();
