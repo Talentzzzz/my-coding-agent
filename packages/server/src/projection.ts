@@ -174,8 +174,18 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	 */
 	const onHost = (sessionId: string, host: HostedSession | undefined): void => {
 		if (host === undefined) {
-			following.get(sessionId)?.off();
+			// The row's live fields came from the host that just went away, so they go with it: a session
+			// whose host closed is not running and has nothing pending, whatever its last in-flight
+			// publish said. Settling the row here is what keeps a finished unwatched run from leaving a
+			// sidebar row stuck on `running: true` — the run's own final publish races the reap that
+			// closes this host, and losing that race used to be losing the row's way back to false.
+			const entry = following.get(sessionId);
+			const stored = rows.get(sessionId);
+			entry?.off();
 			following.delete(sessionId);
+			if (stored !== undefined && (stored.running || stored.pending !== 0)) {
+				publish({ ...stored, running: false, pending: 0 });
+			}
 			if (!rows.has(sessionId)) {
 				void probe(sessionId).then((scanned) => {
 					if (scanned !== undefined) publish(scanned);

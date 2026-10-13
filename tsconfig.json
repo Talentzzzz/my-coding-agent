@@ -16,6 +16,10 @@
 		"packages/core/src/**/*.ts",
 		"packages/server/src/**/*.ts",
 		"scripts/smoke-projection.ts",
-		"scripts/fake-transport.ts"
+		"scripts/fake-transport.ts",
+		"scripts/wire/**/*.ts",
+		"scripts/smoke-mux.ts",
+		"scripts/smoke-liveness.ts",
+		"scripts/smoke-backpressure.ts"
 	]
 }

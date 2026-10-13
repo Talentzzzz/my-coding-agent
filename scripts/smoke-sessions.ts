@@ -86,8 +86,12 @@ const hub = new SessionHub({ cwd: root });
 
 try {
 	process.stdout.write("one session per id\n");
-	const first = await hub.claim();
-	const second = await hub.claim();
+	// The id is asked for first and then claimed by name, which is the only shape production has: a
+	// request never omits the id, so "which session is current" is `GET /api/sessions/current`'s
+	// question and not the claim's.
+	const landing = await hub.currentSessionId();
+	const first = await hub.claim(landing);
+	const second = await hub.claim(landing);
 	check("two connections with no id share one session", first.session === second.session);
 	check("both claims are counted", first.claims === 2, `claims=${first.claims}`);
 	check("the hub runs it once", hub.live.length === 1, hub.live.join(","));
@@ -120,7 +124,7 @@ try {
 
 	process.stdout.write("new_session moves the landing spot\n");
 	const created = await hub.newSession();
-	const landed = await hub.claim();
+	const landed = await hub.claim(await hub.currentSessionId());
 	check("an unnamed claim lands on the newest session", landed.id === created, `${landed.id} vs ${created}`);
 
 	process.stdout.write("a fork is the branch up to one entry\n");

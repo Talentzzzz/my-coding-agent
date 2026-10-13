@@ -146,6 +146,9 @@ node scripts/smoke-sessions.ts # 会话注册表，不需要供应商密钥
 node scripts/smoke-projection.ts # 概况投影与协议信封，不需要供应商密钥
 node scripts/smoke-mux-client.ts # 客户端通道：退避、判活、按引用重放、end 与基线；不需要密钥
 node scripts/smoke-mux-live.ts  # 真服务器 + 真 WebSocket 跑生产的 MuxClient；不需要密钥
+node scripts/smoke-mux.ts       # wire 表面：信封、分道、上行容错、连接级载荷；不需要密钥
+node scripts/smoke-liveness.ts  # 客户端判死与重连：生产 MuxClient + 一条可故障中继；不需要密钥
+node scripts/smoke-backpressure.ts # 写侧停滞策略：注入假 socket，队列预算与截止时间；不需要密钥
 node scripts/smoke-sidebar.ts   # 侧边栏原地改行、按 modified 重排、第二行状态；不需要密钥
 node scripts/smoke-session.ts  # 流式、排队、重试、压缩、委派；不需要密钥
 node scripts/smoke-models.ts   # 导入的模型与无模型占位，不需要密钥

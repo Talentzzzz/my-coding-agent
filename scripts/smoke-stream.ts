@@ -1,31 +1,29 @@
-// Run-scoped stream smoke test: a stream exists for a run, ends when the run ends, and ends itself
-// when it attached to nothing running. No provider key is needed — the model is the scripted transport.
+// Stream lifecycle smoke test, in the shape the resident transport gave it: the claim decides how
+// long a session lives, and a subscription decides nothing. A lane watching an idle session takes no
+// claim and ends nothing; a run ending does not end the lane — the host going away does, and the host
+// goes away when the last claim lets go. The failure section pins where a run that fails under a
+// watcher — and one that fails with nobody watching — is heard.
 //
 //   node scripts/smoke-stream.ts
 //
-// This is the transport half of the phase. What it is really checking is that the browser is *told* to
-// close: `EventSource` reconnects after a normal end, so a stream the server ends without a
-// `stream_end` frame comes back, and an idle session would be pinned in `hub.live` by a heartbeat that
-// no assertion about state can see. Every check below is therefore about a frame or about a claim.
+// No provider key is needed: the model is the scripted transport. The test bench holds its own claims
+// through the real hub wherever a check needs the host to outlive a run — that is the bench's claim,
+// not the subscription's, which is exactly the distinction under test.
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "../packages/server/src/http.ts";
-import { HostedSession, SessionHub } from "../packages/server/src/hub.ts";
-import { EventController } from "../packages/server/src/controllers/events.ts";
+import { muxUpgrade, sessionListeners } from "../packages/server/src/boot.ts";
+import { createMuxServer } from "../packages/server/src/mux.ts";
+import { SessionHub, type HostedSession } from "../packages/server/src/hub.ts";
+import { createSessionProjection } from "../packages/server/src/projection.ts";
 import { SessionController, SystemController } from "../packages/server/src/controllers/sessions.ts";
 import { createRoutes } from "../packages/server/src/controllers/routes.ts";
 import { Router } from "../packages/server/src/http/routing.ts";
-import { createStreamRegistry } from "../packages/server/src/stream-registry.ts";
+import { createServer } from "../packages/server/src/http.ts";
 import { createFakeTransport, fakeAssistantMessage, type FakeTransport } from "./fake-transport.ts";
-import type { SessionSnapshot, UserModel } from "@my-agent/core";
+import { connect, until, type WireClient } from "./wire/client.ts";
+import type { UserModel } from "@my-agent/core";
 
-/** Short enough that both waits below are driven rather than slept through. */
-const IDLE_GRACE_MS = 150;
-/** The release grace is not configurable, so waits that cross it are given room rather than changed. */
-const PAST_RELEASE_GRACE_MS = 6_000;
-
-const root = await mkdtemp(join(tmpdir(), "my-agent-stream-"));
 let failures = 0;
 
 function check(label: string, condition: boolean, detail = ""): void {
@@ -33,91 +31,50 @@ function check(label: string, condition: boolean, detail = ""): void {
 	if (!condition) failures += 1;
 }
 
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, 10));
+
+async function request(base: string, method: string, path: string, body?: unknown): Promise<{ status: number; payload: unknown }> {
+	const headers: Record<string, string> = { accept: "application/json" };
+	if (body !== undefined) headers["content-type"] = "application/json";
+	const response = await fetch(`${base}${path}`, {
+		method,
+		headers,
+		...(body === undefined ? {} : { body: JSON.stringify(body) }),
+	});
+	const text = await response.text();
+	return { status: response.status, payload: text.length === 0 ? undefined : (JSON.parse(text) as unknown) };
 }
 
-/** Poll until `ready` holds, so nothing here guesses at a reap's or a timer's exact timing. */
-async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
-	const deadline = Date.now() + ms;
-	while (Date.now() < deadline) {
-		if (ready()) return true;
-		await sleep(10);
-	}
-	return ready();
+/** Accept a prompt, which is answered before the run has done anything. */
+async function prompt(base: string, sessionId: string, text: string): Promise<number> {
+	return (await request(base, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/messages`, { text })).status;
 }
 
-type Frame = { type: string; [key: string]: unknown };
-
-interface Feed {
-	readonly frames: Frame[];
-	/** Whether the server ended this response, as opposed to the reader being cancelled. */
-	readonly ended: boolean;
-	waitFor(type: string, ms?: number): Promise<Frame | undefined>;
-	/** Wait for one of the loop's own events, which arrive inside a `session_event` frame. */
-	waitForEvent(type: string, ms?: number): Promise<Frame | undefined>;
-	/** Wait for the response to end, which is the other half of the terminal frame's promise. */
-	waitForEnd(ms?: number): Promise<boolean>;
-	cancel(): Promise<void>;
+/** Wait for the loop's own end event on a lane. */
+async function waitAgentEnd(wire: WireClient, sessionId: string, ms = 15_000): Promise<boolean> {
+	return until(
+		() =>
+			wire.items(sessionId).some(
+				(message) => message.type === "event" && (message as { event?: { type?: string } }).event?.type === "agent_end",
+			),
+		ms,
+	);
 }
 
-/**
- * Read one event stream in the background.
- *
- * A cancelled reader raises, so `ended` tells the two ends apart: a response the server finished is
- * the case this phase is about, and a reader this script cancelled is this script's own doing.
- */
-function feed(response: Response): Feed {
-	const reader = response.body!.getReader();
-	const decoder = new TextDecoder();
-	const frames: Frame[] = [];
-	let buffer = "";
-	let ended = false;
-
-	void (async () => {
-		try {
-			for (;;) {
-				const { value, done } = await reader.read();
-				if (done) {
-					ended = true;
-					return;
-				}
-				buffer += decoder.decode(value, { stream: true });
-				let boundary = buffer.indexOf("\n\n");
-				while (boundary >= 0) {
-					const block = buffer.slice(0, boundary);
-					buffer = buffer.slice(boundary + 2);
-					const line = block.split("\n").find((candidate) => candidate.startsWith("data:"));
-					if (line !== undefined) frames.push(JSON.parse(line.slice(5).trim()) as Frame);
-					boundary = buffer.indexOf("\n\n");
-				}
-			}
-		} catch {
-			// A cancelled reader lands here, which is not the server ending the response.
-		}
-	})();
-
-	return {
-		frames,
-		get ended() {
-			return ended;
-		},
-		async waitFor(type: string, ms = 5_000): Promise<Frame | undefined> {
-			const found = await until(() => frames.some((frame) => frame.type === type), ms);
-			return found ? frames.find((frame) => frame.type === type) : undefined;
-		},
-		async waitForEvent(type: string, ms = 5_000): Promise<Frame | undefined> {
-			const found = await until(() => frames.some((frame) => sessionEvent(frame) === type), ms);
-			return found ? frames.find((frame) => sessionEvent(frame) === type) : undefined;
-		},
-		async waitForEnd(ms = 5_000): Promise<boolean> {
-			return until(() => ended, ms);
-		},
-		cancel: () => reader.cancel().then(() => undefined),
-	};
+/** Wait for the status frame that says the run is over, whatever road it took to get there. */
+async function waitSettled(wire: WireClient, sessionId: string, ms = 15_000): Promise<boolean> {
+	return until(
+		() => wire.items(sessionId).some((message) => message.type === "status" && (message as { submitting?: boolean }).submitting === false),
+		ms,
+	);
 }
 
-/** The row the scripted transport answers for, held here so this never reads the machine's own rows. */
+/** Long enough that anything that was going to end an idle lane would have; short enough to stay fast. */
+const QUIET_MS = 700;
+
+/** Slow enough that a run is observably in flight; fast enough to keep the whole smoke sub-minute. */
+const TOKENS_PER_SECOND = 400;
+
 const rows: UserModel[] = [
 	{
 		name: "scripted",
@@ -129,158 +86,239 @@ const rows: UserModel[] = [
 		reasoning: false,
 	},
 ];
-const modelRef = "scripted/claude-sonnet-4-5";
 
 interface Rig {
 	url: string;
 	hub: SessionHub;
-	/** One session, mounted on its own scripted transport, created through the real routes. */
-	session: HostedSession;
 	transport: FakeTransport;
 	close(): Promise<void>;
 }
 
-const rig = await openRig(8090);
+async function openRig(): Promise<Rig> {
+	const root = await mkdtemp(join(tmpdir(), "my-agent-stream-"));
+	const transport = createFakeTransport({ tokensPerSecond: TOKENS_PER_SECOND });
+	const hub = new SessionHub({ cwd: root, api: transport.api });
+	hub.setUserModels(rows);
+
+	const projection = createSessionProjection(hub);
+	const mux = createMuxServer(hub, projection, { heartbeatIntervalMs: 150 });
+	const router = new Router(
+		createRoutes({
+			system: new SystemController(hub),
+		sessions: new SessionController(hub, sessionListeners(mux)),
+		}),
+	);
+	const handle = await createServer({ router, clientDir: "packages/web/dist", onUpgrade: muxUpgrade(mux) });
+	await new Promise<void>((listen) => handle.server.listen(0, "127.0.0.1", listen));
+	const url = `http://127.0.0.1:${(handle.server.address() as { port: number }).port}`;
+
+	return {
+		url,
+		hub,
+		transport,
+		close: async () => {
+			await hub.close();
+			await handle.close();
+			await rm(root, { recursive: true, force: true });
+		},
+	};
+}
+
+/**
+ * Make every assistant message persist fail, on this host only.
+ *
+ * This is the seam ticket 08 named for the mechanical-failure shape: the transcript is the thing that
+ * broke, so nothing about the failure can be written where failures usually go. The user message
+ * still lands — `prompt` writes it before the loop starts — so the patch lets it through.
+ */
+function sabotagePersistence(host: HostedSession): void {
+	const manager = host.session.sessionManager as unknown as {
+		appendMessage: (message: { role?: string }) => string;
+	};
+	const original = manager.appendMessage.bind(manager);
+	manager.appendMessage = (message) => {
+		if (message.role !== "user") throw new Error("smoke-stream: 磁盘写不进去了");
+		return original(message);
+	};
+}
+
+const rig = await openRig();
+const wire = await connect(`${rig.url.replace("http", "ws")}/mux`);
+
+// The claim counter is the load-bearing instrument of this smoke (docs/notes.md §二 bug 4: to verify
+// "x takes no claim", count `hub.claim` calls — never read `hub.live`, which a released claim vanishes
+// from within a tick).
+let claims = 0;
+{
+	const realClaim = rig.hub.claim.bind(rig.hub);
+	(rig.hub as unknown as { claim: (id?: string) => Promise<HostedSession> }).claim = async (id?: string) => {
+		claims += 1;
+		return realClaim(id);
+	};
+}
 
 try {
-	process.stdout.write(`stream scoped to the run (idle grace ${IDLE_GRACE_MS} ms)\n`);
+	// ---------------------------------------------------------------------------------------------
+	// 1. A lane on an idle session: no claim, no host, no end.
+	// ---------------------------------------------------------------------------------------------
+	process.stdout.write("a lane on an idle session claims nothing and ends nothing\n");
 
-	check("the session this script drives is idle to begin with", await until(() => !rig.hub.live.includes(rig.session.id), PAST_RELEASE_GRACE_MS), rig.hub.live.join(","));
+	const created = await request(rig.url, "POST", "/api/sessions");
+	const idleId = (created.payload as { sessionId: string }).sessionId;
+	const idle = await wire.open(idleId);
+	check("the lane opened with the snapshot", idle.id === idleId);
+	check("and an idle session says so", idle.submitting === false, String(idle.submitting));
+	check("subscribing took no claim", claims === 0, `claims=${claims}`);
+
+	await sleep(QUIET_MS);
+	check("the lane is still there — nothing ended it", !wire.endOf(idleId).ended, JSON.stringify(wire.endOf(idleId)));
+	check("and nothing is hosting the session", !rig.hub.live.includes(idleId), rig.hub.live.join(","));
+
+	// A read is not a claim either — the window's cold path. A session that does not exist is a 404,
+	// and its read claims nothing because it never gets that far.
+	const cold = await request(rig.url, "GET", `/api/sessions/${encodeURIComponent(idleId)}`);
+	check("a cold read answers", cold.status === 200, String(cold.status));
+	const missing = await request(rig.url, "GET", "/api/sessions/does-not-exist");
+	check("an unknown session is a 404", missing.status === 404, String(missing.status));
+	check("and neither read claimed anything", claims === 0, `claims=${claims}`);
 
 	// ---------------------------------------------------------------------------------------------
-	// An idle stream ends itself, and says so.
+	// 2. A run ending does not end the lane; the claim's release does.
 	// ---------------------------------------------------------------------------------------------
-	process.stdout.write("a stream on an idle session ends itself\n");
+	process.stdout.write("a run ends, the lane stays, the claim decides the rest\n");
 
-	const idle = await attach(rig.url, rig.session.id);
-	check("it opens with the snapshot", (await idle.waitFor("session")) !== undefined);
+	// The bench holds a claim for as long as it wants the host alive — the same hand a window's send
+	// reference plays, taken through the hub so the reap under test is the real one.
+	const bench = await rig.hub.claim(idleId);
+	rig.transport.setResponses([fakeAssistantMessage("a".repeat(500))]);
+	check("the prompt was accepted", (await prompt(rig.url, idleId, "say something long")) === 202);
+	check("the run's own end reached the lane", await waitAgentEnd(wire, idleId));
+	check("and the status frame said so too", await waitSettled(wire, idleId));
 
-	const terminal = await idle.waitFor("stream_end", IDLE_GRACE_MS + 4_000);
-	check("the stream reported its end", terminal !== undefined, JSON.stringify(idle.frames.map((frame) => frame.type)));
-	check("the response then ended", await idle.waitForEnd());
-	check(
-		"and nothing claims a run ended, because none started",
-		!idle.frames.some((frame) => sessionEvent(frame) === "agent_end"),
-		JSON.stringify(idle.frames.map((frame) => frame.type)),
-	);
-	check(
-		"the session is reaped once the stream is gone",
-		await until(() => !rig.hub.live.includes(rig.session.id), PAST_RELEASE_GRACE_MS),
-		rig.hub.live.join(","),
-	);
+	await sleep(QUIET_MS);
+	check("no end arrived after the run — nothing about the run ends a lane", !wire.endOf(idleId).ended, JSON.stringify(wire.endOf(idleId)));
+	check("the host is still there, held by the bench's claim", rig.hub.live.includes(idleId), rig.hub.live.join(","));
+
+	// The lane is still usable: the same subscription carries the next run.
+	rig.transport.setResponses([fakeAssistantMessage("b".repeat(500))]);
+	check("the second prompt was accepted", (await prompt(rig.url, idleId, "and again")) === 202);
+	check("and its frames reached the same lane", await waitAgentEnd(wire, idleId));
+
+	// Now the claim goes back, and the order of events is the whole point: the host goes away, and the
+	// lane ends because the session it watched is gone — not because anything ended it directly.
+	rig.hub.release(bench);
+	check("the session was reaped once the last claim let go", await until(() => !rig.hub.live.includes(idleId), 10_000), rig.hub.live.join(","));
+	check("and the lane ended with the host it watched", await until(() => wire.endOf(idleId).ended, 5_000), JSON.stringify(wire.endOf(idleId)));
 
 	// ---------------------------------------------------------------------------------------------
-	// A read is not a stream: the window's path for an idle session takes no claim and opens nothing.
+	// 3. Attaching to a run already in flight: the baseline says so, and the lane lives through it.
 	// ---------------------------------------------------------------------------------------------
-	process.stdout.write("reading an idle session takes no claim and opens no stream\n");
+	process.stdout.write("a lane that opens on a run already in flight\n");
 
-	let claims = 0;
-	const claim = rig.hub.claim.bind(rig.hub);
-	rig.hub.claim = async (id?: string) => {
-		claims += 1;
-		return claim(id);
+	const again = await rig.hub.claim(idleId);
+	rig.transport.setResponses([fakeAssistantMessage("c".repeat(600))]);
+	check("the prompt was accepted", (await prompt(rig.url, idleId, "one more long answer")) === 202);
+	check("the run started", await until(() => rig.hub.live.includes(idleId), 5_000), rig.hub.live.join(","));
+
+	const midflight = await wire.open(idleId);
+	check("the mid-run baseline reports the run", midflight.submitting === true, String(midflight.submitting));
+	// `ended` on the wire client is "ever ended" and idleId's lane ended once in the section above,
+	// so the assertions here count ends across this open instead of reading the flag.
+	const endsAtOpen = wire.endOf(idleId).ends;
+	await sleep(QUIET_MS);
+	check("and nothing ends the lane while the run goes on", wire.endOf(idleId).ends === endsAtOpen, JSON.stringify(wire.endOf(idleId)));
+	check("the run ended on the lane", await waitAgentEnd(wire, idleId));
+	check("and the lane outlived it, claim still held", wire.endOf(idleId).ends === endsAtOpen, JSON.stringify(wire.endOf(idleId)));
+	rig.hub.release(again);
+	check("released, the host went, the lane went with it", await until(() => wire.endOf(idleId).ends === endsAtOpen + 1, 5_000), JSON.stringify(wire.endOf(idleId)));
+
+	// ---------------------------------------------------------------------------------------------
+	// 4. A run that fails under a watcher: the error frame, the settled frame, the log, the reap.
+	// ---------------------------------------------------------------------------------------------
+	process.stdout.write("a run that fails under a watcher is heard in three places\n");
+
+	const watched = await request(rig.url, "POST", "/api/sessions");
+	const watchedId = (watched.payload as { sessionId: string }).sessionId;
+	const watchedBench = await rig.hub.claim(watchedId);
+	sabotagePersistence(watchedBench);
+	const watchedLane = await wire.open(watchedId);
+	check("the lane opened on the session about to fail", watchedLane.id === watchedId);
+
+	const logged: string[] = [];
+	const realError = console.error;
+	console.error = (...parts: unknown[]) => {
+		logged.push(parts.map(String).join(" "));
 	};
 
-	const cold = await read(rig.url, rig.session.id);
-	check("GET /api/sessions/{id} answers 200", cold.status === 200, `status=${cold.status}`);
-	check("and reports the session as idle", cold.session?.submitting === false, String(cold.session?.submitting));
-	check("the read never claimed it", claims === 0, `claims=${claims}`);
-	check("so nothing is running it", !rig.hub.live.includes(rig.session.id), rig.hub.live.join(","));
-	check("and nothing is streaming it", rig.hub.live.length === 0, rig.hub.live.join(","));
-	check("an unknown id is still 404", (await read(rig.url, "0123456789abcdef")).status === 404);
-	check("and an unknown id is never claimed either", claims === 0, `claims=${claims}`);
-	const refusedStream = await tryAttach(rig.url, "0123456789abcdef");
-	check(
-		"an unknown id opens no stream",
-		refusedStream.status === 404,
-		`status=${refusedStream.status} body=${refusedStream.body}`,
-	);
+	rig.transport.setResponses([fakeAssistantMessage("never lands")]);
+	check("the prompt was accepted", (await prompt(rig.url, watchedId, "this run will fail")) === 202);
+	check("the failure was announced on the lane", await until(() => wire.items(watchedId).some((message) => message.type === "error"), 10_000), JSON.stringify(wire.items(watchedId).map((message) => message.type)));
+	check("the lane was told the run was over", await waitSettled(wire, watchedId));
+	console.error = realError;
+
+	check("and the server logged what no frame could carry", logged.length > 0, JSON.stringify(logged));
+	check("the transcript is exactly what the failure let survive", ((await request(rig.url, "GET", `/api/sessions/${encodeURIComponent(watchedId)}`)).payload as { session: { messages: unknown[] } }).session.messages.length === 1);
+
+	// The bench claim still holds the host; letting it go reaps the session. No leak.
+	rig.hub.release(watchedBench);
+	check("the session was reaped once the claim let go", await until(() => !rig.hub.live.includes(watchedId), 10_000), rig.hub.live.join(","));
 
 	// ---------------------------------------------------------------------------------------------
-	// A run ended ends the stream, immediately after the run's own last frame.
+	// 5. The same failure with nobody watching: the log is the only place it is still audible.
 	// ---------------------------------------------------------------------------------------------
-	process.stdout.write("a run ended ends the stream\n");
+	process.stdout.write("a run that fails with nobody watching is heard only in the log\n");
 
-	rig.transport.setResponses([fakeAssistantMessage("transport ok")]);
-	const running = await attach(rig.url, rig.session.id);
-	check("the stream opened on the idle session", (await running.waitFor("session")) !== undefined);
-	check("the prompt was accepted", (await prompt(rig.url, rig.session.id, "say it")) === 202);
+	const unwatched = await request(rig.url, "POST", "/api/sessions");
+	const unwatchedId = (unwatched.payload as { sessionId: string }).sessionId;
+	const unwatchedBench = await rig.hub.claim(unwatchedId);
+	sabotagePersistence(unwatchedBench);
 
-	check("the run's own end reached the stream", (await running.waitForEvent("agent_end", 10_000)) !== undefined);
-	const frameTypes = running.frames.map((frame) =>
-		frame.type === "session_event" ? `event:${String(sessionEvent(frame))}` : frame.type,
-	);
+	const loggedAlone: string[] = [];
+	console.error = (...parts: unknown[]) => {
+		loggedAlone.push(parts.map(String).join(" "));
+	};
+	rig.transport.setResponses([fakeAssistantMessage("also never lands")]);
+	check("the prompt was accepted", (await prompt(rig.url, unwatchedId, "this run fails alone")) === 202);
+	// Acceptance edge 3's server-side half: no lane is open on this session anywhere, so what keeps it
+	// alive is the run and nothing else. The bench claim goes back first, on purpose — held, it would
+	// be the thing answering this question instead of the run, which is exactly the assertion the
+	// hand-off for this section exists to make. The reap that follows has nothing to settle through
+	// but the run itself, so the session is still here.
+	rig.hub.release(unwatchedBench);
 	check(
-		"the terminal frame came after it",
-		frameTypes.indexOf("stream_end") > frameTypes.indexOf("event:agent_end"),
-		frameTypes.join(","),
-	);
-	check("and the response ended right after it", await running.waitForEnd());
-	check(
-		"the session is reaped once the run is over",
-		await until(() => !rig.hub.live.includes(rig.session.id), PAST_RELEASE_GRACE_MS),
+		"a run nobody watches still holds its own session open",
+		rig.hub.live.includes(unwatchedId),
 		rig.hub.live.join(","),
 	);
+	// The run's end is observable without any lane: the read path answers `submitting: false` once
+	// the loop has finished. Only then is the log capture closed — restoring it earlier would race
+	// the failure out of the window it is meant to watch. (A hand-rolled poll, because `until` takes
+	// a synchronous predicate and an async one would be read as always-true.)
+	const settleDeadline = Date.now() + 10_000;
+	for (;;) {
+		const read = await request(rig.url, "GET", `/api/sessions/${encodeURIComponent(unwatchedId)}`);
+		if (((read.payload as { session?: { submitting?: boolean } }).session?.submitting ?? true) === false) break;
+		if (Date.now() > settleDeadline) break;
+		await sleep(50);
+	}
+	console.error = realError;
+
+	check("no lane existed to announce on, and the log line went out anyway", loggedAlone.length > 0, JSON.stringify(loggedAlone));
+	check("and nothing leaked: the session was reaped", await until(() => !rig.hub.live.includes(unwatchedId), 10_000), rig.hub.live.join(","));
 
 	// ---------------------------------------------------------------------------------------------
-	// A stream attached *to* a run is ended by that run, not by its own grace.
-	// ---------------------------------------------------------------------------------------------
-	process.stdout.write("a stream that attaches to a run already in flight\n");
-
-	// Long enough that the run is certainly still going when the second stream arrives.
-	rig.transport.setResponses([fakeAssistantMessage("a".repeat(4_000))]);
-	const first = await attach(rig.url, rig.session.id);
-	await first.waitFor("session");
-	check("the prompt was accepted", (await prompt(rig.url, rig.session.id, "long answer")) === 202);
-	check("the run started", (await first.waitForEvent("agent_start", 10_000)) !== undefined);
-
-	const second = await attach(rig.url, rig.session.id);
-	const opening = await second.waitFor("session");
-	check(
-		"attaching mid-run reports the run",
-		((opening?.session as { submitting?: boolean } | undefined)?.submitting ?? false) === true,
-		JSON.stringify(opening?.session),
-	);
-
-	// The idle grace is 150 ms; a stream that arrived on a session reporting `submitting: true` must
-	// still be here well after it, because what ends it is the run, not the grace.
-	await sleep(IDLE_GRACE_MS * 6);
-	check("and the idle grace does not end it", !second.ended);
-
-	check("the run's end ended the stream that started it", await first.waitForEnd(15_000));
-	check("and the one that attached to it", await second.waitForEnd(15_000));
-	check(
-		"both announced the end",
-		first.frames.some((frame) => frame.type === "stream_end") &&
-			second.frames.some((frame) => frame.type === "stream_end"),
-	);
-
-	// ---------------------------------------------------------------------------------------------
-	// A read while a run is in flight is still not a claim.
-	// ---------------------------------------------------------------------------------------------
-	process.stdout.write("reading a running session is not a claim either\n");
-
-	rig.transport.setResponses([fakeAssistantMessage("b".repeat(4_000))]);
-	const live = await attach(rig.url, rig.session.id);
-	await live.waitFor("session");
-	check("the prompt was accepted", (await prompt(rig.url, rig.session.id, "another long answer")) === 202);
-	check("the run started", (await live.waitForEvent("agent_start", 10_000)) !== undefined);
-
-	const beforeRead = claims;
-	const during = await read(rig.url, rig.session.id);
-	check("a read during a run answers", during.status === 200, `status=${during.status}`);
-	check("and reports the run", during.session?.submitting === true, String(during.session?.submitting));
-	check("the read took no claim of its own", claims === beforeRead, `claims=${claims - beforeRead}`);
-
-	// ---------------------------------------------------------------------------------------------
-	// Shutdown waits for nothing.
+	// 6. Shutdown waits for nothing.
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("shutdown waits for nothing\n");
+
+	rig.transport.setResponses([fakeAssistantMessage("d".repeat(600))]);
+	check("the prompt was accepted", (await prompt(rig.url, idleId, "a run for shutdown to stop")) === 202);
+	check("the run started", await until(() => rig.hub.live.includes(idleId), 5_000), rig.hub.live.join(","));
+
 	const started = Date.now();
 	await rig.close();
-	check("closing the server with a run in flight returns", Date.now() - started < 15_000, `${Date.now() - started} ms`);
+	check("closing with a run in flight and a lane attached returns", Date.now() - started < 5_000, `${Date.now() - started} ms`);
 	check("and no session is left running", rig.hub.live.length === 0, rig.hub.live.join(","));
-	await rm(root, { recursive: true, force: true });
 } catch (error) {
 	failures += 1;
 	process.stdout.write(`\nFAIL ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
@@ -289,117 +327,7 @@ try {
 	} catch {
 		// The rig may already be closed by the shutdown check above.
 	}
-	await rm(root, { recursive: true, force: true }).catch(() => {});
 } finally {
 	process.stdout.write(failures === 0 ? "\nstream ok\n" : `\n${failures} failure(s)\n`);
-	process.exit(failures === 0 ? 0 : 1);
-}
-
-// ---------------------------------------------------------------------------------------------------
-// The rig.
-// ---------------------------------------------------------------------------------------------------
-
-/** Attach to one session's stream over the real route. */
-async function attach(base: string, sessionId: string): Promise<Feed> {
-	const response = await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}/events`, {
-		headers: { accept: "text/event-stream" },
-	});
-	if (response.status !== 200 || !response.body) throw new Error(`the stream answered ${response.status}`);
-	return feed(response);
-}
-
-/** Whether one session's stream opens at all, and the status when it does not. */
-async function tryAttach(base: string, sessionId: string): Promise<{ status: number; body: string }> {
-	const response = await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}/events`, {
-		headers: { accept: "text/event-stream" },
-	});
-	const body = await response.text();
-	return { status: response.status, body };
-}
-
-/** Accept a prompt, which is answered before the run has done anything. */
-async function prompt(base: string, sessionId: string, text: string): Promise<number> {
-	const response = await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
-		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ text }),
-	});
-	return response.status;
-}
-
-/** One read of a snapshot: the window's path for a session, and the cold path under it. */
-async function read(base: string, sessionId: string): Promise<{ status: number; session?: SessionSnapshot }> {
-	const response = await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}`, {
-		headers: { accept: "application/json" },
-	});
-	if (!response.ok) return { status: response.status };
-	const body = (await response.json()) as { session: SessionSnapshot };
-	return { status: response.status, session: body.session };
-}
-
-/** The inner event of a `session_event` frame, or undefined for any other frame. */
-function sessionEvent(frame: Frame): string | undefined {
-	if (frame.type !== "session_event") return undefined;
-	return (frame.event as { type?: string } | undefined)?.type;
-}
-
-/**
- * One isolated server: the real hub, the real routes, and a session on a scripted transport.
- *
- * Only the model is a stand-in. The session is created through `POST /api/sessions` and opened through
- * `hub.claim`, so every claim below — the stream's, the read's, the request's — is a real claim through
- * the real hub, and the registry's idle grace is the one under test rather than a guess about
- * production's fifteen seconds.
- */
-async function openRig(port: number): Promise<Rig> {
-	const hub = new SessionHub({ cwd: root });
-	hub.setUserModels(rows);
-
-	const streams = createStreamRegistry(hub, { idleGraceMs: IDLE_GRACE_MS });
-	const router = new Router(
-		createRoutes({
-			system: new SystemController(hub),
-			sessions: new SessionController(hub, {
-				onRunFailure: (sessionId, message) => streams.announce(sessionId, message),
-				onApproval: (toolCallId, approved) => streams.rememberApproval(toolCallId, approved),
-			}),
-			events: new EventController(streams, hub),
-		}),
-	);
-	const handle = await createServer({ router, clientDir: "packages/web/dist" });
-	await new Promise<void>((listen) => handle.server.listen(port, "127.0.0.1", listen));
-	const url = `http://127.0.0.1:${port}`;
-
-	// The one thing a smoke has to add to the real hub: the transport. Sessions are built inside
-	// `SessionHub.open`, so there is no option to hand a double to, and this seam is what keeps the
-	// paths under test — creation, claiming, streaming, reading — the production ones. Only the model
-	// is scripted; a session that is reopened later gets the same double.
-	// Kept slow enough that a run is observably in flight: every check below that reads a session *during*
-	// a run is racing a scripted answer otherwise, and a race is not what is being tested here.
-	const transport = createFakeTransport({ tokensPerSecond: 300 });
-	const open = (hub as unknown as { open(id: string): Promise<HostedSession> }).open.bind(hub);
-	(hub as unknown as { open(id: string): Promise<HostedSession> }).open = async (id: string) => {
-		const host = await open(id);
-		(host.session as unknown as { api: unknown }).api = transport.api;
-		return host;
-	};
-
-	const created = await fetch(`${url}/api/sessions`, { method: "POST" });
-	const { sessionId } = (await created.json()) as { sessionId: string };
-	// Claimed and released, so the checks below start from the state the window is normally in: a
-	// session that exists on disk and is running nothing. Reading it is then the cold path.
-	const session = await hub.claim(sessionId);
-	hub.release(session);
-
-	return {
-		url,
-		hub,
-		session,
-		transport,
-		close: async () => {
-			await streams.close();
-			await hub.close();
-			await handle.close();
-		},
-	};
+	process.exitCode = failures === 0 ? 0 : 1;
 }

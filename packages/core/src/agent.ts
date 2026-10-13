@@ -854,13 +854,25 @@ export class Agent {
 		this.rememberWrite(message, "prompt");
 		this.emitQueueUpdate();
 		this.publish();
-		await this.loop.prompt([message]);
-		// `agent_end` is the last *event* of a run, but the run is not over until the loop has finished
-		// with it — `loop.state.isStreaming` stays true through every awaited listener for that event and
-		// is cleared only in the loop's own `finally`. So this is the first moment `submitting` is false,
-		// and without publishing here nothing ever reports it: a subscriber to {@link onChange} would
-		// keep reading `true` for a run that had ended, which is exactly what a stream needs to know.
-		this.publish();
+		try {
+			await this.loop.prompt([message]);
+		} finally {
+			// `agent_end` is the last *event* of a run, but the run is not over until the loop has finished
+			// with it — `loop.state.isStreaming` stays true through every awaited listener for that event
+			// and is cleared only in the loop's own `finally`. So this is the first moment `submitting` is
+			// false, and without publishing here nothing ever reports it: a subscriber to {@link onChange}
+			// would keep reading `true` for a run that had ended, which is exactly what a stream needs to
+			// know.
+			//
+			// In a `finally` rather than after the `await`, because the two ends of a run reach this point
+			// by different roads: a run that ends normally falls through, but a run whose own failure
+			// handling rejected — the persistence that reports the failure is the persistence that broke —
+			// arrives here as a rejection, and a publish placed after the `await` would be skipped by
+			// exactly the run that most needs the frame. Every end path a run has goes through this one
+			// block; the error frame that may precede it is announced by the caller that learns of the
+			// rejection, not by the session.
+			this.publish();
+		}
 	}
 
 	/**
