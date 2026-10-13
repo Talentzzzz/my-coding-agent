@@ -89,7 +89,13 @@ Status: charting
 
 - **`docs/architecture.md` 的哪几节要重写**：`## 谁拥有一个会话`、`## wire`、`## API`、`## 与原计划的偏离` 至少四节。
 - **leaf 在内存**（`docs/notes.md:67-80`）**已由票 18 钉死为"一条 `leaf` 状态 entry"**，落地清单在票 18 的 Answer（唯一的生产代码文件是 `session-manager.ts`）。这里原来那句"票 09 先装了守卫"要更正：票 09 只产出决定、守卫从未落地，且票 18 判定它的判据在 leaf entry 落地后不可定义——决定 8 划掉，守卫永不落地。`docs/notes.md` §三 与 `docs/architecture.md` 的"未决"一节今天说的仍是事实，随落地票一起改写。
-- **审批答案挂在哪个键上**：票 13 修掉了"共享 `Set` 被每条流各自 `delete`"，但那张表**仍按 `toolCallId` 单独索引、不带会话身份**，所以两个同时停在审批上的会话撞上同一个 id 就会串（有些 Anthropic 兼容端点是按对话编号 `call_0` / `call_1` 的）。**已开成票 19**；它与票 09 记的"`stream-registry.ts` 怎么退场"很可能是同一件事的两面——新模型里订阅表本来就按会话存条目。
+- **审批答案挂在哪个键上**：**【2026-10-13 票 19 已解决，修在今天】**答案表改为嵌套
+  `Map<sessionId, Map<toolCallId, ShownApproval>>`（`showing` 计数随 entry 分层），
+  `SessionListener.onApproval` 加宽带上 `sessionId`，与 `onRunFailure(sessionId, message)` 一致；
+  复现段落在票 15 摆好的 rig 上（两个会话、同一个脚本化 `toolCallId`、abort 那一侧不得读到另一侧的
+  准予）。mux 落地时这张表并入按会话存条目的订阅表（键随 `Subscription` 落位，是搬运不是返工），
+  登记在票 09 的 Comments；会话内 `toolCallId` 唯一是全树假定的契约（`Agent.pendingApprovals` 按 id
+  建 Map），写在 stream-registry 差值表声明处。
 - **D1 的连带面**：`GET /api/sessions/current` 继续创建会话、且"读形状的请求带写副作用"（`:44`、`:48`）。审计发现刷新会丢掉"我在看哪个会话"，而 `docs/architecture.md:244` 声称这件事由 URL 记住——代码不这样做。这会不会顶到 D1，取决于票 03 与票 04。**票 03 已答**：窗口形态是并排两栏，所以要恢复的不再是"一个会话"，而是**两栏各自在看谁**——这个连带面因此变重了，不是变轻。**票 09 补一条约束**：每页加载只调一次 `/api/sessions/current`（栏 2 没有会话时保持空，重连只按 id 重放 `open`），所以无历史时"打开应用写下一个头文件"的频率不变，仍是**一次**。
 - **客户端遗留**：`packages/web/src/api.ts` 的 `exists()` 无调用者（`docs/notes.md:118`）；`packages/server/package.json` 那句过时的 `description: "HTTP and WebSocket transport…"`——全仓库唯一把 WebSocket 说成本项目传输的地方。
 - **心跳帧的参数**：票 07 定了**有一条**连接级应用层心跳、载在 `{ streamId: null, … }`、间隔 5000 ms、客户端容差 3×（15000 ms）；服务端的协议层 ping 沿用 DSH 的参数（2000 ms / 容忍 2 次 / 第三次 `terminate()`）。**【2026-10-13 票 17 复核完毕，参数不动】**：浏览器对每条 ping 都**尽快**回 pong（实测 123/123、RTT 0–1 ms，含窗口被后台节流的那 20 秒），但 RFC 只承诺 MUST 回 + SHOULD 快，且 §5.5.3 **明确允许合并 pong**，所以容忍 2 次是有依据的下限、不能降到 1；`ws` 的 `ping()`/`'pong'` 在 Node 22.19 上与 24.15 上语义一致；隐藏窗口里**应用层帧照样按节奏到**（两配置下 123 帧、最大间隔 216 ms），被节流到 1 Hz 的只有**渲染器自己的定时器**，所以 15000 ms 的 watchdog 最多晚约 1 秒；服务端停滞上限 (10 s) < 客户端 watchdog (15 s) 这条不等式**成立**。

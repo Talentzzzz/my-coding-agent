@@ -88,7 +88,7 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 			system: new SystemController(hub),
 			sessions: new SessionController(hub, {
 				onRunFailure: (sessionId, message) => streams.announce(sessionId, message),
-				onApproval: (toolCallId, approved) => streams.rememberApproval(toolCallId, approved),
+				onApproval: (sessionId, toolCallId, approved) => streams.rememberApproval(sessionId, toolCallId, approved),
 			}),
 			events: new EventController(streams, hub),
 		}),

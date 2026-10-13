@@ -74,15 +74,17 @@ export interface StreamRegistry {
 	 */
 	announce(sessionId: string, message: string): void;
 	/**
-	 * Note how an approval was answered, for the frames that report it back.
+	 * Note how one session's approval was answered, for the frames that report it back.
 	 *
 	 * Nothing else holds this by the time those frames go out: answering takes the request out of the
 	 * session, so the change that publishes it says only that something left, and every stream would
 	 * otherwise read its own difference as a denial. Set by the approvals endpoint, read by *every*
-	 * stream still showing that request — a second window or a script learns the answer it did not
-	 * give — and kept only while one of them is.
+	 * stream watching that session and still showing the request — a second window or a script learns
+	 * the answer it did not give — and kept only while one of them is. The answer is keyed to the
+	 * session it was given on, because a `toolCallId` two sessions happen to share is two approvals,
+	 * not one fact.
 	 */
-	rememberApproval(toolCallId: string, approved: boolean): void;
+	rememberApproval(sessionId: string, toolCallId: string, approved: boolean): void;
 	/** End every stream and let go of every claim, so a closing process waits for nothing. */
 	close(): Promise<void>;
 }
@@ -155,11 +157,18 @@ export function createStreamRegistry(hub: SessionHub, options: StreamRegistryOpt
 			 *
 			 * Every one of them is registered as shown: this stream is now a reader of the answer to
 			 * it, which is the only thing that keeps an answer around.
+			 *
+			 * Keyed by `toolCallId`, which is assumed unique within one session — the contract every
+			 * reader of these ids already runs on (`Agent.pendingApprovals` is a map keyed the same
+			 * way, and an answer to the id answers that one call). A provider that repeated an id
+			 * within a session would break that contract, and with it more than this table; the
+			 * cross-session collision is a different fact, and the one the answers table below keys
+			 * its entries against.
 			 */
 			const pending = new Map<string, PendingApproval>();
 			for (const approval of opening.pendingApprovals) {
 				pending.set(approval.toolCallId, approval);
-				answers.show(approval.toolCallId);
+				answers.show(host.id, approval.toolCallId);
 			}
 
 			let released = false;
@@ -170,7 +179,7 @@ export function createStreamRegistry(hub: SessionHub, options: StreamRegistryOpt
 				for (const off of unsubscribe) off();
 				// Whatever this stream was still showing, nobody here will report it now: an answer
 				// waiting only for readers that are gone is an answer with no reason to be kept.
-				for (const toolCallId of pending.keys()) answers.hide(toolCallId);
+				for (const toolCallId of pending.keys()) answers.hide(host.id, toolCallId);
 				detach(host.id, stream);
 				hub.release(host);
 			};
@@ -241,7 +250,7 @@ export function createStreamRegistry(hub: SessionHub, options: StreamRegistryOpt
 					// A pending approval is published by the session as a change like any other, so this
 					// is where the browser learns to show the banner. The snapshot above only seeds the
 					// approvals that were already waiting when this stream attached.
-					sendApprovalChanges(stream, pending, snapshot, answers);
+					sendApprovalChanges(host.id, stream, pending, snapshot, answers);
 
 					// Rule 1: the run this stream was following is over, so the stream is too. The change
 					// that reports `submitting: false` is the last one a run produces, so this lands after
@@ -276,8 +285,8 @@ export function createStreamRegistry(hub: SessionHub, options: StreamRegistryOpt
 			for (const stream of watchers.get(sessionId) ?? []) stream.send({ type: "error", message });
 		},
 
-		rememberApproval(toolCallId: string, approved: boolean): void {
-			answers.remember(toolCallId, approved);
+		rememberApproval(sessionId: string, toolCallId: string, approved: boolean): void {
+			answers.remember(sessionId, toolCallId, approved);
 		},
 
 		async close(): Promise<void> {
@@ -328,8 +337,12 @@ function sendEntry(host: HostedSession, stream: EventStream, entryId: string): v
  *
  * Nothing here is consumed for the session as a whole: an approval is read and let go of per stream,
  * so each stream watching it reports the same answer rather than racing the others for one copy.
+ * Every read and every count goes through `sessionId`, because the session is what scopes an answer:
+ * a `toolCallId` another session happens to also be waiting on is that session's question, not this
+ * answer's reader.
  */
 function sendApprovalChanges(
+	sessionId: string,
 	stream: EventStream,
 	pending: Map<string, PendingApproval>,
 	snapshot: SessionSnapshot,
@@ -340,12 +353,12 @@ function sendApprovalChanges(
 	for (const [toolCallId, approval] of current) {
 		if (pending.has(toolCallId)) continue;
 		stream.send({ type: "tool_approval_request", request: approval });
-		answers.show(toolCallId);
+		answers.show(sessionId, toolCallId);
 	}
 	for (const toolCallId of pending.keys()) {
 		if (current.has(toolCallId)) continue;
-		stream.send({ type: "tool_approval_settled", toolCallId, approved: answers.wasApproved(toolCallId) });
-		answers.hide(toolCallId);
+		stream.send({ type: "tool_approval_settled", toolCallId, approved: answers.wasApproved(sessionId, toolCallId) });
+		answers.hide(sessionId, toolCallId);
 	}
 
 	pending.clear();
@@ -362,16 +375,20 @@ function sendApprovalChanges(
  * empty room has no frame to be reported on, and holding one would only make it outlive the process
  * that was told, one unanswered question at a time. The same count is what lets go of an answer that
  * was given while a window was open, once every window showing it has reported it.
+ *
+ * The entries live one table per session, because the answer is the session's fact before it is any
+ * stream's: a tool call the model numbered the same way in two sessions — several Anthropic-compatible
+ * endpoints do — is two approvals, and one of them being granted must never reach the other's window.
  */
 interface ApprovalAnswers {
 	/** Note an answer, for the streams that will report it — and only when one of them can. */
-	remember(toolCallId: string, approved: boolean): void;
+	remember(sessionId: string, toolCallId: string, approved: boolean): void;
 	/** How this approval was answered. Denied is the answer when nothing recorded one. */
-	wasApproved(toolCallId: string): boolean;
+	wasApproved(sessionId: string, toolCallId: string): boolean;
 	/** One more stream is showing this approval. */
-	show(toolCallId: string): void;
+	show(sessionId: string, toolCallId: string): void;
 	/** One stream is done with it, dropping it once no stream is left to report the answer. */
-	hide(toolCallId: string): void;
+	hide(sessionId: string, toolCallId: string): void;
 }
 
 /** One approval a stream has on screen: the answer to report, and how many streams will report it. */
@@ -383,27 +400,34 @@ interface ShownApproval {
 }
 
 function createApprovalAnswers(): ApprovalAnswers {
-	const shown = new Map<string, ShownApproval>();
+	/** Per session, the approvals one of its streams has on screen. */
+	const shown = new Map<string, Map<string, ShownApproval>>();
 
 	return {
-		remember(toolCallId, approved) {
-			const approval = shown.get(toolCallId);
+		remember(sessionId, toolCallId, approved) {
+			const approval = shown.get(sessionId)?.get(toolCallId);
 			if (approval === undefined) return;
 			approval.approved = approved;
 		},
-		wasApproved(toolCallId) {
-			return shown.get(toolCallId)?.approved ?? false;
+		wasApproved(sessionId, toolCallId) {
+			return shown.get(sessionId)?.get(toolCallId)?.approved ?? false;
 		},
-		show(toolCallId) {
-			const approval = shown.get(toolCallId);
-			if (approval === undefined) shown.set(toolCallId, { approved: false, showing: 1 });
+		show(sessionId, toolCallId) {
+			const perSession = shown.get(sessionId) ?? new Map<string, ShownApproval>();
+			if (!shown.has(sessionId)) shown.set(sessionId, perSession);
+			const approval = perSession.get(toolCallId);
+			if (approval === undefined) perSession.set(toolCallId, { approved: false, showing: 1 });
 			else approval.showing += 1;
 		},
-		hide(toolCallId) {
-			const approval = shown.get(toolCallId);
-			if (approval === undefined) return;
+		hide(sessionId, toolCallId) {
+			const perSession = shown.get(sessionId);
+			const approval = perSession?.get(toolCallId);
+			if (perSession === undefined || approval === undefined) return;
 			approval.showing -= 1;
-			if (approval.showing <= 0) shown.delete(toolCallId);
+			if (approval.showing <= 0) perSession.delete(toolCallId);
+			// The same hygiene the per-session entry got: a table with nothing left in it is a
+			// session's answer-holder with no reason to outlive its last reader.
+			if (perSession.size === 0) shown.delete(sessionId);
 		},
 	};
 }

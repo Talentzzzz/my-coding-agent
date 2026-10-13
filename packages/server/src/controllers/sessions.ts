@@ -41,11 +41,13 @@ function settingsOf(manager: SettingsManager): SettingsSnapshot {
  *
  * Both are consequences of the split between a request and a stream: a run's failure has no response
  * left to be reported on, and an answer to an approval has to reach every stream watching the
- * session, not only the client that gave it.
+ * session, not only the client that gave it. Both therefore name the session they belong to: the
+ * answer is keyed to the session it was given on, and a `toolCallId` another session happens to also
+ * wait on is that session's question, not this answer's.
  */
 export interface SessionListener {
 	onRunFailure?(sessionId: string, message: string): void;
-	onApproval?(toolCallId: string, approved: boolean): void;
+	onApproval?(sessionId: string, toolCallId: string, approved: boolean): void;
 }
 
 /**
@@ -454,7 +456,7 @@ export class SessionController {
 			// Recorded before the session is told, not after: answering publishes the change, and the
 			// frame that reports the answer is built from the session's own change notification — which
 			// therefore runs before this method gets control back.
-			this.listeners.onApproval?.(toolCallId, approved);
+			this.listeners.onApproval?.(sessionId, toolCallId, approved);
 			session.approve(toolCallId, approved);
 			return { toolCallId, approved };
 		});

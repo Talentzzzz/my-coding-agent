@@ -233,3 +233,11 @@ leaf entry 落地之后**不可定义**——每次移动都写下一条 entry�
 leaf 的落法（一条 `leaf` 状态 entry，`buildIndex()` 重放）见票 18 的 Answer；本票决定 1（"reap 只听
 claim"）从此第一次没有脚注。票 15 登记的那条冒烟断言的最终形式也记在了票 18（移动后不 attach、等回
 收、冷读报出移动后的 leafId——"因为 leaf 落盘了"）。
+
+**2026-10-13，票 19 解决时追加（本票的 Answer 一字未改；只登记一条归落地清单的事项）**：
+
+票 19 把审批答案表按 `sessionId + toolCallId` 键控（嵌套 `Map<sessionId, Map<toolCallId, …>>`，
+`SessionListener.onApproval` 加宽带上 `sessionId`），并把"修在今天、不随落地消失"的决定与理由记在
+它自己的 Answer 第 3 节。这里只登记它指给落地的那一条：**mux 落地把审批答案并入按会话存条目的订阅
+表时，键随 `Subscription` 落位，这张嵌套表退场**（票 19 Answer 的形状恰好就是订阅层要的形状，是搬运
+不是返工）；`scripts/smoke-approval.ts` 那段"两个会话不得串号"的断言**保留**，换运载不改语义。

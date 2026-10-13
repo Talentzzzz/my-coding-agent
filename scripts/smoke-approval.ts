@@ -93,7 +93,7 @@ const router = new Router(
 		system: new SystemController(hub),
 		sessions: new SessionController(hub, {
 			onRunFailure: (sessionId, message) => streams.announce(sessionId, message),
-			onApproval: (toolCallId, approved) => streams.rememberApproval(toolCallId, approved),
+			onApproval: (sessionId, toolCallId, approved) => streams.rememberApproval(sessionId, toolCallId, approved),
 		}),
 		events: new EventController(streams, hub),
 	}),
@@ -292,6 +292,95 @@ try {
 	}
 } finally {
 	clearTimeout(sharedWatchdog);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// One id, two sessions: an answer belongs to the session it was given on.
+//
+// The defect this pins: the answers table was keyed by toolCallId alone and shared by every session
+// on the registry, so two sessions whose providers happened to number their calls the same way —
+// several Anthropic-compatible endpoints do (`call_0`, `call_1`) — shared one entry. Answering the
+// first wrote the grant into it; the second session's identical approval then leaving any other way
+// read that same entry and reported the first session's answer as its own. The wire's own random
+// `toolu_…` ids only make the collision improbable, never impossible, so the scripted transports are
+// told to hand both sessions the same id: the case the random ids hide.
+// ---------------------------------------------------------------------------------------------------
+
+process.stdout.write("\nan answer reaches only the session it was given on\n");
+
+const crossWatchdog = setTimeout(() => {
+	process.stdout.write("\nFAIL the shared-id checks did not settle within 60 s\n");
+	process.exit(1);
+}, 60_000);
+
+try {
+	const cross = await openCrossRig(8092);
+	try {
+		const [first, second] = cross.sessions;
+		const firstStream = await attach(`${cross.url}/api/sessions/${first.id}/events`);
+		const secondStream = await attach(`${cross.url}/api/sessions/${second.id}/events`);
+		const openings = await Promise.all([
+			firstStream.pump((frame) => frame.type === "session"),
+			secondStream.pump((frame) => frame.type === "session"),
+		]);
+		check("two sessions on one registry are both watchable", openings.every((frame) => frame !== undefined));
+
+		for (const parked of cross.sessions) {
+			const accepted = await fetch(`${cross.url}/api/sessions/${parked.id}/messages`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ text: "read the notes" }),
+			});
+			if (accepted.status !== 202) throw new Error(`the prompt was not accepted: ${accepted.status}`);
+		}
+
+		await Promise.all([
+			firstStream.pump((frame) => frame.type === "tool_approval_request"),
+			secondStream.pump((frame) => frame.type === "tool_approval_request"),
+		]);
+		const firstId = firstStream.approvals[0]?.toolCallId ?? "";
+		const secondId = secondStream.approvals[0]?.toolCallId ?? "";
+		check(
+			"and both approvals carry the same toolCallId",
+			firstId.length > 0 && firstId === secondId,
+			`${firstId} vs ${secondId}`,
+		);
+		if (firstId.length === 0 || firstId !== secondId) {
+			throw new Error("the two sessions did not park on the same id, so the rest of this test cannot run");
+		}
+
+		const granted = await fetch(
+			`${cross.url}/api/sessions/${first.id}/approvals/${encodeURIComponent(firstId)}`,
+			{ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ approved: true }) },
+		);
+		check("the first session's answer was accepted", granted.status === 200, `status ${granted.status}`);
+
+		// The second session's identical id leaves the other way: an abort denies it, and the frame
+		// that takes its banner down is built from that denial — never from the first session's grant.
+		const stopped = await fetch(`${cross.url}/api/sessions/${second.id}/abort`, { method: "POST" });
+		check("the second session was aborted", stopped.status === 200, `status ${stopped.status}`);
+
+		await Promise.all([
+			firstStream.pump((frame) => frame.type === "tool_approval_settled"),
+			secondStream.pump((frame) => frame.type === "tool_approval_settled"),
+		]);
+
+		const reported = [firstStream, secondStream].map(
+			(stream) => stream.settled.find((frame) => frame.toolCallId === firstId)?.approved,
+		);
+		check("the answered session was told its own grant", reported[0] === true, JSON.stringify(reported));
+		check(
+			"the aborted session was told a denial, not the other session's grant",
+			reported[1] === false,
+			JSON.stringify(reported),
+		);
+
+		await Promise.all([firstStream.cancel(), secondStream.cancel()]);
+	} finally {
+		await cross.close();
+	}
+} finally {
+	clearTimeout(crossWatchdog);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -550,7 +639,7 @@ async function openRig(approvalGraceMs: number, port: number): Promise<Rig> {
 			system: new SystemController(hub),
 			sessions: new SessionController(hub, {
 				onRunFailure: (sessionId, message) => streams.announce(sessionId, message),
-				onApproval: (toolCallId, approved) => streams.rememberApproval(toolCallId, approved),
+				onApproval: (sessionId, toolCallId, approved) => streams.rememberApproval(sessionId, toolCallId, approved),
 			}),
 			events: new EventController(streams, hub),
 		}),
@@ -577,6 +666,71 @@ async function openRig(approvalGraceMs: number, port: number): Promise<Rig> {
 		},
 	};
 	return rig;
+}
+
+interface CrossRig {
+	/** Two sessions on one hub, each parked on the same scripted toolCallId once prompted. */
+	sessions: Awaited<ReturnType<typeof openAgent>>[];
+	url: string;
+	close(): Promise<void>;
+}
+
+/**
+ * One server, two sessions, one answers table between them: the shape under test.
+ *
+ * Each session runs a scripted transport of its own, but both are told the same toolCallId — the
+ * collision a random-id provider only makes improbable. Both are mounted the way `SessionHub.open()`
+ * mounts one, so the answers table they share is the real registry's.
+ */
+async function openCrossRig(port: number): Promise<CrossRig> {
+	const root = await mkdtemp(join(tmpdir(), "my-agent-approval-cross-"));
+	const hub = new SessionHub({ cwd: root, approvalGraceMs: 60_000 });
+	const sessions: Awaited<ReturnType<typeof openAgent>>[] = [];
+	for (let index = 0; index < 2; index++) {
+		const transport = createFakeTransport();
+		transport.setResponses([
+			// The same id from both transports: what a provider that numbers its calls does to two
+			// sessions parked at once, and what the wire's random ids only make improbable.
+			fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" }, { id: "call_shared" })),
+			fakeAssistantMessage("done"),
+		]);
+		const session = await openAgent({
+			workspaceRoot: root,
+			sessionManager: SessionManager.create(root),
+			models,
+			api: transport.api,
+			model: modelRef,
+			settingsManager: SettingsManager.inMemory({ approval: { read: true } }),
+		});
+		(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(session.id, new HostedSession(session, root));
+		sessions.push(session);
+	}
+
+	const streams = createStreamRegistry(hub);
+	const router = new Router(
+		createRoutes({
+			system: new SystemController(hub),
+			sessions: new SessionController(hub, {
+				onRunFailure: (sessionId, message) => streams.announce(sessionId, message),
+				onApproval: (sessionId, toolCallId, approved) => streams.rememberApproval(sessionId, toolCallId, approved),
+			}),
+			events: new EventController(streams, hub),
+		}),
+	);
+	const handle = await createServer({ router, clientDir: "packages/web/dist" });
+	await new Promise<void>((listen) => handle.server.listen(port, "127.0.0.1", listen));
+
+	return {
+		sessions,
+		url: `http://127.0.0.1:${port}`,
+		close: async () => {
+			await streams.close();
+			await hub.close();
+			await handle.close();
+			await rm(root, { recursive: true, force: true });
+			await rm(workspaceDir(root), { recursive: true, force: true }).catch(() => {});
+		},
+	};
 }
 
 /**
