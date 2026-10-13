@@ -15,9 +15,9 @@ Anthropic Messages）和 `packages/agent`（pi 的 agent 循环、工具执行�
 packages/ai       vendored 传输层，只剩 src/api/anthropic-messages.ts；@ts-nocheck
 packages/agent    vendored 循环：四个文件，Loop / LoopState（上游叫 Agent / AgentState）
 packages/core     无头 agent：模型、工具、会话管理器、系统提示词、上下文。没有传输层
-packages/server   node:http、REST + SSE、活跃会话；boot.ts 是整个服务器，main.ts 是 CLI
+packages/server   node:http、REST 命令 + 一条常驻 WebSocket mux、活跃会话；boot.ts 是整个服务器，main.ts 是 CLI
 packages/desktop  Electron 外壳：进程内启动服务器，让一个窗口指向它
-packages/web      Vite + TypeScript 窗口客户端。渲染事件流
+packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的逻辑流
 ```
 
 ## 术语
@@ -81,9 +81,11 @@ packages/web      Vite + TypeScript 窗口客户端。渲染事件流
   客户端被打包。
 - 相对 import 带 `.ts` 扩展名；只用可擦除语法（没有 `enum`、`namespace`、参数属性），tsconfig 强制。
 - 缩进用 tab，双引号，分号；除非第三方类型所迫，不用 `any`。
-- **文档与注释用中文。** `docs/`、`README.md`、`AGENTS.md` 与源码注释一律中文；代码标识符、路径、
-  命令、API 名、线上协议保持英文。窗口文案直接写简体中文（只有一个 locale），状态行的 `total`、
-  `cache`、`context` 保持英文。
+- **文档用中文，源码注释用英文。** `docs/`、`README.md`、`AGENTS.md` 一律中文；代码标识符、路径、
+  命令、API 名、线上协议保持英文。源码注释用英文——这是整棵树的约定，新写的代码照此（既有的两个例外
+  是 `scripts/wire/client.ts` 与 `proxy.ts` 的中文注释，见 `.scratch/mux-landing/issues/08-smoke-wire.md`
+  的登记）。面向人的字符串按用到它的地方写：窗口文案是简体中文（只有一个 locale），诊断日志（服务端
+  与客户端，多为 `mux: ` 前缀）也是简体中文，状态行的 `total`、`cache`、`context` 保持英文。
 - 工具失败即抛出：一个抛出的工具会被作为错误结果报告给模型。
 - 每个工具路径都经过 `Workspace.resolve()`，好让它留在工作区内部。
 
@@ -114,7 +116,8 @@ UTF-8 文件的行连起来、把每一个非 ASCII 字符换成 `?`。
 - 子代理是**一对工具**，不是机制：没有供应商注册表、没有嵌套生成、没有新协议。发现自己想加其中
   任何一样时，停下来、去长现有的那一对。插件和 MCP 机制仍然不在范围内。
 - 加一个端点 = 控制器上一个方法 + `createRoutes()` 里一条记录：`Router` 之外没有东西解释 URL，
-  `SessionHub.claim()` 之外没有东西持有一个会话。
+  `SessionHub.claim()` 之外没有东西持有一个会话。**mux 的上行帧不是端点**——`open` / `cancel` 不走
+  URL，所以这条形状管不到它们，加一个帧类型也不违反它。
 - 改完代码跑 `npm run check` 和对应的 smoke（都不需要供应商密钥）：core 用 `scripts/smoke-tools.ts`，
   模型用 `smoke-models.ts`，会话注册表用 `smoke-sessions.ts`，HTTP 表面用 `smoke-api.ts`，wire 表面用
   `smoke-mux.ts`；清单见 README 的*验证一次构建*。

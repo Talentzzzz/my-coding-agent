@@ -27,9 +27,8 @@ export interface HubOptions {
 	 * silence as abandonment and denies it. Default ten minutes.
 	 *
 	 * An option rather than a constant only so a smoke can drive it in milliseconds; nothing else is
-	 * expected to set it. It is deliberately not `RELEASE_GRACE_MS`: that one is how long an ended
-	 * response outlives a browser's automatic reconnect, and "how long will a person take to come back
-	 * to a question" is a different question with a different answer.
+	 * expected to set it. Waiting on a person is its own question: it is deliberately not tied to any
+	 * other timer, because "how long will someone take to come back to a question" has its own answer.
 	 */
 	approvalGraceMs?: number;
 	/**
@@ -580,7 +579,7 @@ function feedsOf(host: HostedSession): SessionFeeds {
  *
  * A timer that is holding a session open is a timer that is holding the process open, and this one is
  * waiting on a person: `unref` is what keeps a parked approval from becoming a reason the server
- * cannot exit. Same pattern as the stream registry's reconnect grace.
+ * cannot exit. Same pattern as the mux's stall timer.
  */
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => {

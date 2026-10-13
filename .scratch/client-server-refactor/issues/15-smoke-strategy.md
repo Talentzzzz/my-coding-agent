@@ -562,3 +562,13 @@ REST 那一半（health / models 往返与重名 400 / settings 409 / 列表 / 4
 窗口之后移动还在"（本票第 1 问第 2 半）。配对的 `smoke-session.ts` 断言（close → reopen 移动仍在；
 没有 `leaf` entry 的旧文件按最后一条 entry 读）同在票 18 的清单里。落地时守卫**不写**：票 18 判定票
 09 决定 8 的判据在新世界里不可定义，从落地清单上划掉了。
+
+**2026-10-13，票 09 的文档改写收尾时追加**：ADR-0001 的*文档落点*登记在本票名下的那一问——"关停仍
+能完成的判据是'断言常驻连接下进程仍然能退出'，还是改用 `closeAllConnections()`"——**已由本票 Answer
+的决定 8 回答**（mux 自持 upgrade 后的 socket 并在 `close()` 里 `destroy()`，**不**拿
+`closeAllConnections()` 当机制；判据是"常驻连接 + 一个没人会回答的审批在场时 `close()` 在预算内返回，
+且不调用 `process.exit` 的进程自行退出"），并已被票 17 Comments 第 4 条实测坐实（`server.close()` 的
+回调与 `closeAllConnections()` **都**覆盖不到 upgrade 之后的 socket）。落地形式就在
+`scripts/smoke-boot.ts` 末尾：那条 `unref()` 的自然退出看门狗，加上子进程收 `SIGTERM` 在预算内
+`exit`。`docs/architecture.md` 的 `## 谁拥有一个会话` 已按研究票 02 的准确说法重写（不再是"一条泄漏的
+流就是一台关不掉的服务器"）。本票无剩余改动。

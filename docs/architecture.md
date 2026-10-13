@@ -1,27 +1,26 @@
 # 架构
 
-一个 Node 进程，一个窗口。agent、会话文件、以及供应商密钥都活在进程里；窗口只是它所服务的 REST API 的一个客户端。
-
-> **状态预告（2026-10-13）**：传输已决定改为一条常驻的 WebSocket mux（[ADR-0001](adr/0001-transport-websocket-mux.md)）；命令面留在 REST，abort 不帧化、不引入 ack/requestId，mux 上行 `cancel` 帧只用于取消订阅（边界见 `.scratch/mux-landing/issues/01-wire-boundary.md`）。本文写的仍是**现行 SSE 实况**，随落地票 `09-docs-rewrite` 一起改写。
+一个 Node 进程，一个窗口。agent、会话文件、以及供应商密钥都活在进程里；窗口只是它所服务的服务器的一个客户端。
 
 ```
 窗口 (packages/web)  --REST 命令-->  server (packages/server)  -->  core (packages/core)  -->  @my-agent/ai  -->  供应商
-                     <--一条 SSE 流--  每个 id 一个 Agent        @my-agent/agent 循环、工具、hook
+                     <--一条常驻 WebSocket--  每个 id 一个 Agent      @my-agent/agent 循环、工具、hook
+                        （其上是 N 条逻辑流）
 ```
 
 agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程；而读写文件是它的本职，浏览器做不到。工作区是这台机器上**真实的目录**，不是虚拟文件系统。
 
-命令用 `POST`，事件用一条 `GET .../events`，因为两个方向的性子不同：命令是每个用户动作一条，要的是状态码；事件是每秒多条，要的是有序且无缺口。值得点名的后果是 `abort` —— 它不是流上的一帧，所以卡住的标签页、一个脚本、另一个标签页，都能停掉同一次运行。
+命令用 `POST`，事件走一条**常驻的 WebSocket**（`/mux`），因为两个方向的性子不同：命令是每个用户动作一条，要的是状态码；事件是每秒多条、跨会话、要的是有序且无缺口。一条连接的生命周期是**连接**而不是某一次运行：它随标签页存活、跨多次运行、跨会话切换，其上的逻辑流身份是 `streamId`（就是会话 id）。值得点名的后果是 `abort` —— 它继续留在 REST 上（`POST /api/sessions/{id}/abort`），不是 mux 上的一帧，所以卡住的标签页、一个脚本、另一个标签页，都能停掉同一次运行；而"取消订阅"与"中止运行"是两回事，mux 上行的 `cancel` 帧只用来关掉一条逻辑流，从不中止运行（[ADR-0001](adr/0001-transport-websocket-mux.md)）。
 
-另一个后果是"命令的承诺在哪里结束"。`Agent.prompt()` 在**运行**结束时才 resolve，所以一个 await 它的控制器会把请求和它的 claim 一起攥上几分钟，然后在 `202` 所宣告的那件事结束时报 `202`。控制器的做法是启动运行然后立即返回；由流来报告它——**包括启动前就失败的运行**，因为到那时已经没有响应可供失败了。
+另一个后果是"命令的承诺在哪里结束"。`Agent.prompt()` 在**运行**结束时才 resolve，所以一个 await 它的控制器会把请求和它的 claim 一起攥上几分钟，然后在 `202` 所宣告的那件事结束时报 `202`。控制器的做法是启动运行然后立即返回；由订阅的流报告它——**包括启动前就失败的运行**，因为到那时已经没有响应可供失败了。
 
 ## 各 package 的职责
 
 **core** 是无头的：工作区、导入的模型、工具、会话管理器、系统提示词、审批闸门，对 HTTP 和 DOM 一无所知。它发出 `AgentSessionEvent` 值 —— @my-agent/agent 的 `AgentEvent`，加上它自己的成员：队列深度、压缩、entry 落地、配置变更、重试。
 
-**server** 拥有传输层和活跃会话：`SessionHub` 持有导入的模型和"每个会话 id 一个 `Agent`"，`Router` 把请求变成对某个控制器的一次调用，每个控制器在它做事期间持有 claim，`StreamRegistry` 在标签页的流存活期间持有一个。模型是**每次请求**都从 `models.json` 读，而不是缓存成一份目录；会话在每次请求前从它命名的那一行重新推导自己的模型，所以设置面板的一次编辑——密钥、端点、窗口、wire id——能抵达**每一个已经打开的会话**。
+**server** 拥有传输层和活跃会话：`SessionHub` 持有导入的模型和"每个会话 id 一个 `Agent`"，`Router` 把请求变成对某个控制器的一次调用，每个控制器在它做事期间持有 claim；`mux.ts` 的连接层持有一张订阅表（连接 × 会话），**订阅不拿 claim**；`projection.ts` 把"每个会话在做什么"聚成侧边栏的行。模型是**每次请求**都从 `models.json` 读，而不是缓存成一份目录；会话在每次请求前从它命名的那一行重新推导自己的模型，所以设置面板的一次编辑——密钥、端点、窗口、wire id——能抵达**每一个已经打开的会话**。
 
-**web** 拥有呈现：协议消息进，视图模型，DOM 出。它永远看不到供应商 SDK、transcript 文件、或服务器没发过来的任何路径。
+**web** 拥有呈现：协议消息进，视图模型，DOM 出。它持有一条常驻连接（`client.ts` 的 `MuxClient`），把每条逻辑流的帧喂给对应的一栏，把连接级载荷喂给侧边栏的行表。它永远看不到供应商 SDK、transcript 文件、或服务器没发过来的任何路径。
 
 | 层 | 归属 | 细节 |
 |---|---|---|
@@ -32,9 +31,9 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 | 工具 | 我们 | 基于 `node:fs` / `node:child_process` 的六个文件工具，加 `SubAgent` / `SubAgentControl` |
 | 会话持久化 | 我们 | `SessionManager`：一棵只追加的 JSONL entry 树 |
 | 提示词、压缩、剪枝 | 我们 | `context/system-prompt.ts`、`argtrim.ts`、`spill.ts`、`pruning.ts`、`compaction.ts` |
-| HTTP + SSE | 我们 | `node:http`：命令走 REST，事件走一条 `text/event-stream` |
+| HTTP + WebSocket | 我们 | `node:http`：命令走 REST，事件走一条常驻 WebSocket mux（`/mux`）；RFC6455 手写，不引入 `ws` 依赖 |
 | 桌面外壳 | 我们 + Electron | `packages/desktop`：窗口、标题栏、主题，以及进程内的服务器 |
-| 窗口 UI | 我们 | Vite + TypeScript，无框架，一个 DOM 渲染器架在事件流上 |
+| 窗口 UI | 我们 | Vite + TypeScript，无框架，一个 DOM 渲染器架在常驻通道上 |
 
 运行时依赖是三个包：`@my-agent/ai`、`@my-agent/agent`、`typebox`。前两个是 `@earendil-works/pi-ai` 与 `@earendil-works/pi-agent-core` 0.99.2 的 vendored 子集（`packages/ai`、`packages/agent`），只追踪到本项目真正触达的文件，并保留在 pi 自己的编译设置下（逐文件 `@ts-nocheck`；工作区更严格的根配置仍然检查每一个进入 core 的 import）。`pi-tui`、`pi-mcp`、`pi-codemode`、`pi-durable` 和 pico3 harness 都没有取用。
 
@@ -52,12 +51,14 @@ my-coding-agent/
     │                 #   workspace.ts、protocol.ts、session/（会话管理器）、context/（提示词、
     │                 #   argtrim、spill、pruning、compaction）、tools/（每工具一个文件 + 委派对）
     ├── server/src/   # @my-agent/server - 传输层：boot.ts、main.ts、http.ts、http/（routing.ts 是
-    │                 #   唯一读 URL 的地方）、controllers/（routes.ts 是 API 表）、stream-registry.ts、
-    │                 #   hub.ts（每个 id 一个 Agent）、cli.ts
+    │                 #   唯一读 URL 的地方，websocket.ts 是手写的 RFC6455，client-frame.ts 解析上行帧）、
+    │                 #   mux.ts（常驻连接、订阅表、写侧有界队列）、projection.ts（侧边栏行）、
+    │                 #   controllers/（routes.ts 是 API 表）、hub.ts（每个 id 一个 Agent）、cli.ts
     ├── desktop/      # @my-agent/desktop - Electron 外壳：main.cjs、preload.cjs、scripts/launch.mjs、
     │                 #   scripts/inspect.cjs
-    └── web/src/      # @my-agent/web - 窗口客户端：main.ts、api.ts、client.ts、state.ts、
-                      #   composer.ts、dom.ts、tokens.css、style.css、render/
+    └── web/src/      # @my-agent/web - 窗口客户端：main.ts、api.ts、client.ts（MuxClient）、
+                      #   rows.ts（连接级行表）、state.ts、composer.ts、dom.ts、tokens.css、
+                      #   style.css、render/
 ```
 
 ## 装配与设置
@@ -98,7 +99,7 @@ level 本身骑在模型上（`Model.thinkingLevel`，由 `modelFor(row, level)`
 3. 会话施加这个选择，追加用户消息，并调用 `Agent.prompt(message)` —— 或者，当一次运行正在流式时，调用 `Agent.steer` / `Agent.followUp`。
 4. `prepareRequest` 重读活行、记录移动了什么、从 `buildSessionContext()` 取得 transcript —— 压缩和分支就住在那里 —— 会话在它前面放一条新的打头 system 消息，`context` hook 施加在这一对之上，然后从 @my-agent/ai 开始流式。
 5. 工具调用到达：`beforeToolCall` 跑 `before_tool` hook，后者在设置要求时默认请求审批；`afterToolCall` 跑 `after_tool`，后者归档或约束结果。
-6. 每个会话事件都作为 `{ type: "session_event", event }` 转发给每一条打开的流。
+6. 每个会话事件都作为 `{ type: "event", event }` 发给每一条订阅了该会话的逻辑流；连接级的心跳与行表走 `streamId: null` 那条道。
 7. `message_end` 把消息持久化到 JSONL 文件；浏览器从事件增量修补它的 DOM。
 
 ## 工具契约
@@ -234,36 +235,38 @@ type AgentSessionEvent =
 
 ## 谁拥有一个会话
 
-`SessionHub`（`server/src/hub.ts`）为每个会话 id 运行**至多一个** `Agent`，放在一个按 id 索引的 map 里。一条事件流**不拥有**会话：它在一个会话上持有一次 **claim**，在它打开期间订阅，并在结束时释放 claim。一个会改变什么、或者必须跑在活跃会话上的请求，在**那次调用的长度内**持有一次 claim，所以一个会话可以在没人在看的情况下运行。
+`SessionHub`（`server/src/hub.ts`）为每个会话 id 运行**至多一个** `Agent`，放在一个按 id 索引的 map 里。**订阅不拥有会话**：一条逻辑流是 mux 订阅表里的一行（连接 × 会话），它不拿 claim、也不让会话保持打开。持有一个 claim 的只有两类，各在其长度内一个：**会改变会话的请求**，以及**在飞的运行**。所以一个会话可以在没人在看的情况下运行，而一个开着却闲置的窗口也不会替谁养着一个 `Agent`。
 
-读 transcript 不算在内。`SessionController.read()` 既不拿 claim 也不构建 `Agent`：`SessionHub.snapshotOf()` 在本进程运行该会话时从活对象回答，否则从它的 JSONL 文件回答，走的是装配路径用的同一个 `readSessionSnapshot()`——所以一次读取的代价是一次文件读取而不是一个会话，它既不能保活一个会话、也不能驱逐一个、更不会在 hub 里留下痕迹。
-
-```
-标签页 A 的流 ─┐
-                ├─ claim ─> HostedSession { session, claims }     id -> host     (SessionHub)
-一次请求      ─┘
-```
-
-每个 id 一个循环就是全部要点：**按流**来决策意味着同一个会话上的两个标签页会在一个 JSONL 文件上构建出两个 `Agent` 对象，并各自独立地追加。`SessionHub.claim()` 是唯一数 claim 的东西——流的 `StreamRegistry.open()`，请求的 `SessionController.claiming()`——而一个标签页落在哪个会话上由 URL 决定，带的是该标签页记住的 id，所以重载恢复的是它当时在看的那段对话，而不是 hub 会默认到的那个。
-
-一条流结束时，`StreamRegistry` 停止转发并释放 claim。它**刻意不**中止：正在飞的运行继续跑、继续持久化，所以刷新页面、关掉标签页、或切换会话都不可能截断一份 transcript。
-
-释放不是即时的，而这是这个传输层需要某种 socket 不需要的东西的**唯一**地方。浏览器在连接掉线后会自己重连 `EventSource`，所以当场释放会关掉会话，而重连会拿到一个全新重建的。因此 claim 比响应多活两秒，只有到那时才适用常规回收。等待从**客户端**离开时开始，**绝不是**从流打开时开始：一个在 attach 时启动的计时器会让每条流都在两秒后丢掉 claim，会话在它下面被回收，标签页则停在一条永远不会再带任何帧的、打开着的响应上。
+读 transcript 不算在内。`SessionController.read()` 既不拿 claim 也不构建 `Agent`：`SessionHub.snapshotOf()` 在本进程运行该会话时从活对象回答，否则从它的 JSONL 文件回答，走的是装配路径用的同一个 `readSessionSnapshot()`——所以一次读取的代价是一次文件读取而不是一个会话，它既不能保活一个会话、也不能驱逐一个、更不会在 hub 里留下痕迹。订阅也一样：`SessionHub.observe(sessionId, observer)` 只往观察表里挂一个观察者，观察者既不保活它看的会话，也不花钱跑它。
 
 ```
-响应结束  -> 启动 2s 宽限；在此期间重连则保持同一个 HostedSession
-宽限走完  -> 释放 -> claims--；若仍有 claim 剩余，停止
-回收      -> 未回答的审批停在这里，等待 approvalGraceMs
-             宽限走完、无回答、无 claim -> 拒绝它，让运行能结束并被回收
-             宽限内到达 claim -> 让开；答案仍然是他们的
-             settle()
-             -> 此期间有 claim 到达：保留该会话
-             -> 否则：从 map 里移除、close()，此后该 id 重新可用
+一条常驻连接 ─┐ 订阅表（连接 × 会话，不拿 claim）
+一次请求      ─┼─ claim ─> HostedSession { session, claims }     id -> host     (SessionHub)
+在飞的运行    ─┘
 ```
 
-这两个等待是**互不相关的数字**，从前碰巧是同一个。`RELEASE_GRACE_MS` 是一条已结束的响应比浏览器的自动重连多活多久；而"一个人回来回答一个问题要多久"是另一个问题，claim 回答不了它。claim 只说明有人**曾经**在看——所以一次停在审批上的运行，从前会在最后一个查看者切换会话的那一刻被拒绝，那是**替那个人**做出的推断，而他其实只差一次点击。因此一个有待回答审批的会话会停驻 `approvalGraceMs`（十分钟，`HubOptions`），之后才适用常规回收；而拒绝终于变成它本该一直是的样子：对一个**确实被遗弃**的审批的回答，好让一台合上的笔记本不能把一次运行永远停驻在那。在这段宽限内到达的 claim 就是那个人回来了，回收会完全让开，而不是去等一个只有他能回答的问题——`reaping` 被释放，好让他下一次释放能正常回收该会话。
+每个 id 一个循环就是全部要点：**把所有权按连接而不是按会话来决策**，就意味着同一个会话上的两个标签页会在一个 JSONL 文件上构建出两个 `Agent` 对象，并各自独立地追加。`SessionHub.claim()` 是唯一数 claim 的东西——改变会话的请求与在飞的运行都经过它——而订阅故意绕开它："这个请求必须跑在活跃会话上"（claim 回答的）与"这条连接要不要这个会话的内容"（订阅回答的）是两个永不互相换算的问题（[ADR-0001](adr/0001-transport-websocket-mux.md)）。一个标签页落在哪个会话上由它记住的 id 决定，所以重载恢复的是它当时在看的那段对话，而不是 hub 会默认到的那个。
 
-释放一次 claim 也会结束它的响应：一条没人结束的 SSE 响应会在进程的整个生命周期里占着它的 socket，而只要有这样一条开着，`server.close()` 就永远不会回调——所以**一条泄漏的流就是一台关不掉的服务器**。顺序也要紧——会话只在它 settle 之后才被遗忘，而它是**在 `close()` 完成之前**从 map 里移除的，所以一次与回收竞争的请求会等这次 close，而不是把同一个文件打开两次；而在此期间到达的 claim 会取消回收。遗忘是安全的，因为 JSONL 文件才是持久副本。由此有三个后果：持久化不依赖传输层监听者，所以没人看的一轮也照样落盘；一个无视自己中止信号的工具会让它的会话常驻，所以 `bash` 遵守它，未来任何长跑工具也必须遵守；关闭会先结束每一条流，这正是让 `SessionHub.close()` 得以完成的东西。
+一条逻辑流结束（客户端 `cancel`、或它看着的宿主被回收）只是停止转发：它**刻意不**中止——正在飞的运行继续跑、继续持久化，所以刷新页面、关掉标签页、或切换会话都不可能截断一份 transcript。看着的宿主被回收时那条车道会收到一帧 `end`；"从来没在跑"与"看着的会话停了"是两件事，只有后者发 `end`。
+
+释放是即时的：最后一个 claim 消失就触发一次**回收（reap）**。这里没有"比浏览器重连多活两秒"那一段——那条等待属于旧的 `EventSource` 传输，随传输切换一并退场。反过来，"一个人回来回答一个问题要多久"是另一个问题，claim 答不了它：claim 只说明有人**曾经**在看，所以一次停在审批上的运行不该在最后一个查看者切换会话的那一刻被拒绝，那是**替那个人**做出的推断，而他其实只差一次点击。因此一个有待回答审批的会话会停驻 `approvalGraceMs`（十分钟，`HubOptions`），只有到那时才把沉默读成**遗弃**、拒绝那个审批，好让一台合上的笔记本不能把一次运行永远停驻在那：
+
+```
+最后一个 claim 释放 -> 无待回答审批：直接 settle()
+                    -> 有待回答审批：
+                        宽限（approvalGraceMs）内被回答 / settle -> 正常往下
+                        宽限走完仍无回答、且无 claim            -> 拒绝它，让运行能结束
+                        宽限内到达 claim                       -> 让开；答案仍然是他们的（reaping 释放）
+回收 -> settle()
+     -> 此期间有 claim 到达：保留该会话
+     -> 否则：从 map 里移除、通知观察者、close()
+```
+
+顺序也要紧——会话只在它 settle 之后才被遗忘，而它是**在 `close()` 完成之前**从 map 里移除的，所以一次与回收竞争的请求会等这次 close，而不是把同一个文件打开两次；而在此期间到达的 claim 会取消回收。遗忘是安全的，因为 JSONL 文件才是持久副本。由此有三个后果：持久化不依赖传输层监听者，所以没人看的一轮也照样落盘；一个无视自己中止信号的工具会让它的会话常驻，所以 `bash` 遵守它，未来任何长跑工具也必须遵守；关闭会先结束每条连接（`MuxServer.close()` 让它们放弃订阅），正是这一点让 `SessionHub.close()` 得以完成。
+
+**谁限制写？** 一条常驻连接就是一个 `Writable`，而对端不读时"继续写"的官方后果是无界缓冲，直到进程被自己的内存压垮。所以写侧**必须有界**：`write()` 返回 `false` 之后停写，后续帧进一个有界队列（4 MiB / 10 秒），超限用 `1013`（"try again later"）关掉**整条连接**。这是隔离性付的账——一条连接卡住不会拖住 agent 循环，代价是恢复要靠客户端重连 + 逐条重放订阅 + 一份新基线。这个上限（10 秒）刻意低于客户端的读超时（15 秒），好让"通道卡住"以服务端的 close 收场，而不是等客户端把 watchdog 耗完。
+
+**关停那件事也要说准。** 不是"一条泄漏的流就是一台关不掉的服务器"，而是：**只要有一条响应没结束，`server.close()` 的 `'close'` 回调就不发生**（`server.closeAllConnections()`——Node v18.2.0+——能收掉空闲的 keep-alive 连接，但收不掉已经 upgrade、不再是一条响应的那些 socket）。所以服务端自持 upgrade 后的每条 socket，关停时直接 `destroy()` 它们，这是让进程能干净退出的出口。
 
 ## 会话树
 
@@ -279,7 +282,7 @@ entry 自格式变更起就携带 `id` / `parentId`，所以一个会话的文�
 
 **只有 entry id 在传。** `BranchOption` 携带子节点的 id、一个标签、一个 role——**从不**携带那个选择所通向的 tip。一条分支在它的 tip 上生长，所以一个被记住的 tip 在那条分支被继续的那一刻就成了过期指针，而一个持有它的窗口会回退到对话早已离开的地方；服务器在做选择时从 id 往下走。`SessionSnapshot.branchPoints` 就是这条 wire 的全部，所以一个无视它的客户端画的仍然只是它一直在画的那一条链。
 
-在 HTTP 上，一次移动是 `POST /api/sessions/{id}/branch`，带 `{ entryId, descend? }`，用会话的新状态作答。一棵变了的树不只是发问客户端的私事，所以 `Agent` 发出 `branch_changed`，而每条流用一帧新的 `session` 来回应它。有两样东西发出它，而它们是同一件事从两侧看：一个移动了的 leaf（一个窗口选了另一条走法——否则显示旧链的第二个标签页会把它的下一条 prompt 发往一条它并未在展示的分支），以及在一条**已有继续**的消息**之后**追加（回退再问一次就是这样把那条消息变成一个分支点的）。没有第二种情况，窗口会一直留着它从旧快照读到的分支点，而它刚写下的那条走法的切换器要等到重载才出现。
+在 HTTP 上，一次移动是 `POST /api/sessions/{id}/branch`，带 `{ entryId, descend? }`，用会话的新状态作答。一棵变了的树不只是发问客户端的私事，所以 `Agent` 发出 `branch_changed`，而每条订阅用一帧新的 `baseline` 来回应它。有两样东西发出它，而它们是同一件事从两侧看：一个移动了的 leaf（一个窗口选了另一条走法——否则显示旧链的第二个标签页会把它的下一条 prompt 发往一条它并未在展示的分支），以及在一条**已有继续**的消息**之后**追加（回退再问一次就是这样把那条消息变成一个分支点的）。没有第二种情况，窗口会一直留着它从旧快照读到的分支点，而它刚写下的那条走法的切换器要等到重载才出现。
 
 leaf 自己也在文件里。一次**真的移动了位置**的移动——`branch()` / `resetLeaf()`，也就是 `Agent.branchTo` 落到存储层的那个动作——写出一条 `leaf` 状态 entry：`leafId` 字段记对话**去了哪里**（一个 entry id，或 null 意为"第一条 entry 之前"），而 entry 自己以移动前那个 leaf 为父节点追加、且这次追加**不推进** leafId——树的位置记"这次追加发生在哪"，`leafId` 字段记"对话去了哪"，两个事实各占一个字段。移动到当前所在之处不写（`recordSelection` 同款守卫），所以连续的空移动不增长文件；普通的追加推着 leaf 走，不需要记录——文件最后一条 entry 就是位置。`buildIndex()` 按文件序重放：`leaf` entry 把 leafId 设成它记录的位置，其余每种 entry 把 leafId 设成自己——后写的是最后的话，一条旧记录像一条旧的 `model_change` 一样自然过期；记录的目标不在文件里时（只有手改的文件能造出来）回落到 entry 自己的树位置。`CURRENT_SESSION_VERSION` 保持 3——它钉的是线格式的代，kind 集合本来就是开放的。
 
@@ -295,7 +298,7 @@ SessionManager.forkFrom(sourcePath, targetCwd, entryId, sessionDir)   # 写出�
 
 `forkFrom` 是唯一的静态方法：它从一个**文件**开始，而不是一个活的管理器，这正是让 hub 能 fork 一个它并未在运行的会话的原因。它复制源的 header，换一个新 id、把 `parentSession` 设为源的**文件路径**——是路径而不是 id，因为一个手里拿着某个文件的读取者，手里拿着的就是它——然后写出**包含** `entryId` 的那条分支，`entryId` 为 null 时写出整份日志。被复制的那段前缀保持它**原本的** entry id，因为那些就是父级已经写下的 id：这正是让一个 fork 能追溯回它所来自的那些 entry 的东西。什么都不被重写，源文件只被读取，而它自己的 `leafId` 不会因为一次 fork 而移动。
 
-`SessionHub.fork(sessionId, entryId)` 拥有这个操作，因为一条分支必须比请求它的那个请求活得更久。在 HTTP 上它是 `POST /api/sessions/{id}/forks`，用新 id 作答；调用方随后把它的流指向那个 id，走的是其他每个会话都走的那条 `claim` 路径。`SessionSnapshot` 携带 `parentSession`、`leafId`、以及每条消息一个 entry id，所以一份 transcript 可以就一条它并未看着被写下的消息提供"从这里 fork"。
+`SessionHub.fork(sessionId, entryId)` 拥有这个操作，因为一条分支必须比请求它的那个请求活得更久。在 HTTP 上它是 `POST /api/sessions/{id}/forks`，用新 id 作答；调用方随后订阅那个 id，走的是其他每个会话都走的同一条 `open` 帧。`SessionSnapshot` 携带 `parentSession`、`leafId`、以及每条消息一个 entry id，所以一份 transcript 可以就一条它并未看着被写下的消息提供"从这里 fork"。
 
 header 记录父级的**路径**，因为那是一个手里拿着某个文件的读取者所持有的东西。列表是两端同时已知的**第一个**地方，所以 `linkForkParents` 把那个路径解析成父级的 **id**——是 id 而不是路径，因为侧边栏其他每一行都是用 id 命名的——而 `SessionRef.parentId` 携带它。父级在该目录之外的 fork 保持未解析、显示为根，这是诚实的读法：那里也没有东西能打开它。用它的是侧边栏，它把一个工作区的会话按深度优先铺开，一个 fork 放在它所来自的那个会话下面。
 
@@ -320,21 +323,20 @@ header 记录父级的**路径**，因为那是一个手里拿着某个文件的
 
 ## API
 
-只有一个端点做流式；其他一切都是 JSON 请求与响应。`createRoutes()` 就是整张表，而 `Router` 是唯一读 URL 的东西。
+命令面全是 JSON 请求与响应；**会话事件不是其中任何一个**——它们是一条常驻 WebSocket 上的帧。`createRoutes()` 就是整张 REST 表，而 `Router` 是唯一读 URL 的东西。mux 的上行帧（`open` / `cancel`）**不走 URL**，所以这张表与它们互不覆盖：表里每一条都是任何人能用 `curl` 发的请求，而帧是窗口说它要订阅什么的方式。
 
 | 方法 | 路径 | 请求体 | 回答 |
 |---|---|---|---|
-| `GET` | `/api/health` | — | `{ ok, cwd, live, streaming }` |
+| `GET` | `/api/health` | — | `{ ok, cwd, live }`——`live` 是本进程正在运行的会话 id |
 | `GET` | `/api/models` | — | `{ models: ModelOption[] }` |
 | `PUT` | `/api/models` | `{ models: ModelInput[] }` | `{ models: ModelOption[] }` |
 | `GET` | `/api/settings` | — | `{ settings: SettingsSnapshot }` |
 | `PATCH` | `/api/settings` | `{ patch: { appearance?, approval?, bash? } }` | `{ settings }` —— 工作区**默认值**，在任何会话存在之前读取；按会话的审批变更发往 `PATCH /api/sessions/{id}` |
-| `GET` | `/api/workspaces` | — | `{ workspaces: WorkspaceGroup[] }` |
+| `GET` | `/api/workspaces` | — | `{ workspaces: WorkspaceGroup[] }`——每组的 `sessions` 是 `SessionRow[]`（含 `modified` / `running` / `pending`） |
 | `GET` | `/api/sessions` | — | `{ sessions: SessionRef[] }` |
 | `GET` | `/api/sessions/current` | — | `{ sessionId, sessions }` |
 | `POST` | `/api/sessions` | — | `201 { sessionId, sessions }` |
 | `GET` | `/api/sessions/{id}` | — | `{ session: SessionSnapshot }` |
-| `GET` | `/api/sessions/{id}/events` | — | `text/event-stream` |
 | `POST` | `/api/sessions/{id}/messages` | `{ text, behavior? }` | `202 { accepted }` |
 | `POST` | `/api/sessions/{id}/abort` | — | `{ stopped }` |
 | `PATCH` | `/api/sessions/{id}` | `{ patch: ConfigPatch }` | `{ session }` |
@@ -343,32 +345,67 @@ header 记录父级的**路径**，因为那是一个手里拿着某个文件的
 | `POST` | `/api/sessions/{id}/forks` | `{ entryId: string \| null }` | `201 { sessionId, sessions }` |
 | `POST` | `/api/sessions/{id}/branch` | `{ entryId: string, descend?: boolean }` | `{ session }` |
 
+这里没有一行是会话事件的端点——唯一的流式通道是 `/mux`（不在 `/api` 之下，因为它不是一个 REST 资源）；`abort` 也留在 REST 上，不帧化。`/api/workspaces` 的行是这个进程知道的每一行，而**无人在看时一个会话的行也照样更新**（它由 `projection.ts` 喂，不由某条恰好开着的流喂）；通道不可用时，客户端把 `GET /api/workspaces` 当作侧边栏行表的 REST 兜底。
+
 `ModelOption` 是用户导入的一行、**去掉密钥**——`hasApiKey` 说明是否存了一个，而密钥从不离开服务器。`PUT /api/models` 替换整份清单，因为设置面板编辑的是一份清单，而一份被半途施加的清单是没人能推理的状态；一行不带 `apiKey` 送来时，保留存在它名下的那个，这正是让面板能够往返一行"它从未被展示过密钥"的数据的原因。名字是一行的**身份**——transcript 记录它、配置补丁命名它——所以重复会被 `400` 拒绝（`The name "X" is already in use`），而不是在用户背后把它改成唯一的：一个加了后缀的名字会改变**每一条**命名它的 transcript 的含义，而显示这次冲突的那个面板才是修复该发生的地方。变更能抵达活会话而不必重新打开它们，因为会话持有一个 `ModelSource`、每次请求都通过它读存储而不是复制一行、并每次都从活行重新推导自己的模型——所以端点、窗口和 wire id 都随密钥一起移动。
 
 `GET /api/workspaces` 扫描 agent home 的会话目录，所以侧边栏可以按工作区分组，尽管本进程是**恰好**在其中一个之上启动的；从另一个分组打开会话要使用该会话自己 header 里的 `cwd`。`PATCH /api/settings` 刻意比 `PATCH /api/sessions/{id}` 更窄：主题、字号、审批集合在任何会话存在之前就要读，所以它们不能住在某一个会话上。`GET /api/sessions/current` 是落地端点——`--session` 钉住一个，`--continue` 恢复最新的，一个有历史的工作区重新打开最近的那个——因为一个去猜的客户端会静默显示与服务器正在服务的**不同**的对话。
 
-路径参数在控制器看到它们之前按段做百分号解码，所以一个不透明的 id——工具调用 id 可能含冒号——能安然走完这段路而不会被二次编码。失败是 JSON——`{ error }`——配上说明发生了什么的 status：`404` 表示 id 不是会话，`400` 表示请求体不是 JSON 或字段类型不对，`409` 表示会话拒绝的一次变更（未知工具名、没有任何行提供的模型），或一个不是待回答审批的 `toolCallId`——会话存在、请求合法，但此刻收不下这个答案，`405` 带 `Allow` 表示该路径在另一个动词下存在。审批端点只在答案真的被收下时才记入答案表（只读检查在 `onApproval` 之前），所以一次被 409 拒掉的请求不会污染任何一条流还在展示的审批的差值。
+路径参数在控制器看到它们之前按段做百分号解码，所以一个不透明的 id——工具调用 id 可能含冒号——能安然走完这段路而不会被二次编码。失败是 JSON——`{ error }`——配上说明发生了什么的 status：`404` 表示 id 不是会话，`400` 表示请求体不是 JSON 或字段类型不对，`409` 表示会话拒绝的一次变更（未知工具名、没有任何行提供的模型），或一个不是待回答审批的 `toolCallId`——会话存在、请求合法，但此刻收不下这个答案，`405` 带 `Allow` 表示该路径在另一个动词下存在。审批端点只在答案真的被收下时才记入答案表（只读检查在 `onApproval` 之前），所以一次被 409 拒掉的请求不会污染任何一条订阅还在展示的审批的差值。
 
 ## wire
 
-服务器推出的一切都是 `core/src/protocol.ts` 里的一个 `ServerMessage`，在 `GET /api/sessions/{id}/events` 上每个事件作为一帧 `data:` 发出：
+服务器推给客户端的一切都在 `core/src/protocol.ts` 里，分三层：一份 `ServerMessage`（一条逻辑流的内容）、一层 `StreamFrame` / `ConnectionFrame`（一条逻辑流或整条连接的帧），以及最外面的信封 `ServerFrame`。一条 WebSocket 消息就是一个信封，套着一帧；用哪个键载 id，就把两种帧分开了：
+
+```ts
+type ServerFrame =
+  | ({ streamId: string } & StreamFrame)      // 一条逻辑流，streamId 就是会话 id
+  | ({ streamId: null }   & ConnectionFrame)  // 连接自己的载荷
+```
+
+于是"把连接级载荷塞进某条会话的流"和反过来都成了**不可表示**的状态，而不只是"不推荐"。信封刻意在 `ServerMessage` 之外、而不是塞进它每个成员的字段里：好几个调用方构造协议消息时背后根本没有流（一次 REST 读取、一次 fork），内联 id 会逼它们去发明一个。
+
+一条逻辑流有三种形状（`StreamFrame`），用字段名而不是判别式区分：`item` 装一条 `ServerMessage`，`end: true` 说这条流结束了，`error` 说这条流上出了事。`end` **不带原因**：该分的是"这条逻辑流上有没有过 `baseline`"，不是"服务端为什么结束它"。`error` 也**不是**终帧——流还开着，客户端接下来怎么做取决于它有没有见过 `baseline`。
 
 ```ts
 type ServerMessage =
-  | { type: "session"; session: SessionSnapshot }     // id, cwd, title, model, allTools, activeTools, messages, usage, approvals, parentSession, leafId, messageEntryIds, branchPoints
-  | { type: "session_event"; event: AgentSessionEvent }
+  | { type: "baseline"; session: SessionSnapshot }   // 这条逻辑流的第一帧，且只有它一份
+  | { type: "event"; event: AgentSessionEvent }
   | { type: "entry"; entryId: string; messageTimestamp?: number }   // entry_appended 背后的那条消息，供 "fork from here" 使用
-  | { type: "tool_approval_request"; request: PendingApproval }
-  | { type: "tool_approval_settled"; toolCallId: string; approved: boolean }
+  | { type: "approval_request"; request: PendingApproval }
+  | { type: "approval_settled"; toolCallId: string; approved: boolean }
   | { type: "status"; usage: UsageTotals; submitting: boolean; queued: number; isRetrying: boolean; retryAttempt: number }
   | { type: "error"; message: string };
 ```
 
-`models`、`sessions`、`workspaces`、`settings` 从前是这条流上的帧；它们现在是端点，因为一个无法 attach 到任何会话的页面仍然需要填充它的侧边栏、设置面板和窗口 chrome。
+`baseline` 是一次订阅的**全部起点**：`open` 之后的第一帧就是它，而订阅与基线是同一个原子动作——建条目、取快照、挂监听、发基线，中间没有 `await` 点，所以"基线与增量之间没有缺口"是构造出来的、不是论证出来的。重开一条逻辑流拿到的是一份**新的** `baseline`（替换，不是追加），恢复因此收敛到"现在长什么样"，而不是"我错过了哪几帧"。
 
-`tool_approval_request` 和 `tool_approval_settled` 是**流自己的**活儿，不是会话的：会话把一次待回答的审批作为一次普通变更发布，所以注册表把 `snapshot.pendingApprovals` 与这条流已经告诉过窗口的东西相比较，只发差值——没有这一步，横幅只会出现在"prompt 上去之后才重载"的页面上。
+连接级的那条道（`ConnectionFrame`）也是 `item` / `error` 两种形状，但 `item` 装的是 `ConnectionItem`——**不属于任何会话**的载荷：
 
-一个会话 id 可以被多于一个标签页流式，并被任意多个请求读取。hub 为它运行**一个** agent 循环，并把它的事件转发给每一条持有 claim 的流，所以 `session_event` 和 `status` 是**按认领者**的，尽管它们背后的 transcript 是共享的。这条流是单向的：命令从不是它上面的一帧。扩展任一侧的规则：如果浏览器需要知道某件事，它进一条消息或一个端点；如果只有服务器端需要，它就留在 core。`snapshot.allTools` 是 header 据以给每个工具画一个开关的东西，`snapshot.activeTools` 是那些开关显示为开的东西，而 `PUT /api/sessions/{id}/tools` 带 `{ names }` 替换活跃集合。
+```ts
+type ConnectionItem =
+  | { type: "heartbeat"; everyMs: number }         // 服务端每隔多久发一次，客户端据此校准自己的读超时
+  | { type: "sessions"; sessions: SessionRow[] }   // 这个进程知道的每一行，每连接一次，替换而非追加
+  | { type: "session_row"; session: SessionRow };  // 一行变了，整行替换（行小，幂等胜过差量）
+```
+
+`heartbeat` 是**应用层**的判活：浏览器一侧根本看不到协议层的 Pong，所以它必须有一个有人读的信号，那正是它能喂给读超时 watchdog 的东西。协议层的 Ping/Pong 另有一份职责，它判的是**客户端**死没死（2 秒一次、容忍两次未回应，第三次 `terminate()`）——两个计时器回答两个不同的问题，刻意不让一个成为另一个的函数。
+
+上行帧 `ClientFrame` 只有两个成员，且**没有信封**——帧本身就是协议：
+
+```ts
+type ClientFrame =
+  | { type: "open"; sessionId: string; window?: unknown }
+  | { type: "cancel"; sessionId: string };
+```
+
+`open` 订阅一条会话、`cancel` 取消订阅（关一条逻辑流，同 DSH 的 `cancel`；**中止运行只叫 `abort`、只在 REST 上**，两个词不混用）。两条都是**连接上的状态**，不是会话上的：同一会话在一条连接上至多一条逻辑流，所以会话 id 就是全部地址，没有单独的订阅句柄要同步。抵达一条未知 `type` 的上行帧会被丢弃并记一行日志，而不是关掉连接。
+
+一个会话 id 可以被多于一条连接订阅，并被任意多个请求读取。hub 为它运行**一个** agent 循环，并把它的事件转发给每一条订阅它的逻辑流，所以 `event` 和 `status` 是**按订阅者**的，尽管它们背后的 transcript 是共享的。这条流是单向的：命令从不是它上面的一帧。扩展任一侧的规则：如果浏览器需要知道某件事，它进一条消息或一个端点；如果只有服务器端需要，它就留在 core。`snapshot.allTools` 是 header 据以给每个工具画一个开关的东西，`snapshot.activeTools` 是那些开关显示为开的东西，而 `PUT /api/sessions/{id}/tools` 带 `{ names }` 替换活跃集合。
+
+`models`、`sessions`、`workspaces`、`settings` 从前是这条流上的帧；它们现在是端点，因为一个无法订阅任何会话的页面仍然需要填充它的侧边栏、设置面板和窗口 chrome。连接级载荷里唯一替代了旧行为的是 `sessions` / `session_row`：一个窗口的行表由投影喂，不再由它恰好在看的那条流喂——**没人在看时一个会话的行也照样更新**。
+
+`approval_request` 和 `approval_settled` 是**订阅自己的**活儿，不是会话的：会话把一次待回答的审批作为一次普通变更发布，所以 mux 把 `snapshot.pendingApprovals` 与这条订阅已经告诉过窗口的东西相比较，只发差值——没有这一步，横幅只会出现在"prompt 上去之后才重载"的页面上。答案表按**会话**键控（`Map<sessionId, Map<toolCallId, ShownApproval>>`），因为几个 Anthropic 兼容端点会把不同会话的 `toolCallId` 编成同一个；一条准予绝不能因此抵达另一个会话的窗口。
 
 ## 请求流程
 
@@ -383,9 +420,8 @@ type ServerMessage =
   -> core/hooks.ts                             context、审批闸门、工具输出兜底
   -> core/tools/*                              针对服务器文件系统执行
   -> core/session/*                            追加每条消息和每个工具结果
-  -> GET /api/sessions/{id}/events             每个会话事件一帧 SSE
-  -> server/controllers/events.ts              由 StreamRegistry 打开，它所持有的那个 claim
-  -> web/client.ts, web/state.ts               解析、折叠、交给渲染器
+  -> server/mux.ts                             observe 这条会话的订阅，把每条 ServerMessage 装进信封
+  -> web/client.ts, web/state.ts               按 streamId 分道，解析、折叠，交给渲染器
   -> web/render/*                              增量更新 DOM
 ```
 
@@ -409,8 +445,8 @@ type ServerMessage =
 
 | 原计划 | 实际构建 | 原因 |
 |---|---|---|
-| 一条 WebSocket 同时承载命令和事件 | 命令走 REST，事件走 SSE；`channel.ts` 变成 `stream-registry.ts` | 浏览器发的一切都是带状态码的请求，服务器发的一切都是单向的；把它们分开让 `abort` 成为任何东西都能发的请求 |
-| `channel.ts` 拥有会话 | `hub.ts`，claim 由 attach 上来的人持有 | 同一个会话 id 上的两条连接会构建两个 agent 循环、跑在一个 JSONL 文件上并各自独立追加 |
+| 一条 WebSocket 同时承载命令和事件 | 命令走 REST，事件走一条常驻 WebSocket mux；`channel.ts` 长成 `mux.ts` | 浏览器发的一切都是带状态码的请求，服务器发的一切都是单向的；命令面留在 REST 不动，而事件合流到一条常驻连接上（[ADR-0001](adr/0001-transport-websocket-mux.md)） |
+| `channel.ts` 拥有会话 | `hub.ts`，claim 由改变会话的请求与在飞的运行持有（**订阅不拿**） | 同一个会话 id 上的两条连接会构建两个 agent 循环、跑在一个 JSONL 文件上并各自独立追加 |
 | 每个会话读一次 `settings.json`，用一个 `SettingsStore` 去写 | 每个工作区一个管理器，两层 | 一个工作区上的两个会话持有同一个文件的两个版本，最后写的人赢 |
 | @my-agent/ai 内置的模型目录 | `<agent home>/models.json`，前面没有注册表 | 存在哪些端点、它们的上下文多大，是**用户的事实**；一行本来就**是**一个端点加一个密钥，所以"每行一个 provider"持有的只是行自己已经有的一个字符串——而那个字符串现在就是该行的 `name`，它既是选择器显示的标签，也是 transcript 记录的身份 |
 | 每行一个传输层 | 每一行都走 Anthropic Messages，每模型能力从 wire id 推导 | 本应用只说一种 API，所以传输层选择会是一个没人能采取行动的选择；某个 Claude 模型接受什么仍然必须按模型来，而 wire id 是手打的一行所携带的唯一事实 |
@@ -430,5 +466,5 @@ type ServerMessage =
 
 插件、扩展、MCP、skills、图像输入、多用户访问、部署、桌面打包。每一样都会在循环配得上之前先给循环加一个概念。
 
-**第一次真实的模型往返也仍未验证**，因为这台机器上没有配置供应商密钥：token 流式、一次重试退避、压缩的摘要调用，都从未被真实供应商回答过。它们周围的一切由 `scripts/fake-transport.ts` 覆盖；见 `README.md` 里的 *Verifying a build*。
+**第一次真实的模型往返也仍未验证**，因为这台机器上没有配置供应商密钥：token 流式、一次重试退避、压缩的摘要调用，都从未被真实供应商回答过。它们周围的一切由 `scripts/fake-transport.ts` 覆盖；见 `README.md` 里的 *验证一次构建*。
 

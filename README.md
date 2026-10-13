@@ -4,7 +4,7 @@
 [`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层，`packages/agent`（`@my-agent/agent`，来自
 [`@earendil-works/pi-agent-core`](https://www.npmjs.com/package/@earendil-works/pi-agent-core)）负责 agent 循环——只取本项目真正调用的部分，不是完整的 package。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳都是我们自己的。
 
-agent 跑在一个 Node 进程里，而不是渲染进程里：它持有你的 API 密钥，而它的本职就是读写文件。窗口是一个客户端——它用 REST 发送 prompt，并把 agent 的输出读成一条 server-sent event 流，这也是为什么每一条命令同样能用 `curl` 或脚本发。[docs/architecture.md](docs/architecture.md) 是设计文档：请求流程、API 表、会话格式，以及每一块为什么在那个位置。
+agent 跑在一个 Node 进程里，而不是渲染进程里：它持有你的 API 密钥，而它的本职就是读写文件。窗口是一个客户端——它用 REST 发送 prompt，并从一条常驻 WebSocket 通道上读取 agent 的输出，这也是为什么每一条命令同样能用 `curl` 或脚本发。[docs/architecture.md](docs/architecture.md) 是设计文档：请求流程、API 表、会话格式，以及每一块为什么在那个位置。
 
 ## 快速开始
 
@@ -30,12 +30,15 @@ npm run cli -- --list-models
 
 ### 从 shell 驱动它
 
-`POST /api/sessions/{id}/messages` 在 prompt 被持久化的那一刻就回答 `202`；答案从流上到达。`node packages/server/src/main.ts --help` 会打印每一个端点，[docs/architecture.md](docs/architecture.md#api) 有那张表。
+`POST /api/sessions/{id}/messages` 在 prompt 被持久化的那一刻就回答 `202`；答案从一条常驻 WebSocket 通道上到达，而命令全都还是 REST。`node packages/server/src/main.ts --help` 会打印每一个端点，[docs/architecture.md](docs/architecture.md#api) 有那张表。
 
 ```bash
 curl -X POST localhost:8080/api/sessions/$ID/messages \
   -H 'content-type: application/json' -d '{"text":"list the files here"}'
-curl -N localhost:8080/api/sessions/$ID/events
+
+# 答案不是一次 fetch 能拿到的：在 /mux 上开一条订阅，再按 streamId 读帧。
+# Node ≥ 22 自带全局 WebSocket，不需要任何依赖：
+node -e 'const ws=new WebSocket("ws://localhost:8080/mux");ws.onmessage=e=>console.log(e.data);ws.onopen=()=>ws.send(JSON.stringify({type:"open",sessionId:process.argv[1]}))' "$ID"
 ```
 
 ### 为什么用 `install-deps.ts` 而不是 `npm install`
@@ -177,7 +180,7 @@ const api: ChatTransport = fake.api;
 
 ## 状态
 
-核心循环、六个工具与那对委派工具、会话持久化与恢复、压缩、审批闸门、会话替换、带事件流的 REST API、桌面外壳、窗口客户端、以及会话树——会话内部分支和侧边栏里嵌套的 fork——全部可用；类型检查与 smoke 脚本通过。
+核心循环、六个工具与那对委派工具、会话持久化与恢复、压缩、审批闸门、会话替换、REST API 加一条常驻 WebSocket 通道（`/mux`，同时订阅多个会话、断线判活与重连、写侧背压都有界）、桌面外壳、窗口客户端、以及会话树——会话内部分支和侧边栏里嵌套的 fork——全部可用；类型检查与 smoke 脚本通过。
 
 **未验证**：第一次真实的模型往返，以及因此只有真实供应商才会走到的部分——token 流式、一次重试退避、压缩的摘要调用。这台机器上没有配置供应商密钥；它们周围的一切由脚本化模型覆盖，而指向一个死端点的一行已经被驱动到一次真实的连接错误。
 
