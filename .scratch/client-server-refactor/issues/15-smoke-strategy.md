@@ -552,3 +552,13 @@ REST 那一半（health / models 往返与重名 400 / settings 409 / 列表 / 4
 2. **第 0 节第 4 条结论不变**：22.19 的全局 `WebSocket` 同样不暴露底层 socket、也没有 `ping`/`pong`，所以决定 7 那条"注入假 socket"的改法原样成立。
 3. **决定 10 的"明确不断言"清单可以照旧**（pong 可见性、`1013`/`4000` 的送达、节流幅度、upgrade socket 记账、连接池上限都已核实，但冒烟**仍然不必**断言它们）：`1013` 与 `4000` 实测两端都合法且原样送达、**不会混淆**；`backgroundThrottling` 只节流页面自己的定时器（10/s → 1/s）、**WS 投递零影响**——所以第 4 条那个"两个时间尺度降到毫秒级"的装置不受它影响。
 4. **决定 8 那句"若票 17 实测出 Node 已经覆盖升级 socket，跟踪可删"有答案了：没有覆盖。** `server.close()` 的回调因为 `net.Server._connections` 照算这条 socket 而**永不发生**；`closeAllConnections()` 因为 http 解析器在升级那一刻 `parser.remove()` 把它摘出了自己的连接表而**看不到它**（Node v22.19 与 v24.15 实测一致）。所以"mux 自持 upgrade socket 并 `destroy()`"**不是冗余，是必须**。完整出处见 `../research/ws-multiplex.md`（装置 `../prototype/ws/`）。
+
+**2026-10-13，票 18 解决时追加（本票的 Answer 一字未改；记那条登记给本票的冒烟断言的最终形式）**：
+
+票 09 Comments 第 4 条登记的那条断言（"移动之后不 attach 任何东西，下一条 prompt 仍从移动后的 leaf
+继续"）有了可落地的最终形状，在票 18 的落地清单第 3 条：**移动之后不 attach 任何东西 → 等会话被回
+收 → 一条冷读（`GET /api/sessions/{id}`）报出移动后的 `leafId` → 下一条 prompt 仍从它继续**。回收斩
+断了驻留的 `Agent`，冷读只能从文件回答——这正是"因为 leaf 落盘了"的可观察形式，也顺手断言了"关掉
+窗口之后移动还在"（本票第 1 问第 2 半）。配对的 `smoke-session.ts` 断言（close → reopen 移动仍在；
+没有 `leaf` entry 的旧文件按最后一条 entry 读）同在票 18 的清单里。落地时守卫**不写**：票 18 判定票
+09 决定 8 的判据在新世界里不可定义，从落地清单上划掉了。
