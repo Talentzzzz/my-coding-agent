@@ -14,6 +14,7 @@ const { existsSync } = require("node:fs");
 const { writeFile } = require("node:fs/promises");
 const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { createShutdown } = require("./shutdown.cjs");
 
 /** Height of the Windows caption the shell draws, matched by --desktop-titlebar in the client. */
 const TITLEBAR_HEIGHT = 40;
@@ -23,7 +24,14 @@ const CHROME_LIGHT = "#f9fafb";
 const CHROME_DARK = "#1b1b1c";
 
 let mainWindow = null;
-let server = null;
+
+/**
+ * The server's lifetime, which the quit path owns — see `shutdown.cjs` for why it is its own file.
+ *
+ * This is also what the window is pointed at, so a window is never opened against a server that is
+ * on its way down.
+ */
+const lifecycle = createShutdown({ app });
 
 /** The repository root: this file lives in packages/desktop. */
 const packageRoot = resolve(__dirname, "..", "..");
@@ -197,13 +205,15 @@ app.whenReady().then(async () => {
 	registerWindowControls();
 
 	const cwd = workspaceDirectory();
+	let booted;
 	try {
-		server = await bootServer(cwd);
-		console.log(`desktop: server on ${server.url}  workspace ${cwd}`);
+		booted = await bootServer(cwd);
+		console.log(`desktop: server on ${booted.url}  workspace ${cwd}`);
 	} catch (error) {
 		reportStartupFailure(error);
 		return;
 	}
+	lifecycle.serve(booted);
 
 	mainWindow = createWindow();
 	syncChrome(mainWindow);
@@ -211,7 +221,7 @@ app.whenReady().then(async () => {
 		if (mainWindow && !mainWindow.isDestroyed()) syncChrome(mainWindow);
 	});
 
-	await mainWindow.loadURL(server.url);
+	await mainWindow.loadURL(booted.url);
 
 	// A capture run renders the real window and exits, so a layout change can be inspected from a
 	// terminal instead of from a description of it.
@@ -240,9 +250,10 @@ app.whenReady().then(async () => {
 
 	app.on("activate", () => {
 		// macOS keeps the application alive with no windows; the Dock icon is how it comes back.
-		if (BrowserWindow.getAllWindows().length === 0 && server) {
+		const live = lifecycle.current;
+		if (BrowserWindow.getAllWindows().length === 0 && live !== null) {
 			mainWindow = createWindow();
-			void mainWindow.loadURL(server.url);
+			void mainWindow.loadURL(live.url);
 		}
 	});
 });
@@ -251,11 +262,6 @@ app.on("window-all-closed", () => {
 	if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => {
-	// The server holds open event streams and live sessions; closing them is what lets the process
-	// actually exit instead of waiting on a response that never ends.
-	if (!server) return;
-	const closing = server;
-	server = null;
-	void closing.close();
-});
+// Putting the server down is an ordering question rather than a formality, and the resident
+// connection is why; `shutdown.cjs` is where that lives, comment and all.
+app.on("before-quit", (event) => lifecycle.beforeQuit(event));

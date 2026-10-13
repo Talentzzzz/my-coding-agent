@@ -144,6 +144,7 @@ UI 里做出的变更会回到**已经提供那个键**的文件，所以一个�
 ```bash
 npm run check                  # 对 core、server 和客户端跑 tsc，加设计 token 审计
 npm run smoke:boot             # 进程内服务器启动、落地会话、以及关闭
+node scripts/smoke-desktop-close.mjs # 外壳退出顺序：先关服务器再走，含预算与二次退出；不需要密钥
 node scripts/smoke-tools.ts    # 工具、会话存储、压缩，不需要供应商密钥
 node scripts/smoke-sessions.ts # 会话注册表，不需要供应商密钥
 node scripts/smoke-projection.ts # 概况投影与协议信封，不需要供应商密钥
