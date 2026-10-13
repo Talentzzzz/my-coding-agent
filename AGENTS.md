@@ -39,10 +39,16 @@ packages/web      Vite + TypeScript 窗口客户端。渲染事件流
 - **model selection（模型选择）** —— 输入框的 `{ model, thinkingLevel }`，随消息发送（`ModelSelection`），
   不是一次配置变更；`recordSelection` 在 `prepareRequest` 顶部才写 entry，没说过话的会话因此不增长
   entry。
-- **transport（传输层）** —— REST 加 server-sent events，从不用 socket；`createRoutes()` 是整张 API 表，
-  `Router` 是唯一解释 URL 的地方，命令在被施加时作答。默认端口 8080。
-- **claim（认领）** —— 持有者对活跃会话的握持：每条事件流一个，外加运行或改变会话的请求在其长度内的
-  一个；读 transcript 不拿 claim。
+- **transport（传输层）** —— 命令面是 REST：一条常驻 WebSocket mux（`/mux`）承载事件与连接级载荷，
+  命令一个字不改地留在 REST。`createRoutes()` 是整张 API 表，`Router` 是唯一解释 URL 的地方，命令
+  在被施加时作答——mux 的上行帧**不走 URL**，所以"加一个端点"这条形状管不到 `open` / `cancel`。
+  默认端口 8080。abort 是 REST 命令不帧化、不引入 ack/requestId，mux 上行 `cancel` 只用于取消订阅
+  （[ADR-0001](docs/adr/0001-transport-websocket-mux.md)、`.scratch/mux-landing/`）。**一条常驻连接
+  是一个 `Writable`，所以写侧必须有界**：`write()` 返回 `false` 之后停写，帧进有界队列（4 MiB /
+  10 秒），超限用 `1013` 关掉整条连接。
+- **claim（认领）** —— 持有者对活跃会话的握持：只有改变会话的请求与在飞的运行各在其长度内一个；读
+  transcript 不拿claim，**订阅也不拿**——一张订阅表回答"这条连接订了什么"，与 claim 回答"这个请求
+  必须跑在活跃会话上"永不互相换算（ADR-0001）。
 - **approval（审批）** —— `before_tool` 把一次调用停住，直到有人回答
   `POST /api/sessions/{id}/approvals/{toolCallId}`。哪些工具会问是**按会话**的，记录在一条
   `tool_config` entry 里。

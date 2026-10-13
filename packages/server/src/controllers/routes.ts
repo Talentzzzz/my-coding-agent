@@ -1,6 +1,6 @@
 import { sendJson } from "../http/static.ts";
 import { readObjectBody } from "../http/errors.ts";
-import { route, stringParam, type ApiRoute } from "../http/routing.ts";import type { EventController } from "./events.ts";
+import { route, stringParam, type ApiRoute } from "../http/routing.ts";
 import type { SessionController, SystemController } from "./sessions.ts";
 
 /**
@@ -9,6 +9,14 @@ import type { SessionController, SystemController } from "./sessions.ts";
  * This is the equivalent of the annotations on a Spring controller, kept in one file so that one
  * read answers "what does this server expose?". Every entry names a method on a controller; nothing
  * here does work of its own.
+ *
+ * **The mux's uplink frames are not here, and that is not an omission.** They do not go through a URL:
+ * `open` and `cancel` arrive as WebSocket messages on the one resident connection, and the router never
+ * sees them. So this table is the whole REST surface — every entry is a request someone could make with
+ * `curl` — while the frames above it are how a window says what it wants to watch. The line between the
+ * two is not arbitrary: an action that has its own resource, a persistent consequence, and a URL that
+ * reproduces it is a command and belongs here; one that only changes "what this connection receives"
+ * belongs on the mux.
  *
  * The verbs carry meaning rather than being a convention:
  *
@@ -22,7 +30,6 @@ import type { SessionController, SystemController } from "./sessions.ts";
 export interface Controllers {
 	system: SystemController;
 	sessions: SessionController;
-	events: EventController;
 }
 
 export function createRoutes(controllers: Controllers): ApiRoute[] {
@@ -31,8 +38,7 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 			method: "GET",
 			path: "/api/health",
 			params: {},
-			handle: (_params, _request, response) =>
-				sendJson(response, 200, { ...controllers.system.health(), streaming: controllers.events.streaming() }),
+			handle: (_params, _request, response) => sendJson(response, 200, controllers.system.health()),
 		}),
 		route({
 			method: "GET",
@@ -89,12 +95,6 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 			path: "/api/sessions/:id",
 			params: { id: stringParam },
 			handle: async (params, _request, response) => sendJson(response, 200, await controllers.sessions.read(params.id)),
-		}),
-		route({
-			method: "GET",
-			path: "/api/sessions/:id/events",
-			params: { id: stringParam },
-			handle: (params, _request, response) => controllers.events.stream(params.id, response),
 		}),
 		route({
 			method: "POST",

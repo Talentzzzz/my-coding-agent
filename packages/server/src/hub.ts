@@ -242,6 +242,40 @@ export class SessionHub {
 	}
 
 	/**
+	 * The session's current state, synchronously, for a caller that is already holding a live host.
+	 *
+	 * The synchronous twin of {@link snapshotOf}, and it exists because of what the mux guarantees: a
+	 * subscription's baseline has to be written in the same synchronous block that attached its feeds,
+	 * or a change published between the two would reach the client before the state it describes. An
+	 * `await` in that window is not merely slower — it is a hole in the one guarantee the whole
+	 * recovery story rests on.
+	 *
+	 * So this refuses rather than guesses: reaching it means the caller believes the session is live,
+	 * and if it is not, that belief is a bug worth hearing about rather than a snapshot worth inventing.
+	 */
+	snapshotNow(id: string): SessionSnapshot {
+		const host = this.hosts.get(id);
+		if (host === undefined) throw new Error(`Session is not running: ${id}`);
+		return host.session.snapshot;
+	}
+
+	/**
+	 * When the entry behind an id was written, for a transcript that orders by message time.
+	 *
+	 * Also synchronous, and for the same reason as {@link snapshotNow}: the frame that pairs an entry
+	 * with its timestamp is produced from inside an event callback, where there is nothing to await.
+	 *
+	 * `undefined` for an entry that is gone or is not a message — the caller sends the frame without a
+	 * timestamp, which is what the client already handles for an entry that carries no message.
+	 */
+	timestampOf(id: string, entryId: string): number | undefined {
+		const host = this.hosts.get(id);
+		if (host === undefined) return undefined;
+		const entry = host.session.sessionManager.getEntry(entryId);
+		return entry?.type === "message" ? entry.message.timestamp : undefined;
+	}
+
+	/**
 	 * The id a connection lands on when it does not name one.
 	 *
 	 * A client asks for this instead of choosing for itself, because the policy belongs to the

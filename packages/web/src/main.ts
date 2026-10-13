@@ -139,12 +139,6 @@ function main(): void {
 	const stream = new SessionStream({
 		onMessage: (message) => apply(reduce(state, message)),
 		onFollow: (sessionId) => void follow(sessionId),
-		onStreamEnd: () => {
-			// The server closed the stream because the run is over. No `status` frame can follow on a
-			// closed response, so the end is folded in here; the transcript is already complete,
-			// because `agent_end` goes out before the run stops being `submitting`.
-			apply({ ...state, streaming: false });
-		},
 	});
 
 	/**
@@ -359,7 +353,7 @@ function main(): void {
 		chosen = {};
 		// The same rendering the branch command uses: a snapshot is a snapshot, whether it arrived on
 		// a stream or on a read.
-		apply(reduce(state, { type: "session", session: snapshot }));
+		apply(reduce(state, { type: "baseline", session: snapshot }));
 
 		try {
 			await refreshLists();
@@ -486,7 +480,7 @@ function main(): void {
 		if (followed === undefined) return;
 		try {
 			const { session } = await api.branchSession(followed, entryId, descend);
-			apply(reduce(state, { type: "session", session }));
+			apply(reduce(state, { type: "baseline", session }));
 		} catch (error) {
 			report(error);
 		}

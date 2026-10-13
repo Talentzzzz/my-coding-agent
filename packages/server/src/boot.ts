@@ -1,11 +1,11 @@
 import { createServer, type HttpServerHandle } from "./http.ts";
 import { SessionHub } from "./hub.ts";
-import { EventController } from "./controllers/events.ts";
 import { SessionController, SystemController } from "./controllers/sessions.ts";
 import { createRoutes } from "./controllers/routes.ts";
 import { Router } from "./http/routing.ts";
 import { createSessionProjection, type SessionProjection } from "./projection.ts";
-import { createStreamRegistry } from "./stream-registry.ts";
+import { createMuxServer, type FrameSink, type MuxConnection, type MuxOptions, type MuxServer } from "./mux.ts";
+import { WebSocketConnection } from "./http/websocket.ts";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +15,9 @@ import { fileURLToPath } from "node:url";
  */
 const WEB_DIR = fileURLToPath(new URL("../../web", import.meta.url));
 const CLIENT_DIR = fileURLToPath(new URL("../../web/dist", import.meta.url));
+
+/** Where the mux lives. One path, and it is not under `/api`: it is not a REST resource. */
+const MUX_PATH = "/mux";
 
 export interface BootOptions {
 	/** The directory the agent may touch. */
@@ -31,12 +34,12 @@ export interface BootOptions {
 	sessionId?: string;
 	continueSession?: boolean;
 	/**
-	 * How long a stream that attached to an idle session waits for a run before ending itself.
+	 * The mux's own timers and budgets, overridable so a smoke can drive them in milliseconds.
 	 *
-	 * Passed straight to the stream registry, and an option here only so a smoke can drive it in
-	 * milliseconds; nothing in production sets it. See `StreamRegistryOptions.idleGraceMs`.
+	 * A pass-through rather than a field per timer: the connection layer owns what these mean, and
+	 * restating them here would be a second place to keep them honest. Nothing in production sets it.
 	 */
-	idleGraceMs?: number;
+	mux?: MuxOptions;
 	/** Serve the client through Vite instead of the built assets, for hot reload. */
 	vite?: boolean;
 }
@@ -55,8 +58,10 @@ export interface BootedServer {
 	 * a claim, a reap or a host's closing depends on it having asked.
 	 */
 	projection: SessionProjection;
+	/** The resident connection layer: one per upgraded socket. */
+	mux: MuxServer;
 	server: HttpServerHandle;
-	/** Close the event streams first, then the sessions, then the listener. */
+	/** Close the connections first, then the sessions, then the listener. */
 	close(): Promise<void>;
 }
 
@@ -87,22 +92,25 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 		continueSession: options.continueSession ?? false,
 	});
 
-	// The event streams hold the claims that keep a session open, so they are built first: everything
-	// that owns a session's lifetime is in one of these two objects, and the controllers are stateless
-	// except for the two things only a stream can report — a run that failed to start, and an approval
-	// answered in one tab that every other tab has to hear about.
-	const streams = createStreamRegistry(hub, { ...(options.idleGraceMs === undefined ? {} : { idleGraceMs: options.idleGraceMs }) });
-	// Built against the hub, not wired into it: the projection observes which sessions exist and what
-	// they are doing, and neither of those is allowed to keep a session alive or hurry its closing.
+	// The mux holds the connections, and the projection is built against the hub rather than wired
+	// into it: the projection observes which sessions exist and what they are doing, and neither of
+	// those is allowed to keep a session alive or hurry its closing.
+	//
+	// Order matters only in that the mux needs the projection — its first frame on every connection is
+	// the overview, so it has to be able to answer "what sessions exist" before any window asks.
 	const projection = createSessionProjection(hub);
+	const mux = createMuxServer(hub, projection, options.mux ?? {});
 	const router = new Router(
 		createRoutes({
 			system: new SystemController(hub),
 			sessions: new SessionController(hub, {
-				onRunFailure: (sessionId, message) => streams.announce(sessionId, message),
-				onApproval: (sessionId, toolCallId, approved) => streams.rememberApproval(sessionId, toolCallId, approved),
+				// Both of these are facts about a run rather than about a request that is still open: the
+				// request that started the run was answered long before it could fail, and an answer given
+				// in one window has to reach every other window showing the same approval. The mux is the
+				// only thing that knows which connections are watching what.
+				onRunFailure: (sessionId, message) => mux.announce(sessionId, message),
+				onApproval: (sessionId, toolCallId, approved) => mux.rememberApproval(sessionId, toolCallId, approved),
 			}),
-			events: new EventController(streams, hub),
 		}),
 	);
 
@@ -110,6 +118,88 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 		router,
 		clientDir: options.vite === true ? WEB_DIR : CLIENT_DIR,
 		useVite: options.vite ?? false,
+		onUpgrade: (request, socket, head) => {
+			if (pathOf(request.url) !== MUX_PATH) {
+				// Destroyed here rather than declined, because declining is not a thing this server can do:
+				// once any `upgrade` listener exists, Node has already handed the socket over and will
+				// never touch it again. Returning without destroying leaves it open forever — and
+				// `server.close()` never calls back while one is, so a single stray `Upgrade:` header to
+				// any other path would wedge shutdown permanently.
+				socket.destroy();
+				return true;
+			}
+			const connection = WebSocketConnection.accept(request, socket);
+			if (connection === undefined) return true;
+
+			// `FrameSink` over the WebSocket, so the connection layer's policy never sees a socket and the
+			// frame codec never sees a subscription. This is the seam the whole split rests on.
+			const sink: FrameSink = {
+				send: (frame) => connection.send(JSON.stringify(frame)),
+				ping: () => connection.ping(),
+				close: (code, reason) => connection.close(code, reason),
+				terminate: () => connection.terminate(),
+				get isClosed() {
+					return connection.isClosed;
+				},
+			};
+
+			/**
+			 * Uplink frames that arrived before the connection object existed.
+			 *
+			 * `accept()` awaits the projection's first read, so it cannot hand back a connection
+			 * synchronously — and a client whose first act is `open` puts that frame in the very TCP
+			 * segment as the handshake, which is replayed *before* `accept()` is even called. Dropping
+			 * those frames would leave that client waiting for a baseline that was never going to come,
+			 * while heartbeats kept its watchdog fed so it never noticed. So they wait here instead, in
+			 * order, and are replayed the moment there is something to replay them to.
+			 */
+			const waiting: string[] = [];
+
+			let owned: MuxConnection | undefined;
+			connection.start({
+				onMessage: (text) => {
+					if (owned === undefined) {
+						if (!connection.isClosed) waiting.push(text);
+						return;
+					}
+					mux.handle(owned, text);
+				},
+				onClose: () => {
+					// Nothing to forget if the connection never became one, but the pending frames are
+					// dropped either way: there is no longer anything they could be delivered to.
+					waiting.length = 0;
+					if (owned !== undefined) mux.forget(owned);
+				},
+				onProtocolError: (reason) => {
+					console.warn(`mux: 协议错误，关闭连接：${reason}`);
+				},
+				// The only evidence of liveness this side gets. Without it the connection layer would
+				// count unanswered Pings against a peer that is answering perfectly well, and drop it.
+				onPong: () => {
+					if (owned !== undefined) mux.notePong(owned);
+				},
+			});
+
+			void mux
+				.accept(sink)
+				.then((accepted) => {
+					owned = accepted;
+					// A connection that ended during the (awaited) overview read must not be left in the
+					// server's set with nothing left to close it.
+					if (connection.isClosed) {
+						mux.forget(accepted);
+						return;
+					}
+					// Only safe once the connection is known to be live: the first frame it receives is the
+					// overview, so a client cannot tell these from its own until it has seen one anyway.
+					for (const text of waiting.splice(0)) mux.handle(accepted, text);
+				})
+				.catch((error: unknown) => {
+					console.warn(`mux: 拒绝一个连接：${error instanceof Error ? error.message : String(error)}`);
+				});
+			if (head.length > 0) connection.replay(head);
+			return true;
+		},
 	});
 
 	await new Promise<void>((resolveListen) => server.server.listen(port, host, resolveListen));
@@ -121,17 +211,28 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 		cwd,
 		hub,
 		projection,
+		mux,
 		server,
 		close: async () => {
-			// Streams first: ending them lets go of the claims, so the hub's own close does not wait for
-			// a response that is never going to end. The projection is released before either, since it
-			// only listens — nothing it holds can delay what comes after.
+			// Connections first, and before the sessions: a window's subscriptions are released while the
+			// sessions they were watching are still there, so nothing has to be torn down from underneath
+			// a live feed. The projection goes first of all because it only listens — nothing it holds can
+			// delay what comes after.
 			projection.close();
-			await streams.close();
+			mux.close();
+			// The upgraded sockets are destroyed by the listener's own close, which is the only place that
+			// can reach them; the mux only stops wanting them.
 			await hub.close();
 			await server.close();
 		},
 	};
+}
+
+/** The path of a request URL, without its query. */
+function pathOf(url: string | undefined): string {
+	const raw = url ?? "/";
+	const end = raw.indexOf("?");
+	return end < 0 ? raw : raw.slice(0, end);
 }
 
 /** Where the built client lives, for a caller that wants to report it. */

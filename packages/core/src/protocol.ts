@@ -265,8 +265,15 @@ export type QueueMode = "all" | "one-at-a-time";
 export type PromptBehavior = "steer" | "followUp";
 
 export type ServerMessage =
-	| { type: "session"; session: SessionSnapshot }
-	| { type: "session_event"; event: AgentSessionEvent }
+	/**
+	 * Everything this session looks like right now.
+	 *
+	 * The first frame on a logical stream, and the only one of its kind: a subscription that is opened
+	 * again gets a new one rather than an append, which is what makes recovery converge on "what this
+	 * looks like now" instead of on "what I missed".
+	 */
+	| { type: "baseline"; session: SessionSnapshot }
+	| { type: "event"; event: AgentSessionEvent }
 	/**
 	 * The entry behind a message the session just wrote.
 	 *
@@ -275,8 +282,8 @@ export type ServerMessage =
 	 * event, not instead of it, so a client that ignores this frame behaves exactly as before.
 	 */
 	| { type: "entry"; entryId: string; messageTimestamp?: number }
-	| { type: "tool_approval_request"; request: PendingApproval }
-	| { type: "tool_approval_settled"; toolCallId: string; approved: boolean }
+	| { type: "approval_request"; request: PendingApproval }
+	| { type: "approval_settled"; toolCallId: string; approved: boolean }
 	| { type: "status"; usage: UsageTotals; submitting: boolean; queued: number; isRetrying: boolean; retryAttempt: number }
 	/**
 	 * Something failed outside any request's reach.
@@ -284,20 +291,7 @@ export type ServerMessage =
 	 * A run that could not start, mainly: the request that accepted its prompt was answered 202 long
 	 * before the failure, so this stream is the only place left to say so.
 	 */
-	| { type: "error"; message: string }
-	/**
-	 * This stream is over, and the response ends immediately after this frame.
-	 *
-	 * The client must close rather than let `EventSource` reconnect: a normal end and a dropped
-	 * connection look identical to the browser, and a reconnect here would put a stream back on an
-	 * idle session — the exact 15-second heartbeat this frame exists to prevent.
-	 *
-	 * One frame for both cases, because the client's obligation is the same in both: a run this
-	 * stream watched has ended, or the stream arrived on a session with nothing running and waited
-	 * out its grace. Neither is a "run end" in the transcript's sense, and no run at all may have
-	 * started, so the name says what it means rather than which case is commoner.
-	 */
-	| { type: "stream_end" };
+	| { type: "error"; message: string };
 
 /**
  * One logical stream's identity on one connection: the session id itself.

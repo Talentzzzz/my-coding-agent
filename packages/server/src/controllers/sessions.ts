@@ -257,9 +257,10 @@ export class SessionController {
 	/**
 	 * Start a conversation and make it what an unnamed stream lands on next.
 	 *
-	 * Returns an id rather than a claimed session, so attaching happens in exactly one place: the
-	 * `GET /events` request the client makes next. Creating a session writes its JSONL header, so a
-	 * session that is created and never opened is still findable by id.
+	 * Returns an id rather than a claimed session, so attaching happens in exactly one place: the mux
+	 * `open` frame the client sends next. Creating a session writes its JSONL header, so a session
+	 * that is created and never opened is still findable by id — and still subscribable, since
+	 * subscribing reads the transcript rather than running it.
 	 */
 	async create(): Promise<{ sessionId: string; sessions: SessionRef[] }> {
 		const sessionId = await this.hub.newSession();

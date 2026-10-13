@@ -127,7 +127,7 @@ export function applyAppearance(settings: SettingsSnapshot): void {
  */
 export function reduce(state: ViewState, message: ServerMessage): ViewState {
 	switch (message.type) {
-		case "session":
+		case "baseline":
 			return {
 				...state,
 				snapshot: message.session,
@@ -167,7 +167,7 @@ export function reduce(state: ViewState, message: ServerMessage): ViewState {
 			};
 		case "error":
 			return { ...state, error: message.message };
-		case "tool_approval_request":
+		case "approval_request":
 			return {
 				...state,
 				approvals: [
@@ -175,9 +175,9 @@ export function reduce(state: ViewState, message: ServerMessage): ViewState {
 					message.request,
 				],
 			};
-		case "tool_approval_settled":
+		case "approval_settled":
 			return { ...state, approvals: state.approvals.filter((approval) => approval.toolCallId !== message.toolCallId) };
-		case "session_event":
+		case "event":
 			return applySessionEvent(state, message.event);
 		default:
 			return state;

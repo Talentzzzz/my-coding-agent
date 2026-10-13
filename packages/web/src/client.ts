@@ -7,13 +7,6 @@ export interface StreamHandlers {
 	 * went away being replaced, or the server naming the one it opened.
 	 */
 	onFollow(sessionId: string): void;
-	/**
-	 * The server ended this stream because the thing it was watching is over.
-	 *
-	 * The stream is already closed and will not reconnect. The caller is told because the run's own
-	 * end is what this frame stands for, and nothing more will arrive on this response to say it.
-	 */
-	onStreamEnd(): void;
 }
 
 /** How long to wait before reopening a stream the browser itself gave up on. */
@@ -141,13 +134,8 @@ export class SessionStream {
 			// Any frame is proof the attach worked, whether or not `open` got here first.
 			took();
 
-			if (message.type === "stream_end") {
-				this.endStream();
-				return;
-			}
-
-			if (message.type === "session" && message.session.id !== this.sessionId) {
-				// A snapshot names the session this attempt landed on, which is how a fork or a
+			if (message.type === "baseline" && message.session.id !== this.sessionId) {
+				// A baseline names the session this attempt landed on, which is how a fork or a
 				// replacement is followed without the caller having to guess.
 				this.sessionId = message.session.id;
 				this.handlers.onFollow(message.session.id);
@@ -167,20 +155,5 @@ export class SessionStream {
 			// is one a prompt must not be posted into.
 			for (const settle of [...this.waiting]) settle(attached);
 		});
-	}
-
-	/**
-	 * Take the terminal frame: close, and leave nothing able to reopen.
-	 *
-	 * Bumping the generation first is what makes the close safe — the `error` the close produces is
-	 * then ignored, so no reconnect is scheduled — and clearing the fields is what lets the next
-	 * {@link watch} of this same session open a new stream rather than be read as already watching.
-	 */
-	private endStream(): void {
-		this.generation += 1;
-		this.stream?.close();
-		this.stream = undefined;
-		this.sessionId = undefined;
-		this.handlers.onStreamEnd();
 	}
 }
