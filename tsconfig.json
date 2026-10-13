@@ -20,6 +20,7 @@
 		"scripts/wire/**/*.ts",
 		"scripts/smoke-mux.ts",
 		"scripts/smoke-liveness.ts",
-		"scripts/smoke-backpressure.ts"
+		"scripts/smoke-backpressure.ts",
+		"scripts/smoke-desktop-close.ts"
 	]
 }

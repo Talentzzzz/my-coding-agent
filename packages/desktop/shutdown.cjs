@@ -38,8 +38,14 @@ function createShutdown(options) {
 
 	/** The server this shell is serving, or `null` once it is on its way down. */
 	let server = null;
-	/** Whether a shutdown has already begun, so a second quit cannot start a second one. */
-	let inFlight = false;
+	/** Whether a shutdown is under way. */
+	let shuttingDown = false;
+	/**
+	 * Whether the quit standing in the handler right now is the one this module asked for.
+	 *
+	 * It is the only quit that may pass once a shutdown has begun — see {@link beforeQuit}.
+	 */
+	let ownQuit = false;
 
 	/** Attach the server the shell just booted. */
 	function serve(booted) {
@@ -62,17 +68,30 @@ function createShutdown(options) {
 	 * that returns rather than on a response that never ends.
 	 */
 	function beforeQuit(event) {
-		if (inFlight || server === null) return;
+		if (shuttingDown) {
+			// A shutdown is already under way, and every quit arriving now is somebody else's: the
+			// operating system asking a second time, or the user insisting before the server is down.
+			// It is held back for the same reason the first one was — letting it through is what tears
+			// the process down in the middle of `close()` — and "insisting" is already answered: the
+			// budget below bounds how long the wait can be. The one quit that must pass is this
+			// module's own, and it is the only one marked as such.
+			if (!ownQuit) event.preventDefault();
+			return;
+		}
+		if (server === null) return;
 		event.preventDefault();
-		inFlight = true;
+		shuttingDown = true;
 
 		const closing = server;
-		// Dropped before the await, and not just for the double-quit guard: macOS reopens a window
-		// against `server.url` on `activate`, and a server on its way down must not be the one a new
-		// window is pointed at.
+		// Dropped before the await, and not just for the guard above: macOS reopens a window against
+		// `server.url` on `activate`, and a server on its way down must not be the one a new window is
+		// pointed at.
 		server = null;
 
+		/** Whether the shell has given up waiting, which is also "there is nothing left to ask for". */
+		let gaveUp = false;
 		const budget = setTimeout(() => {
+			gaveUp = true;
 			log(`desktop: the server did not finish closing within ${budgetMs} ms; leaving anyway`);
 			// `exit` rather than `quit`: the quit sequence is what is stuck, so asking for it again
 			// would wait on the same thing. This one does not consult `before-quit`.
@@ -86,8 +105,12 @@ function createShutdown(options) {
 			})
 			.finally(() => {
 				clearTimeout(budget);
-				// The second quit, and the one that counts: `inFlight` sends this handler straight
-				// through, so Electron closes the windows and terminates as it normally would.
+				// A server that finished closing on its way out of a shell that has already left: the
+				// budget sent the process away, and a quit asked for now would only talk to a corpse.
+				if (gaveUp) return;
+				ownQuit = true;
+				// The quit that counts: `beforeQuit` lets this one through, so Electron closes the
+				// windows and terminates as it normally would.
 				app.quit();
 			});
 	}
@@ -98,10 +121,6 @@ function createShutdown(options) {
 		/** The server still being served, or `null` once a shutdown is under way. */
 		get current() {
 			return server;
-		},
-		/** Whether a shutdown has begun. */
-		get inFlight() {
-			return inFlight;
 		},
 	};
 }
