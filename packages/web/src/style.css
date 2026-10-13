@@ -112,6 +112,65 @@ body {
 	text-overflow: ellipsis;
 }
 
+/*
+ * Whether the resident channel is up.
+ *
+ * One dot, and words only when there is something to say — a label that always read "已连接" would be
+ * one more piece of chrome competing with the conversation, and the states that matter are precisely
+ * the ones a person did not cause. It sits beside the brand because it is a fact about the window
+ * rather than about any one conversation, so it belongs to neither the transcript nor its status line.
+ *
+ * Silent when live: the dot is the whole message, and it takes the secondary colour rather than a
+ * success colour, because "nothing is wrong" should not look like an achievement.
+ */
+.channel-indicator {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	min-width: 0;
+	flex: none;
+	color: var(--dsw-label-caption);
+	font-size: 11px;
+	white-space: nowrap;
+}
+
+.channel-dot {
+	width: 6px;
+	height: 6px;
+	flex: none;
+	border-radius: 50%;
+	background: var(--dsw-label-caption);
+}
+
+.channel-indicator[data-state="connecting"] {
+	color: var(--dsw-state-warn);
+}
+
+.channel-indicator[data-state="connecting"] .channel-dot {
+	background: var(--dsw-state-warn);
+	/* Pulsing rather than a second colour: this state is transient, and a static dot would read as a
+	   settled condition the window is not in. */
+	animation: channel-pulse 1.2s ease-in-out infinite;
+}
+
+.channel-indicator[data-state="down"] {
+	color: var(--dsw-state-error);
+}
+
+.channel-indicator[data-state="down"] .channel-dot {
+	background: var(--dsw-state-error);
+}
+
+@keyframes channel-pulse {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.35;
+	}
+}
+
 /* One control shape for every icon button, so they line up on the same grid. */
 .icon-button {
 	display: grid;
@@ -201,11 +260,11 @@ body {
 
 .session-item {
 	display: flex;
-	align-items: center;
-	gap: 8px;
+	align-items: flex-start;
+	gap: 6px;
 	width: 100%;
 	min-height: 32px;
-	padding: 6px 8px 6px var(--session-indent);
+	padding: 5px 8px 5px var(--session-indent);
 	border: none;
 	border-radius: var(--dsw-radius-sm);
 	background: transparent;
@@ -225,6 +284,54 @@ body {
 	background: var(--dsw-bg-active);
 	color: var(--dsw-label-primary);
 	font-weight: 500;
+}
+
+/*
+ * One row's two lines: the title and its time, then whatever the row has to say about itself.
+ *
+ * The column layout is what lets a row grow a second line without the title and the time drifting
+ * apart — as one flex row they would have to share a line's height, and adding the status underneath
+ * would push the time down instead of leaving it beside the title.
+ */
+.session-item-body {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	min-width: 0;
+	flex: 1;
+}
+
+.session-item-line {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	min-width: 0;
+}
+
+/*
+ * The second line: running, waiting for an answer, or open and idle.
+ *
+ * `min-height` is fixed rather than left to the text, so a row that gains a status line grows by that
+ * line and the rows below it do not jump — a sidebar that reshuffles under the pointer is exactly what
+ * the in-place updating is there to prevent.
+ */
+.session-item-status {
+	color: var(--dsw-label-caption);
+	font-size: 11px;
+	line-height: 14px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* Both busy states share one colour: they are the same fact seen from two sides. */
+.session-item-status[data-tone="warn"] {
+	color: var(--dsw-state-warn);
+}
+
+.session-item[aria-current="true"] .session-item-status {
+	color: inherit;
+	opacity: 0.75;
 }
 
 .session-item-title {
@@ -269,6 +376,8 @@ body {
 	display: inline-flex;
 	flex: none;
 	align-items: center;
+	/* Aligned to the title's line rather than the row's, so a two-line row's mark sits with its text. */
+	margin-top: 2px;
 	color: var(--dsw-label-caption);
 }
 
@@ -1373,15 +1482,6 @@ input:focus-visible {
 	background: var(--dsw-state-warn);
 }
 
-/* While the stream is down there is one true thing to say, so it replaces the three stale ones. */
-.status-bar[data-state="down"] .status-stat {
-	color: var(--dsw-state-error);
-}
-
-.status-bar[data-state="down"] .status-meter {
-	opacity: 0.3;
-}
-
 /* ------------------------------------------------------------ notices */
 
 .notice-card {
@@ -1784,6 +1884,8 @@ select.input {
 #app[data-sidebar="rail"] .workspace-head,
 #app[data-sidebar="rail"] .session-item-title,
 #app[data-sidebar="rail"] .session-item-time,
+#app[data-sidebar="rail"] .session-item-status,
+#app[data-sidebar="rail"] .channel-indicator-text,
 #app[data-sidebar="rail"] .session-fork-mark,
 #app[data-sidebar="rail"] .settings-entry span {
 	display: none;
@@ -1794,6 +1896,12 @@ select.input {
 	height: auto;
 	gap: 6px;
 	padding: 0;
+}
+
+/* The rail has room for the dot and nothing else, which is the whole message anyway. */
+#app[data-sidebar="rail"] .channel-indicator {
+	justify-content: center;
+	width: 100%;
 }
 
 #app[data-sidebar="rail"] .new-session {

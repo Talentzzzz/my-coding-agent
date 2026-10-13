@@ -7,11 +7,9 @@ import {
 	type ModelOption,
 	type PendingApproval,
 	type ServerMessage,
-	type SessionRef,
 	type SessionSnapshot,
 	type SettingsSnapshot,
 	type UsageTotals,
-	type WorkspaceGroup,
 } from "@my-agent/core/protocol";
 
 export interface ToolCard {
@@ -66,7 +64,19 @@ export interface PendingEntry {
 }
 
 export interface ViewState {
-	connected: boolean;
+	/**
+	 * Whether the server answers requests.
+	 *
+	 * This is the old `connected`, kept under a name that says what it measures: a successful `fetch`
+	 * sets it and a `fetch` that never reached a server clears it. It is deliberately *not* the same
+	 * fact as the mux channel being up — the two answer differently and asynchronously, and deriving
+	 * one from the other would trade a known fact for a guess. A channel that is down while this is
+	 * true is a normal state: the window can still send, and the request answers for itself.
+	 *
+	 * Not touched by {@link reduce}, because it is a fact about the connection rather than about any
+	 * session, and a baseline is about one session.
+	 */
+	reachable: boolean;
 	snapshot?: SessionSnapshot;
 	items: Item[];
 	/** Entry ids whose message has not shown up in `items` yet. */
@@ -80,10 +90,6 @@ export interface ViewState {
 	retry?: RetryState;
 	/** The models the user has imported, for the settings panel and the session's model picker. */
 	models: ModelOption[];
-	/** The sessions of this workspace, for the picker the server answers with. */
-	sessions: SessionRef[];
-	/** Every workspace with stored sessions, for the sidebar's groups. */
-	workspaces: WorkspaceGroup[];
 	/** Theme, font size, and the approval set. Absent until the server has answered once. */
 	settings?: SettingsSnapshot;
 	error?: string;
@@ -91,7 +97,7 @@ export interface ViewState {
 
 export function initialState(): ViewState {
 	return {
-		connected: false,
+		reachable: false,
 		items: [],
 		pendingEntries: [],
 		streaming: false,
@@ -99,8 +105,6 @@ export function initialState(): ViewState {
 		approvals: [],
 		queued: 0,
 		models: [],
-		sessions: [],
-		workspaces: [],
 	};
 }
 
@@ -138,8 +142,18 @@ export function reduce(state: ViewState, message: ServerMessage): ViewState {
 				usage: message.session.usage,
 				approvals: message.session.pendingApprovals,
 				queued: message.session.queued,
-				retry: message.session.isRetrying ? state.retry : undefined,
-				error: undefined,
+				// Cleared rather than carried over, and not rebuilt from the snapshot either: the
+				// countdown only ever came from the frame that scheduled the backoff, and a snapshot
+				// knows a retry is in flight but not how long is left on it. Carrying the old value
+				// across a reconnect would show a countdown for a backoff this stream never watched
+				// begin. The header line still says "retrying", off the snapshot's own flag.
+				retry: undefined,
+				// `error` survives a baseline. It is the record of a failed operation, and the only
+				// thing that should erase it is the next operation succeeding — a reconnect that
+				// worked is not one of the user's operations. Clearing it here would mean a session
+				// that failed while the channel was down silently forgave itself the moment it came
+				// back, which is exactly the failure this notice exists to make visible.
+				error: state.error,
 			};
 		case "entry": {
 			const drained = drainEntries(state.items, [{ entryId: message.entryId, messageTimestamp: message.messageTimestamp }]);
@@ -182,6 +196,32 @@ export function reduce(state: ViewState, message: ServerMessage): ViewState {
 		default:
 			return state;
 	}
+}
+
+/**
+ * Fold the end of a logical stream.
+ *
+ * Not a case in {@link reduce} because it is not a `ServerMessage`: `end` is the frame that closes
+ * the stream, so it sits beside the messages rather than among them, and giving it a `type` of its
+ * own would put a stream-control fact into the payload vocabulary.
+ *
+ * Two things change and one deliberately does not.
+ *
+ * `approvals` is cleared. The baseline seeds it and per-approval frames maintain it, and after an
+ * `end` there will be no further baseline on this stream to seed it again — so a banner left standing
+ * is a button whose request goes nowhere. This is the one place that clears it, and it is here rather
+ * than in the baseline branch because the baseline branch already had the right answer for a stream
+ * that is still open.
+ *
+ * `streaming` stops, because a run cannot outlive the stream reporting it. The old code set this in
+ * its own stream-end handler and would have lost it in the rewrite; folding it here means the state
+ * has one place that knows what an end means.
+ *
+ * `items` stays. The transcript belongs to the session, not to the stream carrying it — clearing it
+ * would throw away everything the window had drawn because the connection went away.
+ */
+export function reduceEnd(state: ViewState): ViewState {
+	return { ...state, approvals: [], streaming: false };
 }
 
 /**

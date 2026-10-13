@@ -144,6 +144,9 @@ npm run smoke:boot             # 进程内服务器启动、落地会话、以�
 node scripts/smoke-tools.ts    # 工具、会话存储、压缩，不需要供应商密钥
 node scripts/smoke-sessions.ts # 会话注册表，不需要供应商密钥
 node scripts/smoke-projection.ts # 概况投影与协议信封，不需要供应商密钥
+node scripts/smoke-mux-client.ts # 客户端通道：退避、判活、按引用重放、end 与基线；不需要密钥
+node scripts/smoke-mux-live.ts  # 真服务器 + 真 WebSocket 跑生产的 MuxClient；不需要密钥
+node scripts/smoke-sidebar.ts   # 侧边栏原地改行、按 modified 重排、第二行状态；不需要密钥
 node scripts/smoke-session.ts  # 流式、排队、重试、压缩、委派；不需要密钥
 node scripts/smoke-models.ts   # 导入的模型与无模型占位，不需要密钥
 node scripts/smoke-approval.ts # 经 API 的审批往返，不需要密钥

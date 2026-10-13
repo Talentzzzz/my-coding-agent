@@ -3,7 +3,6 @@ import type { UsageTotals } from "@my-agent/core/protocol";
 
 export interface StatusState {
 	usage: UsageTotals;
-	connected: boolean;
 }
 
 /**
@@ -14,10 +13,12 @@ export interface StatusState {
  * context window is. All three are read at a glance and none is a control, which is why they sit below
  * the composer rather than in the header the conversation is read from.
  *
- * While the server is not answering the three are replaced by the one thing that is actually true,
- * because a stale percentage is worse than no percentage. It is the *server's* reachability that is
- * being reported and not a stream's: under a run-scoped stream, having no stream open is the normal
- * state of an idle conversation, and calling that "reconnecting…" would mean showing it all the time.
+ * The three are drawn unconditionally. The line used to blank them whenever the server was not
+ * answering, on the reasoning that a stale percentage is worse than no percentage — but a token count
+ * is not a claim about the server, it is the last thing this window saw the session do, and clearing
+ * it throws away a true fact to avoid showing a stale one. A dead channel is a different fact and it
+ * is reported separately, by the sidebar's connection indicator, where it can be seen without the
+ * window being asked to forget what it knows.
  */
 export class StatusBar {
 	readonly element: HTMLElement;
@@ -43,15 +44,6 @@ export class StatusBar {
 	}
 
 	render(state: StatusState): void {
-		if (!state.connected) {
-			this.element.dataset.state = "down";
-			// The one sentence that is still true goes in the first seat; the other two go blank.
-			this.total.textContent = "已断开";
-			this.cache.textContent = "";
-			this.context.textContent = "";
-			this.meterFill.style.width = "0%";
-			return;
-		}
 		this.element.dataset.state = "up";
 
 		const usage = state.usage;

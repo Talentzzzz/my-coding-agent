@@ -15,5 +15,13 @@
 			"@my-agent/core/protocol": ["./packages/core/src/protocol.ts"]
 		}
 	},
-	"include": ["src/**/*.ts"]
+	// The smokes are included here rather than in the root project because they import this package's
+	// sources, and they need the same `lib` they do — the reducer touches `document` for the theme, and
+	// a check without the DOM types would fail on code the package legitimately contains.
+	"include": [
+		"src/**/*.ts",
+		"../../scripts/smoke-mux-client.ts",
+		"../../scripts/smoke-mux-live.ts",
+		"../../scripts/smoke-sidebar.ts"
+	]
 }
