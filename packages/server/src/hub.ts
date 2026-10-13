@@ -86,7 +86,14 @@ export class HostedSession {
 	readonly session: Agent;
 	/** The directory this session's tools may touch. */
 	readonly workspaceRoot: string;
-	/** Callers currently holding this session open: one per in-flight request or run. */
+	/**
+	 * Callers currently holding this session open.
+	 *
+	 * Today that is one per event stream plus one per request in flight, because a stream holds a
+	 * claim for as long as it lives. Under the multiplexed transport the stream half goes away — a
+	 * subscription takes no claim, and only a request that changes the session or a run in flight
+	 * keeps one — but the counter itself does not change, and nothing else may start counting here.
+	 */
 	claims = 0;
 	/** Set while the hub is deciding whether an unclaimed session can be closed. */
 	reaping = false;
@@ -314,9 +321,16 @@ export class SessionHub {
 		};
 	}
 
-	/** How many observers a session has right now — what an abandonment timer reads, empty or not. */
-	watchersOf(sessionId: string): number {
-		return this.observers.get(sessionId)?.size ?? 0;
+	/**
+	 * Whether anyone is watching a session right now.
+	 *
+	 * An emptiness question rather than a count, and deliberately not one: the only reader is an
+	 * abandonment timer that wants to know when a session stopped being watched, and handing it a
+	 * number invites it to reason about how many — which is the substitution that turns a set into the
+	 * second counter this hub must not have.
+	 */
+	isWatched(sessionId: string): boolean {
+		return (this.observers.get(sessionId)?.size ?? 0) > 0;
 	}
 
 	/**

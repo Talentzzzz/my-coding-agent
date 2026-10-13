@@ -1628,12 +1628,12 @@ export class SessionManager {
 			const cwd = header === null ? undefined : getSessionHeaderCwd(header);
 			if (cwd === undefined || cwd === "") continue;
 
-const sessions = (await SessionManager.list(cwd, dir, signal)).map(toSessionRow);
-		if (sessions.length === 0) continue;
-		groups.push({ cwd, sessions });
-	}
+			const sessions = (await SessionManager.list(cwd, dir, signal)).map(toSessionRow);
+			if (sessions.length === 0) continue;
+			groups.push({ cwd, sessions });
+		}
 
-	return groups.sort((a, b) => newestAt(b) - newestAt(a));
+		return groups.sort((a, b) => newestAt(b) - newestAt(a));
 	}
 
 	/**
@@ -1646,8 +1646,14 @@ const sessions = (await SessionManager.list(cwd, dir, signal)).map(toSessionRow)
 	static async rowFor(filePath: string, signal?: AbortSignal): Promise<SessionRow | undefined> {
 		const info = await buildSessionInfo(filePath, signal);
 		if (info === null) return undefined;
-		// A fork's parent id is only knowable where both ends are listed together, so one file alone
-		// cannot name one. The row is still right about everything else.
+		// A fork's parent is named by *path* in the header, so it is knowable from one file alone once
+		// that path is resolved to an id — which matters because a fork reaches a store one row at a
+		// time, where the listing that would have linked it is not in play.
+		if (info.parentId === undefined && info.parentSessionPath !== undefined) {
+			const parent = readSessionHeaderForDiscovery(info.parentSessionPath);
+			const parentId = parent?.id;
+			if (parentId !== undefined && parentId !== info.id) info.parentId = parentId;
+		}
 		return toSessionRow(info);
 	}
 
@@ -1697,6 +1703,30 @@ const sessions = (await SessionManager.list(cwd, dir, signal)).map(toSessionRow)
 /** The most recent activity in a group, for ordering the sidebar's workspaces. */
 function newestAt(group: WorkspaceSessions): number {
 	return group.sessions.reduce((newest, session) => Math.max(newest, session.modified), 0);
+}
+
+/**
+ * Group rows by workspace and order them the way the sidebar draws them.
+ *
+ * Newest activity first within a group, and groups ordered by their own newest row. Exported because
+ * the server's projection holds the same rows and has to order them the same way — a store and a
+ * reader that each sorted for themselves would disagree the moment a row moved.
+ */
+export function groupSessionsByWorkspace(rows: readonly SessionRow[]): WorkspaceSessions[] {
+	const groups = new Map<string, SessionRow[]>();
+	for (const row of rows) {
+		const group = groups.get(row.cwd);
+		if (group === undefined) groups.set(row.cwd, [row]);
+		else group.push(row);
+	}
+	return [...groups.entries()]
+		.map(([cwd, sessions]) => ({ cwd, sessions: byModified(sessions) }))
+		.sort((a, b) => newestAt(b) - newestAt(a));
+}
+
+/** Most recently active first, on a copy so two callers cannot reorder each other's view. */
+export function byModified(rows: readonly SessionRow[]): SessionRow[] {
+	return [...rows].sort((a, b) => b.modified - a.modified);
 }
 
 /**

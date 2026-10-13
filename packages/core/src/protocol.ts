@@ -340,21 +340,40 @@ export type ConnectionItem =
  * Three shapes at one level, told apart by field name rather than by a discriminant — `item` carries
  * its own `type`, so an outer `type` would say the same thing twice and make "outer and inner
  * disagree" a representable state.
+ *
+ * `item` holds only {@link ServerMessage}: the connection-level payloads belong to no session, and
+ * letting one ride a column's `streamId` would make "which session is this for" answerable two ways.
  */
 export type StreamFrame =
-	| { item: ServerMessage | ConnectionItem }
+	| { item: ServerMessage }
 	| { end: true }
 	| { error: StreamFailure };
 
 /**
- * One WebSocket message: an envelope around a stream frame.
+ * The connection's own frame: a payload belonging to no session, or the failure of the connection.
  *
- * `streamId: null` is what a connection-level payload travels on. The envelope is deliberately
- * outside {@link ServerMessage} rather than a field inside each of its members: several callers
- * construct protocol messages with no stream behind them at all (a REST read, a fork), and inlining
- * the id would force them to invent one.
+ * A separate type from {@link StreamFrame} rather than a wider `item` on it, because the two travel on
+ * different keys and a client routes them differently: one to a column, the other to the store behind
+ * all of them.
  */
-export type ServerFrame = { streamId: StreamId | null } & StreamFrame;
+export type ConnectionFrame =
+	| { item: ConnectionItem }
+	| { error: StreamFailure };
+
+/**
+ * One WebSocket message: an envelope around a frame, told apart by which key carries the id.
+ *
+ * `streamId` is the session id when the frame belongs to one logical stream and `null` when it belongs
+ * to the connection, so the pair of types makes "a connection-level payload on a session's stream" and
+ * the reverse unrepresentable rather than merely discouraged.
+ *
+ * The envelope is deliberately outside {@link ServerMessage} rather than a field inside each of its
+ * members: several callers construct protocol messages with no stream behind them at all (a REST read,
+ * a fork), and inlining the id would force them to invent one.
+ */
+export type ServerFrame =
+	| ({ streamId: StreamId } & StreamFrame)
+	| ({ streamId: null } & ConnectionFrame);
 
 /**
  * What a client may send. Two actions, no envelope — the frame is the protocol.

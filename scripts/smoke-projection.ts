@@ -193,6 +193,25 @@ try {
 	await until(() => !hub.live.includes(first));
 	check("the row is still there after its host", (await projection.row(first)) !== undefined);
 
+	process.stdout.write("a fork knows its parent without a listing beside it\n");
+	const source = await hub.newSession();
+	const sourceHost = await hub.claim(source);
+	fake.setResponses([fakeAssistantMessage("to fork from")]);
+	await sourceHost.session.prompt("the conversation being forked");
+	await settle();
+	const forked = await hub.fork(source, sourceHost.session.sessionManager.getLeafId());
+	await until(() => seen.some((row) => row.id === forked));
+	const forkRow = await projection.row(forked);
+	check("the fork reaches the store on its own", forkRow !== undefined, forked);
+	check(
+		"and names the session it came from",
+		forkRow?.parentId === source,
+		`${forkRow?.parentId} vs ${source}`,
+	);
+	check("while the session it came from names nobody", (await projection.row(source))?.parentId === undefined, (await projection.row(source))?.parentId);
+	hub.release(sourceHost);
+	await until(() => !hub.live.includes(source));
+
 	process.stdout.write("the hub tells a process-level listener about sessions nobody watches\n");
 	const heard: string[] = [];
 	const stopHosting = hub.onHostChange((sessionId, hostSeen) => heard.push(`${sessionId}:${hostSeen === undefined ? "none" : "host"}`));
@@ -228,7 +247,7 @@ try {
 	check("the host was reaped while observed", !hub.live.includes(afterStop));
 	check("and the row says idle", (await projection.row(afterStop))?.running === false);
 	stopObserving();
-	check("and the observer let go", hub.watchersOf(afterStop) === 0, String(hub.watchersOf(afterStop)));
+	check("and the observer let go", !hub.isWatched(afterStop));
 
 	process.stdout.write("the envelope types describe a multiplexed connection\n");
 	const item: ServerMessage = { type: "status", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2, contextWindow: 100 }, submitting: true, queued: 0, isRetrying: false, retryAttempt: 0 };

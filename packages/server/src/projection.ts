@@ -1,4 +1,10 @@
-import { type AgentSessionEvent, SessionManager, type SessionRow, type WorkspaceGroup } from "@my-agent/core";
+import {
+	type AgentSessionEvent,
+	groupSessionsByWorkspace,
+	SessionManager,
+	type SessionRow,
+	type WorkspaceGroup,
+} from "@my-agent/core";
 import type { HostedSession, SessionHub } from "./hub.ts";
 
 /**
@@ -81,7 +87,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	 * A running session's row: whatever the store knows, with the two fields only a loop can say.
 	 *
 	 * The stored half has to exist before this can be called — a session nobody has a row for has no
-	 * stored half yet, which is what {@link probeRow} is for.
+	 * stored half yet, which is what {@link probe} is for.
 	 */
 	const liveRow = (sessionId: string, live: LiveFields): SessionRow | undefined => {
 		const stored = rows.get(sessionId);
@@ -149,10 +155,11 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	 * Only for a session that no scan has accounted for: created or forked by this process, or dropped
 	 * into the store by hand. One file, not the machine — a scan here would cost a full parse of every
 	 * transcript to learn about the one session that just appeared.
+	 *
+	 * A session nobody is running may not have a file yet at all, and says so by answering `undefined`;
+	 * the row then appears when the session first writes, which is also when the host opens.
 	 */
-	const probeRow = async (sessionId: string): Promise<SessionRow | undefined> => {
-		return SessionManager.rowForId(sessionId);
-	};
+	const probe = (sessionId: string): Promise<SessionRow | undefined> => SessionManager.rowForId(sessionId);
 
 	/**
 	 * The hub said a session appeared, started, or went away.
@@ -170,7 +177,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 			following.get(sessionId)?.off();
 			following.delete(sessionId);
 			if (!rows.has(sessionId)) {
-				void probeRow(sessionId).then((scanned) => {
+				void probe(sessionId).then((scanned) => {
 					if (scanned !== undefined) publish(scanned);
 				});
 			}
@@ -183,7 +190,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 		follow(sessionId, host);
 		if (rows.has(sessionId)) return;
 
-		void probeRow(sessionId).then((scanned) => {
+		void probe(sessionId).then((scanned) => {
 			if (scanned === undefined) return;
 			const entry = following.get(sessionId);
 			publish(entry === undefined ? scanned : { ...scanned, ...liveOf(entry.host) });
@@ -198,7 +205,10 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	 */
 	const seed = async (): Promise<void> => {
 		for (const group of await SessionManager.listWorkspaces()) {
-			for (const row of group.sessions) rows.set(row.id, row);
+			// Through `publish` rather than `rows.set`: a row may already be here from a probe, and a
+			// listing knows things a single file does not — a fork's parent, above all. Going around the
+			// comparison would leave that correction sitting in the store with nobody told.
+			for (const row of group.sessions) publish(row);
 		}
 		for (const [sessionId, entry] of following) {
 			const next = liveRow(sessionId, liveOf(entry.host));
@@ -221,7 +231,9 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	return {
 		async groups(): Promise<WorkspaceGroup[]> {
 			await ensureSeeded();
-			return orderedGroups([...rows.values()]);
+			// Grouped by the store's own rule rather than a second copy of it: the sidebar draws one
+			// order, and a reader that ordered differently would disagree with the listing it came from.
+			return groupSessionsByWorkspace([...rows.values()]);
 		},
 		async rows(): Promise<SessionRow[]> {
 			await ensureSeeded();
@@ -259,52 +271,39 @@ function liveOf(host: HostedSession): LiveFields {
 }
 
 /**
- * Rows as the sidebar's groups: newest activity first within a group, and groups ordered by their own
- * newest row.
+ * Every field a row has, in the order they are declared.
  *
- * The group order reads `modified` rather than `createdAt` because a workspace's recency is the
- * recency of its most recent conversation — reading `createdAt` there put a workspace someone worked
- * in all morning below one they opened and abandoned.
+ * Read from the type rather than written out by hand twice, because a comparison that quietly forgets
+ * a field would stop noticing rows that differ only in it — and the symptom would be a row that never
+ * updates, which is precisely the bug this store exists to remove. The `satisfies` line is what makes
+ * adding a field to `SessionRow` a compile error here rather than a silent omission.
  */
-function orderedGroups(rows: readonly SessionRow[]): WorkspaceGroup[] {
-	const groups = new Map<string, SessionRow[]>();
-	for (const row of rows) {
-		const group = groups.get(row.cwd);
-		if (group === undefined) groups.set(row.cwd, [row]);
-		else group.push(row);
-	}
-	return [...groups.entries()]
-		.map(([cwd, sessions]) => ({ cwd, sessions: byModified(sessions) }))
-		.sort((a, b) => newestAt(b) - newestAt(a));
-}
+const ROW_FIELDS = [
+	"id",
+	"cwd",
+	"createdAt",
+	"title",
+	"parentId",
+	"modified",
+	"running",
+	"pending",
+] as const satisfies readonly (keyof SessionRow)[];
 
-/** The most recent activity in a group. */
-function newestAt(group: WorkspaceGroup): number {
-	return group.sessions.reduce((newest, row) => Math.max(newest, row.modified), 0);
-}
+type RowField = (typeof ROW_FIELDS)[number];
+
+/** Compile-time proof that the list above covers `SessionRow` exactly. */
+type _EveryRowFieldIsListed = Exclude<keyof SessionRow, RowField> extends never ? true : never;
+const _everyRowFieldIsListed: _EveryRowFieldIsListed = true;
+void _everyRowFieldIsListed;
 
 /**
- * Most recently active first.
+ * Whether two rows would draw the same, so an identical one need not be sent.
  *
- * A copy rather than an in-place sort: the order belongs to whoever asked for it, and two callers
- * asking at once must not reorder each other's view.
+ * Compared field by field rather than by serialization: the wire form is a string, and building one to
+ * throw it away would be both slower and a lie about what this checks.
  */
-function byModified(rows: readonly SessionRow[]): SessionRow[] {
-	return [...rows].sort((a, b) => b.modified - a.modified);
-}
-
-/** Whether two rows would draw the same, so an identical one need not be sent. */
 function sameRow(a: SessionRow, b: SessionRow): boolean {
-	return (
-		a.id === b.id &&
-		a.cwd === b.cwd &&
-		a.createdAt === b.createdAt &&
-		a.title === b.title &&
-		a.parentId === b.parentId &&
-		a.modified === b.modified &&
-		a.running === b.running &&
-		a.pending === b.pending
-	);
+	return ROW_FIELDS.every((field) => a[field] === b[field]);
 }
 
 /**

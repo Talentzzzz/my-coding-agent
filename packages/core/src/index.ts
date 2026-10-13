@@ -133,6 +133,8 @@ export {
 	buildSessionContext,
 	deriveTitle,
 	findMostRecentSession,
+	byModified,
+	groupSessionsByWorkspace,
 	loadEntriesFromFile,
 	modelChangeName,
 	sessionEntryToContextMessages,
