@@ -1,3 +1,5 @@
+import { stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { ChatTransport } from "@my-agent/ai";
 import {
 	type Agent,
@@ -388,9 +390,15 @@ export class SessionHub {
 	 *
 	 * Returns an id rather than a claimed session so that claiming happens in exactly one place:
 	 * the caller attaches through {@link claim}, which is the only thing that counts claims.
+	 *
+	 * `cwd` decides where the session lands. Undefined is the server's own root; a path is accepted
+	 * when it exists and is a directory, and nothing more — a first session in a directory nobody has
+	 * worked in is the one way a new workspace enters the known list, and the workspace root is the
+	 * tools' fence rather than the process's, so no known-workspace check belongs here.
 	 */
-	async newSession(): Promise<string> {
-		const id = SessionManager.create(this.cwd).getSessionId();
+	async newSession(cwd?: string): Promise<string> {
+		const root = await workspaceRootOrThrow(cwd ?? this.cwd);
+		const id = SessionManager.create(root).getSessionId();
 		this.current = Promise.resolve(id);
 		this.announceHost(id, undefined);
 		return id;
@@ -586,4 +594,27 @@ function delay(ms: number): Promise<void> {
 		const timer = setTimeout(resolve, ms);
 		timer.unref();
 	});
+}
+
+/**
+ * The root a new session lands on, resolved and checked before anything is written.
+ *
+ * The check is deliberately only "exists and is a directory". Anything narrower — a known-workspace
+ * list, for one — would close the one sanctioned road to a first session in a directory the process
+ * has never worked in, which is exactly how a new workspace earns its place in the sidebar.
+ *
+ * Exported because the status a refusal deserves is the controller's decision, not the hub's: the
+ * controller runs this check itself so a bad path can be answered with a 400, and `newSession`
+ * runs it again so no internal caller can write a session without it.
+ */
+export async function workspaceRootOrThrow(cwd: string): Promise<string> {
+	const root = resolve(cwd);
+	let stats;
+	try {
+		stats = await stat(root);
+	} catch {
+		throw new Error(`No such directory: ${root}`);
+	}
+	if (!stats.isDirectory()) throw new Error(`Not a directory: ${root}`);
+	return root;
 }

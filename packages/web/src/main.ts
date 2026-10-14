@@ -4,11 +4,24 @@ import { browserSocket, MuxClient, muxUrl, type ChannelState } from "./client.ts
 import { SessionRows } from "./rows.ts";
 import { Composer, type ComposerSelection } from "./composer.ts";
 import { TranscriptView } from "./render/transcript.ts";
-import { Sidebar } from "./render/sidebar.ts";
+import { Sidebar, workspaceName } from "./render/sidebar.ts";
 import { SettingsPanel } from "./render/settings.ts";
+import { SessionSettingsPanel } from "./render/session-settings.ts";
+import { closeMenu, openMenu } from "./render/menu.ts";
 import { StatusBar } from "./render/statusbar.ts";
 import { element, icon } from "./dom.ts";
 import type { ConnectionItem, ModelOption, ServerMessage } from "@my-agent/core/protocol";
+
+/**
+ * The one thing the desktop shell adds to the page: the OS's own folder picker. The app itself does
+ * not browse the filesystem — "添加工作区" hands the browsing to the system dialog — so a browser
+ * without the shell has no picker, and the menu item says so rather than pretending.
+ */
+declare global {
+	interface Window {
+		desktop?: { pickFolder?: () => Promise<string | undefined> };
+	}
+}
 
 /** What a failed request should say. The status is part of it: 404 and 409 mean different things. */
 function describe(error: unknown): string {
@@ -51,8 +64,20 @@ function main(): void {
 	 * session.
 	 */
 	let chosen: { model?: string; thinkingLevel?: string } = {};
-	/** The directory this server runs over, which is where "新建会话" writes. */
+	/** The directory this server runs over, which is where "新建会话" writes by default. */
 	let currentWorkspace = "";
+	/**
+	 * The workspace picker's own choice, held by the window and never by the server.
+	 *
+	 * Three controls read it and nothing else does: the hero chip that displays it, the new-session
+	 * button that creates into it, and the sidebar's "当前" mark that names it. Empty means "no
+	 * explicit choice", and the answer is then the active session's workspace — so the mark can never
+	 * contradict the conversation on screen — or the server's root when there is no session. Opening a
+	 * session clears it, which is what keeps the choice a "next time" answer rather than a state that
+	 * quietly outlives the moment it was made in. It survives no restart and lands in no file, by
+	 * decision: a transient preference re-chosen at the moment it is needed is not worth a store.
+	 */
+	let pickedWorkspace = "";
 	let collapsed = false;
 	/**
 	 * Whether the resident channel is up.
@@ -81,7 +106,11 @@ function main(): void {
 	let headingDrawn: string | undefined;
 	let headingTipDrawn: string | undefined;
 	let subtitleDrawn: string | undefined;
-	let noticesDrawn: { models: ViewState["models"]; approvals: ViewState["approvals"] } | undefined;
+	/** The directory the chip's label was last drawn from, so an unchanged one is not rewritten. */
+	let chipDrawn: string | undefined;
+	/** The approvals the takeover seat was last drawn from; a new array means something to answer. */
+	let approvalsDrawn: ViewState["approvals"] | undefined;
+	let noticesDrawn: ViewState["models"] | undefined;
 
 	// ---------------------------------------------------------------- the column
 
@@ -110,6 +139,18 @@ function main(): void {
 	const composerWrap = element("div", "composer-wrap");
 	const errorBar = element("div", "error-bar");
 	errorBar.hidden = true;
+	/**
+	 * The approval card's seat, which is the composer's own seat.
+	 *
+	 * A pending approval replaces the input box rather than hanging above it: the question is the only
+	 * thing the window can act on while it stands, and a card that took over the seat is the shape the
+	 * reference gives it — warning border, command, two answers — where a banner above an input that
+	 * is still taking text reads like decoration on something that is not listening anyway.
+	 */
+	const approvalSeat = element("div", "approval-seat");
+	approvalSeat.hidden = true;
+	/** The hero row: the workspace chip, rendered only while there is nothing to read. */
+	const heroRow = element("div", "hero-row");
 	const composer = new Composer({
 		onSubmit: (text, behavior) => void prompt(text, behavior),
 		onAbort: () => void abort(),
@@ -123,8 +164,57 @@ function main(): void {
 			chosen = { ...chosen, thinkingLevel: level };
 			render();
 		},
+		onOpenSessionSettings: () => {
+			sessionSettings.show();
+			sessionSettings.render({
+				...(state.settings ? { settings: state.settings } : {}),
+				...(state.snapshot ? { snapshot: state.snapshot } : {}),
+			});
+		},
 	});
-	composerWrap.append(errorBar, composer.element);
+	composerWrap.append(errorBar, approvalSeat, heroRow, composer.element);
+
+	/**
+	 * The workspace chip, and the menu it opens.
+	 *
+	 * The chip is the picker's face: it shows where the *next* new session will land, it is rendered
+	 * only while the transcript is empty — the moment the conversation is the thing on screen, a
+	 * control that promises to redirect it would be a lie, since the choice never rewrites a session —
+	 * and its menu lists the workspaces this machine already knows plus the one road in for one it
+	 * does not. The list is drawn from the sidebar's own rows, so a workspace that earned its place by
+	 * having a session is the same list here.
+	 */
+	const workspaceChip = element("button", "workspace-chip", undefined, { type: "button", "aria-haspopup": "menu" });
+	const chipLabel = element("span", "workspace-chip-label");
+	workspaceChip.append(icon("folder"), chipLabel, icon("chevron"));
+	workspaceChip.addEventListener("click", () => {
+		const groups = rows.groups();
+		// Nothing known yet: a one-row menu whose only row is the add action is a menu that pretends
+		// there was a choice, so the click goes straight to the picker, as the reference does.
+		if (groups.length === 0) {
+			void addWorkspace();
+			return;
+		}
+		const chosenDirectory = directoryForNewSession();
+		openMenu(workspaceChip, [
+			...groups.map((group) => ({
+				icon: "folder" as const,
+				label: workspaceName(group.cwd),
+				title: group.cwd,
+				active: group.cwd === chosenDirectory,
+				onSelect: () => {
+					pickedWorkspace = group.cwd;
+					render();
+				},
+			})),
+			{ kind: "separator" as const },
+			{
+				label: "添加工作区…",
+				onSelect: () => void addWorkspace(),
+			},
+		]);
+	});
+	heroRow.append(workspaceChip);
 
 	const statusBar = new StatusBar();
 
@@ -143,6 +233,7 @@ function main(): void {
 			settings.show();
 			settings.render({ models: state.models, ...(state.settings ? { settings: state.settings } : {}), ...(state.snapshot ? { snapshot: state.snapshot } : {}) });
 		},
+		onAddWorkspace: () => void addWorkspace(),
 	});
 
 	// ----------------------------------------------------------------- settings
@@ -151,17 +242,10 @@ function main(): void {
 		onClose: () => settings.hide(),
 		onTheme: (theme) => void saveSettings({ appearance: { theme } }),
 		onFontSize: (fontSize) => void saveSettings({ appearance: { fontSize } }),
-		// Session-scoped, like the tool toggles beside it: the choice is recorded in this session's own
-		// transcript, so it must not go through the settings endpoint, which writes the workspace files
-		// that only decide what a *new* session opens on.
-		onApproval: (tool, value) => {
-			if (followed === undefined) {
-				report(new Error("还没有挂上任何会话。"));
-				return;
-			}
-			void api.setConfig(followed, { approval: { [tool]: value } }).catch(report);
-		},
 		onBashTimeouts: (bash) => void saveSettings({ bash }),
+		// The global default approval map: what a session that never chose opens on. Writing it here
+		// writes the settings files, and a session with recorded choices of its own keeps them.
+		onGlobalApproval: (tool, value) => void saveSettings({ approval: { [tool]: value } }),
 		onSaveModels: async (rows) => {
 			const { models } = await api.updateModels(rows);
 			apply({ ...state, models });
@@ -169,12 +253,52 @@ function main(): void {
 		// The default a *new* session opens on, so it writes the settings files. The model a live session
 		// is on is the composer's, and never goes through here.
 		onDefaultModel: (ref) => void saveSettings({ model: ref }),
+		onGlobalTools: (names) => void saveSettings({ tools: names }),
+	});
+
+	/**
+	 * The session-level panel, behind the composer's own button.
+	 *
+	 * Its controls write the session's transcript — `PUT /tools` and the approval `PATCH` — which is
+	 * the same path the old settings panel used, moved to the seat that says which level it edits. The
+	 * reset sends the global defaults through the two endpoints together, which is what writes one
+	 * `tool_config` entry *holding* the defaults; the snapshot's field-equality booleans then read it
+	 * as following global again.
+	 */
+	const sessionSettings = new SessionSettingsPanel({
+		onClose: () => sessionSettings.hide(),
 		onActiveTools: (names) => {
-			if (followed !== undefined) void api.setTools(followed, names).catch(report);
+			if (followed === undefined) {
+				report(new Error("还没有挂上任何会话。"));
+				return;
+			}
+			void api.setTools(followed, names).catch(report);
+		},
+		onApproval: (tool, value) => {
+			if (followed === undefined) {
+				report(new Error("还没有挂上任何会话。"));
+				return;
+			}
+			// Session-scoped: the choice is recorded in this session's own transcript, so it must not go
+			// through the settings endpoint, which writes the workspace files that only decide what a
+			// *new* session opens on.
+			void api.setConfig(followed, { approval: { [tool]: value } }).catch(report);
+		},
+		onFollowGlobal: () => {
+			if (followed === undefined || state.snapshot === undefined) return;
+			const allTools = state.snapshot.allTools;
+			const global = state.settings;
+			if (global === undefined) {
+				report(new Error("全局设置还没有读到，稍后再试。"));
+				return;
+			}
+			const names = global.tools === undefined ? allTools : global.tools.filter((name) => allTools.includes(name));
+			void api.setTools(followed, names).catch(report);
+			void api.setConfig(followed, { approval: { ...global.approval } }).catch(report);
 		},
 	});
 
-	root.append(sidebar.element, conversation, settings.element);
+	root.append(sidebar.element, conversation, settings.element, sessionSettings.element);
 
 	// ------------------------------------------------------------------- wiring
 
@@ -282,16 +406,52 @@ function main(): void {
 		// window's own three facts — so it is skipped here rather than walked and patched inside.
 		// Rendering the sidebar on every token was the profile's H7, a flat per-frame tax that grew
 		// with the workspace count; the rows bump `rows.version` when they actually change.
-		const drawn = `${rows.version}|${followed ?? ""}|${currentWorkspace}|${collapsed ? 1 : 0}|${channel}`;
+		const directory = directoryForNewSession();
+		const drawn = `${rows.version}|${followed ?? ""}|${directory}|${pickedWorkspace}|${collapsed ? 1 : 0}|${channel}`;
 		if (drawn === sidebarDrawn) return;
 		sidebarDrawn = drawn;
 		sidebar.render({
 			workspaces: rows.groups(),
 			...(followed === undefined ? {} : { activeSessionId: followed }),
-			currentWorkspace,
+			currentWorkspace: directory,
 			collapsed,
 			channel,
 		});
+	}
+
+	/**
+	 * Where the next new session lands, and the one answer to the question the picker exists for.
+	 *
+	 * The explicit choice wins, then the session on screen's workspace, then the server's root — the
+	 * order the "当前" mark's promise needs, since the mark names this answer and must never disagree
+	 * with the conversation being read.
+	 */
+	function directoryForNewSession(): string {
+		return pickedWorkspace || state.snapshot?.cwd || currentWorkspace;
+	}
+
+	/**
+	 * The OS folder picker, which is the only road a new workspace enters the list by.
+	 *
+	 * The app never browses the filesystem itself: the system dialog does the browsing, and the path
+	 * it answers becomes the picker's choice and a session in the same breath — a workspace earns its
+	 * place in the list by having a session, so adding one *is* starting one.
+	 */
+	async function addWorkspace(): Promise<void> {
+		if (window.desktop?.pickFolder === undefined) {
+			report(new Error("选择文件夹需要桌面外壳；浏览器里可以直接用命令行把会话开在目标目录。"));
+			return;
+		}
+		let path: string | undefined;
+		try {
+			path = await window.desktop.pickFolder();
+		} catch (error) {
+			report(error);
+			return;
+		}
+		if (path === undefined) return;
+		pickedWorkspace = path;
+		await newSession(path);
 	}
 
 	/** Repaint the status line, and only when a new usage arrived to paint it with. */
@@ -397,16 +557,36 @@ function main(): void {
 			subtitle.textContent = subtitleText;
 		}
 
+		// The hero row is the empty conversation's phase: an empty transcript is "about to start one",
+		// which is exactly the future the chip talks about. The moment there is something to read, the
+		// chip goes — its choice never rewrites a session, and a control that looked like it could
+		// would be read as one that does.
+		const directory = directoryForNewSession();
+		if (chipDrawn !== directory) {
+			chipDrawn = directory;
+			chipLabel.textContent = workspaceName(directory);
+			workspaceChip.title = directory;
+		}
+		const heroVisible = state.items.length === 0;
+		if (heroRow.hidden === heroVisible) heroRow.hidden = !heroVisible;
+
 		// What a send would carry is what the seat shows, so the seat is drawn from the same values
 		// `prompt` reads rather than from the snapshot alone. The two selects inside gate themselves
 		// on a signature, so this stays cheap per frame.
 		composer.setSelection(selectionForSend());
 
 		renderStatusBar();
+		renderApprovals();
 
 		if (settings.open) {
 			settings.render({
 				models: state.models,
+				...(state.settings ? { settings: state.settings } : {}),
+				...(snapshot ? { snapshot } : {}),
+			});
+		}
+		if (sessionSettings.open) {
+			sessionSettings.render({
 				...(state.settings ? { settings: state.settings } : {}),
 				...(snapshot ? { snapshot } : {}),
 			});
@@ -421,17 +601,16 @@ function main(): void {
 	 * With no model imported there is nothing this app can do, and the failure would otherwise arrive
 	 * as an error message after the user had already typed a question and waited for it.
 	 *
-	 * The gate is the identity of the two arrays it draws from. Rebuilding the banner area on a frame
-	 * that changed neither was the last unconditional per-frame write left in `render()` — cheap per
-	 * frame, but a rebuild of every approval card is not nothing, and it ran whether or not any of
-	 * this was on screen.
+	 * The gate is the identity of the array it draws from. Rebuilding the banner area on a frame that
+	 * did not change it was the last unconditional per-frame write left in `render()` — cheap per
+	 * frame, but a rebuild is not nothing, and it ran whether or not any of this was on screen.
 	 */
 	function renderNotices(): void {
-		if (state.models === noticesDrawn?.models && state.approvals === noticesDrawn?.approvals) return;
-		noticesDrawn = { models: state.models, approvals: state.approvals };
+		if (state.models === noticesDrawn) return;
+		noticesDrawn = state.models;
 
 		if (state.models.length > 0) {
-			banners.replaceChildren(...state.approvals.map((approval) => approvalCard(approval)));
+			banners.replaceChildren();
 			return;
 		}
 
@@ -451,22 +630,45 @@ function main(): void {
 		});
 		card.append(mark, text, open);
 
-		banners.replaceChildren(
-			card,
-			...state.approvals.map((approval) => approvalCard(approval)),
-		);
+		banners.replaceChildren(card);
+	}
+
+	/**
+	 * The takeover seat: one card per approval the session is waiting on, in the composer's place.
+	 *
+	 * A pending approval is the only thing this window can act on while it stands — the run is parked
+	 * mid-tool, and typing into an input box would queue words behind a question nobody has answered.
+	 * Replacing the composer is the honest rendering of that, and the card carries the two answers the
+	 * protocol actually takes.
+	 */
+	function renderApprovals(): void {
+		if (state.approvals === approvalsDrawn) return;
+		approvalsDrawn = state.approvals;
+		const pending = state.approvals;
+		approvalSeat.replaceChildren(...pending.map(approvalCard));
+		approvalSeat.hidden = pending.length === 0;
+		// The composer hides rather than disables: a visible-but-muted input box under an approval card
+		// invites typing that would be queued behind a question. Hidden, the card *is* the input.
+		composer.element.hidden = pending.length > 0;
 	}
 
 	function approvalCard(approval: ViewState["approvals"][number]): HTMLElement {
-		const card = element("div", "approval");
-		const cardTitle = element("div", "approval-title");
+		const card = element("div", "approval-card");
+
+		const strip = element("div", "approval-strip");
+		strip.append(element("span", "approval-dot"), element("span", undefined, "等待审批"));
+		card.append(strip);
+
+		const body = element("div", "approval-body-wrap");
+		const cardTitle = element("div", "approval-headline");
 		cardTitle.append(icon("shield"), element("span", undefined, `允许运行 ${approval.toolName}？`));
-		card.append(cardTitle, element("pre", "approval-body", approval.summary));
+		body.append(cardTitle, element("pre", "approval-command", approval.summary));
+		card.append(body);
 
 		const deny = element("button", "button", undefined, { type: "button" });
 		deny.textContent = "拒绝";
 		const allow = element("button", "button primary", undefined, { type: "button" });
-		allow.textContent = "允许";
+		allow.textContent = "允许一次";
 		// One request per answer, against the session the prompt came from.
 		deny.addEventListener("click", () => {
 			if (followed !== undefined) void api.approve(followed, approval.toolCallId, false).catch(report);
@@ -536,6 +738,9 @@ function main(): void {
 		// A different conversation is a different seat: what was chosen for the one before it says
 		// nothing about this one, which opens on whatever its own branch recorded.
 		chosen = {};
+		// The picker's explicit choice is about the session that was *about* to start, and that session
+		// has started — the one on screen now decides what "当前" names until the chip is used again.
+		pickedWorkspace = "";
 		// The same rendering the branch command uses: a snapshot is a snapshot, whether it arrived on
 		// the channel or on a read. The channel's own baseline will replace it within a moment.
 		apply(reduce(state, { type: "baseline", session: snapshot }));
@@ -624,9 +829,17 @@ function main(): void {
 		}
 	}
 
-	async function newSession(): Promise<void> {
+	/**
+	 * Start a conversation in the picker's directory, and point the window at it.
+	 *
+	 * The directory travels with the request (`cwd`), which is the whole of the picker's contract: a
+	 * choice made for one creation is not a state the server keeps. The session it opens re-reads the
+	 * lists, which is how a first session in a brand-new directory earns its workspace group a place
+	 * in the sidebar.
+	 */
+	async function newSession(cwd?: string): Promise<void> {
 		try {
-			const created = await api.createSession();
+			const created = await api.createSession(cwd ?? (directoryForNewSession() || undefined));
 			reachable();
 			await openSession(created.sessionId);
 		} catch (error) {
@@ -669,9 +882,42 @@ function main(): void {
 
 	// ---------------------------------------------------------------- listeners
 
+	/**
+	 * Whether the focus is somewhere keys mean something else.
+	 *
+	 * The takeover's Enter and Escape are for a person reading the card, not for a form: a button
+	 * already focused answers with its own key, and an input that is visible — the panels', the
+	 * search's — must not have its typing turned into an answer.
+	 */
+	function typingTarget(): boolean {
+		const target = document.activeElement;
+		return (
+			target instanceof HTMLElement &&
+			["INPUT", "TEXTAREA", "BUTTON", "SELECT", "SUMMARY"].includes(target.tagName)
+		);
+	}
+
 	window.addEventListener("keydown", (event) => {
-		if (event.key === "Escape" && settings.open) {
-			settings.hide();
+		if (event.key === "Escape") {
+			// The menu closes itself in its own capture listener, which stops the event before it gets
+			// here; the panels go in the order they were likely opened in.
+			if (settings.open) {
+				settings.hide();
+				return;
+			}
+			if (sessionSettings.open) {
+				sessionSettings.hide();
+				return;
+			}
+			if (state.approvals.length > 0 && followed !== undefined && !typingTarget()) {
+				void api.approve(followed, state.approvals[0]!.toolCallId, false).catch(report);
+				return;
+			}
+		}
+		if (event.key === "Enter" && state.approvals.length > 0 && followed !== undefined && !typingTarget()) {
+			// Enter allows, Escape denies — the two answers the takeover card offers, from the keyboard
+			// it replaced the input box for.
+			void api.approve(followed, state.approvals[0]!.toolCallId, true).catch(report);
 			return;
 		}
 		if (event.key === "n" && (event.ctrlKey || event.metaKey)) {

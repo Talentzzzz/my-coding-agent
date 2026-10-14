@@ -82,7 +82,7 @@ openAgent({ workspaceRoot, sessionManager, models })   # 设置、AGENTS.md、�
 
 这条规则叫**写到值所在之处**：一个仓库把 `"approval": { "bash": false }` 钉在项目文件里，它就继续拥有那套审批设置，于是 UI 里的一次切换被写在它旁边。嵌套对象做合并，所以一个只命名某个工具审批的补丁不会动到文件里的其他条目。每一层都按它文件里写的样子保留，未知键也在内，而合并视图是单独归一化的；写之前会重读文件，所以进程运行期间的手工编辑能存活。写入是同步的，而一个无法解析的设置文件会**抛出并点名该文件**，而不是悄悄按默认值跑下去。
 
-这些文件为 `approval` 提供的是**一个新会话打开时的默认值**。会话自己的选择记录在它的 transcript 里、作为一条 `tool_config` entry，并在它存活期间覆盖那些文件——所以 `PATCH /api/settings` 移动的是默认值，`PATCH /api/sessions/{id}` 移动的是该会话。这正是为什么设置面板里的审批开关要发往会话端点，和工具开关并排。
+这些文件为 `approval` 与 `tools`（全局默认活跃工具集，缺省即全量）提供的是**一个新会话打开时的默认值**。会话自己的选择记录在它的 transcript 里、作为一条 `tool_config` entry，并在它存活期间覆盖那些文件——所以 `PATCH /api/settings` 移动的是默认值，`PATCH /api/sessions/{id}` 移动的是该会话。这正是为什么设置面板里的审批开关要发往会话端点，和工具开关并排。
 
 ## 输入框的模型座位
 
@@ -278,7 +278,7 @@ entry 自格式变更起就携带 `id` / `parentId`，所以一个会话的文�
 
 让这棵树可导航的是 `getBranchPoints()`：一条对话从它**以多于一种方式继续过**的消息，每种继续方式一个选项。一个子节点只在**有一条消息能通过它抵达**时才算数。`model_change`、`tool_config`、`prune`、`compaction`、`leaf` entry 是状态，而不是对话可以被恢复到的位置，所以一条位于消息之前的状态 entry 会被**穿过去**，而不是被当作一个空选项提供出来——回退、切换模型、再问一次是**一条**继续，不是两条。每个选项用它下方最早的那条消息（连同它的 role）来打标签，这正是让窗口能说出"它**没有**展示的那个选项通向哪里"的东西。
 
-**工具选择也属于分支。** 哪些工具是激活的、哪些要请求审批，是关于 leaf 在哪里的**事实**，与对话本身一样，所以 `branchTo` 在移动后重放目标分支的 `tool_config` entry——`applyRecordedToolConfig` 是唯一的读取方，从那里和从 `openAgent` 被调用。一条什么都没记录的分支不动注册表的活跃集合（设置文件关于"哪些工具是激活的"什么都没说，所以没有默认集合可恢复），并把审批映射放回设置上。没有这次重放，一个会话会用两种说法回答：活会话保持它离开的那条分支的选择，而重新打开同一个文件却恢复目标分支的。
+**工具选择也属于分支。** 哪些工具是激活的、哪些要请求审批，是关于 leaf 在哪里的**事实**，与对话本身一样，所以 `branchTo` 在移动后重放目标分支的 `tool_config` entry——`applyRecordedToolConfig` 是唯一的读取方，从那里和从 `openAgent` 被调用。一条什么都没记录的分支把注册表放回设置文件里的**全局默认工具集**（没写就是全量），并把审批映射放回设置上。没有这次重放，一个会话会用两种说法回答：活会话保持它离开的那条分支的选择，而重新打开同一个文件却恢复目标分支的。
 
 **只有 entry id 在传。** `BranchOption` 携带子节点的 id、一个标签、一个 role——**从不**携带那个选择所通向的 tip。一条分支在它的 tip 上生长，所以一个被记住的 tip 在那条分支被继续的那一刻就成了过期指针，而一个持有它的窗口会回退到对话早已离开的地方；服务器在做选择时从 id 往下走。`SessionSnapshot.branchPoints` 就是这条 wire 的全部，所以一个无视它的客户端画的仍然只是它一直在画的那一条链。
 
@@ -331,11 +331,11 @@ header 记录父级的**路径**，因为那是一个手里拿着某个文件的
 | `GET` | `/api/models` | — | `{ models: ModelOption[] }` |
 | `PUT` | `/api/models` | `{ models: ModelInput[] }` | `{ models: ModelOption[] }` |
 | `GET` | `/api/settings` | — | `{ settings: SettingsSnapshot }` |
-| `PATCH` | `/api/settings` | `{ patch: { appearance?, approval?, bash? } }` | `{ settings }` —— 工作区**默认值**，在任何会话存在之前读取；按会话的审批变更发往 `PATCH /api/sessions/{id}` |
+| `PATCH` | `/api/settings` | `{ patch: { appearance?, approval?, tools?, bash? } }` | `{ settings }` —— 工作区**默认值**，在任何会话存在之前读取；按会话的审批变更发往 `PATCH /api/sessions/{id}` |
 | `GET` | `/api/workspaces` | — | `{ workspaces: WorkspaceGroup[] }`——每组的 `sessions` 是 `SessionRow[]`（含 `modified` / `running` / `pending`） |
 | `GET` | `/api/sessions` | — | `{ sessions: SessionRef[] }` |
 | `GET` | `/api/sessions/current` | — | `{ sessionId, sessions }` |
-| `POST` | `/api/sessions` | — | `201 { sessionId, sessions }` |
+| `POST` | `/api/sessions` | `{ cwd?: string }`（可为空体） | `201 { sessionId, sessions }`——带 `cwd` 时会话落在那个目录，`sessions` 列**该目录**的会话 |
 | `GET` | `/api/sessions/{id}` | — | `{ session: SessionSnapshot }` |
 | `POST` | `/api/sessions/{id}/messages` | `{ text, behavior? }` | `202 { accepted }` |
 | `POST` | `/api/sessions/{id}/abort` | — | `{ stopped }` |
@@ -349,7 +349,7 @@ header 记录父级的**路径**，因为那是一个手里拿着某个文件的
 
 `ModelOption` 是用户导入的一行、**去掉密钥**——`hasApiKey` 说明是否存了一个，而密钥从不离开服务器。`PUT /api/models` 替换整份清单，因为设置面板编辑的是一份清单，而一份被半途施加的清单是没人能推理的状态；一行不带 `apiKey` 送来时，保留存在它名下的那个，这正是让面板能够往返一行"它从未被展示过密钥"的数据的原因。名字是一行的**身份**——transcript 记录它、配置补丁命名它——所以重复会被 `400` 拒绝（`The name "X" is already in use`），而不是在用户背后把它改成唯一的：一个加了后缀的名字会改变**每一条**命名它的 transcript 的含义，而显示这次冲突的那个面板才是修复该发生的地方。变更能抵达活会话而不必重新打开它们，因为会话持有一个 `ModelSource`、每次请求都通过它读存储而不是复制一行、并每次都从活行重新推导自己的模型——所以端点、窗口和 wire id 都随密钥一起移动。
 
-`GET /api/workspaces` 扫描 agent home 的会话目录，所以侧边栏可以按工作区分组，尽管本进程是**恰好**在其中一个之上启动的；从另一个分组打开会话要使用该会话自己 header 里的 `cwd`。`PATCH /api/settings` 刻意比 `PATCH /api/sessions/{id}` 更窄：主题、字号、审批集合在任何会话存在之前就要读，所以它们不能住在某一个会话上。`GET /api/sessions/current` 是落地端点——`--session` 钉住一个，`--continue` 恢复最新的，一个有历史的工作区重新打开最近的那个——因为一个去猜的客户端会静默显示与服务器正在服务的**不同**的对话。
+`GET /api/workspaces` 扫描 agent home 的会话目录，所以侧边栏可以按工作区分组，尽管本进程是**恰好**在其中一个之上启动的；从另一个分组打开会话要使用该会话自己 header 里的 `cwd`。`PATCH /api/settings` 刻意比 `PATCH /api/sessions/{id}` 更窄：主题、字号、审批集合、全局默认工具集在任何会话存在之前就要读，所以它们不能住在某一个会话上。`GET /api/sessions/current` 是落地端点——`--session` 钉住一个，`--continue` 恢复最新的，一个有历史的工作区重新打开最近的那个——因为一个去猜的客户端会静默显示与服务器正在服务的**不同**的对话。
 
 路径参数在控制器看到它们之前按段做百分号解码，所以一个不透明的 id——工具调用 id 可能含冒号——能安然走完这段路而不会被二次编码。失败是 JSON——`{ error }`——配上说明发生了什么的 status：`404` 表示 id 不是会话，`400` 表示请求体不是 JSON 或字段类型不对，`409` 表示会话拒绝的一次变更（未知工具名、没有任何行提供的模型），或一个不是待回答审批的 `toolCallId`——会话存在、请求合法，但此刻收不下这个答案，`405` 带 `Allow` 表示该路径在另一个动词下存在。审批端点只在答案真的被收下时才记入答案表（只读检查在 `onApproval` 之前），所以一次被 409 拒掉的请求不会污染任何一条订阅还在展示的审批的差值。
 

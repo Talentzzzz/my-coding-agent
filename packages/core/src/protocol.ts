@@ -116,6 +116,8 @@ export interface ModelSelection {
 /** What the settings panel reads and writes. */
 export interface SettingsSnapshot {
 	appearance: AppearanceSettings;
+	/** The global default active tool set; absent means every tool the build knows. */
+	tools?: string[];
 	approval: Record<ToolApprovalKey, boolean>;
 	/** How long the `bash` tool lets one command run. */
 	bash: BashSettings;
@@ -201,6 +203,17 @@ export interface SessionSnapshot {
 	allTools: string[];
 	/** Tools the model may call right now. */
 	activeTools: string[];
+	/**
+	 * Whether the branch's last recorded tool set equals the current global default.
+	 *
+	 * The two maps ride one `tool_config` entry, but a user may have moved only one of them, so each
+	 * half is judged on its own. True for a branch with no entry at all: a session that never chose
+	 * *is* on the global default. Equality is against the global value *now* — a session reset and
+	 * then left behind by a later default change reports false, which is the honest answer.
+	 */
+	toolsFollowGlobal: boolean;
+	/** The approval map's half of the same judgement. */
+	approvalsFollowGlobal: boolean;
 	messages: AgentMessage[];
 	/**
 	 * The entry id behind each message in `messages`, in the same order.

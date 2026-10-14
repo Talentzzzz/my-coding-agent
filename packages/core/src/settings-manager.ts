@@ -29,6 +29,8 @@ type SettingsLayer = Record<string, unknown>;
 /** A partial change to the settings, shaped like the config patch the browser sends. */
 export interface SettingsPatch {
 	model?: string;
+	/** The global default active tool set. A whole list, like the tool set on a session. */
+	tools?: string[];
 	approval?: Partial<Record<ToolApprovalKey, boolean>>;
 	/** Theme and font size. Part of a patch so one field can move without the other. */
 	appearance?: Partial<AppearanceSettings>;
@@ -168,6 +170,17 @@ export class SettingsManager {
 	/** The configured default model, as `<name>/<model-id>`, or undefined when no layer names one. */
 	getModel(): string | undefined {
 		return this.settings.model;
+	}
+
+	/**
+	 * The global default active tool set, or undefined for the registry's full set.
+	 *
+	 * Undefined is its own answer rather than an empty list, because "no field" and "nothing active"
+	 * must stay distinguishable: the first is the old file's behaviour, the second would be a session
+	 * that can call nothing.
+	 */
+	getTools(): string[] | undefined {
+		return this.settings.tools === undefined ? undefined : [...this.settings.tools];
 	}
 
 	/** Theme and font size, as the window should draw itself. */

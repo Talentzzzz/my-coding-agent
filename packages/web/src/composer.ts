@@ -1,4 +1,4 @@
-import { element, icon, option } from "./dom.ts";
+import { element, icon, iconButton, option } from "./dom.ts";
 import type { ModelOption, PromptBehavior } from "@my-agent/core/protocol";
 
 export interface ComposerHandlers {
@@ -6,6 +6,8 @@ export interface ComposerHandlers {
 	onAbort(): void;
 	onSelectModel(ref: string): void;
 	onSelectLevel(level: string): void;
+	/** The session-level settings panel, which is what the composer's own button opens. */
+	onOpenSessionSettings(): void;
 }
 
 /** The model seat: which row answers, and how hard it is asked to think. */
@@ -69,7 +71,10 @@ export class Composer {
 		this.levelSelect.addEventListener("change", () => handlers.onSelectLevel(this.levelSelect.value));
 
 		const seat = element("div", "composer-seat");
-		seat.append(this.modelSelect, this.levelSelect);
+		// The session's own settings sit at the bar's left end: they belong to the conversation the way
+		// the model seat does, and the app-level ones stay behind the sidebar's one button.
+		const sessionSettings = iconButton("gear", "会话设置", () => handlers.onOpenSessionSettings(), "icon-button composer-gear");
+		seat.append(sessionSettings, this.modelSelect, this.levelSelect);
 
 		this.stop = element("button", "button danger", undefined, { type: "button", hidden: true });
 		this.stop.append(icon("stop"), element("span", undefined, "停止"));

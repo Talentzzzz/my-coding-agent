@@ -1,5 +1,5 @@
 import { sendJson } from "../http/static.ts";
-import { readObjectBody } from "../http/errors.ts";
+import { optionalObjectBody, readObjectBody } from "../http/errors.ts";
 import { route, stringParam, type ApiRoute } from "../http/routing.ts";
 import type { SessionController, SystemController } from "./sessions.ts";
 
@@ -86,9 +86,13 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 		}),
 		route({
 			method: "POST",
+			// The body is optional and usually absent: an empty `POST` still creates a session in the
+			// server's own workspace. A `cwd` in the body moves where that one session lands — a choice
+			// made with the request, so it travels with it rather than becoming server state.
 			path: "/api/sessions",
 			params: {},
-			handle: async (_params, _request, response) => sendJson(response, 201, await controllers.sessions.create()),
+			handle: async (_params, request, response) =>
+				sendJson(response, 201, await controllers.sessions.create(await optionalObjectBody(request))),
 		}),
 		route({
 			method: "GET",

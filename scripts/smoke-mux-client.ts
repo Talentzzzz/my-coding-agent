@@ -128,6 +128,8 @@ function snapshot(sessionId: string, submitting = false): SessionSnapshot {
 		approvals: { ...NO_APPROVALS },
 		allTools: [],
 		activeTools: [],
+		toolsFollowGlobal: true,
+		approvalsFollowGlobal: true,
 		messages: [],
 		messageEntryIds: [],
 		branchPoints: [],

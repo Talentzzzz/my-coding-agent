@@ -61,7 +61,11 @@ import {
 import { convertToLlm } from "./session/messages.ts";
 import { foldUsage, sessionSnapshot } from "./session/snapshot.ts";
 import { type SessionEntry, SessionManager, sessionEntryToContextMessages } from "./session/session-manager.ts";
-import { applyRecordedToolConfig } from "./session/tool-config.ts";
+import {
+	applyRecordedToolConfig,
+	defaultToolNames,
+	followsGlobalOf,
+} from "./session/tool-config.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { describeToolCall, type ToolRegistry } from "./tools/index.ts";
 import type { Workspace } from "./workspace.ts";
@@ -780,6 +784,9 @@ export class Agent {
 			approvals: this.getApprovals(),
 			allTools: this.tools.all().map((tool) => tool.name),
 			activeTools: this.tools.activeNames(),
+			// Judged against this workspace's own settings, the same way a cold read judges it, so the
+			// panel's "沿用全局" label cannot disagree with itself between the two paths.
+			...followsGlobalOf(this.sessionManager, this.settingsManager, this.tools),
 			submitting: this.loop.state.isStreaming,
 			queued: this.queued,
 			isRetrying: this.retrying,
@@ -943,13 +950,14 @@ export class Agent {
 	 * would carry that choice onto a branch that never had it, while a reopen of the same file restored
 	 * the target branch's — the same session, two answers.
 	 *
-	 * A branch that recorded nothing leaves the registry alone — the settings files say nothing about
-	 * which tools are active, so there is no default set to restore — and puts the approval map back on
-	 * the settings, which is what a session that never chose runs on. Only a recorded `tool_config` can
-	 * move the active set, and every move ends on the branch's answer rather than the previous one's.
+	 * A branch that recorded nothing falls back on the global default the settings files name — or the
+	 * registry's full set when they name none — which is what a session that never chose runs on; the
+	 * settings files say which tools are active, so a move onto an unrecorded branch restores that
+	 * answer rather than keeping the branch it left behind. Only a recorded `tool_config` can name
+	 * something else, and every move ends on the branch's answer rather than the previous one's.
 	 */
 	private applyBranchToolConfig(): void {
-		const recorded = applyRecordedToolConfig(this.sessionManager, this.tools);
+		const recorded = applyRecordedToolConfig(this.sessionManager, this.tools, defaultToolNames(this.settingsManager, this.tools));
 		this.approvalOverride = recorded.approval ?? {};
 		this.declareTools();
 		// Reported because neither map is in the branch payload, and every stream other than the one

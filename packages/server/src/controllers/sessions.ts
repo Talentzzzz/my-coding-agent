@@ -17,8 +17,9 @@ import {
 	type UserModel,
 	type WorkspaceGroup,
 } from "@my-agent/core";
+import { resolve } from "node:path";
 import { httpStatus } from "../http/errors.ts";
-import type { SessionHub } from "../hub.ts";
+import { workspaceRootOrThrow, type SessionHub } from "../hub.ts";
 
 /** The stored sessions for a workspace, narrowed from the session files to what the wire carries. */
 export async function listSessions(workspaceRoot: string): Promise<SessionRef[]> {
@@ -32,6 +33,7 @@ function settingsOf(manager: SettingsManager): SettingsSnapshot {
 		appearance: manager.getAppearance(),
 		approval: manager.getApprovals(),
 		bash: manager.getBashSettings(),
+		...(settings.tools === undefined ? {} : { tools: settings.tools }),
 		...(settings.model === undefined ? {} : { model: settings.model }),
 	};
 }
@@ -134,7 +136,9 @@ export class SystemController {
 	 * `approval` here is therefore the **workspace default** — what a session that never chose opens on
 	 * — not a running session's own answer, which travels as a config patch on that session. `model` is
 	 * the row a *new* session starts on; the model a live session is on is the composer's, and reaches
-	 * the server with the message rather than here.
+	 * the server with the message rather than here. `tools` is the global default active set, whole,
+	 * like the session-level endpoint's own contract — and a session's recorded choice still wins over
+	 * it, so nothing here reaches a session that already chose.
 	 */
 	updateSettings(body: Record<string, unknown>): { settings: SettingsSnapshot } {
 		const patch = body.patch ?? body;
@@ -145,6 +149,13 @@ export class SystemController {
 
 		const manager = this.hub.settingsFor(this.hub.cwd);
 		const next: SettingsPatch = {};
+
+		if (fields.tools !== undefined) {
+			if (!Array.isArray(fields.tools) || fields.tools.some((name) => typeof name !== "string")) {
+				throw httpStatus.badRequest("`tools` must be an array of tool names");
+			}
+			next.tools = fields.tools as string[];
+		}
 
 		if (fields.model !== undefined) {
 			if (typeof fields.model !== "string") throw httpStatus.badRequest("`model` must be a string");
@@ -261,10 +272,31 @@ export class SessionController {
 	 * `open` frame the client sends next. Creating a session writes its JSONL header, so a session
 	 * that is created and never opened is still findable by id — and still subscribable, since
 	 * subscribing reads the transcript rather than running it.
+	 *
+	 * `cwd` in the body decides where the session lands, and the listing answers for that directory:
+	 * a window that just pointed the picker somewhere new should be able to trust that the sessions it
+	 * is shown are the ones it created into. Undefined stays the server's own root, which is what a
+	 * bodyless `POST` has always meant.
 	 */
-	async create(): Promise<{ sessionId: string; sessions: SessionRef[] }> {
-		const sessionId = await this.hub.newSession();
-		return { sessionId, sessions: await listSessions(this.hub.cwd) };
+	async create(body: Record<string, unknown> = {}): Promise<{ sessionId: string; sessions: SessionRef[] }> {
+		const cwd = body.cwd;
+		if (cwd !== undefined && typeof cwd !== "string") {
+			throw httpStatus.badRequest("`cwd` must be a string");
+		}
+		// Resolved here so the listing names the same directory the hub validated and wrote into,
+		// whatever spelling the request arrived with. The check runs here too, because "a bad path is
+		// the request's fault" is a status decision and this is where those are made; the hub repeats
+		// it so no internal caller can write a session without it.
+		const root = typeof cwd === "string" && cwd.length > 0 ? resolve(cwd) : undefined;
+		if (root !== undefined) {
+			try {
+				await workspaceRootOrThrow(root);
+			} catch (error) {
+				throw httpStatus.badRequest(messageOf(error));
+			}
+		}
+		const sessionId = await this.hub.newSession(root);
+		return { sessionId, sessions: await listSessions(root ?? this.hub.cwd) };
 	}
 
 	/**

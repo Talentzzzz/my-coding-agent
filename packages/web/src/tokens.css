@@ -72,6 +72,7 @@
 	--dsw-radius-sm: 8px;
 	--dsw-radius-md: 12px;
 	--dsw-radius-lg: 16px;
+	--dsw-radius-xl: 20px;
 	--dsw-radius-panel: 28px;
 
 	/* Alias roles — light. */
@@ -100,6 +101,9 @@
 	--dsw-state-error: var(--dsw-static-red-600);
 	--dsw-state-warn: var(--dsw-static-amber-500);
 	--dsw-state-warn-label: var(--dsw-static-amber-600);
+	/* The warn strip's own fill: the tint behind a waiting approval's status line, one step calmer
+	   than the border it sits inside. */
+	--dsw-warn-tint: var(--dsw-static-amber-100);
 	--dsw-button-primary-fill: var(--dsw-static-neutral-bluish-1000);
 	--dsw-button-primary-hover: var(--dsw-static-neutral-bluish-750);
 	--dsw-button-primary-label: var(--dsw-static-neutral-bluish-00);
@@ -153,6 +157,7 @@
 	--dsw-state-error: var(--dsw-static-red-400);
 	--dsw-state-warn: var(--dsw-static-amber-500);
 	--dsw-state-warn-label: var(--dsw-static-amber-600);
+	--dsw-warn-tint: var(--dsw-static-amber-900);
 	--dsw-button-primary-fill: var(--dsw-static-neutral-bluish-50);
 	--dsw-button-primary-hover: var(--dsw-static-neutral-bluish-100);
 	--dsw-button-primary-label: var(--dsw-static-neutral-bluish-1000);

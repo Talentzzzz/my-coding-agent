@@ -1,14 +1,21 @@
 // Session-registry smoke test: proves one agent loop per session id, that a session survives losing
 // its last connection, and that the JSONL file is what a later connection gets back.
 // Nothing here reaches a model, so no provider key is needed. Run with: node scripts/smoke-sessions.ts
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { request } from "node:http";
 import type { AgentMessage } from "@my-agent/agent";
 import { bootServer } from "../packages/server/src/boot.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
-import { SessionManager, workspaceDir, type SessionSnapshot } from "@my-agent/core";
+import {
+	openAgent,
+	readSessionSnapshot,
+	SessionManager,
+	SettingsManager,
+	workspaceDir,
+	type SessionSnapshot,
+} from "@my-agent/core";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-sessions-"));
 let failures = 0;
@@ -53,6 +60,29 @@ function get(url: string): Promise<ReadAnswer> {
 /** A user message the transcript accepts; nothing here goes near a model. */
 function userMessage(text: string): AgentMessage {
 	return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
+}
+
+/** One request against the booted server, for the endpoints this script exercises besides reads. */
+function call(method: string, url: string, body?: unknown): Promise<{ status: number; payload: Record<string, unknown> }> {
+	return new Promise((resolvePromise, reject) => {
+		const headers: Record<string, string> = { accept: "application/json" };
+		if (body !== undefined) headers["content-type"] = "application/json";
+		const call_ = request(url, { agent: false, method, headers }, (response) => {
+			let text = "";
+			response.setEncoding("utf8");
+			response.on("data", (chunk: string) => {
+				text += chunk;
+			});
+			response.on("end", () => {
+				resolvePromise({
+					status: response.statusCode ?? 0,
+					payload: text.length === 0 ? {} : (JSON.parse(text) as Record<string, unknown>),
+				});
+			});
+		});
+		call_.on("error", reject);
+		call_.end(body === undefined ? undefined : JSON.stringify(body));
+	});
 }
 
 /** Entry ids in file order, for comparing a fork against the branch it copied. */
@@ -257,6 +287,66 @@ try {
 	check("claiming an unknown id rejects", missing instanceof Error, String(missing));
 	check("and nothing entered the registry", !hub.live.includes("0123456789abcdef"));
 
+	process.stdout.write("the settings files name the tools a session that never chose opens on\n");
+	// The global default tool set is a settings field, so the seam is assembly itself: a session with
+	// no `tool_config` entry opens on the configured set, one with an entry keeps its own, and a
+	// branch move onto an unrecorded chain restores the default rather than the previous branch's set.
+	// Everything here runs on an in-memory settings manager, so no file outside the temporary
+	// workspace is ever touched.
+	const settingsRoot = await mkdtemp(join(tmpdir(), "my-agent-settings-"));
+	try {
+		const settings = SettingsManager.inMemory({ tools: ["read", "bash"] });
+		const manager = SessionManager.create(settingsRoot);
+		const options = {
+			workspaceRoot: settingsRoot,
+			sessionManager: manager,
+			models: { list: () => [] },
+			settingsManager: settings,
+		};
+
+		const cold = await readSessionSnapshot(options);
+		check("a session with no entry opens on the settings' tool set", cold.activeTools.join(",") === "read,bash", cold.activeTools.join(","));
+		check("and reports both halves as following global", cold.toolsFollowGlobal && cold.approvalsFollowGlobal);
+
+		const live = await openAgent(options);
+		try {
+			// The one message the branch test below can rewind to with nothing recorded after it.
+			const firstEntry = manager.appendMessage(userMessage("before any choice"));
+
+			live.setActiveTools(["read"]);
+			check("a recorded choice wins over the default", live.snapshot.activeTools.join(",") === "read", live.snapshot.activeTools.join(","));
+			check("and stops reporting the tools as global", live.snapshot.toolsFollowGlobal === false);
+			check("while the untouched approval half still follows global", live.snapshot.approvalsFollowGlobal === true);
+
+			live.applyConfig({ approval: { bash: false } });
+			check("a recorded approval stops its half too", live.snapshot.approvalsFollowGlobal === false);
+
+			// The reset is a new entry that *holds* the global values, so the judgement has to be field
+			// equality and not "an entry exists" — the trap the panel's label would fall into otherwise.
+			live.setActiveTools(["bash", "read"]);
+			check("re-recording the global set reads as following global again", live.snapshot.toolsFollowGlobal === true);
+
+			// A branch move onto a chain that recorded nothing lands on the settings' answer, not on
+			// the chain that was just left.
+			live.branchTo(firstEntry, false);
+			check("a branch onto an unrecorded chain restores the default", live.snapshot.activeTools.join(",") === "read,bash", live.snapshot.activeTools.join(","));
+
+			live.setActiveTools(["grep"]);
+			const recold = await readSessionSnapshot(options);
+			check(
+				"the cold read answers the judgement exactly as the live snapshot does",
+				recold.toolsFollowGlobal === live.snapshot.toolsFollowGlobal &&
+					recold.approvalsFollowGlobal === live.snapshot.approvalsFollowGlobal,
+				`${recold.toolsFollowGlobal}/${recold.approvalsFollowGlobal} vs ${live.snapshot.toolsFollowGlobal}/${live.snapshot.approvalsFollowGlobal}`,
+			);
+		} finally {
+			await live.close();
+		}
+	} finally {
+		await rm(workspaceDir(settingsRoot), { recursive: true, force: true });
+		await rm(settingsRoot, { recursive: true, force: true });
+	}
+
 	process.stdout.write("reading a session does not assemble one\n");
 	// Phase 1 in one section: a read answers from the JSONL log, leaves the registry exactly as it was,
 	// and agrees field-for-field with what claiming the same transcript reports — because both build
@@ -323,6 +413,8 @@ try {
 			"thinkingLevels",
 			"allTools",
 			"activeTools",
+			"toolsFollowGlobal",
+			"approvalsFollowGlobal",
 			"approvals",
 			"usage",
 		] as const satisfies readonly (keyof SessionSnapshot)[];
@@ -347,6 +439,49 @@ try {
 			differing.every((field) => onlyALoopAnswers.has(field)),
 			differing.join(","),
 		);
+
+		process.stdout.write("POST /api/sessions takes the directory it is given\n");
+		// The workspace is only the tools' fence, so a first session in a directory the process has
+		// never worked in is refused by nothing more than "exists and is a directory".
+		const elsewhere = await mkdtemp(join(tmpdir(), "my-agent-elsewhere-"));
+		try {
+			const created = await call("POST", `${http.url}/api/sessions`, { cwd: elsewhere });
+			check("a new directory is accepted (201)", created.status === 201, `status=${created.status}`);
+			const landed = String(created.payload.sessionId ?? "");
+			const landedRead = await get(`${http.url}/api/sessions/${landed}`);
+			check(
+				"and the session runs where it was told",
+				resolve(landedRead.session?.cwd ?? "") === resolve(elsewhere),
+				`${landedRead.session?.cwd}`,
+			);
+			check(
+				"the answer's listing is that directory's",
+				(created.payload.sessions as { id: string }[]).some((session) => session.id === landed),
+			);
+
+			await writeFile(join(elsewhere, "a-file"), "not a directory\n");
+			const missing = await call("POST", `${http.url}/api/sessions`, { cwd: join(elsewhere, "no-such-dir") });
+			check("a directory that does not exist is refused (400)", missing.status === 400, `status=${missing.status}`);
+			const notDir = await call("POST", `${http.url}/api/sessions`, { cwd: join(elsewhere, "a-file") });
+			check("a path that is not a directory is refused (400)", notDir.status === 400, `status=${notDir.status}`);
+			const wrongType = await call("POST", `${http.url}/api/sessions`, { cwd: 42 });
+			check("a non-string cwd is refused (400)", wrongType.status === 400, `status=${wrongType.status}`);
+			const bodyless = await call("POST", `${http.url}/api/sessions`);
+			check("an empty POST still creates (201)", bodyless.status === 201, `status=${bodyless.status}`);
+			const bodylessRead = await get(`${http.url}/api/sessions/${String(bodyless.payload.sessionId ?? "")}`);
+			check("and it runs where the server does", resolve(bodylessRead.session?.cwd ?? "") === resolve(root), bodylessRead.session?.cwd);
+		} finally {
+			await rm(workspaceDir(elsewhere), { recursive: true, force: true });
+			await rm(elsewhere, { recursive: true, force: true });
+		}
+
+		process.stdout.write("the settings endpoint validates the default tool set\n");
+		// Only refusals here: an accepted write lands in the real agent home's settings file, and this
+		// script does not own that file. The accepted shape is proven on the seam above.
+		const notArray = await call("PATCH", `${http.url}/api/settings`, { patch: { tools: "read" } });
+		check("`tools` must be an array (400)", notArray.status === 400, `status=${notArray.status}`);
+		const notNames = await call("PATCH", `${http.url}/api/settings`, { patch: { tools: [42] } });
+		check("every entry must be a string (400)", notNames.status === 400, `status=${notNames.status}`);
 	} finally {
 		await http.close();
 	}

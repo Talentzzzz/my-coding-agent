@@ -1,5 +1,5 @@
 import { element, icon, iconButton, option } from "../dom.ts";
-import type { BashSettings, ModelInput, ModelOption, SettingsSnapshot, SessionSnapshot } from "@my-agent/core/protocol";
+import { APPROVAL_TOOLS, type BashSettings, type ModelInput, type ModelOption, type SettingsSnapshot, type SessionSnapshot } from "@my-agent/core/protocol";
 
 /** A row being edited. `apiKey` is present only when the user typed a new one this session. */
 export interface ModelDraft extends ModelOption {
@@ -12,19 +12,25 @@ export interface SettingsHandlers {
 	onFontSize(size: number): void;
 	onSaveModels(rows: ModelInput[]): Promise<void>;
 	onDefaultModel(ref: string): void;
-	onActiveTools(names: string[]): void;
-	onApproval(tool: string, value: boolean): void;
+	/** The global default active tool set, whole — the session-level panel resets to it. */
+	onGlobalTools(names: string[]): void;
+	/** One tool of the global default approval map. */
+	onGlobalApproval(tool: string, value: boolean): void;
 	onBashTimeouts(patch: Partial<BashSettings>): void;
 }
 
 export interface SettingsState {
 	settings?: SettingsSnapshot;
 	models: readonly ModelOption[];
-	/** The session on screen, for the controls that belong to it rather than to the app. */
+	/**
+	 * The session on screen, when there is one. The app-level panel does not edit it — the
+	 * session-level panel does — but its `allTools` is the one list of tool names this build has, and
+	 * the global default tool set needs names to offer.
+	 */
 	snapshot?: SessionSnapshot;
 }
 
-type Tab = "appearance" | "models" | "session";
+type Tab = "appearance" | "models" | "defaults";
 
 /**
  * A starting point for a new row, so the form never opens with empty numbers in it.
@@ -60,14 +66,15 @@ const BLANK_DRAFT: ModelDraft = {
 const THINKING_LEVELS = ["off", "low", "medium", "high", "max"] as const;
 
 /**
- * The settings panel.
+ * The app-level settings panel.
  *
  * It holds what lasts longer than one conversation: how the window draws itself, which models this
- * machine has imported, and how the agent is allowed to behave. The controls that follow the
- * *session* — the model on screen and its thinking level — are on the composer instead, because they
- * are changed while working and belong to the conversation rather than to the app. What is left here
- * is visited rarely and changed deliberately, which is what a panel behind one button is for and a
- * row of always-visible controls is not.
+ * machine has imported, and the defaults a session that never chose opens on — the default model, the
+ * bash timeouts, the default approval map, and the default active tool set. The controls that follow
+ * the *session* — its own tools and approvals — live in the panel behind the composer's button
+ * (`./session-settings.ts`), because they are changed while working and recorded in the session's own
+ * transcript. What is left here is visited rarely and changed deliberately, which is what a panel
+ * behind one button is for and a row of always-visible controls is not.
  *
  * The model list is edited as a draft and saved whole, because a half-saved list is the one state
  * nobody can reason about: a row deleted here and another added there have to land together. The
@@ -102,7 +109,7 @@ export class SettingsPanel {
 		for (const [id, label] of [
 			["appearance", "外观"],
 			["models", "模型"],
-			["session", "会话"],
+			["defaults", "默认"],
 		] as [Tab, string][]) {
 			const button = element("button", "settings-tab", label, { type: "button" });
 			button.addEventListener("click", () => {
@@ -149,12 +156,17 @@ export class SettingsPanel {
 		const signature = [
 			this.tab,
 			state.settings
-				? `${state.settings.appearance.theme}/${state.settings.appearance.fontSize}/${state.settings.bash.defaultTimeoutMs}/${state.settings.bash.maxTimeoutMs}`
+				? [
+						state.settings.appearance.theme,
+						state.settings.appearance.fontSize,
+						state.settings.bash.defaultTimeoutMs,
+						state.settings.bash.maxTimeoutMs,
+						state.settings.tools?.join(",") ?? "",
+						Object.entries(state.settings.approval).join(","),
+					].join("/")
 				: "",
 			state.models.map((model) => `${model.name}:${model.modelId}:${model.hasApiKey}`).join(","),
-			state.snapshot ? `${state.snapshot.model}/${state.snapshot.thinkingLevel}` : "",
 			state.snapshot?.allTools.join(",") ?? "",
-			(state.snapshot?.activeTools ?? []).join(","),
 		].join("|");
 
 		const stable = this.draft === undefined && signature === this.signature;
@@ -191,7 +203,7 @@ export class SettingsPanel {
 				this.body.replaceChildren(this.modelsSection());
 				return;
 			default:
-				this.body.replaceChildren(this.sessionSection());
+				this.body.replaceChildren(this.defaultsSection());
 		}
 	}
 
@@ -399,28 +411,26 @@ export class SettingsPanel {
 		}
 	}
 
-	// --------------------------------------------------------------------- session
+	// --------------------------------------------------------------------- defaults
 
-	private sessionSection(): HTMLElement {
-		const snapshot = this.state.snapshot;
+	/**
+	 * The defaults a session that never chose opens on.
+	 *
+	 * Each one is a value in the settings files, which is why the section renders whether or not a
+	 * session happens to be on screen — these are the answers for a session that does not exist yet.
+	 * The session's own choices are the other panel's, and the model a live session is on is the
+	 * composer's; nothing here reaches either.
+	 */
+	private defaultsSection(): HTMLElement {
 		const section = element("section", "settings-section");
 
 		section.append(this.defaultModelSection());
 
-		// The bash timeouts belong to the settings files, not to the session on screen, so they render
-		// whether or not one is attached.
+		// The bash timeouts belong to the settings files, not to the session on screen.
 		section.append(this.bashSection());
 
-		if (!snapshot) {
-			section.append(element("p", "settings-hint empty", "还没有挂上任何会话。"));
-			return section;
-		}
-
-		// The model a *live* session is on and its thinking level are not here. Both are chosen on the
-		// composer, because both follow the conversation — and because a panel control would have to be
-		// applied the moment it moved, which is exactly what the transcript must not record.
-		section.append(this.toolList(snapshot));
-		section.append(this.approvalList(snapshot));
+		section.append(this.globalApprovalSection());
+		section.append(this.globalToolsSection());
 		return section;
 	}
 
@@ -480,39 +490,65 @@ export class SettingsPanel {
 		return this.field(label, input, hint);
 	}
 
-	private toolList(snapshot: SessionSnapshot): HTMLElement {
+	/**
+	 * The global default approval map, over the six tools the map has keys for.
+	 *
+	 * The keys are the loadout's rather than a session's active set — the map gates tools whether or
+	 * not a given session has them active — so the list is the fixed six and not whatever one session
+	 * happens to carry. A session that has chosen its own answers keeps them: this only decides what
+	 * the next unchoosing session opens on.
+	 */
+	private globalApprovalSection(): HTMLElement {
 		const group = element("div", "settings-field stack");
-		group.append(element("span", "settings-label", "模型可调用的工具"));
-		const active = new Set(snapshot.activeTools);
-		for (const name of snapshot.allTools) {
+		group.append(element("span", "settings-label", "运行前先询问"));
+		group.append(
+			element("span", "model-hint", "新建会话的默认值；已单独选过的会话不受影响。这里没勾选的工具会直接运行、不再询问。"),
+		);
+		for (const key of APPROVAL_TOOLS) {
 			const label = element("label", "settings-check");
 			const box = element("input", undefined, undefined, { type: "checkbox" });
-			box.checked = active.has(name);
-			box.addEventListener("change", () => {
-				// The endpoint replaces the whole set, and the order is taken from the registry so the
-				// payload does not depend on the order boxes happened to be clicked in.
-				const next = new Set(active);
-				if (box.checked) next.add(name);
-				else next.delete(name);
-				this.handlers.onActiveTools(snapshot.allTools.filter((candidate) => next.has(candidate)));
-			});
-			label.append(box, document.createTextNode(name));
+			box.checked = this.state.settings?.approval[key] === true;
+			box.addEventListener("change", () => this.handlers.onGlobalApproval(key, box.checked));
+			label.append(box, document.createTextNode(key));
 			group.append(label);
 		}
 		return group;
 	}
 
-	private approvalList(snapshot: SessionSnapshot): HTMLElement {
+	/**
+	 * The global default active tool set.
+	 *
+	 * The names on offer are the build's, which the client only knows from a session's `allTools` —
+	 * so without one on screen the section says so rather than inventing a list. No field at all means
+	 * every tool, and the checkboxes show that as the effective set: unchecking one writes the whole
+	 * rest, which is the session-level endpoint's own replace-whole contract.
+	 */
+	private globalToolsSection(): HTMLElement {
 		const group = element("div", "settings-field stack");
-		group.append(element("span", "settings-label", "运行前先询问"));
+		group.append(element("span", "settings-label", "默认启用的工具"));
 		group.append(
-			element("span", "model-hint", "只对这个会话生效，记在它自己的记录里；新建的会话用设置文件里的默认值。这里没勾选的工具会直接运行、不再询问。"),
+			element("span", "model-hint", "新建会话默认打开哪些工具；已单独选过的会话不受影响。不设置就是全部启用。"),
 		);
-		for (const name of snapshot.allTools) {
+		const allTools = this.state.snapshot?.allTools;
+		if (allTools === undefined || allTools.length === 0) {
+			group.append(element("span", "model-hint empty", "还没有挂上任何会话，暂时列不出本构建的工具名。"));
+			return group;
+		}
+		// Undefined is the full set, so the effective default is what the checkboxes have to show and
+		// edit — never an absent field behind a half-ticked list.
+		const effective = this.state.settings?.tools ?? allTools;
+		const active = new Set(effective.filter((name) => allTools.includes(name)));
+		for (const name of allTools) {
 			const label = element("label", "settings-check");
 			const box = element("input", undefined, undefined, { type: "checkbox" });
-			box.checked = snapshot.approvals[name as keyof typeof snapshot.approvals] === true;
-			box.addEventListener("change", () => this.handlers.onApproval(name, box.checked));
+			box.checked = active.has(name);
+			box.addEventListener("change", () => {
+				const next = new Set(active);
+				if (box.checked) next.add(name);
+				else next.delete(name);
+				// Sent in the registry's order, so the stored list does not depend on click order.
+				this.handlers.onGlobalTools(allTools.filter((candidate) => next.has(candidate)));
+			});
 			label.append(box, document.createTextNode(name));
 			group.append(label);
 		}

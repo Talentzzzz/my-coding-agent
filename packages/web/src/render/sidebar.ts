@@ -7,13 +7,19 @@ export interface SidebarHandlers {
 	onSelectSession(sessionId: string): void;
 	onToggleCollapsed(): void;
 	onOpenSettings(): void;
+	/** The system folder picker, which is the only road a new workspace enters the list by. */
+	onAddWorkspace(): void;
 }
 
 export interface SidebarState {
 	/** Every workspace with stored sessions, most recently used first. */
 	workspaces: readonly WorkspaceGroup[];
 	activeSessionId?: string;
-	/** The directory this server is running over, marked in the list so "new session" is predictable. */
+	/**
+	 * The workspace the "当前" mark names, which is the picker's own choice — where the next new
+	 * session will land — rather than the server's startup root. The three readers of one choice are
+	 * the hero chip, the new-session button, and this mark.
+	 */
 	currentWorkspace: string;
 	collapsed: boolean;
 	/**
@@ -79,6 +85,13 @@ export class Sidebar {
 	 * redraw without the caller having threaded it back in. Only the "more" button needs this.
 	 */
 	private lastState: SidebarState | undefined;
+	/** Whether the search row is on screen, and the text it is filtering by. */
+	private searchOpen = false;
+	private filterText = "";
+	private readonly headRow: HTMLElement;
+	private readonly searchRow: HTMLElement;
+	private readonly searchInput: HTMLInputElement;
+	private readonly noMatch: HTMLElement;
 
 	constructor(handlers: SidebarHandlers) {
 		this.handlers = handlers;
@@ -99,6 +112,40 @@ export class Sidebar {
 
 		this.list = element("nav", "session-list", undefined, { "aria-label": "会话列表" });
 
+		// The heading row and its three controls, per the reference layout: a search that really
+		// filters the list, a view-options control that is look-only for now, and the road in for a
+		// workspace this machine has never had a session in.
+		this.headRow = element("div", "list-head");
+		this.headRow.append(element("div", "session-list-heading", "工作区"));
+		const headActions = element("div", "list-head-actions");
+		headActions.append(
+			iconButton("search", "搜索会话", () => this.toggleSearch()),
+			// Look-only by decision: sorting stays `modified` descending, and the control is here so
+			// the row reads like the reference rather than so it can be used. Clicking says so.
+			iconButton("sliders", "视图选项（暂未启用）", () => {}),
+			iconButton("folder-add", "添加工作区", () => this.handlers.onAddWorkspace()),
+		);
+		this.headRow.append(headActions);
+
+		this.searchRow = element("div", "search-row");
+		this.searchInput = element("input", "search-input", undefined, {
+			type: "search",
+			placeholder: "搜索会话…",
+			"aria-label": "搜索会话",
+		});
+		this.searchInput.addEventListener("input", () => {
+			this.filterText = this.searchInput.value;
+			if (this.lastState !== undefined) this.renderRows(this.lastState);
+		});
+		this.searchInput.addEventListener("keydown", (event) => {
+			if (event.key === "Escape") this.toggleSearch();
+		});
+		this.searchRow.append(this.searchInput);
+		this.searchRow.hidden = true;
+
+		this.noMatch = element("div", "session-list-empty", "没有匹配的会话");
+		this.noMatch.hidden = true;
+
 		// The one control in the corner the eye returns to: everything that is set once — the theme,
 		// the font size, the models — lives behind it rather than in the chrome around the transcript.
 		const foot = element("div", "sidebar-foot");
@@ -108,6 +155,16 @@ export class Sidebar {
 		foot.append(settings);
 
 		this.element.append(top, newSession, this.list, foot);
+	}
+
+	/** Open or close the search row. Closing it clears the filter, because a closed filter filters nothing. */
+	private toggleSearch(): void {
+		this.searchOpen = !this.searchOpen;
+		this.searchRow.hidden = !this.searchOpen;
+		this.searchInput.value = "";
+		this.filterText = "";
+		if (this.lastState !== undefined) this.renderRows(this.lastState);
+		if (this.searchOpen) this.searchInput.focus();
 	}
 
 	render(state: SidebarState): void {
@@ -132,22 +189,37 @@ export class Sidebar {
 	private renderRows(state: SidebarState): void {
 		const wanted = new Set<string>();
 		const groups = state.workspaces;
+		const filter = this.filterText.trim().toLowerCase();
 
 		if (groups.length === 0) {
 			this.drawn.clear();
-			this.list.replaceChildren(
-				element("div", "session-list-heading", "工作区"),
-				element("div", "session-list-empty", "暂无会话"),
-			);
+			this.list.replaceChildren(this.headRow, this.searchRow, element("div", "session-list-empty", "暂无会话"));
+			this.searchRow.hidden = !this.searchOpen;
 			this.scrolledTo = undefined;
 			return;
 		}
 		this.ensureHeading();
 
+		// A filter shows every match, in every group: the collapsed-count limit is about how much a
+		// scan can hold, and a list the user is actively narrowing is not a scan.
+		let matches = 0;
 		for (const group of groups) {
 			const wrapper = this.groupFor(group.cwd, state.currentWorkspace);
 			const rows = rowsOf(group);
-			const shown = this.expanded.has(group.cwd) ? rows : collapsedRows(rows, state.activeSessionId);
+			// The workspace itself counts as a match, so narrowing by project still shows that
+			// project's whole list rather than hiding it behind a title that does not contain the text.
+			const kept =
+				filter === ""
+					? rows
+					: rows.filter(
+							(row) => row.session.title.toLowerCase().includes(filter) || group.cwd.toLowerCase().includes(filter),
+						);
+			matches += kept.length;
+			const shown = filter !== "" || this.expanded.has(group.cwd) ? kept : collapsedRows(kept, state.activeSessionId);
+			// Hidden rather than removed: a group with no matches keeps its place in the DOM, so a
+			// filter clearing puts every group back exactly where it was instead of re-appending them
+			// in creation order.
+			wrapper.hidden = filter !== "" && kept.length === 0;
 
 			// The heading is the wrapper's first child, so the sequence of movable rows starts *after*
 			// it. Seeding `previous` with the heading is what keeps the first row below its title: with
@@ -163,7 +235,8 @@ export class Sidebar {
 				previous = button;
 			}
 
-			const hidden = rows.length - shown.length;
+			// A filtering list shows everything it matched, so there is no "more" to hold back.
+			const hidden = filter !== "" ? 0 : rows.length - shown.length;
 			const more = this.moreFor(group.cwd, hidden);
 			if (more !== undefined) {
 				wanted.add(`more:${group.cwd}`);
@@ -174,6 +247,8 @@ export class Sidebar {
 			}
 			wanted.add(`head:${group.cwd}`);
 		}
+
+		this.noMatch.hidden = !(filter !== "" && matches === 0);
 
 		for (const [key, node] of [...this.drawn]) {
 			if (!wanted.has(key)) {
@@ -200,9 +275,12 @@ export class Sidebar {
 	}
 
 	private ensureHeading(): void {
-		const first = this.list.firstElementChild;
-		if (first?.classList.contains("session-list-heading")) return;
-		this.list.prepend(element("div", "session-list-heading", "工作区"));
+		// The heading row and the search row are the list's fixed prefix; a list that lost them — a
+		// `replaceChildren` during the empty phase, say — gets them back in the same order. The
+		// no-match note is the list's suffix, and only moves when it is not already last.
+		if (!this.list.contains(this.headRow)) this.list.prepend(this.headRow, this.searchRow);
+		this.searchRow.hidden = !this.searchOpen;
+		if (this.list.lastElementChild !== this.noMatch) this.list.append(this.noMatch);
 	}
 
 	/** The heading for one workspace, built once and then only labelled. */

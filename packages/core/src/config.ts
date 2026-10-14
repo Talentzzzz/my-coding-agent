@@ -70,6 +70,12 @@ export const DEFAULT_BASH_SETTINGS: BashSettings = { defaultTimeoutMs: 120_000, 
 export interface Settings {
 	/** `<name>/<model-id>`. Undefined lets the session pick a default. */
 	model?: string;
+	/**
+	 * The tools a session that never chose opens on, as the global default the session-level panel
+	 * resets to. Undefined means the registry's full set, which is what today's sessions open on —
+	 * so an old settings file needs no migration and no field of its own.
+	 */
+	tools?: string[];
 	/** Theme and font size, as the window draws them. */
 	appearance: AppearanceSettings;
 	/** Tools that must be approved in the UI before they run. */
@@ -124,6 +130,9 @@ export function mergeSettings(input: unknown): Settings {
 
 	const model = stringOrUndefined(record.model);
 	if (model !== undefined) merged.model = model;
+
+	const tools = stringListOrUndefined(record.tools);
+	if (tools !== undefined) merged.tools = tools;
 
 	for (const key of Object.keys(merged.approval) as ToolApprovalKey[]) {
 		const value = approval[key];
@@ -206,4 +215,18 @@ function queueModeOr(value: unknown, fallback: QueueMode): QueueMode {
 
 function stringOrUndefined(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/**
+ * A list of tool names, or undefined when the field is absent or not an array.
+ *
+ * The file is hand-editable, so an entry that is not a non-empty string is dropped rather than
+ * refused — one bad line should not cost the whole field. The empty list is *kept*: an absent field
+ * means "every tool" (the old file's behaviour), while an explicit empty list is a choice — "nothing
+ * active" — and silently rewriting a choice into its opposite is the one thing a settings reader must
+ * not do.
+ */
+function stringListOrUndefined(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
 }

@@ -63,6 +63,8 @@ class FakeNode {
 	};
 	/** The element's tooltip. */
 	title = "";
+	/** The element's value, which only an input has but any node may carry. */
+	value = "";
 	/** How many times this exact node was created. Anything above 1 means it was rebuilt. */
 	created: number;
 	/** Set when a node is pulled out of its parent, so "moved" and "replaced" can be told apart. */
@@ -102,7 +104,7 @@ class FakeNode {
 			this.children.push(node);
 		}
 	}
-	prepend(node: FakeNode): void { this.append(node); }
+	prepend(...nodes: FakeNode[]): void { this.append(...nodes); }
 	replaceChildren(...nodes: FakeNode[]): void {
 		for (const child of this.children) { child.detached = true; child.parent = undefined; }
 		this.children.length = 0;
@@ -134,7 +136,27 @@ class FakeNode {
 	setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
 	removeAttribute(name: string): void { this.attributes.delete(name); }
 	getAttribute(name: string): string | null { return this.attributes.get(name) ?? null; }
-	addEventListener(): void {}
+	/**
+	 * Listeners are recorded rather than dropped, so the smoke can drive the controls the way a click
+	 * would: the search row is opened by its button, and filtered by its input's own event.
+	 */
+	private readonly listeners = new Map<string, ((event?: unknown) => void)[]>();
+	addEventListener(type: string, handler: (event?: unknown) => void): void {
+		const list = this.listeners.get(type) ?? [];
+		list.push(handler);
+		this.listeners.set(type, list);
+	}
+	/** Fire one recorded handler, which is what a real click or input event would do. */
+	dispatch(type: string): void {
+		for (const handler of this.listeners.get(type) ?? []) handler();
+	}
+	/** Whether this node is the given one or holds it, the containment check `ensureHeading` makes. */
+	contains(node: FakeNode): boolean {
+		if (node === this) return true;
+		return this.children.some((child) => child.contains(node));
+	}
+	get lastElementChild(): FakeNode | undefined { return this.children.at(-1); }
+	focus(): void {}
 	set innerHTML(_value: string) {
 		this.children.length = 0;
 		// One child, so `firstElementChild` has something to hand back. Real markup would nest
@@ -257,6 +279,7 @@ process.stdout.write("\nsidebar：行是原地改的\n");
 		onSelectSession: (id) => selected.push(id),
 		onToggleCollapsed: () => {},
 		onOpenSettings: () => {},
+		onAddWorkspace: () => {},
 	});
 
 	const rows = [row("a", 300), row("b", 200), row("c", 100)];
@@ -287,6 +310,7 @@ process.stdout.write("\nsidebar：重排是移动节点\n");
 		onSelectSession: () => {},
 		onToggleCollapsed: () => {},
 		onOpenSettings: () => {},
+		onAddWorkspace: () => {},
 	});
 
 	const a = row("a", 100);
@@ -319,6 +343,7 @@ process.stdout.write("\nsidebar：第二行状态\n");
 		onSelectSession: () => {},
 		onToggleCollapsed: () => {},
 		onOpenSettings: () => {},
+		onAddWorkspace: () => {},
 	});
 
 	// Each row's own status, looked up by session rather than by position: rows are ordered by
@@ -359,6 +384,7 @@ process.stdout.write("\nsidebar：连接指示器\n");
 		onSelectSession: () => {},
 		onToggleCollapsed: () => {},
 		onOpenSettings: () => {},
+		onAddWorkspace: () => {},
 	});
 
 	sidebar.render(state([row("a", 1)], { channel: "connecting" }));
@@ -384,6 +410,7 @@ process.stdout.write("\nsidebar：分组标题在会话行之上\n");
 		onSelectSession: () => {},
 		onToggleCollapsed: () => {},
 		onOpenSettings: () => {},
+		onAddWorkspace: () => {},
 	});
 
 	// Two workspaces, so this is about each group rather than about the one group a single-workspace
@@ -424,6 +451,7 @@ process.stdout.write("\nsidebar：行会消失\n");
 		onSelectSession: () => {},
 		onToggleCollapsed: () => {},
 		onOpenSettings: () => {},
+		onAddWorkspace: () => {},
 	});
 
 	sidebar.render(state([row("a", 300), row("b", 200), row("c", 100)]));
@@ -434,6 +462,49 @@ process.stdout.write("\nsidebar：行会消失\n");
 
 	sidebar.render(state([]));
 	check("空列表不留残骸", titlesOf(sidebar).length === 0, JSON.stringify(titlesOf(sidebar)));
+}
+
+// ------------------------------------------------- 7. the search really filters
+
+process.stdout.write("\nsidebar：搜索真的过滤\n");
+
+{
+	const sidebar = new Sidebar({
+		onNewSession: () => {},
+		onSelectSession: () => {},
+		onToggleCollapsed: () => {},
+		onOpenSettings: () => {},
+		onAddWorkspace: () => {},
+	});
+
+	sidebar.render(state([row("alpha", 300), row("beta", 200)]));
+
+	// Opened by its own button, the way a click opens it; the shim records handlers, so dispatching
+	// one is dispatching the click.
+	const searchButton = all(sidebar, "icon-button").find((entry) => entry.node.getAttribute("title") === "搜索会话");
+	check("搜索按钮在标题行上", searchButton !== undefined);
+	searchButton?.node.dispatch("click");
+
+	const input = all(sidebar, "search-input")[0]?.node;
+	check("搜索行打开了输入框", input !== undefined);
+	if (input !== undefined) {
+		input.value = "alpha";
+		input.dispatch("input");
+		const titles = titlesOf(sidebar).map((t) => t.title);
+		check("过滤后只剩匹配的行", titles.join(",") === "会话 alpha", JSON.stringify(titles));
+
+		input.value = "没有这一条";
+		input.dispatch("input");
+		const note = all(sidebar, "session-list-empty")[0]?.node;
+		check("没有匹配时说没有匹配", note !== undefined && note.textContent === "没有匹配的会话", JSON.stringify(note?.textContent));
+
+		input.value = "";
+		input.dispatch("input");
+		const restored = titlesOf(sidebar).map((t) => t.title);
+		check("清空搜索把行都放回来", restored.join(",") === "会话 alpha,会话 beta", JSON.stringify(restored));
+		const workspaces = all(sidebar, "workspace");
+		check("分组不是被删掉的", workspaces.every((entry) => entry.created === 1), JSON.stringify(workspaces.map((entry) => entry.created)));
+	}
 }
 
 process.stdout.write(failures === 0 ? "\nsidebar ok\n" : `\n${failures} 项失败\n`);

@@ -14,6 +14,8 @@ import type {
 export interface PanelSettingsPatch {
 	/** The row a new session starts on, as `<name>/<wire id>`. */
 	model?: string;
+	/** The global default active tool set, sent whole like the session-level endpoint's own. */
+	tools?: string[];
 	appearance?: { theme?: "system" | "light" | "dark"; fontSize?: number };
 	approval?: Record<string, boolean>;
 	/** Partial so one timeout can be committed without naming the other. */
@@ -75,12 +77,16 @@ export class SessionApi {
 	/**
 	 * Start a conversation.
 	 *
+	 * `cwd` is where the new session lands: the workspace picker's own choice, made with the request
+	 * and never a server-side "current directory". Undefined is the server's root, which is what a
+	 * bodyless create has always meant.
+	 *
 	 * The answer names the new session so the window can point itself at it. The listing that comes
 	 * with it is deliberately not exposed: the sidebar's rows have one writer at a time, and while the
 	 * channel is up that writer is the channel — see {@link sessionId}.
 	 */
-	async createSession(): Promise<{ sessionId: string }> {
-		return this.sessionId("POST", "/api/sessions", undefined);
+	async createSession(cwd?: string): Promise<{ sessionId: string }> {
+		return this.sessionId("POST", "/api/sessions", cwd === undefined ? undefined : { cwd });
 	}
 
 	/** Branch a session at one entry, or copy the whole log when the entry is null. */

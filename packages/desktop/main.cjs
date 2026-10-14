@@ -9,7 +9,7 @@
  * It is plain CommonJS because that is what Electron loads before any toolchain runs: the server
  * below is the workspace's TypeScript, executed by Node's own type stripping.
  */
-const { app, BrowserWindow, ipcMain, nativeTheme, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell } = require("electron");
 const { existsSync } = require("node:fs");
 const { writeFile } = require("node:fs/promises");
 const { join, resolve } = require("node:path");
@@ -150,6 +150,16 @@ function registerWindowControls() {
 
 	ipcMain.handle("desktop:window:is-maximized", (event) => {
 		return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false;
+	});
+
+	// The system folder picker, for the workspace picker's "添加工作区…". The browsing belongs to the
+	// OS dialog and nothing else: the page learns the chosen path and reads no filesystem.
+	ipcMain.handle("desktop:pick-folder", async (event) => {
+		const window = BrowserWindow.fromWebContents(event.sender);
+		const answer = await dialog.showOpenDialog(window, {
+			properties: ["openDirectory"],
+		});
+		return answer.canceled || answer.filePaths.length === 0 ? undefined : answer.filePaths[0];
 	});
 }
 

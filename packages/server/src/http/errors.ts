@@ -48,13 +48,13 @@ export function internalError(error: unknown): { status: number; message: string
 const MAX_BODY_BYTES = 1_000_000;
 
 /**
- * Read a JSON request body.
+ * The request body as text, trimmed, bounded by the size cap.
  *
- * Both halves of "the client sent something wrong" are a 400: a body that is not JSON, and a body
- * larger than this server will read. The size limit is checked before reading, because it exists to
- * bound memory, not to be reported after a megabyte already arrived.
+ * The one reader both object readers share, because the cap exists to bound memory and is therefore
+ * checked before reading — a check written twice would eventually be written once without it. The
+ * size limit is reported before the megabyte arrives, not after.
  */
-export async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+async function readBodyText(request: IncomingMessage): Promise<string> {
 	const length = Number.parseInt(request.headers["content-length"] ?? "", 10);
 	if (Number.isFinite(length) && length > MAX_BODY_BYTES) {
 		throw httpStatus.badRequest(`Request body is larger than ${MAX_BODY_BYTES} bytes`);
@@ -68,8 +68,31 @@ export async function readJsonBody(request: IncomingMessage): Promise<unknown> {
 		if (total > MAX_BODY_BYTES) throw httpStatus.badRequest(`Request body is larger than ${MAX_BODY_BYTES} bytes`);
 		chunks.push(buffer);
 	}
+	return Buffer.concat(chunks).toString("utf8").trim();
+}
 
-	const text = Buffer.concat(chunks).toString("utf8").trim();
+/** The text as an object, or the two 400s a malformed body deserves. */
+function parseObject(text: string): Record<string, unknown> {
+	let body: unknown;
+	try {
+		body = JSON.parse(text);
+	} catch {
+		throw httpStatus.badRequest("Request body is not valid JSON");
+	}
+	if (typeof body !== "object" || body === null || Array.isArray(body)) {
+		throw httpStatus.badRequest("Request body must be a JSON object");
+	}
+	return body as Record<string, unknown>;
+}
+
+/**
+ * Read a JSON request body.
+ *
+ * An absent body is refused here rather than answered, because every caller of this reader names a
+ * required field off it.
+ */
+export async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+	const text = await readBodyText(request);
 	if (text.length === 0) throw httpStatus.badRequest("A JSON body is required");
 	try {
 		return JSON.parse(text) as unknown;
@@ -85,9 +108,18 @@ export async function readJsonBody(request: IncomingMessage): Promise<unknown> {
  * settled once instead of in every handler.
  */
 export async function readObjectBody(request: IncomingMessage): Promise<Record<string, unknown>> {
-	const body = await readJsonBody(request);
-	if (typeof body !== "object" || body === null || Array.isArray(body)) {
-		throw httpStatus.badRequest("Request body must be a JSON object");
-	}
-	return body as Record<string, unknown>;
+	return parseObject(await readBodyText(request));
+}
+
+/**
+ * The JSON body as an object, or `{}` when there is nothing there.
+ *
+ * For the one endpoint whose body names no required field: an empty `POST /api/sessions` has always
+ * created a session, and the `cwd` that may join it must not turn that into a request that needs a
+ * body. Size and shape are checked exactly as {@link readObjectBody} checks them — only "empty" is
+ * answered rather than refused.
+ */
+export async function optionalObjectBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+	const text = await readBodyText(request);
+	return text.length === 0 ? {} : parseObject(text);
 }

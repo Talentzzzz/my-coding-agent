@@ -250,12 +250,65 @@ body {
 }
 
 .session-list-heading {
-	padding: 6px 8px 4px;
 	color: var(--dsw-label-caption);
 	font-size: 11px;
 	font-weight: 600;
 	letter-spacing: 0.04em;
 	text-transform: uppercase;
+}
+
+/*
+ * The heading row: the section's name and, at its right end, the three controls the reference puts
+ * there — search, view options, add a workspace. One row rather than a heading plus a floating
+ * cluster, because the controls are about the list the heading names.
+ */
+.list-head {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 6px 0 4px;
+}
+
+.list-head .session-list-heading {
+	flex: 1;
+	min-width: 0;
+	padding: 0 8px;
+}
+
+.list-head-actions {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+}
+
+.list-head-actions .icon-button {
+	width: 24px;
+	height: 24px;
+}
+
+.list-head-actions .icon-button svg {
+	width: 14px;
+	height: 14px;
+}
+
+.search-row {
+	padding: 0 0 6px;
+}
+
+.search-input {
+	width: 100%;
+	height: 28px;
+	padding: 0 8px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-input-fill);
+	color: var(--dsw-label-primary);
+	font: inherit;
+	font-size: 12.5px;
+}
+
+.search-input::placeholder {
+	color: var(--dsw-label-caption);
 }
 
 .session-item {
@@ -1288,48 +1341,214 @@ input:focus-visible {
 	padding: 0 24px 8px;
 }
 
-.approval {
+/*
+ * The approval takeover: one card per waiting approval, sitting in the composer's own seat.
+ *
+ * The shape is the reference's — a warning border around the whole card, a status strip on top, the
+ * command in the middle, and the two answers at the bottom right — because the card *is* the input
+ * for as long as the approval stands, and a question that replaces the thing it interrupted reads as
+ * urgent where a banner above an untouched input box reads as a sticky note.
+ */
+.approval-seat {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
 	margin-bottom: 8px;
-	padding: 12px 14px;
-	border: 1px solid var(--dsw-state-warn);
-	border-radius: var(--dsw-radius-md);
-	background: var(--dsw-bg-layer-1);
-	box-shadow: var(--dsw-shadow-panel);
 }
 
-.approval-title {
+.approval-card {
+	border: 1px solid var(--dsw-state-warn);
+	border-radius: var(--dsw-radius-xl);
+	background: var(--dsw-input-fill);
+	box-shadow: var(--dsw-shadow-panel);
+	overflow: hidden;
+}
+
+.approval-strip {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 14px;
+	background: var(--dsw-warn-tint);
+	color: var(--dsw-state-warn-label);
+	font-size: 12px;
+	font-weight: 500;
+}
+
+.approval-dot {
+	width: 7px;
+	height: 7px;
+	flex: none;
+	border-radius: 50%;
+	background: var(--dsw-state-warn);
+	animation: pulse 1.2s var(--dsw-ease) infinite;
+}
+
+.approval-body-wrap {
+	padding: 10px 14px 4px;
+}
+
+.approval-headline {
 	display: flex;
 	align-items: center;
 	gap: 8px;
-	margin-bottom: 6px;
 	font-weight: 600;
 }
 
-.approval-title svg {
+.approval-headline svg {
 	width: 16px;
 	height: 16px;
+	flex: none;
 	color: var(--dsw-state-warn);
 }
 
-.approval-body {
-	margin: 0 0 10px;
+.approval-command {
+	margin: 6px 0 0;
+	max-height: 8rem;
+	overflow: auto;
 	color: var(--dsw-label-secondary);
 	font-family: var(--dsw-font-mono);
 	font-size: 12px;
 	line-height: 1.5;
 	white-space: pre-wrap;
 	word-break: break-word;
-	max-height: 8rem;
-	overflow: auto;
 }
 
 .approval-actions {
 	display: flex;
 	gap: 8px;
 	justify-content: flex-end;
+	padding: 10px 14px 12px;
 }
 
 /* ------------------------------------------------------------------ composer */
+
+/*
+ * The hero row: the workspace chip, alone on its line above the input card, and only while the
+ * transcript is empty. It is the picker's face — where the *next* new session will land — and a
+ * future-tense control has no business on screen once there is a present to read instead.
+ */
+.hero-row {
+	display: flex;
+	align-items: center;
+	padding: 0 4px 6px;
+}
+
+.workspace-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 100%;
+	height: 28px;
+	padding: 0 10px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: 999px;
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: 12.5px;
+	cursor: pointer;
+	transition:
+		background var(--dsw-duration-fast) var(--dsw-ease),
+		border-color var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.workspace-chip:hover {
+	background: var(--dsw-bg-hover);
+	border-color: var(--dsw-border-l3);
+	color: var(--dsw-label-primary);
+}
+
+.workspace-chip svg {
+	width: 14px;
+	height: 14px;
+	flex: none;
+}
+
+/* The chevron is the affordance; the folder is the content. */
+.workspace-chip svg:last-child {
+	width: 12px;
+	height: 12px;
+	color: var(--dsw-label-caption);
+}
+
+.workspace-chip-label {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+/*
+ * The one self-drawn menu. Fixed against the viewport, token-shaded, one at a time — and nothing
+ * else in the window gets one, because a second popup implementation is a second set of dismissal
+ * rules to keep honest.
+ */
+.menu {
+	position: fixed;
+	z-index: 60;
+	min-width: 180px;
+	max-width: 320px;
+	padding: 4px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-bg-layer-1);
+	box-shadow: var(--dsw-shadow-panel);
+}
+
+.menu-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	min-height: 30px;
+	padding: 5px 10px;
+	border: none;
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: 13px;
+	text-align: left;
+	cursor: pointer;
+}
+
+.menu-item:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.menu-item[data-active="true"] {
+	color: var(--dsw-label-primary);
+	font-weight: 500;
+}
+
+.menu-item[data-active="true"] .menu-label::after {
+	content: "✓";
+	margin-left: auto;
+	color: var(--dsw-state-business);
+	font-weight: 400;
+}
+
+.menu-item svg {
+	width: 14px;
+	height: 14px;
+	flex: none;
+	color: var(--dsw-label-tertiary);
+}
+
+.menu-label {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.menu-separator {
+	height: 1px;
+	margin: 4px 6px;
+	background: var(--dsw-border-l1);
+}
 
 .composer-wrap {
 	max-width: 46rem;
@@ -1424,6 +1643,17 @@ input:focus-visible {
 .composer-select:focus-visible {
 	border-color: var(--dsw-border-l4);
 	outline: none;
+}
+
+/* The session-level settings entry: one quiet gear at the bar's left end, same grammar as the seat. */
+.composer-gear {
+	width: 26px;
+	height: 26px;
+}
+
+.composer-gear svg {
+	width: 15px;
+	height: 15px;
 }
 
 .composer-hint {
@@ -1943,7 +2173,7 @@ select.input {
 .tool-output,
 .diff,
 .settings-body,
-.approval-body {
+.approval-command {
 	scrollbar-width: thin;
 	scrollbar-color: var(--dsw-scrollbar-thumb) transparent;
 }
@@ -1953,7 +2183,7 @@ select.input {
 .tool-output::-webkit-scrollbar,
 .diff::-webkit-scrollbar,
 .settings-body::-webkit-scrollbar,
-.approval-body::-webkit-scrollbar {
+.approval-command::-webkit-scrollbar {
 	width: 10px;
 	height: 10px;
 }
@@ -1963,7 +2193,7 @@ select.input {
 .tool-output::-webkit-scrollbar-thumb,
 .diff::-webkit-scrollbar-thumb,
 .settings-body::-webkit-scrollbar-thumb,
-.approval-body::-webkit-scrollbar-thumb {
+.approval-command::-webkit-scrollbar-thumb {
 	border: 3px solid transparent;
 	border-radius: 999px;
 	background: var(--dsw-scrollbar-thumb);
@@ -1975,7 +2205,7 @@ select.input {
 .tool-output::-webkit-scrollbar-thumb:hover,
 .diff::-webkit-scrollbar-thumb:hover,
 .settings-body::-webkit-scrollbar-thumb:hover,
-.approval-body::-webkit-scrollbar-thumb:hover {
+.approval-command::-webkit-scrollbar-thumb:hover {
 	background: var(--dsw-scrollbar-thumb-hover);
 	background-clip: content-box;
 }
@@ -1988,6 +2218,8 @@ select.input {
 
 #app[data-sidebar="rail"] .brand-name,
 #app[data-sidebar="rail"] .new-session span,
+#app[data-sidebar="rail"] .list-head,
+#app[data-sidebar="rail"] .search-row,
 #app[data-sidebar="rail"] .session-list-heading,
 #app[data-sidebar="rail"] .workspace-head,
 #app[data-sidebar="rail"] .session-item-title,

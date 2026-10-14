@@ -15,7 +15,7 @@ import {
 import type { SessionSnapshot, ToolApprovalKey } from "./protocol.ts";
 import type { SessionManager } from "./session/session-manager.ts";
 import { sessionSnapshot } from "./session/snapshot.ts";
-import { applyRecordedToolConfig, approvalToolsOf } from "./session/tool-config.ts";
+import { applyRecordedToolConfig, approvalToolsOf, defaultToolNames, followsGlobalOf } from "./session/tool-config.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { createToolRegistry, type ToolRegistry } from "./tools/index.ts";
 import { createSubagentTools } from "./tools/subagent.ts";
@@ -108,8 +108,7 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 			? undefined
 			: options.thinkingLevel ?? recorded.thinkingLevel ?? row.defaultThinkingLevel;
 	const model: Model<Api> = row === undefined ? placeholderModel() : modelFor(row, level);
-	const registry = options.tools ?? createToolRegistry(workspace, settingsManager);
-	// The level the model came back with, which is the level a subagent inherits: `modelFor` already
+	const registry = options.tools ?? createToolRegistry(workspace, settingsManager);	// The level the model came back with, which is the level a subagent inherits: `modelFor` already
 	// settled what the row's default means for this model, so asking again here could only disagree.
 	const thinkingLevel = model.thinkingLevel ?? "off";
 
@@ -131,8 +130,18 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 	}
 
 	// The tool set and approvals the session itself chose, replayed from its `tool_config` entries. A
-	// session with no entry opens on the defaults, which is the same choice it never made.
-	const recordedTools = applyRecordedToolConfig(options.sessionManager, registry);
+	// session with no entry opens on the global default — the settings files' own tool set, or the
+	// registry's full set when they name none — which is the choice it never made. A caller-supplied
+	// registry is the exception: its active set *is* a deliberate loadout (the SubAgent child's
+	// read-only narrowing, a test's custom tool), so with no entry the set is kept, not defaulted.
+	//
+	// The registry is settled here, after the subagent tools, so the default the files name can
+	// include a delegation tool and the replay is the last word on the active set.
+	const recordedTools = applyRecordedToolConfig(
+		options.sessionManager,
+		registry,
+		options.tools === undefined ? defaultToolNames(settingsManager, registry) : registry.activeNames(),
+	);
 
 	return { workspace, settingsManager, model, registry, agentsMd, recordedTools };
 }
@@ -161,6 +170,10 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 		// Read off the registry *after* the replay, so the toggles match a live session's exactly.
 		allTools: registry.all().map((tool) => tool.name),
 		activeTools: registry.activeNames(),
+		// Judged against this workspace's own settings, the same way the live session's getter does it:
+		// a cold read and a live snapshot must agree here, or the panel would flip its "沿用全局" label
+		// the moment a session went from open to merely read.
+		...followsGlobalOf(options.sessionManager, settingsManager, registry),
 		submitting: false,
 		queued: 0,
 		isRetrying: false,

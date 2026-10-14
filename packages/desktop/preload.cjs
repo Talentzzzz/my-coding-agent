@@ -2,9 +2,10 @@
  * The preload seam.
  *
  * The renderer is the ordinary web client: it talks to the server over HTTP and needs no privileged
- * access. Two things a page cannot learn for itself — the shell's native theme, and how to draw
- * window controls when the caption belongs to the page — are exposed here, and nothing else. No
- * filesystem, no shell, no IPC passthrough.
+ * access. Three things a page cannot learn for itself — the shell's native theme, how to draw window
+ * controls when the caption belongs to the page, and the OS's own folder picker (the workspace picker's
+ * "添加工作区…" hands the browsing to the system dialog, because the app itself does not browse the
+ * filesystem) — are exposed here, and nothing else. No filesystem reads, no shell, no IPC passthrough.
  */
 const { contextBridge, ipcRenderer } = require("electron");
 
@@ -22,4 +23,9 @@ contextBridge.exposeInMainWorld("desktop", {
 		close: () => ipcRenderer.send("desktop:window", "close"),
 		isMaximized: () => ipcRenderer.invoke("desktop:window:is-maximized"),
 	},
+	/**
+	 * The system folder picker. Resolves the chosen absolute path, or undefined for a cancelled
+	 * dialog. The page never reads the filesystem; the dialog is the whole of the access.
+	 */
+	pickFolder: () => ipcRenderer.invoke("desktop:pick-folder"),
 });

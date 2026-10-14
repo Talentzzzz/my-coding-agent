@@ -27,6 +27,9 @@ export interface SnapshotInput {
 	approvals: Record<ToolApprovalKey, boolean>;
 	allTools: string[];
 	activeTools: string[];
+	/** Already judged by the caller against the settings it holds; see `SessionSnapshot`. */
+	toolsFollowGlobal: boolean;
+	approvalsFollowGlobal: boolean;
 	submitting: boolean;
 	queued: number;
 	isRetrying: boolean;
@@ -60,6 +63,8 @@ export function sessionSnapshot(input: SnapshotInput): SessionSnapshot {
 		approvals: input.approvals,
 		allTools: input.allTools,
 		activeTools: input.activeTools,
+		toolsFollowGlobal: input.toolsFollowGlobal,
+		approvalsFollowGlobal: input.approvalsFollowGlobal,
 		messages,
 		messageEntryIds: input.sessionManager.getContextMessageEntryIds(),
 		branchPoints: input.sessionManager.getBranchPoints(),
