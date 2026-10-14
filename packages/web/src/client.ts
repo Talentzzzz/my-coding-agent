@@ -36,7 +36,9 @@ export type SubscriptionStatus =
 	 * The one state that survives a reconnect without being reopened: the server decided this
 	 * logical stream is over, and asking again after every dropped connection would buy a second
 	 * "there is no such session" for a session that is simply gone. It clears when the last
-	 * reference goes away, so pointing a pane somewhere else and back re-subscribes normally.
+	 * reference goes away, so pointing a pane somewhere else and back re-subscribes normally — and it
+	 * clears on a fresh `retain` too, so a new send on a session a still-pointing pane holds revives
+	 * the stream rather than being added to a dead entry.
 	 */
 	| "ended";
 
@@ -284,6 +286,16 @@ export class MuxClient {
 		const existing = this.subscriptions.get(sessionId);
 		if (existing !== undefined) {
 			existing.sources.add(source);
+			// A new want revives a stream the server ended. The `ended` mark exists to keep the
+			// *reconnect* path — {@link replaySubscriptions} — from asking again for a session the
+			// server has already declared over; it is not a verdict that outlives a fresh gesture of
+			// intent. Without this, a session whose pane never let go could never be watched again:
+			// the only other way out of `ended` is the reference count dropping to zero, which a pane
+			// still pointing at the session prevents.
+			if (existing.status === "ended") {
+				existing.status = "subscribed";
+				if (this.channelState === "live") this.writeOpen(sessionId);
+			}
 			return;
 		}
 

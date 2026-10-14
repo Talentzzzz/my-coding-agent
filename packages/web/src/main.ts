@@ -209,6 +209,12 @@ function main(): void {
 				apply(reduce(state, message));
 			},
 			onStreamEnd: (sessionId) => {
+				// The send's reference has a third exit besides a settled status and a refused run: the
+				// server ending the stream. Released before the pane test below, for the same reason
+				// `onStreamError` releases before it draws anything — the reference belongs to the run,
+				// not to the pane, so a window that navigated away mid-run still holds it. Releasing
+				// unconditionally is safe: an id this connection does not hold is a no-op.
+				mux.release(sessionId, "send");
 				if (followed !== sessionId) return;
 				apply(reduceEnd(state));
 			},

@@ -1,7 +1,9 @@
 // A live check that the browser client and the server actually agree: boots the real server, opens a
 // real WebSocket to `/mux`, and drives it through the production `MuxClient` — the same class the
 // window uses. So this is the seam the desktop shell runs on, not a mock of it.
-// Nothing reaches a model, so no provider key is needed.
+// The last section drives a real run through the scripted transport and asserts the one thing the
+// user reported broken: a second prompt must reach the window again after the first run ended.
+// No provider key is needed — where a run happens, the model is the scripted transport.
 // Run with: node scripts/smoke-mux-live.ts
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,7 +11,9 @@ import { join } from "node:path";
 import { bootServer } from "../packages/server/src/boot.ts";
 import { MuxClient, browserSocket, type MuxHandlers } from "../packages/web/src/client.ts";
 import { SessionRows } from "../packages/web/src/rows.ts";
+import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
 import type { ConnectionItem, ServerMessage } from "@my-agent/core/protocol";
+import type { UserModel } from "@my-agent/core";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-mux-live-"));
 let failures = 0;
@@ -29,9 +33,47 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
 	return ready();
 }
 
+/** Send one prompt over REST, the way the window's composer does. */
+async function postPrompt(base: string, sessionId: string, text: string): Promise<number> {
+	const response = await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ text }),
+	});
+	return response.status;
+}
+
+/**
+ * Whether this frame is the run's last word, in the same two places the window reads it.
+ *
+ * A copy of `main.ts`'s helper rather than an import, because `main.ts` touches the DOM and cannot
+ * load here. It is the release signal `onStreamMessage` below mirrors.
+ */
+function settled(message: ServerMessage): boolean {
+	if (message.type === "status") return !message.submitting;
+	if (message.type === "baseline") return !message.session.submitting;
+	return false;
+}
+
+/** The scripted model the run section drives. Its endpoint is never reached: the transport answers. */
+const modelRows: UserModel[] = [
+	{
+		name: "scripted",
+		baseUrl: "http://127.0.0.1:1/v1",
+		apiKey: "unused-by-the-scripted-transport",
+		modelId: "claude-sonnet-4-5",
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+		reasoning: false,
+	},
+];
+
 process.stdout.write("\n真服务器 + 真 WebSocket + 生产的 MuxClient\n");
 
-const server = await bootServer({ cwd: root, port: 0, mux: { heartbeatIntervalMs: 60 } });
+const transport = createFakeTransport({ tokensPerSecond: 400 });
+const server = await bootServer({ cwd: root, port: 0, mux: { heartbeatIntervalMs: 60 }, api: transport.api });
+// Handed to the hub after boot, before any prompt: the one run section below needs a model to run.
+server.hub.setUserModels(modelRows);
 
 try {
 	const { sessionId } = await (await fetch(`${server.url}/api/sessions/current`)).json() as { sessionId: string };
@@ -42,13 +84,25 @@ try {
 	const ended: string[] = [];
 	const errors: string[] = [];
 
-	const client = new MuxClient(
+	const client: MuxClient = new MuxClient(
 		{
 			onChannel: (state) => channels.push(state),
 			onConnectionItem: (item) => items.push(item),
-			onStreamMessage: (id, message: ServerMessage) => messages.push({ sessionId: id, type: message.type }),
-			onStreamEnd: (id) => ended.push(id),
-			onStreamError: (id, message) => errors.push(`${id}:${message}`),
+			// The window's own wiring, mirrored: a send's reference lives exactly as long as the run it
+			// started, and a status that says the run settled is one of its exits. Without this the
+			// reproduction below would not be the one the user hit.
+			onStreamMessage: (id, message: ServerMessage) => {
+				messages.push({ sessionId: id, type: message.type });
+				if (settled(message)) client.release(id, "send");
+			},
+			onStreamEnd: (id) => {
+				ended.push(id);
+				client.release(id, "send");
+			},
+			onStreamError: (id, message) => {
+				errors.push(`${id}:${message}`);
+				if (id !== "") client.release(id, "send");
+			},
 		} satisfies MuxHandlers,
 		{ url: server.url.replace("http", "ws") + "/mux", socket: browserSocket(server.url.replace("http", "ws") + "/mux") },
 	);
@@ -100,6 +154,32 @@ try {
 	client.retain("不存在的会话", "pane");
 	check("订阅不存在的会话在帧上被拒绝", await until(() => errors.length > beforeErrors), JSON.stringify(errors));
 	check("并且那条流被结束", await until(() => ended.includes("不存在的会话")), JSON.stringify(ended));
+
+	// ---------------------------------------------------------------------------------------------
+	// The reported bug: a run ends, the server reaps the host it was running and ends the stream,
+	// and the pane never left the session. A second prompt must reach this connection again.
+	// ---------------------------------------------------------------------------------------------
+	process.stdout.write("run 结束后，同一会话的下一次 prompt 必须重新收到帧\n");
+
+	const framesFor = (): number => messages.filter((m) => m.sessionId === sessionId).length;
+
+	// Run 1: the window takes the pane's reference and a send's, posts, watches the answer, and the
+	// server ends the stream once the host it was running goes away. The pane is still pointing at
+	// the session throughout — which is exactly the state the old client could not get out of.
+	transport.setResponses([fakeAssistantMessage("first answer")]);
+	const beforeFirst = framesFor();
+	client.retain(sessionId, "send");
+	check("第一条 prompt 被接受", (await postPrompt(server.url, sessionId, "第一条")) === 202);
+	check("第一条 prompt 的帧到达了", await until(() => framesFor() > beforeFirst, 10_000), JSON.stringify(messages.slice(beforeFirst)));
+	check("run 结束后服务端把这条流判终", await until(() => ended.includes(sessionId), 10_000), JSON.stringify(ended));
+
+	// Run 2: the same session, a new send's reference, and the pane still holding it. Nothing about
+	// the window changed, so the frames must arrive exactly as they did the first time.
+	const beforeSecond = framesFor();
+	transport.setResponses([fakeAssistantMessage("second answer")]);
+	client.retain(sessionId, "send");
+	check("第二条 prompt 被接受", (await postPrompt(server.url, sessionId, "第二条")) === 202);
+	check("第二条 prompt 也必须再次收到帧", await until(() => framesFor() > beforeSecond, 10_000), JSON.stringify(messages.slice(beforeSecond)));
 
 	client.close();
 	check("关掉之后不再有状态变化", channels.at(-1) !== undefined);
