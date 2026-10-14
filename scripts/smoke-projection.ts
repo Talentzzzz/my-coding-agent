@@ -163,7 +163,7 @@ try {
 
 	process.stdout.write("a row's title follows the branch, not the file\n");
 	const beforeBranch = await projection.row(first);
-	check("an untouched session is named by the placeholder", beforeBranch?.title === "New session", beforeBranch?.title);
+	check("an untouched session is named by the placeholder", beforeBranch?.title === "新会话", beforeBranch?.title);
 	const branchHost = await hub.claim(first);
 	fake.setResponses([fakeAssistantMessage("one"), fakeAssistantMessage("two")]);
 	await branchHost.session.prompt("first turn");

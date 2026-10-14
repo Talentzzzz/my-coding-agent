@@ -782,7 +782,7 @@ function titleOfBranch(
 		const title = shortenTitle(text);
 		if (title.length > 0) return title;
 	}
-	return "New session";
+	return "新会话";
 }
 
 const MAX_CONCURRENT_SESSION_INFO_LOADS = 10;
@@ -1833,7 +1833,7 @@ export function deriveTitle(messages: readonly AgentMessage[]): string {
 		const text = shortenTitle(textOf((message as { content?: unknown }).content));
 		if (text.length > 0) return text;
 	}
-	return "New session";
+	return "新会话";
 }
 
 /**

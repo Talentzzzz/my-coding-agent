@@ -374,7 +374,47 @@ process.stdout.write("\nsidebar：连接指示器\n");
 	check("down 说它在重试", (indicator.children[1]?.textContent ?? "").includes("重连"), JSON.stringify(indicator.children[1]?.textContent));
 }
 
-// ----------------------------------------------------------- 5. removals
+// ------------------------------------------- 5. a heading sits above its rows
+
+process.stdout.write("\nsidebar：分组标题在会话行之上\n");
+
+{
+	const sidebar = new Sidebar({
+		onNewSession: () => {},
+		onSelectSession: () => {},
+		onToggleCollapsed: () => {},
+		onOpenSettings: () => {},
+	});
+
+	// Two workspaces, so this is about each group rather than about the one group a single-workspace
+	// list happens to have. The reported symptom — the rows first, then "📁项目名" — showed up in
+	// every group and only got more obvious with more of them.
+	sidebar.render({
+		workspaces: [
+			{ cwd: "/one", sessions: [row("a", 300), row("b", 200)] },
+			{ cwd: "/two", sessions: [row("c", 100)] },
+		],
+		currentWorkspace: "/one",
+		collapsed: false,
+		channel: "live",
+	});
+
+	// The rows are ordered by `modified`, so a positional assertion on the flattened list would be
+	// testing the sort. What this looks at instead is the group's own child sequence: the heading is
+	// its first child, and no row is allowed above it. Before the fix the first row was inserted
+	// before the heading, so the list read "会话 a, 会话 b, 📁one".
+	const groups = all(sidebar, "workspace").map((entry) => entry.node.children.map((child) => child.className));
+	check("两个分组都在", groups.length === 2, JSON.stringify(groups));
+	for (const order of groups) {
+		check(
+			`标题在它那些行之上：${order.join(" > ")}`,
+			order[0] === "workspace-head" && !order.slice(1).includes("workspace-head"),
+			JSON.stringify(order),
+		);
+	}
+}
+
+// ----------------------------------------------------------- 6. removals
 
 process.stdout.write("\nsidebar：行会消失\n");
 

@@ -332,7 +332,7 @@ async function exerciseSessionManager(): Promise<void> {
 	check("and a reload reads the same checkpoint", compacted.buildSessionContext().messages[0]?.role === "compactionSummary");
 	check("with the same entries", compacted.getEntries().length === manager.getEntries().length, String(compacted.getEntries().length));
 
-	check("deriveTitle ignores assistant messages", deriveTitle([reply]) === "New session");
+	check("deriveTitle ignores assistant messages", deriveTitle([reply]) === "新会话");
 }
 
 /**

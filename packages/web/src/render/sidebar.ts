@@ -149,9 +149,13 @@ export class Sidebar {
 			const rows = rowsOf(group);
 			const shown = this.expanded.has(group.cwd) ? rows : collapsedRows(rows, state.activeSessionId);
 
+			// The heading is the wrapper's first child, so the sequence of movable rows starts *after*
+			// it. Seeding `previous` with the heading is what keeps the first row below its title: with
+			// `undefined` the anchor would be the wrapper's first child, which is the heading itself,
+			// and the first row would be inserted above it.
+			let previous: HTMLElement | undefined = wrapper.firstElementChild as HTMLElement | null ?? undefined;
 			// Appended in order and only moved when the place differs, so the browser does the minimum
 			// work per render and no node is ever destroyed and rebuilt while a pointer is on it.
-			let previous: HTMLElement | undefined;
 			for (const row of shown) {
 				wanted.add(row.session.id);
 				const button = this.rowFor(row, state);

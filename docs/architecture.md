@@ -211,7 +211,7 @@ type AgentSessionEvent =
 
 `buildContextEntries` 把分支变成仍在上下文里的 entry，施加那三个被记录成 entry 的决定：沿父链接从根走到 `leafId`，在那条分支上找到最新的 `compaction`，从它的 `firstKeptEntryId` 起全部取用、并丢掉之前的（换成这个检查点），然后清掉任何 `prune` 记录命名的结果、缩短任何 `argtrim` 记录命名的参数。`buildSessionContext` 把这份清单投影成发给模型的东西，并报告这条分支最后一次被设成的 thinking level 和模型。
 
-写入是同步的：`appendMessage`、`appendThinkingLevelChange`、`appendModelChange`、`appendToolConfig`、`appendCompaction`、`appendArgTrim`、`appendPrune` 把新 entry 链接到 leaf、移动 leaf，并追加一行。`SessionManager.create()` **立刻**写 header，这是对 pi 的延迟创建的一次刻意偏离：本应用按 id 寻址会话——重载的浏览器请求它当时在看的那个 id，hub 靠读目录里的 header 来查找——而一个正在跑却还没有文件的会话是找不到的。标题从第一条**有文本的**用户消息推导，活会话和列表一视同仁，因为 header 的创建时间戳会把每个恢复的会话都叫成 "New session"。
+写入是同步的：`appendMessage`、`appendThinkingLevelChange`、`appendModelChange`、`appendToolConfig`、`appendCompaction`、`appendArgTrim`、`appendPrune` 把新 entry 链接到 leaf、移动 leaf，并追加一行。`SessionManager.create()` **立刻**写 header，这是对 pi 的延迟创建的一次刻意偏离：本应用按 id 寻址会话——重载的浏览器请求它当时在看的那个 id，hub 靠读目录里的 header 来查找——而一个正在跑却还没有文件的会话是找不到的。标题从第一条**有文本的**用户消息推导，活会话和列表一视同仁，因为 header 的创建时间戳会把每个恢复的会话都叫成「新会话」。
 
 这就是 `prepareRequest` 要紧的原因：它让供应商请求和文件一致，无论会话是一秒前创建的还是重启后恢复的。唯一刻意的例外是 hook 改写过的工具结果（见*Hook*）：请求拿到被改写的 content，而文件保留工具产出的东西。
 
