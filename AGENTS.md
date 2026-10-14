@@ -29,7 +29,9 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 - **session（会话）** —— 一个只追加的 JSONL 文件，由 `SessionManager` 拥有；entry 的 kind 有
   `message`、`tool_config`、`compaction` 等，未知 kind 原样带过。
 - **settings（设置）** —— `SettingsManager` 合并全局与工作区两份 `settings.json`，变更写回**已经提供
-  该字段**的那一份。
+  该字段**的那一份。窗口里「设置」这个词**分两级**：**会话级**（工具集合与审批，记在会话自己的
+  `tool_config` entry 里，没单独选过就沿用全局）与**应用级**（外观、模型清单、默认模型、bash 超时，
+  以及全局默认的工具集与审批）。
 - **model（模型）** —— `models.json` 里用户导入的一行**就是**一个端点加一个密钥，它的 `name` 既是
   身份也是标签；`modelFor(row, level)` 把一行变成发请求用的模型（`apiKey`、`thinkingLevelMap`、
   `thinkingLevel` 都骑在这个对象上）。
