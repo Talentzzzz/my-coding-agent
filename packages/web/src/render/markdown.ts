@@ -96,16 +96,20 @@ function tableAlign(line: string): Align[] | undefined {
 }
 
 /**
- * Split Markdown into blocks.
+ * Split Markdown into blocks, from `start` onward, and say where the last block began.
  *
  * An unterminated block — a fence with no closing marker, a table with no delimiter row, a list still
  * being written — becomes the block it looks like so far. A streaming message needs that: the tail
  * is rendered as it stands, then replaced when the next chunk decides what it really is.
+ *
+ * Every iteration pushes exactly one block, and lines are consumed in order, so the line index of the
+ * final block is also the point past which nothing earlier can change. `lastStart` reports it: the
+ * incremental caller keeps everything before it and re-parses only from there.
  */
-export function parseBlocks(text: string): Block[] {
+function parseFrom(lines: string[], start: number): { blocks: Block[]; lastStart: number } {
 	const blocks: Block[] = [];
-	const lines = text.split("\n");
-	let index = 0;
+	let index = start;
+	let lastStart = start;
 
 	while (index < lines.length) {
 		const line = lines[index]!;
@@ -114,6 +118,9 @@ export function parseBlocks(text: string): Block[] {
 			index += 1;
 			continue;
 		}
+
+		// This line begins the block the iteration will push, so it is the newest safe cut.
+		lastStart = index;
 
 		const fence = fenceInfo(line);
 		if (fence) {
@@ -161,7 +168,7 @@ export function parseBlocks(text: string): Block[] {
 
 		const item = listItem(line);
 		if (item !== undefined) {
-			const { ordered, start } = item;
+			const { ordered, start: first } = item;
 			const items: string[] = [];
 			while (index < lines.length) {
 				const current = lines[index]!;
@@ -179,7 +186,7 @@ export function parseBlocks(text: string): Block[] {
 				}
 				break;
 			}
-			blocks.push({ kind: "list", ordered, start, items });
+			blocks.push({ kind: "list", ordered, start: first, items });
 			continue;
 		}
 
@@ -215,37 +222,96 @@ export function parseBlocks(text: string): Block[] {
 		blocks.push({ kind: "paragraph", lines: paragraph });
 	}
 
-	return blocks;
+	return { blocks, lastStart };
+}
+
+/** Split Markdown into blocks. */
+export function parseBlocks(text: string): Block[] {
+	return parseFrom(text.split("\n"), 0).blocks;
+}
+
+/**
+ * What {@link renderMarkdown} carries between calls.
+ *
+ * A streaming message is re-rendered many times a second, and re-parsing the whole answer each time
+ * costs O(answer²) over the answer. This keeps the parse: every block before the last one is settled
+ * — appending text cannot change it — so the next call keeps those and re-parses only the tail. The
+ * tail is cut by character offset rather than by re-splitting the whole text, so a frame's cost is
+ * proportional to the block still being written and not to the answer so far. The caller holds one
+ * of these per message and threads it back in; it means nothing on its own.
+ */
+export interface MarkdownState {
+	/** The text this state was parsed from. */
+	text: string;
+	/** Every block parsed from that text, in order. */
+	blocks: Block[];
+	/**
+	 * The character offset at which the last block began — the only block that can still change.
+	 *
+	 * An offset rather than a line index, because the next call must not touch the whole text to
+	 * find the tail: slicing here and splitting the slice costs O(tail), where a line index would
+	 * force a full `split` just to be usable.
+	 */
+	tailOffset: number;
 }
 
 /**
  * Render `text` into `container`, touching only what changed.
  *
- * `rendered` is the block count already in the DOM, which the caller keeps per message. Every block
- * except the last is immutable once written, so only the tail is ever replaced.
+ * `state` is the previous call's {@link MarkdownState}, and the returned value is the one to pass
+ * back next time. When the text only grew, the settled blocks are kept and just the tail is parsed;
+ * everything else is a full parse. Either way the tail block is re-rendered every call, because it is
+ * the block still being written.
  */
-export function renderMarkdown(container: HTMLElement, text: string, rendered = 0): number {
-	const blocks = parseBlocks(text);
+export function renderMarkdown(container: HTMLElement, text: string, state?: MarkdownState): MarkdownState {
+	const previous = state?.blocks ?? [];
+	let blocks: Block[];
+	let tailOffset: number;
 
-	// Fewer blocks than are on screen means this is a replacement, not a continuation, so the
-	// container is rebuilt rather than patched against blocks that no longer exist.
-	if (blocks.length < rendered) {
+	if (state !== undefined && text.length >= state.text.length && text.startsWith(state.text)) {
+		// The text only grew: keep everything before the old tail and re-parse from where it started.
+		// The slice shares its first `state.tailOffset` characters with the old text, so the tail's
+		// own first line is the block that was still open — and nothing earlier is touched at all.
+		const kept = Math.max(0, state.blocks.length - 1);
+		const tailLines = text.slice(state.tailOffset).split("\n");
+		const tail = parseFrom(tailLines, 0);
+		// The tail's blocks may be fewer, equal, or more than the one they replace — a paragraph the
+		// new text just split with a blank line becomes two — and the DOM patch below handles all
+		// three by re-adding from `kept`.
+		blocks = [...state.blocks.slice(0, kept), ...tail.blocks];
+		tailOffset = state.tailOffset + offsetOfLine(tailLines, tail.lastStart);
+	} else {
+		const lines = text.split("\n");
+		const parsed = parseFrom(lines, 0);
+		blocks = parsed.blocks;
+		tailOffset = offsetOfLine(lines, parsed.lastStart);
+	}
+
+	if (blocks.length < previous.length) {
+		// Fewer blocks than are on screen means this is a replacement, not a continuation, so the
+		// container is rebuilt rather than patched against blocks that no longer exist.
 		container.replaceChildren();
-		rendered = 0;
+		appendBlocks(container, blocks, 0);
+	} else {
+		// Drop the tail before re-adding it: it is the block still being written, and the one just
+		// parsed may differ from what is on screen.
+		if (previous.length > 0) container.lastElementChild?.remove();
+		appendBlocks(container, blocks, Math.max(0, previous.length - 1));
 	}
 
-	if (blocks.length > rendered) {
-		// Drop the tail before re-adding it: it is the block still being written.
-		if (rendered > 0) {
-			container.lastElementChild?.remove();
-			rendered -= 1;
-		}
-		for (let index = rendered; index < blocks.length; index += 1) {
-			container.append(renderBlock(blocks[index]!));
-		}
-	}
+	return { text, blocks, tailOffset };
+}
 
-	return blocks.length;
+/** The character offset at which line `index` begins, within the text `lines` was split from. */
+function offsetOfLine(lines: readonly string[], index: number): number {
+	if (index <= 0) return 0;
+	let offset = 0;
+	for (let at = 0; at < index; at += 1) offset += lines[at]!.length + 1;
+	return offset;
+}
+
+function appendBlocks(container: HTMLElement, blocks: readonly Block[], from: number): void {
+	for (let index = from; index < blocks.length; index += 1) container.append(renderBlock(blocks[index]!));
 }
 
 function renderBlock(block: Block): HTMLElement {

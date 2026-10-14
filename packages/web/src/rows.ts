@@ -19,6 +19,16 @@ export class SessionRows {
 	private readonly rows = new Map<string, SessionRow>();
 
 	/**
+	 * Bumped by every mutation, read by the window's render gate.
+	 *
+	 * The sidebar's rows change on their own schedule while a streaming frame changes none of them,
+	 * and a redraw decision needs to tell those apart without diffing the table. A counter is the
+	 * cheapest honest answer: a frame that changed no row reads the same number it drew last, and a
+	 * frame that changed one does not.
+	 */
+	version = 0;
+
+	/**
 	 * Replace the whole table, which is what the connection's opening frame is.
 	 *
 	 * A replacement rather than a merge, so a row for a session that has since been deleted
@@ -27,6 +37,7 @@ export class SessionRows {
 	replaceAll(rows: readonly SessionRow[]): void {
 		this.rows.clear();
 		for (const row of rows) this.rows.set(row.id, row);
+		this.version += 1;
 	}
 
 	/**
@@ -38,6 +49,7 @@ export class SessionRows {
 	 */
 	put(row: SessionRow): void {
 		this.rows.set(row.id, row);
+		this.version += 1;
 	}
 
 	/**
@@ -54,6 +66,7 @@ export class SessionRows {
 		for (const group of groups) {
 			for (const row of group.sessions) this.rows.set(row.id, row);
 		}
+		this.version += 1;
 		return true;
 	}
 

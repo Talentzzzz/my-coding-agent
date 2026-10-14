@@ -2,7 +2,7 @@ import { element, icon, iconButton } from "../dom.ts";
 import type { Item, ToolCard } from "../state.ts";
 import type { BranchOption } from "@my-agent/core/protocol";
 import { diffStat, renderFileDiff } from "./diff.ts";
-import { renderMarkdown } from "./markdown.ts";
+import { renderMarkdown, type MarkdownState } from "./markdown.ts";
 
 export interface TranscriptOptions {
 	/** Called with the entry a user message's "派生新会话" control belongs to. */
@@ -16,13 +16,44 @@ export interface TranscriptOptions {
 	onBranch(entryId: string, descend: boolean): void;
 }
 
+/** The pieces of a branch switcher, kept so a render patches them instead of searching for them. */
+interface BranchControls {
+	root: HTMLElement;
+	count: HTMLElement;
+	previous: HTMLButtonElement;
+	next: HTMLButtonElement;
+}
+
+/**
+ * One turn's reasoning row.
+ *
+ * The row is a `<details>` so the open/closed state is the browser's to keep: it is created closed,
+ * and the reader toggles it without the view having to remember anything. Only the summary line and
+ * the running state are patched on a render; the body's Markdown is parsed only while the row is
+ * open, so a collapsed long thought costs nothing to stream.
+ */
+interface ReasoningView {
+	details: HTMLDetailsElement;
+	preview: HTMLElement;
+	body: HTMLElement;
+	markdown?: MarkdownState;
+	text: string;
+	running: boolean;
+}
+
 /** One rendered conversation entry, plus the little state needed to patch it in place. */
 interface Turn {
 	section: HTMLElement;
 	body: HTMLElement;
-	/** Blocks already rendered into `body`, so a streaming message only touches its tail. */
-	blocks: number;
+	/** The parsed state of the body's Markdown, so a streaming message only re-parses its tail. */
+	markdown?: MarkdownState;
 	text: string;
+	/** The branch controls this turn was built with, patched in place rather than looked up again. */
+	branchButton?: HTMLButtonElement;
+	forkButton?: HTMLButtonElement;
+	branch?: BranchControls;
+	/** The reasoning row, once this turn's message has any. */
+	reasoning?: ReasoningView;
 	/**
 	 * The item this turn is currently drawn from.
 	 *
@@ -49,7 +80,7 @@ export class TranscriptView {
 	private readonly container: HTMLElement;
 	private readonly options: TranscriptOptions;
 	private readonly turns = new Map<string, Turn>();
-	private readonly tools = new Map<string, { section: HTMLElement; cards: ToolCard[] }>();
+	private readonly tools = new Map<string, { section: HTMLElement; source: readonly ToolCard[]; cards: Map<string, { node: HTMLElement; shape: string }> }>();
 	private welcome?: HTMLElement;
 	private sticky = true;
 
@@ -72,7 +103,7 @@ export class TranscriptView {
 		for (const item of items) {
 			seen.add(item.id);
 			if (item.kind === "message") this.renderMessage(item);
-			else this.renderTools(item.id, item.cards);
+			else this.renderTools(item);
 		}
 
 		for (const [id, turn] of [...this.turns]) {
@@ -86,9 +117,29 @@ export class TranscriptView {
 			group.section.remove();
 		}
 
+		// A new item does not always arrive at the end: a compaction summary is drawn at the head of
+		// the conversation, and a reconnect that re-baselines the session replays every item in its
+		// order. So once everything on screen has been drawn, the nodes are placed in `items` order —
+		// the same "append in order, move only what moved" pass the sidebar runs. Without it a summary
+		// that should sit at the top was appended last and read as the newest thing said.
+		let previous: HTMLElement | undefined;
+		for (const item of items) {
+			const node = item.kind === "message" ? this.turns.get(item.id)?.section : this.tools.get(item.id)?.section;
+			if (node === undefined) continue;
+			this.place(this.container, node, previous);
+			previous = node;
+		}
+
 		this.setWelcome(items.length === 0 && !streaming);
 		this.container.classList.toggle("streaming", streaming);
 		if (this.sticky) this.container.scrollTop = this.container.scrollHeight;
+	}
+
+	/** Put a node after `previous`, doing nothing when it is already there. */
+	private place(parent: HTMLElement, node: HTMLElement, previous: HTMLElement | undefined): void {
+		const wanted = previous === undefined ? parent.firstChild : previous.nextSibling;
+		if (node === wanted) return;
+		parent.insertBefore(node, wanted);
 	}
 
 	scrollToBottom(): void {
@@ -102,18 +153,25 @@ export class TranscriptView {
 	}
 
 	private renderMessage(item: Extract<Item, { kind: "message" }>): void {
-		let turn = this.turns.get(item.id);
-		if (!turn) {
-			turn = this.createTurn(item);
+		const known = this.turns.get(item.id);
+		const turn = known ?? this.createTurn(item);
+		if (known === undefined) {
 			this.turns.set(item.id, turn);
 			this.container.append(turn.section);
 			this.sticky = true;
+		} else if (known.item === item) {
+			// Items are immutable — the reducer rebuilds only the ones a frame changed — so a turn
+			// already drawn from this very item has nothing to do. This is the second half of "cost
+			// proportional to the delta": the walk reaches every item, but each untouched one costs
+			// one `===` and no DOM work at all.
+			return;
 		}
 		turn.item = item;
 		this.applyControls(turn);
 
 		// A notice is plain text and never streams, so it is written once and left alone.
 		if (item.notice) {
+			this.clearReasoning(turn);
 			if (turn.text !== item.text) {
 				turn.body.replaceChildren(element("p", undefined, item.text));
 				turn.text = item.text;
@@ -121,9 +179,76 @@ export class TranscriptView {
 			return;
 		}
 
+		// Drawn before the body, and before the early return below: a message that is only thinking so
+		// far has no text to change, and its row still has to appear and to keep up as it streams.
+		this.renderReasoning(turn, item);
+
 		if (item.text === turn.text) return;
-		turn.blocks = renderMarkdown(turn.body, item.text, turn.blocks);
+		turn.markdown = renderMarkdown(turn.body, item.text, turn.markdown);
 		turn.text = item.text;
+	}
+
+	/**
+	 * Draw or patch the reasoning row that precedes a message's text.
+	 *
+	 * A message with no reasoning has no row; a message that gains or loses one between renders gets
+	 * its row added or dropped here. The summary line carries the first line of the reasoning, which
+	 * is enough to say what it is about while collapsed, and the running state is a class the styles
+	 * use to keep the line moving while reasoning is still arriving.
+	 */
+	private renderReasoning(turn: Turn, item: Extract<Item, { kind: "message" }>): void {
+		const thinking = item.thinking;
+		if (thinking === undefined) {
+			this.clearReasoning(turn);
+			return;
+		}
+
+		let view = turn.reasoning;
+		if (view === undefined) {
+			view = this.createReasoning(turn);
+			turn.reasoning = view;
+		}
+
+		const preview = reasoningPreviewOf(thinking.text, thinking.running);
+		if (view.preview.textContent !== preview) view.preview.textContent = preview;
+		if (view.running !== thinking.running) {
+			view.running = thinking.running;
+			view.details.classList.toggle("running", thinking.running);
+		}
+		// A collapsed row shows only the summary, so its Markdown is left unparsed until it is opened.
+		if (view.details.open) this.paintReasoning(turn);
+	}
+
+	/** Build a reasoning row, closed, and place it between the role line and the message body. */
+	private createReasoning(turn: Turn): ReasoningView {
+		const details = element("details", "reasoning");
+		const summary = element("summary", "reasoning-summary");
+		const preview = element("span", "reasoning-preview");
+		const body = element("div", "reasoning-body");
+		summary.append(icon("think"), element("span", "reasoning-label", "思考"), element("span", "reasoning-sep"), preview);
+		details.append(summary, body);
+		// The body is parsed on the way open, which is the first moment it is worth rendering.
+		details.addEventListener("toggle", () => {
+			if (details.open) this.paintReasoning(turn);
+		});
+		turn.section.insertBefore(details, turn.body);
+		return { details, preview, body, text: "", running: false };
+	}
+
+	/** Render the reasoning body's Markdown from the turn's current item. */
+	private paintReasoning(turn: Turn): void {
+		const view = turn.reasoning;
+		const thinking = turn.item.thinking;
+		if (view === undefined || thinking === undefined) return;
+		if (view.text === thinking.text) return;
+		view.markdown = renderMarkdown(view.body, thinking.text, view.markdown);
+		view.text = thinking.text;
+	}
+
+	private clearReasoning(turn: Turn): void {
+		if (turn.reasoning === undefined) return;
+		turn.reasoning.details.remove();
+		turn.reasoning = undefined;
 	}
 
 	/**
@@ -137,7 +262,7 @@ export class TranscriptView {
 	private createTurn(item: Extract<Item, { kind: "message" }>): Turn {
 		const section = element("section", `turn ${item.role}${item.notice ? " notice" : ""}`);
 		const body = element("div", "turn-body");
-		const turn: Turn = { section, body, blocks: 0, text: "", item };
+		const turn: Turn = { section, body, text: "", item };
 
 		if (item.role === "user") {
 			section.dataset.role = "user";
@@ -145,7 +270,10 @@ export class TranscriptView {
 			// its own. They sit together because they answer one question — "what if I went another way
 			// here" — and only the tooltips have to carry which one keeps the rest of the tree.
 			const actions = element("div", "turn-actions");
-			actions.append(this.branchButton(turn), this.forkButton(turn), this.branchNav(turn));
+			turn.branchButton = this.branchButton(turn);
+			turn.forkButton = this.forkButton(turn);
+			turn.branch = this.branchNav(turn);
+			actions.append(turn.branchButton, turn.forkButton, turn.branch.root);
 			section.append(actions, body);
 			return turn;
 		}
@@ -154,7 +282,8 @@ export class TranscriptView {
 		role.append(element("span", "avatar", initialFor(item.role)), element("span", "role-name", labelFor(item.role)));
 		// An agent message can be a branch point too — asking twice from the same answer forks there —
 		// so it carries the switcher, without the two controls that only make sense on your own words.
-		role.append(this.branchNav(turn));
+		turn.branch = this.branchNav(turn);
+		role.append(turn.branch.root);
 		section.append(role, body);
 		return turn;
 	}
@@ -164,37 +293,31 @@ export class TranscriptView {
 	 *
 	 * Everything here can arrive after the section was built: a user message is written to the store
 	 * before the loop echoes it, so its entry id lands a frame later, and a branch point only exists
-	 * once the conversation has been rewound. So the controls are created inert and told what they act
-	 * on by each render — the turn reads through {@link Turn.item}, which every render replaces.
+	 * once the conversation has been rewound. So each control is patched through the reference the
+	 * turn was built with — a previous version searched for these three nodes with `querySelector` on
+	 * every message, every frame, which is what made the transcript cost grow with the conversation.
 	 */
 	private applyControls(turn: Turn): void {
-		const { item, section } = turn;
-		const entryId = item.forkEntryId ?? undefined;
+		const entryId = turn.item.forkEntryId ?? undefined;
 
-		const branchButton = section.querySelector<HTMLButtonElement>(".branch-button");
-		if (branchButton) branchButton.disabled = entryId === undefined;
+		if (turn.branchButton) turn.branchButton.disabled = entryId === undefined;
+		if (turn.forkButton) turn.forkButton.disabled = entryId === undefined;
 
-		const forkButton = section.querySelector<HTMLButtonElement>(".fork-button");
-		if (forkButton) forkButton.disabled = entryId === undefined;
+		const nav = turn.branch;
+		if (nav === undefined) return;
 
-		const nav = section.querySelector<HTMLElement>(".branch-nav");
-		if (!nav) return;
-
-		const options = item.branch?.options ?? [];
+		const options = turn.item.branch?.options ?? [];
 		// One alternative is not a choice, so a message that never forked shows no switcher at all.
-		nav.hidden = options.length < 2;
+		nav.root.hidden = options.length < 2;
 		if (options.length < 2) return;
 
 		const active = Math.max(1, options.findIndex((option) => option.active) + 1);
-		const count = nav.querySelector<HTMLElement>(".branch-count");
-		if (count) count.textContent = `${active}/${options.length}`;
-		const previous = nav.querySelector<HTMLButtonElement>('[data-step="-1"]');
-		const next = nav.querySelector<HTMLButtonElement>('[data-step="1"]');
-		if (previous) previous.disabled = active <= 1;
-		if (next) next.disabled = active >= options.length;
+		nav.count.textContent = `${active}/${options.length}`;
+		nav.previous.disabled = active <= 1;
+		nav.next.disabled = active >= options.length;
 		// The alternatives that are not on screen are the ones worth naming, and the active one is
 		// marked so the list also says which of them is being read.
-		nav.title = options.map((option, index) => `${index + 1}.${option.active ? " ●" : ""} ${labelOf(option)}`).join("\n");
+		nav.root.title = options.map((option, index) => `${index + 1}.${option.active ? " ●" : ""} ${labelOf(option)}`).join("\n");
 	}
 
 	/** Rewind to this message, so the next prompt starts another alternative from it. */
@@ -237,9 +360,9 @@ export class TranscriptView {
 	 * continuations, and the one that is not shown is the one a reader wants named — which the tooltip
 	 * does, from the labels the server derived from where each alternative actually goes.
 	 */
-	private branchNav(turn: Turn): HTMLElement {
-		const nav = element("span", "branch-nav");
-		nav.hidden = true;
+	private branchNav(turn: Turn): BranchControls {
+		const root = element("span", "branch-nav");
+		root.hidden = true;
 
 		const step = (direction: -1 | 1, label: string, glyph: string): HTMLButtonElement => {
 			const button = element("button", "branch-step", glyph, {
@@ -256,38 +379,65 @@ export class TranscriptView {
 			return button;
 		};
 
-		nav.append(step(-1, "上一条分支", "‹"), element("span", "branch-count", "1/1"), step(1, "下一条分支", "›"));
-		return nav;
+		const previous = step(-1, "上一条分支", "‹");
+		const count = element("span", "branch-count", "1/1");
+		const next = step(1, "下一条分支", "›");
+		root.append(previous, count, next);
+		return { root, count, previous, next };
 	}
 
 	/**
-	 * One tool group, rebuilt only when its card list changed.
+	 * One tool group, with only the cards that changed rebuilt.
 	 *
-	 * Cards of a group update as the tool runs — its output grows, then it settles — so the reshape
-	 * key is the number of cards plus each card's run state, output length, and whether it brought a
-	 * diff back. Rebuilding on every `tool_execution_update` would throw away the `<details>` the
-	 * reader just opened.
+	 * Cards of a group update as the tool runs — its output grows, then it settles — and a group can
+	 * hold many of them. A card's reshape key is its run state, output length, and whether it brought
+	 * a diff back; as long as the key holds, the card's node is left alone, which is what keeps a
+	 * single growing output from rebuilding the whole group (and the `<details>` the reader opened).
 	 */
-	private renderTools(id: string, cards: readonly ToolCard[]): void {
-		const shape = cards
-			.map(
-				(card) =>
-					`${card.toolCallId}:${card.running ? "r" : "d"}:${card.isError ? "e" : "o"}:${card.output.length}:${card.diff ? "D" : "-"}`,
-			)
-			.join("|");
+	private renderTools(item: Extract<Item, { kind: "tools" }>): void {
+		const { id, cards } = item;
 		let group = this.tools.get(id);
-		if (group && group.section.dataset.shape === shape) return;
-
-		if (!group) {
+		if (group !== undefined) {
+			// Same shortcut as the message path: the reducer rebuilds a group's item only when one of
+			// its cards changed, so the same array back means nothing here moved either. A long run
+			// with many finished groups then costs each of them one `===` per frame.
+			if (group.source === cards) return;
+		} else {
 			const section = element("section", "tool-group");
-			group = { section, cards: [] };
+			group = { section, cards: new Map(), source: cards };
 			this.tools.set(id, group);
 			this.container.append(section);
 			this.sticky = true;
 		}
+		group.source = cards;
 
-		group.section.dataset.shape = shape;
-		group.section.replaceChildren(...cards.map((card) => renderTool(card)));
+		for (const card of cards) {
+			const shape = shapeOf(card);
+			const drawn = group.cards.get(card.toolCallId);
+			if (drawn === undefined) {
+				group.cards.set(card.toolCallId, { node: renderTool(card), shape });
+			} else if (drawn.shape !== shape) {
+				// The card's own content changed; its node is remade, and only its node.
+				drawn.node.remove();
+				drawn.node = renderTool(card);
+				drawn.shape = shape;
+			}
+		}
+
+		const present = new Set(cards.map((card) => card.toolCallId));
+		for (const [toolCallId, drawn] of [...group.cards]) {
+			if (present.has(toolCallId)) continue;
+			drawn.node.remove();
+			group.cards.delete(toolCallId);
+		}
+
+		let previous: HTMLElement | undefined;
+		for (const card of cards) {
+			const drawn = group.cards.get(card.toolCallId);
+			if (drawn === undefined) continue;
+			this.place(group.section, drawn.node, previous);
+			previous = drawn.node;
+		}
 	}
 
 	/** The first-run state: an empty conversation says what this is and what to do. */
@@ -314,6 +464,39 @@ export class TranscriptView {
 		this.welcome = welcome;
 		this.container.append(welcome);
 	}
+}
+
+/**
+ * A tool card's reshape key: run state, error state, output length, and whether it brought a diff.
+ *
+ * Distinct keys mean the card's own drawing would differ, so its node is remade; the same key means
+ * the node on screen still says the right thing and is left alone. The id is the map key, not here.
+ */
+function shapeOf(card: ToolCard): string {
+	return `${card.running ? "r" : "d"}:${card.isError ? "e" : "o"}:${card.output.length}:${card.diff ? "D" : "-"}`;
+}
+
+/** The first non-empty line of a reasoning block, for the collapsed row's summary. */
+function firstLineOf(text: string): string {
+	for (const line of text.split("\n")) {
+		const trimmed = line.trim();
+		if (trimmed.length > 0) return trimmed.replace(/^#{1,6}\s+/, "");
+	}
+	return "";
+}
+
+/**
+ * The collapsed row's summary line.
+ *
+ * Finished, a thought reads its first line. Still streaming, the line comes from the latest
+ * paragraph that has already ended — the tail paragraph is still being written, and a summary that
+ * rewrites itself every token reads as noise rather than as progress.
+ */
+function reasoningPreviewOf(text: string, running: boolean): string {
+	if (!running) return firstLineOf(text);
+	const paragraphs = text.split(/\r?\n[\t ]*\r?\n/);
+	const done = paragraphs.length > 1 ? paragraphs[paragraphs.length - 2]! : text;
+	return firstLineOf(done);
 }
 
 /** What a message's role reads as in the transcript. */

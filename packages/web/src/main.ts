@@ -66,6 +66,23 @@ function main(): void {
 	/** The sidebar's rows, written by the channel when it is up and by REST when it is not. */
 	const rows = new SessionRows();
 
+	/**
+	 * What each piece of chrome was last drawn from.
+	 *
+	 * The transcript re-renders on every token, and everything around it used to redraw too — the
+	 * sidebar walked its rows, the status line rewrote its figures, the banner area rebuilt its
+	 * cards — all per frame, all for inputs the frame had not touched. Each gate below compares
+	 * against the last draw instead: a cheap reference or string comparison that skips a walk whose
+	 * inputs did not move. A frame that changes one of them still draws it, and the first draw
+	 * happens because every gate starts unset.
+	 */
+	let sidebarDrawn: string | undefined;
+	let usageDrawn: ViewState["usage"] | undefined;
+	let headingDrawn: string | undefined;
+	let headingTipDrawn: string | undefined;
+	let subtitleDrawn: string | undefined;
+	let noticesDrawn: { models: ViewState["models"]; approvals: ViewState["approvals"] } | undefined;
+
 	// ---------------------------------------------------------------- the column
 
 	const conversation = element("section", "conversation");
@@ -260,6 +277,14 @@ function main(): void {
 
 	/** Repaint just the sidebar. Rows change on their own schedule, not the state's. */
 	function renderSidebar(): void {
+		// The gate here is the whole per-frame story for this column: a streaming frame changes none
+		// of the inputs the sidebar reads — the row table's version, the followed session, and the
+		// window's own three facts — so it is skipped here rather than walked and patched inside.
+		// Rendering the sidebar on every token was the profile's H7, a flat per-frame tax that grew
+		// with the workspace count; the rows bump `rows.version` when they actually change.
+		const drawn = `${rows.version}|${followed ?? ""}|${currentWorkspace}|${collapsed ? 1 : 0}|${channel}`;
+		if (drawn === sidebarDrawn) return;
+		sidebarDrawn = drawn;
 		sidebar.render({
 			workspaces: rows.groups(),
 			...(followed === undefined ? {} : { activeSessionId: followed }),
@@ -267,6 +292,13 @@ function main(): void {
 			collapsed,
 			channel,
 		});
+	}
+
+	/** Repaint the status line, and only when a new usage arrived to paint it with. */
+	function renderStatusBar(): void {
+		if (state.usage === usageDrawn) return;
+		usageDrawn = state.usage;
+		statusBar.render({ usage: state.usage });
 	}
 
 	/**
@@ -293,15 +325,13 @@ function main(): void {
 			composer.setStreaming(next.streaming);
 			composer.setQueued(next.queued);
 		}
-		if (next.usage !== previous.usage) {
-			statusBar.render({ usage: next.usage });
-		}
+		if (next.usage !== previous.usage) renderStatusBar();
 		if (next.error !== previous.error) {
 			errorBar.hidden = next.error === undefined;
 			errorBar.textContent = next.error ?? "";
 		}
-		if (next.approvals !== previous.approvals) renderApprovals();
-
+		// Approvals are not drawn here: the gated `renderNotices()` at the end of `render()` is the
+		// one writer of the banner area, and it fires on exactly the frames this line used to fire on.
 		render();
 	}
 
@@ -347,17 +377,32 @@ function main(): void {
 		syncChosen();
 		const snapshot = state.snapshot;
 
+		// Each piece below draws itself only when one of its own inputs moved. A streaming frame
+		// changes none of them, so its cost ends at the transcript — the point of the gates above.
 		renderSidebar();
 
-		heading.textContent = snapshot?.title ?? "新会话";
-		heading.title = snapshot?.title ?? "";
-		subtitle.textContent = snapshot?.cwd ?? (followed === undefined ? "连接中…" : followed);
+		const headingText = snapshot?.title ?? "新会话";
+		if (headingText !== headingDrawn) {
+			headingDrawn = headingText;
+			heading.textContent = headingText;
+		}
+		const headingTip = snapshot?.title ?? "";
+		if (headingTip !== headingTipDrawn) {
+			headingTipDrawn = headingTip;
+			heading.title = headingTip;
+		}
+		const subtitleText = snapshot?.cwd ?? (followed === undefined ? "连接中…" : followed);
+		if (subtitleText !== subtitleDrawn) {
+			subtitleDrawn = subtitleText;
+			subtitle.textContent = subtitleText;
+		}
 
 		// What a send would carry is what the seat shows, so the seat is drawn from the same values
-		// `prompt` reads rather than from the snapshot alone.
+		// `prompt` reads rather than from the snapshot alone. The two selects inside gate themselves
+		// on a signature, so this stays cheap per frame.
 		composer.setSelection(selectionForSend());
 
-		statusBar.render({ usage: state.usage });
+		renderStatusBar();
 
 		if (settings.open) {
 			settings.render({
@@ -375,8 +420,16 @@ function main(): void {
 	 *
 	 * With no model imported there is nothing this app can do, and the failure would otherwise arrive
 	 * as an error message after the user had already typed a question and waited for it.
+	 *
+	 * The gate is the identity of the two arrays it draws from. Rebuilding the banner area on a frame
+	 * that changed neither was the last unconditional per-frame write left in `render()` — cheap per
+	 * frame, but a rebuild of every approval card is not nothing, and it ran whether or not any of
+	 * this was on screen.
 	 */
 	function renderNotices(): void {
+		if (state.models === noticesDrawn?.models && state.approvals === noticesDrawn?.approvals) return;
+		noticesDrawn = { models: state.models, approvals: state.approvals };
+
 		if (state.models.length > 0) {
 			banners.replaceChildren(...state.approvals.map((approval) => approvalCard(approval)));
 			return;
@@ -402,11 +455,6 @@ function main(): void {
 			card,
 			...state.approvals.map((approval) => approvalCard(approval)),
 		);
-	}
-
-	function renderApprovals(): void {
-		if (state.models.length === 0) return;
-		banners.replaceChildren(...state.approvals.map((approval) => approvalCard(approval)));
 	}
 
 	function approvalCard(approval: ViewState["approvals"][number]): HTMLElement {

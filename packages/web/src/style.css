@@ -972,6 +972,114 @@ input:focus-visible {
 	}
 }
 
+/* --------------------------------------------------------------- reasoning */
+
+/*
+ * The row that holds what the model thought before it answered. It is collapsed by default — the
+ * answer is the point and the reasoning is behind it — so the closed row is a single quiet line: an
+ * icon, the word 「思考」, and the first line of the reasoning as a summary that ellipsizes.
+ */
+.reasoning {
+	margin: 0 0 10px;
+	font-size: calc(var(--app-font-size) - 1px);
+	line-height: 20px;
+}
+
+.reasoning > summary {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	cursor: pointer;
+	list-style: none;
+	color: var(--dsw-label-tertiary);
+}
+
+.reasoning > summary::-webkit-details-marker {
+	display: none;
+}
+
+.reasoning > summary:hover {
+	color: var(--dsw-label-secondary);
+}
+
+.reasoning > summary svg {
+	flex: none;
+	width: 14px;
+	height: 14px;
+	color: var(--dsw-label-caption);
+}
+
+.reasoning-label {
+	flex: none;
+	font-weight: 500;
+}
+
+/* The 2px dot that separates the label from the summary, per the reference row. */
+.reasoning-sep {
+	flex: none;
+	width: 2px;
+	height: 2px;
+	border-radius: 50%;
+	background: var(--dsw-label-caption);
+}
+
+.reasoning-preview {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	color: var(--dsw-label-caption);
+}
+
+/* While reasoning is still arriving the summary pulses, so a glance says work is happening. */
+.reasoning.running .reasoning-preview {
+	animation: pulse 1.4s var(--dsw-ease) infinite;
+}
+
+.reasoning-body {
+	margin-top: 6px;
+	padding-left: 20px;
+	border-left: 2px solid var(--dsw-border-l2);
+	color: var(--dsw-label-secondary);
+	font-size: var(--app-font-size);
+	line-height: 1.6;
+	word-break: break-word;
+}
+
+.reasoning-body > :first-child {
+	margin-top: 0;
+}
+
+.reasoning-body > :last-child {
+	margin-bottom: 0;
+}
+
+.reasoning-body p {
+	margin: 0 0 0.6em;
+	white-space: pre-wrap;
+}
+
+.reasoning-body code {
+	padding: 1px 5px;
+	border-radius: var(--dsw-radius-xs);
+	background: var(--dsw-code-inline);
+	font-family: var(--dsw-font-mono);
+	font-size: 0.92em;
+}
+
+.reasoning-body pre {
+	margin: 0 0 0.6em;
+	padding: 10px 12px;
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-code-block);
+	overflow-x: auto;
+}
+
+.reasoning-body pre code {
+	padding: 0;
+	background: transparent;
+}
+
 /* --------------------------------------------------------------- tool cards */
 
 .tool-group {

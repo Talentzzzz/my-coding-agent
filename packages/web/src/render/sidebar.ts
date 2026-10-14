@@ -210,26 +210,36 @@ export class Sidebar {
 		const key = `head:${cwd}`;
 		const existing = this.drawn.get(key);
 		if (existing !== undefined) {
-			const mark = existing.button.querySelector<HTMLElement>(".workspace-current");
+			// The mark is reached through the reference the heading was built with. Searching for it
+			// with `querySelector` here was a per-workspace, per-frame DOM walk — the one hotspot the
+			// profile caught growing with the workspace count — and a heading's mark never moves on
+			// its own, so there is nothing to search for.
 			const shouldMark = cwd === currentWorkspace;
-			if (shouldMark && mark === null) existing.button.append(element("span", "workspace-current", "当前"));
-			if (!shouldMark && mark !== null) mark.remove();
+			if (shouldMark && existing.mark === undefined && existing.head !== undefined) {
+				existing.mark = element("span", "workspace-current", "当前");
+				existing.head.append(existing.mark);
+			} else if (!shouldMark && existing.mark !== undefined) {
+				existing.mark.remove();
+				existing.mark = undefined;
+			}
 			return existing.button;
 		}
 
 		const head = element("div", "workspace-head", undefined, { title: cwd });
 		const name = element("span", "workspace-name", workspaceName(cwd));
 		head.append(icon("folder"), name);
+		let mark: HTMLElement | undefined;
 		if (cwd === currentWorkspace) {
 			// Which group the new-session button will write into, said once rather than left to be
 			// discovered by creating a session and finding it in the wrong place.
-			head.append(element("span", "workspace-current", "当前"));
+			mark = element("span", "workspace-current", "当前");
+			head.append(mark);
 		}
 
 		const wrapper = element("div", "workspace");
 		wrapper.append(head);
 		this.list.append(wrapper);
-		this.drawn.set(key, { button: wrapper });
+		this.drawn.set(key, { button: wrapper, head, mark });
 		return wrapper;
 	}
 
@@ -279,10 +289,23 @@ export class Sidebar {
 		// rebuilds every row object on every frame and object identity would report a change every time.
 		if (parts.parentTitle !== parent?.title) drawMark(parts, parent);
 
-		button.title =
+		// The tooltip is composed only from what can change, and the creation date — the one piece
+		// that costs a real `toLocaleString` — is formatted once per stamp and kept. Recomposing the
+		// string every frame was cheap; calling `Intl` every frame for a date that never moves was
+		// not, and it ran per row, per frame, for every row on screen.
+		let created = parts.created;
+		if (created === undefined || created.at !== session.createdAt) {
+			created = { at: session.createdAt, text: formatDate(session.createdAt) };
+			parts.created = created;
+		}
+		const tooltip =
 			parent === undefined
-				? `${session.title}\n${session.cwd}\n创建于 ${formatDate(session.createdAt)}`
-				: `${session.title}\n${session.cwd}\n派生自 ${parent.title}\n创建于 ${formatDate(session.createdAt)}`;
+				? `${session.title}\n${session.cwd}\n创建于 ${created.text}`
+				: `${session.title}\n${session.cwd}\n派生自 ${parent.title}\n创建于 ${created.text}`;
+		if (parts.tooltip !== tooltip) {
+			parts.tooltip = tooltip;
+			button.title = tooltip;
+		}
 
 		if (parts.title.textContent !== session.title) parts.title.textContent = session.title;
 		this.paintTime(parts, session.modified);
@@ -406,6 +429,10 @@ interface DrawnNode {
 	button: HTMLElement;
 	/** The row's own parts, and the values last written to them. Absent for the two non-row entries. */
 	parts?: RowParts;
+	/** The heading element inside `button`, for group entries; the mark hangs off it. */
+	head?: HTMLElement;
+	/** The "当前" mark currently on the heading, so a change of current workspace is a move, not a search. */
+	mark?: HTMLElement;
 }
 
 /**
@@ -428,6 +455,10 @@ interface RowParts {
 	/** The parent title the mark shows, so a rename repaints and anything else does not. */
 	parentTitle?: string;
 	depth?: number;
+	/** The tooltip string on screen, so an unchanged one is neither recomposed nor rewritten. */
+	tooltip?: string;
+	/** The creation stamp the tooltip's date was formatted from, so `toLocaleString` runs once per row. */
+	created?: { at: number; text: string };
 }
 
 /**
@@ -604,14 +635,26 @@ export function workspaceName(cwd: string): string {
  * Read from `modified` rather than `createdAt`. Sorting by when a conversation was last active and
  * labelling it with when it was created is how a row ends up second in the list and reading "3天前" —
  * two facts about the same session disagreeing in plain sight.
+ *
+ * The oldest branch is cached per stamp. Past a week the label is a month and a day — a fact about
+ * the timestamp alone, with no "now" in it — but producing it costs `Intl`, and this runs per row,
+ * per frame; a long list made that the sidebar's remaining per-frame cost after the tooltip's own
+ * `toLocaleString` was taken off it. The cache holds one entry per old row and nothing else.
  */
+const dateLabels = new Map<number, string>();
+
 function relativeTime(timestamp: number): string {
 	const seconds = Math.max(0, (Date.now() - timestamp) / 1000);
 	if (seconds < 60) return "刚刚";
 	if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟`;
 	if (seconds < 86_400) return `${Math.floor(seconds / 3600)}小时`;
 	if (seconds < 604_800) return `${Math.floor(seconds / 86_400)}天`;
-	return new Date(timestamp).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+	let label = dateLabels.get(timestamp);
+	if (label === undefined) {
+		label = new Date(timestamp).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+		dateLabels.set(timestamp, label);
+	}
+	return label;
 }
 
 /** The row's creation, for the tooltip. Only ever a date: the row itself carries the precise age. */

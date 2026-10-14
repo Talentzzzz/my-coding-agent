@@ -30,12 +30,39 @@ export interface ToolCard {
 	diff?: FileDiff;
 }
 
+/**
+ * The model's reasoning for one message, kept apart from the answer it led to.
+ *
+ * A reasoning block and the text that follows it arrive on the same message, but they are read
+ * differently — the answer is the point, the reasoning is behind it — so the transcript draws them
+ * as separate rows and only the reasoning one collapses. `text` is the provider's Markdown as it
+ * came (`packages/ai/src/api/anthropic-messages.ts` concatenates the deltas verbatim), and several
+ * reasoning blocks in one message are joined with a blank line, which is where a paragraph break is.
+ */
+export interface MessageThinking {
+	/** The reasoning, as Markdown, with the provider's own line breaks. */
+	text: string;
+	/** The message's reasoning included a redacted block; its text already says so in words. */
+	redacted?: boolean;
+	/**
+	 * Whether reasoning is still arriving.
+	 *
+	 * The text itself needs no delta bookkeeping — every `message_update` carries the running total —
+	 * but "still thinking" is not a fact about the text: it is a fact about which event is in flight.
+	 * `thinking_start`/`thinking_delta` set it, `thinking_end` clears it, and a `text_*` event clears
+	 * it too, because by then reasoning has stopped and only the answer is still being written.
+	 */
+	running: boolean;
+}
+
 export type Item =
 	| {
 			kind: "message";
 			id: string;
 			role: string;
 			text: string;
+			/** The reasoning that preceded this message's text, when the provider returned any. */
+			thinking?: MessageThinking;
 			notice: boolean;
 			streaming: boolean;
 			/** The store entry behind this message, when the message is forkable from. */
@@ -240,7 +267,12 @@ function applySessionEvent(state: ViewState, event: AgentSessionEvent): ViewStat
 		case "message_start":
 		case "message_update":
 		case "message_end": {
-			const items = upsertMessage(state.items, event.message, event.type === "message_end");
+			// A `message_update` is the only member that names the kind of delta in flight, and that
+			// kind is what tells reasoning apart from the answer while both ride the same message.
+			// The optional chain is deliberate: the field is required on the wire type, but a frame
+			// without it is a server bug, and one malformed frame must not take the window down.
+			const phase = event.type === "message_update" ? event.assistantMessageEvent?.type : undefined;
+			const items = upsertMessage(state.items, event.message, event.type === "message_end", undefined, phase);
 			// A user entry is named before the loop echoes it, so its id waits here for the item.
 			const drained = drainEntries(items, state.pendingEntries);
 			return { ...state, items: drained.items, pendingEntries: drained.pending };
@@ -415,6 +447,7 @@ function upsertMessage(
 	message: unknown,
 	final: boolean,
 	forkEntryId: string | null | undefined = undefined,
+	phase?: string,
 ): Item[] {
 	const record = message as {
 		role?: string;
@@ -426,21 +459,32 @@ function upsertMessage(
 	const role = record.role ?? "unknown";
 	if (role === "toolResult") return items;
 
+	// Reasoning is split out here rather than in `contentToText`, which tool output shares: the tool
+	// path must keep folding a thinking block into its text, while a message keeps the two apart.
+	const thinking = thinkingOf(record.content);
+
 	// A compaction checkpoint is a role of its own on the wire: its text is the summary, and it is the
 	// one thing in the transcript that stands for history the model no longer has verbatim.
-	let text = role === "compactionSummary" ? (record.summary ?? "") : contentToText(record.content);
+	let text = role === "compactionSummary" ? (record.summary ?? "") : contentToText(withoutThinking(record.content));
 	if (text.length === 0 && role === "assistant" && final && typeof record.errorMessage === "string") {
 		text = `错误：${record.errorMessage}`;
 	}
-	if (text.length === 0) return items;
+	// A message with text is kept; so is one that is only reasoning so far, because that is the whole
+	// point of a collapsed row — it appears while the answer is still empty. Anything else is a frame
+	// that carries nothing to draw.
+	if (text.length === 0 && (thinking === undefined || thinking.text.length === 0)) return items;
 
 	const id = `${role}:${String(record.timestamp ?? "unknown")}`;
 	const notice =
 		role === "compactionSummary" || text.startsWith("[上下文已压缩：") || text.startsWith("错误：");
-	const index = items.findIndex((item) => item.kind === "message" && item.id === id);
+	const index = indexOfMessage(items, id);
 	const existing = index === -1 ? undefined : (items[index] as Extract<Item, { kind: "message" }>);
 	const carried = forkEntryId ?? existing?.forkEntryId;
 	const item: Extract<Item, { kind: "message" }> = { kind: "message", id, role, text, notice, streaming: !final };
+	if (thinking !== undefined) {
+		const running = !final && (phase === "thinking_start" || phase === "thinking_delta");
+		item.thinking = thinking.redacted ? { text: thinking.text, redacted: true, running } : { text: thinking.text, running };
+	}
 	// A streaming update carries no entry id, so an id already attached to this item is kept — and with
 	// it the branch point that was read off that id, which rebuilding this same message would drop.
 	if (carried !== undefined && carried !== null) item.forkEntryId = carried;
@@ -453,6 +497,52 @@ function upsertMessage(
 	const next = [...items];
 	next[index] = item;
 	return next;
+}
+
+/**
+ * The index of a message item by id, or -1.
+ *
+ * The streaming message — the one every `message_update` targets — is the last item, so the tail is
+ * checked first and the linear scan is only the fallback. That keeps the common frame from walking
+ * the whole transcript before finding what it came to replace. (The array copy below is the part
+ * that stays O(items): the state is immutable, so a changed item means a new array, and an index
+ * would be a change to the shape of {@link ViewState} for a cost that is already small.)
+ */
+function indexOfMessage(items: Item[], id: string): number {
+	const tail = items.at(-1);
+	if (tail !== undefined && tail.kind === "message" && tail.id === id) return items.length - 1;
+	return items.findIndex((item) => item.kind === "message" && item.id === id);
+}
+
+/**
+ * The reasoning blocks inside a message's content, pulled out of the array they came in.
+ *
+ * Only an array can hold blocks; a plain string or the nested `{ content }` fallback is text and has
+ * no reasoning to find. The blocks keep their order and are joined with a blank line, so a paragraph
+ * split survives into the Markdown the reasoning row renders. A redacted block is the same shape with
+ * `redacted: true` and its text already reading "[Reasoning redacted]", so it needs no second field.
+ */
+function thinkingOf(content: unknown): { text: string; redacted: boolean } | undefined {
+	if (!Array.isArray(content)) return undefined;
+	const parts: string[] = [];
+	let redacted = false;
+	for (const block of content) {
+		if (typeof block !== "object" || block === null) continue;
+		const typed = block as { type?: unknown; thinking?: unknown; redacted?: unknown };
+		if (typed.type !== "thinking") continue;
+		parts.push(String(typed.thinking ?? ""));
+		if (typed.redacted === true) redacted = true;
+	}
+	if (parts.length === 0) return undefined;
+	return { text: parts.join("\n\n"), redacted };
+}
+
+/** The same content with its reasoning blocks dropped, for the text path. */
+function withoutThinking(content: unknown): unknown {
+	if (!Array.isArray(content)) return content;
+	return content.filter(
+		(block) => !(typeof block === "object" && block !== null && (block as { type?: unknown }).type === "thinking"),
+	);
 }
 
 /**
