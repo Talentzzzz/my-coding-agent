@@ -1,0 +1,5 @@
+{
+	"name": "switch-probe",
+	"private": true,
+	"main": "controller.cjs"
+}

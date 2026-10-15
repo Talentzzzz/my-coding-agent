@@ -1,0 +1,80 @@
+﻿    2026-10-15T15:55:44.711Z +0ms probe: switches=[no-sandbox,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=false via=argv
+    2026-10-15T15:55:44.712Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --no-sandbox --use-angle=d3d11 --ignore-gpu-blocklist]
+    2026-10-15T15:55:44.713Z +1ms probe: browser sees no-sandbox=true in-process-gpu=false
+    2026-10-15T15:55:45.167Z +455ms probe: app ready
+    2026-10-15T15:55:45.290Z +579ms probe: did-finish-load at 579ms
+    2026-10-15T15:55:45.292Z +581ms probe: ready-to-show at 581ms visible=false
+    2026-10-15T15:55:55.170Z +10458ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+    2026-10-15T15:55:55.171Z +10459ms probe: appMetrics [{"type":"Browser","pid":20076,"cpu":0},{"type":"Utility","pid":22276,"cpu":0},{"type":"Tab","pid":3276,"cpu":0}]
+    2026-10-15T15:55:55.690Z +10979ms probe: window visible=false destroyed=false
+    2026-10-15T15:55:55.690Z +10979ms probe: renderer pid 3276
+    2026-10-15T15:55:55.708Z +10997ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n8鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n16鍒嗛挓\nmy-agent-boot-CeTO81\nread"}
+    2026-10-15T15:56:29.724Z +45013ms probe: watchdog fired
+    2026-10-15T15:56:31.416Z +0ms probe: switches=[no-sandbox,in-process-gpu,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=false via=argv
+    2026-10-15T15:56:31.417Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --no-sandbox --in-process-gpu --use-angle=d3d11 --ignore-gpu-blocklist]
+    2026-10-15T15:56:31.417Z +1ms probe: browser sees no-sandbox=true in-process-gpu=true
+    2026-10-15T15:56:31.830Z +415ms probe: app ready
+    2026-10-15T15:56:31.938Z +522ms probe: did-finish-load at 522ms
+    2026-10-15T15:56:31.940Z +524ms probe: ready-to-show at 524ms visible=false
+    2026-10-15T15:56:41.839Z +10424ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+    2026-10-15T15:56:41.840Z +10425ms probe: appMetrics [{"type":"Browser","pid":39704,"cpu":0},{"type":"Utility","pid":2512,"cpu":0},{"type":"Tab","pid":37740,"cpu":0}]
+    2026-10-15T15:56:42.340Z +10925ms probe: window visible=false destroyed=false
+    2026-10-15T15:56:42.341Z +10925ms probe: renderer pid 37740
+    2026-10-15T15:56:42.343Z +10928ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n9鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n17鍒嗛挓\nmy-agent-boot-CeTO81\nread"}
+    2026-10-15T15:57:16.426Z +45010ms probe: watchdog fired
+    2026-10-15T15:57:18.099Z +0ms probe: switches=[no-sandbox,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=true via=argv
+    2026-10-15T15:57:18.100Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --no-sandbox --use-angle=d3d11 --ignore-gpu-blocklist]
+    2026-10-15T15:57:18.100Z +1ms probe: browser sees no-sandbox=true in-process-gpu=false
+    2026-10-15T15:57:18.507Z +408ms probe: app ready
+    2026-10-15T15:57:18.608Z +510ms probe: did-finish-load at 510ms
+    2026-10-15T15:57:18.610Z +511ms probe: ready-to-show at 511ms visible=false
+    2026-10-15T15:57:28.515Z +10416ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+    2026-10-15T15:57:28.516Z +10417ms probe: appMetrics [{"type":"Browser","pid":3712,"cpu":0},{"type":"Utility","pid":44904,"cpu":0},{"type":"Tab","pid":44632,"cpu":0}]
+    2026-10-15T15:57:28.968Z +10869ms probe: window visible=true destroyed=false
+    2026-10-15T15:57:28.968Z +10870ms probe: renderer pid 44632
+    2026-10-15T15:57:28.970Z +10871ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n10鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n18鍒嗛挓\nmy-agent-boot-CeTO81\nrea"}
+    2026-10-15T15:57:29.645Z +11546ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":4.3,"mean":4.17},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5.5,"max":6,"mean":4.1},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+    2026-10-15T15:57:29.646Z +11547ms probe: gpuChild none in app metrics
+    2026-10-15T15:57:29.646Z +11548ms probe: finished
+    2026-10-15T15:57:31.634Z +0ms probe: switches=[no-sandbox,in-process-gpu,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=true via=argv
+    2026-10-15T15:57:31.635Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --no-sandbox --in-process-gpu --use-angle=d3d11 --ignore-gpu-blocklist]
+    2026-10-15T15:57:31.635Z +1ms probe: browser sees no-sandbox=true in-process-gpu=true
+    2026-10-15T15:57:32.068Z +435ms probe: app ready
+    2026-10-15T15:57:32.174Z +541ms probe: did-finish-load at 541ms
+    2026-10-15T15:57:32.176Z +543ms probe: ready-to-show at 543ms visible=false
+    2026-10-15T15:57:42.082Z +10448ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+    2026-10-15T15:57:42.083Z +10449ms probe: appMetrics [{"type":"Browser","pid":41948,"cpu":0},{"type":"Utility","pid":38520,"cpu":0},{"type":"Tab","pid":28592,"cpu":0}]
+    2026-10-15T15:57:42.533Z +10899ms probe: window visible=true destroyed=false
+    2026-10-15T15:57:42.533Z +10899ms probe: renderer pid 28592
+    2026-10-15T15:57:42.535Z +10901ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n10鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n18鍒嗛挓\nmy-agent-boot-CeTO81\nrea"}
+    2026-10-15T15:57:43.213Z +11579ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":8.3,"mean":4.2},"over33":0,"feedback":{"n":40,"median":4.3,"p95":5,"max":5.1,"mean":4.12},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+    2026-10-15T15:57:43.214Z +11580ms probe: gpuChild none in app metrics
+    2026-10-15T15:57:43.214Z +11580ms probe: finished
+    2026-10-15T15:57:45.203Z +0ms probe: switches=[in-process-gpu,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=false via=argv
+    2026-10-15T15:57:45.204Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --in-process-gpu --use-angle=d3d11 --ignore-gpu-blocklist]
+    2026-10-15T15:57:45.204Z +1ms probe: browser sees no-sandbox=false in-process-gpu=true
+    2026-10-15T15:57:45.623Z +420ms probe: app ready
+    2026-10-15T15:57:45.728Z +526ms probe: did-finish-load at 526ms
+    2026-10-15T15:57:45.730Z +527ms probe: ready-to-show at 527ms visible=false
+    2026-10-15T15:57:55.630Z +10427ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+    2026-10-15T15:57:55.631Z +10428ms probe: appMetrics [{"type":"Browser","pid":6784,"cpu":0},{"type":"Utility","pid":42880,"cpu":0},{"type":"Tab","pid":40932,"cpu":0}]
+    2026-10-15T15:57:56.078Z +10875ms probe: window visible=true destroyed=false
+    2026-10-15T15:57:56.078Z +10875ms probe: renderer pid 40932
+    2026-10-15T15:57:56.095Z +10893ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n10鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n18鍒嗛挓\nmy-agent-boot-CeTO81\nrea"}
+    2026-10-15T15:58:22.915Z +37713ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":8.3,"mean":4.2},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5.1,"max":5.2,"mean":4.15},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+    2026-10-15T15:58:22.917Z +37714ms probe: gpuChild none in app metrics
+    2026-10-15T15:58:22.917Z +37714ms probe: finished
+    2026-10-15T15:58:24.901Z +0ms probe: switches=[no-sandbox,disable-gpu-shader-disk-cache,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=false via=argv
+    2026-10-15T15:58:24.902Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --no-sandbox --disable-gpu-shader-disk-cache --use-angle=d3d11 --ignore-gpu-blocklist]
+    2026-10-15T15:58:24.902Z +1ms probe: browser sees no-sandbox=true in-process-gpu=false
+    2026-10-15T15:58:25.351Z +450ms probe: app ready
+    2026-10-15T15:58:25.454Z +554ms probe: did-finish-load at 554ms
+    2026-10-15T15:58:25.457Z +556ms probe: ready-to-show at 556ms visible=false
+    2026-10-15T15:58:35.362Z +10461ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+    2026-10-15T15:58:35.364Z +10463ms probe: appMetrics [{"type":"Browser","pid":34176,"cpu":0},{"type":"Utility","pid":39684,"cpu":0},{"type":"Tab","pid":44256,"cpu":0}]
+    2026-10-15T15:58:35.795Z +10894ms probe: window visible=true destroyed=false
+    2026-10-15T15:58:35.795Z +10894ms probe: renderer pid 44256
+    2026-10-15T15:58:35.796Z +10895ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n11鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n19鍒嗛挓\nmy-agent-boot-CeTO81\nrea"}
+    2026-10-15T15:58:36.472Z +11571ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.2,"max":4.3,"mean":4.17},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5.3,"max":5.3,"mean":4.11},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+    2026-10-15T15:58:36.473Z +11572ms probe: gpuChild none in app metrics
+    2026-10-15T15:58:36.473Z +11572ms probe: finished

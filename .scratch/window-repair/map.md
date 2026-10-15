@@ -139,6 +139,22 @@ resolved**，本图接着它们往下走，但有两条是**重开**而不是新
   `ready-to-show`，原来的失败窗口**从来没显示过**。**策略（等多久、重试、换端口）按票面没动**，仍是
   下面"引导挂起"那条雾；20 s 那只预算只是为了"挂起 ≠ 什么都没发生"。**语言**：诊断行英文、窗口文案
   中文（外壳是 AGENTS.md 那条诊断中文规则里的既定例外，已记进 `docs/architecture.md`）。
+- [02 最小开关组合](issues/02-minimal-switch-set.md)：结论在
+  [`research/minimal-switch-set.md`](research/minimal-switch-set.md)。**本机今天那 12 行一行都不起
+  作用**——GPU 进程**从未被观察到活着**（进程表采样只有 browser/renderer/utility；九项能力全
+  `disabled_software`；WebGL 是 WARP），12 组配置含完全裸跑**全部产出窗口与完整页面、0 次崩溃**，
+  所以"最小组合"是**空集**（其中 2 组的测量回合没收场，那是量具自己的 bug，不是窗口）。**但 10/13
+  那次崩溃是真的，而且转储读出了名字**：`0x80000003`（FATAL 断点）打在 `electron.exe` 自己里，栈上
+  逐字是 `gpu_data_manager_impl_private.cc:417: GPU process isn't usable. Goodbye.`；**退出码只读到
+  `-1073741` + 一个非可打印字节，完整的 `-1073741819` 不在转储里**（那是与用户记录的跨来源拼接）。
+  被注入的第三方代码是 **腾讯 WorkBuddy 的沙箱产品 `tsbx.dll`（`sandbox\5.7.10`）**，而它
+  **10/15 08:13 升级到 5.8.2，5.7.10 已消失**——"升级修好了它"是时间线推断，不是因果证明（GPU 子进程
+  自己的转储不在手上，也没做栈回溯）。**给 03 号的形状**：删三条开关与 `disableHardwareAcceleration()`、
+  删那段"这台机器"的注释、**保留 `webPreferences.sandbox: true`**（开关一删它就是唯一还在表达沙箱
+  意图的地方）、ADR 写**历史 + 恢复路径**，别把开关留成幽灵配置。**04/05 号的交接**：量具留了真窗口的
+  帧时间与输入延迟，但**没有**真实流式回合、也**没有**硬件合成的对照（本机做不到）；那唯一一次
+  SwiftShader 运行（16.6 ms ≈ 60 Hz）量的是 vsync 有无限住，**别当成"软件渲染慢 4 倍"**；`web_fetch`
+  在本 session 解析不了域名，所以**一手文档没读成正文**，03 号写 ADR 时要补。
 
 ## Not yet specified
 

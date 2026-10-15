@@ -1,0 +1,72 @@
+﻿    2026-10-15T15:53:34.923Z +0ms probe: switches=[no-sandbox,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=false
+    2026-10-15T15:53:35.350Z +427ms probe: app ready
+    2026-10-15T15:53:35.463Z +540ms probe: did-finish-load at 539ms
+    2026-10-15T15:53:35.465Z +542ms probe: ready-to-show at 542ms visible=false
+    2026-10-15T15:53:45.353Z +10430ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+    2026-10-15T15:53:45.354Z +10431ms probe: appMetrics [{"type":"Browser","pid":33308,"cpu":0},{"type":"Utility","pid":29040,"cpu":0},{"type":"Tab","pid":45776,"cpu":0}]
+    2026-10-15T15:53:45.354Z +10431ms probe: window visible=true destroyed=false
+    2026-10-15T15:53:45.355Z +10432ms probe: renderer pid 45776
+    2026-10-15T15:53:45.356Z +10433ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n6鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n14鍒嗛挓\nmy-agent-boot-CeTO81\nread"}
+    2026-10-15T15:53:46.037Z +11114ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":8.4,"mean":4.2},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5.2,"max":5.2,"mean":4.14},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+    2026-10-15T15:53:46.038Z +11115ms probe: gpuChild none in app metrics
+    2026-10-15T15:53:46.038Z +11115ms probe: finished
+    2026-10-15T15:53:48.031Z +0ms probe: switches=[no-sandbox,in-process-gpu,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=false
+    2026-10-15T15:53:48.448Z +417ms probe: app ready
+    2026-10-15T15:53:48.557Z +526ms probe: did-finish-load at 526ms
+    2026-10-15T15:53:48.559Z +529ms probe: ready-to-show at 529ms visible=false
+    2026-10-15T15:53:58.450Z +10420ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+    2026-10-15T15:53:58.453Z +10422ms probe: appMetrics [{"type":"Browser","pid":45788,"cpu":0},{"type":"Utility","pid":6680,"cpu":0},{"type":"Tab","pid":33132,"cpu":0}]
+    2026-10-15T15:53:58.453Z +10423ms probe: window visible=true destroyed=false
+    2026-10-15T15:53:58.453Z +10423ms probe: renderer pid 33132
+    2026-10-15T15:53:58.455Z +10424ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n6鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n14鍒嗛挓\nmy-agent-boot-CeTO81\nread"}
+    2026-10-15T15:53:59.138Z +11107ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":8.3,"mean":4.2},"over33":0,"feedback":{"n":40,"median":4.1,"p95":4.9,"max":5.4,"mean":4.09},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+    2026-10-15T15:53:59.139Z +11109ms probe: gpuChild none in app metrics
+    2026-10-15T15:53:59.140Z +11109ms probe: finished
+    2026-10-15T15:54:01.121Z +0ms probe: switches=[no-sandbox,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=true
+    2026-10-15T15:54:01.536Z +415ms probe: app ready
+    2026-10-15T15:54:01.641Z +520ms probe: did-finish-load at 520ms
+    2026-10-15T15:54:01.643Z +522ms probe: ready-to-show at 522ms visible=false
+    2026-10-15T15:54:11.550Z +10429ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+    2026-10-15T15:54:11.553Z +10432ms probe: appMetrics [{"type":"Browser","pid":11480,"cpu":0},{"type":"Utility","pid":35676,"cpu":0},{"type":"Tab","pid":19792,"cpu":0}]
+    2026-10-15T15:54:11.553Z +10432ms probe: window visible=true destroyed=false
+    2026-10-15T15:54:11.553Z +10433ms probe: renderer pid 19792
+    2026-10-15T15:54:11.555Z +10434ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n7鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n15鍒嗛挓\nmy-agent-boot-CeTO81\nread"}
+    2026-10-15T15:54:12.238Z +11118ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":8.3,"mean":4.2},"over33":0,"feedback":{"n":40,"median":4.2,"p95":5.4,"max":5.4,"mean":4.14},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+    2026-10-15T15:54:12.239Z +11119ms probe: gpuChild none in app metrics
+    2026-10-15T15:54:12.240Z +11119ms probe: finished
+    2026-10-15T15:54:14.234Z +0ms probe: switches=[no-sandbox,in-process-gpu,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=true
+    2026-10-15T15:54:14.647Z +413ms probe: app ready
+    2026-10-15T15:54:14.747Z +513ms probe: did-finish-load at 513ms
+    2026-10-15T15:54:14.749Z +515ms probe: ready-to-show at 515ms visible=false
+    2026-10-15T15:54:24.653Z +10419ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+    2026-10-15T15:54:24.656Z +10422ms probe: appMetrics [{"type":"Browser","pid":21380,"cpu":0},{"type":"Utility","pid":26508,"cpu":0},{"type":"Tab","pid":9408,"cpu":0}]
+    2026-10-15T15:54:24.657Z +10422ms probe: window visible=true destroyed=false
+    2026-10-15T15:54:24.657Z +10423ms probe: renderer pid 9408
+    2026-10-15T15:54:24.659Z +10424ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n7鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n15鍒嗛挓\nmy-agent-boot-CeTO81\nread"}
+    2026-10-15T15:54:25.343Z +11109ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":8.4,"mean":4.2},"over33":0,"feedback":{"n":40,"median":4.3,"p95":5.6,"max":5.7,"mean":4.17},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+    2026-10-15T15:54:25.344Z +11110ms probe: gpuChild none in app metrics
+    2026-10-15T15:54:25.344Z +11110ms probe: finished
+    2026-10-15T15:54:27.492Z +0ms probe: switches=[in-process-gpu,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=false
+    2026-10-15T15:54:27.910Z +418ms probe: app ready
+    2026-10-15T15:54:28.017Z +525ms probe: did-finish-load at 525ms
+    2026-10-15T15:54:28.019Z +527ms probe: ready-to-show at 527ms visible=false
+    2026-10-15T15:54:37.925Z +10433ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+    2026-10-15T15:54:37.927Z +10435ms probe: appMetrics [{"type":"Browser","pid":42608,"cpu":0},{"type":"Utility","pid":45124,"cpu":0},{"type":"Tab","pid":41592,"cpu":0}]
+    2026-10-15T15:54:37.927Z +10435ms probe: window visible=true destroyed=false
+    2026-10-15T15:54:37.927Z +10436ms probe: renderer pid 41592
+    2026-10-15T15:54:37.929Z +10437ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n7鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n15鍒嗛挓\nmy-agent-boot-CeTO81\nread"}
+    2026-10-15T15:54:38.612Z +11120ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":4.3,"mean":4.17},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5.3,"max":5.5,"mean":4.09},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+    2026-10-15T15:54:38.613Z +11121ms probe: gpuChild none in app metrics
+    2026-10-15T15:54:38.613Z +11122ms probe: finished
+    2026-10-15T15:54:40.746Z +0ms probe: switches=[no-sandbox,disable-gpu-shader-disk-cache,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=false
+    2026-10-15T15:54:41.187Z +441ms probe: app ready
+    2026-10-15T15:54:41.293Z +548ms probe: did-finish-load at 548ms
+    2026-10-15T15:54:41.295Z +550ms probe: ready-to-show at 550ms visible=false
+    2026-10-15T15:54:51.191Z +10445ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+    2026-10-15T15:54:51.192Z +10447ms probe: appMetrics [{"type":"Browser","pid":39748,"cpu":0},{"type":"Utility","pid":42488,"cpu":0},{"type":"Tab","pid":45448,"cpu":0}]
+    2026-10-15T15:54:51.193Z +10447ms probe: window visible=true destroyed=false
+    2026-10-15T15:54:51.193Z +10447ms probe: renderer pid 45448
+    2026-10-15T15:54:51.194Z +10449ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n7鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n15鍒嗛挓\nmy-agent-boot-CeTO81\nread"}
+    2026-10-15T15:54:51.874Z +11129ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":8.2,"mean":4.2},"over33":0,"feedback":{"n":40,"median":4.2,"p95":5.1,"max":5.2,"mean":4.14},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+    2026-10-15T15:54:51.875Z +11130ms probe: gpuChild none in app metrics
+    2026-10-15T15:54:51.875Z +11130ms probe: finished

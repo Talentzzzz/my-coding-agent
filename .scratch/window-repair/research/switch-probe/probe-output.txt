@@ -1,0 +1,564 @@
+# 票 02 的全部原始探针输出（2026-10-16，本机）
+#
+# 这是 research/switch-probe/logs/*.log 的**逐字副本**，按产生时间拼接，每段一个
+# `== logs/<名字>` 标题。每行带 `+Nms` 墙钟。这些行是本票所有数字的唯一来源。
+# `*.log` 在 .gitignore 里，所以证据以这个 .txt 提交；重建用 make-evidence.mjs。
+#
+# 注意：中文在这个文件里是 UTF-8，用按 ANSI 代码页读的工具打开会显示成乱码
+# （`新建会话` -> `鏂板缓浼氳瘽`）——那是读法的问题，结论不依赖中文字符串。
+
+====================================================================================================
+== logs/00-baseline.log
+====================================================================================================
+2026-10-15T15:50:06.295Z +3ms probe: switches=[] softwareRendering=false
+2026-10-15T15:50:06.829Z +534ms probe: app ready
+2026-10-15T15:50:07.023Z +728ms probe: did-finish-load at 728ms
+2026-10-15T15:50:07.033Z +737ms probe: ready-to-show at 737ms visible=false
+2026-10-15T15:50:14.844Z +8549ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T15:50:14.845Z +8550ms probe: appMetrics [{"type":"Browser","pid":18900,"cpu":0},{"type":"Utility","pid":43968,"cpu":0},{"type":"Tab","pid":4792,"cpu":0}]
+2026-10-15T15:50:14.846Z +8551ms probe: window visible=true destroyed=false
+2026-10-15T15:50:14.847Z +8551ms probe: renderer pid 4792
+2026-10-15T15:50:14.848Z +8553ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n3分钟\nmy-agent-boot-fYTwp6\nread the notes\n11分钟\nmy-agent-boot-CeTO81\nread"}
+2026-10-15T15:50:33.755Z +27460ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":2466.9,"mean":24.76},"over33":1,"feedback":{"n":40,"median":4.1,"p95":5.6,"max":12.2,"mean":4.32},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+2026-10-15T15:50:33.757Z +27461ms probe: gpuChild none in app metrics
+2026-10-15T15:50:33.757Z +27462ms probe: finished
+
+====================================================================================================
+== logs/gpu-forced.log
+====================================================================================================
+2026-10-15T15:50:46.584Z +0ms probe: switches=[ignore-gpu-blocklist,enable-unsafe-swiftshader,enable-gpu-rasterization,enable-zero-copy] softwareRendering=false
+2026-10-15T15:50:47.042Z +458ms probe: app ready
+2026-10-15T15:50:47.157Z +573ms probe: did-finish-load at 573ms
+2026-10-15T15:50:47.159Z +575ms probe: ready-to-show at 575ms visible=false
+2026-10-15T15:50:55.048Z +8464ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T15:50:55.050Z +8466ms probe: appMetrics [{"type":"Browser","pid":35784,"cpu":0},{"type":"Utility","pid":40268,"cpu":0},{"type":"Tab","pid":14952,"cpu":0}]
+2026-10-15T15:50:55.050Z +8466ms probe: window visible=true destroyed=false
+2026-10-15T15:50:55.051Z +8467ms probe: renderer pid 14952
+2026-10-15T15:50:55.053Z +8469ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n3分钟\nmy-agent-boot-fYTwp6\nread the notes\n11分钟\nmy-agent-boot-CeTO81\nread"}
+2026-10-15T15:50:57.466Z +10882ms probe: measure {"frame":{"n":120,"median":16.6,"p95":16.8,"max":16.8,"mean":15.42},"over33":0,"feedback":{"n":40,"median":15.4,"p95":16.4,"max":22.3,"mean":13.59},"webgl":{"renderer":"ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)","vendor":"Google Inc. (Google)"}}
+2026-10-15T15:50:57.467Z +10883ms probe: gpuChild none in app metrics
+2026-10-15T15:50:57.467Z +10883ms probe: finished
+
+====================================================================================================
+== logs/gpu-process-sample.log
+====================================================================================================
+2026-10-15T15:54:59.667Z +0ms probe: switches=[use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=false
+2026-10-15T15:55:00.085Z +419ms probe: app ready
+2026-10-15T15:55:00.197Z +530ms probe: did-finish-load at 530ms
+2026-10-15T15:55:00.199Z +533ms probe: ready-to-show at 533ms visible=false
+2026-10-15T15:55:12.086Z +12420ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T15:55:12.088Z +12421ms probe: appMetrics [{"type":"Browser","pid":42724,"cpu":0},{"type":"Utility","pid":18116,"cpu":0},{"type":"Tab","pid":25140,"cpu":0}]
+2026-10-15T15:55:12.088Z +12421ms probe: window visible=true destroyed=false
+2026-10-15T15:55:12.088Z +12422ms probe: renderer pid 25140
+2026-10-15T15:55:12.089Z +12423ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n8分钟\nmy-agent-boot-fYTwp6\nread the notes\n16分钟\nmy-agent-boot-CeTO81\nread"}
+2026-10-15T15:55:12.090Z +12423ms probe: finished
+
+====================================================================================================
+== logs/01-nosandbox-only.log
+====================================================================================================
+2026-10-15T15:55:44.711Z +0ms probe: switches=[no-sandbox,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=false via=argv
+2026-10-15T15:55:44.712Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --no-sandbox --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T15:55:44.713Z +1ms probe: browser sees no-sandbox=true in-process-gpu=false
+2026-10-15T15:55:45.167Z +455ms probe: app ready
+2026-10-15T15:55:45.290Z +579ms probe: did-finish-load at 579ms
+2026-10-15T15:55:45.292Z +581ms probe: ready-to-show at 581ms visible=false
+2026-10-15T15:55:55.170Z +10458ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T15:55:55.171Z +10459ms probe: appMetrics [{"type":"Browser","pid":20076,"cpu":0},{"type":"Utility","pid":22276,"cpu":0},{"type":"Tab","pid":3276,"cpu":0}]
+2026-10-15T15:55:55.690Z +10979ms probe: window visible=false destroyed=false
+2026-10-15T15:55:55.690Z +10979ms probe: renderer pid 3276
+2026-10-15T15:55:55.708Z +10997ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n8分钟\nmy-agent-boot-fYTwp6\nread the notes\n16分钟\nmy-agent-boot-CeTO81\nread"}
+2026-10-15T15:56:29.724Z +45013ms probe: watchdog fired
+
+====================================================================================================
+== logs/02-nosandbox-inprocessgpu.log
+====================================================================================================
+2026-10-15T15:56:31.416Z +0ms probe: switches=[no-sandbox,in-process-gpu,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=false via=argv
+2026-10-15T15:56:31.417Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --no-sandbox --in-process-gpu --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T15:56:31.417Z +1ms probe: browser sees no-sandbox=true in-process-gpu=true
+2026-10-15T15:56:31.830Z +415ms probe: app ready
+2026-10-15T15:56:31.938Z +522ms probe: did-finish-load at 522ms
+2026-10-15T15:56:31.940Z +524ms probe: ready-to-show at 524ms visible=false
+2026-10-15T15:56:41.839Z +10424ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T15:56:41.840Z +10425ms probe: appMetrics [{"type":"Browser","pid":39704,"cpu":0},{"type":"Utility","pid":2512,"cpu":0},{"type":"Tab","pid":37740,"cpu":0}]
+2026-10-15T15:56:42.340Z +10925ms probe: window visible=false destroyed=false
+2026-10-15T15:56:42.341Z +10925ms probe: renderer pid 37740
+2026-10-15T15:56:42.343Z +10928ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n9分钟\nmy-agent-boot-fYTwp6\nread the notes\n17分钟\nmy-agent-boot-CeTO81\nread"}
+2026-10-15T15:57:16.426Z +45010ms probe: watchdog fired
+
+====================================================================================================
+== logs/03-nosandbox-disableha.log
+====================================================================================================
+2026-10-15T15:57:18.099Z +0ms probe: switches=[no-sandbox,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=true via=argv
+2026-10-15T15:57:18.100Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --no-sandbox --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T15:57:18.100Z +1ms probe: browser sees no-sandbox=true in-process-gpu=false
+2026-10-15T15:57:18.507Z +408ms probe: app ready
+2026-10-15T15:57:18.608Z +510ms probe: did-finish-load at 510ms
+2026-10-15T15:57:18.610Z +511ms probe: ready-to-show at 511ms visible=false
+2026-10-15T15:57:28.515Z +10416ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T15:57:28.516Z +10417ms probe: appMetrics [{"type":"Browser","pid":3712,"cpu":0},{"type":"Utility","pid":44904,"cpu":0},{"type":"Tab","pid":44632,"cpu":0}]
+2026-10-15T15:57:28.968Z +10869ms probe: window visible=true destroyed=false
+2026-10-15T15:57:28.968Z +10870ms probe: renderer pid 44632
+2026-10-15T15:57:28.970Z +10871ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n10分钟\nmy-agent-boot-fYTwp6\nread the notes\n18分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T15:57:29.645Z +11546ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":4.3,"mean":4.17},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5.5,"max":6,"mean":4.1},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+2026-10-15T15:57:29.646Z +11547ms probe: gpuChild none in app metrics
+2026-10-15T15:57:29.646Z +11548ms probe: finished
+
+====================================================================================================
+== logs/04-full-three.log
+====================================================================================================
+2026-10-15T15:57:31.634Z +0ms probe: switches=[no-sandbox,in-process-gpu,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=true via=argv
+2026-10-15T15:57:31.635Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --no-sandbox --in-process-gpu --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T15:57:31.635Z +1ms probe: browser sees no-sandbox=true in-process-gpu=true
+2026-10-15T15:57:32.068Z +435ms probe: app ready
+2026-10-15T15:57:32.174Z +541ms probe: did-finish-load at 541ms
+2026-10-15T15:57:32.176Z +543ms probe: ready-to-show at 543ms visible=false
+2026-10-15T15:57:42.082Z +10448ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T15:57:42.083Z +10449ms probe: appMetrics [{"type":"Browser","pid":41948,"cpu":0},{"type":"Utility","pid":38520,"cpu":0},{"type":"Tab","pid":28592,"cpu":0}]
+2026-10-15T15:57:42.533Z +10899ms probe: window visible=true destroyed=false
+2026-10-15T15:57:42.533Z +10899ms probe: renderer pid 28592
+2026-10-15T15:57:42.535Z +10901ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n10分钟\nmy-agent-boot-fYTwp6\nread the notes\n18分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T15:57:43.213Z +11579ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":8.3,"mean":4.2},"over33":0,"feedback":{"n":40,"median":4.3,"p95":5,"max":5.1,"mean":4.12},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+2026-10-15T15:57:43.214Z +11580ms probe: gpuChild none in app metrics
+2026-10-15T15:57:43.214Z +11580ms probe: finished
+
+====================================================================================================
+== logs/05-inprocessgpu-only.log
+====================================================================================================
+2026-10-15T15:57:45.203Z +0ms probe: switches=[in-process-gpu,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=false via=argv
+2026-10-15T15:57:45.204Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --in-process-gpu --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T15:57:45.204Z +1ms probe: browser sees no-sandbox=false in-process-gpu=true
+2026-10-15T15:57:45.623Z +420ms probe: app ready
+2026-10-15T15:57:45.728Z +526ms probe: did-finish-load at 526ms
+2026-10-15T15:57:45.730Z +527ms probe: ready-to-show at 527ms visible=false
+2026-10-15T15:57:55.630Z +10427ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T15:57:55.631Z +10428ms probe: appMetrics [{"type":"Browser","pid":6784,"cpu":0},{"type":"Utility","pid":42880,"cpu":0},{"type":"Tab","pid":40932,"cpu":0}]
+2026-10-15T15:57:56.078Z +10875ms probe: window visible=true destroyed=false
+2026-10-15T15:57:56.078Z +10875ms probe: renderer pid 40932
+2026-10-15T15:57:56.095Z +10893ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n10分钟\nmy-agent-boot-fYTwp6\nread the notes\n18分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T15:58:22.915Z +37713ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":8.3,"mean":4.2},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5.1,"max":5.2,"mean":4.15},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+2026-10-15T15:58:22.917Z +37714ms probe: gpuChild none in app metrics
+2026-10-15T15:58:22.917Z +37714ms probe: finished
+
+====================================================================================================
+== logs/06-nosandbox-noshadercache.log
+====================================================================================================
+2026-10-15T15:58:24.901Z +0ms probe: switches=[no-sandbox,disable-gpu-shader-disk-cache,use-angle=d3d11,ignore-gpu-blocklist] softwareRendering=false via=argv
+2026-10-15T15:58:24.902Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --no-sandbox --disable-gpu-shader-disk-cache --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T15:58:24.902Z +1ms probe: browser sees no-sandbox=true in-process-gpu=false
+2026-10-15T15:58:25.351Z +450ms probe: app ready
+2026-10-15T15:58:25.454Z +554ms probe: did-finish-load at 554ms
+2026-10-15T15:58:25.457Z +556ms probe: ready-to-show at 556ms visible=false
+2026-10-15T15:58:35.362Z +10461ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T15:58:35.364Z +10463ms probe: appMetrics [{"type":"Browser","pid":34176,"cpu":0},{"type":"Utility","pid":39684,"cpu":0},{"type":"Tab","pid":44256,"cpu":0}]
+2026-10-15T15:58:35.795Z +10894ms probe: window visible=true destroyed=false
+2026-10-15T15:58:35.795Z +10894ms probe: renderer pid 44256
+2026-10-15T15:58:35.796Z +10895ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n11分钟\nmy-agent-boot-fYTwp6\nread the notes\n19分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T15:58:36.472Z +11571ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.2,"max":4.3,"mean":4.17},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5.3,"max":5.3,"mean":4.11},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+2026-10-15T15:58:36.473Z +11572ms probe: gpuChild none in app metrics
+2026-10-15T15:58:36.473Z +11572ms probe: finished
+
+====================================================================================================
+== logs/sightings-A-gpu-enabled.log
+====================================================================================================
+2026-10-15T15:59:07.226Z +0ms probe: switches=[] softwareRendering=false via=appendSwitch
+2026-10-15T15:59:07.227Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T15:59:07.227Z +1ms probe: browser sees no-sandbox=false in-process-gpu=false
+2026-10-15T15:59:07.638Z +412ms probe: app ready
+2026-10-15T15:59:07.749Z +523ms probe: did-finish-load at 523ms
+2026-10-15T15:59:07.750Z +525ms probe: ready-to-show at 525ms visible=false
+2026-10-15T15:59:21.652Z +14427ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T15:59:21.653Z +14428ms probe: appMetrics [{"type":"Browser","pid":6032,"cpu":0},{"type":"Utility","pid":21532,"cpu":0},{"type":"Tab","pid":34440,"cpu":0}]
+2026-10-15T15:59:22.097Z +14871ms probe: window visible=true destroyed=false
+2026-10-15T15:59:22.097Z +14872ms probe: renderer pid 34440
+2026-10-15T15:59:22.099Z +14873ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n12分钟\nmy-agent-boot-fYTwp6\nread the notes\n20分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T15:59:22.099Z +14873ms probe: finished
+
+====================================================================================================
+== logs/sightings-B-gpu-enabled-nosandbox.log
+====================================================================================================
+2026-10-15T15:59:39.864Z +0ms probe: switches=[] softwareRendering=false via=appendSwitch
+2026-10-15T15:59:39.865Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --no-sandbox --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T15:59:39.865Z +1ms probe: browser sees no-sandbox=true in-process-gpu=false
+2026-10-15T15:59:40.273Z +409ms probe: app ready
+2026-10-15T15:59:40.384Z +520ms probe: did-finish-load at 520ms
+2026-10-15T15:59:40.386Z +522ms probe: ready-to-show at 522ms visible=false
+2026-10-15T15:59:54.279Z +14415ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T15:59:54.282Z +14418ms probe: appMetrics [{"type":"Browser","pid":45556,"cpu":0},{"type":"Utility","pid":36332,"cpu":0},{"type":"Tab","pid":11288,"cpu":0}]
+2026-10-15T15:59:54.719Z +14855ms probe: window visible=true destroyed=false
+2026-10-15T15:59:54.720Z +14856ms probe: renderer pid 11288
+2026-10-15T15:59:54.721Z +14857ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n12分钟\nmy-agent-boot-fYTwp6\nread the notes\n20分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T15:59:54.721Z +14857ms probe: finished
+
+====================================================================================================
+== logs/sightings-C-plain.log
+====================================================================================================
+2026-10-15T16:00:12.451Z +0ms probe: switches=[] softwareRendering=false via=appendSwitch
+2026-10-15T16:00:12.452Z +2ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe]
+2026-10-15T16:00:12.453Z +2ms probe: browser sees no-sandbox=false in-process-gpu=false
+2026-10-15T16:00:12.895Z +444ms probe: app ready
+2026-10-15T16:00:13.009Z +558ms probe: did-finish-load at 558ms
+2026-10-15T16:00:13.011Z +561ms probe: ready-to-show at 561ms visible=false
+2026-10-15T16:00:26.907Z +14456ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T16:00:26.908Z +14458ms probe: appMetrics [{"type":"Browser","pid":27580,"cpu":0},{"type":"Utility","pid":20900,"cpu":0},{"type":"Tab","pid":39136,"cpu":0}]
+2026-10-15T16:00:27.372Z +14922ms probe: window visible=true destroyed=false
+2026-10-15T16:00:27.373Z +14922ms probe: renderer pid 39136
+2026-10-15T16:00:27.374Z +14924ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n13分钟\nmy-agent-boot-fYTwp6\nread the notes\n21分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T16:00:27.375Z +14924ms probe: finished
+
+====================================================================================================
+== logs/timeline-plain.log
+====================================================================================================
+2026-10-15T16:00:55.146Z +0ms probe: switches=[] softwareRendering=false via=appendSwitch
+2026-10-15T16:00:55.147Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe]
+2026-10-15T16:00:55.147Z +1ms probe: browser sees no-sandbox=false in-process-gpu=false
+2026-10-15T16:00:55.579Z +434ms probe: app ready
+2026-10-15T16:00:55.696Z +550ms probe: did-finish-load at 550ms
+2026-10-15T16:00:55.698Z +552ms probe: ready-to-show at 552ms visible=false
+2026-10-15T16:00:56.579Z +1434ms probe: tick visible=true minimized=false
+2026-10-15T16:00:57.580Z +2434ms probe: tick visible=true minimized=false
+2026-10-15T16:00:58.587Z +3441ms probe: tick visible=true minimized=false
+2026-10-15T16:00:59.592Z +4446ms probe: tick visible=true minimized=false
+2026-10-15T16:01:00.604Z +5458ms probe: tick visible=true minimized=false
+2026-10-15T16:01:01.618Z +6473ms probe: tick visible=true minimized=false
+2026-10-15T16:01:02.619Z +7474ms probe: tick visible=true minimized=false
+2026-10-15T16:01:03.619Z +8474ms probe: tick visible=true minimized=false
+2026-10-15T16:01:04.626Z +9480ms probe: tick visible=true minimized=false
+2026-10-15T16:01:05.626Z +10480ms probe: tick visible=true minimized=false
+2026-10-15T16:01:06.626Z +11481ms probe: tick visible=true minimized=false
+2026-10-15T16:01:07.580Z +12435ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T16:01:07.582Z +12436ms probe: appMetrics [{"type":"Browser","pid":2728,"cpu":0},{"type":"Utility","pid":4836,"cpu":0},{"type":"Tab","pid":34180,"cpu":0}]
+2026-10-15T16:01:08.019Z +12873ms probe: window visible=true destroyed=false
+2026-10-15T16:01:08.019Z +12873ms probe: renderer pid 34180
+2026-10-15T16:01:08.032Z +12887ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n14分钟\nmy-agent-boot-fYTwp6\nread the notes\n22分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T16:01:08.712Z +13566ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.2,"max":4.3,"mean":4.17},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5.6,"max":5.6,"mean":4.17},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+2026-10-15T16:01:08.713Z +13567ms probe: gpuChild none in app metrics
+2026-10-15T16:01:08.713Z +13568ms probe: finished
+
+====================================================================================================
+== logs/timeline-gpu.log
+====================================================================================================
+2026-10-15T16:01:10.486Z +0ms probe: switches=[] softwareRendering=false via=appendSwitch
+2026-10-15T16:01:10.487Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T16:01:10.487Z +2ms probe: browser sees no-sandbox=false in-process-gpu=false
+2026-10-15T16:01:10.919Z +433ms probe: app ready
+2026-10-15T16:01:11.026Z +541ms probe: did-finish-load at 541ms
+2026-10-15T16:01:11.029Z +543ms probe: ready-to-show at 543ms visible=false
+2026-10-15T16:01:11.918Z +1433ms probe: tick visible=true minimized=false
+2026-10-15T16:01:12.918Z +2433ms probe: tick visible=true minimized=false
+2026-10-15T16:01:13.918Z +3433ms probe: tick visible=true minimized=false
+2026-10-15T16:01:14.925Z +4440ms probe: tick visible=true minimized=false
+2026-10-15T16:01:15.933Z +5447ms probe: tick visible=true minimized=false
+2026-10-15T16:01:16.943Z +6457ms probe: tick visible=true minimized=false
+2026-10-15T16:01:17.954Z +7468ms probe: tick visible=true minimized=false
+2026-10-15T16:01:18.964Z +8478ms probe: tick visible=true minimized=false
+2026-10-15T16:01:19.974Z +9488ms probe: tick visible=true minimized=false
+2026-10-15T16:01:20.984Z +10498ms probe: tick visible=true minimized=false
+2026-10-15T16:01:22.000Z +11514ms probe: tick visible=true minimized=false
+2026-10-15T16:01:22.930Z +12444ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T16:01:22.931Z +12445ms probe: appMetrics [{"type":"Browser","pid":18788,"cpu":0},{"type":"Utility","pid":37852,"cpu":0},{"type":"Tab","pid":21720,"cpu":0}]
+2026-10-15T16:01:23.360Z +12874ms probe: window visible=true destroyed=false
+2026-10-15T16:01:23.360Z +12874ms probe: renderer pid 21720
+2026-10-15T16:01:23.361Z +12875ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n14分钟\nmy-agent-boot-fYTwp6\nread the notes\n22分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T16:01:24.037Z +13552ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.2,"max":4.3,"mean":4.17},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5.4,"max":5.6,"mean":4.1},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+2026-10-15T16:01:24.039Z +13553ms probe: gpuChild none in app metrics
+2026-10-15T16:01:24.039Z +13553ms probe: finished
+
+====================================================================================================
+== logs/real-shell-screenshot.log
+====================================================================================================
+2026-10-15T16:01:43.038Z +0ms probe: switches=[] softwareRendering=false via=appendSwitch
+2026-10-15T16:01:43.039Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --screenshot C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe\logs\real-shell.png]
+2026-10-15T16:01:43.039Z +1ms probe: browser sees no-sandbox=false in-process-gpu=false
+2026-10-15T16:01:43.457Z +419ms probe: app ready
+2026-10-15T16:01:43.566Z +528ms probe: did-finish-load at 528ms
+2026-10-15T16:01:43.568Z +530ms probe: ready-to-show at 530ms visible=false
+2026-10-15T16:01:44.458Z +1420ms probe: tick visible=true minimized=false
+2026-10-15T16:01:45.459Z +2421ms probe: tick visible=true minimized=false
+
+====================================================================================================
+== logs/shadercache-flag-on.log
+====================================================================================================
+2026-10-15T16:01:54.684Z +0ms probe: switches=[disable-gpu-shader-disk-cache] softwareRendering=true via=appendSwitch
+2026-10-15T16:01:54.685Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --user-data-dir=C:\Users\a1368\AppData\Local\Temp\switch-probe-shadercache-test]
+2026-10-15T16:01:54.685Z +1ms probe: browser sees no-sandbox=false in-process-gpu=false
+2026-10-15T16:01:55.098Z +414ms probe: app ready
+2026-10-15T16:01:55.216Z +532ms probe: did-finish-load at 532ms
+2026-10-15T16:01:55.218Z +534ms probe: ready-to-show at 534ms visible=false
+2026-10-15T16:01:56.099Z +1415ms probe: tick visible=true minimized=false
+2026-10-15T16:01:57.111Z +2427ms probe: tick visible=true minimized=false
+2026-10-15T16:01:58.121Z +3437ms probe: tick visible=true minimized=false
+2026-10-15T16:01:59.128Z +4444ms probe: tick visible=true minimized=false
+2026-10-15T16:02:00.141Z +5457ms probe: tick visible=true minimized=false
+2026-10-15T16:02:01.107Z +6423ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T16:02:01.109Z +6425ms probe: appMetrics [{"type":"Browser","pid":35064,"cpu":0},{"type":"Utility","pid":8764,"cpu":0},{"type":"Tab","pid":39268,"cpu":0}]
+2026-10-15T16:02:01.565Z +6881ms probe: window visible=true destroyed=false
+2026-10-15T16:02:01.566Z +6882ms probe: renderer pid 39268
+2026-10-15T16:02:01.568Z +6884ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n15分钟\nmy-agent-boot-fYTwp6\nread the notes\n22分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T16:02:01.569Z +6885ms probe: finished
+
+====================================================================================================
+== logs/provenance-appendSwitch.log
+====================================================================================================
+2026-10-15T16:02:20.804Z +0ms probe: switches=[no-sandbox,in-process-gpu,disable-gpu-shader-disk-cache] softwareRendering=true via=appendSwitch
+2026-10-15T16:02:20.806Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe]
+2026-10-15T16:02:20.806Z +1ms probe: browser sees no-sandbox=true in-process-gpu=true
+2026-10-15T16:02:21.212Z +408ms probe: app ready
+2026-10-15T16:02:21.317Z +513ms probe: did-finish-load at 513ms
+2026-10-15T16:02:21.319Z +515ms probe: ready-to-show at 515ms visible=false
+2026-10-15T16:02:22.212Z +1408ms probe: tick visible=true minimized=false
+2026-10-15T16:02:23.213Z +2409ms probe: tick visible=true minimized=false
+2026-10-15T16:02:24.219Z +3415ms probe: tick visible=true minimized=false
+2026-10-15T16:02:25.233Z +4429ms probe: tick visible=true minimized=false
+2026-10-15T16:02:26.243Z +5439ms probe: tick visible=true minimized=false
+2026-10-15T16:02:27.214Z +6409ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T16:02:27.215Z +6410ms probe: appMetrics [{"type":"Browser","pid":20972,"cpu":0},{"type":"Utility","pid":45448,"cpu":0},{"type":"Tab","pid":43160,"cpu":0}]
+2026-10-15T16:02:27.690Z +6886ms probe: cmdline browser gpu-relevant=[]
+2026-10-15T16:02:27.690Z +6886ms probe: cmdline utility gpu-relevant=[--no-sandbox --use-angle=d3d11-warp-webgl --use-gl=angle]
+2026-10-15T16:02:27.691Z +6886ms probe: cmdline renderer gpu-relevant=[--no-sandbox --disable-gpu-compositing --video-capture-use-gpu-memory-buffer]
+2026-10-15T16:02:27.691Z +6886ms probe: window visible=true destroyed=false
+2026-10-15T16:02:27.691Z +6887ms probe: renderer pid 43160
+2026-10-15T16:02:27.693Z +6888ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n15分钟\nmy-agent-boot-fYTwp6\nread the notes\n23分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T16:02:27.693Z +6888ms probe: finished
+
+====================================================================================================
+== logs/provenance-argv.log
+====================================================================================================
+2026-10-15T16:02:29.162Z +0ms probe: switches=[no-sandbox,in-process-gpu,disable-gpu-shader-disk-cache] softwareRendering=true via=argv
+2026-10-15T16:02:29.164Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --no-sandbox --in-process-gpu --disable-gpu-shader-disk-cache]
+2026-10-15T16:02:29.164Z +1ms probe: browser sees no-sandbox=true in-process-gpu=true
+2026-10-15T16:02:29.573Z +411ms probe: app ready
+2026-10-15T16:02:29.668Z +505ms probe: did-finish-load at 505ms
+2026-10-15T16:02:29.672Z +509ms probe: ready-to-show at 509ms visible=false
+2026-10-15T16:02:30.574Z +1412ms probe: tick visible=true minimized=false
+2026-10-15T16:02:31.574Z +2411ms probe: tick visible=true minimized=false
+2026-10-15T16:02:32.578Z +3415ms probe: tick visible=true minimized=false
+2026-10-15T16:02:33.588Z +4426ms probe: tick visible=true minimized=false
+2026-10-15T16:02:34.598Z +5436ms probe: tick visible=true minimized=false
+2026-10-15T16:02:35.583Z +6421ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T16:02:35.584Z +6422ms probe: appMetrics [{"type":"Browser","pid":25180,"cpu":0},{"type":"Utility","pid":3668,"cpu":0},{"type":"Tab","pid":29396,"cpu":0}]
+2026-10-15T16:02:36.011Z +6849ms probe: cmdline browser gpu-relevant=[--no-sandbox --in-process-gpu --disable-gpu-shader-disk-cache]
+2026-10-15T16:02:36.011Z +6849ms probe: cmdline utility gpu-relevant=[--no-sandbox --use-angle=d3d11-warp-webgl --use-gl=angle]
+2026-10-15T16:02:36.011Z +6849ms probe: cmdline renderer gpu-relevant=[--no-sandbox --disable-gpu-compositing --video-capture-use-gpu-memory-buffer]
+2026-10-15T16:02:36.012Z +6849ms probe: window visible=true destroyed=false
+2026-10-15T16:02:36.012Z +6849ms probe: renderer pid 29396
+2026-10-15T16:02:36.013Z +6851ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n15分钟\nmy-agent-boot-fYTwp6\nread the notes\n23分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T16:02:36.013Z +6851ms probe: finished
+
+====================================================================================================
+== logs/stall-gpu-1.log
+====================================================================================================
+2026-10-15T16:04:02.615Z +0ms probe: switches=[] softwareRendering=false via=appendSwitch
+2026-10-15T16:04:02.617Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T16:04:02.617Z +2ms probe: browser sees no-sandbox=false in-process-gpu=false
+2026-10-15T16:04:03.052Z +437ms probe: app ready
+2026-10-15T16:04:03.159Z +544ms probe: did-finish-load at 544ms
+2026-10-15T16:04:03.161Z +546ms probe: ready-to-show at 546ms visible=false
+2026-10-15T16:04:04.052Z +1436ms probe: tick visible=true minimized=false
+2026-10-15T16:04:05.052Z +2436ms probe: tick visible=true minimized=false
+2026-10-15T16:04:06.056Z +3441ms probe: tick visible=true minimized=false
+2026-10-15T16:04:07.067Z +4452ms probe: tick visible=true minimized=false
+2026-10-15T16:04:08.075Z +5460ms probe: tick visible=true minimized=false
+2026-10-15T16:04:09.084Z +6469ms probe: tick visible=true minimized=false
+2026-10-15T16:04:10.097Z +7482ms probe: tick visible=true minimized=false
+2026-10-15T16:04:11.063Z +8448ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T16:04:11.064Z +8449ms probe: appMetrics [{"type":"Browser","pid":36304,"cpu":0},{"type":"Utility","pid":40872,"cpu":0},{"type":"Tab","pid":34852,"cpu":0}]
+2026-10-15T16:04:11.469Z +8854ms probe: cmdline browser gpu-relevant=[--use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T16:04:11.469Z +8854ms probe: cmdline utility gpu-relevant=[--no-sandbox --use-angle=d3d11-warp-webgl --use-gl=angle]
+2026-10-15T16:04:11.469Z +8854ms probe: cmdline renderer gpu-relevant=[--no-sandbox --disable-gpu-compositing --video-capture-use-gpu-memory-buffer]
+2026-10-15T16:04:11.470Z +8854ms probe: window visible=true destroyed=false
+2026-10-15T16:04:11.470Z +8855ms probe: renderer pid 34852
+2026-10-15T16:04:11.471Z +8856ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n17分钟\nmy-agent-boot-fYTwp6\nread the notes\n25分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T16:04:12.148Z +9533ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.2,"max":4.3,"mean":4.17},"over33":0,"feedback":{"n":40,"median":4.2,"p95":5,"max":5,"mean":4.09},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+2026-10-15T16:04:12.149Z +9534ms probe: gpuChild none in app metrics
+2026-10-15T16:04:12.150Z +9534ms probe: finished
+
+====================================================================================================
+== logs/stall-gpu-2.log
+====================================================================================================
+2026-10-15T16:04:13.604Z +0ms probe: switches=[] softwareRendering=false via=appendSwitch
+2026-10-15T16:04:13.605Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T16:04:13.606Z +1ms probe: browser sees no-sandbox=false in-process-gpu=false
+2026-10-15T16:04:14.022Z +418ms probe: app ready
+2026-10-15T16:04:14.127Z +523ms probe: did-finish-load at 523ms
+2026-10-15T16:04:14.129Z +525ms probe: ready-to-show at 525ms visible=false
+2026-10-15T16:04:15.022Z +1418ms probe: tick visible=true minimized=false
+2026-10-15T16:04:16.023Z +2419ms probe: tick visible=true minimized=false
+2026-10-15T16:04:17.022Z +3418ms probe: tick visible=true minimized=false
+2026-10-15T16:04:18.025Z +4421ms probe: tick visible=true minimized=false
+2026-10-15T16:04:19.034Z +5430ms probe: tick visible=true minimized=false
+2026-10-15T16:04:20.045Z +6441ms probe: tick visible=true minimized=false
+2026-10-15T16:04:21.055Z +7451ms probe: tick visible=true minimized=false
+2026-10-15T16:04:22.034Z +8430ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T16:04:22.035Z +8431ms probe: appMetrics [{"type":"Browser","pid":17112,"cpu":0},{"type":"Utility","pid":36164,"cpu":0},{"type":"Tab","pid":24408,"cpu":0}]
+2026-10-15T16:04:22.482Z +8878ms probe: cmdline browser gpu-relevant=[--use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T16:04:22.482Z +8878ms probe: cmdline utility gpu-relevant=[--no-sandbox --use-angle=d3d11-warp-webgl --use-gl=angle]
+2026-10-15T16:04:22.482Z +8878ms probe: cmdline renderer gpu-relevant=[--no-sandbox --disable-gpu-compositing --video-capture-use-gpu-memory-buffer]
+2026-10-15T16:04:22.483Z +8878ms probe: window visible=true destroyed=false
+2026-10-15T16:04:22.483Z +8879ms probe: renderer pid 24408
+2026-10-15T16:04:22.484Z +8880ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n17分钟\nmy-agent-boot-fYTwp6\nread the notes\n25分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T16:04:23.159Z +9555ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.2,"max":4.3,"mean":4.17},"over33":0,"feedback":{"n":40,"median":4.2,"p95":5.2,"max":5.3,"mean":4.1},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+2026-10-15T16:04:23.160Z +9556ms probe: gpuChild none in app metrics
+2026-10-15T16:04:23.161Z +9556ms probe: finished
+
+====================================================================================================
+== logs/stall-gpu-3.log
+====================================================================================================
+2026-10-15T16:04:24.553Z +0ms probe: switches=[] softwareRendering=false via=appendSwitch
+2026-10-15T16:04:24.554Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T16:04:24.555Z +2ms probe: browser sees no-sandbox=false in-process-gpu=false
+2026-10-15T16:04:24.969Z +417ms probe: app ready
+2026-10-15T16:04:25.066Z +513ms probe: did-finish-load at 513ms
+2026-10-15T16:04:25.068Z +515ms probe: ready-to-show at 515ms visible=false
+2026-10-15T16:04:25.969Z +1417ms probe: tick visible=true minimized=false
+2026-10-15T16:04:26.970Z +2417ms probe: tick visible=true minimized=false
+2026-10-15T16:04:27.977Z +3424ms probe: tick visible=true minimized=false
+2026-10-15T16:04:28.990Z +4437ms probe: tick visible=true minimized=false
+2026-10-15T16:04:30.001Z +5448ms probe: tick visible=true minimized=false
+2026-10-15T16:04:31.015Z +6462ms probe: tick visible=true minimized=false
+2026-10-15T16:04:32.025Z +7472ms probe: tick visible=true minimized=false
+2026-10-15T16:04:32.975Z +8422ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T16:04:32.976Z +8423ms probe: appMetrics [{"type":"Browser","pid":7880,"cpu":0},{"type":"Utility","pid":46576,"cpu":0},{"type":"Tab","pid":42580,"cpu":0}]
+2026-10-15T16:04:33.384Z +8831ms probe: cmdline browser gpu-relevant=[--use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T16:04:33.384Z +8832ms probe: cmdline utility gpu-relevant=[--no-sandbox --use-angle=d3d11-warp-webgl --use-gl=angle]
+2026-10-15T16:04:33.385Z +8832ms probe: cmdline renderer gpu-relevant=[--no-sandbox --disable-gpu-compositing --video-capture-use-gpu-memory-buffer]
+2026-10-15T16:04:33.385Z +8832ms probe: window visible=true destroyed=false
+2026-10-15T16:04:33.385Z +8832ms probe: renderer pid 42580
+2026-10-15T16:04:33.386Z +8833ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n17分钟\nmy-agent-boot-fYTwp6\nread the notes\n25分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T16:04:34.062Z +9509ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":4.3,"mean":4.17},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5.2,"max":5.5,"mean":4.12},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+2026-10-15T16:04:34.063Z +9510ms probe: gpuChild none in app metrics
+2026-10-15T16:04:34.063Z +9510ms probe: finished
+
+====================================================================================================
+== logs/stall-software-1.log
+====================================================================================================
+2026-10-15T16:04:35.449Z +0ms probe: switches=[] softwareRendering=true via=appendSwitch
+2026-10-15T16:04:35.451Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T16:04:35.451Z +2ms probe: browser sees no-sandbox=false in-process-gpu=false
+2026-10-15T16:04:35.860Z +410ms probe: app ready
+2026-10-15T16:04:35.962Z +513ms probe: did-finish-load at 513ms
+2026-10-15T16:04:35.965Z +515ms probe: ready-to-show at 515ms visible=false
+2026-10-15T16:04:36.860Z +1410ms probe: tick visible=true minimized=false
+2026-10-15T16:04:37.860Z +2411ms probe: tick visible=true minimized=false
+2026-10-15T16:04:38.875Z +3426ms probe: tick visible=true minimized=false
+2026-10-15T16:04:39.888Z +4439ms probe: tick visible=true minimized=false
+2026-10-15T16:04:40.901Z +5451ms probe: tick visible=true minimized=false
+2026-10-15T16:04:41.911Z +6461ms probe: tick visible=true minimized=false
+2026-10-15T16:04:42.922Z +7473ms probe: tick visible=true minimized=false
+2026-10-15T16:04:43.875Z +8425ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T16:04:43.876Z +8426ms probe: appMetrics [{"type":"Browser","pid":30096,"cpu":0},{"type":"Utility","pid":45748,"cpu":0},{"type":"Tab","pid":40212,"cpu":0}]
+2026-10-15T16:04:44.270Z +8821ms probe: cmdline browser gpu-relevant=[--use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T16:04:44.270Z +8821ms probe: cmdline utility gpu-relevant=[--no-sandbox --use-angle=d3d11-warp-webgl --use-gl=angle]
+2026-10-15T16:04:44.270Z +8821ms probe: cmdline renderer gpu-relevant=[--no-sandbox --disable-gpu-compositing --video-capture-use-gpu-memory-buffer]
+2026-10-15T16:04:44.271Z +8821ms probe: window visible=true destroyed=false
+2026-10-15T16:04:44.271Z +8821ms probe: renderer pid 40212
+2026-10-15T16:04:44.272Z +8823ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n17分钟\nmy-agent-boot-fYTwp6\nread the notes\n25分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T16:04:44.947Z +9497ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.2,"max":4.3,"mean":4.17},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5.2,"max":5.5,"mean":4.07},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+2026-10-15T16:04:44.948Z +9499ms probe: gpuChild none in app metrics
+2026-10-15T16:04:44.948Z +9499ms probe: finished
+
+====================================================================================================
+== logs/stall-software-2.log
+====================================================================================================
+2026-10-15T16:04:46.342Z +0ms probe: switches=[] softwareRendering=true via=appendSwitch
+2026-10-15T16:04:46.343Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T16:04:46.344Z +2ms probe: browser sees no-sandbox=false in-process-gpu=false
+2026-10-15T16:04:46.816Z +474ms probe: app ready
+2026-10-15T16:04:46.921Z +579ms probe: did-finish-load at 579ms
+2026-10-15T16:04:46.923Z +581ms probe: ready-to-show at 581ms visible=false
+2026-10-15T16:04:47.816Z +1474ms probe: tick visible=true minimized=false
+2026-10-15T16:04:48.816Z +2474ms probe: tick visible=true minimized=false
+2026-10-15T16:04:49.818Z +3476ms probe: tick visible=true minimized=false
+2026-10-15T16:04:50.830Z +4488ms probe: tick visible=true minimized=false
+2026-10-15T16:04:51.845Z +5503ms probe: tick visible=true minimized=false
+2026-10-15T16:04:52.846Z +6504ms probe: tick visible=true minimized=false
+2026-10-15T16:04:53.848Z +7506ms probe: tick visible=true minimized=false
+2026-10-15T16:04:54.817Z +8475ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T16:04:54.818Z +8476ms probe: appMetrics [{"type":"Browser","pid":25388,"cpu":0},{"type":"Utility","pid":32272,"cpu":0},{"type":"Tab","pid":26228,"cpu":0}]
+2026-10-15T16:04:55.240Z +8898ms probe: cmdline browser gpu-relevant=[--use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T16:04:55.241Z +8899ms probe: cmdline utility gpu-relevant=[--no-sandbox --use-angle=d3d11-warp-webgl --use-gl=angle]
+2026-10-15T16:04:55.241Z +8899ms probe: cmdline renderer gpu-relevant=[--no-sandbox --disable-gpu-compositing --video-capture-use-gpu-memory-buffer]
+2026-10-15T16:04:55.241Z +8899ms probe: window visible=true destroyed=false
+2026-10-15T16:04:55.241Z +8899ms probe: renderer pid 26228
+2026-10-15T16:04:55.242Z +8900ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n17分钟\nmy-agent-boot-fYTwp6\nread the notes\n25分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T16:04:55.914Z +9572ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.3,"max":4.3,"mean":4.17},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5,"max":5.1,"mean":4.08},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+2026-10-15T16:04:55.916Z +9574ms probe: gpuChild none in app metrics
+2026-10-15T16:04:55.916Z +9574ms probe: finished
+
+====================================================================================================
+== logs/stall-software-3.log
+====================================================================================================
+2026-10-15T16:04:57.295Z +0ms probe: switches=[] softwareRendering=true via=appendSwitch
+2026-10-15T16:04:57.296Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T16:04:57.296Z +1ms probe: browser sees no-sandbox=false in-process-gpu=false
+2026-10-15T16:04:57.700Z +405ms probe: app ready
+2026-10-15T16:04:57.797Z +502ms probe: did-finish-load at 502ms
+2026-10-15T16:04:57.799Z +504ms probe: ready-to-show at 504ms visible=false
+2026-10-15T16:04:58.700Z +1405ms probe: tick visible=true minimized=false
+2026-10-15T16:04:59.701Z +2406ms probe: tick visible=true minimized=false
+2026-10-15T16:05:00.711Z +3416ms probe: tick visible=true minimized=false
+2026-10-15T16:05:01.723Z +4428ms probe: tick visible=true minimized=false
+2026-10-15T16:05:02.730Z +5435ms probe: tick visible=true minimized=false
+2026-10-15T16:05:03.744Z +6449ms probe: tick visible=true minimized=false
+2026-10-15T16:05:04.753Z +7458ms probe: tick visible=true minimized=false
+2026-10-15T16:05:05.714Z +8419ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T16:05:05.714Z +8420ms probe: appMetrics [{"type":"Browser","pid":17960,"cpu":0},{"type":"Utility","pid":12212,"cpu":0},{"type":"Tab","pid":45540,"cpu":0}]
+2026-10-15T16:05:06.120Z +8825ms probe: cmdline browser gpu-relevant=[--use-angle=d3d11 --ignore-gpu-blocklist]
+2026-10-15T16:05:06.120Z +8825ms probe: cmdline utility gpu-relevant=[--no-sandbox --use-angle=d3d11-warp-webgl --use-gl=angle]
+2026-10-15T16:05:06.121Z +8826ms probe: cmdline renderer gpu-relevant=[--no-sandbox --disable-gpu-compositing --video-capture-use-gpu-memory-buffer]
+2026-10-15T16:05:06.121Z +8826ms probe: window visible=true destroyed=false
+2026-10-15T16:05:06.121Z +8827ms probe: renderer pid 45540
+2026-10-15T16:05:06.123Z +8828ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n18分钟\nmy-agent-boot-fYTwp6\nread the notes\n25分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T16:05:06.798Z +9503ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.2,"max":4.3,"mean":4.17},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5.1,"max":5.3,"mean":4.1},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+2026-10-15T16:05:06.799Z +9504ms probe: gpuChild none in app metrics
+2026-10-15T16:05:06.799Z +9504ms probe: finished
+
+====================================================================================================
+== logs/final-validation.log
+====================================================================================================
+2026-10-15T16:06:01.615Z +0ms probe: switches=[no-sandbox,in-process-gpu,disable-gpu-shader-disk-cache] softwareRendering=true via=appendSwitch
+2026-10-15T16:06:01.616Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe]
+2026-10-15T16:06:01.616Z +1ms probe: browser sees no-sandbox=true in-process-gpu=true
+2026-10-15T16:06:02.031Z +416ms probe: app ready
+2026-10-15T16:06:02.142Z +528ms probe: did-finish-load at 528ms
+2026-10-15T16:06:02.144Z +530ms probe: ready-to-show at 530ms visible=false
+2026-10-15T16:06:03.031Z +1416ms probe: tick visible=true minimized=false
+2026-10-15T16:06:04.032Z +2417ms probe: tick visible=true minimized=false
+2026-10-15T16:06:05.047Z +3432ms probe: tick visible=true minimized=false
+2026-10-15T16:06:06.054Z +4440ms probe: tick visible=true minimized=false
+2026-10-15T16:06:07.058Z +5444ms probe: tick visible=true minimized=false
+2026-10-15T16:06:08.044Z +6429ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T16:06:08.045Z +6431ms probe: appMetrics [{"type":"Browser","pid":28456,"cpu":0},{"type":"Utility","pid":11176,"cpu":0},{"type":"Tab","pid":45768,"cpu":0}]
+2026-10-15T16:06:08.472Z +6857ms probe: cmdline browser gpu-relevant=[]
+2026-10-15T16:06:08.472Z +6858ms probe: cmdline utility gpu-relevant=[--no-sandbox --use-angle=d3d11-warp-webgl --use-gl=angle]
+2026-10-15T16:06:08.472Z +6858ms probe: cmdline renderer gpu-relevant=[--no-sandbox --disable-gpu-compositing --video-capture-use-gpu-memory-buffer]
+2026-10-15T16:06:08.473Z +6858ms probe: window visible=true destroyed=false
+2026-10-15T16:06:08.473Z +6858ms probe: renderer pid 45768
+2026-10-15T16:06:08.474Z +6859ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n19分钟\nmy-agent-boot-fYTwp6\nread the notes\n27分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T16:06:09.154Z +7539ms probe: measure {"frame":{"n":120,"median":4.2,"p95":4.2,"max":4.3,"mean":4.17},"over33":0,"feedback":{"n":40,"median":4.1,"p95":5.3,"max":5.4,"mean":4.18},"webgl":{"renderer":"ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)","vendor":"Google Inc. (Microsoft)"}}
+2026-10-15T16:06:09.155Z +7540ms probe: gpuChild none in app metrics
+2026-10-15T16:06:09.155Z +7540ms probe: finished
+
+====================================================================================================
+== logs/cmdline-truncation.log
+====================================================================================================
+2026-10-15T16:06:15.962Z +0ms probe: switches=[no-sandbox,in-process-gpu,disable-gpu-shader-disk-cache] softwareRendering=true via=appendSwitch
+2026-10-15T16:06:15.963Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe]
+2026-10-15T16:06:15.963Z +2ms probe: browser sees no-sandbox=true in-process-gpu=true
+2026-10-15T16:06:16.433Z +471ms probe: app ready
+2026-10-15T16:06:16.560Z +598ms probe: did-finish-load at 598ms
+2026-10-15T16:06:16.562Z +600ms probe: ready-to-show at 600ms visible=false
+2026-10-15T16:06:17.434Z +1472ms probe: tick visible=true minimized=false
+2026-10-15T16:06:18.435Z +2473ms probe: tick visible=true minimized=false
+2026-10-15T16:06:19.435Z +3473ms probe: tick visible=true minimized=false
+2026-10-15T16:06:20.445Z +4484ms probe: tick visible=true minimized=false
+2026-10-15T16:06:21.460Z +5498ms probe: tick visible=true minimized=false
+2026-10-15T16:06:22.472Z +6510ms probe: tick visible=true minimized=false
+2026-10-15T16:06:23.448Z +7486ms probe: gpuFeatureStatus {"2d_canvas":"unavailable_software","direct_rendering_display_compositor":"disabled_off_ok","gpu_compositing":"disabled_software","multiple_raster_threads":"enabled_on","opengl":"disabled_off","rasterization":"disabled_software","raw_draw":"disabled_off_ok","skia_graphite":"disabled_off","trees_in_viz":"disabled_off","video_decode":"disabled_software","video_encode":"disabled_software","webgl":"unavailable_software","webgpu":"unavailable_software","webnn":"unavailable_software"}
+2026-10-15T16:06:23.449Z +7487ms probe: appMetrics [{"type":"Browser","pid":44128,"cpu":0},{"type":"Utility","pid":16060,"cpu":0},{"type":"Tab","pid":29752,"cpu":0}]
+2026-10-15T16:06:23.894Z +7932ms probe: cmdline browser gpu-relevant=[]
+2026-10-15T16:06:23.894Z +7932ms probe: cmdline utility gpu-relevant=[--no-sandbox --use-angle=d3d11-warp-webgl --use-gl=angle]
+2026-10-15T16:06:23.895Z +7933ms probe: cmdline renderer gpu-relevant=[--no-sandbox --disable-gpu-compositing --video-capture-use-gpu-memory-buffer]
+2026-10-15T16:06:23.895Z +7933ms probe: window visible=true destroyed=false
+2026-10-15T16:06:23.895Z +7933ms probe: renderer pid 29752
+2026-10-15T16:06:23.896Z +7935ms probe: page {"title":"my-coding-agent","ready":"complete","body":"新建会话\n工作区\n暂无会话\nmy-agent-boot-IhZRds\nread the notes\n19分钟\nmy-agent-boot-fYTwp6\nread the notes\n27分钟\nmy-agent-boot-CeTO81\nrea"}
+2026-10-15T16:06:23.897Z +7935ms probe: finished

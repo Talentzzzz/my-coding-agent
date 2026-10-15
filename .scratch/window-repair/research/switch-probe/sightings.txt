@@ -1,0 +1,33 @@
+﻿    2026-10-15T15:59:07.226Z +0ms probe: switches=[] softwareRendering=false via=appendSwitch
+    2026-10-15T15:59:07.227Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --use-angle=d3d11 --ignore-gpu-blocklist]
+    2026-10-15T15:59:07.227Z +1ms probe: browser sees no-sandbox=false in-process-gpu=false
+    2026-10-15T15:59:07.638Z +412ms probe: app ready
+    2026-10-15T15:59:07.749Z +523ms probe: did-finish-load at 523ms
+    2026-10-15T15:59:07.750Z +525ms probe: ready-to-show at 525ms visible=false
+    2026-10-15T15:59:21.653Z +14428ms probe: appMetrics [{"type":"Browser","pid":6032,"cpu":0},{"type":"Utility","pid":21532,"cpu":0},{"type":"Tab","pid":34440,"cpu":0}]
+    2026-10-15T15:59:22.097Z +14871ms probe: window visible=true destroyed=false
+    2026-10-15T15:59:22.097Z +14872ms probe: renderer pid 34440
+    2026-10-15T15:59:22.099Z +14873ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n12鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n20鍒嗛挓\nmy-agent-boot-CeTO81\nrea"}
+    2026-10-15T15:59:22.099Z +14873ms probe: finished
+    2026-10-15T15:59:39.864Z +0ms probe: switches=[] softwareRendering=false via=appendSwitch
+    2026-10-15T15:59:39.865Z +1ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe --no-sandbox --use-angle=d3d11 --ignore-gpu-blocklist]
+    2026-10-15T15:59:39.865Z +1ms probe: browser sees no-sandbox=true in-process-gpu=false
+    2026-10-15T15:59:40.273Z +409ms probe: app ready
+    2026-10-15T15:59:40.384Z +520ms probe: did-finish-load at 520ms
+    2026-10-15T15:59:40.386Z +522ms probe: ready-to-show at 522ms visible=false
+    2026-10-15T15:59:54.282Z +14418ms probe: appMetrics [{"type":"Browser","pid":45556,"cpu":0},{"type":"Utility","pid":36332,"cpu":0},{"type":"Tab","pid":11288,"cpu":0}]
+    2026-10-15T15:59:54.719Z +14855ms probe: window visible=true destroyed=false
+    2026-10-15T15:59:54.720Z +14856ms probe: renderer pid 11288
+    2026-10-15T15:59:54.721Z +14857ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n12鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n20鍒嗛挓\nmy-agent-boot-CeTO81\nrea"}
+    2026-10-15T15:59:54.721Z +14857ms probe: finished
+    2026-10-15T16:00:12.451Z +0ms probe: switches=[] softwareRendering=false via=appendSwitch
+    2026-10-15T16:00:12.452Z +2ms probe: argv=[C:\Users\a1368\Desktop\my-coding-agent\.scratch\window-repair\research\switch-probe]
+    2026-10-15T16:00:12.453Z +2ms probe: browser sees no-sandbox=false in-process-gpu=false
+    2026-10-15T16:00:12.895Z +444ms probe: app ready
+    2026-10-15T16:00:13.009Z +558ms probe: did-finish-load at 558ms
+    2026-10-15T16:00:13.011Z +561ms probe: ready-to-show at 561ms visible=false
+    2026-10-15T16:00:26.908Z +14458ms probe: appMetrics [{"type":"Browser","pid":27580,"cpu":0},{"type":"Utility","pid":20900,"cpu":0},{"type":"Tab","pid":39136,"cpu":0}]
+    2026-10-15T16:00:27.372Z +14922ms probe: window visible=true destroyed=false
+    2026-10-15T16:00:27.373Z +14922ms probe: renderer pid 39136
+    2026-10-15T16:00:27.374Z +14924ms probe: page {"title":"my-coding-agent","ready":"complete","body":"鏂板缓浼氳瘽\n宸ヤ綔鍖篭n鏆傛棤浼氳瘽\nmy-agent-boot-IhZRds\nread the notes\n13鍒嗛挓\nmy-agent-boot-fYTwp6\nread the notes\n21鍒嗛挓\nmy-agent-boot-CeTO81\nrea"}
+    2026-10-15T16:00:27.375Z +14924ms probe: finished

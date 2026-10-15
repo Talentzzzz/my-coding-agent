@@ -1,0 +1,243 @@
+﻿===== C:\Users\a1368\AppData\Local\CrashDumps\electron.exe.11344.dmp
+  size 6556616 bytes, written 2026/10/13 23:41:15
+  streams present: 3, 4, 5, 6, 7, 13, 14, 15, 21, 22, 24
+  system: arch 9, windows 10.0.26200
+  exception: thread 32300, code 0x80000003, flags 0x0, address 0x7FF7164C4CB9
+  exception parameters: 0x1 0x0 0x0 0x0
+  modules loaded: 85
+    00007FF70F1F0000+0EBB4000  C:\Users\a1368\Desktop\my-coding-agent\packages\desktop\node_modules\electron\dist\electron.exe
+    00007FFE72780000+00267000  C:\Windows\System32\ntdll.dll
+    00007FFE70940000+000CB000  C:\Windows\System32\kernel32.dll
+    00007FFE6FA60000+00402000  C:\Windows\System32\KERNELBASE.dll
+    00007FFE726B0000+00080000  C:\Windows\System32\ws2_32.dll
+    00007FFE6FE70000+0014C000  C:\Windows\System32\ucrtbase.dll
+    00007FFE72010000+00118000  C:\Windows\System32\rpcrt4.dll
+    00007FFE66360000+0000B000  C:\Windows\System32\version.dll
+    00007FFE5CC20000+00036000  C:\Windows\System32\winmm.dll
+    00007FFE70060000+0017E000  C:\Windows\System32\crypt32.dll
+    00007FFE721C0000+000A9000  C:\Windows\System32\msvcrt.dll
+    00007FFE6A7B0000+0026A000  C:\Windows\System32\DWrite.dll
+    00007FFE6F980000+000A3000  C:\Windows\System32\msvcp_win.dll
+    00007FFE6F560000+0000A000  C:\Windows\System32\dpapi.dll
+    00007FFE701F0000+000AC000  C:\Windows\System32\bcryptPrimitives.dll
+    00007FFDFEC30000+000C7000  C:\WorkBuddy\resources\app.asar.unpacked\cli\vendor\sandbox\5.7.10\tsbx.dll
+    00007FFE70E30000+00798000  C:\Windows\System32\shell32.dll
+    00007FFE71E30000+001CF000  C:\Windows\System32\user32.dll
+    00007FFE6FA30000+00027000  C:\Windows\System32\win32u.dll
+    00007FFE715D0000+0002B000  C:\Windows\System32\gdi32.dll
+    00007FFE702B0000+00129000  C:\Windows\System32\gdi32full.dll
+    00007FFE71600000+00031000  C:\Windows\System32\imm32.dll
+    00007FFE6E170000+00158000  C:\Windows\System32\dnsapi.dll
+    00007FFE71CB0000+000A9000  C:\Windows\System32\sechost.dll
+    00007FFE6E9F0000+0000D000  C:\Windows\System32\dsparse.dll
+    00007FFE6E080000+00033000  C:\Windows\System32\IPHLPAPI.DLL
+    00007FFE71640000+0000A000  C:\Windows\System32\nsi.dll
+    00007FFE697F0000+0012A000  C:\Windows\System32\winhttp.dll
+    00007FFE6F7E0000+0005E000  C:\Windows\System32\powrprof.dll
+    00007FFE6F7C0000+00015000  C:\Windows\System32\umpdc.dll
+    00007FFE6C640000+000A8000  C:\Windows\System32\uxtheme.dll
+    00007FFE70A10000+00385000  C:\Windows\System32\combase.dll
+    00007FFE6EC10000+0006C000  C:\Windows\System32\mswsock.dll
+    00007FFE70630000+000FB000  C:\Windows\System32\SHCore.dll
+    00007FFE71D60000+000BC000  C:\Windows\System32\advapi32.dll
+    00007FFE6E780000+00036000  C:\Windows\System32\ntmarta.dll
+    00007FFE72480000+0015B000  C:\Windows\System32\msctf.dll
+    00007FFE6E650000+0001B000  C:\Windows\System32\kernel.appcore.dll
+    00007FFE70790000+0019A000  C:\Windows\System32\ole32.dll
+    00007FFE71BD0000+000D9000  C:\Windows\System32\oleaut32.dll
+    00007FFE725E0000+000AE000  C:\Windows\System32\clbcatq.dll
+    00007FFE211F0000+0069D000  C:\Windows\System32\Windows.Media.dll
+    00007FFE687E0000+0016A000  C:\Windows\System32\WinTypes.dll
+    00007FFE2BB80000+0015B000  C:\Windows\System32\Windows.UI.dll
+    00007FFE2F340000+00151000  C:\Windows\System32\Windows.UI.Immersive.dll
+    00007FFE6D3B0000+008AE000  C:\Windows\System32\windows.storage.dll
+    00007FFE704C0000+00066000  C:\Windows\System32\shlwapi.dll
+    00007FFE51A80000+00290000  C:\Windows\WinSxS\amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.9278_none_3e0d1ba8e3303201\comctl32.dll
+    00007FFE6EF20000+0000C000  C:\Windows\System32\CRYPTBASE.dll
+    00007FFE1B2E0000+00027000  C:\Windows\System32\nlansp_c.dll
+    00007FFE699E0000+0001D000  C:\Windows\System32\dhcpcsvc6.DLL
+    00007FFE699B0000+00025000  C:\Windows\System32\dhcpcsvc.dll
+    00007FFE327A0000+00537000  C:\Windows\System32\SogouTSF.ime
+    00007FFE70930000+00008000  C:\Windows\System32\psapi.dll
+    00007FFE58340000+00008000  C:\Windows\System32\msimg32.dll
+    00007FFE6F870000+0002A000  C:\Windows\System32\bcrypt.dll
+    00007FFE23640000+00142000  C:\Windows\System32\textinputframework.dll
+    00007FFE124B0000+01B46000  C:\Windows\System32\SogouPY.ime
+    00007FFE72450000+00020000  C:\Windows\System32\imagehlp.dll
+    00007FFE42F60000+00075000  C:\Windows\System32\oleacc.dll
+    00007FFE6ECC0000+00034000  C:\Windows\System32\userenv.dll
+    00007FFE6F8A0000+00029000  C:\Windows\System32\profapi.dll
+    00000298A0720000+004A2000  C:\sougou\SogouInput\16.6.0.4777\Resource.dll
+    00007FFDFC120000+002D4000  C:\sougou\SogouInput\Components\IChat\1.0.2.3232\ichat_bundle64.dll
+    00007FFE6A090000+000F5000  C:\Windows\System32\propsys.dll
+    00007FFE6C920000+0002F000  C:\Windows\System32\dwmapi.dll
+    00007FFDFBC80000+000A6000  C:\sougou\SogouInput\Components\isgpet\1.0.2.3152\isgpet_bundle64.dll
+    00007FFE6AD20000+0063A000  C:\Windows\System32\d2d1.dll
+    00007FFE28090000+000FB000  C:\Windows\System32\TextShaping.dll
+    00007FFDC3C30000+004B3000  C:\sougou\SogouInput\Components\PicFace\1.1.0.3184\PicFace64.dll
+    00007FFE70530000+000F5000  C:\Windows\System32\comdlg32.dll
+    00007FFE6C4D0000+0002A000  C:\Windows\System32\wtsapi32.dll
+    00007FFE6E910000+00049000  C:\Windows\System32\sspicli.dll
+    00007FFE69200000+000BF000  C:\Windows\System32\mscms.dll
+    00007FFE5A7A0000+000A5000  C:\Windows\System32\MMDevAPI.dll
+    00007FFE6F570000+00064000  C:\Windows\System32\winsta.dll
+    00007FFE6F4A0000+0002F000  C:\Windows\System32\devobj.dll
+    00007FFE6F4E0000+00052000  C:\Windows\System32\cfgmgr32.dll
+    00007FFE6C140000+0006E000  C:\Windows\System32\netprofm.dll
+    00007FFDF9190000+00080000  C:\sougou\SogouInput\Components\systembeautify\1.0.2.2868\systembeautify_bundle64.dll
+    00007FFE68190000+00019000  C:\Windows\System32\npmproxy.dll
+    00007FFE6F050000+00013000  C:\Windows\System32\msasn1.dll
+    00007FFE6EF00000+0001B000  C:\Windows\System32\cryptsp.dll
+    00007FFE6E5B0000+00039000  C:\Windows\System32\rsaenh.dll
+    00007FFE6EC90000+00025000  C:\Windows\System32\gpapi.dll
+  modules NOT under C:\Windows: 7
+    C:\Users\a1368\Desktop\my-coding-agent\packages\desktop\node_modules\electron\dist\electron.exe
+    C:\WorkBuddy\resources\app.asar.unpacked\cli\vendor\sandbox\5.7.10\tsbx.dll
+    C:\sougou\SogouInput\16.6.0.4777\Resource.dll
+    C:\sougou\SogouInput\Components\IChat\1.0.2.3232\ichat_bundle64.dll
+    C:\sougou\SogouInput\Components\isgpet\1.0.2.3152\isgpet_bundle64.dll
+    C:\sougou\SogouInput\Components\PicFace\1.1.0.3184\PicFace64.dll
+    C:\sougou\SogouInput\Components\systembeautify\1.0.2.2868\systembeautify_bundle64.dll
+  memory ranges (list): 1502
+  threads: 44 (record stride 48 bytes)
+    thread 32300: stack 0xCFB4FFBF58+16552 bytes (file rva 3937337), context 1663 bytes   <-- the crashing thread
+    thread 31024: stack 0xCFB57FFBF8+1032 bytes (file rva 5573923), context 1663 bytes
+    thread 22840: stack 0xCFB5FFF868+1944 bytes (file rva 3894437), context 1663 bytes
+    thread 23112: stack 0xCFB67FF428+3032 bytes (file rva 5142462), context 1663 bytes
+  faulting address is in C:\Users\a1368\Desktop\my-coding-agent\packages\desktop\node_modules\electron\dist\electron.exe +0x72D4CB9
+  --- strings on the crashing thread's stack (16552 bytes at rva 3937337) ---
+    A +0x2D8: ????????
+    A +0x4D0: ????????X
+    A +0x5AC: ?????????
+    A +0x788: [11344:1013/234110.262:ERROR:content\browser\gpu
+    A +0x7E0: xited unexpectedly: exit_code=-1
+    A +0x1438: gpu_data_manager_impl_private.cc:417: GPU process isn't usable. Goodbye.
+    A +0x15A0: [11344:1013/234110.262:FATAL:content\browser\gpu\gpu_data_manager_impl_private.cc:417] GPU process isn't usable. Goodbye.
+    A +0x1D48: -1073741h
+    A +0x1E20: ?????????????
+    A +0x2140: IPC.mojom.Channel
+    A +0x2458: ?????????????
+    A +0x24A8: ????????
+  --- runs that look like a negative exit code (1) ---
+    A +0x1D48: -1073741
+===== C:\Users\a1368\AppData\Local\CrashDumps\electron.exe.26804.dmp
+  size 6609992 bytes, written 2026/10/13 23:41:35
+  streams present: 3, 4, 5, 6, 7, 13, 14, 15, 21, 22, 24
+  system: arch 9, windows 10.0.26200
+  exception: thread 5364, code 0x80000003, flags 0x0, address 0x7FF7164C4CB9
+  exception parameters: 0x1 0x0 0x0 0x0
+  modules loaded: 85
+    00007FF70F1F0000+0EBB4000  C:\Users\a1368\Desktop\my-coding-agent\packages\desktop\node_modules\electron\dist\electron.exe
+    00007FFE72780000+00267000  C:\Windows\System32\ntdll.dll
+    00007FFE70940000+000CB000  C:\Windows\System32\kernel32.dll
+    00007FFE6FA60000+00402000  C:\Windows\System32\KERNELBASE.dll
+    00007FFE726B0000+00080000  C:\Windows\System32\ws2_32.dll
+    00007FFE6FE70000+0014C000  C:\Windows\System32\ucrtbase.dll
+    00007FFE66360000+0000B000  C:\Windows\System32\version.dll
+    00007FFE5CC20000+00036000  C:\Windows\System32\winmm.dll
+    00007FFE72010000+00118000  C:\Windows\System32\rpcrt4.dll
+    00007FFE721C0000+000A9000  C:\Windows\System32\msvcrt.dll
+    00007FFE70060000+0017E000  C:\Windows\System32\crypt32.dll
+    00007FFE6A7B0000+0026A000  C:\Windows\System32\DWrite.dll
+    00007FFE6F980000+000A3000  C:\Windows\System32\msvcp_win.dll
+    00007FFE6F560000+0000A000  C:\Windows\System32\dpapi.dll
+    00007FFE701F0000+000AC000  C:\Windows\System32\bcryptPrimitives.dll
+    00007FFDFEC30000+000C7000  C:\WorkBuddy\resources\app.asar.unpacked\cli\vendor\sandbox\5.7.10\tsbx.dll
+    00007FFE70E30000+00798000  C:\Windows\System32\shell32.dll
+    00007FFE71E30000+001CF000  C:\Windows\System32\user32.dll
+    00007FFE6FA30000+00027000  C:\Windows\System32\win32u.dll
+    00007FFE715D0000+0002B000  C:\Windows\System32\gdi32.dll
+    00007FFE702B0000+00129000  C:\Windows\System32\gdi32full.dll
+    00007FFE71600000+00031000  C:\Windows\System32\imm32.dll
+    00007FFE6E170000+00158000  C:\Windows\System32\dnsapi.dll
+    00007FFE71CB0000+000A9000  C:\Windows\System32\sechost.dll
+    00007FFE6E9F0000+0000D000  C:\Windows\System32\dsparse.dll
+    00007FFE6E080000+00033000  C:\Windows\System32\IPHLPAPI.DLL
+    00007FFE71640000+0000A000  C:\Windows\System32\nsi.dll
+    00007FFE697F0000+0012A000  C:\Windows\System32\winhttp.dll
+    00007FFE6F7E0000+0005E000  C:\Windows\System32\powrprof.dll
+    00007FFE6F7C0000+00015000  C:\Windows\System32\umpdc.dll
+    00007FFE6C640000+000A8000  C:\Windows\System32\uxtheme.dll
+    00007FFE70A10000+00385000  C:\Windows\System32\combase.dll
+    00007FFE6EC10000+0006C000  C:\Windows\System32\mswsock.dll
+    00007FFE70630000+000FB000  C:\Windows\System32\SHCore.dll
+    00007FFE71D60000+000BC000  C:\Windows\System32\advapi32.dll
+    00007FFE6E780000+00036000  C:\Windows\System32\ntmarta.dll
+    00007FFE72480000+0015B000  C:\Windows\System32\msctf.dll
+    00007FFE6E650000+0001B000  C:\Windows\System32\kernel.appcore.dll
+    00007FFE70790000+0019A000  C:\Windows\System32\ole32.dll
+    00007FFE71BD0000+000D9000  C:\Windows\System32\oleaut32.dll
+    00007FFE725E0000+000AE000  C:\Windows\System32\clbcatq.dll
+    00007FFE211F0000+0069D000  C:\Windows\System32\Windows.Media.dll
+    00007FFE687E0000+0016A000  C:\Windows\System32\WinTypes.dll
+    00007FFE2BB80000+0015B000  C:\Windows\System32\Windows.UI.dll
+    00007FFE2F340000+00151000  C:\Windows\System32\Windows.UI.Immersive.dll
+    00007FFE6D3B0000+008AE000  C:\Windows\System32\windows.storage.dll
+    00007FFE704C0000+00066000  C:\Windows\System32\shlwapi.dll
+    00007FFE51A80000+00290000  C:\Windows\WinSxS\amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.9278_none_3e0d1ba8e3303201\comctl32.dll
+    00007FFE6EF20000+0000C000  C:\Windows\System32\CRYPTBASE.dll
+    00007FFE1B2E0000+00027000  C:\Windows\System32\nlansp_c.dll
+    00007FFE699E0000+0001D000  C:\Windows\System32\dhcpcsvc6.DLL
+    00007FFE699B0000+00025000  C:\Windows\System32\dhcpcsvc.dll
+    00007FFE327A0000+00537000  C:\Windows\System32\SogouTSF.ime
+    00007FFE70930000+00008000  C:\Windows\System32\psapi.dll
+    00007FFE58340000+00008000  C:\Windows\System32\msimg32.dll
+    00007FFE6F870000+0002A000  C:\Windows\System32\bcrypt.dll
+    00007FFE23640000+00142000  C:\Windows\System32\textinputframework.dll
+    00007FFE124B0000+01B46000  C:\Windows\System32\SogouPY.ime
+    00007FFE72450000+00020000  C:\Windows\System32\imagehlp.dll
+    00007FFE42F60000+00075000  C:\Windows\System32\oleacc.dll
+    00007FFE6ECC0000+00034000  C:\Windows\System32\userenv.dll
+    00007FFE6F8A0000+00029000  C:\Windows\System32\profapi.dll
+    000002199B640000+004A2000  C:\sougou\SogouInput\16.6.0.4777\Resource.dll
+    00007FFDFC120000+002D4000  C:\sougou\SogouInput\Components\IChat\1.0.2.3232\ichat_bundle64.dll
+    00007FFE6A090000+000F5000  C:\Windows\System32\propsys.dll
+    00007FFE6C920000+0002F000  C:\Windows\System32\dwmapi.dll
+    00007FFDFBC80000+000A6000  C:\sougou\SogouInput\Components\isgpet\1.0.2.3152\isgpet_bundle64.dll
+    00007FFE6AD20000+0063A000  C:\Windows\System32\d2d1.dll
+    00007FFE28090000+000FB000  C:\Windows\System32\TextShaping.dll
+    00007FFDC3C30000+004B3000  C:\sougou\SogouInput\Components\PicFace\1.1.0.3184\PicFace64.dll
+    00007FFE70530000+000F5000  C:\Windows\System32\comdlg32.dll
+    00007FFE6C4D0000+0002A000  C:\Windows\System32\wtsapi32.dll
+    00007FFE6E910000+00049000  C:\Windows\System32\sspicli.dll
+    00007FFE69200000+000BF000  C:\Windows\System32\mscms.dll
+    00007FFE5A7A0000+000A5000  C:\Windows\System32\MMDevAPI.dll
+    00007FFE6F570000+00064000  C:\Windows\System32\winsta.dll
+    00007FFE6F4A0000+0002F000  C:\Windows\System32\devobj.dll
+    00007FFE6F4E0000+00052000  C:\Windows\System32\cfgmgr32.dll
+    00007FFE6C140000+0006E000  C:\Windows\System32\netprofm.dll
+    00007FFDF9190000+00080000  C:\sougou\SogouInput\Components\systembeautify\1.0.2.2868\systembeautify_bundle64.dll
+    00007FFE68190000+00019000  C:\Windows\System32\npmproxy.dll
+    00007FFE6F050000+00013000  C:\Windows\System32\msasn1.dll
+    00007FFE6EF00000+0001B000  C:\Windows\System32\cryptsp.dll
+    00007FFE6E5B0000+00039000  C:\Windows\System32\rsaenh.dll
+    00007FFE6EC90000+00025000  C:\Windows\System32\gpapi.dll
+  modules NOT under C:\Windows: 7
+    C:\Users\a1368\Desktop\my-coding-agent\packages\desktop\node_modules\electron\dist\electron.exe
+    C:\WorkBuddy\resources\app.asar.unpacked\cli\vendor\sandbox\5.7.10\tsbx.dll
+    C:\sougou\SogouInput\16.6.0.4777\Resource.dll
+    C:\sougou\SogouInput\Components\IChat\1.0.2.3232\ichat_bundle64.dll
+    C:\sougou\SogouInput\Components\isgpet\1.0.2.3152\isgpet_bundle64.dll
+    C:\sougou\SogouInput\Components\PicFace\1.1.0.3184\PicFace64.dll
+    C:\sougou\SogouInput\Components\systembeautify\1.0.2.2868\systembeautify_bundle64.dll
+  memory ranges (list): 1406
+  threads: 44 (record stride 48 bytes)
+    thread 5364: stack 0xE27F1FBF58+16552 bytes (file rva 6147997), context 1663 bytes   <-- the crashing thread
+    thread 28344: stack 0xE27F9FFA58+1448 bytes (file rva 4063149), context 1663 bytes
+    thread 13948: stack 0xE2007FF558+2728 bytes (file rva 6600616), context 1663 bytes
+    thread 31504: stack 0xE200FFF858+1960 bytes (file rva 5065029), context 1663 bytes
+  faulting address is in C:\Users\a1368\Desktop\my-coding-agent\packages\desktop\node_modules\electron\dist\electron.exe +0x72D4CB9
+  --- strings on the crashing thread's stack (16552 bytes at rva 6147997) ---
+    A +0x2D8: ????????
+    A +0x4D0: ????????X
+    A +0x798: [26804:1013/234131.260:ERROR:con
+    A +0x7E0: 5] GPU process exited unexpected
+    A +0x1448: gpu_data_manager_impl_private.cc:417: GPU process isn't usable. Goodbye.
+    A +0x15B0: [26804:1013/234131.260:FATAL:content\browser\gpu\gpu_data_manager_impl_private.cc:417] GPU process isn't usable. Goodbye.
+    A +0x1D58: -1073741?
+    A +0x1E30: ??????????
+    A +0x2150: IPC.mojom.Channel
+    A +0x2468: ????????
+    A +0x24B8: ????????
+  --- runs that look like a negative exit code (1) ---
+    A +0x1D58: -1073741
