@@ -6,6 +6,7 @@
 // Run with: node scripts/smoke-sidebar.ts
 import { Sidebar, type SidebarState } from "../packages/web/src/render/sidebar.ts";
 import { SessionRows } from "../packages/web/src/rows.ts";
+import { installDom, type FakeNode } from "./dom-shim.ts";
 import type { SessionRow } from "@my-agent/core/protocol";
 
 let failures = 0;
@@ -18,205 +19,31 @@ function check(label: string, condition: boolean, detail = ""): void {
 // ------------------------------------------------------------------ a tiny DOM
 
 /**
- * The smallest DOM the sidebar actually touches.
+ * The DOM comes from `scripts/dom-shim.ts`, which is the **one** copy: this smoke and the jank
+ * harness under `.scratch/window-rework/research/` both drive production views against it.
  *
- * Not a general implementation: only the members the sidebar calls, and each one records what was done
- * to it. The counters are the point — "was this node replaced" is the thing this smoke is about, and a
- * real browser would answer it only by inspecting the heap after the fact.
+ * They used to hold a copy each, and the copies drifted: the harness's was missing `Node.contains`,
+ * which `sidebar.ensureHeading` started using in `482673a` — so this smoke stayed green while the
+ * harness silently stopped running at all, and every performance conclusion after that commit was
+ * read out of the source instead of measured. One copy is the fix, not a tidier layout.
+ *
+ * The counters this file leans on are the shim's: `created` (a node constructed more than once was
+ * rebuilt) and `detached` (a node pulled out of the tree).
  */
-class FakeNode {
-	readonly children: FakeNode[] = [];
-	parent: FakeNode | undefined;
-	textContent: string | undefined;
-	className: string;
-	readonly tag: string;
-	readonly id: string;
-	readonly attributes = new Map<string, string>();
-	/**
-	 * `dataset`, as a live view of the attributes rather than a separate bag.
-	 *
-	 * A real `dataset` *is* the attribute map with a different key spelling, and keeping them apart
-	 * would let the sidebar set `data-depth` in one and read it from the other without failing here.
-	 */
-	readonly dataset: Record<string, string> = new Proxy({} as Record<string, string>, {
-		get: (_target, key: string) => this.attributes.get(`data-${camelToDash(key)}`),
-		set: (_target, key: string, value: string) => {
-			this.attributes.set(`data-${camelToDash(key)}`, String(value));
-			return true;
-		},
-		has: (_target, key: string) => this.attributes.has(`data-${camelToDash(key)}`),
-		deleteProperty: (_target, key: string) => {
-			this.attributes.delete(`data-${camelToDash(key)}`);
-			return true;
-		},
-		ownKeys: () => [...this.attributes.keys()].filter((k) => k.startsWith("data-")).map((k) => k.slice(5)),
-		getOwnPropertyDescriptor: () => ({ enumerable: true, configurable: true }),
-	});
-	/** Inline style, as a property bag — the sidebar sets `--depth` on it. */
-	readonly style = {
-		properties: new Map<string, string>(),
-		setProperty(key: string, value: string): void {
-			this.properties.set(key, value);
-		},
-		removeProperty(key: string): void {
-			this.properties.delete(key);
-		},
-	};
-	/** The element's tooltip. */
-	title = "";
-	/** The element's value, which only an input has but any node may carry. */
-	value = "";
-	/** How many times this exact node was created. Anything above 1 means it was rebuilt. */
-	created: number;
-	/** Set when a node is pulled out of its parent, so "moved" and "replaced" can be told apart. */
-	detached = false;
-	/** The viewport box, as a context menu's positioning code measures it. Zeros are fine. */
-	getBoundingClientRect(): { left: number; right: number; top: number; bottom: number; width: number; height: number } {
-		return { left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0 };
-	}
-	/** The input gesture a rename starts with. */
-	select(): void {}
+const shim = installDom();
 
-	constructor(tag: string, className?: string, text?: string) {
-		this.tag = tag;
-		this.className = className ?? "";
-		this.textContent = text;
-		this.id = `n${++FakeNode.counter}`;
-		this.created = 1;
-	}
-	static counter = 0;
-
-	get classList(): { contains(name: string): boolean; add(name: string): void; remove(name: string): void } {
-		const names = new Set(this.className.split(/\s+/).filter(Boolean));
-		return {
-			contains: (name) => names.has(name),
-			add: (name) => names.add(name),
-			remove: (name) => names.delete(name),
-		};
-	}
-
-	get firstChild(): FakeNode | undefined { return this.children[0]; }
-	get nextSibling(): FakeNode | undefined {
-		if (this.parent === undefined) return undefined;
-		const at = this.parent.children.indexOf(this);
-		return this.parent.children[at + 1];
-	}
-	get firstElementChild(): FakeNode | undefined { return this.children[0]; }
-
-	append(...nodes: FakeNode[]): void {
-		for (const node of nodes) {
-			node.parent?.removeChild(node);
-			node.parent = this;
-			node.detached = false;
-			this.children.push(node);
-		}
-	}
-	prepend(...nodes: FakeNode[]): void { this.append(...nodes); }
-	replaceChildren(...nodes: FakeNode[]): void {
-		for (const child of this.children) { child.detached = true; child.parent = undefined; }
-		this.children.length = 0;
-		this.append(...nodes);
-	}
-	removeChild(node: FakeNode): void {
-		const at = this.children.indexOf(node);
-		if (at >= 0) { this.children.splice(at, 1); node.detached = true; node.parent = undefined; }
-	}
-	remove(): void { this.parent?.removeChild(this); }
-	/** Swap this node out for others in place, which is what the rename editor does to a title. */
-	replaceWith(...nodes: FakeNode[]): void {
-		const parent = this.parent;
-		if (parent === undefined) return;
-		const at = parent.children.indexOf(this);
-		parent.removeChild(this);
-		parent.children.splice(at, 0, ...nodes);
-		for (const node of nodes) {
-			node.parent?.removeChild(node);
-			node.parent = parent;
-			node.detached = false;
-		}
-	}
-	/**
-	 * Move a node, the way the DOM does it.
-	 *
-	 * Unlinking from the old parent is bookkeeping, not detachment: a real `insertBefore` on a node that
-	 * is already in the tree moves it and leaves it attached throughout, which is the whole property
-	 * the sidebar's reordering depends on. Marking it detached here would make a correct move look like
-	 * a remove-and-reinsert and the assertion below would be measuring this shim rather than the code.
-	 */
-	insertBefore(node: FakeNode, reference: FakeNode | null): void {
-		const from = node.parent;
-		if (from !== undefined) {
-			const at = from.children.indexOf(node);
-			if (at >= 0) from.children.splice(at, 1);
-		}
-		node.parent = this;
-		const at = reference === null ? this.children.length : this.children.indexOf(reference);
-		this.children.splice(at < 0 ? this.children.length : at, 0, node);
-	}
-	setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
-	removeAttribute(name: string): void { this.attributes.delete(name); }
-	getAttribute(name: string): string | null { return this.attributes.get(name) ?? null; }
-	/**
-	 * Listeners are recorded rather than dropped, so the smoke can drive the controls the way a click
-	 * would: the search row is opened by its button, and filtered by its input's own event.
-	 */
-	private readonly listeners = new Map<string, ((event?: unknown) => void)[]>();
-	addEventListener(type: string, handler: (event?: unknown) => void): void {
-		const list = this.listeners.get(type) ?? [];
-		list.push(handler);
-		this.listeners.set(type, list);
-	}
-	/**
-	 * Fire one recorded handler, which is what a real click or input event would do.
-	 *
-	 * `event` travels to the handler, which is how a `contextmenu` carries the pointer a menu opens
-	 * at and a `keydown` carries the key that settles a rename.
-	 */
-	dispatch(type: string, event?: unknown): void {
-		for (const handler of this.listeners.get(type) ?? []) handler(event);
-	}
-	/** Whether this node is the given one or holds it, the containment check `ensureHeading` makes. */
-	contains(node: FakeNode): boolean {
-		if (node === this) return true;
-		return this.children.some((child) => child.contains(node));
-	}
-	get lastElementChild(): FakeNode | undefined { return this.children.at(-1); }
-	focus(): void {}
-	set innerHTML(_value: string) {
-		this.children.length = 0;
-		// One child, so `firstElementChild` has something to hand back. Real markup would nest
-		// arbitrarily deep; nothing in this smoke looks inside an icon, so depth would buy nothing.
-		const parsed = new FakeNode("svg");
-		parsed.parent = this;
-		this.children.push(parsed);
-	}
-	/**
-	 * Depth-first search by class name, the one query the sidebar makes.
-	 *
-	 * Implemented because the sidebar's own `querySelector("[aria-current=\"true\"]")` is a real
-	 * behaviour — it decides whether the active row scrolls into view — and a shim that answered
-	 * nothing would quietly stop exercising it.
-	 */
-	querySelector(selector: string): FakeNode | undefined {
-		const wanted = selector.startsWith(".") ? selector.slice(1) : undefined;
-		const wantedAttribute = selector.match(/^\[([a-z-]+)="([^"]*)"\]$/);
-		let found: FakeNode | undefined;
-		const walk = (node: FakeNode): void => {
-			if (found !== undefined) return;
-			if (wanted !== undefined ? node.classList.contains(wanted) : node.getAttribute(wantedAttribute?.[1] ?? "") === wantedAttribute?.[2]) {
-				found = node;
-				return;
-			}
-			for (const child of node.children) walk(child);
-		};
-		walk(this);
-		return found;
-	}
-	scrollIntoView(): void {}
+/**
+ * The open menu's row list, in order.
+ *
+ * A menu hangs on the shim's `document.body`, and the menu is a shim node — so the one place this file
+ * reaches into node internals is here, named, instead of a `body().children` written out five times.
+ */
+function bodyChildren(): FakeNode[] {
+	return (shim.body as unknown as FakeNode).children;
 }
 
 /**
- * The sidebar's own element, seen as what this shim built.
+ * The sidebar's own element, seen as what the shim built.
  *
  * The one cast in the file, and it is here rather than sprinkled at each call site: the sidebar is
  * typed against the real DOM because that is what it runs on, and the shim implements the members it
@@ -226,42 +53,6 @@ class FakeNode {
 function root(sidebar: Sidebar): FakeNode {
 	return sidebar.element as unknown as FakeNode;
 }
-
-/** `depth` to `data-depth`: the spelling a real `dataset` uses between a JS name and an attribute. */
-function camelToDash(name: string): string {
-	return name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
-}
-
-/**
- * Install the shim.
- *
- * `innerHTML` produces exactly one child, because that is all `dom.ts` ever assigns and because
- * `icon()` reads `firstElementChild` straight back out of it. Anything more would be a markup parser.
- *
- * `document.body` is real because the context menu opens there, and the document-level listener
- * stubs exist because a menu registers its dismissal on the document rather than on itself.
- */
-const shim = { body: new FakeNode("body") };
-
-function installDom(): void {
-	const g = globalThis as unknown as Record<string, unknown>;
-	g.document = {
-		createElement: (tag: string) => new FakeNode(tag),
-		getElementById: () => null,
-		documentElement: { dataset: {}, style: { setProperty: () => {} } },
-		body: shim.body,
-		addEventListener: () => {},
-		removeEventListener: () => {},
-	};
-	g.window = { matchMedia: () => ({ matches: false }), innerWidth: 1280, innerHeight: 800 };
-}
-
-/** The shim's `document.body`, which is where an open menu lives. */
-function body(): FakeNode {
-	return shim.body;
-}
-
-installDom();
 
 /** One row as the channel would send it. */
 function row(id: string, modified: number, extra: Partial<SessionRow> = {}): SessionRow {
@@ -716,7 +507,7 @@ process.stdout.write("\nsidebar：右键菜单\n");
 	check("行在列表里", target !== undefined);
 	target?.dispatch("contextmenu", { clientX: 40, clientY: 60, preventDefault() {} });
 
-	const menu = body().children.find((child) => child.className === "menu");
+	const menu = bodyChildren().find((child) => child.className === "menu");
 	check("菜单打开了", menu !== undefined);
 	const labels = (menu?.children ?? [])
 		.filter((child) => child.className === "menu-item")
@@ -726,10 +517,10 @@ process.stdout.write("\nsidebar：右键菜单\n");
 	const forkItem = (menu?.children ?? []).find((child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === "派生新会话");
 	forkItem?.dispatch("click");
 	check("派生拿到的是这一行的会话 id", forked.join(",") === "a", JSON.stringify(forked));
-	check("选完菜单收起了", body().children.every((child) => child.className !== "menu"));
+	check("选完菜单收起了", bodyChildren().every((child) => child.className !== "menu"));
 
 	target?.dispatch("contextmenu", { clientX: 40, clientY: 60, preventDefault() {} });
-	const reopened = body().children.find((child) => child.className === "menu");
+	const reopened = bodyChildren().find((child) => child.className === "menu");
 	const deleteItem = (reopened?.children ?? []).find((child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === "删除");
 	deleteItem?.dispatch("click");
 	check("删除拿到的是同一行的会话 id", deleted.join(",") === "a", JSON.stringify(deleted));
@@ -762,7 +553,7 @@ process.stdout.write("\nsidebar：就地改名\n");
 
 	const forkRow = all(sidebar, "session-item")[1]?.node;
 	forkRow?.dispatch("contextmenu", { clientX: 10, clientY: 10, preventDefault() {} });
-	const menu = body().children.find((child) => child.className === "menu");
+	const menu = bodyChildren().find((child) => child.className === "menu");
 	const renameItem = (menu?.children ?? []).find((child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === "重命名");
 	renameItem?.dispatch("click");
 
@@ -787,7 +578,7 @@ process.stdout.write("\nsidebar：就地改名\n");
 	// Escape sends nothing at all — the typed text included.
 	const rootRow = all(sidebar, "session-item")[0]?.node;
 	rootRow?.dispatch("contextmenu", { clientX: 10, clientY: 10, preventDefault() {} });
-	const again = body().children.find((child) => child.className === "menu");
+	const again = bodyChildren().find((child) => child.className === "menu");
 	const renameAgain = (again?.children ?? []).find((child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === "重命名");
 	renameAgain?.dispatch("click");
 	const editor = all(sidebar, "rename-input")[0]?.node;

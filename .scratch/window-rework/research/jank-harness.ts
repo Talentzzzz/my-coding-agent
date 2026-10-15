@@ -30,7 +30,8 @@
  * - **切换会话**（`switchScenario`）：`openSession()` 端到端——两次 HTTP 往返、快照重放
  *   （`itemsFromSnapshot` + 每条消息的 `renderMarkdown`）、首次绘制。05 号要照这条测量动手。
  */
-import { installDom, asElement, resetWork, work, type FakeNode } from "./dom-shim.ts";
+import { writeFileSync } from "node:fs";
+import { installDom, asElement, resetWork, work, type FakeNode } from "../../../scripts/dom-shim.ts";
 import { TranscriptView } from "../../../packages/web/src/render/transcript.ts";
 import { Sidebar } from "../../../packages/web/src/render/sidebar.ts";
 import { StatusBar } from "../../../packages/web/src/render/statusbar.ts";
@@ -76,7 +77,7 @@ function markdownCostOf(snapshot: SessionSnapshot): { totalMs: number; calls: nu
 }
 
 /** 一条持久消息的正文，按 `state.ts` 的读法（text 块拼起来）。 */
-function textOfMessage(message: unknown): string {
+export function textOfMessage(message: unknown): string {
 	const content = (message as { content?: unknown }).content;
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -102,7 +103,7 @@ const MODEL: ModelOption = {
 const USAGE = { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 150, contextWindow: 200_000 };
 
 /** 一条既有消息的正文：`chars` 字的 markdown 段落。 */
-function messageBody(index: number, chars: number): string {
+export function messageBody(index: number, chars: number): string {
 	if (chars <= 0) return `第 ${index} 条既有消息`;
 	let text = "";
 	let section = 0;
@@ -120,7 +121,7 @@ function messageBody(index: number, chars: number): string {
  * 会话的场景必须给每条会话**各自**的 `stamp`：所有会话共用一批时间戳的话，`transcript.render` 会
  * 把新会话的 item 认成上一个会话那几个 turn（id 相同 → 复用），量出来的就成了"什么都没重画"。
  */
-function snapshotWith(count: number, chars = 20, options: { id?: string; stamp?: number; cwd?: string } = {}): SessionSnapshot {
+export function snapshotWith(count: number, chars = 20, options: { id?: string; stamp?: number; cwd?: string } = {}): SessionSnapshot {
 	const stamp = options.stamp ?? 1_000;
 	const messages = Array.from({ length: count }, (_unused, index) => ({
 		role: index % 2 === 0 ? "user" : "assistant",
@@ -293,19 +294,27 @@ function makeGates() {
 		models: undefined as unknown,
 		approvals: undefined as unknown,
 		directory: undefined as string | undefined,
+		/**
+		 * 工作目录选择器的选择，`main.ts` 里那个 `pickedWorkspace`。
+		 *
+		 * `openSession()` 每次都把它清空（"选择是关于那个**即将**开始的新会话的"），所以它进签名——签名
+		 * 里有一个会变的字段，切换会话时左栏那一栏就真的会重画，而不是被门挡掉。
+		 */
+		pickedWorkspace: "",
 	};
 }
 
 type Gates = ReturnType<typeof makeGates>;
 
 /**
- * `main.ts` 的 `renderSidebar()` 的那个签名：`rows.version|followed|目录|pickedWorkspace|collapsed|channel`。
+ * `main.ts` 的 `renderSidebar()` 的那个签名。
  *
- * 逐字照抄，因为它是"这一帧左栏要不要重画"的唯一判据——流式帧一个字段都不动（于是整段跳过），而
- * 切换会话动的是 `followed` 与目录（于是整段重画）。
+ * 逐字照抄 `main.ts:708`，因为它是"这一帧左栏要不要重画"的唯一判据——流式帧一个字段都不动（于是整段
+ * 跳过），而切换会话动的是 `followed` 与目录（于是整段重画）。**六个字段全在这里、全由调用方给**：
+ * 抄成一个冻死的字面量，下一次 `main.ts` 改公式时这里就会静默地对不上，那正是这一票诊断出的那种漂移。
  */
-function sidebarKey(rows: SessionRows, followed: string | undefined, directory: string): string {
-	return `${rows.version}|${followed ?? ""}|${directory}||${0}|live`;
+function sidebarKey(rows: SessionRows, followed: string | undefined, directory: string, pickedWorkspace: string, collapsed: boolean): string {
+	return `${rows.version}|${followed ?? ""}|${directory}|${pickedWorkspace}|${collapsed ? 1 : 0}|live`;
 }
 
 /**
@@ -342,7 +351,7 @@ function renderFrame(next: ViewState, previous: ViewState, deps: Deps, rows: Ses
 
 	// `render()` 的第一段：`renderSidebar()`。
 	const directory = next.snapshot?.cwd ?? "";
-	const key = sidebarKey(rows, next.snapshot?.id, directory);
+	const key = sidebarKey(rows, next.snapshot?.id, directory, gates.pickedWorkspace, false);
 	if (key !== gates.sidebar) {
 		gates.sidebar = key;
 		gates.directory = directory;
@@ -441,7 +450,7 @@ function streamScenario(historyCount: number, answer: string, chunk: number, fra
 		collapsed: false,
 		channel: "live",
 	});
-	gates.sidebar = sidebarKey(rows, snapshot.id, snapshot.cwd);
+	gates.sidebar = sidebarKey(rows, snapshot.id, snapshot.cwd, gates.pickedWorkspace, false);
 	gates.directory = snapshot.cwd;
 	gates.usage = state.usage;
 	gates.models = state.models;
@@ -595,34 +604,43 @@ function settingsScenario(modelCount: number, iterations: number) {
 /**
  * 假传输层：真 `fetch` + 真的 JSON 文本。
  *
- * `api.read()` 只做三件事——一次 `fetch`、`response.text()`、`JSON.parse`——而这三件都是客户端要付的
- * 真账。所以这里不返回对象而是返回**字符串**：把一个 `SessionSnapshot` 序列化成 `JSON.stringify` 的
- * 结果，再让生产的 `SessionApi` 自己 `JSON.parse` 回来。要是这里直接给对象，切换会话的头一笔账
- * （把 n 条消息的 JSON 解析成对象）就会凭空消失。
+ * `api.read()` 只做三件事——一次 `fetch`、`response.text()`、`JSON.parse`——所以这里不返回对象而是返回
+ * **字符串**：把快照 `JSON.stringify` 出来，让生产的 `SessionApi` 自己 `JSON.parse` 回来。直接给对象
+ * 的话，"把 n 条消息的 JSON 解析成对象"这笔账就凭空消失了。
+ *
+ * **一端在这一侧、一端不在**：`stringify` 在真系统里是**服务端**干的（客户端只收字节），所以它被单独
+ * 计时、单独报（`wire` 那一列），不计进 `read`——`read` 只算客户端真正付的那一笔（`JSON.parse`）。
+ * 服务器的响应时间与网络在 shim 里根本量不到，输出里明说。
  */
 class FakeApi {
 	readonly sessions = new Map<string, SessionSnapshot>();
 	rows: WorkspaceGroup[] = [];
-	readBytes = 0;
 	listBytes = 0;
+	/** 上次读快照时那份 JSON 的字节数。 */
+	lastReadBytes = 0;
+	/** 假服务端把一条快照序列化成 JSON 花了多久——不是客户端付的钱，单独报。 */
+	wireMs = 0;
 
 	read(sessionId: string): { ok: true; text: string } {
 		const snapshot = this.sessions.get(sessionId);
 		if (snapshot === undefined) throw new Error(`FakeApi：没有 ${sessionId} 这个会话`);
+		const started = hrtime();
 		const text = JSON.stringify({ session: snapshot });
-		this.readBytes = text.length;
+		this.wireMs = msBetween(started, hrtime());
+		this.lastReadBytes = text.length;
 		return { ok: true, text };
 	}
 
-	/** 会话列表：`/api/sessions/current`、`/api/sessions` 那几笔都用它。 */
-	list(): { ok: true; text: string } {
-		const text = JSON.stringify({ sessionId: "s1", sessions: this.rows });
+	/** 会话列表：`GET /api/workspaces` 与 `/api/sessions*` 那几笔都用它。 */
+	workspaces(): { ok: true; text: string } {
+		const text = JSON.stringify({ workspaces: this.rows });
 		this.listBytes = text.length;
 		return { ok: true, text };
 	}
 
-	workspaces(): { ok: true; text: string } {
-		const text = JSON.stringify({ workspaces: this.rows });
+	/** `/api/sessions/current`（以及创建/派生那几笔）答的是"哪一条"，外加一份列表。 */
+	sessionId(id: string): { ok: true; text: string } {
+		const text = JSON.stringify({ sessionId: id, sessions: this.rows });
 		this.listBytes = text.length;
 		return { ok: true, text };
 	}
@@ -633,20 +651,20 @@ class FakeApi {
 
 	/** 装上全局 `fetch`，把生产的 `SessionApi` 接到这条假线上。 */
 	install(): void {
-		const g = globalThis as unknown as { fetch: (path: string, init?: { method?: string }) => Promise<unknown>; Response: unknown };
+		const g = globalThis as unknown as { fetch: (path: string, init?: { method?: string }) => Promise<unknown> };
+		// 只有读取路径答得上话：这一票量的是切换会话，写入那几笔（发消息、改名、审批）走后端就是另一张
+		// 票的事了。走到这里说明量具越界了，当场说，别静默答一个形状不对的 body。
 		g.fetch = async (path: string, init?: { method?: string }) => {
 			const method = init?.method ?? "GET";
 			const body =
 				path === "/api/health" ? JSON.stringify({ ok: true, cwd: "/workspace", live: [] })
 				: path === "/api/models" ? this.models().text
 				: path === "/api/workspaces" ? this.workspaces().text
+				: path === "/api/sessions/current" ? this.sessionId(this.rows[0]?.sessions[0]?.id ?? "s0").text
 				: path.startsWith("/api/sessions/") && method === "GET" ? this.read(decodeURIComponent(path.slice("/api/sessions/".length))).text
-				: this.list().text;
-			return {
-				ok: true,
-				status: 200,
-				text: async () => body,
-			};
+				: undefined;
+			if (body === undefined) throw new Error(`FakeApi：没为 ${method} ${path} 准备应答`);
+			return { ok: true, status: 200, text: async () => body };
 		};
 		g.Response = class {
 			readonly ok = true;
@@ -664,8 +682,15 @@ class FakeApi {
 
 /** 一次切换会话的账，按 `openSession()` 的步骤分。 */
 interface SwitchBreakdown {
-	/** 两次 HTTP 往返：`GET /api/sessions/{id}` 与 `GET /api/workspaces`（含两侧的 JSON）。 */
+	/**
+	 * 读快照那一笔里**客户端**付的：`response.text()` + `JSON.parse`。
+	 *
+	 * `stringify` 不在里面——真系统里那是服务端干的，量具把它单独放在 {@link wireMs}。
+	 */
 	readMs: number;
+	/** 那一笔快照在假服务端被序列化花了多久。**不是客户端的账**，列出来只是为了看清它有多大。 */
+	wireMs: number;
+	/** 第二笔往返：`GET /api/workspaces` 的解析 + 左栏重画。 */
 	refreshMs: number;
 	/** 快照重放：`reduce(baseline)`——`itemsFromSnapshot` + `buildBranchTree`。 */
 	reduceMs: number;
@@ -673,7 +698,7 @@ interface SwitchBreakdown {
 	paintMs: number;
 	/** 那一帧里 Markdown 自己占多少：同一批文本重画一遍量的（不重复计入 `paintMs`）。 */
 	markdownMs: number;
-	/** 同步总时长：账面上"点了这一行之后主线程被占住多久"。 */
+	/** 同步总时长：账面上"点了这一行之后主线程被占住多久"。`wireMs` 不在里面。 */
 	syncMs: number;
 	readBytes: number;
 	renderedMessages: number;
@@ -697,6 +722,7 @@ async function driveOpenSession(api: FakeApi, sessionId: string, deps: Deps, sta
 	const client = new SessionApi();
 	const breakdown: SwitchBreakdown = {
 		readMs: 0,
+		wireMs: 0,
 		refreshMs: 0,
 		reduceMs: 0,
 		paintMs: 0,
@@ -709,11 +735,13 @@ async function driveOpenSession(api: FakeApi, sessionId: string, deps: Deps, sta
 	};
 	const syncStart = hrtime();
 
-	// 1. 读快照：`await api.read(sessionId)`。
+	// 1. 读快照：`await api.read(sessionId)`。计时的这一段里只有客户端付的钱：`response.text()` 与
+	//    `JSON.parse`。假服务端那次 `stringify` 被单独记在 `wireMs`，**不进 `syncMs`**。
 	const readStart = hrtime();
 	const snapshot = await client.read(sessionId);
 	breakdown.readMs = msBetween(readStart, hrtime());
-	breakdown.readBytes = api.readBytes;
+	breakdown.wireMs = api.wireMs;
+	breakdown.readBytes = api.lastReadBytes;
 
 	// 2. 重放：`apply(reduce(state, { type: "baseline", session: snapshot }))`，两段都量。
 	const reduceStart = hrtime();
@@ -753,9 +781,13 @@ interface SwitchRow {
 	chars: number;
 	/** `fresh`：每次切换都换一副新的窗口 chrome（相当于页面刚打开）。`reuse`：窗口不变，只有 pane 变。 */
 	mode: "fresh" | "reuse";
+	/** 采样几次，以及被当成热身丢掉了前几次。 */
 	runs: number;
+	warmup: number;
 	readMs: number;
 	readP50: number;
+	/** 假服务端序列化那条快照花的时间——**不是客户端付的钱**，与 `readMs` 分开列。 */
+	wireMs: number;
 	refreshMs: number;
 	reduceMs: number;
 	reduceP50: number;
@@ -834,8 +866,10 @@ async function switchScenario(tag: string, history: number, chars: number, runs:
 		chars,
 		mode,
 		runs: samples.length,
+		warmup: WARMUP,
 		readMs: mean((row) => row.readMs),
 		readP50: median((row) => row.readMs),
+		wireMs: mean((row) => row.wireMs),
 		refreshMs: mean((row) => row.refreshMs),
 		reduceMs: mean((row) => row.reduceMs),
 		reduceP50: median((row) => row.reduceMs),
@@ -863,61 +897,75 @@ const answer = longAnswer(ANSWER_LENGTH);
 const out: Record<string, unknown> = {};
 const log = (line = ""): void => process.stdout.write(`${line}\n`);
 
-log("== jank-harness：窄 DOM 宿主中的前端逐帧成本 ==");
-log(`node=${process.version} frames=${FRAMES} chunk=${CHUNK} answerLength=${answer.length}`);
-log("诚实限度：绝对毫秒不是真实帧时间（shim 不是浏览器）；可靠的信号是同一把尺子下的短/长比值。");
-log();
+/**
+ * 这份输出的一个去处：`HARNESS_OUT=<路径>` 时同时写一份 UTF-8 无 BOM 的副本。
+ *
+ * 为什么要这个开关而不是 `> file`：本仓库的 shell 是 Windows PowerShell 5.1，`>` 重定向写的是
+ * **UTF-16LE**——中文变成乱码、NUL 满地、git 把产物当二进制。证据文件要留得住，就得让写它的进程
+ * 自己按 UTF-8 写。
+ */
+const HARNESS_OUT = process.env.HARNESS_OUT;
+const sink: string[] = [];
+const emit = (line = ""): void => {
+	if (HARNESS_OUT !== undefined) sink.push(line);
+	log(line);
+};
+
+emit("== jank-harness：窄 DOM 宿主中的前端逐帧成本 ==");
+emit(`node=${process.version} frames=${FRAMES} chunk=${CHUNK} answerLength=${answer.length}`);
+emit("诚实限度：绝对毫秒不是真实帧时间（shim 不是浏览器）；可靠的信号是同一把尺子下的短/长比值。");
+emit();
 
 // warmup（丢弃），让 V8 把这些路径 JIT 编译热。
 streamScenario(50, answer, CHUNK, FRAMES, true);
-log("warmup 完成");
-log();
+emit("warmup 完成");
+emit();
 
 {
 	const short = streamScenario(50, answer, CHUNK, FRAMES, false);
 	const long = streamScenario(500, answer, CHUNK, FRAMES, false);
 
 	const stageNames = ["reduce", "transcript", "chrome", "sidebar", "header", "notices", "full"];
-	log("流式一帧：apply()/render() 逐段门控之后的每帧成本");
-	log("阶段                 | 短历史(50) mean/p95/max ms      | 长历史(500) mean/p95/max ms     | 长/短 mean 比");
-	log("---------------------+---------------------------------+---------------------------------+-------------");
+	emit("流式一帧：apply()/render() 逐段门控之后的每帧成本");
+	emit("阶段                 | 短历史(50) mean/p95/max ms      | 长历史(500) mean/p95/max ms     | 长/短 mean 比");
+	emit("---------------------+---------------------------------+---------------------------------+-------------");
 	for (const name of stageNames) {
 		const s = short.stages[name]!;
 		const l = long.stages[name]!;
 		const ratio = s.mean > 0 ? l.mean / s.mean : 0;
-		log(
+		emit(
 			`${name.padEnd(20)} | ${f4(s.mean)} / ${f4(s.p95)} / ${f4(s.max)}`.padEnd(56)
 			+ `| ${f4(l.mean)} / ${f4(l.p95)} / ${f4(l.max)}`.padEnd(34)
 			+ `| ${ratio.toFixed(2)}x`,
 		);
 	}
-	log();
-	log(`每帧工作量（短历史）：nodes=${short.workPerFrame.nodes?.toFixed(1)} appends=${short.workPerFrame.appends?.toFixed(1)} querySelector=${short.workPerFrame.qs?.toFixed(1)} qsNodes=${short.workPerFrame.qsNodes?.toFixed(1)}`);
-	log(`每帧工作量（长历史）：nodes=${long.workPerFrame.nodes?.toFixed(1)} appends=${long.workPerFrame.appends?.toFixed(1)} querySelector=${long.workPerFrame.qs?.toFixed(1)} qsNodes=${long.workPerFrame.qsNodes?.toFixed(1)}`);
-	log(`sanity：短 turnSections=${short.sanity.turnSections} items=${short.sanity.items}；长 turnSections=${long.sanity.turnSections} items=${long.sanity.items}`);
-	log();
+	emit();
+	emit(`每帧工作量（短历史）：nodes=${short.workPerFrame.nodes?.toFixed(1)} appends=${short.workPerFrame.appends?.toFixed(1)} querySelector=${short.workPerFrame.qs?.toFixed(1)} qsNodes=${short.workPerFrame.qsNodes?.toFixed(1)}`);
+	emit(`每帧工作量（长历史）：nodes=${long.workPerFrame.nodes?.toFixed(1)} appends=${long.workPerFrame.appends?.toFixed(1)} querySelector=${long.workPerFrame.qs?.toFixed(1)} qsNodes=${long.workPerFrame.qsNodes?.toFixed(1)}`);
+	emit(`sanity：短 turnSections=${short.sanity.turnSections} items=${short.sanity.items}；长 turnSections=${long.sanity.turnSections} items=${long.sanity.items}`);
+	emit();
 	Object.assign(out, { short, long });
 }
 
 {
 	const markdownResult = markdownScenario(answer, CHUNK, Math.floor(answer.length / CHUNK));
-	log("renderMarkdown / parseBlocks（单条消息随长度增长）");
-	log(`  frames=${markdownResult.frames} 首帧文本~${CHUNK}字 末帧文本~${answer.length}字`);
-	log(`  parseBlocks   mean=${f4(markdownResult.parse.mean)}ms 首四分之一均值=${f4(markdownResult.parse.firstQuarterMean)}ms 末四分之一均值=${f4(markdownResult.parse.lastQuarterMean)}ms 末/首=${(markdownResult.parse.lastQuarterMean / markdownResult.parse.firstQuarterMean).toFixed(1)}x max=${f4(markdownResult.parse.max)}ms`);
-	log(`  renderMarkdown mean=${f4(markdownResult.render.mean)}ms 首四分之一均值=${f4(markdownResult.render.firstQuarterMean)}ms 末四分之一均值=${f4(markdownResult.render.lastQuarterMean)}ms 末/首=${(markdownResult.render.lastQuarterMean / markdownResult.render.firstQuarterMean).toFixed(1)}x max=${f4(markdownResult.render.max)}ms`);
-	log(`  单条消息的 renderMarkdown 总耗时=${f4(markdownResult.render.sum)}ms（${markdownResult.frames} 帧）`);
-	log();
+	emit("renderMarkdown / parseBlocks（单条消息随长度增长）");
+	emit(`  frames=${markdownResult.frames} 首帧文本~${CHUNK}字 末帧文本~${answer.length}字`);
+	emit(`  parseBlocks   mean=${f4(markdownResult.parse.mean)}ms 首四分之一均值=${f4(markdownResult.parse.firstQuarterMean)}ms 末四分之一均值=${f4(markdownResult.parse.lastQuarterMean)}ms 末/首=${(markdownResult.parse.lastQuarterMean / markdownResult.parse.firstQuarterMean).toFixed(1)}x max=${f4(markdownResult.parse.max)}ms`);
+	emit(`  renderMarkdown mean=${f4(markdownResult.render.mean)}ms 首四分之一均值=${f4(markdownResult.render.firstQuarterMean)}ms 末四分之一均值=${f4(markdownResult.render.lastQuarterMean)}ms 末/首=${(markdownResult.render.lastQuarterMean / markdownResult.render.firstQuarterMean).toFixed(1)}x max=${f4(markdownResult.render.max)}ms`);
+	emit(`  单条消息的 renderMarkdown 总耗时=${f4(markdownResult.render.sum)}ms（${markdownResult.frames} 帧）`);
+	emit();
 	out.markdown = markdownResult;
 }
 
 {
 	const sidebarSmall = sidebarScenario(4, 500);
 	const sidebarBig = sidebarScenario(200, 500);
-	log("sidebar.render（随会话行数增长）");
-	log(`  4 行  ：mean=${f4(sidebarSmall.mean)}ms p95=${f4(sidebarSmall.p95)}ms max=${f4(sidebarSmall.max)}ms qs/次=${sidebarSmall.qsPerCall.toFixed(1)} nodes/次=${sidebarSmall.nodesPerCall.toFixed(1)}`);
-	log(`  200 行：mean=${f4(sidebarBig.mean)}ms p95=${f4(sidebarBig.p95)}ms max=${f4(sidebarBig.max)}ms qs/次=${sidebarBig.qsPerCall.toFixed(1)} nodes/次=${sidebarBig.nodesPerCall.toFixed(1)}`);
-	log(`  200/4 mean 比 = ${(sidebarBig.mean / sidebarSmall.mean).toFixed(1)}x`);
-	log();
+	emit("sidebar.render（随会话行数增长）");
+	emit(`  4 行  ：mean=${f4(sidebarSmall.mean)}ms p95=${f4(sidebarSmall.p95)}ms max=${f4(sidebarSmall.max)}ms qs/次=${sidebarSmall.qsPerCall.toFixed(1)} nodes/次=${sidebarSmall.nodesPerCall.toFixed(1)}`);
+	emit(`  200 行：mean=${f4(sidebarBig.mean)}ms p95=${f4(sidebarBig.p95)}ms max=${f4(sidebarBig.max)}ms qs/次=${sidebarBig.qsPerCall.toFixed(1)} nodes/次=${sidebarBig.nodesPerCall.toFixed(1)}`);
+	emit(`  200/4 mean 比 = ${(sidebarBig.mean / sidebarSmall.mean).toFixed(1)}x`);
+	emit();
 	out.sidebarSmall = sidebarSmall;
 	out.sidebarBig = sidebarBig;
 }
@@ -925,11 +973,11 @@ log();
 {
 	const toolsSmall = toolsScenario(4, 300);
 	const toolsBig = toolsScenario(40, 300);
-	log("工具组更新（renderTools 的 shape + 整组重建）");
-	log(`  组内 4 卡 ：transcript.render mean=${f4(toolsSmall.mean)}ms max=${f4(toolsSmall.max)}ms nodes/帧=${toolsSmall.nodesPerFrame.toFixed(1)}`);
-	log(`  组内 40 卡：transcript.render mean=${f4(toolsBig.mean)}ms max=${f4(toolsBig.max)}ms nodes/帧=${toolsBig.nodesPerFrame.toFixed(1)}`);
-	log(`  40/4 mean 比 = ${(toolsBig.mean / toolsSmall.mean).toFixed(1)}x`);
-	log();
+	emit("工具组更新（renderTools 的 shape + 整组重建）");
+	emit(`  组内 4 卡 ：transcript.render mean=${f4(toolsSmall.mean)}ms max=${f4(toolsSmall.max)}ms nodes/帧=${toolsSmall.nodesPerFrame.toFixed(1)}`);
+	emit(`  组内 40 卡：transcript.render mean=${f4(toolsBig.mean)}ms max=${f4(toolsBig.max)}ms nodes/帧=${toolsBig.nodesPerFrame.toFixed(1)}`);
+	emit(`  40/4 mean 比 = ${(toolsBig.mean / toolsSmall.mean).toFixed(1)}x`);
+	emit();
 	out.toolsSmall = toolsSmall;
 	out.toolsBig = toolsBig;
 }
@@ -937,20 +985,20 @@ log();
 {
 	const settingsSmall = settingsScenario(1, 100);
 	const settingsBig = settingsScenario(50, 100);
-	log("settings.render（仅面板打开、切到模型页时跑）");
-	log(`  1 个模型 ：mean=${f4(settingsSmall.mean)}ms max=${f4(settingsSmall.max)}ms nodes/次=${settingsSmall.nodesPerCall.toFixed(1)}`);
-	log(`  50 个模型：mean=${f4(settingsBig.mean)}ms max=${f4(settingsBig.max)}ms nodes/次=${settingsBig.nodesPerCall.toFixed(1)}`);
-	log();
+	emit("settings.render（仅面板打开、切到模型页时跑）");
+	emit(`  1 个模型 ：mean=${f4(settingsSmall.mean)}ms max=${f4(settingsSmall.max)}ms nodes/次=${settingsSmall.nodesPerCall.toFixed(1)}`);
+	emit(`  50 个模型：mean=${f4(settingsBig.mean)}ms max=${f4(settingsBig.max)}ms nodes/次=${settingsBig.nodesPerCall.toFixed(1)}`);
+	emit();
 	out.settingsSmall = settingsSmall;
 	out.settingsBig = settingsBig;
 }
 
 {
 	const SWITCH_RUNS = Number(process.env.SWITCH_RUNS ?? "12");
-	log("切换会话：openSession() 端到端");
-	log("诚实限度：两次 HTTP 往返跑在同一进程里，量到的是**客户端这一侧**的解析与重画代价，不是网络延迟；");
-	log("          真窗口里那两笔还要再加上服务器响应时间，shim 里量不到。");
-	log();
+	emit("切换会话：openSession() 端到端");
+	emit("诚实限度：两次 HTTP 往返跑在同一进程里，量到的是**客户端这一侧**的解析与重画代价，不是网络延迟；");
+	emit("          真窗口里那两笔还要再加上服务器响应时间，shim 里量不到。");
+	emit();
 	const rows: SwitchRow[] = [];
 	// 两条轴分开量：一条让历史变多，一条让每条消息变长（renderMarkdown 的活随它涨）。
 	// `reuse` 是真实点击那条路（窗口的 chrome 是活的），`fresh` 每次换一副新 chrome 作为对照。
@@ -964,12 +1012,13 @@ log();
 	for (const [tag, history, chars, mode] of cases) rows.push(await switchScenario(tag, history, chars, SWITCH_RUNS, mode));
 
 	const cell = (mean: number, p50: number): string => pad(`${mean.toFixed(2)}/${p50.toFixed(2)}`, 15);
-	log(pad("场景", 34) + pad("read", 15) + pad("refresh", 9) + pad("reduce", 15) + pad("paint", 15) + pad("其中md", 15) + pad("sync", 15));
-	log("-".repeat(118));
+	emit(pad("场景", 34) + pad("read", 15) + pad("wire", 9) + pad("refresh", 9) + pad("reduce", 15) + pad("paint", 15) + pad("其中md", 15) + pad("sync", 15));
+	emit("-".repeat(127));
 	for (const row of rows) {
-		log(
+		emit(
 			pad(row.tag, 34)
 			+ cell(row.readMs, row.readP50)
+			+ pad(`${row.wireMs.toFixed(2)}ms`, 9)
 			+ pad(`${row.refreshMs.toFixed(2)}ms`, 9)
 			+ cell(row.reduceMs, row.reduceP50)
 			+ cell(row.paintMs, row.paintP50)
@@ -977,36 +1026,43 @@ log();
 			+ cell(row.syncMs, row.syncP50),
 		);
 	}
-	log();
-	log("每个数据格是「均值/中位数」（单位 ms）——切换会话的单次样本有长尾，中位数比均值更能代表「平常那一下」。");	log("read = 读快照那一笔往返（客户端侧）；refresh = 列表那一笔往返 + 左栏重画；");
-	log("reduce = 快照重放（itemsFromSnapshot + buildBranchTree）；paint = 首次绘制整棵 transcript + chrome；");
-	log("其中md = 那一帧里 Markdown 自己占的（同一批文本重画一遍量的，不重复计入 sync；归因由 markdown-attribution-probe.ts 单独核对）；sync = 整段同步总时长。");
-	log(`每次场景采样 ${rows[0]?.runs ?? 0} 次（另外前 3 次当热身丢掉）。`);
-	log();
+	emit();
+	emit("每个数据格是「均值/中位数」（单位 ms）——切换会话的单次样本有长尾，中位数比均值更能代表「平常那一下」。");
+	emit("read = 读快照时**客户端**付的（response.text + JSON.parse）；refresh = 第二笔往返的解析 + 左栏重画；");
+	emit("wire = 假**服务端**把那条快照 stringify 出来的时间——真系统里不归客户端，列在这里只是为了看见它有多大；");
+	emit("reduce = 快照重放（itemsFromSnapshot + buildBranchTree）；paint = 首次绘制整棵 transcript + chrome；");
+	emit("其中md = 那一帧里 Markdown 自己占的（同一批文本重画一遍量的，不重复计入 sync；归因由 markdown-attribution-probe.ts 单独核对）；sync = 整段同步总时长。");
+	emit(`每次场景采样 ${rows[0]?.runs ?? 0} 次（另外前 ${rows[0]?.warmup ?? 0} 次当热身丢掉）。`);
+	emit("网络延迟与服务器响应时间在 shim 里量不到：这里量的是「切换一次会话，客户端要同步做多少活」。");
+	emit();
 	const base = rows[0]!;
 	for (const row of rows.slice(1)) {
-		log(
+		emit(
 			`比值 ${row.tag} / ${base.tag}：sync ${(row.syncMs / base.syncMs).toFixed(2)}x`
 			+ `（read ${(row.readMs / base.readMs).toFixed(2)}x、reduce ${(row.reduceMs / base.reduceMs).toFixed(2)}x、`
 			+ `paint ${(row.paintMs / base.paintMs).toFixed(2)}x、md ${(row.markdownMs / base.markdownMs).toFixed(2)}x）`,
 		);
 	}
-	log();
-	log("同步时间里 Markdown 占多少（同一个场景，md ÷ sync；两条量法各有一点偏差，100% 附近读作「基本全是它」）");
+	emit();
+	emit("同步时间里 Markdown 占多少（同一个场景，md ÷ sync；两条量法各有一点偏差，100% 附近读作「基本全是它」）");
 	for (const row of rows) {
-		log(`  ${pad(row.tag, 34)} ${((row.markdownMs / row.syncMs) * 100).toFixed(0)}%（${row.markdownMs.toFixed(1)}ms / ${row.syncMs.toFixed(1)}ms）`);
+		emit(`  ${pad(row.tag, 34)} ${((row.markdownMs / row.syncMs) * 100).toFixed(0)}%（${row.markdownMs.toFixed(1)}ms / ${row.syncMs.toFixed(1)}ms）`);
 	}
-	log();
-	log("每次切换的规模：快照 JSON 字节 / 画出的 turn / Markdown 调用次数与总字数");
+	emit();
+	emit("每次切换的规模：快照 JSON 字节 / 画出的 turn / Markdown 调用次数与总字数");
 	for (const row of rows) {
-		log(
+		emit(
 			`  ${pad(row.tag, 36)} ${String(row.readBytes).padStart(8)} B  turns=${String(row.turnSections).padStart(4)}`
 			+ `  md×${String(row.markdownCalls).padStart(4)}  ${String(row.markdownChars).padStart(7)} 字`,
 		);
 	}
-	log();
+	emit();
 	out.switch = rows;
 }
 
-log("=== JSON ===");
-log(JSON.stringify(out));
+emit("=== JSON ===");
+emit(JSON.stringify(out));
+
+if (HARNESS_OUT !== undefined) {
+	writeFileSync(HARNESS_OUT, `${sink.join("\n")}\n`, "utf8");
+}

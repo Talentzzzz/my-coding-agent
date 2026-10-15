@@ -35,7 +35,6 @@ function fail(node: FakeNode, member: string): never {
 
 function missing(node: FakeNode, member: string, value: unknown): unknown {
 	if (value !== undefined) return value;
-	if (typeof member === "symbol") return value;
 	// 那些"是个对象都会问一句"的成员：内建探测、调试器、Error 排版。它们不是产品代码在要 DOM。
 	if (IGNORED.has(member)) return value;
 	if (strict) fail(node, member);
@@ -43,20 +42,7 @@ function missing(node: FakeNode, member: string, value: unknown): unknown {
 }
 
 /** 内建/工具链自己会读的键，不算"产品代码在要一个 DOM 成员"。 */
-const IGNORED = new Set([
-	"then",
-	"constructor",
-	"prototype",
-	"toJSON",
-	"valueOf",
-	"toString",
-	"inspect",
-	"nodeType",
-	Symbol.iterator as unknown as string,
-	Symbol.toPrimitive as unknown as string,
-	Symbol.toStringTag as unknown as string,
-	"@@iterator",
-]);
+const IGNORED = new Set(["then", "constructor", "prototype", "toJSON", "valueOf", "toString", "inspect", "nodeType"]);
 
 // ------------------------------------------------------------------ 记账
 
@@ -87,6 +73,11 @@ class FakeNode {
 	scrollHeight = 0;
 	clientHeight = 0;
 	clientWidth = 0;
+	/** 这个节点被构造过几次——`smoke-sidebar.ts` 拿它分辨"原地改"与"重建"。 */
+	created = 1;
+	/** 每个节点一个独有的 id，与真 DOM 一样。 */
+	readonly id: string;
+	private static counter = 0;
 	/** 真 DOM 的 `open`（`<details>`）；`transcript.ts` 用它决定正文要不要解析。 */
 	open = false;
 	checked = false;
@@ -136,6 +127,8 @@ class FakeNode {
 		this.tag = tag;
 		this.className = className ?? "";
 		this._text = text;
+		FakeNode.counter += 1;
+		this.id = `n${FakeNode.counter}`;
 		work.nodes += 1;
 	}
 
@@ -144,9 +137,6 @@ class FakeNode {
 	}
 	get tagName(): string {
 		return this.tag.toUpperCase();
-	}
-	get id(): string {
-		return this.attributes.get("id") ?? "";
 	}
 	get hidden(): boolean {
 		return this.attributes.has("hidden");
@@ -286,6 +276,9 @@ class FakeNode {
 			this.children.splice(at, 1);
 			node.detached = true;
 			node.parent = undefined;
+			// 空了就得把旧的 `_text` 忘掉：真 DOM 里 `textContent` 是"当下这些孩子拼起来的字"，
+			// 留着一个早就被孩子盖掉、又被摘空的旧串，是这套 shim 自己造出来的第三态。
+			if (this.children.length === 0) this._text = undefined;
 		}
 	}
 	remove(): void {
@@ -457,7 +450,9 @@ function matches(node: FakeNode, selector: string): boolean {
  * 严格模式的闸门。
  *
  * 读一个**没实现**的成员当场抛。实现过的成员走原型，一次不碰——所以这层代理只在有人越界时才说话。
- * 不代理 `document` / `window`，那里少几个成员是"没用到"，不是"用错了"。
+ *
+ * **它只管元素。** `document` 与 `window` 是普通对象，不代理：那里少几个成员通常是"这条路没走到"，
+ * 而不是"用错了"。所以量具跑得完，等于**它走过的那条路上**要的元素成员齐了——不等于整棵 DOM 面齐了。
  */
 function guard(node: FakeNode): FakeNode {
 	return new Proxy(node, {
@@ -593,10 +588,16 @@ export function installDom(options: InstallOptions = {}): DomShim {
 	return { document, body, root, window: windowObject };
 }
 
-/** 把 shim 里的节点当成真 DOM 元素用；**全文件唯一**的一次类型缺口，与 smoke-sidebar 同一条理由。 */
+/**
+ * Hand a shim node to code that is typed against the real DOM.
+ *
+ * The one bridge between the two types, and it exists because the views are typed against
+ * `HTMLElement` — that is what they run on in the browser — while the shim implements the members they
+ * actually call. Every caller is a harness, so the gap between the two types is never what is under
+ * test; keeping the cast here means there is one place to look when it finally bites.
+ */
 export function asElement(node: FakeNode): HTMLElement {
 	return node as unknown as HTMLElement;
 }
 
 export type { FakeNode };
-export { FakeNode as FakeNodeClass };

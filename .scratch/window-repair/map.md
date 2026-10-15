@@ -179,17 +179,19 @@ resolved**，本图接着它们往下走，但有两条是**重开**而不是新
   所以 ADR 里的开关语义全部落在本机实测上，这一点在 ADR 的「证据的限度」里明说。
 - [04 修好卡顿量具](issues/04-jank-harness.md)：量具的病因不是"缺一个 `contains`"，而是**同一个 shim 被
   两份代码各抄了一遍**——`smoke-sidebar.ts` 那份补了 `contains`，`jank-harness.ts` 那份没补，于是
-  `482673a` 之后量具静默废掉、H6 之后的结论全是读代码读出来的。修法是**一份 shim**
-  （`research/dom-shim.ts`，按今天产品代码的 DOM 面补齐，缺成员默认**当场抛**）＋把量具的折叠顺序
-  对齐今天的 `apply()`/`render()`（老副本每帧多画一遍状态行、左栏签名抄的是旧公式）。顺带修掉两个
-  只有全量跑才现形的坑：`classList.add/remove` 老 shim 改的是副本（于是"加 `dragging`"这类行为在量具
-  里从没生效过）、以及 shim 把所有创建过的节点钉在堆上（全量跑 OOM，4 GB）。
-  **新场景 `switchScenario` 把「切换会话」拆开了**（500 条×4000 字，中位数）：`read` 8.8 ms、
-  `refresh` 0.29 ms、`reduce` 2.7 ms、`paint` 168 ms、`sync` 194 ms；**那第二笔没有效果的往返只占 1%
-  上下，顿的是首次绘制，而绘制里几乎全是每条消息的 `renderMarkdown`**（`其中md` 166 ms；口径由
-  `research/markdown-attribution-probe.ts` 独立核对：整棵 188 ms / 单量 217 ms / 单字残值 4 ms）。
-  **05 号的着力点因此是"快照重放时不要逐条重画 Markdown"，不是"删掉第二次往返"。** 量具全程零产品
-  代码改动；`npm run check` 与五个 smoke 全绿。
+  `482673a` 之后量具静默废掉、H6 之后的结论全是读代码读出来的。修法是**只剩一份**
+  （`scripts/dom-shim.ts`，两位用户共用，缺成员默认**当场抛**，并进了 `packages/web/tsconfig.json` 的
+  include 让 `npm run check` 管住它）＋把量具的折叠顺序对齐今天的 `apply()`/`render()`（老副本每帧多画
+  一遍状态行、左栏签名抄的是旧公式）。顺带修掉两个只有全量跑才现形的坑：`classList.add/remove` 老
+  shim 改的是副本（"加 `dragging`"这类行为在量具里从没生效过）、以及 shim 把所有创建过的节点钉在堆上
+  （全量跑 OOM，4 GB）。
+  **新场景 `switchScenario` 把「切换会话」拆开了**（500 条×4000 字，中位数）：`read`（客户端解析）
+  7.5 ms、`wire`（假服务端 stringify，不归客户端）5.3 ms、`refresh` 0.25 ms、`reduce` 1.9 ms、
+  `paint` 161 ms、`sync` 173 ms；**那第二笔没有效果的往返只占 1% 上下，顿的是首次绘制，而绘制里几乎
+  全是每条消息的 `renderMarkdown`**（`其中md` 155 ms；口径由 `research/markdown-attribution-probe.ts`
+  独立核对：整棵 134～148 ms / 单量 132～153 ms / 单字残值 3.4～4.7 ms）。
+  **05 号的着力点因此是"快照重放时不要逐条重画 Markdown"，不是"删掉第二次往返"。** 量具零产品代码
+  改动（只动了一个 smoke 与一份 tsconfig）；`npm run check` 与五个 smoke 全绿。
 
 ## Not yet specified
 - **"卡"在真窗口里的真实帧时间**：今天所有性能数字都是 `FakeNode` shim 量出来的**比值**，没有一帧

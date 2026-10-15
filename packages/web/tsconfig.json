@@ -18,8 +18,12 @@
 	// The smokes are included here rather than in the root project because they import this package's
 	// sources, and they need the same `lib` they do — the reducer touches `document` for the theme, and
 	// a check without the DOM types would fail on code the package legitimately contains.
+	//
+	// `scripts/dom-shim.ts` rides along for the same reason: it *is* the DOM those smokes run against
+	// (it builds `HTMLElement`s), and it is imported by `smoke-sidebar.ts`, which is checked here.
 	"include": [
 		"src/**/*.ts",
+		"../../scripts/dom-shim.ts",
 		"../../scripts/smoke-mux-client.ts",
 		"../../scripts/smoke-mux-live.ts",
 		"../../scripts/smoke-sidebar.ts",
