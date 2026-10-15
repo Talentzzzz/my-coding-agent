@@ -85,6 +85,13 @@ WebSocket 连接处报 "the mux connection failed"——那是没起服务器，
 
 <!-- 关掉的 ticket 依次列在这里：一行要点 + 指向该 ticket 的链接 -->
 
+- [19 真窗口核验：分支、fork、改名三个入口可达且可用](issues/19-entry-verification.md)：**三个
+  入口在最新构建里全部可达且可用**（`research/verify-19.ts`，真 UI 24 条断言全绿，出图 10 张
+  在 `research/v19-*.png`）。用户报的「没实现」核实为**旧构建 + 入口藏得深**（fork/改名/删除
+  只在会话行右键菜单、无常驻按钮；「当前分支」块单走法时整块隐藏，要先分过岔）。核验跑出两条
+  真 bug，按票面规矩另开、不在 19 里修：[21 删除刚派生的会话后会订阅已删会话（红横幅
+  「未知的会话」）](issues/21-fork-then-delete-stale-open.md)、
+  [22 空态的模型位读作「（已丢失）」](issues/22-empty-state-model-seat.md)。
 - [17 整体字号抬高：原型拍板维持现状](issues/17-type-scale-up.md)：三方案原型
   （`prototype/type-scale.html`，真窗口构图、`?variant=` 切换、悬停读实际字号）让用户对照后
   收回原始诉求——五档一字不动，"小一号"的感觉来自别处；后续某个具体面再读着小，按面开新票。

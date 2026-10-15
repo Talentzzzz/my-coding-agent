@@ -1,0 +1,37 @@
+  ok   会话行已出现在左栏
+base title: V19uu288 看结构
+  ok   右键菜单三项：派生新会话 / 重命名 / 删除
+A1 v19-a1-session-menu.png
+  ok   改名框预填净名
+A2 v19-a2-rename-input.png
+  ok   改名后左栏行显示新名
+  ok   改名后旧名不再出现
+  ok   改名的是正在读的会话时头部跟上
+A3 v19-a3-renamed.png
+  ok   派生行的标题是 源标题（1）
+A4 v19-a4-forked.png
+  ok   派生会话复制了整份记录
+  ok   删除后派生行不再出现
+  ok   源会话行还在
+A5 v19-a5-deleted.png
+  ok   点击会话行回到了那条会话
+  ok   窗口真的载入了那条会话
+  ok   用户消息右键有「从此分支」
+  ok   用户消息右键有「查看分支图」
+B1 v19-b1-user-menu.png
+  !!  错误横幅 @B1：未知的会话：01a13f3b-0922-753f-aee6-17005ba6f365
+  ok   从此分支回卷了 leaf
+  ok   再发一句长出第二条走法
+  ok   分过岔后「当前分支」块出现
+B2 v19-b2-branched.png
+  ok   分支块点开换成分支页
+  ok   分支页没有输入框
+  ok   分支页画出了节点
+C1 v19-c1-branch-page.png
+  ok   存在一条可选的非活跃走法
+  ok   选中后按钮改口成「切到这一条并回到对话」
+C2 v19-c2-branch-selected.png
+  ok   切回去后回到对话页
+  ok   固定头写着新的当前分支
+C3 v19-c3-branch-switched.png
+verify-19: 三个入口全绿（过程中出现错误横幅 1 次）
