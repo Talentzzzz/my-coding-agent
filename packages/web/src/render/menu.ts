@@ -8,6 +8,8 @@ export interface MenuItem {
 	title?: string;
 	/** The row the choice currently sits on, marked rather than left to be discovered. */
 	active?: boolean;
+	/** A destructive row, named by colour as well as by words. */
+	danger?: boolean;
 	onSelect?(): void;
 	kind?: "separator";
 }
@@ -25,10 +27,37 @@ export interface MenuItem {
  * a popup has everywhere else on this platform. Dismissal is outside-pointerdown, Escape, and
  * selection; resize and re-layout are handled by closing, which is what menus without their own
  * positioning logic have always done.
+ *
+ * Two ways in, one menu: {@link openMenu} hangs it under an anchor element, and {@link openMenuAt}
+ * puts it where the pointer was — the shape a `contextmenu` wants, since the thing it was asked on
+ * is a row that may be rebuilt before the menu even draws.
  */
 export function openMenu(anchor: HTMLElement, items: readonly MenuItem[]): void {
 	closeMenu();
+	const menu = build(items);
+	const rect = anchor.getBoundingClientRect();
+	// `position: fixed` against the viewport keeps the menu with the anchor without measuring the
+	// page: the anchor's own rect is measured once, when the menu opens.
+	menu.style.left = `${rect.left}px`;
+	menu.style.top = `${rect.bottom + 4}px`;
+}
 
+/**
+ * Open the menu at a pointer, clamped to the viewport.
+ *
+ * The clamp is the one thing a pointer-opened menu needs that an anchor-opened one does not: a row
+ * near the window's edge would otherwise open a menu half outside it. Measured after appending, so
+ * the menu's own size is what the clamp reads rather than a guess.
+ */
+export function openMenuAt(x: number, y: number, items: readonly MenuItem[]): void {
+	closeMenu();
+	const menu = build(items);
+	menu.style.left = `${Math.min(x, window.innerWidth - menu.getBoundingClientRect().width - 8)}px`;
+	menu.style.top = `${Math.min(y, window.innerHeight - menu.getBoundingClientRect().height - 8)}px`;
+}
+
+/** Build the menu's rows, put it on the page, and arm the dismissal listeners. */
+function build(items: readonly MenuItem[]): HTMLElement {
 	const menu = element("div", "menu", undefined, { role: "menu" });
 	for (const item of items) {
 		if (item.kind === "separator") {
@@ -37,6 +66,7 @@ export function openMenu(anchor: HTMLElement, items: readonly MenuItem[]): void 
 		}
 		const row = element("button", "menu-item", undefined, { type: "button", role: "menuitem" });
 		row.dataset.active = item.active === true ? "true" : "false";
+		if (item.danger === true) row.dataset.danger = "true";
 		if (item.title !== undefined) row.title = item.title;
 		if (item.icon !== undefined) row.append(icon(item.icon));
 		row.append(element("span", "menu-label", item.label ?? ""));
@@ -47,17 +77,13 @@ export function openMenu(anchor: HTMLElement, items: readonly MenuItem[]): void 
 		menu.append(row);
 	}
 
-	// `position: fixed` against the viewport keeps the menu with the anchor without measuring the
-	// page: the anchor's own rect is measured once, when the menu opens.
-	const rect = anchor.getBoundingClientRect();
-	menu.style.left = `${rect.left}px`;
-	menu.style.top = `${rect.bottom + 4}px`;
 	document.body.append(menu);
 	open = menu;
 
 	menu.addEventListener("pointerdown", (event) => event.stopPropagation());
 	document.addEventListener("pointerdown", onOutside, true);
 	document.addEventListener("keydown", onEscape, true);
+	return menu;
 }
 
 /** The menu currently open, if any. One at a time, so a module variable is the whole registry. */
@@ -72,6 +98,11 @@ export function closeMenu(): void {
 }
 
 function onOutside(event: PointerEvent): void {
+	// A press inside the open menu is the click choosing a row, not a dismissal. The check has to sit
+	// here rather than trusting the menu's own `stopPropagation`: this listener is a capture listener
+	// on the document, which runs before any listener on the menu itself, so by the time the menu
+	// could speak the menu would already be gone — and the click it was protecting would land nowhere.
+	if (open !== undefined && event.target instanceof Node && open.contains(event.target)) return;
 	closeMenu();
 }
 

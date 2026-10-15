@@ -1,5 +1,6 @@
 import { element, icon, iconButton } from "../dom.ts";
 import type { ChannelState } from "../client.ts";
+import { openMenuAt } from "./menu.ts";
 import type { SessionRow, WorkspaceGroup } from "@my-agent/core/protocol";
 
 export interface SidebarHandlers {
@@ -9,6 +10,16 @@ export interface SidebarHandlers {
 	onOpenSettings(): void;
 	/** The system folder picker, which is the only road a new workspace enters the list by. */
 	onAddWorkspace(): void;
+	/**
+	 * Copy the session this row names whole, and open the copy.
+	 *
+	 * Optional only while ticket 08's window wiring is still in flight: a window built before the
+	 * menu landed has no road for these yet, and the menu refuses to offer an action its caller
+	 * cannot take.
+	 */
+	onForkSession?(sessionId: string): void;
+	/** Delete the session this row names, transcript and all. Same in-flight caveat as the fork. */
+	onDeleteSession?(sessionId: string): void;
 }
 
 export interface SidebarState {
@@ -92,6 +103,25 @@ export class Sidebar {
 	private readonly searchRow: HTMLElement;
 	private readonly searchInput: HTMLInputElement;
 	private readonly noMatch: HTMLElement;
+	/**
+	 * The rows of the last render, by session id.
+	 *
+	 * The tree row is where a row's display title was computed, and the rename editor needs exactly
+	 * that: the clean name it edits is the label with the suffix left out, which only the tree knows.
+	 * Rebuilt on every render, so a rename always seeds from what is actually on screen.
+	 */
+	private readonly rowsById = new Map<string, TreeRow>();
+	/**
+	 * The names this window has given sessions itself, by session id.
+	 *
+	 * A rename has no storage behind it yet — the title a server sends is derived from the branch's
+	 * first user message, and where a user-chosen name lands is ticket 11's decision. Until then the
+	 * override is a display fact that lives here: the server's rows keep arriving and keep carrying
+	 * the derived title, and the drawn label layers this window's choice over it.
+	 */
+	private readonly renames = new Map<string, string>();
+	/** The rename editor in flight, if any. One at a time, like every other popup here. */
+	private editing: Editing | undefined;
 
 	constructor(handlers: SidebarHandlers) {
 		this.handlers = handlers;
@@ -190,6 +220,7 @@ export class Sidebar {
 		const wanted = new Set<string>();
 		const groups = state.workspaces;
 		const filter = this.filterText.trim().toLowerCase();
+		this.rowsById.clear();
 
 		if (groups.length === 0) {
 			this.drawn.clear();
@@ -205,14 +236,15 @@ export class Sidebar {
 		let matches = 0;
 		for (const group of groups) {
 			const wrapper = this.groupFor(group.cwd, state.currentWorkspace);
-			const rows = rowsOf(group);
-			// The workspace itself counts as a match, so narrowing by project still shows that
-			// project's whole list rather than hiding it behind a title that does not contain the text.
+			const rows = rowsOf(group, this.renames);
+			for (const row of rows) this.rowsById.set(row.session.id, row);
+			// Matched on the label a row *wears* rather than the title it stores: the fork's suffix is
+			// part of what a person reads, so "（1）" narrows to the fork and not to every sibling.
 			const kept =
 				filter === ""
 					? rows
 					: rows.filter(
-							(row) => row.session.title.toLowerCase().includes(filter) || group.cwd.toLowerCase().includes(filter),
+							(row) => row.label.toLowerCase().includes(filter) || group.cwd.toLowerCase().includes(filter),
 						);
 			matches += kept.length;
 			const shown = filter !== "" || this.expanded.has(group.cwd) ? kept : collapsedRows(kept, state.activeSessionId);
@@ -329,7 +361,6 @@ export class Sidebar {
 		}
 
 		const button = element("button", "session-item", undefined, { type: "button" });
-		const forkMark = element("span", "session-fork-mark");
 		const body = element("span", "session-item-body");
 		const head = element("span", "session-item-line");
 		const title = element("span", "session-item-title");
@@ -337,13 +368,95 @@ export class Sidebar {
 		const status = element("span", "session-item-status");
 		head.append(title, time);
 		body.append(head, status);
-		button.append(forkMark, body);
+		button.append(body);
 		button.addEventListener("click", () => this.handlers.onSelectSession(row.session.id));
+		// The row's whole menu lives here rather than in any resident control: a right click names the
+		// row, and the menu it opens is the only place fork, rename, and delete are offered from.
+		button.addEventListener("contextmenu", (event) => {
+			event.preventDefault();
+			this.openSessionMenu(row.session.id, event.clientX, event.clientY);
+		});
 
-		const parts: RowParts = { title, time, status, forkMark };
+		const parts: RowParts = { title, time, status };
 		this.drawn.set(row.session.id, { button, parts });
 		this.patchRow(parts, button, row, state);
 		return button;
+	}
+
+	/**
+	 * The one menu a session row has: fork, rename, delete.
+	 *
+	 * Opened at the pointer, the way a `contextmenu` asks. The fork's tooltip is written to say what
+	 * the call actually does — the whole log is copied and the conversation continues from there —
+	 * because "从最后一条继续" would promise more than a fork does: a branched session's last
+	 * *recorded* position is not a "last turn", and the copy is of everything.
+	 */
+	private openSessionMenu(sessionId: string, x: number, y: number): void {
+		openMenuAt(x, y, [
+			{
+				icon: "fork",
+				label: "派生新会话",
+				title: "复制整份记录，从这条会话接着往下走",
+				onSelect: () => this.handlers.onForkSession?.(sessionId),
+			},
+			{ kind: "separator" },
+			{ label: "重命名", onSelect: () => this.startRename(sessionId) },
+			{
+				icon: "trash",
+				label: "删除",
+				danger: true,
+				title: "永久删除这条会话",
+				onSelect: () => this.handlers.onDeleteSession?.(sessionId),
+			},
+		]);
+	}
+
+	/**
+	 * Turn a row's title into an editor, in place.
+	 *
+	 * The editor holds the *clean* name — the `（1）` a fork row wears is a fact about its birth, and
+	 * a person should not have to retype it — so the seed comes from the tree row's base and the
+	 * suffix is re-derived by the next render. Enter commits, Escape leaves the row as it was, and
+	 * clicking anywhere else commits, because an in-place editor that lost its audience has no
+	 * argument for throwing the typing away.
+	 */
+	private startRename(sessionId: string): void {
+		if (this.editing !== undefined) return;
+		const drawn = this.drawn.get(sessionId);
+		const row = this.rowsById.get(sessionId);
+		if (drawn?.parts === undefined || row === undefined) return;
+
+		const input = element("input", "rename-input", undefined, { type: "text", "aria-label": "会话名称" });
+		const original = this.renames.get(sessionId) ?? row.base;
+		input.value = original;
+		const title = drawn.parts.title;
+		title.replaceWith(input);
+		input.focus();
+		input.select();
+
+		const editing: Editing = { sessionId, settled: false };
+		this.editing = editing;
+		const finish = (save: boolean): void => {
+			if (editing.settled) return;
+			editing.settled = true;
+			this.editing = undefined;
+			const typed = input.value.trim();
+			// Stored only when it is a change: re-recording the name the row already wears would pin a
+			// derived title against the server's next word for no reason at all.
+			if (save && typed.length > 0 && typed !== original) this.renames.set(sessionId, typed);
+			input.replaceWith(title);
+			if (this.lastState !== undefined) this.renderRows(this.lastState);
+		};
+		input.addEventListener("keydown", (event) => {
+			if (event.key === "Enter") {
+				event.preventDefault();
+				finish(true);
+			} else if (event.key === "Escape") {
+				event.preventDefault();
+				finish(false);
+			}
+		});
+		input.addEventListener("blur", () => finish(true));
 	}
 
 	/**
@@ -355,38 +468,30 @@ export class Sidebar {
 	 * text node on every heartbeat, which is exactly the churn this design exists to avoid.
 	 */
 	private patchRow(parts: RowParts, button: HTMLElement, row: TreeRow, state: SidebarState): void {
-		const { session, parent } = row;
-		const isActive = session.id === state.activeSessionId;
-
-		if (parts.depth !== row.depth) {
-			parts.depth = row.depth;
-			drawDepth(button, row.depth);
-		}
-
-		// Compared by the parent's *title* rather than by the parent object, because the listing
-		// rebuilds every row object on every frame and object identity would report a change every time.
-		if (parts.parentTitle !== parent?.title) drawMark(parts, parent);
+		const isActive = row.session.id === state.activeSessionId;
 
 		// The tooltip is composed only from what can change, and the creation date — the one piece
 		// that costs a real `toLocaleString` — is formatted once per stamp and kept. Recomposing the
 		// string every frame was cheap; calling `Intl` every frame for a date that never moves was
 		// not, and it ran per row, per frame, for every row on screen.
 		let created = parts.created;
-		if (created === undefined || created.at !== session.createdAt) {
-			created = { at: session.createdAt, text: formatDate(session.createdAt) };
+		if (created === undefined || created.at !== row.session.createdAt) {
+			created = { at: row.session.createdAt, text: formatDate(row.session.createdAt) };
 			parts.created = created;
 		}
+		// The parent is named by what it *wears* rather than by what it stores: a fork of a fork hangs
+		// its suffix on the parent's own, so the tooltip names the row a person actually sees above.
 		const tooltip =
-			parent === undefined
-				? `${session.title}\n${session.cwd}\n创建于 ${created.text}`
-				: `${session.title}\n${session.cwd}\n派生自 ${parent.title}\n创建于 ${created.text}`;
+			row.parentLabel === undefined
+				? `${row.label}\n${row.session.cwd}\n创建于 ${created.text}`
+				: `${row.label}\n${row.session.cwd}\n派生自 ${row.parentLabel}\n创建于 ${created.text}`;
 		if (parts.tooltip !== tooltip) {
 			parts.tooltip = tooltip;
 			button.title = tooltip;
 		}
 
-		if (parts.title.textContent !== session.title) parts.title.textContent = session.title;
-		this.paintTime(parts, session.modified);
+		if (parts.title.textContent !== row.label) parts.title.textContent = row.label;
+		this.paintTime(parts, row.session.modified);
 		this.paintStatus(parts, rowStatus(row.session, isActive));
 
 		if (isActive) button.setAttribute("aria-current", "true");
@@ -513,6 +618,13 @@ interface DrawnNode {
 	mark?: HTMLElement;
 }
 
+/** One rename in flight: which row is being edited, and whether it has been settled already. */
+interface Editing {
+	sessionId: string;
+	/** Set the first time Enter, Escape, or blur settles the edit, so the other two are no-ops. */
+	settled: boolean;
+}
+
 /**
  * The parts of one row that get written, and the values they currently hold.
  *
@@ -525,55 +637,14 @@ interface RowParts {
 	title: HTMLElement;
 	time: HTMLElement;
 	status: HTMLElement;
-	forkMark: HTMLElement;
 	/** Last activity written into the time, kept so a tick can recompute the text without the rows. */
 	modified?: number;
 	/** The status text on screen, so an unchanged one is not rewritten. */
 	statusText?: string;
-	/** The parent title the mark shows, so a rename repaints and anything else does not. */
-	parentTitle?: string;
-	depth?: number;
 	/** The tooltip string on screen, so an unchanged one is neither recomposed nor rewritten. */
 	tooltip?: string;
 	/** The creation stamp the tooltip's date was formatted from, so `toLocaleString` runs once per row. */
 	created?: { at: number; text: string };
-}
-
-/**
- * Write a row's indent.
- *
- * Depth travels as a number on a custom property rather than as nested elements, so the list stays one
- * flat level of buttons and the keyboard walks the rows in the order they read. The attribute beside
- * it is for anything reading rows, and the default on the attribute is what lets the stylesheet say
- * "zero unless told otherwise" in one place.
- */
-function drawDepth(button: HTMLElement, depth: number): void {
-	if (depth > 0) {
-		button.dataset.depth = String(depth);
-		button.style.setProperty("--depth", String(depth));
-		return;
-	}
-	delete button.dataset.depth;
-	button.style.removeProperty("--depth");
-}
-
-/**
- * Give a row its fork mark, or take it away.
- *
- * Removal rather than emptying: the mark is `display: inline-flex`, so an emptied one still occupies
- * its width and every root row would carry an invisible indent.
- */
-function drawMark(parts: RowParts, parent: SessionRow | undefined): void {
-	const mark = parts.forkMark;
-	if (parent === undefined) {
-		mark.replaceChildren();
-		mark.removeAttribute("title");
-		parts.parentTitle = undefined;
-		return;
-	}
-	if (parts.parentTitle === undefined) mark.append(icon("fork"));
-	mark.title = `派生自 ${parent.title}`;
-	parts.parentTitle = parent.title;
 }
 
 /**
@@ -624,28 +695,38 @@ function collapsedRows(rows: readonly TreeRow[], activeSessionId?: string): Tree
 }
 
 /**
- * One row of a workspace's list: a session, and how deep in its fork tree it sits.
+ * One row of a workspace's list: a session, and the name it is drawn under.
  *
  * Named apart from the protocol's `SessionRow` on purpose, because the two are not the same thing and
  * the difference is easy to miss. A protocol row is a session plus three facts only a running process
- * knows (`running`, `pending`, `modified`); this one is a protocol row plus its place in the fork tree.
- * Calling them both `SessionRow` would invite exactly the mistake this rename exists to prevent — a
- * tree row being asked for a `running` it does not have, or a live field being read off a placeholder.
+ * knows (`running`, `pending`, `modified`); this one is a protocol row plus its place in the fork tree
+ * and the display title that place earns it.
+ *
+ * `label` is what the row wears and `base` is what a rename edits: they differ by exactly the row's
+ * own `（N）`, which is drawn here rather than stored anywhere — the server has no title field to put
+ * it in, and any client-computed suffix would be overwritten by the next row frame. The number is the
+ * row's own place among its siblings under the same parent, by creation time, and the suffix hangs on
+ * the parent's *label*, so a fork of a fork reads 标题（1）（1） without anyone having stored a thing.
  */
 interface TreeRow {
 	session: SessionRow;
-	/** 0 for a session of its own, 1 for a fork of one, and one more per generation. */
+	/** 0 for a session of its own, 1 for a fork of one, and one more per generation. Order still rides on it. */
 	depth: number;
-	/** The session it was forked from, for the row's own tooltip. */
-	parent?: SessionRow;
+	/** The row's clean name: what a rename edits, and what the label is built from. */
+	base: string;
+	/** The full display title, suffix included. */
+	label: string;
+	/** The label of the session this one was forked from, for the row's own tooltip. */
+	parentLabel?: string;
 }
 
 /**
- * Lay a workspace's sessions out as the tree they are.
+ * Lay a workspace's sessions out as the tree they are, and name each row.
  *
  * A fork records its parent as a file path, the listing resolves that to an id, and this is where the
  * id becomes a row: roots sorted by when they were last active, each fork directly beneath the session
- * it came from so a fork's own forks stay under it rather than beside it.
+ * it came from so a fork's own forks stay under it rather than beside it, and siblings in creation
+ * order — which is what the suffix's number counts.
  *
  * The sort is done here rather than trusted from the listing, and that is the point. A row's position
  * is now a function of a field that moves while nobody is clicking, so the order has to be recomputed
@@ -654,10 +735,11 @@ interface TreeRow {
  * It costs one sort over a workspace's roots.
  *
  * A fork whose parent is not in this list was already a root for every other purpose, and stays one
- * here. A file hand-edited into a cycle must not lose rows to a walk that never returns, so anything
- * the descent did not reach is placed at the top level rather than dropped.
+ * here — which is also what happens to a fork whose parent has been deleted: no parent, no suffix,
+ * the name stands on its own. A file hand-edited into a cycle must not lose rows to a walk that never
+ * returns, so anything the descent did not reach is placed at the top level rather than dropped.
  */
-function rowsOf(group: WorkspaceGroup): TreeRow[] {
+function rowsOf(group: WorkspaceGroup, renames: ReadonlyMap<string, string>): TreeRow[] {
 	const byId = new Map(group.sessions.map((session) => [session.id, session]));
 	const children = new Map<string, SessionRow[]>();
 	const roots: SessionRow[] = [];
@@ -673,19 +755,30 @@ function rowsOf(group: WorkspaceGroup): TreeRow[] {
 		else siblings.push(session);
 	}
 
+	// The suffix counts a sibling's place by creation time, so the walk that lays the rows out reads
+	// the same order the count does: a fork row appears under its parent in the order it was born.
+	for (const siblings of children.values()) siblings.sort((a, b) => a.createdAt - b.createdAt);
 	roots.sort((a, b) => b.modified - a.modified);
 
 	const rows: TreeRow[] = [];
 	const placed = new Set<string>();
-	const place = (session: SessionRow, depth: number, parent?: SessionRow): void => {
+	const place = (session: SessionRow, depth: number, parent: TreeRow | undefined, index: number): void => {
 		if (placed.has(session.id)) return;
 		placed.add(session.id);
-		rows.push({ session, depth, ...(parent === undefined ? {} : { parent }) });
-		for (const child of children.get(session.id) ?? []) place(child, depth + 1, session);
+		const suffix = parent === undefined ? "" : `（${index}）`;
+		// A rename of this row replaces the whole inherited name — parent label included — and the
+		// suffix comes back on its own, because it is this row's own fact and not part of any name.
+		const base = renames.get(session.id) ?? (parent === undefined ? session.title : parent.label);
+		const row: TreeRow = { session, depth, base, label: base + suffix };
+		if (parent !== undefined) row.parentLabel = parent.label;
+		rows.push(row);
+		for (const [position, child] of (children.get(session.id) ?? []).entries()) {
+			place(child, depth + 1, row, position + 1);
+		}
 	};
 
-	for (const root of roots) place(root, 0);
-	for (const session of group.sessions) place(session, 0);
+	for (const root of roots) place(root, 0, undefined, 0);
+	for (const session of group.sessions) place(session, 0, undefined, 0);
 	return rows;
 }
 

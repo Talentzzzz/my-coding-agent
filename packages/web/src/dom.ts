@@ -78,6 +78,7 @@ export type IconName =
 	| "close"
 	| "trash"
 	| "fork"
+	| "tree"
 	| "think"
 	| "monitor"
 	| "sun"
@@ -108,6 +109,8 @@ const ICONS: Record<IconName, string> = {
 	trash: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>`,
 	// The mark on a session that was forked from another: a line leaving the one above it.
 	fork: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4v7a4 4 0 0 0 4 4h7"/><path d="M14 12l3 3-3 3"/></svg>`,
+	// The branch page's mark: a fork in a road, read left to right the way the tree grows.
+	tree: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M7 5h4a4 4 0 0 1 4 4v0"/><path d="M7 19h4a4 4 0 0 0 4-4v0"/></svg>`,
 	// The mark on a reasoning row: a lit bulb, because the row is what the model thought before it spoke.
 	think: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 18h5M10.5 21h3"/><path d="M12 3a6 6 0 0 0-3.6 10.8c.5.4.8 1 .9 1.6l.1.6h5.2l.1-.6c.1-.6.4-1.2.9-1.6A6 6 0 0 0 12 3z"/></svg>`,
 	monitor: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M9 20h6M12 16v4"/></svg>`,

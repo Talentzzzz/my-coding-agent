@@ -2,6 +2,7 @@ import {
 	addUsage,
 	EMPTY_USAGE,
 	type AgentSessionEvent,
+	type BranchOption,
 	type BranchPoint,
 	type FileDiff,
 	type ModelOption,
@@ -67,15 +68,118 @@ export type Item =
 			streaming: boolean;
 			/** The store entry behind this message, when the message is forkable from. */
 			forkEntryId?: string | null;
-			/**
-			 * The branch point this message sits on, when the conversation carried on from it more than
-			 * one way. The alternatives are entry ids and nothing more: where each one leads is worked out
-			 * when the choice is made, because a branch grows at its tip and a remembered tip would be a
-			 * place the conversation had already left.
-			 */
-			branch?: BranchPoint;
 	  }
 	| { kind: "tools"; id: string; cards: ToolCard[] };
+
+/**
+ * One way a conversation can go from a branch point.
+ *
+ * A way begins at one entry — a child of the branch point it hangs under — and the card that draws
+ * it shows that entry's first few characters as the short id, so the id on screen is the id in the
+ * store rather than a decoration. `children` are the ways that fork off this one further down; the
+ * server only reports branch points on the active chain, so an inactive way arrives without children
+ * and is drawn as a leaf until the conversation moves onto it.
+ */
+export interface BranchWay {
+	/** The entry this way begins at: how a switch names it, and what the short id is cut from. */
+	entryId: string;
+	/** One line of the way's first message, as the server derived it. */
+	label: string;
+	/** The role of that message, so a card can say who speaks. */
+	role: string;
+	/** The round the way's first message sits in; user messages start a round. */
+	turn: number;
+	/** The ways that fork off this one, in the order they were written. */
+	children: BranchWay[];
+}
+
+/**
+ * The whole branch shape of one session, folded once per snapshot.
+ *
+ * The transcript is the hot path and `branchPoints` used to ride on individual message items, which
+ * answered "what hangs off *this* message" and nothing more. Drawing the tree needs every point at
+ * once, so the fold runs here — at the baseline, the only frame that can change the points — and the
+ * view reads this field instead of walking `items`.
+ */
+export interface BranchTree {
+	/** A label for the common ancestor the whole tree hangs off: the conversation's own title. */
+	rootLabel: string;
+	/** The ways hanging off the root, in the order the first branch point reported them. */
+	ways: BranchWay[];
+	/**
+	 * The way the leaf currently sits on: the deepest option the active chain runs through.
+	 *
+	 * Undefined when the leaf is parked on a branch point itself — the conversation is between ways,
+	 * and the next prompt starts a new one.
+	 */
+	currentId: string | undefined;
+	/** How many branch points the tree has; every one of them carries at least two ways. */
+	points: number;
+	/** How many ways the tree holds in total, for the summary line. */
+	options: number;
+}
+
+/**
+ * Fold the snapshot's branch points into the tree the branch page draws.
+ *
+ * The points arrive in chain order, and the chain leaves a branch point only through the option it
+ * marks active — so each point's options hang under the *previous* point's active option, and the
+ * deepest active option is the way being read. Rounds come from the messages: user messages start a
+ * round, and a way's first message sits in the round its branch point sits in, one later when that
+ * first message is itself a user's.
+ */
+export function buildBranchTree(snapshot: SessionSnapshot): BranchTree | undefined {
+	const points = snapshot.branchPoints;
+	if (points.length === 0) return undefined;
+
+	const roundOfEntry = new Map<string, number>();
+	let round = 0;
+	snapshot.messages.forEach((message, index) => {
+		if (message.role === "user") round += 1;
+		const entryId = snapshot.messageEntryIds[index];
+		if (typeof entryId === "string") roundOfEntry.set(entryId, round);
+	});
+
+	const nodes = new Map<string, BranchWay>();
+	const build = (option: BranchOption, turn: number): BranchWay => {
+		const way: BranchWay = { entryId: option.entryId, label: option.label, role: option.role, turn, children: [] };
+		nodes.set(option.entryId, way);
+		return way;
+	};
+
+	let roots: BranchWay[] = [];
+	let previous: BranchPoint | undefined;
+	for (const point of points) {
+		const at = roundOfEntry.get(point.entryId) ?? 1;
+		const built = point.options.map((option) => build(option, option.role === "user" ? at + 1 : at));
+		const host = previous?.options.find((option) => option.active)?.entryId;
+		const parent = host === undefined ? undefined : nodes.get(host);
+		if (previous === undefined) roots = built;
+		else if (parent !== undefined) parent.children = built;
+		previous = point;
+	}
+
+	return {
+		rootLabel: snapshot.title,
+		ways: roots,
+		currentId: points.at(-1)?.options.find((option) => option.active)?.entryId,
+		points: points.length,
+		options: points.reduce((total, point) => total + point.options.length, 0),
+	};
+}
+
+/** The way an id names, wherever it hangs in the tree. */
+export function findWay(tree: BranchTree, id: string): BranchWay | undefined {
+	const walk = (ways: readonly BranchWay[]): BranchWay | undefined => {
+		for (const way of ways) {
+			if (way.entryId === id) return way;
+			const hit = walk(way.children);
+			if (hit !== undefined) return hit;
+		}
+		return undefined;
+	};
+	return walk(tree.ways);
+}
 
 /** A backoff the session is waiting out, from `retry_scheduled` until `retry_end`. */
 export interface RetryState {
@@ -108,6 +212,8 @@ export interface ViewState {
 	items: Item[];
 	/** Entry ids whose message has not shown up in `items` yet. */
 	pendingEntries: PendingEntry[];
+	/** The session's branch shape, folded once per snapshot for the header's entry and the branch page. */
+	branchTree?: BranchTree;
 	streaming: boolean;
 	usage: UsageTotals;
 	approvals: PendingApproval[];
@@ -162,7 +268,10 @@ export function reduce(state: ViewState, message: ServerMessage): ViewState {
 			return {
 				...state,
 				snapshot: message.session,
-				items: attachBranches(itemsFromSnapshot(message.session), message.session.branchPoints),
+				items: itemsFromSnapshot(message.session),
+				// The branch shape rides the same frame: a snapshot is the only thing that can change
+				// the points, so the fold runs here and nowhere else.
+				branchTree: buildBranchTree(message.session),
 				// A snapshot carries the ids of everything it shows, so nothing is left outstanding.
 				pendingEntries: [],
 				streaming: message.session.submitting,
@@ -484,25 +593,6 @@ function settleCards(items: Item[]): Item[] {
 	});
 }
 
-/**
- * Put each branch point on the message it belongs to.
- *
- * A branch point names the entry the alternatives hang off, and a message item already carries the
- * entry behind it — the same pairing "派生新会话" is drawn from — so this is a match on entry id
- * rather than a second walk of the tree. A point whose message is not on screen, because a compaction
- * folded that turn into its summary, has nowhere to be drawn and is dropped.
- */
-function attachBranches(items: Item[], branchPoints: readonly BranchPoint[] | undefined): Item[] {
-	if (branchPoints === undefined || branchPoints.length === 0) return items;
-
-	const byEntry = new Map(branchPoints.map((point) => [point.entryId, point]));
-	return items.map((item) => {
-		if (item.kind !== "message" || item.forkEntryId === undefined || item.forkEntryId === null) return item;
-		const branch = byEntry.get(item.forkEntryId);
-		return branch === undefined ? item : { ...item, branch };
-	});
-}
-
 function upsertMessage(
 	items: Item[],
 	message: unknown,
@@ -546,10 +636,8 @@ function upsertMessage(
 		const running = !final && (phase === "thinking_start" || phase === "thinking_delta");
 		item.thinking = thinking.redacted ? { text: thinking.text, redacted: true, running } : { text: thinking.text, running };
 	}
-	// A streaming update carries no entry id, so an id already attached to this item is kept — and with
-	// it the branch point that was read off that id, which rebuilding this same message would drop.
+	// A streaming update carries no entry id, so an id already attached to this item is kept.
 	if (carried !== undefined && carried !== null) item.forkEntryId = carried;
-	if (existing?.branch !== undefined) item.branch = existing.branch;
 
 	if (index === -1) {
 		// A new message ends the current tool group, so cards that follow belong to it.

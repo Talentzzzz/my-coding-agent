@@ -1,13 +1,14 @@
-import { applyAppearance, initialState, reduce, reduceEnd, type ViewState } from "./state.ts";
+import { applyAppearance, initialState, reduce, reduceEnd, findWay, type ViewState } from "./state.ts";
 import { SessionApi, ApiError } from "./api.ts";
 import { browserSocket, MuxClient, muxUrl, type ChannelState } from "./client.ts";
 import { SessionRows } from "./rows.ts";
 import { Composer, type ComposerSelection } from "./composer.ts";
 import { TranscriptView } from "./render/transcript.ts";
+import { BranchView, shortId } from "./render/branch-view.ts";
 import { Sidebar, workspaceName } from "./render/sidebar.ts";
 import { SettingsPanel } from "./render/settings.ts";
 import { SessionSettingsPanel } from "./render/session-settings.ts";
-import { closeMenu, openMenu } from "./render/menu.ts";
+import { openMenu, openMenuAt, type MenuItem } from "./render/menu.ts";
 import { StatusBar } from "./render/statusbar.ts";
 import { element, icon } from "./dom.ts";
 import type { ConnectionItem, ModelOption, ServerMessage } from "@my-agent/core/protocol";
@@ -108,6 +109,8 @@ function main(): void {
 	let subtitleDrawn: string | undefined;
 	/** The directory the chip's label was last drawn from, so an unchanged one is not rewritten. */
 	let chipDrawn: string | undefined;
+	/** The signature the branch entry was last drawn from; a baseline is what can move it. */
+	let branchChipDrawn: string | undefined;
 	/** The approvals the takeover seat was last drawn from; a new array means something to answer. */
 	let approvalsDrawn: ViewState["approvals"] | undefined;
 	let noticesDrawn: ViewState["models"] | undefined;
@@ -115,7 +118,14 @@ function main(): void {
 	// ---------------------------------------------------------------- the column
 
 	const conversation = element("section", "conversation");
+
+	/**
+	 * The fixed header: the session title on the left of its first row, the branch entry on its
+	 * right, and — on the branch page only — the tools row. It spans the whole conversation column
+	 * and never follows the reading column in, so resizing the prose never moves it.
+	 */
 	const header = element("header", "header");
+	const headerRow = element("div", "header-row");
 
 	const title = element("div", "header-title");
 	const heading = element("h1", undefined, "新会话");
@@ -125,12 +135,61 @@ function main(): void {
 	// level — are on the composer, one row below the thing they affect, because they move with the
 	// conversation rather than with the app. Everything that lasts across sessions is a setting, and
 	// settings live in the panel behind the one button in the sidebar.
-	header.append(title);
+
+	/**
+	 * The branch entry, the one door into the branch page.
+	 *
+	 * It names the way being read — `当前分支`, the short id cut from that way's entry, and the first
+	 * sentence said under it — and hides when the conversation has fewer than two ways, where
+	 * "branching" names nothing. Hidden also is every other door: this chip and the user message's
+	 * right-click menu are the only two ways in, and the branch page's own button is the only way out.
+	 */
+	const branchChip = element("button", "branch-chip", undefined, { type: "button", title: "打开分支视图" });
+	const branchChipId = element("span", "branch-chip-id");
+	const branchChipLabel = element("span", "branch-chip-label");
+	branchChip.append(icon("fork"), element("span", undefined, "当前分支"), branchChipId, branchChipLabel);
+	branchChip.hidden = true;
+	branchChip.addEventListener("click", () => setPane("branch"));
+
+	headerRow.append(title, branchChip);
+	header.append(headerRow);
+
+	/**
+	 * Which page the conversation column shows.
+	 *
+	 * Two, by the ticket's count: the conversation, and the branch tree that replaces it whole — not
+	 * an overlay and not a side panel. Recorded on the body so one CSS rule can retire the composer,
+	 * the status line, and the banners together, because the branch page has none of them.
+	 */
+	let pane: "chat" | "branch" = "chat";
+	function setPane(next: "chat" | "branch"): void {
+		if (pane === next) return;
+		pane = next;
+		document.body.dataset.pane = next;
+		if (next === "branch") branchView.enter();
+		else branchView.leave();
+	}
+
+	/**
+	 * The branch page, and the fixed header's second row.
+	 *
+	 * Switching is the two-beat the prototype settled on: a click on a node only selects, and the
+	 * button in the tools row is what moves the leaf and returns to the conversation — which is why
+	 * `onSwitch` flips the pane first and moves the session second: the person pressed "go back",
+	 * and the answer they chose rides along.
+	 */
+	const branchView = new BranchView({
+		onSwitch: (entryId) => {
+			setPane("chat");
+			void branch(entryId, true);
+		},
+		onBack: () => setPane("chat"),
+	});
+	header.append(branchView.toolsBar);
 
 	const transcriptHost = element("main", "transcript");
 	const transcript = new TranscriptView(transcriptHost, {
-		onFork: (entryId) => void fork(entryId),
-		onBranch: (entryId, descend) => void branch(entryId, descend),
+		onUserContext: (entryId, x, y) => openUserMenu(entryId, x, y),
 	});
 	transcript.trackScroll();
 
@@ -218,7 +277,10 @@ function main(): void {
 
 	const statusBar = new StatusBar();
 
-	conversation.append(header, transcriptHost, banners, composerWrap, statusBar.element);
+	// The branch page sits where the transcript sits: one grid row that flexes, whichever of the two
+	// is on. Hiding is CSS's job (`body[data-pane]`), so the two pages trade places without any of
+	// the chrome around them re-flowing.
+	conversation.append(header, transcriptHost, branchView.element, banners, composerWrap, statusBar.element);
 
 	// ------------------------------------------------------------------ sidebar
 
@@ -234,6 +296,13 @@ function main(): void {
 			settings.render({ models: state.models, ...(state.settings ? { settings: state.settings } : {}), ...(state.snapshot ? { snapshot: state.snapshot } : {}) });
 		},
 		onAddWorkspace: () => void addWorkspace(),
+		// The row menu's fork copies a session whole — it acts on a session, not on a message, so this
+		// is the `entryId: null` fork rather than anything a message used to offer.
+		onForkSession: (sessionId) => void forkSession(sessionId),
+		onDeleteSession: (sessionId) => {
+			void sessionId;
+			report(new Error("删除会话还没有上线。"));
+		},
 	});
 
 	// ----------------------------------------------------------------- settings
@@ -557,6 +626,29 @@ function main(): void {
 			subtitle.textContent = subtitleText;
 		}
 
+		// The branch entry follows the session's branch shape, which only a baseline can change, so
+		// the signature is the tree's identity and the three figures a label is cut from.
+		const tree = state.branchTree;
+		const branchSig =
+			tree === undefined ? "none" : `${tree.currentId ?? "-"}|${tree.points}|${tree.options}|${snapshot?.title ?? ""}`;
+		if (branchSig !== branchChipDrawn) {
+			branchChipDrawn = branchSig;
+			// Fewer than two ways, "branching" names nothing — the entry is gone whole, and with it
+			// the only door into the branch page.
+			branchChip.hidden = tree === undefined;
+			if (tree !== undefined && tree.currentId !== undefined) {
+				branchChipId.textContent = shortId(tree.currentId);
+				branchChipLabel.textContent = findWay(tree, tree.currentId)?.label ?? "";
+			} else {
+				branchChipId.textContent = "";
+				branchChipLabel.textContent = "";
+			}
+		}
+
+		// The branch page draws itself from the same tree, and gates on the same rarity: its render
+		// costs one comparison unless a baseline changed the tree or a run changed the lock.
+		branchView.render(tree, state.streaming);
+
 		// The hero row is the empty conversation's phase: an empty transcript is "about to start one",
 		// which is exactly the future the chip talks about. The moment there is something to read, the
 		// chip goes — its choice never rewrites a session, and a control that looked like it could
@@ -741,6 +833,9 @@ function main(): void {
 		// The picker's explicit choice is about the session that was *about* to start, and that session
 		// has started — the one on screen now decides what "当前" names until the chip is used again.
 		pickedWorkspace = "";
+		// A conversation opens to be read. Whatever page the window was on — someone was still staring
+		// at another session's tree — the new session starts on its own conversation.
+		setPane("chat");
 		// The same rendering the branch command uses: a snapshot is a snapshot, whether it arrived on
 		// the channel or on a read. The channel's own baseline will replace it within a moment.
 		apply(reduce(state, { type: "baseline", session: snapshot }));
@@ -847,10 +942,16 @@ function main(): void {
 		}
 	}
 
-	async function fork(entryId: string | null): Promise<void> {
-		if (followed === undefined) return;
+	/**
+	 * Copy a session whole into a new file, and open the copy.
+	 *
+	 * `entryId: null` is the whole-log fork: every entry and every leaf rides along, and the copy
+	 * continues from where the source stopped. The row menu acts on a session rather than on any one
+	 * message of it, which is why there is no entry in the call.
+	 */
+	async function forkSession(sessionId: string): Promise<void> {
 		try {
-			const created = await api.forkSession(followed, entryId);
+			const created = await api.forkSession(sessionId, null);
 			reachable();
 			await openSession(created.sessionId);
 		} catch (error) {
@@ -861,10 +962,12 @@ function main(): void {
 	/**
 	 * Move this session onto another branch of its own tree.
 	 *
-	 * The answer is applied here *and* arrives on the channel: the server sends the same snapshot to
-	 * every window on this session, and applying the response as well is what keeps the window that
-	 * clicked from waiting a round trip to see its own move. Both are the same session state, so the
-	 * second one to arrive changes nothing.
+	 * `descend` chooses the landing: true follows an alternative to where it stopped, false rewinds
+	 * to the message itself so the next prompt starts a new way from there. The answer is applied
+	 * here *and* arrives on the channel: the server sends the same snapshot to every window on this
+	 * session, and applying the response as well is what keeps the window that clicked from waiting
+	 * a round trip to see its own move. Both are the same session state, so the second one to arrive
+	 * changes nothing.
 	 */
 	async function branch(entryId: string, descend: boolean): Promise<void> {
 		if (followed === undefined) return;
@@ -874,6 +977,28 @@ function main(): void {
 		} catch (error) {
 			report(error);
 		}
+	}
+
+	/**
+	 * The user message's right-click menu — one of the two doors into branching.
+	 *
+	 * `从此分支` rewinds to the message so the next prompt starts another way from it, which is why
+	 * it stays on the conversation page: the branch page has no composer to type that prompt into.
+	 * `查看分支图` is the other half, into the page itself. A run in flight is writing to the tree
+	 * the first item would move, so while one is streaming the menu offers the look, not the move.
+	 */
+	function openUserMenu(entryId: string | undefined, x: number, y: number): void {
+		const items: MenuItem[] = [];
+		if (entryId !== undefined && !state.streaming) {
+			items.push({
+				label: "从此分支",
+				icon: "fork",
+				title: "在本会话里从这条消息继续：其后内容保留为另一条分支",
+				onSelect: () => void branch(entryId, false),
+			});
+		}
+		items.push({ label: "查看分支图", icon: "tree", onSelect: () => setPane("branch") });
+		openMenuAt(x, y, items);
 	}
 
 	function report(error: unknown): void {

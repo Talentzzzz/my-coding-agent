@@ -1,27 +1,15 @@
-import { element, icon, iconButton } from "../dom.ts";
+import { element, icon } from "../dom.ts";
 import type { Item, ToolCard } from "../state.ts";
-import type { BranchOption } from "@my-agent/core/protocol";
 import { diffStat, renderFileDiff } from "./diff.ts";
 import { renderMarkdown, type MarkdownState } from "./markdown.ts";
 
 export interface TranscriptOptions {
-	/** Called with the entry a user message's "派生新会话" control belongs to. */
-	onFork(entryId: string): void;
 	/**
-	 * Called with the entry a branch move starts at, and which end of it the leaf should land on.
-	 *
-	 * `descend` is true for choosing an alternative the conversation already has — land where it
-	 * stopped — and false for rewinding to the message itself, so the next prompt starts another one.
+	 * A user message was right-clicked: the store entry it stands for — when one has been named for
+	 * it yet — and the pointer, where a menu should open. The menu itself belongs to the caller; the
+	 * transcript only knows which message was under the pointer.
 	 */
-	onBranch(entryId: string, descend: boolean): void;
-}
-
-/** The pieces of a branch switcher, kept so a render patches them instead of searching for them. */
-interface BranchControls {
-	root: HTMLElement;
-	count: HTMLElement;
-	previous: HTMLButtonElement;
-	next: HTMLButtonElement;
+	onUserContext(entryId: string | undefined, x: number, y: number): void;
 }
 
 /**
@@ -48,18 +36,13 @@ interface Turn {
 	/** The parsed state of the body's Markdown, so a streaming message only re-parses its tail. */
 	markdown?: MarkdownState;
 	text: string;
-	/** The branch controls this turn was built with, patched in place rather than looked up again. */
-	branchButton?: HTMLButtonElement;
-	forkButton?: HTMLButtonElement;
-	branch?: BranchControls;
 	/** The reasoning row, once this turn's message has any. */
 	reasoning?: ReasoningView;
 	/**
 	 * The item this turn is currently drawn from.
 	 *
-	 * The controls are built once with the section and patched afterwards, and they read through here
-	 * rather than closing over the item: a snapshot can replace every item, so the entry a control acts
-	 * on is whatever the last render said it was.
+	 * Kept on the turn rather than closed over: a snapshot can replace every item, so the entry the
+	 * context menu acts on is whatever the last render said it was.
 	 */
 	item: Extract<Item, { kind: "message" }>;
 }
@@ -87,6 +70,15 @@ export class TranscriptView {
 	constructor(container: HTMLElement, options: TranscriptOptions) {
 		this.container = container;
 		this.options = options;
+		// The message menu is the caller's; this side only decides *which* message was under the
+		// pointer, and hands the caller the entry that message stands for.
+		container.addEventListener("contextmenu", (event) => {
+			if (!(event.target instanceof Element)) return;
+			const turn = event.target.closest(".turn[data-role=\"user\"]");
+			if (!(turn instanceof HTMLElement)) return;
+			event.preventDefault();
+			this.options.onUserContext(turn.dataset.entry || undefined, event.clientX, event.clientY);
+		});
 	}
 
 	/** Follow the bottom unless the reader has scrolled away from it. */
@@ -167,7 +159,7 @@ export class TranscriptView {
 			return;
 		}
 		turn.item = item;
-		this.applyControls(turn);
+		this.applyEntry(turn);
 
 		// A notice is plain text and never streams, so it is written once and left alone.
 		if (item.notice) {
@@ -264,126 +256,32 @@ export class TranscriptView {
 		const body = element("div", "turn-body");
 		const turn: Turn = { section, body, text: "", item };
 
+		// A user message is right-clickable: the menu's items are the caller's, and the entry it acts
+		// on is patched in per frame by {@link applyEntry}.
 		if (item.role === "user") {
 			section.dataset.role = "user";
-			// The two ways on from a message: another alternative inside this session, or a session of
-			// its own. They sit together because they answer one question — "what if I went another way
-			// here" — and only the tooltips have to carry which one keeps the rest of the tree.
-			const actions = element("div", "turn-actions");
-			turn.branchButton = this.branchButton(turn);
-			turn.forkButton = this.forkButton(turn);
-			turn.branch = this.branchNav(turn);
-			actions.append(turn.branchButton, turn.forkButton, turn.branch.root);
-			section.append(actions, body);
+			section.append(body);
 			return turn;
 		}
 
 		const role = element("div", "turn-role");
 		role.append(element("span", "avatar", initialFor(item.role)), element("span", "role-name", labelFor(item.role)));
-		// An agent message can be a branch point too — asking twice from the same answer forks there —
-		// so it carries the switcher, without the two controls that only make sense on your own words.
-		turn.branch = this.branchNav(turn);
-		role.append(turn.branch.root);
 		section.append(role, body);
 		return turn;
 	}
 
 	/**
-	 * Fill in the controls a turn's own message says it has.
+	 * Keep a user turn's entry id current on its section.
 	 *
 	 * Everything here can arrive after the section was built: a user message is written to the store
-	 * before the loop echoes it, so its entry id lands a frame later, and a branch point only exists
-	 * once the conversation has been rewound. So each control is patched through the reference the
-	 * turn was built with — a previous version searched for these three nodes with `querySelector` on
-	 * every message, every frame, which is what made the transcript cost grow with the conversation.
+	 * before the loop echoes it, so its entry id lands a frame later. The id rides on the section's
+	 * dataset because the context menu reads it at right-click time, not at build time.
 	 */
-	private applyControls(turn: Turn): void {
+	private applyEntry(turn: Turn): void {
+		if (turn.section.dataset.role !== "user") return;
 		const entryId = turn.item.forkEntryId ?? undefined;
-
-		if (turn.branchButton) turn.branchButton.disabled = entryId === undefined;
-		if (turn.forkButton) turn.forkButton.disabled = entryId === undefined;
-
-		const nav = turn.branch;
-		if (nav === undefined) return;
-
-		const options = turn.item.branch?.options ?? [];
-		// One alternative is not a choice, so a message that never forked shows no switcher at all.
-		nav.root.hidden = options.length < 2;
-		if (options.length < 2) return;
-
-		const active = Math.max(1, options.findIndex((option) => option.active) + 1);
-		nav.count.textContent = `${active}/${options.length}`;
-		nav.previous.disabled = active <= 1;
-		nav.next.disabled = active >= options.length;
-		// The alternatives that are not on screen are the ones worth naming, and the active one is
-		// marked so the list also says which of them is being read.
-		nav.root.title = options.map((option, index) => `${index + 1}.${option.active ? " ●" : ""} ${labelOf(option)}`).join("\n");
-	}
-
-	/** Rewind to this message, so the next prompt starts another alternative from it. */
-	private branchButton(turn: Turn): HTMLButtonElement {
-		const button = element("button", "turn-action branch-button", "从此分支", {
-			type: "button",
-			title: "在本会话里从这条消息继续：其后内容保留为另一条分支",
-		});
-		button.disabled = true;
-		button.addEventListener("click", () => {
-			const entryId = turn.item.forkEntryId;
-			if (entryId) this.options.onBranch(entryId, false);
-		});
-		return button;
-	}
-
-	/**
-	 * The "派生新会话" control on a user message.
-	 *
-	 * It starts a session of its own rather than moving this one, and that is the difference the
-	 * tooltip has to carry: a fork copies the branch into a new file and leaves this conversation be.
-	 */
-	private forkButton(turn: Turn): HTMLButtonElement {
-		const button = element("button", "turn-action fork-button", "派生新会话", {
-			type: "button",
-			title: "从这条消息另起一个会话，当前会话保持不变",
-		});
-		button.disabled = true;
-		button.addEventListener("click", () => {
-			const entryId = turn.item.forkEntryId;
-			if (entryId) this.options.onFork(entryId);
-		});
-		return button;
-	}
-
-	/**
-	 * Which of the conversation's own alternatives is on screen, and the way to the others.
-	 *
-	 * A count between two steps rather than a list, because a branch point rarely has more than two
-	 * continuations, and the one that is not shown is the one a reader wants named — which the tooltip
-	 * does, from the labels the server derived from where each alternative actually goes.
-	 */
-	private branchNav(turn: Turn): BranchControls {
-		const root = element("span", "branch-nav");
-		root.hidden = true;
-
-		const step = (direction: -1 | 1, label: string, glyph: string): HTMLButtonElement => {
-			const button = element("button", "branch-step", glyph, {
-				type: "button",
-				"data-step": String(direction),
-				title: label,
-			});
-			button.addEventListener("click", () => {
-				const options = turn.item.branch?.options ?? [];
-				const active = Math.max(1, options.findIndex((option) => option.active) + 1);
-				const option = options[active - 1 + direction];
-				if (option) this.options.onBranch(option.entryId, true);
-			});
-			return button;
-		};
-
-		const previous = step(-1, "上一条分支", "‹");
-		const count = element("span", "branch-count", "1/1");
-		const next = step(1, "下一条分支", "›");
-		root.append(previous, count, next);
-		return { root, count, previous, next };
+		if (entryId === undefined) delete turn.section.dataset.entry;
+		else turn.section.dataset.entry = entryId;
 	}
 
 	/**
@@ -505,17 +403,6 @@ function labelFor(role: string): string {
 	if (role === "assistant") return "智能体";
 	if (role === "compactionSummary") return "上下文摘要";
 	return role;
-}
-
-/**
- * How one alternative reads in a switcher's tooltip.
- *
- * A branch point's alternatives are told apart by the first thing said below each one, which can be
- * either side of the conversation — so the label says who speaks before it says what was said. An
- * assistant turn that only called a tool has no text at all, and saying so beats an empty line.
- */
-function labelOf(option: BranchOption): string {
-	return `${labelFor(option.role)}：${option.label.length > 0 ? option.label : "（无文本）"}`;
 }
 
 function initialFor(role: string): string {
