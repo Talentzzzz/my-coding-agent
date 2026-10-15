@@ -354,15 +354,20 @@ export class Agent {
 	/** Tool results a hook rewrote, so the transcript can keep what the tool produced. */
 	private readonly toolResultViews = new Map<string, ToolResultView>();
 	/**
-	 * User messages this session already wrote to the store, oldest first.
+	 * Messages the loop has not taken yet, split by the queue they are waiting on.
 	 *
-	 * `prompt()` persists a message before handing it to the loop, so the loop's own emit of the same
-	 * message must not be written again. Two lists because the loop consumes them differently: a
-	 * steered message is injected into a running turn, so it is spent by the time that turn ends, while
-	 * a follow-up is still waiting.
+	 * Nothing is written to the store here. A message accepted mid-run is persisted when the loop
+	 * drains it, so the file's order is the order the loop takes them in — which is the order the model
+	 * is shown them in, and the order a reconnect's baseline replays. Persisting at acceptance instead
+	 * puts the file's copy of the message in front of the answer it interrupted, and a view rebuilt
+	 * from the file then draws a bubble between a question and its own reply.
+	 *
+	 * Two lists rather than one because the queues are read differently: a steered message is injected
+	 * into the running turn, so it is spent by the time that turn ends, while a follow-up is still
+	 * waiting — and only follow-ups are the depth a composer shows.
 	 */
-	private readonly steeredWrites: number[] = [];
-	private readonly queuedWrites: number[] = [];
+	private readonly steered: AgentMessage[] = [];
+	private readonly followUps: AgentMessage[] = [];
 	/** Messages that started a run, whose echoes must not be written twice either. */
 	private readonly promptWrites: number[] = [];
 	/** Last stamp this session handed out, so two messages in one millisecond stay distinguishable. */
@@ -737,7 +742,7 @@ export class Agent {
 	 * counted: it goes into the turn that is already running.
 	 */
 	get queued(): number {
-		return this.queuedWrites.length;
+		return this.followUps.length;
 	}
 
 	/** True while a tool call is waiting for an approval nobody has answered yet. */
@@ -834,8 +839,10 @@ export class Agent {
 	 *
 	 * While a run is streaming the message is queued instead of rejected: `steer` is injected at the
 	 * current turn's next drain point, `followUp` waits until the agent would otherwise stop. Either
-	 * way the message is persisted here, so the transcript gains it before the loop echoes it — which
-	 * is what {@link isOptimisticEcho} keeps from doubling.
+	 * way it is handed to the loop unwritten, and the loop's own echo of it is what the store records —
+	 * a drained message is one the conversation has reached, so the file gains it in the place the
+	 * model met it, behind the answer it interrupted. A run that ends before draining it writes it
+	 * anyway ({@link flushAccepted}), so accepted still means persisted, exactly once.
 	 */
 	async prompt(text: string, options: { behavior?: PromptBehavior; selection?: ModelSelection } = {}): Promise<void> {
 		const trimmed = text.trim();
@@ -848,22 +855,30 @@ export class Agent {
 		const message = this.userMessage(trimmed);
 		if (this.loop.state.isStreaming) {
 			const steer = (options.behavior ?? "followUp") === "steer";
-			this.appendMessage(message);
-			this.rememberWrite(message, steer ? "steer" : "followUp");
-			if (steer) this.loop.steer(message);
-			else this.loop.followUp(message);
+			if (steer) {
+				this.loop.steer(message);
+				this.steered.push(message);
+			} else {
+				this.loop.followUp(message);
+				this.followUps.push(message);
+			}
 			this.emitQueueUpdate();
 			this.publish();
 			return;
 		}
 
 		this.appendMessage(message);
-		this.rememberWrite(message, "prompt");
+		this.rememberPrompt(message);
 		this.emitQueueUpdate();
 		this.publish();
 		try {
 			await this.loop.prompt([message]);
 		} finally {
+			// A message accepted in the last moment of the run — after the loop had already decided to
+			// stop looking for one — is on a queue nothing will drain, so it is written here rather than
+			// lost. The ordinary drain path has already emptied both lists by this point, which is what
+			// makes this a no-op for a run that ended the way it should.
+			this.flushAccepted();
 			// `agent_end` is the last *event* of a run, but the run is not over until the loop has finished
 			// with it — `loop.state.isStreaming` stays true through every awaited listener for that event
 			// and is cleared only in the loop's own `finally`. So this is the first moment `submitting` is
@@ -1398,17 +1413,21 @@ export class Agent {
 	/** Persist what the loop reports, and pass it on. */
 	private async handleEvent(event: AgentEvent): Promise<void> {
 		if (event.type === "message_end") {
-			// `prompt()` already appended the user message optimistically, so the loop's own emit of
-			// that same message must not be recorded twice.
-			const duplicate = this.isOptimisticEcho(event.message);
-			if (!duplicate) this.appendMessage(this.transcriptMessage(event.message));
+			// The one user message the store already holds is the one that started a run: `prompt()`
+			// wrote it before handing it to the loop, so the loop's own emit of it must not be recorded
+			// twice. Everything else the loop announces is written here — including a message it just
+			// drained out of a queue, whose write was deliberately left to this moment so that the file
+			// gains it behind the answer it interrupted rather than in front of it.
+			if (!this.isOptimisticEcho(event.message)) {
+				this.takeAccepted(event.message);
+				this.appendMessage(this.transcriptMessage(event.message));
+			}
 		}
 		if (event.type === "agent_end") {
-			// A steered message belongs to the run it was injected into, so it is spent by the time the
-			// run ends whether or not its echo was seen; leaving it outstanding would overstate the
-			// queue forever. Clearing at the turn boundary would be too early: the drain point that
-			// injected it can echo after the turn that accepted it.
-			this.steeredWrites.length = 0;
+			// An accepted message the run never reached — an abort, a failure, a prompt that arrived in
+			// the moment the loop stopped looking. Nothing will drain it now, so the end of the run is
+			// where it is written. See {@link flushAccepted}.
+			this.flushAccepted();
 		}
 		this.emit(event);
 		// The echo of a drained message is what lowers the depth, so this is where the count goes live.
@@ -1477,28 +1496,71 @@ export class Agent {
 		this.emit({ type: "entry_appended", entryId, kind: "message" });
 	}
 
-	/** Record that this session, not the loop, wrote a user message. */
-	private rememberWrite(message: AgentMessage, kind: "prompt" | "steer" | "followUp"): void {
+	/**
+	 * Record that this session, not the loop, wrote the user message that started a run.
+	 *
+	 * The one write the session makes ahead of the loop: a prompt is what starts a run, so the store
+	 * gains it before the loop can echo it, and {@link isOptimisticEcho} is what keeps that echo from
+	 * writing it a second time.
+	 */
+	private rememberPrompt(message: AgentMessage): void {
 		if (message.role !== "user" || message.timestamp === undefined) return;
-		if (kind === "steer") this.steeredWrites.push(message.timestamp);
-		else if (kind === "followUp") this.queuedWrites.push(message.timestamp);
-		else this.promptWrites.push(message.timestamp);
+		this.promptWrites.push(message.timestamp);
 	}
 
 	/**
 	 * True when the loop is echoing a user message this session already persisted.
 	 *
-	 * The loop hands back the message it was given, so the stamp identifies the echo, and stamps are
-	 * unique per message because this session issues them. A match consumes the outstanding write: the
-	 * message is in the store once, whether the loop echoes it or not.
+	 * Only a prompt is written ahead of the loop: it is what starts a run, so there is a moment between
+	 * the write and the loop's own emit of the same message, and the stamp identifies it — stamps are
+	 * unique per message because this session issues them. A message drained out of a queue is not one
+	 * of these; its write is the echo, so it must land here.
 	 */
 	private isOptimisticEcho(message: AgentMessage): boolean {
 		if (message.role !== "user" || message.timestamp === undefined) return false;
-		return (
-			this.consume(this.steeredWrites, message.timestamp) ||
-			this.consume(this.queuedWrites, message.timestamp) ||
-			this.consume(this.promptWrites, message.timestamp)
+		return this.consume(this.promptWrites, message.timestamp);
+	}
+
+	/**
+	 * Take one accepted message off its queue, now that the loop has drained it.
+	 *
+	 * The count a composer shows is what is left on these lists, so this is where the depth drops: a
+	 * follow-up stops being "accepted and waiting" at the drain point, not when the turn it opened ends.
+	 * The message the loop hands back is the very object `prompt()` queued, so the stamp is the key.
+	 */
+	private takeAccepted(message: AgentMessage): void {
+		if (message.role !== "user" || message.timestamp === undefined) return;
+		for (const queue of [this.steered, this.followUps]) {
+			const index = queue.findIndex((candidate) => candidate.timestamp === message.timestamp);
+			if (index !== -1) {
+				queue.splice(index, 1);
+				return;
+			}
+		}
+	}
+
+	/**
+	 * Write the accepted messages a run never drained, in the order they were accepted.
+	 *
+	 * The run is over, so nothing will ever drain them: a message accepted while a run was in flight
+	 * that the run never reached — an abort, a failure, a prompt that arrived after the loop had
+	 * already decided to stop — is appended here, behind everything the run answered. Letting them go
+	 * instead would lose words the user typed, and would leave the depth above zero, which is what
+	 * `settle()` waits on.
+	 *
+	 * The loop's own queues are emptied with them, and that is not a convenience: they belong to the
+	 * run that just ended, and a message left on one would be drained into some later run and written
+	 * a second time.
+	 */
+	private flushAccepted(): void {
+		if (this.steered.length === 0 && this.followUps.length === 0) return;
+		const pending = [...this.steered, ...this.followUps].sort(
+			(left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0),
 		);
+		this.steered.length = 0;
+		this.followUps.length = 0;
+		this.loop.clearAllQueues();
+		for (const message of pending) this.appendMessage(message);
 	}
 
 	/** Take one outstanding write off its list, and say whether there was one. */

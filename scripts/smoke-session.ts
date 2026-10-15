@@ -333,9 +333,9 @@ function toolResultTexts(session: Agent): string[] {
 /**
  * A follow-up sent mid-run is accepted, queued, and drained when the turn ends.
  *
- * The transcript must hold both user messages exactly once: `prompt()` persists the queued message
- * before the loop echoes it, and the optimistic-write suppression is what keeps the echo from
- * writing it a second time.
+ * The transcript must hold both user messages exactly once, and in the order the loop took them: the
+ * queued message is written when the loop echoes it — behind the answer it interrupted — rather than
+ * when it was accepted.
  */
 async function exerciseFollowUp(): Promise<void> {
 	process.stdout.write("followUp\n");
@@ -369,8 +369,8 @@ async function exerciseFollowUp(): Promise<void> {
 	check("the transcript holds both user messages", users.length === 2, JSON.stringify(users));
 	check("the first exactly once", users.filter((text) => text === "first question").length === 1, JSON.stringify(users));
 	check("the second exactly once", users.filter((text) => text === "second question").length === 1, JSON.stringify(users));
-	// The loop does emit the queued message it drains, and that emit is what the store deduplicates
-	// against: whatever the loop echoed, the transcript holds the message once.
+	// The loop's own emit of the drained message *is* the write — nothing wrote it at acceptance — so
+	// "once" here means the echo landed, not that a duplicate was deduplicated away.
 	check("the drain point injected the queued message", echoed.includes("second question"), JSON.stringify(echoed));
 	check("two provider calls were made", fake.state.callCount - base === 2, String(fake.state.callCount - base));
 	check("nothing is queued after settling", session.snapshot.queued === 0, String(session.snapshot.queued));
@@ -379,16 +379,18 @@ async function exerciseFollowUp(): Promise<void> {
 }
 
 /**
- * `steer` is consumed without waiting for the turn; `followUp` stays queued until it ends.
+ * `steer` is taken without waiting for the turn; `followUp` waits for it to end.
  *
- * One held provider call gives the injection a window. `steer` is appended to the store during that
- * window, `followUp` only afterwards, and the entry's position in the log is the persistent evidence.
+ * One held provider call gives the injection a window, and what the two queues do in it is what
+ * separates them: a steered message goes into the running turn, so the depth a composer shows stays
+ * zero, while a follow-up is still waiting and counted. Neither is written yet — the loop's echo is
+ * the write — so the entry lands behind the answer it interrupted, and once.
  */
 async function exerciseSteerVersusFollowUp(): Promise<void> {
 	process.stdout.write("steer versus followUp\n");
 	const scenarios = [
-		{ behavior: "steer" as const, appendedWhileStreaming: true },
-		{ behavior: "followUp" as const, appendedWhileStreaming: false },
+		{ behavior: "steer" as const, counted: false },
+		{ behavior: "followUp" as const, counted: true },
 	];
 
 	for (const scenario of scenarios) {
@@ -401,13 +403,15 @@ async function exerciseSteerVersusFollowUp(): Promise<void> {
 		await session.prompt("queued now", { behavior: scenario.behavior });
 
 		const duringStreaming = entryIdsFor(session, "queued now");
-		// Both behaviours persist the message the moment it is accepted, so the store already holds it.
-		// What differs is what the queue reports: a steered message goes into the running turn, a
-		// follow-up waits for the next one.
 		check(
-			scenario.appendedWhileStreaming ? "steer is taken without waiting for the turn to end" : "followUp waits for the turn to end",
-			duringStreaming.length === 1 && (scenario.appendedWhileStreaming ? session.snapshot.queued === 0 : session.snapshot.queued === 1),
-			`entries=${JSON.stringify(duringStreaming)} queued=${session.snapshot.queued}`,
+			`${scenario.behavior} is not written while the run is streaming`,
+			duringStreaming.length === 0,
+			JSON.stringify(duringStreaming),
+		);
+		check(
+			scenario.counted ? "and the queue counts it" : "and the queue does not count it",
+			session.snapshot.queued === (scenario.counted ? 1 : 0),
+			String(session.snapshot.queued),
 		);
 
 		gate.release();
@@ -416,18 +420,110 @@ async function exerciseSteerVersusFollowUp(): Promise<void> {
 
 		const after = entryIdsFor(session, "queued now");
 		check(`${scenario.behavior} is in the store exactly once`, after.length === 1, JSON.stringify(after));
+		// The order is the reason the write waits for the drain: the store's order is the order the loop
+		// replayed, which is what the next request is built from and what a baseline replays.
+		const order = allMessages(session).map((message) => `${message.role}:${textOf(message)}`);
 		check(
-			scenario.appendedWhileStreaming
-				? "and the entry is the one written mid-run"
-				: "and it was written only once the turn ended",
-			duringStreaming.length === 0 ? after.length === 1 : after[0] === duringStreaming[0],
-			`during=${JSON.stringify(duringStreaming)} after=${JSON.stringify(after)}`,
+			`${scenario.behavior} is filed behind the answer it interrupted`,
+			JSON.stringify(order) ===
+				JSON.stringify(["user:question one", "assistant:first answer", "user:queued now", "assistant:second answer"]),
+			JSON.stringify(order),
 		);
-
-		const users = textsOf(session);
-		check(`${scenario.behavior} stays a single user message`, users.filter((text) => text === "queued now").length === 1, JSON.stringify(users));
 		await session.close();
 	}
+}
+
+/**
+ * A message accepted mid-run is filed behind the answer it interrupted, and the next request reads it
+ * there.
+ *
+ * This is what the deferred write buys, and it is two facts rather than one: the store's order, and
+ * the provider's view of it. `prepareRequest` builds the second out of the first, so a session whose
+ * file puts the follow-up in front of the answer would send the model exactly that.
+ */
+async function exerciseAcceptedOrder(): Promise<void> {
+	process.stdout.write("accepted message order\n");
+	const sent: SentRequest[] = [];
+	recordRequests(sent, [fakeAssistantMessage("first answer"), fakeAssistantMessage("second answer")]);
+	const { api: gatedApi, gate } = gatedTransport();
+	const session = await openSession({}, { api: gatedApi });
+
+	const running = session.prompt("question one");
+	await whenStreaming(session, gate);
+	await session.prompt("asked while it was answering", { behavior: "followUp" });
+	check(
+		"nothing is written at acceptance",
+		entryIdsFor(session, "asked while it was answering").length === 0,
+		JSON.stringify(entryIdsFor(session, "asked while it was answering")),
+	);
+
+	gate.release();
+	await within("the run", 10_000, running);
+	await within("settle()", 10_000, session.settle());
+
+	const order = allMessages(session).map((message) => `${message.role}:${textOf(message)}`);
+	check(
+		"the store reads the way the loop replayed it",
+		JSON.stringify(order) ===
+			JSON.stringify(["user:question one", "assistant:first answer", "user:asked while it was answering", "assistant:second answer"]),
+		JSON.stringify(order),
+	);
+	check(
+		"the first request carried the question alone",
+		JSON.stringify(sent[0]?.texts.slice(1)) === JSON.stringify(["question one"]),
+		JSON.stringify(sent[0]?.texts),
+	);
+	check(
+		"the request the follow-up opened carried it behind that answer",
+		JSON.stringify(sent[1]?.roles.slice(1)) === JSON.stringify(["user", "assistant", "user"]),
+		JSON.stringify(sent[1]?.roles),
+	);
+	check(
+		"with the texts in the same order",
+		JSON.stringify(sent[1]?.texts.slice(1)) ===
+			JSON.stringify(["question one", "first answer", "asked while it was answering"]),
+		JSON.stringify(sent[1]?.texts),
+	);
+
+	await session.close();
+}
+
+/**
+ * A message accepted mid-run that the run never reaches is still written, once, at the end.
+ *
+ * An abort is the ordinary way this happens: the loop stops before its next drain point, so nothing
+ * will ever take the message off the queue. Letting it go would lose words the user typed and would
+ * leave the depth above zero — which is what `settle()` waits on.
+ */
+async function exerciseAbortFlushesAccepted(): Promise<void> {
+	process.stdout.write("abort flushes the queue\n");
+	fake.setResponses([fakeAssistantMessage("an answer that never lands")]);
+	const { api: gatedApi, gate } = gatedTransport();
+	const session = await openSession({}, { api: gatedApi });
+
+	const running = session.prompt("question before the abort");
+	await whenStreaming(session, gate);
+	await session.prompt("typed while it was answering", { behavior: "followUp" });
+	check("the run is streaming with one message queued", session.isStreaming && session.snapshot.queued === 1, String(session.snapshot.queued));
+
+	const aborting = session.abort();
+	// The held call has to answer before the aborted run can end; the abort's own signal is what turns
+	// that answer into the end.
+	gate.release();
+	await within("the run", 10_000, running);
+	await within("abort()", 10_000, aborting);
+	await within("settle()", 10_000, session.settle());
+
+	const order = allMessages(session).map((message) => `${message.role}:${textOf(message)}`);
+	check("the aborted run still ends with what the user typed", order.at(-1) === "user:typed while it was answering", JSON.stringify(order));
+	check(
+		"written exactly once",
+		order.filter((line) => line === "user:typed while it was answering").length === 1,
+		JSON.stringify(order),
+	);
+	check("and the queue is empty, which is what settle() waits on", session.snapshot.queued === 0, String(session.snapshot.queued));
+
+	await session.close();
 }
 
 /** `followUpMode: "one-at-a-time"` drains one queued message per turn, not the whole queue. */
@@ -450,12 +546,13 @@ async function exerciseQueueMode(): Promise<void> {
 	await gateHeld(gate);
 	check("exactly one queued message was drained", session.snapshot.queued === 1, String(session.snapshot.queued));
 	check("and the loop has started its second request", gate.calls === 2, String(gate.calls));
-	// Both queued messages are persisted the moment they are accepted, which is what keeps a queued
-	// message safe, so the transcript is not what distinguishes drained from waiting. The depth is.
+	// The drained message is in the transcript, the waiting one is still only on a queue — the depth is
+	// what reports it, and since the write waits for the drain the transcript shows it too.
+	const soFar = allMessages(session).map((message) => `${message.role}:${textOf(message)}`);
 	check(
-		"the transcript holds one entry per user message so far",
-		allMessages(session).filter((message) => message.role === "user").length === 3,
-		JSON.stringify(allMessages(session).map((message) => [message.role, textOf(message)])),
+		"the transcript holds the drained message and not the waiting one",
+		JSON.stringify(soFar) === JSON.stringify(["user:turn one", "assistant:answer one", "user:turn two"]),
+		JSON.stringify(soFar),
 	);
 
 	gate.release();
@@ -519,8 +616,9 @@ function labelOf(event: AgentSessionEvent): string {
  * message_start/message_end, the queue depth, and every entry as it lands.
  *
  * Flattening is what makes this readable from one subscription: the loop's events and the session's
- * own members arrive in one stream, ordered by what actually happened: the write is announced before
- * the loop echoes the message it wrote, and the queue is reported between acceptance and the drain.
+ * own members arrive in one stream, ordered by what actually happened. For the message that started
+ * the run that means the write comes first; for a drained one it means the queue reports the
+ * acceptance, the entry lands at the drain, and the loop's own echo follows.
  */
 async function exerciseEventStream(): Promise<void> {
 	process.stdout.write("session events\n");
@@ -565,7 +663,7 @@ async function exerciseEventStream(): Promise<void> {
 	check("and so does its message_end", answered > asked, trace);
 
 	const queuedEntry = entryIdsFor(session, "event question two")[0];
-	const written = appended.indexOf(queuedEntry ?? "\u0000");
+	const written = seen.findIndex((event) => event.type === "entry_appended" && event.entryId === queuedEntry);
 	const queuedUpdate = seen.findIndex((event) => event.type === "queue_update" && event.queued === 1);
 	const drainedStart = seen.findIndex(
 		(event) => event.type === "message_start" && event.message.role === "user" && textOf(event.message) === "event question two",
@@ -573,8 +671,16 @@ async function exerciseEventStream(): Promise<void> {
 	const drainedEnd = seen.findIndex(
 		(event) => event.type === "message_end" && event.message.role === "user" && textOf(event.message) === "event question two",
 	);
-	check("the accepted message is written before the queue reports it", written >= 0 && queuedUpdate > written, `write=${written} queue=${queuedUpdate}`);
-	check("the loop echoes it only after the queue reported it", drainedStart > queuedUpdate && drainedEnd > drainedStart, `queue=${queuedUpdate} start=${drainedStart} end=${drainedEnd}`);
+	check(
+		"the queue reports the message while nothing is written yet",
+		queuedUpdate >= 0 && written > queuedUpdate && queuedUpdate < drainedStart,
+		`queue=${queuedUpdate} write=${written} start=${drainedStart}`,
+	);
+	check(
+		"the write is the drain, in the same breath as the echo and before its end",
+		written === drainedStart + 1 && drainedEnd === drainedStart + 2,
+		`start=${drainedStart} write=${written} end=${drainedEnd}`,
+	);
 	check("and the depth returns to zero once drained", seen.some((event) => event.type === "queue_update" && event.queued === 0), trace);
 
 	await session.close();
@@ -1721,6 +1827,8 @@ try {
 	await exerciseModelSelection();
 	await exerciseFollowUp();
 	await exerciseSteerVersusFollowUp();
+	await exerciseAcceptedOrder();
+	await exerciseAbortFlushesAccepted();
 	await exerciseQueueMode();
 	await exerciseLiveStates();
 	await exerciseEventStream();

@@ -85,6 +85,19 @@ WebSocket 连接处报 "the mux connection failed"——那是没起服务器，
 
 <!-- 关掉的 ticket 依次列在这里：一行要点 + 指向该 ticket 的链接 -->
 
+- [20 重连基线把排队消息重排到它打断的回答之前](issues/20-midrun-baseline-reorder.md)：判定 **(a)
+  ——排队消息的落盘点移到取走点**，因为分歧不只在窗口：`prompt()` 的乐观落盘发生在接受时，而
+  assistant 消息是 `message_end` 才落盘，于是 store 链是 `U1 → U2 → A1`、循环回放与
+  `prepareRequest` 建出的请求却是 `U1 → A1 → U2`——**模型读到的也是错的顺序**，运行中基线只是它的
+  第一个症状（重载页面时会画成两份气泡）。会话自己动手写的只剩启动一次运行的那条 prompt；
+  运行结束前没被取走的（中止/失败）由 `flushAccepted` 在 `agent_end` 补写一次并清空循环队列——
+  不补写 `queued` 不归零、`settle()` 会永不返回。窗口侧不做次序补偿。核实掉的另一条：一次会话在
+  一条连接上**不可能**有两条逻辑流（两端都按会话去重），16 号那「三份基线」是探头抹掉了
+  `streamId` + harness 点过两次新建会话。落地 `packages/core/src/agent.ts`、
+  `scripts/smoke-session.ts`（新增 `accepted message order` / `abort flushes the queue` 两节）、
+  `docs/architecture.md` 与 **ADR-0003**；复现与核验脚本 `research/verify-20.ts`（A 落定后重开、
+  B 运行中重载，修复前 9 条失败、修复后 22 条全绿）。
+
 - [19 真窗口核验：分支、fork、改名三个入口可达且可用](issues/19-entry-verification.md)：**三个
   入口在最新构建里全部可达且可用**（`research/verify-19.ts`，真 UI 24 条断言全绿，出图 10 张
   在 `research/v19-*.png`）。用户报的「没实现」核实为**旧构建 + 入口藏得深**（fork/改名/删除
