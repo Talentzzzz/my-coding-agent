@@ -1,7 +1,7 @@
 # 06 左栏：去 logo、行规格、拖拽调宽
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 01, 04
 
 ## Question
@@ -33,3 +33,30 @@ Blocked by: 01, 04
 
 `npm run check` + `scripts/smoke-sidebar.ts` 要绿。smoke 里如果断言了 brand 的存在，**改断言**并说明
 为什么那个断言本来就该消失。
+
+## Answer
+
+六条全做，与 05 号同一批落地（两票在 `style.css` / `state.ts` / `tokens.css` 上逐行交缠，拆不开，
+一个提交走）。`npm run check`、`scripts/smoke-sidebar.ts` 绿——smoke 原本就没断言 brand 的存在，
+无需改断言。
+
+1. **logo 整块删掉**：`sidebar.ts` 的 `brand`（`M` + `my-agent`）与 `style.css` 的 `.brand-*` 一并
+   清理。顶行只剩新建会话与收起按钮，40px 高度由这两个控件撑着，不留空条；连接指示挪进**栏脚**、
+   与设置入口同行——它是窗口级的事实，栏脚是窗口级东西住的地方。静默时只有一个点没有字
+   （参考实现的读法），connecting 脉动、down 才有声。
+2. **会话行一行化**：32px 高、`--dsw-radius-md`、左右 8px；原第二行状态整个删除
+   （`rowStatus()` / `.session-item-status` / `min-height` 一并清理），运行中/待审批收进左边
+   16px 槽的一颗琥珀圆点（`busyOf()`：pending > 0 或 running，两者同色——同一事实的两面），
+   「已打开」就是 `aria-current` 底色本身，不占槽。
+3. **fork 缩进删除**：`drawDepth` / `data-depth` / 竖线 / ▸ 整套从渲染里拿掉；`rowsOf()` 的建树
+   留着（顺序与"紧跟源会话"还靠它）。行与行只有一种长相，fork 的差异就是名字上的「（1）」。
+4. **工作区分组**：标题在会话行之上的顺序未动；分组头 34px、meta 档，hover 时文件夹图标换
+   chevron——两者共用一个槽位，hover 而非 DOM 决定谁显示。
+5. **拖宽**：左栏右缘一条 6px 把手（`role="separator"` + 方向键），拖的是 `--dsw-sidebar-width`。
+   量程从 `tokens.css` 的 `--dsw-sidebar-min/max`（208/360）读回——config 模块跑在 Node 上，
+   客户端不把它拉进 bundle，字面值只是样式表加载失败时的兜底。宽度记进
+   `appearance.sidebarWidth`（04 拍的 settings 层，非 localStorage——桌面外壳每次启动换端口）；
+   服务端 `clampSidebarWidth` 与客户端 clamp 同一对数；**按下未动不覆写**偏好；收起的 rail 态
+   把手隐藏、拖拽与键盘都早退。
+6. **就地改名**：`.rename-input` 就是行内标题换上输入框的衣服——同一 flex、同一 margins、title 档
+   同一套字号行高，换进去不跳。

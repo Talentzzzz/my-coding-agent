@@ -47,17 +47,21 @@ export interface SidebarState {
 }
 
 /**
- * What one row says under its title.
+ * What the row's slot says, as the line the tooltip gains while it is lit.
  *
- * Only two of these are facts about the session, and only one of those is worth a colour: an idle
- * session takes none, so a workspace with four stopped conversations is four ordinary rows rather
- * than four rows insisting on something.
+ * Only two of these are facts about the session, and both share the one amber dot: a session waiting
+ * on the user is not more urgent than one working — it is the same fact seen from a different side,
+ * and giving them two colours would ask the eye to learn a distinction the words already make. The
+ * words survive in the tooltip, where a person who wants to know why the dot is lit can read them.
  *
- * "运行中" and "待审批" are both amber, and deliberately not different colours. A session waiting on
- * the user is not more urgent than one working — it is the same fact seen from a different side, and
- * giving them two colours would ask the eye to learn a distinction the words already make.
+ * "已打开" needs no slot at all: it is the `aria-current` background itself, which is the row already
+ * saying it is the one on screen.
  */
-type RowStatus = { text: string; tone: "warn" | "idle" } | undefined;
+function busyOf(row: SessionRow): string | undefined {
+	if (row.pending > 0) return row.pending > 1 ? `待审批 ${row.pending}` : "待审批";
+	if (row.running) return "运行中";
+	return undefined;
+}
 
 /**
  * The navigation column.
@@ -78,7 +82,7 @@ export class Sidebar {
 	private readonly handlers: SidebarHandlers;
 	private readonly list: HTMLElement;
 	private readonly toggle: HTMLButtonElement;
-	/** The channel's three states, as the indicator beside the brand. */
+	/** The channel's three states, as the dot beside the settings entry. */
 	private readonly indicator: HTMLElement;
 	private readonly indicatorText: HTMLElement;
 	/** Workspaces whose list has been opened past {@link COLLAPSED_COUNT}. */
@@ -120,18 +124,15 @@ export class Sidebar {
 		this.handlers = handlers;
 		this.element = element("aside", "sidebar");
 
+		// The top row is the drag strip and nothing else: the window is moved from here, so the row
+		// holds the two controls the column opens with and no brand — the column is the list, not a
+		// product, and a logo on it was one more piece of chrome competing with the conversations.
 		const top = element("div", "sidebar-top");
-		const brand = element("div", "brand");
-		brand.append(element("span", "brand-mark", "M"), element("span", "brand-name", "my-agent"));
-		this.toggle = iconButton("panel", "切换侧边栏", () => this.handlers.onToggleCollapsed());
-		this.indicator = element("span", "channel-indicator");
-		this.indicatorText = element("span", "channel-indicator-text");
-		this.indicator.append(element("span", "channel-dot"), this.indicatorText);
-		top.append(brand, this.indicator, this.toggle);
-
 		const newSession = element("button", "new-session", undefined, { type: "button" });
 		newSession.append(icon("plus"), element("span", undefined, "新建会话"));
 		newSession.addEventListener("click", () => this.handlers.onNewSession());
+		this.toggle = iconButton("panel", "切换侧边栏", () => this.handlers.onToggleCollapsed());
+		top.append(newSession, this.toggle);
 
 		this.list = element("nav", "session-list", undefined, { "aria-label": "会话列表" });
 
@@ -171,13 +172,18 @@ export class Sidebar {
 
 		// The one control in the corner the eye returns to: everything that is set once — the theme,
 		// the font size, the models — lives behind it rather than in the chrome around the transcript.
+		// The channel indicator shares the foot rather than the top row it used to share with the
+		// brand: it is a fact about the window, and the foot is where window-level things live.
 		const foot = element("div", "sidebar-foot");
 		const settings = element("button", "settings-entry", undefined, { type: "button", title: "设置" });
 		settings.append(icon("gear"), element("span", undefined, "设置"));
 		settings.addEventListener("click", () => this.handlers.onOpenSettings());
-		foot.append(settings);
+		this.indicator = element("span", "channel-indicator");
+		this.indicatorText = element("span", "channel-indicator-text");
+		this.indicator.append(element("span", "channel-dot"), this.indicatorText);
+		foot.append(settings, this.indicator);
 
-		this.element.append(top, newSession, this.list, foot);
+		this.element.append(top, this.list, foot);
 	}
 
 	/** Open or close the search row. Closing it clears the filter, because a closed filter filters nothing. */
@@ -330,7 +336,13 @@ export class Sidebar {
 
 		const head = element("div", "workspace-head", undefined, { title: cwd });
 		const name = element("span", "workspace-name", workspaceName(cwd));
-		head.append(icon("folder"), name);
+		// Both icons ride every head, and the hover — not the DOM — decides which shows: the folder is
+		// the content, the chevron the affordance, and the swap keeps one position for both meanings.
+		const folder = element("span", "workspace-icon-folder");
+		folder.append(icon("folder"));
+		const chev = element("span", "workspace-icon-chev");
+		chev.append(icon("chevron"));
+		head.append(folder, chev, name);
 		let mark: HTMLElement | undefined;
 		if (cwd === currentWorkspace) {
 			// Which group the new-session button will write into, said once rather than left to be
@@ -354,14 +366,13 @@ export class Sidebar {
 		}
 
 		const button = element("button", "session-item", undefined, { type: "button" });
-		const body = element("span", "session-item-body");
-		const head = element("span", "session-item-line");
+		// One line, per the reference's row spec: the status slot, the title, and the age. The slot is
+		// the row's only room for a state — a second line under the title made every row taller to
+		// carry what a dot in a 16px gutter already says.
+		const slot = element("span", "session-item-slot");
 		const title = element("span", "session-item-title");
 		const time = element("span", "session-item-time");
-		const status = element("span", "session-item-status");
-		head.append(title, time);
-		body.append(head, status);
-		button.append(body);
+		button.append(slot, title, time);
 		button.addEventListener("click", () => this.handlers.onSelectSession(row.session.id));
 		// The row's whole menu lives here rather than in any resident control: a right click names the
 		// row, and the menu it opens is the only place fork, rename, and delete are offered from.
@@ -370,7 +381,7 @@ export class Sidebar {
 			this.openSessionMenu(row.session.id, event.clientX, event.clientY);
 		});
 
-		const parts: RowParts = { title, time, status };
+		const parts: RowParts = { slot, title, time };
 		this.drawn.set(row.session.id, { button, parts });
 		this.patchRow(parts, button, row, state);
 		return button;
@@ -476,10 +487,13 @@ export class Sidebar {
 		}
 		// The parent is named by what it *wears* rather than by what it stores: a fork of a fork hangs
 		// its suffix on the parent's own, so the tooltip names the row a person actually sees above.
+		// The busy line rides the end of it: the dot is the glance, the words are for the look.
+		const busy = busyOf(row.session);
 		const tooltip =
-			row.parentLabel === undefined
+			(row.parentLabel === undefined
 				? `${row.label}\n${row.session.cwd}\n创建于 ${created.text}`
-				: `${row.label}\n${row.session.cwd}\n派生自 ${row.parentLabel}\n创建于 ${created.text}`;
+				: `${row.label}\n${row.session.cwd}\n派生自 ${row.parentLabel}\n创建于 ${created.text}`) +
+			(busy === undefined ? "" : `\n${busy}`);
 		if (parts.tooltip !== tooltip) {
 			parts.tooltip = tooltip;
 			button.title = tooltip;
@@ -487,7 +501,7 @@ export class Sidebar {
 
 		if (parts.title.textContent !== row.label) parts.title.textContent = row.label;
 		this.paintTime(parts, row.session.modified);
-		this.paintStatus(parts, rowStatus(row.session, isActive));
+		this.paintSlot(parts, busy);
 
 		if (isActive) button.setAttribute("aria-current", "true");
 		else button.removeAttribute("aria-current");
@@ -523,28 +537,18 @@ export class Sidebar {
 	}
 
 	/**
-	 * Write a status line, or clear it.
+	 * Light the slot's dot, or clear it.
 	 *
-	 * Cleared rather than emptied, because an empty span with a line-height still occupies the line:
-	 * a workspace of finished sessions would be as tall as a workspace of busy ones, and a row's height
-	 * is what the collapsed-count limit is really about. The element itself stays — it is the row's, and
-	 * rebuilding it per change is the churn this whole design exists to avoid.
+	 * Cleared rather than left stale, because a row that stopped running while the list was scrolled
+	 * away would otherwise come back still claiming a run. The attribute — not a class — is the
+	 * switch, so the dot is one CSS rule away from both states and the element itself stays: it is
+	 * the row's, and rebuilding it per change is the churn this whole design exists to avoid.
 	 */
-	private paintStatus(parts: RowParts, status: RowStatus): void {
-		const node = parts.status;
-		if (status === undefined) {
-			if (parts.statusText !== undefined) {
-				parts.statusText = undefined;
-				node.replaceChildren();
-				node.removeAttribute("data-tone");
-			}
-			return;
-		}
-		if (parts.statusText !== status.text) {
-			parts.statusText = status.text;
-			node.textContent = status.text;
-		}
-		node.dataset.tone = status.tone;
+	private paintSlot(parts: RowParts, busy: string | undefined): void {
+		if (parts.busy === busy) return;
+		parts.busy = busy;
+		if (busy === undefined) parts.slot.removeAttribute("data-state");
+		else parts.slot.dataset.state = "warn";
 	}
 
 	private moreFor(cwd: string, hidden: number): HTMLElement | undefined {
@@ -629,41 +633,17 @@ interface Editing {
  * row at all.
  */
 interface RowParts {
+	slot: HTMLElement;
 	title: HTMLElement;
 	time: HTMLElement;
-	status: HTMLElement;
 	/** Last activity written into the time, kept so a tick can recompute the text without the rows. */
 	modified?: number;
-	/** The status text on screen, so an unchanged one is not rewritten. */
-	statusText?: string;
+	/** The busy line the tooltip currently names, so an unchanged one is neither recomposed nor rewritten. */
+	busy?: string;
 	/** The tooltip string on screen, so an unchanged one is neither recomposed nor rewritten. */
 	tooltip?: string;
 	/** The creation stamp the tooltip's date was formatted from, so `toLocaleString` runs once per row. */
 	created?: { at: number; text: string };
-}
-
-/**
- * The second line under a row's title.
- *
- * Ordered by what a person has to act on. "待审批" comes before "运行中" because a session waiting on
- * the user is the one case where looking at the row tells you something is *yours* to do, and it
- * would be buried if the running badge claimed the line first.
- *
- * "已打开 · 空闲" is a fact about this window rather than about the session, and needs no field: it
- * is the row the window is currently showing.
- *
- * Each state keeps the glyph it was designed with, because the glyph is what separates the two busy
- * states from each other and from the idle one when the text is skimmed rather than read: a filled dot
- * is something happening, a bar is something merely open, and colour alone would leave the idle row
- * looking like a fourth kind of busy. The glyphs are characters rather than shapes drawn in CSS
- * because they carry no meaning of their own — the words beside them are the sentence, and the marks
- * are the part of it that survives being scanned.
- */
-function rowStatus(row: SessionRow, isActive: boolean): RowStatus {
-	if (row.pending > 0) return { text: `● 待审批${row.pending > 1 ? ` ${row.pending}` : ""}`, tone: "warn" };
-	if (row.running) return { text: "● 运行中", tone: "warn" };
-	if (isActive) return { text: "▍ 已打开 · 空闲", tone: "idle" };
-	return undefined;
 }
 
 /**

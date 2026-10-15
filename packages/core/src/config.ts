@@ -42,14 +42,32 @@ export interface RetrySettings {
 export interface AppearanceSettings {
 	/** `system` follows the OS. */
 	theme: "system" | "light" | "dark";
-	/** Root font size in pixels; every other size is expressed against it. */
+	/**
+	 * The body tier's font size in px — the one tier the type scale lets move; the shell's other
+	 * four tiers are fixed and do not follow it.
+	 */
 	fontSize: number;
+	/**
+	 * The sidebar's width in px, as the drag handle last left it. Absent until the user has dragged
+	 * once — the default width is the stylesheet's, and a preference that was never expressed must
+	 * not be manufactured here.
+	 */
+	sidebarWidth?: number;
 }
 
-export const DEFAULT_APPEARANCE: AppearanceSettings = { theme: "dark", fontSize: 14 };
+export const DEFAULT_APPEARANCE: AppearanceSettings = { theme: "dark", fontSize: 15 };
 
 /** The range the font-size control offers, shared by the parser and the client. */
 export const FONT_SIZE_RANGE = { min: 12, max: 20 } as const;
+
+/**
+ * The range the sidebar's drag handle can reach, shared by the parser and the client.
+ *
+ * The numbers live beside the font-size range rather than only in the stylesheet because both ends
+ * of the drag clamp against them in the client: a stored preference outside the range would survive
+ * every resize the user could see and re-apply itself on the next boot.
+ */
+export const SIDEBAR_WIDTH_RANGE = { min: 208, max: 360 } as const;
 
 /**
  * How long the `bash` tool lets one command run.
@@ -191,9 +209,13 @@ function bashOr(value: unknown): BashSettings {
 function appearanceOr(value: unknown): AppearanceSettings {
 	const record = isRecord(value) ? value : {};
 	const theme = record.theme;
+	const sidebarWidth = clampSidebarWidth(record.sidebarWidth);
 	return {
 		theme: theme === "light" || theme === "dark" || theme === "system" ? theme : DEFAULT_APPEARANCE.theme,
 		fontSize: clampFontSize(record.fontSize),
+		// Optional, so an appearance never dragged keeps no field: the default width is the
+		// stylesheet's, and writing one here would turn "never chose" into "chose the default".
+		...(sidebarWidth === undefined ? {} : { sidebarWidth }),
 	};
 }
 
@@ -206,6 +228,18 @@ function appearanceOr(value: unknown): AppearanceSettings {
 export function clampFontSize(value: unknown): number {
 	if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_APPEARANCE.fontSize;
 	return Math.min(FONT_SIZE_RANGE.max, Math.max(FONT_SIZE_RANGE.min, Math.round(value)));
+}
+
+/**
+ * The sidebar's width within what the handle can reach, or undefined for "never dragged".
+ *
+ * Clamped rather than rejected, for the same reason the font size is: a hand-edited file, or a
+ * preference left wider than the current range allows, is a number to pull back inside — not a
+ * reason to forget it.
+ */
+export function clampSidebarWidth(value: unknown): number | undefined {
+	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+	return Math.min(SIDEBAR_WIDTH_RANGE.max, Math.max(SIDEBAR_WIDTH_RANGE.min, Math.round(value)));
 }
 
 /** The two queue modes pi-agent-core understands; anything else keeps the default. */

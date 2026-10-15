@@ -69,12 +69,48 @@
 	--dsw-ease: cubic-bezier(0.4, 0, 0.2, 1);
 	--dsw-duration: 0.2s;
 	--dsw-duration-fast: 0.1s;
+
+	/*
+	 * The type scale, five tiers. Each tier states its size and its leading together — a size without
+	 * the line it sits on is half a decision, and restating the pair per rule is the same mistake
+	 * made twice. Four tiers are fixed; only `body` moves: the appearance setting's font-size slider
+	 * publishes its value straight onto `--dsw-fs-body` at runtime (state.ts), so the body text rides
+	 * the slider while the shell keeps its fixed steps. The default here is the slider's default.
+	 */
+	--dsw-fs-title: 14px;
+	--dsw-lh-title: 20px;
+	--dsw-fs-meta: 13px;
+	--dsw-lh-meta: 18px;
+	--dsw-fs-caption: 12px;
+	--dsw-lh-caption: 16px;
+	--dsw-fs-body: 15px;
+	/* The body leading is derived, not stated: the slider overrides the size at runtime, and a
+	   second number would stay behind while the size moved — the pair is one decision at every
+	   step of the slider, which is what 25/15 is the ratio of. */
+	--dsw-lh-body: calc(var(--dsw-fs-body) * 25 / 15);
+	--dsw-fs-code: 13px;
+	--dsw-lh-code: 20px;
+
 	--dsw-radius-xs: 4px;
 	--dsw-radius-sm: 8px;
 	--dsw-radius-md: 12px;
 	--dsw-radius-lg: 16px;
 	--dsw-radius-xl: 20px;
 	--dsw-radius-panel: 28px;
+
+	/*
+	 * The sidebar's width and the range its drag handle can reach.
+	 *
+	 * The width is the default, and the one variable the window overrides at runtime: the drag
+	 * handle (main.ts) writes the dragged value straight onto it, and the stored preference lands
+	 * here through applyAppearance on every settings load. The min and max are the same numbers the
+	 * server clamps a stored preference against (`SIDEBAR_WIDTH_RANGE` in core/config.ts); the
+	 * handle reads them back from here at drag time, so this file — not a JS constant — is where
+	 * the clamp lives, and changing it changes both ends at once.
+	 */
+	--dsw-sidebar-width: 232px;
+	--dsw-sidebar-min: 208px;
+	--dsw-sidebar-max: 360px;
 
 	/* Alias roles — light. */
 	--dsw-bg-base: var(--dsw-static-neutral-bluish-00);

@@ -195,6 +195,20 @@ token 审计会拒绝一个被引用却从未定义的 `--dsw-*` 名字；改完
   `scripts/smoke-replay.ts` 修复前 12 失败、修复后全绿（钉住文本/isError/diff/并行分组/卡片位置）。
   一处超票面：`submitting:false` 的快照把无结果的卡 `settleCards` 收掉（截断的记录不转圈），
   `submitting:true` 时留给活的 end 事件。`contentToText` 的 `[调用 name]` 降级留给 07，两票不各修。
+- [05 排版 token 化](issues/05-type-tokens.md)：`style.css` 里近 60 处字号散值（10–14px 八档 +
+  8 处骑 `--app-font-size` 的派生式）全部收进 04 拍的五档 `--dsw-fs-*`/`--dsw-lh-*`；对照表在票的
+  Answer 里。`--app-font-size` 退役——设置滑杆的值由 `state.ts` 直接发布到 `--dsw-fs-body`，
+  `--dsw-lh-body` 改为 `calc(fs * 25/15)` 派生，滑杆怎么拖字号与行高都不拆对；默认 14 抬到 15
+  （`DEFAULT_APPEARANCE` 与 README 示例同步）。两处有意的判断：输入框正文（composer textarea）落
+  body 档骑轴——它是用户自己的正文，跟气泡同轴；状态行读数钉 caption + 等宽（04 的改判）。
+  `npm run check`（token 审计）绿。
+- [06 左栏：去 logo、单行会话、拖宽记忆](issues/06-sidebar.md)：brand 整块删掉，连接指示挪进栏脚
+  （窗口级事实住窗口级的位置）；会话行收成一行 32px，运行中/待审批收进左边 16px 槽的一颗琥珀点，
+  「已打开」就是 `aria-current` 底色本身；fork 缩进整套删除（`rowsOf()` 建树留着）；工作区分组头
+  hover 时文件夹换 chevron；右缘拖宽把手（`role="separator"`，键盘可达），宽度记进
+  `appearance.sidebarWidth`（`SIDEBAR_WIDTH_RANGE` 208–360，服务端 clamp，客户端读 tokens.css 的
+  `--dsw-sidebar-min/max`——config 模块跑在 Node 上，客户端不把它拉进 bundle），空按不覆写偏好。
+  `scripts/smoke-sidebar.ts` 原本就没断言 brand，未改断言，全绿。
 
 
 ## Not yet specified

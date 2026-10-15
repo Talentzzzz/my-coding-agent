@@ -232,7 +232,10 @@ export class SettingsPanel {
 
 		const sizeRow = element("div", "settings-field");
 		sizeRow.append(element("span", "settings-label", "字号"));
-		const size = settings?.appearance.fontSize ?? 14;
+		// The fallback is DEFAULT_APPEARANCE.fontSize in @my-agent/core/config.ts, restated here —
+		// that module runs on Node, and the client must not pull it into its bundle. The slider's
+		// 12–20 ends are the same kind of restatement (FONT_SIZE_RANGE), for the same reason.
+		const size = settings?.appearance.fontSize ?? 15;
 		const value = element("span", "settings-value", `${size}px`);
 		const slider = element("input", "slider", undefined, {
 			type: "range",

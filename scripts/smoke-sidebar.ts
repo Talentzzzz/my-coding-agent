@@ -271,20 +271,46 @@ function state(rows: SessionRow[], over: Partial<SidebarState> = {}): SidebarSta
 	return { workspaces: [{ cwd: "/w", sessions: rows }], currentWorkspace: "/w", collapsed: false, channel: "live", ...over };
 }
 
-/** The row buttons currently in the list, by their title text. */
-function titlesOf(sidebar: Sidebar): { title: string; created: number }[] {
-	const found: { title: string; created: number }[] = [];
+/**
+ * One drawn row's whole surface, in list order: the title it wears, when its node was created, the
+ * state its slot carries, and the tooltip it shows.
+ *
+ * The one walk every assertion reads through, so the row's shape — the button, the slot, the title,
+ * the time — is described exactly once. Rows are looked up by their title because they are ordered
+ * by `modified`, so a positional assertion would be testing the sort instead of the row.
+ */
+function collectRows(sidebar: Sidebar): { title: string; created: number; state: string | null; tooltip: string }[] {
+	const found: { title: string; created: number; state: string | null; tooltip: string }[] = [];
 	const walk = (node: FakeNode): void => {
 		if (node.className === "session-item") {
-			// A row is the button, its fork mark and its body; the body holds the two lines, and the
-			// title is on the first of them. So: button -> body -> line -> title.
-			const title = node.querySelector(".session-item-title");
-			found.push({ title: title?.textContent ?? "?", created: title?.created ?? 0 });
+			const titleNode = node.querySelector(".session-item-title");
+			found.push({
+				title: titleNode?.textContent ?? "?",
+				created: titleNode?.created ?? 0,
+				state: node.querySelector(".session-item-slot")?.getAttribute("data-state") ?? null,
+				tooltip: node.title,
+			});
 		}
 		for (const child of node.children) walk(child);
 	};
 	walk(root(sidebar));
 	return found;
+}
+
+/** The row buttons currently in the list, by their title text. */
+function titlesOf(sidebar: Sidebar): { title: string; created: number }[] {
+	return collectRows(sidebar).map(({ title, created }) => ({ title, created }));
+}
+
+/**
+ * One row's slot state and tooltip, by the title the row wears.
+ *
+ * The slot is the row's only status now — the second line it replaced is gone — so "what does this
+ * row say about itself" is answered by whether the slot is lit and what the tooltip names the reason
+ * with.
+ */
+function rowsByName(sidebar: Sidebar): Map<string, { state: string | null; tooltip: string }> {
+	return new Map(collectRows(sidebar).map(({ title, state, tooltip }) => [title, { state, tooltip }]));
 }
 
 /**
@@ -325,6 +351,11 @@ process.stdout.write("\nsidebar：行是原地改的\n");
 	const rows = [row("a", 300), row("b", 200), row("c", 100)];
 	sidebar.render(state(rows, { activeSessionId: "b" }));
 
+	// The brand the column used to open with is gone whole — no logo, no mark, no name — and with it
+	// the empty seat its row left behind. The top row holds controls now, or nothing at all.
+	check("顶部没有 brand", all(sidebar, "brand").length === 0);
+	check("没有任何行带着第二行状态的残骸", all(sidebar, "session-item-status").length === 0);
+
 	const before = titlesOf(sidebar);
 	check("三行都在", before.length === 3, JSON.stringify(before.map((t) => t.title)));
 	check("按 modified 降序", before.map((t) => t.title).join(",") === "会话 a,会话 b,会话 c", JSON.stringify(before.map((t) => t.title)));
@@ -336,8 +367,8 @@ process.stdout.write("\nsidebar：行是原地改的\n");
 	check("改字段不重建行", after.every((t) => t.created === 1), JSON.stringify(after));
 	check("重建后还是同一批节点", after.map((t) => t.title).join(",") === before.map((t) => t.title).join(","));
 
-	const statuses = all(sidebar, "session-item-status").map((entry) => entry.node.textContent ?? "");
-	check("运行中的行有第二行状态", statuses.includes("● 运行中"), JSON.stringify(statuses));
+	const busyStates = [...rowsByName(sidebar).values()].map((entry) => entry.state);
+	check("运行中的行点亮了槽里的点", busyStates.includes("warn"), JSON.stringify(busyStates));
 }
 
 // ------------------------------------------------------- 2. reordering in place
@@ -376,9 +407,9 @@ process.stdout.write("\nsidebar：重排是移动节点\n");
 	check("两行都还在", rowsAfter.length === 2, JSON.stringify(rowsAfter.length));
 }
 
-// --------------------------------------------------------- 3. status precedence
+// --------------------------------------------------------- 3. the status slot
 
-process.stdout.write("\nsidebar：第二行状态\n");
+process.stdout.write("\nsidebar：状态收进左边的槽\n");
 
 {
 	const sidebar = new Sidebar({
@@ -392,8 +423,8 @@ process.stdout.write("\nsidebar：第二行状态\n");
 		onRenameSession: () => {},
 	});
 
-	// Each row's own status, looked up by session rather than by position: rows are ordered by
-	// `modified`, so a positional assertion here would be testing the sort instead of the precedence.
+	// Each row's own state, looked up by session rather than by position: rows are ordered by
+	// `modified`, so a positional assertion here would be testing the sort instead of the state.
 	const rows = [
 		row("busy", 400, { running: true }),
 		row("waiting", 300, { running: true, pending: 2 }),
@@ -402,22 +433,21 @@ process.stdout.write("\nsidebar：第二行状态\n");
 	];
 	sidebar.render(state(rows, { activeSessionId: "open" }));
 
-	const statusBySession = new Map<string, string>();
-	const walk = (node: FakeNode): void => {
-		if (node.className === "session-item") {
-			const title = node.querySelector(".session-item-title")?.textContent ?? "?";
-			statusBySession.set(title, node.querySelector(".session-item-status")?.textContent ?? "");
-		}
-		for (const child of node.children) walk(child);
-	};
-	walk(root(sidebar));
+	const byName = rowsByName(sidebar);
 
-	// A session waiting on the user says so, and does not also claim to be "running": it *is*
-	// running, but the thing the reader has to act on is the other half, and only one line fits.
-	check("待审批盖过运行中", statusBySession.get("会话 waiting") === "● 待审批 2", JSON.stringify([...statusBySession]));
-	check("运行中只说运行中", statusBySession.get("会话 busy") === "● 运行中", JSON.stringify([...statusBySession]));
-	check("打开但空闲的那一行有标记", statusBySession.get("会话 open") === "▍ 已打开 · 空闲", JSON.stringify([...statusBySession]));
-	check("完全没关系的行不留第二行", statusBySession.get("会话 quiet") === "", JSON.stringify([...statusBySession]));
+	// Both busy states share the one amber dot — they are the same fact seen from two sides, and the
+	// slot has no second colour to hand out. The words move to the tooltip, where the reason a dot
+	// is lit can be read rather than guessed.
+	check("待审批的行亮着点", byName.get("会话 waiting")?.state === "warn", JSON.stringify([...byName]));
+	check("运行中的行亮着点", byName.get("会话 busy")?.state === "warn", JSON.stringify([...byName]));
+	check("待审批的名字进了提示", byName.get("会话 waiting")?.tooltip.includes("待审批 2") === true, byName.get("会话 waiting")?.tooltip ?? "");
+	check("运行中的名字进了提示", byName.get("会话 busy")?.tooltip.includes("运行中") === true, byName.get("会话 busy")?.tooltip ?? "");
+
+	// The two facts that stopped being lines: an open row is already the `aria-current` background,
+	// and a row with nothing to say keeps an empty slot rather than a quiet sentence.
+	check("打开但空闲的那一行不亮点（底色本身在说话）", byName.get("会话 open")?.state === null, JSON.stringify([...byName]));
+	check("完全没关系的行不亮点", byName.get("会话 quiet")?.state === null, JSON.stringify([...byName]));
+	check("空闲的提示里没有状态行", !byName.get("会话 open")!.tooltip.includes("空闲"), byName.get("会话 open")?.tooltip ?? "");
 }
 
 // ------------------------------------------------------ 4. connection indicator
@@ -437,16 +467,18 @@ process.stdout.write("\nsidebar：连接指示器\n");
 	});
 
 	sidebar.render(state([row("a", 1)], { channel: "connecting" }));
-	const indicator = root(sidebar).children[0]!.children[1]!;
-	check("连接中：点在那一行上", indicator.dataset.state === "connecting", JSON.stringify(indicator.dataset.state));
-	check("连接中有文案", (indicator.children[1]?.textContent ?? "") === "连接中…", JSON.stringify(indicator.children[1]?.textContent));
+	// The indicator lives in the foot now, beside the settings entry — the row it used to share with
+	// the brand is gone, and the foot is where window-level things live.
+	const indicator = all(sidebar, "channel-indicator")[0]?.node;
+	check("连接中：点在那一行上", indicator !== undefined && indicator.dataset.state === "connecting", JSON.stringify(indicator?.dataset.state));
+	check("连接中有文案", (indicator?.children[1]?.textContent ?? "") === "连接中…", JSON.stringify(indicator?.children[1]?.textContent));
 
 	sidebar.render(state([row("a", 1)], { channel: "live" }));
-	check("live：同一个点", indicator.dataset.state === "live", JSON.stringify(indicator.dataset.state));
-	check("live 时没有文案", (indicator.children[1]?.textContent ?? "") === "", JSON.stringify(indicator.children[1]?.textContent));
+	check("live：同一个点", indicator !== undefined && indicator.dataset.state === "live", JSON.stringify(indicator?.dataset.state));
+	check("live 时没有文案", (indicator?.children[1]?.textContent ?? "") === "", JSON.stringify(indicator?.children[1]?.textContent));
 
 	sidebar.render(state([row("a", 1)], { channel: "down" }));
-	check("down 说它在重试", (indicator.children[1]?.textContent ?? "").includes("重连"), JSON.stringify(indicator.children[1]?.textContent));
+	check("down 说它在重试", (indicator?.children[1]?.textContent ?? "").includes("重连"), JSON.stringify(indicator?.children[1]?.textContent));
 }
 
 // ------------------------------------------- 5. a heading sits above its rows

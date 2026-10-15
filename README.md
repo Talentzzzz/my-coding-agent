@@ -89,7 +89,7 @@ ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/ node packages/
 ```json
 {
   "model": "Opus/claude-opus-5",
-  "appearance": { "theme": "dark", "fontSize": 14 },
+  "appearance": { "theme": "dark", "fontSize": 15 },
   "approval": { "write": false, "edit": true, "bash": true },
   "bash": { "defaultTimeoutMs": 120000, "maxTimeoutMs": 3600000 }
 }

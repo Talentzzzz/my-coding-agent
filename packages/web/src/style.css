@@ -1,27 +1,21 @@
 /*
  * The application shell.
  *
- * Two columns: a sidebar that owns navigation, and a conversation column that owns one session. The
- * sidebar is `--dsw-bg-sidebar` and never scrolls as a whole — its list does — so the brand and the
- * new-session control stay put while the history moves, which is what makes the list feel like a
- * panel rather than a page.
+ * Three columns: a sidebar that owns navigation, a drag handle on its right edge, and a conversation
+ * column that owns one session. The sidebar is `--dsw-bg-sidebar` and never scrolls as a whole — its
+ * list does — so the new-session control stays put while the history moves, which is what makes the
+ * list feel like a panel rather than a page. The handle's column is the affordance itself; the
+ * sidebar's width is `--dsw-sidebar-width`, which the handle moves and the settings remember.
  *
  * The conversation column is four stacked rows: the title, the transcript (the only one that
  * scrolls), the composer, and the status line. Nothing sits beside the transcript, because the one
  * thing this window is for is reading it.
  *
  * Everything here reads a token from `tokens.css`. A literal color in this file is a bug: it would
- * be the one value that does not follow the theme.
+ * be the one value that does not follow the theme. A literal font size is the same kind of bug:
+ * every size comes from the type scale's five tiers (`--dsw-fs-*`, each with its `--dsw-lh-*`),
+ * and the one moving part — `--dsw-fs-body` — is published by the settings panel at runtime.
  */
-
-:root {
-	/*
-	 * The reading size, overridden at runtime by the settings panel. It lives here rather than in
-	 * `tokens.css` because it is not part of the design system: the design system says what the sizes
-	 * are relative to each other, and this says how large the whole scale is drawn.
-	 */
-	--app-font-size: 14px;
-}
 
 *,
 *::before,
@@ -39,21 +33,29 @@ body {
 	background: var(--dsw-bg-base);
 	color: var(--dsw-label-primary);
 	font-family: var(--dsw-font-family);
-	font-size: var(--app-font-size);
-	line-height: 1.6;
+	/* The shell's base step: the title tier, so anything that forgets to pick a size still lands in
+	   the scale. Reading text overrides this with the body tier, which is the one that moves. */
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
 	-webkit-font-smoothing: antialiased;
 	overflow: hidden;
 }
 
 #app {
 	display: grid;
-	grid-template-columns: 232px minmax(0, 1fr);
+	/* Sidebar · drag handle · conversation. The handle's own column is the affordance. */
+	grid-template-columns: var(--dsw-sidebar-width) 6px minmax(0, 1fr);
 	height: 100vh;
 }
 
-/* A collapsed rail keeps the app usable in a narrow window. */
+/* A collapsed rail keeps the app usable in a narrow window. The handle goes with it: a rail's width
+   is not a preference, and a drag that moved 52px would only break it. */
 #app[data-sidebar="rail"] {
 	grid-template-columns: 52px minmax(0, 1fr);
+}
+
+#app[data-sidebar="rail"] .side-resizer {
+	display: none;
 }
 
 /* ------------------------------------------------------------------ sidebar */
@@ -65,14 +67,19 @@ body {
 	padding: 6px 12px;
 	background: var(--dsw-bg-sidebar);
 	border-right: 1px solid var(--dsw-border-l1);
-	font-size: 14px;
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
 }
 
-/* The drag strip. Electron needs `app-region` here or the window cannot be moved by its top. */
+/*
+ * The top row is the drag strip, and it holds the column's two controls: the new-session button and
+ * the collapse toggle. Electron needs `app-region` here or the window cannot be moved by its top.
+ * The brand that used to share this row is gone — the column is the list, not a product — and with
+ * it went the empty seat a logo leaves behind.
+ */
 .sidebar-top {
 	display: flex;
 	align-items: center;
-	justify-content: space-between;
 	gap: 8px;
 	height: 40px;
 	padding-left: calc(var(--desktop-traffic-light-inset) + 4px);
@@ -83,42 +90,14 @@ body {
 	-webkit-app-region: no-drag;
 }
 
-.brand {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	min-width: 0;
-}
-
-.brand-mark {
-	display: grid;
-	place-items: center;
-	width: 22px;
-	height: 22px;
-	flex: none;
-	border-radius: 6px;
-	background: var(--dsw-bg-inverse);
-	color: var(--dsw-label-inverse);
-	font-size: 12px;
-	font-weight: 600;
-}
-
-.brand-name {
-	font-size: 15px;
-	font-weight: 600;
-	letter-spacing: -0.01em;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-
 /*
  * Whether the resident channel is up.
  *
  * One dot, and words only when there is something to say — a label that always read "已连接" would be
  * one more piece of chrome competing with the conversation, and the states that matter are precisely
- * the ones a person did not cause. It sits beside the brand because it is a fact about the window
- * rather than about any one conversation, so it belongs to neither the transcript nor its status line.
+ * the ones a person did not cause. It sits in the foot, beside the settings entry, because it is a
+ * fact about the window rather than about any one conversation — the foot is where window-level
+ * things live, and the top row is the column's own controls.
  *
  * Silent when live: the dot is the whole message, and it takes the secondary colour rather than a
  * success colour, because "nothing is wrong" should not look like an achievement.
@@ -130,7 +109,8 @@ body {
 	min-width: 0;
 	flex: none;
 	color: var(--dsw-label-caption);
-	font-size: 11px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	white-space: nowrap;
 }
 
@@ -202,11 +182,11 @@ body {
 	align-items: center;
 	justify-content: center;
 	gap: 6px;
-	width: 100%;
-	height: 38px;
-	margin: 4px 0 10px;
+	/* The top row's other seat: beside the collapse toggle, not below the row it used to headline. */
+	min-width: 0;
+	flex: 1;
+	height: 34px;
 	padding: 8px 12px;
-	flex: none;
 	border: 1px solid var(--dsw-border-l2);
 	border-radius: var(--dsw-radius-md);
 	background: transparent;
@@ -238,20 +218,12 @@ body {
 	flex: 1;
 	overflow-y: auto;
 	overscroll-behavior: contain;
-	/*
-	 * Where a workspace's sessions start.
-	 *
-	 * Under the folder's *name*, not under its icon: a row that lines up with the folder's own left
-	 * edge reads as a sibling of the folder rather than as one of the sessions written under it. The
-	 * folder's side of this number is its padding plus the icon plus the gap; the two are stated
-	 * together so a change to either is noticed here.
-	 */
-	--session-indent: 27px;
 }
 
 .session-list-heading {
 	color: var(--dsw-label-caption);
-	font-size: 11px;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 	font-weight: 600;
 	letter-spacing: 0.04em;
 	text-transform: uppercase;
@@ -304,22 +276,31 @@ body {
 	background: var(--dsw-input-fill);
 	color: var(--dsw-label-primary);
 	font: inherit;
-	font-size: 12.5px;
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
 }
 
 .search-input::placeholder {
 	color: var(--dsw-label-caption);
 }
 
+/*
+ * One row of the list, per the reference's spec: 32px tall, one line, `--dsw-radius-md` corners,
+ * 8px of air at each side.
+ *
+ * A fork wears no indent of its own — it sits under the session it came from, and the `（1）` on its
+ * name is the whole difference — so every row is the same shape, and the row is the height the
+ * collapsed-count limit was always assuming.
+ */
 .session-item {
 	display: flex;
-	align-items: flex-start;
-	gap: 6px;
+	align-items: center;
+	gap: 0;
 	width: 100%;
-	min-height: 32px;
-	padding: 5px 8px 5px var(--session-indent);
+	height: 32px;
+	padding: 0 8px;
 	border: none;
-	border-radius: var(--dsw-radius-sm);
+	border-radius: var(--dsw-radius-md);
 	background: transparent;
 	color: var(--dsw-label-secondary);
 	font: inherit;
@@ -340,56 +321,34 @@ body {
 }
 
 /*
- * One row's two lines: the title and its time, then whatever the row has to say about itself.
+ * The status slot: the row's one room for a state, a 16px gutter at its left edge.
  *
- * The column layout is what lets a row grow a second line without the title and the time drifting
- * apart — as one flex row they would have to share a line's height, and adding the status underneath
- * would push the time down instead of leaving it beside the title.
+ * Running and waiting-for-an-approval share the one amber dot — the same fact seen from two sides —
+ * and an idle row keeps an empty slot, so a workspace of finished sessions is four ordinary rows
+ * rather than four rows insisting on something. "已打开" needs no slot: it is the `aria-current`
+ * background itself.
  */
-.session-item-body {
-	display: flex;
-	flex-direction: column;
-	gap: 1px;
-	min-width: 0;
-	flex: 1;
+.session-item-slot {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 20px;
+	flex: none;
 }
 
-.session-item-line {
-	display: flex;
-	align-items: baseline;
-	gap: 8px;
-	min-width: 0;
-}
-
-/*
- * The second line: running, waiting for an answer, or open and idle.
- *
- * `min-height` is fixed rather than left to the text, so a row that gains a status line grows by that
- * line and the rows below it do not jump — a sidebar that reshuffles under the pointer is exactly what
- * the in-place updating is there to prevent.
- */
-.session-item-status {
-	color: var(--dsw-label-caption);
-	font-size: 11px;
-	line-height: 14px;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-
-/* Both busy states share one colour: they are the same fact seen from two sides. */
-.session-item-status[data-tone="warn"] {
-	color: var(--dsw-state-warn);
-}
-
-.session-item[aria-current="true"] .session-item-status {
-	color: inherit;
-	opacity: 0.75;
+.session-item-slot[data-state="warn"]::before {
+	content: "";
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--dsw-state-warn);
 }
 
 .session-item-title {
 	min-width: 0;
 	flex: 1;
+	margin: 0 6px;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -398,24 +357,30 @@ body {
 .session-item-time {
 	flex: none;
 	color: var(--dsw-label-caption);
-	font-size: 11px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 }
 
 /*
  * The in-place rename editor: the row's own title, wearing an input's clothes.
  *
- * It replaces the title span inside the same line, so it inherits the line's metrics and takes the
- * title's flex slot — a swap that does not jump is the whole point of editing in place.
+ * It replaces the title span inside the same line — same flex, same margins, the title tier's own
+ * metrics — so the swap is a change of control, not a change of layout. That it does not jump is the
+ * whole point of editing in place.
  */
 .rename-input {
 	min-width: 0;
 	flex: 1;
-	padding: 0 3px;
-	border: 1px solid var(--dsw-border-l2);
-	border-radius: var(--dsw-radius-sm);
+	height: 22px;
+	margin: 0 6px;
+	padding: 0 6px;
+	border: 1px solid var(--dsw-border-l3);
+	border-radius: var(--dsw-radius-xs);
 	background: var(--dsw-bg-layer-1);
 	color: var(--dsw-label-primary);
 	font: inherit;
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
 	outline: none;
 }
 
@@ -431,15 +396,27 @@ body {
 	margin-bottom: 6px;
 }
 
+/*
+ * One workspace's heading, the reference's project row: 34px tall, the same radius and padding as a
+ * session row, at the meta tier. On hover the folder — the content — gives its place to the
+ * chevron — the affordance — because both icons share one slot and the swap keeps one position for
+ * two meanings.
+ */
 .workspace-head {
 	display: flex;
 	align-items: center;
-	gap: 6px;
-	min-height: 26px;
-	padding: 4px 8px 2px;
+	gap: 7px;
+	height: 34px;
+	padding: 0 8px;
+	border-radius: var(--dsw-radius-md);
 	color: var(--dsw-label-tertiary);
-	font-size: 11.5px;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 	font-weight: 600;
+}
+
+.workspace-head:hover {
+	background: var(--dsw-bg-hover);
 }
 
 .workspace-head svg {
@@ -447,6 +424,18 @@ body {
 	height: 13px;
 	flex: none;
 	opacity: 0.75;
+}
+
+.workspace-icon-chev {
+	display: none;
+}
+
+.workspace-head:hover .workspace-icon-chev {
+	display: inline-flex;
+}
+
+.workspace-head:hover .workspace-icon-folder {
+	display: none;
 }
 
 .workspace-name {
@@ -462,7 +451,8 @@ body {
 	border-radius: 999px;
 	background: var(--dsw-bg-hover);
 	color: var(--dsw-label-caption);
-	font-size: 10px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	font-weight: 500;
 	letter-spacing: 0.02em;
 }
@@ -470,21 +460,23 @@ body {
 .session-list-empty {
 	padding: 8px;
 	color: var(--dsw-label-caption);
-	font-size: 12px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 }
 
 /* Opens one workspace's list without opening the others. */
 .session-more {
 	align-self: flex-start;
 	padding: 4px 8px;
-	/* Its own 8px of padding is subtracted, so the label lands on the rows' left edge. */
-	margin-left: calc(var(--session-indent) - 8px);
+	/* Under the names' left edge, the way the rows read: 8px of row padding plus the 16px slot. */
+	margin-left: 22px;
 	border: none;
 	border-radius: var(--dsw-radius-xs);
 	background: transparent;
 	color: var(--dsw-label-caption);
 	font: inherit;
-	font-size: 11.5px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	cursor: pointer;
 }
 
@@ -495,7 +487,8 @@ body {
 
 .sidebar-foot {
 	display: flex;
-	flex-direction: column;
+	align-items: center;
+	gap: 8px;
 	padding-top: 8px;
 	margin-top: 8px;
 	border-top: 1px solid var(--dsw-border-l1);
@@ -506,11 +499,12 @@ body {
 	display: flex;
 	align-items: center;
 	gap: 8px;
-	width: 100%;
+	min-width: 0;
+	flex: 1;
 	height: 34px;
 	padding: 0 8px;
 	border: none;
-	border-radius: var(--dsw-radius-sm);
+	border-radius: var(--dsw-radius-md);
 	background: transparent;
 	color: var(--dsw-label-secondary);
 	font: inherit;
@@ -528,6 +522,39 @@ body {
 	width: 16px;
 	height: 16px;
 	flex: none;
+}
+
+/*
+ * The drag handle on the sidebar's right edge.
+ *
+ * Its own 6px grid column is the hit area; the strip the user sees is drawn by `::after`, two pixels
+ * in from each side so a grab reads as grabbing the edge rather than a line that happens to be
+ * nearby. It is a focusable separator, so the keyboard reaches the same clamp the pointer does.
+ */
+.side-resizer {
+	position: relative;
+	z-index: 6;
+	cursor: col-resize;
+	touch-action: none;
+}
+
+.side-resizer::after {
+	content: "";
+	position: absolute;
+	inset: 0 2px;
+	border-radius: 2px;
+	background: transparent;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.side-resizer:hover::after,
+.side-resizer.dragging::after {
+	background: var(--dsw-border-l3);
+}
+
+.side-resizer:focus-visible {
+	outline: 2px solid var(--dsw-state-business);
+	outline-offset: -2px;
 }
 
 /* ---------------------------------------------------------------- app region */
@@ -582,9 +609,9 @@ body {
 
 .header-title h1 {
 	margin: 0;
-	font-size: calc(var(--app-font-size) + 1px);
+	font-size: var(--dsw-fs-title);
 	font-weight: 600;
-	line-height: 1.4;
+	line-height: var(--dsw-lh-title);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -592,8 +619,8 @@ body {
 
 .header-subtitle {
 	color: var(--dsw-label-caption);
-	font-size: calc(var(--app-font-size) - 2px);
-	line-height: 1.3;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -618,8 +645,8 @@ body {
 	background: var(--dsw-bg-layer-1);
 	color: var(--dsw-label-tertiary);
 	font: inherit;
-	font-size: calc(var(--app-font-size) - 2px);
-	line-height: 1.3;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 	transition:
 		border-color var(--dsw-duration-fast) var(--dsw-ease),
 		color var(--dsw-duration-fast) var(--dsw-ease);
@@ -639,7 +666,8 @@ body {
 
 .branch-chip-id {
 	font-family: var(--dsw-font-mono);
-	font-size: calc(var(--app-font-size) - 3px);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	color: var(--dsw-state-business);
 }
 
@@ -661,7 +689,8 @@ body {
 	gap: 12px;
 	padding: 6px 0 8px;
 	border-top: 1px solid var(--dsw-border-l1);
-	font-size: calc(var(--app-font-size) - 2px);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 	color: var(--dsw-label-caption);
 }
 
@@ -714,7 +743,8 @@ body {
 	background: transparent;
 	color: var(--dsw-label-tertiary);
 	font: inherit;
-	font-size: calc(var(--app-font-size) - 2px);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 	cursor: pointer;
 	transition:
 		background var(--dsw-duration-fast) var(--dsw-ease),
@@ -730,7 +760,8 @@ body {
 	min-width: 44px;
 	text-align: center;
 	font-family: var(--dsw-font-mono);
-	font-size: calc(var(--app-font-size) - 3px);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	color: var(--dsw-label-caption);
 }
 
@@ -748,7 +779,8 @@ body {
 	background: var(--dsw-bg-layer-1);
 	color: var(--dsw-label-primary);
 	font: inherit;
-	font-size: calc(var(--app-font-size) - 2px);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 	font-weight: 500;
 	cursor: pointer;
 	transition:
@@ -839,14 +871,16 @@ input:focus-visible {
 .welcome h2 {
 	margin: 0;
 	color: var(--dsw-label-primary);
-	font-size: 17px;
+	font-size: var(--dsw-fs-body);
+	line-height: var(--dsw-lh-body);
 	font-weight: 600;
 }
 
 .welcome p {
 	margin: 0;
 	max-width: 34rem;
-	font-size: 13px;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 }
 
 .turn {
@@ -870,7 +904,8 @@ input:focus-visible {
 	gap: 8px;
 	margin-bottom: 6px;
 	color: var(--dsw-label-caption);
-	font-size: calc(var(--app-font-size) - 2px);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	font-weight: 600;
 }
 
@@ -882,14 +917,15 @@ input:focus-visible {
 	border-radius: 50%;
 	background: var(--dsw-bg-layer-2);
 	border: 1px solid var(--dsw-border-l1);
-	font-size: 10px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	font-weight: 600;
 	color: var(--dsw-label-secondary);
 }
 
 .turn-body {
-	font-size: var(--app-font-size);
-	line-height: 1.7;
+	font-size: var(--dsw-fs-body);
+	line-height: var(--dsw-lh-body);
 	word-break: break-word;
 	min-width: 0;
 }
@@ -905,7 +941,8 @@ input:focus-visible {
 
 .turn.notice .turn-body {
 	color: var(--dsw-label-tertiary);
-	font-size: 13px;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 	font-style: italic;
 }
 
@@ -1020,7 +1057,8 @@ input:focus-visible {
 	padding: 0 10px;
 	border-bottom: 1px solid var(--dsw-border-l1);
 	color: var(--dsw-label-caption);
-	font-size: 11px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	font-family: var(--dsw-font-mono);
 }
 
@@ -1031,7 +1069,8 @@ input:focus-visible {
 	background: transparent;
 	color: var(--dsw-label-caption);
 	font: inherit;
-	font-size: 11px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	cursor: pointer;
 }
 
@@ -1052,8 +1091,8 @@ input:focus-visible {
 	background: none;
 	color: var(--dsw-label-primary);
 	font-family: var(--dsw-font-mono);
-	font-size: 12.5px;
-	line-height: 1.6;
+	font-size: var(--dsw-fs-code);
+	line-height: var(--dsw-lh-code);
 	white-space: pre;
 }
 
@@ -1096,8 +1135,8 @@ input:focus-visible {
  */
 .reasoning {
 	margin: 0 0 10px;
-	font-size: calc(var(--app-font-size) - 1px);
-	line-height: 20px;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 }
 
 .reasoning > summary {
@@ -1156,8 +1195,8 @@ input:focus-visible {
 	padding-left: 20px;
 	border-left: 2px solid var(--dsw-border-l2);
 	color: var(--dsw-label-secondary);
-	font-size: var(--app-font-size);
-	line-height: 1.6;
+	font-size: var(--dsw-fs-body);
+	line-height: var(--dsw-lh-body);
 	word-break: break-word;
 }
 
@@ -1219,7 +1258,8 @@ input:focus-visible {
 	padding: 6px 12px;
 	cursor: pointer;
 	list-style: none;
-	font-size: 13px;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 }
 
 .tool > summary::-webkit-details-marker {
@@ -1263,7 +1303,8 @@ input:focus-visible {
 	flex: none;
 	color: var(--dsw-label-primary);
 	font-family: var(--dsw-font-mono);
-	font-size: 12.5px;
+	font-size: var(--dsw-fs-code);
+	line-height: var(--dsw-lh-code);
 	font-weight: 500;
 }
 
@@ -1272,7 +1313,8 @@ input:focus-visible {
 	flex: 1;
 	color: var(--dsw-label-tertiary);
 	font-family: var(--dsw-font-mono);
-	font-size: 12px;
+	font-size: var(--dsw-fs-code);
+	line-height: var(--dsw-lh-code);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -1285,8 +1327,8 @@ input:focus-visible {
 	background: var(--dsw-code-block);
 	color: var(--dsw-label-secondary);
 	font-family: var(--dsw-font-mono);
-	font-size: 12px;
-	line-height: 1.55;
+	font-size: var(--dsw-fs-code);
+	line-height: var(--dsw-lh-code);
 	max-height: 24rem;
 	overflow: auto;
 	white-space: pre-wrap;
@@ -1312,8 +1354,8 @@ input:focus-visible {
 	border-top: 1px solid var(--dsw-border-l1);
 	background: var(--dsw-code-block);
 	font-family: var(--dsw-font-mono);
-	font-size: 12px;
-	line-height: 1.55;
+	font-size: var(--dsw-fs-code);
+	line-height: var(--dsw-lh-code);
 }
 
 .diff-stat {
@@ -1353,7 +1395,8 @@ input:focus-visible {
 	padding: 2px 12px;
 	background: var(--dsw-bg-hover);
 	color: var(--dsw-label-caption);
-	font-size: 11.5px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 }
 
 .diff-num {
@@ -1427,8 +1470,8 @@ body:not([data-pane="branch"]) .branch-view {
 	gap: 16px;
 	min-width: 0;
 	padding: 14px 24px 10px;
-	font-size: calc(var(--app-font-size) - 3px);
-	line-height: 1.4;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	color: var(--dsw-label-caption);
 }
 
@@ -1510,8 +1553,8 @@ body:not([data-pane="branch"]) .branch-view {
 	border: 1px solid var(--dsw-border-l2);
 	color: var(--dsw-label-caption);
 	font: inherit;
-	font-size: calc(var(--app-font-size) - 2px);
-	line-height: 1.4;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 	cursor: pointer;
 	transition:
 		background var(--dsw-duration-fast) var(--dsw-ease),
@@ -1563,8 +1606,8 @@ body:not([data-pane="branch"]) .branch-view {
 	align-items: center;
 	gap: 8px;
 	font-family: var(--dsw-font-mono);
-	font-size: calc(var(--app-font-size) - 4px);
-	line-height: 1.4;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	color: var(--dsw-label-caption);
 }
 
@@ -1636,7 +1679,8 @@ body:not([data-pane="branch"]) .branch-view {
 	padding: 6px 14px;
 	background: var(--dsw-warn-tint);
 	color: var(--dsw-state-warn-label);
-	font-size: 12px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	font-weight: 500;
 }
 
@@ -1673,8 +1717,8 @@ body:not([data-pane="branch"]) .branch-view {
 	overflow: auto;
 	color: var(--dsw-label-secondary);
 	font-family: var(--dsw-font-mono);
-	font-size: 12px;
-	line-height: 1.5;
+	font-size: var(--dsw-fs-code);
+	line-height: var(--dsw-lh-code);
 	white-space: pre-wrap;
 	word-break: break-word;
 }
@@ -1711,7 +1755,8 @@ body:not([data-pane="branch"]) .branch-view {
 	background: transparent;
 	color: var(--dsw-label-secondary);
 	font: inherit;
-	font-size: 12.5px;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 	cursor: pointer;
 	transition:
 		background var(--dsw-duration-fast) var(--dsw-ease),
@@ -1773,7 +1818,8 @@ body:not([data-pane="branch"]) .branch-view {
 	background: transparent;
 	color: var(--dsw-label-secondary);
 	font: inherit;
-	font-size: 13px;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 	text-align: left;
 	cursor: pointer;
 }
@@ -1842,7 +1888,8 @@ body:not([data-pane="branch"]) .branch-view {
 	border-radius: var(--dsw-radius-sm);
 	background: var(--dsw-bg-hover-danger);
 	color: var(--dsw-state-error);
-	font-size: 13px;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 }
 
 .composer {
@@ -1870,8 +1917,11 @@ body:not([data-pane="branch"]) .branch-view {
 	background: transparent;
 	color: var(--dsw-label-primary);
 	font: inherit;
-	font-size: 14px;
-	line-height: 1.6;
+	/* The body tier, not the title tier the small inputs wear: this is the user's own prose — the
+	   text that becomes the next message bubble — so it rides the same axis the transcript reads
+	   at, and someone enlarging the window's text enlarges what they type with it. */
+	font-size: var(--dsw-fs-body);
+	line-height: var(--dsw-lh-body);
 	resize: none;
 	outline: none;
 }
@@ -1909,7 +1959,8 @@ body:not([data-pane="branch"]) .branch-view {
 	background: transparent;
 	color: var(--dsw-label-secondary);
 	font: inherit;
-	font-size: 12px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	cursor: pointer;
 	transition: background var(--dsw-duration-fast) var(--dsw-ease);
 }
@@ -1938,7 +1989,8 @@ body:not([data-pane="branch"]) .branch-view {
 	min-width: 0;
 	flex: 1;
 	color: var(--dsw-label-caption);
-	font-size: 11px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -1955,7 +2007,8 @@ body:not([data-pane="branch"]) .branch-view {
 	background: transparent;
 	color: var(--dsw-label-primary);
 	font: inherit;
-	font-size: 13px;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 	font-weight: 500;
 	cursor: pointer;
 	transition: background var(--dsw-duration-fast) var(--dsw-ease);
@@ -2037,8 +2090,11 @@ body:not([data-pane="branch"]) .branch-view {
 	   middle reading's own nudge below, this is optical: the layout is untouched. */
 	transform: translateX(-24px);
 	color: var(--dsw-label-caption);
+	/* Technical readings, deliberately a step under the prose and pinned to the caption tier:
+	   numbers one watches for, not text one reads. They do not ride the slider. */
 	font-family: var(--dsw-font-mono);
-	font-size: 11px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 }
 
 .status-stat {
@@ -2133,12 +2189,14 @@ body:not([data-pane="branch"]) .branch-view {
 	gap: 2px;
 	min-width: 0;
 	flex: 1;
-	font-size: 13px;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 }
 
 .notice-text span {
 	color: var(--dsw-label-caption);
-	font-size: 12px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 }
 
 /* --------------------------------------------------------------- settings */
@@ -2177,7 +2235,8 @@ body:not([data-pane="branch"]) .branch-view {
 
 .settings-head h2 {
 	margin: 0;
-	font-size: calc(var(--app-font-size) + 2px);
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
 	font-weight: 600;
 }
 
@@ -2195,7 +2254,8 @@ body:not([data-pane="branch"]) .branch-view {
 	background: transparent;
 	color: var(--dsw-label-tertiary);
 	font: inherit;
-	font-size: 13px;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 	cursor: pointer;
 	transition: color var(--dsw-duration-fast) var(--dsw-ease);
 }
@@ -2225,8 +2285,8 @@ body:not([data-pane="branch"]) .branch-view {
 .settings-hint {
 	margin: 0;
 	color: var(--dsw-label-caption);
-	font-size: 12px;
-	line-height: 1.6;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 }
 
 .settings-hint.empty {
@@ -2248,14 +2308,16 @@ body:not([data-pane="branch"]) .branch-view {
 
 .settings-label {
 	color: var(--dsw-label-secondary);
-	font-size: 12px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	font-weight: 600;
 }
 
 .settings-value {
 	color: var(--dsw-label-caption);
 	font-family: var(--dsw-font-mono);
-	font-size: 12px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	min-width: 40px;
 	text-align: right;
 }
@@ -2276,7 +2338,8 @@ body:not([data-pane="branch"]) .branch-view {
 .settings-note {
 	padding: 0 16px;
 	color: var(--dsw-label-caption);
-	font-size: 12px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 }
 
 .settings-note:not(:empty) {
@@ -2298,7 +2361,8 @@ body:not([data-pane="branch"]) .branch-view {
 	padding: 4px 2px;
 	color: var(--dsw-label-secondary);
 	font-family: var(--dsw-font-mono);
-	font-size: 12.5px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	cursor: pointer;
 }
 
@@ -2328,7 +2392,8 @@ body:not([data-pane="branch"]) .branch-view {
 	background: transparent;
 	color: var(--dsw-label-secondary);
 	font: inherit;
-	font-size: 12.5px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	cursor: pointer;
 	transition: background var(--dsw-duration-fast) var(--dsw-ease);
 }
@@ -2363,7 +2428,8 @@ body:not([data-pane="branch"]) .branch-view {
 	background: var(--dsw-input-fill);
 	color: var(--dsw-label-primary);
 	font: inherit;
-	font-size: 13px;
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
 }
 
 select.input {
@@ -2403,7 +2469,8 @@ select.input {
 .model-ref {
 	color: var(--dsw-label-caption);
 	font-family: var(--dsw-font-mono);
-	font-size: 11.5px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 }
 
 .model-form {
@@ -2421,7 +2488,8 @@ select.input {
 
 .model-hint {
 	color: var(--dsw-label-caption);
-	font-size: 11.5px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 }
 
 .model-check {
@@ -2429,7 +2497,8 @@ select.input {
 	align-items: center;
 	gap: 8px;
 	color: var(--dsw-label-secondary);
-	font-size: 12.5px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	cursor: pointer;
 }
 
@@ -2494,7 +2563,6 @@ select.input {
 	padding: 6px 8px;
 }
 
-#app[data-sidebar="rail"] .brand-name,
 #app[data-sidebar="rail"] .new-session span,
 #app[data-sidebar="rail"] .list-head,
 #app[data-sidebar="rail"] .search-row,
@@ -2502,10 +2570,15 @@ select.input {
 #app[data-sidebar="rail"] .workspace-head,
 #app[data-sidebar="rail"] .session-item-title,
 #app[data-sidebar="rail"] .session-item-time,
-#app[data-sidebar="rail"] .session-item-status,
 #app[data-sidebar="rail"] .channel-indicator-text,
 #app[data-sidebar="rail"] .settings-entry span {
 	display: none;
+}
+
+/* The rail's foot stacks: the gear above the channel dot, each centred in its own row. */
+#app[data-sidebar="rail"] .sidebar-foot {
+	flex-direction: column;
+	gap: 6px;
 }
 
 #app[data-sidebar="rail"] .sidebar-top {
@@ -2526,6 +2599,8 @@ select.input {
 	height: 36px;
 	margin-inline: auto;
 	padding: 0;
+	/* The top row is a column here; the seat the full sidebar gives this button must not stretch. */
+	flex: none;
 }
 
 #app[data-sidebar="rail"] .session-item {

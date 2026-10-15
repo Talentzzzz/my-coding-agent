@@ -303,6 +303,85 @@ function main(): void {
 		onRenameSession: (sessionId, title) => void renameSession(sessionId, title),
 	});
 
+	/**
+	 * The drag handle on the sidebar's right edge.
+	 *
+	 * A separator, not a button: the pointer grabs the sidebar's edge and drags it — right widens,
+	 * the direction the prototype settled — and the keyboard reaches the same clamp through the
+	 * arrow keys, which is why the element is focusable at all. The width it moves is
+	 * `--dsw-sidebar-width`, the one variable the grid's first column is drawn from.
+	 *
+	 * Persistence follows the reading handle's two rules: the preference saved is the one the drag
+	 * produced, clamped to the range the server also enforces, and a press that never moved commits
+	 * nothing — an empty click must not overwrite a stored width with whatever the current layout
+	 * had clamped it to.
+	 */
+	const sidebarResizer = element("div", "side-resizer", undefined, {
+		role: "separator",
+		"aria-orientation": "vertical",
+		"aria-label": "调整侧栏宽度",
+		tabindex: "0",
+	});
+	/** The keys turn the width in steps, which is finer than a drag and needs a named number. */
+	const SIDEBAR_RESIZE_STEP = 8;
+	/**
+	 * The drag range, read from the same tokens the stylesheet declares (`--dsw-sidebar-min/max`).
+	 *
+	 * The numbers' home is `tokens.css`, mirrored by `SIDEBAR_WIDTH_RANGE` in `@my-agent/core/config.ts`
+	 * where the server clamps a stored preference. They are not imported into the client — the config
+	 * module runs on Node, and the client must not pull that into its bundle — so the tokens are read
+	 * back instead, and the literals here are only what a stylesheet that failed to load falls back to.
+	 */
+	function sidebarRange(): { min: number; max: number } {
+		const styles = getComputedStyle(document.documentElement);
+		const read = (name: string, fallback: number): number => {
+			const value = Number.parseFloat(styles.getPropertyValue(name));
+			return Number.isFinite(value) ? value : fallback;
+		};
+		return { min: read("--dsw-sidebar-min", 208), max: read("--dsw-sidebar-max", 360) };
+	}
+	/** The width the variable currently carries, or the token's default before anything set it. */
+	function sidebarWidthNow(): number {
+		const value = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--dsw-sidebar-width"));
+		return Number.isFinite(value) ? value : 232;
+	}
+	function setSidebarWidth(width: number): void {
+		const { min, max } = sidebarRange();
+		document.documentElement.style.setProperty("--dsw-sidebar-width", `${Math.min(max, Math.max(min, Math.round(width)))}px`);
+	}
+	let sidebarDrag: { x: number; width: number } | undefined;
+	sidebarResizer.addEventListener("pointerdown", (event) => {
+		if (collapsed) return;
+		event.preventDefault();
+		sidebarDrag = { x: event.clientX, width: sidebarWidthNow() };
+		sidebarResizer.setPointerCapture(event.pointerId);
+		sidebarResizer.classList.add("dragging");
+	});
+	sidebarResizer.addEventListener("pointermove", (event) => {
+		if (sidebarDrag === undefined) return;
+		setSidebarWidth(sidebarDrag.width + event.clientX - sidebarDrag.x);
+	});
+	const endSidebarDrag = (): void => {
+		sidebarDrag = undefined;
+		sidebarResizer.classList.remove("dragging");
+	};
+	sidebarResizer.addEventListener("pointerup", (event) => {
+		// The drag that ends here is measured against where it began, so a click that never moved
+		// saves nothing: the stored preference keeps the value the user chose, not one the current
+		// layout's clamp would have whispered over it.
+		const moved = sidebarDrag !== undefined && event.clientX !== sidebarDrag.x;
+		endSidebarDrag();
+		if (moved) void saveSettings({ appearance: { sidebarWidth: sidebarWidthNow() } });
+	});
+	sidebarResizer.addEventListener("pointercancel", () => endSidebarDrag());
+	sidebarResizer.addEventListener("keydown", (event) => {
+		const step = event.key === "ArrowLeft" ? -SIDEBAR_RESIZE_STEP : event.key === "ArrowRight" ? SIDEBAR_RESIZE_STEP : 0;
+		if (step === 0 || collapsed) return;
+		event.preventDefault();
+		setSidebarWidth(sidebarWidthNow() + step);
+		void saveSettings({ appearance: { sidebarWidth: sidebarWidthNow() } });
+	});
+
 	// ----------------------------------------------------------------- settings
 
 	const settings = new SettingsPanel({
@@ -365,7 +444,9 @@ function main(): void {
 		},
 	});
 
-	root.append(sidebar.element, conversation, settings.element, sessionSettings.element);
+	// The handle sits between the two columns — it is the sidebar's right edge, which is the whole
+	// point — and the rail's CSS hides it, since a 52px rail is not a width anyone is choosing.
+	root.append(sidebar.element, sidebarResizer, conversation, settings.element, sessionSettings.element);
 
 	// ------------------------------------------------------------------- wiring
 
