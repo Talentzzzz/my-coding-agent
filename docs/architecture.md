@@ -439,6 +439,9 @@ type ClientFrame =
 | 标题栏 | Windows 上 `titleBarStyle: "hidden"` + `titleBarOverlay`，macOS 上 `hiddenInset` | 页面自己画 header，所以它能把自己的调色板带进标题栏；Linux 保留自己的边框 |
 | 主题 | 页面跟随 `nativeTheme`，通过 `preload.cjs` 同步读取 | 只有一个主题来源，所以标题栏和页面不可能不一致 |
 | 桥 | `contextBridge` 暴露原生主题和四条窗口命令 | 渲染进程不需要文件系统、不需要 shell、也不需要 IPC 透传 |
+| 失败面 | `observability.cjs` 监听 `child-process-gone` / `render-process-gone` / `uncaughtException` / `unhandledRejection`，启动带一个 20 s 的看门狗；报告先写一行日志，再画一张 `data:` 说明页，原生对话框只在页面画不出来时兜底 | 这台机器上子进程成批死亡（GPU、network），而"什么都没发生"正是 10/13 那次要靠人肉翻日志的原因；`data:` 页由外壳自己画、不经过那个没起来的服务器，而**渲染进程死后换上的新渲染进程照样能画它**（本机 `forcefullyCrashRenderer()` 实测），所以它排在原生对话框前面——`showErrorBox` 会阻塞到有人点掉它 |
+| 外壳诊断的语言 | **英文**（`desktop: …`），与 `shutdown.cjs` 及 `main.cjs` 既有的行一致；说明页与原生对话框里的文案是中文 | AGENTS.md 把诊断日志划给中文，而外壳从第一行起就是这条规则的例外；新模块跟着邻居比一半中文一半英文更小。用户看得到的字符串仍按窗口文案走中文 |
+| 看门狗 | 启动有预算（挂起也会被报告），重试/换端口的**策略**没有 | 失败必须可见是这张表的事；等多久、重试几次是另一个决定，没有它就只是永远没有窗口 |
 | 打包 | 未构建 | 安装包、签名、更新、ASAR 布局，在决定要发布之前都太早 |
 
 外壳必须通过 `scripts/launch.mjs` 启动，而不是直接调 `electron` 二进制：环境里**任何地方**设置了 `ELECTRON_RUN_AS_NODE` 都会把 Electron 变成普通 Node，而应用会死在 `require("electron")` 返回一个路径而不是 API 上。客户端从不 import @my-agent/ai 或 @my-agent/agent——它只看得到 `protocol.ts` 的类型，这正是让第二个界面（终端、RPC）成为一个**新客户端**而不是一次 core 改动的原因。

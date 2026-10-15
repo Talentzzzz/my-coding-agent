@@ -21,6 +21,7 @@
 		"scripts/smoke-mux.ts",
 		"scripts/smoke-liveness.ts",
 		"scripts/smoke-backpressure.ts",
-		"scripts/smoke-desktop-close.ts"
+		"scripts/smoke-desktop-close.ts",
+		"scripts/smoke-desktop-observability.ts"
 	]
 }

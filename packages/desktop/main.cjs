@@ -14,6 +14,7 @@ const { existsSync } = require("node:fs");
 const { writeFile } = require("node:fs/promises");
 const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { createObservability, LOAD_FAILED_HEADLINE } = require("./observability.cjs");
 const { createShutdown } = require("./shutdown.cjs");
 
 /** Height of the Windows caption the shell draws, matched by --desktop-titlebar in the client. */
@@ -121,6 +122,18 @@ function createWindow() {
 	return window;
 }
 
+/**
+ * The failure surface, wired once the two things it wraps exist: how a window is built, and how the
+ * server is started. It lives in `observability.cjs` for the same reason the quit path lives in
+ * `shutdown.cjs` — a smoke can drive the real handlers there with fakes, which it cannot do with
+ * lines buried in this file.
+ */
+const observability = createObservability({
+	app,
+	createWindow,
+	boot: bootServer,
+});
+
 /** Keep the native caption's colors on the palette the page is actually using. */
 function syncChrome(window) {
 	if (process.platform !== "win32") return;
@@ -163,26 +176,6 @@ function registerWindowControls() {
 	});
 }
 
-/** Turn a failure on the way up into something a user can act on, rather than a blank window. */
-function reportStartupFailure(error) {
-	const message = error instanceof Error ? error.message : String(error);
-	const detail = error instanceof Error && error.stack ? `\n\n${error.stack}` : "";
-	console.error("desktop: startup failed", error);
-	const window = createWindow();
-	window.once("ready-to-show", () => window.show());
-	void window.loadURL(
-		"data:text/html;charset=utf-8," +
-			encodeURIComponent(
-				`<!doctype html><meta charset="utf-8"><title>my-coding-agent</title>` +
-					`<body style="font:14px/1.6 system-ui;background:#151517;color:#e9ecf2;padding:2rem">` +
-					`<h1 style="font-size:16px">agent 服务没有启动起来</h1>` +
-					`<pre style="white-space:pre-wrap;color:#f25a5a">${message.replace(/[<&]/g, (c) => (c === "<" ? "&lt;" : "&amp;"))}${detail
-						.replace(/[<&]/g, (c) => (c === "<" ? "&lt;" : "&amp;"))
-						.slice(0, 4000)}</pre>`,
-			),
-	);
-}
-
 /** Where `--screenshot <file>` writes, or undefined for an ordinary launch. */
 function screenshotPath() {
 	const flag = process.argv.indexOf("--screenshot");
@@ -213,16 +206,16 @@ function applyThemeOverride() {
 app.whenReady().then(async () => {
 	applyThemeOverride();
 	registerWindowControls();
+	// The signals a shell cannot prevent but must not swallow: a child process going away (the GPU
+	// one first, on the machine this exists for), a renderer going away, and an exception nobody
+	// caught. Wired as soon as the application is ready, before the server is asked for anything, so
+	// a failure during boot is already being watched for.
+	observability.watch();
 
 	const cwd = workspaceDirectory();
-	let booted;
-	try {
-		booted = await bootServer(cwd);
-		console.log(`desktop: server on ${booted.url}  workspace ${cwd}`);
-	} catch (error) {
-		reportStartupFailure(error);
-		return;
-	}
+	const booted = await observability.bootWithinBudget(cwd);
+	if (booted === null) return;
+	console.log(`desktop: server on ${booted.url}  workspace ${cwd}`);
 	lifecycle.serve(booted);
 
 	mainWindow = createWindow();
@@ -231,7 +224,15 @@ app.whenReady().then(async () => {
 		if (mainWindow && !mainWindow.isDestroyed()) syncChrome(mainWindow);
 	});
 
-	await mainWindow.loadURL(booted.url);
+	// The load that the machine this exists for used to fail: the GPU process dies, the browser
+	// process goes with it, and the navigation comes back as `ERR_FAILED` — with the window already
+	// created and no window ever shown. Caught, it is a report instead of a launch that did nothing.
+	try {
+		await mainWindow.loadURL(booted.url);
+	} catch (error) {
+		observability.report(LOAD_FAILED_HEADLINE, error);
+		return;
+	}
 
 	// A capture run renders the real window and exits, so a layout change can be inspected from a
 	// terminal instead of from a description of it.
@@ -263,7 +264,9 @@ app.whenReady().then(async () => {
 		const live = lifecycle.current;
 		if (BrowserWindow.getAllWindows().length === 0 && live !== null) {
 			mainWindow = createWindow();
-			void mainWindow.loadURL(live.url);
+			void mainWindow.loadURL(live.url).catch((error) => {
+				observability.report(LOAD_FAILED_HEADLINE, error);
+			});
 		}
 	});
 });
