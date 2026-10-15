@@ -85,6 +85,15 @@ WebSocket 连接处报 "the mux connection failed"——那是没起服务器，
 
 <!-- 关掉的 ticket 依次列在这里：一行要点 + 指向该 ticket 的链接 -->
 
+- [21 删掉刚派生的会话后，窗口给已删会话补发一次 `open`](issues/21-fork-then-delete-stale-open.md)：
+  三处各自都对、合起来漏的竞态修在客户端两处——`openSession` 尾部 `mux.retain` 前加
+  `followed !== snapshot.id` 的闸（`followed` 是「窗格开在哪」的唯一事实，四个入口同走
+  `openSession`，一道闸全覆盖）；`session_gone` 到达时补上缺失的另一半——把 `deleteSession` 的
+  折叠尾巴提成 `foldFromDeleted` 共用，别的窗口删掉正在读的会话时 pane 引用不再悬挂。
+  `mux.retain` 不加「服务端说过它没了」的记性（不造第二真相源），红横幅保留、不做消息字符串
+  级抑制（`session_gone` 折叠自会清掉残留）。`repro-19.ts` 连跑三次横幅全程空、`verify-19.ts`
+  24 条断言全绿横幅 0 次；`client.ts` 与服务端零改动。
+
 - [20 重连基线把排队消息重排到它打断的回答之前](issues/20-midrun-baseline-reorder.md)：判定 **(a)
   ——排队消息的落盘点移到取走点**，因为分歧不只在窗口：`prompt()` 的乐观落盘发生在接受时，而
   assistant 消息是 `message_end` 才落盘，于是 store 链是 `U1 → U2 → A1`、循环回放与

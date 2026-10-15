@@ -685,6 +685,11 @@ function main(): void {
 			return;
 		}
 		if (item.type === "session_gone") {
+			// The fold before the row removal, so the sidebar draws once with both facts in hand: the
+			// pane already elsewhere and the row already gone. The fold itself is the shared one —
+			// a session deleted by another window folds this window exactly the way a local delete
+			// does, because gone is gone whichever window said it.
+			foldFromDeleted(item.sessionId);
 			rows.remove(item.sessionId);
 			renderSidebar();
 			return;
@@ -1073,6 +1078,16 @@ function main(): void {
 			report(error);
 		}
 
+		// The gate on the way out. The waits above left a window in which anything could have happened
+		// to the pane: a fork deleted the moment its row appeared, a click that moved on mid-refresh,
+		// a `session_gone` that folded the pane elsewhere. `followed` is the one fact about what this
+		// pane is on — the same one {@link foldFromDeleted} reads — so when it no longer names this
+		// session, taking the subscription here would send an `open` for a session the pane has
+		// already left, and the server's refusal would land as a red banner for a race nobody chose.
+		// Not retaining is the whole fix: whoever moved the pane owns its references. The baseline
+		// apply above needs no gate: there is no `await` between it and the assignment of `followed`,
+		// so nothing can fold the pane between the two.
+		if (followed !== snapshot.id) return;
 		mux.retain(snapshot.id, "pane");
 	}
 
@@ -1211,10 +1226,9 @@ function main(): void {
 	 * Delete a session whole, and leave it if this window was reading it.
 	 *
 	 * The row leaves on the connection's `session_gone` frame, never by a local edit — one road per
-	 * fact, the same rule the fork follows. What only the deleting window can do is let go of the
-	 * pane: the transcript on screen is a view of something that no longer exists, so it is folded
-	 * back to the empty state — models, settings, and reachability kept, because those are the
-	 * window's own facts and not the deleted session's.
+	 * fact, the same rule the fork follows. The fold itself is {@link foldFromDeleted}, shared with
+	 * that frame: whichever of the two lands first does the work, and the other finds the pane
+	 * already elsewhere.
 	 */
 	async function deleteSession(sessionId: string): Promise<void> {
 		try {
@@ -1226,6 +1240,21 @@ function main(): void {
 			unreachable(error);
 			return;
 		}
+		foldFromDeleted(sessionId);
+	}
+
+	/**
+	 * Fold the pane away from a session that no longer exists.
+	 *
+	 * Two doors lead here carrying the same verdict: this window's own delete, and the connection's
+	 * `session_gone` frame for a session another window deleted. The transcript on screen is a view
+	 * of something that is gone either way, so the fold is the same one — models, settings, and
+	 * reachability kept, because those are the window's own facts and not the deleted session's.
+	 * Releasing the pane reference here, on the frame rather than only on the local delete, is what
+	 * keeps a reference held on a session the server has forgotten from turning the next reconnect
+	 * into a refused `open` — and the refusal into a banner for a race nobody chose.
+	 */
+	function foldFromDeleted(sessionId: string): void {
 		if (followed !== sessionId) return;
 		mux.release(followed, "pane");
 		followed = undefined;

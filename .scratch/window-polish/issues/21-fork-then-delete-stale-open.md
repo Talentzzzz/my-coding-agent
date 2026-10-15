@@ -1,7 +1,7 @@
 # 21 删掉刚派生的会话后，窗口给这个已经没了的会话补发一次 `open`
 
 Type: task
-Status: open
+Status: resolved
 Blocked by:
 
 ## Question
@@ -61,3 +61,43 @@ npm run build:web && node .scratch/window-polish/research/repro-19.ts
    「窗口自己要的东西没了」只该记日志。
 
 不在本票范围：19 号那三个入口本身（全绿）。
+
+## Answer
+
+三个决定都落了，全部在 `packages/web/src/main.ts`，服务端与 `client.ts`（MuxClient）一字未动。
+
+1. **修在 `openSession` 的尾巴**（采纳票面倾向）：`mux.retain` 之前加一道闸
+   `if (followed !== snapshot.id) return;`。`followed` 本来就是「窗格开在哪条会话上」这一个事实，
+   `deleteSession` 已经在用它做判断，不引入第二个真相源。核对过 `newSession` 与页面加载那条
+   `GET /api/sessions/current`：两者与侧栏点击、fork 一样都走 `openSession`，一道闸全覆盖四个入口。
+   这道闸同时拍掉同窗口里的另一半竞态——`await refreshLists()` 期间点去别的会话，旧 `openSession`
+   续段也不再补发一条多余的 `open`。
+
+2. **`mux.retain` 不加「服务端说过它没了」的记性**（采纳票面倾向）：那是在客户端再造一个
+   「这个会话还在不在」的第二真相源，19 号的教训就是不这么做。真正该补的一半在 `session_gone`：
+   到达时除了 `rows.remove`，还把正在读这条会话的窗格折回空态——把 `deleteSession` 的尾巴
+   （release pane 引用、`followed` 置空、`initialState()` 折叠、reachable/models/settings 保留）
+   提成 `foldFromDeleted(sessionId)`，两个门共用。删除窗口先折叠时帧迟到是空操作，帧先到时
+   `deleteSession` 的尾巴是空操作，幂等。这一半顺带修掉一个此前没人撞的隐患：**别的窗口**删掉
+   本窗格正在读的会话时，pane 引用会一直悬挂在一条服务端早已忘记的会话上，重连重放（`end` 帧
+   恰好丢失的情形）会对已删会话再发一次 `open`——同样的红横幅，另一条来路。
+
+3. **红横幅保留，不做消息字符串级的抑制**：竞态在源头（1+2）拍死，剩余的交错（retain 与删除
+   同帧赛跑）里 `session_gone` 的折叠会把横幅连同整个状态一起清掉（`initialState()` 不带
+   `error`），残留是瞬时的、自愈的。按「未知的会话」字面匹配降级成日志会造出第二个错误分类
+   机制，不值。
+
+**验证**：`npm run check` 绿；`npm run build:web` 后 `research/repro-19.ts` 连跑三次，五个采样点
+横幅全程空串（修复前 step 2 必现「未知的会话：<派生 id>」）；`research/verify-19.ts` 24 条断言
+全绿、错误横幅 0 次（修复前同脚本连跑三次三次命中 `!! 错误横幅`）。
+
+## Comments
+
+- code-review（两轴并行，2026-10-15）：**无硬性违反**。Spec 轴：三项决定全部落地，四个入口
+  （侧栏点击 / newSession / fork / 页面加载）核实同走 `openSession`，`client.ts` 零改动；
+  `session_gone` 折叠判为票面第 2 问的在范围内回答，非 scope creep。两轴各提一条「`session_gone`
+  恰落在 `followed = snapshot.id` 与 baseline apply 之间」的残留竞态——核实为**不成立**：两者之间
+  没有 `await`，同步块内 `session_gone` 无法插入（事件循环模型），真正的两个让位点
+  （`api.read` / `refreshLists`）期间的折叠都由尾部闸接住；这条结论已写进闸注释。判断题一条
+  已顺手收掉：闸注释的 `{@link deleteSession}` 更新为 `{@link foldFromDeleted}`。
+  `foldFromDeleted` 的命名沿仓库「fold 回空态」既有行话，不改。
