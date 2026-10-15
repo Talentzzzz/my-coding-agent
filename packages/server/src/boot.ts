@@ -119,7 +119,7 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 			// Both listeners are facts about a run rather than about a request that is still open, and
 			// both are the transport's business: see {@link sessionListeners}, which is the one home
 			// they have so a smoke can be wired through the same function this server is.
-			sessions: new SessionController(hub, sessionListeners(mux)),
+			sessions: new SessionController(hub, sessionListeners(mux, projection)),
 		}),
 	);
 
@@ -270,14 +270,20 @@ export function muxUpgrade(
  * nobody was watching is still audible. A smoke that copied these lines instead would be asserting
  * its own copy; wired through here, the thing it proves is that deleting this `console.error` turns
  * it red.
+ *
+ * The projection rides beside the mux because a rename and a delete are both *row* facts before they
+ * are frame facts: the projection's store is updated first, and the frame each one sends is the
+ * ordinary publish road — a re-read row for a rename, a gone id for a delete.
  */
-export function sessionListeners(mux: MuxServer): SessionListener {
+export function sessionListeners(mux: MuxServer, projection: SessionProjection): SessionListener {
 	return {
 		onRunFailure: (sessionId, message) => {
 			console.error(`会话 ${sessionId} 的运行失败：${message}`);
 			mux.announce(sessionId, message);
 		},
 		onApproval: (sessionId, toolCallId, approved) => mux.rememberApproval(sessionId, toolCallId, approved),
+		onRenamed: (sessionId) => void projection.refresh(sessionId),
+		onRemoved: (sessionId) => projection.forget(sessionId),
 	};
 }
 

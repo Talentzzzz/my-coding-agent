@@ -10,16 +10,18 @@ export interface SidebarHandlers {
 	onOpenSettings(): void;
 	/** The system folder picker, which is the only road a new workspace enters the list by. */
 	onAddWorkspace(): void;
+	/** Copy the session this row names whole, and open the copy. */
+	onForkSession(sessionId: string): void;
+	/** Delete the session this row names, transcript and all. */
+	onDeleteSession(sessionId: string): void;
 	/**
-	 * Copy the session this row names whole, and open the copy.
+	 * Give the session this row names a stored name of its own.
 	 *
-	 * Optional only while ticket 08's window wiring is still in flight: a window built before the
-	 * menu landed has no road for these yet, and the menu refuses to offer an action its caller
-	 * cannot take.
+	 * The row does not change here: the name is real storage on the server, and the row takes the new
+	 * one when the connection's `session_row` frame delivers it — the same road every other row fact
+	 * takes, and deliberately not a local edit this column would have to reconcile afterwards.
 	 */
-	onForkSession?(sessionId: string): void;
-	/** Delete the session this row names, transcript and all. Same in-flight caveat as the fork. */
-	onDeleteSession?(sessionId: string): void;
+	onRenameSession(sessionId: string, title: string): void;
 }
 
 export interface SidebarState {
@@ -111,15 +113,6 @@ export class Sidebar {
 	 * Rebuilt on every render, so a rename always seeds from what is actually on screen.
 	 */
 	private readonly rowsById = new Map<string, TreeRow>();
-	/**
-	 * The names this window has given sessions itself, by session id.
-	 *
-	 * A rename has no storage behind it yet — the title a server sends is derived from the branch's
-	 * first user message, and where a user-chosen name lands is ticket 11's decision. Until then the
-	 * override is a display fact that lives here: the server's rows keep arriving and keep carrying
-	 * the derived title, and the drawn label layers this window's choice over it.
-	 */
-	private readonly renames = new Map<string, string>();
 	/** The rename editor in flight, if any. One at a time, like every other popup here. */
 	private editing: Editing | undefined;
 
@@ -236,7 +229,7 @@ export class Sidebar {
 		let matches = 0;
 		for (const group of groups) {
 			const wrapper = this.groupFor(group.cwd, state.currentWorkspace);
-			const rows = rowsOf(group, this.renames);
+			const rows = rowsOf(group);
 			for (const row of rows) this.rowsById.set(row.session.id, row);
 			// Matched on the label a row *wears* rather than the title it stores: the fork's suffix is
 			// part of what a person reads, so "（1）" narrows to the fork and not to every sibling.
@@ -397,7 +390,7 @@ export class Sidebar {
 				icon: "fork",
 				label: "派生新会话",
 				title: "复制整份记录，从这条会话接着往下走",
-				onSelect: () => this.handlers.onForkSession?.(sessionId),
+				onSelect: () => this.handlers.onForkSession(sessionId),
 			},
 			{ kind: "separator" },
 			{ label: "重命名", onSelect: () => this.startRename(sessionId) },
@@ -406,7 +399,7 @@ export class Sidebar {
 				label: "删除",
 				danger: true,
 				title: "永久删除这条会话",
-				onSelect: () => this.handlers.onDeleteSession?.(sessionId),
+				onSelect: () => this.handlers.onDeleteSession(sessionId),
 			},
 		]);
 	}
@@ -415,10 +408,13 @@ export class Sidebar {
 	 * Turn a row's title into an editor, in place.
 	 *
 	 * The editor holds the *clean* name — the `（1）` a fork row wears is a fact about its birth, and
-	 * a person should not have to retype it — so the seed comes from the tree row's base and the
-	 * suffix is re-derived by the next render. Enter commits, Escape leaves the row as it was, and
-	 * clicking anywhere else commits, because an in-place editor that lost its audience has no
-	 * argument for throwing the typing away.
+	 * a person should not have to retype it — so the seed comes from the tree row's base. Enter
+	 * commits, Escape leaves the row as it was, and clicking anywhere else commits, because an
+	 * in-place editor that lost its audience has no argument for throwing the typing away.
+	 *
+	 * Committing changes nothing on this row. The name is real storage on the server, and the row
+	 * wears the new one when the connection's `session_row` frame arrives — the same road every other
+	 * row fact takes, and deliberately not a local edit this column would have to reconcile.
 	 */
 	private startRename(sessionId: string): void {
 		if (this.editing !== undefined) return;
@@ -427,7 +423,7 @@ export class Sidebar {
 		if (drawn?.parts === undefined || row === undefined) return;
 
 		const input = element("input", "rename-input", undefined, { type: "text", "aria-label": "会话名称" });
-		const original = this.renames.get(sessionId) ?? row.base;
+		const original = row.base;
 		input.value = original;
 		const title = drawn.parts.title;
 		title.replaceWith(input);
@@ -441,11 +437,10 @@ export class Sidebar {
 			editing.settled = true;
 			this.editing = undefined;
 			const typed = input.value.trim();
-			// Stored only when it is a change: re-recording the name the row already wears would pin a
-			// derived title against the server's next word for no reason at all.
-			if (save && typed.length > 0 && typed !== original) this.renames.set(sessionId, typed);
+			// Sent only when it is a change: re-recording the name the row already wears is a request
+			// that stores what the server already holds.
+			if (save && typed.length > 0 && typed !== original) this.handlers.onRenameSession(sessionId, typed);
 			input.replaceWith(title);
-			if (this.lastState !== undefined) this.renderRows(this.lastState);
 		};
 		input.addEventListener("keydown", (event) => {
 			if (event.key === "Enter") {
@@ -703,10 +698,11 @@ function collapsedRows(rows: readonly TreeRow[], activeSessionId?: string): Tree
  * and the display title that place earns it.
  *
  * `label` is what the row wears and `base` is what a rename edits: they differ by exactly the row's
- * own `（N）`, which is drawn here rather than stored anywhere — the server has no title field to put
- * it in, and any client-computed suffix would be overwritten by the next row frame. The number is the
- * row's own place among its siblings under the same parent, by creation time, and the suffix hangs on
- * the parent's *label*, so a fork of a fork reads 标题（1）（1） without anyone having stored a thing.
+ * own `（N）`, which is drawn here rather than stored anywhere — the number is the row's own place
+ * among its siblings under the same parent, by creation time. The base is the row's *own* stored
+ * title the moment that title is a fact of its own — a rename makes it one — and the parent's label
+ * while it is still the same string the parent carries, which is what stacks the suffixes: a fork of
+ * a fork reads 标题（1）（1）, so no two rows of a family ever wear the same name.
  */
 interface TreeRow {
 	session: SessionRow;
@@ -739,7 +735,7 @@ interface TreeRow {
  * the name stands on its own. A file hand-edited into a cycle must not lose rows to a walk that never
  * returns, so anything the descent did not reach is placed at the top level rather than dropped.
  */
-function rowsOf(group: WorkspaceGroup, renames: ReadonlyMap<string, string>): TreeRow[] {
+function rowsOf(group: WorkspaceGroup): TreeRow[] {
 	const byId = new Map(group.sessions.map((session) => [session.id, session]));
 	const children = new Map<string, SessionRow[]>();
 	const roots: SessionRow[] = [];
@@ -766,9 +762,13 @@ function rowsOf(group: WorkspaceGroup, renames: ReadonlyMap<string, string>): Tr
 		if (placed.has(session.id)) return;
 		placed.add(session.id);
 		const suffix = parent === undefined ? "" : `（${index}）`;
-		// A rename of this row replaces the whole inherited name — parent label included — and the
-		// suffix comes back on its own, because it is this row's own fact and not part of any name.
-		const base = renames.get(session.id) ?? (parent === undefined ? session.title : parent.label);
+		// The base is the row's own name the moment it becomes a fact of its own — a rename wrote one,
+		// so the stored title differs from its parent's — and the parent's label while it is still the
+		// same string the parent carries. Both halves matter: inheriting is what stacks the suffixes
+		// down an unrenamed family, and stopping the inheritance at the first different name is what
+		// lets a renamed row wear the name its server row actually carries.
+		const inherited = parent !== undefined && session.title === parent.session.title;
+		const base = inherited ? parent.label : session.title;
 		const row: TreeRow = { session, depth, base, label: base + suffix };
 		if (parent !== undefined) row.parentLabel = parent.label;
 		rows.push(row);

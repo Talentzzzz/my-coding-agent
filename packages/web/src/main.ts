@@ -299,10 +299,8 @@ function main(): void {
 		// The row menu's fork copies a session whole — it acts on a session, not on a message, so this
 		// is the `entryId: null` fork rather than anything a message used to offer.
 		onForkSession: (sessionId) => void forkSession(sessionId),
-		onDeleteSession: (sessionId) => {
-			void sessionId;
-			report(new Error("删除会话还没有上线。"));
-		},
+		onDeleteSession: (sessionId) => void deleteSession(sessionId),
+		onRenameSession: (sessionId, title) => void renameSession(sessionId, title),
 	});
 
 	// ----------------------------------------------------------------- settings
@@ -462,6 +460,11 @@ function main(): void {
 		}
 		if (item.type === "session_row") {
 			rows.put(item.session);
+			renderSidebar();
+			return;
+		}
+		if (item.type === "session_gone") {
+			rows.remove(item.sessionId);
 			renderSidebar();
 			return;
 		}
@@ -957,6 +960,57 @@ function main(): void {
 		} catch (error) {
 			unreachable(error);
 		}
+	}
+
+	/**
+	 * Give a session a name of its own, stored server-side.
+	 *
+	 * The sidebar's row does not change here — the name comes back on the `session_row` frame, the
+	 * same road every other row fact takes. What this window does beyond the request is keep the
+	 * header honest when the renamed session is the one on screen: the header reads the snapshot's
+	 * title, and a snapshot does not refresh on a row frame, so the confirmed name is folded in once,
+	 * at the moment the server said it stuck.
+	 */
+	async function renameSession(sessionId: string, title: string): Promise<void> {
+		try {
+			const { title: stored } = await api.renameSession(sessionId, title);
+			reachable();
+			if (followed === sessionId && state.snapshot !== undefined) {
+				apply({ ...state, snapshot: { ...state.snapshot, title: stored } });
+			}
+		} catch (error) {
+			unreachable(error);
+		}
+	}
+
+	/**
+	 * Delete a session whole, and leave it if this window was reading it.
+	 *
+	 * The row leaves on the connection's `session_gone` frame, never by a local edit — one road per
+	 * fact, the same rule the fork follows. What only the deleting window can do is let go of the
+	 * pane: the transcript on screen is a view of something that no longer exists, so it is folded
+	 * back to the empty state — models, settings, and reachability kept, because those are the
+	 * window's own facts and not the deleted session's.
+	 */
+	async function deleteSession(sessionId: string): Promise<void> {
+		try {
+			await api.deleteSession(sessionId);
+			reachable();
+		} catch (error) {
+			// A busy session — a run in flight, an approval waiting — is the server refusing with its
+			// reasons named; the error bar is where those reasons are already shown.
+			unreachable(error);
+			return;
+		}
+		if (followed !== sessionId) return;
+		mux.release(followed, "pane");
+		followed = undefined;
+		apply({
+			...initialState(),
+			reachable: state.reachable,
+			models: state.models,
+			...(state.settings === undefined ? {} : { settings: state.settings }),
+		});
 	}
 
 	/**

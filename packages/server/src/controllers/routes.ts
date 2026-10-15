@@ -24,8 +24,11 @@ import type { SessionController, SystemController } from "./sessions.ts";
  * - `POST /api/sessions` creates one; `POST` on a sub-resource is a command that has an effect and
  *   returns as soon as it is accepted. Commands are `POST` rather than `PATCH` because they are not
  *   edits: sending the same prompt twice is two prompts, and sending `abort` twice is still one stop.
+ *   `POST /api/sessions/:id/title` is the same shape — one accepted rename, one entry appended.
  * - `PATCH` changes part of a configuration.
  * - `PUT` replaces the active tool set outright, which is exactly the session's own contract.
+ * - `DELETE` removes the resource for good. It exists once, on the session itself, because a session
+ *   is the one thing here whose removal is the point rather than an effect on something else.
  */
 export interface Controllers {
 	system: SystemController;
@@ -147,6 +150,21 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 			params: { id: stringParam },
 			handle: async (params, request, response) =>
 				sendJson(response, 201, await controllers.sessions.fork(params.id, await readObjectBody(request))),
+		}),
+		route({
+			// 201 rather than 200: a rename creates one entry — the accepted request has a record in
+			// the session file to show for it, which is what this status says.
+			method: "POST",
+			path: "/api/sessions/:id/title",
+			params: { id: stringParam },
+			handle: async (params, request, response) =>
+				sendJson(response, 201, await controllers.sessions.rename(params.id, await readObjectBody(request))),
+		}),
+		route({
+			method: "DELETE",
+			path: "/api/sessions/:id",
+			params: { id: stringParam },
+			handle: async (params, _request, response) => sendJson(response, 200, await controllers.sessions.remove(params.id)),
 		}),
 		route({
 			method: "POST",

@@ -18,6 +18,11 @@ export interface RowListener {
 	(row: SessionRow): void;
 }
 
+/** Told a row went away: the session behind it no longer exists, and the id is all there is to say. */
+export interface RowGoneListener {
+	(sessionId: string): void;
+}
+
 export interface SessionProjection {
 	/**
 	 * Every row, grouped by workspace and ordered the way the sidebar draws them.
@@ -32,6 +37,19 @@ export interface SessionProjection {
 	row(sessionId: string): Promise<SessionRow | undefined>;
 	/** Be told a row changed. Returns the way to stop listening. */
 	onRow(listener: RowListener): () => void;
+	/** Be told a row went away — deleted, not closed. Returns the way to stop listening. */
+	onGone(listener: RowGoneListener): () => void;
+	/**
+	 * Re-read one row off disk and republish it.
+	 *
+	 * This is the road a stored rename takes to the sidebar: the row's title lives in the file, the
+	 * live feeds carry no title of their own, so the row is read once and published whole. A session
+	 * that is running keeps its live fields — the scan says `running: false` the way every cold read
+	 * does, and overlaying them is what keeps a rename from idling a working row.
+	 */
+	refresh(sessionId: string): Promise<void>;
+	/** Drop one row and stop following its session: the session behind it has been deleted. */
+	forget(sessionId: string): void;
 	/** Let go of everything this projection attached to the hub. */
 	close(): void;
 }
@@ -59,6 +77,8 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	const rows = new Map<string, SessionRow>();
 	/** Whoever wants to hear a row change. */
 	const listeners = new Set<RowListener>();
+	/** Whoever wants to hear that a row went away. */
+	const goneListeners = new Set<RowGoneListener>();
 	/** The live sessions being followed, with the unsubscribers that let them go again. */
 	const following = new Map<string, { host: HostedSession; off: () => void }>();
 	/**
@@ -162,6 +182,37 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	const probe = (sessionId: string): Promise<SessionRow | undefined> => SessionManager.rowForId(sessionId);
 
 	/**
+	 * Re-read one row and publish it, live fields included.
+	 *
+	 * The overlay is the same one {@link onHost} applies to a scanned row, and for the same reason:
+	 * the file's own row says idle, and a session mid-turn is nothing of the sort. A session the scan
+	 * cannot read — deleted between the rename and the re-read — leaves the stored row alone rather
+	 * than replacing it with nothing.
+	 */
+	const refresh = async (sessionId: string): Promise<void> => {
+		const scanned = await probe(sessionId);
+		if (scanned === undefined) return;
+		const entry = following.get(sessionId);
+		publish(entry === undefined ? scanned : { ...scanned, ...liveOf(entry.host) });
+	};
+
+	/**
+	 * Drop one row and stop following its session.
+	 *
+	 * Unbinding before the drop is what keeps the two facts in order: the feeds are gone before the
+	 * listeners hear the row is, so nobody reacts to a removal by publishing to a session that no
+	 * longer exists. A session this store never drew has no listeners to tell — "gone" is only news
+	 * to someone who had it.
+	 */
+	const forget = (sessionId: string): void => {
+		const entry = following.get(sessionId);
+		entry?.off();
+		following.delete(sessionId);
+		if (!rows.delete(sessionId)) return;
+		for (const listener of goneListeners) listener(sessionId);
+	};
+
+	/**
 	 * The hub said a session appeared, started, or went away.
 	 *
 	 * Four cases, and what separates them is whether a host came with the news and whether a row
@@ -259,11 +310,24 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 				listeners.delete(listener);
 			};
 		},
+		onGone(listener: RowGoneListener): () => void {
+			goneListeners.add(listener);
+			return () => {
+				goneListeners.delete(listener);
+			};
+		},
+		refresh(sessionId: string): Promise<void> {
+			return refresh(sessionId);
+		},
+		forget(sessionId: string): void {
+			forget(sessionId);
+		},
 		close(): void {
 			stopHosting();
 			for (const entry of following.values()) entry.off();
 			following.clear();
 			listeners.clear();
+			goneListeners.clear();
 		},
 	};
 }

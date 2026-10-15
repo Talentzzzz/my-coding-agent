@@ -114,7 +114,7 @@ async function openRig(): Promise<Rig> {
 	const router = new Router(
 		createRoutes({
 			system: new SystemController(hub),
-			sessions: new SessionController(hub, sessionListeners(mux)),
+			sessions: new SessionController(hub, sessionListeners(mux, projection)),
 		}),
 	);
 	const handle = await createServer({ router, clientDir: "packages/web/dist", onUpgrade: muxUpgrade(mux) });

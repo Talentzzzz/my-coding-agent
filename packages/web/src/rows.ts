@@ -53,6 +53,18 @@ export class SessionRows {
 	}
 
 	/**
+	 * One row went away: the session behind it was deleted.
+	 *
+	 * A no-op for an id the table never held, because "gone" is only news to a window that had it —
+	 * but the version still moves for the one that did, since a row disappearing is a change the
+	 * render gate has to see.
+	 */
+	remove(sessionId: string): void {
+		if (!this.rows.delete(sessionId)) return;
+		this.version += 1;
+	}
+
+	/**
 	 * Take a REST listing, as the fallback for a channel that is not up.
 	 *
 	 * Rejected while the channel is `live`, which is the whole point of the rule: at that moment the

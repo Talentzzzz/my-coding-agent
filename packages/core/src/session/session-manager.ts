@@ -12,7 +12,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { readdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
@@ -178,6 +178,21 @@ export interface LeafEntry extends SessionEntryBase {
 	leafId: string | null;
 }
 
+/**
+ * A record that the conversation was given a name of its own.
+ *
+ * The derived title — the first user message on the branch — stays the fallback, and this entry is
+ * what a person's own choice writes over it. The title here is the clean name, already shortened at
+ * the write; a fork's `（N）` suffix is a rendering fact and is never stored. Read in file order,
+ * last one wins, regardless of which way the branch points — see ADR-0002 for why a rename is a fact
+ * about the session rather than about one way through it.
+ */
+export interface RenameEntry extends SessionEntryBase {
+	type: "rename";
+	/** The name the conversation was given, shortened the same way a derived title is. */
+	title: string;
+}
+
 export type SessionEntry =
 	| SessionMessageEntry
 	| ThinkingLevelChangeEntry
@@ -186,7 +201,8 @@ export type SessionEntry =
 	| PruneEntry
 	| ArgTrimEntry
 	| ToolConfigEntry
-	| LeafEntry;
+	| LeafEntry
+	| RenameEntry;
 
 /** One line of the file, header included. */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -692,6 +708,14 @@ async function buildSessionInfo(filePath: string, signal?: AbortSignal, fileStat
 		const userTextOf = new Map<string, string>();
 		/** The last entry of any kind, which is where a branch read from the file starts. */
 		let leafId: string | undefined;
+		/**
+		 * The last rename entry's title, in file order.
+		 *
+		 * A rename is a fact about the session rather than about one way through it (ADR-0002), so the
+		 * scan reads it the same way the live manager does: last one in the file wins, before any
+		 * branch walk starts.
+		 */
+		let renamedTitle: string | undefined;
 
 		const lines = createInterface({
 			input: createReadStream(filePath, { encoding: "utf8", signal }),
@@ -710,6 +734,7 @@ async function buildSessionInfo(filePath: string, signal?: AbortSignal, fileStat
 			// The header has already been consumed above, so this is one of the id-bearing kinds — and
 			// the ones a branch walks through (model and tool changes) are recorded here too.
 			parentOf.set(entry.id, (entry as { parentId?: string | null }).parentId ?? null);
+			if (entry.type === "rename") renamedTitle = entry.title;
 			if (entry.type !== "message") continue;
 			messageCount++;
 
@@ -745,7 +770,7 @@ async function buildSessionInfo(filePath: string, signal?: AbortSignal, fileStat
 			created: new Date(header.timestamp),
 			modified,
 			messageCount,
-			title: titleOfBranch(parentOf, userTextOf, leafId),
+			title: renamedTitle ?? titleOfBranch(parentOf, userTextOf, leafId),
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText: allMessages.join(" "),
 		};
@@ -1153,6 +1178,26 @@ export class SessionManager {
 	}
 
 	/**
+	 * Record the conversation's own name, over the derived one.
+	 *
+	 * The title is expected already shortened — the endpoint that takes a user's typing applies
+	 * {@link shortenTitle} before it gets here, so what lands in the file is what a row shows. Like
+	 * every state entry this one is not transcript: it reaches no message, and a reader takes the
+	 * last one in file order, whichever way the branch points.
+	 */
+	appendRename(title: string): string {
+		const entry: RenameEntry = {
+			type: "rename",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			title,
+		};
+		this.appendEntry(entry);
+		return entry.id;
+	}
+
+	/**
 	 * Record a compaction checkpoint: everything up to `firstKeptEntryId` is replaced by `summary`.
 	 *
 	 * `firstKeptEntryId` of null means this compaction keeps no earlier entry, so the checkpoint is the
@@ -1450,13 +1495,19 @@ export class SessionManager {
 	}
 
 	/**
-	 * The conversation's own name: the first user message on the branch, or a placeholder.
+	 * The conversation's own name: a recorded rename if there is one, else the branch's first user
+	 * message, else a placeholder.
 	 *
-	 * Read from the whole branch rather than from the compacted context, so summarizing the oldest turn
-	 * away cannot rename the session. That also keeps it in step with the name the picker derives from
-	 * the file, which scan every message entry rather than the model's view of them.
+	 * The rename is read in **file order**, not along the branch, and that is deliberate: the left
+	 * column draws one row per session, not per way through it, so a name a person gave the session
+	 * does not stop being theirs because the leaf moved. The branch walk below stays exactly as it
+	 * was — it is the fallback, and summarizing the oldest turn away still cannot rename the session.
 	 */
 	getTitle(): string {
+		for (let index = this.fileEntries.length - 1; index >= 0; index--) {
+			const entry = this.fileEntries[index];
+			if (entry?.type === "rename") return entry.title;
+		}
 		return deriveTitle(this.getBranch().flatMap(sessionEntryToContextMessages));
 	}
 
@@ -1756,6 +1807,20 @@ export class SessionManager {
 		}
 		return undefined;
 	}
+
+	/**
+	 * Delete the file a session id names, from whichever workspace holds it.
+	 *
+	 * One file, not a directory: a workspace's sessions share a directory, so anything wider than the
+	 * one `.jsonl` the header names is a different conversation's transcript. Throwing for an unknown
+	 * id rather than answering "already gone" keeps the two failures apart — the caller decides what
+	 * a second delete means, and the hub turns it into a status the client can show.
+	 */
+	static async remove(id: string): Promise<void> {
+		const path = SessionManager.findAnywhere(id);
+		if (path === undefined) throw new Error(`Unknown session: ${id}`);
+		await rm(path);
+	}
 }
 
 /** The most recent activity in a group, for ordering the sidebar's workspaces. */
@@ -1839,11 +1904,13 @@ export function deriveTitle(messages: readonly AgentMessage[]): string {
 /**
  * The one rule for shortening a title: collapse its whitespace, then cut it at 72 characters.
  *
- * Shared rather than written twice because the two callers answer different questions about *which*
- * message they are shortening — a live session walks its branch, a scan walks the file — and a row
- * whose title jumped the moment its host was reaped would be the flicker this sharing exists to stop.
+ * Shared rather than written twice because the callers answer different questions about *which*
+ * string they are shortening — a live session walks its branch, a scan walks the file, and the
+ * rename endpoint truncates a user's typing — and a row whose title jumped between those worlds
+ * would be the flicker this sharing exists to stop. Exported because the endpoint that stores a
+ * rename is the controller's, and the rule has to be the store's, not the caller's copy of it.
  */
-function shortenTitle(text: string): string {
+export function shortenTitle(text: string): string {
 	const collapsed = text.replace(/\s+/g, " ").trim();
 	return collapsed.length > 72 ? `${collapsed.slice(0, 69)}...` : collapsed;
 }

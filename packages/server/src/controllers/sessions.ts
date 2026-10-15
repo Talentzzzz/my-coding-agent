@@ -5,6 +5,7 @@ import {
 	type ConfigPatch,
 	listModelOptions,
 	SessionManager,
+	shortenTitle,
 	type ModelOption,
 	type ModelSelection,
 	resolveModelRef,
@@ -50,6 +51,14 @@ function settingsOf(manager: SettingsManager): SettingsSnapshot {
 export interface SessionListener {
 	onRunFailure?(sessionId: string, message: string): void;
 	onApproval?(sessionId: string, toolCallId: string, approved: boolean): void;
+	/**
+	 * A stored rename landed, and the row's title is stale until the file is read once more. The
+	 * projection re-reads the row and the ordinary `session_row` frame carries the new name to every
+	 * window — the same road any other row change takes, so no client learns a second shape of news.
+	 */
+	onRenamed?(sessionId: string): void;
+	/** A session was deleted. The projection drops its row, and the transport tells its clients. */
+	onRemoved?(sessionId: string): void;
 }
 
 /**
@@ -313,6 +322,48 @@ export class SessionController {
 		}
 		const sessionId = await this.hub.fork(sourceId, typeof entryId === "string" ? entryId : null);
 		return { sessionId, sessions: await listSessions(this.hub.cwd) };
+	}
+
+	/**
+	 * Give the session a name of its own, stored as one `rename` entry (ADR-0002).
+	 *
+	 * The store's own shortening rule is applied here, before anything is written — a user's typing is
+	 * not a title until it has been collapsed and cut the same way a derived one is, so a renamed row
+	 * and a derived row are indistinguishable in width and shape. An empty name is refused rather than
+	 * stored: an entry whose title is nothing would silently restore the derived title, which is what
+	 * *not renaming* already does. There is no clear-rename; changing the name back is another rename.
+	 *
+	 * No claim is taken and a run in flight is no obstacle: the entry lands beside the conversation,
+	 * and nothing the loop reads depends on a title.
+	 */
+	async rename(sessionId: string, body: Record<string, unknown>): Promise<{ sessionId: string; title: string }> {
+		const title = body.title;
+		if (typeof title !== "string") throw httpStatus.badRequest("`title` must be a string");
+		const stored = shortenTitle(title);
+		if (stored.length === 0) throw httpStatus.badRequest("`title` must be a non-empty string");
+		if (!this.hub.has(sessionId)) throw httpStatus.notFound(`Unknown session: ${sessionId}`);
+		await this.hub.rename(sessionId, stored);
+		this.listeners.onRenamed?.(sessionId);
+		return { sessionId, title: stored };
+	}
+
+	/**
+	 * Delete the session: transcript, file, and every row this process knows about it.
+	 *
+	 * A busy session is a conflict rather than a bad request — the request was understood, and what
+	 * stands between it and the delete is a run to wait out or an approval to answer, which is the
+	 * situation 409 exists to name. The listeners hear *after* the file is gone, so the frame that
+	 * tells the windows never precedes the fact it reports.
+	 */
+	async remove(sessionId: string): Promise<{ removed: true }> {
+		if (!this.hub.has(sessionId)) throw httpStatus.notFound(`Unknown session: ${sessionId}`);
+		try {
+			await this.hub.remove(sessionId);
+		} catch (error) {
+			throw httpStatus.conflict(messageOf(error));
+		}
+		this.listeners.onRemoved?.(sessionId);
+		return { removed: true };
 	}
 
 	/**

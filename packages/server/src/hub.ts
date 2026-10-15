@@ -430,6 +430,71 @@ export class SessionHub {
 	}
 
 	/**
+	 * Give a session a name of its own, stored as one `rename` entry (ADR-0002).
+	 *
+	 * A session this process runs appends through its own manager — the one writer its file has while
+	 * the loop is live — and a stored session appends by path, the same road {@link fork} reads a
+	 * source by. Neither takes a claim: a rename is a record beside the conversation, the loop never
+	 * reads titles, and an entry appended mid-run lands on the file without disturbing the turn.
+	 *
+	 * The title arrives already shortened; what reaches the file is what a row shows.
+	 */
+	async rename(sessionId: string, title: string): Promise<void> {
+		const hosted = this.hosts.get(sessionId);
+		if (hosted !== undefined) {
+			hosted.session.sessionManager.appendRename(title);
+			return;
+		}
+		const path = SessionManager.findAnywhere(sessionId);
+		if (path === undefined) throw new Error(`Unknown session: ${sessionId}`);
+		SessionManager.open(path).appendRename(title);
+	}
+
+	/**
+	 * Delete a session: transcript, file, and every trace in this process.
+	 *
+	 * A session with work in flight refuses rather than deleting under it — a run writing the file,
+	 * an approval waiting on a person, a request holding a claim, an open mid-flight — and the
+	 * controller turns that refusal into a 409. An idle session closes the way a reaped one does
+	 * (observers told, listeners announced, `settle` before `close`), and the slot in `closing` is
+	 * held across the whole removal so a claim arriving mid-delete waits and then finds no file
+	 * instead of opening one that is about to go away.
+	 *
+	 * The unnamed landing spot is reset: whatever it named is gone, and the next ask re-resolves
+	 * against what remains rather than answering with a session that no longer exists.
+	 */
+	async remove(sessionId: string): Promise<void> {
+		const hosted = this.hosts.get(sessionId);
+		if (hosted !== undefined) {
+			const snapshot = hosted.session.snapshot;
+			if (hosted.claims > 0 || this.opening.has(sessionId) || snapshot.submitting || hosted.session.hasPendingApprovals) {
+				throw new Error("这个会话还有运行中的轮次或没答完的审批，等它停下来再删。");
+			}
+			const closing = (async () => {
+				await hosted.session.settle();
+				if (this.hosts.get(sessionId) === hosted) this.hosts.delete(sessionId);
+				// The same order a reap uses: the observers lose their feeds before the listeners hear
+				// about the loss, so a subscriber never reaches for a session that is already gone.
+				for (const observer of this.observers.get(sessionId) ?? []) observer(undefined);
+				this.announceHost(sessionId, undefined);
+				await hosted.session.close();
+				// The file removal rides inside the same slot: a claim that waited on `closing` resumes
+				// only after the file is gone, so it finds no file instead of reopening one mid-delete.
+				await SessionManager.remove(sessionId);
+			})();
+			this.closing.set(sessionId, closing);
+			try {
+				await closing;
+			} finally {
+				this.closing.delete(sessionId);
+			}
+		} else {
+			await SessionManager.remove(sessionId);
+		}
+		this.current = undefined;
+	}
+
+	/**
 	 * Stop every run and settle every session before the process exits.
 	 *
 	 * Aborting first is what bounds this: `close()` waits for the run to finish, so without the abort

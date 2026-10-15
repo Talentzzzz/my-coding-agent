@@ -95,6 +95,27 @@ export class SessionApi {
 	}
 
 	/**
+	 * Give a session a name of its own.
+	 *
+	 * The answer only says the entry landed: the row a sidebar draws takes the new name when the
+	 * connection's `session_row` frame carries it, which is the same road every other row fact takes.
+	 */
+	async renameSession(sessionId: string, title: string): Promise<{ sessionId: string; title: string }> {
+		return this.send("POST", `/api/sessions/${encodeURIComponent(sessionId)}/title`, { title });
+	}
+
+	/**
+	 * Delete the session whole — transcript, file, everything.
+	 *
+	 * This answer says the server did it; the row a sidebar draws leaves on the connection's
+	 * `session_gone` frame rather than on anything returned here, so the list never learns about a
+	 * removal through two roads.
+	 */
+	async deleteSession(sessionId: string): Promise<void> {
+		await this.send("DELETE", `/api/sessions/${encodeURIComponent(sessionId)}`, undefined);
+	}
+
+	/**
 	 * Move this session onto another branch of its own tree, and answer with what it looks like now.
 	 *
 	 * `descend` is the whole difference between the two gestures a window offers: choosing an existing

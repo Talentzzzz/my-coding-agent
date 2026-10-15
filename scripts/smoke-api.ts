@@ -381,6 +381,27 @@ async function main(): Promise<void> {
 			);
 			if (listed?.parentId !== treeId) fail(`the fork lists parentId=${String(listed?.parentId)}, expected ${treeId}`);
 			else pass("the listing gives a fork its parent by id, which is what the tree is drawn from");
+
+			// The rename and the delete, over the same surface the row menu uses. A rename creates one
+			// entry — 201 — and answers with the name it stored; a blank one is refused before the
+			// file hears about it. A delete answers 200 and the session is a 404 ever after.
+			const named = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/title`, { title: "改过的名字" });
+			if (named.status !== 201) fail(`a rename answered ${named.status}, expected 201`);
+			else if ((named.payload as { title?: string }).title !== "改过的名字") fail(`a rename answered ${JSON.stringify(named.payload)}`);
+			else pass("a rename is accepted (201) and carries the stored name");
+			const blank = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/title`, { title: "   " });
+			if (blank.status !== 400) fail(`a blank rename answered ${blank.status}, expected 400`);
+			else pass("a blank name is refused (400)");
+
+			const removed = await request("DELETE", `/api/sessions/${encodeURIComponent(forkedId)}`);
+			if (removed.status !== 200) fail(`a delete answered ${removed.status}, expected 200`);
+			else pass("a delete is accepted (200)");
+			const goneRead = await request("GET", `/api/sessions/${encodeURIComponent(forkedId)}`);
+			if (goneRead.status !== 404) fail(`the deleted session answered ${goneRead.status}, expected 404`);
+			else pass("and the deleted session is a 404 ever after");
+			const again = await request("DELETE", `/api/sessions/${encodeURIComponent(forkedId)}`);
+			if (again.status !== 404) fail(`a second delete answered ${again.status}, expected 404`);
+			else pass("a second delete is a 404, not a silent no-op");
 		}
 	}
 

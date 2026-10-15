@@ -339,7 +339,12 @@ export type ConnectionItem =
 	/** Every row this process knows, once per connection. A replacement, not an append. */
 	| { type: "sessions"; sessions: SessionRow[] }
 	/** One row changed. The whole row, because a row is small and idempotent beats a diff here. */
-	| { type: "session_row"; session: SessionRow };
+	| { type: "session_row"; session: SessionRow }
+	/**
+	 * One row went away: the session behind it was deleted. The id is the whole payload, because
+	 * dropping is the only thing a client can do with it — there is no state left to describe.
+	 */
+	| { type: "session_gone"; sessionId: string };
 
 /**
  * One logical stream's frame: its content, its end, or a failure attributed to it.

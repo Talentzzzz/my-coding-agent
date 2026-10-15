@@ -27,7 +27,8 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 - **tool（工具）** —— `AgentTool`；`createToolRegistry(workspace)` 持有定义和每会话的活跃集合，没有
   插件注册表。
 - **session（会话）** —— 一个只追加的 JSONL 文件，由 `SessionManager` 拥有；entry 的 kind 有
-  `message`、`tool_config`、`compaction` 等，未知 kind 原样带过。
+  `message`、`tool_config`、`compaction` 等，未知 kind 原样带过。标题可被一条 `rename` entry 覆写
+  （文件序最后一条赢、与分支无关，见 ADR-0002）；没有它时标题仍从分支首条 user 消息派生。
 - **settings（设置）** —— `SettingsManager` 合并全局与工作区两份 `settings.json`，变更写回**已经提供
   该字段**的那一份。窗口里「设置」这个词**分两级**：**会话级**（工具集合与审批，记在会话自己的
   `tool_config` entry 里，没单独选过就沿用全局）与**应用级**（外观、模型清单、默认模型、bash 超时，

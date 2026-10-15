@@ -69,6 +69,12 @@ class FakeNode {
 	created: number;
 	/** Set when a node is pulled out of its parent, so "moved" and "replaced" can be told apart. */
 	detached = false;
+	/** The viewport box, as a context menu's positioning code measures it. Zeros are fine. */
+	getBoundingClientRect(): { left: number; right: number; top: number; bottom: number; width: number; height: number } {
+		return { left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0 };
+	}
+	/** The input gesture a rename starts with. */
+	select(): void {}
 
 	constructor(tag: string, className?: string, text?: string) {
 		this.tag = tag;
@@ -115,6 +121,19 @@ class FakeNode {
 		if (at >= 0) { this.children.splice(at, 1); node.detached = true; node.parent = undefined; }
 	}
 	remove(): void { this.parent?.removeChild(this); }
+	/** Swap this node out for others in place, which is what the rename editor does to a title. */
+	replaceWith(...nodes: FakeNode[]): void {
+		const parent = this.parent;
+		if (parent === undefined) return;
+		const at = parent.children.indexOf(this);
+		parent.removeChild(this);
+		parent.children.splice(at, 0, ...nodes);
+		for (const node of nodes) {
+			node.parent?.removeChild(node);
+			node.parent = parent;
+			node.detached = false;
+		}
+	}
 	/**
 	 * Move a node, the way the DOM does it.
 	 *
@@ -146,9 +165,14 @@ class FakeNode {
 		list.push(handler);
 		this.listeners.set(type, list);
 	}
-	/** Fire one recorded handler, which is what a real click or input event would do. */
-	dispatch(type: string): void {
-		for (const handler of this.listeners.get(type) ?? []) handler();
+	/**
+	 * Fire one recorded handler, which is what a real click or input event would do.
+	 *
+	 * `event` travels to the handler, which is how a `contextmenu` carries the pointer a menu opens
+	 * at and a `keydown` carries the key that settles a rename.
+	 */
+	dispatch(type: string, event?: unknown): void {
+		for (const handler of this.listeners.get(type) ?? []) handler(event);
 	}
 	/** Whether this node is the given one or holds it, the containment check `ensureHeading` makes. */
 	contains(node: FakeNode): boolean {
@@ -212,15 +236,28 @@ function camelToDash(name: string): string {
  *
  * `innerHTML` produces exactly one child, because that is all `dom.ts` ever assigns and because
  * `icon()` reads `firstElementChild` straight back out of it. Anything more would be a markup parser.
+ *
+ * `document.body` is real because the context menu opens there, and the document-level listener
+ * stubs exist because a menu registers its dismissal on the document rather than on itself.
  */
+const shim = { body: new FakeNode("body") };
+
 function installDom(): void {
 	const g = globalThis as unknown as Record<string, unknown>;
 	g.document = {
 		createElement: (tag: string) => new FakeNode(tag),
 		getElementById: () => null,
 		documentElement: { dataset: {}, style: { setProperty: () => {} } },
+		body: shim.body,
+		addEventListener: () => {},
+		removeEventListener: () => {},
 	};
-	g.window = { matchMedia: () => ({ matches: false }) };
+	g.window = { matchMedia: () => ({ matches: false }), innerWidth: 1280, innerHeight: 800 };
+}
+
+/** The shim's `document.body`, which is where an open menu lives. */
+function body(): FakeNode {
+	return shim.body;
 }
 
 installDom();
@@ -280,6 +317,9 @@ process.stdout.write("\nsidebar：行是原地改的\n");
 		onToggleCollapsed: () => {},
 		onOpenSettings: () => {},
 		onAddWorkspace: () => {},
+		onForkSession: () => {},
+		onDeleteSession: () => {},
+		onRenameSession: () => {},
 	});
 
 	const rows = [row("a", 300), row("b", 200), row("c", 100)];
@@ -311,6 +351,9 @@ process.stdout.write("\nsidebar：重排是移动节点\n");
 		onToggleCollapsed: () => {},
 		onOpenSettings: () => {},
 		onAddWorkspace: () => {},
+		onForkSession: () => {},
+		onDeleteSession: () => {},
+		onRenameSession: () => {},
 	});
 
 	const a = row("a", 100);
@@ -344,6 +387,9 @@ process.stdout.write("\nsidebar：第二行状态\n");
 		onToggleCollapsed: () => {},
 		onOpenSettings: () => {},
 		onAddWorkspace: () => {},
+		onForkSession: () => {},
+		onDeleteSession: () => {},
+		onRenameSession: () => {},
 	});
 
 	// Each row's own status, looked up by session rather than by position: rows are ordered by
@@ -385,6 +431,9 @@ process.stdout.write("\nsidebar：连接指示器\n");
 		onToggleCollapsed: () => {},
 		onOpenSettings: () => {},
 		onAddWorkspace: () => {},
+		onForkSession: () => {},
+		onDeleteSession: () => {},
+		onRenameSession: () => {},
 	});
 
 	sidebar.render(state([row("a", 1)], { channel: "connecting" }));
@@ -411,6 +460,9 @@ process.stdout.write("\nsidebar：分组标题在会话行之上\n");
 		onToggleCollapsed: () => {},
 		onOpenSettings: () => {},
 		onAddWorkspace: () => {},
+		onForkSession: () => {},
+		onDeleteSession: () => {},
+		onRenameSession: () => {},
 	});
 
 	// Two workspaces, so this is about each group rather than about the one group a single-workspace
@@ -452,6 +504,9 @@ process.stdout.write("\nsidebar：行会消失\n");
 		onToggleCollapsed: () => {},
 		onOpenSettings: () => {},
 		onAddWorkspace: () => {},
+		onForkSession: () => {},
+		onDeleteSession: () => {},
+		onRenameSession: () => {},
 	});
 
 	sidebar.render(state([row("a", 300), row("b", 200), row("c", 100)]));
@@ -475,6 +530,9 @@ process.stdout.write("\nsidebar：搜索真的过滤\n");
 		onToggleCollapsed: () => {},
 		onOpenSettings: () => {},
 		onAddWorkspace: () => {},
+		onForkSession: () => {},
+		onDeleteSession: () => {},
+		onRenameSession: () => {},
 	});
 
 	sidebar.render(state([row("alpha", 300), row("beta", 200)]));
@@ -505,6 +563,206 @@ process.stdout.write("\nsidebar：搜索真的过滤\n");
 		const workspaces = all(sidebar, "workspace");
 		check("分组不是被删掉的", workspaces.every((entry) => entry.created === 1), JSON.stringify(workspaces.map((entry) => entry.created)));
 	}
+}
+
+// ------------------------------------------------- 8. a fork row looks like any row
+
+process.stdout.write("\nsidebar：fork 的行跟普通行一模一样\n");
+
+{
+	const sidebar = new Sidebar({
+		onNewSession: () => {},
+		onSelectSession: () => {},
+		onToggleCollapsed: () => {},
+		onOpenSettings: () => {},
+		onAddWorkspace: () => {},
+		onForkSession: () => {},
+		onDeleteSession: () => {},
+		onRenameSession: () => {},
+	});
+
+	// One root, one fork of it. The fork keeps its tree place — right beneath the session it came
+	// from — but draws no indent, no mark, and no depth of any kind: the name, suffix included, is
+	// the whole difference.
+	const source = row("s", 300, { createdAt: 100 });
+	const forked = row("f", 200, { createdAt: 200, parentId: "s", title: "会话 s" });
+	sidebar.render(state([source, forked]));
+
+	const order = titlesOf(sidebar).map((t) => t.title);
+	check("fork 的行紧跟源行，名字带着（1）", order.join(",") === "会话 s,会话 s（1）", JSON.stringify(order));
+	check("没有任何行带着缩进深度", all(sidebar, "session-item").every((entry) => entry.node.getAttribute("data-depth") === null));
+	check("没有任何 fork 标记", all(sidebar, "session-fork-mark").length === 0, JSON.stringify(all(sidebar, "session-fork-mark").length));
+}
+
+// ------------------------------------------------- 9. the suffix is drawn, not stored
+
+process.stdout.write("\nsidebar：（1）由渲染拼出来\n");
+
+{
+	const sidebar = new Sidebar({
+		onNewSession: () => {},
+		onSelectSession: () => {},
+		onToggleCollapsed: () => {},
+		onOpenSettings: () => {},
+		onAddWorkspace: () => {},
+		onForkSession: () => {},
+		onDeleteSession: () => {},
+		onRenameSession: () => {},
+	});
+
+	// Three forks of one source, born out of order; the number is the sibling's own place under the
+	// same parent by creation time, and nothing anywhere stores it. A fork of a fork hangs its suffix
+	// on the parent's *display* title, so the numbers stack: 标题（2）（1）, not 标题（1）again.
+	const source = row("s", 500, { createdAt: 100 });
+	const one = row("f1", 400, { createdAt: 300, parentId: "s", title: "会话 s" });
+	const two = row("f2", 300, { createdAt: 200, parentId: "s", title: "会话 s" });
+	const three = row("f3", 200, { createdAt: 400, parentId: "s", title: "会话 s" });
+	const grand = row("g", 100, { createdAt: 500, parentId: "f1", title: "会话 s" });
+	sidebar.render(state([source, one, two, three, grand]));
+
+	const titles = titlesOf(sidebar).map((t) => t.title);
+	check("三个兄弟按创建时间拿到 1、2、3", titles.includes("会话 s（1）") && titles.includes("会话 s（2）") && titles.includes("会话 s（3）"), JSON.stringify(titles));
+	check("派生的再派生叠在父行的显示标题上", titles.includes("会话 s（2）（1）"), JSON.stringify(titles));
+	check("源行自己不带后缀", titles.includes("会话 s"), JSON.stringify(titles));
+}
+
+// --------------------------------- 10. a forked session arrives through its row frame
+
+process.stdout.write("\nsidebar：新会话出现在列表里\n");
+
+{
+	const sidebar = new Sidebar({
+		onNewSession: () => {},
+		onSelectSession: () => {},
+		onToggleCollapsed: () => {},
+		onOpenSettings: () => {},
+		onAddWorkspace: () => {},
+		onForkSession: () => {},
+		onDeleteSession: () => {},
+		onRenameSession: () => {},
+	});
+
+	// The listing the window had before the fork, then the same listing with the fork's row in it —
+	// which is exactly what the connection's `session_row` frame delivers. The row has to appear
+	// beneath its source with its suffix on, and nothing already on screen may be rebuilt to make
+	// room: the client never inserts a row of its own.
+	const source = row("s", 300, { createdAt: 100 });
+	sidebar.render(state([source]));
+	const sourceNode = all(sidebar, "session-item")[0]?.node;
+
+	sidebar.render(state([source, row("f", 200, { createdAt: 200, parentId: "s", title: "会话 s" })]));
+	const after = titlesOf(sidebar);
+	check("fork 出现了", after.length === 2, JSON.stringify(after.map((t) => t.title)));
+	check("带着（1），紧跟源行", after.map((t) => t.title).join(",") === "会话 s,会话 s（1）", JSON.stringify(after.map((t) => t.title)));
+	check(
+		"原来的行没有为它重建",
+		all(sidebar, "session-item").some((entry) => entry.node === sourceNode && entry.created === 1 && !entry.detached),
+	);
+}
+
+// ------------------------------------------------- 11. the row's own context menu
+
+process.stdout.write("\nsidebar：右键菜单\n");
+
+{
+	const forked: string[] = [];
+	const deleted: string[] = [];
+	const sidebar = new Sidebar({
+		onNewSession: () => {},
+		onSelectSession: () => {},
+		onToggleCollapsed: () => {},
+		onOpenSettings: () => {},
+		onAddWorkspace: () => {},
+		onForkSession: (sessionId) => forked.push(sessionId),
+		onDeleteSession: (sessionId) => deleted.push(sessionId),
+		onRenameSession: () => {},
+	});
+
+	sidebar.render(state([row("a", 300), row("b", 200)]));
+	const target = all(sidebar, "session-item")[0]?.node;
+	check("行在列表里", target !== undefined);
+	target?.dispatch("contextmenu", { clientX: 40, clientY: 60, preventDefault() {} });
+
+	const menu = body().children.find((child) => child.className === "menu");
+	check("菜单打开了", menu !== undefined);
+	const labels = (menu?.children ?? [])
+		.filter((child) => child.className === "menu-item")
+		.map((child) => child.querySelector(".menu-label")?.textContent ?? "");
+	check("三项都在：派生新会话、重命名、删除", labels.join("|") === "派生新会话|重命名|删除", JSON.stringify(labels));
+
+	const forkItem = (menu?.children ?? []).find((child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === "派生新会话");
+	forkItem?.dispatch("click");
+	check("派生拿到的是这一行的会话 id", forked.join(",") === "a", JSON.stringify(forked));
+	check("选完菜单收起了", body().children.every((child) => child.className !== "menu"));
+
+	target?.dispatch("contextmenu", { clientX: 40, clientY: 60, preventDefault() {} });
+	const reopened = body().children.find((child) => child.className === "menu");
+	const deleteItem = (reopened?.children ?? []).find((child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === "删除");
+	deleteItem?.dispatch("click");
+	check("删除拿到的是同一行的会话 id", deleted.join(",") === "a", JSON.stringify(deleted));
+}
+
+// ------------------------------------------------- 12. rename, in place
+
+process.stdout.write("\nsidebar：就地改名\n");
+
+{
+	const renamed: { sessionId: string; title: string }[] = [];
+	const sidebar = new Sidebar({
+		onNewSession: () => {},
+		onSelectSession: () => {},
+		onToggleCollapsed: () => {},
+		onOpenSettings: () => {},
+		onAddWorkspace: () => {},
+		onForkSession: () => {},
+		onDeleteSession: () => {},
+		onRenameSession: (sessionId, title) => renamed.push({ sessionId, title }),
+	});
+
+	// A root and a fork of it, so the rename shows both halves of the rule: the editor holds the
+	// clean name — the fork's own suffix is a fact about its birth, not something to retype — and
+	// committing changes nothing on this row, because the name is real storage on the server and the
+	// row wears the new one only when its row frame arrives.
+	const source = row("s", 300, { createdAt: 100 });
+	const forked = row("f", 200, { createdAt: 200, parentId: "s", title: "会话 s" });
+	sidebar.render(state([source, forked]));
+
+	const forkRow = all(sidebar, "session-item")[1]?.node;
+	forkRow?.dispatch("contextmenu", { clientX: 10, clientY: 10, preventDefault() {} });
+	const menu = body().children.find((child) => child.className === "menu");
+	const renameItem = (menu?.children ?? []).find((child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === "重命名");
+	renameItem?.dispatch("click");
+
+	const input = all(sidebar, "rename-input")[0]?.node;
+	check("编辑框出现在行里", input !== undefined);
+	check("编辑的是去掉后缀的名字", input?.value === "会话 s", String(input?.value));
+
+	check("提交前没有提交过任何名字", renamed.length === 0);
+	if (input !== undefined) {
+		input.value = "新名字";
+		input.dispatch("keydown", { key: "Enter", preventDefault() {} });
+		check("提交的是净名和这一行的会话 id", renamed.length === 1 && renamed[0]!.sessionId === "f" && renamed[0]!.title === "新名字", JSON.stringify(renamed));
+		check("本行没有自己改名字", titlesOf(sidebar).map((t) => t.title).join(",") === "会话 s,会话 s（1）", JSON.stringify(titlesOf(sidebar).map((t) => t.title)));
+		check("编辑框换回了标题", all(sidebar, "rename-input").length === 0);
+	}
+
+	// The server stored it; the row frame is how the list finds out. The suffix comes back on its
+	// own — it was never part of what the user typed, and the tree still knows the row's place.
+	sidebar.render(state([source, row("f", 200, { createdAt: 200, parentId: "s", title: "新名字" })]));
+	check("行帧到了，名字换上、后缀自己拼回", titlesOf(sidebar).map((t) => t.title).join(",") === "会话 s,新名字（1）", JSON.stringify(titlesOf(sidebar).map((t) => t.title)));
+
+	// Escape sends nothing at all — the typed text included.
+	const rootRow = all(sidebar, "session-item")[0]?.node;
+	rootRow?.dispatch("contextmenu", { clientX: 10, clientY: 10, preventDefault() {} });
+	const again = body().children.find((child) => child.className === "menu");
+	const renameAgain = (again?.children ?? []).find((child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === "重命名");
+	renameAgain?.dispatch("click");
+	const editor = all(sidebar, "rename-input")[0]?.node;
+	if (editor !== undefined) {
+		editor.value = "没有这一笔";
+		editor.dispatch("keydown", { key: "Escape", preventDefault() {} });
+	}
+	check("Escape 取消，什么都没提交", renamed.length === 1 && titlesOf(sidebar).map((t) => t.title).join(",") === "会话 s,新名字（1）", `${JSON.stringify(renamed)} / ${JSON.stringify(titlesOf(sidebar).map((t) => t.title))}`);
 }
 
 process.stdout.write(failures === 0 ? "\nsidebar ok\n" : `\n${failures} 项失败\n`);

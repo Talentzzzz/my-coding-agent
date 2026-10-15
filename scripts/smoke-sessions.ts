@@ -279,6 +279,36 @@ try {
 		JSON.stringify(group?.sessions.map((session) => [session.id, session.parentId])),
 	);
 
+	process.stdout.write("a rename is stored and outlives a reopen\n");
+	// The rename is one entry appended to the file (ADR-0002), read back in file order by every path
+	// that names a session — the live manager, the scan, and the fork that copies the whole log.
+	{
+		const renamedId = await hub.newSession();
+		const host = await hub.claim(renamedId);
+		host.session.sessionManager.appendMessage(userMessage("改名的会话"));
+		await hub.rename(renamedId, "新名字");
+		check("a live session reports the stored name", host.session.snapshot.title === "新名字", host.session.snapshot.title);
+
+		hub.release(host);
+		check("the renamed session closes", await until(() => !hub.live.includes(renamedId)));
+		const rescanned = await SessionManager.rowForId(renamedId);
+		check("the file's row carries the stored name", rescanned?.title === "新名字", rescanned?.title);
+		const reopened = await hub.claim(renamedId);
+		check("a reopen reports it too", reopened.session.snapshot.title === "新名字", reopened.session.snapshot.title);
+
+		const renameFork = await hub.fork(renamedId, null);
+		const forkRow = await SessionManager.rowForId(renameFork);
+		check("a fork lands with the source's stored name", forkRow?.title === "新名字", forkRow?.title);
+		await hub.rename(renameFork, "另一条");
+		check(
+			"renaming the fork leaves the source alone",
+			(await SessionManager.rowForId(renamedId))?.title === "新名字" &&
+				(await SessionManager.rowForId(renameFork))?.title === "另一条",
+			`${(await SessionManager.rowForId(renamedId))?.title} / ${(await SessionManager.rowForId(renameFork))?.title}`,
+		);
+		await hub.release(reopened);
+	}
+
 	process.stdout.write("an unknown id fails instead of quietly starting one\n");
 	const missing = await hub.claim("0123456789abcdef").then(
 		() => undefined,
@@ -482,6 +512,43 @@ try {
 		check("`tools` must be an array (400)", notArray.status === 400, `status=${notArray.status}`);
 		const notNames = await call("PATCH", `${http.url}/api/settings`, { patch: { tools: [42] } });
 		check("every entry must be a string (400)", notNames.status === 400, `status=${notNames.status}`);
+
+		process.stdout.write("a rename stores a name and a delete removes the session\n");
+		// The two row-menu actions the window offers, over the real route table: a rename lands as one
+		// entry and answers 201, a blank one is refused before anything is written, and a delete takes
+		// the file with it — refusing first while a claim is still held.
+		{
+			const victim = await http.hub.newSession();
+			const host = await http.hub.claim(victim);
+			host.session.sessionManager.appendMessage(userMessage("要删的会话"));
+			http.hub.release(host);
+			check("the victim goes idle", await until(() => !http.hub.live.includes(victim)), http.hub.live.join(","));
+
+			const blank = await call("POST", `${http.url}/api/sessions/${victim}/title`, { title: "   " });
+			check("a blank name is refused (400)", blank.status === 400, `status=${blank.status}`);
+			const wrongType = await call("POST", `${http.url}/api/sessions/${victim}/title`, { title: 42 });
+			check("a non-string name is refused (400)", wrongType.status === 400, `status=${wrongType.status}`);
+			const named = await call("POST", `${http.url}/api/sessions/${victim}/title`, { title: "新名字" });
+			check("a rename is accepted (201)", named.status === 201, `status=${named.status}`);
+			check("the answer carries the stored name", named.payload.title === "新名字", JSON.stringify(named.payload));
+			const reread = await get(`${http.url}/api/sessions/${victim}`);
+			check("and the snapshot reports it", reread.session?.title === "新名字", reread.session?.title);
+
+			const busy = await http.hub.claim(victim);
+			const refused = await call("DELETE", `${http.url}/api/sessions/${victim}`);
+			check("deleting a claimed session is refused (409)", refused.status === 409, `status=${refused.status}`);
+			http.hub.release(busy);
+			check("the claim lets go", await until(() => !http.hub.live.includes(victim)));
+
+			const removed = await call("DELETE", `${http.url}/api/sessions/${victim}`);
+			check("an idle session is deleted (200)", removed.status === 200, `status=${removed.status}`);
+			check("the answer says what happened", removed.payload.removed === true, JSON.stringify(removed.payload));
+			const gone = await get(`${http.url}/api/sessions/${victim}`);
+			check("and then it is a 404", gone.status === 404, `status=${gone.status}`);
+			const second = await call("DELETE", `${http.url}/api/sessions/${victim}`);
+			check("a second delete is a 404 too", second.status === 404, `status=${second.status}`);
+			check("and the file is really gone", SessionManager.findById(root, victim) === undefined);
+		}
 	} finally {
 		await http.close();
 	}

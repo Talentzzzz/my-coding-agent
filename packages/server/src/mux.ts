@@ -577,6 +577,11 @@ export class MuxConnection {
 		this.send({ streamId: null, item: { type: "session_row", session: row } });
 	}
 
+	/** One row went away. The id is the whole payload: dropping it is all a client can do. */
+	sendGone(sessionId: string): void {
+		this.send({ streamId: null, item: { type: "session_gone", sessionId } });
+	}
+
 	/** The application-level liveness frame. Connection-level by construction: no stream id. */
 	heartbeat(): void {
 		this.send({ streamId: null, item: { type: "heartbeat", everyMs: this.options.heartbeatIntervalMs } });
@@ -830,8 +835,9 @@ export class MuxServer {
 	 */
 	private readonly answers: ApprovalAnswers = createApprovalAnswers();
 	private shuttingDown = false;
-	/** Let go of the projection's row listener, so this server stops being reachable from it. */
+	/** Let go of the projection's row listeners, so this server stops being reachable from it. */
 	private readonly stopRows: () => void;
+	private readonly stopGone: () => void;
 
 	private readonly hub: SessionHub;
 	private readonly projection: SessionProjection;
@@ -857,6 +863,12 @@ export class MuxServer {
 		// anyway, which is why the bug would not have shown up there.
 		this.stopRows = projection.onRow((row) => {
 			for (const connection of this.connections) connection.sendRow(row);
+		});
+		// The removal rides the same connection-level seat the rows do, and for the same reason: it is
+		// about the machine's list, not about any stream. Kept like `stopRows` is — a projection
+		// outlives this server, and a listener left behind would hold the whole graph alive.
+		this.stopGone = projection.onGone((sessionId) => {
+			for (const connection of this.connections) connection.sendGone(sessionId);
 		});
 	}
 
@@ -950,6 +962,7 @@ export class MuxServer {
 	close(): void {
 		this.shuttingDown = true;
 		this.stopRows();
+		this.stopGone();
 		clearInterval(this.pingTimer);
 		clearInterval(this.heartbeatTimer);
 		for (const connection of [...this.connections]) connection.close();

@@ -72,6 +72,22 @@ token 审计会拒绝一个被引用却从未定义的 `--dsw-*` 名字；改完
 
 <!-- 关掉的 ticket 依次列在这里：一行要点 + 指向该 ticket 的链接 -->
 
+- [14 改名的持久化：rename entry 与标题端点](issues/14-session-rename-server.md)：**改名是一条
+  `{type:"rename"}` entry**（header 不动、version 维持 3，未知 kind 原样带过免费兼容），
+  **文件序最后一条赢、与分支无关**（左栏一行是一个会话，不是一条走法）；活会话与文件扫描两条读取
+  路径同改；`hub.rename` 活走自己的 manager、冷照 `forkFrom` 按路径追加、不拿 claim；
+  `POST /api/sessions/:id/title`（空白 400、`shortenTitle` 72 字符兜底、201）经
+  `onRenamed → projection.refresh → 既有 session_row 帧` 送达，**改名这条路 protocol.ts 一字未动**；
+  ADR-0002 落 `docs/adr/`。执行期发现：真存储改了 08 ② 的前提——左栏拼后缀的 base 规则随之修订
+  （行名与父行相同才继承父行显示标题，不同了用自己的名字），落在 08 号。
+- [08 fork 的入口搬进左栏右键菜单](issues/08-fork-menu.md)：行上 `contextmenu` 开自绘三项菜单
+  （`menu.ts` 新增 `openMenuAt` 指针定位 + `MenuItem.danger`）：**派生新会话**（`entryId: null`，文案
+  「复制整份记录，从这条会话接着往下走」）、**重命名**（就地编辑净名、提交 `POST /title`、行从
+  `session_row` 帧回来——**不做本地先行**）、**删除**（用户拍板加的真删除：`SessionManager.remove`
+  + `hub.remove` 忙会话 409 + `projection.forget/onGone` + `DELETE /api/sessions/:id` + 协议新成员
+  `session_gone` 连接级帧；删掉正在读的会话时窗口释放 pane 回空态）。**`（1）` 由渲染拼**（兄弟按
+  `createdAt` 排、同父行下序号；base 规则见 14 号的修订）；`drawDepth`/`session-fork-mark`/
+  `data-depth` 整套视觉缩进连同 CSS 拆掉，`rowsOf` 建树保留；`forkButton`/`onFork` 拆掉（随票 09 落地）。
 - [04 两个把手与字号阶](issues/04-handles-and-type.md)：三问全拍。① **只有一个把手**，管正文最大
   宽度（量程照 13 号第 6 条），**不给"整列宽度"的第二个把手**——留白只剩 35/20px，第二个把手
   无可调之物；"左栏挤没阅读列"由 600 下限兜住。布局常量落 token：`--dsw-content-min/cap`（600/

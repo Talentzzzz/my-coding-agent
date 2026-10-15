@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>窗口打磨 · 字号与观感对照</title>
+<style>
+/* ============================================================================
+ * 对照页：左边是**现在的**尺寸（从 packages/web/src/style.css 抄来的真值），
+ * 右边是**提案的**尺寸。两边内容一字不差，只有字号、行高、内边距不一样。
+ * 这一页只回答一个问题："又小又丑"到底差在哪。
+ * ==========================================================================*/
+
+/* ---- 现状的真实取值（style.css，逐条抄的） ---- */
+:root{
+	--now-app-font: 14px;          /* --app-font-size */
+	--now-sidebar-w: 232px;
+	--now-row-min-h: 32px;
+	--now-row-radius: 8px;         /* --dsw-radius-sm */
+	--now-title-size: 14px;        /* 继承 --app-font-size */
+	--now-title-lh: 1.6;           /* body line-height */
+	--now-time: 11px;
+	--now-status: 11px; --now-status-lh: 14px;
+	--now-wshead: 11.5px;
+	--now-badge: 10px;
+	--now-more: 11.5px;
+	--now-tool-name: 11px;
+	--now-tool-preview: 11px;
+	--now-role: 12px;
+	--now-prose: 14px;             /* --app-font-size */
+}
+
+/* ---- 提案的取值（原型 index.html 的三档 + 行高） ---- */
+:root{
+	--pr-sidebar-w: 264px;
+	--pr-title: 14px; --pr-title-lh: 20px;
+	--pr-meta: 13px;  --pr-meta-lh: 18px;
+	--pr-caption: 12px; --pr-caption-lh: 16px;
+	--pr-body: 15px;  --pr-body-lh: 25px;
+	--pr-code: 13px;  --pr-code-lh: 20px;
+	--pr-row-h: 32px;
+	--pr-radius: 12px;   /* --dsw-radius-md */
+}
+
+:root{
+	--bg-base: rgb(21,21,23); --bg-sidebar: rgb(27,27,28); --bg-layer-1: rgb(35,35,36);
+	--bg-layer-2: rgb(44,44,46); --bg-hover: rgba(255,255,255,.08); --bg-active: rgba(255,255,255,.14);
+	--border-l1: rgba(255,255,255,.06); --border-l2: rgba(255,255,255,.12);
+	--fg-primary: rgb(249,250,251); --fg-secondary: rgb(207,211,214); --fg-tertiary: rgb(173,178,184);
+	--fg-caption: rgb(129,133,140); --accent: rgb(122,170,255); --accent-tint: rgba(122,170,255,.14);
+	--bubble: rgb(44,44,46); --code-bg: rgb(27,27,28); --warn: rgb(245,158,11);
+	--sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+	--code: "SF Mono", "JetBrains Mono", Consolas, Menlo, "PingFang SC", "Microsoft YaHei";
+}
+html[data-theme="light"]{
+	--bg-base: #fff; --bg-sidebar: rgb(249,250,251); --bg-layer-1:#fff; --bg-layer-2: rgb(241,243,245);
+	--bg-hover: rgba(38,49,72,.06); --bg-active: rgba(38,49,72,.1);
+	--border-l1: rgba(0,0,0,.05); --border-l2: rgba(0,0,0,.1);
+	--fg-primary: rgb(15,17,21); --fg-secondary: rgb(97,102,107); --fg-tertiary: rgb(129,133,140);
+	--fg-caption: rgb(173,178,184); --accent: rgb(65,118,230); --accent-tint: rgba(65,118,230,.1);
+	--bubble: rgb(237,243,254); --code-bg: rgb(249,250,251); --warn: rgb(221,134,41);
+}
+
+*{ box-sizing:border-box; }
+body{
+	margin:0; padding:28px 32px 64px; font-family: var(--sans);
+	background: rgb(10,10,11); color: var(--fg-primary); font-size:14px; line-height:1.6;
+}
+html[data-theme="light"] body{ background: rgb(232,234,238); }
+h1{ font-size:20px; line-height:28px; margin:0 0 6px; font-weight:600; }
+.lede{ margin:0 0 26px; color: var(--fg-tertiary); font-size:14px; max-width:760px; }
+h2{ font-size:15px; line-height:22px; margin:34px 0 12px; font-weight:600; }
+h2:first-of-type{ margin-top:0; }
+code{ font-family: var(--code); font-size:12px; }
+.k{ font-family: var(--code); font-size:12px; padding:1px 5px; border-radius:4px; background: var(--bg-layer-2); color: var(--fg-secondary); }
+button{ font:inherit; color:inherit; background:none; border:none; cursor:pointer; }
+svg{ display:block; }
+
+.topbar{ display:flex; align-items:center; gap:12px; margin-bottom:20px; }
+.topbar .spacer{ flex:1; }
+.toggle{ padding:5px 12px; border-radius:8px; border:1px solid rgba(255,255,255,.14); font-size:13px; color:var(--fg-secondary); }
+html[data-theme="light"] .toggle{ border-color: rgba(0,0,0,.12); }
+.toggle:hover{ background: rgba(255,255,255,.06); }
+
+/* ---- 对照板 ---- */
+.pair{ display:flex; gap:22px; align-items:flex-start; flex-wrap:wrap; }
+.panel{ display:flex; flex-direction:column; gap:8px; }
+.panel .cap{ display:flex; align-items:baseline; gap:8px; font-size:12px; color: var(--fg-caption); }
+.panel .cap b{ font-size:13px; color: var(--fg-secondary); font-weight:600; }
+.panel .cap .tag{ font-family: var(--code); font-size:11px; padding:1px 6px; border-radius:999px; }
+.tag.now{ background: rgba(242,90,90,.14); color: rgb(242,90,90); }
+.tag.pr{ background: var(--accent-tint); color: var(--accent); }
+
+/* ============================ 左栏 · 现状 ============================ */
+.sb{ width: var(--now-sidebar-w); border:1px solid var(--border-l2); border-radius:10px; overflow:hidden;
+	background: var(--bg-sidebar); padding:8px; font-size: var(--now-app-font); line-height:1.6; }
+.now-brand{ display:flex; align-items:center; gap:8px; padding:2px 6px 8px; }
+.now-brand .mark{ width:22px; height:22px; border-radius:6px; background: var(--bg-layer-2); color: var(--fg-secondary);
+	font-size:12px; display:flex; align-items:center; justify-content:center; font-weight:600; }
+.now-brand .name{ font-size:13px; color: var(--fg-primary); font-weight:500; }
+.now-new{ display:flex; align-items:center; gap:6px; height:28px; padding:0 8px; border-radius:6px;
+	background: rgba(255,255,255,.06); color: var(--fg-secondary); font-size:13px; margin-bottom:8px; }
+html[data-theme="light"] .now-new{ background: rgba(0,0,0,.05); }
+.now-head{ display:flex; align-items:center; gap:6px; padding:4px 8px 2px; min-height:26px;
+	font-size: var(--now-wshead); font-weight:600; color: var(--fg-tertiary); }
+.now-badge{ margin-left:auto; padding:0 5px; border-radius:999px; background: var(--bg-hover);
+	color: var(--fg-caption); font-size: var(--now-badge); }
+.now-row{ display:flex; align-items:flex-start; gap:6px; padding:5px 8px; min-height: var(--now-row-min-h);
+	border-radius: var(--now-row-radius); color: var(--fg-secondary); }
+.now-row:hover{ background: var(--bg-hover); }
+.now-row.on{ background: var(--bg-active); color: var(--fg-primary); font-weight:500; }
+.now-row .body{ flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
+.now-row .line{ display:flex; align-items:baseline; gap:8px; min-width:0; }
+.now-row .title{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.now-row .time{ flex:none; font-size: var(--now-time); color: var(--fg-caption); }
+.now-row .status{ font-size: var(--now-status); line-height: var(--now-status-lh); color: var(--fg-caption); }
+.now-row.on .status{ color: inherit; opacity:.75; }
+.now-more{ padding:4px 8px; margin-left:-8px; font-size: var(--now-more); color: var(--fg-caption); }
+.now-foot{ margin-top:8px; padding-top:8px; border-top:1px solid var(--border-l1);
+	display:flex; align-items:center; gap:6px; padding-left:8px; height:32px; font-size:13px; color: var(--fg-secondary); }
+
+/* ============================ 左栏 · 提案 ============================ */
+.pb{ width: var(--pr-sidebar-w); border:1px solid var(--border-l2); border-radius: var(--pr-radius); overflow:hidden;
+	background: var(--bg-sidebar); padding:10px 10px 8px; font-size: var(--pr-title); line-height: var(--pr-title-lh); }
+.pb-top{ display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+.pb-new{ flex:1; display:flex; align-items:center; justify-content:center; gap:8px; height:34px;
+	border-radius: var(--pr-radius); background: var(--bg-layer-2); font-size: var(--pr-title); }
+html[data-theme="light"] .pb-new{ background: rgb(235,238,242); }
+.pb-icon{ width:28px; height:28px; display:flex; align-items:center; justify-content:center;
+	border-radius:8px; color: var(--fg-tertiary); }
+.pb-head{ display:flex; align-items:center; gap:6px; padding:6px 8px 4px; }
+.pb-head h5{ margin:0; font-size: var(--pr-caption); line-height: var(--pr-caption-lh); font-weight:600;
+	letter-spacing:.04em; color: var(--fg-caption); }
+.pb-head .spacer{ flex:1; }
+.pb-ws{ display:flex; align-items:center; gap:7px; height:34px; padding:0 8px; border-radius: var(--pr-radius);
+	color: var(--fg-tertiary); font-size: var(--pr-meta); line-height: var(--pr-meta-lh); }
+.pb-ws:hover{ background: var(--bg-hover); }
+.pb-ws .nm{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pb-ws .mk{ flex:none; font-size:11px; line-height:16px; padding:0 6px; border-radius:999px;
+	background: var(--accent-tint); color: var(--accent); }
+.pb-row{ display:flex; align-items:center; width:100%; height: var(--pr-row-h); padding:0 8px 0 14px;
+	border-radius: var(--pr-radius); color: var(--fg-secondary); text-align:left;
+	font-size: var(--pr-title); line-height: var(--pr-title-lh); }
+.pb-row:hover{ background: var(--bg-hover); color: var(--fg-primary); }
+.pb-row.on{ background: var(--bg-active); color: var(--fg-primary); }
+.pb-row .slot{ flex:none; width:16px; display:flex; align-items:center; justify-content:center; color: var(--fg-caption); }
+.pb-row .title{ flex:1; min-width:0; margin:0 6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pb-row .time{ flex:none; font-size: var(--pr-caption); line-height: var(--pr-caption-lh); color: var(--fg-caption); }
+.pb-more{ display:block; width:100%; height:28px; padding-left:30px; text-align:left;
+	font-size: var(--pr-caption); line-height:28px; color: var(--fg-caption); border-radius:8px; }
+.pb-more:hover{ background: var(--bg-hover); }
+.pb-foot{ margin-top:8px; padding-top:8px; border-top:1px solid var(--border-l1);
+	display:flex; align-items:center; gap:8px; height:32px; font-size: var(--pr-title); color: var(--fg-tertiary); }
+.pb-foot .spacer{ flex:1; }
+.pb-foot i{ width:6px; height:6px; border-radius:50%; background: rgb(34,197,94); display:block; }
+
+/* ============================ 会话 · 现状 vs 提案 ============================ */
+.conv{ width:520px; border:1px solid var(--border-l2); border-radius:10px; background: var(--bg-base); padding:14px 16px; }
+.conv.now{ font-size: var(--now-prose); line-height:1.6; }
+.conv.pr{ font-size: var(--pr-body); line-height: var(--pr-body-lh); border-radius: var(--pr-radius); }
+
+.now-role{ display:flex; align-items:center; gap:6px; margin-bottom:4px; color: var(--fg-tertiary); font-size: var(--now-role); }
+.now-role .av{ width:16px; height:16px; border-radius:50%; background: var(--bg-layer-2); color: var(--fg-secondary);
+	display:flex; align-items:center; justify-content:center; font-size:9px; }
+.now-think{ color: var(--fg-caption); font-size:12px; margin-bottom:6px; }
+.pill{ display:inline-block; font-family: var(--code); font-size: var(--now-tool-preview); color: var(--fg-caption); }
+.bubble-now{ display:inline-block; padding:6px 10px; border-radius:12px; background: var(--bubble); font-size:14px; }
+
+.pr-user{ display:flex; justify-content:flex-end; }
+.pr-bubble{ max-width:76%; padding:9px 14px; border-radius:16px; background: var(--bubble); font-size: var(--pr-body); line-height: var(--pr-body-lh); }
+.pr-div{ height:1px; background: var(--border-l1); margin:12px 0 6px; }
+.pr-turn{ padding:0; }
+.pr-think{ display:flex; align-items:center; gap:8px; height:26px; color: var(--fg-tertiary); font-size: var(--pr-meta); line-height: var(--pr-meta-lh); }
+.pr-think .pv{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color: var(--fg-caption); }
+.pr-tool{ display:flex; align-items:center; gap:9px; min-height:28px; color: var(--fg-tertiary); font-size: var(--pr-meta); line-height: var(--pr-meta-lh); }
+.pr-tool:hover{ color: var(--fg-primary); }
+.pr-tool .nm{ font-weight:500; color: var(--fg-secondary); }
+.pr-tool:hover .nm{ color: var(--fg-primary); }
+.pr-tool .pt{ font-family: var(--code); font-size: var(--pr-caption); color: var(--fg-caption); }
+.pr-prose p{ margin:0 0 10px; font-size: var(--pr-body); line-height: var(--pr-body-lh); }
+.pr-prose code{ font-family: var(--code); font-size: var(--pr-code); background: var(--code-bg); padding:1px 5px; border-radius:4px; }
+
+/* ---- 字号标尺 ---- */
+.scale{ border:1px solid var(--border-l2); border-radius:10px; overflow:hidden; }
+.scale table{ border-collapse:collapse; width:100%; }
+.scale th, .scale td{ text-align:left; padding:9px 14px; border-bottom:1px solid var(--border-l1); vertical-align:baseline; }
+.scale th{ font-size:12px; font-weight:600; color: var(--fg-caption); background: var(--bg-sidebar); }
+.scale td{ font-size:13px; color: var(--fg-secondary); }
+.scale tr:last-child td{ border-bottom:none; }
+.scale .num{ font-family: var(--code); font-size:12px; color: var(--fg-caption); white-space:nowrap; }
+.scale .chip{ display:inline-block; font-family: var(--code); font-size:12px; padding:1px 6px; border-radius:999px; }
+.chip.now{ background: rgba(242,90,90,.14); color: rgb(242,90,90); }
+.chip.pr{ background: var(--accent-tint); color: var(--accent); }
+.scale .used{ color: var(--fg-primary); }
+.dim{ color: var(--fg-caption); font-size:12px; }
+.arrow{ color: var(--fg-caption); padding:0 8px; }
+</style>
+</head>
+<body>
+	<div class="topbar">
+		<h1 style="margin:0; font-size:20px;">字号与观感对照</h1>
+		<span class="spacer"></span>
+		<button class="toggle" id="theme-toggle">浅色</button>
+	</div>
+	<p class="lede">
+		左边一栏用的是 <code>packages/web/src/style.css</code> 里**现在的真值**（10 / 11 / 11.5 / 12.5px），
+		右边一栏是提案的三档（12 / 13 / 14 / 15px）。两边内容一字不差。
+	</p>
+
+	<h2>左栏</h2>
+	<div class="pair">
+		<div class="panel">
+			<div class="cap"><b>现状</b><span class="tag now">232px · 行 32px · 圆角 8px</span>
+				<span class="dim">标题 14/1.6 · 次要行 11px · 分组标题 11.5px · 徽章 10px</span></div>
+			<div class="sb">
+				<div class="now-brand">
+					<span class="mark">M</span><span class="name">my-agent</span>
+					<span style="margin-left:auto; color:var(--fg-tertiary); font-size:11px;">已断开，重连中…</span>
+				</div>
+				<div class="now-new">＋ 新建会话</div>
+				<div class="now-head">工作区 <span style="margin-left:auto; font-weight:400;">⌕ ≡＋</span></div>
+				<div class="now-head" style="padding-left:8px;">
+					<span style="font-size:11px;">▸</span><span>rafflex</span><span class="now-badge">当前</span>
+				</div>
+				<div class="now-row on"><div class="body"><div class="line"><span class="title">介绍一下这个项目</span><span class="time">刚刚</span></div><span class="status">▍ 已打开 · 空闲</span></div></div>
+				<div class="now-row"><div class="body"><div class="line"><span class="title">项目结构走一遍</span><span class="time">4分钟</span></div></div></div>
+				<div class="now-row"><div class="body"><div class="line"><span class="title">新会话</span><span class="time">30分钟</span></div><span class="status">● 待审批</span></div></div>
+				<div class="now-row"><div class="body"><div class="line"><span class="title">上下文摘要那段</span><span class="time">1小时</span></div></div></div>
+				<button class="now-more">展开其余 1 个会话</button>
+				<div class="now-foot">⚙ 设置</div>
+			</div>
+		</div>
+
+		<div class="panel">
+			<div class="cap"><b>提案</b><span class="tag pr">264px · 行 32px · 圆角 12px</span>
+				<span class="dim">标题 14/20 · 次要行 13/18 · 分组标题 12/16 · 徽章 11/16</span></div>
+			<div class="pb">
+				<div class="pb-top">
+					<button class="pb-new">＋ <span>新建会话</span></button>
+					<button class="pb-icon" title="收起侧栏">▤</button>
+				</div>
+				<div class="pb-head"><h5>工作区</h5><span class="spacer"></span>
+					<button class="pb-icon" style="width:24px;height:24px;font-size:12px;">⌕</button>
+					<button class="pb-icon" style="width:24px;height:24px;font-size:12px;">≡</button>
+					<button class="pb-icon" style="width:24px;height:24px;font-size:12px;">＋</button>
+				</div>
+				<div class="pb-ws"><span style="color:var(--fg-caption)">▸</span><span style="color:var(--fg-caption)">📁</span><span class="nm">rafflex</span><span class="mk">当前</span></div>
+				<button class="pb-row on"><span class="slot"></span><span class="title">介绍一下这个项目</span><span class="time">刚刚</span></button>
+				<button class="pb-row" style="padding-left:22px;"><span class="slot"></span><span class="title">介绍一下这个项目（1）</span><span class="time">刚刚</span></button>
+				<button class="pb-row"><span class="slot"></span><span class="title">项目结构走一遍</span><span class="time">4分钟</span></button>
+				<button class="pb-row"><span class="slot"><span style="width:8px;height:8px;border-radius:50%;background:var(--warn);display:block;"></span></span><span class="title">新会话</span><span class="time">30分钟</span></button>
+				<button class="pb-row"><span class="slot"></span><span class="title">上下文摘要那段</span><span class="time">1小时</span></button>
+				<button class="pb-more">展开其余 1 个会话</button>
+				<div class="pb-foot">⚙ <span>设置</span><span class="spacer"></span><i></i></div>
+			</div>
+		</div>
+	</div>
+
+	<h2>会话里的一轮</h2>
+	<div class="pair">
+		<div class="panel">
+			<div class="cap"><b>现状</b><span class="tag now">角色行 + 正文里的 [调用 read]</span></div>
+			<div class="conv now">
+				<div style="display:flex;justify-content:flex-end;"><span class="bubble-now">你好</span></div>
+				<div class="now-role"><span class="av">智</span><span>智能体</span></div>
+				<div class="now-think">▾ 思考 &nbsp;你好，我能帮你做什么？我应该先看看有哪些工具。</div>
+				<div style="font-weight:600;">你好，我可以用的工具：</div>
+				<table style="border-collapse:collapse;width:100%;margin:8px 0;font-size:13px;">
+					<tr style="background:rgba(255,255,255,.05)"><th style="text-align:left;padding:4px 8px;border:1px solid var(--border-l2);">工具</th><th style="text-align:left;padding:4px 8px;border:1px solid var(--border-l2);">用途</th></tr>
+					<tr><td style="padding:4px 8px;border:1px solid var(--border-l2);"><span class="pill">read</span></td><td style="padding:4px 8px;border:1px solid var(--border-l2);">读取文件内容（带行号）</td></tr>
+					<tr><td style="padding:4px 8px;border:1px solid var(--border-l2);"><span class="pill">glob</span></td><td style="padding:4px 8px;border:1px solid var(--border-l2);">按模式查找文件</td></tr>
+					<tr><td style="padding:4px 8px;border:1px solid var(--border-l2);"><span class="pill">bash</span></td><td style="padding:4px 8px;border:1px solid var(--border-l2);">在工作区里跑命令</td></tr>
+				</table>
+				<div style="color:var(--fg-secondary);">我先看一下项目结构再介绍，<span class="pill">[调用 glob][调用 glob]</span></div>
+				<div style="color:var(--fg-secondary);">我看得更深一点，<span class="pill">[调用 read][调用 bash]</span></div>
+				<div class="dim" style="margin-top:10px;">— 关掉再打开这一段就没有了</div>
+			</div>
+		</div>
+
+		<div class="panel">
+			<div class="cap"><b>提案</b><span class="tag pr">只有一条分隔线 · 工具一行 · 可点开</span></div>
+			<div class="conv pr">
+				<div class="pr-user"><span class="pr-bubble">你好</span></div>
+				<div class="pr-div"></div>
+				<div class="pr-turn">
+					<div class="pr-think"><span style="color:var(--fg-caption)">✦</span><span>思考</span><span class="pv">你好，我能帮你做什么？我应该先看看有哪些工具。</span><span style="color:var(--fg-caption)">▸</span></div>
+					<div class="pr-tool"><span style="color:var(--fg-caption)">▸</span><span class="nm">Glob</span><span class="pt">**/*.ts</span></div>
+					<div class="pr-tool"><span style="color:var(--fg-caption)">▸</span><span class="nm">Read</span><span class="pt">README.md</span></div>
+					<div class="pr-tool"><span style="color:var(--fg-caption)">▸</span><span class="nm">Read</span><span class="pt">package.json</span></div>
+					<div class="pr-tool"><span style="color:var(--fg-caption)">▸</span><span class="nm">Bash</span><span class="pt">npm run check</span><span style="margin-left:auto;font-family:var(--code);font-size:var(--pr-caption);color:rgb(78,209,126)">0</span></div>
+					<div class="pr-prose" style="margin-top:8px;">
+						<p>这是一个带桌面 UI 的编码 agent。两个 vendored package 承担了重活：<code>packages/ai</code> 是传输层，<code>packages/agent</code> 是 agent 循环。</p>
+					</div>
+					<div class="dim" style="margin-top:10px;">— 关掉再打开，这一段还在</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<h2>字号的账</h2>
+	<div class="scale">
+		<table>
+			<tr><th>用在哪</th><th>现状</th><th></th><th>提案</th></tr>
+			<tr><td>会话行标题 · 按钮 · 输入框</td><td><span class="chip now">14 / 1.6</span></td><td class="arrow">→</td><td><span class="chip pr">14 / 20</span> <span class="used">行高给它一个定值，不再靠 1.6 去乘</span></td></tr>
+			<tr><td>分组标题 · 时间 · 状态行 · 工具行</td><td><span class="chip now">11 / 11.5</span> <span class="dim">三处三个值</span></td><td class="arrow">→</td><td><span class="chip pr">13 / 18</span></td></tr>
+			<tr><td>徽章「当前」· 键盘提示 · 步数</td><td><span class="chip now">10 / 11</span></td><td class="arrow">→</td><td><span class="chip pr">12 / 16</span></td></tr>
+			<tr><td>正文</td><td><span class="chip now">14 / 1.6</span></td><td class="arrow">→</td><td><span class="chip pr">15 / 25</span></td></tr>
+			<tr><td>代码 · 路径 · 状态行读数</td><td><span class="chip now">11 / 12.5</span></td><td class="arrow">→</td><td><span class="chip pr">13 / 20</span></td></tr>
+		</table>
+	</div>
+	<p class="dim" style="margin-top:12px; max-width:760px;">
+		现状里散着 <span class="k">10 / 10.5 / 11 / 11.5 / 12 / 12.5 / 13 / 14</span> 八个字号，而应用级设置里那个
+		「字号」只驱动其中一部分（<span class="k">--app-font-size</span>）。收成五档之后，那个设置才有可能真的
+		整棵树一起缩放。这一组的最终取值是 04 号票要拍的。
+	</p>
+
+<script>
+document.getElementById("theme-toggle").addEventListener("click", function () {
+	var dark = document.documentElement.dataset.theme === "dark";
+	document.documentElement.dataset.theme = dark ? "light" : "dark";
+	this.textContent = dark ? "深色" : "浅色";
+});
+</script>
+</body>
+</html>

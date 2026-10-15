@@ -1,7 +1,7 @@
 # 08 fork 的入口搬进左栏右键菜单
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 01, 02, 14
 
 ## Question
@@ -37,3 +37,40 @@ Blocked by: 01, 02, 14
 
 `npm run check` + `scripts/smoke-sidebar.ts` / `smoke-sessions.ts` 要绿。**先让断言红再修到绿**——
 新会话出现在列表里这条要有断言。
+
+## Comments
+
+- **claimed，做到一半暂停（等并行的 07/09/13 会话收尾）。** 已落地（红先绿后，`smoke-sidebar.ts` 全绿）：`menu.ts` 加 `openMenuAt`（指针定位 + 视口收拢）与 `MenuItem.danger`；`sidebar.ts` 拆掉 `drawDepth`/`session-fork-mark`/`data-depth`，`rowsOf` 留树、兄弟按 `createdAt` 排，`（N）` 由渲染拼在父行显示标题上（`标题（1）（2）（3）`、`标题（1）（1）` 有断言）；行上 `contextmenu` 开三项菜单；就地改名编辑净名、后缀自动拼回。**改名暂为本地覆盖**（`Sidebar.renames`），14 号落地后换 `POST /api/sessions/{id}/title`。第 7 条（拆 `forkButton`）已由并行会话的未提交改动完成。`SidebarHandlers.onForkSession/onDeleteSession` 暂为可选，main.ts 接线是剩余工作：fork（`entryId: null`）、删除、改名提交、`session_gone` 帧的消费。
+
+## Answer
+
+七条全部落地（14 号先解，见它的 Answer）。`npm run check` + `smoke-sidebar.ts` / `smoke-sessions.ts`
+及清单内其余 smoke 全绿；断言红先绿后，"新会话出现在列表里"有断言（第 10 段：先只有源行、带 fork 行
+重渲染后新行出现、其他行不重建）。
+
+1. **右键菜单**：`menu.ts` 加 `openMenuAt(x, y, items)`（指针定位、视口内收拢，测量在 append 之后）
+   与 `MenuItem.danger`；`sidebar.ts` 的 `openSessionMenu` 开三项——「派生新会话」（fork 图标，tooltip
+   「复制整份记录，从这条会话接着往下走」）/ 分隔线 / 「重命名」 / 「删除」（trash、danger 色）。
+2. **`（1）` 由渲染拼**：`rowsOf` 建树留下，兄弟按 `createdAt` 排，N 是同父行下的兄弟序号。**一条
+   修订**：改名真存储后 fork 的服务端标题不再恒等于源标题，所以 base 规则是「行自己的名字与父行
+   相同才继承父行显示标题（后缀堆叠：`标题（1）（1）`），不同了（被改过名）就以自己的名字为准」——
+   不然一个改过名的 fork 行会被显示回父行的名字。`标题（1）（2）（3）`、`标题（1）（1）`、改名后
+   `新名字（1）` 三种都有断言。
+3. **fork 行与普通行同长相**：`drawDepth` / `session-fork-mark` / `data-depth` 及其 CSS（含 rail 规则）
+   全部拆掉，`rowsOf` 建树保留。
+4. **服务端调用**：`forkSession(sessionId)` → `POST /api/sessions/{id}/forks { entryId: null }`，派生后
+   `openSession` 跟过去（main.ts 由票 09 的会话接好线，本票核对并保留）。
+5. **不自己插行**：行来自 `session_row` 帧。**改名同样不做本地先行**（修订后的第 5 条）：就地编辑
+   提交 `POST /api/sessions/{id}/title`（`api.renameSession`），行从随后的帧回来；smoke 断言"本行
+   没有自己改名字"。
+6. **触发**：行上 `contextmenu`，无常驻按钮、hover 也不出现。
+7. **拆 `forkButton`**：已随票 09 的会话落地（`TranscriptOptions` 现在只有 `onUserContext`）。
+
+**超出原票范围、经用户拍板加进来的：真删除。** 服务端一条龙——`SessionManager.remove(id)`（找到
+即删那一个文件）、`hub.remove`（忙会话拒绝：有 claim/在开/在跑/待审批 → 控制器 409；空闲则照 reap
+的次序 settle → observers → listeners → close，`closing` 槽跨整个删除过程防重开竞态；落地后重置
+`current`）、`projection.forget/onGone`、`DELETE /api/sessions/:id`、协议新成员
+`session_gone { sessionId }`（连接级帧，`mux.sendGone`）。客户端 `rows.remove` + `session_gone`
+消费；删的是正在读的会话时，本窗口释放 pane、回到空态（models/settings/reachable 保留）。
+**就地改名**：入口与编辑框在本票，提交到 14 号的端点，`onRenameSession` 接线；改的是正在读的会话时，
+服务端确认后把新名折进 snapshot，让头部标题立刻跟上。
