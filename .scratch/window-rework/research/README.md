@@ -56,6 +56,13 @@ node scripts/smoke-sidebar.ts                                           # 同一
   `FATAL ERROR: Ineffective mark-compacts near heap limit`。真 DOM 里摘下来的节点可以回收，这里也必须
   能——按 `id` 找就从页面根往下走。
 
+## 一处量具会**多报**的地方（05 号动手前知道）
+
+`transcript.render()` 里那句 `container.scrollTop = container.scrollHeight` 在浏览器里是**布局后**的
+读-写：`scrollHeight` 要重新量一次内容，所以它触发一次强制同步布局。**shim 没有布局**——`scrollHeight`
+就是个初始为 0 的普通属性，赋值跟读一个字段一样便宜。所以逐帧成本里那笔"强制布局"在这里**根本没被
+量到**，真实帧只会比这张表更贵，不会更便宜。
+
 ## PowerShell 写输出的坑
 
 本仓库的 shell 是 Windows PowerShell 5.1：`Get-Content` 按机器 ANSI 代码页**读**，`>` 重定向按
