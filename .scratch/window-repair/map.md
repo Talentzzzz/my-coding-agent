@@ -66,7 +66,10 @@ resolved**，本图接着它们往下走，但有两条是**重开**而不是新
 - `packages/desktop/main.cjs` **有未提交改动**：`+12 行、0 删除`，全部插在
   `const lifecycle = createShutdown({ app })` 之后——`app.disableHardwareAcceleration()`
   （`:39`）+ `appendSwitch("no-sandbox" | "in-process-gpu" | "disable-gpu-shader-disk-cache")`
-  （`:45-47`），外面裹着"这台机器"字样的注释。
+  （`:45-47`），外面裹着"这台机器"字样的注释。**（03 号已处理，此处是当时的快照：那 12 行从未
+  被提交，所以删掉它们不产生任何 diff——`git log -S no-sandbox -- packages/desktop/main.cjs` 为空。
+  03 号删掉后工作区回到 `HEAD` 字节。理由与恢复路径见
+  [ADR-0004](../../docs/adr/0004-shell-sandbox-switches-removed.md)。）**
 - 启动耗时实测：`import(boot.ts)` **415 ms**（Node 类型擦除整张 server+core+agent 图）+ `bootServer()`
   **12 ms** = 到 `loadURL` 427 ms；`npm run desktop` 每次还会先跑 `build:web`（实测 **1077 ms**）。
 - **端口不可能撞车**：`port: 0` 由 OS 分配（`main.cjs:88`、`boot.ts:133`），窗口加载的是
@@ -93,8 +96,11 @@ resolved**，本图接着它们往下走，但有两条是**重开**而不是新
   `npm run desktop` 开窗口。敲错命令的人看到的是"什么都没发生"。
 - **代理这条与上一张图的 Notes 相反**：本机这个 shell 里 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`
   **都是空的**，`curl localhost:8080` 不再被送去代理。上一张图那条坑可以不再当承重事实引用。
-- `npm run desktop:screenshot` 在本机必崩（GPU 进程），出图走
-  `.scratch/window-rework/research/shots.ts` 那套（bootServer + 本机 Chromium）。
+- ~~`npm run desktop:screenshot` 在本机必崩（GPU 进程），出图走
+  `.scratch/window-rework/research/shots.ts` 那套（bootServer + 本机 Chromium）。~~ **已过期（03 号实测，
+  2026-10-16）**：这条说的时候那 12 行开关还没加。03 号在**删开关之前与之后**各跑一次
+  `npm run desktop:screenshot`，两次都退出码 0、都写出 1280×820 的整窗截图；所以本机现在出图直接走
+  这条命令。`shots.ts` 那套仍然可用（它不依赖外壳）。
 - `smoke-api.ts` 与其他 smoke 不同：**它要一台已在跑的服务器**（默认 `127.0.0.1:8080`），空跑会在
   WebSocket 连接处报 "the mux connection failed"——那是没起服务器，不是回归。
 
@@ -154,7 +160,23 @@ resolved**，本图接着它们往下走，但有两条是**重开**而不是新
   意图的地方）、ADR 写**历史 + 恢复路径**，别把开关留成幽灵配置。**04/05 号的交接**：量具留了真窗口的
   帧时间与输入延迟，但**没有**真实流式回合、也**没有**硬件合成的对照（本机做不到）；那唯一一次
   SwiftShader 运行（16.6 ms ≈ 60 Hz）量的是 vsync 有无限住，**别当成"软件渲染慢 4 倍"**；`web_fetch`
-  在本 session 解析不了域名，所以**一手文档没读成正文**，03 号写 ADR 时要补。
+  在本 session 解析不了域名，所以**一手文档没读成正文**，03 号写 ADR 时要补（03 号补的是一条诚实的
+  限度声明：仍没读成正文，见 ADR-0004 的「证据的限度」；这一段是 02 号当时的快照）。
+- [03 落地最小开关组合](issues/03-land-the-switches.md)：按 02 的形状落地——四条开关与那段"这台机器"
+  的注释**删除**（`main.cjs` 里 `lifecycle` 与 `packageRoot` 的文档注释之间现在是空的），
+  `webPreferences.sandbox: true` **保留、不加注解**（开关一删，那个语义矛盾就不存在了，"死配置"这个
+  描述随之失效；删它等于顺手关掉渲染进程的沙箱，没人要求过）。理由、被否决的更便宜方案、没被推翻的
+  边界与**恢复路径**写进 **[ADR-0004](../../docs/adr/0004-shell-sandbox-switches-removed.md)**——
+  票面要的"两样记录"里，第二样落地成仓库正式 ADR，第一样（"12 行停在未提交状态"）由"删掉"解决，
+  因为一组已验证有效的规避留在工作区本身就是 bug。**这次提交里看不到 `main.cjs`，那不是漏做**：
+  那 12 行从未被提交（`git log -S no-sandbox -- packages/desktop/main.cjs` 为空），所以删除它们让
+  工作区回到 `HEAD` 字节、**不产生 diff**，证据只能是写下来的命令与结果。**本轮当面验了生产启动
+  路径**：`npm run desktop:screenshot` 在删之前与删之后**都**退出码 0、都写出 1280×820 的整窗截图
+  （截图没提交，`ui.png` 已还原）。
+  `npm run check` 退出 0，`smoke-desktop-close` / `smoke-desktop-observability` 全 ok；
+  `smoke:boot` 仍红且逐字不变（那是 10 号票）。`observability.cjs` 里那句拿 `no-sandbox` 举例的注释
+  一并改掉——它引用的两行已经不在了。**一手文档这一轮仍没读成正文**（`getaddrinfo ENOTFOUND`），
+  所以 ADR 里的开关语义全部落在本机实测上，这一点在 ADR 的「证据的限度」里明说。
 
 ## Not yet specified
 

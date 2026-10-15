@@ -260,11 +260,12 @@ function createObservability(options) {
 	 * Wire the failures that happen on their own, once the application is ready.
 	 *
 	 * Four signals, and they are not the same kind of news. A child process going away is a line and
-	 * nothing else: `no-sandbox` and `in-process-gpu` exist because children die on some machines, and
-	 * a line is what makes the next one diagnosable rather than mysterious — a dialog for a process
-	 * the user never asked for would be noise in front of the window they are using. A renderer going
-	 * away costs them that window, so it gets a report window of its own. An exception in the main
-	 * process is neither: the shell's work here is starting a server and drawing a window, and the
+	 * nothing else: a GPU or network child is a process the user never asked for, so a dialog in
+	 * front of the window they are using would be noise. A line is what makes the next death
+	 * diagnosable rather than mysterious — and such lines are how the switches this shell used to
+	 * carry were found, measured, and then dropped (ADR-0004). A renderer going away costs them that
+	 * window, so it gets a report window of its own. An exception in the main process is neither:
+	 * the shell's work here is starting a server and drawing a window, and the
 	 * window and the server are both someone else's children — so it is reported and the process is
 	 * left standing, rather than making a stray exception the end of a conversation the user is in the
 	 * middle of. A rejected promise nobody handled is the same news as a thrown error but arrives
