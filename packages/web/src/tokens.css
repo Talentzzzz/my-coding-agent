@@ -112,6 +112,23 @@
 	--dsw-sidebar-min: 208px;
 	--dsw-sidebar-max: 360px;
 
+	/*
+	 * The reading column's width axis.
+	 *
+	 * `--dsw-content-width` is the one runtime value: the handle (main.ts) computes it — the stored
+	 * preference, or the conversation column's own width minus a gutter at each side when the user
+	 * never dragged — and writes it here on every layout change, because the default is a formula
+	 * against the column's width and not a value this sheet could state. The min and cap are the
+	 * absolute ends the server clamps a stored preference against (`CONTENT_WIDTH_RANGE` in
+	 * core/config.ts); the two gutters are the resting and the tightest side room the formula
+	 * consumes. The value below is only what the page shows before that first write lands.
+	 */
+	--dsw-content-width: 46rem;
+	--dsw-content-min: 600px;
+	--dsw-content-cap: 1280px;
+	--dsw-content-gutter: 35px;
+	--dsw-content-gutter-tight: 20px;
+
 	/* Alias roles — light. */
 	--dsw-bg-base: var(--dsw-static-neutral-bluish-00);
 	--dsw-bg-layer-1: var(--dsw-static-neutral-bluish-00);

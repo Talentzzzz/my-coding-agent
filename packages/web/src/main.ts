@@ -193,6 +193,145 @@ function main(): void {
 	});
 	transcript.trackScroll();
 
+	/**
+	 * The drag handle on the reading column's left edge.
+	 *
+	 * One handle, and it controls the prose's maximum width — the decision 04 took and this window
+	 * never carried. The column is centred, so pushing the handle right narrows the text on both
+	 * sides at once: the direction the prototype settled after the user said the first one was
+	 * backwards. The width it moves is `--dsw-content-width`, and it is computed rather than looked
+	 * up, because its default is a formula against the conversation column's own width: column minus
+	 * a gutter at each side, ceiling the column minus the tight gutter, floor and absolute cap the
+	 * tokens (`--dsw-content-min/cap`) the stylesheet declares. The formula lives here, citing those
+	 * tokens — the same split the sidebar's handle makes, and for the same reason.
+	 *
+	 * Persistence follows the sidebar handle's two rules, which the reference implementation's match:
+	 * the preference saved is the one the drag produced, a press that never moved commits nothing —
+	 * an empty click must not overwrite a wider preference with whatever the current layout clamped
+	 * the display to — and the stored number is clamped to the current layout on every read, so a
+	 * smaller window presses the display down without destroying the choice. The server clamps the
+	 * stored preference to the absolute range (`CONTENT_WIDTH_RANGE` in `@my-agent/core/config.ts`);
+	 * the layout-relative ends are the window's alone, since only it knows the column's width.
+	 */
+	const contentResizer = element("div", "content-resizer", undefined, {
+		role: "separator",
+		"aria-orientation": "vertical",
+		"aria-label": "调整正文宽度",
+		tabindex: "0",
+	});
+	/** The keys turn the width in steps; the handle itself moves at half this rate, 2px of prose per 1px of pointer. */
+	const CONTENT_RESIZE_STEP = 16;
+	/**
+	 * The formula's constants, read from the same tokens the stylesheet declares.
+	 *
+	 * Not imported from the config module — it runs on Node, and the client must not pull that into
+	 * its bundle — so the tokens are read back, and the literals here are only what a stylesheet that
+	 * failed to load falls back to.
+	 */
+	function contentTokens(): { min: number; cap: number; gutter: number; gutterTight: number } {
+		const styles = getComputedStyle(document.documentElement);
+		const read = (name: string, fallback: number): number => {
+			const value = Number.parseFloat(styles.getPropertyValue(name));
+			return Number.isFinite(value) ? value : fallback;
+		};
+		return {
+			min: read("--dsw-content-min", 600),
+			cap: read("--dsw-content-cap", 1280),
+			gutter: read("--dsw-content-gutter", 35),
+			gutterTight: read("--dsw-content-gutter-tight", 20),
+		};
+	}
+	/**
+	 * The width to draw for a preference, under this layout.
+	 *
+	 * `undefined` means the user never dragged: the default is the column minus the resting gutter at
+	 * each side, and manufacturing a stored number for it would turn "never chose" into "chose the
+	 * default" — the same rule the sidebar's width follows. The result is clamped either way: the
+	 * floor is absolute, the ceiling the tighter of the cap and the column minus the tight gutter,
+	 * and a column too narrow for the floor lets the ceiling win, because on a narrow window the
+	 * prose must fill what is left rather than leave a gap the floor demands.
+	 */
+	function contentWidthFor(preference: number | undefined): number {
+		const { min, cap, gutter, gutterTight } = contentTokens();
+		const column = conversation.clientWidth;
+		const max = Math.min(cap, column - gutterTight * 2);
+		const wanted = preference ?? column - gutter * 2;
+		return Math.min(max, Math.max(min, Math.round(wanted)));
+	}
+	/** The width last written to the variable, so a recompute that answers the same number is skipped. */
+	let contentApplied: number | undefined;
+	function applyContentWidth(preference: number | undefined): void {
+		const width = contentWidthFor(preference);
+		if (width === contentApplied) return;
+		contentApplied = width;
+		document.documentElement.style.setProperty("--dsw-content-width", `${width}px`);
+	}
+	/** The width on screen right now: what was last written, or what would be. */
+	function contentWidthNow(): number {
+		return contentApplied ?? contentWidthFor(contentPref);
+	}
+	/**
+	 * The preference as the settings hold it, undefined while the user never dragged.
+	 *
+	 * Written when a settings snapshot arrives, read by the observer below on every layout change,
+	 * and by the drag itself only as the starting point.
+	 */
+	let contentPref: number | undefined;
+	// The default is a formula against the column's width, so anything that changes that width — the
+	// window's, or the sidebar's — re-asks the question. The observer is the one place that
+	// recomputation is scheduled from: a column resize is a resize, whichever handle caused it.
+	new ResizeObserver(() => applyContentWidth(contentPref)).observe(conversation);
+	let contentDrag: { x: number; width: number } | undefined;
+	contentResizer.addEventListener("pointerdown", (event) => {
+		event.preventDefault();
+		contentDrag = { x: event.clientX, width: contentWidthNow() };
+		contentResizer.setPointerCapture(event.pointerId);
+		contentResizer.classList.add("dragging");
+	});
+	contentResizer.addEventListener("pointermove", (event) => {
+		if (contentDrag === undefined) return;
+		// The column is centred, so one pixel of handle moves two pixels of prose — the factor the
+		// prototype settled on, and what keeps the handle under the pointer as it drags.
+		applyContentWidth(contentDrag.width - (event.clientX - contentDrag.x) * 2);
+	});
+	const endContentDrag = (): void => {
+		contentDrag = undefined;
+		contentResizer.classList.remove("dragging");
+	};
+	contentResizer.addEventListener("pointerup", (event) => {
+		// Measured against where the drag began, so a click that never moved saves nothing — the same
+		// guard the sidebar's handle puts between an empty press and the stored preference.
+		const moved = contentDrag !== undefined && event.clientX !== contentDrag.x;
+		endContentDrag();
+		if (moved) {
+			contentPref = contentWidthNow();
+			void saveSettings({ appearance: { contentWidth: contentPref } });
+		}
+	});
+	contentResizer.addEventListener("pointercancel", () => endContentDrag());
+	contentResizer.addEventListener("keydown", (event) => {
+		// Right narrows, left widens — the same direction a drag follows.
+		const step = event.key === "ArrowRight" ? -CONTENT_RESIZE_STEP : event.key === "ArrowLeft" ? CONTENT_RESIZE_STEP : 0;
+		if (step === 0) return;
+		event.preventDefault();
+		// Stored is what the draw clamped to, the same thing a drag commits: a keypress against a
+		// clamp this layout already enforces must not file a wider preference that only takes effect
+		// after the window grows.
+		applyContentWidth(contentWidthNow() + step);
+		contentPref = contentApplied;
+		void saveSettings({ appearance: { contentWidth: contentPref } });
+	});
+
+	/**
+	 * The transcript's wrapper: the grid row that flexes, and the handle's positioning context.
+	 *
+	 * The two live one layer apart on purpose — an absolutely positioned handle inside the scroll
+	 * container itself would scroll away with the content, while the handle belongs to the layout
+	 * the prose is read through, not to anything in it.
+	 */
+	const transcriptBody = element("div", "transcript-body");
+	transcriptBody.append(transcriptHost, contentResizer);
+
 	const banners = element("div", "banners");
 
 	const composerWrap = element("div", "composer-wrap");
@@ -281,7 +420,7 @@ function main(): void {
 	// The branch page sits where the transcript sits: one grid row that flexes, whichever of the two
 	// is on. Hiding is CSS's job (`body[data-pane]`), so the two pages trade places without any of
 	// the chrome around them re-flowing.
-	conversation.append(header, transcriptHost, branchView.element, banners, composerWrap, statusBar.element);
+	conversation.append(header, transcriptBody, branchView.element, banners, composerWrap, statusBar.element);
 
 	// ------------------------------------------------------------------ sidebar
 
@@ -631,6 +770,13 @@ function main(): void {
 		const previous = state;
 		state = next;
 
+		// A new settings snapshot may carry a content-width preference, and the reading column is the
+		// one thing that draws from it. Same road the sidebar's width rides into `applyAppearance`,
+		// except this one is layout-relative and so is painted here, beside the column it measures.
+		if (next.settings !== previous.settings) {
+			contentPref = next.settings?.appearance.contentWidth;
+			applyContentWidth(contentPref);
+		}
 		if (next.items !== previous.items || next.streaming !== previous.streaming) {
 			transcript.render(next.items, next.streaming);
 		}

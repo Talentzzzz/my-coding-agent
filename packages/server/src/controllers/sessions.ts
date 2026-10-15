@@ -1,6 +1,8 @@
 import {
 	type Agent,
+	clampContentWidth,
 	clampFontSize,
+	clampSidebarWidth,
 	coerceModel,
 	type ConfigPatch,
 	listModelOptions,
@@ -189,6 +191,15 @@ export class SystemController {
 			next.appearance = {
 				...(theme === undefined ? {} : { theme }),
 				...(appearance.fontSize === undefined ? {} : { fontSize: clampFontSize(appearance.fontSize) }),
+				// The two drag handles' widths. Each passes through its own clamp on the way in, so the
+				// absolute range is enforced here exactly as a hand-edited file would be — and a value
+				// that is not a number clamps to undefined, which drops the field rather than storing it.
+				...(appearance.sidebarWidth === undefined
+					? {}
+					: { sidebarWidth: clampSidebarWidth(appearance.sidebarWidth) }),
+				...(appearance.contentWidth === undefined
+					? {}
+					: { contentWidth: clampContentWidth(appearance.contentWidth) }),
 			};
 		}
 

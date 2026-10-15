@@ -16,7 +16,12 @@ export interface PanelSettingsPatch {
 	model?: string;
 	/** The global default active tool set, sent whole like the session-level endpoint's own. */
 	tools?: string[];
-	appearance?: { theme?: "system" | "light" | "dark"; fontSize?: number; sidebarWidth?: number };
+	appearance?: {
+		theme?: "system" | "light" | "dark";
+		fontSize?: number;
+		sidebarWidth?: number;
+		contentWidth?: number;
+	};
 	approval?: Record<string, boolean>;
 	/** Partial so one timeout can be committed without naming the other. */
 	bash?: Partial<BashSettings>;

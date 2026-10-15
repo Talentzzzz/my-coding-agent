@@ -53,6 +53,17 @@ export interface AppearanceSettings {
 	 * not be manufactured here.
 	 */
 	sidebarWidth?: number;
+	/**
+	 * The reading column's width in px, as its drag handle last left it. Absent until the user has
+	 * dragged once — the default is the conversation column's own width minus a gutter at each side,
+	 * computed at draw time, and a preference that was never expressed must not be manufactured here.
+	 *
+	 * The stored number is the *preference*, not the displayed width: the window clamps it to the
+	 * range the current layout allows on every read, so a smaller window presses the display down
+	 * without destroying the choice, which walks back in when the window grows again. The server's
+	 * part is only the absolute range, {@link CONTENT_WIDTH_RANGE}.
+	 */
+	contentWidth?: number;
 }
 
 export const DEFAULT_APPEARANCE: AppearanceSettings = { theme: "dark", fontSize: 15 };
@@ -68,6 +79,15 @@ export const FONT_SIZE_RANGE = { min: 12, max: 20 } as const;
  * every resize the user could see and re-apply itself on the next boot.
  */
 export const SIDEBAR_WIDTH_RANGE = { min: 208, max: 360 } as const;
+
+/**
+ * The absolute range the reading column's width can occupy, shared by the parser and the client.
+ *
+ * The layout-relative ends — the conversation column minus its gutters — are the client's formula,
+ * because they depend on a width only the window knows; what the server clamps a stored preference
+ * against is this pair, the same split the sidebar's range makes.
+ */
+export const CONTENT_WIDTH_RANGE = { min: 600, max: 1280 } as const;
 
 /**
  * How long the `bash` tool lets one command run.
@@ -210,12 +230,14 @@ function appearanceOr(value: unknown): AppearanceSettings {
 	const record = isRecord(value) ? value : {};
 	const theme = record.theme;
 	const sidebarWidth = clampSidebarWidth(record.sidebarWidth);
+	const contentWidth = clampContentWidth(record.contentWidth);
 	return {
 		theme: theme === "light" || theme === "dark" || theme === "system" ? theme : DEFAULT_APPEARANCE.theme,
 		fontSize: clampFontSize(record.fontSize),
 		// Optional, so an appearance never dragged keeps no field: the default width is the
 		// stylesheet's, and writing one here would turn "never chose" into "chose the default".
 		...(sidebarWidth === undefined ? {} : { sidebarWidth }),
+		...(contentWidth === undefined ? {} : { contentWidth }),
 	};
 }
 
@@ -240,6 +262,18 @@ export function clampFontSize(value: unknown): number {
 export function clampSidebarWidth(value: unknown): number | undefined {
 	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
 	return Math.min(SIDEBAR_WIDTH_RANGE.max, Math.max(SIDEBAR_WIDTH_RANGE.min, Math.round(value)));
+}
+
+/**
+ * The reading column's width within its absolute range, or undefined for "never dragged".
+ *
+ * Clamped rather than rejected, for the same reason the sidebar's width is: a hand-edited file, or a
+ * preference left outside the range by an older build, is a number to pull back inside — not a
+ * reason to forget it.
+ */
+export function clampContentWidth(value: unknown): number | undefined {
+	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+	return Math.min(CONTENT_WIDTH_RANGE.max, Math.max(CONTENT_WIDTH_RANGE.min, Math.round(value)));
 }
 
 /** The two queue modes pi-agent-core understands; anything else keeps the default. */

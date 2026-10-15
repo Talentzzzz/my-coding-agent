@@ -2,10 +2,12 @@ export { Agent, lastAssistantText, type AgentConfig, type AgentSessionEvent, typ
 export {
 	AGENT_HOME,
 	APP_NAME,
+	clampContentWidth,
 	clampFontSize,
 	clampSidebarWidth,
 	DEFAULT_APPEARANCE,
 	DEFAULT_SETTINGS,
+	CONTENT_WIDTH_RANGE,
 	FONT_SIZE_RANGE,
 	mergeSettings,
 	PROJECT_DIR_NAME,

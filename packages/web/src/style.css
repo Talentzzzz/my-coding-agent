@@ -557,6 +557,45 @@ body {
 	outline-offset: -2px;
 }
 
+/*
+ * The drag handle on the reading column's left edge.
+ *
+ * Not a column of the grid — an absolutely positioned strip inside the transcript's own wrapper,
+ * centred on the edge the prose starts at: half the leftover space is where the reading column
+ * begins, and the handle rides that edge as the width moves. Its width is a hit area; the strip the
+ * user sees is drawn by `::after`, the same grammar the sidebar's handle speaks, so the two read as
+ * one family of affordances.
+ */
+.content-resizer {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	z-index: 6;
+	width: 10px;
+	left: calc((100% - var(--dsw-content-width)) / 2 - 5px);
+	cursor: col-resize;
+	touch-action: none;
+}
+
+.content-resizer::after {
+	content: "";
+	position: absolute;
+	inset: 0 4px;
+	border-radius: 2px;
+	background: transparent;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.content-resizer:hover::after,
+.content-resizer.dragging::after {
+	background: var(--dsw-border-l3);
+}
+
+.content-resizer:focus-visible {
+	outline: 2px solid var(--dsw-state-business);
+	outline-offset: -2px;
+}
+
 /* ---------------------------------------------------------------- app region */
 
 .conversation {
@@ -833,10 +872,32 @@ input:focus-visible {
 	padding: 22px 0 8px;
 }
 
-/* The reading column: wide enough for code, narrow enough to read prose. */
+/*
+ * The transcript's wrapper: the grid row that flexes, and the positioning context the reading
+ * column's handle hangs off. The scroll itself is the child's job — an absolutely positioned handle
+ * inside a scroll container would scroll away with the content, so the two live one layer apart.
+ */
+.transcript-body {
+	position: relative;
+	min-width: 0;
+	min-height: 0;
+}
+
+.transcript-body .transcript {
+	height: 100%;
+}
+
+/*
+ * The reading column: wide enough for code, narrow enough to read prose.
+ *
+ * The width is the one axis the handle moves — `--dsw-content-width`, computed at runtime from the
+ * conversation column and the stored preference. The fixed header above stays whole-column wide and
+ * deliberately does not consume this variable: the top of the session is where the session is read
+ * from, not part of the prose.
+ */
 .transcript > * {
 	width: 100%;
-	max-width: 46rem;
+	max-width: var(--dsw-content-width);
 	margin-inline: auto;
 	padding-inline: 24px;
 }
@@ -1457,7 +1518,7 @@ input:focus-visible {
  * all go with it; the page is the tree, the summary line, and the fixed header's tools row, and
  * that is all. The branch view occupies the same flexing grid row the transcript does.
  */
-body[data-pane="branch"] .transcript,
+body[data-pane="branch"] .transcript-body,
 body[data-pane="branch"] .banners,
 body[data-pane="branch"] .composer-wrap,
 body[data-pane="branch"] .status-bar {
@@ -1657,7 +1718,7 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 .banners {
-	max-width: 46rem;
+	max-width: var(--dsw-content-width);
 	margin-inline: auto;
 	padding: 0 24px 8px;
 }
@@ -1889,7 +1950,7 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 .composer-wrap {
-	max-width: 46rem;
+	max-width: var(--dsw-content-width);
 	width: 100%;
 	margin-inline: auto;
 	padding: 0 24px 20px;
@@ -2077,7 +2138,9 @@ body:not([data-pane="branch"]) .branch-view {
  * divided three ways, the figures sit where the composer above them is read from.
  *
  * The line is a little narrower than the composer it sits under, so the three figures read as one
- * cluster about the middle rather than as a row pinned to the composer's two corners.
+ * cluster about the middle rather than as a row pinned to the composer's two corners. That gap is
+ * stated as a difference, not a second width, so the relationship survives the reading column
+ * handle: however wide the prose is dragged, the line stays one step narrower.
  *
  * Deliberately not in the header: the header is where the conversation starts, and a figure that
  * moves on every turn would pull the eye to it. Down here it is read when it is being looked for.
@@ -2086,7 +2149,7 @@ body:not([data-pane="branch"]) .branch-view {
 	display: flex;
 	align-items: center;
 	gap: 10px;
-	max-width: 40rem;
+	max-width: calc(var(--dsw-content-width) - 6rem);
 	width: 100%;
 	margin-inline: auto;
 	padding: 0 24px 10px;
