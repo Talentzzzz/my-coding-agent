@@ -891,6 +891,10 @@ input:focus-visible {
  * A user message is a bubble against the right margin; the agent's work runs the full width of the
  * column. The asymmetry is the point: one is what was asked and is already known, the other is what
  * is being read.
+ *
+ * The divider under the bubble is the seam between rounds — the one mark a turn carries (01 ⑥: no
+ * role line, no per-turn dot, just this). It hangs off the user turn itself rather than standing
+ * between turns, so the transcript's reconcile — which places one node per item — stays untouched.
  */
 .turn[data-role="user"] {
 	display: flex;
@@ -898,29 +902,12 @@ input:focus-visible {
 	align-items: flex-end;
 }
 
-.turn-role {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	margin-bottom: 6px;
-	color: var(--dsw-label-caption);
-	font-size: var(--dsw-fs-caption);
-	line-height: var(--dsw-lh-caption);
-	font-weight: 600;
-}
-
-.turn-role .avatar {
-	display: grid;
-	place-items: center;
-	width: 20px;
-	height: 20px;
-	border-radius: 50%;
-	background: var(--dsw-bg-layer-2);
-	border: 1px solid var(--dsw-border-l1);
-	font-size: var(--dsw-fs-caption);
-	line-height: var(--dsw-lh-caption);
-	font-weight: 600;
-	color: var(--dsw-label-secondary);
+.turn[data-role="user"]::after {
+	content: "";
+	align-self: stretch;
+	height: 1px;
+	margin-top: 4px;
+	background: var(--dsw-border-l1);
 }
 
 .turn-body {
@@ -1243,23 +1230,30 @@ input:focus-visible {
 	margin-bottom: 20px;
 }
 
+/*
+ * One tool call, read as a line (01 ④).
+ *
+ * The call has no box: a run of steps is a column of quiet lines, each `Name  path`, weakly
+ * coloured until hover lifts the line. The chevron exists to promise and mark expansion, so it
+ * appears on hover and stays while open; the running dot is the one thing on the line that moves.
+ * Expanding reveals the content as an indented block under the line — the indent is the summary's
+ * own leading (chevron 12px + gap 10px), so the block reads as the line's continuation.
+ */
 .tool {
-	border: 1px solid var(--dsw-border-l2);
-	border-radius: var(--dsw-radius-sm);
-	background: var(--dsw-bg-layer-1);
-	overflow: hidden;
+	background: transparent;
 }
 
 .tool > summary {
 	display: flex;
 	align-items: center;
 	gap: 10px;
-	min-height: 36px;
-	padding: 6px 12px;
+	min-height: 28px;
 	cursor: pointer;
 	list-style: none;
+	color: var(--dsw-label-tertiary);
 	font-size: var(--dsw-fs-meta);
 	line-height: var(--dsw-lh-meta);
+	transition: color var(--dsw-duration-fast) var(--dsw-ease);
 }
 
 .tool > summary::-webkit-details-marker {
@@ -1267,63 +1261,82 @@ input:focus-visible {
 }
 
 .tool > summary:hover {
-	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
 }
 
 .tool-chevron {
 	flex: none;
 	width: 12px;
 	color: var(--dsw-label-caption);
-	transition: transform var(--dsw-duration-fast) var(--dsw-ease);
+	opacity: 0;
+	transition:
+		opacity var(--dsw-duration-fast) var(--dsw-ease),
+		transform var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.tool > summary:hover .tool-chevron,
+.tool[open] .tool-chevron {
+	opacity: 1;
 }
 
 .tool[open] .tool-chevron {
 	transform: rotate(90deg);
 }
 
-/* The running dot is the only thing on the card that moves, so a glance finds the live call. */
-.tool-status {
+/* The running dot rides the line's right end; a running call never carries a diffstat, so the two
+   auto margins never share a line. */
+.tool-spin {
 	flex: none;
-	width: 7px;
-	height: 7px;
+	width: 8px;
+	height: 8px;
+	margin-left: auto;
 	border-radius: 50%;
-	background: var(--dsw-state-success);
-}
-
-.tool.running .tool-status {
 	background: var(--dsw-state-warn);
 	animation: pulse 1.2s var(--dsw-ease) infinite;
 }
 
-.tool.error .tool-status {
-	background: var(--dsw-state-error);
-}
-
 .tool-name {
 	flex: none;
-	color: var(--dsw-label-primary);
-	font-family: var(--dsw-font-mono);
-	font-size: var(--dsw-fs-code);
-	line-height: var(--dsw-lh-code);
+	color: var(--dsw-label-secondary);
 	font-weight: 500;
 }
 
-.tool-preview {
+.tool > summary:hover .tool-name {
+	color: var(--dsw-label-primary);
+}
+
+.tool.error .tool-name {
+	color: var(--dsw-state-error);
+}
+
+.tool-path {
+	flex: 0 1 auto;
 	min-width: 0;
-	flex: 1;
-	color: var(--dsw-label-tertiary);
+	color: var(--dsw-label-caption);
 	font-family: var(--dsw-font-mono);
-	font-size: var(--dsw-fs-code);
-	line-height: var(--dsw-lh-code);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
 
+/* The diffstat sits at the line's far end, a reading about the change rather than part of the call. */
+.tool > summary .diff-stat {
+	margin-left: auto;
+}
+
+/* Expanded content is one indented block under the line, and both bodies share the box: the indent
+   is the summary's own leading (chevron 12px + gap 10px), stated once for the two of them. */
+.tool-output,
+.tool > .diff {
+	margin: 4px 0 8px 22px;
+	border: 1px solid var(--dsw-border-l1);
+	border-radius: var(--dsw-radius-sm);
+}
+
 .tool-output {
-	margin: 0;
 	padding: 10px 12px;
-	border-top: 1px solid var(--dsw-border-l1);
 	background: var(--dsw-code-block);
 	color: var(--dsw-label-secondary);
 	font-family: var(--dsw-font-mono);
@@ -1733,11 +1746,12 @@ body:not([data-pane="branch"]) .branch-view {
 /* ------------------------------------------------------------------ composer */
 
 /*
- * The hero row: the workspace chip, alone on its line above the input card, and only while the
- * transcript is empty. It is the picker's face — where the *next* new session will land — and a
- * future-tense control has no business on screen once there is a present to read instead.
+ * The composer head: the workspace chip on its own line above the input card, leftmost — where a
+ * session starts is where "where the next one starts" belongs (01 ⑦). The chip is permanent here:
+ * its choice never rewrites the session on screen, and it is placed by the input it sits over
+ * rather than by what the transcript says, so it needs no phase to come and go with.
  */
-.hero-row {
+.composer-head {
 	display: flex;
 	align-items: center;
 	padding: 0 4px 6px;
@@ -1919,15 +1933,12 @@ body:not([data-pane="branch"]) .branch-view {
 	font: inherit;
 	/* The body tier, not the title tier the small inputs wear: this is the user's own prose — the
 	   text that becomes the next message bubble — so it rides the same axis the transcript reads
-	   at, and someone enlarging the window's text enlarges what they type with it. */
+	   at, and someone enlarging the window's text enlarges what they type with it. (05's call; 07
+	   left it standing.) */
 	font-size: var(--dsw-fs-body);
 	line-height: var(--dsw-lh-body);
 	resize: none;
 	outline: none;
-}
-
-.composer textarea::placeholder {
-	color: var(--dsw-label-caption);
 }
 
 .composer-bar {
@@ -1940,14 +1951,18 @@ body:not([data-pane="branch"]) .branch-view {
  * The model seat: which row answers, and how hard it is asked to think.
  *
  * On the bar rather than in the settings panel because it follows the session — it is read while
- * working and changed mid-conversation, so it has to be where the writing happens. Both selects are
- * deliberately quiet: a control read on every glance should not compete with the answer above it.
+ * working and changed mid-conversation, so it has to be where the writing happens — and on the
+ * bar's right end because that is where 01 ④ put it: "选模型的放在输入框右边", just left of the
+ * send button. The bar carries no hint lines, so the auto margin is what pins the seat there. Both
+ * selects are deliberately quiet: a control read on every glance should not compete with the answer
+ * above it.
  */
 .composer-seat {
 	display: flex;
 	align-items: center;
 	gap: 4px;
 	min-width: 0;
+	margin-left: auto;
 }
 
 .composer-select {
@@ -1974,7 +1989,7 @@ body:not([data-pane="branch"]) .branch-view {
 	outline: none;
 }
 
-/* The session-level settings entry: one quiet gear at the bar's left end, same grammar as the seat. */
+/* The session-level settings entry: one quiet gear leading the seat, same grammar as the selects. */
 .composer-gear {
 	width: 26px;
 	height: 26px;
@@ -1983,17 +1998,6 @@ body:not([data-pane="branch"]) .branch-view {
 .composer-gear svg {
 	width: 15px;
 	height: 15px;
-}
-
-.composer-hint {
-	min-width: 0;
-	flex: 1;
-	color: var(--dsw-label-caption);
-	font-size: var(--dsw-fs-caption);
-	line-height: var(--dsw-lh-caption);
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
 }
 
 .button {

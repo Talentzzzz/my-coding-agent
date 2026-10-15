@@ -30,11 +30,13 @@ export interface ComposerSelection {
  * The box grows with its content up to a cap. A prompt is often several lines — a stack trace, a
  * list of files — and a box that scrolls after two of them hides the thing being written.
  *
- * The model seat sits on the bar rather than in the settings panel because it is the one control that
- * moves with the session: which model answers, and how hard it is asked to think, are chosen per
- * conversation and often changed inside one. Both halves are held by the window until a message is
- * sent with them — nothing here reaches the server until then — so the two selects are drawn from
- * {@link setSelection} and their changes are reported as plain choices.
+ * There are no hint lines and no placeholder: the two lines of instruction the bar used to carry
+ * were chrome the reader had already learned (01 ④), and the seat that names the model sits on the
+ * bar's right end for the same reason it sits on the bar at all — which model answers, and how hard
+ * it is asked to think, are chosen per conversation and often changed inside one. Both halves are
+ * held by the window until a message is sent with them — nothing here reaches the server until
+ * then — so the two selects are drawn from {@link setSelection} and their changes are reported as
+ * plain choices.
  */
 export class Composer {
 	readonly element: HTMLFormElement;
@@ -42,7 +44,6 @@ export class Composer {
 	private readonly send: HTMLButtonElement;
 	private readonly stop: HTMLButtonElement;
 	private readonly queue: HTMLElement;
-	private readonly hint: HTMLElement;
 	private readonly modelSelect: HTMLSelectElement;
 	private readonly levelSelect: HTMLSelectElement;
 	private modelSignature = "";
@@ -56,12 +57,10 @@ export class Composer {
 		this.textarea = element("textarea", undefined, undefined, {
 			rows: 1,
 			spellcheck: false,
-			placeholder: "描述要改的地方、要修的 bug，或要解释的内容…",
 			"aria-label": "消息",
 		});
 
 		const bar = element("div", "composer-bar");
-		this.hint = element("div", "composer-hint", "Enter 发送 · Shift+Enter 换行");
 		this.queue = element("span", "composer-queued");
 		this.queue.hidden = true;
 
@@ -71,8 +70,9 @@ export class Composer {
 		this.levelSelect.addEventListener("change", () => handlers.onSelectLevel(this.levelSelect.value));
 
 		const seat = element("div", "composer-seat");
-		// The session's own settings sit at the bar's left end: they belong to the conversation the way
-		// the model seat does, and the app-level ones stay behind the sidebar's one button.
+		// The session's own settings lead the seat: they belong to the conversation the way the model
+		// seat does, and the app-level ones stay behind the sidebar's one button. The whole seat rides
+		// the bar's right end, the model picking just left of the send button.
 		const sessionSettings = iconButton("gear", "会话设置", () => handlers.onOpenSessionSettings(), "icon-button composer-gear");
 		seat.append(sessionSettings, this.modelSelect, this.levelSelect);
 
@@ -83,7 +83,7 @@ export class Composer {
 		this.send = element("button", "button primary", undefined, { type: "submit" });
 		this.send.append(element("span", undefined, "发送"), icon("send"));
 
-		bar.append(seat, this.hint, this.queue, this.stop, this.send);
+		bar.append(seat, this.queue, this.stop, this.send);
 		this.element.append(this.textarea, bar);
 
 		this.element.addEventListener("submit", (event) => {
@@ -126,9 +126,6 @@ export class Composer {
 		this.streaming = streaming;
 		this.stop.hidden = !streaming;
 		this.send.firstElementChild!.textContent = streaming ? "排队" : "发送";
-		this.hint.textContent = streaming
-			? "Enter 排队 · Ctrl+Enter 插话 · Esc 停止"
-			: "Enter 发送 · Shift+Enter 换行";
 		this.syncDisabled();
 	}
 

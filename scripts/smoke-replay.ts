@@ -96,13 +96,20 @@ check("with the arguments it was made with", JSON.stringify(failedCard?.args) ==
 check("the result survived the reopen", failedCard?.output === "File not found: notes.txt", JSON.stringify(failedCard?.output));
 check("and its error flag", failedCard?.isError === true, String(failedCard?.isError));
 check("a settled snapshot settles its card", failedCard?.running === false, String(failedCard?.running));
-const callIndex = failed.findIndex((item) => item.kind === "message" && item.role === "assistant" && item.id === "assistant:2000");
+// The calling message itself has no body — 07 took `[调用 name]` out of the prose path, and a
+// message that is only calls has nothing to say — so the group's lower neighbour is the question.
+const userIndex = failed.findIndex((item) => item.kind === "message" && item.role === "user");
 const answerIndex = failed.findIndex((item) => item.kind === "message" && item.role === "assistant" && item.id === "assistant:4000");
 const groupIndex = failed.indexOf(failedGroups[0]!);
 check(
-	"the group sits between the call and the answer",
-	callIndex !== -1 && answerIndex !== -1 && callIndex < groupIndex && groupIndex < answerIndex,
-	`call=${callIndex} group=${groupIndex} answer=${answerIndex}`,
+	"the group sits between the question and the answer",
+	userIndex !== -1 && answerIndex !== -1 && userIndex < groupIndex && groupIndex < answerIndex,
+	`user=${userIndex} group=${groupIndex} answer=${answerIndex}`,
+);
+check(
+	"the call-only message left no body behind",
+	!failed.some((item) => item.kind === "message" && item.id === "assistant:2000"),
+	JSON.stringify(failed.map((item) => (item.kind === "message" ? item.id : item.kind))),
 );
 
 process.stdout.write("a write's diff survives the reopen\n");

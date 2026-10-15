@@ -72,6 +72,16 @@ token 审计会拒绝一个被引用却从未定义的 `--dsw-*` 名字；改完
 
 <!-- 关掉的 ticket 依次列在这里：一行要点 + 指向该 ticket 的链接 -->
 
+- [07 会话：圆点、分隔线、工具一行](issues/07-transcript.md)：五条全落（`packages/web`）。
+  角色行连 `labelFor`/`initialFor` 整个拆掉、不留替代物，用户气泡下的细分隔线挂在回合自己的
+  `::after` 上（reconcile 一行没改）；10 号留给 07 的 `contentToText` 缝如约收掉——正文路径加
+  `withoutToolCalls`，call-only 消息从此没有正文 item，`contentToText` 本体与三处工具输出消费
+  不动；工具组照原型读作一行 `Name path`（无边框盒、hover 提亮、chev hover 才出现、running
+  脉冲点在行尾、diffstat 钉行尾、展开内容缩进 22px，认不得的参数只显名字）；工作目录芯片常驻
+  composer 卡上方最左（hero 行的隐藏逻辑删除），模型选择器整座推右下，两行提示字删掉，
+  textarea 字号尊重 05 已拍的 body 档；状态行核对后零改动。smoke-replay 的位置断言改判为
+  「组夹在问题与回答之间」并钉住 call-only 不留正文。出图 `research/shots-transcript.ts` 前后
+  各两张（整窗 + 输入框特写）。出图顺带撞出 item 身份 `role:timestamp` 同毫秒碰撞的边角，未修。
 - [14 改名的持久化：rename entry 与标题端点](issues/14-session-rename-server.md)：**改名是一条
   `{type:"rename"}` entry**（header 不动、version 维持 3，未知 kind 原样带过免费兼容），
   **文件序最后一条赢、与分支无关**（左栏一行是一个会话，不是一条走法）；活会话与文件扫描两条读取

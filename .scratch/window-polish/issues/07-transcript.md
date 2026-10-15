@@ -1,7 +1,7 @@
 # 07 会话：圆点、分隔线、工具一行
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 01, 04
 
 ## Question
@@ -37,3 +37,57 @@ Blocked by: 01, 04
 
 `npm run check` + `scripts/smoke-stream.ts` / `smoke-tools.ts` 要绿。**答案里要看图**：
 用 `.scratch/window-rework/research/shots.ts` 那套出前后两张，放进 `../research/`。
+
+## Answer
+
+五条全落，全部在 `packages/web` + 一处 smoke 改判，core 未动。出图
+`research/shots-transcript.ts`（bootServer + 假传输 + 本机 Chromium，09 号已证实的路），
+前后各两张：`shot-transcript-{before,after}.png`（整窗一轮对话）、
+`shot-composer-{before,after}.png`（输入框特写）。
+
+1. **角色行整个没了，也不留替代物。** `createTurn` 里 `turn-role`（avatar + role-name）删掉，
+   非用户回合与用户回合只剩同一个 `section + body`；`labelFor` / `initialFor` 两个函数与
+   `.turn-role` / `.avatar` 两条 CSS 一并清掉（确认过分支侧用的是 `BranchWay.label`，与这对函数
+   无关，没删错）。轮与轮之间唯一的标记是**用户气泡下那条细分隔线**——它挂在用户回合自己的
+   `::after` 上，而不是作为独立元素插在回合之间，所以 transcript 按 item 摆位的 reconcile
+   一行没改。前图里调用消息与回答各有一行「智 智能体」，后图只剩气泡、分隔线、内容。
+
+2. **正文里不再有 `[调用 read]`。** 10 号留给 07 的那一条如约收掉：`upsertMessage` 的正文路径
+   加了 `withoutToolCalls` 过滤，工具调用块不再折成 `[调用 name]` 拼进 `text`——调用有自己的
+   item（工具组，流式与重放共用同一个 `upsertTool` 造卡），一条只有调用的消息从此**没有正文**，
+   连同 item 一起不出现。`contentToText` 本体一字未动：票面点名的三处工具输出消费
+   （`tool_execution_update` 的 `partialResult`、`tool_execution_end` 的 `result`、重放的
+   `toolResult`）喂进来的都是工具结果内容，其中没有调用块，正文专用的过滤不值得在工具路径上
+   再走一遍。`smoke-replay.ts` 的位置断言随票改判：原来钉「组夹在调用消息与回答之间」，现在
+   调用消息没有 item，改钉「组夹在**问题**与回答之间」，外加一条「call-only 消息不留正文」。
+
+3. **工具组读作一行。** 照原型重写：卡片没有边框盒了，一行 `Read  README.md`——名字在前
+   （500 重、secondary 色）、简短参数在后（mono、caption 档、弱描色），整行 tertiary 色、
+   hover 才提亮到 primary；chevron 平时透明，hover 出现、open 时驻留并转向。running 用行尾一个
+   琥珀脉冲点（运行中的卡不可能带 diffstat，两个 auto margin 不同时上同一条线）；diffstat 钉在
+   行尾；错误卡的名字直接上错误色，展开逻辑照旧。**settled 卡不再有状态点**：原型的一行读法里
+   没有它的位置——运行中由行尾脉冲点说话、错误由名字的颜色说话，一个恒绿的点在一行里什么都
+   不说（评审指出答案漏了交代这条取舍，补上）。展开后的内容（`tool-output` 与 `.diff`）是
+   行下的缩进块，缩进 22px = chevron 12 + gap 10，读作这一行的延续。
+   **参数里没有可用路径时显示工具名 alone**——`previewOf` 认不得的参数不造占位符，展开里
+   自然有全部内容。
+
+4. **输入框。** ① 工作目录芯片从「空会话才显示的 hero 行」改为**常驻** composer 卡上方最左：
+   `hero-row` 更名 `composer-head`，按 items 是否为空隐藏它的那段 render 逻辑整块删除——它的
+   位置由「它盖着的输入框」决定，不由 transcript 的状态决定，01 ⑦ 的语义（`POST /api/sessions`
+   的 cwd、新会话落点、侧栏「当前」三处同源）原样没动。② 模型选择器连同思考档位与会话设置的
+   齿轮整座推到**右下角**（seat `margin-left: auto`），发送键在最右。③ 两行提示字删掉：
+   textarea 的 placeholder 属性与 `.composer-hint` 元素（连同 `setStreaming` 里换提示文案的
+   分支）一并清除。④ 字号：05 已经拍过 textarea 骑 **body 档**（15/25，滑杆值直发），07 不推翻。
+
+5. **状态行零改动。** 核对过 `statusbar.ts` 本就只渲染 `total` / `cache` / `context` 三个字段，
+   一行没动。
+
+**验证**：`npm run check` 绿（token 审计 122 定义 / 100 引用）；`smoke-replay` / `smoke-stream` /
+`smoke-tools` / `smoke-sessions` / `smoke-models` / `smoke-mux` 全绿。`smoke-api` 在干净 HEAD 上
+也同样失败（「the mux connection failed」，与本票无关，先行存在，值得单独查）。
+
+**出图顺带撞出一个未修的边角**：transcript 的消息 item 以 `role:timestamp` 为身份，而
+`fakeAssistantMessage` 的时间戳默认取 `Date.now()`——两条 scripted 回答落在同一毫秒时重放会合成
+一个 item（出图脚本已改为显式时间戳绕开）。真实路径里两次消息隔着一整轮工具执行，撞不撞得到
+不好说；要是哪天 transcript 里两条消息粘成一条，先查这里。

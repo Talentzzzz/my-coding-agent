@@ -70,7 +70,7 @@ function main(): void {
 	/**
 	 * The workspace picker's own choice, held by the window and never by the server.
 	 *
-	 * Three controls read it and nothing else does: the hero chip that displays it, the new-session
+	 * Three controls read it and nothing else does: the composer chip that displays it, the new-session
 	 * button that creates into it, and the sidebar's "当前" mark that names it. Empty means "no
 	 * explicit choice", and the answer is then the active session's workspace — so the mark can never
 	 * contradict the conversation on screen — or the server's root when there is no session. Opening a
@@ -208,8 +208,8 @@ function main(): void {
 	 */
 	const approvalSeat = element("div", "approval-seat");
 	approvalSeat.hidden = true;
-	/** The hero row: the workspace chip, rendered only while there is nothing to read. */
-	const heroRow = element("div", "hero-row");
+	/** The composer head: the workspace chip on the row above the input card, leftmost. */
+	const composerHead = element("div", "composer-head");
 	const composer = new Composer({
 		onSubmit: (text, behavior) => void prompt(text, behavior),
 		onAbort: () => void abort(),
@@ -231,17 +231,18 @@ function main(): void {
 			});
 		},
 	});
-	composerWrap.append(errorBar, approvalSeat, heroRow, composer.element);
+	composerWrap.append(errorBar, approvalSeat, composerHead, composer.element);
 
 	/**
 	 * The workspace chip, and the menu it opens.
 	 *
-	 * The chip is the picker's face: it shows where the *next* new session will land, it is rendered
-	 * only while the transcript is empty — the moment the conversation is the thing on screen, a
-	 * control that promises to redirect it would be a lie, since the choice never rewrites a session —
-	 * and its menu lists the workspaces this machine already knows plus the one road in for one it
-	 * does not. The list is drawn from the sidebar's own rows, so a workspace that earned its place by
-	 * having a session is the same list here.
+	 * The chip is the picker's face: it shows where the *next* new session will land, and it lives on
+	 * the row above the input card, leftmost — the composer is where a session starts, so that is
+	 * where "where the next one starts" belongs (01 ⑦). The choice never rewrites the session on
+	 * screen, and the chip is placed by the input it sits over rather than by what the transcript
+	 * says, so it needs no phase to come and go with. Its menu lists the workspaces this machine
+	 * already knows plus the one road in for one it does not; the list is drawn from the sidebar's
+	 * own rows, so a workspace that earned its place by having a session is the same list here.
 	 */
 	const workspaceChip = element("button", "workspace-chip", undefined, { type: "button", "aria-haspopup": "menu" });
 	const chipLabel = element("span", "workspace-chip-label");
@@ -273,7 +274,7 @@ function main(): void {
 			},
 		]);
 	});
-	heroRow.append(workspaceChip);
+	composerHead.append(workspaceChip);
 
 	const statusBar = new StatusBar();
 
@@ -733,18 +734,14 @@ function main(): void {
 		// costs one comparison unless a baseline changed the tree or a run changed the lock.
 		branchView.render(tree, state.streaming);
 
-		// The hero row is the empty conversation's phase: an empty transcript is "about to start one",
-		// which is exactly the future the chip talks about. The moment there is something to read, the
-		// chip goes — its choice never rewrites a session, and a control that looked like it could
-		// would be read as one that does.
+		// The chip is the composer head's only tenant and is permanent there: the row above the input
+		// is where "where the next session lands" belongs, whatever the transcript above is doing.
 		const directory = directoryForNewSession();
 		if (chipDrawn !== directory) {
 			chipDrawn = directory;
 			chipLabel.textContent = workspaceName(directory);
 			workspaceChip.title = directory;
 		}
-		const heroVisible = state.items.length === 0;
-		if (heroRow.hidden === heroVisible) heroRow.hidden = !heroVisible;
 
 		// What a send would carry is what the seat shows, so the seat is drawn from the same values
 		// `prompt` reads rather than from the snapshot alone. The two selects inside gate themselves

@@ -246,10 +246,10 @@ export class TranscriptView {
 	/**
 	 * One turn.
 	 *
-	 * A user message is a bubble against the right margin with no name on it — it is the reader's own
-	 * words, and labelling them "You" wastes the line they sit on. The agent's work is the opposite:
-	 * it runs the full width of the column, because it is what is being read, and it keeps its name so
-	 * a long transcript still says who is speaking.
+	 * There is no role line and no per-turn marker — the user message, a thin divider under it, and
+	 * then the content is the whole shape a turn reads as (01 ⑥). Who is speaking is carried by the
+	 * forms themselves: a user message is a bubble against the right margin, the agent's work runs
+	 * the full width of the column, and a divider is the seam between rounds.
 	 */
 	private createTurn(item: Extract<Item, { kind: "message" }>): Turn {
 		const section = element("section", `turn ${item.role}${item.notice ? " notice" : ""}`);
@@ -258,15 +258,8 @@ export class TranscriptView {
 
 		// A user message is right-clickable: the menu's items are the caller's, and the entry it acts
 		// on is patched in per frame by {@link applyEntry}.
-		if (item.role === "user") {
-			section.dataset.role = "user";
-			section.append(body);
-			return turn;
-		}
-
-		const role = element("div", "turn-role");
-		role.append(element("span", "avatar", initialFor(item.role)), element("span", "role-name", labelFor(item.role)));
-		section.append(role, body);
+		if (item.role === "user") section.dataset.role = "user";
+		section.append(body);
 		return turn;
 	}
 
@@ -397,27 +390,17 @@ function reasoningPreviewOf(text: string, running: boolean): string {
 	return firstLineOf(done);
 }
 
-/** What a message's role reads as in the transcript. */
-function labelFor(role: string): string {
-	if (role === "user") return "你";
-	if (role === "assistant") return "智能体";
-	if (role === "compactionSummary") return "上下文摘要";
-	return role;
-}
-
-function initialFor(role: string): string {
-	if (role === "user") return "你";
-	if (role === "assistant") return "智";
-	return "•";
-}
-
 /**
- * One tool card: a summary line that always shows what was called, and the result behind it.
+ * One tool card, read as a line: the name, then a short path, then nothing else.
  *
- * A call that changed a file shows the change itself, which is the one thing about it worth reading:
- * the diff carries the path and the counts that the tool's own text was there to state, so the text
- * is left out rather than repeated in a worse form. Every other call — and any tool that reported no
- * diff — falls back to its output.
+ * The call reads as `Read  README.md` — name first, a single recognizable argument after — and the
+ * whole line is quietly coloured until hover, so a run of tool steps reads as one quiet block
+ * (01 ④). The card has no box of its own; expanding is what reveals the content, an indented block
+ * under the line. A call that changed a file shows the change itself instead of its text: the diff
+ * carries the path and the counts that the tool's own text was there to state.
+ *
+ * A card whose arguments hold nothing recognizable shows its name alone — no placeholder is
+ * invented for what the call did not carry.
  */
 function renderTool(card: ToolCard): HTMLElement {
 	const details = element("details", `tool${card.isError ? " error" : ""}${card.running ? " running" : ""}`);
@@ -428,13 +411,11 @@ function renderTool(card: ToolCard): HTMLElement {
 	chevron.append(icon("chevron"));
 	summary.append(
 		chevron,
-		element("span", "tool-status"),
 		element("span", "tool-name", card.toolName),
-		// A diff names the file it changed, which is what a card says when its arguments had no path
-		// to preview in the first place.
-		element("span", "tool-preview", previewOf(card.args) || (card.diff?.path ?? "")),
+		element("span", "tool-path", previewOf(card.args) || (card.diff?.path ?? "")),
 	);
 	if (card.diff) summary.append(diffStat(card.diff));
+	if (card.running) summary.append(element("span", "tool-spin"));
 
 	details.append(summary, card.diff ? renderFileDiff(card.diff) : outputOf(card));
 	return details;

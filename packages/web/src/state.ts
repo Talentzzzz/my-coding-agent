@@ -622,11 +622,15 @@ function upsertMessage(
 
 	// Reasoning is split out here rather than in `contentToText`, which tool output shares: the tool
 	// path must keep folding a thinking block into its text, while a message keeps the two apart.
+	// Tool calls are dropped for the same reason the tool output path keeps them: a call is not the
+	// model's prose, and it has its own item — the tools group the replay and the loop both build —
+	// so folding it into the body as `[调用 name]` is the one thing left that makes the body ugly
+	// (07). A message whose content is nothing but calls therefore has no body, and is dropped below.
 	const thinking = thinkingOf(record.content);
 
 	// A compaction checkpoint is a role of its own on the wire: its text is the summary, and it is the
 	// one thing in the transcript that stands for history the model no longer has verbatim.
-	let text = role === "compactionSummary" ? (record.summary ?? "") : contentToText(withoutThinking(record.content));
+	let text = role === "compactionSummary" ? (record.summary ?? "") : contentToText(withoutToolCalls(withoutThinking(record.content)));
 	if (text.length === 0 && role === "assistant" && final && typeof record.errorMessage === "string") {
 		text = `错误：${record.errorMessage}`;
 	}
@@ -696,12 +700,29 @@ function thinkingOf(content: unknown): { text: string; redacted: boolean } | und
 	return { text: parts.join("\n\n"), redacted };
 }
 
-/** The same content with its reasoning blocks dropped, for the text path. */
-function withoutThinking(content: unknown): unknown {
+/** The same content with every block of one kind dropped, for the paths that read it differently. */
+function withoutBlocks(content: unknown, type: string): unknown {
 	if (!Array.isArray(content)) return content;
 	return content.filter(
-		(block) => !(typeof block === "object" && block !== null && (block as { type?: unknown }).type === "thinking"),
+		(block) => !(typeof block === "object" && block !== null && (block as { type?: unknown }).type === type),
 	);
+}
+
+/** The same content with its reasoning blocks dropped, for the text path. */
+function withoutThinking(content: unknown): unknown {
+	return withoutBlocks(content, "thinking");
+}
+
+/**
+ * The same content with its tool-call blocks dropped, for the message-text path.
+ *
+ * Only a message body ever meets this filter, and only the body must not read a call as prose: the
+ * call's item is the tools group, which both the loop's events and the replay build. The tool-output
+ * path keeps {@link contentToText} whole — a result carries no calls, and there is nothing there for
+ * the filter to find.
+ */
+function withoutToolCalls(content: unknown): unknown {
+	return withoutBlocks(content, "toolCall");
 }
 
 /**
