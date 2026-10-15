@@ -5,6 +5,7 @@
 // Nothing reaches the network, so no server and no provider key are needed.
 // Run with: node scripts/smoke-sidebar.ts
 import { Sidebar, type SidebarState } from "../packages/web/src/render/sidebar.ts";
+import { SessionRows } from "../packages/web/src/rows.ts";
 import type { SessionRow } from "@my-agent/core/protocol";
 
 let failures = 0;
@@ -795,6 +796,26 @@ process.stdout.write("\nsidebar：就地改名\n");
 		editor.dispatch("keydown", { key: "Escape", preventDefault() {} });
 	}
 	check("Escape 取消，什么都没提交", renamed.length === 1 && titlesOf(sidebar).map((t) => t.title).join(",") === "会话 s,新名字（1）", `${JSON.stringify(renamed)} / ${JSON.stringify(titlesOf(sidebar).map((t) => t.title))}`);
+}
+
+// ------------------------------------------------- 7. workspace group ordering
+
+process.stdout.write("\nsidebar：工作区按最近活跃在前\n");
+
+{
+	// The server's own listing sorts groups by their newest activity, most recent first, and the
+	// window's live path must agree with it — a message landing in a workspace moves that workspace
+	// to the top of the sidebar. The store, not the view, owns this sort, so the check drives
+	// `SessionRows` directly: two groups whose newest rows disagree in both directions.
+	const store = new SessionRows();
+	store.put(row("a", 100, { cwd: "/old" }));
+	store.put(row("c", 300, { cwd: "/new" }));
+	check("初始：最近活跃的在前", store.groups().map((group) => group.cwd).join(",") === "/new,/old", JSON.stringify(store.groups().map((group) => group.cwd)));
+
+	// A message lands in the older workspace: its row's `modified` moves forward and the group order
+	// follows — the one frame the projection sends for every appended message.
+	store.put(row("a", 400, { cwd: "/old" }));
+	check("活跃后：老的反超到第一", store.groups().map((group) => group.cwd).join(",") === "/old,/new", JSON.stringify(store.groups().map((group) => group.cwd)));
 }
 
 process.stdout.write(failures === 0 ? "\nsidebar ok\n" : `\n${failures} 项失败\n`);

@@ -67,11 +67,28 @@ token 审计会拒绝一个被引用却从未定义的 `--dsw-*` 名字；改完
 `curl localhost:8080` 会被送去代理，用 node 的 `fetch`/`WebSocket` 探测；`ELECTRON_RUN_AS_NODE=1` 已在环境里 →
 桌面窗口只能走 `npm run desktop`；`npm run desktop:screenshot` 在本机必崩，出图走
 `.scratch/window-rework/research/shots.ts` 那套（bootServer + 本机 Chromium）。
+`smoke-api.ts` 与其他 smoke 不同：**它要一台已在跑的服务器**（默认 `127.0.0.1:8080`），空跑会在
+WebSocket 连接处报 "the mux connection failed"——那是没起服务器，不是回归。
+
+**2026-10-15 用户反馈后的核实结论（动手前不必再证）。**
+
+- 分支、fork、改名、删除**已落地**（08/09/14 号，提交 077a7f4、ce1a589），check 与 smoke 全绿。
+  用户报"没实现"最可能是入口发现或旧构建：fork 只在会话行**右键菜单**里、没有常驻按钮；分支入口
+  单走法时整块隐藏，要分过一次岔才出现；桌面外壳服务 `packages/web/dist`，改完要
+  `npm run build:web` 且已开的窗口要重开。真窗口逐个入口的核验归 [19 号](issues/19-entry-verification.md)。
+- 「对话页左右调整」（04 号 ① 的阅读列把手）**确实从未落地**——代码里 `contentWidth` 一处不存在，
+  只有左栏把手（06 号）落了。归 [15 号](issues/15-content-handle.md)。
+- 用户消息发送后的渲染异常（气泡悬在上一轮回答下方、偏小、下带孤立光标块）截图存
+  `research/shot-user-bubble-bug.png`，复现与修复归 [16 号](issues/16-user-bubble-render.md)。
 
 ## Decisions so far
 
 <!-- 关掉的 ticket 依次列在这里：一行要点 + 指向该 ticket 的链接 -->
 
+- [18 工作区按最近活跃排序](issues/18-workspace-recency.md)：客户端 `rows.ts` 的 `groups()`
+  把方向排反了（升序，活跃工作区沉底），服务端本来就是降序——一比较器反转落地，smoke-sidebar
+  新增一节直接驱动 `SessionRows` 钉住"刚发过消息的工作区排第一"。链路（projection 推 `modified`
+  → `session_row` 帧 → 重画重排）核实过不用动。
 - [07 会话：圆点、分隔线、工具一行](issues/07-transcript.md)：五条全落（`packages/web`）。
   角色行连 `labelFor`/`initialFor` 整个拆掉、不留替代物，用户气泡下的细分隔线挂在回合自己的
   `::after` 上（reconcile 一行没改）；10 号留给 07 的 `contentToText` 缝如约收掉——正文路径加
@@ -229,6 +246,8 @@ token 审计会拒绝一个被引用却从未定义的 `--dsw-*` 名字；改完
   收不动再单独一票。
 - **朗读一遍整窗**（不只是左栏与会话这两列）：状态行、设置面板、审批接管卡、欢迎态有没有同样"小一号"
   的毛病。前一个 effort 没碰它们的字号，这一轮大概率要连坐，但等把左栏与会话的量摸出来再判断。
+  **用户 10-15 报"系统字体再大一点"，这条雾随 [17 号](issues/17-type-scale-up.md) 毕业**——
+  五档抬哪几档、整窗连坐怎么算，由那票和用户对齐。
 - **左栏那条"运行中/待审批"状态行**在右侧不再有角色行之后是否还够用——它现在是第二行，参考实现的
   会话行只有一行标题 + hover 才出现的操作区。
 - **分支图在"大"的时候长什么样**：12 号已经给了缩放与平移，所以"看不见"不再是问题；剩下的是一条

@@ -95,9 +95,10 @@ export class SessionRows {
 	/**
 	 * The rows as the sidebar's groups, each group ordered by its own newest row.
 	 *
-	 * The same shape the server's projection answers with, and the same ordering, so a REST fallback
-	 * and a live channel produce an identical list — a store and a reader that each sorted for
-	 * themselves would disagree the first time a row moved.
+	 * The same shape the server's projection answers with, and the same ordering — groups by their
+	 * newest activity, most recent first, so the workspace a message just landed in is the first one
+	 * the sidebar shows. A REST fallback and a live channel produce an identical list: a store and a
+	 * reader that each sorted for themselves would disagree the first time a row moved.
 	 */
 	groups(): WorkspaceGroup[] {
 		const byCwd = new Map<string, SessionRow[]>();
@@ -108,7 +109,7 @@ export class SessionRows {
 		}
 		return [...byCwd.entries()]
 			.map(([cwd, sessions]) => ({ cwd, sessions }))
-			.sort((a, b) => newest(a.sessions) - newest(b.sessions));
+			.sort((a, b) => newest(b.sessions) - newest(a.sessions));
 	}
 }
 
