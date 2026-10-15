@@ -1,7 +1,7 @@
 # 17 整体字号抬高
 
 Type: prototype
-Status: claimed
+Status: resolved
 Blocked by:
 
 ## Question
@@ -35,3 +35,15 @@ caption 12/16、code 13/20）与参考实现一致，但用户读着小。要和
 
 **等用户挑**：B、C，或都不满意再说。拍板后落代码归 task 票（改 tokens.css 五档 +
 `DEFAULT_APPEARANCE`，npm run check）。
+
+## Answer
+
+2026-10-15 15:25 用户看完原型拍板：**A，维持现状**（追问确认过——不是误选，是对照真实读感后
+认为五档现状已够）。五档 14/20、13/18、12/16、15/25、13/20 一字不动，tokens.css 与
+`DEFAULT_APPEARANCE` 零改动。
+
+这一票的产出是对照本身：原型 `prototype/type-scale.html` 把三档方案放进真窗口的构图里，
+用户据此收回了「系统字体再大一点」的原始诉求——"小一号"的感觉来自别处（大概率是 04 号定的
+正文最大宽度与 35px 留白，或某个未收进五档的散值），不再是字号档位的问题。
+
+原型按惯例留在 `prototype/` 作主源；后续若某个具体面仍读着小，开新票按面定位，不重开五档。
