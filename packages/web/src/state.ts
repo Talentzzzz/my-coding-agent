@@ -418,9 +418,70 @@ function dropStreamingAssistant(items: Item[]): Item[] {
 function itemsFromSnapshot(snapshot: SessionSnapshot): Item[] {
 	let items: Item[] = [];
 	snapshot.messages.forEach((message, index) => {
-		items = upsertMessage(items, message, true, snapshot.messageEntryIds?.[index] ?? undefined);
+		items = replayMessage(items, message, snapshot.messageEntryIds?.[index] ?? undefined);
 	});
+	// A snapshot that is not submitting cannot have a call in flight, so a card it left unanswered is
+	// a record cut short — a branch taken before the result was written — rather than a live one.
+	// Settling it keeps a reopened transcript from spinning on history; a submitting snapshot skips
+	// this, because its live `tool_execution_end` is still to come and will patch the card itself.
+	if (!snapshot.submitting) items = settleCards(items);
 	return items;
+}
+
+/**
+ * Fold one persisted message the way its live arrival would have been folded.
+ *
+ * The message itself goes through {@link upsertMessage} exactly as before. The tool blocks inside it
+ * go through {@link upsertTool} — the same card constructor the loop's `tool_execution_*` events
+ * feed — so a reopened transcript is rebuilt from the same cards a watched run drew: the call's
+ * name and arguments from the assistant message's `toolCall` block, the outcome from the
+ * `toolResult` message that answers it by id. That pairing is the whole repair: a replay that only
+ * ever rebuilt messages loses the entire tool process on reopen, not just the result.
+ */
+function replayMessage(items: Item[], message: unknown, entryId: string | null | undefined): Item[] {
+	items = upsertMessage(items, message, true, entryId);
+	const record = message as { role?: unknown; content?: unknown };
+	if (record.role === "toolResult") return replayResult(items, message);
+	if (!Array.isArray(record.content)) return items;
+	for (const block of record.content) {
+		if (typeof block !== "object" || block === null) continue;
+		const typed = block as { type?: unknown; id?: unknown; name?: unknown; arguments?: unknown };
+		if (typed.type !== "toolCall" || typeof typed.id !== "string") continue;
+		// Created the way a start event creates it: running, no output. The result message settles it.
+		items = upsertTool(items, typed.id, {
+			toolCallId: typed.id,
+			toolName: typeof typed.name === "string" ? typed.name : "tool",
+			args: typed.arguments,
+			output: "",
+			isError: false,
+			running: true,
+		});
+	}
+	return items;
+}
+
+/** The same patch a `tool_execution_end` carries, read off the result message the file kept. */
+function replayResult(items: Item[], message: unknown): Item[] {
+	const record = message as { toolCallId?: unknown; toolName?: unknown; isError?: unknown };
+	if (typeof record.toolCallId !== "string") return items;
+	return upsertTool(items, record.toolCallId, {
+		toolCallId: record.toolCallId,
+		toolName: typeof record.toolName === "string" ? record.toolName : "tool",
+		// Both read the whole result the way the end event does: the text from its content, the
+		// diff from its `details`.
+		output: contentToText(message),
+		isError: record.isError === true,
+		running: false,
+		diff: fileDiffOf(message),
+	});
+}
+
+/** Settle every card a snapshot left without a result, so a finished transcript shows none running. */
+function settleCards(items: Item[]): Item[] {
+	return items.map((item) => {
+		if (item.kind !== "tools" || !item.cards.some((card) => card.running)) return item;
+		return { ...item, cards: item.cards.map((card) => (card.running ? { ...card, running: false } : card)) };
+	});
 }
 
 /**
