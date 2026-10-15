@@ -247,6 +247,11 @@ function allMessages(session: Agent): AgentMessage[] {
 	return entriesOf(session).flatMap((entry) => (entry.type === "message" ? [entry.message] : []));
 }
 
+/** Each stored message as "role:text", in store order — the shape most ordering assertions compare. */
+function orderOf(session: Agent): string[] {
+	return allMessages(session).map((message) => `${message.role}:${textOf(message)}`);
+}
+
 /** Ids of the message entries whose text matches, in log order. */
 function entryIdsFor(session: Agent, text: string): string[] {
 	return entriesOf(session)
@@ -422,7 +427,7 @@ async function exerciseSteerVersusFollowUp(): Promise<void> {
 		check(`${scenario.behavior} is in the store exactly once`, after.length === 1, JSON.stringify(after));
 		// The order is the reason the write waits for the drain: the store's order is the order the loop
 		// replayed, which is what the next request is built from and what a baseline replays.
-		const order = allMessages(session).map((message) => `${message.role}:${textOf(message)}`);
+		const order = orderOf(session);
 		check(
 			`${scenario.behavior} is filed behind the answer it interrupted`,
 			JSON.stringify(order) ===
@@ -461,7 +466,7 @@ async function exerciseAcceptedOrder(): Promise<void> {
 	await within("the run", 10_000, running);
 	await within("settle()", 10_000, session.settle());
 
-	const order = allMessages(session).map((message) => `${message.role}:${textOf(message)}`);
+	const order = orderOf(session);
 	check(
 		"the store reads the way the loop replayed it",
 		JSON.stringify(order) ===
@@ -514,7 +519,7 @@ async function exerciseAbortFlushesAccepted(): Promise<void> {
 	await within("abort()", 10_000, aborting);
 	await within("settle()", 10_000, session.settle());
 
-	const order = allMessages(session).map((message) => `${message.role}:${textOf(message)}`);
+	const order = orderOf(session);
 	check("the aborted run still ends with what the user typed", order.at(-1) === "user:typed while it was answering", JSON.stringify(order));
 	check(
 		"written exactly once",
@@ -548,7 +553,7 @@ async function exerciseQueueMode(): Promise<void> {
 	check("and the loop has started its second request", gate.calls === 2, String(gate.calls));
 	// The drained message is in the transcript, the waiting one is still only on a queue — the depth is
 	// what reports it, and since the write waits for the drain the transcript shows it too.
-	const soFar = allMessages(session).map((message) => `${message.role}:${textOf(message)}`);
+	const soFar = orderOf(session);
 	check(
 		"the transcript holds the drained message and not the waiting one",
 		JSON.stringify(soFar) === JSON.stringify(["user:turn one", "assistant:answer one", "user:turn two"]),

@@ -286,6 +286,18 @@ interface ToolResultView {
 }
 
 /**
+ * One message accepted during a run, and the queue it is waiting on.
+ *
+ * The queue is the behaviour the composer asked for: a steered message is injected into the running
+ * turn, so it is spent by the time that turn ends, while a follow-up is still waiting — and only
+ * follow-ups are the depth a composer shows.
+ */
+interface AcceptedMessage {
+	message: AgentMessage;
+	queue: PromptBehavior;
+}
+
+/**
  * One conversation: the pi-agent-core `Loop`, the workspace, the JSONL store, and the approval gate.
  *
  * The store is the source of truth for the conversation. Before every provider request,
@@ -354,7 +366,7 @@ export class Agent {
 	/** Tool results a hook rewrote, so the transcript can keep what the tool produced. */
 	private readonly toolResultViews = new Map<string, ToolResultView>();
 	/**
-	 * Messages the loop has not taken yet, split by the queue they are waiting on.
+	 * Messages accepted mid-run, oldest first, each with the queue it is waiting on.
 	 *
 	 * Nothing is written to the store here. A message accepted mid-run is persisted when the loop
 	 * drains it, so the file's order is the order the loop takes them in — which is the order the model
@@ -362,12 +374,11 @@ export class Agent {
 	 * puts the file's copy of the message in front of the answer it interrupted, and a view rebuilt
 	 * from the file then draws a bubble between a question and its own reply.
 	 *
-	 * Two lists rather than one because the queues are read differently: a steered message is injected
-	 * into the running turn, so it is spent by the time that turn ends, while a follow-up is still
-	 * waiting — and only follow-ups are the depth a composer shows.
+	 * One list rather than one per queue, because two things read it whole: the depth counts the
+	 * follow-ups among them, and a run that ends without draining them appends them as they stand —
+	 * which is acceptance order, the only order left for a message nobody answered.
 	 */
-	private readonly steered: AgentMessage[] = [];
-	private readonly followUps: AgentMessage[] = [];
+	private readonly accepted: AcceptedMessage[] = [];
 	/** Messages that started a run, whose echoes must not be written twice either. */
 	private readonly promptWrites: number[] = [];
 	/** Last stamp this session handed out, so two messages in one millisecond stay distinguishable. */
@@ -742,7 +753,9 @@ export class Agent {
 	 * counted: it goes into the turn that is already running.
 	 */
 	get queued(): number {
-		return this.followUps.length;
+		let waiting = 0;
+		for (const accepted of this.accepted) if (accepted.queue === "followUp") waiting += 1;
+		return waiting;
 	}
 
 	/** True while a tool call is waiting for an approval nobody has answered yet. */
@@ -854,14 +867,10 @@ export class Agent {
 
 		const message = this.userMessage(trimmed);
 		if (this.loop.state.isStreaming) {
-			const steer = (options.behavior ?? "followUp") === "steer";
-			if (steer) {
-				this.loop.steer(message);
-				this.steered.push(message);
-			} else {
-				this.loop.followUp(message);
-				this.followUps.push(message);
-			}
+			const queue = options.behavior ?? "followUp";
+			if (queue === "steer") this.loop.steer(message);
+			else this.loop.followUp(message);
+			this.accepted.push({ message, queue });
 			this.emitQueueUpdate();
 			this.publish();
 			return;
@@ -1522,21 +1531,16 @@ export class Agent {
 	}
 
 	/**
-	 * Take one accepted message off its queue, now that the loop has drained it.
+	 * Take one accepted message off the list, now that the loop has drained it.
 	 *
-	 * The count a composer shows is what is left on these lists, so this is where the depth drops: a
-	 * follow-up stops being "accepted and waiting" at the drain point, not when the turn it opened ends.
-	 * The message the loop hands back is the very object `prompt()` queued, so the stamp is the key.
+	 * The count a composer shows is what is left here, so this is where the depth drops: a follow-up
+	 * stops being "accepted and waiting" at the drain point, not when the turn it opened ends. The
+	 * message the loop hands back is the very object `prompt()` queued, so the stamp is the key.
 	 */
 	private takeAccepted(message: AgentMessage): void {
 		if (message.role !== "user" || message.timestamp === undefined) return;
-		for (const queue of [this.steered, this.followUps]) {
-			const index = queue.findIndex((candidate) => candidate.timestamp === message.timestamp);
-			if (index !== -1) {
-				queue.splice(index, 1);
-				return;
-			}
-		}
+		const index = this.accepted.findIndex((entry) => entry.message.timestamp === message.timestamp);
+		if (index !== -1) this.accepted.splice(index, 1);
 	}
 
 	/**
@@ -1553,14 +1557,11 @@ export class Agent {
 	 * a second time.
 	 */
 	private flushAccepted(): void {
-		if (this.steered.length === 0 && this.followUps.length === 0) return;
-		const pending = [...this.steered, ...this.followUps].sort(
-			(left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0),
-		);
-		this.steered.length = 0;
-		this.followUps.length = 0;
+		if (this.accepted.length === 0) return;
+		// Emptied before the writes, so a failed append can never turn into a second copy of one.
+		const pending = this.accepted.splice(0);
 		this.loop.clearAllQueues();
-		for (const message of pending) this.appendMessage(message);
+		for (const entry of pending) this.appendMessage(entry.message);
 	}
 
 	/** Take one outstanding write off its list, and say whether there was one. */

@@ -175,9 +175,9 @@ type AgentSessionEvent =
 
 `Settings.steeringMode` 和 `Settings.followUpMode`（`"all"` 或 `"one-at-a-time"`，默认 `one-at-a-time`）决定每个取走点注入多少条排队消息。`snapshot.queued` 报告已接受、循环还没取走的消息有多少条——**只算 follow-up**，steer 进的是正在跑的那一轮；`applyConfig` 重新施加这两个模式；`settle()` 等的是**队列被取空**，而不只是当前这一轮结束。
 
-**排队消息的落盘点在取走点上，不在接受点上**（[ADR-0003](adr/0003-queued-writes-at-drain.md)）。循环在取走点回显它（`message_start` / `message_end`），`handleEvent` 就在那里写进 store；接受时只是在会话自己的一张表上计数（`steered` / `followUps`）。于是 store 同时是请求的来源（`prepareRequest` 从它建）和基线的来源（重连、重载、宿主复活都按它重建 items），而两者读到的是同一个顺序：循环回放的那个。会话自己动手写的只剩启动一次运行的那条 prompt，它在循环之前落盘，循环对它的回显由戳记匹配抑制（`isOptimisticEcho`，戳记来自会话而不是 `Date.now()`，因为两条消息可能落在同一毫秒）。计数从**被接受**算到**循环回显它**，而不是从 `peekQueuedMessages().length` 算——后者只预览被选中进入下一轮的那些消息。
+**排队消息的落盘点在取走点上，不在接受点上**（[ADR-0003](adr/0003-queued-writes-at-drain.md)）。循环在取走点回显它（`message_start` / `message_end`），`handleEvent` 就在那里写进 store；接受时只是记在会话自己的一张表上（`accepted`，`snapshot.queued` 读其中等待 follow-up 的那些）。于是 store 同时是请求的来源（`prepareRequest` 从它建）和基线的来源（重连、重载、宿主复活都按它重建 items），而两者读到的是同一个顺序：循环回放的那个。会话自己动手写的只剩启动一次运行的那条 prompt，它在循环之前落盘，循环对它的回显由戳记匹配抑制（`isOptimisticEcho`，戳记来自会话而不是 `Date.now()`，因为两条消息可能落在同一毫秒）。计数从**被接受**算到**循环回显它**，而不是从 `peekQueuedMessages().length` 算——后者只预览被选中进入下一轮的那些消息。
 
-一次运行结束时**还没被取走**的消息由 `flushAccepted` 在 `agent_end` 补写，顺序按接受先后，并同时清空循环的两条队列：中止、失败、以及恰好在循环决定不再找消息之后到达的那条 prompt，都在这里落地。没有这一步，"已接受"就不等于"在文件里"——用户敲的字会丢，而 `queued` 不归零会让 `settle()` 永不返回。
+一次运行结束时**还没被取走**的消息由 `flushAccepted` 在 `agent_end` 补写，顺序按接受先后，并同时清空循环的两条队列：中止、失败、以及恰好在循环决定不再找消息之后到达的那条 prompt，都在这里落地。
 
 ## 重试
 
