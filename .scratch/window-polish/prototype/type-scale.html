@@ -1,0 +1,542 @@
+<!doctype html>
+<!--
+  PROTOTYPE — 票 17：整体字号抬高。Throwaway, 用来回答一个问题："系统字体再大一点"该怎么抬。
+
+  Three variants of the type scale, switchable via ?variant= and the floating bar:
+    A 现状            title 14/20 · meta 13/18 · caption 12/16 · body 15/25 · code 13/20
+    B 整棵抬一档       title 15/21 · meta 14/19 · caption 13/17 · body 16/27 · code 14/21
+    C 只抬正文         title 14/20 · meta 13/18 · caption 12/16 · body 16/27 · code 13/20
+
+  页面照真窗口的 token 与构图复刻（左栏 32px 行、固定头、用户气泡、工具一行、composer、状态行、
+  审批卡、欢迎态、设置面板），颜色与尺寸抄自 packages/web/src/tokens.css 与 style.css。
+  双击打开即可，无构建、无依赖、无持久化。悬浮条上悬停任意文字可读出它的实际字号/行高。
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>字号原型 — 票 17（throwaway）</title>
+<style>
+	/* ---- 真窗口的 token（抄自 tokens.css，静态深浅两套） ---- */
+	:root {
+		--dsw-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+			"Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+		--dsw-font-mono: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", Menlo, Courier,
+			"PingFang SC", "Microsoft YaHei", monospace;
+		--dsw-radius-xs: 4px; --dsw-radius-sm: 8px; --dsw-radius-md: 12px;
+		--dsw-radius-lg: 16px; --dsw-radius-xl: 20px; --dsw-radius-panel: 28px;
+		--dsw-sidebar-width: 232px;
+
+		/* ===== 五档字号：变体唯一动的地方 ===== */
+		/* A 现状 */
+		--dsw-fs-title: 14px; --dsw-lh-title: 20px;
+		--dsw-fs-meta: 13px;  --dsw-lh-meta: 18px;
+		--dsw-fs-caption: 12px; --dsw-lh-caption: 16px;
+		--dsw-fs-body: 15px;
+		--dsw-lh-body: calc(var(--dsw-fs-body) * 25 / 15);
+		--dsw-fs-code: 13px; --dsw-lh-code: 20px;
+	}
+	:root[data-variant="b"] {
+		/* B 整棵抬一档 */
+		--dsw-fs-title: 15px; --dsw-lh-title: 21px;
+		--dsw-fs-meta: 14px;  --dsw-lh-meta: 19px;
+		--dsw-fs-caption: 13px; --dsw-lh-caption: 17px;
+		--dsw-fs-body: 16px;
+		--dsw-lh-body: calc(var(--dsw-fs-body) * 27 / 16);
+		--dsw-fs-code: 14px; --dsw-lh-code: 21px;
+	}
+	:root[data-variant="c"] {
+		/* C 只抬正文：正文 15→16，其余四档原地不动 */
+		--dsw-fs-body: 16px;
+		--dsw-lh-body: calc(var(--dsw-fs-body) * 27 / 16);
+	}
+
+	:root {
+		--dsw-bg-base: rgb(255,255,255); --dsw-bg-sidebar: rgb(249,250,251);
+		--dsw-bg-hover: rgba(38,49,72,0.06); --dsw-bg-active: rgba(38,49,72,0.1);
+		--dsw-bg-hover-solid: rgb(241,243,245);
+		--dsw-border-l1: rgba(0,0,0,0.04); --dsw-border-l2: rgba(0,0,0,0.1); --dsw-border-l3: rgba(0,0,0,0.12); --dsw-border-l4: rgba(0,0,0,0.16);
+		--dsw-label-primary: rgb(15,17,21); --dsw-label-secondary: rgb(97,102,107);
+		--dsw-label-tertiary: rgb(129,133,140); --dsw-label-caption: rgb(173,178,184);
+		--dsw-state-business: rgb(65,118,230); --dsw-state-warn: rgb(245,158,11); --dsw-state-warn-label: rgb(221,134,41);
+		--dsw-state-error: rgb(236,19,19);
+		--dsw-warn-tint: rgb(254,245,231);
+		--dsw-button-primary-fill: rgb(15,17,21); --dsw-button-primary-label: rgb(255,255,255);
+		--dsw-input-fill: rgb(255,255,255);
+		--dsw-bubble: rgb(237,243,254);
+		--dsw-code-block: rgb(249,250,251); --dsw-code-inline: rgb(241,243,245);
+		--dsw-shadow-panel: 0 8px 24px rgba(15,17,21,0.12), 0 1px 2px rgba(15,17,21,0.08);
+	}
+	:root[data-theme="dark"] {
+		--dsw-bg-base: rgb(21,21,23); --dsw-bg-sidebar: rgb(27,27,28);
+		--dsw-bg-hover: rgba(255,255,255,0.08); --dsw-bg-active: rgba(255,255,255,0.14);
+		--dsw-bg-hover-solid: rgb(53,54,56);
+		--dsw-border-l1: rgba(255,255,255,0.06); --dsw-border-l2: rgba(255,255,255,0.12); --dsw-border-l3: rgba(255,255,255,0.16); --dsw-border-l4: rgba(255,255,255,0.2);
+		--dsw-label-primary: rgb(225,229,238); --dsw-label-secondary: rgb(207,211,214);
+		--dsw-label-tertiary: rgb(173,178,184); --dsw-label-caption: rgb(97,102,107);
+		--dsw-state-business: rgb(122,170,255); --dsw-state-error: rgb(242,90,90);
+		--dsw-warn-tint: rgb(39,36,31);
+		--dsw-button-primary-fill: rgb(235,238,242); --dsw-button-primary-label: rgb(15,17,21);
+		--dsw-input-fill: rgb(44,44,46);
+		--dsw-bubble: rgb(44,44,46);
+		--dsw-code-block: rgb(27,27,28); --dsw-code-inline: rgb(53,54,56);
+		--dsw-shadow-panel: 0 8px 24px rgba(0,0,0,0.44), 0 1px 2px rgba(0,0,0,0.32);
+	}
+
+	* { box-sizing: border-box; }
+	body {
+		margin: 0; padding: 24px 16px 120px;
+		background: color-mix(in srgb, var(--dsw-bg-base) 88%, var(--dsw-label-primary) 12%);
+		color: var(--dsw-label-primary);
+		font-family: var(--dsw-font-family);
+		transition: background 0.2s;
+	}
+
+	/* ---- 页头说明（不属于被评的东西） ---- */
+	.proto-note { max-width: 1180px; margin: 0 auto 14px; color: var(--dsw-label-tertiary); font-size: 13px; line-height: 1.6; }
+	.proto-note b { color: var(--dsw-label-primary); }
+	.tier-table { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+	.tier-pill {
+		padding: 3px 10px; border: 1px solid var(--dsw-border-l2); border-radius: 999px;
+		background: var(--dsw-input-fill); color: var(--dsw-label-secondary);
+		font-family: var(--dsw-font-mono); font-size: 12px;
+	}
+	.tier-pill b { color: var(--dsw-label-primary); font-weight: 600; }
+	.tier-pill.moved { border-color: var(--dsw-state-business); color: var(--dsw-state-business); }
+
+	/* ---- 窗口框 ---- */
+	.window {
+		display: grid; grid-template-columns: var(--dsw-sidebar-width) 1fr;
+		max-width: 1180px; height: 720px; margin: 0 auto;
+		border: 1px solid var(--dsw-border-l2); border-radius: var(--dsw-radius-panel);
+		background: var(--dsw-bg-base); overflow: hidden;
+		box-shadow: var(--dsw-shadow-panel);
+	}
+
+	/* ---- 左栏 ---- */
+	.sidebar { display: flex; flex-direction: column; background: var(--dsw-bg-sidebar); border-right: 1px solid var(--dsw-border-l1); min-width: 0; }
+	.sidebar-top { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 8px; }
+	.new-session {
+		display: flex; align-items: center; justify-content: center; gap: 6px;
+		flex: 1; height: 34px; padding: 8px 12px;
+		border: 1px solid var(--dsw-border-l2); border-radius: var(--dsw-radius-md);
+		background: transparent; color: var(--dsw-label-primary);
+		font: inherit; font-weight: 500; cursor: pointer;
+	}
+	.sidebar-scroll { flex: 1; overflow-y: auto; padding: 4px 8px; }
+	.workspace { margin-bottom: 6px; }
+	.workspace-head {
+		display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 8px;
+		border-radius: var(--dsw-radius-md); color: var(--dsw-label-tertiary);
+		font-size: var(--dsw-fs-meta); line-height: var(--dsw-lh-meta); font-weight: 600;
+	}
+	.workspace-head svg { width: 13px; height: 13px; flex: none; opacity: 0.75; }
+	.workspace-current {
+		margin-left: auto; padding: 0 5px; border-radius: 999px; background: var(--dsw-bg-hover);
+		color: var(--dsw-label-caption); font-size: var(--dsw-fs-caption); line-height: var(--dsw-lh-caption); font-weight: 500;
+	}
+	.session-item {
+		display: flex; align-items: center; width: 100%; height: 32px; padding: 0 8px;
+		border: none; border-radius: var(--dsw-radius-md); background: transparent;
+		color: var(--dsw-label-secondary); font: inherit; text-align: left; cursor: pointer;
+	}
+	.session-item[aria-current="true"] { background: var(--dsw-bg-active); color: var(--dsw-label-primary); font-weight: 500; }
+	.session-item-slot { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 20px; flex: none; }
+	.session-item-slot[data-state="warn"]::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--dsw-state-warn); }
+	.session-item-title { min-width: 0; flex: 1; margin: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--dsw-fs-title); line-height: var(--dsw-lh-title); }
+	.session-item-time { flex: none; color: var(--dsw-label-caption); font-size: var(--dsw-fs-caption); line-height: var(--dsw-lh-caption); }
+	.sidebar-foot { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--dsw-border-l1); color: var(--dsw-label-secondary); font-size: var(--dsw-fs-meta); line-height: var(--dsw-lh-meta); }
+	.foot-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-label-caption); }
+
+	/* ---- 会话列 ---- */
+	.conversation { display: grid; grid-template-rows: auto 1fr auto auto; min-width: 0; min-height: 0; background: var(--dsw-bg-base); }
+	.header { display: flex; flex-direction: column; justify-content: center; padding: 0 24px; border-bottom: 1px solid var(--dsw-border-l1); }
+	.header-row { display: flex; align-items: center; gap: 10px; min-height: 52px; }
+	.header-title { display: flex; flex-direction: column; justify-content: center; min-width: 0; flex: 1; }
+	.header-title h1 { margin: 0; font-size: var(--dsw-fs-title); font-weight: 600; line-height: var(--dsw-lh-title); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.header-subtitle { color: var(--dsw-label-caption); font-size: var(--dsw-fs-meta); line-height: var(--dsw-lh-meta); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.branch-chip {
+		display: inline-flex; align-items: center; gap: 8px; max-width: 52%; height: 28px; padding: 0 10px;
+		border: 1px solid var(--dsw-border-l1); border-radius: var(--dsw-radius-md); background: var(--dsw-input-fill);
+		color: var(--dsw-label-tertiary); font: inherit; font-size: var(--dsw-fs-meta); line-height: var(--dsw-lh-meta); cursor: pointer;
+	}
+	.branch-chip-id { font-family: var(--dsw-font-mono); font-size: var(--dsw-fs-caption); line-height: var(--dsw-lh-caption); color: var(--dsw-state-business); }
+	.branch-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-label-secondary); }
+
+	.transcript { overflow-y: auto; padding: 20px 0; }
+	.reading { max-width: 46rem; margin-inline: auto; padding: 0 24px; }
+	.turn { margin-bottom: 20px; }
+	.turn[data-role="user"] { display: flex; flex-direction: column; align-items: flex-end; }
+	.turn[data-role="user"]::after { content: ""; align-self: stretch; height: 1px; margin-top: 4px; background: var(--dsw-border-l1); }
+	.turn-body { font-size: var(--dsw-fs-body); line-height: var(--dsw-lh-body); word-break: break-word; min-width: 0; }
+	.turn[data-role="user"] .turn-body { max-width: 80%; padding: 9px 14px; border-radius: var(--dsw-radius-md); background: var(--dsw-bubble); border: 1px solid var(--dsw-border-l1); }
+	.turn-body p { margin: 0 0 0.75em; }
+	.turn-body > :last-child { margin-bottom: 0; }
+	.turn-body ul { margin: 0 0 0.75em; padding-left: 1.4em; }
+	.turn-body li { margin: 0.2em 0; }
+	.turn-body code { padding: 0.1em 0.4em; border-radius: var(--dsw-radius-xs); background: var(--dsw-code-inline); font-family: var(--dsw-font-mono); font-size: var(--dsw-fs-code); line-height: var(--dsw-lh-code); }
+
+	.reasoning { margin: 0 0 10px; font-size: var(--dsw-fs-meta); line-height: var(--dsw-lh-meta); }
+	.reasoning > summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; color: var(--dsw-label-tertiary); }
+	.reasoning > summary::-webkit-details-marker { display: none; }
+	.reasoning-label { flex: none; font-weight: 500; }
+	.reasoning-sep { flex: none; width: 2px; height: 2px; border-radius: 50%; background: var(--dsw-label-caption); }
+	.reasoning-preview { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--dsw-label-tertiary); }
+
+	.tool-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 20px; }
+	.tool > summary { display: flex; align-items: center; gap: 10px; min-height: 28px; cursor: pointer; list-style: none; color: var(--dsw-label-tertiary); font-size: var(--dsw-fs-meta); line-height: var(--dsw-lh-meta); }
+	.tool > summary::-webkit-details-marker { display: none; }
+	.tool-chevron { flex: none; width: 12px; color: var(--dsw-label-caption); }
+	.tool-name { flex: none; color: var(--dsw-label-secondary); font-weight: 500; }
+	.tool-path { flex: 0 1 auto; min-width: 0; color: var(--dsw-label-caption); font-family: var(--dsw-font-mono); font-size: var(--dsw-fs-caption); line-height: var(--dsw-lh-caption); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+	/* ---- composer ---- */
+	.composer-wrap { max-width: 46rem; width: 100%; margin-inline: auto; padding: 0 24px; }
+	.composer-head { display: flex; align-items: center; padding: 0 4px 6px; }
+	.workspace-chip {
+		display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px;
+		border: 1px solid var(--dsw-border-l2); border-radius: 999px; background: transparent;
+		color: var(--dsw-label-secondary); font: inherit; font-size: var(--dsw-fs-meta); line-height: var(--dsw-lh-meta); cursor: pointer;
+	}
+	.composer {
+		display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+		border: 1px solid var(--dsw-border-l2); border-radius: var(--dsw-radius-lg);
+		background: var(--dsw-input-fill); box-shadow: var(--dsw-shadow-panel);
+	}
+	.composer textarea {
+		width: 100%; min-height: 44px; padding: 0; border: none; background: transparent;
+		color: var(--dsw-label-primary); font: inherit; resize: none; outline: none;
+		font-size: var(--dsw-fs-body); line-height: var(--dsw-lh-body);
+	}
+	.composer-bar { display: flex; align-items: center; gap: 8px; }
+	.composer-spacer { flex: 1; }
+	.composer-select {
+		max-width: 12rem; height: 26px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--dsw-radius-sm);
+		background: transparent; color: var(--dsw-label-secondary); font: inherit;
+		font-size: var(--dsw-fs-caption); line-height: var(--dsw-lh-caption); cursor: pointer;
+	}
+	.send {
+		display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 14px;
+		border: none; border-radius: var(--dsw-radius-sm); background: var(--dsw-button-primary-fill);
+		color: var(--dsw-button-primary-label); font: inherit; font-size: var(--dsw-fs-caption); font-weight: 500; cursor: pointer;
+	}
+
+	.status-bar {
+		display: flex; align-items: center; gap: 10px; max-width: 40rem; width: 100%;
+		margin-inline: auto; padding: 0 24px 10px; transform: translateX(-24px);
+		color: var(--dsw-label-caption); font-family: var(--dsw-font-mono);
+		font-size: var(--dsw-fs-caption); line-height: var(--dsw-lh-caption);
+	}
+	.status-stat { flex: 1; text-align: center; white-space: nowrap; }
+
+	/* ---- 连坐面板：欢迎态 / 审批卡 / 设置面板，同一变体的档位 ---- */
+	.panels { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; max-width: 1180px; margin: 20px auto 0; }
+	.panel-box { border: 1px solid var(--dsw-border-l2); border-radius: var(--dsw-radius-lg); background: var(--dsw-bg-base); padding: 18px; min-width: 0; }
+	.panel-title { color: var(--dsw-label-caption); font-family: var(--dsw-font-mono); font-size: 11px; margin-bottom: 12px; }
+	.welcome-mark { display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; margin: 8px auto 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-bubble); }
+	.welcome h2 { margin: 0 0 6px; text-align: center; font-size: var(--dsw-fs-title); font-weight: 600; line-height: var(--dsw-lh-title); }
+	.welcome p { margin: 0; text-align: center; color: var(--dsw-label-tertiary); font-size: var(--dsw-fs-meta); line-height: var(--dsw-lh-meta); }
+	.approval-card { border: 1px solid var(--dsw-state-warn); border-radius: var(--dsw-radius-xl); background: var(--dsw-input-fill); overflow: hidden; }
+	.approval-strip { display: flex; align-items: center; gap: 6px; padding: 6px 14px; background: var(--dsw-warn-tint); color: var(--dsw-state-warn-label); font-size: var(--dsw-fs-caption); line-height: var(--dsw-lh-caption); font-weight: 500; }
+	.approval-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--dsw-state-warn); }
+	.approval-body-wrap { padding: 10px 14px 4px; }
+	.approval-headline { display: flex; align-items: center; gap: 8px; font-size: var(--dsw-fs-meta); line-height: var(--dsw-lh-meta); font-weight: 600; }
+	.approval-command { margin: 6px 0 0; color: var(--dsw-label-secondary); font-family: var(--dsw-font-mono); font-size: var(--dsw-fs-code); line-height: var(--dsw-lh-code); white-space: pre-wrap; }
+	.approval-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 14px 12px; }
+	.ghost-btn { height: 28px; padding: 0 12px; border: 1px solid var(--dsw-border-l2); border-radius: var(--dsw-radius-sm); background: transparent; color: var(--dsw-label-secondary); font: inherit; font-size: var(--dsw-fs-caption); cursor: pointer; }
+	.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--dsw-border-l1); }
+	.settings-row:last-child { border-bottom: none; }
+	.settings-label { font-size: var(--dsw-fs-meta); line-height: var(--dsw-lh-meta); color: var(--dsw-label-primary); }
+	.settings-hint { color: var(--dsw-label-caption); font-size: var(--dsw-fs-caption); line-height: var(--dsw-lh-caption); }
+	.settings-value { color: var(--dsw-label-secondary); font-size: var(--dsw-fs-meta); line-height: var(--dsw-lh-meta); }
+
+	/* ---- 悬浮切换条（不属于被评的东西） ---- */
+	.switcher {
+		position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+		display: flex; align-items: center; gap: 4px; padding: 6px;
+		border: 1px solid var(--dsw-border-l3); border-radius: 999px;
+		background: var(--dsw-button-primary-fill); color: var(--dsw-button-primary-label);
+		box-shadow: 0 12px 32px rgba(0,0,0,0.35); z-index: 100;
+	}
+	.switcher button {
+		display: inline-flex; align-items: center; justify-content: center;
+		width: 30px; height: 30px; border: none; border-radius: 50%;
+		background: transparent; color: inherit; font-size: 15px; cursor: pointer;
+	}
+	.switcher button:hover { background: rgba(128,128,128,0.25); }
+	.switcher .label { min-width: 210px; text-align: center; font-size: 13px; font-weight: 600; }
+	.switcher .label small { display: block; font-weight: 400; opacity: 0.75; font-size: 11px; }
+	.switcher .readout {
+		position: absolute; top: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+		padding: 3px 10px; border-radius: 999px; background: var(--dsw-button-primary-fill); color: var(--dsw-button-primary-label);
+		font-family: var(--dsw-font-mono); font-size: 11px; white-space: nowrap; opacity: 0; transition: opacity 0.1s;
+	}
+	.switcher.reading .readout { opacity: 1; }
+</style>
+</head>
+<body>
+
+<p class="proto-note">
+	<b>字号原型（throwaway）。</b>三个方案，底部悬浮条或 ←/→ 切换，地址栏 <code>?variant=a|b|c</code> 可分享。
+	每个方案只动五档 token，窗口的每个面照真尺寸复刻——判断的是读感，不是想象力。
+	下面的三块"连坐面板"（欢迎态 / 审批卡 / 设置面板）也吃同一套档位，看看整棵抬时它们要不要跟。
+	<b>把鼠标悬在任何文字上</b>，悬浮条下方会读出它实际的字号/行高。
+</p>
+<div class="tier-table" id="tierTable"></div>
+
+<div class="window">
+	<!-- ================ 左栏 ================ -->
+	<aside class="sidebar">
+		<div class="sidebar-top">
+			<button class="new-session">＋ 新建会话</button>
+		</div>
+		<div class="sidebar-scroll">
+			<div class="workspace">
+				<div class="workspace-head">
+					<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 4.5a1 1 0 0 1 1-1h3l1.5 2h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-10.5a1 1 0 0 1-1-1z"/></svg>
+					<span class="workspace-name">my-coding-agent</span>
+					<span class="workspace-current">当前</span>
+				</div>
+				<button class="session-item" aria-current="true"><span class="session-item-slot"></span><span class="session-item-title">字号原型这一票</span><span class="session-item-time">14:41</span></button>
+				<button class="session-item"><span class="session-item-slot" data-state="warn"></span><span class="session-item-title">分支落地：顶部一个入口</span><span class="session-item-time">11:10</span></button>
+				<button class="session-item"><span class="session-item-slot"></span><span class="session-item-title">左栏右键菜单（派生 / 改名 / 删除）</span><span class="session-item-time">12:11</span></button>
+				<button class="session-item"><span class="session-item-slot"></span><span class="session-item-title">排版 token 化</span><span class="session-item-time">13:03</span></button>
+			</div>
+			<div class="workspace">
+				<div class="workspace-head">
+					<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 4.5a1 1 0 0 1 1-1h3l1.5 2h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-10.5a1 1 0 0 1-1-1z"/></svg>
+					<span class="workspace-name">Desktop/test</span>
+				</div>
+				<button class="session-item"><span class="session-item-slot"></span><span class="session-item-title">目录里有什么</span><span class="session-item-time">10-12</span></button>
+				<button class="session-item"><span class="session-item-slot"></span><span class="session-item-title">你有哪些工具</span><span class="session-item-time">10-12</span></button>
+			</div>
+		</div>
+		<div class="sidebar-foot"><span class="foot-dot"></span><span>设置</span></div>
+	</aside>
+
+	<!-- ================ 会话列 ================ -->
+	<main class="conversation">
+		<div class="header">
+			<div class="header-row">
+				<div class="header-title">
+					<h1>字号原型这一票</h1>
+					<div class="header-subtitle">五档只动 token，一把把手管正文宽度</div>
+				</div>
+				<button class="branch-chip">
+					<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="4" cy="4" r="2"/><circle cx="4" cy="12" r="2"/><circle cx="12" cy="8" r="2"/><path d="M4 6v4M6 4h3a3 3 0 0 1 3 3v0"/></svg>
+					<span>当前分支</span>
+					<span class="branch-chip-id">a1b2c3d</span>
+					<span class="branch-chip-label">把 toolbar 的字号按档位收</span>
+				</button>
+			</div>
+		</div>
+
+		<div class="transcript">
+			<div class="reading">
+				<section class="turn">
+					<details class="reasoning">
+						<summary><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.5a4.5 4.5 0 0 1 4.5 4.5c0 1.7-.9 2.6-1.7 3.4-.5.5-.8 1-.8 1.6h-4c0-.6-.3-1.1-.8-1.6C4.4 8.6 3.5 7.7 3.5 6A4.5 4.5 0 0 1 8 1.5z"/><path d="M6.5 13.5h3"/></svg><span class="reasoning-label">思考</span><span class="reasoning-sep"></span><span class="reasoning-preview">字号是五档 token，方案 B 整棵抬一档、方案 C 只动正文……</span></summary>
+					</details>
+					<div class="turn-body"><p>现在的五档读着小，我想让整个窗口的文字都大一号，怎么抬？</p></div>
+				</section>
+
+				<section class="turn" data-role="user">
+					<div class="turn-body"><p>系统字体再大一点，最好是整体都大，不是只有正文。</p></div>
+				</section>
+
+				<div class="tool-group">
+					<details class="tool">
+						<summary><svg class="tool-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3l5 5-5 5"/></svg><span class="tool-name">Read</span><span class="tool-path">packages/web/src/tokens.css</span></summary>
+					</details>
+					<details class="tool" open>
+						<summary><svg class="tool-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3l5 5-5 5"/></svg><span class="tool-name">Edit</span><span class="tool-path">packages/web/src/tokens.css</span><span class="diff-stat" style="margin-left:auto;font-family:var(--dsw-font-mono);font-size:var(--dsw-fs-caption);color:var(--dsw-state-success)">+5 −5</span></summary>
+					</details>
+				</div>
+
+				<section class="turn">
+					<div class="turn-body">
+						<p>两个方向都做出来了，切换底部悬浮条对比：</p>
+						<ul>
+							<li><b>B 整棵抬一档</b>——五档全部 +1px，行高跟着比率走，整个窗口一起变大；</li>
+							<li><b>C 只抬正文</b>——正文 15→16，外壳四档不动，读感是"内容大了、框架没变"。</li>
+						</ul>
+						<p>行高不是拍的：<code>body</code> 沿用 25/15 的比率派生，其余各档按原比率就近取整。</p>
+					</div>
+				</section>
+			</div>
+		</div>
+
+		<div class="composer-wrap">
+			<div class="composer-head">
+				<button class="workspace-chip">
+					<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 4.5a1 1 0 0 1 1-1h3l1.5 2h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-10.5a1 1 0 0 1-1-1z"/></svg>
+					<span class="workspace-chip-label">my-coding-agent</span>
+				</button>
+			</div>
+			<form class="composer">
+				<textarea rows="2">试试两个方案哪个读着舒服。</textarea>
+				<div class="composer-bar">
+					<button type="button" class="composer-select">deepseek-flash ▾</button>
+					<button type="button" class="composer-select">high ▾</button>
+					<span class="composer-spacer"></span>
+					<button type="button" class="send">发送</button>
+				</div>
+			</form>
+			<div class="status-bar">
+				<span class="status-stat">total 6.2k</span>
+				<span class="status-stat">cache 41%</span>
+				<span class="status-stat">context 18%</span>
+			</div>
+		</div>
+	</main>
+</div>
+
+<!-- ================ 连坐面板：同一套档位 ================ -->
+<div class="panels">
+	<div class="panel-box welcome">
+		<div class="panel-title">welcome 欢迎态</div>
+		<div class="welcome-mark">✦</div>
+		<h2>想做点什么？</h2>
+		<p>新会话从这里开始。左边挑一个工作区，或者直接在下面说。</p>
+	</div>
+	<div class="panel-box">
+		<div class="panel-title">approval 审批接管卡</div>
+		<div class="approval-card">
+			<div class="approval-strip"><span class="approval-dot"></span>等待你的批准</div>
+			<div class="approval-body-wrap">
+				<div class="approval-headline">Bash · 1 条命令</div>
+				<pre class="approval-command">npm run check</pre>
+			</div>
+			<div class="approval-actions">
+				<button class="ghost-btn">拒绝</button>
+				<button class="send">批准</button>
+			</div>
+		</div>
+	</div>
+	<div class="panel-box">
+		<div class="panel-title">settings 设置面板</div>
+		<div class="settings-row">
+			<div><div class="settings-label">字号</div><div class="settings-hint">只驱动正文一档</div></div>
+			<span class="settings-value" id="fsReadout">15</span>
+		</div>
+		<div class="settings-row">
+			<div><div class="settings-label">外观</div><div class="settings-hint">浅色 / 深色跟随系统</div></div>
+			<span class="settings-value">深色</span>
+		</div>
+		<div class="settings-row">
+			<div><div class="settings-label">Bash 超时</div><div class="settings-hint">超时中断一次调用</div></div>
+			<span class="settings-value">120 秒</span>
+		</div>
+	</div>
+</div>
+
+<!-- ================ 悬浮切换条 ================ -->
+<div class="switcher" id="switcher">
+	<button id="prev" title="上一个（←）">←</button>
+	<div class="label" id="label"></div>
+	<button id="next" title="下一个（→）">→</button>
+	<div class="readout" id="readout"></div>
+</div>
+
+<script>
+	// Three variants; the answer this prototype is chasing is "B or C (or neither)".
+	const VARIANTS = [
+		{ key: "a", name: "A 现状", note: "04/05 拍的五档，与参考实现一致" },
+		{ key: "b", name: "B 整棵抬一档", note: "五档全部 +1px，行高按原比率就近取整" },
+		{ key: "c", name: "C 只抬正文", note: "body 15→16，外壳四档原地不动" },
+	];
+
+	const TIERS = [
+		["title", "会话标题 / 设置标签"],
+		["meta", "次级行 / 工具行 / 菜单"],
+		["caption", "时间戳 / 状态行"],
+		["body", "正文 / 气泡 / 输入框"],
+		["code", "代码 / 命令"],
+	];
+
+	function tierText(tier) {
+		const style = getComputedStyle(document.documentElement);
+		return `${style.getPropertyValue(`--dsw-fs-${tier}`).trim()} / ${style.getPropertyValue(`--dsw-lh-${tier}`).trim()}`;
+	}
+
+	function drawTierTable() {
+		const table = document.getElementById("tierTable");
+		table.replaceChildren(...TIERS.map(([tier, role]) => {
+			const pill = document.createElement("span");
+			pill.className = "tier-pill";
+			const text = document.createElement("b");
+			text.textContent = tier;
+			pill.append(text, ` ${tierText(tier)} · ${role}`);
+			if (current.key !== "a") {
+				const base = tierValue(tier, "a"), now = tierValue(tier, current.key);
+				if (base !== now) pill.classList.add("moved");
+			}
+			return pill;
+		}));
+	}
+
+	function tierValue(tier, key) {
+		const el = document.createElement("i");
+		el.style.display = "none";
+		document.documentElement.dataset.savedVariant = document.documentElement.dataset.variant ?? "";
+		document.documentElement.dataset.variant = key === "a" ? "" : key;
+		document.body.append(el);
+		const fs = getComputedStyle(document.documentElement).getPropertyValue(`--dsw-fs-${tier}`).trim();
+		el.remove();
+		document.documentElement.dataset.variant = current.key === "a" ? "" : current.key;
+		return fs;
+	}
+
+	let index = 0;
+	let current = VARIANTS[0];
+
+	function apply() {
+		current = VARIANTS[index];
+		document.documentElement.dataset.variant = current.key === "a" ? "" : current.key;
+		document.getElementById("label").innerHTML = `${current.name}<small>${current.note}</small>`;
+		document.getElementById("fsReadout").textContent = tierValue("body", current.key).replace("px", "");
+		drawTierTable();
+		history.replaceState(null, "", `?variant=${current.key}`);
+	}
+
+	function step(delta) {
+		index = (index + delta + VARIANTS.length) % VARIANTS.length;
+		apply();
+	}
+
+	document.getElementById("prev").addEventListener("click", () => step(-1));
+	document.getElementById("next").addEventListener("click", () => step(1));
+	document.addEventListener("keydown", (event) => {
+		const target = event.target;
+		if (target instanceof HTMLElement && target.matches("input, textarea, [contenteditable]")) return;
+		if (event.key === "ArrowLeft") step(-1);
+		if (event.key === "ArrowRight") step(1);
+	});
+
+	// Hover readout: point at any text and the bar reads its actual size/leading.
+	const switcher = document.getElementById("switcher");
+	const readout = document.getElementById("readout");
+	document.addEventListener("pointerover", (event) => {
+		const target = event.target instanceof Element ? event.target : null;
+		if (target === null || !document.body.contains(target)) return;
+		const style = getComputedStyle(target);
+		if (style.fontSize === "" || target.closest(".switcher")) return;
+		readout.textContent = `${style.fontSize} / ${style.lineHeight} · ${target.tagName.toLowerCase()}.${String(target.className).split(" ")[0] || "—"}`;
+		switcher.classList.add("reading");
+	});
+
+	// Theme toggle on Shift+T — the reference material is judged in both sheets.
+	document.addEventListener("keydown", (event) => {
+		if (event.shiftKey && event.key === "T") {
+			const root = document.documentElement;
+			root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+		}
+	});
+
+	const fromUrl = new URLSearchParams(location.search).get("variant");
+	const found = VARIANTS.findIndex((variant) => variant.key === fromUrl);
+	if (found >= 0) index = found;
+	apply();
+</script>
+</body>
+</html>

@@ -1,10 +1,12 @@
 # 17 整体字号抬高
 
-Type: grilling
-Status: open
+Type: prototype
+Status: claimed
 Blocked by:
 
 ## Question
+
+> 用户 2026-10-15 15:08 拍板：不直接答，先做个原型看。
 
 用户要求「系统的字体再大一点」。04/05 拍的五档（body 15/25、title 14/20、meta 13/18、
 caption 12/16、code 13/20）与参考实现一致，但用户读着小。要和用户对齐的：
@@ -16,3 +18,20 @@ caption 12/16、code 13/20）与参考实现一致，但用户读着小。要和
    05–07 没碰，若整棵抬一档，它们一起动还是各自再核。
 3. 产出：五档新数值表（照 05 号 Answer 的对照表格式）+ `DEFAULT_APPEARANCE` 与 tokens.css
    的改动清单。落代码归 task 票，本票只拍数。
+
+## Prototype
+
+2026-10-15：原型落 `prototype/type-scale.html`（自包含、无依赖、双击可开），三个方案
+`?variant=a|b|c`，底部悬浮条或 ←/→ 切换，Shift+T 换浅深主题，悬停任意文字读出实际字号/行高：
+
+- **A 现状**：title 14/20 · meta 13/18 · caption 12/16 · body 15/25 · code 13/20；
+- **B 整棵抬一档**：title 15/21 · meta 14/19 · caption 13/17 · body 16/27 · code 14/21
+  （行高按各档原比率就近取整，body 沿用派生式 `calc(fs * 27/16)`）；
+- **C 只抬正文**：body 15→16，外壳四档原地不动。
+
+窗口照真尺寸复刻：左栏 32px 行 + 工作区头、固定头 + 分支 chip、思考行、用户气泡 + 分隔线、
+工具一行、composer + 状态行；"连坐"三面板（欢迎态 / 审批卡 / 设置面板）吃同一套档位。
+顶部档位读数标出本方案动过的档（蓝框）。
+
+**等用户挑**：B、C，或都不满意再说。拍板后落代码归 task 票（改 tokens.css 五档 +
+`DEFAULT_APPEARANCE`，npm run check）。
