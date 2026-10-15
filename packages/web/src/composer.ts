@@ -13,7 +13,10 @@ export interface ComposerHandlers {
 /** The model seat: which row answers, and how hard it is asked to think. */
 export interface ComposerSelection {
 	models: readonly ModelOption[];
-	/** The ref on screen, which may name a row that is no longer in `models`. */
+	/**
+	 * The ref on screen, which may name a row that is no longer in `models` — or be the empty
+	 * string when nothing has been chosen yet, the state a window with no session open sits in.
+	 */
 	model: string;
 	levels: readonly string[];
 	level: string;
@@ -140,9 +143,10 @@ export class Composer {
 	 *
 	 * The options are rebuilt only when the list they came from moved, so an ordinary re-render — which
 	 * happens on every token — cannot close a dropdown the user has open or drop a value mid-choice.
-	 * The session's own ref is always among the options: a row may have been deleted, or never existed
-	 * at all for a session with nothing configured, and the control has to show where the session
-	 * actually is rather than silently agree with a list that no longer mentions it.
+	 * The session's own ref is always among the options: a row may have been deleted, never existed at
+	 * all for a session with nothing configured, or not have been chosen yet at all — and the control
+	 * has to show where the choice actually stands rather than silently agree with a list that no
+	 * longer mentions it.
 	 */
 	setSelection(selection: ComposerSelection): void {
 		const modelSignature = `${selection.model}\n${selection.models.map((model) => `${model.name}/${model.modelId}`).join("\n")}`;
@@ -152,7 +156,13 @@ export class Composer {
 				...selection.models.map((model) => option(`${model.name}/${model.modelId}`, model.name)),
 			);
 			if (!selection.models.some((model) => `${model.name}/${model.modelId}` === selection.model)) {
-				const label = selection.models.length === 0 ? "未配置模型" : `${selection.model}（已丢失）`;
+				// Three ways to sit outside the list, and only one of them is a loss: nothing configured
+				// at all, nothing chosen yet (the empty ref — the seat is where the next conversation
+				// starts), and a ref whose row is gone. Only the last one names what was lost.
+				const label =
+					selection.models.length === 0 ? "未配置模型"
+					: selection.model.length === 0 ? "选择模型"
+					: `${selection.model}（已丢失）`;
 				this.modelSelect.append(option(selection.model, label));
 			}
 		}

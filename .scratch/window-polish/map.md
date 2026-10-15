@@ -85,6 +85,18 @@ WebSocket 连接处报 "the mux connection failed"——那是没起服务器，
 
 <!-- 关掉的 ticket 依次列在这里：一行要点 + 指向该 ticket 的链接 -->
 
+- [22 空态里的模型位读作「（已丢失）」](issues/22-empty-state-model-seat.md)：`model === ""`
+  这个「还没轮到选」的第三态在 `composer.ts` 单独分支，读作**「选择模型」**（与 hero 同调的
+  邀请式文案；`selectionForSend()` 一字未动），空串永远到不了「已丢失」支；
+  `models.length === 0` 的「未配置模型」一支文案不动、判定次序被 C 段钉住。
+  核出的事实修正：新装配的会话快照里已有装配时采纳的默认行，第三态只在 `snapshot === undefined`
+  的空态现形。`settings.ts:457` 核过不受影响（有 `current.length > 0` 守卫）。
+  **执行期撞出更重的事**：核验脚本从不隔离 agent home，`setUserModels` 整文件覆写把用户真实的
+  `~/.my-agent/models.json` 换成了假行（19 号起每次运行都在发生）——已清回空清单（密钥不可恢复，
+  真实行名 `anthropic/claude-sonnet-4-5`、`deepseek/deepseek-flash` 要用户重录），两份 verify
+  脚本补上 `MY_AGENT_HOME` 隔离 + core 模块动态 import 的时序。真窗口 8 条断言
+  `research/verify-22.ts` 全绿，图 `v22-*.png`。
+
 - [21 删掉刚派生的会话后，窗口给已删会话补发一次 `open`](issues/21-fork-then-delete-stale-open.md)：
   三处各自都对、合起来漏的竞态修在客户端两处——`openSession` 尾部 `mux.retain` 前加
   `followed !== snapshot.id` 的闸（`followed` 是「窗格开在哪」的唯一事实，四个入口同走

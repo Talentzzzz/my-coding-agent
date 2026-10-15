@@ -11,12 +11,21 @@
 // 每一步入图；某一入口若点了没反应，check 会红，脚本照样跑完把剩下的也验一遍——红的那条就是
 // 19 号要登记的 bug（修复另开票，不在这里顺手改）。退出码 1 表示至少一条红。
 import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
-import { bootServer } from "../../../packages/server/src/boot.ts";
-import { createFakeTransport, fakeAssistantMessage } from "../../../scripts/fake-transport.ts";
 import type { SessionSnapshot, UserModel } from "@my-agent/core";
+
+// 隔离 agent home：`AGENT_HOME`（由 `MY_AGENT_HOME` 环境变量驱动）在 config.ts 装载时求值，
+// 所以必须在任何 core 模块进来之前把环境变量立住——动态 import 而不是顶部静态 import 就是
+// 为此。没有这一步，`setUserModels` 会把整份假模型写进真实的 ~/.my-agent/models.json
+// （22 号核验途中撞见并已实际发生一次，隔离补在这里，见 22 号票面 Answer）。
+const home = mkdtempSync(join(tmpdir(), "my-agent-verify19-home-"));
+process.env.MY_AGENT_HOME = home;
+
+const { bootServer } = await import("../../../packages/server/src/boot.ts");
+const { createFakeTransport, fakeAssistantMessage } = await import("../../../scripts/fake-transport.ts");
 
 const { chromium } = createRequire(import.meta.url)(
 	"C:/Users/a1368/.workbuddy/binaries/node/workspace/node_modules/playwright-core/index.js",
@@ -34,9 +43,10 @@ const rows: UserModel[] = [
 		reasoning: false,
 	},
 ];
-// 每次运行一个唯一标记：左栏的会话清单是**整机**的（本机上还堆着几百条别的历史工作区），
-// 靠文字找行时若用固定开场白，上一次运行残留的临时工作区会被匹配上，操作就落到旧会话去了。
-// 标记要短：行标题长了会被 CSS 截断，`（1）` 那个后缀就拍不进图里了。
+// 每次运行一个唯一标记：隔离之前左栏的会话清单是**整机**的（agent home 共享时，本机上堆着的
+// 历史工作区会一起出现），靠文字找行时若用固定开场白，上一次运行残留的临时工作区会被匹配上。
+// 现在清单虽已随 agent home 隔离，标记仍留着——它同时是找行与断言的锚点，且要短：行标题长了
+// 会被 CSS 截断，`（1）` 那个后缀就拍不进图里了。
 const tag = `V19${Math.random().toString(36).slice(2, 7)}`;
 const root = await mkdtemp(join(tmpdir(), `my-agent-verify19-${tag}-`));
 const server = await bootServer({ cwd: root, port: 0, api: fake.api });
@@ -308,6 +318,7 @@ if (alternative !== undefined) {
 await browser.close();
 await server.close();
 await rm(root, { recursive: true, force: true });
+await rm(home, { recursive: true, force: true });
 // 横幅是**过程记录**，不是断言：三个入口本身全绿，这条红字是 21 号那条竞态白送给用户的噪音，
 // 修复在 21 号。它的出现取决于「派生」到「删除」之间隔了多久，所以这里把次数打出来留档。
 say(
