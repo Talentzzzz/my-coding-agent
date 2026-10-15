@@ -429,15 +429,6 @@ class FakeNode {
 		walk(this);
 		return found ?? null;
 	}
-	querySelectorAll(selector: string): FakeNode[] {
-		const found: FakeNode[] = [];
-		const walk = (node: FakeNode): void => {
-			if (matches(node, selector)) found.push(node);
-			for (const child of node.children) walk(child);
-		};
-		walk(this);
-		return found;
-	}
 }
 
 /** 一条选择器：`.a.b`、`[attr]`、`[attr="v"]`、`tag`，以及它们的组合。 */
@@ -490,8 +481,6 @@ export interface DomShim {
 export interface InstallOptions {
 	/** 覆盖严格模式；不传就用 `DOM_SHIM_LAX` 的默认。 */
 	strict?: boolean;
-	/** 页面里 `#app` 那个根，`document.querySelector("#app")` 命中它。 */
-	app?: FakeNode;
 	/** 视口尺寸，菜单的钳位读它。 */
 	viewport?: { width: number; height: number };
 }
@@ -551,7 +540,6 @@ export function installDom(options: InstallOptions = {}): DomShim {
 		createDocumentFragment: () => guard(new FakeNode("#fragment")),
 		getElementById: byId,
 		querySelector: (selector: string) => root.querySelector(selector),
-		querySelectorAll: (selector: string) => root.querySelectorAll(selector),
 		get activeElement(): FakeNode | null {
 			return null;
 		},

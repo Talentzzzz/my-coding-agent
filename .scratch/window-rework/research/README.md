@@ -4,10 +4,13 @@
 
 | 文件 | 是什么 |
 | --- | --- |
-| `dom-shim.ts` | **唯一一份**最小 DOM 宿主。量具与它同源；`scripts/smoke-sidebar.ts` 里那份是老的独立副本（尚未合并），两边因此漂移过一次——见下 |
+| `dom-shim.ts` | **唯一一份**最小 DOM 宿主。量具从这里 import；`scripts/smoke-sidebar.ts` 里还留着一份独立的旧副本（本票没动它），两边曾因此漂移过一次——见下 |
 | `jank-harness.ts` | 量具本身：流式一帧的成本、以及 `openSession()` 端到端的一次会话切换 |
 | `markdown-attribution-probe.ts` | 独立核对量具里"其中md"那一列的归因 |
 | `jank-harness-output-repair.txt` | 2026-10-16 那次默认参数的**原样输出**（`FRAMES=2000`，切换场景每档采样 10 次 + 3 次热身） |
+
+> 老文档 `jank-profile.md`（03 号）描述的是**修好之前**的装置：它的行号、门槛与场景清单都指旧副本。
+> 装置本身以本文件与 `jank-harness.ts` 的头部注释为准。
 
 ## 跑法
 
