@@ -1157,7 +1157,13 @@ input:focus-visible {
 	background: var(--dsw-diff-deleted);
 }
 
-.streaming .turn:last-of-type .turn-body::after {
+/*
+ * The streaming caret, on the one message that is still being written. It is gated twice —
+ * the run is in flight, and this turn's own item says it is arriving — because "last turn"
+ * is the wrong owner: between an answer's end and the next one's first delta, the last turn
+ * is often the user's own bubble, and a caret drawn there reads as an orphan block (16).
+ */
+.streaming .turn.assistant.streaming .turn-body::after {
 	content: "";
 	display: inline-block;
 	width: 7px;

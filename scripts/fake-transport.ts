@@ -81,7 +81,7 @@ export function fakeAssistantMessage(
 		stopReason: options.stopReason ?? "stop",
 		...(options.errorMessage === undefined ? {} : { errorMessage: options.errorMessage }),
 		...(options.responseId === undefined ? {} : { responseId: options.responseId }),
-		timestamp: options.timestamp ?? Date.now(),
+		timestamp: options.timestamp ?? nextStamp(),
 	};
 }
 
@@ -130,6 +130,17 @@ function estimateTokens(text: string): number {
 
 function randomId(prefix: string): string {
 	return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+}
+
+// Scripted answers all read this module's clock, so two messages built in the same millisecond
+// would carry one stamp — the window folds transcript items by `role:timestamp`, and a shared
+// stamp makes it fold one message over the other (16; 07 hit this while shooting screenshots).
+// The stamp is the double's own sequence, then: monotonic, like the session's `nextStamp`.
+let lastStamp = 0;
+
+function nextStamp(): number {
+	lastStamp = Math.max(Date.now(), lastStamp + 1);
+	return lastStamp;
 }
 
 function contentToText(content: string | Array<TextContent | ImageContent>): string {
@@ -214,7 +225,7 @@ function cloneMessage(message: AssistantMessage, model: Model<string>): Assistan
 		...cloned,
 		api: model.api,
 		model: model.id,
-		timestamp: cloned.timestamp ?? Date.now(),
+		timestamp: cloned.timestamp ?? nextStamp(),
 		usage: cloned.usage ?? DEFAULT_USAGE,
 	};
 }
@@ -228,12 +239,12 @@ function createErrorMessage(error: unknown, model: Model<string>): AssistantMess
 		usage: DEFAULT_USAGE,
 		stopReason: "error",
 		errorMessage: error instanceof Error ? error.message : String(error),
-		timestamp: Date.now(),
+		timestamp: nextStamp(),
 	};
 }
 
 function createAbortedMessage(partial: AssistantMessage): AssistantMessage {
-	return { ...partial, stopReason: "aborted", errorMessage: "Request was aborted", timestamp: Date.now() };
+	return { ...partial, stopReason: "aborted", errorMessage: "Request was aborted", timestamp: nextStamp() };
 }
 
 function scheduleChunk(chunk: string, tokensPerSecond: number | undefined): Promise<void> {

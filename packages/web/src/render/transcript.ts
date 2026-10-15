@@ -159,6 +159,11 @@ export class TranscriptView {
 			return;
 		}
 		turn.item = item;
+		// Whether *this* message is still arriving, which is what the stylesheet's streaming caret
+		// keys on: the caret belongs to the message being written, not to whatever turn happens to
+		// sit last while the run is in flight (16) — between an answer's end and the next one's
+		// first delta, the last turn is often the user's own bubble.
+		turn.section.classList.toggle("streaming", item.streaming);
 		this.applyEntry(turn);
 
 		// A notice is plain text and never streams, so it is written once and left alone.

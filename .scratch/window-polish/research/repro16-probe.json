@@ -1,0 +1,43 @@
+{
+  "order": [
+    {
+      "cls": "turn user",
+      "role": "user",
+      "text": "第一轮的问题"
+    },
+    {
+      "cls": "turn user",
+      "role": "user",
+      "text": "你有哪些工具"
+    },
+    {
+      "cls": "turn assistant",
+      "role": "",
+      "text": "目录里没有代码，只有三个文件：1.jpg、2.j"
+    },
+    {
+      "cls": "turn user",
+      "role": "user",
+      "text": "你有哪些工具"
+    }
+  ],
+  "containerStreaming": true,
+  "lastTurnRole": "user",
+  "lastTurnClass": "turn user",
+  "caret": {
+    "content": "none",
+    "width": "auto",
+    "height": "auto"
+  },
+  "bubbleFontSize": "20px",
+  "bubbleParagraphFontSize": "20px",
+  "assistantFontSize": "20px",
+  "bubbleRect": {
+    "w": 150,
+    "h": 53.328125
+  },
+  "paraRect": {
+    "w": 120,
+    "h": 33.328125
+  }
+}

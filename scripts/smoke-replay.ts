@@ -5,8 +5,8 @@
 // `toolResult` message paired by id), as verified on disk by 03's research (`replay-tools.md`).
 // Nothing reaches a model, so no provider key is needed.
 // Run with: node scripts/smoke-replay.ts
-import { initialState, reduce, type Item } from "../packages/web/src/state.ts";
-import type { SessionSnapshot, UsageTotals } from "@my-agent/core/protocol";
+import { initialState, reduce, type Item, type ViewState } from "../packages/web/src/state.ts";
+import type { ServerMessage, SessionSnapshot, UsageTotals } from "@my-agent/core/protocol";
 
 let failures = 0;
 
@@ -203,6 +203,92 @@ const cutShort = reopen([
 ]);
 const cutCard = toolGroups(cutShort)[0]?.cards[0];
 check("an unanswered call is settled, not spinning", cutCard?.running === false, String(cutCard?.running));
+
+// ------------------------------------------------------------------ one watched turn, folded live
+//
+// The shape 16 pinned: the echo of a queued message lands in the gap after the previous turn
+// finished streaming (the real wire order — the loop only replays it at a drain point, always
+// after the previous assistant's message_end), and two assistant messages stamped in the same
+// millisecond (the collision 07 hit) must not push the first answer to the other side of the
+// user bubble.
+
+/** Fold one session event the way the wire delivers it. */
+function fold(state: ViewState, event: unknown): ViewState {
+	return reduce(state, { type: "event", event } as ServerMessage);
+}
+
+function userEcho(timestamp: number, text: string) {
+	return { type: "message_start", message: { role: "user", content: [{ type: "text", text }], timestamp } };
+}
+function userEnd(timestamp: number, text: string) {
+	return { type: "message_end", message: { role: "user", content: [{ type: "text", text }], timestamp } };
+}
+function assistantStart(timestamp: number, text = "") {
+	return { type: "message_start", message: { role: "assistant", content: text.length === 0 ? [] : [{ type: "text", text }], timestamp } };
+}
+function assistantUpdate(timestamp: number, text: string) {
+	return { type: "message_update", message: { role: "assistant", content: [{ type: "text", text }], timestamp } };
+}
+function assistantEnd(timestamp: number, text: string) {
+	return { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], timestamp } };
+}
+
+/** The message items, as `id=text`, in fold order. */
+function shapeOf(items: Item[]): string {
+	return items
+		.map((item) => (item.kind === "message" ? `${item.id}=${item.text.slice(0, 12)}` : item.id))
+		.join(" ");
+}
+
+process.stdout.write("a user echo landing mid-stream keeps the answer whole\n");
+let liveState = reduce(initialState(), { type: "baseline", session: snapshotWith([]) });
+liveState = fold(liveState, userEcho(1_000, "第一问"));
+liveState = fold(liveState, userEnd(1_000, "第一问"));
+liveState = fold(liveState, assistantStart(2_000));
+liveState = fold(liveState, assistantUpdate(2_000, "第一答"));
+// The queued message is written to the store before the loop replays it: this entry arrives
+// ahead of the echo and waits there for its item.
+liveState = reduce(liveState, { type: "entry", entryId: "entry-u2", messageTimestamp: 3_000 });
+liveState = fold(liveState, assistantEnd(2_000, "第一答"));
+liveState = fold(liveState, userEcho(3_000, "你有哪些工具"));
+liveState = fold(liveState, userEnd(3_000, "你有哪些工具"));
+check(
+	"the echo lands after the finished answer, before the next one",
+	shapeOf(liveState.items) === "user:1000=第一问 assistant:2000=第一答 user:3000=你有哪些工具",
+	shapeOf(liveState.items),
+);
+const echoItem = liveState.items.find((item): item is Extract<Item, { kind: "message" }> => item.kind === "message" && item.id === "user:3000");
+check("the pending entry found its echo", echoItem?.forkEntryId === "entry-u2", JSON.stringify(echoItem?.forkEntryId));
+
+// A second assistant stamped like the first: it must not overwrite the first answer's body,
+// and must not draw the answer on the far side of the user bubble.
+liveState = fold(liveState, assistantStart(2_000, "第二答"));
+liveState = fold(liveState, assistantUpdate(2_000, "第二答"));
+liveState = fold(liveState, assistantEnd(2_000, "第二答"));
+check(
+	"a same-stamp successor takes the tail, the first answer keeps its place",
+	shapeOf(liveState.items) === "user:1000=第一问 assistant:2000#1=第一答 user:3000=你有哪些工具 assistant:2000=第二答",
+	shapeOf(liveState.items),
+);
+
+process.stdout.write("the fold's live order never splits an answer around a bubble\n");
+let plainState = reduce(initialState(), { type: "baseline", session: snapshotWith([]) });
+plainState = fold(plainState, userEcho(10_000, "第一问"));
+plainState = fold(plainState, userEnd(10_000, "第一问"));
+plainState = fold(plainState, assistantStart(11_000));
+plainState = fold(plainState, assistantUpdate(11_000, "第一答"));
+plainState = fold(plainState, assistantEnd(11_000, "第一答"));
+plainState = fold(plainState, userEcho(12_000, "接着问"));
+plainState = fold(plainState, userEnd(12_000, "接着问"));
+plainState = fold(plainState, assistantStart(13_000));
+plainState = fold(plainState, assistantUpdate(13_000, "第二答"));
+plainState = fold(plainState, { type: "tool_execution_start", toolCallId: "tool:9", toolName: "read", args: { path: "a.txt" } });
+plainState = fold(plainState, assistantEnd(13_000, "第二答"));
+check(
+	"echo, next answer, and its tool group each follow the item they belong to",
+	shapeOf(plainState.items) === "user:10000=第一问 assistant:11000=第一答 user:12000=接着问 assistant:13000=第二答 tools:tool:9",
+	shapeOf(plainState.items),
+);
 
 process.stdout.write(failures === 0 ? "\nreplay ok\n" : `\n${failures} failure(s)\n`);
 process.exit(failures === 0 ? 0 : 1);

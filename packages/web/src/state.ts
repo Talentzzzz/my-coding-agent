@@ -657,8 +657,33 @@ function upsertMessage(
 		// A new message ends the current tool group, so cards that follow belong to it.
 		return [...items, item];
 	}
+	// A frame that starts or advances a message the loop has not shown yet cannot legitimately
+	// target a *finished* item: the loop announces each message once and streams its updates
+	// before the end, so an id that matches one names a different message — two stamped in the
+	// same millisecond (07). Replacing in place would draw the newcomer's body on the old
+	// answer's position, splitting the transcript around a user bubble (16), so the finished
+	// item is renamed out of the way and the newcomer takes the plain id its own updates will
+	// arrive under.
+	if (existing !== undefined && !final && !existing.streaming) {
+		return [...renameMessage(items, index, freeMessageId(items, id)), item];
+	}
 	const next = [...items];
 	next[index] = item;
+	return next;
+}
+
+/** The first unused variant of `id`, for two messages that were stamped alike. */
+function freeMessageId(items: Item[], id: string): string {
+	for (let n = 1; ; n += 1) {
+		const candidate = `${id}#${n}`;
+		if (!items.some((existing) => existing.kind === "message" && existing.id === candidate)) return candidate;
+	}
+}
+
+/** Replace one message item's id in place, leaving its position and content alone. */
+function renameMessage(items: Item[], index: number, id: string): Item[] {
+	const next = [...items];
+	next[index] = { ...(next[index] as Extract<Item, { kind: "message" }>), id };
 	return next;
 }
 
