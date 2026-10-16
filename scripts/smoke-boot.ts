@@ -16,15 +16,38 @@
 // Its honest limit, written down: `main.ts`'s own shutdown handler ends with `process.exit(0)`, so
 // this proves the shell can put the server down — not that the event loop drains by itself. Only
 // the in-process half above proves that.
+//
+// The agent home is the script's own scratch directory, created before the first app module is
+// imported: `AGENT_HOME` is resolved once, at import time, from `MY_AGENT_HOME`, which is why every
+// app import below is dynamic. Booting against the machine's real home made this smoke read the
+// user's `models.json` — zero rows there put the landing session on the placeholder model, which
+// never sends anything, so the run below never reached its tool call and the approval never arrived
+// (ticket 10: red on 2026-10-16, green the same afternoon, code untouched in between). It also
+// wrote every run's session file into the real home's `sessions/`. Both leaks are gone: the model
+// list is this script's own one-row file, and the home is removed with the workspaces at the end.
 import { mkdtemp, rm } from "node:fs/promises";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createServer as createTcpServer } from "node:net";
 import { spawn } from "node:child_process";
-import { bootServer, type BootedServer } from "../packages/server/src/boot.ts";
-import { connect, until, type WireClient } from "./wire/client.ts";
-import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
+import type { BootedServer } from "../packages/server/src/boot.ts";
+import type { WireClient } from "./wire/client.ts";
+
+// The scratch home, then the env it rides on, then — and only then — the app modules. The row needs
+// no key: the fake transport below never dials the endpoint a row names.
+const agentHome = mkdtempSync(join(tmpdir(), "my-agent-boot-home-"));
+writeFileSync(
+	join(agentHome, "models.json"),
+	`${JSON.stringify({ models: [{ name: "boot-fake", baseUrl: "http://127.0.0.1:9", modelId: "boot-fake" }] }, null, "\t")}\n`,
+	"utf8",
+);
+process.env.MY_AGENT_HOME = agentHome;
+
+const { bootServer } = await import("../packages/server/src/boot.ts");
+const { connect, until } = await import("./wire/client.ts");
+const { createFakeTransport, fakeAssistantMessage, fakeToolCall } = await import("./fake-transport.ts");
 
 let failures = 0;
 
@@ -56,10 +79,12 @@ async function freePort(): Promise<number> {
 	return port;
 }
 
-// The desktop shell boots against the machine's own home; so does this script. The workspaces,
-// though, are scratch directories — nothing here writes a session into the repo. The scripted
-// transport rides the boot path itself: the worst case below needs a run parked on an approval, and
-// a provider key must not be the price of one.
+// The desktop shell boots against the machine's own home; this script boots against the scratch
+// home above, because what the shell needs from the boot path must not depend on what the machine
+// happens to have in it. The workspaces are scratch directories too — nothing here writes a session
+// into the repo, or anywhere outside the two scratch trees. The scripted transport rides the boot
+// path itself: the worst case below needs a run parked on an approval, and a provider key must not
+// be the price of one.
 const workspace = await mkdtemp(join(tmpdir(), "my-agent-boot-"));
 const fake = createFakeTransport();
 fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" }))]);
@@ -210,6 +235,7 @@ try {
 	await rm(childWorkspace, { recursive: true, force: true }).catch(() => {});
 } finally {
 	await rm(workspace, { recursive: true, force: true }).catch(() => {});
+	await rm(agentHome, { recursive: true, force: true }).catch(() => {});
 }
 
 // The natural-exit watchdog, last thing in the file: everything above has been torn down, so the
@@ -218,6 +244,12 @@ try {
 // fail, because a smoke that ends only because it was told to has proven nothing about shutdown.
 setTimeout(() => {
 	process.stdout.write("\nFAIL the process did not exit on its own — a handle leaked somewhere above\n");
+	// Say what is still holding the loop, so the next occurrence names its handle instead of only
+	// announcing that one exists. Types only — Node offers no portable handle identity here — but a
+	// leak that reports "TCPSocketWrap" is one that can be hunted; ticket 10's second half is still
+	// unreproduced, and this is the net it leaves behind for it.
+	const resources = [...new Set(process.getActiveResourcesInfo())].join(", ");
+	process.stdout.write(`still-active resources: ${resources}\n`);
 	process.exit(1);
 }, 5_000).unref();
 

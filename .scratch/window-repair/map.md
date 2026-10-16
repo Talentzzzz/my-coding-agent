@@ -94,8 +94,11 @@ resolved**，本图接着它们往下走，但有两条是**重开**而不是新
   外壳只能走 `npm run desktop`（`packages/desktop/scripts/launch.mjs:51` 会删掉这个变量）。
 - **`npm start` 起的是服务器，不是应用**（根 `package.json:18` → port 8080、没有窗口）。只有
   `npm run desktop` 开窗口。敲错命令的人看到的是"什么都没发生"。
-- **代理这条与上一张图的 Notes 相反**：本机这个 shell 里 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`
-  **都是空的**，`curl localhost:8080` 不再被送去代理。上一张图那条坑可以不再当承重事实引用。
+- ~~**代理这条与上一张图的 Notes 相反**：本机这个 shell 里 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`
+  **都是空的**，`curl localhost:8080` 不再被送去代理。上一张图那条坑可以不再当承重事实引用。~~
+  **再次过期（10 号实测，2026-10-16 下午）**：当前 shell 里 `HTTP_PROXY`/`HTTPS_PROXY` **又有了**
+  （`http://127.0.0.1:51845`）。对 `curl` 的手工探测要带 `--noproxy '*'`；Node 的 fetch/WebSocket 不读
+  这些变量，smoke 不受影响。教训：这条环境事实**一天能变两次**，别把它记成承重事实，要用时当场看。
 - ~~`npm run desktop:screenshot` 在本机必崩（GPU 进程），出图走
   `.scratch/window-rework/research/shots.ts` 那套（bootServer + 本机 Chromium）。~~ **已过期（03 号实测，
   2026-10-16）**：这条说的时候那 12 行开关还没加。03 号在**删开关之前与之后**各跑一次
@@ -210,6 +213,17 @@ resolved**，本图接着它们往下走，但有两条是**重开**而不是新
   appearance 记住**（不用 localStorage）。落地注意事项（`main.ts:708` 签名带收展状态、「当前」标记
   与收起态共存、计数按会话走、appearance 真实序列化→恢复要真验）随票记下，执行归
   [11 号 task 票](issues/11-land-workspace-paging.md)。
+- [10 smoke:boot 是红的](issues/10-smoke-boot-red.md)：红态钉住且根因查明——**不是闸门或循环的
+  bug**（`caa373c` 与 HEAD 的 packages/ 无差），是 **smoke-boot 不封闭**：它读机器真实的
+  `models.json`，零行时会话装配到 placeholder model、`unconfiguredStream` 根本不发请求，审批永远
+  不来（票面"不读模型清单"的排除是错的，假传输只替换 API 不替换模型行）。空 home 下 13/13 复现。
+  修法：scratch agent home 先于一切应用模块 import 建立（`AGENT_HOME` 是 import 时刻常量，三处
+  import 改动态），自带一行假模型，随 finally 删除——顺带止住了"每次跑 smoke 往真实
+  `~/.my-agent/sessions/` 写会话"的旧账（现存 36 个残留目录清不清由人定）。全局 settings 的 `tools`
+  不含 `read` 会在 `beforeToolCall` 之前以 "Tool not found" 绕过闸门（`agent-loop.ts:653`），同一个
+  scratch home 一起关掉。**泄漏的句柄 14+ 次未再现，不编因果**；看门狗现在退出前 dump
+  `process.getActiveResourcesInfo()`，下次直接指认句柄类型。README「状态」句改回事实，全量清单
+  （check + 16 条 smoke，含对真服务器跑的 `smoke-api`）全绿。
 
 ## Not yet specified
 - **"卡"在真窗口里的真实帧时间**：今天所有性能数字都是 `FakeNode` shim 量出来的**比值**，没有一帧
