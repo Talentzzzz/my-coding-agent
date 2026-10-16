@@ -1,8 +1,13 @@
 # 03 分支图进入时居中
 
 Type: task
-Status: open
+Status: resolved
 Label: feature
+Resolution: 2026-10-16
+
+> 收尾待办：`## Answer` 未写。实现本身已落地并全绿（`c1e183f` 的 hunks + `999d115`），
+> 但当时另一个会话正在同一棵树上改 `.scratch/window-polish/` 与同几个源文件，所以这里只记状态、
+> 不写正文，避免两个会话同时写一份文件。
 
 ## Question
 
