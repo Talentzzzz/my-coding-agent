@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	ARG_TRIM_MARKER,
+	BRANCH_LABEL_MAX,
 	clearableToolResultIds,
 	clearedToolResultText,
 	clearToolResult,
@@ -241,6 +242,9 @@ try {
 	process.stdout.write("branch points\n");
 	exerciseBranchPoints();
 
+	process.stdout.write("branch label preview\n");
+	exerciseBranchLabelPreview();
+
 	process.stdout.write("session file format\n");
 	await exerciseFileFormat();
 
@@ -391,6 +395,39 @@ function exerciseBranchPoints(): void {
 			}
 		})(),
 	);
+}
+
+/**
+ * A branch label is what a card's tooltip shows, so the preview has to be sized for a sentence.
+ *
+ * The card itself is one ellipsised line; the whole point of the tooltip is that the sentence is
+ * still readable somewhere. It was capped at 64 characters, which cut the ordinary Chinese sentence
+ * below in half, so the bound is now `BRANCH_LABEL_MAX` — this asserts the message arrives whole, and
+ * keeps a future tightening of that bound from silently shortening every tooltip in the branch graph.
+ */
+function exerciseBranchLabelPreview(): void {
+	const manager = SessionManager.create(root);
+	const question = (text: string, at: number): AgentMessage => ({ role: "user", content: [{ type: "text", text }], timestamp: at });
+
+	const firstId = manager.appendMessage(question("first", 1));
+	// Long enough to have been cut by the old 64-character bound, short enough to survive today's — so
+	// this fails on a regression rather than on a future, larger bound.
+	const sentence = "把整个窗口的布局问题一次说清楚：从标题栏到输入框、从侧边栏到状态行，连同分支图卡片为什么会被一段很长的消息撑高、把下面那一行盖住。".slice(0, 150);
+	manager.appendMessage(question(sentence, 2));
+	// Back to the first message and ask again: the branch point is now `firstId` with two ways, which is
+	// the shape a card is drawn from. Branching at the current leaf would write nothing at all.
+	manager.branch(firstId);
+	manager.appendMessage(question("second", 3));
+
+	const options = manager.getBranchPoints()[0]?.options ?? [];
+	check("一条很长的消息，标签仍然是整句（tooltip 靠它）", options.some((option) => option.label === sentence), options.map((option) => `${option.label.length}:${option.label}`).join(" | "));
+	check("而另一条走法的标签照样是它自己那句", options.some((option) => option.label === "second"), JSON.stringify(options.map((option) => option.label)));
+	check("一串没有空白的超长文本仍然被裁到上限", (() => {
+		manager.branch(firstId);
+		manager.appendMessage(question("x".repeat(BRANCH_LABEL_MAX + 50), 4));
+		const capped = (manager.getBranchPoints()[0]?.options ?? []).find((option) => option.label.startsWith("xxx"))?.label ?? "";
+		return capped.length === BRANCH_LABEL_MAX && capped.endsWith("...");
+	})());
 }
 
 /**

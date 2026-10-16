@@ -9,8 +9,8 @@
  *
  * 覆盖面按**今天的产品代码**算：`transcript.ts` / `sidebar.ts` / `statusbar.ts` / `settings.ts` /
  * `session-settings.ts` / `composer.ts` / `menu.ts` / `markdown.ts` / `diff.ts` / `dom.ts` /
- * `main.ts` 里出现过的每一个 DOM 成员都实现了。缺哪一个，下面 `installDom()` 的**严格模式**会当场
- * 指名道姓地抛出来，而不是静默地 `undefined` 然后几十行之后才崩。
+ * `branch-view.ts` / `main.ts` 里出现过的每一个 DOM 成员都实现了。缺哪一个，下面 `installDom()` 的
+ * **严格模式**会当场指名道姓地抛出来，而不是静默地 `undefined` 然后几十行之后才崩。
  *
  * 它**不是**浏览器：没有布局、没有事件循环、没有 CSS。绝对毫秒数因此不是真实帧时间，可靠的信号是
  * 同一把尺子下短 vs 长的比值。源码注释用英文（本仓库约定），本文件顶部的说明用中文。
@@ -70,6 +70,7 @@ class FakeNode {
 	readonly attributes = new Map<string, string>();
 	title = "";
 	scrollTop = 0;
+	scrollLeft = 0;
 	scrollHeight = 0;
 	clientHeight = 0;
 	clientWidth = 0;
@@ -240,8 +241,11 @@ class FakeNode {
 		return this.options.filter((option) => option.value === this.value);
 	}
 
-	append(...nodes: FakeNode[]): void {
-		for (const node of nodes) {
+	append(...nodes: (FakeNode | string)[]): void {
+		for (const value of nodes) {
+			// 真 DOM 的 `append("文字")` 会现造一个文本节点；`paintSummary` 这类"一句话中间夹一个 <b>"
+			// 的写法全靠它，只收节点会让这种写法在量具里当场崩。
+			const node = typeof value === "string" ? textNode(value) : value;
 			node.parent?.removeChild(node);
 			node.parent = this;
 			node.detached = false;
@@ -251,8 +255,9 @@ class FakeNode {
 		work.appends += nodes.length;
 	}
 	/** `prepend` 收多个：`sidebar.ensureHeading` 一次放回头行与搜索行。 */
-	prepend(...nodes: FakeNode[]): void {
-		for (const node of [...nodes].reverse()) {
+	prepend(...nodes: (FakeNode | string)[]): void {
+		for (const value of [...nodes].reverse()) {
+			const node = typeof value === "string" ? textNode(value) : value;
 			node.parent?.removeChild(node);
 			node.parent = this;
 			node.detached = false;
@@ -261,7 +266,7 @@ class FakeNode {
 			work.appends += 1;
 		}
 	}
-	replaceChildren(...nodes: FakeNode[]): void {
+	replaceChildren(...nodes: (FakeNode | string)[]): void {
 		for (const child of this.children) {
 			child.detached = true;
 			child.parent = undefined;
@@ -465,8 +470,29 @@ function guard(node: FakeNode): FakeNode {
 
 // ------------------------------------------------------------------ 装配全局
 
+/**
+ * `document` 的形状。
+ *
+ * 它得有个名字：`installDom()` 返回的 `document` 是 `unknown` 时，每个量具的第一行都要自己写一次
+ * 断言转换——`smoke-transcript.ts` 就是这么在 `npm run check` 之外活了很久的。这里的每个成员都返回
+ * `FakeNode`，量具因此可以直接 `.children` / `.textContent`，不必再穿一层类型。
+ */
+export interface FakeDocument {
+	createElement(tag: string): FakeNode;
+	createElementNS(namespace: string, tag: string): FakeNode;
+	createTextNode(text: string): FakeNode;
+	createDocumentFragment(): FakeNode;
+	getElementById(id: string): FakeNode | null;
+	querySelector(selector: string): FakeNode | null;
+	readonly activeElement: FakeNode | null;
+	readonly body: FakeNode;
+	readonly documentElement: FakeNode;
+	addEventListener(): void;
+	removeEventListener(): void;
+}
+
 export interface DomShim {
-	document: unknown;
+	document: FakeDocument;
 	body: FakeNode;
 	/** 页面根元素，`applyAppearance` 与两条拖宽都往上写变量。 */
 	root: FakeNode;
@@ -499,8 +525,27 @@ function textNode(text: string): FakeNode {
  * `event.target instanceof Element` 在量具里应当为假——量具直接调用控制器方法，不走事件的
  * `target`——但真代码里那些判断必须有个类可比，缺了它会 `ReferenceError`。
  */
+/**
+ * 计算后的样式：默认全空，量具自己往里放要读的名字。
+ *
+ * 真 `getComputedStyle` 会把 `calc()` 解析成像素，这里不做那件事——没有层叠、没有单位，只有一张
+ * 名字到值的表。`branch-view.ts` 的卡片高度、`main.ts` 的内容列都读着它，谁要断言"这个值是从样式
+ * 表来的"，就先把名字放进去，再断言它出现在了画出来的东西里。
+ */
+export const styleMetrics: Record<string, string> = {};
+
+/**
+ * 量具的 `document` 要什么给什么；`getComputedStyle` 与它挂上同一张表。
+ *
+ * `installDom()` 会重设这张表，所以多次安装之间不会互相串。
+ */
+function computedStyle(): { getPropertyValue: (name: string) => string } {
+	return { getPropertyValue: (name: string): string => styleMetrics[name] ?? "" };
+}
+
 export function installDom(options: InstallOptions = {}): DomShim {
 	if (options.strict !== undefined) strict = options.strict;
+	for (const name of Object.keys(styleMetrics)) delete styleMetrics[name];
 	const g = globalThis as unknown as Record<string, unknown>;
 
 	const root = guard(new FakeNode("html"));
@@ -536,8 +581,11 @@ export function installDom(options: InstallOptions = {}): DomShim {
 		return found;
 	};
 
-	const document = {
+	const document: FakeDocument = {
 		createElement,
+		// SVG 元素在 shim 里就是一个普通元素：`branch-view.ts` 造出来的那些只用 `setAttribute`，
+		// 而属性表本来就与标签名无关。
+		createElementNS: (_namespace: string, tag: string): FakeNode => createElement(tag),
 		createTextNode: (text: string): FakeNode => guard(textNode(text)),
 		createDocumentFragment: () => guard(new FakeNode("#fragment")),
 		getElementById: byId,
@@ -569,7 +617,7 @@ export function installDom(options: InstallOptions = {}): DomShim {
 		matchMedia: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }),
 		addEventListener: () => {},
 		removeEventListener: () => {},
-		getComputedStyle: () => ({ getPropertyValue: () => "" }),
+		getComputedStyle: computedStyle,
 		innerWidth: options.viewport?.width ?? 1280,
 		innerHeight: options.viewport?.height ?? 800,
 		setTimeout: () => 0,
@@ -605,7 +653,7 @@ export function installDom(options: InstallOptions = {}): DomShim {
 	g.SVGElement = FakeElement;
 	g.Comment = FakeElement;
 	g.DocumentFragment = FakeElement;
-	g.getComputedStyle = () => ({ getPropertyValue: () => "" });
+	g.getComputedStyle = computedStyle;
 	g.ResizeObserver = class {
 		observe(): void {}
 		unobserve(): void {}

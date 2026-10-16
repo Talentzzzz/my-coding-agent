@@ -1697,22 +1697,21 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * One node: a dot on the line, then a two-line card — the way's first sentence, and under it the
- * short id cut from its store entry plus its round. A card shows the sentence cut to a few
- * characters and expands the whole thing on hover, growing over the row below without moving it:
- * the tree is for reading structure, not prose, and a hover that reflowed the graph would lie
- * about that structure.
+ * One node: a dot on the line, then a **fixed-height, one-line** card — the way's first sentence, and
+ * under it the short id cut from its store entry plus its round. The sentence is cut by the ellipsis,
+ * and the whole of it is the card's `title`: a card that grew on hover covered the row below and made
+ * the tree, which is the only reason the page exists, read as prose. Height and the gap under it come
+ * from the branch tokens, which follow the font-size scale; the graph reads the same two back to lay
+ * the lanes out, so a card and its lane can only agree.
  */
 .gnode {
-	/* The card's own height, so a hover can grow it to auto and back; the paint sets it per card. */
-	--node-h: 46px;
 	position: absolute;
 	display: flex;
 	flex-direction: column;
 	justify-content: center;
 	gap: 2px;
-	height: var(--node-h);
-	padding: 5px 10px;
+	height: var(--dsw-branch-node-h);
+	padding: 4px 10px;
 	border-radius: var(--dsw-radius-sm);
 	overflow: hidden;
 	text-align: left;
@@ -1730,8 +1729,6 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 .gnode:hover {
-	height: auto;
-	min-height: var(--node-h);
 	z-index: 3;
 	background: var(--dsw-bg-layer-2);
 	border-color: var(--dsw-border-l3);
@@ -1744,34 +1741,21 @@ body:not([data-pane="branch"]) .branch-view {
 	color: var(--dsw-label-caption);
 }
 
+/* The one line the card shows, cut by the ellipsis; the whole sentence is the card's `title`. */
 .gnode .lbl {
+	display: block;
+	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-}
-
-.gnode .lbl .full {
-	display: none;
-}
-
-.gnode:hover .lbl {
-	overflow: visible;
-	white-space: normal;
-	text-overflow: clip;
-}
-
-.gnode:hover .lbl .short {
-	display: none;
-}
-
-.gnode:hover .lbl .full {
-	display: inline;
 }
 
 .gnode .meta {
 	display: flex;
 	align-items: center;
 	gap: 8px;
+	min-width: 0;
+	white-space: nowrap;
 	font-family: var(--dsw-font-mono);
 	font-size: var(--dsw-fs-caption);
 	line-height: var(--dsw-lh-caption);

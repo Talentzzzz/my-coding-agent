@@ -16,18 +16,25 @@ import { findWay, type BranchTree, type BranchWay } from "../state.ts";
  */
 
 const NODE_W = 268; // A node card's width.
-const NODE_H = 46; // A node card's height: summary line + meta line.
 const STEP_X = 300; // How much further right one level of depth sits.
-const LANE_H = 58; // The height of one lane (row).
 const DOT_R = 4.5; // The dot on the line.
 const DOT_X = 12; // The dot's distance from its card's left edge.
 const PAD_X = 24; // Space around the graph (also the viewport's inset).
 const PAD_Y = 16;
 const ZOOM_MIN = 0.4;
 const ZOOM_MAX = 3;
-/** How much of a way's first sentence a card shows before the pointer expands it. */
-const PREVIEW = 14;
-/** The short id: the entry id's first few characters, so it is the store's own id, not a decoration. */
+/**
+ * What the graph falls back to when the branch tokens cannot be read off the stylesheet.
+ *
+ * A card's height and the lane it sits in are **tokens**, not constants here, because the window's
+ * font-size setting moves them: `tokens.css` derives both from the type scale, so the label line and
+ * the meta line always fit whatever size the slider is on. Reading them back is the same shape
+ * `main.ts` uses for the content column, and these literals are only what a stylesheet that failed to
+ * load leaves behind — they are the token values at the default font size.
+ */
+const NODE_H_FALLBACK = 44;
+const LANE_H_FALLBACK = 56;
+/** The short id a card and the header's entry both show: the entry id's first few characters. */
 const SHORT_ID = 7;
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -207,6 +214,18 @@ export class BranchView {
 		this.toolsBar.hidden = true;
 	}
 
+	/**
+	 * Re-read the stylesheet's geometry and paint again, for a change the tree cannot report.
+	 *
+	 * A card's height and its lane are tokens (`cardMetrics`), and the only thing that moves them is the
+	 * window's font-size setting — which is not a new tree, so `render`'s one comparison would skip the
+	 * paint and leave every card at the height it had before the slider moved. A page that is not open
+	 * needs nothing: `enter` paints on the way in.
+	 */
+	remeasure(): void {
+		if (this.open) this.paint();
+	}
+
 	// ------------------------------------------------------------------ painting
 
 	private paint(): void {
@@ -221,7 +240,8 @@ export class BranchView {
 			return;
 		}
 
-		const laid = (this.laid = layout(tree));
+		const metrics = cardMetrics();
+		const laid = (this.laid = layout(tree, metrics));
 		this.paintSummary(tree);
 
 		const svg = document.createElementNS(SVG_NS, "svg");
@@ -232,7 +252,7 @@ export class BranchView {
 		const colors = laneColors();
 		const at = new Map(laid.nodes.map((node, index) => [node.id, index]));
 		const dotX = (depth: number) => depth * STEP_X + DOT_X;
-		const dotY = (lane: number) => lane * LANE_H + LANE_H / 2;
+		const dotY = (lane: number) => lane * metrics.lane + metrics.lane / 2;
 
 		// Edges: parent's dot rightwards; a change of lane elbows over — out straight, one curve,
 		// across, one curve back, in straight.
@@ -300,20 +320,17 @@ export class BranchView {
 			});
 			const isSelected = node.id === this.selected;
 			card.style.left = `${node.depth * STEP_X}px`;
-			card.style.top = `${dotY(node.lane) - NODE_H / 2}px`;
+			card.style.top = `${dotY(node.lane) - metrics.node / 2}px`;
 			card.style.width = `${NODE_W}px`;
-			card.style.setProperty("--node-h", `${NODE_H}px`);
-			// The full sentence rides in `title` as the fallback for a pointer that cannot hover.
+			card.style.height = `${metrics.node}px`;
+			// The whole sentence rides in `title`: the card shows one line of it, cut by the stylesheet's
+			// ellipsis, and the tooltip is what answers "what did it actually say".
 			card.title = node.label;
 			if (node.id === this.tree?.currentId) card.dataset.current = "";
 			if (isSelected) card.dataset.selected = "";
 			if (onPathOf(laid, node.id)) card.dataset.onPath = "";
 
-			const label = element("span", "lbl");
-			label.append(
-				element("span", "short", shorten(node.label, PREVIEW)),
-				element("span", "full", node.label),
-			);
+			const label = element("span", "lbl", node.label);
 			const meta = element("span", "meta");
 			if (node.way === undefined) meta.append(element("span", undefined, "起点"));
 			else meta.append(element("span", undefined, shortId(node.way.entryId)));
@@ -428,12 +445,36 @@ export class BranchView {
 // --------------------------------------------------------------------- layout
 
 /**
+ * A card's height and the lane it sits in, as the stylesheet resolves them.
+ *
+ * Read per paint for the same reason the palette is: a paint is rare, and the font-size slider can
+ * move both between one paint and the next.
+ */
+interface CardMetrics {
+	node: number;
+	lane: number;
+}
+
+/** The graph's own geometry, off the branch tokens; the fallbacks are the values at the default size. */
+function cardMetrics(): CardMetrics {
+	const styles = getComputedStyle(document.documentElement);
+	const read = (name: string, fallback: number): number => {
+		const value = Number.parseFloat(styles.getPropertyValue(name));
+		return Number.isFinite(value) ? value : fallback;
+	};
+	return {
+		node: read("--dsw-branch-node-h", NODE_H_FALLBACK),
+		lane: read("--dsw-branch-lane-h", LANE_H_FALLBACK),
+	};
+}
+
+/**
  * Place the nodes: **one rule only** — the child on the active path keeps its parent's lane, every
  * other child opens a new lane; rows are depth-first, so a subtree finishes before the next sibling
  * starts. The path child is sorted first, which is what keeps the trunk on the top row as one
  * straight horizontal line.
  */
-function layout(tree: BranchTree): Layout {
+function layout(tree: BranchTree, metrics: CardMetrics): Layout {
 	const path = pathOf(tree);
 	const nodes: LaidNode[] = [
 		// The root is the common ancestor, not a way of its own — drawn so the tree has a place to
@@ -464,7 +505,7 @@ function layout(tree: BranchTree): Layout {
 		nodes,
 		path,
 		width: (depths - 1) * STEP_X + DOT_X + NODE_W,
-		height: lanes * LANE_H,
+		height: lanes * metrics.lane,
 	};
 }
 
@@ -494,11 +535,6 @@ function onPathOf(laid: Layout, id: string): boolean {
 /** The short id a card and the header's entry both show: the entry id's first few characters. */
 export function shortId(entryId: string): string {
 	return entryId.slice(0, SHORT_ID);
-}
-
-/** A card shows the first few characters of a sentence; the pointer expands it, the title keeps it. */
-function shorten(text: string, max: number): string {
-	return text.length <= max ? text : `${text.slice(0, max)}…`;
 }
 
 /**

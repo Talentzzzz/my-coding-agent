@@ -1230,8 +1230,10 @@ function main(): void {
 		try {
 			const { settings: saved } = await api.updateSettings(patch);
 			// Applied straight away rather than after a re-render: the font size and the theme are the
-			// two settings whose whole value is seeing them change.
+			// two settings whose whole value is seeing them change. The branch page measures its cards
+			// off the type scale, so it is the one view that has to be told to measure again.
 			applyAppearance(saved);
+			branchView.remeasure();
 			apply({ ...state, settings: saved });
 		} catch (error) {
 			report(error);

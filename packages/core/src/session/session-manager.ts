@@ -904,12 +904,23 @@ interface SubtreeDescription {
 	role: string;
 }
 
+/**
+ * How much of a message's first sentence a branch label carries.
+ *
+ * It is the tooltip's whole content — a card shows one ellipsised line and the title answers "what did
+ * it actually say" — so the bound is sized for a real sentence rather than for a row: a branch option
+ * travels in every snapshot, and these ride whole, which is why the label is a preview at all and not
+ * the message. The alternatives that are not on the active chain have no message in the snapshot to
+ * read from, so there is nothing longer to fall back to. See ticket `.scratch/ui-pass` 02.
+ */
+export const BRANCH_LABEL_MAX = 200;
+
 /** One short line naming what a message says, for a branch switcher's label. */
 function previewOfMessage(message: AgentMessage): { label: string; role: string } {
 	const text = extractTextContent(message).replace(/\s+/g, " ").trim();
 	const role = typeof (message as { role?: unknown }).role === "string" ? String(message.role) : "";
 	if (text.length === 0) return { label: "", role };
-	return { label: text.length > 64 ? `${text.slice(0, 61)}...` : text, role };
+	return { label: text.length > BRANCH_LABEL_MAX ? `${text.slice(0, BRANCH_LABEL_MAX - 3)}...` : text, role };
 }
 
 /**

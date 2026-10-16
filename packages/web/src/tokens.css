@@ -203,6 +203,21 @@
 	--dsw-lane-2: var(--dsw-static-green-400);
 	--dsw-lane-3: var(--dsw-static-amber-400);
 	--dsw-lane-4: var(--dsw-static-purple-400);
+	/*
+	 * The branch page's card, and the lane one sits in.
+	 *
+	 * Both are derived from the type scale rather than stated, because the card is **fixed** height: the
+	 * label is one ellipsised line and the whole sentence lives in the card's tooltip, so a card that
+	 * sized itself to its text would push the row below it around. A fixed number here would therefore
+	 * be right only at the slider's default size — at the top of the range it would clip the meta line
+	 * instead. So: meta line, the small gap, caption line, and the scaled padding make the card; a card
+	 * plus a gap that also grows makes a lane. The paint reads both back to lay the graph out
+	 * (`branch-view.ts`), which is why they are tokens and not literals in that stylesheet.
+	 */
+	--dsw-branch-node-h: calc(
+		var(--dsw-lh-meta) + 2px + var(--dsw-fs-delta) + var(--dsw-lh-caption) + 8px + var(--dsw-fs-delta)
+	);
+	--dsw-branch-lane-h: calc(var(--dsw-branch-node-h) + 12px);
 
 	color-scheme: light;
 }

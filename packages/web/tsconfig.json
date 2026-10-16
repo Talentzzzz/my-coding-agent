@@ -20,10 +20,12 @@
 	// a check without the DOM types would fail on code the package legitimately contains.
 	//
 	// `scripts/dom-shim.ts` rides along for the same reason: it *is* the DOM those smokes run against
-	// (it builds `HTMLElement`s), and it is imported by `smoke-sidebar.ts`, which is checked here.
+	// (it builds `HTMLElement`s), and every smoke below drives a view or a channel client from here.
 	"include": [
 		"src/**/*.ts",
 		"../../scripts/dom-shim.ts",
+		"../../scripts/smoke-branch.ts",
+		"../../scripts/smoke-transcript.ts",
 		"../../scripts/smoke-mux-client.ts",
 		"../../scripts/smoke-mux-live.ts",
 		"../../scripts/smoke-sidebar.ts",

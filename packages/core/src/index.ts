@@ -132,6 +132,7 @@ export {
 	workspaceDirName,
 } from "./session/paths.ts";
 export {
+	BRANCH_LABEL_MAX,
 	CURRENT_SESSION_VERSION,
 	SessionManager,
 	assertValidSessionId,
