@@ -129,6 +129,19 @@
 	--dsw-content-gutter: 35px;
 	--dsw-content-gutter-tight: 20px;
 
+	/*
+	 * The app settings panel's fixed shape.
+	 *
+	 * One height for every section, taken from the viewport rather than the content: a content-sized
+	 * panel would resize under the pointer on every nav click. The air is the room the panel keeps
+	 * at each side of the viewport — the overlay pads by it and the height subtracts two of it, so
+	 * the panel sits centered and the two numbers cannot drift apart.
+	 */
+	--dsw-settings-width: 800px;
+	--dsw-settings-height: 800px;
+	--dsw-settings-nav-width: 188px;
+	--dsw-settings-air: 24px;
+
 	/* Alias roles — light. */
 	--dsw-bg-base: var(--dsw-static-neutral-bluish-00);
 	--dsw-bg-layer-1: var(--dsw-static-neutral-bluish-00);

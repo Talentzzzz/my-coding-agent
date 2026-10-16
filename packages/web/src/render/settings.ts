@@ -85,7 +85,7 @@ export class SettingsPanel {
 	readonly element: HTMLElement;
 	private readonly handlers: SettingsHandlers;
 	private readonly body: HTMLElement;
-	private readonly tabs: { id: Tab; button: HTMLButtonElement }[] = [];
+	private readonly navItems: { id: Tab; button: HTMLButtonElement }[] = [];
 	private readonly note: HTMLElement;
 
 	private state: SettingsState = { models: [] };
@@ -98,32 +98,39 @@ export class SettingsPanel {
 	constructor(handlers: SettingsHandlers) {
 		this.handlers = handlers;
 
+		// The panel is pinned to the viewport rather than sized by its content (`.app-settings` in
+		// style.css), so switching sections never resizes it under the pointer. The title lives in
+		// the nav column, the close control alone stays in the content column's head.
 		this.element = element("div", "settings-overlay", undefined, { hidden: true });
-		const panel = element("div", "settings", undefined, { role: "dialog", "aria-label": "设置" });
+		const panel = element("div", "settings app-settings", undefined, { role: "dialog", "aria-label": "设置" });
 
-		const head = element("header", "settings-head");
-		head.append(element("h2", undefined, "设置"));
-		head.append(iconButton("close", "关闭设置", () => this.handlers.onClose()));
-
-		const nav = element("nav", "settings-tabs");
+		const nav = element("nav", "settings-nav");
+		nav.append(element("h2", "settings-nav-title", "设置"));
+		const navList = element("div", "settings-nav-list");
 		for (const [id, label] of [
 			["appearance", "外观"],
 			["models", "模型"],
 			["defaults", "默认"],
 		] as [Tab, string][]) {
-			const button = element("button", "settings-tab", label, { type: "button" });
+			const button = element("button", "settings-nav-item", label, { type: "button" });
 			button.addEventListener("click", () => {
 				this.tab = id;
-				this.renderTabs();
+				this.renderNav();
 				this.renderBody();
 			});
-			this.tabs.push({ id, button });
-			nav.append(button);
+			this.navItems.push({ id, button });
+			navList.append(button);
 		}
+		nav.append(navList);
 
+		const head = element("header", "settings-head");
+		head.append(iconButton("close", "关闭设置", () => this.handlers.onClose()));
+
+		const content = element("div", "settings-content");
 		this.note = element("div", "settings-note");
 		this.body = element("div", "settings-body");
-		panel.append(head, nav, this.body, this.note);
+		content.append(head, this.body, this.note);
+		panel.append(nav, content);
 
 		// Clicking the dimmed area behind the panel closes it; clicking inside must not.
 		this.element.addEventListener("click", (event) => {
@@ -171,7 +178,7 @@ export class SettingsPanel {
 
 		const stable = this.draft === undefined && signature === this.signature;
 		this.signature = signature;
-		this.renderTabs();
+		this.renderNav();
 		if (!stable) this.renderBody();
 	}
 
@@ -186,10 +193,13 @@ export class SettingsPanel {
 		return this.draft ?? this.state.models.map((model) => ({ ...model }));
 	}
 
-	private renderTabs(): void {
-		for (const { id, button } of this.tabs) {
+	private renderNav(): void {
+		for (const { id, button } of this.navItems) {
 			button.classList.toggle("active", id === this.tab);
-			button.setAttribute("aria-selected", id === this.tab ? "true" : "false");
+			// A vertical nav of plain buttons: aria-current rather than aria-selected, which is only
+			// meaningful on a tablist role the list does not carry.
+			if (id === this.tab) button.setAttribute("aria-current", "true");
+			else button.removeAttribute("aria-current");
 		}
 	}
 

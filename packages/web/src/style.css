@@ -2337,22 +2337,122 @@ body:not([data-pane="branch"]) .branch-view {
 	z-index: 40;
 	display: grid;
 	place-items: center;
-	padding: 24px;
+	padding: var(--dsw-settings-air);
 	background: rgb(0 0 0 / 32%);
-	backdrop-filter: blur(2px);
+	/* Deliberately no backdrop-filter: this machine composites in software (ADR-0004), and the
+	   measurement in .scratch/window-repair/research/overlay-blur.ts prices blur(2px) at ~2.5ms of
+	   CPU per frame whenever the backdrop moves — for an effect the 32% dim already carries. */
 }
 
+/*
+ * The shared modal surface. Both panels — the app-level one and the session-level one behind the
+ * composer — are this box; each states its own shape below, and the app-level one re-lays itself
+ * out as a nav column plus a content column.
+ */
 .settings {
 	display: flex;
 	flex-direction: column;
-	width: min(720px, 100%);
-	max-height: min(760px, 100%);
 	min-height: 0;
 	border: 1px solid var(--dsw-border-l2);
 	border-radius: var(--dsw-radius-lg);
 	background: var(--dsw-bg-layer-1);
 	box-shadow: var(--dsw-shadow-panel);
 	overflow: hidden;
+}
+
+/* The session panel keeps the content-sized shape it had: it is opened from the composer for one
+   short look, and a full-height frame would be mostly empty. */
+.session-settings {
+	width: min(720px, 100%);
+	max-height: min(760px, 100%);
+}
+
+/*
+ * The app panel's shape, taken from the viewport rather than the content — one height for every
+ * section, because a content-sized panel resizes under the pointer on every nav click. Width 800,
+ * the height capped at 800, and the same air at every side (the overlay pads by it, the height
+ * subtracts two of it), so the panel stays centered and whole in even the smallest window.
+ */
+.app-settings {
+	flex-direction: row;
+	width: min(var(--dsw-settings-width), 100%);
+	height: min(var(--dsw-settings-height), calc(100vh - 2 * var(--dsw-settings-air)));
+	max-width: calc(100vw - 2 * var(--dsw-settings-air));
+}
+
+/* The left column: the panel's title and the section list, which scrolls on its own when the
+   window is too short for the list — the content column scrolls independently of it. */
+.settings-nav {
+	flex: none;
+	display: flex;
+	flex-direction: column;
+	gap: 18px;
+	width: var(--dsw-settings-nav-width);
+	min-height: 0;
+	padding: 22px 12px 0;
+}
+
+.settings-nav-title {
+	margin: 0;
+	padding: 0 12px;
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
+	font-weight: 600;
+}
+
+.settings-nav-list {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	overflow-y: auto;
+}
+
+.settings-nav-item {
+	flex: none;
+	display: flex;
+	align-items: center;
+	height: 40px;
+	padding: 0 12px;
+	border: none;
+	border-radius: var(--dsw-radius-md);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	text-align: left;
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.settings-nav-item:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.settings-nav-item.active {
+	background: var(--dsw-bg-active);
+	color: var(--dsw-label-primary);
+	font-weight: 500;
+}
+
+/* The right column: fixed head, scrolling body, note. The body stays the only scroller in it, as
+   before; the nav list is the second, independent one. */
+.settings-content {
+	flex: 1;
+	min-width: 0;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+/* The app panel's head carries the close control alone — its title lives in the nav column — so
+   the space-between that seats the session panel's heading has nothing to pair with here. */
+.app-settings .settings-head {
+	justify-content: flex-end;
+	padding: 14px 16px 0;
 }
 
 .settings-head {
@@ -2368,36 +2468,6 @@ body:not([data-pane="branch"]) .branch-view {
 	font-size: var(--dsw-fs-title);
 	line-height: var(--dsw-lh-title);
 	font-weight: 600;
-}
-
-.settings-tabs {
-	display: flex;
-	gap: 2px;
-	padding: 0 12px;
-	border-bottom: 1px solid var(--dsw-border-l1);
-}
-
-.settings-tab {
-	padding: 8px 12px;
-	border: none;
-	border-bottom: 2px solid transparent;
-	background: transparent;
-	color: var(--dsw-label-tertiary);
-	font: inherit;
-	font-size: var(--dsw-fs-meta);
-	line-height: var(--dsw-lh-meta);
-	cursor: pointer;
-	transition: color var(--dsw-duration-fast) var(--dsw-ease);
-}
-
-.settings-tab:hover {
-	color: var(--dsw-label-primary);
-}
-
-.settings-tab.active {
-	border-bottom-color: var(--dsw-state-business);
-	color: var(--dsw-label-primary);
-	font-weight: 500;
 }
 
 .settings-body {
@@ -2650,6 +2720,7 @@ select.input {
 .tool-output,
 .diff,
 .settings-body,
+.settings-nav-list,
 .approval-command {
 	scrollbar-width: thin;
 	scrollbar-color: var(--dsw-scrollbar-thumb) transparent;
@@ -2660,6 +2731,7 @@ select.input {
 .tool-output::-webkit-scrollbar,
 .diff::-webkit-scrollbar,
 .settings-body::-webkit-scrollbar,
+.settings-nav-list::-webkit-scrollbar,
 .approval-command::-webkit-scrollbar {
 	width: 10px;
 	height: 10px;
@@ -2670,6 +2742,7 @@ select.input {
 .tool-output::-webkit-scrollbar-thumb,
 .diff::-webkit-scrollbar-thumb,
 .settings-body::-webkit-scrollbar-thumb,
+.settings-nav-list::-webkit-scrollbar-thumb,
 .approval-command::-webkit-scrollbar-thumb {
 	border: 3px solid transparent;
 	border-radius: 999px;
@@ -2682,6 +2755,7 @@ select.input {
 .tool-output::-webkit-scrollbar-thumb:hover,
 .diff::-webkit-scrollbar-thumb:hover,
 .settings-body::-webkit-scrollbar-thumb:hover,
+.settings-nav-list::-webkit-scrollbar-thumb:hover,
 .approval-command::-webkit-scrollbar-thumb:hover {
 	background: var(--dsw-scrollbar-thumb-hover);
 	background-clip: content-box;
