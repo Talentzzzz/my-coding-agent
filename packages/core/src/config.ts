@@ -69,7 +69,7 @@ export interface AppearanceSettings {
 export const DEFAULT_APPEARANCE: AppearanceSettings = { theme: "dark", fontSize: 15 };
 
 /** The range the font-size control offers, shared by the parser and the client. */
-export const FONT_SIZE_RANGE = { min: 12, max: 20 } as const;
+export const FONT_SIZE_RANGE = { min: 10, max: 22 } as const;
 
 /**
  * The range the sidebar's drag handle can reach, shared by the parser and the client.

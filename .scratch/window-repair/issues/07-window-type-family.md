@@ -1,7 +1,7 @@
 # 7 字号：让设置驱动**整窗**的派生族，并把量程放开到 22
 
 Type: task
-Status: open
+Status: resolved
 Blocked by:
 
 ## Question
@@ -40,3 +40,28 @@ title，全在那 4 条之外。所以"+2 之后还是小"是**必然**的，不
 
 **诚实限度：** 这票改的是**机制**，不是"把五档一起挪"（那是 17 号称过、被否掉的事，本图 Out of scope
 里写着）。落地后**请用户把滑杆拉到底试一次**——如果 22 还不够，那才是真的档位问题，另开票。
+
+## Comments
+
+### 落地（2026-10-16）
+
+按参考实现的形状落了"一个基准 + 一个偏移量派生整族"：
+
+- `tokens.css`：五个档位不再是九个独立字面量。`--dsw-fs-base`（默认 15px，滑杆的运行时落点）+
+  `--dsw-fs-delta: calc(var(--dsw-fs-base) - 15px)`；title/meta/caption/code 四档写成
+  `calc(<字面量>px + var(--dsw-fs-delta))`，body 即 base 本身。**行高一并派生**（各自保持原比率：
+  title 20/14、meta 18/13、caption 16/12、body 25/15、code 20/13）——行高是字号自己的那半张决定，
+  不是第 4 条说的间距轴；固定行高配派生字号在两端都会挤。
+- `state.ts`：`applyAppearance` 落点从 `--dsw-fs-body` 改为 `--dsw-fs-base`，一处改动驱动整窗。
+- 量程：`config.ts` 的 `FONT_SIZE_RANGE` 改 10–22（服务端 clamp 随常量走，权威不变），滑杆
+  `min`/`max` 同步 10/22；`clampFontSize` 实测两端含、越界夹、非数回默认 15。
+- `em` 六处核对过：`.turn-body`/`.reasoning-body` 骑 `--dsw-fs-body`，h1/h2/h3/code/table 的 em
+  随父级同比缩放，落地前后行为一致。
+- 文档：README 的 `appearance` 段补了 fontSize 的语义（整窗基准、10–22、默认 15）；AGENTS.md 术语表
+  不涉档位，无需动。
+
+验证：`npm run check` 绿（含 token 审计 133 定义 / 107 引用），`smoke:boot` 绿。
+
+### 留给用户
+
+**把滑杆拉到底试一次。** 这票改的是机制不是"五档一起挪"；如果 22 还不够，那才是档位问题，另开票。

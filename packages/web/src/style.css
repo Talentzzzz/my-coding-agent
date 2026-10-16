@@ -14,7 +14,7 @@
  * Everything here reads a token from `tokens.css`. A literal color in this file is a bug: it would
  * be the one value that does not follow the theme. A literal font size is the same kind of bug:
  * every size comes from the type scale's five tiers (`--dsw-fs-*`, each with its `--dsw-lh-*`),
- * and the one moving part — `--dsw-fs-body` — is published by the settings panel at runtime.
+ * all derived from `--dsw-fs-base`, which the settings panel publishes at runtime.
  */
 
 *,
@@ -34,7 +34,7 @@ body {
 	color: var(--dsw-label-primary);
 	font-family: var(--dsw-font-family);
 	/* The shell's base step: the title tier, so anything that forgets to pick a size still lands in
-	   the scale. Reading text overrides this with the body tier, which is the one that moves. */
+	   the scale — which the slider moves as a family, so unstyled text rides it too. */
 	font-size: var(--dsw-fs-title);
 	line-height: var(--dsw-lh-title);
 	-webkit-font-smoothing: antialiased;

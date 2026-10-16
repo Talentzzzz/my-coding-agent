@@ -245,9 +245,10 @@ export function initialState(): ViewState {
  * Paint the appearance the server reported.
  *
  * Called on every settings change rather than only at boot, because the panel edits these live: the
- * font size is the type scale's one moving part — the slider's value lands straight on
- * `--dsw-fs-body`, its leading deriving from it — and the theme is one attribute, so neither needs
- * a reload to take effect, and the panel would feel broken if either did.
+ * font size is the type scale's base — the slider's value lands straight on `--dsw-fs-base`, and
+ * every tier derives from it (tokens.css), so the whole window rescales with no per-tier wiring.
+ * The theme is one attribute, so neither needs a reload to take effect, and the panel would feel
+ * broken if either did.
  *
  * The sidebar's width rides the same road, with one asymmetry: the server stores the *preference*,
  * already clamped to the drag range at parse time, so what lands here is always drawable. A width
@@ -260,7 +261,7 @@ export function applyAppearance(settings: SettingsSnapshot): void {
 	const theme = settings.appearance.theme;
 	root.dataset.theme =
 		theme === "system" ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : theme;
-	root.style.setProperty("--dsw-fs-body", `${settings.appearance.fontSize}px`);
+	root.style.setProperty("--dsw-fs-base", `${settings.appearance.fontSize}px`);
 	const sidebarWidth = settings.appearance.sidebarWidth;
 	if (sidebarWidth === undefined) root.style.removeProperty("--dsw-sidebar-width");
 	else root.style.setProperty("--dsw-sidebar-width", `${sidebarWidth}px`);

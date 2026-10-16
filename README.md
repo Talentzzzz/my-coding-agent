@@ -101,7 +101,7 @@ ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/ node packages/
 
 UI 里做出的变更会回到**已经提供那个键**的文件，所以一个钉住了 `approval.bash` 的项目继续拥有它，其他一切则落到你 home 里的那份。`SettingsManager`（`packages/core/src/settings-manager.ts`）读写两者；`session.settingsManager` 是那个活对象。
 
-`appearance` 是一项设置而不是浏览器存储，这是有意的：桌面外壳每次启动都会挑一个新端口，而 `localStorage` 是按 origin 隔离的，所以存在那里的偏好会在窗口重新打开的那一刻被忘掉。
+`appearance` 是一项设置而不是浏览器存储，这是有意的：桌面外壳每次启动都会挑一个新端口，而 `localStorage` 是按 origin 隔离的，所以存在那里的偏好会在窗口重新打开的那一刻被忘掉。`fontSize` 是整窗字号的基准，量程 10–22、默认 15（服务端会把它夹回这个区间）：滑杆改的是基准，标题、侧栏、代码、状态行等各档从它按各自的步差派生，整窗一起动。
 
 ## 模型
 
