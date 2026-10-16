@@ -93,6 +93,34 @@ function main(): void {
 	const rows = new SessionRows();
 
 	/**
+	 * Which read of a session the window is on, counted up at every click.
+	 *
+	 * Reading a session is a request per click, and two of them are in flight the moment someone
+	 * clicks a second row before the first has answered. The count is what decides which answer to
+	 * keep: a read that is no longer the newest is dropped whole, because applying it would draw the
+	 * conversation the user has already moved off — and retaining it would subscribe the pane to a
+	 * session the click after it had left. Nothing cancels the request itself; a discarded answer
+	 * costs one response body and no work.
+	 */
+	let openSeries = 0;
+	/**
+	 * The reads still in flight, by their series, so the loading notice leaves with the last of them.
+	 *
+	 * A set rather than a count, and the difference is visible: a superseded read finishes *after*
+	 * the read that replaced it started, and a counter would have that late finish add nothing but
+	 * take the notice down for a read that is still running. Removing a read that is not in the set
+	 * is the no-op it should be — the newest read can always speak for the set it is in.
+	 */
+	const openReads = new Set<number>();
+
+	/** Put the loading notice up for one read, or take it down once nothing is being read. */
+	function showLoading(series: number, on: boolean): void {
+		if (on) openReads.add(series);
+		else openReads.delete(series);
+		sessionLoading.hidden = openReads.size === 0;
+	}
+
+	/**
 	 * What each piece of chrome was last drawn from.
 	 *
 	 * The transcript re-renders on every token, and everything around it used to redraw too — the
@@ -330,7 +358,26 @@ function main(): void {
 	 * the prose is read through, not to anything in it.
 	 */
 	const transcriptBody = element("div", "transcript-body");
-	transcriptBody.append(transcriptHost, contentResizer);
+	/**
+	 * The notice that a session is being read, which is the window's only answer to "did my click
+	 * do anything".
+	 *
+	 * Reading a session is one request and then one draw, and until the draw lands the previous
+	 * transcript is still on screen — the deliberate behaviour of a pane that swaps rather than
+	 * blanks, but indistinguishable from "the click was ignored" when the request is slow. So the
+	 * wait gets a face: it appears over the pane the moment the read starts and leaves when the
+	 * snapshot's first slice has been drawn.
+	 *
+	 * It sits in the wrapper rather than in the transcript because the transcript scrolls: a notice
+	 * inside the scroll container would scroll away with the conversation it is replacing. That is
+	 * the same one-layer-apart arrangement the reading column's handle makes.
+	 */
+	const sessionLoading = element("div", "session-loading", undefined, { role: "status", "aria-live": "polite" });
+	const loadingRing = element("div", "loading-ring");
+	const loadingLabel = element("div", "loading-label", "正在载入会话…");
+	sessionLoading.append(loadingRing, loadingLabel);
+	sessionLoading.hidden = true;
+	transcriptBody.append(transcriptHost, contentResizer, sessionLoading);
 
 	const banners = element("div", "banners");
 
@@ -771,7 +818,7 @@ function main(): void {
 	 * it off a change in `streaming` — which is how the old code got there — meant a failure between
 	 * sends left the input box enabled with nothing behind it.
 	 */
-	function apply(next: ViewState): void {
+	function apply(next: ViewState, options: { deferred?: boolean } = {}): void {
 		const previous = state;
 		state = next;
 
@@ -783,7 +830,11 @@ function main(): void {
 			applyContentWidth(contentPref);
 		}
 		if (next.items !== previous.items || next.streaming !== previous.streaming) {
-			transcript.render(next.items, next.streaming);
+			// `deferred` is set by the one caller that hands over a whole conversation at once — the
+			// session switch — where the draw is the cost of the switch and must not hold the frame.
+			// Every other frame carries a delta the reader is watching arrive, and lands whole.
+			if (options.deferred) transcript.renderDeferred(next.items, next.streaming);
+			else transcript.render(next.items, next.streaming);
 		}
 		if (next.reachable !== previous.reachable) composer.setDisabled(!next.reachable);
 		if (next.streaming !== previous.streaming || next.queued !== previous.queued) {
@@ -1043,15 +1094,41 @@ function main(): void {
 	 *
 	 * A run already in flight needs nothing extra: its `submitting` flag is in the snapshot, and the
 	 * frames are already coming.
+	 *
+	 * Three things about the order are load-bearing, and each was a way the window used to stall:
+	 *
+	 * - The read is announced before it starts. It is the window's slowest, least predictable step —
+	 *   a whole conversation over the wire and through `JSON.parse` — and the previous transcript stays
+	 *   up throughout, which is right for the pane and mute about the click.
+	 * - The snapshot is drawn deferred. It is the whole conversation in one frame, and every message in
+	 *   it is new, so the draw is proportional to the session: drawn whole it is the freeze, drawn in
+	 *   slices it is a first paint plus a handful of frames.
+	 * - The subscription is retained before the list refresh, and the list refresh is not awaited. The
+	 *   window is *live* on this session from the moment its baseline is on screen; the sidebar's rows
+	 *   arrive on the channel anyway when it is up, and when it is not, the listing is a repair of a
+	 *   column that is already drawn — not something the pane's liveness may queue behind.
 	 */
 	async function openSession(sessionId: string): Promise<void> {
+		const series = (openSeries += 1);
+		showLoading(series, true);
 		let snapshot;
 		try {
 			snapshot = await api.read(sessionId);
 		} catch (error) {
+			showLoading(series, false);
+			// A superseded read's failure is not news about the pane: the user is looking at a session
+			// that read fine, and a banner about the one they left — often the same server, often the
+			// same request raced by a newer click — would name a problem that is not on screen. The
+			// read that owns the pane owns the report too.
+			if (series !== openSeries) return;
 			unreachable(error);
 			return;
 		}
+		showLoading(series, false);
+		// A newer click moved the window while this read was in flight. Its answer names a session the
+		// pane has already left, so it is dropped whole: no state, no draw, no subscription. The read
+		// that superseded it owns all three.
+		if (series !== openSeries) return;
 
 		reachable();
 		// The previous pane's reference goes before the new one is taken, so a session is never watched
@@ -1070,25 +1147,17 @@ function main(): void {
 		setPane("chat");
 		// The same rendering the branch command uses: a snapshot is a snapshot, whether it arrived on
 		// the channel or on a read. The channel's own baseline will replace it within a moment.
-		apply(reduce(state, { type: "baseline", session: snapshot }));
+		apply(reduce(state, { type: "baseline", session: snapshot }), { deferred: true });
 
-		try {
-			await refreshLists();
-		} catch (error) {
-			report(error);
-		}
-
-		// The gate on the way out. The waits above left a window in which anything could have happened
-		// to the pane: a fork deleted the moment its row appeared, a click that moved on mid-refresh,
-		// a `session_gone` that folded the pane elsewhere. `followed` is the one fact about what this
-		// pane is on — the same one {@link foldFromDeleted} reads — so when it no longer names this
-		// session, taking the subscription here would send an `open` for a session the pane has
-		// already left, and the server's refusal would land as a red banner for a race nobody chose.
-		// Not retaining is the whole fix: whoever moved the pane owns its references. The baseline
-		// apply above needs no gate: there is no `await` between it and the assignment of `followed`,
-		// so nothing can fold the pane between the two.
-		if (followed !== snapshot.id) return;
+		// Taken before the list is asked for, and that is the whole point of the order: the pane is live
+		// on this session now, and the subscription is what a send needs. Asking for the listing first
+		// would leave a window in which the conversation is on screen and nothing is listening to it.
 		mux.retain(snapshot.id, "pane");
+		// The listing is not awaited. It redraws the sidebar and nothing else, it is refused outright
+		// while the channel is live (the channel is the authority on rows then), and the frame it would
+		// have held up is the frame the reader is waiting on. A failure to get it is reported against
+		// the window rather than against the pane, so it cannot undo the switch either.
+		void refreshLists().catch(report);
 	}
 
 	/** Re-read the sidebar's rows over REST, but only while the channel is not the authority. */

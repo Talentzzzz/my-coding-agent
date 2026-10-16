@@ -1,4 +1,5 @@
 import { element, icon } from "../dom.ts";
+import { Drain } from "../drain.ts";
 import type { Item, ToolCard } from "../state.ts";
 import { diffStat, renderFileDiff } from "./diff.ts";
 import { renderMarkdown, type MarkdownState } from "./markdown.ts";
@@ -11,6 +12,25 @@ export interface TranscriptOptions {
 	 */
 	onUserContext(entryId: string | undefined, x: number, y: number): void;
 }
+
+/**
+ * How many items one slice of a deferred draw carries.
+ *
+ * A count rather than a time budget, measured against the harness: the price of a slice is the
+ * Markdown parsing inside it, and 24 items is several milliseconds at the sizes a window really
+ * sees while staying far under the block a whole conversation used to cost. One very long message
+ * is a slice of its own, because a slice is never split — message text is Markdown, and half a
+ * message is not a thing to parse.
+ */
+const BATCH_ITEMS = 24;
+
+/**
+ * How long one frame's batch of deferred drawing may spend.
+ *
+ * The drain turns the generator, and this is when it stops: a batch that ran to a slice boundary
+ * is already bounded, and this bounds the case where slices are cheap enough to run several.
+ */
+const FRAME_BUDGET_MS = 4;
 
 /**
  * One turn's reasoning row.
@@ -64,6 +84,16 @@ export class TranscriptView {
 	private readonly options: TranscriptOptions;
 	private readonly turns = new Map<string, Turn>();
 	private readonly tools = new Map<string, { section: HTMLElement; source: readonly ToolCard[]; cards: Map<string, { node: HTMLElement; shape: string }> }>();
+	/**
+	 * The draw of a whole snapshot, spread over frames.
+	 *
+	 * `render` stays the immediate path and this is the other one: the transcript arriving in a
+	 * snapshot is drawn in slices, while a frame that carries a delta must land whole — a delta is
+	 * what the reader is watching being written.
+	 */
+	private readonly drain = new Drain(FRAME_BUDGET_MS);
+	/** The item ids the screen currently carries, for a deferred draw's cumulative reconcile. */
+	private readonly drawn = new Set<string>();
 	private welcome?: HTMLElement;
 	private sticky = true;
 
@@ -89,42 +119,159 @@ export class TranscriptView {
 		});
 	}
 
+	/**
+	 * Draw `items`, whole, in this frame.
+	 *
+	 * The path for everything the window reacts to as it happens: a `message_update`, a tool event, a
+	 * snapshot small enough to draw in one go. A whole conversation drawn this way is what used to
+	 * freeze the window, so {@link renderDeferred} exists for it — and this method is where that
+	 * deferral ends: an outstanding draw is cancelled, and the pass below completes it.
+	 */
 	render(items: readonly Item[], streaming: boolean): void {
-		const seen = new Set<string>();
+		this.drain.cancel();
+		this.draw(items, streaming);
+	}
 
-		for (const item of items) {
-			seen.add(item.id);
-			if (item.kind === "message") this.renderMessage(item);
-			else this.renderTools(item);
-		}
+	/**
+	 * Draw a whole snapshot in bounded slices, the first one in this turn.
+	 *
+	 * The batching is the point: `render` on a session with a long history is one block of Markdown
+	 * parsing and node building, and while it runs the browser does not repaint — not the transcript
+	 * arriving, not the notice saying it is arriving. Here the first slice lands with the click, the
+	 * frame is given back so the browser can paint it, and the rest follows one batch per frame.
+	 *
+	 * The first slice is deliberately a fixed count rather than "everything up to the fold": a slice
+	 * that ran to the end of a short conversation would behave exactly like the immediate path, and
+	 * the one case this method exists for is the long conversation, where a fixed count is the only
+	 * bound that means anything. Its cost is therefore the price of the first paint, and it is the
+	 * number the harness reports.
+	 */
+	renderDeferred(items: readonly Item[], streaming: boolean): void {
+		this.drain.cancel();
+		this.sticky = true;
+		// The walk starts here rather than at a `yield`: a generator that queued the first slice for
+		// the next frame would leave the pane showing the previous session's transcript for one whole
+		// frame after the click, which is the thing being fixed.
+		this.batch(items, streaming, 0, Math.min(items.length, BATCH_ITEMS));
+		this.drain.start(() => this.producer(items, streaming));
+	}
 
-		for (const [id, turn] of [...this.turns]) {
-			if (seen.has(id)) continue;
-			this.turns.delete(id);
-			turn.section.remove();
+	/** The remaining slices of a deferred draw, one `yield` per frame. */
+	private *producer(items: readonly Item[], streaming: boolean): Generator<undefined> {
+		yield;
+		for (let index = BATCH_ITEMS; index < items.length; index += BATCH_ITEMS) {
+			this.batch(items, streaming, index, Math.min(items.length, index + BATCH_ITEMS));
+			yield;
 		}
-		for (const [id, group] of [...this.tools]) {
-			if (seen.has(id)) continue;
-			this.tools.delete(id);
-			group.section.remove();
-		}
+		// Everything is on screen, so the last word goes to the same complete pass the immediate path
+		// runs — which is also what retires anything a newer snapshot dropped.
+		this.draw(items, streaming);
+	}
+
+	/**
+	 * One slice of a deferred draw: a contiguous run of `items`, in `items` order.
+	 *
+	 * A slice never moves what earlier slices drew, and never reconciles against only itself: the
+	 * items before `from` are still on screen, so the set the tables are pruned against is the whole
+	 * conversation, not the slice. Placement only walks up to `to` for the same reason — a slice is
+	 * appended after what is already in order, and the complete pass at the end of the draw is what
+	 * handles the one case that is not, a summary that belongs at the head.
+	 */
+	private batch(items: readonly Item[], streaming: boolean, from: number, to: number): void {
+		this.visit(items, from, to);
+		this.reconcile();
+		this.setWelcome(items.length === 0 && !streaming);
+		this.sticky = true;
+		this.placeAll(items, to);
+		this.follow();
+	}
+
+	/**
+	 * Draw everything this frame knows about, and leave the screen clean.
+	 *
+	 * The immediate path and the pass that ends a deferred one are the same code, because they differ
+	 * only in how much of the work is already on screen: an item named by `drawn` has a turn here and
+	 * is left alone unless its own item changed, which is what makes the pass that closes a deferred
+	 * draw cost each turn one reference comparison instead of a second Markdown parse.
+	 *
+	 * `drawn` is cleared first because this is a complete pass: whatever `items` is, it is the whole
+	 * screen when this returns, and a deferred draw the caller superseded must not leave the ids of
+	 * its half-drawn slices behind for the prune below to spare.
+	 */
+	private draw(items: readonly Item[], streaming: boolean): void {
+		this.drawn.clear();
+		this.visit(items, 0, items.length);
+		this.reconcile();
 
 		// A new item does not always arrive at the end: a compaction summary is drawn at the head of
 		// the conversation, and a reconnect that re-baselines the session replays every item in its
 		// order. So once everything on screen has been drawn, the nodes are placed in `items` order —
 		// the same "append in order, move only what moved" pass the sidebar runs. Without it a summary
 		// that should sit at the top was appended last and read as the newest thing said.
+		this.placeAll(items, items.length);
+
+		this.setWelcome(items.length === 0 && !streaming);
+		this.container.classList.toggle("streaming", streaming);
+		if (this.sticky) this.follow();
+	}
+
+	/** Draw one run of `items`, noting each id as drawn. Both paths share this: a slice is not special. */
+	private visit(items: readonly Item[], from: number, to: number): void {
+		for (let index = from; index < to; index += 1) {
+			const item = items[index]!;
+			this.drawn.add(item.id);
+			if (item.kind === "message") this.renderMessage(item);
+			else this.renderTools(item);
+		}
+	}
+
+	/**
+	 * Put the first `to` items' nodes in `items` order.
+	 *
+	 * `to` is the whole conversation for a complete pass, and the end of the slice for one slice of a
+	 * deferred draw — a slice only ever appends after what is already in order, so walking up to its
+	 * own end is enough, and the complete pass is what settles the order for good.
+	 */
+	private placeAll(items: readonly Item[], to: number): void {
 		let previous: HTMLElement | undefined;
-		for (const item of items) {
+		for (let index = 0; index < to; index += 1) {
+			const item = items[index]!;
 			const node = item.kind === "message" ? this.turns.get(item.id)?.section : this.tools.get(item.id)?.section;
 			if (node === undefined) continue;
 			this.place(this.container, node, previous);
 			previous = node;
 		}
+	}
 
-		this.setWelcome(items.length === 0 && !streaming);
-		this.container.classList.toggle("streaming", streaming);
-		if (this.sticky) this.container.scrollTop = this.container.scrollHeight;
+	/** Drop what the conversation no longer carries, from the tables and the DOM both. */
+	private reconcile(): void {
+		for (const [id, turn] of [...this.turns]) {
+			if (this.drawn.has(id)) continue;
+			this.turns.delete(id);
+			turn.section.remove();
+		}
+		for (const [id, group] of [...this.tools]) {
+			if (this.drawn.has(id)) continue;
+			this.tools.delete(id);
+			group.section.remove();
+		}
+	}
+
+	/** Put the view back at the bottom, for a draw that just replaced the conversation. */
+	private follow(): void {
+		this.sticky = true;
+		this.container.scrollTop = this.container.scrollHeight;
+	}
+
+	/**
+	 * Run one batch of an outstanding deferred draw, and say whether more is left.
+	 *
+	 * The frame is the drain's to schedule, and this is the seam for a caller that has none: the
+	 * harness and the smoke drive the queue a batch at a time to price the first paint and the worst
+	 * slice. Production never calls it — a window's frames are the browser's to hand out.
+	 */
+	stepPending(): boolean {
+		return this.drain.step();
 	}
 
 	/** Put a node after `previous`, doing nothing when it is already there. */
@@ -144,6 +291,15 @@ export class TranscriptView {
 		return this.sticky;
 	}
 
+	/**
+	 * Draw or patch one message.
+	 *
+	 * The turn is looked up in this view's own table, which is exactly the question "is this id on
+	 * screen": a turn that has left it is a turn to build, whether because the conversation is new to
+	 * this view or because a deferred draw has not reached it yet. The table and the prune below agree
+	 * on that answer because they are the same table — deciding from anywhere else is what let a turn
+	 * the prune was about to drop be mistaken for the item arriving in its place.
+	 */
 	private renderMessage(item: Extract<Item, { kind: "message" }>): void {
 		const known = this.turns.get(item.id);
 		const turn = known ?? this.createTurn(item);

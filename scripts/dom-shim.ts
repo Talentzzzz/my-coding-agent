@@ -471,6 +471,13 @@ export interface DomShim {
 	/** 页面根元素，`applyAppearance` 与两条拖宽都往上写变量。 */
 	root: FakeNode;
 	window: unknown;
+	/**
+	 * 跑掉当前排队的那一批动画帧回调。
+	 *
+	 * shim 没有帧循环，`requestAnimationFrame` 只能把回调收下来——调用方自己决定什么时候"过一帧"。
+	 * 返回这一批实际跑掉的个数，好让调用方知道还有没有下一批（回调里再排一帧就会出现）。
+	 */
+	frames(): number;
 }
 
 export interface InstallOptions {
@@ -548,6 +555,16 @@ export function installDom(options: InstallOptions = {}): DomShim {
 		removeEventListener: () => {},
 	};
 
+	/**
+	 * 排队的动画帧回调，按挂号顺序。
+	 *
+	 * 生产代码里唯一用它的是 `drain.ts`——一帧一小批地把整棵 transcript 画出来。shim 不自己跑它，
+	 * 因为"一帧"在量具里是调用方说了算；缺了这一层，`requestAnimationFrame` 收下回调就扔，量具会
+	 * 静默地只画出第一批，而那正是量具曾经废掉一次的形状。
+	 */
+	const frameHandles = new Map<number, (time: number) => void>();
+	let frameHandle = 0;
+
 	const windowObject = {
 		matchMedia: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }),
 		addEventListener: () => {},
@@ -557,14 +574,31 @@ export function installDom(options: InstallOptions = {}): DomShim {
 		innerHeight: options.viewport?.height ?? 800,
 		setTimeout: () => 0,
 		clearTimeout: () => {},
-		requestAnimationFrame: () => 0,
-		cancelAnimationFrame: () => {},
+		requestAnimationFrame: (callback: (time: number) => void): number => {
+			frameHandle += 1;
+			frameHandles.set(frameHandle, callback);
+			return frameHandle;
+		},
+		cancelAnimationFrame: (handle: number): void => {
+			frameHandles.delete(handle);
+		},
 		location: { href: "http://127.0.0.1:0/", protocol: "http:", host: "127.0.0.1:0", origin: "http://127.0.0.1:0" },
 		desktop: undefined,
 	};
 
+	/** 一"帧"：把挂号的那批取出来跑，回调里再挂的算下一帧。 */
+	const frames = (): number => {
+		const batch = [...frameHandles.values()];
+		frameHandles.clear();
+		for (const callback of batch) callback(Date.now());
+		return batch.length;
+	};
+
 	g.document = document;
 	g.window = windowObject;
+	// 生产代码直接调全局的这两个（`drain.ts`），不是 `window.requestAnimationFrame`。
+	g.requestAnimationFrame = windowObject.requestAnimationFrame;
+	g.cancelAnimationFrame = windowObject.cancelAnimationFrame;
 	g.Element = FakeElement;
 	g.HTMLElement = FakeHTMLElement;
 	g.Node = FakeElement;
@@ -585,7 +619,7 @@ export function installDom(options: InstallOptions = {}): DomShim {
 		writable: true,
 	});
 
-	return { document, body, root, window: windowObject };
+	return { document, body, root, window: windowObject, frames };
 }
 
 /**

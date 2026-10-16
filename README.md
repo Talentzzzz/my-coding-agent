@@ -155,6 +155,7 @@ node scripts/smoke-mux.ts       # wire 表面：信封、分道、上行容错�
 node scripts/smoke-liveness.ts  # 客户端判死与重连：生产 MuxClient + 一条可故障中继；不需要密钥
 node scripts/smoke-backpressure.ts # 写侧停滞策略：注入假 socket，队列预算与截止时间；不需要密钥
 node scripts/smoke-sidebar.ts   # 侧边栏原地改行、按 modified 重排、第二行状态；不需要密钥
+node scripts/smoke-transcript.ts # 转录的分批绘制：两条路画出同一个、连跑多帧不长树、中途来的帧说了算；不需要密钥
 node scripts/smoke-session.ts  # 流式、排队、重试、压缩、委派；不需要密钥
 node scripts/smoke-models.ts   # 导入的模型与无模型占位，不需要密钥
 node scripts/smoke-approval.ts # 经 API 的审批往返，不需要密钥

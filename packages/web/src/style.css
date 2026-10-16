@@ -888,6 +888,63 @@ input:focus-visible {
 }
 
 /*
+ * The notice that a session is being read.
+ *
+ * It sits over the pane, in the wrapper rather than in the scrolling transcript, because the whole
+ * point is that it is visible while the previous conversation is still on screen — a notice inside
+ * the scroll container would scroll away with the thing it is replacing.
+ *
+ * It appears late rather than at once. The hidden attribute is toggled the moment the read starts,
+ * so on a fast local answer the notice would flash for a frame or two, which reads as a glitch
+ * rather than as progress; the delay means it only becomes visible once the wait has lasted long
+ * enough to be worth naming. The transition-delay is on the way in only, so taking it down is
+ * immediate and cannot be seen lingering over the session it was waiting for.
+ */
+.session-loading {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 10px;
+	color: var(--dsw-label-secondary);
+	background: var(--dsw-bg-base);
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity var(--dsw-duration) var(--dsw-ease) 160ms;
+}
+
+.session-loading:not([hidden]) {
+	opacity: 1;
+}
+
+/*
+ * The ring, drawn as a border rather than as a glyph: no icon to keep in sync, and its own keyframes
+ * rather than one of the pulses around it — a spin is rotation, and every other animation in this file
+ * is an opacity fade.
+ */
+.loading-ring {
+	width: 22px;
+	height: 22px;
+	border: 2px solid var(--dsw-border-l3);
+	border-top-color: var(--dsw-state-business);
+	border-radius: 50%;
+	animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.loading-label {
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+}
+
+/*
  * The reading column: wide enough for code, narrow enough to read prose.
  *
  * The width is the one axis the handle moves — `--dsw-content-width`, computed at runtime from the
