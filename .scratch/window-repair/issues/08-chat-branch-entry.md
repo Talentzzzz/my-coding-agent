@@ -1,7 +1,7 @@
 # 8 「当前分支」永远可见（不建页签）
 
 Type: task
-Status: open
+Status: resolved
 Blocked by:
 
 ## Question
@@ -40,3 +40,21 @@ Blocked by:
 
 改完跑 `npm run check` 与 `smoke-sidebar`；出图走
 `.scratch/window-rework/research/shots.ts` 那套（`desktop:screenshot` 在本机必崩）。
+
+## Answer
+
+2026-10-16，commit `a62a73c`（"The branch chip stands on single-way sessions too"）。
+
+1. **chip 永远可见**：`branchChip.hidden = true`（初始）与渲染里的 `hidden = tree === undefined`
+   都删了。单走法形态 = fork 图标 + 「当前分支」，短 id 与走法摘要清空（它们本就来自 `tree`）。
+   点击照旧落 `setPane("branch")`，分支页空态那句引导文案未动、位置确认合适。
+2. **重画门控**：`branchSig` 保留 `"none"` 作为单走法签名——它与任何树签名可区分，树与 `"none"`
+   之间任何移动都会改变签名触发重画，chip 的内容跟着签名走，不会卡死。
+3. **CSS**：`style.css` 的 branch-chip 块注释连同被推翻的理由一起重写；规则体本身不含隐藏逻辑
+   （隐藏一直由 JS `hidden` 控制），无需改。
+4. **冗余入口收掉**：按「一个入口最好只有一处」，右键菜单里的「查看分支图」删除，chip 成为唯一
+   门；`openUserMenu` 顺带加了空菜单守卫——流式期间右键用户消息不再弹任何菜单（旧行为是弹出仅含
+   「查看分支图」的菜单，该入口已不存在）。
+
+验证：`npm run check` 与 `smoke-sidebar` 全过；code-review（standards + spec 双轴）无硬违规，
+仅修掉一句过时注释表述。未出图（`shots.ts` 那套留给视觉确认时再跑）。
