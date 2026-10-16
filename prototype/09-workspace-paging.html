@@ -497,7 +497,9 @@ const WORKSPACES = [
 
 /* ===== The three undecided forms + each workspace's paging/collapse state. ===== */
 const PAGE = 5;
-const choice = { q1: "first5", q2: "collapse", q3: "remember" };
+/* Decided 2026-10-16: reopen lands on the last page, the button becomes 「收起」, and the
+   collapsed state is remembered through appearance. The switches stay for reference. */
+const choice = { q1: "lastpage", q2: "collapse", q3: "remember" };
 /** Simulates the copy appearance would sync: with q3=remember, "reopen" keeps it. */
 const wsState = new Map();
 function stateOf(cwd) {

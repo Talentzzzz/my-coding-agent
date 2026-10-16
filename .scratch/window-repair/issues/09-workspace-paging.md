@@ -1,7 +1,7 @@
 # 9 工作区折叠与分页的形态
 
 Type: prototype
-Status: open
+Status: resolved
 Blocked by:
 
 ## Prototype
@@ -57,3 +57,15 @@ Blocked by:
 `${rows.version}|${followed ?? ""}|${directory}|${pickedWorkspace}|${collapsed ? 1 : 0}|${channel}`
 里**没有**收展状态的话，收起/展开**根本不会重画**。还有 `pickedWorkspace`（`main.ts:81`）驱动的
 「当前」标记（`sidebar.ts:347-352`）要与收起态共存。
+
+## Answer
+
+**2026-10-16 用户在原型上当场拍板**（控制台里翻的开关，不是读文字选的）：
+
+1. **问题一 · 从收起点表头 → 「上次那一页」**：不是屏上默认的「前 5 条」——用户翻到了「上次那一页」。收起前的页码记在 `savedPage` 里，展开时恢复。
+2. **问题二 · 全部展开之后 → 变「收起」**（参考实现的原词）。点了回到 5 条、不动 `savedPage`，且只在会话数超过 5 的工作区出现。
+3. **问题三 · 收起状态 → 记住，跟 appearance 走**。不用 localStorage（04 号的刻意分歧）。
+
+原型（`prototype/09-workspace-paging.html`）的默认开关已改成这组拍板值，开关保留供回看。
+
+落地归 [11 号 task 票](11-land-workspace-paging.md)。

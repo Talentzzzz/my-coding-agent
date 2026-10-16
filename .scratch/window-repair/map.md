@@ -203,6 +203,13 @@ resolved**，本图接着它们往下走，但有两条是**重开**而不是新
   连续测量就是 1.0x，量具的 `total` 列已改成连续测量并把这个坑写进量具 README 的限度清单。
   补了 `scripts/smoke-transcript.ts`（此前没有任何东西驱动 `TranscriptView`，而这条路最坏的失败形态
   是每帧重建 → 4 GB 堆爆，`npm run check` 按构造抓不到）。
+- [09 工作区折叠与分页的形态](issues/09-workspace-paging.md)：原型
+  [`prototype/09-workspace-paging.html`](../../../prototype/09-workspace-paging.html)（自包含、浅深
+  两套、照真窗口构图），三处没定做成可翻开关，**用户 2026-10-16 当场拍板**：从收起点表头回到
+  **「上次那一页」**（不是屏上默认的「前 5 条」）、全部展开后按钮**变「收起」**、收起状态**跟
+  appearance 记住**（不用 localStorage）。落地注意事项（`main.ts:708` 签名带收展状态、「当前」标记
+  与收起态共存、计数按会话走、appearance 真实序列化→恢复要真验）随票记下，执行归
+  [11 号 task 票](issues/11-land-workspace-paging.md)。
 
 ## Not yet specified
 - **"卡"在真窗口里的真实帧时间**：今天所有性能数字都是 `FakeNode` shim 量出来的**比值**，没有一帧
