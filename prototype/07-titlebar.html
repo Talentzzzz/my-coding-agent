@@ -247,7 +247,9 @@ input[type="range"] { width: 200px; accent-color: var(--dsw-button-info-fill); }
 	overflow: hidden;
 	border: 1px solid var(--dsw-border-l2);
 	box-shadow: var(--dsw-shadow-panel);
-	/* The window's own fill, which the band inherits: this IS `--dsw-bg-sidebar`. */
+	/* The window's own fill, which the band inherits: this IS `--dsw-bg-sidebar`. It is also what the
+	   drag handle's 6px column shows at rest — matching the sidebar means no seam, which is what the
+	   reference has (it draws no divider between the two columns at all). */
 	background: var(--dsw-bg-sidebar);
 }
 
@@ -310,7 +312,11 @@ input[type="range"] { width: 200px; accent-color: var(--dsw-button-info-fill); }
 	padding: 6px 12px;
 	/* The band's fill continued — one surface from the top of the window down the left column. */
 	background: var(--dsw-bg-sidebar);
-	border-right: 1px solid var(--dsw-border-l1);
+	/*
+	 * No border-right: the reference separates the two columns by their fills alone (measured at
+	 * y=300: sidebar 27,27,28 ends at x=279 and the panel's 21,21,23 starts at x=280 — no divider
+	 * pixel between them). A hairline there draws a seam the design does not have.
+	 */
 }
 .sidebar-top {
 	display: flex;
@@ -456,6 +462,15 @@ input[type="range"] { width: 200px; accent-color: var(--dsw-button-info-fill); }
 	grid-template-rows: auto 1fr auto auto;
 	/* The reading panel's own fill: the deeper of the two in the dark sheet. */
 	background: var(--dsw-bg-base);
+	/*
+	 * The panel's top-left corner is rounded, which is what makes the band + sidebar read as one
+	 * surface with a card laid into it rather than as three rectangles butted together. Measured on
+	 * the reference: the panel's left edge runs from x=290 at y=40 to x=280 at y=50 — a ~10px radius.
+	 * Stated a step up the radius scale (`--dsw-radius-lg`, 16px) because at 12px the arc is only a
+	 * few pixels of anti-aliasing against a 24% luminance step and reads as square in a screenshot.
+	 * Only the top-left: the other three corners are the window's own or sit against nothing.
+	 */
+	border-top-left-radius: var(--dsw-radius-lg);
 }
 
 /*
@@ -706,13 +721,10 @@ li { margin-bottom: 4px; }
 /* ============================================== the variants' structural rules */
 
 /*
- * B — 统一填充: the band and both columns take one fill, and the reading panel is set off by a
- * hairline instead of a tone. Cheapest to reason about; gives up the depth cue.
+ * B — 统一填充: the band and both columns take one fill, so the reading panel is set off by its
+ * rounded corner alone. Cheapest to reason about; gives up the depth cue.
  */
-.shell[data-variant="B"] .conversation {
-	background: var(--dsw-bg-sidebar);
-	border-left: 1px solid var(--dsw-border-l2);
-}
+.shell[data-variant="B"] .conversation { background: var(--dsw-bg-sidebar); }
 
 /* ============================================ the floating switcher (prototype only) */
 
@@ -934,7 +946,7 @@ li { margin-bottom: 4px; }
 
 const VARIANTS = [
 	{ key: "A", name: "参考形态", note: "顶带 = 会话栏填充，面板深一档。和你发的窗口 1:1。" },
-	{ key: "B", name: "统一填充", note: "三块一个色，面板靠一道分隔线区分。最省事，代价是丢掉深浅层次。" },
+	{ key: "B", name: "统一填充", note: "三块一个色，面板只靠左上角的圆角区分。最省事，代价是丢掉深浅层次。" },
 ];
 
 const PAGE = 5;

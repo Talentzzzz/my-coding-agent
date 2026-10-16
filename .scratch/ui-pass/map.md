@@ -24,11 +24,11 @@ Label: `wayfinder:map`
 ## Decisions so far
 
 - [桌面端启动验证与修复](issues/01-desktop-launch.md)：独显直连后仍以同样症状崩溃（GPU 0xC0000005 + 渲染 0x80000003），与显示模式无关；按预案把 `disableHardwareAcceleration` + `no-sandbox` 固化进 `main.cjs`，重启验证通过。
+- [标题栏布局原型](issues/07-titlebar-prototype.md)：结构照用户给的参考窗口逐像素量定——**y 0–40 是一条铺满窗口宽的顶带，填充与会话栏同色，页面不在里面画内容**；y ≥ 40 才是两栏，对话面板另一档深度（深色 `27,27,28` / `21,21,23`，浅色 `245,246,247` / `255,255,255`）。用户拍板方案 A，并补两条：**面板左上角圆角 16px**、**会话栏右侧不画分隔线**。原型 `prototype/07-titlebar.html`（`npm run prototype:titlebar`），全部实测数字与截图在 ticket 里。
 - [open-claude-ui 参考](issues/11-open-claude-ui-reference.md)：清单 7 条已备好（危险确认对话框、回到底部悬浮按钮、菜单键盘漫游、边缘渐隐、分割条双击归位、档位分段胶囊、状态点微动效），等用户挑中哪些再毕业成 ticket。
 
 ## Not yet specified
 
-- 标题栏原型（[标题栏布局原型](issues/07-titlebar-prototype.md)）：**第二轮原型已就绪**（`prototype/07-titlebar.html`，双击即可）。第一轮的"在标题行内部让位"四个方案已被用户否掉——照参考窗口逐像素量出来的结构是：**y 0–40 是一条铺满窗口宽的顶带，页面不在里面画任何东西，填充与会话栏同色；y ≥ 40 才是两栏，对话面板比会话栏深/浅一档**。我们现在的 bug 是顶带被画成了面板的色（`rgb(21,21,23)`），所以按钮站在"内容"上。`A 参考形态` 与 `B 统一填充` 两方案实测都是 0 冲突，等用户拍板后从"标题栏原型"毕业出实现 ticket；实现 ticket 要带上：拆顶带、顶带填充/`titleBarOverlay` 跟主题、`.header-row` 去掉标题栏高度、`.branch-tools` 的 `min-width: 0`。
 - [open-claude-ui 参考](issues/11-open-claude-ui-reference.md) 的借鉴清单会毕业出一批新 ticket（数量未知，取决于清单里哪些被用户挑中）。
 
 ## Out of scope
