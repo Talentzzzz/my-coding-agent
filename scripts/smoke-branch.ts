@@ -19,7 +19,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { BranchView } from "../packages/web/src/render/branch-view.ts";
 import type { BranchTree, BranchWay } from "../packages/web/src/state.ts";
-import { installDom, styleMetrics, type FakeNode } from "./dom-shim.ts";
+import { FakeNode, installDom } from "./dom-shim.ts";
 
 let failures = 0;
 
@@ -61,10 +61,36 @@ function geometryOf(cards: FakeNode[]): { heights: string[]; tops: number[] } {
 	return { heights, tops };
 }
 
-/** The card's height and its lane, as a browser would have resolved the two tokens. */
-function tokensAt(node: number, lane: number): void {
-	styleMetrics["--dsw-branch-node-h"] = `${node}px`;
-	styleMetrics["--dsw-branch-lane-h"] = `${lane}px`;
+/** What the next graph measures for the two branch tokens. */
+let boxes = { node: 46, lane: 58 };
+
+/**
+ * Answer the graph's geometry probe with the box a browser would have given it.
+ *
+ * The tokens are `calc()` chains, and an unregistered custom property's computed value keeps its
+ * `calc()` — which is why the production code measures a **box** rather than parsing the token string
+ * (see `cardMetrics`). The shim has no layout, so this is that box: from here on, a `branch-metric`
+ * element answers with what `probeAt` last said, and everything else answers as it always did. The first
+ * cut of this file fed `parseFloat` a literal instead, which is precisely the read-back the real window
+ * got wrong: production was fine here and broken there, and the shim said nothing.
+ */
+const answerProbe = ((): (() => void) => {
+	const original = FakeNode.prototype.getBoundingClientRect;
+	FakeNode.prototype.getBoundingClientRect = function (this: FakeNode) {
+		if (this.className.split(/\s+/).includes("branch-metric")) {
+			const measured = String(this.style.height ?? "").includes("node") ? boxes.node : boxes.lane;
+			return { left: 0, right: 0, top: 0, bottom: measured, width: 0, height: measured };
+		}
+		return original.call(this);
+	};
+	return () => {
+		FakeNode.prototype.getBoundingClientRect = original;
+	};
+})();
+
+/** The card's height and its lane, as the layout's own answer to the two tokens. */
+function probeAt(node: number, lane: number): void {
+	boxes = { node, lane };
 }
 
 /** Build the page the way `main.ts` does, then show it, so the paint has run. */
@@ -72,6 +98,11 @@ function painted(tree: BranchTree): FakeNode[] {
 	const view = new BranchView({ onSwitch: () => {}, onBack: () => {} });
 	view.render(tree, false);
 	view.enter();
+	return cardsOf(view);
+}
+
+/** The cards one page is showing. */
+function cardsOf(view: BranchView): FakeNode[] {
 	return nodesOfClass(view.element as unknown as FakeNode, "gnode");
 }
 
@@ -224,21 +255,22 @@ function chainTree(depth: number): BranchTree {
 process.stdout.write("\nbranch：任意长的消息，卡片同一高度且不换行\n");
 
 {
-	// The shim resolves no CSS, so the tokens are stood in for here: the paint reads `--dsw-branch-node-h`
-	// and `--dsw-branch-lane-h` back off the document, and these stand for what a browser would have
-	// resolved them to. Part 2 checks the tokens themselves.
-	tokensAt(44, 56);
+	// The shim has no layout, so the two numbers below stand for the boxes the layout gives the graph's
+	// probe element: the paint measures `--dsw-branch-node-h` and `--dsw-branch-lane-h` off a probe
+	// rather than parsing them, because an unregistered `calc()` token reads back as its own token
+	// stream. Part 2 checks the tokens; this part checks that whatever the probe answers is what lands.
+	probeAt(46, 58);
 
 	const cards = painted(forkedTree());
 	check("每一条走法、连同根，各有一张卡片", cards.length === 4, `${cards.length} 张`);
 
 	const solid = geometryOf(cards);
-	check("所有卡片高度相同，且就是令牌那个高度", solid.heights.length === 1 && solid.heights[0] === "44px", solid.heights.join(" / "));
+	check("所有卡片高度相同，且就是量到的高度", solid.heights.length === 1 && solid.heights[0] === "46px", solid.heights.join(" / "));
 
 	// The lane the tokens describe, read off the paint: two cards on different rows have to clear each
 	// other — a card that clips is the failure this whole ticket is about.
 	const steps = solid.tops.slice(1).map((top, index) => top - solid.tops[index]!);
-	check("行与行之间就是令牌那个行高", steps.every((step) => step === 56), steps.join(" / "));
+	check("行与行之间就是量到的行高", steps.every((step) => step === 58), steps.join(" / "));
 
 	// The label is one line of ordinary text with `text-overflow: ellipsis` doing the cutting: the card
 	// must not carry a second, hidden copy of the sentence that a hover can swap in.
@@ -256,40 +288,46 @@ process.stdout.write("\nbranch：任意长的消息，卡片同一高度且不�
 
 {
 	// The font-size slider moves the type scale, which is exactly why these two are tokens: a card sized
-	// for the default size clips its meta line at the top of the range. Same tree, bigger tokens.
-	tokensAt(56, 68);
+	// for the default size clips its meta line at the top of the range. Same tree, taller probe boxes.
+	probeAt(52, 64);
 
 	const cards = painted(forkedTree());
 	const grown = geometryOf(cards);
-	check("字号变大：卡片跟着令牌长高", grown.heights.length === 1 && grown.heights[0] === "56px", grown.heights.join(" / "));
+	check("字号变大：卡片跟着量到的高度长高", grown.heights.length === 1 && grown.heights[0] === "52px", grown.heights.join(" / "));
 	const steps = grown.tops.slice(1).map((top, index) => top - grown.tops[index]!);
-	check("字号变大：行高也跟着令牌", steps.every((step) => step === 68), steps.join(" / "));
+	check("字号变大：行高也跟着量到的行高", steps.every((step) => step === 64), steps.join(" / "));
 
-	tokensAt(44, 56);
+	probeAt(46, 58);
 }
 
 {
 	// The font-size setting is not a new tree, so `render`'s one comparison would skip the paint: the page
 	// has to be told to measure again, and only while it is on screen — `enter` paints on the way in.
+	// The font-size setting is not a new tree, so `render`'s one comparison would skip the paint: the page
+	// has to be told to measure again, and only while it is on screen — `enter` paints on the way in.
+	probeAt(46, 58);
 	const view = new BranchView({ onSwitch: () => {}, onBack: () => {} });
 	const cards = (): FakeNode[] => nodesOfClass(view.element as unknown as FakeNode, "gnode");
-	tokensAt(44, 56);
 	view.render(forkedTree(), false);
 	view.remeasure();
 	check("没打开的页面不需要重量", cards().length === 0, `${cards().length} 张`);
 
 	view.enter();
 	check("打开时画一次", cards().length === 4, `${cards().length} 张`);
-	tokensAt(52, 64);
-	check("字号一变，卡片还是旧高度，直到重量一次", String(cards()[0]?.style.height) === "44px", String(cards()[0]?.style.height));
+	check("这时量到的是旧字号下的高度", String(cards()[0]?.style.height) === "46px", String(cards()[0]?.style.height));
+
+	// The font grew. The tree did not, so the page keeps the height it measured until it is told to
+	// measure again — which is exactly the bug that made `remeasure` necessary.
+	probeAt(52, 64);
+	check("字号变了、还没重量，卡片还是旧高度", String(cards()[0]?.style.height) === "46px", String(cards()[0]?.style.height));
 	view.remeasure();
 	check("重量之后卡片是新高度", String(cards()[0]?.style.height) === "52px", String(cards()[0]?.style.height));
 
-	tokensAt(44, 56);
+	probeAt(46, 58);
 }
 
 {
-	tokensAt(44, 56);
+	probeAt(46, 58);
 	const cards = painted(chainTree(6));
 	check("六层长句的链：卡片数对", cards.length === 7, `${cards.length} 张`);
 	check("六层长句的链：高度仍然只有一个", geometryOf(cards).heights.length === 1, geometryOf(cards).heights.join(" / "));
@@ -298,12 +336,13 @@ process.stdout.write("\nbranch：任意长的消息，卡片同一高度且不�
 }
 
 {
-	// A stylesheet that failed to load must not collapse the lanes onto the cards either.
-	tokensAt(44, 56);
-	for (const name of Object.keys(styleMetrics)) delete styleMetrics[name];
+	// A stylesheet that never loaded leaves the probe without a box, and the honest answer is a graph the
+	// browser says is nothing — not a card height guessed in TypeScript, which would be right only at the
+	// default font size and would hide the fact that the tokens stopped resolving.
+	probeAt(0, 0);
 	const cards = painted(forkedTree());
-	check("令牌读不到时仍有兜底几何", String(cards[0]?.style.height) === "44px", String(cards[0]?.style.height));
-	tokensAt(44, 56);
+	check("令牌量不到就照量到的画，不猜一个兜底高度", cards.length === 4 && cards.every((card) => String(card.style.height) === "0px"), cards.map((card) => String(card.style.height)).join(" / "));
+	probeAt(46, 58);
 }
 
 // ------------------------------------------------------- 2. the stylesheet agrees with the paint
@@ -323,10 +362,96 @@ process.stdout.write("\nbranch：卡片几何来自令牌，悬停不再撑高\n
 	const lane = declared(tokens, ":root", "--dsw-branch-lane-h") ?? "";
 	check("卡片高度由字号阶梯派生", node.includes("--dsw-fs-delta") && node.includes("--dsw-lh-caption") && node.includes("--dsw-lh-meta"), node);
 	check("行高由卡片高度派生", lane.includes("--dsw-branch-node-h"), lane);
-	check("默认字号下卡片 44px、行高 56px", tokenPixels("--dsw-branch-node-h") === 44 && tokenPixels("--dsw-branch-lane-h") === 56, `${tokenPixels("--dsw-branch-node-h")} / ${tokenPixels("--dsw-branch-lane-h")}`);
-	// The top of the slider's range (22px) used to clip the meta line at a fixed 44px.
+	check("默认字号下卡片 46px、行高 58px", tokenPixels("--dsw-branch-node-h") === 46 && tokenPixels("--dsw-branch-lane-h") === 58, `${tokenPixels("--dsw-branch-node-h")} / ${tokenPixels("--dsw-branch-lane-h")}`);
+	// The card has to hold its own two lines inside `box-sizing: border-box`: 18 + 2 + 16 + (4+4+1+1).
+	check("卡片高度装得下两行加内边距和边框", tokenPixels("--dsw-branch-node-h") >= tokenPixels("--dsw-lh-meta") + tokenPixels("--dsw-lh-caption") + 2 + 10, String(tokenPixels("--dsw-branch-node-h")));
+	// The top of the slider's range (22px) used to clip the meta line at a fixed height.
 	const tallest = tokenPixels("--dsw-branch-node-h", 22);
-	check("字号拉满时卡片跟着长高，行高仍然装得下它", tallest > 44 && tokenPixels("--dsw-branch-lane-h", 22) >= tallest + 8, `${tallest} / ${tokenPixels("--dsw-branch-lane-h", 22)}`);
+	check("字号拉满时卡片跟着长高，行高仍然装得下它", tallest > 46 && tokenPixels("--dsw-branch-lane-h", 22) >= tallest + 12, `${tallest} / ${tokenPixels("--dsw-branch-lane-h", 22)}`);
+}
+
+// ------------------------------------------------- 3. entering the page centres the graph
+//
+// Ticket `.scratch/ui-pass/issues/03-branch-center.md`. The page used to scroll to (0, 0) on the way
+// in, which pins the graph to the top-left corner of a viewport it may only fill a third of. Centring
+// is two halves that must not fight: the graph **that overflows** is centred by the scroll position
+// (`scrollHome`), and the graph **that fits** has no scroll range at all, so the stylesheet centres it.
+// A shim has no layout and no cascade, so each half is pinned where it lives — the scroll arithmetic
+// against measured sizes, the centring against the stylesheet's own declarations.
+
+process.stdout.write("\nbranch：进入时整图居中\n");
+
+/**
+ * A page whose viewport measures `width × height`, the one thing a shim cannot work out for itself.
+ *
+ * The sizer's box needs no such help: it is `style.width` / `style.height`, which the shim reads back
+ * the way a browser would (a real sizer gets its height from the SVG child inside it).
+ */
+function pageOf(tree: BranchTree, width: number, height: number): { view: BranchView; viewport: FakeNode; sizer: FakeNode } {
+	const view = new BranchView({ onSwitch: () => {}, onBack: () => {} });
+	const root = view.element as unknown as FakeNode;
+	const viewport = root.querySelector(".graph-viewport");
+	const sizer = root.querySelector(".graph-sizer");
+	if (viewport === null || sizer === null) throw new Error("量具找不到 viewport 或 sizer");
+	viewport.clientWidth = width;
+	viewport.clientHeight = height;
+	view.render(tree, false);
+	view.enter();
+	return { view, viewport, sizer };
+}
+
+/** The sizer's own size, measured the way the view measures it. */
+function sizerSizeOf(sizer: FakeNode): { width: number; height: number } {
+	return { width: sizer.clientWidth, height: sizer.clientHeight };
+}
+
+/** The scroll position `scrollHome` is supposed to have reached, clamped the way a scroll range is. */
+function centreOf(sizer: FakeNode, width: number, height: number): { left: number; top: number } {
+	const size = sizerSizeOf(sizer);
+	return { left: Math.max(0, (size.width - width) / 2), top: Math.max(0, (size.height - height) / 2) };
+}
+
+{
+	// A viewport too narrow for the graph: it is clamped at the zoom floor, so the sizer is the wider
+	// of the two and the scroll position can park in the middle of the remainder. (What the two axes
+	// hold can differ — at a normal zoom the sizer is only wider because the graph's own margins do not
+	// shrink with it.)
+	probeAt(44, 56);
+	const { viewport, sizer } = pageOf(forkedTree(), 300, 300);
+	const want = centreOf(sizer, 300, 300);
+	check("图比视口大：居中位置是两个溢出量的一半", viewport.scrollLeft === want.left && viewport.scrollTop === want.top, `${viewport.scrollLeft}/${viewport.scrollTop} 想要 ${want.left}/${want.top}`);
+	check("图比视口大：这个用例确实滚到了里面", want.left > 0, `${want.left} / ${sizer.clientWidth}`);
+}
+
+{
+	// A graph that fits: there is no scroll range to centre with, so the scroll stays at the clamp and
+	// the stylesheet's `justify-items` is the half that does the centring. Both halves are asserted,
+	// because "回到 0" is exactly what the ticket says was wrong.
+	probeAt(44, 56);
+	const { viewport, sizer } = pageOf(forkedTree(), 2000, 1200);
+	const want = centreOf(sizer, 2000, 1200);
+	check("图装得下：没有可滚的余量，滚动停在零", viewport.scrollLeft === 0 && viewport.scrollTop === 0, `${viewport.scrollLeft} / ${viewport.scrollTop}`);
+	check("图装得下：零正是那条公式被夹到下限的结果，不是另写的一条路", want.left === 0 && want.top === 0, `${want.left} / ${want.top}`);
+
+	check("视口用居中排布，而不是让图贴角", declared(css, ".graph-viewport", "justify-items") === "center" && declared(css, ".graph-viewport", "align-items") === "center", `${declared(css, ".graph-viewport", "justify-items")} / ${declared(css, ".graph-viewport", "align-items")}`);
+	// The hinge: with the track allowed to shrink below the viewport, centring a graph that overflows
+	// would push its left and top edges out of reach — unreachable, not merely off-centre.
+	check("sizer 不小于视口，居中不会把图的边缘推出可达范围", declared(css, ".graph-sizer", "min-width") === "100%" && declared(css, ".graph-sizer", "min-height") === "100%", `${declared(css, ".graph-sizer", "min-width")} / ${declared(css, ".graph-sizer", "min-height")}`);
+}
+
+{
+	// "适应" is the same landing as entering: it fits the graph to the viewport and centres it. Scrolled
+	// off the centre first, so the assertion is about the button and not about where the page started.
+	probeAt(44, 56);
+	const { viewport, sizer, view } = pageOf(forkedTree(), 300, 300);
+	viewport.scrollLeft = 0;
+	viewport.scrollTop = 0;
+	const fit = nodesOfClass(view.toolsBar as unknown as FakeNode, "zoom-button").find((button) => button.textContent === "适应");
+	if (fit === undefined) throw new Error("量具找不到「适应」按钮");
+	fit.dispatch("click");
+	const want = centreOf(sizer, 300, 300);
+	check("「适应」之后同样居中", viewport.scrollLeft === want.left && viewport.scrollTop === want.top, `${viewport.scrollLeft}/${viewport.scrollTop} 想要 ${want.left}/${want.top}`);
+	check("「适应」的用例确实滚到了别处", want.left > 0, `${want.left} / ${sizer.clientWidth}`);
 }
 
 process.stdout.write(failures === 0 ? "\nbranch ok\n" : `\n${failures} 项失败\n`);

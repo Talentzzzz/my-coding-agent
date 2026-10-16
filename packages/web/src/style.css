@@ -1660,9 +1660,25 @@ body:not([data-pane="branch"]) .branch-view {
 	border-left: 1px solid var(--dsw-border-l1);
 }
 
+/*
+ * The viewport centres what fits and scrolls what does not.
+ *
+ * A graph smaller than the viewport has no scroll range, so no scroll position can put it in the
+ * middle: `justify-items` / `align-items` are what centre it, while `scrollHome()` in the view keeps a
+ * graph that *does* overflow centred by scroll. The sizer's `min-width` / `min-height: 100%` are the
+ * hinge — they make the track no smaller than the viewport, so a starved grid track can never become
+ * the thing that is scrolled, which would put the graph's left and top edges out of reach.
+ *
+ * The graph's natural size and its scaled size are two facts: the sizer outside carries the scroll
+ * range (so a shrunken graph still scrolls a shrunken distance), and the layer inside carries the
+ * `scale()` — which keeps the text vector-sharp at any zoom.
+ */
 .graph-viewport {
 	flex: 1;
 	min-height: 0;
+	display: grid;
+	justify-items: center;
+	align-items: center;
 	overflow: auto;
 	position: relative;
 	cursor: grab;
@@ -1673,13 +1689,10 @@ body:not([data-pane="branch"]) .branch-view {
 	cursor: grabbing;
 }
 
-/*
- * The graph's natural size and its scaled size are two facts: the sizer outside carries the scroll
- * range (so a shrunken graph still scrolls a shrunken distance), and the layer inside carries the
- * `scale()` — which keeps the text vector-sharp at any zoom.
- */
 .graph-sizer {
 	position: relative;
+	min-width: 100%;
+	min-height: 100%;
 }
 
 .graph-zoom {
@@ -1697,12 +1710,26 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
+ * The element the graph measures its geometry on (`cardMetrics` in `branch-view.ts`): it is handed a
+ * token as its height and read back, because a `calc()` token's computed value is still a `calc()`
+ * string and parsing it yields nothing. It never shows, sits out of the flow, and the paint removes it.
+ */
+.branch-metric {
+	position: absolute;
+	left: 0;
+	top: 0;
+	width: 0;
+	visibility: hidden;
+	pointer-events: none;
+}
+
+/*
  * One node: a dot on the line, then a **fixed-height, one-line** card — the way's first sentence, and
  * under it the short id cut from its store entry plus its round. The sentence is cut by the ellipsis,
  * and the whole of it is the card's `title`: a card that grew on hover covered the row below and made
  * the tree, which is the only reason the page exists, read as prose. Height and the gap under it come
- * from the branch tokens, which follow the font-size scale; the graph reads the same two back to lay
- * the lanes out, so a card and its lane can only agree.
+ * from the branch tokens, which follow the font-size scale; the graph measures the same two to lay the
+ * lanes out, so a card and its lane can only agree.
  */
 .gnode {
 	position: absolute;

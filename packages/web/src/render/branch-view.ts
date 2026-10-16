@@ -23,17 +23,6 @@ const PAD_X = 24; // Space around the graph (also the viewport's inset).
 const PAD_Y = 16;
 const ZOOM_MIN = 0.4;
 const ZOOM_MAX = 3;
-/**
- * What the graph falls back to when the branch tokens cannot be read off the stylesheet.
- *
- * A card's height and the lane it sits in are **tokens**, not constants here, because the window's
- * font-size setting moves them: `tokens.css` derives both from the type scale, so the label line and
- * the meta line always fit whatever size the slider is on. Reading them back is the same shape
- * `main.ts` uses for the content column, and these literals are only what a stylesheet that failed to
- * load leaves behind — they are the token values at the default font size.
- */
-const NODE_H_FALLBACK = 44;
-const LANE_H_FALLBACK = 56;
 /** The short id a card and the header's entry both show: the entry id's first few characters. */
 const SHORT_ID = 7;
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -240,7 +229,7 @@ export class BranchView {
 			return;
 		}
 
-		const metrics = cardMetrics();
+		const metrics = cardMetrics(this.viewport);
 		const laid = (this.laid = layout(tree, metrics));
 		this.paintSummary(tree);
 
@@ -406,8 +395,14 @@ export class BranchView {
 		const box = this.viewport.getBoundingClientRect();
 		const vx = clientX === undefined ? this.viewport.clientWidth / 2 : clientX - box.left;
 		const vy = clientY === undefined ? this.viewport.clientHeight / 2 : clientY - box.top;
-		const gx = (this.viewport.scrollLeft + vx - PAD_X) / this.zoom;
-		const gy = (this.viewport.scrollTop + vy - PAD_Y) / this.zoom;
+		// Where the point under the pointer sits in the graph's own coordinates. Measured, not derived
+		// from `scrollLeft`: a graph smaller than the viewport is centred by the stylesheet, so the
+		// viewport's origin meets the sizer somewhere in the middle rather than at its corner.
+		const sizer = this.sizer.getBoundingClientRect();
+		const ox = box.left + this.viewport.scrollLeft - sizer.left;
+		const oy = box.top + this.viewport.scrollTop - sizer.top;
+		const gx = (ox + vx - PAD_X) / this.zoom;
+		const gy = (oy + vy - PAD_Y) / this.zoom;
 
 		this.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, next));
 		this.sizer.style.width = `${laid.width * this.zoom + PAD_X * 2}px`;
@@ -416,8 +411,10 @@ export class BranchView {
 		this.zoomLayer.style.top = `${PAD_Y}px`;
 		this.zoomLayer.style.transform = `scale(${this.zoom})`;
 
-		this.viewport.scrollLeft = gx * this.zoom + PAD_X - vx;
-		this.viewport.scrollTop = gy * this.zoom + PAD_Y - vy;
+		// The `- PAD_X` is the sizer's own inset: the graph sits inside it, so the scroll that pins the
+		// graph's point under the pointer is the scroll that pins the sizer's box plus that inset.
+		this.viewport.scrollLeft = gx * this.zoom + PAD_X - vx - ox;
+		this.viewport.scrollTop = gy * this.zoom + PAD_Y - vy - oy;
 		this.zoomValue.textContent = `${Math.round(this.zoom * 100)}%`;
 	}
 
@@ -430,9 +427,19 @@ export class BranchView {
 		return Math.min(byWidth, byHeight);
 	}
 
+	/**
+	 * The scroll position that puts the graph in the middle of the viewport — entering the page and
+	 * pressing "适应" both land here.
+	 *
+	 * Read off the sizer's painted size rather than recomputed from `zoom`: one size, one place, and
+	 * the two cannot drift apart. A graph smaller than the viewport has no scroll range, so the clamp
+	 * is the whole answer there and the stylesheet's `justify-items` does the visible half.
+	 */
 	private scrollHome(): void {
-		this.viewport.scrollLeft = 0;
-		this.viewport.scrollTop = 0;
+		if (this.laid === undefined) return;
+		const sizer = this.sizer.getBoundingClientRect();
+		this.viewport.scrollLeft = Math.max(0, (sizer.width - this.viewport.clientWidth) / 2);
+		this.viewport.scrollTop = Math.max(0, (sizer.height - this.viewport.clientHeight) / 2);
 	}
 
 	/** Entering the page: 100% when the graph fits, shrunk only when it does not. */
@@ -455,17 +462,31 @@ interface CardMetrics {
 	lane: number;
 }
 
-/** The graph's own geometry, off the branch tokens; the fallbacks are the values at the default size. */
-function cardMetrics(): CardMetrics {
-	const styles = getComputedStyle(document.documentElement);
-	const read = (name: string, fallback: number): number => {
-		const value = Number.parseFloat(styles.getPropertyValue(name));
-		return Number.isFinite(value) ? value : fallback;
+/**
+ * The graph's geometry, measured off a throwaway element rather than parsed off the tokens.
+ *
+ * `--dsw-branch-node-h` is a `calc()` chain, and an **unregistered** custom property's computed value
+ * is that token stream with the `calc()` left unevaluated — `getComputedStyle(root).getPropertyValue()`
+ * hands back `"calc(calc(13px + calc(22px - 15px)) * 18 / 13) + ..."`, which `parseFloat` reads as
+ * `NaN`. The first cut of this read the tokens that way, so it always took its fallback and painted
+ * every card at the default size no matter what the font-size slider said: the clipping this page was
+ * fixed for, back at the top of the range. `main.ts` can parse its own tokens because those are literal
+ * pixels; these are not, so the browser does the arithmetic and this reads the result.
+ *
+ * The probe carries the token as its height, so what comes back is the box the layout gives a real
+ * card — it has to be attached to be measured at all, so it goes into the viewport and comes straight
+ * back out. `.branch-metric` keeps it invisible and out of the flow while it is there.
+ */
+function cardMetrics(host: HTMLElement): CardMetrics {
+	const measure = (height: string): number => {
+		const probe = element("div", "branch-metric");
+		probe.style.height = height;
+		host.append(probe);
+		const measured = probe.getBoundingClientRect().height;
+		probe.remove();
+		return measured;
 	};
-	return {
-		node: read("--dsw-branch-node-h", NODE_H_FALLBACK),
-		lane: read("--dsw-branch-lane-h", LANE_H_FALLBACK),
-	};
+	return { node: measure("var(--dsw-branch-node-h)"), lane: measure("var(--dsw-branch-lane-h)") };
 }
 
 /**

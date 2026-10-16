@@ -72,8 +72,8 @@ class FakeNode {
 	scrollTop = 0;
 	scrollLeft = 0;
 	scrollHeight = 0;
-	clientHeight = 0;
-	clientWidth = 0;
+	/** 显式写进去的尺寸；没写就现读 `style`（见下面的存取器）。 */
+	private readonly measured = { width: 0, height: 0 };
 	/** 这个节点被构造过几次——`smoke-sidebar.ts` 拿它分辨"原地改"与"重建"。 */
 	created = 1;
 	/** 每个节点一个独有的 id，与真 DOM 一样。 */
@@ -347,9 +347,43 @@ class FakeNode {
 	setPointerCapture(): void {}
 	releasePointerCapture(): void {}
 	scrollIntoView(): void {}
-	/** 视口盒子：全是零。菜单的定位读它，量具不量布局。 */
+	/**
+	 * A node's own size: what a test wrote on it, and failing that what its inline style says.
+	 *
+	 * The fallback is what makes the branch view measurable. The sizer's size is not stored anywhere the
+	 * view can read back — it *is* `style.width` / `style.height`, which the paint sets and the graph's
+	 * SVG child would in a browser turn into a height. A shim that answered zero there would report a
+	 * scroll range of zero and quietly measure nothing.
+	 */
+	get clientWidth(): number {
+		return this.measured.width || this.pixelsOf("width");
+	}
+	set clientWidth(value: number) {
+		this.measured.width = value;
+	}
+	get clientHeight(): number {
+		return this.measured.height || this.pixelsOf("height");
+	}
+	set clientHeight(value: number) {
+		this.measured.height = value;
+	}
+
+	private pixelsOf(property: "width" | "height"): number {
+		const value = Number.parseFloat(String(this.style[property] ?? ""));
+		return Number.isFinite(value) ? value : 0;
+	}
+
+	/**
+	 * The viewport box: a real box, not a zero one.
+	 *
+	 * There is no layout here, so a rect can only report what a test put on the node — but zero was a
+	 * lie that one caller actually paid for: `branch-view.ts` anchors a zoom at the pointer by
+	 * subtracting the viewport's rect from the sizer's, and with both at zero that arithmetic was being
+	 * measured against an origin the browser never has. A node with no size set still answers zero,
+	 * which is what a hidden node in a browser gives back.
+	 */
 	getBoundingClientRect(): { left: number; right: number; top: number; bottom: number; width: number; height: number } {
-		return { left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0 };
+		return { left: 0, right: this.clientWidth, top: 0, bottom: this.clientHeight, width: this.clientWidth, height: this.clientHeight };
 	}
 	/** `closest`：沿父链找选择器命中的第一个祖先（含自己）。 */
 	closest(selector: string): FakeNode | null {
@@ -524,28 +558,13 @@ function textNode(text: string): FakeNode {
  * `Element` / `HTMLElement` 是**空类**：`transcript.ts:76` 与 `branch-view.ts:146` 的
  * `event.target instanceof Element` 在量具里应当为假——量具直接调用控制器方法，不走事件的
  * `target`——但真代码里那些判断必须有个类可比，缺了它会 `ReferenceError`。
- */
-/**
- * 计算后的样式：默认全空，量具自己往里放要读的名字。
  *
- * 真 `getComputedStyle` 会把 `calc()` 解析成像素，这里不做那件事——没有层叠、没有单位，只有一张
- * 名字到值的表。`branch-view.ts` 的卡片高度、`main.ts` 的内容列都读着它，谁要断言"这个值是从样式
- * 表来的"，就先把名字放进去，再断言它出现在了画出来的东西里。
+ * 有一条边界值得写在这里：`getComputedStyle` **不解析 `calc()`**，它只是一张名字到值的表。产品代码
+ * 量一个 `calc()` 令牌的方式因此必须是量元素的盒子（`branch-view.ts` 的探针），而不是 `parseFloat`
+ * 那个令牌串——真浏览器把未注册的自定义属性算回来时 `calc()` 还在，`parseFloat` 得到 `NaN`。
  */
-export const styleMetrics: Record<string, string> = {};
-
-/**
- * 量具的 `document` 要什么给什么；`getComputedStyle` 与它挂上同一张表。
- *
- * `installDom()` 会重设这张表，所以多次安装之间不会互相串。
- */
-function computedStyle(): { getPropertyValue: (name: string) => string } {
-	return { getPropertyValue: (name: string): string => styleMetrics[name] ?? "" };
-}
-
 export function installDom(options: InstallOptions = {}): DomShim {
 	if (options.strict !== undefined) strict = options.strict;
-	for (const name of Object.keys(styleMetrics)) delete styleMetrics[name];
 	const g = globalThis as unknown as Record<string, unknown>;
 
 	const root = guard(new FakeNode("html"));
@@ -617,7 +636,7 @@ export function installDom(options: InstallOptions = {}): DomShim {
 		matchMedia: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }),
 		addEventListener: () => {},
 		removeEventListener: () => {},
-		getComputedStyle: computedStyle,
+		getComputedStyle: () => ({ getPropertyValue: () => "" }),
 		innerWidth: options.viewport?.width ?? 1280,
 		innerHeight: options.viewport?.height ?? 800,
 		setTimeout: () => 0,
@@ -653,7 +672,7 @@ export function installDom(options: InstallOptions = {}): DomShim {
 	g.SVGElement = FakeElement;
 	g.Comment = FakeElement;
 	g.DocumentFragment = FakeElement;
-	g.getComputedStyle = computedStyle;
+	g.getComputedStyle = () => ({ getPropertyValue: () => "" });
 	g.ResizeObserver = class {
 		observe(): void {}
 		unobserve(): void {}
@@ -682,4 +701,9 @@ export function asElement(node: FakeNode): HTMLElement {
 	return node as unknown as HTMLElement;
 }
 
-export type { FakeNode };
+/**
+ * `FakeNode` 是**值**导出，不只是类型：量具要能改它的 `getBoundingClientRect`，好回答"布局会给这个
+ * 元素多大的盒子"。量具没有布局引擎，而产品代码（`branch-view.ts` 的几何探针）问的正是盒子——所以
+ * 这里留一个原型方法可以顶替，而不是给 `InstallOptions` 再开一张表。
+ */
+export { FakeNode };

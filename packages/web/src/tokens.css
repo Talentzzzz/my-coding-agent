@@ -210,12 +210,16 @@
 	 * label is one ellipsised line and the whole sentence lives in the card's tooltip, so a card that
 	 * sized itself to its text would push the row below it around. A fixed number here would therefore
 	 * be right only at the slider's default size — at the top of the range it would clip the meta line
-	 * instead. So: meta line, the small gap, caption line, and the scaled padding make the card; a card
-	 * plus a gap that also grows makes a lane. The paint reads both back to lay the graph out
-	 * (`branch-view.ts`), which is why they are tokens and not literals in that stylesheet.
+	 * instead. The sum is the card's own box, term for term: the two line boxes (`.lbl` on
+	 * `--dsw-lh-meta`, `.meta` on `--dsw-lh-caption`), the 2px flex gap between them, and the vertical
+	 * chrome of `padding: 4px 10px` plus `border: 1px` — 4+4+1+1, the last four pixels being the border,
+	 * without which `box-sizing: border-box` would leave the content box 2px short of its own two lines.
+	 * Only the gap and the padding follow `--dsw-fs-delta`; the border is one device pixel whatever the
+	 * type does. A lane is a card plus air. The graph measures both off a probe element and lays the
+	 * lanes out with them (`branch-view.ts`), which is why they are tokens and not literals there.
 	 */
 	--dsw-branch-node-h: calc(
-		var(--dsw-lh-meta) + 2px + var(--dsw-fs-delta) + var(--dsw-lh-caption) + 8px + var(--dsw-fs-delta)
+		var(--dsw-lh-meta) + 2px + var(--dsw-fs-delta) + var(--dsw-lh-caption) + 10px + var(--dsw-fs-delta)
 	);
 	--dsw-branch-lane-h: calc(var(--dsw-branch-node-h) + 12px);
 
