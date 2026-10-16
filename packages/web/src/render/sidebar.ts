@@ -1,7 +1,7 @@
 import { element, icon, iconButton } from "../dom.ts";
 import type { ChannelState } from "../client.ts";
 import { openMenuAt } from "./menu.ts";
-import type { SessionRow, WorkspaceGroup } from "@my-agent/core/protocol";
+import type { SessionRow, WorkspaceGroup, WorkspacePaging } from "@my-agent/core/protocol";
 
 export interface SidebarHandlers {
 	onNewSession(): void;
@@ -22,6 +22,12 @@ export interface SidebarHandlers {
 	 * takes, and deliberately not a local edit this column would have to reconcile afterwards.
 	 */
 	onRenameSession(sessionId: string, title: string): void;
+	/** The workspace head was clicked: collapse it to its heading, or reopen it on its saved page. */
+	onToggleWorkspace(cwd: string): void;
+	/** The workspace's 「展开其余」 was clicked: show one more page of its conversations. */
+	onPageWorkspace(cwd: string): void;
+	/** The workspace's 「收起」 was clicked: back to the first page, without touching the saved one. */
+	onCollapseWorkspace(cwd: string): void;
 }
 
 export interface SidebarState {
@@ -35,6 +41,15 @@ export interface SidebarState {
 	 */
 	currentWorkspace: string;
 	collapsed: boolean;
+	/**
+	 * Per-workspace paging state, keyed by the workspace's path, as the appearance settings hold it.
+	 *
+	 * Read-only here: the sidebar draws from it and reports the clicks, and the window — which owns
+	 * the settings write — answers with a new map. Holding it in the state rather than in the view
+	 * is what makes it survive a window: it rides appearance, and appearance rides the server's
+	 * settings files, not an origin-scoped `localStorage` the desktop shell's fresh port strands.
+	 */
+	paging: Record<string, WorkspacePaging>;
 	/**
 	 * Whether the resident channel is up.
 	 *
@@ -85,8 +100,6 @@ export class Sidebar {
 	/** The channel's three states, as the dot beside the settings entry. */
 	private readonly indicator: HTMLElement;
 	private readonly indicatorText: HTMLElement;
-	/** Workspaces whose list has been opened past {@link COLLAPSED_COUNT}. */
-	private readonly expanded = new Set<string>();
 	/**
 	 * The rows on screen, by session id.
 	 *
@@ -230,11 +243,12 @@ export class Sidebar {
 		}
 		this.ensureHeading();
 
-		// A filter shows every match, in every group: the collapsed-count limit is about how much a
-		// scan can hold, and a list the user is actively narrowing is not a scan.
+		// A filter shows every match, in every group: the paging limit is about how much a scan can
+		// hold, and a list the user is actively narrowing is not a scan.
 		let matches = 0;
 		for (const group of groups) {
-			const wrapper = this.groupFor(group.cwd, state.currentWorkspace);
+			const entry = pagingOf(state.paging, group.cwd);
+			const wrapper = this.groupFor(group.cwd, state.currentWorkspace, entry);
 			const rows = rowsOf(group);
 			for (const row of rows) this.rowsById.set(row.session.id, row);
 			// Matched on the label a row *wears* rather than the title it stores: the fork's suffix is
@@ -246,7 +260,10 @@ export class Sidebar {
 							(row) => row.label.toLowerCase().includes(filter) || group.cwd.toLowerCase().includes(filter),
 						);
 			matches += kept.length;
-			const shown = filter !== "" || this.expanded.has(group.cwd) ? kept : collapsedRows(kept, state.activeSessionId);
+			const open = filter !== "" || !entry.collapsed;
+			const shown = open
+				? pagedRows(kept, state.activeSessionId, filter !== "" ? Infinity : entry.page)
+				: [];
 			// Hidden rather than removed: a group with no matches keeps its place in the DOM, so a
 			// filter clearing puts every group back exactly where it was instead of re-appending them
 			// in creation order.
@@ -266,15 +283,31 @@ export class Sidebar {
 				previous = button;
 			}
 
-			// A filtering list shows everything it matched, so there is no "more" to hold back.
-			const hidden = filter !== "" ? 0 : rows.length - shown.length;
-			const more = this.moreFor(group.cwd, hidden);
+			// The paging row under the list: one more page while rows are held back, and once
+			// everything is on screen the 「收起」 that returns to the first page — but only where
+			// paging was ever a thing, which is a workspace with more conversations than a page holds.
+			// A filtering list shows everything it matched, so it wears neither; a collapsed workspace
+			// wears neither either — the decision is 全部收起、只留表头, and a paging row under a
+			// heading would contradict the collapse it sits inside.
+			const paged = open && filter === "";
+			const hidden = paged ? rows.length - shown.length : 0;
+			const conversations = rows.filter((row) => row.depth === 0).length;
+			const more = paged && hidden > 0 ? this.moreFor(group.cwd, hidden) : undefined;
+			const collapse =
+				more === undefined && paged && conversations > PAGE_SIZE ? this.collapseFor(group.cwd) : undefined;
 			if (more !== undefined) {
 				wanted.add(`more:${group.cwd}`);
 				this.place(wrapper, more, previous);
 				previous = more;
 			} else {
 				this.stale(`more:${group.cwd}`);
+			}
+			if (collapse !== undefined) {
+				wanted.add(`collapse:${group.cwd}`);
+				this.place(wrapper, collapse, previous);
+				previous = collapse;
+			} else {
+				this.stale(`collapse:${group.cwd}`);
 			}
 			wanted.add(`head:${group.cwd}`);
 		}
@@ -314,8 +347,15 @@ export class Sidebar {
 		if (this.list.lastElementChild !== this.noMatch) this.list.append(this.noMatch);
 	}
 
-	/** The heading for one workspace, built once and then only labelled. */
-	private groupFor(cwd: string, currentWorkspace: string): HTMLElement {
+	/**
+	 * The heading for one workspace, built once and then only labelled.
+	 *
+	 * The heading is a real button since the paging decision: clicking it is how a workspace
+	 * collapses to its heading and opens again, so Enter and Space reach it like any other control,
+	 * and `[aria-expanded]` is the state a screen reader — and the stylesheet's chevron — read.
+	 * The state is patched like everything else on a drawn node: written only when it moved.
+	 */
+	private groupFor(cwd: string, currentWorkspace: string, entry: WorkspacePaging): HTMLElement {
 		const key = `head:${cwd}`;
 		const existing = this.drawn.get(key);
 		if (existing !== undefined) {
@@ -331,18 +371,24 @@ export class Sidebar {
 				existing.mark.remove();
 				existing.mark = undefined;
 			}
+			if (existing.head !== undefined) this.paintExpanded(existing.head, entry.collapsed);
 			return existing.button;
 		}
 
-		const head = element("div", "workspace-head", undefined, { title: cwd });
-		const name = element("span", "workspace-name", workspaceName(cwd));
+		const head = element("button", "workspace-head", undefined, {
+			type: "button",
+			title: cwd,
+			"aria-expanded": entry.collapsed ? "false" : "true",
+		});
 		// Both icons ride every head, and the hover — not the DOM — decides which shows: the folder is
 		// the content, the chevron the affordance, and the swap keeps one position for both meanings.
 		const folder = element("span", "workspace-icon-folder");
 		folder.append(icon("folder"));
 		const chev = element("span", "workspace-icon-chev");
 		chev.append(icon("chevron"));
+		const name = element("span", "workspace-name", workspaceName(cwd));
 		head.append(folder, chev, name);
+		head.addEventListener("click", () => this.handlers.onToggleWorkspace(cwd));
 		let mark: HTMLElement | undefined;
 		if (cwd === currentWorkspace) {
 			// Which group the new-session button will write into, said once rather than left to be
@@ -356,6 +402,12 @@ export class Sidebar {
 		this.list.append(wrapper);
 		this.drawn.set(key, { button: wrapper, head, mark });
 		return wrapper;
+	}
+
+	/** Write a heading's expanded state, and only when it moved. */
+	private paintExpanded(head: HTMLElement, collapsed: boolean): void {
+		const wanted = collapsed ? "false" : "true";
+		if (head.getAttribute("aria-expanded") !== wanted) head.setAttribute("aria-expanded", wanted);
 	}
 
 	private rowFor(row: TreeRow, state: SidebarState): HTMLElement {
@@ -551,11 +603,16 @@ export class Sidebar {
 		else parts.slot.dataset.state = "warn";
 	}
 
-	private moreFor(cwd: string, hidden: number): HTMLElement | undefined {
+	/**
+	 * The 「展开其余 N 个会话」 row: one more page of conversations per press.
+	 *
+	 * The click is reported rather than acted on — the page count is appearance state, and the
+	 * window owns the settings write, so the redraw comes back through the state the caller hands
+	 * in. Patched in place like every drawn node: a press that lands between pointer-down and up
+	 * must not fall on a button that was rebuilt under it.
+	 */
+	private moreFor(cwd: string, hidden: number): HTMLElement {
 		const key = `more:${cwd}`;
-		if (hidden <= 0) {
-			return undefined;
-		}
 		const label = `展开其余 ${hidden} 个会话`;
 		const existing = this.drawn.get(key);
 		if (existing !== undefined) {
@@ -564,14 +621,30 @@ export class Sidebar {
 		}
 
 		const more = element("button", "session-more", label, { type: "button" });
-		more.addEventListener("click", () => {
-			this.expanded.add(cwd);
-			// Redrawn from the state the caller last gave, not from a fresh guess: the rows and the
-			// active session are facts about the window, and a control inside the list cannot see them.
-			if (this.lastState !== undefined) this.renderRows(this.lastState);
-		});
+		more.addEventListener("click", () => this.handlers.onPageWorkspace(cwd));
 		this.drawn.set(key, { button: more });
 		return more;
+	}
+
+	/**
+	 * The 「收起」 row, worn only once everything a workspace has is on screen.
+	 *
+	 * It is a separate drawn node from {@link moreFor} rather than a re-labelled one, because the
+	 * two are different promises about what the click does — one adds a page, the other resets to
+	 * the first — and a control whose meaning flips under it should at least be two controls that
+	 * never share a moment on screen. The workspace keeps its saved page through this: the reset is
+	 * a view-level "back to five", not a collapse, and reopening a later heading-collapse still
+	 * lands where the user had read down to.
+	 */
+	private collapseFor(cwd: string): HTMLElement {
+		const key = `collapse:${cwd}`;
+		const existing = this.drawn.get(key);
+		if (existing !== undefined) return existing.button;
+
+		const collapse = element("button", "session-more", "收起", { type: "button" });
+		collapse.addEventListener("click", () => this.handlers.onCollapseWorkspace(cwd));
+		this.drawn.set(key, { button: collapse });
+		return collapse;
 	}
 
 	/** Drop one drawn node by key, wherever it happens to be. */
@@ -647,22 +720,40 @@ interface RowParts {
 }
 
 /**
- * The rows a collapsed workspace shows: its first {@link COLLAPSED_COUNT} conversations, each with
- * the forks that came from it, and always the one the window is on.
+ * One workspace's paging state, or the untouched default: one page, open, nothing saved.
+ *
+ * The missing entry is the common case — a workspace the user never paged or collapsed keeps no
+ * record of it — so both the draw and the window's three handlers read through this rather than
+ * indexing and defaulting at each site.
+ */
+export function pagingOf(paging: Record<string, WorkspacePaging>, cwd: string): WorkspacePaging {
+	return paging[cwd] ?? { collapsed: false, page: 1, savedPage: 1 };
+}
+
+/**
+ * The rows a workspace shows after `pageCount` pages of its conversations: the first
+ * `pageCount * PAGE_SIZE` conversations, each with the forks that came from it, and always the one
+ * the window is on.
  *
  * The last part is why this is not a `slice`: a session that has been forked from is often older
- * than the four most recent, and the list still has to say where the conversation on screen came
- * from. A fork counts as part of the conversation it branched off rather than as a row of its own,
- * which is what keeps a heavily forked workspace from crowding out the others.
+ * than the first page's most recent, and the list still has to say where the conversation on screen
+ * came from. A fork counts as part of the conversation it branched off rather than as a row of its
+ * own, which is what keeps a heavily forked workspace from crowding out the others — and which is
+ * also why paging is counted in conversations here, the unit the limit actually caps, rather than
+ * in rows the way the shape prototype demoed it.
+ *
+ * `Infinity` is the page count a filtering draw passes: a list the user is actively narrowing shows
+ * every match, in every group, and holds nothing back.
  */
-function collapsedRows(rows: readonly TreeRow[], activeSessionId?: string): TreeRow[] {
+function pagedRows(rows: readonly TreeRow[], activeSessionId: string | undefined, pageCount: number): TreeRow[] {
+	const limit = pageCount * PAGE_SIZE;
 	const roots: number[] = [];
 	const rootOf = rows.map((row, index) => {
 		if (row.depth === 0) roots.push(index);
 		return roots[roots.length - 1] ?? 0;
 	});
 
-	const visible = new Set(roots.slice(0, COLLAPSED_COUNT));
+	const visible = new Set(roots.slice(0, limit));
 	const active = activeSessionId === undefined ? -1 : rows.findIndex((row) => row.session.id === activeSessionId);
 	if (active >= 0) visible.add(rootOf[active]!);
 
@@ -763,13 +854,15 @@ function rowsOf(group: WorkspaceGroup): TreeRow[] {
 }
 
 /**
- * How many of a workspace's conversations are shown before it has to be opened.
+ * How many conversations one page of a workspace holds.
  *
+ * The page, not a collapsed cap: a workspace shows this many conversations before 「展开其余」
+ * offers one more page, and a workspace with no more than this never wears a paging control at all.
  * Counted in conversations rather than rows, so a fork never costs another session its place. The
  * second status line makes each row taller, which is a density question rather than a correctness
  * one — the cap is about how much a scan can hold, and that has not changed.
  */
-const COLLAPSED_COUNT = 4;
+const PAGE_SIZE = 5;
 
 /** The last segment of a path, which is what a person calls the project. */
 export function workspaceName(cwd: string): string {

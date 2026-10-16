@@ -5,6 +5,7 @@ export {
 	clampContentWidth,
 	clampFontSize,
 	clampSidebarWidth,
+	clampWorkspacePaging,
 	DEFAULT_APPEARANCE,
 	DEFAULT_SETTINGS,
 	CONTENT_WIDTH_RANGE,
@@ -17,6 +18,7 @@ export {
 	type AppearanceSettings,
 	type RetrySettings,
 	type Settings,
+	type WorkspacePaging,
 } from "./config.ts";
 export { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
 export {

@@ -213,6 +213,15 @@ resolved**，本图接着它们往下走，但有两条是**重开**而不是新
   appearance 记住**（不用 localStorage）。落地注意事项（`main.ts:708` 签名带收展状态、「当前」标记
   与收起态共存、计数按会话走、appearance 真实序列化→恢复要真验）随票记下，执行归
   [11 号 task 票](issues/11-land-workspace-paging.md)。
+- [11 落地工作区分页 + 表头收起](issues/11-land-workspace-paging.md)：09 号拍板的形态进了真的左栏——
+  `PAGE_SIZE = 5`、`pagedRows` 按会话计页（活跃者恒在）、表头变真 `button`（`[aria-expanded]` +
+  chevron 常显右转 + 键盘可达）、「收起」回第 1 页不动 `savedPage`、收展状态三字段
+  `WorkspacePaging` 骑 `AppearanceSettings.workspaces` 走 appearance（core 归一 → server patch →
+  客户端整表发送），`main.ts` 重画签名带上 `paging`。localStorage 一处没碰。收展状态经
+  真 `SettingsManager` + 真文件验了序列化→恢复（新 smoke `smoke-settings.ts`，磁盘内容也断言）；
+  smoke-sidebar 新增 4 节盖三个拍板行为。code review 抓到并修掉一个真缺陷：收起态下表头下面
+  多画「展开其余」按钮（hidden 未被 open 门控）。全量清单全绿。Destination 里「左栏点工作区能收
+  能展、收着的状态关窗再开还在」这条至此落地。
 - [10 smoke:boot 是红的](issues/10-smoke-boot-red.md)：红态钉住且根因查明——**不是闸门或循环的
   bug**（`caa373c` 与 HEAD 的 packages/ 无差），是 **smoke-boot 不封闭**：它读机器真实的
   `models.json`，零行时会话装配到 placeholder model、`unconfiguredStream` 根本不发请求，审批永远

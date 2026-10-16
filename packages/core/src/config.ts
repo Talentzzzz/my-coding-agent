@@ -64,6 +64,31 @@ export interface AppearanceSettings {
 	 * part is only the absolute range, {@link CONTENT_WIDTH_RANGE}.
 	 */
 	contentWidth?: number;
+	/**
+	 * The sidebar's per-workspace paging state, keyed by the workspace's absolute path.
+	 *
+	 * Absent until a workspace has actually been paged or collapsed — a list the user never touched
+	 * keeps no entry, by the same rule the two widths follow. The path is the key rather than an id
+	 * because it is the only identity a workspace group carries on the wire.
+	 */
+	workspaces?: Record<string, WorkspacePaging>;
+}
+
+/**
+ * One workspace's paging state, as the sidebar last left it.
+ *
+ * Three fields, because two of the decided behaviours need a memory that survives the third: the
+ * 「收起」 button returns to the first page *without* touching {@link savedPage}, so that reopening a
+ * later heading-collapse still lands on the page the user had read down to — not on the page the
+ * button had just reset to.
+ */
+export interface WorkspacePaging {
+	/** Whether the workspace shows only its heading. */
+	collapsed: boolean;
+	/** How many pages of conversations are expanded right now; the cap is `page * 5`. */
+	page: number;
+	/** The page the workspace was expanded to when its heading last collapsed it. */
+	savedPage: number;
 }
 
 export const DEFAULT_APPEARANCE: AppearanceSettings = { theme: "dark", fontSize: 15 };
@@ -231,6 +256,7 @@ function appearanceOr(value: unknown): AppearanceSettings {
 	const theme = record.theme;
 	const sidebarWidth = clampSidebarWidth(record.sidebarWidth);
 	const contentWidth = clampContentWidth(record.contentWidth);
+	const workspaces = clampWorkspacePaging(record.workspaces);
 	return {
 		theme: theme === "light" || theme === "dark" || theme === "system" ? theme : DEFAULT_APPEARANCE.theme,
 		fontSize: clampFontSize(record.fontSize),
@@ -238,6 +264,7 @@ function appearanceOr(value: unknown): AppearanceSettings {
 		// stylesheet's, and writing one here would turn "never chose" into "chose the default".
 		...(sidebarWidth === undefined ? {} : { sidebarWidth }),
 		...(contentWidth === undefined ? {} : { contentWidth }),
+		...(workspaces === undefined ? {} : { workspaces }),
 	};
 }
 
@@ -274,6 +301,30 @@ export function clampSidebarWidth(value: unknown): number | undefined {
 export function clampContentWidth(value: unknown): number | undefined {
 	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
 	return Math.min(CONTENT_WIDTH_RANGE.max, Math.max(CONTENT_WIDTH_RANGE.min, Math.round(value)));
+}
+
+/**
+ * The workspaces' paging state, entry by entry, or undefined for "never touched".
+ *
+ * Clamped rather than rejected, for the same reason the widths are: the file is hand-editable, and
+ * one workspace's bad entry is dropped on its own — it should not cost the other workspaces their
+ * state, and it should not cost the whole field its place in the appearance. A page counter that is
+ * not a positive integer falls back to the first page rather than being believed.
+ */
+export function clampWorkspacePaging(value: unknown): Record<string, WorkspacePaging> | undefined {
+	if (!isRecord(value)) return undefined;
+	const out: Record<string, WorkspacePaging> = {};
+	for (const [cwd, entry] of Object.entries(value)) {
+		if (cwd.trim().length === 0 || !isRecord(entry)) continue;
+		const clampPage = (input: unknown): number =>
+			typeof input === "number" && Number.isInteger(input) && input >= 1 ? input : 1;
+		out[cwd] = {
+			collapsed: entry.collapsed === true,
+			page: clampPage(entry.page),
+			savedPage: clampPage(entry.savedPage),
+		};
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /** The two queue modes pi-agent-core understands; anything else keeps the default. */

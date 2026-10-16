@@ -3,6 +3,7 @@ import {
 	clampContentWidth,
 	clampFontSize,
 	clampSidebarWidth,
+	clampWorkspacePaging,
 	coerceModel,
 	type ConfigPatch,
 	listModelOptions,
@@ -200,6 +201,14 @@ export class SystemController {
 				...(appearance.contentWidth === undefined
 					? {}
 					: { contentWidth: clampContentWidth(appearance.contentWidth) }),
+				// The sidebar's per-workspace paging state, normalized entry by entry the same way: a
+				// workspace whose entry is not a record is dropped, not stored. A field that is not a
+				// record at all — or a record with no workspace left in it — clamps to undefined, and
+				// spreading `undefined` into the object literal is what leaves the field out of the
+				// patch entirely, so nothing is stored and nothing is manufactured.
+				...(appearance.workspaces === undefined
+					? {}
+					: { workspaces: clampWorkspacePaging(appearance.workspaces) }),
 			};
 		}
 

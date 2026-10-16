@@ -4,16 +4,71 @@
 // render replaces every button, which loses a click landing between pointer-down and pointer-up.
 // Nothing reaches the network, so no server and no provider key are needed.
 // Run with: node scripts/smoke-sidebar.ts
-import { Sidebar, type SidebarState } from "../packages/web/src/render/sidebar.ts";
+import { Sidebar, pagingOf, type SidebarHandlers, type SidebarState } from "../packages/web/src/render/sidebar.ts";
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { installDom, type FakeNode } from "./dom-shim.ts";
-import type { SessionRow } from "@my-agent/core/protocol";
+import type { SessionRow, WorkspacePaging } from "@my-agent/core/protocol";
 
 let failures = 0;
 
 function check(label: string, condition: boolean, detail = ""): void {
 	process.stdout.write(`${condition ? "  ok  " : "  FAIL"} ${label}${condition ? "" : ` ${detail}`}\n`);
 	if (!condition) failures += 1;
+}
+
+/**
+ * The no-op handler set most sections drive with, overridable per section.
+ *
+ * One builder rather than a literal per section, so a new handler door lands here once instead of
+ * being added thirteen times — and so a section that forgets to override a door gets a loud no-op
+ * rather than a TypeError at construction.
+ */
+function handlers(over: Partial<SidebarHandlers> = {}): SidebarHandlers {
+	return {
+		onNewSession: () => {},
+		onSelectSession: () => {},
+		onToggleCollapsed: () => {},
+		onOpenSettings: () => {},
+		onAddWorkspace: () => {},
+		onForkSession: () => {},
+		onDeleteSession: () => {},
+		onRenameSession: () => {},
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
+		...over,
+	};
+}
+
+/**
+ * The paging contract, as a driver: the sidebar reports clicks, this folds the same state
+ * `main.ts`'s three handlers fold, and the next render reads it out of `SidebarState`.
+ *
+ * The three rules are deliberately the ones `main.ts` implements — expand lands on the saved page,
+ * collapse saves the page it was on, 「收起」 resets the page and leaves the saved one — copied here
+ * because the sidebar's own behaviour is only half the contract: the other half is that some window
+ * turns its reports back into state. If `main.ts` drifts from this, the smoke's red is the drift.
+ */
+function pagingDriver(over: Partial<SidebarHandlers> = {}): { handlers: SidebarHandlers; paging: Record<string, WorkspacePaging> } {
+	const paging: Record<string, WorkspacePaging> = {};
+	const driver = handlers({
+		onToggleWorkspace: (cwd) => {
+			const entry = pagingOf(paging, cwd);
+			paging[cwd] = entry.collapsed
+				? { collapsed: false, page: entry.savedPage, savedPage: entry.savedPage }
+				: { collapsed: true, page: entry.page, savedPage: entry.page };
+		},
+		onPageWorkspace: (cwd) => {
+			const entry = pagingOf(paging, cwd);
+			paging[cwd] = { collapsed: false, page: entry.page + 1, savedPage: entry.page + 1 };
+		},
+		onCollapseWorkspace: (cwd) => {
+			const entry = pagingOf(paging, cwd);
+			paging[cwd] = { collapsed: false, page: 1, savedPage: entry.savedPage };
+		},
+		...over,
+	});
+	return { handlers: driver, paging };
 }
 
 // ------------------------------------------------------------------ a tiny DOM
@@ -60,7 +115,7 @@ function row(id: string, modified: number, extra: Partial<SessionRow> = {}): Ses
 }
 
 function state(rows: SessionRow[], over: Partial<SidebarState> = {}): SidebarState {
-	return { workspaces: [{ cwd: "/w", sessions: rows }], currentWorkspace: "/w", collapsed: false, channel: "live", ...over };
+	return { workspaces: [{ cwd: "/w", sessions: rows }], currentWorkspace: "/w", collapsed: false, paging: {}, channel: "live", ...over };
 }
 
 /**
@@ -138,6 +193,9 @@ process.stdout.write("\nsidebar：行是原地改的\n");
 		onForkSession: () => {},
 		onDeleteSession: () => {},
 		onRenameSession: () => {},
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
 	});
 
 	const rows = [row("a", 300), row("b", 200), row("c", 100)];
@@ -177,6 +235,9 @@ process.stdout.write("\nsidebar：重排是移动节点\n");
 		onForkSession: () => {},
 		onDeleteSession: () => {},
 		onRenameSession: () => {},
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
 	});
 
 	const a = row("a", 100);
@@ -213,6 +274,9 @@ process.stdout.write("\nsidebar：状态收进左边的槽\n");
 		onForkSession: () => {},
 		onDeleteSession: () => {},
 		onRenameSession: () => {},
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
 	});
 
 	// Each row's own state, looked up by session rather than by position: rows are ordered by
@@ -256,6 +320,9 @@ process.stdout.write("\nsidebar：连接指示器\n");
 		onForkSession: () => {},
 		onDeleteSession: () => {},
 		onRenameSession: () => {},
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
 	});
 
 	sidebar.render(state([row("a", 1)], { channel: "connecting" }));
@@ -287,6 +354,9 @@ process.stdout.write("\nsidebar：分组标题在会话行之上\n");
 		onForkSession: () => {},
 		onDeleteSession: () => {},
 		onRenameSession: () => {},
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
 	});
 
 	// Two workspaces, so this is about each group rather than about the one group a single-workspace
@@ -299,6 +369,7 @@ process.stdout.write("\nsidebar：分组标题在会话行之上\n");
 		],
 		currentWorkspace: "/one",
 		collapsed: false,
+		paging: {},
 		channel: "live",
 	});
 
@@ -331,6 +402,9 @@ process.stdout.write("\nsidebar：行会消失\n");
 		onForkSession: () => {},
 		onDeleteSession: () => {},
 		onRenameSession: () => {},
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
 	});
 
 	sidebar.render(state([row("a", 300), row("b", 200), row("c", 100)]));
@@ -357,6 +431,9 @@ process.stdout.write("\nsidebar：搜索真的过滤\n");
 		onForkSession: () => {},
 		onDeleteSession: () => {},
 		onRenameSession: () => {},
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
 	});
 
 	sidebar.render(state([row("alpha", 300), row("beta", 200)]));
@@ -403,6 +480,9 @@ process.stdout.write("\nsidebar：fork 的行跟普通行一模一样\n");
 		onForkSession: () => {},
 		onDeleteSession: () => {},
 		onRenameSession: () => {},
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
 	});
 
 	// One root, one fork of it. The fork keeps its tree place — right beneath the session it came
@@ -432,6 +512,9 @@ process.stdout.write("\nsidebar：（1）由渲染拼出来\n");
 		onForkSession: () => {},
 		onDeleteSession: () => {},
 		onRenameSession: () => {},
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
 	});
 
 	// Three forks of one source, born out of order; the number is the sibling's own place under the
@@ -464,6 +547,9 @@ process.stdout.write("\nsidebar：新会话出现在列表里\n");
 		onForkSession: () => {},
 		onDeleteSession: () => {},
 		onRenameSession: () => {},
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
 	});
 
 	// The listing the window had before the fork, then the same listing with the fork's row in it —
@@ -500,6 +586,9 @@ process.stdout.write("\nsidebar：右键菜单\n");
 		onForkSession: (sessionId) => forked.push(sessionId),
 		onDeleteSession: (sessionId) => deleted.push(sessionId),
 		onRenameSession: () => {},
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
 	});
 
 	sidebar.render(state([row("a", 300), row("b", 200)]));
@@ -541,6 +630,9 @@ process.stdout.write("\nsidebar：就地改名\n");
 		onForkSession: () => {},
 		onDeleteSession: () => {},
 		onRenameSession: (sessionId, title) => renamed.push({ sessionId, title }),
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
 	});
 
 	// A root and a fork of it, so the rename shows both halves of the rule: the editor holds the
@@ -607,6 +699,121 @@ process.stdout.write("\nsidebar：工作区按最近活跃在前\n");
 	// follows — the one frame the projection sends for every appended message.
 	store.put(row("a", 400, { cwd: "/old" }));
 	check("活跃后：老的反超到第一", store.groups().map((group) => group.cwd).join(",") === "/old,/new", JSON.stringify(store.groups().map((group) => group.cwd)));
+}
+
+// ------------------------------------------ 13. paging: one more page per press
+
+process.stdout.write("\nsidebar：分页 ——「展开其余」一次加一页，「收起」回到一页\n");
+
+{
+	const { handlers: driver, paging } = pagingDriver();
+	const sidebar = new Sidebar(driver);
+	// Twelve root conversations, newest first. The active session sits on the first root, so the
+	// always-visible rule never fires and the numbers below are pure paging.
+	const rows = Array.from({ length: 12 }, (_unused, index) => row(`s${index}`, 1200 - index * 100));
+	const render = (): void => sidebar.render(state(rows, { activeSessionId: "s0", paging }));
+
+	render();
+	check("默认一页：只有 5 个会话", titlesOf(sidebar).length === 5, String(titlesOf(sidebar).length));
+	const more = (): FakeNode => all(sidebar, "session-more")[0]!.node;
+	check("底部写着「展开其余 7 个会话」", more().textContent === "展开其余 7 个会话", more().textContent);
+	more().dispatch("click");
+	render();
+	check("点一次多 5 条", titlesOf(sidebar).length === 10, String(titlesOf(sidebar).length));
+	check("按钮数到剩下的 2 个", more().textContent === "展开其余 2 个会话", more().textContent);
+	more().dispatch("click");
+	render();
+	check("再点一次：12 条全在", titlesOf(sidebar).length === 12, String(titlesOf(sidebar).length));
+	check("全部展开后按钮变「收起」", more().textContent === "收起", more().textContent);
+	more().dispatch("click");
+	render();
+	check("「收起」回到一页 5 条", titlesOf(sidebar).length === 5, String(titlesOf(sidebar).length));
+	check("「收起」后底部回到「展开其余」", more().textContent === "展开其余 7 个会话", more().textContent);
+
+	// A workspace with no more than a page never wears any paging control: there was nothing held
+	// back, so there is nothing to expand and nothing to collapse.
+	const small = new Sidebar(handlers());
+	small.render(state([row("a", 300), row("b", 200), row("c", 100)]));
+	check("一页装得下的工作区没有分页按钮", all(small, "session-more").length === 0, String(all(small, "session-more").length));
+}
+
+// ------------------------- 14. the head collapses to itself and reopens on the saved page
+
+process.stdout.write("\nsidebar：表头收起只剩表头，重开回到上次那一页\n");
+
+{
+	const { handlers: driver, paging } = pagingDriver();
+	const sidebar = new Sidebar(driver);
+	const rows = Array.from({ length: 12 }, (_unused, index) => row(`s${index}`, 1200 - index * 100));
+	const render = (): void => sidebar.render(state(rows, { activeSessionId: "s0", paging }));
+	render();
+
+	// Read down to the second page, then fold the whole workspace away with its head.
+	all(sidebar, "session-more")[0]!.node.dispatch("click");
+	render();
+	check("第二页在屏上", titlesOf(sidebar).length === 10, String(titlesOf(sidebar).length));
+	const head = (): FakeNode => all(sidebar, "workspace-head")[0]!.node;
+	check("表头是个真按钮", head().tagName === "BUTTON", head().tagName);
+	check("展开时 aria-expanded=true", head().getAttribute("aria-expanded") === "true", String(head().getAttribute("aria-expanded")));
+	head().dispatch("click");
+	render();
+	check("收起后这个分组没有会话行", titlesOf(sidebar).length === 0, JSON.stringify(titlesOf(sidebar).map((t) => t.title)));
+	check("收起后只剩表头：没有分页按钮", all(sidebar, "session-more").length === 0, String(all(sidebar, "session-more").length));
+	check("表头还在", all(sidebar, "workspace-head").length === 1);
+	check("收起时 aria-expanded=false", head().getAttribute("aria-expanded") === "false", String(head().getAttribute("aria-expanded")));
+	check("「当前」标记与收起态共存", all(sidebar, "workspace-current").length === 1, String(all(sidebar, "workspace-current").length));
+
+	head().dispatch("click");
+	render();
+	check("重开回到上次那一页：10 条", titlesOf(sidebar).length === 10, String(titlesOf(sidebar).length));
+	check("重开时 aria-expanded=true", head().getAttribute("aria-expanded") === "true", String(head().getAttribute("aria-expanded")));
+}
+
+// --------------------------------- 15. paging counts conversations, not rows
+
+process.stdout.write("\nsidebar：分页按会话数走 —— 根加它的派生算一个\n");
+
+{
+	const sidebar = new Sidebar(handlers());
+	// One family of four rows (a root and three forks) plus five more roots: six conversations in
+	// nine rows. The first page holds the first *five conversations* — the family takes three extra
+	// rows with it and still costs one slot — so the sixth conversation is what the button counts.
+	const family = row("root", 900, { createdAt: 100 });
+	const forks = [1, 2, 3].map((index) =>
+		row(`fork${index}`, 800 - index * 10, { createdAt: 100 + index, parentId: "root", title: "会话 root" }),
+	);
+	const rest = Array.from({ length: 5 }, (_unused, index) => row(`r${index}`, 700 - index * 100));
+	sidebar.render(state([family, ...forks, ...rest], { activeSessionId: "root" }));
+
+	const titles = titlesOf(sidebar).map((t) => t.title);
+	check("第一页是五个会话：九行里进来八行", titles.length === 8, JSON.stringify(titles));
+	check("第五个会话在", titles.includes("会话 r3"), JSON.stringify(titles));
+	check("第六个会话不在", !titles.includes("会话 r4"), JSON.stringify(titles));
+	const more = all(sidebar, "session-more")[0]?.node;
+	check("按钮数的是被挡住的行", more?.textContent === "展开其余 1 个会话", more?.textContent ?? "");
+}
+
+// ------------------------------- 16. a filter shows every match, paging or not
+
+process.stdout.write("\nsidebar：搜索翻出全部匹配，收起与分页都不拦\n");
+
+{
+	const sidebar = new Sidebar(handlers());
+	const rows = Array.from({ length: 12 }, (_unused, index) => row(`s${index}`, 1200 - index * 100));
+	// Drawn collapsed straight from the state, without any click: the draw must honour whatever the
+	// appearance settings hold, including a workspace that was folded away in another window.
+	sidebar.render(state(rows, { activeSessionId: "s0", paging: { "/w": { collapsed: true, page: 1, savedPage: 1 } } }));
+	check("收起的工作区不出行", titlesOf(sidebar).length === 0, String(titlesOf(sidebar).length));
+
+	all(sidebar, "icon-button")
+		.find((entry) => entry.node.getAttribute("title") === "搜索会话")
+		?.node.dispatch("click");
+	const input = all(sidebar, "search-input")[0]!.node;
+	input.value = "s1";
+	input.dispatch("input");
+	const titles = titlesOf(sidebar).map((t) => t.title);
+	// s1, s10, s11 — every match, in a group whose own list was folded away.
+	check("收着的工作区照样给出全部匹配", titles.length === 3, JSON.stringify(titles));
 }
 
 process.stdout.write(failures === 0 ? "\nsidebar ok\n" : `\n${failures} 项失败\n`);

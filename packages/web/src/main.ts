@@ -5,13 +5,13 @@ import { SessionRows } from "./rows.ts";
 import { Composer, type ComposerSelection } from "./composer.ts";
 import { TranscriptView } from "./render/transcript.ts";
 import { BranchView, shortId } from "./render/branch-view.ts";
-import { Sidebar, workspaceName } from "./render/sidebar.ts";
+import { Sidebar, pagingOf, workspaceName } from "./render/sidebar.ts";
 import { SettingsPanel } from "./render/settings.ts";
 import { SessionSettingsPanel } from "./render/session-settings.ts";
 import { openMenu, openMenuAt, type MenuItem } from "./render/menu.ts";
 import { StatusBar } from "./render/statusbar.ts";
 import { element, icon } from "./dom.ts";
-import type { ConnectionItem, ModelOption, ServerMessage } from "@my-agent/core/protocol";
+import type { ConnectionItem, ModelOption, ServerMessage, WorkspacePaging } from "@my-agent/core/protocol";
 
 /**
  * The one thing the desktop shell adds to the page: the OS's own folder picker. The app itself does
@@ -80,6 +80,15 @@ function main(): void {
 	 */
 	let pickedWorkspace = "";
 	let collapsed = false;
+	/**
+	 * The sidebar's per-workspace paging state, keyed by the workspace's path.
+	 *
+	 * Seeded from the appearance settings when they arrive and written back through them on every
+	 * click — the decision 09 号 landed: the state follows appearance, not `localStorage`, which the
+	 * desktop shell's fresh port on every launch would strand. A workspace the user never touched
+	 * keeps no entry, so the map stays empty until a collapse or a page turn happens.
+	 */
+	let paging: Record<string, WorkspacePaging> = {};
 	/**
 	 * Whether the resident channel is up.
 	 *
@@ -487,7 +496,44 @@ function main(): void {
 		onForkSession: (sessionId) => void forkSession(sessionId),
 		onDeleteSession: (sessionId) => void deleteSession(sessionId),
 		onRenameSession: (sessionId, title) => void renameSession(sessionId, title),
+		onToggleWorkspace: (cwd) => {
+			const entry = pagingOf(paging, cwd);
+			// Expanding lands on the page the workspace was read down to when it collapsed; collapsing
+			// saves the page it was on. This is the one place the saved page is written — the 「收起」
+			// button deliberately leaves it alone.
+			setPaging(
+				cwd,
+				entry.collapsed
+					? { collapsed: false, page: entry.savedPage, savedPage: entry.savedPage }
+					: { collapsed: true, page: entry.page, savedPage: entry.page },
+			);
+		},
+		onPageWorkspace: (cwd) => {
+			const entry = pagingOf(paging, cwd);
+			setPaging(cwd, { collapsed: false, page: entry.page + 1, savedPage: entry.page + 1 });
+		},
+		onCollapseWorkspace: (cwd) => {
+			// Back to the first page, and the saved page deliberately untouched: this is a view-level
+			// reset, not a collapse, so reopening a later heading-collapse still lands where the user
+			// had read down to rather than where this button just reset to.
+			setPaging(cwd, { collapsed: false, page: 1, savedPage: pagingOf(paging, cwd).savedPage });
+		},
 	});
+
+	/**
+	 * Fold one workspace's paging state in, redraw, and persist it through appearance.
+	 *
+	 * The local map moves first so the redraw does not wait on a round trip; the map is then sent
+	 * whole, the way every appearance field is. The server's answer lands in `apply`, which re-seeds
+	 * this map from the saved settings — when the write failed, the report is the error bar and the
+	 * view keeps the click, which is the honest split: the screen is what the user did, the file is
+	 * what survived.
+	 */
+	function setPaging(cwd: string, next: WorkspacePaging): void {
+		paging = { ...paging, [cwd]: next };
+		renderSidebar();
+		void saveSettings({ appearance: { workspaces: paging } });
+	}
 
 	/**
 	 * The drag handle on the sidebar's right edge.
@@ -751,7 +797,11 @@ function main(): void {
 		// Rendering the sidebar on every token was the profile's H7, a flat per-frame tax that grew
 		// with the workspace count; the rows bump `rows.version` when they actually change.
 		const directory = directoryForNewSession();
-		const drawn = `${rows.version}|${followed ?? ""}|${directory}|${pickedWorkspace}|${collapsed ? 1 : 0}|${channel}`;
+		// The paging state is in the signature because it is one of the sidebar's inputs now: a
+		// collapse or a page turn changes nothing in the row table, so a signature without it would
+		// mean the click redraws nothing at all. Serialization is deterministic — the entries are
+		// built with one fixed field order — so the string is stable across equal maps.
+		const drawn = `${rows.version}|${followed ?? ""}|${directory}|${pickedWorkspace}|${collapsed ? 1 : 0}|${channel}|${JSON.stringify(paging)}`;
 		if (drawn === sidebarDrawn) return;
 		sidebarDrawn = drawn;
 		sidebar.render({
@@ -759,6 +809,7 @@ function main(): void {
 			...(followed === undefined ? {} : { activeSessionId: followed }),
 			currentWorkspace: directory,
 			collapsed,
+			paging,
 			channel,
 		});
 	}
@@ -827,6 +878,10 @@ function main(): void {
 		if (next.settings !== previous.settings) {
 			contentPref = next.settings?.appearance.contentWidth;
 			applyContentWidth(contentPref);
+			// The sidebar's paging state rides the same snapshot. Re-seeded rather than merged: the
+			// settings are the authority, and a workspace whose entry the server dropped — a bad line
+			// in a hand-edited file — falls back to its default, not to this window's memory of it.
+			paging = next.settings?.appearance.workspaces ?? {};
 		}
 		if (next.items !== previous.items || next.streaming !== previous.streaming) {
 			// `deferred` is set by the one caller that hands over a whole conversation at once — the

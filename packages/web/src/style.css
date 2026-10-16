@@ -398,25 +398,40 @@ body {
 
 /*
  * One workspace's heading, the reference's project row: 34px tall, the same radius and padding as a
- * session row, at the meta tier. On hover the folder — the content — gives its place to the
- * chevron — the affordance — because both icons share one slot and the swap keeps one position for
- * two meanings.
+ * session row, at the meta tier. A real button since the paging decision — clicking it is how the
+ * workspace collapses to its heading and opens again — so Enter and Space reach it like any other
+ * control. On hover the folder — the content — gives its place to the chevron — the affordance —
+ * because both icons share one slot and the swap keeps one position for two meanings. Collapsed,
+ * `aria-expanded="false"` keeps the chevron on and turned right, so the affordance no longer
+ * depends on hover to be visible: that hover promise is what the collapsed state redeems.
  */
 .workspace-head {
 	display: flex;
 	align-items: center;
 	gap: 7px;
+	width: 100%;
 	height: 34px;
 	padding: 0 8px;
+	border: none;
 	border-radius: var(--dsw-radius-md);
+	background: transparent;
 	color: var(--dsw-label-tertiary);
+	font: inherit;
 	font-size: var(--dsw-fs-meta);
 	line-height: var(--dsw-lh-meta);
 	font-weight: 600;
+	text-align: left;
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
 }
 
 .workspace-head:hover {
 	background: var(--dsw-bg-hover);
+}
+
+.workspace-head:focus-visible {
+	outline: 2px solid var(--dsw-state-business);
+	outline-offset: -2px;
 }
 
 .workspace-head svg {
@@ -430,12 +445,26 @@ body {
 	display: none;
 }
 
-.workspace-head:hover .workspace-icon-chev {
+.workspace-icon-chev svg {
+	transition: transform var(--dsw-duration) var(--dsw-ease);
+}
+
+.workspace-head:hover .workspace-icon-chev,
+.workspace-head[aria-expanded="false"] .workspace-icon-chev {
 	display: inline-flex;
 }
 
-.workspace-head:hover .workspace-icon-folder {
+.workspace-head:hover .workspace-icon-folder,
+.workspace-head[aria-expanded="false"] .workspace-icon-folder {
 	display: none;
+}
+
+.workspace-head[aria-expanded="false"] {
+	color: var(--dsw-label-secondary);
+}
+
+.workspace-head[aria-expanded="false"] .workspace-icon-chev svg {
+	transform: rotate(-90deg);
 }
 
 .workspace-name {

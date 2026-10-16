@@ -6,7 +6,7 @@ import type { BranchPoint } from "./session/session-manager.ts";
 
 export type { AgentSessionEvent } from "./agent.ts";
 export type { BranchOption, BranchPoint } from "./session/session-manager.ts";
-export type { BashSettings } from "./config.ts";
+export type { BashSettings, WorkspacePaging } from "./config.ts";
 
 export interface SessionRef {
 	id: string;

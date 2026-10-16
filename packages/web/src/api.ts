@@ -8,6 +8,7 @@ import type {
 	SessionSnapshot,
 	SettingsSnapshot,
 	WorkspaceGroup,
+	WorkspacePaging,
 } from "@my-agent/core/protocol";
 
 /** What the settings panel can change. Narrower than the server's own patch, which is the point. */
@@ -21,6 +22,8 @@ export interface PanelSettingsPatch {
 		fontSize?: number;
 		sidebarWidth?: number;
 		contentWidth?: number;
+		/** The sidebar's per-workspace paging state, sent whole like every other appearance field. */
+		workspaces?: Record<string, WorkspacePaging>;
 	};
 	approval?: Record<string, boolean>;
 	/** Partial so one timeout can be committed without naming the other. */

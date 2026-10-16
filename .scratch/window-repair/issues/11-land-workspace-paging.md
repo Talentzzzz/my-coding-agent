@@ -1,7 +1,7 @@
 # 11 落地工作区分页 + 表头收起（09 号拍板的形态）
 
 Type: task
-Status: open
+Status: resolved
 Blocked by:
 
 ## Question
@@ -35,3 +35,30 @@ Blocked by:
 +5 翻页、表头收起只剩表头、收起重开回「上次那一页」；appearance 那条用真 `SettingsManager` 驱一遍
 （写 → 重读 → 状态还在）。参考形态以
 [`prototype/09-workspace-paging.html`](../../../prototype/09-workspace-paging.html) 为准（浅深两套都看）。
+
+## Answer
+
+2026-10-16 落地完成。三处拍板全部进了真的左栏，逐条对着票面：
+
+1. **默认 5 条、点一次 +5**：`sidebar.ts` 的 `COLLAPSED_COUNT = 4` 改成 `PAGE_SIZE = 5`，`collapsedRows()`
+   泛化为 `pagedRows(rows, active, pageCount)`——按**会话**（根）计页，活跃者的根永远在场，`Infinity`
+   是过滤态的页数。计数不是原型的行数版。
+2. **表头收起 / 重开回上次那一页**：表头从 `div` 变成真 `button`（Enter/Space 可达，`[aria-expanded]`
+   驱动 chevron 常显右转 + focus-visible，`style.css` 里那个 hover 假承诺兑现）；页码记忆三字段
+   `WorkspacePaging { collapsed, page, savedPage }`——展开落在 `savedPage`，收起时写 `savedPage`，
+   「收起」按钮回第 1 页但**不动** `savedPage`，只在会话数超过 5 的工作区出现。
+3. **收展状态跟 appearance 走**：`AppearanceSettings.workspaces`（按 cwd 键控），core 里
+   `clampWorkspacePaging()` 逐条归一（坏条目丢、坏页码落回 1、空表钳成 undefined 即字段缺席），
+   server 的 appearance patch 接受它，客户端 `PanelSettingsPatch` 发整表。`main.ts` 的 `setPaging()`
+   本地先动、立即重画、再经 `saveSettings` 落盘；**重画签名**加上了 `JSON.stringify(paging)`。
+   localStorage 一处都没碰。
+
+「当前」标记与收起态共存（收起的工作区照样标「当前」）；过滤态照旧翻出全部匹配，分页与收起都不拦。
+
+**验收与评审**：`npm run check` 全绿（token 133 defined / 107 referenced）；`smoke-sidebar.ts` 新增
+4 节盖住 +5 翻页、表头收起只剩表头、重开回「上次那一页」、按会话计数，另加过滤翻越收起态一节；
+新增 `scripts/smoke-settings.ts` 用真 `SettingsManager` + 真文件走「写 → 新 manager 重读 → 状态还在」，
+连磁盘内容一起断言（README 清单已登记）。双轴 code review 抓到一个真缺陷——**收起态下表头下面会
+多画一个「展开其余 N 个会话」按钮**（hidden 没被 open 拦住，smoke 也没断言到）——已修
+（`paged = open && filter === ""` 门控 + smoke 14 补「没有 session-more」断言）。全量 README 清单
+（check + 16 条 smoke，不含需活服务器的 smoke-api）全绿。
