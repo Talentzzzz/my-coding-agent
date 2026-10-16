@@ -25,6 +25,7 @@ Label: `wayfinder:map`
 
 - [桌面端启动验证与修复](issues/01-desktop-launch.md)：独显直连后仍以同样症状崩溃（GPU 0xC0000005 + 渲染 0x80000003），与显示模式无关；按预案把 `disableHardwareAcceleration` + `no-sandbox` 固化进 `main.cjs`，重启验证通过。
 - [标题栏布局原型](issues/07-titlebar-prototype.md)：结构照用户给的参考窗口逐像素量定——**y 0–40 是一条铺满窗口宽的顶带，填充与会话栏同色，页面不在里面画内容**；y ≥ 40 才是两栏，对话面板另一档深度（深色 `27,27,28` / `21,21,23`，浅色 `245,246,247` / `255,255,255`）。用户拍板方案 A，并补两条：**面板左上角圆角 16px**、**会话栏右侧不画分隔线**。原型 `prototype/07-titlebar.html`（`npm run prototype:titlebar`），全部实测数字与截图在 ticket 里。
+- [分支图进入时居中](issues/03-branch-center.md)：居中由 `scrollHome()` 的 `max(0, (sizer − viewport) / 2)` 给出；票面提示的 `place-items` 对这棵树是空转的（sizer 从不小于视口，唯一有余额的场合就是图被缩到 40% 下限时），CSS 只留 sizer 的两条 `100%` 下限保护。顺带修了 Ctrl+滚轮锚点读过期 `zoom`、并从 `scrollLeft` 反推图坐标的既有缺陷。全量 smoke 清单绿；真窗口目视未做（本会话 harness 下 Electron 捕获一律被杀）。
 - [open-claude-ui 参考](issues/11-open-claude-ui-reference.md)：清单 7 条已备好（危险确认对话框、回到底部悬浮按钮、菜单键盘漫游、边缘渐隐、分割条双击归位、档位分段胶囊、状态点微动效），等用户挑中哪些再毕业成 ticket。
 
 ## Not yet specified
