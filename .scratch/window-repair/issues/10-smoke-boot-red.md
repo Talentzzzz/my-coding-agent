@@ -87,3 +87,11 @@ packages/ 一个字节都没差；是 `smoke-boot` 不封闭——它读了机�
   backpressure、sidebar、transcript、session、models、approval）+ `smoke-api`（对着一台真跑的服务器，
   `api ok`）。smoke-api 起初两次 FAIL 是我自己的装置错误（服务器跨 shell 没活到下一条命令 + 相对路径
   敲错），与 map 里"the mux connection failed = 没起服务器"那条坑一致，不是连坐。
+
+## Comments
+
+- **2026-10-16 code-review（双轴）收尾**：Standards 轴抓到 `mkdirSync` 导入没人用；Spec 轴指出
+  settings.json 的封闭靠"缺席"而非"钉住"。落实两处：删导入、三处 scratch 目录的 rm 收成
+  `removeQuiet`；并新增一条断言——PATCH 之后显式检查 `read` 仍在会话 `activeTools` 里，把
+  "tools 不含 read → 闸门之前 Tool not found → 静默绕过"这个失败形态变成响亮的 FAIL（`bf4fd6e`）。
+  投毒环境复跑 3/3 绿、`npm run check` 通过。
