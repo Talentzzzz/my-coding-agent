@@ -1,7 +1,8 @@
 // Session-registry smoke test: proves one agent loop per session id, that a session survives losing
 // its last connection, and that the JSONL file is what a later connection gets back.
 // Nothing here reaches a model, so no provider key is needed. Run with: node scripts/smoke-sessions.ts
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { request } from "node:http";
@@ -512,6 +513,104 @@ try {
 		check("`tools` must be an array (400)", notArray.status === 400, `status=${notArray.status}`);
 		const notNames = await call("PATCH", `${http.url}/api/settings`, { patch: { tools: [42] } });
 		check("every entry must be a string (400)", notNames.status === 400, `status=${notNames.status}`);
+
+		process.stdout.write("a workspace can be renamed and put aside\n");
+		// 票 06's two workspace commands, end to end. A workspace is created by making a session in it,
+		// which is the only road one enters the sidebar by — and the reason this section can run against
+		// a directory of its own instead of the server's root, whose name the sections after this one
+		// still refer to. The agent home is a scratch one so the settings this writes are not the
+		// machine's own.
+		{
+			const home = await mkdtemp(join(tmpdir(), "my-agent-agent-home-"));
+			const host = await mkdtemp(join(tmpdir(), "my-agent-workspaces-"));
+			const http = await bootServer({ cwd: root, port: 0, settingsHome: home });
+			const listed = async (): Promise<string[]> =>
+				(((await call("GET", `${http.url}/api/workspaces`)).payload.workspaces as { cwd: string }[]) ?? []).map(
+					(group) => resolve(group.cwd),
+				);
+			const before = join(host, "before");
+			const after = join(host, "after");
+			const other = join(host, "other");
+			try {
+				// `after` is deliberately not created: renaming onto a directory that is already there is
+				// what Windows refuses with EPERM, and the whole point of the target checks below is that
+				// the client never has to read an errno to learn that. `other` is created, and earns its
+				// place by having a session of its own.
+				for (const dir of [before, other]) await mkdir(dir, { recursive: true });
+
+				const created = await call("POST", `${http.url}/api/sessions`, { cwd: before });
+				const id = String(created.payload.sessionId ?? "");
+				const elsewhere = await call("POST", `${http.url}/api/sessions`, { cwd: other });
+				check("two new directories are listed as two workspaces", (await listed()).includes(resolve(before)) && (await listed()).includes(resolve(other)));
+
+				const malformed = await call("POST", `${http.url}/api/workspaces/hide`, { cwd: 42 });
+				check("hiding with a non-string path is refused (400)", malformed.status === 400, `status=${malformed.status}`);
+				const unknown = await call("POST", `${http.url}/api/workspaces/rename`, { from: join(host, "nowhere"), to: after });
+				check("renaming a workspace this machine does not list is a 404", unknown.status === 404, `status=${unknown.status}`);
+				const same = await call("POST", `${http.url}/api/workspaces/rename`, { from: before, to: before });
+				check("renaming a workspace onto itself is refused (400)", same.status === 400, `status=${same.status}`);
+				const missingParent = await call("POST", `${http.url}/api/workspaces/rename`, {
+					from: before,
+					to: join(host, "no-such-parent", "x"),
+				});
+				check("a target whose parent is missing is refused (409)", missingParent.status === 409, `status=${missingParent.status}`);
+				const taken = await call("POST", `${http.url}/api/workspaces/rename`, { from: before, to: other });
+				check("renaming onto another workspace's directory is refused (409)", taken.status === 409, `status=${taken.status}`);
+
+				const busy = await http.hub.claim(id);
+				const held = await call("POST", `${http.url}/api/workspaces/rename`, { from: before, to: after });
+				check("a workspace with a live session refuses to move (409)", held.status === 409, `status=${held.status}`);
+				check("and nothing moved for it", existsSync(before) && !existsSync(after));
+				http.hub.release(busy);
+				check("the claim lets go", await until(() => !http.hub.live.includes(id)));
+
+				const renamed = await call("POST", `${http.url}/api/workspaces/rename`, { from: before, to: after });
+				check("the rename is accepted (200)", renamed.status === 200, `status=${renamed.status}`);
+				check("the answer names the new path", resolve(String(renamed.payload.cwd ?? "")) === resolve(after), JSON.stringify(renamed.payload));
+				check("and names the sessions it carried", ((renamed.payload.sessions as string[]) ?? []).includes(id), JSON.stringify(renamed.payload.sessions));
+				const moved = await get(`${http.url}/api/sessions/${id}`);
+				check("the session's own record follows the workspace", resolve(moved.session?.cwd ?? "") === resolve(after), moved.session?.cwd);
+				check("the group is listed under the new path", (await listed()).includes(resolve(after)));
+				check("nothing is listed under the old path", !(await listed()).includes(resolve(before)));
+				check("and the folder itself moved", !existsSync(before) && existsSync(after));
+
+				const hidden = await call("POST", `${http.url}/api/workspaces/hide`, { cwd: after });
+				check("hiding a workspace is accepted (200)", hidden.status === 200, `status=${hidden.status}`);
+				check("the answer's listing no longer draws the group", !((hidden.payload.workspaces as { cwd: string }[]) ?? []).some((group) => resolve(group.cwd) === resolve(after)));
+				check(
+					"and the stored setting records it",
+					((hidden.payload.settings as { hiddenWorkspaces?: string[] })?.hiddenWorkspaces ?? []).some((path) => resolve(path) === resolve(after)),
+				);
+				check("the next listing leaves it out too", !(await listed()).includes(resolve(after)));
+				check("but the folder is exactly where it was", existsSync(after));
+				check("and the transcript is untouched", SessionManager.findById(after, id) !== undefined);
+				check("the other workspace is still listed", (await listed()).includes(resolve(other)));
+
+				const restored = await call("PATCH", `${http.url}/api/settings`, { patch: { hiddenWorkspaces: [] } });
+				check("an empty hidden list is stored as a choice (200)", restored.status === 200, `status=${restored.status}`);
+				check("and the group comes back", (await listed()).includes(resolve(after)));
+
+				// 删除 is not a one-way door, and this is the door: the transcripts and the folder were
+				// never touched, so a new session in that directory is the user saying they want it listed
+				// again. Nothing else in the window can un-hide one, which is why the road has to exist.
+				const hiddenAgain = await call("POST", `${http.url}/api/workspaces/hide`, { cwd: after });
+				check("hiding it a second time is accepted (200)", hiddenAgain.status === 200, `status=${hiddenAgain.status}`);
+				check("and it leaves the listing again", !(await listed()).includes(resolve(after)));
+				const reborn = await call("POST", `${http.url}/api/sessions`, { cwd: after });
+				check("a new session in it is accepted (201)", reborn.status === 201, `status=${reborn.status}`);
+				check("a new session in a put-aside workspace lists it again", (await listed()).includes(resolve(after)));
+				const storedHidden =
+					(((await call("GET", `${http.url}/api/settings`)).payload.settings as { hiddenWorkspaces?: string[] })?.hiddenWorkspaces ?? []);
+				check("and the stored list no longer names it", !storedHidden.some((path) => resolve(path) === resolve(after)), JSON.stringify(storedHidden));
+				void elsewhere;
+			} finally {
+				for (const dir of [before, after, other]) await rm(workspaceDir(dir), { recursive: true, force: true });
+				for (const dir of [before, after, other]) await rm(dir, { recursive: true, force: true });
+				await rm(host, { recursive: true, force: true });
+				await http.close();
+				await rm(home, { recursive: true, force: true });
+			}
+		}
 
 		process.stdout.write("a rename stores a name and a delete removes the session\n");
 		// The two row-menu actions the window offers, over the real route table: a rename lands as one

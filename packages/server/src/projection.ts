@@ -48,6 +48,15 @@ export interface SessionProjection {
 	 * does, and overlaying them is what keeps a rename from idling a working row.
 	 */
 	refresh(sessionId: string): Promise<void>;
+	/**
+	 * Re-read the rows of a workspace that was renamed on disk, and publish them.
+	 *
+	 * A rename moves *every* session of the workspace at once, so this is the plural of
+	 * {@link refresh} and rides the same road: one re-read per file, published whole, which is what
+	 * tells every open window that the group moved without any of them asking again. Ids this store
+	 * does not hold are skipped — a row nobody drew is not a row to send.
+	 */
+	repath(sessionIds: readonly string[]): Promise<void>;
 	/** Drop one row and stop following its session: the session behind it has been deleted. */
 	forget(sessionId: string): void;
 	/** Let go of everything this projection attached to the hub. */
@@ -318,6 +327,11 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 		},
 		refresh(sessionId: string): Promise<void> {
 			return refresh(sessionId);
+		},
+		async repath(sessionIds: readonly string[]): Promise<void> {
+			for (const sessionId of sessionIds) {
+				if (rows.has(sessionId)) await refresh(sessionId);
+			}
 		},
 		forget(sessionId: string): void {
 			forget(sessionId);

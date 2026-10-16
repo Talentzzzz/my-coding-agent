@@ -1,11 +1,11 @@
 // A live check that the browser client and the server actually agree: boots the real server, opens a
 // real WebSocket to `/mux`, and drives it through the production `MuxClient` — the same class the
 // window uses. So this is the seam the desktop shell runs on, not a mock of it.
-// The last section drives a real run through the scripted transport and asserts the one thing the
-// user reported broken: a second prompt must reach the window again after the first run ended.
+// The last two sections drive a real run through the scripted transport, and a workspace put aside and
+// taken back, which is the one change no row frame can carry.
 // No provider key is needed — where a run happens, the model is the scripted transport.
 // Run with: node scripts/smoke-mux-live.ts
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bootServer } from "../packages/server/src/boot.ts";
@@ -13,9 +13,11 @@ import { MuxClient, browserSocket, type MuxHandlers } from "../packages/web/src/
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
 import type { ConnectionItem, ServerMessage } from "@my-agent/core/protocol";
-import type { UserModel } from "@my-agent/core";
+import { workspaceDir, type UserModel } from "@my-agent/core";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-mux-live-"));
+/** A scratch agent home, so the settings this smoke writes are not the machine's own. */
+const home = await mkdtemp(join(tmpdir(), "my-agent-mux-live-home-"));
 let failures = 0;
 
 function check(label: string, condition: boolean, detail = ""): void {
@@ -71,7 +73,7 @@ const modelRows: UserModel[] = [
 process.stdout.write("\n真服务器 + 真 WebSocket + 生产的 MuxClient\n");
 
 const transport = createFakeTransport({ tokensPerSecond: 400 });
-const server = await bootServer({ cwd: root, port: 0, mux: { heartbeatIntervalMs: 60 }, api: transport.api });
+const server = await bootServer({ cwd: root, port: 0, mux: { heartbeatIntervalMs: 60 }, api: transport.api, settingsHome: home });
 // Handed to the hub after boot, before any prompt: the one run section below needs a model to run.
 server.hub.setUserModels(modelRows);
 
@@ -181,11 +183,69 @@ try {
 	check("第二条 prompt 被接受", (await postPrompt(server.url, sessionId, "第二条")) === 202);
 	check("第二条 prompt 也必须再次收到帧", await until(() => framesFor() > beforeSecond, 10_000), JSON.stringify(messages.slice(beforeSecond)));
 
+	// ---------------------------------------------------------------------------------------------
+	// A workspace put aside leaves the *list*, which is the one change no row frame can carry: no row
+	// changed, so the server re-sends the overview — the same frame a connection opens on. Both
+	// directions matter and both are checked against the row table the window actually keeps.
+	// ---------------------------------------------------------------------------------------------
+	process.stdout.write("被搁置的工作区离开概览，回来时也回到概览\n");
+
+	const aside = join(root, "aside");
+	await mkdir(aside, { recursive: true });
+
+	/** The client's own row table, as `main.ts` feeds it: the newest overview, then the rows after it. */
+	const rowTable = (): SessionRows => {
+		const store = new SessionRows();
+		for (const item of items) {
+			if (item.type === "sessions") store.replaceAll(item.sessions);
+			if (item.type === "session_row") store.put(item.session);
+		}
+		return store;
+	};
+	const overviews = (): number => items.filter((item) => item.type === "sessions").length;
+	const postSession = (cwd: string): Promise<Response> =>
+		fetch(`${server.url}/api/sessions`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ cwd }),
+		});
+	const restWorkspaces = async (): Promise<string[]> =>
+		((await (await fetch(`${server.url}/api/workspaces`)).json()) as { workspaces: { cwd: string }[] }).workspaces.map((group) => group.cwd);
+
+	const first = (await (await postSession(aside)).json()) as { sessionId: string };
+	check("新工作区的行到达了概览", await until(() => rowTable().get(first.sessionId) !== undefined), JSON.stringify(rowTable().list().map((row) => row.cwd)));
+	check("它也被 REST 列表列着", (await restWorkspaces()).includes(aside), JSON.stringify(await restWorkspaces()));
+
+	const beforeHide = overviews();
+	const hidden = await fetch(`${server.url}/api/workspaces/hide`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ cwd: aside }),
+	});
+	check("搁置一个工作区被接受 (200)", hidden.status === 200, `status=${hidden.status}`);
+	check("服务端因此重发了一份概览", await until(() => overviews() > beforeHide), `overviews=${overviews()}`);
+	check("行表里不再有这个工作区的任何一行", rowTable().list().every((row) => row.cwd !== aside), JSON.stringify(rowTable().list().map((row) => row.cwd)));
+	check("REST 列表与概览说的是同一件事", !(await restWorkspaces()).includes(aside), JSON.stringify(await restWorkspaces()));
+
+	// And back: the transcripts and the folder were never touched, so a new session in that directory
+	// is the user saying they want it listed again.
+	const beforeBack = overviews();
+	const reborn = await postSession(aside);
+	check("在搁置的工作区里新建会话被接受 (201)", reborn.status === 201, `status=${reborn.status}`);
+	check("服务端又重发了一份概览", await until(() => overviews() > beforeBack), `overviews=${overviews()}`);
+	check("那个工作区回到了行表里", rowTable().list().some((row) => row.cwd === aside), JSON.stringify(rowTable().list().map((row) => row.cwd)));
+	check("REST 列表也把它列回来了", (await restWorkspaces()).includes(aside), JSON.stringify(await restWorkspaces()));
+
 	client.close();
 	check("关掉之后不再有状态变化", channels.at(-1) !== undefined);
 } finally {
 	await server.close();
+	// Both the workspace and the store directory keyed by it: a session that is created and never
+	// cleaned leaves an orphan directory in the real agent home on every run.
 	await rm(root, { recursive: true, force: true });
+	await rm(workspaceDir(root), { recursive: true, force: true });
+	await rm(workspaceDir(join(root, "aside")), { recursive: true, force: true });
+	await rm(home, { recursive: true, force: true });
 }
 
 process.stdout.write(failures === 0 ? "\nmux live ok\n" : `\n${failures} 项失败\n`);

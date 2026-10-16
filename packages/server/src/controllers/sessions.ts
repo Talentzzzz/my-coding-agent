@@ -12,6 +12,7 @@ import {
 	type ModelOption,
 	type ModelSelection,
 	resolveModelRef,
+	resolvePath,
 	type SessionRef,
 	type SessionSnapshot,
 	type SettingsPatch,
@@ -20,10 +21,11 @@ import {
 	toSessionRef,
 	type UserModel,
 	type WorkspaceGroup,
+	type WorkspacePaging,
 } from "@my-agent/core";
-import { resolve } from "node:path";
+import { dirname, resolve, sep } from "node:path";
 import { httpStatus } from "../http/errors.ts";
-import { workspaceRootOrThrow, type SessionHub } from "../hub.ts";
+import { samePath, workspaceRootOrThrow, type SessionHub } from "../hub.ts";
 
 /** The stored sessions for a workspace, narrowed from the session files to what the wire carries. */
 export async function listSessions(workspaceRoot: string): Promise<SessionRef[]> {
@@ -33,11 +35,13 @@ export async function listSessions(workspaceRoot: string): Promise<SessionRef[]>
 /** What the settings panel reads: the values it can edit, and the ones it shows read-only. */
 function settingsOf(manager: SettingsManager): SettingsSnapshot {
 	const settings = manager.getSettings();
+	const hidden = manager.getHiddenWorkspaces();
 	return {
 		appearance: manager.getAppearance(),
 		approval: manager.getApprovals(),
 		bash: manager.getBashSettings(),
 		...(settings.tools === undefined ? {} : { tools: settings.tools }),
+		...(hidden.length === 0 ? {} : { hiddenWorkspaces: hidden }),
 		...(settings.model === undefined ? {} : { model: settings.model }),
 	};
 }
@@ -62,6 +66,23 @@ export interface SessionListener {
 	onRenamed?(sessionId: string): void;
 	/** A session was deleted. The projection drops its row, and the transport tells its clients. */
 	onRemoved?(sessionId: string): void;
+	/**
+	 * A workspace was renamed on disk, so every session row it holds now names a different `cwd`.
+	 *
+	 * The plural of {@link onRenamed} and told the same way: the caller re-reads each row off disk and
+	 * the ordinary `session_row` frame carries the new path to every window, so a client that has the
+	 * group open learns the move from the same road any other row change takes.
+	 */
+	onWorkspaceRenamed?(cwd: string, sessionIds: readonly string[]): void;
+	/**
+	 * A workspace entered or left the machine's listing: it was put aside, or taken back.
+	 *
+	 * Unlike {@link onWorkspaceRenamed}, no row changed, so there is no `session_row` frame that could
+	 * carry this: the group list itself is what moved, and the transport answers by re-sending the
+	 * overview the rows are drawn from. A window told nothing would keep drawing a group the server
+	 * has stopped listing — which is the one thing 「删除」 promises not to happen.
+	 */
+	onWorkspaceListingChanged?(): void;
 }
 
 /**
@@ -73,9 +94,19 @@ export interface SessionListener {
  */
 export class SystemController {
 	private readonly hub: SessionHub;
+	/**
+	 * Where a command's consequences go when they are not its answer.
+	 *
+	 * A workspace rename is the one thing here with a consequence wider than its response: every row
+	 * of the group moves at once, and the projection is the one writer of rows, so the caller is told
+	 * rather than left to guess. Optional for the same reason it is on {@link SessionController}: a
+	 * smoke that only wants the HTTP surface wires no transport at all.
+	 */
+	private readonly listeners: SessionListener;
 
-	constructor(hub: SessionHub) {
+	constructor(hub: SessionHub, listeners: SessionListener = {}) {
 		this.hub = hub;
+		this.listeners = listeners;
 	}
 
 	health(): { ok: boolean; cwd: string; live: readonly string[] } {
@@ -133,7 +164,132 @@ export class SystemController {
 
 	/** Every workspace this machine has sessions for, each with its own list, most recent first. */
 	async workspaces(): Promise<{ workspaces: WorkspaceGroup[] }> {
-		return { workspaces: await SessionManager.listWorkspaces() };
+		return { workspaces: (await SessionManager.listWorkspaces()).filter((group) => this.hub.listsWorkspace(group.cwd)) };
+	}
+
+	/**
+	 * Rename a workspace's folder, and carry its sessions along.
+	 *
+	 * The two halves are one operation rather than two endpoints, because half of it is worse than
+	 * neither: a moved directory whose transcripts still name the old path is every session unfindable
+	 * by the workspace it claims, and a rewritten store whose directory never moved is the same
+	 * problem from the other side.
+	 *
+	 * The paths are the client's to build — it is the side that knows what the user typed, and the
+	 * name they typed is a *segment* appended to the directory the group already names. What arrives
+	 * here is therefore two absolute directories, and the checks below are the ones only this side can
+	 * make: that the source is a workspace this machine actually lists, and that the target is not one
+	 * of the others.
+	 */
+	async renameWorkspace(body: Record<string, unknown>): Promise<{ cwd: string; sessions: string[] }> {
+		const from = body.from;
+		const to = body.to;
+		if (typeof from !== "string" || from.trim().length === 0) {
+			throw httpStatus.badRequest("`from` must be a workspace path");
+		}
+		if (typeof to !== "string" || to.trim().length === 0) {
+			throw httpStatus.badRequest("`to` must be a workspace path");
+		}
+
+		const source = resolve(from);
+		const target = resolve(to);
+		// A rename onto itself is asked and answered before anything is looked up: it is not a move, so
+		// the "that directory is taken" check below would otherwise find the source occupying its own
+		// destination and call it a conflict, which names the wrong thing.
+		if (samePath(source, target)) throw httpStatus.badRequest("新名字不能还是同一个目录。");
+
+		const manager = this.hub.settingsFor(this.hub.cwd);
+		const groups = await SessionManager.listWorkspaces();
+		if (!groups.some((group) => samePath(group.cwd, source))) {
+			throw httpStatus.notFound(`Unknown workspace: ${source}`);
+		}
+		if (groups.some((group) => samePath(group.cwd, target))) {
+			throw httpStatus.conflict(`另一个工作区已经在用这个目录：${target}`);
+		}
+		// The destination has to be a directory the moved workspace can land in, checked before the
+		// move rather than after it: a missing parent would otherwise be discovered by `rename`, which
+		// answers with a bare errno — a 500 the client can do nothing with — instead of the conflict
+		// that says the target was understood and is not somewhere a folder can be put.
+		try {
+			await workspaceRootOrThrow(dirname(target));
+		} catch (error) {
+			throw httpStatus.conflict(messageOf(error));
+		}
+
+		let sessions: string[];
+		try {
+			sessions = await this.hub.repathWorkspace(source, target);
+		} catch (error) {
+			// A running session, a store directory already taken, a target that cannot be written: all
+			// of them are "understood and refused", which is what 409 names.
+			throw httpStatus.conflict(messageOf(error));
+		}
+
+		this.renameInSettings(manager, source, target);
+		this.listeners.onWorkspaceRenamed?.(target, sessions);
+		return { cwd: target, sessions };
+	}
+
+	/**
+	 * Remove a workspace from the list, touching nothing on disk.
+	 *
+	 * The stored list is sent whole, the way the client's own `hidden` list reads it, and the field
+	 * goes through the ordinary settings road — so「删除」 is a view decision that survives a reload
+	 * without either the transcripts or the directory they name being moved.
+	 *
+	 * Two things are told rather than returned, because they are the facts a second window is not
+	 * asking about: the listing itself went back with the answer, and every other window hears the same
+	 * news as a fresh overview — see {@link SessionListener.onWorkspaceListingChanged}. Re-adding the
+	 * workspace is a new session in it, which is {@link SessionController.create}'s half of the pair.
+	 */
+	hideWorkspace(body: Record<string, unknown>): Promise<{ settings: SettingsSnapshot; workspaces: WorkspaceGroup[] }> {
+		const cwd = body.cwd;
+		if (typeof cwd !== "string" || cwd.trim().length === 0) {
+			throw httpStatus.badRequest("`cwd` must be a workspace path");
+		}
+
+		const manager = this.hub.settingsFor(this.hub.cwd);
+		const hidden = manager.getHiddenWorkspaces();
+		if (!hidden.some((path) => samePath(path, cwd))) {
+			manager.applySettings({ hiddenWorkspaces: [...hidden, resolve(cwd)] });
+			this.listeners.onWorkspaceListingChanged?.();
+		}
+
+		// The listing goes back with the answer because the removal is a *stored* fact rather than a
+		// frame: this command rides REST, and the rows a window draws come from the channel. A client
+		// that applied its own guess would be a second writer for a list the server owns.
+		return this.listing(manager);
+	}
+
+	/** The visible listing, as the hub's rule leaves it. */
+	private async listing(manager: SettingsManager): Promise<{ settings: SettingsSnapshot; workspaces: WorkspaceGroup[] }> {
+		return {
+			settings: settingsOf(manager),
+			workspaces: (await SessionManager.listWorkspaces()).filter((group) => this.hub.listsWorkspace(group.cwd)),
+		};
+	}
+
+	/**
+	 * Move the workspace's own entries in the settings files to the path it now has.
+	 *
+	 * Two fields name a workspace by path and neither survives a rename on its own: the sidebar's
+	 * paging state, whose key *is* the path, and the paging state of any workspace nested inside the
+	 * one that moved — the keys are not paths to walk but keys to re-key, and one that no longer names
+	 * anything is forgotten with everything it held.
+	 *
+	 * The hidden list is deliberately not moved. A hidden workspace is not in the list to rename, and
+	 * one that was renamed by hand is a path the user chose to have named again.
+	 */
+	private renameInSettings(manager: SettingsManager, from: string, to: string): void {
+		const appearance = manager.getAppearance();
+		if (appearance.workspaces !== undefined) {
+			const moved: Record<string, WorkspacePaging> = {};
+			for (const [cwd, entry] of Object.entries(appearance.workspaces)) {
+				if (samePath(cwd, from)) moved[to] = entry;
+				else if (!underPath(cwd, from)) moved[cwd] = entry;
+			}
+			manager.applySettings({ appearance: { workspaces: moved } });
+		}
 	}
 
 	settings(): { settings: SettingsSnapshot } {
@@ -167,6 +323,15 @@ export class SystemController {
 				throw httpStatus.badRequest("`tools` must be an array of tool names");
 			}
 			next.tools = fields.tools as string[];
+		}
+
+		if (fields.hiddenWorkspaces !== undefined) {
+			if (!Array.isArray(fields.hiddenWorkspaces) || fields.hiddenWorkspaces.some((path) => typeof path !== "string")) {
+				throw httpStatus.badRequest("`hiddenWorkspaces` must be an array of workspace paths");
+			}
+			// Empty is a choice and not an absence — "nothing is hidden" — so it is stored as it
+			// arrives, the same rule the empty tool set follows.
+			next.hiddenWorkspaces = fields.hiddenWorkspaces as string[];
 		}
 
 		if (fields.model !== undefined) {
@@ -325,7 +490,25 @@ export class SessionController {
 			}
 		}
 		const sessionId = await this.hub.newSession(root);
+		this.restoreWorkspace(root ?? this.hub.cwd);
 		return { sessionId, sessions: await listSessions(root ?? this.hub.cwd) };
+	}
+
+	/**
+	 * A new session in a workspace that was put aside takes it back onto the list.
+	 *
+	 * The pair to `SystemController.hideWorkspace`, and the answer to「删除」 being a one-way door: the
+	 * transcripts and the directory were never touched, so the workspace is still there to be used —
+	 * and coming back to it is what says the user wants it listed again. Written through the manager
+	 * the hub's visibility rule reads, so the next listing and the next overview frame already agree.
+	 */
+	private restoreWorkspace(cwd: string): void {
+		const manager = this.hub.settingsFor(this.hub.cwd);
+		const hidden = manager.getHiddenWorkspaces();
+		const kept = hidden.filter((path) => !samePath(path, cwd));
+		if (kept.length === hidden.length) return;
+		manager.applySettings({ hiddenWorkspaces: kept });
+		this.listeners.onWorkspaceListingChanged?.();
 	}
 
 	/**
@@ -606,4 +789,23 @@ export class SessionController {
 
 function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Whether a workspace path lives under a directory that moved.
+ *
+ * Strictly below, not equal: the key that *is* the moved workspace is re-keyed rather than dropped,
+ * and this answers the question the other keys are filtered by — a workspace nested inside the one
+ * that was renamed now names a directory that does not exist, so its entry is forgotten with
+ * everything it held.
+ *
+ * Resolved and case-folded the way {@link samePath} compares, so the two directions of the same
+ * comparison cannot disagree about what "under" means on Windows.
+ */
+function underPath(cwd: string, dir: string): boolean {
+	const parent = resolvePath(dir);
+	const key = process.platform === "win32" ? parent.toLowerCase() : parent;
+	const target = resolvePath(cwd);
+	const candidate = process.platform === "win32" ? target.toLowerCase() : target;
+	return candidate.startsWith(key.endsWith(sep) ? key : key + sep);
 }

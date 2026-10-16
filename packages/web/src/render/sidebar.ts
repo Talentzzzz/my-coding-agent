@@ -1,10 +1,19 @@
 import { element, icon, iconButton } from "../dom.ts";
 import type { ChannelState } from "../client.ts";
 import { openMenuAt } from "./menu.ts";
+import { askForText } from "./text-dialog.ts";
 import type { SessionRow, WorkspaceGroup, WorkspacePaging } from "@my-agent/core/protocol";
 
 export interface SidebarHandlers {
-	onNewSession(): void;
+	/**
+	 * Start a conversation.
+	 *
+	 * `cwd` is the workspace the request was made *from*, and it is what makes the workspace heading's
+	 * own 「新建会话」 land where the right click was: the top row's button asks for the picker's
+	 * directory (no argument), and the heading names its own. One door rather than two, because a
+	 * new session is the same act wherever it is asked for.
+	 */
+	onNewSession(cwd?: string): void;
 	onSelectSession(sessionId: string): void;
 	onToggleCollapsed(): void;
 	onOpenSettings(): void;
@@ -28,6 +37,22 @@ export interface SidebarHandlers {
 	onPageWorkspace(cwd: string): void;
 	/** The workspace's 「收起」 was clicked: back to the first page, without touching the saved one. */
 	onCollapseWorkspace(cwd: string): void;
+	/**
+	 * Rename the workspace this heading names: move its folder, and carry its sessions along (票 06).
+	 *
+	 * `cwd` is the group the card was opened on and `name` is the single folder name that was typed.
+	 * Both travel, because the two halves belong to different sides: the segment is the user's, and
+	 * turning it into a path — beside the directory it already sits in — is the window's, which is the
+	 * side that knows what "rename" means on this machine.
+	 */
+	onRenameWorkspace(cwd: string, name: string): void;
+	/**
+	 * Remove the workspace this heading names from the list, touching nothing on disk.
+	 *
+	 * Named `delete` in the menu because that is what the user is doing from where they sit; the
+	 * handler's job — and the endpoint's name — is the narrower 「hide」.
+	 */
+	onDeleteWorkspace(cwd: string): void;
 }
 
 export interface SidebarState {
@@ -314,11 +339,15 @@ export class Sidebar {
 
 		this.noMatch.hidden = !(filter !== "" && matches === 0);
 
+		// Everything this column drew and no longer wants goes, headings included, and this is where a
+		// *stale* entry is the one that matters: a heading whose workspace was renamed is no longer
+		// named by any key, and the only thing still holding its wrapper is this map. Nothing is walked
+		// backwards from the list, so a group without rows — the renamed one, whose rows are already
+		// under the new path — is not reachable from the DOM at all.
 		for (const [key, node] of [...this.drawn]) {
-			if (!wanted.has(key)) {
-				node.button.remove();
-				this.drawn.delete(key);
-			}
+			if (wanted.has(key)) continue;
+			node.button.remove();
+			this.drawn.delete(key);
 		}
 
 		// Only when the window moved to a different conversation. Doing it on every render would drag
@@ -365,6 +394,13 @@ export class Sidebar {
 				this.paintCurrent(existing.head, cwd === currentWorkspace);
 				this.paintExpanded(existing.head, entry.collapsed);
 			}
+			// The two strings a rename can move are patched for the same reason a row's title is:
+			// nothing rebuilds a heading, and a rename re-keys the group — so the node that wore the
+			// old path has to be able to stop wearing it, label and tooltip both.
+			if (existing.head !== undefined && existing.head.title !== cwd) existing.head.title = cwd;
+			if (existing.name !== undefined && existing.name.textContent !== workspaceName(cwd)) {
+				existing.name.textContent = workspaceName(cwd);
+			}
 			return existing.button;
 		}
 
@@ -382,13 +418,74 @@ export class Sidebar {
 		const name = element("span", "workspace-name", workspaceName(cwd));
 		head.append(folder, chev, name);
 		head.addEventListener("click", () => this.handlers.onToggleWorkspace(cwd));
+		// The heading's whole menu lives here rather than on any resident control: a right click names
+		// the workspace, and the menu it opens is the only place new-session-here, rename, and delete
+		// are offered from — the same road a session row's menu takes.
+		head.addEventListener("contextmenu", (event) => {
+			event.preventDefault();
+			this.openWorkspaceMenu(cwd, event.clientX, event.clientY);
+		});
 
 		const wrapper = element("div", "workspace");
 		wrapper.append(head);
 		this.list.append(wrapper);
 		this.paintCurrent(head, cwd === currentWorkspace);
-		this.drawn.set(key, { button: wrapper, head });
+		this.drawn.set(key, { button: wrapper, head, name });
 		return wrapper;
+	}
+
+	/**
+	 * The one menu a workspace heading has: new session here, rename, delete.
+	 *
+	 * 新建会话 names the cwd it was asked on, which is the whole point of the item — the top row's
+	 * button starts a session wherever the picker points, and this one starts it *here*.
+	 *
+	 * 删除 carries the tooltip that says what it does not do. The menu word is the one the user is
+	 * looking for; the endpoint behind it and the sentence under it are both narrower, and a person
+	 * deleting a project from a sidebar deserves to know the folder is not going anywhere.
+	 */
+	private openWorkspaceMenu(cwd: string, x: number, y: number): void {
+		openMenuAt(x, y, [
+			{
+				icon: "plus",
+				label: "新建会话",
+				title: `在这个工作区里新建：${cwd}`,
+				onSelect: () => this.handlers.onNewSession(cwd),
+			},
+			{ kind: "separator" },
+			{ label: "重命名…", title: "改本地文件夹名，该工作区的会话记录一起跟过去", onSelect: () => void this.renameWorkspace(cwd) },
+			{
+				icon: "trash",
+				label: "删除",
+				danger: true,
+				title: "只从列表里移除，不碰磁盘：会话文件与文件夹都留在原地",
+				onSelect: () => this.handlers.onDeleteWorkspace(cwd),
+			},
+		]);
+	}
+	/**
+	 * Ask for a new folder name, and report it beside the group it was asked on.
+	 *
+	 * What is collected here is one *segment*, which is the only part a rename can change: the
+	 * directory the group names stays where it is and the folder inside it is renamed. That is also why
+	 * a separator or a `..` in the answer is dropped rather than passed on — a rename that could move
+	 * the folder elsewhere would be a move wearing a rename's clothes, and the session headers are
+	 * rewritten on the assumption that only the last segment moved. A name the folder already wears is
+	 * dropped for the simpler reason: it is not a change, and sending it would be a request that
+	 * stores what the server already holds.
+	 */
+	private async renameWorkspace(cwd: string): Promise<void> {
+		const current = workspaceName(cwd);
+		const typed = await askForText({
+			title: "重命名工作区",
+			label: "新的文件夹名",
+			value: current,
+			hint: "文件夹与它下面所有会话记录的路径会一起改成新名字。",
+			confirm: "重命名",
+		});
+		if (typed === undefined || typed === current) return;
+		if (typed.includes("/") || typed.includes("\\") || typed === "." || typed === "..") return;
+		this.handlers.onRenameWorkspace(cwd, typed);
 	}
 
 	/**
@@ -683,6 +780,8 @@ interface DrawnNode {
 	parts?: RowParts;
 	/** The heading element inside `button`, for group entries. */
 	head?: HTMLElement;
+	/** The heading's label node, so a re-keyed group can be renamed without rebuilding the heading. */
+	name?: HTMLElement;
 }
 
 /** One rename in flight: which row is being edited, and whether it has been settled already. */

@@ -567,7 +567,7 @@ export class MuxConnection {
 		this.send({ streamId: sessionId, item: { type: "error", message } });
 	}
 
-	/** This connection's opening overview: every row this process knows, once. */
+	/** This connection's opening overview, or a fresh one after the list moved: the rows it may see. */
 	sendSessions(rows: readonly SessionRow[]): void {
 		this.send({ streamId: null, item: { type: "sessions", sessions: [...rows] } });
 	}
@@ -862,6 +862,7 @@ export class MuxServer {
 		// after `close()`. In the real process the projection is closed first and clears its listeners
 		// anyway, which is why the bug would not have shown up there.
 		this.stopRows = projection.onRow((row) => {
+			if (!this.listed(row)) return;
 			for (const connection of this.connections) connection.sendRow(row);
 		});
 		// The removal rides the same connection-level seat the rows do, and for the same reason: it is
@@ -894,7 +895,7 @@ export class MuxServer {
 		// connection that has sent one is a connection the client can already call live. The overview
 		// follows, and the socket's write order is the order they arrive in.
 		connection.heartbeat();
-		connection.sendSessions(await this.projection.rows());
+		connection.sendSessions(await this.overview());
 
 		sink.ping();
 		return connection;
@@ -934,6 +935,36 @@ export class MuxServer {
 	/** Note an approval answer, for every connection showing it. */
 	rememberApproval(sessionId: string, toolCallId: string, approved: boolean): void {
 		this.answers.remember(sessionId, toolCallId, approved);
+	}
+
+	/**
+	 * Whether this connection's window is allowed to see a row.
+	 *
+	 * The rule is the hub's ({@link SessionHub.listsWorkspace}) and the filter is applied here, at both
+	 * points a row reaches a window: the overview a connection opens on, and every changed row after
+	 * it. Filtering only the overview would let a workspace the user put aside come back the moment one
+	 * of its sessions changed — a group that returns on its own is worse than one that never left.
+	 */
+	private listed(row: SessionRow): boolean {
+		return this.hub.listsWorkspace(row.cwd);
+	}
+
+	/** This connection's opening overview: every row this process lists, once. */
+	private overview(): Promise<SessionRow[]> {
+		return this.projection.rows().then((rows) => rows.filter((row) => this.listed(row)));
+	}
+
+	/**
+	 * Send every connection a fresh overview.
+	 *
+	 * The one thing a window cannot be told by a row: a workspace entering or leaving the list is a
+	 * change to the list itself, and there is no `session_row` for a group. Re-sending the overview is
+	 * how the frame that already means "here is the machine's list" says "…and it moved" — the same
+	 * frame a connection opens on, so no client learns a second shape of news about a sidebar.
+	 */
+	async broadcastSessions(): Promise<void> {
+		const rows = await this.overview();
+		for (const connection of this.connections) connection.sendSessions(rows);
 	}
 
 	/** One round of the protocol-level liveness question, and the sweep of whoever it finished. */

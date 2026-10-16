@@ -118,6 +118,14 @@ export interface SettingsSnapshot {
 	appearance: AppearanceSettings;
 	/** The global default active tool set; absent means every tool the build knows. */
 	tools?: string[];
+	/**
+	 * Workspaces the sidebar does not list, by absolute path; absent means none are put aside.
+	 *
+	 * Carried here rather than kept to the server because it is what the window has to know to draw the
+	 * list it was sent: a workspace missing from `GET /api/workspaces` for a reason no one can see
+	 * would be a group that vanished with nothing to explain it.
+	 */
+	hiddenWorkspaces?: string[];
 	approval: Record<ToolApprovalKey, boolean>;
 	/** How long the `bash` tool lets one command run. */
 	bash: BashSettings;

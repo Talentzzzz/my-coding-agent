@@ -17,6 +17,14 @@ export interface PanelSettingsPatch {
 	model?: string;
 	/** The global default active tool set, sent whole like the session-level endpoint's own. */
 	tools?: string[];
+	/**
+	 * Workspaces the sidebar does not list, by absolute path, sent whole like `tools`.
+	 *
+	 * The panel has no control for this and probably never will: it is the shape 「删除」 on a workspace
+	 * heading goes through, and hiding a workspace from a settings list would be a second door to the
+	 * one act that needs the group in front of you to mean anything.
+	 */
+	hiddenWorkspaces?: string[];
 	appearance?: {
 		theme?: "system" | "light" | "dark";
 		fontSize?: number;
@@ -164,6 +172,34 @@ export class SessionApi {
 	/** Every workspace this machine has sessions for, for the sidebar's groups. */
 	async listWorkspaces(): Promise<{ workspaces: WorkspaceGroup[] }> {
 		return this.send("GET", "/api/workspaces", undefined);
+	}
+
+	/**
+	 * Move a workspace's folder, with its sessions following.
+	 *
+	 * Both paths are absolute and both are built here, because this is the side that knows what the
+	 * user typed: the new name is one *segment*, and the directory it goes in is the one the group
+	 * already names. The server makes the checks only it can make — that the source is a workspace it
+	 * lists, that the target is free, and that nothing is running in either.
+	 *
+	 * The answer names the new path, and the rows are deliberately not part of it: the group comes
+	 * back through the channel's `session_row` frames, so a window never has two stories about where
+	 * its sidebar points.
+	 */
+	async renameWorkspace(from: string, to: string): Promise<{ cwd: string; sessions: string[] }> {
+		return this.send("POST", "/api/workspaces/rename", { from, to });
+	}
+
+	/**
+	 * Take a workspace out of the list, touching nothing on disk.
+	 *
+	 * The whole stored list and the visible listing come back because this is the one workspace
+	 * command that does not ride the channel: nothing about a hidden workspace is a row fact, so the
+	 * endpoint answers with what the sidebar should now draw — and the client applies it rather than
+	 * guessing, which would be a second writer for a list the server owns.
+	 */
+	async hideWorkspace(cwd: string): Promise<{ settings: SettingsSnapshot; workspaces: WorkspaceGroup[] }> {
+		return this.send("POST", "/api/workspaces/hide", { cwd });
 	}
 
 	async listModels(): Promise<{ models: ModelOption[] }> {

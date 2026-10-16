@@ -2085,6 +2085,80 @@ body:not([data-pane="branch"]) .branch-view {
 	background: var(--dsw-border-l1);
 }
 
+/*
+ * The one self-drawn card that asks for a line of typing — a workspace's new folder name.
+ *
+ * It is a modal, unlike the menu above it: centred, keyboard-taking, and undismissable by a stray
+ * click on the page behind it. The scrim is the only place either is drawn from, so the dimming
+ * follows the theme without a second rule, and it sits above the menu because the menu is what opens
+ * it (z-index 60 there).
+ */
+.text-dialog-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 70;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--dsw-scrim);
+}
+
+.text-dialog {
+	width: min(420px, calc(100vw - 48px));
+	padding: 20px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-lg);
+	background: var(--dsw-bg-layer-1);
+	box-shadow: var(--dsw-shadow-panel);
+}
+
+.text-dialog-title {
+	margin-bottom: 14px;
+	color: var(--dsw-label-primary);
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
+	font-weight: 600;
+}
+
+.text-dialog-label {
+	display: block;
+	margin-bottom: 6px;
+	color: var(--dsw-label-secondary);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.text-dialog-input {
+	width: 100%;
+	height: 34px;
+	padding: 0 10px;
+	border: 1px solid var(--dsw-border-l3);
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-input-fill);
+	color: var(--dsw-label-primary);
+	font: inherit;
+	font-size: var(--dsw-fs-body);
+}
+
+.text-dialog-input:focus {
+	outline: none;
+	border-color: var(--dsw-state-business);
+}
+
+.text-dialog-hint {
+	margin-top: 8px;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.text-dialog-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 18px;
+}
+
 .composer-wrap {
 	max-width: var(--dsw-content-width);
 	width: 100%;
@@ -2411,7 +2485,7 @@ body:not([data-pane="branch"]) .branch-view {
 	display: grid;
 	place-items: center;
 	padding: var(--dsw-settings-air);
-	background: rgb(0 0 0 / 32%);
+	background: var(--dsw-scrim);
 	/* Deliberately no backdrop-filter: this machine composites in software (ADR-0004), and the
 	   measurement in .scratch/window-repair/research/overlay-blur.ts prices blur(2px) at ~2.5ms of
 	   CPU per frame whenever the backdrop moves — for an effect the 32% dim already carries. */

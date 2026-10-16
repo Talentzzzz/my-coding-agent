@@ -5,6 +5,7 @@
 // Nothing reaches the network, so no server and no provider key are needed.
 // Run with: node scripts/smoke-sidebar.ts
 import { Sidebar, pagingOf, type SidebarHandlers, type SidebarState } from "../packages/web/src/render/sidebar.ts";
+import { askForText } from "../packages/web/src/render/text-dialog.ts";
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { installDom, type FakeNode } from "./dom-shim.ts";
 import type { SessionRow, WorkspacePaging } from "@my-agent/core/protocol";
@@ -36,6 +37,8 @@ function handlers(over: Partial<SidebarHandlers> = {}): SidebarHandlers {
 		onToggleWorkspace: () => {},
 		onPageWorkspace: () => {},
 		onCollapseWorkspace: () => {},
+		onRenameWorkspace: () => {},
+		onDeleteWorkspace: () => {},
 		...over,
 	};
 }
@@ -119,6 +122,18 @@ function state(rows: SessionRow[], over: Partial<SidebarState> = {}): SidebarSta
 }
 
 /**
+ * Let a synchronously dispatched event's promises run.
+ *
+ * The rename card answers with a promise, and the heading's handler is suspended on it — so a check
+ * written right after `dispatch("keydown")` reads the state from *before* the answer, and reports a
+ * working feature as broken. Two turns cover the chain the card actually has: the promise resolving,
+ * and the `await` in the handler continuing.
+ */
+function settle(): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
  * One drawn row's whole surface, in list order: the title it wears, when its node was created, the
  * state its slot carries, and the tooltip it shows.
  *
@@ -189,19 +204,7 @@ process.stdout.write("\nsidebar：行是原地改的\n");
 
 {
 	const selected: string[] = [];
-	const sidebar = new Sidebar({
-		onNewSession: () => {},
-		onSelectSession: (id) => selected.push(id),
-		onToggleCollapsed: () => {},
-		onOpenSettings: () => {},
-		onAddWorkspace: () => {},
-		onForkSession: () => {},
-		onDeleteSession: () => {},
-		onRenameSession: () => {},
-		onToggleWorkspace: () => {},
-		onPageWorkspace: () => {},
-		onCollapseWorkspace: () => {},
-	});
+	const sidebar = new Sidebar(handlers({ onSelectSession: (id) => selected.push(id) }));
 
 	const rows = [row("a", 300), row("b", 200), row("c", 100)];
 	sidebar.render(state(rows, { activeSessionId: "b" }));
@@ -231,19 +234,7 @@ process.stdout.write("\nsidebar：行是原地改的\n");
 process.stdout.write("\nsidebar：重排是移动节点\n");
 
 {
-	const sidebar = new Sidebar({
-		onNewSession: () => {},
-		onSelectSession: () => {},
-		onToggleCollapsed: () => {},
-		onOpenSettings: () => {},
-		onAddWorkspace: () => {},
-		onForkSession: () => {},
-		onDeleteSession: () => {},
-		onRenameSession: () => {},
-		onToggleWorkspace: () => {},
-		onPageWorkspace: () => {},
-		onCollapseWorkspace: () => {},
-	});
+	const sidebar = new Sidebar(handlers());
 
 	const a = row("a", 100);
 	const b = row("b", 300);
@@ -270,19 +261,7 @@ process.stdout.write("\nsidebar：重排是移动节点\n");
 process.stdout.write("\nsidebar：状态收进左边的槽\n");
 
 {
-	const sidebar = new Sidebar({
-		onNewSession: () => {},
-		onSelectSession: () => {},
-		onToggleCollapsed: () => {},
-		onOpenSettings: () => {},
-		onAddWorkspace: () => {},
-		onForkSession: () => {},
-		onDeleteSession: () => {},
-		onRenameSession: () => {},
-		onToggleWorkspace: () => {},
-		onPageWorkspace: () => {},
-		onCollapseWorkspace: () => {},
-	});
+	const sidebar = new Sidebar(handlers());
 
 	// Each row's own state, looked up by session rather than by position: rows are ordered by
 	// `modified`, so a positional assertion here would be testing the sort instead of the state.
@@ -316,19 +295,7 @@ process.stdout.write("\nsidebar：状态收进左边的槽\n");
 process.stdout.write("\nsidebar：连接指示器\n");
 
 {
-	const sidebar = new Sidebar({
-		onNewSession: () => {},
-		onSelectSession: () => {},
-		onToggleCollapsed: () => {},
-		onOpenSettings: () => {},
-		onAddWorkspace: () => {},
-		onForkSession: () => {},
-		onDeleteSession: () => {},
-		onRenameSession: () => {},
-		onToggleWorkspace: () => {},
-		onPageWorkspace: () => {},
-		onCollapseWorkspace: () => {},
-	});
+	const sidebar = new Sidebar(handlers());
 
 	sidebar.render(state([row("a", 1)], { channel: "connecting" }));
 	// The indicator lives in the foot now, beside the settings entry — the row it used to share with
@@ -350,19 +317,7 @@ process.stdout.write("\nsidebar：连接指示器\n");
 process.stdout.write("\nsidebar：分组标题在会话行之上\n");
 
 {
-	const sidebar = new Sidebar({
-		onNewSession: () => {},
-		onSelectSession: () => {},
-		onToggleCollapsed: () => {},
-		onOpenSettings: () => {},
-		onAddWorkspace: () => {},
-		onForkSession: () => {},
-		onDeleteSession: () => {},
-		onRenameSession: () => {},
-		onToggleWorkspace: () => {},
-		onPageWorkspace: () => {},
-		onCollapseWorkspace: () => {},
-	});
+	const sidebar = new Sidebar(handlers());
 
 	// Two workspaces, so this is about each group rather than about the one group a single-workspace
 	// list happens to have. The reported symptom — the rows first, then "📁项目名" — showed up in
@@ -400,19 +355,7 @@ process.stdout.write("\nsidebar：分组标题在会话行之上\n");
 process.stdout.write("\nsidebar：行会消失\n");
 
 {
-	const sidebar = new Sidebar({
-		onNewSession: () => {},
-		onSelectSession: () => {},
-		onToggleCollapsed: () => {},
-		onOpenSettings: () => {},
-		onAddWorkspace: () => {},
-		onForkSession: () => {},
-		onDeleteSession: () => {},
-		onRenameSession: () => {},
-		onToggleWorkspace: () => {},
-		onPageWorkspace: () => {},
-		onCollapseWorkspace: () => {},
-	});
+	const sidebar = new Sidebar(handlers());
 
 	sidebar.render(state([row("a", 300), row("b", 200), row("c", 100)]));
 	check("三行", titlesOf(sidebar).length === 3);
@@ -429,19 +372,7 @@ process.stdout.write("\nsidebar：行会消失\n");
 process.stdout.write("\nsidebar：搜索真的过滤\n");
 
 {
-	const sidebar = new Sidebar({
-		onNewSession: () => {},
-		onSelectSession: () => {},
-		onToggleCollapsed: () => {},
-		onOpenSettings: () => {},
-		onAddWorkspace: () => {},
-		onForkSession: () => {},
-		onDeleteSession: () => {},
-		onRenameSession: () => {},
-		onToggleWorkspace: () => {},
-		onPageWorkspace: () => {},
-		onCollapseWorkspace: () => {},
-	});
+	const sidebar = new Sidebar(handlers());
 
 	sidebar.render(state([row("alpha", 300), row("beta", 200)]));
 
@@ -478,19 +409,7 @@ process.stdout.write("\nsidebar：搜索真的过滤\n");
 process.stdout.write("\nsidebar：fork 的行跟普通行一模一样\n");
 
 {
-	const sidebar = new Sidebar({
-		onNewSession: () => {},
-		onSelectSession: () => {},
-		onToggleCollapsed: () => {},
-		onOpenSettings: () => {},
-		onAddWorkspace: () => {},
-		onForkSession: () => {},
-		onDeleteSession: () => {},
-		onRenameSession: () => {},
-		onToggleWorkspace: () => {},
-		onPageWorkspace: () => {},
-		onCollapseWorkspace: () => {},
-	});
+	const sidebar = new Sidebar(handlers());
 
 	// One root, one fork of it. The fork keeps its tree place — right beneath the session it came
 	// from — but draws no indent, no mark, and no depth of any kind: the name, suffix included, is
@@ -510,19 +429,7 @@ process.stdout.write("\nsidebar：fork 的行跟普通行一模一样\n");
 process.stdout.write("\nsidebar：（1）由渲染拼出来\n");
 
 {
-	const sidebar = new Sidebar({
-		onNewSession: () => {},
-		onSelectSession: () => {},
-		onToggleCollapsed: () => {},
-		onOpenSettings: () => {},
-		onAddWorkspace: () => {},
-		onForkSession: () => {},
-		onDeleteSession: () => {},
-		onRenameSession: () => {},
-		onToggleWorkspace: () => {},
-		onPageWorkspace: () => {},
-		onCollapseWorkspace: () => {},
-	});
+	const sidebar = new Sidebar(handlers());
 
 	// Three forks of one source, born out of order; the number is the sibling's own place under the
 	// same parent by creation time, and nothing anywhere stores it. A fork of a fork hangs its suffix
@@ -545,19 +452,7 @@ process.stdout.write("\nsidebar：（1）由渲染拼出来\n");
 process.stdout.write("\nsidebar：新会话出现在列表里\n");
 
 {
-	const sidebar = new Sidebar({
-		onNewSession: () => {},
-		onSelectSession: () => {},
-		onToggleCollapsed: () => {},
-		onOpenSettings: () => {},
-		onAddWorkspace: () => {},
-		onForkSession: () => {},
-		onDeleteSession: () => {},
-		onRenameSession: () => {},
-		onToggleWorkspace: () => {},
-		onPageWorkspace: () => {},
-		onCollapseWorkspace: () => {},
-	});
+	const sidebar = new Sidebar(handlers());
 
 	// The listing the window had before the fork, then the same listing with the fork's row in it —
 	// which is exactly what the connection's `session_row` frame delivers. The row has to appear
@@ -584,19 +479,12 @@ process.stdout.write("\nsidebar：右键菜单\n");
 {
 	const forked: string[] = [];
 	const deleted: string[] = [];
-	const sidebar = new Sidebar({
-		onNewSession: () => {},
-		onSelectSession: () => {},
-		onToggleCollapsed: () => {},
-		onOpenSettings: () => {},
-		onAddWorkspace: () => {},
-		onForkSession: (sessionId) => forked.push(sessionId),
-		onDeleteSession: (sessionId) => deleted.push(sessionId),
-		onRenameSession: () => {},
-		onToggleWorkspace: () => {},
-		onPageWorkspace: () => {},
-		onCollapseWorkspace: () => {},
-	});
+	const sidebar = new Sidebar(
+		handlers({
+			onForkSession: (sessionId) => forked.push(sessionId),
+			onDeleteSession: (sessionId) => deleted.push(sessionId),
+		}),
+	);
 
 	sidebar.render(state([row("a", 300), row("b", 200)]));
 	const target = all(sidebar, "session-item")[0]?.node;
@@ -628,19 +516,7 @@ process.stdout.write("\nsidebar：就地改名\n");
 
 {
 	const renamed: { sessionId: string; title: string }[] = [];
-	const sidebar = new Sidebar({
-		onNewSession: () => {},
-		onSelectSession: () => {},
-		onToggleCollapsed: () => {},
-		onOpenSettings: () => {},
-		onAddWorkspace: () => {},
-		onForkSession: () => {},
-		onDeleteSession: () => {},
-		onRenameSession: (sessionId, title) => renamed.push({ sessionId, title }),
-		onToggleWorkspace: () => {},
-		onPageWorkspace: () => {},
-		onCollapseWorkspace: () => {},
-	});
+	const sidebar = new Sidebar(handlers({ onRenameSession: (sessionId, title) => renamed.push({ sessionId, title }) }));
 
 	// A root and a fork of it, so the rename shows both halves of the rule: the editor holds the
 	// clean name — the fork's own suffix is a fact about its birth, not something to retype — and
@@ -853,6 +729,173 @@ process.stdout.write("\nsidebar：当前工作区靠阴影，没有「当前」�
 	sidebar.render(two("/two"));
 	check("当前换了：标记跟着走", marks().length === 1 && marks()[0]?.getAttribute("title") === "/two", JSON.stringify(marks().map((node) => node.getAttribute("title"))));
 	check("上一个表头是同一个节点，只是摘了标记", head.created === 1 && !head.classList.contains("workspace-head-current"), `created=${head.created}`);
+}
+
+// ----------------------------------- 18. the workspace head's own context menu
+
+process.stdout.write("\nsidebar：工作区表头的右键菜单\n");
+
+await (async (): Promise<void> => {
+	const started: (string | undefined)[] = [];
+	const deleted: string[] = [];
+	const renamed: { cwd: string; name: string }[] = [];
+	const sidebar = new Sidebar(
+		handlers({
+			onNewSession: (cwd) => started.push(cwd),
+			onDeleteWorkspace: (cwd) => deleted.push(cwd),
+			onRenameWorkspace: (cwd, name) => renamed.push({ cwd, name }),
+		}),
+	);
+
+	sidebar.render({
+		workspaces: [
+			{ cwd: "/one", sessions: [row("a", 300)] },
+			{ cwd: "/two", sessions: [row("b", 200)] },
+		],
+		currentWorkspace: "/one",
+		collapsed: false,
+		paging: {},
+		channel: "live",
+	});
+
+	// Right-clicked on the *second* group's heading, so an answer that ignored which heading was under
+	// the pointer would name the wrong workspace and be caught here.
+	const heads = all(sidebar, "workspace-head");
+	check("两个表头都画出来了", heads.length === 2, String(heads.length));
+	heads[1]?.node.dispatch("contextmenu", { clientX: 30, clientY: 40, preventDefault() {} });
+
+	const menu = (): FakeNode | undefined => bodyChildren().find((child) => child.className === "menu");
+	check("菜单打开了", menu() !== undefined);
+	const labels = (menu()?.children ?? [])
+		.filter((child) => child.className === "menu-item")
+		.map((child) => child.querySelector(".menu-label")?.textContent ?? "");
+	check("三项都在：新建会话、重命名…、删除", labels.join("|") === "新建会话|重命名…|删除", JSON.stringify(labels));
+
+	// 新建会话 carries the cwd it was asked on, which is the acceptance criterion of 票 06 in one line:
+	// the new session lands in the workspace that was right-clicked, not in whatever is current.
+	const item = (label: string): FakeNode | undefined =>
+		(menu()?.children ?? []).find(
+			(child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === label,
+		);
+	item("新建会话")?.dispatch("click");
+	check("新建会话拿到的是右键那个工作区的路径", started.join(",") === "/two", JSON.stringify(started));
+	check("选完菜单收起了", menu() === undefined);
+
+	heads[1]?.node.dispatch("contextmenu", { clientX: 30, clientY: 40, preventDefault() {} });
+	item("删除")?.dispatch("click");
+	check("删除拿到的是同一个工作区", deleted.join(",") === "/two", JSON.stringify(deleted));
+
+	// 重命名 opens the card rather than reporting straight away: the name the user types is a segment,
+	// and the heading passes it on with the group it was asked on. Committing here is the card's own
+	// contract, driven through the DOM the way the menu's items are — and every commit is awaited,
+	// because the heading's handler runs on the promise the card resolves.
+	heads[1]?.node.dispatch("contextmenu", { clientX: 30, clientY: 40, preventDefault() {} });
+	item("重命名…")?.dispatch("click");
+	const card = bodyChildren().find((child) => child.className === "text-dialog-overlay");
+	check("卡片打开了", card !== undefined);
+	const input = card?.querySelector(".text-dialog-input");
+	check("输入框里是当前的文件夹名", input?.value === "two", String(input?.value));
+	check("提交前没有报过任何重命名", renamed.length === 0);
+
+	if (input != null) {
+		input.value = "renamed";
+		input.dispatch("keydown", { key: "Enter", preventDefault() {} });
+	}
+	await settle();
+	check("提交的是原路径加新名字", renamed.length === 1 && renamed[0]!.cwd === "/two" && renamed[0]!.name === "renamed", JSON.stringify(renamed));
+	check("卡片关上了", bodyChildren().every((child) => child.className !== "text-dialog-overlay"));
+
+	// Typing the name the folder already wears is not a change, and a separator is not a name: both are
+	// dropped rather than sent, because the header rewrite assumes only the last segment moved.
+	const reopenAndType = async (value: string): Promise<void> => {
+		heads[1]?.node.dispatch("contextmenu", { clientX: 30, clientY: 40, preventDefault() {} });
+		item("重命名…")?.dispatch("click");
+		const field = bodyChildren().find((child) => child.className === "text-dialog-overlay")?.querySelector(".text-dialog-input");
+		if (field != null) {
+			field.value = value;
+			field.dispatch("keydown", { key: "Enter", preventDefault() {} });
+		}
+		await settle();
+	};
+	await reopenAndType("two");
+	check("名字没变就不发请求", renamed.length === 1, JSON.stringify(renamed));
+	await reopenAndType("a/b");
+	check("带路径分隔符的名字被丢掉", renamed.length === 1, JSON.stringify(renamed));
+	await reopenAndType("..");
+	check("`..` 也被丢掉", renamed.length === 1, JSON.stringify(renamed));
+})();
+
+// ------------------------- 19. a renamed group is re-keyed, not left beside the old one
+
+process.stdout.write("\nsidebar：重命名后表头跟着新路径走\n");
+
+{
+	const sidebar = new Sidebar(handlers());
+	const two = (cwd: string): SidebarState => ({
+		workspaces: [{ cwd, sessions: [row("a", 300, { cwd })] }],
+		currentWorkspace: cwd,
+		collapsed: false,
+		paging: {},
+		channel: "live",
+	});
+
+	sidebar.render(two("/work/old"));
+	const head = all(sidebar, "workspace-head")[0]!.node;
+	// The *wrapper* is what the sweep drops, and `remove()` only detaches the node it was called on — so
+	// the node whose survival is being checked has to be the wrapper, not the heading inside it.
+	const wrapper = head.parent!;
+	check("表头写着旧名字", head.querySelector(".workspace-name")?.textContent === "old", String(head.querySelector(".workspace-name")?.textContent));
+
+	// The group comes back under its new path, which is what the channel's row frames produce after the
+	// rename. The node that wore the old path must lose it rather than be joined by a second heading:
+	// a stale heading is a folder the user can right-click that no longer exists.
+	sidebar.render(two("/work/new"));
+	const heads = all(sidebar, "workspace-head");
+	check("只剩一个表头", heads.length === 1, String(heads.length));
+	check("名字换成了新文件夹名", heads[0]?.node.querySelector(".workspace-name")?.textContent === "new", String(heads[0]?.node.querySelector(".workspace-name")?.textContent));
+	check("tooltip 也换成了新路径", heads[0]?.node.getAttribute("title") === "/work/new", String(heads[0]?.node.getAttribute("title")));
+	check("旧分组连同它的表头一起从文档里摘掉了", wrapper.detached && head.parent === wrapper, `detached=${wrapper.detached} headParentKept=${head.parent === wrapper}`);
+}
+
+// ------------------------- 20. the two roads that answer "nothing was asked"
+
+process.stdout.write("\nsidebar：取消与被顶掉都要给出答案\n");
+
+{
+	// The card answers with a promise, so there are three ways out and one of them used to leak: Escape
+	// took the card away without settling anything, and the caller waited for the rest of the window's
+	// life. None of that is visible on screen, which is why it is asserted here on the promise itself
+	// rather than through the sidebar's handler.
+	const dialog = { title: "重命名工作区", label: "新的文件夹名", value: "two", confirm: "重命名" };
+	const settled = (): FakeNode | undefined => bodyChildren().find((child) => child.className === "text-dialog-overlay");
+	const keydownsBefore = shim.document.listenerCount("keydown");
+	/**
+	 * The card's answer, encoded — and a leak has to read as a failure rather than as a hung smoke: a
+	 * promise that never settles is exactly the bug, so waiting for it forever would hide it.
+	 */
+	const answerOf = async (answer: Promise<string | undefined>): Promise<string> => {
+		const timedOut = Symbol("no answer");
+		const raced = await Promise.race([answer, new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), 50))]);
+		return raced === timedOut ? "（没有回答，promise 悬着）" : JSON.stringify(raced ?? null);
+	};
+
+	const escaped = askForText(dialog);
+	check("卡片打开了", settled() !== undefined);
+	check("卡片挂上了 document 的键盘监听", shim.document.listenerCount("keydown") === keydownsBefore + 1);
+	shim.document.dispatch("keydown", { key: "Escape", stopPropagation() {} });
+	check("Escape 之后卡片关上了", settled() === undefined);
+	check("Escape 把监听也摘了", shim.document.listenerCount("keydown") === keydownsBefore);
+	check("Escape 让调用方拿到「什么都没问」", (await answerOf(escaped)) === "null");
+
+	// One card at a time, and the card that is replaced is settled rather than merely removed: it is the
+	// same leak by another road, and the second question is the one whose answer is still wanted.
+	const superseded = askForText(dialog);
+	const current = askForText(dialog);
+	check("屏幕上只剩一张卡片", bodyChildren().filter((child) => child.className === "text-dialog-overlay").length === 1);
+	check("被顶掉的那张以「什么都没问」收场", (await answerOf(superseded)) === "null");
+	shim.document.dispatch("keydown", { key: "Escape", stopPropagation() {} });
+	check("留在屏幕上的那张也能收场", (await answerOf(current)) === "null");
+	check("没有卡片留在页面上", settled() === undefined);
 }
 
 process.stdout.write(failures === 0 ? "\nsidebar ok\n" : `\n${failures} 项失败\n`);

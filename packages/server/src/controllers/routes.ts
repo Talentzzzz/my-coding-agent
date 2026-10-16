@@ -76,6 +76,27 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 			handle: async (_params, _request, response) => sendJson(response, 200, await controllers.system.workspaces()),
 		}),
 		route({
+			method: "POST",
+			// A command rather than a `PATCH` on a workspace resource, because a workspace has no id
+			// here: it is named by the directory it is, and the body carries both the path it has and
+			// the path the user typed. Moving the folder and rewriting the headers of its transcripts
+			// are one operation — see `SystemController.renameWorkspace` — so there is one request.
+			path: "/api/workspaces/rename",
+			params: {},
+			handle: async (_params, request, response) =>
+				sendJson(response, 200, await controllers.system.renameWorkspace(await readObjectBody(request))),
+		}),
+		route({
+			method: "POST",
+			// Removal from the list and nothing else: the transcripts and the directory they name stay
+			// exactly where they are. `hide` rather than `delete` says so in the URL, because a DELETE
+			// here would promise the one thing this deliberately does not do.
+			path: "/api/workspaces/hide",
+			params: {},
+			handle: async (_params, request, response) =>
+				sendJson(response, 200, await controllers.system.hideWorkspace(await readObjectBody(request))),
+		}),
+		route({
 			method: "GET",
 			path: "/api/sessions",
 			params: {},

@@ -334,7 +334,9 @@ header 记录父级的**路径**，因为那是一个手里拿着某个文件的
 | `PUT` | `/api/models` | `{ models: ModelInput[] }` | `{ models: ModelOption[] }` |
 | `GET` | `/api/settings` | — | `{ settings: SettingsSnapshot }` |
 | `PATCH` | `/api/settings` | `{ patch: { appearance?, approval?, tools?, bash? } }` | `{ settings }` —— 工作区**默认值**，在任何会话存在之前读取；按会话的审批变更发往 `PATCH /api/sessions/{id}` |
-| `GET` | `/api/workspaces` | — | `{ workspaces: WorkspaceGroup[] }`——每组的 `sessions` 是 `SessionRow[]`（含 `modified` / `running` / `pending`） |
+| `GET` | `/api/workspaces` | — | `{ workspaces: WorkspaceGroup[] }`——每组的 `sessions` 是 `SessionRow[]`（含 `modified` / `running` / `pending`）；被搁置的工作区不在其中 |
+| `POST` | `/api/workspaces/rename` | `{ from, to }`（两个绝对路径） | `{ cwd, sessions: string[] }`——**一个**操作：先把文件夹搬过去，再把 store 目录与每条 header 的 `cwd` 跟上；有活会话、目标被占、父目录不存在都是 `409` |
+| `POST` | `/api/workspaces/hide` | `{ cwd }` | `{ settings, workspaces }`——只从列表移除，磁盘原样；把 `cwd` 从那轮设置里去掉（`PATCH /api/settings` 带 `hiddenWorkspaces`）即可放回，在该目录里新建会话也同样 |
 | `GET` | `/api/sessions` | — | `{ sessions: SessionRef[] }` |
 | `GET` | `/api/sessions/current` | — | `{ sessionId, sessions }` |
 | `POST` | `/api/sessions` | `{ cwd?: string }`（可为空体） | `201 { sessionId, sessions }`——带 `cwd` 时会话落在那个目录，`sessions` 列**该目录**的会话 |
@@ -347,7 +349,7 @@ header 记录父级的**路径**，因为那是一个手里拿着某个文件的
 | `POST` | `/api/sessions/{id}/forks` | `{ entryId: string \| null }` | `201 { sessionId, sessions }` |
 | `POST` | `/api/sessions/{id}/branch` | `{ entryId: string, descend?: boolean }` | `{ session }` |
 
-这里没有一行是会话事件的端点——唯一的流式通道是 `/mux`（不在 `/api` 之下，因为它不是一个 REST 资源）；`abort` 也留在 REST 上，不帧化。`/api/workspaces` 的行是这个进程知道的每一行，而**无人在看时一个会话的行也照样更新**（它由 `projection.ts` 喂，不由某条恰好开着的流喂）；通道不可用时，客户端把 `GET /api/workspaces` 当作侧边栏行表的 REST 兜底。
+这里没有一行是会话事件的端点——唯一的流式通道是 `/mux`（不在 `/api` 之下，因为它不是一个 REST 资源）；`abort` 也留在 REST 上，不帧化。`/api/workspaces` 的行是这个进程知道的每一行，而**无人在看时一个会话的行也照样更新**（它由 `projection.ts` 喂，不由某条恰好开着的流喂）；通道不可用时，客户端把 `GET /api/workspaces` 当作侧边栏行表的 REST 兜底。**被搁置的工作区是这里唯一的例外，而它只有一条规则**（`SessionHub.listsWorkspace`）：REST 列表与通道概览都按它过滤，所以两条路永远说同一件事——只过滤概览会让一个被删掉的分组在它某个会话下次变动时自己长回来。搁置或取回不改变任何一行，所以它由**重发一份概览**（`broadcastSessions()`）通知，而不是靠 `session_row`。
 
 `ModelOption` 是用户导入的一行、**去掉密钥**——`hasApiKey` 说明是否存了一个，而密钥从不离开服务器。`PUT /api/models` 替换整份清单，因为设置面板编辑的是一份清单，而一份被半途施加的清单是没人能推理的状态；一行不带 `apiKey` 送来时，保留存在它名下的那个，这正是让面板能够往返一行"它从未被展示过密钥"的数据的原因。名字是一行的**身份**——transcript 记录它、配置补丁命名它——所以重复会被 `400` 拒绝（`The name "X" is already in use`），而不是在用户背后把它改成唯一的：一个加了后缀的名字会改变**每一条**命名它的 transcript 的含义，而显示这次冲突的那个面板才是修复该发生的地方。变更能抵达活会话而不必重新打开它们，因为会话持有一个 `ModelSource`、每次请求都通过它读存储而不是复制一行、并每次都从活行重新推导自己的模型——所以端点、窗口和 wire id 都随密钥一起移动。
 

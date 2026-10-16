@@ -143,6 +143,18 @@ export interface Settings {
 	appearance: AppearanceSettings;
 	/** Tools that must be approved in the UI before they run. */
 	approval: Record<ToolApprovalKey, boolean>;
+	/**
+	 * Workspaces the sidebar does not list, by absolute path.
+	 *
+	 * The list is a *view* decision and nothing more: 「删除」 on a workspace heading removes the group
+	 * from the list and leaves every transcript exactly where it lies, so a workspace can be put aside
+	 * without anything on disk being touched. That is the whole reason this is a stored setting rather
+	 * than a delete — the sessions are still openable by id, and un-hiding is emptying this list.
+	 *
+	 * Absent rather than `[]` until the user hides the first one, by the same rule the two widths
+	 * follow: a preference nobody expressed is not written down.
+	 */
+	hiddenWorkspaces?: string[];
 	/** How many steered messages one drain point injects. */
 	steeringMode: QueueMode;
 	/** How many follow-up messages one drain point injects. */
@@ -196,6 +208,9 @@ export function mergeSettings(input: unknown): Settings {
 
 	const tools = stringListOrUndefined(record.tools);
 	if (tools !== undefined) merged.tools = tools;
+
+	const hiddenWorkspaces = stringListOrUndefined(record.hiddenWorkspaces);
+	if (hiddenWorkspaces !== undefined) merged.hiddenWorkspaces = hiddenWorkspaces;
 
 	for (const key of Object.keys(merged.approval) as ToolApprovalKey[]) {
 		const value = approval[key];

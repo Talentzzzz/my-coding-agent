@@ -7,13 +7,14 @@ import {
 	mkdirSync,
 	openSync,
 	readdirSync,
+	readFileSync,
 	readSync,
 	type Stats,
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { readdir, rm, stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readdir, rename, rm, stat } from "node:fs/promises";
+import { basename, dirname, join, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 import type { AgentMessage } from "@my-agent/agent";
@@ -1080,6 +1081,19 @@ export class SessionManager {
 		return this.sessionDir;
 	}
 
+	/**
+	 * Follow a workspace that was renamed on disk, for a session this process already has open.
+	 *
+	 * The file itself has not moved — it lives under the agent home, in a directory keyed by the
+	 * workspace — so nothing about the open handle changes; what changes is where this session says it
+	 * lives and which store directory it names. Only a caller holding an open manager needs this; a
+	 * transcript read afterwards takes the new path out of its own header.
+	 */
+	repath(workspaceRoot: string): void {
+		this.cwd = resolvePath(workspaceRoot);
+		if (this.persist) this.sessionDir = workspaceDir(this.cwd);
+	}
+
 	usesDefaultSessionDir(): boolean {
 		return this.sessionDir === workspaceDir(this.cwd);
 	}
@@ -1832,6 +1846,145 @@ export class SessionManager {
 		if (path === undefined) throw new Error(`Unknown session: ${id}`);
 		await rm(path);
 	}
+
+	/**
+	 * Follow a workspace that was renamed on disk: the folder moves, the store moves with it, and every
+	 * header names the new directory.
+	 *
+	 * Three facts have to move together or a session becomes unfindable by the path it claims. The
+	 * folder itself is renamed, which is the operation the user actually asked for. The sessions'
+	 * *directory* under the agent home is named after the workspace, so it is renamed too — otherwise
+	 * the group would be listed under the new path while its files sat in a directory keyed by a path
+	 * that no longer exists. Then each file's header is rewritten, because the header's `cwd` is what
+	 * every reader takes as the workspace: the listing's groups, the tools' fence, the settings a
+	 * session opens on.
+	 *
+	 * The folder moves first, so a name the filesystem will not grant — a target that appeared while
+	 * the user was typing, a directory another process is holding open — fails before anything about
+	 * the store has changed. Nothing here can be undone from this side, so the order is chosen to put
+	 * the failure as early as it can be.
+	 *
+	 * Only the header line is rewritten, and only its `cwd` and `parentSession` fields — the rest of
+	 * each file is a byte-for-byte copy, and every entry after the header is written back exactly as it
+	 * was read. A JSONL file this build does not fully understand therefore survives: the one line it
+	 * promises to read is the one line that changes.
+	 *
+	 * `parentSession` is rewritten inside the directory for the forks whose source is one of these
+	 * files, which is what keeps `linkForkParents` pairing a family after the move.
+	 */
+	static async repathWorkspace(from: string, to: string): Promise<string[]> {
+		const oldDir = workspaceDir(from);
+		const newDir = workspaceDir(to);
+		if (!existsSync(oldDir)) return [];
+		if (existsSync(newDir)) {
+			throw new Error(`Another workspace already stores its sessions at ${newDir}`);
+		}
+
+		// The pairing is read before anything moves, because it is what a fork's `parentSession` is
+		// resolved through: after the move that field names a path in a directory that is gone.
+		const byFile = new Map<string, string>();
+		for (const file of sessionFilesIn(oldDir)) {
+			const header = readSessionHeader(file);
+			if (header !== null) byFile.set(fileKey(file), header.id);
+		}
+
+		await rename(resolvePath(from), resolvePath(to));
+		await rename(oldDir, newDir);
+
+		const rewritten: string[] = [];
+		for (const file of sessionFilesIn(newDir)) {
+			const id = rewriteHeaderPaths(file, resolvePath(from), resolvePath(to), oldDir, byFile);
+			if (id !== undefined) rewritten.push(id);
+		}
+		return rewritten;
+	}
+}
+
+/** Every session file in one workspace directory, or none when the directory is not there. */
+function sessionFilesIn(dir: string): string[] {
+	try {
+		return readdirSync(dir)
+			.filter((file) => file.endsWith(".jsonl"))
+			.map((file) => join(dir, file));
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Rewrite one file's header for a move, and answer the session id it holds — or `undefined` when the
+ * file was left alone.
+ *
+ * The header is found the same way {@link readSessionHeader} finds it, by parsing lines until one
+ * declares itself a session. Only that line is re-serialized; every line after it is copied verbatim,
+ * which is what makes this safe on a file holding an entry kind or a field this build does not know —
+ * the one line this promises to understand is the one line that changes.
+ *
+ * Two paths inside the header move with the workspace: `cwd`, when it is the directory being renamed,
+ * and `parentSession`, when it names another file in the same store — a fork's source, which is what
+ * keeps a family paired after the move. A file that already names the new paths is left alone rather
+ * than rewritten with the values it already carries.
+ */
+function rewriteHeaderPaths(
+	filePath: string,
+	from: string,
+	to: string,
+	oldDir: string,
+	byFile: ReadonlyMap<string, string>,
+): string | undefined {
+	let text: string;
+	try {
+		text = readFileSync(filePath, "utf8");
+	} catch {
+		return undefined;
+	}
+
+	const lines = text.split("\n");
+	let changed = false;
+	let id: string | undefined;
+	for (const [index, line] of lines.entries()) {
+		if (line.trim().length === 0) continue;
+		const entry = parseSessionEntryLine(line);
+		if (entry === null) continue;
+		if (entry.type !== "session") {
+			// Past the header there is nothing to rewrite: no later line carries a working directory.
+			if (id !== undefined) break;
+			continue;
+		}
+
+		id = entry.id;
+		const header = entry as SessionHeader;
+		const cwd = header.cwd;
+		// Compared by key rather than by string, because the two ends come from different places: the
+		// header holds whatever spelling the create request carried, `from` is the rename request's own,
+		// and on Windows `C:\Work` and `c:\work` are one directory. A session compared byte-exact would
+		// be left naming a path that no longer exists while the rename answered success.
+		if (typeof cwd === "string" && fileKey(cwd) === fileKey(from)) header.cwd = to;
+		const parent = (header as { parentSession?: unknown }).parentSession;
+		const parentId = typeof parent === "string" && isInside(parent, oldDir) ? byFile.get(fileKey(parent)) : undefined;
+		// A fork's source, which moved to the directory this file now lives in. The parent-id check is
+		// what leaves a hand-edited header that points at its own file alone.
+		if (typeof parent === "string" && parentId !== undefined && parentId !== id) {
+			header.parentSession = join(dirname(resolvePath(filePath)), basename(parent));
+		}
+		const serialized = JSON.stringify(header);
+		if (serialized !== line) {
+			lines[index] = serialized;
+			changed = true;
+		}
+		break;
+	}
+
+	if (!changed || typeof id !== "string") return undefined;
+	writeFileSync(filePath, lines.join("\n"), "utf8");
+	return id;
+}
+
+/** True when a path lives directly in a directory, in the comparison's own spelling. */
+function isInside(filePath: string, dir: string): boolean {
+	const key = fileKey(filePath);
+	const parent = fileKey(dir);
+	return key.startsWith(parent.endsWith(sep) ? parent : parent + sep);
 }
 
 /** The most recent activity in a group, for ordering the sidebar's workspaces. */

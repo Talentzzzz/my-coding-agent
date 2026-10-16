@@ -31,6 +31,12 @@ export interface SettingsPatch {
 	model?: string;
 	/** The global default active tool set. A whole list, like the tool set on a session. */
 	tools?: string[];
+	/**
+	 * Workspaces the sidebar does not list, by absolute path. A whole list, like `tools`: the setting
+	 * is the set of hidden workspaces, so one more hidden workspace is the previous list with one more
+	 * entry.
+	 */
+	hiddenWorkspaces?: string[];
 	approval?: Partial<Record<ToolApprovalKey, boolean>>;
 	/** Theme and font size. Part of a patch so one field can move without the other. */
 	appearance?: Partial<AppearanceSettings>;
@@ -186,6 +192,16 @@ export class SettingsManager {
 	/** Theme and font size, as the window should draw itself. */
 	getAppearance(): AppearanceSettings {
 		return { ...this.settings.appearance };
+	}
+
+	/**
+	 * The workspaces the sidebar leaves out, by absolute path.
+	 *
+	 * Always a list, never undefined: every reader of this asks "is this one hidden", and the answer
+	 * for a file that never named the field is the same as for an empty list.
+	 */
+	getHiddenWorkspaces(): string[] {
+		return [...(this.settings.hiddenWorkspaces ?? [])];
 	}
 
 	/** The tools that must be approved in the UI before they run. */

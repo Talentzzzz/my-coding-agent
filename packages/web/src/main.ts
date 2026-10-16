@@ -481,7 +481,13 @@ function main(): void {
 	// ------------------------------------------------------------------ sidebar
 
 	const sidebar = new Sidebar({
-		onNewSession: () => void newSession(),
+		// The heading's own 「新建会话」 names the workspace it was asked on; the top row names nothing
+		// and follows the picker. The choice is folded into `pickedWorkspace` *before* the create goes
+		// out, because `openSession` clears it — the picker has done its job once the session exists.
+		onNewSession: (cwd) => {
+			if (cwd !== undefined) pickedWorkspace = cwd;
+			void newSession(cwd);
+		},
 		onSelectSession: (sessionId) => void openSession(sessionId),
 		onToggleCollapsed: () => {
 			collapsed = !collapsed;
@@ -519,6 +525,8 @@ function main(): void {
 			// had read down to rather than where this button just reset to.
 			setPaging(cwd, { collapsed: false, page: 1, savedPage: pagingOf(paging, cwd).savedPage });
 		},
+		onRenameWorkspace: (cwd, name) => void renameWorkspace(cwd, name),
+		onDeleteWorkspace: (cwd) => void deleteWorkspace(cwd),
 	});
 
 	/**
@@ -1311,6 +1319,90 @@ function main(): void {
 			const created = await api.createSession(cwd ?? (directoryForNewSession() || undefined));
 			reachable();
 			await openSession(created.sessionId);
+		} catch (error) {
+			unreachable(error);
+		}
+	}
+
+	/**
+	 * Rename a workspace's folder, and carry its sessions along (票 06).
+	 *
+	 * `cwd` is the group the heading named and `name` is the one folder segment the user typed; the
+	 * new path is built here, beside the directory the group already sits in. One request does both
+	 * halves — the directory moves and every transcript's header is rewritten — so there is nothing
+	 * here to keep in step afterwards. What this window *does* owe the rename is its own paging state:
+	 * its keys are workspace paths, and a key under the old path names a directory that no longer
+	 * exists. The key is moved locally before the server's answer lands, because the paging map is this
+	 * window's to hold — the sidebar's rows are the server's, and those arrive on the channel as
+	 * `session_row` frames like every other row change.
+	 *
+	 * `pickedWorkspace` moves too when it named the workspace that moved: it is the picker's own
+	 * choice, and a next-new-session pointed at a directory which is gone would fail at the create with
+	 * the user's intent looking like a typo.
+	 */
+	async function renameWorkspace(cwd: string, name: string): Promise<void> {
+		// Split rather than `node:path`'s `dirname`: this module is the browser's, where the segment
+		// replaced is the whole computation. The separator comes from the path itself, so a Windows
+		// path stays a Windows path.
+		const separator = cwd.includes("\\") ? "\\" : "/";
+		const parent = cwd.split(/[/\\]/).slice(0, -1).join(separator);
+		const target = parent.length === 0 ? name : `${parent}${separator}${name}`;
+		try {
+			const answer = await api.renameWorkspace(cwd, target);
+			reachable();
+			reKeyPaging(cwd, answer.cwd);
+			if (pickedWorkspace === cwd) pickedWorkspace = answer.cwd;
+			// The rows follow on the channel: the server re-reads each moved transcript and the ordinary
+			// `session_row` frame carries the new path. With the channel down no frame is coming, and a
+			// REST listing is the fallback road — refused outright while it is live, which is why this
+			// can be called unconditionally.
+			void refreshLists().catch(report);
+			renderSidebar();
+		} catch (error) {
+			// A busy workspace, a name already taken, a folder Windows will not let go of: the server
+			// names which, and the error bar is where those reasons are already shown.
+			unreachable(error);
+		}
+	}
+
+	/**
+	 * Move this window's saved paging entry from the workspace's old path to its new one.
+	 *
+	 * Leaving it under the old path would silently reset the group on the next reload — whether it was
+	 * folded and how far it had been read down both live in that entry. Only the one key moves: a
+	 * *nested* workspace is the server's to forget, and it does, in the same operation's settings write.
+	 */
+	function reKeyPaging(from: string, to: string): void {
+		const entry = paging[from];
+		if (entry === undefined) return;
+		const moved = { ...paging };
+		delete moved[from];
+		moved[to] = entry;
+		paging = moved;
+	}
+
+	/**
+	 * Take a workspace out of the sidebar, touching nothing on disk (票 06).
+	 *
+	 * Two roads, one per channel state, and the difference is not a detail: while the channel is live
+	 * the *server* removes the group by re-sending the overview — the row table's one writer is the
+	 * channel, and a REST listing is refused outright while it holds that pen (`rows.loadFrom` is that
+	 * refusal). While it is down there are no frames, so the listing the answer carries is the only
+	 * road, and it is applied here. What this window owes either of them is its settings snapshot: the
+	 * hidden list is what the next reload leaves the group out by.
+	 */
+	async function deleteWorkspace(cwd: string): Promise<void> {
+		try {
+			const answer = await api.hideWorkspace(cwd);
+			reachable();
+			rows.loadFrom(answer.workspaces, channel === "live");
+			applyAppearance(answer.settings);
+			branchView.remeasure();
+			apply({ ...state, settings: answer.settings });
+			// The settings snapshot changed, but nothing in the signature the gate reads has to: a
+			// window with no rows for this group would otherwise draw the same string it drew before.
+			sidebarDrawn = undefined;
+			renderSidebar();
 		} catch (error) {
 			unreachable(error);
 		}

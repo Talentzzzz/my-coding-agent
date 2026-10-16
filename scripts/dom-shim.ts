@@ -521,8 +521,12 @@ export interface FakeDocument {
 	readonly activeElement: FakeNode | null;
 	readonly body: FakeNode;
 	readonly documentElement: FakeNode;
-	addEventListener(): void;
-	removeEventListener(): void;
+	addEventListener(type: string, handler: (event?: unknown) => void): void;
+	removeEventListener(type: string, handler: (event?: unknown) => void): void;
+	/** Deliver one document-level event, the way `FakeNode.dispatch` delivers a node's. */
+	dispatch(type: string, event?: unknown): void;
+	/** How many handlers are registered, in total or for one type. */
+	listenerCount(type?: string): number;
 }
 
 export interface DomShim {
@@ -558,6 +562,42 @@ export interface InstallOptions {
 	strict?: boolean;
 	/** 视口尺寸，菜单的钳位读它。 */
 	viewport?: { width: number; height: number };
+}
+
+/**
+ * A bag of listeners a harness can dispatch into.
+ *
+ * `window` and `document` each need one, and they are **one implementation** because the two were
+ * written apart once already: `window`'s listeners were real while `document`'s were a no-op, so every
+ * `document` road in the product — the menu's outside-press and Escape, the card's Escape — was
+ * untestable, and the bug one of them hid (a card taken away without its promise being settled) had no
+ * smoke that could have failed. Coverage is counted against today's product code, and today's code
+ * listens on `document` in two modules.
+ */
+function listenerBag(): {
+	addEventListener(type: string, handler: (event?: unknown) => void): void;
+	removeEventListener(type: string, handler: (event?: unknown) => void): void;
+	dispatch(type: string, event?: unknown): void;
+	listenerCount(type?: string): number;
+} {
+	const listeners = new Map<string, ((event?: unknown) => void)[]>();
+	return {
+		addEventListener: (type, handler) => {
+			if (typeof handler !== "function") return;
+			listeners.set(type, [...(listeners.get(type) ?? []), handler]);
+		},
+		removeEventListener: (type, handler) => {
+			const list = listeners.get(type);
+			if (list === undefined) return;
+			const at = list.indexOf(handler);
+			if (at >= 0) list.splice(at, 1);
+		},
+		dispatch: (type, event) => {
+			for (const handler of [...(listeners.get(type) ?? [])]) handler(event);
+		},
+		listenerCount: (type) =>
+			type === undefined ? [...listeners.values()].reduce((total, list) => total + list.length, 0) : (listeners.get(type)?.length ?? 0),
+	};
 }
 
 /** 一个文本节点：`markdown.ts` 的 inline 渲染与 `diff.ts` 的行都往元素里塞它。 */
@@ -640,8 +680,10 @@ export function installDom(options: InstallOptions = {}): DomShim {
 		get documentElement(): FakeNode {
 			return root;
 		},
-		addEventListener: () => {},
-		removeEventListener: () => {},
+		// The same bag the window gets, and for the same reason: `menu.ts` and `text-dialog.ts` both
+		// hang their dismissal on a `document` capture listener, so a no-op here made every one of those
+		// roads invisible to a smoke.
+		...listenerBag(),
 	};
 
 	/**
@@ -661,30 +703,11 @@ export function installDom(options: InstallOptions = {}): DomShim {
 	 * release of a pan can land anywhere, so the decision "this was a click" belongs to the window —
 	 * and that listener is where selecting a node lives. A no-op `addEventListener` here would make the
 	 * one interaction the page exists for untestable, so the window keeps handlers and dispatches them
-	 * like a node does.
+	 * like a node does. The handlers themselves are {@link listenerBag}'s, shared with `document`.
 	 */
-	const windowListeners = new Map<string, ((event?: unknown) => void)[]>();
-
 	const windowObject = {
 		matchMedia: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }),
-		addEventListener: (type: string, handler: (event?: unknown) => void): void => {
-			if (typeof handler !== "function") return;
-			windowListeners.set(type, [...(windowListeners.get(type) ?? []), handler]);
-		},
-		removeEventListener: (type: string, handler: (event?: unknown) => void): void => {
-			const list = windowListeners.get(type);
-			if (list === undefined) return;
-			const at = list.indexOf(handler);
-			if (at >= 0) list.splice(at, 1);
-		},
-		/** Deliver one window-level event, the way `FakeNode.dispatch` delivers a node's. */
-		dispatch(type: string, event?: unknown): void {
-			for (const handler of [...(windowListeners.get(type) ?? [])]) handler(event);
-		},
-		listenerCount(type?: string): number {
-			if (type === undefined) return [...windowListeners.values()].reduce((total, list) => total + list.length, 0);
-			return windowListeners.get(type)?.length ?? 0;
-		},
+		...listenerBag(),
 		getComputedStyle: () => ({ getPropertyValue: () => "" }),
 		innerWidth: options.viewport?.width ?? 1280,
 		innerHeight: options.viewport?.height ?? 800,

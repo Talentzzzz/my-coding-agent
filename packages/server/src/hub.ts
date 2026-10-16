@@ -7,6 +7,7 @@ import {
 	type ModelSource,
 	openAgent,
 	readSessionSnapshot,
+	resolvePath,
 	type OpenAgentOptions,
 	type SessionSnapshot,
 	SessionManager,
@@ -33,6 +34,14 @@ export interface HubOptions {
 	 * other timer, because "how long will someone take to come back to a question" has its own answer.
 	 */
 	approvalGraceMs?: number;
+	/**
+	 * The agent home the global settings are read from and written to. Defaults to the real one.
+	 *
+	 * A pass-through of `BootOptions`, for the same reason: a smoke that exercises a command which
+	 * *writes* settings must not write the machine's own file. Nothing in production sets it, and a
+	 * host that kept settings elsewhere would supply a storage backend rather than this path.
+	 */
+	settingsHome?: string;
 	/**
 	 * The transport every session this hub opens talks to.
 	 *
@@ -131,8 +140,17 @@ export class SessionHub {
 	 * It is a default, not the workspace: new sessions take it as their cwd, and the default listing
 	 * and settings are scoped to it. A session's actual workspace comes from its own header — see
 	 * {@link HostedSession.workspaceRoot} — which may name any directory on the machine.
+	 *
+	 * It moves when the workspace it names is renamed on disk ({@link repathWorkspace}), which is the
+	 * one thing that can change it after construction: a default that went on naming a directory that
+	 * no longer exists would put the next new session somewhere nobody asked for.
 	 */
-	readonly cwd: string;
+	private root: string;
+
+	/** The current default workspace, which a rename of it moves. */
+	get cwd(): string {
+		return this.root;
+	}
 	/**
 	 * The models this process can run, read from the rows the user entered.
 	 *
@@ -168,7 +186,7 @@ export class SessionHub {
 
 	constructor(options: HubOptions) {
 		this.options = options;
-		this.cwd = options.cwd;
+		this.root = options.cwd;
 		this.modelStore = UserModelStore.create();
 		this.approvalGraceMs = options.approvalGraceMs ?? DEFAULT_APPROVAL_GRACE_MS;
 	}
@@ -194,9 +212,28 @@ export class SessionHub {
 	settingsFor(workspaceRoot: string): SettingsManager {
 		const existing = this.settingsManagers.get(workspaceRoot);
 		if (existing) return existing;
-		const created = SettingsManager.create(workspaceRoot);
+		const created = SettingsManager.create(workspaceRoot, this.options.settingsHome);
 		this.settingsManagers.set(workspaceRoot, created);
 		return created;
+	}
+
+	/**
+	 * Whether this process's listings still name a workspace: one the user put aside is left out.
+	 *
+	 * One home for one rule, because there are two roads by which a window learns the machine's
+	 * workspaces — the REST listing and the channel's overview — and two filters would be two answers
+	 * the first time either side changed. The list itself is a settings fact, read through the manager
+	 * that the command writing it goes through, so a hide is visible to both roads on the next look.
+	 *
+	 * A hub with no root answers "everything is listed". That is not a production state — `HubOptions`
+	 * requires `cwd` and `bootServer` always passes it — but `scripts/smoke-approval.ts` builds one
+	 * without it on purpose (`docs/notes.md` §一 pins that construction, and the section mounts its own
+	 * session and asks the workspace nothing). The filter's whole job is to leave a group out, and
+	 * nothing has been left out.
+	 */
+	listsWorkspace(cwd: string): boolean {
+		if (typeof this.root !== "string") return true;
+		return !this.settingsFor(this.root).getHiddenWorkspaces().some((path) => samePath(path, cwd));
 	}
 
 	get continueSession(): boolean {
@@ -451,6 +488,41 @@ export class SessionHub {
 	}
 
 	/**
+	 * This process's own root changed directory: the renamed workspace. A default, not the workspace —
+	 * see {@link cwd} — so only the paths that were already derived from it are dropped, and nothing
+	 * running is touched.
+	 */
+	setRoot(cwd: string): void {
+		this.root = cwd;
+		this.current = undefined;
+	}
+
+	/**
+	 * Follow a workspace that was renamed on disk: the transcripts move with it and every header names
+	 * the new directory.
+	 *
+	 * A session this process is running refuses the whole operation rather than being carried along,
+	 * and the refusal is a property of the loop rather than a caution: a host holds the directory its
+	 * tools were fenced to (`Workspace.root`), the settings it opened on, and an open handle on a file
+	 * whose contents this operation rewrites. Rewriting a live session's header under it would leave
+	 * every one of those naming a directory that no longer exists — so the honest answer is "not while
+	 * it is running", which the controller turns into a 409.
+	 *
+	 * Answers the ids whose row a client has to be told about: the projection is the one writer of
+	 * rows here, so it is re-read by the caller rather than by this method, which writes nothing but
+	 * files and its own root.
+	 */
+	async repathWorkspace(from: string, to: string): Promise<string[]> {
+		const busy = [...this.hosts.values()].filter((host) => samePath(host.workspaceRoot, from));
+		if (busy.length > 0) {
+			throw new Error("这个工作区还有会话开着，先关掉它们再改目录名。");
+		}
+		const moved = await SessionManager.repathWorkspace(from, to);
+		if (samePath(this.root, from)) this.setRoot(to);
+		return moved;
+	}
+
+	/**
 	 * Delete a session: transcript, file, and every trace in this process.
 	 *
 	 * A session with work in flight refuses rather than deleting under it — a run writing the file,
@@ -682,4 +754,18 @@ export async function workspaceRootOrThrow(cwd: string): Promise<string> {
 	}
 	if (!stats.isDirectory()) throw new Error(`Not a directory: ${root}`);
 	return root;
+}
+
+/**
+ * Whether two paths name the same directory, in the spelling a lookup can key on.
+ *
+ * Resolved the way every stored path is, and case-folded on Windows, because the two ends of a
+ * comparison come from different places — a request body, a session header, a settings file — and
+ * `C:\Work` and `c:\work` are one directory there. Symlinks are deliberately not followed: the
+ * comparison is about which string a store is keyed by, not about where it leads.
+ */
+export function samePath(a: string, b: string): boolean {
+	const left = resolvePath(a);
+	const right = resolvePath(b);
+	return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
 }

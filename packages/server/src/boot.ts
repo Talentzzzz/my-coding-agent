@@ -37,6 +37,14 @@ export interface BootOptions {
 	sessionId?: string;
 	continueSession?: boolean;
 	/**
+	 * The agent home the global settings are read from and written to. Defaults to the real one.
+	 *
+	 * A pass-through for one reason: a smoke that drives a command which writes settings — hiding a
+	 * workspace, say — would otherwise edit the machine's own `settings.json`. Nothing in production
+	 * sets it.
+	 */
+	settingsHome?: string;
+	/**
 	 * The transport every session this server opens talks to.
 	 *
 	 * Omitted in the real process, where it means Anthropic Messages. A smoke passes a scripted
@@ -102,6 +110,7 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 		// environment is how a launcher or a capture run says which one to open.
 		...(sessionId === undefined ? {} : { sessionId }),
 		continueSession: options.continueSession ?? false,
+		...(options.settingsHome === undefined ? {} : { settingsHome: options.settingsHome }),
 		...(options.api === undefined ? {} : { api: options.api }),
 	});
 
@@ -113,13 +122,17 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 	// the overview, so it has to be able to answer "what sessions exist" before any window asks.
 	const projection = createSessionProjection(hub);
 	const mux = createMuxServer(hub, projection, options.mux ?? {});
+	// One listener set for both controllers, and built before either: a workspace rename is received
+	// by the system controller and lands on the projection, which is the same piece the session
+	// controller's rename and delete go through.
+	const listeners = sessionListeners(mux, projection);
 	const router = new Router(
 		createRoutes({
-			system: new SystemController(hub),
+			system: new SystemController(hub, listeners),
 			// Both listeners are facts about a run rather than about a request that is still open, and
 			// both are the transport's business: see {@link sessionListeners}, which is the one home
 			// they have so a smoke can be wired through the same function this server is.
-			sessions: new SessionController(hub, sessionListeners(mux, projection)),
+			sessions: new SessionController(hub, listeners),
 		}),
 	);
 
@@ -284,6 +297,15 @@ export function sessionListeners(mux: MuxServer, projection: SessionProjection):
 		onApproval: (sessionId, toolCallId, approved) => mux.rememberApproval(sessionId, toolCallId, approved),
 		onRenamed: (sessionId) => void projection.refresh(sessionId),
 		onRemoved: (sessionId) => projection.forget(sessionId),
+		// Every row of the group moved at once, so the projection re-reads them all: the ordinary
+		// `session_row` frame carries the new `cwd` from there, and no client is sent a second shape of
+		// news about a workspace it draws.
+		onWorkspaceRenamed: (_cwd, sessionIds) => void projection.repath(sessionIds),
+		// A group entered or left the list — put aside, or taken back by a new session — and that moves
+		// the list rather than any row, so the frame that answers it is the overview every connection
+		// opened on. Sent to all of them: the window that asked already has the answer in its response,
+		// and the window that did not ask is the one this is for.
+		onWorkspaceListingChanged: () => void mux.broadcastSessions(),
 	};
 }
 
