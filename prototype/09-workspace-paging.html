@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9 · 工作区折叠与分页 — 形态原型</title>
+<style>
+/* ===== 设计 token，照抄 tokens.css（浅 / 深两套）===== */
+:root {
+	--dsw-static-amber-500: rgb(245, 158, 11);
+	--dsw-static-amber-600: rgb(221, 134, 41);
+	--dsw-static-deepseek-500: rgb(65, 118, 230);
+	--dsw-static-neutral-bluish-1000: rgb(15, 17, 21);
+	--dsw-static-neutral-bluish-950: rgb(21, 21, 23);
+	--dsw-static-neutral-bluish-900: rgb(27, 27, 28);
+	--dsw-static-neutral-bluish-875: rgb(35, 35, 36);
+	--dsw-static-neutral-bluish-850: rgb(44, 44, 46);
+	--dsw-static-neutral-bluish-800: rgb(53, 54, 56);
+	--dsw-static-neutral-bluish-750: rgb(67, 69, 74);
+	--dsw-static-neutral-bluish-700: rgb(97, 102, 107);
+	--dsw-static-neutral-bluish-600: rgb(129, 133, 140);
+	--dsw-static-neutral-bluish-500: rgb(151, 157, 166);
+	--dsw-static-neutral-bluish-400: rgb(173, 178, 184);
+	--dsw-static-neutral-bluish-300: rgb(207, 211, 214);
+	--dsw-static-neutral-bluish-100: rgb(235, 238, 242);
+	--dsw-static-neutral-bluish-75: rgb(241, 243, 245);
+	--dsw-static-neutral-bluish-60: rgb(245, 246, 247);
+	--dsw-static-neutral-bluish-50: rgb(249, 250, 251);
+	--dsw-static-neutral-bluish-00: rgb(255, 255, 255);
+	--dsw-static-neutral-300: rgb(212, 212, 212);
+
+	--dsw-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+		"Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+	--dsw-ease: cubic-bezier(0.4, 0, 0.2, 1);
+	--dsw-duration: 0.2s;
+	--dsw-duration-fast: 0.1s;
+
+	--dsw-fs-title: 14px;  --dsw-lh-title: 20px;
+	--dsw-fs-meta: 13px;   --dsw-lh-meta: 18px;
+	--dsw-fs-caption: 12px; --dsw-lh-caption: 16px;
+
+	--dsw-radius-md: 12px;
+	--dsw-radius-xs: 4px;
+
+	/* 浅色（默认） */
+	--dsw-bg-base: var(--dsw-static-neutral-bluish-00);
+	--dsw-bg-sidebar: var(--dsw-static-neutral-bluish-50);
+	--dsw-bg-hover: rgba(38, 49, 72, 0.06);
+	--dsw-bg-active: rgba(38, 49, 72, 0.1);
+	--dsw-border-l1: rgba(0, 0, 0, 0.04);
+	--dsw-border-l2: rgba(0, 0, 0, 0.1);
+	--dsw-label-primary: var(--dsw-static-neutral-bluish-1000);
+	--dsw-label-secondary: var(--dsw-static-neutral-bluish-700);
+	--dsw-label-tertiary: var(--dsw-static-neutral-bluish-600);
+	--dsw-label-caption: var(--dsw-static-neutral-bluish-400);
+	--dsw-state-business: var(--dsw-static-deepseek-500);
+	--dsw-state-warn: var(--dsw-static-amber-500);
+	--dsw-shadow-panel: 0 8px 24px rgba(15, 17, 21, 0.12), 0 1px 2px rgba(15, 17, 21, 0.08);
+}
+:root[data-theme="dark"] {
+	--dsw-bg-base: var(--dsw-static-neutral-bluish-950);
+	--dsw-bg-sidebar: var(--dsw-static-neutral-bluish-900);
+	--dsw-bg-hover: rgba(255, 255, 255, 0.08);
+	--dsw-bg-active: rgba(255, 255, 255, 0.14);
+	--dsw-border-l1: rgba(255, 255, 255, 0.06);
+	--dsw-border-l2: rgba(255, 255, 255, 0.12);
+	--dsw-label-primary: var(--dsw-static-neutral-bluish-50);
+	--dsw-label-secondary: var(--dsw-static-neutral-bluish-300);
+	--dsw-label-tertiary: var(--dsw-static-neutral-bluish-400);
+	--dsw-label-caption: var(--dsw-static-neutral-bluish-600);
+	--dsw-state-business: rgb(122, 170, 255);
+	--dsw-shadow-panel: 0 8px 24px rgba(0, 0, 0, 0.44), 0 1px 2px rgba(0, 0, 0, 0.32);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+	background: var(--dsw-static-neutral-bluish-875);
+	font-family: var(--dsw-font-family);
+	color: var(--dsw-label-primary);
+	min-height: 100vh;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	padding: 24px 16px 48px;
+}
+
+/* ===== 控制台：三处未定形态，摆出来让用户翻 ===== */
+.panel {
+	width: 860px;
+	max-width: 100%;
+	border-radius: 16px;
+	background: var(--dsw-static-neutral-bluish-900);
+	color: var(--dsw-static-neutral-bluish-300);
+	padding: 16px 20px 12px;
+	margin-bottom: 20px;
+	font-size: 13px;
+	line-height: 18px;
+}
+.panel h1 {
+	margin: 0 0 2px;
+	font-size: 15px;
+	line-height: 20px;
+	color: var(--dsw-static-neutral-bluish-100);
+	font-weight: 600;
+}
+.panel .sub {
+	margin: 0 0 14px;
+	color: var(--dsw-static-neutral-bluish-500);
+	font-size: 12px;
+	line-height: 16px;
+}
+.panel-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px 20px;
+	align-items: center;
+	margin-bottom: 10px;
+}
+.panel-q { display: flex; align-items: center; gap: 8px; }
+.panel-q .q-label { color: var(--dsw-static-neutral-bluish-500); font-size: 12px; }
+.seg { display: inline-flex; border: 1px solid var(--dsw-static-neutral-bluish-750); border-radius: 8px; overflow: hidden; }
+.seg button {
+	appearance: none;
+	border: none;
+	background: transparent;
+	color: var(--dsw-static-neutral-bluish-400);
+	font: inherit;
+	font-size: 12px;
+	line-height: 16px;
+	padding: 5px 10px;
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease), color var(--dsw-duration-fast) var(--dsw-ease);
+}
+.seg button + button { border-left: 1px solid var(--dsw-static-neutral-bluish-750); }
+.seg button:hover { color: var(--dsw-static-neutral-bluish-100); }
+.seg button[aria-pressed="true"] { background: var(--dsw-static-neutral-bluish-750); color: #fff; }
+.panel .plain {
+	appearance: none;
+	border: 1px solid var(--dsw-static-neutral-bluish-750);
+	border-radius: 8px;
+	background: transparent;
+	color: var(--dsw-static-neutral-bluish-300);
+	font: inherit;
+	font-size: 12px;
+	padding: 5px 12px;
+	cursor: pointer;
+}
+.panel .plain:hover { color: #fff; border-color: var(--dsw-static-neutral-bluish-600); }
+.panel .landing {
+	margin: 12px 0 0;
+	padding-top: 10px;
+	border-top: 1px solid var(--dsw-static-neutral-bluish-850);
+	color: var(--dsw-static-neutral-bluish-500);
+	font-size: 12px;
+	line-height: 18px;
+}
+.panel .landing b { color: var(--dsw-static-neutral-bluish-400); font-weight: 600; }
+
+/* ===== 窗口外壳，照真窗口构图 ===== */
+.window {
+	width: 860px;
+	max-width: 100%;
+	height: 620px;
+	display: flex;
+	flex-direction: column;
+	border-radius: 12px;
+	overflow: hidden;
+	background: var(--dsw-bg-base);
+	box-shadow: var(--dsw-shadow-panel);
+	border: 1px solid var(--dsw-border-l2);
+}
+.caption {
+	height: 36px;
+	flex: none;
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 8px;
+	padding: 0 12px;
+	background: var(--dsw-bg-base);
+	border-bottom: 1px solid var(--dsw-border-l1);
+}
+.caption i {
+	width: 10px; height: 10px;
+	border-radius: 50%;
+	background: var(--dsw-border-l2);
+}
+.shell { flex: 1; display: flex; min-height: 0; }
+
+/* ===== 侧栏，照真侧栏的规格 ===== */
+.sidebar {
+	width: 232px;
+	flex: none;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	padding: 6px 12px;
+	background: var(--dsw-bg-sidebar);
+	border-right: 1px solid var(--dsw-border-l1);
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
+}
+.sidebar-top { flex: none; display: flex; align-items: center; gap: 6px; padding: 2px 0 6px; }
+.new-session {
+	flex: 1;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	height: 30px;
+	border: none;
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-label-primary);
+	color: var(--dsw-bg-base);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	cursor: pointer;
+}
+.sidebar-toggle {
+	width: 28px; height: 28px; flex: none;
+	display: flex; align-items: center; justify-content: center;
+	border: none; border-radius: 8px;
+	background: transparent; color: var(--dsw-label-tertiary);
+	cursor: pointer;
+}
+.sidebar-toggle:hover { background: var(--dsw-bg-hover); }
+.sidebar svg { width: 14px; height: 14px; }
+
+.list-head {
+	flex: none;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 4px 8px 2px;
+}
+.list-head-title {
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+}
+.list-head-actions { display: flex; gap: 2px; }
+.head-icon {
+	width: 24px; height: 24px;
+	display: flex; align-items: center; justify-content: center;
+	border: none; border-radius: 6px;
+	background: transparent; color: var(--dsw-label-tertiary);
+	cursor: pointer;
+}
+.head-icon:hover { background: var(--dsw-bg-hover); }
+.head-icon svg { width: 13px; height: 13px; }
+
+.session-list {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	padding-top: 4px;
+	scrollbar-width: thin;
+}
+
+/* 工作区头：34px，meta 档；hover 时文件夹换成 chevron，chevron 带旋转态 */
+.workspace { display: flex; flex-direction: column; gap: 1px; margin-bottom: 6px; }
+.workspace-head {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	height: 34px;
+	padding: 0 8px;
+	border: none;
+	border-radius: var(--dsw-radius-md);
+	background: transparent;
+	color: var(--dsw-label-tertiary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	font-weight: 600;
+	text-align: left;
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+.workspace-head:hover { background: var(--dsw-bg-hover); }
+.workspace-head:focus-visible { outline: 2px solid var(--dsw-state-business); outline-offset: -2px; }
+.workspace-head svg { width: 13px; height: 13px; flex: none; opacity: 0.75; }
+.workspace-icon-chev { display: none; }
+.workspace-icon-chev svg { transition: transform var(--dsw-duration) var(--dsw-ease); }
+.workspace-head:hover .workspace-icon-chev { display: inline-flex; }
+.workspace-head:hover .workspace-icon-folder { display: none; }
+/* 收起态挂靠：aria-expanded 为 false 时 chevron 指向右，不再依赖 hover 才知道那里可以点 */
+.workspace-head[aria-expanded="false"] { color: var(--dsw-label-secondary); }
+.workspace-head[aria-expanded="false"] .workspace-icon-chev { display: inline-flex; }
+.workspace-head[aria-expanded="false"] .workspace-icon-folder { display: none; }
+.workspace-head[aria-expanded="false"] .workspace-icon-chev svg { transform: rotate(-90deg); }
+.workspace-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.workspace-current {
+	margin-left: auto;
+	padding: 0 5px;
+	border-radius: 999px;
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	font-weight: 500;
+	letter-spacing: 0.02em;
+}
+
+/* 会话行：32px，title 档 */
+.session-item {
+	display: flex;
+	align-items: center;
+	gap: 0;
+	width: 100%;
+	height: 32px;
+	padding: 0 8px;
+	border: none;
+	border-radius: var(--dsw-radius-md);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+.session-item:hover { background: var(--dsw-bg-hover); }
+.session-item[aria-current="true"] { background: var(--dsw-bg-active); color: var(--dsw-label-primary); }
+.session-item-slot {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px; height: 20px; flex: none;
+}
+.session-item-slot[data-state="warn"]::before {
+	content: "";
+	width: 8px; height: 8px;
+	border-radius: 50%;
+	background: var(--dsw-state-warn);
+}
+.session-item-title {
+	min-width: 0; flex: 1;
+	margin: 0 6px 0 4px;
+	white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
+}
+.session-item-time {
+	flex: none;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+/* 展开其余 / 收起：caption 档，缩进对齐标题列 */
+.session-more {
+	align-self: flex-start;
+	padding: 4px 8px;
+	margin-left: 22px;
+	border: none;
+	border-radius: var(--dsw-radius-xs);
+	background: transparent;
+	color: var(--dsw-label-caption);
+	font: inherit;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	cursor: pointer;
+	transition: color var(--dsw-duration-fast) var(--dsw-ease), background var(--dsw-duration-fast) var(--dsw-ease);
+}
+.session-more:hover { background: var(--dsw-bg-hover); color: var(--dsw-label-secondary); }
+
+/* ===== 内容列的残影，只为了卖构图 ===== */
+.content { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.content-ghost {
+	flex: 1;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+.content-ghost span {
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-meta);
+	user-select: none;
+}
+.input-ghost {
+	flex: none;
+	margin: 0 24px 16px;
+	height: 46px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: 14px;
+	opacity: 0.6;
+}
+</style>
+</head>
+<body>
+
+<div class="panel">
+	<h1>9 · 工作区折叠与分页 — 形态原型</h1>
+	<p class="sub">规则照你的原话：一个工作区一开始只显示 5 个最近的会话；点工作区那一栏，收起全部、只留表头；这 5 个底部有「展开其余会话」，点一下再展开 5 个。下面三处票里没定的，各做成可翻的变体——点着感受，别读文字猜。</p>
+	<div class="panel-row">
+		<div class="panel-q">
+			<span class="q-label">问题一 · 从收起点表头，回到——</span>
+			<div class="seg" data-q="q1">
+				<button type="button" data-v="first5">前 5 条</button>
+				<button type="button" data-v="lastpage">上次那一页</button>
+			</div>
+		</div>
+		<div class="panel-q">
+			<span class="q-label">问题三 · 收起状态——</span>
+			<div class="seg" data-q="q3">
+				<button type="button" data-v="remember">记住（跟 appearance）</button>
+				<button type="button" data-v="forget">不记（关窗即忘）</button>
+			</div>
+		</div>
+		<button type="button" class="plain" id="reopen">重开窗口（试问题三）</button>
+	</div>
+	<div class="panel-row">
+		<div class="panel-q">
+			<span class="q-label">问题二 · 全部展开之后，那个按钮——</span>
+			<div class="seg" data-q="q2">
+				<button type="button" data-v="hide">消失</button>
+				<button type="button" data-v="collapse">变「收起」</button>
+				<button type="button" data-v="collapseRest">变「收起其余」</button>
+			</div>
+		</div>
+		<button type="button" class="plain" id="theme">切换 浅 / 深</button>
+	</div>
+	<p class="landing"><b>落地时跟着改的（票里已记）：</b>① <b>main.ts:708</b> 的重画签名要把收展状态带上——签名里没有它，收起 / 展开根本不会重画；② <b>pickedWorkspace</b> 驱动的「当前」标记要与收起态共存（收起的工作区照样可能是当前）；③ 展开的计数照真实现<b>按会话走</b>（根 + 它的派生算一个，派生不占别的会话的名额），原型里为了看得清按行数演示；④ 状态跟 appearance 走、<b>不用 localStorage</b>（桌面外壳每次启动换端口，origin 一变 localStorage 就死）。</p>
+</div>
+
+<div class="window">
+	<div class="caption"><i></i><i></i><i></i></div>
+	<div class="shell">
+		<aside class="sidebar">
+			<div class="sidebar-top">
+				<button type="button" class="new-session">
+					<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
+					新建会话
+				</button>
+				<button type="button" class="sidebar-toggle" title="收起侧边栏">
+					<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M6 3v10"/></svg>
+				</button>
+			</div>
+			<div class="list-head">
+				<span class="list-head-title">工作区</span>
+				<div class="list-head-actions">
+					<button type="button" class="head-icon" title="搜索会话"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg></button>
+					<button type="button" class="head-icon" title="视图选项（暂未启用）"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 5h11M2.5 8h11M2.5 11h11"/><circle cx="6" cy="5" r="1.4" fill="currentColor" stroke="none"/><circle cx="10" cy="8" r="1.4" fill="currentColor" stroke="none"/><circle cx="5" cy="11" r="1.4" fill="currentColor" stroke="none"/></svg></button>
+					<button type="button" class="head-icon" title="添加工作区"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/><path d="M8 7.5v3M6.5 9h3"/></svg></button>
+				</div>
+			</div>
+			<nav class="session-list" id="list" aria-label="会话列表"></nav>
+		</aside>
+		<div class="content">
+			<div class="content-ghost"><span>会话内容</span></div>
+			<div class="input-ghost"></div>
+		</div>
+	</div>
+</div>
+
+<script>
+"use strict";
+
+/* ===== 数据：一个 14 条的忙工作区、一个 3 条的、一个 2 条的 ===== */
+const WORKSPACES = [
+	{
+		cwd: "C:/Users/a1368/Desktop/my-coding-agent",
+		current: true,
+		sessions: [
+			{ title: "工作区分页原型", time: "26分钟", active: true },
+			{ title: "修复侧栏的分页", time: "2小时", busy: true },
+			{ title: "wire 压测收尾", time: "3小时" },
+			{ title: "修复侧栏（1）", time: "1小时" },
+			{ title: "修复侧栏", time: "5小时" },
+			{ title: "token 审计", time: "1天" },
+			{ title: "设置面板重构", time: "2天" },
+			{ title: "输入框状态行", time: "3天" },
+			{ title: "会话右键菜单", time: "4天" },
+			{ title: "分支视图", time: "5天" },
+			{ title: "压缩策略", time: "6天" },
+			{ title: "模型导入", time: "10月6日" },
+			{ title: "传输层 mux", time: "10月4日" },
+			{ title: "首屏布局", time: "10月1日" },
+		],
+	},
+	{
+		cwd: "C:/Users/a1368/Desktop/notes",
+		current: false,
+		sessions: [
+			{ title: "周报整理", time: "4小时" },
+			{ title: "读书笔记", time: "2天" },
+			{ title: "灵感清单", time: "3天" },
+		],
+	},
+	{
+		cwd: "C:/Code/side-project",
+		current: false,
+		sessions: [
+			{ title: "爬虫调度", time: "8小时", busy: true },
+			{ title: "字段对齐", time: "5天" },
+		],
+	},
+];
+
+/* ===== 三处未定的形态 + 每个工作区的收展状态 ===== */
+const PAGE = 5;
+const choice = { q1: "first5", q2: "collapse", q3: "remember" };
+/** 模拟 appearance 同步下来的那一份：q3=remember 时「重开窗口」不丢它。 */
+const wsState = new Map();
+function stateOf(cwd) {
+	let s = wsState.get(cwd);
+	if (s === undefined) {
+		s = { collapsed: false, page: 1, savedPage: 1 };
+		wsState.set(cwd, s);
+	}
+	return s;
+}
+
+/* ===== 渲染 ===== */
+const list = document.getElementById("list");
+
+function render() {
+	list.replaceChildren();
+	for (const ws of WORKSPACES) {
+		const s = stateOf(ws.cwd);
+		const wrapper = document.createElement("div");
+		wrapper.className = "workspace";
+
+		// 表头：真正的按钮，带 aria-expanded，收起时只留这一栏
+		const head = document.createElement("button");
+		head.type = "button";
+		head.className = "workspace-head";
+		head.title = ws.cwd;
+		head.setAttribute("aria-expanded", s.collapsed ? "false" : "true");
+		const folder = document.createElement("span");
+		folder.className = "workspace-icon-folder";
+		folder.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>';
+		const chev = document.createElement("span");
+		chev.className = "workspace-icon-chev";
+		chev.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.5 8 10.5 12 6.5"/></svg>';
+		const name = document.createElement("span");
+		name.className = "workspace-name";
+		name.textContent = ws.cwd.split("/").filter(Boolean).at(-1);
+		head.append(folder, chev, name);
+		if (ws.current) {
+			const mark = document.createElement("span");
+			mark.className = "workspace-current";
+			mark.textContent = "当前";
+			head.append(mark);
+		}
+		head.addEventListener("click", () => {
+			if (s.collapsed) {
+				// 问题一：从收起点表头，回到前 5 条，还是回到收起前展开到的那一页
+				s.page = choice.q1 === "first5" ? 1 : Math.max(1, s.savedPage);
+				s.collapsed = false;
+			} else {
+				s.savedPage = s.page;
+				s.collapsed = true;
+			}
+			render();
+		});
+		wrapper.append(head);
+		if (s.collapsed) {
+			list.append(wrapper);
+			continue;
+		}
+
+		// 分页：page 页 × 5 条；正在看的那个永远在场（照 collapsedRows 的规矩）
+		const rows = ws.sessions;
+		const activeIndex = rows.findIndex((r) => r.active);
+		let visibleCount = s.page * PAGE;
+		if (activeIndex >= visibleCount) visibleCount = activeIndex + 1;
+		for (let i = 0; i < Math.min(visibleCount, rows.length); i += 1) {
+			wrapper.append(rowOf(rows[i]));
+		}
+
+		// 底部那个按钮：还有剩余 → 展开其余 N 个；展完了 → 看问题二
+		const hidden = rows.length - Math.min(visibleCount, rows.length);
+		const more = document.createElement("button");
+		more.type = "button";
+		more.className = "session-more";
+		if (hidden > 0) {
+			more.textContent = `展开其余 ${hidden} 个会话`;
+			more.addEventListener("click", () => {
+				s.page += 1;
+				s.savedPage = s.page;
+				render();
+			});
+			wrapper.append(more);
+		} else if (choice.q2 === "collapse" || choice.q2 === "collapseRest") {
+			more.textContent = choice.q2 === "collapse" ? "收起" : "收起其余";
+			more.addEventListener("click", () => {
+				s.page = 1;
+				s.savedPage = 1;
+				render();
+			});
+			wrapper.append(more);
+		} // hide：展完了按钮就消失
+		list.append(wrapper);
+	}
+}
+
+function rowOf(row) {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.className = "session-item";
+	if (row.active) button.setAttribute("aria-current", "true");
+	const slot = document.createElement("span");
+	slot.className = "session-item-slot";
+	if (row.busy) slot.dataset.state = "warn";
+	slot.title = row.busy ? "运行中" : "";
+	const title = document.createElement("span");
+	title.className = "session-item-title";
+	title.textContent = row.title;
+	const time = document.createElement("span");
+	time.className = "session-item-time";
+	time.textContent = row.time;
+	button.append(slot, title, time);
+	button.title = `${row.title}\n${row.time}前活跃${row.busy ? "\n运行中" : ""}`;
+	return button;
+}
+
+/* ===== 控制台 ===== */
+document.querySelectorAll(".seg").forEach((seg) => {
+	const key = seg.dataset.q;
+	seg.querySelectorAll("button").forEach((button) => {
+		button.addEventListener("click", () => {
+			choice[key] = button.dataset.v;
+			seg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", b === button ? "true" : "false"));
+			render();
+		});
+	});
+	seg.querySelector(`[data-v="${choice[key]}"]`)?.setAttribute("aria-pressed", "true");
+});
+
+document.getElementById("reopen").addEventListener("click", () => {
+	if (choice.q3 === "forget") {
+		// 不记：关窗即忘——每个工作区回到「5 条、未收起」
+		wsState.clear();
+	} // 记住：跟 appearance 走，什么也不动，重开就是原样
+	render();
+});
+
+document.getElementById("theme").addEventListener("click", () => {
+	const root = document.documentElement;
+	root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+});
+
+render();
+</script>
+</body>
+</html>
