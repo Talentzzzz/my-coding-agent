@@ -17,6 +17,14 @@ const { pathToFileURL } = require("node:url");
 const { createObservability, LOAD_FAILED_HEADLINE } = require("./observability.cjs");
 const { createShutdown } = require("./shutdown.cjs");
 
+// This machine cannot run Chromium's accelerated/sandboxed child processes: the GPU process dies
+// with 0xC0000005 in the driver path no matter the display mode (hybrid or discrete-only), and the
+// renderer dies with 0x80000003 when Chromium's sandbox meets the launch environment's job object.
+// Both switches are set before `app` is ready; a future machine with a healthy driver can delete
+// these two lines to get hardware acceleration back. See 问题/启动.md for the full diagnosis.
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch("no-sandbox");
+
 /** Height of the Windows caption the shell draws, matched by --desktop-titlebar in the client. */
 const TITLEBAR_HEIGHT = 40;
 
@@ -191,6 +199,25 @@ function flagValue(name) {
 }
 
 /**
+ * A page to load instead of the booted client, from `--load <url>`.
+ *
+ * The capture flags exist so a layout can be looked at from a terminal, and the pages worth looking
+ * at are not only the app's own: a standalone HTML prototype is judged in a real window, at a real
+ * size, under the real caption overlay. With this the server is not started at all, which is also
+ * what keeps a capture of a prototype from touching an agent home.
+ */
+function loadTarget() {
+	const url = flagValue("--load");
+	if (url === undefined) return undefined;
+	if (url.startsWith("http:") || url.startsWith("https:")) return url;
+	// A query string is the prototype switcher's (`?variant=B`), so it is split off before the rest
+	// is read as a path — `resolve()` would otherwise fold `?...` into the filename.
+	const query = url.search(/[?#]/);
+	const path = query === -1 ? url : url.slice(0, query);
+	return pathToFileURL(resolve(path)).href + (query === -1 ? "" : url.slice(query));
+}
+
+/**
  * Apply `--theme dark|light` to the shell's native theme.
  *
  * The page follows `nativeTheme`, so this is also what decides the renderer's palette: one theme
@@ -203,6 +230,38 @@ function applyThemeOverride() {
 	else if (value === "light") nativeTheme.themeSource = "light";
 }
 
+/**
+ * Render a window against `page` and exit, for `--screenshot <file>`.
+ *
+ * With `--load` and no `--screenshot` there is nothing to wait for: the window stays up on the page,
+ * which is how a prototype is opened in the real shell.
+ *
+ * `--click <selector>[,<selector>...]` opens whatever is behind a control before the capture.
+ * Without it a panel, a menu, or a dialog is the one part of the window a capture can never show;
+ * with several selectors a capture can reach something nested, in order.
+ */
+async function capture(page, file) {
+	mainWindow = createWindow();
+	syncChrome(mainWindow);
+	await mainWindow.loadURL(page);
+	if (file === undefined) return;
+	await new Promise((done) => setTimeout(done, 2500));
+	const click = flagValue("--click");
+	if (click) {
+		for (const selector of click.split(",")) {
+			await mainWindow.webContents.executeJavaScript(
+				`document.querySelector(${JSON.stringify(selector.trim())})?.click()`,
+			);
+			await new Promise((done) => setTimeout(done, 300));
+		}
+		await new Promise((done) => setTimeout(done, 500));
+	}
+	const image = await mainWindow.webContents.capturePage();
+	await writeFile(file, image.toPNG());
+	console.log(`desktop: wrote ${file} (${image.getSize().width}x${image.getSize().height})`);
+	app.quit();
+}
+
 app.whenReady().then(async () => {
 	applyThemeOverride();
 	registerWindowControls();
@@ -211,6 +270,22 @@ app.whenReady().then(async () => {
 	// caught. Wired as soon as the application is ready, before the server is asked for anything, so
 	// a failure during boot is already being watched for.
 	observability.watch();
+
+	// A page pointed at by hand, and a capture of one, are both the booted client's opposite: they
+	// want a window and nothing else, so neither starts the server. A failure here has no server
+	// behind it to report through, so it is reported the plain way — and the app still exits, or a
+	// capture run would sit on a window nobody asked for.
+	const loaded = loadTarget();
+	const shot = screenshotPath();
+	if (loaded !== undefined || shot !== undefined) {
+		try {
+			await capture(loaded ?? `about:blank`, shot);
+		} catch (error) {
+			process.stderr.write(`desktop: capture failed: ${error?.message ?? error}\n`);
+			app.exit(1);
+		}
+		return;
+	}
 
 	const cwd = workspaceDirectory();
 	const booted = await observability.bootWithinBudget(cwd);
@@ -231,31 +306,6 @@ app.whenReady().then(async () => {
 		await mainWindow.loadURL(booted.url);
 	} catch (error) {
 		observability.report(LOAD_FAILED_HEADLINE, error);
-		return;
-	}
-
-	// A capture run renders the real window and exits, so a layout change can be inspected from a
-	// terminal instead of from a description of it.
-	const shot = screenshotPath();
-	if (shot) {
-		await new Promise((done) => setTimeout(done, 2500));
-		// `--click <selector>[,<selector>...]` opens whatever is behind a control before the capture.
-		// Without it a panel, a menu, or a dialog is the one part of the window a capture can never
-		// show; with several selectors a capture can reach something nested, in order.
-		const click = flagValue("--click");
-		if (click) {
-			for (const selector of click.split(",")) {
-				await mainWindow.webContents.executeJavaScript(
-					`document.querySelector(${JSON.stringify(selector.trim())})?.click()`,
-				);
-				await new Promise((done) => setTimeout(done, 300));
-			}
-			await new Promise((done) => setTimeout(done, 500));
-		}
-		const image = await mainWindow.webContents.capturePage();
-		await writeFile(shot, image.toPNG());
-		console.log(`desktop: wrote ${shot} (${image.getSize().width}x${image.getSize().height})`);
-		app.quit();
 		return;
 	}
 

@@ -21,6 +21,7 @@
 		"desktop": "npm run build:web && npm run start --workspace=@my-agent/desktop",
 		"desktop:dev": "npm run build:web && npm run dev --workspace=@my-agent/desktop",
 		"desktop:screenshot": "npm run build:web && npm run screenshot --workspace=@my-agent/desktop",
+		"prototype:titlebar": "node packages/desktop/scripts/launch.mjs --load prototype/07-titlebar.html --screenshot prototype/shot-A.png",
 		"smoke:boot": "node scripts/smoke-boot.ts",
 		"install:deps": "node scripts/install-deps.ts"
 	},

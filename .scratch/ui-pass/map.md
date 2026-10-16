@@ -28,7 +28,7 @@ Label: `wayfinder:map`
 
 ## Not yet specified
 
-- 标题栏原型（[标题栏布局原型](issues/07-titlebar-prototype.md)）经用户确认后，实现 ticket 从这里毕业。
+- 标题栏原型（[标题栏布局原型](issues/07-titlebar-prototype.md)）：原型已就绪（`prototype/07-titlebar.html`，`npm run prototype:titlebar`），四方案实测数字在位——A/D 会被按钮压住（D 证明"缩边距"无效），B/C 为 0。等用户拍板后从"标题栏原型"毕业出实现 ticket；实现 ticket 必须带上 `.branch-tools` 的 `min-width: 0`（现成的溢出，见 issue）。
 - [open-claude-ui 参考](issues/11-open-claude-ui-reference.md) 的借鉴清单会毕业出一批新 ticket（数量未知，取决于清单里哪些被用户挑中）。
 
 ## Out of scope
