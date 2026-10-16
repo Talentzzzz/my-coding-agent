@@ -19,7 +19,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { BranchView } from "../packages/web/src/render/branch-view.ts";
 import type { BranchTree, BranchWay } from "../packages/web/src/state.ts";
-import { FakeNode, installDom } from "./dom-shim.ts";
+import { FakeElement, FakeNode, installDom } from "./dom-shim.ts";
 
 let failures = 0;
 
@@ -28,7 +28,7 @@ function check(label: string, condition: boolean, detail = ""): void {
 	if (!condition) failures += 1;
 }
 
-installDom();
+const dom = installDom();
 
 // ------------------------------------------------------------------ reading the page
 
@@ -451,6 +451,197 @@ function centreOf(sizer: FakeNode, width: number, height: number): { left: numbe
 	check("「适应」之后同样居中", viewport.scrollLeft === want.left && viewport.scrollTop === want.top, `${viewport.scrollLeft}/${viewport.scrollTop} 想要 ${want.left}/${want.top}`);
 	check("「适应」的用例确实滚到了别处", want.left > 0, `${want.left} / ${sizer.clientWidth}`);
 }
+
+// ------------------------------------------------- 4. the two ways out of the page
+//
+// Ticket `.scratch/ui-pass/issues/04-branch-back-button.md`. Both exit buttons go through
+// `applySelection`, and it used to open with `if (this.streaming) return` — one silent early return in
+// front of **both** of them. Whatever set `streaming` and never cleared it therefore made the pair do
+// nothing at all, with neither button disabled, which is the report exactly: two pressable buttons
+// that answer nothing. The two beats are separated here because they are not the same act: moving the
+// leaf is the one a run can refuse, and returning to the conversation is the window changing which
+// page it shows, which no run is in the middle of.
+//
+// Driven through the page's real listeners rather than its private methods: `pointerdown` on the
+// viewport sets the press, `pointerup` **on the window** is what decides it was a click and selects
+// the card — the same two hops the browser makes.
+
+process.stdout.write("\nbranch：两个出口按钮\n");
+
+/**
+ * The card a window-level `pointerup` names.
+ *
+ * `branch-view.ts` refuses any target that is not `instanceof Element` — a real page can receive a
+ * release whose target is the window or a text node, and the check is what keeps that from throwing.
+ * The shim's nodes are `FakeNode`s, and `asElement()` cannot help here: it is a *type* bridge, and a
+ * cast is erased at runtime, so the `instanceof` whose whole job is to look at the object would still
+ * say no. What is needed is an object that is really a `FakeElement` and answers everything else with
+ * the card's own values, which is what this proxy is. A harness that handed the card over bare would
+ * be testing a path the browser never takes.
+ */
+function cardTarget(card: FakeNode): FakeNode {
+	return new Proxy(Object.create(FakeElement.prototype) as FakeNode, {
+		get: (_target, key) => Reflect.get(card as object, key),
+		has: (_target, key) => Reflect.has(card as object, key),
+	});
+}
+
+/** Press a card the way a browser does: the press on the viewport, the release on the window. */
+function clickCard(root: FakeNode, id: string): void {
+	const viewport = root.querySelector(".graph-viewport");
+	if (viewport === null) throw new Error("量具找不到 viewport");
+	viewport.dispatch("pointerdown", { button: 0, clientX: 10, clientY: 10 });
+	const cards = nodesOfClass(root, "gnode");
+	const card = cards.find((node) => node.dataset.id === id);
+	if (card === undefined) throw new Error(`量具找不到节点 ${id}（有 ${cards.map((node) => node.dataset.id).join("|")}）`);
+	dom.window.dispatch("pointerup", { target: cardTarget(card), clientX: 10, clientY: 10 });
+}
+
+/** The page's one exit button. */
+function backButtonOf(view: BranchView): FakeNode | undefined {
+	return nodesOfClass(view.toolsBar as unknown as FakeNode, "back-button")[0];
+}
+
+/** One run of the page: what it was shown, and what its exit presses did. */
+interface ExitRun {
+	view: BranchView;
+	root: FakeNode;
+	viewport: FakeNode;
+	switched: string[];
+	backs: number;
+}
+
+/**
+ * Show a page, optionally press a card on it, and optionally let a run settle — then press the exit
+ * button once and report both.
+ *
+ * `settle` is the end of a run and `render` is the only thing that carries it in, exactly as `main.ts`
+ * feeds it; it happens **after** the card is pressed, so the press that matters was made while
+ * `streaming` was still true.
+ */
+function pressExit(
+	tree: BranchTree | undefined,
+	options: { select?: string; streaming?: boolean; settle?: boolean } = {},
+): ExitRun {
+	probeAt(46, 58);
+	const switched: string[] = [];
+	let backs = 0;
+	const view = new BranchView({
+		onSwitch: (entryId) => switched.push(entryId),
+		onBack: () => {
+			backs += 1;
+		},
+	});
+	view.render(tree, options.streaming ?? false);
+	view.enter();
+	const root = view.element as unknown as FakeNode;
+	const viewport = root.querySelector(".graph-viewport");
+	if (viewport === null) throw new Error("量具找不到 viewport");
+
+	if (options.select !== undefined) clickCard(root, options.select);
+	if (options.settle === true) view.render(tree, false);
+	backButtonOf(view)?.dispatch("click");
+	return { view, root, viewport, switched, backs };
+}
+
+{
+	// The first beat: a click on a node selects it, and the button then offers to move. Nothing has
+	// happened to the session yet — that is the two-beat the page was built on.
+	probeAt(46, 58);
+	const tree = forkedTree();
+	const run = pressExit(tree, { select: "aaaaaaa1" });
+	check("点一个节点会选中它", backButtonOf(run.view)?.textContent === "切到这一条并回到对话", String(backButtonOf(run.view)?.textContent));
+	check("「切到这一条并回到对话」真的移动了", run.switched.length === 1 && run.switched[0] === "aaaaaaa1", run.switched.join(","));
+	check("移动的那一次不会再回一趟对话", run.backs === 0, `${run.backs}`);
+}
+
+{
+	// The second beat, and the acceptance the ticket states in one line: nothing but the way being read
+	// is selected, so the button is the plain way out and answers on the very first press.
+	probeAt(46, 58);
+	const run = pressExit(forkedTree());
+	check("直接按「回到对话」就回对话", run.backs === 1 && run.switched.length === 0, `${run.backs} / ${run.switched.join(",")}`);
+}
+
+{
+	// The regression this ticket is about. `applySelection` used to open with `if (this.streaming)
+	// return` — one silent early return in front of **both** buttons — so a `streaming` that never
+	// cleared made the pair answer nothing, with neither of them even disabled. A run in flight is not
+	// a reason to be unable to leave the page.
+	probeAt(46, 58);
+	const run = pressExit(forkedTree(), { streaming: true });
+	check("有正在跑的一轮：「回到对话」照样回得去", run.backs === 1 && run.switched.length === 0, `${run.backs} / ${run.switched.join(",")}`);
+	check("有正在跑的一轮：这个按钮不该是灰的", backButtonOf(run.view)?.disabled === false, String(backButtonOf(run.view)?.disabled));
+}
+
+{
+	// The one thing a run *does* refuse: moving the leaf it is writing. The button is disabled for it
+	// and says why, so the refusal is visible instead of being a pressable nothing.
+	probeAt(46, 58);
+	const run = pressExit(forkedTree(), { select: "aaaaaaa1", streaming: true });
+	check("有正在跑的一轮：不移动", run.switched.length === 0, run.switched.join(","));
+	check("有正在跑的一轮：按钮灰掉", backButtonOf(run.view)?.disabled === true, String(backButtonOf(run.view)?.disabled));
+	check("按钮把拒绝的原因说出来", backButtonOf(run.view)?.title === "这一轮还在写，等它结束再切", String(backButtonOf(run.view)?.title));
+}
+
+{
+	// A press that raced the paint — `streaming` arrived after the button was drawn enabled. The move
+	// is refused, and refused *quietly*: the button's own `title` is what carries the reason, and the
+	// caption keeps describing the selection rather than being overwritten with a sentence that would
+	// have to wait for the end of the run to be replaced. What matters for the ticket is the refusal
+	// itself — the press must not move the session — so both halves are asserted.
+	probeAt(46, 58);
+	const tree = forkedTree();
+	const switched: string[] = [];
+	const view = new BranchView({
+		onSwitch: (entryId) => switched.push(entryId),
+		onBack: () => {},
+	});
+	view.render(tree, false);
+	view.enter();
+	const root = view.element as unknown as FakeNode;
+	clickCard(root, "aaaaaaa1");
+	const before = nodesOfClass(view.toolsBar as unknown as FakeNode, "branch-sel-info")[0]?.textContent ?? "";
+	// The run starts now, after the button was painted enabled.
+	view.render(tree, true);
+	backButtonOf(view)?.dispatch("click");
+	const info = nodesOfClass(view.toolsBar as unknown as FakeNode, "branch-sel-info")[0]?.textContent ?? "";
+	check("竞态下按下：不移动", switched.length === 0, switched.join(","));
+	check("竞态下按下：选择行还在描述选中的那一条", info === before && info.includes("已选中"), `${JSON.stringify(before)} → ${JSON.stringify(info)}`);
+	check("竞态下按下：按钮把原因说在 title 上", backButtonOf(view)?.title === "这一轮还在写，等它结束再切", String(backButtonOf(view)?.title));
+}
+
+{
+	// A run that ends turns the move back on. `render` is the only carrier of that fact, so a page that
+	// ignored the second call would leave the move refused forever.
+	probeAt(46, 58);
+	const run = pressExit(forkedTree(), { select: "aaaaaaa1", streaming: true, settle: true });
+	check("跑完的那一轮：按钮重新可用", backButtonOf(run.view)?.disabled === false, String(backButtonOf(run.view)?.disabled));
+	check("跑完的那一轮：按下去就移动", run.switched.length === 1 && run.switched[0] === "aaaaaaa1", run.switched.join(","));
+}
+
+{
+	// A conversation with no fork at all has one exit and no selection to make.
+	probeAt(46, 58);
+	const run = pressExit(undefined);
+	check("没有树的时候，出口照样是回对话", run.backs === 1 && run.switched.length === 0, `${run.backs}`);
+	check("没有树的时候按钮就是「回到对话」", backButtonOf(run.view)?.textContent === "回到对话", String(backButtonOf(run.view)?.textContent));
+}
+
+// The row that holds them may not outgrow the header, and the header's content floor may not reach the
+// conversation column. Both halves are the same fix. `.branch-tools { min-width: 0 }` lets the row
+// shrink below its content; `.header { min-width: 0 }` stops the header, as a grid item, from handing
+// its own content minimum to `.conversation`'s `auto` column, which may then be laid out wider than the
+// window. These two assertions only pin the declarations — geometry is not something this harness can
+// prove. The measurement lives in the ticket's Answer: in the real shell at a 720px window, with the
+// header's declaration removed the column resolves to 701.4px inside that 720px window and the exit
+// button lands at x 872–962 where `elementFromPoint` answers nothing; with it, the column is 435px and
+// the button is at x 606–696. `no-drag` is the same rule the title row already follows.
+check("工具行可以收缩，不把出口按钮挤出 header", declared(css, ".branch-tools", "min-width") === "0", String(declared(css, ".branch-tools", "min-width")));
+check("header 不把工具行的最小宽度顶给对话列", declared(css, ".header", "min-width") === "0", String(declared(css, ".header", "min-width")));
+check("工具行自己声明成可交互区，与标题行同规矩", declared(css, ".branch-tools", "-webkit-app-region") === "no-drag", String(declared(css, ".branch-tools", "-webkit-app-region")));
+check("选中提示先让位", declared(css, ".branch-tools .header-spacer", "min-width") === "0", String(declared(css, ".branch-tools .header-spacer", "min-width")));
+check("出口按钮不参与收缩，大小由它自己说了算", declared(css, ".branch-tools .back-button", "flex") === "none", String(declared(css, ".branch-tools .back-button", "flex")));
 
 process.stdout.write(failures === 0 ? "\nbranch ok\n" : `\n${failures} 项失败\n`);
 process.exitCode = failures === 0 ? 0 : 1;

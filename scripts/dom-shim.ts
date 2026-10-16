@@ -530,7 +530,8 @@ export interface DomShim {
 	body: FakeNode;
 	/** 页面根元素，`applyAppearance` 与两条拖宽都往上写变量。 */
 	root: FakeNode;
-	window: unknown;
+	/** 窗口，带能被真正派发的监听器（`branch-view.ts` 的 `pointerup` 挂在这里）。 */
+	window: FakeWindow;
 	/**
 	 * 跑掉当前排队的那一批动画帧回调。
 	 *
@@ -538,6 +539,18 @@ export interface DomShim {
 	 * 返回这一批实际跑掉的个数，好让调用方知道还有没有下一批（回调里再排一帧就会出现）。
 	 */
 	frames(): number;
+}
+
+/** `installDom()` 装上的窗口：常量、两个计时器，以及可以派发的监听器。 */
+export interface FakeWindow {
+	addEventListener(type: string, handler: (event?: unknown) => void): void;
+	removeEventListener(type: string, handler: (event?: unknown) => void): void;
+	dispatch(type: string, event?: unknown): void;
+	listenerCount(type?: string): number;
+	readonly innerWidth: number;
+	readonly innerHeight: number;
+	readonly location: { href: string; protocol: string; host: string; origin: string };
+	readonly desktop: unknown;
 }
 
 export interface InstallOptions {
@@ -553,11 +566,23 @@ function textNode(text: string): FakeNode {
 }
 
 /**
+ * `Element` 与 `HTMLElement`，**导出**给量具用。
+ *
+ * 产品代码里 `branch-view.ts` 用一个 `event.target instanceof Element` 决定一次 window 级
+ * `pointerup` 算不算点中了卡片。shim 的节点不是这两个类的实例就没有意义，所以量具造事件目标时
+ * 必须拿得到它们——藏在这里会让每个量具自己 `as unknown as Element` 硬转，而那正是 shim 不该
+ * 逼出来的写法。
+ */
+export class FakeElement {}
+export class FakeHTMLElement extends FakeElement {}
+
+/**
  * 装上一整套最小 DOM。
  *
  * `Element` / `HTMLElement` 是**空类**：`transcript.ts:76` 与 `branch-view.ts:146` 的
  * `event.target instanceof Element` 在量具里应当为假——量具直接调用控制器方法，不走事件的
- * `target`——但真代码里那些判断必须有个类可比，缺了它会 `ReferenceError`。
+ * `target`——但真代码里那些判断必须有个类可比，缺了它会 `ReferenceError`。量具要造一个**真的会
+ * 被当成卡片**的事件目标时，用下面导出的这两个类包一层。
  *
  * 有一条边界值得写在这里：`getComputedStyle` **不解析 `calc()`**，它只是一张名字到值的表。产品代码
  * 量一个 `calc()` 令牌的方式因此必须是量元素的盒子（`branch-view.ts` 的探针），而不是 `parseFloat`
@@ -575,9 +600,6 @@ export function installDom(options: InstallOptions = {}): DomShim {
 	body.append(app);
 
 	const createElement = (tag: string): FakeNode => guard(new FakeNode(tag));
-
-	class FakeElement {}
-	class FakeHTMLElement extends FakeElement {}
 
 	/**
 	 * 按 `id` 找节点：从页面根往下走，**不是**从一张"创建过的节点"表里查。
@@ -632,10 +654,37 @@ export function installDom(options: InstallOptions = {}): DomShim {
 	const frameHandles = new Map<number, (time: number) => void>();
 	let frameHandle = 0;
 
+	/**
+	 * The window, with events that can actually be delivered.
+	 *
+	 * `branch-view.ts` attaches its `pointerup` to the window rather than to its own viewport — the
+	 * release of a pan can land anywhere, so the decision "this was a click" belongs to the window —
+	 * and that listener is where selecting a node lives. A no-op `addEventListener` here would make the
+	 * one interaction the page exists for untestable, so the window keeps handlers and dispatches them
+	 * like a node does.
+	 */
+	const windowListeners = new Map<string, ((event?: unknown) => void)[]>();
+
 	const windowObject = {
 		matchMedia: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }),
-		addEventListener: () => {},
-		removeEventListener: () => {},
+		addEventListener: (type: string, handler: (event?: unknown) => void): void => {
+			if (typeof handler !== "function") return;
+			windowListeners.set(type, [...(windowListeners.get(type) ?? []), handler]);
+		},
+		removeEventListener: (type: string, handler: (event?: unknown) => void): void => {
+			const list = windowListeners.get(type);
+			if (list === undefined) return;
+			const at = list.indexOf(handler);
+			if (at >= 0) list.splice(at, 1);
+		},
+		/** Deliver one window-level event, the way `FakeNode.dispatch` delivers a node's. */
+		dispatch(type: string, event?: unknown): void {
+			for (const handler of [...(windowListeners.get(type) ?? [])]) handler(event);
+		},
+		listenerCount(type?: string): number {
+			if (type === undefined) return [...windowListeners.values()].reduce((total, list) => total + list.length, 0);
+			return windowListeners.get(type)?.length ?? 0;
+		},
 		getComputedStyle: () => ({ getPropertyValue: () => "" }),
 		innerWidth: options.viewport?.width ?? 1280,
 		innerHeight: options.viewport?.height ?? 800,

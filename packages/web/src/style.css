@@ -644,11 +644,22 @@ body {
  * tool set, and a retry chip. All of that is a setting now, and settings live behind one button in
  * the sidebar: a control that is touched once a week does not get to sit in the row the conversation
  * is read from.
+ *
+ * `min-width: 0` is load-bearing, and not for the header's own sake. The header is a grid item, so its
+ * automatic minimum size is its content; `.conversation` is itself a grid whose single column is
+ * `auto`, and that column sizes to the largest minimum contribution among its items — the header's
+ * content floor. A column may be wider than its grid container, and this one is: on the branch page it
+ * comes out wider than the conversation has room for, so the header's right-hand controls are laid out
+ * past the end of the window and clipped away rather than overlapped. `min-width: 0` drops that floor
+ * (measured in the real shell at a 720px window: with the declaration the column is 435px and the exit
+ * button sits at x 606–696; with it removed the column resolves to 701.4px inside the same 720px window
+ * and the button lands at x 872–962, where `elementFromPoint` on its centre answers nothing).
  */
 .header {
 	display: flex;
 	flex-direction: column;
 	justify-content: center;
+	min-width: 0;
 	padding: 0 24px;
 	border-bottom: 1px solid var(--dsw-border-l1);
 	-webkit-app-region: drag;
@@ -751,16 +762,28 @@ body {
 /*
  * The branch page's row of tools, which lives in the fixed header so panning the tree cannot pull
  * it away. What is selected sits on the left, the zoom fallbacks and the one way out on the right.
+ *
+ * The row may not outgrow the header. As a flex item its automatic minimum size is its content, so
+ * `min-width: 0` is what lets it shrink at all — without it the zoom group and the exit button, which
+ * cannot shrink, push the row's own minimum up; the row then overflows the header and the button is
+ * outside the clickable box, which is what "the button does nothing" looks like from the outside.
+ * `.header` needs the same declaration for that floor to be able to give at all: the two are one fix,
+ * and neither half alone was enough.
+ *
+ * `no-drag` follows the row's controls, exactly as `.header-row > *` does for the title row: the band
+ * is the window's to drag, and everything a person can press has to opt out of it.
  */
 .branch-tools {
 	display: flex;
 	align-items: center;
 	gap: 12px;
+	min-width: 0;
 	padding: 6px 0 8px;
 	border-top: 1px solid var(--dsw-border-l1);
 	font-size: var(--dsw-fs-meta);
 	line-height: var(--dsw-lh-meta);
 	color: var(--dsw-label-caption);
+	-webkit-app-region: no-drag;
 }
 
 .branch-tools[hidden] {
@@ -768,7 +791,13 @@ body {
 }
 
 .branch-tools .header-spacer {
-	flex: 1;
+	flex: 1 1 0;
+	min-width: 0;
+}
+
+.branch-tools .zoom-group,
+.branch-tools .back-button {
+	flex: none;
 }
 
 .branch-sel-info {

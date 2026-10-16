@@ -1150,8 +1150,14 @@ function main(): void {
 	 * A run already in flight needs nothing extra: its `submitting` flag is in the snapshot, and the
 	 * frames are already coming.
 	 *
-	 * Three things about the order are load-bearing, and each was a way the window used to stall:
+	 * Four things about the order are load-bearing, and each was a way the window used to stall or lose
+	 * its place:
 	 *
+	 * - The pane flips to the conversation before the read, not after it. The read is slow enough to
+	 *   work in, and a reader who has clicked a row, then gone to the branch page, must not have the
+	 *   pane pulled out from under the tree they are looking at when the answer finally lands. A
+	 *   conversation opens to be read, and that is a decision about the click rather than about the
+	 *   answer — so a read that fails leaves the old conversation on screen instead of a blank pane.
 	 * - The read is announced before it starts. It is the window's slowest, least predictable step —
 	 *   a whole conversation over the wire and through `JSON.parse` — and the previous transcript stays
 	 *   up throughout, which is right for the pane and mute about the click.
@@ -1165,6 +1171,7 @@ function main(): void {
 	 */
 	async function openSession(sessionId: string): Promise<void> {
 		const series = (openSeries += 1);
+		setPane("chat");
 		showLoading(series, true);
 		let snapshot;
 		try {
@@ -1197,9 +1204,6 @@ function main(): void {
 		// The picker's explicit choice is about the session that was *about* to start, and that session
 		// has started — the one on screen now decides what "当前" names until the chip is used again.
 		pickedWorkspace = "";
-		// A conversation opens to be read. Whatever page the window was on — someone was still staring
-		// at another session's tree — the new session starts on its own conversation.
-		setPane("chat");
 		// The same rendering the branch command uses: a snapshot is a snapshot, whether it arrived on
 		// the channel or on a read. The channel's own baseline will replace it within a moment.
 		apply(reduce(state, { type: "baseline", session: snapshot }), { deferred: true });

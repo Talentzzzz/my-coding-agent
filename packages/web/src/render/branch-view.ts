@@ -344,22 +344,50 @@ export class BranchView {
 		this.sum.replaceChildren(line, hint);
 	}
 
+	/**
+	 * The way the page would move to if the exit button were pressed, or `undefined` when there is
+	 * nothing to move to — no tree, nothing selected, or the way being read is what is selected.
+	 *
+	 * The button's label, its primary tint, its disabled state, and what a press does all turn on this
+	 * one fact, so it is derived once here rather than spelled again at each of them. `paintTools` needs
+	 * the way itself for the caption; the press needs only where to move.
+	 *
+	 * A selected id with no way behind it is not movable either, even though it is not the way being
+	 * read: `findWay` coming back empty means there is nowhere to go, which is the same answer as the
+	 * selected id being the way being read. Without this the two readers would disagree — the caption
+	 * would say "已选中" while the button still said "回到对话".
+	 */
+	private movingWay(): BranchWay | undefined {
+		const tree = this.tree;
+		const id = this.selected;
+		if (tree === undefined || id === undefined || id === tree.currentId) return undefined;
+		return findWay(tree, id);
+	}
+
 	/** The fixed header's row: what is selected, the zoom fallbacks, and the one way out. */
 	private paintTools(): void {
-		const tree = this.tree;
-		const selected = tree === undefined || this.selected === undefined ? undefined : findWay(tree, this.selected);
-		const moving = selected !== undefined && tree !== undefined && this.selected !== tree.currentId;
-		if (selected === undefined) {
+		const moving = this.movingWay();
+		// What the caption describes: the way that would be moved to, else whatever is selected, else
+		// nothing at all. Derived here rather than in `movingWay` because the two readers want different
+		// answers — the press must not move, while the caption still has to name what is selected.
+		const named = moving ?? (this.tree === undefined || this.selected === undefined ? undefined : findWay(this.tree, this.selected));
+		if (named === undefined) {
 			this.selInfo.replaceChildren("点一个节点选中它，再按右边的按钮回到对话。");
 		} else {
-			const head = element("b", undefined, shortId(selected.entryId));
-			const name = element("em", undefined, selected.label);
-			this.selInfo.replaceChildren(moving ? "已选中 " : "现在读的是 ", head, " ", name, `（轮 ${selected.turn}）`);
+			const head = element("b", undefined, shortId(named.entryId));
+			const name = element("em", undefined, named.label);
+			this.selInfo.replaceChildren(moving === undefined ? "现在读的是 " : "已选中 ", head, " ", name, `（轮 ${named.turn}）`);
 		}
-		this.back.textContent = moving ? "切到这一条并回到对话" : "回到对话";
-		this.back.classList.toggle("primary", moving);
-		// A run is writing to the tree the button would move; switching waits for it to settle.
-		this.back.disabled = moving && this.streaming;
+		this.back.textContent = moving === undefined ? "回到对话" : "切到这一条并回到对话";
+		this.back.classList.toggle("primary", moving !== undefined);
+		// A run is writing to the tree the button would move, so the move waits for it to settle — but
+		// only the *move* waits. "回到对话" is the window changing which page it shows and is always
+		// allowed, and the button says which of the two it is refusing rather than looking pressable and
+		// doing nothing. Every paint rewrites this, so the end of the run is what turns it back on.
+		this.back.disabled = moving !== undefined && this.streaming;
+		// Deliberately empty when the move is allowed rather than absent: a button that carries no
+		// `title` of its own would still show the last refusal's tooltip on hover.
+		this.back.title = this.back.disabled ? "这一轮还在写，等它结束再切" : "";
 	}
 
 	// --------------------------------------------------------------- selection
@@ -370,16 +398,30 @@ export class BranchView {
 		this.paint();
 	}
 
-	/** The one way out of the page: apply what is selected, or just go back. */
+	/**
+	 * The one way out of the page: apply what is selected, or just go back.
+	 *
+	 * `tree === undefined`, nothing selected, and "the way being read is selected" are all the same
+	 * answer — go back — so the only thing that can decide between the two is whether there is a way to
+	 * move to at all, which is `movingWay`'s question.
+	 *
+	 * The run check guards the **move** alone. Returning to the conversation is this window swapping
+	 * which page it shows, which no run can be in the middle of, and it used to sit behind the same
+	 * check the move does — so a stale `streaming` made the button look pressable and do nothing at
+	 * all. A press that reaches the refused move is one whose `streaming` arrived after the paint that
+	 * enabled the button; the refusal is stated by the button's own `title` (set in `paintTools`), and
+	 * nothing is written into the caption here: the caption is the selection readout, and the next
+	 * paint that could put it back is the end of the run, so overwriting it would trade a description
+	 * that is still true for a sentence the button already carries.
+	 */
 	private applySelection(): void {
-		if (this.streaming) return;
-		const tree = this.tree;
-		if (tree === undefined) {
+		const moving = this.movingWay();
+		if (moving === undefined) {
 			this.options.onBack();
 			return;
 		}
-		if (this.selected !== undefined && this.selected !== tree.currentId) this.options.onSwitch(this.selected);
-		else this.options.onBack();
+		if (this.streaming) return;
+		this.options.onSwitch(moving.entryId);
 	}
 
 	// -------------------------------------------------------------- zoom & pan
