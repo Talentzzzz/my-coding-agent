@@ -28,7 +28,7 @@ Label: `wayfinder:map`
 
 ## Not yet specified
 
-- 标题栏原型（[标题栏布局原型](issues/07-titlebar-prototype.md)）：原型已就绪（`prototype/07-titlebar.html`，`npm run prototype:titlebar`），四方案实测数字在位——A/D 会被按钮压住（D 证明"缩边距"无效），B/C 为 0。等用户拍板后从"标题栏原型"毕业出实现 ticket；实现 ticket 必须带上 `.branch-tools` 的 `min-width: 0`（现成的溢出，见 issue）。
+- 标题栏原型（[标题栏布局原型](issues/07-titlebar-prototype.md)）：**第二轮原型已就绪**（`prototype/07-titlebar.html`，双击即可）。第一轮的"在标题行内部让位"四个方案已被用户否掉——照参考窗口逐像素量出来的结构是：**y 0–40 是一条铺满窗口宽的顶带，页面不在里面画任何东西，填充与会话栏同色；y ≥ 40 才是两栏，对话面板比会话栏深/浅一档**。我们现在的 bug 是顶带被画成了面板的色（`rgb(21,21,23)`），所以按钮站在"内容"上。`A 参考形态` 与 `B 统一填充` 两方案实测都是 0 冲突，等用户拍板后从"标题栏原型"毕业出实现 ticket；实现 ticket 要带上：拆顶带、顶带填充/`titleBarOverlay` 跟主题、`.header-row` 去掉标题栏高度、`.branch-tools` 的 `min-width: 0`。
 - [open-claude-ui 参考](issues/11-open-claude-ui-reference.md) 的借鉴清单会毕业出一批新 ticket（数量未知，取决于清单里哪些被用户挑中）。
 
 ## Out of scope
