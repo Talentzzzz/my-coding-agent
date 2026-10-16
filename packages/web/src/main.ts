@@ -165,18 +165,17 @@ function main(): void {
 	// settings live in the panel behind the one button in the sidebar.
 
 	/**
-	 * The branch entry, the one door into the branch page.
+	 * The branch entry, the only door into the branch page.
 	 *
 	 * It names the way being read — `当前分支`, the short id cut from that way's entry, and the first
-	 * sentence said under it — and hides when the conversation has fewer than two ways, where
-	 * "branching" names nothing. Hidden also is every other door: this chip and the user message's
-	 * right-click menu are the only two ways in, and the branch page's own button is the only way out.
+	 * sentence said under it. With fewer than two ways there is no way to name, so the id and the
+	 * sentence stand empty and the chip reads the mark and the words alone: a single-way conversation
+	 * is the one that most needs the door, and the page it opens answers with the how-to.
 	 */
 	const branchChip = element("button", "branch-chip", undefined, { type: "button", title: "打开分支视图" });
 	const branchChipId = element("span", "branch-chip-id");
 	const branchChipLabel = element("span", "branch-chip-label");
 	branchChip.append(icon("fork"), element("span", undefined, "当前分支"), branchChipId, branchChipLabel);
-	branchChip.hidden = true;
 	branchChip.addEventListener("click", () => setPane("branch"));
 
 	headerRow.append(title, branchChip);
@@ -914,15 +913,16 @@ function main(): void {
 		}
 
 		// The branch entry follows the session's branch shape, which only a baseline can change, so
-		// the signature is the tree's identity and the three figures a label is cut from.
+		// the signature is the tree's identity and the three figures a label is cut from. "none" is
+		// the single-way shape — the chip stands with nothing to name — and any move between a tree
+		// and "none" changes the signature, so the label it carries is always redrawn with it.
 		const tree = state.branchTree;
 		const branchSig =
 			tree === undefined ? "none" : `${tree.currentId ?? "-"}|${tree.points}|${tree.options}|${snapshot?.title ?? ""}`;
 		if (branchSig !== branchChipDrawn) {
 			branchChipDrawn = branchSig;
-			// Fewer than two ways, "branching" names nothing — the entry is gone whole, and with it
-			// the only door into the branch page.
-			branchChip.hidden = tree === undefined;
+			// Always visible: a conversation with one way is exactly the one that needs the door, and
+			// the page it opens answers with the how-to.
 			if (tree !== undefined && tree.currentId !== undefined) {
 				branchChipId.textContent = shortId(tree.currentId);
 				branchChipLabel.textContent = findWay(tree, tree.currentId)?.label ?? "";
@@ -1356,12 +1356,13 @@ function main(): void {
 	}
 
 	/**
-	 * The user message's right-click menu — one of the two doors into branching.
+	 * The user message's right-click menu.
 	 *
 	 * `从此分支` rewinds to the message so the next prompt starts another way from it, which is why
 	 * it stays on the conversation page: the branch page has no composer to type that prompt into.
-	 * `查看分支图` is the other half, into the page itself. A run in flight is writing to the tree
-	 * the first item would move, so while one is streaming the menu offers the look, not the move.
+	 * The door into the branch page itself is the header's chip alone — one entry, one place — so a
+	 * streaming run, which is moving the very tree a branch would grow from, simply leaves the menu
+	 * unopened rather than offering a look the chip already serves.
 	 */
 	function openUserMenu(entryId: string | undefined, x: number, y: number): void {
 		const items: MenuItem[] = [];
@@ -1373,7 +1374,7 @@ function main(): void {
 				onSelect: () => void branch(entryId, false),
 			});
 		}
-		items.push({ label: "查看分支图", icon: "tree", onSelect: () => setPane("branch") });
+		if (items.length === 0) return;
 		openMenuAt(x, y, items);
 	}
 

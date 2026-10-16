@@ -666,11 +666,12 @@ body {
 }
 
 /*
- * The branch entry, the one door into the branch page.
+ * The branch entry, the only door into the branch page.
  *
  * It names the way being read — the mark, `当前分支`, the short id cut from that way's store entry,
- * and the first sentence said under it — and disappears whole when the conversation has fewer than
- * two ways, where "branching" names nothing.
+ * and the first sentence said under it. With fewer than two ways there is no way to name, so the id
+ * and the sentence stand empty and the chip reads the mark and the words alone: a single-way
+ * conversation is the one that most needs the door, and the page it opens answers with the how-to.
  */
 .branch-chip {
 	display: inline-flex;
