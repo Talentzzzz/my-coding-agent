@@ -424,19 +424,17 @@ function centreOf(sizer: FakeNode, width: number, height: number): { left: numbe
 }
 
 {
-	// A graph that fits: there is no scroll range to centre with, so the scroll stays at the clamp and
-	// the stylesheet's `justify-items` is the half that does the centring. Both halves are asserted,
-	// because "回到 0" is exactly what the ticket says was wrong.
+	// A graph that fits: there is no scroll range to centre with, so the midpoint formula clamps to
+	// zero — that is, the graph's own margin is all the centring there is left to do.
 	probeAt(44, 56);
 	const { viewport, sizer } = pageOf(forkedTree(), 2000, 1200);
 	const want = centreOf(sizer, 2000, 1200);
 	check("图装得下：没有可滚的余量，滚动停在零", viewport.scrollLeft === 0 && viewport.scrollTop === 0, `${viewport.scrollLeft} / ${viewport.scrollTop}`);
 	check("图装得下：零正是那条公式被夹到下限的结果，不是另写的一条路", want.left === 0 && want.top === 0, `${want.left} / ${want.top}`);
 
-	check("视口用居中排布，而不是让图贴角", declared(css, ".graph-viewport", "justify-items") === "center" && declared(css, ".graph-viewport", "align-items") === "center", `${declared(css, ".graph-viewport", "justify-items")} / ${declared(css, ".graph-viewport", "align-items")}`);
-	// The hinge: with the track allowed to shrink below the viewport, centring a graph that overflows
-	// would push its left and top edges out of reach — unreachable, not merely off-centre.
-	check("sizer 不小于视口，居中不会把图的边缘推出可达范围", declared(css, ".graph-sizer", "min-width") === "100%" && declared(css, ".graph-sizer", "min-height") === "100%", `${declared(css, ".graph-sizer", "min-width")} / ${declared(css, ".graph-sizer", "min-height")}`);
+	// The floor under the arithmetic: with the sizer allowed below the viewport, the scroll position
+	// and the graph's own coordinates could slide apart, and the left and top edges would go with them.
+	check("sizer 不小于视口，滚动位置与图的坐标不会错位", declared(css, ".graph-sizer", "min-width") === "100%" && declared(css, ".graph-sizer", "min-height") === "100%", `${declared(css, ".graph-sizer", "min-width")} / ${declared(css, ".graph-sizer", "min-height")}`);
 }
 
 {

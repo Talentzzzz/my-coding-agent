@@ -1661,13 +1661,14 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * The viewport centres what fits and scrolls what does not.
+ * The viewport hands the pan its scroll range; the view decides where in it to sit.
  *
- * A graph smaller than the viewport has no scroll range, so no scroll position can put it in the
- * middle: `justify-items` / `align-items` are what centre it, while `scrollHome()` in the view keeps a
- * graph that *does* overflow centred by scroll. The sizer's `min-width` / `min-height: 100%` are the
- * hinge — they make the track no smaller than the viewport, so a starved grid track can never become
- * the thing that is scrolled, which would put the graph's left and top edges out of reach.
+ * `scrollHome()` on entry sets the scroll to the midpoint of sizer-minus-viewport, which is what puts a
+ * graph wider than the viewport in the middle; on the axis where the sizer is not wider, that midpoint
+ * is zero and the graph's own margin is as centred as the viewport allows. The sizer's `min-width` /
+ * `min-height: 100%` are the floor under that: they keep the sizer's origin at the viewport's own
+ * origin, so the scroll position and the graph's coordinates cannot slide apart, and the graph's left
+ * and top edges stay reachable.
  *
  * The graph's natural size and its scaled size are two facts: the sizer outside carries the scroll
  * range (so a shrunken graph still scrolls a shrunken distance), and the layer inside carries the
@@ -1677,8 +1678,6 @@ body:not([data-pane="branch"]) .branch-view {
 	flex: 1;
 	min-height: 0;
 	display: grid;
-	justify-items: center;
-	align-items: center;
 	overflow: auto;
 	position: relative;
 	cursor: grab;

@@ -395,9 +395,9 @@ export class BranchView {
 		const box = this.viewport.getBoundingClientRect();
 		const vx = clientX === undefined ? this.viewport.clientWidth / 2 : clientX - box.left;
 		const vy = clientY === undefined ? this.viewport.clientHeight / 2 : clientY - box.top;
-		// Where the point under the pointer sits in the graph's own coordinates. Measured, not derived
-		// from `scrollLeft`: a graph smaller than the viewport is centred by the stylesheet, so the
-		// viewport's origin meets the sizer somewhere in the middle rather than at its corner.
+		// Where the point under the pointer sits in the graph's own coordinates. The sizer's own box is
+		// what scrollLeft is measured against, so this is the one subtraction that stays right whether
+		// the graph is panned to a corner or sitting where `scrollHome` left it.
 		const sizer = this.sizer.getBoundingClientRect();
 		const ox = box.left + this.viewport.scrollLeft - sizer.left;
 		const oy = box.top + this.viewport.scrollTop - sizer.top;
@@ -432,8 +432,10 @@ export class BranchView {
 	 * pressing "适应" both land here.
 	 *
 	 * Read off the sizer's painted size rather than recomputed from `zoom`: one size, one place, and
-	 * the two cannot drift apart. A graph smaller than the viewport has no scroll range, so the clamp
-	 * is the whole answer there and the stylesheet's `justify-items` does the visible half.
+	 * the two cannot drift apart. It is also the *only* thing that centres in practice: the sizer is
+	 * never smaller than the viewport (its `min-width` / `min-height` are `100%`), so the two axes
+	 * differ only in whether the graph's own margins fit inside it. What the clamp answers is the axis
+	 * where they do — there the graph is already as centred as the viewport allows.
 	 */
 	private scrollHome(): void {
 		if (this.laid === undefined) return;
