@@ -26,7 +26,7 @@
 // wrote every run's session file into the real home's `sessions/`. Both leaks are gone: the model
 // list is this script's own one-row file, and the home is removed with the workspaces at the end.
 import { mkdtemp, rm } from "node:fs/promises";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -57,6 +57,11 @@ function check(label: string, condition: boolean, detail = ""): void {
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Scratch trees are best-effort to remove: a leftover temp dir must not fail a smoke that passed. */
+function removeQuiet(dir: string): Promise<void> {
+	return rm(dir, { recursive: true, force: true }).catch(() => {});
+}
 
 async function request(base: string, method: string, path: string, body?: unknown): Promise<{ status: number; payload: unknown }> {
 	const headers: Record<string, string> = { accept: "application/json" };
@@ -140,6 +145,11 @@ try {
 		approval: { read: true },
 	});
 	check("the read tool was put behind the approval gate", turned.status === 200, String(turned.status));
+	// A tool that is not active is never gated — `prepareToolCall` answers "Tool not found" before the
+	// approval hook runs — so the worst case below would silently lose its park. The snapshot the
+	// PATCH answers with says what is active; assert it rather than assume the default set.
+	const active = (turned.payload as { session?: { activeTools?: string[] } }).session?.activeTools ?? [];
+	check("the gated tool is active on the session", active.includes("read"), active.join(","));
 
 	const accepted = await request(server.url, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
 		text: "read the notes",
@@ -232,10 +242,10 @@ try {
 		check("the child exited with a connection attached", await Promise.race([exited, sleep(5_000).then(() => false)]));
 		childSocket.close();
 	}
-	await rm(childWorkspace, { recursive: true, force: true }).catch(() => {});
+	await removeQuiet(childWorkspace);
 } finally {
-	await rm(workspace, { recursive: true, force: true }).catch(() => {});
-	await rm(agentHome, { recursive: true, force: true }).catch(() => {});
+	await removeQuiet(workspace);
+	await removeQuiet(agentHome);
 }
 
 // The natural-exit watchdog, last thing in the file: everything above has been torn down, so the
