@@ -1,7 +1,7 @@
 # 07 标题栏布局原型
 
 Type: prototype
-Status: open
+Status: resolved
 Label: feature
 
 ## Question
