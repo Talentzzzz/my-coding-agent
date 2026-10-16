@@ -5,29 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>9 · 工作区折叠与分页 — 形态原型</title>
 <style>
-/* ===== 设计 token，照抄 tokens.css（浅 / 深两套）===== */
+/* ===== Design tokens, copied from tokens.css (light / dark sheets). ===== */
 :root {
 	--dsw-static-amber-500: rgb(245, 158, 11);
-	--dsw-static-amber-600: rgb(221, 134, 41);
 	--dsw-static-deepseek-500: rgb(65, 118, 230);
 	--dsw-static-neutral-bluish-1000: rgb(15, 17, 21);
 	--dsw-static-neutral-bluish-950: rgb(21, 21, 23);
 	--dsw-static-neutral-bluish-900: rgb(27, 27, 28);
 	--dsw-static-neutral-bluish-875: rgb(35, 35, 36);
 	--dsw-static-neutral-bluish-850: rgb(44, 44, 46);
-	--dsw-static-neutral-bluish-800: rgb(53, 54, 56);
 	--dsw-static-neutral-bluish-750: rgb(67, 69, 74);
-	--dsw-static-neutral-bluish-700: rgb(97, 102, 107);
 	--dsw-static-neutral-bluish-600: rgb(129, 133, 140);
 	--dsw-static-neutral-bluish-500: rgb(151, 157, 166);
 	--dsw-static-neutral-bluish-400: rgb(173, 178, 184);
 	--dsw-static-neutral-bluish-300: rgb(207, 211, 214);
-	--dsw-static-neutral-bluish-100: rgb(235, 238, 242);
-	--dsw-static-neutral-bluish-75: rgb(241, 243, 245);
-	--dsw-static-neutral-bluish-60: rgb(245, 246, 247);
 	--dsw-static-neutral-bluish-50: rgb(249, 250, 251);
 	--dsw-static-neutral-bluish-00: rgb(255, 255, 255);
-	--dsw-static-neutral-300: rgb(212, 212, 212);
 
 	--dsw-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
 		"Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
@@ -42,7 +35,7 @@
 	--dsw-radius-md: 12px;
 	--dsw-radius-xs: 4px;
 
-	/* 浅色（默认） */
+	/* Light (default) alias roles. */
 	--dsw-bg-base: var(--dsw-static-neutral-bluish-00);
 	--dsw-bg-sidebar: var(--dsw-static-neutral-bluish-50);
 	--dsw-bg-hover: rgba(38, 49, 72, 0.06);
@@ -85,7 +78,7 @@ body {
 	padding: 24px 16px 48px;
 }
 
-/* ===== 控制台：三处未定形态，摆出来让用户翻 ===== */
+/* ===== The control strip: the three undecided forms, as switchable variants. ===== */
 .panel {
 	width: 860px;
 	max-width: 100%;
@@ -157,7 +150,7 @@ body {
 }
 .panel .landing b { color: var(--dsw-static-neutral-bluish-400); font-weight: 600; }
 
-/* ===== 窗口外壳，照真窗口构图 ===== */
+/* ===== Window shell, after the real window's composition. ===== */
 .window {
 	width: 860px;
 	max-width: 100%;
@@ -188,7 +181,7 @@ body {
 }
 .shell { flex: 1; display: flex; min-height: 0; }
 
-/* ===== 侧栏，照真侧栏的规格 ===== */
+/* ===== Sidebar, after the real sidebar's specs. ===== */
 .sidebar {
 	width: 232px;
 	flex: none;
@@ -261,7 +254,7 @@ body {
 	scrollbar-width: thin;
 }
 
-/* 工作区头：34px，meta 档；hover 时文件夹换成 chevron，chevron 带旋转态 */
+/* Workspace head: 34px, meta tier; hover swaps folder for chevron, chevron carries the rotation. */
 .workspace { display: flex; flex-direction: column; gap: 1px; margin-bottom: 6px; }
 .workspace-head {
 	display: flex;
@@ -288,7 +281,8 @@ body {
 .workspace-icon-chev svg { transition: transform var(--dsw-duration) var(--dsw-ease); }
 .workspace-head:hover .workspace-icon-chev { display: inline-flex; }
 .workspace-head:hover .workspace-icon-folder { display: none; }
-/* 收起态挂靠：aria-expanded 为 false 时 chevron 指向右，不再依赖 hover 才知道那里可以点 */
+/* The collapsed state hooks here: aria-expanded="false" keeps the chevron on and turned right,
+   so the affordance no longer depends on hover to be visible. */
 .workspace-head[aria-expanded="false"] { color: var(--dsw-label-secondary); }
 .workspace-head[aria-expanded="false"] .workspace-icon-chev { display: inline-flex; }
 .workspace-head[aria-expanded="false"] .workspace-icon-folder { display: none; }
@@ -306,7 +300,7 @@ body {
 	letter-spacing: 0.02em;
 }
 
-/* 会话行：32px，title 档 */
+/* Session row: 32px, title tier. */
 .session-item {
 	display: flex;
 	align-items: center;
@@ -321,9 +315,9 @@ body {
 	font: inherit;
 	text-align: left;
 	cursor: pointer;
-	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+	transition: background var(--dsw-duration-fast) var(--dsw-ease), color var(--dsw-duration-fast) var(--dsw-ease);
 }
-.session-item:hover { background: var(--dsw-bg-hover); }
+.session-item:hover { background: var(--dsw-bg-hover); color: var(--dsw-label-primary); }
 .session-item[aria-current="true"] { background: var(--dsw-bg-active); color: var(--dsw-label-primary); }
 .session-item-slot {
 	display: inline-flex;
@@ -339,7 +333,7 @@ body {
 }
 .session-item-title {
 	min-width: 0; flex: 1;
-	margin: 0 6px 0 4px;
+	margin: 0 6px;
 	white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 	font-size: var(--dsw-fs-title);
 	line-height: var(--dsw-lh-title);
@@ -351,7 +345,7 @@ body {
 	line-height: var(--dsw-lh-caption);
 }
 
-/* 展开其余 / 收起：caption 档，缩进对齐标题列 */
+/* Expand-the-rest / collapse: caption tier, indented to the titles' left edge. */
 .session-more {
 	align-self: flex-start;
 	padding: 4px 8px;
@@ -366,9 +360,9 @@ body {
 	cursor: pointer;
 	transition: color var(--dsw-duration-fast) var(--dsw-ease), background var(--dsw-duration-fast) var(--dsw-ease);
 }
-.session-more:hover { background: var(--dsw-bg-hover); color: var(--dsw-label-secondary); }
+.session-more:hover { background: var(--dsw-bg-hover); color: var(--dsw-label-primary); }
 
-/* ===== 内容列的残影，只为了卖构图 ===== */
+/* ===== The content column's ghost, only to sell the composition. ===== */
 .content { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .content-ghost {
 	flex: 1;
@@ -460,7 +454,7 @@ body {
 <script>
 "use strict";
 
-/* ===== 数据：一个 14 条的忙工作区、一个 3 条的、一个 2 条的 ===== */
+/* ===== Data: one busy workspace with 14 sessions, one with 3, one with 2. ===== */
 const WORKSPACES = [
 	{
 		cwd: "C:/Users/a1368/Desktop/my-coding-agent",
@@ -501,10 +495,10 @@ const WORKSPACES = [
 	},
 ];
 
-/* ===== 三处未定的形态 + 每个工作区的收展状态 ===== */
+/* ===== The three undecided forms + each workspace's paging/collapse state. ===== */
 const PAGE = 5;
 const choice = { q1: "first5", q2: "collapse", q3: "remember" };
-/** 模拟 appearance 同步下来的那一份：q3=remember 时「重开窗口」不丢它。 */
+/** Simulates the copy appearance would sync: with q3=remember, "reopen" keeps it. */
 const wsState = new Map();
 function stateOf(cwd) {
 	let s = wsState.get(cwd);
@@ -515,7 +509,7 @@ function stateOf(cwd) {
 	return s;
 }
 
-/* ===== 渲染 ===== */
+/* ===== Rendering ===== */
 const list = document.getElementById("list");
 
 function render() {
@@ -525,7 +519,7 @@ function render() {
 		const wrapper = document.createElement("div");
 		wrapper.className = "workspace";
 
-		// 表头：真正的按钮，带 aria-expanded，收起时只留这一栏
+		// The head is a real button with aria-expanded; collapsed leaves only this row.
 		const head = document.createElement("button");
 		head.type = "button";
 		head.className = "workspace-head";
@@ -549,7 +543,8 @@ function render() {
 		}
 		head.addEventListener("click", () => {
 			if (s.collapsed) {
-				// 问题一：从收起点表头，回到前 5 条，还是回到收起前展开到的那一页
+				// Question 1: from collapsed, a head click returns to the first 5 or to the page
+				// the workspace was expanded to when it collapsed.
 				s.page = choice.q1 === "first5" ? 1 : Math.max(1, s.savedPage);
 				s.collapsed = false;
 			} else {
@@ -564,7 +559,7 @@ function render() {
 			continue;
 		}
 
-		// 分页：page 页 × 5 条；正在看的那个永远在场（照 collapsedRows 的规矩）
+		// Paging: page x 5 rows; the session on screen always stays visible (after collapsedRows).
 		const rows = ws.sessions;
 		const activeIndex = rows.findIndex((r) => r.active);
 		let visibleCount = s.page * PAGE;
@@ -573,7 +568,9 @@ function render() {
 			wrapper.append(rowOf(rows[i]));
 		}
 
-		// 底部那个按钮：还有剩余 → 展开其余 N 个；展完了 → 看问题二
+		// The bottom button: rows still held back -> expand the rest; all shown -> question 2.
+		// A workspace with PAGE rows or fewer never had anything held back, so it never wears
+		// the button in any of the three variants.
 		const hidden = rows.length - Math.min(visibleCount, rows.length);
 		const more = document.createElement("button");
 		more.type = "button";
@@ -586,15 +583,16 @@ function render() {
 				render();
 			});
 			wrapper.append(more);
-		} else if (choice.q2 === "collapse" || choice.q2 === "collapseRest") {
+		} else if (rows.length > PAGE && (choice.q2 === "collapse" || choice.q2 === "collapseRest")) {
+			// Both variants land back on the first 5 and deliberately leave savedPage alone, so
+			// with question 1 on "last page" a later head-collapse reopens where you were.
 			more.textContent = choice.q2 === "collapse" ? "收起" : "收起其余";
 			more.addEventListener("click", () => {
 				s.page = 1;
-				s.savedPage = 1;
 				render();
 			});
 			wrapper.append(more);
-		} // hide：展完了按钮就消失
+		} // hide: once everything is shown, the button is gone.
 		list.append(wrapper);
 	}
 }
@@ -619,7 +617,7 @@ function rowOf(row) {
 	return button;
 }
 
-/* ===== 控制台 ===== */
+/* ===== Control strip ===== */
 document.querySelectorAll(".seg").forEach((seg) => {
 	const key = seg.dataset.q;
 	seg.querySelectorAll("button").forEach((button) => {
@@ -634,9 +632,9 @@ document.querySelectorAll(".seg").forEach((seg) => {
 
 document.getElementById("reopen").addEventListener("click", () => {
 	if (choice.q3 === "forget") {
-		// 不记：关窗即忘——每个工作区回到「5 条、未收起」
+		// Not remembered: closing the window forgets — every workspace back to 5 rows, open.
 		wsState.clear();
-	} // 记住：跟 appearance 走，什么也不动，重开就是原样
+	} // Remembered: appearance carries it, so reopening is exactly as it was.
 	render();
 });
 
