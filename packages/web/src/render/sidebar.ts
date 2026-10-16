@@ -35,9 +35,9 @@ export interface SidebarState {
 	workspaces: readonly WorkspaceGroup[];
 	activeSessionId?: string;
 	/**
-	 * The workspace the "当前" mark names, which is the picker's own choice — where the next new
+	 * The workspace the shadowed heading names, which is the picker's own choice — where the next new
 	 * session will land — rather than the server's startup root. The three readers of one choice are
-	 * the hero chip, the new-session button, and this mark.
+	 * the hero chip, the new-session button, and this heading.
 	 */
 	currentWorkspace: string;
 	collapsed: boolean;
@@ -359,19 +359,12 @@ export class Sidebar {
 		const key = `head:${cwd}`;
 		const existing = this.drawn.get(key);
 		if (existing !== undefined) {
-			// The mark is reached through the reference the heading was built with. Searching for it
-			// with `querySelector` here was a per-workspace, per-frame DOM walk — the one hotspot the
-			// profile caught growing with the workspace count — and a heading's mark never moves on
-			// its own, so there is nothing to search for.
-			const shouldMark = cwd === currentWorkspace;
-			if (shouldMark && existing.mark === undefined && existing.head !== undefined) {
-				existing.mark = element("span", "workspace-current", "当前");
-				existing.head.append(existing.mark);
-			} else if (!shouldMark && existing.mark !== undefined) {
-				existing.mark.remove();
-				existing.mark = undefined;
+			// Both facts are written through the heading reference this entry was built with, so
+			// neither one needs a search.
+			if (existing.head !== undefined) {
+				this.paintCurrent(existing.head, cwd === currentWorkspace);
+				this.paintExpanded(existing.head, entry.collapsed);
 			}
-			if (existing.head !== undefined) this.paintExpanded(existing.head, entry.collapsed);
 			return existing.button;
 		}
 
@@ -389,19 +382,23 @@ export class Sidebar {
 		const name = element("span", "workspace-name", workspaceName(cwd));
 		head.append(folder, chev, name);
 		head.addEventListener("click", () => this.handlers.onToggleWorkspace(cwd));
-		let mark: HTMLElement | undefined;
-		if (cwd === currentWorkspace) {
-			// Which group the new-session button will write into, said once rather than left to be
-			// discovered by creating a session and finding it in the wrong place.
-			mark = element("span", "workspace-current", "当前");
-			head.append(mark);
-		}
 
 		const wrapper = element("div", "workspace");
 		wrapper.append(head);
 		this.list.append(wrapper);
-		this.drawn.set(key, { button: wrapper, head, mark });
+		this.paintCurrent(head, cwd === currentWorkspace);
+		this.drawn.set(key, { button: wrapper, head });
 		return wrapper;
+	}
+
+	/**
+	 * Write whether this heading is the current workspace, and only when it moved.
+	 *
+	 * A class rather than a chip: the mark is the heading's own surface, so moving it is a toggle.
+	 */
+	private paintCurrent(head: HTMLElement, current: boolean): void {
+		if (head.classList.contains(CURRENT_HEAD) === current) return;
+		head.classList.toggle(CURRENT_HEAD, current);
 	}
 
 	/** Write a heading's expanded state, and only when it moved. */
@@ -684,10 +681,8 @@ interface DrawnNode {
 	button: HTMLElement;
 	/** The row's own parts, and the values last written to them. Absent for the two non-row entries. */
 	parts?: RowParts;
-	/** The heading element inside `button`, for group entries; the mark hangs off it. */
+	/** The heading element inside `button`, for group entries. */
 	head?: HTMLElement;
-	/** The "当前" mark currently on the heading, so a change of current workspace is a move, not a search. */
-	mark?: HTMLElement;
 }
 
 /** One rename in flight: which row is being edited, and whether it has been settled already. */
@@ -863,6 +858,14 @@ function rowsOf(group: WorkspaceGroup): TreeRow[] {
  * one — the cap is about how much a scan can hold, and that has not changed.
  */
 const PAGE_SIZE = 5;
+
+/**
+ * The class naming the one group heading that is the current workspace.
+ *
+ * A class on the heading rather than a chip inside it: the mark is a surface — see
+ * `--dsw-shadow-workspace-current` in `tokens.css` — so it travels with the heading it marks.
+ */
+const CURRENT_HEAD = "workspace-head-current";
 
 /** The last segment of a path, which is what a person calls the project. */
 export function workspaceName(cwd: string): string {

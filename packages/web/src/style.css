@@ -422,7 +422,9 @@ body {
 	font-weight: 600;
 	text-align: left;
 	cursor: pointer;
-	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+	/* The shadow rides the transition too: becoming the current workspace is a change of surface, and
+	   a ring that snapped on while the hover fill faded would read as two separate marks. */
+	transition: background var(--dsw-duration-fast) var(--dsw-ease), box-shadow var(--dsw-duration-fast) var(--dsw-ease);
 }
 
 .workspace-head:hover {
@@ -468,22 +470,24 @@ body {
 }
 
 .workspace-name {
+	/* The heading is a button, so it does not stretch its children; the name asks for the room the
+	   chip at the heading's right edge used to leave behind, and ellipsises inside it. */
+	flex: 1;
 	overflow: hidden;
 	white-space: nowrap;
 	text-overflow: ellipsis;
 }
 
-/* Which group the new-session button writes into, said once rather than discovered by surprise. */
-.workspace-current {
-	margin-left: auto;
-	padding: 0 5px;
-	border-radius: 999px;
-	background: var(--dsw-bg-hover);
-	color: var(--dsw-label-caption);
-	font-size: var(--dsw-fs-caption);
-	line-height: var(--dsw-lh-caption);
-	font-weight: 500;
-	letter-spacing: 0.02em;
+/*
+ * Which group the new-session button writes into, said by the surface rather than by a word.
+ *
+ * The heading is the one row of the column that is *above* the list instead of part of it, so it
+ * wears the surface a raised row would: a hairline ring and a lift, both out of one token. The fill
+ * stays transparent on purpose — the heading keeps the hover feedback every other heading gives, and
+ * the ring says which one is current whether or not a pointer is on it.
+ */
+.workspace-head-current {
+	box-shadow: var(--dsw-shadow-workspace-current);
 }
 
 .session-list-empty {

@@ -71,12 +71,13 @@ function main(): void {
 	 * The workspace picker's own choice, held by the window and never by the server.
 	 *
 	 * Three controls read it and nothing else does: the composer chip that displays it, the new-session
-	 * button that creates into it, and the sidebar's "当前" mark that names it. Empty means "no
-	 * explicit choice", and the answer is then the active session's workspace — so the mark can never
-	 * contradict the conversation on screen — or the server's root when there is no session. Opening a
-	 * session clears it, which is what keeps the choice a "next time" answer rather than a state that
-	 * quietly outlives the moment it was made in. It survives no restart and lands in no file, by
-	 * decision: a transient preference re-chosen at the moment it is needed is not worth a store.
+	 * button that creates into it, and the sidebar's shadowed heading that names it. Empty means "no
+	 * explicit choice", and the answer is then the active session's workspace — so that heading can
+	 * never contradict the conversation on screen — or the server's root when there is no session.
+	 * Opening a session clears it, which is what keeps the choice a "next time" answer rather than a
+	 * state that quietly outlives the moment it was made in. It survives no restart and lands in no
+	 * file, by decision: a transient preference re-chosen at the moment it is needed is not worth a
+	 * store.
 	 */
 	let pickedWorkspace = "";
 	let collapsed = false;
@@ -818,8 +819,8 @@ function main(): void {
 	 * Where the next new session lands, and the one answer to the question the picker exists for.
 	 *
 	 * The explicit choice wins, then the session on screen's workspace, then the server's root — the
-	 * order the "当前" mark's promise needs, since the mark names this answer and must never disagree
-	 * with the conversation being read.
+	 * order the shadowed heading's promise needs, since that heading names this answer and must never
+	 * disagree with the conversation being read.
 	 */
 	function directoryForNewSession(): string {
 		return pickedWorkspace || state.snapshot?.cwd || currentWorkspace;
@@ -1202,7 +1203,8 @@ function main(): void {
 		// nothing about this one, which opens on whatever its own branch recorded.
 		chosen = {};
 		// The picker's explicit choice is about the session that was *about* to start, and that session
-		// has started — the one on screen now decides what "当前" names until the chip is used again.
+		// has started — the one on screen now decides which workspace the next session lands in, until
+		// the chip is used again.
 		pickedWorkspace = "";
 		// The same rendering the branch command uses: a snapshot is a snapshot, whether it arrived on
 		// the channel or on a read. The channel's own baseline will replace it within a moment.

@@ -129,7 +129,9 @@ function state(rows: SessionRow[], over: Partial<SidebarState> = {}): SidebarSta
 function collectRows(sidebar: Sidebar): { title: string; created: number; state: string | null; tooltip: string }[] {
 	const found: { title: string; created: number; state: string | null; tooltip: string }[] = [];
 	const walk = (node: FakeNode): void => {
-		if (node.className === "session-item") {
+		// The same membership rule `all()` reads, so the two walks in this file cannot drift into
+		// disagreeing about what counts as a row.
+		if (node.classList.contains("session-item")) {
 			const titleNode = node.querySelector(".session-item-title");
 			found.push({
 				title: titleNode?.textContent ?? "?",
@@ -167,11 +169,14 @@ function rowsByName(sidebar: Sidebar): Map<string, { state: string | null; toolt
  * with the right title, and only the second is the behaviour this file exists to check — a real
  * re-render replaces the button, and a click that started on the old one never reaches the new one.
  * `created` counts constructions, so a rebuilt row shows up as 2.
+ *
+ * Membership rather than equality, the way `classList.contains` reads a class: a heading wears
+ * `workspace-head` and, when it is the current workspace, one more class beside it.
  */
 function all(sidebar: Sidebar, className: string): { node: FakeNode; detached: boolean; created: number }[] {
 	const found: { node: FakeNode; detached: boolean; created: number }[] = [];
 	const walk = (node: FakeNode): void => {
-		if (node.className === className) found.push({ node, detached: node.detached, created: node.created });
+		if (node.classList.contains(className)) found.push({ node, detached: node.detached, created: node.created });
 		for (const child of node.children) walk(child);
 	};
 	walk(root(sidebar));
@@ -380,9 +385,11 @@ process.stdout.write("\nsidebar：分组标题在会话行之上\n");
 	const groups = all(sidebar, "workspace").map((entry) => entry.node.children.map((child) => child.className));
 	check("两个分组都在", groups.length === 2, JSON.stringify(groups));
 	for (const order of groups) {
+		// The heading may carry the current-workspace class beside its own, so the check is that the
+		// first child *is* the heading — `all`'s membership rule, one group at a time.
 		check(
 			`标题在它那些行之上：${order.join(" > ")}`,
-			order[0] === "workspace-head" && !order.slice(1).includes("workspace-head"),
+			order[0]?.startsWith("workspace-head") === true && !order.slice(1).some((name) => name.startsWith("workspace-head")),
 			JSON.stringify(order),
 		);
 	}
@@ -761,7 +768,7 @@ process.stdout.write("\nsidebar：表头收起只剩表头，重开回到上次�
 	check("收起后只剩表头：没有分页按钮", all(sidebar, "session-more").length === 0, String(all(sidebar, "session-more").length));
 	check("表头还在", all(sidebar, "workspace-head").length === 1);
 	check("收起时 aria-expanded=false", head().getAttribute("aria-expanded") === "false", String(head().getAttribute("aria-expanded")));
-	check("「当前」标记与收起态共存", all(sidebar, "workspace-current").length === 1, String(all(sidebar, "workspace-current").length));
+	check("「当前」标记与收起态共存", all(sidebar, "workspace-head-current").length === 1, String(all(sidebar, "workspace-head-current").length));
 
 	head().dispatch("click");
 	render();
@@ -814,6 +821,38 @@ process.stdout.write("\nsidebar：搜索翻出全部匹配，收起与分页都�
 	const titles = titlesOf(sidebar).map((t) => t.title);
 	// s1, s10, s11 — every match, in a group whose own list was folded away.
 	check("收着的工作区照样给出全部匹配", titles.length === 3, JSON.stringify(titles));
+}
+
+// ---------------------------- 17. the current workspace is a surface, not a word
+
+process.stdout.write("\nsidebar：当前工作区靠阴影，没有「当前」两个字\n");
+
+{
+	const sidebar = new Sidebar(handlers());
+	const two = (current: string): SidebarState => ({
+		workspaces: [
+			{ cwd: "/one", sessions: [row("a", 300)] },
+			{ cwd: "/two", sessions: [row("b", 200)] },
+		],
+		currentWorkspace: current,
+		collapsed: false,
+		paging: {},
+		channel: "live",
+	});
+
+	sidebar.render(two("/one"));
+	const marks = (): FakeNode[] => all(sidebar, "workspace-head-current").map((entry) => entry.node);
+	// A mark that is on every heading, or on none, is not a mark: the check is the count and which
+	// heading wears it, so a class written once at build time and never patched fails here.
+	check("只有一个工作区戴当前标记", marks().length === 1, String(marks().length));
+	check("戴标记的是当前那一个", marks()[0]?.getAttribute("title") === "/one", String(marks()[0]?.getAttribute("title")));
+	check("没有「当前」两个字", !JSON.stringify(root(sidebar).textContent).includes("当前"), root(sidebar).textContent);
+
+	// The heading is patched, not rebuilt: the node that wore the mark is the node that loses it.
+	const head = marks()[0]!;
+	sidebar.render(two("/two"));
+	check("当前换了：标记跟着走", marks().length === 1 && marks()[0]?.getAttribute("title") === "/two", JSON.stringify(marks().map((node) => node.getAttribute("title"))));
+	check("上一个表头是同一个节点，只是摘了标记", head.created === 1 && !head.classList.contains("workspace-head-current"), `created=${head.created}`);
 }
 
 process.stdout.write(failures === 0 ? "\nsidebar ok\n" : `\n${failures} 项失败\n`);
