@@ -28,8 +28,16 @@ app.commandLine.appendSwitch("no-sandbox");
 /** Height of the Windows caption the shell draws, matched by --desktop-titlebar in the client. */
 const TITLEBAR_HEIGHT = 40;
 
-/** The DSH palette's sidebar fill, so the native caption matches the page before it paints. */
-const CHROME_LIGHT = "#f9fafb";
+/**
+ * The DSH palette's sidebar fill, so the native caption matches the page before it paints.
+ *
+ * The caption and the page's top band are one surface (`.titleband` takes `--dsw-bg-sidebar`, which
+ * in the dark sheet is `neutral-bluish-900`, rgb(27,27,28), and in the light sheet
+ * `neutral-bluish-60`, rgb(245,246,247)). This file cannot read a CSS custom property, so these two
+ * hexes restate those tokens by hand — if `--dsw-bg-sidebar` ever moves, these move with it, or the
+ * first paint flashes a band that disagrees with itself.
+ */
+const CHROME_LIGHT = "#f5f6f7";
 const CHROME_DARK = "#1b1b1c";
 
 let mainWindow = null;

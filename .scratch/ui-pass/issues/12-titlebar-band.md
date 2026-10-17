@@ -1,7 +1,7 @@
 # 12 标题栏：立一条真正的顶带
 
 Type: task
-Status: open
+Status: resolved
 Label: feature
 
 ## Question
@@ -19,12 +19,12 @@ Label: feature
 
 ## 动手清单
 
-- [ ] 把顶带从 `.header` 里拆出去，做成窗口级的一条：`packages/web/src/style.css:648` 的 `.header` 现在同时是标题行的容器（`padding: 0 24px`、`.header-row` 上的 `height: var(--desktop-titlebar)` / `min-height: 52px`）。
-- [ ] 顶带填充用 `--dsw-bg-sidebar`；`.sidebar` 去掉 `border-right`（`style.css:69`）；`.conversation` 保留 `--dsw-bg-base` 并加 `border-top-left-radius: var(--dsw-radius-lg)`。
-- [ ] `packages/desktop/main.cjs` 的 `titleBarOverlay.color` 改为跟着 `--dsw-bg-sidebar` 走（`CHROME_LIGHT` / `CHROME_DARK` 现在写的是 `#f9fafb` / `#1b1b1c`，对应不了 `tokens.css` 的 `bluish-60` / `bluish-900`）——浅/深两套都要对。
-- [ ] 拖拽区归顶带（`-webkit-app-region: drag`），顶带内没有可交互内容；`.header-row` 不再需要标题栏高度。
-- [ ] 顺带修**现成的溢出**：`.branch-tools`（`style.css:755`）是 flex item，自动最小尺寸等于内容宽度，比 header 的 padding box 还宽，右侧会溢进按钮保留区——加 `min-width: 0` 并允许收缩（原生型 `prototype/07-titlebar.html` 里已验证这一条）。**注（票 04 实测，2026-10-17）**：只加 `.branch-tools { min-width: 0 }` **不够**——`.header` 也是 grid item，它的自动最小尺寸（内容）会被 `.conversation` 的单列 `auto` 取成列宽，列可以比容器宽，于是整行照样出界（720px 窗口实测列 701.4px、按钮 x 872–962、`elementFromPoint` 打不中）。票 04 已把 `.header { min-width: 0 }` 一起加上（`style.css:648` 那一块）；本票立顶带时要保证这两条都在，原型之所以「验证过」是因为原型里没有 `.header` 这个 grid item。
-- [ ] 会话栏顶行（`sidebar-top`，40px + 6px padding）落在顶带之下；实测第一个可点控件应在 y≈47。
+- [x] 把顶带从 `.header` 里拆出去，做成窗口级的一条：`packages/web/src/style.css:648` 的 `.header` 现在同时是标题行的容器（`padding: 0 24px`、`.header-row` 上的 `height: var(--desktop-titlebar)` / `min-height: 52px`）。
+- [x] 顶带填充用 `--dsw-bg-sidebar`；`.sidebar` 去掉 `border-right`（`style.css:69`）；`.conversation` 保留 `--dsw-bg-base` 并加 `border-top-left-radius: var(--dsw-radius-lg)`。
+- [x] `packages/desktop/main.cjs` 的 `titleBarOverlay.color` 改为跟着 `--dsw-bg-sidebar` 走（`CHROME_LIGHT` / `CHROME_DARK` 现在写的是 `#f9fafb` / `#1b1b1c`，对应不了 `tokens.css` 的 `bluish-60` / `bluish-900`）——浅/深两套都要对。
+- [x] 拖拽区归顶带（`-webkit-app-region: drag`），顶带内没有可交互内容；`.header-row` 不再需要标题栏高度。
+- [x] 顺带修**现成的溢出**：`.branch-tools`（`style.css:755`）是 flex item，自动最小尺寸等于内容宽度，比 header 的 padding box 还宽，右侧会溢进按钮保留区——加 `min-width: 0` 并允许收缩（原生型 `prototype/07-titlebar.html` 里已验证这一条）。**注（票 04 实测，2026-10-17）**：只加 `.branch-tools { min-width: 0 }` **不够**——`.header` 也是 grid item，它的自动最小尺寸（内容）会被 `.conversation` 的单列 `auto` 取成列宽，列可以比容器宽，于是整行照样出界（720px 窗口实测列 701.4px、按钮 x 872–962、`elementFromPoint` 打不中）。票 04 已把 `.header { min-width: 0 }` 一起加上（`style.css:648` 那一块）；本票立顶带时要保证这两条都在，原型之所以「验证过」是因为原型里没有 `.header` 这个 grid item。
+- [x] 会话栏顶行（`sidebar-top`，40px + 6px padding）落在顶带之下；实测第一个可点控件应在 y≈47。
 
 ## 验收
 
@@ -37,3 +37,23 @@ Label: feature
 - 原型与全部实测数字：[07 标题栏布局原型](07-titlebar-prototype.md)
 - 真窗口截图：`prototype/shot-A.png`（深·对话）、`shot-A-branch.png`（深·分支）、`shot-A-light.png`、`shot-A-branch-light.png`、`shot-A-branch-zone.png`（按钮保留区描边）
 - 复现原型：`npm run prototype:titlebar`，或双击 `prototype/07-titlebar.html`
+
+## 落地记录（2026-10-17）
+
+**改了什么**：
+
+- `packages/web/src/style.css`：`#app` 加一行 `grid-template-rows: var(--desktop-titlebar) minmax(0, 1fr)`，`background` 换成 `--dsw-bg-sidebar`（顶带、会话栏、6px 手柄列由此成为**一个面**，面板圆角就刻在这个面上——照 07 原型的 `.window` 填充同一条理由）；新增 `.titleband`（占满第 1 行、drag、页面不往里画任何东西）；`.sidebar` / `.side-resizer` / `.conversation` 显式钉在 `grid-row: 2`；`.sidebar` 删 `border-right`；`.conversation` 加 `border-top-left-radius: var(--dsw-radius-lg)`；`.header-row` 删 `height: var(--desktop-titlebar)`（`min-height: 52px` 保留）。
+- `packages/web/src/main.ts`：新增 `titleband` 元素，`#app` 的第一个 grid item。
+- `packages/web/src/tokens.css`：浅色 `--dsw-bg-sidebar` 从 `bluish-50`（249,250,251）改为 `bluish-60`（245,246,247）——票面量的参考值本来就是 60，token 表里还停在 50；顺带删掉暗色表里因此**再无人引用**的 `bluish-60` 重述。
+- `packages/desktop/main.cjs`：`CHROME_LIGHT` `#f9fafb` → `#f5f6f7`（= bluish-60）；`CHROME_DARK` `#1b1b1c` 不动（= bluish-900，本来就对）；注释写明这两块是 token 的手工重述、`--dsw-bg-sidebar` 动它们跟着动。
+
+**验证**：`npm run check` 绿（tsc 四包 + token 审计 137/111）；README 全量 smoke 清单 18 条全绿（含 `smoke:boot`——首跑报过一次「进程没自己退出」的把手泄漏，复跑即绿，与本次纯客户端改动无关；`smoke-api` 对着真服务器跑也绿）。
+
+**目视与像素**（`launch.mjs --load <夹具> --screenshot`，夹具内联真 tokens/style、照当前 DOM 形状手写标记，生成器在 `.scratch/ui-pass/research/fixture-12-titleband.mjs`，截图 `shot-12-{chat,branch}-{dark,light}.png` 同目录）：
+
+- 顶带铺满整宽，与会话栏同色：深 `27,27,28` / 浅 `245,246,247`（x=8、x=640、x=1160 三点实测一致）；面板另一档：深 `21,21,23` / 浅 `255,255,255`。
+- 138×40 按钮保留区描边内露出的是顶带自己的填充——**被按钮压住的总面积 = 0**，对话页与分支页都成立（分支工具行现在整行落在 y≥40，`回到对话` 右缘不进保留区）。
+- 两栏接缝（x=236）实测就是会话栏的色，无分隔像素；面板左上角圆角成立（角外 `27,27,28`、角内 `21,21,23`）。
+- 第一个可点控件（新建会话）实测 y≈49–50，顶带底 40 之下。
+
+**已知偏离**：真应用对 `http://` 页面的 `--load` 捕获在本会话 harness 下依旧被杀（exit 127/−1、无输出，票 03 记过同类症状），所以真窗口截图走的是夹具路线（票 05/08 的成法）；夹具与应用共享同一份样式表，几何与填色因此是应用自己的，标记是手写的。

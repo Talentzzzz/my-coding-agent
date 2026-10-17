@@ -1,11 +1,17 @@
 /*
  * The application shell.
  *
- * Three columns: a sidebar that owns navigation, a drag handle on its right edge, and a conversation
- * column that owns one session. The sidebar is `--dsw-bg-sidebar` and never scrolls as a whole — its
- * list does — so the new-session control stays put while the history moves, which is what makes the
- * list feel like a panel rather than a page. The handle's column is the affordance itself; the
- * sidebar's width is `--dsw-sidebar-width`, which the handle moves and the settings remember.
+ * One band above two columns. The band is the window's own top strip — full width, the sidebar's
+ * fill, and nothing laid out inside it, because the shell's three caption buttons are overlaid onto
+ * its right end (`titleBarOverlay`); a band with page content in it is a band the buttons cover.
+ * `y >= var(--desktop-titlebar)` is where the columns begin: a sidebar that owns navigation, a drag
+ * handle on its right edge, and a conversation column that owns one session. The sidebar is
+ * `--dsw-bg-sidebar` — the band's fill continued, one surface from the top of the window down the
+ * left column — and never scrolls as a whole — its list does — so the new-session control stays put
+ * while the history moves, which is what makes the list feel like a panel rather than a page. The
+ * two columns are set off by their fills alone (no divider line); the conversation is
+ * `--dsw-bg-base`, the other depth of the theme, and its rounded top-left corner is what reads the
+ * panel as a card laid into that surface rather than a third rectangle butted to it.
  *
  * The conversation column is four stacked rows: the title, the transcript (the only one that
  * scrolls), the composer, and the status line. Nothing sits beside the transcript, because the one
@@ -41,10 +47,18 @@ body {
 	overflow: hidden;
 }
 
+/*
+ * The fill behind the columns is the sidebar's, not the base's: the band, the sidebar and the
+ * handle's 6px column are one surface (the reason each is stated once, at `.titleband`). A base fill
+ * here would show the body's tone through the handle's column — a seam the design does not have —
+ * and behind the panel's rounded corner, where the sidebar's own tone is what belongs.
+ */
 #app {
 	display: grid;
-	/* Sidebar · drag handle · conversation. The handle's own column is the affordance. */
+	/* The band · Sidebar · drag handle · conversation. The handle's own column is the affordance. */
 	grid-template-columns: var(--dsw-sidebar-width) 6px minmax(0, 1fr);
+	grid-template-rows: var(--desktop-titlebar) minmax(0, 1fr);
+	background: var(--dsw-bg-sidebar);
 	height: 100vh;
 }
 
@@ -58,22 +72,45 @@ body {
 	display: none;
 }
 
+/*
+ * The top band. Window-level, not any column's: it spans the full width and row 1, and the page
+ * lays nothing out inside it — the caption's three buttons live in its right end and every
+ * touchable thing begins below it. That emptiness is the whole fix: buttons can only cover what is
+ * under them, and under them is now the band's own fill and nothing else. Its fill is `#app`'s —
+ * the sidebar's, and for why see `#app`. (Outside the shell's caption the row collapses to 0px, so
+ * a browser tab shows no band at all.)
+ */
+.titleband {
+	grid-column: 1 / -1;
+	grid-row: 1;
+	-webkit-app-region: drag;
+}
+
 /* ------------------------------------------------------------------ sidebar */
 
+/*
+ * Row 2, column 1 — under the band, where the surface it shares with the band continues. No
+ * `border-right`: the two columns are set off by their fills alone (measured on the reference at
+ * y=300 — the sidebar's tone ends and the panel's begins with no divider pixel between them), and a
+ * hairline there would draw a seam the design does not have.
+ */
 .sidebar {
 	display: flex;
 	flex-direction: column;
+	grid-row: 2;
 	min-height: 0;
 	padding: 6px 12px;
 	background: var(--dsw-bg-sidebar);
-	border-right: 1px solid var(--dsw-border-l1);
 	font-size: var(--dsw-fs-title);
 	line-height: var(--dsw-lh-title);
 }
 
 /*
- * The top row is the drag strip, and it holds the column's two controls: the new-session button and
- * the collapse toggle. Electron needs `app-region` here or the window cannot be moved by its top.
+ * The column's top row, and it holds the column's two controls: the new-session button and the
+ * collapse toggle. It is the first thing under the band — with the band's 40px above and this rule's
+ * 6px of sidebar padding, the first control lands at y≈46–47, clear of the caption's buttons. The
+ * drag region stays on it for macOS, where the band is 0px tall and the traffic lights overlay this
+ * row (hence the inset in the padding); on Windows the band already drags, and this is harmless.
  * The brand that used to share this row is gone — the column is the list, not a product — and with
  * it went the empty seat a logo leaves behind.
  */
@@ -572,6 +609,7 @@ body {
  */
 .side-resizer {
 	position: relative;
+	grid-row: 2;
 	z-index: 6;
 	cursor: col-resize;
 	touch-action: none;
@@ -637,17 +675,33 @@ body {
 
 /* ---------------------------------------------------------------- app region */
 
+/*
+ * Row 2, column 3 — the reading panel, the theme's other depth.
+ *
+ * The top-left corner is rounded, which is what makes band + sidebar read as one surface with a card
+ * laid into it rather than three rectangles butted together. Measured on the reference: the panel's
+ * left edge runs from x=290 at y=40 to x=280 at y=50 — a ~10px radius. Stated a step up the radius
+ * scale (`--dsw-radius-lg`, 16px) because at 12px the arc is only a few pixels of anti-aliasing
+ * against a 24% luminance step and reads as square in a screenshot. Only the top-left: the other
+ * three corners are the window's own or sit against nothing.
+ */
 .conversation {
 	display: grid;
 	/* title · transcript · banners · composer · status line. Only the transcript flexes. */
 	grid-template-rows: auto 1fr auto auto auto;
+	grid-row: 2;
 	min-width: 0;
 	min-height: 0;
 	background: var(--dsw-bg-base);
+	border-top-left-radius: var(--dsw-radius-lg);
 }
 
 /*
  * The fixed header, whole-column wide and never following the reading column in.
+ *
+ * It is NOT the window's top band — the band is `.titleband`, a window-level strip the page lays
+ * nothing out in. This header begins below the band, so nothing in it can ever sit under the
+ * caption's buttons, and it no longer reserves any titlebar height of its own.
  *
  * The first row is the session title on the left and the branch entry on its right; the branch page
  * adds a second row of tools under it. It used to carry the model picker, the thinking level, the
@@ -679,7 +733,6 @@ body {
 	display: flex;
 	align-items: center;
 	gap: 10px;
-	height: var(--desktop-titlebar);
 	min-height: 52px;
 }
 

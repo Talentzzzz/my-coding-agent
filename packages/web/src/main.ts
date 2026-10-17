@@ -153,6 +153,18 @@ function main(): void {
 	let approvalsDrawn: ViewState["approvals"] | undefined;
 	let noticesDrawn: ViewState["models"] | undefined;
 
+	// ---------------------------------------------------------------- the window band
+
+	/**
+	 * The top band: a window-level strip the page lays nothing out in.
+	 *
+	 * The shell's caption buttons are overlaid onto its right end, and that is its entire content —
+	 * which is what makes them harmless. Every control below starts at row 2, so nothing the user can
+	 * press ever sits under them. The fill and the drag region are the stylesheet's (`.titleband`);
+	 * outside the shell's caption the row collapses to 0px and this element is nothing at all.
+	 */
+	const titleband = element("div", "titleband");
+
 	// ---------------------------------------------------------------- the column
 
 	const conversation = element("section", "conversation");
@@ -689,7 +701,10 @@ function main(): void {
 
 	// The handle sits between the two columns — it is the sidebar's right edge, which is the whole
 	// point — and the rail's CSS hides it, since a 52px rail is not a width anyone is choosing.
-	root.append(sidebar.element, sidebarResizer, conversation, settings.element, sessionSettings.element);
+	// The band goes first: as #app's first grid item it takes the window's top row, the one strip the
+	// caption's buttons are overlaid onto, and it stays empty by design — every touchable thing the
+	// page owns begins in row 2, so the buttons cannot cover anything.
+	root.append(titleband, sidebar.element, sidebarResizer, conversation, settings.element, sessionSettings.element);
 
 	// ------------------------------------------------------------------- wiring
 

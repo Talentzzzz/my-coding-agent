@@ -8,8 +8,7 @@
  *
  * Two selectors, not three: the default sheet is light, and `[data-theme="dark"]` on the document
  * element replaces the roles. The static ramps contain a few values that differ between the sheets
- * (`neutral-bluish-60`, and `deepseek-400`'s brightening), so they are restated rather than assumed
- * identical.
+ * (`deepseek-400`'s brightening), so they are restated rather than assumed identical.
  */
 
 :root {
@@ -159,7 +158,13 @@
 	--dsw-bg-layer-1: var(--dsw-static-neutral-bluish-00);
 	--dsw-bg-layer-2: var(--dsw-static-neutral-bluish-00);
 	--dsw-bg-layer-3: var(--dsw-static-neutral-bluish-00);
-	--dsw-bg-sidebar: var(--dsw-static-neutral-bluish-50);
+	/*
+	 * The sidebar's fill, and the top band's with it — the two are one surface. The step is measured,
+	 * not tasted: the reference window's light sidebar reads `rgb(245,246,247)`, one notch deeper
+	 * than the `bluish-50` the sheet first had, enough for the panel's white and the sidebar's grey
+	 * to carry the two columns without a divider line.
+	 */
+	--dsw-bg-sidebar: var(--dsw-static-neutral-bluish-60);
 	--dsw-bg-hover: rgba(38, 49, 72, 0.06);
 	--dsw-bg-active: rgba(38, 49, 72, 0.1);
 	--dsw-bg-hover-solid: var(--dsw-static-neutral-bluish-75);
@@ -262,7 +267,6 @@
 
 :root[data-theme="dark"] {
 	--dsw-static-deepseek-400: rgb(122, 170, 255);
-	--dsw-static-neutral-bluish-60: rgb(249, 250, 251);
 
 	--dsw-bg-base: var(--dsw-static-neutral-bluish-950);
 	--dsw-bg-layer-1: var(--dsw-static-neutral-bluish-875);
