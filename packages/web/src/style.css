@@ -1148,13 +1148,28 @@ input:focus-visible {
 	color: var(--dsw-label-caption);
 }
 
+/*
+ * The one copy control, in both meta rows: an icon, not a browser button.
+ *
+ * A `<button>` that states nothing paints the platform's own surface — `buttonface` plus a bevel —
+ * and the icon's `currentColor` then lands on a light plate in the dark theme, where it is almost
+ * invisible. The reset belongs here rather than on a global `button` rule: `.button`, `.icon-button`
+ * and the menu rows each draw their own control, and a blanket reset would be a second owner of
+ * every one of them.
+ */
 .turn-copy {
 	display: grid;
 	place-items: center;
 	width: 24px;
 	height: 24px;
+	flex: none;
+	padding: 0;
+	border: none;
 	border-radius: 6px;
+	background: transparent;
 	color: var(--dsw-label-caption);
+	font: inherit;
+	cursor: pointer;
 	transition:
 		background 0.12s var(--dsw-ease),
 		color 0.12s var(--dsw-ease);
@@ -1203,12 +1218,16 @@ input:focus-visible {
  * The run's ticking line: one plain label under the conversation while the loop streams — no pill,
  * no verb, just the number moving (01 ⑥). The minutes are the footer's seat too, so the timer and
  * the number it freezes into are set the same way.
+ *
+ * Only the block margins are stated here. The inline ones belong to `.transcript > *` above, which
+ * centres every child in the reading column; a `margin` shorthand would reset them to zero and pull
+ * this one line out to the container's left edge, away from the prose it belongs to.
  */
 .runtime {
 	display: flex;
 	align-items: center;
 	gap: 6px;
-	margin: 16px 0;
+	margin-block: 16px;
 	font-size: var(--dsw-fs-caption);
 	line-height: var(--dsw-lh-caption);
 	color: var(--dsw-label-caption);
@@ -1493,15 +1512,15 @@ input:focus-visible {
 	}
 }
 
-/* The body is prose, not output — Markdown, not mono — but it indents to the same leading as a
-   tool's output, so it reads as the line's continuation, not a second column, and reads one type
-   tier under the answer it precedes. */
+/* The body is prose, not output — Markdown, not mono — but it wears the same unfolded card a tool's
+   output does. The box is stated once, beside `.tool-output` below: fill, border, corner, 22px
+   leading, padding, and the 24rem scroll cap all come from there, so the thought and the command's
+   output cannot drift apart. This rule is only the type inside that box — one tier under the answer
+   rather than the code size. */
 .reasoning-body {
-	margin: 4px 0 8px 22px;
 	color: var(--dsw-label-secondary);
 	font-size: var(--dsw-fs-meta);
 	line-height: var(--dsw-lh-meta);
-	word-break: break-word;
 }
 
 .reasoning-body > :first-child {
@@ -1551,10 +1570,10 @@ input:focus-visible {
  * One tool call, read as a line (01 ④).
  *
  * The call has no box: a run of steps is a column of quiet lines, each `Name  path`, weakly
- * coloured until hover lifts the line. The chevron exists to promise and mark expansion, so it
- * appears on hover and stays while open; the running dot is the one thing on the line that moves.
- * Expanding reveals the content as an indented block under the line — the indent is the summary's
- * own leading (chevron 12px + gap 10px), so the block reads as the line's continuation.
+ * coloured until hover lifts the line. The chevron is a permanent mark — it says "this line opens",
+ * and only its direction changes with the open state — while the running dot is the one thing on the
+ * line that moves. Expanding reveals the content as an indented block under the line — the indent is
+ * the summary's own leading (chevron 12px + gap 10px), so the block reads as the line's continuation.
  */
 .tool {
 	background: transparent;
@@ -1585,17 +1604,13 @@ input:focus-visible {
 	flex: none;
 	width: 12px;
 	color: var(--dsw-label-caption);
-	opacity: 0;
-	transition:
-		opacity var(--dsw-duration-fast) var(--dsw-ease),
-		transform var(--dsw-duration-fast) var(--dsw-ease);
+	transition: transform var(--dsw-duration-fast) var(--dsw-ease);
 }
 
-.tool > summary:hover .tool-chevron,
-.tool[open] .tool-chevron {
-	opacity: 1;
-}
-
+/* Open is the only state the chevron has to say: it turns right so the row reads as a level being
+   unfolded. Visibility is not a state — a mark that has to be found by hovering promises nothing
+   to someone reading rather than pointing, and a run of tool lines that only shows its marks under
+   the pointer reads as flat text. */
 .tool[open] .tool-chevron {
 	transform: rotate(90deg);
 }
@@ -1643,26 +1658,34 @@ input:focus-visible {
 	margin-left: auto;
 }
 
-/* Expanded content is one indented block under the line, and both bodies share the box: the indent
-   is the summary's own leading (chevron 12px + gap 10px), stated once for the two of them. */
+/* Expanded content is one indented block under the line, and the bodies share the box: the indent
+   is the summary's own leading (chevron 12px + gap 10px), stated once for the three of them. A
+   thought's body is one of the three — a run unfolds a thought and a command's output, and the two
+   should read as the same block even though one is prose and the other is code. */
 .tool-output,
-.tool > .diff {
+.tool > .diff,
+.reasoning-body {
 	margin: 4px 0 8px 22px;
 	border: 1px solid var(--dsw-border-l1);
 	border-radius: var(--dsw-radius-sm);
 }
 
-.tool-output {
+/* The scroll panel the two text bodies share; the diff brings its own copy's padding and gutter. */
+.tool-output,
+.reasoning-body {
 	padding: 10px 12px;
 	background: var(--dsw-code-block);
 	color: var(--dsw-label-secondary);
+	max-height: 24rem;
+	overflow: auto;
+	word-break: break-word;
+}
+
+.tool-output {
 	font-family: var(--dsw-font-mono);
 	font-size: var(--dsw-fs-code);
 	line-height: var(--dsw-lh-code);
-	max-height: 24rem;
-	overflow: auto;
 	white-space: pre-wrap;
-	word-break: break-word;
 }
 
 /* ---------------------------------------------------------------- diff view */
@@ -3209,6 +3232,7 @@ select.input {
 .transcript,
 .session-list,
 .tool-output,
+.reasoning-body,
 .diff,
 .settings-body,
 .settings-nav-list,
@@ -3220,6 +3244,7 @@ select.input {
 .transcript::-webkit-scrollbar,
 .session-list::-webkit-scrollbar,
 .tool-output::-webkit-scrollbar,
+.reasoning-body::-webkit-scrollbar,
 .diff::-webkit-scrollbar,
 .settings-body::-webkit-scrollbar,
 .settings-nav-list::-webkit-scrollbar,
@@ -3231,6 +3256,7 @@ select.input {
 .transcript::-webkit-scrollbar-thumb,
 .session-list::-webkit-scrollbar-thumb,
 .tool-output::-webkit-scrollbar-thumb,
+.reasoning-body::-webkit-scrollbar-thumb,
 .diff::-webkit-scrollbar-thumb,
 .settings-body::-webkit-scrollbar-thumb,
 .settings-nav-list::-webkit-scrollbar-thumb,
@@ -3244,6 +3270,7 @@ select.input {
 .transcript::-webkit-scrollbar-thumb:hover,
 .session-list::-webkit-scrollbar-thumb:hover,
 .tool-output::-webkit-scrollbar-thumb:hover,
+.reasoning-body::-webkit-scrollbar-thumb:hover,
 .diff::-webkit-scrollbar-thumb:hover,
 .settings-body::-webkit-scrollbar-thumb:hover,
 .settings-nav-list::-webkit-scrollbar-thumb:hover,

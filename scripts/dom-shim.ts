@@ -545,7 +545,7 @@ export interface DomShim {
 	frames(): number;
 }
 
-/** `installDom()` 装上的窗口：常量、两个计时器，以及可以派发的监听器。 */
+/** `installDom()` 装上的窗口：常量、计时器与帧队列，以及可以派发的监听器。 */
 export interface FakeWindow {
 	addEventListener(type: string, handler: (event?: unknown) => void): void;
 	removeEventListener(type: string, handler: (event?: unknown) => void): void;
@@ -713,6 +713,11 @@ export function installDom(options: InstallOptions = {}): DomShim {
 		innerHeight: options.viewport?.height ?? 800,
 		setTimeout: () => 0,
 		clearTimeout: () => {},
+		// The transcript's ticking line starts an interval while a run streams and clears it when the
+		// run ends. A harness never wants a real clock — the frame queue is what it drives — so the
+		// handle is inert and clearing it is a no-op, the same shape as the two lines above.
+		setInterval: () => 0,
+		clearInterval: () => {},
 		requestAnimationFrame: (callback: (time: number) => void): number => {
 			frameHandle += 1;
 			frameHandles.set(frameHandle, callback);
