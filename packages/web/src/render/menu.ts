@@ -3,6 +3,12 @@ import { element, icon, type IconName } from "../dom.ts";
 /** One row of a menu. A `separator` kind draws the divider and ignores the rest. */
 export interface MenuItem {
 	label?: string;
+	/**
+	 * The row's second line, when a choice needs one more fact than its name carries — the mode
+	 * picker's summaries are the reason this exists. A row with a detail stacks its two lines; the
+	 * active mark still rides the first.
+	 */
+	detail?: string;
 	icon?: IconName;
 	/** The tooltip the row carries, which is usually the full path a label was shortened from. */
 	title?: string;
@@ -69,7 +75,13 @@ function build(items: readonly MenuItem[]): HTMLElement {
 		if (item.danger === true) row.dataset.danger = "true";
 		if (item.title !== undefined) row.title = item.title;
 		if (item.icon !== undefined) row.append(icon(item.icon));
-		row.append(element("span", "menu-label", item.label ?? ""));
+		if (item.detail !== undefined) {
+			const text = element("span", "menu-text");
+			text.append(element("span", "menu-label", item.label ?? ""), element("span", "menu-detail", item.detail));
+			row.append(text);
+		} else {
+			row.append(element("span", "menu-label", item.label ?? ""));
+		}
 		row.addEventListener("click", () => {
 			closeMenu();
 			item.onSelect?.();

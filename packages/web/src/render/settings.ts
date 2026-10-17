@@ -1,9 +1,41 @@
 import { element, icon, iconButton, option } from "../dom.ts";
-import { APPROVAL_TOOLS, type BashSettings, type ModelInput, type ModelOption, type SettingsSnapshot, type SessionSnapshot } from "@my-agent/core/protocol";
+import {
+	APPROVAL_TOOLS,
+	type BashSettings,
+	type ModeSettings,
+	type ModelInput,
+	type ModelOption,
+	type SettingsSnapshot,
+	type SessionSnapshot,
+} from "@my-agent/core/protocol";
+
+/**
+ * The built-in default mode's name, restated here rather than imported.
+ *
+ * The constant's home (`@my-agent/core/config.ts`) runs on Node, and the client must not pull that
+ * into its bundle — the same restatement rule the font-size range follows.
+ */
+const DEFAULT_MODE_NAME = "默认";
 
 /** A row being edited. `apiKey` is present only when the user typed a new one this session. */
 export interface ModelDraft extends ModelOption {
 	apiKey?: string;
+}
+
+/** A mode being edited: the stored shape, plus nothing — a mode carries no secret to hold back. */
+type ModeDraft = ModeSettings;
+
+/** A mode with nothing set: every tool off, every tool auto-allowed — the prototype's new mode. */
+function blankMode(): ModeDraft {
+	const approval: Record<string, boolean> = {};
+	for (const key of APPROVAL_TOOLS) approval[key] = false;
+	return { name: "新模式", tools: [], approval: approval as ModeDraft["approval"] };
+}
+
+/** A mode's one-line summary, the same shape the prototype's mode menu showed. */
+export function modeSummaryOf(tools: readonly string[], approval: Record<string, boolean>): string {
+	const ask = tools.filter((tool) => approval[tool as keyof typeof approval] === true).length;
+	return `${tools.length} 个工具 · ${ask} 项询问`;
 }
 
 export interface SettingsHandlers {
@@ -11,6 +43,7 @@ export interface SettingsHandlers {
 	onTheme(theme: "system" | "light" | "dark"): void;
 	onFontSize(size: number): void;
 	onSaveModels(rows: ModelInput[]): Promise<void>;
+	onSaveModes(modes: ModeSettings[]): Promise<void>;
 	onDefaultModel(ref: string): void;
 	/** The global default active tool set, whole — the session-level panel resets to it. */
 	onGlobalTools(names: string[]): void;
@@ -30,7 +63,7 @@ export interface SettingsState {
 	snapshot?: SessionSnapshot;
 }
 
-type Tab = "appearance" | "models" | "defaults";
+type Tab = "appearance" | "models" | "modes" | "defaults";
 
 /**
  * A starting point for a new row, so the form never opens with empty numbers in it.
@@ -119,6 +152,19 @@ export class SettingsPanel {
 	private form?: ModelDraft;
 	private saving = false;
 	private signature = "";
+	/**
+	 * The modes tab's own interaction state, kept beside the models' rather than shared with it:
+	 * the two lists are edited on the same one-interaction-at-a-time rule, but their rows have
+	 * different shapes and their commits go to different endpoints, so sharing the fields would
+	 * couple two save paths that must never move together.
+	 */
+	private modeFrozen?: ModeDraft[];
+	/** Which mode is open for editing: a row index, or the add form's blank one. */
+	private modeEditing?: number | "new";
+	/** The mode with a delete confirmation standing under it. */
+	private modeConfirming?: number;
+	/** The values typed into the open mode form, present exactly while one is open. */
+	private modeForm?: ModeDraft;
 
 	constructor(handlers: SettingsHandlers) {
 		this.handlers = handlers;
@@ -135,6 +181,7 @@ export class SettingsPanel {
 		for (const [id, label] of [
 			["appearance", "外观"],
 			["models", "模型"],
+			["modes", "模式"],
 			["defaults", "默认"],
 		] as [Tab, string][]) {
 			const button = element("button", "settings-nav-item", label, { type: "button" });
@@ -169,7 +216,12 @@ export class SettingsPanel {
 		return !this.element.hidden;
 	}
 
-	show(): void {
+	/**
+	 * Open the panel, optionally straight onto one tab — the composer's 「去设置 › 模式」 names its
+	 * tab, because the click already said what the person is going there for.
+	 */
+	show(tab?: Tab): void {
+		if (tab !== undefined) this.tab = tab;
 		this.element.hidden = false;
 		this.clearInteraction();
 		this.saving = false;
@@ -200,6 +252,9 @@ export class SettingsPanel {
 						state.settings.bash.maxTimeoutMs,
 						state.settings.tools?.join(",") ?? "",
 						Object.entries(state.settings.approval).join(","),
+						(state.settings.modes ?? [])
+							.map((mode) => `${mode.name}:${mode.tools.join(",")}:${Object.entries(mode.approval).join(",")}`)
+							.join(";"),
 					].join("/")
 				: "",
 			state.models.map((model) => `${model.name}:${model.modelId}:${model.hasApiKey}`).join(","),
@@ -246,6 +301,9 @@ export class SettingsPanel {
 				return;
 			case "models":
 				this.body.replaceChildren(this.modelsSection());
+				return;
+			case "modes":
+				this.body.replaceChildren(this.modesSection());
 				return;
 			default:
 				this.body.replaceChildren(this.defaultsSection());
@@ -532,12 +590,16 @@ export class SettingsPanel {
 		this.begin({});
 	}
 
-	/** End any open interaction outright, dropping the freeze with it. */
+	/** End any open interaction outright, dropping both freezes with it. */
 	private clearInteraction(): void {
 		this.editing = undefined;
 		this.confirming = undefined;
 		this.form = undefined;
 		this.frozen = undefined;
+		this.modeEditing = undefined;
+		this.modeConfirming = undefined;
+		this.modeForm = undefined;
+		this.modeFrozen = undefined;
 	}
 
 	/**
@@ -588,15 +650,336 @@ export class SettingsPanel {
 		await this.commit(this.rows.filter((_row, at) => at !== index));
 	}
 
+	// ----------------------------------------------------------------------- modes
+
+	/**
+	 * The modes tab: the built-in default card and the user's modes beneath it.
+	 *
+	 * The default card is the global defaults read live (ADR-0005) — the same two controls the
+	 * defaults tab used to carry, moved here because a mode *is* a tool set plus an approval set, and
+	 * two doors to one value would only drift apart. It applies on the spot, the way those controls
+	 * always have; the user's modes get the same inline edit / confirmed delete the model rows have.
+	 */
+	private modesSection(): HTMLElement {
+		const section = element("section", "settings-section");
+		section.append(
+			element(
+				"p",
+				"settings-hint",
+				"模式 = 一组工具与审批配置。会话在输入框左下角选择模式；模式只能在这里修改，会话只用。",
+			),
+		);
+		section.append(this.defaultModeCard());
+
+		const modes = this.modeRows;
+		for (const [index, mode] of modes.entries()) section.append(this.modeRow(mode, index));
+
+		if (this.modeEditing === "new" && this.modeForm !== undefined) {
+			section.append(this.modeFormCard(this.modeForm, () => this.closeModeInteraction(), () => void this.commitModeAdd()));
+		} else {
+			const add = element("button", "model-add", undefined, { type: "button" });
+			add.append(icon("plus"), element("span", undefined, "新建模式"));
+			add.addEventListener("click", () => this.beginAddMode());
+			section.append(add);
+		}
+		return section;
+	}
+
+	/** The modes as they stand: the frozen list while an interaction is open, the server's otherwise. */
+	private get modeRows(): ModeDraft[] {
+		return this.modeFrozen ?? (this.state.settings?.modes ?? []).map((mode) => ({ ...mode, approval: { ...mode.approval } }));
+	}
+
+	/**
+	 * The tools one mode's form offers, in the order the toggle rows draw.
+	 *
+	 * The build's own list — which only a session's `allTools` can name, so without one the six
+	 * built-ins stand in — plus anything the mode already names that the build no longer has, so a
+	 * tool an upgrade dropped can still be unchecked rather than silently carried. The fallback list
+	 * is a mode form's convenience only: the default card's writes go through the build's own list,
+	 * and stand down when no session has named it.
+	 */
+	private modeToolList(mode: ModeDraft | undefined): string[] {
+		const all = this.state.snapshot?.allTools;
+		const base = all !== undefined && all.length > 0 ? [...all] : [...APPROVAL_TOOLS];
+		if (mode !== undefined) {
+			for (const name of mode.tools) if (!base.includes(name)) base.push(name);
+		}
+		return base;
+	}
+
+	/**
+	 * The built-in default mode: never stored, always the global defaults.
+	 *
+	 * The header is a plain label rather than a door — there is no form to open, the controls are
+	 * always live — and the trash has nothing to delete. Its summary is computed from the same values
+	 * its toggles write, so the card can never describe a state it does not hold.
+	 */
+	private defaultModeCard(): HTMLElement {
+		const settings = this.state.settings;
+		const card = element("div", "model-row");
+		const head = element("div", "model-row-head");
+		head.append(
+			element("span", "model-label", DEFAULT_MODE_NAME),
+			element("span", "mode-badge", "内置"),
+			element(
+				"span",
+				"mode-summary",
+				modeSummaryOf(settings?.tools ?? this.state.snapshot?.allTools ?? [], settings?.approval ?? {}),
+			),
+		);
+		card.append(head, this.modeToolTable(undefined));
+		return card;
+	}
+
+	/** One user mode: the head that opens it, the trash that asks once, and the form when open. */
+	private modeRow(mode: ModeDraft, index: number): HTMLElement {
+		const row = element("div", "model-row");
+		if (this.modeEditing === index) row.classList.add("editing");
+		if (this.modeConfirming === index) row.classList.add("confirming");
+
+		const head = element("button", "model-row-head", undefined, { type: "button" });
+		head.append(
+			element("span", "model-label", mode.name),
+			element("span", "mode-summary", modeSummaryOf(mode.tools, mode.approval)),
+		);
+		head.addEventListener("click", () => this.beginModeEdit(index));
+		row.append(head);
+
+		row.append(iconButton("trash", "删除这个模式", () => this.beginModeConfirm(index), "icon-button model-row-del"));
+
+		if (this.modeEditing === index && this.modeForm !== undefined) {
+			row.append(this.modeFormCard(this.modeForm, () => this.closeModeInteraction(), () => void this.commitModeRow(index)));
+		}
+		if (this.modeConfirming === index) row.append(this.modeConfirmBar(mode, index));
+
+		return row;
+	}
+
+	/** The delete confirmation for one mode, standing in the row it would act on. */
+	private modeConfirmBar(mode: ModeDraft, index: number): HTMLElement {
+		const bar = element("div", "model-confirm");
+		bar.append(element("span", undefined, `删除模式「${mode.name}」？此操作不可撤销。`));
+		bar.append(element("span", "model-confirm-spacer"));
+		const remove = element("button", "button danger", undefined, { type: "button" });
+		remove.textContent = "删除";
+		remove.disabled = this.saving;
+		remove.addEventListener("click", () => void this.commitModeRemove(index));
+		bar.append(remove);
+		const cancel = element("button", "button", undefined, { type: "button" });
+		cancel.textContent = "取消";
+		cancel.addEventListener("click", () => this.closeModeInteraction());
+		bar.append(cancel);
+		return bar;
+	}
+
+	/**
+	 * One mode's tool table: a toggle row per tool, the approval select riding beside it.
+	 *
+	 * Only the tools the approval map has keys for carry a select — a delegated call asks nobody by
+	 * design — so the extra tools a registry adds draw their toggle alone. An unchecked tool's select
+	 * is disabled rather than hidden: the choice it would hold still belongs to the mode.
+	 */
+	private modeToolTable(mode: ModeDraft | undefined): HTMLElement {
+		const table = element("div", "mode-tooltable");
+
+		// The live values, read once: for the default card they are the settings themselves (each
+		// change writes straight through), for a form they are the draft the form is editing.
+		const live: { tools: string[]; approval: Record<string, boolean> } = mode ?? {
+			tools: this.state.settings?.tools ?? this.state.snapshot?.allTools ?? [],
+			approval: this.state.settings?.approval ?? ({} as Record<string, boolean>),
+		};
+		const active = new Set(live.tools);
+		// The default card's writes have to land on the build's own list, and only a session's
+		// `allTools` can name it — the old defaults section refused to invent one, and so does this:
+		// without a session its toggles stand down rather than write the six built-ins over a set
+		// that may name more. A user mode's form keeps its fallback list, because editing a stored
+		// preset writes the preset, not the live default.
+		const global = mode === undefined;
+		const grounded = this.state.snapshot?.allTools;
+		const standDown = global && (grounded === undefined || grounded.length === 0);
+		if (standDown) {
+			table.append(element("span", "model-hint", "还没有挂上任何会话，暂时列不出本构建的工具名；挂上会话后再改默认集。"));
+		}
+
+		for (const name of this.modeToolList(mode)) {
+			const row = element("div", "mode-tool");
+			const box = element("input", undefined, undefined, { type: "checkbox", "aria-label": `启用 ${name}` });
+			box.checked = active.has(name);
+			box.disabled = standDown;
+			box.addEventListener("change", () => {
+				if (global) {
+					// The stand-down's belt: a real browser never fires a disabled toggle's change, and a
+					// write with no list to write against would invent one.
+					if (grounded === undefined || grounded.length === 0) return;
+					const next = new Set(active);
+					if (box.checked) next.add(name);
+					else next.delete(name);
+					// The set is written whole, in the build's own order, the same way the old defaults
+					// tab wrote it.
+					this.handlers.onGlobalTools(grounded.filter((candidate) => next.has(candidate)));
+					return;
+				}
+				const tools = new Set(mode.tools);
+				if (box.checked) tools.add(name);
+				else tools.delete(name);
+				mode.tools = [...tools];
+			});
+			row.append(box, element("span", "mode-tool-name", name));
+
+			if ((APPROVAL_TOOLS as readonly string[]).includes(name)) {
+				const select = element("select", "input mode-tool-approval");
+				select.append(option("allow", "自动允许"), option("ask", "每次询问"));
+				select.value = (live.approval[name] === true) ? "ask" : "allow";
+				select.disabled = !box.checked;
+				box.addEventListener("change", () => {
+					select.disabled = !box.checked;
+				});
+				select.addEventListener("change", () => {
+					const asked = select.value === "ask";
+					if (global) this.handlers.onGlobalApproval(name, asked);
+					else mode.approval[name as keyof typeof mode.approval] = asked;
+				});
+				row.append(select);
+			}
+			table.append(row);
+		}
+		return table;
+	}
+
+	/** The inline mode form, shared by editing and adding. */
+	private modeFormCard(draft: ModeDraft, onCancel: () => void, onSave: () => void): HTMLElement {
+		const form = element("div", "model-form");
+		const nameInput = element("input", "input", undefined, { type: "text", value: draft.name });
+		nameInput.addEventListener("input", () => {
+			draft.name = nameInput.value;
+		});
+		const nameField = element("label", "model-field");
+		nameField.append(
+			element("span", "settings-label", "模式名称"),
+			nameInput,
+			element("span", "model-hint", "这个名字是模式的身份；「默认」是内置模式的名字，不能用"),
+		);
+		form.append(nameField, this.modeToolTable(draft));
+
+		const actions = element("div", "model-actions");
+		const cancel = element("button", "button", undefined, { type: "button" });
+		cancel.textContent = "取消";
+		cancel.addEventListener("click", onCancel);
+		const save = element("button", "button primary", undefined, { type: "button" });
+		save.textContent = this.saving ? "保存中…" : "保存";
+		save.disabled = this.saving;
+		save.addEventListener("click", onSave);
+		actions.append(cancel, save);
+		form.append(actions);
+		return form;
+	}
+
+	// ------------------------------------------------ mode interactions
+
+	/** Open one mode interaction and close whatever stood, freezing the list it edits against. */
+	private beginMode(next: { editing?: number | "new"; confirming?: number; form?: ModeDraft }): void {
+		this.modeEditing = next.editing;
+		this.modeConfirming = next.confirming;
+		this.modeForm = next.form;
+		this.modeFrozen =
+			next.editing === undefined && next.confirming === undefined ? undefined : this.modeRows;
+		this.renderBody();
+	}
+
+	private beginModeEdit(index: number): void {
+		const mode = this.modeRows.at(index);
+		if (mode === undefined) return;
+		this.beginMode({ editing: index, form: { ...mode, approval: { ...mode.approval } } });
+	}
+
+	private beginAddMode(): void {
+		this.beginMode({ editing: "new", form: blankMode() });
+		this.body.lastElementChild?.scrollIntoView({ block: "nearest" });
+	}
+
+	private beginModeConfirm(index: number): void {
+		if (this.modeRows.at(index) === undefined) return;
+		this.beginMode({ confirming: index });
+	}
+
+	private closeModeInteraction(): void {
+		this.beginMode({});
+	}
+
+	/** Send one mode action's list whole, and fold the answer in — the model commit's twin. */
+	private async commitModes(modes: ModeSettings[]): Promise<void> {
+		this.saving = true;
+		this.renderBody();
+		let outcome: { message: string; tone: "ok" | "error" };
+		try {
+			await this.handlers.onSaveModes(modes);
+			this.modeEditing = undefined;
+			this.modeConfirming = undefined;
+			this.modeForm = undefined;
+			this.modeFrozen = undefined;
+			this.signature = "";
+			outcome = { message: "模式已保存。", tone: "ok" };
+		} catch (error) {
+			outcome = { message: error instanceof Error ? error.message : String(error), tone: "error" };
+		} finally {
+			this.saving = false;
+			this.renderBody();
+		}
+		this.reportNote(outcome.message, outcome.tone);
+	}
+
+	/**
+	 * The sentence refusing a draft's name, or undefined when it may join the list.
+	 *
+	 * Empty and reserved names never reach the commit, and neither does a duplicate — the name is a
+	 * mode's identity, so the client refuses before the server ever sees the list. `skip` is the row
+	 * being edited, which owns its own name.
+	 */
+	private nameErrorFor(name: string, rows: readonly ModeDraft[], skip?: number): string | undefined {
+		if (name.length === 0) return "模式要有自己的名字。";
+		if (name === DEFAULT_MODE_NAME) return "「默认」是内置模式的名字，不能另用。";
+		if (rows.some((mode, at) => at !== skip && mode.name === name)) return `模式名「${name}」已经在用。`;
+		return undefined;
+	}
+
+	private async commitModeRow(index: number): Promise<void> {
+		const form = this.modeForm;
+		if (form === undefined) return;
+		const name = form.name.trim();
+		const refused = this.nameErrorFor(name, this.modeRows, index);
+		if (refused !== undefined) {
+			this.reportNote(refused, "error");
+			return;
+		}
+		await this.commitModes(this.modeRows.map((mode, at) => (at === index ? { ...form, name, approval: { ...form.approval } } : mode)));
+	}
+
+	private async commitModeAdd(): Promise<void> {
+		const form = this.modeForm;
+		if (form === undefined) return;
+		const name = form.name.trim();
+		const refused = this.nameErrorFor(name, this.modeRows);
+		if (refused !== undefined) {
+			this.reportNote(refused, "error");
+			return;
+		}
+		await this.commitModes([...this.modeRows, { ...form, name, approval: { ...form.approval } }]);
+	}
+
+	private async commitModeRemove(index: number): Promise<void> {
+		if (this.modeRows.at(index) === undefined) return;
+		await this.commitModes(this.modeRows.filter((_mode, at) => at !== index));
+	}
+
 	// --------------------------------------------------------------------- defaults
 
 	/**
 	 * The defaults a session that never chose opens on.
 	 *
-	 * Each one is a value in the settings files, which is why the section renders whether or not a
-	 * session happens to be on screen — these are the answers for a session that does not exist yet.
-	 * The session's own choices are the other panel's, and the model a live session is on is the
-	 * composer's; nothing here reaches either.
+	 * The tool set and the approval map are not here any more: they are the built-in default mode now
+	 * (ADR-0005), and the modes tab is their one door. What stays is the half that is *not* a mode —
+	 * the row a new session starts on, and the bash timeouts.
 	 */
 	private defaultsSection(): HTMLElement {
 		const section = element("section", "settings-section");
@@ -605,9 +988,6 @@ export class SettingsPanel {
 
 		// The bash timeouts belong to the settings files, not to the session on screen.
 		section.append(this.bashSection());
-
-		section.append(this.globalApprovalSection());
-		section.append(this.globalToolsSection());
 		return section;
 	}
 
@@ -665,70 +1045,5 @@ export class SettingsPanel {
 			if (Number.isFinite(seconds) && seconds >= 1) onCommit(Math.round(seconds * 1000));
 		});
 		return this.field(label, input, hint);
-	}
-
-	/**
-	 * The global default approval map, over the six tools the map has keys for.
-	 *
-	 * The keys are the loadout's rather than a session's active set — the map gates tools whether or
-	 * not a given session has them active — so the list is the fixed six and not whatever one session
-	 * happens to carry. A session that has chosen its own answers keeps them: this only decides what
-	 * the next unchoosing session opens on.
-	 */
-	private globalApprovalSection(): HTMLElement {
-		const group = element("div", "settings-field stack");
-		group.append(element("span", "settings-label", "运行前先询问"));
-		group.append(
-			element("span", "model-hint", "新建会话的默认值；已单独选过的会话不受影响。这里没勾选的工具会直接运行、不再询问。"),
-		);
-		for (const key of APPROVAL_TOOLS) {
-			const label = element("label", "settings-check");
-			const box = element("input", undefined, undefined, { type: "checkbox" });
-			box.checked = this.state.settings?.approval[key] === true;
-			box.addEventListener("change", () => this.handlers.onGlobalApproval(key, box.checked));
-			label.append(box, document.createTextNode(key));
-			group.append(label);
-		}
-		return group;
-	}
-
-	/**
-	 * The global default active tool set.
-	 *
-	 * The names on offer are the build's, which the client only knows from a session's `allTools` —
-	 * so without one on screen the section says so rather than inventing a list. No field at all means
-	 * every tool, and the checkboxes show that as the effective set: unchecking one writes the whole
-	 * rest, which is the session-level endpoint's own replace-whole contract.
-	 */
-	private globalToolsSection(): HTMLElement {
-		const group = element("div", "settings-field stack");
-		group.append(element("span", "settings-label", "默认启用的工具"));
-		group.append(
-			element("span", "model-hint", "新建会话默认打开哪些工具；已单独选过的会话不受影响。不设置就是全部启用。"),
-		);
-		const allTools = this.state.snapshot?.allTools;
-		if (allTools === undefined || allTools.length === 0) {
-			group.append(element("span", "model-hint empty", "还没有挂上任何会话，暂时列不出本构建的工具名。"));
-			return group;
-		}
-		// Undefined is the full set, so the effective default is what the checkboxes have to show and
-		// edit — never an absent field behind a half-ticked list.
-		const effective = this.state.settings?.tools ?? allTools;
-		const active = new Set(effective.filter((name) => allTools.includes(name)));
-		for (const name of allTools) {
-			const label = element("label", "settings-check");
-			const box = element("input", undefined, undefined, { type: "checkbox" });
-			box.checked = active.has(name);
-			box.addEventListener("change", () => {
-				const next = new Set(active);
-				if (box.checked) next.add(name);
-				else next.delete(name);
-				// Sent in the registry's order, so the stored list does not depend on click order.
-				this.handlers.onGlobalTools(allTools.filter((candidate) => next.has(candidate)));
-			});
-			label.append(box, document.createTextNode(name));
-			group.append(label);
-		}
-		return group;
 	}
 }

@@ -120,6 +120,30 @@ try {
 	const hubId = await server.hub.currentSessionId();
 	console.log(`current ${landing.status} sessionId=${sessionId} hub=${hubId} agrees=${sessionId === hubId}`);
 
+	// The modes surface (ADR-0005): the patch replaces the list whole, the snapshot carries it back,
+	// and a name colliding with the built-in default's — or with another row's — is refused, not made
+	// unique. Everything here rides the scratch home, so nothing leaks into the machine's settings.
+	const saved = await request(server.url, "PATCH", "/api/settings", {
+		patch: { modes: [{ name: "smoke-readonly", tools: ["read", "glob", "grep"], approval: { bash: false } }] },
+	});
+	check("modes saved through the settings patch", saved.status === 200, JSON.stringify(saved.payload));
+	const carried = (saved.payload as { settings?: { modes?: { name: string; tools: string[] }[] } }).settings?.modes;
+	check(
+		"the snapshot carries the saved mode whole",
+		carried?.length === 1 && carried[0]!.name === "smoke-readonly" && carried[0]!.tools.join(",") === "read,glob,grep",
+		JSON.stringify(carried),
+	);
+	const reserved = await request(server.url, "PATCH", "/api/settings", {
+		patch: { modes: [{ name: "默认", tools: [], approval: {} }] },
+	});
+	check("the built-in default's name is reserved", reserved.status === 400, String(reserved.status));
+	const duplicate = await request(server.url, "PATCH", "/api/settings", {
+		patch: { modes: [{ name: "a", tools: [], approval: {} }, { name: "a", tools: [], approval: {} }] },
+	});
+	check("a duplicate mode name is refused", duplicate.status === 400, String(duplicate.status));
+	const cleared = await request(server.url, "PATCH", "/api/settings", { patch: { modes: [] } });
+	check("an empty list is a choice the patch accepts", cleared.status === 200, String(cleared.status));
+
 	const wire: WireClient = await connect(`${server.url.replace("http", "ws")}/mux`);
 	const baseline = await wire.open(sessionId);
 	check("the lane serves the landing session", baseline.id === sessionId, `baseline=${baseline.id} landing=${sessionId}`);

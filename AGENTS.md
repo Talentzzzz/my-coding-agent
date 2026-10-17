@@ -57,6 +57,11 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   `tool_config` entry 里。
 - **tool set（工具集合）** —— 活跃工具和审批映射是**一个**决定，一起写在一条 `tool_config` entry 里；
   它是状态，绝不是对话。
+- **mode（模式）** —— 全局设置里一个命名的预设：工具集合 + 每工具审批映射，整份存进 settings 的
+  `modes` 字段。内置「默认」模式不存储——它就是全局默认（`tools` 缺省全量 + `approval`）的活视图，
+  所以选「默认」等于会话级面板的「沿用全局」。会话选模式 = 现有的 `PUT /tools` + 审批 `PATCH` 两个
+  命令的组合，落既有 `tool_config` entry——没有新模式 entry kind，也没有会话端点；输入框的座位是
+  从快照与模式表**按值匹配**出来的（ADR-0005）。
 - **fork（派生子会话）** —— `forkFrom()` 写出一个**新**文件，把源的**文件路径**记为 `parentSession`，
   链和 id 原样复制。
 - **branch（分支）** —— 同一个会话里的另一条路径，而 fork 是另一个文件；`branch(entryId)` 移动 leaf，

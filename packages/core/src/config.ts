@@ -130,6 +130,32 @@ export interface BashSettings {
 
 export const DEFAULT_BASH_SETTINGS: BashSettings = { defaultTimeoutMs: 120_000, maxTimeoutMs: 3_600_000 };
 
+/**
+ * The name of the built-in default mode, which the settings never store.
+ *
+ * The default mode *is* the global defaults — the default tool set and the default approval map,
+ * read live — so it has no row of its own to keep in step with them (ADR-0005). The name is
+ * reserved: a stored mode claiming it would shadow the one answer the composer must always find.
+ */
+export const DEFAULT_MODE_NAME = "默认";
+
+/**
+ * One mode: a named preset of tools and approvals, edited in the app-level settings and applied to
+ * a session wholesale.
+ *
+ * Both halves travel whole, on the same contract the session's own `tool_config` entries follow:
+ * a mode is one decision, so applying it must not merge into whatever the session held before. The
+ * name is the mode's identity — the composer names the active mode by matching values against this
+ * list, which is why a duplicate name is refused rather than made unique.
+ */
+export interface ModeSettings {
+	name: string;
+	/** The active tool set the mode applies, whole. An empty list is a choice: nothing active. */
+	tools: string[];
+	/** Per-tool approval over the keys the approval map gates; a session applies it as one patch. */
+	approval: Record<ToolApprovalKey, boolean>;
+}
+
 export interface Settings {
 	/** `<name>/<model-id>`. Undefined lets the session pick a default. */
 	model?: string;
@@ -139,6 +165,11 @@ export interface Settings {
 	 * so an old settings file needs no migration and no field of its own.
 	 */
 	tools?: string[];
+	/**
+	 * The user's modes, whole, in the order the picker lists them. Absent means none: the built-in
+	 * default mode is never stored, so an old file is already a valid modes file (ADR-0005).
+	 */
+	modes?: ModeSettings[];
 	/** Theme and font size, as the window draws them. */
 	appearance: AppearanceSettings;
 	/** Tools that must be approved in the UI before they run. */
@@ -208,6 +239,9 @@ export function mergeSettings(input: unknown): Settings {
 
 	const tools = stringListOrUndefined(record.tools);
 	if (tools !== undefined) merged.tools = tools;
+
+	const modes = modesOr(record.modes);
+	if (modes !== undefined) merged.modes = modes;
 
 	const hiddenWorkspaces = stringListOrUndefined(record.hiddenWorkspaces);
 	if (hiddenWorkspaces !== undefined) merged.hiddenWorkspaces = hiddenWorkspaces;
@@ -363,4 +397,38 @@ function stringOrUndefined(value: unknown): string | undefined {
 function stringListOrUndefined(value: unknown): string[] | undefined {
 	if (!Array.isArray(value)) return undefined;
 	return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+}
+
+/**
+ * The user's modes, entry by entry, or undefined for "none were ever written".
+ *
+ * The file is hand-editable, so the same generosity the other list fields show applies here: an
+ * entry that is not a record, carries no name of its own, or names a tool that is not a string is
+ * dropped on its own — one bad mode must not cost the others their place. A duplicate name keeps
+ * its first occurrence, because the name is the identity the composer matches against and two rows
+ * answering to one name would make that match a coin flip. An empty list is *kept*: a user who
+ * deleted every mode made a choice, and an absent field must stay distinguishable from it.
+ *
+ * A mode's approval map is normalized over the standard defaults rather than trusted: the UI always
+ * writes every key, so a missing one is a hand edit, and the answer it falls back to is the same
+ * map a brand-new session opens on.
+ */
+function modesOr(value: unknown): ModeSettings[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const out: ModeSettings[] = [];
+	for (const entry of value) {
+		if (!isRecord(entry)) continue;
+		const name = stringOrUndefined(entry.name);
+		if (name === undefined) continue;
+		if (out.some((mode) => mode.name === name)) continue;
+		const tools = stringListOrUndefined(entry.tools);
+		if (tools === undefined) continue;
+		const approvalRecord = isRecord(entry.approval) ? entry.approval : {};
+		const approval = { ...DEFAULT_SETTINGS.approval };
+		for (const key of Object.keys(DEFAULT_SETTINGS.approval) as ToolApprovalKey[]) {
+			if (typeof approvalRecord[key] === "boolean") approval[key] = approvalRecord[key];
+		}
+		out.push({ name, tools, approval });
+	}
+	return out;
 }

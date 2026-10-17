@@ -7,6 +7,7 @@ import {
 	settingsPath,
 	type AppearanceSettings,
 	type BashSettings,
+	type ModeSettings,
 	type RetrySettings,
 	type Settings,
 } from "./config.ts";
@@ -31,6 +32,11 @@ export interface SettingsPatch {
 	model?: string;
 	/** The global default active tool set. A whole list, like the tool set on a session. */
 	tools?: string[];
+	/**
+	 * The user's modes, sent whole like `tools` (ADR-0005): the panel edits a list, and a mode
+	 * renamed here and another deleted there have to land together or not at all.
+	 */
+	modes?: ModeSettings[];
 	/**
 	 * Workspaces the sidebar does not list, by absolute path. A whole list, like `tools`: the setting
 	 * is the set of hidden workspaces, so one more hidden workspace is the previous list with one more

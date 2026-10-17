@@ -6,6 +6,14 @@ export interface ComposerHandlers {
 	onAbort(): void;
 	onSelectModel(ref: string): void;
 	onSelectLevel(level: string): void;
+	/**
+	 * Open the mode menu over the mode button. The menu's rows are the window's to build — which
+	 * modes exist and which is on are state the composer does not hold — so this hands over the
+	 * anchor and nothing else.
+	 */
+	onModes(anchor: HTMLElement): void;
+	/** Apply a mode to the session this window is on: its tool set and its approval map, whole. */
+	onSelectMode(name: string): void;
 	/** The session-level settings panel, which is what the composer's own button opens. */
 	onOpenSessionSettings(): void;
 }
@@ -47,10 +55,14 @@ export class Composer {
 	private readonly send: HTMLButtonElement;
 	private readonly stop: HTMLButtonElement;
 	private readonly queue: HTMLElement;
+	private readonly modeButton: HTMLButtonElement;
+	private readonly modeLabel: HTMLSpanElement;
 	private readonly modelSelect: HTMLSelectElement;
 	private readonly levelSelect: HTMLSelectElement;
 	private modelSignature = "";
 	private levelSignature = "";
+	/** The mode name the label was last drawn from; a gate, like the two selects' signatures. */
+	private modeSignature: string | undefined;
 	private streaming = false;
 	private disabled = false;
 
@@ -66,6 +78,19 @@ export class Composer {
 		const bar = element("div", "composer-bar");
 		this.queue = element("span", "composer-queued");
 		this.queue.hidden = true;
+
+		// The mode seat leads the bar's left end: which preset of tools and approvals the session runs
+		// on is chosen while working and read at a glance, and the bar's left is where such controls
+		// live (the gear beside it is the same grammar). The menu itself opens through the handler —
+		// the rows are the window's to build from its own state.
+		this.modeButton = element("button", "composer-mode", undefined, {
+			type: "button",
+			"aria-haspopup": "menu",
+			title: "模式：工具与审批的预设",
+		});
+		this.modeLabel = element("span", "composer-mode-label", "默认");
+		this.modeButton.append(icon("sliders"), this.modeLabel, icon("chevron"));
+		this.modeButton.addEventListener("click", () => handlers.onModes(this.modeButton));
 
 		this.modelSelect = element("select", "composer-select", undefined, { "aria-label": "模型" });
 		this.modelSelect.addEventListener("change", () => handlers.onSelectModel(this.modelSelect.value));
@@ -86,7 +111,7 @@ export class Composer {
 		this.send = element("button", "button primary", undefined, { type: "submit" });
 		this.send.append(element("span", undefined, "发送"), icon("send"));
 
-		bar.append(sessionSettings, seat, this.queue, this.stop, this.send);
+		bar.append(this.modeButton, sessionSettings, seat, this.queue, this.stop, this.send);
 		this.element.append(this.textarea, bar);
 
 		this.element.addEventListener("submit", (event) => {
@@ -177,6 +202,21 @@ export class Composer {
 		this.levelSelect.value = selection.level;
 		// One level is not a choice: a model that cannot think has nothing to pick between.
 		this.levelSelect.hidden = selection.levels.length <= 1;
+	}
+
+	/**
+	 * Draw the mode seat's label.
+	 *
+	 * The name is the only thing the button holds: which presets exist and what they contain belong
+	 * to the menu, which is rebuilt on every open. An unmatched session — one whose tools and
+	 * approvals no mode names, usually after a hand tweak in the session panel — shows 「自定义」
+	 * rather than pretending to be on a preset it has left.
+	 */
+	setModes(current: string | undefined): void {
+		const label = current ?? "自定义";
+		if (label === this.modeSignature) return;
+		this.modeSignature = label;
+		this.modeLabel.textContent = label;
 	}
 
 	setDisabled(disabled: boolean): void {

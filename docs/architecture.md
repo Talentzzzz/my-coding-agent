@@ -84,6 +84,8 @@ openAgent({ workspaceRoot, sessionManager, models })   # 设置、AGENTS.md、�
 
 这些文件为 `approval` 与 `tools`（全局默认活跃工具集，缺省即全量）提供的是**一个新会话打开时的默认值**。会话自己的选择记录在它的 transcript 里、作为一条 `tool_config` entry，并在它存活期间覆盖那些文件——所以 `PATCH /api/settings` 移动的是默认值，`PATCH /api/sessions/{id}` 移动的是该会话。这正是为什么设置面板里的审批开关要发往会话端点，和工具开关并排。
 
+**模式是这两半的命名预设，不是第三个状态层**（[ADR-0005](adr/0005-modes-are-a-tool-config-choice.md)）。`modes` 字段整表存在 settings 文件里（`ModeSettings[] = { name, tools, approval }`，`PATCH /api/settings` 一次替换整份）；内置「默认」模式不被存储——它就是全局默认的活视图，所以选「默认」等于会话级面板的「沿用全局」。会话选模式不写新 entry kind、不加会话端点：施加一个模式就是 `PUT /api/sessions/{id}/tools` 与审批 `PATCH` 两个现有命令的组合，落既有 `tool_config` entry。因此一个被施加了模式的会话与一个手动勾出同样配置的会话在任何读取方眼里不可区分；输入框的座位显示哪个模式，是从快照与模式表**按值匹配**出来的——模式被改名后旧会话会失配，这与模型行用名字作身份是同一条规则、同一个代价。
+
 ## 输入框的模型座位
 
 哪个模型来回答、以及被要求思考得多用力，是输入框上的**一个**控件——也是**一个**随消息同行的值：`POST /api/sessions/{id}/messages` 携带 `{ text, behavior?, model?, thinkingLevel? }`，`Agent.prompt` 在运行开始前施加这一对（`chooseModel`）。
@@ -333,7 +335,7 @@ header 记录父级的**路径**，因为那是一个手里拿着某个文件的
 | `GET` | `/api/models` | — | `{ models: ModelOption[] }` |
 | `PUT` | `/api/models` | `{ models: ModelInput[] }` | `{ models: ModelOption[] }` |
 | `GET` | `/api/settings` | — | `{ settings: SettingsSnapshot }` |
-| `PATCH` | `/api/settings` | `{ patch: { appearance?, approval?, tools?, bash? } }` | `{ settings }` —— 工作区**默认值**，在任何会话存在之前读取；按会话的审批变更发往 `PATCH /api/sessions/{id}` |
+| `PATCH` | `/api/settings` | `{ patch: { appearance?, approval?, tools?, modes?, bash? } }` | `{ settings }` —— 工作区**默认值**，在任何会话存在之前读取；按会话的审批变更发往 `PATCH /api/sessions/{id}`；`modes` 整表替换（ADR-0005） |
 | `GET` | `/api/workspaces` | — | `{ workspaces: WorkspaceGroup[] }`——每组的 `sessions` 是 `SessionRow[]`（含 `modified` / `running` / `pending`）；被搁置的工作区不在其中 |
 | `POST` | `/api/workspaces/rename` | `{ from, to }`（两个绝对路径） | `{ cwd, sessions: string[] }`——**一个**操作：先把文件夹搬过去，再把 store 目录与每条 header 的 `cwd` 跟上；有活会话、目标被占、父目录不存在都是 `409` |
 | `POST` | `/api/workspaces/hide` | `{ cwd }` | `{ settings, workspaces }`——只从列表移除，磁盘原样；把 `cwd` 从那轮设置里去掉（`PATCH /api/settings` 带 `hiddenWorkspaces`）即可放回，在该目录里新建会话也同样 |

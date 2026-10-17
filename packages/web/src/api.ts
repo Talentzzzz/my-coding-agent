@@ -1,6 +1,7 @@
 import type {
 	BashSettings,
 	ConfigPatch,
+	ModeSettings,
 	ModelInput,
 	ModelOption,
 	ModelSelection,
@@ -17,6 +18,11 @@ export interface PanelSettingsPatch {
 	model?: string;
 	/** The global default active tool set, sent whole like the session-level endpoint's own. */
 	tools?: string[];
+	/**
+	 * The user's modes, sent whole like `tools` (ADR-0005): the panel edits a list, and a half-applied
+	 * list is the one state nobody can reason about.
+	 */
+	modes?: ModeSettings[];
 	/**
 	 * Workspaces the sidebar does not list, by absolute path, sent whole like `tools`.
 	 *

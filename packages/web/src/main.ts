@@ -6,7 +6,7 @@ import { Composer, type ComposerSelection } from "./composer.ts";
 import { TranscriptView } from "./render/transcript.ts";
 import { BranchView, shortId } from "./render/branch-view.ts";
 import { Sidebar, pagingOf, workspaceName } from "./render/sidebar.ts";
-import { SettingsPanel } from "./render/settings.ts";
+import { SettingsPanel, modeSummaryOf } from "./render/settings.ts";
 import { SessionSettingsPanel } from "./render/session-settings.ts";
 import { openMenu, openMenuAt, type MenuItem } from "./render/menu.ts";
 import { StatusBar } from "./render/statusbar.ts";
@@ -23,6 +23,13 @@ declare global {
 		desktop?: { pickFolder?: () => Promise<string | undefined> };
 	}
 }
+
+/**
+ * The built-in default mode's name, restated because its home (`@my-agent/core/config.ts`) runs on
+ * Node and the client must not pull that into its bundle — the same restatement rule the settings
+ * panel applies for the same reason.
+ */
+const DEFAULT_MODE_NAME = "默认";
 
 /** What a failed request should say. The status is part of it: 404 and 409 mean different things. */
 function describe(error: unknown): string {
@@ -430,6 +437,31 @@ function main(): void {
 			chosen = { ...chosen, thinkingLevel: level };
 			render();
 		},
+		// The mode menu's rows are built here, where the presets and the session's live state are: the
+		// built-in default first, then the stored modes, then the one road into editing them.
+		onModes: (anchor) => {
+			const settings = state.settings;
+			const allTools = state.snapshot?.allTools ?? [];
+			const defaultTools = settings?.tools === undefined ? allTools : settings.tools.filter((name) => allTools.includes(name));
+			const current = currentModeName();
+			openMenu(anchor, [
+				{
+					label: DEFAULT_MODE_NAME,
+					detail: modeSummaryOf(defaultTools, settings?.approval ?? {}),
+					active: current === DEFAULT_MODE_NAME,
+					onSelect: () => applyMode(DEFAULT_MODE_NAME),
+				},
+				...(settings?.modes ?? []).map((mode) => ({
+					label: mode.name,
+					detail: modeSummaryOf(mode.tools, mode.approval),
+					active: current === mode.name,
+					onSelect: () => applyMode(mode.name),
+				})),
+				{ kind: "separator" as const },
+				{ label: "去设置 › 模式", onSelect: () => openSettings("modes") },
+			]);
+		},
+		onSelectMode: (name) => applyMode(name),
 		onOpenSessionSettings: () => {
 			sessionSettings.show();
 			sessionSettings.render({
@@ -505,10 +537,7 @@ function main(): void {
 			collapsed = !collapsed;
 			render();
 		},
-		onOpenSettings: () => {
-			settings.show();
-			settings.render({ models: state.models, ...(state.settings ? { settings: state.settings } : {}), ...(state.snapshot ? { snapshot: state.snapshot } : {}) });
-		},
+		onOpenSettings: () => openSettings(),
 		onAddWorkspace: () => void addWorkspace(),
 		// The row menu's fork copies a session whole — it acts on a session, not on a message, so this
 		// is the `entryId: null` fork rather than anything a message used to offer.
@@ -651,6 +680,9 @@ function main(): void {
 			const { models } = await api.updateModels(rows);
 			apply({ ...state, models });
 		},
+		// The modes list, whole — the endpoint replaces it, so a rename here and a delete there land
+		// together. The snapshot that comes back re-seeds every mode reader.
+		onSaveModes: (modes) => saveSettings({ modes }),
 		// The default a *new* session opens on, so it writes the settings files. The model a live session
 		// is on is the composer's, and never goes through here.
 		onDefaultModel: (ref) => void saveSettings({ model: ref }),
@@ -969,6 +1001,88 @@ function main(): void {
 		}
 	}
 
+	/** Open the app-level settings panel, optionally straight onto one tab. */
+	function openSettings(tab?: "modes"): void {
+		settings.show(tab);
+		settings.render({
+			models: state.models,
+			...(state.settings ? { settings: state.settings } : {}),
+			...(state.snapshot ? { snapshot: state.snapshot } : {}),
+		});
+	}
+
+	/**
+	 * Which mode the session on screen is on, matched by value (ADR-0005).
+	 *
+	 * A session records what it runs on as one `tool_config` snapshot, not as a mode reference, so
+	 * the match is the snapshot's tools and approvals against each preset's — the built-in default
+	 * first, since it *is* the global defaults a following-global session holds. No session on screen
+	 * answers with the default, because that is what the next one opens on; a live session that
+	 * matches nothing — hand-tweaked in the session panel, or left behind by a mode since edited —
+	 * answers undefined, which the seat draws as 「自定义」.
+	 */
+	function currentModeName(): string | undefined {
+		const snapshot = state.snapshot;
+		const settings = state.settings;
+		if (snapshot === undefined || settings === undefined) return DEFAULT_MODE_NAME;
+
+		const sameTools = (a: readonly string[], b: readonly string[]): boolean =>
+			a.length === b.length && a.every((name) => b.includes(name));
+		const sameApprovals = (a: Record<string, boolean>, b: Record<string, boolean>): boolean => {
+			for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
+				if (a[key] !== b[key]) return false;
+			}
+			return true;
+		};
+
+		// Both sides are narrowed to the tools this build knows before the comparison, the same
+		// narrowing an apply performs — otherwise a preset naming a tool an upgrade dropped could be
+		// applied correctly and still read back as 自定义.
+		const defaultTools = (settings.tools ?? snapshot.allTools).filter((name) => snapshot.allTools.includes(name));
+		if (sameTools(snapshot.activeTools, defaultTools) && sameApprovals(snapshot.approvals, settings.approval)) {
+			return DEFAULT_MODE_NAME;
+		}
+		return settings.modes?.find(
+			(mode) =>
+				sameTools(mode.tools.filter((name) => snapshot.allTools.includes(name)), snapshot.activeTools) &&
+				sameApprovals(mode.approval, snapshot.approvals),
+		)?.name;
+	}
+
+	/**
+	 * Put the session this window is on onto a mode: its tool set and its approval map, whole.
+	 *
+	 * The two halves are the session's own two commands — `PUT /tools` and the approval `PATCH` —
+	 * which is the same pair the session panel's reset sends, and they land as one `tool_config`
+	 * snapshot in the transcript. There is deliberately no mode endpoint: a preset *is* those two
+	 * values, and a second spelling of the same command would only have to be kept in step with them.
+	 */
+	function applyMode(name: string): void {
+		if (followed === undefined) {
+			report(new Error("还没有挂上任何会话。"));
+			return;
+		}
+		const settings = state.settings;
+		const snapshot = state.snapshot;
+		if (settings === undefined || snapshot === undefined) {
+			report(new Error("设置还没有读到，稍后再试。"));
+			return;
+		}
+		const preset =
+			name === DEFAULT_MODE_NAME
+				? { tools: settings.tools ?? snapshot.allTools, approval: { ...settings.approval } }
+				: settings.modes?.find((mode) => mode.name === name);
+		if (preset === undefined) {
+			report(new Error(`没有叫「${name}」的模式，可能刚被删除。`));
+			return;
+		}
+		// Narrowed to the tools this build knows, so a preset naming one an upgrade dropped applies the
+		// rest instead of being refused whole — the same narrowing a replayed tool_config gets.
+		const tools = preset.tools.filter((candidate) => snapshot.allTools.includes(candidate));
+		void api.setTools(followed, tools).catch(report);
+		void api.setConfig(followed, { approval: { ...preset.approval } }).catch(report);
+	}
+
 	function render(): void {
 		syncChosen();
 		const snapshot = state.snapshot;
@@ -1030,6 +1144,8 @@ function main(): void {
 		// `prompt` reads rather than from the snapshot alone. The two selects inside gate themselves
 		// on a signature, so this stays cheap per frame.
 		composer.setSelection(selectionForSend());
+		// The mode seat is the same kind of read: which preset the session's values equal, or none.
+		composer.setModes(currentModeName());
 
 		renderStatusBar();
 		renderApprovals();
@@ -1080,10 +1196,7 @@ function main(): void {
 		);
 		const open = element("button", "button primary", undefined, { type: "button" });
 		open.textContent = "打开设置";
-		open.addEventListener("click", () => {
-			settings.show();
-			settings.render({ models: state.models, ...(state.settings ? { settings: state.settings } : {}) });
-		});
+		open.addEventListener("click", () => openSettings());
 		card.append(mark, text, open);
 
 		banners.replaceChildren(card);

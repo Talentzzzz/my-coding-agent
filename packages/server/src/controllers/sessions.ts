@@ -6,7 +6,9 @@ import {
 	clampWorkspacePaging,
 	coerceModel,
 	type ConfigPatch,
+	DEFAULT_MODE_NAME,
 	listModelOptions,
+	type ModeSettings,
 	SessionManager,
 	shortenTitle,
 	type ModelOption,
@@ -41,6 +43,7 @@ function settingsOf(manager: SettingsManager): SettingsSnapshot {
 		approval: manager.getApprovals(),
 		bash: manager.getBashSettings(),
 		...(settings.tools === undefined ? {} : { tools: settings.tools }),
+		...(settings.modes === undefined ? {} : { modes: settings.modes }),
 		...(hidden.length === 0 ? {} : { hiddenWorkspaces: hidden }),
 		...(settings.model === undefined ? {} : { model: settings.model }),
 	};
@@ -297,7 +300,8 @@ export class SystemController {
 	}
 
 	/**
-	 * Change the default model, the theme, the font size, the approval set, or the bash timeouts.
+	 * Change the default model, the theme, the font size, the approval set, the bash timeouts, or the
+	 * user's modes.
 	 *
 	 * Narrower than {@link SessionController.updateConfig} on purpose: these are the defaults the window
 	 * itself runs on, and they are read before any session exists, so they cannot live on a session.
@@ -306,7 +310,8 @@ export class SystemController {
 	 * the row a *new* session starts on; the model a live session is on is the composer's, and reaches
 	 * the server with the message rather than here. `tools` is the global default active set, whole,
 	 * like the session-level endpoint's own contract — and a session's recorded choice still wins over
-	 * it, so nothing here reaches a session that already chose.
+	 * it, so nothing here reaches a session that already chose. `modes` is the preset list whole
+	 * (ADR-0005): applying one to a session is that session's own two commands, not this patch.
 	 */
 	updateSettings(body: Record<string, unknown>): { settings: SettingsSnapshot } {
 		const patch = body.patch ?? body;
@@ -323,6 +328,44 @@ export class SystemController {
 				throw httpStatus.badRequest("`tools` must be an array of tool names");
 			}
 			next.tools = fields.tools as string[];
+		}
+
+		if (fields.modes !== undefined) {
+			// The list is sent whole — the same contract the imported models follow, and for the same
+			// reason: the panel edits a list, and a half-applied list is the one state nobody can
+			// reason about. The name is a mode's identity (ADR-0005), so an empty one and a collision —
+			// with the built-in default or with another row — are refused rather than made unique.
+			if (!Array.isArray(fields.modes)) throw httpStatus.badRequest("`modes` 必须是模式对象数组");
+			const modes: ModeSettings[] = [];
+			for (const entry of fields.modes) {
+				if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+					throw httpStatus.badRequest("每个模式必须是一个 JSON 对象");
+				}
+				const record = entry as Record<string, unknown>;
+				const name = typeof record.name === "string" ? record.name.trim() : "";
+				if (name.length === 0) throw httpStatus.badRequest("每个模式都要有自己的名字");
+				if (name === DEFAULT_MODE_NAME) {
+					throw httpStatus.badRequest(`「${DEFAULT_MODE_NAME}」是内置默认模式的名字，不能另用`);
+				}
+				if (modes.some((mode) => mode.name === name)) {
+					throw httpStatus.badRequest(`模式名「${name}」已经在用`);
+				}
+				if (!Array.isArray(record.tools) || record.tools.some((tool) => typeof tool !== "string")) {
+					throw httpStatus.badRequest(`模式「${name}」的 \`tools\` 必须是工具名数组`);
+				}
+				if (typeof record.approval !== "object" || record.approval === null || Array.isArray(record.approval)) {
+					throw httpStatus.badRequest(`模式「${name}」的 \`approval\` 必须是布尔映射`);
+				}
+				const approval: Record<string, boolean> = {};
+				for (const [tool, value] of Object.entries(record.approval as Record<string, unknown>)) {
+					if (typeof value !== "boolean") {
+						throw httpStatus.badRequest(`模式「${name}」的 \`approval.${tool}\` 必须是布尔值`);
+					}
+					approval[tool] = value;
+				}
+				modes.push({ name, tools: record.tools as string[], approval: approval as ModeSettings["approval"] });
+			}
+			next.modes = modes;
 		}
 
 		if (fields.hiddenWorkspaces !== undefined) {

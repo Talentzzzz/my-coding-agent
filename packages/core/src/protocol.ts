@@ -1,12 +1,12 @@
 import type { AgentMessage } from "@my-agent/agent";
 import type { Usage } from "@my-agent/ai";
 import type { AgentSessionEvent } from "./agent.ts";
-import type { AppearanceSettings, BashSettings } from "./config.ts";
+import type { AppearanceSettings, BashSettings, ModeSettings } from "./config.ts";
 import type { BranchPoint } from "./session/session-manager.ts";
 
 export type { AgentSessionEvent } from "./agent.ts";
 export type { BranchOption, BranchPoint } from "./session/session-manager.ts";
-export type { BashSettings, WorkspacePaging } from "./config.ts";
+export type { BashSettings, ModeSettings, WorkspacePaging } from "./config.ts";
 
 export interface SessionRef {
 	id: string;
@@ -118,6 +118,13 @@ export interface SettingsSnapshot {
 	appearance: AppearanceSettings;
 	/** The global default active tool set; absent means every tool the build knows. */
 	tools?: string[];
+	/**
+	 * The user's modes, whole, in the order the picker lists them; absent means none were defined.
+	 *
+	 * The built-in default mode is deliberately not among them: it is the global defaults read live
+	 * (ADR-0005), so the client assembles it from `tools` and `approval` rather than expecting a row.
+	 */
+	modes?: ModeSettings[];
 	/**
 	 * Workspaces the sidebar does not list, by absolute path; absent means none are put aside.
 	 *

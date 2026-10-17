@@ -2138,6 +2138,31 @@ body:not([data-pane="branch"]) .branch-view {
 	text-overflow: ellipsis;
 }
 
+/* A row with a detail stacks its two lines; the active mark still rides the first line's right end,
+   which is why the label line becomes a flex row of its own. */
+.menu-text {
+	display: flex;
+	flex-direction: column;
+	flex: 1;
+	min-width: 0;
+	gap: 1px;
+}
+
+.menu-text .menu-label {
+	display: flex;
+}
+
+.menu-detail {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	font-weight: 400;
+}
+
 .menu-separator {
 	height: 1px;
 	margin: 4px 6px;
@@ -2329,6 +2354,58 @@ body:not([data-pane="branch"]) .branch-view {
 .composer-gear svg {
 	width: 15px;
 	height: 15px;
+}
+
+/*
+ * The mode seat, leftmost on the bar: a chip like the workspace picker's, because it opens the one
+ * menu — name first, a summary line under it. It is read at every glance and changed while working,
+ * so it keeps the selects' quiet grammar rather than the send button's.
+ */
+.composer-mode {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	max-width: 11rem;
+	height: 26px;
+	padding: 0 8px;
+	border: 1px solid transparent;
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.composer-mode:hover {
+	background: var(--dsw-bg-hover-solid);
+}
+
+.composer-mode:focus-visible {
+	border-color: var(--dsw-border-l4);
+	outline: none;
+}
+
+.composer-mode svg {
+	width: 13px;
+	height: 13px;
+	flex: none;
+	color: var(--dsw-label-caption);
+}
+
+.composer-mode svg:last-child {
+	width: 11px;
+	height: 11px;
+	transform: rotate(90deg);
+}
+
+.composer-mode-label {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
 }
 
 .button {
@@ -3000,6 +3077,60 @@ select.input {
 	justify-content: flex-end;
 	gap: 8px;
 	padding-top: 2px;
+}
+
+/* ---------------------------------------------------------------- modes */
+
+/* The mode cards reuse the model rows' frame — head, trash, inline form — and add only what a mode
+   needs that a model does not: the built-in badge, the value summary, and one toggle row per tool. */
+.mode-badge {
+	padding: 1px 6px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: 999px;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.mode-summary {
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+/* One tool of one mode: toggle, name, and — for the tools the approval map has keys for — the
+   approval select beside them. */
+.mode-tooltable {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 12px;
+	border-top: 1px solid var(--dsw-border-l1);
+}
+
+.mode-tool {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.mode-tool input[type="checkbox"] {
+	accent-color: var(--dsw-state-business);
+}
+
+.mode-tool-name {
+	min-width: 0;
+	color: var(--dsw-label-secondary);
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.mode-tool-approval {
+	margin-left: auto;
+	width: auto;
+	height: 26px;
+	padding: 0 6px;
 }
 
 /* ----------------------------------------------------------------- scrollbars */
