@@ -30,4 +30,6 @@ Blocked by: 01
 - **运行中计时器**：客户端本地 `setInterval` 每 1s 写一个文本节点，起点同样取轮 user 消息 `timestamp`；不新增任何 wire 事件。
 - 脚注里计时器冻结值与本地定格值同源，两者一致。
 
+**实现时顺带定下的三个小行为**（code-review 登记为自加项，保留）：脚注不画在无正文的 assistant 消息上（只有思考块的消息无从复制）；复制失败时图标按钮的 title 变「复制失败」1.2s 再复原（与代码块复制按钮的既有行为一致）；user 消息缺时间戳时计时器起点退化为当前时刻（消息时间戳是持久化的，正常不缺）。
+
 实现面：消息 Item 新增 `timestamp` / `usage`（`state.ts`，带跨进程守卫）；渲染与计时都在 `transcript.ts`（meta 行、foot 行、runtime 行均为 turn 内部元素，reconcile 不感知）；样式入 `style.css`，全走 token。

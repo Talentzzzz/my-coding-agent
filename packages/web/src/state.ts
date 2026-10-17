@@ -901,10 +901,20 @@ function assistantUsage(message: unknown): Parameters<typeof addUsage>[1] | unde
 }
 
 /**
- * The footer chip's slice of one message's usage, or nothing when there is none to show.
+ * The spend one message reported, summed across the four token fields.
  *
- * A request whose usage summed to zero — the failure path stamps `EMPTY_USAGE` on its message —
- * is no spend to report, so it reads as absent rather than as a chip of zeros.
+ * The one number the footer chip shows; a message whose usage sums to zero — the failure path
+ * stamps `EMPTY_USAGE` on its message — is no spend to report, so it reads as absent rather than
+ * as a chip of zeros.
+ */
+export function usageTotal(usage: MessageUsage | undefined): number | undefined {
+	if (usage === undefined) return undefined;
+	const total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+	return total > 0 ? total : undefined;
+}
+
+/**
+ * The footer chip's slice of one message's usage, or nothing when there is none to show.
  */
 function messageUsageOf(usage: unknown): MessageUsage | undefined {
 	if (typeof usage !== "object" || usage === null) return undefined;
@@ -916,6 +926,5 @@ function messageUsageOf(usage: unknown): MessageUsage | undefined {
 		cacheRead: field("cacheRead"),
 		cacheWrite: field("cacheWrite"),
 	};
-	const total = read.input + read.output + read.cacheRead + read.cacheWrite;
-	return total > 0 ? read : undefined;
+	return usageTotal(read) === undefined ? undefined : read;
 }

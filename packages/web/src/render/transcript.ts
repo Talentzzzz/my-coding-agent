@@ -1,6 +1,6 @@
 import { element, icon, type IconName } from "../dom.ts";
 import { Drain } from "../drain.ts";
-import type { Item, MessageUsage, ToolCard } from "../state.ts";
+import { usageTotal, type Item, type ToolCard } from "../state.ts";
 import { diffStat, renderFileDiff } from "./diff.ts";
 import { renderMarkdown, type MarkdownState } from "./markdown.ts";
 
@@ -63,6 +63,8 @@ interface ReasoningView {
 interface FootChip {
 	root: HTMLElement;
 	text: HTMLElement;
+	/** The text the chip last carried, so an unchanged patch writes nothing. */
+	shown?: string;
 }
 
 /** A user turn's meta row: the message's time and its copy control, under the bubble's right edge. */
@@ -77,10 +79,6 @@ interface FootView {
 	usage: FootChip;
 	time: FootChip;
 	elapsed: FootChip;
-	/** The text each chip last carried, so an unchanged patch writes nothing. */
-	usageText: string;
-	timeText: string;
-	elapsedText: string;
 }
 
 /** The user message that opened the round an item sits in — the duration's start seat. */
@@ -144,12 +142,15 @@ export class TranscriptView {
 	private runtime?: HTMLElement;
 	private runtimeText?: HTMLElement;
 	private runtimeTimer?: number;
-	/** The round the timer ticks from: the last user message seen while streaming. */
-	private runtimeFrom?: { key: string; at: number };
+	/**
+	 * The round the timer ticks from: the last user message seen while streaming, carrying the stamp
+	 * the timer needs — the same seat a {@link RoundStart} names, narrowed to the case that has one.
+	 */
+	private runtimeFrom?: { id: string; at: number };
 	/** Whether the previous draw was streaming — the flip back is the run's end. */
 	private wasStreaming = false;
-	/** The duration a watched run took: the round's user message to the run's last answer. */
-	private observed?: { key: string; lastId: string; ms: number };
+	/** The durations a watched run took, keyed by the round's user message. */
+	private readonly observed = new Map<string, { lastId: string; ms: number }>();
 
 	constructor(container: HTMLElement, options: TranscriptOptions) {
 		this.container = container;
@@ -529,7 +530,7 @@ export class TranscriptView {
 			foot.hidden = true;
 			foot.append(copyButton(() => turn.item.text), usage.root, time.root, elapsed.root);
 			section.append(body, foot);
-			turn.foot = { root: foot, usage, time, elapsed, usageText: "", timeText: "", elapsedText: "" };
+			turn.foot = { root: foot, usage, time, elapsed };
 		} else {
 			section.append(body);
 		}
@@ -576,20 +577,9 @@ export class TranscriptView {
 		foot.root.hidden = !visible;
 		if (!visible) return;
 
-		const usage = messageUsageTotal(item.usage);
-		const usageText = usage === undefined ? "" : `用量 ${shortTokens(usage)} tok`;
-		if (foot.usageText !== usageText) {
-			foot.usageText = usageText;
-			foot.usage.root.hidden = usageText === "";
-			foot.usage.text.textContent = usageText;
-		}
-
-		const timeText = item.timestamp === undefined ? "" : formatClockTime(item.timestamp);
-		if (foot.timeText !== timeText) {
-			foot.timeText = timeText;
-			foot.time.root.hidden = timeText === "";
-			foot.time.text.textContent = timeText;
-		}
+		const usage = usageTotal(item.usage);
+		setChip(foot.usage, usage === undefined ? "" : `用量 ${shortTokens(usage)} tok`);
+		setChip(foot.time, item.timestamp === undefined ? "" : formatClockTime(item.timestamp));
 
 		// The round's duration. A run this window watched end is the authority — the answer's own
 		// stamp is its request's start, so the persisted stamps alone read only up to the final
@@ -597,19 +587,14 @@ export class TranscriptView {
 		// the one the footer freezes. Without an observation, the stamps are the fallback.
 		let elapsedMs: number | undefined;
 		if (roundUser?.at !== undefined && item.timestamp !== undefined) {
-			const observed = this.observed;
+			const observed = this.observed.get(roundUser.id);
 			elapsedMs =
-				observed !== undefined && observed.key === roundUser.id && observed.lastId === item.id
+				observed !== undefined && observed.lastId === item.id
 					? observed.ms
 					: item.timestamp - roundUser.at;
 			if (elapsedMs < 0) elapsedMs = undefined;
 		}
-		const elapsedText = elapsedMs === undefined ? "" : `用时 ${formatElapsed(elapsedMs)}`;
-		if (foot.elapsedText !== elapsedText) {
-			foot.elapsedText = elapsedText;
-			foot.elapsed.root.hidden = elapsedText === "";
-			foot.elapsed.text.textContent = elapsedText;
-		}
+		setChip(foot.elapsed, elapsedMs === undefined ? "" : `用时 ${formatElapsed(elapsedMs)}`);
 	}
 
 	/**
@@ -633,7 +618,7 @@ export class TranscriptView {
 				const from = this.runtimeFrom;
 				const ended = items.at(-1);
 				if (from !== undefined && ended !== undefined && ended.kind === "message" && ended.role === "assistant") {
-					this.observed = { key: from.key, lastId: ended.id, ms: Math.max(0, Date.now() - from.at) };
+					this.observed.set(from.id, { lastId: ended.id, ms: Math.max(0, Date.now() - from.at) });
 				}
 			}
 			this.runtimeFrom = undefined;
@@ -648,7 +633,7 @@ export class TranscriptView {
 
 		this.wasStreaming = true;
 		const user = lastUserOf(items);
-		this.runtimeFrom = user === undefined ? undefined : { key: user.id, at: user.timestamp ?? Date.now() };
+		this.runtimeFrom = user === undefined ? undefined : { id: user.id, at: user.timestamp ?? Date.now() };
 		if (this.runtime === undefined) {
 			const text = element("span", "runtime-time", "00:00");
 			const line = element("div", "runtime");
@@ -793,19 +778,30 @@ function lastUserOf(items: readonly Item[]): Extract<Item, { kind: "message" }> 
  * The one copy control both meta rows use: an icon that answers with a check for a beat.
  *
  * The text is read at click time through a getter, because the message it copies can still be
- * streaming when the row is built.
+ * streaming when the row is built. One pending restore at a time — a rapid second click replaces
+ * the beat rather than stacking timers under it.
  */
 function copyButton(getText: () => string): HTMLButtonElement {
 	const button = element("button", "turn-copy", undefined, { type: "button", title: "复制", "aria-label": "复制" });
 	button.append(icon("copy"));
+	let restore = 0;
 	button.addEventListener("click", () => {
 		void navigator.clipboard.writeText(getText()).then(
 			() => {
 				button.replaceChildren(icon("check"));
-				window.setTimeout(() => button.replaceChildren(icon("copy")), 1200);
+				window.clearTimeout(restore);
+				restore = window.setTimeout(() => {
+					restore = 0;
+					button.replaceChildren(icon("copy"));
+				}, 1200);
 			},
 			() => {
 				button.title = "复制失败";
+				window.clearTimeout(restore);
+				restore = window.setTimeout(() => {
+					restore = 0;
+					button.title = "复制";
+				}, 1200);
 			},
 		);
 	});
@@ -821,11 +817,12 @@ function footChip(name: IconName): FootChip {
 	return { root, text };
 }
 
-/** The token total a footer chip reads, or nothing when the message reported no spend. */
-function messageUsageTotal(usage: MessageUsage | undefined): number | undefined {
-	if (usage === undefined) return undefined;
-	const total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-	return total > 0 ? total : undefined;
+/** Write one chip's text, hiding it when the text is empty; an unchanged chip is left alone. */
+function setChip(chip: FootChip, text: string): void {
+	if (chip.shown === text) return;
+	chip.shown = text;
+	chip.root.hidden = text === "";
+	chip.text.textContent = text;
 }
 
 /** The clock face of a message's stamp: hours and minutes, the way the meta row reads them. */
