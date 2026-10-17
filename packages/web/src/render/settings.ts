@@ -66,6 +66,17 @@ const BLANK_DRAFT: ModelDraft = {
 const THINKING_LEVELS = ["off", "low", "medium", "high", "max"] as const;
 
 /**
+ * Whether a form has the three fields a row cannot exist without.
+ *
+ * The server refuses a row with no name of its own, no model id, and no endpoint — the same three
+ * the old card stayed open on — so 保存 sits disabled until they are filled, rather than relaying
+ * the refusal as an error after the click.
+ */
+function formComplete(form: ModelDraft): boolean {
+	return form.name.trim().length > 0 && form.modelId.trim().length > 0 && form.baseUrl.trim().length > 0;
+}
+
+/**
  * The app-level settings panel.
  *
  * It holds what lasts longer than one conversation: how the window draws itself, which models this
@@ -76,10 +87,10 @@ const THINKING_LEVELS = ["off", "low", "medium", "high", "max"] as const;
  * transcript. What is left here is visited rarely and changed deliberately, which is what a panel
  * behind one button is for and a row of always-visible controls is not.
  *
- * The model list is edited as a draft and saved whole, because a half-saved list is the one state
- * nobody can reason about: a row deleted here and another added there have to land together. The
- * appearance controls are the opposite — they apply on the spot, since seeing the font size is how you
- * choose it.
+ * The model list is edited one row at a time and saved one action at a time: an inline form's 保存
+ * and a confirmed delete each send the list whole, because a half-saved list is the one state nobody
+ * can reason about — a row deleted here and another added there have to land together. The appearance
+ * controls are the opposite — they apply on the spot, since seeing the font size is how you choose it.
  */
 export class SettingsPanel {
 	readonly element: HTMLElement;
@@ -90,8 +101,22 @@ export class SettingsPanel {
 
 	private state: SettingsState = { models: [] };
 	private tab: Tab = "appearance";
-	/** The rows as edited, or undefined while the panel is showing what the server holds. */
-	private draft?: ModelDraft[];
+	/**
+	 * The rows as they were when the open interaction began, or undefined while the panel is showing
+	 * what the server holds.
+	 *
+	 * Held rather than re-read per render, so a half-typed form and the rows it edits sit on the same
+	 * frozen list: a model arriving from the server mid-edit must not shift the row under the form.
+	 * One interaction is open at a time, and this is cleared when it ends — saved, confirmed, or
+	 * cancelled.
+	 */
+	private frozen?: ModelDraft[];
+	/** Which row is open for editing: a row index, or the add form's blank one. */
+	private editing?: number | "new";
+	/** The row with a delete confirmation standing under it. */
+	private confirming?: number;
+	/** The values typed into the open form, present exactly while a form is open. */
+	private form?: ModelDraft;
 	private saving = false;
 	private signature = "";
 
@@ -146,7 +171,8 @@ export class SettingsPanel {
 
 	show(): void {
 		this.element.hidden = false;
-		this.draft = undefined;
+		this.clearInteraction();
+		this.saving = false;
 		this.signature = "";
 		this.render();
 	}
@@ -159,7 +185,11 @@ export class SettingsPanel {
 		this.state = state;
 
 		// Rebuilding the body would throw away a half-typed row, so it only happens when the thing the
-		// tab is showing actually moved — or when the user has nothing unsaved to lose.
+		// tab is showing actually moved. An open interaction freezes the body outright: the form is the
+		// one thing on screen that cannot be rebuilt from state, because its latest values live in the
+		// DOM and in `this.form`, and a frame arriving mid-edit — a snapshot, a stream tick — must not
+		// steal the focus the typing is in. The freeze ends when the interaction does, and the next
+		// render then compares signatures as usual.
 		const signature = [
 			this.tab,
 			state.settings
@@ -176,7 +206,7 @@ export class SettingsPanel {
 			state.snapshot?.allTools.join(",") ?? "",
 		].join("|");
 
-		const stable = this.draft === undefined && signature === this.signature;
+		const stable = this.frozen !== undefined || signature === this.signature;
 		this.signature = signature;
 		this.renderNav();
 		if (!stable) this.renderBody();
@@ -188,9 +218,14 @@ export class SettingsPanel {
 		this.note.dataset.tone = tone;
 	}
 
-	/** The rows as they stand, so a caller can hand them to the API without reading the DOM. */
+	/**
+	 * The rows as they stand, so a caller can hand them to the API without reading the DOM.
+	 *
+	 * The frozen list while an interaction is open — the one the form was opened against — and the
+	 * server's list otherwise, copied so a caller may splice it without touching the state.
+	 */
 	get rows(): ModelDraft[] {
-		return this.draft ?? this.state.models.map((model) => ({ ...model }));
+		return this.frozen ?? this.state.models.map((model) => ({ ...model }));
 	}
 
 	private renderNav(): void {
@@ -279,73 +314,126 @@ export class SettingsPanel {
 			element(
 				"p",
 				"settings-hint",
-				"没有内置模型列表。下面每个模型都是手动录入的，也只有它们能被运行。",
+				"每个模型是一行「端点 + 密钥」。点击条目中部进入编辑；右侧回收站删除；「＋ 添加模型」直接展开一张空表单。",
 			),
 		);
 
-		if (rows.length === 0) {
+		if (rows.length === 0 && this.editing !== "new") {
 			section.append(element("p", "settings-hint empty", "还没有模型。添加一个才能开始对话。"));
 		}
 
-		for (const [index, row] of rows.entries()) section.append(this.modelCard(row, index));
+		for (const [index, row] of rows.entries()) section.append(this.modelRow(row, index));
 
-		const add = element("button", "button", undefined, { type: "button" });
-		add.append(icon("plus"), element("span", undefined, "添加模型"));
-		add.addEventListener("click", () => {
-			this.draft = [...this.rows, { ...BLANK_DRAFT }];
-			this.renderBody();
-		});
-		section.append(add);
-
-		const actions = element("div", "settings-actions");
-		const save = element("button", "button primary", undefined, { type: "button" });
-		save.textContent = this.saving ? "保存中…" : "保存模型";
-		save.disabled = this.saving;
-		save.addEventListener("click", () => void this.save());
-		actions.append(save);
-		section.append(actions);
+		// The add form is the expanded row itself rather than a mode the button toggles, so the button
+		// stands down while it is open — there is nothing left for a second click to add.
+		if (this.editing === "new" && this.form !== undefined) {
+			section.append(this.modelForm(this.form, () => this.closeInteraction(), () => void this.commitAdd()));
+		} else {
+			const add = element("button", "model-add", undefined, { type: "button" });
+			add.append(icon("plus"), element("span", undefined, "添加模型"));
+			add.addEventListener("click", () => this.beginAdd());
+			section.append(add);
+		}
 
 		return section;
 	}
 
-	/** One row, collapsed to its name and expanded into the form that edits it. */
-	private modelCard(row: ModelDraft, index: number): HTMLElement {
-		const card = element("details", "model-card");
-		// A row with no model id is one that was just added, so it opens ready to be filled in.
-		if (row.modelId === "" || row.name === "") card.open = true;
+	/**
+	 * One row: the head that opens it for editing, the trash that asks once, and the form when open.
+	 *
+	 * The head is a button covering the row's middle — the name and the wire ref — and the trash rides
+	 * beside it, revealed on hover. They are siblings rather than head housing the trash, because a
+	 * button cannot hold another; the trash is positioned over the head's reserved right padding.
+	 */
+	private modelRow(row: ModelDraft, index: number): HTMLElement {
+		const rowEl = element("div", "model-row");
+		if (this.editing === index) rowEl.classList.add("editing");
+		if (this.confirming === index) rowEl.classList.add("confirming");
 
-		const summary = element("summary");
-		summary.append(
+		const head = element("button", "model-row-head", undefined, { type: "button" });
+		head.append(
 			element("span", "model-label", row.name.length > 0 ? row.name : "新模型"),
 			element("span", "model-ref", row.modelId.length > 0 ? `${row.name || "未命名"}/${row.modelId}` : "未配置"),
 		);
-		card.append(summary);
+		head.addEventListener("click", () => this.beginEdit(index));
+		rowEl.append(head);
 
+		rowEl.append(iconButton("trash", "删除这个模型", () => this.beginConfirm(index), "icon-button model-row-del"));
+
+		if (this.editing === index && this.form !== undefined) {
+			rowEl.append(this.modelForm(this.form, () => this.closeInteraction(), () => void this.commitRow(index)));
+		}
+		if (this.confirming === index) rowEl.append(this.confirmBar(row, index));
+
+		return rowEl;
+	}
+
+	/**
+	 * The delete confirmation, standing in the row it would act on.
+	 *
+	 * One confirmation, then the delete: the bar asks in place — naming the row it is about to remove
+	 * — and both answers take it down, the destructive one by sending the shortened list. The buttons
+	 * sit in the prototype's order, the destructive one first.
+	 */
+	private confirmBar(row: ModelDraft, index: number): HTMLElement {
+		const bar = element("div", "model-confirm");
+		bar.append(element("span", undefined, `删除 ${row.name.length > 0 ? row.name : "未命名"}？此操作不可撤销。`));
+		bar.append(element("span", "model-confirm-spacer"));
+		const remove = element("button", "button danger", undefined, { type: "button" });
+		remove.textContent = "删除";
+		remove.disabled = this.saving;
+		remove.addEventListener("click", () => void this.commitRemove(index));
+		bar.append(remove);
+		const cancel = element("button", "button", undefined, { type: "button" });
+		cancel.textContent = "取消";
+		cancel.addEventListener("click", () => this.closeInteraction());
+		bar.append(cancel);
+		return bar;
+	}
+
+	/**
+	 * The inline form, shared by editing and adding.
+	 *
+	 * Typing writes `this.form` and never re-renders — a rebuild per keystroke would steal the focus
+	 * the typing is in — so the one piece of the form that reads it (保存's gate) is synced by hand.
+	 * An omitted API key keeps the stored one on the server, which is why the field is a prompt to
+	 * replace rather than a value on show.
+	 */
+	private modelForm(draft: ModelDraft, onCancel: () => void, onSave: () => void): HTMLElement {
 		const form = element("div", "model-form");
+		let save: HTMLButtonElement | undefined;
+		const syncSave = (): void => {
+			if (save !== undefined) save.disabled = this.saving || !formComplete(this.form ?? draft);
+		};
 		const update = (patch: Partial<ModelDraft>): void => {
-			this.draft = this.rows.map((candidate, at) => (at === index ? { ...candidate, ...patch } : candidate));
+			this.form = { ...(this.form ?? draft), ...patch };
+			syncSave();
 		};
 
 		form.append(
-			this.textField("名称", row.name, "这个名字同时是它的身份：改名等于换一个模型，用过它的会话要重新选", (value) =>
+			this.textField("名称", draft.name, "这个名字同时是它的身份：改名等于换一个模型，用过它的会话要重新选", (value) =>
 				update({ name: value }),
 			),
 		);
-		form.append(this.textField("模型 ID", row.modelId, "接口那边的名字，例如 claude-opus-5", (value) => update({ modelId: value })));
-		form.append(this.textField("服务地址", row.baseUrl, "Anthropic Messages 接口的地址；代理或中转填它自己的", (value) => update({ baseUrl: value })));
-		form.append(this.keyField(row, update));
+		form.append(this.textField("模型 ID", draft.modelId, "接口那边的名字，例如 claude-opus-5", (value) =>
+			update({ modelId: value }),
+		));
+		form.append(this.textField("服务地址", draft.baseUrl, "Anthropic Messages 接口的地址；代理或中转填它自己的", (value) =>
+			update({ baseUrl: value }),
+		));
+		form.append(this.keyField(draft, update));
 		form.append(
-			this.numberField("上下文窗口", row.contextWindow, "模型能接受多少 tokens；压缩由它决定", (value) =>
+			this.numberField("上下文窗口", draft.contextWindow, "模型能接受多少 tokens；压缩由它决定", (value) =>
 				update({ contextWindow: value }),
 			),
 		);
 		form.append(
-			this.numberField("最大输出", row.maxTokens, "一次回答最多多少 tokens", (value) => update({ maxTokens: value })),
+			this.numberField("最大输出", draft.maxTokens, "一次回答最多多少 tokens", (value) => update({ maxTokens: value })),
 		);
 
 		const reasoning = element("label", "model-check");
 		const box = element("input", undefined, undefined, { type: "checkbox" });
-		box.checked = row.reasoning;
+		box.checked = draft.reasoning;
 		box.addEventListener("change", () => update({ reasoning: box.checked }));
 		reasoning.append(box, document.createTextNode("该模型支持推理 / 思考档位"));
 		form.append(reasoning);
@@ -355,22 +443,22 @@ export class SettingsPanel {
 		// level a three-effort endpoint has.
 		const level = element("select", "input");
 		for (const candidate of THINKING_LEVELS) level.append(option(candidate, candidate));
-		level.value = row.defaultThinkingLevel;
+		level.value = draft.defaultThinkingLevel;
 		level.addEventListener("change", () => update({ defaultThinkingLevel: level.value }));
 		form.append(this.field("默认思考等级", level, "这个模型新建会话时的档位；模型没有的档位会被落到它支持的一档"));
 
 		const actions = element("div", "model-actions");
-		const remove = element("button", "button danger", undefined, { type: "button" });
-		remove.append(icon("trash"), element("span", undefined, "删除"));
-		remove.addEventListener("click", () => {
-			this.draft = this.rows.filter((_candidate, at) => at !== index);
-			this.renderBody();
-		});
-		actions.append(remove);
+		const cancel = element("button", "button", undefined, { type: "button" });
+		cancel.textContent = "取消";
+		cancel.addEventListener("click", onCancel);
+		save = element("button", "button primary", undefined, { type: "button" });
+		save.textContent = this.saving ? "保存中…" : "保存";
+		save.addEventListener("click", onSave);
+		actions.append(cancel, save);
 		form.append(actions);
+		syncSave();
 
-		card.append(form);
-		return card;
+		return form;
 	}
 
 	private keyField(row: ModelDraft, update: (patch: Partial<ModelDraft>) => void): HTMLElement {
@@ -406,22 +494,98 @@ export class SettingsPanel {
 		return wrapper;
 	}
 
-	private async save(): Promise<void> {
+	// ------------------------------------------------------- model interactions
+
+	/** Open one interaction — a row, the add form, or a delete ask — and close whatever stood. */
+	private begin(next: { editing?: number | "new"; confirming?: number; form?: ModelDraft }): void {
+		this.editing = next.editing;
+		this.confirming = next.confirming;
+		this.form = next.form;
+		// Nothing open means nothing to freeze against: the next render may compare signatures and
+		// rebuild from what the server holds. Re-freezing while one stood keeps the list the open
+		// form was typed against, rather than moving it under the form mid-edit.
+		this.frozen =
+			next.editing === undefined && next.confirming === undefined ? undefined : this.rows;
+		this.renderBody();
+	}
+
+	private beginEdit(index: number): void {
+		const row = this.rows.at(index);
+		if (row === undefined) return;
+		this.begin({ editing: index, form: { ...row } });
+	}
+
+	private beginAdd(): void {
+		this.begin({ editing: "new", form: { ...BLANK_DRAFT } });
+		// The form opens at the list's end, below the fold when the list is long, so it walks itself
+		// into view — the same courtesy the prototype paid the click.
+		this.body.lastElementChild?.scrollIntoView({ block: "nearest" });
+	}
+
+	private beginConfirm(index: number): void {
+		if (this.rows.at(index) === undefined) return;
+		this.begin({ confirming: index });
+	}
+
+	/** Take an open form or confirmation down without saving. */
+	private closeInteraction(): void {
+		this.begin({});
+	}
+
+	/** End any open interaction outright, dropping the freeze with it. */
+	private clearInteraction(): void {
+		this.editing = undefined;
+		this.confirming = undefined;
+		this.form = undefined;
+		this.frozen = undefined;
+	}
+
+	/**
+	 * Send one action's list whole, and fold the answer in.
+	 *
+	 * Every action — a row's 保存, a confirmed 删除, the add form's 保存 — resolves to the list it
+	 * wants stored, because the endpoint replaces the list whole: a row whose `apiKey` is omitted
+	 * keeps the stored one, so untouched rows round-trip with the keys this panel was never shown.
+	 * Success ends the interaction and drops the freeze, so the next render shows what the server
+	 * actually stored rather than what was typed.
+	 */
+	private async commit(rows: ModelInput[]): Promise<void> {
 		this.saving = true;
 		this.renderBody();
+		let outcome: { message: string; tone: "ok" | "error" };
 		try {
-			await this.handlers.onSaveModels(this.rows);
-			// The server owns the ids it derived, so the draft is dropped and the next render shows
-			// what was actually stored rather than what was typed.
-			this.draft = undefined;
+			await this.handlers.onSaveModels(rows);
+			this.clearInteraction();
 			this.signature = "";
-			this.reportNote("模型已保存。", "ok");
+			outcome = { message: "模型已保存。", tone: "ok" };
 		} catch (error) {
-			this.reportNote(error instanceof Error ? error.message : String(error), "error");
+			outcome = { message: error instanceof Error ? error.message : String(error), tone: "error" };
 		} finally {
 			this.saving = false;
 			this.renderBody();
 		}
+		// Reported after the rebuild rather than before it, because renderBody clears the note on its
+		// way in — reporting first would have the outcome wiped by the very redraw that made room
+		// for it, and with the global save button gone this note is the only word a failed action
+		// gets.
+		this.reportNote(outcome.message, outcome.tone);
+	}
+
+	private async commitRow(index: number): Promise<void> {
+		const form = this.form;
+		if (form === undefined || !formComplete(form)) return;
+		await this.commit(this.rows.map((row, at) => (at === index ? form : row)));
+	}
+
+	private async commitAdd(): Promise<void> {
+		const form = this.form;
+		if (form === undefined || !formComplete(form)) return;
+		await this.commit([...this.rows, form]);
+	}
+
+	private async commitRemove(index: number): Promise<void> {
+		if (this.rows.at(index) === undefined) return;
+		await this.commit(this.rows.filter((_row, at) => at !== index));
 	}
 
 	// --------------------------------------------------------------------- defaults

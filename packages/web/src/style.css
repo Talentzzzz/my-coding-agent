@@ -2845,28 +2845,45 @@ select.input {
 
 /* ---------------------------------------------------------------- models */
 
-.model-card {
+/* One interaction at a time lives in a row: the head opens it, the trash asks once, the form edits
+   it in place. The trash is a sibling of the head rather than a child, because a button cannot hold
+   another — it is laid over the head's reserved right padding instead. */
+.model-row {
+	position: relative;
 	border: 1px solid var(--dsw-border-l2);
 	border-radius: var(--dsw-radius-md);
 	background: var(--dsw-bg-layer-2);
+	margin-bottom: 8px;
 	overflow: hidden;
 }
 
-.model-card > summary {
+.model-row-head {
 	display: flex;
 	align-items: baseline;
 	gap: 10px;
-	padding: 10px 12px;
+	width: 100%;
+	padding: 10px 44px 10px 12px;
+	border: none;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	text-align: left;
 	cursor: pointer;
-	list-style: none;
 }
 
-.model-card > summary::-webkit-details-marker {
-	display: none;
+.model-row-head:hover {
+	background: var(--dsw-bg-hover);
 }
 
-.model-card[open] > summary {
+/* While the form is open the head is the row's label, not a door: clicks go nowhere, the trash is
+   gone, and the divider sets the form off from what it is editing. */
+.model-row.editing .model-row-head {
+	pointer-events: none;
 	border-bottom: 1px solid var(--dsw-border-l1);
+}
+
+.model-row.editing .model-row-del {
+	display: none;
 }
 
 .model-label {
@@ -2878,6 +2895,27 @@ select.input {
 	font-family: var(--dsw-font-mono);
 	font-size: var(--dsw-fs-caption);
 	line-height: var(--dsw-lh-caption);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.model-row-del {
+	position: absolute;
+	top: 6px;
+	right: 8px;
+	opacity: 0;
+	color: var(--dsw-label-caption);
+}
+
+.model-row:hover .model-row-del,
+.model-row.confirming .model-row-del {
+	opacity: 1;
+}
+
+.model-row-del:hover {
+	background: var(--dsw-bg-hover-danger);
+	color: var(--dsw-state-error);
 }
 
 .model-form {
@@ -2885,6 +2923,50 @@ select.input {
 	flex-direction: column;
 	gap: 10px;
 	padding: 12px;
+}
+
+.model-confirm {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 8px 12px;
+	border-top: 1px solid var(--dsw-border-l1);
+	color: var(--dsw-label-secondary);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.model-confirm-spacer {
+	flex: 1;
+}
+
+/* The add affordance is a dashed invitation, not a boxed button — it reads as an empty slot the
+   next row will fill. */
+.model-add {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	padding: 11px 12px;
+	border: 1px dashed var(--dsw-border-l3);
+	border-radius: var(--dsw-radius-md);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.model-add:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.model-add svg {
+	width: 15px;
+	height: 15px;
 }
 
 .model-field {

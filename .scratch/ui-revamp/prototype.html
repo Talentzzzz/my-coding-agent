@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<!-- Interactive prototype for the ui-revamp effort (.scratch/ui-revamp/map.md).
+     Dark theme only, values lifted from packages/web/src/tokens.css ([data-theme="dark"]). -->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>原型 · 桌面 UI 优化</title>
+<style>
+	:root {
+		--bg-base: #151517;
+		--bg-sidebar: #1b1b1c;
+		--bg-layer-1: #232324;
+		--bg-layer-2: #2c2c2e;
+		--bg-layer-3: #353638;
+		--hover: rgba(255, 255, 255, 0.08);
+		--active: rgba(255, 255, 255, 0.14);
+		--border-l1: rgba(255, 255, 255, 0.06);
+		--border-l2: rgba(255, 255, 255, 0.12);
+		--border-l3: rgba(255, 255, 255, 0.16);
+		--label-primary: #f5f6f7;
+		--label-secondary: #cfd3d6;
+		--label-tertiary: #adb2b8;
+		--label-caption: #818588;
+		--accent: rgb(122, 170, 255);
+		--green: rgb(78, 209, 126);
+		--red: rgb(242, 90, 90);
+		--btn-primary-fill: #f5f6f7;
+		--btn-primary-label: #0f1115;
+		--code-block: #1b1b1c;
+		--radius-sm: 8px;
+		--radius-md: 12px;
+		--radius-lg: 16px;
+		--ease: cubic-bezier(0.4, 0, 0.2, 1);
+		--font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+			"Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+		--mono: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+	}
+	* { box-sizing: border-box; margin: 0; padding: 0; }
+	html, body { height: 100%; }
+	body {
+		font-family: var(--font);
+		font-size: 15px;
+		background: var(--bg-base);
+		color: var(--label-primary);
+		overflow: hidden;
+	}
+	button { font-family: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+	input, select, textarea { font-family: inherit; }
+	svg { display: block; flex: none; }
+	.ic { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+	/* ---------- app frame ---------- */
+	.app { display: flex; height: 100vh; }
+	.sidebar {
+		width: 232px; flex: none; background: var(--bg-sidebar);
+		display: flex; flex-direction: column; padding: 12px 10px; gap: 4px;
+		border-right: 1px solid var(--border-l1);
+	}
+	.new-chat {
+		display: flex; align-items: center; justify-content: center; gap: 7px;
+		height: 34px; border-radius: var(--radius-md); border: 1px solid var(--border-l2);
+		font-size: 13.5px; color: var(--label-primary); transition: background 0.15s var(--ease);
+	}
+	.new-chat:hover { background: var(--hover); }
+	.sb-label { font-size: 12px; color: var(--label-caption); padding: 14px 8px 6px; }
+	.sb-item {
+		display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 8px;
+		border-radius: var(--radius-sm); color: var(--label-secondary); font-size: 13px;
+		white-space: nowrap; overflow: hidden;
+	}
+	.sb-item:hover { background: var(--hover); }
+	.sb-item.on { background: var(--active); color: var(--label-primary); }
+	.sb-item .t { overflow: hidden; text-overflow: ellipsis; }
+	.sb-item .age { margin-left: auto; font-size: 11.5px; color: var(--label-caption); }
+	.sb-spacer { flex: 1; }
+	.sb-settings {
+		display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 8px;
+		border-radius: var(--radius-sm); color: var(--label-secondary); font-size: 13.5px;
+	}
+	.sb-settings:hover { background: var(--hover); }
+
+	.main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+	.topbar {
+		flex: none; display: flex; align-items: baseline; gap: 10px;
+		padding: 14px 24px 10px;
+	}
+	.topbar .title { font-size: 14px; font-weight: 600; }
+	.topbar .path { font-size: 12px; color: var(--label-caption); }
+	.topbar .branch { margin-left: auto; font-size: 12px; color: var(--label-tertiary);
+		border: 1px solid var(--border-l2); border-radius: 999px; padding: 3px 10px; }
+
+	/* ---------- transcript ---------- */
+	.transcript { flex: 1; overflow-y: auto; min-height: 0; }
+	.col { max-width: 46rem; margin: 0 auto; padding: 8px 24px 24px; }
+
+	/* empty state */
+	.empty { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
+	.empty .glyph {
+		width: 52px; height: 52px; border-radius: var(--radius-md);
+		background: var(--bg-layer-2); border: 1px solid var(--border-l1);
+		display: grid; place-items: center; color: var(--label-tertiary);
+	}
+	.empty .glyph svg { width: 24px; height: 24px; }
+	.empty h2 { font-size: 17px; font-weight: 600; }
+
+	/* user message */
+	.usermsg { display: flex; flex-direction: column; align-items: flex-end; margin: 26px 0 10px; }
+	.usermsg .bubble {
+		max-width: 78%; background: var(--bg-layer-2); border-radius: var(--radius-lg);
+		padding: 10px 16px; line-height: 25px; border-bottom-right-radius: 6px;
+	}
+	/* the meta row replaces the old divider: time + copy, roomy margins */
+	.usermsg .meta {
+		display: flex; align-items: center; gap: 4px; margin-top: 7px; margin-right: 2px;
+		font-size: 12px; color: var(--label-caption);
+	}
+	.iconbtn {
+		display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px;
+		color: var(--label-caption); transition: background 0.12s var(--ease), color 0.12s var(--ease);
+	}
+	.iconbtn:hover { background: var(--hover); color: var(--label-secondary); }
+	.iconbtn .ic { width: 13.5px; height: 13.5px; }
+	.usermsg + .gap { height: 26px; }
+
+	/* agent text */
+	.agent { margin: 18px 0; line-height: 25px; color: var(--label-primary); }
+	.agent p + p { margin-top: 12px; }
+	.agent code, .rowbody code {
+		font-family: var(--mono); font-size: 12.5px; background: var(--bg-layer-2);
+		border-radius: 5px; padding: 1px 6px;
+	}
+
+	/* tool / thinking entries: flat one-line rows, no capsule, expand on click */
+	.trow { margin: 2px 0; }
+	.rowhead {
+		display: flex; align-items: center; gap: 8px; text-align: left;
+		padding: 6px 8px; margin: 0 -8px; width: calc(100% + 16px);
+		border-radius: var(--radius-sm);
+		font-family: var(--mono);
+	}
+	.rowhead:hover { background: var(--hover); }
+	.rowlabel { font-size: 12px; font-weight: 500; color: var(--label-secondary); flex: none; }
+	.rowargs {
+		font-size: 11.5px; color: var(--label-caption); min-width: 0; flex: 1;
+		white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+	}
+	.rowbody { display: none; padding: 4px 0 10px 8px; font-size: 12.5px; line-height: 21px; color: var(--label-secondary); }
+	.rowbody.mono { font-family: var(--mono); font-size: 12px; color: var(--label-caption); max-height: 300px; overflow-y: auto; white-space: pre-wrap; }
+	.trow.open .rowbody { display: block; }
+	.trow.open .rowargs, .trow.open .think-marquee { visibility: hidden; }
+
+	/* collapsed thinking: one line, endlessly scrolling */
+	.think-marquee { flex: 1; overflow: hidden; min-width: 0;
+		-webkit-mask-image: linear-gradient(90deg, transparent, #000 5%, #000 95%, transparent);
+		mask-image: linear-gradient(90deg, transparent, #000 5%, #000 95%, transparent); }
+	.think-marquee .track { display: inline-flex; white-space: nowrap; animation: marquee 26s linear infinite; }
+	.think-marquee span { font-size: 12px; color: var(--label-caption); padding-right: 64px; }
+	@keyframes marquee { to { transform: translateX(-50%); } }
+
+	/* agent footer chips: copy / usage / time / total */
+	.agentfoot { display: flex; align-items: center; gap: 2px; margin: 6px 0 22px; }
+	.chip {
+		display: flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px;
+		border-radius: 6px; font-size: 12px; color: var(--label-caption);
+		transition: background 0.12s var(--ease), color 0.12s var(--ease);
+	}
+	button.chip:hover { background: var(--hover); color: var(--label-secondary); }
+	.chip .ic { width: 13px; height: 13px; }
+	.chip.mono { font-family: var(--mono); }
+
+	/* running state: plain ticking label, no capsule */
+	.runtime {
+		display: flex; align-items: center; gap: 6px; margin: 16px 0;
+		font-size: 12px; color: var(--label-caption);
+	}
+	.runtime .tm { font-family: var(--mono); }
+
+	/* ---------- composer ---------- */
+	.composer { flex: none; padding: 0 24px 10px; }
+	.composer .inner { max-width: 46rem; margin: 0 auto; }
+	.wschip {
+		display: inline-flex; align-items: center; gap: 6px; margin-bottom: 8px;
+		font-size: 12px; color: var(--label-tertiary); border: 1px solid var(--border-l1);
+		background: var(--bg-layer-1); border-radius: 999px; padding: 4px 11px;
+	}
+	.inputbox {
+		background: var(--bg-layer-1); border: 1px solid var(--border-l2);
+		border-radius: var(--radius-lg); padding: 12px 12px 10px;
+	}
+	.inputbox textarea {
+		width: 100%; background: none; border: none; outline: none; resize: none;
+		color: var(--label-primary); font-size: 14.5px; line-height: 22px; height: 44px;
+	}
+	.inputbox textarea::placeholder { color: var(--label-caption); }
+	.inputrow { display: flex; align-items: center; margin-top: 4px; }
+
+	/* mode dropdown — bottom-left of the input box */
+	.mode-wrap { position: relative; }
+	.modebtn {
+		display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 10px;
+		border-radius: var(--radius-sm); font-size: 12.5px; color: var(--label-secondary);
+		transition: background 0.12s var(--ease);
+	}
+	.modebtn:hover { background: var(--hover); }
+	.modebtn .ic { width: 13.5px; height: 13.5px; color: var(--label-caption); }
+	.modebtn .chev { width: 12px; height: 12px; }
+	.modemenu {
+		display: none; position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 30;
+		width: 264px; background: var(--bg-layer-2); border: 1px solid var(--border-l3);
+		border-radius: var(--radius-md); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.44);
+		padding: 5px; 
+	}
+	.modemenu.show { display: block; }
+	.modeitem {
+		display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
+		padding: 8px 10px; border-radius: var(--radius-sm);
+	}
+	.modeitem:hover { background: var(--hover); }
+	.modeitem .n { font-size: 13px; }
+	.modeitem .d { font-size: 11.5px; color: var(--label-caption); margin-top: 1px; }
+	.modeitem .ok { margin-left: auto; color: var(--accent); opacity: 0; }
+	.modeitem.on .ok { opacity: 1; }
+	.modehint {
+		display: flex; align-items: center; gap: 6px; margin-top: 4px; padding: 7px 10px 5px;
+		border-top: 1px solid var(--border-l1); font-size: 11.5px; color: var(--label-caption);
+	}
+	.modehint button { color: var(--accent); font-size: 11.5px; }
+	.modehint button:hover { text-decoration: underline; }
+
+	.inputrow .right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+	.pill {
+		display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px;
+		border-radius: var(--radius-sm); font-size: 12.5px; color: var(--label-secondary);
+	}
+	.pill:hover { background: var(--hover); }
+	.pill .ic { width: 12px; height: 12px; color: var(--label-caption); }
+	.send {
+		display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px;
+		border-radius: 999px; background: var(--btn-primary-fill); color: var(--btn-primary-label);
+		font-size: 13px; font-weight: 500; margin-left: 4px;
+	}
+	.send:hover { opacity: 0.88; }
+
+	.statusline {
+		max-width: 46rem; margin: 8px auto 0; display: flex; align-items: center; gap: 24px;
+		font-size: 12px; color: var(--label-caption); font-family: var(--mono);
+	}
+	.meter { width: 120px; height: 5px; border-radius: 3px; background: var(--bg-layer-3); overflow: hidden; }
+	.meter i { display: block; height: 100%; width: 16%; background: var(--accent); border-radius: 3px; }
+
+	/* ---------- scene switcher (prototype chrome, not app UI): plain text, no capsule ---------- */
+	.scenes {
+		position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 90;
+		display: flex; align-items: center; gap: 10px; font-size: 12px;
+	}
+	.scenes .lab { color: var(--label-caption); }
+	.scenes button { color: var(--label-caption); padding: 2px 2px; }
+	.scenes button:hover { color: var(--label-primary); }
+	.scenes button.on { color: var(--label-primary); text-decoration: underline; text-underline-offset: 4px; }
+
+	/* ---------- settings modal ---------- */
+	.overlay {
+		display: none; position: fixed; inset: 0; z-index: 50;
+		background: rgba(0, 0, 0, 0.32); place-items: center;
+	}
+	.overlay.show { display: grid; }
+	.panel {
+		width: min(800px, 92vw); height: min(680px, 88vh); display: flex; flex-direction: column;
+		background: var(--bg-layer-1); border: 1px solid var(--border-l2);
+		border-radius: 20px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.44); overflow: hidden;
+	}
+	.panel-head { flex: none; display: flex; align-items: center; padding: 16px 20px 12px; }
+	.panel-head b { font-size: 15px; }
+	.panel-head .x { margin-left: auto; }
+	.panel-body { flex: 1; display: flex; min-height: 0; }
+	.pnav { width: 172px; flex: none; padding: 4px 10px 16px; display: flex; flex-direction: column; gap: 3px; }
+	.pnav button { text-align: left; height: 32px; padding: 0 10px; border-radius: var(--radius-sm);
+		font-size: 13px; color: var(--label-secondary); }
+	.pnav button:hover { background: var(--hover); }
+	.pnav button.on { background: var(--active); color: var(--label-primary); }
+	.pcontent { flex: 1; min-width: 0; overflow-y: auto; padding: 4px 24px 24px 12px; }
+	.pane { display: none; }
+	.pane.on { display: block; }
+	.phint { font-size: 12.5px; color: var(--label-caption); line-height: 19px; margin-bottom: 14px; }
+
+	/* model rows */
+	.mrow { border: 1px solid var(--border-l2); border-radius: var(--radius-md); margin-bottom: 10px; background: var(--bg-layer-2); }
+	.mrow-head { display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 14px; text-align: left; }
+	.mrow-head:hover { background: var(--hover); border-radius: var(--radius-md); }
+	.mrow-head .nm { font-size: 13.5px; font-weight: 600; }
+	.mrow-head .id { font-size: 12px; color: var(--label-caption); font-family: var(--mono); }
+	.mrow-head .del { margin-left: auto; opacity: 0; color: var(--label-caption); }
+	.mrow:hover .del { opacity: 1; }
+	.mrow-head .del:hover { color: var(--red); background: rgba(242, 90, 90, 0.15); }
+	.mform { display: none; border-top: 1px solid var(--border-l1); padding: 14px; }
+	.mrow.editing .mform { display: block; }
+	.mrow.editing .mrow-head { pointer-events: none; }
+	.mrow.editing .mrow-head .del { display: none; }
+	.fgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+	.field { display: flex; flex-direction: column; gap: 5px; }
+	.field label { font-size: 11.5px; color: var(--label-caption); }
+	.field input {
+		height: 34px; border-radius: var(--radius-sm); border: 1px solid var(--border-l2);
+		background: var(--bg-base); color: var(--label-primary); padding: 0 10px; font-size: 13px; outline: none;
+	}
+	.field input:focus { border-color: var(--accent); }
+	.field.wide { grid-column: 1 / -1; }
+	.mactions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+	.btn { height: 30px; padding: 0 14px; border-radius: 999px; font-size: 12.5px;
+		color: var(--label-secondary); border: 1px solid var(--border-l2); }
+	.btn:hover { background: var(--hover); }
+	.btn.primary { background: var(--btn-primary-fill); color: var(--btn-primary-label); border: none; font-weight: 500; }
+	.btn.primary:hover { opacity: 0.88; }
+	.btn.danger { color: var(--red); border-color: rgba(242, 90, 90, 0.4); }
+	.btn.danger:hover { background: rgba(242, 90, 90, 0.15); }
+	.addrow {
+		display: flex; align-items: center; gap: 8px; width: 100%; padding: 12px 14px;
+		border: 1px dashed var(--border-l3); border-radius: var(--radius-md);
+		color: var(--label-secondary); font-size: 13px;
+	}
+	.addrow:hover { background: var(--hover); color: var(--label-primary); }
+	.confirmbar {
+		display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+		border-top: 1px solid rgba(242, 90, 90, 0.25); font-size: 12.5px; color: var(--label-secondary);
+	}
+	.confirmbar .spacer { flex: 1; }
+
+	/* mode rows */
+	.modecard { border: 1px solid var(--border-l2); border-radius: var(--radius-md); margin-bottom: 10px; background: var(--bg-layer-2); }
+	.modecard-head { display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 14px; text-align: left; }
+	.modecard-head:hover { background: var(--hover); border-radius: var(--radius-md); }
+	.modecard-head .nm { font-size: 13.5px; font-weight: 600; }
+	.modecard-head .sum { font-size: 12px; color: var(--label-caption); }
+	.modecard-head .badge { font-size: 10.5px; color: var(--label-caption); border: 1px solid var(--border-l2);
+		border-radius: 999px; padding: 1px 8px; }
+	.modecard-head .del { margin-left: auto; opacity: 0; color: var(--label-caption); }
+	.modecard:hover .del { opacity: 1; }
+	.modecard-head .del:hover { color: var(--red); background: rgba(242, 90, 90, 0.15); }
+	.modeform { display: none; border-top: 1px solid var(--border-l1); padding: 14px; }
+	.modecard.editing .modeform { display: block; }
+	.modecard.editing .modecard-head { pointer-events: none; }
+	.modecard.editing .modecard-head .del { display: none; }
+	.tooltable { border: 1px solid var(--border-l1); border-radius: var(--radius-sm); overflow: hidden; }
+	.toolrow { display: flex; align-items: center; gap: 10px; padding: 7px 12px; border-bottom: 1px solid var(--border-l1); }
+	.toolrow:last-child { border-bottom: none; }
+	.toolrow:nth-child(odd) { background: rgba(255, 255, 255, 0.02); }
+	.toolrow .tn { font-family: var(--mono); font-size: 12.5px; width: 84px; }
+	.toolrow select {
+		margin-left: auto; height: 26px; border-radius: 6px; border: 1px solid var(--border-l2);
+		background: var(--bg-base); color: var(--label-secondary); font-size: 12px; padding: 0 6px; outline: none;
+	}
+	.toolrow select:disabled { opacity: 0.4; }
+	.toolrow input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px; }
+	.mname { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+	.mname label { font-size: 11.5px; color: var(--label-caption); }
+	.mname input {
+		height: 32px; width: 200px; border-radius: var(--radius-sm); border: 1px solid var(--border-l2);
+		background: var(--bg-base); color: var(--label-primary); padding: 0 10px; font-size: 13px; outline: none;
+	}
+	.copytoast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+		background: var(--bg-layer-3); color: var(--label-primary); font-size: 12px;
+		border-radius: 999px; padding: 6px 14px; opacity: 0; transition: opacity 0.2s; pointer-events: none; z-index: 99; }
+	.copytoast.show { opacity: 1; }
+</style>
+</head>
+<body data-scene="chat">
+
+	<div class="scenes">
+		<span class="lab">原型场景</span>
+		<button data-s="empty" onclick="setScene('empty')">空会话</button>
+		<button data-s="chat" onclick="setScene('chat')" class="on">对话</button>
+		<button data-s="running" onclick="setScene('running')">运行中</button>
+	</div>
+
+	<div class="app">
+		<!-- ================= sidebar ================= -->
+		<aside class="sidebar">
+			<button class="new-chat" onclick="setScene('empty')">
+				<svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+				新会话
+			</button>
+			<div class="sb-label">工作区</div>
+			<button class="sb-item on"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7l3-3h12l3 3M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7M3 7h18"/></svg><span class="t">my-coding-agent</span></button>
+			<button class="sb-item"><span class="t">介绍一下这个项目…</span><span class="age">12分钟</span></button>
+			<button class="sb-item"><span class="t">新会话</span><span class="age">15分钟</span></button>
+			<button class="sb-item"><span class="t">写一段长回答</span><span class="age">13小时</span></button>
+			<button class="sb-item"><span class="t">branch at this message</span><span class="age">2天</span></button>
+			<button class="sb-item"><span class="t">Reply with exactly…</span><span class="age">4天</span></button>
+			<button class="sb-item"><span class="t">新会话</span><span class="age">10/9</span></button>
+			<div class="sb-spacer"></div>
+			<button class="sb-settings" onclick="openSettings('model')">
+				<svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
+				设置
+			</button>
+		</aside>
+
+		<!-- ================= main ================= -->
+		<main class="main">
+			<div class="topbar">
+				<span class="title">新会话</span>
+				<span class="path">C:\Users\a1368\Desktop\my-coding-agent</span>
+				<span class="branch">⌥ 当前分支</span>
+			</div>
+
+			<div class="transcript" id="transcript">
+				<!-- empty scene -->
+				<div class="empty" id="scene-empty" style="display:none">
+					<div class="glyph"><svg viewBox="0 0 24 24" class="ic"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg></div>
+					<h2>想做点什么?</h2>
+				</div>
+
+				<!-- chat scene -->
+				<div class="col" id="scene-chat" style="display:none">
+					<div class="usermsg">
+						<div class="bubble">介绍一下这个项目的结构</div>
+						<div class="meta">
+							<span>01:44</span>
+							<button class="iconbtn" title="复制" onclick="copyMsg(this)"><svg class="ic" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>
+						</div>
+					</div>
+					<div class="gap"></div>
+
+					<!-- thinking entry: flat row; finished, so it shows the first sentence -->
+					<div class="trow" id="think1">
+						<button class="rowhead" onclick="toggleBlock('think1')">
+							<span class="rowlabel">思考</span>
+							<span class="rowargs">The user asks in Chinese: “介绍一下这个项目的结构” (introduce the project structure). I should inspect the workspace to give an accurate overview, not just repeat AGENTS.md.</span>
+						</button>
+						<div class="rowbody">The user asks in Chinese: "介绍一下这个项目的结构" (introduce the project structure). I should inspect the workspace to give an accurate overview, not just repeat AGENTS.md. Let me look at the directory structure and key files.
+
+Let me start with listing files, reading README, docs/architecture.md maybe, and package.json.</div>
+					</div>
+
+					<div class="agent"><p>我先看一下仓库的实际结构，再结合文档介绍。</p></div>
+
+					<div class="trow" id="bash1">
+						<button class="rowhead" onclick="toggleBlock('bash1')">
+							<span class="rowlabel mono">bash</span>
+							<span class="rowargs mono">git ls-files | head -300</span>
+						</button>
+						<div class="rowbody mono">.gitignore
+.scratch/client-server-refactor/issues/01-dsh-portability.md
+.scratch/client-server-refactor/issues/02-sse-multiplex-pitfalls.md
+.scratch/client-server-refactor/issues/03-window-multi-session-prototype.md
+.scratch/client-server-refactor/issues/04-subplex-api.md
+.scratch/client-server-refactor/issues/05-multiplex-framing.md
+.scratch/client-server-refactor/issues/06-recovery-baseline.md</div>
+					</div>
+
+					<div class="trow">
+						<button class="rowhead" onclick="this.parentNode.classList.toggle('open')">
+							<span class="rowlabel mono">read</span>
+							<span class="rowargs mono">docs/architecture.md</span>
+						</button>
+						<div class="rowbody mono">## 请求流程
+…（文件节选）</div>
+					</div>
+
+					<div class="trow">
+						<button class="rowhead" onclick="this.parentNode.classList.toggle('open')">
+							<span class="rowlabel mono">grep</span>
+							<span class="rowargs mono">"claim" packages/server --type ts</span>
+						</button>
+						<div class="rowbody mono">packages/server/src/hub.ts:41:  claim(id: string): Claim
+packages/server/src/hub.ts:88:  release(claim: Claim)
+…（其余命中）</div>
+					</div>
+
+					<div class="trow">
+						<button class="rowhead" onclick="this.parentNode.classList.toggle('open')">
+							<span class="rowlabel mono">glob</span>
+							<span class="rowargs mono">packages/core/src/**/*.ts</span>
+						</button>
+						<div class="rowbody mono">packages/core/src/agent.ts
+packages/core/src/tools.ts
+packages/core/src/session.ts
+…（其余命中）</div>
+					</div>
+
+					<div class="trow">
+						<button class="rowhead" onclick="this.parentNode.classList.toggle('open')">
+							<span class="rowlabel mono">edit</span>
+							<span class="rowargs mono">packages/web/src/style.css (+12 −3)</span>
+						</button>
+						<div class="rowbody mono">@@ -41,7 +41,14 @@
+ .toolrow select:disabled { opacity: 0.4; }
++.modeitem .ok { margin-left: auto; … }</div>
+					</div>
+
+					<div class="trow">
+						<button class="rowhead" onclick="this.parentNode.classList.toggle('open')">
+							<span class="rowlabel mono">write</span>
+							<span class="rowargs mono">docs/adr/0003-modes.md</span>
+						</button>
+						<div class="rowbody mono"># ADR-0003: 模式即工具集与审批集的一次选择
+…（全文）</div>
+					</div>
+
+					<div class="trow">
+						<button class="rowhead" onclick="this.parentNode.classList.toggle('open')">
+							<span class="rowlabel mono">subagent</span>
+							<span class="rowargs">梳理 session manager 的分支与压缩逻辑，产出要点清单</span>
+						</button>
+						<div class="rowbody">已读完 packages/core/src/session.ts 与 docs/architecture.md 对应章节，要点：…（子代理结果摘要）</div>
+					</div>
+
+					<div class="agent"><p>这是一个带桌面 UI 的编码 agent： <code>packages/ai</code> 是裁剪后的传输层，<code>packages/agent</code> 是循环，<code>packages/core</code> 是无头 agent，<code>packages/server</code> 暴露 REST + WebSocket mux，<code>packages/web</code> 是窗口客户端。</p></div>
+
+					<!-- agent footer: copy icon only, no separators -->
+					<div class="agentfoot">
+						<button class="iconbtn" title="复制" onclick="copyMsg(this)"><svg class="ic" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>
+						<span class="chip"><svg class="ic" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>用量 74.8K tok</span>
+						<span class="chip"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>01:44</span>
+						<span class="chip"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6M12 2v3"/></svg>用时 6.2s</span>
+					</div>
+				</div>
+
+				<!-- running scene -->
+				<div class="col" id="scene-running" style="display:none">
+					<div class="usermsg">
+						<div class="bubble">再看看 docs/ 里的 ADR，补充到你的回答里</div>
+						<div class="meta">
+							<span>14:26</span>
+							<button class="iconbtn" title="复制" onclick="copyMsg(this)"><svg class="ic" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>
+						</div>
+					</div>
+					<div class="gap"></div>
+
+					<!-- thinking entry, streaming: the line keeps scrolling while tokens arrive;
+					     when the stream ends it freezes on the first sentence (see the chat scene) -->
+					<div class="trow" id="think2">
+						<button class="rowhead" onclick="toggleBlock('think2')">
+							<span class="rowlabel">思考</span>
+							<div class="think-marquee"><div class="track">
+								<span>User wants the ADRs folded in. docs/adr/ has the transport decisions — 0001 is the WebSocket mux one. I should read 0001 and the branch naming ADR-0002, then merge them into the earlier structure answer…</span>
+								<span>User wants the ADRs folded in. docs/adr/ has the transport decisions — 0001 is the WebSocket mux one. I should read 0001 and the branch naming ADR-0002, then merge them into the earlier structure answer…</span>
+							</div></div>
+						</button>
+						<div class="rowbody">User wants the ADRs folded in. docs/adr/ has the transport decisions — 0001 is the WebSocket mux one. I should read 0001 and the branch naming ADR-0002, then merge them into the earlier structure answer.</div>
+					</div>
+
+					<div class="runtime">用时 <span class="tm" id="runTimer">00:00</span></div>
+				</div>
+			</div>
+
+			<!-- ================= composer ================= -->
+			<div class="composer">
+				<div class="inner">
+					<span class="wschip"><svg class="ic" style="width:12px;height:12px" viewBox="0 0 24 24"><path d="M3 7l3-3h12l3 3M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7M3 7h18"/></svg>my-coding-agent ›</span>
+					<div class="inputbox">
+						<textarea placeholder="想做点什么？"></textarea>
+						<div class="inputrow">
+							<!-- mode dropdown: pick a tool set + approval set, edited only in settings -->
+							<div class="mode-wrap">
+								<button class="modebtn" onclick="toggleModeMenu(event)">
+									<svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
+									<span id="modeLabel">默认</span>
+									<svg class="ic chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+								</button>
+								<div class="modemenu" id="modeMenu"></div>
+							</div>
+							<div class="right">
+								<button class="pill">deepseek-flash <svg class="ic" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
+								<button class="pill">high <svg class="ic" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
+								<button class="send">发送 <svg class="ic" style="width:13px;height:13px" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+							</div>
+						</div>
+					</div>
+					<div class="statusline">
+						<span>total 304k</span><span>cache 90%</span>
+						<span style="display:flex;align-items:center;gap:8px">context 16% <span class="meter"><i></i></span></span>
+					</div>
+				</div>
+			</div>
+		</main>
+	</div>
+
+	<!-- ================= settings ================= -->
+	<div class="overlay" id="settingsOverlay">
+		<div class="panel">
+			<div class="panel-head">
+				<b>设置</b>
+				<button class="iconbtn" onclick="closeSettings()"><svg class="ic" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+			</div>
+			<div class="panel-body">
+				<nav class="pnav">
+					<button data-p="appearance" onclick="setPane('appearance')">外观</button>
+					<button data-p="model" onclick="setPane('model')" class="on">模型</button>
+					<button data-p="modes" onclick="setPane('modes')">模式</button>
+					<button data-p="default" onclick="setPane('default')">默认</button>
+				</nav>
+				<div class="pcontent">
+					<div class="pane" id="pane-appearance"><p class="phint">（外观设置与本次改造无关，原型从略。）</p></div>
+
+					<!-- ===== models: no global save; inline edit / add / delete ===== -->
+					<div class="pane on" id="pane-model">
+						<p class="phint">每个模型是一行「端点 + 密钥」。点击条目中间进入编辑；右侧回收站删除；「＋ 添加模型」直接展开一张空表单。</p>
+						<div id="modelList"></div>
+						<button class="addrow" onclick="startAddModel()"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>添加模型</button>
+					</div>
+
+					<!-- ===== modes: tool set + approval set, edited only here ===== -->
+					<div class="pane" id="pane-modes">
+						<p class="phint">模式 = 一组工具与审批配置。会话在输入框左下角选择模式；模式只能在这里修改，会话只用。</p>
+						<div id="modeList"></div>
+						<button class="addrow" onclick="startAddMode()"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新建模式</button>
+					</div>
+
+					<div class="pane" id="pane-default"><p class="phint">（默认设置与本次改造无关，原型从略。）</p></div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="copytoast" id="toast">已复制</div>
+
+<script>
+	/* ---------- scenes ---------- */
+	function setScene(s) {
+		document.body.dataset.scene = s;
+		for (const el of ["scene-empty", "scene-chat", "scene-running"]) {
+			document.getElementById(el).style.display = "none";
+		}
+		document.getElementById("scene-" + s).style.display = s === "empty" ? "flex" : "block";
+		for (const b of document.querySelectorAll(".scenes button")) b.classList.toggle("on", b.dataset.s === s);
+		if (s === "running") startTimer(); else stopTimer();
+		document.getElementById("transcript").scrollTop = 0;
+	}
+
+	/* ---------- running timer ---------- */
+	let timerId = null;
+	function startTimer() {
+		stopTimer();
+		const el = document.getElementById("runTimer");
+		let sec = 0;
+		el.textContent = "00:00";
+		timerId = setInterval(() => {
+			sec++;
+			el.textContent = String(Math.floor(sec / 60)).padStart(2, "0") + ":" + String(sec % 60).padStart(2, "0");
+		}, 1000);
+	}
+	function stopTimer() { if (timerId) { clearInterval(timerId); timerId = null; } }
+
+	/* ---------- collapsible blocks ---------- */
+	function toggleBlock(id) { document.getElementById(id).classList.toggle("open"); }
+
+	/* ---------- copy ---------- */
+	let toastId = null;
+	function copyMsg(btn) {
+		const t = document.getElementById("toast");
+		t.classList.add("show");
+		clearTimeout(toastId);
+		toastId = setTimeout(() => t.classList.remove("show"), 1200);
+	}
+
+	/* ---------- data ---------- */
+	const TOOLS = ["read", "grep", "glob", "bash", "edit", "write", "subagent"];
+	let models = [
+		{ name: "scripted", id: "scripted/claude-sonnet-4-5", base: "https://example.invalid/v1", key: "sk-••••", mid: "claude-sonnet-4-5" },
+		{ name: "deepseek-flash", id: "deepseek-flash/deepseek-flash", base: "https://example.invalid/v1", key: "sk-••••", mid: "deepseek-flash" },
+	];
+	let modes = [
+		{ name: "默认", builtin: true, tools: { read: ["on", "allow"], grep: ["on", "allow"], glob: ["on", "allow"], bash: ["on", "ask"], edit: ["on", "ask"], write: ["on", "ask"], subagent: ["on", "ask"] } },
+		{ name: "只读", builtin: false, tools: { read: ["on", "allow"], grep: ["on", "allow"], glob: ["on", "allow"], bash: ["off", "ask"], edit: ["off", "ask"], write: ["off", "ask"], subagent: ["off", "ask"] } },
+		{ name: "全自动", builtin: false, tools: { read: ["on", "allow"], grep: ["on", "allow"], glob: ["on", "allow"], bash: ["on", "allow"], edit: ["on", "allow"], write: ["on", "allow"], subagent: ["on", "allow"] } },
+	];
+	let currentMode = "默认";
+	let editingModel = null; // index or "new"
+	let editingMode = null;
+
+	/* ---------- settings modal ---------- */
+	function openSettings(pane) { document.getElementById("settingsOverlay").classList.add("show"); setPane(pane); }
+	function closeSettings() { document.getElementById("settingsOverlay").classList.remove("show"); editingModel = null; editingMode = null; renderModels(); renderModes(); }
+	function setPane(p) {
+		for (const el of document.querySelectorAll(".pane")) el.classList.remove("on");
+		document.getElementById("pane-" + p).classList.add("on");
+		for (const b of document.querySelectorAll(".pnav button")) b.classList.toggle("on", b.dataset.p === p);
+	}
+
+	/* ---------- models ---------- */
+	function modeSummary(m) {
+		const on = Object.values(m.tools).filter(t => t[0] === "on");
+		const ask = on.filter(t => t[1] === "ask").length;
+		return `${on.length} 个工具 · ${ask} 项询问`;
+	}
+	function renderModels() {
+		const host = document.getElementById("modelList");
+		host.innerHTML = "";
+		models.forEach((m, i) => {
+			const row = document.createElement("div");
+			row.className = "mrow" + (editingModel === i ? " editing" : "");
+			row.innerHTML = `
+				<button class="mrow-head" onclick="editModel(${i})">
+					<span class="nm">${m.name}</span><span class="id">${m.name}/${m.mid}</span>
+					<span class="del iconbtn" title="删除" onclick="event.stopPropagation();askDeleteModel(${i})"><svg class="ic" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></svg></span>
+				</button>
+				<div class="mform"><div class="fgrid">
+					<div class="field"><label>名称</label><input id="mf-name-${i}" value="${m.name}"></div>
+					<div class="field"><label>模型 ID</label><input id="mf-mid-${i}" value="${m.mid}"></div>
+					<div class="field wide"><label>Base URL</label><input id="mf-base-${i}" value="${m.base}"></div>
+					<div class="field wide"><label>API Key</label><input id="mf-key-${i}" type="password" value="${m.key}"></div>
+				</div>
+				<div class="mactions">
+					<button class="btn" onclick="cancelModel()">取消</button>
+					<button class="btn primary" onclick="saveModel(${i})">保存</button>
+				</div></div>
+				${row.dataset.confirm ? confirmBar : ""}
+			`;
+			host.appendChild(row);
+		});
+	}
+	function editModel(i) { editingModel = i; editingMode = null; renderModels(); renderModes(); }
+	function cancelModel() { editingModel = null; renderModels(); }
+	function saveModel(i) {
+		models[i].name = document.getElementById("mf-name-" + i).value || models[i].name;
+		models[i].mid = document.getElementById("mf-mid-" + i).value || models[i].mid;
+		models[i].base = document.getElementById("mf-base-" + i).value;
+		models[i].key = document.getElementById("mf-key-" + i).value;
+		editingModel = null; renderModels();
+	}
+	function startAddModel() {
+		models.push({ name: "新模型", id: "未配置", base: "", key: "", mid: "" });
+		editingModel = models.length - 1; renderModels();
+		const host = document.getElementById("modelList");
+		host.lastElementChild.scrollIntoView({ behavior: "smooth", block: "nearest" });
+	}
+	function askDeleteModel(i) {
+		const host = document.getElementById("modelList");
+		const row = host.children[i];
+		if (row.querySelector(".confirmbar")) return;
+		const bar = document.createElement("div");
+		bar.className = "confirmbar";
+		bar.innerHTML = `<span>删除 <b>${models[i].name}</b>？此操作不可撤销。</span><span class="spacer"></span>
+			<button class="btn danger" onclick="delModel(${i})">删除</button>
+			<button class="btn" onclick="renderModels()">取消</button>`;
+		row.appendChild(bar);
+	}
+	function delModel(i) { models.splice(i, 1); editingModel = null; renderModels(); }
+
+	/* ---------- modes ---------- */
+	function renderModes() {
+		const host = document.getElementById("modeList");
+		host.innerHTML = "";
+		modes.forEach((m, i) => {
+			const card = document.createElement("div");
+			card.className = "modecard" + (editingMode === i ? " editing" : "");
+			const rows = TOOLS.map(t => {
+				const st = m.tools[t] || ["off", "ask"];
+				return `<div class="toolrow">
+					<input type="checkbox" ${st[0] === "on" ? "checked" : ""} onchange="modeTool(${i},'${t}',0,this.checked)">
+					<span class="tn">${t}</span>
+					<select ${st[0] === "off" ? "disabled" : ""} onchange="modeTool(${i},'${t}',1,this.value)">
+						<option value="allow" ${st[1] === "allow" ? "selected" : ""}>自动允许</option>
+						<option value="ask" ${st[1] === "ask" ? "selected" : ""}>每次询问</option>
+					</select>
+				</div>`;
+			}).join("");
+			card.innerHTML = `
+				<button class="modecard-head" onclick="editMode(${i})">
+					<span class="nm">${m.name}</span>
+					${m.builtin ? '<span class="badge">内置</span>' : ""}
+					<span class="sum">${modeSummary(m)}</span>
+					<span class="del iconbtn" title="删除模式" onclick="event.stopPropagation();delMode(${i})"><svg class="ic" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></svg></span>
+				</button>
+				<div class="modeform">
+					<div class="mname"><label>模式名称</label><input id="md-name-${i}" value="${m.name}"></div>
+					<div class="tooltable">${rows}</div>
+					<div class="mactions">
+						<button class="btn" onclick="cancelMode()">取消</button>
+						<button class="btn primary" onclick="saveMode(${i})">保存</button>
+					</div>
+				</div>`;
+			host.appendChild(card);
+		});
+		renderModeMenu();
+	}
+	function editMode(i) { editingMode = i; editingModel = null; renderModes(); renderModels(); }
+	function cancelMode() { editingMode = null; renderModes(); }
+	function modeTool(i, t, slot, val) {
+		const st = modes[i].tools[t] || ["off", "ask"];
+		st[slot] = slot === 0 ? (val ? "on" : "off") : val;
+		modes[i].tools[t] = st;
+		renderModes(); editingMode = i;
+	}
+	function saveMode(i) {
+		modes[i].name = document.getElementById("md-name-" + i).value || modes[i].name;
+		editingMode = null; renderModes();
+	}
+	function delMode(i) {
+		if (modes[i].builtin) return;
+		modes.splice(i, 1);
+		if (currentMode === modes[i]) currentMode = "默认";
+		editingMode = null; renderModes(); renderModeMenu();
+	}
+	function startAddMode() {
+		const tools = {};
+		for (const t of TOOLS) tools[t] = ["off", "allow"];
+		modes.push({ name: "新模式", builtin: false, tools });
+		editingMode = modes.length - 1; renderModes();
+		const host = document.getElementById("modeList");
+		host.lastElementChild.scrollIntoView({ behavior: "smooth", block: "nearest" });
+	}
+
+	/* ---------- composer mode dropdown ---------- */
+	function renderModeMenu() {
+		const menu = document.getElementById("modeMenu");
+		menu.innerHTML = modes.map(m => `
+			<button class="modeitem ${m.name === currentMode ? "on" : ""}" onclick="pickMode('${m.name}')">
+				<span><div class="n">${m.name}</div><div class="d">${modeSummary(m)}</div></span>
+				<svg class="ic ok" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+			</button>`).join("") +
+			`<div class="modehint">模式只能在全局设置里修改 <button onclick="openSettings('modes');toggleModeMenu(event)">去设置 › 模式</button></div>`;
+		document.getElementById("modeLabel").textContent = currentMode;
+	}
+	function toggleModeMenu(e) { e.stopPropagation(); document.getElementById("modeMenu").classList.toggle("show"); }
+	function pickMode(name) { currentMode = name; renderModeMenu(); document.getElementById("modeMenu").classList.remove("show"); }
+	document.addEventListener("click", () => document.getElementById("modeMenu").classList.remove("show"));
+
+	/* ---------- boot ---------- */
+	renderModels();
+	renderModes();
+	setScene("chat");
+</script>
+</body>
+</html>
