@@ -506,8 +506,8 @@ function main(): void {
 		onToggleWorkspace: (cwd) => {
 			const entry = pagingOf(paging, cwd);
 			// Expanding lands on the page the workspace was read down to when it collapsed; collapsing
-			// saves the page it was on. This is the one place the saved page is written — the 「收起」
-			// button deliberately leaves it alone.
+			// saves the page it was on. The two paging buttons write the saved page too — they are
+			// where the reading happens — so the saved page is always the page on screen.
 			setPaging(
 				cwd,
 				entry.collapsed
@@ -520,10 +520,12 @@ function main(): void {
 			setPaging(cwd, { collapsed: false, page: entry.page + 1, savedPage: entry.page + 1 });
 		},
 		onCollapseWorkspace: (cwd) => {
-			// Back to the first page, and the saved page deliberately untouched: this is a view-level
-			// reset, not a collapse, so reopening a later heading-collapse still lands where the user
-			// had read down to rather than where this button just reset to.
-			setPaging(cwd, { collapsed: false, page: 1, savedPage: pagingOf(paging, cwd).savedPage });
+			// Step back the one page the last 「展开其余」 added — not a reset to the first, and the
+			// saved page moves with it: un-expanding is un-reading, so reopening a later
+			// heading-collapse lands on the page the user had actually read down to.
+			const entry = pagingOf(paging, cwd);
+			const page = Math.max(1, entry.page - 1);
+			setPaging(cwd, { collapsed: false, page, savedPage: page });
 		},
 		onRenameWorkspace: (cwd, name) => void renameWorkspace(cwd, name),
 		onDeleteWorkspace: (cwd) => void deleteWorkspace(cwd),

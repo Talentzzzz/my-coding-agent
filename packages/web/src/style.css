@@ -497,12 +497,18 @@ body {
 	line-height: var(--dsw-lh-caption);
 }
 
-/* Opens one workspace's list without opening the others. */
-.session-more {
-	align-self: flex-start;
-	padding: 4px 8px;
+/* The paging row: 「展开其余」 and — beside it, once a page has been added — 「收起」. */
+.session-paging {
+	display: flex;
+	align-items: baseline;
+	gap: 2px;
 	/* Under the names' left edge, the way the rows read: 8px of row padding plus the 16px slot. */
 	margin-left: 22px;
+}
+
+/* One of the two paging buttons. The presence of each is patched, never a rebuild. */
+.session-more {
+	padding: 4px 8px;
 	border: none;
 	border-radius: var(--dsw-radius-xs);
 	background: transparent;

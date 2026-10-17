@@ -78,9 +78,9 @@ export interface AppearanceSettings {
  * One workspace's paging state, as the sidebar last left it.
  *
  * Three fields, because two of the decided behaviours need a memory that survives the third: the
- * 「收起」 button returns to the first page *without* touching {@link savedPage}, so that reopening a
- * later heading-collapse still lands on the page the user had read down to — not on the page the
- * button had just reset to.
+ * 「收起」 button steps {@link page} back one page — undoing the page the last 「展开其余」 added —
+ * and {@link savedPage} moves with it, so reopening a later heading-collapse lands on the page the
+ * user had actually read down to.
  */
 export interface WorkspacePaging {
 	/** Whether the workspace shows only its heading. */

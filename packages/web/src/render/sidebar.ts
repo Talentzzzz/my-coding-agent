@@ -35,7 +35,7 @@ export interface SidebarHandlers {
 	onToggleWorkspace(cwd: string): void;
 	/** The workspace's 「展开其余」 was clicked: show one more page of its conversations. */
 	onPageWorkspace(cwd: string): void;
-	/** The workspace's 「收起」 was clicked: back to the first page, without touching the saved one. */
+	/** The workspace's 「收起」 was clicked: step the expansion back one page. */
 	onCollapseWorkspace(cwd: string): void;
 	/**
 	 * Rename the workspace this heading names: move its folder, and carry its sessions along (票 06).
@@ -137,7 +137,7 @@ export class Sidebar {
 	private scrolledTo: string | undefined;
 	/**
 	 * The last state handed to {@link render}, so a control drawn inside the list can ask for a
-	 * redraw without the caller having threaded it back in. Only the "more" button needs this.
+	 * redraw without the caller having threaded it back in. Only the paging row needs this.
 	 */
 	private lastState: SidebarState | undefined;
 	/** Whether the search row is on screen, and the text it is filtering by. */
@@ -308,31 +308,26 @@ export class Sidebar {
 				previous = button;
 			}
 
-			// The paging row under the list: one more page while rows are held back, and once
-			// everything is on screen the 「收起」 that returns to the first page — but only where
-			// paging was ever a thing, which is a workspace with more conversations than a page holds.
-			// A filtering list shows everything it matched, so it wears neither; a collapsed workspace
-			// wears neither either — the decision is 全部收起、只留表头, and a paging row under a
-			// heading would contradict the collapse it sits inside.
+			// The paging row under the list, two buttons on one line: 「展开其余」 while rows are
+			// held back, and — beside it, once a page has been added — the 「收起」 that steps the
+			// expansion back one page. Neither appears where paging was never a thing, which is a
+			// workspace with no more conversations than a page holds; a filtering list shows
+			// everything it matched, so it wears neither; and a collapsed workspace wears neither
+			// either — the decision is 全部收起、只留表头, and a paging row under a heading would
+			// contradict the collapse it sits inside.
 			const paged = open && filter === "";
 			const hidden = paged ? rows.length - shown.length : 0;
 			const conversations = rows.filter((row) => row.depth === 0).length;
-			const more = paged && hidden > 0 ? this.moreFor(group.cwd, hidden) : undefined;
-			const collapse =
-				more === undefined && paged && conversations > PAGE_SIZE ? this.collapseFor(group.cwd) : undefined;
-			if (more !== undefined) {
-				wanted.add(`more:${group.cwd}`);
-				this.place(wrapper, more, previous);
-				previous = more;
+			const more = paged && hidden > 0;
+			const back = paged && entry.page > 1 && conversations > PAGE_SIZE;
+			if (more || back) {
+				wanted.add(`paging:${group.cwd}`);
+				const pagingRow = this.pagingRowFor(group.cwd);
+				this.paintPagingRow(pagingRow, more, back, hidden);
+				this.place(wrapper, pagingRow.row, previous);
+				previous = pagingRow.row;
 			} else {
-				this.stale(`more:${group.cwd}`);
-			}
-			if (collapse !== undefined) {
-				wanted.add(`collapse:${group.cwd}`);
-				this.place(wrapper, collapse, previous);
-				previous = collapse;
-			} else {
-				this.stale(`collapse:${group.cwd}`);
+				this.stale(`paging:${group.cwd}`);
 			}
 			wanted.add(`head:${group.cwd}`);
 		}
@@ -698,47 +693,40 @@ export class Sidebar {
 	}
 
 	/**
-	 * The 「展开其余 N 个会话」 row: one more page of conversations per press.
+	 * The paging row under a workspace's conversations: 「展开其余」 first, and — beside it, not
+	 * beneath it — 「收起」.
 	 *
-	 * The click is reported rather than acted on — the page count is appearance state, and the
-	 * window owns the settings write, so the redraw comes back through the state the caller hands
-	 * in. Patched in place like every drawn node: a press that lands between pointer-down and up
-	 * must not fall on a button that was rebuilt under it.
+	 * One drawn node holding both buttons rather than two drawn nodes placed one after another,
+	 * because the list column lays its children out vertically: side by side is a row of their own.
+	 * Patched in place like every drawn node — a press that lands between pointer-down and up must
+	 * not fall on a button that was rebuilt under it — and which of the two is on screen is part of
+	 * the patch, not a rebuild: 展开 is on while rows are held back, 收起 is on once a page has
+	 * been added, and either one alone is an ordinary state of the row.
 	 */
-	private moreFor(cwd: string, hidden: number): HTMLElement {
-		const key = `more:${cwd}`;
-		const label = `展开其余 ${hidden} 个会话`;
+	private pagingRowFor(cwd: string): PagingRow {
+		const key = `paging:${cwd}`;
 		const existing = this.drawn.get(key);
-		if (existing !== undefined) {
-			if (existing.button.textContent !== label) existing.button.textContent = label;
-			return existing.button;
-		}
+		if (existing?.paging !== undefined) return existing.paging;
 
-		const more = element("button", "session-more", label, { type: "button" });
+		const more = element("button", "session-more", undefined, { type: "button" });
 		more.addEventListener("click", () => this.handlers.onPageWorkspace(cwd));
-		this.drawn.set(key, { button: more });
-		return more;
+		const collapse = element("button", "session-more session-collapse", "收起", { type: "button" });
+		collapse.addEventListener("click", () => this.handlers.onCollapseWorkspace(cwd));
+		const row = element("div", "session-paging");
+		row.append(more, collapse);
+		const paging: PagingRow = { row, more, collapse };
+		this.drawn.set(key, { button: row, paging });
+		return paging;
 	}
 
-	/**
-	 * The 「收起」 row, worn only once everything a workspace has is on screen.
-	 *
-	 * It is a separate drawn node from {@link moreFor} rather than a re-labelled one, because the
-	 * two are different promises about what the click does — one adds a page, the other resets to
-	 * the first — and a control whose meaning flips under it should at least be two controls that
-	 * never share a moment on screen. The workspace keeps its saved page through this: the reset is
-	 * a view-level "back to five", not a collapse, and reopening a later heading-collapse still
-	 * lands where the user had read down to.
-	 */
-	private collapseFor(cwd: string): HTMLElement {
-		const key = `collapse:${cwd}`;
-		const existing = this.drawn.get(key);
-		if (existing !== undefined) return existing.button;
-
-		const collapse = element("button", "session-more", "收起", { type: "button" });
-		collapse.addEventListener("click", () => this.handlers.onCollapseWorkspace(cwd));
-		this.drawn.set(key, { button: collapse });
-		return collapse;
+	/** Write one paging row's current state, and only what moved. */
+	private paintPagingRow(paging: PagingRow, more: boolean, back: boolean, hidden: number): void {
+		paging.more.hidden = !more;
+		if (more) {
+			const label = `展开其余 ${hidden} 个会话`;
+			if (paging.more.textContent !== label) paging.more.textContent = label;
+		}
+		paging.collapse.hidden = !back;
 	}
 
 	/** Drop one drawn node by key, wherever it happens to be. */
@@ -768,20 +756,39 @@ export class Sidebar {
 /**
  * One drawn node, plus what is remembered about it between renders.
  *
- * Two kinds of thing live in this map and only one of them is a session row — a workspace heading and a
- * "more" button are drawn the same way, kept for the same reason, and never patched. `parts` is what
- * separates them: it is present exactly for the rows, which is why the patching code can reach through
- * it without asking whether this entry happens to be a row.
+ * Three kinds of thing live in this map and only one of them is a session row — a workspace heading
+ * and the paging row are drawn the same way, kept for the same reason, and never rebuilt. `parts` and
+ * `paging` are what separate them: `parts` is present exactly for the rows, `paging` exactly for the
+ * paging row, which is why the patching code can reach through either without asking whether the
+ * entry it was handed happens to be the other kind.
  */
 interface DrawnNode {
-	/** The button for a row, or the container for a group heading. */
+	/** The button for a row, or the container for a group heading or the paging row. */
 	button: HTMLElement;
-	/** The row's own parts, and the values last written to them. Absent for the two non-row entries. */
+	/** The row's own parts, and the values last written to them. Absent for the non-row entries. */
 	parts?: RowParts;
 	/** The heading element inside `button`, for group entries. */
 	head?: HTMLElement;
 	/** The heading's label node, so a re-keyed group can be renamed without rebuilding the heading. */
 	name?: HTMLElement;
+	/** The paging row's two buttons, for paging entries. */
+	paging?: PagingRow;
+}
+
+/**
+ * The two buttons a paging row holds, and the row that lays them side by side.
+ *
+ * A separate type from {@link DrawnNode} for the same reason {@link RowParts} is: which nodes exist
+ * and what gets written into them are separate facts, and the paging row writes two buttons' presence
+ * where a session row writes five fields' text.
+ */
+interface PagingRow {
+	/** The flex row the two buttons sit in; the drawn node itself. */
+	row: HTMLElement;
+	/** 「展开其余 N 个会话」, on while rows are held back. */
+	more: HTMLButtonElement;
+	/** 「收起」, on once a page has been added; steps the expansion back one page. */
+	collapse: HTMLButtonElement;
 }
 
 /** One rename in flight: which row is being edited, and whether it has been settled already. */

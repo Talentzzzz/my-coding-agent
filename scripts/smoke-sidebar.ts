@@ -48,7 +48,7 @@ function handlers(over: Partial<SidebarHandlers> = {}): SidebarHandlers {
  * `main.ts`'s three handlers fold, and the next render reads it out of `SidebarState`.
  *
  * The three rules are deliberately the ones `main.ts` implements — expand lands on the saved page,
- * collapse saves the page it was on, 「收起」 resets the page and leaves the saved one — copied here
+ * collapse saves the page it was on, 「收起」 steps the expansion back one page — copied here
  * because the sidebar's own behaviour is only half the contract: the other half is that some window
  * turns its reports back into state. If `main.ts` drifts from this, the smoke's red is the drift.
  */
@@ -67,7 +67,8 @@ function pagingDriver(over: Partial<SidebarHandlers> = {}): { handlers: SidebarH
 		},
 		onCollapseWorkspace: (cwd) => {
 			const entry = pagingOf(paging, cwd);
-			paging[cwd] = { collapsed: false, page: 1, savedPage: entry.savedPage };
+			const page = Math.max(1, entry.page - 1);
+			paging[cwd] = { collapsed: false, page, savedPage: page };
 		},
 		...over,
 	});
@@ -584,9 +585,9 @@ process.stdout.write("\nsidebar：工作区按最近活跃在前\n");
 	check("活跃后：老的反超到第一", store.groups().map((group) => group.cwd).join(",") === "/old,/new", JSON.stringify(store.groups().map((group) => group.cwd)));
 }
 
-// ------------------------------------------ 13. paging: one more page per press
+// -------- 13. paging: one more page per press, one back per collapse, side by side
 
-process.stdout.write("\nsidebar：分页 ——「展开其余」一次加一页，「收起」回到一页\n");
+process.stdout.write("\nsidebar：分页 ——「展开其余」一次加一页，「收起」在它右边退一页\n");
 
 {
 	const { handlers: driver, paging } = pagingDriver();
@@ -596,28 +597,46 @@ process.stdout.write("\nsidebar：分页 ——「展开其余」一次加一页
 	const rows = Array.from({ length: 12 }, (_unused, index) => row(`s${index}`, 1200 - index * 100));
 	const render = (): void => sidebar.render(state(rows, { activeSessionId: "s0", paging }));
 
+	const more = (): FakeNode => all(sidebar, "session-more")[0]!.node;
+	const collapse = (): FakeNode => all(sidebar, "session-collapse")[0]!.node;
+	const pagingRow = (): FakeNode => all(sidebar, "session-paging")[0]!.node;
+	// The buttons are patched, not rebuilt: 「收起」 stays in the row and its *presence* is the
+	// `hidden` attribute, so "is it on screen" is a visibility question, not a count of nodes.
+	const collapseShown = (): boolean => all(sidebar, "session-collapse").some((entry) => !entry.node.hidden);
+
 	render();
 	check("默认一页：只有 5 个会话", titlesOf(sidebar).length === 5, String(titlesOf(sidebar).length));
-	const more = (): FakeNode => all(sidebar, "session-more")[0]!.node;
 	check("底部写着「展开其余 7 个会话」", more().textContent === "展开其余 7 个会话", more().textContent);
+	check("第一页没有「收起」：没有可收的", !collapseShown(), String(collapseShown()));
+
 	more().dispatch("click");
 	render();
 	check("点一次多 5 条", titlesOf(sidebar).length === 10, String(titlesOf(sidebar).length));
 	check("按钮数到剩下的 2 个", more().textContent === "展开其余 2 个会话", more().textContent);
+	check("展开之后「收起」出现了", collapseShown(), String(collapseShown()));
+	check("两个按钮在同一行里", pagingRow().children.length === 2, JSON.stringify(pagingRow().children.map((child) => child.className)));
+	check("「收起」在「展开其余」的右边", pagingRow().children[0]?.classList.contains("session-collapse") === false && pagingRow().children[1]?.classList.contains("session-collapse") === true, JSON.stringify(pagingRow().children.map((child) => child.className)));
+
 	more().dispatch("click");
 	render();
 	check("再点一次：12 条全在", titlesOf(sidebar).length === 12, String(titlesOf(sidebar).length));
-	check("全部展开后按钮变「收起」", more().textContent === "收起", more().textContent);
-	more().dispatch("click");
+	check("全部展开后只剩「收起」", more().hidden && !collapse().hidden, `more.hidden=${String(more().hidden)}`);
+	collapse().dispatch("click");
 	render();
-	check("「收起」回到一页 5 条", titlesOf(sidebar).length === 5, String(titlesOf(sidebar).length));
-	check("「收起」后底部回到「展开其余」", more().textContent === "展开其余 7 个会话", more().textContent);
+	check("「收起」退一页：10 条", titlesOf(sidebar).length === 10, String(titlesOf(sidebar).length));
+	check("「展开其余」跟着回来了", more().textContent === "展开其余 2 个会话", more().textContent);
+	check("退了一页后「收起」还在", collapseShown(), String(collapseShown()));
+	collapse().dispatch("click");
+	render();
+	check("再退一次：回到一页 5 条", titlesOf(sidebar).length === 5, String(titlesOf(sidebar).length));
+	check("退回第一页后「收起」又没了", !collapseShown(), String(collapseShown()));
+	check("「展开其余」还写着 7 个", more().textContent === "展开其余 7 个会话", more().textContent);
 
 	// A workspace with no more than a page never wears any paging control: there was nothing held
 	// back, so there is nothing to expand and nothing to collapse.
 	const small = new Sidebar(handlers());
 	small.render(state([row("a", 300), row("b", 200), row("c", 100)]));
-	check("一页装得下的工作区没有分页按钮", all(small, "session-more").length === 0, String(all(small, "session-more").length));
+	check("一页装得下的工作区没有分页按钮", all(small, "session-paging").length === 0, String(all(small, "session-paging").length));
 }
 
 // ------------------------- 14. the head collapses to itself and reopens on the saved page
