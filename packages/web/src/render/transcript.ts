@@ -56,6 +56,8 @@ interface ReasoningView {
 	marqueeText: string;
 	/** When the track was last written, the anchor of the throttle below. */
 	marqueeAt: number;
+	/** The thought the static preview was last cut from, so the collapsed line is cut only on change. */
+	previewText: string;
 	running: boolean;
 }
 
@@ -71,6 +73,8 @@ interface FootChip {
 interface MetaView {
 	/** The time text, hidden until the message carries a stamp. */
 	time: HTMLElement;
+	/** Whether the time was last drawn visible, so a row that agrees with it writes nothing. */
+	shown: boolean;
 }
 
 /** An agent turn's footer: copy, then usage / time / elapsed — one quiet row under the answer. */
@@ -79,12 +83,31 @@ interface FootView {
 	usage: FootChip;
 	time: FootChip;
 	elapsed: FootChip;
+	/** Whether the row was last drawn visible, so a frame that agrees with it writes nothing. */
+	shown?: boolean;
 }
 
 /** The user message that opened the round an item sits in — the duration's start seat. */
 interface RoundStart {
 	id: string;
 	at?: number;
+}
+
+/**
+ * The facts a message needs that are not facts about itself.
+ *
+ * Which assistant closes its round, and which user message opened that round, are answered by a walk
+ * over the conversation. The walk is cheap once but not per token: a delta changes the text of the
+ * last message and nothing about the shape above it, so these are rebuilt only when the item list's
+ * shape moves (see {@link TranscriptView.draw}) and reused for every delta in between.
+ */
+interface RoundIndex {
+	/** The ids of the messages that close their round — the ones that draw a footer. */
+	last: ReadonlySet<string>;
+	/** For each of those, the user message that opened its round. */
+	users: ReadonlyMap<string, RoundStart>;
+	/** The last user message of the whole conversation, which is what the run timer ticks from. */
+	user?: Extract<Item, { kind: "message" }>;
 }
 
 /** One rendered conversation entry, plus the little state needed to patch it in place. */
@@ -94,6 +117,10 @@ interface Turn {
 	/** The parsed state of the body's Markdown, so a streaming message only re-parses its tail. */
 	markdown?: MarkdownState;
 	text: string;
+	/** Whether this message closes its round at the last draw — the footer's visibility, patched on change. */
+	roundLast: boolean;
+	/** Whether the section wore the streaming caret at the last draw, so class writes happen on a flip. */
+	streaming: boolean;
 	/** The reasoning row, once this turn's message has any. */
 	reasoning?: ReasoningView;
 	/** The user turn's meta row, once the turn is a user's. */
@@ -114,12 +141,14 @@ interface Turn {
  *
  * Rendering is a reconcile against `items` rather than a rebuild, because the transcript is the hot
  * path: a `message_update` arrives many times a second and must cost work proportional to the delta,
- * not to the conversation so far. Three things make that true — a message keeps its element and gets
- * appended to, a tool group is only rebuilt when its card list actually changes, and anything that
- * left `items` is dropped.
+ * not to the conversation so far. Items are immutable and the reducer rebuilds only the ones a frame
+ * changed, so each draw walks the list once with one reference comparison per item and renders only
+ * the ones that are new. Everything else — placement, the round walk, pruning — is keyed to the item
+ * list's *shape*, which a token landing in the last message does not move.
  *
  * The view owns its scroll policy: it follows the bottom while the reader is already there, and stops
- * the moment they scroll away, so reading history is never yanked back by a token.
+ * the moment they scroll away, so reading history is never yanked back by a token. Following is a
+ * write, not a measurement, and the frame that changed nothing asks for nothing (see {@link pin}).
  */
 export class TranscriptView {
 	private readonly container: HTMLElement;
@@ -134,13 +163,26 @@ export class TranscriptView {
 	 * what the reader is watching being written.
 	 */
 	private readonly drain = new Drain(FRAME_BUDGET_MS);
-	/** The item ids the screen currently carries, for a deferred draw's cumulative reconcile. */
-	private readonly drawn = new Set<string>();
+	/**
+	 * The items the screen was last drawn from, by index.
+	 *
+	 * This is the delta: an entry that is the same object as last time is a turn already on screen,
+	 * because items are immutable and only the ones a frame changed are rebuilt. A deferred draw
+	 * fills it a slice at a time, which is also how an immediate frame arriving mid-draw knows what is
+	 * still missing.
+	 */
+	private drawnItems: readonly (Item | undefined)[] = [];
+	/** The round facts of the last shape, reused while the shape holds (see {@link RoundIndex}). */
+	private rounds: RoundIndex = { last: new Set(), users: new Map() };
+	/** Whether the last complete draw was streaming — both the container class and the run's end. */
+	private drawnStreaming = false;
 	private welcome?: HTMLElement;
 	private sticky = true;
 	/** The ticking line while the loop streams, and the interval that moves it. */
 	private runtime?: HTMLElement;
 	private runtimeText?: HTMLElement;
+	/** The text the ticking line last carried, so a frame inside the same second writes nothing. */
+	private runtimeShown = "";
 	private runtimeTimer?: number;
 	/**
 	 * The round the timer ticks from: the last user message seen while streaming, carrying the stamp
@@ -204,18 +246,34 @@ export class TranscriptView {
 	renderDeferred(items: readonly Item[], streaming: boolean): void {
 		this.drain.cancel();
 		this.sticky = true;
+		// A snapshot is a whole conversation arriving at once, so the delta table starts empty: a
+		// streaming frame landing between two slices must see the undrawn half as undrawn and finish
+		// that draw itself, which is the documented relationship between the two paths.
+		this.drawnItems = [];
+		const rounds = roundIndex(items);
+		// Published here rather than left to the pass that closes the draw: by then every item is on
+		// screen and the shape reads as unchanged, so that pass skips the round walk — and a delta
+		// arriving afterwards trusts this index. An empty one would cost the answer its round: no
+		// footer when the run settles, and a ticking line with no start seat.
+		this.rounds = rounds;
+		const wanted = idsOf(items);
 		// The walk starts here rather than at a `yield`: a generator that queued the first slice for
 		// the next frame would leave the pane showing the previous session's transcript for one whole
 		// frame after the click, which is the thing being fixed.
-		this.batch(items, streaming, 0, Math.min(items.length, BATCH_ITEMS));
-		this.drain.start(() => this.producer(items, streaming));
+		this.batch(items, streaming, rounds, wanted, 0, Math.min(items.length, BATCH_ITEMS));
+		this.drain.start(() => this.producer(items, streaming, rounds, wanted));
 	}
 
 	/** The remaining slices of a deferred draw, one `yield` per frame. */
-	private *producer(items: readonly Item[], streaming: boolean): Generator<undefined> {
+	private *producer(
+		items: readonly Item[],
+		streaming: boolean,
+		rounds: RoundIndex,
+		wanted: ReadonlySet<string>,
+	): Generator<undefined> {
 		yield;
 		for (let index = BATCH_ITEMS; index < items.length; index += BATCH_ITEMS) {
-			this.batch(items, streaming, index, Math.min(items.length, index + BATCH_ITEMS));
+			this.batch(items, streaming, rounds, wanted, index, Math.min(items.length, index + BATCH_ITEMS));
 			yield;
 		}
 		// Everything is on screen, so the last word goes to the same complete pass the immediate path
@@ -226,70 +284,97 @@ export class TranscriptView {
 	/**
 	 * One slice of a deferred draw: a contiguous run of `items`, in `items` order.
 	 *
-	 * A slice never moves what earlier slices drew, and never reconciles against only itself: the
-	 * items before `from` are still on screen, so the set the tables are pruned against is the whole
-	 * conversation, not the slice. Placement only walks up to `to` for the same reason — a slice is
-	 * appended after what is already in order, and the complete pass at the end of the draw is what
-	 * handles the one case that is not, a summary that belongs at the head.
+	 * A slice never reconciles against only itself: the items before `from` are still on screen, and
+	 * `wanted` is the whole conversation, so a turn the new snapshot no longer carries is dropped by
+	 * the first slice rather than lingering until the last one. Placement only walks up to `to` for
+	 * the same reason — a slice is appended after what is already in order, and the complete pass at
+	 * the end of the draw is what handles the one case that is not, a summary that belongs at the head.
 	 */
-	private batch(items: readonly Item[], streaming: boolean, from: number, to: number): void {
-		this.visit(items, from, to);
-		this.reconcile();
+	private batch(
+		items: readonly Item[],
+		streaming: boolean,
+		rounds: RoundIndex,
+		wanted: ReadonlySet<string>,
+		from: number,
+		to: number,
+	): void {
+		const drawn = this.drawnItems.slice();
+		for (let index = from; index < to; index += 1) {
+			const item = items[index]!;
+			drawn[index] = item;
+			this.renderItem(item, rounds);
+		}
+		this.drawnItems = drawn;
+		this.reconcile(wanted);
 		this.setWelcome(items.length === 0 && !streaming);
-		this.setRuntime(streaming, items);
+		this.setRuntime(streaming, rounds, items);
 		this.sticky = true;
 		this.placeAll(items, to);
-		this.follow();
+		this.pin();
 	}
 
 	/**
 	 * Draw everything this frame knows about, and leave the screen clean.
 	 *
 	 * The immediate path and the pass that ends a deferred one are the same code, because they differ
-	 * only in how much of the work is already on screen: an item named by `drawn` has a turn here and
-	 * is left alone unless its own item changed, which is what makes the pass that closes a deferred
-	 * draw cost each turn one reference comparison instead of a second Markdown parse.
+	 * only in how much of the work is already on screen. The delta loop is the whole cost model: items
+	 * are immutable and the reducer rebuilds only the ones a frame changed, so an index whose item is
+	 * the same object as last draw is a turn already on screen, and the loop skips it with one `===`.
+	 * A token landing in the streaming message therefore costs that one message's draw plus one
+	 * reference comparison per item — nothing above the tail is touched.
 	 *
-	 * `drawn` is cleared first because this is a complete pass: whatever `items` is, it is the whole
-	 * screen when this returns, and a deferred draw the caller superseded must not leave the ids of
-	 * its half-drawn slices behind for the prune below to spare.
+	 * Everything proportional to the list is keyed to its *shape* — its length and the identity of its
+	 * last item. Appending a message, folding in a note, a retry's note replacing an abandoned answer,
+	 * a compaction summary landing at the head: those move the shape, and only those pay for the round
+	 * walk, the prune and the placement pass. A reconnect that re-baselines the same conversation keeps
+	 * the shape — every item is a new object, so the delta loop redraws them all, but neither their
+	 * order nor the round facts above them moved.
 	 */
 	private draw(items: readonly Item[], streaming: boolean): void {
-		this.drawn.clear();
-		this.visit(items, 0, items.length);
-		this.reconcile();
+		const previous = this.drawnItems;
+		const structural = !sameShape(previous, items);
+		const wasStreaming = this.drawnStreaming;
+		this.drawnStreaming = streaming;
+		this.drawnItems = items;
+		if (structural) this.rounds = roundIndex(items);
+
+		// The prune runs against the whole conversation, not against the drawn slices: a deferred
+		// draw abandoned half way must not leave the previous session's turns behind for a slice to
+		// spare.
+		if (structural) this.reconcile(idsOf(items));
+
+		this.setWelcome(items.length === 0 && !streaming);
+		// Before the delta loop, because the loop's footer patch is one of the readers of the
+		// observation recorded when the run ends.
+		this.setRuntime(streaming, this.rounds, items);
+		if (streaming !== wasStreaming) this.container.classList.toggle("streaming", streaming);
+
+		let touched = structural;
+		for (let index = 0; index < items.length; index += 1) {
+			const item = items[index]!;
+			if (previous[index] === item) continue;
+			this.renderItem(item, this.rounds);
+			touched = true;
+		}
+
+		// The rows whose visibility is not a fact about their own item are re-read on the frames that
+		// can move them: a new assistant message takes the footer from the one before it, and the
+		// settled duration only lands when the run ends. Never per token.
+		if (structural || streaming !== wasStreaming) this.patchFeet();
 
 		// A new item does not always arrive at the end: a compaction summary is drawn at the head of
 		// the conversation, and a reconnect that re-baselines the session replays every item in its
 		// order. So once everything on screen has been drawn, the nodes are placed in `items` order —
 		// the same "append in order, move only what moved" pass the sidebar runs. Without it a summary
 		// that should sit at the top was appended last and read as the newest thing said.
-		this.placeAll(items, items.length);
-
-		this.setWelcome(items.length === 0 && !streaming);
-		this.setRuntime(streaming, items);
-		this.container.classList.toggle("streaming", streaming);
-		if (this.sticky) this.follow();
+		if (structural) this.placeAll(items, items.length);
+		if (this.sticky && touched) this.pin();
 	}
 
-	/**
-	 * Draw one run of `items`, noting each id as drawn. Both paths share this: a slice is not special.
-	 *
-	 * The round walk runs from the head even for a slice, because neither fact a message needs is a
-	 * fact about itself: whether it closes its round, and which user message opened that round. Both
-	 * are settled by one pass over the conversation before the slice renders.
-	 */
-	private visit(items: readonly Item[], from: number, to: number): void {
-		const last = roundLastFlags(items);
-		let roundUser: RoundStart | undefined;
-		for (let index = 0; index < to; index += 1) {
-			const item = items[index]!;
-			if (item.kind === "message" && item.role === "user") roundUser = { id: item.id, at: item.timestamp };
-			if (index < from) continue;
-			this.drawn.add(item.id);
-			if (item.kind === "message") this.renderMessage(item, last.has(item.id), roundUser);
-			else this.renderTools(item);
-		}
+	/** Draw one item: a message's turn, or a tool group's cards. */
+	private renderItem(item: Item, rounds: RoundIndex): void {
+		if (item.kind === "message") this.renderMessage(item, rounds);
+		else this.renderTools(item);
 	}
 
 	/**
@@ -311,23 +396,32 @@ export class TranscriptView {
 	}
 
 	/** Drop what the conversation no longer carries, from the tables and the DOM both. */
-	private reconcile(): void {
+	private reconcile(wanted: ReadonlySet<string>): void {
 		for (const [id, turn] of [...this.turns]) {
-			if (this.drawn.has(id)) continue;
+			if (wanted.has(id)) continue;
 			this.turns.delete(id);
 			turn.section.remove();
 		}
 		for (const [id, group] of [...this.tools]) {
-			if (this.drawn.has(id)) continue;
+			if (wanted.has(id)) continue;
 			this.tools.delete(id);
 			group.section.remove();
 		}
 	}
 
-	/** Put the view back at the bottom, for a draw that just replaced the conversation. */
-	private follow(): void {
-		this.sticky = true;
-		this.container.scrollTop = this.container.scrollHeight;
+	/**
+	 * Put the view at the bottom.
+	 *
+	 * A write, not a measurement: a `scrollTop` past the end is clamped by the browser to the range
+	 * it has, so following costs no `scrollHeight` read and forces no layout inside the frame that
+	 * just wrote the DOM. Reading `scrollHeight` here was one synchronous reflow per token, which is
+	 * exactly the kind of frame the reader sees as a stutter.
+	 *
+	 * Nothing here decides *whether* to follow — that is `sticky`, set by the scroll listener and by a
+	 * turn arriving, and only the frame that actually changed the content calls this.
+	 */
+	private pin(): void {
+		this.container.scrollTop = Number.MAX_SAFE_INTEGER;
 	}
 
 	/**
@@ -350,7 +444,7 @@ export class TranscriptView {
 
 	scrollToBottom(): void {
 		this.sticky = true;
-		this.container.scrollTop = this.container.scrollHeight;
+		this.pin();
 	}
 
 	/** Whether the reader is at the bottom, which decides if a redraw should chase it. */
@@ -363,15 +457,14 @@ export class TranscriptView {
 	 *
 	 * The turn is looked up in this view's own table, which is exactly the question "is this id on
 	 * screen": a turn that has left it is a turn to build, whether because the conversation is new to
-	 * this view or because a deferred draw has not reached it yet. The table and the prune below agree
-	 * on that answer because they are the same table — deciding from anywhere else is what let a turn
-	 * the prune was about to drop be mistaken for the item arriving in its place.
+	 * this view or because a deferred draw has not reached it yet. The table and the prune agree on
+	 * that answer because they are the same table.
+	 *
+	 * Only items the frame actually changed are handed here — the delta loop in {@link draw} filters
+	 * them — so this side can spend its writes on what moved: the streaming caret, the entry id, the
+	 * meta row, the footer.
 	 */
-	private renderMessage(
-		item: Extract<Item, { kind: "message" }>,
-		roundLast: boolean,
-		roundUser: RoundStart | undefined,
-	): void {
+	private renderMessage(item: Extract<Item, { kind: "message" }>, rounds: RoundIndex): void {
 		const known = this.turns.get(item.id);
 		const turn = known ?? this.createTurn(item);
 		if (known === undefined) {
@@ -379,28 +472,23 @@ export class TranscriptView {
 			this.container.append(turn.section);
 			this.sticky = true;
 		} else if (known.item === item) {
-			// Items are immutable — the reducer rebuilds only the ones a frame changed — so a turn
-			// already drawn from this very item has nothing to do. This is the second half of "cost
-			// proportional to the delta": the walk reaches every item, but each untouched one costs
-			// one `===` and no DOM work at all.
-			//
-			// The two exceptions are the rows whose visibility is not a fact about this item alone:
-			// a later assistant message opening in the same round moves the footer, and the meta
-			// row's stamp can land a frame after the bubble. Both are patched even when the item
-			// itself has not changed.
-			this.patchMeta(turn);
-			this.patchFoot(turn, roundLast, roundUser);
+			// A repeated slice of a deferred draw can hand over the very item already on screen; a
+			// complete pass over an unchanged snapshot does the same. Nothing to say, nothing to write.
 			return;
 		}
 		turn.item = item;
+		turn.roundLast = rounds.last.has(item.id);
 		// Whether *this* message is still arriving, which is what the stylesheet's streaming caret
 		// keys on: the caret belongs to the message being written, not to whatever turn happens to
 		// sit last while the run is in flight (16) — between an answer's end and the next one's
 		// first delta, the last turn is often the user's own bubble.
-		turn.section.classList.toggle("streaming", item.streaming);
+		if (turn.streaming !== item.streaming) {
+			turn.streaming = item.streaming;
+			turn.section.classList.toggle("streaming", item.streaming);
+		}
 		this.applyEntry(turn);
 		this.patchMeta(turn);
-		this.patchFoot(turn, roundLast, roundUser);
+		this.patchFoot(turn, turn.roundLast, rounds.users.get(item.id));
 
 		// A notice is plain text and never streams, so it is written once and left alone.
 		if (item.notice) {
@@ -447,7 +535,10 @@ export class TranscriptView {
 			view.details.classList.toggle("running", thinking.running);
 		}
 		if (thinking.running) patchMarquee(view, thinking.text);
-		else {
+		else if (view.previewText !== thinking.text) {
+			// The preview is the first line of the whole thought, so cutting it walks the text. It is
+			// cut only when the thought moved, which for a settled row is never again.
+			view.previewText = thinking.text;
 			const preview = firstLineOf(thinking.text);
 			if (view.preview.textContent !== preview) view.preview.textContent = preview;
 		}
@@ -475,7 +566,18 @@ export class TranscriptView {
 			if (details.open) this.paintReasoning(turn);
 		});
 		turn.section.insertBefore(details, turn.body);
-		return { details, preview, track, spans, body, text: "", marqueeText: "", marqueeAt: 0, running: false };
+		return {
+			details,
+			preview,
+			track,
+			spans,
+			body,
+			text: "",
+			marqueeText: "",
+			marqueeAt: 0,
+			previewText: "",
+			running: false,
+		};
 	}
 
 	/** Render the reasoning body's Markdown from the turn's current item. */
@@ -509,7 +611,7 @@ export class TranscriptView {
 	private createTurn(item: Extract<Item, { kind: "message" }>): Turn {
 		const section = element("section", `turn ${item.role}${item.notice ? " notice" : ""}`);
 		const body = element("div", "turn-body");
-		const turn: Turn = { section, body, text: "", item };
+		const turn: Turn = { section, body, text: "", roundLast: false, streaming: false, item };
 
 		// A user message is right-clickable: the menu's items are the caller's, and the entry it acts
 		// on is patched in per frame by {@link applyEntry}.
@@ -521,7 +623,7 @@ export class TranscriptView {
 			// The text is read at click time: the bubble can still be streaming when the row is built.
 			meta.append(time, copyButton(() => turn.item.text));
 			section.append(body, meta);
-			turn.meta = { time };
+			turn.meta = { time, shown: false };
 		} else if (item.role === "assistant" && !item.notice) {
 			const usage = footChip("database");
 			const time = footChip("clock");
@@ -530,7 +632,7 @@ export class TranscriptView {
 			foot.hidden = true;
 			foot.append(copyButton(() => turn.item.text), usage.root, time.root, elapsed.root);
 			section.append(body, foot);
-			turn.foot = { root: foot, usage, time, elapsed };
+			turn.foot = { root: foot, usage, time, elapsed, shown: false };
 		} else {
 			section.append(body);
 		}
@@ -547,8 +649,12 @@ export class TranscriptView {
 	private applyEntry(turn: Turn): void {
 		if (turn.section.dataset.role !== "user") return;
 		const entryId = turn.item.forkEntryId ?? undefined;
-		if (entryId === undefined) delete turn.section.dataset.entry;
-		else turn.section.dataset.entry = entryId;
+		const shown = turn.section.dataset.entry;
+		if (entryId === undefined) {
+			if (shown !== undefined) delete turn.section.dataset.entry;
+		} else if (shown !== entryId) {
+			turn.section.dataset.entry = entryId;
+		}
 	}
 
 	/** Draw the user meta row's time; a message without a stamp shows none. */
@@ -556,8 +662,13 @@ export class TranscriptView {
 		const meta = turn.meta;
 		if (meta === undefined) return;
 		const stamp = turn.item.timestamp;
-		meta.time.hidden = stamp === undefined;
-		const text = stamp === undefined ? "" : formatClockTime(stamp);
+		const shown = stamp !== undefined;
+		if (meta.shown !== shown) {
+			meta.shown = shown;
+			meta.time.hidden = !shown;
+		}
+		if (stamp === undefined) return;
+		const text = formatClockTime(stamp);
 		if (meta.time.textContent !== text) meta.time.textContent = text;
 	}
 
@@ -574,7 +685,10 @@ export class TranscriptView {
 		if (foot === undefined) return;
 		const item = turn.item;
 		const visible = !item.notice && !item.streaming && roundLast && item.text.length > 0;
-		foot.root.hidden = !visible;
+		if (foot.shown !== visible) {
+			foot.shown = visible;
+			foot.root.hidden = !visible;
+		}
 		if (!visible) return;
 
 		const usage = usageTotal(item.usage);
@@ -598,6 +712,29 @@ export class TranscriptView {
 	}
 
 	/**
+	 * Re-read the footers on the frames where the round facts can move.
+	 *
+	 * A footer's visibility is not a fact about its own item: a later assistant message opening in the
+	 * same round takes that seat from the answer before it, so the earlier turn has to be told even
+	 * though its own item is untouched. The same applies to the settled duration, which is recorded
+	 * only when the run ends — the answer's own stamp alone reads up to its final request.
+	 *
+	 * Called on a shape change or a streaming flip, never per token; within it, a turn that lost the
+	 * round's last seat and gained nothing else costs one Set lookup and one comparison.
+	 */
+	private patchFeet(): void {
+		for (const turn of this.turns.values()) {
+			if (turn.foot === undefined) continue;
+			const last = this.rounds.last.has(turn.item.id);
+			const moved = turn.roundLast !== last;
+			turn.roundLast = last;
+			// A turn that still closes its round is re-read as well: the settled duration lands on a
+			// frame that changes no item at all, and this is the only pass that can hand it over.
+			if (moved || last) this.patchFoot(turn, last, this.rounds.users.get(turn.item.id));
+		}
+	}
+
+	/**
 	 * The run's ticking line, and the moment a watched run ends.
 	 *
 	 * While the loop streams, one plain line under the last item reads `用时 mm:ss`, ticking from the
@@ -605,13 +742,17 @@ export class TranscriptView {
 	 * freezes into are one clock (06). The tick is a local interval writing one text node: no event
 	 * exists for "a second passed", and inventing one would put a display concern on the wire.
 	 *
+	 * The node is built once per run and only moved when it is not already the last thing in the
+	 * column: appending it every frame re-parented the line on every token, which is a DOM write the
+	 * reader never saw. The text is written only when the second it names moved, for the same reason.
+	 *
 	 * When the streaming flips back, the elapsed is recorded against the round — the one observation
 	 * the footer cannot derive from the transcript, since the answer's own stamp is its request's
 	 * start. The recording is keyed to the round's user message and the answer's id both, so a stale
 	 * observation from a previous run of the same round — a branch taken again — reads as absent and
 	 * the stamps answer instead.
 	 */
-	private setRuntime(streaming: boolean, items: readonly Item[]): void {
+	private setRuntime(streaming: boolean, rounds: RoundIndex, items: readonly Item[]): void {
 		if (!streaming) {
 			if (this.wasStreaming) {
 				this.wasStreaming = false;
@@ -632,7 +773,7 @@ export class TranscriptView {
 		}
 
 		this.wasStreaming = true;
-		const user = lastUserOf(items);
+		const user = rounds.user;
 		this.runtimeFrom = user === undefined ? undefined : { id: user.id, at: user.timestamp ?? Date.now() };
 		if (this.runtime === undefined) {
 			const text = element("span", "runtime-time", "00:00");
@@ -640,19 +781,23 @@ export class TranscriptView {
 			line.append("用时 ", text);
 			this.runtime = line;
 			this.runtimeText = text;
+			this.runtimeShown = "";
 			this.runtimeTimer = window.setInterval(() => this.tickRuntime(), 1000);
 		}
-		// The line sits under whatever the conversation currently ends with, so it is appended after
-		// the placement pass has had its word.
-		this.container.append(this.runtime);
+		// The line sits under whatever the conversation currently ends with, and the placement pass
+		// puts newly drawn items above it; only a line that is not already there is moved.
+		if (this.container.lastChild !== this.runtime) this.container.append(this.runtime);
 		this.tickRuntime();
 	}
 
-	/** Write the ticking line from the round's start seat. */
+	/** Write the ticking line from the round's start seat, and only when the second it names moved. */
 	private tickRuntime(): void {
 		const from = this.runtimeFrom;
 		if (this.runtimeText === undefined || from === undefined) return;
-		this.runtimeText.textContent = formatTick(Date.now() - from.at);
+		const text = formatTick(Date.now() - from.at);
+		if (text === this.runtimeShown) return;
+		this.runtimeShown = text;
+		this.runtimeText.textContent = text;
 	}
 
 	/**
@@ -738,40 +883,78 @@ function shapeOf(card: ToolCard): string {
 }
 
 /**
- * The ids of each round's last assistant message.
+ * The round facts of the conversation, in one forward walk.
  *
- * A round runs from one user message to the next; the footer belongs to the answer that closed it.
- * The walk runs backwards so one pass marks every round, and notices — role `system` — take no part:
- * they are folds the transcript carries between rounds, not things anyone said.
+ * A round runs from one user message to the next, and the footer belongs to the answer that closed
+ * it — the last assistant message before the next prompt. Notices take no part: a fold or a failed
+ * run is carried between rounds rather than spoken in one, and the seat stays with the last real
+ * answer. The walk also remembers, for each closing answer, the user message that opened its round —
+ * the elapsed time's start seat — and the conversation's last user message, which is the running
+ * timer's.
+ *
+ * One pass, called when the item list's shape moves (see {@link TranscriptView.draw}); a delta in the
+ * last message cannot change any of these facts.
  */
-function roundLastFlags(items: readonly Item[]): Set<string> {
+function roundIndex(items: readonly Item[]): RoundIndex {
 	const last = new Set<string>();
-	let seen = false;
-	for (let index = items.length - 1; index >= 0; index -= 1) {
-		const item = items[index]!;
+	const users = new Map<string, RoundStart>();
+	let user: Extract<Item, { kind: "message" }> | undefined;
+	let start: RoundStart | undefined;
+	let closing: string | undefined;
+	let closingStart: RoundStart | undefined;
+
+	// The round is committed when the next user message opens, and once more at the end: whichever
+	// assistant was seen last in it is the one that closed it.
+	const close = (): void => {
+		if (closing === undefined) return;
+		last.add(closing);
+		if (closingStart !== undefined) users.set(closing, closingStart);
+		closing = undefined;
+		closingStart = undefined;
+	};
+
+	for (const item of items) {
 		if (item.kind !== "message") continue;
 		if (item.role === "user") {
-			seen = false;
+			close();
+			user = item;
+			start = { id: item.id, at: item.timestamp };
 			continue;
 		}
-		// A notice — a fold, or a run that failed — neither closes a round nor takes the seat of the
-		// answer that did finish; the footer stays with the last real answer.
 		if (item.notice) continue;
-		if (item.role === "assistant" && !seen) {
-			last.add(item.id);
-			seen = true;
-		}
+		if (item.role !== "assistant") continue;
+		closing = item.id;
+		closingStart = start;
 	}
-	return last;
+	close();
+	return { last, users, ...(user === undefined ? {} : { user }) };
 }
 
-/** The last user message of the conversation — the run the timer ticks from. */
-function lastUserOf(items: readonly Item[]): Extract<Item, { kind: "message" }> | undefined {
-	for (let index = items.length - 1; index >= 0; index -= 1) {
-		const item = items[index]!;
-		if (item.kind === "message" && item.role === "user") return item;
-	}
-	return undefined;
+/** The ids `items` carries, for a prune that asks membership rather than position. */
+function idsOf(items: readonly Item[]): Set<string> {
+	const ids = new Set<string>();
+	for (const item of items) ids.add(item.id);
+	return ids;
+}
+
+/**
+ * Whether two item lists have the same shape, which is what the non-delta work is keyed to.
+ *
+ * Items are immutable, so "same shape" cannot mean "same references" — the streaming message's item
+ * is a new object on every token. It means the list's length and the identity of its last item: an
+ * append, a drop, a retry's note replacing an abandoned answer, or a whole new conversation moves
+ * one of those, while a token landing in the message already at the end moves neither.
+ */
+function sameShape(previous: readonly (Item | undefined)[], next: readonly Item[]): boolean {
+	if (previous.length !== next.length) return false;
+	return shapeKey(previous.at(-1)) === shapeKey(next.at(-1));
+}
+
+/** The identity a shape comparison reads: an item's id, and the two flags the round walk keys on. */
+function shapeKey(item: Item | undefined): string {
+	if (item === undefined) return "";
+	if (item.kind !== "message") return item.id;
+	return `${item.id}|${item.role}|${item.notice ? "n" : "-"}`;
 }
 
 /**

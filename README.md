@@ -157,7 +157,8 @@ node scripts/smoke-backpressure.ts # 写侧停滞策略：注入假 socket，队
 node scripts/smoke-sidebar.ts   # 侧边栏原地改行、按 modified 重排、分页与表头收起；不需要密钥
 node scripts/smoke-settings.ts  # 设置真实落盘再重读：收展状态跟着 appearance 序列化恢复；不需要密钥
 node scripts/smoke-modes.ts    # 设置面板的模式页、输入框的模式座位与菜单；不需要密钥
-node scripts/smoke-transcript.ts # 转录的分批绘制：两条路画出同一个、连跑多帧不长树、中途来的帧说了算；不需要密钥
+node scripts/smoke-transcript.ts # 转录的分批绘制与流式代价：两条路画出同一个、流式一帧只碰尾部、脚注跟着轮与运行走、中途来的帧说了算；不需要密钥
+node scripts/smoke-frame.ts    # 一帧只画一次：多次请求合并成一帧、回调里再排的是下一帧、取消的帧不跑；不需要密钥
 node scripts/smoke-branch.ts   # 分支图卡片：任意长的消息都是同一固定高度、单行截断、整句在 tooltip 里；不需要密钥
 node scripts/smoke-session.ts  # 流式、排队、重试、压缩、委派；不需要密钥
 node scripts/smoke-models.ts   # 导入的模型与无模型占位，不需要密钥

@@ -1,13 +1,20 @@
 // Transcript smoke: drives the production `TranscriptView` against the shared DOM shim, and checks the
-// three properties the deferred draw lives or dies by — that spreading a snapshot over frames draws the
-// same thing as drawing it whole, that nothing is rebuilt per frame while it does, and that a frame
-// arriving mid-draw supersedes it instead of being overwritten by it later.
+// properties the transcript's two draw paths live or die by — that spreading a snapshot over frames
+// draws the same thing as drawing it whole, that nothing is rebuilt per frame while it does, that a
+// frame arriving mid-draw supersedes it instead of being overwritten by it later, that a streaming
+// delta touches only the tail (its own item, and not the round bookkeeping above it), and that the
+// rows whose truth depends on a round or a run — the footers — are re-read on the frames that move
+// them even when no item changed.
 //
 // Why this file exists: until it did, **nothing in `scripts/` drove `TranscriptView` at all**, so the
 // deferred path shipped with no regression cover — and the bug it was written against (a streaming frame
 // pruning against a half-drawn set, so every turn was rebuilt every frame, 2000 frames, 4 GB heap) is
 // invisible to `npm run check` by construction. `transcript.render` is read as "the immediate path" by
 // everything downstream; this is the only place both paths are run side by side.
+//
+// The streaming checks were added by the jank ticket (03): the old path walked every item per token and
+// wrote a footer and a meta row for each one, an O(conversation) tax that this smoke now prices by
+// counting the attribute writes and node moves the shim sees.
 //
 // Nothing reaches the network, so no server and no provider key are needed.
 // Run with: node scripts/smoke-transcript.ts
@@ -64,6 +71,11 @@ function nodesOfClass(root: FakeNode, className: string): FakeNode[] {
 /** The turn sections on screen, in order. */
 function turnsOf(host: FakeNode): FakeNode[] {
 	return nodesOfClass(host, "turn");
+}
+
+/** The footer inside one turn, when that turn has one. */
+function footOf(turn: FakeNode): FakeNode | undefined {
+	return nodesOfClass(turn, "turn-foot")[0];
 }
 
 /** The transcript's text, read the way a screenshot would: everything on screen, depth first. */
@@ -217,6 +229,124 @@ process.stdout.write("\ntranscript：画到一半来了新的帧，以新的为�
 	while (frames < 100 && shim.frames() > 0) frames += 1;
 	check("旧的批次没有回来", turnsOf(host).length === 30, `${turnsOf(host).length}`);
 	check("屏幕上那 30 条各建了一次", turnsOf(host).every((turn) => turn.created === 1), `${turnsOf(host).filter((turn) => turn.created !== 1).length} 条被重建`);
+}
+
+// ----------------------------------------------- 4. a streaming frame touches only the tail
+
+process.stdout.write("\ntranscript：流式一帧只碰尾部\n");
+
+{
+	const items = conversation(200);
+	const { host, view } = makeTranscript();
+	view.render(items, true);
+
+	const runtime = nodesOfClass(host, "runtime");
+	check("运行中只有一条计时行", runtime.length === 1, `${runtime.length}`);
+
+	/**
+	 * The answer's tail growing, one frame at a time: the shape that used to cost every turn a
+	 * footer patch and the scroll container a forced layout.
+	 */
+	let current = items;
+	resetWork();
+	const FRAMES = 100;
+	for (let frame = 1; frame <= FRAMES; frame += 1) {
+		const last = current[current.length - 1] as Extract<Item, { kind: "message" }>;
+		current = [...current.slice(0, -1), { ...last, streaming: true, text: `${last.text}新的一帧。` }];
+		view.render(current, true);
+	}
+
+	// The old path wrote one hidden attribute per assistant turn and one per user turn — every
+	// frame, for every row whose item had not changed at all (20,000 writes over these 100 frames on
+	// 200 items, measured). A burst of deltas therefore cost O(conversation) attribute writes; the
+	// tail-only path costs a couple per frame.
+	process.stdout.write(
+		`     增长 ${FRAMES} 帧：属性写入 ${work.attrs}，新建节点 ${work.nodes}，DOM 移动 ${work.appends}（200 条会话）\n`,
+	);
+	check(
+		"增长帧只改最后一条",
+		work.attrs < FRAMES * 8,
+		`${work.attrs} 次属性写入 / ${FRAMES} 帧（旧路径 ${FRAMES * items.length} 次）`,
+	);
+	check("增长帧不为整段会话建节点", work.nodes < FRAMES * 4, `${work.nodes}`);
+	check("条数没变", turnsOf(host).length === items.length, `${turnsOf(host).length} vs ${items.length}`);
+	check(
+		"计时行自始至终是同一个节点",
+		nodesOfClass(host, "runtime")[0] === runtime[0] && runtime[0]!.created === 1,
+	);
+
+	// A frame with nothing new must touch nothing at all: the streaming timer's node was moved to
+	// the end on every delta before this pass, even when it was already there.
+	resetWork();
+	view.render(current, true);
+	check("同一份 items 再画一次不碰 DOM", work.appends === 0 && work.attrs === 0 && work.nodes === 0, JSON.stringify(work));
+}
+
+// ------------------------------------------- 5. footers are re-read when a run, not a token, moves
+
+process.stdout.write("\ntranscript：脚注跟着轮与运行走，不跟着 token 走\n");
+
+{
+	/** One message item with the two fields a footer reads. */
+	function said(
+		id: string,
+		role: string,
+		timestamp: number,
+		text: string,
+		streaming: boolean,
+	): Extract<Item, { kind: "message" }> {
+		return { kind: "message", id, role, timestamp, text, notice: false, streaming };
+	}
+
+	const at = Date.now() - 100;
+	const question = said("u1", "user", at, "问题", false);
+	const first = said("a1", "assistant", at + 500, "第一段回答", false);
+	// A stamp far past the watched run, so the two durations cannot be confused: the observed one is
+	// "now minus the user message", about 0.1s, while the stamps would read five seconds.
+	const second = said("a2", "assistant", at + 5_000, "第二段回答", true);
+	const settledSecond = { ...second, streaming: false };
+
+	const { host, view } = makeTranscript();
+	view.render([question, first], false);
+	const firstTurn = turnsOf(host)[1]!;
+	check("一轮的答案带着脚注", footOf(firstTurn)?.hidden === false);
+
+	// A second answer opening in the same round takes the footer's seat from the first.
+	view.render([question, first, second], true);
+	check("同轮的更晚答案接管脚注", footOf(firstTurn)?.hidden === true);
+	const secondTurn = turnsOf(host)[2]!;
+	check("还在流的答案不显示脚注", footOf(secondTurn)?.hidden === true);
+
+	// `message_end` settles the item while the loop is still flagged streaming, and `agent_end` later
+	// flips only that flag — no item changes on that frame at all. The settled footer has to be drawn
+	// from the observation recorded on it, not from the persisted stamps.
+	const finished = [question, first, settledSecond];
+	view.render(finished, true);
+	view.render(finished, false);
+	const settled = footOf(secondTurn)!;
+	check("运行结束后脚注出现", settled.hidden === false);
+	check("脚注带用时", textOf(settled).includes("用时"), textOf(settled));
+	check("计时行随运行结束退场", nodesOfClass(host, "runtime").length === 0);
+
+	// The observed run happened just now, so the chip reads a fraction of a second rather than the
+	// five seconds the persisted stamps would claim.
+	check("用时读的是观察值", /用时 \d\.\ds/.test(textOf(settled)), textOf(settled));
+
+	// A snapshot that arrives mid-run — a reconnect, or a window opened onto a session that is
+	// already streaming — is drawn by the deferred path. Its round facts have to outlive that draw:
+	// the deltas that follow are delta frames, and a delta frame trusts the index the last draw left
+	// behind, not a fresh walk. A deferred draw that forgot to publish it left the answer without a
+	// round, so the footer never appeared and the ticking line had no start seat.
+	{
+		const { host: resumedHost, view: resumed } = makeTranscript();
+		resumed.renderDeferred([question, second], true);
+		const grown = { ...second, text: `${second.text}，还在写` };
+		resumed.render([question, grown], true);
+		resumed.render([question, { ...grown, streaming: false }], false);
+		const resumedAnswer = turnsOf(resumedHost)[1]!;
+		check("中途接上的快照，结束后脚注照样出现", footOf(resumedAnswer)?.hidden === false, textOf(resumedAnswer));
+		check("中途接上的快照，用时也读的是观察值", /用时 \d\.\ds/.test(textOf(footOf(resumedAnswer)!)), textOf(resumedAnswer));
+	}
 }
 
 process.stdout.write(failures === 0 ? "\ntranscript ok\n" : `\n${failures} 项失败\n`);

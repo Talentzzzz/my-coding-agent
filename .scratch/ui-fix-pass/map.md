@@ -25,10 +25,10 @@ Label: wayfinder:map
 
 - [01 · 脚注复制按钮、行首三角、思考灰底、用时列对齐](issues/01-meta-chevron-reasoning-runtime.md)：已落地——复制按钮在自身规则里归零为纯图标（hover 才出 `--dsw-bg-hover` 与更亮字色）；三角常显、open 只转 90°；思考展开体并入工具输出的同一块灰面板（背景/圆角/内边距/滚动策略，含滚动条）；用时行改用 `margin-block`，inline 方向继续由 `.transcript > *` 居中。无新增 token。
 - [02 · 输入框左下角只留模式座位；「默认」模式改成可编辑](issues/02-composer-and-default-mode.md)：已落地——齿轮与整个会话级面板删除（`followed` 保留，它是全窗口的当前会话）；模式座位是 bar 左端唯一控件；「默认」卡头部可点、展开 `modeFormCard`，名称只读，保存写全局 `tools`/`approval` 且串行化，不回写 `modes`；工具行 gap 8px、行高/下拉 30px。`npm run check`、重写的 `smoke-modes`、真 Chromium 的 `verify-02.ts` 全过。
+- [03 · 正文流式渲染卡顿](issues/03-streaming-jank.md)：已落地——`frame.ts` 的 `OncePerFrame` 把 delta 合并到帧；`transcript.render` 按 `drawnItems` 引用差只画变化项，轮事实（末答案/开轮 user/最后 user）只在形状变化时重算，`placeAll` 只在形状变化时跑，`renderDeferred` 开头即发布轮索引（code-review 抓到的中途接入流式会话丢脚注/计时）；runtime 行只在不在末位时移动、文本按秒去重，`follow()` 换成不读 `scrollHeight` 的 `pin()`；折叠头只在思考文本变化时切。同一段内容的浏览器脚本时间不随会话长度增长（210→800 条：93–119 → 108–122ms，旧路径 175 → 284–299ms），jank-harness 长短比 4.67x → 0.92–1.11x，smoke 的属性写入 20000 → 1。`npm run check`、`smoke-transcript`、`smoke-frame`、`verify-03.ts`（210/800）全过。
 
 ## Not yet specified
 
-- 流式修复后 `.transcript` 的批处理形状：是否把 `Drain` 的帧预算复用到流式帧上，取决于 03 的实测结果。
 - 老会话的「自定义」态（工具集不匹配任何模式）在失去手动编辑入口后的体验：02 只保证它照常显示
   「自定义」、选一个模式即可回到预设；是否要再给一句提示或「按模式归一」仍待定。
 

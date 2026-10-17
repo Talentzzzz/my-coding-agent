@@ -1,6 +1,7 @@
 import { applyAppearance, initialState, reduce, reduceEnd, findWay, type ViewState } from "./state.ts";
 import { SessionApi, ApiError } from "./api.ts";
 import { browserSocket, MuxClient, muxUrl, type ChannelState } from "./client.ts";
+import { OncePerFrame } from "./frame.ts";
 import { SessionRows } from "./rows.ts";
 import { Composer, type ComposerSelection } from "./composer.ts";
 import { TranscriptView } from "./render/transcript.ts";
@@ -735,7 +736,10 @@ function main(): void {
 				// redrawing for: the pane's reference was released, so the server has no reason to send
 				// it, and if one arrives it is a frame that arrived before the release reached it.
 				if (followed !== sessionId) return;
-				apply(reduce(state, message));
+				// Coalesced: a run's deltas arrive far faster than the display refreshes, and painting
+				// each one is work no frame shows. The fold still happens here, per event; the draw is
+				// asked for once and runs against the last state the frame reached.
+				apply(reduce(state, message), { coalesce: true });
 			},
 			onStreamEnd: (sessionId) => {
 				// The send's reference has a third exit besides a settled status and a refused run: the
@@ -864,8 +868,40 @@ function main(): void {
 		statusBar.render({ usage: state.usage });
 	}
 
+	/** How a fold reaches the screen: whole now, in bounded slices, or at most once per frame. */
+	interface ApplyOptions {
+		/** Draw a whole snapshot in bounded slices — the cost of a session switch, not of a delta. */
+		deferred?: boolean;
+		/** Land this draw on the next animation frame instead of in this one — a stream delta. */
+		coalesce?: boolean;
+	}
+
 	/**
-	 * Fold a new state in and redraw what changed.
+	 * The state the screen was last drawn from.
+	 *
+	 * The gates below compare a state against this rather than against the state the previous fold
+	 * produced: several folds can land between two draws — that is the point of coalescing them — and
+	 * "did this change" is a question about what is on screen, not about what the last event was.
+	 */
+	let drawnState: ViewState = state;
+
+	/**
+	 * The coalesced delta draw: many stream frames, one paint.
+	 *
+	 * A provider sends tens of deltas between two display refreshes, and repainting the transcript for
+	 * each is work the reader never sees — the intermediate states are not on screen for a single
+	 * frame. The fold itself still runs per event (it is a cheap immutable update), so nothing about
+	 * the state is skipped; only the drawing is saved for the frame, which paints the last state the
+	 * run reached.
+	 */
+	const deltaDraw = new OncePerFrame(() => {
+		const previous = drawnState;
+		drawnState = state;
+		drawState(state, previous);
+	});
+
+	/**
+	 * Fold a new state in and draw what it changed.
 	 *
 	 * The columns are redrawn independently because they change at very different rates: the transcript
 	 * on every token, the sidebar on a row change, the status bar on a settled turn. Testing for a
@@ -876,10 +912,22 @@ function main(): void {
 	 * it off a change in `streaming` — which is how the old code got there — meant a failure between
 	 * sends left the input box enabled with nothing behind it.
 	 */
-	function apply(next: ViewState, options: { deferred?: boolean } = {}): void {
-		const previous = state;
+	function apply(next: ViewState, options: ApplyOptions = {}): void {
 		state = next;
+		if (options.coalesce === true) {
+			deltaDraw.schedule();
+			return;
+		}
+		// An immediate draw supersedes a queued one: it is about to paint this very state, and an armed
+		// frame would paint it a second time a refresh later.
+		deltaDraw.cancel();
+		const previous = drawnState;
+		drawnState = next;
+		drawState(next, previous, options);
+	}
 
+	/** Draw the parts of `next` — which callers have already made `state` — that differ from the last draw. */
+	function drawState(next: ViewState, previous: ViewState, options: ApplyOptions = {}): void {
 		// A new settings snapshot may carry a content-width preference, and the reading column is the
 		// one thing that draws from it. Same road the sidebar's width rides into `applyAppearance`,
 		// except this one is layout-relative and so is painted here, beside the column it measures.

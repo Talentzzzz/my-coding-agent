@@ -46,14 +46,22 @@ const IGNORED = new Set(["then", "constructor", "prototype", "toJSON", "valueOf"
 
 // ------------------------------------------------------------------ 记账
 
-/** 与时间无关的"工作量"计数：即使 shim 比浏览器快，它也能证明每帧确实做了 O(n) 的活。 */
-export const work = { nodes: 0, appends: 0, qs: 0, qsNodes: 0 };
+/**
+ * Counts of the DOM work a frame did, which prove O(n) work even when the shim is faster than a
+ * browser.
+ *
+ * `attrs` counts attribute writes (`hidden`, `data-*`, `setAttribute`): the expensive half of the old
+ * streaming frame — patching a footer and a time row for every turn — built no nodes and moved none,
+ * it only wrote attributes, so nothing else here could price it.
+ */
+export const work = { nodes: 0, appends: 0, qs: 0, qsNodes: 0, attrs: 0 };
 
 export function resetWork(): void {
 	work.nodes = 0;
 	work.appends = 0;
 	work.qs = 0;
 	work.qsNodes = 0;
+	work.attrs = 0;
 }
 
 export function camelToDash(name: string): string {
@@ -97,11 +105,13 @@ class FakeNode {
 		get: (_target, key: string) => this.attributes.get(`data-${camelToDash(key)}`),
 		set: (_target, key: string, value: string) => {
 			this.attributes.set(`data-${camelToDash(key)}`, String(value));
+			work.attrs += 1;
 			return true;
 		},
 		has: (_target, key: string) => this.attributes.has(`data-${camelToDash(key)}`),
 		deleteProperty: (_target, key: string) => {
 			this.attributes.delete(`data-${camelToDash(key)}`);
+			work.attrs += 1;
 			return true;
 		},
 		ownKeys: () => [...this.attributes.keys()].filter((key) => key.startsWith("data-")).map((key) => key.slice(5)),
@@ -143,6 +153,7 @@ class FakeNode {
 		return this.attributes.has("hidden");
 	}
 	set hidden(value: boolean) {
+		work.attrs += 1;
 		if (value) this.attributes.set("hidden", "");
 		else this.attributes.delete("hidden");
 	}
@@ -328,9 +339,11 @@ class FakeNode {
 	}
 	setAttribute(name: string, value: string): void {
 		this.attributes.set(name, value);
+		work.attrs += 1;
 	}
 	removeAttribute(name: string): void {
 		this.attributes.delete(name);
+		work.attrs += 1;
 	}
 	getAttribute(name: string): string | null {
 		return this.attributes.get(name) ?? null;

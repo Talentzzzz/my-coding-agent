@@ -25,6 +25,7 @@
 		"src/**/*.ts",
 		"../../scripts/dom-shim.ts",
 		"../../scripts/smoke-branch.ts",
+		"../../scripts/smoke-frame.ts",
 		"../../scripts/smoke-transcript.ts",
 		"../../scripts/smoke-mux-client.ts",
 		"../../scripts/smoke-mux-live.ts",

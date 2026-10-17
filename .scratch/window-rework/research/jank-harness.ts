@@ -137,6 +137,11 @@ function makeFrameDeps() {
 		onForkSession: () => {},
 		onDeleteSession: () => {},
 		onRenameSession: () => {},
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
+		onRenameWorkspace: () => {},
+		onDeleteWorkspace: () => {},
 	});
 	const statusBar = new StatusBar();
 	const composer = new Composer({
@@ -144,16 +149,18 @@ function makeFrameDeps() {
 		onAbort: () => {},
 		onSelectModel: () => {},
 		onSelectLevel: () => {},
-		onOpenSessionSettings: () => {},
+		onModes: () => {},
+		onSelectMode: () => {},
 	});
 	const settings = new SettingsPanel({
 		onClose: () => {},
 		onTheme: () => {},
 		onFontSize: () => {},
 		onSaveModels: async () => {},
+		onSaveModes: async () => {},
 		onDefaultModel: () => {},
-		onGlobalTools: () => {},
-		onGlobalApproval: () => {},
+		onGlobalTools: async () => {},
+		onGlobalApproval: async () => {},
 		onBashTimeouts: () => {},
 	});
 
@@ -280,6 +287,7 @@ function renderFrame(next: ViewState, previous: ViewState, deps: Deps, rows: Ses
 			...(next.snapshot === undefined ? {} : { activeSessionId: next.snapshot.id }),
 			currentWorkspace: directory,
 			collapsed: false,
+			paging: {},
 			channel: "live",
 		});
 	}
@@ -368,6 +376,7 @@ function streamScenario(historyCount: number, answer: string, chunk: number, fra
 		activeSessionId: snapshot.id,
 		currentWorkspace: snapshot.cwd,
 		collapsed: false,
+		paging: {},
 		channel: "live",
 	});
 	gates.sidebar = sidebarKey(rows, snapshot.id, snapshot.cwd, gates.pickedWorkspace, false);
@@ -444,8 +453,13 @@ function sidebarScenario(workspaceCount: number, iterations: number) {
 		onForkSession: () => {},
 		onDeleteSession: () => {},
 		onRenameSession: () => {},
+		onToggleWorkspace: () => {},
+		onPageWorkspace: () => {},
+		onCollapseWorkspace: () => {},
+		onRenameWorkspace: () => {},
+		onDeleteWorkspace: () => {},
 	});
-	const state = { workspaces: sidebarRows(workspaceCount).groups(), currentWorkspace: "/w0", collapsed: false, channel: "live" as const };
+	const state = { workspaces: sidebarRows(workspaceCount).groups(), currentWorkspace: "/w0", collapsed: false, paging: {}, channel: "live" as const };
 	sidebar.render(state); // warmup + 建行
 	const samples: number[] = [];
 	resetWork();
@@ -496,9 +510,10 @@ function settingsScenario(modelCount: number, iterations: number) {
 		onTheme: () => {},
 		onFontSize: () => {},
 		onSaveModels: async () => {},
+		onSaveModes: async () => {},
 		onDefaultModel: () => {},
-		onGlobalTools: () => {},
-		onGlobalApproval: () => {},
+		onGlobalTools: async () => {},
+		onGlobalApproval: async () => {},
 		onBashTimeouts: () => {},
 	});
 	settings.show();
@@ -679,6 +694,7 @@ async function driveOpenSession(api: FakeApi, sessionId: string, deps: Deps, sta
 		activeSessionId: snapshot.id,
 		currentWorkspace: snapshot.cwd,
 		collapsed: false,
+		paging: {},
 		channel: "live",
 	});
 	breakdown.refreshMs = msBetween(refreshStart, hrtime());
