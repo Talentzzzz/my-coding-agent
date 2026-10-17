@@ -217,6 +217,15 @@
 	 */
 	--dsw-scrim: rgb(0 0 0 / 32%);
 	/*
+	 * What the reasoning row's fade mask is inked with.
+	 *
+	 * A CSS mask reads the gradient's alpha, not its color, so the ink never shows and is one value
+	 * for both themes — but it is a token rather than a literal at the call site because a colour
+	 * written in `style.css` is a colour no theme can move (the rule AGENTS.md states, the same
+	 * reason the scrim moved here).
+	 */
+	--dsw-mask-ink: rgb(0 0 0 / 100%);
+	/*
 	 * The one group heading that is the *current workspace* — where the next new session lands — as a
 	 * raised surface rather than a word.
 	 *

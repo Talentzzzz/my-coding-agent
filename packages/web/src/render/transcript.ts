@@ -35,17 +35,27 @@ const FRAME_BUDGET_MS = 4;
 /**
  * One turn's reasoning row.
  *
- * The row is a `<details>` so the open/closed state is the browser's to keep: it is created closed,
- * and the reader toggles it without the view having to remember anything. Only the summary line and
- * the running state are patched on a render; the body's Markdown is parsed only while the row is
- * open, so a collapsed long thought costs nothing to stream.
+ * The row shares the tool card's container and head — a `<details class="tool">`, the same chevron,
+ * the same quiet line (01 ④) — with 「思考」 in the name seat. The row is created closed, and the
+ * reader toggles it without the view having to remember anything. Only the head and the running
+ * state are patched on a render; the body's Markdown is parsed only while the row is open, so a
+ * collapsed long thought costs nothing to stream.
  */
 interface ReasoningView {
 	details: HTMLDetailsElement;
+	/** The static head text, shown once the thought has stopped arriving. */
 	preview: HTMLElement;
+	/** The scrolling track that carries the thought while it is still arriving. */
+	track: HTMLElement;
+	/** The track's two copies of the text — two, so the `translateX(-50%)` loop is seamless. */
+	spans: [HTMLElement, HTMLElement];
 	body: HTMLElement;
 	markdown?: MarkdownState;
 	text: string;
+	/** The text the track last carried, so a throttled repaint can skip work it already did. */
+	marqueeText: string;
+	/** When the track was last written, the anchor of the throttle below. */
+	marqueeAt: number;
 	running: boolean;
 }
 
@@ -345,9 +355,9 @@ export class TranscriptView {
 	 * Draw or patch the reasoning row that precedes a message's text.
 	 *
 	 * A message with no reasoning has no row; a message that gains or loses one between renders gets
-	 * its row added or dropped here. The summary line carries the first line of the reasoning, which
-	 * is enough to say what it is about while collapsed, and the running state is a class the styles
-	 * use to keep the line moving while reasoning is still arriving.
+	 * its row added or dropped here. The head carries the thought while collapsed — scrolling while
+	 * it is still arriving, frozen on its first line once it has stopped — and the running state is
+	 * the class that swaps one for the other.
 	 */
 	private renderReasoning(turn: Turn, item: Extract<Item, { kind: "message" }>): void {
 		const thinking = item.thinking;
@@ -362,30 +372,40 @@ export class TranscriptView {
 			turn.reasoning = view;
 		}
 
-		const preview = reasoningPreviewOf(thinking.text, thinking.running);
-		if (view.preview.textContent !== preview) view.preview.textContent = preview;
 		if (view.running !== thinking.running) {
 			view.running = thinking.running;
 			view.details.classList.toggle("running", thinking.running);
 		}
-		// A collapsed row shows only the summary, so its Markdown is left unparsed until it is opened.
+		if (thinking.running) patchMarquee(view, thinking.text);
+		else {
+			const preview = firstLineOf(thinking.text);
+			if (view.preview.textContent !== preview) view.preview.textContent = preview;
+		}
+		// A collapsed row shows only the head, so its Markdown is left unparsed until it is opened.
 		if (view.details.open) this.paintReasoning(turn);
 	}
 
 	/** Build a reasoning row, closed, and place it between the role line and the message body. */
 	private createReasoning(turn: Turn): ReasoningView {
-		const details = element("details", "reasoning");
-		const summary = element("summary", "reasoning-summary");
-		const preview = element("span", "reasoning-preview");
+		const details = element("details", "tool reasoning");
+		const summary = element("summary");
+		const chevron = element("span", "tool-chevron");
+		chevron.append(icon("chevron"));
+		const preview = element("span", "tool-path reasoning-preview");
+		const marquee = element("div", "reasoning-marquee");
+		const track = element("div", "reasoning-track");
+		const spans: [HTMLElement, HTMLElement] = [element("span"), element("span")];
+		track.append(...spans);
+		marquee.append(track);
 		const body = element("div", "reasoning-body");
-		summary.append(icon("think"), element("span", "reasoning-label", "思考"), element("span", "reasoning-sep"), preview);
+		summary.append(chevron, element("span", "tool-name", "思考"), preview, marquee);
 		details.append(summary, body);
 		// The body is parsed on the way open, which is the first moment it is worth rendering.
 		details.addEventListener("toggle", () => {
 			if (details.open) this.paintReasoning(turn);
 		});
 		turn.section.insertBefore(details, turn.body);
-		return { details, preview, body, text: "", running: false };
+		return { details, preview, track, spans, body, text: "", marqueeText: "", marqueeAt: 0, running: false };
 	}
 
 	/** Render the reasoning body's Markdown from the turn's current item. */
@@ -530,17 +550,38 @@ function firstLineOf(text: string): string {
 }
 
 /**
- * The collapsed row's summary line.
+ * How often a streaming thought's marquee may be rewritten, in milliseconds.
  *
- * Finished, a thought reads its first line. Still streaming, the line comes from the latest
- * paragraph that has already ended — the tail paragraph is still being written, and a summary that
- * rewrites itself every token reads as noise rather than as progress.
+ * The track carries the whole text so far, which grows with every delta; rewriting it per token
+ * would both copy the whole string each frame and force a layout per measurement below. A walking
+ * pace is invisible on a line whose content is itself moving — the marquee shows where the thought
+ * was, not where the token boundary is.
  */
-function reasoningPreviewOf(text: string, running: boolean): string {
-	if (!running) return firstLineOf(text);
-	const paragraphs = text.split(/\r?\n[\t ]*\r?\n/);
-	const done = paragraphs.length > 1 ? paragraphs[paragraphs.length - 2]! : text;
-	return firstLineOf(done);
+const MARQUEE_INTERVAL_MS = 2000;
+
+/** How fast the marquee glides, in pixels per second — the speed its duration is solved for. */
+const MARQUEE_SPEED_PX_S = 50;
+
+/** The shortest loop a marquee runs, so a short thought does not visibly snap back to its start. */
+const MARQUEE_MIN_S = 12;
+
+/**
+ * Write the streaming thought into a collapsed row's marquee.
+ *
+ * While reasoning is still arriving the collapsed head scrolls the text instead of ellipsizing it
+ * (01 ④): the track carries it twice so the `translateX(-50%)` loop is seamless, and the loop's
+ * duration is solved from the measured width, so a long paragraph glides at the pace a short one
+ * does. The read forces a layout, which is why the write is throttled to {@link MARQUEE_INTERVAL_MS}
+ * — a delta frame pays for neither the copy nor the reflow.
+ */
+function patchMarquee(view: ReasoningView, text: string): void {
+	const now = Date.now();
+	if (view.marqueeText !== "" && now - view.marqueeAt < MARQUEE_INTERVAL_MS) return;
+	view.marqueeAt = now;
+	view.marqueeText = text;
+	for (const span of view.spans) span.textContent = text;
+	const duration = Math.max(MARQUEE_MIN_S, view.track.scrollWidth / 2 / MARQUEE_SPEED_PX_S);
+	view.track.style.animationDuration = `${duration.toFixed(1)}s`;
 }
 
 /**

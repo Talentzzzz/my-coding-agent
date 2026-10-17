@@ -1355,74 +1355,77 @@ input:focus-visible {
 /* --------------------------------------------------------------- reasoning */
 
 /*
- * The row that holds what the model thought before it answered. It is collapsed by default — the
- * answer is the point and the reasoning is behind it — so the closed row is a single quiet line: an
- * icon, the word 「思考」, and the first line of the reasoning as a summary that ellipsizes.
+ * The row that holds what the model thought before it answered. It shares the tool card's container
+ * and head — a `<details class="tool">`, the same chevron and quiet line — with 「思考」 in the name
+ * seat, so a run of steps and thoughts reads as one column of lines (01 ④). What a thought needs
+ * that a call does not is here: a body that renders Markdown prose, and a collapsed head that moves.
  */
 .reasoning {
 	margin: 0 0 10px;
-	font-size: var(--dsw-fs-meta);
-	line-height: var(--dsw-lh-meta);
 }
 
-.reasoning > summary {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	cursor: pointer;
-	list-style: none;
-	color: var(--dsw-label-tertiary);
-}
-
-.reasoning > summary::-webkit-details-marker {
+/*
+ * The head while the thought is still arriving: the text scrolls instead of ellipsizing.
+ *
+ * The track carries the text twice so the `translateX(-50%)` loop is seamless, and the mask fades
+ * the line's edges so the text enters and leaves it rather than being cut by it. The loop's duration
+ * is solved from the measured width per patch (see `patchMarquee`); the 26s here is only what the
+ * animation says before the first patch lands.
+ */
+.reasoning-marquee {
 	display: none;
-}
-
-.reasoning > summary:hover {
-	color: var(--dsw-label-secondary);
-}
-
-.reasoning > summary svg {
-	flex: none;
-	width: 14px;
-	height: 14px;
-	color: var(--dsw-label-caption);
-}
-
-.reasoning-label {
-	flex: none;
-	font-weight: 500;
-}
-
-/* The 2px dot that separates the label from the summary, per the reference row. */
-.reasoning-sep {
-	flex: none;
-	width: 2px;
-	height: 2px;
-	border-radius: 50%;
-	background: var(--dsw-label-caption);
-}
-
-.reasoning-preview {
+	flex: 1 1 auto;
 	min-width: 0;
 	overflow: hidden;
 	white-space: nowrap;
-	text-overflow: ellipsis;
-	color: var(--dsw-label-caption);
+	-webkit-mask-image: linear-gradient(90deg, transparent, var(--dsw-mask-ink) 5%, var(--dsw-mask-ink) 95%, transparent);
+	mask-image: linear-gradient(90deg, transparent, var(--dsw-mask-ink) 5%, var(--dsw-mask-ink) 95%, transparent);
 }
 
-/* While reasoning is still arriving the summary pulses, so a glance says work is happening. */
+.reasoning.running .reasoning-marquee {
+	display: block;
+}
+
 .reasoning.running .reasoning-preview {
-	animation: pulse 1.4s var(--dsw-ease) infinite;
+	display: none;
 }
 
+/* The head steps aside while the row is open: the body is the full text, and a summary beside it —
+   one still scrolling while the thought streams — would say it twice. Hidden rather than gone, so
+   the line's height does not jump on toggle. */
+.reasoning[open] .reasoning-preview,
+.reasoning[open] .reasoning-marquee {
+	visibility: hidden;
+}
+
+.reasoning-track {
+	display: inline-flex;
+	white-space: nowrap;
+	animation: marquee 26s linear infinite;
+}
+
+.reasoning-track span {
+	padding-right: 64px;
+	color: var(--dsw-label-caption);
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+@keyframes marquee {
+	to {
+		transform: translateX(-50%);
+	}
+}
+
+/* The body is prose, not output — Markdown, not mono — but it indents to the same leading as a
+   tool's output, so it reads as the line's continuation, not a second column, and reads one type
+   tier under the answer it precedes. */
 .reasoning-body {
-	margin-top: 6px;
-	padding-left: 20px;
-	border-left: 2px solid var(--dsw-border-l2);
+	margin: 4px 0 8px 22px;
 	color: var(--dsw-label-secondary);
-	font-size: var(--dsw-fs-body);
-	line-height: var(--dsw-lh-body);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
 	word-break: break-word;
 }
 

@@ -20,11 +20,11 @@ Label: wayfinder:map
 - [02 · 模型管理交互改造](issues/02-model-manager.md)：已落地——无全局保存按钮，行内编辑/添加/删除各自发整表 PUT；省略 apiKey 的原样行由服务端保留密钥；保存门槛（名称/模型 ID/服务地址必填）；单一互斥交互 + 交互期间冻结行列表与 body；顺带修复 note 被 renderBody 清掉的既有 bug。
 - [03 · 模式系统](issues/03-modes.md)：已落地（数据形态毕业为 [ADR-0005](../../docs/adr/0005-modes-are-a-tool-config-choice.md)）——`modes` 整表进 settings；内置「默认」不存储、即全局默认活视图；选模式 = 现有 `PUT /tools` + 审批 `PATCH` 组合，落既有 `tool_config` entry，无新 entry kind、无会话端点；设置面板「模式」页（默认卡就地生效 + 用户模式卡），「默认」页的工具/审批两组控件移入默认卡；输入框左下角模式座位（自绘菜单加两行 `detail`），按值匹配当前模式。
 - [04 · 空状态与侧栏文案](issues/04-empty-state-sidebar.md)：已落地——空会话页只留 sparkle 图标 +「想做点什么?」（说明段落整段去掉）；侧栏顶部按钮「新会话」；工作区右键菜单的「新建会话」不动（它命名工作区，是另一个控件）。
+- [05 · 思考块改成工具块样式](issues/05-thinking-block.md)：已落地——思考行复用工具卡容器与头部（`details.tool` + chevron +「思考」名位），灯泡图标与分隔点删除；折叠态流式中整段文本 marquee 横滚（轨道双份文本无缝循环、时长按宽度解算、重写节流 2s），结束后定格第一句；展开时头行摘要隐藏、正文 meta 档 prose 缩进对齐工具输出行首；mask 墨色入 token（`--dsw-mask-ink`）。
 
 ## Not yet specified
 
 - 「总用时」的起止定义与事件来源（一轮的 start/stop 由哪个事件携带）；「运行中」计时器走客户端本地计时还是服务端事件。
-- 折叠态思考文本「不断滚动」在流式输出时的更新策略（marquee 与流式追加如何共存）。
 
 ## Out of scope
 
