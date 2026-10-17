@@ -19,6 +19,7 @@ Label: wayfinder:map
 - [01 · 原型：六项 UI 改造的确认原型](issues/01-prototype.md)：四轮反馈后定稿——模型管理内联编辑/删除；模式系统（审批默认自动允许、会话只读）；空状态留白 +「新会话」；工具/思考扁平等宽条目（无框无图标、原名、流式滚动/定格首句）；user 消息「时间+复制」；agent 脚注「复制图标/用量/时间/用时」+ 运行计时。
 - [02 · 模型管理交互改造](issues/02-model-manager.md)：已落地——无全局保存按钮，行内编辑/添加/删除各自发整表 PUT；省略 apiKey 的原样行由服务端保留密钥；保存门槛（名称/模型 ID/服务地址必填）；单一互斥交互 + 交互期间冻结行列表与 body；顺带修复 note 被 renderBody 清掉的既有 bug。
 - [03 · 模式系统](issues/03-modes.md)：已落地（数据形态毕业为 [ADR-0005](../../docs/adr/0005-modes-are-a-tool-config-choice.md)）——`modes` 整表进 settings；内置「默认」不存储、即全局默认活视图；选模式 = 现有 `PUT /tools` + 审批 `PATCH` 组合，落既有 `tool_config` entry，无新 entry kind、无会话端点；设置面板「模式」页（默认卡就地生效 + 用户模式卡），「默认」页的工具/审批两组控件移入默认卡；输入框左下角模式座位（自绘菜单加两行 `detail`），按值匹配当前模式。
+- [04 · 空状态与侧栏文案](issues/04-empty-state-sidebar.md)：已落地——空会话页只留 sparkle 图标 +「想做点什么?」（说明段落整段去掉）；侧栏顶部按钮「新会话」；工作区右键菜单的「新建会话」不动（它命名工作区，是另一个控件）。
 
 ## Not yet specified
 

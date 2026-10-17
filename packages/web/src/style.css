@@ -1116,13 +1116,6 @@ input:focus-visible {
 	font-weight: 600;
 }
 
-.welcome p {
-	margin: 0;
-	max-width: 34rem;
-	font-size: var(--dsw-fs-meta);
-	line-height: var(--dsw-lh-meta);
-}
-
 .turn {
 	margin-bottom: 20px;
 }

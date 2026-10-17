@@ -492,7 +492,7 @@ export class TranscriptView {
 		}
 	}
 
-	/** The first-run state: an empty conversation says what this is and what to do. */
+	/** The first-run state: an empty conversation shows the mark and one question, nothing more. */
 	private setWelcome(visible: boolean): void {
 		if (!visible) {
 			this.welcome?.remove();
@@ -504,15 +504,7 @@ export class TranscriptView {
 		const welcome = element("div", "welcome");
 		const mark = element("div", "welcome-mark");
 		mark.append(icon("sparkle"));
-		welcome.append(
-			mark,
-			element("h2", undefined, "想做点什么？"),
-			element(
-				"p",
-				undefined,
-				"描述要改的地方、要修的 bug，或要解释的内容。智能体运行的每个工具都会显示在这份记录里，任何要改动磁盘的操作都会先征求同意。",
-			),
-		);
+		welcome.append(mark, element("h2", undefined, "想做点什么?"));
 		this.welcome = welcome;
 		this.container.append(welcome);
 	}

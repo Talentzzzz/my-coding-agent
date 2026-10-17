@@ -167,7 +167,7 @@ export class Sidebar {
 		// product, and a logo on it was one more piece of chrome competing with the conversations.
 		const top = element("div", "sidebar-top");
 		const newSession = element("button", "new-session", undefined, { type: "button" });
-		newSession.append(icon("plus"), element("span", undefined, "新建会话"));
+		newSession.append(icon("plus"), element("span", undefined, "新会话"));
 		newSession.addEventListener("click", () => this.handlers.onNewSession());
 		this.toggle = iconButton("panel", "切换侧边栏", () => this.handlers.onToggleCollapsed());
 		top.append(newSession, this.toggle);
