@@ -2413,7 +2413,7 @@ body:not([data-pane="branch"]) .branch-view {
 	position: relative;
 	flex: 1;
 	max-width: 120px;
-	height: 3px;
+	height: var(--dsw-status-meter-h);
 	border-radius: 999px;
 	background: var(--dsw-bg-skeleton);
 	overflow: hidden;

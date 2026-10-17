@@ -144,6 +144,16 @@
 	--dsw-settings-nav-width: 188px;
 	--dsw-settings-air: 24px;
 
+	/*
+	 * The status line's context meter thickness.
+	 *
+	 * The meter is the one bar on the status line, and it sits beside caption-size text, so it must
+	 * read without ever weighing like the chrome bars (6-8px) elsewhere in the window. One notch
+	 * above its original 3px lands on 5px: a single 1px step is invisible at this scale, and 5 keeps
+	 * the meter under the handle track and toggles it must not compete with.
+	 */
+	--dsw-status-meter-h: 5px;
+
 	/* Alias roles — light. */
 	--dsw-bg-base: var(--dsw-static-neutral-bluish-00);
 	--dsw-bg-layer-1: var(--dsw-static-neutral-bluish-00);
