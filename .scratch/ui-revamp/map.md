@@ -21,10 +21,7 @@ Label: wayfinder:map
 - [03 · 模式系统](issues/03-modes.md)：已落地（数据形态毕业为 [ADR-0005](../../docs/adr/0005-modes-are-a-tool-config-choice.md)）——`modes` 整表进 settings；内置「默认」不存储、即全局默认活视图；选模式 = 现有 `PUT /tools` + 审批 `PATCH` 组合，落既有 `tool_config` entry，无新 entry kind、无会话端点；设置面板「模式」页（默认卡就地生效 + 用户模式卡），「默认」页的工具/审批两组控件移入默认卡；输入框左下角模式座位（自绘菜单加两行 `detail`），按值匹配当前模式。
 - [04 · 空状态与侧栏文案](issues/04-empty-state-sidebar.md)：已落地——空会话页只留 sparkle 图标 +「想做点什么?」（说明段落整段去掉）；侧栏顶部按钮「新会话」；工作区右键菜单的「新建会话」不动（它命名工作区，是另一个控件）。
 - [05 · 思考块改成工具块样式](issues/05-thinking-block.md)：已落地——思考行复用工具卡容器与头部（`details.tool` + chevron +「思考」名位），灯泡图标与分隔点删除；折叠态流式中整段文本 marquee 横滚（轨道双份文本无缝循环、时长按宽度解算、重写节流 2s），结束后定格第一句；展开时头行摘要隐藏、正文 meta 档 prose 缩进对齐工具输出行首；mask 墨色入 token（`--dsw-mask-ink`）。
-
-## Not yet specified
-
-- 「总用时」的起止定义与事件来源（一轮的 start/stop 由哪个事件携带）；「运行中」计时器走客户端本地计时还是服务端事件。
+- [06 · 消息元信息与运行计时](issues/06-message-meta.md)：已落地——user 气泡下右侧「时间+复制」（替代分隔线，turn 下边距放大留空隙）；agent 脚注只画在轮末 assistant 消息下（复制图标/用量/时间/用时）；运行中底部一行「用时 mm:ss」本地递增。计时来源敲定：轮起点 = 轮 user 消息 `timestamp`；看过的运行由客户端在 streaming 翻回时定格，没看过的退化用末条 assistant `timestamp` − user `timestamp`（少计末段流式，可接受）；计时器为本地 interval，不加 wire 事件。
 
 ## Out of scope
 

@@ -1125,22 +1125,97 @@ input:focus-visible {
  * column. The asymmetry is the point: one is what was asked and is already known, the other is what
  * is being read.
  *
- * The divider under the bubble is the seam between rounds — the one mark a turn carries (01 ⑥: no
- * role line, no per-turn dot, just this). It hangs off the user turn itself rather than standing
- * between turns, so the transcript's reconcile — which places one node per item — stays untouched.
+ * The meta row under the bubble — time, then the copy control, against the bubble's right edge — is
+ * the seam between rounds (06 ⑤): the divider it replaces sat too close to the text and said too
+ * little, and the row's own bottom margin is the breathing room that keeps a user message and the
+ * answer it opened from reading as one block.
  */
 .turn[data-role="user"] {
 	display: flex;
 	flex-direction: column;
 	align-items: flex-end;
+	margin-bottom: 36px;
 }
 
-.turn[data-role="user"]::after {
-	content: "";
-	align-self: stretch;
-	height: 1px;
-	margin-top: 4px;
-	background: var(--dsw-border-l1);
+.turn-meta {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	margin-top: 7px;
+	margin-right: 2px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	color: var(--dsw-label-caption);
+}
+
+.turn-copy {
+	display: grid;
+	place-items: center;
+	width: 24px;
+	height: 24px;
+	border-radius: 6px;
+	color: var(--dsw-label-caption);
+	transition:
+		background 0.12s var(--dsw-ease),
+		color 0.12s var(--dsw-ease);
+}
+
+.turn-copy:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-secondary);
+}
+
+.turn-copy svg {
+	width: 13.5px;
+	height: 13.5px;
+}
+
+/*
+ * The agent footer (06 ⑥): the round's copy control — icon only — then the usage, the wall-clock
+ * time, and the elapsed time, one quiet row under the answer that closed the round. No separators:
+ * the chips are small enough and quiet enough to read as one line without them.
+ */
+.turn-foot {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	margin-top: 6px;
+	margin-bottom: 16px;
+}
+
+.foot-chip {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	height: 26px;
+	padding: 0 8px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	color: var(--dsw-label-caption);
+}
+
+.foot-chip svg {
+	width: 13px;
+	height: 13px;
+}
+
+/*
+ * The run's ticking line: one plain label under the conversation while the loop streams — no pill,
+ * no verb, just the number moving (01 ⑥). The minutes are the footer's seat too, so the timer and
+ * the number it freezes into are set the same way.
+ */
+.runtime {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 16px 0;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	color: var(--dsw-label-caption);
+}
+
+.runtime-time {
+	font-family: var(--dsw-font-mono);
 }
 
 .turn-body {

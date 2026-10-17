@@ -1,7 +1,7 @@
 # 06 · 消息元信息与运行计时
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 01
 
 ## Question
@@ -14,3 +14,20 @@ Blocked by: 01
 - 「总用时」与计时器的数据来源（见 map「Not yet specified」）先敲定。
 
 ## Answer
+
+已落地，形态按原型定稿（01 ⑤⑥）：
+
+1. **user 消息**：气泡下右侧一行「时间 + 复制图标」（caption 字号、与气泡留 7px），替代原分隔线；user turn 的下边距放大到 36px 作为与后续内容的呼吸空隙。复制点击后图标变对勾 1.2s 再复原。
+2. **agent 脚注**：只画在本轮**最后一条** assistant 消息下——复制图标 / 用量（该次请求的 input+output+cacheRead+cacheWrite，`用量 74.8K tok`）/ 时间（消息时间戳 HH:MM）/ 用时；中间消息与 notice（压缩、错误）不画脚注。消息流式期间脚注隐藏。
+3. **运行中**：transcript 底部一行纯文字「用时 mm:ss」本地每秒递增，无胶囊、无「工作中」字样。
+
+**「用时」的起止定义与来源（敲定）**：
+
+- 一轮 = 两条相邻 user 消息之间的全部条目；**轮起点 = 本轮 user 消息的 `timestamp`**（持久化在消息上，桌面端客户端与服务端同一时钟）。
+- **轮终点 = 本轮最后一条 assistant 消息的完成时刻**。该时刻不在持久化数据里（消息 `timestamp` 是其请求的开始时刻），分两路取：
+  - **看过的运行**：客户端在 streaming 翻回 false 的那一帧用本地时钟定格（`Date.now() − 轮起点`），记在视图上，键为轮 user 消息 id + 末条 assistant 消息 id（同轮重跑/分支重跑时旧观察失效，退回时间戳差）。
+  - **没看过的运行**（重开、重连、切会话回来）：退化用「末条 assistant `timestamp` − user `timestamp`」，即只算到末次请求起点，少计最后一段流式时间——可接受的低估。
+- **运行中计时器**：客户端本地 `setInterval` 每 1s 写一个文本节点，起点同样取轮 user 消息 `timestamp`；不新增任何 wire 事件。
+- 脚注里计时器冻结值与本地定格值同源，两者一致。
+
+实现面：消息 Item 新增 `timestamp` / `usage`（`state.ts`，带跨进程守卫）；渲染与计时都在 `transcript.ts`（meta 行、foot 行、runtime 行均为 turn 内部元素，reconcile 不感知）；样式入 `style.css`，全走 token。

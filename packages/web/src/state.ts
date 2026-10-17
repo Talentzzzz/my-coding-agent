@@ -56,12 +56,29 @@ export interface MessageThinking {
 	running: boolean;
 }
 
+/**
+ * The token usage one assistant request reported, kept to the fields the footer chip shows.
+ *
+ * It arrives on the message the provider returned it with, so the chip reads the round's own
+ * spend rather than the session total the status line carries.
+ */
+export interface MessageUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+}
+
 export type Item =
 	| {
 			kind: "message";
 			id: string;
 			role: string;
 			text: string;
+			/** When the message was stamped, in epoch milliseconds — the round clock's source. */
+			timestamp?: number;
+			/** The usage this request reported, when it is an assistant message that carried one. */
+			usage?: MessageUsage;
 			/** The reasoning that preceded this message's text, when the provider returned any. */
 			thinking?: MessageThinking;
 			notice: boolean;
@@ -615,6 +632,7 @@ function upsertMessage(
 		role?: string;
 		content?: unknown;
 		timestamp?: number;
+		usage?: unknown;
 		summary?: string;
 		errorMessage?: string;
 	};
@@ -647,6 +665,10 @@ function upsertMessage(
 	const existing = index === -1 ? undefined : (items[index] as Extract<Item, { kind: "message" }>);
 	const carried = forkEntryId ?? existing?.forkEntryId;
 	const item: Extract<Item, { kind: "message" }> = { kind: "message", id, role, text, notice, streaming: !final };
+	// The stamp and the usage ride on the message itself, so a reopened transcript draws the same
+	// meta row a watched run did. Both cross a process boundary as plain JSON, hence the guards.
+	if (typeof record.timestamp === "number") item.timestamp = record.timestamp;
+	if (role === "assistant") item.usage = messageUsageOf(record.usage);
 	if (thinking !== undefined) {
 		const running = !final && (phase === "thinking_start" || phase === "thinking_delta");
 		item.thinking = thinking.redacted ? { text: thinking.text, redacted: true, running } : { text: thinking.text, running };
@@ -876,4 +898,24 @@ function assistantUsage(message: unknown): Parameters<typeof addUsage>[1] | unde
 	const record = message as { role?: string; usage?: unknown };
 	if (record.role !== "assistant" || record.usage === undefined) return undefined;
 	return record.usage as Parameters<typeof addUsage>[1];
+}
+
+/**
+ * The footer chip's slice of one message's usage, or nothing when there is none to show.
+ *
+ * A request whose usage summed to zero — the failure path stamps `EMPTY_USAGE` on its message —
+ * is no spend to report, so it reads as absent rather than as a chip of zeros.
+ */
+function messageUsageOf(usage: unknown): MessageUsage | undefined {
+	if (typeof usage !== "object" || usage === null) return undefined;
+	const record = usage as Record<string, unknown>;
+	const field = (key: string): number => (typeof record[key] === "number" ? record[key] : 0);
+	const read: MessageUsage = {
+		input: field("input"),
+		output: field("output"),
+		cacheRead: field("cacheRead"),
+		cacheWrite: field("cacheWrite"),
+	};
+	const total = read.input + read.output + read.cacheRead + read.cacheWrite;
+	return total > 0 ? read : undefined;
 }
