@@ -11,6 +11,7 @@ import { SettingsPanel, modeSummaryOf } from "./render/settings.ts";
 import { openMenu, openMenuAt, type MenuItem } from "./render/menu.ts";
 import { StatusBar } from "./render/statusbar.ts";
 import { element, icon } from "./dom.ts";
+import { seedDefaultModel } from "./default-model.ts";
 import type { ConnectionItem, ModelOption, ServerMessage, WorkspacePaging } from "@my-agent/core/protocol";
 
 /**
@@ -1728,6 +1729,35 @@ function main(): void {
 	// boot script in index.html, before the first paint. They are not repeated here: the caption has to
 	// reserve its space before the stylesheet renders, not after the module loads.
 
+	/**
+	 * The imported rows, planting the window's built-in default when nothing is imported yet.
+	 *
+	 * This is the one place a message is ever written by the window without the user asking: a machine
+	 * with no model can do nothing at all, and a notice explaining that is a worse first screen than
+	 * the row that makes it untrue. The row is `DEFAULT_MODEL` — keyless, so it is a starting point and
+	 * not a credential — and it goes through the ordinary model endpoint, exactly as if the user had
+	 * typed it. After it lands, the settings marker records that this window made the offer, which is
+	 * what keeps a deleted row deleted on the next launch; see `default-model.ts`.
+	 *
+	 * A planting that fails is reported and the read's own answer — possibly empty — still lands: the
+	 * window opens, says what went wrong, and the settings panel is still the fix.
+	 */
+	async function importedModels(): Promise<ModelOption[]> {
+		const { models } = await api.listModels();
+		try {
+			const planted = await seedDefaultModel({
+				models,
+				seeded: state.settings?.defaultModelSeeded === true,
+				save: async (rows) => (await api.updateModels(rows)).models,
+				markSeeded: () => saveSettings({ defaultModelSeeded: true }),
+			});
+			return planted ?? models;
+		} catch (error) {
+			report(error);
+			return models;
+		}
+	}
+
 	// Fill the panel and the list from the API, independently of the channel: a window that cannot open
 	// a connection can still show what the server has, and can still say what is missing. So the first
 	// connect happens here rather than at module load — the panel is worth having either way.
@@ -1748,7 +1778,7 @@ function main(): void {
 			report(error);
 		}
 		try {
-			const { models } = await api.listModels();
+			const models = await importedModels();
 			reachable();
 			apply({ ...state, models });
 		} catch (error) {

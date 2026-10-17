@@ -137,6 +137,8 @@ export interface SettingsSnapshot {
 	/** How long the `bash` tool lets one command run. */
 	bash: BashSettings;
 	model?: string;
+	/** Whether the window already planted its built-in default row; see `Settings.defaultModelSeeded`. */
+	defaultModelSeeded?: boolean;
 }
 
 export interface UsageTotals {

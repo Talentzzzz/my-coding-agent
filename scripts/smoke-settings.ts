@@ -154,5 +154,40 @@ process.stdout.write("\nsettings：模式跟着整表设置走一遍真实的序
 	}
 }
 
+// --------------------------------- 4. the seeded-default marker survives a real restart
+
+process.stdout.write("\nsettings：种过默认模型的标记活过一次重启\n");
+
+{
+	const home = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
+	try {
+		const cwd = join(home, "workspace");
+		const manager = SettingsManager.create(cwd, home);
+		// Never written is its own state — the old file's and the fresh machine's — so the window can
+		// tell "no window ever offered the row" from "the user deleted it".
+		check("没写过时没有标记", manager.getSettings().defaultModelSeeded === undefined, String(manager.getSettings().defaultModelSeeded));
+
+		manager.applySettings({ defaultModelSeeded: true });
+		check("写下去之后当场为真", manager.getSettings().defaultModelSeeded === true, String(manager.getSettings().defaultModelSeeded));
+
+		// A new manager over the same file is what the next launch reads: the marker must come back
+		// through JSON → mergeSettings, or the planted row the user deleted would be planted again.
+		check(
+			"新进程从文件里读回真",
+			SettingsManager.create(cwd, home).getSettings().defaultModelSeeded === true,
+			String(SettingsManager.create(cwd, home).getSettings().defaultModelSeeded),
+		);
+		const onDisk = JSON.parse(readFileSync(settingsPath(home), "utf8")) as Record<string, unknown>;
+		check("磁盘上就写着这个字段", onDisk.defaultModelSeeded === true, JSON.stringify(onDisk.defaultModelSeeded));
+
+		// A hand edit asking for the offer again is representable: `false` is kept rather than read as
+		// an absence, which would be the same thing here but not in the merge's own terms.
+		manager.applySettings({ defaultModelSeeded: false });
+		check("手写的假也留得住", SettingsManager.create(cwd, home).getSettings().defaultModelSeeded === false, String(SettingsManager.create(cwd, home).getSettings().defaultModelSeeded));
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+}
+
 process.stdout.write(failures === 0 ? "\nsettings ok\n" : `\n${failures} 项失败\n`);
 process.exitCode = failures === 0 ? 0 : 1;

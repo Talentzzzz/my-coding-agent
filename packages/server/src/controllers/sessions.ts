@@ -46,6 +46,7 @@ function settingsOf(manager: SettingsManager): SettingsSnapshot {
 		...(settings.modes === undefined ? {} : { modes: settings.modes }),
 		...(hidden.length === 0 ? {} : { hiddenWorkspaces: hidden }),
 		...(settings.model === undefined ? {} : { model: settings.model }),
+		...(settings.defaultModelSeeded === undefined ? {} : { defaultModelSeeded: settings.defaultModelSeeded }),
 	};
 }
 
@@ -386,6 +387,15 @@ export class SystemController {
 				throw httpStatus.conflict(`Unknown model: ${fields.model}`);
 			}
 			next.model = fields.model;
+		}
+
+		if (fields.defaultModelSeeded !== undefined) {
+			// A marker, not a preference: the client writes it once, after planting the built-in default
+			// row, and only its truth matters to the next launch's seeding decision.
+			if (typeof fields.defaultModelSeeded !== "boolean") {
+				throw httpStatus.badRequest("`defaultModelSeeded` must be a boolean");
+			}
+			next.defaultModelSeeded = fields.defaultModelSeeded;
 		}
 
 		if (fields.appearance !== undefined) {

@@ -16,6 +16,8 @@ import type {
 export interface PanelSettingsPatch {
 	/** The row a new session starts on, as `<name>/<wire id>`. */
 	model?: string;
+	/** The window's "already planted the built-in default" marker; see `Settings.defaultModelSeeded`. */
+	defaultModelSeeded?: boolean;
 	/** The global default active tool set, sent whole like the session-level endpoint's own. */
 	tools?: string[];
 	/**

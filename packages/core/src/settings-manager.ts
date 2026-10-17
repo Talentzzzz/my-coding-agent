@@ -30,6 +30,8 @@ type SettingsLayer = Record<string, unknown>;
 /** A partial change to the settings, shaped like the config patch the browser sends. */
 export interface SettingsPatch {
 	model?: string;
+	/** The window's "already planted the built-in default" marker; see `Settings.defaultModelSeeded`. */
+	defaultModelSeeded?: boolean;
 	/** The global default active tool set. A whole list, like the tool set on a session. */
 	tools?: string[];
 	/**

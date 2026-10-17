@@ -17,6 +17,7 @@
 		"packages/server/src/**/*.ts",
 		"scripts/smoke-projection.ts",
 		"scripts/fake-transport.ts",
+		"scripts/smoke-default-model.ts",
 		"scripts/wire/**/*.ts",
 		"scripts/smoke-mux.ts",
 		"scripts/smoke-liveness.ts",

@@ -30,6 +30,7 @@
 		"../../scripts/smoke-mux-client.ts",
 		"../../scripts/smoke-mux-live.ts",
 		"../../scripts/smoke-sidebar.ts",
-		"../../scripts/smoke-replay.ts"
+		"../../scripts/smoke-replay.ts",
+		"../../scripts/smoke-model-form.ts"
 	]
 }

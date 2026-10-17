@@ -484,27 +484,32 @@ export class SettingsPanel {
 				update({ name: value }),
 			),
 		);
-		form.append(this.textField("模型 ID", draft.modelId, "接口那边的名字，例如 claude-opus-5", (value) =>
+		form.append(this.textField("模型", draft.modelId, "接口那边的名字，例如 claude-opus-5", (value) =>
 			update({ modelId: value }),
 		));
-		form.append(this.textField("服务地址", draft.baseUrl, "Anthropic Messages 接口的地址；代理或中转填它自己的", (value) =>
+		form.append(this.textField("BASE URL", draft.baseUrl, "Anthropic Messages 接口的地址；代理或中转填它自己的", (value) =>
 			update({ baseUrl: value }),
 		));
 		form.append(this.keyField(draft, update));
 		form.append(
-			this.numberField("上下文窗口", draft.contextWindow, "模型能接受多少 tokens；压缩由它决定", (value) =>
+			this.numberField("上下文长度", draft.contextWindow, "模型能接受多少 tokens；压缩由它决定", (value) =>
 				update({ contextWindow: value }),
 			),
 		);
 		form.append(
-			this.numberField("最大输出", draft.maxTokens, "一次回答最多多少 tokens", (value) => update({ maxTokens: value })),
+			this.numberField("最大输出长度", draft.maxTokens, "一次回答最多多少 tokens", (value) => update({ maxTokens: value })),
 		);
 
-		const reasoning = element("label", "model-check");
+		// A checkbox and not a select: this is one capability the row either has or does not, so it
+		// reads as a switch. It keeps the field column's shape — the check with its label, the hint
+		// under it — rather than joining the other controls' label-above-control rows.
+		const reasoning = element("div", "model-field");
+		const check = element("label", "model-check");
 		const box = element("input", undefined, undefined, { type: "checkbox" });
 		box.checked = draft.reasoning;
 		box.addEventListener("change", () => update({ reasoning: box.checked }));
-		reasoning.append(box, document.createTextNode("该模型支持推理 / 思考档位"));
+		check.append(box, document.createTextNode("思考模式"));
+		reasoning.append(check, element("span", "model-hint", "打开表示这个模型支持推理；关闭后请求不带任何思考参数"));
 		form.append(reasoning);
 
 		// The level a session opened on this row starts at. It belongs to the row rather than to the
@@ -514,7 +519,7 @@ export class SettingsPanel {
 		for (const candidate of THINKING_LEVELS) level.append(option(candidate, candidate));
 		level.value = draft.defaultThinkingLevel;
 		level.addEventListener("change", () => update({ defaultThinkingLevel: level.value }));
-		form.append(this.field("默认思考等级", level, "这个模型新建会话时的档位；模型没有的档位会被落到它支持的一档"));
+		form.append(this.field("默认思考强度", level, "这个模型新建会话时的强度；模型没有的档位会被落到它支持的一档"));
 
 		const actions = element("div", "model-actions");
 		const cancel = element("button", "button", undefined, { type: "button" });
@@ -539,7 +544,7 @@ export class SettingsPanel {
 			placeholder: row.hasApiKey ? "•••••••• 已保存 — 输入即可替换" : "未设置",
 		});
 		input.addEventListener("input", () => update({ apiKey: input.value }));
-		return this.field("API 密钥", input, "保存在本机，不会回传给浏览器；这是唯一的鉴权方式");
+		return this.field("API KEY", input, "保存在本机，不会回传给浏览器；这是唯一的鉴权方式");
 	}
 
 	private textField(label: string, value: string, hint: string, onInput: (value: string) => void): HTMLElement {

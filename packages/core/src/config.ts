@@ -160,6 +160,19 @@ export interface Settings {
 	/** `<name>/<model-id>`. Undefined lets the session pick a default. */
 	model?: string;
 	/**
+	 * Whether the window has already planted its built-in default model row.
+	 *
+	 * The client seeds one starter row when no model is imported (`packages/web/src/default-model.ts`),
+	 * and the user may delete it. This marker is what makes that deletion final: without it the next
+	 * launch would see an empty list and plant the row again. It is a setting rather than the browser's
+	 * own storage because the desktop shell serves a fresh port on every launch, and `localStorage` is
+	 * scoped to an origin — the marker would be forgotten by the very restart it exists for.
+	 *
+	 * Absent means "never seeded", which is the state of an old settings file and of a machine that
+	 * never launched a window.
+	 */
+	defaultModelSeeded?: boolean;
+	/**
 	 * The tools a session that never chose opens on, as the global default the session-level panel
 	 * resets to. Undefined means the registry's full set, which is what today's sessions open on —
 	 * so an old settings file needs no migration and no field of its own.
@@ -236,6 +249,11 @@ export function mergeSettings(input: unknown): Settings {
 
 	const model = stringOrUndefined(record.model);
 	if (model !== undefined) merged.model = model;
+
+	// Kept as written either way: `false` is how a hand-edited file asks for the built-in row again,
+	// and turning it into an absence here would make that request unrepresentable. Like every other
+	// field it merges by layer, so a project file's `false` overrides the home file's `true`.
+	if (typeof record.defaultModelSeeded === "boolean") merged.defaultModelSeeded = record.defaultModelSeeded;
 
 	const tools = stringListOrUndefined(record.tools);
 	if (tools !== undefined) merged.tools = tools;
