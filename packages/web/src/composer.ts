@@ -72,12 +72,12 @@ export class Composer {
 		this.levelSelect = element("select", "composer-select", undefined, { "aria-label": "思考档位" });
 		this.levelSelect.addEventListener("change", () => handlers.onSelectLevel(this.levelSelect.value));
 
-		const seat = element("div", "composer-seat");
-		// The session's own settings lead the seat: they belong to the conversation the way the model
-		// seat does, and the app-level ones stay behind the sidebar's one button. The whole seat rides
-		// the bar's right end, the model picking just left of the send button.
+		// The session's own settings lead the bar's left end (08): they belong to the conversation the
+		// way the model seat does, and the app-level ones stay behind the sidebar's one button. The
+		// model seat keeps the bar's right end, the model picking just left of the send button.
 		const sessionSettings = iconButton("gear", "会话设置", () => handlers.onOpenSessionSettings(), "icon-button composer-gear");
-		seat.append(sessionSettings, this.modelSelect, this.levelSelect);
+		const seat = element("div", "composer-seat");
+		seat.append(this.modelSelect, this.levelSelect);
 
 		this.stop = element("button", "button danger", undefined, { type: "button", hidden: true });
 		this.stop.append(icon("stop"), element("span", undefined, "停止"));
@@ -86,7 +86,7 @@ export class Composer {
 		this.send = element("button", "button primary", undefined, { type: "submit" });
 		this.send.append(element("span", undefined, "发送"), icon("send"));
 
-		bar.append(seat, this.queue, this.stop, this.send);
+		bar.append(sessionSettings, seat, this.queue, this.stop, this.send);
 		this.element.append(this.textarea, bar);
 
 		this.element.addEventListener("submit", (event) => {

@@ -2224,9 +2224,9 @@ body:not([data-pane="branch"]) .branch-view {
  * On the bar rather than in the settings panel because it follows the session — it is read while
  * working and changed mid-conversation, so it has to be where the writing happens — and on the
  * bar's right end because that is where 01 ④ put it: "选模型的放在输入框右边", just left of the
- * send button. The bar carries no hint lines, so the auto margin is what pins the seat there. Both
- * selects are deliberately quiet: a control read on every glance should not compete with the answer
- * above it.
+ * send button (08 moved the session-settings gear to the bar's left end; the seat kept the right).
+ * The bar carries no hint lines, so the auto margin is what pins the seat there. Both selects are
+ * deliberately quiet: a control read on every glance should not compete with the answer above it.
  */
 .composer-seat {
 	display: flex;
@@ -2260,7 +2260,8 @@ body:not([data-pane="branch"]) .branch-view {
 	outline: none;
 }
 
-/* The session-level settings entry: one quiet gear leading the seat, same grammar as the selects. */
+/* The session-level settings entry: one quiet gear at the bar's left end (08), same grammar as the
+   selects it used to lead on the right. */
 .composer-gear {
 	width: 26px;
 	height: 26px;
