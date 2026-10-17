@@ -7,7 +7,6 @@ import { TranscriptView } from "./render/transcript.ts";
 import { BranchView, shortId } from "./render/branch-view.ts";
 import { Sidebar, pagingOf, workspaceName } from "./render/sidebar.ts";
 import { SettingsPanel, modeSummaryOf } from "./render/settings.ts";
-import { SessionSettingsPanel } from "./render/session-settings.ts";
 import { openMenu, openMenuAt, type MenuItem } from "./render/menu.ts";
 import { StatusBar } from "./render/statusbar.ts";
 import { element, icon } from "./dom.ts";
@@ -462,13 +461,6 @@ function main(): void {
 			]);
 		},
 		onSelectMode: (name) => applyMode(name),
-		onOpenSessionSettings: () => {
-			sessionSettings.show();
-			sessionSettings.render({
-				...(state.settings ? { settings: state.settings } : {}),
-				...(state.snapshot ? { snapshot: state.snapshot } : {}),
-			});
-		},
 	});
 	composerWrap.append(errorBar, approvalSeat, composerHead, composer.element);
 
@@ -675,7 +667,7 @@ function main(): void {
 		onBashTimeouts: (bash) => void saveSettings({ bash }),
 		// The global default approval map: what a session that never chose opens on. Writing it here
 		// writes the settings files, and a session with recorded choices of its own keeps them.
-		onGlobalApproval: (tool, value) => void saveSettings({ approval: { [tool]: value } }),
+		onGlobalApproval: (tool, value) => saveSettings({ approval: { [tool]: value } }),
 		onSaveModels: async (rows) => {
 			const { models } = await api.updateModels(rows);
 			apply({ ...state, models });
@@ -686,49 +678,7 @@ function main(): void {
 		// The default a *new* session opens on, so it writes the settings files. The model a live session
 		// is on is the composer's, and never goes through here.
 		onDefaultModel: (ref) => void saveSettings({ model: ref }),
-		onGlobalTools: (names) => void saveSettings({ tools: names }),
-	});
-
-	/**
-	 * The session-level panel, behind the composer's own button.
-	 *
-	 * Its controls write the session's transcript — `PUT /tools` and the approval `PATCH` — which is
-	 * the same path the old settings panel used, moved to the seat that says which level it edits. The
-	 * reset sends the global defaults through the two endpoints together, which is what writes one
-	 * `tool_config` entry *holding* the defaults; the snapshot's field-equality booleans then read it
-	 * as following global again.
-	 */
-	const sessionSettings = new SessionSettingsPanel({
-		onClose: () => sessionSettings.hide(),
-		onActiveTools: (names) => {
-			if (followed === undefined) {
-				report(new Error("还没有挂上任何会话。"));
-				return;
-			}
-			void api.setTools(followed, names).catch(report);
-		},
-		onApproval: (tool, value) => {
-			if (followed === undefined) {
-				report(new Error("还没有挂上任何会话。"));
-				return;
-			}
-			// Session-scoped: the choice is recorded in this session's own transcript, so it must not go
-			// through the settings endpoint, which writes the workspace files that only decide what a
-			// *new* session opens on.
-			void api.setConfig(followed, { approval: { [tool]: value } }).catch(report);
-		},
-		onFollowGlobal: () => {
-			if (followed === undefined || state.snapshot === undefined) return;
-			const allTools = state.snapshot.allTools;
-			const global = state.settings;
-			if (global === undefined) {
-				report(new Error("全局设置还没有读到，稍后再试。"));
-				return;
-			}
-			const names = global.tools === undefined ? allTools : global.tools.filter((name) => allTools.includes(name));
-			void api.setTools(followed, names).catch(report);
-			void api.setConfig(followed, { approval: { ...global.approval } }).catch(report);
-		},
+		onGlobalTools: (names) => saveSettings({ tools: names }),
 	});
 
 	// The handle sits between the two columns — it is the sidebar's right edge, which is the whole
@@ -736,7 +686,7 @@ function main(): void {
 	// The band goes first: as #app's first grid item it takes the window's top row, the one strip the
 	// caption's buttons are overlaid onto, and it stays empty by design — every touchable thing the
 	// page owns begins in row 2, so the buttons cannot cover anything.
-	root.append(titleband, sidebar.element, sidebarResizer, conversation, settings.element, sessionSettings.element);
+	root.append(titleband, sidebar.element, sidebarResizer, conversation, settings.element);
 
 	// ------------------------------------------------------------------- wiring
 
@@ -1014,12 +964,12 @@ function main(): void {
 	/**
 	 * Which mode the session on screen is on, matched by value (ADR-0005).
 	 *
-	 * A session records what it runs on as one `tool_config` snapshot, not as a mode reference, so
+	 * The session records what it runs on as one `tool_config` snapshot, not as a mode reference, so
 	 * the match is the snapshot's tools and approvals against each preset's — the built-in default
 	 * first, since it *is* the global defaults a following-global session holds. No session on screen
 	 * answers with the default, because that is what the next one opens on; a live session that
-	 * matches nothing — hand-tweaked in the session panel, or left behind by a mode since edited —
-	 * answers undefined, which the seat draws as 「自定义」.
+	 * matches nothing — left behind by a mode since edited, or by a tool set an older build recorded —
+	 * answers undefined, which the seat draws as 「自定义」. Picking a mode is the one way back.
 	 */
 	function currentModeName(): string | undefined {
 		const snapshot = state.snapshot;
@@ -1053,9 +1003,9 @@ function main(): void {
 	 * Put the session this window is on onto a mode: its tool set and its approval map, whole.
 	 *
 	 * The two halves are the session's own two commands — `PUT /tools` and the approval `PATCH` —
-	 * which is the same pair the session panel's reset sends, and they land as one `tool_config`
-	 * snapshot in the transcript. There is deliberately no mode endpoint: a preset *is* those two
-	 * values, and a second spelling of the same command would only have to be kept in step with them.
+	 * and they land as one `tool_config` snapshot in the transcript. There is deliberately no mode
+	 * endpoint: a preset *is* those two values, and a second spelling of the same command would only
+	 * have to be kept in step with them.
 	 */
 	function applyMode(name: string): void {
 		if (followed === undefined) {
@@ -1153,12 +1103,6 @@ function main(): void {
 		if (settings.open) {
 			settings.render({
 				models: state.models,
-				...(state.settings ? { settings: state.settings } : {}),
-				...(snapshot ? { snapshot } : {}),
-			});
-		}
-		if (sessionSettings.open) {
-			sessionSettings.render({
 				...(state.settings ? { settings: state.settings } : {}),
 				...(snapshot ? { snapshot } : {}),
 			});
@@ -1370,18 +1314,36 @@ function main(): void {
 		renderSidebar();
 	}
 
-	async function saveSettings(patch: Parameters<SessionApi["updateSettings"]>[0]): Promise<void> {
-		try {
-			const { settings: saved } = await api.updateSettings(patch);
-			// Applied straight away rather than after a re-render: the font size and the theme are the
-			// two settings whose whole value is seeing them change. The branch page measures its cards
-			// off the type scale, so it is the one view that has to be told to measure again.
-			applyAppearance(saved);
-			branchView.remeasure();
-			apply({ ...state, settings: saved });
-		} catch (error) {
+	/**
+	 * The tail of the settings writes, so one file's patches land one at a time.
+	 *
+	 * A save that moves a tool set and the approvals that came with it is several patches, and every
+	 * answer carries the whole settings object: two in flight could apply the older answer last and
+	 * repaint the window with a snapshot that has already been superseded. Chaining the requests keeps
+	 * the answers — and the state they paint — in the order the user made them. Settings are one file,
+	 * so one writer at a time is the contract the files already assume.
+	 */
+	let settingsWrites: Promise<void> = Promise.resolve();
+
+	function saveSettings(patch: Parameters<SessionApi["updateSettings"]>[0]): Promise<void> {
+		// The catch sits at the chain's end rather than in `writeSettings`: one refused patch is
+		// reported once, the chain still resolves, and the next patch — about a different field — goes
+		// out instead of being cancelled by its predecessor's rejection.
+		const write = settingsWrites.then(() => writeSettings(patch)).catch((error: unknown) => {
 			report(error);
-		}
+		});
+		settingsWrites = write;
+		return write;
+	}
+
+	async function writeSettings(patch: Parameters<SessionApi["updateSettings"]>[0]): Promise<void> {
+		const { settings: saved } = await api.updateSettings(patch);
+		// Applied straight away rather than after a re-render: the font size and the theme are the
+		// two settings whose whole value is seeing them change. The branch page measures its cards
+		// off the type scale, so it is the one view that has to be told to measure again.
+		applyAppearance(saved);
+		branchView.remeasure();
+		apply({ ...state, settings: saved });
 	}
 
 	/**
@@ -1690,10 +1652,6 @@ function main(): void {
 			// here; the panels go in the order they were likely opened in.
 			if (settings.open) {
 				settings.hide();
-				return;
-			}
-			if (sessionSettings.open) {
-				sessionSettings.hide();
 				return;
 			}
 			if (state.approvals.length > 0 && followed !== undefined && !typingTarget()) {

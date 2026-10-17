@@ -8,7 +8,7 @@
  * 唯一办法。
  *
  * 覆盖面按**今天的产品代码**算：`transcript.ts` / `sidebar.ts` / `statusbar.ts` / `settings.ts` /
- * `session-settings.ts` / `composer.ts` / `menu.ts` / `markdown.ts` / `diff.ts` / `dom.ts` /
+ * `composer.ts` / `menu.ts` / `markdown.ts` / `diff.ts` / `dom.ts` /
  * `branch-view.ts` / `main.ts` 里出现过的每一个 DOM 成员都实现了。缺哪一个，下面 `installDom()` 的
  * **严格模式**会当场指名道姓地抛出来，而不是静默地 `undefined` 然后几十行之后才崩。
  *

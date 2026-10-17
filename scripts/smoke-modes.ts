@@ -1,8 +1,9 @@
 // Modes UI smoke: drives the production settings panel's modes tab, the composer's mode seat, and
 // the mode menu against the minimal DOM, and checks the behaviours a screenshot cannot — that the
-// built-in default card edits the global defaults live, that a user mode's form commits the list
-// whole, that the built-in's name is refused, and that a menu row's detail line reaches the DOM.
-// Nothing reaches the network, so no server and no provider key are needed.
+// built-in default card opens the same inline form and saves the global defaults whole, that a user
+// mode's form commits the list whole, that the built-in's name is refused, and that a menu row's
+// detail line reaches the DOM. Nothing reaches the network, so no server and no provider key are
+// needed.
 // Run with: node scripts/smoke-modes.ts
 import { SettingsPanel, modeSummaryOf, type SettingsHandlers } from "../packages/web/src/render/settings.ts";
 import { Composer, type ComposerHandlers } from "../packages/web/src/composer.ts";
@@ -58,8 +59,8 @@ function handlers(over: Partial<SettingsHandlers> = {}): SettingsHandlers {
 		onSaveModels: async () => {},
 		onSaveModes: async () => {},
 		onDefaultModel: () => {},
-		onGlobalTools: () => {},
-		onGlobalApproval: () => {},
+		onGlobalTools: async () => {},
+		onGlobalApproval: async () => {},
 		onBashTimeouts: () => {},
 		...over,
 	};
@@ -73,7 +74,6 @@ function composerHandlers(over: Partial<ComposerHandlers> = {}): ComposerHandler
 		onSelectLevel: () => {},
 		onModes: () => {},
 		onSelectMode: () => {},
-		onOpenSessionSettings: () => {},
 		...over,
 	};
 }
@@ -102,14 +102,17 @@ process.stdout.write("\nmodes：模式页画出内置默认卡与用户模式\n"
 	check("默认卡的摘要来自全局默认值", summaries[0]?.textContent === "3 个工具 · 1 项询问", summaries[0]?.textContent);
 	check("用户模式的摘要整份算出", summaries[1]?.textContent === "3 个工具 · 0 项询问", summaries[1]?.textContent);
 
-	// The default card's toggles are always live — no form to open, no save to press.
+	// Collapsed, the default card is the same one-line row a user mode is: the tools are behind the
+	// head, which is the door into the inline form.
 	const defaultTools = all(rows[0] as FakeNode, "mode-tool");
-	check("默认卡每工具一行", defaultTools.length === ALL_TOOLS.length, String(defaultTools.length));
+	check("默认卡收起时只有一行摘要", defaultTools.length === 0, String(defaultTools.length));
+	const defaultHead = rows[0]!.children.find((child) => child.classList.contains("model-row-head"));
+	check("默认卡的头是门", defaultHead?.tag === "button", defaultHead?.tag);
 }
 
-// ------------------------------------------------- 2. the default card edits the globals in place
+// -------------------------------------- 2. the default card edits the globals on save
 
-process.stdout.write("\nmodes：默认卡就地写全局默认\n");
+process.stdout.write("\nmodes：默认卡展开同一套表单并写全局默认\n");
 
 {
 	installDom();
@@ -117,44 +120,78 @@ process.stdout.write("\nmodes：默认卡就地写全局默认\n");
 	const approvalWrites: [string, boolean][] = [];
 	const panel = new SettingsPanel(
 		handlers({
-			onGlobalTools: (names) => toolsWrites.push(names),
-			onGlobalApproval: (tool, value) => approvalWrites.push([tool, value]),
+			onGlobalTools: async (names) => {
+				toolsWrites.push(names);
+			},
+			onGlobalApproval: async (tool, value) => {
+				approvalWrites.push([tool, value]);
+			},
 		}),
 	);
 	panel.render({ settings: settingsOf(undefined), models: [], snapshot: snapshotOf() });
 	panel.show("modes");
 
 	const rows = all(panel.element as unknown as FakeNode, "model-row");
-	const boxes = all(rows[0] as FakeNode, "mode-tool").map((row) => row.querySelector("input"));
+	const head = rows[0]!.children.find((child) => child.classList.contains("model-row-head"))!;
+	head.dispatch("click");
+	const form = all(panel.element as unknown as FakeNode, "model-form")[0];
+	check("点默认卡的头展开内联表单", form !== undefined);
+
+	// The name is the one field the built-in cannot edit: it is shown as a label with the badge, not
+	// as a text input.
+	check("默认模式的名称不可编辑", form!.querySelector('input[type="text"]') === null);
+	const nameBadges = all(form!, "mode-badge");
+	check("表单里仍是「默认」+「内置」", nameBadges.length === 1 && nameBadges[0]!.textContent === "内置", nameBadges[0]?.textContent);
+
+	const toolRows = all(form!, "mode-tool");
+	check("展开后每工具一行", toolRows.length === ALL_TOOLS.length, String(toolRows.length));
+
 	// `bash` is the sixth row and starts checked (the standard default). The shim does not reproduce
 	// the browser's click-then-change order, so the toggle is set the way a click would leave it
 	// before the change event dispatches.
-	const bashBox = boxes[5]!;
+	const bashRow = toolRows[5]!;
+	const bashBox = bashRow.querySelector("input")!;
 	check("bash 默认勾着", bashBox.getAttribute("aria-label") === "启用 bash" && bashBox.checked === true);
 	bashBox.checked = false;
 	bashBox.dispatch("change");
-	check("取消勾选把整份工具集写下去", JSON.stringify(toolsWrites.at(-1)) === JSON.stringify(ALL_TOOLS.filter((name) => name !== "bash")), JSON.stringify(toolsWrites.at(-1)));
-	check("审批没有跟着工具开关走", approvalWrites.length === 0, JSON.stringify(approvalWrites));
+	check("表单里的修改不立刻写全局", toolsWrites.length === 0 && approvalWrites.length === 0, JSON.stringify([toolsWrites, approvalWrites]));
 
-	// The approval select rides the same row; moving it writes the one tool's approval. Only the six
-	// keyed tools carry one, so the fourth select is `glob`.
-	const select = all(rows[0] as FakeNode, "mode-tool-approval")[3]!;
+	// The approval select rides the same row; moving it edits the draft too. Only the six keyed tools
+	// carry one, so the fourth select is `glob`.
+	const select = all(form!, "mode-tool-approval")[3]!;
 	select.value = "ask";
 	select.dispatch("change");
-	check("下拉写到那个工具的审批", JSON.stringify(approvalWrites.at(-1)) === JSON.stringify(["glob", true]), JSON.stringify(approvalWrites));
+	check("审批修改也留在草稿里", approvalWrites.length === 0, JSON.stringify(approvalWrites));
 
-	// Without a session the default card stands down, the way the old defaults section did: its
+	const save = all(form!, "button").find((button) => button.textContent === "保存")!;
+	save.dispatch("click");
+	await flush();
+	check("保存把整份工具集写下去", JSON.stringify(toolsWrites.at(-1)) === JSON.stringify(ALL_TOOLS.filter((name) => name !== "bash")), JSON.stringify(toolsWrites.at(-1)));
+	check("保存只写变更过的审批", JSON.stringify(approvalWrites) === JSON.stringify([["glob", true]]), JSON.stringify(approvalWrites));
+	check("保存后表单收起", all(panel.element as unknown as FakeNode, "model-form").length === 0);
+
+	// Without a session the default form stands down, the way the old defaults section did: its
 	// toggles cannot name the build's own list, and writing the six built-ins over a set that may
 	// name more would be inventing one — the exact thing that path refuses to do.
 	const bareWrites: string[][] = [];
-	const bare = new SettingsPanel(handlers({ onGlobalTools: (names) => bareWrites.push(names) }));
+	const bare = new SettingsPanel(
+		handlers({
+			onGlobalTools: async (names) => {
+				bareWrites.push(names);
+			},
+		}),
+	);
 	bare.render({ settings: settingsOf(undefined), models: [] });
 	bare.show("modes");
 	const bareRows = all(bare.element as unknown as FakeNode, "model-row");
-	const bareBox = all(bareRows[0] as FakeNode, "mode-tool")[5]!.querySelector("input")!;
-	check("无会话时默认卡的开关退场", bareBox.disabled === true, String(bareBox.disabled));
-	bareBox.checked = false;
-	bareBox.dispatch("change");
+	const bareHead = bareRows[0]!.children.find((child) => child.classList.contains("model-row-head"))!;
+	bareHead.dispatch("click");
+	const bareForm = all(bare.element as unknown as FakeNode, "model-form")[0]!;
+	const bareBox = all(bareForm, "mode-tool")[5]!.querySelector("input")!;
+	check("无会话时默认表单的开关退场", bareBox.disabled === true, String(bareBox.disabled));
+	const bareSave = all(bareForm, "button").find((button) => button.textContent === "保存")!;
+	check("无会话时保存退场", bareSave.disabled === true, String(bareSave.disabled));
+	bareSave.dispatch("click");
 	check("无会话时默认卡不写编造的工具集", bareWrites.length === 0, JSON.stringify(bareWrites));
 }
 
@@ -282,6 +319,7 @@ process.stdout.write("\nmodes：输入框的模式座位与菜单\n");
 	installDom();
 	const picked: string[] = [];
 	const composer = new Composer(composerHandlers({ onSelectMode: (name) => picked.push(name) }));
+	check("输入框 bar 上只剩模式座位", all(composer.element as unknown as FakeNode, "composer-gear").length === 0);
 
 	composer.setModes("默认");
 	const label = all(composer.element as unknown as FakeNode, "composer-mode-label")[0]!;

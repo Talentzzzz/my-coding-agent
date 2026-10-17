@@ -24,12 +24,13 @@ Label: wayfinder:map
 <!-- 一张票据一行 -->
 
 - [01 · 脚注复制按钮、行首三角、思考灰底、用时列对齐](issues/01-meta-chevron-reasoning-runtime.md)：已落地——复制按钮在自身规则里归零为纯图标（hover 才出 `--dsw-bg-hover` 与更亮字色）；三角常显、open 只转 90°；思考展开体并入工具输出的同一块灰面板（背景/圆角/内边距/滚动策略，含滚动条）；用时行改用 `margin-block`，inline 方向继续由 `.transcript > *` 居中。无新增 token。
+- [02 · 输入框左下角只留模式座位；「默认」模式改成可编辑](issues/02-composer-and-default-mode.md)：已落地——齿轮与整个会话级面板删除（`followed` 保留，它是全窗口的当前会话）；模式座位是 bar 左端唯一控件；「默认」卡头部可点、展开 `modeFormCard`，名称只读，保存写全局 `tools`/`approval` 且串行化，不回写 `modes`；工具行 gap 8px、行高/下拉 30px。`npm run check`、重写的 `smoke-modes`、真 Chromium 的 `verify-02.ts` 全过。
 
 ## Not yet specified
 
 - 流式修复后 `.transcript` 的批处理形状：是否把 `Drain` 的帧预算复用到流式帧上，取决于 03 的实测结果。
-- 删掉会话级面板后，服务端 `PUT /tools` 与 `PATCH /config` 是否仍然需要：`PUT /tools` 仍被模式选择使用，`PATCH /config` 的审批半边是否还有调用方，取决于 02 的落地结果。
-- 老会话的「自定义」态（工具集不匹配任何模式）在失去手动编辑入口后的体验：可能只需一句提示，也可能要一次“按模式归一”。
+- 老会话的「自定义」态（工具集不匹配任何模式）在失去手动编辑入口后的体验：02 只保证它照常显示
+  「自定义」、选一个模式即可回到预设；是否要再给一句提示或「按模式归一」仍待定。
 
 ## Out of scope
 

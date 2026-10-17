@@ -2402,9 +2402,9 @@ body:not([data-pane="branch"]) .branch-view {
  * On the bar rather than in the settings panel because it follows the session — it is read while
  * working and changed mid-conversation, so it has to be where the writing happens — and on the
  * bar's right end because that is where 01 ④ put it: "选模型的放在输入框右边", just left of the
- * send button (08 moved the session-settings gear to the bar's left end; the seat kept the right).
- * The bar carries no hint lines, so the auto margin is what pins the seat there. Both selects are
- * deliberately quiet: a control read on every glance should not compete with the answer above it.
+ * send button. The bar carries no hint lines, so the auto margin is what pins the seat there. Both
+ * selects are deliberately quiet: a control read on every glance should not compete with the answer
+ * above it.
  */
 .composer-seat {
 	display: flex;
@@ -2438,20 +2438,7 @@ body:not([data-pane="branch"]) .branch-view {
 	outline: none;
 }
 
-/* The session-level settings entry: one quiet gear at the bar's left end (08), same grammar as the
-   selects it used to lead on the right. */
-.composer-gear {
-	width: 26px;
-	height: 26px;
-}
-
-.composer-gear svg {
-	width: 15px;
-	height: 15px;
-}
-
-/*
- * The mode seat, leftmost on the bar: a chip like the workspace picker's, because it opens the one
+/* The mode seat, leftmost on the bar: a chip like the workspace picker's, because it opens the one
  * menu — name first, a summary line under it. It is read at every glance and changed while working,
  * so it keeps the selects' quiet grammar rather than the send button's.
  */
@@ -2723,9 +2710,8 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * The shared modal surface. Both panels — the app-level one and the session-level one behind the
- * composer — are this box; each states its own shape below, and the app-level one re-lays itself
- * out as a nav column plus a content column.
+ * The shared modal surface. The app-level panel is this box, laid out as a nav column plus a content
+ * column below.
  */
 .settings {
 	display: flex;
@@ -2736,13 +2722,6 @@ body:not([data-pane="branch"]) .branch-view {
 	background: var(--dsw-bg-layer-1);
 	box-shadow: var(--dsw-shadow-panel);
 	overflow: hidden;
-}
-
-/* The session panel keeps the content-sized shape it had: it is opened from the composer for one
-   short look, and a full-height frame would be mostly empty. */
-.session-settings {
-	width: min(720px, 100%);
-	max-height: min(760px, 100%);
 }
 
 /*
@@ -2827,7 +2806,7 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /* The app panel's head carries the close control alone — its title lives in the nav column — so
-   the space-between that seats the session panel's heading has nothing to pair with here. */
+   the space-between has nothing to pair with here. */
 .app-settings .settings-head {
 	justify-content: flex-end;
 	padding: 14px 16px 0;
@@ -2839,13 +2818,6 @@ body:not([data-pane="branch"]) .branch-view {
 	justify-content: space-between;
 	gap: 10px;
 	padding: 14px 16px 12px;
-}
-
-.settings-head h2 {
-	margin: 0;
-	font-size: var(--dsw-fs-title);
-	line-height: var(--dsw-lh-title);
-	font-weight: 600;
 }
 
 .settings-body {
@@ -2906,13 +2878,6 @@ body:not([data-pane="branch"]) .branch-view {
 	gap: 10px;
 }
 
-.settings-actions {
-	display: flex;
-	justify-content: flex-end;
-	gap: 8px;
-	padding-top: 4px;
-}
-
 .settings-note {
 	padding: 0 16px;
 	color: var(--dsw-label-caption);
@@ -2930,22 +2895,6 @@ body:not([data-pane="branch"]) .branch-view {
 
 .settings-note[data-tone="error"] {
 	color: var(--dsw-state-error);
-}
-
-.settings-check {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	padding: 4px 2px;
-	color: var(--dsw-label-secondary);
-	font-family: var(--dsw-font-mono);
-	font-size: var(--dsw-fs-caption);
-	line-height: var(--dsw-lh-caption);
-	cursor: pointer;
-}
-
-.settings-check input {
-	accent-color: var(--dsw-state-business);
 }
 
 /* --------------------------------------------------------- appearance bits */
@@ -3192,12 +3141,27 @@ select.input {
 	line-height: var(--dsw-lh-caption);
 }
 
+/* The built-in default's name in its form: the label and badge where a stored mode has an input. It
+   keeps the input's height so the two forms read as the same object, not as one missing a field. */
+.mode-name-static {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 30px;
+}
+
+/* The built-in card has no trash to sit in the head's reserved right padding. */
+.model-row.mode-default .model-row-head {
+	padding-right: 12px;
+}
+
 /* One tool of one mode: toggle, name, and — for the tools the approval map has keys for — the
-   approval select beside them. */
+   approval select beside them. The 30px row is the select's height rather than the text's line box,
+   and the 8px gap keeps the selects from almost touching the row above. */
 .mode-tooltable {
 	display: flex;
 	flex-direction: column;
-	gap: 6px;
+	gap: 8px;
 	padding: 12px;
 	border-top: 1px solid var(--dsw-border-l1);
 }
@@ -3206,6 +3170,7 @@ select.input {
 	display: flex;
 	align-items: center;
 	gap: 8px;
+	min-height: 30px;
 }
 
 .mode-tool input[type="checkbox"] {
@@ -3223,7 +3188,7 @@ select.input {
 .mode-tool-approval {
 	margin-left: auto;
 	width: auto;
-	height: 26px;
+	height: 30px;
 	padding: 0 6px;
 }
 

@@ -45,10 +45,10 @@ export interface SettingsHandlers {
 	onSaveModels(rows: ModelInput[]): Promise<void>;
 	onSaveModes(modes: ModeSettings[]): Promise<void>;
 	onDefaultModel(ref: string): void;
-	/** The global default active tool set, whole — the session-level panel resets to it. */
-	onGlobalTools(names: string[]): void;
-	/** One tool of the global default approval map. */
-	onGlobalApproval(tool: string, value: boolean): void;
+	/** The global default active tool set, whole — the built-in default mode's save writes it. */
+	onGlobalTools(names: string[]): Promise<void>;
+	/** One tool of the global default approval map, which the built-in default mode reads. */
+	onGlobalApproval(tool: string, value: boolean): Promise<void>;
 	onBashTimeouts(patch: Partial<BashSettings>): void;
 }
 
@@ -56,9 +56,9 @@ export interface SettingsState {
 	settings?: SettingsSnapshot;
 	models: readonly ModelOption[];
 	/**
-	 * The session on screen, when there is one. The app-level panel does not edit it — the
-	 * session-level panel does — but its `allTools` is the one list of tool names this build has, and
-	 * the global default tool set needs names to offer.
+	 * The session on screen, when there is one. Its `allTools` is the one list of tool names this
+	 * build has, and the global default tool set needs names to offer, so without a session the
+	 * built-in default mode's form stands down rather than inventing a list.
 	 */
 	snapshot?: SessionSnapshot;
 }
@@ -114,11 +114,12 @@ function formComplete(form: ModelDraft): boolean {
  *
  * It holds what lasts longer than one conversation: how the window draws itself, which models this
  * machine has imported, and the defaults a session that never chose opens on — the default model, the
- * bash timeouts, the default approval map, and the default active tool set. The controls that follow
- * the *session* — its own tools and approvals — live in the panel behind the composer's button
- * (`./session-settings.ts`), because they are changed while working and recorded in the session's own
- * transcript. What is left here is visited rarely and changed deliberately, which is what a panel
- * behind one button is for and a row of always-visible controls is not.
+ * bash timeouts, the global default tool set and approval map (which are the built-in default mode),
+ * and the user's named modes. The tools and approvals a session itself runs on are not here: they
+ * follow the conversation and are chosen in the composer's mode seat, which applies a preset through
+ * the session's own `tool_config`, with no second panel to edit them by hand. What is left here is
+ * visited rarely and changed deliberately, which is what a panel behind one button is for and a row of
+ * always-visible controls is not.
  *
  * The model list is edited one row at a time and saved one action at a time: an inline form's 保存
  * and a confirmed delete each send the list whole, because a half-saved list is the one state nobody
@@ -165,6 +166,14 @@ export class SettingsPanel {
 	private modeConfirming?: number;
 	/** The values typed into the open mode form, present exactly while one is open. */
 	private modeForm?: ModeDraft;
+	/**
+	 * Whether the built-in default card is open for editing. It is a separate interaction from the
+	 * stored modes' rows because it has no list to freeze — its draft is the global defaults — but only
+	 * one of the two is open at a time.
+	 */
+	private defaultEditing = false;
+	/** The global defaults as the open default form is editing them, present exactly while it is open. */
+	private defaultForm?: ModeDraft;
 
 	constructor(handlers: SettingsHandlers) {
 		this.handlers = handlers;
@@ -239,9 +248,10 @@ export class SettingsPanel {
 		// Rebuilding the body would throw away a half-typed row, so it only happens when the thing the
 		// tab is showing actually moved. An open interaction freezes the body outright: the form is the
 		// one thing on screen that cannot be rebuilt from state, because its latest values live in the
-		// DOM and in `this.form`, and a frame arriving mid-edit — a snapshot, a stream tick — must not
-		// steal the focus the typing is in. The freeze ends when the interaction does, and the next
-		// render then compares signatures as usual.
+		// DOM and in the two draft fields, and a frame arriving mid-edit — a snapshot, a stream tick —
+		// must not steal the focus the typing is in. A stored mode freezes through `modeFrozen`, the
+		// model rows through `frozen`, the built-in default card through its own flag. The freeze ends
+		// when the interaction does, and the next render then compares signatures as usual.
 		const signature = [
 			this.tab,
 			state.settings
@@ -261,7 +271,8 @@ export class SettingsPanel {
 			state.snapshot?.allTools.join(",") ?? "",
 		].join("|");
 
-		const stable = this.frozen !== undefined || signature === this.signature;
+		const stable =
+			this.frozen !== undefined || this.modeFrozen !== undefined || this.defaultEditing || signature === this.signature;
 		this.signature = signature;
 		this.renderNav();
 		if (!stable) this.renderBody();
@@ -596,10 +607,22 @@ export class SettingsPanel {
 		this.confirming = undefined;
 		this.form = undefined;
 		this.frozen = undefined;
+		this.dropModeInteraction();
+		this.dropDefaultForm();
+	}
+
+	/** Drop a stored mode's open form without redrawing — the state half of closing it. */
+	private dropModeInteraction(): void {
 		this.modeEditing = undefined;
 		this.modeConfirming = undefined;
 		this.modeForm = undefined;
 		this.modeFrozen = undefined;
+	}
+
+	/** Drop the built-in default card's open form without redrawing. */
+	private dropDefaultForm(): void {
+		this.defaultEditing = false;
+		this.defaultForm = undefined;
 	}
 
 	/**
@@ -657,8 +680,9 @@ export class SettingsPanel {
 	 *
 	 * The default card is the global defaults read live (ADR-0005) — the same two controls the
 	 * defaults tab used to carry, moved here because a mode *is* a tool set plus an approval set, and
-	 * two doors to one value would only drift apart. It applies on the spot, the way those controls
-	 * always have; the user's modes get the same inline edit / confirmed delete the model rows have.
+	 * two doors to one value would only drift apart. It reads like the user's modes: a one-line head
+	 * that opens an inline form, whose 保存 writes the global `tools` and `approval` rather than the
+	 * `modes` list. The user's modes get the same inline edit / confirmed delete the model rows have.
 	 */
 	private modesSection(): HTMLElement {
 		const section = element("section", "settings-section");
@@ -696,39 +720,52 @@ export class SettingsPanel {
 	 * The build's own list — which only a session's `allTools` can name, so without one the six
 	 * built-ins stand in — plus anything the mode already names that the build no longer has, so a
 	 * tool an upgrade dropped can still be unchecked rather than silently carried. The fallback list
-	 * is a mode form's convenience only: the default card's writes go through the build's own list,
-	 * and stand down when no session has named it.
+	 * is a display convenience only: the built-in default's form stands down without a session, so it
+	 * never writes the six over a set that may name more.
 	 */
-	private modeToolList(mode: ModeDraft | undefined): string[] {
+	private modeToolList(mode: ModeDraft): string[] {
 		const all = this.state.snapshot?.allTools;
 		const base = all !== undefined && all.length > 0 ? [...all] : [...APPROVAL_TOOLS];
-		if (mode !== undefined) {
-			for (const name of mode.tools) if (!base.includes(name)) base.push(name);
-		}
+		for (const name of mode.tools) if (!base.includes(name)) base.push(name);
 		return base;
 	}
 
 	/**
 	 * The built-in default mode: never stored, always the global defaults.
 	 *
-	 * The header is a plain label rather than a door — there is no form to open, the controls are
-	 * always live — and the trash has nothing to delete. Its summary is computed from the same values
-	 * its toggles write, so the card can never describe a state it does not hold.
+	 * It opens the same inline form a stored mode does, with the two differences that follow from
+	 * being a live view rather than a row (ADR-0005): the name is a label rather than an input, and
+	 * 保存 writes the global `tools`/`approval` instead of the `modes` list. Collapsed it is the same
+	 * one-line row the user's modes are, so it reads as a peer rather than as an always-expanded panel.
 	 */
 	private defaultModeCard(): HTMLElement {
 		const settings = this.state.settings;
-		const card = element("div", "model-row");
-		const head = element("div", "model-row-head");
-		head.append(
-			element("span", "model-label", DEFAULT_MODE_NAME),
-			element("span", "mode-badge", "内置"),
-			element(
-				"span",
-				"mode-summary",
-				modeSummaryOf(settings?.tools ?? this.state.snapshot?.allTools ?? [], settings?.approval ?? {}),
-			),
-		);
-		card.append(head, this.modeToolTable(undefined));
+		const allTools = this.state.snapshot?.allTools;
+		const storedTools = settings?.tools ?? allTools ?? [];
+		// The summary names the same tools the composer's default row does: when a session can name the
+		// build's list, a stored name an upgrade dropped is not a tool this build has, so it is not
+		// counted here either. Without a session there is no list to narrow against, and what the file
+		// holds is the only true answer.
+		const summaryTools =
+			allTools === undefined || allTools.length === 0 ? storedTools : storedTools.filter((name) => allTools.includes(name));
+		const card = element("div", "model-row mode-default");
+		if (this.defaultEditing) card.classList.add("editing");
+
+		const head = element("button", "model-row-head", undefined, { type: "button" });
+		head.append(element("span", "model-label", DEFAULT_MODE_NAME), element("span", "mode-badge", "内置"));
+		if (!this.defaultEditing) {
+			head.append(element("span", "mode-summary", modeSummaryOf(summaryTools, settings?.approval ?? {})));
+		}
+		head.addEventListener("click", () => this.beginDefaultEdit());
+		card.append(head);
+
+		if (this.defaultEditing && this.defaultForm !== undefined) {
+			card.append(
+				this.modeFormCard(this.defaultForm, () => this.closeDefaultInteraction(), () => void this.commitDefault(), {
+					builtIn: true,
+				}),
+			);
+		}
 		return card;
 	}
 
@@ -776,50 +813,27 @@ export class SettingsPanel {
 	/**
 	 * One mode's tool table: a toggle row per tool, the approval select riding beside it.
 	 *
-	 * Only the tools the approval map has keys for carry a select — a delegated call asks nobody by
-	 * design — so the extra tools a registry adds draw their toggle alone. An unchecked tool's select
-	 * is disabled rather than hidden: the choice it would hold still belongs to the mode.
+	 * It always edits a draft: the built-in default card's draft holds the global defaults and the
+	 * stored modes' forms hold their rows, and only 保存 turns either into a write. Only the tools the
+	 * approval map has keys for carry a select — a delegated call asks nobody by design — so the extra
+	 * tools a registry adds draw their toggle alone. An unchecked tool's select is disabled rather
+	 * than hidden: the choice it would hold still belongs to the mode. `standDown` is the built-in
+	 * default's form with no session: there is no build's own list to name, so the toggles stand down
+	 * rather than write the six built-ins over a set that may name more.
 	 */
-	private modeToolTable(mode: ModeDraft | undefined): HTMLElement {
+	private modeToolTable(mode: ModeDraft, standDown = false): HTMLElement {
 		const table = element("div", "mode-tooltable");
-
-		// The live values, read once: for the default card they are the settings themselves (each
-		// change writes straight through), for a form they are the draft the form is editing.
-		const live: { tools: string[]; approval: Record<string, boolean> } = mode ?? {
-			tools: this.state.settings?.tools ?? this.state.snapshot?.allTools ?? [],
-			approval: this.state.settings?.approval ?? ({} as Record<string, boolean>),
-		};
-		const active = new Set(live.tools);
-		// The default card's writes have to land on the build's own list, and only a session's
-		// `allTools` can name it — the old defaults section refused to invent one, and so does this:
-		// without a session its toggles stand down rather than write the six built-ins over a set
-		// that may name more. A user mode's form keeps its fallback list, because editing a stored
-		// preset writes the preset, not the live default.
-		const global = mode === undefined;
-		const grounded = this.state.snapshot?.allTools;
-		const standDown = global && (grounded === undefined || grounded.length === 0);
 		if (standDown) {
 			table.append(element("span", "model-hint", "还没有挂上任何会话，暂时列不出本构建的工具名；挂上会话后再改默认集。"));
 		}
 
+		const active = new Set(mode.tools);
 		for (const name of this.modeToolList(mode)) {
 			const row = element("div", "mode-tool");
 			const box = element("input", undefined, undefined, { type: "checkbox", "aria-label": `启用 ${name}` });
 			box.checked = active.has(name);
 			box.disabled = standDown;
 			box.addEventListener("change", () => {
-				if (global) {
-					// The stand-down's belt: a real browser never fires a disabled toggle's change, and a
-					// write with no list to write against would invent one.
-					if (grounded === undefined || grounded.length === 0) return;
-					const next = new Set(active);
-					if (box.checked) next.add(name);
-					else next.delete(name);
-					// The set is written whole, in the build's own order, the same way the old defaults
-					// tab wrote it.
-					this.handlers.onGlobalTools(grounded.filter((candidate) => next.has(candidate)));
-					return;
-				}
 				const tools = new Set(mode.tools);
 				if (box.checked) tools.add(name);
 				else tools.delete(name);
@@ -830,15 +844,13 @@ export class SettingsPanel {
 			if ((APPROVAL_TOOLS as readonly string[]).includes(name)) {
 				const select = element("select", "input mode-tool-approval");
 				select.append(option("allow", "自动允许"), option("ask", "每次询问"));
-				select.value = (live.approval[name] === true) ? "ask" : "allow";
-				select.disabled = !box.checked;
+				select.value = mode.approval[name as keyof typeof mode.approval] === true ? "ask" : "allow";
+				select.disabled = standDown || !box.checked;
 				box.addEventListener("change", () => {
-					select.disabled = !box.checked;
+					select.disabled = standDown || !box.checked;
 				});
 				select.addEventListener("change", () => {
-					const asked = select.value === "ask";
-					if (global) this.handlers.onGlobalApproval(name, asked);
-					else mode.approval[name as keyof typeof mode.approval] = asked;
+					mode.approval[name as keyof typeof mode.approval] = select.value === "ask";
 				});
 				row.append(select);
 			}
@@ -847,20 +859,45 @@ export class SettingsPanel {
 		return table;
 	}
 
-	/** The inline mode form, shared by editing and adding. */
-	private modeFormCard(draft: ModeDraft, onCancel: () => void, onSave: () => void): HTMLElement {
+	/**
+	 * The inline mode form, shared by editing, adding, and the built-in default card.
+	 *
+	 * A stored mode's name is an input, because the name is its identity. The built-in's name is a
+	 * label with the badge: it is the global defaults, so renaming it is not a thing that exists.
+	 */
+	private modeFormCard(
+		draft: ModeDraft,
+		onCancel: () => void,
+		onSave: () => void,
+		options: { builtIn?: boolean } = {},
+	): HTMLElement {
 		const form = element("div", "model-form");
-		const nameInput = element("input", "input", undefined, { type: "text", value: draft.name });
-		nameInput.addEventListener("input", () => {
-			draft.name = nameInput.value;
-		});
-		const nameField = element("label", "model-field");
-		nameField.append(
-			element("span", "settings-label", "模式名称"),
-			nameInput,
-			element("span", "model-hint", "这个名字是模式的身份；「默认」是内置模式的名字，不能用"),
-		);
-		form.append(nameField, this.modeToolTable(draft));
+		if (options.builtIn === true) {
+			const shown = element("div", "mode-name-static");
+			shown.append(element("span", "model-label", DEFAULT_MODE_NAME), element("span", "mode-badge", "内置"));
+			const nameField = element("div", "model-field");
+			nameField.append(
+				element("span", "settings-label", "模式名称"),
+				shown,
+				element("span", "model-hint", "内置模式的名称不可改。它的工具与审批就是全局默认，保存写回全局设置，不写模式列表。"),
+			);
+			form.append(nameField);
+		} else {
+			const nameInput = element("input", "input", undefined, { type: "text", value: draft.name });
+			nameInput.addEventListener("input", () => {
+				draft.name = nameInput.value;
+			});
+			const nameField = element("label", "model-field");
+			nameField.append(
+				element("span", "settings-label", "模式名称"),
+				nameInput,
+				element("span", "model-hint", "这个名字是模式的身份；「默认」是内置模式的名字，不能用"),
+			);
+			form.append(nameField);
+		}
+
+		const standDown = options.builtIn === true && (this.state.snapshot?.allTools.length ?? 0) === 0;
+		form.append(this.modeToolTable(draft, standDown));
 
 		const actions = element("div", "model-actions");
 		const cancel = element("button", "button", undefined, { type: "button" });
@@ -868,7 +905,7 @@ export class SettingsPanel {
 		cancel.addEventListener("click", onCancel);
 		const save = element("button", "button primary", undefined, { type: "button" });
 		save.textContent = this.saving ? "保存中…" : "保存";
-		save.disabled = this.saving;
+		save.disabled = this.saving || standDown;
 		save.addEventListener("click", onSave);
 		actions.append(cancel, save);
 		form.append(actions);
@@ -879,6 +916,7 @@ export class SettingsPanel {
 
 	/** Open one mode interaction and close whatever stood, freezing the list it edits against. */
 	private beginMode(next: { editing?: number | "new"; confirming?: number; form?: ModeDraft }): void {
+		this.dropDefaultForm();
 		this.modeEditing = next.editing;
 		this.modeConfirming = next.confirming;
 		this.modeForm = next.form;
@@ -907,6 +945,78 @@ export class SettingsPanel {
 		this.beginMode({});
 	}
 
+	/**
+	 * Open the built-in default card's form, seeded from the global defaults as they stand.
+	 *
+	 * The draft is the card's own until 保存, so a toggle does not write the settings file on every
+	 * click; a stored mode's form is closed first, because one interaction is open at a time. The seed
+	 * keeps `settings.tools` as it is rather than narrowing it, so a tool an upgrade dropped still has
+	 * a row — checked — that can be turned off, and saving then drops it from the global set.
+	 */
+	private beginDefaultEdit(): void {
+		if (this.defaultEditing) return;
+		const settings = this.state.settings;
+		const allTools = this.state.snapshot?.allTools ?? [];
+		this.dropModeInteraction();
+		this.defaultEditing = true;
+		this.defaultForm = {
+			name: DEFAULT_MODE_NAME,
+			tools: settings?.tools === undefined ? [...allTools] : [...settings.tools],
+			approval: { ...(settings?.approval ?? {}) } as ModeDraft["approval"],
+		};
+		this.renderBody();
+	}
+
+	/** Take the open default form down without saving. */
+	private closeDefaultInteraction(): void {
+		this.dropDefaultForm();
+		this.renderBody();
+	}
+
+	/**
+	 * Save the default form: the global `tools` and `approval`, never the `modes` list.
+	 *
+	 * The tool set is written whole in the build's own order — the same contract every tool-set write
+	 * has — and narrowed to the tools this build knows, so a name an upgrade dropped is dropped here
+	 * too. Approvals move one key at a time through `onGlobalApproval`, and only the keys that moved:
+	 * a save that touched nothing but tools never rewrites the approval map. With no session there is
+	 * no build list to write against, so the save is a no-op — the form's own controls already stand
+	 * down.
+	 *
+	 * The writes are awaited before the form closes. Each answer carries the whole settings object, so
+	 * the collapsed summary is drawn from the last one; closing first would flash a summary built from
+	 * the old values while a patch was still in flight. The button says 保存中… meanwhile, the same
+	 * wait the stored modes' save has.
+	 */
+	private async commitDefault(): Promise<void> {
+		const draft = this.defaultForm;
+		const grounded = this.state.snapshot?.allTools;
+		if (draft === undefined || grounded === undefined || grounded.length === 0) return;
+
+		const nextTools = grounded.filter((name) => draft.tools.includes(name));
+		const currentTools = this.state.settings?.tools ?? grounded;
+		const unchanged =
+			currentTools.length === nextTools.length && nextTools.every((name) => currentTools.includes(name));
+
+		const writes: Promise<void>[] = [];
+		if (!unchanged) writes.push(this.handlers.onGlobalTools(nextTools));
+		for (const name of APPROVAL_TOOLS) {
+			const asked = draft.approval[name] === true;
+			if ((this.state.settings?.approval[name] === true) !== asked) writes.push(this.handlers.onGlobalApproval(name, asked));
+		}
+
+		this.saving = true;
+		this.renderBody();
+		try {
+			await Promise.all(writes);
+		} finally {
+			this.saving = false;
+			this.dropDefaultForm();
+			this.signature = "";
+			this.renderBody();
+		}
+	}
+
 	/** Send one mode action's list whole, and fold the answer in — the model commit's twin. */
 	private async commitModes(modes: ModeSettings[]): Promise<void> {
 		this.saving = true;
@@ -914,10 +1024,7 @@ export class SettingsPanel {
 		let outcome: { message: string; tone: "ok" | "error" };
 		try {
 			await this.handlers.onSaveModes(modes);
-			this.modeEditing = undefined;
-			this.modeConfirming = undefined;
-			this.modeForm = undefined;
-			this.modeFrozen = undefined;
+			this.dropModeInteraction();
 			this.signature = "";
 			outcome = { message: "模式已保存。", tone: "ok" };
 		} catch (error) {

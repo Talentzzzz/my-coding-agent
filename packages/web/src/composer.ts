@@ -1,4 +1,4 @@
-import { element, icon, iconButton, option } from "./dom.ts";
+import { element, icon, option } from "./dom.ts";
 import type { ModelOption, PromptBehavior } from "@my-agent/core/protocol";
 
 export interface ComposerHandlers {
@@ -14,8 +14,6 @@ export interface ComposerHandlers {
 	onModes(anchor: HTMLElement): void;
 	/** Apply a mode to the session this window is on: its tool set and its approval map, whole. */
 	onSelectMode(name: string): void;
-	/** The session-level settings panel, which is what the composer's own button opens. */
-	onOpenSessionSettings(): void;
 }
 
 /** The model seat: which row answers, and how hard it is asked to think. */
@@ -81,8 +79,9 @@ export class Composer {
 
 		// The mode seat leads the bar's left end: which preset of tools and approvals the session runs
 		// on is chosen while working and read at a glance, and the bar's left is where such controls
-		// live (the gear beside it is the same grammar). The menu itself opens through the handler —
-		// the rows are the window's to build from its own state.
+		// live. It is the only seat there — the session's tools and approvals are set only by picking
+		// a mode, so there is no second door that could disagree with the one on screen. The menu
+		// itself opens through the handler — the rows are the window's to build from its own state.
 		this.modeButton = element("button", "composer-mode", undefined, {
 			type: "button",
 			"aria-haspopup": "menu",
@@ -97,10 +96,8 @@ export class Composer {
 		this.levelSelect = element("select", "composer-select", undefined, { "aria-label": "思考档位" });
 		this.levelSelect.addEventListener("change", () => handlers.onSelectLevel(this.levelSelect.value));
 
-		// The session's own settings lead the bar's left end (08): they belong to the conversation the
-		// way the model seat does, and the app-level ones stay behind the sidebar's one button. The
-		// model seat keeps the bar's right end, the model picking just left of the send button.
-		const sessionSettings = iconButton("gear", "会话设置", () => handlers.onOpenSessionSettings(), "icon-button composer-gear");
+		// The model seat keeps the bar's right end, the model picking just left of the send button. The
+		// mode seat is the bar's left end; nothing else leads there.
 		const seat = element("div", "composer-seat");
 		seat.append(this.modelSelect, this.levelSelect);
 
@@ -111,7 +108,7 @@ export class Composer {
 		this.send = element("button", "button primary", undefined, { type: "submit" });
 		this.send.append(element("span", undefined, "发送"), icon("send"));
 
-		bar.append(this.modeButton, sessionSettings, seat, this.queue, this.stop, this.send);
+		bar.append(this.modeButton, seat, this.queue, this.stop, this.send);
 		this.element.append(this.textarea, bar);
 
 		this.element.addEventListener("submit", (event) => {
@@ -209,7 +206,7 @@ export class Composer {
 	 *
 	 * The name is the only thing the button holds: which presets exist and what they contain belong
 	 * to the menu, which is rebuilt on every open. An unmatched session — one whose tools and
-	 * approvals no mode names, usually after a hand tweak in the session panel — shows 「自定义」
+	 * approvals no mode names, usually one left behind by a mode edited since — shows 「自定义」
 	 * rather than pretending to be on a preset it has left.
 	 */
 	setModes(current: string | undefined): void {
