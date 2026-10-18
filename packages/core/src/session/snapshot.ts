@@ -35,6 +35,14 @@ export interface SnapshotInput {
 	isRetrying: boolean;
 	retryAttempt: number;
 	pendingApprovals: PendingApproval[];
+	/**
+	 * The assistant message a live loop is writing right now.
+	 *
+	 * A cold reader never has one: the store gains a message when it ends. That asymmetry is the
+	 * point of the field — a window attaching mid-run needs the characters already sent, and only the
+	 * process running the loop has them.
+	 */
+	partial?: AgentMessage;
 }
 
 /**
@@ -69,6 +77,7 @@ export function sessionSnapshot(input: SnapshotInput): SessionSnapshot {
 		messageEntryIds: input.sessionManager.getContextMessageEntryIds(),
 		branchPoints: input.sessionManager.getBranchPoints(),
 		leafId: input.sessionManager.getLeafId(),
+		...(input.partial === undefined ? {} : { partial: input.partial }),
 		...(header?.parentSession === undefined ? {} : { parentSession: header.parentSession }),
 		submitting: input.submitting,
 		queued: input.queued,

@@ -15,6 +15,7 @@
 	"include": [
 		"packages/core/src/**/*.ts",
 		"packages/server/src/**/*.ts",
+		"scripts/cdp.ts",
 		"scripts/smoke-projection.ts",
 		"scripts/fake-transport.ts",
 		"scripts/smoke-default-model.ts",

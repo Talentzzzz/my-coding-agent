@@ -21,31 +21,72 @@ export interface MenuItem {
 }
 
 /**
+ * Where a menu hangs relative to its anchor.
+ *
+ * A menu below its anchor is what a picker in the middle of the page wants; a menu above it is what
+ * the composer's seats want, because they sit on the window's bottom edge and a menu hung underneath
+ * them has nowhere to go. Either way the choice is a preference rather than a promise: a menu with
+ * no room on the side it was asked for takes the other one, and both are clamped into the viewport.
+ *
+ * `align` picks the edge that lines up with the anchor's: `"start"` (the default) matches left edges,
+ * `"end"` matches right edges, which is how a seat at the bar's right end keeps its menu inside the
+ * card it belongs to instead of running off the window.
+ */
+export interface MenuPlacement {
+	placement?: "above" | "below";
+	align?: "start" | "end";
+}
+
+/**
  * The one self-drawn dropdown, and the only one.
  *
- * The workspace picker needs a menu that a native `select` cannot give it — rows with icons, a
- * full-path tooltip, and a footer action that is not a choice among the listed values — and that is
- * the whole justification for drawing one by hand. Anything else in this window stays a native
- * control, because a second popup implementation is a second set of focus, hover, and dismissal
- * rules to keep honest.
+ * It was drawn for the workspace picker — rows with icons, a full-path tooltip, and a footer action
+ * that is not a choice among the listed values, none of which a native `select` can carry. The
+ * composer's model and level seats joined it for the other thing a native control cannot do: its
+ * popup is the platform's, not the theme's, so on a dark window it arrives as a light rectangle. The
+ * two seats are the ones read and changed most often, so they wear this menu rather than that one.
+ * Nothing outside these three uses it; a picker that has no such need stays a native control,
+ * because a second popup implementation is a second set of focus, hover, and dismissal rules to
+ * keep honest.
  *
  * One menu at a time, module-scoped: opening a menu closes the one before it, which is the behaviour
  * a popup has everywhere else on this platform. Dismissal is outside-pointerdown, Escape, and
  * selection; resize and re-layout are handled by closing, which is what menus without their own
  * positioning logic have always done.
  *
- * Two ways in, one menu: {@link openMenu} hangs it under an anchor element, and {@link openMenuAt}
- * puts it where the pointer was — the shape a `contextmenu` wants, since the thing it was asked on
- * is a row that may be rebuilt before the menu even draws.
+ * Two ways in, one menu: {@link openMenu} hangs it under (or over) an anchor element, and
+ * {@link openMenuAt} puts it where the pointer was — the shape a `contextmenu` wants, since the
+ * thing it was asked on is a row that may be rebuilt before the menu even draws.
  */
-export function openMenu(anchor: HTMLElement, items: readonly MenuItem[]): void {
+export function openMenu(anchor: HTMLElement, items: readonly MenuItem[], where: MenuPlacement = {}): void {
 	closeMenu();
 	const menu = build(items);
-	const rect = anchor.getBoundingClientRect();
 	// `position: fixed` against the viewport keeps the menu with the anchor without measuring the
-	// page: the anchor's own rect is measured once, when the menu opens.
-	menu.style.left = `${rect.left}px`;
-	menu.style.top = `${rect.bottom + 4}px`;
+	// page: the anchor's own rect is measured once, when the menu opens. The menu's own size is
+	// read after it is on the page, so "does it fit" is answered by the drawn menu, not a guess.
+	const rect = anchor.getBoundingClientRect();
+	const { width, height } = menu.getBoundingClientRect();
+
+	// The gap between anchor and menu, and the margin kept from the window's edges.
+	const gap = 4;
+	const inset = 8;
+
+	const left = where.align === "end" ? rect.right - width : rect.left;
+	menu.style.left = `${clamp(left, inset, window.innerWidth - width - inset)}px`;
+
+	const above = rect.top - gap - height;
+	const below = rect.bottom + gap;
+	const fits = { above: above >= inset, below: below + height <= window.innerHeight - inset };
+	const top =
+		where.placement === "above" ? (fits.above ? above : below)
+		: where.placement === "below" ? (fits.below ? below : above)
+		: fits.below ? below
+		: above;
+	menu.style.top = `${clamp(top, inset, window.innerHeight - height - inset)}px`;
+}
+
+function clamp(value: number, min: number, max: number): number {
+	return Math.max(min, Math.min(value, max));
 }
 
 /**

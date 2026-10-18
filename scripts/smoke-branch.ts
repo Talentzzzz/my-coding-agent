@@ -30,6 +30,9 @@ function check(label: string, condition: boolean, detail = ""): void {
 
 const dom = installDom();
 
+/** How much further right the next message on the line sits, in pixels (`STEP_X` in the view). */
+const STEP = 300;
+
 // ------------------------------------------------------------------ reading the page
 
 /** Every node of a class below `root`, in document order. */
@@ -224,35 +227,100 @@ function tokenPixels(name: string, fontBase = 15): number {
 
 const LONG = "把整个窗口的布局问题一次说清楚：从标题栏到输入框、从侧边栏到状态行，连同分支图卡片为什么会被撑高。";
 
-/** A way whose first sentence is long enough that no card can hold it on one line honestly. */
-function way(entryId: string, label: string, turn: number, children: BranchWay[] = []): BranchWay {
-	return { entryId, label, role: "user", turn, children };
+/** One way on the page: a user message on the line, or a way that left it. */
+function way(entryId: string, label: string, turn: number, landing: BranchWay["landing"] = "here"): BranchWay {
+	return { entryId, label, question: label, answer: "", role: "user", turn, branches: [], landing };
 }
 
-/** A tree with a fork: one short label, one very long one, and a child hanging off the long one. */
-function forkedTree(): BranchTree {
-	const long = way("bbbbbbb2", LONG, 2, [way("ccccccc3", "换个说法再来一次", 3)]);
+/**
+ * The shape a conversation without any fork draws: three questions in a row.
+ *
+ * This is the shape the page has to be worth opening for — `.scratch/branch-line-and-smoothness/
+ * issues/04-branch-line.md`: with no branch points the page used to be blank, which is the one
+ * conversation state where "where can I go back to" is the only question there is.
+ */
+function lineTree(): BranchTree {
+	const first = way("aaaaaaa1", LONG, 1);
+	const second = way("bbbbbbb2", "换个说法再来一次", 2);
+	const third = way("ccccccc3", "最后一句", 3);
+	first.next = second;
+	second.next = third;
 	return {
-		rootLabel: "分支图卡片为什么会被撑高",
-		ways: [way("aaaaaaa1", "先随便问一句", 1), long],
+		trunk: first,
 		currentId: "ccccccc3",
-		points: 1,
-		options: 3,
+		points: 0,
+		options: 1,
+		line: new Set(["aaaaaaa1", "bbbbbbb2", "ccccccc3"]),
 	};
 }
 
-/** A deep chain of one long sentence per way: the shape that used to make the tallest cards. */
-function chainTree(depth: number): BranchTree {
-	let current = way("way00000", LONG, depth);
-	for (let level = depth - 1; level >= 1; level -= 1) {
-		current = way(`way0000${level}`, LONG, level, [current]);
-	}
-	return { rootLabel: LONG, ways: [current], currentId: "way00000", points: 0, options: depth };
+/** The line plus one way that left it: a fork hangs below the card it left, on its own row. */
+function forkedTree(): BranchTree {
+	const first = way("aaaaaaa1", "先随便问一句", 1);
+	const second = way("bbbbbbb2", LONG, 2);
+	first.next = second;
+	second.branches = [way("ddddddd4", "另一条走法", 3, "tip")];
+	return {
+		trunk: first,
+		currentId: "bbbbbbb2",
+		points: 1,
+		options: 2,
+		line: new Set(["aaaaaaa1", "bbbbbbb2"]),
+	};
 }
 
-// ------------------------------------------------- 1. one height, one line, whole sentence on hover
+/**
+ * The shape a conversation draws when its first question already has its answer: the first card's
+ * `replyId` is the entry a rewind lands after. This is also the shape a rewind leaves — the leaf
+ * parked on a question's answer — so it is the one a returning reader meets first.
+ */
+function singleTree(): BranchTree {
+	const first = way("aaaaaaa1", LONG, 1);
+	first.answer = "回答的第一句。";
+	first.replyId = "eeeeeee5";
+	const second = way("bbbbbbb2", "第二句", 2);
+	first.next = second;
+	return {
+		trunk: first,
+		currentId: "bbbbbbb2",
+		points: 0,
+		options: 1,
+		line: new Set(["aaaaaaa1", "bbbbbbb2"]),
+	};
+}
 
-process.stdout.write("\nbranch：任意长的消息，卡片同一高度且不换行\n");
+/** A card's `left` / `top`, as the paint wrote them. */
+function placeOf(card: FakeNode): { left: number; top: number } {
+	return {
+		left: Number(String(card.style.left ?? "").replace("px", "")),
+		top: Number(String(card.style.top ?? "").replace("px", "")),
+	};
+}
+
+/** The page's one graph element, found by tag: `setAttribute("class")` is not `className` on the shim. */
+function svgOf(view: BranchView): FakeNode {
+	let found: FakeNode | undefined;
+	const walk = (node: FakeNode): void => {
+		if (node.tagName === "SVG") found = node;
+		for (const child of node.children) walk(child);
+	};
+	walk(view.element as unknown as FakeNode);
+	if (found === undefined) throw new Error("量具找不到那张 svg");
+	return found;
+}
+
+/** The layer's transform, read back the way the browser receives it. */
+function transformOf(view: BranchView): { x: number; y: number; zoom: number } {
+	const layer = nodesOfClass(view.element as unknown as FakeNode, "graph-zoom")[0];
+	if (layer === undefined) throw new Error("量具找不到 .graph-zoom");
+	const match = /translate\(([-\d.]+)px, ([-\d.]+)px\) scale\(([-\d.]+)\)/.exec(String(layer.style.transform ?? ""));
+	if (match === null) throw new Error(`transform 读不懂：${String(layer.style.transform)}`);
+	return { x: Number(match[1]), y: Number(match[2]), zoom: Number(match[3]) };
+}
+
+// -------------------------------------------- 1. one card per message, one row per way
+
+process.stdout.write("\nbranch：一条线一张卡，走法各占一行\n");
 
 {
 	// The shim has no layout, so the two numbers below stand for the boxes the layout gives the graph's
@@ -261,78 +329,40 @@ process.stdout.write("\nbranch：任意长的消息，卡片同一高度且不�
 	// stream. Part 2 checks the tokens; this part checks that whatever the probe answers is what lands.
 	probeAt(46, 58);
 
-	const cards = painted(forkedTree());
-	check("每一条走法、连同根，各有一张卡片", cards.length === 4, `${cards.length} 张`);
+	const cards = painted(lineTree());
+	check("没有分支也画：三条消息三张卡", cards.length === 3, `${cards.length} 张`);
+	check("所有卡片高度相同，且就是量到的高度", new Set(cards.map((card) => String(card.style.height))).size === 1 && String(cards[0]?.style.height) === "46px", cards.map((card) => String(card.style.height)).join(" / "));
 
-	const solid = geometryOf(cards);
-	check("所有卡片高度相同，且就是量到的高度", solid.heights.length === 1 && solid.heights[0] === "46px", solid.heights.join(" / "));
+	const places = cards.map(placeOf);
+	check("一条线在同一行上", new Set(places.map((place) => place.top)).size === 1, places.map((place) => place.top).join(" / "));
+	check("一条线每隔一格往右一格", places.every((place, at) => at === 0 || place.left - places[at - 1]!.left === STEP), places.map((place) => place.left).join(" / "));
 
-	// The lane the tokens describe, read off the paint: two cards on different rows have to clear each
-	// other — a card that clips is the failure this whole ticket is about.
-	const steps = solid.tops.slice(1).map((top, index) => top - solid.tops[index]!);
-	check("行与行之间就是量到的行高", steps.every((step) => step === 58), steps.join(" / "));
-
-	// The label is one line of ordinary text with `text-overflow: ellipsis` doing the cutting: the card
-	// must not carry a second, hidden copy of the sentence that a hover can swap in.
-	check("卡片里没有第二份整句（悬停展开的那份）", nodesOfClass(cards[0]!, "full").length === 0);
-	check("卡片里没有截断用的短句节点", nodesOfClass(cards[0]!, "short").length === 0);
 	const labels = cards.map((card) => nodesOfClass(card, "lbl"));
 	check("每张卡片恰好有一行标签", labels.every((found) => found.length === 1), labels.map((found) => found.length).join(" / "));
-
-	// Acceptance: hovering shows the whole sentence. That is the card's `title`, and it is the whole
-	// label even when the card can only show a few characters of it.
-	const titles = cards.map((card) => card.title);
-	check("悬停看得到整句", titles.includes(LONG), titles.join(" / "));
-	check("标签就是整句，截断交给 CSS", textOf(labels[1]![0]!) === LONG, textOf(labels[1]![0]!));
+	check("标签就是整句，截断交给 CSS", textOf(labels[0]![0]!) === LONG, textOf(labels[0]![0]!));
+	check("悬停看得到整句", cards[0]?.title === LONG, String(cards[0]?.title));
+	check("最新的一条戴着「当前」", nodesOfClass(cards[2]!, "tag").some((tag) => tag.textContent === "当前"));
 }
 
 {
-	// The font-size slider moves the type scale, which is exactly why these two are tokens: a card sized
-	// for the default size clips its meta line at the top of the range. Same tree, taller probe boxes.
-	probeAt(52, 64);
-
 	const cards = painted(forkedTree());
-	const grown = geometryOf(cards);
-	check("字号变大：卡片跟着量到的高度长高", grown.heights.length === 1 && grown.heights[0] === "52px", grown.heights.join(" / "));
-	const steps = grown.tops.slice(1).map((top, index) => top - grown.tops[index]!);
-	check("字号变大：行高也跟着量到的行高", steps.every((step) => step === 64), steps.join(" / "));
+	check("有分支时：线两张卡加一条走法", cards.length === 3, `${cards.length} 张`);
 
-	probeAt(46, 58);
+	const byId = new Map(cards.map((card) => [card.dataset.id, card]));
+	const host = byId.get("bbbbbbb2")!;
+	const branch = byId.get("ddddddd4")!;
+	check("走法挂在线下面一行", placeOf(branch).top - placeOf(host).top === 58, String(placeOf(branch).top - placeOf(host).top));
+	check("走法比它离开的那一条往右一格", placeOf(branch).left - placeOf(host).left === STEP, String(placeOf(branch).left - placeOf(host).left));
+	check("走法不进「这条线」", !branch.attributes.has("data-on-path"));
+	check("线上的卡进「这条线」", host.attributes.has("data-on-path"));
 }
 
 {
-	// The font-size setting is not a new tree, so `render`'s one comparison would skip the paint: the page
-	// has to be told to measure again, and only while it is on screen — `enter` paints on the way in.
-	// The font-size setting is not a new tree, so `render`'s one comparison would skip the paint: the page
-	// has to be told to measure again, and only while it is on screen — `enter` paints on the way in.
+	// Only the first question exists — the newest conversation, or the leaf parked on an answer. The
+	// line is still drawn: one card per question, and nothing else on the page.
 	probeAt(46, 58);
-	const view = new BranchView({ onSwitch: () => {}, onBack: () => {} });
-	const cards = (): FakeNode[] => nodesOfClass(view.element as unknown as FakeNode, "gnode");
-	view.render(forkedTree(), false);
-	view.remeasure();
-	check("没打开的页面不需要重量", cards().length === 0, `${cards().length} 张`);
-
-	view.enter();
-	check("打开时画一次", cards().length === 4, `${cards().length} 张`);
-	check("这时量到的是旧字号下的高度", String(cards()[0]?.style.height) === "46px", String(cards()[0]?.style.height));
-
-	// The font grew. The tree did not, so the page keeps the height it measured until it is told to
-	// measure again — which is exactly the bug that made `remeasure` necessary.
-	probeAt(52, 64);
-	check("字号变了、还没重量，卡片还是旧高度", String(cards()[0]?.style.height) === "46px", String(cards()[0]?.style.height));
-	view.remeasure();
-	check("重量之后卡片是新高度", String(cards()[0]?.style.height) === "52px", String(cards()[0]?.style.height));
-
-	probeAt(46, 58);
-}
-
-{
-	probeAt(46, 58);
-	const cards = painted(chainTree(6));
-	check("六层长句的链：卡片数对", cards.length === 7, `${cards.length} 张`);
-	check("六层长句的链：高度仍然只有一个", geometryOf(cards).heights.length === 1, geometryOf(cards).heights.join(" / "));
-	const wrapping = cards.filter((card) => nodesOfClass(card, "full").length > 0);
-	check("六层长句的链：没有一张带悬停展开", wrapping.length === 0, `${wrapping.length} 张`);
+	const cards = painted(singleTree());
+	check("只有第一句也画：一张卡在线上", cards.length === 2 && cards[0]?.dataset.id === "aaaaaaa1" && textOf(nodesOfClass(cards[0]!, "lbl")[0]!) === LONG, `${cards.length} 张`);
 }
 
 {
@@ -341,21 +371,26 @@ process.stdout.write("\nbranch：任意长的消息，卡片同一高度且不�
 	// default font size and would hide the fact that the tokens stopped resolving.
 	probeAt(0, 0);
 	const cards = painted(forkedTree());
-	check("令牌量不到就照量到的画，不猜一个兜底高度", cards.length === 4 && cards.every((card) => String(card.style.height) === "0px"), cards.map((card) => String(card.style.height)).join(" / "));
+	check("令牌量不到就照量到的画，不猜一个兜底高度", cards.length === 3 && cards.every((card) => String(card.style.height) === "0px"), cards.map((card) => String(card.style.height)).join(" / "));
 	probeAt(46, 58);
 }
 
-// ------------------------------------------------------- 2. the stylesheet agrees with the paint
+// ------------------------------------------------ 2. the stylesheet agrees with the paint
 
-process.stdout.write("\nbranch：卡片几何来自令牌，悬停不再撑高\n");
+process.stdout.write("\nbranch：卡片几何来自令牌，画布不再靠滚动\n");
 
 {
 	const nodeHeight = declared(css, ".gnode", "height");
 	check("卡片高度读的是令牌，不是字面量", nodeHeight === "var(--dsw-branch-node-h)", String(nodeHeight));
 	check("悬停只换颜色和阴影，不改高度", declared(css, ".gnode:hover", "height") === undefined, String(declared(css, ".gnode:hover", "height")));
-	check("悬停也不再设 min-height", declared(css, ".gnode:hover", "min-height") === undefined, String(declared(css, ".gnode:hover", "min-height")));
 	check("标签单行且溢出用省略号", declared(css, ".gnode .lbl", "white-space") === "nowrap" && declared(css, ".gnode .lbl", "text-overflow") === "ellipsis", `${declared(css, ".gnode .lbl", "white-space")} / ${declared(css, ".gnode .lbl", "text-overflow")}`);
-	check("悬停不再把标签放成多行", declared(css, ".gnode:hover .lbl", "white-space") === undefined, String(declared(css, ".gnode:hover .lbl", "white-space")));
+
+	// The canvas is a map, not a scroll box: the viewport never scrolls, and the layer carries the pan and
+	// the zoom as one transform. A `scrollLeft` pan had no range at all once the graph fitted the window,
+	// which is the state `enter` puts it in — that is why dragging did nothing.
+	check("画布不滚动", declared(css, ".graph-viewport", "overflow") === "hidden", String(declared(css, ".graph-viewport", "overflow")));
+	check("缩放以左上角为原点（平移与缩放同一套坐标）", declared(css, ".graph-zoom", "transform-origin") === "0 0", String(declared(css, ".graph-zoom", "transform-origin")));
+	check("画布上的元素不再被浏览器面板接管手势", declared(css, ".graph-viewport", "user-select") === "none", String(declared(css, ".graph-viewport", "user-select")));
 
 	// The tokens follow the type scale, so the slider moves the card instead of clipping it.
 	const node = declared(tokens, ":root", "--dsw-branch-node-h") ?? "";
@@ -365,119 +400,122 @@ process.stdout.write("\nbranch：卡片几何来自令牌，悬停不再撑高\n
 	check("默认字号下卡片 46px、行高 58px", tokenPixels("--dsw-branch-node-h") === 46 && tokenPixels("--dsw-branch-lane-h") === 58, `${tokenPixels("--dsw-branch-node-h")} / ${tokenPixels("--dsw-branch-lane-h")}`);
 	// The card has to hold its own two lines inside `box-sizing: border-box`: 18 + 2 + 16 + (4+4+1+1).
 	check("卡片高度装得下两行加内边距和边框", tokenPixels("--dsw-branch-node-h") >= tokenPixels("--dsw-lh-meta") + tokenPixels("--dsw-lh-caption") + 2 + 10, String(tokenPixels("--dsw-branch-node-h")));
-	// The top of the slider's range (22px) used to clip the meta line at a fixed height.
 	const tallest = tokenPixels("--dsw-branch-node-h", 22);
 	check("字号拉满时卡片跟着长高，行高仍然装得下它", tallest > 46 && tokenPixels("--dsw-branch-lane-h", 22) >= tallest + 12, `${tallest} / ${tokenPixels("--dsw-branch-lane-h", 22)}`);
 }
 
-// ------------------------------------------------- 3. entering the page centres the graph
-//
-// Ticket `.scratch/ui-pass/issues/03-branch-center.md`. The page used to scroll to (0, 0) on the way
-// in, which pins the graph to the top-left corner of a viewport it may only fill a third of. Centring
-// is two halves that must not fight: the graph **that overflows** is centred by the scroll position
-// (`scrollHome`), and the graph **that fits** has no scroll range at all, so the stylesheet centres it.
-// A shim has no layout and no cascade, so each half is pinned where it lives — the scroll arithmetic
-// against measured sizes, the centring against the stylesheet's own declarations.
+// ------------------------------------------------- 3. the map: fits, centres, drags, zooms
 
-process.stdout.write("\nbranch：进入时整图居中\n");
+process.stdout.write("\nbranch：进入时整图居中，画布能拖能缩\n");
 
-/**
- * A page whose viewport measures `width × height`, the one thing a shim cannot work out for itself.
- *
- * The sizer's box needs no such help: it is `style.width` / `style.height`, which the shim reads back
- * the way a browser would (a real sizer gets its height from the SVG child inside it).
- */
-function pageOf(tree: BranchTree, width: number, height: number): { view: BranchView; viewport: FakeNode; sizer: FakeNode } {
+/** A page whose viewport measures `width × height` — the one thing a shim cannot work out for itself. */
+function pageOf(tree: BranchTree, width: number, height: number): { view: BranchView; viewport: FakeNode } {
 	const view = new BranchView({ onSwitch: () => {}, onBack: () => {} });
-	const root = view.element as unknown as FakeNode;
-	const viewport = root.querySelector(".graph-viewport");
-	const sizer = root.querySelector(".graph-sizer");
-	if (viewport === null || sizer === null) throw new Error("量具找不到 viewport 或 sizer");
+	const viewport = (view.element as unknown as FakeNode).querySelector(".graph-viewport");
+	if (viewport === null) throw new Error("量具找不到 viewport");
 	viewport.clientWidth = width;
 	viewport.clientHeight = height;
 	view.render(tree, false);
 	view.enter();
-	return { view, viewport, sizer };
+	return { view, viewport };
 }
 
-/** The sizer's own size, measured the way the view measures it. */
-function sizerSizeOf(sizer: FakeNode): { width: number; height: number } {
-	return { width: sizer.clientWidth, height: sizer.clientHeight };
-}
-
-/** The scroll position `scrollHome` is supposed to have reached, clamped the way a scroll range is. */
-function centreOf(sizer: FakeNode, width: number, height: number): { left: number; top: number } {
-	const size = sizerSizeOf(sizer);
-	return { left: Math.max(0, (size.width - width) / 2), top: Math.max(0, (size.height - height) / 2) };
-}
-
-{
-	// A viewport too narrow for the graph: it is clamped at the zoom floor, so the sizer is the wider
-	// of the two and the scroll position can park in the middle of the remainder. (What the two axes
-	// hold can differ — at a normal zoom the sizer is only wider because the graph's own margins do not
-	// shrink with it.)
-	probeAt(44, 56);
-	const { viewport, sizer } = pageOf(forkedTree(), 300, 300);
-	const want = centreOf(sizer, 300, 300);
-	check("图比视口大：居中位置是两个溢出量的一半", viewport.scrollLeft === want.left && viewport.scrollTop === want.top, `${viewport.scrollLeft}/${viewport.scrollTop} 想要 ${want.left}/${want.top}`);
-	check("图比视口大：这个用例确实滚到了里面", want.left > 0, `${want.left} / ${sizer.clientWidth}`);
+/** How far the graph sits from the viewport's two edges, in viewport pixels. */
+function marginsOf(view: BranchView, width: number, height: number): { left: number; right: number; top: number; bottom: number } {
+	const svg = svgOf(view);
+	const { x, y, zoom } = transformOf(view);
+	const scaledW = Number(svg.getAttribute("width")) * zoom;
+	const scaledH = Number(svg.getAttribute("height")) * zoom;
+	return { left: x, right: width - (x + scaledW), top: y, bottom: height - (y + scaledH) };
 }
 
 {
-	// A graph that fits: there is no scroll range to centre with, so the midpoint formula clamps to
-	// zero — that is, the graph's own margin is all the centring there is left to do.
-	probeAt(44, 56);
-	const { viewport, sizer } = pageOf(forkedTree(), 2000, 1200);
-	const want = centreOf(sizer, 2000, 1200);
-	check("图装得下：没有可滚的余量，滚动停在零", viewport.scrollLeft === 0 && viewport.scrollTop === 0, `${viewport.scrollLeft} / ${viewport.scrollTop}`);
-	check("图装得下：零正是那条公式被夹到下限的结果，不是另写的一条路", want.left === 0 && want.top === 0, `${want.left} / ${want.top}`);
-
-	// The floor under the arithmetic: with the sizer allowed below the viewport, the scroll position
-	// and the graph's own coordinates could slide apart, and the left and top edges would go with them.
-	check("sizer 不小于视口，滚动位置与图的坐标不会错位", declared(css, ".graph-sizer", "min-width") === "100%" && declared(css, ".graph-sizer", "min-height") === "100%", `${declared(css, ".graph-sizer", "min-width")} / ${declared(css, ".graph-sizer", "min-height")}`);
+	probeAt(46, 58);
+	const { view } = pageOf(forkedTree(), 2000, 1200);
+	const margins = marginsOf(view, 2000, 1200);
+	check("装得下：左右留白相等", Math.abs(margins.left - margins.right) < 0.5, `${margins.left} / ${margins.right}`);
+	check("装得下：上下留白相等", Math.abs(margins.top - margins.bottom) < 0.5, `${margins.top} / ${margins.bottom}`);
+	check("装得下时不放大过 100%", transformOf(view).zoom <= 1, String(transformOf(view).zoom));
+	check("居中是真的留了白", margins.left > 0 && margins.top > 0, `${margins.left} / ${margins.top}`);
 }
 
 {
-	// "适应" is the same landing as entering: it fits the graph to the viewport and centres it. Scrolled
-	// off the centre first, so the assertion is about the button and not about where the page started.
+	// Too narrow for the graph: it still centres, and the overflow is simply outside the clip — no scroll
+	// range, no clamping, and therefore nothing for a pan to run out of.
 	probeAt(44, 56);
-	const { viewport, sizer, view } = pageOf(forkedTree(), 300, 300);
-	viewport.scrollLeft = 0;
-	viewport.scrollTop = 0;
+	const { view } = pageOf(forkedTree(), 300, 300);
+	const margins = marginsOf(view, 300, 300);
+	check("装不下也居中（两侧留白相等，可以是负的）", Math.abs(margins.left - margins.right) < 0.5, `${margins.left} / ${margins.right}`);
+}
+
+{
+	// Dragging is a translate that follows the pointer, and it works whether or not the graph is bigger
+	// than the window — the case that used to be impossible.
+	probeAt(46, 58);
+	const { view, viewport } = pageOf(forkedTree(), 2000, 1200);
+	const before = transformOf(view);
+	viewport.dispatch("pointerdown", { button: 0, clientX: 100, clientY: 100 });
+	viewport.dispatch("pointermove", { clientX: 160, clientY: 130 });
+	const moved = transformOf(view);
+	check("按住左键拖：画布跟着走", moved.x - before.x === 60 && moved.y - before.y === 30, `${moved.x - before.x} / ${moved.y - before.y}`);
+	check("拖动画布不动缩放", moved.zoom === before.zoom, `${moved.zoom} / ${before.zoom}`);
+	dom.window.dispatch("pointerup", { target: null, clientX: 160, clientY: 130 });
+
+	viewport.dispatch("pointerdown", { button: 0, clientX: 100, clientY: 100 });
+	viewport.dispatch("pointermove", { clientX: 101, clientY: 101 });
+	check("不到 4px 算「按一下」，不算拖", transformOf(view).x === moved.x, String(transformOf(view).x - moved.x));
+	dom.window.dispatch("pointerup", { target: null, clientX: 101, clientY: 101 });
+}
+
+{
+	// The wheel is the other hand: bare wheel pans, Ctrl+wheel zooms, and the point under the pointer is
+	// the one that stays put.
+	probeAt(46, 58);
+	const { view, viewport } = pageOf(forkedTree(), 2000, 1200);
+	const before = transformOf(view);
+	viewport.dispatch("wheel", { deltaX: 0, deltaY: 40, ctrlKey: false, metaKey: false, clientX: 500, clientY: 400, preventDefault() {} });
+	const panned = transformOf(view);
+	check("滚轮平移：内容跟着滚动方向走", panned.y - before.y === -40, String(panned.y - before.y));
+
+	// The graph point under (500, 400) before the zoom has to be under it after.
+	const px = 500;
+	const py = 400;
+	const graphX = (px - panned.x) / panned.zoom;
+	const anchorY = (py - panned.y) / panned.zoom;
+	viewport.dispatch("wheel", { deltaX: 0, deltaY: -40, ctrlKey: true, metaKey: false, clientX: px, clientY: py, preventDefault() {} });
+	const zoomed = transformOf(view);
+	check("Ctrl+滚轮：放大", zoomed.zoom > panned.zoom, `${zoomed.zoom} / ${panned.zoom}`);
+	check("放大时指针下那一点不动", Math.abs((px - zoomed.x) / zoomed.zoom - graphX) < 0.001 && Math.abs((py - zoomed.y) / zoomed.zoom - anchorY) < 0.001, `${(px - zoomed.x) / zoomed.zoom} vs ${graphX}`);
+}
+
+{
+	// "适应" is the same landing as entering: fit, centre, and no bigger than 100%.
+	probeAt(46, 58);
+	const { view, viewport } = pageOf(forkedTree(), 2000, 1200);
+	viewport.dispatch("pointerdown", { button: 0, clientX: 100, clientY: 100 });
+	viewport.dispatch("pointermove", { clientX: 700, clientY: 500 });
+	dom.window.dispatch("pointerup", { target: null, clientX: 700, clientY: 500 });
+	const moved = transformOf(view);
 	const fit = nodesOfClass(view.toolsBar as unknown as FakeNode, "zoom-button").find((button) => button.textContent === "适应");
 	if (fit === undefined) throw new Error("量具找不到「适应」按钮");
 	fit.dispatch("click");
-	const want = centreOf(sizer, 300, 300);
-	check("「适应」之后同样居中", viewport.scrollLeft === want.left && viewport.scrollTop === want.top, `${viewport.scrollLeft}/${viewport.scrollTop} 想要 ${want.left}/${want.top}`);
-	check("「适应」的用例确实滚到了别处", want.left > 0, `${want.left} / ${sizer.clientWidth}`);
+	const home = transformOf(view);
+	check("「适应」把画布拉回居中", home.x !== moved.x && home.y !== moved.y, `${home.x} / ${moved.x}`);
+	const margins = marginsOf(view, 2000, 1200);
+	check("「适应」之后左右留白相等", Math.abs(margins.left - margins.right) < 0.5, `${margins.left} / ${margins.right}`);
 }
 
 // ------------------------------------------------- 4. the two ways out of the page
-//
-// Ticket `.scratch/ui-pass/issues/04-branch-back-button.md`. Both exit buttons go through
-// `applySelection`, and it used to open with `if (this.streaming) return` — one silent early return in
-// front of **both** of them. Whatever set `streaming` and never cleared it therefore made the pair do
-// nothing at all, with neither button disabled, which is the report exactly: two pressable buttons
-// that answer nothing. The two beats are separated here because they are not the same act: moving the
-// leaf is the one a run can refuse, and returning to the conversation is the window changing which
-// page it shows, which no run is in the middle of.
-//
-// Driven through the page's real listeners rather than its private methods: `pointerdown` on the
-// viewport sets the press, `pointerup` **on the window** is what decides it was a click and selects
-// the card — the same two hops the browser makes.
 
-process.stdout.write("\nbranch：两个出口按钮\n");
+process.stdout.write("\nbranch：两个出口按钮，两种落地\n");
 
 /**
  * The card a window-level `pointerup` names.
  *
- * `branch-view.ts` refuses any target that is not `instanceof Element` — a real page can receive a
- * release whose target is the window or a text node, and the check is what keeps that from throwing.
- * The shim's nodes are `FakeNode`s, and `asElement()` cannot help here: it is a *type* bridge, and a
- * cast is erased at runtime, so the `instanceof` whose whole job is to look at the object would still
- * say no. What is needed is an object that is really a `FakeElement` and answers everything else with
- * the card's own values, which is what this proxy is. A harness that handed the card over bare would
- * be testing a path the browser never takes.
+ * `branch-view.ts` refuses any target that is not `instanceof Element`, and the shim's nodes are
+ * `FakeNode`s, so the release is handed a proxy that is really a `FakeElement` and answers everything
+ * else with the card's own values. A harness that passed the card over bare would be testing a path the
+ * browser never takes.
  */
 function cardTarget(card: FakeNode): FakeNode {
 	return new Proxy(Object.create(FakeElement.prototype) as FakeNode, {
@@ -502,146 +540,74 @@ function backButtonOf(view: BranchView): FakeNode | undefined {
 	return nodesOfClass(view.toolsBar as unknown as FakeNode, "back-button")[0];
 }
 
-/** One run of the page: what it was shown, and what its exit presses did. */
 interface ExitRun {
 	view: BranchView;
-	root: FakeNode;
-	viewport: FakeNode;
-	switched: string[];
+	switched: { entryId: string; landing: string }[];
 	backs: number;
 }
 
-/**
- * Show a page, optionally press a card on it, and optionally let a run settle — then press the exit
- * button once and report both.
- *
- * `settle` is the end of a run and `render` is the only thing that carries it in, exactly as `main.ts`
- * feeds it; it happens **after** the card is pressed, so the press that matters was made while
- * `streaming` was still true.
- */
-function pressExit(
-	tree: BranchTree | undefined,
-	options: { select?: string; streaming?: boolean; settle?: boolean } = {},
-): ExitRun {
+/** Show a page, optionally press a card on it, then press the exit button once and report what it did. */
+function pressExit(tree: BranchTree, options: { select?: string; streaming?: boolean } = {}): ExitRun {
 	probeAt(46, 58);
-	const switched: string[] = [];
+	const switched: { entryId: string; landing: string }[] = [];
 	let backs = 0;
 	const view = new BranchView({
-		onSwitch: (entryId) => switched.push(entryId),
+		onSwitch: (entryId, landing) => switched.push({ entryId, landing }),
 		onBack: () => {
 			backs += 1;
 		},
 	});
 	view.render(tree, options.streaming ?? false);
 	view.enter();
-	const root = view.element as unknown as FakeNode;
-	const viewport = root.querySelector(".graph-viewport");
-	if (viewport === null) throw new Error("量具找不到 viewport");
-
-	if (options.select !== undefined) clickCard(root, options.select);
-	if (options.settle === true) view.render(tree, false);
+	if (options.select !== undefined) clickCard(view.element as unknown as FakeNode, options.select);
 	backButtonOf(view)?.dispatch("click");
-	return { view, root, viewport, switched, backs };
+	return { view, switched, backs };
 }
 
 {
-	// The first beat: a click on a node selects it, and the button then offers to move. Nothing has
-	// happened to the session yet — that is the two-beat the page was built on.
-	probeAt(46, 58);
-	const tree = forkedTree();
-	const run = pressExit(tree, { select: "aaaaaaa1" });
-	check("点一个节点会选中它", backButtonOf(run.view)?.textContent === "切到这一条并回到对话", String(backButtonOf(run.view)?.textContent));
-	check("「切到这一条并回到对话」真的移动了", run.switched.length === 1 && run.switched[0] === "aaaaaaa1", run.switched.join(","));
+	// The gesture the page exists for: pick an earlier question on the line, go back, and the next prompt
+	// starts a second way from it. So the landing is `here` — rewind, not "follow this way".
+	const run = pressExit(lineTree(), { select: "aaaaaaa1" });
+	check("选中线上一张卡：按钮说「从这里继续」", backButtonOf(run.view)?.textContent === "从这里继续", String(backButtonOf(run.view)?.textContent));
+	check("按下之后落地是「回到这一句」", run.switched.length === 1 && run.switched[0]!.landing === "here" && run.switched[0]!.entryId === "aaaaaaa1", JSON.stringify(run.switched));
 	check("移动的那一次不会再回一趟对话", run.backs === 0, `${run.backs}`);
 }
 
 {
-	// The second beat, and the acceptance the ticket states in one line: nothing but the way being read
-	// is selected, so the button is the plain way out and answers on the very first press.
-	probeAt(46, 58);
-	const run = pressExit(forkedTree());
-	check("直接按「回到对话」就回对话", run.backs === 1 && run.switched.length === 0, `${run.backs} / ${run.switched.join(",")}`);
+	// A question that already has its answer lands **after the answer**: the conversation comes back
+	// showing the question and what it said, and the next prompt forks there — where a new question
+	// belongs. Landing on the question itself would hide the very reply the card stands for.
+	const run = pressExit(singleTree(), { select: "aaaaaaa1" });
+	check("有回答的一句：落地落在回答之后", run.switched.length === 1 && run.switched[0]!.entryId === "eeeeeee5" && run.switched[0]!.landing === "here", JSON.stringify(run.switched));
 }
 
 {
-	// The regression this ticket is about. `applySelection` used to open with `if (this.streaming)
-	// return` — one silent early return in front of **both** buttons — so a `streaming` that never
-	// cleared made the pair answer nothing, with neither of them even disabled. A run in flight is not
-	// a reason to be unable to leave the page.
-	probeAt(46, 58);
-	const run = pressExit(forkedTree(), { streaming: true });
-	check("有正在跑的一轮：「回到对话」照样回得去", run.backs === 1 && run.switched.length === 0, `${run.backs} / ${run.switched.join(",")}`);
-	check("有正在跑的一轮：这个按钮不该是灰的", backButtonOf(run.view)?.disabled === false, String(backButtonOf(run.view)?.disabled));
+	// A card that left the line means "take me there": the way below it already has work in it.
+	const run = pressExit(forkedTree(), { select: "ddddddd4" });
+	check("选中一条走法：按钮说「切到这一条」", backButtonOf(run.view)?.textContent === "切到这一条并回到对话", String(backButtonOf(run.view)?.textContent));
+	check("按下之后落地是「跟到它的尽头」", run.switched.length === 1 && run.switched[0]!.landing === "tip", JSON.stringify(run.switched));
 }
 
 {
-	// The one thing a run *does* refuse: moving the leaf it is writing. The button is disabled for it
-	// and says why, so the refusal is visible instead of being a pressable nothing.
-	probeAt(46, 58);
-	const run = pressExit(forkedTree(), { select: "aaaaaaa1", streaming: true });
-	check("有正在跑的一轮：不移动", run.switched.length === 0, run.switched.join(","));
-	check("有正在跑的一轮：按钮灰掉", backButtonOf(run.view)?.disabled === true, String(backButtonOf(run.view)?.disabled));
-	check("按钮把拒绝的原因说出来", backButtonOf(run.view)?.title === "这一轮还在写，等它结束再切", String(backButtonOf(run.view)?.title));
+	// Nothing but the way being read is selected: the button is the plain way out.
+	const run = pressExit(lineTree(), { select: "ccccccc3" });
+	check("选中当前那一句：按钮只是「回到对话」", backButtonOf(run.view)?.textContent === "回到对话", String(backButtonOf(run.view)?.textContent));
+	check("这一按没有移动会话", run.switched.length === 0, JSON.stringify(run.switched));
+	check("这一按回到了对话", run.backs === 1, `${run.backs}`);
 }
 
 {
-	// A press that raced the paint — `streaming` arrived after the button was drawn enabled. The move
-	// is refused, and refused *quietly*: the button's own `title` is what carries the reason, and the
-	// caption keeps describing the selection rather than being overwritten with a sentence that would
-	// have to wait for the end of the run to be replaced. What matters for the ticket is the refusal
-	// itself — the press must not move the session — so both halves are asserted.
-	probeAt(46, 58);
-	const tree = forkedTree();
-	const switched: string[] = [];
-	const view = new BranchView({
-		onSwitch: (entryId) => switched.push(entryId),
-		onBack: () => {},
-	});
-	view.render(tree, false);
-	view.enter();
-	const root = view.element as unknown as FakeNode;
-	clickCard(root, "aaaaaaa1");
-	const before = nodesOfClass(view.toolsBar as unknown as FakeNode, "branch-sel-info")[0]?.textContent ?? "";
-	// The run starts now, after the button was painted enabled.
-	view.render(tree, true);
-	backButtonOf(view)?.dispatch("click");
-	const info = nodesOfClass(view.toolsBar as unknown as FakeNode, "branch-sel-info")[0]?.textContent ?? "";
-	check("竞态下按下：不移动", switched.length === 0, switched.join(","));
-	check("竞态下按下：选择行还在描述选中的那一条", info === before && info.includes("已选中"), `${JSON.stringify(before)} → ${JSON.stringify(info)}`);
-	check("竞态下按下：按钮把原因说在 title 上", backButtonOf(view)?.title === "这一轮还在写，等它结束再切", String(backButtonOf(view)?.title));
+	// A run is writing to the tree the button would move, so the move waits — but only the move. The way
+	// out is the window swapping pages and is never refused.
+	const move = pressExit(lineTree(), { select: "aaaaaaa1", streaming: true });
+	check("运行中：移动被拒", move.switched.length === 0, JSON.stringify(move.switched));
+	check("运行中：按钮说自己被拒了", String(backButtonOf(move.view)?.title).length > 0, String(backButtonOf(move.view)?.title));
+
+	// But the door out is never refused: with nothing selected the button is "回到对话", which is this
+	// window changing which page it shows — no run can be in the middle of that.
+	const out = pressExit(lineTree(), { streaming: true });
+	check("运行中：没有选中时，「回到对话」照样可以", out.backs === 1, `${out.backs}`);
 }
 
-{
-	// A run that ends turns the move back on. `render` is the only carrier of that fact, so a page that
-	// ignored the second call would leave the move refused forever.
-	probeAt(46, 58);
-	const run = pressExit(forkedTree(), { select: "aaaaaaa1", streaming: true, settle: true });
-	check("跑完的那一轮：按钮重新可用", backButtonOf(run.view)?.disabled === false, String(backButtonOf(run.view)?.disabled));
-	check("跑完的那一轮：按下去就移动", run.switched.length === 1 && run.switched[0] === "aaaaaaa1", run.switched.join(","));
-}
-
-{
-	// A conversation with no fork at all has one exit and no selection to make.
-	probeAt(46, 58);
-	const run = pressExit(undefined);
-	check("没有树的时候，出口照样是回对话", run.backs === 1 && run.switched.length === 0, `${run.backs}`);
-	check("没有树的时候按钮就是「回到对话」", backButtonOf(run.view)?.textContent === "回到对话", String(backButtonOf(run.view)?.textContent));
-}
-
-// The row that holds them may not outgrow the header, and the header's content floor may not reach the
-// conversation column. Both halves are the same fix. `.branch-tools { min-width: 0 }` lets the row
-// shrink below its content; `.header { min-width: 0 }` stops the header, as a grid item, from handing
-// its own content minimum to `.conversation`'s `auto` column, which may then be laid out wider than the
-// window. These two assertions only pin the declarations — geometry is not something this harness can
-// prove. The measurement lives in the ticket's Answer: in the real shell at a 720px window, with the
-// header's declaration removed the column resolves to 701.4px inside that 720px window and the exit
-// button lands at x 872–962 where `elementFromPoint` answers nothing; with it, the column is 435px and
-// the button is at x 606–696. `no-drag` is the same rule the title row already follows.
-check("工具行可以收缩，不把出口按钮挤出 header", declared(css, ".branch-tools", "min-width") === "0", String(declared(css, ".branch-tools", "min-width")));
-check("header 不把工具行的最小宽度顶给对话列", declared(css, ".header", "min-width") === "0", String(declared(css, ".header", "min-width")));
-check("工具行自己声明成可交互区，与标题行同规矩", declared(css, ".branch-tools", "-webkit-app-region") === "no-drag", String(declared(css, ".branch-tools", "-webkit-app-region")));
-check("选中提示先让位", declared(css, ".branch-tools .header-spacer", "min-width") === "0", String(declared(css, ".branch-tools .header-spacer", "min-width")));
-check("出口按钮不参与收缩，大小由它自己说了算", declared(css, ".branch-tools .back-button", "flex") === "none", String(declared(css, ".branch-tools .back-button", "flex")));
-
-process.stdout.write(failures === 0 ? "\nbranch ok\n" : `\n${failures} 项失败\n`);
+process.stdout.write(failures === 0 ? "\nbranch ok\n" : `\nbranch：${failures} 项失败\n`);
 process.exitCode = failures === 0 ? 0 : 1;

@@ -119,7 +119,7 @@ function row(id: string, modified: number, extra: Partial<SessionRow> = {}): Ses
 }
 
 function state(rows: SessionRow[], over: Partial<SidebarState> = {}): SidebarState {
-	return { workspaces: [{ cwd: "/w", sessions: rows }], currentWorkspace: "/w", collapsed: false, paging: {}, channel: "live", ...over };
+	return { workspaces: [{ cwd: "/w", sessions: rows }], collapsed: false, paging: {}, channel: "live", ...over };
 }
 
 /**
@@ -328,7 +328,6 @@ process.stdout.write("\nsidebar：分组标题在会话行之上\n");
 			{ cwd: "/one", sessions: [row("a", 300), row("b", 200)] },
 			{ cwd: "/two", sessions: [row("c", 100)] },
 		],
-		currentWorkspace: "/one",
 		collapsed: false,
 		paging: {},
 		channel: "live",
@@ -366,6 +365,19 @@ process.stdout.write("\nsidebar：行会消失\n");
 
 	sidebar.render(state([]));
 	check("空列表不留残骸", titlesOf(sidebar).length === 0, JSON.stringify(titlesOf(sidebar)));
+
+	// The first paint lands before the list is fetched, so the 「暂无会话」 note is a phase rather than
+	// a row. It has to go when the first workspace arrives — otherwise every session of every group is
+	// drawn under a sentence saying there are none, which is what the window used to show.
+	sidebar.render(state([], { workspaces: [] }));
+	const phase = all(sidebar, "session-list-empty").map((entry) => entry.node.textContent);
+	check("还没有工作区时说暂无会话", phase.includes("暂无会话"), JSON.stringify(phase));
+	sidebar.render(state([row("a", 300)]));
+	const leftOver = all(sidebar, "session-list-empty")
+		.filter((entry) => !entry.detached)
+		.map((entry) => entry.node.textContent);
+	check("工作区一到，「暂无会话」就撤掉", !leftOver.includes("暂无会话"), JSON.stringify(leftOver));
+	check("撤掉之后行还在", titlesOf(sidebar).length === 1, JSON.stringify(titlesOf(sidebar).map((t) => t.title)));
 }
 
 // ------------------------------------------------- 7. the search really filters
@@ -663,7 +675,6 @@ process.stdout.write("\nsidebar：表头收起只剩表头，重开回到上次�
 	check("收起后只剩表头：没有分页按钮", all(sidebar, "session-more").length === 0, String(all(sidebar, "session-more").length));
 	check("表头还在", all(sidebar, "workspace-head").length === 1);
 	check("收起时 aria-expanded=false", head().getAttribute("aria-expanded") === "false", String(head().getAttribute("aria-expanded")));
-	check("「当前」标记与收起态共存", all(sidebar, "workspace-head-current").length === 1, String(all(sidebar, "workspace-head-current").length));
 
 	head().dispatch("click");
 	render();
@@ -718,38 +729,6 @@ process.stdout.write("\nsidebar：搜索翻出全部匹配，收起与分页都�
 	check("收着的工作区照样给出全部匹配", titles.length === 3, JSON.stringify(titles));
 }
 
-// ---------------------------- 17. the current workspace is a surface, not a word
-
-process.stdout.write("\nsidebar：当前工作区靠阴影，没有「当前」两个字\n");
-
-{
-	const sidebar = new Sidebar(handlers());
-	const two = (current: string): SidebarState => ({
-		workspaces: [
-			{ cwd: "/one", sessions: [row("a", 300)] },
-			{ cwd: "/two", sessions: [row("b", 200)] },
-		],
-		currentWorkspace: current,
-		collapsed: false,
-		paging: {},
-		channel: "live",
-	});
-
-	sidebar.render(two("/one"));
-	const marks = (): FakeNode[] => all(sidebar, "workspace-head-current").map((entry) => entry.node);
-	// A mark that is on every heading, or on none, is not a mark: the check is the count and which
-	// heading wears it, so a class written once at build time and never patched fails here.
-	check("只有一个工作区戴当前标记", marks().length === 1, String(marks().length));
-	check("戴标记的是当前那一个", marks()[0]?.getAttribute("title") === "/one", String(marks()[0]?.getAttribute("title")));
-	check("没有「当前」两个字", !JSON.stringify(root(sidebar).textContent).includes("当前"), root(sidebar).textContent);
-
-	// The heading is patched, not rebuilt: the node that wore the mark is the node that loses it.
-	const head = marks()[0]!;
-	sidebar.render(two("/two"));
-	check("当前换了：标记跟着走", marks().length === 1 && marks()[0]?.getAttribute("title") === "/two", JSON.stringify(marks().map((node) => node.getAttribute("title"))));
-	check("上一个表头是同一个节点，只是摘了标记", head.created === 1 && !head.classList.contains("workspace-head-current"), `created=${head.created}`);
-}
-
 // ----------------------------------- 18. the workspace head's own context menu
 
 process.stdout.write("\nsidebar：工作区表头的右键菜单\n");
@@ -771,7 +750,6 @@ await (async (): Promise<void> => {
 			{ cwd: "/one", sessions: [row("a", 300)] },
 			{ cwd: "/two", sessions: [row("b", 200)] },
 		],
-		currentWorkspace: "/one",
 		collapsed: false,
 		paging: {},
 		channel: "live",
@@ -852,7 +830,6 @@ process.stdout.write("\nsidebar：重命名后表头跟着新路径走\n");
 	const sidebar = new Sidebar(handlers());
 	const two = (cwd: string): SidebarState => ({
 		workspaces: [{ cwd, sessions: [row("a", 300, { cwd })] }],
-		currentWorkspace: cwd,
 		collapsed: false,
 		paging: {},
 		channel: "live",

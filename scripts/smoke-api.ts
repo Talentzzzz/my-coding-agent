@@ -179,12 +179,13 @@ async function handleItem(id: string, item: { type: string; [key: string]: unkno
 	if (item.type === "event") {
 		const event = item.event as {
 			type: string;
-			assistantMessageEvent?: { type: string; delta?: string };
+			delta?: { kind?: string; text?: string };
 			message?: { role?: string; errorMessage?: string; stopReason?: string };
 		};
 		if (process.env.MY_AGENT_TRACE === "1") pass(`  event ${event.type}`);
-		if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-			process.stdout.write(event.assistantMessageEvent.delta ?? "");
+		// A streamed update is a delta now: the characters that arrived, not the message so far.
+		if (event.type === "message_update" && event.delta?.kind === "text") {
+			process.stdout.write(event.delta.text ?? "");
 			return false;
 		}
 		if (event.type === "message_end" && event.message?.stopReason !== undefined) {

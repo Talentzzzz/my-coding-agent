@@ -1,0 +1,1162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3 · 分支页卡片 + 助手底部分支入口 — 形态原型（第三轮）</title>
+<style>
+/*
+ * PROTOTYPE — throwaway. Round three.
+ *
+ * The question: what does one card on the branch page show, now that a branch starts from an
+ * **assistant answer** instead of a user prompt?
+ *
+ *   A 回答卡   the card is the answer the way leads to; the prompt is the tooltip.
+ *   B 问答卡   two lines: the prompt that started the way, and the answer it got.
+ *   C 提问卡   the card is the prompt above the way's assistant message; the answer is the tooltip.
+ *
+ * Everything else on this page is fixed by the brief and is here to be checked against the real
+ * window's density, not to be chosen:
+ *   - the branch button lives in the assistant footer, right of copy, on every answer except the
+ *     bottom-most one;
+ *   - the graph is centred in its pane, both axes;
+ *   - the current workspace in the sidebar is a flat fill, no ring, no shadow.
+ *
+ * Switch cards with the buttons above or ← / →; switch pages with 对话 / 分支图.
+ */
+
+/* ===== Design tokens, copied from packages/web/src/tokens.css (dark sheet). ===== */
+:root {
+	--dsw-static-amber-400: rgb(247, 173, 49);
+	--dsw-static-amber-500: rgb(245, 158, 11);
+	--dsw-static-deepseek-400: rgb(122, 170, 255);
+	--dsw-static-deepseek-500: rgb(65, 118, 230);
+	--dsw-static-green-400: rgb(78, 209, 126);
+	--dsw-static-purple-400: rgb(198, 120, 221);
+	--dsw-static-neutral-bluish-1000: rgb(15, 17, 21);
+	--dsw-static-neutral-bluish-950: rgb(21, 21, 23);
+	--dsw-static-neutral-bluish-900: rgb(27, 27, 28);
+	--dsw-static-neutral-bluish-875: rgb(35, 35, 36);
+	--dsw-static-neutral-bluish-850: rgb(44, 44, 46);
+	--dsw-static-neutral-bluish-800: rgb(53, 54, 56);
+	--dsw-static-neutral-bluish-750: rgb(67, 69, 74);
+	--dsw-static-neutral-bluish-700: rgb(97, 102, 107);
+	--dsw-static-neutral-bluish-600: rgb(129, 133, 140);
+	--dsw-static-neutral-bluish-500: rgb(151, 157, 166);
+	--dsw-static-neutral-bluish-400: rgb(173, 178, 184);
+	--dsw-static-neutral-bluish-300: rgb(207, 211, 214);
+	--dsw-static-neutral-bluish-200: rgb(225, 229, 238);
+	--dsw-static-neutral-bluish-100: rgb(235, 238, 242);
+	--dsw-static-neutral-bluish-75: rgb(241, 243, 245);
+	--dsw-static-neutral-bluish-60: rgb(245, 246, 247);
+	--dsw-static-neutral-bluish-50: rgb(249, 250, 251);
+
+	--dsw-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+		"Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+	--dsw-font-mono: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", Menlo, Courier,
+		"PingFang SC", "Microsoft YaHei", monospace;
+	--dsw-ease: cubic-bezier(0.4, 0, 0.2, 1);
+	--dsw-duration-fast: 0.1s;
+
+	--dsw-fs-base: 15px;
+	--dsw-fs-title: 14px;
+	--dsw-lh-title: 20px;
+	--dsw-fs-meta: 13px;
+	--dsw-lh-meta: 18px;
+	--dsw-fs-caption: 12px;
+	--dsw-lh-caption: 16px;
+	--dsw-fs-body: var(--dsw-fs-base);
+	--dsw-lh-body: 25px;
+
+	--dsw-radius-xs: 4px;
+	--dsw-radius-sm: 8px;
+	--dsw-radius-md: 12px;
+	--dsw-radius-lg: 16px;
+
+	--dsw-sidebar-width: 232px;
+
+	--dsw-bg-base: var(--dsw-static-neutral-bluish-950);
+	--dsw-bg-layer-1: var(--dsw-static-neutral-bluish-875);
+	--dsw-bg-layer-2: var(--dsw-static-neutral-bluish-850);
+	--dsw-bg-sidebar: var(--dsw-static-neutral-bluish-900);
+	--dsw-bg-hover: rgba(255, 255, 255, 0.08);
+	--dsw-bg-active: rgba(255, 255, 255, 0.14);
+	--dsw-bubble: rgb(52, 65, 91);
+	--dsw-border-l1: rgba(255, 255, 255, 0.06);
+	--dsw-border-l2: rgba(255, 255, 255, 0.12);
+	--dsw-border-l3: rgba(255, 255, 255, 0.16);
+	--dsw-label-primary: var(--dsw-static-neutral-bluish-50);
+	--dsw-label-secondary: var(--dsw-static-neutral-bluish-300);
+	--dsw-label-tertiary: var(--dsw-static-neutral-bluish-400);
+	--dsw-label-caption: var(--dsw-static-neutral-bluish-600);
+	--dsw-state-business: var(--dsw-static-deepseek-400);
+	--dsw-button-primary-fill: var(--dsw-static-neutral-bluish-50);
+	--dsw-button-primary-label: var(--dsw-static-neutral-bluish-1000);
+	--dsw-button-info-fill: var(--dsw-static-deepseek-400);
+	--dsw-lane-1: var(--dsw-static-deepseek-400);
+	--dsw-lane-2: var(--dsw-static-green-400);
+	--dsw-shadow-panel: 0 8px 24px rgba(0, 0, 0, 0.44), 0 1px 2px rgba(0, 0, 0, 0.32);
+
+	--proto-desk: var(--dsw-static-neutral-bluish-800);
+	--proto-shell: var(--dsw-static-neutral-bluish-875);
+	--proto-shell-ink: var(--dsw-static-neutral-bluish-50);
+	--proto-shell-dim: var(--dsw-static-neutral-bluish-400);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+	background: var(--proto-desk);
+	font-family: var(--dsw-font-family);
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
+	color: var(--proto-shell-ink);
+	padding: 14px 20px 70px;
+	height: 100vh;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 10px;
+	overflow: hidden;
+	-webkit-font-smoothing: antialiased;
+}
+
+/* ==================================================================== the panel */
+.panel {
+	width: 100%;
+	max-width: 1320px;
+	flex: none;
+	border-radius: var(--dsw-radius-lg);
+	background: var(--proto-shell);
+	padding: 12px 18px 10px;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+}
+.panel h1 { margin: 0 0 2px; font-size: var(--dsw-fs-title); font-weight: 600; }
+.panel .sub {
+	margin: 0 0 10px;
+	color: var(--proto-shell-dim);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+.panel .sub b { color: var(--dsw-label-secondary); font-weight: 600; }
+.panel-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; }
+.panel-q { display: flex; align-items: center; gap: 8px; }
+.q-label { color: var(--proto-shell-dim); font-size: var(--dsw-fs-caption); }
+.seg { display: inline-flex; border: 1px solid var(--dsw-border-l3); border-radius: var(--dsw-radius-sm); overflow: hidden; }
+.seg button {
+	appearance: none;
+	border: none;
+	background: transparent;
+	color: var(--proto-shell-dim);
+	font: inherit;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	padding: 5px 10px;
+	cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--dsw-border-l3); }
+.seg button:hover { color: var(--proto-shell-ink); }
+.seg button[aria-pressed="true"] { background: var(--dsw-button-info-fill); color: #fff; }
+.readout {
+	margin: 10px 0 0;
+	padding-top: 8px;
+	border-top: 1px solid var(--dsw-border-l2);
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 22px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+.readout .k { color: var(--proto-shell-dim); }
+.readout .v { font-family: var(--dsw-font-mono); color: var(--dsw-label-secondary); }
+
+/* ================================================================ the window mock */
+.window {
+	position: relative;
+	width: 1280px;
+	max-width: 100%;
+	flex: 1 1 auto;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	border-radius: var(--dsw-radius-md);
+	overflow: hidden;
+	border: 1px solid var(--dsw-border-l2);
+	box-shadow: var(--dsw-shadow-panel);
+	background: var(--dsw-bg-sidebar);
+}
+.band {
+	flex: none;
+	height: 40px;
+	display: flex;
+	align-items: stretch;
+	justify-content: flex-end;
+	background: var(--dsw-bg-sidebar);
+}
+.win-buttons { display: flex; width: 138px; align-items: stretch; }
+.win-button { flex: 1; display: grid; place-items: center; color: var(--proto-shell-ink); }
+.win-button svg { width: 10px; height: 10px; }
+.win-button.close:hover { background: #c42b1c; color: #fff; }
+.shell { flex: 1; display: flex; min-height: 0; }
+
+/* ====================================================================== sidebar */
+.sidebar {
+	width: var(--dsw-sidebar-width);
+	flex: none;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	padding: 6px 12px;
+	background: var(--dsw-bg-sidebar);
+}
+.sidebar-top { display: flex; align-items: center; gap: 8px; height: 40px; padding-left: 4px; }
+.new-session {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	min-width: 0;
+	flex: 1;
+	height: 34px;
+	padding: 8px 12px;
+	border: none;
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-button-primary-fill);
+	color: var(--dsw-button-primary-label);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	cursor: pointer;
+}
+.new-session svg { width: 15px; height: 15px; }
+.icon-button {
+	display: grid;
+	place-items: center;
+	width: 28px;
+	height: 28px;
+	flex: none;
+	padding: 0;
+	border: none;
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	cursor: pointer;
+}
+.icon-button:hover { background: var(--dsw-bg-hover); color: var(--dsw-label-primary); }
+.icon-button svg { width: 16px; height: 16px; }
+.list-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	height: 30px;
+	padding: 0 8px;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+}
+.list-head-actions { display: flex; gap: 2px; }
+.session-list { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
+.workspace { display: flex; flex-direction: column; gap: 1px; margin-bottom: 6px; }
+.workspace-head {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	height: 34px;
+	padding: 0 8px;
+	border: none;
+	border-radius: var(--dsw-radius-md);
+	background: transparent;
+	color: var(--dsw-label-tertiary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	font-weight: 600;
+	text-align: left;
+	cursor: pointer;
+}
+.workspace-head:hover { background: var(--dsw-bg-hover); }
+.workspace-head svg { width: 13px; height: 13px; flex: none; opacity: 0.75; }
+/* FIXED: the current workspace is a flat fill, the same language as the current session row. */
+.workspace-head.current { background: var(--dsw-bg-active); color: var(--dsw-label-secondary); }
+.workspace-name { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.session-item {
+	display: flex;
+	align-items: center;
+	width: 100%;
+	height: 32px;
+	padding: 0 8px;
+	border: none;
+	border-radius: var(--dsw-radius-md);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	text-align: left;
+	cursor: pointer;
+}
+.session-item:hover { background: var(--dsw-bg-hover); color: var(--dsw-label-primary); }
+.session-item[aria-current="true"] { background: var(--dsw-bg-active); color: var(--dsw-label-primary); font-weight: 500; }
+.session-item-slot { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 20px; flex: none; }
+.session-item-title { min-width: 0; flex: 1; margin: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session-item-time { flex: none; color: var(--dsw-label-caption); font-size: var(--dsw-fs-caption); line-height: var(--dsw-lh-caption); }
+.sidebar-foot {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 40px;
+	margin-top: auto;
+	padding: 0 8px;
+	color: var(--dsw-label-secondary);
+	font-size: var(--dsw-fs-meta);
+}
+.sidebar-foot svg { width: 16px; height: 16px; }
+.channel-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--dsw-label-caption); margin-left: auto; }
+
+/* =============================================================== conversation */
+.conversation {
+	flex: 1;
+	min-width: 0;
+	min-height: 0;
+	display: grid;
+	grid-template-rows: auto 1fr auto auto;
+	background: var(--dsw-bg-base);
+	border-top-left-radius: var(--dsw-radius-lg);
+}
+.shell[data-pane="branch"] .conversation { grid-template-rows: auto 1fr; }
+.shell[data-pane="branch"] .composer,
+.shell[data-pane="branch"] .statusline { display: none; }
+
+.header {
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	padding: 0 24px;
+	border-bottom: 1px solid var(--dsw-border-l1);
+}
+.header-row { display: flex; align-items: center; gap: 10px; min-height: 56px; }
+.header-title { display: flex; flex-direction: column; justify-content: center; min-width: 0; flex: 1; }
+.header-title h1 {
+	margin: 0;
+	font-size: var(--dsw-fs-title);
+	font-weight: 600;
+	line-height: var(--dsw-lh-title);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.header-subtitle {
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.branch-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	max-width: 46%;
+	height: 28px;
+	padding: 0 10px;
+	border-radius: var(--dsw-radius-md);
+	border: 1px solid var(--dsw-border-l1);
+	background: var(--dsw-bg-layer-1);
+	color: var(--dsw-label-tertiary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	cursor: pointer;
+}
+.branch-chip svg { width: 14px; height: 14px; flex: none; }
+.branch-chip-id { font-family: var(--dsw-font-mono); font-size: var(--dsw-fs-caption); line-height: var(--dsw-lh-caption); color: var(--dsw-state-business); }
+.branch-chip-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--dsw-label-secondary);
+}
+.branch-tools {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 6px 0 8px;
+	border-top: 1px solid var(--dsw-border-l1);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	color: var(--dsw-label-caption);
+	min-width: 0;
+}
+.branch-tools[hidden] { display: none; }
+.branch-sel-info { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.branch-sel-info b { font-family: var(--dsw-font-mono); font-weight: 600; color: var(--dsw-label-secondary); }
+.branch-sel-info em { font-style: normal; }
+.header-spacer { flex: 1; }
+.zoom-group {
+	display: flex;
+	align-items: center;
+	flex: none;
+	gap: 2px;
+	padding: 2px;
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-bg-layer-1);
+	border: 1px solid var(--dsw-border-l1);
+}
+.zoom-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	height: 24px;
+	min-width: 26px;
+	padding: 0 6px;
+	border: none;
+	border-radius: var(--dsw-radius-xs);
+	background: transparent;
+	color: var(--dsw-label-tertiary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	cursor: pointer;
+}
+.zoom-button:hover { background: var(--dsw-bg-hover); color: var(--dsw-label-primary); }
+.zoom-value {
+	min-width: 44px;
+	text-align: center;
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	color: var(--dsw-label-caption);
+}
+.back-button {
+	display: inline-flex;
+	align-items: center;
+	flex: none;
+	white-space: nowrap;
+	height: 28px;
+	padding: 0 12px;
+	border-radius: var(--dsw-radius-md);
+	border: 1px solid var(--dsw-border-l2);
+	background: var(--dsw-bg-layer-1);
+	color: var(--dsw-label-primary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	font-weight: 500;
+	cursor: pointer;
+}
+.back-button.primary { background: var(--dsw-button-info-fill); border-color: var(--dsw-button-info-fill); color: #fff; }
+
+/* ============================================================ transcript */
+.transcript { min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.reading {
+	width: 100%;
+	max-width: 760px;
+	margin: 0 auto;
+	padding: 10px 24px 0;
+	overflow-y: auto;
+	scrollbar-width: none;
+}
+.reading::-webkit-scrollbar { display: none; }
+.turn { margin-bottom: 10px; }
+.turn.user { display: flex; flex-direction: column; align-items: flex-end; }
+.bubble {
+	max-width: 78%;
+	padding: 10px 14px;
+	border-radius: var(--dsw-radius-lg);
+	background: var(--dsw-bubble);
+	font-size: var(--dsw-fs-body);
+	line-height: var(--dsw-lh-body);
+}
+.turn-meta {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	margin-top: 7px;
+	margin-right: 2px;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+.turn.assistant { font-size: var(--dsw-fs-body); line-height: var(--dsw-lh-body); color: var(--dsw-label-primary); }
+.turn.assistant h2 { margin: 0 0 8px; font-size: var(--dsw-fs-title); line-height: var(--dsw-lh-title); font-weight: 600; }
+.turn.assistant p { margin: 0 0 10px; }
+.turn.assistant p:last-child { margin-bottom: 0; }
+.turn.assistant ul { margin: 0 0 10px; padding-left: 20px; }
+.turn.assistant li { margin-bottom: 3px; }
+.turn.assistant code {
+	font-family: var(--dsw-font-mono);
+	font-size: 0.92em;
+	background: var(--dsw-bg-layer-2);
+	border-radius: var(--dsw-radius-xs);
+	padding: 1px 5px;
+}
+.turn-foot { display: flex; align-items: center; gap: 2px; margin-top: 6px; margin-bottom: 4px; }
+.foot-chip {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	height: 26px;
+	padding: 0 8px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	color: var(--dsw-label-caption);
+}
+.foot-chip svg { width: 13px; height: 13px; }
+.foot-action {
+	display: grid;
+	place-items: center;
+	width: 26px;
+	height: 26px;
+	padding: 0;
+	border: none;
+	border-radius: var(--dsw-radius-xs);
+	background: transparent;
+	color: var(--dsw-label-caption);
+	cursor: pointer;
+}
+.foot-action:hover { background: var(--dsw-bg-hover); color: var(--dsw-label-primary); }
+.foot-action svg { width: 14px; height: 14px; }
+.foot-action.fork { margin-right: 4px; }
+.foot-action.missing { opacity: 0.22; cursor: default; }
+.foot-action.missing:hover { background: transparent; color: var(--dsw-label-caption); }
+
+/* ============================================================ branch page */
+.branch-page { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.branch-page[hidden] { display: none; }
+.branch-sum {
+	flex: none;
+	display: flex;
+	align-items: baseline;
+	gap: 16px;
+	min-width: 0;
+	padding: 14px 24px 10px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	color: var(--dsw-label-caption);
+}
+.branch-sum > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.branch-sum b { font-family: var(--dsw-font-mono); font-weight: 600; color: var(--dsw-label-secondary); }
+.branch-sum .branch-hint { padding-left: 16px; border-left: 1px solid var(--dsw-border-l1); }
+
+/* FIXED: the tree is centred in the pane, both axes — not parked in the top-left corner. */
+.branch-canvas {
+	flex: 1;
+	min-height: 0;
+	display: grid;
+	place-items: center;
+	overflow: auto;
+	padding: 16px 24px 24px;
+}
+.graph { position: relative; flex: none; }
+.graph svg { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.gnode {
+	position: absolute;
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	gap: 2px;
+	padding: 5px 10px;
+	border-radius: var(--dsw-radius-sm);
+	border: 1px solid var(--dsw-border-l2);
+	background: var(--dsw-bg-layer-1);
+	color: var(--dsw-label-caption);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	text-align: left;
+	cursor: pointer;
+	overflow: hidden;
+}
+.gnode .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-label-secondary); }
+.gnode .lbl.answer { color: var(--dsw-label-primary); }
+.gnode .meta { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: var(--dsw-fs-caption); line-height: var(--dsw-lh-caption); color: var(--dsw-label-caption); }
+.gnode .meta .sid { font-family: var(--dsw-font-mono); }
+.gnode .meta .tag { color: var(--dsw-state-business); }
+.gnode .row { display: flex; align-items: center; gap: 6px; min-width: 0; height: var(--dsw-lh-meta); }
+.gnode .row .prompt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-label-secondary); }
+.gnode .row .turn { flex: none; font-size: var(--dsw-fs-caption); line-height: var(--dsw-lh-caption); color: var(--dsw-label-caption); }
+.gnode .answer-line {
+	display: block;
+	height: var(--dsw-lh-meta);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	color: var(--dsw-label-primary);
+}
+.gnode[data-current] { border-color: var(--dsw-border-l3); background: var(--dsw-bg-layer-2); }
+.gnode[data-selected] { border-color: var(--dsw-state-business); box-shadow: 0 0 0 3px rgba(65, 118, 230, 0.16); }
+.gnode[data-current] .lbl, .gnode[data-current] .answer-line { color: var(--dsw-label-primary); }
+.gnode .tag { color: var(--dsw-state-business); }
+
+/* TEMPORARY: on with ?debug=1, for eyeballing the centring box in a capture. */
+.branch-canvas.debug { outline: 1px dashed rgba(242, 90, 90, 0.9); outline-offset: -1px; }
+.branch-canvas.debug .graph { outline: 1px dashed rgba(122, 170, 255, 0.9); }
+
+/* ================================================================== composer */
+.composer { padding: 0 24px 10px; }
+.composer-box {
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-lg);
+	background: var(--dsw-bg-layer-1);
+	padding: 10px 12px 8px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.composer-input { min-height: 30px; color: var(--dsw-label-caption); font-size: var(--dsw-fs-body); }
+.composer-foot { display: flex; align-items: center; gap: 8px; color: var(--dsw-label-tertiary); font-size: var(--dsw-fs-meta); }
+.composer-foot svg { width: 16px; height: 16px; }
+.send {
+	margin-left: auto;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	height: 30px;
+	padding: 0 14px;
+	border: none;
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-button-primary-fill);
+	color: var(--dsw-button-primary-label);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	cursor: pointer;
+}
+.statusline {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 28px;
+	height: 34px;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+.statusline b { font-weight: 500; color: var(--dsw-label-tertiary); }
+
+/* ================================================================== switcher */
+.switcher {
+	position: fixed;
+	left: 50%;
+	bottom: 14px;
+	transform: translateX(-50%);
+	z-index: 50;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 7px 10px;
+	border-radius: 999px;
+	background: rgba(15, 17, 21, 0.92);
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+	color: var(--dsw-static-neutral-bluish-200);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+.switcher button {
+	appearance: none;
+	border: none;
+	width: 24px;
+	height: 24px;
+	border-radius: 50%;
+	background: rgba(255, 255, 255, 0.1);
+	color: #fff;
+	font: inherit;
+	cursor: pointer;
+}
+.switcher button:hover { background: rgba(255, 255, 255, 0.2); }
+.switcher .label { min-width: 360px; text-align: center; white-space: nowrap; }
+.switcher .label b { color: #fff; }
+.switcher .label em { font-style: normal; color: var(--dsw-static-neutral-bluish-400); }
+.switcher .hint { color: var(--dsw-static-neutral-bluish-500); }
+</style>
+</head>
+<body>
+
+<div class="panel">
+	<h1>3 · 分支页卡片 + 助手底部分支入口 — 形态原型（第三轮）</h1>
+	<p class="sub">
+		Q2 / Q4 已定：分支从<b>助手回答</b>发起、<b>最底部那条不给按钮</b>，分支图在画布里<b>居中</b>。
+		这一页只问一件事——<b>一张分支卡写什么</b>。三种结构都用同一段真实会话画，密度按真窗口来。
+		侧栏当前工作区的纯填充、脚注里 fork 的位置已按推荐固定，可顺带确认。
+	</p>
+	<div class="panel-row">
+		<div class="panel-q">
+			<span class="q-label">卡片</span>
+			<div class="seg" id="variants">
+				<button type="button" data-v="A">A 回答卡</button>
+				<button type="button" data-v="B">B 问答卡</button>
+				<button type="button" data-v="C">C 提问卡</button>
+			</div>
+		</div>
+		<div class="panel-q">
+			<span class="q-label">页面</span>
+			<div class="seg" id="panes">
+				<button type="button" data-p="chat">对话</button>
+				<button type="button" data-p="branch">分支图</button>
+			</div>
+		</div>
+		<span class="q-label" id="r-variant">A · 回答卡</span>
+	</div>
+</div>
+
+<div class="window" id="window">
+	<div class="band">
+		<div class="win-buttons" aria-hidden="true">
+			<span class="win-button"><svg viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor" stroke-width="1"/></svg></span>
+			<span class="win-button"><svg viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/></svg></span>
+			<span class="win-button close"><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor" stroke-width="1"/></svg></span>
+		</div>
+	</div>
+
+	<div class="shell" id="shell" data-pane="chat" data-variant="A">
+		<aside class="sidebar">
+			<div class="sidebar-top">
+				<button type="button" class="new-session">
+					<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
+					新会话
+				</button>
+				<button type="button" class="icon-button" title="收起侧边栏">
+					<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M6 3v10"/></svg>
+				</button>
+			</div>
+			<div class="list-head">
+				<span>工作区</span>
+				<div class="list-head-actions">
+					<button type="button" class="icon-button" title="搜索会话"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg></button>
+					<button type="button" class="icon-button" title="添加工作区"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/><path d="M8 7.5v3M6.5 9h3"/></svg></button>
+				</div>
+			</div>
+			<nav class="session-list" aria-label="会话列表">
+				<div class="workspace">
+					<button type="button" class="workspace-head">
+						<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>
+						<span class="workspace-name">my-agent-mux-KTCvis</span>
+					</button>
+				</div>
+				<div class="workspace">
+					<!-- FIXED (图 1): flat fill, no ring, no shadow. -->
+					<button type="button" class="workspace-head current">
+						<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>
+						<span class="workspace-name">my-coding-agent</span>
+					</button>
+					<button type="button" class="session-item" aria-current="true">
+						<span class="session-item-slot"></span>
+						<span class="session-item-title">看一下项目结构</span>
+						<span class="session-item-time">1分钟</span>
+					</button>
+					<button type="button" class="session-item">
+						<span class="session-item-slot"></span>
+						<span class="session-item-title">看一下项目结构（1）</span>
+						<span class="session-item-time">2分钟</span>
+					</button>
+					<button type="button" class="session-item">
+						<span class="session-item-slot"></span>
+						<span class="session-item-title">新会话</span>
+						<span class="session-item-time">10小时</span>
+					</button>
+				</div>
+				<div class="workspace">
+					<button type="button" class="workspace-head">
+						<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>
+						<span class="workspace-name">my-agent-liveness-iF364t</span>
+					</button>
+				</div>
+			</nav>
+			<div class="sidebar-foot">
+				<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1"/></svg>
+				<span>设置</span>
+				<span class="channel-dot"></span>
+			</div>
+		</aside>
+
+		<section class="conversation">
+			<header class="header">
+				<div class="header-row">
+					<div class="header-title">
+						<h1>看一下项目结构</h1>
+						<div class="header-subtitle">C:\Users\a1368\Desktop\my-coding-agent</div>
+					</div>
+					<button type="button" class="branch-chip" id="branch-chip" title="打开分支视图">
+						<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.5" cy="3.5" r="1.8"/><circle cx="4.5" cy="12.5" r="1.8"/><circle cx="11.5" cy="8" r="1.8"/><path d="M4.5 5.3v5.4M6.3 8h3.4"/></svg>
+						<span>当前分支</span>
+						<span class="branch-chip-id">0ae942a</span>
+						<span class="branch-chip-label" id="chip-label">你好</span>
+					</button>
+				</div>
+				<div class="branch-tools" id="branch-tools" hidden>
+					<span class="branch-sel-info">现在读的是 <b>0ae942a</b> <em>你好</em>（轮 4）</span>
+					<span class="header-spacer"></span>
+					<div class="zoom-group">
+						<button type="button" class="zoom-button">−</button>
+						<span class="zoom-value">100%</span>
+						<button type="button" class="zoom-button">＋</button>
+						<button type="button" class="zoom-button">适应</button>
+					</div>
+					<button type="button" class="back-button">回到对话</button>
+				</div>
+			</header>
+
+			<main class="transcript">
+				<div class="reading" id="chat-page">
+					<div class="turn user">
+						<div class="bubble">帮我看一下都有哪些文档</div>
+						<div class="turn-meta">
+							<button type="button" class="foot-action" title="复制"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5v-1A1.5 1.5 0 0 0 9 3H4a1.5 1.5 0 0 0-1.5 1.5v5A1.5 1.5 0 0 0 4 11h1"/></svg></button>
+							<span>14:09</span>
+						</div>
+					</div>
+
+					<div class="turn assistant">
+						<h2>文档清单</h2>
+						<ul>
+							<li><code>AGENTS.md</code>、<code>README.md</code> —— 安装、布局与规则</li>
+							<li><code>docs/architecture.md</code> —— 请求流程、wire、每个选择背后的理由</li>
+						</ul>
+						<div class="turn-foot">
+							<button type="button" class="foot-action" title="复制"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5v-1A1.5 1.5 0 0 0 9 3H4a1.5 1.5 0 0 0-1.5 1.5v5A1.5 1.5 0 0 0 4 11h1"/></svg></button>
+							<!-- FIXED (Q2): the fork lives right of copy, on every answer but the bottom-most one. -->
+							<button type="button" class="foot-action fork" title="从这条回答开始分支"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.5" cy="3.5" r="1.8"/><circle cx="4.5" cy="12.5" r="1.8"/><circle cx="11.5" cy="8" r="1.8"/><path d="M4.5 5.3v5.4M6.3 8h3.4"/></svg></button>
+							<span class="foot-chip"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.5" rx="5" ry="2"/><path d="M3 4.5v7c0 1.1 2.2 2 5 2s5-.9 5-2v-7"/><path d="M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/></svg>用量 18.2k tok</span>
+							<span class="foot-chip"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="5.5"/><path d="M8 4.5V8l2.2 1.6"/></svg>14:09</span>
+							<span class="foot-chip"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="9" r="4.5"/><path d="M8 6.5V9l1.8 1.2M6.2 2.5h3.6"/></svg>用时 1m 12s</span>
+						</div>
+					</div>
+
+					<div class="turn user">
+						<div class="bubble">你好</div>
+						<div class="turn-meta">
+							<button type="button" class="foot-action" title="复制"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5v-1A1.5 1.5 0 0 0 9 3H4a1.5 1.5 0 0 0-1.5 1.5v5A1.5 1.5 0 0 0 4 11h1"/></svg></button>
+							<span>14:11</span>
+						</div>
+					</div>
+
+					<div class="turn assistant">
+						<p>你好！有什么想让我做的？可以继续看文档、定位代码、跑检查，或者直接说要改的功能。</p>
+						<div class="turn-foot">
+							<button type="button" class="foot-action" title="复制"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5v-1A1.5 1.5 0 0 0 9 3H4a1.5 1.5 0 0 0-1.5 1.5v5A1.5 1.5 0 0 0 4 11h1"/></svg></button>
+							<span class="foot-chip"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.5" rx="5" ry="2"/><path d="M3 4.5v7c0 1.1 2.2 2 5 2s5-.9 5-2v-7"/><path d="M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/></svg>用量 2.1k tok</span>
+							<span class="foot-chip"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="5.5"/><path d="M8 4.5V8l2.2 1.6"/></svg>14:11</span>
+							<span class="foot-chip"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="9" r="4.5"/><path d="M8 6.5V9l1.8 1.2M6.2 2.5h3.6"/></svg>用时 9s</span>
+						</div>
+					</div>
+				</div>
+
+				<div class="branch-page" id="branch-page" hidden>
+					<div class="branch-sum">
+						<span>这份记录有 <b>1</b> 个分支点、<b>2</b> 条走法；根在最左边，实心点连起来的那条是你现在读的。</span>
+						<span class="branch-hint">左键点一个节点选中它 · 悬停看整句话 · 按住左键拖动画布 · Ctrl+滚轮放大</span>
+					</div>
+					<div class="branch-canvas">
+						<div class="graph" id="graph"></div>
+					</div>
+				</div>
+			</main>
+
+			<div class="composer">
+				<div class="composer-box">
+					<div class="composer-input">输入消息…</div>
+					<div class="composer-foot">
+						<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1"/></svg>
+						<span>默认 ⌄</span>
+						<span>deepseek-flash ⌄</span>
+						<button type="button" class="send">发送 →</button>
+					</div>
+				</div>
+			</div>
+			<div class="statusline">
+				<span>total <b>315k</b></span>
+				<span>cache <b>72%</b></span>
+				<span>context <b>31%</b></span>
+			</div>
+		</section>
+	</div>
+</div>
+
+<div class="switcher">
+	<button type="button" id="prev" title="上一个方案（←）">‹</button>
+	<span class="label" id="switch-label"></span>
+	<button type="button" id="next" title="下一个方案（→）">›</button>
+	<span class="hint">← →</span>
+</div>
+
+<script>
+/*
+ * One scenario, three card shapes. The data is the user's own branch (session
+ * 2026-10-17T06-10-42…): a fork at the answer to 「帮我看一下都有哪些文档」, with 「你好」 as the current
+ * way and a second way that asks for a table.
+ */
+const NODE_W = 320;
+const STEP_X = 352;
+const DOT_GAP = 14; // The dot sits this far left of the card.
+const ROW_GAP = 14;
+
+const SCENARIO = {
+	root: {
+		id: "d358b10",
+		turn: 3,
+		prompt: "帮我看一下都有哪些文档",
+		answer: "文档分三层：根目录说明、docs/ 下的架构与决策、docs/agents/ 里的工作流说明。",
+	},
+	ways: [
+		{
+			id: "0ae942a",
+			turn: 4,
+			prompt: "你好",
+			answer: "你好！有什么想让我做的？可以继续看文档、定位代码、跑检查，或者直接说要改的功能。",
+			current: true,
+		},
+		{
+			id: "39dd15b",
+			turn: 5,
+			prompt: "把这些文档摘成一张表",
+			answer: "好的。我按目录列成一张表，标出每份文档解决的问题和最近一次修改。",
+			current: false,
+		},
+	],
+};
+
+const VARIANTS = {
+	A: { name: "A · 回答卡", content: "助手回答（提问在 tooltip）", chip: "你好！有什么想让我做的？" },
+	B: { name: "B · 问答卡", content: "提问 + 回答两行", chip: "你好" },
+	C: { name: "C · 提问卡", content: "提问（回答在 tooltip）", chip: "你好" },
+};
+
+const state = { variant: "A", pane: "chat" };
+const shell = document.getElementById("shell");
+const graph = document.getElementById("graph");
+const chipLabel = document.getElementById("chip-label");
+
+/** What one card writes, per variant. */
+function cardSpec(variant, node, kind) {
+	const tooltip = `${node.prompt}\n\n${node.answer}`;
+	if (variant === "C") {
+		return { primary: node.prompt, meta: `${node.id} · 轮 ${node.turn}${kind === "root" ? " · 起点" : ""}`, tooltip };
+	}
+	if (variant === "B") {
+		return { prompt: node.prompt, turn: node.turn, answer: node.answer, tooltip };
+	}
+	return {
+		primary: node.answer,
+		meta: `${node.id} · 轮 ${node.turn}${kind === "root" ? " · 起点" : ""}`,
+		tooltip,
+	};
+}
+
+function cardMetrics(variant) {
+	return variant === "B" ? { height: 60, row: 60 + 20 } : { height: 48, row: 48 + ROW_GAP };
+}
+
+function buildCard(spec, variant, kind, node) {
+	const card = document.createElement("button");
+	card.type = "button";
+	card.className = "gnode";
+	card.title = spec.tooltip;
+	if (node.current) card.dataset.current = "";
+	if (node.current && kind === "way") card.dataset.selected = "";
+	if (variant === "B") {
+		const row = document.createElement("span");
+		row.className = "row";
+		const prompt = document.createElement("span");
+		prompt.className = "prompt";
+		prompt.textContent = spec.prompt;
+		row.append(prompt);
+		if (kind === "root") {
+			const turn = document.createElement("span");
+			turn.className = "turn";
+			turn.textContent = `起点 · 轮 ${node.turn}`;
+			row.append(turn);
+		} else if (node.current) {
+			const turn = document.createElement("span");
+			turn.className = "turn";
+			turn.textContent = "当前";
+			row.append(turn);
+		} else {
+			const turn = document.createElement("span");
+			turn.className = "turn";
+			turn.textContent = `轮 ${node.turn}`;
+			row.append(turn);
+		}
+		const answer = document.createElement("span");
+		answer.className = "answer-line";
+		answer.textContent = spec.answer;
+		card.append(row, answer);
+		return card;
+	}
+	const label = document.createElement("span");
+	label.className = variant === "A" ? "lbl answer" : "lbl";
+	label.textContent = spec.primary;
+	const meta = document.createElement("span");
+	meta.className = "meta";
+	meta.append(document.createTextNode(spec.meta));
+	if (node.current && kind === "way") {
+		const tag = document.createElement("span");
+		tag.className = "tag";
+		tag.textContent = "当前";
+		meta.append(tag);
+	}
+	card.append(label, meta);
+	return card;
+}
+
+function renderGraph() {
+	const variant = state.variant;
+	const metrics = cardMetrics(variant);
+	const nodes = [
+		{ kind: "root", lane: 0, depth: 0, node: SCENARIO.root },
+		...SCENARIO.ways.map((way, index) => ({ kind: "way", lane: index, depth: 1, node: way })),
+	];
+	const width = STEP_X + NODE_W + DOT_GAP;
+	const height = 2 * metrics.row;
+
+	graph.replaceChildren();
+	graph.style.width = `${width}px`;
+	graph.style.height = `${height}px`;
+
+	const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+	svg.setAttribute("width", String(width));
+	svg.setAttribute("height", String(height));
+	const dotX = (depth) => depth * STEP_X - DOT_GAP;
+	const laneY = (lane) => lane * metrics.row + metrics.row / 2;
+
+	const edge = (from, to) => {
+		const ax = dotX(from.depth) + 10;
+		const ay = laneY(from.lane);
+		const bx = dotX(to.depth) - 10;
+		const by = laneY(to.lane);
+		const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+		let d;
+		if (ay === by) d = `M${ax},${ay} H${bx}`;
+		else {
+			const sign = by > ay ? 1 : -1;
+			const mid = ax + 26;
+			d =
+				`M${ax},${ay} H${ax + 10}` +
+				` Q${mid},${ay} ${mid},${ay + sign * 10}` +
+				` V${by - sign * 10}` +
+				` Q${mid},${by} ${mid + 10},${by}` +
+				` H${bx}`;
+		}
+		path.setAttribute("d", d);
+		path.setAttribute("fill", "none");
+		path.setAttribute("stroke", to.lane === 0 ? "var(--dsw-lane-1)" : "var(--dsw-lane-2)");
+		path.setAttribute("stroke-width", "1.6");
+		path.setAttribute("stroke-opacity", tonodeOpacity(to));
+		svg.append(path);
+	};
+
+	const nodesById = new Map(nodes.map((entry) => [entry.node.id, entry]));
+	const root = nodes[0];
+	for (const entry of nodes.slice(1)) edge(root, nodesById.get(entry.node.id));
+
+	for (const entry of nodes) {
+		const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+		dot.setAttribute("cx", String(dotX(entry.depth)));
+		dot.setAttribute("cy", String(laneY(entry.lane)));
+		dot.setAttribute("r", "4.5");
+		dot.setAttribute("fill", entry.node.current || entry.kind === "root" ? "var(--dsw-lane-1)" : "none");
+		dot.setAttribute("stroke", entry.kind === "root" || entry.node.current ? "var(--dsw-lane-1)" : "var(--dsw-lane-2)");
+		dot.setAttribute("stroke-width", "1.6");
+		svg.append(dot);
+	}
+
+	const cardNodes = nodes.map((entry) => {
+		const spec = cardSpec(variant, entry.node, entry.kind);
+		const card = buildCard(spec, variant, entry.kind, entry.node);
+		card.style.left = `${entry.depth * STEP_X}px`;
+		card.style.top = `${laneY(entry.lane) - metrics.height / 2}px`;
+		card.style.width = `${NODE_W}px`;
+		card.style.height = `${metrics.height}px`;
+		return card;
+	});
+
+	graph.append(svg, ...cardNodes);
+}
+
+/** The inactive way's edge is drawn faint, the way being read solid — same as the app. */
+function tonodeOpacity(entry) {
+	return entry.node.current ? "1" : "0.4";
+}
+
+function renderMeta() {
+	const variant = VARIANTS[state.variant];
+	document.getElementById("r-variant").textContent = `${variant.name} · ${variant.content}`;
+	document.getElementById("switch-label").innerHTML = `<b>${variant.name}</b> <em>· ${variant.content}</em>`;
+	chipLabel.textContent = variant.chip;
+	for (const button of document.querySelectorAll("#variants button")) {
+		button.setAttribute("aria-pressed", String(button.dataset.v === state.variant));
+	}
+	for (const button of document.querySelectorAll("#panes button")) {
+		button.setAttribute("aria-pressed", String(button.dataset.p === state.pane));
+	}
+	document.getElementById("branch-tools").hidden = state.pane !== "branch";
+	document.getElementById("chat-page").hidden = state.pane !== "chat";
+	document.getElementById("branch-page").hidden = state.pane !== "branch";
+	shell.dataset.pane = state.pane;
+	shell.dataset.variant = state.variant;
+}
+
+function updateUrl() {
+	const url = new URL(window.location.href);
+	url.searchParams.set("variant", state.variant);
+	if (state.pane === "branch") url.searchParams.set("pane", "branch");
+	else url.searchParams.delete("pane");
+	history.replaceState(null, "", url);
+}
+
+function setVariant(next) {
+	state.variant = next;
+	renderGraph();
+	renderMeta();
+	updateUrl();
+}
+
+function setPane(next) {
+	state.pane = next;
+	renderMeta();
+	updateUrl();
+}
+
+document.getElementById("variants").addEventListener("click", (event) => {
+	const button = event.target.closest("button");
+	if (button) setVariant(button.dataset.v);
+});
+document.getElementById("panes").addEventListener("click", (event) => {
+	const button = event.target.closest("button");
+	if (button) setPane(button.dataset.p);
+});
+document.getElementById("prev").addEventListener("click", () => {
+	const keys = Object.keys(VARIANTS);
+	setVariant(keys[(keys.indexOf(state.variant) + keys.length - 1) % keys.length]);
+});
+document.getElementById("next").addEventListener("click", () => {
+	const keys = Object.keys(VARIANTS);
+	setVariant(keys[(keys.indexOf(state.variant) + 1) % keys.length]);
+});
+window.addEventListener("keydown", (event) => {
+	const target = event.target;
+	if (target instanceof HTMLElement && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
+	if (event.key === "ArrowLeft") {
+		const keys = Object.keys(VARIANTS);
+		setVariant(keys[(keys.indexOf(state.variant) + keys.length - 1) % keys.length]);
+	} else if (event.key === "ArrowRight") {
+		const keys = Object.keys(VARIANTS);
+		setVariant(keys[(keys.indexOf(state.variant) + 1) % keys.length]);
+	}
+});
+
+const params = new URLSearchParams(window.location.search);
+const wanted = (params.get("variant") ?? "A").toUpperCase();
+if (Object.hasOwn(VARIANTS, wanted)) state.variant = wanted;
+if (params.get("pane") === "branch") state.pane = "branch";
+if (params.get("debug") === "1") document.querySelector(".branch-canvas").classList.add("debug");
+
+renderGraph();
+renderMeta();
+</script>
+</body>
+</html>

@@ -5,6 +5,7 @@ import {
 	type BranchOption,
 	type BranchPoint,
 	type FileDiff,
+	type MessageDelta,
 	type ModelOption,
 	type PendingApproval,
 	type ServerMessage,
@@ -48,10 +49,11 @@ export interface MessageThinking {
 	/**
 	 * Whether reasoning is still arriving.
 	 *
-	 * The text itself needs no delta bookkeeping — every `message_update` carries the running total —
-	 * but "still thinking" is not a fact about the text: it is a fact about which event is in flight.
-	 * `thinking_start`/`thinking_delta` set it, `thinking_end` clears it, and a `text_*` event clears
-	 * it too, because by then reasoning has stopped and only the answer is still being written.
+	 * The text itself is not `running`'s business: it says whether the row should keep its animation,
+	 * which is not a fact about the words. A thinking delta sets it, a text delta clears it — by then
+	 * reasoning has stopped and only the answer is still being written — and the end of the message
+	 * clears it too. A baseline's `partial` may carry reasoning with no answer yet, and that is the
+	 * one case where the window has to guess: thinking with no text under it is still running.
 	 */
 	running: boolean;
 }
@@ -85,117 +87,235 @@ export type Item =
 			streaming: boolean;
 			/** The store entry behind this message, when the message is forkable from. */
 			forkEntryId?: string | null;
+			/**
+			 * The content block the last delta landed on, while the message streams.
+			 *
+			 * A full message joins its reasoning blocks with a blank line and its text blocks with
+			 * nothing, so a delta that opens a *second* thinking block has to carry that blank line
+			 * itself — this is what tells it apart from another delta of the block already open. It is
+			 * dropped when the message ends, because from then on the full message is the authority.
+			 */
+			streamBlock?: { kind: "text" | "thinking"; index: number };
 	  }
 	| { kind: "tools"; id: string; cards: ToolCard[] };
 
 /**
- * One way a conversation can go from a branch point.
+ * One way the branch page draws: a user message on the line being read, or a way that left it.
  *
- * A way begins at one entry — a child of the branch point it hangs under — and the card that draws
- * it shows that entry's first few characters as the short id, so the id on screen is the id in the
- * store rather than a decoration. `children` are the ways that fork off this one further down; the
- * server only reports branch points on the active chain, so an inactive way arrives without children
- * and is drawn as a leaf until the conversation moves onto it.
+ * The page is built around **the line** rather than around branch points. A conversation that never
+ * forked still has a line — its user messages, oldest to newest — and that is exactly what a reader
+ * wants to see when they ask "where can I go back to": every question they asked, in order, with the
+ * newest one where the leaf sits. A fork is a card that hangs below one of them.
+ *
+ * `entryId` is a store entry, so the card's short id is the id the session is moved to rather than a
+ * decoration. `next` is the following user message on the same line, and `branches` are the ways that
+ * leave it. They are two fields rather than one child list because the two mean different things at a
+ * press: see {@link BranchWay.landing}.
  */
 export interface BranchWay {
-	/** The entry this way begins at: how a switch names it, and what the short id is cut from. */
+	/** The entry this way starts at: how a switch names it, and what the short id is cut from. */
 	entryId: string;
-	/** One line of the way's first message, as the server derived it. */
+	/** One line naming the way — a user message's own text, or an alternative's first line. */
 	label: string;
+	/** The question the way answers, for the card's tooltip; the message itself on the line. */
+	question: string;
+	/** One line of the way's answer — the turn's closing assistant text, for the tooltip; may be empty. */
+	answer: string;
 	/** The role of that message, so a card can say who speaks. */
 	role: string;
-	/** The round the way's first message sits in; user messages start a round. */
+	/** The round the way's message sits in; user messages start a round. */
 	turn: number;
-	/** The ways that fork off this one, in the order they were written. */
-	children: BranchWay[];
+	/**
+	 * The assistant answer that followed this user message on the line, up to the next user message —
+	 * the entry the leaf lands on when this card is chosen from the branch page.
+	 *
+	 * Landing on the answer rather than on the question is what keeps the rewind readable: the
+	 * conversation comes back showing the question *and* what it produced, and the next prompt forks
+	 * after the answer, where a new question belongs. Absent when the way has no answer yet — the
+	 * newest question, or one whose run never finished — and the leaf then lands on the message
+	 * itself.
+	 */
+	replyId?: string;
+	/** The next user message on the same line; absent at the end of it. */
+	next?: BranchWay;
+	/** The ways that leave this line here — the alternatives of a branch point. */
+	branches: BranchWay[];
+	/**
+	 * What a press on this card does.
+	 *
+	 * `here` rewinds the leaf to the answer this way's question produced — to the message itself when
+	 * the way has no answer yet — so the next prompt starts a second way from there: the gesture the
+	 * whole page exists for. `tip` follows the way down to where its own work stopped, which is what a
+	 * card that left the line means: "take me there".
+	 */
+	landing: "tip" | "here";
 }
 
 /**
  * The whole branch shape of one session, folded once per snapshot.
  *
  * The transcript is the hot path and `branchPoints` used to ride on individual message items, which
- * answered "what hangs off *this* message" and nothing more. Drawing the tree needs every point at
+ * answered "what hangs off *this* message" and nothing more. Drawing the page needs every point at
  * once, so the fold runs here — at the baseline, the only frame that can change the points — and the
  * view reads this field instead of walking `items`.
  */
 export interface BranchTree {
-	/** A label for the common ancestor the whole tree hangs off: the conversation's own title. */
-	rootLabel: string;
-	/** The ways hanging off the root, in the order the first branch point reported them. */
-	ways: BranchWay[];
+	/** The first user message of the line being read; the rest of the line hangs off its `next`s. */
+	trunk: BranchWay;
 	/**
-	 * The way the leaf currently sits on: the deepest option the active chain runs through.
+	 * The way the leaf sits on: the newest user message of the line.
 	 *
-	 * Undefined when the leaf is parked on a branch point itself — the conversation is between ways,
-	 * and the next prompt starts a new one.
+	 * Undefined only for a conversation with no user message at all, which is also the one shape the
+	 * page has nothing to draw for.
 	 */
 	currentId: string | undefined;
-	/** How many branch points the tree has; every one of them carries at least two ways. */
+	/** How many branch points the line has; every one of them carries at least two ways. */
 	points: number;
-	/** How many ways the tree holds in total, for the summary line. */
+	/** How many ways the tree holds in total: the line itself plus every alternative. */
 	options: number;
+	/** The entry ids on the line, which the paint marks solid. */
+	line: ReadonlySet<string>;
 }
 
 /**
- * Fold the snapshot's branch points into the tree the branch page draws.
+ * Fold the snapshot into the line the branch page draws.
  *
- * The points arrive in chain order, and the chain leaves a branch point only through the option it
- * marks active — so each point's options hang under the *previous* point's active option, and the
- * deepest active option is the way being read. Rounds come from the messages: user messages start a
- * round, and a way's first message sits in the round its branch point sits in, one later when that
- * first message is itself a user's.
+ * The line is the active chain's **user messages**, in chain order: `snapshot.messages` is already the
+ * chain (the store answers with the leaf's ancestry), and a user message is what a person recognises
+ * as a decision they made. Assistant turns are not nodes — they are what a way *produced*, and they
+ * ride in the card's tooltip.
+ *
+ * `undefined` means there is nothing to draw: a session with no user message yet.
  */
 export function buildBranchTree(snapshot: SessionSnapshot): BranchTree | undefined {
-	const points = snapshot.branchPoints;
-	if (points.length === 0) return undefined;
-
-	const roundOfEntry = new Map<string, number>();
+	const ids = snapshot.messageEntryIds;
+	const line: { index: number; entryId: string; label: string; turn: number }[] = [];
 	let round = 0;
-	snapshot.messages.forEach((message, index) => {
+	for (let index = 0; index < snapshot.messages.length; index += 1) {
+		const message = snapshot.messages[index]!;
 		if (message.role === "user") round += 1;
-		const entryId = snapshot.messageEntryIds[index];
-		if (typeof entryId === "string") roundOfEntry.set(entryId, round);
-	});
+		if (message.role !== "user") continue;
+		const entryId = ids[index];
+		if (typeof entryId !== "string") continue;
+		const text = contentToText((message as { content?: unknown }).content);
+		line.push({ index, entryId, label: firstLine(text), turn: round });
+	}
+	if (line.length === 0) return undefined;
 
-	const nodes = new Map<string, BranchWay>();
-	const build = (option: BranchOption, turn: number): BranchWay => {
-		const way: BranchWay = { entryId: option.entryId, label: option.label, role: option.role, turn, children: [] };
-		nodes.set(option.entryId, way);
-		return way;
-	};
+	// The line, built backwards so each card's `next` is the one after it.
+	const ways: BranchWay[] = [];
+	for (let at = line.length - 1; at >= 0; at -= 1) {
+		const entry = line[at]!;
+		const next = ways[0];
+		ways.unshift({
+			entryId: entry.entryId,
+			label: entry.label.length > 0 ? entry.label : `轮 ${entry.turn}`,
+			question: entry.label,
+			answer: "",
+			role: "user",
+			turn: entry.turn,
+			...(next === undefined ? {} : { next }),
+			branches: [],
+			landing: "here",
+		});
+	}
 
-	let roots: BranchWay[] = [];
-	let previous: BranchPoint | undefined;
-	for (const point of points) {
-		const at = roundOfEntry.get(point.entryId) ?? 1;
-		const built = point.options.map((option) => build(option, option.role === "user" ? at + 1 : at));
-		const host = previous?.options.find((option) => option.active)?.entryId;
-		const parent = host === undefined ? undefined : nodes.get(host);
-		if (previous === undefined) roots = built;
-		else if (parent !== undefined) parent.children = built;
-		previous = point;
+	// Each way's own answer: the last assistant message between its question and the next question on
+	// the line. The last one, not the first — a turn's earlier assistant messages carry tool traffic,
+	// and the reply a person wants back on screen is the one the turn ended on. The answer also rides
+	// in the card's tooltip, and its entry is what a rewind lands after (see {@link BranchWay.replyId}).
+	const byIndex = new Map(line.map((entry, at) => [entry.index, at]));
+	// Scanning backwards, the first hit is the turn's last: `tail` is the entry the leaf lands on,
+	// `answer` the text the tooltip quotes, which an entry made only of tool calls does not have.
+	let tail: { entryId: string } | undefined;
+	let answer: string | undefined;
+	for (let index = snapshot.messages.length - 1; index >= 0; index -= 1) {
+		const message = snapshot.messages[index]!;
+		if (message.role === "user") {
+			const at = byIndex.get(index);
+			const host = at === undefined ? undefined : ways[at];
+			if (host !== undefined && tail !== undefined) {
+				host.replyId = tail.entryId;
+				host.answer = answer === undefined ? "" : firstLine(answer);
+			}
+			tail = undefined;
+			answer = undefined;
+			continue;
+		}
+		if (message.role !== "assistant") continue;
+		const entryId = ids[index];
+		if (typeof entryId !== "string") continue;
+		if (tail === undefined) tail = { entryId };
+		if (answer === undefined) {
+			const text = contentToText((message as { content?: unknown }).content);
+			if (text.trim().length > 0) answer = text;
+		}
+	}
+
+	// Every branch point hangs its alternatives under the last user message at or before it: that is
+	// the card a person pressed, and the assistant answer between the two is the answer the
+	// alternatives answer.
+	let options = 1;
+	for (const point of snapshot.branchPoints) {
+		const pointIndex = snapshot.messageEntryIds.indexOf(point.entryId);
+		if (pointIndex === -1) continue;
+		const host = ways[lastAtOrBefore(line, pointIndex)];
+		if (host === undefined) continue;
+		const turn = host.turn + (point.options.some((option) => option.role === "user") ? 1 : 0);
+		for (const option of point.options) {
+			// The active option is the line itself: its messages are already on it, further right.
+			if (option.active) continue;
+			host.branches.push({
+				entryId: option.entryId,
+				label: option.label.length > 0 ? option.label : option.answer.length > 0 ? option.answer : point.prompt,
+				question: option.role === "user" ? option.label : point.prompt,
+				answer: option.answer,
+				role: option.role,
+				turn,
+				branches: [],
+				landing: "tip",
+			});
+			options += 1;
+		}
 	}
 
 	return {
-		rootLabel: snapshot.title,
-		ways: roots,
-		currentId: points.at(-1)?.options.find((option) => option.active)?.entryId,
-		points: points.length,
-		options: points.reduce((total, point) => total + point.options.length, 0),
+		trunk: ways[0]!,
+		currentId: ways.at(-1)?.entryId,
+		points: snapshot.branchPoints.length,
+		options,
+		line: new Set(ways.map((way) => way.entryId)),
 	};
+}
+
+/** The position of the last line entry at or before a message index. */
+function lastAtOrBefore(entries: readonly { index: number }[], index: number): number {
+	let found = -1;
+	for (let at = 0; at < entries.length && entries[at]!.index <= index; at += 1) found = at;
+	return found;
+}
+
+/** The first line of a message, which is what a card has room for. */
+function firstLine(text: string): string {
+	for (const line of text.split("\n")) {
+		const trimmed = line.trim();
+		if (trimmed.length > 0) return trimmed.replace(/^#{1,6}\s+/, "");
+	}
+	return "";
 }
 
 /** The way an id names, wherever it hangs in the tree. */
 export function findWay(tree: BranchTree, id: string): BranchWay | undefined {
-	const walk = (ways: readonly BranchWay[]): BranchWay | undefined => {
-		for (const way of ways) {
-			if (way.entryId === id) return way;
-			const hit = walk(way.children);
+	const walk = (way: BranchWay | undefined): BranchWay | undefined => {
+		if (way === undefined) return undefined;
+		if (way.entryId === id) return way;
+		for (const branch of way.branches) {
+			const hit = walk(branch);
 			if (hit !== undefined) return hit;
 		}
-		return undefined;
+		return walk(way.next);
 	};
-	return walk(tree.ways);
+	return walk(tree.trunk);
 }
 
 /** A backoff the session is waiting out, from `retry_scheduled` until `retry_end`. */
@@ -402,18 +522,16 @@ function applySessionEvent(state: ViewState, event: AgentSessionEvent): ViewStat
 		case "agent_end":
 			return { ...state, streaming: false };
 		case "message_start":
-		case "message_update":
 		case "message_end": {
-			// A `message_update` is the only member that names the kind of delta in flight, and that
-			// kind is what tells reasoning apart from the answer while both ride the same message.
-			// The optional chain is deliberate: the field is required on the wire type, but a frame
-			// without it is a server bug, and one malformed frame must not take the window down.
-			const phase = event.type === "message_update" ? event.assistantMessageEvent?.type : undefined;
-			const items = upsertMessage(state.items, event.message, event.type === "message_end", undefined, phase);
+			const items = upsertMessage(state.items, event.message, event.type === "message_end");
 			// A user entry is named before the loop echoes it, so its id waits here for the item.
 			const drained = drainEntries(items, state.pendingEntries);
 			return { ...state, items: drained.items, pendingEntries: drained.pending };
 		}
+		case "message_update":
+			// A delta, not a message: the item it names grows by the characters that arrived, and
+			// nothing here re-reads the answer to find what moved.
+			return { ...state, items: appendDelta(state.items, event.delta) };
 		case "tool_execution_start":
 			return { ...state, items: upsertTool(state.items, event.toolCallId, {
 				toolCallId: event.toolCallId,
@@ -557,6 +675,16 @@ function itemsFromSnapshot(snapshot: SessionSnapshot): Item[] {
 	snapshot.messages.forEach((message, index) => {
 		items = replayMessage(items, message, snapshot.messageEntryIds?.[index] ?? undefined);
 	});
+	// A live session answers with the message it is writing right now, which the store does not have
+	// yet; a cold read never carries one. Drawing it is what lets a window that attaches mid-run show
+	// the beginning of the sentence the deltas after this frame will continue.
+	if (snapshot.partial !== undefined) {
+		const reasoning = thinkingOf((snapshot.partial as { content?: unknown }).content);
+		// With reasoning and no answer yet, the row is still running by definition; the first text
+		// delta clears it.
+		const phase = reasoning !== undefined ? "thinking_delta" : undefined;
+		items = upsertMessage(items, snapshot.partial, false, undefined, phase);
+	}
 	// A snapshot that is not submitting cannot have a call in flight, so a card it left unanswered is
 	// a record cut short — a branch taken before the result was written — rather than a live one.
 	// Settling it keeps a reopened transcript from spinning on history; a submitting snapshot skips
@@ -653,16 +781,34 @@ function upsertMessage(
 	if (text.length === 0 && role === "assistant" && final && typeof record.errorMessage === "string") {
 		text = `错误：${record.errorMessage}`;
 	}
+
+	const id = `${role}:${String(record.timestamp ?? "unknown")}`;
+	let list = items;
+	let index = indexOfMessage(list, id);
+	// A frame that starts or advances a message the loop has not shown yet cannot legitimately
+	// target a *finished* item: the loop announces each message once and streams its updates
+	// before the end, so an id that matches one names a different message — two stamped in the
+	// same millisecond (07). Replacing in place would draw the newcomer's body on the old
+	// answer's position, splitting the transcript around a user bubble (16), so the finished
+	// item is renamed out of the way and the newcomer takes the plain id its own updates will
+	// arrive under.
+	//
+	// This runs before the "nothing to draw" return below: a `message_start` carries an empty
+	// message, and it is still the frame that claims the identity. Without setting it aside here,
+	// the first delta to follow would land on the answer this message displaced.
+	if (index !== -1 && !final && !(list[index] as Extract<Item, { kind: "message" }>).streaming) {
+		list = renameMessage(list, index, freeMessageId(list, id));
+		index = -1;
+	}
+
 	// A message with text is kept; so is one that is only reasoning so far, because that is the whole
 	// point of a collapsed row — it appears while the answer is still empty. Anything else is a frame
 	// that carries nothing to draw.
-	if (text.length === 0 && (thinking === undefined || thinking.text.length === 0)) return items;
+	if (text.length === 0 && (thinking === undefined || thinking.text.length === 0)) return list;
 
-	const id = `${role}:${String(record.timestamp ?? "unknown")}`;
 	const notice =
 		role === "compactionSummary" || text.startsWith("[上下文已压缩：") || text.startsWith("错误：");
-	const index = indexOfMessage(items, id);
-	const existing = index === -1 ? undefined : (items[index] as Extract<Item, { kind: "message" }>);
+	const existing = index === -1 ? undefined : (list[index] as Extract<Item, { kind: "message" }>);
 	const carried = forkEntryId ?? existing?.forkEntryId;
 	const item: Extract<Item, { kind: "message" }> = { kind: "message", id, role, text, notice, streaming: !final };
 	// The stamp and the usage ride on the message itself, so a reopened transcript draws the same
@@ -678,20 +824,70 @@ function upsertMessage(
 
 	if (index === -1) {
 		// A new message ends the current tool group, so cards that follow belong to it.
-		return [...items, item];
+		return [...list, item];
 	}
-	// A frame that starts or advances a message the loop has not shown yet cannot legitimately
-	// target a *finished* item: the loop announces each message once and streams its updates
-	// before the end, so an id that matches one names a different message — two stamped in the
-	// same millisecond (07). Replacing in place would draw the newcomer's body on the old
-	// answer's position, splitting the transcript around a user bubble (16), so the finished
-	// item is renamed out of the way and the newcomer takes the plain id its own updates will
-	// arrive under.
-	if (existing !== undefined && !final && !existing.streaming) {
-		return [...renameMessage(items, index, freeMessageId(items, id)), item];
+	const next = [...list];
+	next[index] = item;
+	return next;
+}
+
+/**
+ * Fold one delta into the message it names.
+ *
+ * The item is created by the first delta, not by `message_start`: a start announces a message whose
+ * content is still empty, and an empty turn would exist for a frame and then fill. The transcript
+ * draws the first character instead of the envelope around it.
+ *
+ * A delta with no item to land on is dropped. That is a message that ended before this window
+ * arrived, and the `message_end` frame carries it whole — the cost is the characters not being drawn
+ * a moment early, where inventing an item would draw a fragment in a place the answer never had.
+ */
+function appendDelta(items: Item[], delta: MessageDelta): Item[] {
+	const id = `assistant:${delta.timestamp}`;
+	const index = indexOfMessage(items, id);
+	if (index === -1) {
+		const item: Extract<Item, { kind: "message" }> = {
+			kind: "message",
+			id,
+			role: "assistant",
+			text: "",
+			timestamp: delta.timestamp,
+			notice: false,
+			streaming: true,
+		};
+		return [...items, withDelta(item, delta)];
 	}
 	const next = [...items];
-	next[index] = item;
+	next[index] = withDelta(items[index] as Extract<Item, { kind: "message" }>, delta);
+	return next;
+}
+
+/**
+ * One message item with a delta folded in — same item, characters appended.
+ *
+ * The joining rule is the full message's: reasoning blocks are separated by a blank line and text
+ * blocks are not, so a delta that opens a *new* block of the same kind brings that separator with it
+ * and every other delta is a plain append. Text is never re-read, which is the whole point: the work
+ * a frame costs is the characters it carries.
+ */
+function withDelta(item: Extract<Item, { kind: "message" }>, delta: MessageDelta): Item {
+	const open = item.streamBlock;
+	const joining = open !== undefined && open.kind === delta.kind && open.index === delta.contentIndex;
+	if (delta.kind === "thinking") {
+		const previous = item.thinking?.text ?? "";
+		const separator = previous.length > 0 && !joining ? "\n\n" : "";
+		const thinking: MessageThinking = { text: previous + separator + delta.text, running: true };
+		if (item.thinking?.redacted === true) thinking.redacted = true;
+		return { ...item, thinking, streamBlock: { kind: "thinking", index: delta.contentIndex } };
+	}
+	const text = item.text + delta.text;
+	const next: Extract<Item, { kind: "message" }> = {
+		...item,
+		text,
+		notice: item.notice || text.startsWith("错误："),
+		streamBlock: { kind: "text", index: delta.contentIndex },
+	};
+	if (item.thinking !== undefined) next.thinking = { ...item.thinking, running: false };
 	return next;
 }
 

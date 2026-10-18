@@ -1,8 +1,8 @@
 // Frame-coalescer smoke: drives the production `OncePerFrame` against the shared DOM shim, which is
 // also the only thing that implements animation frames here. The property under test is the one a
-// streaming run rests on — many asks, one callback, run against the latest state — plus the two
-// edges a caller has to be able to trust: a run that asks again gets the *next* frame, and a
-// cancelled frame never runs.
+// streaming run rests on — many asks, one callback, run against the latest state — plus the three
+// edges a caller has to be able to trust: a run that asks again gets the *next* frame, a draw that
+// would land inside the minimum interval is deferred whole, and a cancelled frame never runs.
 //
 // Nothing reaches the network, so no server and no provider key are needed.
 // Run with: node scripts/smoke-frame.ts
@@ -75,6 +75,36 @@ process.stdout.write("\nframe：一帧只画一次\n");
 	check("再下一帧继续跑", runs === 2 && again.pending, `${runs}`);
 	shim.frames();
 	check("跑满之后停下", runs === 3 && !again.pending, `${runs}`);
+}
+
+{
+	// The minimum-interval gate: a draw that would land less than one 60 Hz refresh after the
+	// previous one is pushed to the next frame — the shape a 120 Hz display produces, where two
+	// refreshes fit inside what a reader sees as one. The ask is not lost: the deferred frame
+	// carries it, and it runs on the first frame that meets the interval.
+	let runs = 0;
+	const gated = new OncePerFrame(() => {
+		runs += 1;
+	});
+	gated.schedule();
+	shim.frames();
+	check("第一帧照常跑", runs === 1, `${runs}`);
+	gated.schedule();
+	shim.frames(8);
+	check("间隔不足就顺延", runs === 1 && gated.pending, `${runs}/${gated.pending}`);
+	shim.frames(8.7);
+	check("间隔够了补跑", runs === 2 && !gated.pending, `${runs}/${gated.pending}`);
+
+	// Cancellation reaches a deferred frame too: an immediate draw preempts it, the same road it
+	// preempts an ordinary armed one.
+	gated.schedule();
+	shim.frames(8);
+	check("顺延的帧还在队列里", gated.pending);
+	gated.cancel();
+	check("顺延中可以取消", !gated.pending);
+	shim.frames(8.7);
+	check("取消的顺延帧没有跑", runs === 2, `${runs}`);
+	check("补跑之后没有多出来的帧", shim.frames() === 0 && runs === 2, `${runs}`);
 }
 
 process.stdout.write(failures === 0 ? "\nframe ok\n" : `\n${failures} 项失败\n`);

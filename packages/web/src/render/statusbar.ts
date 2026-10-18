@@ -1,8 +1,11 @@
 import { element } from "../dom.ts";
 import type { UsageTotals } from "@my-agent/core/protocol";
+import type { MessageUsage } from "../state.ts";
 
 export interface StatusState {
 	usage: UsageTotals;
+	/** The usage of the most recent request, which is what the cache seat reads. */
+	last?: MessageUsage;
 }
 
 /**
@@ -56,10 +59,21 @@ export class StatusBar {
 				: "no request has been made yet";
 
 		const hit = cacheHitRate(usage);
-		this.cache.textContent = hit === undefined ? "cache —" : `cache ${Math.round(hit * 100)}%`;
+		const cached = state.last?.cacheRead;
+		// The seat reads **this request**, not the session's average. A lifetime average of hit rates
+		// is the wrong shape for the thing it is asked to describe: every request that carries a big
+		// new block (a tool result, a file read) is mostly fresh by definition, so the average saws
+		// between 83% and 90% while the conversation is in fact being cached perfectly well. The
+		// cached prefix, on the other hand, only ever grows (`.scratch/branch-line-and-smoothness/
+		// issues/02-cache-reading.md` measured 18 real requests: miss ≈ growth, every time).
+		this.cache.textContent = cached === undefined ? "cache —" : `cache ${formatTokens(cached)}`;
 		this.cache.title =
-			`${formatTokens(usage.cacheRead)} tokens read from cache, ` +
-			`${formatTokens(usage.input)} fresh, ${formatTokens(usage.cacheWrite)} written`;
+			state.last === undefined
+				? "no request has been made yet"
+				: `${formatTokens(state.last.cacheRead)} of this request's ${formatTokens(promptTokens(state.last))} prompt ` +
+					`tokens came from the provider's cache (${formatTokens(state.last.input)} fresh, ` +
+					`${formatTokens(state.last.cacheWrite)} written)` +
+					(hit === undefined ? "" : ` · session average ${Math.round(hit * 100)}%`);
 
 		const percent = usage.contextWindow > 0 ? Math.min(100, (usage.contextTokens / usage.contextWindow) * 100) : 0;
 		this.context.textContent =
@@ -93,6 +107,11 @@ function totalTokens(usage: UsageTotals): number {
 function cacheHitRate(usage: UsageTotals): number | undefined {
 	const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
 	return prompt > 0 ? usage.cacheRead / prompt : undefined;
+}
+
+/** One request's prompt, counted the way the provider bills it. */
+function promptTokens(usage: MessageUsage): number {
+	return usage.input + usage.cacheRead + usage.cacheWrite;
 }
 
 function formatTokens(count: number): string {

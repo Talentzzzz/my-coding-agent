@@ -60,3 +60,12 @@ Blocked by: 01, 04
    把手隐藏、拖拽与键盘都早退。
 6. **就地改名**：`.rename-input` 就是行内标题换上输入框的衣服——同一 flex、同一 margins、title 档
    同一套字号行高，换进去不跳。
+
+## Comments
+
+- code-review（两轴并行，2026-10-15）：无硬性违反。判断题级遗留三条——① 拖宽量程 208/360 现存三处
+  （tokens.css、config.ts 的 `SIDEBAR_WIDTH_RANGE`、main.ts `sidebarRange()` 的兜底字面量），注释
+  已给理由，但 tokens.css 那句"stated twice on purpose"宜改成把客户端兜底也点名；② **键盘调宽
+  每按一次方向键就写一次 settings.json**（keydown 内逐次 `saveSettings`），指针路径是松手才提交
+  ——建议移到 keyup 且只在宽度真的动过之后提交，与"空按不覆写"同一克制；③ main() 里 resizer 约
+  80 行内联块，注释密、内聚，可留可抽。

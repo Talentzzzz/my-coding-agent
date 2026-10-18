@@ -1,4 +1,12 @@
-import { applyAppearance, initialState, reduce, reduceEnd, findWay, type ViewState } from "./state.ts";
+import {
+	applyAppearance,
+	initialState,
+	reduce,
+	reduceEnd,
+	findWay,
+	type MessageUsage,
+	type ViewState,
+} from "./state.ts";
 import { SessionApi, ApiError } from "./api.ts";
 import { browserSocket, MuxClient, muxUrl, type ChannelState } from "./client.ts";
 import { OncePerFrame } from "./frame.ts";
@@ -233,12 +241,14 @@ function main(): void {
 	 * Switching is the two-beat the prototype settled on: a click on a node only selects, and the
 	 * button in the tools row is what moves the leaf and returns to the conversation — which is why
 	 * `onSwitch` flips the pane first and moves the session second: the person pressed "go back",
-	 * and the answer they chose rides along.
+	 * and the answer they chose rides along. The view has already resolved the entry the leaf lands
+	 * on: a card on the line names the answer its question produced, so the conversation comes back
+	 * showing the question and what it said, and the next prompt forks after the answer.
 	 */
 	const branchView = new BranchView({
-		onSwitch: (entryId) => {
+		onSwitch: (entryId, landing) => {
 			setPane("chat");
-			void branch(entryId, true);
+			void branch(entryId, landing === "tip");
 		},
 		onBack: () => setPane("chat"),
 	});
@@ -247,6 +257,7 @@ function main(): void {
 	const transcriptHost = element("main", "transcript");
 	const transcript = new TranscriptView(transcriptHost, {
 		onUserContext: (entryId, x, y) => openUserMenu(entryId, x, y),
+		onBranch: (entryId) => void branch(entryId, false),
 	});
 	transcript.trackScroll();
 
@@ -439,28 +450,34 @@ function main(): void {
 			render();
 		},
 		// The mode menu's rows are built here, where the presets and the session's live state are: the
-		// built-in default first, then the stored modes, then the one road into editing them.
+		// built-in default first, then the stored modes, then the one road into editing them. It opens
+		// upward: the mode seat is on the bar at the window's bottom edge, where a menu hung underneath
+		// it would have nowhere to go.
 		onModes: (anchor) => {
 			const settings = state.settings;
 			const allTools = state.snapshot?.allTools ?? [];
 			const defaultTools = settings?.tools === undefined ? allTools : settings.tools.filter((name) => allTools.includes(name));
 			const current = currentModeName();
-			openMenu(anchor, [
-				{
-					label: DEFAULT_MODE_NAME,
-					detail: modeSummaryOf(defaultTools, settings?.approval ?? {}),
-					active: current === DEFAULT_MODE_NAME,
-					onSelect: () => applyMode(DEFAULT_MODE_NAME),
-				},
-				...(settings?.modes ?? []).map((mode) => ({
-					label: mode.name,
-					detail: modeSummaryOf(mode.tools, mode.approval),
-					active: current === mode.name,
-					onSelect: () => applyMode(mode.name),
-				})),
-				{ kind: "separator" as const },
-				{ label: "去设置 › 模式", onSelect: () => openSettings("modes") },
-			]);
+			openMenu(
+				anchor,
+				[
+					{
+						label: DEFAULT_MODE_NAME,
+						detail: modeSummaryOf(defaultTools, settings?.approval ?? {}),
+						active: current === DEFAULT_MODE_NAME,
+						onSelect: () => applyMode(DEFAULT_MODE_NAME),
+					},
+					...(settings?.modes ?? []).map((mode) => ({
+						label: mode.name,
+						detail: modeSummaryOf(mode.tools, mode.approval),
+						active: current === mode.name,
+						onSelect: () => applyMode(mode.name),
+					})),
+					{ kind: "separator" as const },
+					{ label: "去设置 › 模式", onSelect: () => openSettings("modes") },
+				],
+				{ placement: "above" },
+			);
 		},
 		onSelectMode: (name) => applyMode(name),
 	});
@@ -489,23 +506,29 @@ function main(): void {
 			return;
 		}
 		const chosenDirectory = directoryForNewSession();
-		openMenu(workspaceChip, [
-			...groups.map((group) => ({
-				icon: "folder" as const,
-				label: workspaceName(group.cwd),
-				title: group.cwd,
-				active: group.cwd === chosenDirectory,
-				onSelect: () => {
-					pickedWorkspace = group.cwd;
-					render();
+		// Upward like the bar's three seats: the chip sits at the bottom of the window too, and a menu
+		// that fell below it would land on the input card it hangs over.
+		openMenu(
+			workspaceChip,
+			[
+				...groups.map((group) => ({
+					icon: "folder" as const,
+					label: workspaceName(group.cwd),
+					title: group.cwd,
+					active: group.cwd === chosenDirectory,
+					onSelect: () => {
+						pickedWorkspace = group.cwd;
+						render();
+					},
+				})),
+				{ kind: "separator" as const },
+				{
+					label: "添加工作区…",
+					onSelect: () => void addWorkspace(),
 				},
-			})),
-			{ kind: "separator" as const },
-			{
-				label: "添加工作区…",
-				onSelect: () => void addWorkspace(),
-			},
-		]);
+			],
+			{ placement: "above" },
+		);
 	});
 	composerHead.append(workspaceChip);
 
@@ -809,18 +832,16 @@ function main(): void {
 		// window's own three facts — so it is skipped here rather than walked and patched inside.
 		// Rendering the sidebar on every token was the profile's H7, a flat per-frame tax that grew
 		// with the workspace count; the rows bump `rows.version` when they actually change.
-		const directory = directoryForNewSession();
 		// The paging state is in the signature because it is one of the sidebar's inputs now: a
 		// collapse or a page turn changes nothing in the row table, so a signature without it would
 		// mean the click redraws nothing at all. Serialization is deterministic — the entries are
 		// built with one fixed field order — so the string is stable across equal maps.
-		const drawn = `${rows.version}|${followed ?? ""}|${directory}|${pickedWorkspace}|${collapsed ? 1 : 0}|${channel}|${JSON.stringify(paging)}`;
+		const drawn = `${rows.version}|${followed ?? ""}|${pickedWorkspace}|${collapsed ? 1 : 0}|${channel}|${JSON.stringify(paging)}`;
 		if (drawn === sidebarDrawn) return;
 		sidebarDrawn = drawn;
 		sidebar.render({
 			workspaces: rows.groups(),
 			...(followed === undefined ? {} : { activeSessionId: followed }),
-			currentWorkspace: directory,
 			collapsed,
 			paging,
 			channel,
@@ -866,7 +887,23 @@ function main(): void {
 	function renderStatusBar(): void {
 		if (state.usage === usageDrawn) return;
 		usageDrawn = state.usage;
-		statusBar.render({ usage: state.usage });
+		statusBar.render({ usage: state.usage, last: lastRequestUsage() });
+	}
+
+	/**
+	 * The usage of the most recent request, read off the item it was reported on.
+	 *
+	 * The cache seat describes *one request* rather than the session's running average (see
+	 * `render/statusbar.ts`), and the per-message usage the transcript already carries for its footers
+	 * is exactly that — no protocol change, and nothing to fold: a message's usage is its own.
+	 */
+	function lastRequestUsage(): MessageUsage | undefined {
+		for (let index = state.items.length - 1; index >= 0; index -= 1) {
+			const item = state.items[index]!;
+			if (item.kind !== "message" || item.role !== "assistant") continue;
+			if (item.usage !== undefined) return item.usage;
+		}
+		return undefined;
 	}
 
 	/** How a fold reaches the screen: whole now, in bounded slices, or at most once per frame. */
@@ -1646,6 +1683,9 @@ function main(): void {
 		try {
 			const { session } = await api.branchSession(followed, entryId, descend);
 			apply(reduce(state, { type: "baseline", session }));
+			// A rewind — the fork button's case — is half a gesture: the branch is only real once
+			// the next prompt is typed, so the composer takes the focus the press was aiming at.
+			if (!descend) composer.focus();
 		} catch (error) {
 			report(error);
 		}

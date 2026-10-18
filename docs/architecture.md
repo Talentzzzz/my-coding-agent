@@ -138,7 +138,8 @@ level 本身骑在模型上（`Model.thinkingLevel`，由 `modelFor(row, level)`
 
 ```ts
 type AgentSessionEvent =
-  | AgentEvent                                                   // 循环的词汇，未改动
+  | Exclude<AgentEvent, { type: "message_update" }>                                       // 循环的词汇，未改动
+  | { type: "message_update"; delta: { timestamp: number; kind: "text" | "thinking"; contentIndex: number; text: string } }
   | { type: "queue_update"; queued: number }                     // 已接受，尚未被取走
   | { type: "compaction"; summary: string; firstKeptEntryId: string; summarized: number; tokensBefore: number; contextTokens: number }
   | { type: "compaction_failed"; message: string }
@@ -152,6 +153,8 @@ type AgentSessionEvent =
 ```
 
 循环的事件是这个联合的**成员**，而不是一个嵌套字段，所以消费方只需对 `event.type` 保持**一个** `switch`；这之所以安全，只是因为没有任何 `AgentEvent` 名字与这里新增的名字相撞，而**新的会话事件绝不能复用循环的某个名字**。
+
+`message_update` 是唯一一个**被替换**而不是照搬的成员。循环的版本同时带着整条 partial 消息和供应商的 delta；会话只把 delta 发出去——两个 delta 之间真正移动的只有一个增量，而每 token 重传整条回答会让帧长随答案线性增长，客户端还得重读全文才知道变了什么。整条消息仍走三处：`message_start`、`message_end`，以及中途接入时基线里的 `snapshot.partial`（没有它，一个在回答写到一半时打开的窗口只能从下一个 delta 开始画）。toolcall 的 delta 不占帧：工具卡由工具事件建。
 
 | 成员 | 何时发出 |
 |---|---|

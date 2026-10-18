@@ -395,6 +395,30 @@ function exerciseBranchPoints(): void {
 			}
 		})(),
 	);
+
+	// The gesture this window now offers: rewind to an *assistant answer* and ask again. The point is
+	// that answer, and the card that names it has to say which question it answered — the answer's own
+	// text is the tooltip's second half, not the label.
+	const assistantPoint = SessionManager.create(root);
+	assistantPoint.appendMessage(question("q1", 10));
+	const firstAnswer = assistantPoint.appendMessage(answerMessage("a1", 11));
+	assistantPoint.appendMessage(question("q2", 12));
+	assistantPoint.branch(firstAnswer);
+	assistantPoint.appendMessage(question("q3", 13));
+	const [ap] = assistantPoint.getBranchPoints();
+	check("an assistant answer is a branch point", ap?.entryId === firstAnswer, JSON.stringify(ap));
+	check("named by the user message above it", ap?.prompt === "q1", JSON.stringify(ap?.prompt));
+	check("with its own text as the answer", ap?.answer === "a1", JSON.stringify(ap?.answer));
+	check(
+		"and both ways are the prompts that continue it",
+		(ap?.options ?? []).map((option) => `${option.role}:${option.label}`).join("|") === "user:q2|user:q3",
+		JSON.stringify(ap?.options),
+	);
+	check(
+		"neither way has answered yet, so both answers are empty",
+		(ap?.options ?? []).every((option) => option.answer === ""),
+		JSON.stringify((ap?.options ?? []).map((option) => option.answer)),
+	);
 }
 
 /**

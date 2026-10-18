@@ -19,6 +19,7 @@
 // Nothing reaches the network, so no server and no provider key are needed.
 // Run with: node scripts/smoke-transcript.ts
 import { TranscriptView } from "../packages/web/src/render/transcript.ts";
+import { renderMarkdown } from "../packages/web/src/render/markdown.ts";
 import type { Item } from "../packages/web/src/state.ts";
 import { installDom, resetWork, work, type FakeNode } from "./dom-shim.ts";
 
@@ -43,10 +44,10 @@ function check(label: string, condition: boolean, detail = ""): void {
 const shim = installDom();
 
 /** A transcript host shaped like the one `main.ts` builds, plus its view. */
-function makeTranscript(): { host: FakeNode; view: TranscriptView } {
+function makeTranscript(onBranch: (entryId: string) => void = () => {}): { host: FakeNode; view: TranscriptView } {
 	const host = shim.document.createElement("main") as unknown as FakeNode;
 	host.className = "transcript";
-	const view = new TranscriptView(host as unknown as HTMLElement, { onUserContext: () => {} });
+	const view = new TranscriptView(host as unknown as HTMLElement, { onUserContext: () => {}, onBranch });
 	view.trackScroll();
 	return { host, view };
 }
@@ -347,6 +348,218 @@ process.stdout.write("\ntranscript：脚注跟着轮与运行走，不跟着 tok
 		check("中途接上的快照，结束后脚注照样出现", footOf(resumedAnswer)?.hidden === false, textOf(resumedAnswer));
 		check("中途接上的快照，用时也读的是观察值", /用时 \d\.\ds/.test(textOf(footOf(resumedAnswer)!)), textOf(resumedAnswer));
 	}
+}
+
+// ---------------------------------------------- 6. the fork sits beside copy, everywhere but the leaf
+
+process.stdout.write("\ntranscript：分支按钮在最后一条回答之外都出现\n");
+
+{
+	/** One message item with the fields a footer and the fork read. */
+	function said(
+		id: string,
+		role: string,
+		timestamp: number,
+		text: string,
+		streaming: boolean,
+		forkEntryId?: string,
+	): Extract<Item, { kind: "message" }> {
+		const item: Extract<Item, { kind: "message" }> = {
+			kind: "message",
+			id,
+			role,
+			timestamp,
+			text,
+			notice: false,
+			streaming,
+		};
+		if (forkEntryId !== undefined) item.forkEntryId = forkEntryId;
+		return item;
+	}
+
+	const at = Date.now() - 100;
+	const question = said("u1", "user", at, "问题", false);
+	const first = said("a1", "assistant", at + 500, "第一段回答", false, "e1");
+	const next = said("u2", "user", at + 1_000, "接着问", false);
+	const second = said("a2", "assistant", at + 1_500, "第二段回答", false, "e2");
+	// The same answer, caught mid-arrival: the footer is not drawn at all, but the fork on the
+	// answer *above* it must still refuse a press while the loop is writing to the tree.
+	const secondLive = { ...second, streaming: true };
+
+	let picked = "";
+	const { host, view } = makeTranscript((entryId) => {
+		picked = entryId;
+	});
+
+	view.render([question, first], false);
+	const firstFoot = footOf(turnsOf(host)[1]!)!;
+	const actions = nodesOfClass(firstFoot, "turn-copy");
+	check("脚注里是复制 + 分支两个图标", actions.length === 2, `${actions.length}`);
+	check("最底部的回答没有分支按钮", actions[1]!.hidden === true);
+
+	// A later answer takes the leaf away from the first one, which is what makes it forkable.
+	view.render([question, first, next, second], false);
+	const firstActions = nodesOfClass(footOf(turnsOf(host)[1]!)!, "turn-copy");
+	check("后面有回答之后，上一条的分支按钮出现", firstActions[1]!.hidden === false);
+	const secondActions = nodesOfClass(footOf(turnsOf(host)[3]!)!, "turn-copy");
+	check("新的最后一条回答仍然没有", secondActions[1]!.hidden === true);
+	firstActions[1]!.click();
+	check("按下去带着这条回答的 entry", picked === "e1", picked);
+
+	// A run in flight moves the leaf; the fork is refused rather than looking pressable.
+	view.render([question, first, next, secondLive], true);
+	const blocked = nodesOfClass(footOf(turnsOf(host)[1]!)!, "turn-copy")[1]!;
+	check("运行中分支按钮被禁用", blocked.disabled === true);
+	check("运行中说明原因", blocked.title.includes("等它结束"), blocked.title);
+
+	view.render([question, first, next, second], false);
+	const unblocked = nodesOfClass(footOf(turnsOf(host)[1]!)!, "turn-copy")[1]!;
+	check("运行结束后重新可用", unblocked.disabled === false);
+}
+
+// ------------------------------------------- 7. the streaming tail is patched, not rebuilt
+
+process.stdout.write("\ntranscript：流式尾块只补不删\n");
+
+{
+	const hostOf = (): { root: FakeNode; body: HTMLElement } => {
+		const root = shim.document.createElement("div") as unknown as FakeNode;
+		return { root, body: root as unknown as HTMLElement };
+	};
+
+	// The shape the ticket measured: one paragraph that grows to thousands of characters. Every
+	// frame after the first must cost no node at all, and the paragraph on screen must be the very
+	// element the first frame built.
+	{
+		const { root, body } = hostOf();
+		const opening = "这是一整段会一直变长的回答。";
+		let state = renderMarkdown(body, opening);
+		const paragraph = root.lastElementChild!;
+		resetWork();
+		let text = opening;
+		for (let frame = 0; frame < 100; frame += 1) {
+			text += "又长了一点。";
+			state = renderMarkdown(body, text, state);
+		}
+		check("长段落：段落节点自始至终是同一个", root.lastElementChild === paragraph);
+		check("长段落：100 个增长帧不建任何节点", work.nodes === 0, `${work.nodes}`);
+		check("长段落：文字拼回原文", root.lastElementChild!.textContent === text);
+		check("长段落：仍然只有一个块", root.children.length === 1, `${root.children.length}`);
+
+		// A replacement is not growth: the block may keep its kind and count and still say something
+		// else, so the element is rebuilt rather than patched against text that no longer prefixes.
+		state = renderMarkdown(body, "换了一段完全不同的文字。", state);
+		check("改写：旧文本不残留", root.lastElementChild!.textContent === "换了一段完全不同的文字。", root.lastElementChild!.textContent);
+	}
+
+	// A growing fenced block, including its copy control: the button must read the element at click
+	// time, because the element it was built with keeps growing in place. The fence stays open until
+	// the end, which is the shape a stream really has — inserting a line before the closer would be a
+	// rewrite, and a rewrite is the path that re-makes the block.
+	{
+		const { root, body } = hostOf();
+		let state = renderMarkdown(body, "```ts\nconst a = 1;");
+		const block = root.lastElementChild!;
+		const code = block.lastElementChild!.firstElementChild!;
+		resetWork();
+		state = renderMarkdown(body, "```ts\nconst a = 1;\nconst b = 2;", state);
+		check("代码块：外框没有换", root.lastElementChild === block);
+		check("代码块：新增一行不重建块", work.nodes === 0, `${work.nodes}`);
+		check("代码块：文字是新的两行", code.textContent === "const a = 1;\nconst b = 2;", JSON.stringify(code.textContent));
+		state = renderMarkdown(body, "```ts\nconst a = 1;\nconst b = 2;\n```", state);
+		check("代码块：闭合之后外框仍然没换", root.lastElementChild === block);
+		check("代码块：闭合之后文字不变", code.textContent === "const a = 1;\nconst b = 2;", JSON.stringify(code.textContent));
+
+		let copied = "";
+		const clipboard = navigator.clipboard;
+		const write = clipboard.writeText;
+		clipboard.writeText = async (value: string): Promise<void> => {
+			copied = value;
+		};
+		nodesOfClass(block, "code-copy")[0]!.click();
+		await new Promise((done) => setTimeout(done, 0));
+		check("复制按钮读的是当下的代码", copied === "const a = 1;\nconst b = 2;", JSON.stringify(copied));
+		clipboard.writeText = write;
+	}
+
+	// A patch-style code block: growth adds spans, and the line that was last stops being last.
+	{
+		const { root, body } = hostOf();
+		let state = renderMarkdown(body, "```diff\n@@ -1 +1 @@\n-old\n+new");
+		const code = root.lastElementChild!.lastElementChild!.firstElementChild!;
+		check("diff：先画出三行", code.children.length === 3, `${code.children.length}`);
+		resetWork();
+		state = renderMarkdown(body, "```diff\n@@ -1 +1 @@\n-old\n+new\n+extra", state);
+		check("diff：只追加了新的那一行", work.nodes === 1, `${work.nodes}`);
+		check("diff：现在是四行", code.children.length === 4, `${code.children.length}`);
+		check("diff：拼回原文", code.textContent === "@@ -1 +1 @@\n-old\n+new\n+extra", JSON.stringify(code.textContent));
+	}
+
+	// A list grows item by item; the existing items are not rebuilt.
+	{
+		const { root, body } = hostOf();
+		let state = renderMarkdown(body, "- 一\n- 二");
+		const list = root.lastElementChild!;
+		resetWork();
+		state = renderMarkdown(body, "- 一\n- 二\n- 三", state);
+		check("列表：列表节点没有换", root.lastElementChild === list);
+		check("列表：现在是三项", list.children.length === 3, `${list.children.length}`);
+		check("列表：新项的文字", list.children[2]!.textContent === "三", list.children[2]!.textContent);
+		check("列表：旧项没有被重建", list.children[0]!.created === 1 && list.children[1]!.created === 1);
+	}
+
+	// An inline marker that closes changes how the paragraph splits: the fast append path must stay
+	// off it, and the rebuilt children must be the formatted text rather than the literal markers.
+	{
+		const { root, body } = hostOf();
+		let state = renderMarkdown(body, "**粗");
+		const paragraph = root.lastElementChild!;
+		resetWork();
+		state = renderMarkdown(body, "**粗体", state);
+		check("未收口的标记：段落没有重建", root.lastElementChild === paragraph);
+		check("未收口的标记：增长不建节点", work.nodes === 0, `${work.nodes}`);
+		state = renderMarkdown(body, "**粗体**", state);
+		check("收口的行内标记：文字正确", root.lastElementChild!.textContent === "粗体", root.lastElementChild!.textContent);
+		check("收口的行内标记：星号没有留下", !root.lastElementChild!.textContent.includes("*"), root.lastElementChild!.textContent);
+	}
+}
+
+// ------------------------------------ 8. scroll readings are deferred, pinned is a class
+
+process.stdout.write("\ntranscript：滚动读数分帧、贴底是一个类\n");
+
+{
+	const { host, view } = makeTranscript();
+	host.scrollHeight = 1_000;
+	host.clientHeight = 100;
+	host.scrollTop = 900;
+	view.scrollToBottom();
+	check("贴底时 wears pinned", host.className.split(/\s+/).includes("pinned"), host.className);
+
+	// A scroll away is a write to this side and a read of layout to the other; the read waits for
+	// the frame, so nothing has changed until one runs.
+	host.scrollTop = 0;
+	host.dispatch("scroll");
+	check("滚动事件本身还没读数", view.following() && host.className.split(/\s+/).includes("pinned"));
+	shim.frames();
+	check("下一帧读出已经离开底部", !view.following(), host.className);
+	check("不再跟随就摘掉 pinned", !host.className.split(/\s+/).includes("pinned"), host.className);
+
+	host.scrollTop = 920;
+	host.dispatch("scroll");
+	shim.frames();
+	check("回到附近就读作跟随", view.following(), host.className);
+	check("跟随重新戴上 pinned", host.className.split(/\s+/).includes("pinned"), host.className);
+
+	// Many events, one reading: only the position the last event left can decide anything, and the
+	// reading that runs after the burst is the one that sees it.
+	host.scrollTop = 0;
+	host.dispatch("scroll");
+	host.dispatch("scroll");
+	host.scrollTop = 900;
+	host.dispatch("scroll");
+	shim.frames();
+	check("一串滚动事件按最后一个位置读", view.following(), host.className);
 }
 
 process.stdout.write(failures === 0 ? "\ntranscript ok\n" : `\n${failures} 项失败\n`);

@@ -1,0 +1,3344 @@
+/*
+ * The application shell.
+ *
+ * One band above two columns. The band is the window's own top strip — full width, the sidebar's
+ * fill, and nothing laid out inside it, because the shell's three caption buttons are overlaid onto
+ * its right end (`titleBarOverlay`); a band with page content in it is a band the buttons cover.
+ * `y >= var(--desktop-titlebar)` is where the columns begin: a sidebar that owns navigation, a drag
+ * handle on its right edge, and a conversation column that owns one session. The sidebar is
+ * `--dsw-bg-sidebar` — the band's fill continued, one surface from the top of the window down the
+ * left column — and never scrolls as a whole — its list does — so the new-session control stays put
+ * while the history moves, which is what makes the list feel like a panel rather than a page. The
+ * two columns are set off by their fills alone (no divider line); the conversation is
+ * `--dsw-bg-base`, the other depth of the theme, and its rounded top-left corner is what reads the
+ * panel as a card laid into that surface rather than a third rectangle butted to it.
+ *
+ * The conversation column is four stacked rows: the title, the transcript (the only one that
+ * scrolls), the composer, and the status line. Nothing sits beside the transcript, because the one
+ * thing this window is for is reading it.
+ *
+ * Everything here reads a token from `tokens.css`. A literal color in this file is a bug: it would
+ * be the one value that does not follow the theme. A literal font size is the same kind of bug:
+ * every size comes from the type scale's five tiers (`--dsw-fs-*`, each with its `--dsw-lh-*`),
+ * all derived from `--dsw-fs-base`, which the settings panel publishes at runtime.
+ */
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	height: 100%;
+	margin: 0;
+}
+
+body {
+	background: var(--dsw-bg-base);
+	color: var(--dsw-label-primary);
+	font-family: var(--dsw-font-family);
+	/* The shell's base step: the title tier, so anything that forgets to pick a size still lands in
+	   the scale — which the slider moves as a family, so unstyled text rides it too. */
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
+	-webkit-font-smoothing: antialiased;
+	overflow: hidden;
+}
+
+/*
+ * The fill behind the columns is the sidebar's, not the base's: the band, the sidebar and the
+ * handle's 6px column are one surface (the reason each is stated once, at `.titleband`). A base fill
+ * here would show the body's tone through the handle's column — a seam the design does not have —
+ * and behind the panel's rounded corner, where the sidebar's own tone is what belongs.
+ */
+#app {
+	display: grid;
+	/* The band · Sidebar · drag handle · conversation. The handle's own column is the affordance. */
+	grid-template-columns: var(--dsw-sidebar-width) 6px minmax(0, 1fr);
+	grid-template-rows: var(--desktop-titlebar) minmax(0, 1fr);
+	background: var(--dsw-bg-sidebar);
+	height: 100vh;
+}
+
+/* A collapsed rail keeps the app usable in a narrow window. The handle goes with it: a rail's width
+   is not a preference, and a drag that moved 52px would only break it. */
+#app[data-sidebar="rail"] {
+	grid-template-columns: 52px minmax(0, 1fr);
+}
+
+#app[data-sidebar="rail"] .side-resizer {
+	display: none;
+}
+
+/*
+ * The top band. Window-level, not any column's: it spans the full width and row 1, and the page
+ * lays nothing out inside it — the caption's three buttons live in its right end and every
+ * touchable thing begins below it. That emptiness is the whole fix: buttons can only cover what is
+ * under them, and under them is now the band's own fill and nothing else. Its fill is `#app`'s —
+ * the sidebar's, and for why see `#app`. (Outside the shell's caption the row collapses to 0px, so
+ * a browser tab shows no band at all.)
+ */
+.titleband {
+	grid-column: 1 / -1;
+	grid-row: 1;
+	-webkit-app-region: drag;
+}
+
+/* ------------------------------------------------------------------ sidebar */
+
+/*
+ * Row 2, column 1 — under the band, where the surface it shares with the band continues. No
+ * `border-right`: the two columns are set off by their fills alone (measured on the reference at
+ * y=300 — the sidebar's tone ends and the panel's begins with no divider pixel between them), and a
+ * hairline there would draw a seam the design does not have.
+ */
+.sidebar {
+	display: flex;
+	flex-direction: column;
+	grid-row: 2;
+	min-height: 0;
+	padding: 6px 12px;
+	background: var(--dsw-bg-sidebar);
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
+}
+
+/*
+ * The column's top row, and it holds the column's two controls: the new-session button and the
+ * collapse toggle. It is the first thing under the band — with the band's 40px above and this rule's
+ * 6px of sidebar padding, the first control lands at y≈46–47, clear of the caption's buttons. The
+ * drag region stays on it for macOS, where the band is 0px tall and the traffic lights overlay this
+ * row (hence the inset in the padding); on Windows the band already drags, and this is harmless.
+ * The brand that used to share this row is gone — the column is the list, not a product — and with
+ * it went the empty seat a logo leaves behind.
+ */
+.sidebar-top {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 40px;
+	padding-left: calc(var(--desktop-traffic-light-inset) + 4px);
+	-webkit-app-region: drag;
+}
+
+.sidebar-top button {
+	-webkit-app-region: no-drag;
+}
+
+/*
+ * Whether the resident channel is up.
+ *
+ * One dot, and words only when there is something to say — a label that always read "已连接" would be
+ * one more piece of chrome competing with the conversation, and the states that matter are precisely
+ * the ones a person did not cause. It sits in the foot, beside the settings entry, because it is a
+ * fact about the window rather than about any one conversation — the foot is where window-level
+ * things live, and the top row is the column's own controls.
+ *
+ * Silent when live: the dot is the whole message, and it takes the secondary colour rather than a
+ * success colour, because "nothing is wrong" should not look like an achievement.
+ */
+.channel-indicator {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	min-width: 0;
+	flex: none;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	white-space: nowrap;
+}
+
+.channel-dot {
+	width: 6px;
+	height: 6px;
+	flex: none;
+	border-radius: 50%;
+	background: var(--dsw-label-caption);
+}
+
+.channel-indicator[data-state="connecting"] {
+	color: var(--dsw-state-warn);
+}
+
+.channel-indicator[data-state="connecting"] .channel-dot {
+	background: var(--dsw-state-warn);
+	/* Pulsing rather than a second colour: this state is transient, and a static dot would read as a
+	   settled condition the window is not in. */
+	animation: channel-pulse 1.2s ease-in-out infinite;
+}
+
+.channel-indicator[data-state="down"] {
+	color: var(--dsw-state-error);
+}
+
+.channel-indicator[data-state="down"] .channel-dot {
+	background: var(--dsw-state-error);
+}
+
+@keyframes channel-pulse {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.35;
+	}
+}
+
+/* One control shape for every icon button, so they line up on the same grid. */
+.icon-button {
+	display: grid;
+	place-items: center;
+	width: 28px;
+	height: 28px;
+	flex: none;
+	padding: 0;
+	border: none;
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.icon-button:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.icon-button svg {
+	width: 16px;
+	height: 16px;
+}
+
+.new-session {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	/* The top row's other seat: beside the collapse toggle, not below the row it used to headline. */
+	min-width: 0;
+	flex: 1;
+	height: 34px;
+	padding: 8px 12px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-md);
+	background: transparent;
+	color: var(--dsw-label-primary);
+	font: inherit;
+	font-weight: 500;
+	cursor: pointer;
+	transition:
+		background var(--dsw-duration-fast) var(--dsw-ease),
+		border-color var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.new-session:hover {
+	background: var(--dsw-bg-hover-solid);
+	border-color: var(--dsw-border-l3);
+}
+
+.new-session svg {
+	width: 16px;
+	height: 16px;
+	flex: none;
+}
+
+.session-list {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	min-height: 0;
+	flex: 1;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+
+.session-list-heading {
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+/*
+ * The heading row: the section's name and, at its right end, the three controls the reference puts
+ * there — search, view options, add a workspace. One row rather than a heading plus a floating
+ * cluster, because the controls are about the list the heading names.
+ */
+.list-head {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 6px 0 4px;
+}
+
+.list-head .session-list-heading {
+	flex: 1;
+	min-width: 0;
+	padding: 0 8px;
+}
+
+.list-head-actions {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+}
+
+.list-head-actions .icon-button {
+	width: 24px;
+	height: 24px;
+}
+
+.list-head-actions .icon-button svg {
+	width: 14px;
+	height: 14px;
+}
+
+.search-row {
+	padding: 0 0 6px;
+}
+
+.search-input {
+	width: 100%;
+	height: 28px;
+	padding: 0 8px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-input-fill);
+	color: var(--dsw-label-primary);
+	font: inherit;
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
+}
+
+.search-input::placeholder {
+	color: var(--dsw-label-caption);
+}
+
+/*
+ * One row of the list, per the reference's spec: 32px tall, one line, `--dsw-radius-md` corners,
+ * 8px of air at each side.
+ *
+ * A fork wears no indent of its own — it sits under the session it came from, and the `（1）` on its
+ * name is the whole difference — so every row is the same shape, and the row is the height the
+ * collapsed-count limit was always assuming.
+ */
+.session-item {
+	display: flex;
+	align-items: center;
+	gap: 0;
+	width: 100%;
+	height: 32px;
+	padding: 0 8px;
+	border: none;
+	border-radius: var(--dsw-radius-md);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.session-item:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.session-item[aria-current="true"] {
+	background: var(--dsw-bg-active);
+	color: var(--dsw-label-primary);
+	font-weight: 500;
+}
+
+/*
+ * The status slot: the row's one room for a state, a 16px gutter at its left edge.
+ *
+ * Running and waiting-for-an-approval share the one amber dot — the same fact seen from two sides —
+ * and an idle row keeps an empty slot, so a workspace of finished sessions is four ordinary rows
+ * rather than four rows insisting on something. "已打开" needs no slot: it is the `aria-current`
+ * background itself.
+ */
+.session-item-slot {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 20px;
+	flex: none;
+}
+
+.session-item-slot[data-state="warn"]::before {
+	content: "";
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--dsw-state-warn);
+}
+
+.session-item-title {
+	min-width: 0;
+	flex: 1;
+	margin: 0 6px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.session-item-time {
+	flex: none;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+/*
+ * The in-place rename editor: the row's own title, wearing an input's clothes.
+ *
+ * It replaces the title span inside the same line — same flex, same margins, the title tier's own
+ * metrics — so the swap is a change of control, not a change of layout. That it does not jump is the
+ * whole point of editing in place.
+ */
+.rename-input {
+	min-width: 0;
+	flex: 1;
+	height: 22px;
+	margin: 0 6px;
+	padding: 0 6px;
+	border: 1px solid var(--dsw-border-l3);
+	border-radius: var(--dsw-radius-xs);
+	background: var(--dsw-bg-layer-1);
+	color: var(--dsw-label-primary);
+	font: inherit;
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
+	outline: none;
+}
+
+.rename-input:focus {
+	border-color: var(--dsw-state-business);
+}
+
+/* The grouped list. A workspace is a heading and the sessions written under it. */
+.workspace {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	margin-bottom: 6px;
+}
+
+/*
+ * One workspace's heading, the reference's project row: 34px tall, the same radius and padding as a
+ * session row, at the meta tier. A real button since the paging decision — clicking it is how the
+ * workspace collapses to its heading and opens again — so Enter and Space reach it like any other
+ * control. On hover the folder — the content — gives its place to the chevron — the affordance —
+ * because both icons share one slot and the swap keeps one position for two meanings. Collapsed,
+ * `aria-expanded="false"` keeps the chevron on and turned right, so the affordance no longer
+ * depends on hover to be visible: that hover promise is what the collapsed state redeems.
+ */
+.workspace-head {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	width: 100%;
+	height: 34px;
+	padding: 0 8px;
+	border: none;
+	border-radius: var(--dsw-radius-md);
+	background: transparent;
+	color: var(--dsw-label-tertiary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	font-weight: 600;
+	text-align: left;
+	cursor: pointer;
+	transition:
+		background var(--dsw-duration-fast) var(--dsw-ease),
+		color var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.workspace-head:hover {
+	background: var(--dsw-bg-hover);
+}
+
+.workspace-head:focus-visible {
+	outline: 2px solid var(--dsw-state-business);
+	outline-offset: -2px;
+}
+
+.workspace-head svg {
+	width: 13px;
+	height: 13px;
+	flex: none;
+	opacity: 0.75;
+}
+
+.workspace-icon-chev {
+	display: none;
+}
+
+.workspace-icon-chev svg {
+	transition: transform var(--dsw-duration) var(--dsw-ease);
+}
+
+.workspace-head:hover .workspace-icon-chev,
+.workspace-head[aria-expanded="false"] .workspace-icon-chev {
+	display: inline-flex;
+}
+
+.workspace-head:hover .workspace-icon-folder,
+.workspace-head[aria-expanded="false"] .workspace-icon-folder {
+	display: none;
+}
+
+.workspace-head[aria-expanded="false"] {
+	color: var(--dsw-label-secondary);
+}
+
+.workspace-head[aria-expanded="false"] .workspace-icon-chev svg {
+	transform: rotate(-90deg);
+}
+
+.workspace-name {
+	/* The heading is a button, so it does not stretch its children; the name asks for the room the
+	   chip at the heading's right edge used to leave behind, and ellipsises inside it. */
+	flex: 1;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+/*
+ * Which group the new-session button writes into, said by the surface rather than by a word.
+ *
+ * The heading is the one row of the column that is *above* the list instead of part of it, so it
+ * wears the surface the current session row wears: one flat fill and a step up in label colour. The
+ * earlier cut gave it a ring plus a drop shadow, which in the dark sheet read as a blurry glow
+ * around a hollow box — the screenshot in `优化/1.png`. A fill needs no second mark, so the hover
+ * state is the same fill (the heading is already the surface being pointed at) and the class keeps
+ * the specificity of the hover rule above, so pointing at it cannot dim it back to `--dsw-bg-hover`.
+ */
+.workspace-head.workspace-head-current {
+	background: var(--dsw-bg-active);
+	color: var(--dsw-label-secondary);
+}
+
+.session-list-empty {
+	padding: 8px;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+/* The paging row: 「展开其余」 and — beside it, once a page has been added — 「收起」. */
+.session-paging {
+	display: flex;
+	align-items: baseline;
+	gap: 2px;
+	/* Under the names' left edge, the way the rows read: 8px of row padding plus the 16px slot. */
+	margin-left: 22px;
+}
+
+/* One of the two paging buttons. The presence of each is patched, never a rebuild. */
+.session-more {
+	padding: 4px 8px;
+	border: none;
+	border-radius: var(--dsw-radius-xs);
+	background: transparent;
+	color: var(--dsw-label-caption);
+	font: inherit;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	cursor: pointer;
+}
+
+.session-more:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.sidebar-foot {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding-top: 8px;
+	margin-top: 8px;
+	border-top: 1px solid var(--dsw-border-l1);
+	flex: none;
+}
+
+.settings-entry {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+	flex: 1;
+	height: 34px;
+	padding: 0 8px;
+	border: none;
+	border-radius: var(--dsw-radius-md);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.settings-entry:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.settings-entry svg {
+	width: 16px;
+	height: 16px;
+	flex: none;
+}
+
+/*
+ * The drag handle on the sidebar's right edge.
+ *
+ * Its own 6px grid column is the hit area; the strip the user sees is drawn by `::after`, two pixels
+ * in from each side so a grab reads as grabbing the edge rather than a line that happens to be
+ * nearby. It is a focusable separator, so the keyboard reaches the same clamp the pointer does.
+ */
+.side-resizer {
+	position: relative;
+	grid-row: 2;
+	z-index: 6;
+	cursor: col-resize;
+	touch-action: none;
+}
+
+.side-resizer::after {
+	content: "";
+	position: absolute;
+	inset: 0 2px;
+	border-radius: 2px;
+	background: transparent;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.side-resizer:hover::after,
+.side-resizer.dragging::after {
+	background: var(--dsw-border-l3);
+}
+
+.side-resizer:focus-visible {
+	outline: 2px solid var(--dsw-state-business);
+	outline-offset: -2px;
+}
+
+/*
+ * The drag handle on the reading column's left edge.
+ *
+ * Not a column of the grid — an absolutely positioned strip inside the transcript's own wrapper,
+ * centred on the edge the prose starts at: half the leftover space is where the reading column
+ * begins, and the handle rides that edge as the width moves. Its width is a hit area; the strip the
+ * user sees is drawn by `::after`, the same grammar the sidebar's handle speaks, so the two read as
+ * one family of affordances.
+ */
+.content-resizer {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	z-index: 6;
+	width: 10px;
+	left: calc((100% - var(--dsw-content-width)) / 2 - 5px);
+	cursor: col-resize;
+	touch-action: none;
+}
+
+.content-resizer::after {
+	content: "";
+	position: absolute;
+	inset: 0 4px;
+	border-radius: 2px;
+	background: transparent;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.content-resizer:hover::after,
+.content-resizer.dragging::after {
+	background: var(--dsw-border-l3);
+}
+
+.content-resizer:focus-visible {
+	outline: 2px solid var(--dsw-state-business);
+	outline-offset: -2px;
+}
+
+/* ---------------------------------------------------------------- app region */
+
+/*
+ * Row 2, column 3 — the reading panel, the theme's other depth.
+ *
+ * The top-left corner is rounded, which is what makes band + sidebar read as one surface with a card
+ * laid into it rather than three rectangles butted together. Measured on the reference: the panel's
+ * left edge runs from x=290 at y=40 to x=280 at y=50 — a ~10px radius. Stated a step up the radius
+ * scale (`--dsw-radius-lg`, 16px) because at 12px the arc is only a few pixels of anti-aliasing
+ * against a 24% luminance step and reads as square in a screenshot. Only the top-left: the other
+ * three corners are the window's own or sit against nothing.
+ */
+.conversation {
+	display: grid;
+	/* title · transcript · banners · composer · status line. Only the transcript flexes. */
+	grid-template-rows: auto 1fr auto auto auto;
+	grid-row: 2;
+	min-width: 0;
+	min-height: 0;
+	background: var(--dsw-bg-base);
+	border-top-left-radius: var(--dsw-radius-lg);
+}
+
+/*
+ * The fixed header, whole-column wide and never following the reading column in.
+ *
+ * It is NOT the window's top band — the band is `.titleband`, a window-level strip the page lays
+ * nothing out in. This header begins below the band, so nothing in it can ever sit under the
+ * caption's buttons, and it no longer reserves any titlebar height of its own.
+ *
+ * The first row is the session title on the left and the branch entry on its right; the branch page
+ * adds a second row of tools under it. It used to carry the model picker, the thinking level, the
+ * tool set, and a retry chip. All of that is a setting now, and settings live behind one button in
+ * the sidebar: a control that is touched once a week does not get to sit in the row the conversation
+ * is read from.
+ *
+ * `min-width: 0` is load-bearing, and not for the header's own sake. The header is a grid item, so its
+ * automatic minimum size is its content; `.conversation` is itself a grid whose single column is
+ * `auto`, and that column sizes to the largest minimum contribution among its items — the header's
+ * content floor. A column may be wider than its grid container, and this one is: on the branch page it
+ * comes out wider than the conversation has room for, so the header's right-hand controls are laid out
+ * past the end of the window and clipped away rather than overlapped. `min-width: 0` drops that floor
+ * (measured in the real shell at a 720px window: with the declaration the column is 435px and the exit
+ * button sits at x 606–696; with it removed the column resolves to 701.4px inside the same 720px window
+ * and the button lands at x 872–962, where `elementFromPoint` on its centre answers nothing).
+ */
+.header {
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	min-width: 0;
+	padding: 0 24px;
+	border-bottom: 1px solid var(--dsw-border-l1);
+	-webkit-app-region: drag;
+}
+
+.header-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: 52px;
+}
+
+/* The title row stays draggable; the controls in it do not. */
+.header-row > * {
+	-webkit-app-region: no-drag;
+}
+
+.header-title {
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	min-width: 0;
+	flex: 1;
+}
+
+.header-title h1 {
+	margin: 0;
+	font-size: var(--dsw-fs-title);
+	font-weight: 600;
+	line-height: var(--dsw-lh-title);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.header-subtitle {
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/*
+ * The branch entry, the only door into the branch page.
+ *
+ * It names the way being read — the mark, `当前分支`, the short id cut from that way's store entry,
+ * and the first sentence said under it. With fewer than two ways there is no way to name, so the id
+ * and the sentence stand empty and the chip reads the mark and the words alone: a single-way
+ * conversation is the one that most needs the door, and the page it opens answers with the how-to.
+ */
+.branch-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	max-width: 52%;
+	height: 28px;
+	padding: 0 10px;
+	border-radius: var(--dsw-radius-md);
+	border: 1px solid var(--dsw-border-l1);
+	background: var(--dsw-bg-layer-1);
+	color: var(--dsw-label-tertiary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	transition:
+		border-color var(--dsw-duration-fast) var(--dsw-ease),
+		color var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.branch-chip:hover {
+	border-color: var(--dsw-border-l3);
+	color: var(--dsw-label-primary);
+}
+
+.branch-chip svg {
+	width: 14px;
+	height: 14px;
+	flex: none;
+	color: var(--dsw-label-tertiary);
+}
+
+/*
+ * One line, always. The words and the id are fixed parts of the chip's own grammar, so they neither
+ * wrap nor give way; the label is the only part that may shrink, because a way's label is a message
+ * preview — a whole sentence, and for a branch taken from an answer, Markdown and all. Without the
+ * `nowrap` a narrow window broke 「当前分支」 into a vertical column of single characters, and without
+ * the label's `flex` the shrink was shared with those fixed parts instead of being taken by the one
+ * thing that has somewhere to put the ellipsis.
+ */
+.branch-chip > span {
+	white-space: nowrap;
+}
+
+.branch-chip > .branch-chip-id {
+	flex: none;
+}
+
+.branch-chip-id {
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	color: var(--dsw-state-business);
+}
+
+.branch-chip > .branch-chip-label {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.branch-chip-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--dsw-label-secondary);
+}
+
+/*
+ * The branch page's row of tools, which lives in the fixed header so panning the tree cannot pull
+ * it away. What is selected sits on the left, the zoom fallbacks and the one way out on the right.
+ *
+ * The row may not outgrow the header. As a flex item its automatic minimum size is its content, so
+ * `min-width: 0` is what lets it shrink at all — without it the zoom group and the exit button, which
+ * cannot shrink, push the row's own minimum up; the row then overflows the header and the button is
+ * outside the clickable box, which is what "the button does nothing" looks like from the outside.
+ * `.header` needs the same declaration for that floor to be able to give at all: the two are one fix,
+ * and neither half alone was enough.
+ *
+ * `no-drag` follows the row's controls, exactly as `.header-row > *` does for the title row: the band
+ * is the window's to drag, and everything a person can press has to opt out of it.
+ */
+.branch-tools {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	min-width: 0;
+	padding: 6px 0 8px;
+	border-top: 1px solid var(--dsw-border-l1);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	color: var(--dsw-label-caption);
+	-webkit-app-region: no-drag;
+}
+
+.branch-tools[hidden] {
+	display: none;
+}
+
+.branch-tools .header-spacer {
+	flex: 1 1 0;
+	min-width: 0;
+}
+
+.branch-tools .zoom-group,
+.branch-tools .back-button {
+	flex: none;
+}
+
+.branch-sel-info {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.branch-sel-info b {
+	font-family: var(--dsw-font-mono);
+	font-weight: 600;
+	color: var(--dsw-label-secondary);
+}
+
+.branch-sel-info em {
+	font-style: normal;
+	color: var(--dsw-label-tertiary);
+}
+
+/* The zoom buttons are the fallback for a pointer without a wheel; Ctrl+wheel is the main path. */
+.zoom-group {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	padding: 2px;
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-bg-layer-1);
+	border: 1px solid var(--dsw-border-l1);
+}
+
+.zoom-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	height: 24px;
+	min-width: 26px;
+	padding: 0 6px;
+	border: none;
+	border-radius: var(--dsw-radius-xs);
+	background: transparent;
+	color: var(--dsw-label-tertiary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	cursor: pointer;
+	transition:
+		background var(--dsw-duration-fast) var(--dsw-ease),
+		color var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.zoom-button:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.zoom-value {
+	min-width: 44px;
+	text-align: center;
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	color: var(--dsw-label-caption);
+}
+
+/*
+ * The one way out of the branch page. Most of the time it says where it leads; once another way is
+ * selected it turns primary, because then it moves the session on the way out.
+ */
+.back-button {
+	display: inline-flex;
+	align-items: center;
+	height: 28px;
+	padding: 0 12px;
+	border-radius: var(--dsw-radius-md);
+	border: 1px solid var(--dsw-border-l2);
+	background: var(--dsw-bg-layer-1);
+	color: var(--dsw-label-primary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	font-weight: 500;
+	cursor: pointer;
+	transition:
+		background var(--dsw-duration-fast) var(--dsw-ease),
+		border-color var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.back-button:hover:not(:disabled) {
+	background: var(--dsw-bg-layer-2);
+}
+
+.back-button.primary {
+	background: var(--dsw-button-info-fill);
+	border-color: var(--dsw-button-info-fill);
+	color: var(--dsw-label-inverse);
+}
+
+.back-button.primary:hover:not(:disabled) {
+	background: var(--dsw-button-info-hover);
+	border-color: var(--dsw-button-info-hover);
+}
+
+.back-button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+@keyframes pulse {
+	50% {
+		opacity: 0.3;
+	}
+}
+
+.select:focus-visible,
+button:focus-visible,
+textarea:focus-visible,
+input:focus-visible {
+	outline: 2px solid var(--dsw-state-business);
+	outline-offset: 1px;
+}
+
+/* ----------------------------------------------------------------- transcript */
+
+.transcript {
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding: 22px 0 8px;
+}
+
+/*
+ * The transcript's wrapper: the grid row that flexes, and the positioning context the reading
+ * column's handle hangs off. The scroll itself is the child's job — an absolutely positioned handle
+ * inside a scroll container would scroll away with the content, so the two live one layer apart.
+ */
+.transcript-body {
+	position: relative;
+	min-width: 0;
+	min-height: 0;
+}
+
+.transcript-body .transcript {
+	height: 100%;
+}
+
+/*
+ * The notice that a session is being read.
+ *
+ * It sits over the pane, in the wrapper rather than in the scrolling transcript, because the whole
+ * point is that it is visible while the previous conversation is still on screen — a notice inside
+ * the scroll container would scroll away with the thing it is replacing.
+ *
+ * It appears late rather than at once. The hidden attribute is toggled the moment the read starts,
+ * so on a fast local answer the notice would flash for a frame or two, which reads as a glitch
+ * rather than as progress; the delay means it only becomes visible once the wait has lasted long
+ * enough to be worth naming. The transition-delay is on the way in only, so taking it down is
+ * immediate and cannot be seen lingering over the session it was waiting for.
+ */
+.session-loading {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 10px;
+	color: var(--dsw-label-secondary);
+	background: var(--dsw-bg-base);
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity var(--dsw-duration) var(--dsw-ease) 160ms;
+}
+
+.session-loading:not([hidden]) {
+	opacity: 1;
+}
+
+/*
+ * The ring, drawn as a border rather than as a glyph: no icon to keep in sync, and its own keyframes
+ * rather than one of the pulses around it — a spin is rotation, and every other animation in this file
+ * is an opacity fade.
+ */
+.loading-ring {
+	width: 22px;
+	height: 22px;
+	border: 2px solid var(--dsw-border-l3);
+	border-top-color: var(--dsw-state-business);
+	border-radius: 50%;
+	animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.loading-label {
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+}
+
+/*
+ * The reading column: wide enough for code, narrow enough to read prose.
+ *
+ * The width is the one axis the handle moves — `--dsw-content-width`, computed at runtime from the
+ * conversation column and the stored preference. The fixed header above stays whole-column wide and
+ * deliberately does not consume this variable: the top of the session is where the session is read
+ * from, not part of the prose.
+ */
+.transcript > * {
+	width: 100%;
+	max-width: var(--dsw-content-width);
+	margin-inline: auto;
+	padding-inline: 24px;
+}
+
+.welcome {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 10px;
+	flex: 1;
+	color: var(--dsw-label-caption);
+	text-align: center;
+}
+
+.welcome-mark {
+	display: grid;
+	place-items: center;
+	width: 44px;
+	height: 44px;
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-bg-layer-2);
+	border: 1px solid var(--dsw-border-l1);
+	color: var(--dsw-label-tertiary);
+}
+
+.welcome-mark svg {
+	width: 22px;
+	height: 22px;
+}
+
+.welcome h2 {
+	margin: 0;
+	color: var(--dsw-label-primary);
+	font-size: var(--dsw-fs-body);
+	line-height: var(--dsw-lh-body);
+	font-weight: 600;
+}
+
+.turn {
+	margin-bottom: 20px;
+}
+
+/*
+ * A user message is a bubble against the right margin; the agent's work runs the full width of the
+ * column. The asymmetry is the point: one is what was asked and is already known, the other is what
+ * is being read.
+ *
+ * The meta row under the bubble — time, then the copy control, against the bubble's right edge — is
+ * the seam between rounds (06 ⑤): the divider it replaces sat too close to the text and said too
+ * little, and the row's own bottom margin is the breathing room that keeps a user message and the
+ * answer it opened from reading as one block.
+ */
+.turn[data-role="user"] {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	margin-bottom: 36px;
+}
+
+.turn-meta {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	margin-top: 7px;
+	margin-right: 2px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	color: var(--dsw-label-caption);
+}
+
+/*
+ * The one copy control, in both meta rows: an icon, not a browser button.
+ *
+ * A `<button>` that states nothing paints the platform's own surface — `buttonface` plus a bevel —
+ * and the icon's `currentColor` then lands on a light plate in the dark theme, where it is almost
+ * invisible. The reset belongs here rather than on a global `button` rule: `.button`, `.icon-button`
+ * and the menu rows each draw their own control, and a blanket reset would be a second owner of
+ * every one of them.
+ */
+.turn-copy {
+	display: grid;
+	place-items: center;
+	width: 24px;
+	height: 24px;
+	flex: none;
+	padding: 0;
+	border: none;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--dsw-label-caption);
+	font: inherit;
+	cursor: pointer;
+	transition:
+		background 0.12s var(--dsw-ease),
+		color 0.12s var(--dsw-ease);
+}
+
+.turn-copy:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-secondary);
+}
+
+/* A fork that arrived while a run is writing to the tree: the control is there, the press waits. */
+.turn-copy:disabled,
+.turn-copy:disabled:hover {
+	background: transparent;
+	color: var(--dsw-label-caption);
+	opacity: 0.4;
+	cursor: default;
+}
+
+.turn-copy svg {
+	width: 13.5px;
+	height: 13.5px;
+}
+
+/*
+ * The agent footer (06 ⑥): the round's copy control — icon only — then the usage, the wall-clock
+ * time, and the elapsed time, one quiet row under the answer that closed the round. No separators:
+ * the chips are small enough and quiet enough to read as one line without them.
+ */
+.turn-foot {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	margin-top: 6px;
+	margin-bottom: 16px;
+}
+
+.foot-chip {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	height: 26px;
+	padding: 0 8px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	color: var(--dsw-label-caption);
+}
+
+.foot-chip svg {
+	width: 13px;
+	height: 13px;
+}
+
+/*
+ * The run's ticking line: one plain label under the conversation while the loop streams — no pill,
+ * no verb, just the number moving (01 ⑥). The minutes are the footer's seat too, so the timer and
+ * the number it freezes into are set the same way.
+ *
+ * Only the block margins are stated here. The inline ones belong to `.transcript > *` above, which
+ * centres every child in the reading column; a `margin` shorthand would reset them to zero and pull
+ * this one line out to the container's left edge, away from the prose it belongs to.
+ */
+.runtime {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-block: 16px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	color: var(--dsw-label-caption);
+}
+
+.runtime-time {
+	font-family: var(--dsw-font-mono);
+}
+
+.turn-body {
+	font-size: var(--dsw-fs-body);
+	line-height: var(--dsw-lh-body);
+	word-break: break-word;
+	min-width: 0;
+}
+
+/* A user turn is a bubble; the agent's answer is the page itself. */
+.turn[data-role="user"] .turn-body {
+	max-width: 80%;
+	padding: 9px 14px;
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-bubble);
+	border: 1px solid var(--dsw-border-l1);
+}
+
+.turn.notice .turn-body {
+	color: var(--dsw-label-tertiary);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	font-style: italic;
+}
+
+.turn-body > :first-child {
+	margin-top: 0;
+}
+
+.turn-body > :last-child {
+	margin-bottom: 0;
+}
+
+.turn-body p {
+	margin: 0 0 0.75em;
+	white-space: pre-wrap;
+}
+
+.turn-body h1,
+.turn-body h2,
+.turn-body h3,
+.turn-body h4 {
+	margin: 1.4em 0 0.5em;
+	font-weight: 600;
+	line-height: 1.3;
+}
+
+.turn-body h1 {
+	font-size: 1.35em;
+}
+
+.turn-body h2 {
+	font-size: 1.2em;
+}
+
+.turn-body h3 {
+	font-size: 1.05em;
+}
+
+.turn-body ul,
+.turn-body ol {
+	margin: 0 0 0.75em;
+	padding-left: 1.4em;
+}
+
+.turn-body li {
+	margin-bottom: 0.25em;
+}
+
+.turn-body blockquote {
+	margin: 0 0 0.75em;
+	padding: 2px 0 2px 12px;
+	border-left: 3px solid var(--dsw-border-l3);
+	color: var(--dsw-label-secondary);
+}
+
+.turn-body a {
+	color: var(--dsw-state-business);
+	text-decoration: none;
+}
+
+.turn-body a:hover {
+	text-decoration: underline;
+}
+
+.turn-body code {
+	padding: 0.1em 0.35em;
+	border-radius: var(--dsw-radius-xs);
+	background: var(--dsw-code-inline);
+	font-family: var(--dsw-font-mono);
+	font-size: 0.88em;
+}
+
+.turn-body table {
+	width: 100%;
+	margin: 0 0 0.75em;
+	border-collapse: collapse;
+	font-size: 0.94em;
+}
+
+.turn-body th,
+.turn-body td {
+	padding: 6px 10px;
+	border: 1px solid var(--dsw-border-l2);
+	text-align: left;
+}
+
+.turn-body th {
+	background: var(--dsw-bg-layer-2);
+	font-weight: 600;
+}
+
+.turn-body hr {
+	margin: 1.2em 0;
+	border: none;
+	border-top: 1px solid var(--dsw-border-l2);
+}
+
+/* A code block carries its language; the copy button sits in the same row. */
+.code-block {
+	margin: 0 0 0.85em;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-code-block);
+	overflow: hidden;
+}
+
+.code-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	height: 30px;
+	padding: 0 10px;
+	border-bottom: 1px solid var(--dsw-border-l1);
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	font-family: var(--dsw-font-mono);
+}
+
+.code-copy {
+	padding: 2px 6px;
+	border: none;
+	border-radius: var(--dsw-radius-xs);
+	background: transparent;
+	color: var(--dsw-label-caption);
+	font: inherit;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	cursor: pointer;
+}
+
+.code-copy:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.code-block pre {
+	margin: 0;
+	padding: 12px 14px;
+	overflow-x: auto;
+}
+
+.code-block code {
+	display: block;
+	padding: 0;
+	background: none;
+	color: var(--dsw-label-primary);
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-code);
+	line-height: var(--dsw-lh-code);
+	white-space: pre;
+}
+
+/* Diff lines, so a patch in a tool result or a code block reads as a change. */
+.code-block code .diff-add,
+.diff-add {
+	display: block;
+	background: var(--dsw-diff-added);
+}
+
+.code-block code .diff-del,
+.diff-del {
+	display: block;
+	background: var(--dsw-diff-deleted);
+}
+
+/*
+ * The streaming caret, on the one message that is still being written. It is gated twice —
+ * the run is in flight, and this turn's own item says it is arriving — because "last turn"
+ * is the wrong owner: between an answer's end and the next one's first delta, the last turn
+ * is often the user's own bubble, and a caret drawn there reads as an orphan block (16).
+ */
+.streaming .turn.assistant.streaming .turn-body::after {
+	content: "";
+	display: inline-block;
+	width: 7px;
+	height: 15px;
+	margin-left: 2px;
+	vertical-align: text-bottom;
+	background: var(--dsw-label-primary);
+	animation: blink 1s steps(2, start) infinite;
+}
+
+@keyframes blink {
+	to {
+		visibility: hidden;
+	}
+}
+
+/* --------------------------------------------------------------- reasoning */
+
+/*
+ * The row that holds what the model thought before it answered. It shares the tool card's container
+ * and head — a `<details class="tool">`, the same chevron and quiet line — with 「思考」 in the name
+ * seat, so a run of steps and thoughts reads as one column of lines (01 ④). What a thought needs
+ * that a call does not is here: a body that renders Markdown prose, and a collapsed head that moves.
+ */
+.reasoning {
+	margin: 0 0 10px;
+}
+
+/*
+ * The head while the thought is still arriving: the text scrolls instead of ellipsizing.
+ *
+ * The track carries the text twice so the `translateX(-50%)` loop is seamless, and the mask fades
+ * the line's edges so the text enters and leaves it rather than being cut by it. The loop's duration
+ * is solved from the measured width per patch (see `patchMarquee`); the 26s here is only what the
+ * animation says before the first patch lands.
+ */
+.reasoning-marquee {
+	display: none;
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	-webkit-mask-image: linear-gradient(90deg, transparent, var(--dsw-mask-ink) 5%, var(--dsw-mask-ink) 95%, transparent);
+	mask-image: linear-gradient(90deg, transparent, var(--dsw-mask-ink) 5%, var(--dsw-mask-ink) 95%, transparent);
+}
+
+.reasoning.running .reasoning-marquee {
+	display: block;
+}
+
+.reasoning.running .reasoning-preview {
+	display: none;
+}
+
+/* The head steps aside while the row is open: the body is the full text, and a summary beside it —
+   one still scrolling while the thought streams — would say it twice. Hidden rather than gone, so
+   the line's height does not jump on toggle. */
+.reasoning[open] .reasoning-preview,
+.reasoning[open] .reasoning-marquee {
+	visibility: hidden;
+}
+
+.reasoning-track {
+	display: inline-flex;
+	white-space: nowrap;
+	animation: marquee 26s linear infinite;
+}
+
+.reasoning-track span {
+	padding-right: 64px;
+	color: var(--dsw-label-caption);
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+@keyframes marquee {
+	to {
+		transform: translateX(-50%);
+	}
+}
+
+/* The body is prose, not output — Markdown, not mono — but it wears the same unfolded card a tool's
+   output does. The box is stated once, beside `.tool-output` below: fill, border, corner, 22px
+   leading, padding, and the 24rem scroll cap all come from there, so the thought and the command's
+   output cannot drift apart. This rule is only the type inside that box — one tier under the answer
+   rather than the code size. */
+.reasoning-body {
+	color: var(--dsw-label-secondary);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+}
+
+.reasoning-body > :first-child {
+	margin-top: 0;
+}
+
+.reasoning-body > :last-child {
+	margin-bottom: 0;
+}
+
+.reasoning-body p {
+	margin: 0 0 0.6em;
+	white-space: pre-wrap;
+}
+
+.reasoning-body code {
+	padding: 1px 5px;
+	border-radius: var(--dsw-radius-xs);
+	background: var(--dsw-code-inline);
+	font-family: var(--dsw-font-mono);
+	font-size: 0.92em;
+}
+
+.reasoning-body pre {
+	margin: 0 0 0.6em;
+	padding: 10px 12px;
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-code-block);
+	overflow-x: auto;
+}
+
+.reasoning-body pre code {
+	padding: 0;
+	background: transparent;
+}
+
+/* --------------------------------------------------------------- tool cards */
+
+.tool-group {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-bottom: 20px;
+}
+
+/*
+ * One tool call, read as a line (01 ④).
+ *
+ * The call has no box: a run of steps is a column of quiet lines, each `Name  path`, weakly
+ * coloured until hover lifts the line. The chevron is a permanent mark — it says "this line opens",
+ * and only its direction changes with the open state — while the running dot is the one thing on the
+ * line that moves. Expanding reveals the content as an indented block under the line — the indent is
+ * the summary's own leading (chevron 12px + gap 10px), so the block reads as the line's continuation.
+ */
+.tool {
+	background: transparent;
+}
+
+.tool > summary {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: 28px;
+	cursor: pointer;
+	list-style: none;
+	color: var(--dsw-label-tertiary);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	transition: color var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.tool > summary::-webkit-details-marker {
+	display: none;
+}
+
+.tool > summary:hover {
+	color: var(--dsw-label-primary);
+}
+
+.tool-chevron {
+	flex: none;
+	width: 12px;
+	color: var(--dsw-label-caption);
+	transition: transform var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+/* Open is the only state the chevron has to say: it turns right so the row reads as a level being
+   unfolded. Visibility is not a state — a mark that has to be found by hovering promises nothing
+   to someone reading rather than pointing, and a run of tool lines that only shows its marks under
+   the pointer reads as flat text. */
+.tool[open] .tool-chevron {
+	transform: rotate(90deg);
+}
+
+/* The running dot rides the line's right end; a running call never carries a diffstat, so the two
+   auto margins never share a line. */
+.tool-spin {
+	flex: none;
+	width: 8px;
+	height: 8px;
+	margin-left: auto;
+	border-radius: 50%;
+	background: var(--dsw-state-warn);
+	animation: pulse 1.2s var(--dsw-ease) infinite;
+}
+
+.tool-name {
+	flex: none;
+	color: var(--dsw-label-secondary);
+	font-weight: 500;
+}
+
+.tool > summary:hover .tool-name {
+	color: var(--dsw-label-primary);
+}
+
+.tool.error .tool-name {
+	color: var(--dsw-state-error);
+}
+
+.tool-path {
+	flex: 0 1 auto;
+	min-width: 0;
+	color: var(--dsw-label-caption);
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* The diffstat sits at the line's far end, a reading about the change rather than part of the call. */
+.tool > summary .diff-stat {
+	margin-left: auto;
+}
+
+/* Expanded content is one indented block under the line, and the bodies share the box: the indent
+   is the summary's own leading (chevron 12px + gap 10px), stated once for the three of them. A
+   thought's body is one of the three — a run unfolds a thought and a command's output, and the two
+   should read as the same block even though one is prose and the other is code. */
+.tool-output,
+.tool > .diff,
+.reasoning-body {
+	margin: 4px 0 8px 22px;
+	border: 1px solid var(--dsw-border-l1);
+	border-radius: var(--dsw-radius-sm);
+}
+
+/* The scroll panel the two text bodies share; the diff brings its own copy's padding and gutter. */
+.tool-output,
+.reasoning-body {
+	padding: 10px 12px;
+	background: var(--dsw-code-block);
+	color: var(--dsw-label-secondary);
+	max-height: 24rem;
+	overflow: auto;
+	word-break: break-word;
+}
+
+.tool-output {
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-code);
+	line-height: var(--dsw-lh-code);
+	white-space: pre-wrap;
+}
+
+/* ---------------------------------------------------------------- diff view */
+
+/*
+ * What a file-changing call did, as the body of its card.
+ *
+ * A row is four columns: the number the line had, the number it has now, the sign, and the text. Both
+ * number columns are the same width — set per report by the renderer, three digits until it says
+ * otherwise — because a gutter that grows partway down the diff reads as a second table rather than
+ * as one file.
+ */
+.diff {
+	--diff-number-width: 3ch;
+
+	max-height: 24rem;
+	overflow: auto;
+	padding: 4px 0;
+	border-top: 1px solid var(--dsw-border-l1);
+	background: var(--dsw-code-block);
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-code);
+	line-height: var(--dsw-lh-code);
+}
+
+.diff-stat {
+	flex: none;
+	display: flex;
+	gap: 6px;
+}
+
+.diff-count.add {
+	color: var(--dsw-state-success);
+}
+
+.diff-count.del {
+	color: var(--dsw-state-error);
+}
+
+.diff-row {
+	display: grid;
+	grid-template-columns: var(--diff-number-width) var(--diff-number-width) 1.6ch 1fr;
+	gap: 0 6px;
+	padding-inline: 12px;
+	color: var(--dsw-label-secondary);
+}
+
+.diff-row.add {
+	background: var(--dsw-diff-added);
+}
+
+.diff-row.remove {
+	background: var(--dsw-diff-deleted);
+}
+
+/* An elided run and a cut-off report are facts about the view, not lines of the file: no columns. */
+.diff-row.skip,
+.diff-row.omitted {
+	display: block;
+	padding: 2px 12px;
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.diff-num {
+	color: var(--dsw-label-caption);
+	text-align: right;
+	user-select: none;
+}
+
+.diff-sign {
+	color: var(--dsw-label-tertiary);
+	text-align: center;
+	user-select: none;
+}
+
+.diff-row.add .diff-sign {
+	color: var(--dsw-state-success);
+}
+
+.diff-row.remove .diff-sign {
+	color: var(--dsw-state-error);
+}
+
+/* The text is the one column allowed to run past the card: code does not wrap into sense. */
+.diff-text {
+	white-space: pre;
+	color: var(--dsw-label-primary);
+}
+
+.diff-mark {
+	background: var(--dsw-diff-added-strong);
+	color: inherit;
+}
+
+.diff-row.remove .diff-mark {
+	background: var(--dsw-diff-deleted-strong);
+}
+
+/* --------------------------------------------------------------- branch page */
+
+/*
+ * The pane switch, decided by one attribute on the body.
+ *
+ * The branch page replaces the conversation whole — not an overlay, not a side panel — so the
+ * composer (with the workspace row and the approval seat in it), the status line, and the banners
+ * all go with it; the page is the tree, the summary line, and the fixed header's tools row, and
+ * that is all. The branch view occupies the same flexing grid row the transcript does.
+ */
+body[data-pane="branch"] .transcript-body,
+body[data-pane="branch"] .banners,
+body[data-pane="branch"] .composer-wrap,
+body[data-pane="branch"] .status-bar {
+	display: none;
+}
+
+body:not([data-pane="branch"]) .branch-view {
+	display: none;
+}
+
+.branch-view {
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	min-width: 0;
+}
+
+/* The summary line: what the tree holds, and — because no one guesses these gestures — how to use it. */
+.branch-sum {
+	flex: none;
+	display: flex;
+	align-items: baseline;
+	gap: 16px;
+	min-width: 0;
+	padding: 14px 24px 10px;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	color: var(--dsw-label-caption);
+}
+
+.branch-sum > span {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.branch-sum b {
+	font-family: var(--dsw-font-mono);
+	font-weight: 600;
+	color: var(--dsw-label-secondary);
+}
+
+.branch-sum .branch-hint {
+	padding-left: 16px;
+	border-left: 1px solid var(--dsw-border-l1);
+}
+
+/*
+ * The viewport hands the pan its scroll range; the view decides where in it to sit.
+ *
+ * The sizer is at least the viewport (its `min-width` / `min-height` are `100%`), and `left` / `top`
+ * of the layer inside it are written by `applyZoom` as the midpoint of the room left over. So a
+ * graph smaller than the canvas is centred on both axes with no scroll at all, and one larger than
+ * the canvas keeps the padding on its left/top edge while `scrollHome()` centres it. The sizer's
+ * floor is also what keeps its origin at the viewport's origin, so the scroll position and the
+ * graph's coordinates cannot slide apart.
+ *
+ * The graph's natural size and its scaled size are two facts: the sizer outside carries the scroll
+ * range (so a shrunken graph still scrolls a shrunken distance), and the layer inside carries the
+ * `scale()` — which keeps the text vector-sharp at any zoom.
+ */
+.graph-viewport {
+	flex: 1;
+	min-height: 0;
+	display: grid;
+	overflow: auto;
+	position: relative;
+	cursor: grab;
+	user-select: none;
+}
+
+.graph-viewport.panning {
+	cursor: grabbing;
+}
+
+.graph-sizer {
+	position: relative;
+	min-width: 100%;
+	min-height: 100%;
+}
+
+.graph-zoom {
+	position: absolute;
+	left: 0;
+	top: 0;
+	transform-origin: 0 0;
+}
+
+.graph-svg {
+	position: absolute;
+	left: 0;
+	top: 0;
+	pointer-events: none;
+}
+
+/*
+ * The element the graph measures its geometry on (`cardMetrics` in `branch-view.ts`): it is handed a
+ * token as its height and read back, because a `calc()` token's computed value is still a `calc()`
+ * string and parsing it yields nothing. It never shows, sits out of the flow, and the paint removes it.
+ */
+.branch-metric {
+	position: absolute;
+	left: 0;
+	top: 0;
+	width: 0;
+	visibility: hidden;
+	pointer-events: none;
+}
+
+/*
+ * One node: a dot on the line, then a **fixed-height, one-line** card — the way's first sentence, and
+ * under it the short id cut from its store entry plus its round. The sentence is cut by the ellipsis,
+ * and the whole of it is the card's `title`: a card that grew on hover covered the row below and made
+ * the tree, which is the only reason the page exists, read as prose. Height and the gap under it come
+ * from the branch tokens, which follow the font-size scale; the graph measures the same two to lay the
+ * lanes out, so a card and its lane can only agree.
+ */
+.gnode {
+	position: absolute;
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	gap: 2px;
+	height: var(--dsw-branch-node-h);
+	padding: 4px 10px;
+	border-radius: var(--dsw-radius-sm);
+	overflow: hidden;
+	text-align: left;
+	background: var(--dsw-bg-layer-1);
+	border: 1px solid var(--dsw-border-l2);
+	color: var(--dsw-label-caption);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	cursor: pointer;
+	transition:
+		background var(--dsw-duration-fast) var(--dsw-ease),
+		border-color var(--dsw-duration-fast) var(--dsw-ease),
+		color var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.gnode:hover {
+	z-index: 3;
+	background: var(--dsw-bg-layer-2);
+	border-color: var(--dsw-border-l3);
+	color: var(--dsw-label-primary);
+	box-shadow: var(--dsw-shadow-panel);
+}
+
+.gnode:disabled {
+	cursor: default;
+	color: var(--dsw-label-caption);
+}
+
+/* The one line the card shows, cut by the ellipsis; the whole sentence is the card's `title`. */
+.gnode .lbl {
+	display: block;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.gnode .meta {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+	white-space: nowrap;
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	color: var(--dsw-label-caption);
+}
+
+.gnode .meta .tag {
+	padding: 0 5px;
+	border-radius: var(--dsw-radius-xs);
+	background: var(--dsw-bubble-highlight);
+	color: var(--dsw-state-business);
+}
+
+.gnode[data-on-path] {
+	color: var(--dsw-label-secondary);
+}
+
+.gnode[data-current] {
+	background: var(--dsw-bg-layer-2);
+	border-color: var(--dsw-border-l3);
+	color: var(--dsw-label-primary);
+}
+
+.gnode[data-current] .lbl {
+	font-weight: 500;
+}
+
+.gnode[data-selected] {
+	border-color: var(--dsw-state-business);
+	box-shadow: 0 0 0 3px var(--dsw-bubble-highlight);
+}
+
+/* ------------------------------------------------------------------- banners */
+
+.banners:empty {
+	display: none;
+}
+
+.banners {
+	max-width: var(--dsw-content-width);
+	margin-inline: auto;
+	padding: 0 24px 8px;
+}
+
+/*
+ * The approval takeover: one card per waiting approval, sitting in the composer's own seat.
+ *
+ * The shape is the reference's — a warning border around the whole card, a status strip on top, the
+ * command in the middle, and the two answers at the bottom right — because the card *is* the input
+ * for as long as the approval stands, and a question that replaces the thing it interrupted reads as
+ * urgent where a banner above an untouched input box reads as a sticky note.
+ */
+.approval-seat {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-bottom: 8px;
+}
+
+.approval-card {
+	border: 1px solid var(--dsw-state-warn);
+	border-radius: var(--dsw-radius-xl);
+	background: var(--dsw-input-fill);
+	box-shadow: var(--dsw-shadow-panel);
+	overflow: hidden;
+}
+
+.approval-strip {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 14px;
+	background: var(--dsw-warn-tint);
+	color: var(--dsw-state-warn-label);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	font-weight: 500;
+}
+
+.approval-dot {
+	width: 7px;
+	height: 7px;
+	flex: none;
+	border-radius: 50%;
+	background: var(--dsw-state-warn);
+	animation: pulse 1.2s var(--dsw-ease) infinite;
+}
+
+.approval-body-wrap {
+	padding: 10px 14px 4px;
+}
+
+.approval-headline {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 600;
+}
+
+.approval-headline svg {
+	width: 16px;
+	height: 16px;
+	flex: none;
+	color: var(--dsw-state-warn);
+}
+
+.approval-command {
+	margin: 6px 0 0;
+	max-height: 8rem;
+	overflow: auto;
+	color: var(--dsw-label-secondary);
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-code);
+	line-height: var(--dsw-lh-code);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.approval-actions {
+	display: flex;
+	gap: 8px;
+	justify-content: flex-end;
+	padding: 10px 14px 12px;
+}
+
+/* ------------------------------------------------------------------ composer */
+
+/*
+ * The composer head: the workspace chip on its own line above the input card, leftmost — where a
+ * session starts is where "where the next one starts" belongs (01 ⑦). The chip is permanent here:
+ * its choice never rewrites the session on screen, and it is placed by the input it sits over
+ * rather than by what the transcript says, so it needs no phase to come and go with.
+ */
+.composer-head {
+	display: flex;
+	align-items: center;
+	padding: 0 4px 6px;
+}
+
+.workspace-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 100%;
+	height: 28px;
+	padding: 0 10px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: 999px;
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	cursor: pointer;
+	transition:
+		background var(--dsw-duration-fast) var(--dsw-ease),
+		border-color var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.workspace-chip:hover {
+	background: var(--dsw-bg-hover);
+	border-color: var(--dsw-border-l3);
+	color: var(--dsw-label-primary);
+}
+
+.workspace-chip svg {
+	width: 14px;
+	height: 14px;
+	flex: none;
+}
+
+/* The chevron is the affordance; the folder is the content. */
+.workspace-chip svg:last-child {
+	width: 12px;
+	height: 12px;
+	color: var(--dsw-label-caption);
+}
+
+.workspace-chip-label {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+/*
+ * The one self-drawn menu. Fixed against the viewport, token-shaded, one at a time — and nothing
+ * else in the window gets one, because a second popup implementation is a second set of dismissal
+ * rules to keep honest.
+ */
+.menu {
+	position: fixed;
+	z-index: 60;
+	min-width: 180px;
+	max-width: 320px;
+	padding: 4px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-bg-layer-1);
+	box-shadow: var(--dsw-shadow-panel);
+}
+
+.menu-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	min-height: 30px;
+	padding: 5px 10px;
+	border: none;
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	text-align: left;
+	cursor: pointer;
+}
+
+.menu-item:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.menu-item[data-active="true"] {
+	color: var(--dsw-label-primary);
+	font-weight: 500;
+}
+
+.menu-item[data-active="true"] .menu-label::after {
+	content: "✓";
+	margin-left: auto;
+	color: var(--dsw-state-business);
+	font-weight: 400;
+}
+
+/* A destructive row says so in colour, before its words are read. */
+.menu-item[data-danger="true"] {
+	color: var(--dsw-state-error);
+}
+
+.menu-item[data-danger="true"]:hover {
+	background: var(--dsw-bg-hover-danger);
+}
+
+.menu-item[data-danger="true"] svg {
+	color: var(--dsw-state-error);
+}
+
+.menu-item svg {
+	width: 14px;
+	height: 14px;
+	flex: none;
+	color: var(--dsw-label-tertiary);
+}
+
+.menu-label {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+/* A row with a detail stacks its two lines; the active mark still rides the first line's right end,
+   which is why the label line becomes a flex row of its own. */
+.menu-text {
+	display: flex;
+	flex-direction: column;
+	flex: 1;
+	min-width: 0;
+	gap: 1px;
+}
+
+.menu-text .menu-label {
+	display: flex;
+}
+
+.menu-detail {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	font-weight: 400;
+}
+
+.menu-separator {
+	height: 1px;
+	margin: 4px 6px;
+	background: var(--dsw-border-l1);
+}
+
+/*
+ * The one self-drawn card that asks for a line of typing — a workspace's new folder name.
+ *
+ * It is a modal, unlike the menu above it: centred, keyboard-taking, and undismissable by a stray
+ * click on the page behind it. The scrim is the only place either is drawn from, so the dimming
+ * follows the theme without a second rule, and it sits above the menu because the menu is what opens
+ * it (z-index 60 there).
+ */
+.text-dialog-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 70;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--dsw-scrim);
+}
+
+.text-dialog {
+	width: min(420px, calc(100vw - 48px));
+	padding: 20px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-lg);
+	background: var(--dsw-bg-layer-1);
+	box-shadow: var(--dsw-shadow-panel);
+}
+
+.text-dialog-title {
+	margin-bottom: 14px;
+	color: var(--dsw-label-primary);
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
+	font-weight: 600;
+}
+
+.text-dialog-label {
+	display: block;
+	margin-bottom: 6px;
+	color: var(--dsw-label-secondary);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.text-dialog-input {
+	width: 100%;
+	height: 34px;
+	padding: 0 10px;
+	border: 1px solid var(--dsw-border-l3);
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-input-fill);
+	color: var(--dsw-label-primary);
+	font: inherit;
+	font-size: var(--dsw-fs-body);
+}
+
+.text-dialog-input:focus {
+	outline: none;
+	border-color: var(--dsw-state-business);
+}
+
+.text-dialog-hint {
+	margin-top: 8px;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.text-dialog-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 18px;
+}
+
+.composer-wrap {
+	max-width: var(--dsw-content-width);
+	width: 100%;
+	margin-inline: auto;
+	padding: 0 24px 20px;
+}
+
+.error-bar {
+	margin-bottom: 8px;
+	padding: 8px 12px;
+	border: 1px solid var(--dsw-state-error);
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-bg-hover-danger);
+	color: var(--dsw-state-error);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+}
+
+.composer {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 10px 12px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-lg);
+	background: var(--dsw-input-fill);
+	box-shadow: var(--dsw-shadow-panel);
+	transition: border-color var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.composer:focus-within {
+	border-color: var(--dsw-border-l4);
+}
+
+.composer textarea {
+	width: 100%;
+	min-height: 44px;
+	max-height: 16rem;
+	padding: 0;
+	border: none;
+	background: transparent;
+	color: var(--dsw-label-primary);
+	font: inherit;
+	/* The body tier, not the title tier the small inputs wear: this is the user's own prose — the
+	   text that becomes the next message bubble — so it rides the same axis the transcript reads
+	   at, and someone enlarging the window's text enlarges what they type with it. (05's call; 07
+	   left it standing.) */
+	font-size: var(--dsw-fs-body);
+	line-height: var(--dsw-lh-body);
+	resize: none;
+	outline: none;
+}
+
+.composer-bar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+/*
+ * The model seat: which row answers, and how hard it is asked to think.
+ *
+ * On the bar rather than in the settings panel because it follows the session — it is read while
+ * working and changed mid-conversation, so it has to be where the writing happens — and on the
+ * bar's right end because that is where 01 ④ put it: "选模型的放在输入框右边", just left of the
+ * send button. The bar carries no hint lines, so the auto margin is what pins the seat there. Both
+ * selects are deliberately quiet: a control read on every glance should not compete with the answer
+ * above it.
+ */
+.composer-seat {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+	margin-left: auto;
+}
+
+.composer-select {
+	max-width: 12rem;
+	height: 26px;
+	padding: 0 6px;
+	border: 1px solid transparent;
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.composer-select:hover {
+	background: var(--dsw-bg-hover-solid);
+}
+
+.composer-select:focus-visible {
+	border-color: var(--dsw-border-l4);
+	outline: none;
+}
+
+/* The mode seat, leftmost on the bar: a chip like the workspace picker's, because it opens the one
+ * menu — name first, a summary line under it. It is read at every glance and changed while working,
+ * so it keeps the selects' quiet grammar rather than the send button's.
+ */
+.composer-mode {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	max-width: 11rem;
+	height: 26px;
+	padding: 0 8px;
+	border: 1px solid transparent;
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.composer-mode:hover {
+	background: var(--dsw-bg-hover-solid);
+}
+
+.composer-mode:focus-visible {
+	border-color: var(--dsw-border-l4);
+	outline: none;
+}
+
+.composer-mode svg {
+	width: 13px;
+	height: 13px;
+	flex: none;
+	color: var(--dsw-label-caption);
+}
+
+.composer-mode svg:last-child {
+	width: 11px;
+	height: 11px;
+	transform: rotate(90deg);
+}
+
+.composer-mode-label {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.button {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	height: 32px;
+	padding: 0 14px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-primary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	font-weight: 500;
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.button:hover {
+	background: var(--dsw-bg-hover-solid);
+}
+
+.button svg {
+	width: 15px;
+	height: 15px;
+}
+
+.button.primary {
+	border-color: transparent;
+	background: var(--dsw-button-primary-fill);
+	color: var(--dsw-button-primary-label);
+}
+
+.button.primary:hover {
+	background: var(--dsw-button-primary-hover);
+}
+
+.button.danger {
+	border-color: var(--dsw-state-error);
+	color: var(--dsw-state-error);
+}
+
+.button.danger:hover {
+	background: var(--dsw-bg-hover-danger);
+}
+
+.button:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+.button:disabled:hover {
+	background: transparent;
+}
+
+.button.primary:disabled:hover {
+	background: var(--dsw-button-primary-fill);
+}
+
+/*
+ * `display: inline-flex` above would otherwise win over the browser's own `[hidden]` rule, leaving
+ * the Stop button on screen next to Send.
+ */
+[hidden] {
+	display: none !important;
+}
+
+/* --------------------------------------------------------------- status line */
+
+/*
+ * Three numbers and a bar, under the composer.
+ *
+ * Each reading owns a third of the line and centers inside its own third. Left to itself the row
+ * gathers at the left edge, which reads as an unfinished line rather than a line about the request;
+ * divided three ways, the figures sit where the composer above them is read from.
+ *
+ * The line is a little narrower than the composer it sits under, so the three figures read as one
+ * cluster about the middle rather than as a row pinned to the composer's two corners. That gap is
+ * stated as a difference, not a second width, so the relationship survives the reading column
+ * handle: however wide the prose is dragged, the line stays one step narrower.
+ *
+ * Deliberately not in the header: the header is where the conversation starts, and a figure that
+ * moves on every turn would pull the eye to it. Down here it is read when it is being looked for.
+ */
+.status-bar {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	max-width: calc(var(--dsw-content-width) - 6rem);
+	width: 100%;
+	margin-inline: auto;
+	padding: 0 24px 10px;
+	/* A little left of the composer's centre, which is the axis the line is read from. Like the
+	   middle reading's own nudge below, this is optical: the layout is untouched. */
+	transform: translateX(-24px);
+	color: var(--dsw-label-caption);
+	/* Technical readings, deliberately a step under the prose and pinned to the caption tier:
+	   numbers one watches for, not text one reads. They do not ride the slider. */
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.status-stat {
+	white-space: nowrap;
+}
+
+/* The line's three seats: the session total, the cache reading, and context with its bar. */
+.status-bar > .status-stat,
+.status-group {
+	flex: 1;
+	min-width: 0;
+}
+
+.status-bar > .status-stat {
+	text-align: center;
+}
+
+/*
+ * The middle reading sits a little left of its own middle.
+ *
+ * The figure to its right carries a bar, so the three even out only when the middle one gives that
+ * side some room. It is a transform rather than padding because padding would widen this seat and so
+ * move the two readings beside it: this is optical, and the seats stay where they are.
+ */
+.status-bar > .status-stat:nth-child(2) {
+	transform: translateX(-24px);
+}
+
+.status-group {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 10px;
+}
+
+/* The bar is capped, so what the group does not use stays as the space that centers it. */
+.status-meter {
+	position: relative;
+	flex: 1;
+	max-width: 120px;
+	height: var(--dsw-status-meter-h);
+	border-radius: 999px;
+	background: var(--dsw-bg-skeleton);
+	overflow: hidden;
+}
+
+.status-meter-fill {
+	display: block;
+	width: 0;
+	height: 100%;
+	border-radius: 999px;
+	background: var(--dsw-state-business);
+	transition: width var(--dsw-duration) var(--dsw-ease);
+}
+
+.status-bar.warn .status-meter-fill {
+	background: var(--dsw-state-warn);
+}
+
+/* ------------------------------------------------------------ notices */
+
+.notice-card {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 12px 14px;
+	margin-bottom: 8px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-bg-layer-2);
+}
+
+.notice-mark {
+	display: grid;
+	place-items: center;
+	width: 32px;
+	height: 32px;
+	flex: none;
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-secondary);
+}
+
+.notice-mark svg {
+	width: 17px;
+	height: 17px;
+}
+
+.notice-text {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 0;
+	flex: 1;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+}
+
+.notice-text span {
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+/* --------------------------------------------------------------- settings */
+
+.settings-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 40;
+	display: grid;
+	place-items: center;
+	padding: var(--dsw-settings-air);
+	background: var(--dsw-scrim);
+	/* Deliberately no backdrop-filter: this machine composites in software (ADR-0004), and the
+	   measurement in .scratch/window-repair/research/overlay-blur.ts prices blur(2px) at ~2.5ms of
+	   CPU per frame whenever the backdrop moves — for an effect the 32% dim already carries. */
+}
+
+/*
+ * The shared modal surface. The app-level panel is this box, laid out as a nav column plus a content
+ * column below.
+ */
+.settings {
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-lg);
+	background: var(--dsw-bg-layer-1);
+	box-shadow: var(--dsw-shadow-panel);
+	overflow: hidden;
+}
+
+/*
+ * The app panel's shape, taken from the viewport rather than the content — one height for every
+ * section, because a content-sized panel resizes under the pointer on every nav click. Width 800,
+ * the height capped at 800, and the same air at every side (the overlay pads by it, the height
+ * subtracts two of it), so the panel stays centered and whole in even the smallest window.
+ */
+.app-settings {
+	flex-direction: row;
+	width: min(var(--dsw-settings-width), 100%);
+	height: min(var(--dsw-settings-height), calc(100vh - 2 * var(--dsw-settings-air)));
+	max-width: calc(100vw - 2 * var(--dsw-settings-air));
+}
+
+/* The left column: the panel's title and the section list, which scrolls on its own when the
+   window is too short for the list — the content column scrolls independently of it. */
+.settings-nav {
+	flex: none;
+	display: flex;
+	flex-direction: column;
+	gap: 18px;
+	width: var(--dsw-settings-nav-width);
+	min-height: 0;
+	padding: 22px 12px 0;
+}
+
+.settings-nav-title {
+	margin: 0;
+	padding: 0 12px;
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
+	font-weight: 600;
+}
+
+.settings-nav-list {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	overflow-y: auto;
+}
+
+.settings-nav-item {
+	flex: none;
+	display: flex;
+	align-items: center;
+	height: 40px;
+	padding: 0 12px;
+	border: none;
+	border-radius: var(--dsw-radius-md);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	text-align: left;
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.settings-nav-item:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.settings-nav-item.active {
+	background: var(--dsw-bg-active);
+	color: var(--dsw-label-primary);
+	font-weight: 500;
+}
+
+/* The right column: fixed head, scrolling body, note. The body stays the only scroller in it, as
+   before; the nav list is the second, independent one. */
+.settings-content {
+	flex: 1;
+	min-width: 0;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+/* The app panel's head carries the close control alone — its title lives in the nav column — so
+   the space-between has nothing to pair with here. */
+.app-settings .settings-head {
+	justify-content: flex-end;
+	padding: 14px 16px 0;
+}
+
+.settings-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	padding: 14px 16px 12px;
+}
+
+.settings-body {
+	min-height: 0;
+	overflow-y: auto;
+	padding: 16px;
+}
+
+.settings-section {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.settings-hint {
+	margin: 0;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.settings-hint.empty {
+	padding: 14px;
+	border: 1px dashed var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-sm);
+	text-align: center;
+}
+
+.settings-field {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.settings-field.stack {
+	gap: 4px;
+}
+
+.settings-label {
+	color: var(--dsw-label-secondary);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	font-weight: 600;
+}
+
+.settings-value {
+	color: var(--dsw-label-caption);
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	min-width: 40px;
+	text-align: right;
+}
+
+.settings-control {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.settings-note {
+	padding: 0 16px;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.settings-note:not(:empty) {
+	padding-bottom: 12px;
+}
+
+.settings-note[data-tone="ok"] {
+	color: var(--dsw-state-success);
+}
+
+.settings-note[data-tone="error"] {
+	color: var(--dsw-state-error);
+}
+
+/* --------------------------------------------------------- appearance bits */
+
+.segmented {
+	display: flex;
+	gap: 4px;
+	padding: 3px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-bg-layer-2);
+	width: fit-content;
+}
+
+.segment {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 12px;
+	border: none;
+	border-radius: var(--dsw-radius-sm);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.segment:hover {
+	background: var(--dsw-bg-hover);
+}
+
+.segment.active {
+	background: var(--dsw-bg-layer-3);
+	color: var(--dsw-label-primary);
+	box-shadow: 0 1px 2px rgb(0 0 0 / 18%);
+}
+
+.segment svg {
+	width: 15px;
+	height: 15px;
+}
+
+.slider {
+	flex: 1;
+	max-width: 260px;
+	accent-color: var(--dsw-state-business);
+}
+
+.input {
+	width: 100%;
+	height: 32px;
+	padding: 0 10px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-sm);
+	background: var(--dsw-input-fill);
+	color: var(--dsw-label-primary);
+	font: inherit;
+	font-size: var(--dsw-fs-title);
+	line-height: var(--dsw-lh-title);
+}
+
+select.input {
+	cursor: pointer;
+}
+
+/* ---------------------------------------------------------------- models */
+
+/* One interaction at a time lives in a row: the head opens it, the trash asks once, the form edits
+   it in place. The trash is a sibling of the head rather than a child, because a button cannot hold
+   another — it is laid over the head's reserved right padding instead. */
+.model-row {
+	position: relative;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: var(--dsw-radius-md);
+	background: var(--dsw-bg-layer-2);
+	margin-bottom: 8px;
+	overflow: hidden;
+}
+
+.model-row-head {
+	display: flex;
+	align-items: baseline;
+	gap: 10px;
+	width: 100%;
+	padding: 10px 44px 10px 12px;
+	border: none;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.model-row-head:hover {
+	background: var(--dsw-bg-hover);
+}
+
+/* While the form is open the head is the row's label, not a door: clicks go nowhere, the trash is
+   gone, and the divider sets the form off from what it is editing. */
+.model-row.editing .model-row-head {
+	pointer-events: none;
+	border-bottom: 1px solid var(--dsw-border-l1);
+}
+
+.model-row.editing .model-row-del {
+	display: none;
+}
+
+.model-label {
+	font-weight: 500;
+}
+
+.model-ref {
+	color: var(--dsw-label-caption);
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.model-row-del {
+	position: absolute;
+	top: 6px;
+	right: 8px;
+	opacity: 0;
+	color: var(--dsw-label-caption);
+}
+
+.model-row:hover .model-row-del,
+.model-row.confirming .model-row-del {
+	opacity: 1;
+}
+
+.model-row-del:hover {
+	background: var(--dsw-bg-hover-danger);
+	color: var(--dsw-state-error);
+}
+
+.model-form {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding: 12px;
+}
+
+.model-confirm {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 8px 12px;
+	border-top: 1px solid var(--dsw-border-l1);
+	color: var(--dsw-label-secondary);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.model-confirm-spacer {
+	flex: 1;
+}
+
+/* The add affordance is a dashed invitation, not a boxed button — it reads as an empty slot the
+   next row will fill. */
+.model-add {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	padding: 11px 12px;
+	border: 1px dashed var(--dsw-border-l3);
+	border-radius: var(--dsw-radius-md);
+	background: transparent;
+	color: var(--dsw-label-secondary);
+	font: inherit;
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	cursor: pointer;
+	transition: background var(--dsw-duration-fast) var(--dsw-ease);
+}
+
+.model-add:hover {
+	background: var(--dsw-bg-hover);
+	color: var(--dsw-label-primary);
+}
+
+.model-add svg {
+	width: 15px;
+	height: 15px;
+}
+
+.model-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.model-hint {
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.model-check {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	color: var(--dsw-label-secondary);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+	cursor: pointer;
+}
+
+.model-check input {
+	accent-color: var(--dsw-state-business);
+}
+
+.model-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	padding-top: 2px;
+}
+
+/* ---------------------------------------------------------------- modes */
+
+/* The mode cards reuse the model rows' frame — head, trash, inline form — and add only what a mode
+   needs that a model does not: the built-in badge, the value summary, and one toggle row per tool. */
+.mode-badge {
+	padding: 1px 6px;
+	border: 1px solid var(--dsw-border-l2);
+	border-radius: 999px;
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.mode-summary {
+	color: var(--dsw-label-caption);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+/* The built-in default's name in its form: the label and badge where a stored mode has an input. It
+   keeps the input's height so the two forms read as the same object, not as one missing a field. */
+.mode-name-static {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 30px;
+}
+
+/* The built-in card has no trash to sit in the head's reserved right padding. */
+.model-row.mode-default .model-row-head {
+	padding-right: 12px;
+}
+
+/* One tool of one mode: toggle, name, and — for the tools the approval map has keys for — the
+   approval select beside them. The 30px row is the select's height rather than the text's line box,
+   and the 8px gap keeps the selects from almost touching the row above. */
+.mode-tooltable {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 12px;
+	border-top: 1px solid var(--dsw-border-l1);
+}
+
+.mode-tool {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-height: 30px;
+}
+
+.mode-tool input[type="checkbox"] {
+	accent-color: var(--dsw-state-business);
+}
+
+.mode-tool-name {
+	min-width: 0;
+	color: var(--dsw-label-secondary);
+	font-family: var(--dsw-font-mono);
+	font-size: var(--dsw-fs-caption);
+	line-height: var(--dsw-lh-caption);
+}
+
+.mode-tool-approval {
+	margin-left: auto;
+	width: auto;
+	height: 30px;
+	padding: 0 6px;
+}
+
+/* ----------------------------------------------------------------- scrollbars */
+
+.transcript,
+.session-list,
+.tool-output,
+.reasoning-body,
+.diff,
+.settings-body,
+.settings-nav-list,
+.approval-command {
+	scrollbar-width: thin;
+	scrollbar-color: var(--dsw-scrollbar-thumb) transparent;
+}
+
+.transcript::-webkit-scrollbar,
+.session-list::-webkit-scrollbar,
+.tool-output::-webkit-scrollbar,
+.reasoning-body::-webkit-scrollbar,
+.diff::-webkit-scrollbar,
+.settings-body::-webkit-scrollbar,
+.settings-nav-list::-webkit-scrollbar,
+.approval-command::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+
+.transcript::-webkit-scrollbar-thumb,
+.session-list::-webkit-scrollbar-thumb,
+.tool-output::-webkit-scrollbar-thumb,
+.reasoning-body::-webkit-scrollbar-thumb,
+.diff::-webkit-scrollbar-thumb,
+.settings-body::-webkit-scrollbar-thumb,
+.settings-nav-list::-webkit-scrollbar-thumb,
+.approval-command::-webkit-scrollbar-thumb {
+	border: 3px solid transparent;
+	border-radius: 999px;
+	background: var(--dsw-scrollbar-thumb);
+	background-clip: content-box;
+}
+
+.transcript::-webkit-scrollbar-thumb:hover,
+.session-list::-webkit-scrollbar-thumb:hover,
+.tool-output::-webkit-scrollbar-thumb:hover,
+.reasoning-body::-webkit-scrollbar-thumb:hover,
+.diff::-webkit-scrollbar-thumb:hover,
+.settings-body::-webkit-scrollbar-thumb:hover,
+.settings-nav-list::-webkit-scrollbar-thumb:hover,
+.approval-command::-webkit-scrollbar-thumb:hover {
+	background: var(--dsw-scrollbar-thumb-hover);
+	background-clip: content-box;
+}
+
+/* --------------------------------------------------------------------- rail */
+
+#app[data-sidebar="rail"] .sidebar {
+	padding: 6px 8px;
+}
+
+#app[data-sidebar="rail"] .new-session span,
+#app[data-sidebar="rail"] .list-head,
+#app[data-sidebar="rail"] .search-row,
+#app[data-sidebar="rail"] .session-list-heading,
+#app[data-sidebar="rail"] .workspace-head,
+#app[data-sidebar="rail"] .session-item-title,
+#app[data-sidebar="rail"] .session-item-time,
+#app[data-sidebar="rail"] .channel-indicator-text,
+#app[data-sidebar="rail"] .settings-entry span {
+	display: none;
+}
+
+/* The rail's foot stacks: the gear above the channel dot, each centred in its own row. */
+#app[data-sidebar="rail"] .sidebar-foot {
+	flex-direction: column;
+	gap: 6px;
+}
+
+#app[data-sidebar="rail"] .sidebar-top {
+	flex-direction: column;
+	height: auto;
+	gap: 6px;
+	padding: 0;
+}
+
+/* The rail has room for the dot and nothing else, which is the whole message anyway. */
+#app[data-sidebar="rail"] .channel-indicator {
+	justify-content: center;
+	width: 100%;
+}
+
+#app[data-sidebar="rail"] .new-session {
+	width: 36px;
+	height: 36px;
+	margin-inline: auto;
+	padding: 0;
+	/* The top row is a column here; the seat the full sidebar gives this button must not stretch. */
+	flex: none;
+}
+
+#app[data-sidebar="rail"] .session-item {
+	justify-content: center;
+	padding: 6px 0;
+}
+
+#app[data-sidebar="rail"] .settings-entry {
+	justify-content: center;
+	padding: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+	}
+}

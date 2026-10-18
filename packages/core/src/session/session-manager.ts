@@ -259,6 +259,14 @@ export interface BranchOption {
 	label: string;
 	/** The role of that message, so a label can say who speaks. */
 	role: string;
+	/**
+	 * One line of the first assistant text below it, or empty while it has produced none.
+	 *
+	 * The card names a way by the user message that starts it, and this is what that way answered —
+	 * the card's tooltip. A subtree whose answer so far is only tool calls has nothing to show yet;
+	 * the walk skips those messages rather than handing back an empty line to hover over.
+	 */
+	answer: string;
 	/** True for the alternative the active chain leads through. */
 	active: boolean;
 }
@@ -273,7 +281,50 @@ export interface BranchOption {
 export interface BranchPoint {
 	/** The entry the alternatives hang off, always an entry on the active chain. */
 	entryId: string;
+	/**
+	 * One line of the user message at or above the point: the question the point's message answers,
+	 * or the point's own text when the point is a user's.
+	 *
+	 * A branch taken from an assistant answer has no user text of its own to name it by, and the
+	 * answer is what the card would otherwise repeat; the question is the one line that says which
+	 * answer this is without reading it. Empty only for a conversation that opens with an assistant.
+	 */
+	prompt: string;
+	/** One line of the point's own message when that message is an assistant's, or empty. */
+	answer: string;
 	options: BranchOption[];
+}
+
+/**
+ * One user message in the session, as the branch page draws it.
+ *
+ * The page is a line of **questions**, not a list of forks: what a person recognises as a place they
+ * can go back to is the thing they asked. So this is folded from the whole entry tree rather than the
+ * active chain — a question whose way was left behind is still a question, and it is exactly the card
+ * a reader is looking for after a rewind took the rest of the line out of the transcript.
+ *
+ * `parentId` is the nearest user message **above** it, not the entry's own parent: the entries between
+ * two questions are one round's work, and a card hangs off the question that opened the round before.
+ */
+export interface UserWay {
+	/** The user message entry: the card's identity, and the id a move names. */
+	entryId: string;
+	/** The user message this one follows on its own way; null for the first question of a line. */
+	parentId: string | null;
+	/** One line of what was asked. */
+	label: string;
+	/** One line of the first assistant text the round produced, for the card's tooltip. */
+	answer: string;
+	/**
+	 * Where a press on the card lands: the last message of the round this question opened.
+	 *
+	 * Only when that message is an assistant's, because the point of landing there is that the next
+	 * prompt is typed **after** an answer rather than in place of one. A round that stopped mid-tool
+	 * has no answer to keep, so its card lands on the question itself.
+	 */
+	landingId: string;
+	/** True when this message sits on the chain the leaf is on. */
+	active: boolean;
 }
 
 /** One workspace the sidebar groups under, and the sessions stored for it. */
@@ -903,6 +954,8 @@ interface SubtreeDescription {
 	label: string;
 	/** The role of that message, so a label can say who speaks. */
 	role: string;
+	/** A one-line preview of the earliest assistant text below, or empty when there is none yet. */
+	answer: string;
 }
 
 /**
@@ -1334,8 +1387,16 @@ export class SessionManager {
 		const children = this.childrenIndex();
 		const memo = new Map<string, SubtreeDescription>();
 		const points: BranchPoint[] = [];
+		// The user message the chain is currently under. A point's `prompt` is this one, at or above
+		// the point: an assistant answer is named by the question it answered, and a user message is
+		// its own prompt.
+		let prompt = "";
 
 		for (const entry of chain) {
+			const own = entry.type === "message" ? previewOfMessage(entry.message) : undefined;
+			if (entry.type === "message" && entry.message.role === "user" && own !== undefined && own.label.length > 0) {
+				prompt = own.label;
+			}
 			const options: BranchOption[] = [];
 			for (const child of children.get(entry.id) ?? []) {
 				const described = this.subtreeDescription(child.id, children, memo);
@@ -1344,10 +1405,14 @@ export class SessionManager {
 					entryId: child.id,
 					label: described.label,
 					role: described.role,
+					answer: described.answer,
 					active: onChain.has(child.id),
 				});
 			}
-			if (options.length > 1) points.push({ entryId: entry.id, options });
+			if (options.length > 1) {
+				const answer = entry.type === "message" && entry.message.role === "assistant" ? (own?.label ?? "") : "";
+				points.push({ entryId: entry.id, prompt, answer, options });
+			}
 		}
 		return points;
 	}
@@ -1389,7 +1454,7 @@ export class SessionManager {
 		if (cached !== undefined) return cached;
 		// Seeded before the descent: this is what a file hand-edited into a cycle finds when it comes
 		// back around, so the walk ends there instead of spinning.
-		memo.set(entryId, { tip: entryId, message: false, label: "", role: "" });
+		memo.set(entryId, { tip: entryId, message: false, label: "", role: "", answer: "" });
 
 		const entry = this.byId.get(entryId);
 		const descents = (children.get(entryId) ?? []).map((child) =>
@@ -1407,6 +1472,13 @@ export class SessionManager {
 				role = below.role;
 			}
 		}
+		// The first assistant text, not the first message: a way that is still calling tools has not
+		// answered yet, and its card's tooltip should stay empty until it has.
+		const ownAnswer = own?.role === "assistant" ? own.label : "";
+		const answer =
+			ownAnswer.length > 0
+				? ownAnswer
+				: (descents.find((descent) => descent.answer.length > 0)?.answer ?? "");
 
 		const described: SubtreeDescription = {
 			// The newest child is the last written, and the file is in write order.
@@ -1414,6 +1486,7 @@ export class SessionManager {
 			message,
 			label,
 			role,
+			answer,
 		};
 		memo.set(entryId, described);
 		return described;

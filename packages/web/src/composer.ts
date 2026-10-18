@@ -1,4 +1,5 @@
-import { element, icon, option } from "./dom.ts";
+import { element, icon } from "./dom.ts";
+import { openMenu } from "./render/menu.ts";
 import type { ModelOption, PromptBehavior } from "@my-agent/core/protocol";
 
 export interface ComposerHandlers {
@@ -28,6 +29,26 @@ export interface ComposerSelection {
 	level: string;
 }
 
+/** The ref a model row is chosen by, which is what the window and the server both name it with. */
+function refOf(model: ModelOption): string {
+	return `${model.name}/${model.modelId}`;
+}
+
+/**
+ * The model seat's label: the row's name, or the reason it names none.
+ *
+ * Three ways to sit outside the list, and only one of them is a loss: nothing configured at all,
+ * nothing chosen yet (the empty ref — the seat is where the next conversation starts), and a ref
+ * whose row is gone. Only the last one names what was lost.
+ */
+function modelLabel(selection: ComposerSelection): string {
+	const row = selection.models.find((model) => refOf(model) === selection.model);
+	if (row !== undefined) return row.name;
+	if (selection.models.length === 0) return "未配置模型";
+	if (selection.model.length === 0) return "选择模型";
+	return `${selection.model}（已丢失）`;
+}
+
 /**
  * The prompt box.
  *
@@ -44,8 +65,16 @@ export interface ComposerSelection {
  * bar's right end for the same reason it sits on the bar at all — which model answers, and how hard
  * it is asked to think, are chosen per conversation and often changed inside one. Both halves are
  * held by the window until a message is sent with them — nothing here reaches the server until
- * then — so the two selects are drawn from {@link setSelection} and their changes are reported as
- * plain choices.
+ * then — so the seat is drawn from {@link setSelection} and its changes are reported as plain
+ * choices.
+ *
+ * The bar's three pickers — mode, model, level — are all one thing: a chip that opens the window's
+ * menu over itself. They used to be native `select`s, and the model and level ones were the last
+ * two in the window, but a native popup is drawn by the platform rather than by the theme: on a dark
+ * window it arrives as a light rectangle. The seats read at every glance are the worst place for a
+ * control that leaves the theme, so they wear the menu the workspace picker already had. All three
+ * open upward, because the bar sits on the window's bottom edge and a menu hung underneath it would
+ * have nowhere to go.
  */
 export class Composer {
 	readonly element: HTMLFormElement;
@@ -55,11 +84,15 @@ export class Composer {
 	private readonly queue: HTMLElement;
 	private readonly modeButton: HTMLButtonElement;
 	private readonly modeLabel: HTMLSpanElement;
-	private readonly modelSelect: HTMLSelectElement;
-	private readonly levelSelect: HTMLSelectElement;
+	private readonly modelButton: HTMLButtonElement;
+	private readonly modelLabelText: HTMLSpanElement;
+	private readonly levelButton: HTMLButtonElement;
+	private readonly levelLabelText: HTMLSpanElement;
+	/** What the two menus are built from: the choices on screen, as of the last draw. */
+	private selection: ComposerSelection = { models: [], model: "", levels: [], level: "" };
 	private modelSignature = "";
 	private levelSignature = "";
-	/** The mode name the label was last drawn from; a gate, like the two selects' signatures. */
+	/** The mode name the label was last drawn from; a gate, like the model and level signatures. */
 	private modeSignature: string | undefined;
 	private streaming = false;
 	private disabled = false;
@@ -91,15 +124,53 @@ export class Composer {
 		this.modeButton.append(icon("sliders"), this.modeLabel, icon("chevron"));
 		this.modeButton.addEventListener("click", () => handlers.onModes(this.modeButton));
 
-		this.modelSelect = element("select", "composer-select", undefined, { "aria-label": "模型" });
-		this.modelSelect.addEventListener("change", () => handlers.onSelectModel(this.modelSelect.value));
-		this.levelSelect = element("select", "composer-select", undefined, { "aria-label": "思考档位" });
-		this.levelSelect.addEventListener("change", () => handlers.onSelectLevel(this.levelSelect.value));
+		// The model seat: two chips of the mode seat's grammar — a label and a chevron — each opening
+		// the window's menu over itself. They are buttons rather than native selects because the menu
+		// they open is drawn from this window's tokens; see the class comment.
+		this.modelButton = element("button", "composer-pick", undefined, {
+			type: "button",
+			"aria-haspopup": "menu",
+			"aria-label": "模型",
+		});
+		this.modelLabelText = element("span", "composer-pick-label");
+		this.modelButton.append(this.modelLabelText, icon("chevron"));
+		this.modelButton.addEventListener("click", () => {
+			const { models, model } = this.selection;
+			openMenu(
+				this.modelButton,
+				models.map((row) => ({
+					label: row.name,
+					active: refOf(row) === model,
+					onSelect: () => handlers.onSelectModel(refOf(row)),
+				})),
+				{ placement: "above", align: "end" },
+			);
+		});
+
+		this.levelButton = element("button", "composer-pick", undefined, {
+			type: "button",
+			"aria-haspopup": "menu",
+			"aria-label": "思考档位",
+		});
+		this.levelLabelText = element("span", "composer-pick-label");
+		this.levelButton.append(this.levelLabelText, icon("chevron"));
+		this.levelButton.addEventListener("click", () => {
+			const { levels, level } = this.selection;
+			openMenu(
+				this.levelButton,
+				levels.map((name) => ({
+					label: name,
+					active: name === level,
+					onSelect: () => handlers.onSelectLevel(name),
+				})),
+				{ placement: "above", align: "end" },
+			);
+		});
 
 		// The model seat keeps the bar's right end, the model picking just left of the send button. The
 		// mode seat is the bar's left end; nothing else leads there.
 		const seat = element("div", "composer-seat");
-		seat.append(this.modelSelect, this.levelSelect);
+		seat.append(this.modelButton, this.levelButton);
 
 		this.stop = element("button", "button danger", undefined, { type: "button", hidden: true });
 		this.stop.append(icon("stop"), element("span", undefined, "停止"));
@@ -163,42 +234,37 @@ export class Composer {
 	/**
 	 * Draw the model seat.
 	 *
-	 * The options are rebuilt only when the list they came from moved, so an ordinary re-render — which
-	 * happens on every token — cannot close a dropdown the user has open or drop a value mid-choice.
-	 * The session's own ref is always among the options: a row may have been deleted, never existed at
-	 * all for a session with nothing configured, or not have been chosen yet at all — and the control
+	 * The labels are rewritten only when the thing they name moved, so an ordinary re-render — which
+	 * happens on every token — cannot close a menu the user has open or drop a value mid-choice. The
+	 * menus themselves are built when they open, from {@link selection}, for the same reason: a menu
+	 * built from a stale list would list choices the seat no longer agrees with.
+	 *
+	 * The session's own ref is always accounted for: a row may have been deleted, never existed at
+	 * all for a session with nothing configured, or not have been chosen yet at all — and the seat
 	 * has to show where the choice actually stands rather than silently agree with a list that no
 	 * longer mentions it.
 	 */
 	setSelection(selection: ComposerSelection): void {
-		const modelSignature = `${selection.model}\n${selection.models.map((model) => `${model.name}/${model.modelId}`).join("\n")}`;
+		this.selection = selection;
+
+		const modelSignature = `${selection.model}\n${selection.models.map(refOf).join("\n")}`;
 		if (modelSignature !== this.modelSignature) {
 			this.modelSignature = modelSignature;
-			this.modelSelect.replaceChildren(
-				...selection.models.map((model) => option(`${model.name}/${model.modelId}`, model.name)),
-			);
-			if (!selection.models.some((model) => `${model.name}/${model.modelId}` === selection.model)) {
-				// Three ways to sit outside the list, and only one of them is a loss: nothing configured
-				// at all, nothing chosen yet (the empty ref — the seat is where the next conversation
-				// starts), and a ref whose row is gone. Only the last one names what was lost.
-				const label =
-					selection.models.length === 0 ? "未配置模型"
-					: selection.model.length === 0 ? "选择模型"
-					: `${selection.model}（已丢失）`;
-				this.modelSelect.append(option(selection.model, label));
-			}
+			const label = modelLabel(selection);
+			this.modelLabelText.textContent = label;
+			// The chip is one line, so a name too long to fit is shortened on screen — the tooltip is
+			// where it stays whole.
+			this.modelButton.title = label;
+			this.modelButton.disabled = selection.models.length === 0;
 		}
-		this.modelSelect.value = selection.model;
-		this.modelSelect.disabled = selection.models.length === 0;
 
 		const levelSignature = `${selection.level}\n${selection.levels.join(",")}`;
 		if (levelSignature !== this.levelSignature) {
 			this.levelSignature = levelSignature;
-			this.levelSelect.replaceChildren(...selection.levels.map((level) => option(level, level)));
+			this.levelLabelText.textContent = selection.level.length === 0 ? "思考档位" : selection.level;
 		}
-		this.levelSelect.value = selection.level;
 		// One level is not a choice: a model that cannot think has nothing to pick between.
-		this.levelSelect.hidden = selection.levels.length <= 1;
+		this.levelButton.hidden = selection.levels.length <= 1;
 	}
 
 	/**

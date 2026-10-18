@@ -226,8 +226,10 @@ function userEnd(timestamp: number, text: string) {
 function assistantStart(timestamp: number, text = "") {
 	return { type: "message_start", message: { role: "assistant", content: text.length === 0 ? [] : [{ type: "text", text }], timestamp } };
 }
-function assistantUpdate(timestamp: number, text: string) {
-	return { type: "message_update", message: { role: "assistant", content: [{ type: "text", text }], timestamp } };
+function assistantUpdate(timestamp: number, delta: string) {
+	// A delta, not a message: the wire carries the characters that arrived and the client appends
+	// them to the item the stamp names.
+	return { type: "message_update", delta: { timestamp, kind: "text", contentIndex: 0, text: delta } };
 }
 function assistantEnd(timestamp: number, text: string) {
 	return { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], timestamp } };
@@ -262,7 +264,7 @@ check("the pending entry found its echo", echoItem?.forkEntryId === "entry-u2", 
 
 // A second assistant stamped like the first: it must not overwrite the first answer's body,
 // and must not draw the answer on the far side of the user bubble.
-liveState = fold(liveState, assistantStart(2_000, "第二答"));
+liveState = fold(liveState, assistantStart(2_000));
 liveState = fold(liveState, assistantUpdate(2_000, "第二答"));
 liveState = fold(liveState, assistantEnd(2_000, "第二答"));
 check(
@@ -289,6 +291,46 @@ check(
 	shapeOf(plainState.items) === "user:10000=第一问 assistant:11000=第一答 user:12000=接着问 assistant:13000=第二答 tools:tool:9",
 	shapeOf(plainState.items),
 );
+
+process.stdout.write("a delta stream appends to one item, and a mid-run baseline seeds it\n");
+{
+	// The ordinary run: reasoning, then the answer, one delta at a time. No frame carries the message,
+	// so every character on screen got there by being appended to the item its stamp names.
+	let state = reduce(initialState(), { type: "baseline", session: snapshotWith([], { submitting: true }) });
+	state = fold(state, assistantStart(20_000));
+	state = fold(state, { type: "message_update", delta: { timestamp: 20_000, kind: "thinking", contentIndex: 0, text: "先想" } });
+	state = fold(state, { type: "message_update", delta: { timestamp: 20_000, kind: "thinking", contentIndex: 0, text: "一下" } });
+	const thinking = state.items.at(-1);
+	check("thinking deltas append into one block", thinking?.kind === "message" && thinking.thinking?.text === "先想一下", JSON.stringify(thinking));
+	check("and the row still says it is thinking", thinking?.kind === "message" && thinking.thinking?.running === true);
+	check("the item was opened by the first delta", state.items.length === 1 && state.items[0]?.kind === "message");
+
+	state = fold(state, { type: "message_update", delta: { timestamp: 20_000, kind: "text", contentIndex: 1, text: "第一" } });
+	state = fold(state, { type: "message_update", delta: { timestamp: 20_000, kind: "text", contentIndex: 1, text: "答" } });
+	const answer = state.items.at(-1);
+	check("text deltas append into one answer", answer?.kind === "message" && answer.text === "第一答", JSON.stringify(answer));
+	check("the first answer character stops the thinking row", answer?.kind === "message" && answer.thinking?.running === false);
+
+	state = fold(state, assistantEnd(20_000, "第一答"));
+	const settled = state.items.at(-1);
+	check("the end still replaces the item with the whole message", settled?.kind === "message" && settled.text === "第一答" && settled.streaming === false);
+}
+{
+	// Attaching mid-run: the store has no message yet, so the baseline's `partial` is the only way the
+	// window sees the beginning of the sentence the deltas after it continue.
+	const partial = {
+		role: "assistant",
+		content: [{ type: "text", text: "已经写了一半" }],
+		timestamp: 30_000,
+	} as unknown as SessionSnapshot["partial"];
+	const state = reduce(initialState(), { type: "baseline", session: snapshotWith([], { submitting: true, partial }) });
+	const item = state.items.at(-1);
+	check("the mid-run baseline draws the text already sent", item?.kind === "message" && item.text === "已经写了一半", JSON.stringify(item));
+	check("and draws it as still streaming", item?.kind === "message" && item.streaming === true);
+	const continued = fold(state, { type: "message_update", delta: { timestamp: 30_000, kind: "text", contentIndex: 0, text: "，后半句" } });
+	const grown = continued.items.at(-1);
+	check("the deltas after it continue the same item", grown?.kind === "message" && grown.text === "已经写了一半，后半句");
+}
 
 process.stdout.write(failures === 0 ? "\nreplay ok\n" : `\n${failures} failure(s)\n`);
 process.exit(failures === 0 ? 0 : 1);

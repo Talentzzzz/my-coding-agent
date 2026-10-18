@@ -307,7 +307,76 @@ try {
 	check("and nothing leaked: the session was reaped", await until(() => !rig.hub.live.includes(unwatchedId), 10_000), rig.hub.live.join(","));
 
 	// ---------------------------------------------------------------------------------------------
-	// 6. Shutdown waits for nothing.
+	// 6. The streamed answer crosses the wire as deltas, and a lane opened mid-run is handed the rest.
+	// ---------------------------------------------------------------------------------------------
+	process.stdout.write("a streamed answer crosses the wire as deltas\n");
+
+	/** The text of an assistant message, as the wire sends it on a start/end/baseline. */
+	const textOf = (message: unknown): string => {
+		const content = (message as { content?: unknown } | undefined)?.content;
+		if (!Array.isArray(content)) return "";
+		return content
+			.map((block) =>
+				typeof block === "object" && block !== null && (block as { type?: string }).type === "text"
+					? String((block as { text?: unknown }).text ?? "")
+					: "",
+			)
+			.join("");
+	};
+	const updatesOf = (client: WireClient, sessionId: string) =>
+		client
+			.items(sessionId)
+			.map((message) => (message.type === "event" ? message.event : undefined))
+			.filter((event): event is { type: "message_update"; delta: { kind: string; text: string } } => event?.type === "message_update");
+
+	const deltaAnswer = "x".repeat(2_400);
+	const deltaSession = await request(rig.url, "POST", "/api/sessions");
+	const deltaId = (deltaSession.payload as { sessionId: string }).sessionId;
+	const deltaBench = await rig.hub.claim(deltaId);
+	const deltaLane = await wire.open(deltaId);
+	check("the lane opened on the new session", deltaLane.id === deltaId);
+
+	rig.transport.setResponses([fakeAssistantMessage(deltaAnswer)]);
+	check("the prompt was accepted", (await prompt(rig.url, deltaId, "say something very long")) === 202);
+	check("the run started producing", await until(() => updatesOf(wire, deltaId).length > 0, 5_000));
+
+	// A second lane, opened while the answer is still arriving. Its baseline is the only frame that
+	// can carry what this window missed — the deltas after it are the rest of the answer.
+	const late = await connect(`${rig.url.replace("http", "ws")}/mux`);
+	const lateBaseline = await late.open(deltaId);
+	const partialText = textOf(lateBaseline.partial);
+	check("the mid-run baseline carries the in-flight message", lateBaseline.partial !== undefined);
+	check(
+		"…and it is the characters that already arrived",
+		partialText.length > 0 && deltaAnswer.startsWith(partialText),
+		`${partialText.length} chars`,
+	);
+
+	check("the run ended", await waitAgentEnd(wire, deltaId));
+
+	const updates = updatesOf(wire, deltaId);
+	check("every update is a delta, with no second copy of the message", updates.every((event) => !("message" in event) && !("assistantMessageEvent" in event)), JSON.stringify(Object.keys(updates[0] ?? {})));
+	check("the deltas concatenate to the answer", updates.map((event) => event.delta.text).join("") === deltaAnswer, `${updates.map((event) => event.delta.text).join("").length}/${deltaAnswer.length}`);
+	const sizes = wire.frames
+		.filter((frame) => frame.streamId === deltaId && "item" in frame && frame.item.type === "event" && frame.item.event.type === "message_update")
+		.map((frame) => JSON.stringify(frame).length);
+	// The envelope plus one provider chunk, whatever the answer has grown to. The whole message does
+	// still cross the wire once — on `message_end`, where it is the thing being recorded.
+	check("no update frame is a copy of the answer", Math.max(...sizes) < 300, `largest ${Math.max(...sizes)} bytes of ${deltaAnswer.length}`);
+	const endSizes = wire.frames
+		.filter((frame) => frame.streamId === deltaId && "item" in frame && frame.item.type === "event" && frame.item.event.type === "message_end")
+		.map((frame) => JSON.stringify(frame).length);
+	check("the answer itself travels once, whole, at the end", endSizes.some((size) => size > deltaAnswer.length), `${endSizes.join("/")} bytes`);
+
+	const lateText = partialText + updatesOf(late, deltaId).map((event) => event.delta.text).join("");
+	check("baseline plus the rest is the whole answer", lateText === deltaAnswer, `${lateText.length}/${deltaAnswer.length}`);
+
+	await late.close();
+	rig.hub.release(deltaBench);
+	check("the delta session was reaped", await until(() => !rig.hub.live.includes(deltaId), 10_000), rig.hub.live.join(","));
+
+	// ---------------------------------------------------------------------------------------------
+	// 7. Shutdown waits for nothing.
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("shutdown waits for nothing\n");
 

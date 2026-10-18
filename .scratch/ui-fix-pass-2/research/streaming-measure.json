@@ -1,0 +1,250 @@
+{
+	"generatedAt": "2026-10-17T17:27:13.340Z",
+	"browser": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.0.0 Safari/537.36",
+	"answerChars": 8000,
+	"frames": 2000,
+	"old": {
+		"frames": 2000,
+		"answerChars": 8000,
+		"bytes": 17562000,
+		"peakBytes": 16777,
+		"parseMs": 11.100000008940697,
+		"reduceMs": 0.5999999940395355,
+		"buckets": [
+			{
+				"from": 0,
+				"to": 249,
+				"answerChars": 1000,
+				"bytes": 445250,
+				"parseMs": 0.4999999925494194,
+				"reduceMs": 0.10000000149011612
+			},
+			{
+				"from": 250,
+				"to": 499,
+				"answerChars": 2000,
+				"bytes": 945250,
+				"parseMs": 1.2000000029802322,
+				"reduceMs": 0.10000000149011612
+			},
+			{
+				"from": 500,
+				"to": 749,
+				"answerChars": 3000,
+				"bytes": 1445250,
+				"parseMs": 1.2000000104308128,
+				"reduceMs": 0
+			},
+			{
+				"from": 750,
+				"to": 999,
+				"answerChars": 4000,
+				"bytes": 1945250,
+				"parseMs": 1.5000000074505806,
+				"reduceMs": 0
+			},
+			{
+				"from": 1000,
+				"to": 1249,
+				"answerChars": 5000,
+				"bytes": 2445250,
+				"parseMs": 1.2999999970197678,
+				"reduceMs": 0
+			},
+			{
+				"from": 1250,
+				"to": 1499,
+				"answerChars": 6000,
+				"bytes": 2945250,
+				"parseMs": 2,
+				"reduceMs": 0.10000000149011612
+			},
+			{
+				"from": 1500,
+				"to": 1749,
+				"answerChars": 7000,
+				"bytes": 3445250,
+				"parseMs": 1.1999999955296516,
+				"reduceMs": 0.29999998956918716
+			},
+			{
+				"from": 1750,
+				"to": 1999,
+				"answerChars": 8000,
+				"bytes": 3945250,
+				"parseMs": 2.2000000029802322,
+				"reduceMs": 0
+			}
+		],
+		"performance": {
+			"LayoutCount": 0,
+			"RecalcStyleCount": 0,
+			"ScriptDuration": 0,
+			"TaskDuration": 0.094727,
+			"JSHeapUsedSize": 564448
+		}
+	},
+	"new": {
+		"frames": 2000,
+		"answerChars": 8000,
+		"bytes": 324000,
+		"peakBytes": 162,
+		"parseMs": 1.4000000059604645,
+		"reduceMs": 0.6000000014901161,
+		"buckets": [
+			{
+				"from": 0,
+				"to": 249,
+				"answerChars": 1000,
+				"bytes": 40500,
+				"parseMs": 0.29999999701976776,
+				"reduceMs": 0
+			},
+			{
+				"from": 250,
+				"to": 499,
+				"answerChars": 2000,
+				"bytes": 40500,
+				"parseMs": 0.10000000149011612,
+				"reduceMs": 0
+			},
+			{
+				"from": 500,
+				"to": 749,
+				"answerChars": 3000,
+				"bytes": 40500,
+				"parseMs": 0.19999999552965164,
+				"reduceMs": 0.10000000149011612
+			},
+			{
+				"from": 750,
+				"to": 999,
+				"answerChars": 4000,
+				"bytes": 40500,
+				"parseMs": 0.20000000298023224,
+				"reduceMs": 0
+			},
+			{
+				"from": 1000,
+				"to": 1249,
+				"answerChars": 5000,
+				"bytes": 40500,
+				"parseMs": 0.20000000298023224,
+				"reduceMs": 0
+			},
+			{
+				"from": 1250,
+				"to": 1499,
+				"answerChars": 6000,
+				"bytes": 40500,
+				"parseMs": 0.10000000149011612,
+				"reduceMs": 0.20000000298023224
+			},
+			{
+				"from": 1500,
+				"to": 1749,
+				"answerChars": 7000,
+				"bytes": 40500,
+				"parseMs": 0.20000000298023224,
+				"reduceMs": 0.09999999403953552
+			},
+			{
+				"from": 1750,
+				"to": 1999,
+				"answerChars": 8000,
+				"bytes": 40500,
+				"parseMs": 0.10000000149011612,
+				"reduceMs": 0.20000000298023224
+			}
+		],
+		"performance": {
+			"LayoutCount": 0,
+			"RecalcStyleCount": 0,
+			"ScriptDuration": 0,
+			"TaskDuration": 0.003595,
+			"JSHeapUsedSize": 1289820
+		}
+	},
+	"curve": [
+		{
+			"index": 1,
+			"answerChars": 1000,
+			"oldBytes": 1781,
+			"newBytes": 162,
+			"oldParse": 0.002,
+			"newParse": 0.0012,
+			"oldReduce": 0.0004,
+			"newReduce": 0
+		},
+		{
+			"index": 2,
+			"answerChars": 2000,
+			"oldBytes": 3781,
+			"newBytes": 162,
+			"oldParse": 0.0048,
+			"newParse": 0.0004,
+			"oldReduce": 0.0004,
+			"newReduce": 0
+		},
+		{
+			"index": 3,
+			"answerChars": 3000,
+			"oldBytes": 5781,
+			"newBytes": 162,
+			"oldParse": 0.0048,
+			"newParse": 0.0008,
+			"oldReduce": 0,
+			"newReduce": 0.0004
+		},
+		{
+			"index": 4,
+			"answerChars": 4000,
+			"oldBytes": 7781,
+			"newBytes": 162,
+			"oldParse": 0.006,
+			"newParse": 0.0008,
+			"oldReduce": 0,
+			"newReduce": 0
+		},
+		{
+			"index": 5,
+			"answerChars": 5000,
+			"oldBytes": 9781,
+			"newBytes": 162,
+			"oldParse": 0.0052,
+			"newParse": 0.0008,
+			"oldReduce": 0,
+			"newReduce": 0
+		},
+		{
+			"index": 6,
+			"answerChars": 6000,
+			"oldBytes": 11781,
+			"newBytes": 162,
+			"oldParse": 0.008,
+			"newParse": 0.0004,
+			"oldReduce": 0.0004,
+			"newReduce": 0.0008
+		},
+		{
+			"index": 7,
+			"answerChars": 7000,
+			"oldBytes": 13781,
+			"newBytes": 162,
+			"oldParse": 0.0048,
+			"newParse": 0.0008,
+			"oldReduce": 0.0012,
+			"newReduce": 0.0004
+		},
+		{
+			"index": 8,
+			"answerChars": 8000,
+			"oldBytes": 15781,
+			"newBytes": 162,
+			"oldParse": 0.0088,
+			"newParse": 0.0004,
+			"oldReduce": 0,
+			"newReduce": 0.0008
+		}
+	]
+}

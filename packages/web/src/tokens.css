@@ -225,20 +225,6 @@
 	 * reason the scrim moved here).
 	 */
 	--dsw-mask-ink: rgb(0 0 0 / 100%);
-	/*
-	 * The one group heading that is the *current workspace* — where the next new session lands — as a
-	 * raised surface rather than a word.
-	 *
-	 * Both parts are needed and neither is enough: the ring is what says "this one" at a glance, and
-	 * the outer drop is what makes the heading sit above the list it heads. The ring is a spread-only
-	 * shadow with no offset, so it outlines the button's own `--dsw-radius-md` instead of drawing a
-	 * second, square-cornered box behind it — and it is a shadow rather than a `border` because a
-	 * border would add 2px to a heading whose height is fixed at 34px.
-	 *
-	 * The ring's strength started at the `--dsw-border-l1` level and was measured up to `l3`: against
-	 * a transparent heading on the sidebar's own fill, an `l1` hairline read as nothing at 1280px.
-	 */
-	--dsw-shadow-workspace-current: 0 0 0 1px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.06);
 	--dsw-scrollbar-thumb: var(--dsw-static-neutral-300);
 	--dsw-scrollbar-thumb-hover: var(--dsw-static-neutral-300);
 	/*
@@ -319,9 +305,6 @@
 	--dsw-diff-added-strong: rgb(34 197 94 / 32%);
 	--dsw-diff-deleted-strong: rgb(242 90 90 / 30%);
 	--dsw-shadow-panel: 0 8px 24px rgba(0, 0, 0, 0.44), 0 1px 2px rgba(0, 0, 0, 0.32);
-	/* The dark sidebar has no light to drop onto, so the ring carries the reading and the drop only
-	   lifts the near edge — a black shadow on a 27,27,28 panel would be invisible either way. */
-	--dsw-shadow-workspace-current: 0 0 0 1px rgba(255, 255, 255, 0.14), 0 1px 3px rgba(0, 0, 0, 0.4);
 	--dsw-scrollbar-thumb: var(--dsw-static-neutral-bluish-700);
 	--dsw-scrollbar-thumb-hover: var(--dsw-static-neutral-bluish-600);
 

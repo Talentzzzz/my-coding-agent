@@ -69,11 +69,19 @@ function renderEvent(event: AgentSessionEvent, verbose: boolean): void {
 			if (event.message.role === "user") process.stdout.write("\n\x1b[36muser>\x1b[0m ");
 			else if (event.message.role === "assistant") process.stdout.write("\n\x1b[32massistant>\x1b[0m ");
 			break;
-		case "message_update": {
-			const inner = event.assistantMessageEvent;
-			if (inner.type === "text_delta") process.stdout.write(inner.delta);
-			else if (inner.type === "thinking_delta" && verbose) process.stdout.write(`\x1b[90m${inner.delta}\x1b[0m`);
-			else if (inner.type === "error") process.stdout.write(`\n\x1b[31merror: ${inner.error.errorMessage ?? "unknown"}\x1b[0m`);
+		case "message_update":
+			// The wire carries the delta alone, so this is the characters and nothing to unpack.
+			if (event.delta.kind === "text") process.stdout.write(event.delta.text);
+			else if (verbose) process.stdout.write(`\x1b[90m${event.delta.text}\x1b[0m`);
+			break;
+		case "message_end": {
+			// A failed attempt used to be printed from the streaming event that carried the error;
+			// that event is not on the wire any more (it carries no characters), so the message's own
+			// end is where the terminal learns how the attempt went.
+			const message = event.message as { stopReason?: string; errorMessage?: string };
+			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				process.stdout.write(`\n\x1b[31m${message.stopReason}: ${message.errorMessage ?? "unknown"}\x1b[0m`);
+			}
 			break;
 		}
 		case "tool_execution_start":

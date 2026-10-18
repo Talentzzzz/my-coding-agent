@@ -219,8 +219,30 @@ class FakeNode {
 		this.textContent = value;
 	}
 
+	/**
+	 * `Text.appendData` — the streaming tail patch's one write.
+	 *
+	 * A character-data node has no children, so the shim's `_text` is exactly its data; refusing the
+	 * call on anything else keeps it from standing in for an element append.
+	 */
+	appendData(data: string): void {
+		if (this.tag !== "#text") throw new Error(`appendData on <${this.tag}>`);
+		this._text = (this._text ?? "") + data;
+	}
+
 	get firstChild(): FakeNode | undefined {
 		return this.children[0];
+	}
+	/**
+	 * `childNodes` — every child, text nodes included.
+	 *
+	 * `children` here already holds text nodes (this shim has no `Element` / `Node` split), so this is
+	 * an alias rather than a second list. It exists because the markdown tail patch reads backwards
+	 * from the end of a block, and in a browser `children` would quietly skip the text node it is
+	 * looking for.
+	 */
+	get childNodes(): FakeNode[] {
+		return this.children;
 	}
 	get lastChild(): FakeNode | undefined {
 		return this.children[this.children.length - 1];
@@ -554,8 +576,11 @@ export interface DomShim {
 	 *
 	 * shim 没有帧循环，`requestAnimationFrame` 只能把回调收下来——调用方自己决定什么时候"过一帧"。
 	 * 返回这一批实际跑掉的个数，好让调用方知道还有没有下一批（回调里再排一帧就会出现）。
+	 *
+	 * `advanceMs` 是这一批回调拿到的时间戳离上一批走了多远，缺省一个 60Hz 帧周期；
+	 * `frame.ts` 的最小绘制间隔闸门读这个数。
 	 */
-	frames(): number;
+	frames(advanceMs?: number): number;
 }
 
 /** `installDom()` 装上的窗口：常量、计时器与帧队列，以及可以派发的监听器。 */
@@ -708,6 +733,14 @@ export function installDom(options: InstallOptions = {}): DomShim {
 	 */
 	const frameHandles = new Map<number, (time: number) => void>();
 	let frameHandle = 0;
+	/**
+	 * 帧回调拿到的假时间戳：每跑一批就往前走一格，间隔由调用方给（缺省一帧 ≈ 16.7ms）。
+	 *
+	 * 传真时间会让 `frame.ts` 的 16ms 闸门在 smoke 里变成掷硬币——两批 `frames()` 之间真实经过
+	 * 的微秒数不可控。闸门读的是回调的时间参数，所以时钟归帧队列管，调用方想模拟高刷屏就给
+	 * 一个小于一帧的间隔（见 `smoke-frame.ts` 的顺延用例）。
+	 */
+	let frameClock = Date.now();
 
 	/**
 	 * The window, with events that can actually be delivered.
@@ -744,10 +777,11 @@ export function installDom(options: InstallOptions = {}): DomShim {
 	};
 
 	/** 一"帧"：把挂号的那批取出来跑，回调里再挂的算下一帧。 */
-	const frames = (): number => {
+	const frames = (advanceMs = 1000 / 60): number => {
 		const batch = [...frameHandles.values()];
 		frameHandles.clear();
-		for (const callback of batch) callback(Date.now());
+		frameClock += advanceMs;
+		for (const callback of batch) callback(frameClock);
 		return batch.length;
 	};
 

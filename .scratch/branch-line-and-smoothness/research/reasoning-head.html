@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+	<head>
+		<meta charset="utf-8" />
+		<title>思考行 · 流式头</title>
+		<link rel="stylesheet" href="../../../packages/web/src/tokens.css" />
+		<link rel="stylesheet" href="../../../packages/web/src/style.css" />
+		<style>
+			/* Only the harness: a column as wide as the reading column, and nothing else. */
+			body {
+				margin: 0;
+				padding: 24px;
+				background: var(--dsw-bg-app);
+			}
+			.harness {
+				width: 640px;
+			}
+			.harness h2 {
+				margin: 18px 0 6px;
+				font-size: var(--dsw-fs-caption);
+				color: var(--dsw-label-tertiary);
+			}
+		</style>
+	</head>
+	<body>
+		<div class="harness">
+			<h2>短：一行还没写满（应当贴着「思考」）</h2>
+			<details class="tool reasoning running">
+				<summary>
+					<span class="tool-chevron"></span>
+					<span class="tool-name">思考</span>
+					<span class="tool-path reasoning-preview"></span>
+					<div class="reasoning-marquee"><span class="reasoning-tail">先看一下分支页的几何</span></div>
+				</summary>
+				<div class="reasoning-body"></div>
+			</details>
+
+			<h2>长：写满溢出（应当露出结尾，开头被裁掉）</h2>
+			<details class="tool reasoning running">
+				<summary>
+					<span class="tool-chevron"></span>
+					<span class="tool-name">思考</span>
+					<span class="tool-path reasoning-preview"></span>
+					<div class="reasoning-marquee">
+						<span class="reasoning-tail"
+							>现在要决定的是分支页的画布到底该不该用滚动来平移，因为图装得下视口时滚动范围是零，
+							拖动就完全不动了。所以这里换成 translate 直接跟着指针走，缩放仍然以指针为锚点。</span
+						>
+					</div>
+				</summary>
+				<div class="reasoning-body"></div>
+			</details>
+
+			<h2>结束：定格首句（非流式）</h2>
+			<details class="tool reasoning">
+				<summary>
+					<span class="tool-chevron"></span>
+					<span class="tool-name">思考</span>
+					<span class="tool-path reasoning-preview">先看一下分支页的几何，再说画布怎么拖</span>
+					<div class="reasoning-marquee"><span class="reasoning-tail"></span></div>
+				</summary>
+				<div class="reasoning-body"></div>
+			</details>
+		</div>
+	</body>
+</html>

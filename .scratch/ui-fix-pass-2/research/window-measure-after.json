@@ -1,0 +1,52 @@
+{
+	"label": "after",
+	"generatedAt": "2026-10-17T17:52:19.062Z",
+	"scenarios": [
+		{
+			"name": "long-paragraph",
+			"answerChars": 8000,
+			"expectedChars": 8000,
+			"drawnChars": 8000,
+			"durationMs": 25781,
+			"frames": 6191,
+			"frameGap": {
+				"p50": 4.2,
+				"p95": 4.3,
+				"max": 229.2,
+				"over32": 1
+			},
+			"longTasks": {
+				"count": 0,
+				"totalMs": 0,
+				"maxMs": 0
+			},
+			"layoutCount": 1807,
+			"recalcStyleCount": 1834,
+			"taskDurationMs": 4537.8,
+			"scriptDurationMs": 1246.2
+		},
+		{
+			"name": "split-paragraphs",
+			"answerChars": 8000,
+			"expectedChars": 7870,
+			"drawnChars": 7870,
+			"durationMs": 25960,
+			"frames": 6244,
+			"frameGap": {
+				"p50": 4.2,
+				"p95": 4.3,
+				"max": 8.4,
+				"over32": 0
+			},
+			"longTasks": {
+				"count": 0,
+				"totalMs": 0,
+				"maxMs": 0
+			},
+			"layoutCount": 1826,
+			"recalcStyleCount": 1906,
+			"taskDurationMs": 2996.1,
+			"scriptDurationMs": 624.9
+		}
+	]
+}

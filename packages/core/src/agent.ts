@@ -155,15 +155,41 @@ export interface AgentConfig {
 export type SessionListener = (snapshot: SessionSnapshot) => void;
 
 /**
+ * One `message_update` as a session publishes it: the characters that just arrived, not the message.
+ *
+ * The loop's own event carries both the whole partial message and the provider's delta, and a session
+ * used to republish both — so a token at the end of a long answer cost a frame the size of the answer,
+ * serialized once here and parsed once in the window, and the window then re-read the whole text to
+ * find what changed. What actually moves between two frames is one delta, so that is what is sent.
+ * The full message still travels on `message_start` and `message_end`, and once more in a baseline's
+ * `partial` for a window that attaches mid-run.
+ *
+ * The message is named by `timestamp` rather than by entry id: the entry does not exist until the
+ * message ends, and the stamp is what a transcript already keys an item on.
+ */
+export interface MessageDelta {
+	timestamp: number;
+	/** Which of the two running texts moved; a tool call has its own events and is not a delta. */
+	kind: "text" | "thinking";
+	/** Where the block sits in the message, so a second block can be joined the way a full message is. */
+	contentIndex: number;
+	/** The characters that arrived. */
+	text: string;
+}
+
+/**
  * Everything one session publishes: the loop's events as they arrive, plus the facts the loop has no
  * words for — queue depth, a compaction, an entry landing in the store, a settings change.
  *
  * The union is flat rather than nested, so a consumer keeps one `switch` over event types. That is
  * safe only because no `AgentEvent` type name collides with the names added here: a new session event
- * must therefore never reuse one of the loop's names.
+ * must therefore never reuse one of the loop's names. `message_update` is the one member deliberately
+ * *replaced* rather than added beside the loop's: the session keeps the loop's full-message shape for
+ * itself (it is what a mid-run baseline needs) and republishes the delta alone.
  */
 export type AgentSessionEvent =
-	| AgentEvent
+	| Exclude<AgentEvent, { type: "message_update" }>
+	| { type: "message_update"; delta: MessageDelta }
 	| { type: "queue_update"; queued: number }
 	| {
 			type: "compaction";
@@ -249,6 +275,28 @@ export type AgentSessionEvent =
 
 /** Called with every event the session publishes, in the order they happened. */
 export type SessionEventListener = (event: AgentSessionEvent) => void;
+
+/**
+ * The delta a loop `message_update` is worth, or `undefined` for the frames that carry no characters.
+ *
+ * Start/end frames and tool-call deltas are dropped: a block boundary needs no frame of its own — the
+ * first delta of a block is what opens it in the window — and a tool call's card is built from the
+ * tool events, which carry the arguments and the result rather than the JSON being assembled. An
+ * empty delta is dropped for the same reason: it says nothing a frame could carry.
+ */
+function messageDeltaOf(event: Extract<AgentEvent, { type: "message_update" }>): MessageDelta | undefined {
+	const inner = event.assistantMessageEvent;
+	if (inner.type !== "text_delta" && inner.type !== "thinking_delta") return undefined;
+	if (inner.delta.length === 0) return undefined;
+	const stamp = (event.message as { timestamp?: unknown }).timestamp;
+	if (typeof stamp !== "number") return undefined;
+	return {
+		timestamp: stamp,
+		kind: inner.type === "text_delta" ? "text" : "thinking",
+		contentIndex: inner.contentIndex,
+		text: inner.delta,
+	};
+}
 
 /** One unanswered approval: what the banner shows, and the promise the tool call is parked on. */
 interface PendingApprovalEntry {
@@ -385,6 +433,15 @@ export class Agent {
 	private lastStamp = 0;
 	/** Queue depth as last published, so `queue_update` fires on a change and not on every touch. */
 	private lastQueued = 0;
+	/**
+	 * The assistant message being written right now, as the loop last reported it.
+	 *
+	 * The loop's `message_update` carries the whole partial message and this session republishes only
+	 * its delta — but a window that attaches mid-run has missed every delta so far, so a baseline has
+	 * to carry the running text once. Cleared when the message ends, which is also when the store
+	 * gains it and a snapshot starts reading it from the transcript instead.
+	 */
+	private partial: AgentMessage | undefined;
 	/** True between `retry_scheduled` and `retry_end`: the run is waiting out a backoff. */
 	private retrying = false;
 	/** The attempt the policy is on, 1-based, or 0 when no retry is pending. */
@@ -805,6 +862,7 @@ export class Agent {
 			// Judged against this workspace's own settings, the same way a cold read judges it, so the
 			// panel's "沿用全局" label cannot disagree with itself between the two paths.
 			...followsGlobalOf(this.sessionManager, this.settingsManager, this.tools),
+			...(this.partial === undefined ? {} : { partial: this.partial }),
 			submitting: this.loop.state.isStreaming,
 			queued: this.queued,
 			isRetrying: this.retrying,
@@ -1421,6 +1479,16 @@ export class Agent {
 
 	/** Persist what the loop reports, and pass it on. */
 	private async handleEvent(event: AgentEvent): Promise<void> {
+		if (event.type === "message_update") {
+			// The hot path: one event per provider delta. Keep the running message for a baseline that
+			// has to hand a mid-run attach the text it missed, and publish only what moved since the
+			// last frame. Nothing is written here — the message is persisted when it ends.
+			this.partial = event.message;
+			const delta = messageDeltaOf(event);
+			if (delta !== undefined) this.emit({ type: "message_update", delta });
+			return;
+		}
+		if (event.type === "message_end" || event.type === "agent_end") this.partial = undefined;
 		if (event.type === "message_end") {
 			// The one user message the store already holds is the one that started a run: `prompt()`
 			// wrote it before handing it to the loop, so the loop's own emit of it must not be recorded

@@ -642,12 +642,11 @@ export class SettingsPanel {
 	private async commit(rows: ModelInput[]): Promise<void> {
 		this.saving = true;
 		this.renderBody();
-		let outcome: { message: string; tone: "ok" | "error" };
+		let outcome: { message: string; tone: "ok" | "error" } | undefined;
 		try {
 			await this.handlers.onSaveModels(rows);
 			this.clearInteraction();
 			this.signature = "";
-			outcome = { message: "模型已保存。", tone: "ok" };
 		} catch (error) {
 			outcome = { message: error instanceof Error ? error.message : String(error), tone: "error" };
 		} finally {
@@ -656,9 +655,10 @@ export class SettingsPanel {
 		}
 		// Reported after the rebuild rather than before it, because renderBody clears the note on its
 		// way in — reporting first would have the outcome wiped by the very redraw that made room
-		// for it, and with the global save button gone this note is the only word a failed action
-		// gets.
-		this.reportNote(outcome.message, outcome.tone);
+		// for it. Success says nothing at all: the form closing and the row showing what the server
+		// stored is the confirmation, and a green "saved" line under every save is one more thing to
+		// read for a fact the window already shows.
+		if (outcome !== undefined) this.reportNote(outcome.message, outcome.tone);
 	}
 
 	private async commitRow(index: number): Promise<void> {
@@ -1026,19 +1026,18 @@ export class SettingsPanel {
 	private async commitModes(modes: ModeSettings[]): Promise<void> {
 		this.saving = true;
 		this.renderBody();
-		let outcome: { message: string; tone: "ok" | "error" };
+		let outcome: { message: string; tone: "ok" | "error" } | undefined;
 		try {
 			await this.handlers.onSaveModes(modes);
 			this.dropModeInteraction();
 			this.signature = "";
-			outcome = { message: "模式已保存。", tone: "ok" };
 		} catch (error) {
 			outcome = { message: error instanceof Error ? error.message : String(error), tone: "error" };
 		} finally {
 			this.saving = false;
 			this.renderBody();
 		}
-		this.reportNote(outcome.message, outcome.tone);
+		if (outcome !== undefined) this.reportNote(outcome.message, outcome.tone);
 	}
 
 	/**

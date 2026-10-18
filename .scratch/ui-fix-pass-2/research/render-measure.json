@@ -1,0 +1,77 @@
+{
+	"generatedAt": "2026-10-17T18:11:08.862Z",
+	"results": [
+		{
+			"strategy": "patch",
+			"shape": "solid",
+			"label": "补写 · 一整段",
+			"frames": 500,
+			"answerChars": 16000,
+			"workTotalMs": 155.699999935925,
+			"workP95Ms": 0.6000000014901161,
+			"intervalP95Ms": 4.300000004470348,
+			"nodes": 1,
+			"performance": {
+				"LayoutCount": 500,
+				"RecalcStyleCount": 1,
+				"ScriptDuration": 0.176646,
+				"TaskDuration": 0.639183
+			},
+			"longTasks": 0
+		},
+		{
+			"strategy": "legacy",
+			"shape": "solid",
+			"label": "重建 · 一整段",
+			"frames": 500,
+			"answerChars": 16000,
+			"workTotalMs": 56.29999986290932,
+			"workP95Ms": 0.20000000298023224,
+			"intervalP95Ms": 4.300000004470348,
+			"nodes": 1,
+			"performance": {
+				"LayoutCount": 500,
+				"RecalcStyleCount": 500,
+				"ScriptDuration": 0.076677,
+				"TaskDuration": 0.727521
+			},
+			"longTasks": 0
+		},
+		{
+			"strategy": "patch",
+			"shape": "spaced",
+			"label": "补写 · 空行分段",
+			"frames": 500,
+			"answerChars": 16000,
+			"workTotalMs": 48.89999993890524,
+			"workP95Ms": 0.20000000298023224,
+			"intervalP95Ms": 4.300000004470348,
+			"nodes": 64,
+			"performance": {
+				"LayoutCount": 500,
+				"RecalcStyleCount": 64,
+				"ScriptDuration": 0.069301,
+				"TaskDuration": 0.273718
+			},
+			"longTasks": 0
+		},
+		{
+			"strategy": "legacy",
+			"shape": "spaced",
+			"label": "重建 · 空行分段",
+			"frames": 500,
+			"answerChars": 16000,
+			"workTotalMs": 42.80000002682209,
+			"workP95Ms": 0.20000000298023224,
+			"intervalP95Ms": 4.399999998509884,
+			"nodes": 64,
+			"performance": {
+				"LayoutCount": 500,
+				"RecalcStyleCount": 500,
+				"ScriptDuration": 0.063681,
+				"TaskDuration": 0.319114
+			},
+			"longTasks": 0
+		}
+	]
+}

@@ -11,6 +11,15 @@ export interface TranscriptOptions {
 	 * transcript only knows which message was under the pointer.
 	 */
 	onUserContext(entryId: string | undefined, x: number, y: number): void;
+	/**
+	 * The fork button under a settled assistant answer was pressed.
+	 *
+	 * The entry is read from the turn at press time, not at build time: a message's entry id can
+	 * arrive a frame after the turn, and the footer is built once. What a press *does* — rewind the
+	 * session so the next prompt starts another way from this answer — is the caller's; the
+	 * transcript only knows which answer was under the pointer.
+	 */
+	onBranch(entryId: string): void;
 }
 
 /**
@@ -33,6 +42,14 @@ const BATCH_ITEMS = 24;
 const FRAME_BUDGET_MS = 4;
 
 /**
+ * How close to the bottom counts as "following it", in pixels.
+ *
+ * A margin rather than an exact end: a render can land a frame's worth of content between the scroll
+ * event and the reading, and a reader who was at the bottom must not stop following over that.
+ */
+const FOLLOW_DISTANCE_PX = 80;
+
+/**
  * One turn's reasoning row.
  *
  * The row shares the tool card's container and head — a `<details class="tool">`, the same chevron,
@@ -45,17 +62,13 @@ interface ReasoningView {
 	details: HTMLDetailsElement;
 	/** The static head text, shown once the thought has stopped arriving. */
 	preview: HTMLElement;
-	/** The scrolling track that carries the thought while it is still arriving. */
-	track: HTMLElement;
-	/** The track's two copies of the text — two, so the `translateX(-50%)` loop is seamless. */
-	spans: [HTMLElement, HTMLElement];
+	/** The live tail the head carries while the thought is still arriving. */
+	tail: HTMLElement;
 	body: HTMLElement;
 	markdown?: MarkdownState;
 	text: string;
-	/** The text the track last carried, so a throttled repaint can skip work it already did. */
-	marqueeText: string;
-	/** When the track was last written, the anchor of the throttle below. */
-	marqueeAt: number;
+	/** The tail the head last carried, so a repaint can skip work it already did. */
+	tailText: string;
 	/** The thought the static preview was last cut from, so the collapsed line is cut only on change. */
 	previewText: string;
 	running: boolean;
@@ -80,11 +93,16 @@ interface MetaView {
 /** An agent turn's footer: copy, then usage / time / elapsed — one quiet row under the answer. */
 interface FootView {
 	root: HTMLElement;
+	/** The fork control beside copy: the way into another branch from this answer. */
+	fork: HTMLButtonElement;
 	usage: FootChip;
 	time: FootChip;
 	elapsed: FootChip;
 	/** Whether the row was last drawn visible, so a frame that agrees with it writes nothing. */
 	shown?: boolean;
+	/** Whether the fork was last drawn at all, and whether it was last refused. */
+	forkShown?: boolean;
+	forkRefused?: boolean;
 }
 
 /** The user message that opened the round an item sits in — the duration's start seat. */
@@ -108,6 +126,15 @@ interface RoundIndex {
 	users: ReadonlyMap<string, RoundStart>;
 	/** The last user message of the whole conversation, which is what the run timer ticks from. */
 	user?: Extract<Item, { kind: "message" }>;
+	/**
+	 * The last assistant message of the whole conversation.
+	 *
+	 * It is the one answer a fork button is *not* offered on: the leaf is where the conversation
+	 * already is, and "branch from here" on it is just carrying on. Once anything follows it, the
+	 * answer becomes forkable — which is exactly the pair the user asked for (图 2：最底部那条不给，
+	 * 倒数第二条开始给).
+	 */
+	lastAssistant?: string;
 }
 
 /** One rendered conversation entry, plus the little state needed to patch it in place. */
@@ -178,6 +205,8 @@ export class TranscriptView {
 	private drawnStreaming = false;
 	private welcome?: HTMLElement;
 	private sticky = true;
+	/** The frame the scroll reading is deferred to, so a burst of events costs one reading. */
+	private scrollRead?: number;
 	/** The ticking line while the loop streams, and the interval that moves it. */
 	private runtime?: HTMLElement;
 	private runtimeText?: HTMLElement;
@@ -210,10 +239,39 @@ export class TranscriptView {
 
 	/** Follow the bottom unless the reader has scrolled away from it. */
 	trackScroll(): void {
-		this.container.addEventListener("scroll", () => {
+		this.setSticky(this.sticky);
+		this.container.addEventListener("scroll", () => this.followFromScroll());
+	}
+
+	/**
+	 * Read the scroll position on the next frame, and decide whether to keep following.
+	 *
+	 * The reading is a layout read — `scrollHeight` forces the layout the frame that just grew the
+	 * answer left dirty — and {@link pin} is a layout write. Doing both in one turn of the event loop
+	 * is the forced reflow the reader sees as a stutter, so the read is moved to the frame, where it
+	 * also coalesces however many scroll events landed (a scroll is not a frame). Only the last
+	 * reading can decide anything anyway.
+	 */
+	private followFromScroll(): void {
+		if (this.scrollRead !== undefined) return;
+		this.scrollRead = requestAnimationFrame(() => {
+			this.scrollRead = undefined;
 			const distance = this.container.scrollHeight - this.container.scrollTop - this.container.clientHeight;
-			this.sticky = distance < 80;
+			this.setSticky(distance < FOLLOW_DISTANCE_PX);
 		});
+	}
+
+	/**
+	 * Set whether the view follows the bottom, and wear the class that makes following cheap.
+	 *
+	 * `overflow-anchor: none` while pinned is the browser's help: anchoring otherwise holds the
+	 * reader's place when content above the viewport changes, while a pinned view is appending below
+	 * it every frame — the two policies fight and the reader sees a jump. Once they scroll away,
+	 * anchoring is exactly right, so the class comes off with `sticky`.
+	 */
+	private setSticky(sticky: boolean): void {
+		this.sticky = sticky;
+		if (this.container.classList.contains("pinned") !== sticky) this.container.classList.toggle("pinned", sticky);
 	}
 
 	/**
@@ -245,7 +303,7 @@ export class TranscriptView {
 	 */
 	renderDeferred(items: readonly Item[], streaming: boolean): void {
 		this.drain.cancel();
-		this.sticky = true;
+		this.setSticky(true);
 		// A snapshot is a whole conversation arriving at once, so the delta table starts empty: a
 		// streaming frame landing between two slices must see the undrawn half as undrawn and finish
 		// that draw itself, which is the documented relationship between the two paths.
@@ -308,7 +366,7 @@ export class TranscriptView {
 		this.reconcile(wanted);
 		this.setWelcome(items.length === 0 && !streaming);
 		this.setRuntime(streaming, rounds, items);
-		this.sticky = true;
+		this.setSticky(true);
 		this.placeAll(items, to);
 		this.pin();
 	}
@@ -443,7 +501,7 @@ export class TranscriptView {
 	}
 
 	scrollToBottom(): void {
-		this.sticky = true;
+		this.setSticky(true);
 		this.pin();
 	}
 
@@ -470,7 +528,7 @@ export class TranscriptView {
 		if (known === undefined) {
 			this.turns.set(item.id, turn);
 			this.container.append(turn.section);
-			this.sticky = true;
+			this.setSticky(true);
 		} else if (known.item === item) {
 			// A repeated slice of a deferred draw can hand over the very item already on screen; a
 			// complete pass over an unchanged snapshot does the same. Nothing to say, nothing to write.
@@ -488,7 +546,7 @@ export class TranscriptView {
 		}
 		this.applyEntry(turn);
 		this.patchMeta(turn);
-		this.patchFoot(turn, turn.roundLast, rounds.users.get(item.id));
+		this.patchFoot(turn, turn.roundLast, rounds.users.get(item.id), rounds.lastAssistant === item.id);
 
 		// A notice is plain text and never streams, so it is written once and left alone.
 		if (item.notice) {
@@ -513,9 +571,9 @@ export class TranscriptView {
 	 * Draw or patch the reasoning row that precedes a message's text.
 	 *
 	 * A message with no reasoning has no row; a message that gains or loses one between renders gets
-	 * its row added or dropped here. The head carries the thought while collapsed — scrolling while
-	 * it is still arriving, frozen on its first line once it has stopped — and the running state is
-	 * the class that swaps one for the other.
+	 * its row added or dropped here. The head carries the thought while collapsed — the end of it
+	 * while it is still arriving, frozen on its first line once it has stopped — and the running
+	 * state is the class that swaps one for the other.
 	 */
 	private renderReasoning(turn: Turn, item: Extract<Item, { kind: "message" }>): void {
 		const thinking = item.thinking;
@@ -534,7 +592,7 @@ export class TranscriptView {
 			view.running = thinking.running;
 			view.details.classList.toggle("running", thinking.running);
 		}
-		if (thinking.running) patchMarquee(view, thinking.text);
+		if (thinking.running) patchTail(view, thinking.text);
 		else if (view.previewText !== thinking.text) {
 			// The preview is the first line of the whole thought, so cutting it walks the text. It is
 			// cut only when the thought moved, which for a settled row is never again.
@@ -554,10 +612,8 @@ export class TranscriptView {
 		chevron.append(icon("chevron"));
 		const preview = element("span", "tool-path reasoning-preview");
 		const marquee = element("div", "reasoning-marquee");
-		const track = element("div", "reasoning-track");
-		const spans: [HTMLElement, HTMLElement] = [element("span"), element("span")];
-		track.append(...spans);
-		marquee.append(track);
+		const tail = element("span", "reasoning-tail");
+		marquee.append(tail);
 		const body = element("div", "reasoning-body");
 		summary.append(chevron, element("span", "tool-name", "思考"), preview, marquee);
 		details.append(summary, body);
@@ -569,12 +625,10 @@ export class TranscriptView {
 		return {
 			details,
 			preview,
-			track,
-			spans,
+			tail,
 			body,
 			text: "",
-			marqueeText: "",
-			marqueeAt: 0,
+			tailText: "",
 			previewText: "",
 			running: false,
 		};
@@ -628,11 +682,23 @@ export class TranscriptView {
 			const usage = footChip("database");
 			const time = footChip("clock");
 			const elapsed = footChip("timer");
+			const fork = element("button", "turn-copy", undefined, {
+				type: "button",
+				title: "从这条回答开始分支",
+				"aria-label": "从这条回答开始分支",
+			});
+			fork.append(icon("fork"));
+			// The entry is read at press time: an assistant message's id lands a frame after the turn
+			// is built, and the footer is the one node that lives across those frames.
+			fork.addEventListener("click", () => {
+				const entryId = turn.item.forkEntryId ?? undefined;
+				if (entryId !== undefined) this.options.onBranch(entryId);
+			});
 			const foot = element("div", "turn-foot");
 			foot.hidden = true;
-			foot.append(copyButton(() => turn.item.text), usage.root, time.root, elapsed.root);
+			foot.append(copyButton(() => turn.item.text), fork, usage.root, time.root, elapsed.root);
 			section.append(body, foot);
-			turn.foot = { root: foot, usage, time, elapsed, shown: false };
+			turn.foot = { root: foot, fork, usage, time, elapsed, shown: false };
 		} else {
 			section.append(body);
 		}
@@ -679,8 +745,13 @@ export class TranscriptView {
 	 * next user prompt — and only once that answer has stopped arriving: while it streams, the run's
 	 * own line under the transcript is the elapsed time's seat. A notice is not an answer, and a
 	 * message with no text has nothing to copy, so neither draws a footer.
+	 *
+	 * The fork sits beside copy on every footer but the conversation's last answer: the leaf is where
+	 * the conversation already continues, so a branch from it would be the ordinary next prompt. It
+	 * is refused while a run is in flight for the same reason the user menu hides its own branch
+	 * item: moving the leaf under a run that is writing to it is the one thing a branch must wait out.
 	 */
-	private patchFoot(turn: Turn, roundLast: boolean, roundUser: RoundStart | undefined): void {
+	private patchFoot(turn: Turn, roundLast: boolean, roundUser: RoundStart | undefined, isLastAnswer: boolean): void {
 		const foot = turn.foot;
 		if (foot === undefined) return;
 		const item = turn.item;
@@ -688,6 +759,17 @@ export class TranscriptView {
 		if (foot.shown !== visible) {
 			foot.shown = visible;
 			foot.root.hidden = !visible;
+		}
+		const forkShown = visible && !isLastAnswer;
+		if (foot.forkShown !== forkShown) {
+			foot.forkShown = forkShown;
+			foot.fork.hidden = !forkShown;
+		}
+		const refused = this.drawnStreaming;
+		if (foot.forkRefused !== refused) {
+			foot.forkRefused = refused;
+			foot.fork.disabled = refused;
+			foot.fork.title = refused ? "这一轮还在写，等它结束再分支" : "从这条回答开始分支";
 		}
 		if (!visible) return;
 
@@ -730,7 +812,9 @@ export class TranscriptView {
 			turn.roundLast = last;
 			// A turn that still closes its round is re-read as well: the settled duration lands on a
 			// frame that changes no item at all, and this is the only pass that can hand it over.
-			if (moved || last) this.patchFoot(turn, last, this.rounds.users.get(turn.item.id));
+			if (moved || last) {
+				this.patchFoot(turn, last, this.rounds.users.get(turn.item.id), this.rounds.lastAssistant === turn.item.id);
+			}
 		}
 	}
 
@@ -821,7 +905,7 @@ export class TranscriptView {
 			group = { section, cards: new Map(), source: cards };
 			this.tools.set(id, group);
 			this.container.append(section);
-			this.sticky = true;
+			this.setSticky(true);
 		}
 		group.source = cards;
 
@@ -854,7 +938,7 @@ export class TranscriptView {
 		}
 	}
 
-	/** The first-run state: an empty conversation shows the mark and one question, nothing more. */
+	/** The first-run state: an empty conversation shows one question and nothing else. */
 	private setWelcome(visible: boolean): void {
 		if (!visible) {
 			this.welcome?.remove();
@@ -864,9 +948,7 @@ export class TranscriptView {
 		if (this.welcome) return;
 
 		const welcome = element("div", "welcome");
-		const mark = element("div", "welcome-mark");
-		mark.append(icon("sparkle"));
-		welcome.append(mark, element("h2", undefined, "想做点什么?"));
+		welcome.append(element("h2", undefined, "想做点什么?"));
 		this.welcome = welcome;
 		this.container.append(welcome);
 	}
@@ -902,6 +984,7 @@ function roundIndex(items: readonly Item[]): RoundIndex {
 	let start: RoundStart | undefined;
 	let closing: string | undefined;
 	let closingStart: RoundStart | undefined;
+	let lastAssistant: string | undefined;
 
 	// The round is committed when the next user message opens, and once more at the end: whichever
 	// assistant was seen last in it is the one that closed it.
@@ -925,9 +1008,15 @@ function roundIndex(items: readonly Item[]): RoundIndex {
 		if (item.role !== "assistant") continue;
 		closing = item.id;
 		closingStart = start;
+		lastAssistant = item.id;
 	}
 	close();
-	return { last, users, ...(user === undefined ? {} : { user }) };
+	return {
+		last,
+		users,
+		...(user === undefined ? {} : { user }),
+		...(lastAssistant === undefined ? {} : { lastAssistant }),
+	};
 }
 
 /** The ids `items` carries, for a prune that asks membership rather than position. */
@@ -1045,38 +1134,33 @@ function firstLineOf(text: string): string {
 }
 
 /**
- * How often a streaming thought's marquee may be rewritten, in milliseconds.
+ * How much of the streaming thought the head carries, in characters.
  *
- * The track carries the whole text so far, which grows with every delta; rewriting it per token
- * would both copy the whole string each frame and force a layout per measurement below. A walking
- * pace is invisible on a line whose content is itself moving — the marquee shows where the thought
- * was, not where the token boundary is.
+ * The head is one clipped line, so the only part of the thought with anything to say is its end. The
+ * cap keeps the write bounded: a thought can be tens of thousands of characters, and the head re-reads
+ * only its tail each frame rather than the whole of it.
  */
-const MARQUEE_INTERVAL_MS = 2000;
-
-/** How fast the marquee glides, in pixels per second — the speed its duration is solved for. */
-const MARQUEE_SPEED_PX_S = 50;
-
-/** The shortest loop a marquee runs, so a short thought does not visibly snap back to its start. */
-const MARQUEE_MIN_S = 12;
+const TAIL_CHARS = 240;
 
 /**
- * Write the streaming thought into a collapsed row's marquee.
+ * Write the end of the streaming thought into the collapsed row's head.
  *
- * While reasoning is still arriving the collapsed head scrolls the text instead of ellipsizing it
- * (01 ④): the track carries it twice so the `translateX(-50%)` loop is seamless, and the loop's
- * duration is solved from the measured width, so a long paragraph glides at the pace a short one
- * does. The read forces a layout, which is why the write is throttled to {@link MARQUEE_INTERVAL_MS}
- * — a delta frame pays for neither the copy nor the reflow.
+ * This started as a marquee — the track carried the whole text twice and looped it with a
+ * `translateX(-50%)` animation. That cannot stay smooth while the text is still arriving: a
+ * percentage translate moves by half of the track's **current** width, so every appended character
+ * shifts the visible text by half of what it appended. Bucketing the writes made it worse rather than
+ * better — the head then jumped once every two seconds, which is the "思考一卡一卡" the reader
+ * reported. So the head shows the tail instead: the line grows at its right edge and the start is
+ * clipped away by the mask, which is what a ticker looks like when nothing is scrolling it.
  */
-function patchMarquee(view: ReasoningView, text: string): void {
-	const now = Date.now();
-	if (view.marqueeText !== "" && now - view.marqueeAt < MARQUEE_INTERVAL_MS) return;
-	view.marqueeAt = now;
-	view.marqueeText = text;
-	for (const span of view.spans) span.textContent = text;
-	const duration = Math.max(MARQUEE_MIN_S, view.track.scrollWidth / 2 / MARQUEE_SPEED_PX_S);
-	view.track.style.animationDuration = `${duration.toFixed(1)}s`;
+function patchTail(view: ReasoningView, text: string): void {
+	if (view.tailText === text) return;
+	view.tailText = text;
+	const tail = text.length > TAIL_CHARS ? text.slice(-TAIL_CHARS) : text;
+	// One line, whatever the thought did: the head is a line, and a newline in it would be a lost
+	// character in a `nowrap` strip.
+	const line = tail.replace(/\s+/g, " ").trimStart();
+	if (view.tail.textContent !== line) view.tail.textContent = line;
 }
 
 /**

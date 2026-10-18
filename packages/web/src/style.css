@@ -459,9 +459,9 @@ body {
 	font-weight: 600;
 	text-align: left;
 	cursor: pointer;
-	/* The shadow rides the transition too: becoming the current workspace is a change of surface, and
-	   a ring that snapped on while the hover fill faded would read as two separate marks. */
-	transition: background var(--dsw-duration-fast) var(--dsw-ease), box-shadow var(--dsw-duration-fast) var(--dsw-ease);
+	transition:
+		background var(--dsw-duration-fast) var(--dsw-ease),
+		color var(--dsw-duration-fast) var(--dsw-ease);
 }
 
 .workspace-head:hover {
@@ -516,17 +516,14 @@ body {
 }
 
 /*
- * Which group the new-session button writes into, said by the surface rather than by a word.
+ * Which group the new-session button writes into is not painted on the heading.
  *
- * The heading is the one row of the column that is *above* the list instead of part of it, so it
- * wears the surface a raised row would: a hairline ring and a lift, both out of one token. The fill
- * stays transparent on purpose — the heading keeps the hover feedback every other heading gives, and
- * the ring says which one is current whether or not a pointer is on it.
+ * It used to be: a ring and a drop shadow first (`优化/1.png`), then a flat `--dsw-bg-active` fill —
+ * "the surface the current session row wears". Both read as a raised box sitting in the list, and the
+ * reader asked for exactly one thing to wear that surface: **the session row**. So the heading is
+ * plain, hover only, and the answer to "where does a new session land" lives where it always did in
+ * fact — the workspace chip by the composer — rather than in a box drawn around a folder name.
  */
-.workspace-head-current {
-	box-shadow: var(--dsw-shadow-workspace-current);
-}
-
 .session-list-empty {
 	padding: 8px;
 	color: var(--dsw-label-caption);
@@ -807,11 +804,32 @@ body {
 	color: var(--dsw-label-tertiary);
 }
 
+/*
+ * One line, always. The words and the id are fixed parts of the chip's own grammar, so they neither
+ * wrap nor give way; the label is the only part that may shrink, because a way's label is a message
+ * preview — a whole sentence, and for a branch taken from an answer, Markdown and all. Without the
+ * `nowrap` a narrow window broke 「当前分支」 into a vertical column of single characters, and without
+ * the label's `flex` the shrink was shared with those fixed parts instead of being taken by the one
+ * thing that has somewhere to put the ellipsis.
+ */
+.branch-chip > span {
+	white-space: nowrap;
+}
+
+.branch-chip > .branch-chip-id {
+	flex: none;
+}
+
 .branch-chip-id {
 	font-family: var(--dsw-font-mono);
 	font-size: var(--dsw-fs-caption);
 	line-height: var(--dsw-lh-caption);
 	color: var(--dsw-state-business);
+}
+
+.branch-chip > .branch-chip-label {
+	flex: 1 1 auto;
+	min-width: 0;
 }
 
 .branch-chip-label {
@@ -861,24 +879,6 @@ body {
 .branch-tools .zoom-group,
 .branch-tools .back-button {
 	flex: none;
-}
-
-.branch-sel-info {
-	min-width: 0;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-.branch-sel-info b {
-	font-family: var(--dsw-font-mono);
-	font-weight: 600;
-	color: var(--dsw-label-secondary);
-}
-
-.branch-sel-info em {
-	font-style: normal;
-	color: var(--dsw-label-tertiary);
 }
 
 /* The zoom buttons are the fallback for a pointer without a wheel; Ctrl+wheel is the main path. */
@@ -995,6 +995,18 @@ input:focus-visible {
 }
 
 /*
+ * While the view follows the bottom, browser scroll anchoring is off.
+ *
+ * Anchoring holds the reader's place when content above the viewport changes — the right policy for
+ * someone reading history — and a pinned view is appending below it every frame, so the two policies
+ * pull against each other and the column visibly jumps. The class is toggled by `sticky`; scrolling
+ * away drops it, because anchoring is then exactly the help it was designed to be.
+ */
+.transcript.pinned {
+	overflow-anchor: none;
+}
+
+/*
  * The transcript's wrapper: the grid row that flexes, and the positioning context the reading
  * column's handle hangs off. The scroll itself is the child's job — an absolutely positioned handle
  * inside a scroll container would scroll away with the content, so the two live one layer apart.
@@ -1053,6 +1065,7 @@ input:focus-visible {
 	border-top-color: var(--dsw-state-business);
 	border-radius: 50%;
 	animation: spin 0.9s linear infinite;
+	will-change: transform;
 }
 
 @keyframes spin {
@@ -1086,33 +1099,18 @@ input:focus-visible {
 	flex-direction: column;
 	align-items: center;
 	justify-content: center;
-	gap: 10px;
 	flex: 1;
 	color: var(--dsw-label-caption);
 	text-align: center;
 }
 
-.welcome-mark {
-	display: grid;
-	place-items: center;
-	width: 44px;
-	height: 44px;
-	border-radius: var(--dsw-radius-md);
-	background: var(--dsw-bg-layer-2);
-	border: 1px solid var(--dsw-border-l1);
-	color: var(--dsw-label-tertiary);
-}
-
-.welcome-mark svg {
-	width: 22px;
-	height: 22px;
-}
-
 .welcome h2 {
 	margin: 0;
 	color: var(--dsw-label-primary);
-	font-size: var(--dsw-fs-body);
-	line-height: var(--dsw-lh-body);
+	/* Twice the body size: the title is the empty state's whole content, and it reads as a
+	   poster line, not as a paragraph heading. Line height keeps the title tier's 20/14 ratio. */
+	font-size: calc(var(--dsw-fs-body) * 2);
+	line-height: calc(var(--dsw-fs-body) * 2 * 20 / 14);
 	font-weight: 600;
 }
 
@@ -1178,6 +1176,15 @@ input:focus-visible {
 .turn-copy:hover {
 	background: var(--dsw-bg-hover);
 	color: var(--dsw-label-secondary);
+}
+
+/* A fork that arrived while a run is writing to the tree: the control is there, the press waits. */
+.turn-copy:disabled,
+.turn-copy:disabled:hover {
+	background: transparent;
+	color: var(--dsw-label-caption);
+	opacity: 0.4;
+	cursor: default;
 }
 
 .turn-copy svg {
@@ -1438,11 +1445,14 @@ input:focus-visible {
 	vertical-align: text-bottom;
 	background: var(--dsw-label-primary);
 	animation: blink 1s steps(2, start) infinite;
+	/* Opacity rather than `visibility`: a visibility flip relayouts the answer's line, while a
+	   composited opacity change is the one thing the WARP fallback can do without touching it. */
+	will-change: opacity;
 }
 
 @keyframes blink {
 	to {
-		visibility: hidden;
+		opacity: 0;
 	}
 }
 
@@ -1468,16 +1478,25 @@ input:focus-visible {
  */
 .reasoning-marquee {
 	display: none;
-	flex: 1 1 auto;
+	/* Only as wide as what it holds, up to what the row has left: a short thought therefore lines up
+	   right after 「思考」 instead of being pushed to the far edge, and a long one takes the width and
+	   lets its start fall out of the clip. */
+	flex: 0 1 auto;
 	min-width: 0;
 	overflow: hidden;
 	white-space: nowrap;
+	/* The line's painting is clipped here anyway; `contain: paint` says so to the compositor, so a
+	   growing line cannot invalidate anything outside the strip the reader is watching. */
+	contain: paint;
 	-webkit-mask-image: linear-gradient(90deg, transparent, var(--dsw-mask-ink) 5%, var(--dsw-mask-ink) 95%, transparent);
 	mask-image: linear-gradient(90deg, transparent, var(--dsw-mask-ink) 5%, var(--dsw-mask-ink) 95%, transparent);
 }
 
 .reasoning.running .reasoning-marquee {
-	display: block;
+	display: flex;
+	/* Once the line outgrows the strip, the overflow goes off its left edge rather than its right:
+	   the newest words are the ones worth watching, and no animation is needed to show them. */
+	justify-content: flex-end;
 }
 
 .reasoning.running .reasoning-preview {
@@ -1485,31 +1504,20 @@ input:focus-visible {
 }
 
 /* The head steps aside while the row is open: the body is the full text, and a summary beside it —
-   one still scrolling while the thought streams — would say it twice. Hidden rather than gone, so
-   the line's height does not jump on toggle. */
+   one still moving while the thought streams — would say it twice. Hidden rather than gone, so the
+   line's height does not jump on toggle. */
 .reasoning[open] .reasoning-preview,
 .reasoning[open] .reasoning-marquee {
 	visibility: hidden;
 }
 
-.reasoning-track {
-	display: inline-flex;
+.reasoning-tail {
+	flex: 0 0 auto;
 	white-space: nowrap;
-	animation: marquee 26s linear infinite;
-}
-
-.reasoning-track span {
-	padding-right: 64px;
 	color: var(--dsw-label-caption);
 	font-family: var(--dsw-font-mono);
 	font-size: var(--dsw-fs-caption);
 	line-height: var(--dsw-lh-caption);
-}
-
-@keyframes marquee {
-	to {
-		transform: translateX(-50%);
-	}
 }
 
 /* The body is prose, not output — Markdown, not mono — but it wears the same unfolded card a tool's
@@ -1625,6 +1633,7 @@ input:focus-visible {
 	border-radius: 50%;
 	background: var(--dsw-state-warn);
 	animation: pulse 1.2s var(--dsw-ease) infinite;
+	will-change: opacity;
 }
 
 .tool-name {
@@ -1815,69 +1824,30 @@ body:not([data-pane="branch"]) .branch-view {
 	min-width: 0;
 }
 
-/* The summary line: what the tree holds, and — because no one guesses these gestures — how to use it. */
-.branch-sum {
-	flex: none;
-	display: flex;
-	align-items: baseline;
-	gap: 16px;
-	min-width: 0;
-	padding: 14px 24px 10px;
-	font-size: var(--dsw-fs-caption);
-	line-height: var(--dsw-lh-caption);
-	color: var(--dsw-label-caption);
-}
-
-.branch-sum > span {
-	min-width: 0;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-.branch-sum b {
-	font-family: var(--dsw-font-mono);
-	font-weight: 600;
-	color: var(--dsw-label-secondary);
-}
-
-.branch-sum .branch-hint {
-	padding-left: 16px;
-	border-left: 1px solid var(--dsw-border-l1);
-}
-
 /*
- * The viewport hands the pan its scroll range; the view decides where in it to sit.
+ * The canvas is a map, not a scroll box.
  *
- * `scrollHome()` on entry sets the scroll to the midpoint of sizer-minus-viewport, which is what puts a
- * graph wider than the viewport in the middle; on the axis where the sizer is not wider, that midpoint
- * is zero and the graph's own margin is as centred as the viewport allows. The sizer's `min-width` /
- * `min-height: 100%` are the floor under that: they keep the sizer's origin at the viewport's own
- * origin, so the scroll position and the graph's coordinates cannot slide apart, and the graph's left
- * and top edges stay reachable.
- *
- * The graph's natural size and its scaled size are two facts: the sizer outside carries the scroll
- * range (so a shrunken graph still scrolls a shrunken distance), and the layer inside carries the
- * `scale()` — which keeps the text vector-sharp at any zoom.
+ * It used to be the other thing: `overflow: auto`, with the pan written as `scrollLeft` / `scrollTop`
+ * and the scroll range owned by a sizer element sized to the graph. That works until the graph fits
+ * the window — which is exactly the state `enter` puts it in — because then the range is zero and
+ * dragging does nothing at all. So the viewport never scrolls: the layer inside carries the pan and
+ * the zoom as one `translate(...) scale(...)`, both in the layer's own coordinate space (`0 0`
+ * origin), and a drag is one number the pointer moves.
  */
 .graph-viewport {
 	flex: 1;
 	min-height: 0;
-	display: grid;
-	overflow: auto;
+	overflow: hidden;
 	position: relative;
 	cursor: grab;
 	user-select: none;
+	/* The wheel is the view's own gesture here, so the page must not treat it as a scroll to
+	   rubber-band or hand to the browser. */
+	touch-action: none;
 }
 
 .graph-viewport.panning {
 	cursor: grabbing;
-}
-
-.graph-sizer {
-	position: relative;
-	min-width: 100%;
-	min-height: 100%;
 }
 
 .graph-zoom {
@@ -2054,6 +2024,7 @@ body:not([data-pane="branch"]) .branch-view {
 	border-radius: 50%;
 	background: var(--dsw-state-warn);
 	animation: pulse 1.2s var(--dsw-ease) infinite;
+	will-change: opacity;
 }
 
 .approval-body-wrap {
@@ -2157,12 +2128,18 @@ body:not([data-pane="branch"]) .branch-view {
  * The one self-drawn menu. Fixed against the viewport, token-shaded, one at a time — and nothing
  * else in the window gets one, because a second popup implementation is a second set of dismissal
  * rules to keep honest.
+ *
+ * A menu is a list, so it is capped and scrolls rather than growing past the window: the workspace
+ * picker's list has no ceiling — every workspace this machine ever made a session in is a row — and
+ * a menu taller than the screen would carry rows nobody can reach.
  */
 .menu {
 	position: fixed;
 	z-index: 60;
 	min-width: 180px;
 	max-width: 320px;
+	max-height: min(70vh, 560px);
+	overflow-y: auto;
 	padding: 4px;
 	border: 1px solid var(--dsw-border-l2);
 	border-radius: var(--dsw-radius-md);
@@ -2198,7 +2175,12 @@ body:not([data-pane="branch"]) .branch-view {
 	font-weight: 500;
 }
 
-.menu-item[data-active="true"] .menu-label::after {
+/*
+ * The active mark rides the row's right end, not the label's: a plain row's label is only as wide as
+ * its words, so a mark left in the flow would sit against the text it marks. A row-level `::after`
+ * is a flex item like any other, which is what the auto margin needs to push it out.
+ */
+.menu-item[data-active="true"]::after {
 	content: "✓";
 	margin-left: auto;
 	color: var(--dsw-state-business);
@@ -2232,18 +2214,13 @@ body:not([data-pane="branch"]) .branch-view {
 	text-overflow: ellipsis;
 }
 
-/* A row with a detail stacks its two lines; the active mark still rides the first line's right end,
-   which is why the label line becomes a flex row of its own. */
+/* A row with a detail stacks its two lines; the active mark still rides the row's own right end. */
 .menu-text {
 	display: flex;
 	flex-direction: column;
 	flex: 1;
 	min-width: 0;
 	gap: 1px;
-}
-
-.menu-text .menu-label {
-	display: flex;
 }
 
 .menu-detail {
@@ -2403,7 +2380,7 @@ body:not([data-pane="branch"]) .branch-view {
  * working and changed mid-conversation, so it has to be where the writing happens — and on the
  * bar's right end because that is where 01 ④ put it: "选模型的放在输入框右边", just left of the
  * send button. The bar carries no hint lines, so the auto margin is what pins the seat there. Both
- * selects are deliberately quiet: a control read on every glance should not compete with the answer
+ * chips are deliberately quiet: a control read on every glance should not compete with the answer
  * above it.
  */
 .composer-seat {
@@ -2414,35 +2391,13 @@ body:not([data-pane="branch"]) .branch-view {
 	margin-left: auto;
 }
 
-.composer-select {
-	max-width: 12rem;
-	height: 26px;
-	padding: 0 6px;
-	border: 1px solid transparent;
-	border-radius: var(--dsw-radius-sm);
-	background: transparent;
-	color: var(--dsw-label-secondary);
-	font: inherit;
-	font-size: var(--dsw-fs-caption);
-	line-height: var(--dsw-lh-caption);
-	cursor: pointer;
-	transition: background var(--dsw-duration-fast) var(--dsw-ease);
-}
-
-.composer-select:hover {
-	background: var(--dsw-bg-hover-solid);
-}
-
-.composer-select:focus-visible {
-	border-color: var(--dsw-border-l4);
-	outline: none;
-}
-
-/* The mode seat, leftmost on the bar: a chip like the workspace picker's, because it opens the one
- * menu — name first, a summary line under it. It is read at every glance and changed while working,
- * so it keeps the selects' quiet grammar rather than the send button's.
+/*
+ * A chip on the bar: the mode seat at its left end, the model and level seats at its right. All
+ * three name a current choice and open the one menu over themselves, so all three are one shape —
+ * quiet until hovered, with the chevron that says a menu is behind them.
  */
-.composer-mode {
+.composer-mode,
+.composer-pick {
 	display: inline-flex;
 	align-items: center;
 	gap: 5px;
@@ -2460,29 +2415,44 @@ body:not([data-pane="branch"]) .branch-view {
 	transition: background var(--dsw-duration-fast) var(--dsw-ease);
 }
 
-.composer-mode:hover {
+.composer-pick {
+	max-width: 12rem;
+}
+
+.composer-mode:hover,
+.composer-pick:hover:not(:disabled) {
 	background: var(--dsw-bg-hover-solid);
 }
 
-.composer-mode:focus-visible {
+.composer-mode:focus-visible,
+.composer-pick:focus-visible {
 	border-color: var(--dsw-border-l4);
 	outline: none;
 }
 
-.composer-mode svg {
+/* Nothing to pick: the chip still says why, but it stops looking pressable. */
+.composer-pick:disabled {
+	color: var(--dsw-label-caption);
+	cursor: default;
+}
+
+.composer-mode svg,
+.composer-pick svg {
 	width: 13px;
 	height: 13px;
 	flex: none;
 	color: var(--dsw-label-caption);
 }
 
-.composer-mode svg:last-child {
+.composer-mode svg:last-child,
+.composer-pick svg:last-child {
 	width: 11px;
 	height: 11px;
 	transform: rotate(90deg);
 }
 
-.composer-mode-label {
+.composer-mode-label,
+.composer-pick-label {
 	min-width: 0;
 	overflow: hidden;
 	white-space: nowrap;

@@ -126,3 +126,9 @@ Blocked by: 01, 04
 复述，照 main.ts 拖宽把手的先例：config 模块跑在 Node 上，客户端不把它拉进 bundle）；滑杆
 12–20 的两端同理仍是 `FONT_SIZE_RANGE` 的复述。`npm run check`、`smoke-sidebar`、`smoke-boot`、
 `smoke-sessions`、`vite build` 全绿。
+
+## Comments
+
+- code-review（spec 轴，2026-10-15）：`--dsw-lh-body` 用 `calc` 派生是对票面"每个都带行高"的
+  字面偏离（理由见 Answer：静态行高会在滑杆上与字号拆对），**待 04 拍板人追认**；若不认，
+  备选是把 body 的行高也做成轴上第二个发布值，由 state.ts 同步写两个变量。

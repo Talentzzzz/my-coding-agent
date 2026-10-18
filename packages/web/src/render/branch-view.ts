@@ -2,25 +2,33 @@ import { element } from "../dom.ts";
 import { findWay, type BranchTree, type BranchWay } from "../state.ts";
 
 /*
- * The branch page: one tree, drawn the way git draws one but turned on its side —
- * **column = depth (growing right), row = lane, root in the leftmost column**. A way occupies one
- * row, the line elbows over onto another row at a fork, and the trunk always keeps the top row, so
- * the way being read is one horizontal line from end to end. The geometry and the scale below are
- * the prototype's (12/13 号), copied rather than reinvented.
+ * The branch page: **the line you are reading, drawn left to right, with the ways that left it hanging
+ * below** — column = one more user message to the right, row = another way.
  *
- * Interaction is the two-beat the prototype settled on: clicking a node only **selects** it, and the
- * button in the fixed header is what moves the session and returns to the conversation. The page
- * zooms with Ctrl+wheel (anchored at the pointer) and pans with a held left button, anywhere — a
- * press that never moves more than 4px counts as a click, which is how select and pan share one
- * button without a click event of their own.
+ * The line is the trunk and it is always drawn, even when nothing has forked: a conversation with no
+ * branch points still has its questions, and "which question do I want to go back to" is the question
+ * the page answers. A fork is a card below the card it left from, and the way being read keeps the top
+ * row, so it reads end to end as one horizontal line.
+ *
+ * Interaction is the two-beat the prototype settled on: a click on a card only **selects** it, and the
+ * button in the fixed header is what moves the session and returns to the conversation. A card on the
+ * line lands on the answer its question produced (see {@link BranchWay.replyId}), a card that left the
+ * line follows it to where its own work stopped — and the page itself carries no prose: the cards and
+ * their tooltips are the whole of the explanation, so a tree that fits the window reads as just that.
+ *
+ * The canvas behaves like a map rather than a scroll box: the layer carries one `translate` and one
+ * `scale`, the press moves the translate directly, and the wheel pans. It used to pan by writing
+ * `scrollLeft` / `scrollTop` into an overflow box, whose scroll range was the graph's own size — so a
+ * graph that fitted the window (which is what `enter` fits it to) had no range at all, and dragging did
+ * nothing. Panning has no such precondition: a map can be dragged even when it is smaller than the
+ * window.
  */
 
-const NODE_W = 268; // A node card's width.
-const STEP_X = 300; // How much further right one level of depth sits.
+const NODE_W = 268; // A card's width.
+const STEP_X = 300; // How much further right the next message sits.
 const DOT_R = 4.5; // The dot on the line.
 const DOT_X = 12; // The dot's distance from its card's left edge.
-const PAD_X = 24; // Space around the graph (also the viewport's inset).
-const PAD_Y = 16;
+const PAD = 24; // Room kept around the graph when it is fitted.
 const ZOOM_MIN = 0.4;
 const ZOOM_MAX = 3;
 /** The short id a card and the header's entry both show: the entry id's first few characters. */
@@ -28,44 +36,41 @@ const SHORT_ID = 7;
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 export interface BranchViewOptions {
-	/** Move the session onto a way and return to the conversation. */
-	onSwitch(entryId: string): void;
+	/**
+	 * Move the session onto a way and return to the conversation.
+	 *
+	 * `entryId` is the entry the leaf lands on: for a card that left the line, the way's own entry
+	 * (the caller follows it to its tip); for a card on the line, the answer the question produced
+	 * when there is one, the question itself when there is not.
+	 */
+	onSwitch(entryId: string, landing: BranchWay["landing"]): void;
 	/** Return to the conversation without moving. */
 	onBack(): void;
 }
 
-/** One laid-out node: a way, or the root card when `way` is undefined. */
+/** One laid-out card: a way, placed in the grid. */
 interface LaidNode {
-	way: BranchWay | undefined;
-	id: string;
-	label: string;
-	turn: number | undefined;
-	selectable: boolean;
+	way: BranchWay;
 	depth: number;
 	lane: number;
 }
 
 interface Layout {
 	nodes: LaidNode[];
-	/** The ids on the way being read, which the paint marks solid. */
-	path: Set<string>;
 	width: number;
 	height: number;
 }
 
 /** The branch page, and the fixed header's own row of branch tools. */
 export class BranchView {
-	/** The page itself: summary line over the pan-and-zoom viewport. */
+	/** The page itself: the pan-and-zoom viewport, with nothing above it. */
 	readonly element: HTMLElement;
 	/** The tools row that lives in the fixed header, under the title. */
 	readonly toolsBar: HTMLElement;
 
 	private readonly options: BranchViewOptions;
-	private readonly sum = element("div", "branch-sum");
 	private readonly viewport = element("div", "graph-viewport");
-	private readonly sizer = element("div", "graph-sizer");
 	private readonly zoomLayer = element("div", "graph-zoom");
-	private readonly selInfo = element("span", "branch-sel-info");
 	private readonly zoomValue = element("span", "zoom-value", "100%");
 	private readonly back: HTMLButtonElement;
 	private readonly zoomOut: HTMLButtonElement;
@@ -77,43 +82,42 @@ export class BranchView {
 	/** Whether the page is the one on screen; painting waits for it, because fitting needs a size. */
 	private open = false;
 	private zoom = 1;
+	/** The layer's translation, in viewport pixels — the whole of the pan. */
+	private x = PAD;
+	private y = PAD;
 	/** The way the page has picked but not yet applied; starts on the way being read. */
 	private selected: string | undefined;
 	private laid: Layout | undefined;
 
-	/** Pan bookkeeping: the press's origin, and whether it grew into a drag. */
-	private drag: { x: number; y: number; left: number; top: number } | undefined;
+	/** Pan bookkeeping: where the press started, and the translation it started from. */
+	private drag: { x: number; y: number; atX: number; atY: number } | undefined;
 	private dragged = false;
 
 	constructor(options: BranchViewOptions) {
 		this.options = options;
-		this.viewport.append(this.sizer);
-		this.sizer.append(this.zoomLayer);
+		this.viewport.append(this.zoomLayer);
 		this.element = element("div", "branch-view");
-		this.element.append(this.sum, this.viewport);
+		this.element.append(this.viewport);
 
 		this.zoomOut = element("button", "zoom-button", "−", { type: "button", title: "缩小" });
 		this.zoomIn = element("button", "zoom-button", "＋", { type: "button", title: "放大" });
-		this.zoomFit = element("button", "zoom-button", "适应", { type: "button", title: "缩放到刚好装下" });
+		this.zoomFit = element("button", "zoom-button", "适应", { type: "button", title: "缩放到刚好装下并居中" });
 		this.back = element("button", "back-button", "回到对话", { type: "button" });
 		const zoomGroup = element("div", "zoom-group");
 		zoomGroup.append(this.zoomOut, this.zoomValue, this.zoomIn, this.zoomFit);
 		this.toolsBar = element("div", "branch-tools");
-		this.toolsBar.append(this.selInfo, element("span", "header-spacer"), zoomGroup, this.back);
+		this.toolsBar.append(element("span", "header-spacer"), zoomGroup, this.back);
 		// The tools row belongs to the branch page; it shows when the page does, and not before.
 		this.toolsBar.hidden = true;
 
-		this.zoomOut.addEventListener("click", () => this.applyZoom(this.zoom / 1.2));
-		this.zoomIn.addEventListener("click", () => this.applyZoom(this.zoom * 1.2));
-		this.zoomFit.addEventListener("click", () => {
-			this.applyZoom(this.fitScale());
-			this.scrollHome();
-		});
+		this.zoomOut.addEventListener("click", () => this.zoomAt(this.zoom / 1.2));
+		this.zoomIn.addEventListener("click", () => this.zoomAt(this.zoom * 1.2));
+		this.zoomFit.addEventListener("click", () => this.homeZoom());
 		this.back.addEventListener("click", () => this.applySelection());
 
 		this.viewport.addEventListener("pointerdown", (event) => {
 			if (event.button !== 0) return;
-			this.drag = { x: event.clientX, y: event.clientY, left: this.viewport.scrollLeft, top: this.viewport.scrollTop };
+			this.drag = { x: event.clientX, y: event.clientY, atX: this.x, atY: this.y };
 			this.dragged = false;
 		});
 		this.viewport.addEventListener("pointermove", (event) => {
@@ -128,8 +132,9 @@ export class BranchView {
 				this.viewport.classList.add("panning");
 				this.viewport.setPointerCapture(event.pointerId);
 			}
-			this.viewport.scrollLeft = this.drag.left - dx;
-			this.viewport.scrollTop = this.drag.top - dy;
+			this.x = this.drag.atX + dx;
+			this.y = this.drag.atY + dy;
+			this.applyTransform();
 		});
 		// The release is where a press that never dragged becomes a click: the pointer decides, not a
 		// `click` event — otherwise a pan would end by selecting whatever card it stopped on.
@@ -148,13 +153,19 @@ export class BranchView {
 			this.dragged = false;
 			this.viewport.classList.remove("panning");
 		});
-		// Ctrl / ⌘ + wheel zooms with the point under the pointer pinned; an unmodified wheel scrolls.
+		// The wheel is the map's other hand: Ctrl / ⌘ zooms under the pointer, and a bare wheel — or a
+		// two-finger trackpad swipe — pans. Neither has a scroll range to run out of.
 		this.viewport.addEventListener(
 			"wheel",
 			(event) => {
-				if (!event.ctrlKey && !event.metaKey) return;
 				event.preventDefault();
-				this.applyZoom(this.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12), event.clientX, event.clientY);
+				if (event.ctrlKey || event.metaKey) {
+					this.zoomAt(this.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12), event.clientX, event.clientY);
+					return;
+				}
+				this.x -= event.deltaX;
+				this.y -= event.deltaY;
+				this.applyTransform();
 			},
 			{ passive: false },
 		);
@@ -220,9 +231,7 @@ export class BranchView {
 	private paint(): void {
 		const tree = this.tree;
 		if (tree === undefined) {
-			this.sum.replaceChildren(
-				element("span", undefined, "这条会话还没有分支。对一条用户消息右键选「从此分支」，再发一条消息，这里就会长出第二条走法。"),
-			);
+			// No tree, no graph: the page waits empty for the first question to land.
 			this.zoomLayer.replaceChildren();
 			this.laid = undefined;
 			this.paintTools();
@@ -231,7 +240,6 @@ export class BranchView {
 
 		const metrics = cardMetrics(this.viewport);
 		const laid = (this.laid = layout(tree, metrics));
-		this.paintSummary(tree);
 
 		const svg = document.createElementNS(SVG_NS, "svg");
 		svg.setAttribute("class", "graph-svg");
@@ -239,109 +247,95 @@ export class BranchView {
 		svg.setAttribute("height", String(laid.height));
 
 		const colors = laneColors();
-		const at = new Map(laid.nodes.map((node, index) => [node.id, index]));
 		const dotX = (depth: number) => depth * STEP_X + DOT_X;
 		const dotY = (lane: number) => lane * metrics.lane + metrics.lane / 2;
+		const at = new Map(laid.nodes.map((node) => [node.way.entryId, node]));
 
-		// Edges: parent's dot rightwards; a change of lane elbows over — out straight, one curve,
-		// across, one curve back, in straight.
-		const drawEdges = (way: BranchWay | undefined, id: string): void => {
-			const kids = way === undefined ? tree.ways : way.children;
-			kids.forEach((kid, index) => {
-				const a = at.get(id);
-				const b = at.get(kid.entryId);
-				if (a !== undefined && b !== undefined) {
-					const from = laid.nodes[a]!;
-					const to = laid.nodes[b]!;
-					const ax = dotX(from.depth) + DOT_R;
-					const ay = dotY(from.lane);
-					const bx = dotX(to.depth) - DOT_R;
-					const by = dotY(to.lane);
-					const color = colors[to.lane % colors.length] ?? "currentColor";
-					const opacity = laid.path.has(kid.entryId) ? "1" : "0.4";
-					let d: string;
-					if (ay === by) {
-						d = `M${ax},${ay} H${bx}`;
-					} else {
-						const out = ax + 10 + index * 9;
-						const mid = out + 16;
-						const sign = by > ay ? 1 : -1;
-						d =
-							`M${ax},${ay} H${out}` +
-							` Q${mid},${ay} ${mid},${ay + sign * 10}` +
-							` V${by - sign * 10}` +
-							` Q${mid},${by} ${mid + 10},${by}` +
-							` H${bx}`;
-					}
-					const edge = document.createElementNS(SVG_NS, "path");
-					edge.setAttribute("d", d);
-					edge.setAttribute("fill", "none");
-					edge.setAttribute("stroke", color);
-					edge.setAttribute("stroke-width", "1.6");
-					edge.setAttribute("stroke-opacity", opacity);
-					svg.append(edge);
-				}
-				drawEdges(kid, kid.entryId);
-			});
+		const drawEdge = (d: string, lane: number, solid: boolean): void => {
+			const edge = document.createElementNS(SVG_NS, "path");
+			edge.setAttribute("d", d);
+			edge.setAttribute("fill", "none");
+			edge.setAttribute("stroke", colors[lane % colors.length] ?? "currentColor");
+			edge.setAttribute("stroke-width", "1.6");
+			edge.setAttribute("stroke-opacity", solid ? "1" : "0.4");
+			svg.append(edge);
 		};
-		drawEdges(undefined, "");
+
+		for (const node of laid.nodes) {
+			const ax = dotX(node.depth) + DOT_R;
+			const ay = dotY(node.lane);
+			// Along the line: the next user message is one column right, on the same row.
+			if (node.way.next !== undefined && at.has(node.way.next.entryId)) {
+				drawEdge(`M${ax},${ay} H${dotX(node.depth + 1) - DOT_R}`, node.lane, true);
+			}
+			// Off the line: out straight, one curve, down, one curve back, in straight.
+			node.way.branches.forEach((branch, index) => {
+				const to = at.get(branch.entryId);
+				if (to === undefined) return;
+				const by = dotY(to.lane);
+				const bx = dotX(to.depth) - DOT_R;
+				const out = ax + 10 + index * 9;
+				const mid = out + 16;
+				const sign = by > ay ? 1 : -1;
+				drawEdge(
+					`M${ax},${ay} H${out}` +
+						` Q${mid},${ay} ${mid},${ay + sign * 10}` +
+						` V${by - sign * 10}` +
+						` Q${mid},${by} ${mid + 10},${by}` +
+						` H${bx}`,
+					to.lane,
+					false,
+				);
+			});
+		}
 
 		for (const node of laid.nodes) {
 			const color = colors[node.lane % colors.length] ?? "currentColor";
-			const onPath = node.id !== "" && laid.path.has(node.id);
-			const selected = node.id === this.selected;
+			const onLine = tree.line.has(node.way.entryId);
 			const dot = document.createElementNS(SVG_NS, "circle");
 			dot.setAttribute("cx", String(dotX(node.depth)));
 			dot.setAttribute("cy", String(dotY(node.lane)));
-			dot.setAttribute("r", String(selected ? DOT_R + 1.5 : DOT_R));
-			dot.setAttribute("fill", onPath ? color : "none");
+			dot.setAttribute("r", String(node.way.entryId === this.selected ? DOT_R + 1.5 : DOT_R));
+			dot.setAttribute("fill", onLine ? color : "none");
 			dot.setAttribute("stroke", color);
 			dot.setAttribute("stroke-width", "1.8");
-			dot.setAttribute("stroke-opacity", onPath ? "1" : "0.6");
+			dot.setAttribute("stroke-opacity", onLine ? "1" : "0.6");
 			svg.append(dot);
 		}
 
 		const cards: HTMLElement[] = laid.nodes.map((node) => {
-			const card = element("button", "gnode", undefined, {
-				type: "button",
-				"data-id": node.id,
-				...(node.selectable ? {} : { disabled: true }),
-			});
-			const isSelected = node.id === this.selected;
+			const way = node.way;
+			const card = element("button", "gnode", undefined, { type: "button", "data-id": way.entryId });
 			card.style.left = `${node.depth * STEP_X}px`;
 			card.style.top = `${dotY(node.lane) - metrics.node / 2}px`;
 			card.style.width = `${NODE_W}px`;
 			card.style.height = `${metrics.node}px`;
 			// The whole sentence rides in `title`: the card shows one line of it, cut by the stylesheet's
-			// ellipsis, and the tooltip is what answers "what did it actually say".
-			card.title = node.label;
-			if (node.id === this.tree?.currentId) card.dataset.current = "";
-			if (isSelected) card.dataset.selected = "";
-			if (onPathOf(laid, node.id)) card.dataset.onPath = "";
+			// ellipsis, and the tooltip is what answers "what did it actually say". The question and the
+			// answer both ride there — a card that names the way by its question and the two ways that
+			// differ by their answers needs both to be readable, once each.
+			const parts: string[] = [];
+			for (const part of [way.question, way.answer, way.label]) {
+				if (part.length > 0 && !parts.includes(part)) parts.push(part);
+			}
+			card.title = parts.join("\n\n");
+			if (way.entryId === this.tree?.currentId) card.dataset.current = "";
+			if (way.entryId === this.selected) card.dataset.selected = "";
+			if (tree.line.has(way.entryId)) card.dataset.onPath = "";
 
-			const label = element("span", "lbl", node.label);
+			const label = element("span", "lbl", way.label);
 			const meta = element("span", "meta");
-			if (node.way === undefined) meta.append(element("span", undefined, "起点"));
-			else meta.append(element("span", undefined, shortId(node.way.entryId)));
-			if (node.turn !== undefined) meta.append(element("span", undefined, `轮 ${node.turn}`));
-			if (node.id === this.tree?.currentId) meta.append(element("span", "tag", "当前"));
-			else if (isSelected) meta.append(element("span", "tag", "已选中"));
+			meta.append(element("span", undefined, shortId(way.entryId)));
+			if (way.turn > 0) meta.append(element("span", undefined, `轮 ${way.turn}`));
+			if (way.entryId === this.tree?.currentId) meta.append(element("span", "tag", "当前"));
+			else if (way.entryId === this.selected) meta.append(element("span", "tag", "已选中"));
 			card.append(label, meta);
 			return card;
 		});
 
 		this.zoomLayer.replaceChildren(svg, ...cards);
-		this.applyZoom(this.zoom);
+		this.applyTransform();
 		this.paintTools();
-	}
-
-	private paintSummary(tree: BranchTree): void {
-		const line = element("span");
-		const count = element("b", undefined, String(tree.points));
-		const ways = element("b", undefined, String(tree.options));
-		line.append("这份记录有 ", count, " 个分支点、", ways, " 条走法；根在最左边，实心点连起来的那条是你现在读的。");
-		const hint = element("span", "branch-hint", "左键点一个节点选中它 · 悬停看整句话 · 按住左键拖动画布 · Ctrl+滚轮放大");
-		this.sum.replaceChildren(line, hint);
 	}
 
 	/**
@@ -349,13 +343,7 @@ export class BranchView {
 	 * nothing to move to — no tree, nothing selected, or the way being read is what is selected.
 	 *
 	 * The button's label, its primary tint, its disabled state, and what a press does all turn on this
-	 * one fact, so it is derived once here rather than spelled again at each of them. `paintTools` needs
-	 * the way itself for the caption; the press needs only where to move.
-	 *
-	 * A selected id with no way behind it is not movable either, even though it is not the way being
-	 * read: `findWay` coming back empty means there is nowhere to go, which is the same answer as the
-	 * selected id being the way being read. Without this the two readers would disagree — the caption
-	 * would say "已选中" while the button still said "回到对话".
+	 * one fact, so it is derived once here rather than spelled again at each of them.
 	 */
 	private movingWay(): BranchWay | undefined {
 		const tree = this.tree;
@@ -364,21 +352,11 @@ export class BranchView {
 		return findWay(tree, id);
 	}
 
-	/** The fixed header's row: what is selected, the zoom fallbacks, and the one way out. */
+	/** The fixed header's row: the zoom fallbacks and the one way out. */
 	private paintTools(): void {
 		const moving = this.movingWay();
-		// What the caption describes: the way that would be moved to, else whatever is selected, else
-		// nothing at all. Derived here rather than in `movingWay` because the two readers want different
-		// answers — the press must not move, while the caption still has to name what is selected.
-		const named = moving ?? (this.tree === undefined || this.selected === undefined ? undefined : findWay(this.tree, this.selected));
-		if (named === undefined) {
-			this.selInfo.replaceChildren("点一个节点选中它，再按右边的按钮回到对话。");
-		} else {
-			const head = element("b", undefined, shortId(named.entryId));
-			const name = element("em", undefined, named.label);
-			this.selInfo.replaceChildren(moving === undefined ? "现在读的是 " : "已选中 ", head, " ", name, `（轮 ${named.turn}）`);
-		}
-		this.back.textContent = moving === undefined ? "回到对话" : "切到这一条并回到对话";
+		this.back.textContent =
+			moving === undefined ? "回到对话" : moving.landing === "here" ? "从这里继续" : "切到这一条并回到对话";
 		this.back.classList.toggle("primary", moving !== undefined);
 		// A run is writing to the tree the button would move, so the move waits for it to settle — but
 		// only the *move* waits. "回到对话" is the window changing which page it shows and is always
@@ -401,18 +379,13 @@ export class BranchView {
 	/**
 	 * The one way out of the page: apply what is selected, or just go back.
 	 *
-	 * `tree === undefined`, nothing selected, and "the way being read is selected" are all the same
-	 * answer — go back — so the only thing that can decide between the two is whether there is a way to
-	 * move to at all, which is `movingWay`'s question.
-	 *
 	 * The run check guards the **move** alone. Returning to the conversation is this window swapping
-	 * which page it shows, which no run can be in the middle of, and it used to sit behind the same
-	 * check the move does — so a stale `streaming` made the button look pressable and do nothing at
-	 * all. A press that reaches the refused move is one whose `streaming` arrived after the paint that
-	 * enabled the button; the refusal is stated by the button's own `title` (set in `paintTools`), and
-	 * nothing is written into the caption here: the caption is the selection readout, and the next
-	 * paint that could put it back is the end of the run, so overwriting it would trade a description
-	 * that is still true for a sentence the button already carries.
+	 * which page it shows, which no run can be in the middle of.
+	 *
+	 * A card on the line lands on the **answer** its question produced, not on the question itself —
+	 * the conversation comes back showing the question and what it said, and the next prompt forks
+	 * after the answer, where a new question belongs. A way with no answer yet, and a card that left
+	 * the line, land on their own entry.
 	 */
 	private applySelection(): void {
 		const moving = this.movingWay();
@@ -421,75 +394,55 @@ export class BranchView {
 			return;
 		}
 		if (this.streaming) return;
-		this.options.onSwitch(moving.entryId);
+		const entryId = moving.landing === "here" && moving.replyId !== undefined ? moving.replyId : moving.entryId;
+		this.options.onSwitch(entryId, moving.landing);
 	}
 
-	// -------------------------------------------------------------- zoom & pan
+	// ------------------------------------------------------------------ the map
+
+	/** Write the layer's one transform — the whole of pan and zoom. */
+	private applyTransform(): void {
+		this.zoomLayer.style.transform = `translate(${this.x}px, ${this.y}px) scale(${this.zoom})`;
+		this.zoomValue.textContent = `${Math.round(this.zoom * 100)}%`;
+	}
 
 	/**
 	 * Zoom, keeping the point under the pointer (or the viewport's centre) pinned.
-	 * The graph's natural size and its scaled size are two facts, which is why the sizer outside
-	 * carries the scroll range while the layer inside carries the `scale()`.
+	 *
+	 * The graph point under a viewport point is `(px - x) / zoom`; after the zoom it has to land on the
+	 * same pixel, so the translation is solved from it rather than nudged. There is no scroll box and no
+	 * content size to clamp against: a map does not need one.
 	 */
-	private applyZoom(next: number, clientX?: number, clientY?: number): void {
-		const laid = this.laid;
-		if (laid === undefined) return;
+	private zoomAt(next: number, clientX?: number, clientY?: number): void {
+		if (this.laid === undefined) return;
 		const box = this.viewport.getBoundingClientRect();
-		const vx = clientX === undefined ? this.viewport.clientWidth / 2 : clientX - box.left;
-		const vy = clientY === undefined ? this.viewport.clientHeight / 2 : clientY - box.top;
-		// Where the point under the pointer sits in the graph's own coordinates. The sizer's own box is
-		// what scrollLeft is measured against, so this is the one subtraction that stays right whether
-		// the graph is panned to a corner or sitting where `scrollHome` left it.
-		const sizer = this.sizer.getBoundingClientRect();
-		const ox = box.left + this.viewport.scrollLeft - sizer.left;
-		const oy = box.top + this.viewport.scrollTop - sizer.top;
-		const gx = (ox + vx - PAD_X) / this.zoom;
-		const gy = (oy + vy - PAD_Y) / this.zoom;
-
-		this.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, next));
-		this.sizer.style.width = `${laid.width * this.zoom + PAD_X * 2}px`;
-		this.sizer.style.height = `${laid.height * this.zoom + PAD_Y * 2}px`;
-		this.zoomLayer.style.left = `${PAD_X}px`;
-		this.zoomLayer.style.top = `${PAD_Y}px`;
-		this.zoomLayer.style.transform = `scale(${this.zoom})`;
-
-		// The `- PAD_X` is the sizer's own inset: the graph sits inside it, so the scroll that pins the
-		// graph's point under the pointer is the scroll that pins the sizer's box plus that inset.
-		this.viewport.scrollLeft = gx * this.zoom + PAD_X - vx - ox;
-		this.viewport.scrollTop = gy * this.zoom + PAD_Y - vy - oy;
-		this.zoomValue.textContent = `${Math.round(this.zoom * 100)}%`;
+		const px = clientX === undefined ? this.viewport.clientWidth / 2 : clientX - box.left;
+		const py = clientY === undefined ? this.viewport.clientHeight / 2 : clientY - box.top;
+		const zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, next));
+		if (zoom === this.zoom) return;
+		this.x = px - ((px - this.x) / this.zoom) * zoom;
+		this.y = py - ((py - this.y) / this.zoom) * zoom;
+		this.zoom = zoom;
+		this.applyTransform();
 	}
 
 	/** The scale that fits the whole graph, width and height both. */
 	private fitScale(): number {
 		const laid = this.laid;
 		if (laid === undefined) return 1;
-		const byWidth = (this.viewport.clientWidth - PAD_X * 2) / laid.width;
-		const byHeight = (this.viewport.clientHeight - PAD_Y * 2) / laid.height;
+		const byWidth = (this.viewport.clientWidth - PAD * 2) / laid.width;
+		const byHeight = (this.viewport.clientHeight - PAD * 2) / laid.height;
 		return Math.min(byWidth, byHeight);
 	}
 
-	/**
-	 * The scroll position that puts the graph in the middle of the viewport — entering the page and
-	 * pressing "适应" both land here.
-	 *
-	 * Read off the sizer's painted size rather than recomputed from `zoom`: one size, one place, and
-	 * the two cannot drift apart. It is also the *only* thing that centres in practice: the sizer is
-	 * never smaller than the viewport (its `min-width` / `min-height` are `100%`), so the two axes
-	 * differ only in whether the graph's own margins fit inside it. What the clamp answers is the axis
-	 * where they do — there the graph is already as centred as the viewport allows.
-	 */
-	private scrollHome(): void {
-		if (this.laid === undefined) return;
-		const sizer = this.sizer.getBoundingClientRect();
-		this.viewport.scrollLeft = Math.max(0, (sizer.width - this.viewport.clientWidth) / 2);
-		this.viewport.scrollTop = Math.max(0, (sizer.height - this.viewport.clientHeight) / 2);
-	}
-
-	/** Entering the page: 100% when the graph fits, shrunk only when it does not. */
+	/** Entering the page and pressing "适应" both land here: the whole graph, centred, never above 100%. */
 	private homeZoom(): void {
-		this.applyZoom(Math.min(1, this.fitScale()));
-		this.scrollHome();
+		const laid = this.laid;
+		if (laid === undefined) return;
+		this.zoom = Math.min(1, this.fitScale());
+		this.x = (this.viewport.clientWidth - laid.width * this.zoom) / 2;
+		this.y = (this.viewport.clientHeight - laid.height * this.zoom) / 2;
+		this.applyTransform();
 	}
 }
 
@@ -512,14 +465,9 @@ interface CardMetrics {
  * `--dsw-branch-node-h` is a `calc()` chain, and an **unregistered** custom property's computed value
  * is that token stream with the `calc()` left unevaluated — `getComputedStyle(root).getPropertyValue()`
  * hands back `"calc(calc(13px + calc(22px - 15px)) * 18 / 13) + ..."`, which `parseFloat` reads as
- * `NaN`. The first cut of this read the tokens that way, so it always took its fallback and painted
- * every card at the default size no matter what the font-size slider said: the clipping this page was
- * fixed for, back at the top of the range. `main.ts` can parse its own tokens because those are literal
- * pixels; these are not, so the browser does the arithmetic and this reads the result.
- *
- * The probe carries the token as its height, so what comes back is the box the layout gives a real
- * card — it has to be attached to be measured at all, so it goes into the viewport and comes straight
- * back out. `.branch-metric` keeps it invisible and out of the flow while it is there.
+ * `NaN`. The probe carries the token as its height, so what comes back is the box the layout gives a
+ * real card — it has to be attached to be measured at all, so it goes into the viewport and comes
+ * straight back out. `.branch-metric` keeps it invisible and out of the flow while it is there.
  */
 function cardMetrics(host: HTMLElement): CardMetrics {
 	const measure = (height: string): number => {
@@ -534,67 +482,31 @@ function cardMetrics(host: HTMLElement): CardMetrics {
 }
 
 /**
- * Place the nodes: **one rule only** — the child on the active path keeps its parent's lane, every
- * other child opens a new lane; rows are depth-first, so a subtree finishes before the next sibling
- * starts. The path child is sorted first, which is what keeps the trunk on the top row as one
- * straight horizontal line.
+ * Place the cards: the line runs along row 0, one column per message, and each fork's alternatives
+ * take the rows below the card they left.
+ *
+ * One rule only — **`next` keeps the row, `branches` open new ones** — which is what makes the way
+ * being read a straight horizontal line with the others hanging off it. Each alternative is a leaf:
+ * the server only reports branch points on the active chain, so a way nobody is reading has no
+ * further shape to draw.
  */
 function layout(tree: BranchTree, metrics: CardMetrics): Layout {
-	const path = pathOf(tree);
-	const nodes: LaidNode[] = [
-		// The root is the common ancestor, not a way of its own — drawn so the tree has a place to
-		// start, and never selectable.
-		{ way: undefined, id: "", label: tree.rootLabel, turn: undefined, selectable: false, depth: 0, lane: 0 },
-	];
-	let nextLane = 0;
-	const walk = (way: BranchWay, depth: number, lane: number): void => {
-		nodes.push({
-			way,
-			id: way.entryId,
-			label: way.label,
-			turn: way.turn,
-			selectable: true,
-			depth,
-			lane,
-		});
-		const kids = [...way.children].sort((a, b) => Number(path.has(b.entryId)) - Number(path.has(a.entryId)));
-		kids.forEach((kid, index) => walk(kid, depth + 1, index === 0 ? lane : ++nextLane));
+	const nodes: LaidNode[] = [];
+	let lane = 1;
+	const walk = (way: BranchWay, depth: number, row: number): void => {
+		nodes.push({ way, depth, lane: row });
+		for (const branch of way.branches) walk(branch, depth + 1, lane++);
+		if (way.next !== undefined) walk(way.next, depth + 1, row);
 	};
-	[...tree.ways]
-		.sort((a, b) => Number(path.has(b.entryId)) - Number(path.has(a.entryId)))
-		.forEach((way, index) => walk(way, 1, index === 0 ? 0 : ++nextLane));
+	walk(tree.trunk, 0, 0);
 
-	const lanes = Math.max(...nodes.map((node) => node.lane)) + 1;
 	const depths = Math.max(...nodes.map((node) => node.depth)) + 1;
+	const lanes = Math.max(...nodes.map((node) => node.lane)) + 1;
 	return {
 		nodes,
-		path,
 		width: (depths - 1) * STEP_X + DOT_X + NODE_W,
 		height: lanes * metrics.lane,
 	};
-}
-
-/** The ids from the root to the way being read — the chain the paint draws solid. */
-function pathOf(tree: BranchTree): Set<string> {
-	const path = new Set<string>();
-	if (tree.currentId === undefined) return path;
-	const walk = (ways: readonly BranchWay[], chain: string[]): boolean => {
-		for (const way of ways) {
-			const next = [...chain, way.entryId];
-			if (way.entryId === tree.currentId) {
-				next.forEach((id) => path.add(id));
-				return true;
-			}
-			if (walk(way.children, next)) return true;
-		}
-		return false;
-	};
-	walk(tree.ways, []);
-	return path;
-}
-
-function onPathOf(laid: Layout, id: string): boolean {
-	return id !== "" && laid.path.has(id);
 }
 
 /** The short id a card and the header's entry both show: the entry id's first few characters. */

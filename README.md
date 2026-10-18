@@ -163,7 +163,7 @@ node scripts/smoke-settings.ts  # 设置真实落盘再重读：收展状态跟�
 node scripts/smoke-modes.ts    # 设置面板的模式页、输入框的模式座位与菜单；不需要密钥
 node scripts/smoke-transcript.ts # 转录的分批绘制与流式代价：两条路画出同一个、流式一帧只碰尾部、脚注跟着轮与运行走、中途来的帧说了算；不需要密钥
 node scripts/smoke-frame.ts    # 一帧只画一次：多次请求合并成一帧、回调里再排的是下一帧、取消的帧不跑；不需要密钥
-node scripts/smoke-branch.ts   # 分支图卡片：任意长的消息都是同一固定高度、单行截断、整句在 tooltip 里；不需要密钥
+node scripts/smoke-branch.ts   # 分支页：一条线上一张卡（任意长的消息都是同一固定高度、单行截断、整句在 tooltip 里）、走法挂在下面一行、画布能拖能缩、两个出口两种落地；不需要密钥
 node scripts/smoke-session.ts  # 流式、排队、重试、压缩、委派；不需要密钥
 node scripts/smoke-models.ts   # 导入的模型与无模型占位，不需要密钥
 node scripts/smoke-default-model.ts # 内置默认模型：常量、服务端收下的形状、先存行后落标记；不需要密钥

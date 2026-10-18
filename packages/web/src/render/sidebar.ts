@@ -59,12 +59,6 @@ export interface SidebarState {
 	/** Every workspace with stored sessions, most recently used first. */
 	workspaces: readonly WorkspaceGroup[];
 	activeSessionId?: string;
-	/**
-	 * The workspace the shadowed heading names, which is the picker's own choice — where the next new
-	 * session will land — rather than the server's startup root. The three readers of one choice are
-	 * the hero chip, the new-session button, and this heading.
-	 */
-	currentWorkspace: string;
 	collapsed: boolean;
 	/**
 	 * Per-workspace paging state, keyed by the workspace's path, as the appearance settings hold it.
@@ -273,7 +267,7 @@ export class Sidebar {
 		let matches = 0;
 		for (const group of groups) {
 			const entry = pagingOf(state.paging, group.cwd);
-			const wrapper = this.groupFor(group.cwd, state.currentWorkspace, entry);
+			const wrapper = this.groupFor(group.cwd, entry);
 			const rows = rowsOf(group);
 			for (const row of rows) this.rowsById.set(row.session.id, row);
 			// Matched on the label a row *wears* rather than the title it stores: the fork's suffix is
@@ -368,6 +362,13 @@ export class Sidebar {
 		// no-match note is the list's suffix, and only moves when it is not already last.
 		if (!this.list.contains(this.headRow)) this.list.prepend(this.headRow, this.searchRow);
 		this.searchRow.hidden = !this.searchOpen;
+		// The empty phase leaves its note behind once the first group arrives: `replaceChildren` put
+		// it there, nothing claims it afterwards, and a list that started empty would wear 「暂无会话」
+		// above its sessions for as long as the window is open. `noMatch` shares the class and is the
+		// list's permanent suffix, so it is the one note this must not remove.
+		for (const note of [...this.list.children]) {
+			if (note !== this.noMatch && note.classList.contains("session-list-empty")) note.remove();
+		}
 		if (this.list.lastElementChild !== this.noMatch) this.list.append(this.noMatch);
 	}
 
@@ -379,14 +380,13 @@ export class Sidebar {
 	 * and `[aria-expanded]` is the state a screen reader — and the stylesheet's chevron — read.
 	 * The state is patched like everything else on a drawn node: written only when it moved.
 	 */
-	private groupFor(cwd: string, currentWorkspace: string, entry: WorkspacePaging): HTMLElement {
+	private groupFor(cwd: string, entry: WorkspacePaging): HTMLElement {
 		const key = `head:${cwd}`;
 		const existing = this.drawn.get(key);
 		if (existing !== undefined) {
 			// Both facts are written through the heading reference this entry was built with, so
 			// neither one needs a search.
 			if (existing.head !== undefined) {
-				this.paintCurrent(existing.head, cwd === currentWorkspace);
 				this.paintExpanded(existing.head, entry.collapsed);
 			}
 			// The two strings a rename can move are patched for the same reason a row's title is:
@@ -424,7 +424,6 @@ export class Sidebar {
 		const wrapper = element("div", "workspace");
 		wrapper.append(head);
 		this.list.append(wrapper);
-		this.paintCurrent(head, cwd === currentWorkspace);
 		this.drawn.set(key, { button: wrapper, head, name });
 		return wrapper;
 	}
@@ -483,17 +482,6 @@ export class Sidebar {
 		this.handlers.onRenameWorkspace(cwd, typed);
 	}
 
-	/**
-	 * Write whether this heading is the current workspace, and only when it moved.
-	 *
-	 * A class rather than a chip: the mark is the heading's own surface, so moving it is a toggle.
-	 */
-	private paintCurrent(head: HTMLElement, current: boolean): void {
-		if (head.classList.contains(CURRENT_HEAD) === current) return;
-		head.classList.toggle(CURRENT_HEAD, current);
-	}
-
-	/** Write a heading's expanded state, and only when it moved. */
 	private paintExpanded(head: HTMLElement, collapsed: boolean): void {
 		const wanted = collapsed ? "false" : "true";
 		if (head.getAttribute("aria-expanded") !== wanted) head.setAttribute("aria-expanded", wanted);
@@ -964,14 +952,6 @@ function rowsOf(group: WorkspaceGroup): TreeRow[] {
  * one — the cap is about how much a scan can hold, and that has not changed.
  */
 const PAGE_SIZE = 5;
-
-/**
- * The class naming the one group heading that is the current workspace.
- *
- * A class on the heading rather than a chip inside it: the mark is a surface — see
- * `--dsw-shadow-workspace-current` in `tokens.css` — so it travels with the heading it marks.
- */
-const CURRENT_HEAD = "workspace-head-current";
 
 /** The last segment of a path, which is what a person calls the project. */
 export function workspaceName(cwd: string): string {

@@ -5,6 +5,7 @@ import type { AppearanceSettings, BashSettings, ModeSettings } from "./config.ts
 import type { BranchPoint } from "./session/session-manager.ts";
 
 export type { AgentSessionEvent } from "./agent.ts";
+export type { MessageDelta } from "./agent.ts";
 export type { BranchOption, BranchPoint } from "./session/session-manager.ts";
 export type { BashSettings, ModeSettings, WorkspacePaging } from "./config.ts";
 
@@ -253,6 +254,15 @@ export interface SessionSnapshot {
 	parentSession?: string;
 	/** The entry the session is on: the tip of its chain, or null before the first entry. */
 	leafId: string | null;
+	/**
+	 * The assistant message being written right now, when this process is running one.
+	 *
+	 * Only a live session can answer it — the store gains the message when it ends — and it exists so
+	 * a window that attaches mid-run is not left waiting for the rest of a sentence whose beginning it
+	 * never saw: the baseline draws these characters, and the deltas that follow append to them.
+	 * Absent for a settled transcript and for every cold read.
+	 */
+	partial?: AgentMessage;
 	submitting: boolean;
 	/** User messages accepted mid-run that the loop has not drained yet. */
 	queued: number;

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>票 05 · 流式渲染量具</title>
+<style>
+	html, body { margin: 0; }
+	/* 尺寸与排版取 transcript 阅读列的量级；两套策略共用同一份样式，差异全部来自渲染路径。 */
+	.stream {
+		box-sizing: border-box;
+		width: 720px;
+		height: 640px;
+		margin: 0 auto;
+		overflow-y: scroll;
+		/* 生产里贴底时 `.pinned` 就是它：量具量的是贴底状态。 */
+		overflow-anchor: none;
+		padding: 16px 24px;
+		font: 14px/1.7 system-ui, sans-serif;
+	}
+	.stream > * { margin: 0 0 1em; }
+</style>
+</head>
+<body>
+<main id="stream" class="stream"></main>
+<script type="module" src="./main.ts"></script>
+</body>
+</html>

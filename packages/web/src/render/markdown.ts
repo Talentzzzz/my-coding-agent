@@ -23,6 +23,9 @@ export type Block =
 
 type Align = "left" | "center" | "right" | undefined;
 
+/** One member of {@link Block}, named by its kind — what a `switch (block.kind)` case narrows to. */
+type BlockOf<Kind extends Block["kind"]> = Extract<Block, { kind: Kind }>;
+
 function isBlank(line: string): boolean {
 	return line.trim().length === 0;
 }
@@ -260,15 +263,23 @@ export interface MarkdownState {
  *
  * `state` is the previous call's {@link MarkdownState}, and the returned value is the one to pass
  * back next time. When the text only grew, the settled blocks are kept and just the tail is parsed;
- * everything else is a full parse. Either way the tail block is re-rendered every call, because it is
- * the block still being written.
+ * everything else is a full parse.
+ *
+ * The tail is the block still being written, and while it keeps its kind it is patched in place
+ * rather than replaced: a long answer is often one paragraph, and replacing it every token makes the
+ * browser rebuild the whole subtree, lay the column out again, and drop any selection inside it. See
+ * {@link patchBlock} for what "in place" means per kind; a tail that changed kind, or text that was
+ * replaced rather than continued, is re-made the old way.
  */
 export function renderMarkdown(container: HTMLElement, text: string, state?: MarkdownState): MarkdownState {
 	const previous = state?.blocks ?? [];
+	// Growth is the one shape a streaming message has; a shorter or rewritten text is a replacement
+	// (a `message_end` that disagrees with the deltas, a turn drawn from a new snapshot).
+	const continued = state !== undefined && text.length >= state.text.length && text.startsWith(state.text);
 	let blocks: Block[];
 	let tailOffset: number;
 
-	if (state !== undefined && text.length >= state.text.length && text.startsWith(state.text)) {
+	if (continued) {
 		// The text only grew: keep everything before the old tail and re-parse from where it started.
 		// The slice shares its first `state.tailOffset` characters with the old text, so the tail's
 		// own first line is the block that was still open — and nothing earlier is touched at all.
@@ -277,7 +288,7 @@ export function renderMarkdown(container: HTMLElement, text: string, state?: Mar
 		const tail = parseFrom(tailLines, 0);
 		// The tail's blocks may be fewer, equal, or more than the one they replace — a paragraph the
 		// new text just split with a blank line becomes two — and the DOM patch below handles all
-		// three by re-adding from `kept`.
+		// three.
 		blocks = [...state.blocks.slice(0, kept), ...tail.blocks];
 		tailOffset = state.tailOffset + offsetOfLine(tailLines, tail.lastStart);
 	} else {
@@ -287,14 +298,25 @@ export function renderMarkdown(container: HTMLElement, text: string, state?: Mar
 		tailOffset = offsetOfLine(lines, parsed.lastStart);
 	}
 
-	if (blocks.length < previous.length) {
-		// Fewer blocks than are on screen means this is a replacement, not a continuation, so the
-		// container is rebuilt rather than patched against blocks that no longer exist.
+	// The only case worth patching is "same number of blocks, tail kept its kind": every block before
+	// the tail is settled, so the screen differs only in its last element, and the element itself can
+	// keep its identity. Anything else is a shape change, and the old path re-adds from the cut.
+	const kept = previous.length - 1;
+	if (continued && blocks.length === previous.length && kept >= 0) {
+		const tail = container.lastElementChild as HTMLElement | null;
+		if (tail !== null && patchBlock(tail, previous[kept]!, blocks[kept]!)) {
+			return { text, blocks, tailOffset };
+		}
+	}
+
+	if (!continued || blocks.length < previous.length) {
+		// A replacement, or a tail that lost blocks: the container is rebuilt rather than patched
+		// against blocks that no longer exist.
 		container.replaceChildren();
 		appendBlocks(container, blocks, 0);
 	} else {
 		// Drop the tail before re-adding it: it is the block still being written, and the one just
-		// parsed may differ from what is on screen.
+		// parsed is a different kind (or a list that changed type), so it cannot be patched.
 		if (previous.length > 0) container.lastElementChild?.remove();
 		appendBlocks(container, blocks, Math.max(0, previous.length - 1));
 	}
@@ -312,6 +334,195 @@ function offsetOfLine(lines: readonly string[], index: number): number {
 
 function appendBlocks(container: HTMLElement, blocks: readonly Block[], from: number): void {
 	for (let index = from; index < blocks.length; index += 1) container.append(renderBlock(blocks[index]!));
+}
+
+/**
+ * Patch the block still being written, in place, and say whether it worked.
+ *
+ * The element is the one already on screen, so a successful patch leaves its identity, its place in
+ * the column, and everything already laid out around it alone. `false` means the element cannot
+ * describe `next` — a kind change, a replacement, or a structure a growth would rewrite — and the
+ * caller re-makes it the old way.
+ */
+function patchBlock(element: HTMLElement, previous: Block, next: Block): boolean {
+	if (previous.kind !== next.kind) return false;
+	switch (next.kind) {
+		case "paragraph": {
+			const before = previous as BlockOf<"paragraph">;
+			return patchInlineBlock(element, before.lines.join("\n"), next.lines.join("\n"));
+		}
+		case "heading": {
+			const before = previous as BlockOf<"heading">;
+			return before.level === next.level && patchInlineBlock(element, before.text, next.text);
+		}
+		case "code":
+			return patchCodeBlock(element, previous as BlockOf<"code">, next);
+		case "list":
+			return patchListBlock(element, previous as BlockOf<"list">, next);
+		case "quote": {
+			// A quote is a container of blocks rather than one run of text, so its own children are
+			// re-made; the `<blockquote>` itself stays, which is what keeps its margins and place.
+			element.replaceChildren();
+			for (const child of parseBlocks(next.lines.join("\n"))) element.append(renderBlock(child));
+			return true;
+		}
+		case "table":
+			// A table's rows and alignment are a grid, not a run: the element is cheaper to re-make
+			// than to patch cell by cell, and a streamed table is rare enough not to earn the code.
+			return false;
+		case "rule":
+			return true;
+	}
+}
+
+/**
+ * Patch a paragraph or heading whose text only grew.
+ *
+ * The element's **last child** says which write is the cheap correct one, and the whole paragraph is
+ * never re-read:
+ *
+ * - A text node is the run of literal text since the last inline form, so everything a suffix can
+ *   newly form has to begin inside that run — nothing before it is left unanswered. A suffix of
+ *   ordinary prose therefore extends the node (`appendData`); a suffix carrying a marker re-reads
+ *   just that run plus the suffix and swaps the nodes in its place.
+ * - A form at the end closes the previous text, so nothing before the suffix can open or close
+ *   anything: the suffix is rendered on its own and appended.
+ *
+ * The earlier cut asked "does the whole paragraph hold a form" (`hasInlineMarkup(next)`) and rebuilt
+ * the element when it did, which for `思考` and any technical answer — a backtick every few words —
+ * meant rebuilding the entire paragraph, node by node, on **every** frame: 456,053 nodes over 666
+ * frames for a 16k-character answer, against 2 for plain prose (`.scratch/branch-line-and-smoothness/
+ * research/measure-inline.ts`). Re-parsing only the unanswered run costs the same as prose does.
+ */
+function patchInlineBlock(element: HTMLElement, previous: string, next: string): boolean {
+	if (!next.startsWith(previous)) return false;
+	const suffix = next.slice(previous.length);
+	if (suffix.length === 0) return true;
+
+	const literal = !INLINE_MARKER.test(suffix);
+	const last = element.lastChild;
+	// `3` is `Node.TEXT_NODE`; the literal is used because the smoke's DOM shim does not export Node.
+	if (last != null && last.nodeType === 3) {
+		const tail = last.textContent ?? "";
+		// The node has to be the tail of what was rendered, or offsets in it mean nothing.
+		if (!previous.endsWith(tail)) return false;
+		// Ordinary prose on both sides cannot form anything across the join, so the node just grows.
+		// A marker on either side means a form may open or close here, and then only the unanswered
+		// run is re-read — which is this node, never the paragraph behind it.
+		if (literal && !INLINE_MARKER.test(tail)) {
+			(last as Text).appendData(suffix);
+			return true;
+		}
+		const nodes = hasInlineMarkup(tail + suffix) ? inlineNodes(tail + suffix) : [];
+		// A run that still holds no form parses to the text it already is, so the node simply grows:
+		// this is the ordinary case while a marker sits unanswered (`**粗` becoming `**粗体`), and it
+		// builds nothing at all.
+		if (nodes.length === 0) {
+			(last as Text).appendData(suffix);
+			return true;
+		}
+		for (const node of nodes) element.insertBefore(node, last);
+		last.remove();
+		return true;
+	}
+
+	// The text ends on a form. A marker still unanswered to the left of that form can bind across it
+	// (`**每一次*` renders as a stray `*` plus an `em`, and the next `*` turns the pair into a
+	// `strong`), and nothing short of the whole paragraph can settle that.
+	if (pendingMarker(element)) {
+		element.replaceChildren();
+		appendInline(element, next);
+		return true;
+	}
+	if (literal) {
+		element.append(document.createTextNode(suffix));
+		return true;
+	}
+	appendInline(element, suffix);
+	return true;
+}
+
+/**
+ * Whether the literal run that closes `element` still carries an unanswered marker.
+ *
+ * Read backwards over the trailing form elements to the nearest text: a text node ending on one of
+ * {@link INLINE_MARKER}'s characters is a marker nobody closed yet, and the next characters decide
+ * whether it stays literal or becomes a form. The walk is over a handful of siblings, never over
+ * the paragraph.
+ */
+function pendingMarker(element: HTMLElement): boolean {
+	const nodes = element.childNodes;
+	for (let index = nodes.length - 1; index >= 0; index -= 1) {
+		const node = nodes[index]!;
+		if (node.nodeType !== 3) continue;
+		const text = node.textContent ?? "";
+		return text.length > 0 && INLINE_MARKER.test(text.slice(-1));
+	}
+	return false;
+}
+
+/** Patch a fenced block that grew: the text node, or the diff's spans, extends rather than resets. */
+function patchCodeBlock(
+	element: HTMLElement,
+	previous: Extract<Block, { kind: "code" }>,
+	next: Extract<Block, { kind: "code" }>,
+): boolean {
+	if (!next.code.startsWith(previous.code) || previous.language !== next.language) return false;
+	const code = (element.lastElementChild?.firstElementChild as HTMLElement | undefined) ?? null;
+	if (code === null) return false;
+
+	const wasDiff = isDiffCode(previous.code);
+	const nowDiff = isDiffCode(next.code);
+	if (wasDiff !== nowDiff) return false;
+
+	if (!nowDiff) {
+		const only = code.firstChild === code.lastChild ? code.firstChild : null;
+		if (only != null && only.nodeType === 3) (only as Text).appendData(next.code.slice(previous.code.length));
+		else code.textContent = next.code;
+		return true;
+	}
+
+	// One span per line, so only the last old line and the lines that arrived are touched. The last
+	// old line loses its final-line status the moment a new line follows it, hence the newline.
+	const spans = [...code.children];
+	if (spans.length === 0) return false;
+	const oldLines = previous.code.split("\n");
+	const newLines = next.code.split("\n");
+	const last = spans[spans.length - 1]! as HTMLElement;
+	if (newLines.length > oldLines.length) {
+		last.textContent = `${newLines[oldLines.length - 1]!}\n`;
+		for (let index = oldLines.length; index < newLines.length; index += 1) {
+			appendDiffLine(code, newLines[index]!, index === newLines.length - 1);
+		}
+	} else {
+		last.textContent = newLines[newLines.length - 1]!;
+	}
+	return true;
+}
+
+/** Patch a list item by item; items are the only thing a growing list adds or extends. */
+function patchListBlock(
+	element: HTMLElement,
+	previous: Extract<Block, { kind: "list" }>,
+	next: Extract<Block, { kind: "list" }>,
+): boolean {
+	// Ordered-ness and the starting number are fixed by the first item, which growth cannot move.
+	if (previous.ordered !== next.ordered || previous.start !== next.start) return false;
+	const items = [...element.children] as HTMLElement[];
+	const shared = Math.min(previous.items.length, items.length);
+	for (let index = 0; index < shared; index += 1) {
+		const before = previous.items[index]!;
+		const after = next.items[index];
+		if (before === after || after === undefined) continue;
+		if (!patchInlineBlock(items[index]!, before, after)) return false;
+	}
+	for (let index = items.length; index < next.items.length; index += 1) {
+		const entry = document.createElement("li");
+		appendInline(entry, next.items[index]!);
+		element.append(entry);
+	}
+	for (let index = items.length - 1; index >= next.items.length; index -= 1) items[index]!.remove();
+	return true;
 }
 
 function renderBlock(block: Block): HTMLElement {
@@ -393,8 +604,16 @@ function renderCode(language: string, code: string): HTMLElement {
 	copy.type = "button";
 	copy.className = "code-copy";
 	copy.textContent = "复制";
+
+	const pre = document.createElement("pre");
+	const element = document.createElement("code");
+	if (language.length > 0) element.dataset.language = language;
+	appendDiffLines(element, code);
+
+	// Read at click time: the block can still be streaming, and a later tail patch extends the
+	// element in place rather than replacing it, so a captured string would go stale.
 	copy.addEventListener("click", () => {
-		void navigator.clipboard.writeText(code).then(
+		void navigator.clipboard.writeText(element.textContent ?? "").then(
 			() => {
 				copy.textContent = "已复制";
 				window.setTimeout(() => {
@@ -408,15 +627,24 @@ function renderCode(language: string, code: string): HTMLElement {
 	});
 
 	head.append(label, copy);
-
-	const pre = document.createElement("pre");
-	const element = document.createElement("code");
-	if (language.length > 0) element.dataset.language = language;
-	appendDiffLines(element, code);
-
 	wrapper.append(head, pre);
 	pre.append(element);
 	return wrapper;
+}
+
+/** Whether a code block renders as a patch — the test the line-by-line painter below applies. */
+function isDiffCode(code: string): boolean {
+	const lines = code.split("\n");
+	return lines.some((line) => line.startsWith("@@")) || lines.some((line) => /^\+{3} |^-{3} /.test(line));
+}
+
+/** One line of a patch: a span carrying its add/remove fill, and a newline unless it is the last. */
+function appendDiffLine(target: HTMLElement, line: string, last: boolean): void {
+	const span = document.createElement("span");
+	if (line.startsWith("+") && !line.startsWith("+++")) span.className = "diff-add";
+	else if (line.startsWith("-") && !line.startsWith("---")) span.className = "diff-del";
+	span.textContent = last ? line : `${line}\n`;
+	target.append(span);
 }
 
 /**
@@ -427,34 +655,59 @@ function renderCode(language: string, code: string): HTMLElement {
  * code misleadingly.
  */
 function appendDiffLines(target: HTMLElement, code: string): void {
-	const lines = code.split("\n");
-	const isDiff = lines.some((line) => line.startsWith("@@")) || lines.some((line) => /^\+{3} |^-{3} /.test(line));
-	if (!isDiff) {
+	if (!isDiffCode(code)) {
 		target.textContent = code;
 		return;
 	}
 
-	lines.forEach((line, index) => {
-		const span = document.createElement("span");
-		if (line.startsWith("+") && !line.startsWith("+++")) span.className = "diff-add";
-		else if (line.startsWith("-") && !line.startsWith("---")) span.className = "diff-del";
-		span.textContent = index === lines.length - 1 ? line : `${line}\n`;
-		target.append(span);
-	});
+	const lines = code.split("\n");
+	lines.forEach((line, index) => appendDiffLine(target, line, index === lines.length - 1));
+}
+
+/**
+ * The inline forms this renderer knows: code, strong, emphasis, strikethrough, and links.
+ *
+ * One pattern with a `g` flag, walked by {@link appendInline} and asked by {@link hasInlineMarkup}.
+ * The walk collects its matches before it builds any node, so the recursion into nested emphasis
+ * cannot move this pattern's cursor.
+ */
+const INLINE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(__[^_]+__)|(\*[^*\n]+\*)|(_[^_\n]+_)|(~~[^~]+~~)|(\[[^\]\n]*\]\([^)\s]+\))/g;
+
+/**
+ * Characters that can open or close an inline form.
+ *
+ * The tail patch reads this against the suffix that just arrived, not against the paragraph: prose
+ * carries none of these, so a growing answer needs no scan of what it already said.
+ */
+const INLINE_MARKER = /[`*_~[\]]/;
+
+/** Whether `text` carries a form {@link appendInline} would render as more than one text node. */
+function hasInlineMarkup(text: string): boolean {
+	INLINE.lastIndex = 0;
+	return INLINE.test(text);
+}
+
+/** The nodes an inline run renders to, in order — what a tail patch swaps in for its literal run. */
+function inlineNodes(text: string): Node[] {
+	const nodes: Node[] = [];
+	const found: { at: number; source: string }[] = [];
+	INLINE.lastIndex = 0;
+	let match: RegExpExecArray | null;
+	while ((match = INLINE.exec(text)) !== null) found.push({ at: match.index, source: match[0] });
+
+	let last = 0;
+	for (const part of found) {
+		if (part.at > last) nodes.push(document.createTextNode(text.slice(last, part.at)));
+		nodes.push(renderInline(part.source));
+		last = part.at + part.source.length;
+	}
+	if (last < text.length) nodes.push(document.createTextNode(text.slice(last)));
+	return nodes;
 }
 
 /** Inline spans within a block: code, strong, emphasis, strikethrough, and links. */
-function appendInline(parent: HTMLElement, text: string): void {
-	const pattern = /(`[^`]+`)|(\*\*[^*]+\*\*)|(__[^_]+__)|(\*[^*\n]+\*)|(_[^_\n]+_)|(~~[^~]+~~)|(\[[^\]\n]*\]\([^)\s]+\))/g;
-	let last = 0;
-	let match: RegExpExecArray | null;
-
-	while ((match = pattern.exec(text)) !== null) {
-		if (match.index > last) parent.append(document.createTextNode(text.slice(last, match.index)));
-		parent.append(renderInline(match[0]));
-		last = match.index + match[0].length;
-	}
-	if (last < text.length) parent.append(document.createTextNode(text.slice(last)));
+function appendInline(parent: { append(...nodes: Node[]): void }, text: string): void {
+	parent.append(...inlineNodes(text));
 }
 
 function renderInline(source: string): Node {
