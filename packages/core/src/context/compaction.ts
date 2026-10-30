@@ -1,6 +1,4 @@
-import type { AgentMessage } from "@my-agent/agent";
-import { type Api, type AssistantMessage, contentText, type Message, type Model, type Usage } from "@my-agent/ai";
-import { convertToLlm } from "../session/messages.ts";
+import { type Api, type AssistantMessage, contentText, type Message, type Model, type Usage } from "@my-agent/llm";
 import { sessionEntryToContextMessages, type SessionEntry } from "../session/session-manager.ts";
 
 /**
@@ -9,7 +7,7 @@ import { sessionEntryToContextMessages, type SessionEntry } from "../session/ses
  * The provider reports exact usage after each response, but we need a number before the request to
  * decide whether to compact, and an approximation that is deliberately pessimistic is fine for that.
  */
-export function estimateTokens(messages: readonly AgentMessage[]): number {
+export function estimateTokens(messages: readonly Message[]): number {
 	let characters = 0;
 	for (const message of messages) characters += messageCharacters(message);
 	return Math.ceil(characters / 4);
@@ -48,7 +46,7 @@ export interface CompactionResult {
 }
 
 /** True when the transcript is large enough that the next request risks overflowing the window. */
-export function shouldCompact(messages: readonly AgentMessage[], threshold: number): boolean {
+export function shouldCompact(messages: readonly Message[], threshold: number): boolean {
 	if (threshold <= 0) return false;
 	return estimateTokens(messages) > threshold;
 }
@@ -56,7 +54,7 @@ export function shouldCompact(messages: readonly AgentMessage[], threshold: numb
 export interface CompactionPreparation {
 	firstKeptEntryId: string;
 	/** The messages being replaced by the summary, in order. */
-	messagesToSummarize: AgentMessage[];
+	messagesToSummarize: Message[];
 	tokensBefore: number;
 	/** The summary a previous compaction wrote, when this one refines it rather than starting over. */
 	previousSummary?: string;
@@ -112,7 +110,7 @@ function findCutPoint(contextEntries: readonly SessionEntry[], startIndex: numbe
 }
 
 /** What one entry contributes to a summary: its conversation, with prompt state and checkpoints left out. */
-function entryMessagesForSummary(entry: SessionEntry): AgentMessage[] {
+function entryMessagesForSummary(entry: SessionEntry): Message[] {
 	if (entry.type === "compaction") return [];
 	return sessionEntryToContextMessages(entry).filter((message) => message.role !== "system");
 }
@@ -198,7 +196,7 @@ function summarizationFailure(response: AssistantMessage): string | undefined {
 }
 
 function summarizationPrompt(preparation: CompactionPreparation): string {
-	const conversation = serializeConversation(convertToLlm(preparation.messagesToSummarize));
+	const conversation = serializeConversation(preparation.messagesToSummarize);
 	let prompt = `<conversation>\n${conversation}\n</conversation>\n\n`;
 	if (preparation.previousSummary !== undefined) {
 		prompt += `<previous-summary>\n${preparation.previousSummary}\n</previous-summary>\n\n`;
@@ -291,7 +289,7 @@ const TOOL_RESULT_MAX_CHARS = 2_000;
  * The messages are text rather than a live transcript on purpose: the model must summarize what it is
  * shown, not answer it. Tool results are cut down because their full text is not what a summary needs.
  */
-export function serializeConversation(messages: readonly Message[]): string {
+function serializeConversation(messages: readonly Message[]): string {
 	const parts: string[] = [];
 
 	for (const message of messages) {
@@ -331,9 +329,7 @@ function truncateForSummary(text: string, maxChars: number): string {
 	return `${text.slice(0, maxChars)}\n\n[... ${text.length - maxChars} more characters truncated]`;
 }
 
-function messageCharacters(message: AgentMessage): number {
-	if (message.role === "compactionSummary") return message.summary.length;
-
+function messageCharacters(message: Message): number {
 	const content = (message as { content?: unknown }).content;
 	if (typeof content === "string") return content.length;
 	if (!Array.isArray(content)) return 0;

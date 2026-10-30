@@ -13,7 +13,7 @@ import { MuxClient, browserSocket, type MuxHandlers } from "../packages/web/src/
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
 import type { ConnectionItem, ServerMessage } from "@my-agent/core/protocol";
-import { workspaceDir, type UserModel } from "@my-agent/core";
+import { workspaceDir, type ModelConfig } from "@my-agent/core";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-mux-live-"));
 /** A scratch agent home, so the settings this smoke writes are not the machine's own. */
@@ -58,12 +58,12 @@ function settled(message: ServerMessage): boolean {
 }
 
 /** The scripted model the run section drives. Its endpoint is never reached: the transport answers. */
-const modelRows: UserModel[] = [
+const modelRows: ModelConfig[] = [
 	{
 		name: "scripted",
 		baseUrl: "http://127.0.0.1:1/v1",
 		apiKey: "unused-by-the-scripted-transport",
-		modelId: "claude-sonnet-4-5",
+		id: "claude-sonnet-4-5",
 		contextWindow: 200_000,
 		maxTokens: 8_192,
 		reasoning: false,
@@ -73,9 +73,9 @@ const modelRows: UserModel[] = [
 process.stdout.write("\n真服务器 + 真 WebSocket + 生产的 MuxClient\n");
 
 const transport = createFakeTransport({ tokensPerSecond: 400 });
-const server = await bootServer({ cwd: root, port: 0, mux: { heartbeatIntervalMs: 60 }, api: transport.api, settingsHome: home });
+const server = await bootServer({ absCwd: root, port: 0, mux: { heartbeatIntervalMs: 60 }, api: transport.api, settingsHome: home });
 // Handed to the hub after boot, before any prompt: the one run section below needs a model to run.
-server.hub.setUserModels(modelRows);
+server.hub.setModelConfigs(modelRows);
 
 try {
 	const { sessionId } = await (await fetch(`${server.url}/api/sessions/current`)).json() as { sessionId: string };
@@ -134,7 +134,7 @@ try {
 		if (item.type === "session_row") rows.put(item.session);
 	}
 	check("行 store 拿到了这个会话", rows.get(sessionId) !== undefined, JSON.stringify(rows.list().map((r) => r.id)));
-	const refused = rows.loadFrom([{ cwd: root, sessions: [] }], true);
+	const refused = rows.loadFrom([{ absCwd: root, sessions: [] }], true);
 	check("通道 live 时 REST 列表被拒收", refused === false && rows.get(sessionId) !== undefined, `refused=${refused}`);
 
 	// Cancelling is silent by design: the client asked to stop receiving, so a reply would be a frame
@@ -203,28 +203,28 @@ try {
 		return store;
 	};
 	const overviews = (): number => items.filter((item) => item.type === "sessions").length;
-	const postSession = (cwd: string): Promise<Response> =>
+	const postSession = (absCwd: string): Promise<Response> =>
 		fetch(`${server.url}/api/sessions`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ cwd }),
+			body: JSON.stringify({ absCwd }),
 		});
 	const restWorkspaces = async (): Promise<string[]> =>
-		((await (await fetch(`${server.url}/api/workspaces`)).json()) as { workspaces: { cwd: string }[] }).workspaces.map((group) => group.cwd);
+		((await (await fetch(`${server.url}/api/workspaces`)).json()) as { workspaces: { absCwd: string }[] }).workspaces.map((group) => group.absCwd);
 
 	const first = (await (await postSession(aside)).json()) as { sessionId: string };
-	check("新工作区的行到达了概览", await until(() => rowTable().get(first.sessionId) !== undefined), JSON.stringify(rowTable().list().map((row) => row.cwd)));
+	check("新工作区的行到达了概览", await until(() => rowTable().get(first.sessionId) !== undefined), JSON.stringify(rowTable().list().map((row) => row.absCwd)));
 	check("它也被 REST 列表列着", (await restWorkspaces()).includes(aside), JSON.stringify(await restWorkspaces()));
 
 	const beforeHide = overviews();
 	const hidden = await fetch(`${server.url}/api/workspaces/hide`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ cwd: aside }),
+		body: JSON.stringify({ absCwd: aside }),
 	});
 	check("搁置一个工作区被接受 (200)", hidden.status === 200, `status=${hidden.status}`);
 	check("服务端因此重发了一份概览", await until(() => overviews() > beforeHide), `overviews=${overviews()}`);
-	check("行表里不再有这个工作区的任何一行", rowTable().list().every((row) => row.cwd !== aside), JSON.stringify(rowTable().list().map((row) => row.cwd)));
+	check("行表里不再有这个工作区的任何一行", rowTable().list().every((row) => row.absCwd !== aside), JSON.stringify(rowTable().list().map((row) => row.absCwd)));
 	check("REST 列表与概览说的是同一件事", !(await restWorkspaces()).includes(aside), JSON.stringify(await restWorkspaces()));
 
 	// And back: the transcripts and the folder were never touched, so a new session in that directory
@@ -233,7 +233,7 @@ try {
 	const reborn = await postSession(aside);
 	check("在搁置的工作区里新建会话被接受 (201)", reborn.status === 201, `status=${reborn.status}`);
 	check("服务端又重发了一份概览", await until(() => overviews() > beforeBack), `overviews=${overviews()}`);
-	check("那个工作区回到了行表里", rowTable().list().some((row) => row.cwd === aside), JSON.stringify(rowTable().list().map((row) => row.cwd)));
+	check("那个工作区回到了行表里", rowTable().list().some((row) => row.absCwd === aside), JSON.stringify(rowTable().list().map((row) => row.absCwd)));
 	check("REST 列表也把它列回来了", (await restWorkspaces()).includes(aside), JSON.stringify(await restWorkspaces()));
 
 	client.close();

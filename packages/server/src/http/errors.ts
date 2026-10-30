@@ -115,7 +115,7 @@ export async function readObjectBody(request: IncomingMessage): Promise<Record<s
  * The JSON body as an object, or `{}` when there is nothing there.
  *
  * For the one endpoint whose body names no required field: an empty `POST /api/sessions` has always
- * created a session, and the `cwd` that may join it must not turn that into a request that needs a
+ * created a session, and the `absCwd` that may join it must not turn that into a request that needs a
  * body. Size and shape are checked exactly as {@link readObjectBody} checks them — only "empty" is
  * answered rather than refused.
  */

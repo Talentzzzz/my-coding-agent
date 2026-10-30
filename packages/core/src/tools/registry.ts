@@ -1,4 +1,4 @@
-import type { AgentTool } from "@my-agent/agent";
+import type { AgentTool } from "@my-agent/loop";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { Workspace } from "../workspace.ts";
 import { createBashTool } from "./bash.ts";

@@ -45,6 +45,13 @@ export interface SettingsPatch {
 	 * entry.
 	 */
 	hiddenWorkspaces?: string[];
+	/**
+	 * The name the sidebar shows for a workspace, by absolute path.
+	 *
+	 * A patch carries the entries it changes, and an empty string takes a name back — a record that
+	 * merges per key has no other way to say "forget this one".
+	 */
+	workspaceNames?: Record<string, string>;
 	approval?: Partial<Record<ToolApprovalKey, boolean>>;
 	/** Theme and font size. Part of a patch so one field can move without the other. */
 	appearance?: Partial<AppearanceSettings>;
@@ -72,16 +79,16 @@ export interface SettingsStorage {
 }
 
 /** The two real files: `<agent home>/settings.json` and `<workspace>/.my-agent/settings.json`. */
-export class FileSettingsStorage implements SettingsStorage {
-	private readonly paths: Record<SettingsScope, string>;
+class FileSettingsStorage implements SettingsStorage {
+	private readonly absPaths: Record<SettingsScope, string>;
 
 	constructor(globalPath: string, projectPath: string) {
-		this.paths = { global: globalPath, project: projectPath };
+		this.absPaths = { global: globalPath, project: projectPath };
 	}
 
 	read(scope: SettingsScope): string | undefined {
 		try {
-			return readFileSync(this.paths[scope], "utf8");
+			return readFileSync(this.absPaths[scope], "utf8");
 		} catch (error) {
 			// A missing file is the normal first run. Anything else — a permission, a directory in the
 			// way — is a real failure, and must not reach the caller as "no settings configured".
@@ -91,18 +98,18 @@ export class FileSettingsStorage implements SettingsStorage {
 	}
 
 	write(scope: SettingsScope, content: string): void {
-		const path = this.paths[scope];
-		mkdirSync(dirname(path), { recursive: true });
-		writeFileSync(path, content, "utf8");
+		const absPath = this.absPaths[scope];
+		mkdirSync(dirname(absPath), { recursive: true });
+		writeFileSync(absPath, content, "utf8");
 	}
 
 	path(scope: SettingsScope): string {
-		return this.paths[scope];
+		return this.absPaths[scope];
 	}
 }
 
 /** Settings with no file behind them, for a test or an embedded host. */
-export class InMemorySettingsStorage implements SettingsStorage {
+class InMemorySettingsStorage implements SettingsStorage {
 	private readonly contents: Record<SettingsScope, string | undefined> = { global: undefined, project: undefined };
 
 	read(scope: SettingsScope): string | undefined {
@@ -152,8 +159,8 @@ export class SettingsManager {
 	}
 
 	/** The settings of a workspace: the agent home's file and the workspace's own, project winning. */
-	static create(cwd: string, agentDir: string = AGENT_HOME): SettingsManager {
-		return SettingsManager.fromStorage(new FileSettingsStorage(settingsPath(agentDir), projectSettingsPath(cwd)));
+	static create(absCwd: string, agentDir: string = AGENT_HOME): SettingsManager {
+		return SettingsManager.fromStorage(new FileSettingsStorage(settingsPath(agentDir), projectSettingsPath(absCwd)));
 	}
 
 	/** A manager over any storage backend. */
@@ -181,7 +188,7 @@ export class SettingsManager {
 		return structuredClone(this.settings);
 	}
 
-	/** The configured default model, as `<name>/<model-id>`, or undefined when no layer names one. */
+	/** The configured default model, as the row's name, or undefined when no layer names one. */
 	getModel(): string | undefined {
 		return this.settings.model;
 	}
@@ -210,6 +217,20 @@ export class SettingsManager {
 	 */
 	getHiddenWorkspaces(): string[] {
 		return [...(this.settings.hiddenWorkspaces ?? [])];
+	}
+
+	/**
+	 * The names the sidebar shows instead of folder names, by absolute path.
+	 *
+	 * Empty entries are dropped here rather than at every reader: a cleared name is stored as an empty
+	 * string, and "the folder's own name" is what the absence of a key means.
+	 */
+	getWorkspaceNames(): Record<string, string> {
+		const names: Record<string, string> = {};
+		for (const [absCwd, name] of Object.entries(this.settings.workspaceNames ?? {})) {
+			if (name.trim().length > 0) names[absCwd] = name;
+		}
+		return names;
 	}
 
 	/** The tools that must be approved in the UI before they run. */

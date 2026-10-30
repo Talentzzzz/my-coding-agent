@@ -2,32 +2,26 @@ import {
 	Loop,
 	type AfterToolCallResult,
 	type AgentEvent,
-	type AgentMessage,
 	type AgentTool,
 	type AgentToolResult,
 	type BeforeToolCallResult,
-	type StreamFn,
-} from "@my-agent/agent";
+} from "@my-agent/loop";
+import { PendingMessageQueue } from "./session/queues.ts";
 import {
-	type Api,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	anthropicMessages,
 	type ChatTransport,
-	contentText,
 	createAssistantMessageEventStream,
-	createInitialSystemMessage,
+	createSystemMessage,
 	isContextOverflow,
+	type LlmContext,
 	type Message,
-	type Model,
-	normalizeContext,
 	type RetryCallbacks,
 	retryAssistantCall,
 	type SimpleStreamOptions,
-	toToolDeclaration,
-	type TranscriptContext,
 	type Usage,
-} from "@my-agent/ai";
+} from "@my-agent/llm";
 import { type Settings } from "./config.ts";
 import {
 	compact as compactTranscript,
@@ -36,17 +30,17 @@ import {
 	shouldCompact,
 	type Summarize,
 } from "./context/compaction.ts";
-import { trimmableToolArgEntryIds } from "./context/argtrim.ts";
-import { clearableToolResultIds, isCacheProbablyExpired } from "./context/pruning.ts";
+import { trimmableToolArgEntryIds } from "./context/trim-tool-call-args.ts";
+import { clearableToolResultIds, isCacheProbablyExpired } from "./context/clear-tool-results.ts";
 import { spillOversizedToolResult } from "./context/spill.ts";
 import { boundToolContent, createHooks, type Hooks, type ToolResultContent } from "./hooks.ts";
 import {
-	modelFor,
-	resolveModelRef,
-	rowFor,
-	thinkingLevelsFor,
+	applyRowToModel,
+	createModel,
+	type Model,
 	type ModelSource,
 	type ThinkingLevel,
+	thinkingLevelsFor,
 	unconfiguredStream,
 } from "./models.ts";
 import {
@@ -58,8 +52,7 @@ import {
 	type ToolApprovalKey,
 	type UsageTotals,
 } from "./protocol.ts";
-import { convertToLlm } from "./session/messages.ts";
-import { foldUsage, sessionSnapshot } from "./session/snapshot.ts";
+import { sessionSnapshot, sessionUsage } from "./session/snapshot.ts";
 import { type SessionEntry, SessionManager, sessionEntryToContextMessages } from "./session/session-manager.ts";
 import {
 	applyRecordedToolConfig,
@@ -95,16 +88,18 @@ export interface AgentConfig {
 	 * Handed over rather than copied, because a row is the thing most likely to change while a session
 	 * is open: a session that cached one would keep sending a key the user has already corrected, to an
 	 * endpoint they have already moved. Reading through this is what makes an edit in the settings panel
-	 * reach the next message — {@link Agent.adoptCurrentRow} rebuilds the model itself from the row it
-	 * finds here, so the key, the endpoint, the window, and the wire id are all as fresh as the row is.
+	 * reach the next message — {@link Agent.adoptCurrentRow} re-derives the session's model from the row
+	 * it finds here, so the key, the endpoint, the window, and the wire id are all as fresh as the row is.
 	 */
 	models: ModelSource;
 	/**
-	 * The transport every request in this session goes over.
+	 * The transport every model this session builds carries.
 	 *
-	 * Defaults to Anthropic Messages, which is the only one this app speaks. It is injectable because
-	 * the smokes drive the real loop against a scripted answer, and a seam that could not be handed a
-	 * different transport would mean testing the session through a network.
+	 * A model is what a request is made with and the transport is how it is sent, so the session hands
+	 * one to each model it constructs — the one it was assembled with, and every one it re-derives from
+	 * a row afterwards. Defaults to Anthropic Messages, which is the only one this app speaks. It is
+	 * injectable because the smokes drive the real loop against a scripted answer, and a seam that could
+	 * not be handed a different transport would mean testing the session through a network.
 	 */
 	api?: ChatTransport;
 	/**
@@ -146,9 +141,11 @@ export interface AgentConfig {
 	 * The model this session starts on, already carrying its thinking level.
 	 *
 	 * One object rather than a model and a level beside it, so there is no way for a session to be on
-	 * one row and asked at a level that belongs to another.
+	 * one row and asked at a level that belongs to another. The session mutates this object rather than
+	 * replacing it — see {@link Agent.adoptCurrentRow} — which is why the session never has to hand the
+	 * loop a new one.
 	 */
-	model: Model<Api>;
+	model: Model;
 }
 
 /** Called with the session's state whenever anything a reader can see has moved. */
@@ -208,28 +205,29 @@ export type AgentSessionEvent =
 	 */
 	| { type: "compaction_failed"; message: string }
 	| {
-			type: "pruned";
+			type: "tool_results_cleared";
 			/**
-			 * Tool results were cleared out of the transcript, and recorded as one `prune` entry.
+			 * Tool results were cleared out of the transcript, and recorded as one `clear_tool_result`
+			 * entry.
 			 *
 			 * Reported because it is invisible otherwise: the entries it names keep their place in the
 			 * file, so a reader comparing messages would see the notice appear with nothing to explain it.
 			 */
 			/** How many tool results were cleared. */
 			cleared: number;
-			/** The estimated prompt size before the prune. */
+			/** The estimated prompt size before the clear. */
 			tokensBefore: number;
 			/** The estimated prompt size the next request will carry. */
 			contextTokens: number;
 	  }
 	| {
-			type: "arg_trimmed";
+			type: "tool_call_args_trimmed";
 			/**
-			 * Recorded tool-call arguments were shortened, and recorded as one `argtrim` entry.
+			 * Recorded tool-call arguments were shortened, and recorded as one `trim_tool_call_arg` entry.
 			 *
-			 * Reported for the same reason `pruned` is: the file keeps the full arguments, and the view
-			 * drops their bodies, so a reader comparing messages would otherwise see the cut with nothing
-			 * to explain it.
+			 * Reported for the same reason `tool_results_cleared` is: the file keeps the full arguments,
+			 * and the view drops their bodies, so a reader comparing messages would otherwise see the cut
+			 * with nothing to explain it.
 			 */
 			/** How many entries had their recorded tool-call arguments shortened. */
 			trimmed: number;
@@ -341,7 +339,7 @@ interface ToolResultView {
  * follow-ups are the depth a composer shows.
  */
 interface AcceptedMessage {
-	message: AgentMessage;
+	message: Message;
 	queue: PromptBehavior;
 }
 
@@ -352,7 +350,7 @@ interface AcceptedMessage {
  * {@link prepareRequestOnLoop} asks the `context` hook for the transcript the model should see — by
  * default the store's current view, which is where compaction shows up — and puts a fresh leading
  * system message in front of it, because the prompt and the tool declarations reach the model as a
- * system message and `LoopState.systemPrompt` is read-only. That is what keeps a resumed session and
+ * system message and the loop holds no prompt of its own. That is what keeps a resumed session and
  * a live session on exactly the same context. The session owns no transport: the server subscribes to
  * {@link onEvent} and forwards events to the browser, so the same session could be driven from a
  * terminal instead.
@@ -429,6 +427,15 @@ export class Agent {
 	private readonly accepted: AcceptedMessage[] = [];
 	/** Messages that started a run, whose echoes must not be written twice either. */
 	private readonly promptWrites: number[] = [];
+	/**
+	 * The queues a run drains at its take points.
+	 *
+	 * Steered messages are pulled at the end of each turn; follow-ups when the loop would otherwise
+	 * stop. The queues live here rather than in the loop because they belong to the session that
+	 * accepts messages — the loop only pulls through the config hooks handed to {@link prompt}.
+	 */
+	private readonly steeringQueue: PendingMessageQueue;
+	private readonly followUpQueue: PendingMessageQueue;
 	/** Last stamp this session handed out, so two messages in one millisecond stay distinguishable. */
 	private lastStamp = 0;
 	/** Queue depth as last published, so `queue_update` fires on a change and not on every touch. */
@@ -441,27 +448,41 @@ export class Agent {
 	 * to carry the running text once. Cleared when the message ends, which is also when the store
 	 * gains it and a snapshot starts reading it from the transcript instead.
 	 */
-	private partial: AgentMessage | undefined;
+	private partial: Message | undefined;
 	/** True between `retry_scheduled` and `retry_end`: the run is waiting out a backoff. */
 	private retrying = false;
+	/**
+	 * True while {@link prompt} is inside the run it started.
+	 *
+	 * The session owns this flag because it owns the run: the loop is a stateless
+	 * engine, and the promise its `runLoop` returns already covers the whole
+	 * lifetime the loop used to report — through the `agent_end` listeners and
+	 * the engine's own `finally`.
+	 */
+	private running = false;
 	/** The attempt the policy is on, 1-based, or 0 when no retry is pending. */
 	private retryAttemptNumber = 0;
 	private retryMaxAttempts = 0;
 	/** The failure this retry was scheduled for, for a retry the package never announced an end for. */
 	private retryError?: string;
 	/**
-	 * The provider call the loop is handed, with the retry policy around it.
+	 * Where a request actually leaves: the injected transport.
 	 *
-	 * See {@link pumpAttempts} for why retries live here and not between turns.
+	 * A model's `stream()` goes through {@link Agent.transport}, which is this one wrapped in the retry
+	 * policy — so this is the seam the policy wraps, and the only place a provider is reached.
 	 */
-	private readonly streamWithRetry: StreamFn = (model, context, options) => {
-		const outer = createAssistantMessageEventStream();
-		// Deliberately not awaited: the loop owns the stream's lifetime, and a failure that cannot be
-		// retried comes back as an error event on it rather than as a rejection out of the stream
-		// function (which the loop's contract forbids anyway).
-		void this.pumpAttempts(outer, model, context, options);
-		return outer;
-	};
+	private readonly base: ChatTransport;
+	/**
+	 * The transport every model this session builds carries, with the retry policy around it.
+	 *
+	 * The loop is handed a stream function, not a transport: it asks the model it holds for a stream,
+	 * and the model answers through whatever transport it carries. So the policy is installed on the
+	 * model rather than on the loop, and every request — the loop's, and compaction's — goes through
+	 * {@link pumpAttempts} without either of them knowing retries exist.
+	 *
+	 * See {@link pumpAttempts} for why retries live below the loop rather than between turns.
+	 */
+	private readonly transport: ChatTransport;
 	/**
 	 * The one completion compaction makes: the session's own model, with the summary instructions.
 	 *
@@ -473,12 +494,12 @@ export class Agent {
 	private readonly summarize: Summarize = async (request) => {
 		// The same absence a turn meets: a session with no row answers with the sentence that says what
 		// to add, rather than sending a summary request to a placeholder endpoint.
-		if (rowFor(this.models, this.model) === undefined) return unconfiguredStream(this.model).result();
+		if (this.models.list().find((userModel) => userModel.name === this.model.name) === undefined) return unconfiguredStream(this.model).result();
 		const messages: Message[] = [
 			{ role: "user", content: [{ type: "text", text: request.prompt }], timestamp: Date.now() },
 		];
-		return this.api
-			.streamSimple(this.model, normalizeContext({ systemPrompt: request.systemPrompt, messages }), {
+		return this.model
+			.stream({ messages, system: createSystemMessage(request.systemPrompt) }, {
 				// The row's key, said here rather than only carried on the model: this is the one call
 				// that does not travel through the loop, and the loop is what copies the key into options.
 				apiKey: this.model.apiKey,
@@ -489,9 +510,8 @@ export class Agent {
 			})
 			.result();
 	};
-	private model: Model<Api>;
-	/** The transport every request goes over, defaulted in the constructor. */
-	private readonly api: ChatTransport;
+	/** The one object a request is made with, mutated in place as the row behind it changes. */
+	private model: Model;
 
 	constructor(config: AgentConfig) {
 		this.workspace = config.workspace;
@@ -503,7 +523,26 @@ export class Agent {
 		this.approvalOverride = config.approvalOverride ?? {};
 		this.hooks = config.hooks ?? createHooks();
 		this.model = config.model;
-		this.api = config.api ?? anthropicMessages;
+		this.base = config.api ?? anthropicMessages;
+		// The session's send policy is installed on the model it was handed. The loop is never told
+		// about it: it asks for a stream from whatever model it holds, and the model answers through
+		// this — so retries, and the "no row behind this model" answer, happen below everything that
+		// could report them.
+		this.transport = {
+			stream: (model, context, options) => {
+				const outer = createAssistantMessageEventStream();
+				// Deliberately not awaited: the loop owns the stream's lifetime, and a failure that
+				// cannot be retried comes back as an error event on it rather than as a rejection out
+				// of the stream function (which the loop's contract forbids anyway).
+				//
+				// The loop hands back the object this session built — `runLoop` is seeded with
+				// `this.model` and `prepareRequest` returns it every turn — so the assertion only
+				// restores the type `ChatTransport` widens to in order to stay usable by any model.
+				void this.pumpAttempts(outer, model as Model, context, options);
+				return outer;
+			},
+		};
+		this.model.transport = this.transport;
 		// What the branch already says, so the first request appends only what is missing. A session that
 		// reopens on the same row and level has moved nowhere and writes nothing; one whose branch records
 		// neither — a session that has never spoken — writes both, because what it is about to use is a
@@ -513,18 +552,16 @@ export class Agent {
 		this.recordedThinkingLevel = recorded.thinkingLevel as ThinkingLevel | undefined;
 
 		this.loop = new Loop({
-			streamFn: this.streamWithRetry,
-			initialState: {
-				systemPrompt: this.buildSystemPrompt(),
-				model: config.model,
-				tools: this.tools.active(),
-			},
-			steeringMode: config.settingsManager.getSteeringMode(),
-			followUpMode: config.settingsManager.getFollowUpMode(),
+			// The one thing the engine needs to know about a model: how it answers. A function rather
+			// than the model itself keeps the ownership where it belongs — this session owns the model
+			// and may replace it at any time, while the loop only ever asks the model it was handed.
+			streamFn: (model, context, options) => model.stream(context, options),
 			beforeToolCall: async ({ toolCall, args }) => this.beforeTool(toolCall.id, toolCall.name, args),
 			afterToolCall: async ({ toolCall, result, isError }) =>
 				this.afterTool(toolCall.id, toolCall.name, result, isError),
 		});
+		this.steeringQueue = new PendingMessageQueue(config.settingsManager.getSteeringMode());
+		this.followUpQueue = new PendingMessageQueue(config.settingsManager.getFollowUpMode());
 
 		this.loop.subscribe(async (event) => this.handleEvent(event));
 		this.loop.prepareRequest = async ({ context }, signal) => {
@@ -542,7 +579,7 @@ export class Agent {
 			// against this model's window.
 			this.recordSelection();
 			// One pass decides both what the request carries and whether it has to be summarized: the
-			// trigger, the prune of stale tool results, and the summary all read the same entries, so the
+			// trigger, the clearing of stale tool results, and the summary all read the same entries, so the
 			// decision and the request cannot disagree about how large the prompt is.
 			const entries = await this.maybeCompact(this.sessionManager.buildContextEntries(), Date.now(), signal);
 			// The prompt is rebuilt here, not remembered: `applyConfig` can move the approval set and
@@ -551,23 +588,21 @@ export class Agent {
 			const rewritten = await this.hooks.apply("context", injected);
 			const messages = this.forModel(rewritten?.messages ?? injected.messages);
 			// The leading system message is replaced rather than appended to, and every other system
-			// message is dropped: appending a second one concatenates two lists of available tools
-			// instead of narrowing one (`getCurrentSystemMessage` in pi-ai).
-			const system = createInitialSystemMessage(
-				rewritten?.systemPrompt ?? injected.systemPrompt,
-				this.tools.active().map((tool) => toToolDeclaration(tool)),
-			);
-			// A compaction checkpoint is a custom role the provider cannot read, so the transcript is
-			// converted on the way out: the summary becomes the user turn it stands for.
-			const conversation = convertToLlm(messages.filter((message) => message.role !== "system"));
+			// message is dropped: the prompt is rebuilt whole on this request, so a second one would
+			// describe a state that is already gone. A hook that wants to change the prompt returns
+			// `systemPrompt`; one that pushes a system message into `messages` loses it here.
+			const system = createSystemMessage(rewritten?.systemPrompt ?? injected.systemPrompt);
+			// A compaction checkpoint is already the user turn it stands for — `sessionEntryToContextMessages`
+			// wraps the summary in tags — so the transcript goes to the provider as it is.
+			const conversation = messages.filter((message) => message.role !== "system");
 			return {
 				model: this.model,
 				context: {
 					...context,
 					messages: system === undefined ? conversation : [system, ...conversation],
-					// The live executable set, mirrored onto the request so the context names the tools this
-					// request offers rather than what the transcript started with. Every tool change is resent
-					// with the request, so the two cannot drift.
+					// The live executable set. The loop declares it on the request (`toToolDeclaration`)
+					// rather than reading it out of the transcript, so a tool switched on mid-session
+					// reaches the model on the next request and the two cannot drift.
 					tools: this.tools.active(),
 				},
 			};
@@ -592,11 +627,13 @@ export class Agent {
 	 * read mid-flight is not yet what the request went out with.
 	 */
 	private adoptCurrentRow(): void {
-		const row = rowFor(this.models, this.model);
-		if (row === undefined) return;
+		const userModel = this.models.list().find((userModel) => userModel.name === this.model.name);
+		if (userModel === undefined) return;
 
-		this.model = modelFor(row, this.model.thinkingLevel);
-		this.loop.state.model = this.model;
+		// Re-derived in place rather than rebuilt: the object is the one the loop has, so the fields the
+		// next request reads are the row's current ones without a new object having to be threaded
+		// through a run that is already going.
+		applyRowToModel(this.model, userModel, this.model.thinkingLevel);
 	}
 
 	/**
@@ -639,13 +676,9 @@ export class Agent {
 	 */
 	private applyBranchSelection(): void {
 		const recorded = this.sessionManager.getRecordedSettings();
-		const row =
-			recorded.model === undefined
-				? rowFor(this.models, this.model)
-				: resolveModelRef(this.models.list(), `${recorded.model.name}/${recorded.model.modelId}`);
-		if (row !== undefined) {
-			this.model = modelFor(row, recorded.thinkingLevel ?? row.defaultThinkingLevel);
-			this.loop.state.model = this.model;
+		const userModel = this.models.list().find((userModel) => userModel.name === (recorded.model?.name ?? this.model.name));
+		if (userModel !== undefined) {
+			applyRowToModel(this.model, userModel, recorded.thinkingLevel ?? userModel.defaultThinkingLevel);
 		}
 		this.recordedModelId = recorded.model?.modelId;
 		this.recordedThinkingLevel = recorded.thinkingLevel as ThinkingLevel | undefined;
@@ -655,11 +688,11 @@ export class Agent {
 	 * Run one provider call through the retry policy, pumping it into the stream the loop reads.
 	 *
 	 * Retries live on `streamFn`, below the loop, because an error response is a hard exit: the loop
-	 * emits `turn_end` and `agent_end` the moment a stream ends in `stopReason: "error"` and never
-	 * calls `prepareNextTurn` after it, so there is no later turn in which a failed assistant message
-	 * could be rewritten. Below the loop the failed attempt is never a message at all: the transcript
-	 * gains exactly one assistant message, the store keeps none of the failures, and the next request
-	 * has no leftover error to explain.
+	 * emits `turn_end` and `agent_end` the moment a stream ends in `stopReason: "error"` and returns,
+	 * so there is no later turn in which a failed assistant message could be rewritten. Below the
+	 * loop the failed attempt is never a message at all: the transcript gains exactly one assistant
+	 * message, the store keeps none of the failures, and the next request has no leftover error to
+	 * explain.
 	 *
 	 * `retryAssistantCall` owns the classification, the backoff, and abort normalization — an abort
 	 * during the sleep comes back as an aborted message — so nothing here counts attempts or sleeps. It
@@ -674,8 +707,8 @@ export class Agent {
 	 */
 	private async pumpAttempts(
 		outer: AssistantMessageEventStream,
-		model: Model<Api>,
-		context: TranscriptContext,
+		model: Model,
+		context: LlmContext,
 		options: SimpleStreamOptions | undefined,
 	): Promise<void> {
 		let started = false;
@@ -683,9 +716,9 @@ export class Agent {
 			// A session with no row has nothing to send with, so it answers with the sentence that says
 			// what to do instead of a request to a placeholder endpoint.
 			const inner =
-				rowFor(this.models, model) === undefined
+				this.models.list().find((userModel) => userModel.name === model.name) === undefined
 					? unconfiguredStream(model)
-					: await this.api.streamSimple(model, context, options);
+					: await this.base.stream(model, context, options);
 			for await (const event of inner) {
 				if (event.type === "done" || event.type === "error") continue;
 				if (event.type === "start") {
@@ -763,12 +796,12 @@ export class Agent {
 
 	/** The JSONL file this session appends to, or undefined for a session that is never written. */
 	get sessionFile(): string | undefined {
-		return this.sessionManager.getSessionFile();
+		return this.sessionManager.getAbsSessionFile();
 	}
 
-	/** `name/modelId`, the string a config patch and the picker both name. */
-	get modelRef(): string {
-		return `${this.model.name}/${this.model.id}`;
+	/** The row's name the session is on, which a config patch and the picker both name it by. */
+	get modelName(): string {
+		return this.model.name;
 	}
 
 	/** The level this session is asked at, read off the model it is on. */
@@ -782,8 +815,8 @@ export class Agent {
 	}
 
 	/** Whether a run is in flight, including a run parked at an approval. */
-	get isStreaming(): boolean {
-		return this.loop.state.isStreaming;
+	get isLooping(): boolean {
+		return this.running;
 	}
 
 	/** Names of the tools the model may call right now, in registration order. */
@@ -804,10 +837,8 @@ export class Agent {
 	/**
 	 * User messages accepted mid-run that the loop has not reached yet.
 	 *
-	 * Deliberately not `peekQueuedMessages().length`: that previews the messages selected for the next
-	 * turn, so with `one-at-a-time` it reports 1 however many are waiting. What a composer needs is the
-	 * depth, so a queued message stays counted until the loop emits it back. A steered message is not
-	 * counted: it goes into the turn that is already running.
+	 * A queued message stays counted until the loop emits it back. A steered
+	 * message is not counted: it goes into the turn that is already running.
 	 */
 	get queued(): number {
 		let waiting = 0;
@@ -854,7 +885,7 @@ export class Agent {
 	get snapshot(): SessionSnapshot {
 		return sessionSnapshot({
 			sessionManager: this.sessionManager,
-			workspaceRoot: this.workspace.root,
+			absWorkspaceRoot: this.workspace.absRoot,
 			model: this.model,
 			approvals: this.getApprovals(),
 			allTools: this.tools.all().map((tool) => tool.name),
@@ -863,7 +894,7 @@ export class Agent {
 			// panel's "沿用全局" label cannot disagree with itself between the two paths.
 			...followsGlobalOf(this.sessionManager, this.settingsManager, this.tools),
 			...(this.partial === undefined ? {} : { partial: this.partial }),
-			submitting: this.loop.state.isStreaming,
+			submitting: this.running,
 			queued: this.queued,
 			isRetrying: this.retrying,
 			retryAttempt: this.retryAttemptNumber,
@@ -873,9 +904,7 @@ export class Agent {
 
 	/** Usage summed over the transcript, with the window it is measured against. */
 	get usage(): UsageTotals {
-		const contextWindow = this.model.contextWindow;
-		const totals = foldUsage(this.transcript(), contextWindow);
-		return { ...totals, contextWindow };
+		return sessionUsage(this.sessionManager, this.model.contextWindow);
 	}
 
 	/**
@@ -885,7 +914,7 @@ export class Agent {
 	 * it being the single record: `appendCompaction` between two requests changes this, and so does
 	 * anything a host appends.
 	 */
-	private transcript(): AgentMessage[] {
+	private transcript(): Message[] {
 		return this.sessionManager.buildSessionContext().messages;
 	}
 
@@ -921,13 +950,17 @@ export class Agent {
 
 		// The composer's choice arrives with the message, so this is the only place either half is
 		// applied. A message that never reaches here — an empty one, a rejected send — moves nothing.
-		if (options.selection !== undefined) this.chooseModel(options.selection);
+		if (options.selection !== undefined) this.applyModelSelection(options.selection);
 
-		const message = this.userMessage(trimmed);
-		if (this.loop.state.isStreaming) {
+		const message: Message = {
+			role: "user",
+			content: [{ type: "text", text: trimmed }],
+			timestamp: this.nextStamp(),
+		};
+		if (this.running) {
 			const queue = options.behavior ?? "followUp";
-			if (queue === "steer") this.loop.steer(message);
-			else this.loop.followUp(message);
+			if (queue === "steer") this.steeringQueue.enqueue(message);
+			else this.followUpQueue.enqueue(message);
 			this.accepted.push({ message, queue });
 			this.emitQueueUpdate();
 			this.publish();
@@ -938,20 +971,33 @@ export class Agent {
 		this.rememberPrompt(message);
 		this.emitQueueUpdate();
 		this.publish();
+		this.running = true;
 		try {
-			await this.loop.prompt([message]);
+			// The transcript and the tools are handed over per run — the loop keeps no state of its
+			// own — and both are rebuilt for the request that actually goes out by
+			// {@link prepareRequestOnLoop} anyway. The queues' drain hooks are what connect the
+			// engine's take points to the queues this session owns.
+			await this.loop.runLoop(
+				{ messages: this.transcript(), tools: this.tools.active() },
+				message,
+				{
+					model: this.model,
+					getSteeringMessages: async () => this.steeringQueue.drain(),
+					getFollowUpMessages: async () => this.followUpQueue.drain(),
+				},
+			);
 		} finally {
+			this.running = false;
 			// A message accepted in the last moment of the run — after the loop had already decided to
 			// stop looking for one — is on a queue nothing will drain, so it is written here rather than
 			// lost. The ordinary drain path has already emptied both lists by this point, which is what
 			// makes this a no-op for a run that ended the way it should.
 			this.flushAccepted();
-			// `agent_end` is the last *event* of a run, but the run is not over until the loop has finished
-			// with it — `loop.state.isStreaming` stays true through every awaited listener for that event
-			// and is cleared only in the loop's own `finally`. So this is the first moment `submitting` is
-			// false, and without publishing here nothing ever reports it: a subscriber to {@link onChange}
-			// would keep reading `true` for a run that had ended, which is exactly what a stream needs to
-			// know.
+			// `agent_end` is the last *event* of a run, but the run is not over until the loop's
+			// `runLoop` resolves — after every awaited listener for that event and the engine's own
+			// `finally`. So this is the first moment `running` is false, and without publishing here
+			// nothing ever reports it: a subscriber to {@link onChange} would keep reading `true` for
+			// a run that had ended, which is exactly what a stream needs to know.
 			//
 			// In a `finally` rather than after the `await`, because the two ends of a run reach this point
 			// by different roads: a run that ends normally falls through, but a run whose own failure
@@ -1003,19 +1049,18 @@ export class Agent {
 	 * file the rest of that turn under a branch the turn was not answering.
 	 */
 	branchTo(entryId: string, descend = true): string {
-		if (this.loop.state.isStreaming) throw new Error("A run is in flight: the branch cannot move under it");
+		if (this.running) throw new Error("A run is in flight: the branch cannot move under it");
 
 		const leafId = descend ? this.sessionManager.getBranchTip(entryId) : entryId;
-		const previousRef = this.modelRef;
+		const previousName = this.modelName;
 		const previousLevel = this.thinkingLevel;
 		this.sessionManager.branch(leafId);
-		this.declareConversation();
 		this.applyBranchSelection();
 		this.applyBranchToolConfig();
 		// Reported because neither field is in the branch payload, and every stream other than the one
 		// that asked is holding a snapshot taken before the move.
 		this.emitConfigChanged({
-			...(this.modelRef === previousRef ? {} : { model: this.modelRef }),
+			...(this.modelName === previousName ? {} : { model: this.modelName }),
 			...(this.thinkingLevel === previousLevel ? {} : { thinkingLevel: this.thinkingLevel }),
 		});
 		this.emit({ type: "branch_changed", leafId });
@@ -1041,7 +1086,6 @@ export class Agent {
 	private applyBranchToolConfig(): void {
 		const recorded = applyRecordedToolConfig(this.sessionManager, this.tools, defaultToolNames(this.settingsManager, this.tools));
 		this.approvalOverride = recorded.approval ?? {};
-		this.declareTools();
 		// Reported because neither map is in the branch payload, and every stream other than the one
 		// that asked is holding a snapshot taken before the move. Both maps travel whole: this is the
 		// branch's state, not a delta, and a client applies either shape.
@@ -1049,27 +1093,11 @@ export class Agent {
 	}
 
 	/**
-	 * Point the loop's own message list at the store's current branch.
-	 *
-	 * Every request is built from the store, so this changes nothing about what a provider is sent — it
-	 * is the same reason `declareTools` rewrites the loop's system message: the loop should not be left
-	 * holding a tail the store no longer has, or the next turn it assembles would disagree with the one
-	 * this session would send.
-	 */
-	private declareConversation(): void {
-		const system = this.loop.state.messages.find((message) => message.role === "system");
-		const messages = this.sessionManager.getBranch().flatMap((entry) => sessionEntryToContextMessages(entry));
-		this.loop.state.messages = system === undefined ? messages : [system, ...messages];
-	}
-
-	/**
 	 * Narrow the tools the model may call. An unknown name throws and leaves the session as it was.
 	 *
-	 * Two things have to move together. `loop.state.tools` is what the loop executes and rejects a
-	 * scripted call against; the transcript's leading system message is the prompt and the tool
-	 * declarations the model is sent. That message is replaced rather than appended to, because
-	 * appending a second one concatenates two lists of available tools instead of narrowing one
-	 * (`getCurrentSystemMessage` in pi-ai). The change takes effect on the next request.
+	 * The change is recorded as one `tool_config` entry and takes effect on the next request:
+	 * {@link prepareRequestOnLoop} offers the registry's live active set with every request, so the
+	 * model is told about the narrowed set when the next prompt is built.
 	 */
 	setActiveTools(names: string[]): void {
 		const previous = this.tools.activeNames();
@@ -1078,20 +1106,8 @@ export class Agent {
 		if (active.length === previous.length && active.every((name, index) => name === previous[index])) return;
 
 		this.sessionManager.appendToolConfig(active, this.getApprovals());
-		this.declareTools();
 		this.publish();
 		this.emitConfigChanged({ tools: active });
-	}
-
-	/** Point the loop and the leading system message at the registry's current active set. */
-	private declareTools(): void {
-		const active = this.tools.active();
-		this.loop.state.tools = active;
-
-		const prompt = this.buildSystemPrompt();
-		const system = createInitialSystemMessage(prompt, active.map((tool) => toToolDeclaration(tool)));
-		const rest = this.loop.state.messages.filter((message) => message.role !== "system");
-		this.loop.state.messages = system === undefined ? rest : [system, ...rest];
 	}
 
 	/** The fresh prompt: the caller's builder over the registry's current names and the live approvals. */
@@ -1114,33 +1130,32 @@ export class Agent {
 	 * composer that offered the levels of the model it is moving to; "off" is the exception and is
 	 * always accepted, since it means "as quiet as this model gets".
 	 */
-	chooseModel(selection: ModelSelection): void {
-		const previousRef = this.modelRef;
+	applyModelSelection(selection: ModelSelection): void {
+		const previousName = this.modelName;
 		const previousLevel = this.thinkingLevel;
 		// Nothing named is nothing to do, which is how a caller sends an ordinary message.
 		if (selection.model === undefined && selection.thinkingLevel === undefined) return;
 
-		const ref = selection.model ?? previousRef;
-		const row = resolveModelRef(this.models.list(), ref);
-		if (row === undefined) throw new Error(`Unknown model: ${ref}`);
+		const name = selection.model ?? previousName;
+		const userModel = this.models.list().find((userModel) => userModel.name === name);
+		if (userModel === undefined) throw new Error(`Unknown model: ${name}`);
 
 		// A row named without a level lands on that row's own default, which is the answer an assembled
 		// session opens on; a level named on the current row is the caller's. Either way the pair is
 		// built once, so a level the model has no room for is refused rather than half-applied.
-		const requested =
+		const thinkingLevel =
 			selection.thinkingLevel ??
-			(selection.model === undefined ? this.model.thinkingLevel : row.defaultThinkingLevel);
-		const candidate = modelFor(row, requested);
+			(selection.model === undefined ? this.model.thinkingLevel : userModel.defaultThinkingLevel);
+		const candidate = createModel(userModel, thinkingLevel, this.transport);
 		const level = candidate.thinkingLevel ?? "off";
 		if (selection.thinkingLevel !== undefined && level !== selection.thinkingLevel && selection.thinkingLevel !== "off") {
 			throw new Error(`${candidate.id} does not support thinking level "${selection.thinkingLevel}"`);
 		}
 
 		this.model = candidate;
-		this.loop.state.model = this.model;
 		this.publish();
 		this.emitConfigChanged({
-			...(this.modelRef === previousRef ? {} : { model: this.modelRef }),
+			...(this.modelName === previousName ? {} : { model: this.modelName }),
 			...(this.thinkingLevel === previousLevel ? {} : { thinkingLevel: this.thinkingLevel }),
 		});
 	}
@@ -1164,8 +1179,8 @@ export class Agent {
 			this.sessionManager.appendToolConfig(this.tools.activeNames(), this.getApprovals());
 		}
 		this.settingsManager.applySettings(patch.approval === undefined ? patch : { ...patch, approval: undefined });
-		this.loop.steeringMode = this.settingsManager.getSteeringMode();
-		this.loop.followUpMode = this.settingsManager.getFollowUpMode();
+		this.steeringQueue.mode = this.settingsManager.getSteeringMode();
+		this.followUpQueue.mode = this.settingsManager.getFollowUpMode();
 		this.publish();
 		this.emitConfigChanged({
 			approvals: changedApprovals(previousApprovals, this.getApprovals()),
@@ -1239,9 +1254,10 @@ export class Agent {
 	 * transcript folded into a summary, which costs a request; nothing is kept verbatim but the turn in
 	 * flight.
 	 *
-	 * Both steps before the summary are *recorded*, not held in memory: `appendArgTrim` and `appendPrune`
-	 * name the entries, and the store's own view applies them from then on. So a resumed process, the
-	 * next request in the run, and the window all read one transcript instead of each re-deciding.
+		 * Both steps before the summary are *recorded*, not held in memory: `appendTrimToolCallArgs` and
+		 * `appendClearToolResults` name the entries, and the store's own view applies them from then on.
+		 * So a resumed process, the next request in the run, and the window all read one transcript
+		 * instead of each re-deciding.
 	 *
 	 * A summary that cannot be produced leaves the transcript exactly as it was and is reported rather
 	 * than thrown: compaction is an optimization, and failing the turn over it would replace a clear
@@ -1249,7 +1265,7 @@ export class Agent {
 	 *
 	 * Returns the entries to send: the ones it was given when no step changed anything, the store's view
 	 * after whichever step was enough, and that view again once a checkpoint was written. The counts are
-	 * reported by the `arg_trimmed`, `pruned`, and `compaction` events, not by this answer.
+		 * reported by the `tool_call_args_trimmed`, `tool_results_cleared`, and `compaction` events, not by this answer.
 	 */
 	async maybeCompact(
 		entries: readonly SessionEntry[],
@@ -1259,15 +1275,15 @@ export class Agent {
 		const threshold = compactionThresholdFor(this.model.contextWindow);
 		if (!shouldCompact(messagesOf(entries), threshold)) return entries;
 
-		const trimmed = this.trimRecordedArgs(entries);
-		if (!shouldCompact(messagesOf(trimmed), threshold)) return trimmed;
+			const trimmed = this.trimRecordedArgs(entries);
+			if (!shouldCompact(messagesOf(trimmed), threshold)) return trimmed;
 
-		const pruned = this.pruneStaleResults(trimmed, now);
-		if (!shouldCompact(messagesOf(pruned), threshold)) return pruned;
+			const cleared = this.clearStaleToolResults(trimmed, now);
+			if (!shouldCompact(messagesOf(cleared), threshold)) return cleared;
 
-		let outcome;
-		try {
-			outcome = await compactTranscript(pruned, this.model, this.summarize, signal);
+			let outcome;
+			try {
+				outcome = await compactTranscript(cleared, this.model, this.summarize, signal);
 		} catch (error) {
 			// An abort is not a compaction failure: the run is ending, and the transcript simply keeps the
 			// history it already had. Anything else is worth saying out loud, because the next request may
@@ -1278,15 +1294,14 @@ export class Agent {
 					message: error instanceof Error ? error.message : String(error),
 				});
 			}
-			return pruned;
+			return cleared;
 		}
-		if (!outcome) return pruned;
+		if (!outcome) return cleared;
 
 		this.sessionManager.appendCompaction(
 			outcome.summary,
 			outcome.firstKeptEntryId,
 			outcome.tokensBefore,
-			undefined,
 			outcome.usage,
 		);
 		// Published after the transcript moved, so a listener that reacts reads back the same numbers:
@@ -1308,8 +1323,8 @@ export class Agent {
 	 *
 	 * This is the cheapest step compaction has: no request, and no clock to wait out — the bodies a
 	 * `write` or an `edit` carried are already in the files they changed, so the view loses nothing the
-	 * workspace does not hold. It is also the reason this runs before the prune rather than beside it:
-	 * the prune needs an expired cache to be worth its cache invalidation, and this does not, because
+	 * workspace does not hold. It is also the reason this runs before the clear rather than beside it:
+	 * the clear needs an expired cache to be worth its cache invalidation, and this does not, because
 	 * when the transcript is over the trigger the next request is in trouble whatever the cache says.
 	 */
 	private trimRecordedArgs(entries: readonly SessionEntry[]): readonly SessionEntry[] {
@@ -1317,10 +1332,10 @@ export class Agent {
 		if (trimmed.length === 0) return entries;
 
 		const tokensBefore = estimateTokens(messagesOf(entries));
-		this.sessionManager.appendArgTrim(trimmed, tokensBefore);
+		this.sessionManager.appendTrimToolCallArgs(trimmed, tokensBefore);
 		const view = this.sessionManager.buildContextEntries();
 		this.emit({
-			type: "arg_trimmed",
+			type: "tool_call_args_trimmed",
 			trimmed: trimmed.length,
 			tokensBefore,
 			contextTokens: estimateTokens(messagesOf(view)),
@@ -1335,27 +1350,22 @@ export class Agent {
 	 * already read costs more than the tokens it saves, which is why the summary — one deliberate
 	 * invalidation that shrinks the transcript for good — is the answer for a warm transcript.
 	 */
-	private pruneStaleResults(entries: readonly SessionEntry[], now: number): readonly SessionEntry[] {
+	private clearStaleToolResults(entries: readonly SessionEntry[], now: number): readonly SessionEntry[] {
 		if (!isCacheProbablyExpired(entries, now)) return entries;
 
 		const cleared = clearableToolResultIds(entries);
 		if (cleared.length === 0) return entries;
 
 		const tokensBefore = estimateTokens(messagesOf(entries));
-		this.sessionManager.appendPrune(cleared, tokensBefore);
-		const pruned = this.sessionManager.buildContextEntries();
+		this.sessionManager.appendClearToolResults(cleared, tokensBefore);
+		const view = this.sessionManager.buildContextEntries();
 		this.emit({
-			type: "pruned",
+			type: "tool_results_cleared",
 			cleared: cleared.length,
 			tokensBefore,
-			contextTokens: estimateTokens(messagesOf(pruned)),
+			contextTokens: estimateTokens(messagesOf(view)),
 		});
-		return pruned;
-	}
-
-	/** The message a user's text becomes: one text block, stamped by this session. */
-	private userMessage(text: string): AgentMessage {
-		return { role: "user", content: [{ type: "text", text }], timestamp: this.nextStamp() };
+		return view;
 	}
 
 	/**
@@ -1442,7 +1452,7 @@ export class Agent {
 	 * The loop hands back the content the hooks produced; the store keeps what the tool actually
 	 * returned, so bounding the model's context can never lose the tool's output.
 	 */
-	private transcriptMessage(message: AgentMessage): AgentMessage {
+	private transcriptMessage(message: Message): Message {
 		if (message.role !== "toolResult") return message;
 		const view = this.toolResultViews.get(message.toolCallId);
 		return view === undefined ? message : { ...message, content: view.stored };
@@ -1459,7 +1469,7 @@ export class Agent {
 	 * clipped here: a result stored by an earlier process has no view to replay, and the budget is what
 	 * keeps it out of the context.
 	 */
-	private forModel(messages: readonly AgentMessage[]): AgentMessage[] {
+	private forModel(messages: readonly Message[]): Message[] {
 		return messages.map((message) => {
 			if (message.role !== "toolResult") return message;
 			const view = this.toolResultViews.get(message.toolCallId);
@@ -1557,7 +1567,7 @@ export class Agent {
 	 * {@link handleEvent} for everything the loop hands back — so a listener that follows
 	 * `entry_appended` sees the whole transcript, not just the loop's half of it.
 	 */
-	private appendMessage(message: AgentMessage): void {
+	private appendMessage(message: Message): void {
 		// A message appended where something already followed is a *second* alternative at that message
 		// rather than a continuation of its tip — which is what rewinding and asking again is. The tree
 		// gained a branch point there, so the windows are told where the leaf is, exactly as a move does:
@@ -1580,7 +1590,7 @@ export class Agent {
 	 * gains it before the loop can echo it, and {@link isOptimisticEcho} is what keeps that echo from
 	 * writing it a second time.
 	 */
-	private rememberPrompt(message: AgentMessage): void {
+	private rememberPrompt(message: Message): void {
 		if (message.role !== "user" || message.timestamp === undefined) return;
 		this.promptWrites.push(message.timestamp);
 	}
@@ -1593,7 +1603,7 @@ export class Agent {
 	 * unique per message because this session issues them. A message drained out of a queue is not one
 	 * of these; its write is the echo, so it must land here.
 	 */
-	private isOptimisticEcho(message: AgentMessage): boolean {
+	private isOptimisticEcho(message: Message): boolean {
 		if (message.role !== "user" || message.timestamp === undefined) return false;
 		return this.consume(this.promptWrites, message.timestamp);
 	}
@@ -1605,7 +1615,7 @@ export class Agent {
 	 * stops being "accepted and waiting" at the drain point, not when the turn it opened ends. The
 	 * message the loop hands back is the very object `prompt()` queued, so the stamp is the key.
 	 */
-	private takeAccepted(message: AgentMessage): void {
+	private takeAccepted(message: Message): void {
 		if (message.role !== "user" || message.timestamp === undefined) return;
 		const index = this.accepted.findIndex((entry) => entry.message.timestamp === message.timestamp);
 		if (index !== -1) this.accepted.splice(index, 1);
@@ -1628,7 +1638,8 @@ export class Agent {
 		if (this.accepted.length === 0) return;
 		// Emptied before the writes, so a failed append can never turn into a second copy of one.
 		const pending = this.accepted.splice(0);
-		this.loop.clearAllQueues();
+		this.steeringQueue.clear();
+		this.followUpQueue.clear();
 		for (const entry of pending) this.appendMessage(entry.message);
 	}
 
@@ -1693,7 +1704,7 @@ const NO_USAGE: Usage = {
 };
 
 /** A stream function that threw, in the shape the loop ends a run on. */
-function failureMessage(model: Model<Api>, error: unknown): AssistantMessage {
+function failureMessage(model: Model, error: unknown): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [],
@@ -1728,19 +1739,9 @@ function pushTerminal(outer: AssistantMessageEventStream, message: AssistantMess
 /**
  * The messages one selection of entries stands for — the same projection the store hands a request.
  *
- * It is the only way the trigger measures a prompt, so `maybeCompact` can compare the transcript as
- * stored with the transcript after a prune without building the request twice.
+	 * It is the only way the trigger measures a prompt, so `maybeCompact` can compare the transcript as
+	 * stored with the transcript after a clear without building the request twice.
  */
-function messagesOf(entries: readonly SessionEntry[]): AgentMessage[] {
+function messagesOf(entries: readonly SessionEntry[]): Message[] {
 	return entries.flatMap((entry) => sessionEntryToContextMessages(entry));
-}
-
-/** Last assistant text in the transcript. */
-export function lastAssistantText(messages: readonly AgentMessage[]): string | undefined {
-	for (const message of messages.toReversed()) {
-		if (message.role !== "assistant") continue;
-		const text = contentText((message as { content: Parameters<typeof contentText>[0] }).content).trim();
-		if (text.length > 0) return text;
-	}
-	return undefined;
 }

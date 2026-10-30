@@ -55,20 +55,20 @@ function handlers(over: Partial<SidebarHandlers> = {}): SidebarHandlers {
 function pagingDriver(over: Partial<SidebarHandlers> = {}): { handlers: SidebarHandlers; paging: Record<string, WorkspacePaging> } {
 	const paging: Record<string, WorkspacePaging> = {};
 	const driver = handlers({
-		onToggleWorkspace: (cwd) => {
-			const entry = pagingOf(paging, cwd);
-			paging[cwd] = entry.collapsed
+		onToggleWorkspace: (absCwd) => {
+			const entry = pagingOf(paging, absCwd);
+			paging[absCwd] = entry.collapsed
 				? { collapsed: false, page: entry.savedPage, savedPage: entry.savedPage }
 				: { collapsed: true, page: entry.page, savedPage: entry.page };
 		},
-		onPageWorkspace: (cwd) => {
-			const entry = pagingOf(paging, cwd);
-			paging[cwd] = { collapsed: false, page: entry.page + 1, savedPage: entry.page + 1 };
+		onPageWorkspace: (absCwd) => {
+			const entry = pagingOf(paging, absCwd);
+			paging[absCwd] = { collapsed: false, page: entry.page + 1, savedPage: entry.page + 1 };
 		},
-		onCollapseWorkspace: (cwd) => {
-			const entry = pagingOf(paging, cwd);
+		onCollapseWorkspace: (absCwd) => {
+			const entry = pagingOf(paging, absCwd);
 			const page = Math.max(1, entry.page - 1);
-			paging[cwd] = { collapsed: false, page, savedPage: page };
+			paging[absCwd] = { collapsed: false, page, savedPage: page };
 		},
 		...over,
 	});
@@ -115,11 +115,11 @@ function root(sidebar: Sidebar): FakeNode {
 
 /** One row as the channel would send it. */
 function row(id: string, modified: number, extra: Partial<SessionRow> = {}): SessionRow {
-	return { id, cwd: "/w", createdAt: 1, title: `会话 ${id}`, modified, running: false, pending: 0, ...extra };
+	return { id, absCwd: "/w", createdAt: 1, title: `会话 ${id}`, modified, running: false, pending: 0, ...extra };
 }
 
 function state(rows: SessionRow[], over: Partial<SidebarState> = {}): SidebarState {
-	return { workspaces: [{ cwd: "/w", sessions: rows }], collapsed: false, paging: {}, channel: "live", ...over };
+	return { workspaces: [{ absCwd: "/w", sessions: rows }], collapsed: false, paging: {}, channel: "live", ...over };
 }
 
 /**
@@ -325,8 +325,8 @@ process.stdout.write("\nsidebar：分组标题在会话行之上\n");
 	// every group and only got more obvious with more of them.
 	sidebar.render({
 		workspaces: [
-			{ cwd: "/one", sessions: [row("a", 300), row("b", 200)] },
-			{ cwd: "/two", sessions: [row("c", 100)] },
+			{ absCwd: "/one", sessions: [row("a", 300), row("b", 200)] },
+			{ absCwd: "/two", sessions: [row("c", 100)] },
 		],
 		collapsed: false,
 		paging: {},
@@ -587,14 +587,14 @@ process.stdout.write("\nsidebar：工作区按最近活跃在前\n");
 	// to the top of the sidebar. The store, not the view, owns this sort, so the check drives
 	// `SessionRows` directly: two groups whose newest rows disagree in both directions.
 	const store = new SessionRows();
-	store.put(row("a", 100, { cwd: "/old" }));
-	store.put(row("c", 300, { cwd: "/new" }));
-	check("初始：最近活跃的在前", store.groups().map((group) => group.cwd).join(",") === "/new,/old", JSON.stringify(store.groups().map((group) => group.cwd)));
+	store.put(row("a", 100, { absCwd: "/old" }));
+	store.put(row("c", 300, { absCwd: "/new" }));
+	check("初始：最近活跃的在前", store.groups().map((group) => group.absCwd).join(",") === "/new,/old", JSON.stringify(store.groups().map((group) => group.absCwd)));
 
 	// A message lands in the older workspace: its row's `modified` moves forward and the group order
 	// follows — the one frame the projection sends for every appended message.
-	store.put(row("a", 400, { cwd: "/old" }));
-	check("活跃后：老的反超到第一", store.groups().map((group) => group.cwd).join(",") === "/old,/new", JSON.stringify(store.groups().map((group) => group.cwd)));
+	store.put(row("a", 400, { absCwd: "/old" }));
+	check("活跃后：老的反超到第一", store.groups().map((group) => group.absCwd).join(",") === "/old,/new", JSON.stringify(store.groups().map((group) => group.absCwd)));
 }
 
 // -------- 13. paging: one more page per press, one back per collapse, side by side
@@ -736,19 +736,19 @@ process.stdout.write("\nsidebar：工作区表头的右键菜单\n");
 await (async (): Promise<void> => {
 	const started: (string | undefined)[] = [];
 	const deleted: string[] = [];
-	const renamed: { cwd: string; name: string }[] = [];
+	const renamed: { absCwd: string; name: string }[] = [];
 	const sidebar = new Sidebar(
 		handlers({
-			onNewSession: (cwd) => started.push(cwd),
-			onDeleteWorkspace: (cwd) => deleted.push(cwd),
-			onRenameWorkspace: (cwd, name) => renamed.push({ cwd, name }),
+			onNewSession: (absCwd) => started.push(absCwd),
+			onDeleteWorkspace: (absCwd) => deleted.push(absCwd),
+			onRenameWorkspace: (absCwd, name) => renamed.push({ absCwd, name }),
 		}),
 	);
 
 	sidebar.render({
 		workspaces: [
-			{ cwd: "/one", sessions: [row("a", 300)] },
-			{ cwd: "/two", sessions: [row("b", 200)] },
+			{ absCwd: "/one", sessions: [row("a", 300)] },
+			{ absCwd: "/two", sessions: [row("b", 200)] },
 		],
 		collapsed: false,
 		paging: {},
@@ -768,7 +768,7 @@ await (async (): Promise<void> => {
 		.map((child) => child.querySelector(".menu-label")?.textContent ?? "");
 	check("三项都在：新建会话、重命名…、删除", labels.join("|") === "新建会话|重命名…|删除", JSON.stringify(labels));
 
-	// 新建会话 carries the cwd it was asked on, which is the acceptance criterion of 票 06 in one line:
+	// 新建会话 carries the absCwd it was asked on, which is the acceptance criterion of 票 06 in one line:
 	// the new session lands in the workspace that was right-clicked, not in whatever is current.
 	const item = (label: string): FakeNode | undefined =>
 		(menu()?.children ?? []).find(
@@ -799,7 +799,7 @@ await (async (): Promise<void> => {
 		input.dispatch("keydown", { key: "Enter", preventDefault() {} });
 	}
 	await settle();
-	check("提交的是原路径加新名字", renamed.length === 1 && renamed[0]!.cwd === "/two" && renamed[0]!.name === "renamed", JSON.stringify(renamed));
+	check("提交的是原路径加新名字", renamed.length === 1 && renamed[0]!.absCwd === "/two" && renamed[0]!.name === "renamed", JSON.stringify(renamed));
 	check("卡片关上了", bodyChildren().every((child) => child.className !== "text-dialog-overlay"));
 
 	// Typing the name the folder already wears is not a change, and a separator is not a name: both are
@@ -828,8 +828,8 @@ process.stdout.write("\nsidebar：重命名后表头跟着新路径走\n");
 
 {
 	const sidebar = new Sidebar(handlers());
-	const two = (cwd: string): SidebarState => ({
-		workspaces: [{ cwd, sessions: [row("a", 300, { cwd })] }],
+	const two = (absCwd: string): SidebarState => ({
+		workspaces: [{ absCwd, sessions: [row("a", 300, { absCwd })] }],
 		collapsed: false,
 		paging: {},
 		channel: "live",

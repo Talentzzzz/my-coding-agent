@@ -1,6 +1,7 @@
-import { stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, stat } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { ChatTransport } from "@my-agent/ai";
+import type { ChatTransport } from "@my-agent/llm";
 import {
 	type Agent,
 	type AgentSessionEvent,
@@ -12,19 +13,18 @@ import {
 	type SessionSnapshot,
 	SessionManager,
 	SettingsManager,
-	type UserModel,
-	UserModelStore,
+	workspaceDir,
+	type ModelConfig,
+	ModelConfigStore,
 } from "@my-agent/core";
 
 export interface HubOptions {
 	/** The directory the process was started in; new sessions take it as their workspace. */
-	cwd: string;
+	absCwd: string;
 	model?: string;
 	thinkingLevel?: string;
 	/** Session every connection lands on when it does not name one. */
 	sessionId?: string;
-	/** Start from the newest stored session for this workspace instead of a new one. */
-	continueSession?: boolean;
 	/**
 	 * How long a run stopped at an approval waits for someone to answer it before the reap treats the
 	 * silence as abandonment and denies it. Default ten minutes.
@@ -94,8 +94,8 @@ export type SessionObserver = (feeds: SessionFeeds | undefined) => void;
 export class HostedSession {
 	readonly id: string;
 	readonly session: Agent;
-	/** The directory this session's tools may touch. */
-	readonly workspaceRoot: string;
+	/** The directory this session's tools may touch, absolute. */
+	readonly absWorkspaceRoot: string;
 	/**
 	 * Callers currently holding this session open.
 	 *
@@ -108,10 +108,10 @@ export class HostedSession {
 	/** Set while the hub is deciding whether an unclaimed session can be closed. */
 	reaping = false;
 
-	constructor(session: Agent, workspaceRoot: string) {
+	constructor(session: Agent, absWorkspaceRoot: string) {
 		this.session = session;
 		this.id = session.id;
-		this.workspaceRoot = workspaceRoot;
+		this.absWorkspaceRoot = absWorkspaceRoot;
 	}
 }
 
@@ -137,19 +137,19 @@ export class SessionHub {
 	/**
 	 * The directory this process was started in.
 	 *
-	 * It is a default, not the workspace: new sessions take it as their cwd, and the default listing
+	 * It is a default, not the workspace: new sessions take it as their absCwd, and the default listing
 	 * and settings are scoped to it. A session's actual workspace comes from its own header — see
-	 * {@link HostedSession.workspaceRoot} — which may name any directory on the machine.
+	 * {@link HostedSession.absWorkspaceRoot} — which may name any directory on the machine.
 	 *
-	 * It moves when the workspace it names is renamed on disk ({@link repathWorkspace}), which is the
-	 * one thing that can change it after construction: a default that went on naming a directory that
-	 * no longer exists would put the next new session somewhere nobody asked for.
+	 * Nothing moves it after construction, which is why a folder the user renamed behind this
+	 * process's back is not followed: a default that guessed at a new name would put the next new
+	 * session somewhere nobody asked for.
 	 */
-	private root: string;
+	private absRoot: string;
 
-	/** The current default workspace, which a rename of it moves. */
-	get cwd(): string {
-		return this.root;
+	/** The current default workspace. */
+	get absCwd(): string {
+		return this.absRoot;
 	}
 	/**
 	 * The models this process can run, read from the rows the user entered.
@@ -162,7 +162,7 @@ export class SessionHub {
 	readonly models: ModelSource = { list: () => this.modelStore.list() };
 
 	private readonly options: HubOptions;
-	private readonly modelStore: UserModelStore;
+	private readonly modelStore: ModelConfigStore;
 	/** How long a parked approval is waited out before it is denied. See {@link HubOptions.approvalGraceMs}. */
 	private readonly approvalGraceMs: number;
 	/** One settings manager per workspace, so two sessions over one directory share a single view. */
@@ -182,17 +182,31 @@ export class SessionHub {
 	private readonly observers = new Map<string, Set<SessionObserver>>();
 	/** The process-level listeners, told about every session this process gains or loses. */
 	private readonly hostListeners = new Set<HostListener>();
+	/**
+	 * Sessions this process created whose file does not exist yet, by id.
+	 *
+	 * A creation writes nothing: the file appears with the first message (`SessionManager.persistEntry`
+	 * gates on `hasConversation`). Between the id being handed out and that first message there is no
+	 * file, so {@link has}, {@link snapshotOf}, and {@link open} read this map before the store —
+	 * otherwise a window that creates a session and immediately opens it would be told the id it was
+	 * just given names nothing.
+	 *
+	 * An entry leaves on the first lookup that finds the file on disk, so the map holds only the
+	 * window it was made for. It is process state, so a session nobody ever spoke in dies with the
+	 * process — and nothing was written for it, so nothing is lost.
+	 */
+	private readonly pending = new Map<string, SessionManager>();
 	private current?: Promise<string>;
 
 	constructor(options: HubOptions) {
 		this.options = options;
-		this.root = options.cwd;
-		this.modelStore = UserModelStore.create();
+		this.absRoot = options.absCwd;
+		this.modelStore = ModelConfigStore.create();
 		this.approvalGraceMs = options.approvalGraceMs ?? DEFAULT_APPROVAL_GRACE_MS;
 	}
 
 	/** The models the user has entered, in the order they appear in the settings panel. */
-	get userModels(): UserModel[] {
+	get userModels(): ModelConfig[] {
 		return this.modelStore.list();
 	}
 
@@ -204,16 +218,16 @@ export class SessionHub {
 	 * new rows — a key corrected in the panel is the key that message sends, and so is an endpoint, a
 	 * window, or a wire id, including from a window that has been open the whole time.
 	 */
-	setUserModels(models: readonly UserModel[]): void {
+	setModelConfigs(models: readonly ModelConfig[]): void {
 		this.modelStore.replace(models);
 	}
 
 	/** The settings of one workspace, built once and shared by every session over it. */
-	settingsFor(workspaceRoot: string): SettingsManager {
-		const existing = this.settingsManagers.get(workspaceRoot);
+	settingsFor(absWorkspaceRoot: string): SettingsManager {
+		const existing = this.settingsManagers.get(absWorkspaceRoot);
 		if (existing) return existing;
-		const created = SettingsManager.create(workspaceRoot, this.options.settingsHome);
-		this.settingsManagers.set(workspaceRoot, created);
+		const created = SettingsManager.create(absWorkspaceRoot, this.options.settingsHome);
+		this.settingsManagers.set(absWorkspaceRoot, created);
 		return created;
 	}
 
@@ -226,29 +240,26 @@ export class SessionHub {
 	 * that the command writing it goes through, so a hide is visible to both roads on the next look.
 	 *
 	 * A hub with no root answers "everything is listed". That is not a production state — `HubOptions`
-	 * requires `cwd` and `bootServer` always passes it — but `scripts/smoke-approval.ts` builds one
+	 * requires `absCwd` and `bootServer` always passes it — but `scripts/smoke-approval.ts` builds one
 	 * without it on purpose (`docs/notes.md` §一 pins that construction, and the section mounts its own
 	 * session and asks the workspace nothing). The filter's whole job is to leave a group out, and
 	 * nothing has been left out.
 	 */
-	listsWorkspace(cwd: string): boolean {
-		if (typeof this.root !== "string") return true;
-		return !this.settingsFor(this.root).getHiddenWorkspaces().some((path) => samePath(path, cwd));
-	}
-
-	get continueSession(): boolean {
-		return this.options.continueSession ?? false;
+	listsWorkspace(absCwd: string): boolean {
+		if (typeof this.absRoot !== "string") return true;
+		return !this.settingsFor(this.absRoot).getHiddenWorkspaces().some((path) => samePath(path, absCwd));
 	}
 
 	/**
-	 * Whether this id names a session at all: one this process is running, or one on disk.
+	 * Whether this id names a session at all: one this process is running, one it created and has not
+	 * written yet, or one on disk.
 	 *
 	 * The search covers every workspace, not just the server's own: a client lists all of them and can
 	 * ask for any of them, and answering "no such session" for a row the same server just listed would
 	 * be the one contradiction a client cannot recover from.
 	 */
 	has(id: string): boolean {
-		return this.hosts.has(id) || SessionManager.findAnywhere(id) !== undefined;
+		return this.hosts.has(id) || this.pendingManager(id) !== undefined || SessionManager.findSessionFilePathById(id) !== undefined;
 	}
 
 	/** Session ids this process is running right now. */
@@ -273,10 +284,15 @@ export class SessionHub {
 		const hosted = this.hosts.get(id);
 		if (hosted) return hosted.session.snapshot;
 
-		const path = SessionManager.findAnywhere(id);
-		if (path === undefined) throw new Error(`Unknown session: ${id}`);
-		const manager = SessionManager.open(path);
-		return readSessionSnapshot(this.agentOptions(manager, manager.getCwd()));
+		// A session created and not spoken in has no file to open, but this process still holds the
+		// transcript it is building — reading it is the same cold read, over an empty log.
+		const pending = this.pendingManager(id);
+		if (pending !== undefined) return readSessionSnapshot(this.agentOptions(pending, pending.getAbsCwd()));
+
+		const absPath = SessionManager.findSessionFilePathById(id);
+		if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
+		const manager = SessionManager.open(absPath);
+		return readSessionSnapshot(this.agentOptions(manager, manager.getAbsCwd()));
 	}
 
 	/**
@@ -317,9 +333,9 @@ export class SessionHub {
 	 * The id a connection lands on when it does not name one.
 	 *
 	 * A client asks for this instead of choosing for itself, because the policy belongs to the
-	 * server: `--session` pins one, `--continue` resumes the newest, and otherwise the first caller
-	 * creates a session. A client that picked "the newest file" would silently ignore the pin and
-	 * show a different conversation from the one the server is serving.
+	 * server: `--session` pins one, and otherwise the first caller creates a session. A client that
+	 * picked "the newest file" would silently ignore the pin and show a different conversation from
+	 * the one the server is serving.
 	 */
 	currentSessionId(): Promise<string> {
 		return this.currentId();
@@ -428,14 +444,14 @@ export class SessionHub {
 	 * Returns an id rather than a claimed session so that claiming happens in exactly one place:
 	 * the caller attaches through {@link claim}, which is the only thing that counts claims.
 	 *
-	 * `cwd` decides where the session lands. Undefined is the server's own root; a path is accepted
+	 * `absCwd` decides where the session lands. Undefined is the server's own root; a path is accepted
 	 * when it exists and is a directory, and nothing more — a first session in a directory nobody has
 	 * worked in is the one way a new workspace enters the known list, and the workspace root is the
 	 * tools' fence rather than the process's, so no known-workspace check belongs here.
 	 */
-	async newSession(cwd?: string): Promise<string> {
-		const root = await workspaceRootOrThrow(cwd ?? this.cwd);
-		const id = SessionManager.create(root).getSessionId();
+	async newSession(absCwd?: string): Promise<string> {
+		const absRoot = await workspaceRootForCreate(absCwd ?? this.absCwd);
+		const id = this.createUnpersisted(absRoot);
 		this.current = Promise.resolve(id);
 		this.announceHost(id, undefined);
 		return id;
@@ -455,12 +471,12 @@ export class SessionHub {
 	 */
 	async fork(sessionId: string, entryId: string | null): Promise<string> {
 		const hosted = this.hosts.get(sessionId);
-		const sourcePath = hosted?.session.sessionFile ?? SessionManager.findAnywhere(sessionId);
-		if (sourcePath === undefined) throw new Error(`Unknown session: ${sessionId}`);
+		const absSourcePath = hosted?.session.sessionFile ?? SessionManager.findSessionFilePathById(sessionId);
+		if (absSourcePath === undefined) throw new Error(`Unknown session: ${sessionId}`);
 		// The branch is written where its source lives: forking a conversation held in another
 		// workspace must not quietly move it into this one.
-		const targetCwd = hosted?.workspaceRoot ?? SessionManager.open(sourcePath).getCwd();
-		const id = SessionManager.forkFrom(sourcePath, targetCwd, entryId).getSessionId();
+		const absTargetCwd = hosted?.absWorkspaceRoot ?? SessionManager.open(absSourcePath).getAbsCwd();
+		const id = SessionManager.forkFrom(absSourcePath, absTargetCwd, entryId).getSessionId();
 		this.current = Promise.resolve(id);
 		this.announceHost(id, undefined);
 		return id;
@@ -482,44 +498,19 @@ export class SessionHub {
 			hosted.session.sessionManager.appendRename(title);
 			return;
 		}
-		const path = SessionManager.findAnywhere(sessionId);
-		if (path === undefined) throw new Error(`Unknown session: ${sessionId}`);
-		SessionManager.open(path).appendRename(title);
+		const absPath = SessionManager.findSessionFilePathById(sessionId);
+		if (absPath === undefined) throw new Error(`Unknown session: ${sessionId}`);
+		SessionManager.open(absPath).appendRename(title);
 	}
 
 	/**
 	 * This process's own root changed directory: the renamed workspace. A default, not the workspace —
-	 * see {@link cwd} — so only the paths that were already derived from it are dropped, and nothing
+	 * see {@link absCwd} — so only the paths that were already derived from it are dropped, and nothing
 	 * running is touched.
 	 */
-	setRoot(cwd: string): void {
-		this.root = cwd;
+	setRoot(absCwd: string): void {
+		this.absRoot = absCwd;
 		this.current = undefined;
-	}
-
-	/**
-	 * Follow a workspace that was renamed on disk: the transcripts move with it and every header names
-	 * the new directory.
-	 *
-	 * A session this process is running refuses the whole operation rather than being carried along,
-	 * and the refusal is a property of the loop rather than a caution: a host holds the directory its
-	 * tools were fenced to (`Workspace.root`), the settings it opened on, and an open handle on a file
-	 * whose contents this operation rewrites. Rewriting a live session's header under it would leave
-	 * every one of those naming a directory that no longer exists — so the honest answer is "not while
-	 * it is running", which the controller turns into a 409.
-	 *
-	 * Answers the ids whose row a client has to be told about: the projection is the one writer of
-	 * rows here, so it is re-read by the caller rather than by this method, which writes nothing but
-	 * files and its own root.
-	 */
-	async repathWorkspace(from: string, to: string): Promise<string[]> {
-		const busy = [...this.hosts.values()].filter((host) => samePath(host.workspaceRoot, from));
-		if (busy.length > 0) {
-			throw new Error("这个工作区还有会话开着，先关掉它们再改目录名。");
-		}
-		const moved = await SessionManager.repathWorkspace(from, to);
-		if (samePath(this.root, from)) this.setRoot(to);
-		return moved;
 	}
 
 	/**
@@ -536,6 +527,11 @@ export class SessionHub {
 	 * against what remains rather than answering with a session that no longer exists.
 	 */
 	async remove(sessionId: string): Promise<void> {
+		// A session this process created and never spoke in has no file: forgetting the held manager is
+		// the whole removal, and the store has nothing to delete for it. An id this process never heard
+		// of still goes to the store, so its refusal stays the 404 it always was.
+		const held = this.pending.delete(sessionId);
+		const onDisk = SessionManager.findSessionFilePathById(sessionId) !== undefined;
 		const hosted = this.hosts.get(sessionId);
 		if (hosted !== undefined) {
 			const snapshot = hosted.session.snapshot;
@@ -552,7 +548,8 @@ export class SessionHub {
 				await hosted.session.close();
 				// The file removal rides inside the same slot: a claim that waited on `closing` resumes
 				// only after the file is gone, so it finds no file instead of reopening one mid-delete.
-				await SessionManager.remove(sessionId);
+				// A session that never spoke has no file, and asking for one would be asking for nothing.
+				if (onDisk) await SessionManager.remove(sessionId);
 			})();
 			this.closing.set(sessionId, closing);
 			try {
@@ -560,7 +557,7 @@ export class SessionHub {
 			} finally {
 				this.closing.delete(sessionId);
 			}
-		} else {
+		} else if (onDisk || !held) {
 			await SessionManager.remove(sessionId);
 		}
 		this.current = undefined;
@@ -583,6 +580,7 @@ export class SessionHub {
 			this.announceHost(host.id, undefined);
 		}
 		this.hosts.clear();
+		this.pending.clear();
 	}
 
 	private hold(host: HostedSession): HostedSession {
@@ -598,12 +596,20 @@ export class SessionHub {
 	 * its tools resolve where it was written, and its approvals come from that directory's settings.
 	 */
 	private async open(id: string): Promise<HostedSession> {
-		const path = SessionManager.findAnywhere(id);
-		if (path === undefined) throw new Error(`Unknown session: ${id}`);
-		const manager = SessionManager.open(path);
-		const workspaceRoot = manager.getCwd();
-		const session = await this.sessionOver(manager, workspaceRoot);
-		const host = new HostedSession(session, workspaceRoot);
+		// The pending manager before the store: a session created a moment ago has no file to find yet,
+		// and this is the road its own id takes from the creation to the first message.
+		const pending = this.pendingManager(id);
+		let manager: SessionManager;
+		if (pending !== undefined) {
+			manager = pending;
+		} else {
+			const absPath = SessionManager.findSessionFilePathById(id);
+			if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
+			manager = SessionManager.open(absPath);
+		}
+		const absWorkspaceRoot = manager.getAbsCwd();
+		const session = await this.sessionOver(manager, absWorkspaceRoot);
+		const host = new HostedSession(session, absWorkspaceRoot);
 		this.hosts.set(id, host);
 		// Observers first, then the listeners: a subscriber told "a host opened" and reaching for the
 		// session must find it already handed over.
@@ -626,20 +632,20 @@ export class SessionHub {
 	 * without assembling is indistinguishable from a snapshot taken after — if these were written out
 	 * twice, the difference would show up as a session that changes when you open it.
 	 */
-	private agentOptions(sessionManager: SessionManager, workspaceRoot: string): OpenAgentOptions {
+	private agentOptions(sessionManager: SessionManager, absWorkspaceRoot: string): OpenAgentOptions {
 		return {
-			workspaceRoot,
+			absWorkspaceRoot,
 			sessionManager,
 			models: this.models,
-			settingsManager: this.settingsFor(workspaceRoot),
+			settingsManager: this.settingsFor(absWorkspaceRoot),
 			...(this.options.model === undefined ? {} : { model: this.options.model }),
 			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),
 			...(this.options.api === undefined ? {} : { api: this.options.api }),
 		};
 	}
 
-	private sessionOver(sessionManager: SessionManager, workspaceRoot: string): Promise<Agent> {
-		return openAgent(this.agentOptions(sessionManager, workspaceRoot));
+	private sessionOver(sessionManager: SessionManager, absWorkspaceRoot: string): Promise<Agent> {
+		return openAgent(this.agentOptions(sessionManager, absWorkspaceRoot));
 	}
 
 	private async reap(host: HostedSession): Promise<void> {
@@ -686,9 +692,10 @@ export class SessionHub {
 	 * The session a connection lands on when it does not name one.
 	 *
 	 * Resolved once per process, as a promise so two connections arriving together cannot both create
-	 * a session. `--session` pins it, `--continue` resumes the newest stored session, and otherwise
-	 * the newest is resumed when there is one — a window reopened on a workspace should show the
-	 * conversation that was just happening, and only an empty history creates a session.
+	 * a session. `--session` pins it, and otherwise the caller gets a new one — a launch opens on the
+	 * welcome state even in a workspace full of history, and the session a page reload lands on is
+	 * that same one because this is memoised. History is the sidebar's business: resuming it is a
+	 * click on a row, not something the server guesses.
 	 * `newSession()` moves it.
 	 */
 	private currentId(): Promise<string> {
@@ -698,10 +705,35 @@ export class SessionHub {
 
 	private async resolveCurrentId(): Promise<string> {
 		if (this.options.sessionId !== undefined) return this.options.sessionId;
-		if (this.continueSession || (await SessionManager.list(this.cwd)).length > 0) {
-			return SessionManager.continueRecent(this.cwd).getSessionId();
+		return this.createUnpersisted(this.absCwd);
+	}
+
+	/**
+	 * Create a session and hold it until its first message puts it on disk.
+	 *
+	 * The held manager is the whole reason a creation can write nothing: the id stays answerable by
+	 * {@link open} and {@link has} without a file to look up. What that costs is that the id is
+	 * process-local until the first message — which is all a conversation with no message in it is
+	 * worth, and it is why the sidebar never shows one.
+	 */
+	private createUnpersisted(absCwd: string): string {
+		const manager = SessionManager.create(absCwd);
+		const id = manager.getSessionId();
+		this.pending.set(id, manager);
+		return id;
+	}
+
+	/** The manager behind an id whose file is not written yet, if there is one. */
+	private pendingManager(id: string): SessionManager | undefined {
+		const manager = this.pending.get(id);
+		if (manager === undefined) return undefined;
+		const absFile = manager.getAbsSessionFile();
+		if (absFile !== undefined && existsSync(absFile)) {
+			// The first message landed, so the store is the source again and this entry has done its job.
+			this.pending.delete(id);
+			return undefined;
 		}
-		return SessionManager.create(this.cwd).getSessionId();
+		return manager;
 	}
 }
 
@@ -744,16 +776,36 @@ function delay(ms: number): Promise<void> {
  * controller runs this check itself so a bad path can be answered with a 400, and `newSession`
  * runs it again so no internal caller can write a session without it.
  */
-export async function workspaceRootOrThrow(cwd: string): Promise<string> {
-	const root = resolve(cwd);
+export async function workspaceRootOrThrow(cwdInput: string): Promise<string> {
+	const absRoot = resolve(cwdInput);
 	let stats;
 	try {
-		stats = await stat(root);
+		stats = await stat(absRoot);
 	} catch {
-		throw new Error(`No such directory: ${root}`);
+		throw new Error(`No such directory: ${absRoot}`);
 	}
-	if (!stats.isDirectory()) throw new Error(`Not a directory: ${root}`);
-	return root;
+	if (!stats.isDirectory()) throw new Error(`Not a directory: ${absRoot}`);
+	return absRoot;
+}
+
+/**
+ * The directory a new session will run in, recreated when this machine already has its sessions.
+ *
+ * A user can rename or delete a project folder behind this process's back. Its transcripts stay in
+ * the store, so the group stays listed and the picker can still point at it — and the honest answer
+ * then is to put the directory back, empty, because nothing of the user's was ever ours to keep
+ * there. A path this machine has no sessions for still refuses: a typo in the picker must not become
+ * a folder nobody asked for.
+ */
+export async function workspaceRootForCreate(cwdInput: string): Promise<string> {
+	const absRoot = resolve(cwdInput);
+	try {
+		return await workspaceRootOrThrow(absRoot);
+	} catch (error) {
+		if (!existsSync(workspaceDir(absRoot))) throw error;
+		await mkdir(absRoot, { recursive: true });
+		return absRoot;
+	}
 }
 
 /**

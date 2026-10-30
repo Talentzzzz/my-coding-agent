@@ -2,23 +2,21 @@ import { bootServer } from "./boot.ts";
 import { resolve } from "node:path";
 
 interface Args {
-	cwd: string;
+	absCwd: string;
 	host: string;
 	port: number;
 	model?: string;
 	thinkingLevel?: string;
 	session?: string;
-	shouldContinue: boolean;
 	vite: boolean;
 }
 
 function parseArgs(argv: readonly string[]): Args {
 	const args: Args = {
-		cwd: process.cwd(),
+		absCwd: process.cwd(),
 		host: "127.0.0.1",
 		// The port a familiar backend listens on, and overridable for anything that wants 5180 back.
 		port: 8080,
-		shouldContinue: false,
 		vite: false,
 	};
 
@@ -33,7 +31,7 @@ function parseArgs(argv: readonly string[]): Args {
 
 		switch (arg) {
 			case "--cwd":
-				args.cwd = resolve(value());
+				args.absCwd = resolve(value());
 				break;
 			case "--host":
 				args.host = value();
@@ -49,10 +47,6 @@ function parseArgs(argv: readonly string[]): Args {
 				break;
 			case "--session":
 				args.session = value();
-				break;
-			case "--continue":
-			case "-c":
-				args.shouldContinue = true;
 				break;
 			case "--vite":
 				args.vite = true;
@@ -85,8 +79,7 @@ function printHelp(): void {
 			"  --port <port>      port (default: 8080)",
 			"  --model <ref>      <row id>/<model id> from the imported models, or the row id alone",
 			"  --thinking <level> off | low | medium | high | max",
-			"  --session <id>     resume a stored session",
-			"  --continue, -c     resume the newest session for this workspace",
+			"  --session <id>     open a stored session",
 			"  --vite             serve the client through Vite (hot reload, no build step)",
 			"  --help, -h         show this text",
 			"",
@@ -95,7 +88,7 @@ function printHelp(): void {
 			"without it the server serves packages/web/dist, so run npm run build:web first.",
 			"",
 			"There is no built-in model catalog: models are imported in the app's settings panel, or by",
-			"writing <agent home>/models.json. `npm run cli -- --list-models` prints what is stored.",
+			"writing <agent home>/models.json. The settings panel lists what is stored.",
 			"",
 			"API (all JSON). Session events are NOT here: they arrive as frames on one resident",
 			"WebSocket at /mux, whose uplink carries only `open` and `cancel`. Commands stay REST.",
@@ -121,20 +114,19 @@ async function main(): Promise<void> {
 	const args = parseArgs(process.argv.slice(2));
 
 	const server = await bootServer({
-		cwd: args.cwd,
+		absCwd: args.absCwd,
 		host: args.host,
 		port: args.port,
 		vite: args.vite,
 		...(args.model === undefined ? {} : { model: args.model }),
 		...(args.thinkingLevel === undefined ? {} : { thinkingLevel: args.thinkingLevel }),
 		...(args.session === undefined ? {} : { sessionId: args.session }),
-		continueSession: args.shouldContinue,
 	});
 
 	process.stdout.write(
 		[
 			`my-agent listening on ${server.url}`,
-			`  workspace: ${args.cwd}`,
+			`  workspace: ${args.absCwd}`,
 			`  client:    ${args.vite ? "vite (hot reload)" : "packages/web/dist"}`,
 			`  api:       ${server.url}/api/health`,
 			"",

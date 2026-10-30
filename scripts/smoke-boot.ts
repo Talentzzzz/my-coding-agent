@@ -40,7 +40,7 @@ import type { WireClient } from "./wire/client.ts";
 const agentHome = mkdtempSync(join(tmpdir(), "my-agent-boot-home-"));
 writeFileSync(
 	join(agentHome, "models.json"),
-	`${JSON.stringify({ models: [{ name: "boot-fake", baseUrl: "http://127.0.0.1:9", modelId: "boot-fake" }] }, null, "\t")}\n`,
+	`${JSON.stringify({ models: [{ name: "boot-fake", baseUrl: "http://127.0.0.1:9", id: "boot-fake" }] }, null, "\t")}\n`,
 	"utf8",
 );
 process.env.MY_AGENT_HOME = agentHome;
@@ -93,7 +93,7 @@ async function freePort(): Promise<number> {
 const workspace = await mkdtemp(join(tmpdir(), "my-agent-boot-"));
 const fake = createFakeTransport();
 fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" }))]);
-const server: BootedServer = await bootServer({ cwd: workspace, port: 0, api: fake.api });
+const server: BootedServer = await bootServer({ absCwd: workspace, port: 0, api: fake.api });
 
 try {
 	process.stdout.write(`booted on ${server.url} (port ${server.port})\n`);

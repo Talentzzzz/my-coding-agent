@@ -18,7 +18,7 @@
 //   5. a restart — a second process seeds no pending approval, and the transcript keeps the call.
 //
 // Two things pinned by `docs/notes.md` §一 and §二 are load-bearing here. The first section's
-// `new SessionHub({ workspaceRoot: root })` is deliberately left alone (the hub's option is `cwd`):
+// `new SessionHub({ workspaceRoot: root })` is deliberately left alone (the hub's option is `absCwd`):
 // that section drives a session it mounted itself and never asks the hub to resolve a workspace, and
 // "fixing" it would change the one thing the note says not to touch — it is also why this file stays
 // outside `npm run check`'s `include`. And no section may hold a session open through a *subscription*:
@@ -46,7 +46,7 @@ import {
 	SettingsManager,
 	type Agent,
 	type ModelSource,
-	type UserModel,
+	type ModelConfig,
 	workspaceDir,
 } from "@my-agent/core";
 
@@ -115,20 +115,20 @@ async function waitParked(base: string, sessionId: string, ms = 15_000): Promise
 // The row every rig's session runs on. Held here rather than read from the hub: the hub reads the
 // machine's own `models.json`, and a test must not depend on what the person running it happens to
 // have configured.
-const rows: UserModel[] = [
+const rows: ModelConfig[] = [
 	{
 		name: "anthropic",
 		baseUrl: "http://127.0.0.1:1/v1",
 		apiKey: "unused-by-the-scripted-transport",
-		modelId: "claude-sonnet-4-5",
+		id: "claude-sonnet-4-5",
 		contextWindow: 200_000,
 		maxTokens: 8_192,
 		reasoning: false,
 	},
 ];
 const models: ModelSource = { list: () => rows };
-const modelRef = "anthropic/claude-sonnet-4-5";
-process.stdout.write(`model ${modelRef} via the scripted transport\n`);
+const modelName = "anthropic";
+process.stdout.write(`model ${modelName} via the scripted transport\n`);
 
 // ---------------------------------------------------------------------------------------------------
 // 1. The round trip, and a refused answer that leaves nothing behind.
@@ -140,7 +140,7 @@ const roundTripWatchdog = deadline("the approval round trip", 60_000);
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-"));
 // `docs/notes.md` §一: left exactly as written, `workspaceRoot` included, even though `HubOptions`
-// declares `cwd`. This section mounts the session by hand and never asks the hub to resolve a
+// declares `absCwd`. This section mounts the session by hand and never asks the hub to resolve a
 // workspace, which is the only reason it works — and why the note says not to "fix" it.
 const hub = new SessionHub({ workspaceRoot: root });
 const fake = createFakeTransport();
@@ -151,11 +151,11 @@ fake.setResponses([
 	fakeAssistantMessage("done"),
 ]);
 const session = await openAgent({
-	workspaceRoot: root,
+	absWorkspaceRoot: root,
 	sessionManager: SessionManager.create(root),
 	models,
 	api: fake.api,
-	model: modelRef,
+	model: modelName,
 	settingsManager: SettingsManager.inMemory({ approval: { read: true } }),
 });
 // Mounted the way `SessionHub.open()` mounts one, so every request below claims through the real hub.
@@ -580,7 +580,7 @@ restartFake.setResponses([
 	fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 	fakeAssistantMessage("done"),
 ]);
-const first = await bootServer({ cwd: restartRoot, port: 0, api: restartFake.api });
+const first = await bootServer({ absCwd: restartRoot, port: 0, api: restartFake.api });
 let restartSessionId = "";
 try {
 	const landing = (await (await fetch(`${first.url}/api/sessions/current`)).json()) as { sessionId: string };
@@ -715,7 +715,7 @@ interface Rig {
  */
 async function openRig(approvalGraceMs: number): Promise<Rig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-approval-grace-"));
-	const hub = new SessionHub({ cwd: root, approvalGraceMs });
+	const hub = new SessionHub({ absCwd: root, approvalGraceMs });
 
 	const transport = createFakeTransport();
 	transport.setResponses([
@@ -723,11 +723,11 @@ async function openRig(approvalGraceMs: number): Promise<Rig> {
 		fakeAssistantMessage("done"),
 	]);
 	const session = await openAgent({
-		workspaceRoot: root,
+		absWorkspaceRoot: root,
 		sessionManager: SessionManager.create(root),
 		models,
 		api: transport.api,
-		model: modelRef,
+		model: modelName,
 		settingsManager: SettingsManager.inMemory({ approval: { read: true } }),
 	});
 
@@ -766,7 +766,7 @@ interface CrossRig {
  */
 async function openCrossRig(): Promise<CrossRig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-approval-cross-"));
-	const hub = new SessionHub({ cwd: root, approvalGraceMs: 60_000 });
+	const hub = new SessionHub({ absCwd: root, approvalGraceMs: 60_000 });
 	const sessions: Agent[] = [];
 	for (let index = 0; index < 2; index += 1) {
 		const transport = createFakeTransport();
@@ -777,11 +777,11 @@ async function openCrossRig(): Promise<CrossRig> {
 			fakeAssistantMessage("done"),
 		]);
 		const session = await openAgent({
-			workspaceRoot: root,
+			absWorkspaceRoot: root,
 			sessionManager: SessionManager.create(root),
 			models,
 			api: transport.api,
-			model: modelRef,
+			model: modelName,
 			settingsManager: SettingsManager.inMemory({ approval: { read: true } }),
 		});
 		(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(session.id, new HostedSession(session, root));

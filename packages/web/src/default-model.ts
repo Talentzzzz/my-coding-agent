@@ -17,11 +17,16 @@ import type { ModelInput, ModelOption } from "@my-agent/core/protocol";
  * `apiKey` is absent on purpose, both halves of that: the app never ships a credential, and an absent
  * field is what the endpoint reads as "keep whatever is stored". The row is therefore keyless until
  * the user pastes one in, which is the one thing only they can do.
+ *
+ * `name` restates `DEFAULT_MODEL_NAME` from `packages/core/src/models.ts`, where the server's half of
+ * the same decision lives: that module runs on Node and this one is bundled for the browser, so the
+ * literal is written twice. The two must agree — the name here is what the row is planted as, and the
+ * name there is what assembly opens a session on.
  */
 export const DEFAULT_MODEL: ModelInput = {
 	name: "deepseek-flash",
 	baseUrl: "https://api.deepseek.com/anthropic",
-	modelId: "deepseek-flash",
+	id: "deepseek-flash",
 	contextWindow: 1_000_000,
 	maxTokens: 384_000,
 	reasoning: true,

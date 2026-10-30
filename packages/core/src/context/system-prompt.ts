@@ -3,7 +3,7 @@ import type { AgentsMdFile } from "./agents-md.ts";
 import { formatAgentsMd } from "./agents-md.ts";
 
 export interface SystemPromptInput {
-	workspaceRoot: string;
+	absWorkspaceRoot: string;
 	toolNames: readonly string[];
 	/** Tools that require user approval before they run. */
 	approvalTools: readonly string[];
@@ -33,7 +33,7 @@ export function buildSystemPrompt(input: SystemPromptInput): string {
 	sections.push(
 		[
 			"## Environment",
-			`- Workspace root: ${input.workspaceRoot}`,
+			`- Workspace root: ${input.absWorkspaceRoot}`,
 			`- Platform: ${platform()}`,
 			`- Today: ${new Date().toISOString().slice(0, 10)}`,
 		].join("\n"),
@@ -47,7 +47,7 @@ export function buildSystemPrompt(input: SystemPromptInput): string {
 	const available = input.toolNames.length === 0 ? "none" : input.toolNames.join(", ");
 	sections.push(`## Tools\nAvailable: ${available}.${approval}`);
 
-	const project = formatAgentsMd(input.agentsMd, input.workspaceRoot);
+	const project = formatAgentsMd(input.agentsMd, input.absWorkspaceRoot);
 	if (project !== undefined) {
 		sections.push(`## Project instructions\nThe user's project ships these instructions. Follow them.\n\n${project}`);
 	}

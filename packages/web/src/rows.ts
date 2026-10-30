@@ -103,12 +103,12 @@ export class SessionRows {
 	groups(): WorkspaceGroup[] {
 		const byCwd = new Map<string, SessionRow[]>();
 		for (const row of this.list()) {
-			const group = byCwd.get(row.cwd);
-			if (group === undefined) byCwd.set(row.cwd, [row]);
+			const group = byCwd.get(row.absCwd);
+			if (group === undefined) byCwd.set(row.absCwd, [row]);
 			else group.push(row);
 		}
 		return [...byCwd.entries()]
-			.map(([cwd, sessions]) => ({ cwd, sessions }))
+			.map(([absCwd, sessions]) => ({ absCwd, sessions }))
 			.sort((a, b) => newest(b.sessions) - newest(a.sessions));
 	}
 }

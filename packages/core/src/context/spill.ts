@@ -30,11 +30,11 @@ export function spillPathFor(
 	sessionId: string,
 	toolName: string,
 	toolCallId: string,
-): { absolute: string; display: string } {
+): { absPath: string; relPath: string } {
 	const segments = [...SPILL_DIR_PARTS, safeSegment(sessionId), `${safeSegment(toolCallId)}-${safeSegment(toolName)}.txt`];
 	return {
-		absolute: join(workspace.root, ...segments),
-		display: segments.join("/"),
+		absPath: join(workspace.absRoot, ...segments),
+		relPath: segments.join("/"),
 	};
 }
 
@@ -69,11 +69,11 @@ export function spillOversizedToolResult(
 	const text = resultText(content);
 	if (text === undefined) return undefined;
 
-	const { absolute, display } = spillPathFor(workspace, sessionId, toolName, toolCallId);
+	const { absPath, relPath } = spillPathFor(workspace, sessionId, toolName, toolCallId);
 	try {
-		if (!existsSync(absolute)) {
-			mkdirSync(dirname(absolute), { recursive: true });
-			writeFileSync(absolute, text, "utf8");
+		if (!existsSync(absPath)) {
+			mkdirSync(dirname(absPath), { recursive: true });
+			writeFileSync(absPath, text, "utf8");
 		}
 	} catch {
 		return undefined;
@@ -82,7 +82,7 @@ export function spillOversizedToolResult(
 	const head = text.slice(0, SPILL_KEEP_CHARS);
 	const tail = text.slice(text.length - SPILL_KEEP_CHARS);
 	const notice =
-		`\n\n[... ${text.length - head.length - tail.length} characters omitted — the full output was saved to ${display}; ` +
+		`\n\n[... ${text.length - head.length - tail.length} characters omitted — the full output was saved to ${relPath}; ` +
 		`use the read tool on that file if you need the rest ...]\n\n`;
 	// The text blocks collapse into one: the archive holds them all, and the view is about what the
 	// model reads first. Anything that is not text — an image block — passes through after it.

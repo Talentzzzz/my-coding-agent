@@ -1,17 +1,27 @@
-import type { AgentMessage } from "@my-agent/agent";
-import type { Usage } from "@my-agent/ai";
+import type { Message } from "@my-agent/llm";
+import type { Usage } from "@my-agent/llm";
+import type { ModelConfig } from "@my-agent/llm";
 import type { AgentSessionEvent } from "./agent.ts";
 import type { AppearanceSettings, BashSettings, ModeSettings } from "./config.ts";
 import type { BranchPoint } from "./session/session-manager.ts";
 
+export type { Message } from "@my-agent/llm";
 export type { AgentSessionEvent } from "./agent.ts";
 export type { MessageDelta } from "./agent.ts";
 export type { BranchOption, BranchPoint } from "./session/session-manager.ts";
 export type { BashSettings, ModeSettings, WorkspacePaging } from "./config.ts";
+// The compaction checkpoint crosses the wire inside snapshot `messages` as a user message wrapped
+// in these tags, so the tags are wire facts: the client recognizes the summary by them.
+export {
+	COMPACTION_SUMMARY_PREFIX,
+	COMPACTION_SUMMARY_SUFFIX,
+	compactionSummaryOf,
+} from "./session/messages.ts";
 
 export interface SessionRef {
 	id: string;
-	cwd: string;
+	/** The workspace this session runs in, absolute: the header recorded a resolved path. */
+	absCwd: string;
 	createdAt: number;
 	title: string;
 	/**
@@ -52,7 +62,7 @@ export interface SessionRow extends SessionRef {
  * workspace, but every workspace this machine has ever run in has its sessions on disk beside it.
  */
 export interface WorkspaceGroup {
-	cwd: string;
+	absCwd: string;
 	sessions: SessionRow[];
 }
 
@@ -68,10 +78,11 @@ export interface WorkspaceGroup {
  * speaks one transport, so it is a fact about the build rather than a field the form edits.
  */
 export interface ModelOption {
+	/** The wire id, which is also the field a submitted config names this row's model by. */
+	id: string;
 	name: string;
 	api: string;
 	baseUrl: string;
-	modelId: string;
 	contextWindow: number;
 	maxTokens: number;
 	reasoning: boolean;
@@ -88,17 +99,23 @@ export interface ModelOption {
 	hasApiKey: boolean;
 }
 
-/** One row as a client submits it. An omitted `apiKey` leaves whatever is stored in place. */
-export interface ModelInput {
-	name?: string;
-	baseUrl?: string;
-	apiKey?: string;
-	modelId?: string;
-	contextWindow?: number;
-	maxTokens?: number;
-	reasoning?: boolean;
+/**
+ * One row as a client submits it.
+ *
+ * Every field is optional, and that is the entire difference from a {@link ModelConfig}: an omitted
+ * field leaves whatever is stored in place, which is what makes a patch ("this row's key is new")
+ * expressible at all — a whole config would have to repeat every fact the row already had. The shape
+ * is derived rather than restated, so a field added to a config is a field a client can send, and one
+ * that is not in this list (`api`, `input`, `cost`) is one it cannot.
+ *
+ * The level is the exception, spelled as a plain string: the field is a text control's value by the
+ * time it gets here, and `coerceModelConfig` is what refuses one this app has no name for.
+ */
+export type ModelInput = Partial<
+	Pick<ModelConfig, "id" | "name" | "baseUrl" | "apiKey" | "contextWindow" | "maxTokens" | "reasoning">
+> & {
 	defaultThinkingLevel?: string;
-}
+};
 
 /**
  * Which model answers a message, and how hard it is asked to think.
@@ -109,7 +126,7 @@ export interface ModelInput {
  * the session already has it.
  */
 export interface ModelSelection {
-	/** `<name>/<wire id>`, the ref the settings panel and the transcript both use. */
+	/** The row's name — the identity the settings panel shows and the transcript records. */
 	model?: string;
 	thinkingLevel?: string;
 }
@@ -134,6 +151,15 @@ export interface SettingsSnapshot {
 	 * would be a group that vanished with nothing to explain it.
 	 */
 	hiddenWorkspaces?: string[];
+	/**
+	 * The names the sidebar shows for workspaces, by absolute path; absent means every group wears
+	 * the folder's own name.
+	 *
+	 * Carried beside `hiddenWorkspaces` and for the same reason: the window draws a group's heading,
+	 * and the name it draws is not derivable from anything else the snapshot holds — it is a view the
+	 * user typed, not a property of the directory.
+	 */
+	workspaceNames?: Record<string, string>;
 	approval: Record<ToolApprovalKey, boolean>;
 	/** How long the `bash` tool lets one command run. */
 	bash: BashSettings;
@@ -195,8 +221,8 @@ export interface DiffLine {
  * provider ever sees it: a request carries a tool result's content and only its content.
  */
 export interface FileDiff {
-	/** The file as the workspace displays it, the same path the tool's own text names. */
-	path: string;
+	/** The file as the workspace displays it — relative to the workspace root, forward slashes. */
+	relPath: string;
 	lines: DiffLine[];
 	added: number;
 	removed: number;
@@ -208,9 +234,10 @@ export interface FileDiff {
 
 export interface SessionSnapshot {
 	id: string;
-	cwd: string;
+	absCwd: string;
 	createdAt: number;
 	title: string;
+	/** The row's name the session is on. */
 	model: string;
 	thinkingLevel: string;
 	/** Thinking levels this model accepts, including "off". */
@@ -232,7 +259,7 @@ export interface SessionSnapshot {
 	toolsFollowGlobal: boolean;
 	/** The approval map's half of the same judgement. */
 	approvalsFollowGlobal: boolean;
-	messages: AgentMessage[];
+	messages: Message[];
 	/**
 	 * The entry id behind each message in `messages`, in the same order.
 	 *
@@ -242,12 +269,14 @@ export interface SessionSnapshot {
 	 */
 	messageEntryIds: (string | null)[];
 	/**
-	 * Where the active chain carried on from a message in more than one way.
+	 * Every place in this session's log where it carried on in more than one way.
 	 *
 	 * The entries have always been a tree, so a chain is one path through it; this is what a window
-	 * needs to draw the rest of the tree and to move through it. Only the entry ids of the alternatives
-	 * travel, not where they lead: those ids are written once, while a branch grows at its tip, so a
-	 * remembered tip would be a place the conversation had already left.
+	 * needs to draw the rest of the tree and to move through it. All of it, not only the chain's —
+	 * moving the leaf must not change the shape of the tree a window draws — and `options[].active`
+	 * is the one field that answers "which of these is the chain I am on". Only the entry ids of the
+	 * alternatives travel, not where they lead: those ids are written once, while a branch grows at
+	 * its tip, so a remembered tip would be a place the conversation had already left.
 	 */
 	branchPoints: BranchPoint[];
 	/** The session this one was forked from, if it is a fork; absent for a root session. */
@@ -262,7 +291,7 @@ export interface SessionSnapshot {
 	 * never saw: the baseline draws these characters, and the deltas that follow append to them.
 	 * Absent for a settled transcript and for every cold read.
 	 */
-	partial?: AgentMessage;
+	partial?: Message;
 	submitting: boolean;
 	/** User messages accepted mid-run that the loop has not drained yet. */
 	queued: number;

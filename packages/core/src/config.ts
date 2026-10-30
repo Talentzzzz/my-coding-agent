@@ -157,7 +157,13 @@ export interface ModeSettings {
 }
 
 export interface Settings {
-	/** `<name>/<model-id>`. Undefined lets the session pick a default. */
+	/**
+	 * The row a new session opens on: its `name`, or the `<name>/<model-id>` ref a transcript records.
+	 *
+	 * Both spellings are accepted, because the panel writes the first and a repair script writes the
+	 * second. Undefined is not "no model": assembly falls back to `DEFAULT_MODEL_NAME`
+	 * (`packages/core/src/models.ts`), and only a machine without that row opens on its first one.
+	 */
 	model?: string;
 	/**
 	 * Whether the window has already planted its built-in default model row.
@@ -199,6 +205,18 @@ export interface Settings {
 	 * follow: a preference nobody expressed is not written down.
 	 */
 	hiddenWorkspaces?: string[];
+	/**
+	 * The name the sidebar shows for a workspace, by absolute path.
+	 *
+	 * A view decision exactly like `hiddenWorkspaces`, and for the same reason: the folder on disk
+	 * keeps the name the file system gave it, and every transcript keeps the `absCwd` its header
+	 * recorded. Renaming a workspace here therefore cannot make a session unfindable, and it cannot
+	 * touch anything outside the agent's own settings.
+	 *
+	 * An empty string is how a name is taken back — the group falls to the folder's own name again —
+	 * because a record that merges per key cannot express "forget this one" by omission.
+	 */
+	workspaceNames?: Record<string, string>;
 	/** How many steered messages one drain point injects. */
 	steeringMode: QueueMode;
 	/** How many follow-up messages one drain point injects. */
@@ -224,8 +242,8 @@ export function settingsPath(agentDir: string = AGENT_HOME): string {
 }
 
 /** The settings file a workspace can commit. Only `SettingsManager` decides whether to write it. */
-export function projectSettingsPath(cwd: string): string {
-	return join(resolve(cwd), PROJECT_DIR_NAME, "settings.json");
+export function projectSettingsPath(absCwd: string): string {
+	return join(resolve(absCwd), PROJECT_DIR_NAME, "settings.json");
 }
 
 /**
@@ -263,6 +281,9 @@ export function mergeSettings(input: unknown): Settings {
 
 	const hiddenWorkspaces = stringListOrUndefined(record.hiddenWorkspaces);
 	if (hiddenWorkspaces !== undefined) merged.hiddenWorkspaces = hiddenWorkspaces;
+
+	const workspaceNames = stringRecordOrUndefined(record.workspaceNames);
+	if (workspaceNames !== undefined) merged.workspaceNames = workspaceNames;
 
 	for (const key of Object.keys(merged.approval) as ToolApprovalKey[]) {
 		const value = approval[key];
@@ -381,11 +402,11 @@ export function clampContentWidth(value: unknown): number | undefined {
 export function clampWorkspacePaging(value: unknown): Record<string, WorkspacePaging> | undefined {
 	if (!isRecord(value)) return undefined;
 	const out: Record<string, WorkspacePaging> = {};
-	for (const [cwd, entry] of Object.entries(value)) {
-		if (cwd.trim().length === 0 || !isRecord(entry)) continue;
+	for (const [absCwd, entry] of Object.entries(value)) {
+		if (absCwd.trim().length === 0 || !isRecord(entry)) continue;
 		const clampPage = (input: unknown): number =>
 			typeof input === "number" && Number.isInteger(input) && input >= 1 ? input : 1;
-		out[cwd] = {
+		out[absCwd] = {
 			collapsed: entry.collapsed === true,
 			page: clampPage(entry.page),
 			savedPage: clampPage(entry.savedPage),
@@ -415,6 +436,20 @@ function stringOrUndefined(value: unknown): string | undefined {
 function stringListOrUndefined(value: unknown): string[] | undefined {
 	if (!Array.isArray(value)) return undefined;
 	return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+}
+
+/**
+ * A path-keyed map of names, or undefined for "none were ever written".
+ *
+ * Empty strings survive here rather than being dropped: an empty name is how a cleared entry is
+ * stored, and the reader that shows the sidebar is the one place that decides what it means.
+ */
+function stringRecordOrUndefined(value: unknown): Record<string, string> | undefined {
+	if (!isRecord(value)) return undefined;
+	const entries = Object.entries(value).filter(
+		(entry): entry is [string, string] => typeof entry[1] === "string" && entry[0].trim().length > 0,
+	);
+	return entries.length === 0 ? undefined : Object.fromEntries(entries);
 }
 
 /**

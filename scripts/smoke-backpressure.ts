@@ -117,7 +117,7 @@ function options(overrides: Partial<ResolvedMuxOptions>): ResolvedMuxOptions {
 }
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-backpressure-"));
-const hub = new SessionHub({ cwd: root });
+const hub = new SessionHub({ absCwd: root });
 
 try {
 	process.stdout.write("the moment write() says no, nothing jumps the queue\n");

@@ -14,7 +14,7 @@ import {
 	type ServerFrame,
 	type ServerMessage,
 	type SessionRow,
-	type UserModel,
+	type ModelConfig,
 } from "@my-agent/core";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import { createSessionProjection } from "../packages/server/src/projection.ts";
@@ -49,19 +49,19 @@ async function settle(): Promise<void> {
  * The hub reads its rows from the store the user typed, so one row is all it takes — and the scripted
  * transport answers it, which is what lets a live session's row be driven with no provider key.
  */
-const ROW: UserModel = {
+const ROW: ModelConfig = {
 	name: "faux",
 	baseUrl: "http://127.0.0.1:1/v1",
 	apiKey: "unused-by-the-scripted-transport",
-	modelId: "faux-1",
+	id: "faux-1",
 	contextWindow: 128_000,
 	maxTokens: 16_384,
 	reasoning: false,
 };
 
 const fake = createFakeTransport();
-const hub = new SessionHub({ cwd: root, api: fake.api });
-hub.setUserModels([ROW]);
+const hub = new SessionHub({ absCwd: root, api: fake.api });
+hub.setModelConfigs([ROW]);
 
 try {
 	process.stdout.write("a session that exists before anything asks gets a row\n");
@@ -78,7 +78,7 @@ try {
 	const seeded = await projection.row(first);
 	check("the session has a row", seeded !== undefined, String(seeded));
 	check("and it is idle", seeded?.running === false && seeded.pending === 0, JSON.stringify(seeded));
-	check("with the workspace as its cwd", seeded?.cwd === root, seeded?.cwd);
+	check("with the workspace as its absCwd", seeded?.absCwd === root, seeded?.absCwd);
 	check("a row carries modified, not only createdAt", typeof seeded?.modified === "number" && seeded.modified > 0, String(seeded?.modified));
 
 	process.stdout.write("one scan, however many callers\n");
@@ -93,8 +93,8 @@ try {
 	const again = await projection.rows();
 	check("both callers see the same rows", JSON.stringify(rows) === JSON.stringify(again));
 	check("the rows are the ones the seed found", rows.some((row) => row.id === first));
-	const mine = groups.find((group) => group.cwd === root);
-	check("this workspace's group holds this session's row", mine?.sessions.some((row) => row.id === first) === true, JSON.stringify(mine?.cwd));
+	const mine = groups.find((group) => group.absCwd === root);
+	check("this workspace's group holds this session's row", mine?.sessions.some((row) => row.id === first) === true, JSON.stringify(mine?.absCwd));
 	check(
 		"a group is ordered by activity, newest first",
 		(mine?.sessions ?? []).every((row, index, all) => index === 0 || (all[index - 1]?.modified ?? 0) >= row.modified),
@@ -171,8 +171,8 @@ try {
 	check("a message landing named the row", (await projection.row(first))?.title === "first turn", (await projection.row(first))?.title);
 	check(
 		"and a cold probe agrees with the live row",
-		(await SessionManager.rowForId(first))?.title === "first turn",
-		(await SessionManager.rowForId(first))?.title,
+		(await SessionManager.findSessionRowById(first))?.title === "first turn",
+		(await SessionManager.findSessionRowById(first))?.title,
 	);
 
 	// The leaf is in memory, so the only way to learn the branch moved is to hear the session say so —
@@ -186,8 +186,8 @@ try {
 	check("a new root is named from the message it started with", reopened?.title === "a different opening", reopened?.title);
 	check(
 		"and the cold probe agrees with the live row, which is the whole point of one derivation",
-		(await SessionManager.rowForId(first))?.title === reopened?.title,
-		`${(await SessionManager.rowForId(first))?.title} vs ${reopened?.title}`,
+		(await SessionManager.findSessionRowById(first))?.title === reopened?.title,
+		`${(await SessionManager.findSessionRowById(first))?.title} vs ${reopened?.title}`,
 	);
 	hub.release(branchHost);
 	await until(() => !hub.live.includes(first));

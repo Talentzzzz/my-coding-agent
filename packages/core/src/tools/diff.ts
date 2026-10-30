@@ -51,7 +51,7 @@ type Op = { kind: "context" | "add" | "remove"; text: string };
  * `path` is carried through rather than derived: only the caller knows how its workspace displays
  * the file, and the card names the same path the tool's own text does.
  */
-export function fileDiff(path: string, before: string, after: string, options: DiffOptions = {}): FileDiff {
+export function fileDiff(relPath: string, before: string, after: string, options: DiffOptions = {}): FileDiff {
 	const ops = editScript(splitLines(before), splitLines(after));
 
 	let added = 0;
@@ -77,7 +77,7 @@ export function fileDiff(path: string, before: string, after: string, options: D
 
 	const limit = options.maxLines ?? lines.length;
 	return {
-		path,
+		relPath,
 		lines: lines.slice(0, limit),
 		added,
 		removed,

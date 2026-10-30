@@ -23,7 +23,7 @@ import {
 	SessionManager,
 	SettingsManager,
 	type ModelSource,
-	type UserModel,
+	type ModelConfig,
 	workspaceDir,
 } from "@my-agent/core";
 
@@ -41,21 +41,21 @@ const watchdog = setTimeout(() => {
 	process.exit(1);
 }, 60_000);
 
-const rows: UserModel[] = [
+const rows: ModelConfig[] = [
 	{
 		name: "anthropic",
 		baseUrl: "http://127.0.0.1:1/v1",
 		apiKey: "unused-by-the-scripted-transport",
-		modelId: "claude-sonnet-4-5",
+		id: "claude-sonnet-4-5",
 		contextWindow: 200_000,
 		maxTokens: 8_192,
 		reasoning: false,
 	},
 ];
 const models: ModelSource = { list: () => rows };
-const modelRef = "anthropic/claude-sonnet-4-5";
+const modelName = "anthropic";
 
-const hub = new SessionHub({ cwd: root, approvalGraceMs: 60_000 });
+const hub = new SessionHub({ absCwd: root, approvalGraceMs: 60_000 });
 
 // The scripted transport stands in for the model: a tool call that parks at the gate, then the text
 // that ends the run once the answer arrives.
@@ -65,11 +65,11 @@ fake.setResponses([
 	fakeAssistantMessage("done"),
 ]);
 const session = await openAgent({
-	workspaceRoot: root,
+	absWorkspaceRoot: root,
 	sessionManager: SessionManager.create(root),
 	models,
 	api: fake.api,
-	model: modelRef,
+	model: modelName,
 	settingsManager: SettingsManager.inMemory({ approval: { read: true } }),
 });
 

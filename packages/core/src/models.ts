@@ -4,25 +4,26 @@ import {
 	type Api,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
+	type ChatTransport,
 	clampThinkingLevel,
 	createAssistantMessageEventStream,
 	getSupportedThinkingLevels,
-	type Model,
-} from "@my-agent/ai";
+	Model,
+	type ModelConfig,
+	type ModelThinkingLevel,
+} from "@my-agent/llm";
 import { anthropicCompatFor, anthropicThinkingLevelMapFor } from "./anthropic-models.ts";
 import { AGENT_HOME } from "./config.ts";
 import type { ModelOption } from "./protocol.ts";
 
-/**
- * The wire id every model here carries.
- *
- * `Model.api` is a string field, and pi-ai dispatches on it. This app has exactly one value it can
- * be, so it is named once and written in both places a model is built rather than typed twice.
- */
-const ANTHROPIC_MESSAGES_API = "anthropic-messages";
+/** The class itself, so a caller that only wants "a model" does not reach into the transport package. */
+export { Model } from "@my-agent/llm";
+
+/** The shape a row is written down in, re-exported so a caller need not name the package it lives in. */
+export type { ModelConfig } from "@my-agent/llm";
 
 /**
- * The models this installation runs, as rows the user typed.
+ * The models this installation runs, as configs a person wrote.
  *
  * There is no built-in catalog. pi-ai ships one, and it is deliberately not used: which endpoints
  * exist, what they cost, and how large their context is are all things the person paying the bill
@@ -30,49 +31,26 @@ const ANTHROPIC_MESSAGES_API = "anthropic-messages";
  * *after* the model is known — assembling the request, streaming the answer, retry classification,
  * thinking levels — which is the part worth not writing ourselves.
  *
- * A row is the whole of a model here: the endpoint, the key that reaches it, and the model's own
- * facts. There is no layer between a row and a request. Upstream pi-ai routed through a provider
- * registry, where a provider owned a key and a base URL and a set of models; that registry earned its
- * keep when one host spoke several APIs with several credential kinds, and this one does neither. A
- * row already *is* "one endpoint, one key", so the registry held one entry per row and its only
- * content was a string the row already had. It is gone, and the key travels from the row to the
- * request directly.
- */
-
-/**
- * One model the user entered.
+ * Upstream pi-ai routed through a provider registry, where a provider owned a key and a base URL and a
+ * set of models; that registry earned its keep when one host spoke several APIs with several credential
+ * kinds, and this one does neither. A row already *is* "one endpoint, one key", so the registry held
+ * one entry per row and its only content was a string the row already had. It is gone, and the key
+ * travels from the row to the request directly.
  *
- * Every row goes over Anthropic Messages — there is no transport field, because there is nothing to
- * choose between. A row is the endpoint, the key that reaches it, and the model's own facts.
+ * A row *is* a {@link ModelConfig}, and this file no longer keeps a second shape for it. There used to
+ * be two: `UserModel`, the sparse facts a person typed, and `ModelInit`, the complete field table a
+ * request needs, with `modelInitFor()` translating between them. That translation was one-way, held no
+ * state, and lived for one call stack — the sign that the split was not doing work. The fields that
+ * differed are constants of this build: `api` can only be one string, `input` can only be text, and
+ * `cost` is unmeasured. Constants belong as defaults where the model is built, not as a mapping in the
+ * layer above. So there is one shape now, owned by the package that constructs models from it, and the
+ * stored file already has that shape.
  *
- * `name` is the row's identity as well as its label. It is what the transcript records, what a config
- * patch names, and what the settings panel shows, so those are one thing rather than two that can drift
- * apart. The cost is stated plainly: renaming a row that sessions were using breaks their reference to
- * it, exactly as deleting the row does, and both are answered the same way — the session opens with no
- * model and a sentence saying to pick one.
+ * Two things stayed here instead of moving into `Model`. Which compat flags and thinking levels a
+ * given wire id takes, because `anthropic-models.ts` is knowledge about endpoints rather than about
+ * the transport. And the rules about what may be stored at all — {@link coerceModelConfig} — because
+ * a config that came from a window or a text editor is not yet a config this app will send.
  */
-export interface UserModel {
-	/** The row's identity, and what the picker shows. Unique among the rows, at the user's hand. */
-	name: string;
-	baseUrl: string;
-	/** Sent to the endpoint. The one way this app authenticates. */
-	apiKey: string;
-	/** The name the endpoint knows the model by. */
-	modelId: string;
-	contextWindow: number;
-	maxTokens: number;
-	/** Whether the transport should offer thinking levels for this model. */
-	reasoning: boolean;
-	/**
-	 * The level a session opened on this row starts at, before anyone moves the composer.
-	 *
-	 * A per-row default rather than one per workspace, because the levels are the model's: a level
-	 * that is the middle of a five-level family is not a level a three-effort endpoint has. Absent
-	 * means the row was added before this field existed or the user never chose, and the session opens
-	 * as quiet as the model gets.
-	 */
-	defaultThinkingLevel?: ThinkingLevel;
-}
 
 /**
  * The user's models, as a session sees them.
@@ -83,7 +61,7 @@ export interface UserModel {
  * read is one small file, so nothing here is cached and nothing has to be invalidated.
  */
 export interface ModelSource {
-	list(): readonly UserModel[];
+	list(): readonly ModelConfig[];
 }
 
 /** The defaults a new row starts from, so the form never shows an empty numeric field. */
@@ -93,8 +71,21 @@ export const NEW_MODEL_DEFAULTS = {
 	reasoning: false,
 };
 
-/** The vendor whose endpoint a blank row points at, as a starting value rather than a choice. */
-export const DEFAULT_BASE_URL = "https://api.anthropic.com";
+/**
+ * The row a session opens on when nothing more specific names one.
+ *
+ * Hardcoded on purpose. Assembly used to answer this with "whichever row the user wrote first", which
+ * is a guess that only looks like an answer when the first row happens to be the one they want: a
+ * `models.json` rewritten by a repair script or a smoke run silently moves the default, and a stored
+ * preference naming a row that has since been deleted moves it again. Naming the model here instead
+ * means every session that nothing overrules opens on `deepseek-flash`, whatever order the file is in.
+ *
+ * This is the *default*, not an override: `settings.model` still names the row for new sessions, and
+ * the composer still moves the session on screen. The same name is what the client plants when a
+ * machine has no rows at all — see `DEFAULT_MODEL` in `packages/web/src/default-model.ts`, which
+ * restates the literal because that module is bundled for the browser and this one runs on Node.
+ */
+export const DEFAULT_MODEL_NAME = "deepseek-flash";
 
 /** Where the rows live. One file, beside the settings and the sessions. */
 export function modelsPath(agentDir: string = AGENT_HOME): string {
@@ -108,22 +99,22 @@ export function modelsPath(agentDir: string = AGENT_HOME): string {
  * who adds a row with an editor should not have to restart the app to see it, and a cache would make
  * that the surprising behaviour rather than the obvious one.
  */
-export class UserModelStore {
-	private readonly file: string;
+export class ModelConfigStore {
+	private readonly absFile: string;
 
-	private constructor(file: string) {
-		this.file = file;
+	private constructor(absFile: string) {
+		this.absFile = absFile;
 	}
 
-	static create(agentDir: string = AGENT_HOME): UserModelStore {
-		return new UserModelStore(modelsPath(agentDir));
+	static create(agentDir: string = AGENT_HOME): ModelConfigStore {
+		return new ModelConfigStore(modelsPath(agentDir));
 	}
 
-	/** The stored rows, in the order they were written. A missing or unreadable file is no rows. */
-	list(): UserModel[] {
+	/** The stored configs, in the order they were written. A missing or unreadable file is no rows. */
+	list(): ModelConfig[] {
 		let text: string;
 		try {
-			text = readFileSync(this.file, "utf8");
+			text = readFileSync(this.absFile, "utf8");
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
 			throw error;
@@ -136,21 +127,21 @@ export class UserModelStore {
 		try {
 			parsed = JSON.parse(trimmed);
 		} catch (error) {
-			throw new Error(`${this.file} is not valid JSON: ${(error as Error).message}`);
+			throw new Error(`${this.absFile} is not valid JSON: ${(error as Error).message}`);
 		}
 		const entries = isRecord(parsed) && Array.isArray(parsed.models) ? parsed.models : [];
-		const rows: UserModel[] = [];
+		const rows: ModelConfig[] = [];
 		for (const entry of entries) {
-			const model = coerceModel(entry);
-			if (model !== undefined) rows.push(model);
+			const config = coerceModelConfig(entry);
+			if (config !== undefined) rows.push(config);
 		}
 		return rows;
 	}
 
 	/** Replace every row. The whole-list write is what keeps the names and the file from drifting apart. */
-	replace(models: readonly UserModel[]): void {
-		mkdirSync(dirname(this.file), { recursive: true });
-		writeFileSync(this.file, `${JSON.stringify({ models }, null, "\t")}\n`, "utf8");
+	replace(models: readonly ModelConfig[]): void {
+		mkdirSync(dirname(this.absFile), { recursive: true });
+		writeFileSync(this.absFile, `${JSON.stringify({ models }, null, "\t")}\n`, "utf8");
 	}
 }
 
@@ -158,7 +149,7 @@ export class UserModelStore {
  * The placeholder's name, kept deliberately out of the way of any user row.
  *
  * A name is the whole identity of a row now, so this is what stops a user's own row from being mistaken
- * for "nothing configured". {@link coerceModel} refuses it outright, because the alternative — quietly
+ * for "nothing configured". {@link coerceModelConfig} refuses it outright, because the alternative — quietly
  * storing the row under a different name — would mean the settings panel showed a name the user did not
  * type.
  */
@@ -184,15 +175,18 @@ function isReserved(name: string): boolean {
  * That is the same account a rename or a deletion settles, and it is paid once rather than left as a
  * panel full of slugs forever.
  */
-export function coerceModel(input: unknown): UserModel | undefined {
+export function coerceModelConfig(input: unknown): ModelConfig | undefined {
 	if (!isRecord(input)) return undefined;
 
-	const modelId = stringOrUndefined(input.modelId);
-	if (modelId === undefined) return undefined;
+	// `id` is the field's name now. `modelId` is what every file written before the config became the
+	// row spends it under, so both are read: an upgrade keeps the endpoints it already had instead of
+	// emptying a list of models the user entered by hand.
+	const id = stringOrUndefined(input.id) ?? stringOrUndefined(input.modelId);
+	if (id === undefined) return undefined;
 
-	// A row added before the user has thought about what to call it takes the wire id as its name, which
-	// is the same field they would have to fill in anyway.
-	const name = stringOrUndefined(input.name) ?? stringOrUndefined(input.label) ?? modelId;
+	// A config added before the user has thought about what to call it takes the wire id as its name,
+	// which is the same field they would have to fill in anyway.
+	const name = stringOrUndefined(input.name) ?? stringOrUndefined(input.label) ?? id;
 	if (isReserved(name)) return undefined;
 
 	const baseUrl = stringOrUndefined(input.baseUrl);
@@ -203,11 +197,14 @@ export function coerceModel(input: unknown): UserModel | undefined {
 	// *model* has no room for is a different question, and assembly settles it.
 	const defaultThinkingLevel = thinkingLevelOr(input.defaultThinkingLevel);
 
+	// Only the fields a person can meaningfully name are copied. `api`, `input`, and `cost` are
+	// constants of this build, so they are not read back out of a file that could claim otherwise —
+	// the same reason a submitted config does not get to choose its own transport.
 	return {
+		id,
 		name,
 		baseUrl,
 		apiKey: typeof input.apiKey === "string" ? input.apiKey : "",
-		modelId,
 		contextWindow: positiveInt(input.contextWindow, NEW_MODEL_DEFAULTS.contextWindow),
 		maxTokens: positiveInt(input.maxTokens, NEW_MODEL_DEFAULTS.maxTokens),
 		reasoning: input.reasoning === true,
@@ -222,80 +219,68 @@ function thinkingLevelOr(value: unknown): ThinkingLevel | undefined {
 		: undefined;
 }
 
-/** `name/wire-id` — the ref the transcript records and a config patch names. */
-export function modelRefOf(row: UserModel): string {
-	return `${row.name}/${row.modelId}`;
-}
+// ---------------------------------------------------------------------------- one config as a model
 
 /**
- * The row a ref came from: everything before the first slash.
+ * The config with the facts its wire id implies filled in.
  *
- * The name, not the wire id, is what a ref leads with, so this reads a name out of a ref without having
- * to know which rows exist. A wire id may itself contain slashes, which is why only the first one counts.
+ * `compat` and `thinkingLevelMap` are the two things a person cannot know and should not be asked:
+ * they describe the endpoint behind an id, and `anthropic-models.ts` is where that table lives. Only a
+ * config that says it reasons gets them — a row with `reasoning` off must produce a request with no
+ * thinking parameters in it at all, and handing it a level table would be a promise the transport then
+ * keeps.
+ *
+ * Nothing else is added here. The constants a config never names — `api`, `input`, `cost` — are
+ * defaulted inside `Model.reconfigure`, in the package that knows what they can be. This function is
+ * the only translation left between "what a person wrote" and "what a request needs", and it exists
+ * because app knowledge could not follow the constants into the transport.
  */
-export function rowNameFromRef(ref: string): string {
-	const slash = ref.indexOf("/");
-	return slash === -1 ? ref : ref.slice(0, slash);
-}
-
-// ---------------------------------------------------------------------------- one row as a model
-
-/**
- * One row as the model a request is made with.
- *
- * The row's wire id becomes `Model.id` and the row's name becomes `Model.name` — and the name is
- * load-bearing rather than decorative, because it is what the session records in its transcript and what
- * a config patch names to get back to this row. The row's key rides along as `Model.apiKey`, so a
- * request carries its own credential instead of the loop looking one up by a name it was handed.
- *
- * That only works because the caller rebuilds this for every request: see `Agent.adoptCurrentRow`, which
- * re-derives the model from the live row rather than keeping one. A captured model would hold a
- * captured key.
- *
- * The level is the second half of the same idea: it rides on the model, so "which endpoint" and "how
- * hard" are one object a request is made with and there is nowhere else for a strength to come from.
- * Omitted leaves the model with no level at all, which the wire reads as "do not think" — that is what
- * a caller building a model for a job of its own wants, and what this returns when the row has no
- * default either. A named level is normalized against this model, so a level it has no room for lands
- * on one it does rather than on a value the endpoint rejects.
- */
-export function modelFor(row: UserModel, thinkingLevel?: string): Model<Api> {
-	// The per-model facts are derived from the wire id, because a hand-typed row has nothing else to
-	// key them by. They are read only for a row that says it thinks: a row with `reasoning` off asks
-	// for a request with no thinking parameters in it at all, and a level map would put one back.
-	const compat = row.reasoning ? anthropicCompatFor(row.modelId) : undefined;
-	const thinkingLevelMap = row.reasoning ? anthropicThinkingLevelMapFor(row.modelId) : undefined;
-	const model: Model<Api> = {
-		id: row.modelId,
-		name: row.name,
-		api: ANTHROPIC_MESSAGES_API,
-		apiKey: row.apiKey,
-		// Required and absolute: the transport reads the base URL off the model.
-		baseUrl: row.baseUrl,
-		reasoning: row.reasoning,
-		input: ["text"],
-		// Pricing is per million tokens and the user is not asked for it, so every rate is zero. The
-		// cost the status bar would show is therefore always $0.00, which is the honest answer to
-		// "what did this app measure" rather than a guess at someone's contract.
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: row.contextWindow,
-		maxTokens: row.maxTokens,
+function withCapabilities(config: ModelConfig): ModelConfig {
+	if (!config.reasoning) return config;
+	const compat = config.compat ?? anthropicCompatFor(config.id);
+	const thinkingLevelMap = config.thinkingLevelMap ?? anthropicThinkingLevelMapFor(config.id);
+	return {
+		...config,
 		...(compat === undefined ? {} : { compat }),
 		...(thinkingLevelMap === undefined ? {} : { thinkingLevelMap }),
 	};
-	return thinkingLevel === undefined
-		? model
-		: { ...model, thinkingLevel: normalizeThinkingLevel(model, thinkingLevel) };
 }
 
 /**
- * The row behind a model, or undefined when there is none.
+ * One config as the model a request is made with.
  *
- * A model carries its row's name, so this is the one lookup that turns "which model is this session on"
- * back into "which row is that". Undefined means the placeholder: a session with no row to send with.
+ * The level is the second half of the same idea: it rides on the model, so "which endpoint" and "how
+ * hard" are one object a request is made with and there is nowhere else for a strength to come from.
+ * It is normalized against the built model, so a level the model has no room for lands on one it does
+ * rather than on a value the endpoint rejects. Omitted leaves the model with no level at all, which the
+ * wire reads as "do not think" — what a caller building a model for a job of its own wants, and what a
+ * row with no default produces.
+ *
+ * `transport` is how this model will be sent. Left out, the model uses the package's one transport; a
+ * session passes its own, which is where the retry policy and the "no row behind this model" answer
+ * live.
  */
-export function rowFor(models: ModelSource, model: { name: string }): UserModel | undefined {
-	return models.list().find((row) => row.name === model.name);
+export function createModel(config: ModelConfig, thinkingLevel?: string, transport?: ChatTransport): Model {
+	const model = new Model(withCapabilities(config), transport);
+	if (thinkingLevel !== undefined) model.thinkingLevel = normalizeThinkingLevel(model, thinkingLevel);
+	return model;
+}
+
+/**
+ * Re-derive a live model from the config behind it, in place.
+ *
+ * What `Agent.adoptCurrentRow` calls before every request: the object the loop holds is the object that
+ * changes, so a corrected key, a moved endpoint, a resized window, and a level table the row no longer
+ * justifies all reach the next request without a new object being threaded through a run already going.
+ *
+ * The level is carried across by the caller rather than taken from the config — the config says what
+ * the model can be asked, and the session is the one that chose — and it is re-normalized here, which
+ * is what turns a row edited to stop reasoning into a session back at "off" instead of one still
+ * claiming a level the row no longer has.
+ */
+export function applyRowToModel(model: Model, config: ModelConfig, thinkingLevel?: string): void {
+	model.reconfigure(withCapabilities(config));
+	if (thinkingLevel !== undefined) model.thinkingLevel = normalizeThinkingLevel(model, thinkingLevel);
 }
 
 /**
@@ -307,18 +292,18 @@ export function rowFor(models: ModelSource, model: { name: string }): UserModel 
  * row does not exist, and {@link unconfiguredStream} is what answers for it. Its name is the reserved
  * one, which is what {@link isUnconfigured} tests and what no stored row may claim.
  */
-export function placeholderModel(): Model<Api> {
-	return {
-		id: UNCONFIGURED_MODEL_ID,
-		name: UNCONFIGURED_NAME,
-		api: ANTHROPIC_MESSAGES_API,
-		baseUrl: "http://127.0.0.1:1/v1",
-		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 200_000,
-		maxTokens: 8_192,
-	};
+export function placeholderModel(transport?: ChatTransport): Model {
+	return new Model(
+		{
+			id: UNCONFIGURED_MODEL_ID,
+			name: UNCONFIGURED_NAME,
+			baseUrl: "http://127.0.0.1:1/v1",
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+			reasoning: false,
+		},
+		transport,
+	);
 }
 
 /** Whether a model is the placeholder rather than something the user entered. */
@@ -365,40 +350,24 @@ export function unconfiguredStream(model: Model<Api>): AssistantMessageEventStre
 
 // ---------------------------------------------------------------------------- lookup
 
-/** Parse `name/wire-id`, or a bare wire id when exactly one row has it. */
-export function resolveModelRef(rows: readonly UserModel[], ref: string): UserModel | undefined {
-	const trimmed = ref.trim();
-	if (trimmed.length === 0) return undefined;
-
-	const slash = trimmed.indexOf("/");
-	if (slash > 0) {
-		const name = trimmed.slice(0, slash);
-		const modelId = trimmed.slice(slash + 1);
-		return rows.find((row) => row.name === name && row.modelId === modelId);
-	}
-
-	const matches = rows.filter((row) => row.modelId === trimmed);
-	return matches.length === 1 ? matches[0] : undefined;
-}
-
 /** The rows, narrowed to what a client may see. The key itself never leaves the server. */
-export function listModelOptions(models: readonly UserModel[]): ModelOption[] {
-	return models.map((model) => {
-		const built = modelFor(model);
+export function listModelOptions(models: readonly ModelConfig[]): ModelOption[] {
+	return models.map((config) => {
+		const built = createModel(config);
 		return {
-			name: model.name,
-			api: ANTHROPIC_MESSAGES_API,
-			baseUrl: model.baseUrl,
-			modelId: model.modelId,
-			contextWindow: model.contextWindow,
-			maxTokens: model.maxTokens,
-			reasoning: model.reasoning,
+			id: config.id,
+			name: config.name,
+			api: built.api,
+			baseUrl: config.baseUrl,
+			contextWindow: config.contextWindow,
+			maxTokens: config.maxTokens,
+			reasoning: config.reasoning,
 			// The levels travelled with the row rather than being worked out by the client, which has no
 			// way to know what an endpoint takes. A composer that moves the model needs the new row's own
 			// list, and it needs it before the move is sent anywhere.
 			thinkingLevels: [...getSupportedThinkingLevels(built)],
-			defaultThinkingLevel: normalizeThinkingLevel(built, model.defaultThinkingLevel),
-			hasApiKey: model.apiKey.length > 0,
+			defaultThinkingLevel: normalizeThinkingLevel(built, config.defaultThinkingLevel),
+			hasApiKey: (config.apiKey ?? "").length > 0,
 		};
 	});
 }
@@ -408,8 +377,14 @@ export function thinkingLevelsFor(model: Model<Api>): string[] {
 	return [...getSupportedThinkingLevels(model)];
 }
 
-/** Thinking levels a session can be in, matching pi-ai's scale. */
-export type ThinkingLevel = "off" | "low" | "medium" | "high" | "max";
+/**
+ * Thinking levels a session can be in.
+ *
+ * The scale is the transport's, named here so a caller in this package does not reach for
+ * `@my-agent/llm` merely to spell a level — and named as an alias rather than restated, because two
+ * hand-written copies of five string literals is the drift this file just spent a type removing.
+ */
+export type ThinkingLevel = ModelThinkingLevel;
 
 /**
  * Clamp a requested level to one this model supports.

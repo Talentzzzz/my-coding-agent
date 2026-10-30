@@ -4,7 +4,6 @@ import {
 	reduce,
 	reduceEnd,
 	findWay,
-	type MessageUsage,
 	type ViewState,
 } from "./state.ts";
 import { SessionApi, ApiError } from "./api.ts";
@@ -82,7 +81,7 @@ function main(): void {
 	 */
 	let chosen: { model?: string; thinkingLevel?: string } = {};
 	/** The directory this server runs over, which is where "新建会话" writes by default. */
-	let currentWorkspace = "";
+	let absCurrentWorkspace = "";
 	/**
 	 * The workspace picker's own choice, held by the window and never by the server.
 	 *
@@ -95,7 +94,7 @@ function main(): void {
 	 * file, by decision: a transient preference re-chosen at the moment it is needed is not worth a
 	 * store.
 	 */
-	let pickedWorkspace = "";
+	let absPickedWorkspace = "";
 	let collapsed = false;
 	/**
 	 * The sidebar's per-workspace paging state, keyed by the workspace's path.
@@ -439,10 +438,10 @@ function main(): void {
 	const composer = new Composer({
 		onSubmit: (text, behavior) => void prompt(text, behavior),
 		onAbort: () => void abort(),
-		onSelectModel: (ref) => {
+		onSelectModel: (name) => {
 			// The two halves move together: a level belongs to a model, so a new row lands on that row's
 			// own default rather than carrying the old row's level into a model that may not have it.
-			chosen = { model: ref, thinkingLevel: rowOf(ref)?.defaultThinkingLevel };
+			chosen = { model: name, thinkingLevel: rowOf(name)?.defaultThinkingLevel };
 			render();
 		},
 		onSelectLevel: (level) => {
@@ -505,7 +504,7 @@ function main(): void {
 			void addWorkspace();
 			return;
 		}
-		const chosenDirectory = directoryForNewSession();
+		const absChosenDir = directoryForNewSession();
 		// Upward like the bar's three seats: the chip sits at the bottom of the window too, and a menu
 		// that fell below it would land on the input card it hangs over.
 		openMenu(
@@ -513,11 +512,11 @@ function main(): void {
 			[
 				...groups.map((group) => ({
 					icon: "folder" as const,
-					label: workspaceName(group.cwd),
-					title: group.cwd,
-					active: group.cwd === chosenDirectory,
+					label: state.settings?.workspaceNames?.[group.absCwd] ?? workspaceName(group.absCwd),
+					title: group.absCwd,
+					active: group.absCwd === absChosenDir,
 					onSelect: () => {
-						pickedWorkspace = group.cwd;
+						absPickedWorkspace = group.absCwd;
 						render();
 					},
 				})),
@@ -543,11 +542,11 @@ function main(): void {
 
 	const sidebar = new Sidebar({
 		// The heading's own 「新建会话」 names the workspace it was asked on; the top row names nothing
-		// and follows the picker. The choice is folded into `pickedWorkspace` *before* the create goes
+		// and follows the picker. The choice is folded into `absPickedWorkspace` *before* the create goes
 		// out, because `openSession` clears it — the picker has done its job once the session exists.
-		onNewSession: (cwd) => {
-			if (cwd !== undefined) pickedWorkspace = cwd;
-			void newSession(cwd);
+		onNewSession: (absCwd) => {
+			if (absCwd !== undefined) absPickedWorkspace = absCwd;
+			void newSession(absCwd);
 		},
 		onSelectSession: (sessionId) => void openSession(sessionId),
 		onToggleCollapsed: () => {
@@ -561,32 +560,32 @@ function main(): void {
 		onForkSession: (sessionId) => void forkSession(sessionId),
 		onDeleteSession: (sessionId) => void deleteSession(sessionId),
 		onRenameSession: (sessionId, title) => void renameSession(sessionId, title),
-		onToggleWorkspace: (cwd) => {
-			const entry = pagingOf(paging, cwd);
+		onToggleWorkspace: (absCwd) => {
+			const entry = pagingOf(paging, absCwd);
 			// Expanding lands on the page the workspace was read down to when it collapsed; collapsing
 			// saves the page it was on. The two paging buttons write the saved page too — they are
 			// where the reading happens — so the saved page is always the page on screen.
 			setPaging(
-				cwd,
+				absCwd,
 				entry.collapsed
 					? { collapsed: false, page: entry.savedPage, savedPage: entry.savedPage }
 					: { collapsed: true, page: entry.page, savedPage: entry.page },
 			);
 		},
-		onPageWorkspace: (cwd) => {
-			const entry = pagingOf(paging, cwd);
-			setPaging(cwd, { collapsed: false, page: entry.page + 1, savedPage: entry.page + 1 });
+		onPageWorkspace: (absCwd) => {
+			const entry = pagingOf(paging, absCwd);
+			setPaging(absCwd, { collapsed: false, page: entry.page + 1, savedPage: entry.page + 1 });
 		},
-		onCollapseWorkspace: (cwd) => {
+		onCollapseWorkspace: (absCwd) => {
 			// Step back the one page the last 「展开其余」 added — not a reset to the first, and the
 			// saved page moves with it: un-expanding is un-reading, so reopening a later
 			// heading-collapse lands on the page the user had actually read down to.
-			const entry = pagingOf(paging, cwd);
+			const entry = pagingOf(paging, absCwd);
 			const page = Math.max(1, entry.page - 1);
-			setPaging(cwd, { collapsed: false, page, savedPage: page });
+			setPaging(absCwd, { collapsed: false, page, savedPage: page });
 		},
-		onRenameWorkspace: (cwd, name) => void renameWorkspace(cwd, name),
-		onDeleteWorkspace: (cwd) => void deleteWorkspace(cwd),
+		onRenameWorkspace: (absCwd, name) => void renameWorkspace(absCwd, name),
+		onDeleteWorkspace: (absCwd) => void deleteWorkspace(absCwd),
 	});
 
 	/**
@@ -598,8 +597,8 @@ function main(): void {
 	 * view keeps the click, which is the honest split: the screen is what the user did, the file is
 	 * what survived.
 	 */
-	function setPaging(cwd: string, next: WorkspacePaging): void {
-		paging = { ...paging, [cwd]: next };
+	function setPaging(absCwd: string, next: WorkspacePaging): void {
+		paging = { ...paging, [absCwd]: next };
 		renderSidebar();
 		void saveSettings({ appearance: { workspaces: paging } });
 	}
@@ -702,7 +701,7 @@ function main(): void {
 		onSaveModes: (modes) => saveSettings({ modes }),
 		// The default a *new* session opens on, so it writes the settings files. The model a live session
 		// is on is the composer's, and never goes through here.
-		onDefaultModel: (ref) => void saveSettings({ model: ref }),
+		onDefaultModel: (name) => void saveSettings({ model: name }),
 		onGlobalTools: (names) => saveSettings({ tools: names }),
 	});
 
@@ -836,7 +835,10 @@ function main(): void {
 		// collapse or a page turn changes nothing in the row table, so a signature without it would
 		// mean the click redraws nothing at all. Serialization is deterministic — the entries are
 		// built with one fixed field order — so the string is stable across equal maps.
-		const drawn = `${rows.version}|${followed ?? ""}|${pickedWorkspace}|${collapsed ? 1 : 0}|${channel}|${JSON.stringify(paging)}`;
+		// The names are in the signature for the same reason the paging map is: a rename moves nothing
+		// in the row table, so a signature that ignored the labels would mean the click repaints nothing.
+		const names = state.settings?.workspaceNames;
+		const drawn = `${rows.version}|${followed ?? ""}|${absPickedWorkspace}|${collapsed ? 1 : 0}|${channel}|${JSON.stringify(paging)}|${JSON.stringify(names ?? {})}`;
 		if (drawn === sidebarDrawn) return;
 		sidebarDrawn = drawn;
 		sidebar.render({
@@ -844,6 +846,7 @@ function main(): void {
 			...(followed === undefined ? {} : { activeSessionId: followed }),
 			collapsed,
 			paging,
+			...(names === undefined ? {} : { workspaceNames: names }),
 			channel,
 		});
 	}
@@ -856,7 +859,7 @@ function main(): void {
 	 * disagree with the conversation being read.
 	 */
 	function directoryForNewSession(): string {
-		return pickedWorkspace || state.snapshot?.cwd || currentWorkspace;
+		return absPickedWorkspace || state.snapshot?.absCwd || absCurrentWorkspace;
 	}
 
 	/**
@@ -871,39 +874,23 @@ function main(): void {
 			report(new Error("选择文件夹需要桌面外壳；浏览器里可以直接用命令行把会话开在目标目录。"));
 			return;
 		}
-		let path: string | undefined;
+		let absPath: string | undefined;
 		try {
-			path = await window.desktop.pickFolder();
+			absPath = await window.desktop.pickFolder();
 		} catch (error) {
 			report(error);
 			return;
 		}
-		if (path === undefined) return;
-		pickedWorkspace = path;
-		await newSession(path);
+		if (absPath === undefined) return;
+		absPickedWorkspace = absPath;
+		await newSession(absPath);
 	}
 
 	/** Repaint the status line, and only when a new usage arrived to paint it with. */
 	function renderStatusBar(): void {
 		if (state.usage === usageDrawn) return;
 		usageDrawn = state.usage;
-		statusBar.render({ usage: state.usage, last: lastRequestUsage() });
-	}
-
-	/**
-	 * The usage of the most recent request, read off the item it was reported on.
-	 *
-	 * The cache seat describes *one request* rather than the session's running average (see
-	 * `render/statusbar.ts`), and the per-message usage the transcript already carries for its footers
-	 * is exactly that — no protocol change, and nothing to fold: a message's usage is its own.
-	 */
-	function lastRequestUsage(): MessageUsage | undefined {
-		for (let index = state.items.length - 1; index >= 0; index -= 1) {
-			const item = state.items[index]!;
-			if (item.kind !== "message" || item.role !== "assistant") continue;
-			if (item.usage !== undefined) return item.usage;
-		}
-		return undefined;
+		statusBar.render({ usage: state.usage });
 	}
 
 	/** How a fold reaches the screen: whole now, in bounded slices, or at most once per frame. */
@@ -1005,7 +992,7 @@ function main(): void {
 	 * The window's own choice wins over the session's, because the session's is what the *last* request
 	 * used and the choice is what the *next* one will. The level list comes from the row being shown —
 	 * the levels are the model's, and the server sends each row its own — falling back to the session's
-	 * list when the ref names a row that is gone.
+	 * list when the name names a row that is gone.
 	 */
 	function selectionForSend(): ComposerSelection {
 		const snapshot = state.snapshot;
@@ -1016,9 +1003,9 @@ function main(): void {
 		return { models: state.models, model, levels, level };
 	}
 
-	/** The imported row behind a ref, or undefined for one that was deleted or never existed. */
-	function rowOf(ref: string | undefined): ModelOption | undefined {
-		return ref === undefined ? undefined : state.models.find((model) => `${model.name}/${model.modelId}` === ref);
+	/** The imported row behind a name, or undefined for one that was deleted or never existed. */
+	function rowOf(name: string | undefined): ModelOption | undefined {
+		return name === undefined ? undefined : state.models.find((model) => model.name === name);
 	}
 
 	/**
@@ -1137,24 +1124,28 @@ function main(): void {
 			headingTipDrawn = headingTip;
 			heading.title = headingTip;
 		}
-		const subtitleText = snapshot?.cwd ?? (followed === undefined ? "连接中…" : followed);
+		const subtitleText = snapshot?.absCwd ?? (followed === undefined ? "连接中…" : followed);
 		if (subtitleText !== subtitleDrawn) {
 			subtitleDrawn = subtitleText;
 			subtitle.textContent = subtitleText;
 		}
 
-		// The branch entry follows the session's branch shape, which only a baseline can change, so
-		// the signature is the tree's identity and the three figures a label is cut from. "none" is
-		// the single-way shape — the chip stands with nothing to name — and any move between a tree
-		// and "none" changes the signature, so the label it carries is always redrawn with it.
+		// The branch entry follows the session's branch shape, which a baseline or a finished message
+		// can change, so the signature is the tree's identity and the three figures a label is cut
+		// from. "none" is the single-way shape — the chip stands with nothing to name — and any move
+		// between a tree and "none" changes the signature, so the label it carries is always redrawn
+		// with it.
 		const tree = state.branchTree;
 		const branchSig =
 			tree === undefined ? "none" : `${tree.currentId ?? "-"}|${tree.points}|${tree.options}|${snapshot?.title ?? ""}`;
 		if (branchSig !== branchChipDrawn) {
 			branchChipDrawn = branchSig;
 			// Always visible: a conversation with one way is exactly the one that needs the door, and
-			// the page it opens answers with the how-to.
-			if (tree !== undefined && tree.currentId !== undefined) {
+			// the page it opens answers with the how-to. The id and the label are another matter: a
+			// session with no fork has one branch, so "which one am I on" answers itself and the
+			// figures only say "the newest user message" — noise. They appear when a fork exists,
+			// which is when the question has an answer worth reading.
+			if (tree !== undefined && tree.currentId !== undefined && tree.points > 0) {
 				branchChipId.textContent = shortId(tree.currentId);
 				branchChipLabel.textContent = findWay(tree, tree.currentId)?.label ?? "";
 			} else {
@@ -1373,7 +1364,7 @@ function main(): void {
 		// The picker's explicit choice is about the session that was *about* to start, and that session
 		// has started — the one on screen now decides which workspace the next session lands in, until
 		// the chip is used again.
-		pickedWorkspace = "";
+		absPickedWorkspace = "";
 		// The same rendering the branch command uses: a snapshot is a snapshot, whether it arrived on
 		// the channel or on a read. The channel's own baseline will replace it within a moment.
 		apply(reduce(state, { type: "baseline", session: snapshot }), { deferred: true });
@@ -1487,14 +1478,14 @@ function main(): void {
 	/**
 	 * Start a conversation in the picker's directory, and point the window at it.
 	 *
-	 * The directory travels with the request (`cwd`), which is the whole of the picker's contract: a
+	 * The directory travels with the request (`absCwd`), which is the whole of the picker's contract: a
 	 * choice made for one creation is not a state the server keeps. The session it opens re-reads the
 	 * lists, which is how a first session in a brand-new directory earns its workspace group a place
 	 * in the sidebar.
 	 */
-	async function newSession(cwd?: string): Promise<void> {
+	async function newSession(absCwd?: string): Promise<void> {
 		try {
-			const created = await api.createSession(cwd ?? (directoryForNewSession() || undefined));
+			const created = await api.createSession(absCwd ?? (directoryForNewSession() || undefined));
 			reachable();
 			await openSession(created.sessionId);
 		} catch (error) {
@@ -1503,60 +1494,29 @@ function main(): void {
 	}
 
 	/**
-	 * Rename a workspace's folder, and carry its sessions along (票 06).
+	 * Give a workspace a name the sidebar shows, and leave the disk alone.
 	 *
-	 * `cwd` is the group the heading named and `name` is the one folder segment the user typed; the
-	 * new path is built here, beside the directory the group already sits in. One request does both
-	 * halves — the directory moves and every transcript's header is rewritten — so there is nothing
-	 * here to keep in step afterwards. What this window *does* owe the rename is its own paging state:
-	 * its keys are workspace paths, and a key under the old path names a directory that no longer
-	 * exists. The key is moved locally before the server's answer lands, because the paging map is this
-	 * window's to hold — the sidebar's rows are the server's, and those arrive on the channel as
-	 * `session_row` frames like every other row change.
+	 * `name` is a label, not a path: nothing here builds a directory, and the answer carries the
+	 * settings because that is where the label lives. The rows are untouched — a workspace is
+	 * identified by the directory its transcripts recorded — so the only thing this window owes the
+	 * change is a repaint, which a cleared `sidebarDrawn` forces past the gate below.
 	 *
-	 * `pickedWorkspace` moves too when it named the workspace that moved: it is the picker's own
-	 * choice, and a next-new-session pointed at a directory which is gone would fail at the create with
-	 * the user's intent looking like a typo.
+	 * An empty name takes the custom one back and the heading falls to the folder's own name.
 	 */
-	async function renameWorkspace(cwd: string, name: string): Promise<void> {
-		// Split rather than `node:path`'s `dirname`: this module is the browser's, where the segment
-		// replaced is the whole computation. The separator comes from the path itself, so a Windows
-		// path stays a Windows path.
-		const separator = cwd.includes("\\") ? "\\" : "/";
-		const parent = cwd.split(/[/\\]/).slice(0, -1).join(separator);
-		const target = parent.length === 0 ? name : `${parent}${separator}${name}`;
+	async function renameWorkspace(absCwd: string, name: string): Promise<void> {
 		try {
-			const answer = await api.renameWorkspace(cwd, target);
+			const answer = await api.renameWorkspace(absCwd, name);
 			reachable();
-			reKeyPaging(cwd, answer.cwd);
-			if (pickedWorkspace === cwd) pickedWorkspace = answer.cwd;
-			// The rows follow on the channel: the server re-reads each moved transcript and the ordinary
-			// `session_row` frame carries the new path. With the channel down no frame is coming, and a
-			// REST listing is the fallback road — refused outright while it is live, which is why this
-			// can be called unconditionally.
-			void refreshLists().catch(report);
+			apply({ ...state, settings: answer.settings });
+			// The settings snapshot moved but nothing in the gate's signature has to: the rows are the
+			// same rows, and a heading wearing a different label would otherwise keep its old text.
+			sidebarDrawn = undefined;
 			renderSidebar();
 		} catch (error) {
-			// A busy workspace, a name already taken, a folder Windows will not let go of: the server
-			// names which, and the error bar is where those reasons are already shown.
+			// A path this machine has no sessions for, a body the server cannot read: the error bar is
+			// where those reasons are already shown.
 			unreachable(error);
 		}
-	}
-
-	/**
-	 * Move this window's saved paging entry from the workspace's old path to its new one.
-	 *
-	 * Leaving it under the old path would silently reset the group on the next reload — whether it was
-	 * folded and how far it had been read down both live in that entry. Only the one key moves: a
-	 * *nested* workspace is the server's to forget, and it does, in the same operation's settings write.
-	 */
-	function reKeyPaging(from: string, to: string): void {
-		const entry = paging[from];
-		if (entry === undefined) return;
-		const moved = { ...paging };
-		delete moved[from];
-		moved[to] = entry;
-		paging = moved;
 	}
 
 	/**
@@ -1569,9 +1529,9 @@ function main(): void {
 	 * road, and it is applied here. What this window owes either of them is its settings snapshot: the
 	 * hidden list is what the next reload leaves the group out by.
 	 */
-	async function deleteWorkspace(cwd: string): Promise<void> {
+	async function deleteWorkspace(absCwd: string): Promise<void> {
 		try {
-			const answer = await api.hideWorkspace(cwd);
+			const answer = await api.hideWorkspace(absCwd);
 			reachable();
 			rows.loadFrom(answer.workspaces, channel === "live");
 			applyAppearance(answer.settings);
@@ -1804,7 +1764,7 @@ function main(): void {
 	void (async () => {
 		try {
 			const health = await api.health();
-			currentWorkspace = health.cwd;
+			absCurrentWorkspace = health.absCwd;
 			reachable();
 		} catch (error) {
 			unreachable(error);
@@ -1829,10 +1789,10 @@ function main(): void {
 		} catch (error) {
 			report(error);
 		}
-		// Which session to land on is the server's decision — `--session` pins one, `--continue`
-		// resumes one, an empty history creates one — so the page asks rather than picking from the
-		// list. From there this is the same path as a click in the sidebar: a read, a render, and a
-		// subscription.
+		// Which session to land on is the server's decision — `--session` pins one, otherwise a new
+		// one is created and the pane opens on the welcome state — so the page asks rather than
+		// picking from the list. From there this is the same path as a click in the sidebar: a read,
+		// a render, and a subscription.
 		try {
 			const { sessionId } = await api.currentSession();
 			reachable();

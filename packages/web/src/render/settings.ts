@@ -79,7 +79,7 @@ const BLANK_DRAFT: ModelDraft = {
 	name: "",
 	api: "anthropic-messages",
 	baseUrl: "https://api.anthropic.com",
-	modelId: "",
+	id: "",
 	contextWindow: 200_000,
 	maxTokens: 8_192,
 	reasoning: false,
@@ -106,7 +106,7 @@ const THINKING_LEVELS = ["off", "low", "medium", "high", "max"] as const;
  * the refusal as an error after the click.
  */
 function formComplete(form: ModelDraft): boolean {
-	return form.name.trim().length > 0 && form.modelId.trim().length > 0 && form.baseUrl.trim().length > 0;
+	return form.name.trim().length > 0 && form.id.trim().length > 0 && form.baseUrl.trim().length > 0;
 }
 
 /**
@@ -267,7 +267,7 @@ export class SettingsPanel {
 							.join(";"),
 					].join("/")
 				: "",
-			state.models.map((model) => `${model.name}:${model.modelId}:${model.hasApiKey}`).join(","),
+			state.models.map((model) => `${model.name}:${model.id}:${model.hasApiKey}`).join(","),
 			state.snapshot?.allTools.join(",") ?? "",
 		].join("|");
 
@@ -422,7 +422,7 @@ export class SettingsPanel {
 		const head = element("button", "model-row-head", undefined, { type: "button" });
 		head.append(
 			element("span", "model-label", row.name.length > 0 ? row.name : "新模型"),
-			element("span", "model-ref", row.modelId.length > 0 ? `${row.name || "未命名"}/${row.modelId}` : "未配置"),
+			element("span", "model-ref", row.id.length > 0 ? `${row.name || "未命名"}/${row.id}` : "未配置"),
 		);
 		head.addEventListener("click", () => this.beginEdit(index));
 		rowEl.append(head);
@@ -484,8 +484,8 @@ export class SettingsPanel {
 				update({ name: value }),
 			),
 		);
-		form.append(this.textField("模型", draft.modelId, "接口那边的名字，例如 claude-opus-5", (value) =>
-			update({ modelId: value }),
+		form.append(this.textField("模型", draft.id, "接口那边的名字，例如 claude-opus-5", (value) =>
+			update({ id: value }),
 		));
 		form.append(this.textField("BASE URL", draft.baseUrl, "Anthropic Messages 接口的地址；代理或中转填它自己的", (value) =>
 			update({ baseUrl: value }),
@@ -1115,7 +1115,7 @@ export class SettingsPanel {
 		const select = element("select", "input");
 		select.append(option("", "第一个导入的模型"));
 		for (const candidate of this.state.models) {
-			select.append(option(`${candidate.name}/${candidate.modelId}`, candidate.name));
+			select.append(option(candidate.name, candidate.name));
 		}
 		// A default naming a row that is gone is a real state — the file is hand-editable — so it gets a
 		// row of its own rather than being shown as something else.

@@ -1,5 +1,5 @@
-import type { AgentMessage } from "@my-agent/agent";
-import type { Api, Model, Usage } from "@my-agent/ai";
+import type { Message } from "@my-agent/llm";
+import type { Api, Model, Usage } from "@my-agent/llm";
 import {
 	addUsage,
 	EMPTY_USAGE,
@@ -9,20 +9,21 @@ import {
 	type UsageTotals,
 } from "../protocol.ts";
 import { thinkingLevelsFor } from "../models.ts";
-import type { SessionManager } from "./session-manager.ts";
+import type { SessionEntry, SessionManager } from "./session-manager.ts";
 
 /**
  * Everything one snapshot is built from, already resolved by the caller.
  *
  * Every field is a settled value rather than something to look up: the model has already been through
- * `modelFor` or `placeholderModel`, the approval map is already merged over the recorded one, and the
+ * `createModel` or `placeholderModel`, the approval map is already merged over the recorded one, and the
  * tool lists are already the registry's. That is what lets a live session and a cold reader build the
  * same object from the same parts without either one owning the other's job.
  */
 export interface SnapshotInput {
 	sessionManager: SessionManager;
-	workspaceRoot: string;
-	/** Already settled: `modelFor(row, level)` or `placeholderModel()`. */
+	/** The workspace the session runs in, absolute. */
+	absWorkspaceRoot: string;
+	/** Already settled: `createModel(row, level)` or `placeholderModel()`. */
 	model: Model<Api>;
 	approvals: Record<ToolApprovalKey, boolean>;
 	allTools: string[];
@@ -42,7 +43,7 @@ export interface SnapshotInput {
 	 * point of the field — a window attaching mid-run needs the characters already sent, and only the
 	 * process running the loop has them.
 	 */
-	partial?: AgentMessage;
+	partial?: Message;
 }
 
 /**
@@ -62,10 +63,10 @@ export function sessionSnapshot(input: SnapshotInput): SessionSnapshot {
 	const messages = input.sessionManager.buildSessionContext().messages;
 	return {
 		id: input.sessionManager.getSessionId(),
-		cwd: input.workspaceRoot,
+		absCwd: input.absWorkspaceRoot,
 		createdAt: header ? new Date(header.timestamp).getTime() : Date.now(),
 		title: input.sessionManager.getTitle(),
-		model: `${input.model.name}/${input.model.id}`,
+		model: input.model.name,
 		thinkingLevel: input.model.thinkingLevel ?? "off",
 		thinkingLevels: thinkingLevelsFor(input.model),
 		approvals: input.approvals,
@@ -83,22 +84,49 @@ export function sessionSnapshot(input: SnapshotInput): SessionSnapshot {
 		queued: input.queued,
 		isRetrying: input.isRetrying,
 		retryAttempt: input.retryAttempt,
-		usage: foldUsage(messages, input.model.contextWindow),
+		usage: sessionUsage(input.sessionManager, input.model.contextWindow),
 		pendingApprovals: input.pendingApprovals,
 	};
 }
 
-/** Usage summed over the transcript. */
-export function foldUsage(messages: readonly AgentMessage[], contextWindow: number): UsageTotals {
-	let totals: UsageTotals = { ...EMPTY_USAGE, contextWindow };
-	for (const message of messages) {
-		const usage = assistantUsage(message);
-		if (usage) totals = addUsage(totals, usage, contextWindow);
+/** The usage one entry carries, whichever kind holds it. */
+export function entryUsage(entry: SessionEntry): Usage | undefined {
+	if (entry.type === "message") {
+		const message = entry.message;
+		if (message.role !== "assistant") return undefined;
+		return (message as { usage?: Usage }).usage;
 	}
-	return totals;
+	if (entry.type === "compaction" || entry.type === "usage") return entry.usage;
+	return undefined;
 }
 
-function assistantUsage(message: AgentMessage): Usage | undefined {
-	if (message.role !== "assistant") return undefined;
-	return (message as { usage?: Usage }).usage;
+/**
+ * Usage summed over the whole transcript, in file order.
+ *
+ * The sum walks every entry the file holds rather than the active branch's messages, and that is a
+ * decision about what the total means: tokens burned on a way through the tree the leaf has since
+ * left were spent all the same, and so were the tokens of a compaction's summary call — recorded on
+ * its entry, but no assistant message carries it. The one field that stays branch-relative is
+ * `contextTokens`, because it is not a sum at all: it is how full the window is right now, which is
+ * a property of the branch the leaf is on and of nothing else.
+ */
+export function sessionUsage(sessionManager: SessionManager, contextWindow: number): UsageTotals {
+	let totals: UsageTotals = { ...EMPTY_USAGE, contextWindow };
+	for (const entry of sessionManager.getEntries()) {
+		const usage = entryUsage(entry);
+		if (usage) totals = addUsage(totals, usage, contextWindow);
+	}
+	return { ...totals, contextTokens: branchContextTokens(sessionManager.buildSessionContext().messages) };
+}
+
+/** The context footprint the branch's last usage-carrying assistant message reported. */
+function branchContextTokens(messages: readonly Message[]): number {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index]!;
+		if (message.role !== "assistant") continue;
+		const usage = (message as { usage?: Usage }).usage;
+		if (usage === undefined) continue;
+		return usage.input + usage.cacheRead + usage.cacheWrite + usage.output;
+	}
+	return 0;
 }

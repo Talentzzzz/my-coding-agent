@@ -22,46 +22,47 @@ export function defaultLauncher(): Launcher {
  * workspace are accepted; absolute paths outside it are rejected.
  */
 export class Workspace {
-	/** Root with its original casing, for display and for shell working directories. */
-	readonly root: string;
+	/** The root, absolute, with its original casing — for display and for shell working directories. */
+	readonly absRoot: string;
+	/** The folder's own name, for a label; not a path. */
 	readonly name: string;
 	/** Comparison key: canonicalized, and lowercased on Windows. */
 	private readonly key: string;
 
-	constructor(root: string) {
-		this.root = resolve(root);
-		this.name = basename(this.root) || this.root;
-		this.key = canonicalize(this.root);
+	constructor(rootInput: string) {
+		this.absRoot = resolve(rootInput);
+		this.name = basename(this.absRoot) || this.absRoot;
+		this.key = canonicalize(this.absRoot);
 	}
 
 	/** Resolve a tool-supplied path to an absolute path inside the workspace. */
-	resolve(input: string): string {
-		if (input.length === 0) throw new Error("Path must not be empty");
-		if (input.includes("\0")) throw new Error(`Invalid path: ${input}`);
+	resolve(pathInput: string): string {
+		if (pathInput.length === 0) throw new Error("Path must not be empty");
+		if (pathInput.includes("\0")) throw new Error(`Invalid path: ${pathInput}`);
 
-		const candidate = isAbsolute(input) ? normalize(input) : resolve(this.root, input);
-		if (!this.contains(candidate)) {
-			throw new Error(`Path escapes the workspace (${this.root}): ${input}`);
+		const absCandidate = isAbsolute(pathInput) ? normalize(pathInput) : resolve(this.absRoot, pathInput);
+		if (!this.contains(absCandidate)) {
+			throw new Error(`Path escapes the workspace (${this.absRoot}): ${pathInput}`);
 		}
-		return candidate;
+		return absCandidate;
 	}
 
 	/** Path relative to the workspace root, with forward slashes, for display. */
-	display(absolute: string): string {
-		const rel = relative(this.root, absolute);
-		if (rel.length === 0) return ".";
-		return rel.split(sep).join("/");
+	display(absPath: string): string {
+		const relPath = relative(this.absRoot, absPath);
+		if (relPath.length === 0) return ".";
+		return relPath.split(sep).join("/");
 	}
 
-	/** True when `absolute` is the root itself or lives under it. */
-	contains(absolute: string): boolean {
-		const target = canonicalize(absolute);
-		if (target === this.key) return true;
-		return target.startsWith(this.key.endsWith(sep) ? this.key : this.key + sep);
+	/** True when `absPath` is the root itself or lives under it. */
+	contains(absPath: string): boolean {
+		const absTarget = canonicalize(absPath);
+		if (absTarget === this.key) return true;
+		return absTarget.startsWith(this.key.endsWith(sep) ? this.key : this.key + sep);
 	}
 
-	exists(absolute: string): boolean {
-		return existsSync(absolute);
+	exists(absPath: string): boolean {
+		return existsSync(absPath);
 	}
 }
 
@@ -69,13 +70,13 @@ export class Workspace {
  * Canonicalize a path for comparison, following symlinks when the path exists.
  * Windows paths are case-insensitive, so casing differences must not produce false mismatches.
  */
-function canonicalize(absolute: string): string {
-	let result = absolute;
-	if (existsSync(absolute)) {
+function canonicalize(absPath: string): string {
+	let result = absPath;
+	if (existsSync(absPath)) {
 		try {
-			result = realpathSync.native(absolute);
+			result = realpathSync.native(absPath);
 		} catch {
-			result = absolute;
+			result = absPath;
 		}
 	}
 	return process.platform === "win32" ? result.toLowerCase() : result;

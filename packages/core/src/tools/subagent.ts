@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import type { AgentTool } from "@my-agent/agent";
+import type { AgentTool } from "@my-agent/loop";
+import type { ChatTransport, Usage } from "@my-agent/llm";
 import { Type, type Static } from "typebox";
+import type { Agent } from "../agent.ts";
 import { openAgent } from "../session-factory.ts";
 import { workspaceDir } from "../session/paths.ts";
 import { SessionManager } from "../session/session-manager.ts";
+import { entryUsage } from "../session/snapshot.ts";
 import { SettingsManager } from "../settings-manager.ts";
-import type { Agent } from "../agent.ts";
-import type { ChatTransport } from "@my-agent/ai";
 import type { ModelSource } from "../models.ts";
 import type { Workspace } from "../workspace.ts";
 import { createToolRegistry } from "./registry.ts";
@@ -81,9 +82,16 @@ interface SubagentJob {
 export interface SubagentToolDeps {
 	workspace: Workspace;
 	models: ModelSource;
-	/** The parent's resolved model, as `<row id>/<wire id>`: the child runs on the same one. */
-	modelRef?: string;
+	/** The parent's resolved model, as its row's name: the child runs on the same one. */
+	model?: string;
 	thinkingLevel: string;
+	/**
+	 * The parent's transcript, which receives the child's spend as a `usage` entry.
+	 *
+	 * The child burns tokens on a transcript of its own, so the delegation is the one source of usage
+	 * this session's total cannot fold out of its own assistant messages — the record closes that gap.
+	 */
+	parentSessionManager: SessionManager;
 	/** The parent's transport. Omitted in the real process, where it means Anthropic Messages. */
 	api?: ChatTransport;
 	/** The parent transcript's file, recorded as the child header's `parentSession`. */
@@ -103,17 +111,15 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 	const jobs = new Map<string, SubagentJob>();
 
 	async function buildChild(): Promise<Agent> {
-		const childDir = join(workspaceDir(deps.workspace.root), "subagents");
-		const sessionManager = SessionManager.create(deps.workspace.root, childDir, {
-			...(deps.parentSessionFile === undefined ? {} : { parentSession: deps.parentSessionFile }),
-		});
+		const absChildDir = join(workspaceDir(deps.workspace.absRoot), "subagents");
+		const sessionManager = SessionManager.create(deps.workspace.absRoot, absChildDir, deps.parentSessionFile);
 		const registry = createToolRegistry(deps.workspace);
 		registry.setActive([...SUBAGENT_TOOLS]);
 		return openAgent({
-			workspaceRoot: deps.workspace.root,
+			absWorkspaceRoot: deps.workspace.absRoot,
 			sessionManager,
 			models: deps.models,
-			...(deps.modelRef === undefined ? {} : { model: deps.modelRef }),
+			...(deps.model === undefined ? {} : { model: deps.model }),
 			thinkingLevel: deps.thinkingLevel,
 			...(deps.api === undefined ? {} : { api: deps.api }),
 			// The child's approvals are structurally unanswerable, so they are off — and its tool set
@@ -145,6 +151,55 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 			.map((block) => block.text)
 			.join("\n")
 			.trim() || "(the SubAgent produced no text)";
+	}
+
+	/**
+	 * The child's whole spend, summed over its own transcript.
+	 *
+	 * The same fold a session's total runs, aimed at the child's file: assistant messages carry their
+	 * request's usage, and a delegation is short enough that a compaction is a stranger — but the
+	 * fold reads the entry kinds rather than trusting that. `undefined` means the child completed no
+	 * request that reported tokens, so there is no spend to record — a spend of nothing is not a
+	 * fact worth a line.
+	 */
+	function childUsage(child: Agent): Usage | undefined {
+		let input = 0;
+		let output = 0;
+		let cacheRead = 0;
+		let cacheWrite = 0;
+		let costInput = 0;
+		let costOutput = 0;
+		let costCacheRead = 0;
+		let costCacheWrite = 0;
+		let seen = false;
+		for (const entry of child.sessionManager.getEntries()) {
+			const usage = entryUsage(entry);
+			if (usage === undefined) continue;
+			seen = true;
+			input += usage.input;
+			output += usage.output;
+			cacheRead += usage.cacheRead;
+			cacheWrite += usage.cacheWrite;
+			costInput += usage.cost.input;
+			costOutput += usage.cost.output;
+			costCacheRead += usage.cost.cacheRead;
+			costCacheWrite += usage.cost.cacheWrite;
+		}
+		if (!seen || input + output + cacheRead + cacheWrite === 0) return undefined;
+		return {
+			input,
+			output,
+			cacheRead,
+			cacheWrite,
+			totalTokens: input + output + cacheRead + cacheWrite,
+			cost: {
+				input: costInput,
+				output: costOutput,
+				cacheRead: costCacheRead,
+				cacheWrite: costCacheWrite,
+				total: costInput + costOutput + costCacheRead + costCacheWrite,
+			},
+		};
 	}
 
 	function startJob(prompt: string, signal: AbortSignal | undefined): SubagentJob {
@@ -184,7 +239,15 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 				job.status = "failed";
 				job.error = error instanceof Error ? error.message : String(error);
 			} finally {
-				if (job.child !== undefined) await job.child.close().catch(() => {});
+				if (job.child !== undefined) {
+					// Spend is spend whatever the outcome: a failed or stopped child still burned what
+					// it burned, and the parent transcript is where this session's total reads it back.
+					const usage = childUsage(job.child);
+					if (usage !== undefined) {
+						deps.parentSessionManager.appendUsage("subagent", job.child.modelName, usage);
+					}
+					await job.child.close().catch(() => {});
+				}
 			}
 		})();
 		return job;

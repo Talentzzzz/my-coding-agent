@@ -39,20 +39,20 @@ export function sendJson(response: ServerResponse, status: number, body: unknown
  * the UI's HTML rather than a JSON 404. `isApiPath` is what keeps those two apart.
  */
 export async function serveStatic(clientDir: string, pathname: string, response: ServerResponse): Promise<void> {
-	const relative = normalize(decodeURIComponent(pathname)).replace(/^([/\\])+/, "");
-	const root = resolve(clientDir);
-	const candidate = resolve(root, relative);
+	const relPath = normalize(decodeURIComponent(pathname)).replace(/^([/\\])+/, "");
+	const absRoot = resolve(clientDir);
+	const absPath = resolve(absRoot, relPath);
 	// A separator, not just the prefix: without it a sibling directory named `<clientDir>-backup`
 	// would pass the check and be served.
-	if (candidate !== root && !candidate.startsWith(root + sep)) {
+	if (absPath !== absRoot && !absPath.startsWith(absRoot + sep)) {
 		const failure = httpStatus.notFound("Not found");
 		sendJson(response, failure.status, { error: failure.message });
 		return;
 	}
 
-	const info = await stat(candidate).catch(() => undefined);
-	const file = info?.isFile() ? candidate : join(clientDir, "index.html");
-	const fallback = await stat(file).catch(() => undefined);
+	const info = await stat(absPath).catch(() => undefined);
+	const absFile = info?.isFile() ? absPath : join(clientDir, "index.html");
+	const fallback = await stat(absFile).catch(() => undefined);
 	if (!fallback) {
 		sendJson(response, 503, {
 			error: `No client build at ${clientDir}. Run "npm run build:web", or start the server with --vite.`,
@@ -61,10 +61,10 @@ export async function serveStatic(clientDir: string, pathname: string, response:
 	}
 
 	response.writeHead(200, {
-		"content-type": MIME[extname(file)] ?? "application/octet-stream",
-		"cache-control": file.endsWith("index.html") ? "no-store" : "public, max-age=3600",
+		"content-type": MIME[extname(absFile)] ?? "application/octet-stream",
+		"cache-control": absFile.endsWith("index.html") ? "no-store" : "public, max-age=3600",
 	});
-	createReadStream(file).pipe(response);
+	createReadStream(absFile).pipe(response);
 }
 
 /** Whether a path belongs to the API, so an unrouted one is a 404 instead of the client shell. */

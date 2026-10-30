@@ -29,20 +29,15 @@ export interface ComposerSelection {
 	level: string;
 }
 
-/** The ref a model row is chosen by, which is what the window and the server both name it with. */
-function refOf(model: ModelOption): string {
-	return `${model.name}/${model.modelId}`;
-}
-
 /**
  * The model seat's label: the row's name, or the reason it names none.
  *
  * Three ways to sit outside the list, and only one of them is a loss: nothing configured at all,
- * nothing chosen yet (the empty ref — the seat is where the next conversation starts), and a ref
+ * nothing chosen yet (the empty name — the seat is where the next conversation starts), and a name
  * whose row is gone. Only the last one names what was lost.
  */
 function modelLabel(selection: ComposerSelection): string {
-	const row = selection.models.find((model) => refOf(model) === selection.model);
+	const row = selection.models.find((model) => model.name === selection.model);
 	if (row !== undefined) return row.name;
 	if (selection.models.length === 0) return "未配置模型";
 	if (selection.model.length === 0) return "选择模型";
@@ -140,8 +135,8 @@ export class Composer {
 				this.modelButton,
 				models.map((row) => ({
 					label: row.name,
-					active: refOf(row) === model,
-					onSelect: () => handlers.onSelectModel(refOf(row)),
+					active: row.name === model,
+					onSelect: () => handlers.onSelectModel(row.name),
 				})),
 				{ placement: "above", align: "end" },
 			);
@@ -247,7 +242,7 @@ export class Composer {
 	setSelection(selection: ComposerSelection): void {
 		this.selection = selection;
 
-		const modelSignature = `${selection.model}\n${selection.models.map(refOf).join("\n")}`;
+		const modelSignature = `${selection.model}\n${selection.models.map((row) => row.name).join("\n")}`;
 		if (modelSignature !== this.modelSignature) {
 			this.modelSignature = modelSignature;
 			const label = modelLabel(selection);

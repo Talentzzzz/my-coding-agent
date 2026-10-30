@@ -1,5 +1,5 @@
 import { glob, readFile, stat } from "node:fs/promises";
-import type { AgentTool, AgentToolResult } from "@my-agent/agent";
+import type { AgentTool, AgentToolResult } from "@my-agent/loop";
 import { resolve } from "node:path";
 import { Type, type Static } from "typebox";
 import type { Workspace } from "../workspace.ts";
@@ -41,9 +41,9 @@ export async function runGrep(
 	hooks: { signal?: AbortSignal; onUpdate?: (partial: AgentToolResult<unknown>) => void } = {},
 ): Promise<AgentToolResult<unknown>> {
 	throwIfAborted(hooks.signal);
-	const root = params.path === undefined ? workspace.root : workspace.resolve(params.path);
-	const info = await stat(root).catch(() => undefined);
-	if (!info?.isDirectory()) throw new Error(`Not a directory: ${workspace.display(root)}`);
+	const absRoot = params.path === undefined ? workspace.absRoot : workspace.resolve(params.path);
+	const info = await stat(absRoot).catch(() => undefined);
+	if (!info?.isDirectory()) throw new Error(`Not a directory: ${workspace.display(absRoot)}`);
 
 	let expression: RegExp;
 	try {
@@ -54,7 +54,7 @@ export async function runGrep(
 
 	const include = params.include ?? "**/*";
 	const files: string[] = [];
-	for await (const entry of glob(include, { cwd: root, exclude: DEFAULT_EXCLUDES })) {
+	for await (const entry of glob(include, { cwd: absRoot, exclude: DEFAULT_EXCLUDES })) {
 		throwIfAborted(hooks.signal);
 		if (typeof entry === "string") files.push(entry);
 		if (files.length >= MAX_FILES_SCANNED) break;
@@ -63,14 +63,14 @@ export async function runGrep(
 	const hits: string[] = [];
 	let matchCount = 0;
 	let scanned = 0;
-	for (const relative of files) {
+	for (const relPath of files) {
 		throwIfAborted(hooks.signal);
-		const absolute = resolve(root, relative);
-		const fileInfo = await stat(absolute).catch(() => undefined);
+		const absPath = resolve(absRoot, relPath);
+		const fileInfo = await stat(absPath).catch(() => undefined);
 		if (!fileInfo?.isFile() || fileInfo.size > MAX_FILE_BYTES) continue;
 		scanned += 1;
 
-		const text = await readFile(absolute, "utf8").catch(() => undefined);
+		const text = await readFile(absPath, "utf8").catch(() => undefined);
 		if (text === undefined || text.includes("\u0000")) continue;
 
 		const lines = text.split("\n");
@@ -81,7 +81,7 @@ export async function runGrep(
 			if (!expression.test(line)) continue;
 			matchCount += 1;
 			if (hits.length < MAX_MATCHES) {
-				hits.push(`${workspace.display(absolute)}:${index + 1}: ${line.trim().slice(0, MAX_LINE_LENGTH)}`);
+				hits.push(`${workspace.display(absPath)}:${index + 1}: ${line.trim().slice(0, MAX_LINE_LENGTH)}`);
 			}
 			hooks.onUpdate?.(textResult(`${matchCount} matches`));
 		}

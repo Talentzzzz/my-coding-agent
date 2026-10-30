@@ -1,4 +1,4 @@
-import type { AnthropicMessagesCompat, ThinkingLevelMap } from "@my-agent/ai";
+import type { AnthropicMessagesCompat, ThinkingLevelMap } from "@my-agent/llm";
 
 /**
  * What a model has to be told, derived from its wire id.

@@ -32,7 +32,7 @@ function snapshotWith(
 ): SessionSnapshot {
 	return {
 		id: "smoke-replay",
-		cwd: "/tmp/smoke-replay",
+		absCwd: "/tmp/smoke-replay",
 		createdAt: 1,
 		title: "重放",
 		model: "faux",
@@ -134,7 +134,7 @@ const written = reopen([
 	{ role: "assistant", content: [{ type: "text", text: "写好了。" }], timestamp: 13_000 },
 ]);
 const writtenCard = toolGroups(written)[0]?.cards[0];
-check("the card carries the diff the result reported", writtenCard?.diff?.path === "hello.txt" && writtenCard?.diff?.added === 1, JSON.stringify(writtenCard?.diff));
+check("the card carries the diff the result reported", writtenCard?.diff?.relPath === "hello.txt" && writtenCard?.diff?.added === 1, JSON.stringify(writtenCard?.diff));
 
 process.stdout.write("calls of one turn share the group they were replayed into\n");
 const parallel = reopen([

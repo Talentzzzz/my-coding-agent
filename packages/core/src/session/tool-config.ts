@@ -61,7 +61,7 @@ export function defaultToolNames(settingsManager: SettingsManager, registry: Too
  * The tool halves are compared as sets, because a hand-edited settings file owes the registry no
  * order; the approval halves are compared field by field over every key either side names.
  */
-export function toolConfigFollowsGlobal(
+function toolConfigFollowsGlobal(
 	recorded: { activeTools?: string[]; approval?: Record<ToolApprovalKey, boolean> },
 	globalTools: readonly string[],
 	globalApprovals: Record<ToolApprovalKey, boolean>,

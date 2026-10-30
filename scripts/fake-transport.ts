@@ -2,7 +2,7 @@
 // network, so streaming, queueing, steering, retries, and compaction are testable with no provider
 // key. Run with any smoke: `node scripts/smoke-session.ts`.
 //
-// It lives here rather than in `@my-agent/ai` because it is this app's test double and nothing else's.
+// It lives here rather than in `@my-agent/llm` because it is this app's test double and nothing else's.
 // pi-ai ships a faux provider, but it was built on the provider registry this app no longer has — it
 // registered itself into a `Models` collection, which is exactly the indirection that was removed.
 // What is left to fake is one transport, so the double is one object with two methods.
@@ -12,6 +12,7 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type ChatTransport,
+	type LlmContext,
 	type ImageContent,
 	type Message,
 	type Model,
@@ -21,9 +22,8 @@ import {
 	type ThinkingContent,
 	type ToolCall,
 	type ToolResultMessage,
-	type TranscriptContext,
 	type Usage,
-} from "@my-agent/ai";
+} from "@my-agent/llm";
 
 const DEFAULT_USAGE: Usage = {
 	input: 0,
@@ -100,7 +100,7 @@ export interface FakeState {
 }
 
 export type FakeResponseFactory = (
-	context: TranscriptContext,
+	context: LlmContext,
 	options: SimpleStreamOptions | undefined,
 	state: FakeState,
 	model: Model<string>,
@@ -165,22 +165,16 @@ function toolResultToText(message: ToolResultMessage): string {
 }
 
 function messageToText(message: Message): string {
-	if (message.role === "system") {
-		return [
-			getSystemMessageText(message),
-			...(message.toolsRemoved?.map((tool) => `tool-:${JSON.stringify(tool)}`) ?? []),
-			...(message.toolsAdded?.map((tool) => `tool+:${JSON.stringify(tool)}`) ?? []),
-		]
-			.filter((part) => part.length > 0)
-			.join("\n");
-	}
+	if (message.role === "system") return getSystemMessageText(message);
 	if (message.role === "user") return contentToText(message.content);
 	if (message.role === "assistant") return assistantContentToText(message.content);
 	return toolResultToText(message);
 }
 
-function serializeContext(context: TranscriptContext): string {
-	return context.messages.map((message) => `${message.role}:${messageToText(message)}`).join("\n\n");
+function serializeContext(context: LlmContext): string {
+	const tools = (context.tools ?? []).map((tool) => `tool:${JSON.stringify(tool)}`);
+	const messages = context.messages.map((message) => `${message.role}:${messageToText(message)}`);
+	return [...tools, ...messages].join("\n\n");
 }
 
 /**
@@ -189,7 +183,7 @@ function serializeContext(context: TranscriptContext): string {
  * Cache reads and writes stay zero: this double answers from a queue rather than a provider, and it
  * has no prompt-cache identity to key a simulation by.
  */
-function withUsageEstimate(message: AssistantMessage, context: TranscriptContext): AssistantMessage {
+function withUsageEstimate(message: AssistantMessage, context: LlmContext): AssistantMessage {
 	const input = estimateTokens(serializeContext(context));
 	const outputTokens = estimateTokens(assistantContentToText(message.content));
 
@@ -366,7 +360,7 @@ export function createFakeTransport(options: FakeTransportOptions = {}): FakeTra
 
 	const resolveResponse = async (
 		step: FakeResponseStep,
-		context: TranscriptContext,
+		context: LlmContext,
 		streamOptions: SimpleStreamOptions | undefined,
 		requestModel: Model<string>,
 	): Promise<AssistantMessage> => {
@@ -374,7 +368,7 @@ export function createFakeTransport(options: FakeTransportOptions = {}): FakeTra
 		return withUsageEstimate(cloneMessage(resolved, requestModel), context);
 	};
 
-	const stream = (requestModel: Model<string>, context: TranscriptContext, streamOptions?: SimpleStreamOptions) => {
+	const stream = (requestModel: Model<string>, context: LlmContext, streamOptions?: SimpleStreamOptions) => {
 		const outer = createAssistantMessageEventStream();
 		const step = pendingResponses.shift();
 		state.callCount++;
@@ -410,7 +404,6 @@ export function createFakeTransport(options: FakeTransportOptions = {}): FakeTra
 	return {
 		api: {
 			stream: (model, context, streamOptions) => stream(model, context, streamOptions),
-			streamSimple: (model, context, streamOptions) => stream(model, context, streamOptions),
 		},
 		state,
 		setResponses(responses: FakeResponseStep[]) {

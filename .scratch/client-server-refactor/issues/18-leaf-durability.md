@@ -60,8 +60,8 @@ Blocked by: 09
   每次移动都要重写第一行，而"这种格式从不重写一行"（`docs/architecture.md:226`）是这个格式**唯一**不做
   的事；且 `forkFrom()` 复制 header 换新 id，一个 header 里的位置会作为一份**立刻过期的事实**被复制进
   每个 fork。
-- **(c) sidecar 文件 —— 死。** "一个会话 = 一个 JSONL 文件"是发现（`findAnywhere` / `findById` /
-  `findMostRecentSession` 只扫 `.jsonl`）、fork（只复制 entry 行）、列表、`snapshotOf()` 冷读共同假设的
+- **(c) sidecar 文件 —— 死。** "一个会话 = 一个 JSONL 文件"是发现（`findAnywhere` /
+  `findMostRecentSession` / `list` 只扫 `.jsonl`）、fork（只复制 entry 行）、列表、`snapshotOf()` 冷读共同假设的
   事实。sidecar 不随 fork 旅行、不随文件移动，缺席与过期会成为第二份要和解的真相——而它要记录的东西
   一行 entry 就装下了。
 - **(a) 状态 entry —— 胜出。** 文件已经用 entry 记状态（`tool_config`、`model_change`、

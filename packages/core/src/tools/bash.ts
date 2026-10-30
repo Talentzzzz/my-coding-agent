@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import type { AgentTool, AgentToolResult } from "@my-agent/agent";
+import type { AgentTool, AgentToolResult } from "@my-agent/loop";
 import { Type, type Static } from "typebox";
 import { DEFAULT_BASH_SETTINGS, type BashSettings } from "../config.ts";
 import type { SettingsManager } from "../settings-manager.ts";
@@ -75,7 +75,7 @@ export async function runBash(
 
 	return new Promise<AgentToolResult<unknown>>((resolvePromise, rejectPromise) => {
 		const child = spawn(launcher.file, [...launcher.args, params.command], {
-			cwd: workspace.root,
+			cwd: workspace.absRoot,
 			windowsHide: true,
 			stdio: ["ignore", "pipe", "pipe"],
 		});

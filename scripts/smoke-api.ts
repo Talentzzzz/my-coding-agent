@@ -125,7 +125,7 @@ interface TreeSession {
 	leafId: string | null;
 	submitting: boolean;
 	messageEntryIds: (string | null)[];
-	branchPoints: { entryId: string; options: { entryId: string; label: string; role: string; active: boolean }[] }[];
+	branchPoints: { entryId: string; anchor: string; options: { entryId: string; label: string; role: string; active: boolean }[] }[];
 }
 
 /** Handle one payload from the watched session's stream. Returns true once the watch should end. */
@@ -133,14 +133,14 @@ async function handleItem(id: string, item: { type: string; [key: string]: unkno
 	if (item.type === "baseline") {
 		const session = item.session as {
 			id: string;
-			cwd: string;
+			absCwd: string;
 			model: string;
 			thinkingLevels: string[];
 			approvals: Record<string, boolean>;
 			messages: unknown[];
 		};
 		pass(
-			`\nbaseline ${session.id}\n  cwd=${session.cwd}\n  model=${session.model}\n  thinking=${session.thinkingLevels.join(",")}\n  approvals=${JSON.stringify(session.approvals)}\n  messages=${session.messages.length}`,
+			`\nbaseline ${session.id}\n  absCwd=${session.absCwd}\n  model=${session.model}\n  thinking=${session.thinkingLevels.join(",")}\n  approvals=${JSON.stringify(session.approvals)}\n  messages=${session.messages.length}`,
 		);
 
 		// The second stream is the point of it: the server named a session, and this script attached
@@ -265,11 +265,11 @@ async function main(): Promise<void> {
 	// The trailing check restores what it found, since this is the one request here that persists.
 	const existing = (models.payload as { models?: unknown[] }).models ?? [];
 	const probe = `smoke-api-${Date.now()}`;
-	const row = { name: probe, baseUrl: "http://127.0.0.1:1/v1", modelId: "smoke-api-model" };
+	const row = { name: probe, baseUrl: "http://127.0.0.1:1/v1", id: "smoke-api-model" };
 	const saved = await request("PUT", "/api/models", { models: [...existing, row] });
 	if (saved.status !== 200) fail(`importing a row answered ${saved.status}, expected 200`);
 	else pass("a row with a name of its own is imported");
-	const collision = await request("PUT", "/api/models", { models: [...existing, row, { ...row, modelId: "other" }] });
+	const collision = await request("PUT", "/api/models", { models: [...existing, row, { ...row, id: "other" }] });
 	if (collision.status !== 400) fail(`a duplicate name answered ${collision.status}, expected 400`);
 	else pass("a duplicate name is refused with 400");
 	const restored = await request("PUT", "/api/models", { models: existing });
@@ -354,6 +354,21 @@ async function main(): Promise<void> {
 		else if (point.options.length !== 2) fail(`the branch point has ${point.options.length} options, expected 2`);
 		else if (point.options.filter((option) => option.active).length !== 1) fail("no single option is marked active");
 		else pass(`the next prompt continued from the moved leaf: ${point.options.map((option) => `${option.role}:${option.label}`).join(" | ")}`);
+
+		// The tree belongs to the conversation, not to where the leaf happens to sit. Rewind to the entry
+		// the fork hangs off — the first question, the page's "back to the beginning" — and the fork is
+		// still reported. A chain-relative report lost it here, which is why the branch page showed half
+		// the tree after a rewind.
+		const rewound = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/branch`, { entryId: entry, descend: false });
+		const rewoundPoints = (rewound.payload as { session?: TreeSession }).session?.branchPoints ?? [];
+		const kept = rewoundPoints.find((candidate) => candidate.entryId === entry);
+		if (kept === undefined || kept.options.length !== 2) {
+			fail(`after a rewind the fork at ${entry} is ${kept === undefined ? "gone" : `down to ${kept.options.length} options`}`);
+		} else if (kept.anchor !== entry) {
+			fail(`the fork's card is ${kept.anchor}, expected the entry it hangs off`);
+		} else {
+			pass("a rewind keeps the forks below it: the tree does not move with the leaf");
+		}
 
 		const noEntry = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/branch`, {});
 		if (noEntry.status !== 400) fail(`a branch with no entryId answered ${noEntry.status}, expected 400`);

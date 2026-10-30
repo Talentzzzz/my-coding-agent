@@ -1,16 +1,16 @@
-import { type Api, type ChatTransport, type Model } from "@my-agent/ai";
+import type { ChatTransport } from "@my-agent/llm";
 import { Agent, type AgentConfig } from "./agent.ts";
 import { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
 import { buildSystemPrompt } from "./context/system-prompt.ts";
 import { spillOversizedToolResult } from "./context/spill.ts";
 import { boundToolContent, createHooks } from "./hooks.ts";
 import {
-	modelFor,
-	modelRefOf,
+	createModel,
+	DEFAULT_MODEL_NAME,
+	type Model,
 	placeholderModel,
-	resolveModelRef,
 	type ModelSource,
-	type UserModel,
+	type ModelConfig,
 } from "./models.ts";
 import type { SessionSnapshot, ToolApprovalKey } from "./protocol.ts";
 import type { SessionManager } from "./session/session-manager.ts";
@@ -23,7 +23,8 @@ import { Workspace } from "./workspace.ts";
 
 /** What a caller must supply to build a session. Everything else is discovered here. */
 export interface OpenAgentOptions {
-	workspaceRoot: string;
+	/** The workspace the tools resolve inside, absolute. */
+	absWorkspaceRoot: string;
 	/**
 	 * The transcript this session will read and write.
 	 *
@@ -32,7 +33,7 @@ export interface OpenAgentOptions {
 	 */
 	sessionManager: SessionManager;
 	models: ModelSource;
-	/** Overrides the stored and configured model with a `<name>/<wire id>` ref. */
+	/** Overrides the stored default with a row's name. */
 	model?: string;
 	thinkingLevel?: string;
 	/**
@@ -73,7 +74,7 @@ export interface OpenAgentOptions {
 interface Assembled {
 	workspace: Workspace;
 	settingsManager: SettingsManager;
-	model: Model<Api>;
+	model: Model;
 	registry: ToolRegistry;
 	/** The workspace's own instructions, already loaded, for the prompt this session will build. */
 	agentsMd: AgentsMdFile[];
@@ -89,12 +90,12 @@ interface Assembled {
  * described by the same decisions, in the same order, as the one it would have assembled.
  */
 async function assemble(options: OpenAgentOptions): Promise<Assembled> {
-	const workspace = new Workspace(options.workspaceRoot);
+	const workspace = new Workspace(options.absWorkspaceRoot);
 	// The project settings file is looked up beside the workspace, so it is resolved after the
 	// workspace is: `<workspace>/.my-agent/settings.json`, over the agent home's own file.
-	const settingsManager = options.settingsManager ?? SettingsManager.create(workspace.root);
+	const settingsManager = options.settingsManager ?? SettingsManager.create(workspace.absRoot);
 	const settings = settingsManager.getSettings();
-	const agentsMd = await loadAgentsMd(workspace.root);
+	const agentsMd = await loadAgentsMd(workspace.absRoot);
 	const recorded = options.sessionManager.getRecordedSettings();
 	const row = selectModel(options.models, options.model ?? recordedRefOf(recorded.model) ?? settings.model);
 	// A session with no row still runs, on the placeholder: see `placeholderModel`. What it cannot do
@@ -107,8 +108,13 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 		row === undefined
 			? undefined
 			: options.thinkingLevel ?? recorded.thinkingLevel ?? row.defaultThinkingLevel;
-	const model: Model<Api> = row === undefined ? placeholderModel() : modelFor(row, level);
-	const registry = options.tools ?? createToolRegistry(workspace, settingsManager);	// The level the model came back with, which is the level a subagent inherits: `modelFor` already
+	// The transport arrives on the model rather than beside it: a model is what a request is made with
+	// and this is how it is sent, so the one an injected transport names is the one every re-derivation
+	// from a row keeps using.
+	const model: Model =
+		row === undefined ? placeholderModel(options.api) : createModel(row, level, options.api);
+	const registry = options.tools ?? createToolRegistry(workspace, settingsManager);
+	// The level the model came back with, which is the level a subagent inherits: `createModel` already
 	// settled what the row's default means for this model, so asking again here could only disagree.
 	const thinkingLevel = model.thinkingLevel ?? "off";
 
@@ -116,14 +122,15 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 	// model and the transcript this session resolved — things only the factory has in hand. The
 	// SubAgent's own sessions pass `subagents: false`, so a child can never spawn a grandchild.
 	if (options.subagents !== false) {
-		const sessionFile = options.sessionManager.getSessionFile();
+		const absSessionFile = options.sessionManager.getAbsSessionFile();
 		for (const tool of createSubagentTools({
 			workspace,
 			models: options.models,
-			...(row === undefined ? {} : { modelRef: modelRefOf(row) }),
+			...(row === undefined ? {} : { model: row.name }),
 			thinkingLevel,
+			parentSessionManager: options.sessionManager,
 			...(options.api === undefined ? {} : { api: options.api }),
-			...(sessionFile === undefined ? {} : { parentSessionFile: sessionFile }),
+			...(absSessionFile === undefined ? {} : { parentSessionFile: absSessionFile }),
 		})) {
 			registry.register(tool);
 		}
@@ -161,7 +168,7 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 	const { workspace, settingsManager, model, registry, recordedTools } = await assemble(options);
 	return sessionSnapshot({
 		sessionManager: options.sessionManager,
-		workspaceRoot: workspace.root,
+		absWorkspaceRoot: workspace.absRoot,
 		model,
 		// The same merge `Agent.getApprovals` performs: the workspace's defaults with the session's own
 		// recorded choices over them. Neither half is optional, or the header's toggles would show a
@@ -206,7 +213,7 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 		// or approvals the session no longer has.
 		systemPrompt: (toolNames, approvals) =>
 			buildSystemPrompt({
-				workspaceRoot: workspace.root,
+				absWorkspaceRoot: workspace.absRoot,
 				toolNames,
 				// Every tool the map gates, not just the active ones: the map is the session's whole
 				// choice, and a tool narrowed away is a tool the prompt should still say is gated rather
@@ -251,21 +258,26 @@ function recordedRefOf(model: { name: string; modelId: string } | undefined): st
 }
 
 /**
- * The row this session opens on: what the caller named, else whatever the user entered first.
+ * The row this session opens on: what the caller named, else the built-in default, else the first row.
  *
- * There is no preferred default any more. The old list of known-good ids was a guess at which vendor
- * the user had a key for, and with rows the user types themselves the first one they wrote is a
- * better answer than any guess: it exists, and it is theirs.
+ * Two callers hand a *ref* rather than a name — `settings.model` as a repair script wrote it, and a
+ * transcript's `model_change` — and both spell it `<name>/<model-id>`. The name is what identifies the
+ * row, so both spellings are resolved here instead of at each caller; before, a ref simply matched
+ * nothing and the session quietly opened on somebody else's row.
  *
- * `undefined` means there are no rows at all, which the caller answers with the placeholder rather
- * than throwing: a session has to be buildable for the window to open far enough to say what is
- * missing, and an exception here would surface as a server that serves no session.
+ * {@link DEFAULT_MODEL_NAME} is the third rung and is hardcoded rather than a guess at which vendor
+ * the user has a key for: it is the model this app was built around, so a default naming a row that
+ * has been deleted, or a settings file that names none, still opens on it. Only a machine without that
+ * row falls through to `rows[0]`, and only a machine with no rows at all gets `undefined` — which the
+ * caller answers with the placeholder rather than throwing, because a session has to be buildable for
+ * the window to open far enough to say what is missing.
  */
-function selectModel(models: ModelSource, ref: string | undefined): UserModel | undefined {
+function selectModel(models: ModelSource, ref: string | undefined): ModelConfig | undefined {
 	const rows = models.list();
-	if (ref !== undefined) {
-		const row = resolveModelRef(rows, ref);
-		if (row) return row;
+	const name = ref?.split("/")[0];
+	if (name !== undefined) {
+		const named = rows.find((row) => row.name === name);
+		if (named) return named;
 	}
-	return rows[0];
+	return rows.find((row) => row.name === DEFAULT_MODEL_NAME) ?? rows[0];
 }

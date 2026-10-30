@@ -78,9 +78,9 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 		route({
 			method: "POST",
 			// A command rather than a `PATCH` on a workspace resource, because a workspace has no id
-			// here: it is named by the directory it is, and the body carries both the path it has and
-			// the path the user typed. Moving the folder and rewriting the headers of its transcripts
-			// are one operation — see `SystemController.renameWorkspace` — so there is one request.
+			// here: it is named by the directory it is, and the body carries that path beside the
+			// name the user typed. A command because it changes no resource: it writes a label into
+			// the settings, and the directory keeps the name the file system gave it.
 			path: "/api/workspaces/rename",
 			params: {},
 			handle: async (_params, request, response) =>
@@ -111,7 +111,7 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 		route({
 			method: "POST",
 			// The body is optional and usually absent: an empty `POST` still creates a session in the
-			// server's own workspace. A `cwd` in the body moves where that one session lands — a choice
+			// server's own workspace. An `absCwd` in the body moves where that one session lands — a choice
 			// made with the request, so it travels with it rather than becoming server state.
 			path: "/api/sessions",
 			params: {},

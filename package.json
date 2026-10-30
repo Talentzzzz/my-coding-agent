@@ -5,18 +5,17 @@
 	"type": "module",
 	"description": "Coding agent with a desktop UI",
 	"workspaces": [
-		"packages/ai",
-		"packages/agent",
+		"packages/llm",
+		"packages/loop",
 		"packages/core",
 		"packages/server",
 		"packages/web",
 		"packages/desktop"
 	],
 	"scripts": {
-		"check": "tsc -p packages/ai/tsconfig.json && tsc -p packages/agent/tsconfig.json && tsc -p tsconfig.json && tsc -p packages/web/tsconfig.json && node scripts/check-tokens.ts packages/web/src/tokens.css packages/web/src/style.css",
+		"check": "tsc -p packages/llm/tsconfig.json && tsc -p packages/loop/tsconfig.json && tsc -p tsconfig.json && tsc -p packages/web/tsconfig.json && node scripts/check-tokens.ts packages/web/src/tokens.css packages/web/src/style.css",
 		"dev": "npm run dev --workspace=@my-agent/server",
 		"start": "npm run start --workspace=@my-agent/server",
-		"cli": "npm run cli --workspace=@my-agent/server --",
 		"build:web": "npm run build --workspace=@my-agent/web",
 		"desktop": "npm run build:web && npm run start --workspace=@my-agent/desktop",
 		"desktop:dev": "npm run build:web && npm run dev --workspace=@my-agent/desktop",

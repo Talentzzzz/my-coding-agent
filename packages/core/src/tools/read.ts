@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import type { AgentTool, AgentToolResult } from "@my-agent/agent";
+import type { AgentTool, AgentToolResult } from "@my-agent/loop";
 import { Type, type Static } from "typebox";
 import type { Workspace } from "../workspace.ts";
 import { textResult, throwIfAborted } from "./types.ts";
@@ -8,7 +8,7 @@ const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_LINES = 2_000;
 
 const parameters = Type.Object({
-	path: Type.String({ description: "File path, relative to the workspace root or absolute inside it" }),
+	path: Type.String({ description: "File path, relative to the workspace root or absPath inside it" }),
 	offset: Type.Optional(Type.Integer({ minimum: 1, description: "First line to read, 1-based" })),
 	limit: Type.Optional(Type.Integer({ minimum: 1, description: `Maximum lines to read, default ${MAX_LINES}` })),
 });
@@ -48,18 +48,18 @@ export async function runRead(
 	hooks: ReadHooks = {},
 ): Promise<AgentToolResult<unknown>> {
 	throwIfAborted(hooks.signal);
-	const absolute = workspace.resolve(params.path);
-	const info = await stat(absolute).catch(() => undefined);
+	const absPath = workspace.resolve(params.path);
+	const info = await stat(absPath).catch(() => undefined);
 	if (!info) throw new Error(`File not found: ${params.path}`);
 	if (info.isDirectory()) throw new Error(`Not a file (it is a directory): ${params.path}`);
 	if (info.size > MAX_FILE_BYTES) {
 		throw new Error(`File is ${formatBytes(info.size)}, over the ${formatBytes(MAX_FILE_BYTES)} read limit`);
 	}
 
-	const bytes = await readFile(absolute);
+	const bytes = await readFile(absPath);
 	throwIfAborted(hooks.signal);
 	const mimeType = sniffImageMimeType(bytes);
-	if (mimeType) return imageResult(workspace, params.path, absolute, bytes, mimeType, hooks);
+	if (mimeType) return imageResult(workspace, params.path, absPath, bytes, mimeType, hooks);
 	const raw = bytes.toString("utf8");
 	if (looksBinary(raw)) throw new Error(`Binary file, not shown: ${params.path}`);
 
@@ -81,7 +81,7 @@ export async function runRead(
 	const shown = offset - 1 + slice.length;
 	const suffix =
 		shown < lines.length ? `\n\n[${lines.length - shown} more lines; continue with offset=${shown + 1}]` : "";
-	return textResult(`${body}${suffix}`, { path: workspace.display(absolute), lines: lines.length });
+	return textResult(`${body}${suffix}`, { path: workspace.display(absPath), lines: lines.length });
 }
 
 /**
@@ -92,7 +92,7 @@ export async function runRead(
 function imageResult(
 	workspace: Workspace,
 	requestedPath: string,
-	absolute: string,
+	absPath: string,
 	bytes: Buffer,
 	mimeType: string,
 	hooks: ReadHooks,
@@ -103,7 +103,7 @@ function imageResult(
 			{ type: "text", text: `Read image file [${mimeType}], ${formatBytes(bytes.length)}.` },
 			{ type: "image", data: bytes.toString("base64"), mimeType },
 		],
-		details: { path: workspace.display(absolute), mimeType, bytes: bytes.length, requestedPath },
+		details: { path: workspace.display(absPath), mimeType, bytes: bytes.length, requestedPath },
 	};
 }
 

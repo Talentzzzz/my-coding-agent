@@ -3,9 +3,9 @@
 // The mechanism is entirely client-side (ticket 04): a constant in `packages/web`, stored through the
 // existing `PUT /api/models`, with a persistent marker that keeps a deleted row deleted. Nothing here
 // reaches the network — the store is a pair of callbacks — so no server and no provider key are
-// needed. What the server *would* keep is checked through the same `coerceModel` the endpoint uses.
+// needed. What the server *would* keep is checked through the same `coerceModelConfig` the endpoint uses.
 // Run with: node scripts/smoke-default-model.ts
-import { coerceModel, listModelOptions, resolveModelRef } from "@my-agent/core";
+import { coerceModelConfig, listModelOptions } from "@my-agent/core";
 import type { ModelInput, ModelOption } from "@my-agent/core/protocol";
 import {
 	DEFAULT_MODEL,
@@ -27,7 +27,7 @@ function modelOption(name: string): ModelOption {
 		name,
 		api: "anthropic-messages",
 		baseUrl: "https://example.invalid",
-		modelId: name,
+		id: name,
 		contextWindow: 1_000,
 		maxTokens: 1_000,
 		reasoning: false,
@@ -39,7 +39,7 @@ function modelOption(name: string): ModelOption {
 
 /** The server's answer to a save: the rows it kept, in the wire shape. */
 function savedModels(rows: ModelInput[]): ModelOption[] {
-	return rows.map((row) => modelOption(row.name ?? row.modelId ?? "row"));
+	return rows.map((row) => modelOption(row.name ?? row.id ?? "row"));
 }
 
 type Harness = DefaultModelHost & { events: string[]; writes: ModelInput[][] };
@@ -70,7 +70,7 @@ process.stdout.write("\ndefault-model：内置的那一行逐字是用户要的\
 
 {
 	check("名称是 deepseek-flash", DEFAULT_MODEL.name === "deepseek-flash", String(DEFAULT_MODEL.name));
-	check("模型 id 是 deepseek-flash", DEFAULT_MODEL.modelId === "deepseek-flash", String(DEFAULT_MODEL.modelId));
+	check("模型 id 是 deepseek-flash", DEFAULT_MODEL.id === "deepseek-flash", String(DEFAULT_MODEL.id));
 	check(
 		"BASE URL 是 DeepSeek 的 Anthropic 端点",
 		DEFAULT_MODEL.baseUrl === "https://api.deepseek.com/anthropic",
@@ -86,12 +86,12 @@ process.stdout.write("\ndefault-model：内置的那一行逐字是用户要的\
 
 	// The endpoint's own coercion, so this is the row the server would actually keep rather than a
 	// shape the panel happens to show.
-	const stored = coerceModel(DEFAULT_MODEL);
+	const stored = coerceModelConfig(DEFAULT_MODEL);
 	check("服务端收下这一行", stored !== undefined, JSON.stringify(stored));
 	check("存下来的上下文窗口没被改", stored?.contextWindow === 1_000_000, String(stored?.contextWindow));
 	check("存下来的输出上限没被改", stored?.maxTokens === 384_000, String(stored?.maxTokens));
 	check("存下来是空密钥", stored?.apiKey === "", JSON.stringify(stored?.apiKey));
-	check("按 name/wire-id 能被引用", resolveModelRef(stored === undefined ? [] : [stored], "deepseek-flash/deepseek-flash") !== undefined);
+	check("按行名能被找到", (stored === undefined ? [] : [stored]).find((userModel) => userModel.name === "deepseek-flash") !== undefined);
 	const shown = listModelOptions(stored === undefined ? [] : [stored]);
 	check("客户端看到的行没有密钥", shown[0]?.hasApiKey === false, String(shown[0]?.hasApiKey));
 	check(

@@ -4,7 +4,9 @@ import {
 	type AgentSessionEvent,
 	type BranchOption,
 	type BranchPoint,
+	compactionSummaryOf,
 	type FileDiff,
+	type Message,
 	type MessageDelta,
 	type ModelOption,
 	type PendingApproval,
@@ -38,7 +40,7 @@ export interface ToolCard {
  * A reasoning block and the text that follows it arrive on the same message, but they are read
  * differently — the answer is the point, the reasoning is behind it — so the transcript draws them
  * as separate rows and only the reasoning one collapses. `text` is the provider's Markdown as it
- * came (`packages/ai/src/api/anthropic-messages.ts` concatenates the deltas verbatim), and several
+ * came (`packages/llm/src/api/anthropic-messages.ts` concatenates the deltas verbatim), and several
  * reasoning blocks in one message are joined with a blank line, which is where a paragraph break is.
  */
 export interface MessageThinking {
@@ -117,12 +119,6 @@ export interface BranchWay {
 	entryId: string;
 	/** One line naming the way — a user message's own text, or an alternative's first line. */
 	label: string;
-	/** The question the way answers, for the card's tooltip; the message itself on the line. */
-	question: string;
-	/** One line of the way's answer — the turn's closing assistant text, for the tooltip; may be empty. */
-	answer: string;
-	/** The role of that message, so a card can say who speaks. */
-	role: string;
 	/** The round the way's message sits in; user messages start a round. */
 	turn: number;
 	/**
@@ -152,12 +148,14 @@ export interface BranchWay {
 }
 
 /**
- * The whole branch shape of one session, folded once per snapshot.
+ * The whole branch shape of one session, folded from a snapshot and grown with the transcript.
  *
  * The transcript is the hot path and `branchPoints` used to ride on individual message items, which
  * answered "what hangs off *this* message" and nothing more. Drawing the page needs every point at
- * once, so the fold runs here — at the baseline, the only frame that can change the points — and the
- * view reads this field instead of walking `items`.
+ * once, so the fold runs here and the view reads this field instead of walking `items`. The fold
+ * runs at a baseline — the only frame that can change the points — and again at each message end,
+ * because a plain append extends the line without carrying a baseline; see
+ * {@link branchTreeFromItems}.
  */
 export interface BranchTree {
 	/** The first user message of the line being read; the rest of the line hangs off its `next`s. */
@@ -169,7 +167,7 @@ export interface BranchTree {
 	 * page has nothing to draw for.
 	 */
 	currentId: string | undefined;
-	/** How many branch points the line has; every one of them carries at least two ways. */
+	/** How many branch points the tree has; every one of them carries at least two ways. */
 	points: number;
 	/** How many ways the tree holds in total: the line itself plus every alternative. */
 	options: number;
@@ -182,22 +180,64 @@ export interface BranchTree {
  *
  * The line is the active chain's **user messages**, in chain order: `snapshot.messages` is already the
  * chain (the store answers with the leaf's ancestry), and a user message is what a person recognises
- * as a decision they made. Assistant turns are not nodes — they are what a way *produced*, and they
- * ride in the card's tooltip.
+ * as a decision they made. Assistant turns are not nodes — they are what a way *produced*, and a card
+ * keeps the press they land on, never their text.
+ *
+ * The ways that left the line come from `branchPoints`, which describes the whole log rather than the
+ * chain alone: rewinding to the first question leaves the tree below it standing.
  *
  * `undefined` means there is nothing to draw: a session with no user message yet.
  */
 export function buildBranchTree(snapshot: SessionSnapshot): BranchTree | undefined {
-	const ids = snapshot.messageEntryIds;
+	return foldBranchLine(snapshot.messages, snapshot.messageEntryIds, snapshot.branchPoints);
+}
+
+/**
+ * The same fold, fed from the live transcript between baselines.
+ *
+ * A baseline is the only frame that can change the *points*, but it is not the only thing that
+ * changes the *line*: a message appended at the tip extends it, and no baseline rides on that append.
+ * Rebuilding the whole tree from the transcript items on each message end keeps the page current —
+ * the points come from the snapshot the client last received, which plain appends leave valid, and
+ * the line is exactly what the items already are: the chain, extended in place.
+ *
+ * Items without an entry id yet are skipped the same way a snapshot's nulls are, so a frame that
+ * outruns its `entry` pairing costs a card until the next baseline rather than a wrong one.
+ */
+export function branchTreeFromItems(items: Item[], points: BranchPoint[]): BranchTree | undefined {
+	const messages: { role: string; content: unknown }[] = [];
+	const ids: (string | null)[] = [];
+	const seen = new Set<string>();
+	for (const item of items) {
+		if (item.kind !== "message") continue;
+		if (item.role !== "user" && item.role !== "assistant") continue;
+		// The same store entry twice is one way, not two — a transcript mid-repair can hold both
+		// copies for a moment, and the fold speaks in entry ids, so the second copy is noise.
+		if (item.forkEntryId !== undefined && item.forkEntryId !== null) {
+			if (seen.has(item.forkEntryId)) continue;
+			seen.add(item.forkEntryId);
+		}
+		messages.push({ role: item.role, content: [{ type: "text", text: item.text }] });
+		ids.push(item.forkEntryId ?? null);
+	}
+	return foldBranchLine(messages, ids, points);
+}
+
+/** The fold itself: the line's user messages, their answers, and the points that hang alternatives. */
+function foldBranchLine(
+	messages: readonly { role?: string; content?: unknown }[],
+	ids: readonly (string | null)[],
+	points: readonly BranchPoint[],
+): BranchTree | undefined {
 	const line: { index: number; entryId: string; label: string; turn: number }[] = [];
 	let round = 0;
-	for (let index = 0; index < snapshot.messages.length; index += 1) {
-		const message = snapshot.messages[index]!;
+	for (let index = 0; index < messages.length; index += 1) {
+		const message = messages[index]!;
 		if (message.role === "user") round += 1;
 		if (message.role !== "user") continue;
 		const entryId = ids[index];
 		if (typeof entryId !== "string") continue;
-		const text = contentToText((message as { content?: unknown }).content);
+		const text = contentToText(message.content);
 		line.push({ index, entryId, label: firstLine(text), turn: round });
 	}
 	if (line.length === 0) return undefined;
@@ -210,9 +250,6 @@ export function buildBranchTree(snapshot: SessionSnapshot): BranchTree | undefin
 		ways.unshift({
 			entryId: entry.entryId,
 			label: entry.label.length > 0 ? entry.label : `轮 ${entry.turn}`,
-			question: entry.label,
-			answer: "",
-			role: "user",
 			turn: entry.turn,
 			...(next === undefined ? {} : { next }),
 			branches: [],
@@ -220,61 +257,56 @@ export function buildBranchTree(snapshot: SessionSnapshot): BranchTree | undefin
 		});
 	}
 
-	// Each way's own answer: the last assistant message between its question and the next question on
+	// What a rewind lands on: the last assistant message between a question and the next question on
 	// the line. The last one, not the first — a turn's earlier assistant messages carry tool traffic,
-	// and the reply a person wants back on screen is the one the turn ended on. The answer also rides
-	// in the card's tooltip, and its entry is what a rewind lands after (see {@link BranchWay.replyId}).
+	// and the reply a person wants back on screen is the one the turn ended on.
 	const byIndex = new Map(line.map((entry, at) => [entry.index, at]));
-	// Scanning backwards, the first hit is the turn's last: `tail` is the entry the leaf lands on,
-	// `answer` the text the tooltip quotes, which an entry made only of tool calls does not have.
 	let tail: { entryId: string } | undefined;
-	let answer: string | undefined;
-	for (let index = snapshot.messages.length - 1; index >= 0; index -= 1) {
-		const message = snapshot.messages[index]!;
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index]!;
 		if (message.role === "user") {
 			const at = byIndex.get(index);
 			const host = at === undefined ? undefined : ways[at];
-			if (host !== undefined && tail !== undefined) {
-				host.replyId = tail.entryId;
-				host.answer = answer === undefined ? "" : firstLine(answer);
-			}
+			if (host !== undefined && tail !== undefined) host.replyId = tail.entryId;
 			tail = undefined;
-			answer = undefined;
 			continue;
 		}
 		if (message.role !== "assistant") continue;
 		const entryId = ids[index];
 		if (typeof entryId !== "string") continue;
+		// Scanning backwards, the first hit is the turn's last, and an entry made only of tool calls
+		// still names a place to land even though it has no text.
 		if (tail === undefined) tail = { entryId };
-		if (answer === undefined) {
-			const text = contentToText((message as { content?: unknown }).content);
-			if (text.trim().length > 0) answer = text;
-		}
 	}
 
-	// Every branch point hangs its alternatives under the last user message at or before it: that is
-	// the card a person pressed, and the assistant answer between the two is the answer the
-	// alternatives answer.
+	// Every branch point hangs its alternatives under the card it names in `anchor`: the last question
+	// at or above it for a point on the line, and the way's own card for one below a way nobody is
+	// reading. The cards are collected as they are drawn, so a point can hang off a card an earlier
+	// point made — the server hands the points over ancestors first.
+	const cards = new Map<string, BranchWay>(ways.map((way) => [way.entryId, way]));
 	let options = 1;
-	for (const point of snapshot.branchPoints) {
-		const pointIndex = snapshot.messageEntryIds.indexOf(point.entryId);
-		if (pointIndex === -1) continue;
-		const host = ways[lastAtOrBefore(line, pointIndex)];
+	for (const point of points) {
+		const host = cards.get(point.anchor);
+		// A card the transcript cannot place (an entry with no user message above it, or one the
+		// window never drew) drops its point instead of hanging it somewhere it does not belong.
 		if (host === undefined) continue;
-		const turn = host.turn + (point.options.some((option) => option.role === "user") ? 1 : 0);
+		// A way opens with a question, so every card hanging off the host was asked one round later
+		// than the question the host card names.
+		const turn = host.turn + 1;
 		for (const option of point.options) {
 			// The active option is the line itself: its messages are already on it, further right.
 			if (option.active) continue;
-			host.branches.push({
+			const branch: BranchWay = {
 				entryId: option.entryId,
-				label: option.label.length > 0 ? option.label : option.answer.length > 0 ? option.answer : point.prompt,
-				question: option.role === "user" ? option.label : point.prompt,
-				answer: option.answer,
-				role: option.role,
+				// A way whose opening message carries no text of its own is named by the question above
+				// it: a card has one line, and a card with no name is a hole in the tree.
+				label: option.label.length > 0 ? option.label : point.prompt,
 				turn,
 				branches: [],
 				landing: "tip",
-			});
+			};
+			host.branches.push(branch);
+			cards.set(branch.entryId, branch);
 			options += 1;
 		}
 	}
@@ -282,17 +314,10 @@ export function buildBranchTree(snapshot: SessionSnapshot): BranchTree | undefin
 	return {
 		trunk: ways[0]!,
 		currentId: ways.at(-1)?.entryId,
-		points: snapshot.branchPoints.length,
+		points: points.length,
 		options,
 		line: new Set(ways.map((way) => way.entryId)),
 	};
-}
-
-/** The position of the last line entry at or before a message index. */
-function lastAtOrBefore(entries: readonly { index: number }[], index: number): number {
-	let found = -1;
-	for (let at = 0; at < entries.length && entries[at]!.index <= index; at += 1) found = at;
-	return found;
 }
 
 /** The first line of a message, which is what a card has room for. */
@@ -418,7 +443,7 @@ export function reduce(state: ViewState, message: ServerMessage): ViewState {
 				snapshot: message.session,
 				items: itemsFromSnapshot(message.session),
 				// The branch shape rides the same frame: a snapshot is the only thing that can change
-				// the points, so the fold runs here and nowhere else.
+				// the points, so the fold runs here and at each message end, where the line grows.
 				branchTree: buildBranchTree(message.session),
 				// A snapshot carries the ids of everything it shows, so nothing is left outstanding.
 				pendingEntries: [],
@@ -526,7 +551,16 @@ function applySessionEvent(state: ViewState, event: AgentSessionEvent): ViewStat
 			const items = upsertMessage(state.items, event.message, event.type === "message_end");
 			// A user entry is named before the loop echoes it, so its id waits here for the item.
 			const drained = drainEntries(items, state.pendingEntries);
-			return { ...state, items: drained.items, pendingEntries: drained.pending };
+			const next: ViewState = { ...state, items: drained.items, pendingEntries: drained.pending };
+			// The branch line grows with the transcript: an ended message either opens a new way (a
+			// user message) or answers the last one (an assistant message), and no baseline rides on
+			// a plain append. The points cannot have moved — only a baseline or a leaf move changes
+			// them — so the snapshot's own points are still the truth here. Without this regrow the
+			// page and the header's entry would sit frozen on the shape the last baseline carried.
+			if (event.type === "message_end" && state.snapshot !== undefined) {
+				next.branchTree = branchTreeFromItems(drained.items, state.snapshot.branchPoints);
+			}
+			return next;
 		}
 		case "message_update":
 			// A delta, not a message: the item it names grows by the characters that arrived, and
@@ -583,7 +617,7 @@ function applySessionEvent(state: ViewState, event: AgentSessionEvent): ViewStat
 			};
 		case "compaction_failed":
 			return { ...state, items: appendNote(state.items, `[压缩失败：${event.message}]`) };
-		case "pruned":
+		case "tool_results_cleared":
 			// The cleared results carry their own notice in the transcript, so this line only has to say
 			// how much went and what it was worth — the messages themselves already show what changed.
 			return {
@@ -593,7 +627,7 @@ function applySessionEvent(state: ViewState, event: AgentSessionEvent): ViewStat
 					`[已清理 ${event.cleared} 条过期工具结果：清理前约 ${event.tokensBefore} tokens，当前上下文约 ${event.contextTokens} tokens。]`,
 				),
 			};
-		case "arg_trimmed":
+		case "tool_call_args_trimmed":
 			// The trimmed calls carry their own "... [truncated] ..." marker in the transcript, so this
 			// line only has to say how much went and what it was worth.
 			return {
@@ -761,7 +795,6 @@ function upsertMessage(
 		content?: unknown;
 		timestamp?: number;
 		usage?: unknown;
-		summary?: string;
 		errorMessage?: string;
 	};
 	const role = record.role ?? "unknown";
@@ -775,14 +808,22 @@ function upsertMessage(
 	// (07). A message whose content is nothing but calls therefore has no body, and is dropped below.
 	const thinking = thinkingOf(record.content);
 
-	// A compaction checkpoint is a role of its own on the wire: its text is the summary, and it is the
-	// one thing in the transcript that stands for history the model no longer has verbatim.
-	let text = role === "compactionSummary" ? (record.summary ?? "") : contentToText(withoutToolCalls(withoutThinking(record.content)));
+	// A compaction checkpoint crosses the snapshot as a user message wrapped in the compaction tags:
+	// its stripped text is the summary, the one thing in the transcript that stands for history the
+	// model no longer has verbatim.
+	const summary =
+		role === "user"
+			? compactionSummaryOf({ role: "user", content: record.content, timestamp: 0 } as Message)
+			: undefined;
+	// The checkpoint keeps the display role it has always had: it is not something the user said, so
+	// the user bubble's copy seat and right-click menu must not reach it.
+	const displayRole = summary !== undefined ? "compactionSummary" : role;
+	let text = summary ?? contentToText(withoutToolCalls(withoutThinking(record.content)));
 	if (text.length === 0 && role === "assistant" && final && typeof record.errorMessage === "string") {
 		text = `错误：${record.errorMessage}`;
 	}
 
-	const id = `${role}:${String(record.timestamp ?? "unknown")}`;
+	const id = `${displayRole}:${String(record.timestamp ?? "unknown")}`;
 	let list = items;
 	let index = indexOfMessage(list, id);
 	// A frame that starts or advances a message the loop has not shown yet cannot legitimately
@@ -797,8 +838,19 @@ function upsertMessage(
 	// message, and it is still the frame that claims the identity. Without setting it aside here,
 	// the first delta to follow would land on the answer this message displaced.
 	if (index !== -1 && !final && !(list[index] as Extract<Item, { kind: "message" }>).streaming) {
-		list = renameMessage(list, index, freeMessageId(list, id));
-		index = -1;
+		// The same message twice is not the collision this rename exists for. A baseline that lands
+		// between the optimistic prompt write and the loop's own echo of it — the `branch_changed`
+		// frame a switched-to branch emits the moment the prompt is appended — replays the store's
+		// copy as a finished item, and the echo that follows is that message, not a newcomer.
+		// Renaming it out of the way drew the prompt twice, and the echo's item then also carried no
+		// entry id, so the branch line lost its fork seat. Two different messages stamped in the
+		// same millisecond never share the text, so the text is what tells them apart.
+		const finished = list[index] as Extract<Item, { kind: "message" }>;
+		const sameMessage = finished.role === displayRole && finished.text === text && text.length > 0;
+		if (!sameMessage) {
+			list = renameMessage(list, index, freeMessageId(list, id));
+			index = -1;
+		}
 	}
 
 	// A message with text is kept; so is one that is only reasoning so far, because that is the whole
@@ -806,11 +858,10 @@ function upsertMessage(
 	// that carries nothing to draw.
 	if (text.length === 0 && (thinking === undefined || thinking.text.length === 0)) return list;
 
-	const notice =
-		role === "compactionSummary" || text.startsWith("[上下文已压缩：") || text.startsWith("错误：");
+	const notice = summary !== undefined || text.startsWith("[上下文已压缩：") || text.startsWith("错误：");
 	const existing = index === -1 ? undefined : (list[index] as Extract<Item, { kind: "message" }>);
 	const carried = forkEntryId ?? existing?.forkEntryId;
-	const item: Extract<Item, { kind: "message" }> = { kind: "message", id, role, text, notice, streaming: !final };
+	const item: Extract<Item, { kind: "message" }> = { kind: "message", id, role: displayRole, text, notice, streaming: !final };
 	// The stamp and the usage ride on the message itself, so a reopened transcript draws the same
 	// meta row a watched run did. Both cross a process boundary as plain JSON, hence the guards.
 	if (typeof record.timestamp === "number") item.timestamp = record.timestamp;
@@ -1054,12 +1105,15 @@ function fileDiffOf(result: unknown): FileDiff | undefined {
 	const candidate = (details as { diff?: unknown } | null | undefined)?.diff;
 	if (typeof candidate !== "object" || candidate === null) return undefined;
 
-	const record = candidate as Partial<FileDiff>;
-	if (typeof record.path !== "string") return undefined;
+	// Older transcripts recorded this shape with `path`; the field is read-only data inside a
+	// session file, so the old spelling is read and normalized rather than refused.
+	const record = candidate as Partial<FileDiff> & { path?: unknown };
+	const relPath = typeof record.relPath === "string" ? record.relPath : typeof record.path === "string" ? record.path : undefined;
+	if (relPath === undefined) return undefined;
 	if (typeof record.added !== "number" || typeof record.removed !== "number") return undefined;
 	if (typeof record.created !== "boolean" || typeof record.omitted !== "number") return undefined;
 	if (!Array.isArray(record.lines) || !record.lines.every(isDiffLine)) return undefined;
-	return record as FileDiff;
+	return { ...record, relPath } as FileDiff;
 }
 
 function isDiffLine(line: unknown): boolean {

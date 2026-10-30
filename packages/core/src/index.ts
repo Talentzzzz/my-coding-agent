@@ -1,4 +1,4 @@
-export { Agent, lastAssistantText, type AgentConfig, type AgentSessionEvent, type SessionEventListener, type SessionListener } from "./agent.ts";
+export { Agent, type AgentConfig, type AgentSessionEvent, type SessionEventListener, type SessionListener } from "./agent.ts";
 export {
 	AGENT_HOME,
 	APP_NAME,
@@ -30,13 +30,12 @@ export {
 	ARG_TRIM_TOOLS,
 	trimmableToolArgEntryIds,
 	trimToolCallArgs,
-} from "./context/argtrim.ts";
+} from "./context/trim-tool-call-args.ts";
 export {
 	compact,
 	compactionThresholdFor,
 	estimateTokens,
 	prepareCompaction,
-	serializeConversation,
 	shouldCompact,
 	type CompactionPreparation,
 	type CompactionResult,
@@ -50,7 +49,7 @@ export {
 	clearToolResult,
 	isCacheProbablyExpired,
 	REFETCHABLE_TOOLS,
-} from "./context/pruning.ts";
+} from "./context/clear-tool-results.ts";
 export {
 	spillOversizedToolResult,
 	spillPathFor,
@@ -69,27 +68,26 @@ export {
 	type ToolResultContent,
 } from "./hooks.ts";
 export {
-	coerceModel,
+	coerceModelConfig,
 	isUnconfigured,
 	listModelOptions,
-	modelFor,
-	modelRefOf,
+	createModel,
+	DEFAULT_MODEL_NAME,
 	modelsPath,
 	NEW_MODEL_DEFAULTS,
 	normalizeThinkingLevel,
+	Model,
+	ModelConfigStore,
 	placeholderModel,
-	resolveModelRef,
-	rowFor,
-	rowNameFromRef,
 	thinkingLevelsFor,
 	unconfiguredStream,
-	UserModelStore,
+	type ModelConfig,
 	type ModelSource,
 	type ThinkingLevel,
-	type UserModel,
 } from "./models.ts";
 export { openAgent, readSessionSnapshot, type OpenAgentOptions } from "./session-factory.ts";
-export type { AgentEvent, AgentMessage, AgentTool } from "@my-agent/agent";
+export type { AgentEvent, AgentTool } from "@my-agent/loop";
+export type { Message } from "@my-agent/llm";
 export {
 	addUsage,
 	EMPTY_USAGE,
@@ -120,59 +118,44 @@ export {
 export {
 	COMPACTION_SUMMARY_PREFIX,
 	COMPACTION_SUMMARY_SUFFIX,
-	convertToLlm,
-	createCompactionSummaryMessage,
-	type CompactionSummaryMessage,
+	compactionSummaryOf,
 } from "./session/messages.ts";
 export {
-	ensureWorkspaceDir,
 	normalizePath,
 	resolvePath,
 	sessionPath,
 	sessionsDir,
 	workspaceDir,
-	workspaceDirName,
 } from "./session/paths.ts";
 export {
 	BRANCH_LABEL_MAX,
 	CURRENT_SESSION_VERSION,
 	SessionManager,
-	assertValidSessionId,
-	buildContextEntries,
-	buildSessionContext,
 	deriveTitle,
-	findMostRecentSession,
-	byModified,
 	groupSessionsByWorkspace,
-	loadEntriesFromFile,
-	modelChangeName,
 	sessionEntryToContextMessages,
 	shortenTitle,
 	toSessionRef,
-	toSessionRow,
 		type CompactionEntry,
-		type FileEntry,
-		type ArgTrimEntry,
+		type JsonlEntry,
+		type TrimToolCallArgEntry,
 		type BranchOption,
 		type BranchPoint,
 		type ModelChangeEntry,
-	type NewSessionOptions,
-	type PruneEntry,
+		type ClearToolResultEntry,
 	type RenameEntry,
 	type SessionContext,
 	type SessionEntry,
 	type SessionEntryBase,
 	type SessionHeader,
 	type SessionInfo,
-	type SessionMessageEntry,
+	type MessageEntry,
 	type ThinkingLevelChangeEntry,
 	type ToolConfigEntry,
 	type WorkspaceSessions,
 } from "./session/session-manager.ts";
 export { applyRecordedToolConfig } from "./session/tool-config.ts";
 export {
-	FileSettingsStorage,
-	InMemorySettingsStorage,
 	SettingsManager,
 	type SettingsPatch,
 	type SettingsScope,

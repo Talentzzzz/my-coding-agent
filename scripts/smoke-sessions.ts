@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { request } from "node:http";
-import type { AgentMessage } from "@my-agent/agent";
+import type { Message } from "@my-agent/llm";
 import { bootServer } from "../packages/server/src/boot.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import {
@@ -59,7 +59,7 @@ function get(url: string): Promise<ReadAnswer> {
 }
 
 /** A user message the transcript accepts; nothing here goes near a model. */
-function userMessage(text: string): AgentMessage {
+function userMessage(text: string): Message {
 	return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
 }
 
@@ -92,15 +92,15 @@ function ids(entries: readonly { id: string }[]): string {
 }
 
 /** The messages of a manager's current branch, which is what a provider would be sent. */
-function messagesOf(manager: SessionManager): AgentMessage[] {
+function messagesOf(manager: SessionManager): Message[] {
 	return manager.buildSessionContext().messages;
 }
 
 /** Open the stored file for a session id, the way a later process would. */
 function openFile(id: string): SessionManager {
-	const path = SessionManager.findById(root, id);
+	const path = SessionManager.findSessionFilePathById(id);
 	if (path === undefined) throw new Error(`no session file for ${id}`);
-	return SessionManager.open(path, workspaceDir(root), root);
+	return SessionManager.open(path);
 }
 
 /** Poll until `ready` holds, and report whether it did, so no test guesses at a reap's timing. */
@@ -113,7 +113,7 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
 	return ready();
 }
 
-const hub = new SessionHub({ cwd: root });
+const hub = new SessionHub({ absCwd: root });
 
 try {
 	process.stdout.write("one session per id\n");
@@ -250,7 +250,7 @@ try {
 	check("it is not running until someone claims it", !hub.live.includes(cold));
 	const coldFile = openFile(cold);
 	check("its branch ends where it was told to", coldFile.getLeafId() === onDisk.getLeafId());
-	check("and it points at the session it came from", coldFile.getHeader()?.parentSession === SessionManager.findById(root, forkedId));
+	check("and it points at the session it came from", coldFile.getHeader()?.parentSession === SessionManager.findSessionFilePathById(forkedId));
 	check("the other fork is a session of its own", secondFork.getSessionId() !== forkedId && secondFork.getSessionId() !== cold);
 
 	process.stdout.write("a listing resolves a fork's parent\n");
@@ -292,20 +292,20 @@ try {
 
 		hub.release(host);
 		check("the renamed session closes", await until(() => !hub.live.includes(renamedId)));
-		const rescanned = await SessionManager.rowForId(renamedId);
+		const rescanned = await SessionManager.findSessionRowById(renamedId);
 		check("the file's row carries the stored name", rescanned?.title === "新名字", rescanned?.title);
 		const reopened = await hub.claim(renamedId);
 		check("a reopen reports it too", reopened.session.snapshot.title === "新名字", reopened.session.snapshot.title);
 
 		const renameFork = await hub.fork(renamedId, null);
-		const forkRow = await SessionManager.rowForId(renameFork);
+		const forkRow = await SessionManager.findSessionRowById(renameFork);
 		check("a fork lands with the source's stored name", forkRow?.title === "新名字", forkRow?.title);
 		await hub.rename(renameFork, "另一条");
 		check(
 			"renaming the fork leaves the source alone",
-			(await SessionManager.rowForId(renamedId))?.title === "新名字" &&
-				(await SessionManager.rowForId(renameFork))?.title === "另一条",
-			`${(await SessionManager.rowForId(renamedId))?.title} / ${(await SessionManager.rowForId(renameFork))?.title}`,
+			(await SessionManager.findSessionRowById(renamedId))?.title === "新名字" &&
+				(await SessionManager.findSessionRowById(renameFork))?.title === "另一条",
+			`${(await SessionManager.findSessionRowById(renamedId))?.title} / ${(await SessionManager.findSessionRowById(renameFork))?.title}`,
 		);
 		await hub.release(reopened);
 	}
@@ -329,7 +329,7 @@ try {
 		const settings = SettingsManager.inMemory({ tools: ["read", "bash"] });
 		const manager = SessionManager.create(settingsRoot);
 		const options = {
-			workspaceRoot: settingsRoot,
+			absWorkspaceRoot: settingsRoot,
 			sessionManager: manager,
 			models: { list: () => [] },
 			settingsManager: settings,
@@ -382,7 +382,7 @@ try {
 	// Phase 1 in one section: a read answers from the JSONL log, leaves the registry exactly as it was,
 	// and agrees field-for-field with what claiming the same transcript reports — because both build
 	// their snapshot from the same parts.
-	const http = await bootServer({ cwd: root, port: 0 });
+	const http = await bootServer({ absCwd: root, port: 0 });
 	try {
 		const readId = await http.hub.newSession();
 		const opened = await http.hub.claim(readId);
@@ -476,31 +476,47 @@ try {
 		// never worked in is refused by nothing more than "exists and is a directory".
 		const elsewhere = await mkdtemp(join(tmpdir(), "my-agent-elsewhere-"));
 		try {
-			const created = await call("POST", `${http.url}/api/sessions`, { cwd: elsewhere });
+			const created = await call("POST", `${http.url}/api/sessions`, { absCwd: elsewhere });
 			check("a new directory is accepted (201)", created.status === 201, `status=${created.status}`);
 			const landed = String(created.payload.sessionId ?? "");
 			const landedRead = await get(`${http.url}/api/sessions/${landed}`);
 			check(
 				"and the session runs where it was told",
-				resolve(landedRead.session?.cwd ?? "") === resolve(elsewhere),
-				`${landedRead.session?.cwd}`,
+				resolve(landedRead.session?.absCwd ?? "") === resolve(elsewhere),
+				`${landedRead.session?.absCwd}`,
 			);
+			// A session writes nothing until its first message, so a listing taken at creation cannot
+			// name it — and that is the rule rather than a race: the sidebar lists conversations, and a
+			// conversation nobody has said anything in is not one. Speaking once is what puts it there.
 			check(
-				"the answer's listing is that directory's",
-				(created.payload.sessions as { id: string }[]).some((session) => session.id === landed),
+				"the answer's listing does not name a session with nothing said in it",
+				!(created.payload.sessions as { id: string }[]).some((session) => session.id === landed),
+			);
+			const spoke = await http.hub.claim(landed);
+			spoke.session.sessionManager.appendMessage(userMessage("a first message"));
+			http.hub.release(spoke);
+			const groups = ((await call("GET", `${http.url}/api/workspaces`)).payload.workspaces as {
+				absCwd: string;
+				sessions: { id: string }[];
+			}[]) ?? [];
+			const group = groups.find((candidate) => resolve(candidate.absCwd) === resolve(elsewhere));
+			check(
+				"and lists it under that directory once it has a message",
+				(group?.sessions ?? []).some((session) => session.id === landed),
+				JSON.stringify(group?.sessions),
 			);
 
 			await writeFile(join(elsewhere, "a-file"), "not a directory\n");
-			const missing = await call("POST", `${http.url}/api/sessions`, { cwd: join(elsewhere, "no-such-dir") });
+			const missing = await call("POST", `${http.url}/api/sessions`, { absCwd: join(elsewhere, "no-such-dir") });
 			check("a directory that does not exist is refused (400)", missing.status === 400, `status=${missing.status}`);
-			const notDir = await call("POST", `${http.url}/api/sessions`, { cwd: join(elsewhere, "a-file") });
+			const notDir = await call("POST", `${http.url}/api/sessions`, { absCwd: join(elsewhere, "a-file") });
 			check("a path that is not a directory is refused (400)", notDir.status === 400, `status=${notDir.status}`);
-			const wrongType = await call("POST", `${http.url}/api/sessions`, { cwd: 42 });
-			check("a non-string cwd is refused (400)", wrongType.status === 400, `status=${wrongType.status}`);
+			const wrongType = await call("POST", `${http.url}/api/sessions`, { absCwd: 42 });
+			check("a non-string absCwd is refused (400)", wrongType.status === 400, `status=${wrongType.status}`);
 			const bodyless = await call("POST", `${http.url}/api/sessions`);
 			check("an empty POST still creates (201)", bodyless.status === 201, `status=${bodyless.status}`);
 			const bodylessRead = await get(`${http.url}/api/sessions/${String(bodyless.payload.sessionId ?? "")}`);
-			check("and it runs where the server does", resolve(bodylessRead.session?.cwd ?? "") === resolve(root), bodylessRead.session?.cwd);
+			check("and it runs where the server does", resolve(bodylessRead.session?.absCwd ?? "") === resolve(root), bodylessRead.session?.absCwd);
 		} finally {
 			await rm(workspaceDir(elsewhere), { recursive: true, force: true });
 			await rm(elsewhere, { recursive: true, force: true });
@@ -523,89 +539,103 @@ try {
 		{
 			const home = await mkdtemp(join(tmpdir(), "my-agent-agent-home-"));
 			const host = await mkdtemp(join(tmpdir(), "my-agent-workspaces-"));
-			const http = await bootServer({ cwd: root, port: 0, settingsHome: home });
+			const http = await bootServer({ absCwd: root, port: 0, settingsHome: home });
 			const listed = async (): Promise<string[]> =>
-				(((await call("GET", `${http.url}/api/workspaces`)).payload.workspaces as { cwd: string }[]) ?? []).map(
-					(group) => resolve(group.cwd),
+				(((await call("GET", `${http.url}/api/workspaces`)).payload.workspaces as { absCwd: string }[]) ?? []).map(
+					(group) => resolve(group.absCwd),
 				);
 			const before = join(host, "before");
-			const after = join(host, "after");
 			const other = join(host, "other");
 			try {
-				// `after` is deliberately not created: renaming onto a directory that is already there is
-				// what Windows refuses with EPERM, and the whole point of the target checks below is that
-				// the client never has to read an errno to learn that. `other` is created, and earns its
-				// place by having a session of its own.
 				for (const dir of [before, other]) await mkdir(dir, { recursive: true });
 
-				const created = await call("POST", `${http.url}/api/sessions`, { cwd: before });
+				const created = await call("POST", `${http.url}/api/sessions`, { absCwd: before });
 				const id = String(created.payload.sessionId ?? "");
-				const elsewhere = await call("POST", `${http.url}/api/sessions`, { cwd: other });
+				const elsewhere = await call("POST", `${http.url}/api/sessions`, { absCwd: other });
+				// A directory earns its group by holding a conversation, and a session has no file until
+				// its first message — so each of these says one thing before the sidebar can draw it.
+				const speak = async (sessionId: string, text: string): Promise<void> => {
+					const host = await http.hub.claim(sessionId);
+					host.session.sessionManager.appendMessage(userMessage(text));
+					http.hub.release(host);
+				};
+				await speak(id, "before");
+				await speak(String(elsewhere.payload.sessionId ?? ""), "other");
 				check("two new directories are listed as two workspaces", (await listed()).includes(resolve(before)) && (await listed()).includes(resolve(other)));
 
-				const malformed = await call("POST", `${http.url}/api/workspaces/hide`, { cwd: 42 });
+				const malformed = await call("POST", `${http.url}/api/workspaces/hide`, { absCwd: 42 });
 				check("hiding with a non-string path is refused (400)", malformed.status === 400, `status=${malformed.status}`);
-				const unknown = await call("POST", `${http.url}/api/workspaces/rename`, { from: join(host, "nowhere"), to: after });
-				check("renaming a workspace this machine does not list is a 404", unknown.status === 404, `status=${unknown.status}`);
-				const same = await call("POST", `${http.url}/api/workspaces/rename`, { from: before, to: before });
-				check("renaming a workspace onto itself is refused (400)", same.status === 400, `status=${same.status}`);
-				const missingParent = await call("POST", `${http.url}/api/workspaces/rename`, {
-					from: before,
-					to: join(host, "no-such-parent", "x"),
-				});
-				check("a target whose parent is missing is refused (409)", missingParent.status === 409, `status=${missingParent.status}`);
-				const taken = await call("POST", `${http.url}/api/workspaces/rename`, { from: before, to: other });
-				check("renaming onto another workspace's directory is refused (409)", taken.status === 409, `status=${taken.status}`);
 
-				const busy = await http.hub.claim(id);
-				const held = await call("POST", `${http.url}/api/workspaces/rename`, { from: before, to: after });
-				check("a workspace with a live session refuses to move (409)", held.status === 409, `status=${held.status}`);
-				check("and nothing moved for it", existsSync(before) && !existsSync(after));
-				http.hub.release(busy);
-				check("the claim lets go", await until(() => !http.hub.live.includes(id)));
+				// A name is a label, so the refusals a move needed — a target already taken, a missing
+				// parent — have nothing to answer here. What is left is whether the path is one this
+				// machine lists, and whether a name arrived at all.
+				const unknown = await call("POST", `${http.url}/api/workspaces/rename`, { absCwd: join(host, "nowhere"), name: "x" });
+				check("naming a workspace this machine does not list is a 404", unknown.status === 404, `status=${unknown.status}`);
+				const wrongName = await call("POST", `${http.url}/api/workspaces/rename`, { absCwd: before, name: 42 });
+				check("a non-string name is refused (400)", wrongName.status === 400, `status=${wrongName.status}`);
 
-				const renamed = await call("POST", `${http.url}/api/workspaces/rename`, { from: before, to: after });
-				check("the rename is accepted (200)", renamed.status === 200, `status=${renamed.status}`);
-				check("the answer names the new path", resolve(String(renamed.payload.cwd ?? "")) === resolve(after), JSON.stringify(renamed.payload));
-				check("and names the sessions it carried", ((renamed.payload.sessions as string[]) ?? []).includes(id), JSON.stringify(renamed.payload.sessions));
-				const moved = await get(`${http.url}/api/sessions/${id}`);
-				check("the session's own record follows the workspace", resolve(moved.session?.cwd ?? "") === resolve(after), moved.session?.cwd);
-				check("the group is listed under the new path", (await listed()).includes(resolve(after)));
-				check("nothing is listed under the old path", !(await listed()).includes(resolve(before)));
-				check("and the folder itself moved", !existsSync(before) && existsSync(after));
+				const named = await call("POST", `${http.url}/api/workspaces/rename`, { absCwd: before, name: "改过的名字" });
+				check("naming a workspace is accepted (200)", named.status === 200, `status=${named.status}`);
+				check("the answer names the path it was asked about", resolve(String(named.payload.absCwd ?? "")) === resolve(before), JSON.stringify(named.payload));
+				const namedSet = (named.payload.settings as { workspaceNames?: Record<string, string> })?.workspaceNames ?? {};
+				check("and the settings carry the label", namedSet[resolve(before)] === "改过的名字", JSON.stringify(namedSet));
+				const storedNames = ((await call("GET", `${http.url}/api/settings`)).payload.settings as { workspaceNames?: Record<string, string> })
+					?.workspaceNames ?? {};
+				check("a later read sees it too", storedNames[resolve(before)] === "改过的名字", JSON.stringify(storedNames));
 
-				const hidden = await call("POST", `${http.url}/api/workspaces/hide`, { cwd: after });
+				// Nothing on disk moves, which is the whole difference from the folder rename this
+				// replaced: the directory, the store keyed by it, and the header's absCwd all stay put.
+				check("the folder is exactly where it was", existsSync(before));
+				const kept = await get(`${http.url}/api/sessions/${id}`);
+				check("the session still names its own directory", resolve(kept.session?.absCwd ?? "") === resolve(before), kept.session?.absCwd);
+				check("and its transcript is still under that key", (await SessionManager.list(before)).some((session) => session.id === id));
+				check("the listing draws the path, not the label", (await listed()).includes(resolve(before)));
+
+				const cleared = await call("POST", `${http.url}/api/workspaces/rename`, { absCwd: before, name: "  " });
+				const clearedSet = (cleared.payload.settings as { workspaceNames?: Record<string, string> })?.workspaceNames ?? {};
+				check("an empty name takes the label back (200)", cleared.status === 200 && (clearedSet[resolve(before)] ?? "") === "", JSON.stringify(cleared.payload));
+
+				const hidden = await call("POST", `${http.url}/api/workspaces/hide`, { absCwd: before });
 				check("hiding a workspace is accepted (200)", hidden.status === 200, `status=${hidden.status}`);
-				check("the answer's listing no longer draws the group", !((hidden.payload.workspaces as { cwd: string }[]) ?? []).some((group) => resolve(group.cwd) === resolve(after)));
+				check("the answer's listing no longer draws the group", !((hidden.payload.workspaces as { absCwd: string }[]) ?? []).some((group) => resolve(group.absCwd) === resolve(before)));
 				check(
 					"and the stored setting records it",
-					((hidden.payload.settings as { hiddenWorkspaces?: string[] })?.hiddenWorkspaces ?? []).some((path) => resolve(path) === resolve(after)),
+					((hidden.payload.settings as { hiddenWorkspaces?: string[] })?.hiddenWorkspaces ?? []).some((path) => resolve(path) === resolve(before)),
 				);
-				check("the next listing leaves it out too", !(await listed()).includes(resolve(after)));
-				check("but the folder is exactly where it was", existsSync(after));
-				check("and the transcript is untouched", SessionManager.findById(after, id) !== undefined);
+				check("the next listing leaves it out too", !(await listed()).includes(resolve(before)));
+				check("but the folder is exactly where it was", existsSync(before));
+				check("and the transcript is untouched", (await SessionManager.list(before)).some((session) => session.id === id));
 				check("the other workspace is still listed", (await listed()).includes(resolve(other)));
 
 				const restored = await call("PATCH", `${http.url}/api/settings`, { patch: { hiddenWorkspaces: [] } });
 				check("an empty hidden list is stored as a choice (200)", restored.status === 200, `status=${restored.status}`);
-				check("and the group comes back", (await listed()).includes(resolve(after)));
+				check("and the group comes back", (await listed()).includes(resolve(before)));
 
 				// 删除 is not a one-way door, and this is the door: the transcripts and the folder were
 				// never touched, so a new session in that directory is the user saying they want it listed
 				// again. Nothing else in the window can un-hide one, which is why the road has to exist.
-				const hiddenAgain = await call("POST", `${http.url}/api/workspaces/hide`, { cwd: after });
+				const hiddenAgain = await call("POST", `${http.url}/api/workspaces/hide`, { absCwd: before });
 				check("hiding it a second time is accepted (200)", hiddenAgain.status === 200, `status=${hiddenAgain.status}`);
-				check("and it leaves the listing again", !(await listed()).includes(resolve(after)));
-				const reborn = await call("POST", `${http.url}/api/sessions`, { cwd: after });
+				check("and it leaves the listing again", !(await listed()).includes(resolve(before)));
+				const reborn = await call("POST", `${http.url}/api/sessions`, { absCwd: before });
 				check("a new session in it is accepted (201)", reborn.status === 201, `status=${reborn.status}`);
-				check("a new session in a put-aside workspace lists it again", (await listed()).includes(resolve(after)));
+				check("a new session in a put-aside workspace lists it again", (await listed()).includes(resolve(before)));
 				const storedHidden =
 					(((await call("GET", `${http.url}/api/settings`)).payload.settings as { hiddenWorkspaces?: string[] })?.hiddenWorkspaces ?? []);
-				check("and the stored list no longer names it", !storedHidden.some((path) => resolve(path) === resolve(after)), JSON.stringify(storedHidden));
+				check("and the stored list no longer names it", !storedHidden.some((path) => resolve(path) === resolve(before)), JSON.stringify(storedHidden));
+
+				// A user can rename a folder behind this process's back. The transcripts stay in the store,
+				// so the group is still listed — and a new session there puts the directory back instead of
+				// failing on a path nothing on screen says is gone.
+				await rm(before, { recursive: true, force: true });
+				check("the workspace directory is gone", !existsSync(before));
+				const putBack = await call("POST", `${http.url}/api/sessions`, { absCwd: before });
+				check("a new session puts the directory back (201)", putBack.status === 201, `status=${putBack.status}`);
+				check("and the folder exists again", existsSync(before));
 				void elsewhere;
 			} finally {
-				for (const dir of [before, after, other]) await rm(workspaceDir(dir), { recursive: true, force: true });
-				for (const dir of [before, after, other]) await rm(dir, { recursive: true, force: true });
+				for (const dir of [before, other]) await rm(workspaceDir(dir), { recursive: true, force: true });
+				for (const dir of [before, other]) await rm(dir, { recursive: true, force: true });
 				await rm(host, { recursive: true, force: true });
 				await http.close();
 				await rm(home, { recursive: true, force: true });
@@ -646,7 +676,7 @@ try {
 			check("and then it is a 404", gone.status === 404, `status=${gone.status}`);
 			const second = await call("DELETE", `${http.url}/api/sessions/${victim}`);
 			check("a second delete is a 404 too", second.status === 404, `status=${second.status}`);
-			check("and the file is really gone", SessionManager.findById(root, victim) === undefined);
+			check("and the file is really gone", SessionManager.findSessionFilePathById(victim) === undefined);
 		}
 	} finally {
 		await http.close();

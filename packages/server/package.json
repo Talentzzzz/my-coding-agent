@@ -7,8 +7,7 @@
 	"main": "./src/main.ts",
 	"scripts": {
 		"dev": "node src/main.ts --vite",
-		"start": "node src/main.ts",
-		"cli": "node src/cli.ts"
+		"start": "node src/main.ts"
 	},
 	"dependencies": {
 		"@my-agent/core": "workspace:*"

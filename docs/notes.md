@@ -28,7 +28,7 @@
 
 **部分失效**：~~"每条事件流一个 claim"~~ 这一句**失效**——claim 本身原样活着，新版 claim 的持有者只有两类（会改变会话的请求，以及**在飞的运行**）。上面那句"`claim` 只用于……"与重命名禁令原样有效；订阅不拿 claim 也是在这条之上定的。
 
-### `packages/ai` 与 `packages/agent` 一行都不改 —— **保留**
+### `packages/llm` 与 `packages/loop` 一行都不改 —— **保留**
 
 两者都是 vendored 代码；这些改动属于 core + server 范围。不引入 plugin / MCP 机制。
 
@@ -38,18 +38,18 @@
 
 ### 不要"顺手修好" `scripts/smoke-approval.ts` 前半段那个怪异之处 —— **保留**
 
-它构造 `new SessionHub({ workspaceRoot: root })`，而 `HubOptions` 声明的是 `cwd`。它能通过，是因为该脚本自己驱动自己构建的会话。**保持原样**——第二阶段新增的测试台用的是正确的 `cwd`，别去动旧的那个。
+它构造 `new SessionHub({ workspaceRoot: root })`，而 `HubOptions` 声明的是 `absCwd`（改名前是 `cwd`）。它能通过，是因为该脚本自己驱动自己构建的会话。**保持原样**——第二阶段新增的测试台用的是正确的 `cwd`，别去动旧的那个。
 
 ### 第四阶段的四个决定（均于 2026-02-19 拍板）—— **D1 保留，D0 / D2 / D3 被 ADR-0001 取代**
 
 | 编号 | 问题 | 结论 |
 |---|---|---|
 | D0 | 是否采纳"流随运行存活" | ~~**采纳。**~~ **取代**：流改随**订阅者**存活——D0 当时明知并接受的那项代价（看不到别处启动的运行），正是 ADR-0001 换来的那项收益 |
-| D1 | `GET /api/sessions/current` 是否停止创建会话 | **继续创建（保留）。** `resolveCurrentId()` 在无历史时仍回落到 `SessionManager.create(this.cwd)`，`SystemController.current()` 的 `sessionId` 保持必填 |
+| D1 | `GET /api/sessions/current` 是否停止创建会话 | **继续创建（保留）。** `resolveCurrentId()` 在无历史时仍回落到 `SessionManager.create(this.absCwd)`，`SystemController.current()` 的 `sessionId` 保持必填 |
 | D2 | 空闲流如何结束，才能让浏览器不重连 | ~~**合用一个终帧 `{ type: "stream_end" }`。**~~ **取代**：终帧改叫 `end`、不带原因，判据是"这条逻辑流上有没有过 `baseline`" |
 | D3 | 发送路径无法挂上流时，还要不要发送 | ~~**报告失败且不发送。**~~ **取代**：订阅改在 POST 之前建立，失败改按形状落到 transcript 或 `item.error` |
 
-**D1 的一个已知后果**：打开应用仍然会写下一个 JSONL 头文件（`hub.claim()` 不带 id 时会经 `currentId()` 解析；该回落后来收紧成 `claim(sessionId)`，所以今天唯一的生产者是 `GET /api/sessions/current`，客户端每页只调一次）。这是"读形状的请求带写副作用"，被明确接受。
+**D1 的一个已知后果（已消解）**：`GET /api/sessions/current` 在空工作区仍然会创建一条会话（`resolveCurrentId()` 回落到 `SessionManager.create(this.absCwd)`；客户端每页只调一次），但那条会话不再落盘——`create()` 不写 header，文件随第一条消息出现。于是"读形状的请求带写副作用"这件事今天不再成立：读一份空历史只换来进程内的一份 manager，盘上没有任何文件。
 
 **本节只记"哪些结论作废"，不记理由。** 理由在 [ADR-0001](adr/0001-transport-websocket-mux.md) 或它引的票里；另外，上面那句"对浏览器而言两种结束是同一个事实"是 `EventSource` 时代的事实，随传输切换一并退场。
 

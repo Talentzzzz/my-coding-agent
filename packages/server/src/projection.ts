@@ -48,15 +48,6 @@ export interface SessionProjection {
 	 * does, and overlaying them is what keeps a rename from idling a working row.
 	 */
 	refresh(sessionId: string): Promise<void>;
-	/**
-	 * Re-read the rows of a workspace that was renamed on disk, and publish them.
-	 *
-	 * A rename moves *every* session of the workspace at once, so this is the plural of
-	 * {@link refresh} and rides the same road: one re-read per file, published whole, which is what
-	 * tells every open window that the group moved without any of them asking again. Ids this store
-	 * does not hold are skipped — a row nobody drew is not a row to send.
-	 */
-	repath(sessionIds: readonly string[]): Promise<void>;
 	/** Drop one row and stop following its session: the session behind it has been deleted. */
 	forget(sessionId: string): void;
 	/** Let go of everything this projection attached to the hub. */
@@ -90,6 +81,14 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	const goneListeners = new Set<RowGoneListener>();
 	/** The live sessions being followed, with the unsubscribers that let them go again. */
 	const following = new Map<string, { host: HostedSession; off: () => void }>();
+	/**
+	 * Ids whose row is being read for the first time.
+	 *
+	 * A session created but never spoken in has no file, so no row and no scan accounts for it. Its
+	 * first message is what puts it on disk, and that message arrives as one of a burst of entries —
+	 * this keeps the burst to one read instead of one per entry.
+	 */
+	const probing = new Set<string>();
 	/**
 	 * The scan, once.
 	 *
@@ -159,7 +158,17 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	 */
 	const onEvent = (sessionId: string, host: HostedSession, event: AgentSessionEvent): void => {
 		const current = rows.get(sessionId);
-		if (current === undefined) return;
+		if (current === undefined) {
+			// No row means this session was created and has only just been written to: the creation
+			// itself leaves nothing on disk. The first entry is therefore the moment the row can be
+			// read at all, and reading it here is what makes the session appear in the sidebar when it
+			// starts rather than when some later host change happens to re-probe it. Until then it is
+			// deliberately absent — an empty「新会话」row is not a conversation.
+			if (event.type !== "entry_appended" || probing.has(sessionId)) return;
+			probing.add(sessionId);
+			void refresh(sessionId).finally(() => probing.delete(sessionId));
+			return;
+		}
 		const manager = host.session.sessionManager;
 
 		if (event.type === "branch_changed") {
@@ -182,13 +191,14 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	 * Read one session's row off disk.
 	 *
 	 * Only for a session that no scan has accounted for: created or forked by this process, or dropped
-	 * into the store by hand. One file, not the machine — a scan here would cost a full parse of every
-	 * transcript to learn about the one session that just appeared.
+	 * into the store by hand. The id has to be located first, which reads every store's headers, but
+	 * only the file that matched is parsed — the alternative, a listing, would parse every transcript
+	 * to learn about the one session that just appeared.
 	 *
 	 * A session nobody is running may not have a file yet at all, and says so by answering `undefined`;
 	 * the row then appears when the session first writes, which is also when the host opens.
 	 */
-	const probe = (sessionId: string): Promise<SessionRow | undefined> => SessionManager.rowForId(sessionId);
+	const probe = (sessionId: string): Promise<SessionRow | undefined> => SessionManager.findSessionRowById(sessionId);
 
 	/**
 	 * Re-read one row and publish it, live fields included.
@@ -328,11 +338,6 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 		refresh(sessionId: string): Promise<void> {
 			return refresh(sessionId);
 		},
-		async repath(sessionIds: readonly string[]): Promise<void> {
-			for (const sessionId of sessionIds) {
-				if (rows.has(sessionId)) await refresh(sessionId);
-			}
-		},
 		forget(sessionId: string): void {
 			forget(sessionId);
 		},
@@ -368,7 +373,7 @@ function liveOf(host: HostedSession): LiveFields {
  */
 const ROW_FIELDS = [
 	"id",
-	"cwd",
+	"absCwd",
 	"createdAt",
 	"title",
 	"parentId",

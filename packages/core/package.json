@@ -12,8 +12,8 @@
 		"./tools": "./src/tools/index.ts"
 	},
 	"dependencies": {
-		"@my-agent/agent": "workspace:*",
-		"@my-agent/ai": "workspace:*",
+		"@my-agent/loop": "workspace:*",
+		"@my-agent/llm": "workspace:*",
 		"typebox": "^1.3.27"
 	}
 }

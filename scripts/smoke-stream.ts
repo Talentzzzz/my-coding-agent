@@ -22,7 +22,7 @@ import { Router } from "../packages/server/src/http/routing.ts";
 import { createServer } from "../packages/server/src/http.ts";
 import { createFakeTransport, fakeAssistantMessage, type FakeTransport } from "./fake-transport.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
-import type { UserModel } from "@my-agent/core";
+import type { ModelConfig } from "@my-agent/core";
 
 let failures = 0;
 
@@ -75,12 +75,12 @@ const QUIET_MS = 700;
 /** Slow enough that a run is observably in flight; fast enough to keep the whole smoke sub-minute. */
 const TOKENS_PER_SECOND = 400;
 
-const rows: UserModel[] = [
+const rows: ModelConfig[] = [
 	{
 		name: "scripted",
 		baseUrl: "http://127.0.0.1:1/v1",
 		apiKey: "unused-by-the-scripted-transport",
-		modelId: "claude-sonnet-4-5",
+		id: "claude-sonnet-4-5",
 		contextWindow: 200_000,
 		maxTokens: 8_192,
 		reasoning: false,
@@ -98,7 +98,7 @@ async function openRig(): Promise<Rig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-stream-"));
 	const transport = createFakeTransport({ tokensPerSecond: TOKENS_PER_SECOND });
 	const hub = new SessionHub({ cwd: root, api: transport.api });
-	hub.setUserModels(rows);
+	hub.setModelConfigs(rows);
 
 	const projection = createSessionProjection(hub);
 	const mux = createMuxServer(hub, projection, { heartbeatIntervalMs: 150 });

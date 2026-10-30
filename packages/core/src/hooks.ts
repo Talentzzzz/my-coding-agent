@@ -1,4 +1,5 @@
-import type { AgentMessage, AgentToolResult } from "@my-agent/agent";
+import type { AgentToolResult } from "@my-agent/loop";
+import type { Message } from "@my-agent/llm";
 import { truncate } from "./tools/truncate.ts";
 
 /** How a tool result carries its content: text and image blocks, in order. */
@@ -17,8 +18,8 @@ type MaybePromise<T> = T | Promise<T>;
  */
 export interface HookMap {
 	/** Rewrite what goes to the provider. Default: fresh system message + the store's messages. */
-	context: (event: { messages: AgentMessage[]; systemPrompt: string }) => MaybePromise<
-		{ messages?: AgentMessage[]; systemPrompt?: string } | undefined
+	context: (event: { messages: Message[]; systemPrompt: string }) => MaybePromise<
+		{ messages?: Message[]; systemPrompt?: string } | undefined
 	>;
 	/** Runs before a tool call. Default: the approval gate. */
 	before_tool: (event: { toolCallId: string; toolName: string; args: unknown }) => MaybePromise<

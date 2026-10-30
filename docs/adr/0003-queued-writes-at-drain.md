@@ -45,7 +45,7 @@ U1 → A1 → U2 → A2   （循环实际回放给模型的顺序：U2 在上一
 
 - `steer` / `followUp` 两条队列、`steeringMode` / `followUpMode`、`snapshot.queued` 的含义与「只算 follow-up」这条算法。
 - 启动运行的那条 prompt 仍然乐观落盘（它是循环的输入，没有"更晚的取走点"可等）。
-- 循环一行没改：`packages/agent` 是 vendored 的，取走点仍是 `getSteeringMessages` / `getFollowUpMessages`。
+- 循环一行没改：`packages/loop` 是 vendored 的，取走点仍是 `getSteeringMessages` / `getFollowUpMessages`。
 - 窗口侧**不做**次序补偿。基线就是真相；补偿是第二事实源。
 
 ## 代价与后果
@@ -61,3 +61,7 @@ U1 → A1 → U2 → A2   （循环实际回放给模型的顺序：U2 在上一
 ## 不可逆性
 
 反悔要同时动三处以上：`packages/core/src/agent.ts` 的 `prompt` / `handleEvent` / `flushAccepted`、`scripts/smoke-session.ts` 里三条按新顺序写死的断言、以及 `docs/architecture.md` 的「流式期间的输入」一节；并且要重新承认「请求的顺序」与「文件的顺序」是两份东西。
+
+## 后记（2026-10，状态所有权重构之后）
+
+本文写作时队列还在循环手里，文中 `loop.clearAllQueues()` 与「循环一行没改」的说法按当时的事实成立。此后 `packages/loop` 的 `Loop` 改为无状态运行引擎：steer / followUp 两条队列搬进了会话（`packages/core/src/session/queues.ts`），`flushAccepted` 清的也是会话自己的队列；循环不再持有 transcript、工具与模型，一次运行按次接收它们。本文的落盘点决策——接受只记账、取走点落盘、运行结束补写——没有变化，只是「清空队列」这一步的执行者从循环换成了会话。

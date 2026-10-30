@@ -4,7 +4,7 @@ import {
 	clampFontSize,
 	clampSidebarWidth,
 	clampWorkspacePaging,
-	coerceModel,
+	coerceModelConfig,
 	type ConfigPatch,
 	DEFAULT_MODE_NAME,
 	listModelOptions,
@@ -13,7 +13,6 @@ import {
 	shortenTitle,
 	type ModelOption,
 	type ModelSelection,
-	resolveModelRef,
 	resolvePath,
 	type SessionRef,
 	type SessionSnapshot,
@@ -21,13 +20,13 @@ import {
 	type SettingsSnapshot,
 	SettingsManager,
 	toSessionRef,
-	type UserModel,
+	type ModelConfig,
 	type WorkspaceGroup,
 	type WorkspacePaging,
 } from "@my-agent/core";
 import { dirname, resolve, sep } from "node:path";
 import { httpStatus } from "../http/errors.ts";
-import { samePath, workspaceRootOrThrow, type SessionHub } from "../hub.ts";
+import { samePath, workspaceRootForCreate, workspaceRootOrThrow, type SessionHub } from "../hub.ts";
 
 /** The stored sessions for a workspace, narrowed from the session files to what the wire carries. */
 export async function listSessions(workspaceRoot: string): Promise<SessionRef[]> {
@@ -38,6 +37,7 @@ export async function listSessions(workspaceRoot: string): Promise<SessionRef[]>
 function settingsOf(manager: SettingsManager): SettingsSnapshot {
 	const settings = manager.getSettings();
 	const hidden = manager.getHiddenWorkspaces();
+	const names = manager.getWorkspaceNames();
 	return {
 		appearance: manager.getAppearance(),
 		approval: manager.getApprovals(),
@@ -45,6 +45,7 @@ function settingsOf(manager: SettingsManager): SettingsSnapshot {
 		...(settings.tools === undefined ? {} : { tools: settings.tools }),
 		...(settings.modes === undefined ? {} : { modes: settings.modes }),
 		...(hidden.length === 0 ? {} : { hiddenWorkspaces: hidden }),
+		...(Object.keys(names).length === 0 ? {} : { workspaceNames: names }),
 		...(settings.model === undefined ? {} : { model: settings.model }),
 		...(settings.defaultModelSeeded === undefined ? {} : { defaultModelSeeded: settings.defaultModelSeeded }),
 	};
@@ -71,18 +72,10 @@ export interface SessionListener {
 	/** A session was deleted. The projection drops its row, and the transport tells its clients. */
 	onRemoved?(sessionId: string): void;
 	/**
-	 * A workspace was renamed on disk, so every session row it holds now names a different `cwd`.
-	 *
-	 * The plural of {@link onRenamed} and told the same way: the caller re-reads each row off disk and
-	 * the ordinary `session_row` frame carries the new path to every window, so a client that has the
-	 * group open learns the move from the same road any other row change takes.
-	 */
-	onWorkspaceRenamed?(cwd: string, sessionIds: readonly string[]): void;
-	/**
 	 * A workspace entered or left the machine's listing: it was put aside, or taken back.
 	 *
-	 * Unlike {@link onWorkspaceRenamed}, no row changed, so there is no `session_row` frame that could
-	 * carry this: the group list itself is what moved, and the transport answers by re-sending the
+	 * No row changed, so there is no `session_row` frame that could carry this: the group list itself
+	 * is what moved, and the transport answers by re-sending the
 	 * overview the rows are drawn from. A window told nothing would keep drawing a group the server
 	 * has stopped listing — which is the one thing 「删除」 promises not to happen.
 	 */
@@ -113,8 +106,8 @@ export class SystemController {
 		this.listeners = listeners;
 	}
 
-	health(): { ok: boolean; cwd: string; live: readonly string[] } {
-		return { ok: true, cwd: this.hub.cwd, live: this.hub.live };
+	health(): { ok: boolean; absCwd: string; live: readonly string[] } {
+		return { ok: true, absCwd: this.hub.absCwd, live: this.hub.live };
 	}
 
 	models(): ModelOption[] {
@@ -142,7 +135,7 @@ export class SystemController {
 		if (!Array.isArray(input)) throw httpStatus.badRequest("`models` must be an array");
 
 		const stored = new Map(this.hub.userModels.map((model) => [model.name, model.apiKey]));
-		const rows: UserModel[] = [];
+		const rows: ModelConfig[] = [];
 		for (const entry of input) {
 			if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
 				throw httpStatus.badRequest("Every model must be a JSON object");
@@ -152,9 +145,9 @@ export class SystemController {
 			const carried = name === undefined ? undefined : stored.get(name);
 			const candidate = record.apiKey === undefined && carried !== undefined ? { ...record, apiKey: carried } : record;
 
-			const model = coerceModel(candidate);
+			const model = coerceModelConfig(candidate);
 			if (model === undefined) {
-				throw httpStatus.badRequest("Every model needs a `modelId` and a `baseUrl`, and a name of its own");
+				throw httpStatus.badRequest("Every model needs a `id` and a `baseUrl`, and a name of its own");
 			}
 			if (rows.some((row) => row.name === model.name)) {
 				throw httpStatus.badRequest(`The name "${model.name}" is already in use`);
@@ -162,76 +155,46 @@ export class SystemController {
 			rows.push(model);
 		}
 
-		this.hub.setUserModels(rows);
+		this.hub.setModelConfigs(rows);
 		return { models: listModelOptions(rows) };
 	}
 
 	/** Every workspace this machine has sessions for, each with its own list, most recent first. */
 	async workspaces(): Promise<{ workspaces: WorkspaceGroup[] }> {
-		return { workspaces: (await SessionManager.listWorkspaces()).filter((group) => this.hub.listsWorkspace(group.cwd)) };
+		return { workspaces: (await SessionManager.listWorkspaces()).filter((group) => this.hub.listsWorkspace(group.absCwd)) };
 	}
 
 	/**
-	 * Rename a workspace's folder, and carry its sessions along.
+	 * Give a workspace a name this window shows instead of its folder name.
 	 *
-	 * The two halves are one operation rather than two endpoints, because half of it is worse than
-	 * neither: a moved directory whose transcripts still name the old path is every session unfindable
-	 * by the workspace it claims, and a rewritten store whose directory never moved is the same
-	 * problem from the other side.
+	 * A view decision, and deliberately the only rename this app offers: a workspace is identified by
+	 * the directory its transcripts recorded, so renaming that directory would be a *move*. It would
+	 * have to rewrite every header, it would break the moment the user renamed the folder behind our
+	 * back, and it would put a destructive operation behind a menu item that reads like a label. What
+	 * the user types here goes into the settings and nowhere else; the folder keeps the name the file
+	 * system gave it, and every session keeps the `absCwd` its header holds.
 	 *
-	 * The paths are the client's to build — it is the side that knows what the user typed, and the
-	 * name they typed is a *segment* appended to the directory the group already names. What arrives
-	 * here is therefore two absolute directories, and the checks below are the ones only this side can
-	 * make: that the source is a workspace this machine actually lists, and that the target is not one
-	 * of the others.
+	 * An empty name takes the custom name back, so the heading wears the folder's own name again.
 	 */
-	async renameWorkspace(body: Record<string, unknown>): Promise<{ cwd: string; sessions: string[] }> {
-		const from = body.from;
-		const to = body.to;
-		if (typeof from !== "string" || from.trim().length === 0) {
-			throw httpStatus.badRequest("`from` must be a workspace path");
+	async renameWorkspace(body: Record<string, unknown>): Promise<{ absCwd: string; name: string; settings: SettingsSnapshot }> {
+		const absCwd = body.absCwd;
+		const name = body.name;
+		if (typeof absCwd !== "string" || absCwd.trim().length === 0) {
+			throw httpStatus.badRequest("`absCwd` must be a workspace path");
 		}
-		if (typeof to !== "string" || to.trim().length === 0) {
-			throw httpStatus.badRequest("`to` must be a workspace path");
-		}
+		if (typeof name !== "string") throw httpStatus.badRequest("`name` must be a string");
 
-		const source = resolve(from);
-		const target = resolve(to);
-		// A rename onto itself is asked and answered before anything is looked up: it is not a move, so
-		// the "that directory is taken" check below would otherwise find the source occupying its own
-		// destination and call it a conflict, which names the wrong thing.
-		if (samePath(source, target)) throw httpStatus.badRequest("新名字不能还是同一个目录。");
-
-		const manager = this.hub.settingsFor(this.hub.cwd);
+		const absSource = resolve(absCwd);
+		// The same check the listing makes: a path this machine has no sessions for is not a workspace,
+		// so naming it would store a label nothing ever draws.
 		const groups = await SessionManager.listWorkspaces();
-		if (!groups.some((group) => samePath(group.cwd, source))) {
-			throw httpStatus.notFound(`Unknown workspace: ${source}`);
-		}
-		if (groups.some((group) => samePath(group.cwd, target))) {
-			throw httpStatus.conflict(`另一个工作区已经在用这个目录：${target}`);
-		}
-		// The destination has to be a directory the moved workspace can land in, checked before the
-		// move rather than after it: a missing parent would otherwise be discovered by `rename`, which
-		// answers with a bare errno — a 500 the client can do nothing with — instead of the conflict
-		// that says the target was understood and is not somewhere a folder can be put.
-		try {
-			await workspaceRootOrThrow(dirname(target));
-		} catch (error) {
-			throw httpStatus.conflict(messageOf(error));
+		if (!groups.some((group) => samePath(group.absCwd, absSource))) {
+			throw httpStatus.notFound(`Unknown workspace: ${absSource}`);
 		}
 
-		let sessions: string[];
-		try {
-			sessions = await this.hub.repathWorkspace(source, target);
-		} catch (error) {
-			// A running session, a store directory already taken, a target that cannot be written: all
-			// of them are "understood and refused", which is what 409 names.
-			throw httpStatus.conflict(messageOf(error));
-		}
-
-		this.renameInSettings(manager, source, target);
-		this.listeners.onWorkspaceRenamed?.(target, sessions);
-		return { cwd: target, sessions };
+		const manager = this.hub.settingsFor(this.hub.absCwd);
+		manager.applySettings({ workspaceNames: { [absSource]: name.trim() } });
+		return { absCwd: absSource, name: name.trim(), settings: settingsOf(manager) };
 	}
 
 	/**
@@ -247,15 +210,15 @@ export class SystemController {
 	 * workspace is a new session in it, which is {@link SessionController.create}'s half of the pair.
 	 */
 	hideWorkspace(body: Record<string, unknown>): Promise<{ settings: SettingsSnapshot; workspaces: WorkspaceGroup[] }> {
-		const cwd = body.cwd;
-		if (typeof cwd !== "string" || cwd.trim().length === 0) {
-			throw httpStatus.badRequest("`cwd` must be a workspace path");
+		const absCwd = body.absCwd;
+		if (typeof absCwd !== "string" || absCwd.trim().length === 0) {
+			throw httpStatus.badRequest("`absCwd` must be a workspace path");
 		}
 
-		const manager = this.hub.settingsFor(this.hub.cwd);
+		const manager = this.hub.settingsFor(this.hub.absCwd);
 		const hidden = manager.getHiddenWorkspaces();
-		if (!hidden.some((path) => samePath(path, cwd))) {
-			manager.applySettings({ hiddenWorkspaces: [...hidden, resolve(cwd)] });
+		if (!hidden.some((path) => samePath(path, absCwd))) {
+			manager.applySettings({ hiddenWorkspaces: [...hidden, resolve(absCwd)] });
 			this.listeners.onWorkspaceListingChanged?.();
 		}
 
@@ -269,35 +232,12 @@ export class SystemController {
 	private async listing(manager: SettingsManager): Promise<{ settings: SettingsSnapshot; workspaces: WorkspaceGroup[] }> {
 		return {
 			settings: settingsOf(manager),
-			workspaces: (await SessionManager.listWorkspaces()).filter((group) => this.hub.listsWorkspace(group.cwd)),
+			workspaces: (await SessionManager.listWorkspaces()).filter((group) => this.hub.listsWorkspace(group.absCwd)),
 		};
 	}
 
-	/**
-	 * Move the workspace's own entries in the settings files to the path it now has.
-	 *
-	 * Two fields name a workspace by path and neither survives a rename on its own: the sidebar's
-	 * paging state, whose key *is* the path, and the paging state of any workspace nested inside the
-	 * one that moved — the keys are not paths to walk but keys to re-key, and one that no longer names
-	 * anything is forgotten with everything it held.
-	 *
-	 * The hidden list is deliberately not moved. A hidden workspace is not in the list to rename, and
-	 * one that was renamed by hand is a path the user chose to have named again.
-	 */
-	private renameInSettings(manager: SettingsManager, from: string, to: string): void {
-		const appearance = manager.getAppearance();
-		if (appearance.workspaces !== undefined) {
-			const moved: Record<string, WorkspacePaging> = {};
-			for (const [cwd, entry] of Object.entries(appearance.workspaces)) {
-				if (samePath(cwd, from)) moved[to] = entry;
-				else if (!underPath(cwd, from)) moved[cwd] = entry;
-			}
-			manager.applySettings({ appearance: { workspaces: moved } });
-		}
-	}
-
 	settings(): { settings: SettingsSnapshot } {
-		return { settings: settingsOf(this.hub.settingsFor(this.hub.cwd)) };
+		return { settings: settingsOf(this.hub.settingsFor(this.hub.absCwd)) };
 	}
 
 	/**
@@ -321,7 +261,7 @@ export class SystemController {
 		}
 		const fields = patch as Record<string, unknown>;
 
-		const manager = this.hub.settingsFor(this.hub.cwd);
+		const manager = this.hub.settingsFor(this.hub.absCwd);
 		const next: SettingsPatch = {};
 
 		if (fields.tools !== undefined) {
@@ -378,12 +318,27 @@ export class SystemController {
 			next.hiddenWorkspaces = fields.hiddenWorkspaces as string[];
 		}
 
+		if (fields.workspaceNames !== undefined) {
+			const names = fields.workspaceNames;
+			if (typeof names !== "object" || names === null || Array.isArray(names)) {
+				throw httpStatus.badRequest("`workspaceNames` must be an object of workspace paths to names");
+			}
+			for (const [absCwd, name] of Object.entries(names as Record<string, unknown>)) {
+				if (typeof name !== "string") {
+					throw httpStatus.badRequest(`\`workspaceNames.${absCwd}\` must be a string`);
+				}
+			}
+			// Sent as the entries that changed, merged per key by the settings writer. An empty string
+			// is how a name is taken back, so it is stored rather than dropped here.
+			next.workspaceNames = names as Record<string, string>;
+		}
+
 		if (fields.model !== undefined) {
 			if (typeof fields.model !== "string") throw httpStatus.badRequest("`model` must be a string");
 			// A default that names no row is refused rather than stored: `selectModel` would fall back to
 			// the first row, so a typo here would look like a preference that quietly did nothing. The
 			// rows are the hub's, read fresh, so a row deleted since the panel loaded is caught too.
-			if (resolveModelRef(this.hub.models.list(), fields.model) === undefined) {
+			if (this.hub.models.list().find((userModel) => userModel.name === fields.model) === undefined) {
 				throw httpStatus.conflict(`Unknown model: ${fields.model}`);
 			}
 			next.model = fields.model;
@@ -463,18 +418,18 @@ export class SystemController {
 	}
 
 	async sessions(): Promise<{ sessions: SessionRef[] }> {
-		return { sessions: await listSessions(this.hub.cwd) };
+		return { sessions: await listSessions(this.hub.absCwd) };
 	}
 
 	/**
 	 * The session a client with no id of its own should open, and the list to draw beside it.
 	 *
 	 * Both come back together because a client always wants both at boot, and asking the server for
-	 * the id is what makes `--session` and `--continue` observable in the UI: the client follows the
-	 * server's answer instead of guessing from the stored files.
+	 * the id is what makes `--session` observable in the UI: the client follows the server's answer
+	 * instead of guessing from the stored files.
 	 */
 	async current(): Promise<{ sessionId: string; sessions: SessionRef[] }> {
-		const [sessionId, sessions] = await Promise.all([this.hub.currentSessionId(), listSessions(this.hub.cwd)]);
+		const [sessionId, sessions] = await Promise.all([this.hub.currentSessionId(), listSessions(this.hub.absCwd)]);
 		return { sessionId, sessions };
 	}
 }
@@ -520,31 +475,33 @@ export class SessionController {
 	 * that is created and never opened is still findable by id — and still subscribable, since
 	 * subscribing reads the transcript rather than running it.
 	 *
-	 * `cwd` in the body decides where the session lands, and the listing answers for that directory:
+	 * `absCwd` in the body decides where the session lands, and the listing answers for that directory:
 	 * a window that just pointed the picker somewhere new should be able to trust that the sessions it
 	 * is shown are the ones it created into. Undefined stays the server's own root, which is what a
 	 * bodyless `POST` has always meant.
 	 */
 	async create(body: Record<string, unknown> = {}): Promise<{ sessionId: string; sessions: SessionRef[] }> {
-		const cwd = body.cwd;
-		if (cwd !== undefined && typeof cwd !== "string") {
-			throw httpStatus.badRequest("`cwd` must be a string");
+		const absCwd = body.absCwd;
+		if (absCwd !== undefined && typeof absCwd !== "string") {
+			throw httpStatus.badRequest("`absCwd` must be a string");
 		}
 		// Resolved here so the listing names the same directory the hub validated and wrote into,
 		// whatever spelling the request arrived with. The check runs here too, because "a bad path is
 		// the request's fault" is a status decision and this is where those are made; the hub repeats
 		// it so no internal caller can write a session without it.
-		const root = typeof cwd === "string" && cwd.length > 0 ? resolve(cwd) : undefined;
-		if (root !== undefined) {
+		const absRoot = typeof absCwd === "string" && absCwd.length > 0 ? resolve(absCwd) : undefined;
+		if (absRoot !== undefined) {
 			try {
-				await workspaceRootOrThrow(root);
+				// A directory this machine already stores sessions for is put back when it is gone:
+				// the user renamed the folder behind us, and the group they see is still that path.
+				await workspaceRootForCreate(absRoot);
 			} catch (error) {
 				throw httpStatus.badRequest(messageOf(error));
 			}
 		}
-		const sessionId = await this.hub.newSession(root);
-		this.restoreWorkspace(root ?? this.hub.cwd);
-		return { sessionId, sessions: await listSessions(root ?? this.hub.cwd) };
+		const sessionId = await this.hub.newSession(absRoot);
+		this.restoreWorkspace(absRoot ?? this.hub.absCwd);
+		return { sessionId, sessions: await listSessions(absRoot ?? this.hub.absCwd) };
 	}
 
 	/**
@@ -555,10 +512,10 @@ export class SessionController {
 	 * and coming back to it is what says the user wants it listed again. Written through the manager
 	 * the hub's visibility rule reads, so the next listing and the next overview frame already agree.
 	 */
-	private restoreWorkspace(cwd: string): void {
-		const manager = this.hub.settingsFor(this.hub.cwd);
+	private restoreWorkspace(absCwd: string): void {
+		const manager = this.hub.settingsFor(this.hub.absCwd);
 		const hidden = manager.getHiddenWorkspaces();
-		const kept = hidden.filter((path) => !samePath(path, cwd));
+		const kept = hidden.filter((path) => !samePath(path, absCwd));
 		if (kept.length === hidden.length) return;
 		manager.applySettings({ hiddenWorkspaces: kept });
 		this.listeners.onWorkspaceListingChanged?.();
@@ -577,7 +534,7 @@ export class SessionController {
 			throw httpStatus.badRequest("`entryId` must be a string or null");
 		}
 		const sessionId = await this.hub.fork(sourceId, typeof entryId === "string" ? entryId : null);
-		return { sessionId, sessions: await listSessions(this.hub.cwd) };
+		return { sessionId, sessions: await listSessions(this.hub.absCwd) };
 	}
 
 	/**
@@ -855,10 +812,10 @@ function messageOf(error: unknown): string {
  * Resolved and case-folded the way {@link samePath} compares, so the two directions of the same
  * comparison cannot disagree about what "under" means on Windows.
  */
-function underPath(cwd: string, dir: string): boolean {
-	const parent = resolvePath(dir);
-	const key = process.platform === "win32" ? parent.toLowerCase() : parent;
-	const target = resolvePath(cwd);
-	const candidate = process.platform === "win32" ? target.toLowerCase() : target;
+function underPath(absWorkspaceCwd: string, dirInput: string): boolean {
+	const absDir = resolvePath(dirInput);
+	const key = process.platform === "win32" ? absDir.toLowerCase() : absDir;
+	const absTarget = resolvePath(absWorkspaceCwd);
+	const candidate = process.platform === "win32" ? absTarget.toLowerCase() : absTarget;
 	return candidate.startsWith(key.endsWith(sep) ? key : key + sep);
 }

@@ -1,6 +1,6 @@
 // Branch-page smoke: drives the production `BranchView` against the shared DOM shim and pins the two
-// things the page's geometry is supposed to be — **every card is the same fixed height on one line with
-// the whole sentence in its tooltip**, and **that height comes from the tokens, not from a literal**.
+// things the page's geometry is supposed to be — **every card is the same fixed height on one line,
+// with no hover of its own**, and **that height comes from the tokens, not from a literal**.
 //
 // Why this file exists: ticket `.scratch/ui-pass/issues/02-branch-card-truncate.md`. The card used to
 // be a two-line box whose hover state grew to `auto` and swapped a cut sentence for the whole one, so a
@@ -8,7 +8,9 @@
 // reason the page exists — read as unreadable prose. Generalising that into a literal height is the
 // next way to get it wrong: the window's font-size slider moves the type scale, and a card fixed at the
 // default size clips its meta line at the top of the range. So the height and the lane are tokens
-// (`tokens.css`) the paint reads back, and this file checks the whole chain.
+// (`tokens.css`) the paint reads back, and this file checks the whole chain. The `title` that followed
+// the first cut went the same way later: a tooltip big enough to say the whole message covered the tree
+// it was drawn over, so a card now says one ellipsised line and nothing else.
 //
 // The shim has no layout and no CSS, so "same height" here means "the paint gave every card the height
 // it read", not "a browser measured it": the token values are fed in through `styleMetrics`, and the
@@ -229,7 +231,7 @@ const LONG = "把整个窗口的布局问题一次说清楚：从标题栏到输
 
 /** One way on the page: a user message on the line, or a way that left it. */
 function way(entryId: string, label: string, turn: number, landing: BranchWay["landing"] = "here"): BranchWay {
-	return { entryId, label, question: label, answer: "", role: "user", turn, branches: [], landing };
+	return { entryId, label, turn, branches: [], landing };
 }
 
 /**
@@ -276,7 +278,6 @@ function forkedTree(): BranchTree {
  */
 function singleTree(): BranchTree {
 	const first = way("aaaaaaa1", LONG, 1);
-	first.answer = "回答的第一句。";
 	first.replyId = "eeeeeee5";
 	const second = way("bbbbbbb2", "第二句", 2);
 	first.next = second;
@@ -340,7 +341,7 @@ process.stdout.write("\nbranch：一条线一张卡，走法各占一行\n");
 	const labels = cards.map((card) => nodesOfClass(card, "lbl"));
 	check("每张卡片恰好有一行标签", labels.every((found) => found.length === 1), labels.map((found) => found.length).join(" / "));
 	check("标签就是整句，截断交给 CSS", textOf(labels[0]![0]!) === LONG, textOf(labels[0]![0]!));
-	check("悬停看得到整句", cards[0]?.title === LONG, String(cards[0]?.title));
+	check("悬停什么都不弹：卡片没有 title", cards.every((card) => card.title === undefined || card.title === ""), String(cards[0]?.title));
 	check("最新的一条戴着「当前」", nodesOfClass(cards[2]!, "tag").some((tag) => tag.textContent === "当前"));
 }
 
@@ -355,6 +356,35 @@ process.stdout.write("\nbranch：一条线一张卡，走法各占一行\n");
 	check("走法比它离开的那一条往右一格", placeOf(branch).left - placeOf(host).left === STEP, String(placeOf(branch).left - placeOf(host).left));
 	check("走法不进「这条线」", !branch.attributes.has("data-on-path"));
 	check("线上的卡进「这条线」", host.attributes.has("data-on-path"));
+}
+
+{
+	// A fork **below** a way nobody is reading. The card that left the line carries alternatives of its
+	// own, and they hang off it exactly like a line card's do — one column right, a row further down.
+	// This is the shape a rewind to the first question leaves standing, and the one the page used to
+	// lose: a tree that only reported forks on the chain dropped everything below the leaf.
+	const first = way("aaaaaaa1", "先随便问一句", 1);
+	const second = way("bbbbbbb2", "第二条", 2);
+	first.next = second;
+	const left = way("ddddddd4", "另一条走法", 2, "tip");
+	left.branches = [way("fffffff6", "那一支下面的另一个问法", 3, "tip")];
+	second.branches = [left];
+	const cards = painted({
+		trunk: first,
+		currentId: "bbbbbbb2",
+		points: 2,
+		options: 3,
+		line: new Set(["aaaaaaa1", "bbbbbbb2"]),
+	});
+	const byId = new Map(cards.map((card) => [card.dataset.id, card]));
+	check("线上线外一共四张卡", cards.length === 4, `${cards.length} 张`);
+	const leftCard = byId.get("ddddddd4");
+	const deep = byId.get("fffffff6");
+	const stepRight = (from: FakeNode | undefined, to: FakeNode | undefined) =>
+		from === undefined || to === undefined ? "没有那张卡" : String(placeOf(to).left - placeOf(from).left);
+	check("走法自己的岔也往右一格", leftCard !== undefined && deep !== undefined && placeOf(deep).left - placeOf(leftCard).left === STEP, stepRight(leftCard, deep));
+	check("走法自己的岔自己占一行", leftCard !== undefined && deep !== undefined && placeOf(deep).top - placeOf(leftCard).top === 58, leftCard === undefined || deep === undefined ? "没有那张卡" : String(placeOf(deep).top - placeOf(leftCard).top));
+	check("线外的岔不算「这条线」", deep !== undefined && !deep.attributes.has("data-on-path"));
 }
 
 {

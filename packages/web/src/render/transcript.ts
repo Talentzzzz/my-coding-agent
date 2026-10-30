@@ -1185,7 +1185,7 @@ function renderTool(card: ToolCard): HTMLElement {
 	summary.append(
 		chevron,
 		element("span", "tool-name", card.toolName),
-		element("span", "tool-path", previewOf(card.args) || (card.diff?.path ?? "")),
+		element("span", "tool-path", previewOf(card.args) || (card.diff?.relPath ?? "")),
 	);
 	if (card.diff) summary.append(diffStat(card.diff));
 	if (card.running) summary.append(element("span", "tool-spin"));

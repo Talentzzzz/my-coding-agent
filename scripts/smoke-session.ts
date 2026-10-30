@@ -5,8 +5,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, rm, access, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage, AgentTool } from "@my-agent/agent";
-import type { AssistantMessage, ChatTransport, SimpleStreamOptions } from "@my-agent/ai";
+import type { AgentTool } from "@my-agent/loop";
+import type { Message } from "@my-agent/llm";
+import type { AssistantMessage, ChatTransport, SimpleStreamOptions } from "@my-agent/llm";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall, type FakeResponseStep } from "./fake-transport.ts";
 import {
 	createToolRegistry,
@@ -22,11 +23,11 @@ import {
 	type Settings,
 	type SessionEntry,
 	type ToolRegistry,
-	type UserModel,
+	type ModelConfig,
 	workspaceDir,
 } from "@my-agent/core";
 
-// `@my-agent/ai` and `@my-agent/agent` are workspace packages, linked into the repository root's
+// `@my-agent/llm` and `@my-agent/loop` are workspace packages, linked into the repository root's
 // node_modules so scripts resolve them the same way `packages/core` does.
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-session-"));
@@ -46,18 +47,18 @@ const watchdog = setTimeout(() => {
  * typed, and the only thing standing between it and a request is the key in that row. A check that
  * needs a second model adds a second row.
  */
-const ROW: UserModel = {
+const ROW: ModelConfig = {
 	name: "faux",
 	baseUrl: "http://127.0.0.1:1/v1",
 	apiKey: "unused-by-the-scripted-transport",
-	modelId: "faux-1",
+	id: "faux-1",
 	contextWindow: 128_000,
 	maxTokens: 16_384,
 	reasoning: false,
 };
 
 /** The rows the sessions read. Shared, so every check counts responses from one queue. */
-const rows: UserModel[] = [ROW];
+const rows: ModelConfig[] = [ROW];
 const models: ModelSource = { list: () => rows };
 const fake = createFakeTransport();
 
@@ -106,12 +107,12 @@ interface Gate {
  * constructs its `Loop`.
  */
 function gatedTransport(hold = 1): { api: ChatTransport; gate: Gate } {
-	const call = fake.api.streamSimple.bind(fake.api);
+	const call = fake.api.stream.bind(fake.api);
 	let held = 0;
 	let calls = 0;
 	const releases: (() => void)[] = [];
 
-	const streamSimple: ChatTransport["streamSimple"] = async (model, context, options) => {
+	const stream: ChatTransport["stream"] = async (model, context, options) => {
 		calls += 1;
 		if (held < hold) {
 			held += 1;
@@ -121,11 +122,7 @@ function gatedTransport(hold = 1): { api: ChatTransport; gate: Gate } {
 	};
 
 	return {
-		// Both methods are the same scripted answer: nothing here distinguishes a "simple" request.
-		api: {
-			stream: (model, context, options) => streamSimple(model, context, options),
-			streamSimple,
-		},
+		api: { stream },
 		gate: {
 			release: () => {
 				for (const resolve of releases.splice(0)) resolve();
@@ -154,17 +151,17 @@ function windowedRows(contextWindow: number): ModelSource {
 /**
  * Wait until a run has actually reached the provider, or record a failure.
  *
- * Waiting for `isStreaming` alone is not enough: the loop reports that before `prepareRequest` runs, so
+ * Waiting for `isLooping` alone is not enough: the session reports that before `prepareRequest` runs, so
  * a test that released the gate on that signal could release it before the call arrived, and the call
  * would then wait for a release that already happened.
  */
 async function whenStreaming(session: Agent, gate: Gate, ms = 5_000): Promise<void> {
 	const started = Date.now();
 	while (Date.now() - started < ms) {
-		if (session.isStreaming && gate.held >= 1) return;
+		if (session.isLooping && gate.held >= 1) return;
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
-	check("a run reached the provider", false, `streaming=${session.isStreaming} held=${gate.held} after ${ms} ms`);
+	check("a run reached the provider", false, `streaming=${session.isLooping} held=${gate.held} after ${ms} ms`);
 }
 
 /** Poll until `ready` holds, so a check reads a state the loop reaches asynchronously. */
@@ -218,7 +215,7 @@ async function openSession(
 ): Promise<Agent> {
 	const sessionManager = SessionManager.create(root);
 	return openAgent({
-		workspaceRoot: root,
+		absWorkspaceRoot: root,
 		sessionManager,
 		models: run.models ?? models,
 		api: run.api ?? fake.api,
@@ -243,7 +240,7 @@ function entriesOf(session: Agent): SessionEntry[] {
  * A compaction removes messages from the model's view, never from the file, so "the store kept it" is
  * always a question about this list rather than about the transcript.
  */
-function allMessages(session: Agent): AgentMessage[] {
+function allMessages(session: Agent): Message[] {
 	return entriesOf(session).flatMap((entry) => (entry.type === "message" ? [entry.message] : []));
 }
 
@@ -259,7 +256,7 @@ function entryIdsFor(session: Agent, text: string): string[] {
 		.map((entry) => entry.id);
 }
 
-function textOf(message: AgentMessage): string {
+function textOf(message: Message): string {
 	const content = (message as { content?: unknown }).content;
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -293,14 +290,17 @@ interface SentRequest {
  */
 function recordRequests(seen: SentRequest[], responses: AssistantMessage[]): void {
 	fake.setResponses(
-		responses.map((response) => (context: { messages: readonly unknown[] }, options?: SimpleStreamOptions) => {
+		responses.map((response) => (
+			context: { messages: readonly unknown[]; tools?: readonly { name?: string }[] },
+			options?: SimpleStreamOptions,
+		) => {
 			seen.push({
 				prompt: context.messages
 					.filter((message) => (message as { role?: string }).role === "system")
-					.map((message) => textOf(message as AgentMessage))
+					.map((message) => textOf(message as Message))
 					.join("\n\n"),
-				tools: declaredTools(context.messages),
-				texts: context.messages.map((message) => textOf(message as AgentMessage)),
+				tools: declaredTools(context),
+				texts: context.messages.map((message) => textOf(message as Message)),
 				roles: context.messages.map((message) => String((message as { role?: string }).role ?? "")),
 				apiKey: options?.apiKey,
 			});
@@ -309,13 +309,9 @@ function recordRequests(seen: SentRequest[], responses: AssistantMessage[]): voi
 	);
 }
 
-/** Tool names the transcript declares, read off the leading system message that carries them. */
-function declaredTools(messages: readonly unknown[]): string[] {
-	for (const message of messages) {
-		const typed = message as { role?: string; toolsAdded?: { name?: string }[] };
-		if (typed.role === "system" && typed.toolsAdded) return typed.toolsAdded.map((tool) => String(tool.name));
-	}
-	return [];
+/** Tool names the request declares. They travel on the context, not inside a message. */
+function declaredTools(context: { tools?: readonly { name?: string }[] }): string[] {
+	return (context.tools ?? []).map((tool) => String(tool.name));
 }
 
 /** The tools line of the prompt, which is the part of it the active set decides. */
@@ -358,7 +354,7 @@ async function exerciseFollowUp(): Promise<void> {
 
 	const running = session.prompt("first question");
 	await whenStreaming(session, gate);
-	check("the first run is streaming", session.isStreaming === true);
+	check("the first run is streaming", session.isLooping === true);
 	check("the provider call is held open", gate.held === 1, String(gate.held));
 	check("nothing is queued yet", session.snapshot.queued === 0, String(session.snapshot.queued));
 
@@ -509,7 +505,7 @@ async function exerciseAbortFlushesAccepted(): Promise<void> {
 	const running = session.prompt("question before the abort");
 	await whenStreaming(session, gate);
 	await session.prompt("typed while it was answering", { behavior: "followUp" });
-	check("the run is streaming with one message queued", session.isStreaming && session.snapshot.queued === 1, String(session.snapshot.queued));
+	check("the run is streaming with one message queued", session.isLooping && session.snapshot.queued === 1, String(session.snapshot.queued));
 
 	const aborting = session.abort();
 	// The held call has to answer before the aborted run can end; the abort's own signal is what turns
@@ -591,7 +587,7 @@ async function exerciseLiveStates(): Promise<void> {
 	const streamingSeen: boolean[] = [];
 	session.onEvent(() => {
 		queuedSeen.push(session.snapshot.queued);
-		streamingSeen.push(session.isStreaming);
+		streamingSeen.push(session.isLooping);
 	});
 
 	const running = session.prompt("live question");
@@ -781,7 +777,7 @@ async function exerciseConfigChanged(): Promise<void> {
 	process.stdout.write("config changed\n");
 	// A second row gives the source a second model, so a model change is observable at all. Both are
 	// answered by the same scripted transport: nothing here sends a request.
-	const twoRows: UserModel[] = [ROW, { ...ROW, name: "faux2" }];
+	const twoRows: ModelConfig[] = [ROW, { ...ROW, name: "faux2" }];
 	const session = await openSession({}, { models: { list: () => twoRows } }, "faux/faux-1");
 
 	const seen: Extract<AgentSessionEvent, { type: "config_changed" }>[] = [];
@@ -810,17 +806,17 @@ async function exerciseConfigChanged(): Promise<void> {
 	);
 
 	// The composer's choice, which is not a config patch: it moves the session and nothing else.
-	session.chooseModel({ model: "faux2/faux-1" });
+	session.applyModelSelection({ model: "faux2" });
 	check(
 		"a model change carries the model alone",
-		seen.length === 3 && JSON.stringify(seen[2]) === JSON.stringify({ type: "config_changed", model: "faux2/faux-1" }),
+		seen.length === 3 && JSON.stringify(seen[2]) === JSON.stringify({ type: "config_changed", model: "faux2" }),
 		JSON.stringify(seen[2]),
 	);
-	session.chooseModel({ model: "faux2/faux-1" });
+	session.applyModelSelection({ model: "faux2" });
 	check("re-selecting the current model says nothing", seen.length === 3, JSON.stringify(seen));
 
 	check("the row does not reason, so its only level is off", JSON.stringify(session.thinkingLevels) === JSON.stringify(["off"]), JSON.stringify(session.thinkingLevels));
-	session.chooseModel({ thinkingLevel: "off" });
+	session.applyModelSelection({ thinkingLevel: "off" });
 	check("so re-applying it says nothing", seen.length === 3, JSON.stringify(seen));
 
 	// The whole point of choosing on the composer: a choice no request was made with is not something
@@ -951,7 +947,7 @@ async function exerciseOutputBackstop(): Promise<void> {
 
 	const delivered: string[] = [];
 	session.onEvent((event) => {
-		if (event.type === "tool_execution_end") delivered.push(textOf({ content: event.result?.content } as AgentMessage));
+		if (event.type === "tool_execution_end") delivered.push(textOf({ content: event.result?.content } as Message));
 	});
 
 	await within("the run", 10_000, session.prompt("run the unbounded tool"));
@@ -984,7 +980,7 @@ async function exerciseOutputBackstop(): Promise<void> {
  * The prompt is rebuilt every request, so an approval change reaches the model on the next one.
  *
  * Asserted from the request the provider received: the leading system message is the only place the
- * prompt exists, because `LoopState.systemPrompt` is read-only and the store holds no prompt.
+ * prompt exists, because the loop holds no prompt of its own and the store holds no prompt.
  */
 async function exerciseApprovalPrompt(): Promise<void> {
 	process.stdout.write("approval prompt\n");
@@ -1219,7 +1215,7 @@ async function exerciseDeactivatedToolCall(): Promise<void> {
 	const ends: { toolName: string; isError: boolean; text: string }[] = [];
 	session.onEvent((event) => {
 		if (event.type === "tool_execution_end") {
-			ends.push({ toolName: event.toolName, isError: event.isError, text: textOf({ content: event.result?.content } as AgentMessage) });
+			ends.push({ toolName: event.toolName, isError: event.isError, text: textOf({ content: event.result?.content } as Message) });
 		}
 	});
 
@@ -1716,21 +1712,20 @@ async function exerciseCompactionFailure(): Promise<void> {
 async function exerciseModelFromRow(): Promise<void> {
 	process.stdout.write("the model comes from the row\n");
 
-	const sent: { key: string | undefined; baseUrl: string; modelId: string; alsoInOptions: string | undefined }[] = [];
+	const sent: { key: string | undefined; baseUrl: string; id: string; alsoInOptions: string | undefined }[] = [];
 	const recording: ChatTransport = {
-		stream: (model, context, options) => fake.api.stream(model, context, options),
-		streamSimple: (model, context, options) => {
+		stream: (model, context, options) => {
 			sent.push({
 				key: model.apiKey,
 				baseUrl: model.baseUrl,
-				modelId: model.id,
+				id: model.id,
 				alsoInOptions: options?.apiKey,
 			});
-			return fake.api.streamSimple(model, context, options);
+			return fake.api.stream(model, context, options);
 		},
 	};
 
-	const keyedRows: UserModel[] = [{ ...ROW, name: "keyed", apiKey: "first-key", baseUrl: "http://127.0.0.1:1/v1" }];
+	const keyedRows: ModelConfig[] = [{ ...ROW, name: "keyed", apiKey: "first-key", baseUrl: "http://127.0.0.1:1/v1" }];
 	const source: ModelSource = { list: () => keyedRows };
 	fake.setResponses([fakeAssistantMessage("answered")]);
 	const session = await openSession({}, { models: source, api: recording });
@@ -1741,7 +1736,7 @@ async function exerciseModelFromRow(): Promise<void> {
 		sent[0]?.alsoInOptions === "first-key",
 		String(sent[0]?.alsoInOptions),
 	);
-	check("the model names the row it came from", session.modelRef === "keyed/faux-1", session.modelRef);
+	check("the model names the row it came from", session.modelName === "keyed", session.modelName);
 
 	// No catalog is rebuilt and no session reopened: the row is read again before the next request, so
 	// every field of it is as fresh as the file was — not just the key.
@@ -1758,11 +1753,11 @@ async function exerciseModelFromRow(): Promise<void> {
 	check("and neither appends a model_change entry", changesOf() === changesBefore, `${changesOf()} vs ${changesBefore}`);
 
 	// A wire id that moves is a different model answering, and the transcript says so — once.
-	keyedRows[0]!.modelId = "faux-2";
+	keyedRows[0]!.id = "faux-2";
 	fake.setResponses([fakeAssistantMessage("answered a third time")]);
 	await within("the third run", 10_000, session.prompt("and again"));
-	check("a renamed wire id reaches the request", sent[2]?.modelId === "faux-2", String(sent[2]?.modelId));
-	check("which the session's own ref follows", session.modelRef === "keyed/faux-2", session.modelRef);
+	check("a renamed wire id reaches the request", sent[2]?.id === "faux-2", String(sent[2]?.id));
+	check("and the session stays on the row it came from", session.modelName === "keyed", session.modelName);
 	check("and is recorded once as a model change", changesOf() === changesBefore + 1, String(changesOf()));
 	fake.setResponses([fakeAssistantMessage("answered a fourth time")]);
 	await within("the fourth run", 10_000, session.prompt("once more"));
@@ -1785,8 +1780,8 @@ async function exerciseModelSelection(): Promise<void> {
 	// Sonnet 4.5 rather than a newer family, because it has no native `max`: that is what makes the
 	// refusal below observable. The row carries its own default level, which is where a new session
 	// starts — not the workspace's, since the levels belong to the model.
-	const thinkerRows: UserModel[] = [
-		{ ...ROW, name: "thinker", modelId: "claude-sonnet-4-5", reasoning: true, defaultThinkingLevel: "low" },
+	const thinkerRows: ModelConfig[] = [
+		{ ...ROW, name: "thinker", id: "claude-sonnet-4-5", reasoning: true, defaultThinkingLevel: "low" },
 	];
 	const scripted = createFakeTransport();
 	scripted.setResponses([fakeAssistantMessage("first")]);
@@ -1800,7 +1795,7 @@ async function exerciseModelSelection(): Promise<void> {
 	);
 
 	const levelsOf = (): number => entriesOf(session).filter((entry) => entry.type === "thinking_level_change").length;
-	session.chooseModel({ thinkingLevel: "high" });
+	session.applyModelSelection({ thinkingLevel: "high" });
 	check("choosing a level moves the session", session.thinkingLevel === "high", session.thinkingLevel);
 	check("and writes nothing until a request uses it", levelsOf() === 0, String(levelsOf()));
 
@@ -1817,7 +1812,7 @@ async function exerciseModelSelection(): Promise<void> {
 	// composer that offered the levels of the row it is moving within.
 	let refused = "";
 	try {
-		session.chooseModel({ thinkingLevel: "max" });
+		session.applyModelSelection({ thinkingLevel: "max" });
 	} catch (error) {
 		refused = (error as Error).message;
 	}
@@ -1932,7 +1927,7 @@ async function exerciseSubagent(): Promise<void> {
 	function toolResultTextsIn(context: { messages: readonly unknown[] }): string[] {
 		return context.messages
 			.filter((message) => (message as { role?: unknown }).role === "toolResult")
-			.map((message) => textOf(message as AgentMessage));
+			.map((message) => textOf(message as Message));
 	}
 
 	/** What the model is asked to run, classified off the request the provider was handed. */
@@ -1940,7 +1935,7 @@ async function exerciseSubagent(): Promise<void> {
 		if (hasToolCallNamed(context, "SubAgentControl")) return "parent-control";
 		if (hasToolCallNamed(context, "SubAgent")) return "parent-next";
 		if (context.messages.some((message) => {
-			const text = textOf(message as AgentMessage);
+			const text = textOf(message as Message);
 			return text.includes(SYNC_MARKER) || text.includes(BG_MARKER);
 		})) {
 			return "child";
@@ -1955,14 +1950,17 @@ async function exerciseSubagent(): Promise<void> {
 
 	// The same recording `recordRequests` does, inlined: the factory here has to classify the
 	// request itself, so it records what it was handed as it answers it.
-	const respondSync = (context: { messages: readonly unknown[] }): AssistantMessage => {
+	const respondSync = (context: {
+		messages: readonly unknown[];
+		tools?: readonly { name?: string }[];
+	}): AssistantMessage => {
 		sent.push({
 			prompt: context.messages
 				.filter((message) => (message as { role?: string }).role === "system")
-				.map((message) => textOf(message as AgentMessage))
+				.map((message) => textOf(message as Message))
 				.join("\n\n"),
-			tools: declaredTools(context.messages),
-			texts: context.messages.map((message) => textOf(message as AgentMessage)),
+			tools: declaredTools(context),
+			texts: context.messages.map((message) => textOf(message as Message)),
 			roles: context.messages.map((message) => String((message as { role?: string }).role ?? "")),
 		});
 		const kind = classify(context);
@@ -1992,6 +1990,30 @@ async function exerciseSubagent(): Promise<void> {
 		const header = JSON.parse(readFileSync(join(childDir, childFiles[0]), "utf8").split("\n")[0] ?? "{}") as { parentSession?: string };
 		check("and its header names the parent session", header.parentSession === syncSession.sessionFile, JSON.stringify(header.parentSession));
 	}
+
+	// The child's spend owns no message entry in this transcript, so it arrives as its own record and
+	// the total folds it in file order — money from a transcript of its own, on the session's books.
+	// The fake transport estimates every answer's usage, so the assertions are structural: one entry,
+	// attributed to the delegation, and a total whose excess over the messages' own sum is exactly it.
+	const usageEntries = entriesOf(syncSession).filter((entry) => entry.type === "usage");
+	check(
+		"the delegation recorded its spend as one usage entry",
+		usageEntries.length === 1 &&
+			usageEntries[0]?.type === "usage" &&
+			usageEntries[0].operation === "subagent" &&
+			usageEntries[0].usage.totalTokens > 0,
+		JSON.stringify(usageEntries),
+	);
+	const messageOutput = entriesOf(syncSession).reduce((sum, entry) => {
+		const usage = entry.type === "message" && entry.message.role === "assistant" ? entry.message.usage : undefined;
+		return sum + (usage?.output ?? 0);
+	}, 0);
+	const recordedOutput = usageEntries[0]?.type === "usage" ? usageEntries[0].usage.output : 0;
+	check(
+		"the session total counts the child's spend on top of the messages' own",
+		syncSession.usage.output === messageOutput + recordedOutput,
+		JSON.stringify({ total: syncSession.usage.output, messages: messageOutput, recorded: recordedOutput }),
+	);
 	await syncSession.close();
 
 	// --- Phase 2: a background job, collected through SubAgentControl ----------------------------
@@ -2007,11 +2029,11 @@ async function exerciseSubagent(): Promise<void> {
 			// The `SubAgent` tool call stays on the transcript for every later turn, so the collect
 			// turn is told apart from the turn right after the spawn by the parent's answer already
 			// being on the record.
-			const parentAnswered = context.messages.some((message) => (message as { role?: unknown }).role === "assistant" && textOf(message as AgentMessage) === "bg parent done");
+			const parentAnswered = context.messages.some((message) => (message as { role?: unknown }).role === "assistant" && textOf(message as Message) === "bg parent done");
 			if (parentAnswered) {
 				// The job id only exists once the spawn has answered, so it is read back out of the
 				// transcript the same way the model would read it.
-				const result = context.messages.map((message) => textOf(message as AgentMessage)).find((text) => text.includes("started in the background"));
+				const result = context.messages.map((message) => textOf(message as Message)).find((text) => text.includes("started in the background"));
 				const id = result?.match(/SubAgent job (\S+) started/)?.[1] ?? "missing";
 				return toolResultTextsIn(context).includes("BACKGROUND REPORT")
 					? fakeAssistantMessage("collected")
@@ -2050,7 +2072,7 @@ async function exerciseSubagent(): Promise<void> {
 
 	// --- Phase 4: subagents: false builds a session without the pair -----------------------------
 	const bare = await openAgent({
-		workspaceRoot: root,
+		absWorkspaceRoot: root,
 		sessionManager: SessionManager.create(root),
 		models,
 		settingsManager: SettingsManager.inMemory(settings()),
@@ -2117,7 +2139,7 @@ async function exerciseBranching(): Promise<void> {
 	check("with both of its continuations", points[0]?.options.length === 2, JSON.stringify(points[0]?.options));
 	check(
 		"each labelled by the first thing it leads to",
-		(points[0]?.options ?? []).map((option) => `${option.role}:${option.label}`).join("|") === "assistant:answer one|user:question three",
+		(points[0]?.options ?? []).map((option) => option.label).join("|") === "answer one|question three",
 		JSON.stringify(points[0]?.options),
 	);
 	check(
@@ -2322,7 +2344,7 @@ async function exerciseLeafDurability(): Promise<void> {
 	session.branchTo(firstId, false);
 	check("moving to the position already held writes nothing", entriesOf(session).length === entriesBefore + 1, String(entriesOf(session).length - entriesBefore));
 
-	const file = session.sessionManager.getSessionFile() ?? "";
+	const file = session.sessionManager.getAbsSessionFile() ?? "";
 	await session.close();
 
 	// --- The move is where the file says it is, not where the file ends --------------------------
@@ -2335,7 +2357,7 @@ async function exerciseLeafDurability(): Promise<void> {
 	);
 
 	// The next append is a child of the recorded position, which is what turns it into a branch point.
-	reopened.appendMessage({ role: "user", content: [{ type: "text", text: "carried on" }] } as AgentMessage);
+	reopened.appendMessage({ role: "user", content: [{ type: "text", text: "carried on" }] } as Message);
 	const points = reopened.getBranchPoints();
 	check(
 		"the next append continued from the moved leaf",
@@ -2354,7 +2376,7 @@ async function exerciseLeafDurability(): Promise<void> {
 	// rewrites a line, so old files keep the shape their writer gave them.
 	const fixture = join(root, "fixture-no-leaf.jsonl");
 	const lines = [
-		{ type: "session", version: 3, id: "fixture-no-leaf", timestamp: new Date().toISOString(), cwd: root },
+		{ type: "SessionHeader", version: 4, id: "fixture-no-leaf", timestamp: new Date().toISOString(), cwd: root },
 		{ type: "message", id: "fx-u1", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: [{ type: "text", text: "fixture one" }] } },
 		{ type: "message", id: "fx-a1", parentId: "fx-u1", timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "text", text: "fixture answer" }] } },
 		{ type: "message", id: "fx-u2", parentId: "fx-u1", timestamp: new Date().toISOString(), message: { role: "user", content: [{ type: "text", text: "fixture two" }] } },

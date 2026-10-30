@@ -1,31 +1,27 @@
-// Model smoke test: the user's imported models, the refs that name them, and the placeholder that
+// Model smoke test: the user's imported models, the names that pick them out, and the placeholder that
 // stands in for none. Run with: node scripts/smoke-models.ts
 //
 // No provider key: everything here is the mapping from a row the user typed to the pi-ai model a
-// session runs (vendored as @my-agent/ai), plus the one request this app never wants to make — the one
+// session runs (vendored as @my-agent/llm), plus the one request this app never wants to make — the one
 // that has no model to make it with. One heading reaches the real transport with a key, and captures
 // the request before it leaves, so what it reads is the credential rather than a provider's answer.
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { anthropicMessages, normalizeContext, type SimpleStreamOptions } from "@my-agent/ai";
+import { anthropicMessages, type SimpleStreamOptions } from "@my-agent/llm";
 import {
-	coerceModel,
+	coerceModelConfig,
 	isUnconfigured,
 	listModelOptions,
-	modelFor,
-	modelRefOf,
+	createModel,
 	modelsPath,
 	normalizeThinkingLevel,
 	placeholderModel,
-	resolveModelRef,
-	rowFor,
-	rowNameFromRef,
 	thinkingLevelsFor,
 	unconfiguredStream,
-	UserModelStore,
+	ModelConfigStore,
 	type ModelSource,
-	type UserModel,
+	type ModelConfig,
 } from "@my-agent/core";
 
 let failures = 0;
@@ -43,12 +39,12 @@ function heading(title: string): void {
 	process.stdout.write(`${title}\n`);
 }
 
-function row(overrides: Partial<UserModel> = {}): UserModel {
+function row(overrides: Partial<ModelConfig> = {}): ModelConfig {
 	return {
 		name: "mine",
 		baseUrl: "http://127.0.0.1:1/v1",
 		apiKey: "secret",
-		modelId: "wire-model",
+		id: "wire-model",
 		contextWindow: 64_000,
 		maxTokens: 4_096,
 		reasoning: false,
@@ -62,14 +58,11 @@ try {
 	heading("a row becomes a runnable model");
 	{
 		const rows = [row()];
-		const ref = modelRefOf(row());
-		check("the ref is the row name and the wire id", ref === "mine/wire-model", ref);
+		const source: ModelSource = { list: () => rows };
+		const resolved = source.list().find((userModel) => userModel.name === "mine");
+		check("the row is found by the name the user typed", resolved?.name === "mine", String(resolved?.name));
 
-		const resolved = resolveModelRef(rows, ref);
-		check("the ref resolves", resolved !== undefined);
-		check("to the row the user typed", resolved?.name === "mine", String(resolved?.name));
-
-		const model = modelFor(resolved!);
+		const model = createModel(resolved!);
 		check("whose wire id is what the endpoint is asked for", model.id === "wire-model", String(model.id));
 		check("carrying the row's base URL", model.baseUrl === "http://127.0.0.1:1/v1", String(model.baseUrl));
 		check("and the row's context window", model.contextWindow === 64_000, String(model.contextWindow));
@@ -77,36 +70,36 @@ try {
 		check("and its key, so the request carries its own credential", model.apiKey === "secret", String(model.apiKey));
 		check("and is not the placeholder", !isUnconfigured(model));
 
-		const bare = resolveModelRef(rows, "wire-model");
-		check("a bare wire id resolves when only one row has it", bare?.name === "mine", String(bare?.name));
-
-		check("an unknown ref resolves to nothing", resolveModelRef(rows, "nope/nope") === undefined);
-		check("the row name comes back out of the ref", rowNameFromRef(ref) === "mine", rowNameFromRef(ref));
+		check("an unknown name resolves to nothing", source.list().find((userModel) => userModel.name === "nope") === undefined);
 	}
 
 	heading("the row behind a model is found by the name it carries");
 	{
 		const rows = [row()];
 		const source: ModelSource = { list: () => rows };
-		check("the model's row is found by the name it carries", rowFor(source, modelFor(rows[0]!))?.apiKey === "secret");
-		check("and a model with no row behind it has none", rowFor(source, placeholderModel()) === undefined);
+		const model = createModel(rows[0]!);
+		check("the model's row is found by the name it carries", source.list().find((userModel) => userModel.name === model.name)?.apiKey === "secret");
+		check("and a model with no row behind it has none", source.list().find((userModel) => userModel.name === placeholderModel().name) === undefined);
 		// Renaming the row is exactly what breaks the link, which is the documented cost of a name being
 		// an identity: the model that was built from the old name no longer finds anything.
 		rows[0]!.name = "renamed";
-		check("a renamed row stops answering to the old name", rowFor(source, modelFor(row({ name: "mine" }))) === undefined);
+		const stale = createModel(row({ name: "mine" }));
+		check("a renamed row stops answering to the old name", source.list().find((userModel) => userModel.name === stale.name) === undefined);
 	}
 	heading("two rows on one vendor keep their own keys");
 	{
 		const rows = [row({ name: "work", apiKey: "work-key" }), row({ name: "home", apiKey: "home-key" })];
 		const source: ModelSource = { list: () => rows };
-		check("the first row's key is the first row's", rowFor(source, modelFor(rows[0]!))?.apiKey === "work-key");
-		check("and the second row's is not it", rowFor(source, modelFor(rows[1]!))?.apiKey === "home-key");
+		const first = createModel(rows[0]!);
+		const second = createModel(rows[1]!);
+		check("the first row's key is the first row's", source.list().find((userModel) => userModel.name === first.name)?.apiKey === "work-key");
+		check("and the second row's is not it", source.list().find((userModel) => userModel.name === second.name)?.apiKey === "home-key");
 	}
 
 	heading("with no rows, the answer says what to add");
 	{
 		const placeholder = placeholderModel();
-		check("the placeholder has no row behind it", rowFor({ list: () => [] }, placeholder) === undefined);
+		check("the placeholder has no row behind it", { list: () => [] }.list().find((userModel) => userModel.name === placeholder.name) === undefined);
 		check("and is recognised as the placeholder", isUnconfigured(placeholder));
 		check("by a name no stored row may claim", placeholder.name === "my-agent:unconfigured", placeholder.name);
 		check("and it carries no key at all", placeholder.apiKey === undefined, String(placeholder.apiKey));
@@ -124,20 +117,20 @@ try {
 	{
 		// The whole of "editing a model takes effect on the next request": there is no catalog to
 		// rebuild, because a session holds the source and re-derives the model from it each time.
-		const rows: UserModel[] = [];
+		const rows: ModelConfig[] = [];
 		const source: ModelSource = { list: () => rows };
-		check("an empty source resolves nothing", resolveModelRef(source.list(), "added/wire-model") === undefined);
+		check("an empty source resolves nothing", source.list().find((userModel) => userModel.name === "added") === undefined);
 
 		rows.push(row({ name: "added", apiKey: "first" }));
-		check("a row added to the source is resolvable", resolveModelRef(source.list(), "added/wire-model") !== undefined);
-		check("and its key is on the model a request would use", modelFor(rows[0]!).apiKey === "first");
+		check("a row added to the source is resolvable", source.list().find((userModel) => userModel.name === "added") !== undefined);
+		check("and its key is on the model a request would use", createModel(rows[0]!).apiKey === "first");
 
 		rows[0]!.apiKey = "corrected";
-		const rederived = modelFor(resolveModelRef(source.list(), "added/wire-model")!);
+		const rederived = createModel(source.list().find((userModel) => userModel.name === "added")!);
 		check("a corrected key is read on the next lookup, with nothing rebuilt", rederived.apiKey === "corrected");
 
 		rows.length = 0;
-		check("a removed row stops resolving", resolveModelRef(source.list(), "added/wire-model") === undefined);
+		check("a removed row stops resolving", source.list().find((userModel) => userModel.name === "added") === undefined);
 	}
 
 	heading("the model's own key is what a caller without one authenticates with");
@@ -147,7 +140,7 @@ try {
 		// while the row it was summarizing had one all along. Nothing here opens a connection: the
 		// request is captured on its way out, which is also what says *which* key was on it.
 		const attempt = async (
-			model: ReturnType<typeof modelFor>,
+			model: ReturnType<typeof createModel>,
 			options: SimpleStreamOptions = {},
 		): Promise<{ key: string | undefined; authorization: string | undefined; message: string }> => {
 			let key: string | undefined;
@@ -160,7 +153,7 @@ try {
 			}) as typeof fetch;
 			const messages = [{ role: "user" as const, content: [{ type: "text" as const, text: "hi" }], timestamp: Date.now() }];
 			try {
-				const stream = anthropicMessages.streamSimple(model, normalizeContext({ messages }), {
+				const stream = anthropicMessages.stream(model, { messages }, {
 					...options,
 					fetch: capture,
 				});
@@ -171,55 +164,62 @@ try {
 			}
 		};
 
-		const keyed = await attempt(modelFor(row({ apiKey: "secret" })));
+		const keyed = await attempt(createModel(row({ apiKey: "secret" })));
 		check("a keyed row sends the row's key, with no key passed in", keyed.key === "secret", String(keyed.key));
 
-		const keyless = await attempt(modelFor(row({ apiKey: "" })));
+		const keyless = await attempt(createModel(row({ apiKey: "" })));
 		check("a row with no key still fails in setup", keyless.message.includes("No API key"), keyless.message);
 
-		const byHeader = await attempt(modelFor(row({ apiKey: "" })), { headers: { authorization: "Bearer gateway" } });
+		const byHeader = await attempt(createModel(row({ apiKey: "" })), { headers: { authorization: "Bearer gateway" } });
 		check(
 			"and a gateway's own credential is what reaches the request instead",
 			byHeader.authorization === "Bearer gateway" && byHeader.key === "",
 			`${byHeader.authorization} / ${byHeader.key}`,
 		);
 
-		const explicit = await attempt(modelFor(row({ apiKey: "stale" })), { apiKey: "passed-in" });
+		const explicit = await attempt(createModel(row({ apiKey: "stale" })), { apiKey: "passed-in" });
 		check("while a key the caller passes wins over the row's", explicit.key === "passed-in", String(explicit.key));
 	}
 
 	heading("rows are validated rather than trusted");
 	{
-		check("a row without a model id is refused", coerceModel({ baseUrl: "http://x" }) === undefined);
-		check("a row without a base URL is refused", coerceModel({ modelId: "m" }) === undefined);
+		check("a row without a model id is refused", coerceModelConfig({ baseUrl: "http://x" }) === undefined);
+		check("a row without a base URL is refused", coerceModelConfig({ id: "m" }) === undefined);
 
-		const derived = coerceModel({ name: "DeepSeek Chat", modelId: "deepseek-chat", baseUrl: "http://x" });
+		const derived = coerceModelConfig({ name: "DeepSeek Chat", id: "deepseek-chat", baseUrl: "http://x" });
 		check("a name is kept as it was typed", derived?.name === "DeepSeek Chat", String(derived?.name));
 
-		const unnamed = coerceModel({ modelId: "deepseek-chat", baseUrl: "http://x" });
+		const unnamed = coerceModelConfig({ id: "deepseek-chat", baseUrl: "http://x" });
 		check("a missing name falls back to the wire id", unnamed?.name === "deepseek-chat", String(unnamed?.name));
 
 		// A name is an identity, so a duplicate is not quietly made unique: the caller has to refuse the
 		// list, or every transcript referring to the first row would silently change meaning.
-		const duplicate = coerceModel({ name: "m", modelId: "m", baseUrl: "http://x" });
+		const duplicate = coerceModelConfig({ name: "m", id: "m", baseUrl: "http://x" });
 		check("a duplicate name is stored as it was typed, not suffixed", duplicate?.name === "m", String(duplicate?.name));
 
-		const reserved = coerceModel({ name: "my-agent:unconfigured", modelId: "m", baseUrl: "http://x" });
+		const reserved = coerceModelConfig({ name: "my-agent:unconfigured", id: "m", baseUrl: "http://x" });
 		check("the placeholder's name cannot be claimed", reserved === undefined, JSON.stringify(reserved));
 
 		// A file written before a name was the identity still holds the label the user chose. Reading it
 		// as the name is what keeps an upgrade from showing them a slug they never typed.
-		const fromLabel = coerceModel({ label: "Claude Opus 5", modelId: "claude-opus-5", baseUrl: "http://x" });
+		const fromLabel = coerceModelConfig({ label: "Claude Opus 5", id: "claude-opus-5", baseUrl: "http://x" });
 		check("an older row's label becomes its name", fromLabel?.name === "Claude Opus 5", String(fromLabel?.name));
 		check("and the label does not survive as a field", !Object.hasOwn(fromLabel ?? {}, "label"));
 
+		// A file written before the config *was* the row spells the wire id `modelId`. Both are read,
+		// which is what makes the rename an upgrade rather than a list of endpoints the user has to
+		// retype — the same account `label` above settles, for the same reason.
+		const fromModelId = coerceModelConfig({ modelId: "deepseek-chat", baseUrl: "http://x" });
+		check("an older row's modelId is read as its id", fromModelId?.id === "deepseek-chat", String(fromModelId?.id));
+		check("and the old spelling does not survive", !Object.hasOwn(fromModelId ?? {}, "modelId"));
+
 		// A row no longer says which transport to use — there is one — so a transport field that arrives
 		// from an older file is simply not part of a row, and the row is still accepted.
-		const strayApi = coerceModel({ modelId: "m", baseUrl: "http://x", api: "not-a-transport" });
-		check("a stray transport field is ignored", strayApi?.modelId === "m", String(strayApi?.modelId));
+		const strayApi = coerceModelConfig({ id: "m", baseUrl: "http://x", api: "not-a-transport" });
+		check("a stray transport field is ignored", strayApi?.id === "m", String(strayApi?.id));
 		check("and never reaches the stored row", !Object.hasOwn(strayApi ?? {}, "api"));
 
-		const sized = coerceModel({ modelId: "m", baseUrl: "http://x", contextWindow: -1, maxTokens: "big" });
+		const sized = coerceModelConfig({ id: "m", baseUrl: "http://x", contextWindow: -1, maxTokens: "big" });
 		check("a nonsense context window falls back", sized?.contextWindow === 200_000, String(sized?.contextWindow));
 		check("and so does a nonsense token limit", sized?.maxTokens === 8_192, String(sized?.maxTokens));
 	}
@@ -229,7 +229,7 @@ try {
 	// the model has no native level for is rejected, and so is a temperature a model refuses.
 	heading("what a Claude model accepts is derived from its wire id");
 	{
-		const model = (modelId: string, reasoning = true) => modelFor(row({ modelId, reasoning }));
+		const model = (id: string, reasoning = true) => createModel(row({ id, reasoning }));
 
 		const plain = model("claude-sonnet-4-5");
 		check("a 4.5 model needs no overrides", plain.compat === undefined, JSON.stringify(plain.compat));
@@ -280,7 +280,7 @@ try {
 		// Its Anthropic-compatible endpoint reads the strength from `output_config.effort` — the shape
 		// every row is asked in now — and takes three efforts rather than the app's four, so its map is
 		// what keeps `medium` from going out as a value the endpoint rejects.
-		const deepseek = modelFor(row({ modelId: "deepseek-v4.1-flash", reasoning: true }));
+		const deepseek = createModel(row({ id: "deepseek-v4.1-flash", reasoning: true }));
 		check("the row needs no compatibility overrides", deepseek.compat === undefined, JSON.stringify(deepseek.compat));
 		check(
 			"the four levels fold onto the three efforts it takes",
@@ -304,7 +304,7 @@ try {
 		// object that names the endpoint. So these build the model the way a session does — from the row
 		// and the level — and read the body on its way out.
 		const sent = async (
-			row: UserModel,
+			row: ModelConfig,
 			level?: "low" | "medium" | "high" | "max",
 		): Promise<{ body: Record<string, unknown>; headers: Headers }> => {
 			let body: Record<string, unknown> = {};
@@ -316,7 +316,7 @@ try {
 			}) as typeof fetch;
 			const messages = [{ role: "user" as const, content: [{ type: "text" as const, text: "hi" }], timestamp: Date.now() }];
 			await anthropicMessages
-				.streamSimple(modelFor(row, level), normalizeContext({ messages }), {
+				.stream(createModel(row, level), { messages }, {
 					apiKey: "secret",
 					fetch: capture,
 				} satisfies SimpleStreamOptions)
@@ -327,9 +327,9 @@ try {
 		const switchOf = (body: Record<string, unknown>): unknown => (body.thinking as { type?: unknown } | undefined)?.type;
 		const displayOf = (body: Record<string, unknown>): unknown => (body.thinking as { display?: unknown } | undefined)?.display;
 
-		const claude = row({ modelId: "claude-opus-4-6", reasoning: true });
-		const deepseek = row({ modelId: "deepseek-v4.1-flash", reasoning: true });
-		const unknown = row({ modelId: "glm-4.6", reasoning: true });
+		const claude = row({ id: "claude-opus-4-6", reasoning: true });
+		const deepseek = row({ id: "deepseek-v4.1-flash", reasoning: true });
+		const unknown = row({ id: "glm-4.6", reasoning: true });
 
 		const claudeHigh = (await sent(claude, "high")).body;
 		check("a Claude row turns thinking on adaptively", switchOf(claudeHigh) === "adaptive", JSON.stringify(claudeHigh.thinking));
@@ -371,18 +371,18 @@ try {
 		check("and sends no effort at all", off.output_config === undefined, JSON.stringify(off.output_config));
 
 		// Fable 5 has no off to be in, so it is not asked for one.
-		const alwaysThinking = row({ modelId: "claude-fable-5", reasoning: true });
+		const alwaysThinking = row({ id: "claude-fable-5", reasoning: true });
 		const cannotStop = (await sent(alwaysThinking)).body;
 		check("a family that cannot stop thinking is sent no switch at all", cannotStop.thinking === undefined, JSON.stringify(cannotStop.thinking));
 	}
 
 	heading("the store round-trips the file");
 	{
-		const store = UserModelStore.create(home);
+		const store = ModelConfigStore.create(home);
 		check("a missing file is no models", store.list().length === 0);
 
-		store.replace([row({ name: "one" }), row({ name: "two", modelId: "claude-opus-5", reasoning: true })]);
-		const reloaded = UserModelStore.create(home).list();
+		store.replace([row({ name: "one" }), row({ name: "two", id: "claude-opus-5", reasoning: true })]);
+		const reloaded = ModelConfigStore.create(home).list();
 		check("both rows come back", reloaded.length === 2, String(reloaded.length));
 		check("with their names", reloaded[0]?.name === "one" && reloaded[1]?.name === "two");
 		check("their keys", reloaded[0]?.apiKey === "secret", String(reloaded[0]?.apiKey));

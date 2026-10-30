@@ -21,7 +21,7 @@ import { Router } from "../packages/server/src/http/routing.ts";
 import { createServer } from "../packages/server/src/http.ts";
 import { createFakeTransport, fakeAssistantMessage, type FakeTransport } from "./fake-transport.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
-import type { SessionRow, SessionSnapshot, UserModel } from "@my-agent/core";
+import type { SessionRow, SessionSnapshot, ModelConfig } from "@my-agent/core";
 
 let failures = 0;
 
@@ -81,12 +81,12 @@ function rowOf(envelope: unknown): SessionRow | undefined {
 	return item?.type === "session_row" ? item.session : undefined;
 }
 
-const rows: UserModel[] = [
+const rows: ModelConfig[] = [
 	{
 		name: "scripted",
 		baseUrl: "http://127.0.0.1:1/v1",
 		apiKey: "unused-by-the-scripted-transport",
-		modelId: "claude-sonnet-4-5",
+		id: "claude-sonnet-4-5",
 		contextWindow: 200_000,
 		maxTokens: 8_192,
 		reasoning: false,
@@ -106,8 +106,8 @@ const TOKENS_PER_SECOND = 400;
 async function openRig(): Promise<Rig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-mux-"));
 	const transport = createFakeTransport({ tokensPerSecond: TOKENS_PER_SECOND });
-	const hub = new SessionHub({ cwd: root, api: transport.api });
-	hub.setUserModels(rows);
+	const hub = new SessionHub({ absCwd: root, api: transport.api });
+	hub.setModelConfigs(rows);
 
 	const projection = createSessionProjection(hub);
 	const mux = createMuxServer(hub, projection, { heartbeatIntervalMs: 150 });
@@ -327,8 +327,9 @@ try {
 			.connection()
 			.map(rowOf)
 			.filter((row): row is SessionRow => row?.id === unwatchedId);
-	// By the time the 202 answers, the claim has opened a host and the projection has laid its first
-	// row down; catch it so the "moved forward" comparison has a before.
+	// A session with nothing said in it has no file, and so no row: the first message is what puts
+	// both down. There is therefore no "before" stamp to compare against here — the run is what
+	// creates the row, and the two checks below say exactly that.
 	const modifiedBefore = rowsForSession()[0]?.modified;
 
 	rig.transport.setResponses([fakeAssistantMessage("unwatched run ".repeat(20))]);
@@ -352,8 +353,13 @@ try {
 	check("the row reported the run while it was in flight", runningIndex >= 0, JSON.stringify(allRows.map((row) => row.running)));
 	check("and reported it finished afterwards", finishedIndex > runningIndex, JSON.stringify(allRows));
 	check(
-		"and its last-activity stamp moved forward",
-		modifiedBefore !== undefined && settledRow !== undefined && settledRow.modified > modifiedBefore,
+		"a session with nothing said in it had no sidebar row",
+		modifiedBefore === undefined,
+		`before=${modifiedBefore}`,
+	);
+	check(
+		"and the run stamped the row it created",
+		settledRow !== undefined && settledRow.modified > 0,
 		`before=${modifiedBefore} after=${settledRow?.modified}`,
 	);
 

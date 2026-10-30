@@ -1,5 +1,5 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import type { AgentTool } from "@my-agent/agent";
+import type { AgentTool } from "@my-agent/loop";
 import { dirname } from "node:path";
 import { Type, type Static } from "typebox";
 import type { Workspace } from "../workspace.ts";
@@ -7,7 +7,7 @@ import { DIFF_MAX_ROWS, fileDiff } from "./diff.ts";
 import { textResult, throwIfAborted } from "./types.ts";
 
 const parameters = Type.Object({
-	path: Type.String({ description: "File path, relative to the workspace root or absolute inside it" }),
+	path: Type.String({ description: "File path, relative to the workspace root or absPath inside it" }),
 	content: Type.String({ description: "Complete file content. Trailing newline is added when missing." }),
 	overwrite: Type.Optional(
 		Type.Boolean({ description: "Replace an existing file. Defaults to false; use edit for small changes." }),
@@ -42,10 +42,10 @@ export async function runWrite(
 	signal?: AbortSignal,
 ): Promise<ReturnType<typeof textResult>> {
 	throwIfAborted(signal);
-	const absolute = workspace.resolve(params.path);
-	const display = workspace.display(absolute);
-	const existing = await stat(absolute).catch(() => undefined);
-	if (existing?.isDirectory()) throw new Error(`Not a file (it is a directory): ${display}`);
+	const absPath = workspace.resolve(params.path);
+	const relPath = workspace.display(absPath);
+	const existing = await stat(absPath).catch(() => undefined);
+	if (existing?.isDirectory()) throw new Error(`Not a file (it is a directory): ${relPath}`);
 
 	const content = params.content.endsWith("\n") ? params.content : `${params.content}\n`;
 
@@ -56,29 +56,29 @@ export async function runWrite(
 	if (existing) {
 		if (params.overwrite !== true) {
 			throw new Error(
-				`${display} already exists. Use edit for a targeted change, or pass overwrite: true to replace the whole file.`,
+				`${relPath} already exists. Use edit for a targeted change, or pass overwrite: true to replace the whole file.`,
 			);
 		}
-		before = await readFile(absolute, "utf8").catch(() => undefined);
+		before = await readFile(absPath, "utf8").catch(() => undefined);
 		if (before === content) {
-			return textResult(`No change: ${display} already has exactly this content.`, { path: display, changed: false });
+			return textResult(`No change: ${relPath} already has exactly this content.`, { path: relPath, changed: false });
 		}
 	}
 
-	await mkdir(dirname(absolute), { recursive: true });
-	await writeFile(absolute, content, "utf8");
+	await mkdir(dirname(absPath), { recursive: true });
+	await writeFile(absPath, content, "utf8");
 	throwIfAborted(signal);
 
 	const lines = content.split("\n").length - 1;
 	const action = existing ? "Replaced" : "Created";
-	return textResult(`${action} ${display} (${lines} lines, ${content.length} bytes).`, {
-		path: display,
+	return textResult(`${action} ${relPath} (${lines} lines, ${content.length} bytes).`, {
+		path: relPath,
 		changed: true,
 		lines,
 		// A file nothing could read back has no change to report: a diff against content nobody saw
 		// would be a guess dressed up as a record, so the card falls back to the tool's own text.
 		...(existing && before === undefined
 			? {}
-			: { diff: fileDiff(display, before ?? "", content, { maxLines: DIFF_MAX_ROWS, created: existing === undefined }) }),
+			: { diff: fileDiff(relPath, before ?? "", content, { maxLines: DIFF_MAX_ROWS, created: existing === undefined }) }),
 	});
 }

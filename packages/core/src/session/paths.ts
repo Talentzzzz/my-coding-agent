@@ -1,4 +1,3 @@
-import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve as nodeResolve } from "node:path";
 import { AGENT_HOME } from "../config.ts";
@@ -18,39 +17,33 @@ export function sessionsDir(): string {
 	return join(AGENT_HOME, "sessions");
 }
 
-/** The directory name for one workspace's sessions. Exported so a test can name it without creating it. */
-export function workspaceDirName(workspaceRoot: string): string {
-	const resolved = resolvePath(workspaceRoot);
-	return `--${resolved.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+/** The directory name for one workspace's sessions. */
+function workspaceDirName(workspaceRootInput: string): string {
+	const absRoot = resolvePath(workspaceRootInput);
+	return `--${absRoot.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 }
 
-export function workspaceDir(workspaceRoot: string): string {
-	return join(sessionsDir(), workspaceDirName(workspaceRoot));
+export function workspaceDir(workspaceRootInput: string): string {
+	return join(sessionsDir(), workspaceDirName(workspaceRootInput));
 }
 
-/** `dir` is a session directory; `createdAt` is the ISO stamp the header carries. */
-export function sessionPath(dir: string, sessionId: string, createdAt: string): string {
-	return join(dir, `${createdAt.replace(/[:.]/g, "-")}_${sessionId}.jsonl`);
-}
-
-export function ensureWorkspaceDir(workspaceRoot: string): string {
-	const dir = workspaceDir(workspaceRoot);
-	mkdirSync(dir, { recursive: true });
-	return dir;
+/** `absDir` is a session directory; `createdAt` is the ISO stamp the header carries. */
+export function sessionPath(absDir: string, sessionId: string, createdAt: string): string {
+	return join(absDir, `${createdAt.replace(/[:.]/g, "-")}_${sessionId}.jsonl`);
 }
 
 /** Convert Git Bash, MSYS, Cygwin, and WSL drive paths to a form native Windows APIs accept. */
-export function normalizeWindowsShellPath(filePath: string): string {
-	if (!filePath.startsWith("/") || filePath.startsWith("//") || filePath.includes("\\")) return filePath;
-	const match = filePath.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i);
-	if (!match) return filePath;
+function normalizeWindowsShellPath(pathInput: string): string {
+	if (!pathInput.startsWith("/") || pathInput.startsWith("//") || pathInput.includes("\\")) return pathInput;
+	const match = pathInput.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i);
+	if (!match) return pathInput;
 	const suffix = match[2]?.replaceAll("/", "\\");
 	return `${match[1]!.toUpperCase()}:\\${suffix ?? ""}`;
 }
 
 /** Expand a leading `~` and normalize shell-style drive paths, without touching the rest. */
-export function normalizePath(input: string): string {
-	let normalized = input;
+export function normalizePath(pathInput: string): string {
+	let normalized = pathInput;
 	if (process.platform === "win32") normalized = normalizeWindowsShellPath(normalized);
 
 	const home = homedir();
@@ -61,8 +54,8 @@ export function normalizePath(input: string): string {
 	return normalized;
 }
 
-export function resolvePath(input: string, baseDir: string = process.cwd()): string {
-	const normalized = normalizePath(input);
-	const base = normalizePath(baseDir);
+export function resolvePath(pathInput: string, baseDirInput: string = process.cwd()): string {
+	const normalized = normalizePath(pathInput);
+	const base = normalizePath(baseDirInput);
 	return isAbsolute(normalized) ? nodeResolve(normalized) : nodeResolve(base, normalized);
 }

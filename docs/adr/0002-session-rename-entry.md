@@ -21,7 +21,7 @@
 它是会话的一件可变更的事实，和「活跃工具集」「leaf 在哪」同类，而那两件事的先例都是**状态 entry**
 （`tool_config`、`leaf`）：追加一条记录，读的时候取最后一条赢。
 
-`version` 不动。本格式对未知 entry kind 的既有约定是**原样带过**（`parseSessionEntryLine` 不过滤、
+`version` 不动。本格式对未知 entry kind 的既有约定是**原样带过**（`parseJsonlLine` 不过滤、
 `getEntries` 不丢弃），所以老构建读到一个带 `rename` 的文件只是忽略它、照旧派生标题——兼容是免费
 的，不需要迁移，也不需要第二版本号。
 

@@ -1,12 +1,12 @@
 import { readFile, stat, writeFile } from "node:fs/promises";
-import type { AgentTool } from "@my-agent/agent";
+import type { AgentTool } from "@my-agent/loop";
 import { Type, type Static } from "typebox";
 import type { Workspace } from "../workspace.ts";
 import { DIFF_MAX_ROWS, diffText, fileDiff } from "./diff.ts";
 import { textResult, throwIfAborted } from "./types.ts";
 
 const parameters = Type.Object({
-	path: Type.String({ description: "File path, relative to the workspace root or absolute inside it" }),
+	path: Type.String({ description: "File path, relative to the workspace root or absPath inside it" }),
 	old_string: Type.String({ description: "Exact text to replace, including indentation, as it appears in read" }),
 	new_string: Type.String({ description: "Replacement text. Use an empty string to delete the matched text." }),
 	replace_all: Type.Optional(Type.Boolean({ description: "Replace every occurrence. Defaults to false." })),
@@ -45,13 +45,13 @@ export async function runEdit(
 		throw new Error("old_string must not be empty.");
 	}
 
-	const absolute = workspace.resolve(params.path);
-	const display = workspace.display(absolute);
-	const info = await stat(absolute).catch(() => undefined);
-	if (!info) throw new Error(`File not found: ${display}`);
-	if (info.isDirectory()) throw new Error(`Not a file (it is a directory): ${display}`);
+	const absPath = workspace.resolve(params.path);
+	const relPath = workspace.display(absPath);
+	const info = await stat(absPath).catch(() => undefined);
+	if (!info) throw new Error(`File not found: ${relPath}`);
+	if (info.isDirectory()) throw new Error(`Not a file (it is a directory): ${relPath}`);
 
-	const raw = await readFile(absolute, "utf8");
+	const raw = await readFile(absPath, "utf8");
 	const usesCrlf = raw.includes("\r\n");
 	const original = normalize(raw);
 	const needle = normalize(params.old_string);
@@ -59,26 +59,26 @@ export async function runEdit(
 
 	const occurrences = countOccurrences(original, needle);
 	if (occurrences === 0) {
-		throw new Error(`old_string not found in ${display}.${hintFor(original, needle)}`);
+		throw new Error(`old_string not found in ${relPath}.${hintFor(original, needle)}`);
 	}
 	if (occurrences > 1 && params.replace_all !== true) {
 		throw new Error(
-			`old_string appears ${occurrences} times in ${display}. Add surrounding context to make it unique, or pass replace_all: true.`,
+			`old_string appears ${occurrences} times in ${relPath}. Add surrounding context to make it unique, or pass replace_all: true.`,
 		);
 	}
 
 	const updated = params.replace_all === true ? original.split(needle).join(replacement) : original.replace(needle, replacement);
-	await writeFile(absolute, usesCrlf ? updated.replace(/\n/g, "\r\n") : updated, "utf8");
+	await writeFile(absPath, usesCrlf ? updated.replace(/\n/g, "\r\n") : updated, "utf8");
 	throwIfAborted(signal);
 
 	const replaced = params.replace_all === true ? occurrences : 1;
 	// The change is read off the whole file rather than off the needle: a real diff has to know where
 	// in the file it landed, which is what gives the card its line numbers.
-	const diff = fileDiff(display, original, updated, { maxLines: DIFF_MAX_ROWS });
+	const diff = fileDiff(relPath, original, updated, { maxLines: DIFF_MAX_ROWS });
 	const text = diffText(diff);
-	const header = `Edited ${display}: ${replaced} replacement${replaced === 1 ? "" : "s"}.`;
+	const header = `Edited ${relPath}: ${replaced} replacement${replaced === 1 ? "" : "s"}.`;
 	return textResult(text.length > 0 ? `${header}\n${text}` : header, {
-		path: display,
+		path: relPath,
 		replacements: replaced,
 		diff,
 	});

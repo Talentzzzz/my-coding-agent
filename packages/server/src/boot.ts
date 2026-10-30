@@ -1,4 +1,4 @@
-import type { ChatTransport } from "@my-agent/ai";
+import type { ChatTransport } from "@my-agent/llm";
 import { createServer, type HttpServerHandle } from "./http.ts";
 import { SessionHub } from "./hub.ts";
 import { SessionController, SystemController, type SessionListener } from "./controllers/sessions.ts";
@@ -24,7 +24,7 @@ const MUX_PATH = "/mux";
 
 export interface BootOptions {
 	/** The directory the agent may touch. */
-	cwd: string;
+	absCwd: string;
 	/** Bind address. Defaults to `127.0.0.1`: this server is for its own machine. */
 	host?: string;
 	/**
@@ -35,7 +35,6 @@ export interface BootOptions {
 	model?: string;
 	thinkingLevel?: string;
 	sessionId?: string;
-	continueSession?: boolean;
 	/**
 	 * The agent home the global settings are read from and written to. Defaults to the real one.
 	 *
@@ -68,7 +67,7 @@ export interface BootedServer {
 	/** Where the client and the API are reachable, with the port actually bound. */
 	url: string;
 	port: number;
-	cwd: string;
+	absCwd: string;
 	hub: SessionHub;
 	/**
 	 * What this process knows about every session, as sidebar rows.
@@ -93,7 +92,7 @@ export interface BootedServer {
  * command-line face of this function and owns nothing on its own.
  */
 export async function bootServer(options: BootOptions): Promise<BootedServer> {
-	const cwd = options.cwd;
+	const absCwd = options.absCwd;
 	const host = options.host ?? "127.0.0.1";
 	const port = options.port ?? 8080;
 	const sessionId = options.sessionId ?? process.env.MY_AGENT_SESSION ?? undefined;
@@ -103,13 +102,12 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 	}
 
 	const hub = new SessionHub({
-		cwd,
+		absCwd,
 		...(options.model === undefined ? {} : { model: options.model }),
 		...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
 		// A shell with no project picker yet has no other way to be pointed at a conversation; the
 		// environment is how a launcher or a capture run says which one to open.
 		...(sessionId === undefined ? {} : { sessionId }),
-		continueSession: options.continueSession ?? false,
 		...(options.settingsHome === undefined ? {} : { settingsHome: options.settingsHome }),
 		...(options.api === undefined ? {} : { api: options.api }),
 	});
@@ -149,7 +147,7 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 	return {
 		url: `http://${host}:${bound}`,
 		port: bound,
-		cwd,
+		absCwd,
 		hub,
 		projection,
 		mux,
@@ -297,10 +295,6 @@ export function sessionListeners(mux: MuxServer, projection: SessionProjection):
 		onApproval: (sessionId, toolCallId, approved) => mux.rememberApproval(sessionId, toolCallId, approved),
 		onRenamed: (sessionId) => void projection.refresh(sessionId),
 		onRemoved: (sessionId) => projection.forget(sessionId),
-		// Every row of the group moved at once, so the projection re-reads them all: the ordinary
-		// `session_row` frame carries the new `cwd` from there, and no client is sent a second shape of
-		// news about a workspace it draws.
-		onWorkspaceRenamed: (_cwd, sessionIds) => void projection.repath(sessionIds),
 		// A group entered or left the list — put aside, or taken back by a new session — and that moves
 		// the list rather than any row, so the frame that answers it is the overview every connection
 		// opened on. Sent to all of them: the window that asked already has the answer in its response,

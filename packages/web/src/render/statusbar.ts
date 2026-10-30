@@ -1,20 +1,17 @@
 import { element } from "../dom.ts";
 import type { UsageTotals } from "@my-agent/core/protocol";
-import type { MessageUsage } from "../state.ts";
 
 export interface StatusState {
 	usage: UsageTotals;
-	/** The usage of the most recent request, which is what the cache seat reads. */
-	last?: MessageUsage;
 }
 
 /**
  * The line under the composer.
  *
  * It carries exactly three numbers, all of them about the tokens this session has spent: the session's
- * total, how much of its prompt the provider served from its own cache, and how full the model's
- * context window is. All three are read at a glance and none is a control, which is why they sit below
- * the composer rather than in the header the conversation is read from.
+ * total, what share of its prompts the provider served from its own cache over the whole session, and
+ * how full the model's context window is. All three are read at a glance and none is a control, which
+ * is why they sit below the composer rather than in the header the conversation is read from.
  *
  * The three are drawn unconditionally. The line used to blank them whenever the server was not
  * answering, on the reasoning that a stale percentage is worse than no percentage — but a token count
@@ -59,21 +56,19 @@ export class StatusBar {
 				: "no request has been made yet";
 
 		const hit = cacheHitRate(usage);
-		const cached = state.last?.cacheRead;
-		// The seat reads **this request**, not the session's average. A lifetime average of hit rates
-		// is the wrong shape for the thing it is asked to describe: every request that carries a big
-		// new block (a tool result, a file read) is mostly fresh by definition, so the average saws
-		// between 83% and 90% while the conversation is in fact being cached perfectly well. The
-		// cached prefix, on the other hand, only ever grows (`.scratch/branch-line-and-smoothness/
-		// issues/02-cache-reading.md` measured 18 real requests: miss ≈ growth, every time).
-		this.cache.textContent = cached === undefined ? "cache —" : `cache ${formatTokens(cached)}`;
+		// The seat reads the **session's totals**, not one request. A per-request reading saws with
+		// the shape of each turn — every request that carries a big new block (a tool result, a file
+		// read) is mostly fresh by definition, so the figure swings while the conversation is in fact
+		// being cached perfectly well — and what a person watching the line wants to know is whether
+		// this conversation's caching works, which is exactly the question the lifetime ratio answers.
+		// The per-request numbers stay in the total seat's tooltip, where the bill lives.
+		this.cache.textContent = hit === undefined ? "cache —" : `cache ${Math.round(hit * 100)}%`;
 		this.cache.title =
-			state.last === undefined
+			hit === undefined
 				? "no request has been made yet"
-				: `${formatTokens(state.last.cacheRead)} of this request's ${formatTokens(promptTokens(state.last))} prompt ` +
-					`tokens came from the provider's cache (${formatTokens(state.last.input)} fresh, ` +
-					`${formatTokens(state.last.cacheWrite)} written)` +
-					(hit === undefined ? "" : ` · session average ${Math.round(hit * 100)}%`);
+				: `${Math.round(hit * 100)}% of the session's ${formatTokens(promptTokens(usage))} prompt tokens ` +
+					`came from the provider's cache — ${formatTokens(usage.cacheRead)} read, ` +
+					`${formatTokens(usage.input)} fresh, ${formatTokens(usage.cacheWrite)} written`;
 
 		const percent = usage.contextWindow > 0 ? Math.min(100, (usage.contextTokens / usage.contextWindow) * 100) : 0;
 		this.context.textContent =
@@ -99,18 +94,19 @@ function totalTokens(usage: UsageTotals): number {
 }
 
 /**
- * How much of the prompt the provider did not have to re-read.
+ * How much of the session's prompts the provider did not have to re-read.
  *
- * Against the whole prompt rather than against the fresh tokens alone: "96% cached" should mean the
- * request was almost free, and a ratio that could exceed 100% would not say that.
+ * Summed over every request the session has made, and against the whole prompt rather than against
+ * the fresh tokens alone: "96% cached" should mean the requests were almost free, and a ratio that
+ * could exceed 100% would not say that.
  */
 function cacheHitRate(usage: UsageTotals): number | undefined {
 	const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
 	return prompt > 0 ? usage.cacheRead / prompt : undefined;
 }
 
-/** One request's prompt, counted the way the provider bills it. */
-function promptTokens(usage: MessageUsage): number {
+/** The session's prompts, counted the way the provider bills them. */
+function promptTokens(usage: UsageTotals): number {
 	return usage.input + usage.cacheRead + usage.cacheWrite;
 }
 

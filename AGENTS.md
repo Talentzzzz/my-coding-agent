@@ -1,8 +1,8 @@
 # my-coding-agent
 
-一个带桌面 UI 的编码 agent。两个 vendored package 承担了重活：`packages/ai`（`@earendil-works/pi-ai`
+一个带桌面 UI 的编码 agent。两个 vendored package 承担了重活：`packages/llm`（`@earendil-works/pi-ai`
 0.99.2 的裁剪副本，砍到只剩一个传输层：API-key 认证、流式、wire，以及唯一一个 API 实现
-Anthropic Messages）和 `packages/agent`（pi 的 agent 循环、工具执行、事件、steering）。其余都是我们
+Anthropic Messages）和 `packages/loop`（pi 的 agent 循环、工具执行、事件、steering）。其余都是我们
 自己的：模型、工具、会话管理器、HTTP API、窗口 UI、Electron 外壳。插件不在范围内。
 
 `docs/architecture.md` 是设计参考——请求流程、wire、以及每个选择背后的理由；动手改哪个子系统之前，
@@ -12,10 +12,10 @@ Anthropic Messages）和 `packages/agent`（pi 的 agent 循环、工具执行�
 ## 布局
 
 ```
-packages/ai       vendored 传输层，只剩 src/api/anthropic-messages.ts；@ts-nocheck
-packages/agent    vendored 循环：四个文件，Loop / LoopState（上游叫 Agent / AgentState）
+packages/llm       vendored 传输层，只剩 src/api/anthropic-messages.ts；@ts-nocheck
+packages/loop    vendored 循环：四个文件，Loop / LoopState（上游叫 Agent / AgentState）
 packages/core     无头 agent：模型、工具、会话管理器、系统提示词、上下文。没有传输层
-packages/server   node:http、REST 命令 + 一条常驻 WebSocket mux、活跃会话；boot.ts 是整个服务器，main.ts 是 CLI
+packages/server   node:http、REST 命令 + 一条常驻 WebSocket mux、活跃会话；boot.ts 是整个服务器，main.ts 只解析启动参数
 packages/desktop  Electron 外壳：进程内启动服务器，让一个窗口指向它
 packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的逻辑流
 ```
@@ -26,16 +26,20 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 
 - **tool（工具）** —— `AgentTool`；`createToolRegistry(workspace)` 持有定义和每会话的活跃集合，没有
   插件注册表。
-- **session（会话）** —— 一个只追加的 JSONL 文件，由 `SessionManager` 拥有；entry 的 kind 有
+- **session（会话）** —— 一个只追加的 JSONL 文件，由 `SessionManager` 拥有；文件随第一条消息出现（`create()` 不写 header，没人说过话的会话不落盘、不进侧边栏），entry 的 kind 有
   `message`、`tool_config`、`compaction` 等，未知 kind 原样带过。标题可被一条 `rename` entry 覆写
   （文件序最后一条赢、与分支无关，见 ADR-0002）；没有它时标题仍从分支首条 user 消息派生。
 - **settings（设置）** —— `SettingsManager` 合并全局与工作区两份 `settings.json`，变更写回**已经提供
   该字段**的那一份。窗口里「设置」这个词**分两级**：**会话级**（工具集合与审批，记在会话自己的
   `tool_config` entry 里，没单独选过就沿用全局；窗口里没有手动编辑入口，改动它只有「选一个模式」
   这一条路）与**应用级**（外观、模型清单、默认模型、bash 超时，以及全局默认的工具集与审批）。
-- **model（模型）** —— `models.json` 里用户导入的一行**就是**一个端点加一个密钥，它的 `name` 既是
-  身份也是标签；`modelFor(row, level)` 把一行变成发请求用的模型（`apiKey`、`thinkingLevelMap`、
-  `thinkingLevel` 都骑在这个对象上）。
+- **model（模型）** —— `models.json` 里的一行**就是**一个 `ModelConfig`：一个端点、一个密钥、以及模型
+  自己的事实（`id` 是接口认识的名字，`name` 既是身份也是标签，`defaultThinkingLevel` 是这一行打开时的
+  默认等级）。`packages/llm` 的 `Model` 类把它变成发请求用的对象（`apiKey`、`thinkingLevelMap`、
+  `thinkingLevel` 都骑在这个对象上），`stream(context, options)` 走它携带的 transport；`Model` 构造时
+  才补上的 `api`、`input`、`cost` 是本构建的**常量**而不是配置项，所以磁盘上的行里没有它们。core 的
+  `coerceModelConfig` 是"什么才允许被存下来"的唯一守门人，`createModel(config, level, transport?)` 与
+  `applyRowToModel(model, config, level)` 是"一个配置 → 一个模型"的唯一入口，后者原地重算、不换对象。
 - **thinking level（思考等级）** —— `off` 到 `max`：一次请求被要求的强度，骑在 `Model.thinkingLevel`
   上，从不发 token 预算，所以 level **就是**强度；模型可以没有 `off`（`thinkingLevelMap` 里的
   `off: null`）。
@@ -65,19 +69,22 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 - **fork（派生子会话）** —— `forkFrom()` 写出一个**新**文件，把源的**文件路径**记为 `parentSession`，
   链和 id 原样复制。
 - **branch（分支）** —— 同一个会话里的另一条路径，而 fork 是另一个文件；`branch(entryId)` 移动 leaf，
-  `getBranchPoints()` 报告分支点。
-- **compaction（压缩）** —— transcript 收缩而不是被替换，最便宜的步骤先走：**argtrim**、**prune**，
-  再到模型写的摘要；每一步是一条 entry，文件永远保留全文。
+  `getBranchPoints()` 报告分支点——**整份日志**的，不是活跃链的，所以树不随 leaf 的位置变形（每个点
+  带一个 `anchor`，指窗口该把它的卡片挂在谁下面）。
+- **compaction（压缩）** —— transcript 收缩而不是被替换，最便宜的步骤先走：**trim_tool_call_arg**（截短
+  工具调用参数）、**clear_tool_result**（清空可重取工具的结果），再到模型写的摘要；每一步是一条
+  entry，文件永远保留全文。
 - **hook（接缝）** —— 会话三个接缝：`context`、`before_tool`（审批闸门）、`after_tool`（超过 80,000
   字符的结果归档到 `.my-agent/tool-results/`）。
-- **retry（重试）** —— 一次瞬时的供应商失败在循环**之下**、在 `streamFn` 接缝上重试，失败的尝试从不
-  被记录。
+- **retry（重试）** —— 一次瞬时的供应商失败在循环**之下**重试：策略装在模型的 transport 上，`streamFn`
+  只是 `(model, context, options) => model.stream(...)` 的适配器；失败的尝试从不被记录。
 - **subagent（子代理）** —— `SubAgent` / `SubAgentControl` 这一对工具；每次委派是一个真实的子
-  `Agent`，永不嵌套，跑在收窄到 `read`、`glob`、`grep` 且审批关闭的注册表上。
+  `Agent`，永不嵌套，跑在收窄到 `read`、`glob`、`grep` 且审批关闭的注册表上；子代理花掉的
+  token 没有消息可搭，作为一条 `usage` entry 整笔记在父会话上、计入会话总额。
 - **queue（队列）** —— 一次运行正在流式时被接受的消息：`steer` 在下一个取走点注入，`followUp` 等这一
   轮结束。
 - **assembly（装配）** —— `openAgent()` 从设置、AGENTS.md、导入的模型构建一个会话；它只决定 transcript
-  **命名**哪一行（`adoptCurrentRow()` 每次请求都从活行重建）。
+  **命名**哪一行（`adoptCurrentRow()` 每次请求都按活行原地重算）。
 - **workspace（工作区）** —— agent 可以触碰的目录；它是**按会话**的，从会话自己 header 里的 `cwd`
   取根。
 - **event（事件）** —— 一个 `AgentSessionEvent`：`AgentEvent` 与会话自己的成员（`queue_update`、
@@ -106,7 +113,6 @@ npm run dev                      # http://127.0.0.1:8080，Vite 服务客户端
 npm run build:web && npm run start   # 改为服务预构建的客户端
 npm run desktop                  # 构建客户端，然后打开桌面窗口
 npm run desktop:dev              # 同样，但由 Vite 服务客户端
-npm run cli -- --cwd . "list the files here"   # 不用任何 UI 调试循环
 ```
 
 三个坑：外壳只能通过 `npm run desktop`（`packages/desktop/scripts/launch.mjs`）启动，有

@@ -8,12 +8,12 @@ export interface SidebarHandlers {
 	/**
 	 * Start a conversation.
 	 *
-	 * `cwd` is the workspace the request was made *from*, and it is what makes the workspace heading's
+	 * `absCwd` is the workspace the request was made *from*, and it is what makes the workspace heading's
 	 * own 「新建会话」 land where the right click was: the top row's button asks for the picker's
 	 * directory (no argument), and the heading names its own. One door rather than two, because a
 	 * new session is the same act wherever it is asked for.
 	 */
-	onNewSession(cwd?: string): void;
+	onNewSession(absCwd?: string): void;
 	onSelectSession(sessionId: string): void;
 	onToggleCollapsed(): void;
 	onOpenSettings(): void;
@@ -32,27 +32,26 @@ export interface SidebarHandlers {
 	 */
 	onRenameSession(sessionId: string, title: string): void;
 	/** The workspace head was clicked: collapse it to its heading, or reopen it on its saved page. */
-	onToggleWorkspace(cwd: string): void;
+	onToggleWorkspace(absCwd: string): void;
 	/** The workspace's 「展开其余」 was clicked: show one more page of its conversations. */
-	onPageWorkspace(cwd: string): void;
+	onPageWorkspace(absCwd: string): void;
 	/** The workspace's 「收起」 was clicked: step the expansion back one page. */
-	onCollapseWorkspace(cwd: string): void;
+	onCollapseWorkspace(absCwd: string): void;
 	/**
-	 * Rename the workspace this heading names: move its folder, and carry its sessions along (票 06).
+	 * Give the workspace this heading names a new label (票 06).
 	 *
-	 * `cwd` is the group the card was opened on and `name` is the single folder name that was typed.
-	 * Both travel, because the two halves belong to different sides: the segment is the user's, and
-	 * turning it into a path — beside the directory it already sits in — is the window's, which is the
-	 * side that knows what "rename" means on this machine.
+	 * `absCwd` is the group the card was opened on and `name` is what the user typed. Nothing on disk is
+	 * named by either: the label is a view the settings remember, so the window's only job is to store
+	 * it and repaint the heading that wears it.
 	 */
-	onRenameWorkspace(cwd: string, name: string): void;
+	onRenameWorkspace(absCwd: string, name: string): void;
 	/**
 	 * Remove the workspace this heading names from the list, touching nothing on disk.
 	 *
 	 * Named `delete` in the menu because that is what the user is doing from where they sit; the
 	 * handler's job — and the endpoint's name — is the narrower 「hide」.
 	 */
-	onDeleteWorkspace(cwd: string): void;
+	onDeleteWorkspace(absCwd: string): void;
 }
 
 export interface SidebarState {
@@ -69,6 +68,14 @@ export interface SidebarState {
 	 * settings files, not an origin-scoped `localStorage` the desktop shell's fresh port strands.
 	 */
 	paging: Record<string, WorkspacePaging>;
+	/**
+	 * The names the user gave workspaces, by path, as the settings hold them.
+	 *
+	 * A heading wears `workspaceNames[absCwd]` when there is one and the folder's own name otherwise. The
+	 * entry is a *view*: the folder on disk is never renamed, so this is the whole of what a rename
+	 * changes — which is also why it rides the settings and not the group the server lists.
+	 */
+	workspaceNames?: Record<string, string>;
 	/**
 	 * Whether the resident channel is up.
 	 *
@@ -266,8 +273,9 @@ export class Sidebar {
 		// hold, and a list the user is actively narrowing is not a scan.
 		let matches = 0;
 		for (const group of groups) {
-			const entry = pagingOf(state.paging, group.cwd);
-			const wrapper = this.groupFor(group.cwd, entry);
+			const entry = pagingOf(state.paging, group.absCwd);
+			const label = state.workspaceNames?.[group.absCwd] ?? workspaceName(group.absCwd);
+			const wrapper = this.groupFor(group.absCwd, entry, label);
 			const rows = rowsOf(group);
 			for (const row of rows) this.rowsById.set(row.session.id, row);
 			// Matched on the label a row *wears* rather than the title it stores: the fork's suffix is
@@ -276,7 +284,7 @@ export class Sidebar {
 				filter === ""
 					? rows
 					: rows.filter(
-							(row) => row.label.toLowerCase().includes(filter) || group.cwd.toLowerCase().includes(filter),
+							(row) => row.label.toLowerCase().includes(filter) || group.absCwd.toLowerCase().includes(filter),
 						);
 			matches += kept.length;
 			const open = filter !== "" || !entry.collapsed;
@@ -315,15 +323,15 @@ export class Sidebar {
 			const more = paged && hidden > 0;
 			const back = paged && entry.page > 1 && conversations > PAGE_SIZE;
 			if (more || back) {
-				wanted.add(`paging:${group.cwd}`);
-				const pagingRow = this.pagingRowFor(group.cwd);
+				wanted.add(`paging:${group.absCwd}`);
+				const pagingRow = this.pagingRowFor(group.absCwd);
 				this.paintPagingRow(pagingRow, more, back, hidden);
 				this.place(wrapper, pagingRow.row, previous);
 				previous = pagingRow.row;
 			} else {
-				this.stale(`paging:${group.cwd}`);
+				this.stale(`paging:${group.absCwd}`);
 			}
-			wanted.add(`head:${group.cwd}`);
+			wanted.add(`head:${group.absCwd}`);
 		}
 
 		this.noMatch.hidden = !(filter !== "" && matches === 0);
@@ -379,9 +387,13 @@ export class Sidebar {
 	 * collapses to its heading and opens again, so Enter and Space reach it like any other control,
 	 * and `[aria-expanded]` is the state a screen reader — and the stylesheet's chevron — read.
 	 * The state is patched like everything else on a drawn node: written only when it moved.
+	 *
+	 * `label` is what the user called this workspace, already resolved from the settings by the
+	 * caller: a rename changes that string and nothing else, so the node is keyed by `absCwd` — which a
+	 * rename no longer moves — and only its text is patched.
 	 */
-	private groupFor(cwd: string, entry: WorkspacePaging): HTMLElement {
-		const key = `head:${cwd}`;
+	private groupFor(absCwd: string, entry: WorkspacePaging, label: string): HTMLElement {
+		const key = `head:${absCwd}`;
 		const existing = this.drawn.get(key);
 		if (existing !== undefined) {
 			// Both facts are written through the heading reference this entry was built with, so
@@ -389,19 +401,18 @@ export class Sidebar {
 			if (existing.head !== undefined) {
 				this.paintExpanded(existing.head, entry.collapsed);
 			}
-			// The two strings a rename can move are patched for the same reason a row's title is:
-			// nothing rebuilds a heading, and a rename re-keys the group — so the node that wore the
-			// old path has to be able to stop wearing it, label and tooltip both.
-			if (existing.head !== undefined && existing.head.title !== cwd) existing.head.title = cwd;
-			if (existing.name !== undefined && existing.name.textContent !== workspaceName(cwd)) {
-				existing.name.textContent = workspaceName(cwd);
+			// The label is patched for the same reason a row's title is: nothing rebuilds a heading,
+			// so the node that wore the old name has to be able to stop wearing it.
+			if (existing.head !== undefined && existing.head.title !== absCwd) existing.head.title = absCwd;
+			if (existing.name !== undefined && existing.name.textContent !== label) {
+				existing.name.textContent = label;
 			}
 			return existing.button;
 		}
 
 		const head = element("button", "workspace-head", undefined, {
 			type: "button",
-			title: cwd,
+			title: absCwd,
 			"aria-expanded": entry.collapsed ? "false" : "true",
 		});
 		// Both icons ride every head, and the hover — not the DOM — decides which shows: the folder is
@@ -410,15 +421,15 @@ export class Sidebar {
 		folder.append(icon("folder"));
 		const chev = element("span", "workspace-icon-chev");
 		chev.append(icon("chevron"));
-		const name = element("span", "workspace-name", workspaceName(cwd));
+		const name = element("span", "workspace-name", label);
 		head.append(folder, chev, name);
-		head.addEventListener("click", () => this.handlers.onToggleWorkspace(cwd));
+		head.addEventListener("click", () => this.handlers.onToggleWorkspace(absCwd));
 		// The heading's whole menu lives here rather than on any resident control: a right click names
 		// the workspace, and the menu it opens is the only place new-session-here, rename, and delete
 		// are offered from — the same road a session row's menu takes.
 		head.addEventListener("contextmenu", (event) => {
 			event.preventDefault();
-			this.openWorkspaceMenu(cwd, event.clientX, event.clientY);
+			this.openWorkspaceMenu(absCwd, label, event.clientX, event.clientY);
 		});
 
 		const wrapper = element("div", "workspace");
@@ -431,55 +442,53 @@ export class Sidebar {
 	/**
 	 * The one menu a workspace heading has: new session here, rename, delete.
 	 *
-	 * 新建会话 names the cwd it was asked on, which is the whole point of the item — the top row's
+	 * 新建会话 names the absCwd it was asked on, which is the whole point of the item — the top row's
 	 * button starts a session wherever the picker points, and this one starts it *here*.
 	 *
 	 * 删除 carries the tooltip that says what it does not do. The menu word is the one the user is
 	 * looking for; the endpoint behind it and the sentence under it are both narrower, and a person
 	 * deleting a project from a sidebar deserves to know the folder is not going anywhere.
 	 */
-	private openWorkspaceMenu(cwd: string, x: number, y: number): void {
+	private openWorkspaceMenu(absCwd: string, label: string, x: number, y: number): void {
 		openMenuAt(x, y, [
 			{
 				icon: "plus",
 				label: "新建会话",
-				title: `在这个工作区里新建：${cwd}`,
-				onSelect: () => this.handlers.onNewSession(cwd),
+				title: `在这个工作区里新建：${absCwd}`,
+				onSelect: () => this.handlers.onNewSession(absCwd),
 			},
 			{ kind: "separator" },
-			{ label: "重命名…", title: "改本地文件夹名，该工作区的会话记录一起跟过去", onSelect: () => void this.renameWorkspace(cwd) },
+			{ label: "重命名…", title: "改它在这个列表里显示的名字，磁盘上的文件夹不动", onSelect: () => void this.renameWorkspace(absCwd, label) },
 			{
 				icon: "trash",
 				label: "删除",
 				danger: true,
 				title: "只从列表里移除，不碰磁盘：会话文件与文件夹都留在原地",
-				onSelect: () => this.handlers.onDeleteWorkspace(cwd),
+				onSelect: () => this.handlers.onDeleteWorkspace(absCwd),
 			},
 		]);
 	}
 	/**
-	 * Ask for a new folder name, and report it beside the group it was asked on.
+	 * Ask for the name this heading should wear, and report it beside the group it was asked on.
 	 *
-	 * What is collected here is one *segment*, which is the only part a rename can change: the
-	 * directory the group names stays where it is and the folder inside it is renamed. That is also why
-	 * a separator or a `..` in the answer is dropped rather than passed on — a rename that could move
-	 * the folder elsewhere would be a move wearing a rename's clothes, and the session headers are
-	 * rewritten on the assumption that only the last segment moved. A name the folder already wears is
-	 * dropped for the simpler reason: it is not a change, and sending it would be a request that
-	 * stores what the server already holds.
+	 * What is collected is a *label*, so nothing about it can be wrong in a way that costs anything:
+	 * the directory keeps its own name, no transcript is rewritten, and a name that reads like a path
+	 * is just a name. An empty box is the shared dialog's way of saying nothing was asked, so taking a
+	 * custom name back is the settings road's own answer (`workspaceNames[absCwd] = ""`), not this card's.
+	 * A label the heading already wears is dropped for the simpler reason: it is not a change.
 	 */
-	private async renameWorkspace(cwd: string): Promise<void> {
-		const current = workspaceName(cwd);
+	private async renameWorkspace(absCwd: string, label: string): Promise<void> {
 		const typed = await askForText({
 			title: "重命名工作区",
-			label: "新的文件夹名",
-			value: current,
-			hint: "文件夹与它下面所有会话记录的路径会一起改成新名字。",
+			label: "显示名称",
+			value: label,
+			hint: "只改这个列表里显示的名字，磁盘上的文件夹和会话记录都不动。",
 			confirm: "重命名",
 		});
-		if (typed === undefined || typed === current) return;
-		if (typed.includes("/") || typed.includes("\\") || typed === "." || typed === "..") return;
-		this.handlers.onRenameWorkspace(cwd, typed);
+		if (typed === undefined) return;
+		const name = typed.trim();
+		if (name === label) return;
+		this.handlers.onRenameWorkspace(absCwd, name);
 	}
 
 	private paintExpanded(head: HTMLElement, collapsed: boolean): void {
@@ -620,8 +629,8 @@ export class Sidebar {
 		const busy = busyOf(row.session);
 		const tooltip =
 			(row.parentLabel === undefined
-				? `${row.label}\n${row.session.cwd}\n创建于 ${created.text}`
-				: `${row.label}\n${row.session.cwd}\n派生自 ${row.parentLabel}\n创建于 ${created.text}`) +
+				? `${row.label}\n${row.session.absCwd}\n创建于 ${created.text}`
+				: `${row.label}\n${row.session.absCwd}\n派生自 ${row.parentLabel}\n创建于 ${created.text}`) +
 			(busy === undefined ? "" : `\n${busy}`);
 		if (parts.tooltip !== tooltip) {
 			parts.tooltip = tooltip;
@@ -691,15 +700,15 @@ export class Sidebar {
 	 * the patch, not a rebuild: 展开 is on while rows are held back, 收起 is on once a page has
 	 * been added, and either one alone is an ordinary state of the row.
 	 */
-	private pagingRowFor(cwd: string): PagingRow {
-		const key = `paging:${cwd}`;
+	private pagingRowFor(absCwd: string): PagingRow {
+		const key = `paging:${absCwd}`;
 		const existing = this.drawn.get(key);
 		if (existing?.paging !== undefined) return existing.paging;
 
 		const more = element("button", "session-more", undefined, { type: "button" });
-		more.addEventListener("click", () => this.handlers.onPageWorkspace(cwd));
+		more.addEventListener("click", () => this.handlers.onPageWorkspace(absCwd));
 		const collapse = element("button", "session-more session-collapse", "收起", { type: "button" });
-		collapse.addEventListener("click", () => this.handlers.onCollapseWorkspace(cwd));
+		collapse.addEventListener("click", () => this.handlers.onCollapseWorkspace(absCwd));
 		const row = element("div", "session-paging");
 		row.append(more, collapse);
 		const paging: PagingRow = { row, more, collapse };
@@ -815,8 +824,8 @@ interface RowParts {
  * record of it — so both the draw and the window's three handlers read through this rather than
  * indexing and defaulting at each site.
  */
-export function pagingOf(paging: Record<string, WorkspacePaging>, cwd: string): WorkspacePaging {
-	return paging[cwd] ?? { collapsed: false, page: 1, savedPage: 1 };
+export function pagingOf(paging: Record<string, WorkspacePaging>, absCwd: string): WorkspacePaging {
+	return paging[absCwd] ?? { collapsed: false, page: 1, savedPage: 1 };
 }
 
 /**
@@ -954,9 +963,9 @@ function rowsOf(group: WorkspaceGroup): TreeRow[] {
 const PAGE_SIZE = 5;
 
 /** The last segment of a path, which is what a person calls the project. */
-export function workspaceName(cwd: string): string {
-	const parts = cwd.split(/[/\\]/).filter((part) => part.length > 0);
-	return parts.at(-1) ?? cwd;
+export function workspaceName(absCwd: string): string {
+	const parts = absCwd.split(/[/\\]/).filter((part) => part.length > 0);
+	return parts.at(-1) ?? absCwd;
 }
 
 /**

@@ -101,7 +101,7 @@ export class SessionApi {
 	/**
 	 * Start a conversation.
 	 *
-	 * `cwd` is where the new session lands: the workspace picker's own choice, made with the request
+	 * `absCwd` is where the new session lands: the workspace picker's own choice, made with the request
 	 * and never a server-side "current directory". Undefined is the server's root, which is what a
 	 * bodyless create has always meant.
 	 *
@@ -109,8 +109,8 @@ export class SessionApi {
 	 * with it is deliberately not exposed: the sidebar's rows have one writer at a time, and while the
 	 * channel is up that writer is the channel — see {@link sessionId}.
 	 */
-	async createSession(cwd?: string): Promise<{ sessionId: string }> {
-		return this.sessionId("POST", "/api/sessions", cwd === undefined ? undefined : { cwd });
+	async createSession(absCwd?: string): Promise<{ sessionId: string }> {
+		return this.sessionId("POST", "/api/sessions", absCwd === undefined ? undefined : { absCwd });
 	}
 
 	/** Branch a session at one entry, or copy the whole log when the entry is null. */
@@ -154,9 +154,10 @@ export class SessionApi {
 	 * Which session a window with no anchor of its own should open.
 	 *
 	 * The server answers this rather than the client picking from the list, because the choice is the
-	 * server's: `--session` pins a conversation, `--continue` resumes one, and a workspace with
-	 * history reopens the most recent. A client that chose "the newest file" would silently ignore
-	 * all three, and an empty history still answers with a session the server has just created.
+	 * server's: `--session` pins a conversation, and otherwise a new session is created — a launch
+	 * lands on the welcome state, not on whatever was last spoken in. A client that chose "the newest
+	 * file" would silently ignore the pin, and an empty history still answers with a session the
+	 * server has just created.
 	 *
 	 * The listing that comes back with it is left unread. The sidebar's rows come from the channel
 	 * whenever it is up, and this endpoint's copy is the fallback for when it is not — taking it
@@ -169,11 +170,11 @@ export class SessionApi {
 	/**
 	 * Where this server is rooted, and what it currently has running.
 	 *
-	 * The whole response is typed, `live` included, even though this client reads only `cwd`. Declaring
+	 * The whole response is typed, `live` included, even though this client reads only `absCwd`. Declaring
 	 * a narrower shape would make this file describe something other than the endpoint — and the next
 	 * reader who wants `live` would find a type that insists it does not exist.
 	 */
-	async health(): Promise<{ ok: boolean; cwd: string; live: string[] }> {
+	async health(): Promise<{ ok: boolean; absCwd: string; live: string[] }> {
 		return this.send("GET", "/api/health", undefined);
 	}
 
@@ -183,19 +184,18 @@ export class SessionApi {
 	}
 
 	/**
-	 * Move a workspace's folder, with its sessions following.
+	 * Give a workspace a name the sidebar shows, touching nothing on disk.
 	 *
-	 * Both paths are absolute and both are built here, because this is the side that knows what the
-	 * user typed: the new name is one *segment*, and the directory it goes in is the one the group
-	 * already names. The server makes the checks only it can make — that the source is a workspace it
-	 * lists, that the target is free, and that nothing is running in either.
+	 * `absCwd` names the group and `name` is the label — they are not two paths: the folder keeps the name
+	 * the file system gave it, and this is a view the settings remember. An empty name takes the
+	 * custom one back, and the heading falls to the folder's own name again.
 	 *
-	 * The answer names the new path, and the rows are deliberately not part of it: the group comes
-	 * back through the channel's `session_row` frames, so a window never has two stories about where
-	 * its sidebar points.
+	 * The answer carries the settings snapshot because that is where the label lives: the window
+	 * applies it and repaints the heading, and no row moved, so there is no `session_row` frame on its
+	 * way to disagree with.
 	 */
-	async renameWorkspace(from: string, to: string): Promise<{ cwd: string; sessions: string[] }> {
-		return this.send("POST", "/api/workspaces/rename", { from, to });
+	async renameWorkspace(absCwd: string, name: string): Promise<{ absCwd: string; name: string; settings: SettingsSnapshot }> {
+		return this.send("POST", "/api/workspaces/rename", { absCwd, name });
 	}
 
 	/**
@@ -206,8 +206,8 @@ export class SessionApi {
 	 * endpoint answers with what the sidebar should now draw — and the client applies it rather than
 	 * guessing, which would be a second writer for a list the server owns.
 	 */
-	async hideWorkspace(cwd: string): Promise<{ settings: SettingsSnapshot; workspaces: WorkspaceGroup[] }> {
-		return this.send("POST", "/api/workspaces/hide", { cwd });
+	async hideWorkspace(absCwd: string): Promise<{ settings: SettingsSnapshot; workspaces: WorkspaceGroup[] }> {
+		return this.send("POST", "/api/workspaces/hide", { absCwd });
 	}
 
 	async listModels(): Promise<{ models: ModelOption[] }> {

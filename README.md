@@ -1,7 +1,7 @@
 # my-coding-agent
 
-一个在你本机、自己的桌面窗口里运行的编码 agent。pi 的两个 package 承担了重活，以裁剪副本的形式 vendored 进本仓库：`packages/ai`（`@my-agent/ai`，来自
-[`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层，`packages/agent`（`@my-agent/agent`，来自
+一个在你本机、自己的桌面窗口里运行的编码 agent。pi 的两个 package 承担了重活，以裁剪副本的形式 vendored 进本仓库：`packages/llm`（`@my-agent/llm`，来自
+[`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层，`packages/loop`（`@my-agent/loop`，来自
 [`@earendil-works/pi-agent-core`](https://www.npmjs.com/package/@earendil-works/pi-agent-core)）负责 agent 循环——只取本项目真正调用的部分，不是完整的 package。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳都是我们自己的。
 
 agent 跑在一个 Node 进程里，而不是渲染进程里：它持有你的 API 密钥，而它的本职就是读写文件。窗口是一个客户端——它用 REST 发送 prompt，并从一条常驻 WebSocket 通道上读取 agent 的输出，这也是为什么每一条命令同样能用 `curl` 或脚本发。[docs/architecture.md](docs/architecture.md) 是设计文档：请求流程、API 表、会话格式，以及每一块为什么在那个位置。
@@ -20,13 +20,6 @@ npm run desktop                      # 构建客户端，然后打开窗口
 `npm run desktop:dev` 改为通过 Vite 服务客户端，所以 UI 改动无需重新构建就会重载。`npm run build:web && npm run start` 把预构建的客户端当作普通 Web 应用在 `http://127.0.0.1:8080` 上服务，而 `npm run dev` 用 Vite 做同样的事。
 
 想从终端看某个布局，`npm run desktop:screenshot -- ui.png` 会把真实的窗口渲染成一张 PNG 然后退出。加上 `--click <selector>[,<selector>]` 可以截取某个控件背后的东西：`--click ".settings-entry,.settings-tab:nth-child(2)"` 拍的是 Models 面板。
-
-不用任何 UI 检查循环：
-
-```bash
-npm run cli -- --cwd . "list the files here"
-npm run cli -- --list-models
-```
 
 ### 从 shell 驱动它
 
@@ -133,7 +126,7 @@ UI 里做出的变更会回到**已经提供那个键**的文件，所以一个�
 - `contextWindow` 不是装饰：它驱动上下文计量表和压缩何时运行，所以一个错误的值就是一个关于"何时该摘要"的错误决定。
 - 密钥以**明文**存在这个文件里、在你机器上，并且永远不会被发回浏览器：`GET /api/models` 把它替换成 `hasApiKey`。一行在**每次请求**时都被重新读取，所以对其中任何字段的编辑——密钥、端点、wire id、窗口——就是下一条消息所用的东西，没有任何东西需要重新打开。
 
-设置面板的模型表单就是同一组字段——名字、模型 id、端点、密钥、上下文窗口、输出上限、模型是否思考、以及在其上新建会话打开的 level。`--model <name>/<modelId>` 在服务器上钉住一个，`npm run cli -- --list-models` 列出存储了什么。
+设置面板的模型表单就是同一组字段——名字、模型 id、端点、密钥、上下文窗口、输出上限、模型是否思考、以及在其上新建会话打开的 level。`--model <name>/<modelId>` 在服务器上钉住一个，设置面板的 Models 页列出存储了什么。
 
 **模型列表为空时，窗口会替你种下一行起点**：`deepseek-flash`，DeepSeek 的 Anthropic 兼容端点，上下文 1,000,000、输出 384,000、思考开、默认强度 `high`，**密钥留空**——应用从不附带凭据，填 key 是只有你能做的事。它走的是普通的 `PUT /api/models`，所以这一行和你手打的一模一样，每个字段都能改；它也不是目录，只是一行。种成功之后 `settings.json` 会记下 `defaultModelSeeded: true`，**此后删掉这一行就是最终决定**：下次启动列表仍然是空的。想让它再出现一次，把这个字段改成 `false`（或删掉它）再启动。
 
@@ -163,7 +156,7 @@ node scripts/smoke-settings.ts  # 设置真实落盘再重读：收展状态跟�
 node scripts/smoke-modes.ts    # 设置面板的模式页、输入框的模式座位与菜单；不需要密钥
 node scripts/smoke-transcript.ts # 转录的分批绘制与流式代价：两条路画出同一个、流式一帧只碰尾部、脚注跟着轮与运行走、中途来的帧说了算；不需要密钥
 node scripts/smoke-frame.ts    # 一帧只画一次：多次请求合并成一帧、回调里再排的是下一帧、取消的帧不跑；不需要密钥
-node scripts/smoke-branch.ts   # 分支页：一条线上一张卡（任意长的消息都是同一固定高度、单行截断、整句在 tooltip 里）、走法挂在下面一行、画布能拖能缩、两个出口两种落地；不需要密钥
+node scripts/smoke-branch.ts   # 分支页：一条线上一张卡（任意长的消息都是同一固定高度、单行截断、没有悬停提示）、走法挂在下面一行、走法自己的岔照样画、画布能拖能缩、两个出口两种落地；不需要密钥
 node scripts/smoke-session.ts  # 流式、排队、重试、压缩、委派；不需要密钥
 node scripts/smoke-models.ts   # 导入的模型与无模型占位，不需要密钥
 node scripts/smoke-default-model.ts # 内置默认模型：常量、服务端收下的形状、先存行后落标记；不需要密钥
@@ -177,17 +170,17 @@ MY_AGENT_URL=http://127.0.0.1:8080 node scripts/smoke-api.ts
 
 ```ts
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./scripts/fake-transport.ts";
-import type { ChatTransport, ModelSource, UserModel } from "@my-agent/core";
+import type { ChatTransport, ModelConfig, ModelSource } from "@my-agent/core";
 
 const fake = createFakeTransport();
 fake.setResponses([fakeAssistantMessage("hello"), fakeToolCall("read", { path: "a.txt" }), fakeAssistantMessage("done")]);
 
-const rows: UserModel[] = [{ name: "test", baseUrl: "http://127.0.0.1:1/v1", apiKey: "unused", modelId: "test-model", contextWindow: 200_000, maxTokens: 8_192, reasoning: false }];
+const rows: ModelConfig[] = [{ name: "test", baseUrl: "http://127.0.0.1:1/v1", apiKey: "unused", id: "test-model", contextWindow: 200_000, maxTokens: 8_192, reasoning: false }];
 const models: ModelSource = { list: () => rows };
 const api: ChatTransport = fake.api;
 ```
 
-每次供应商调用一个响应、按顺序，所以一次运行可以按需流式、调工具、失败或卡住。在一个临时目录上、用 `openAgent({ workspaceRoot, sessionManager, models, api, settingsManager })` 构建会话，就像 `scripts/smoke-tools.ts` 那样——并抄走它的**两个坑**：`finally` 必须**同时**删除临时工作区和 `workspaceDir(root)`，否则每次运行都会留下一个孤儿目录；以及除非这个测试就是在测持久化，否则传 `settingsManager: SettingsManager.inMemory({...})`。
+每次供应商调用一个响应、按顺序，所以一次运行可以按需流式、调工具、失败或卡住。在一个临时目录上、用 `openAgent({ absWorkspaceRoot, sessionManager, models, api, settingsManager })` 构建会话，就像 `scripts/smoke-tools.ts` 那样——并抄走它的**两个坑**：`finally` 必须**同时**删除临时工作区和 `workspaceDir(root)`，否则每次运行都会留下一个孤儿目录；以及除非这个测试就是在测持久化，否则传 `settingsManager: SettingsManager.inMemory({...})`。
 
 `npm run desktop:screenshot -- ui.png` 渲染真实的窗口；`node packages/desktop/scripts/inspect.cjs`（经由 Electron 二进制）会 dump 页面实际构建出的东西，并演练一次会话切换。
 

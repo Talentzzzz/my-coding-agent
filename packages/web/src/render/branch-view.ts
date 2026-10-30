@@ -13,8 +13,10 @@ import { findWay, type BranchTree, type BranchWay } from "../state.ts";
  * Interaction is the two-beat the prototype settled on: a click on a card only **selects** it, and the
  * button in the fixed header is what moves the session and returns to the conversation. A card on the
  * line lands on the answer its question produced (see {@link BranchWay.replyId}), a card that left the
- * line follows it to where its own work stopped — and the page itself carries no prose: the cards and
- * their tooltips are the whole of the explanation, so a tree that fits the window reads as just that.
+ * line follows it to where its own work stopped — and the page itself carries no prose: the cards are
+ * the whole of the explanation, so a tree that fits the window reads as just that. Nothing hangs over
+ * them either: a card has no tooltip, because the tree is what the page is showing and a hover that
+ * covered the row below it would be answering a question nobody asked.
  *
  * The canvas behaves like a map rather than a scroll box: the layer carries one `translate` and one
  * `scale`, the press moves the translate directly, and the wheel pans. It used to pan by writing
@@ -268,20 +270,29 @@ export class BranchView {
 			if (node.way.next !== undefined && at.has(node.way.next.entryId)) {
 				drawEdge(`M${ax},${ay} H${dotX(node.depth + 1) - DOT_R}`, node.lane, true);
 			}
-			// Off the line: out straight, one curve, down, one curve back, in straight.
+			// Off the line: run along the trunk to the gap in front of the branch's own column, drop
+			// through the gap, and hook right into the card. The gap — between the parent column's
+			// cards, which end `NODE_W` in, and the branch column's, which start at the next step —
+			// is the one strip of x no card ever occupies below the trunk row, so the descent never
+			// slices behind a card the way it did dropping straight down from the dot. The fan counts
+			// down from the gap's right edge, so a later sibling always descends **left** of an
+			// earlier sibling's approach, and the two can never cross; past the gap's width the
+			// descents share the leftmost lane rather than leave it.
 			node.way.branches.forEach((branch, index) => {
 				const to = at.get(branch.entryId);
 				if (to === undefined) return;
 				const by = dotY(to.lane);
 				const bx = dotX(to.depth) - DOT_R;
-				const out = ax + 10 + index * 9;
-				const mid = out + 16;
+				const gapLeft = node.depth * STEP_X + NODE_W + 4;
+				const gapRight = (node.depth + 1) * STEP_X - 16;
+				const drop = Math.max(gapRight - index * 6, gapLeft);
+				const pre = 14;
 				const sign = by > ay ? 1 : -1;
 				drawEdge(
-					`M${ax},${ay} H${out}` +
-						` Q${mid},${ay} ${mid},${ay + sign * 10}` +
+					`M${ax},${ay} H${drop - pre}` +
+						` Q${drop},${ay} ${drop},${ay + sign * 10}` +
 						` V${by - sign * 10}` +
-						` Q${mid},${by} ${mid + 10},${by}` +
+						` Q${drop},${by} ${drop + 10},${by}` +
 						` H${bx}`,
 					to.lane,
 					false,
@@ -310,15 +321,8 @@ export class BranchView {
 			card.style.top = `${dotY(node.lane) - metrics.node / 2}px`;
 			card.style.width = `${NODE_W}px`;
 			card.style.height = `${metrics.node}px`;
-			// The whole sentence rides in `title`: the card shows one line of it, cut by the stylesheet's
-			// ellipsis, and the tooltip is what answers "what did it actually say". The question and the
-			// answer both ride there — a card that names the way by its question and the two ways that
-			// differ by their answers needs both to be readable, once each.
-			const parts: string[] = [];
-			for (const part of [way.question, way.answer, way.label]) {
-				if (part.length > 0 && !parts.includes(part)) parts.push(part);
-			}
-			card.title = parts.join("\n\n");
+			// No `title`: the card is the whole of what the page says about a way, and a hover that
+			// unfolded the message again would cover the tree — the one thing the page exists to show.
 			if (way.entryId === this.tree?.currentId) card.dataset.current = "";
 			if (way.entryId === this.selected) card.dataset.selected = "";
 			if (tree.line.has(way.entryId)) card.dataset.onPath = "";
@@ -486,9 +490,9 @@ function cardMetrics(host: HTMLElement): CardMetrics {
  * take the rows below the card they left.
  *
  * One rule only — **`next` keeps the row, `branches` open new ones** — which is what makes the way
- * being read a straight horizontal line with the others hanging off it. Each alternative is a leaf:
- * the server only reports branch points on the active chain, so a way nobody is reading has no
- * further shape to draw.
+ * being read a straight horizontal line with the others hanging off it. An alternative carries
+ * branches of its own (a fork further down a way nobody is reading is still a fork), so the walk
+ * recurses and those take rows below their own card, one column right of it like any other.
  */
 function layout(tree: BranchTree, metrics: CardMetrics): Layout {
 	const nodes: LaidNode[] = [];
