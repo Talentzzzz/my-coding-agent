@@ -71,7 +71,7 @@ openAgent({ absWorkspaceRoot, sessionManager, models })   # 设置、AGENTS.md�
         -> new Agent(config)                            # 使用，从不自行发现
 ```
 
-`openAgent()`（`core/src/session-factory.ts`）负责向外伸手，每一个调用者都经过它。会话管理器是唯一一个**由调用者决定而非发现**的协作者，因为"要打开**哪一个**会话"是宿主的问题：hub 用 `create` / `open` 回答它，测试用 `inMemory` 回答它。模型及其 level 在任何地方都遵循同一套优先级：调用者指定的 → transcript 记录的 → 该行自己的 `defaultThinkingLevel`。因此测试可以在一份临时管理器和 `SettingsManager.inMemory` 上打开会话，完全不碰 `~/.my-agent/settings.json`。
+`openAgent()`（`core/src/session-factory.ts`）负责向外伸手，每一个调用者都经过它。会话管理器是唯一一个**由调用者决定而非发现**的协作者，因为"要打开**哪一个**会话"是宿主的问题：hub 用 `create` / `open` 回答它，测试用 `inMemory` 回答它。模型及其 level 在任何地方都遵循同一套优先级：调用者指定的 → transcript 记录的 → `off`（没人要求过，就不要求）。因此测试可以在一份临时管理器和 `SettingsManager.inMemory` 上打开会话，完全不碰 `~/.my-agent/settings.json`。
 
 设置是**一个对象** `SettingsManager`（`core/src/settings-manager.ts`），没有别的地方保留副本：会话把它作为 `session.settingsManager` 暴露出来，`applyConfig` 搬运**会话**缓存的东西——两条队列的模式（队列住在会话里，循环只在取走点拉取）——而把值委派给管理器。模型和 thinking level 根本不在补丁里：两者都属于某一次对话，也都随使用它们的消息一起到达（见*输入框的模型座位*）。
 
@@ -92,7 +92,7 @@ openAgent({ absWorkspaceRoot, sessionManager, models })   # 设置、AGENTS.md�
 
 它之所以不是一次独立的配置变更，是因为这两半在"用它们发出一次请求"之前都**不是真的**。`thinking_level_change` 和 `model_change` 是 transcript 对"什么回答了这一轮"的交代，所以它们写在**一轮被准备的地方**，而不是用户指向某个东西的地方：`prepareRequest` 先跑 `adoptCurrentRow()`（重新读取的活行），再跑 `recordSelection()`，后者把模型的 wire id 和 level 与分支已经说过的东西比较，只追加**移动了的**那些。一个打开了却从未被说过话的会话因此完全不增长任何 entry —— 包括装配时不得不归一化 level 的那种情况，而这种情况从前会在打开时就写一条。在此期间输入框持有自己的选择，并在快照一旦同意时立刻丢掉对应的那一半，所以服务器一跟上，这个控件就不再是覆盖值。
 
-level 本身骑在模型上（`Model.thinkingLevel`，由 `createModel(config, level)` 在构造之后设定、由 `reconfigure` 在原地重算），而不是在传输层选项里待在它旁边。这就是"哪个端点"和"多用力"成为**一个**发请求时用的对象的原因，也是发请求只有一个入口（`Model.stream`，转给它携带的 transport）的原因：effort 在 `buildParams` 里从模型上读取，而一个不带 level 的模型与 `off` 是同一次请求。一行自己的 `defaultThinkingLevel` 是在它上面新建会话的起点——是**行的**字段而不是工作区的字段，因为 level 属于模型；而 `GET /api/models` 会发出每一行的 `thinkingLevels`，好让输入框能同时移动模型和 level，不必问服务器新行接受什么。
+level 本身骑在模型上（`Model.thinkingLevel`，由 `createModel(config, level)` 在构造之后设定、由 `reconfigure` 在原地重算），而不是在传输层选项里待在它旁边。这就是"哪个端点"和"多用力"成为**一个**发请求时用的对象的原因，也是发请求只有一个入口（`Model.stream`，转给它携带的 transport）的原因：effort 在 `buildParams` 里从模型上读取，而一个不带 level 的模型与 `off` 是同一次请求——都是显式把开关关掉。四档（`off`、`low`、`high`、`max`）对每一行都一样，所以档位是客户端的：输入框随消息带来它，行上没有默认档，`GET /api/models` 发出的 `thinkingLevels` 只是让输入框有一个能读的形状。
 
 ## 循环，端到端
 
@@ -471,7 +471,7 @@ type ClientFrame =
 | 每行一个传输层 | 每一行都走 Anthropic Messages，每模型能力从 wire id 推导 | 本应用只说一种 API，所以传输层选择会是一个没人能采取行动的选择；某个 Claude 模型接受什么仍然必须按模型来，而 wire id 是手打的一行所携带的唯一事实 |
 | pi-ai 的懒加载 API，以及它推迟的那四个 API | `api/anthropic-messages.ts` 静态导入，其他实现删除 | 本应用能发的唯一请求就是它一直在发的那一个，所以推迟一个它总要加载的模块买不到什么，却会在树里留下四个任何行都够不到的实现 |
 | pi-ai 的服务端拒绝回退：`compat.allowedFallbackModels`、`fallbacks` 请求字段、它的 beta header、标记流中途模型切换的 `fallback` content block、以及为答案计价的目标成本 | 删除 | 被允许的目标是 pi 生成目录的一个事实，而本应用没有那份目录：手打的一行无法说明它的端点接受哪些模型作为回退，所以 `allowedFallbackModels` 从未被设置、没有任何请求携带过 `fallbacks`、每个读它的分支都不可达。这样的响应会把什么价钱算错，不是一个能从 wire id 推导出来的能力，所以它不是本应用声称拥有的能力 |
-| pi-ai 的 `Models`/`Provider` 注册表、凭据存储、OAuth 登录、环境变量密钥查找 | 该行自己的密钥，骑在发请求所用的模型上（`BaseModel.apiKey`），并由 `Agent.adoptCurrentRow()` 在每次请求前按活行原地重算整个模型 | 这里的模型**就是**端点加上到达它的密钥，两者都存于 `models.json`；用户没有输入的密钥是本应用看不到的密钥，而浏览器配对和令牌刷新没有可以发生的表面。重新推导而不是在旁边解析密钥，是更强的陈述：对端点、窗口或 wire id 的一次手工编辑，能抵达一个**一直开着**的会话，而不只是它的密钥 |
+| pi-ai 的 `Models`/`Provider` 注册表、凭据存储、OAuth 登录、环境变量密钥查找 | 该行自己的密钥，骑在发请求所用的模型上（`Model.apiKey`），并由 `Agent.adoptCurrentRow()` 在每次请求前按活行原地重算整个模型 | 这里的模型**就是**端点加上到达它的密钥，两者都存于 `models.json`；用户没有输入的密钥是本应用看不到的密钥，而浏览器配对和令牌刷新没有可以发生的表面。重新推导而不是在旁边解析密钥，是更强的陈述：对端点、窗口或 wire id 的一次手工编辑，能抵达一个**一直开着**的会话，而不只是它的密钥 |
 | 会话属于进程启动时所在的那个工作区 | 会话属于它自己 header 里的 `cwd` | 从另一个工作区分组打开一行，必须在那份目录内解析它的工具 |
 | 模型切换在顶栏、工具集合在弹层、计量表在侧边栏 | 侧边栏角落一个按钮后的统一设置面板，加上输入框上的一个模型座位 | 那些是很少碰的控件，却坐在"对话被读取"的那片 chrome 里；状态行只保留会话的 token 总数、缓存命中率和上下文占用，别无其他。模型及其 thinking level 是证明这条规则的那个例外：它们跟随**对话**，所以属于书写区下方那一行，而新会话打开时的默认值是模型行的字段 |
 | 模型和 thinking level 作为 `PATCH /api/sessions/{id}` 的补丁字段 | 消息体上的一个 `ModelSelection`，由 `prepareRequest` 记录 | 配置变更在发出的那一刻就被施加，所以指向一个模型会写下一条 `model_change`、选一个 level 会写下一条 `thinking_level_change`——为的是一个**两者都没用它发过请求**的会话。entry 是 transcript 对"什么回答了某一轮"的交代，所以它们属于一轮被准备的地方 |

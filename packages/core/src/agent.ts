@@ -613,15 +613,12 @@ export class Agent {
 	 * Point the session at the live row it names, if that row still exists.
 	 *
 	 * A row is the user's to edit, so this runs before every request: the key, the endpoint, the wire
-	 * id, the window, and the level table are all read fresh, which is what `Model.apiKey` and
-	 * `Model.thinkingLevelMap` riding on the model depend on. It moves the loop's state with it, so the
-	 * level table, the context meter, and the reported ref are about the model the request is actually
-	 * made with.
+	 * id, the window, and the compat overrides are all read fresh, which is what `Model.apiKey` and
+	 * `Model.compat` riding on the model depend on. It moves the loop's state with it, so the level,
+	 * the context meter, and the reported ref are about the model the request is actually made with.
 	 *
-	 * The level the session is on is carried across rather than taken from the row: the row says what
-	 * the model can be asked, and the session is the one that chose. Re-normalizing it here is what
-	 * turns a row edited to stop reasoning into a session back at "off" instead of one still claiming a
-	 * level the row no longer has.
+	 * The level the session is on is carried across rather than taken from the row: the row says which
+	 * endpoint answers, and the session is the one that chose how hard to ask.
 	 *
 	 * Nothing is recorded here: {@link recordSelection} does that once the model is final, because a row
 	 * read mid-flight is not yet what the request went out with.
@@ -667,7 +664,7 @@ export class Agent {
 	 * The same argument as {@link applyBranchToolConfig}: which model answered and how hard it was
 	 * asked are facts about where the leaf is, so moving the leaf moves them, and a session that
 	 * carried the choice from the branch it left would be one session with two answers. The precedence
-	 * is assembly's — the branch's recorded level, else the row's own default — so a move and a reopen
+	 * is assembly's — the branch's recorded level, else nothing asked for — so a move and a reopen
 	 * of the same file land in the same place.
 	 *
 	 * What the branch says also becomes the new baseline for {@link recordSelection}, which is what
@@ -678,7 +675,7 @@ export class Agent {
 		const recorded = this.sessionManager.getRecordedSettings();
 		const userModel = this.models.list().find((userModel) => userModel.name === (recorded.model?.name ?? this.model.name));
 		if (userModel !== undefined) {
-			applyRowToModel(this.model, userModel, recorded.thinkingLevel ?? userModel.defaultThinkingLevel);
+			applyRowToModel(this.model, userModel, recorded.thinkingLevel);
 		}
 		this.recordedModelId = recorded.model?.modelId;
 		this.recordedThinkingLevel = recorded.thinkingLevel as ThinkingLevel | undefined;
@@ -811,7 +808,7 @@ export class Agent {
 
 	/** The levels the current model can be asked at, in the order the picker shows them. */
 	get thinkingLevels(): string[] {
-		return thinkingLevelsFor(this.model);
+		return thinkingLevelsFor();
 	}
 
 	/** Whether a run is in flight, including a run parked at an approval. */
@@ -1123,7 +1120,7 @@ export class Agent {
 	 * There is no entry here and no settings write: a choice is not something that happened until a
 	 * request is made with it, so it lives on the model the session is on and reaches the transcript in
 	 * {@link recordSelection}, at the moment the request it belongs to is built. What a caller gets
-	 * back immediately is the change itself — the snapshot, the level table, and the next request are
+	 * back immediately is the change itself — the snapshot, the level, and the next request are
 	 * all about the new model, whether or not that request is ever sent.
 	 *
 	 * A level the chosen model has no room for is refused rather than clamped, because the caller is a
@@ -1140,17 +1137,11 @@ export class Agent {
 		const userModel = this.models.list().find((userModel) => userModel.name === name);
 		if (userModel === undefined) throw new Error(`Unknown model: ${name}`);
 
-		// A row named without a level lands on that row's own default, which is the answer an assembled
-		// session opens on; a level named on the current row is the caller's. Either way the pair is
-		// built once, so a level the model has no room for is refused rather than half-applied.
-		const thinkingLevel =
-			selection.thinkingLevel ??
-			(selection.model === undefined ? this.model.thinkingLevel : userModel.defaultThinkingLevel);
+		// A level named without a model is the caller's choice on the row already in force; a model
+		// named without one keeps the level the session is on, which is the pair the composer is
+		// showing. Either way the pair is built once, so the two halves are never half-applied.
+		const thinkingLevel = selection.thinkingLevel ?? this.model.thinkingLevel;
 		const candidate = createModel(userModel, thinkingLevel, this.transport);
-		const level = candidate.thinkingLevel ?? "off";
-		if (selection.thinkingLevel !== undefined && level !== selection.thinkingLevel && selection.thinkingLevel !== "off") {
-			throw new Error(`${candidate.id} does not support thinking level "${selection.thinkingLevel}"`);
-		}
 
 		this.model = candidate;
 		this.publish();

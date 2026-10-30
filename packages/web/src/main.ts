@@ -18,7 +18,7 @@ import { SettingsPanel, modeSummaryOf } from "./render/settings.ts";
 import { openMenu, openMenuAt, type MenuItem } from "./render/menu.ts";
 import { StatusBar } from "./render/statusbar.ts";
 import { element, icon } from "./dom.ts";
-import { seedDefaultModel } from "./default-model.ts";
+import { DEFAULT_THINKING_LEVEL, seedDefaultModel } from "./default-model.ts";
 import type { ConnectionItem, ModelOption, ServerMessage, WorkspacePaging } from "@my-agent/core/protocol";
 
 /**
@@ -439,9 +439,9 @@ function main(): void {
 		onSubmit: (text, behavior) => void prompt(text, behavior),
 		onAbort: () => void abort(),
 		onSelectModel: (name) => {
-			// The two halves move together: a level belongs to a model, so a new row lands on that row's
-			// own default rather than carrying the old row's level into a model that may not have it.
-			chosen = { model: name, thinkingLevel: rowOf(name)?.defaultThinkingLevel };
+			// Only the model moves. The level is the composer's, every model takes the same four, and a
+			// strength the user chose should not be silently reset by switching which endpoint answers.
+			chosen = { ...chosen, model: name };
 			render();
 		},
 		onSelectLevel: (level) => {
@@ -999,7 +999,7 @@ function main(): void {
 		const model = chosen.model ?? snapshot?.model ?? "";
 		const row = rowOf(model);
 		const levels = row?.thinkingLevels ?? snapshot?.thinkingLevels ?? [];
-		const level = chosen.thinkingLevel ?? snapshot?.thinkingLevel ?? row?.defaultThinkingLevel ?? "off";
+		const level = chosen.thinkingLevel ?? snapshot?.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
 		return { models: state.models, model, levels, level };
 	}
 

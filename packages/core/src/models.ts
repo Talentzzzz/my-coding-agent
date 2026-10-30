@@ -5,14 +5,13 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type ChatTransport,
-	clampThinkingLevel,
 	createAssistantMessageEventStream,
 	getSupportedThinkingLevels,
 	Model,
 	type ModelConfig,
-	type ModelThinkingLevel,
+	type ThinkingLevel as LlmThinkingLevel,
 } from "@my-agent/llm";
-import { anthropicCompatFor, anthropicThinkingLevelMapFor } from "./anthropic-models.ts";
+import { anthropicCompatFor } from "./anthropic-models.ts";
 import { AGENT_HOME } from "./config.ts";
 import type { ModelOption } from "./protocol.ts";
 
@@ -68,7 +67,6 @@ export interface ModelSource {
 export const NEW_MODEL_DEFAULTS = {
 	contextWindow: 200_000,
 	maxTokens: 8_192,
-	reasoning: false,
 };
 
 /**
@@ -192,11 +190,6 @@ export function coerceModelConfig(input: unknown): ModelConfig | undefined {
 	const baseUrl = stringOrUndefined(input.baseUrl);
 	if (baseUrl === undefined) return undefined;
 
-	// A level this app has no name for is dropped rather than stored: the file is hand-editable, and a
-	// typo should leave the row on its own default instead of being carried around. A level the
-	// *model* has no room for is a different question, and assembly settles it.
-	const defaultThinkingLevel = thinkingLevelOr(input.defaultThinkingLevel);
-
 	// Only the fields a person can meaningfully name are copied. `api`, `input`, and `cost` are
 	// constants of this build, so they are not read back out of a file that could claim otherwise —
 	// the same reason a submitted config does not get to choose its own transport.
@@ -207,16 +200,7 @@ export function coerceModelConfig(input: unknown): ModelConfig | undefined {
 		apiKey: typeof input.apiKey === "string" ? input.apiKey : "",
 		contextWindow: positiveInt(input.contextWindow, NEW_MODEL_DEFAULTS.contextWindow),
 		maxTokens: positiveInt(input.maxTokens, NEW_MODEL_DEFAULTS.maxTokens),
-		reasoning: input.reasoning === true,
-		...(defaultThinkingLevel === undefined ? {} : { defaultThinkingLevel }),
 	};
-}
-
-/** One of the five levels this app has a name for, or undefined. */
-function thinkingLevelOr(value: unknown): ThinkingLevel | undefined {
-	return value === "off" || value === "low" || value === "medium" || value === "high" || value === "max"
-		? value
-		: undefined;
 }
 
 // ---------------------------------------------------------------------------- one config as a model
@@ -224,11 +208,8 @@ function thinkingLevelOr(value: unknown): ThinkingLevel | undefined {
 /**
  * The config with the facts its wire id implies filled in.
  *
- * `compat` and `thinkingLevelMap` are the two things a person cannot know and should not be asked:
- * they describe the endpoint behind an id, and `anthropic-models.ts` is where that table lives. Only a
- * config that says it reasons gets them — a row with `reasoning` off must produce a request with no
- * thinking parameters in it at all, and handing it a level table would be a promise the transport then
- * keeps.
+ * `compat` is the one thing a person cannot know and should not be asked: it describes the endpoint
+ * behind an id, and `anthropic-models.ts` is where that table lives.
  *
  * Nothing else is added here. The constants a config never names — `api`, `input`, `cost` — are
  * defaulted inside `Model.reconfigure`, in the package that knows what they can be. This function is
@@ -236,14 +217,8 @@ function thinkingLevelOr(value: unknown): ThinkingLevel | undefined {
  * because app knowledge could not follow the constants into the transport.
  */
 function withCapabilities(config: ModelConfig): ModelConfig {
-	if (!config.reasoning) return config;
 	const compat = config.compat ?? anthropicCompatFor(config.id);
-	const thinkingLevelMap = config.thinkingLevelMap ?? anthropicThinkingLevelMapFor(config.id);
-	return {
-		...config,
-		...(compat === undefined ? {} : { compat }),
-		...(thinkingLevelMap === undefined ? {} : { thinkingLevelMap }),
-	};
+	return compat === undefined ? config : { ...config, compat };
 }
 
 /**
@@ -251,10 +226,9 @@ function withCapabilities(config: ModelConfig): ModelConfig {
  *
  * The level is the second half of the same idea: it rides on the model, so "which endpoint" and "how
  * hard" are one object a request is made with and there is nowhere else for a strength to come from.
- * It is normalized against the built model, so a level the model has no room for lands on one it does
- * rather than on a value the endpoint rejects. Omitted leaves the model with no level at all, which the
- * wire reads as "do not think" — what a caller building a model for a job of its own wants, and what a
- * row with no default produces.
+ * It is normalized here, so a string this app has no name for lands on "off" rather than on a value
+ * the endpoint rejects. Omitted leaves the model with no level at all, which the wire reads as "do
+ * not think" — what a caller building a model for a job of its own wants.
  *
  * `transport` is how this model will be sent. Left out, the model uses the package's one transport; a
  * session passes its own, which is where the retry policy and the "no row behind this model" answer
@@ -262,7 +236,7 @@ function withCapabilities(config: ModelConfig): ModelConfig {
  */
 export function createModel(config: ModelConfig, thinkingLevel?: string, transport?: ChatTransport): Model {
 	const model = new Model(withCapabilities(config), transport);
-	if (thinkingLevel !== undefined) model.thinkingLevel = normalizeThinkingLevel(model, thinkingLevel);
+	if (thinkingLevel !== undefined) model.thinkingLevel = normalizeThinkingLevel(thinkingLevel);
 	return model;
 }
 
@@ -270,17 +244,15 @@ export function createModel(config: ModelConfig, thinkingLevel?: string, transpo
  * Re-derive a live model from the config behind it, in place.
  *
  * What `Agent.adoptCurrentRow` calls before every request: the object the loop holds is the object that
- * changes, so a corrected key, a moved endpoint, a resized window, and a level table the row no longer
- * justifies all reach the next request without a new object being threaded through a run already going.
+ * changes, so a corrected key, a moved endpoint and a resized window all reach the next request
+ * without a new object being threaded through a run already going.
  *
- * The level is carried across by the caller rather than taken from the config — the config says what
- * the model can be asked, and the session is the one that chose — and it is re-normalized here, which
- * is what turns a row edited to stop reasoning into a session back at "off" instead of one still
- * claiming a level the row no longer has.
+ * The level is carried across by the caller rather than taken from the config: the config says which
+ * endpoint answers, and the session is the one that chose how hard to ask.
  */
 export function applyRowToModel(model: Model, config: ModelConfig, thinkingLevel?: string): void {
 	model.reconfigure(withCapabilities(config));
-	if (thinkingLevel !== undefined) model.thinkingLevel = normalizeThinkingLevel(model, thinkingLevel);
+	if (thinkingLevel !== undefined) model.thinkingLevel = normalizeThinkingLevel(thinkingLevel);
 }
 
 /**
@@ -300,7 +272,6 @@ export function placeholderModel(transport?: ChatTransport): Model {
 			baseUrl: "http://127.0.0.1:1/v1",
 			contextWindow: 200_000,
 			maxTokens: 8_192,
-			reasoning: false,
 		},
 		transport,
 	);
@@ -361,46 +332,40 @@ export function listModelOptions(models: readonly ModelConfig[]): ModelOption[] 
 			baseUrl: config.baseUrl,
 			contextWindow: config.contextWindow,
 			maxTokens: config.maxTokens,
-			reasoning: config.reasoning,
-			// The levels travelled with the row rather than being worked out by the client, which has no
-			// way to know what an endpoint takes. A composer that moves the model needs the new row's own
-			// list, and it needs it before the move is sent anywhere.
-			thinkingLevels: [...getSupportedThinkingLevels(built)],
-			defaultThinkingLevel: normalizeThinkingLevel(built, config.defaultThinkingLevel),
+			// The levels travel with the row so a composer that moves the model has the list before the
+			// move reaches the server. It is the same four for every row; the field stays because the
+			// composer reads one shape whether the row is stored, planted or reported by a session.
+			thinkingLevels: [...getSupportedThinkingLevels()],
 			hasApiKey: (config.apiKey ?? "").length > 0,
 		};
 	});
 }
 
-/** Every thinking level the model accepts, lowest first. A model that always thinks has no "off". */
-export function thinkingLevelsFor(model: Model<Api>): string[] {
-	return [...getSupportedThinkingLevels(model)];
+/** Every thinking level a session can be in, lowest first. */
+export function thinkingLevelsFor(): string[] {
+	return [...getSupportedThinkingLevels()];
 }
 
 /**
  * Thinking levels a session can be in.
  *
- * The scale is the transport's, named here so a caller in this package does not reach for
- * `@my-agent/llm` merely to spell a level — and named as an alias rather than restated, because two
- * hand-written copies of five string literals is the drift this file just spent a type removing.
+ * The scale is the transport's, re-exported so a caller in this package does not reach for
+ * `@my-agent/llm` merely to spell a level — and re-exported rather than restated, because two
+ * hand-written copies of four string literals is the drift this file just spent a type removing.
  */
-export type ThinkingLevel = ModelThinkingLevel;
+export type ThinkingLevel = LlmThinkingLevel;
 
 /**
- * Clamp a requested level to one this model supports.
+ * A requested level as one this app can record.
  *
- * A level the model does not have is not a level a session can be in, so it lands on the quietest one
- * the model does have: "off" where thinking can be turned off, and the lowest effort where it cannot —
- * which is what a model with `off: null` in its `thinkingLevelMap` says about itself. Falling back to
- * "off" unconditionally would record a level the transport then ignores, and on a model that always
- * thinks adaptively that means the request goes out with thinking on while the window says it is off.
+ * The set is the same for every model — an effort is the one strength the wire carries — so this is a
+ * name check, not a clamp: a string the app has no name for, and the caller that asked for nothing,
+ * both land on "off". That is the honest answer for "nothing was asked", and it is the request that
+ * says so on the wire.
  */
-export function normalizeThinkingLevel(model: Model<Api>, level: string | undefined): ThinkingLevel {
-	const allowed = getSupportedThinkingLevels(model);
-	const quietest = (allowed.includes("off") ? "off" : allowed[0] ?? "off") as ThinkingLevel;
-	if (level === undefined || level === "off") return quietest;
-	if (!allowed.includes(level as ThinkingLevel)) return quietest;
-	return clampThinkingLevel(model, level as ThinkingLevel) as ThinkingLevel;
+export function normalizeThinkingLevel(level: string | undefined): ThinkingLevel {
+	const allowed = getSupportedThinkingLevels();
+	return allowed.includes(level as LlmThinkingLevel) ? (level as ThinkingLevel) : "off";
 }
 
 // ---------------------------------------------------------------------------- parsing

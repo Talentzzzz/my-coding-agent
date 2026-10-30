@@ -29,9 +29,17 @@ export const DEFAULT_MODEL: ModelInput = {
 	id: "deepseek-flash",
 	contextWindow: 1_000_000,
 	maxTokens: 384_000,
-	reasoning: true,
-	defaultThinkingLevel: "high",
 };
+
+/**
+ * The strength a window starts on when neither the session nor the user has said.
+ *
+ * A default level is the client's fact, not the row's: the row says which endpoint answers, and the
+ * composer is the thing that is showing a strength — so the value lives where the composer does and
+ * travels with each message. `high` is the answer that matches the row planted above: a reasoning
+ * model asked to think, which is what someone opening this app for the first time is asking for.
+ */
+export const DEFAULT_THINKING_LEVEL = "high";
 
 /**
  * Whether the built-in row is due: nothing imported, and no earlier window ever planted it.

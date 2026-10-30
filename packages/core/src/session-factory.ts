@@ -102,12 +102,9 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 	// is send anything, and `Agent` answers for it with the sentence that says what to add.
 	//
 	// The level is settled here and handed over *on the model*, so a session is never on one row and
-	// asked at a level that belongs to another. The row's own default is what a new session opens on:
-	// the levels are the model's, so the default has to be the row's rather than the workspace's.
-	const level =
-		row === undefined
-			? undefined
-			: options.thinkingLevel ?? recorded.thinkingLevel ?? row.defaultThinkingLevel;
+	// asked at a level that belongs to another. It comes from the caller or from what the branch
+	// recorded; a session that has neither opens at "off", which is the request that asks for nothing.
+	const level = row === undefined ? undefined : options.thinkingLevel ?? recorded.thinkingLevel;
 	// The transport arrives on the model rather than beside it: a model is what a request is made with
 	// and this is how it is sent, so the one an injected transport names is the one every re-derivation
 	// from a row keeps using.
@@ -115,7 +112,7 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 		row === undefined ? placeholderModel(options.api) : createModel(row, level, options.api);
 	const registry = options.tools ?? createToolRegistry(workspace, settingsManager);
 	// The level the model came back with, which is the level a subagent inherits: `createModel` already
-	// settled what the row's default means for this model, so asking again here could only disagree.
+	// settled what the row and the level mean for this model, so asking again here could only disagree.
 	const thinkingLevel = model.thinkingLevel ?? "off";
 
 	// Delegation is part of assembly rather than of `createToolRegistry`, because a child needs the

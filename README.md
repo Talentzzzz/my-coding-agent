@@ -111,9 +111,7 @@ UI 里做出的变更会回到**已经提供那个键**的文件，所以一个�
       "apiKey": "sk-ant-...",
       "modelId": "claude-opus-5",
       "contextWindow": 200000,
-      "maxTokens": 8192,
-      "reasoning": true,
-      "defaultThinkingLevel": "medium"
+      "maxTokens": 8192
     }
   ]
 }
@@ -121,14 +119,13 @@ UI 里做出的变更会回到**已经提供那个键**的文件，所以一个�
 
 - `name` 是你对这一行的称呼，它既是该行的**身份**也是它的**标签**：transcript 记录它、配置补丁命名它、选择器显示它，所以只有一个名字，而不是一个可能与背后身份漂移开的显示名。`modelId` 是向端点请求的东西。一个会话的模型读作 `<name>/<modelId>`。名字在你手上是唯一的——`PUT /api/models` 对重复项报 `400` 而不是悄悄加后缀，因为加了后缀的名字会改变**每一条**命名它的 transcript 的含义——而你还没命名的一行会取它的 `modelId`。
 - `baseUrl` 是请求去往的地方，走 Anthropic Messages——本应用唯一会说的传输层，所以一行就是"URL + 密钥背后的一个 Claude 模型"，没有传输层可挑。代理、中转或网关是同一个字段填上它自己的地址；表单预填 Anthropic 自己的端点作为起始值，而 `apiKey` 是请求唯一的认证方式。也没有供应商字段：一行**就是**一个端点，你给它的名字就是配置补丁和 transcript 所携带的东西。
-- `reasoning` 说明这个模型有 thinking level。它打开时，每次请求都要求自适应思考、并把 level 当作 effort——**所有行一个形状**，且从不发送 token 预算——而 `modelId` 只决定一个 level 怎么拼写、以及存在哪些 level：一个 DeepSeek 行会把 `medium` 折到 `high` 上，而一个无法停止思考的家族没有 `off`。这些事实是**按模型**的，不是按供应商的，弄错一个是 `400`；见 `packages/core/src/anthropic-models.ts`。
-- `defaultThinkingLevel` 是在这一行上新建会话的起始 level。它属于**行**而不属于工作区，因为 level 是模型的：一个五级家族的中间那级，不是一个三档端点拥有的 level。模型没有的 level 在保存清单时会被折到它有的某个上，行回来时显示的是**实际保留**的那个。此后 level 归输入框——按对话改变，并随它所属的那条消息一起发送。
+- 这一行不再声明自己是否思考。每个模型都能被要求思考，四档——`off`、`low`、`high`、`max`——对每一行都一样，请求里的形状也只有一个：自适应思考，强度作为 effort，**从不发送 token 预算**。`off` 是显式关掉思考，而不是省掉字段。档位由输入框决定并随消息发送，所以它不在这个文件里。
 - `contextWindow` 不是装饰：它驱动上下文计量表和压缩何时运行，所以一个错误的值就是一个关于"何时该摘要"的错误决定。
 - 密钥以**明文**存在这个文件里、在你机器上，并且永远不会被发回浏览器：`GET /api/models` 把它替换成 `hasApiKey`。一行在**每次请求**时都被重新读取，所以对其中任何字段的编辑——密钥、端点、wire id、窗口——就是下一条消息所用的东西，没有任何东西需要重新打开。
 
-设置面板的模型表单就是同一组字段——名字、模型 id、端点、密钥、上下文窗口、输出上限、模型是否思考、以及在其上新建会话打开的 level。`--model <name>/<modelId>` 在服务器上钉住一个，设置面板的 Models 页列出存储了什么。
+设置面板的模型表单就是同一组字段——名字、模型 id、端点、密钥、上下文窗口、输出上限。`--model <name>/<modelId>` 在服务器上钉住一个，设置面板的 Models 页列出存储了什么。
 
-**模型列表为空时，窗口会替你种下一行起点**：`deepseek-flash`，DeepSeek 的 Anthropic 兼容端点，上下文 1,000,000、输出 384,000、思考开、默认强度 `high`，**密钥留空**——应用从不附带凭据，填 key 是只有你能做的事。它走的是普通的 `PUT /api/models`，所以这一行和你手打的一模一样，每个字段都能改；它也不是目录，只是一行。种成功之后 `settings.json` 会记下 `defaultModelSeeded: true`，**此后删掉这一行就是最终决定**：下次启动列表仍然是空的。想让它再出现一次，把这个字段改成 `false`（或删掉它）再启动。
+**模型列表为空时，窗口会替你种下一行起点**：`deepseek-flash`，DeepSeek 的 Anthropic 兼容端点，上下文 1,000,000、输出 384,000、**密钥留空**——应用从不附带凭据，填 key 是只有你能做的事。窗口的默认思考强度是 `high`，那是**客户端**的默认值而不是这一行的字段。它走的是普通的 `PUT /api/models`，所以这一行和你手打的一模一样，每个字段都能改；它也不是目录，只是一行。种成功之后 `settings.json` 会记下 `defaultModelSeeded: true`，**此后删掉这一行就是最终决定**：下次启动列表仍然是空的。想让它再出现一次，把这个字段改成 `false`（或删掉它）再启动。
 
 **一行都没有时应用照样能打开**：种不下那行起点（或你把它删了）之后，会话跑在一个占位模型上，它唯一的职责就是以一句提示你去添加一个模型的话失败，而它的名字 `my-agent:unconfigured` 是**保留**的——任何行都不得占用它，因为名字就是一行身份的全部。
 
@@ -175,7 +172,7 @@ import type { ChatTransport, ModelConfig, ModelSource } from "@my-agent/core";
 const fake = createFakeTransport();
 fake.setResponses([fakeAssistantMessage("hello"), fakeToolCall("read", { path: "a.txt" }), fakeAssistantMessage("done")]);
 
-const rows: ModelConfig[] = [{ name: "test", baseUrl: "http://127.0.0.1:1/v1", apiKey: "unused", id: "test-model", contextWindow: 200_000, maxTokens: 8_192, reasoning: false }];
+const rows: ModelConfig[] = [{ name: "test", baseUrl: "http://127.0.0.1:1/v1", apiKey: "unused", id: "test-model", contextWindow: 200_000, maxTokens: 8_192 }];
 const models: ModelSource = { list: () => rows };
 const api: ChatTransport = fake.api;
 ```

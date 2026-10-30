@@ -82,21 +82,9 @@ const BLANK_DRAFT: ModelDraft = {
 	id: "",
 	contextWindow: 200_000,
 	maxTokens: 8_192,
-	reasoning: false,
 	thinkingLevels: [],
-	defaultThinkingLevel: "off",
 	hasApiKey: false,
 };
-
-/**
- * Every level this app has a name for, which is what the row form offers.
- *
- * The full set rather than the row's own: the form is edited before the wire id is settled, so the
- * server's per-row list would be about a model the user has not finished typing. Whichever level a
- * row cannot take is folded onto one it can when the list is saved, and the row comes back showing
- * what was actually kept.
- */
-const THINKING_LEVELS = ["off", "low", "medium", "high", "max"] as const;
 
 /**
  * Whether a form has the three fields a row cannot exist without.
@@ -499,27 +487,6 @@ export class SettingsPanel {
 		form.append(
 			this.numberField("最大输出长度", draft.maxTokens, "一次回答最多多少 tokens", (value) => update({ maxTokens: value })),
 		);
-
-		// A checkbox and not a select: this is one capability the row either has or does not, so it
-		// reads as a switch. It keeps the field column's shape — the check with its label, the hint
-		// under it — rather than joining the other controls' label-above-control rows.
-		const reasoning = element("div", "model-field");
-		const check = element("label", "model-check");
-		const box = element("input", undefined, undefined, { type: "checkbox" });
-		box.checked = draft.reasoning;
-		box.addEventListener("change", () => update({ reasoning: box.checked }));
-		check.append(box, document.createTextNode("思考模式"));
-		reasoning.append(check, element("span", "model-hint", "打开表示这个模型支持推理；关闭后请求不带任何思考参数"));
-		form.append(reasoning);
-
-		// The level a session opened on this row starts at. It belongs to the row rather than to the
-		// workspace, because the levels are the model's: the middle of a five-level family is not a
-		// level a three-effort endpoint has.
-		const level = element("select", "input");
-		for (const candidate of THINKING_LEVELS) level.append(option(candidate, candidate));
-		level.value = draft.defaultThinkingLevel;
-		level.addEventListener("change", () => update({ defaultThinkingLevel: level.value }));
-		form.append(this.field("默认思考强度", level, "这个模型新建会话时的强度；模型没有的档位会被落到它支持的一档"));
 
 		const actions = element("div", "model-actions");
 		const cancel = element("button", "button", undefined, { type: "button" });

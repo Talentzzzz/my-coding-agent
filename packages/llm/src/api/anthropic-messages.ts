@@ -21,7 +21,7 @@ import type {
 	ChatTransport,
 	ImageContent,
 	Message,
-	ModelThinkingLevel,
+	ThinkingLevel,
 	ProviderHeaders,
 	SimpleStreamOptions,
 	StopReason,
@@ -129,6 +129,12 @@ function convertContentBlocks(content: (TextContent | ImageContent)[]):
 	return blocks;
 }
 
+/**
+ * The efforts this wire takes.
+ *
+ * Four here and three in this app: `medium` is a value the endpoint understands and nothing the app
+ * offers, so it never goes out. It stays in the type because the type describes the endpoint.
+ */
 export type AnthropicEffort = "low" | "medium" | "high" | "max";
 
 export type AnthropicThinkingDisplay = "summarized" | "omitted";
@@ -699,31 +705,6 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 	return stream;
 };
 
-/**
- * The effort a model's thinking level is sent as.
- *
- * The model's own `thinkingLevelMap` spells it first: an endpoint with fewer native efforts than the
- * app has levels folds one onto another there (DeepSeek's `medium` is `high`). Otherwise a level is
- * its own spelling, and `max` — which only a model with a native level for it is ever asked for, but
- * a direct caller may still hand a model — lands on `high` rather than on a value the endpoint may
- * not take.
- */
-function mapThinkingLevelToEffort(model: Model<"anthropic-messages">, level: ModelThinkingLevel): AnthropicEffort {
-	const mapped = model.thinkingLevelMap?.[level];
-	if (typeof mapped === "string") return mapped as AnthropicEffort;
-
-	switch (level) {
-		case "low":
-			return "low";
-		case "medium":
-			return "medium";
-		case "high":
-			return "high";
-		default:
-			return "high";
-	}
-}
-
 function createClient(
 	model: Model<"anthropic-messages">,
 	apiKey: string | undefined,
@@ -812,7 +793,7 @@ function buildParams(
 	}
 
 	// The level the model is asked at. Missing is the same request as "off": nothing was asked for.
-	const level: ModelThinkingLevel = model.reasoning ? model.thinkingLevel ?? "off" : "off";
+	const level: ThinkingLevel = model.thinkingLevel ?? "off";
 
 	// Temperature is incompatible with extended thinking and unsupported on Claude Opus 4.7+.
 	if (options?.temperature !== undefined && level === "off" && compat.supportsTemperature) {
@@ -832,21 +813,19 @@ function buildParams(
 		);
 	}
 
-	// Thinking is a switch plus an effort, and both are read off the model — the same object that
+	// Thinking is one switch plus one effort, and both are read off the model — the same object that
 	// names the endpoint, so a request cannot say two things about how hard the model was asked to
 	// think. The effort is the only strength the request carries: no model is ever handed a
-	// `budget_tokens`. A model whose endpoint cannot stop thinking (`off: null` in its map) is never
-	// asked to, and one asked for no level at all is in the same place as "off".
-	if (model.reasoning) {
-		if (level === "off") {
-			if (model.thinkingLevelMap?.off !== null) params.thinking = { type: "disabled" };
-		} else {
-			// Default to "summarized" so a model whose own default is "omitted" comes back as
-			// thinking the transcript can show.
-			const display: AnthropicThinkingDisplay = options?.thinkingDisplay ?? "summarized";
-			params.thinking = { type: "adaptive", display };
-			params.output_config = { effort: mapThinkingLevelToEffort(model, level) };
-		}
+	// `budget_tokens`. A model with no level at all is in the same place as "off", and "off" is a
+	// request for the switch to be off rather than a request that says nothing.
+	if (level === "off") {
+		params.thinking = { type: "disabled" };
+	} else {
+		// Default to "summarized" so a model whose own default is "omitted" comes back as
+		// thinking the transcript can show.
+		const display: AnthropicThinkingDisplay = options?.thinkingDisplay ?? "summarized";
+		params.thinking = { type: "adaptive", display };
+		params.output_config = { effort: level };
 	}
 
 	if (options?.metadata) {

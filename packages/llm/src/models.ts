@@ -7,41 +7,21 @@
 // stricter root config from flagging this file, while every import into packages/core stays fully
 // checked.
 // @ts-nocheck
-import type { Model } from "./model.ts";
-import type { Api, ModelThinkingLevel } from "./types.ts";
+import type { ThinkingLevel } from "./types.ts";
 
 export { ModelsError, type ModelsErrorCode } from "./utils/models-error.ts";
 
-const EXTENDED_THINKING_LEVELS: ModelThinkingLevel[] = ["off", "low", "medium", "high", "max"];
+/**
+ * The levels every model this build can drive is asked at, lowest first.
+ *
+ * The list is constant because the answer no longer depends on the model: an effort is the one
+ * strength this wire carries, every Anthropic-Messages endpoint takes the three, and a model that
+ * cannot think is simply left at `off`. It is the same list `ThinkingLevel` names, and the same one
+ * the composer renders.
+ */
+const SUPPORTED_THINKING_LEVELS: ThinkingLevel[] = ["off", "low", "high", "max"];
 
-export function getSupportedThinkingLevels<TApi extends Api>(model: Model<TApi>): ModelThinkingLevel[] {
-	if (!model.reasoning) return ["off"];
-
-	return EXTENDED_THINKING_LEVELS.filter((level) => {
-		const mapped = model.thinkingLevelMap?.[level];
-		if (mapped === null) return false;
-		if (level === "max") return mapped !== undefined;
-		return true;
-	});
-}
-
-export function clampThinkingLevel<TApi extends Api>(
-	model: Model<TApi>,
-	level: ModelThinkingLevel,
-): ModelThinkingLevel {
-	const availableLevels = getSupportedThinkingLevels(model);
-	if (availableLevels.includes(level)) return level;
-
-	const requestedIndex = EXTENDED_THINKING_LEVELS.indexOf(level);
-	if (requestedIndex === -1) return availableLevels[0] ?? "off";
-
-	for (let i = requestedIndex; i < EXTENDED_THINKING_LEVELS.length; i++) {
-		const candidate = EXTENDED_THINKING_LEVELS[i];
-		if (availableLevels.includes(candidate)) return candidate;
-	}
-	for (let i = requestedIndex - 1; i >= 0; i--) {
-		const candidate = EXTENDED_THINKING_LEVELS[i];
-		if (availableLevels.includes(candidate)) return candidate;
-	}
-	return availableLevels[0] ?? "off";
+/** Every thinking level a session can be in, lowest first. */
+export function getSupportedThinkingLevels(): ThinkingLevel[] {
+	return [...SUPPORTED_THINKING_LEVELS];
 }

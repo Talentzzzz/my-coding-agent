@@ -16,7 +16,7 @@ import {
 	type ImageContent,
 	type Message,
 	type Model,
-	type ModelThinkingLevel,
+	type ThinkingLevel,
 	type SimpleStreamOptions,
 	type TextContent,
 	type ThinkingContent,
@@ -69,7 +69,7 @@ export function fakeAssistantMessage(
 		errorMessage?: string;
 		responseId?: string;
 		timestamp?: number;
-		thinkingLevel?: ModelThinkingLevel;
+		thinkingLevel?: ThinkingLevel;
 	} = {},
 ): AssistantMessage {
 	return {
@@ -96,7 +96,7 @@ export interface FakeState {
 	 * asked for. The level rides on the model rather than in the options, so this is the only place a
 	 * check can see what a request would have been asked at.
 	 */
-	thinkingLevels: ModelThinkingLevel[];
+	thinkingLevels: ThinkingLevel[];
 }
 
 export type FakeResponseFactory = (

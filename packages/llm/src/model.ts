@@ -6,16 +6,14 @@ import { anthropicMessages } from "./api/anthropic-messages.ts";
 import type {
 	AnthropicMessagesCompat,
 	Api,
-	BaseModel,
 	ChatTransport,
 	KnownApi,
 	LlmContext,
 	ModelCost,
 	ModelInputLimits,
 	ModelPromptCache,
-	ModelThinkingLevel,
+	ThinkingLevel,
 	SimpleStreamOptions,
-	ThinkingLevelMap,
 } from "./types.ts";
 import type { AssistantMessageEventStream } from "./utils/event-stream.ts";
 
@@ -51,27 +49,46 @@ export interface ModelConfig<TApi extends Api = Api> {
 	apiKey?: string;
 	contextWindow: number;
 	maxTokens: number;
-	reasoning: boolean;
-	/**
-	 * The level a session opened on this row starts at, before anyone moves the composer.
-	 *
-	 * Held here rather than beside the config, because "a row" and "the default a row opens on" are
-	 * one decision: a row that reasons has a level to start at, and a row that does not has nothing
-	 * to say. It is not the level of any particular request — that is `Model.thinkingLevel`.
-	 */
-	defaultThinkingLevel?: ModelThinkingLevel;
 	/** Defaults to the one protocol this build drives. */
 	api?: TApi;
 	input?: ("text" | "image")[];
 	cost?: ModelCost;
-	type?: "chat";
 	inputLimits?: ModelInputLimits;
 	headers?: Record<string, string>;
-	thinkingLevelMap?: ThinkingLevelMap;
-	thinkingLevel?: ModelThinkingLevel;
+	thinkingLevel?: ThinkingLevel;
 	promptCache?: ModelPromptCache;
 	samplingParams?: Record<string, unknown>;
 	compat?: AnthropicMessagesCompat;
+}
+
+/**
+ * Every field a config decides, with the defaults this build can supply.
+ *
+ * Written once because the defaults are the interesting part — a config that names no `cost` costs
+ * nothing measured, and that is a rule two copies would eventually disagree about. The constructor
+ * copies this object onto the instance field by field, which is what lets each declaration be a plain
+ * `id: string` instead of `id!: string`: tsc only believes an assignment it can see in the
+ * constructor body, and a field added here but forgotten there is an error rather than a silent
+ * `undefined`.
+ */
+function fieldsFrom<TApi extends Api>(config: ModelConfig<TApi>) {
+	return {
+		id: config.id,
+		name: config.name,
+		api: config.api ?? (DEFAULT_API as TApi),
+		baseUrl: config.baseUrl,
+		apiKey: config.apiKey,
+		input: [...(config.input ?? DEFAULT_INPUT)],
+		inputLimits: config.inputLimits,
+		cost: { ...(config.cost ?? ZERO_COST) },
+		headers: config.headers,
+		thinkingLevel: config.thinkingLevel,
+		promptCache: config.promptCache,
+		contextWindow: config.contextWindow,
+		maxTokens: config.maxTokens,
+		samplingParams: config.samplingParams,
+		compat: config.compat,
+	};
 }
 
 /**
@@ -86,41 +103,29 @@ export interface ModelConfig<TApi extends Api = Api> {
  * are writable rather than readonly: the model *is* a request's configuration, and a corrected key
  * has to reach the next request without a second kind of object to keep in step.
  */
-export class Model<TApi extends Api = Api> implements BaseModel<TApi> {
-	id!: string;
-	name!: string;
-	api!: TApi;
+export class Model<TApi extends Api = Api> {
+	id: string;
+	name: string;
+	api: TApi;
 	apiKey?: string;
-	baseUrl!: string;
-	input!: ("text" | "image")[];
+	baseUrl: string;
+	input: ("text" | "image")[];
 	inputLimits?: ModelInputLimits;
-	cost!: ModelCost;
+	cost: ModelCost;
 	headers?: Record<string, string>;
-	type?: "chat";
-	reasoning!: boolean;
-	thinkingLevelMap?: ThinkingLevelMap;
 	/**
-	 * The level this model is asked at, when it reasons at all.
+	 * The level this model is asked at.
 	 *
 	 * Carried here rather than passed beside the model, so "which endpoint" and "how hard" are one
-	 * object. Absent means "do not think", which is the same request as `off`; a model whose map says
-	 * `off: null` cannot be asked either way and is sent no switch at all.
+	 * object. Absent means "do not think", which is the same request as `off`.
 	 */
-	thinkingLevel?: ModelThinkingLevel;
+	thinkingLevel?: ThinkingLevel;
 	promptCache?: ModelPromptCache;
-	contextWindow!: number;
-	maxTokens!: number;
+	contextWindow: number;
+	maxTokens: number;
 	samplingParams?: Record<string, unknown>;
 	/** Compatibility overrides for Anthropic Messages-compatible APIs. */
 	compat?: AnthropicMessagesCompat;
-
-	/**
-	 * The level a session opened on this model starts at.
-	 *
-	 * Copied from the config because the config *is* the row: a caller assembling a session reads it
-	 * here rather than being handed the row a second time beside the model.
-	 */
-	defaultThinkingLevel?: ModelThinkingLevel;
 
 	/**
 	 * How this model is sent.
@@ -133,37 +138,39 @@ export class Model<TApi extends Api = Api> implements BaseModel<TApi> {
 
 	constructor(config: ModelConfig<TApi>, transport: ChatTransport = anthropicMessages) {
 		this.transport = transport;
-		this.reconfigure(config);
+		// Spelled out one field at a time because these are the assignments tsc has to be able to see:
+		// a declaration here carries no `!`, so a field missing from this list is a compile error.
+		const f = fieldsFrom(config);
+		this.id = f.id;
+		this.name = f.name;
+		this.api = f.api;
+		this.baseUrl = f.baseUrl;
+		this.apiKey = f.apiKey;
+		this.input = f.input;
+		this.inputLimits = f.inputLimits;
+		this.cost = f.cost;
+		this.headers = f.headers;
+		this.thinkingLevel = f.thinkingLevel;
+		this.promptCache = f.promptCache;
+		this.contextWindow = f.contextWindow;
+		this.maxTokens = f.maxTokens;
+		this.samplingParams = f.samplingParams;
+		this.compat = f.compat;
 	}
 
 	/**
 	 * Overwrite every field from another config, keeping the transport.
 	 *
 	 * All of it or none of it: a caller that copies three fields by hand is the caller that leaves
-	 * `thinkingLevelMap` describing the model that used to be here. A field the config leaves out
-	 * resets to its default rather than keeping the old value, which is the same promise one step
-	 * further in — a row edited to stop reasoning must not keep the level table it used to justify.
+	 * `compat` describing the endpoint that used to be here. A field the config leaves out resets to
+	 * its default rather than keeping the old value.
+	 *
+	 * The values come from {@link fieldsFrom}, the same object the constructor starts from; here they
+	 * are assigned wholesale, since this is a method rather than a constructor and tsc has no
+	 * initialization question to ask about it.
 	 */
 	reconfigure(config: ModelConfig<TApi>): void {
-		this.id = config.id;
-		this.name = config.name;
-		this.api = config.api ?? (DEFAULT_API as TApi);
-		this.baseUrl = config.baseUrl;
-		this.apiKey = config.apiKey;
-		this.input = [...(config.input ?? DEFAULT_INPUT)];
-		this.inputLimits = config.inputLimits;
-		this.cost = { ...(config.cost ?? ZERO_COST) };
-		this.headers = config.headers;
-		this.type = config.type;
-		this.reasoning = config.reasoning;
-		this.thinkingLevelMap = config.thinkingLevelMap;
-		this.thinkingLevel = config.thinkingLevel;
-		this.promptCache = config.promptCache;
-		this.contextWindow = config.contextWindow;
-		this.maxTokens = config.maxTokens;
-		this.samplingParams = config.samplingParams;
-		this.compat = config.compat;
-		this.defaultThinkingLevel = config.defaultThinkingLevel;
+		Object.assign(this, fieldsFrom(config));
 	}
 
 	/**

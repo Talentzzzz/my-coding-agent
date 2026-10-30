@@ -599,7 +599,6 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		id: "smoke-model",
 		contextWindow: 128_000,
 		maxTokens: 8_192,
-		reasoning: false,
 	};
 	const session = await openAgent({
 		absWorkspaceRoot: root,
@@ -886,7 +885,6 @@ async function exercisePruning(): Promise<void> {
 		// the one after it.
 		contextWindow: 33_500,
 		maxTokens: 8_192,
-		reasoning: false,
 	};
 	const session = await openAgent({
 		absWorkspaceRoot: root,

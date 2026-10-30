@@ -47,7 +47,6 @@ function row(overrides: Partial<ModelConfig> = {}): ModelConfig {
 		id: "wire-model",
 		contextWindow: 64_000,
 		maxTokens: 4_096,
-		reasoning: false,
 		...overrides,
 	};
 }
@@ -225,87 +224,44 @@ try {
 	}
 
 	// A hand-typed row carries no capability metadata, so the wire id is what decides what its model
-	// accepts. Getting one of these wrong is a 400 from the API, not a cosmetic difference: an effort
-	// the model has no native level for is rejected, and so is a temperature a model refuses.
+	// accepts. Getting one of these wrong is a 400 from the API, not a cosmetic difference: a
+	// temperature a model refuses fails the whole request. Levels no longer come from here — every row
+	// is asked at the same four — so what this block can still check is the compat half.
 	heading("what a Claude model accepts is derived from its wire id");
 	{
-		const model = (id: string, reasoning = true) => createModel(row({ id, reasoning }));
+		const model = (id: string) => createModel(row({ id }));
 
 		const plain = model("claude-sonnet-4-5");
 		check("a 4.5 model needs no overrides", plain.compat === undefined, JSON.stringify(plain.compat));
-		check("and has no level list of its own", plain.thinkingLevelMap === undefined, JSON.stringify(plain.thinkingLevelMap));
 		check(
-			"so it offers the default levels",
-			JSON.stringify(thinkingLevelsFor(plain)) === JSON.stringify(["off", "low", "medium", "high"]),
-			JSON.stringify(thinkingLevelsFor(plain)),
+			"and offers every level the app has",
+			JSON.stringify(thinkingLevelsFor()) === JSON.stringify(["off", "low", "high", "max"]),
+			JSON.stringify(thinkingLevelsFor()),
 		);
 
 		const newer = model("claude-opus-4-7");
-		check("4.7 takes a max effort", newer.thinkingLevelMap?.max === "max", JSON.stringify(newer.thinkingLevelMap));
-		check("and rejects a temperature", newer.compat?.supportsTemperature === false, JSON.stringify(newer.compat));
-
-		const newerGeneration = model("claude-opus-5");
-		check("opus-5 takes a max effort too", newerGeneration.thinkingLevelMap?.max === "max", JSON.stringify(newerGeneration.thinkingLevelMap));
-		check(
-			"and rejects a temperature like 4.7",
-			newerGeneration.compat?.supportsTemperature === false,
-			JSON.stringify(newerGeneration.compat),
-		);
-		check("so off is a level it has", thinkingLevelsFor(newerGeneration).includes("off"), JSON.stringify(thinkingLevelsFor(newerGeneration)));
-		check("a level it has is kept", normalizeThinkingLevel(newerGeneration, "max") === "max", normalizeThinkingLevel(newerGeneration, "max"));
-		check(
-			"and a level nobody has still falls back to the quietest one",
-			normalizeThinkingLevel(newerGeneration, "turbo") === "off",
-			normalizeThinkingLevel(newerGeneration, "turbo"),
-		);
-
-		const alwaysThinking = model("claude-fable-5");
-		check("fable-5 takes a max effort", alwaysThinking.thinkingLevelMap?.max === "max", JSON.stringify(alwaysThinking.thinkingLevelMap));
-		check(
-			"and has no way to stop thinking",
-			JSON.stringify(thinkingLevelsFor(alwaysThinking)) === JSON.stringify(["low", "medium", "high", "max"]),
-			JSON.stringify(thinkingLevelsFor(alwaysThinking)),
-		);
+		check("4.7 rejects a temperature", newer.compat?.supportsTemperature === false, JSON.stringify(newer.compat));
 
 		const gateway = model("anthropic/claude-opus-5");
-		check("a gateway id names the same model", gateway.thinkingLevelMap?.max === "max", JSON.stringify(gateway.thinkingLevelMap));
+		check("a gateway id names the same model", gateway.compat?.supportsTemperature === false, JSON.stringify(gateway.compat));
 
-		const silent = model("claude-opus-5", false);
-		check("a row that does not reason is asked for no thinking parameters", silent.compat === undefined, JSON.stringify(silent.compat));
-		check("so its only level is off", JSON.stringify(thinkingLevelsFor(silent)) === JSON.stringify(["off"]), JSON.stringify(thinkingLevelsFor(silent)));
-	}
-
-	heading("a DeepSeek row spells its levels as the three efforts it takes");
-	{
-		// Its Anthropic-compatible endpoint reads the strength from `output_config.effort` — the shape
-		// every row is asked in now — and takes three efforts rather than the app's four, so its map is
-		// what keeps `medium` from going out as a value the endpoint rejects.
-		const deepseek = createModel(row({ id: "deepseek-v4.1-flash", reasoning: true }));
-		check("the row needs no compatibility overrides", deepseek.compat === undefined, JSON.stringify(deepseek.compat));
-		check(
-			"the four levels fold onto the three efforts it takes",
-			JSON.stringify(deepseek.thinkingLevelMap) === JSON.stringify({ low: "low", medium: "high", high: "high", max: "max" }),
-			JSON.stringify(deepseek.thinkingLevelMap),
-		);
-		check(
-			"and off stays a level, because the switch is not an effort",
-			JSON.stringify(thinkingLevelsFor(deepseek)) === JSON.stringify(["off", "low", "medium", "high", "max"]),
-			JSON.stringify(thinkingLevelsFor(deepseek)),
-		);
+		check("a level the app names is kept", normalizeThinkingLevel("max") === "max", normalizeThinkingLevel("max"));
+		check("a level nobody has falls back to off", normalizeThinkingLevel("turbo") === "off", normalizeThinkingLevel("turbo"));
+		check("and asking for nothing is off", normalizeThinkingLevel(undefined) === "off", normalizeThinkingLevel(undefined));
 	}
 
 	// Thinking is one shape on every row: adaptive, with the strength on the request as an effort.
-	// There is no token budget to send and no beta header to ask for, and a family that cannot stop
-	// thinking is not told to. These read the body on its way out, because that is what any of this is
-	// about — a provider key is not needed to see what would have been sent.
-	heading("every reasoning row is asked the same way");
+	// There is no token budget to send and no beta header to ask for, and no table decides what a
+	// level is spelled as — it goes out as itself. These read the body on its way out, because that is
+	// what any of this is about — a provider key is not needed to see what would have been sent.
+	heading("every row is asked the same way");
 	{
 		// The level is not an option: it rides on the model the request is made with, which is the same
 		// object that names the endpoint. So these build the model the way a session does — from the row
 		// and the level — and read the body on its way out.
 		const sent = async (
 			row: ModelConfig,
-			level?: "low" | "medium" | "high" | "max",
+			level?: "low" | "high" | "max",
 		): Promise<{ body: Record<string, unknown>; headers: Headers }> => {
 			let body: Record<string, unknown> = {};
 			let headers = new Headers();
@@ -327,9 +283,9 @@ try {
 		const switchOf = (body: Record<string, unknown>): unknown => (body.thinking as { type?: unknown } | undefined)?.type;
 		const displayOf = (body: Record<string, unknown>): unknown => (body.thinking as { display?: unknown } | undefined)?.display;
 
-		const claude = row({ id: "claude-opus-4-6", reasoning: true });
-		const deepseek = row({ id: "deepseek-v4.1-flash", reasoning: true });
-		const unknown = row({ id: "glm-4.6", reasoning: true });
+		const claude = row({ id: "claude-opus-4-6" });
+		const deepseek = row({ id: "deepseek-v4.1-flash" });
+		const unknown = row({ id: "glm-4.6" });
 
 		const claudeHigh = (await sent(claude, "high")).body;
 		check("a Claude row turns thinking on adaptively", switchOf(claudeHigh) === "adaptive", JSON.stringify(claudeHigh.thinking));
@@ -352,9 +308,6 @@ try {
 			String(deepseekHigh.headers.get("anthropic-beta")),
 		);
 
-		const deepseekMedium = (await sent(deepseek, "medium")).body;
-		check("a level it has no effort for folds onto one it does", effortOf(deepseekMedium) === "high", JSON.stringify(deepseekMedium.output_config));
-
 		const deepseekMax = (await sent(deepseek, "max")).body;
 		check("and max is sent as max", effortOf(deepseekMax) === "max", JSON.stringify(deepseekMax.output_config));
 
@@ -370,10 +323,9 @@ try {
 		check("no level turns the switch off", switchOf(off) === "disabled", JSON.stringify(off.thinking));
 		check("and sends no effort at all", off.output_config === undefined, JSON.stringify(off.output_config));
 
-		// Fable 5 has no off to be in, so it is not asked for one.
-		const alwaysThinking = row({ id: "claude-fable-5", reasoning: true });
-		const cannotStop = (await sent(alwaysThinking)).body;
-		check("a family that cannot stop thinking is sent no switch at all", cannotStop.thinking === undefined, JSON.stringify(cannotStop.thinking));
+		// "off" is a level like the others, not the absence of one, so it says so on the wire.
+		const explicitOff = (await sent(claude, undefined)).body;
+		check("an explicit off reads the same", JSON.stringify(explicitOff.thinking) === JSON.stringify(off.thinking));
 	}
 
 	heading("the store round-trips the file");
@@ -381,7 +333,7 @@ try {
 		const store = ModelConfigStore.create(home);
 		check("a missing file is no models", store.list().length === 0);
 
-		store.replace([row({ name: "one" }), row({ name: "two", id: "claude-opus-5", reasoning: true })]);
+		store.replace([row({ name: "one" }), row({ name: "two", id: "claude-opus-5" })]);
 		const reloaded = ModelConfigStore.create(home).list();
 		check("both rows come back", reloaded.length === 2, String(reloaded.length));
 		check("with their names", reloaded[0]?.name === "one" && reloaded[1]?.name === "two");

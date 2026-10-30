@@ -83,7 +83,6 @@ const rows: ModelConfig[] = [
 		id: "claude-sonnet-4-5",
 		contextWindow: 200_000,
 		maxTokens: 8_192,
-		reasoning: false,
 	},
 ];
 

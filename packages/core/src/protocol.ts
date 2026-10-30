@@ -85,17 +85,14 @@ export interface ModelOption {
 	baseUrl: string;
 	contextWindow: number;
 	maxTokens: number;
-	reasoning: boolean;
 	/**
-	 * Every level a session on this row can be in, lowest first, "off" included when the model has it.
+	 * Every level a session on this row can be in, lowest first.
 	 *
-	 * Travelled with the row rather than derived by the client, which has no way to know what an
-	 * endpoint takes: a composer that moves the model needs the new row's own list, and it needs it
-	 * before the move reaches the server.
+	 * The same four for every row — an effort is the one strength the wire carries — but reported
+	 * rather than assumed, so the composer reads one shape whether the row is stored, planted locally
+	 * or described by a session snapshot.
 	 */
 	thinkingLevels: string[];
-	/** The level a session opened on this row starts at. */
-	defaultThinkingLevel: string;
 	hasApiKey: boolean;
 }
 
@@ -107,15 +104,10 @@ export interface ModelOption {
  * expressible at all — a whole config would have to repeat every fact the row already had. The shape
  * is derived rather than restated, so a field added to a config is a field a client can send, and one
  * that is not in this list (`api`, `input`, `cost`) is one it cannot.
- *
- * The level is the exception, spelled as a plain string: the field is a text control's value by the
- * time it gets here, and `coerceModelConfig` is what refuses one this app has no name for.
  */
 export type ModelInput = Partial<
-	Pick<ModelConfig, "id" | "name" | "baseUrl" | "apiKey" | "contextWindow" | "maxTokens" | "reasoning">
-> & {
-	defaultThinkingLevel?: string;
-};
+	Pick<ModelConfig, "id" | "name" | "baseUrl" | "apiKey" | "contextWindow" | "maxTokens">
+>;
 
 /**
  * Which model answers a message, and how hard it is asked to think.

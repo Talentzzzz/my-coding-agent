@@ -56,7 +56,6 @@ const ROW: ModelConfig = {
 	id: "faux-1",
 	contextWindow: 128_000,
 	maxTokens: 16_384,
-	reasoning: false,
 };
 
 const fake = createFakeTransport();

@@ -34,15 +34,16 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   `tool_config` entry 里，没单独选过就沿用全局；窗口里没有手动编辑入口，改动它只有「选一个模式」
   这一条路）与**应用级**（外观、模型清单、默认模型、bash 超时，以及全局默认的工具集与审批）。
 - **model（模型）** —— `models.json` 里的一行**就是**一个 `ModelConfig`：一个端点、一个密钥、以及模型
-  自己的事实（`id` 是接口认识的名字，`name` 既是身份也是标签，`defaultThinkingLevel` 是这一行打开时的
-  默认等级）。`packages/llm` 的 `Model` 类把它变成发请求用的对象（`apiKey`、`thinkingLevelMap`、
-  `thinkingLevel` 都骑在这个对象上），`stream(context, options)` 走它携带的 transport；`Model` 构造时
+  自己的事实（`id` 是接口认识的名字，`name` 既是身份也是标签）。`packages/llm` 的 `Model` 类把它变成发
+  请求用的对象（`apiKey`、`thinkingLevel` 都骑在这个对象上），`stream(context, options)` 走它携带的
+  transport；`Model` 构造时
   才补上的 `api`、`input`、`cost` 是本构建的**常量**而不是配置项，所以磁盘上的行里没有它们。core 的
   `coerceModelConfig` 是"什么才允许被存下来"的唯一守门人，`createModel(config, level, transport?)` 与
   `applyRowToModel(model, config, level)` 是"一个配置 → 一个模型"的唯一入口，后者原地重算、不换对象。
-- **thinking level（思考等级）** —— `off` 到 `max`：一次请求被要求的强度，骑在 `Model.thinkingLevel`
-  上，从不发 token 预算，所以 level **就是**强度；模型可以没有 `off`（`thinkingLevelMap` 里的
-  `off: null`）。
+- **thinking level（思考等级）** —— `off`、`low`、`high`、`max`：一次请求被要求的强度，骑在
+  `Model.thinkingLevel` 上，从不发 token 预算，所以 level **就是**强度；`off` 是**显式关掉思考**，
+  不是省略一个字段。四档对每个模型都一样，所以档位是**客户端**的事：输入框随消息带来它，行上没有
+  默认档，服务端只负责把收到的档位放上模型。
 - **model selection（模型选择）** —— 输入框的 `{ model, thinkingLevel }`，随消息发送（`ModelSelection`），
   不是一次配置变更；`recordSelection` 在 `prepareRequest` 顶部才写 entry，没说过话的会话因此不增长
   entry。
@@ -124,7 +125,7 @@ UTF-8 文件的行连起来、把每一个非 ASCII 字符换成 `?`。
 ## 规则
 
 - 绝不提交或打印供应商凭据：密钥只在 `<agent home>/models.json` 里，只骑在一次请求所用的模型上
-  （`BaseModel.apiKey`），从不发给客户端——`GET /api/models` 只报 `hasApiKey`，不要加回显密钥的字段。
+  （`Model.apiKey`），从不发给客户端——`GET /api/models` 只报 `hasApiKey`，不要加回显密钥的字段。
 - 客户端对供应商 SDK 一无所知，只看得到协议消息。
 - 不先删掉一个运行时依赖、或不在提交里解释为什么，就不加新的运行时依赖。
 - 子代理是**一对工具**，不是机制：没有供应商注册表、没有嵌套生成、没有新协议。发现自己想加其中

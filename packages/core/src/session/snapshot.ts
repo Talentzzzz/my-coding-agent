@@ -68,7 +68,7 @@ export function sessionSnapshot(input: SnapshotInput): SessionSnapshot {
 		title: input.sessionManager.getTitle(),
 		model: input.model.name,
 		thinkingLevel: input.model.thinkingLevel ?? "off",
-		thinkingLevels: thinkingLevelsFor(input.model),
+		thinkingLevels: thinkingLevelsFor(),
 		approvals: input.approvals,
 		allTools: input.allTools,
 		activeTools: input.activeTools,

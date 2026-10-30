@@ -54,7 +54,6 @@ const ROW: ModelConfig = {
 	id: "faux-1",
 	contextWindow: 128_000,
 	maxTokens: 16_384,
-	reasoning: false,
 };
 
 /** The rows the sessions read. Shared, so every check counts responses from one queue. */
@@ -815,7 +814,7 @@ async function exerciseConfigChanged(): Promise<void> {
 	session.applyModelSelection({ model: "faux2" });
 	check("re-selecting the current model says nothing", seen.length === 3, JSON.stringify(seen));
 
-	check("the row does not reason, so its only level is off", JSON.stringify(session.thinkingLevels) === JSON.stringify(["off"]), JSON.stringify(session.thinkingLevels));
+	check("every row offers the same four levels", JSON.stringify(session.thinkingLevels) === JSON.stringify(["off", "low", "high", "max"]), JSON.stringify(session.thinkingLevels));
 	session.applyModelSelection({ thinkingLevel: "off" });
 	check("so re-applying it says nothing", seen.length === 3, JSON.stringify(seen));
 
@@ -1777,20 +1776,17 @@ async function exerciseModelFromRow(): Promise<void> {
 async function exerciseModelSelection(): Promise<void> {
 	process.stdout.write("the composer's choice travels with the message\n");
 
-	// Sonnet 4.5 rather than a newer family, because it has no native `max`: that is what makes the
-	// refusal below observable. The row carries its own default level, which is where a new session
-	// starts — not the workspace's, since the levels belong to the model.
-	const thinkerRows: ModelConfig[] = [
-		{ ...ROW, name: "thinker", id: "claude-sonnet-4-5", reasoning: true, defaultThinkingLevel: "low" },
-	];
+	// A row no longer carries a default level or a claim about whether it reasons: the strength is the
+	// composer's, so a session nobody has spoken to opens at "off" — the request that asks for nothing.
+	const thinkerRows: ModelConfig[] = [{ ...ROW, name: "thinker", id: "claude-sonnet-4-5" }];
 	const scripted = createFakeTransport();
 	scripted.setResponses([fakeAssistantMessage("first")]);
 	const session = await openSession({}, { models: { list: () => thinkerRows }, api: scripted.api });
 
-	check("a session opens on the row's own default level", session.thinkingLevel === "low", session.thinkingLevel);
+	check("a session opens at off, because nothing has been asked for", session.thinkingLevel === "off", session.thinkingLevel);
 	check(
-		"and offers only the levels that model has",
-		JSON.stringify(session.thinkingLevels) === JSON.stringify(["off", "low", "medium", "high"]),
+		"and offers every level the app has",
+		JSON.stringify(session.thinkingLevels) === JSON.stringify(["off", "low", "high", "max"]),
 		JSON.stringify(session.thinkingLevels),
 	);
 
@@ -1808,16 +1804,13 @@ async function exerciseModelSelection(): Promise<void> {
 	check("a later turn on the same level records nothing", levelsOf() === 1, String(levelsOf()));
 	check("while still being asked at it", scripted.state.thinkingLevels.at(-1) === "high", String(scripted.state.thinkingLevels.at(-1)));
 
-	// A level the model has no room for is refused rather than folded away, because the caller is a
-	// composer that offered the levels of the row it is moving within.
-	let refused = "";
-	try {
-		session.applyModelSelection({ thinkingLevel: "max" });
-	} catch (error) {
-		refused = (error as Error).message;
-	}
-	check("a level the model does not have is refused", refused.includes("max"), refused);
-	check("leaving the session where it was", session.thinkingLevel === "high", session.thinkingLevel);
+	// Every row takes the same four, so there is nothing left for the session to refuse: `max` is a
+	// level like the rest, and the only string that is not one is a name the app has never had.
+	session.applyModelSelection({ thinkingLevel: "max" });
+	check("a level the row used to lack is accepted now", session.thinkingLevel === "max", session.thinkingLevel);
+
+	session.applyModelSelection({ thinkingLevel: "turbo" });
+	check("a level nobody has lands on off", session.thinkingLevel === "off", session.thinkingLevel);
 
 	await session.close();
 }

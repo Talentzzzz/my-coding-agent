@@ -9,6 +9,7 @@ import { coerceModelConfig, listModelOptions } from "@my-agent/core";
 import type { ModelInput, ModelOption } from "@my-agent/core/protocol";
 import {
 	DEFAULT_MODEL,
+	DEFAULT_THINKING_LEVEL,
 	defaultModelDue,
 	seedDefaultModel,
 	type DefaultModelHost,
@@ -30,9 +31,7 @@ function modelOption(name: string): ModelOption {
 		id: name,
 		contextWindow: 1_000,
 		maxTokens: 1_000,
-		reasoning: false,
-		thinkingLevels: ["off"],
-		defaultThinkingLevel: "off",
+		thinkingLevels: ["off", "low", "high", "max"],
 		hasApiKey: true,
 	};
 }
@@ -78,8 +77,7 @@ process.stdout.write("\ndefault-model：内置的那一行逐字是用户要的\
 	);
 	check("上下文长度是 1,000,000", DEFAULT_MODEL.contextWindow === 1_000_000, String(DEFAULT_MODEL.contextWindow));
 	check("最大输出长度是 384,000", DEFAULT_MODEL.maxTokens === 384_000, String(DEFAULT_MODEL.maxTokens));
-	check("思考模式开着", DEFAULT_MODEL.reasoning === true, String(DEFAULT_MODEL.reasoning));
-	check("默认思考强度是 high", DEFAULT_MODEL.defaultThinkingLevel === "high", String(DEFAULT_MODEL.defaultThinkingLevel));
+	check("客户端默认思考强度是 high", DEFAULT_THINKING_LEVEL === "high", DEFAULT_THINKING_LEVEL);
 	// The key is the user's to fill: the planted row must not carry one, and must not send a field
 	// that could overwrite one either — the endpoint keeps a stored key when the field is absent.
 	check("不带密钥字段，留给用户填", DEFAULT_MODEL.apiKey === undefined, String(DEFAULT_MODEL.apiKey));
@@ -95,13 +93,8 @@ process.stdout.write("\ndefault-model：内置的那一行逐字是用户要的\
 	const shown = listModelOptions(stored === undefined ? [] : [stored]);
 	check("客户端看到的行没有密钥", shown[0]?.hasApiKey === false, String(shown[0]?.hasApiKey));
 	check(
-		"客户端看到的默认强度是 high",
-		shown[0]?.defaultThinkingLevel === "high",
-		String(shown[0]?.defaultThinkingLevel),
-	);
-	check(
-		"客户端看到的档位含 medium 与 high（DeepSeek 把两者折到同一档）",
-		shown[0]?.thinkingLevels.includes("medium") === true && shown[0]?.thinkingLevels.includes("high") === true,
+		"客户端看到的是四档，含 high 与 max",
+		shown[0]?.thinkingLevels.join(",") === "off,low,high,max",
 		JSON.stringify(shown[0]?.thinkingLevels),
 	);
 }

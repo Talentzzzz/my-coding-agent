@@ -34,9 +34,17 @@ export type KnownClassifierApi = "typesafe-system-one" | "cloudflare-workers-ai-
 export type ClassifierApi = KnownClassifierApi | (string & {});
 
 export type ToolChoice = "auto" | "none";
-export type ThinkingLevel = "low" | "medium" | "high" | "max";
-export type ModelThinkingLevel = "off" | ThinkingLevel;
-export type ThinkingLevelMap = Partial<Record<ModelThinkingLevel, string | null>>;
+/**
+ * The strengths a request can be asked at.
+ *
+ * Four, and the last three are the efforts this wire carries: a model asked at `high` thinks harder,
+ * and nothing in the request says how many tokens that is worth. An endpoint that spells an effort
+ * differently is not something the app models — a level is sent as its own name.
+ *
+ * `off` is one of the four rather than the absence of a level: it is what a caller that asked for
+ * nothing means, and the request it produces says "do not think" rather than omitting the switch.
+ */
+export type ThinkingLevel = "off" | "low" | "high" | "max";
 
 // Base options all providers share
 export type CacheRetention = "none" | "short" | "long";
@@ -344,7 +352,7 @@ export interface AssistantMessage {
 	responseModel?: string; // Concrete model reported by the provider when different from the requested `model`
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
 	/** Pi thinking level the agent loop requested for this response. Absent outside the agent loop and for legacy responses. */
-	thinkingLevel?: ModelThinkingLevel;
+	thinkingLevel?: ThinkingLevel;
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
@@ -538,28 +546,6 @@ export interface ModelInputLimits {
 	images?: ModelImageInputLimits;
 }
 
-/** Fields shared by every catalog entry, regardless of what you can do with it. */
-export interface BaseModel<TApi extends string> {
-	id: string;
-	name: string;
-	api: TApi;
-	baseUrl: string;
-	/**
-	 * The key this model is reached with.
-	 *
-	 * Carried on the model rather than looked up beside it, because a model here *is* one endpoint plus
-	 * the key that reaches it — there is no credential store to resolve one through. A host builds the
-	 * model fresh for each request from the row the user entered, which is what keeps a corrected key
-	 * from going stale in a long-lived session.
-	 */
-	apiKey?: string;
-	input: ("text" | "image")[];
-	/** Provider input limits and cache-safe preprocessing metadata. */
-	inputLimits?: ModelInputLimits;
-	cost: ModelCost;
-	headers?: Record<string, string>;
-}
-
 /**
  * Chat model: usable with `stream()` and friends.
  *
@@ -569,16 +555,44 @@ export interface BaseModel<TApi extends string> {
  */
 import type { Model } from "./model.ts";
 
-/** Image-generation model: usable with `generateImages()` only. */
-export interface ImageModel<TApi extends ImageApi> extends BaseModel<TApi> {
+/**
+ * Image-generation model: usable with `generateImages()` only.
+ *
+ * The catalog fields are spelled out rather than inherited from a shared base interface: this build
+ * has neither an image nor a classifier transport, so these two shapes never meet `Model` anywhere,
+ * and a common ancestor would be a type that existed only to be declared once.
+ */
+export interface ImageModel<TApi extends ImageApi> {
 	type: "image";
+	id: string;
+	name: string;
+	api: TApi;
+	baseUrl: string;
+	/** The key this model is reached with; carried here because there is no credential store. */
+	apiKey?: string;
+	input: ("text" | "image")[];
+	/** Provider input limits and cache-safe preprocessing metadata. */
+	inputLimits?: ModelInputLimits;
+	cost: ModelCost;
+	headers?: Record<string, string>;
 	/** Output modalities. Always includes `"image"`; `"text"` means the model can also return text blocks. */
 	output: ("text" | "image")[];
 }
 
 /** Structured classifier model: usable with `classify()` only. */
-export interface ClassifierModel<TApi extends ClassifierApi> extends BaseModel<TApi> {
+export interface ClassifierModel<TApi extends ClassifierApi> {
 	type: "classifier";
+	id: string;
+	name: string;
+	api: TApi;
+	baseUrl: string;
+	/** The key this model is reached with; carried here because there is no credential store. */
+	apiKey?: string;
+	input: ("text" | "image")[];
+	/** Provider input limits and cache-safe preprocessing metadata. */
+	inputLimits?: ModelInputLimits;
+	cost: ModelCost;
+	headers?: Record<string, string>;
 	contextWindow: number;
 }
 
