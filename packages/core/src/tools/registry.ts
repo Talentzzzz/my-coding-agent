@@ -1,87 +1,116 @@
 import type { AgentTool } from "@my-agent/loop";
-import type { SettingsManager } from "../settings-manager.ts";
-import type { Workspace } from "../workspace.ts";
-import { createBashTool } from "./bash.ts";
-import { createEditTool } from "./edit.ts";
-import { createGlobTool } from "./glob.ts";
-import { createGrepTool } from "./grep.ts";
-import { createReadTool } from "./read.ts";
-import { createWriteTool } from "./write.ts";
+import type { ToolApprovalKey } from "../protocol.ts";
+import type { ToolRunContext, ToolState } from "./manager.ts";
+import { toolListFor } from "./manager.ts";
+import type { ToolDefinitions } from "./manager.ts";
 
 /**
- * The tools one session knows about, and which of them the model may call.
+ * The tools one session knows, and which of them the model may call.
  *
- * Definitions and the active set live together because they are one decision: a caller registers the
- * tools it has and narrows the set per session — a read-only session, a session without `bash` —
- * without rebuilding any tool object. There is still no plugin registry: a definition is one
- * `AgentTool`, and `executionMode` stays a field on it, not something this set decides.
+ * This is the per-session half of the tool chain: the definitions come from the shared read-only
+ * {@link ToolDefinitions}, the choice is a {@link ToolState} this object holds and mutates, and no
+ * workspace is resident — `active` builds the executable set fresh against the run context it is
+ * handed, so the workspace is a value object that arrives with the request and leaves with it.
+ *
+ * Definitions and the active set live together because they are one decision: a caller starts from
+ * the shared catalog and narrows the set per session — a read-only session, a session without
+ * `bash` — without rebuilding any tool object. `register` is for tools that are the session's own
+ * rather than this build's — the delegation pair, a test's custom tool — and joins the same state.
  */
 export interface ToolRegistry {
-	/** Every registered tool, in registration order. */
-	all(): AgentTool<any>[];
-	get(name: string): AgentTool<any> | undefined;
-	/** What the model may call, in registration order. */
-	active(): AgentTool<any>[];
+	/** Every tool name this registry knows: the definitions', then the session-local ones. */
+	names(): string[];
+	/** Build one tool against a run context, or undefined when the name is not this registry's. */
+	build(name: string, run: ToolRunContext): AgentTool<any> | undefined;
+	/** What the model may call right now, as names, in the order it is offered them. */
 	activeNames(): string[];
+	/** The run context's executable set, built fresh — see {@link toolListFor}. */
+	active(run: ToolRunContext): AgentTool<any>[];
+	/** The state this registry is, as a copy: what a `tool_config` entry records. */
+	toolState(): ToolState;
 	/** Reject unknown names by throwing, leaving the previous set in place. */
 	setActive(names: string[]): void;
-	/** A registered tool joins the active set; `setActive` is how the set is narrowed again. */
+	/** Replace the session's own approval choices, whole. */
+	setApprovalOverride(override: Partial<Record<ToolApprovalKey, boolean>>): void;
+	/** Lay a patch over the session's own approval choices, keeping the keys the patch does not name. */
+	mergeApprovalOverride(patch: Partial<Record<ToolApprovalKey, boolean>>): void;
+	/** A session-local tool joins the active set; `setActive` is how the set is narrowed again. */
 	register(tool: AgentTool<any>): void;
 }
 
 /**
- * The six built-in tools, all active.
+ * One session's loadout over the shared definitions, seeded with a state when the caller has one.
  *
- * `settingsManager` is what lets `bash` run on the configured timeouts; without one it takes the
- * defaults, which is what a test or a SubAgent's read-only registry wants.
+ * `state` is how a deliberate loadout is handed in — the SubAgent child's read-only narrowing, a
+ * session whose recorded `tool_config` was replayed before this object was built. Without one the
+ * registry opens with every tool active, which is what a session that has not chosen runs on until
+ * assembly fills the state for it.
  */
-export function createToolRegistry(workspace: Workspace, settingsManager?: SettingsManager): ToolRegistry {
-	return new Registry([
-		createReadTool(workspace),
-		createWriteTool(workspace),
-		createEditTool(workspace),
-		createGlobTool(workspace),
-		createGrepTool(workspace),
-		createBashTool(workspace, settingsManager),
-	]);
+export function createToolRegistry(definitions: ToolDefinitions, state?: ToolState): ToolRegistry {
+	return new Registry(definitions, state);
 }
 
 class Registry implements ToolRegistry {
-	private readonly tools = new Map<string, AgentTool<any>>();
-	/** Names, not tools: the active list is always derived in registration order. */
-	private activeSet = new Set<string>();
+	private readonly state: ToolState;
+	/** Session-local tools, in registration order; the definitions come first in every listing. */
+	private readonly local = new Map<string, AgentTool<any>>();
+	private readonly definitions: ToolDefinitions;
 
-	constructor(tools: AgentTool<any>[]) {
-		for (const tool of tools) this.register(tool);
+	constructor(definitions: ToolDefinitions, state?: ToolState) {
+		this.definitions = definitions;
+		this.state = state === undefined ? { activeToolNames: definitions.names() } : cloneState(state);
 	}
 
-	all(): AgentTool<any>[] {
-		return [...this.tools.values()];
+	names(): string[] {
+		return [...this.definitions.names(), ...this.local.keys()];
 	}
 
-	get(name: string): AgentTool<any> | undefined {
-		return this.tools.get(name);
-	}
-
-	active(): AgentTool<any>[] {
-		return this.all().filter((tool) => this.activeSet.has(tool.name));
+	build(name: string, run: ToolRunContext): AgentTool<any> | undefined {
+		const local = this.local.get(name);
+		if (local !== undefined) return local;
+		return this.definitions.get(name)?.(run);
 	}
 
 	activeNames(): string[] {
-		return this.active().map((tool) => tool.name);
+		const known = new Set(this.names());
+		return this.state.activeToolNames.filter((name) => known.has(name));
+	}
+
+	active(run: ToolRunContext): AgentTool<any>[] {
+		return toolListFor(this.definitions, this.state, run, [...this.local.values()]);
+	}
+
+	toolState(): ToolState {
+		return cloneState(this.state);
 	}
 
 	setActive(names: string[]): void {
-		const unknown = names.filter((name) => !this.tools.has(name));
+		const known = new Set(this.names());
+		const unknown = names.filter((name) => !known.has(name));
 		if (unknown.length > 0) {
 			throw new Error(`Unknown tool${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
 		}
-		this.activeSet = new Set(names);
+		this.state.activeToolNames = [...names];
+	}
+
+	setApprovalOverride(override: Partial<Record<ToolApprovalKey, boolean>>): void {
+		this.state.approvalOverride = { ...override };
+	}
+
+	mergeApprovalOverride(patch: Partial<Record<ToolApprovalKey, boolean>>): void {
+		this.setApprovalOverride({ ...this.state.approvalOverride, ...patch });
 	}
 
 	register(tool: AgentTool<any>): void {
-		if (this.tools.has(tool.name)) throw new Error(`Tool already registered: ${tool.name}`);
-		this.tools.set(tool.name, tool);
-		this.activeSet.add(tool.name);
+		if (this.names().includes(tool.name)) throw new Error(`Tool already registered: ${tool.name}`);
+		this.local.set(tool.name, tool);
+		this.state.activeToolNames.push(tool.name);
 	}
+}
+
+function cloneState(state: ToolState): ToolState {
+	return {
+		activeToolNames: [...state.activeToolNames],
+		...(state.approvalOverride === undefined ? {} : { approvalOverride: { ...state.approvalOverride } }),
+	};
 }

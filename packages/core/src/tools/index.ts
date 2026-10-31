@@ -1,26 +1,23 @@
 import type { AgentTool } from "@my-agent/loop";
-import type { SettingsManager } from "../settings-manager.ts";
-import type { Workspace } from "../workspace.ts";
-import { createToolRegistry } from "./registry.ts";
+import type { ToolRunContext } from "./manager.ts";
+import { toolDefinitions } from "./manager.ts";
 
+export {
+	type ToolDefinition,
+	type ToolDefinitions,
+	type ToolFillContext,
+	type ToolRunContext,
+	type ToolState,
+	createToolDefinitions,
+	DEFAULT_MODE_NAME,
+	fillTools,
+	narrowToKnown,
+	subagentToolState,
+	SUBAGENT_TOOL_NAMES,
+	toolDefinitions,
+	toolListFor,
+} from "./manager.ts";
 export { createToolRegistry, type ToolRegistry } from "./registry.ts";
-
-/** Names of the built-in tools. Adding a tool means adding a case here and a file next to this one. */
-export type ToolName = "read" | "write" | "edit" | "glob" | "grep" | "bash";
-
-export const TOOL_NAMES: readonly ToolName[] = ["read", "write", "edit", "glob", "grep", "bash"];
-
-/**
- * The built-in loadout as a plain list.
- *
- * `createToolRegistry` is how a session gets its tools; this is for callers that only want the six
- * objects, and it goes through the registry so there is one place that knows what the loadout is.
- * Each tool is one `AgentTool` from pi-agent-core with a workspace bound by closure, so a tool cannot
- * touch anything outside the workspace even by accident.
- */
-export function createTools(workspace: Workspace, settingsManager?: SettingsManager): AgentTool<any>[] {
-	return createToolRegistry(workspace, settingsManager).all();
-}
 
 /** Short human-readable summary of a tool call, for the approval prompt and the transcript. */
 export function describeToolCall(name: string, args: unknown): string {
@@ -48,6 +45,17 @@ export function describeToolCall(name: string, args: unknown): string {
 		default:
 			return name;
 	}
+}
+
+/**
+ * The six built-ins, built against one run context.
+ *
+ * The definitions are how a session gets its tools; this is for callers that want the objects
+ * themselves — a smoke exercising a tool by name, a test driving `execute` directly. Each is built
+ * fresh against the context given, the same way the run-context assembly builds them.
+ */
+export function createTools(run: ToolRunContext): AgentTool<any>[] {
+	return toolDefinitions().all().map((definition) => definition(run));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

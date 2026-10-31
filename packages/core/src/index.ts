@@ -192,7 +192,7 @@ export {
 	type ToolConfigEntry,
 	type WorkspaceSessions,
 } from "./session/session-manager.ts";
-export { applyRecordedToolConfig } from "./session/tool-config.ts";
+export { applyRecordedToolConfig, globalDefaultToolState } from "./session/tool-config.ts";
 export {
 	applySettings,
 	fillSettings,
@@ -220,9 +220,17 @@ export {
 	createToolRegistry,
 	createTools,
 	describeToolCall,
-	TOOL_NAMES,
-	type ToolName,
+	fillTools,
+	narrowToKnown,
+	toolDefinitions,
+	toolListFor,
+	SUBAGENT_TOOL_NAMES,
+	subagentToolState,
+	type ToolDefinition,
+	type ToolDefinitions,
 	type ToolRegistry,
+	type ToolRunContext,
+	type ToolState,
 	} from "./tools/index.ts";
 export {
 	DIFF_CONTEXT,

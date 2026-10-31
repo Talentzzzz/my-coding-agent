@@ -34,6 +34,8 @@ import {
 	spillPathFor,
 	trimmableToolArgEntryIds,
 	Workspace,
+	toolDefinitions,
+	fillTools,
 	openAgent,
 	workspaceDir,
 	type FileDiff,
@@ -75,7 +77,7 @@ function check(label: string, condition: boolean, detail = ""): void {
 }
 
 function tool(name: string): AgentTool<any> {
-	const found = createTools(new Workspace(root)).find((candidate) => candidate.name === name);
+	const found = createTools({ workspace: new Workspace(root) }).find((candidate) => candidate.name === name);
 	if (!found) throw new Error(`no tool named ${name}`);
 	return found;
 }
@@ -219,12 +221,12 @@ try {
 		long.error === undefined && long.text.includes("x") && !long.text.includes("capped"),
 		long.error ?? long.text,
 	);
-	// The timeouts are the registry's settings, not constants: a workspace that names a lower ceiling
-	// caps the call at it and names the cap in the result, so the model can plan around it.
-	const cappedTool = createToolRegistry(
-		new Workspace(root),
-		SettingsManager.inMemory({ bash: { defaultTimeoutMs: 60_000, maxTimeoutMs: 1_000 } }),
-	).get("bash");
+	// The timeouts are the run context's, not constants: a request built with a lower ceiling caps the
+	// call at it and names the cap in the result, so the model can plan around it.
+	const cappedTool = createToolRegistry(toolDefinitions()).build("bash", {
+		workspace: new Workspace(root),
+		bash: { defaultTimeoutMs: 60_000, maxTimeoutMs: 1_000 },
+	});
 	if (!cappedTool) throw new Error("no tool named bash");
 	const capped = await cappedTool.execute("test", { command: "echo y", timeout_ms: 1_000_000 }, undefined, undefined);
 	const cappedText = capped.content.map((block) => (block.type === "text" ? block.text : "")).join("");
@@ -252,6 +254,9 @@ try {
 
 	process.stdout.write("settings manager\n");
 	await exerciseSettings();
+
+	process.stdout.write("tool state fill\n");
+	exerciseFillTools();
 
 	process.stdout.write("compaction\n");
 	exerciseCompaction();
@@ -679,6 +684,59 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		other.snapshot.approvals.bash === false,
 		JSON.stringify(other.snapshot.approvals),
 	);
+}
+
+/**
+ * The tool choice is a fill: a mode seed in, a complete `ToolState` out.
+ *
+ * What the checks pin: the built-in default mode is the global default's live view and reads no
+ * stored entry; a name this build no longer knows is dropped from the answer rather than thrown at
+ * (a replayed set must not refuse a session its reopen); and an unknown mode name throws, because a
+ * session asked to run in a mode nobody defined has no configuration to fall back on.
+ */
+function exerciseFillTools(): void {
+	const known = toolDefinitions().names();
+	const modes = [
+		{
+			name: "reader",
+			tools: ["read", "glob", "vanished"],
+			approval: { read: false, write: true, edit: true, glob: false, grep: true, bash: true },
+		},
+	];
+	const context = { modes, globalTools: [...known, "vanished"], known };
+
+	check(
+		"a missing seed is the global default's view",
+		JSON.stringify(fillTools(undefined, context).activeToolNames) === JSON.stringify(known),
+		JSON.stringify(fillTools(undefined, context)),
+	);
+	check(
+		"and so is the built-in mode's name",
+		JSON.stringify(fillTools("默认", context).activeToolNames) === JSON.stringify(known),
+		JSON.stringify(fillTools("默认", context)),
+	);
+	check(
+		"the default view carries no approval override of its own",
+		fillTools(undefined, context).approvalOverride === undefined,
+		JSON.stringify(fillTools(undefined, context).approvalOverride),
+	);
+	check(
+		"a name this build dropped is narrowed out of the default",
+		fillTools(undefined, context).activeToolNames.includes("vanished") === false,
+		JSON.stringify(fillTools(undefined, context).activeToolNames),
+	);
+
+	const reader = fillTools("reader", context);
+	check("a named mode picks its own tool set", JSON.stringify(reader.activeToolNames) === JSON.stringify(["read", "glob"]), JSON.stringify(reader.activeToolNames));
+	check("carrying its approval map whole", reader.approvalOverride?.write === true && reader.approvalOverride?.read === false, JSON.stringify(reader.approvalOverride));
+
+	let threw = "";
+	try {
+		fillTools("no-such-mode", context);
+	} catch (error) {
+		threw = (error as Error).message;
+	}
+	check("an unknown mode name throws", threw.includes("no-such-mode"), threw);
 }
 
 function exerciseCompaction(): void {

@@ -1,39 +1,12 @@
 import { APPROVAL_TOOLS, type ToolApprovalKey } from "../protocol.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
+import { fillTools, narrowToKnown, type ToolState } from "../tools/manager.ts";
 import type { SessionManager } from "./session-manager.ts";
 
 /** The tools an approval map gates, in the loadout's order. */
 export function approvalToolsOf(approval: Record<ToolApprovalKey, boolean>): ToolApprovalKey[] {
 	return APPROVAL_TOOLS.filter((name) => approval[name]);
-}
-
-/**
- * Put a registry back on the tool set the active branch recorded, and answer its approval map.
- *
- * `tool_config` entries hold both maps whole, so the last one on the branch is the state and every
- * earlier one is history. A branch that carries no entry falls back on `globalTools` — the global
- * default the settings files now name (or the registry's full set, when they name nothing) — because
- * "the choice the session never made" is the global default, not "whatever the last branch left in
- * the registry".
- *
- * Only the tool set is applied here. The approval map is answered instead, because the state belongs
- * to the session and the two callers hold it differently: assembly passes it into a session that does
- * not exist yet, while a session that moves onto another branch merges it into its own override.
- *
- * The recorded set is narrowed to the tools this build still knows, so one an upgrade dropped is
- * dropped by the replay too and cannot refuse the session its reopen. `globalTools` is narrowed the
- * same way, for the same reason: a hand-edited settings file may name a tool this build no longer has.
- */
-export function applyRecordedToolConfig(
-	sessionManager: SessionManager,
-	registry: ToolRegistry,
-	globalTools: readonly string[],
-): { approval?: Record<ToolApprovalKey, boolean> } {
-	const recorded = sessionManager.getRecordedToolConfig();
-	const names = recorded.activeTools ?? globalTools;
-	registry.setActive(names.filter((name) => registry.get(name) !== undefined));
-	return recorded.approval === undefined ? {} : { approval: recorded.approval };
 }
 
 /**
@@ -45,9 +18,49 @@ export function applyRecordedToolConfig(
  */
 export function defaultToolNames(settingsManager: SettingsManager, registry: ToolRegistry): string[] {
 	const configured = settingsManager.getTools();
-	return (configured === undefined ? registry.all().map((tool) => tool.name) : configured).filter(
-		(name) => registry.get(name) !== undefined,
-	);
+	const names = configured === undefined ? registry.names() : configured;
+	return narrowToKnown(names, registry.names());
+}
+
+/**
+ * The global default mode's live view, as a {@link ToolState}.
+ *
+ * The built-in default mode is never stored (ADR-0005), so this is what it is instead: the settings
+ * files' own tool set — the full set when they name none — and their approvals, filled through
+ * {@link fillTools} the same way a named mode would be. Undefined approvals mean "the session never
+ * chose", so the view stays live: a settings change is this mode's change.
+ */
+export function globalDefaultToolState(settingsManager: SettingsManager, registry: ToolRegistry): ToolState {
+	return fillTools(undefined, {
+		modes: settingsManager.getSettings().modes ?? [],
+		globalTools: defaultToolNames(settingsManager, registry),
+		known: registry.names(),
+	});
+}
+
+/**
+ * Put a registry back on the tool set the active branch recorded, with the fill as the fallback.
+ *
+ * `tool_config` entries hold both maps whole, so the last one on the branch is the state and every
+ * earlier one is history. A branch that carries no entry falls back on `fallback` — the global
+ * default's live view, or the deliberate loadout the caller handed in — because "the choice the
+ * session never made" is the global default, not "whatever the last branch left in the registry".
+ *
+ * Both halves are applied to the registry: the recorded set is narrowed to the tools this build still
+ * knows, so one an upgrade dropped is dropped by the replay too and cannot refuse the session its
+ * reopen — and `fallback` is narrowed the same way, for the same reason. A recorded approval is the
+ * session's own choice and is carried whole; without one the fallback's answer stands, which for the
+ * global default is "follow the settings", kept live.
+ */
+export function applyRecordedToolConfig(
+	sessionManager: SessionManager,
+	registry: ToolRegistry,
+	fallback: ToolState,
+): void {
+	const recorded = sessionManager.getRecordedToolConfig();
+	const names = recorded.activeTools ?? fallback.activeToolNames;
+	registry.setActive(narrowToKnown(names, registry.names()));
+	registry.setApprovalOverride(recorded.approval ?? fallback.approvalOverride ?? {});
 }
 
 /**

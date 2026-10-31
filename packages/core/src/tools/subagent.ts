@@ -11,21 +11,12 @@ import { entryUsage } from "../session/snapshot.ts";
 import { SettingsManager } from "../settings-manager.ts";
 import type { ModelSource } from "../models.ts";
 import type { Workspace } from "../workspace.ts";
-import { createToolRegistry } from "./registry.ts";
+import { subagentToolState } from "./manager.ts";
 import { textResult, throwIfAborted } from "./types.ts";
 
 /**
- * What the SubAgent's own session may call, and nothing else.
- *
- * The set is fixed rather than a parameter the caller's model fills in: a model that could name its
- * own tools could grant itself `write` mid-run, and a SubAgent's approval request has no window to
- * answer it. Read-only covers the work delegation is for — reading many files, reporting back — and
- * makes "the SubAgent cannot change anything" a property of the registry, not of model behavior.
- * These three also need no approval under the default approval set, so the child never stalls.
+ * How long `SubAgentControl` with action `output` waits for a running job before reporting status.
  */
-const SUBAGENT_TOOLS = ["read", "glob", "grep"] as const;
-
-/** How long `SubAgentControl` with action `output` waits for a running job before reporting status. */
 const DEFAULT_WAIT_MS = 30_000;
 
 const subagentParams = Type.Object({
@@ -113,8 +104,6 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 	async function buildChild(): Promise<Agent> {
 		const absChildDir = join(workspaceDir(deps.workspace.absRoot), "subagents");
 		const sessionManager = SessionManager.create(deps.workspace.absRoot, absChildDir, deps.parentSessionFile);
-		const registry = createToolRegistry(deps.workspace);
-		registry.setActive([...SUBAGENT_TOOLS]);
 		return openAgent({
 			absWorkspaceRoot: deps.workspace.absRoot,
 			sessionManager,
@@ -122,12 +111,12 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 			...(deps.model === undefined ? {} : { model: deps.model }),
 			thinkingLevel: deps.thinkingLevel,
 			...(deps.api === undefined ? {} : { api: deps.api }),
-			// The child's approvals are structurally unanswerable, so they are off — and its tool set
-			// is narrow enough that nothing it can call wants one under the default approval set.
-			settingsManager: SettingsManager.inMemory({
-				approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false },
-			}),
-			tools: registry,
+			// The child's loadout is one ToolState: the read-only narrowing, and every approval off —
+			// a SubAgent's approval request has no window to answer it (see `subagentToolState`).
+			toolState: subagentToolState(),
+			// The child's settings are never the workspace's files: they exist so nothing here reads or
+			// writes a real settings.json, and the tools it runs need no setting of their own.
+			settingsManager: SettingsManager.inMemory({}),
 			subagents: false,
 		});
 	}

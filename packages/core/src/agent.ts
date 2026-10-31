@@ -58,11 +58,11 @@ import { sessionSnapshot, sessionUsage } from "./session/snapshot.ts";
 import { type SessionEntry, SessionManager, sessionEntryToContextMessages } from "./session/session-manager.ts";
 import {
 	applyRecordedToolConfig,
-	defaultToolNames,
 	followsGlobalOf,
+	globalDefaultToolState,
 } from "./session/tool-config.ts";
 import type { SettingsManager } from "./settings-manager.ts";
-import { describeToolCall, type ToolRegistry } from "./tools/index.ts";
+import { describeToolCall, type ToolRegistry, type ToolRunContext } from "./tools/index.ts";
 import type { Workspace } from "./workspace.ts";
 
 /**
@@ -112,7 +112,13 @@ export interface AgentConfig {
 	 * exposes it unchanged as {@link Agent.settingsManager}.
 	 */
 	settingsManager: SettingsManager;
-	/** The tool definitions, and the per-session active set the prompt is rebuilt from. */
+	/**
+	 * The tool definitions this build knows, and this session's own tool state — the active set and
+	 * the approval choices — which assembly has already put back on the branch's recorded choices.
+	 *
+	 * No workspace is resident here: the executable set is built fresh against the run context every
+	 * request asks for it, so the workspace is a value object that arrives with the request.
+	 */
 	tools: ToolRegistry;
 	/**
 	 * The seams this session dispatches through: the provider transcript, the approval gate, and the
@@ -131,14 +137,6 @@ export interface AgentConfig {
 	 * whole map the gate reads, including the tools that are not active.
 	 */
 	systemPrompt: (toolNames: readonly string[], approvals: Record<ToolApprovalKey, boolean>) => string;
-	/**
-	 * Approval choices this session itself recorded, over the workspace's defaults.
-	 *
-	 * The replayed `tool_config` entries, handed in by assembly: a session that chose its own approvals
-	 * reopens with them rather than with whatever the settings file has since become. Undefined keys
-	 * fall through to {@link AgentConfig.settingsManager}, so a session that never chose is unchanged.
-	 */
-	approvalOverride?: Partial<Record<ToolApprovalKey, boolean>>;
 	/**
 	 * The model this session starts on, as the seed the caller assembled.
 	 *
@@ -389,14 +387,6 @@ export class Agent {
 	private readonly tools: ToolRegistry;
 	/** The caller's prompt builder; {@link buildSystemPrompt} is what the session calls. */
 	private readonly promptBuilder: (toolNames: readonly string[], approvals: Record<ToolApprovalKey, boolean>) => string;
-	/**
-	 * This session's own approval choices, over the workspace defaults.
-	 *
-	 * Grown by `applyConfig` and seeded from the replayed `tool_config` entries. Session-scoped by
-	 * design: the settings files stay the defaults a new session opens on, and a change made here
-	 * writes a `tool_config` entry into this session's transcript rather than onto the workspace.
-	 */
-	private approvalOverride: Partial<Record<ToolApprovalKey, boolean>>;
 	private readonly listeners = new Set<SessionListener>();
 	private readonly eventListeners = new Set<SessionEventListener>();
 	private readonly pendingApprovals = new Map<string, PendingApprovalEntry>();
@@ -516,7 +506,6 @@ export class Agent {
 		this.settingsManager = config.settingsManager;
 		this.tools = config.tools;
 		this.promptBuilder = config.systemPrompt;
-		this.approvalOverride = config.approvalOverride ?? {};
 		this.hooks = config.hooks ?? createHooks();
 		this.modelState = config.modelState;
 		this.base = config.api ?? anthropicMessages;
@@ -593,10 +582,11 @@ export class Agent {
 				context: {
 					...context,
 					messages: system === undefined ? conversation : [system, ...conversation],
-					// The live executable set. The loop declares it on the request (`toToolDeclaration`)
-					// rather than reading it out of the transcript, so a tool switched on mid-session
-					// reaches the model on the next request and the two cannot drift.
-					tools: this.tools.active(),
+					// The live executable set, built fresh against this request's run context. The loop declares
+					// it on the request (`toToolDeclaration`) rather than reading it out of the transcript, so
+					// a tool switched on mid-session reaches the model on the next request and the two cannot
+					// drift.
+					tools: this.tools.active(this.runContext()),
 				},
 			};
 		};
@@ -610,6 +600,15 @@ export class Agent {
 	 */
 	private requestModel(): Model {
 		return resolvedModel(this.modelState, this.transport);
+	}
+
+	/**
+	 * The value objects this request's tools are built against: the workspace, read off the session
+	 * once more, and the bash timeouts, read off the settings the same way. Per request, like the tool
+	 * list itself — nothing here outlives the request that carries it.
+	 */
+	private runContext(): ToolRunContext {
+		return { workspace: this.workspace, bash: this.settingsManager.getBashSettings() };
 	}
 
 	/**
@@ -832,10 +831,11 @@ export class Agent {
 	 * The approval map in force: the workspace's settings with this session's own choices over them.
 	 *
 	 * The single read point for the gate, the snapshot, and the prompt — all three answer the same
-	 * question, so none of them may reach past this to the settings manager alone.
+	 * question, so none of them may reach past this to the settings manager alone. The session's own
+	 * half is the tool state's override, which assembly replayed from the branch's `tool_config` entry.
 	 */
 	getApprovals(): Record<ToolApprovalKey, boolean> {
-		return { ...this.settingsManager.getApprovals(), ...this.approvalOverride };
+		return { ...this.settingsManager.getApprovals(), ...this.tools.toolState().approvalOverride };
 	}
 
 	/**
@@ -892,7 +892,7 @@ export class Agent {
 			absWorkspaceRoot: this.workspace.absRoot,
 			model: this.requestModel(),
 			approvals: this.getApprovals(),
-			allTools: this.tools.all().map((tool) => tool.name),
+			allTools: this.tools.names(),
 			activeTools: this.tools.activeNames(),
 			// Judged against this workspace's own settings, the same way a cold read judges it, so the
 			// panel's "沿用全局" label cannot disagree with itself between the two paths.
@@ -982,7 +982,7 @@ export class Agent {
 			// {@link prepareRequestOnLoop} anyway. The queues' drain hooks are what connect the
 			// engine's take points to the queues this session owns.
 			await this.loop.runLoop(
-				{ messages: this.transcript(), tools: this.tools.active() },
+				{ messages: this.transcript(), tools: this.tools.active(this.runContext()) },
 				message,
 				{
 					// A request object from the bag as it stands; `prepareRequest` fills the bag and hands
@@ -1090,8 +1090,9 @@ export class Agent {
 	 * something else, and every move ends on the branch's answer rather than the previous one's.
 	 */
 	private applyBranchToolConfig(): void {
-		const recorded = applyRecordedToolConfig(this.sessionManager, this.tools, defaultToolNames(this.settingsManager, this.tools));
-		this.approvalOverride = recorded.approval ?? {};
+		// The fallback is the global default's live view, rebuilt from the settings as they are now, so
+		// a move onto a branch that recorded nothing restores what a fresh session would open on.
+		applyRecordedToolConfig(this.sessionManager, this.tools, globalDefaultToolState(this.settingsManager, this.tools));
 		// Reported because neither map is in the branch payload, and every stream other than the one
 		// that asked is holding a snapshot taken before the move. Both maps travel whole: this is the
 		// branch's state, not a delta, and a client applies either shape.
@@ -1176,7 +1177,7 @@ export class Agent {
 	applyConfig(patch: ConfigPatch): void {
 		const previousApprovals = this.getApprovals();
 		if (patch.approval !== undefined) {
-			this.approvalOverride = { ...this.approvalOverride, ...patch.approval };
+			this.tools.mergeApprovalOverride(patch.approval);
 			this.sessionManager.appendToolConfig(this.tools.activeNames(), this.getApprovals());
 		}
 		this.settingsManager.applySettings(patch.approval === undefined ? patch : { ...patch, approval: undefined });

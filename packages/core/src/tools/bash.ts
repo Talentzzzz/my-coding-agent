@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import type { AgentTool, AgentToolResult } from "@my-agent/loop";
 import { Type, type Static } from "typebox";
 import { DEFAULT_BASH_SETTINGS, type BashSettings } from "../config.ts";
-import type { SettingsManager } from "../settings-manager.ts";
 import { defaultLauncher, type Workspace } from "../workspace.ts";
 import { truncate } from "./truncate.ts";
 import { textResult, throwIfAborted } from "./types.ts";
@@ -32,11 +31,12 @@ export type BashParams = Static<typeof parameters>;
  * Running it in the workspace directory (not the server's cwd) keeps `git status`, `npm test` and
  * friends pointed at the project the user is actually talking about.
  *
- * The timeouts are read per call rather than bound at construction, so a change made in the settings
- * panel reaches the next command without rebuilding the session. A caller that passes no manager —
- * a test, a SubAgent's registry — runs on the defaults.
+ * The timeouts arrive with the run context — the same request that built the tool — rather than being
+ * bound here, so a change made in the settings panel reaches the next request's build without
+ * anything being rebuilt by hand. A caller that names none — a test, a SubAgent's loadout — runs on
+ * the defaults.
  */
-export function createBashTool(workspace: Workspace, settingsManager?: SettingsManager): AgentTool<typeof parameters> {
+export function createBashTool(workspace: Workspace, timeouts?: BashSettings): AgentTool<typeof parameters> {
 	return {
 		name: "bash",
 		label: "Bash",
@@ -45,7 +45,7 @@ export function createBashTool(workspace: Workspace, settingsManager?: SettingsM
 		parameters,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal, onUpdate) {
-			return runBash(workspace, params, { signal, onUpdate, timeouts: settingsManager?.getBashSettings() });
+			return runBash(workspace, params, { signal, onUpdate, timeouts });
 		},
 	};
 }
