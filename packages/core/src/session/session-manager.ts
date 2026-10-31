@@ -19,6 +19,7 @@ import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 import type { Message } from "@my-agent/llm";
 import { type Usage, uuidv7 } from "@my-agent/llm";
+import type { ToolResultContent } from "../hooks.ts";
 import { APP_NAME } from "../config.ts";
 import { trimToolCallArgs } from "../context/trim-tool-call-args.ts";
 import { clearToolResult } from "../context/clear-tool-results.ts";
@@ -139,6 +140,25 @@ export interface TrimToolCallArgEntry extends SessionEntryBase {
 }
 
 /**
+ * A record of what a hook left for the model to read in one tool result.
+ *
+ * An `after_tool` rewrite leaves one result with two audiences: the request is served the `shown`
+ * half, the transcript keeps the `stored` half — which is the toolResult message this record follows,
+ * so the file holds both without carrying either twice. Like a clear or a trim, the record changes
+ * what an earlier entry *means* rather than changing it, and a replay pairs it back with that message
+ * by tool call id (`toolResultViewsOf`), which is what keeps a restarted process serving the model the
+ * same bounded result the live one did. A clear outranks it: a view whose result the view emptied is
+ * dead, because the cleared notice exists to send the model back to the tool.
+ */
+export interface ToolResultViewEntry extends SessionEntryBase {
+	type: "tool_result_view";
+	/** The tool call the shown half answers. */
+	toolCallId: string;
+	/** What the hooks left for the model to read. */
+	shown: ToolResultContent;
+}
+
+/**
  * A record of the session's own tool choices: which tools are active and which of them ask for
  * approval.
  *
@@ -213,6 +233,7 @@ export type SessionEntry =
 	| CompactionEntry
 	| ClearToolResultEntry
 	| TrimToolCallArgEntry
+	| ToolResultViewEntry
 	| ToolConfigEntry
 	| LeafEntry
 	| RenameEntry
@@ -1419,6 +1440,27 @@ export function appendTrimToolCallArgs(s: SessionState, trimmedEntryIds: readonl
 	return entry.id;
 }
 
+/**
+ * Record the shown half of a tool result a hook rewrote.
+ *
+ * Written the moment the toolResult message entry lands, as its child — the order the two facts
+ * happened in, and the order a replay reads them in. The stored half is not repeated here: it is
+ * already the message's own content, and carrying it twice would make every rewrite cost its result
+ * twice on disk.
+ */
+export function appendToolResultView(s: SessionState, toolCallId: string, shown: ToolResultContent): string {
+	const entry: ToolResultViewEntry = {
+		type: "tool_result_view",
+		id: generateId(s.sessionEntryMapById),
+		parentId: s.leafId,
+		timestamp: new Date().toISOString(),
+		toolCallId,
+		shown,
+	};
+	appendEntry(s, entry);
+	return entry.id;
+}
+
 // =========================================================================
 // Tree traversal
 // =========================================================================
@@ -1876,6 +1918,10 @@ export class SessionManager {
 
 	appendTrimToolCallArgs(trimmedEntryIds: readonly string[], tokensBefore: number): string {
 		return appendTrimToolCallArgs(this.s, trimmedEntryIds, tokensBefore);
+	}
+
+	appendToolResultView(toolCallId: string, shown: ToolResultContent): string {
+		return appendToolResultView(this.s, toolCallId, shown);
 	}
 
 	getLeafId(): string | null {

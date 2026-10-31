@@ -1,3 +1,4 @@
+import type { ToolResultMessage } from "@my-agent/llm";
 import type { SessionEntry } from "../session/session-manager.ts";
 
 /**
@@ -82,15 +83,27 @@ function refetchableToolName(entry: SessionEntry): string | undefined {
 	return typeof name === "string" && REFETCHABLE_TOOLS.has(name) ? name : undefined;
 }
 
-/** Whether a result already reads as cleared, so a clear has nothing left to do to it. */
-function isCleared(entry: SessionEntry): boolean {
-	if (entry.type !== "message" || entry.message.role !== "toolResult") return false;
-	const content = entry.message.content;
+/**
+ * Whether one tool result already reads as cleared, so a clear has nothing left to do to it.
+ *
+ * The check reads the content rather than any record of the clear, because the question is asked of
+ * entries the view has already applied the clear to — and of a view that carries no clear record at
+ * all. Whatever emptied the result, the notice is what the model would read, and one notice is
+ * indistinguishable from another by design.
+ */
+export function isClearedToolResult(message: ToolResultMessage): boolean {
+	const content = message.content;
 	return (
 		content.length === 1 &&
 		content[0]?.type === "text" &&
-		content[0].text === clearedToolResultText(entry.message.toolName)
+		content[0].text === clearedToolResultText(message.toolName)
 	);
+}
+
+/** Whether an entry already reads as cleared, so a clear has nothing left to do to it. */
+function isCleared(entry: SessionEntry): boolean {
+	if (entry.type !== "message" || entry.message.role !== "toolResult") return false;
+	return isClearedToolResult(entry.message);
 }
 
 /** The same entry with its result text replaced. Images and other blocks go with it: they were fetchable too. */

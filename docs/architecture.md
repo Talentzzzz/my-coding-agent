@@ -130,7 +130,7 @@ level 本身骑在模型上（`Model.thinkingLevel`，由 `createModel(config, l
 - **`before_tool`** 是审批闸门。审批集合决定哪些工具要问，UI 通过审批端点 / `denyAllApprovals` / `snapshot.pendingApprovals` 回答，而这个 hook 把一次拒绝变成 `{ block: { reason } }`，循环把它作为工具错误报告给模型。后一个处理器可以**细化**这道闸门，但不能**撤掉**它。
 - **`after_tool`** 是给"忘记约束自己输出的工具"的兜底。超过 80,000 字符的结果（`SPILL_RESULT_CHARS`，`context/spill.ts`）会被整份归档到工作区的 `.my-agent/tool-results/<session id>/<call id>-<tool name>.txt`，模型拿到的则是它的头尾各 2,000 字符加上归档路径，这样 agent 可以自己 `read` 剩下的部分。归档写不出去时，`boundToolContent` 仍然把文本限制在 `MAX_TOOL_RESULT_BYTES`（200 KB）。
 
-由此得出一条规则：**hook 决定模型看到什么，transcript 保留工具产出了什么。** 被改写的 content 回到循环、用于这一轮；`prepareRequest` 把它服务给之后每一次请求；而会话管理器记录的是工具自己的输出——所以恢复时会把一个被约束过的结果按被约束的样子重放，文件里也仍然保有工具实际返回的东西。
+由此得出一条规则：**hook 决定模型看到什么，transcript 保留工具产出了什么。** 被改写的 content 回到循环、用于这一轮；而会话管理器记录的是工具自己的输出。改写也**落账**：工具结果消息落账时，hook 留给模型的 `shown` 半边作为一条 `tool_result_view` entry 紧随其后写进文件（`Agent.recordToolResultView`），发请求时由 `toolResultViewsOf` 从账本里把它和那条消息按 call id 配回成对——`forModel` 读它，所以重启后的进程服务给模型的仍是那个被约束过的版本；文件里也仍然保有工具实际返回的东西，快照与 wire 读到的也是它。
 
 ## 会话事件
 
@@ -204,7 +204,7 @@ type AgentSessionEvent =
 
 `Agent` 自己不保留 transcript。`SessionManager`（`core/src/session/session-manager.ts`）保留，而且它是会话 config 里的**一个对象**，不是会话记得去写的一个文件：会话通过 `session.sessionManager` 追加，并从它那里读回每一次请求，所以"发给供应商的"、"恢复的进程看到的"、"磁盘上的"是同一件东西，而不是三件需要保持同步的东西。
 
-在磁盘上，一个会话是一个 JSONL 文件，位于 `<agent home>/sessions/--<把分隔符换成短横的 cwd>--/<ISO 时间戳>_<id>.jsonl`。每个工作区一个目录，以**绝对路径**命名而不是哈希，所以一个文件不必打开就能追溯到它的项目。文件以一条 header 开头——`{type, version, id, timestamp, cwd, parentSession}`，`version` 为 `CURRENT_SESSION_VERSION = 4`——它之后的每一行是一条 **entry**，携带 `id`、`parentId`、`timestamp` 和一种 kind。父链接是让这个文件成为一棵树的东西；`leafId` 是对话当前所在之处，而移动它就是窗口在这棵树上行走的方式——见*会话树*。存在十种 kind：
+在磁盘上，一个会话是一个 JSONL 文件，位于 `<agent home>/sessions/--<把分隔符换成短横的 cwd>--/<ISO 时间戳>_<id>.jsonl`。每个工作区一个目录，以**绝对路径**命名而不是哈希，所以一个文件不必打开就能追溯到它的项目。文件以一条 header 开头——`{type, version, id, timestamp, cwd, parentSession}`，`version` 为 `CURRENT_SESSION_VERSION = 4`——它之后的每一行是一条 **entry**，携带 `id`、`parentId`、`timestamp` 和一种 kind。父链接是让这个文件成为一棵树的东西；`leafId` 是对话当前所在之处，而移动它就是窗口在这棵树上行走的方式——见*会话树*。存在十一种 kind：
 
 - `message`，持有循环产生的或用户发出的 `Message`；
 - `thinking_level_change` 和 `model_change`，会话自己的配置历史——记录为 **entry** 而不是一条元数据记录，所以 transcript 本身就能回答"这个会话当时在哪个模型上"。两者都由 `recordSelection` 写在 `prepareRequest` 的开头，也就是说：**在带着它们发出请求时**。用户指向过、却从未用它发过的模型什么也没回答，所以它不在文件里。`model_change` 用那一行**唯一的名字**来命名它；而由于文件从不被重写，读取方取这个字段，并回落到旧构建写在它位置上的 `provider`。assistant 消息的 wire id 是回到某一行的第二条路，用于没有记录过变更的 transcript；但一条消息除了 wire id 之外不携带任何行身份，所以它只有在用户**没给那一行命名**时才能指出是哪一行——两者都没有的会话，启动时没有模型，并提示去挑一个；
@@ -212,6 +212,7 @@ type AgentSessionEvent =
 - `compaction`，一个检查点（见下）；
 - `clear_tool_result`，它命名那些其文本被从视图中清掉的工作结果（见下）；
 - `trim_tool_call_arg`，它命名那些其记录的 tool-call 参数被缩短的 assistant 消息（见下）；
+- `tool_result_view`，hook 改写过的工具结果的 `shown` 半边——`toolCallId` 加上留给模型读的内容，作为它所注解的 toolResult 消息 entry 的 child 紧随其后写；`stored` 半边就是那条消息自己，不重复存。发请求时 `toolResultViewsOf` 按 call id 把两半配回（见*Hook*）；
 - `leaf`，对话**去了哪里**的记录——`branch()` / `resetLeaf()` 在位置真的移动时写出的一条状态 entry，`buildIndex()` 重放它，让一次移动活过回收与进程退出（见*会话树*）；
 - `rename`，人自己起的会话名，按文件序取最后一条、与分支无关（[ADR-0002](adr/0002-session-rename-entry.md)）；
 - `usage`，一笔**不挂在任何消息上**的模型花销：`operation`（今天只有委派子代理的 `"subagent"`）、`model` 与整份 `usage`，由子代理工具在子会话落定时整笔写入父会话。子代理跑在它自己的 transcript 上，它的花销在本会话里没有 assistant 消息可搭，这是它唯一的落点（见下）。
@@ -220,11 +221,11 @@ type AgentSessionEvent =
 
 `buildContextEntries` 把分支变成仍在上下文里的 entry，施加那三个被记录成 entry 的决定：沿父链接从根走到 `leafId`，在那条分支上找到最新的 `compaction`，从它的 `firstKeptEntryId` 起全部取用、并丢掉之前的（换成这个检查点），然后清掉任何 `clear_tool_result` 记录命名的结果、缩短任何 `trim_tool_call_arg` 记录命名的参数。`buildSessionContext` 把这份清单投影成发给模型的东西，并报告这条分支最后一次被设成的 thinking level 和模型。
 
-写入是同步的：`appendMessage`、`appendThinkingLevelChange`、`appendModelChange`、`appendToolConfig`、`appendCompaction`、`appendTrimToolCallArgs`、`appendClearToolResults`、`appendRename`、`appendUsage` 把新 entry 链接到 leaf、移动 leaf，并追加一行。`SessionManager.create()` **不写任何东西**：文件随第一条消息出现（`persistEntry` 里 `hasConversation` 那道闸），所以没人说过话的会话在盘上没有痕迹、在侧边栏没有一行。pi 的延迟创建因此被保留下来，代价是 id 在那之前不可寻址——`findAnywhere` 读的是 header 文件——而这段窗口由 `SessionHub` 手里那份 manager 承担（`pending` 表），因为唯一会把这个 id 发出去的就是它自己；进程重启，这份窗口一并消失，那条会话本来也没有内容可丢。标题从第一条**有文本的**用户消息推导，活会话和列表一视同仁，因为 header 的创建时间戳会把每个恢复的会话都叫成「新会话」。
+写入是同步的：`appendMessage`、`appendThinkingLevelChange`、`appendModelChange`、`appendToolConfig`、`appendCompaction`、`appendTrimToolCallArgs`、`appendClearToolResults`、`appendToolResultView`、`appendRename`、`appendUsage` 把新 entry 链接到 leaf、移动 leaf，并追加一行。`SessionManager.create()` **不写任何东西**：文件随第一条消息出现（`persistEntry` 里 `hasConversation` 那道闸），所以没人说过话的会话在盘上没有痕迹、在侧边栏没有一行。pi 的延迟创建因此被保留下来，代价是 id 在那之前不可寻址——`findAnywhere` 读的是 header 文件——而这段窗口由 `SessionHub` 手里那份 manager 承担（`pending` 表），因为唯一会把这个 id 发出去的就是它自己；进程重启，这份窗口一并消失，那条会话本来也没有内容可丢。标题从第一条**有文本的**用户消息推导，活会话和列表一视同仁，因为 header 的创建时间戳会把每个恢复的会话都叫成「新会话」。
 
 **用量是按文件记的账，不是按分支。** 状态行的 token 总数由 `sessionUsage` 从**整个文件**的 entry 折出——assistant 消息身上的 `usage`、`compaction` entry 存的摘要调用花销、`usage` entry 记的委派花销，三处来源、一个总数——而不是从活跃分支的消息折：被切走的分支上烧掉的 token 也烧掉了，压缩之前的消息不再出现在上下文里、可它们的请求曾经发出，这两个事实都不随 leaf 在哪而改变。总和里唯一的例外是 `contextTokens`（当前上下文占用）：它不是累计值，而是活跃分支最后一条带 usage 的 assistant 消息报出的占用量，属于 leaf 所在的那条分支。窗口客户端在 `turn_end` 上增量折 assistant 消息、由 `status` 帧与服务端的总额对齐，所以一笔 `usage` entry 落账后，客户端在下一个状态帧到来时收回这笔账。
 
-这就是 `prepareRequest` 要紧的原因：它让供应商请求和文件一致，无论会话是一秒前创建的还是重启后恢复的。唯一刻意的例外是 hook 改写过的工具结果（见*Hook*）：请求拿到被改写的 content，而文件保留工具产出的东西。
+这就是 `prepareRequest` 要紧的原因：它让供应商请求和文件一致，无论会话是一秒前创建的还是重启后恢复的。hook 改写过的工具结果（见*Hook*）不是例外，只是**按受众分读**：文件同时保有 `stored`（那条消息自己）和 `shown`（紧跟其后的一条 `tool_result_view` entry），请求按 call id 配走 `shown`，快照与 wire 读 `stored`；result 被清掉时视图随它失效，被压缩折掉时配对自然落空。
 
 ### 压缩
 

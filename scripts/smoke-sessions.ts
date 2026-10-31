@@ -10,18 +10,24 @@ import type { Message } from "@my-agent/llm";
 import { bootServer } from "../packages/server/src/boot.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import {
+	appendClearToolResults,
+	appendCompaction,
 	appendMessage,
+	appendToolResultView,
 	// The file's own `const branch` (a session branch, an entry list) shadows a bare `branch` import.
 	branch as branchState,
+	buildContextEntries,
 	buildSessionContext,
 	createSessionState,
 	fillSession,
+	getEntry,
 	getLeafId,
 	getTitle,
 	openAgent,
 	readSessionSnapshot,
 	SessionManager,
 	SettingsManager,
+	toolResultViewsOf,
 	workspaceDir,
 	type SessionSnapshot,
 } from "@my-agent/core";
@@ -730,6 +736,94 @@ try {
 		} finally {
 			await rm(workspaceDir(statelessRoot), { recursive: true, force: true });
 			await rm(statelessRoot, { recursive: true, force: true });
+		}
+	}
+
+	process.stdout.write("a tool_result_view entry replays with its result\n");
+	// 票 12: the shown half a hook produced is an entry written behind the toolResult message that
+	// holds the stored half. Replaying pairs them back by tool call id — the query the live session
+	// answered from memory, rebuilt from the ledger — and the view dies with the result: cleared,
+	// folded away by a compaction, or left on an abandoned branch.
+	{
+		const viewRoot = await mkdtemp(join(tmpdir(), "my-agent-views-"));
+		try {
+			const s = createSessionState(viewRoot);
+			appendMessage(s, userMessage("ask for a file"));
+			const assistantId = appendMessage(s, {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "x.txt" } }],
+				timestamp: Date.now(),
+			});
+			const resultId = appendMessage(s, {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "the tool's own words" }],
+				isError: false,
+				timestamp: Date.now(),
+			});
+			const viewId = appendToolResultView(s, "call-1", [{ type: "text", text: "REPLACED BY THE HOOK" }]);
+
+			const replayed = fillSession(s.absSessionFile!);
+			const views = toolResultViewsOf(buildContextEntries(replayed));
+			const view = views.get("call-1");
+			check("the replay pairs the halves by call id", view !== undefined, JSON.stringify([...views.keys()]));
+			check("the stored half is the tool's own output", view?.stored[0]?.type === "text" && view.stored[0].text === "the tool's own words", JSON.stringify(view?.stored));
+			check("the shown half is what the hook left", view?.shown[0]?.type === "text" && view.shown[0].text === "REPLACED BY THE HOOK", JSON.stringify(view?.shown));
+			check("the entry is recorded behind its own result", getEntry(replayed, viewId)?.parentId === resultId, `${getEntry(replayed, viewId)?.parentId} vs ${resultId}`);
+			check(
+				"and the transcript itself still reads stored",
+				JSON.stringify(buildSessionContext(replayed).messages).includes("the tool's own words") &&
+					!JSON.stringify(buildSessionContext(replayed).messages).includes("REPLACED BY THE HOOK"),
+			);
+
+			branchState(replayed, assistantId);
+			check(
+				"a view recorded on an abandoned way does not follow the leaf",
+				toolResultViewsOf(buildContextEntries(replayed)).size === 0,
+				JSON.stringify([...toolResultViewsOf(buildContextEntries(replayed)).keys()]),
+			);
+
+			// The abandoned-way branch above wrote a leaf record, so a fresh replay lands there; the clear
+			// is a decision about the main line, so the leaf moves back before it is recorded.
+			const backOn = fillSession(s.absSessionFile!);
+			branchState(backOn, viewId);
+			appendClearToolResults(backOn, [resultId], 100);
+			check(
+				"a clear takes the view with the result it emptied",
+				toolResultViewsOf(buildContextEntries(backOn)).size === 0,
+				JSON.stringify([...toolResultViewsOf(buildContextEntries(backOn)).keys()]),
+			);
+			check(
+				"so the model reads the cleared notice, not the rewrite",
+				JSON.stringify(buildSessionContext(backOn).messages).includes("cleared after an hour idle"),
+			);
+
+			const folded = await mkdtemp(join(tmpdir(), "my-agent-views-orphan-"));
+			try {
+				const s2 = createSessionState(folded);
+				appendMessage(s2, userMessage("another ask"));
+				appendMessage(s2, {
+					role: "toolResult",
+					toolCallId: "call-2",
+					toolName: "read",
+					content: [{ type: "text", text: "another result" }],
+					isError: false,
+					timestamp: Date.now(),
+				});
+				const viewId2 = appendToolResultView(s2, "call-2", [{ type: "text", text: "ANOTHER REWRITE" }]);
+				appendCompaction(s2, "压缩摘要", viewId2, 100);
+				check(
+					"a view whose result a compaction folded away is dropped",
+					toolResultViewsOf(buildContextEntries(fillSession(s2.absSessionFile!))).size === 0,
+				);
+			} finally {
+				await rm(workspaceDir(folded), { recursive: true, force: true });
+				await rm(folded, { recursive: true, force: true });
+			}
+		} finally {
+			await rm(workspaceDir(viewRoot), { recursive: true, force: true });
+			await rm(viewRoot, { recursive: true, force: true });
 		}
 	}
 

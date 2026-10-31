@@ -20,12 +20,15 @@ import {
 	type Agent,
 	type AgentSessionEvent,
 	type FileDiff,
+	type MessageEntry,
 	type ModelSource,
 	type Settings,
 	type SessionEntry,
 	type ToolRegistry,
+	type ToolResultViewEntry,
 	type ModelConfig,
 	workspaceDir,
+	toolResultViewsOf,
 } from "@my-agent/core";
 
 // `@my-agent/llm` and `@my-agent/loop` are workspace packages, linked into the repository root's
@@ -916,7 +919,83 @@ async function exerciseAfterToolHook(): Promise<void> {
 		JSON.stringify(toolResultTexts(session)),
 	);
 
+	// The rewrite outlives the process that made it: the shown half is an entry of its own, written
+	// behind the toolResult message that keeps the stored half. The transcript and the wire read that
+	// message; only the request reads the entry — which is what a reopened session has to prove.
+	check(
+		"the live ledger already pairs the halves",
+		toolResultViewsOf(session.sessionManager.buildContextEntries()).size === 1,
+		JSON.stringify(entriesOf(session).map((entry) => entry.type)),
+	);
+	const sessionFile = session.sessionFile;
 	await session.close();
+
+	process.stdout.write("after_tool hook — the rewrite outlives the process\n");
+	const reopenedFile = SessionManager.open(sessionFile!);
+	const fileEntries = reopenedFile.getEntries();
+	const storedEntry = fileEntries.find(
+		(entry): entry is MessageEntry =>
+			entry.type === "message" && entry.message.role === "toolResult" && textOf(entry.message).includes("the tool's own words"),
+	);
+	check("the stored half is still in the file", storedEntry !== undefined);
+	const viewEntry = fileEntries.find((entry): entry is ToolResultViewEntry => entry.type === "tool_result_view");
+	check("the shown half is an entry of its own", viewEntry !== undefined);
+	check(
+		"recorded behind its own toolResult message",
+		storedEntry !== undefined && viewEntry !== undefined && viewEntry.parentId === storedEntry.id,
+		`${viewEntry?.parentId} vs ${storedEntry?.id}`,
+	);
+	check(
+		"for the call it rewrote",
+		storedEntry !== undefined && viewEntry !== undefined && viewEntry.toolCallId === storedEntry.message.toolCallId,
+		`${viewEntry?.toolCallId} vs ${storedEntry?.message.toolCallId}`,
+	);
+	check(
+		"and it carries what the hook put there",
+		viewEntry?.shown.some((block) => block.type === "text" && block.text === "REPLACED BY THE TEST HOOK") === true,
+		JSON.stringify(viewEntry?.shown),
+	);
+	const transcriptTexts = JSON.stringify(reopenedFile.buildSessionContext().messages);
+	check(
+		"the transcript a window reads still shows the tool's own output",
+		transcriptTexts.includes("the tool's own words") && !transcriptTexts.includes("REPLACED BY THE TEST HOOK"),
+		transcriptTexts.slice(0, 200),
+	);
+	const replayedViews = toolResultViewsOf(reopenedFile.buildContextEntries());
+	check(
+		"the replayed views pair the halves by call id",
+		storedEntry !== undefined &&
+			viewEntry !== undefined &&
+			JSON.stringify(replayedViews.get(viewEntry.toolCallId)?.stored) === JSON.stringify(storedEntry.message.content) &&
+			JSON.stringify(replayedViews.get(viewEntry.toolCallId)?.shown) === JSON.stringify(viewEntry.shown),
+		JSON.stringify([...replayedViews.keys()]),
+	);
+
+	const sentReplay: SentRequest[] = [];
+	recordRequests(sentReplay, [fakeAssistantMessage("replayed")]);
+	const replayed = await openAgent({
+		absWorkspaceRoot: root,
+		sessionManager: reopenedFile,
+		models,
+		api: fake.api,
+		settingsManager: SettingsManager.inMemory(settings()),
+	});
+	try {
+		await within("the reopened run", 10_000, replayed.prompt("one more time"));
+		await within("settle()", 10_000, replayed.settle());
+		check(
+			"a request after reopen still carries the rewrite",
+			(sentReplay[0]?.texts ?? []).some((text) => text.includes("REPLACED BY THE TEST HOOK")),
+			JSON.stringify(sentReplay[0]?.texts),
+		);
+		check(
+			"and still not what the tool returned",
+			(sentReplay[0]?.texts ?? []).every((text) => !text.includes("the tool's own words")),
+			JSON.stringify(sentReplay[0]?.texts),
+		);
+	} finally {
+		await replayed.close();
+	}
 }
 
 /**

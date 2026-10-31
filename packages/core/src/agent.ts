@@ -33,6 +33,7 @@ import {
 import { trimmableToolArgEntryIds } from "./context/trim-tool-call-args.ts";
 import { clearableToolResultIds, isCacheProbablyExpired } from "./context/clear-tool-results.ts";
 import { spillOversizedToolResult } from "./context/spill.ts";
+import { toolResultViewsOf, type ToolResultView } from "./context/tool-result-views.ts";
 import { boundToolContent, createHooks, type Hooks, type ToolResultContent } from "./hooks.ts";
 import {
 	type Model,
@@ -320,18 +321,6 @@ interface ApprovalAnswer {
 }
 
 /**
- * Both halves of a tool result a hook rewrote.
- *
- * The loop stores one message, but two audiences read it: the provider request is served the `shown`
- * half, and the transcript keeps the `stored` half, because bounding what the model sees must not
- * lose what the tool actually produced.
- */
-interface ToolResultView {
-	stored: ToolResultContent;
-	shown: ToolResultContent;
-}
-
-/**
  * One message accepted during a run, and the queue it is waiting on.
  *
  * The queue is the behaviour the composer asked for: a steered message is injected into the running
@@ -390,8 +379,15 @@ export class Agent {
 	private readonly listeners = new Set<SessionListener>();
 	private readonly eventListeners = new Set<SessionEventListener>();
 	private readonly pendingApprovals = new Map<string, PendingApprovalEntry>();
-	/** Tool results a hook rewrote, so the transcript can keep what the tool produced. */
-	private readonly toolResultViews = new Map<string, ToolResultView>();
+	/**
+	 * Tool results a hook rewrote during the run in flight, awaiting the entry that makes them durable.
+	 *
+	 * `after_tool` answers with what the model should see, but the shown half becomes a
+	 * `tool_result_view` entry only when its toolResult message lands — see
+	 * {@link recordToolResultView}. From that moment the ledger is the only source: the request reads
+	 * the views back through `toolResultViewsOf`, so each pending copy is dropped as it is written out.
+	 */
+	private readonly pendingToolResultViews = new Map<string, ToolResultView>();
 	/**
 	 * Messages accepted mid-run, oldest first, each with the queue it is waiting on.
 	 *
@@ -539,57 +535,64 @@ export class Agent {
 			beforeToolCall: async ({ toolCall, args }) => this.beforeTool(toolCall.id, toolCall.name, args),
 			afterToolCall: async ({ toolCall, result, isError }) =>
 				this.afterTool(toolCall.id, toolCall.name, result, isError),
+			// Handed to the constructor rather than assigned onto the loop afterwards: the engine reads
+			// the hook out of the config it snapshots when it is built, so a later assignment never
+			// reaches a request — and every decision made in preparation (the live row, the recorded
+			// selection, compaction, the views the model is shown) silently stops happening.
+			prepareRequest: async ({ context }, signal) => {
+				// The model is re-derived from the live row before anything else reads it, because the
+				// compaction decision below is measured against its context window and a threshold taken from
+				// the window the row had a moment ago would compact the wrong transcript. This is the whole of
+				// "an edit takes effect without reopening anything": the endpoint, the wire id, the window, and
+				// the key are all read here rather than captured when the session was assembled. A row that is
+				// gone — deleted, or renamed under a session that was using it — leaves the model as it is, and
+				// `unconfiguredStream` is what answers for that.
+				this.adoptCurrentRow();
+				// The choice this request is made with reaches the transcript here, at the moment a request
+				// is built from it — so a model or a level the user moved and never sent with is not in the
+				// file at all. It runs before the compaction decision below, which measures the prompt
+				// against this model's window.
+				this.recordSelection();
+				// One pass decides both what the request carries and whether it has to be summarized: the
+				// trigger, the clearing of stale tool results, and the summary all read the same entries, so the
+				// decision and the request cannot disagree about how large the prompt is.
+				const entries = await this.maybeCompact(this.sessionManager.buildContextEntries(), Date.now(), signal);
+				// The views come from the same selection of entries the request is built from, so what the
+				// model is shown and what the request carries cannot disagree about a rewrite.
+				const views = toolResultViewsOf(entries);
+				// The prompt is rebuilt here, not remembered: `applyConfig` can move the approval set and
+				// `setActiveTools` the tool set, and the model must be told about both on the next request.
+				const injected = { messages: messagesOf(entries), systemPrompt: this.buildSystemPrompt() };
+				const rewritten = await this.hooks.apply("context", injected);
+				const messages = this.forModel(rewritten?.messages ?? injected.messages, views);
+				// The leading system message is replaced rather than appended to, and every other system
+				// message is dropped: the prompt is rebuilt whole on this request, so a second one would
+				// describe a state that is already gone. A hook that wants to change the prompt returns
+				// `systemPrompt`; one that pushes a system message into `messages` loses it here.
+				const system = createSystemMessage(rewritten?.systemPrompt ?? injected.systemPrompt);
+				// A compaction checkpoint is already the user turn it stands for — `sessionEntryToContextMessages`
+				// wraps the summary in tags — so the transcript goes to the provider as it is.
+				const conversation = messages.filter((message) => message.role !== "system");
+				return {
+					// Built here, from the bag this request just filled: run-local, used for the one request,
+					// dropped.
+					model: this.requestModel(),
+					context: {
+						...context,
+						messages: system === undefined ? conversation : [system, ...conversation],
+						// The live executable set, built fresh against this request's run context. The loop declares
+						// it on the request (`toToolDeclaration`) rather than reading it out of the transcript, so
+						// a tool switched on mid-session reaches the model on the next request and the two cannot
+						// drift.
+						tools: this.tools.active(this.runContext()),
+					},
+				};
+			},
 		});
 		this.steeringQueue = new PendingMessageQueue(config.settingsManager.getSteeringMode());
 		this.followUpQueue = new PendingMessageQueue(config.settingsManager.getFollowUpMode());
 
 		this.loop.subscribe(async (event) => this.handleEvent(event));
-		this.loop.prepareRequest = async ({ context }, signal) => {
-			// The model is re-derived from the live row before anything else reads it, because the
-			// compaction decision below is measured against its context window and a threshold taken from
-			// the window the row had a moment ago would compact the wrong transcript. This is the whole of
-			// "an edit takes effect without reopening anything": the endpoint, the wire id, the window, and
-			// the key are all read here rather than captured when the session was assembled. A row that is
-			// gone — deleted, or renamed under a session that was using it — leaves the model as it is, and
-			// `unconfiguredStream` is what answers for that.
-			this.adoptCurrentRow();
-			// The choice this request is made with reaches the transcript here, at the moment a request
-			// is built from it — so a model or a level the user moved and never sent with is not in the
-			// file at all. It runs before the compaction decision below, which measures the prompt
-			// against this model's window.
-			this.recordSelection();
-			// One pass decides both what the request carries and whether it has to be summarized: the
-			// trigger, the clearing of stale tool results, and the summary all read the same entries, so the
-			// decision and the request cannot disagree about how large the prompt is.
-			const entries = await this.maybeCompact(this.sessionManager.buildContextEntries(), Date.now(), signal);
-			// The prompt is rebuilt here, not remembered: `applyConfig` can move the approval set and
-			// `setActiveTools` the tool set, and the model must be told about both on the next request.
-			const injected = { messages: messagesOf(entries), systemPrompt: this.buildSystemPrompt() };
-			const rewritten = await this.hooks.apply("context", injected);
-			const messages = this.forModel(rewritten?.messages ?? injected.messages);
-			// The leading system message is replaced rather than appended to, and every other system
-			// message is dropped: the prompt is rebuilt whole on this request, so a second one would
-			// describe a state that is already gone. A hook that wants to change the prompt returns
-			// `systemPrompt`; one that pushes a system message into `messages` loses it here.
-			const system = createSystemMessage(rewritten?.systemPrompt ?? injected.systemPrompt);
-			// A compaction checkpoint is already the user turn it stands for — `sessionEntryToContextMessages`
-			// wraps the summary in tags — so the transcript goes to the provider as it is.
-			const conversation = messages.filter((message) => message.role !== "system");
-			return {
-				// Built here, from the bag this request just filled: run-local, used for the one request,
-				// dropped.
-				model: this.requestModel(),
-				context: {
-					...context,
-					messages: system === undefined ? conversation : [system, ...conversation],
-					// The live executable set, built fresh against this request's run context. The loop declares
-					// it on the request (`toToolDeclaration`) rather than reading it out of the transcript, so
-					// a tool switched on mid-session reaches the model on the next request and the two cannot
-					// drift.
-					tools: this.tools.active(this.runContext()),
-				},
-			};
-		};
 	}
 
 	/**
@@ -1445,7 +1448,7 @@ export class Agent {
 			isError,
 		});
 		if (decided?.content === undefined) return undefined;
-		this.toolResultViews.set(toolCallId, { stored: result.content, shown: decided.content });
+		this.pendingToolResultViews.set(toolCallId, { stored: result.content, shown: decided.content });
 		return { content: decided.content };
 	}
 
@@ -1457,25 +1460,44 @@ export class Agent {
 	 */
 	private transcriptMessage(message: Message): Message {
 		if (message.role !== "toolResult") return message;
-		const view = this.toolResultViews.get(message.toolCallId);
+		const view = this.pendingToolResultViews.get(message.toolCallId);
 		return view === undefined ? message : { ...message, content: view.stored };
+	}
+
+	/**
+	 * Write the shown half of a rewritten result as its own entry, now that the stored half is in the
+	 * file.
+	 *
+	 * The entry follows its toolResult message in the log — as its child, and so on every replay of
+	 * the branch — which is both the order the two facts happened in and the order the red line asks
+	 * the replay to keep. From here on the ledger is the only source of the view: the next request
+	 * reads it back through `toolResultViewsOf`, so the pending copy is dropped as it is written out.
+	 */
+	private recordToolResultView(message: Message): void {
+		if (message.role !== "toolResult") return;
+		const view = this.pendingToolResultViews.get(message.toolCallId);
+		if (view === undefined) return;
+		this.pendingToolResultViews.delete(message.toolCallId);
+		this.sessionManager.appendToolResultView(message.toolCallId, view.shown);
 	}
 
 	/**
 	 * The messages the provider is sent.
 	 *
 	 * A tool result a hook rewrote is served back as the hook left it, so the model sees the bounded
-	 * version of a result the transcript holds in full. A result too large for the context is served
-	 * head and tail with the full text archived in the workspace (`context/spill.ts`) — the backstop for
-	 * a tool that does not bound or paginate its own output, and the one that survives a restart,
-	 * because the archive path is derived from the session and the call id. Anything else oversized is
-	 * clipped here: a result stored by an earlier process has no view to replay, and the budget is what
-	 * keeps it out of the context.
+	 * version of a result the transcript holds in full. The views are the ledger's — replayed from the
+	 * `tool_result_view` entries of the same selection of entries the request is built from — so a
+	 * rewrite outlives the process that made it, and a clear takes the view with the result it emptied.
+	 * A result too large for the context is served head and tail with the full text archived in the
+	 * workspace (`context/spill.ts`) — the backstop for a tool that does not bound or paginate its own
+	 * output, and the one that survives a restart, because the archive path is derived from the session
+	 * and the call id. Anything else oversized is clipped here: a result with no view to replay and no
+	 * archive is kept out of the context by the budget.
 	 */
-	private forModel(messages: readonly Message[]): Message[] {
+	private forModel(messages: readonly Message[], views: ReadonlyMap<string, ToolResultView>): Message[] {
 		return messages.map((message) => {
 			if (message.role !== "toolResult") return message;
-			const view = this.toolResultViews.get(message.toolCallId);
+			const view = views.get(message.toolCallId);
 			if (view !== undefined) return { ...message, content: view.shown };
 			const spilled = spillOversizedToolResult(
 				this.workspace,
@@ -1511,6 +1533,7 @@ export class Agent {
 			if (!this.isOptimisticEcho(event.message)) {
 				this.takeAccepted(event.message);
 				this.appendMessage(this.transcriptMessage(event.message));
+				this.recordToolResultView(event.message);
 			}
 		}
 		if (event.type === "agent_end") {

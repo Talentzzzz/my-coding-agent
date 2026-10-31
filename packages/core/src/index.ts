@@ -48,8 +48,10 @@ export {
 	clearedToolResultText,
 	clearToolResult,
 	isCacheProbablyExpired,
+	isClearedToolResult,
 	REFETCHABLE_TOOLS,
 } from "./context/clear-tool-results.ts";
+export { toolResultViewsOf, type ToolResultView } from "./context/tool-result-views.ts";
 export {
 	spillOversizedToolResult,
 	spillPathFor,
@@ -142,6 +144,7 @@ export {
 	appendRename,
 	appendThinkingLevelChange,
 	appendToolConfig,
+	appendToolResultView,
 	appendTrimToolCallArgs,
 	appendUsage,
 	branch,
@@ -190,6 +193,7 @@ export {
 	type MessageEntry,
 	type ThinkingLevelChangeEntry,
 	type ToolConfigEntry,
+	type ToolResultViewEntry,
 	type WorkspaceSessions,
 } from "./session/session-manager.ts";
 export { applyRecordedToolConfig, globalDefaultToolState } from "./session/tool-config.ts";
