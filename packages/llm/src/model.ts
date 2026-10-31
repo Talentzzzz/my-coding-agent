@@ -99,9 +99,9 @@ function fieldsFrom<TApi extends Api>(config: ModelConfig<TApi>) {
  * is made *with* is now also the object that makes it, which removes the question of which transport
  * a given model belongs to — a model carries its own, and `stream()` is the only way out.
  *
- * A host that rebuilds its model per request (or reconfigures one in place) is the reason the fields
- * are writable rather than readonly: the model *is* a request's configuration, and a corrected key
- * has to reach the next request without a second kind of object to keep in step.
+ * A host that rebuilds its model per request is the reason the fields are writable rather than
+ * readonly: the model *is* a request's configuration, and building it fresh per request keeps a
+ * corrected key two lines away from the request that needs it.
  */
 export class Model<TApi extends Api = Api> {
 	id: string;
@@ -156,21 +156,6 @@ export class Model<TApi extends Api = Api> {
 		this.maxTokens = f.maxTokens;
 		this.samplingParams = f.samplingParams;
 		this.compat = f.compat;
-	}
-
-	/**
-	 * Overwrite every field from another config, keeping the transport.
-	 *
-	 * All of it or none of it: a caller that copies three fields by hand is the caller that leaves
-	 * `compat` describing the endpoint that used to be here. A field the config leaves out resets to
-	 * its default rather than keeping the old value.
-	 *
-	 * The values come from {@link fieldsFrom}, the same object the constructor starts from; here they
-	 * are assigned wholesale, since this is a method rather than a constructor and tsc has no
-	 * initialization question to ask about it.
-	 */
-	reconfigure(config: ModelConfig<TApi>): void {
-		Object.assign(this, fieldsFrom(config));
 	}
 
 	/**

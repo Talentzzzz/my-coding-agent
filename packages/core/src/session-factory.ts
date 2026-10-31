@@ -5,12 +5,14 @@ import { buildSystemPrompt } from "./context/system-prompt.ts";
 import { spillOversizedToolResult } from "./context/spill.ts";
 import { boundToolContent, createHooks } from "./hooks.ts";
 import {
-	createModel,
 	DEFAULT_MODEL_NAME,
-	type Model,
-	placeholderModel,
-	type ModelSource,
+	fillModel,
 	type ModelConfig,
+	type ModelState,
+	type ModelSource,
+	normalizeThinkingLevel,
+	placeholderModelState,
+	resolvedModel,
 } from "./models.ts";
 import type { SessionSnapshot, ToolApprovalKey } from "./protocol.ts";
 import type { SessionManager } from "./session/session-manager.ts";
@@ -74,7 +76,8 @@ export interface OpenAgentOptions {
 interface Assembled {
 	workspace: Workspace;
 	settingsManager: SettingsManager;
-	model: Model;
+	/** The session's model as a bag: the seed, with the row's facts laid in once by assembly. */
+	modelState: ModelState;
 	registry: ToolRegistry;
 	/** The workspace's own instructions, already loaded, for the prompt this session will build. */
 	agentsMd: AgentsMdFile[];
@@ -97,23 +100,28 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 	const settings = settingsManager.getSettings();
 	const agentsMd = await loadAgentsMd(workspace.absRoot);
 	const recorded = options.sessionManager.getRecordedSettings();
-	const row = selectModel(options.models, options.model ?? recordedRefOf(recorded.model) ?? settings.model);
-	// A session with no row still runs, on the placeholder: see `placeholderModel`. What it cannot do
-	// is send anything, and `Agent` answers for it with the sentence that says what to add.
+	const rows = options.models.list();
+	const row = selectModel(rows, options.model ?? recordedRefOf(recorded.model) ?? settings.model);
+	// A session with no row still runs, on the placeholder: see `placeholderModelState`. What it cannot
+	// do is send anything, and `Agent` answers for it with the sentence that says what to add.
 	//
-	// The level is settled here and handed over *on the model*, so a session is never on one row and
+	// The level is settled here and handed over *in the seed*, so a session is never on one row and
 	// asked at a level that belongs to another. It comes from the caller or from what the branch
 	// recorded; a session that has neither opens at "off", which is the request that asks for nothing.
 	const level = row === undefined ? undefined : options.thinkingLevel ?? recorded.thinkingLevel;
-	// The transport arrives on the model rather than beside it: a model is what a request is made with
-	// and this is how it is sent, so the one an injected transport names is the one every re-derivation
-	// from a row keeps using.
-	const model: Model =
-		row === undefined ? placeholderModel(options.api) : createModel(row, level, options.api);
+	// The seed is the client's own selection shape: the row's name and the level, nothing else. The
+	// row's facts — endpoint, key, window, compat — are fill products: laid in here once so a snapshot
+	// reads settled values, and re-laid by every request after, which is what makes an edit to the row
+	// reach the next message.
+	const modelState: ModelState =
+		row === undefined
+			? placeholderModelState()
+			: { name: row.name, ...(level === undefined ? {} : { thinkingLevel: level }) };
+	if (row !== undefined) fillModel(rows, modelState);
+	// The level the bag came back with, which is the level a subagent inherits: `fillModel` already
+	// settled what the seed means for this row, so asking again here could only disagree.
+	const thinkingLevel = normalizeThinkingLevel(modelState.thinkingLevel);
 	const registry = options.tools ?? createToolRegistry(workspace, settingsManager);
-	// The level the model came back with, which is the level a subagent inherits: `createModel` already
-	// settled what the row and the level mean for this model, so asking again here could only disagree.
-	const thinkingLevel = model.thinkingLevel ?? "off";
 
 	// Delegation is part of assembly rather than of `createToolRegistry`, because a child needs the
 	// model and the transcript this session resolved — things only the factory has in hand. The
@@ -147,7 +155,7 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 		options.tools === undefined ? defaultToolNames(settingsManager, registry) : registry.activeNames(),
 	);
 
-	return { workspace, settingsManager, model, registry, agentsMd, recordedTools };
+	return { workspace, settingsManager, modelState, registry, agentsMd, recordedTools };
 }
 
 /**
@@ -162,11 +170,13 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
  * session's history would be indistinguishable from using it.
  */
 export async function readSessionSnapshot(options: OpenAgentOptions): Promise<SessionSnapshot> {
-	const { workspace, settingsManager, model, registry, recordedTools } = await assemble(options);
+	const { workspace, settingsManager, modelState, registry, recordedTools } = await assemble(options);
 	return sessionSnapshot({
 		sessionManager: options.sessionManager,
 		absWorkspaceRoot: workspace.absRoot,
-		model,
+		// The snapshot reads only the name, the level, and the window off the model, all of which the
+		// filled bag already holds; the request object is as throwaway here as it is in a request.
+		model: resolvedModel(modelState),
 		// The same merge `Agent.getApprovals` performs: the workspace's defaults with the session's own
 		// recorded choices over them. Neither half is optional, or the header's toggles would show a
 		// gate the live session does not have.
@@ -194,7 +204,7 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
  * handlers need the session they belong to, and the object itself.
  */
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
-	const { workspace, settingsManager, model, registry, agentsMd, recordedTools } = await assemble(options);
+	const { workspace, settingsManager, modelState, registry, agentsMd, recordedTools } = await assemble(options);
 	const hooks = createHooks();
 
 	const config: AgentConfig = {
@@ -218,7 +228,7 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 				approvalTools: approvalToolsOf(approvals),
 				agentsMd,
 			}),
-		model,
+		modelState,
 	};
 
 	const session = new Agent(config);
@@ -269,8 +279,7 @@ function recordedRefOf(model: { name: string; modelId: string } | undefined): st
  * caller answers with the placeholder rather than throwing, because a session has to be buildable for
  * the window to open far enough to say what is missing.
  */
-function selectModel(models: ModelSource, ref: string | undefined): ModelConfig | undefined {
-	const rows = models.list();
+function selectModel(rows: readonly ModelConfig[], ref: string | undefined): ModelConfig | undefined {
 	const name = ref?.split("/")[0];
 	if (name !== undefined) {
 		const named = rows.find((row) => row.name === name);

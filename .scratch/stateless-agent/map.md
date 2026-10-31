@@ -33,6 +33,7 @@ packages/core、server、loop 落地「无状态服务 + 纯数据状态」重�
 - [07 ADR——无状态会话架构与重启式审批](issues/07-adr.md):已落 `docs/adr/0006-stateless-session-architecture.md`,正式重开现状决定并声明不触碰 0001/0003/0005。
 - [08 SessionManager 无状态化](issues/08-session-manager-stateless.md):`SessionState` 纯数据接口 + 全操作首参收状态的文件级函数 + `fillSession` 重放入口落地;`SessionManager` 收成一行委托的薄壳门面,调用方零改动,票 13/14/16 迁移。
 - [09 SettingsManager 无状态化](issues/09-settings-manager-stateless.md):`SettingsState` 纯数据接口(每工作区一份,hub 缓存共享引用)+ 全操作首参收状态的文件级函数 + `fillSettings` 补齐入口;`SettingsManager` 同收薄壳门面,调用方零改动,票 14/16 迁移。
+- [10 ModelManager 无状态化](issues/10-model-manager.md):`ModelState` 纯数据袋(种子 = 客户端 ModelSelection 原样)+ `fillModel(catalog, bag)` 每请求原地补齐(查不到名字即抛,编排层接)+ `resolvedModel` 现造薄请求对象;`Agent` 的 `recordSelection` 改读账本派生值,recorded* 缓存字段删除;catalog 仍是 hub 持有的 `ModelSource`,只作 fillModel 参数。
 
 ## Not yet specified
 

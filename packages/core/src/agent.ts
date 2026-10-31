@@ -35,10 +35,12 @@ import { clearableToolResultIds, isCacheProbablyExpired } from "./context/clear-
 import { spillOversizedToolResult } from "./context/spill.ts";
 import { boundToolContent, createHooks, type Hooks, type ToolResultContent } from "./hooks.ts";
 import {
-	applyRowToModel,
-	createModel,
 	type Model,
+	fillModel,
 	type ModelSource,
+	type ModelState,
+	normalizeThinkingLevel,
+	resolvedModel,
 	type ThinkingLevel,
 	thinkingLevelsFor,
 	unconfiguredStream,
@@ -138,14 +140,14 @@ export interface AgentConfig {
 	 */
 	approvalOverride?: Partial<Record<ToolApprovalKey, boolean>>;
 	/**
-	 * The model this session starts on, already carrying its thinking level.
+	 * The model this session starts on, as the seed the caller assembled.
 	 *
-	 * One object rather than a model and a level beside it, so there is no way for a session to be on
-	 * one row and asked at a level that belongs to another. The session mutates this object rather than
-	 * replacing it — see {@link Agent.adoptCurrentRow} — which is why the session never has to hand the
-	 * loop a new one.
+	 * A bag rather than a live model object: it holds the selection — the row's name and the level —
+	 * and nothing else is promised. The row's facts are laid in by `fillModel`, which assembly ran
+	 * once to make the bag readable and every request re-runs, so what a request is made with is as
+	 * fresh as the row is; the request object itself is built from the bag at send time and dropped.
 	 */
-	model: Model;
+	modelState: ModelState;
 }
 
 /** Called with the session's state whenever anything a reader can see has moved. */
@@ -395,17 +397,6 @@ export class Agent {
 	 * writes a `tool_config` entry into this session's transcript rather than onto the workspace.
 	 */
 	private approvalOverride: Partial<Record<ToolApprovalKey, boolean>>;
-	/**
-	 * What the transcript last says the session was using, so a move is recorded once.
-	 *
-	 * Kept here rather than read back from the file, which would be a scan of the whole branch before
-	 * every request. Undefined means the branch records nothing — a session that has never made a
-	 * request, or one that has just moved onto a branch where the first turn is still ahead — and then
-	 * the next request appends what it used rather than staying silent. Seeded by the constructor and
-	 * by {@link applyBranchSelection}, and advanced only by {@link recordSelection}.
-	 */
-	private recordedModelId: string | undefined;
-	private recordedThinkingLevel: ThinkingLevel | undefined;
 	private readonly listeners = new Set<SessionListener>();
 	private readonly eventListeners = new Set<SessionEventListener>();
 	private readonly pendingApprovals = new Map<string, PendingApprovalEntry>();
@@ -486,23 +477,24 @@ export class Agent {
 	/**
 	 * The one completion compaction makes: the session's own model, with the summary instructions.
 	 *
-	 * It goes over the same model object a turn does, so the summary carries the same key, endpoint,
-	 * and window as the conversation it summarizes rather than reaching for a second configuration —
-	 * and it is that object because the loop's own `prepareRequest` keeps it fresh from the row, not
-	 * because a key was fetched here.
+	 * It goes over the model a turn goes over — the bag, filled and built into a request object here —
+	 * so the summary carries the same key, endpoint, and window as the conversation it summarizes
+	 * rather than reaching for a second configuration.
 	 */
 	private readonly summarize: Summarize = async (request) => {
 		// The same absence a turn meets: a session with no row answers with the sentence that says what
 		// to add, rather than sending a summary request to a placeholder endpoint.
-		if (this.models.list().find((userModel) => userModel.name === this.model.name) === undefined) return unconfiguredStream(this.model).result();
+		if (this.models.list().find((userModel) => userModel.name === this.modelState.name) === undefined) {
+			return unconfiguredStream(this.requestModel()).result();
+		}
 		const messages: Message[] = [
 			{ role: "user", content: [{ type: "text", text: request.prompt }], timestamp: Date.now() },
 		];
-		return this.model
+		return this.requestModel()
 			.stream({ messages, system: createSystemMessage(request.systemPrompt) }, {
 				// The row's key, said here rather than only carried on the model: this is the one call
 				// that does not travel through the loop, and the loop is what copies the key into options.
-				apiKey: this.model.apiKey,
+				apiKey: this.modelState.apiKey,
 				maxTokens: request.maxTokens,
 				// A one-off summary is never sent again, so paying to cache it would buy nothing.
 				cacheRetention: "none",
@@ -510,8 +502,12 @@ export class Agent {
 			})
 			.result();
 	};
-	/** The one object a request is made with, mutated in place as the row behind it changes. */
-	private model: Model;
+	/**
+	 * The one object a request is made with, as a bag: the seed the caller assembled, plus whatever
+	 * the last fill laid in. The request object itself is built from it per request and dropped —
+	 * see {@link Agent.requestModel}.
+	 */
+	private readonly modelState: ModelState;
 
 	constructor(config: AgentConfig) {
 		this.workspace = config.workspace;
@@ -522,12 +518,12 @@ export class Agent {
 		this.promptBuilder = config.systemPrompt;
 		this.approvalOverride = config.approvalOverride ?? {};
 		this.hooks = config.hooks ?? createHooks();
-		this.model = config.model;
+		this.modelState = config.modelState;
 		this.base = config.api ?? anthropicMessages;
-		// The session's send policy is installed on the model it was handed. The loop is never told
-		// about it: it asks for a stream from whatever model it holds, and the model answers through
-		// this — so retries, and the "no row behind this model" answer, happen below everything that
-		// could report them.
+		// The session's send policy rides on every request object the bag builds — `requestModel`
+		// hands it over. The loop is never told about it: it asks for a stream from whatever model it
+		// holds, and the model answers through this — so retries, and the "no row behind this model"
+		// answer, happen below everything that could report them.
 		this.transport = {
 			stream: (model, context, options) => {
 				const outer = createAssistantMessageEventStream();
@@ -535,21 +531,16 @@ export class Agent {
 				// cannot be retried comes back as an error event on it rather than as a rejection out
 				// of the stream function (which the loop's contract forbids anyway).
 				//
-				// The loop hands back the object this session built — `runLoop` is seeded with
-				// `this.model` and `prepareRequest` returns it every turn — so the assertion only
-				// restores the type `ChatTransport` widens to in order to stay usable by any model.
+				// The loop hands back the object this session built — the run is seeded with a request
+				// object from the bag and `prepareRequest` returns a fresh one every turn — so the
+				// assertion only restores the type `ChatTransport` widens to in order to stay usable by
+				// any model.
 				void this.pumpAttempts(outer, model as Model, context, options);
 				return outer;
 			},
 		};
-		this.model.transport = this.transport;
-		// What the branch already says, so the first request appends only what is missing. A session that
-		// reopens on the same row and level has moved nowhere and writes nothing; one whose branch records
-		// neither — a session that has never spoken — writes both, because what it is about to use is a
-		// fact the file does not have yet.
-		const recorded = config.sessionManager.getRecordedSettings();
-		this.recordedModelId = recorded.model?.modelId;
-		this.recordedThinkingLevel = recorded.thinkingLevel as ThinkingLevel | undefined;
+		// What the branch already says is not cached here: `recordSelection` reads it from the ledger
+		// each time it decides, so the baseline cannot drift from what the file holds.
 
 		this.loop = new Loop({
 			// The one thing the engine needs to know about a model: how it answers. A function rather
@@ -596,7 +587,9 @@ export class Agent {
 			// wraps the summary in tags — so the transcript goes to the provider as it is.
 			const conversation = messages.filter((message) => message.role !== "system");
 			return {
-				model: this.model,
+				// Built here, from the bag this request just filled: run-local, used for the one request,
+				// dropped.
+				model: this.requestModel(),
 				context: {
 					...context,
 					messages: system === undefined ? conversation : [system, ...conversation],
@@ -610,27 +603,39 @@ export class Agent {
 	}
 
 	/**
-	 * Point the session at the live row it names, if that row still exists.
+	 * The run-local request object the session's bag is sent with: the bag as it stands, built into a
+	 * `Model`, used for one read or one request and dropped. Every reader of the bag's facts — the
+	 * snapshot, the usage meter, the compaction summary, the loop's seed — goes through here, so there
+	 * is exactly one place that turns state into a request.
+	 */
+	private requestModel(): Model {
+		return resolvedModel(this.modelState, this.transport);
+	}
+
+	/**
+	 * Lay the live row the bag names over the bag, if that row still exists.
 	 *
 	 * A row is the user's to edit, so this runs before every request: the key, the endpoint, the wire
 	 * id, the window, and the compat overrides are all read fresh, which is what `Model.apiKey` and
-	 * `Model.compat` riding on the model depend on. It moves the loop's state with it, so the level,
-	 * the context meter, and the reported ref are about the model the request is actually made with.
+	 * `Model.compat` riding on the request object depend on. The fill is `fillModel` — idempotent, in
+	 * place — so a corrected key, a moved endpoint and a resized window all reach the next request
+	 * with nothing rebuilt, and the level, the context meter, and the reported ref are about the model
+	 * the request is actually made with.
 	 *
-	 * The level the session is on is carried across rather than taken from the row: the row says which
-	 * endpoint answers, and the session is the one that chose how hard to ask.
+	 * A row that is gone — deleted, or renamed under a session that was using it — leaves the bag as it
+	 * last was, and `unconfiguredStream` is what answers for that, in the transport where the "no row"
+	 * answer has always lived.
 	 *
 	 * Nothing is recorded here: {@link recordSelection} does that once the model is final, because a row
 	 * read mid-flight is not yet what the request went out with.
 	 */
 	private adoptCurrentRow(): void {
-		const userModel = this.models.list().find((userModel) => userModel.name === this.model.name);
-		if (userModel === undefined) return;
-
-		// Re-derived in place rather than rebuilt: the object is the one the loop has, so the fields the
-		// next request reads are the row's current ones without a new object having to be threaded
-		// through a run that is already going.
-		applyRowToModel(this.model, userModel, this.model.thinkingLevel);
+		try {
+			fillModel(this.models.list(), this.modelState);
+		} catch {
+			// No row answers the name any more. The bag keeps what it last had, which is never sent: the
+			// transport's own lookup answers `unconfiguredStream` first.
+		}
 	}
 
 	/**
@@ -639,21 +644,22 @@ export class Agent {
 	 * The model and the level are recorded here rather than where the user chose them, because these
 	 * entries are the transcript's account of what answered a turn: a row the user picked and never
 	 * sent with answered nothing, and a level that was never asked at was never in force. Both guards
-	 * key on what the branch already says, so a run of turns on one selection costs one entry.
+	 * key on what the branch already says — read from the ledger, not cached on the session, so the
+	 * baseline is the file's own and cannot drift from it — so a run of turns on one selection costs
+	 * one entry.
 	 *
 	 * Only the wire id moves a `model_change`: a rename is the same model under another name, and the
 	 * refs built from the old name are already accounted for as a rename.
 	 */
 	private recordSelection(): void {
-		if (this.model.id !== this.recordedModelId) {
-			const entryId = this.sessionManager.appendModelChange(this.model.name, this.model.id);
-			this.recordedModelId = this.model.id;
+		const recorded = this.sessionManager.getRecordedSettings();
+		if (this.modelState.id !== recorded.model?.modelId) {
+			const entryId = this.sessionManager.appendModelChange(this.modelState.name!, this.modelState.id!);
 			this.emit({ type: "entry_appended", entryId, kind: "model_change" });
 		}
 		const level = this.thinkingLevel as ThinkingLevel;
-		if (level !== this.recordedThinkingLevel) {
+		if (level !== recorded.thinkingLevel) {
 			const entryId = this.sessionManager.appendThinkingLevelChange(level);
-			this.recordedThinkingLevel = level;
 			this.emit({ type: "entry_appended", entryId, kind: "thinking_level_change" });
 		}
 	}
@@ -667,18 +673,19 @@ export class Agent {
 	 * is assembly's — the branch's recorded level, else nothing asked for — so a move and a reopen
 	 * of the same file land in the same place.
 	 *
-	 * What the branch says also becomes the new baseline for {@link recordSelection}, which is what
-	 * keeps a move from being recorded twice: an entry the branch already holds is not a move, and one
-	 * it does not hold still is.
+	 * The branch's choices are the seed now, and the row's facts reach the bag with the same fill a
+	 * request would run, so a snapshot taken before the next request already reads the branch's model.
+	 * There is no baseline to update: {@link recordSelection} reads what the branch says each time,
+	 * which is what keeps a move from being recorded twice.
 	 */
 	private applyBranchSelection(): void {
 		const recorded = this.sessionManager.getRecordedSettings();
-		const userModel = this.models.list().find((userModel) => userModel.name === (recorded.model?.name ?? this.model.name));
+		const userModel = this.models.list().find((userModel) => userModel.name === (recorded.model?.name ?? this.modelState.name));
 		if (userModel !== undefined) {
-			applyRowToModel(this.model, userModel, recorded.thinkingLevel);
+			this.modelState.name = userModel.name;
+			this.modelState.thinkingLevel = recorded.thinkingLevel ?? this.modelState.thinkingLevel;
+			fillModel(this.models.list(), this.modelState);
 		}
-		this.recordedModelId = recorded.model?.modelId;
-		this.recordedThinkingLevel = recorded.thinkingLevel as ThinkingLevel | undefined;
 	}
 
 	/**
@@ -798,12 +805,12 @@ export class Agent {
 
 	/** The row's name the session is on, which a config patch and the picker both name it by. */
 	get modelName(): string {
-		return this.model.name;
+		return this.modelState.name!;
 	}
 
-	/** The level this session is asked at, read off the model it is on. */
+	/** The level this session is asked at, read off the seed and normalized. */
 	get thinkingLevel(): string {
-		return this.model.thinkingLevel ?? "off";
+		return normalizeThinkingLevel(this.modelState.thinkingLevel);
 	}
 
 	/** The levels the current model can be asked at, in the order the picker shows them. */
@@ -883,7 +890,7 @@ export class Agent {
 		return sessionSnapshot({
 			sessionManager: this.sessionManager,
 			absWorkspaceRoot: this.workspace.absRoot,
-			model: this.model,
+			model: this.requestModel(),
 			approvals: this.getApprovals(),
 			allTools: this.tools.all().map((tool) => tool.name),
 			activeTools: this.tools.activeNames(),
@@ -901,7 +908,7 @@ export class Agent {
 
 	/** Usage summed over the transcript, with the window it is measured against. */
 	get usage(): UsageTotals {
-		return sessionUsage(this.sessionManager, this.model.contextWindow);
+		return sessionUsage(this.sessionManager, this.requestModel().contextWindow);
 	}
 
 	/**
@@ -978,7 +985,9 @@ export class Agent {
 				{ messages: this.transcript(), tools: this.tools.active() },
 				message,
 				{
-					model: this.model,
+					// A request object from the bag as it stands; `prepareRequest` fills the bag and hands
+					// back a fresh one before anything is sent.
+					model: this.requestModel(),
 					getSteeringMessages: async () => this.steeringQueue.drain(),
 					getFollowUpMessages: async () => this.followUpQueue.drain(),
 				},
@@ -1137,13 +1146,14 @@ export class Agent {
 		const userModel = this.models.list().find((userModel) => userModel.name === name);
 		if (userModel === undefined) throw new Error(`Unknown model: ${name}`);
 
-		// A level named without a model is the caller's choice on the row already in force; a model
-		// named without one keeps the level the session is on, which is the pair the composer is
-		// showing. Either way the pair is built once, so the two halves are never half-applied.
-		const thinkingLevel = selection.thinkingLevel ?? this.model.thinkingLevel;
-		const candidate = createModel(userModel, thinkingLevel, this.transport);
+		// The seed is the client's selection, written as it arrived: the row's name, and the level the
+		// caller named or the one already in force. The row's facts are laid in with the same fill a
+		// request would run, so a snapshot taken before that request already reads the row it names —
+		// and the per-request fill re-derives all of it, so an edit between the two still wins.
+		this.modelState.name = userModel.name;
+		this.modelState.thinkingLevel = selection.thinkingLevel ?? this.thinkingLevel;
+		fillModel(this.models.list(), this.modelState);
 
-		this.model = candidate;
 		this.publish();
 		this.emitConfigChanged({
 			...(this.modelName === previousName ? {} : { model: this.modelName }),
@@ -1263,7 +1273,8 @@ export class Agent {
 		now: number,
 		signal?: AbortSignal,
 	): Promise<readonly SessionEntry[]> {
-		const threshold = compactionThresholdFor(this.model.contextWindow);
+		const model = this.requestModel();
+		const threshold = compactionThresholdFor(model.contextWindow);
 		if (!shouldCompact(messagesOf(entries), threshold)) return entries;
 
 			const trimmed = this.trimRecordedArgs(entries);
@@ -1274,7 +1285,7 @@ export class Agent {
 
 			let outcome;
 			try {
-				outcome = await compactTranscript(cleared, this.model, this.summarize, signal);
+				outcome = await compactTranscript(cleared, model, this.summarize, signal);
 		} catch (error) {
 			// An abort is not a compaction failure: the run is ending, and the transcript simply keeps the
 			// history it already had. Anything else is worth saying out loud, because the next request may
