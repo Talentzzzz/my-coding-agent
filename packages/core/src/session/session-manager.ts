@@ -226,7 +226,7 @@ export type SessionEntry =
  * makes `generateId` collision-free. Iteration order is file order: it is filled by replaying the
  * JSONL in sequence, and appended to in the same order, so "the last line wins" needs no sort.
  */
-type SessionEntryMapById = Map<string, SessionEntry>;
+export type SessionEntryMapById = Map<string, SessionEntry>;
 
 /**
  * One line of the session's JSONL file, header included.
@@ -496,30 +496,6 @@ export function sessionEntryToContextMessages(entry: SessionEntry): Message[] {
 	return [];
 }
 
-/**
- * The entries that make up the current context, following the branch from the root to the leaf.
- *
- * Three decisions recorded as entries are applied here, and they are the only things that make this
- * differ from the raw branch: a compaction entry is a checkpoint — the newest one on the branch is
- * kept, the entries before the one it names are dropped, and everything from `firstKeptEntryId` on is
- * kept — a `clear_tool_result` entry names tool results whose text is cleared, and a `trim_tool_call_arg` entry names
- * assistant messages whose recorded tool-call arguments are shortened. Older compactions that happen
- * to fall inside the retained range are retained too; the newest one is what contributes the summary.
- *
- * Applying all three here is what keeps the request, the snapshot, and a resumed process on one
- * transcript: the file keeps every line, and every reader derives the same view from it.
- *
- * Deliberately module-private. It takes the store's own map and leaf, and a caller rebuilding those
- * from outside would have to reproduce `buildIndex`'s rules for the header and for a `leaf` record —
- * rules nothing in this signature promises. The way to read a transcript is `SessionManager`.
- */
-function buildContextEntries(
-	sessionEntryMapById: SessionEntryMapById,
-	leafId?: string | null,
-): SessionEntry[] {
-	return contextEntriesFromPath(buildSessionPath(sessionEntryMapById, leafId));
-}
-
 /** The three view decisions applied to one path, in the order compaction, trim, clear. */
 function contextEntriesFromPath(chain: SessionEntry[]): SessionEntry[] {
 	return applyClears(
@@ -582,26 +558,6 @@ function trimmedEntryIds(chain: SessionEntry[]): Set<string> {
 function applyTrims(entries: SessionEntry[], trimmed: ReadonlySet<string>): SessionEntry[] {
 	if (trimmed.size === 0) return entries;
 	return entries.map((entry) => (trimmed.has(entry.id) ? trimToolCallArgs(entry) : entry));
-}
-
-/**
- * Build the transcript the model is sent, from a branch of the entries.
- *
- * This is the one function that turns storage into a request, and it is why a resumed session and a
- * live one cannot drift: both go through here. The path is walked once and shared by the settings
- * read and the view, so asking for both costs one walk rather than two.
- *
- * Module-private for the reason {@link buildContextEntries} records; `SessionManager.buildSessionContext`
- * is the entry point.
- */
-function buildSessionContext(
-	sessionEntryMapById: SessionEntryMapById,
-	leafId?: string | null,
-): SessionContext {
-	const chain = buildSessionPath(sessionEntryMapById, leafId);
-	const { thinkingLevel, model } = getSessionContextSettings(chain);
-	const messages = contextEntriesFromPath(chain).flatMap(sessionEntryToContextMessages);
-	return { messages, thinkingLevel, model };
 }
 
 const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
@@ -1070,25 +1026,32 @@ function previewOfMessage(message: Message): string {
 }
 
 /**
- * The session store: an append-only tree of entries in one JSONL file.
+ * The pure-data state of one session's ledger: what the session operations read and write, and
+ * nothing else.
  *
- * Every entry carries an id and its parent's id, so the file reads as a tree and `leafId` is where the
- * conversation currently is. Appending creates a child of the leaf; {@link branch} moves the leaf to
- * an earlier entry — and records the move as a {@link LeafEntry}, so a fresh reader restores it — so a
- * new line of work continues from there without touching what was already written. A file is never
- * rewritten once it holds an entry, which is what lets an entry kind or a field this build does not
- * understand be carried through untouched.
+ * Every session operation is a file-level function taking a `SessionState` as its first parameter —
+ * there is no class holding this state between calls (the `SessionManager` class at the bottom of
+ * this file is a thin shell over these functions, kept only until every caller has moved onto the
+ * stateless form). The state is plain data on purpose: which function touches which field is visible
+ * in the signatures, and a test can construct a bare state and call any operation on it directly.
  *
- * Use {@link buildSessionContext} to get the messages a provider should be sent: it follows the branch
- * from root to leaf and folds in the newest compaction.
+ * The fields are what a JSONL file replays into. Every entry carries an id and its parent's id, so
+ * the file reads as a tree and `leafId` is where the conversation currently is. Appending creates a
+ * child of the leaf; {@link branch} moves the leaf to an earlier entry — and records the move as a
+ * {@link LeafEntry}, so a fresh reader restores it — so a new line of work continues from there
+ * without touching what was already written. A file is never rewritten once it holds an entry, which
+ * is what lets an entry kind or a field this build does not understand be carried through untouched.
+ *
+ * Use {@link buildSessionContext} to get the messages a provider should be sent: it follows the
+ * branch from root to leaf and folds in the newest compaction.
  */
-export class SessionManager {
-	private sessionId = "";
-	private absSessionFile: string | undefined;
+export interface SessionState {
+	sessionId: string;
+	absSessionFile?: string;
 	/** The session directory, absolute; null for a session that is never written. */
-	private absSessionDir: string | null;
-	private absCwd: string;
-	private persist: boolean;
+	absSessionDir: string | null;
+	absCwd: string;
+	persist: boolean;
 	/**
 	 * True once this session's file exists and holds the log as of the last write.
 	 *
@@ -1096,682 +1059,895 @@ export class SessionManager {
 	 * entry worth keeping creates the file and writes the whole log; true means appends go straight
 	 * to disk. See {@link persistEntry}.
 	 */
-	private fileCreated = false;
-	private jsonlEntries: JsonlEntry[] = [];
-	private readonly sessionEntryMapById: SessionEntryMapById = new Map();
-	private leafId: string | null = null;
+	fileCreated: boolean;
+	jsonlEntries: JsonlEntry[];
+	sessionEntryMapById: SessionEntryMapById;
+	leafId: string | null;
+}
 
-	private constructor(
-		cwdInput: string,
-		sessionDirInput: string | null,
-		sessionFile: string | undefined,
-		persist: boolean,
-		parentSessionFile?: string,
-	) {
-		this.absCwd = resolvePath(cwdInput);
-		this.absSessionDir = sessionDirInput === null ? null : normalizePath(sessionDirInput);
-		this.persist = persist;
-		if (persist && this.absSessionDir !== null && !existsSync(this.absSessionDir)) {
-			mkdirSync(this.absSessionDir, { recursive: true });
-		}
+/**
+ * A state for a new session under `sessionDirInput` (default: the workspace's own directory), ready
+ * for the first append.
+ *
+ * The session *directory* may be created here, but no file is: the file appears with the first entry
+ * worth keeping — the gate in {@link persistEntry} (`hasConversation`) — so a session nobody has
+ * spoken in leaves no transcript on disk and no row in the sidebar. That is the whole point of
+ * building the state rather than writing a header: the store is a record of conversations, and a
+ * conversation with no message in it is not one yet.
+ *
+ * The cost is the id's addressability until that first message: {@link findSessionFilePathById} reads
+ * header files, so an id with no file cannot be found there. A caller that hands the id out and has
+ * to answer for it later therefore holds the state (or the `SessionManager` shell around it) for the
+ * length of that window — `SessionHub` holds it for the length of that window.
+ */
+export function createSessionState(
+	cwdInput: string,
+	sessionDirInput?: string,
+	parentSessionFileInput?: string,
+): SessionState {
+	const absDir = sessionDirInput ? normalizePath(sessionDirInput) : workspaceDir(cwdInput);
+	if (!existsSync(absDir)) mkdirSync(absDir, { recursive: true });
+	const s: SessionState = {
+		sessionId: "",
+		absSessionDir: absDir,
+		absCwd: resolvePath(cwdInput),
+		persist: true,
+		fileCreated: false,
+		jsonlEntries: [],
+		sessionEntryMapById: new Map(),
+		leafId: null,
+	};
+	newSession(s, parentSessionFileInput);
+	return s;
+}
 
-		if (sessionFile) {
-			this.loadSessionFile(sessionFile);
+/** A state for a session that is never written to disk. */
+export function inMemorySessionState(cwdInput: string = process.cwd(), parentSessionFileInput?: string): SessionState {
+	const s: SessionState = {
+		sessionId: "",
+		absSessionDir: null,
+		absCwd: resolvePath(cwdInput),
+		persist: false,
+		fileCreated: false,
+		jsonlEntries: [],
+		sessionEntryMapById: new Map(),
+		leafId: null,
+	};
+	newSession(s, parentSessionFileInput);
+	return s;
+}
+
+/**
+ * Replay a session file into a fresh {@link SessionState}: the one entry point that turns a path on
+ * disk into the state the session operations work on.
+ *
+ * This is the combination the old loader spread over three private methods — read the whole JSONL,
+ * find the header, index the entries by id, place the leaf — collapsed into one function, so a
+ * caller that rebuilds a session per request (the state is transient: built here, discarded when the
+ * request ends; appends hit the disk as they happen) has exactly one way to do it and cannot skip
+ * the rules the index is built by. A file this build cannot read is refused, never overwritten.
+ */
+export function fillSession(absFilePath: string): SessionState {
+	const absPath = resolvePath(absFilePath);
+	if (!existsSync(absPath)) throw new Error(`Session file does not exist: ${absPath}`);
+	const entries = loadJsonlEntries(absPath);
+	if (entries.length === 0) {
+		throw new Error(`Session file is not a valid ${APP_NAME} session: ${absPath}`);
+	}
+	// loadJsonlEntries refuses a file whose first entry is not the header, so this finds one.
+	const header = entries.find(isSessionHeader);
+	if (header === undefined) throw new Error(`Session file has no header: ${absPath}`);
+	const s: SessionState = {
+		sessionId: header.id,
+		absSessionFile: absPath,
+		absSessionDir: dirname(absPath),
+		absCwd: getSessionHeaderCwd(header) ?? process.cwd(),
+		persist: true,
+		fileCreated: true,
+		jsonlEntries: entries,
+		sessionEntryMapById: new Map(),
+		leafId: null,
+	};
+	buildIndex(s);
+	return s;
+}
+
+/**
+ * Start a fresh session in `s`, discarding whatever it held. Returns the file path.
+ *
+ * `parentSessionFile` is the absolute path of the session this one descends from — a fork's
+ * source, or a subagent's parent — and it lands on the header as `parentSession`. Undefined means
+ * a root session. A relative path is resolved here against the process's cwd, which is the same
+ * base a listing uses when it matches parent to child; recording it as given would let the two
+ * sides disagree the moment the process ran somewhere else.
+ */
+export function newSession(s: SessionState, parentSessionFile?: string): string | undefined {
+	s.sessionId = createSessionId();
+	const timestamp = new Date().toISOString();
+	const header: SessionHeader = {
+		type: "SessionHeader",
+		version: CURRENT_SESSION_VERSION,
+		id: s.sessionId,
+		timestamp,
+		cwd: s.absCwd,
+		...(parentSessionFile === undefined ? {} : { parentSession: resolvePath(parentSessionFile) }),
+	};
+	s.jsonlEntries = [header];
+	s.sessionEntryMapById.clear();
+	s.leafId = null;
+	s.fileCreated = false;
+
+	const dir = s.absSessionDir;
+	if (s.persist && dir !== null) s.absSessionFile = sessionPath(dir, s.sessionId, timestamp);
+	return s.absSessionFile;
+}
+
+/** Index `s`'s entries by id and place the leaf, in file order. */
+function buildIndex(s: SessionState): void {
+	s.sessionEntryMapById.clear();
+	s.leafId = null;
+	for (const entry of s.jsonlEntries) {
+		if (isSessionHeader(entry)) continue;
+		s.sessionEntryMapById.set(entry.id, entry);
+		if (entry.type === "leaf") {
+			// The record names where the conversation went; every other kind *is* where it went, by
+			// having been appended. File order is the last word, so a later entry of any kind
+			// supersedes what an earlier record said, the way an old `model_change` expires. A
+			// recorded null is a position of its own — "before the first entry" — and only a target
+			// the file does not hold (only a hand-edited file can manage that) falls back to the
+			// record's own tree position, the same family of answer `buildSessionPath` gives an
+			// unknown id.
+			s.leafId = entry.leafId === null || s.sessionEntryMapById.has(entry.leafId) ? entry.leafId : (entry.parentId ?? null);
 		} else {
-			this.newSession(parentSessionFile);
+			s.leafId = entry.id;
 		}
 	}
+}
 
-	/** Take over an existing session file. A file this build cannot read is refused, never overwritten. */
-	private loadSessionFile(sessionFile: string): void {
-		this.absSessionFile = resolvePath(sessionFile);
-		const entries = loadJsonlEntries(this.absSessionFile);
-		if (entries.length === 0) {
-			throw new Error(`Session file is not a valid ${APP_NAME} session: ${this.absSessionFile}`);
+/** True once the session holds a user or assistant message, which is what makes it worth keeping. */
+function hasConversation(s: SessionState): boolean {
+	return s.jsonlEntries.some(
+		(entry) => entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant"),
+	);
+}
+
+/**
+ * Write one entry to disk, or hold it back when the file does not exist yet.
+ *
+ * The gate is deliberate: a session earns its file with its first message (`hasConversation`), so a
+ * session nobody has spoken in never lands on disk. The first write that passes the gate creates the
+ * file and writes the whole log at once — the header and every entry so far — because the file was
+ * not there to have received them; from then on (`fileCreated`) each entry appends by itself.
+ */
+export function persistEntry(s: SessionState, entry: SessionEntry): void {
+	if (!s.persist || !s.absSessionFile) return;
+
+	if (!s.fileCreated) {
+		if (!hasConversation(s)) return;
+		const fd = openSync(s.absSessionFile, "wx");
+		try {
+			for (const existing of s.jsonlEntries) writeFileSync(fd, `${JSON.stringify(existing)}\n`);
+		} finally {
+			closeSync(fd);
 		}
-		this.loadEntries(entries);
-		this.fileCreated = true;
+		s.fileCreated = true;
+		return;
 	}
 
-	/**
-	 * Start a fresh session in this manager, discarding whatever it held. Returns the file path.
-	 *
-	 * `parentSessionFile` is the absolute path of the session this one descends from — a fork's
-	 * source, or a subagent's parent — and it lands on the header as `parentSession`. Undefined means
-	 * a root session. A relative path is resolved here against the process's cwd, which is the same
-	 * base a listing uses when it matches parent to child; recording it as given would let the two
-	 * sides disagree the moment the process ran somewhere else.
-	 */
-	newSession(parentSessionFile?: string): string | undefined {
-		this.sessionId = createSessionId();
-		const timestamp = new Date().toISOString();
-		const header: SessionHeader = {
-			type: "SessionHeader",
-			version: CURRENT_SESSION_VERSION,
-			id: this.sessionId,
-			timestamp,
-			cwd: this.absCwd,
-			...(parentSessionFile === undefined ? {} : { parentSession: resolvePath(parentSessionFile) }),
-		};
-		this.jsonlEntries = [header];
-		this.sessionEntryMapById.clear();
-		this.leafId = null;
-		this.fileCreated = false;
+	appendFileSync(s.absSessionFile, `${JSON.stringify(entry)}\n`);
+}
 
-		const dir = this.getAbsSessionDir();
-		if (this.persist && dir !== null) this.absSessionFile = sessionPath(dir, this.sessionId, timestamp);
-		return this.absSessionFile;
+/** Add `entry` to the log as the new leaf, in memory and on disk. */
+function appendEntry(s: SessionState, entry: SessionEntry): void {
+	s.jsonlEntries.push(entry);
+	s.sessionEntryMapById.set(entry.id, entry);
+	s.leafId = entry.id;
+	persistEntry(s, entry);
+}
+
+/**
+ * Append a message as a child of the leaf and advance the leaf. Returns the new entry's id.
+ *
+ * A compaction summary is deliberately not accepted here: it has to be a top-level entry so that
+ * {@link buildContextEntries} can find it, which is what {@link appendCompaction} is for.
+ */
+export function appendMessage(s: SessionState, message: Message): string {
+	const entry: MessageEntry = {
+		type: "message",
+		id: generateId(s.sessionEntryMapById),
+		parentId: s.leafId,
+		timestamp: new Date().toISOString(),
+		message,
+	};
+	appendEntry(s, entry);
+	return entry.id;
+}
+
+export function appendThinkingLevelChange(s: SessionState, thinkingLevel: string): string {
+	const entry: ThinkingLevelChangeEntry = {
+		type: "thinking_level_change",
+		id: generateId(s.sessionEntryMapById),
+		parentId: s.leafId,
+		timestamp: new Date().toISOString(),
+		thinkingLevel,
+	};
+	appendEntry(s, entry);
+	return entry.id;
+}
+
+export function appendModelChange(s: SessionState, name: string, modelId: string): string {
+	const entry: ModelChangeEntry = {
+		type: "model_change",
+		id: generateId(s.sessionEntryMapById),
+		parentId: s.leafId,
+		timestamp: new Date().toISOString(),
+		name,
+		modelId,
+	};
+	appendEntry(s, entry);
+	return entry.id;
+}
+
+/**
+ * Record the session's tool choices: the active set and the approval map, both whole.
+ *
+ * A snapshot rather than a delta, because the reader replays the branch and takes the last entry —
+ * the same contract as `model_change`, which also records the value, not the move. Both maps are
+ * always present, so one entry written for a tool change carries the approval set along and the
+ * other way round.
+ */
+export function appendToolConfig(s: SessionState, activeTools: string[], approval: Record<ToolApprovalKey, boolean>): string {
+	const entry: ToolConfigEntry = {
+		type: "tool_config",
+		id: generateId(s.sessionEntryMapById),
+		parentId: s.leafId,
+		timestamp: new Date().toISOString(),
+		activeTools: [...activeTools],
+		approval: { ...approval },
+	};
+	appendEntry(s, entry);
+	return entry.id;
+}
+
+/**
+ * Record the conversation's own name, over the derived one.
+ *
+ * The title is expected already shortened — the endpoint that takes a user's typing applies
+ * {@link shortenTitle} before it gets here, so what lands in the file is what a row shows. Like
+ * every state entry this one is not transcript: it reaches no message, and a reader takes the
+ * last one in file order, whichever way the branch points.
+ */
+export function appendRename(s: SessionState, title: string): string {
+	const entry: RenameEntry = {
+		type: "rename",
+		id: generateId(s.sessionEntryMapById),
+		parentId: s.leafId,
+		timestamp: new Date().toISOString(),
+		title,
+	};
+	appendEntry(s, entry);
+	return entry.id;
+}
+
+/**
+ * Record spend that owns no message entry, attributed to `operation` on `model`.
+ *
+ * The whole spend travels in one entry, summed by the writer — a delegation runs many requests on
+ * its own transcript, and this file wants the total, not the receipt list. Zero-usage records are
+ * the caller's to skip: an entry costs a line, and a spend of nothing is not a fact worth one.
+ */
+export function appendUsage(s: SessionState, operation: string, model: string, usage: Usage): string {
+	const entry: UsageEntry = {
+		type: "usage",
+		id: generateId(s.sessionEntryMapById),
+		parentId: s.leafId,
+		timestamp: new Date().toISOString(),
+		operation,
+		model,
+		usage,
+	};
+	appendEntry(s, entry);
+	return entry.id;
+}
+
+/**
+ * Record a compaction checkpoint: everything up to `firstKeptEntryId` is replaced by `summary`.
+ *
+ * `firstKeptEntryId` of null means this compaction keeps no earlier entry, so the checkpoint is the
+ * whole remaining history and the entry points at itself.
+ */
+export function appendCompaction(
+	s: SessionState,
+	summary: string,
+	firstKeptEntryId: string | null,
+	tokensBefore: number,
+	usage?: Usage,
+): string {
+	const timestamp = new Date().toISOString();
+	const id = generateId(s.sessionEntryMapById);
+	const entry: CompactionEntry = {
+		type: "compaction",
+		id,
+		parentId: s.leafId,
+		timestamp,
+		summary,
+		firstKeptEntryId: firstKeptEntryId ?? id,
+		tokensBefore,
+		...(usage === undefined ? {} : { usage }),
+	};
+	appendEntry(s, entry);
+	return entry.id;
+}
+
+/**
+ * Record that tool results were cleared: the named entries keep their place in the file and lose
+ * their text in the view.
+ *
+ * Unlike a compaction there is nothing to hold back — the results are cleared precisely because a
+ * run can reproduce them — so the record is only the ids and what the clear was worth.
+ */
+export function appendClearToolResults(s: SessionState, clearedEntryIds: readonly string[], tokensBefore: number): string {
+	const entry: ClearToolResultEntry = {
+		type: "clear_tool_result",
+		id: generateId(s.sessionEntryMapById),
+		parentId: s.leafId,
+		timestamp: new Date().toISOString(),
+		clearedEntryIds: [...clearedEntryIds],
+		tokensBefore,
+	};
+	appendEntry(s, entry);
+	return entry.id;
+}
+
+/**
+ * Record that tool-call arguments were shortened: the named entries keep their place in the file
+ * and lose the heavy bodies of their arguments in the view.
+ *
+ * Like a clear, there is nothing to hold back — the arguments named belong to calls whose results
+ * are already on the branch — so the record is only the ids and what the trim was worth.
+ */
+export function appendTrimToolCallArgs(s: SessionState, trimmedEntryIds: readonly string[], tokensBefore: number): string {
+	const entry: TrimToolCallArgEntry = {
+		type: "trim_tool_call_arg",
+		id: generateId(s.sessionEntryMapById),
+		parentId: s.leafId,
+		timestamp: new Date().toISOString(),
+		trimmedEntryIds: [...trimmedEntryIds],
+		tokensBefore,
+	};
+	appendEntry(s, entry);
+	return entry.id;
+}
+
+// =========================================================================
+// Tree traversal
+// =========================================================================
+
+export function getLeafId(s: SessionState): string | null {
+	return s.leafId;
+}
+
+export function getLeafEntry(s: SessionState): SessionEntry | undefined {
+	return s.leafId ? s.sessionEntryMapById.get(s.leafId) : undefined;
+}
+
+export function getEntry(s: SessionState, id: string): SessionEntry | undefined {
+	return s.sessionEntryMapById.get(id);
+}
+
+/** Every entry that follows `parentId`, in file order. */
+export function getChildren(s: SessionState, parentId: string): SessionEntry[] {
+	const children: SessionEntry[] = [];
+	for (const entry of s.sessionEntryMapById.values()) {
+		if (entry.parentId === parentId) children.push(entry);
 	}
+	return children;
+}
 
-	private loadEntries(entries: JsonlEntry[]): void {
-		// loadJsonlEntries refuses a file whose first entry is not the header, so this finds one.
-		const header = entries.find(isSessionHeader);
-		if (header === undefined) throw new Error(`Session file has no header: ${this.absSessionFile}`);
-		this.jsonlEntries = entries;
-		this.sessionId = header.id;
-		this.buildIndex();
+/**
+ * The branch points of the log, in file order.
+ *
+ * A child counts as an alternative only when a message is reachable through it: this format carries
+ * state entries too — a model change, a tool config, a tool-result clear, a compaction, a leaf record — and a
+ * conversation cannot be resumed at one of those, so counting them would offer an empty
+ * alternative. A state entry in front of a message is descended through for the same reason:
+ * rewinding, switching the model, and asking again is one alternative, not two.
+ *
+ * The walk covers **every** entry rather than only the active chain's, which is what makes the tree
+ * a property of the conversation instead of of the leaf's current position: rewind to the first
+ * question and the forks further down are still there to draw, where a chain-relative report would
+ * quietly drop them — a page that forgets half the tree the moment the leaf moves. `options[].active`
+ * is what stays chain-relative, and it is the only thing that should be.
+ *
+ * File order is also the order a client can fold the points in: a point's `anchor` is one of its
+ * own ancestors, and an entry is never written before its parent, so the card a point hangs under
+ * is always already placed when the point arrives.
+ */
+export function getBranchPoints(s: SessionState): BranchPoint[] {
+	const chain = getBranch(s);
+	const onChain = new Set(chain.map((entry) => entry.id));
+	const children = childrenIndex(s);
+	const memo = new Map<string, SubtreeDescription>();
+
+	// Pass one: which entries were carried on from in more than one way, and what each
+	// continuation amounts to. Nothing is placed yet — an anchor is only knowable once every point
+	// is known, because a card is either a user message on the line or an earlier point's option.
+	const forks: { entry: SessionEntry; options: BranchOption[] }[] = [];
+	for (const entry of s.sessionEntryMapById.values()) {
+		const options: BranchOption[] = [];
+		for (const child of children.get(entry.id) ?? []) {
+			const described = subtreeDescription(s, child.id, children, memo);
+			if (!described.message) continue;
+			options.push({
+				entryId: child.id,
+				label: described.label,
+				active: onChain.has(child.id),
+			});
+		}
+		if (options.length > 1) forks.push({ entry, options });
 	}
+	const forkIds = new Set(forks.map((fork) => fork.entry.id));
 
-	private buildIndex(): void {
-		this.sessionEntryMapById.clear();
-		this.leafId = null;
-		for (const entry of this.jsonlEntries) {
-			if (isSessionHeader(entry)) continue;
-			this.sessionEntryMapById.set(entry.id, entry);
-			if (entry.type === "leaf") {
-				// The record names where the conversation went; every other kind *is* where it went, by
-				// having been appended. File order is the last word, so a later entry of any kind
-				// supersedes what an earlier record said, the way an old `model_change` expires. A
-				// recorded null is a position of its own — "before the first entry" — and only a target
-				// the file does not hold (only a hand-edited file can manage that) falls back to the
-				// record's own tree position, the same family of answer `buildSessionPath` gives an
-				// unknown id.
-				this.leafId = entry.leafId === null || this.sessionEntryMapById.has(entry.leafId) ? entry.leafId : (entry.parentId ?? null);
-			} else {
-				this.leafId = entry.id;
+	/** True for an entry a window draws a card for: a question on the line, or a taken way. */
+	const isCard = (entry: SessionEntry): boolean => {
+		if (onChain.has(entry.id)) return entry.type === "message" && entry.message.role === "user";
+		// Off the line, only a fork's own continuation becomes a card. An on-chain entry is
+		// excluded above rather than here: the chain's own continuation is drawn as the line's
+		// next card, and stopping a descent at it would name a card that does not exist.
+		return entry.parentId !== null && forkIds.has(entry.parentId);
+	};
+
+	/** The nearest card at or above `entryId`, or undefined for a point nothing can host. */
+	const anchorOf = (entryId: string): string | undefined => {
+		let current: SessionEntry | undefined = s.sessionEntryMapById.get(entryId);
+		while (current !== undefined) {
+			if (isCard(current)) return current.id;
+			current = current.parentId === null ? undefined : s.sessionEntryMapById.get(current.parentId);
+		}
+		return undefined;
+	};
+
+	const prompts = new Map<string, string>();
+	/** The nearest question at or above `entryId`, walked up the entry's own parent links. */
+	const nearestPrompt = (entryId: string): string => {
+		const cached = prompts.get(entryId);
+		if (cached !== undefined) return cached;
+		// Seeded before the descent for the same reason `subtreeDescription` seeds its memo: a file
+		// hand-edited into a cycle has to end the walk rather than spin.
+		prompts.set(entryId, "");
+		const entry = s.sessionEntryMapById.get(entryId);
+		let prompt = "";
+		if (entry !== undefined) {
+			const own = entry.type === "message" ? previewOfMessage(entry.message) : "";
+			if (entry.type === "message" && entry.message.role === "user" && own.length > 0) {
+				prompt = own;
+			} else if (entry.parentId !== null) {
+				prompt = nearestPrompt(entry.parentId);
 			}
 		}
+		prompts.set(entryId, prompt);
+		return prompt;
+	};
+
+	// Pass two: the points, each with the card its alternatives hang under. A point no card can
+	// host keeps its own id, which the client has no card for — dropped there rather than drawn in
+	// a place it does not belong.
+	return forks.map((fork) => ({
+		entryId: fork.entry.id,
+		anchor: anchorOf(fork.entry.id) ?? fork.entry.id,
+		prompt: nearestPrompt(fork.entry.id),
+		options: fork.options,
+	}));
+}
+
+/**
+ * The newest tip of the subtree `entryId` roots: where that line of work would be resumed.
+ *
+ * The descent follows the last child written at each step, over every entry kind, because a branch
+ * whose last entry is a compaction or a model change stopped there too.
+ */
+export function getBranchTip(s: SessionState, entryId: string): string {
+	if (!s.sessionEntryMapById.has(entryId)) throw new Error(`Entry ${entryId} not found`);
+	return subtreeDescription(s, entryId, childrenIndex(s), new Map()).tip;
+}
+
+/** Every entry's children, in file order, built in one pass over the log. */
+function childrenIndex(s: SessionState): Map<string, SessionEntry[]> {
+	const index = new Map<string, SessionEntry[]>();
+	for (const entry of s.sessionEntryMapById.values()) {
+		if (entry.parentId === null) continue;
+		const siblings = index.get(entry.parentId);
+		if (siblings === undefined) index.set(entry.parentId, [entry]);
+		else siblings.push(entry);
+	}
+	return index;
+}
+
+/**
+ * What an alternative amounts to: where the subtree below `entryId` ends, and how to label it.
+ *
+ * Memoized per entry, so one call describes the whole log once however many branch points ask.
+ */
+function subtreeDescription(
+	s: SessionState,
+	entryId: string,
+	children: Map<string, SessionEntry[]>,
+	memo: Map<string, SubtreeDescription>,
+): SubtreeDescription {
+	const cached = memo.get(entryId);
+	if (cached !== undefined) return cached;
+	// Seeded before the descent: this is what a file hand-edited into a cycle finds when it comes
+	// back around, so the walk ends there instead of spinning.
+	memo.set(entryId, { tip: entryId, message: false, label: "" });
+
+	const entry = s.sessionEntryMapById.get(entryId);
+	const descents = (children.get(entryId) ?? []).map((child) =>
+		subtreeDescription(s, child.id, children, memo),
+	);
+	const own = entry?.type === "message" ? previewOfMessage(entry.message) : undefined;
+	let label = own ?? "";
+	let message = own !== undefined;
+	if (!message) {
+		const below = descents.find((descent) => descent.message);
+		if (below !== undefined) {
+			message = true;
+			label = below.label;
+		}
+	}
+	const described: SubtreeDescription = {
+		// The newest child is the last written, and the file is in write order.
+		tip: descents.length === 0 ? entryId : descents[descents.length - 1]!.tip,
+		message,
+		label,
+	};
+	memo.set(entryId, described);
+	return described;
+}
+
+/**
+ * Walk from `fromId` to the root, in path order, every entry kind included.
+ *
+ * This is the raw branch; {@link buildContextEntries} is the same walk with compaction applied, and
+ * is what a provider request is built from.
+ */
+export function getBranch(s: SessionState, fromId?: string): SessionEntry[] {
+	const path: SessionEntry[] = [];
+	const startId = fromId ?? s.leafId;
+	let current = startId ? s.sessionEntryMapById.get(startId) : undefined;
+	while (current) {
+		path.push(current);
+		current = current.parentId ? s.sessionEntryMapById.get(current.parentId) : undefined;
+	}
+	path.reverse();
+	return path;
+}
+
+/**
+ * The entries that make up the current context, following the branch from the root to the leaf.
+ *
+ * Three decisions recorded as entries are applied here, and they are the only things that make this
+ * differ from the raw branch: a compaction entry is a checkpoint — the newest one on the branch is
+ * kept, the entries before the one it names are dropped, and everything from `firstKeptEntryId` on is
+ * kept — a `clear_tool_result` entry names tool results whose text is cleared, and a `trim_tool_call_arg` entry names
+ * assistant messages whose recorded tool-call arguments are shortened. Older compactions that happen
+ * to fall inside the retained range are retained too; the newest one is what contributes the summary.
+ *
+ * Applying all three here is what keeps the request, the snapshot, and a resumed process on one
+ * transcript: the file keeps every line, and every reader derives the same view from it.
+ */
+export function buildContextEntries(s: SessionState): SessionEntry[] {
+	return contextEntriesFromPath(buildSessionPath(s.sessionEntryMapById, s.leafId));
+}
+
+/**
+ * Build the transcript the model is sent, from a branch of the entries.
+ *
+ * This is the one function that turns storage into a request, and it is why a resumed session and a
+ * live one cannot drift: both go through here. The path is walked once and shared by the settings
+ * read and the view, so asking for both costs one walk rather than two.
+ */
+export function buildSessionContext(s: SessionState): SessionContext {
+	const chain = buildSessionPath(s.sessionEntryMapById, s.leafId);
+	const { thinkingLevel, model } = getSessionContextSettings(chain);
+	const messages = contextEntriesFromPath(chain).flatMap(sessionEntryToContextMessages);
+	return { messages, thinkingLevel, model };
+}
+
+/**
+ * The model and thinking level the active branch was last set to, each undefined when it never was.
+ *
+ * {@link buildSessionContext} answers with those values and the defaults to run with. This is for a
+ * caller that has to tell "the session chose off" from "the session never chose" — assembly, which
+ * decides whether a stored value may override the settings file.
+ */
+export function getRecordedSettings(s: SessionState): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
+	const recorded: { model?: { name: string; modelId: string }; thinkingLevel?: string } = {};
+	for (const entry of getBranch(s)) {
+		if (entry.type === "thinking_level_change") recorded.thinkingLevel = entry.thinkingLevel;
+		else if (entry.type === "model_change") {
+			const name = modelChangeName(entry);
+			if (name !== undefined) recorded.model = { name, modelId: entry.modelId };
+		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			// Only ever a fallback, and a weak one: a message records the wire id it was answered by,
+			// not the row's identity, so this can only name a row the user left unnamed. See
+			// {@link getSessionContextSettings}.
+			recorded.model = { name: entry.message.model, modelId: entry.message.model };
+		}
+	}
+	return recorded;
+}
+
+/**
+ * The tool choices the active branch was last recorded with, each undefined when it never was.
+ *
+ * Undefined is meaningful and is what this exists to preserve: a session with no `tool_config`
+ * entry opens on the defaults, while one with an entry reopens exactly as its user left it. Like
+ * {@link getRecordedSettings}, this reads the branch, not the file, so a fork answers with the
+ * choices in force where it split off.
+ */
+export function getRecordedToolConfig(s: SessionState): { activeTools?: string[]; approval?: Record<ToolApprovalKey, boolean> } {
+	const recorded: { activeTools?: string[]; approval?: Record<ToolApprovalKey, boolean> } = {};
+	for (const entry of getBranch(s)) {
+		if (entry.type === "tool_config") {
+			recorded.activeTools = entry.activeTools;
+			recorded.approval = entry.approval;
+		}
+	}
+	return recorded;
+}
+
+/**
+ * The entry id behind each message in {@link buildSessionContext}'s list, in the same order.
+ *
+ * A compaction checkpoint produces messages that belong to no message entry, so those read as null.
+ * This is what a transcript needs to offer "fork from here" on a message it never watched being
+ * written.
+ */
+export function getContextMessageEntryIds(s: SessionState): (string | null)[] {
+	const ids: (string | null)[] = [];
+	for (const entry of buildContextEntries(s)) {
+		const produced = sessionEntryToContextMessages(entry).length;
+		for (let index = 0; index < produced; index++) ids.push(entry.type === "message" ? entry.id : null);
+	}
+	return ids;
+}
+
+export function getHeader(s: SessionState): SessionHeader | null {
+	return s.jsonlEntries.find(isSessionHeader) ?? null;
+}
+
+/** Number of entries, header aside, without copying them the way {@link getEntries} does. */
+export function getEntryCount(s: SessionState): number {
+	return s.sessionEntryMapById.size;
+}
+
+/** Every entry, header aside, in file order. Use the `append*` functions to add more. */
+export function getEntries(s: SessionState): SessionEntry[] {
+	return s.jsonlEntries.filter((entry): entry is SessionEntry => !isSessionHeader(entry));
+}
+
+/**
+ * The conversation's own name: a recorded rename if there is one, else the branch's first user
+ * message, else a placeholder.
+ *
+ * The rename is read in **file order**, not along the branch, and that is deliberate: the left
+ * column draws one row per session, not per way through it, so a name a person gave the session
+ * does not stop being theirs because the leaf moved. The branch walk below stays exactly as it
+ * was — it is the fallback, and summarizing the oldest turn away still cannot rename the session.
+ */
+export function getTitle(s: SessionState): string {
+	for (let index = s.jsonlEntries.length - 1; index >= 0; index--) {
+		const entry = s.jsonlEntries[index];
+		if (entry?.type === "rename") return entry.title;
+	}
+	return deriveTitle(getBranch(s).flatMap(sessionEntryToContextMessages));
+}
+
+// =========================================================================
+// Branching
+// =========================================================================
+
+/**
+ * Move the leaf to an earlier entry, so the next append starts a new branch from it.
+ *
+ * Nothing is modified or deleted: the entries after the old leaf are still in the file, still
+ * reachable by id, and are simply no longer on the active branch.
+ *
+ * A move that actually changes the position is recorded as one {@link LeafEntry}, which is what
+ * lets a process that reopens the file put the leaf back where the conversation went. The record
+ * is appended as a child of the leaf it leaves behind and does not advance it — the tree position
+ * says where the append happened, the `leafId` field says where the conversation went. Moving to
+ * the position already held writes nothing, the same guard `recordSelection` applies to its own
+ * entries: a run of no-op moves costs no file.
+ */
+export function branch(s: SessionState, branchFromId: string): void {
+	if (!s.sessionEntryMapById.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
+	if (s.leafId === branchFromId) return;
+	appendLeafRecord(s, branchFromId);
+	s.leafId = branchFromId;
+}
+
+/** Move the leaf before the first entry, so the next append becomes a new root. */
+export function resetLeaf(s: SessionState): void {
+	if (s.leafId === null) return;
+	appendLeafRecord(s, null);
+	s.leafId = null;
+}
+
+/**
+ * Write one leaf record as a child of the leaf it leaves behind, without moving the leaf.
+ *
+ * The caller sets {@link SessionState.leafId} right after: an append advances the leaf, and this one
+ * must not — the record's place in the tree and the position it reports are two facts, each with its
+ * own field.
+ */
+function appendLeafRecord(s: SessionState, leafId: string | null): void {
+	const entry: LeafEntry = {
+		type: "leaf",
+		id: generateId(s.sessionEntryMapById),
+		parentId: s.leafId,
+		timestamp: new Date().toISOString(),
+		leafId,
+	};
+	s.jsonlEntries.push(entry);
+	s.sessionEntryMapById.set(entry.id, entry);
+	persistEntry(s, entry);
+}
+
+/**
+ * The session shell: a per-session handle over one {@link SessionState}.
+ *
+ * Every method is a one-line delegation to the stateless operation of the same name, which carries
+ * the real logic and its documentation. This class is what callers hold until they have each moved
+ * onto the stateless form; it owns no logic and adds none.
+ */
+export class SessionManager {
+	private s: SessionState;
+
+	private constructor(s: SessionState) {
+		this.s = s;
 	}
 
 	isPersisted(): boolean {
-		return this.persist;
+		return this.s.persist;
 	}
 
 	getAbsCwd(): string {
-		return this.absCwd;
+		return this.s.absCwd;
 	}
 
 	/** The directory this session's file lives in, absolute, or null when it is never written. */
 	getAbsSessionDir(): string | null {
-		return this.absSessionDir;
+		return this.s.absSessionDir;
 	}
 
 	usesDefaultSessionDir(): boolean {
-		return this.absSessionDir !== null && this.absSessionDir === workspaceDir(this.absCwd);
+		return this.s.absSessionDir !== null && this.s.absSessionDir === workspaceDir(this.s.absCwd);
 	}
 
 	getSessionId(): string {
-		return this.sessionId;
+		return this.s.sessionId;
 	}
 
 	getAbsSessionFile(): string | undefined {
-		return this.absSessionFile;
+		return this.s.absSessionFile;
 	}
 
-	/** True once the session holds a user or assistant message, which is what makes it worth keeping. */
-	private hasConversation(): boolean {
-		return this.jsonlEntries.some(
-			(entry) => entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant"),
-		);
+	newSession(parentSessionFile?: string): string | undefined {
+		return newSession(this.s, parentSessionFile);
 	}
 
-	private persistEntry(entry: SessionEntry): void {
-		if (!this.persist || !this.absSessionFile) return;
-
-		if (!this.fileCreated) {
-			if (!this.hasConversation()) return;
-			const fd = openSync(this.absSessionFile, "wx");
-			try {
-				for (const existing of this.jsonlEntries) writeFileSync(fd, `${JSON.stringify(existing)}\n`);
-			} finally {
-				closeSync(fd);
-			}
-			this.fileCreated = true;
-			return;
-		}
-
-		appendFileSync(this.absSessionFile, `${JSON.stringify(entry)}\n`);
-	}
-
-	private appendEntry(entry: SessionEntry): void {
-		this.jsonlEntries.push(entry);
-		this.sessionEntryMapById.set(entry.id, entry);
-		this.leafId = entry.id;
-		this.persistEntry(entry);
-	}
-
-	/**
-	 * Append a message as a child of the leaf and advance the leaf. Returns the new entry's id.
-	 *
-	 * A compaction summary is deliberately not accepted here: it has to be a top-level entry so that
-	 * {@link buildContextEntries} can find it, which is what {@link appendCompaction} is for.
-	 */
 	appendMessage(message: Message): string {
-		const entry: MessageEntry = {
-			type: "message",
-			id: generateId(this.sessionEntryMapById),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			message,
-		};
-		this.appendEntry(entry);
-		return entry.id;
+		return appendMessage(this.s, message);
 	}
 
 	appendThinkingLevelChange(thinkingLevel: string): string {
-		const entry: ThinkingLevelChangeEntry = {
-			type: "thinking_level_change",
-			id: generateId(this.sessionEntryMapById),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			thinkingLevel,
-		};
-		this.appendEntry(entry);
-		return entry.id;
+		return appendThinkingLevelChange(this.s, thinkingLevel);
 	}
 
 	appendModelChange(name: string, modelId: string): string {
-		const entry: ModelChangeEntry = {
-			type: "model_change",
-			id: generateId(this.sessionEntryMapById),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			name,
-			modelId,
-		};
-		this.appendEntry(entry);
-		return entry.id;
+		return appendModelChange(this.s, name, modelId);
 	}
 
-	/**
-	 * Record the session's tool choices: the active set and the approval map, both whole.
-	 *
-	 * A snapshot rather than a delta, because the reader replays the branch and takes the last entry —
-	 * the same contract as `model_change`, which also records the value, not the move. Both maps are
-	 * always present, so one entry written for a tool change carries the approval set along and the
-	 * other way round.
-	 */
 	appendToolConfig(activeTools: string[], approval: Record<ToolApprovalKey, boolean>): string {
-		const entry: ToolConfigEntry = {
-			type: "tool_config",
-			id: generateId(this.sessionEntryMapById),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			activeTools: [...activeTools],
-			approval: { ...approval },
-		};
-		this.appendEntry(entry);
-		return entry.id;
+		return appendToolConfig(this.s, activeTools, approval);
 	}
 
-	/**
-	 * Record the conversation's own name, over the derived one.
-	 *
-	 * The title is expected already shortened — the endpoint that takes a user's typing applies
-	 * {@link shortenTitle} before it gets here, so what lands in the file is what a row shows. Like
-	 * every state entry this one is not transcript: it reaches no message, and a reader takes the
-	 * last one in file order, whichever way the branch points.
-	 */
 	appendRename(title: string): string {
-		const entry: RenameEntry = {
-			type: "rename",
-			id: generateId(this.sessionEntryMapById),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			title,
-		};
-		this.appendEntry(entry);
-		return entry.id;
+		return appendRename(this.s, title);
 	}
 
-	/**
-	 * Record spend that owns no message entry, attributed to `operation` on `model`.
-	 *
-	 * The whole spend travels in one entry, summed by the writer — a delegation runs many requests on
-	 * its own transcript, and this file wants the total, not the receipt list. Zero-usage records are
-	 * the caller's to skip: an entry costs a line, and a spend of nothing is not a fact worth one.
-	 */
 	appendUsage(operation: string, model: string, usage: Usage): string {
-		const entry: UsageEntry = {
-			type: "usage",
-			id: generateId(this.sessionEntryMapById),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			operation,
-			model,
-			usage,
-		};
-		this.appendEntry(entry);
-		return entry.id;
+		return appendUsage(this.s, operation, model, usage);
 	}
 
-	/**
-	 * Record a compaction checkpoint: everything up to `firstKeptEntryId` is replaced by `summary`.
-	 *
-	 * `firstKeptEntryId` of null means this compaction keeps no earlier entry, so the checkpoint is the
-	 * whole remaining history and the entry points at itself.
-	 */
 	appendCompaction(
 		summary: string,
 		firstKeptEntryId: string | null,
 		tokensBefore: number,
 		usage?: Usage,
 	): string {
-		const timestamp = new Date().toISOString();
-		const id = generateId(this.sessionEntryMapById);
-		const entry: CompactionEntry = {
-			type: "compaction",
-			id,
-			parentId: this.leafId,
-			timestamp,
-			summary,
-			firstKeptEntryId: firstKeptEntryId ?? id,
-			tokensBefore,
-			...(usage === undefined ? {} : { usage }),
-		};
-		this.appendEntry(entry);
-		return entry.id;
+		return appendCompaction(this.s, summary, firstKeptEntryId, tokensBefore, usage);
 	}
 
-	/**
-	 * Record that tool results were cleared: the named entries keep their place in the file and lose
-	 * their text in the view.
-	 *
-	 * Unlike a compaction there is nothing to hold back — the results are cleared precisely because a
-	 * run can reproduce them — so the record is only the ids and what the clear was worth.
-	 */
 	appendClearToolResults(clearedEntryIds: readonly string[], tokensBefore: number): string {
-		const entry: ClearToolResultEntry = {
-			type: "clear_tool_result",
-			id: generateId(this.sessionEntryMapById),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			clearedEntryIds: [...clearedEntryIds],
-			tokensBefore,
-		};
-		this.appendEntry(entry);
-		return entry.id;
+		return appendClearToolResults(this.s, clearedEntryIds, tokensBefore);
 	}
 
-	/**
-	 * Record that tool-call arguments were shortened: the named entries keep their place in the file
-	 * and lose the heavy bodies of their arguments in the view.
-	 *
-	 * Like a clear, there is nothing to hold back — the arguments named belong to calls whose results
-	 * are already on the branch — so the record is only the ids and what the trim was worth.
-	 */
 	appendTrimToolCallArgs(trimmedEntryIds: readonly string[], tokensBefore: number): string {
-		const entry: TrimToolCallArgEntry = {
-			type: "trim_tool_call_arg",
-			id: generateId(this.sessionEntryMapById),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			trimmedEntryIds: [...trimmedEntryIds],
-			tokensBefore,
-		};
-		this.appendEntry(entry);
-		return entry.id;
+		return appendTrimToolCallArgs(this.s, trimmedEntryIds, tokensBefore);
 	}
-
-	// =========================================================================
-	// Tree traversal
-	// =========================================================================
 
 	getLeafId(): string | null {
-		return this.leafId;
+		return getLeafId(this.s);
 	}
 
 	getLeafEntry(): SessionEntry | undefined {
-		return this.leafId ? this.sessionEntryMapById.get(this.leafId) : undefined;
+		return getLeafEntry(this.s);
 	}
 
 	getEntry(id: string): SessionEntry | undefined {
-		return this.sessionEntryMapById.get(id);
+		return getEntry(this.s, id);
 	}
 
-	/** Every entry that follows `parentId`, in file order. */
 	getChildren(parentId: string): SessionEntry[] {
-		const children: SessionEntry[] = [];
-		for (const entry of this.sessionEntryMapById.values()) {
-			if (entry.parentId === parentId) children.push(entry);
-		}
-		return children;
+		return getChildren(this.s, parentId);
 	}
 
-	/**
-	 * The branch points of the log, in file order.
-	 *
-	 * A child counts as an alternative only when a message is reachable through it: this format carries
-	 * state entries too — a model change, a tool config, a tool-result clear, a compaction, a leaf record — and a
-	 * conversation cannot be resumed at one of those, so counting them would offer an empty
-	 * alternative. A state entry in front of a message is descended through for the same reason:
-	 * rewinding, switching the model, and asking again is one alternative, not two.
-	 *
-	 * The walk covers **every** entry rather than only the active chain's, which is what makes the tree
-	 * a property of the conversation instead of of the leaf's current position: rewind to the first
-	 * question and the forks further down are still there to draw, where a chain-relative report would
-	 * quietly drop them — a page that forgets half the tree the moment the leaf moves. `options[].active`
-	 * is what stays chain-relative, and it is the only thing that should be.
-	 *
-	 * File order is also the order a client can fold the points in: a point's `anchor` is one of its
-	 * own ancestors, and an entry is never written before its parent, so the card a point hangs under
-	 * is always already placed when the point arrives.
-	 */
 	getBranchPoints(): BranchPoint[] {
-		const chain = this.getBranch();
-		const onChain = new Set(chain.map((entry) => entry.id));
-		const children = this.childrenIndex();
-		const memo = new Map<string, SubtreeDescription>();
-
-		// Pass one: which entries were carried on from in more than one way, and what each
-		// continuation amounts to. Nothing is placed yet — an anchor is only knowable once every point
-		// is known, because a card is either a user message on the line or an earlier point's option.
-		const forks: { entry: SessionEntry; options: BranchOption[] }[] = [];
-		for (const entry of this.sessionEntryMapById.values()) {
-			const options: BranchOption[] = [];
-			for (const child of children.get(entry.id) ?? []) {
-				const described = this.subtreeDescription(child.id, children, memo);
-				if (!described.message) continue;
-				options.push({
-					entryId: child.id,
-					label: described.label,
-					active: onChain.has(child.id),
-				});
-			}
-			if (options.length > 1) forks.push({ entry, options });
-		}
-		const forkIds = new Set(forks.map((fork) => fork.entry.id));
-
-		/** True for an entry a window draws a card for: a question on the line, or a taken way. */
-		const isCard = (entry: SessionEntry): boolean => {
-			if (onChain.has(entry.id)) return entry.type === "message" && entry.message.role === "user";
-			// Off the line, only a fork's own continuation becomes a card. An on-chain entry is
-			// excluded above rather than here: the chain's own continuation is drawn as the line's
-			// next card, and stopping a descent at it would name a card that does not exist.
-			return entry.parentId !== null && forkIds.has(entry.parentId);
-		};
-
-		/** The nearest card at or above `entryId`, or undefined for a point nothing can host. */
-		const anchorOf = (entryId: string): string | undefined => {
-			let current: SessionEntry | undefined = this.sessionEntryMapById.get(entryId);
-			while (current !== undefined) {
-				if (isCard(current)) return current.id;
-				current = current.parentId === null ? undefined : this.sessionEntryMapById.get(current.parentId);
-			}
-			return undefined;
-		};
-
-		const prompts = new Map<string, string>();
-		/** The nearest question at or above `entryId`, walked up the entry's own parent links. */
-		const nearestPrompt = (entryId: string): string => {
-			const cached = prompts.get(entryId);
-			if (cached !== undefined) return cached;
-			// Seeded before the descent for the same reason `subtreeDescription` seeds its memo: a file
-			// hand-edited into a cycle has to end the walk rather than spin.
-			prompts.set(entryId, "");
-			const entry = this.sessionEntryMapById.get(entryId);
-			let prompt = "";
-			if (entry !== undefined) {
-				const own = entry.type === "message" ? previewOfMessage(entry.message) : "";
-				if (entry.type === "message" && entry.message.role === "user" && own.length > 0) {
-					prompt = own;
-				} else if (entry.parentId !== null) {
-					prompt = nearestPrompt(entry.parentId);
-				}
-			}
-			prompts.set(entryId, prompt);
-			return prompt;
-		};
-
-		// Pass two: the points, each with the card its alternatives hang under. A point no card can
-		// host keeps its own id, which the client has no card for — dropped there rather than drawn in
-		// a place it does not belong.
-		return forks.map((fork) => ({
-			entryId: fork.entry.id,
-			anchor: anchorOf(fork.entry.id) ?? fork.entry.id,
-			prompt: nearestPrompt(fork.entry.id),
-			options: fork.options,
-		}));
+		return getBranchPoints(this.s);
 	}
 
-	/**
-	 * The newest tip of the subtree `entryId` roots: where that line of work would be resumed.
-	 *
-	 * The descent follows the last child written at each step, over every entry kind, because a branch
-	 * whose last entry is a compaction or a model change stopped there too.
-	 */
 	getBranchTip(entryId: string): string {
-		if (!this.sessionEntryMapById.has(entryId)) throw new Error(`Entry ${entryId} not found`);
-		return this.subtreeDescription(entryId, this.childrenIndex(), new Map()).tip;
+		return getBranchTip(this.s, entryId);
 	}
 
-	/** Every entry's children, in file order, built in one pass over the log. */
-	private childrenIndex(): Map<string, SessionEntry[]> {
-		const index = new Map<string, SessionEntry[]>();
-		for (const entry of this.sessionEntryMapById.values()) {
-			if (entry.parentId === null) continue;
-			const siblings = index.get(entry.parentId);
-			if (siblings === undefined) index.set(entry.parentId, [entry]);
-			else siblings.push(entry);
-		}
-		return index;
-	}
-
-	/**
-	 * What an alternative amounts to: where the subtree below `entryId` ends, and how to label it.
-	 *
-	 * Memoized per entry, so one call describes the whole log once however many branch points ask.
-	 */
-	private subtreeDescription(
-		entryId: string,
-		children: Map<string, SessionEntry[]>,
-		memo: Map<string, SubtreeDescription>,
-	): SubtreeDescription {
-		const cached = memo.get(entryId);
-		if (cached !== undefined) return cached;
-		// Seeded before the descent: this is what a file hand-edited into a cycle finds when it comes
-		// back around, so the walk ends there instead of spinning.
-		memo.set(entryId, { tip: entryId, message: false, label: "" });
-
-		const entry = this.sessionEntryMapById.get(entryId);
-		const descents = (children.get(entryId) ?? []).map((child) =>
-			this.subtreeDescription(child.id, children, memo),
-		);
-		const own = entry?.type === "message" ? previewOfMessage(entry.message) : undefined;
-		let label = own ?? "";
-		let message = own !== undefined;
-		if (!message) {
-			const below = descents.find((descent) => descent.message);
-			if (below !== undefined) {
-				message = true;
-				label = below.label;
-			}
-		}
-		const described: SubtreeDescription = {
-			// The newest child is the last written, and the file is in write order.
-			tip: descents.length === 0 ? entryId : descents[descents.length - 1]!.tip,
-			message,
-			label,
-		};
-		memo.set(entryId, described);
-		return described;
-	}
-
-	/**
-	 * Walk from `fromId` to the root, in path order, every entry kind included.
-	 *
-	 * This is the raw branch; {@link buildContextEntries} is the same walk with compaction applied, and
-	 * is what a provider request is built from.
-	 */
 	getBranch(fromId?: string): SessionEntry[] {
-		const path: SessionEntry[] = [];
-		const startId = fromId ?? this.leafId;
-		let current = startId ? this.sessionEntryMapById.get(startId) : undefined;
-		while (current) {
-			path.push(current);
-			current = current.parentId ? this.sessionEntryMapById.get(current.parentId) : undefined;
-		}
-		path.reverse();
-		return path;
+		return getBranch(this.s, fromId);
 	}
 
 	buildContextEntries(): SessionEntry[] {
-		return buildContextEntries(this.sessionEntryMapById, this.leafId);
+		return buildContextEntries(this.s);
 	}
 
 	buildSessionContext(): SessionContext {
-		return buildSessionContext(this.sessionEntryMapById, this.leafId);
+		return buildSessionContext(this.s);
 	}
 
-	/**
-	 * The model and thinking level the active branch was last set to, each undefined when it never was.
-	 *
-	 * {@link buildSessionContext} answers with those values and the defaults to run with. This is for a
-	 * caller that has to tell "the session chose off" from "the session never chose" — assembly, which
-	 * decides whether a stored value may override the settings file.
-	 */
 	getRecordedSettings(): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
-		const recorded: { model?: { name: string; modelId: string }; thinkingLevel?: string } = {};
-		for (const entry of this.getBranch()) {
-			if (entry.type === "thinking_level_change") recorded.thinkingLevel = entry.thinkingLevel;
-			else if (entry.type === "model_change") {
-				const name = modelChangeName(entry);
-				if (name !== undefined) recorded.model = { name, modelId: entry.modelId };
-			} else if (entry.type === "message" && entry.message.role === "assistant") {
-				// Only ever a fallback, and a weak one: a message records the wire id it was answered by,
-				// not the row's identity, so this can only name a row the user left unnamed. See
-				// {@link getSessionContextSettings}.
-				recorded.model = { name: entry.message.model, modelId: entry.message.model };
-			}
-		}
-		return recorded;
+		return getRecordedSettings(this.s);
 	}
 
-	/**
-	 * The tool choices the active branch was last recorded with, each undefined when it never was.
-	 *
-	 * Undefined is meaningful and is what this exists to preserve: a session with no `tool_config`
-	 * entry opens on the defaults, while one with an entry reopens exactly as its user left it. Like
-	 * {@link getRecordedSettings}, this reads the branch, not the file, so a fork answers with the
-	 * choices in force where it split off.
-	 */
 	getRecordedToolConfig(): { activeTools?: string[]; approval?: Record<ToolApprovalKey, boolean> } {
-		const recorded: { activeTools?: string[]; approval?: Record<ToolApprovalKey, boolean> } = {};
-		for (const entry of this.getBranch()) {
-			if (entry.type === "tool_config") {
-				recorded.activeTools = entry.activeTools;
-				recorded.approval = entry.approval;
-			}
-		}
-		return recorded;
+		return getRecordedToolConfig(this.s);
 	}
 
-	/**
-	 * The entry id behind each message in {@link buildSessionContext}'s list, in the same order.
-	 *
-	 * A compaction checkpoint produces messages that belong to no message entry, so those read as null.
-	 * This is what a transcript needs to offer "fork from here" on a message it never watched being
-	 * written.
-	 */
 	getContextMessageEntryIds(): (string | null)[] {
-		const ids: (string | null)[] = [];
-		for (const entry of this.buildContextEntries()) {
-			const produced = sessionEntryToContextMessages(entry).length;
-			for (let index = 0; index < produced; index++) ids.push(entry.type === "message" ? entry.id : null);
-		}
-		return ids;
+		return getContextMessageEntryIds(this.s);
 	}
 
 	getHeader(): SessionHeader | null {
-		return this.jsonlEntries.find(isSessionHeader) ?? null;
+		return getHeader(this.s);
 	}
 
-	/** Number of entries, header aside, without copying them the way {@link getEntries} does. */
 	getEntryCount(): number {
-		return this.sessionEntryMapById.size;
+		return getEntryCount(this.s);
 	}
 
-	/** Every entry, header aside, in file order. Use the `append*` methods to add more. */
 	getEntries(): SessionEntry[] {
-		return this.jsonlEntries.filter((entry): entry is SessionEntry => !isSessionHeader(entry));
+		return getEntries(this.s);
 	}
 
-	/**
-	 * The conversation's own name: a recorded rename if there is one, else the branch's first user
-	 * message, else a placeholder.
-	 *
-	 * The rename is read in **file order**, not along the branch, and that is deliberate: the left
-	 * column draws one row per session, not per way through it, so a name a person gave the session
-	 * does not stop being theirs because the leaf moved. The branch walk below stays exactly as it
-	 * was — it is the fallback, and summarizing the oldest turn away still cannot rename the session.
-	 */
 	getTitle(): string {
-		for (let index = this.jsonlEntries.length - 1; index >= 0; index--) {
-			const entry = this.jsonlEntries[index];
-			if (entry?.type === "rename") return entry.title;
-		}
-		return deriveTitle(this.getBranch().flatMap(sessionEntryToContextMessages));
+		return getTitle(this.s);
 	}
 
-	// =========================================================================
-	// Branching
-	// =========================================================================
-
-	/**
-	 * Move the leaf to an earlier entry, so the next append starts a new branch from it.
-	 *
-	 * Nothing is modified or deleted: the entries after the old leaf are still in the file, still
-	 * reachable by id, and are simply no longer on the active branch.
-	 *
-	 * A move that actually changes the position is recorded as one {@link LeafEntry}, which is what
-	 * lets a process that reopens the file put the leaf back where the conversation went. The record
-	 * is appended as a child of the leaf it leaves behind and does not advance it — the tree position
-	 * says where the append happened, the `leafId` field says where the conversation went. Moving to
-	 * the position already held writes nothing, the same guard `recordSelection` applies to its own
-	 * entries: a run of no-op moves costs no file.
-	 */
 	branch(branchFromId: string): void {
-		if (!this.sessionEntryMapById.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
-		if (this.leafId === branchFromId) return;
-		this.appendLeafRecord(branchFromId);
-		this.leafId = branchFromId;
+		branch(this.s, branchFromId);
 	}
 
-	/** Move the leaf before the first entry, so the next append becomes a new root. */
 	resetLeaf(): void {
-		if (this.leafId === null) return;
-		this.appendLeafRecord(null);
-		this.leafId = null;
-	}
-
-	/**
-	 * Write one leaf record as a child of the leaf it leaves behind, without moving the leaf.
-	 *
-	 * The caller sets {@link leafId} right after: an append advances the leaf, and this one must not —
-	 * the record's place in the tree and the position it reports are two facts, each with its own
-	 * field.
-	 */
-	private appendLeafRecord(leafId: string | null): void {
-		const entry: LeafEntry = {
-			type: "leaf",
-			id: generateId(this.sessionEntryMapById),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			leafId,
-		};
-		this.jsonlEntries.push(entry);
-		this.sessionEntryMapById.set(entry.id, entry);
-		this.persistEntry(entry);
+		resetLeaf(this.s);
 	}
 
 	// =========================================================================
@@ -1796,8 +1972,7 @@ export class SessionManager {
 	 * `SessionHub` holds it for the length of that window.
 	 */
 	static create(cwdInput: string, sessionDirInput?: string, parentSessionFileInput?: string): SessionManager {
-		const absDir = sessionDirInput ? normalizePath(sessionDirInput) : workspaceDir(cwdInput);
-		return new SessionManager(cwdInput, absDir, undefined, true, parentSessionFileInput);
+		return new SessionManager(createSessionState(cwdInput, sessionDirInput, parentSessionFileInput));
 	}
 
 	/**
@@ -1808,16 +1983,12 @@ export class SessionManager {
 	 * stray file behind on the way.
 	 */
 	static open(pathInput: string): SessionManager {
-		const absPath = resolvePath(pathInput);
-		if (!existsSync(absPath)) throw new Error(`Session file does not exist: ${absPath}`);
-		const header = readSessionHeader(absPath);
-		const absCwd = getSessionHeaderCwd(header) ?? process.cwd();
-		return new SessionManager(absCwd, dirname(absPath), absPath, true);
+		return new SessionManager(fillSession(pathInput));
 	}
 
 	/** A session that is never written to disk. */
 	static inMemory(cwdInput: string = process.cwd(), parentSessionFileInput?: string): SessionManager {
-		return new SessionManager(cwdInput, null, undefined, false, parentSessionFileInput);
+		return new SessionManager(inMemorySessionState(cwdInput, parentSessionFileInput));
 	}
 
 	/**
@@ -1867,7 +2038,7 @@ export class SessionManager {
 		writeFileSync(absNewSessionFile, `${JSON.stringify(header)}\n`, { flag: "wx" });
 		for (const entry of branch) appendFileSync(absNewSessionFile, `${JSON.stringify(entry)}\n`);
 
-		return new SessionManager(absTargetCwd, absDir, absNewSessionFile, true);
+		return new SessionManager(fillSession(absNewSessionFile));
 	}
 
 	/** Every session stored for `cwd`, newest activity first. */

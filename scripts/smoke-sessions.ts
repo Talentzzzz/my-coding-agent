@@ -10,6 +10,14 @@ import type { Message } from "@my-agent/llm";
 import { bootServer } from "../packages/server/src/boot.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import {
+	appendMessage,
+	// The file's own `const branch` (a session branch, an entry list) shadows a bare `branch` import.
+	branch as branchState,
+	buildSessionContext,
+	createSessionState,
+	fillSession,
+	getLeafId,
+	getTitle,
 	openAgent,
 	readSessionSnapshot,
 	SessionManager,
@@ -680,6 +688,49 @@ try {
 		}
 	} finally {
 		await http.close();
+	}
+
+	process.stdout.write("the stateless form replays the ledger per request\n");
+	// The operations the SessionManager shell delegates to, called with a bare SessionState. A state
+	// is transient — built by fillSession from the file, discarded when the request ends — so nothing
+	// here holds a state between sections except where a check says otherwise.
+	{
+		const statelessRoot = await mkdtemp(join(tmpdir(), "my-agent-stateless-"));
+		try {
+			const s = createSessionState(statelessRoot);
+			check("a fresh state has a path but no file yet", s.absSessionFile !== undefined && !existsSync(s.absSessionFile));
+			const one = appendMessage(s, userMessage("stateless first"));
+			appendMessage(s, userMessage("stateless second"));
+			check("the first message created the file", s.absSessionFile !== undefined && existsSync(s.absSessionFile));
+			check("and the context follows the leaf", buildSessionContext(s).messages.length === 2);
+
+			const replayed = fillSession(s.absSessionFile!);
+			check(
+				"a replay lands on the same leaf",
+				getLeafId(replayed) === getLeafId(s),
+				`${getLeafId(replayed)} vs ${getLeafId(s)}`,
+			);
+			check(
+				"and rebuilds the same transcript",
+				JSON.stringify(buildSessionContext(replayed).messages) === JSON.stringify(buildSessionContext(s).messages),
+			);
+			check("and the same title", getTitle(replayed) === getTitle(s));
+
+			branchState(replayed, one);
+			check("a stateless branch moves the leaf", getLeafId(replayed) === one, String(getLeafId(replayed)));
+			check("while the state appended to stays put", getLeafId(s) !== one, String(getLeafId(s)));
+			const rebranched = fillSession(s.absSessionFile!);
+			check("the branch move is replayed from the file", getLeafId(rebranched) === one, String(getLeafId(rebranched)));
+
+			const live = SessionManager.open(s.absSessionFile!);
+			check(
+				"the shell and the stateless form agree",
+				JSON.stringify(live.buildSessionContext().messages) === JSON.stringify(buildSessionContext(replayed).messages),
+			);
+		} finally {
+			await rm(workspaceDir(statelessRoot), { recursive: true, force: true });
+			await rm(statelessRoot, { recursive: true, force: true });
+		}
 	}
 
 	process.stdout.write("shutdown settles everything\n");
