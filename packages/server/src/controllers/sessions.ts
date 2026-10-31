@@ -744,9 +744,12 @@ export class SessionController {
 	 * status code, which claims only "nobody is waiting for this answer now".
 	 *
 	 * The order below is load-bearing. The read-only check comes first because only an answerable
-	 * request may be recorded; `onApproval` comes before `respondApproval` because answering publishes
-	 * the change, and the frame that reports the answer is built from the session's own change
-	 * notification — which therefore runs before this method gets control back.
+	 * request may be recorded; `onApproval` comes before `respondApproval` because the answer must be
+	 * remembered before the recovery run closes the call — the frame that reports the settlement is
+	 * built from the session's own change notification when the call leaves the snapshot.
+	 *
+	 * The run `respondApproval` starts is not awaited, exactly as a prompt's run is not: 202 semantics
+	 * — the answer is accepted, the run it starts reports itself on the stream.
 	 */
 	async approve(
 		sessionId: string,
@@ -758,12 +761,14 @@ export class SessionController {
 
 		return this.claiming(sessionId, (session) => {
 			// Refused before anything is recorded: an id this session is not waiting on gets a 409, and
-			// neither the answer table nor the session hears about the attempt.
+			// neither the answers table nor the session hears about the attempt.
 			if (!session.hasPendingApproval(toolCallId)) {
 				throw httpStatus.conflict(`${toolCallId} is not a pending approval`);
 			}
 			this.listeners.onApproval?.(sessionId, toolCallId, approved);
-			session.respondApproval(toolCallId, approved);
+			void session.respondApproval(toolCallId, approved).catch((error: unknown) => {
+				this.onRunFailure(sessionId, messageOf(error));
+			});
 			return { toolCallId, approved };
 		});
 	}

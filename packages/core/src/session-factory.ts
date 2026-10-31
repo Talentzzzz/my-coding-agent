@@ -3,6 +3,7 @@ import { Agent, type AgentConfig } from "./agent.ts";
 import { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
 import { buildSystemPrompt } from "./context/system-prompt.ts";
 import { spillOversizedToolResult } from "./context/spill.ts";
+import { danglingApprovalsOf } from "./session/dangling.ts";
 import { boundToolContent, createHooks } from "./hooks.ts";
 import {
 	DEFAULT_MODEL_NAME,
@@ -216,7 +217,10 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 		queued: 0,
 		isRetrying: false,
 		retryAttempt: 0,
-		pendingApprovals: [],
+		// Derived from the ledger exactly as the live session derives it: a call left dangling by a
+		// run that ended — the gate's, or a crash's — is a question the cold read shows too, because
+		// the answer that closes it arrives over REST to whichever process is running the session.
+		pendingApprovals: danglingApprovalsOf(options.sessionManager.buildContextEntries()),
 	});
 }
 
@@ -267,11 +271,12 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 	//
 	// `before_tool`: the approval gate. The session owns the bookkeeping of what the transcript is
 	// still waiting on and the UI that answers it; the hook only translates an unanswered approval
-	// into the block that ends the turn (ADR-0006 §5): the run stops rather than waiting in memory,
-	// and the answer arrives over REST to a call dangling in the ledger.
+	// into the suspend that ends the run (ADR-0006 §5): the call is left dangling in the ledger with
+	// no result — that is what the banner is derived from — and the answer arrives over REST to start
+	// the recovery run that pairs it and continues.
 	hooks.on("before_tool", async ({ toolCallId, toolName, args }) => {
-		const reason = await session.authorize(toolName, toolCallId, args);
-		return reason === undefined ? undefined : { block: { reason }, terminate: true };
+		const needsApproval = await session.authorize(toolName, toolCallId, args);
+		return needsApproval ? { suspend: true } : undefined;
 	});
 	// `after_tool`: the output backstop. Every built-in tool bounds its own output; this catches the
 	// tool that forgets. A result too large for the context is archived into the workspace whole and

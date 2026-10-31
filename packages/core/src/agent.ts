@@ -6,6 +6,7 @@ import {
 	type AgentToolResult,
 	type BeforeToolCallResult,
 	type LoopContext,
+	type ToolCallAnswer,
 } from "@my-agent/loop";
 import type { SessionRuntime } from "./session/session-runtime.ts";
 import {
@@ -662,11 +663,16 @@ export class Agent {
 		};
 		this.appendMessage(message);
 		this.publish();
-		await this.startRun(message);
+		await this.startRun({ prompt: message });
 	}
 
 	/**
 	 * Run the loop once, over everything the transcript already holds.
+	 *
+	 * A run starts one of two ways. A prompted run hands over the message that started it, which the
+	 * store already holds — the loop's own echo of it must not be recorded twice. A resumed run hands
+	 * over the approval answers instead: the loop's recovery pass pairs them with the calls the last
+	 * run left dangling and continues from there, so no message is written and none is echoed.
 	 *
 	 * This is where the run lives, and it is the whole reason the class holds no run state: the loop,
 	 * the transport, the retry scope, and the event handler are all built here, closed over the run's
@@ -674,13 +680,13 @@ export class Agent {
 	 * {@link AgentConfig.runtime} names — the queues and the active run — plus the `run` slot, which
 	 * is how a reader outside the run sees its transients.
 	 */
-	private async startRun(message: Message): Promise<void> {
+	private async startRun(start: { prompt: Message; answers?: undefined } | { prompt?: undefined; answers: Record<string, ToolCallAnswer> }): Promise<void> {
 		const scope: RunScope = {
 			partial: undefined,
 			accepted: [],
 			// The one user message the store already holds is the one that started the run: it is written
 			// before the loop runs, so the loop's own echo of it must not be recorded twice.
-			promptWrites: [message.timestamp],
+			promptWrites: start.prompt === undefined ? [] : [start.prompt.timestamp],
 			pendingToolResultViews: new Map(),
 			retrying: false,
 			retryAttempt: 0,
@@ -731,11 +737,14 @@ export class Agent {
 			// the runtime holds.
 			await loop.runLoop(
 				{ messages: this.transcript(), tools: this.tools.active(this.runContext()) },
-				message,
+				start.prompt,
 				{
 					// A request object from the bag as it stands; the fill chain fills the bag and hands
 					// back a fresh one before anything is sent.
 					model: resolvedModel(this.modelState, transport),
+					// The approval answers a resumed run closes its dangling calls with. A prompted run
+					// carries none: the recovery pass then only sweeps what a crash left behind.
+					recovery: { answers: start.answers },
 					getSteeringMessages: async () => this.runtime.steeringQueue.drain(),
 					getFollowUpMessages: async () => this.runtime.followUpQueue.drain(),
 				},
@@ -815,7 +824,7 @@ export class Agent {
 		const system = createSystemMessage(rewritten?.systemPrompt ?? injected.systemPrompt);
 		// A compaction checkpoint is already the user turn it stands for — `sessionEntryToContextMessages`
 		// wraps the summary in tags — so the transcript goes to the provider as it is.
-		const conversation = messages.filter((message) => message.role !== "system");
+		const conversation = pairLateToolResults(messages.filter((message) => message.role !== "system"));
 		return {
 			// Built here, from the bag this request just filled: run-local, used for the one request,
 			// dropped.
@@ -1213,45 +1222,55 @@ export class Agent {
 	 * Whether this id names a tool call nobody has answered. Read-only.
 	 *
 	 * The approvals endpoint checks this before answering, because the check has to happen without
-	 * answering: `respondApproval` publishes synchronously, and the frame that reports a settlement is
-	 * built from that publication — running it first would make every grant read as a denial by
-	 * whatever reads the answer back. An unknown id is the endpoint's 409, not a silent no-op: a button
-	 * that answers nothing and says so to no one is worse than an error the client can show.
+	 * answering: an answer starts the recovery run that closes the call, and the frame that reports
+	 * the settlement is built from the change that lands when it does — recording the answer first is
+	 * what keeps that frame from reading as a denial by whatever reads the answer back. An unknown id
+	 * is the endpoint's 409, not a silent no-op: a button that answers nothing and says so to no one
+	 * is worse than an error the client can show.
 	 */
 	hasPendingApproval(toolCallId: string): boolean {
 		return this.run === undefined && this.danglingApprovals().some((call) => call.toolCallId === toolCallId);
 	}
 
 	/**
-	 * Close one unanswered tool call with the answer that arrived over REST.
+	 * Answer one unanswered tool call, and resume the run that asked for it.
 	 *
-	 * The end-restart chain's answering half: the run that asked is over, the call dangles in the
-	 * ledger, and this writes the result that closes it. A denial writes the same sentence a press of
-	 * "deny" has always written. A grant cannot re-run the tool in place until the recovery machine
-	 * lands (ticket 15), so the transitional grant does the two things that are recordable now: it
-	 * writes the approval into the transcript, and it records the session's approval choice for that
-	 * tool as one `tool_config` entry — the same move a config patch makes — so the re-issued call the
-	 * result asks for is one the gate lets through. Either way the transcript is left provider-legal.
+	 * The answering half of the end-restart chain (ADR-0006 §5): the run that asked is over, the call
+	 * dangles in the ledger, and the answer starts the run that closes it. The loop's recovery pass
+	 * pairs the answer with the call by id — a grant re-runs the call through the gate and the tool
+	 * itself, a denial closes it with the sentence a press of "deny" writes — and the loop continues
+	 * from there, so the model sees the call resolved and carries on in the same run. A grant also
+	 * records the session's approval choice for that tool — the tool stops asking — as one
+	 * `tool_config` entry, the same move a config patch makes: the recovery pass re-runs the call
+	 * through the gate, and the gate lets through only a tool the map no longer gates.
 	 *
-	 * An id nothing is waiting on is ignored: the caller checked first, and answered it.
+	 * An id nothing is waiting on is ignored: the caller checked first, and answered it. A dangling
+	 * call the answer does not name is closed by the recovery pass as an orphan — which is what keeps
+	 * the resumed request provider-legal when a crash left several calls behind.
 	 */
-	respondApproval(toolCallId: string, approved: boolean): void {
+	async respondApproval(toolCallId: string, approved: boolean): Promise<void> {
+		if (this.run !== undefined) return;
 		const call = this.danglingApprovals().find((candidate) => candidate.toolCallId === toolCallId);
 		if (call === undefined) return;
-		this.appendDanglingResult(call, { approved });
+		const answer: ToolCallAnswer = approved
+			? { approved: true }
+			: { approved: false, reason: `The user denied permission to run ${call.toolName}.` };
 		if (approved) {
-			this.tools.mergeApprovalOverride({ [call.toolName as ToolApprovalKey]: true });
+			this.tools.mergeApprovalOverride({ [call.toolName as ToolApprovalKey]: false });
 			this.sessionManager.appendToolConfig(this.tools.activeNames(), this.getApprovals());
 		}
+		// Said before the run starts: the choice is the session's own and lands now, while the call
+		// itself stays dangling until the run's recovery pass closes it.
 		this.publish();
+		await this.startRun({ answers: { [toolCallId]: answer } });
 	}
 
 	/**
 	 * Close every unanswered tool call with the reason nothing answered.
 	 *
 	 * The reason rides the answer into the transcript: each closed call's tool result says what
-	 * actually happened — the run was aborted, the session closed, no window answered — rather than
-	 * the same sentence a press of "deny" writes, which would record an abandonment as a choice.
+	 * actually happened — the run was aborted, no window answered — rather than the same sentence a
+	 * press of "deny" writes, which would record an abandonment as a choice.
 	 *
 	 * Only an idle session closes anything: a call that dangles mid-run is a result the loop itself is
 	 * about to write, and closing it here would write the answer twice.
@@ -1282,20 +1301,16 @@ export class Agent {
 	}
 
 	/**
-	 * Ask the UI before running a tool that settings mark as requiring approval.
+	 * Whether a tool that settings mark as requiring approval still needs the user's answer.
 	 *
-	 * Under the end-restart semantics the gate does not wait: it answers with the reason the call
-	 * cannot run, and {@link Agent.beforeTool} turns that into the block that ends the turn — the run
-	 * ends, and the answer arrives over REST to a call dangling in the ledger (ticket 15 completes the
-	 * resumption half). A tool the map does not gate runs without asking.
+	 * The gate's decision, not its wording: what comes back is only whether the call may run now.
+	 * Under the end-restart semantics a call that needs the answer does not get a block or a result —
+	 * {@link Agent.beforeTool} turns this answer into the suspend that ends the run with the call
+	 * dangling in the ledger, and the answer arrives over REST to start the recovery run that closes
+	 * it. A tool the map does not gate runs without asking.
 	 */
-	async authorize(name: string, _toolCallId: string, _args: unknown): Promise<string | undefined> {
-		const key = name as ToolApprovalKey;
-		if (!this.getApprovals()[key]) return undefined;
-		return (
-			`This run ended: ${name} needs approval and nobody has answered yet. ` +
-			"Do not issue the call again in this turn; wait for the user's answer or reply in words."
-		);
+	async authorize(name: string, _toolCallId: string, _args: unknown): Promise<boolean> {
+		return this.getApprovals()[name as ToolApprovalKey] === true;
 	}
 
 	// ---------------------------------------------------------------------------- waiting and closing
@@ -1306,26 +1321,40 @@ export class Agent {
 	 *
 	 * A queued message is part of the run that accepted it, so the run is drained to the end: the queue
 	 * can still be non-empty when one turn settles, which is exactly the case a caller waiting for "the
-	 * transcript is complete" must not resolve on. {@link Agent.close} is this plus closing unanswered
-	 * calls, which is what makes it terminate.
+	 * transcript is complete" must not resolve on. {@link Agent.close} stops the run first, which is
+	 * what makes it terminate.
 	 *
 	 * A pending retry is part of the run too, so it is waited for rather than resolved past: the
 	 * retry runs inside the stream the loop is awaiting, which keeps the agent non-idle for the whole
 	 * backoff, and the condition is here so that stays true if that ever changes.
 	 */
 	async settle(): Promise<void> {
-		do {
+		// Read through a closure: the run slot is reassigned across the awaits below, and a narrow
+		// taken before them would tell the checker the slot is always empty here.
+		const stillBusy = (): boolean => this.queued > 0 || this.run?.retrying === true;
+		for (;;) {
 			await (this.runtime.activeRun?.promise ?? Promise.resolve());
-		} while (this.queued > 0 || (this.run?.retrying ?? false));
+			// The run drops its own slot a microtask after the idle promise resolves; wait for that too,
+			// so a caller that settles sees the idle session — and the dangling calls the run ended
+			// with — rather than one still finishing its writes. The same bounded wait `abort` makes.
+			while (this.run !== undefined) await Promise.resolve();
+			if (!stillBusy()) return;
+		}
 	}
 
 	/**
-	 * Wait for the session to go quiet, then close the calls nobody answered, so exiting mid-run
-	 * cannot leave the transcript with a question the next request cannot ask.
+	 * Stop the run, if any, and wait for the session to go quiet.
+	 *
+	 * A call left dangling stays a question: the transcript is the only state (ADR-0006 §5), so the
+	 * reopen derives it from the ledger and shows it again, and the answer that arrives then starts
+	 * the run that closes it. Closing does not answer for the user — the denials an exit used to
+	 * write recorded an abandonment as a choice, and the reopen that inherited them inherited a lie.
+	 * {@link Agent.abort} is the deliberate stop, and the denial is its answer; a process shutdown
+	 * and a reap that has already denied both land here.
 	 */
 	async close(): Promise<void> {
+		this.runtime.activeRun?.abortController.abort();
 		await this.settle();
-		this.denyAllApprovals("Session closed.");
 	}
 
 	// ---------------------------------------------------------------------------- compaction
@@ -1509,11 +1538,11 @@ export class Agent {
 	/**
 	 * Run the `before_tool` hooks.
 	 *
-	 * The loop's seam can only block a call or let it through, so a block is the only decision that
-	 * reaches it: an `args` refinement goes as far as the handlers registered after this one. A block
-	 * from the approval gate carries the terminate hint, because ending the turn is what makes the run
-	 * end — without it the loop would make another request in the same run and the model would re-issue
-	 * the call into the same gate.
+	 * The loop's seam can block a call, suspend one, or let it through, so those are the decisions
+	 * that reach it: an `args` refinement goes as far as the handlers registered after this one. A
+	 * suspend comes from the approval gate, and it is the whole end-restart move (ADR-0006 §5): the
+	 * loop ends the run at that call without writing a result, the call dangles in the ledger, and
+	 * the answer that arrives over REST starts the recovery run that closes it.
 	 */
 	private async beforeTool(
 		toolCallId: string,
@@ -1521,6 +1550,7 @@ export class Agent {
 		args: unknown,
 	): Promise<BeforeToolCallResult | undefined> {
 		const decided = await this.hooks.apply("before_tool", { toolCallId, toolName, args });
+		if (decided?.suspend === true) return { suspend: true };
 		if (decided?.block === undefined) return undefined;
 		return {
 			block: true,
@@ -1877,6 +1907,66 @@ function pushTerminal(outer: AssistantMessageEventStream, message: AssistantMess
 		return;
 	}
 	outer.push({ type: "done", reason: stopReason, message });
+}
+
+/**
+ * Move each late tool result back beside the call it answers.
+ *
+ * The ledger is append-only, so a result can stand behind messages its call never saw: a prompt the
+ * orchestrator wrote before the run's recovery pass closed the call, a message the run flushed at its
+ * end after the gate had already left the call dangling. On disk that order is the honest one — the
+ * prompt really did come before the answer — but a provider request that carries it is not legal: the
+ * wire wants every tool result in the user turn that follows its own assistant message, and a call
+ * answered two turns later reads as a call never answered.
+ *
+ * The repair is the request's, never the file's: a result is late when its call was issued, left
+ * unanswered across a non-result message, and answered afterwards; each late result is hoisted to
+ * directly after the assistant message that carries its call, in the order the calls were made.
+ * Everything else stays exactly where the ledger put it.
+ */
+function pairLateToolResults(messages: readonly Message[]): Message[] {
+	// Which results are late: a call still open when a non-result message arrives is answered too
+	// late by whatever comes after, because the wire has already moved on.
+	const lateIds = new Set<string>();
+	{
+		const open = new Set<string>();
+		for (const message of messages) {
+			if (message.role === "assistant") {
+				for (const block of message.content) {
+					if (block.type === "toolCall") open.add(block.id);
+				}
+			} else if (message.role === "toolResult") {
+				open.delete(message.toolCallId);
+			} else if (open.size > 0) {
+				for (const id of open) lateIds.add(id);
+			}
+		}
+	}
+	if (lateIds.size === 0) return messages as Message[];
+
+	// The late results, grouped by call id and kept in the order the ledger gave them.
+	const late = new Map<string, Message[]>();
+	for (const message of messages) {
+		if (message.role === "toolResult" && lateIds.has(message.toolCallId)) {
+			const grouped = late.get(message.toolCallId) ?? [];
+			grouped.push(message);
+			late.set(message.toolCallId, grouped);
+		}
+	}
+
+	const out: Message[] = [];
+	for (const message of messages) {
+		if (message.role === "toolResult" && lateIds.has(message.toolCallId)) continue;
+		out.push(message);
+		if (message.role === "assistant") {
+			for (const block of message.content) {
+				if (block.type !== "toolCall") continue;
+				const grouped = late.get(block.id);
+				if (grouped !== undefined) out.push(...grouped);
+			}
+		}
+	}
+	return out;
 }
 
 /**

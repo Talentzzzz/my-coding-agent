@@ -23,7 +23,7 @@ export interface HookMap {
 	>;
 	/** Runs before a tool call. Default: the approval gate. */
 	before_tool: (event: { toolCallId: string; toolName: string; args: unknown }) => MaybePromise<
-		{ block?: { reason: string }; args?: unknown; terminate?: boolean } | undefined
+		{ block?: { reason: string }; args?: unknown; terminate?: boolean; suspend?: boolean } | undefined
 	>;
 	/** Runs on the result. Default: the output backstop. */
 	after_tool: (event: {

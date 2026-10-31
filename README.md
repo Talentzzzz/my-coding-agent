@@ -158,7 +158,9 @@ node scripts/smoke-session.ts  # 流式、排队、重试、压缩、委派；�
 node scripts/smoke-models.ts   # 导入的模型与无模型占位，不需要密钥
 node scripts/smoke-default-model.ts # 内置默认模型：常量、服务端收下的形状、先存行后落标记；不需要密钥
 node scripts/smoke-model-form.ts # 设置 → 模型表单的八个标签；不需要密钥
-node scripts/smoke-approval.ts # 经 API 的审批往返，不需要密钥
+node scripts/smoke-approval.ts # 经 API 与 wire 的审批往返、宽限与重启继承，不需要密钥
+node scripts/smoke-approval-endpoint.ts # 审批端点契约：409、答案表与恢复运行，不需要密钥
+node scripts/smoke-approval-recovery.ts # 恢复机器：grant 续跑、deny 合成、孤儿收尾、恢复中 abort，不需要密钥
 npm run start &                # API smoke 测试需要一个正在跑的服务器
 MY_AGENT_URL=http://127.0.0.1:8080 node scripts/smoke-api.ts
 ```

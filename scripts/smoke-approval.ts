@@ -302,10 +302,11 @@ try {
 	);
 	check("the answer was accepted", answered.status === 200, `status ${answered.status}`);
 
-	// Reading each lane to the end of the run is what puts the frame the answer produced in hand: it
-	// goes out before the run continues, so the run's own last status is after all of them.
+	// The settled frame is what the answer produced, and waiting for it is what puts it in hand: the
+	// run's own last status is older than it (the gate's run already ended), so the status alone
+	// cannot tell this wait when the answer has landed.
 	await Promise.all(
-		windows.map((window) => window.waitFor(shared.session.id, (message) => message.type === "status" && message.submitting === false, 10_000)),
+		windows.map((window) => window.waitFor(shared.session.id, (message) => message.type === "approval_settled", 10_000)),
 	);
 
 	const reported = windows.map((window) =>
@@ -470,13 +471,13 @@ try {
 		check("the answer was accepted", answered.status === 200, `status ${answered.status}`);
 
 		check(
-			"the run finished after the answer",
-			(await wire.waitFor(patient.session.id, (message) => message.type === "status" && message.submitting === false, 10_000)) !== undefined,
+			"the approval was settled as granted",
+			await until(() => wire.items(patient.session.id).some((message) => message.type === "approval_settled" && message.approved === true), 8_000),
+			JSON.stringify(wire.items(patient.session.id).filter((message) => message.type === "approval_settled")),
 		);
 		check(
-			"and the approval was settled as granted",
-			wire.items(patient.session.id).some((message) => message.type === "approval_settled" && message.approved === true),
-			JSON.stringify(wire.items(patient.session.id).filter((message) => message.type === "approval_settled")),
+			"and the recovery run it started finished",
+			await until(async () => ((await readSession(patient.url, parked.id))?.submitting ?? true) === false, 8_000),
 		);
 
 		await wire.close().catch(() => {});
@@ -561,15 +562,15 @@ try {
 // ---------------------------------------------------------------------------------------------------
 // 5. A restart seeds no pending approval.
 //
-// The defect this pins: "someone persisted the pending approval". A new process has no run at all, so
-// it can only answer from the transcript — which is why the assertion is "the baseline carries no
-// pending approval, and the call is still in the transcript", never "an entry remembers it". The first
-// half runs in-process with the scripted transport (a parked run needs no provider key); the second is
-// a real `main.ts` over the same agent home and the same workspace, so it can only see what the first
-// one left on disk.
+// The property this pins under the end-restart architecture (ADR-0006 §5): the transcript is the
+// only state, so the waiting call survives the restart *as a question* — the new process derives it
+// from the ledger the way the old one did, and the banner it shows is still answerable. What must
+// NOT survive is a memory-resident promise: nothing here is "an entry remembers it", and the child
+// is a real `main.ts` over the same agent home and the same workspace, so it can only see what the
+// first one left on disk. (The answer itself is not exercised: the child speaks to real providers.)
 // ---------------------------------------------------------------------------------------------------
 
-process.stdout.write("\nan approval does not survive a restart\n");
+process.stdout.write("\nan approval survives a restart as the question it still is\n");
 
 const restartWatchdog = deadline("the restart checks", 90_000);
 
@@ -635,8 +636,8 @@ try {
 		const wire = await connect(muxUrl(childBase));
 		const baseline = await wire.open(restartSessionId);
 		check(
-			"the new process seeds no pending approval",
-			baseline.pendingApprovals.length === 0,
+			"the new process still shows the call that was parked",
+			baseline.pendingApprovals.length === 1,
 			JSON.stringify(baseline.pendingApprovals),
 		);
 		check(

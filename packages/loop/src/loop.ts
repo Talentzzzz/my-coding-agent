@@ -47,6 +47,7 @@ import type {
 	BeforeToolCallContext,
 	BeforeToolCallResult,
 	PrepareRequest,
+	RunRecoveryOptions,
 	StreamFn,
 } from "./types.ts";
 
@@ -115,6 +116,8 @@ export interface LoopQueueHooks {
 export type RunLoopOptions = LoopQueueHooks & {
 	/** The model the run starts with. `prepareRequest` can replace it per request. */
 	model: Model<any>;
+	/** How dangling tool calls are closed before the first request. See {@link RunRecoveryOptions}. */
+	recovery?: RunRecoveryOptions;
 };
 
 /** One run in flight: abort controller, idle promise, and the resolve that fires the promise. */
@@ -127,6 +130,12 @@ export type ActiveRun = {
 type ExecutedToolCallBatch = {
 	messages: ToolResultMessage[];
 	terminate: boolean;
+	/**
+	 * The gate suspended the batch: the call it stopped on and every call after it have no result,
+	 * and the run ends without another request — the answer the gate waits for comes from outside
+	 * any run, and the host resumes the calls through a recovery run.
+	 */
+	suspended?: boolean;
 };
 
 type PreparedToolCall = {
@@ -134,6 +143,10 @@ type PreparedToolCall = {
 	toolCall: AgentToolCall;
 	tool: AgentTool<any>;
 	args: unknown;
+};
+
+type SuspendedToolCall = {
+	kind: "suspended";
 };
 
 type ImmediateToolCallOutcome = {
@@ -281,6 +294,124 @@ async function failToolCallsFromTruncatedMessage(
 	return { messages, terminate: false };
 }
 
+/** One tool call the transcript still waits on: the call block, and the message that issued it. */
+type DanglingToolCall = {
+	toolCall: AgentToolCall;
+	assistantMessage: AssistantMessage;
+};
+
+/**
+ * The tool calls in a context that no tool-result message answers, in transcript order.
+ *
+ * A call dangles when its run ended before the result landed — a crash, or the end-restart approval
+ * gate, which leaves the call it stopped on unanswered on purpose. Either way a provider request that
+ * carries it is illegal, which is why every run closes what it finds before its first request.
+ */
+function danglingToolCallsOf(messages: Message[]): DanglingToolCall[] {
+	const calls: DanglingToolCall[] = [];
+	const answered = new Set<string>();
+	for (const message of messages) {
+		if (message.role === "toolResult") {
+			answered.add(message.toolCallId);
+			continue;
+		}
+		if (message.role !== "assistant") continue;
+		for (const block of message.content) {
+			if (block.type !== "toolCall") continue;
+			calls.push({ toolCall: block, assistantMessage: message });
+		}
+	}
+	return calls.filter(({ toolCall }) => !answered.has(toolCall.id));
+}
+
+/**
+ * Close the dangling calls a run was entered with, before its first request.
+ *
+ * The recovery machine of the end-restart architecture (ADR-0006 §5): an answer closes the call with
+ * itself — a grant re-runs the call through the same steps a live batch uses (gate, validation,
+ * execution, `afterToolCall`), so the resumed call is indistinguishable from one the model just
+ * issued; a denial synthesizes the result its reason names. A call no answer names is closed with a
+ * synthesized error result while `enablePendingToolRecovery` allows it. Every closed call emits the
+ * events its counterpart in a live batch would, so the window and the store learn of it the same way
+ * as any other tool result.
+ *
+ * A gate that suspends again mid-recovery — the grant this run resumed on did not actually clear it —
+ * stops the recovery where it stands: the remaining calls stay dangling and the caller ends the run
+ * without a request, exactly as a live batch's suspend does.
+ */
+async function recoverPendingToolCalls(
+	currentContext: LoopContext,
+	dangling: DanglingToolCall[],
+	recovery: RunRecoveryOptions | undefined,
+	config: ToolCallHooks,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): Promise<ExecutedToolCallBatch> {
+	const answers = recovery?.answers ?? {};
+	const enabled = recovery?.enablePendingToolRecovery !== false;
+	const messages: ToolResultMessage[] = [];
+
+	for (const { toolCall, assistantMessage } of dangling) {
+		const answer = answers[toolCall.id];
+		if (answer !== undefined && answer.approved) {
+			const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
+			if (preparation.kind === "suspended") {
+				return { messages, terminate: true, suspended: true };
+			}
+			await emit({
+				type: "tool_execution_start",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				args: toolCall.arguments,
+			});
+			let finalized: FinalizedToolCallOutcome;
+			if (preparation.kind === "immediate") {
+				finalized = { toolCall, result: preparation.result, isError: preparation.isError };
+			} else {
+				const executed = await executePreparedToolCall(preparation, signal, emitToolExecutionUpdate(toolCall, emit));
+				finalized = await finalizeExecutedToolCall(currentContext, assistantMessage, preparation, executed, config, signal);
+			}
+			await emitToolExecutionEnd(finalized, emit);
+			const toolResultMessage = createToolResultMessage(finalized);
+			await emitToolResultMessage(toolResultMessage, emit);
+			messages.push(toolResultMessage);
+			continue;
+		}
+		// Toggle off is the host taking the calls into its own hands: they go to the provider
+		// unanswered, and nothing is synthesized for them here.
+		if (answer === undefined && !enabled) continue;
+		const text =
+			answer !== undefined
+				? answer.reason ?? `The user denied permission to run ${toolCall.name}.`
+				: `Tool call "${toolCall.name}" was left unanswered: the run that issued it ended before a result landed. Issue the call again if it is still needed.`;
+		messages.push(await synthesizeToolResult(toolCall, text, emit));
+	}
+	return { messages, terminate: true };
+}
+
+/** Close one unanswered call with a synthesized error result, carrying the events of a live batch. */
+async function synthesizeToolResult(
+	toolCall: AgentToolCall,
+	text: string,
+	emit: AgentEventSink,
+): Promise<ToolResultMessage> {
+	await emit({
+		type: "tool_execution_start",
+		toolCallId: toolCall.id,
+		toolName: toolCall.name,
+		args: toolCall.arguments,
+	});
+	const finalized: FinalizedToolCallOutcome = {
+		toolCall,
+		result: createErrorToolResult(text),
+		isError: true,
+	};
+	await emitToolExecutionEnd(finalized, emit);
+	const toolResultMessage = createToolResultMessage(finalized);
+	await emitToolResultMessage(toolResultMessage, emit);
+	return toolResultMessage;
+}
+
 /**
  * Execute tool calls from an assistant message.
  */
@@ -313,6 +444,13 @@ async function executeToolCallsSequential(
 	const messages: ToolResultMessage[] = [];
 
 	for (const toolCall of toolCalls) {
+		// Prepared before it is announced: a suspended call is announced never — the gate ended the
+		// run at it, no result is written, and the events stay silent so the window shows no card for
+		// a call that never ran. The call and everything after it in the batch stay unanswered.
+		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
+		if (preparation.kind === "suspended") {
+			return { messages, terminate: true, suspended: true };
+		}
 		await emit({
 			type: "tool_execution_start",
 			toolCallId: toolCall.id,
@@ -320,7 +458,6 @@ async function executeToolCallsSequential(
 			args: toolCall.arguments,
 		});
 
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
 		let finalized: FinalizedToolCallOutcome;
 		if (preparation.kind === "immediate") {
 			finalized = {
@@ -366,8 +503,17 @@ async function executeToolCallsParallel(
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const finalizedCalls: FinalizedToolCallEntry[] = [];
+	let suspended = false;
 
 	for (const toolCall of toolCalls) {
+		// Prepared before it is announced, as in the sequential path: a suspended call gets no events
+		// and no result, and the calls after it are not prepared either. The calls already queued
+		// above run to completion — they were underway when the gate answered.
+		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
+		if (preparation.kind === "suspended") {
+			suspended = true;
+			break;
+		}
 		await emit({
 			type: "tool_execution_start",
 			toolCallId: toolCall.id,
@@ -375,7 +521,6 @@ async function executeToolCallsParallel(
 			args: toolCall.arguments,
 		});
 
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
 		if (preparation.kind === "immediate") {
 			const finalized = {
 				toolCall,
@@ -429,7 +574,8 @@ async function executeToolCallsParallel(
 
 	return {
 		messages,
-		terminate: shouldTerminateToolBatch(orderedFinalizedCalls),
+		terminate: suspended || shouldTerminateToolBatch(orderedFinalizedCalls),
+		suspended: suspended || undefined,
 	};
 }
 
@@ -458,7 +604,7 @@ async function prepareToolCall(
 	config: ToolCallHooks,
 	signal: AbortSignal | undefined,
 	tools: readonly AgentTool<any>[] = currentContext.tools ?? [],
-): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
+): Promise<PreparedToolCall | ImmediateToolCallOutcome | SuspendedToolCall> {
 	const tool = tools.find((t) => t.name === toolCall.name);
 	if (!tool) {
 		return {
@@ -487,6 +633,12 @@ async function prepareToolCall(
 					result: createErrorToolResult("Operation aborted"),
 					isError: true,
 				};
+			}
+			// The gate ended the run at this call: no result is written for it here — the caller sees
+			// `suspended` on the batch and ends the run, and a recovery run closes the call from the
+			// answer that arrives later. `block` alongside it would write a result, so suspend wins.
+			if (beforeResult?.suspend === true) {
+				return { kind: "suspended" };
 			}
 			if (beforeResult?.block) {
 				const result = createErrorToolResult(beforeResult.reason || "Tool execution was blocked");
@@ -559,6 +711,15 @@ export async function runToolCall(toolCall: AgentToolCall, options: RunToolCallO
 	const preparation = await prepareToolCall(context, assistantMessage, toolCall, options, signal, options.tools);
 	if (preparation.kind === "immediate") {
 		return { toolCall, result: preparation.result, isError: preparation.isError };
+	}
+	// A nested call has no batch to suspend and no run of its own to end, so the suspend comes back
+	// as the error result it is: the tool did not run, and the caller sees why.
+	if (preparation.kind === "suspended") {
+		return {
+			toolCall,
+			result: createErrorToolResult(`Tool call "${toolCall.name}" was suspended before it ran`),
+			isError: true,
+		};
 	}
 	const executed = await executePreparedToolCall(preparation, signal, options.onUpdate ?? (() => {}));
 	return finalizeExecutedToolCall(context, assistantMessage, preparation, executed, options, signal);
@@ -792,14 +953,17 @@ export class Loop {
 	 *
 	 * `prompt` is the message that starts the run — the one user message that
 	 * triggered it. It enters the transcript at the first drain point, exactly
-	 * where a steered message enters on a later turn. The context and the
+	 * where a steered message enters on a later turn. A run that resumes
+	 * instead of starting passes no prompt: it opens on the transcript as it
+	 * stands, and its first act is the recovery pass over the calls a previous
+	 * run left dangling. The context and the
 	 * model are handed over per run and never kept: the engine works on its
 	 * own shallow copy of the context and mutates only that. Returns the
 	 * messages the run produced.
 	 */
 	async runLoop(
 		context: LoopContext,
-		prompt: Message,
+		prompt: Message | undefined,
 		options: RunLoopOptions,
 	): Promise<Message[]> {
 		if (this.runtime.activeRun) {
@@ -830,14 +994,43 @@ export class Loop {
 
 			await this.dispatchEvent({ type: "agent_start" });
 
+			// Recovery pass (ADR-0006 §5): a call in the context that no tool result answers would make
+			// the first request illegal, so every run closes what it finds before its first turn — a
+			// grant re-runs the call, a denial and an orphan get synthesized results. A suspend here
+			// (the grant this run resumed on did not clear the gate) ends the run before any request.
+			let suspendedAtEntry = false;
+			const dangling = danglingToolCallsOf(currentContext.messages);
+			if (dangling.length > 0) {
+				const recovered = await recoverPendingToolCalls(
+					currentContext,
+					dangling,
+					options.recovery,
+					this.baseConfig,
+					signal,
+					this.dispatchEvent,
+				);
+				for (const message of recovered.messages) {
+					currentContext.messages.push(message);
+					newMessages.push(message);
+				}
+				suspendedAtEntry = recovered.suspended === true;
+			}
+			if (suspendedAtEntry) {
+				await this.dispatchEvent({ type: "agent_end", messages: newMessages });
+				return newMessages;
+			}
+
 			// The run's prompt occupies the first drain point: every turn — the first one
-			// included — is `turn_start`, then a drain, then a request. Steering is polled at the end of
+			// included — is `turn_start`, then a drain, then a request. A resumed run has no prompt;
+			// its recovered results are already in the context. Steering is polled at the end of
 			// each turn, so the earliest a steered message can surface is after the first response.
-			let pendingMessages: Message[] = [prompt];
+			let pendingMessages: Message[] = prompt === undefined ? [] : [prompt];
 
 			// Outer loop: continues when queued follow-up messages arrive after agent would stop
 			while (true) {
 				let hasMoreToolCalls = true;
+				// Set when the gate suspends a batch: the run ends at that turn, before the take points.
+				let suspended = false;
 
 				// Inner loop: process tool calls and steering messages
 				while (hasMoreToolCalls || pendingMessages.length > 0) {
@@ -887,6 +1080,7 @@ export class Loop {
 							: await executeToolCalls(currentContext, message, this.baseConfig, signal, this.dispatchEvent);
 						toolResults.push(...executedToolBatch.messages);
 						hasMoreToolCalls = !executedToolBatch.terminate;
+						suspended = executedToolBatch.suspended === true;
 
 						for (const result of toolResults) {
 							currentContext.messages.push(result);
@@ -896,8 +1090,18 @@ export class Loop {
 
 					await this.dispatchEvent({ type: "turn_end", message, toolResults });
 
+					// A suspended batch ends the run here: the take points are skipped, so nothing new is
+					// taken into a run the gate has already stopped — what was accepted waits on the
+					// queues and the caller's end-of-run sweep writes it, and the answer to the suspended
+					// call arrives from outside any run to start the next one.
+					if (suspended) break;
+
 					pendingMessages = (await options.getSteeringMessages?.()) || [];
 				}
+
+				// A suspend ends the follow-up side of the run with it: the queued messages were never
+				// taken, and the run that would answer them is over.
+				if (suspended) break;
 
 				// Loop would stop here. Check for follow-up messages.
 				const followUpMessages = (await options.getFollowUpMessages?.()) || [];

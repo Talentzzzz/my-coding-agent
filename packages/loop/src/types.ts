@@ -83,6 +83,50 @@ export interface BeforeToolCallResult {
 	 * Early termination only happens when every finalized tool result in the batch sets this to true.
 	 */
 	terminate?: boolean;
+	/**
+	 * End the run at this call without writing a result for it: the call stays in the transcript
+	 * unanswered, and the host resumes it later by handing the answer to a recovery run
+	 * (`RunLoopOptions.recovery`). The batch's remaining calls are left unanswered with it, the run
+	 * ends without another provider request, and no `tool_execution_*` event is emitted for this call.
+	 *
+	 * This is the end-restart approval gate's answer (ADR-0006 §5): waiting for a person is not
+	 * something a run can do, so the run ends and the answer arrives from outside it. `block` and
+	 * `suspend` are alternatives — a result that sets both is treated as a suspend.
+	 */
+	suspend?: boolean;
+}
+
+/**
+ * The answer one recovered tool call is resumed with.
+ *
+ * It is what the approval flow recorded while the call was dangling: a grant re-runs the call through
+ * the loop's normal path (gate included), a denial closes the call with `reason` — or, when no reason
+ * rides the answer, with the sentence that says the user denied it.
+ */
+export interface ToolCallAnswer {
+	approved: boolean;
+	/** For a denial: the sentence the synthesized tool result carries. */
+	reason?: string;
+}
+
+/**
+ * How a run recovers the tool calls a previous run left unanswered.
+ *
+ * Every run scans its context for dangling calls (a `toolCall` block no tool-result message answers)
+ * before its first request, because a provider request that carries one is illegal. What happens to
+ * each is fixed: an answer in {@link RunRecoveryOptions.answers} closes the call with itself — a
+ * grant re-executes the call, a denial synthesizes its result — and a call no answer names is closed
+ * with a synthesized error result when {@link RunRecoveryOptions.enablePendingToolRecovery} allows it.
+ */
+export interface RunRecoveryOptions {
+	/** The answers the approval flow recorded, keyed by tool call id. */
+	answers?: Record<string, ToolCallAnswer>;
+	/**
+	 * Close dangling calls that no answer names with a synthesized error result, so the first request
+	 * of the run is provider-legal. Default true. A host that turns this off owns those calls: the run
+	 * sends them unanswered and the provider decides what that is worth.
+	 */
+	enablePendingToolRecovery?: boolean;
 }
 
 /**

@@ -57,9 +57,10 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 - **claim（认领）** —— 持有者对活跃会话的握持：只有改变会话的请求与在飞的运行各在其长度内一个；读
   transcript 不拿claim，**订阅也不拿**——一张订阅表回答"这条连接订了什么"，与 claim 回答"这个请求
   必须跑在活跃会话上"永不互相换算（ADR-0001）。
-- **approval（审批）** —— 结束重启（ADR-0006 §5）：`before_tool` 对要问的调用结束本轮运行，
-  tool call 在账本里悬空（有 tool_use 无 tool_result，派生态）；答案经
-  `POST /api/sessions/{id}/approvals/{toolCallId}` 到达后由编排层收尾（恢复机器落地后续跑）。
+- **approval（审批）** —— 结束重启（ADR-0006 §5）：`before_tool` 对要问的调用返回 suspend，结束本轮
+  运行且不写结果，tool call 在账本里悬空（有 tool_use 无 tool_result，派生态）；答案经
+  `POST /api/sessions/{id}/approvals/{toolCallId}` 到达后启动恢复运行，由 loop 的恢复机器按
+  toolCallId 配对续跑——grant 重跑该调用、deny 合成结果，无答案的孤儿合成错误结果收尾。
   哪些工具会问是**按会话**的，记录在一条 `tool_config` entry 里。
 - **tool set（工具集合）** —— 活跃工具和审批映射是**一个**决定，一起写在一条 `tool_config` entry 里；
   它是状态，绝不是对话。

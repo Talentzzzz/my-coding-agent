@@ -1092,48 +1092,76 @@ async function exerciseApprovalPrompt(): Promise<void> {
 }
 
 /**
- * The approval gate ends the run, and a call nobody answered is derived from the ledger.
+ * The approval gate suspends the run, and the answer starts the run that closes the call.
  *
- * Under the end-restart semantics (ADR-0006 §5) the gate does not park the run in memory: the turn
- * ends at the block, and the answer arrives later to a call dangling in the transcript. While the
- * recovery machine is not wired yet (tickets 15/16) the gate's transitional form is exercised here:
- * the run ends, nothing waits, and the blocked result says why. The answering half is exercised on a
- * call that dangles the way a crash leaves one — appended without its result — which is the state
- * `respondApproval` and `denyAllApprovals` close: the reason rides the answer into the tool result,
- * so an abandonment is recorded as what happened, not as the sentence a pressed "deny" writes.
+ * Under the end-restart semantics (ADR-0006 §5) the gate does not park the run in memory and does
+ * not write a result: the run ends with the call dangling in the transcript — that dangling call is
+ * what the banner is derived from — and the answer arrives over REST to start the recovery run,
+ * whose first act is to pair the answer with the call and continue. A denial closes the call with
+ * the sentence a pressed deny writes; a grant re-runs the call through the gate and the tool itself.
+ * The abandonment half — a call nobody answered — is exercised on a call that dangles the way a
+ * crash leaves one, which `denyAllApprovals` closes with its own reason.
  */
 async function exerciseApprovalDenial(): Promise<void> {
 	process.stdout.write("approval denial reason\n");
 
-	const script = [fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("done")];
-
-	// The gate ends the run instead of parking it: no memory wait, and the blocked result explains.
+	// The gate suspends the run instead of parking it: no memory wait, and the call dangles with no
+	// result at all — that absence is the question the window answers.
 	const gated = await openSession({ approval: { read: true } });
-	recordRequests([], script);
+	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("done")]);
 	const ended = await within("the run to the gate", 10_000, gated.prompt("read the notes"));
 	check("the run ended at the gate rather than parking", ended.ok);
-	check("and nothing is left waiting in memory", !gated.hasPendingApprovals);
-	check("the snapshot derives no pending approval either", gated.snapshot.pendingApprovals.length === 0);
+	check("and the waiting call is derived from the ledger", gated.hasPendingApprovals);
+	check("the snapshot names exactly the call the gate stopped on", gated.snapshot.pendingApprovals.length === 1, JSON.stringify(gated.snapshot.pendingApprovals));
 	await within("settle()", 10_000, gated.settle());
 
 	const gatedResults = toolResultTexts(gated);
 	check(
-		"the blocked result says the run ended for the approval",
-		gatedResults.some((text) => text.includes("This run ended: read needs approval")),
+		"the suspended call has no result in the transcript",
+		gatedResults.every((text) => !text.includes("needs approval") && !text.includes("denied permission")),
 		JSON.stringify(gatedResults),
 	);
-	check(
-		"and not the sentence a pressed deny writes",
-		gatedResults.every((text) => !text.includes("The user denied permission to run")),
-		JSON.stringify(gatedResults),
-	);
-	// The terminate hint is what keeps the run from making another request into the same gate.
+	// The suspend ends the run without another request: the model is not shown the gate and cannot
+	// re-issue the call into it.
 	check("the run never reached the scripted answer", !gated.snapshot.messages.some((message) => message.role === "assistant" && textOf(message) === "done"));
+
+	// Denied: the answer starts the recovery run, the pass pairs it with the dangling call, and the
+	// model is shown the denial and carries on.
+	const callId = gated.snapshot.pendingApprovals[0]?.toolCallId ?? "";
+	check("the suspended call is the one the predicate answers", gated.hasPendingApproval(callId), callId);
+	await within("the deny's recovery run", 10_000, gated.respondApproval(callId, false));
+	await within("settle() after the deny", 10_000, gated.settle());
+
+	const deniedResults = toolResultTexts(gated);
+	check(
+		"the recovery pass closed the call with the deny's own sentence",
+		deniedResults.some((text) => text.includes("The user denied permission to run read.")),
+		JSON.stringify(deniedResults),
+	);
+	check("the answered call is no longer waiting", !gated.hasPendingApproval(callId));
+	check("and the model answered the denial", gated.snapshot.messages.some((message) => message.role === "assistant" && textOf(message) === "done"));
 
 	await gated.close();
 
+	// Granted: the recovery run re-runs the call through the gate and the tool itself — the gate
+	// lets it through because the grant recorded the session's own approval choice.
+	const granted = await openSession({ approval: { read: true } });
+	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("done")]);
+	await within("the grant's run to the gate", 10_000, granted.prompt("read the notes"));
+	check("the grant starts from a tool the map gates", granted.getApprovals().read === true);
+	const grantedId = granted.snapshot.pendingApprovals[0]?.toolCallId ?? "";
+	await within("the grant's recovery run", 10_000, granted.respondApproval(grantedId, true));
+	await within("settle() after the grant", 10_000, granted.settle());
+
+	check("a grant is recorded as the session's own approval choice", granted.getApprovals().read === false);
+	check("the granted call ran and its result is in the transcript", toolResultTexts(granted).some((text) => text.includes("notes.txt")), JSON.stringify(toolResultTexts(granted)));
+	check("the answered call is no longer waiting", !granted.hasPendingApproval(grantedId));
+	check("and the model carried on after the granted call", granted.snapshot.messages.some((message) => message.role === "assistant" && textOf(message) === "done"));
+
+	await granted.close();
+
 	// A call that dangles the way a crash leaves one: the tool_use is in the transcript, the result is
-	// not, and the ledger is where the waiting shows.
+	// not, and the ledger is where the waiting shows. An abandonment keeps its own reason.
 	const abandoned = await openSession();
 	abandoned.sessionManager.appendMessage(fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })));
 	check("the dangling call is derived from the ledger", abandoned.hasPendingApprovals);
@@ -1157,34 +1185,6 @@ async function exerciseApprovalDenial(): Promise<void> {
 	);
 
 	await abandoned.close();
-
-	// Denied through `respondApproval` itself: no reason rides the answer, so the fallback sentence is
-	// the one that is true.
-	const refused = await openSession();
-	refused.sessionManager.appendMessage(fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })));
-	const refusedId = refused.snapshot.pendingApprovals[0]?.toolCallId ?? "";
-	refused.respondApproval(refusedId, false);
-	const refusedResults = toolResultTexts(refused);
-	check(
-		"a pressed deny still says the user denied it",
-		refusedResults.some((text) => text.includes("The user denied permission to run read.")),
-		JSON.stringify(refusedResults),
-	);
-	check("and the answered call is no longer waiting", !refused.hasPendingApproval(refusedId));
-
-	await refused.close();
-
-	// Granted: the transitional grant records the session's approval choice for the tool, so the
-	// re-issued call the result asks for is one the gate lets through.
-	const granted = await openSession();
-	granted.sessionManager.appendMessage(fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })));
-	const grantedId = granted.snapshot.pendingApprovals[0]?.toolCallId ?? "";
-	check("the grant starts from a tool the map does not gate", granted.getApprovals().read === false);
-	granted.respondApproval(grantedId, true);
-	check("a grant is recorded as the session's own approval choice", granted.getApprovals().read === true);
-	check("and the granted call is closed", !granted.hasPendingApproval(grantedId));
-
-	await granted.close();
 }
 
 /**

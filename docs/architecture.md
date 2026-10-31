@@ -127,7 +127,7 @@ level 本身骑在模型上（`Model.thinkingLevel`，由 `createModel(config, l
 | `after_tool` | `{ toolCallId, toolName, content, isError }` | 输出兜底，`boundToolContent` | 循环的 `afterToolCall` |
 
 - **`context`** 是一个纯覆盖接缝：没有注册任何处理器时，供应商拿到的正是会话自己本来会发的那些。
-- **`before_tool`** 是审批闸门。审批集合决定哪些工具要问，UI 通过审批端点 / `denyAllApprovals` / `snapshot.pendingApprovals` 回答，而这个 hook 把一次未答的审批变成 `{ block: { reason }, terminate: true }`——运行在这里结束而不是等在内存里，tool call 在账本里悬空，答案经审批端点到达后收尾（ADR-0006 §5）。后一个处理器可以**细化**这道闸门，但不能**撤掉**它。
+- **`before_tool`** 是审批闸门。审批集合决定哪些工具要问，UI 通过审批端点 / `denyAllApprovals` / `snapshot.pendingApprovals` 回答，而这个 hook 把一次未答的审批变成 `{ suspend: true }`——运行在这里结束而不是等在内存里，tool call 不写结果、在账本里悬空，答案经审批端点到达后启动恢复运行，由 loop 的恢复机器按 `toolCallId` 配对续跑：grant 重跑该调用、deny 合成结果，无答案的孤儿合成错误结果收尾（ADR-0006 §5）。后一个处理器可以**细化**这道闸门，但不能**撤掉**它。
 - **`after_tool`** 是给"忘记约束自己输出的工具"的兜底。超过 80,000 字符的结果（`SPILL_RESULT_CHARS`，`context/spill.ts`）会被整份归档到工作区的 `.my-agent/tool-results/<session id>/<call id>-<tool name>.txt`，模型拿到的则是它的头尾各 2,000 字符加上归档路径，这样 agent 可以自己 `read` 剩下的部分。归档写不出去时，`boundToolContent` 仍然把文本限制在 `MAX_TOOL_RESULT_BYTES`（200 KB）。
 
 由此得出一条规则：**hook 决定模型看到什么，transcript 保留工具产出了什么。** 被改写的 content 回到循环、用于这一轮；而会话管理器记录的是工具自己的输出。改写也**落账**：工具结果消息落账时，hook 留给模型的 `shown` 半边作为一条 `tool_result_view` entry 紧随其后写进文件（`Agent.recordToolResultView`），发请求时由 `toolResultViewsOf` 从账本里把它和那条消息按 call id 配回成对——`forModel` 读它，所以重启后的进程服务给模型的仍是那个被约束过的版本；文件里也仍然保有工具实际返回的东西，快照与 wire 读到的也是它。
@@ -264,11 +264,12 @@ type AgentSessionEvent =
 释放是即时的：最后一个 claim 消失就触发一次**回收（reap）**。这里没有"比浏览器重连多活两秒"那一段——那条等待属于旧的 `EventSource` 传输，随传输切换一并退场。反过来，"一个人回来回答一个问题要多久"是另一个问题，claim 答不了它：claim 只说明有人**曾经**在看，所以一次停在审批上的运行不该在最后一个查看者切换会话的那一刻被拒绝，那是**替那个人**做出的推断，而他其实只差一次点击。因此一个有待回答审批的会话会停驻 `approvalGraceMs`（十分钟，`HubOptions`），只有到那时才把沉默读成**遗弃**、拒绝那个审批，好让一台合上的笔记本不能把一次运行永远停驻在那：
 
 ```
-最后一个 claim 释放 -> 无待回答审批：直接 settle()
+最后一个 claim 释放 -> settle()（运行结束在闸门上时，悬空的调用此刻才出现）
+                    -> 无待回答审批：正常往下
                     -> 有待回答审批：
-                        宽限（approvalGraceMs）内被回答 / settle -> 正常往下
-                        宽限走完仍无回答、且无 claim            -> 拒绝它，让运行能结束
-                        宽限内到达 claim                       -> 让开；答案仍然是他们的（reaping 释放）
+                        宽限（approvalGraceMs）内被回答 -> 正常往下
+                        宽限走完仍无回答、且无 claim    -> 拒绝它
+                        宽限内到达 claim               -> 让开；答案仍然是他们的（reaping 释放）
 回收 -> settle()
      -> 此期间有 claim 到达：保留该会话
      -> 否则：从 map 里移除、通知观察者、close()

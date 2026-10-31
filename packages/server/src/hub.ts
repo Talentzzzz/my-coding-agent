@@ -56,6 +56,8 @@ export interface HubOptions {
 
 /** How long an unanswered approval is given before the last claim's departure is read as abandonment. */
 const DEFAULT_APPROVAL_GRACE_MS = 10 * 60_000;
+/** How often the reap looks for the answer that would end its grace wait early. */
+const APPROVAL_WATCH_MS = 50;
 
 /**
  * One session's own two feeds, handed over exactly as the running session has them.
@@ -586,14 +588,12 @@ export class SessionHub {
 	/**
 	 * Stop every run and settle every session before the process exits.
 	 *
-	 * Aborting first is what bounds this: `close()` waits for the run to finish, so without the abort
-	 * a long tool would hold shutdown open. Closing the sessions themselves is the caller's job only
-	 * in the sense of ordering — whoever owns the transports ends them first, so the claims they hold
-	 * are gone by the time this runs.
+	 * `close()` stops the run itself, which is what bounds this — a long tool cannot hold shutdown
+	 * open. A waiting call is left exactly as it is: the transcript is the only state, so the restart
+	 * inherits the question still answerable, not a denial nobody made.
 	 */
 	async close(): Promise<void> {
 		const hosts = [...this.hosts.values()];
-		await Promise.all(hosts.map((host) => host.session.abort()));
 		await Promise.all(hosts.map((host) => host.session.close()));
 		for (const host of hosts) {
 			for (const observer of this.observers.get(host.id) ?? []) observer(undefined);
@@ -692,19 +692,30 @@ export class SessionHub {
 			// An approval nobody is watching is not an approval nobody will answer: the same window is
 			// one switch away. A claim says that somebody *was* looking, which is not the same question
 			// as whether anybody will answer, so silence is waited out before it is read as abandonment.
+			//
+			// Under the end-restart semantics (ADR-0006 §5) the waiting call appears when the run ends
+			// at the gate, not while it is in flight, so the run is settled first and the waiting is
+			// decided after — a session released mid-run and one released already waiting take the
+			// same road here.
+			await host.session.settle();
 			if (host.session.hasPendingApprovals) {
-				const settled = await Promise.race([
-					host.session.settle().then(() => true),
+				const answered = await Promise.race([
+					// The answer arrives over REST on a claim of its own; what this wait is for is the
+					// moment the call stops dangling, which is the moment it was answered.
+					(async () => {
+						while (host.session.hasPendingApprovals) await delay(APPROVAL_WATCH_MS);
+						return true;
+					})(),
 					delay(this.approvalGraceMs).then(() => false),
 				]);
-				if (!settled && host.claims === 0) {
+				if (!answered && host.claims === 0) {
 					host.session.denyAllApprovals("No window answered this approval.");
 				}
 				// A claim arrived during the wait, so the person came back and the approval is still
-				// theirs to answer. This reap has nothing left to decide: waiting on a run parked at a
-				// prompt would hold `reaping` — and so the session — for as long as they take to reply.
-				// Letting go here is what lets their next release reap it properly.
-				if (!settled && host.claims > 0) return;
+				// theirs to answer. This reap has nothing left to decide: holding `reaping` — and so
+				// the session — for as long as they take to reply would keep the next release from
+				// ever reaping it. Letting go here is what lets their next release do that.
+				if (!answered && host.claims > 0) return;
 			}
 			await host.session.settle();
 			if (host.claims > 0) return;
