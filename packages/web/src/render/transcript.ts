@@ -961,7 +961,7 @@ export class TranscriptView {
  * the node on screen still says the right thing and is left alone. The id is the map key, not here.
  */
 function shapeOf(card: ToolCard): string {
-	return `${card.running ? "r" : "d"}:${card.isError ? "e" : "o"}:${card.output.length}:${card.diff ? "D" : "-"}`;
+	return `${card.waiting ? "w" : card.running ? "r" : "d"}:${card.isError ? "e" : "o"}:${card.output.length}:${card.diff ? "D" : "-"}`;
 }
 
 /**
@@ -1176,8 +1176,13 @@ function patchTail(view: ReasoningView, text: string): void {
  * invented for what the call did not carry.
  */
 function renderTool(card: ToolCard): HTMLElement {
-	const details = element("details", `tool${card.isError ? " error" : ""}${card.running ? " running" : ""}`);
-	if (card.isError || card.running) details.open = true;
+	const details = element(
+		"details",
+		`tool${card.isError ? " error" : ""}${card.running ? " running" : ""}${card.waiting ? " waiting" : ""}`,
+	);
+	// A waiting card opens like a running one: the thing it says is the reason the run stopped, and a
+	// reader should not have to unfold the line to find where the answer went.
+	if (card.isError || card.running || card.waiting) details.open = true;
 
 	const summary = element("summary");
 	const chevron = element("span", "tool-chevron");
@@ -1188,7 +1193,10 @@ function renderTool(card: ToolCard): HTMLElement {
 		element("span", "tool-path", previewOf(card.args) || (card.diff?.relPath ?? "")),
 	);
 	if (card.diff) summary.append(diffStat(card.diff));
+	// The line's right-end mark is the phase: pulsing while the call executes, steady while it waits
+	// for the answer that lets it run. Neither mark shares a line with a diffstat, for the same reason.
 	if (card.running) summary.append(element("span", "tool-spin"));
+	if (card.waiting) summary.append(element("span", "tool-wait"));
 
 	details.append(summary, card.diff ? renderFileDiff(card.diff) : outputOf(card));
 	return details;
@@ -1196,7 +1204,13 @@ function renderTool(card: ToolCard): HTMLElement {
 
 function outputOf(card: ToolCard): HTMLElement {
 	const output = element("pre", "tool-output");
-	output.textContent = card.output.length > 0 ? card.output : card.running ? "运行中…" : "无输出";
+	output.textContent = card.output.length > 0
+		? card.output
+		: card.running
+			? "运行中…"
+			: card.waiting
+				? "等待审批——本轮运行在此调用前暂停，答案到达后继续。"
+				: "无输出";
 	return output;
 }
 

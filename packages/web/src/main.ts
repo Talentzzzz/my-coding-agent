@@ -743,9 +743,11 @@ function main(): void {
 			onStreamMessage: (sessionId, message) => {
 				// A send's reference lasts exactly as long as the run it started, and "settled" is the
 				// stream saying `submitting: false` — not the request being accepted and not the run
-				// beginning. A run parked on an approval still reports `submitting: true`, which is the
-				// point: the stream has to survive until the user has answered, or the banner would be
-				// dropped from under them.
+				// beginning. Under the end-restart semantics (ADR-0006 §5) a run waiting on an approval
+				// *is* over — the run ended at the gate and the answer arrives over REST — so settling
+				// here releases the reference while the question stands; while the window stays on the
+				// conversation the pane's own reference keeps watching, and the answer's resumed run is
+				// reported on that.
 				//
 				// Checked **before** the pane test below, and that ordering is load-bearing. Navigating
 				// away mid-run releases the pane's reference but not the send's — that is what the
@@ -1226,10 +1228,11 @@ function main(): void {
 	/**
 	 * The takeover seat: one card per approval the session is waiting on, in the composer's place.
 	 *
-	 * A pending approval is the only thing this window can act on while it stands — the run is parked
-	 * mid-tool, and typing into an input box would queue words behind a question nobody has answered.
-	 * Replacing the composer is the honest rendering of that, and the card carries the two answers the
-	 * protocol actually takes.
+	 * A pending approval is the only thing this window can act on while it stands — under the
+	 * end-restart semantics (ADR-0006 §5) the run has ended at the gate, and a prompt typed now would
+	 * start a run whose recovery pass would sweep the still-dangling call aside. Replacing the composer
+	 * is the honest rendering of that, and the card carries the two answers the protocol actually
+	 * takes; answering one starts the run that resumes the conversation.
 	 */
 	function renderApprovals(): void {
 		if (state.approvals === approvalsDrawn) return;

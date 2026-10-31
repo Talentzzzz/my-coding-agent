@@ -24,6 +24,16 @@ export interface ToolCard {
 	isError: boolean;
 	running: boolean;
 	/**
+	 * The call is dangling in the ledger waiting for an approval answer (ADR-0006 §5).
+	 *
+	 * Under the end-restart semantics a gated call neither runs nor produces a result while it waits:
+	 * the run ended at the gate, the answer arrives over REST, and the resumed run closes the call —
+	 * a grant by re-running it (whose `tool_execution_start` clears this), a deny by synthesizing the
+	 * result its reason names. Neither running nor finished, the card says so itself instead of
+	 * spinning on a tool that is not executing or settling on a result that has not landed.
+	 */
+	waiting?: boolean;
+	/**
 	 * What the call changed on disk, when the tool reported it.
 	 *
 	 * The report is part of the tool's result, so it arrives on the loop's `tool_execution_end` event
@@ -490,16 +500,41 @@ export function reduce(state: ViewState, message: ServerMessage): ViewState {
 			};
 		case "error":
 			return { ...state, error: message.message };
-		case "approval_request":
+		case "approval_request": {
+			// The waiting call gets its card here rather than from a `tool_execution_start`: the loop
+			// announces a suspended call never, so this frame is the window's first knowledge of it —
+			// and under the end-restart semantics (ADR-0006 §5) it is the transcript's only cue that
+			// the run ended *at* this call rather than around it.
 			return {
 				...state,
 				approvals: [
 					...state.approvals.filter((approval) => approval.toolCallId !== message.request.toolCallId),
 					message.request,
 				],
+				items: upsertTool(state.items, message.request.toolCallId, {
+					toolCallId: message.request.toolCallId,
+					toolName: message.request.toolName,
+					args: message.request.args,
+					output: "",
+					isError: false,
+					running: false,
+					waiting: true,
+				}),
 			};
-		case "approval_settled":
-			return { ...state, approvals: state.approvals.filter((approval) => approval.toolCallId !== message.toolCallId) };
+		}
+		case "approval_settled": {
+			// The answer is recorded and the approval is off the ledger. A grant leaves the card waiting:
+			// the resumed run re-issues the call, and its own `tool_execution_start` flips the card back
+			// to running. A denial is closed by the recovery pass's synthesized result, whose end event
+			// settles the card with its text — but a denial that no resume follows (the answer's own
+			// restart being impossible, or the session denied in a sweep) would leave the card waiting
+			// on nothing, so the settled frame itself is what stops it waiting, as the error the answer
+			// wrote. The synthesized end event will overwrite it whole when it does arrive.
+			const items = message.approved
+				? state.items
+				: patchCard(state.items, message.toolCallId, { running: false, waiting: false, isError: true });
+			return { ...state, approvals: state.approvals.filter((approval) => approval.toolCallId !== message.toolCallId), items };
+		}
 		case "event":
 			return applySessionEvent(state, message.event);
 		default:
@@ -518,9 +553,13 @@ export function reduce(state: ViewState, message: ServerMessage): ViewState {
  *
  * `approvals` is cleared. The baseline seeds it and per-approval frames maintain it, and after an
  * `end` there will be no further baseline on this stream to seed it again — so a banner left standing
- * is a button whose request goes nowhere. This is the one place that clears it, and it is here rather
- * than in the baseline branch because the baseline branch already had the right answer for a stream
- * that is still open.
+ * is a card whose answer could never be reported back on this stream. Under the end-restart semantics
+ * (ADR-0006 §5) the waiting answers live in the ledger rather than in this state, so nothing true is
+ * lost by the clear: every road that ends a watched stream has already delivered its settlement
+ * frames (a reaped session denies before it closes; a deleted session cannot be holding approvals),
+ * and a page that comes back subscribes afresh and reads the still-open question off its baseline.
+ * This is the one place that clears the list, and it is here rather than in the baseline branch
+ * because the baseline branch already had the right answer for a stream that is still open.
  *
  * `streaming` stops, because a run cannot outlive the stream reporting it. The old code set this in
  * its own stream-end handler and would have lost it in the rewrite; folding it here means the state
@@ -567,6 +606,8 @@ function applySessionEvent(state: ViewState, event: AgentSessionEvent): ViewStat
 			// nothing here re-reads the answer to find what moved.
 			return { ...state, items: appendDelta(state.items, event.delta) };
 		case "tool_execution_start":
+			// `waiting: false` is the resumed run's own cue (ADR-0006 §5): the grant re-issues the call
+			// it was answered on, and the card that had been waiting goes back to executing.
 			return { ...state, items: upsertTool(state.items, event.toolCallId, {
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
@@ -574,6 +615,7 @@ function applySessionEvent(state: ViewState, event: AgentSessionEvent): ViewStat
 				output: "",
 				isError: false,
 				running: true,
+				waiting: false,
 			}) };
 		case "tool_execution_update":
 			return { ...state, items: upsertTool(state.items, event.toolCallId, {
@@ -583,6 +625,7 @@ function applySessionEvent(state: ViewState, event: AgentSessionEvent): ViewStat
 				output: contentToText(event.partialResult),
 				isError: false,
 				running: true,
+				waiting: false,
 			}) };
 		case "tool_execution_end":
 			// The loop's end event names the call and its result, but not the arguments it was made
@@ -593,6 +636,7 @@ function applySessionEvent(state: ViewState, event: AgentSessionEvent): ViewStat
 				output: contentToText(event.result),
 				isError: event.isError,
 				running: false,
+				waiting: false,
 				diff: fileDiffOf(event.result),
 			}) };
 		case "turn_end": {
@@ -723,7 +767,15 @@ function itemsFromSnapshot(snapshot: SessionSnapshot): Item[] {
 	// a record cut short — a branch taken before the result was written — rather than a live one.
 	// Settling it keeps a reopened transcript from spinning on history; a submitting snapshot skips
 	// this, because its live `tool_execution_end` is still to come and will patch the card itself.
+	//
+	// The calls the snapshot names as waiting approvals (ADR-0006 §5) are the exception: a dangling
+	// call under the end-restart semantics is not a cut-short record but a question still standing —
+	// the run ended at the gate and the answer has not arrived. Those cards are marked waiting after
+	// the sweep, so a reopened transcript shows the pause instead of a finished card with no output.
 	if (!snapshot.submitting) items = settleCards(items);
+	for (const approval of snapshot.pendingApprovals) {
+		items = patchCard(items, approval.toolCallId, { running: false, waiting: true });
+	}
 	return items;
 }
 
@@ -771,6 +823,7 @@ function replayResult(items: Item[], message: unknown): Item[] {
 		output: contentToText(message),
 		isError: record.isError === true,
 		running: false,
+		waiting: false,
 		diff: fileDiffOf(message),
 	});
 }
@@ -1050,6 +1103,27 @@ function drainEntries(items: Item[], pending: PendingEntry[]): { items: Item[]; 
 const PENDING_ENTRIES = 20;
 
 /**
+ * Patch only the cards a call already has, never creating one.
+ *
+ * {@link upsertTool} is the constructor's road — a frame about a call the window has not drawn yet
+ * draws it. The frames this helper serves are the opposite: a verdict about a call whose card may
+ * already be gone (a denial arriving after the transcript moved on), where inventing a card for a
+ * call the window never showed would put a ghost in the transcript.
+ */
+function patchCard(items: Item[], toolCallId: string, patch: Partial<ToolCard>): Item[] {
+	let changed = false;
+	const next = items.map((item) => {
+		if (item.kind !== "tools" || !item.cards.some((candidate) => candidate.toolCallId === toolCallId)) return item;
+		changed = true;
+		return {
+			...item,
+			cards: item.cards.map((candidate) => (candidate.toolCallId === toolCallId ? { ...candidate, ...patch } : candidate)),
+		};
+	});
+	return changed ? next : items;
+}
+
+/**
  * Fold one tool event into the card it belongs to.
  *
  * The event carries what it knows, not the whole card: a start event has the arguments and no result,
@@ -1058,18 +1132,11 @@ const PENDING_ENTRIES = 20;
  * was called.
  */
 function upsertTool(items: Item[], toolCallId: string, patch: Partial<ToolCard> & { toolName: string }): Item[] {
-	const next = items.map((item) => {
-		if (item.kind !== "tools") return item;
-		if (!item.cards.some((candidate) => candidate.toolCallId === toolCallId)) return item;
-		return {
-			...item,
-			cards: item.cards.map((candidate) =>
-				candidate.toolCallId === toolCallId ? { ...candidate, ...patch } : candidate,
-			),
-		};
-	});
-
-	if (next.some((item) => item.kind === "tools" && item.cards.some((c) => c.toolCallId === toolCallId))) return next;
+	// The patch road first: a card for this call is patched in place, wherever it sits. Only when the
+	// walk found nothing to patch — `patchCard` answers with the very array it was given — does this
+	// become a construction, below.
+	const patched = patchCard(items, toolCallId, patch);
+	if (patched !== items) return patched;
 
 	const card: ToolCard = {
 		toolCallId,
@@ -1081,13 +1148,13 @@ function upsertTool(items: Item[], toolCallId: string, patch: Partial<ToolCard> 
 	};
 
 	// Cards of one turn share the group that directly follows that turn's assistant message.
-	const last = next.at(-1);
+	const last = items.at(-1);
 	if (last?.kind === "tools" && last.cards.every((candidate) => candidate.running)) {
-		const updated = [...next];
+		const updated = [...items];
 		updated[updated.length - 1] = { ...last, cards: [...last.cards, card] };
 		return updated;
 	}
-	return [...next, { kind: "tools", id: `tools:${toolCallId}`, cards: [card] }];
+	return [...items, { kind: "tools", id: `tools:${toolCallId}`, cards: [card] }];
 }
 
 /** The line kinds a report may carry; anything else is not a report this client understands. */

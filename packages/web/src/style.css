@@ -1623,15 +1623,21 @@ input:focus-visible {
 	transform: rotate(90deg);
 }
 
-/* The running dot rides the line's right end; a running call never carries a diffstat, so the two
-   auto margins never share a line. */
-.tool-spin {
+/* The line's right-end mark is the phase, and the two phases share one mark: a dot that pulses while
+   the call executes and holds still while it waits for the answer that lets it run (ADR-0006 §5).
+   A second pulse would say a second call is running, so waiting is the same mark without the
+   animation. Neither mark shares a line with a diffstat, for the same reason. */
+.tool-spin,
+.tool-wait {
 	flex: none;
 	width: 8px;
 	height: 8px;
 	margin-left: auto;
 	border-radius: 50%;
 	background: var(--dsw-state-warn);
+}
+
+.tool-spin {
 	animation: pulse 1.2s var(--dsw-ease) infinite;
 	will-change: opacity;
 }
