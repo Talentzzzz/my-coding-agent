@@ -85,7 +85,8 @@ async function bootServer(cwd) {
 	}
 	const module = await import(pathToFileURL(entry).href);
 	return module.bootServer({
-		cwd,
+		// The option is `absCwd` (BootOptions): the workspace the agent may touch, absolute.
+		absCwd: cwd,
 		host: "127.0.0.1",
 		// Port 0: the operating system picks a free one, so a second launch never collides with the
 		// first and a fixed number never has to be reserved.

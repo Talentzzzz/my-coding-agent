@@ -48,3 +48,18 @@ Blocked by: 15, 16, 17
 - 票 16 曾登记 smoke-stream / smoke-projection / smoke-mux-live 为「干净 master
   上的既有失败,留给 18 处置」——三处至此全部落地,无遗留。
 - 剩余:上方手测清单需真桌面窗口与供应商密钥,由人工执行;全过后关闭本票。
+
+## Progress 补记(2026-10-31 深夜,人工手测第一项就抓到真回归)
+
+- **桌面外壳旧参数名(真回归,手测抓到)**:`packages/desktop/main.cjs` 还给
+  `bootServer` 传 `cwd`,`BootOptions.absCwd` 收到 undefined——窗口里每条
+  路径操作都抛 `The "paths[0]" argument must be of type string. Received
+  undefined`。`npm run check` 抓不到它:`packages/desktop` 是 .cjs,不在任何
+  tsconfig 里。已改传 `absCwd`,桌面端到端(建会话→发消息→DeepSeek 回复)
+  验证通过。教训同 smoke-stream:`cwd`→`absCwd` 改名时,唯一不在 tsc 覆盖内
+  的调用方漏了。
+- 顺带发现的真实环境问题(非代码):用户 agent home 被 smoke 污染——
+  models.json 只剩假行 `scripted`(@127.0.0.1:1)导致每条消息 Connection
+  error;sessions 里 216 个 Temp 假工作区。已清理(备份在
+  `.scratch/home-cleanup-20261031/`),模型表重建为 `deepseek-flash` 并经
+  真实供应商验证。防复发见 `.scratch/smoke-isolation/issues/01`。
