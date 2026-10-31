@@ -26,7 +26,9 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 
 - **tool（工具）** —— `AgentTool`；`createToolRegistry(workspace)` 持有定义和每会话的活跃集合，没有
   插件注册表。
-- **session（会话）** —— 一个只追加的 JSONL 文件，由 `SessionManager` 拥有；文件随第一条消息出现（`create()` 不写 header，没人说过话的会话不落盘、不进侧边栏），entry 的 kind 有
+- **session（会话）** —— 一个只追加的 JSONL 文件（账本、唯一事实），由无状态的 `SessionManager` 拥有——
+  打开时 `fillSession` 重放出纯数据状态，host 在手时它是文件的唯一写者（ADR-0006）；文件随第一条消息
+  出现（`create()` 不写 header，没人说过话的会话不落盘、不进侧边栏），entry 的 kind 有
   `message`、`tool_config`、`compaction` 等，未知 kind 原样带过。标题可被一条 `rename` entry 覆写
   （文件序最后一条赢、与分支无关，见 ADR-0002）；没有它时标题仍从分支首条 user 消息派生。
 - **settings（设置）** —— `SettingsManager` 合并全局与工作区两份 `settings.json`，变更写回**已经提供
@@ -86,8 +88,9 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   token 没有消息可搭，作为一条 `usage` entry 整笔记在父会话上、计入会话总额。
 - **queue（队列）** —— 一次运行正在流式时被接受的消息：`steer` 在下一个取走点注入，`followUp` 等这一
   轮结束。
-- **assembly（装配）** —— `openAgent()` 从设置、AGENTS.md、导入的模型构建一个会话；它只决定 transcript
-  **命名**哪一行（`adoptCurrentRow()` 每次请求都按活行原地重算）。
+- **assembly（装配）** —— `openAgent()` 按种子→补齐（seed→fill）从设置、AGENTS.md、导入的模型装配一个
+  会话（ADR-0006）；`Agent` 是无状态编排层，不持有会话状态——durable 半是账本，live 半是 hub 持有的
+  `SessionRuntime`。它只决定 transcript **命名**哪一行（`adoptCurrentRow()` 每次请求都按活行原地重算）。
 - **workspace（工作区）** —— agent 可以触碰的目录；它是**按会话**的，从会话自己 header 里的 `cwd`
   取根。
 - **event（事件）** —— 一个 `AgentSessionEvent`：`AgentEvent` 与会话自己的成员（`queue_update`、
