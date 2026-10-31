@@ -96,7 +96,7 @@ interface Rig {
 async function openRig(): Promise<Rig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-stream-"));
 	const transport = createFakeTransport({ tokensPerSecond: TOKENS_PER_SECOND });
-	const hub = new SessionHub({ cwd: root, api: transport.api });
+	const hub = new SessionHub({ absCwd: root, api: transport.api });
 	hub.setModelConfigs(rows);
 
 	const projection = createSessionProjection(hub);

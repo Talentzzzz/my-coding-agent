@@ -34,6 +34,14 @@ packages/core、server、loop 落地「无状态服务 + 纯数据状态」重�
 - [08 SessionManager 无状态化](issues/08-session-manager-stateless.md):`SessionState` 纯数据接口 + 全操作首参收状态的文件级函数 + `fillSession` 重放入口落地;`SessionManager` 收成一行委托的薄壳门面,调用方零改动,票 13/14/16 迁移。
 - [09 SettingsManager 无状态化](issues/09-settings-manager-stateless.md):`SettingsState` 纯数据接口(每工作区一份,hub 缓存共享引用)+ 全操作首参收状态的文件级函数 + `fillSettings` 补齐入口;`SettingsManager` 同收薄壳门面,调用方零改动,票 14/16 迁移。
 - [10 ModelManager 无状态化](issues/10-model-manager.md):`ModelState` 纯数据袋(种子 = 客户端 ModelSelection 原样)+ `fillModel(catalog, bag)` 每请求原地补齐(查不到名字即抛,编排层接)+ `resolvedModel` 现造薄请求对象;`Agent` 的 `recordSelection` 改读账本派生值,recorded* 缓存字段删除;catalog 仍是 hub 持有的 `ModelSource`,只作 fillModel 参数。
+- [11 ToolManager 无状态化](issues/11-tool-manager.md):定义注册表全局只读、`ToolState` 纯数据 + `fillTools` 补齐、运行上下文现造工具列表。
+- [12 shown 半边落成 entry](issues/12-tool-result-entry.md):`tool_result_view` 记 toolCallId + shown、重放按 call id 配回双份视图;顺带修复 prepareRequest 构造后赋值从未生效。
+- [13 SessionRuntime 落地](issues/13-session-runtime.md):`{ steeringQueue, followUpQueue, activeRun? }` 成为唯一的跨栈内存态。
+- [14 Agent 编排层](issues/14-agent-orchestrator.md):五单例合龙,运行期瞬态出袋,审批改结束重启先行接线。
+- [15 loop 恢复机器](issues/15-loop-recovery.md):闸门悬空收场、答案按 toolCallId 配对续跑、孤儿收尾。
+- [16 hub/server/mux 适配](issues/16-hub-server-adapt.md):审批端点记录答案并触发恢复运行;快照与宽限计时落账本派生;门面保持 fill-at-open(可重建缓存,每请求全文重放否决);ADR-0006 与文档持有模型表述入库。
+- [17 窗口客户端适配](issues/17-web-client-adapt.md):工具卡片补「等待审批」阶段、恢复运行把会话翻回 running、结束重启语义的注释与文案平移。
+- [18 全量验证](issues/18-verify-all.md):check 与 smoke 全套(24 项)全绿;回修四处——smoke-stream 与 smoke-sidebar 是真回归(hub 旧参数名、重命名丢弃校验被弄丢),smoke-projection 与 smoke-mux-live 按新生命周期重写;真服务器 smoke-api 与密钥红线抽查通过。剩桌面交互手测清单待人工执行。
 
 ## Not yet specified
 

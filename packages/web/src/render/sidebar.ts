@@ -472,10 +472,12 @@ export class Sidebar {
 	 * Ask for the name this heading should wear, and report it beside the group it was asked on.
 	 *
 	 * What is collected is a *label*, so nothing about it can be wrong in a way that costs anything:
-	 * the directory keeps its own name, no transcript is rewritten, and a name that reads like a path
-	 * is just a name. An empty box is the shared dialog's way of saying nothing was asked, so taking a
-	 * custom name back is the settings road's own answer (`workspaceNames[absCwd] = ""`), not this card's.
-	 * A label the heading already wears is dropped for the simpler reason: it is not a change.
+	 * the directory keeps its own name and no transcript is rewritten. A name that reads like a path
+	 * is still dropped — the heading sits in a list of real directory names, and one that looks like a
+	 * directory move can only misread. An empty box is the shared dialog's way of saying nothing was
+	 * asked, so taking a custom name back is the settings road's own answer
+	 * (`workspaceNames[absCwd] = ""`), not this card's. A label the heading already wears is dropped
+	 * for the simpler reason: it is not a change.
 	 */
 	private async renameWorkspace(absCwd: string, label: string): Promise<void> {
 		const typed = await askForText({
@@ -488,6 +490,7 @@ export class Sidebar {
 		if (typed === undefined) return;
 		const name = typed.trim();
 		if (name === label) return;
+		if (name.includes("/") || name.includes("\\") || name === "." || name === "..") return;
 		this.handlers.onRenameWorkspace(absCwd, name);
 	}
 

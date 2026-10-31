@@ -26,10 +26,10 @@ function check(label: string, condition: boolean, detail = ""): void {
 }
 
 /** Poll until `ready` holds, so no check guesses the timing of an async read. */
-async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
+async function until(ready: () => boolean | Promise<boolean>, ms = 5_000): Promise<boolean> {
 	const deadline = Date.now() + ms;
 	while (Date.now() < deadline) {
-		if (ready()) return true;
+		if (await ready()) return true;
 		await new Promise((resolve) => setTimeout(resolve, 20));
 	}
 	return ready();
@@ -43,6 +43,12 @@ async function postPrompt(base: string, sessionId: string, text: string): Promis
 		body: JSON.stringify({ text }),
 	});
 	return response.status;
+}
+
+/** Whether the session's own snapshot says a run is in flight. */
+async function submitting(base: string, sessionId: string): Promise<boolean> {
+	const response = await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}`);
+	return ((await response.json()) as { session: { submitting: boolean } }).session.submitting;
 }
 
 /**
@@ -78,6 +84,13 @@ server.hub.setModelConfigs(modelRows);
 
 try {
 	const { sessionId } = await (await fetch(`${server.url}/api/sessions/current`)).json() as { sessionId: string };
+
+	// A session that nobody has spoken in has no file and so no row (ADR-0006 §3) — the sidebar lists
+	// conversations, not intentions. One warm-up turn is what puts this session into the row store
+	// every check below reads.
+	transport.setResponses([fakeAssistantMessage("warm-up answer")]);
+	check("开场 prompt 被接受", (await postPrompt(server.url, sessionId, "开场")) === 202);
+	check("开场 run 落定了", await until(async () => (await submitting(server.url, sessionId)) === false));
 
 	const channels: string[] = [];
 	const items: ConnectionItem[] = [];
@@ -212,6 +225,10 @@ try {
 		((await (await fetch(`${server.url}/api/workspaces`)).json()) as { workspaces: { absCwd: string }[] }).workspaces.map((group) => group.absCwd);
 
 	const first = (await (await postSession(aside)).json()) as { sessionId: string };
+	// The same lifecycle rule the warm-up above follows: an unspoken session has no file, so the
+	// workspace directory does not exist either — one prompt is what makes both tables know it.
+	transport.setResponses([fakeAssistantMessage("aside answer")]);
+	check("新工作区里的开场 prompt 被接受", (await postPrompt(server.url, first.sessionId, "让工作区落盘")) === 202);
 	check("新工作区的行到达了概览", await until(() => rowTable().get(first.sessionId) !== undefined), JSON.stringify(rowTable().list().map((row) => row.absCwd)));
 	check("它也被 REST 列表列着", (await restWorkspaces()).includes(aside), JSON.stringify(await restWorkspaces()));
 

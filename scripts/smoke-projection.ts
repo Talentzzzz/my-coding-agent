@@ -63,7 +63,7 @@ const hub = new SessionHub({ absCwd: root, api: fake.api });
 hub.setModelConfigs([ROW]);
 
 try {
-	process.stdout.write("a session that exists before anything asks gets a row\n");
+	process.stdout.write("a session that exists before anything asks stays out of the store until it speaks\n");
 	const first = await hub.newSession();
 	hub.release(await hub.claim(first));
 	const projection = createSessionProjection(hub);
@@ -73,12 +73,34 @@ try {
 	const stopListening = projection.onRow((row) => seen.push(row));
 
 	// The store is shared with every other run on this machine, so this smoke never assumes it is the
-	// only session that exists — it asks about the ones it made.
+	// only session that exists — it asks about the ones it made. Under the seed→fill lifecycle a
+	// session nobody has spoken in has no file (ADR-0006 §3), and no file means no row: the sidebar
+	// lists conversations, not intentions.
+	/** Assert a session has no row, with the row it found (always undefined) as the detail. */
+	const checkAbsent = async (label: string, id: string): Promise<void> => {
+		const row = await projection.row(id);
+		check(label, row === undefined, String(row));
+	};
 	const seeded = await projection.row(first);
-	check("the session has a row", seeded !== undefined, String(seeded));
-	check("and it is idle", seeded?.running === false && seeded.pending === 0, JSON.stringify(seeded));
-	check("with the workspace as its absCwd", seeded?.absCwd === root, seeded?.absCwd);
-	check("a row carries modified, not only createdAt", typeof seeded?.modified === "number" && seeded.modified > 0, String(seeded?.modified));
+	check("an unspoken session has no row", seeded === undefined, String(seeded));
+	const groupsBefore = await projection.groups();
+	check(
+		"and no group names its workspace yet",
+		groupsBefore.every((group) => group.absCwd !== root),
+		JSON.stringify(groupsBefore.map((group) => group.absCwd)),
+	);
+
+	process.stdout.write("the first message is what puts the session in the store\n");
+	const spokenHost = await hub.claim(first);
+	fake.setResponses([fakeAssistantMessage("a first answer")]);
+	await spokenHost.session.prompt("the conversation starts here");
+	check("the row arrived with the run", await until(() => seen.some((row) => row.id === first)));
+	hub.release(spokenHost);
+	const spokenRow = await projection.row(first);
+	check("a spoken session has a row", spokenRow !== undefined, String(spokenRow));
+	check("with the workspace as its absCwd", spokenRow?.absCwd === root, spokenRow?.absCwd);
+	check("a row carries modified, not only createdAt", typeof spokenRow?.modified === "number" && spokenRow.modified > 0, String(spokenRow?.modified));
+	check("and the title is the message the branch starts with", spokenRow?.title === "the conversation starts here", spokenRow?.title);
 
 	process.stdout.write("one scan, however many callers\n");
 	// Let the reap of the claim above land before counting publications: it reports the session it lost,
@@ -105,48 +127,50 @@ try {
 		`${groups.reduce((total, group) => total + group.sessions.length, 0)} vs ${rows.length}`,
 	);
 
-	process.stdout.write("a session created with nobody watching still gets a row\n");
+	process.stdout.write("a session created with nobody watching stays out of the store\n");
 	const second = await hub.newSession();
-	check(
-		"a created session reaches the store without a host",
-		await until(() => seen.some((row) => row.id === second)),
-		JSON.stringify(seen.map((row) => row.id)),
-	);
-	const newRow = await projection.row(second);
-	check("and it is a row of its own", newRow !== undefined && newRow.id !== first, newRow?.id);
-	check("an unrun session is idle", newRow?.running === false && newRow.pending === 0, JSON.stringify(newRow));
+	await settle();
+	await checkAbsent("a created session reaches no row without a host", second);
 
-	process.stdout.write("a host opening leaves an idle row alone\n");
+	process.stdout.write("an idle host on an unspoken session builds no row either\n");
 	const host = await hub.claim(second);
 	await settle();
-	const running = await projection.row(second);
-	check("an idle host leaves the row idle", running?.running === false, JSON.stringify(running));
-	check(
-		"and does not republish a row that says the same thing",
-		seen.filter((row) => row.id === second).length === 1,
-		`${seen.filter((row) => row.id === second).length} publishes`,
-	);
+	await checkAbsent("an idle host leaves the store alone", second);
+	check("and published nothing", !seen.some((row) => row.id === second), JSON.stringify(seen.map((row) => row.id)));
 
 	process.stdout.write("a run moves the row even though nothing is watching it\n");
 	// The whole point of the store: a session runs, and its row says so with no subscriber anywhere.
-	// Only the *content* stream would have carried this before, and there is no subscriber here.
+	// Only the *content* stream would have carried this before, and there is no subscriber here. The
+	// first message writes the file, so this run is also the row's birth — the row comes into the
+	// store with the run, and the run after this one is what moves a row that already exists.
 	const beforeRun = seen.length;
 	fake.setResponses([fakeAssistantMessage("answered")]);
 	const run = host.session.prompt("now the row has something to say");
-	await until(() => seen.some((row) => row.id === second && row.running === true));
-	check("the row said running while the run was in flight", seen.some((row) => row.id === second && row.running));
+	check("the row arrived during the run", await until(() => seen.some((row) => row.id === second)));
 	await run;
-	check("and the run ended", (await projection.row(second))?.running === false, JSON.stringify(await projection.row(second)));
-	check("the row moved more than once for one run", seen.length > beforeRun + 1, `${seen.length - beforeRun} updates`);
+	const landed = await projection.row(second);
+	check("and the run ended idle", landed?.running === false && landed.pending === 0, JSON.stringify(landed));
+	check("the title is read from the branch, not the file", landed?.title === "now the row has something to say", landed?.title);
+
+	// With the row in the store, the next run is the store's headline act: `running` while in flight,
+	// republished idle when it settles, all with no subscriber anywhere.
+	const beforeSecondRun = seen.length;
+	fake.setResponses([fakeAssistantMessage("answered again")]);
+	const secondRun = host.session.prompt("the row is watching itself now");
+	check("the row said running while the run was in flight", await until(() => seen.some((row) => row.id === second && row.running === true)));
+	await secondRun;
+	check("and the second run ended", (await projection.row(second))?.running === false, JSON.stringify(await projection.row(second)));
+	check("the row moved more than once for one run", seen.length > beforeSecondRun + 1, `${seen.length - beforeSecondRun} updates`);
 
 	const moved = seen.filter((row) => row.id === second).at(-1);
-	check("a message landing moved the row", moved !== undefined && moved.title.includes("now the row"), moved?.title);
 	check(
-		"and pushed modified forward",
-		(moved?.modified ?? 0) > (seeded?.modified ?? 0),
-		`${moved?.modified} vs ${seeded?.modified}`,
+		"a message landing pushed modified forward",
+		(moved?.modified ?? 0) > (landed?.modified ?? 0),
+		`${moved?.modified} vs ${landed?.modified}`,
 	);
-	check("the title is read from the branch, not the file", moved?.title.startsWith("now the row") === true, moved?.title);
+	// The title names the branch's first user message (ADR-0002), so a second turn moves the row's
+	// activity without renaming the conversation.
+	check("a later message does not rename the row", moved?.title === "now the row has something to say", moved?.title);
 
 	const settled = seen.length;
 	await settle();
@@ -161,16 +185,21 @@ try {
 	check("with the title it had while running", reaped?.title === moved?.title, `${reaped?.title} vs ${moved?.title}`);
 
 	process.stdout.write("a row's title follows the branch, not the file\n");
+	// The placeholder rule lives at the session level now — an unspoken session has no row at all,
+	// which the opening section checked. What the row must do here is carry the title its branch
+	// gave it until the branch moves.
 	const beforeBranch = await projection.row(first);
-	check("an untouched session is named by the placeholder", beforeBranch?.title === "新会话", beforeBranch?.title);
+	check("the row kept the title its branch gave it", beforeBranch?.title === "the conversation starts here", beforeBranch?.title);
 	const branchHost = await hub.claim(first);
 	fake.setResponses([fakeAssistantMessage("one"), fakeAssistantMessage("two")]);
 	await branchHost.session.prompt("first turn");
 	await settle();
-	check("a message landing named the row", (await projection.row(first))?.title === "first turn", (await projection.row(first))?.title);
+	// A second turn on the same branch cannot rename the session: the fallback title is the branch's
+	// first user message, and that message has not moved.
+	check("a message landing does not rename the row", (await projection.row(first))?.title === "the conversation starts here", (await projection.row(first))?.title);
 	check(
 		"and a cold probe agrees with the live row",
-		(await SessionManager.findSessionRowById(first))?.title === "first turn",
+		(await SessionManager.findSessionRowById(first))?.title === "the conversation starts here",
 		(await SessionManager.findSessionRowById(first))?.title,
 	);
 
@@ -244,7 +273,9 @@ try {
 	hub.release(observedHost);
 	await until(() => !hub.live.includes(afterStop));
 	check("the host was reaped while observed", !hub.live.includes(afterStop));
-	check("and the row says idle", (await projection.row(afterStop))?.running === false);
+	// The row's birth publish and its idle republish are asynchronous reads; wait for the idle one
+	// rather than guessing which landed by the time the reap returned.
+	check("and the row says idle", await until(() => seen.some((row) => row.id === afterStop && row.running === false)), JSON.stringify(seen.filter((row) => row.id === afterStop)));
 	stopObserving();
 	check("and the observer let go", !hub.isWatched(afterStop));
 
@@ -254,7 +285,7 @@ try {
 	const heartbeat: ConnectionItem = { type: "heartbeat", everyMs: 5_000 };
 	const onTheConnection: ServerFrame = { streamId: null, item: heartbeat };
 	const rowsBaseline: ServerFrame = { streamId: null, item: { type: "sessions", sessions: [] satisfies SessionRow[] } };
-	const oneRow: ServerFrame = { streamId: null, item: { type: "session_row", session: seeded as SessionRow } };
+	const oneRow: ServerFrame = { streamId: null, item: { type: "session_row", session: spokenRow as SessionRow } };
 	const ended: ServerFrame = { streamId: "session-a", end: true };
 	const failed: ServerFrame = { streamId: "session-a", error: { message: "that run could not start" } };
 
