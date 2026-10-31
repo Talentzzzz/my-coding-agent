@@ -57,9 +57,10 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 - **claim（认领）** —— 持有者对活跃会话的握持：只有改变会话的请求与在飞的运行各在其长度内一个；读
   transcript 不拿claim，**订阅也不拿**——一张订阅表回答"这条连接订了什么"，与 claim 回答"这个请求
   必须跑在活跃会话上"永不互相换算（ADR-0001）。
-- **approval（审批）** —— `before_tool` 把一次调用停住，直到有人回答
-  `POST /api/sessions/{id}/approvals/{toolCallId}`。哪些工具会问是**按会话**的，记录在一条
-  `tool_config` entry 里。
+- **approval（审批）** —— 结束重启（ADR-0006 §5）：`before_tool` 对要问的调用结束本轮运行，
+  tool call 在账本里悬空（有 tool_use 无 tool_result，派生态）；答案经
+  `POST /api/sessions/{id}/approvals/{toolCallId}` 到达后由编排层收尾（恢复机器落地后续跑）。
+  哪些工具会问是**按会话**的，记录在一条 `tool_config` entry 里。
 - **tool set（工具集合）** —— 活跃工具和审批映射是**一个**决定，一起写在一条 `tool_config` entry 里；
   它是状态，绝不是对话。
 - **mode（模式）** —— 全局设置里一个命名的预设：工具集合 + 每工具审批映射，整份存进 settings 的

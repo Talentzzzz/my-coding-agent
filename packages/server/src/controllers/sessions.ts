@@ -744,8 +744,8 @@ export class SessionController {
 	 * status code, which claims only "nobody is waiting for this answer now".
 	 *
 	 * The order below is load-bearing. The read-only check comes first because only an answerable
-	 * request may be recorded; `onApproval` comes before `approve` because answering publishes the
-	 * change, and the frame that reports the answer is built from the session's own change
+	 * request may be recorded; `onApproval` comes before `respondApproval` because answering publishes
+	 * the change, and the frame that reports the answer is built from the session's own change
 	 * notification — which therefore runs before this method gets control back.
 	 */
 	async approve(
@@ -763,7 +763,7 @@ export class SessionController {
 				throw httpStatus.conflict(`${toolCallId} is not a pending approval`);
 			}
 			this.listeners.onApproval?.(sessionId, toolCallId, approved);
-			session.approve(toolCallId, approved);
+			session.respondApproval(toolCallId, approved);
 			return { toolCallId, approved };
 		});
 	}

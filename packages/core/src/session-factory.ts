@@ -224,8 +224,12 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
  * Build one session: discover the workspace, the prompt, the tools, and the default model, then hand
  * the result to {@link Agent}.
  *
- * The resolution is {@link assemble}; this adds what only a live session has — the hooks, whose
- * handlers need the session they belong to, and the object itself.
+ * The resolution is {@link assemble} — the seed→fill lifecycle's seeding half (ADR-0006 §2): the
+ * workspace, the settings, the model selection, and the tool choice are resolved into pure-data
+ * seeds here, and every request re-runs the fill chain over them (adopt the row, fill the model,
+ * replay the ledger, build the context, assemble the tools, merge the approvals, build the prompt),
+ * so opening a session and resuming one are the same act by construction. This adds what only a live
+ * session has — the hooks, whose handlers need the session they belong to, and the object itself.
  */
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 	const { workspace, settingsManager, modelState, registry, agentsMd } = await assemble(options);
@@ -261,11 +265,13 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 	// The defaults, on the same surface the session hands back. Registered here rather than hard-coded
 	// in the class so a host can add a handler after them and refine what they decided.
 	//
-	// `before_tool`: the approval gate. The session owns the pending-approval bookkeeping and the UI
-	// that answers it; the hook only translates a denial into a block.
+	// `before_tool`: the approval gate. The session owns the bookkeeping of what the transcript is
+	// still waiting on and the UI that answers it; the hook only translates an unanswered approval
+	// into the block that ends the turn (ADR-0006 §5): the run stops rather than waiting in memory,
+	// and the answer arrives over REST to a call dangling in the ledger.
 	hooks.on("before_tool", async ({ toolCallId, toolName, args }) => {
 		const reason = await session.authorize(toolName, toolCallId, args);
-		return reason === undefined ? undefined : { block: { reason } };
+		return reason === undefined ? undefined : { block: { reason }, terminate: true };
 	});
 	// `after_tool`: the output backstop. Every built-in tool bounds its own output; this catches the
 	// tool that forgets. A result too large for the context is archived into the workspace whole and

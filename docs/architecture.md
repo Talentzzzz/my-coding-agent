@@ -127,7 +127,7 @@ level 本身骑在模型上（`Model.thinkingLevel`，由 `createModel(config, l
 | `after_tool` | `{ toolCallId, toolName, content, isError }` | 输出兜底，`boundToolContent` | 循环的 `afterToolCall` |
 
 - **`context`** 是一个纯覆盖接缝：没有注册任何处理器时，供应商拿到的正是会话自己本来会发的那些。
-- **`before_tool`** 是审批闸门。审批集合决定哪些工具要问，UI 通过审批端点 / `denyAllApprovals` / `snapshot.pendingApprovals` 回答，而这个 hook 把一次拒绝变成 `{ block: { reason } }`，循环把它作为工具错误报告给模型。后一个处理器可以**细化**这道闸门，但不能**撤掉**它。
+- **`before_tool`** 是审批闸门。审批集合决定哪些工具要问，UI 通过审批端点 / `denyAllApprovals` / `snapshot.pendingApprovals` 回答，而这个 hook 把一次未答的审批变成 `{ block: { reason }, terminate: true }`——运行在这里结束而不是等在内存里，tool call 在账本里悬空，答案经审批端点到达后收尾（ADR-0006 §5）。后一个处理器可以**细化**这道闸门，但不能**撤掉**它。
 - **`after_tool`** 是给"忘记约束自己输出的工具"的兜底。超过 80,000 字符的结果（`SPILL_RESULT_CHARS`，`context/spill.ts`）会被整份归档到工作区的 `.my-agent/tool-results/<session id>/<call id>-<tool name>.txt`，模型拿到的则是它的头尾各 2,000 字符加上归档路径，这样 agent 可以自己 `read` 剩下的部分。归档写不出去时，`boundToolContent` 仍然把文本限制在 `MAX_TOOL_RESULT_BYTES`（200 KB）。
 
 由此得出一条规则：**hook 决定模型看到什么，transcript 保留工具产出了什么。** 被改写的 content 回到循环、用于这一轮；而会话管理器记录的是工具自己的输出。改写也**落账**：工具结果消息落账时，hook 留给模型的 `shown` 半边作为一条 `tool_result_view` entry 紧随其后写进文件（`Agent.recordToolResultView`），发请求时由 `toolResultViewsOf` 从账本里把它和那条消息按 call id 配回成对——`forModel` 读它，所以重启后的进程服务给模型的仍是那个被约束过的版本；文件里也仍然保有工具实际返回的东西，快照与 wire 读到的也是它。

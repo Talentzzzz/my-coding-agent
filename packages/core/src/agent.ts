@@ -2,9 +2,10 @@ import {
 	Loop,
 	type AfterToolCallResult,
 	type AgentEvent,
-	type AgentTool,
+	type AgentRequestUpdate,
 	type AgentToolResult,
 	type BeforeToolCallResult,
+	type LoopContext,
 } from "@my-agent/loop";
 import type { SessionRuntime } from "./session/session-runtime.ts";
 import {
@@ -22,7 +23,6 @@ import {
 	type SimpleStreamOptions,
 	type Usage,
 } from "@my-agent/llm";
-import { type Settings } from "./config.ts";
 import {
 	compact as compactTranscript,
 	compactionThresholdFor,
@@ -32,9 +32,10 @@ import {
 } from "./context/compaction.ts";
 import { trimmableToolArgEntryIds } from "./context/trim-tool-call-args.ts";
 import { clearableToolResultIds, isCacheProbablyExpired } from "./context/clear-tool-results.ts";
-import { spillOversizedToolResult } from "./context/spill.ts";
 import { toolResultViewsOf, type ToolResultView } from "./context/tool-result-views.ts";
-import { boundToolContent, createHooks, type Hooks, type ToolResultContent } from "./hooks.ts";
+import { spillOversizedToolResult } from "./context/spill.ts";
+import { danglingApprovalsOf } from "./session/dangling.ts";
+import { boundToolContent, createHooks, type Hooks } from "./hooks.ts";
 import {
 	type Model,
 	fillModel,
@@ -63,7 +64,7 @@ import {
 	globalDefaultToolState,
 } from "./session/tool-config.ts";
 import type { SettingsManager } from "./settings-manager.ts";
-import { describeToolCall, type ToolRegistry, type ToolRunContext } from "./tools/index.ts";
+import { type ToolRegistry, type ToolRunContext } from "./tools/index.ts";
 import type { Workspace } from "./workspace.ts";
 
 /**
@@ -73,6 +74,12 @@ import type { Workspace } from "./workspace.ts";
  * uses what it is handed. That is what makes it testable (pass an in-memory session manager and an
  * in-memory settings manager) and replaceable (a different settings manager is a different object,
  * not a change here). `session-factory.ts` does the assembling for the real process.
+ *
+ * None of these fields is session *state*. The five singletons this orchestrator coordinates — the
+ * ledger, the settings, the model rows, the tool definitions, and this class — each hold their own
+ * pure-data state (ADR-0006 §1–2); what used to be the `Agent`'s private session fields are gone:
+ * the run-time transients are locals of the run (ADR-0006 §5), the approvals are derived from the
+ * ledger, and the stamps are derived from the file.
  */
 export interface AgentConfig {
 	/** The directory the agent may touch. Every tool path resolves inside it. */
@@ -91,7 +98,7 @@ export interface AgentConfig {
 	 * Handed over rather than copied, because a row is the thing most likely to change while a session
 	 * is open: a session that cached one would keep sending a key the user has already corrected, to an
 	 * endpoint they have already moved. Reading through this is what makes an edit in the settings panel
-	 * reach the next message — {@link Agent.adoptCurrentRow} re-derives the session's model from the row
+	 * reach the next message — the per-request fill re-derives the session's model from the row
 	 * it finds here, so the key, the endpoint, the window, and the wire id are all as fresh as the row is.
 	 */
 	models: ModelSource;
@@ -290,6 +297,55 @@ export type AgentSessionEvent =
 export type SessionEventListener = (event: AgentSessionEvent) => void;
 
 /**
+ * The transients of one run, as the run's own locals.
+ *
+ * Under the end-restart architecture nothing here is session state (ADR-0006 §5): the bag exists
+ * while `runLoop` is on the stack and is dropped with it. It is referenced from one place outside
+ * the run — the orchestrator's `run` slot, the cross-stack handle a mid-run reader (a snapshot, a
+ * queued prompt) reaches through, exactly as `runtime.activeRun` is the handle an abort reaches
+ * through — and dropped from that slot the moment the run settles.
+ */
+interface RunScope {
+	/**
+	 * The assistant message being written right now, as the loop last reported it.
+	 *
+	 * The loop's `message_update` carries the whole partial message and the session republishes only
+	 * its delta — but a window that attaches mid-run has missed every delta so far, so a baseline has
+	 * to carry the running text once. Cleared when the message ends, which is also when the store
+	 * gains it and a snapshot starts reading it from the transcript instead.
+	 */
+	partial: Message | undefined;
+	/**
+	 * Messages accepted mid-run, oldest first, each waiting on one of the runtime's queues.
+	 *
+	 * Nothing is written to the store here. A message accepted mid-run is persisted when the loop
+	 * drains it, so the file's order is the order the loop takes them in — which is the order the model
+	 * is shown them in, and the order a reconnect's baseline replays. The list exists for the run's end:
+	 * a run that stops before draining what it accepted appends the leftovers in acceptance order,
+	 * which is the only order left for a message nobody answered.
+	 */
+	accepted: Message[];
+	/** Stamps of the user messages this run wrote ahead of the loop, whose echoes must not be written twice. */
+	promptWrites: number[];
+	/**
+	 * Tool results a hook rewrote during the run, awaiting the entry that makes them durable.
+	 *
+	 * `after_tool` answers with what the model should see, but the shown half becomes a
+	 * `tool_result_view` entry only when its toolResult message lands — see
+	 * {@link Agent.recordToolResultView}. From that moment the ledger is the only source: the request reads
+	 * the views back through `toolResultViewsOf`, so each pending copy is dropped as it is written out.
+	 */
+	pendingToolResultViews: Map<string, ToolResultView>;
+	/** True between `retry_scheduled` and `retry_end`: the run is waiting out a backoff. */
+	retrying: boolean;
+	/** The attempt the policy is on, 1-based, or 0 when no retry is pending. */
+	retryAttempt: number;
+	retryMaxAttempts: number;
+	/** Queue depth as last published, so `queue_update` fires on a change and not on every touch. */
+	lastQueued: number;
+}
+
+/**
  * The delta a loop `message_update` is worth, or `undefined` for the frames that carry no characters.
  *
  * Start/end frames and tool-call deltas are dropped: a block boundary needs no frame of its own — the
@@ -311,52 +367,18 @@ function messageDeltaOf(event: Extract<AgentEvent, { type: "message_update" }>):
 	};
 }
 
-/** One unanswered approval: what the banner shows, and the promise the tool call is parked on. */
-interface PendingApprovalEntry {
-	approval: PendingApproval;
-	resolve(answer: ApprovalAnswer): void;
-}
-
 /**
- * How one approval was answered, and — when it was denied by something other than a person pressing
- * "deny" — the sentence the tool result should carry.
+ * One conversation: the workspace, the JSONL store, the settings, the models, the tools, and the
+ * loop they are orchestrated into.
  *
- * The reason is what keeps an abandonment from being recorded as a user's choice: a grace timer that
- * denies an approval nobody answered used to leave the same "The user denied permission" line in the
- * transcript as a press of the button, which was a lie about who answered. `approve()` carries no
- * reason — a person really did answer — so a denial there falls back to that sentence, where it is
- * true. An abort's denial never reaches the transcript through here at all: the loop normalizes an
- * aborted call's result itself, before the block branch is ever taken.
- */
-interface ApprovalAnswer {
-	approved: boolean;
-	/** Why the call was denied, when the denial came from somewhere other than the approve endpoint. */
-	reason?: string;
-}
-
-/**
- * One message accepted during a run, and the queue it is waiting on.
- *
- * The queue is the behaviour the composer asked for: a steered message is injected into the running
- * turn, so it is spent by the time that turn ends, while a follow-up is still waiting — and only
- * follow-ups are the depth a composer shows.
- */
-interface AcceptedMessage {
-	message: Message;
-	queue: PromptBehavior;
-}
-
-/**
- * One conversation: the pi-agent-core `Loop`, the workspace, the JSONL store, and the approval gate.
- *
- * The store is the source of truth for the conversation. Before every provider request,
- * {@link prepareRequestOnLoop} asks the `context` hook for the transcript the model should see — by
- * default the store's current view, which is where compaction shows up — and puts a fresh leading
- * system message in front of it, because the prompt and the tool declarations reach the model as a
- * system message and the loop holds no prompt of its own. That is what keeps a resumed session and
- * a live session on exactly the same context. The session owns no transport: the server subscribes to
- * {@link onEvent} and forwards events to the browser, so the same session could be driven from a
- * terminal instead.
+ * This is the orchestration layer of the stateless architecture (ADR-0006 §1): the four domains are
+ * stateless singletons, and the cross-domain order — record the selection, fill the model, replay
+ * the ledger, build the request, assemble the tools, merge the approvals, build the prompt, run the
+ * loop — lives here and nowhere else, because it belongs to no single domain. The class itself holds
+ * no session state: the durable half is the ledger the caller handed over, the live half is the
+ * runtime the caller handed over, and everything a request needs is rebuilt from those two per
+ * request. A resumed session and a live session run the same chain, which is what makes them
+ * indistinguishable.
  */
 export class Agent {
 	/** The directory every tool path resolves inside. */
@@ -386,128 +408,31 @@ export class Agent {
 	 */
 	readonly hooks: Hooks;
 
-	private readonly loop: Loop;
-	private readonly tools: ToolRegistry;
-	/** The caller's prompt builder; {@link buildSystemPrompt} is what the session calls. */
+	/** The caller's prompt builder; {@link buildSystemPrompt} is what a request calls. */
 	private readonly promptBuilder: (toolNames: readonly string[], approvals: Record<ToolApprovalKey, boolean>) => string;
 	private readonly listeners = new Set<SessionListener>();
 	private readonly eventListeners = new Set<SessionEventListener>();
-	private readonly pendingApprovals = new Map<string, PendingApprovalEntry>();
-	/**
-	 * Tool results a hook rewrote during the run in flight, awaiting the entry that makes them durable.
-	 *
-	 * `after_tool` answers with what the model should see, but the shown half becomes a
-	 * `tool_result_view` entry only when its toolResult message lands — see
-	 * {@link recordToolResultView}. From that moment the ledger is the only source: the request reads
-	 * the views back through `toolResultViewsOf`, so each pending copy is dropped as it is written out.
-	 */
-	private readonly pendingToolResultViews = new Map<string, ToolResultView>();
-	/**
-	 * Messages accepted mid-run, oldest first, each with the queue it is waiting on.
-	 *
-	 * Nothing is written to the store here. A message accepted mid-run is persisted when the loop
-	 * drains it, so the file's order is the order the loop takes them in — which is the order the model
-	 * is shown them in, and the order a reconnect's baseline replays. Persisting at acceptance instead
-	 * puts the file's copy of the message in front of the answer it interrupted, and a view rebuilt
-	 * from the file then draws a bubble between a question and its own reply.
-	 *
-	 * One list rather than one per queue, because two things read it whole: the depth counts the
-	 * follow-ups among them, and a run that ends without draining them appends them as they stand —
-	 * which is acceptance order, the only order left for a message nobody answered.
-	 */
-	private readonly accepted: AcceptedMessage[] = [];
-	/** Messages that started a run, whose echoes must not be written twice either. */
-	private readonly promptWrites: number[] = [];
-	/**
-	 * The session's live half: the queues a run drains at its take points, and the run in flight.
-	 *
-	 * Steered messages are pulled at the end of each turn; follow-ups when the loop would otherwise
-	 * stop. The queues live in the runtime rather than in the loop because they belong to the session
-	 * that accepts messages — the loop only pulls through the config hooks handed to {@link prompt}.
-	 * See {@link AgentConfig.runtime} for why the bag is held rather than owned.
-	 */
-	private readonly runtime: SessionRuntime;
-	/** Last stamp this session handed out, so two messages in one millisecond stay distinguishable. */
-	private lastStamp = 0;
-	/** Queue depth as last published, so `queue_update` fires on a change and not on every touch. */
-	private lastQueued = 0;
-	/**
-	 * The assistant message being written right now, as the loop last reported it.
-	 *
-	 * The loop's `message_update` carries the whole partial message and this session republishes only
-	 * its delta — but a window that attaches mid-run has missed every delta so far, so a baseline has
-	 * to carry the running text once. Cleared when the message ends, which is also when the store
-	 * gains it and a snapshot starts reading it from the transcript instead.
-	 */
-	private partial: Message | undefined;
-	/** True between `retry_scheduled` and `retry_end`: the run is waiting out a backoff. */
-	private retrying = false;
-	/**
-	 * True while {@link prompt} is inside the run it started.
-	 *
-	 * The session owns this flag because it owns the run: the loop is a stateless
-	 * engine, and the promise its `runLoop` returns already covers the whole
-	 * lifetime the loop used to report — through the `agent_end` listeners and
-	 * the engine's own `finally`.
-	 */
-	private running = false;
-	/** The attempt the policy is on, 1-based, or 0 when no retry is pending. */
-	private retryAttemptNumber = 0;
-	private retryMaxAttempts = 0;
-	/** The failure this retry was scheduled for, for a retry the package never announced an end for. */
-	private retryError?: string;
-	/**
-	 * Where a request actually leaves: the injected transport.
-	 *
-	 * A model's `stream()` goes through {@link Agent.transport}, which is this one wrapped in the retry
-	 * policy — so this is the seam the policy wraps, and the only place a provider is reached.
-	 */
+	private readonly tools: ToolRegistry;
+	/** Where a request actually leaves: the injected transport, before the retry policy wraps it. */
 	private readonly base: ChatTransport;
+	/** The queues a run drains at its take points, and the run in flight. See {@link AgentConfig.runtime}. */
+	private readonly runtime: SessionRuntime;
 	/**
-	 * The transport every model this session builds carries, with the retry policy around it.
-	 *
-	 * The loop is handed a stream function, not a transport: it asks the model it holds for a stream,
-	 * and the model answers through whatever transport it carries. So the policy is installed on the
-	 * model rather than on the loop, and every request — the loop's, and compaction's — goes through
-	 * {@link pumpAttempts} without either of them knowing retries exist.
-	 *
-	 * See {@link pumpAttempts} for why retries live below the loop rather than between turns.
-	 */
-	private readonly transport: ChatTransport;
-	/**
-	 * The one completion compaction makes: the session's own model, with the summary instructions.
-	 *
-	 * It goes over the model a turn goes over — the bag, filled and built into a request object here —
-	 * so the summary carries the same key, endpoint, and window as the conversation it summarizes
-	 * rather than reaching for a second configuration.
-	 */
-	private readonly summarize: Summarize = async (request) => {
-		// The same absence a turn meets: a session with no row answers with the sentence that says what
-		// to add, rather than sending a summary request to a placeholder endpoint.
-		if (this.models.list().find((userModel) => userModel.name === this.modelState.name) === undefined) {
-			return unconfiguredStream(this.requestModel()).result();
-		}
-		const messages: Message[] = [
-			{ role: "user", content: [{ type: "text", text: request.prompt }], timestamp: Date.now() },
-		];
-		return this.requestModel()
-			.stream({ messages, system: createSystemMessage(request.systemPrompt) }, {
-				// The row's key, said here rather than only carried on the model: this is the one call
-				// that does not travel through the loop, and the loop is what copies the key into options.
-				apiKey: this.modelState.apiKey,
-				maxTokens: request.maxTokens,
-				// A one-off summary is never sent again, so paying to cache it would buy nothing.
-				cacheRetention: "none",
-				...(request.signal === undefined ? {} : { signal: request.signal }),
-			})
-			.result();
-	};
-	/**
-	 * The one object a request is made with, as a bag: the seed the caller assembled, plus whatever
-	 * the last fill laid in. The request object itself is built from it per request and dropped —
-	 * see {@link Agent.requestModel}.
+	 * The model selection as pure data: the seed the caller assembled, moved by a selection or a
+	 * branch move, filled per request. This is the Model domain's state (ADR-0006 §2) — the one bag
+	 * this class holds, and only because the selection itself is not on disk until a request is made
+	 * with it. No request object outlives the request that built it.
 	 */
 	private readonly modelState: ModelState;
+	/**
+	 * The run in flight, as the handle a cross-stack reader reaches it through.
+	 *
+	 * The run's transients are locals of {@link Agent.startRun}; this slot is what a snapshot or a
+	 * queued prompt reads them through while the run is on the stack — the same structural role
+	 * `runtime.activeRun` plays for an abort. Set before the loop starts, cleared the moment the run
+	 * settles; a process restart drops it with everything else in memory.
+	 */
+	private run: RunScope | undefined;
 
 	constructor(config: AgentConfig) {
 		this.workspace = config.workspace;
@@ -520,29 +445,265 @@ export class Agent {
 		this.modelState = config.modelState;
 		this.runtime = config.runtime;
 		this.base = config.api ?? anthropicMessages;
-		// The session's send policy rides on every request object the bag builds — `requestModel`
-		// hands it over. The loop is never told about it: it asks for a stream from whatever model it
-		// holds, and the model answers through this — so retries, and the "no row behind this model"
-		// answer, happen below everything that could report them.
-		this.transport = {
+		// What the branch already says is not cached here: `recordSelection` reads it from the ledger
+		// each time it decides, so the baseline cannot drift from what the file holds. No loop is built
+		// here either: the loop is per run, assembled with the run's own closures — see
+		// {@link Agent.startRun}.
+	}
+
+	// ---------------------------------------------------------------------------- the read surface
+
+	/** This session's id, which is the id of its file. */
+	get id(): string {
+		return this.sessionManager.getSessionId();
+	}
+
+	/** The JSONL file this session appends to, or undefined for a session that is never written. */
+	get sessionFile(): string | undefined {
+		return this.sessionManager.getAbsSessionFile();
+	}
+
+	/** The row's name the session is on, which a config patch and the picker both name it by. */
+	get modelName(): string {
+		return this.modelState.name!;
+	}
+
+	/** The level this session is asked at, read off the seed and normalized. */
+	get thinkingLevel(): string {
+		return normalizeThinkingLevel(this.modelState.thinkingLevel);
+	}
+
+	/** The levels the current model can be asked at, in the order the picker shows them. */
+	get thinkingLevels(): string[] {
+		return thinkingLevelsFor();
+	}
+
+	/** Whether a run is in flight. True from `prompt` until the run settles, whatever it ends on. */
+	get isLooping(): boolean {
+		return this.run !== undefined;
+	}
+
+	/** Names of the tools the model may call right now, in registration order. */
+	get activeTools(): string[] {
+		return this.tools.activeNames();
+	}
+
+	/**
+	 * The approval map in force: the workspace's settings with this session's own choices over them.
+	 *
+	 * The single read point for the gate, the snapshot, and the prompt — all three answer the same
+	 * question, so none of them may reach past this to the settings manager alone. The session's own
+	 * half is the tool state's override, which assembly replayed from the branch's `tool_config` entry.
+	 */
+	getApprovals(): Record<ToolApprovalKey, boolean> {
+		return { ...this.settingsManager.getApprovals(), ...this.tools.toolState().approvalOverride };
+	}
+
+	/**
+	 * User messages accepted mid-run that the loop has not reached yet.
+	 *
+	 * The follow-up queue is the depth: a drained message is off it by the time the loop emits it back.
+	 * A steered message is not counted — it goes into the turn that is already running.
+	 */
+	get queued(): number {
+		return this.runtime.followUpQueue.size;
+	}
+
+	/**
+	 * Whether the transcript holds a tool call nobody has answered.
+	 *
+	 * Only an idle session reports one. A call that dangles *during* a run is a result in the middle
+	 * of landing, not a question waiting for a person, and reporting it would flash a banner on every
+	 * tool batch; the calls that wait for an answer are the ones whose run has already ended.
+	 */
+	get hasPendingApprovals(): boolean {
+		return this.run === undefined && this.danglingApprovals().length > 0;
+	}
+
+	/** True while a transient provider failure is waiting out its backoff. */
+	get isRetrying(): boolean {
+		return this.run?.retrying ?? false;
+	}
+
+	/** The 1-based retry attempt in flight, or 0 when no retry is pending. */
+	get retryAttempt(): number {
+		return this.run?.retryAttempt ?? 0;
+	}
+
+	/**
+	 * The state of this session, built by the one function that also serves a cold reader.
+	 *
+	 * The construction lives in `sessionSnapshot` rather than here so that a transcript this process
+	 * is *not* running is answered by the same code from the same parts: the only fields the two
+	 * callers can disagree on are the five they supply — `submitting`, `queued`, `isRetrying`,
+	 * `retryAttempt`, `pendingApprovals` — and everything a transcript can answer is read identically.
+	 * Of those five, four are the run's locals and one is derived from the ledger.
+	 */
+	get snapshot(): SessionSnapshot {
+		const run = this.run;
+		return sessionSnapshot({
+			sessionManager: this.sessionManager,
+			absWorkspaceRoot: this.workspace.absRoot,
+			// The snapshot reads only the name, the level, and the window off the model, all of which the
+			// filled bag already holds; no transport is needed for a read that sends nothing.
+			model: resolvedModel(this.modelState),
+			approvals: this.getApprovals(),
+			allTools: this.tools.names(),
+			activeTools: this.tools.activeNames(),
+			// Judged against this workspace's own settings, the same way a cold read judges it, so the
+			// panel's "沿用全局" label cannot disagree with itself between the two paths.
+			...followsGlobalOf(this.sessionManager, this.settingsManager, this.tools),
+			...(run?.partial === undefined ? {} : { partial: run.partial }),
+			submitting: run !== undefined,
+			queued: this.queued,
+			isRetrying: run?.retrying ?? false,
+			retryAttempt: run?.retryAttempt ?? 0,
+			pendingApprovals: run === undefined ? this.danglingApprovals() : [],
+		});
+	}
+
+	/** Usage summed over the transcript, with the window it is measured against. */
+	get usage(): UsageTotals {
+		return sessionUsage(this.sessionManager, resolvedModel(this.modelState).contextWindow);
+	}
+
+	/**
+	 * What the provider is sent, before hooks and before the leading system message.
+	 *
+	 * Read from the session manager every time rather than cached, because that is the whole point of
+	 * it being the single record: `appendCompaction` between two requests changes this, and so does
+	 * anything a host appends.
+	 */
+	private transcript(): Message[] {
+		return this.sessionManager.buildSessionContext().messages;
+	}
+
+	/** Subscribe to the session's state. The returned function unsubscribes. */
+	onChange(listener: SessionListener): () => void {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
+	}
+
+	/** Subscribe to the session's events. The returned function unsubscribes. */
+	onEvent(listener: SessionEventListener): () => void {
+		this.eventListeners.add(listener);
+		return () => this.eventListeners.delete(listener);
+	}
+
+	// ---------------------------------------------------------------------------- the run lifecycle
+
+	/**
+	 * Append a user message and run the loop until the agent stops.
+	 *
+	 * `selection` is the composer's model and level, applied here and recorded by the request that
+	 * follows. Both come with the message rather than as a command of their own, so a choice that was
+	 * never sent with is nowhere.
+	 *
+	 * While a run is streaming the message is queued instead of rejected: `steer` is injected at the
+	 * current turn's next drain point, `followUp` waits until the agent would otherwise stop. Either
+	 * way it is handed to the loop unwritten, and the loop's own echo of it is what the store records —
+	 * a drained message is one the conversation has reached, so the file gains it in the place the
+	 * model met it, behind the answer it interrupted. A run that ends before draining it writes it
+	 * anyway ({@link Agent.flushAccepted}), so accepted still means persisted, exactly once.
+	 */
+	async prompt(text: string, options: { behavior?: PromptBehavior; selection?: ModelSelection } = {}): Promise<void> {
+		const trimmed = text.trim();
+		if (trimmed.length === 0) return;
+
+		// The composer's choice arrives with the message, so this is the only place either half is
+		// applied. A message that never reaches here — an empty one, a rejected send — moves nothing.
+		if (options.selection !== undefined) this.applyModelSelection(options.selection);
+
+		if (this.run !== undefined) {
+			const message: Message = {
+				role: "user",
+				content: [{ type: "text", text: trimmed }],
+				timestamp: this.nextStamp(),
+			};
+			const queue = options.behavior ?? "followUp";
+			if (queue === "steer") this.runtime.steeringQueue.enqueue(message);
+			else this.runtime.followUpQueue.enqueue(message);
+			this.run.accepted.push(message);
+			this.emitQueueUpdate();
+			this.publish();
+			return;
+		}
+
+		await this.startPromptedRun(trimmed);
+	}
+
+	/**
+	 * Send a message into the running turn's next drain point.
+	 *
+	 * The same session as {@link Agent.prompt} with `behavior: "steer"` — named on its own because it
+	 * is its own answer in the protocol's terms: a steered message is spent by the turn it interrupted.
+	 * On an idle session it is an ordinary prompt, because a message nobody is running cannot steer.
+	 */
+	steer(text: string, options: { selection?: ModelSelection } = {}): Promise<void> {
+		return this.prompt(text, { ...options, behavior: "steer" });
+	}
+
+	/**
+	 * Queue a message for when the run ends.
+	 *
+	 * The same session as {@link Agent.prompt} with `behavior: "followUp"`: the message waits until the
+	 * agent would otherwise stop, and the depth it adds is what the composer shows.
+	 */
+	followUp(text: string, options: { selection?: ModelSelection } = {}): Promise<void> {
+		return this.prompt(text, { ...options, behavior: "followUp" });
+	}
+
+	/** Write the prompted message into the transcript, then run over it. */
+	private async startPromptedRun(trimmed: string): Promise<void> {
+		const message: Message = {
+			role: "user",
+			content: [{ type: "text", text: trimmed }],
+			timestamp: this.nextStamp(),
+		};
+		this.appendMessage(message);
+		this.publish();
+		await this.startRun(message);
+	}
+
+	/**
+	 * Run the loop once, over everything the transcript already holds.
+	 *
+	 * This is where the run lives, and it is the whole reason the class holds no run state: the loop,
+	 * the transport, the retry scope, and the event handler are all built here, closed over the run's
+	 * locals, and dropped when the run settles. What crosses the stack is exactly what
+	 * {@link AgentConfig.runtime} names — the queues and the active run — plus the `run` slot, which
+	 * is how a reader outside the run sees its transients.
+	 */
+	private async startRun(message: Message): Promise<void> {
+		const scope: RunScope = {
+			partial: undefined,
+			accepted: [],
+			// The one user message the store already holds is the one that started the run: it is written
+			// before the loop runs, so the loop's own echo of it must not be recorded twice.
+			promptWrites: [message.timestamp],
+			pendingToolResultViews: new Map(),
+			retrying: false,
+			retryAttempt: 0,
+			retryMaxAttempts: 0,
+			lastQueued: 0,
+		};
+		this.run = scope;
+
+		// The run's send policy rides on every request object this run's models are built with. The loop
+		// is never told about it: it asks for a stream from whatever model it holds, and the model
+		// answers through this — so retries, and the "no row behind this model" answer, happen below
+		// everything that could report them.
+		const transport: ChatTransport = {
 			stream: (model, context, options) => {
 				const outer = createAssistantMessageEventStream();
 				// Deliberately not awaited: the loop owns the stream's lifetime, and a failure that
 				// cannot be retried comes back as an error event on it rather than as a rejection out
 				// of the stream function (which the loop's contract forbids anyway).
-				//
-				// The loop hands back the object this session built — the run is seeded with a request
-				// object from the bag and `prepareRequest` returns a fresh one every turn — so the
-				// assertion only restores the type `ChatTransport` widens to in order to stay usable by
-				// any model.
-				void this.pumpAttempts(outer, model as Model, context, options);
+				void this.pumpAttempts(scope, outer, model as Model, context, options);
 				return outer;
 			},
 		};
-		// What the branch already says is not cached here: `recordSelection` reads it from the ledger
-		// each time it decides, so the baseline cannot drift from what the file holds.
-
-		this.loop = new Loop({
+		const loop = new Loop({
 			// The one thing the engine needs to know about a model: how it answers. A function rather
 			// than the model itself keeps the ownership where it belongs — this session owns the model
 			// and may replace it at any time, while the loop only ever asks the model it was handed.
@@ -552,73 +713,123 @@ export class Agent {
 			runtime: this.runtime,
 			beforeToolCall: async ({ toolCall, args }) => this.beforeTool(toolCall.id, toolCall.name, args),
 			afterToolCall: async ({ toolCall, result, isError }) =>
-				this.afterTool(toolCall.id, toolCall.name, result, isError),
-			// Handed to the constructor rather than assigned onto the loop afterwards: the engine reads
-			// the hook out of the config it snapshots when it is built, so a later assignment never
-			// reaches a request — and every decision made in preparation (the live row, the recorded
-			// selection, compaction, the views the model is shown) silently stops happening.
-			prepareRequest: async ({ context }, signal) => {
-				// The model is re-derived from the live row before anything else reads it, because the
-				// compaction decision below is measured against its context window and a threshold taken from
-				// the window the row had a moment ago would compact the wrong transcript. This is the whole of
-				// "an edit takes effect without reopening anything": the endpoint, the wire id, the window, and
-				// the key are all read here rather than captured when the session was assembled. A row that is
-				// gone — deleted, or renamed under a session that was using it — leaves the model as it is, and
-				// `unconfiguredStream` is what answers for that.
-				this.adoptCurrentRow();
-				// The choice this request is made with reaches the transcript here, at the moment a request
-				// is built from it — so a model or a level the user moved and never sent with is not in the
-				// file at all. It runs before the compaction decision below, which measures the prompt
-				// against this model's window.
-				this.recordSelection();
-				// One pass decides both what the request carries and whether it has to be summarized: the
-				// trigger, the clearing of stale tool results, and the summary all read the same entries, so the
-				// decision and the request cannot disagree about how large the prompt is.
-				const entries = await this.maybeCompact(this.sessionManager.buildContextEntries(), Date.now(), signal);
-				// The views come from the same selection of entries the request is built from, so what the
-				// model is shown and what the request carries cannot disagree about a rewrite.
-				const views = toolResultViewsOf(entries);
-				// The prompt is rebuilt here, not remembered: `applyConfig` can move the approval set and
-				// `setActiveTools` the tool set, and the model must be told about both on the next request.
-				const injected = { messages: messagesOf(entries), systemPrompt: this.buildSystemPrompt() };
-				const rewritten = await this.hooks.apply("context", injected);
-				const messages = this.forModel(rewritten?.messages ?? injected.messages, views);
-				// The leading system message is replaced rather than appended to, and every other system
-				// message is dropped: the prompt is rebuilt whole on this request, so a second one would
-				// describe a state that is already gone. A hook that wants to change the prompt returns
-				// `systemPrompt`; one that pushes a system message into `messages` loses it here.
-				const system = createSystemMessage(rewritten?.systemPrompt ?? injected.systemPrompt);
-				// A compaction checkpoint is already the user turn it stands for — `sessionEntryToContextMessages`
-				// wraps the summary in tags — so the transcript goes to the provider as it is.
-				const conversation = messages.filter((message) => message.role !== "system");
-				return {
-					// Built here, from the bag this request just filled: run-local, used for the one request,
-					// dropped.
-					model: this.requestModel(),
-					context: {
-						...context,
-						messages: system === undefined ? conversation : [system, ...conversation],
-						// The live executable set, built fresh against this request's run context. The loop declares
-						// it on the request (`toToolDeclaration`) rather than reading it out of the transcript, so
-						// a tool switched on mid-session reaches the model on the next request and the two cannot
-						// drift.
-						tools: this.tools.active(this.runContext()),
-					},
-				};
-			},
+				this.afterTool(scope, toolCall.id, toolCall.name, result, isError),
+			// The per-request fill chain (ADR-0006 §2): adopt the live row, record the selection, replay
+			// the ledger into a view, compact it if it is over the window, build the prompt from the live
+			// tool and approval answers, and hand the request back — built here, used once, dropped.
+			prepareRequest: async ({ context }, signal) => this.prepareRequest(transport, context, signal),
 		});
+		// The run's own subscription. Persistence and the per-run transients — the partial, the accepted
+		// list, the rewritten views — are the run's locals, so the handler is assembled with the run
+		// rather than on the session; the session's `finally` below is the last thing that touches it.
+		loop.subscribe(async (event) => this.handleEvent(scope, event));
 
-		this.loop.subscribe(async (event) => this.handleEvent(event));
+		try {
+			// The transcript and the tools are handed over per run — the loop keeps no state of its
+			// own — and both are rebuilt for the request that actually goes out by the fill chain
+			// anyway. The queues' drain hooks are what connect the engine's take points to the queues
+			// the runtime holds.
+			await loop.runLoop(
+				{ messages: this.transcript(), tools: this.tools.active(this.runContext()) },
+				message,
+				{
+					// A request object from the bag as it stands; the fill chain fills the bag and hands
+					// back a fresh one before anything is sent.
+					model: resolvedModel(this.modelState, transport),
+					getSteeringMessages: async () => this.runtime.steeringQueue.drain(),
+					getFollowUpMessages: async () => this.runtime.followUpQueue.drain(),
+				},
+			);
+		} finally {
+			// A message accepted in the last moment of the run — after the loop had already decided to
+			// stop looking for one — is on a queue nothing will drain, so it is written here rather than
+			// lost. The ordinary drain path has already emptied both lists by this point, which is what
+			// makes this a no-op for a run that ended the way it should.
+			this.flushAccepted(scope);
+			// The depth the run is leaving behind, said before the slot is dropped: after this the depth
+			// is zero and the baseline is the idle one.
+			this.emitQueueUpdate();
+			this.run = undefined;
+			// The run is not over until the loop's `runLoop` resolves — after every awaited listener for
+			// `agent_end` and the engine's own `finally`. So this is the first moment nothing is in
+			// flight, and without publishing here nothing ever reports it.
+			//
+			// In a `finally` rather than after the `await`, because the two ends of a run reach this point
+			// by different roads: a run that ends normally falls through, but a run whose own failure
+			// handling rejected — the persistence that reports the failure is the persistence that broke —
+			// arrives here as a rejection, and a publish placed after the `await` would be skipped by
+			// exactly the run that most needs the frame. Every end path a run has goes through this one
+			// block; the error frame that may precede it is announced by the caller that learns of the
+			// rejection, not by the session.
+			this.publish();
+		}
 	}
 
 	/**
-	 * The run-local request object the session's bag is sent with: the bag as it stands, built into a
-	 * `Model`, used for one read or one request and dropped. Every reader of the bag's facts — the
-	 * snapshot, the usage meter, the compaction summary, the loop's seed — goes through here, so there
-	 * is exactly one place that turns state into a request.
+	 * The per-request fill chain, from the ledger to the request object.
+	 *
+	 * In order: the model is re-derived from the live row (an edit takes effect without reopening
+	 * anything), the selection this request is made with is recorded — exactly one entry per move, so
+	 * a choice that was never sent with is not in the file — the ledger is replayed into the view, the
+	 * view is compacted if it is over this model's window, the prompt is built from the live tool and
+	 * approval answers, and the whole thing is returned as the one request object this turn sends.
+	 * Nothing here outlives the request.
 	 */
-	private requestModel(): Model {
-		return resolvedModel(this.modelState, this.transport);
+	private async prepareRequest(
+		transport: ChatTransport,
+		context: LoopContext,
+		signal: AbortSignal | undefined,
+	): Promise<AgentRequestUpdate> {
+		// The model is re-derived from the live row before anything else reads it, because the
+		// compaction decision below is measured against its context window and a threshold taken from
+		// the window the row had a moment ago would compact the wrong transcript. This is the whole of
+		// "an edit takes effect without reopening anything": the endpoint, the wire id, the window, and
+		// the key are all read here rather than captured when the session was assembled. A row that is
+		// gone — deleted, or renamed under a session that was using it — leaves the model as it is, and
+		// `unconfiguredStream` is what answers for that.
+		this.adoptCurrentRow();
+		// The choice this request is made with reaches the transcript here, at the moment a request
+		// is built from it — so a model or a level the user moved and never sent with is not in the
+		// file at all. It runs before the compaction decision below, which measures the prompt
+		// against this model's window.
+		this.recordSelection();
+		// One pass decides both what the request carries and whether it has to be summarized: the
+		// trigger, the clearing of stale tool results, and the summary all read the same entries, so the
+		// decision and the request cannot disagree about how large the prompt is.
+		const entries = await this.maybeCompact(this.sessionManager.buildContextEntries(), Date.now(), signal, transport);
+		// The views come from the same selection of entries the request is built from, so what the
+		// model is shown and what the request carries cannot disagree about a rewrite.
+		const views = toolResultViewsOf(entries);
+		// The prompt is rebuilt here, not remembered: `applyConfig` can move the approval set and
+		// `setActiveTools` the tool set, and the model must be told about both on the next request.
+		const injected = {
+			messages: messagesOf(entries),
+			systemPrompt: buildSystemPrompt(this.promptBuilder, this.tools.activeNames(), this.getApprovals()),
+		};
+		const rewritten = await this.hooks.apply("context", injected);
+		const messages = this.forModel(rewritten?.messages ?? injected.messages, views);
+		// The leading system message is replaced rather than appended to, and every other system
+		// message is dropped: the prompt is rebuilt whole on this request, so a second one would
+		// describe a state that is already gone. A hook that wants to change the prompt returns
+		// `systemPrompt`; one that pushes a system message into `messages` loses it here.
+		const system = createSystemMessage(rewritten?.systemPrompt ?? injected.systemPrompt);
+		// A compaction checkpoint is already the user turn it stands for — `sessionEntryToContextMessages`
+		// wraps the summary in tags — so the transcript goes to the provider as it is.
+		const conversation = messages.filter((message) => message.role !== "system");
+		return {
+			// Built here, from the bag this request just filled: run-local, used for the one request,
+			// dropped.
+			model: resolvedModel(this.modelState, transport),
+			context: {
+				...context,
+				messages: system === undefined ? conversation : [system, ...conversation],
+				// The live executable set, built fresh against this request's run context. The loop declares
+				// it on the request (`toToolDeclaration`) rather than reading it out of the transcript, so
+				// a tool switched on mid-session reaches the model on the next request and the two cannot
+				// drift.
+				tools: this.tools.active(this.runContext()),
+			},
+		};
 	}
 
 	/**
@@ -644,7 +855,7 @@ export class Agent {
 	 * last was, and `unconfiguredStream` is what answers for that, in the transport where the "no row"
 	 * answer has always lived.
 	 *
-	 * Nothing is recorded here: {@link recordSelection} does that once the model is final, because a row
+	 * Nothing is recorded here: {@link Agent.recordSelection} does that once the model is final, because a row
 	 * read mid-flight is not yet what the request went out with.
 	 */
 	private adoptCurrentRow(): void {
@@ -685,7 +896,7 @@ export class Agent {
 	/**
 	 * Put the session back on the model and level the branch now in force recorded.
 	 *
-	 * The same argument as {@link applyBranchToolConfig}: which model answered and how hard it was
+	 * The same argument as {@link Agent.applyBranchToolConfig}: which model answered and how hard it was
 	 * asked are facts about where the leaf is, so moving the leaf moves them, and a session that
 	 * carried the choice from the branch it left would be one session with two answers. The precedence
 	 * is assembly's — the branch's recorded level, else nothing asked for — so a move and a reopen
@@ -693,7 +904,7 @@ export class Agent {
 	 *
 	 * The branch's choices are the seed now, and the row's facts reach the bag with the same fill a
 	 * request would run, so a snapshot taken before the next request already reads the branch's model.
-	 * There is no baseline to update: {@link recordSelection} reads what the branch says each time,
+	 * There is no baseline to update: {@link Agent.recordSelection} reads what the branch says each time,
 	 * which is what keeps a move from being recorded twice.
 	 */
 	private applyBranchSelection(): void {
@@ -728,6 +939,7 @@ export class Agent {
 	 * overwrite that same slot in place.
 	 */
 	private async pumpAttempts(
+		scope: RunScope,
 		outer: AssistantMessageEventStream,
 		model: Model,
 		context: LlmContext,
@@ -764,7 +976,7 @@ export class Agent {
 				produce,
 				this.settingsManager.getRetrySettings(),
 				options?.signal,
-				this.retryCallbacks(),
+				this.retryCallbacks(scope),
 			);
 		} catch (error) {
 			// A stream function that throws breaks the loop's contract, so it ends up as an error
@@ -773,289 +985,71 @@ export class Agent {
 		}
 		// A retry the policy never announced an end for — the loop was cut short above — still has to
 		// close, or `isRetrying` would outlive the run.
-		if (this.retrying) this.endRetry(false, this.retryAttemptNumber, final.errorMessage);
+		if (scope.retrying) this.endRetry(scope, false, scope.retryAttempt, final.errorMessage);
 		pushTerminal(outer, final);
 		outer.end();
 	}
 
 	/** The three notifications `retryAssistantCall` makes, mapped one-to-one onto session events. */
-	private retryCallbacks(): RetryCallbacks {
+	private retryCallbacks(scope: RunScope): RetryCallbacks {
 		return {
 			onRetryScheduled: (attempt, maxAttempts, delayMs, errorMessage) => {
-				this.retrying = true;
-				this.retryAttemptNumber = attempt;
-				this.retryMaxAttempts = maxAttempts;
-				this.retryError = errorMessage;
+				scope.retrying = true;
+				scope.retryAttempt = attempt;
+				scope.retryMaxAttempts = maxAttempts;
 				this.emit({ type: "retry_scheduled", attempt, maxAttempts, delayMs, errorMessage });
 				this.publish();
 			},
 			onRetryAttemptStart: () => {
 				this.emit({
 					type: "retry_start",
-					attempt: this.retryAttemptNumber,
-					maxAttempts: this.retryMaxAttempts,
+					attempt: scope.retryAttempt,
+					maxAttempts: scope.retryMaxAttempts,
 				});
 				this.publish();
 			},
-			onRetryFinished: (success, attempt, finalError) => this.endRetry(success, attempt, finalError),
+			onRetryFinished: (success, attempt, finalError) => this.endRetry(scope, success, attempt, finalError),
 		};
 	}
 
 	/** Leave the retrying state and say how the loop ended. */
-	private endRetry(success: boolean, attempt: number, finalError?: string): void {
-		this.retrying = false;
-		this.retryAttemptNumber = 0;
-		this.retryMaxAttempts = 0;
-		this.retryError = undefined;
+	private endRetry(scope: RunScope, success: boolean, attempt: number, finalError?: string): void {
+		scope.retrying = false;
+		scope.retryAttempt = 0;
+		scope.retryMaxAttempts = 0;
 		this.emit({ type: "retry_end", success, attempt, finalError });
 		this.publish();
-	}
-
-	/** This session's id, which is the id of its file. */
-	get id(): string {
-		return this.sessionManager.getSessionId();
-	}
-
-	/** The JSONL file this session appends to, or undefined for a session that is never written. */
-	get sessionFile(): string | undefined {
-		return this.sessionManager.getAbsSessionFile();
-	}
-
-	/** The row's name the session is on, which a config patch and the picker both name it by. */
-	get modelName(): string {
-		return this.modelState.name!;
-	}
-
-	/** The level this session is asked at, read off the seed and normalized. */
-	get thinkingLevel(): string {
-		return normalizeThinkingLevel(this.modelState.thinkingLevel);
-	}
-
-	/** The levels the current model can be asked at, in the order the picker shows them. */
-	get thinkingLevels(): string[] {
-		return thinkingLevelsFor();
-	}
-
-	/** Whether a run is in flight, including a run parked at an approval. */
-	get isLooping(): boolean {
-		return this.running;
-	}
-
-	/** Names of the tools the model may call right now, in registration order. */
-	get activeTools(): string[] {
-		return this.tools.activeNames();
-	}
-
-	/**
-	 * The approval map in force: the workspace's settings with this session's own choices over them.
-	 *
-	 * The single read point for the gate, the snapshot, and the prompt — all three answer the same
-	 * question, so none of them may reach past this to the settings manager alone. The session's own
-	 * half is the tool state's override, which assembly replayed from the branch's `tool_config` entry.
-	 */
-	getApprovals(): Record<ToolApprovalKey, boolean> {
-		return { ...this.settingsManager.getApprovals(), ...this.tools.toolState().approvalOverride };
-	}
-
-	/**
-	 * User messages accepted mid-run that the loop has not reached yet.
-	 *
-	 * A queued message stays counted until the loop emits it back. A steered
-	 * message is not counted: it goes into the turn that is already running.
-	 */
-	get queued(): number {
-		let waiting = 0;
-		for (const accepted of this.accepted) if (accepted.queue === "followUp") waiting += 1;
-		return waiting;
-	}
-
-	/** True while a tool call is waiting for an approval nobody has answered yet. */
-	get hasPendingApprovals(): boolean {
-		return this.pendingApprovals.size > 0;
-	}
-
-	/**
-	 * Whether this id names an approval that is waiting for an answer. Read-only.
-	 *
-	 * The approvals endpoint checks this before answering, because the check has to happen without
-	 * answering: `approve` publishes synchronously, and the frame that reports a settlement is built
-	 * from that publication — running it first would make every grant read as a denial by whatever
-	 * reads the answer back. An unknown id is the endpoint's 409, not a silent no-op: a button that
-	 * answers nothing and says so to no one is worse than an error the client can show.
-	 */
-	hasPendingApproval(toolCallId: string): boolean {
-		return this.pendingApprovals.has(toolCallId);
-	}
-
-	/** True while a transient provider failure is waiting out its backoff. */
-	get isRetrying(): boolean {
-		return this.retrying;
-	}
-
-	/** The 1-based retry attempt in flight, or 0 when no retry is pending. */
-	get retryAttempt(): number {
-		return this.retryAttemptNumber;
-	}
-
-	/**
-	 * The state of this session, built by the one function that also serves a cold reader.
-	 *
-	 * The construction lives in `sessionSnapshot` rather than here so that a transcript this process
-	 * is *not* running is answered by the same code from the same parts: the only fields the two
-	 * callers can disagree on are the five they supply — `submitting`, `queued`, `isRetrying`,
-	 * `retryAttempt`, `pendingApprovals` — and everything a transcript can answer is read identically.
-	 */
-	get snapshot(): SessionSnapshot {
-		return sessionSnapshot({
-			sessionManager: this.sessionManager,
-			absWorkspaceRoot: this.workspace.absRoot,
-			model: this.requestModel(),
-			approvals: this.getApprovals(),
-			allTools: this.tools.names(),
-			activeTools: this.tools.activeNames(),
-			// Judged against this workspace's own settings, the same way a cold read judges it, so the
-			// panel's "沿用全局" label cannot disagree with itself between the two paths.
-			...followsGlobalOf(this.sessionManager, this.settingsManager, this.tools),
-			...(this.partial === undefined ? {} : { partial: this.partial }),
-			submitting: this.running,
-			queued: this.queued,
-			isRetrying: this.retrying,
-			retryAttempt: this.retryAttemptNumber,
-			pendingApprovals: [...this.pendingApprovals.values()].map((entry) => entry.approval),
-		});
-	}
-
-	/** Usage summed over the transcript, with the window it is measured against. */
-	get usage(): UsageTotals {
-		return sessionUsage(this.sessionManager, this.requestModel().contextWindow);
-	}
-
-	/**
-	 * What the provider is sent, before hooks and before the leading system message.
-	 *
-	 * Read from the session manager every time rather than cached, because that is the whole point of
-	 * it being the single record: `appendCompaction` between two requests changes this, and so does
-	 * anything a host appends.
-	 */
-	private transcript(): Message[] {
-		return this.sessionManager.buildSessionContext().messages;
-	}
-
-	/** Subscribe to the session's state. The returned function unsubscribes. */
-	onChange(listener: SessionListener): () => void {
-		this.listeners.add(listener);
-		return () => this.listeners.delete(listener);
-	}
-
-	/** Subscribe to the session's events. The returned function unsubscribes. */
-	onEvent(listener: SessionEventListener): () => void {
-		this.eventListeners.add(listener);
-		return () => this.eventListeners.delete(listener);
-	}
-
-	/**
-	 * Append a user message and run the loop until the agent stops.
-	 *
-	 * `selection` is the composer's model and level, applied here and recorded by the request that
-	 * follows. Both come with the message rather than as a command of their own, so a choice that was
-	 * never sent with is nowhere.
-	 *
-	 * While a run is streaming the message is queued instead of rejected: `steer` is injected at the
-	 * current turn's next drain point, `followUp` waits until the agent would otherwise stop. Either
-	 * way it is handed to the loop unwritten, and the loop's own echo of it is what the store records —
-	 * a drained message is one the conversation has reached, so the file gains it in the place the
-	 * model met it, behind the answer it interrupted. A run that ends before draining it writes it
-	 * anyway ({@link flushAccepted}), so accepted still means persisted, exactly once.
-	 */
-	async prompt(text: string, options: { behavior?: PromptBehavior; selection?: ModelSelection } = {}): Promise<void> {
-		const trimmed = text.trim();
-		if (trimmed.length === 0) return;
-
-		// The composer's choice arrives with the message, so this is the only place either half is
-		// applied. A message that never reaches here — an empty one, a rejected send — moves nothing.
-		if (options.selection !== undefined) this.applyModelSelection(options.selection);
-
-		const message: Message = {
-			role: "user",
-			content: [{ type: "text", text: trimmed }],
-			timestamp: this.nextStamp(),
-		};
-		if (this.running) {
-			const queue = options.behavior ?? "followUp";
-			if (queue === "steer") this.runtime.steeringQueue.enqueue(message);
-			else this.runtime.followUpQueue.enqueue(message);
-			this.accepted.push({ message, queue });
-			this.emitQueueUpdate();
-			this.publish();
-			return;
-		}
-
-		this.appendMessage(message);
-		this.rememberPrompt(message);
-		this.emitQueueUpdate();
-		this.publish();
-		this.running = true;
-		try {
-			// The transcript and the tools are handed over per run — the loop keeps no state of its
-			// own — and both are rebuilt for the request that actually goes out by
-			// {@link prepareRequestOnLoop} anyway. The queues' drain hooks are what connect the
-			// engine's take points to the queues this session owns.
-			await this.loop.runLoop(
-				{ messages: this.transcript(), tools: this.tools.active(this.runContext()) },
-				message,
-				{
-					// A request object from the bag as it stands; `prepareRequest` fills the bag and hands
-					// back a fresh one before anything is sent.
-					model: this.requestModel(),
-					getSteeringMessages: async () => this.runtime.steeringQueue.drain(),
-					getFollowUpMessages: async () => this.runtime.followUpQueue.drain(),
-				},
-			);
-		} finally {
-			this.running = false;
-			// A message accepted in the last moment of the run — after the loop had already decided to
-			// stop looking for one — is on a queue nothing will drain, so it is written here rather than
-			// lost. The ordinary drain path has already emptied both lists by this point, which is what
-			// makes this a no-op for a run that ended the way it should.
-			this.flushAccepted();
-			// `agent_end` is the last *event* of a run, but the run is not over until the loop's
-			// `runLoop` resolves — after every awaited listener for that event and the engine's own
-			// `finally`. So this is the first moment `running` is false, and without publishing here
-			// nothing ever reports it: a subscriber to {@link onChange} would keep reading `true` for
-			// a run that had ended, which is exactly what a stream needs to know.
-			//
-			// In a `finally` rather than after the `await`, because the two ends of a run reach this point
-			// by different roads: a run that ends normally falls through, but a run whose own failure
-			// handling rejected — the persistence that reports the failure is the persistence that broke —
-			// arrives here as a rejection, and a publish placed after the `await` would be skipped by
-			// exactly the run that most needs the frame. Every end path a run has goes through this one
-			// block; the error frame that may precede it is announced by the caller that learns of the
-			// rejection, not by the session.
-			this.publish();
-		}
 	}
 
 	/**
 	 * Stop the current run and wait for it to settle.
 	 *
 	 * Settling means the loop finished persisting the turn it was in the middle of, including tool
-	 * results. Note that persistence happens in {@link handleEvent}, the session's own subscription
-	 * to the agent loop, so it runs whether or not a transport is listening. The reason to wait is
-	 * different: a caller that is about to hand this session's socket to a new session must not do so
-	 * while frames for the old one are still being produced.
+	 * results. The abort lands on the run's controller — the one the run registered on the runtime —
+	 * and the run that ends writes what it was writing, so a stopped turn is a complete turn on disk.
+	 * Calls the transcript would otherwise show without a result are closed by
+	 * {@link Agent.denyAllApprovals}, so an abort never leaves a question the next request cannot ask.
 	 *
 	 * A retry that is only waiting out its backoff is cancelled by the same call: the abort signal is
 	 * the one `retryAssistantCall` sleeps on, so it returns an aborted message instead of sleeping to
 	 * the end. Nothing here has to know whether the run is live or in a backoff.
 	 */
 	async abort(): Promise<void> {
-		this.loop.abort();
+		// Read once: the run clears its own registration as it settles, and the promise is what waits
+		// for that settlement.
+		const active = this.runtime.activeRun;
+		active?.abortController.abort();
+		await (active?.promise ?? Promise.resolve());
+		// The run drops its own slot in its `finally`, a microtask after the idle promise resolves;
+		// wait for that too, so the sweep below sees the idle session it is defined on.
+		while (this.run !== undefined) await Promise.resolve();
 		this.denyAllApprovals("The run was aborted.");
-		await this.loop.waitForIdle();
 		// The same end a finished run publishes, and for the same reason: an abort is how a run that
-		// nobody asked to stop otherwise reports that it has. See {@link prompt}.
+		// nobody asked to stop otherwise reports that it has. See {@link Agent.prompt}.
 		this.publish();
 	}
+
+	// ---------------------------------------------------------------------------- config moves
 
 	/**
 	 * Move the conversation onto another branch of its own tree.
@@ -1074,7 +1068,7 @@ export class Agent {
 	 * file the rest of that turn under a branch the turn was not answering.
 	 */
 	branchTo(entryId: string, descend = true): string {
-		if (this.running) throw new Error("A run is in flight: the branch cannot move under it");
+		if (this.run !== undefined) throw new Error("A run is in flight: the branch cannot move under it");
 
 		const leafId = descend ? this.sessionManager.getBranchTip(entryId) : entryId;
 		const previousName = this.modelName;
@@ -1122,7 +1116,7 @@ export class Agent {
 	 * Narrow the tools the model may call. An unknown name throws and leaves the session as it was.
 	 *
 	 * The change is recorded as one `tool_config` entry and takes effect on the next request:
-	 * {@link prepareRequestOnLoop} offers the registry's live active set with every request, so the
+	 * the fill chain offers the registry's live active set with every request, so the
 	 * model is told about the narrowed set when the next prompt is built.
 	 */
 	setActiveTools(names: string[]): void {
@@ -1136,19 +1130,12 @@ export class Agent {
 		this.emitConfigChanged({ tools: active });
 	}
 
-	/** The fresh prompt: the caller's builder over the registry's current names and the live approvals. */
-	private buildSystemPrompt(): string {
-		// The approval map is the session's effective one, so the prompt promises exactly what the gate
-		// will ask for rather than what the workspace defaults say.
-		return this.promptBuilder(this.tools.activeNames(), this.getApprovals());
-	}
-
 	/**
 	 * Point this session at another row, another level, or both.
 	 *
 	 * There is no entry here and no settings write: a choice is not something that happened until a
 	 * request is made with it, so it lives on the model the session is on and reaches the transcript in
-	 * {@link recordSelection}, at the moment the request it belongs to is built. What a caller gets
+	 * {@link Agent.recordSelection}, at the moment the request it belongs to is built. What a caller gets
 	 * back immediately is the change itself — the snapshot, the level, and the next request are
 	 * all about the new model, whether or not that request is ever sent.
 	 *
@@ -1187,7 +1174,8 @@ export class Agent {
 	 * The two halves of a patch live in different places. Approval is session-scoped: it merges into
 	 * this session's own choices and is recorded as one `tool_config` entry, so another session over
 	 * this workspace is untouched. The queue modes go to the settings manager, which owns both the
-	 * merged value and the file it goes in.
+	 * merged value and the file it goes in — and onto the runtime's queues, which read the mode at
+	 * each drain.
 	 *
 	 * The model and the thinking level are not part of a patch at all. They are chosen in the composer
 	 * and arrive with the message they belong to ({@link ModelSelection}), so there is nothing here to
@@ -1208,39 +1196,118 @@ export class Agent {
 		});
 	}
 
-	/** Answer one waiting approval. An id nothing is waiting on is ignored. */
-	approve(toolCallId: string, approved: boolean): void {
-		const entry = this.pendingApprovals.get(toolCallId);
-		if (!entry) return;
-		this.pendingApprovals.delete(toolCallId);
-		entry.resolve({ approved });
-		this.publish();
+	// ---------------------------------------------------------------------------- approvals
+
+	/**
+	 * The tool calls the transcript is still waiting on, as the approval flow sees them.
+	 *
+	 * Derived from the ledger, never held (ADR-0006 §5): an approval that is waiting *is* a dangling
+	 * call in the view, and the answer arrives over REST to close it. See
+	 * {@link Agent.hasPendingApprovals} for why a run in flight reports none.
+	 */
+	private danglingApprovals(): PendingApproval[] {
+		return danglingApprovalsOf(this.sessionManager.buildContextEntries());
 	}
 
 	/**
-	 * Deny every waiting approval, for example when the socket that owns them disconnects.
+	 * Whether this id names a tool call nobody has answered. Read-only.
 	 *
-	 * The reason rides the answer into the transcript: each denied call's tool result says what
-	 * actually happened — the run was aborted, the session closed, no window answered — rather than
-	 * the same sentence a press of "deny" writes, which would record an abandonment as a choice.
+	 * The approvals endpoint checks this before answering, because the check has to happen without
+	 * answering: `respondApproval` publishes synchronously, and the frame that reports a settlement is
+	 * built from that publication — running it first would make every grant read as a denial by
+	 * whatever reads the answer back. An unknown id is the endpoint's 409, not a silent no-op: a button
+	 * that answers nothing and says so to no one is worse than an error the client can show.
 	 */
-	denyAllApprovals(reason: string): void {
-		if (this.pendingApprovals.size === 0) return;
-		for (const [toolCallId, entry] of [...this.pendingApprovals]) {
-			this.pendingApprovals.delete(toolCallId);
-			entry.resolve({ approved: false, reason });
+	hasPendingApproval(toolCallId: string): boolean {
+		return this.run === undefined && this.danglingApprovals().some((call) => call.toolCallId === toolCallId);
+	}
+
+	/**
+	 * Close one unanswered tool call with the answer that arrived over REST.
+	 *
+	 * The end-restart chain's answering half: the run that asked is over, the call dangles in the
+	 * ledger, and this writes the result that closes it. A denial writes the same sentence a press of
+	 * "deny" has always written. A grant cannot re-run the tool in place until the recovery machine
+	 * lands (ticket 15), so the transitional grant does the two things that are recordable now: it
+	 * writes the approval into the transcript, and it records the session's approval choice for that
+	 * tool as one `tool_config` entry — the same move a config patch makes — so the re-issued call the
+	 * result asks for is one the gate lets through. Either way the transcript is left provider-legal.
+	 *
+	 * An id nothing is waiting on is ignored: the caller checked first, and answered it.
+	 */
+	respondApproval(toolCallId: string, approved: boolean): void {
+		const call = this.danglingApprovals().find((candidate) => candidate.toolCallId === toolCallId);
+		if (call === undefined) return;
+		this.appendDanglingResult(call, { approved });
+		if (approved) {
+			this.tools.mergeApprovalOverride({ [call.toolName as ToolApprovalKey]: true });
+			this.sessionManager.appendToolConfig(this.tools.activeNames(), this.getApprovals());
 		}
 		this.publish();
 	}
 
 	/**
+	 * Close every unanswered tool call with the reason nothing answered.
+	 *
+	 * The reason rides the answer into the transcript: each closed call's tool result says what
+	 * actually happened — the run was aborted, the session closed, no window answered — rather than
+	 * the same sentence a press of "deny" writes, which would record an abandonment as a choice.
+	 *
+	 * Only an idle session closes anything: a call that dangles mid-run is a result the loop itself is
+	 * about to write, and closing it here would write the answer twice.
+	 */
+	denyAllApprovals(reason: string): void {
+		if (this.run !== undefined) return;
+		const dangling = this.danglingApprovals();
+		if (dangling.length === 0) return;
+		for (const call of dangling) this.appendDanglingResult(call, { approved: false, reason });
+		this.publish();
+	}
+
+	/** Write the result that closes one dangling call, and announce the entry like any other message. */
+	private appendDanglingResult(call: PendingApproval, answer: { approved: boolean; reason?: string }): void {
+		const text = answer.approved
+			? `The user approved running ${call.toolName}. Issue the call again to run it.`
+			: answer.reason ?? `The user denied permission to run ${call.toolName}.`;
+		const message: Message = {
+			role: "toolResult",
+			toolCallId: call.toolCallId,
+			toolName: call.toolName,
+			content: [{ type: "text", text }],
+			details: {},
+			isError: !answer.approved,
+			timestamp: Date.now(),
+		};
+		this.appendMessage(message);
+	}
+
+	/**
+	 * Ask the UI before running a tool that settings mark as requiring approval.
+	 *
+	 * Under the end-restart semantics the gate does not wait: it answers with the reason the call
+	 * cannot run, and {@link Agent.beforeTool} turns that into the block that ends the turn — the run
+	 * ends, and the answer arrives over REST to a call dangling in the ledger (ticket 15 completes the
+	 * resumption half). A tool the map does not gate runs without asking.
+	 */
+	async authorize(name: string, _toolCallId: string, _args: unknown): Promise<string | undefined> {
+		const key = name as ToolApprovalKey;
+		if (!this.getApprovals()[key]) return undefined;
+		return (
+			`This run ended: ${name} needs approval and nobody has answered yet. ` +
+			"Do not issue the call again in this turn; wait for the user's answer or reply in words."
+		);
+	}
+
+	// ---------------------------------------------------------------------------- waiting and closing
+
+	/**
 	 * Wait for the current run to finish and for its writes to reach the file system, without stopping
 	 * anything. A run that is already idle returns immediately.
 	 *
-	 * A queued message is part of the run that accepted it, so the loop is drained to the end: the queue
+	 * A queued message is part of the run that accepted it, so the run is drained to the end: the queue
 	 * can still be non-empty when one turn settles, which is exactly the case a caller waiting for "the
-	 * transcript is complete" must not resolve on. {@link close} is this plus dropping unanswered
-	 * approvals, which is what makes it terminate.
+	 * transcript is complete" must not resolve on. {@link Agent.close} is this plus closing unanswered
+	 * calls, which is what makes it terminate.
 	 *
 	 * A pending retry is part of the run too, so it is waited for rather than resolved past: the
 	 * retry runs inside the stream the loop is awaiting, which keeps the agent non-idle for the whole
@@ -1248,19 +1315,20 @@ export class Agent {
 	 */
 	async settle(): Promise<void> {
 		do {
-			await this.loop.waitForIdle();
-		} while (this.queued > 0 || this.retrying);
+			await (this.runtime.activeRun?.promise ?? Promise.resolve());
+		} while (this.queued > 0 || (this.run?.retrying ?? false));
 	}
 
 	/**
-	 * Deny waiting approvals and wait for the session to go quiet, so exiting mid-run cannot truncate
-	 * the transcript. `abort()` covers a live run; this also covers a run that is only blocked on an
-	 * approval prompt.
+	 * Wait for the session to go quiet, then close the calls nobody answered, so exiting mid-run
+	 * cannot leave the transcript with a question the next request cannot ask.
 	 */
 	async close(): Promise<void> {
-		this.denyAllApprovals("Session closed.");
 		await this.settle();
+		this.denyAllApprovals("Session closed.");
 	}
+
+	// ---------------------------------------------------------------------------- compaction
 
 	/**
 	 * Shrink the context before the next request, and answer with the entries that request should carry.
@@ -1275,10 +1343,10 @@ export class Agent {
 	 * transcript folded into a summary, which costs a request; nothing is kept verbatim but the turn in
 	 * flight.
 	 *
-		 * Both steps before the summary are *recorded*, not held in memory: `appendTrimToolCallArgs` and
-		 * `appendClearToolResults` name the entries, and the store's own view applies them from then on.
-		 * So a resumed process, the next request in the run, and the window all read one transcript
-		 * instead of each re-deciding.
+	 * Both steps before the summary are *recorded*, not held in memory: `appendTrimToolCallArgs` and
+	 * `appendClearToolResults` name the entries, and the store's own view applies them from then on.
+	 * So a resumed process, the next request in the run, and the window all read one transcript
+	 * instead of each re-deciding.
 	 *
 	 * A summary that cannot be produced leaves the transcript exactly as it was and is reported rather
 	 * than thrown: compaction is an optimization, and failing the turn over it would replace a clear
@@ -1286,26 +1354,54 @@ export class Agent {
 	 *
 	 * Returns the entries to send: the ones it was given when no step changed anything, the store's view
 	 * after whichever step was enough, and that view again once a checkpoint was written. The counts are
-		 * reported by the `tool_call_args_trimmed`, `tool_results_cleared`, and `compaction` events, not by this answer.
+	 * reported by the `tool_call_args_trimmed`, `tool_results_cleared`, and `compaction` events, not by this answer.
 	 */
 	async maybeCompact(
 		entries: readonly SessionEntry[],
 		now: number,
 		signal?: AbortSignal,
+		transport?: ChatTransport,
 	): Promise<readonly SessionEntry[]> {
-		const model = this.requestModel();
+		const model = resolvedModel(this.modelState, transport);
 		const threshold = compactionThresholdFor(model.contextWindow);
 		if (!shouldCompact(messagesOf(entries), threshold)) return entries;
 
-			const trimmed = this.trimRecordedArgs(entries);
-			if (!shouldCompact(messagesOf(trimmed), threshold)) return trimmed;
+		const trimmed = this.trimRecordedArgs(entries);
+		if (!shouldCompact(messagesOf(trimmed), threshold)) return trimmed;
 
-			const cleared = this.clearStaleToolResults(trimmed, now);
-			if (!shouldCompact(messagesOf(cleared), threshold)) return cleared;
+		const cleared = this.clearStaleToolResults(trimmed, now);
+		if (!shouldCompact(messagesOf(cleared), threshold)) return cleared;
 
-			let outcome;
-			try {
-				outcome = await compactTranscript(cleared, model, this.summarize, signal);
+		// The one completion compaction makes: the session's own model, with the summary instructions.
+		// It goes over the model a turn goes over — the bag, filled and built into a request object here —
+		// so the summary carries the same key, endpoint, and window as the conversation it summarizes
+		// rather than reaching for a second configuration. Built per call, because the transport it
+		// goes over is the run's own.
+		const summarize: Summarize = async (request) => {
+			// The same absence a turn meets: a session with no row answers with the sentence that says what
+			// to add, rather than sending a summary request to a placeholder endpoint.
+			if (this.models.list().find((userModel) => userModel.name === this.modelState.name) === undefined) {
+				return unconfiguredStream(model).result();
+			}
+			const messages: Message[] = [
+				{ role: "user", content: [{ type: "text", text: request.prompt }], timestamp: Date.now() },
+			];
+			return model
+				.stream({ messages, system: createSystemMessage(request.systemPrompt) }, {
+					// The row's key, said here rather than only carried on the model: this is the one call
+					// that does not travel through the loop, and the loop is what copies the key into options.
+					apiKey: this.modelState.apiKey,
+					maxTokens: request.maxTokens,
+					// A one-off summary is never sent again, so paying to cache it would buy nothing.
+					cacheRetention: "none",
+					...(request.signal === undefined ? {} : { signal: request.signal }),
+				})
+				.result();
+		};
+
+		let outcome;
+		try {
+			outcome = await compactTranscript(cleared, model, summarize, signal);
 		} catch (error) {
 			// An abort is not a compaction failure: the run is ending, and the transcript simply keeps the
 			// history it already had. Anything else is worth saying out loud, because the next request may
@@ -1390,48 +1486,34 @@ export class Agent {
 		return view;
 	}
 
+	// ---------------------------------------------------------------------------- the run's event half
+
 	/**
 	 * A stamp no other message from this session shares.
 	 *
 	 * `Date.now()` is not enough: two messages queued in the same millisecond would be
-	 * indistinguishable, and the echo of one would then be mistaken for the other.
+	 * indistinguishable, and the echo of one would then be mistaken for the other. Derived from the
+	 * ledger rather than held, so a restart — which forgets every counter — still cannot issue a stamp
+	 * an existing message already has: the newest timestamp the file holds is the floor.
 	 */
 	private nextStamp(): number {
-		this.lastStamp = Math.max(Date.now(), this.lastStamp + 1);
-		return this.lastStamp;
-	}
-
-	/**
-	 * Ask the UI before running a tool that settings mark as requiring approval.
-	 *
-	 * Answers with the reason to block the call, or `undefined` when it may run. Public because the
-	 * default `before_tool` hook is installed outside the class: the session owns the pending-approval
-	 * bookkeeping and the UI-facing `approve`/`denyAllApprovals`, while the hook only decides when to
-	 * ask. A caller that answers nobody leaves the run waiting, which is what `close()` is for.
-	 */
-	async authorize(name: string, toolCallId: string, args: unknown): Promise<string | undefined> {
-		const key = name as ToolApprovalKey;
-		if (!this.getApprovals()[key]) return undefined;
-
-		const answer = await new Promise<ApprovalAnswer>((resolve) => {
-			this.pendingApprovals.set(toolCallId, {
-				approval: { toolCallId, toolName: name, args, summary: describeToolCall(name, args) },
-				resolve,
-			});
-			this.publish();
-		});
-
-		if (answer.approved) return undefined;
-		// An answer with no reason of its own is a person pressing "deny" — the sentence below is true
-		// for exactly that case, which is why only the endpoint's denial falls back to it.
-		return answer.reason ?? `The user denied permission to run ${name}.`;
+		let newest = 0;
+		for (const entry of this.sessionManager.getEntries()) {
+			if (entry.type !== "message") continue;
+			const stamp = entry.message.timestamp;
+			if (typeof stamp === "number" && stamp > newest) newest = stamp;
+		}
+		return Math.max(Date.now(), newest + 1);
 	}
 
 	/**
 	 * Run the `before_tool` hooks.
 	 *
 	 * The loop's seam can only block a call or let it through, so a block is the only decision that
-	 * reaches it: an `args` refinement goes as far as the handlers registered after this one.
+	 * reaches it: an `args` refinement goes as far as the handlers registered after this one. A block
+	 * from the approval gate carries the terminate hint, because ending the turn is what makes the run
+	 * end — without it the loop would make another request in the same run and the model would re-issue
+	 * the call into the same gate.
 	 */
 	private async beforeTool(
 		toolCallId: string,
@@ -1440,18 +1522,23 @@ export class Agent {
 	): Promise<BeforeToolCallResult | undefined> {
 		const decided = await this.hooks.apply("before_tool", { toolCallId, toolName, args });
 		if (decided?.block === undefined) return undefined;
-		return { block: true, reason: decided.block.reason };
+		return {
+			block: true,
+			reason: decided.block.reason,
+			...(decided.terminate === true ? { terminate: true } : {}),
+		};
 	}
 
 	/**
 	 * Run the `after_tool` hooks and keep both halves of their answer.
 	 *
 	 * The loop builds the transcript message from what this returns, so the hooks' content goes back to
-	 * it: that is what the model is shown for this turn. {@link transcriptMessage} then records the
+	 * it: that is what the model is shown for this turn. {@link Agent.transcriptMessage} then records the
 	 * tool's own output instead, because a bound — or any rewrite — is about what the model sees, and
 	 * the file must still hold what the tool produced.
 	 */
 	private async afterTool(
+		scope: RunScope,
 		toolCallId: string,
 		toolName: string,
 		result: AgentToolResult<unknown>,
@@ -1464,7 +1551,7 @@ export class Agent {
 			isError,
 		});
 		if (decided?.content === undefined) return undefined;
-		this.pendingToolResultViews.set(toolCallId, { stored: result.content, shown: decided.content });
+		scope.pendingToolResultViews.set(toolCallId, { stored: result.content, shown: decided.content });
 		return { content: decided.content };
 	}
 
@@ -1474,9 +1561,9 @@ export class Agent {
 	 * The loop hands back the content the hooks produced; the store keeps what the tool actually
 	 * returned, so bounding the model's context can never lose the tool's output.
 	 */
-	private transcriptMessage(message: Message): Message {
+	private transcriptMessage(scope: RunScope, message: Message): Message {
 		if (message.role !== "toolResult") return message;
-		const view = this.pendingToolResultViews.get(message.toolCallId);
+		const view = scope.pendingToolResultViews.get(message.toolCallId);
 		return view === undefined ? message : { ...message, content: view.stored };
 	}
 
@@ -1489,11 +1576,11 @@ export class Agent {
 	 * the replay to keep. From here on the ledger is the only source of the view: the next request
 	 * reads it back through `toolResultViewsOf`, so the pending copy is dropped as it is written out.
 	 */
-	private recordToolResultView(message: Message): void {
+	private recordToolResultView(scope: RunScope, message: Message): void {
 		if (message.role !== "toolResult") return;
-		const view = this.pendingToolResultViews.get(message.toolCallId);
+		const view = scope.pendingToolResultViews.get(message.toolCallId);
 		if (view === undefined) return;
-		this.pendingToolResultViews.delete(message.toolCallId);
+		scope.pendingToolResultViews.delete(message.toolCallId);
 		this.sessionManager.appendToolResultView(message.toolCallId, view.shown);
 	}
 
@@ -1528,35 +1615,35 @@ export class Agent {
 		});
 	}
 
-	/** Persist what the loop reports, and pass it on. */
-	private async handleEvent(event: AgentEvent): Promise<void> {
+	/** Persist what the loop reports, and pass it on. The run's locals are this handler's closure. */
+	private async handleEvent(scope: RunScope, event: AgentEvent): Promise<void> {
 		if (event.type === "message_update") {
 			// The hot path: one event per provider delta. Keep the running message for a baseline that
 			// has to hand a mid-run attach the text it missed, and publish only what moved since the
 			// last frame. Nothing is written here — the message is persisted when it ends.
-			this.partial = event.message;
+			scope.partial = event.message;
 			const delta = messageDeltaOf(event);
 			if (delta !== undefined) this.emit({ type: "message_update", delta });
 			return;
 		}
-		if (event.type === "message_end" || event.type === "agent_end") this.partial = undefined;
+		if (event.type === "message_end" || event.type === "agent_end") scope.partial = undefined;
 		if (event.type === "message_end") {
-			// The one user message the store already holds is the one that started a run: `prompt()`
-			// wrote it before handing it to the loop, so the loop's own emit of it must not be recorded
+			// The one user message the store already holds is the one that started a run: the run wrote
+			// it before handing it to the loop, so the loop's own emit of it must not be recorded
 			// twice. Everything else the loop announces is written here — including a message it just
 			// drained out of a queue, whose write was deliberately left to this moment so that the file
 			// gains it behind the answer it interrupted rather than in front of it.
-			if (!this.isOptimisticEcho(event.message)) {
-				this.takeAccepted(event.message);
-				this.appendMessage(this.transcriptMessage(event.message));
-				this.recordToolResultView(event.message);
+			if (!isOptimisticEcho(scope, event.message)) {
+				takeAccepted(scope, event.message);
+				this.appendMessage(this.transcriptMessage(scope, event.message));
+				this.recordToolResultView(scope, event.message);
 			}
 		}
 		if (event.type === "agent_end") {
 			// An accepted message the run never reached — an abort, a failure, a prompt that arrived in
 			// the moment the loop stopped looking. Nothing will drain it now, so the end of the run is
-			// where it is written. See {@link flushAccepted}.
-			this.flushAccepted();
+			// where it is written. See {@link Agent.flushAccepted}.
+			this.flushAccepted(scope);
 		}
 		this.emit(event);
 		// The echo of a drained message is what lowers the depth, so this is where the count goes live.
@@ -1565,6 +1652,8 @@ export class Agent {
 			this.publish();
 		}
 	}
+
+	// ---------------------------------------------------------------------------- the fan-out
 
 	/** Fan one event out. The only place a session publishes an event. */
 	private emit(event: AgentSessionEvent): void {
@@ -1575,12 +1664,15 @@ export class Agent {
 	 * Report the queue depth whenever it moved.
 	 *
 	 * Called from wherever the depth can change — accepting a message, and the loop echoing a drained
-	 * one — so a composer can show the number without polling `snapshot`.
+	 * one — so a composer can show the number without polling `snapshot`. The depth is read off the
+	 * runtime's queues; the baseline it is compared against lives with the run, because the depth is
+	 * meaningful only while one is in flight.
 	 */
 	private emitQueueUpdate(): void {
 		const queued = this.queued;
-		if (queued === this.lastQueued) return;
-		this.lastQueued = queued;
+		const last = this.run?.lastQueued ?? 0;
+		if (queued === last) return;
+		if (this.run !== undefined) this.run.lastQueued = queued;
 		this.emit({ type: "queue_update", queued });
 	}
 
@@ -1605,8 +1697,8 @@ export class Agent {
 	/**
 	 * Append a message entry and announce it.
 	 *
-	 * Both writers of message entries go through here — `prompt` for the optimistic user write and
-	 * {@link handleEvent} for everything the loop hands back — so a listener that follows
+	 * Both writers of message entries go through here — a prompt for the optimistic user write and
+	 * {@link Agent.handleEvent} for everything the loop hands back — so a listener that follows
 	 * `entry_appended` sees the whole transcript, not just the loop's half of it.
 	 */
 	private appendMessage(message: Message): void {
@@ -1626,44 +1718,6 @@ export class Agent {
 	}
 
 	/**
-	 * Record that this session, not the loop, wrote the user message that started a run.
-	 *
-	 * The one write the session makes ahead of the loop: a prompt is what starts a run, so the store
-	 * gains it before the loop can echo it, and {@link isOptimisticEcho} is what keeps that echo from
-	 * writing it a second time.
-	 */
-	private rememberPrompt(message: Message): void {
-		if (message.role !== "user" || message.timestamp === undefined) return;
-		this.promptWrites.push(message.timestamp);
-	}
-
-	/**
-	 * True when the loop is echoing a user message this session already persisted.
-	 *
-	 * Only a prompt is written ahead of the loop: it is what starts a run, so there is a moment between
-	 * the write and the loop's own emit of the same message, and the stamp identifies it — stamps are
-	 * unique per message because this session issues them. A message drained out of a queue is not one
-	 * of these; its write is the echo, so it must land here.
-	 */
-	private isOptimisticEcho(message: Message): boolean {
-		if (message.role !== "user" || message.timestamp === undefined) return false;
-		return this.consume(this.promptWrites, message.timestamp);
-	}
-
-	/**
-	 * Take one accepted message off the list, now that the loop has drained it.
-	 *
-	 * The count a composer shows is what is left here, so this is where the depth drops: a follow-up
-	 * stops being "accepted and waiting" at the drain point, not when the turn it opened ends. The
-	 * message the loop hands back is the very object `prompt()` queued, so the stamp is the key.
-	 */
-	private takeAccepted(message: Message): void {
-		if (message.role !== "user" || message.timestamp === undefined) return;
-		const index = this.accepted.findIndex((entry) => entry.message.timestamp === message.timestamp);
-		if (index !== -1) this.accepted.splice(index, 1);
-	}
-
-	/**
 	 * Write the accepted messages a run never drained, in the order they were accepted.
 	 *
 	 * The run is over, so nothing will ever drain them: a message accepted while a run was in flight
@@ -1676,21 +1730,17 @@ export class Agent {
 	 * run that just ended, and a message left on one would be drained into some later run and written
 	 * a second time.
 	 */
-	private flushAccepted(): void {
-		if (this.accepted.length === 0) return;
+	private flushAccepted(scope: RunScope): void {
+		if (scope.accepted.length === 0) {
+			this.runtime.steeringQueue.clear();
+			this.runtime.followUpQueue.clear();
+			return;
+		}
 		// Emptied before the writes, so a failed append can never turn into a second copy of one.
-		const pending = this.accepted.splice(0);
+		const pending = scope.accepted.splice(0);
 		this.runtime.steeringQueue.clear();
 		this.runtime.followUpQueue.clear();
-		for (const entry of pending) this.appendMessage(entry.message);
-	}
-
-	/** Take one outstanding write off its list, and say whether there was one. */
-	private consume(writes: number[], timestamp: number): boolean {
-		const index = writes.indexOf(timestamp);
-		if (index === -1) return false;
-		writes.splice(index, 1);
-		return true;
+		for (const message of pending) this.appendMessage(message);
 	}
 
 	/** Tell every listener what the session looks like now. */
@@ -1698,6 +1748,57 @@ export class Agent {
 		const snapshot = this.snapshot;
 		for (const listener of this.listeners) listener(snapshot);
 	}
+}
+
+/**
+ * The fresh prompt: the caller's builder over the registry's current names and the live approvals.
+ *
+ * A pure function rather than a method because the answers it is built from are the request's, not
+ * the session's: the active set and the approval map are read per request, and the approval map is
+ * the session's effective one — the workspace's defaults with the session's own choices over them —
+ * so the prompt promises exactly what the gate will ask for.
+ */
+function buildSystemPrompt(
+	promptBuilder: (toolNames: readonly string[], approvals: Record<ToolApprovalKey, boolean>) => string,
+	toolNames: readonly string[],
+	approvals: Record<ToolApprovalKey, boolean>,
+): string {
+	return promptBuilder(toolNames, approvals);
+}
+
+/**
+ * True when the loop is echoing a user message the session already persisted.
+ *
+ * Only a prompt is written ahead of the loop: it is what starts a run, so there is a moment between
+ * the write and the loop's own emit of the same message, and the stamp identifies it — stamps are
+ * unique per message because this session issues them. A message drained out of a queue is not one
+ * of these; its write is the echo, so it must land here.
+ */
+function isOptimisticEcho(scope: RunScope, message: Message): boolean {
+	if (message.role !== "user" || message.timestamp === undefined) return false;
+	return consume(scope.promptWrites, message.timestamp);
+}
+
+/**
+ * Take one accepted message off the run's list, now that the loop has drained it.
+ *
+ * The depth a composer shows is the follow-up queue's, and the drain took the message off it; what
+ * is left here is the flush's business — a message still on the list when the run ends is one the
+ * run never reached. The message the loop hands back is the very object `prompt()` queued, so the
+ * stamp is the key.
+ */
+function takeAccepted(scope: RunScope, message: Message): void {
+	if (message.role !== "user" || message.timestamp === undefined) return;
+	const index = scope.accepted.findIndex((accepted) => accepted.timestamp === message.timestamp);
+	if (index !== -1) scope.accepted.splice(index, 1);
+}
+
+/** Take one outstanding write off its list, and say whether there was one. */
+function consume(writes: number[], timestamp: number): boolean {
+	const index = writes.indexOf(timestamp);
+	if (index === -1) return false;
+	writes.splice(index, 1);
+	return true;
 }
 
 /**
@@ -1781,8 +1882,8 @@ function pushTerminal(outer: AssistantMessageEventStream, message: AssistantMess
 /**
  * The messages one selection of entries stands for — the same projection the store hands a request.
  *
-	 * It is the only way the trigger measures a prompt, so `maybeCompact` can compare the transcript as
-	 * stored with the transcript after a clear without building the request twice.
+ * It is the only way the trigger measures a prompt, so `maybeCompact` can compare the transcript as
+ * stored with the transcript after a clear without building the request twice.
  */
 function messagesOf(entries: readonly SessionEntry[]): Message[] {
 	return entries.flatMap((entry) => sessionEntryToContextMessages(entry));

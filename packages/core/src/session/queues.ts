@@ -16,6 +16,11 @@ export class PendingMessageQueue {
 		this.mode = mode;
 	}
 
+	/** How many messages are waiting. The depth a composer shows is the follow-up queue's. */
+	get size(): number {
+		return this.messages.length;
+	}
+
 	enqueue(message: Message): void {
 		this.messages.push(message);
 	}

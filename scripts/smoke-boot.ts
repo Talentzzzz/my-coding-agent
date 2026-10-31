@@ -32,6 +32,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { createServer as createTcpServer } from "node:net";
 import { spawn } from "node:child_process";
+import type { ChatTransport } from "@my-agent/llm";
 import type { BootedServer } from "../packages/server/src/boot.ts";
 import type { WireClient } from "./wire/client.ts";
 
@@ -88,12 +89,35 @@ async function freePort(): Promise<number> {
 // home above, because what the shell needs from the boot path must not depend on what the machine
 // happens to have in it. The workspaces are scratch directories too — nothing here writes a session
 // into the repo, or anywhere outside the two scratch trees. The scripted transport rides the boot
-// path itself: the worst case below needs a run parked on an approval, and a provider key must not
-// be the price of one.
+// path itself: the worst case below needs a run in residence that nobody will ever answer, and a
+// provider key must not be the price of one. That worst case is a provider call that never answers —
+// under the end-restart approval semantics an approval no longer parks a run (ADR-0006 §5), so the
+// hang is what keeps a run on the stack for `close()` to cut short. The hang honours the abort
+// signal, which is the whole point: `close()` aborts first, and the aborted call is what lets it
+// return.
 const workspace = await mkdtemp(join(tmpdir(), "my-agent-boot-"));
 const fake = createFakeTransport();
 fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" }))]);
-const server: BootedServer = await bootServer({ absCwd: workspace, port: 0, api: fake.api });
+// The worst case's own prompt, and nothing else, hangs: every other section's calls pass through.
+const neverAnswers: ChatTransport = {
+	stream: (model, context, options) => {
+		if (!JSON.stringify(context.messages).includes("read the notes")) {
+			return fake.api.stream(model, context, options);
+		}
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => resolve(fake.api.stream(model, context, options)), 60_000);
+			options?.signal?.addEventListener(
+				"abort",
+				() => {
+					clearTimeout(timer);
+					resolve(fake.api.stream(model, context, options));
+				},
+				{ once: true },
+			);
+		});
+	},
+};
+const server: BootedServer = await bootServer({ absCwd: workspace, port: 0, api: neverAnswers });
 
 try {
 	process.stdout.write(`booted on ${server.url} (port ${server.port})\n`);
@@ -150,52 +174,36 @@ try {
 	check("a fresh workspace opens an empty session", baseline.messages.length === 0, String(baseline.messages.length));
 
 	// ---------------------------------------------------------------------------------------------
-	// The worst case for shutdown, assembled for real: a window's connection watching a run parked on
-	// an approval nobody will answer. The scripted transport makes the tool call; the approval gate
-	// holds the run; nothing anywhere will ever resolve it.
+	// The worst case for shutdown, assembled for real: a window's connection watching a run whose
+	// provider call nobody will ever answer. The scripted transport hangs on this one prompt; nothing
+	// anywhere will ever resolve it, so only the shutdown's own abort can.
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("shutdown with the worst case in residence\n");
 
-	// The bench holds a claim of its own across the gate-setting PATCH below, the way `smoke-mux` and
-	// `smoke-stream` do wherever a check needs the host to outlive a request. Nothing subtle: the
-	// PATCH takes a claim for the length of one write and gives it straight back, and a session whose
-	// claims reach zero is reaped — which ends the lane watching it, by design (the claim decides how
-	// long a session lives, and a subscription takes none). Reaping that transient host under the lane
-	// would leave the worst case without its window, so the bench is the claim-holder here; the run's
-	// own claim then carries the parked approval to the end.
+	// The bench holds a claim of its own across the prompt below, the way `smoke-mux` and
+	// `smoke-stream` do wherever a check needs the host to outlive a request. A session whose claims
+	// reach zero is reaped — which ends the lane watching it, by design (the claim decides how long a
+	// session lives, and a subscription takes none). Reaping that transient host under the lane would
+	// leave the worst case without its window, so the bench is the claim-holder here.
 	const bench = await server.hub.claim(sessionId);
-
-	const turned = await request(server.url, "PATCH", `/api/sessions/${encodeURIComponent(sessionId)}`, {
-		approval: { read: true },
-	});
-	check("the read tool was put behind the approval gate", turned.status === 200, String(turned.status));
-	// A tool that is not active is never gated — `prepareToolCall` answers "Tool not found" before the
-	// approval hook runs — so the worst case below would silently lose its park. The snapshot the
-	// PATCH answers with says what is active; assert it rather than assume the default set.
-	const active = (turned.payload as { session?: { activeTools?: string[] } }).session?.activeTools ?? [];
-	check("the gated tool is active on the session", active.includes("read"), active.join(","));
 
 	const accepted = await request(server.url, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
 		text: "read the notes",
 	});
 	check("the prompt was accepted", accepted.status === 202, String(accepted.status));
 	check(
-		"the run parked on the approval",
+		"the run is in residence, waiting on a provider that never answers",
 		await until(
-			() => wire.items(sessionId).some((message) => message.type === "approval_request"),
+			() => wire.items(sessionId).some((message) => message.type === "status" && (message as { submitting?: boolean }).submitting === true),
 			10_000,
 		),
 		JSON.stringify(wire.items(sessionId).map((message) => message.type)),
 	);
-	const parked = ((await request(server.url, "GET", `/api/sessions/${encodeURIComponent(sessionId)}`)).payload as {
-		session: { pendingApprovals: unknown[] };
-	}).session;
-	check("and the session is genuinely waiting for an answer", parked.pendingApprovals.length === 1, JSON.stringify(parked.pendingApprovals));
 
 	const started = Date.now();
 	await server.close();
 	check("close() returned with the worst case in residence", Date.now() - started < 5_000, `${Date.now() - started} ms`);
-	// The answer nobody gave was denied on the way down, and the run with it: nothing is left waiting.
+	// The run nobody could answer was aborted on the way down: nothing is left waiting.
 	check("nothing is left running", server.hub.live.length === 0, server.hub.live.join(","));
 
 	// A closed listener must refuse connections, or a shell would leak a server every time it restarts.
