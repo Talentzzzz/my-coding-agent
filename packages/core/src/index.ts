@@ -190,9 +190,26 @@ export {
 } from "./session/session-manager.ts";
 export { applyRecordedToolConfig } from "./session/tool-config.ts";
 export {
+	applySettings,
+	fillSettings,
+	getApprovals,
+	getAppearance,
+	getBashSettings,
+	getFollowUpMode,
+	getHiddenWorkspaces,
+	getModel,
+	getRetrySettings,
+	getSettings,
+	getSteeringMode,
+	getTools,
+	getWorkspaceNames,
+	inMemorySettingsState,
+	isApprovalRequired,
 	SettingsManager,
+	settingsStateFromStorage,
 	type SettingsPatch,
 	type SettingsScope,
+	type SettingsState,
 	type SettingsStorage,
 } from "./settings-manager.ts";
 export {

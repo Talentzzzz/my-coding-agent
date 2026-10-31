@@ -32,6 +32,7 @@ packages/core、server、loop 落地「无状态服务 + 纯数据状态」重�
 - [06 toolResultViews 落 entry](issues/06-tool-result-entry.md):shown 半边持久化为 entry,双份视图从账本补齐,恢复语义闭合。
 - [07 ADR——无状态会话架构与重启式审批](issues/07-adr.md):已落 `docs/adr/0006-stateless-session-architecture.md`,正式重开现状决定并声明不触碰 0001/0003/0005。
 - [08 SessionManager 无状态化](issues/08-session-manager-stateless.md):`SessionState` 纯数据接口 + 全操作首参收状态的文件级函数 + `fillSession` 重放入口落地;`SessionManager` 收成一行委托的薄壳门面,调用方零改动,票 13/14/16 迁移。
+- [09 SettingsManager 无状态化](issues/09-settings-manager-stateless.md):`SettingsState` 纯数据接口(每工作区一份,hub 缓存共享引用)+ 全操作首参收状态的文件级函数 + `fillSettings` 补齐入口;`SettingsManager` 同收薄壳门面,调用方零改动,票 14/16 迁移。
 
 ## Not yet specified
 

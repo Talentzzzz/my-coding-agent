@@ -8,7 +8,16 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { clampWorkspacePaging, settingsPath, SettingsManager } from "@my-agent/core";
+import {
+	applySettings,
+	clampWorkspacePaging,
+	fillSettings,
+	getAppearance,
+	getSettings,
+	settingsPath,
+	settingsStateFromStorage,
+	SettingsManager,
+} from "@my-agent/core";
 
 let failures = 0;
 
@@ -184,6 +193,52 @@ process.stdout.write("\nsettings：种过默认模型的标记活过一次重启
 		// an absence, which would be the same thing here but not in the merge's own terms.
 		manager.applySettings({ defaultModelSeeded: false });
 		check("手写的假也留得住", SettingsManager.create(absCwd, home).getSettings().defaultModelSeeded === false, String(SettingsManager.create(absCwd, home).getSettings().defaultModelSeeded));
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+}
+
+// --------------------------------- 5. the stateless form over the same files
+
+process.stdout.write("\nsettings：无状态面用裸 SettingsState 走同一套读写\n");
+
+{
+	const home = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
+	try {
+		const absCwd = join(home, "workspace");
+		// fillSettings takes the workspace root as its seed and reads both json files into the bag —
+		// the same two files `SettingsManager.create` reads, reached without the shell.
+		const s = fillSettings(absCwd, home);
+		check("种子路径读出空默认", getSettings(s).modes === undefined, JSON.stringify(getSettings(s)));
+
+		// The write path works on the bare state: field-to-file routing and the disk write are the
+		// stateless operation's own, none of the shell's.
+		applySettings(s, { modes: [{ name: "只读", tools: ["read"], approval: {} }] });
+		check("补齐后的 modes 当场可读", getSettings(s).modes?.length === 1, JSON.stringify(getSettings(s).modes));
+
+		// A replay from the same seed must land on the same merged view — that is what lets a host
+		// re-fill a workspace's state at any time without losing a write.
+		const replayed = fillSettings(absCwd, home);
+		check("重灌的种子读回同一份", JSON.stringify(getSettings(replayed)) === JSON.stringify(getSettings(s)));
+
+		// And the shell stays a view over the same functions: stateless-written, shell-read and the
+		// other way round must agree, because they are the same logic. A shell built *after* the
+		// write reads it — one built before holds its own snapshot, by design.
+		applySettings(s, { model: "a/b" });
+		const after = SettingsManager.create(absCwd, home);
+		check("无状态写的字段门面读得到", after.getModel() === "a/b", String(after.getModel()));
+		applySettings(replayed, { appearance: { theme: "dark" } });
+		check("门面新实例读得到无状态写盘的主题", SettingsManager.create(absCwd, home).getAppearance().theme === "dark");
+		check("共享引用的老状态也跟上了", getAppearance(replayed).theme === "dark");
+
+		// The storage seam is still injectable: a host keeping settings somewhere else builds the
+		// state from its own backend rather than from the two real files.
+		const overMemory = settingsStateFromStorage({
+			read: (scope) => (scope === "global" ? `${JSON.stringify({ tools: ["read"] }, null, "\t")}\n` : undefined),
+			write: () => {},
+			path: (scope) => `<fake ${scope}>`,
+		});
+		check("自备存储读出工具集", JSON.stringify(getSettings(overMemory).tools) === JSON.stringify(["read"]));
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}

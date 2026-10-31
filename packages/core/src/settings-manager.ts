@@ -126,12 +126,19 @@ class InMemorySettingsStorage implements SettingsStorage {
 }
 
 /**
- * The settings of one workspace: both files read, merged, and written back field by field.
+ * The pure-data state of one workspace's settings: what the settings operations read and write, and
+ * nothing else.
  *
- * This is the one owner of the settings files. A host builds one per workspace and hands it to every
- * session over that workspace, so a toggle in one session is the same value the next session reads
- * rather than a copy taken when it was assembled. The session never reads a settings file; it asks
- * this object.
+ * Every settings operation is a file-level function taking a `SettingsState` as its first parameter —
+ * there is no class holding this state between calls (the `SettingsManager` class at the bottom of
+ * this file is a thin shell over these functions, kept only until every caller has moved onto the
+ * stateless form). The state is plain data on purpose: which function touches which field is visible
+ * in the signatures, and a test can construct a bare state and call any operation on it directly.
+ *
+ * The state is shared per workspace, not per request: the host holds one {@link SettingsState} per
+ * workspace root and hands the same state to every session over that directory, so a toggle in one
+ * session is the same value the next session reads rather than a copy taken when it was assembled.
+ * The session never reads a settings file; it goes through these operations.
  *
  * The merged view is kept as {@link Settings} — every field filled with its default — while each layer
  * is kept as the file wrote it, unknown keys included. That split is what makes a write safe: only the
@@ -141,188 +148,205 @@ class InMemorySettingsStorage implements SettingsStorage {
  * behind: one process owns the file, and a change is on disk before the call returns, so a host that
  * wants durable settings never has to remember to flush them.
  */
-export class SettingsManager {
-	private readonly storage: SettingsStorage;
-	private readonly layers: Record<SettingsScope, SettingsLayer>;
+export interface SettingsState {
+	storage: SettingsStorage;
+	layers: Record<SettingsScope, SettingsLayer>;
 	/** The fields each file supplies, so a change can be written where the value already lives. */
-	private readonly declared: Record<SettingsScope, Set<string>>;
-	private settings: Settings;
+	declared: Record<SettingsScope, Set<string>>;
+	settings: Settings;
+}
 
-	private constructor(storage: SettingsStorage, layers: Record<SettingsScope, SettingsLayer>) {
-		this.storage = storage;
-		this.layers = layers;
-		this.declared = {
+/**
+ * Read both files behind `storage` into a fresh {@link SettingsState}: the one entry point that turns
+ * a storage backend into the state the settings operations work on.
+ *
+ * This is the combination the old constructor spread over its private fields — read the two layers as
+ * each file wrote them, mark which fields each file declares, merge the layers into the defaulted
+ * view — collapsed into one function, so a host that (re)builds a workspace's state has exactly one
+ * way to do it. A file this build cannot parse is refused, never overwritten.
+ */
+export function settingsStateFromStorage(storage: SettingsStorage): SettingsState {
+	const layers: Record<SettingsScope, SettingsLayer> = {
+		global: readLayer(storage, "global"),
+		project: readLayer(storage, "project"),
+	};
+	return {
+		storage,
+		layers,
+		declared: {
 			global: new Set(Object.keys(layers.global)),
 			project: new Set(Object.keys(layers.project)),
-		};
-		this.settings = mergeSettings(mergeLayers(layers.global, layers.project));
+		},
+		settings: mergeSettings(mergeLayers(layers.global, layers.project)),
+	};
+}
+
+/**
+ * The settings of one workspace: the agent home's file and the workspace's own, project winning.
+ *
+ * The workspace root path is the seed; reading the two json files fills in the whole bag. This is the
+ * replay entry a host calls when it first touches a workspace — and again whenever it wants the state
+ * re-read from disk, since nothing here caches: the state is a snapshot of the files as of this call,
+ * and {@link applySettings} keeps it in step with what it writes.
+ */
+export function fillSettings(absCwd: string, agentDir: string = AGENT_HOME): SettingsState {
+	return settingsStateFromStorage(new FileSettingsStorage(settingsPath(agentDir), projectSettingsPath(absCwd)));
+}
+
+/**
+ * A state over settings that were never written down.
+ *
+ * Everything a caller passes counts as that scope's file, so a later change is written back there
+ * and read out of the state the same way a real one behaves — only the file is missing.
+ */
+export function inMemorySettingsState(
+	settings: Partial<Settings> = {},
+	scope: SettingsScope = "global",
+): SettingsState {
+	const storage = new InMemorySettingsStorage();
+	storage.write(scope, `${JSON.stringify(settings, null, "\t")}\n`);
+	return settingsStateFromStorage(storage);
+}
+
+/** Every setting in effect, merged and defaulted, as a copy: mutating it changes nothing. */
+export function getSettings(s: SettingsState): Settings {
+	return structuredClone(s.settings);
+}
+
+/** The configured default model, as the row's name, or undefined when no layer names one. */
+export function getModel(s: SettingsState): string | undefined {
+	return s.settings.model;
+}
+
+/**
+ * The global default active tool set, or undefined for the registry's full set.
+ *
+ * Undefined is its own answer rather than an empty list, because "no field" and "nothing active"
+ * must stay distinguishable: the first is the old file's behaviour, the second would be a session
+ * that can call nothing.
+ */
+export function getTools(s: SettingsState): string[] | undefined {
+	return s.settings.tools === undefined ? undefined : [...s.settings.tools];
+}
+
+/** Theme and font size, as the window should draw itself. */
+export function getAppearance(s: SettingsState): AppearanceSettings {
+	return { ...s.settings.appearance };
+}
+
+/**
+ * The workspaces the sidebar leaves out, by absolute path.
+ *
+ * Always a list, never undefined: every reader of this asks "is this one hidden", and the answer
+ * for a file that never named the field is the same as for an empty list.
+ */
+export function getHiddenWorkspaces(s: SettingsState): string[] {
+	return [...(s.settings.hiddenWorkspaces ?? [])];
+}
+
+/**
+ * The names the sidebar shows instead of folder names, by absolute path.
+ *
+ * Empty entries are dropped here rather than at every reader: a cleared name is stored as an empty
+ * string, and "the folder's own name" is what the absence of a key means.
+ */
+export function getWorkspaceNames(s: SettingsState): Record<string, string> {
+	const names: Record<string, string> = {};
+	for (const [absCwd, name] of Object.entries(s.settings.workspaceNames ?? {})) {
+		if (name.trim().length > 0) names[absCwd] = name;
+	}
+	return names;
+}
+
+/** The tools that must be approved in the UI before they run. */
+export function getApprovals(s: SettingsState): Record<ToolApprovalKey, boolean> {
+	return { ...s.settings.approval };
+}
+
+/**
+ * Whether the workspace's files gate this tool.
+ *
+ * The files are the defaults a session opens on, so this answers for a session that has not
+ * chosen: a session's own answer is `Agent.getApprovals()`, which is this map with the session's
+ * recorded choices over it. The approval gate reads that one, never this.
+ */
+export function isApprovalRequired(s: SettingsState, tool: ToolApprovalKey): boolean {
+	return s.settings.approval[tool];
+}
+
+export function getSteeringMode(s: SettingsState): QueueMode {
+	return s.settings.steeringMode;
+}
+
+export function getFollowUpMode(s: SettingsState): QueueMode {
+	return s.settings.followUpMode;
+}
+
+/** The retry policy, field for field the shape `retryAssistantCall` takes. */
+export function getRetrySettings(s: SettingsState): RetrySettings {
+	return { ...s.settings.retry };
+}
+
+/** How long the `bash` tool lets one command run. */
+export function getBashSettings(s: SettingsState): BashSettings {
+	return { ...s.settings.bash };
+}
+
+/**
+ * Apply a partial change and write it to disk before returning.
+ *
+ * Each field goes to the file that already names it, so a toggle lands where the value the user is
+ * looking at came from: a project file that names any part of `approval` keeps owning the approval
+ * set, while a setting no layer has ever named goes to the global file. `scope` forces one target
+ * instead.
+ *
+ * Only the named fields move, and nested ones merge, so a patch that changes one tool's approval
+ * leaves the other tools' entries in the file alone.
+ */
+export function applySettings(s: SettingsState, patch: SettingsPatch, scope?: SettingsScope): void {
+	const fields = Object.entries(patch)
+		.filter(([, value]) => value !== undefined)
+		.map(([field]) => field);
+	if (fields.length === 0) return;
+
+	const changes: Record<SettingsScope, SettingsLayer> = { global: {}, project: {} };
+	for (const field of fields) {
+		const target = scope ?? scopeOf(s, field);
+		const layer = s.layers[target];
+		const inherited = layer[field];
+		const value = (patch as Record<string, unknown>)[field];
+		layer[field] = isRecord(inherited) && isRecord(value) ? mergeLayers(inherited, value) : value;
+		s.declared[target].add(field);
+		changes[target][field] = layer[field];
 	}
 
-	/** The settings of a workspace: the agent home's file and the workspace's own, project winning. */
-	static create(absCwd: string, agentDir: string = AGENT_HOME): SettingsManager {
-		return SettingsManager.fromStorage(new FileSettingsStorage(settingsPath(agentDir), projectSettingsPath(absCwd)));
+	for (const target of ["global", "project"] as const) {
+		if (Object.keys(changes[target]).length > 0) persist(s, target, changes[target]);
 	}
+	refresh(s);
+}
 
-	/** A manager over any storage backend. */
-	static fromStorage(storage: SettingsStorage): SettingsManager {
-		return new SettingsManager(storage, {
-			global: readLayer(storage, "global"),
-			project: readLayer(storage, "project"),
-		});
-	}
+/**
+ * Write one scope's changed fields onto whatever that file holds now, then take the result as this
+ * state's copy of the layer.
+ *
+ * Re-reading before writing is what keeps a hand edit to the same file from being reverted by an
+ * unrelated change made here: a model switch must not drop a key the user typed in while the
+ * process was running.
+ */
+function persist(s: SettingsState, scope: SettingsScope, changes: SettingsLayer): void {
+	const merged = mergeLayers(readLayer(s.storage, scope), changes);
+	s.storage.write(scope, `${JSON.stringify(merged, null, "\t")}\n`);
+	s.layers[scope] = merged;
+}
 
-	/**
-	 * A manager over settings that were never written down.
-	 *
-	 * Everything a caller passes counts as that scope's file, so a later change is written back there
-	 * and read out of the manager the same way a real one behaves — only the file is missing.
-	 */
-	static inMemory(settings: Partial<Settings> = {}, scope: SettingsScope = "global"): SettingsManager {
-		const storage = new InMemorySettingsStorage();
-		storage.write(scope, `${JSON.stringify(settings, null, "\t")}\n`);
-		return SettingsManager.fromStorage(storage);
-	}
+function refresh(s: SettingsState): void {
+	s.settings = mergeSettings(mergeLayers(s.layers.global, s.layers.project));
+}
 
-	/** Every setting in effect, merged and defaulted, as a copy: mutating it changes nothing. */
-	getSettings(): Settings {
-		return structuredClone(this.settings);
-	}
-
-	/** The configured default model, as the row's name, or undefined when no layer names one. */
-	getModel(): string | undefined {
-		return this.settings.model;
-	}
-
-	/**
-	 * The global default active tool set, or undefined for the registry's full set.
-	 *
-	 * Undefined is its own answer rather than an empty list, because "no field" and "nothing active"
-	 * must stay distinguishable: the first is the old file's behaviour, the second would be a session
-	 * that can call nothing.
-	 */
-	getTools(): string[] | undefined {
-		return this.settings.tools === undefined ? undefined : [...this.settings.tools];
-	}
-
-	/** Theme and font size, as the window should draw itself. */
-	getAppearance(): AppearanceSettings {
-		return { ...this.settings.appearance };
-	}
-
-	/**
-	 * The workspaces the sidebar leaves out, by absolute path.
-	 *
-	 * Always a list, never undefined: every reader of this asks "is this one hidden", and the answer
-	 * for a file that never named the field is the same as for an empty list.
-	 */
-	getHiddenWorkspaces(): string[] {
-		return [...(this.settings.hiddenWorkspaces ?? [])];
-	}
-
-	/**
-	 * The names the sidebar shows instead of folder names, by absolute path.
-	 *
-	 * Empty entries are dropped here rather than at every reader: a cleared name is stored as an empty
-	 * string, and "the folder's own name" is what the absence of a key means.
-	 */
-	getWorkspaceNames(): Record<string, string> {
-		const names: Record<string, string> = {};
-		for (const [absCwd, name] of Object.entries(this.settings.workspaceNames ?? {})) {
-			if (name.trim().length > 0) names[absCwd] = name;
-		}
-		return names;
-	}
-
-	/** The tools that must be approved in the UI before they run. */
-	getApprovals(): Record<ToolApprovalKey, boolean> {
-		return { ...this.settings.approval };
-	}
-
-	/**
-	 * Whether the workspace's files gate this tool.
-	 *
-	 * The files are the defaults a session opens on, so this answers for a session that has not
-	 * chosen: a session's own answer is `Agent.getApprovals()`, which is this map with the session's
-	 * recorded choices over it. The approval gate reads that one, never this.
-	 */
-	isApprovalRequired(tool: ToolApprovalKey): boolean {
-		return this.settings.approval[tool];
-	}
-
-	getSteeringMode(): QueueMode {
-		return this.settings.steeringMode;
-	}
-
-	getFollowUpMode(): QueueMode {
-		return this.settings.followUpMode;
-	}
-
-	/** The retry policy, field for field the shape `retryAssistantCall` takes. */
-	getRetrySettings(): RetrySettings {
-		return { ...this.settings.retry };
-	}
-
-	/** How long the `bash` tool lets one command run. */
-	getBashSettings(): BashSettings {
-		return { ...this.settings.bash };
-	}
-
-	/**
-	 * Apply a partial change and write it to disk before returning.
-	 *
-	 * Each field goes to the file that already names it, so a toggle lands where the value the user is
-	 * looking at came from: a project file that names any part of `approval` keeps owning the approval
-	 * set, while a setting no layer has ever named goes to the global file. `scope` forces one target
-	 * instead.
-	 *
-	 * Only the named fields move, and nested ones merge, so a patch that changes one tool's approval
-	 * leaves the other tools' entries in the file alone.
-	 */
-	applySettings(patch: SettingsPatch, scope?: SettingsScope): void {
-		const fields = Object.entries(patch)
-			.filter(([, value]) => value !== undefined)
-			.map(([field]) => field);
-		if (fields.length === 0) return;
-
-		const changes: Record<SettingsScope, SettingsLayer> = { global: {}, project: {} };
-		for (const field of fields) {
-			const target = scope ?? this.scopeOf(field);
-			const layer = this.layers[target];
-			const inherited = layer[field];
-			const value = (patch as Record<string, unknown>)[field];
-			layer[field] = isRecord(inherited) && isRecord(value) ? mergeLayers(inherited, value) : value;
-			this.declared[target].add(field);
-			changes[target][field] = layer[field];
-		}
-
-		for (const target of ["global", "project"] as const) {
-			if (Object.keys(changes[target]).length > 0) this.persist(target, changes[target]);
-		}
-		this.refresh();
-	}
-
-	/**
-	 * Write one scope's changed fields onto whatever that file holds now, then take the result as this
-	 * manager's copy of the layer.
-	 *
-	 * Re-reading before writing is what keeps a hand edit to the same file from being reverted by an
-	 * unrelated change made here: a model switch must not drop a key the user typed in while the
-	 * process was running.
-	 */
-	private persist(scope: SettingsScope, changes: SettingsLayer): void {
-		const merged = mergeLayers(readLayer(this.storage, scope), changes);
-		this.storage.write(scope, `${JSON.stringify(merged, null, "\t")}\n`);
-		this.layers[scope] = merged;
-	}
-
-	private refresh(): void {
-		this.settings = mergeSettings(mergeLayers(this.layers.global, this.layers.project));
-	}
-
-	/** The file that owns a field, so a change does not go somewhere the value would be overridden. */
-	private scopeOf(field: string): SettingsScope {
-		return this.declared.project.has(field) ? "project" : "global";
-	}
+/** The file that owns a field, so a change does not go somewhere the value would be overridden. */
+function scopeOf(s: SettingsState, field: string): SettingsScope {
+	return s.declared.project.has(field) ? "project" : "global";
 }
 
 /** One file's settings, as that file wrote them. A file that is not there is an empty layer. */
@@ -357,4 +381,86 @@ function mergeLayers(base: SettingsLayer, overrides: SettingsLayer): SettingsLay
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The settings shell: a per-workspace handle over one {@link SettingsState}.
+ *
+ * Every method is a one-line delegation to the stateless operation of the same name, which carries
+ * the real logic and its documentation. This class is what callers hold until they have each moved
+ * onto the stateless form; it owns no logic and adds none.
+ */
+export class SettingsManager {
+	private readonly s: SettingsState;
+
+	private constructor(s: SettingsState) {
+		this.s = s;
+	}
+
+	/** The settings of a workspace: the agent home's file and the workspace's own, project winning. */
+	static create(absCwd: string, agentDir: string = AGENT_HOME): SettingsManager {
+		return new SettingsManager(fillSettings(absCwd, agentDir));
+	}
+
+	/** A manager over any storage backend. */
+	static fromStorage(storage: SettingsStorage): SettingsManager {
+		return new SettingsManager(settingsStateFromStorage(storage));
+	}
+
+	/** A manager over settings that were never written down. */
+	static inMemory(settings: Partial<Settings> = {}, scope: SettingsScope = "global"): SettingsManager {
+		return new SettingsManager(inMemorySettingsState(settings, scope));
+	}
+
+	getSettings(): Settings {
+		return getSettings(this.s);
+	}
+
+	getModel(): string | undefined {
+		return getModel(this.s);
+	}
+
+	getTools(): string[] | undefined {
+		return getTools(this.s);
+	}
+
+	getAppearance(): AppearanceSettings {
+		return getAppearance(this.s);
+	}
+
+	getHiddenWorkspaces(): string[] {
+		return getHiddenWorkspaces(this.s);
+	}
+
+	getWorkspaceNames(): Record<string, string> {
+		return getWorkspaceNames(this.s);
+	}
+
+	getApprovals(): Record<ToolApprovalKey, boolean> {
+		return getApprovals(this.s);
+	}
+
+	isApprovalRequired(tool: ToolApprovalKey): boolean {
+		return isApprovalRequired(this.s, tool);
+	}
+
+	getSteeringMode(): QueueMode {
+		return getSteeringMode(this.s);
+	}
+
+	getFollowUpMode(): QueueMode {
+		return getFollowUpMode(this.s);
+	}
+
+	getRetrySettings(): RetrySettings {
+		return getRetrySettings(this.s);
+	}
+
+	getBashSettings(): BashSettings {
+		return getBashSettings(this.s);
+	}
+
+	applySettings(patch: SettingsPatch, scope?: SettingsScope): void {
+		applySettings(this.s, patch, scope);
+	}
 }
