@@ -196,6 +196,7 @@ export {
 	type ToolResultViewEntry,
 	type WorkspaceSessions,
 } from "./session/session-manager.ts";
+export { createSessionRuntime, type ActiveRun, type SessionRuntime } from "./session/session-runtime.ts";
 export { applyRecordedToolConfig, globalDefaultToolState } from "./session/tool-config.ts";
 export {
 	applySettings,

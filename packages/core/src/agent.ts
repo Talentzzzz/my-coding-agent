@@ -6,7 +6,7 @@ import {
 	type AgentToolResult,
 	type BeforeToolCallResult,
 } from "@my-agent/loop";
-import { PendingMessageQueue } from "./session/queues.ts";
+import type { SessionRuntime } from "./session/session-runtime.ts";
 import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
@@ -147,6 +147,20 @@ export interface AgentConfig {
 	 * fresh as the row is; the request object itself is built from the bag at send time and dropped.
 	 */
 	modelState: ModelState;
+	/**
+	 * The session's live half: the queues a run drains, and the run in flight.
+	 *
+	 * The only cross-stack in-memory state a session has (ADR-0006 §4), and held by the caller rather
+	 * than built here, because it outlives no one: the hub keeps it per session, builds it the first
+	 * time the session is touched, and drops it when the host closes — which is also what a process
+	 * restart does, so a reopen and a restart land in the same place. Everything else a session knows
+	 * is replayed from disk and configuration per request; nothing of it may be added here.
+	 *
+	 * The queues' drain modes arrive as the workspace settings' answer at creation and move when a
+	 * config patch does — see {@link Agent.applyConfig}. The loop registers each run's abort
+	 * controller and idle promise on `activeRun`, which is where an abort from any layer lands.
+	 */
+	runtime: SessionRuntime;
 }
 
 /** Called with the session's state whenever anything a reader can see has moved. */
@@ -405,14 +419,14 @@ export class Agent {
 	/** Messages that started a run, whose echoes must not be written twice either. */
 	private readonly promptWrites: number[] = [];
 	/**
-	 * The queues a run drains at its take points.
+	 * The session's live half: the queues a run drains at its take points, and the run in flight.
 	 *
 	 * Steered messages are pulled at the end of each turn; follow-ups when the loop would otherwise
-	 * stop. The queues live here rather than in the loop because they belong to the session that
-	 * accepts messages — the loop only pulls through the config hooks handed to {@link prompt}.
+	 * stop. The queues live in the runtime rather than in the loop because they belong to the session
+	 * that accepts messages — the loop only pulls through the config hooks handed to {@link prompt}.
+	 * See {@link AgentConfig.runtime} for why the bag is held rather than owned.
 	 */
-	private readonly steeringQueue: PendingMessageQueue;
-	private readonly followUpQueue: PendingMessageQueue;
+	private readonly runtime: SessionRuntime;
 	/** Last stamp this session handed out, so two messages in one millisecond stay distinguishable. */
 	private lastStamp = 0;
 	/** Queue depth as last published, so `queue_update` fires on a change and not on every touch. */
@@ -504,6 +518,7 @@ export class Agent {
 		this.promptBuilder = config.systemPrompt;
 		this.hooks = config.hooks ?? createHooks();
 		this.modelState = config.modelState;
+		this.runtime = config.runtime;
 		this.base = config.api ?? anthropicMessages;
 		// The session's send policy rides on every request object the bag builds — `requestModel`
 		// hands it over. The loop is never told about it: it asks for a stream from whatever model it
@@ -532,6 +547,9 @@ export class Agent {
 			// than the model itself keeps the ownership where it belongs — this session owns the model
 			// and may replace it at any time, while the loop only ever asks the model it was handed.
 			streamFn: (model, context, options) => model.stream(context, options),
+			// The run registers itself on the session's live half, so an abort from any layer — this
+			// session's, the hub's, a process shutdown's — lands on the one controller the run sleeps on.
+			runtime: this.runtime,
 			beforeToolCall: async ({ toolCall, args }) => this.beforeTool(toolCall.id, toolCall.name, args),
 			afterToolCall: async ({ toolCall, result, isError }) =>
 				this.afterTool(toolCall.id, toolCall.name, result, isError),
@@ -589,8 +607,6 @@ export class Agent {
 				};
 			},
 		});
-		this.steeringQueue = new PendingMessageQueue(config.settingsManager.getSteeringMode());
-		this.followUpQueue = new PendingMessageQueue(config.settingsManager.getFollowUpMode());
 
 		this.loop.subscribe(async (event) => this.handleEvent(event));
 	}
@@ -966,8 +982,8 @@ export class Agent {
 		};
 		if (this.running) {
 			const queue = options.behavior ?? "followUp";
-			if (queue === "steer") this.steeringQueue.enqueue(message);
-			else this.followUpQueue.enqueue(message);
+			if (queue === "steer") this.runtime.steeringQueue.enqueue(message);
+			else this.runtime.followUpQueue.enqueue(message);
 			this.accepted.push({ message, queue });
 			this.emitQueueUpdate();
 			this.publish();
@@ -991,8 +1007,8 @@ export class Agent {
 					// A request object from the bag as it stands; `prepareRequest` fills the bag and hands
 					// back a fresh one before anything is sent.
 					model: this.requestModel(),
-					getSteeringMessages: async () => this.steeringQueue.drain(),
-					getFollowUpMessages: async () => this.followUpQueue.drain(),
+					getSteeringMessages: async () => this.runtime.steeringQueue.drain(),
+					getFollowUpMessages: async () => this.runtime.followUpQueue.drain(),
 				},
 			);
 		} finally {
@@ -1184,8 +1200,8 @@ export class Agent {
 			this.sessionManager.appendToolConfig(this.tools.activeNames(), this.getApprovals());
 		}
 		this.settingsManager.applySettings(patch.approval === undefined ? patch : { ...patch, approval: undefined });
-		this.steeringQueue.mode = this.settingsManager.getSteeringMode();
-		this.followUpQueue.mode = this.settingsManager.getFollowUpMode();
+		this.runtime.steeringQueue.mode = this.settingsManager.getSteeringMode();
+		this.runtime.followUpQueue.mode = this.settingsManager.getFollowUpMode();
 		this.publish();
 		this.emitConfigChanged({
 			approvals: changedApprovals(previousApprovals, this.getApprovals()),
@@ -1664,8 +1680,8 @@ export class Agent {
 		if (this.accepted.length === 0) return;
 		// Emptied before the writes, so a failed append can never turn into a second copy of one.
 		const pending = this.accepted.splice(0);
-		this.steeringQueue.clear();
-		this.followUpQueue.clear();
+		this.runtime.steeringQueue.clear();
+		this.runtime.followUpQueue.clear();
 		for (const entry of pending) this.appendMessage(entry.message);
 	}
 

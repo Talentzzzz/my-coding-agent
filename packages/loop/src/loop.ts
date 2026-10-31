@@ -87,6 +87,20 @@ export interface LoopOptions {
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 	prepareRequest?: PrepareRequest;
+	/**
+	 * Where a run registers itself while it is in flight.
+	 *
+	 * The structural view of the host's `SessionRuntime` — this package cannot import from core, so
+	 * only the one slot the loop writes is declared. The run in flight is "what is in progress and
+	 * nowhere on disk": its abort controller is where an abort from any layer lands, its promise is
+	 * what idle-waiting resolves on, and clearing the slot is what makes the session idle again.
+	 */
+	runtime: LoopRuntime;
+}
+
+/** Where a run registers itself: the loop's structural view of the host's `SessionRuntime`. */
+export interface LoopRuntime {
+	activeRun?: ActiveRun;
 }
 
 /** Queue drain hooks a run pulls at its take points. The queues themselves live with the caller. */
@@ -103,7 +117,8 @@ export type RunLoopOptions = LoopQueueHooks & {
 	model: Model<any>;
 };
 
-type ActiveRun = {
+/** One run in flight: abort controller, idle promise, and the resolve that fires the promise. */
+export type ActiveRun = {
 	promise: Promise<void>;
 	resolve: () => void;
 	abortController: AbortController;
@@ -676,9 +691,9 @@ async function emitToolResultMessage(toolResultMessage: ToolResultMessage, emit:
  *
  * The loop holds no conversation state: the caller owns the transcript, the
  * tools, and the model, and hands them over per run through `runLoop`. What it
- * does hold is execution machinery — the active run with its abort signal, the
- * idle promise, the event dispatch to subscribers, and the engine itself,
- * which is the body of {@link Loop.runLoop}.
+ * does hold is execution machinery — the host's runtime, on which the active
+ * run registers itself with its abort signal, the event dispatch to
+ * subscribers, and the engine itself, which is the body of {@link Loop.runLoop}.
  */
 export class Loop {
 	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
@@ -693,7 +708,8 @@ export class Loop {
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
 	public prepareRequest?: PrepareRequest;
-	private activeRun?: ActiveRun;
+	/** Where the run in flight registers itself; see {@link LoopOptions.runtime}. */
+	private readonly runtime: LoopRuntime;
 	/**
 	 * The static half of the loop config — the hooks that are fixed for the
 	 * Loop's lifetime, assembled once in the constructor. The per-run half
@@ -720,6 +736,7 @@ export class Loop {
 		this.beforeToolCall = runtimeOptions.beforeToolCall;
 		this.afterToolCall = runtimeOptions.afterToolCall;
 		this.prepareRequest = runtimeOptions.prepareRequest;
+		this.runtime = runtimeOptions.runtime;
 		this.baseConfig = {
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
@@ -753,12 +770,12 @@ export class Loop {
 
 	/** Active abort signal for the current run, if any. */
 	get signal(): AbortSignal | undefined {
-		return this.activeRun?.abortController.signal;
+		return this.runtime.activeRun?.abortController.signal;
 	}
 
 	/** Abort the current run, if one is active. */
 	abort(): void {
-		this.activeRun?.abortController.abort();
+		this.runtime.activeRun?.abortController.abort();
 	}
 
 	/**
@@ -767,7 +784,7 @@ export class Loop {
 	 * This resolves after `agent_end` listeners settle.
 	 */
 	waitForIdle(): Promise<void> {
-		return this.activeRun?.promise ?? Promise.resolve();
+		return this.runtime.activeRun?.promise ?? Promise.resolve();
 	}
 
 	/**
@@ -785,7 +802,7 @@ export class Loop {
 		prompt: Message,
 		options: RunLoopOptions,
 	): Promise<Message[]> {
-		if (this.activeRun) {
+		if (this.runtime.activeRun) {
 			throw new Error(
 				"Loop is already processing a run. Use steer() or followUp() to queue messages, or wait for completion.",
 			);
@@ -796,7 +813,7 @@ export class Loop {
 		const promise = new Promise<void>((resolve) => {
 			resolvePromise = resolve;
 		});
-		this.activeRun = { promise, resolve: resolvePromise, abortController };
+		this.runtime.activeRun = { promise, resolve: resolvePromise, abortController };
 		this.runModel = options.model;
 
 		try {
@@ -925,8 +942,8 @@ export class Loop {
 	}
 
 	private finishRun(): void {
-		this.activeRun?.resolve();
-		this.activeRun = undefined;
+		this.runtime.activeRun?.resolve();
+		this.runtime.activeRun = undefined;
 	}
 
 	/**
@@ -941,7 +958,7 @@ export class Loop {
 	 * bound at definition time.
 	 */
 	private readonly dispatchEvent = async (event: AgentEvent): Promise<void> => {
-		const signal = this.activeRun?.abortController.signal;
+		const signal = this.runtime.activeRun?.abortController.signal;
 		if (!signal) {
 			throw new Error("Loop listener invoked outside active run");
 		}

@@ -12,6 +12,8 @@ import {
 	type OpenAgentOptions,
 	type SessionSnapshot,
 	SessionManager,
+	type SessionRuntime,
+	createSessionRuntime,
 	SettingsManager,
 	workspaceDir,
 	type ModelConfig,
@@ -86,6 +88,10 @@ export type SessionObserver = (feeds: SessionFeeds | undefined) => void;
  *
  * The count is what makes ownership work: a request that goes away must not stop a turn another
  * request is watching, and the last claim to go must not leave the session running forever.
+ *
+ * The session's live half — the queues a run drains and the run in flight — is deliberately not on
+ * this class: it is the hub's {@link SessionRuntime}, held in its own map so the in-progress state of
+ * every session is visible in one place and dies with the host that owns it.
  *
  * The workspace is per session rather than per process. A sidebar that lists every workspace this
  * machine has used can open any of them, and the tools of the session that opens must resolve inside
@@ -168,6 +174,17 @@ export class SessionHub {
 	/** One settings manager per workspace, so two sessions over one directory share a single view. */
 	private readonly settingsManagers = new Map<string, SettingsManager>();
 	private readonly hosts = new Map<string, HostedSession>();
+	/**
+	 * Each live session's runtime — the queues a run drains and the run in flight — by session id
+	 * (ADR-0006 §4): the only cross-stack in-memory session state this process keeps.
+	 *
+	 * Built the first time a session is touched ({@link open}, which every first message and every
+	 * claim arrives through) and dropped when its host closes, so the map holds exactly the sessions
+	 * this process is running and nothing else. A process restart clears it with everything else in
+	 * memory and that is the whole recovery story: queued messages are lost, the session files are
+	 * not, and a reopen builds the runtime again from nothing.
+	 */
+	private readonly runtimes = new Map<string, SessionRuntime>();
 	/** Opens in flight, so two callers cannot build two sessions over one id. */
 	private readonly opening = new Map<string, Promise<HostedSession>>();
 	/** Closes in flight, so a new caller cannot open a file that is still being written. */
@@ -550,6 +567,9 @@ export class SessionHub {
 				// only after the file is gone, so it finds no file instead of reopening one mid-delete.
 				// A session that never spoke has no file, and asking for one would be asking for nothing.
 				if (onDisk) await SessionManager.remove(sessionId);
+				// The queues and the run in flight go with the host, after the run has settled — deleting
+				// them earlier would leave a settling turn draining queues nobody holds.
+				this.runtimes.delete(sessionId);
 			})();
 			this.closing.set(sessionId, closing);
 			try {
@@ -581,6 +601,7 @@ export class SessionHub {
 		}
 		this.hosts.clear();
 		this.pending.clear();
+		this.runtimes.clear();
 	}
 
 	private hold(host: HostedSession): HostedSession {
@@ -608,7 +629,7 @@ export class SessionHub {
 			manager = SessionManager.open(absPath);
 		}
 		const absWorkspaceRoot = manager.getAbsCwd();
-		const session = await this.sessionOver(manager, absWorkspaceRoot);
+		const session = await this.sessionOver(manager, absWorkspaceRoot, this.runtimeFor(id, absWorkspaceRoot));
 		const host = new HostedSession(session, absWorkspaceRoot);
 		this.hosts.set(id, host);
 		// Observers first, then the listeners: a subscriber told "a host opened" and reaching for the
@@ -644,8 +665,25 @@ export class SessionHub {
 		};
 	}
 
-	private sessionOver(sessionManager: SessionManager, absWorkspaceRoot: string): Promise<Agent> {
-		return openAgent(this.agentOptions(sessionManager, absWorkspaceRoot));
+	private sessionOver(sessionManager: SessionManager, absWorkspaceRoot: string, runtime: SessionRuntime): Promise<Agent> {
+		return openAgent({ ...this.agentOptions(sessionManager, absWorkspaceRoot), runtime });
+	}
+
+	/**
+	 * The live half of one session, built the first time the session is touched.
+	 *
+	 * The queue modes are the workspace settings' answer at that moment; a config patch moves them on
+	 * the queues in place afterwards. An id this map already names is answered with what it holds —
+	 * which only happens while a host is open, because the close that removes the host is also what
+	 * removes the runtime — so a reopen after a reap never inherits a stale run or a drained queue.
+	 */
+	private runtimeFor(id: string, absWorkspaceRoot: string): SessionRuntime {
+		const existing = this.runtimes.get(id);
+		if (existing) return existing;
+		const settings = this.settingsFor(absWorkspaceRoot);
+		const created = createSessionRuntime(settings.getSteeringMode(), settings.getFollowUpMode());
+		this.runtimes.set(id, created);
+		return created;
 	}
 
 	private async reap(host: HostedSession): Promise<void> {
@@ -683,6 +721,9 @@ export class SessionHub {
 			} finally {
 				this.closing.delete(host.id);
 			}
+			// The host is gone, so its live half goes with it: whatever was queued or running dies with
+			// the session, which is the same thing a process restart would have done, one host at a time.
+			this.runtimes.delete(host.id);
 		} finally {
 			host.reaping = false;
 		}

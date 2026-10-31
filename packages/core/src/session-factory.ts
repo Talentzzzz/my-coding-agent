@@ -26,6 +26,7 @@ import {
 import { SettingsManager } from "./settings-manager.ts";
 import { type ToolRegistry, type ToolState, createToolRegistry, toolDefinitions } from "./tools/index.ts";
 import { createSubagentTools } from "./tools/subagent.ts";
+import { createSessionRuntime, type SessionRuntime } from "./session/session-runtime.ts";
 import { Workspace } from "./workspace.ts";
 
 /** What a caller must supply to build a session. Everything else is discovered here. */
@@ -73,6 +74,15 @@ export interface OpenAgentOptions {
 	 * the read-only tools and nothing that could start a grandchild.
 	 */
 	subagents?: boolean;
+	/**
+	 * The session's live half: the queues a run drains, and the run in flight.
+	 *
+	 * A host that owns the state — the hub, which holds one per session and drops it when the host
+	 * closes — hands its own in, so what it holds and what the session runs on are one object. A
+	 * caller that does not care gets a fresh one, built empty from this workspace's queue modes,
+	 * which is the same thing a process restart would leave behind.
+	 */
+	runtime?: SessionRuntime;
 }
 
 /**
@@ -220,6 +230,7 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 	const { workspace, settingsManager, modelState, registry, agentsMd } = await assemble(options);
 	const hooks = createHooks();
+	const runtime = options.runtime ?? createSessionRuntime(settingsManager.getSteeringMode(), settingsManager.getFollowUpMode());
 
 	const config: AgentConfig = {
 		workspace,
@@ -229,6 +240,7 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 		settingsManager,
 		tools: registry,
 		hooks,
+		runtime,
 		// Rebuilt whenever the active set or the approval set moves, so the prompt cannot promise tools
 		// or approvals the session no longer has.
 		systemPrompt: (toolNames, approvals) =>
