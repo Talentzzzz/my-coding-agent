@@ -63,9 +63,11 @@ fake.setResponses([
 	fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 	fakeAssistantMessage("done"),
 ]);
+const sessionState = createSessionState(root);
+const sessionId = sessionState.sessionId;
 const session = await openAgent({
 	absWorkspaceRoot: root,
-	sessionState: createSessionState(root),
+	sessionState,
 	models,
 	api: fake.api,
 	model: modelName,
@@ -73,8 +75,8 @@ const session = await openAgent({
 });
 
 // Mounted the way `SessionHub.open()` mounts one, so the controller claims through the real hub.
-const host = new HostedSession(session, root);
-(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(session.id, host);
+const host = new HostedSession(sessionId, session, root);
+(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(sessionId, host);
 
 // The spy is the whole point of building the controller by hand: the listener is what the mux's
 // answers table is fed through, so "the refused attempt reached nothing" is asserted right here.
@@ -116,46 +118,46 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
 }
 
 try {
-	const accepted = await request("POST", `/api/sessions/${session.id}/messages`, { text: "read the notes" });
+	const accepted = await request("POST", `/api/sessions/${sessionId}/messages`, { text: "read the notes" });
 	check("the prompt was accepted", accepted.status === 202, `status ${accepted.status}`);
 
-	const pending = await until(() => session.snapshot.pendingApprovals.length === 1);
-	check("the run parked at the approval", pending, JSON.stringify(session.snapshot.pendingApprovals));
-	const toolCallId = session.snapshot.pendingApprovals[0]?.toolCallId ?? "";
+	const pending = await until(() => session.snapshot(sessionId).pendingApprovals.length === 1);
+	check("the run parked at the approval", pending, JSON.stringify(session.snapshot(sessionId).pendingApprovals));
+	const toolCallId = session.snapshot(sessionId).pendingApprovals[0]?.toolCallId ?? "";
 
 	// The refusal half: an id nothing is waiting on is a conflict, and neither the answers listener
 	// nor the session hears about the attempt.
-	const unknown = await request("POST", `/api/sessions/${session.id}/approvals/no-such-call`, { approved: true });
+	const unknown = await request("POST", `/api/sessions/${sessionId}/approvals/no-such-call`, { approved: true });
 	check("an unknown toolCallId is a conflict", unknown.status === 409, `status ${unknown.status} ${JSON.stringify(unknown.payload)}`);
 	check("the refusal says what was refused", JSON.stringify(unknown.payload).includes("not a pending approval"), JSON.stringify(unknown.payload));
 	check("a refused answer was recorded nowhere", remembered.length === 0, JSON.stringify(remembered));
-	check("the run is still parked", session.snapshot.pendingApprovals.length === 1, JSON.stringify(session.snapshot.pendingApprovals));
+	check("the run is still parked", session.snapshot(sessionId).pendingApprovals.length === 1, JSON.stringify(session.snapshot(sessionId).pendingApprovals));
 
-	const denied = await request("POST", `/api/sessions/${session.id}/approvals/no-such-call`, { approved: false });
+	const denied = await request("POST", `/api/sessions/${sessionId}/approvals/no-such-call`, { approved: false });
 	check("the refusal does not depend on the answer's direction", denied.status === 409, `status ${denied.status}`);
 
 	// The answer half: the real id is accepted, reaches the listener with the session's own identity,
 	// and reaches the session — the run carries on to its answer.
-	const answered = await request("POST", `/api/sessions/${session.id}/approvals/${encodeURIComponent(toolCallId)}`, {
+	const answered = await request("POST", `/api/sessions/${sessionId}/approvals/${encodeURIComponent(toolCallId)}`, {
 		approved: true,
 	});
 	check("the real answer was accepted", answered.status === 200, `status ${answered.status} ${JSON.stringify(answered.payload)}`);
 	check(
 		"and it reached the listener exactly once, with the session it was given on",
-		remembered.length === 1 && remembered[0]?.sessionId === session.id && remembered[0]?.toolCallId === toolCallId && remembered[0]?.approved === true,
+		remembered.length === 1 && remembered[0]?.sessionId === sessionId && remembered[0]?.toolCallId === toolCallId && remembered[0]?.approved === true,
 		JSON.stringify(remembered),
 	);
 
 	check(
 		"the run finished after the answer",
-		await until(() => !session.snapshot.submitting, 8_000),
-		String(session.snapshot.submitting),
+		await until(() => !session.snapshot(sessionId).submitting, 8_000),
+		String(session.snapshot(sessionId).submitting),
 	);
-	check("the tool ran", JSON.stringify(session.snapshot.messages).includes("notes.txt"), "");
-	check("and the closing answer is there", session.snapshot.messages.some((message) => JSON.stringify(message).includes("done")), "");
+	check("the tool ran", JSON.stringify(session.snapshot(sessionId).messages).includes("notes.txt"), "");
+	check("and the closing answer is there", session.snapshot(sessionId).messages.some((message) => JSON.stringify(message).includes("done")), "");
 
 	// Answered once, it is no longer answerable: the same request now conflicts too.
-	const twice = await request("POST", `/api/sessions/${session.id}/approvals/${encodeURIComponent(toolCallId)}`, {
+	const twice = await request("POST", `/api/sessions/${sessionId}/approvals/${encodeURIComponent(toolCallId)}`, {
 		approved: true,
 	});
 	check("an already-settled id is a conflict too", twice.status === 409, `status ${twice.status} ${JSON.stringify(twice.payload)}`);

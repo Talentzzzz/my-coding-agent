@@ -93,7 +93,7 @@ try {
 	process.stdout.write("the first message is what puts the session in the store\n");
 	const spokenHost = await hub.claim(first);
 	fake.setResponses([fakeAssistantMessage("a first answer")]);
-	await spokenHost.session.prompt("the conversation starts here");
+	await spokenHost.session.prompt(first, "the conversation starts here");
 	check("the row arrived with the run", await until(() => seen.some((row) => row.id === first)));
 	hub.release(spokenHost);
 	const spokenRow = await projection.row(first);
@@ -145,7 +145,7 @@ try {
 	// store with the run, and the run after this one is what moves a row that already exists.
 	const beforeRun = seen.length;
 	fake.setResponses([fakeAssistantMessage("answered")]);
-	const run = host.session.prompt("now the row has something to say");
+	const run = host.session.prompt(host.id, "now the row has something to say");
 	check("the row arrived during the run", await until(() => seen.some((row) => row.id === second)));
 	await run;
 	const landed = await projection.row(second);
@@ -156,7 +156,7 @@ try {
 	// republished idle when it settles, all with no subscriber anywhere.
 	const beforeSecondRun = seen.length;
 	fake.setResponses([fakeAssistantMessage("answered again")]);
-	const secondRun = host.session.prompt("the row is watching itself now");
+	const secondRun = host.session.prompt(host.id, "the row is watching itself now");
 	check("the row said running while the run was in flight", await until(() => seen.some((row) => row.id === second && row.running === true)));
 	await secondRun;
 	check("and the second run ended", (await projection.row(second))?.running === false, JSON.stringify(await projection.row(second)));
@@ -192,7 +192,7 @@ try {
 	check("the row kept the title its branch gave it", beforeBranch?.title === "the conversation starts here", beforeBranch?.title);
 	const branchHost = await hub.claim(first);
 	fake.setResponses([fakeAssistantMessage("one"), fakeAssistantMessage("two")]);
-	await branchHost.session.prompt("first turn");
+	await branchHost.session.prompt(first, "first turn");
 	await settle();
 	// A second turn on the same branch cannot rename the session: the fallback title is the branch's
 	// first user message, and that message has not moved.
@@ -207,8 +207,8 @@ try {
 	// and the only way a title can move at all is to drop the messages that gave it, because a branch
 	// always runs back to the root. Resetting the leaf and asking again starts a new root, and the file
 	// keeps the conversation it replaced alongside the new one.
-	branchHost.session.sessionManager.resetLeaf(branchHost.session.sessionState);
-	await branchHost.session.prompt("a different opening");
+	branchHost.session.sessionManager.resetLeaf(branchHost.session.sessionManager.stateOf(first));
+	await branchHost.session.prompt(first, "a different opening");
 	await settle();
 	const reopened = await projection.row(first);
 	check("a new root is named from the message it started with", reopened?.title === "a different opening", reopened?.title);
@@ -225,9 +225,9 @@ try {
 	const source = await hub.newSession();
 	const sourceHost = await hub.claim(source);
 	fake.setResponses([fakeAssistantMessage("to fork from")]);
-	await sourceHost.session.prompt("the conversation being forked");
+	await sourceHost.session.prompt(source, "the conversation being forked");
 	await settle();
-	const forked = await hub.fork(source, sourceHost.session.sessionManager.getLeafId(sourceHost.session.sessionState));
+	const forked = await hub.fork(source, sourceHost.session.sessionManager.getLeafId(sourceHost.session.sessionManager.stateOf(source)));
 	await until(() => seen.some((row) => row.id === forked));
 	const forkRow = await projection.row(forked);
 	check("the fork reaches the store on its own", forkRow !== undefined, forked);
@@ -268,7 +268,7 @@ try {
 	const observedHost = await hub.claim(afterStop);
 	check("and it was attached when the host opened", observedHost.claims === 1, `claims=${observedHost.claims}`);
 	fake.setResponses([fakeAssistantMessage("seen")]);
-	await observedHost.session.prompt("does the observer hear this");
+	await observedHost.session.prompt(afterStop, "does the observer hear this");
 	check("the observer saw the run's events", events > 0, `${events} events`);
 	hub.release(observedHost);
 	await until(() => !hub.live.includes(afterStop));

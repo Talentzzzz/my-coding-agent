@@ -149,43 +149,45 @@ fake.setResponses([
 	fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 	fakeAssistantMessage("done"),
 ]);
+const sessionState = createSessionState(root);
+const sessionId = sessionState.sessionId;
 const session = await openAgent({
 	absWorkspaceRoot: root,
-	sessionState: createSessionState(root),
+	sessionState,
 	models,
 	api: fake.api,
 	model: modelName,
 	settingsState: inMemorySettingsState({ approval: { read: true } }),
 });
 // Mounted the way `SessionHub.open()` mounts one, so every request below claims through the real hub.
-(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(session.id, new HostedSession(session, root));
+(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(sessionId, new HostedSession(sessionId, session, root));
 
 const roundTrip = await serve(hub);
 try {
 	// The bench holds a claim for the length of these checks. A subscription takes none — that is the
 	// model — so without it the reap that follows the run's own claim would end the lane in the middle
 	// of the assertions below.
-	const bench = await hub.claim(session.id);
+	const bench = await hub.claim(sessionId);
 	const wire = await connect(muxUrl(roundTrip.url));
 
-	const baseline = await wire.open(session.id);
-	check("the lane opened on the session's baseline", baseline.id === session.id, `baseline=${baseline.id}`);
+	const baseline = await wire.open(sessionId);
+	check("the lane opened on the session's baseline", baseline.id === sessionId, `baseline=${baseline.id}`);
 	check("and the session starts idle", baseline.submitting === false, String(baseline.submitting));
 
-	check("the prompt was accepted", (await prompt(roundTrip.url, session.id, "read the notes")) === 202);
+	check("the prompt was accepted", (await prompt(roundTrip.url, sessionId, "read the notes")) === 202);
 
 	// The run starts and stops at the gate: wait for the frame that shows the banner, and fail if the
 	// lane ends first. Waiting on a frame that never comes is exactly the bug being looked for.
-	const asked = await wire.waitFor(session.id, (message) => message.type === "approval_request", 10_000);
+	const asked = await wire.waitFor(sessionId, (message) => message.type === "approval_request", 10_000);
 	check(
 		"the approval request reached the lane",
 		asked?.type === "approval_request",
-		JSON.stringify(wire.items(session.id).map((message) => message.type)),
+		JSON.stringify(wire.items(sessionId).map((message) => message.type)),
 	);
 	check(
 		"the lane stayed open while it waited",
-		!wire.endOf(session.id).ended && wire.endOf(session.id).errors.length === 0,
-		JSON.stringify(wire.endOf(session.id)),
+		!wire.endOf(sessionId).ended && wire.endOf(sessionId).errors.length === 0,
+		JSON.stringify(wire.endOf(sessionId)),
 	);
 	if (asked?.type !== "approval_request") throw new Error("no approval request, so the rest of this section cannot run");
 
@@ -197,7 +199,7 @@ try {
 	// put no frame on the lane: this is ticket 14's "the failed request does not pollute the
 	// differences", the exact other side of ticket 13's `[true, false, false]` defect. It is also why
 	// the settlement count below is asserted to be one rather than "at least one".
-	const refused = await request(roundTrip.url, "POST", `/api/sessions/${session.id}/approvals/no-such-call`, { approved: true });
+	const refused = await request(roundTrip.url, "POST", `/api/sessions/${sessionId}/approvals/no-such-call`, { approved: true });
 	check("an unknown toolCallId is a conflict", refused.status === 409, `status ${refused.status} ${JSON.stringify(refused.payload)}`);
 	check(
 		"and the refusal says what was refused",
@@ -206,8 +208,8 @@ try {
 	);
 	check(
 		"and the refusal put no settlement on the lane",
-		wire.items(session.id).every((message) => message.type !== "approval_settled"),
-		JSON.stringify(wire.items(session.id).map((message) => message.type)),
+		wire.items(sessionId).every((message) => message.type !== "approval_settled"),
+		JSON.stringify(wire.items(sessionId).map((message) => message.type)),
 	);
 
 	// The ids the browser sends back are opaque and may contain a colon, so this also pins that a path
@@ -215,18 +217,18 @@ try {
 	const answered = await request(
 		roundTrip.url,
 		"POST",
-		`/api/sessions/${session.id}/approvals/${encodeURIComponent(request0.toolCallId)}`,
+		`/api/sessions/${sessionId}/approvals/${encodeURIComponent(request0.toolCallId)}`,
 		{ approved: true },
 	);
 	check("the real answer was accepted", answered.status === 200, `status ${answered.status}`);
 
-	const settled = await wire.waitFor(session.id, (message) => message.type === "approval_settled", 10_000);
+	const settled = await wire.waitFor(sessionId, (message) => message.type === "approval_settled", 10_000);
 	check(
 		"the lane was told the approval was settled",
 		settled?.type === "approval_settled",
-		JSON.stringify(wire.items(session.id).map((message) => message.type)),
+		JSON.stringify(wire.items(sessionId).map((message) => message.type)),
 	);
-	const settlements = wire.items(session.id).filter((message) => message.type === "approval_settled");
+	const settlements = wire.items(sessionId).filter((message) => message.type === "approval_settled");
 	check(
 		"and exactly one answer reached it: the one that was given",
 		settlements.length === 1 && settlements[0]?.approved === true,
@@ -236,10 +238,10 @@ try {
 	// The run continues, so the answer really did reach the waiting tool call.
 	check(
 		"the run finished after the answer",
-		(await wire.waitFor(session.id, (message) => message.type === "status" && message.submitting === false, 10_000)) !== undefined,
-		JSON.stringify(wire.items(session.id).map((message) => message.type)),
+		(await wire.waitFor(sessionId, (message) => message.type === "status" && message.submitting === false, 10_000)) !== undefined,
+		JSON.stringify(wire.items(sessionId).map((message) => message.type)),
 	);
-	const transcript = await readSession(roundTrip.url, session.id);
+	const transcript = await readSession(roundTrip.url, sessionId);
 	check("the tool ran and its result is in the transcript", JSON.stringify(transcript?.messages ?? []).includes("notes.txt"));
 	check("the model's closing answer is in the transcript", JSON.stringify(transcript?.messages ?? []).includes("done"));
 
@@ -268,21 +270,21 @@ const sharedWatchdog = deadline("the shared-answer checks", 60_000);
 
 const shared = await openRig(60_000);
 try {
-	const bench = await shared.hub.claim(shared.session.id);
+	const bench = await shared.hub.claim(shared.sessionId);
 	// Every window is attached before anything runs, so the request is a difference frame on each of
 	// them rather than part of a baseline — which is the path under test.
 	const windows: WireClient[] = [];
 	for (let index = 0; index < 3; index += 1) {
 		const window = await connect(muxUrl(shared.url));
-		await window.open(shared.session.id);
+		await window.open(shared.sessionId);
 		windows.push(window);
 	}
 	check("three connections are open on the one session", windows.length === 3);
 
-	check("the prompt was accepted", (await prompt(shared.url, shared.session.id, "read the notes")) === 202);
+	check("the prompt was accepted", (await prompt(shared.url, shared.sessionId, "read the notes")) === 202);
 
 	const shown = await Promise.all(
-		windows.map((window) => window.waitFor(shared.session.id, (message) => message.type === "approval_request", 10_000)),
+		windows.map((window) => window.waitFor(shared.sessionId, (message) => message.type === "approval_request", 10_000)),
 	);
 	check(
 		"every window was shown the approval",
@@ -297,7 +299,7 @@ try {
 	const answered = await request(
 		shared.url,
 		"POST",
-		`/api/sessions/${shared.session.id}/approvals/${encodeURIComponent(toolCallId)}`,
+		`/api/sessions/${shared.sessionId}/approvals/${encodeURIComponent(toolCallId)}`,
 		{ approved: true },
 	);
 	check("the answer was accepted", answered.status === 200, `status ${answered.status}`);
@@ -306,11 +308,11 @@ try {
 	// run's own last status is older than it (the gate's run already ended), so the status alone
 	// cannot tell this wait when the answer has landed.
 	await Promise.all(
-		windows.map((window) => window.waitFor(shared.session.id, (message) => message.type === "approval_settled", 10_000)),
+		windows.map((window) => window.waitFor(shared.sessionId, (message) => message.type === "approval_settled", 10_000)),
 	);
 
 	const reported = windows.map((window) =>
-		window.items(shared.session.id).find((message) => message.type === "approval_settled"),
+		window.items(shared.sessionId).find((message) => message.type === "approval_settled"),
 	);
 	check(
 		"every window was told the approval was settled",
@@ -433,35 +435,35 @@ try {
 	try {
 		const { wire, viewer } = await driveToApproval(patient);
 		const parked = patient.host;
-		check("the run parked at the approval", parked.session.hasPendingApprovals);
+		check("the run parked at the approval", parked.session.hasPendingApprovals(parked.id));
 
 		// The viewer switches away, and its claim is the *only* thing keeping the session open — a
 		// subscription takes none. So this release is what starts the reap, and the run parked at the
 		// gate is what the reap must not settle through.
-		wire.cancel(patient.session.id);
+		wire.cancel(patient.sessionId);
 		patient.hub.release(viewer);
 		await sleep(1_500);
 
-		check("the approval is still pending well past the old denial window", parked.session.hasPendingApprovals, "it was denied");
+		check("the approval is still pending well past the old denial window", parked.session.hasPendingApprovals(parked.id), "it was denied");
 		check("the session was not reaped out from under it", patient.hub.live.includes(parked.id), patient.hub.live.join(","));
 		check(
 			"and no denial reached the lane",
-			wire.items(patient.session.id).every((message) => message.type !== "approval_settled"),
-			JSON.stringify(wire.items(patient.session.id).map((message) => message.type)),
+			wire.items(patient.sessionId).every((message) => message.type !== "approval_settled"),
+			JSON.stringify(wire.items(patient.sessionId).map((message) => message.type)),
 		);
 
 		// The person came back: the same session, the same unanswered question, still theirs to answer.
 		const again = await patient.hub.claim(parked.id);
 		check("claiming it again hands back the same session", again === parked, "the old host was gone, so a new one was built");
 
-		const returned = await wire.open(patient.session.id);
+		const returned = await wire.open(patient.sessionId);
 		check(
 			"the returning window is shown the approval it must answer",
 			returned.pendingApprovals.length === 1,
 			JSON.stringify(returned.pendingApprovals),
 		);
 
-		const toolCallId = pendingId(wire, patient.session.id);
+		const toolCallId = pendingId(wire, patient.sessionId);
 		const answered = await request(
 			patient.url,
 			"POST",
@@ -472,8 +474,8 @@ try {
 
 		check(
 			"the approval was settled as granted",
-			await until(() => wire.items(patient.session.id).some((message) => message.type === "approval_settled" && message.approved === true), 8_000),
-			JSON.stringify(wire.items(patient.session.id).filter((message) => message.type === "approval_settled")),
+			await until(() => wire.items(patient.sessionId).some((message) => message.type === "approval_settled" && message.approved === true), 8_000),
+			JSON.stringify(wire.items(patient.sessionId).filter((message) => message.type === "approval_settled")),
 		);
 		check(
 			"and the recovery run it started finished",
@@ -496,14 +498,14 @@ try {
 	try {
 		const { wire, viewer } = await driveToApproval(abandoned);
 		const parked = abandoned.host;
-		check("the run parked at the approval", parked.session.hasPendingApprovals);
+		check("the run parked at the approval", parked.session.hasPendingApprovals(parked.id));
 
-		wire.cancel(abandoned.session.id);
+		wire.cancel(abandoned.sessionId);
 		abandoned.hub.release(viewer);
 
 		check(
 			"an approval nobody came back to is denied after the grace",
-			await until(() => !parked.session.hasPendingApprovals, 8_000),
+			await until(() => !parked.session.hasPendingApprovals(parked.id), 8_000),
 			"it was still pending",
 		);
 		check(
@@ -523,9 +525,9 @@ try {
 	try {
 		const { wire, viewer } = await driveToApproval(lookedThenLeft);
 		const parked = lookedThenLeft.host;
-		check("the run parked at the approval", parked.session.hasPendingApprovals);
+		check("the run parked at the approval", parked.session.hasPendingApprovals(parked.id));
 
-		wire.cancel(lookedThenLeft.session.id);
+		wire.cancel(lookedThenLeft.sessionId);
 		lookedThenLeft.hub.release(viewer);
 
 		check("the reap begins once the last claim is gone", await until(() => parked.reaping, 6_000));
@@ -537,13 +539,13 @@ try {
 			await until(() => !parked.reaping, 6_000),
 			"it stayed reaping, so no later release could ever reap this session",
 		);
-		check("and the approval is still unanswered", parked.session.hasPendingApprovals);
+		check("and the approval is still unanswered", parked.session.hasPendingApprovals(parked.id));
 
 		// ...and now they leave without answering. The session must still be reapable.
 		lookedThenLeft.hub.release(back);
 		check(
 			"leaving without answering parks again, and the grace runs out for real",
-			await until(() => !parked.session.hasPendingApprovals, 8_000),
+			await until(() => !parked.session.hasPendingApprovals(parked.id), 8_000),
 			"it stayed pending, so nothing reaped it",
 		);
 		check(
@@ -700,6 +702,8 @@ interface Rig {
 	root: string;
 	hub: SessionHub;
 	session: Agent;
+	/** The id the host is keyed by — what every id-keyed call below names. */
+	sessionId: string;
 	/** The mounted host, as the hub holds it: the object the reap decides about. */
 	host: HostedSession;
 	url: string;
@@ -722,23 +726,26 @@ async function openRig(approvalGraceMs: number): Promise<Rig> {
 		fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 		fakeAssistantMessage("done"),
 	]);
+	const sessionState = createSessionState(root);
+	const sessionId = sessionState.sessionId;
 	const session = await openAgent({
 		absWorkspaceRoot: root,
-		sessionState: createSessionState(root),
+		sessionState,
 		models,
 		api: transport.api,
 		model: modelName,
 		settingsState: inMemorySettingsState({ approval: { read: true } }),
 	});
 
-	const host = new HostedSession(session, root);
-	(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(session.id, host);
+	const host = new HostedSession(sessionId, session, root);
+	(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(sessionId, host);
 
 	const graph = await serve(hub);
 	return {
 		root,
 		hub,
 		session,
+		sessionId,
 		host,
 		url: graph.url,
 		close: async () => {
@@ -749,10 +756,16 @@ async function openRig(approvalGraceMs: number): Promise<Rig> {
 	};
 }
 
+/** One opened session and the id it is keyed by — an `Agent` answers only by id now. */
+interface Mounted {
+	id: string;
+	agent: Agent;
+}
+
 interface CrossRig {
 	hub: SessionHub;
 	/** Two sessions, each parked on the same scripted toolCallId once prompted. */
-	sessions: Agent[];
+	sessions: Mounted[];
 	url: string;
 	close(): Promise<void>;
 }
@@ -767,7 +780,7 @@ interface CrossRig {
 async function openCrossRig(): Promise<CrossRig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-approval-cross-"));
 	const hub = new SessionHub({ absCwd: root, approvalGraceMs: 60_000 });
-	const sessions: Agent[] = [];
+	const sessions: Mounted[] = [];
 	for (let index = 0; index < 2; index += 1) {
 		const transport = createFakeTransport();
 		transport.setResponses([
@@ -776,16 +789,18 @@ async function openCrossRig(): Promise<CrossRig> {
 			fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" }, { id: "call_shared" })),
 			fakeAssistantMessage("done"),
 		]);
+		const sessionState = createSessionState(root);
+		const id = sessionState.sessionId;
 		const session = await openAgent({
 			absWorkspaceRoot: root,
-			sessionState: createSessionState(root),
+			sessionState,
 			models,
 			api: transport.api,
 			model: modelName,
 			settingsState: inMemorySettingsState({ approval: { read: true } }),
 		});
-		(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(session.id, new HostedSession(session, root));
-		sessions.push(session);
+		(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(id, new HostedSession(id, session, root));
+		sessions.push({ id, agent: session });
 	}
 
 	const graph = await serve(hub);
@@ -807,14 +822,14 @@ async function openCrossRig(): Promise<CrossRig> {
  * subscription takes none.
  */
 async function driveToApproval(rig: Rig): Promise<{ wire: WireClient; viewer: HostedSession }> {
-	const viewer = await rig.hub.claim(rig.session.id);
+	const viewer = await rig.hub.claim(rig.sessionId);
 	const wire = await connect(muxUrl(rig.url));
-	await wire.open(rig.session.id);
+	await wire.open(rig.sessionId);
 
-	if ((await prompt(rig.url, rig.session.id, "read the notes")) !== 202) {
+	if ((await prompt(rig.url, rig.sessionId, "read the notes")) !== 202) {
 		throw new Error("the prompt was not accepted");
 	}
-	const asked = await wire.waitFor(rig.session.id, (message) => message.type === "approval_request", 10_000);
+	const asked = await wire.waitFor(rig.sessionId, (message) => message.type === "approval_request", 10_000);
 	if (asked?.type !== "approval_request") throw new Error("the run never asked for approval");
 	return { wire, viewer };
 }

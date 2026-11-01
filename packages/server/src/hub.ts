@@ -16,13 +16,9 @@ import {
 	fillSession,
 	type SessionState,
 	OpenSessions,
-	createOpenSession,
-	type OpenSession,
 	SettingsManager,
 	type SettingsState,
-	getFollowUpMode,
 	getHiddenWorkspaces,
-	getSteeringMode,
 	workspaceDir,
 	type ModelConfig,
 	ModelConfigStore,
@@ -124,9 +120,9 @@ export class HostedSession {
 	/** Set while the hub is deciding whether an unclaimed session can be closed. */
 	reaping = false;
 
-	constructor(session: Agent, absWorkspaceRoot: string) {
+	constructor(sessionId: string, session: Agent, absWorkspaceRoot: string) {
 		this.session = session;
-		this.id = session.id;
+		this.id = sessionId;
 		this.absWorkspaceRoot = absWorkspaceRoot;
 	}
 }
@@ -322,7 +318,7 @@ export class SessionHub {
 	 */
 	async snapshotOf(id: string): Promise<SessionSnapshot> {
 		const hosted = this.hosts.get(id);
-		if (hosted) return hosted.session.snapshot;
+		if (hosted) return hosted.session.snapshot(hosted.id);
 
 		// A session created and not spoken in has no file to open, but this process still holds the
 		// transcript it is building — reading it is the same cold read, over an empty log.
@@ -353,7 +349,7 @@ export class SessionHub {
 	snapshotNow(id: string): SessionSnapshot {
 		const host = this.hosts.get(id);
 		if (host === undefined) throw new Error(`Session is not running: ${id}`);
-		return host.session.snapshot;
+		return host.session.snapshot(host.id);
 	}
 
 	/**
@@ -368,7 +364,7 @@ export class SessionHub {
 	timestampOf(id: string, entryId: string): number | undefined {
 		const host = this.hosts.get(id);
 		if (host === undefined) return undefined;
-		const entry = host.session.sessionManager.getEntry(host.session.sessionState, entryId);
+		const entry = this.sessions.getEntry(this.sessions.stateOf(id), entryId);
 		return entry?.type === "message" ? entry.message.timestamp : undefined;
 	}
 
@@ -519,7 +515,12 @@ export class SessionHub {
 	 */
 	async fork(sessionId: string, entryId: string | null): Promise<string> {
 		const hosted = this.hosts.get(sessionId);
-		const absSourcePath = hosted?.session.sessionFile ?? SessionManager.findSessionFilePathById(sessionId);
+		// A hosted session's file is named by its own bag — the same object the service's cache answers
+		// with, since the open that hosted it handed this service the bag.
+		const absSourcePath =
+			hosted === undefined
+				? SessionManager.findSessionFilePathById(sessionId)
+				: this.sessions.getAbsSessionFile(this.sessions.stateOf(sessionId));
 		if (absSourcePath === undefined) throw new Error(`Unknown session: ${sessionId}`);
 		// The branch is written where its source lives: forking a conversation held in another
 		// workspace must not quietly move it into this one.
@@ -545,7 +546,7 @@ export class SessionHub {
 	async rename(sessionId: string, title: string): Promise<void> {
 		const hosted = this.hosts.get(sessionId);
 		if (hosted !== undefined) {
-			hosted.session.sessionManager.appendRename(hosted.session.sessionState, title);
+			this.sessions.appendRename(this.sessions.stateOf(sessionId), title);
 			return;
 		}
 		const absPath = SessionManager.findSessionFilePathById(sessionId);
@@ -584,18 +585,18 @@ export class SessionHub {
 		const onDisk = SessionManager.findSessionFilePathById(sessionId) !== undefined;
 		const hosted = this.hosts.get(sessionId);
 		if (hosted !== undefined) {
-			const snapshot = hosted.session.snapshot;
-			if (hosted.claims > 0 || this.opening.has(sessionId) || snapshot.submitting || hosted.session.hasPendingApprovals) {
+			const snapshot = hosted.session.snapshot(sessionId);
+			if (hosted.claims > 0 || this.opening.has(sessionId) || snapshot.submitting || hosted.session.hasPendingApprovals(sessionId)) {
 				throw new Error("这个会话还有运行中的轮次或没答完的审批，等它停下来再删。");
 			}
 			const closing = (async () => {
-				await hosted.session.settle();
+				await hosted.session.settle(sessionId);
 				if (this.hosts.get(sessionId) === hosted) this.hosts.delete(sessionId);
 				// The same order a reap uses: the observers lose their feeds before the listeners hear
 				// about the loss, so a subscriber never reaches for a session that is already gone.
 				for (const observer of this.observers.get(sessionId) ?? []) observer(undefined);
 				this.announceHost(sessionId, undefined);
-				await hosted.session.close();
+				await hosted.session.close(sessionId);
 				// The file removal rides inside the same slot: a claim that waited on `closing` resumes
 				// only after the file is gone, so it finds no file instead of reopening one mid-delete.
 				// A session that never spoke has no file, and asking for one would be asking for nothing.
@@ -625,7 +626,7 @@ export class SessionHub {
 	 */
 	async close(): Promise<void> {
 		const hosts = [...this.hosts.values()];
-		await Promise.all(hosts.map((host) => host.session.close()));
+		await Promise.all(hosts.map((host) => host.session.close(host.id)));
 		for (const host of hosts) {
 			for (const observer of this.observers.get(host.id) ?? []) observer(undefined);
 			this.announceHost(host.id, undefined);
@@ -653,8 +654,8 @@ export class SessionHub {
 		const pending = this.pendingManager(id);
 		const state = pending ?? this.sessions.stateOf(id);
 		const absWorkspaceRoot = state.absCwd;
-		const session = await this.sessionOver(state, absWorkspaceRoot, this.openSessionFor(id, absWorkspaceRoot));
-		const host = new HostedSession(session, absWorkspaceRoot);
+		const session = await this.sessionOver(state, absWorkspaceRoot);
+		const host = new HostedSession(id, session, absWorkspaceRoot);
 		this.hosts.set(id, host);
 		// Observers first, then the listeners: a subscriber told "a host opened" and reaching for the
 		// session must find it already handed over.
@@ -691,24 +692,8 @@ export class SessionHub {
 		};
 	}
 
-	private sessionOver(state: SessionState, absWorkspaceRoot: string, openSession: OpenSession): Promise<Agent> {
-		return openAgent({ ...this.agentOptions(state, absWorkspaceRoot), openSession });
-	}
-
-	/**
-	 * The registry entry of one session, built the first time the session is touched.
-	 *
-	 * The queue modes are the workspace settings' answer at that moment — read by the factory only
-	 * when a creation actually happens; a config patch moves them on the queues in place afterwards.
-	 * An entry this registry already names is answered with what it holds — which only happens while
-	 * a host is open, because the close that removes the host is also what removes the entry — so a
-	 * reopen after a reap never inherits a stale run or a drained queue.
-	 */
-	private openSessionFor(id: string, absWorkspaceRoot: string): OpenSession {
-		return this.openSessions.ensure(id, () => {
-			const settings = this.settingsStateOf(absWorkspaceRoot);
-			return createOpenSession(getSteeringMode(settings), getFollowUpMode(settings));
-		});
+	private sessionOver(state: SessionState, absWorkspaceRoot: string): Promise<Agent> {
+		return openAgent({ ...this.agentOptions(state, absWorkspaceRoot), openSessions: this.openSessions });
 	}
 
 	private async reap(host: HostedSession): Promise<void> {
@@ -722,19 +707,28 @@ export class SessionHub {
 			// at the gate, not while it is in flight, so the run is settled first and the waiting is
 			// decided after — a session released mid-run and one released already waiting take the
 			// same road here.
-			await host.session.settle();
-			if (host.session.hasPendingApprovals) {
+			await host.session.settle(host.id);
+			if (host.session.hasPendingApprovals(host.id)) {
 				const answered = await Promise.race([
 					// The answer arrives over REST on a claim of its own; what this wait is for is the
-					// moment the call stops dangling, which is the moment it was answered.
+					// moment the call stops dangling, which is the moment it was answered. The hub can
+					// also drop the host while the watch runs — a process shutdown's close is one — and
+					// a dropped host ends the watch: the question it was waiting on is gone with the
+					// session, and answering it is the closer's business, not a reap nobody holds.
 					(async () => {
-						while (host.session.hasPendingApprovals) await delay(APPROVAL_WATCH_MS);
+						while (this.hosts.get(host.id) === host && host.session.hasPendingApprovals(host.id)) {
+							await delay(APPROVAL_WATCH_MS);
+						}
 						return true;
 					})(),
 					delay(this.approvalGraceMs).then(() => false),
 				]);
+				// Dropped while the watch ran — by the shutdown close, or a delete. Nothing below has a
+				// session to decide about any more, and touching it would read a registry entry the hub
+				// no longer holds.
+				if (this.hosts.get(host.id) !== host) return;
 				if (!answered && host.claims === 0) {
-					host.session.denyAllApprovals("No window answered this approval.");
+					host.session.denyAllApprovals(host.id, "No window answered this approval.");
 				}
 				// A claim arrived during the wait, so the person came back and the approval is still
 				// theirs to answer. This reap has nothing left to decide: holding `reaping` — and so
@@ -742,7 +736,7 @@ export class SessionHub {
 				// ever reaping it. Letting go here is what lets their next release do that.
 				if (!answered && host.claims > 0) return;
 			}
-			await host.session.settle();
+			await host.session.settle(host.id);
 			if (host.claims > 0) return;
 
 			if (this.hosts.get(host.id) === host) this.hosts.delete(host.id);
@@ -750,7 +744,7 @@ export class SessionHub {
 			// the feeds to be gone first, and a listener reacting to the loss is the later of the two.
 			for (const observer of this.observers.get(host.id) ?? []) observer(undefined);
 			this.announceHost(host.id, undefined);
-			const closing = host.session.close();
+			const closing = host.session.close(host.id);
 			this.closing.set(host.id, closing);
 			try {
 				await closing;
@@ -823,8 +817,8 @@ export class SessionHub {
  */
 function feedsOf(host: HostedSession): SessionFeeds {
 	return {
-		onEvent: (listener) => host.session.onEvent(listener),
-		onChange: (listener) => host.session.onChange(listener),
+		onEvent: (listener) => host.session.onEvent(host.id, listener),
+		onChange: (listener) => host.session.onChange(host.id, listener),
 	};
 }
 

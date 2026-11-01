@@ -63,6 +63,8 @@ interface SubagentJob {
 	report?: string;
 	error?: string;
 	child?: Agent;
+	/** The child's transcript, as the bag every read and write of its session names. */
+	childState?: SessionState;
 	/** Aborted by `SubAgentControl`'s stop action, or by the parent run's own cancellation. */
 	controller: AbortController;
 	/** Resolves when the job leaves `running`, whatever the outcome; never rejects. */
@@ -103,10 +105,10 @@ export interface SubagentToolDeps {
 export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 	const jobs = new Map<string, SubagentJob>();
 
-	async function buildChild(): Promise<Agent> {
+	async function buildChild(): Promise<{ agent: Agent; state: SessionState }> {
 		const absChildDir = join(workspaceDir(deps.workspace.absRoot), "subagents");
 		const sessionState = createSessionState(deps.workspace.absRoot, absChildDir, deps.parentSessionFile);
-		return openAgent({
+		const agent = await openAgent({
 			absWorkspaceRoot: deps.workspace.absRoot,
 			sessionManager: deps.parentSessionManager,
 			sessionState,
@@ -122,11 +124,12 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 			settingsState: inMemorySettingsState({}),
 			subagents: false,
 		});
+		return { agent, state: sessionState };
 	}
 
 	/** The child's last assistant message, or undefined when it produced none. */
-	function lastAssistant(child: Agent) {
-		const messages = child.sessionManager.buildSessionContext(child.sessionState).messages;
+	function lastAssistant(state: SessionState) {
+		const messages = deps.parentSessionManager.buildSessionContext(state).messages;
 		for (let index = messages.length - 1; index >= 0; index -= 1) {
 			const message = messages[index]!;
 			if (message.role === "assistant") return message;
@@ -135,8 +138,8 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 	}
 
 	/** The child's last assistant text: the report is the delegation's whole product. */
-	function reportOf(child: Agent): string {
-		const last = lastAssistant(child);
+	function reportOf(state: SessionState): string {
+		const last = lastAssistant(state);
 		if (last === undefined) return "(the SubAgent produced no text)";
 		return last.content
 			.filter((block): block is { type: "text"; text: string } => block.type === "text")
@@ -154,7 +157,7 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 	 * request that reported tokens, so there is no spend to record — a spend of nothing is not a
 	 * fact worth a line.
 	 */
-	function childUsage(child: Agent): Usage | undefined {
+	function childUsage(state: SessionState): Usage | undefined {
 		let input = 0;
 		let output = 0;
 		let cacheRead = 0;
@@ -164,7 +167,7 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 		let costCacheRead = 0;
 		let costCacheWrite = 0;
 		let seen = false;
-		for (const entry of child.sessionManager.getEntries(child.sessionState)) {
+		for (const entry of deps.parentSessionManager.getEntries(state)) {
 			const usage = entryUsage(entry);
 			if (usage === undefined) continue;
 			seen = true;
@@ -201,28 +204,29 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 		jobs.set(job.id, job);
 		job.settled = (async () => {
 			try {
-				const child = await buildChild();
+				const { agent: child, state: childState } = await buildChild();
 				job.child = child;
+				job.childState = childState;
 				if (controller.signal.aborted) {
-					await child.abort();
+					await child.abort(childState.sessionId);
 					job.status = "stopped";
 					return;
 				}
 				// A failed provider call is not a rejection: the loop ends the run with an assistant
 				// message whose stopReason is "error", so the transcript is where the outcome is read.
-				await child.prompt(prompt);
+				await child.prompt(childState.sessionId, prompt);
 				if (controller.signal.aborted) {
 					job.status = "stopped";
 					return;
 				}
-				const last = lastAssistant(child);
+				const last = lastAssistant(childState);
 				if (last?.stopReason === "error") {
 					job.status = "failed";
 					job.error = last.errorMessage ?? "unknown provider error";
 					return;
 				}
 				job.status = "done";
-				job.report = reportOf(child);
+				job.report = reportOf(childState);
 			} catch (error) {
 				if (controller.signal.aborted) {
 					job.status = "stopped";
@@ -231,14 +235,14 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 				job.status = "failed";
 				job.error = error instanceof Error ? error.message : String(error);
 			} finally {
-				if (job.child !== undefined) {
+				if (job.child !== undefined && job.childState !== undefined) {
 					// Spend is spend whatever the outcome: a failed or stopped child still burned what
 					// it burned, and the parent transcript is where this session's total reads it back.
-					const usage = childUsage(job.child);
+					const usage = childUsage(job.childState);
 					if (usage !== undefined) {
-						deps.parentSessionManager.appendUsage(deps.parentSessionState, "subagent", job.child.modelName, usage);
+						deps.parentSessionManager.appendUsage(deps.parentSessionState, "subagent", job.child.modelName(job.childState.sessionId), usage);
 					}
-					await job.child.close().catch(() => {});
+					await job.child.close(job.childState.sessionId).catch(() => {});
 				}
 			}
 		})();
@@ -292,7 +296,7 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 			if (job === undefined) throw new Error(`Unknown SubAgent job: ${params.id}`);
 			if (params.action === "stop") {
 				job.controller.abort();
-				job.child?.abort();
+				if (job.child !== undefined && job.childState !== undefined) job.child.abort(job.childState.sessionId);
 				await job.settled;
 				return textResult(`SubAgent job ${job.id} ${job.status}.`);
 			}

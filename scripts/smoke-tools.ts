@@ -639,12 +639,19 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		models: { list: () => [configured] },
 		settingsState,
 	});
+	const id = state.sessionId;
 
-	check("opens with the stored transcript", session.snapshot.messages.length === 1, String(session.snapshot.messages.length));
-	check("is idle before any prompt", session.isLooping === false);
+	check("opens with the stored transcript", session.snapshot(id).messages.length === 1, String(session.snapshot(id).messages.length));
+	check("is idle before any prompt", session.isLooping(id) === false);
 
-	session.applyConfig({ approval: { bash: true } });
-	check("the session exposes the state it was given", session.settingsState === settingsState);
+	session.applyConfig(id, { approval: { bash: true } });
+	// The session reads and writes the settings state it was given — not a copy: a config patch that
+	// lands in the workspace's half of the patch lands in this bag, which is what the write-through
+	// below proves. The value is put back, because the bag is shared by the exercises that follow.
+	const timeoutBefore = getBashSettings(settingsState).defaultTimeoutMs;
+	session.applyConfig(id, { bash: { defaultTimeoutMs: timeoutBefore + 1 } });
+	check("the session reads and writes the settings state it was given", getBashSettings(settingsState).defaultTimeoutMs === timeoutBefore + 1, String(getBashSettings(settingsState).defaultTimeoutMs));
+	session.applyConfig(id, { bash: { defaultTimeoutMs: timeoutBefore } });
 	// An approval chosen in a session is that session's own: it lives in the transcript as a
 	// `tool_config` entry, and the settings file — which every other session over this workspace reads
 	// — is left exactly as it was.
@@ -653,7 +660,7 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		getApprovals(settingsState).bash === false,
 		JSON.stringify(getApprovals(settingsState)),
 	);
-	check("and the session reflects it", session.snapshot.approvals.bash === true, JSON.stringify(session.snapshot.approvals));
+	check("and the session reflects it", session.snapshot(id).approvals.bash === true, JSON.stringify(session.snapshot(id).approvals));
 	check(
 		"recording the choice in the transcript",
 		getRecordedToolConfig(state).approval?.bash === true,
@@ -661,18 +668,18 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	);
 	check(
 		"beside the tool set in force",
-		JSON.stringify(getRecordedToolConfig(state).activeTools) === JSON.stringify(session.activeTools),
+		JSON.stringify(getRecordedToolConfig(state).activeTools) === JSON.stringify(session.activeTools(id)),
 		JSON.stringify(getRecordedToolConfig(state).activeTools),
 	);
 
 	// Both calls must resolve without an active run, and must not disturb the transcript.
-	const aborted = await within("abort()", 5_000, session.abort());
+	const aborted = await within("abort()", 5_000, session.abort(id));
 	check("abort() settles when idle", aborted.ok);
-	const closed = await within("close()", 5_000, session.close());
+	const closed = await within("close()", 5_000, session.close(id));
 	check("close() settles", closed.ok);
-	check("lifecycle calls keep the transcript", session.snapshot.messages.length === 1, String(session.snapshot.messages.length));
+	check("lifecycle calls keep the transcript", session.snapshot(id).messages.length === 1, String(session.snapshot(id).messages.length));
 
-	const reloaded = fillSession(session.sessionFile ?? "");
+	const reloaded = fillSession(session.sessionFile(id) ?? "");
 	check(
 		"the transcript is still on disk",
 		getEntries(reloaded).filter((entry) => entry.type === "message").length === 1,
@@ -700,17 +707,18 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		models: { list: () => [configured] },
 		settingsState,
 	});
-	check("reopening restores the approval the session chose", reopened.snapshot.approvals.bash === true, JSON.stringify(reopened.snapshot.approvals));
+	check("reopening restores the approval the session chose", reopened.snapshot(reloaded.sessionId).approvals.bash === true, JSON.stringify(reopened.snapshot(reloaded.sessionId).approvals));
+	const otherState = createSessionState(root);
 	const other = await openAgent({
 		absWorkspaceRoot: root,
-		sessionState: createSessionState(root),
+		sessionState: otherState,
 		models: { list: () => [configured] },
 		settingsState,
 	});
 	check(
 		"while another session over the workspace keeps the defaults",
-		other.snapshot.approvals.bash === false,
-		JSON.stringify(other.snapshot.approvals),
+		other.snapshot(otherState.sessionId).approvals.bash === false,
+		JSON.stringify(other.snapshot(otherState.sessionId).approvals),
 	);
 }
 
@@ -979,12 +987,12 @@ async function exercisePruning(): Promise<void> {
 		settingsState: inMemorySettingsState({ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } }),
 	});
 	const announced: string[] = [];
-	session.onEvent((event) => {
+	session.onEvent(store2.sessionId, (event) => {
 		if (event.type === "compaction" || event.type === "compaction_failed" || event.type === "tool_results_cleared") announced.push(event.type);
 	});
 
 	check("the trigger fired before the clear", estimateTokens(project(buildContextEntries(store2))) > 500);
-	const kept = await session.maybeCompact(buildContextEntries(store2), now);
+	const kept = await session.maybeCompact(store2.sessionId, buildContextEntries(store2), now);
 	const keptText = text(kept);
 	check("the clear alone left it under the trigger", estimateTokens(project(kept)) <= 500, String(estimateTokens(project(kept))));
 	check("so the request carries the cleared view", keptText.includes(clearedToolResultText("read")) && !keptText.includes("body 0 "));
@@ -997,9 +1005,9 @@ async function exercisePruning(): Promise<void> {
 	);
 
 	// A second pass has nothing left to clear and the trigger no longer fires, so nothing is written.
-	await session.maybeCompact(buildContextEntries(store2), now);
+	await session.maybeCompact(store2.sessionId, buildContextEntries(store2), now);
 	check("a second pass writes no second record", getEntries(store2).filter((entry) => entry.type === "clear_tool_result").length === 1);
-	await session.close();
+	await session.close(store2.sessionId);
 
 	// The point of recording it: a process that reads the file again sees the cleared view without
 	// re-deciding anything, and the file still holds every result the view dropped.

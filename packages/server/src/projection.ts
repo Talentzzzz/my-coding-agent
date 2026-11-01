@@ -132,8 +132,8 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	const follow = (sessionId: string, host: HostedSession): void => {
 		if (following.has(sessionId)) return;
 
-		const offEvent = host.session.onEvent((event) => onEvent(sessionId, host, event));
-		const offChange = host.session.onChange((snapshot) => {
+		const offEvent = host.session.onEvent(sessionId, (event) => onEvent(sessionId, host, event));
+		const offChange = host.session.onChange(sessionId, (snapshot) => {
 			const next = liveRow(sessionId, {
 				running: snapshot.submitting,
 				pending: snapshot.pendingApprovals.length,
@@ -170,7 +170,8 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 			return;
 		}
 		const manager = host.session.sessionManager;
-		const state = host.session.sessionState;
+		// The bag the session writes through: the service's own cache answers the id with it.
+		const state = manager.stateOf(sessionId);
 
 		if (event.type === "branch_changed") {
 			publish({ ...current, title: manager.getTitle(state) });
@@ -360,7 +361,7 @@ interface LiveFields {
 
 /** Read those two fields off a running session. */
 function liveOf(host: HostedSession): LiveFields {
-	const snapshot = host.session.snapshot;
+	const snapshot = host.session.snapshot(host.id);
 	return { running: snapshot.submitting, pending: snapshot.pendingApprovals.length };
 }
 

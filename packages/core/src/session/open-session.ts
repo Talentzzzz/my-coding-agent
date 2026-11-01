@@ -1,17 +1,26 @@
 import type { QueueMode } from "@my-agent/loop";
+import type { ModelState } from "../models.ts";
+import type { ToolState } from "../tools/manager.ts";
+import type { Workspace } from "../workspace.ts";
 import type { RunScope, SessionEventListener, SessionListener } from "../agent.ts";
+import type { SettingsState } from "../settings-manager.ts";
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.ts";
 
 /**
  * One session this process has touched, as a registry entry: the live half (ADR-0006 §4) plus the
- * two attach points and the cross-stack run slot that ride with it.
+ * assembly the session runs on, and the two attach points and the cross-stack run slot that ride
+ * with it.
  *
- * Everything here answers one question: *what is in progress and nowhere on disk*. The queues and
- * the active run cannot be rebuilt from the ledger; neither can the subscriber sets a window
- * attached through `onChange` / `onEvent`, or the run slot a mid-run reader reaches through. A
- * process restart drops the whole entry on purpose — queued messages are lost, subscribers are
- * re-attached by the next connection, the run slot is empty — and the session file is not, so a
- * reopen and a restart land in the same place.
+ * Everything here answers one of two questions. *What is in progress and nowhere on disk*: the
+ * queues and the active run cannot be rebuilt from the ledger; neither can the subscriber sets a
+ * window attached through `onChange` / `onEvent`, or the run slot a mid-run reader reaches through.
+ * *What one open resolved*: the workspace fence, the settings bag, the model selection, and the
+ * tool seed are the products of the seed→fill assembly (ADR-0006 §2) — the per-session answers a
+ * stateless orchestrator would otherwise have nowhere to put, arrived at when the entry was created
+ * and read by every call that follows. A process restart drops the whole entry on purpose — queued
+ * messages are lost, subscribers are re-attached by the next connection, the run slot is empty, and
+ * the assembly is re-run by the reopen — and the session file is not, so a reopen and a restart land
+ * in the same place.
  *
  * The name is the entry's, not the state's: {@link SessionRuntime} keeps its narrow definition —
  * the queues and the run in flight — and this entry *holds* one rather than replacing it
@@ -35,20 +44,60 @@ export interface OpenSession {
 	 * the moment the run settles.
 	 */
 	run: RunScope | undefined;
+	/** The directory this session's tools resolve inside, resolved once at assembly. */
+	readonly workspace: Workspace;
+	/** The workspace's settings, as the bag every settings call in this session passes. */
+	readonly settings: SettingsState;
+	/**
+	 * The model selection in force, as the seed assembly resolved: the row's name and the level.
+	 *
+	 * The bag is the session's one live model state, and it lives here rather than on the session
+	 * because the orchestrator is stateless (ADR-0007 §5): a selection that arrived with a message
+	 * is written onto it by the session, a branch move rewrites it from the branch's own recording,
+	 * and every request lays the live row's facts over it with `fillModel` before anything reads
+	 * them. What is *recorded* is the ledger's account, written by the request that is made with the
+	 * selection — this bag is what that request was made from.
+	 */
+	readonly modelSelection: ModelState;
+	/**
+	 * The deliberate loadout assembly handed in, as the fallback the tool choice derives against, or
+	 * undefined when the session follows the global default's live view.
+	 *
+	 * A seed, never a state: the SubAgent child's read-only narrowing arrives this way, and the
+	 * recorded `tool_config` entries still have the last word — the seed answers only on a branch
+	 * that carries no entry.
+	 */
+	readonly toolSeed: ToolState | undefined;
+}
+
+/** What one open resolved, as the entry's starting contents. */
+export interface OpenSessionSeed {
+	workspace: Workspace;
+	settings: SettingsState;
+	modelSelection: ModelState;
+	toolSeed?: ToolState;
+	steeringMode: QueueMode;
+	followUpMode: QueueMode;
 }
 
 /**
- * Build one session's registry entry, empty.
+ * Build one session's registry entry.
  *
  * The queue modes are the workspace settings' answer at creation time; a config patch that moves
- * either mode later writes it onto the queue in place, so nothing here is captured for good.
+ * either mode later writes it onto the queue in place, so nothing here is captured for good. The
+ * assembly fields are the caller's resolved answers — the orchestrator reads them and never
+ * re-resolves them, so there is exactly one place a session's assembly lives.
  */
-export function createOpenSession(steeringMode: QueueMode, followUpMode: QueueMode): OpenSession {
+export function createOpenSession(seed: OpenSessionSeed): OpenSession {
 	return {
-		runtime: createSessionRuntime(steeringMode, followUpMode),
+		runtime: createSessionRuntime(seed.steeringMode, seed.followUpMode),
 		listeners: new Set(),
 		eventListeners: new Set(),
 		run: undefined,
+		workspace: seed.workspace,
+		settings: seed.settings,
+		modelSelection: seed.modelSelection,
+		toolSeed: seed.toolSeed,
 	};
 }
 
@@ -68,9 +117,9 @@ export class OpenSessions {
 	 * The entry an id names, created on first touch by the caller's own factory.
 	 *
 	 * The factory rather than the registry builds the entry, because what creation reads — the
-	 * queue modes — is the workspace settings' answer, and the registry stays dumb about where
-	 * those come from: the caller reads them only when a creation actually happens, which keeps
-	 * the timing where it has always been.
+	 * queue modes, the assembly — is the open's own answer, and the registry stays dumb about
+	 * where those come from: the caller resolves them only when a creation actually happens, which
+	 * keeps the timing where it has always been.
 	 */
 	ensure(id: string, create: () => OpenSession): OpenSession {
 		const existing = this.entries.get(id);
@@ -78,6 +127,11 @@ export class OpenSessions {
 		const created = create();
 		this.entries.set(id, created);
 		return created;
+	}
+
+	/** The entry an id names, or undefined when this process has never touched the session. */
+	get(id: string): OpenSession | undefined {
+		return this.entries.get(id);
 	}
 
 	/** Drop one entry: the session's host has closed, so its live half goes with it. */

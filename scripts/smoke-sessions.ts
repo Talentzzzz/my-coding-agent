@@ -29,11 +29,14 @@ import {
 	openAgent,
 	readSessionSnapshot,
 	SessionManager,
+	Workspace,
 	OpenSessions,
 	createOpenSession,
 	inMemorySettingsState,
+	placeholderModelState,
 	toolResultViewsOf,
 	workspaceDir,
+	type QueueMode,
 	type SessionSnapshot,
 	type SessionState,
 } from "@my-agent/core";
@@ -123,6 +126,21 @@ function openFile(id: string): SessionState {
 	return fillSession(path);
 }
 
+/**
+ * The hub's own session service: the one whose open adopted every hosted bag into its cache, so the
+ * bag behind a live session is answerable here the same way the session itself reads and writes it.
+ * The tests append directly to the transcript rather than speaking to a provider, which is what the
+ * id-keyed `Agent` no longer exposes.
+ */
+function hubSessions(hub: SessionHub): SessionManager {
+	return (hub as unknown as { sessions: SessionManager }).sessions;
+}
+
+/** The bag behind a hosted session: what the hub's service adopted at open, file or no file. */
+function bagOf(hub: SessionHub, id: string): SessionState {
+	return hubSessions(hub).stateOf(id);
+}
+
 /** Poll until `ready` holds, and report whether it did, so no test guesses at a reap's timing. */
 async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
 	const deadline = Date.now() + ms;
@@ -160,7 +178,7 @@ try {
 	check("a claimed session is never forgotten", hub.live.includes(first.id));
 
 	process.stdout.write("the last release forgets an idle session\n");
-	first.session.sessionManager.appendMessage(first.session.sessionState, userMessage("survives the reap"));
+	hubSessions(hub).appendMessage(bagOf(hub, first.id), userMessage("survives the reap"));
 	hub.release(first);
 	check("the session is closed and dropped", await until(() => !hub.live.includes(first.id)));
 
@@ -169,7 +187,7 @@ try {
 	check("reopening builds a different session object", reopened.session !== first.session);
 	check(
 		"and it still carries the transcript",
-		JSON.stringify(reopened.session.snapshot.messages).includes("survives the reap"),
+		JSON.stringify(reopened.session.snapshot(reopened.id).messages).includes("survives the reap"),
 	);
 	await hub.close();
 
@@ -181,14 +199,14 @@ try {
 	process.stdout.write("a fork is the branch up to one entry\n");
 	const parentId = await hub.newSession();
 	const parent = await hub.claim(parentId);
-	const parentFile = parent.session.sessionFile ?? "";
-	const entryOne = parent.session.sessionManager.appendMessage(parent.session.sessionState, userMessage("first"));
-	parent.session.sessionManager.appendMessage(parent.session.sessionState, userMessage("second"));
+	const parentFile = parent.session.sessionFile(parent.id) ?? "";
+	const entryOne = hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("first"));
+	hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("second"));
 
 	const forkedId = await hub.fork(parentId, entryOne);
 	// Read the file the fork wrote, before a session opens over it and records its own model.
 	const forkedFile = openFile(forkedId);
-	const branch = parent.session.sessionManager.getBranch(parent.session.sessionState, entryOne);
+	const branch = hubSessions(hub).getBranch(bagOf(hub, parentId), entryOne);
 	check("the fork is a new session id", forkedId !== parentId, `${forkedId} vs ${parentId}`);
 	check(
 		"it holds the prefix through that message",
@@ -209,57 +227,57 @@ try {
 	check("the header names the file it came from", getHeader(forkedFile)?.parentSession === parentFile, String(getHeader(forkedFile)?.parentSession));
 	check(
 		"the source keeps the entries the fork did not take",
-		parent.session.sessionManager.getChildren(parent.session.sessionState, entryOne).length === 1,
-		`children=${parent.session.sessionManager.getChildren(parent.session.sessionState, entryOne).length}`,
+		hubSessions(hub).getChildren(bagOf(hub, parentId), entryOne).length === 1,
+		`children=${hubSessions(hub).getChildren(bagOf(hub, parentId), entryOne).length}`,
 	);
 
 	const forked = await hub.claim(forkedId);
 	check("the fork runs as a session of its own", forked.session !== parent.session);
-	check("and it reports the file it came from", forked.session.sessionManager.getHeader(forked.session.sessionState)?.parentSession === parentFile);
+	check("and it reports the file it came from", hubSessions(hub).getHeader(bagOf(hub, forkedId))?.parentSession === parentFile);
 
 	process.stdout.write("forking without an entry copies the whole log\n");
 	const whole = new SessionManager().forkFrom(parentFile, root, null, workspaceDir(root));
-	check("every entry came with it", ids(getEntries(whole)) === ids(parent.session.sessionManager.getEntries(parent.session.sessionState)));
-	check("and the transcript matches", messagesOf(whole).length === messagesOf(parent.session.sessionState).length);
-	check("its leaf is the source's leaf", getLeafId(whole) === parent.session.sessionManager.getLeafId(parent.session.sessionState));
+	check("every entry came with it", ids(getEntries(whole)) === ids(hubSessions(hub).getEntries(bagOf(hub, parentId))));
+	check("and the transcript matches", messagesOf(whole).length === messagesOf(bagOf(hub, parentId)).length);
+	check("its leaf is the source's leaf", getLeafId(whole) === hubSessions(hub).getLeafId(bagOf(hub, parentId)));
 	check("it points back at the source too", getHeader(whole)?.parentSession === parentFile);
 
 	process.stdout.write("forking leaves the source alone\n");
 	const before = await readFile(parentFile, "utf8");
-	const leafBefore = parent.session.sessionManager.getLeafId(parent.session.sessionState);
+	const leafBefore = hubSessions(hub).getLeafId(bagOf(hub, parentId));
 	const secondFork = openFile(await hub.fork(parentId, entryOne));
-	check("the source keeps its own leaf", parent.session.sessionManager.getLeafId(parent.session.sessionState) === leafBefore);
+	check("the source keeps its own leaf", hubSessions(hub).getLeafId(bagOf(hub, parentId)) === leafBefore);
 	check("its file is byte-identical afterwards", (await readFile(parentFile, "utf8")) === before);
 	check("the claim on it survived", parent.claims === 1 && hub.live.includes(parentId), `claims=${parent.claims}`);
 
 	process.stdout.write("a fork and its parent run side by side\n");
 	check("both are live", hub.live.includes(parentId) && hub.live.includes(forkedId));
-	const forkBefore = JSON.stringify(messagesOf(forked.session.sessionState));
-	const forkLeaf = forked.session.sessionManager.getLeafId(forked.session.sessionState);
-	parent.session.sessionManager.appendMessage(parent.session.sessionState, userMessage("only the parent"));
+	const forkBefore = JSON.stringify(messagesOf(bagOf(hub, forkedId)));
+	const forkLeaf = hubSessions(hub).getLeafId(bagOf(hub, forkedId));
+	hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("only the parent"));
 	check(
 		"appending to the parent leaves the fork's transcript alone",
-		JSON.stringify(messagesOf(forked.session.sessionState)) === forkBefore,
+		JSON.stringify(messagesOf(bagOf(hub, forkedId))) === forkBefore,
 	);
-	check("and the fork's leaf did not move", forked.session.sessionManager.getLeafId(forked.session.sessionState) === forkLeaf);
-	const parentBefore = JSON.stringify(messagesOf(parent.session.sessionState));
-	forked.session.sessionManager.appendMessage(forked.session.sessionState, userMessage("only the fork"));
+	check("and the fork's leaf did not move", hubSessions(hub).getLeafId(bagOf(hub, forkedId)) === forkLeaf);
+	const parentBefore = JSON.stringify(messagesOf(bagOf(hub, parentId)));
+	hubSessions(hub).appendMessage(bagOf(hub, forkedId), userMessage("only the fork"));
 	check(
 		"appending to the fork leaves the parent's transcript alone",
-		JSON.stringify(messagesOf(parent.session.sessionState)) === parentBefore,
+		JSON.stringify(messagesOf(bagOf(hub, parentId))) === parentBefore,
 	);
 
 	process.stdout.write("reopening a fork reports where it came from\n");
-	const leafAtClose = forked.session.sessionManager.getLeafId(forked.session.sessionState);
+	const leafAtClose = hubSessions(hub).getLeafId(bagOf(hub, forkedId));
 	hub.release(forked);
 	check("the fork is closed and dropped", await until(() => !hub.live.includes(forkedId)));
 	const reread = openFile(forkedId);
 	check("reopening reports its parent session", getHeader(reread)?.parentSession === parentFile);
 	check("and the same leaf", getLeafId(reread) === leafAtClose, `${getLeafId(reread)} vs ${leafAtClose}`);
-	check("with the messages it had", messagesOf(reread).length === messagesOf(forked.session.sessionState).length);
+	check("with the messages it had", messagesOf(reread).length === messagesOf(bagOf(hub, forkedId)).length);
 	const reopenedFork = await hub.claim(forkedId);
 	check("a claimed reopen builds a different session object", reopenedFork.session !== forked.session);
-	check("and still reports the session it came from", reopenedFork.session.sessionManager.getHeader(reopenedFork.session.sessionState)?.parentSession === parentFile);
+	check("and still reports the session it came from", hubSessions(hub).getHeader(bagOf(hub, forkedId))?.parentSession === parentFile);
 
 	process.stdout.write("forking a session nobody is watching\n");
 	hub.release(reopenedFork);
@@ -306,16 +324,16 @@ try {
 	{
 		const renamedId = await hub.newSession();
 		const host = await hub.claim(renamedId);
-		host.session.sessionManager.appendMessage(host.session.sessionState, userMessage("改名的会话"));
+		hubSessions(hub).appendMessage(bagOf(hub, renamedId), userMessage("改名的会话"));
 		await hub.rename(renamedId, "新名字");
-		check("a live session reports the stored name", host.session.snapshot.title === "新名字", host.session.snapshot.title);
+		check("a live session reports the stored name", host.session.snapshot(host.id).title === "新名字", host.session.snapshot(host.id).title);
 
 		hub.release(host);
 		check("the renamed session closes", await until(() => !hub.live.includes(renamedId)));
 		const rescanned = await SessionManager.findSessionRowById(renamedId);
 		check("the file's row carries the stored name", rescanned?.title === "新名字", rescanned?.title);
 		const reopened = await hub.claim(renamedId);
-		check("a reopen reports it too", reopened.session.snapshot.title === "新名字", reopened.session.snapshot.title);
+		check("a reopen reports it too", reopened.session.snapshot(reopened.id).title === "新名字", reopened.session.snapshot(reopened.id).title);
 
 		const renameFork = await hub.fork(renamedId, null);
 		const forkRow = await SessionManager.findSessionRowById(renameFork);
@@ -348,6 +366,7 @@ try {
 	try {
 		const settings = inMemorySettingsState({ tools: ["read", "bash"] });
 		const state = createSessionState(settingsRoot);
+		const sessionId = state.sessionId;
 		const options = {
 			absWorkspaceRoot: settingsRoot,
 			sessionState: state,
@@ -364,34 +383,34 @@ try {
 			// The one message the branch test below can rewind to with nothing recorded after it.
 			const firstEntry = appendMessage(state, userMessage("before any choice"));
 
-			live.setActiveTools(["read"]);
-			check("a recorded choice wins over the default", live.snapshot.activeTools.join(",") === "read", live.snapshot.activeTools.join(","));
-			check("and stops reporting the tools as global", live.snapshot.toolsFollowGlobal === false);
-			check("while the untouched approval half still follows global", live.snapshot.approvalsFollowGlobal === true);
+			live.setActiveTools(sessionId, ["read"]);
+			check("a recorded choice wins over the default", live.snapshot(sessionId).activeTools.join(",") === "read", live.snapshot(sessionId).activeTools.join(","));
+			check("and stops reporting the tools as global", live.snapshot(sessionId).toolsFollowGlobal === false);
+			check("while the untouched approval half still follows global", live.snapshot(sessionId).approvalsFollowGlobal === true);
 
-			live.applyConfig({ approval: { bash: false } });
-			check("a recorded approval stops its half too", live.snapshot.approvalsFollowGlobal === false);
+			live.applyConfig(sessionId, { approval: { bash: false } });
+			check("a recorded approval stops its half too", live.snapshot(sessionId).approvalsFollowGlobal === false);
 
 			// The reset is a new entry that *holds* the global values, so the judgement has to be field
 			// equality and not "an entry exists" — the trap the panel's label would fall into otherwise.
-			live.setActiveTools(["bash", "read"]);
-			check("re-recording the global set reads as following global again", live.snapshot.toolsFollowGlobal === true);
+			live.setActiveTools(sessionId, ["bash", "read"]);
+			check("re-recording the global set reads as following global again", live.snapshot(sessionId).toolsFollowGlobal === true);
 
 			// A branch move onto a chain that recorded nothing lands on the settings' answer, not on
 			// the chain that was just left.
-			live.branchTo(firstEntry, false);
-			check("a branch onto an unrecorded chain restores the default", live.snapshot.activeTools.join(",") === "read,bash", live.snapshot.activeTools.join(","));
+			live.branchTo(sessionId, firstEntry, false);
+			check("a branch onto an unrecorded chain restores the default", live.snapshot(sessionId).activeTools.join(",") === "read,bash", live.snapshot(sessionId).activeTools.join(","));
 
-			live.setActiveTools(["grep"]);
+			live.setActiveTools(sessionId, ["grep"]);
 			const recold = await readSessionSnapshot(options);
 			check(
 				"the cold read answers the judgement exactly as the live snapshot does",
-				recold.toolsFollowGlobal === live.snapshot.toolsFollowGlobal &&
-					recold.approvalsFollowGlobal === live.snapshot.approvalsFollowGlobal,
-				`${recold.toolsFollowGlobal}/${recold.approvalsFollowGlobal} vs ${live.snapshot.toolsFollowGlobal}/${live.snapshot.approvalsFollowGlobal}`,
+				recold.toolsFollowGlobal === live.snapshot(sessionId).toolsFollowGlobal &&
+					recold.approvalsFollowGlobal === live.snapshot(sessionId).approvalsFollowGlobal,
+				`${recold.toolsFollowGlobal}/${recold.approvalsFollowGlobal} vs ${live.snapshot(sessionId).toolsFollowGlobal}/${live.snapshot(sessionId).approvalsFollowGlobal}`,
 			);
 		} finally {
-			await live.close();
+			await live.close(sessionId);
 		}
 	} finally {
 		await rm(workspaceDir(settingsRoot), { recursive: true, force: true });
@@ -406,8 +425,8 @@ try {
 	try {
 		const readId = await http.hub.newSession();
 		const opened = await http.hub.claim(readId);
-		opened.session.sessionManager.appendMessage(opened.session.sessionState, userMessage("read me"));
-		opened.session.sessionManager.appendMessage(opened.session.sessionState, userMessage("and me"));
+		hubSessions(http.hub).appendMessage(bagOf(http.hub, readId), userMessage("read me"));
+		hubSessions(http.hub).appendMessage(bagOf(http.hub, readId), userMessage("and me"));
 		http.hub.release(opened);
 		check("the session is idle before the read", await until(() => !http.hub.live.includes(readId)), http.hub.live.join(","));
 
@@ -449,7 +468,7 @@ try {
 		// one this section makes: everything the transcript can answer has to come out the same.
 		const live = await http.hub.claim(readId);
 		check("a claim is what runs it", claims === 1 && live.id === readId, `claims=${claims}`);
-		const liveSnapshot = live.session.snapshot;
+		const liveSnapshot = live.session.snapshot(live.id);
 		http.hub.release(live);
 
 		// Everything a transcript can answer must be identical; only what a loop answers may differ.
@@ -513,7 +532,7 @@ try {
 				!(created.payload.sessions as { id: string }[]).some((session) => session.id === landed),
 			);
 			const spoke = await http.hub.claim(landed);
-			spoke.session.sessionManager.appendMessage(spoke.session.sessionState, userMessage("a first message"));
+			hubSessions(http.hub).appendMessage(bagOf(http.hub, landed), userMessage("a first message"));
 			http.hub.release(spoke);
 			const groups = ((await call("GET", `${http.url}/api/workspaces`)).payload.workspaces as {
 				absCwd: string;
@@ -576,7 +595,7 @@ try {
 				// its first message — so each of these says one thing before the sidebar can draw it.
 				const speak = async (sessionId: string, text: string): Promise<void> => {
 					const host = await http.hub.claim(sessionId);
-					host.session.sessionManager.appendMessage(host.session.sessionState, userMessage(text));
+					hubSessions(http.hub).appendMessage(bagOf(http.hub, sessionId), userMessage(text));
 					http.hub.release(host);
 				};
 				await speak(id, "before");
@@ -669,7 +688,7 @@ try {
 		{
 			const victim = await http.hub.newSession();
 			const host = await http.hub.claim(victim);
-			host.session.sessionManager.appendMessage(host.session.sessionState, userMessage("要删的会话"));
+			hubSessions(http.hub).appendMessage(bagOf(http.hub, victim), userMessage("要删的会话"));
 			http.hub.release(host);
 			check("the victim goes idle", await until(() => !http.hub.live.includes(victim)), http.hub.live.join(","));
 
@@ -771,28 +790,40 @@ try {
 	// process restart (clear) forgets everything, so a reopen never inherits a stale live half.
 	{
 		const opens = new OpenSessions();
+		// The seed's assembly fields are irrelevant to what this block pins — the queue modes and the
+		// lifecycle — so it hands the placeholder answers a session with no row would carry.
+		const seed = (steeringMode: QueueMode, followUpMode: QueueMode) =>
+			createOpenSession({
+				// The workspace fence is never resolved against here — the block pins the queue modes and
+				// the lifecycle, not the fence — so any real directory will do.
+				workspace: new Workspace(tmpdir()),
+				settings: inMemorySettingsState({}),
+				modelSelection: placeholderModelState(),
+				steeringMode,
+				followUpMode,
+			});
 		let built = 0;
 		const entry = opens.ensure("session-a", () => {
 			built += 1;
-			return createOpenSession("all", "one-at-a-time");
+			return seed("all", "one-at-a-time");
 		});
 		check("ensure builds the entry on first touch", built === 1);
 		check("the queue modes are the creation answer's", entry.runtime.steeringQueue.mode === "all" && entry.runtime.followUpQueue.mode === "one-at-a-time");
 		check("ensure answers the same entry afterwards", opens.ensure("session-a", () => {
 			built += 1;
-			return createOpenSession("one-at-a-time", "all");
+			return seed("one-at-a-time", "all");
 		}) === entry && built === 1);
 		entry.listeners.add(() => {});
 		check("delete drops the entry with its subscribers", opens.delete("session-a") && opens.delete("session-a") === false);
 		const rebuilt = opens.ensure("session-a", () => {
 			built += 1;
-			return createOpenSession("all", "all");
+			return seed("all", "all");
 		});
 		check("the next touch builds a fresh entry", built === 2 && rebuilt !== entry && rebuilt.listeners.size === 0);
 		opens.clear();
 		const afterRestart = opens.ensure("session-a", () => {
 			built += 1;
-			return createOpenSession("all", "all");
+			return seed("all", "all");
 		});
 		check("a restart drops every entry", afterRestart !== rebuilt && built === 3);
 	}

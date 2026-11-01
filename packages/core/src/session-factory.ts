@@ -1,5 +1,5 @@
 import type { ChatTransport } from "@my-agent/llm";
-import { Agent, type AgentConfig } from "./agent.ts";
+import { Agent } from "./agent.ts";
 import { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
 import { buildSystemPrompt } from "./context/system-prompt.ts";
 import { spillOversizedToolResult } from "./context/spill.ts";
@@ -40,7 +40,7 @@ import {
 } from "./settings-manager.ts";
 import { type ToolRegistry, type ToolState, createToolRegistry, toolDefinitions } from "./tools/index.ts";
 import { createSubagentTools } from "./tools/subagent.ts";
-import { createOpenSession, type OpenSession } from "./session/open-session.ts";
+import { createOpenSession, OpenSessions } from "./session/open-session.ts";
 import { Workspace } from "./workspace.ts";
 
 /** What a caller must supply to build a session. Everything else is discovered here. */
@@ -109,15 +109,14 @@ export interface OpenAgentOptions {
 	 */
 	subagents?: boolean;
 	/**
-	 * The session's registry entry: its live half plus the attach points and the run slot that ride
-	 * with it.
+	 * The session's registry: its live half plus the assembly the open resolved, keyed by id.
 	 *
 	 * A host that owns the state — the hub, whose {@link OpenSessions} registry holds one entry per
 	 * session and drops it when the host closes — hands its own in, so what it holds and what the
-	 * session runs on are one object. A caller that does not care gets a fresh one, built empty from
-	 * this workspace's queue modes, which is the same thing a process restart would leave behind.
+	 * session runs on are one object. A caller that does not care gets a fresh one, which behaves
+	 * identically for the one session it serves.
 	 */
-	openSession?: OpenSession;
+	openSessions?: OpenSessions;
 }
 
 /**
@@ -131,7 +130,6 @@ export interface OpenAgentOptions {
  */
 interface Assembled {
 	workspace: Workspace;
-	settingsManager: SettingsManager;
 	/** The workspace's settings as the bag every settings call in the session passes. */
 	settingsState: SettingsState;
 	/** The session's model as a bag: the seed, with the row's facts laid in once by assembly. */
@@ -213,7 +211,7 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 		}
 	}
 
-	return { workspace, settingsManager, settingsState, modelState, registry, agentsMd, sessionManager };
+	return { workspace, settingsState, modelState, registry, agentsMd, sessionManager };
 }
 
 /**
@@ -263,35 +261,51 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 
 /**
  * Build one session: discover the workspace, the prompt, the tools, and the default model, then hand
- * the result to {@link Agent}.
+ * the result to {@link Agent} with the id it is served by.
  *
  * The resolution is {@link assemble} — the seed→fill lifecycle's seeding half (ADR-0006 §2): the
  * workspace, the settings, the model selection, and the tool choice are resolved into pure-data
  * seeds here, and every request re-runs the fill chain over them (adopt the row, fill the model,
  * replay the ledger, build the context, assemble the tools, merge the approvals, build the prompt),
- * so opening a session and resuming one are the same act by construction. This adds what only a live
- * session has — the hooks, whose handlers need the session they belong to, and the object itself.
+ * so opening a session and resuming one are the same act by construction. The seeds land on the
+ * registry entry — the assembly product is the entry (ADR-0007 §4) — and the caller's transcript bag
+ * is adopted by the session service, so the id every later call names answers the same object this
+ * open was handed. This adds what only a live session has — the hooks, whose handlers need the
+ * session they belong to, and the object itself.
  */
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
-	const { workspace, settingsManager, settingsState, modelState, registry, agentsMd, sessionManager } =
-		await assemble(options);
+	const { workspace, settingsState, modelState, registry, agentsMd, sessionManager } = await assemble(options);
 	const hooks = createHooks();
-	const openSession = options.openSession ?? createOpenSession(getSteeringMode(settingsState), getFollowUpMode(settingsState));
+	const sessionId = options.sessionState.sessionId;
+	// The assembly product is the entry: first touch creates it, and its fields are the resolved
+	// answers every later call reads — the workspace fence, the settings bag, the model selection the
+	// fill chain re-fills per request, and the deliberate loadout the tool choice derives against.
+	// The queue modes are the same settings' answer at this moment; a config patch moves them on the
+	// queues in place afterwards.
+	const openSessions = options.openSessions ?? new OpenSessions();
+	openSessions.ensure(sessionId, () =>
+		createOpenSession({
+			workspace,
+			settings: settingsState,
+			modelSelection: modelState,
+			...(options.toolState === undefined ? {} : { toolSeed: options.toolState }),
+			steeringMode: getSteeringMode(settingsState),
+			followUpMode: getFollowUpMode(settingsState),
+		}),
+	);
+	// The caller's bag is the session's bag: registering it is what lets every later call — which
+	// names the session by id — answer with this exact object, before the first message puts the file
+	// on disk. An id the service already caches is re-registered to the same object, which changes
+	// nothing.
+	sessionManager.adopt(options.sessionState);
 
-	const config: AgentConfig = {
-		workspace,
+	const session = new Agent({
 		sessionManager,
-		sessionState: options.sessionState,
 		models: options.models,
-		...(options.api === undefined ? {} : { api: options.api }),
-		settingsManager,
-		settingsState,
 		tools: registry,
-		// The deliberate loadout is the fallback the session's derivation reads against — undefined
-		// means the global default's live view, and a recorded `tool_config` entry outranks either.
-		...(options.toolState === undefined ? {} : { toolSeed: options.toolState }),
+		openSessions,
+		...(options.api === undefined ? {} : { api: options.api }),
 		hooks,
-		openSession,
 		// Rebuilt whenever the active set or the approval set moves, so the prompt cannot promise tools
 		// or approvals the session no longer has.
 		systemPrompt: (toolNames, approvals) =>
@@ -304,10 +318,7 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 				approvalTools: approvalToolsOf(approvals),
 				agentsMd,
 			}),
-		modelState,
-	};
-
-	const session = new Agent(config);
+	});
 
 	// The defaults, on the same surface the session hands back. Registered here rather than hard-coded
 	// in the class so a host can add a handler after them and refine what they decided.
@@ -318,7 +329,7 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 	// no result — that is what the banner is derived from — and the answer arrives over REST to start
 	// the recovery run that pairs it and continues.
 	hooks.on("before_tool", async ({ toolCallId, toolName, args }) => {
-		const needsApproval = await session.authorize(toolName, toolCallId, args);
+		const needsApproval = await session.authorize(sessionId, toolName, toolCallId, args);
 		return needsApproval ? { suspend: true } : undefined;
 	});
 	// `after_tool`: the output backstop. Every built-in tool bounds its own output; this catches the
@@ -326,7 +337,7 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 	// the model is served its head and tail plus the archive's path, so nothing is lost that cannot be
 	// read back; when the archive cannot be written, the hard clip in `boundToolContent` is the floor.
 	hooks.on("after_tool", (event) => {
-		const spilled = spillOversizedToolResult(workspace, session.id, event.toolName, event.toolCallId, event.content);
+		const spilled = spillOversizedToolResult(workspace, sessionId, event.toolName, event.toolCallId, event.content);
 		const content = spilled ?? boundToolContent(event.content);
 		return content === undefined ? undefined : { content };
 	});

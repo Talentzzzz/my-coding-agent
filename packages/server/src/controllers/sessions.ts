@@ -612,13 +612,13 @@ export class SessionController {
 
 		return this.claiming(sessionId, (session) => {
 			try {
-				session.branchTo(entryId, descend ?? true);
+				session.branchTo(sessionId, entryId, descend ?? true);
 			} catch (error) {
 				// A run in flight, or an entry this session does not hold: understood and refused, which
 				// is a conflict rather than a bad request.
 				throw httpStatus.conflict(messageOf(error));
 			}
-			return { session: session.snapshot };
+			return { session: session.snapshot(sessionId) };
 		});
 	}
 
@@ -666,7 +666,7 @@ export class SessionController {
 			// `prompt()` persists the message and marks the run as streaming before its first await, so
 			// the message is on disk and `submitting` is true by the time this answers.
 			void session
-				.prompt(text, { ...(behavior === undefined ? {} : { behavior }), selection })
+				.prompt(sessionId, text, { ...(behavior === undefined ? {} : { behavior }), selection })
 				.catch((error: unknown) => {
 					this.onRunFailure(sessionId, messageOf(error));
 				});
@@ -683,7 +683,7 @@ export class SessionController {
 	 */
 	async abort(sessionId: string): Promise<{ stopped: true }> {
 		return this.claiming(sessionId, async (session) => {
-			await session.abort();
+			await session.abort(sessionId);
 			return { stopped: true };
 		});
 	}
@@ -707,13 +707,13 @@ export class SessionController {
 
 		return this.claiming(sessionId, (session) => {
 			try {
-				session.applyConfig(fields);
+				session.applyConfig(sessionId, fields);
 			} catch (error) {
 				// An approval key or a queue mode the session cannot take: the request was understood and
 				// refused, which is a conflict rather than a bad request.
 				throw httpStatus.conflict(messageOf(error));
 			}
-			return { session: session.snapshot };
+			return { session: session.snapshot(sessionId) };
 		});
 	}
 
@@ -732,11 +732,11 @@ export class SessionController {
 
 		return this.claiming(sessionId, (session) => {
 			try {
-				session.setActiveTools(active);
+				session.setActiveTools(sessionId, active);
 			} catch (error) {
 				throw httpStatus.conflict(messageOf(error));
 			}
-			return { session: session.snapshot };
+			return { session: session.snapshot(sessionId) };
 		});
 	}
 
@@ -769,11 +769,11 @@ export class SessionController {
 		return this.claiming(sessionId, (session) => {
 			// Refused before anything is recorded: an id this session is not waiting on gets a 409, and
 			// neither the answers table nor the session hears about the attempt.
-			if (!session.hasPendingApproval(toolCallId)) {
+			if (!session.hasPendingApproval(sessionId, toolCallId)) {
 				throw httpStatus.conflict(`${toolCallId} is not a pending approval`);
 			}
 			this.listeners.onApproval?.(sessionId, toolCallId, approved);
-			void session.respondApproval(toolCallId, approved).catch((error: unknown) => {
+			void session.respondApproval(sessionId, toolCallId, approved).catch((error: unknown) => {
 				this.onRunFailure(sessionId, messageOf(error));
 			});
 			return { toolCallId, approved };

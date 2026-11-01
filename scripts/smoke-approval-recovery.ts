@@ -29,6 +29,7 @@ import {
 	createSessionState,
 	inMemorySettingsState,
 	type Agent,
+	type SessionState,
 	type ModelConfig,
 	type ModelSource,
 	type ModelSelection,
@@ -71,7 +72,7 @@ function textOf(message: Message): string {
 
 /** Every tool result in the session's transcript, oldest first. */
 function toolResultTexts(session: Agent): string[] {
-	return session.snapshot.messages.filter((message) => message.role === "toolResult").map((message) => textOf(message));
+	return session.snapshot(sidOf(session)).messages.filter((message) => message.role === "toolResult").map((message) => textOf(message));
 }
 
 /** The prompt-side view of one request: the roles the provider was sent, in order. */
@@ -125,15 +126,34 @@ function gatedApi(holds: number[]): { api: ChatTransport; release(index: number)
 	};
 }
 
+/**
+ * The id each opened session runs under, kept beside the session object the checks hold.
+ *
+ * The session's methods name it by id now — the orchestrator holds no session state — so the
+ * opening helper records what it created here and every check reads it back through {@link sidOf}.
+ */
+const opened = new WeakMap<Agent, { id: string; state: SessionState }>();
+
+function bagOf(session: Agent): SessionState {
+	return opened.get(session)!.state;
+}
+
+function sidOf(session: Agent): string {
+	return opened.get(session)!.id;
+}
+
 async function openSession(overrides: { approval?: Record<string, boolean>; api?: ChatTransport } = {}): Promise<Agent> {
-	return openAgent({
+	const state = createSessionState(root);
+	const session = await openAgent({
 		absWorkspaceRoot: root,
-		sessionState: createSessionState(root),
+		sessionState: state,
 		models,
 		api: overrides.api ?? fake.api,
 		model: modelName,
 		settingsState: inMemorySettingsState({ approval: overrides.approval ?? {} }),
 	});
+	opened.set(session, { id: state.sessionId, state });
+	return session;
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -145,42 +165,42 @@ process.stdout.write("\na grant resumes the run and re-runs the call; a denial c
 {
 	const session = await openSession({ approval: { read: true } });
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("after the grant")]);
-	await session.prompt("read the notes", { selection });
-	await session.settle();
-	check("the gate ended the run with the call dangling", session.hasPendingApprovals, JSON.stringify(session.snapshot.pendingApprovals));
-	const callId = session.snapshot.pendingApprovals[0]?.toolCallId ?? "";
+	await session.prompt(sidOf(session), "read the notes", { selection });
+	await session.settle(sidOf(session));
+	check("the gate ended the run with the call dangling", session.hasPendingApprovals(sidOf(session)), JSON.stringify(session.snapshot(sidOf(session)).pendingApprovals));
+	const callId = session.snapshot(sidOf(session)).pendingApprovals[0]?.toolCallId ?? "";
 	check("the dangling call has no result yet", toolResultTexts(session).length === 0, JSON.stringify(toolResultTexts(session)));
 
-	await session.respondApproval(callId, true);
-	await session.settle();
+	await session.respondApproval(sidOf(session), callId, true);
+	await session.settle(sidOf(session));
 	const grantResults = toolResultTexts(session);
 	check("the recovery pass re-ran the call through the tool", grantResults.some((text) => text.includes("notes.txt")), JSON.stringify(grantResults));
-	check("the granted call is no longer waiting", !session.hasPendingApproval(callId));
-	check("a grant records the session's own approval choice", session.getApprovals().read === false);
+	check("the granted call is no longer waiting", !session.hasPendingApproval(sidOf(session), callId));
+	check("a grant records the session's own approval choice", session.getApprovals(sidOf(session)).read === false);
 	check(
 		"and the model carried on in the same run",
-		session.snapshot.messages.some((message) => message.role === "assistant" && textOf(message) === "after the grant"),
+		session.snapshot(sidOf(session)).messages.some((message) => message.role === "assistant" && textOf(message) === "after the grant"),
 	);
-	await session.close();
+	await session.close(sidOf(session));
 }
 
 {
 	const session = await openSession({ approval: { read: true } });
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("after the denial")]);
-	await session.prompt("read the notes", { selection });
-	await session.settle();
-	const callId = session.snapshot.pendingApprovals[0]?.toolCallId ?? "";
+	await session.prompt(sidOf(session), "read the notes", { selection });
+	await session.settle(sidOf(session));
+	const callId = session.snapshot(sidOf(session)).pendingApprovals[0]?.toolCallId ?? "";
 
-	await session.respondApproval(callId, false);
-	await session.settle();
+	await session.respondApproval(sidOf(session), callId, false);
+	await session.settle(sidOf(session));
 	const denialResults = toolResultTexts(session);
 	check("the recovery pass closed the call with the deny's sentence", denialResults.some((text) => text.includes("The user denied permission to run read.")), JSON.stringify(denialResults));
-	check("the denied call is no longer waiting", !session.hasPendingApproval(callId));
+	check("the denied call is no longer waiting", !session.hasPendingApproval(sidOf(session), callId));
 	check(
 		"and the model answered the denial",
-		session.snapshot.messages.some((message) => message.role === "assistant" && textOf(message) === "after the denial"),
+		session.snapshot(sidOf(session)).messages.some((message) => message.role === "assistant" && textOf(message) === "after the denial"),
 	);
-	await session.close();
+	await session.close(sidOf(session));
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -193,9 +213,9 @@ process.stdout.write("\ndangling calls no answer names are closed before the fir
 	const session = await openSession();
 	// The crash shape: two calls in the transcript, no results behind either — appended the way a
 	// process that died mid-batch leaves them.
-	session.sessionManager.appendMessage(session.sessionState, fakeAssistantMessage(fakeToolCall("read", { path: "a.txt" }, { id: "call_a" })));
-	session.sessionManager.appendMessage(session.sessionState, fakeAssistantMessage(fakeToolCall("read", { path: "b.txt" }, { id: "call_b" })));
-	check("both dangling calls are derived from the ledger", session.snapshot.pendingApprovals.length === 2, JSON.stringify(session.snapshot.pendingApprovals));
+	session.sessionManager.appendMessage(bagOf(session), fakeAssistantMessage(fakeToolCall("read", { path: "a.txt" }, { id: "call_a" })));
+	session.sessionManager.appendMessage(bagOf(session), fakeAssistantMessage(fakeToolCall("read", { path: "b.txt" }, { id: "call_b" })));
+	check("both dangling calls are derived from the ledger", session.snapshot(sidOf(session)).pendingApprovals.length === 2, JSON.stringify(session.snapshot(sidOf(session)).pendingApprovals));
 
 	const prompts: { roles: string[] }[] = [];
 	fake.setResponses([
@@ -204,8 +224,8 @@ process.stdout.write("\ndangling calls no answer names are closed before the fir
 			return fakeAssistantMessage("carried on");
 		},
 	]);
-	await session.prompt("continue", { selection });
-	await session.settle();
+	await session.prompt(sidOf(session), "continue", { selection });
+	await session.settle(sidOf(session));
 
 	const orphanResults = toolResultTexts(session);
 	check(
@@ -213,13 +233,13 @@ process.stdout.write("\ndangling calls no answer names are closed before the fir
 		orphanResults.filter((text) => text.includes("was left unanswered")).length === 2,
 		JSON.stringify(orphanResults),
 	);
-	check("the sweep cleared the waiting", !session.hasPendingApprovals);
+	check("the sweep cleared the waiting", !session.hasPendingApprovals(sidOf(session)));
 	check(
 		"and the first request was provider-legal: each result beside its own call, the prompt after them",
 		JSON.stringify(prompts[0]?.roles) === JSON.stringify(["system", "assistant", "toolResult", "assistant", "toolResult", "user"]),
 		JSON.stringify(prompts[0]?.roles),
 	);
-	await session.close();
+	await session.close(sidOf(session));
 }
 
 // The toggle: a host that turns the sweep off owns the unanswered calls itself. Driven at the loop's
@@ -323,20 +343,20 @@ process.stdout.write("\naborting a recovery run leaves the recovered call with i
 	const gate = gatedApi([2]);
 	const session = await openSession({ approval: { read: true }, api: gate.api });
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("after the grant")]);
-	await session.prompt("read the notes", { selection });
-	await session.settle();
-	const callId = session.snapshot.pendingApprovals[0]?.toolCallId ?? "";
+	await session.prompt(sidOf(session), "read the notes", { selection });
+	await session.settle(sidOf(session));
+	const callId = session.snapshot(sidOf(session)).pendingApprovals[0]?.toolCallId ?? "";
 	check("the run parked at the gate", callId.length > 0);
 
 	// The grant starts the recovery run; the held provider call is where the abort lands.
-	void session.respondApproval(callId, true);
+	void session.respondApproval(sidOf(session), callId, true);
 	const started = Date.now();
 	while (!gate.held(2) && Date.now() - started < 5_000) await new Promise((resolve) => setTimeout(resolve, 10));
 	check("the recovery run reached its request", gate.held(2));
 
-	await session.abort();
-	await session.settle();
-	check("the abort settled the recovery run", !session.snapshot.submitting);
+	await session.abort(sidOf(session));
+	await session.settle(sidOf(session));
+	check("the abort settled the recovery run", !session.snapshot(sidOf(session)).submitting);
 	const results = toolResultTexts(session);
 	check("the recovered call kept its own result", results.some((text) => text.includes("notes.txt")), JSON.stringify(results));
 	check(
@@ -344,8 +364,8 @@ process.stdout.write("\naborting a recovery run leaves the recovered call with i
 		results.every((text) => !text.includes("denied permission") && !text.includes("The run was aborted")),
 		JSON.stringify(results),
 	);
-	check("the aborted session has nothing waiting", !session.hasPendingApprovals);
-	await session.close();
+	check("the aborted session has nothing waiting", !session.hasPendingApprovals(sidOf(session)));
+	await session.close(sidOf(session));
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -360,24 +380,24 @@ process.stdout.write("\na message steered into a recovery run is taken at the ta
 	const gate = gatedApi([2]);
 	const session = await openSession({ approval: { read: true }, api: gate.api });
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("answered both")]);
-	await session.prompt("read the notes", { selection });
-	await session.settle();
-	const callId = session.snapshot.pendingApprovals[0]?.toolCallId ?? "";
+	await session.prompt(sidOf(session), "read the notes", { selection });
+	await session.settle(sidOf(session));
+	const callId = session.snapshot(sidOf(session)).pendingApprovals[0]?.toolCallId ?? "";
 
-	void session.respondApproval(callId, true);
+	void session.respondApproval(sidOf(session), callId, true);
 	const started = Date.now();
 	while (!gate.held(2) && Date.now() - started < 5_000) await new Promise((resolve) => setTimeout(resolve, 10));
 	// The steer is accepted mid-recovery — the run is streaming, so it queues rather than prompts.
-	await session.steer("and also this", { selection });
+	await session.steer(sidOf(session), "and also this", { selection });
 
 	gate.release(2);
-	await session.settle();
+	await session.settle(sidOf(session));
 	check(
 		"the recovery run drained the mailbox and answered it",
-		session.snapshot.messages.some((message) => message.role === "assistant" && textOf(message) === "answered both"),
+		session.snapshot(sidOf(session)).messages.some((message) => message.role === "assistant" && textOf(message) === "answered both"),
 	);
-	check("and the steered message is in the transcript once", session.snapshot.messages.filter((message) => message.role === "user" && textOf(message) === "and also this").length === 1);
-	await session.close();
+	check("and the steered message is in the transcript once", session.snapshot(sidOf(session)).messages.filter((message) => message.role === "user" && textOf(message) === "and also this").length === 1);
+	await session.close(sidOf(session));
 }
 
 process.stdout.write(failures === 0 ? "\napproval recovery ok\n" : `\n${failures} FAILED\n`);

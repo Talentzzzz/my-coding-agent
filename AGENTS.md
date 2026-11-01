@@ -89,11 +89,13 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 - **queue（队列）** —— 一次运行正在流式时被接受的消息：`steer` 在下一个取走点注入，`followUp` 等这一
   轮结束。
 - **assembly（装配）** —— `openAgent()` 按种子→补齐（seed→fill）从设置、AGENTS.md、导入的模型装配一个
-  会话（ADR-0006）；`Agent` 是无状态编排层，不持有会话状态——durable 半是账本，live 半是交给它的
-  登记处条目。它只决定 transcript **命名**哪一行（`adoptCurrentRow()` 每次请求都按活行原地重算）。
+  会话（ADR-0006）；`Agent` 是无状态编排层，不持有会话状态——公开方法收 id、在用到的那一行向属主
+  现取：durable 半经 `stateOf(id)` 重放账本，live 半经 id 从登记处条目读。它只决定 transcript
+  **命名**哪一行（`adoptCurrentRow()` 每次请求都按活行原地重算）。
 - **OpenSessions（活登记处）** —— 按 id 键控的窄表，只装「进行中且磁盘上没有」的东西：条目
-  `OpenSession` 装着 `SessionRuntime`（两条队列与在飞运行）、订阅集合与跨栈 run 槽（ADR-0007 §4）；
-  hub 持有一份，首次触碰建条目、host 收摊删条目，进程重启即清空。
+  `OpenSession` 装着 `SessionRuntime`（两条队列与在飞运行）、订阅集合、跨栈 run 槽，以及装配种子
+  （工作区、设置袋、模型选择；ADR-0007 §4）；hub 持有一份，首次触碰建条目、host 收摊删条目，
+  进程重启即清空。
 - **workspace（工作区）** —— agent 可以触碰的目录；它是**按会话**的，从会话自己 header 里的 `cwd`
   取根。
 - **event（事件）** —— 一个 `AgentSessionEvent`：`AgentEvent` 与会话自己的成员（`queue_update`、

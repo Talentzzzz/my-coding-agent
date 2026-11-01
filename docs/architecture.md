@@ -63,17 +63,17 @@ my-coding-agent/
 
 ## 装配与设置
 
-`Agent` 只用被交给它的东西，别的什么也不用：它的 config 携带工作区、会话管理器、设置管理器、工具注册表、提示词构建器、hook 表面、模型种子，以及**登记处条目**（`OpenSession`——装着两条队列与在飞运行的 `SessionRuntime`，外加订阅集合与跨栈 run 槽，由 hub 的活登记处在首次触碰时建造、随 host 销毁）。它不读设置文件、不加载 AGENTS.md、不构建工具、也不挑模型，更**不持有任何会话状态**：durable 的一半从账本重放出来，live 的一半就是交给它的登记处条目，所以打开一个会话和恢复一个会话是同一条链（种子→补齐，[ADR-0006](adr/0006-stateless-session-architecture.md) §2；重放出的账本状态是可从磁盘重建的缓存，见*SessionManager 是真相之源*）。
+`Agent` 只用被交给它的东西，别的什么也不用：构造只收**服务**——会话管理器、导入的模型、工具注册表、活登记处（`OpenSessions`）、传输层、hook 表面与提示词构建器——它的每个公开方法都以会话 id 打头，每样数据在用到它的那一行向属主现取：durable 的一半经 `sessions.stateOf(id)` 从账本重放，live 的一半经 id 从登记处条目读（条目 `OpenSession` 装着两条队列与在飞运行的 `SessionRuntime`，外加订阅集合、跨栈 run 槽，以及装配种子——工作区、设置袋、模型选择；由 `openAgent` 在首次触碰时建造、随 host 销毁）。它不读设置文件、不加载 AGENTS.md、不构建工具、也不挑模型，更**不持有任何会话状态**，所以打开一个会话和恢复一个会话是同一条链（种子→补齐，[ADR-0006](adr/0006-stateless-session-architecture.md) §2；重放出的账本状态是可从磁盘重建的缓存，见*SessionManager 是真相之源*）。
 
 ```
-openAgent({ absWorkspaceRoot, sessionManager, models, live? })   # 设置、AGENTS.md、导入的模型
-    -> AgentConfig                                     # 普通值 + 注入的协作者
-        -> new Agent(config)                            # 使用，从不自行发现
+openAgent({ absWorkspaceRoot, sessionState, sessionManager?, openSessions?, … })   # ensure 条目 + adopt 袋
+    -> new Agent({ sessionManager, models, tools, openSessions, api?, hooks?, systemPrompt })
+        -> session.prompt(sessionId, …)                     # 公开方法一律以 id 打头
 ```
 
 `openAgent()`（`core/src/session-factory.ts`）负责向外伸手，每一个调用者都经过它。会话管理器是唯一一个**由调用者决定而非发现**的协作者，因为"要打开**哪一个**会话"是宿主的问题：hub 用 `create` / `open` 回答它，测试用 `inMemory` 回答它。模型及其 level 在任何地方都遵循同一套优先级：调用者指定的 → transcript 记录的 → `off`（没人要求过，就不要求）。因此测试可以在一份临时管理器和 `SettingsManager.inMemory` 上打开会话，完全不碰 `~/.my-agent/settings.json`。
 
-设置是**一个对象** `SettingsManager`（`core/src/settings-manager.ts`），没有别的地方保留副本：会话把它作为 `session.settingsManager` 暴露出来，`applyConfig` 搬运**会话**缓存的东西——两条队列的模式（队列住在会话里，循环只在取走点拉取）——而把值委派给管理器。模型和 thinking level 根本不在补丁里：两者都属于某一次对话，也都随使用它们的消息一起到达（见*输入框的模型座位*）。
+设置是**一个对象** `SettingsManager`（`core/src/settings-manager.ts`），没有别的地方保留副本：工作区的设置袋在装配时解析一次、作为装配字段记在登记处条目上，`applyConfig` 搬运**会话**缓存的东西——两条队列的模式（队列住在条目里，循环只在取走点拉取）——而把值经袋写回文件。模型和 thinking level 根本不在补丁里：两者都属于某一次对话，也都随使用它们的消息一起到达（见*输入框的模型座位*）。
 
 | 作用域 | 文件 | 变更写到哪 |
 |---|---|---|
@@ -98,7 +98,7 @@ level 本身骑在模型上（`Model.thinkingLevel`，由 `createModel(config, l
 
 1. 输入框发送 `POST /api/sessions/{id}/messages`，带 `{ text, behavior?, model?, thinkingLevel? }`。
 2. `SessionController.prompt` 认领会话，在它上面调用 `prompt`，并回答 `202`。
-3. 会话施加这个选择，追加用户消息，并调用 `Agent.prompt(message)` —— 当一次运行正在流式时，同一个入口按 `behavior` 把消息排进会话自己的 steer / followUp 队列，等循环在取走点取走。
+3. 会话施加这个选择，追加用户消息，并调用 `Agent.prompt(sessionId, message)` —— 当一次运行正在流式时，同一个入口按 `behavior` 把消息排进会话自己的 steer / followUp 队列，等循环在取走点取走。
 4. `prepareRequest` 重读活行、记录移动了什么、从 `buildSessionContext()` 取得 transcript —— 压缩和分支就住在那里 —— 会话在它前面放一条新的打头 system 消息，`context` hook 施加在这一对之上，然后从 @my-agent/llm 开始流式。
 5. 工具调用到达：`beforeToolCall` 跑 `before_tool` hook，后者在设置要求时默认请求审批；`afterToolCall` 跑 `after_tool`，后者归档或约束结果。
 6. 每个会话事件都作为 `{ type: "event", event }` 发给每一条订阅了该会话的逻辑流；连接级的心跳与行表走 `streamId: null` 那条道。

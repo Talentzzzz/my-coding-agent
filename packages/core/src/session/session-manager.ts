@@ -1895,9 +1895,9 @@ export class SessionManager {
 	 * - Nothing else drops. Appends, renames, and branch moves mutate the cached bag in place, and a
 	 *   host closes only after its run has settled, so the bag equals the file at that moment.
 	 *
-	 * A session created but not yet on disk is deliberately not here: it has no file to fill from, so
-	 * the host that created it holds the bag itself until the first message lands. That is the live
-	 * half's narrow registry (ADR-0007 §4), not this cache's job.
+	 * A session created but not yet on disk has no file to fill from, so it enters only through
+	 * {@link SessionManager.adopt}, when the host that created the bag hands it over at first touch —
+	 * the same hand-off the creating host used to hold across itself.
 	 */
 	private readonly states = new Map<string, SessionState>();
 
@@ -2055,8 +2055,8 @@ export class SessionManager {
 	 * This is the read side of the fill-at-open contract: a caller that holds a session by id — a host
 	 * about to run it, a rename arriving over REST — takes the bag here, and from then on every write
 	 * through this service lands on that same object. An id with no file on disk is refused, because
-	 * there is nothing to fill from: a session created but not yet spoken in is the creating host's bag
-	 * to hold, not this cache's.
+	 * there is nothing to fill from — unless the bag was {@link adopt}ed, which is how a session
+	 * created but not yet spoken in is answerable by id at all.
 	 */
 	stateOf(id: string): SessionState {
 		const cached = this.states.get(id);
@@ -2066,6 +2066,22 @@ export class SessionManager {
 		const s = fillSession(absPath);
 		this.states.set(id, s);
 		return s;
+	}
+
+	/**
+	 * Register a caller-built bag as the state its id answers with, file or no file.
+	 *
+	 * This is the one road a not-yet-on-disk bag enters the cache, and it exists because the id-keyed
+	 * read side needs somewhere to answer from before the first message writes the file: a session
+	 * created but not spoken in has no file to fill from, so the host that created the bag hands it
+	 * over here, and every later {@link stateOf} on that id answers this exact object. The first
+	 * message makes the entry disk-backed like any other; until then the bag lives only here, which
+	 * is the same window the creating host used to hold it across itself. Re-adopting a bag the
+	 * cache already holds re-registers the same object, which is what an open that received its bag
+	 * from {@link stateOf} does, harmlessly.
+	 */
+	adopt(s: SessionState): void {
+		this.states.set(s.sessionId, s);
 	}
 
 	// =========================================================================
