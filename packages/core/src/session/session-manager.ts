@@ -1051,9 +1051,9 @@ function previewOfMessage(message: Message): string {
  * nothing else.
  *
  * Every session operation is a file-level function taking a `SessionState` as its first parameter —
- * there is no class holding this state between calls (the `SessionManager` class at the bottom of
- * this file is a thin shell over these functions, kept only until every caller has moved onto the
- * stateless form). The state is plain data on purpose: which function touches which field is visible
+ * no method holds this state between calls (the `SessionManager` class at the bottom of this file is
+ * the stateless service over these functions: it adds the fill-at-open cache and nothing else). The
+ * state is plain data on purpose: which function touches which field is visible
  * in the signatures, and a test can construct a bare state and call any operation on it directly.
  *
  * The fields are what a JSONL file replays into. Every entry carries an id and its parent's id, so
@@ -1200,6 +1200,36 @@ export function newSession(s: SessionState, parentSessionFile?: string): string 
 
 	const dir = s.absSessionDir;
 	if (s.persist && dir !== null) s.absSessionFile = sessionPath(dir, s.sessionId, timestamp);
+	return s.absSessionFile;
+}
+
+/** Whether the session is ever written to disk. */
+export function isPersisted(s: SessionState): boolean {
+	return s.persist;
+}
+
+/** The workspace the session runs in, absolute. */
+export function getAbsCwd(s: SessionState): string {
+	return s.absCwd;
+}
+
+/** The directory this session's file lives in, absolute, or null when it is never written. */
+export function getAbsSessionDir(s: SessionState): string | null {
+	return s.absSessionDir;
+}
+
+/** True when the session lands in its workspace's own directory rather than a caller-named one. */
+export function usesDefaultSessionDir(s: SessionState): boolean {
+	return s.absSessionDir !== null && s.absSessionDir === workspaceDir(s.absCwd);
+}
+
+/** The session's id, which is the id of its file once the file exists. */
+export function getSessionId(s: SessionState): string {
+	return s.sessionId;
+}
+
+/** The JSONL file this session appends to, or undefined for a session that is never written. */
+export function getAbsSessionFile(s: SessionState): string | undefined {
 	return s.absSessionFile;
 }
 
@@ -1837,163 +1867,205 @@ function appendLeafRecord(s: SessionState, leafId: string | null): void {
 }
 
 /**
- * The session shell: a per-session handle over one {@link SessionState}.
+ * The session service: a stateless shell the session operations are reached through.
  *
- * Every method is a one-line delegation to the stateless operation of the same name, which carries
- * the real logic and its documentation. This class is what callers hold until they have each moved
- * onto the stateless form; it owns no logic and adds none.
+ * Every per-session method takes its {@link SessionState} as the first parameter and forwards, one
+ * line, to the stateless operation of the same name, which carries the real logic and its
+ * documentation. The class holds no per-session state (ADR-0007 §2) — it is a Spring-style service a
+ * host constructs once and hands around, and the bag a call operates on is named at the call.
+ *
+ * What the class *does* own is the fill-at-open cache (ADR-0007 §3), keyed by session id: see
+ * {@link SessionManager.stateOf}.
  */
 export class SessionManager {
-	private s: SessionState;
+	/**
+	 * Open states by session id — fill-at-open, rebuildable from disk at any time (ADR-0007 §3).
+	 *
+	 * An id is filled the first time {@link stateOf} touches it and the same reference is reused after.
+	 * That is the whole point of the cache: every write to one session lands on one bag, so a rename
+	 * appended through the service and a turn appended by the session's own loop cannot drift from
+	 * each other the way two independently opened states would.
+	 *
+	 * The cache is never authoritative, which is why its rules are about divergence and not about loss:
+	 *
+	 * - {@link SessionManager.remove} drops the id. The file is gone, and a cached state would
+	 *   resurrect a deleted session.
+	 * - {@link SessionManager.forkFrom} registers the fork's own fresh state. Its file was just
+	 *   written, and the next `stateOf` on its id must answer the same object the fork returned.
+	 * - Nothing else drops. Appends, renames, and branch moves mutate the cached bag in place, and a
+	 *   host closes only after its run has settled, so the bag equals the file at that moment.
+	 *
+	 * A session created but not yet on disk is deliberately not here: it has no file to fill from, so
+	 * the host that created it holds the bag itself until the first message lands. That is the live
+	 * half's narrow registry (ADR-0007 §4), not this cache's job.
+	 */
+	private readonly states = new Map<string, SessionState>();
 
-	private constructor(s: SessionState) {
-		this.s = s;
+	isPersisted(s: SessionState): boolean {
+		return isPersisted(s);
 	}
 
-	isPersisted(): boolean {
-		return this.s.persist;
-	}
-
-	getAbsCwd(): string {
-		return this.s.absCwd;
+	getAbsCwd(s: SessionState): string {
+		return getAbsCwd(s);
 	}
 
 	/** The directory this session's file lives in, absolute, or null when it is never written. */
-	getAbsSessionDir(): string | null {
-		return this.s.absSessionDir;
+	getAbsSessionDir(s: SessionState): string | null {
+		return getAbsSessionDir(s);
 	}
 
-	usesDefaultSessionDir(): boolean {
-		return this.s.absSessionDir !== null && this.s.absSessionDir === workspaceDir(this.s.absCwd);
+	usesDefaultSessionDir(s: SessionState): boolean {
+		return usesDefaultSessionDir(s);
 	}
 
-	getSessionId(): string {
-		return this.s.sessionId;
+	getSessionId(s: SessionState): string {
+		return getSessionId(s);
 	}
 
-	getAbsSessionFile(): string | undefined {
-		return this.s.absSessionFile;
+	getAbsSessionFile(s: SessionState): string | undefined {
+		return getAbsSessionFile(s);
 	}
 
-	newSession(parentSessionFile?: string): string | undefined {
-		return newSession(this.s, parentSessionFile);
+	newSession(s: SessionState, parentSessionFile?: string): string | undefined {
+		return newSession(s, parentSessionFile);
 	}
 
-	appendMessage(message: Message): string {
-		return appendMessage(this.s, message);
+	appendMessage(s: SessionState, message: Message): string {
+		return appendMessage(s, message);
 	}
 
-	appendThinkingLevelChange(thinkingLevel: string): string {
-		return appendThinkingLevelChange(this.s, thinkingLevel);
+	appendThinkingLevelChange(s: SessionState, thinkingLevel: string): string {
+		return appendThinkingLevelChange(s, thinkingLevel);
 	}
 
-	appendModelChange(name: string, modelId: string): string {
-		return appendModelChange(this.s, name, modelId);
+	appendModelChange(s: SessionState, name: string, modelId: string): string {
+		return appendModelChange(s, name, modelId);
 	}
 
-	appendToolConfig(activeTools: string[], approval: Record<ToolApprovalKey, boolean>): string {
-		return appendToolConfig(this.s, activeTools, approval);
+	appendToolConfig(s: SessionState, activeTools: string[], approval: Record<ToolApprovalKey, boolean>): string {
+		return appendToolConfig(s, activeTools, approval);
 	}
 
-	appendRename(title: string): string {
-		return appendRename(this.s, title);
+	appendRename(s: SessionState, title: string): string {
+		return appendRename(s, title);
 	}
 
-	appendUsage(operation: string, model: string, usage: Usage): string {
-		return appendUsage(this.s, operation, model, usage);
+	appendUsage(s: SessionState, operation: string, model: string, usage: Usage): string {
+		return appendUsage(s, operation, model, usage);
 	}
 
 	appendCompaction(
+		s: SessionState,
 		summary: string,
 		firstKeptEntryId: string | null,
 		tokensBefore: number,
 		usage?: Usage,
 	): string {
-		return appendCompaction(this.s, summary, firstKeptEntryId, tokensBefore, usage);
+		return appendCompaction(s, summary, firstKeptEntryId, tokensBefore, usage);
 	}
 
-	appendClearToolResults(clearedEntryIds: readonly string[], tokensBefore: number): string {
-		return appendClearToolResults(this.s, clearedEntryIds, tokensBefore);
+	appendClearToolResults(s: SessionState, clearedEntryIds: readonly string[], tokensBefore: number): string {
+		return appendClearToolResults(s, clearedEntryIds, tokensBefore);
 	}
 
-	appendTrimToolCallArgs(trimmedEntryIds: readonly string[], tokensBefore: number): string {
-		return appendTrimToolCallArgs(this.s, trimmedEntryIds, tokensBefore);
+	appendTrimToolCallArgs(s: SessionState, trimmedEntryIds: readonly string[], tokensBefore: number): string {
+		return appendTrimToolCallArgs(s, trimmedEntryIds, tokensBefore);
 	}
 
-	appendToolResultView(toolCallId: string, shown: ToolResultContent): string {
-		return appendToolResultView(this.s, toolCallId, shown);
+	appendToolResultView(s: SessionState, toolCallId: string, shown: ToolResultContent): string {
+		return appendToolResultView(s, toolCallId, shown);
 	}
 
-	getLeafId(): string | null {
-		return getLeafId(this.s);
+	getLeafId(s: SessionState): string | null {
+		return getLeafId(s);
 	}
 
-	getLeafEntry(): SessionEntry | undefined {
-		return getLeafEntry(this.s);
+	getLeafEntry(s: SessionState): SessionEntry | undefined {
+		return getLeafEntry(s);
 	}
 
-	getEntry(id: string): SessionEntry | undefined {
-		return getEntry(this.s, id);
+	getEntry(s: SessionState, id: string): SessionEntry | undefined {
+		return getEntry(s, id);
 	}
 
-	getChildren(parentId: string): SessionEntry[] {
-		return getChildren(this.s, parentId);
+	getChildren(s: SessionState, parentId: string): SessionEntry[] {
+		return getChildren(s, parentId);
 	}
 
-	getBranchPoints(): BranchPoint[] {
-		return getBranchPoints(this.s);
+	getBranchPoints(s: SessionState): BranchPoint[] {
+		return getBranchPoints(s);
 	}
 
-	getBranchTip(entryId: string): string {
-		return getBranchTip(this.s, entryId);
+	getBranchTip(s: SessionState, entryId: string): string {
+		return getBranchTip(s, entryId);
 	}
 
-	getBranch(fromId?: string): SessionEntry[] {
-		return getBranch(this.s, fromId);
+	getBranch(s: SessionState, fromId?: string): SessionEntry[] {
+		return getBranch(s, fromId);
 	}
 
-	buildContextEntries(): SessionEntry[] {
-		return buildContextEntries(this.s);
+	buildContextEntries(s: SessionState): SessionEntry[] {
+		return buildContextEntries(s);
 	}
 
-	buildSessionContext(): SessionContext {
-		return buildSessionContext(this.s);
+	buildSessionContext(s: SessionState): SessionContext {
+		return buildSessionContext(s);
 	}
 
-	getRecordedSettings(): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
-		return getRecordedSettings(this.s);
+	getRecordedSettings(s: SessionState): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
+		return getRecordedSettings(s);
 	}
 
-	getRecordedToolConfig(): { activeTools?: string[]; approval?: Record<ToolApprovalKey, boolean> } {
-		return getRecordedToolConfig(this.s);
+	getRecordedToolConfig(s: SessionState): { activeTools?: string[]; approval?: Record<ToolApprovalKey, boolean> } {
+		return getRecordedToolConfig(s);
 	}
 
-	getContextMessageEntryIds(): (string | null)[] {
-		return getContextMessageEntryIds(this.s);
+	getContextMessageEntryIds(s: SessionState): (string | null)[] {
+		return getContextMessageEntryIds(s);
 	}
 
-	getHeader(): SessionHeader | null {
-		return getHeader(this.s);
+	getHeader(s: SessionState): SessionHeader | null {
+		return getHeader(s);
 	}
 
-	getEntryCount(): number {
-		return getEntryCount(this.s);
+	getEntryCount(s: SessionState): number {
+		return getEntryCount(s);
 	}
 
-	getEntries(): SessionEntry[] {
-		return getEntries(this.s);
+	getEntries(s: SessionState): SessionEntry[] {
+		return getEntries(s);
 	}
 
-	getTitle(): string {
-		return getTitle(this.s);
+	getTitle(s: SessionState): string {
+		return getTitle(s);
 	}
 
-	branch(branchFromId: string): void {
-		branch(this.s, branchFromId);
+	branch(s: SessionState, branchFromId: string): void {
+		branch(s, branchFromId);
 	}
 
-	resetLeaf(): void {
-		resetLeaf(this.s);
+	resetLeaf(s: SessionState): void {
+		resetLeaf(s);
+	}
+
+	/**
+	 * The open state of the session `id` names: the cached bag when there is one, a fresh replay of the
+	 * file when there is not.
+	 *
+	 * This is the read side of the fill-at-open contract: a caller that holds a session by id — a host
+	 * about to run it, a rename arriving over REST — takes the bag here, and from then on every write
+	 * through this service lands on that same object. An id with no file on disk is refused, because
+	 * there is nothing to fill from: a session created but not yet spoken in is the creating host's bag
+	 * to hold, not this cache's.
+	 */
+	stateOf(id: string): SessionState {
+		const cached = this.states.get(id);
+		if (cached !== undefined) return cached;
+		const absPath = SessionManager.findSessionFilePathById(id);
+		if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
+		const s = fillSession(absPath);
+		this.states.set(id, s);
+		return s;
 	}
 
 	// =========================================================================
@@ -2001,57 +2073,23 @@ export class SessionManager {
 	// =========================================================================
 
 	/**
-	 * Start a session in `cwdInput`, stored under `sessionDirInput` or the workspace's default directory.
-	 *
-	 * `parentSessionFile` is the absolute path of the session this one descends from, recorded on the
-	 * header as `parentSession`; undefined starts a root session. See {@link newSession}.
-	 *
-	 * Nothing is written here. The file appears with the first entry worth keeping — the gate in
-	 * {@link persistEntry} (`hasConversation`) — so a session nobody has spoken in leaves no trace on
-	 * disk and no row in the sidebar. That is the whole point of building it here rather than writing
-	 * a header: the store is a record of conversations, and a conversation with no message in it is
-	 * not one yet.
-	 *
-	 * The cost is the id's addressability until that first message: {@link findSessionFilePathById} reads header
-	 * files, so an id with no file cannot be found there. A caller that hands the id out and has to
-	 * answer for it later therefore keeps the returned manager instead of rediscovering it —
-	 * `SessionHub` holds it for the length of that window.
-	 */
-	static create(cwdInput: string, sessionDirInput?: string, parentSessionFileInput?: string): SessionManager {
-		return new SessionManager(createSessionState(cwdInput, sessionDirInput, parentSessionFileInput));
-	}
-
-	/**
-	 * Open one session file, deriving the workspace and the session directory from the file itself.
-	 *
-	 * The path is the whole input, so a path that names nothing is an error rather than a new session
-	 * at that path: a mistyped path must not come back as an empty transcript, and must not leave a
-	 * stray file behind on the way.
-	 */
-	static open(pathInput: string): SessionManager {
-		return new SessionManager(fillSession(pathInput));
-	}
-
-	/** A session that is never written to disk. */
-	static inMemory(cwdInput: string = process.cwd(), parentSessionFileInput?: string): SessionManager {
-		return new SessionManager(inMemorySessionState(cwdInput, parentSessionFileInput));
-	}
-
-	/**
-	 * Copy a branch of a session file into a new session under `targetCwd`.
+	 * Copy a branch of a session file into a new session under `targetCwd`, and cache the new state.
 	 *
 	 * `entryId` is the entry the branch ends at, or null for the whole log. The new header points at the
 	 * source file as `parentSession`, and the copied entries keep the ids and parent links the source
 	 * wrote, which is what makes a fork traceable back to where it came from.
 	 *
-	 * The source is only read: a fork is a new file, and the file it came from is never rewritten.
+	 * The source is only read: a fork is a new file, and the file it came from is never rewritten. The
+	 * new state goes into the cache under its own id — the caller that takes it and the next
+	 * {@link stateOf} on that id must answer the same bag, or the fork's first turn would land on an
+	 * object the fork result knows nothing about.
 	 */
-	static forkFrom(
+	forkFrom(
 		sourcePathInput: string,
 		targetCwdInput: string,
 		entryId: string | null,
 		sessionDirInput?: string,
-	): SessionManager {
+	): SessionState {
 		const absSourcePath = resolvePath(sourcePathInput);
 		const absTargetCwd = resolvePath(targetCwdInput);
 		const sourceEntries = loadJsonlEntries(absSourcePath);
@@ -2084,7 +2122,9 @@ export class SessionManager {
 		writeFileSync(absNewSessionFile, `${JSON.stringify(header)}\n`, { flag: "wx" });
 		for (const entry of branch) appendFileSync(absNewSessionFile, `${JSON.stringify(entry)}\n`);
 
-		return new SessionManager(fillSession(absNewSessionFile));
+		const s = fillSession(absNewSessionFile);
+		this.states.set(s.sessionId, s);
+		return s;
 	}
 
 	/** Every session stored for `cwd`, newest activity first. */
@@ -2196,16 +2236,20 @@ export class SessionManager {
 	}
 
 	/**
-	 * Delete the file a session id names, from whichever workspace holds it.
+	 * Delete the file a session id names, from whichever workspace holds it, and drop the id's cached
+	 * state.
 	 *
 	 * One file, not a directory: a workspace's sessions share a directory, so anything wider than the
 	 * one `.jsonl` the header names is a different conversation's transcript. Throwing for an unknown
 	 * id rather than answering "already gone" keeps the two failures apart — the caller decides what
-	 * a second delete means, and the hub turns it into a status the client can show.
+	 * a second delete means, and the hub turns it into a status the client can show. The cache drop
+	 * rides here rather than on the caller, because a cached state that outlived its file would let
+	 * the next {@link stateOf} answer a deleted session — the one divergence this class cannot permit.
 	 */
-	static async remove(id: string): Promise<void> {
+	async remove(id: string): Promise<void> {
 		const absPath = SessionManager.findSessionFilePathById(id);
 		if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
+		this.states.delete(id);
 		await rm(absPath);
 	}
 

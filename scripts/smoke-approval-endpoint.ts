@@ -20,7 +20,7 @@ import { Router } from "../packages/server/src/http/routing.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import {
 	openAgent,
-	SessionManager,
+	createSessionState,
 	SettingsManager,
 	type ModelSource,
 	type ModelConfig,
@@ -65,7 +65,7 @@ fake.setResponses([
 ]);
 const session = await openAgent({
 	absWorkspaceRoot: root,
-	sessionManager: SessionManager.create(root),
+	sessionState: createSessionState(root),
 	models,
 	api: fake.api,
 	model: modelName,

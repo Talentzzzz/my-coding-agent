@@ -9,7 +9,17 @@ import {
 	type UsageTotals,
 } from "../protocol.ts";
 import { thinkingLevelsFor } from "../models.ts";
-import type { SessionEntry, SessionManager } from "./session-manager.ts";
+import {
+	buildSessionContext,
+	type SessionEntry,
+	type SessionState,
+	getContextMessageEntryIds,
+	getEntries,
+	getBranchPoints,
+	getHeader,
+	getLeafId,
+	getTitle,
+} from "./session-manager.ts";
 
 /**
  * Everything one snapshot is built from, already resolved by the caller.
@@ -20,7 +30,8 @@ import type { SessionEntry, SessionManager } from "./session-manager.ts";
  * same object from the same parts without either one owning the other's job.
  */
 export interface SnapshotInput {
-	sessionManager: SessionManager;
+	/** The transcript's own state: the bag every read below is taken from. */
+	sessionState: SessionState;
 	/** The workspace the session runs in, absolute. */
 	absWorkspaceRoot: string;
 	/** Already settled: `createModel(row, level)` or `placeholderModel()`. */
@@ -59,13 +70,13 @@ export interface SnapshotInput {
  * comparable: they differ in exactly those five and in nothing else.
  */
 export function sessionSnapshot(input: SnapshotInput): SessionSnapshot {
-	const header = input.sessionManager.getHeader();
-	const messages = input.sessionManager.buildSessionContext().messages;
+	const header = getHeader(input.sessionState);
+	const messages = buildSessionContext(input.sessionState).messages;
 	return {
-		id: input.sessionManager.getSessionId(),
+		id: input.sessionState.sessionId,
 		absCwd: input.absWorkspaceRoot,
 		createdAt: header ? new Date(header.timestamp).getTime() : Date.now(),
-		title: input.sessionManager.getTitle(),
+		title: getTitle(input.sessionState),
 		model: input.model.name,
 		thinkingLevel: input.model.thinkingLevel ?? "off",
 		thinkingLevels: thinkingLevelsFor(),
@@ -75,16 +86,16 @@ export function sessionSnapshot(input: SnapshotInput): SessionSnapshot {
 		toolsFollowGlobal: input.toolsFollowGlobal,
 		approvalsFollowGlobal: input.approvalsFollowGlobal,
 		messages,
-		messageEntryIds: input.sessionManager.getContextMessageEntryIds(),
-		branchPoints: input.sessionManager.getBranchPoints(),
-		leafId: input.sessionManager.getLeafId(),
+		messageEntryIds: getContextMessageEntryIds(input.sessionState),
+		branchPoints: getBranchPoints(input.sessionState),
+		leafId: getLeafId(input.sessionState),
 		...(input.partial === undefined ? {} : { partial: input.partial }),
 		...(header?.parentSession === undefined ? {} : { parentSession: header.parentSession }),
 		submitting: input.submitting,
 		queued: input.queued,
 		isRetrying: input.isRetrying,
 		retryAttempt: input.retryAttempt,
-		usage: sessionUsage(input.sessionManager, input.model.contextWindow),
+		usage: sessionUsage(input.sessionState, input.model.contextWindow),
 		pendingApprovals: input.pendingApprovals,
 	};
 }
@@ -110,13 +121,13 @@ export function entryUsage(entry: SessionEntry): Usage | undefined {
  * `contextTokens`, because it is not a sum at all: it is how full the window is right now, which is
  * a property of the branch the leaf is on and of nothing else.
  */
-export function sessionUsage(sessionManager: SessionManager, contextWindow: number): UsageTotals {
+export function sessionUsage(sessionState: SessionState, contextWindow: number): UsageTotals {
 	let totals: UsageTotals = { ...EMPTY_USAGE, contextWindow };
-	for (const entry of sessionManager.getEntries()) {
+	for (const entry of getEntries(sessionState)) {
 		const usage = entryUsage(entry);
 		if (usage) totals = addUsage(totals, usage, contextWindow);
 	}
-	return { ...totals, contextTokens: branchContextTokens(sessionManager.buildSessionContext().messages) };
+	return { ...totals, contextTokens: branchContextTokens(buildSessionContext(sessionState).messages) };
 }
 
 /** The context footprint the branch's last usage-carrying assistant message reported. */

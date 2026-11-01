@@ -10,10 +10,18 @@ import type { Message } from "@my-agent/llm";
 import type { AssistantMessage, ChatTransport, SimpleStreamOptions } from "@my-agent/llm";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall, type FakeResponseStep } from "./fake-transport.ts";
 import {
+	appendMessage,
+	buildContextEntries,
+	buildSessionContext,
+	createSessionState,
 	createToolRegistry,
+	fillSession,
+	getBranchPoints,
+	getEntries,
+	getLeafId,
 	MAX_TOOL_RESULT_BYTES,
 	openAgent,
-	SessionManager,
+	resetLeaf,
 	SettingsManager,
 	toolDefinitions,
 	Workspace,
@@ -216,10 +224,9 @@ async function openSession(
 	model?: string,
 	tools?: ToolRegistry,
 ): Promise<Agent> {
-	const sessionManager = SessionManager.create(root);
 	return openAgent({
 		absWorkspaceRoot: root,
-		sessionManager,
+		sessionState: createSessionState(root),
 		models: run.models ?? models,
 		api: run.api ?? fake.api,
 		model,
@@ -234,7 +241,7 @@ function textsOf(session: Agent): string[] {
 
 /** Every entry in the log, header aside, including branches the session is no longer on. */
 function entriesOf(session: Agent): SessionEntry[] {
-	return session.sessionManager.getEntries();
+	return session.sessionManager.getEntries(session.sessionState);
 }
 
 /**
@@ -827,9 +834,9 @@ async function exerciseConfigChanged(): Promise<void> {
 	// is the level half as well — neither has been asked at yet.
 	check(
 		"and none of it is written down before a request uses it",
-		session.sessionManager.getRecordedSettings().model === undefined &&
-			session.sessionManager.getRecordedSettings().thinkingLevel === undefined,
-		JSON.stringify(session.sessionManager.getRecordedSettings()),
+		session.sessionManager.getRecordedSettings(session.sessionState).model === undefined &&
+			session.sessionManager.getRecordedSettings(session.sessionState).thinkingLevel === undefined,
+		JSON.stringify(session.sessionManager.getRecordedSettings(session.sessionState)),
 	);
 
 	await session.close();
@@ -924,15 +931,15 @@ async function exerciseAfterToolHook(): Promise<void> {
 	// message; only the request reads the entry — which is what a reopened session has to prove.
 	check(
 		"the live ledger already pairs the halves",
-		toolResultViewsOf(session.sessionManager.buildContextEntries()).size === 1,
+		toolResultViewsOf(session.sessionManager.buildContextEntries(session.sessionState)).size === 1,
 		JSON.stringify(entriesOf(session).map((entry) => entry.type)),
 	);
 	const sessionFile = session.sessionFile;
 	await session.close();
 
 	process.stdout.write("after_tool hook — the rewrite outlives the process\n");
-	const reopenedFile = SessionManager.open(sessionFile!);
-	const fileEntries = reopenedFile.getEntries();
+	const reopenedFile = fillSession(sessionFile!);
+	const fileEntries = getEntries(reopenedFile);
 	const storedEntry = fileEntries.find(
 		(entry): entry is MessageEntry =>
 			entry.type === "message" && entry.message.role === "toolResult" && textOf(entry.message).includes("the tool's own words"),
@@ -955,13 +962,13 @@ async function exerciseAfterToolHook(): Promise<void> {
 		viewEntry?.shown.some((block) => block.type === "text" && block.text === "REPLACED BY THE TEST HOOK") === true,
 		JSON.stringify(viewEntry?.shown),
 	);
-	const transcriptTexts = JSON.stringify(reopenedFile.buildSessionContext().messages);
+	const transcriptTexts = JSON.stringify(buildSessionContext(reopenedFile).messages);
 	check(
 		"the transcript a window reads still shows the tool's own output",
 		transcriptTexts.includes("the tool's own words") && !transcriptTexts.includes("REPLACED BY THE TEST HOOK"),
 		transcriptTexts.slice(0, 200),
 	);
-	const replayedViews = toolResultViewsOf(reopenedFile.buildContextEntries());
+	const replayedViews = toolResultViewsOf(buildContextEntries(reopenedFile));
 	check(
 		"the replayed views pair the halves by call id",
 		storedEntry !== undefined &&
@@ -975,7 +982,7 @@ async function exerciseAfterToolHook(): Promise<void> {
 	recordRequests(sentReplay, [fakeAssistantMessage("replayed")]);
 	const replayed = await openAgent({
 		absWorkspaceRoot: root,
-		sessionManager: reopenedFile,
+		sessionState: reopenedFile,
 		models,
 		api: fake.api,
 		settingsManager: SettingsManager.inMemory(settings()),
@@ -1163,7 +1170,7 @@ async function exerciseApprovalDenial(): Promise<void> {
 	// A call that dangles the way a crash leaves one: the tool_use is in the transcript, the result is
 	// not, and the ledger is where the waiting shows. An abandonment keeps its own reason.
 	const abandoned = await openSession();
-	abandoned.sessionManager.appendMessage(fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })));
+	abandoned.sessionManager.appendMessage(abandoned.sessionState, fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })));
 	check("the dangling call is derived from the ledger", abandoned.hasPendingApprovals);
 	const waiting = abandoned.snapshot.pendingApprovals[0]?.toolCallId ?? "";
 	check("the predicate names the waiting call", abandoned.hasPendingApproval(waiting), waiting);
@@ -2179,7 +2186,7 @@ async function exerciseSubagent(): Promise<void> {
 	// --- Phase 4: subagents: false builds a session without the pair -----------------------------
 	const bare = await openAgent({
 		absWorkspaceRoot: root,
-		sessionManager: SessionManager.create(root),
+		sessionState: createSessionState(root),
 		models,
 		settingsManager: SettingsManager.inMemory(settings()),
 		subagents: false,
@@ -2339,7 +2346,7 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	// The leaf is read now, while the session is still on this branch: `getBranchTip` follows the last
 	// child written, so once a second branch exists, descending from the first message reaches *that*
 	// one instead. The branch is addressed by its own tip from here on.
-	const firstTip = session.sessionManager.getLeafId() ?? "";
+	const firstTip = session.sessionManager.getLeafId(session.sessionState) ?? "";
 	check("the narrow set is in force", session.snapshot.activeTools.includes("bash") === false, JSON.stringify(session.snapshot.activeTools));
 	check("with the approval this branch chose", session.snapshot.approvals.bash === true, JSON.stringify(session.snapshot.approvals));
 
@@ -2348,7 +2355,7 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	// reset it, so un-gating `bash` here is what the second branch actually chose.
 	session.setActiveTools([...session.snapshot.allTools]);
 	session.applyConfig({ approval: { bash: false } });
-	const secondTip = session.sessionManager.getLeafId() ?? "";
+	const secondTip = session.sessionManager.getLeafId(session.sessionState) ?? "";
 	check("the full set is back", session.snapshot.activeTools.includes("bash") === true, JSON.stringify(session.snapshot.activeTools));
 	check("and its approval with it", session.snapshot.approvals.bash === false, JSON.stringify(session.snapshot.approvals));
 
@@ -2450,21 +2457,21 @@ async function exerciseLeafDurability(): Promise<void> {
 	session.branchTo(firstId, false);
 	check("moving to the position already held writes nothing", entriesOf(session).length === entriesBefore + 1, String(entriesOf(session).length - entriesBefore));
 
-	const file = session.sessionManager.getAbsSessionFile() ?? "";
+	const file = session.sessionManager.getAbsSessionFile(session.sessionState) ?? "";
 	await session.close();
 
 	// --- The move is where the file says it is, not where the file ends --------------------------
-	const reopened = SessionManager.open(file);
-	check("the move survived close", reopened.getLeafId() === firstId, `${reopened.getLeafId()} vs ${firstId}`);
+	const reopened = fillSession(file);
+	check("the move survived close", getLeafId(reopened) === firstId, `${getLeafId(reopened)} vs ${firstId}`);
 	check(
 		"and the reopened context is the branch through it, the record reaching no message",
-		JSON.stringify(reopened.buildSessionContext().messages.map(textOf)) === JSON.stringify(["durable question one"]),
-		JSON.stringify(reopened.buildSessionContext().messages.map(textOf)),
+		JSON.stringify(buildSessionContext(reopened).messages.map(textOf)) === JSON.stringify(["durable question one"]),
+		JSON.stringify(buildSessionContext(reopened).messages.map(textOf)),
 	);
 
 	// The next append is a child of the recorded position, which is what turns it into a branch point.
-	reopened.appendMessage({ role: "user", content: [{ type: "text", text: "carried on" }] } as Message);
-	const points = reopened.getBranchPoints();
+	appendMessage(reopened, { role: "user", content: [{ type: "text", text: "carried on" }] } as Message);
+	const points = getBranchPoints(reopened);
 	check(
 		"the next append continued from the moved leaf",
 		points.length === 1 && points[0]?.entryId === firstId && points[0]?.options.length === 2,
@@ -2472,10 +2479,10 @@ async function exerciseLeafDurability(): Promise<void> {
 	);
 
 	// --- "Before the first entry" is a position like any other ----------------------------------
-	reopened.resetLeaf();
-	check("resetLeaf moved the leaf before the first entry", reopened.getLeafId() === null, String(reopened.getLeafId()));
-	const rereopened = SessionManager.open(file);
-	check("and that position survived the reopen too", rereopened.getLeafId() === null, String(rereopened.getLeafId()));
+	resetLeaf(reopened);
+	check("resetLeaf moved the leaf before the first entry", getLeafId(reopened) === null, String(getLeafId(reopened)));
+	const rereopened = fillSession(file);
+	check("and that position survived the reopen too", getLeafId(rereopened) === null, String(getLeafId(rereopened)));
 
 	// --- A file with no leaf record reads as it always did: the last entry is the position -------
 	// Handwritten, because no build that writes this format would ever produce one — the format never
@@ -2488,12 +2495,12 @@ async function exerciseLeafDurability(): Promise<void> {
 		{ type: "message", id: "fx-u2", parentId: "fx-u1", timestamp: new Date().toISOString(), message: { role: "user", content: [{ type: "text", text: "fixture two" }] } },
 	];
 	await writeFile(fixture, lines.map((line) => `${JSON.stringify(line)}\n`).join(""));
-	const legacy = SessionManager.open(fixture);
-	check("a file without a leaf record reads its last entry", legacy.getLeafId() === "fx-u2", String(legacy.getLeafId()));
+	const legacy = fillSession(fixture);
+	check("a file without a leaf record reads its last entry", getLeafId(legacy) === "fx-u2", String(getLeafId(legacy)));
 	check(
 		"and its tree is read whole, the second child a branch option",
-		legacy.getBranchPoints().length === 1 && legacy.getBranchPoints()[0]?.options.length === 2,
-		JSON.stringify(legacy.getBranchPoints()),
+		getBranchPoints(legacy).length === 1 && getBranchPoints(legacy)[0]?.options.length === 2,
+		JSON.stringify(getBranchPoints(legacy)),
 	);
 }
 

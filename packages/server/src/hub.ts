@@ -12,6 +12,9 @@ import {
 	type OpenAgentOptions,
 	type SessionSnapshot,
 	SessionManager,
+	createSessionState,
+	fillSession,
+	type SessionState,
 	type SessionRuntime,
 	createSessionRuntime,
 	SettingsManager,
@@ -177,6 +180,14 @@ export class SessionHub {
 	private readonly settingsManagers = new Map<string, SettingsManager>();
 	private readonly hosts = new Map<string, HostedSession>();
 	/**
+	 * The stateless session service every open, rename, fork, and delete below goes through.
+	 *
+	 * One instance rather than one per call, because the service's fill-at-open cache is what keeps
+	 * every write to a session on one bag: a rename appended here and a turn appended by the session's
+	 * own loop land on the same `SessionState`. See `SessionManager.stateOf`.
+	 */
+	private readonly sessions = new SessionManager();
+	/**
 	 * Each live session's runtime — the queues a run drains and the run in flight — by session id
 	 * (ADR-0006 §4): the only cross-stack in-memory session state this process keeps.
 	 *
@@ -204,17 +215,18 @@ export class SessionHub {
 	/**
 	 * Sessions this process created whose file does not exist yet, by id.
 	 *
-	 * A creation writes nothing: the file appears with the first message (`SessionManager.persistEntry`
+	 * A creation writes nothing: the file appears with the first message (`persistEntry`
 	 * gates on `hasConversation`). Between the id being handed out and that first message there is no
 	 * file, so {@link has}, {@link snapshotOf}, and {@link open} read this map before the store —
 	 * otherwise a window that creates a session and immediately opens it would be told the id it was
-	 * just given names nothing.
+	 * just given names nothing. The map holds the bag itself, because a session with no file is the
+	 * one state the service's fill-at-open cache cannot rebuild from disk (ADR-0007 §4).
 	 *
 	 * An entry leaves on the first lookup that finds the file on disk, so the map holds only the
 	 * window it was made for. It is process state, so a session nobody ever spoke in dies with the
 	 * process — and nothing was written for it, so nothing is lost.
 	 */
-	private readonly pending = new Map<string, SessionManager>();
+	private readonly pending = new Map<string, SessionState>();
 	private current?: Promise<string>;
 
 	constructor(options: HubOptions) {
@@ -306,12 +318,15 @@ export class SessionHub {
 		// A session created and not spoken in has no file to open, but this process still holds the
 		// transcript it is building — reading it is the same cold read, over an empty log.
 		const pending = this.pendingManager(id);
-		if (pending !== undefined) return readSessionSnapshot(this.agentOptions(pending, pending.getAbsCwd()));
+		if (pending !== undefined) return readSessionSnapshot(this.agentOptions(pending, pending.absCwd));
 
 		const absPath = SessionManager.findSessionFilePathById(id);
 		if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
-		const manager = SessionManager.open(absPath);
-		return readSessionSnapshot(this.agentOptions(manager, manager.getAbsCwd()));
+		// A transient replay rather than `stateOf`: a read must leave no trace, and pinning the whole
+		// transcript of a session nobody is running is a trace. `open` goes through the cache instead,
+		// because the state it builds is about to be written to.
+		const state = fillSession(absPath);
+		return readSessionSnapshot(this.agentOptions(state, state.absCwd));
 	}
 
 	/**
@@ -344,7 +359,7 @@ export class SessionHub {
 	timestampOf(id: string, entryId: string): number | undefined {
 		const host = this.hosts.get(id);
 		if (host === undefined) return undefined;
-		const entry = host.session.sessionManager.getEntry(entryId);
+		const entry = host.session.sessionManager.getEntry(host.session.sessionState, entryId);
 		return entry?.type === "message" ? entry.message.timestamp : undefined;
 	}
 
@@ -494,8 +509,8 @@ export class SessionHub {
 		if (absSourcePath === undefined) throw new Error(`Unknown session: ${sessionId}`);
 		// The branch is written where its source lives: forking a conversation held in another
 		// workspace must not quietly move it into this one.
-		const absTargetCwd = hosted?.absWorkspaceRoot ?? SessionManager.open(absSourcePath).getAbsCwd();
-		const id = SessionManager.forkFrom(absSourcePath, absTargetCwd, entryId).getSessionId();
+		const absTargetCwd = hosted?.absWorkspaceRoot ?? fillSession(absSourcePath).absCwd;
+		const id = this.sessions.forkFrom(absSourcePath, absTargetCwd, entryId).sessionId;
 		this.current = Promise.resolve(id);
 		this.announceHost(id, undefined);
 		return id;
@@ -504,22 +519,24 @@ export class SessionHub {
 	/**
 	 * Give a session a name of its own, stored as one `rename` entry (ADR-0002).
 	 *
-	 * A session this process runs appends through its own manager — the one writer its file has while
-	 * the loop is live — and a stored session appends by path, the same road {@link fork} reads a
-	 * source by. Neither takes a claim: a rename is a record beside the conversation, the loop never
-	 * reads titles, and an entry appended mid-run lands on the file without disturbing the turn.
+	 * A session this process runs appends through the bag it writes its turns with, and a stored
+	 * session appends through the service's `stateOf` — which is deliberately not a fresh replay: the
+	 * bag it hands back is the one a previous host of this session wrote, so the rename lands on the
+	 * same object the next open will serve. Neither path takes a claim: a rename is a record beside
+	 * the conversation, the loop never reads titles, and an entry appended mid-run lands on the file
+	 * without disturbing the turn.
 	 *
 	 * The title arrives already shortened; what reaches the file is what a row shows.
 	 */
 	async rename(sessionId: string, title: string): Promise<void> {
 		const hosted = this.hosts.get(sessionId);
 		if (hosted !== undefined) {
-			hosted.session.sessionManager.appendRename(title);
+			hosted.session.sessionManager.appendRename(hosted.session.sessionState, title);
 			return;
 		}
 		const absPath = SessionManager.findSessionFilePathById(sessionId);
 		if (absPath === undefined) throw new Error(`Unknown session: ${sessionId}`);
-		SessionManager.open(absPath).appendRename(title);
+		this.sessions.appendRename(this.sessions.stateOf(sessionId), title);
 	}
 
 	/**
@@ -568,7 +585,7 @@ export class SessionHub {
 				// The file removal rides inside the same slot: a claim that waited on `closing` resumes
 				// only after the file is gone, so it finds no file instead of reopening one mid-delete.
 				// A session that never spoke has no file, and asking for one would be asking for nothing.
-				if (onDisk) await SessionManager.remove(sessionId);
+				if (onDisk) await this.sessions.remove(sessionId);
 				// The queues and the run in flight go with the host, after the run has settled — deleting
 				// them earlier would leave a settling turn draining queues nobody holds.
 				this.runtimes.delete(sessionId);
@@ -580,7 +597,7 @@ export class SessionHub {
 				this.closing.delete(sessionId);
 			}
 		} else if (onDisk || !held) {
-			await SessionManager.remove(sessionId);
+			await this.sessions.remove(sessionId);
 		}
 		this.current = undefined;
 	}
@@ -617,19 +634,12 @@ export class SessionHub {
 	 * its tools resolve where it was written, and its approvals come from that directory's settings.
 	 */
 	private async open(id: string): Promise<HostedSession> {
-		// The pending manager before the store: a session created a moment ago has no file to find yet,
+		// The pending bag before the store: a session created a moment ago has no file to find yet,
 		// and this is the road its own id takes from the creation to the first message.
 		const pending = this.pendingManager(id);
-		let manager: SessionManager;
-		if (pending !== undefined) {
-			manager = pending;
-		} else {
-			const absPath = SessionManager.findSessionFilePathById(id);
-			if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
-			manager = SessionManager.open(absPath);
-		}
-		const absWorkspaceRoot = manager.getAbsCwd();
-		const session = await this.sessionOver(manager, absWorkspaceRoot, this.runtimeFor(id, absWorkspaceRoot));
+		const state = pending ?? this.sessions.stateOf(id);
+		const absWorkspaceRoot = state.absCwd;
+		const session = await this.sessionOver(state, absWorkspaceRoot, this.runtimeFor(id, absWorkspaceRoot));
 		const host = new HostedSession(session, absWorkspaceRoot);
 		this.hosts.set(id, host);
 		// Observers first, then the listeners: a subscriber told "a host opened" and reaching for the
@@ -653,10 +663,11 @@ export class SessionHub {
 	 * without assembling is indistinguishable from a snapshot taken after — if these were written out
 	 * twice, the difference would show up as a session that changes when you open it.
 	 */
-	private agentOptions(sessionManager: SessionManager, absWorkspaceRoot: string): OpenAgentOptions {
+	private agentOptions(state: SessionState, absWorkspaceRoot: string): OpenAgentOptions {
 		return {
 			absWorkspaceRoot,
-			sessionManager,
+			sessionManager: this.sessions,
+			sessionState: state,
 			models: this.models,
 			settingsManager: this.settingsFor(absWorkspaceRoot),
 			...(this.options.model === undefined ? {} : { model: this.options.model }),
@@ -665,8 +676,8 @@ export class SessionHub {
 		};
 	}
 
-	private sessionOver(sessionManager: SessionManager, absWorkspaceRoot: string, runtime: SessionRuntime): Promise<Agent> {
-		return openAgent({ ...this.agentOptions(sessionManager, absWorkspaceRoot), runtime });
+	private sessionOver(state: SessionState, absWorkspaceRoot: string, runtime: SessionRuntime): Promise<Agent> {
+		return openAgent({ ...this.agentOptions(state, absWorkspaceRoot), runtime });
 	}
 
 	/**
@@ -769,23 +780,23 @@ export class SessionHub {
 	 * worth, and it is why the sidebar never shows one.
 	 */
 	private createUnpersisted(absCwd: string): string {
-		const manager = SessionManager.create(absCwd);
-		const id = manager.getSessionId();
-		this.pending.set(id, manager);
+		const state = createSessionState(absCwd);
+		const id = state.sessionId;
+		this.pending.set(id, state);
 		return id;
 	}
 
-	/** The manager behind an id whose file is not written yet, if there is one. */
-	private pendingManager(id: string): SessionManager | undefined {
-		const manager = this.pending.get(id);
-		if (manager === undefined) return undefined;
-		const absFile = manager.getAbsSessionFile();
+	/** The bag behind an id whose file is not written yet, if there is one. */
+	private pendingManager(id: string): SessionState | undefined {
+		const state = this.pending.get(id);
+		if (state === undefined) return undefined;
+		const absFile = state.absSessionFile;
 		if (absFile !== undefined && existsSync(absFile)) {
 			// The first message landed, so the store is the source again and this entry has done its job.
 			this.pending.delete(id);
 			return undefined;
 		}
-		return manager;
+		return state;
 	}
 }
 

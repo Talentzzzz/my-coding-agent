@@ -6,7 +6,7 @@ import { Type, type Static } from "typebox";
 import type { Agent } from "../agent.ts";
 import { openAgent } from "../session-factory.ts";
 import { workspaceDir } from "../session/paths.ts";
-import { SessionManager } from "../session/session-manager.ts";
+import { type SessionState, SessionManager, createSessionState } from "../session/session-manager.ts";
 import { entryUsage } from "../session/snapshot.ts";
 import { SettingsManager } from "../settings-manager.ts";
 import type { ModelSource } from "../models.ts";
@@ -83,6 +83,8 @@ export interface SubagentToolDeps {
 	 * this session's total cannot fold out of its own assistant messages — the record closes that gap.
 	 */
 	parentSessionManager: SessionManager;
+	/** The bag {@link SubagentToolDeps.parentSessionManager} operates on: the parent's own `SessionState`. */
+	parentSessionState: SessionState;
 	/** The parent's transport. Omitted in the real process, where it means Anthropic Messages. */
 	api?: ChatTransport;
 	/** The parent transcript's file, recorded as the child header's `parentSession`. */
@@ -103,10 +105,11 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 
 	async function buildChild(): Promise<Agent> {
 		const absChildDir = join(workspaceDir(deps.workspace.absRoot), "subagents");
-		const sessionManager = SessionManager.create(deps.workspace.absRoot, absChildDir, deps.parentSessionFile);
+		const sessionState = createSessionState(deps.workspace.absRoot, absChildDir, deps.parentSessionFile);
 		return openAgent({
 			absWorkspaceRoot: deps.workspace.absRoot,
-			sessionManager,
+			sessionManager: deps.parentSessionManager,
+			sessionState,
 			models: deps.models,
 			...(deps.model === undefined ? {} : { model: deps.model }),
 			thinkingLevel: deps.thinkingLevel,
@@ -123,7 +126,7 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 
 	/** The child's last assistant message, or undefined when it produced none. */
 	function lastAssistant(child: Agent) {
-		const messages = child.sessionManager.buildSessionContext().messages;
+		const messages = child.sessionManager.buildSessionContext(child.sessionState).messages;
 		for (let index = messages.length - 1; index >= 0; index -= 1) {
 			const message = messages[index]!;
 			if (message.role === "assistant") return message;
@@ -161,7 +164,7 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 		let costCacheRead = 0;
 		let costCacheWrite = 0;
 		let seen = false;
-		for (const entry of child.sessionManager.getEntries()) {
+		for (const entry of child.sessionManager.getEntries(child.sessionState)) {
 			const usage = entryUsage(entry);
 			if (usage === undefined) continue;
 			seen = true;
@@ -233,7 +236,7 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 					// it burned, and the parent transcript is where this session's total reads it back.
 					const usage = childUsage(job.child);
 					if (usage !== undefined) {
-						deps.parentSessionManager.appendUsage("subagent", job.child.modelName, usage);
+						deps.parentSessionManager.appendUsage(deps.parentSessionState, "subagent", job.child.modelName, usage);
 					}
 					await job.child.close().catch(() => {});
 				}

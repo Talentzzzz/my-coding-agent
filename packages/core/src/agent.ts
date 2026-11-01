@@ -58,7 +58,12 @@ import {
 	type UsageTotals,
 } from "./protocol.ts";
 import { sessionSnapshot, sessionUsage } from "./session/snapshot.ts";
-import { type SessionEntry, SessionManager, sessionEntryToContextMessages } from "./session/session-manager.ts";
+import {
+	type SessionEntry,
+	type SessionState,
+	SessionManager,
+	sessionEntryToContextMessages,
+} from "./session/session-manager.ts";
 import {
 	applyRecordedToolConfig,
 	followsGlobalOf,
@@ -93,6 +98,15 @@ export interface AgentConfig {
 	 * step. It is built by the caller, which is what lets a test pass an in-memory one.
 	 */
 	sessionManager: SessionManager;
+	/**
+	 * The bag {@link AgentConfig.sessionManager} operates on: the transcript's own
+	 * `SessionState`, which every call inside the session passes explicitly.
+	 *
+	 * A parameter rather than something the service holds, because the service is stateless
+	 * (ADR-0007 §2) — this is the one bag this session reads and writes, held here until the
+	 * session's own state ownership is settled.
+	 */
+	sessionState: SessionState;
 	/**
 	 * The user's models, read on every request.
 	 *
@@ -391,6 +405,14 @@ export class Agent {
 	 * list, or name the file reads it here, and there is no second copy of that state to keep in step.
 	 */
 	readonly sessionManager: SessionManager;
+	/**
+	 * The bag every {@link Agent.sessionManager} call below passes: see {@link AgentConfig.sessionState}.
+	 *
+	 * Exposed so a host that reaches the session's transcript by id — a rename, a fork, a read —
+	 * appends to the same object this session writes, rather than opening a second state over the
+	 * same file.
+	 */
+	readonly sessionState: SessionState;
 	/** The user's models, as this session reads them: see {@link AgentConfig.models}. */
 	readonly models: ModelSource;
 	/**
@@ -438,6 +460,7 @@ export class Agent {
 	constructor(config: AgentConfig) {
 		this.workspace = config.workspace;
 		this.sessionManager = config.sessionManager;
+		this.sessionState = config.sessionState;
 		this.models = config.models;
 		this.settingsManager = config.settingsManager;
 		this.tools = config.tools;
@@ -456,12 +479,12 @@ export class Agent {
 
 	/** This session's id, which is the id of its file. */
 	get id(): string {
-		return this.sessionManager.getSessionId();
+		return this.sessionManager.getSessionId(this.sessionState);
 	}
 
 	/** The JSONL file this session appends to, or undefined for a session that is never written. */
 	get sessionFile(): string | undefined {
-		return this.sessionManager.getAbsSessionFile();
+		return this.sessionManager.getAbsSessionFile(this.sessionState);
 	}
 
 	/** The row's name the session is on, which a config patch and the picker both name it by. */
@@ -543,7 +566,7 @@ export class Agent {
 	get snapshot(): SessionSnapshot {
 		const run = this.run;
 		return sessionSnapshot({
-			sessionManager: this.sessionManager,
+			sessionState: this.sessionState,
 			absWorkspaceRoot: this.workspace.absRoot,
 			// The snapshot reads only the name, the level, and the window off the model, all of which the
 			// filled bag already holds; no transport is needed for a read that sends nothing.
@@ -553,7 +576,7 @@ export class Agent {
 			activeTools: this.tools.activeNames(),
 			// Judged against this workspace's own settings, the same way a cold read judges it, so the
 			// panel's "沿用全局" label cannot disagree with itself between the two paths.
-			...followsGlobalOf(this.sessionManager, this.settingsManager, this.tools),
+			...followsGlobalOf(this.sessionState, this.settingsManager, this.tools),
 			...(run?.partial === undefined ? {} : { partial: run.partial }),
 			submitting: run !== undefined,
 			queued: this.queued,
@@ -565,7 +588,7 @@ export class Agent {
 
 	/** Usage summed over the transcript, with the window it is measured against. */
 	get usage(): UsageTotals {
-		return sessionUsage(this.sessionManager, resolvedModel(this.modelState).contextWindow);
+		return sessionUsage(this.sessionState, resolvedModel(this.modelState).contextWindow);
 	}
 
 	/**
@@ -576,7 +599,7 @@ export class Agent {
 	 * anything a host appends.
 	 */
 	private transcript(): Message[] {
-		return this.sessionManager.buildSessionContext().messages;
+		return this.sessionManager.buildSessionContext(this.sessionState).messages;
 	}
 
 	/** Subscribe to the session's state. The returned function unsubscribes. */
@@ -805,7 +828,7 @@ export class Agent {
 		// One pass decides both what the request carries and whether it has to be summarized: the
 		// trigger, the clearing of stale tool results, and the summary all read the same entries, so the
 		// decision and the request cannot disagree about how large the prompt is.
-		const entries = await this.maybeCompact(this.sessionManager.buildContextEntries(), Date.now(), signal, transport);
+		const entries = await this.maybeCompact(this.sessionManager.buildContextEntries(this.sessionState), Date.now(), signal, transport);
 		// The views come from the same selection of entries the request is built from, so what the
 		// model is shown and what the request carries cannot disagree about a rewrite.
 		const views = toolResultViewsOf(entries);
@@ -890,14 +913,14 @@ export class Agent {
 	 * refs built from the old name are already accounted for as a rename.
 	 */
 	private recordSelection(): void {
-		const recorded = this.sessionManager.getRecordedSettings();
+		const recorded = this.sessionManager.getRecordedSettings(this.sessionState);
 		if (this.modelState.id !== recorded.model?.modelId) {
-			const entryId = this.sessionManager.appendModelChange(this.modelState.name!, this.modelState.id!);
+			const entryId = this.sessionManager.appendModelChange(this.sessionState, this.modelState.name!, this.modelState.id!);
 			this.emit({ type: "entry_appended", entryId, kind: "model_change" });
 		}
 		const level = this.thinkingLevel as ThinkingLevel;
 		if (level !== recorded.thinkingLevel) {
-			const entryId = this.sessionManager.appendThinkingLevelChange(level);
+			const entryId = this.sessionManager.appendThinkingLevelChange(this.sessionState, level);
 			this.emit({ type: "entry_appended", entryId, kind: "thinking_level_change" });
 		}
 	}
@@ -917,7 +940,7 @@ export class Agent {
 	 * which is what keeps a move from being recorded twice.
 	 */
 	private applyBranchSelection(): void {
-		const recorded = this.sessionManager.getRecordedSettings();
+		const recorded = this.sessionManager.getRecordedSettings(this.sessionState);
 		const userModel = this.models.list().find((userModel) => userModel.name === (recorded.model?.name ?? this.modelState.name));
 		if (userModel !== undefined) {
 			this.modelState.name = userModel.name;
@@ -1079,10 +1102,10 @@ export class Agent {
 	branchTo(entryId: string, descend = true): string {
 		if (this.run !== undefined) throw new Error("A run is in flight: the branch cannot move under it");
 
-		const leafId = descend ? this.sessionManager.getBranchTip(entryId) : entryId;
+		const leafId = descend ? this.sessionManager.getBranchTip(this.sessionState, entryId) : entryId;
 		const previousName = this.modelName;
 		const previousLevel = this.thinkingLevel;
-		this.sessionManager.branch(leafId);
+		this.sessionManager.branch(this.sessionState, leafId);
 		this.applyBranchSelection();
 		this.applyBranchToolConfig();
 		// Reported because neither field is in the branch payload, and every stream other than the one
@@ -1114,7 +1137,7 @@ export class Agent {
 	private applyBranchToolConfig(): void {
 		// The fallback is the global default's live view, rebuilt from the settings as they are now, so
 		// a move onto a branch that recorded nothing restores what a fresh session would open on.
-		applyRecordedToolConfig(this.sessionManager, this.tools, globalDefaultToolState(this.settingsManager, this.tools));
+		applyRecordedToolConfig(this.sessionState, this.tools, globalDefaultToolState(this.settingsManager, this.tools));
 		// Reported because neither map is in the branch payload, and every stream other than the one
 		// that asked is holding a snapshot taken before the move. Both maps travel whole: this is the
 		// branch's state, not a delta, and a client applies either shape.
@@ -1134,7 +1157,7 @@ export class Agent {
 		const active = this.tools.activeNames();
 		if (active.length === previous.length && active.every((name, index) => name === previous[index])) return;
 
-		this.sessionManager.appendToolConfig(active, this.getApprovals());
+		this.sessionManager.appendToolConfig(this.sessionState, active, this.getApprovals());
 		this.publish();
 		this.emitConfigChanged({ tools: active });
 	}
@@ -1194,7 +1217,7 @@ export class Agent {
 		const previousApprovals = this.getApprovals();
 		if (patch.approval !== undefined) {
 			this.tools.mergeApprovalOverride(patch.approval);
-			this.sessionManager.appendToolConfig(this.tools.activeNames(), this.getApprovals());
+			this.sessionManager.appendToolConfig(this.sessionState, this.tools.activeNames(), this.getApprovals());
 		}
 		this.settingsManager.applySettings(patch.approval === undefined ? patch : { ...patch, approval: undefined });
 		this.runtime.steeringQueue.mode = this.settingsManager.getSteeringMode();
@@ -1215,7 +1238,7 @@ export class Agent {
 	 * {@link Agent.hasPendingApprovals} for why a run in flight reports none.
 	 */
 	private danglingApprovals(): PendingApproval[] {
-		return danglingApprovalsOf(this.sessionManager.buildContextEntries());
+		return danglingApprovalsOf(this.sessionManager.buildContextEntries(this.sessionState));
 	}
 
 	/**
@@ -1257,7 +1280,7 @@ export class Agent {
 			: { approved: false, reason: `The user denied permission to run ${call.toolName}.` };
 		if (approved) {
 			this.tools.mergeApprovalOverride({ [call.toolName as ToolApprovalKey]: false });
-			this.sessionManager.appendToolConfig(this.tools.activeNames(), this.getApprovals());
+			this.sessionManager.appendToolConfig(this.sessionState, this.tools.activeNames(), this.getApprovals());
 		}
 		// Said before the run starts: the choice is the session's own and lands now, while the call
 		// itself stays dangling until the run's recovery pass closes it.
@@ -1446,6 +1469,7 @@ export class Agent {
 		if (!outcome) return cleared;
 
 		this.sessionManager.appendCompaction(
+			this.sessionState,
 			outcome.summary,
 			outcome.firstKeptEntryId,
 			outcome.tokensBefore,
@@ -1453,7 +1477,7 @@ export class Agent {
 		);
 		// Published after the transcript moved, so a listener that reacts reads back the same numbers:
 		// `summarized` is what this pass folded in, `contextTokens` is what the provider will now be sent.
-		const compacted = this.sessionManager.buildContextEntries();
+		const compacted = this.sessionManager.buildContextEntries(this.sessionState);
 		this.emit({
 			type: "compaction",
 			summary: outcome.summary,
@@ -1479,8 +1503,8 @@ export class Agent {
 		if (trimmed.length === 0) return entries;
 
 		const tokensBefore = estimateTokens(messagesOf(entries));
-		this.sessionManager.appendTrimToolCallArgs(trimmed, tokensBefore);
-		const view = this.sessionManager.buildContextEntries();
+		this.sessionManager.appendTrimToolCallArgs(this.sessionState, trimmed, tokensBefore);
+		const view = this.sessionManager.buildContextEntries(this.sessionState);
 		this.emit({
 			type: "tool_call_args_trimmed",
 			trimmed: trimmed.length,
@@ -1504,8 +1528,8 @@ export class Agent {
 		if (cleared.length === 0) return entries;
 
 		const tokensBefore = estimateTokens(messagesOf(entries));
-		this.sessionManager.appendClearToolResults(cleared, tokensBefore);
-		const view = this.sessionManager.buildContextEntries();
+		this.sessionManager.appendClearToolResults(this.sessionState, cleared, tokensBefore);
+		const view = this.sessionManager.buildContextEntries(this.sessionState);
 		this.emit({
 			type: "tool_results_cleared",
 			cleared: cleared.length,
@@ -1527,7 +1551,7 @@ export class Agent {
 	 */
 	private nextStamp(): number {
 		let newest = 0;
-		for (const entry of this.sessionManager.getEntries()) {
+		for (const entry of this.sessionManager.getEntries(this.sessionState)) {
 			if (entry.type !== "message") continue;
 			const stamp = entry.message.timestamp;
 			if (typeof stamp === "number" && stamp > newest) newest = stamp;
@@ -1611,7 +1635,7 @@ export class Agent {
 		const view = scope.pendingToolResultViews.get(message.toolCallId);
 		if (view === undefined) return;
 		scope.pendingToolResultViews.delete(message.toolCallId);
-		this.sessionManager.appendToolResultView(message.toolCallId, view.shown);
+		this.sessionManager.appendToolResultView(this.sessionState, message.toolCallId, view.shown);
 	}
 
 	/**
@@ -1739,10 +1763,10 @@ export class Agent {
 		// The count is the raw child count, so a `leaf` entry — the record a branch move writes — counts
 		// too, the same way a `model_change` written in front of a message already does. The cost is one
 		// extra full-snapshot frame that shows no extra branch point, which is harmless.
-		const parent = this.sessionManager.getLeafId();
-		const continued = parent !== null && this.sessionManager.getChildren(parent).length > 0;
+		const parent = this.sessionManager.getLeafId(this.sessionState);
+		const continued = parent !== null && this.sessionManager.getChildren(this.sessionState, parent).length > 0;
 
-		const entryId = this.sessionManager.appendMessage(message);
+		const entryId = this.sessionManager.appendMessage(this.sessionState, message);
 		if (continued) this.emit({ type: "branch_changed", leafId: entryId });
 		this.emit({ type: "entry_appended", entryId, kind: "message" });
 	}

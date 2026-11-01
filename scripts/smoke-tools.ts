@@ -12,6 +12,14 @@ import {
 	clearToolResult,
 	compactionThresholdFor,
 	CURRENT_SESSION_VERSION,
+	appendCompaction,
+	appendMessage,
+	appendModelChange,
+	appendTrimToolCallArgs,
+	branch,
+	buildContextEntries,
+	buildSessionContext,
+	createSessionState,
 	createToolRegistry,
 	createTools,
 	deriveTitle,
@@ -19,6 +27,19 @@ import {
 	DIFF_TEXT_MAX_ROWS,
 	diffText,
 	estimateTokens,
+	fillSession,
+	getAbsSessionFile,
+	getBranchPoints,
+	getBranchTip,
+	getEntry,
+	getEntries,
+	getHeader,
+	getLeafId,
+	getRecordedSettings,
+	getRecordedToolConfig,
+	getSessionId,
+	getTitle,
+	inMemorySessionState,
 	fileDiff,
 	isCacheProbablyExpired,
 	prepareCompaction,
@@ -287,7 +308,7 @@ process.exit(failures === 0 ? 0 : 1);
 
 /** A session must survive a restart with the same transcript, and compaction must not delete lines. */
 async function exerciseSessionManager(): Promise<void> {
-	const manager = SessionManager.create(root);
+	const manager = createSessionState(root);
 	const first: Message = { role: "user", content: [{ type: "text", text: "first question" }], timestamp: 1 };
 	const reply: Message = {
 		role: "assistant",
@@ -298,50 +319,50 @@ async function exerciseSessionManager(): Promise<void> {
 		stopReason: "stop",
 		timestamp: 2,
 	};
-	const firstEntryId = manager.appendMessage(first);
-	manager.appendMessage(reply);
+	const firstEntryId = appendMessage(manager, first);
+	appendMessage(manager, reply);
 
-	const header = manager.getHeader();
+	const header = getHeader(manager);
 	check("writes a versioned header", header?.version === CURRENT_SESSION_VERSION, String(header?.version));
 	check("stamped with an ISO time", typeof header?.timestamp === "string" && !Number.isNaN(Date.parse(header.timestamp)), header?.timestamp);
 	check("naming the workspace it belongs to", header?.cwd === resolvePath(root), header?.cwd);
 	check("and no parent for a root session", header?.parentSession === undefined, String(header?.parentSession));
-	check("the file leads with the creation stamp", (manager.getAbsSessionFile() ?? "").endsWith(`_${manager.getSessionId()}.jsonl`), String(manager.getAbsSessionFile()));
-	check("derives a title from the first user message", manager.getTitle() === "first question", manager.getTitle());
-	check("the first entry has no parent", manager.getEntries()[0]?.parentId === null, String(manager.getEntries()[0]?.parentId));
-	check("each entry chains to the previous one", manager.getEntries()[1]?.parentId === firstEntryId, String(manager.getEntries()[1]?.parentId));
-	check("the leaf is the last entry", manager.getLeafId() === manager.getEntries().at(-1)?.id, String(manager.getLeafId()));
+	check("the file leads with the creation stamp", (getAbsSessionFile(manager) ?? "").endsWith(`_${getSessionId(manager)}.jsonl`), String(getAbsSessionFile(manager)));
+	check("derives a title from the first user message", getTitle(manager) === "first question", getTitle(manager));
+	check("the first entry has no parent", getEntries(manager)[0]?.parentId === null, String(getEntries(manager)[0]?.parentId));
+	check("each entry chains to the previous one", getEntries(manager)[1]?.parentId === firstEntryId, String(getEntries(manager)[1]?.parentId));
+	check("the leaf is the last entry", getLeafId(manager) === getEntries(manager).at(-1)?.id, String(getLeafId(manager)));
 
-	const absSessionFile = manager.getAbsSessionFile() ?? "";
-	const reopened = SessionManager.open(absSessionFile);
-	check("reloads both messages", reopened.buildSessionContext().messages.length === 2, String(reopened.buildSessionContext().messages.length));
+	const absSessionFile = getAbsSessionFile(manager) ?? "";
+	const reopened = fillSession(absSessionFile);
+	check("reloads both messages", buildSessionContext(reopened).messages.length === 2, String(buildSessionContext(reopened).messages.length));
 	check(
 		"reads the same entry ids back",
-		reopened.getEntries().map((entry) => entry.id).join() === manager.getEntries().map((entry) => entry.id).join(),
+		getEntries(reopened).map((entry) => entry.id).join() === getEntries(manager).map((entry) => entry.id).join(),
 	);
-	check("reads the same leaf back", reopened.getLeafId() === manager.getLeafId(), String(reopened.getLeafId()));
-	check("reads the title back", reopened.getTitle() === "first question", reopened.getTitle());
-	check("finds the file by id", SessionManager.findSessionFilePathById(manager.getSessionId()) === absSessionFile);
+	check("reads the same leaf back", getLeafId(reopened) === getLeafId(manager), String(getLeafId(reopened)));
+	check("reads the title back", getTitle(reopened) === "first question", getTitle(reopened));
+	check("finds the file by id", SessionManager.findSessionFilePathById(getSessionId(manager)) === absSessionFile);
 
-	const listed = (await SessionManager.list(root)).find((entry) => entry.id === manager.getSessionId());
+	const listed = (await SessionManager.list(root)).find((entry) => entry.id === getSessionId(manager));
 	check("lists the session for the workspace", listed !== undefined);
 	check("the list shows the derived title", listed?.firstMessage === "first question", listed?.firstMessage);
 	check("and counts the transcript", listed?.messageCount === 2, String(listed?.messageCount));
 
 	// A compaction is a checkpoint: the entry it names and everything after it stay in context, the
 	// summary stands for the rest, and the file keeps every line it ever wrote.
-	const replyEntryId = manager.getEntries()[1]?.id ?? "";
-	manager.appendCompaction("a summary of the first exchange", replyEntryId, 120);
-	const context = manager.buildSessionContext();
+	const replyEntryId = getEntries(manager)[1]?.id ?? "";
+	appendCompaction(manager, "a summary of the first exchange", replyEntryId, 120);
+	const context = buildSessionContext(manager);
 	check("the model view leads with the compaction summary", context.messages[0]?.role === "user", context.messages[0]?.role);
 	check("carrying the summary text", compactionSummaryText(context.messages[0]) === "a summary of the first exchange");
 	check("the kept entry is still there", context.messages[1]?.role === "assistant", context.messages[1]?.role);
 	check("and what it replaced is not", !JSON.stringify(context.messages).includes("first question"), JSON.stringify(context.messages));
-	check("while the file keeps every message", manager.getEntries().filter((entry) => entry.type === "message").length === 2);
+	check("while the file keeps every message", getEntries(manager).filter((entry) => entry.type === "message").length === 2);
 
-	const compacted = SessionManager.open(absSessionFile);
-	check("and a reload reads the same checkpoint", compacted.buildSessionContext().messages[0]?.role === "user" && compactionSummaryText(compacted.buildSessionContext().messages[0]) !== undefined);
-	check("with the same entries", compacted.getEntries().length === manager.getEntries().length, String(compacted.getEntries().length));
+	const compacted = fillSession(absSessionFile);
+	check("and a reload reads the same checkpoint", buildSessionContext(compacted).messages[0]?.role === "user" && compactionSummaryText(buildSessionContext(compacted).messages[0]) !== undefined);
+	check("with the same entries", getEntries(compacted).length === getEntries(manager).length, String(getEntries(compacted).length));
 
 	check("deriveTitle ignores assistant messages", deriveTitle([reply]) === "新会话");
 }
@@ -353,21 +374,21 @@ async function exerciseSessionManager(): Promise<void> {
  * messages the conversation carried on from more than one way, and where one of those ways ends.
  */
 function exerciseBranchPoints(): void {
-	const manager = SessionManager.create(root);
+	const manager = createSessionState(root);
 	const question = (text: string, at: number): Message => ({ role: "user", content: [{ type: "text", text }], timestamp: at });
 
-	const firstId = manager.appendMessage(question("first", 1));
-	const answerId = manager.appendMessage(answerMessage("answer one", 2));
-	check("a chain has no branch points", manager.getBranchPoints().length === 0, JSON.stringify(manager.getBranchPoints()));
-	check("and its tip is where it stopped", manager.getBranchTip(firstId) === answerId, `${manager.getBranchTip(firstId)} vs ${answerId}`);
+	const firstId = appendMessage(manager, question("first", 1));
+	const answerId = appendMessage(manager, answerMessage("answer one", 2));
+	check("a chain has no branch points", getBranchPoints(manager).length === 0, JSON.stringify(getBranchPoints(manager)));
+	check("and its tip is where it stopped", getBranchTip(manager, firstId) === answerId, `${getBranchTip(manager, firstId)} vs ${answerId}`);
 
 	// Rewind, change the model, then ask again. A state entry is not a place a conversation can be
 	// resumed at, so it must not read as an alternative of its own.
-	manager.branch(firstId);
-	const modelEntryId = manager.appendModelChange("t", "m");
-	const secondId = manager.appendMessage(question("second", 3));
+	branch(manager, firstId);
+	const modelEntryId = appendModelChange(manager, "t", "m");
+	const secondId = appendMessage(manager, question("second", 3));
 
-	const points = manager.getBranchPoints();
+	const points = getBranchPoints(manager);
 	check("the message both ways carried on from is a branch point", points.length === 1 && points[0]?.entryId === firstId, JSON.stringify(points));
 	check("with two continuations", points[0]?.options.length === 2, JSON.stringify(points[0]?.options));
 	check(
@@ -380,12 +401,12 @@ function exerciseBranchPoints(): void {
 		points[0]?.options[0]?.active === false && points[0]?.options[1]?.active === true,
 		JSON.stringify(points[0]?.options),
 	);
-	check("a branch resumes at its newest tip", manager.getBranchTip(modelEntryId) === secondId, `${manager.getBranchTip(modelEntryId)} vs ${secondId}`);
+	check("a branch resumes at its newest tip", getBranchTip(manager, modelEntryId) === secondId, `${getBranchTip(manager, modelEntryId)} vs ${secondId}`);
 	// The move this exercise made is a real move, so it wrote its record as a child of the answer, and
 	// the subtree's newest tip is that record. Landing on it is landing on the answer's branch — the
 	// next append continues under it, and the replay takes the file's last word.
-	const otherTip = manager.getBranchTip(points[0]?.options[0]?.entryId ?? "");
-	const otherEntry = manager.getEntry(otherTip);
+	const otherTip = getBranchTip(manager, points[0]?.options[0]?.entryId ?? "");
+	const otherEntry = getEntry(manager, otherTip);
 	check(
 		"which for the other alternative ends at the record its move wrote",
 		otherEntry?.type === "leaf" && otherEntry.parentId === answerId,
@@ -395,7 +416,7 @@ function exerciseBranchPoints(): void {
 		"an entry the session does not have is refused",
 		(() => {
 			try {
-				manager.getBranchTip("no-such-entry");
+				getBranchTip(manager, "no-such-entry");
 				return false;
 			} catch {
 				return true;
@@ -405,13 +426,13 @@ function exerciseBranchPoints(): void {
 
 	// The gesture this window now offers: rewind to an *assistant answer* and ask again. The point is
 	// that answer, and the card that names it has to say which question it answered.
-	const assistantPoint = SessionManager.create(root);
-	assistantPoint.appendMessage(question("q1", 10));
-	const firstAnswer = assistantPoint.appendMessage(answerMessage("a1", 11));
-	assistantPoint.appendMessage(question("q2", 12));
-	assistantPoint.branch(firstAnswer);
-	assistantPoint.appendMessage(question("q3", 13));
-	const [ap] = assistantPoint.getBranchPoints();
+	const assistantPoint = createSessionState(root);
+	appendMessage(assistantPoint, question("q1", 10));
+	const firstAnswer = appendMessage(assistantPoint, answerMessage("a1", 11));
+	appendMessage(assistantPoint, question("q2", 12));
+	branch(assistantPoint, firstAnswer);
+	appendMessage(assistantPoint, question("q3", 13));
+	const [ap] = getBranchPoints(assistantPoint);
 	check("an assistant answer is a branch point", ap?.entryId === firstAnswer, JSON.stringify(ap));
 	check("named by the user message above it", ap?.prompt === "q1", JSON.stringify(ap?.prompt));
 	check(
@@ -431,26 +452,26 @@ function exerciseBranchPoints(): void {
  * future tightening of that bound from silently shortening every card in the branch graph.
  */
 function exerciseBranchLabelPreview(): void {
-	const manager = SessionManager.create(root);
+	const manager = createSessionState(root);
 	const question = (text: string, at: number): Message => ({ role: "user", content: [{ type: "text", text }], timestamp: at });
 
-	const firstId = manager.appendMessage(question("first", 1));
+	const firstId = appendMessage(manager, question("first", 1));
 	// Long enough to have been cut by the old 64-character bound, short enough to survive today's — so
 	// this fails on a regression rather than on a future, larger bound.
 	const sentence = "把整个窗口的布局问题一次说清楚：从标题栏到输入框、从侧边栏到状态行，连同分支图卡片为什么会被一段很长的消息撑高、把下面那一行盖住。".slice(0, 150);
-	manager.appendMessage(question(sentence, 2));
+	appendMessage(manager, question(sentence, 2));
 	// Back to the first message and ask again: the branch point is now `firstId` with two ways, which is
 	// the shape a card is drawn from. Branching at the current leaf would write nothing at all.
-	manager.branch(firstId);
-	manager.appendMessage(question("second", 3));
+	branch(manager, firstId);
+	appendMessage(manager, question("second", 3));
 
-	const options = manager.getBranchPoints()[0]?.options ?? [];
+	const options = getBranchPoints(manager)[0]?.options ?? [];
 	check("一条很长的消息，标签仍然是整句（卡片靠它取名）", options.some((option) => option.label === sentence), options.map((option) => `${option.label.length}:${option.label}`).join(" | "));
 	check("而另一条走法的标签照样是它自己那句", options.some((option) => option.label === "second"), JSON.stringify(options.map((option) => option.label)));
 	check("一串没有空白的超长文本仍然被裁到上限", (() => {
-		manager.branch(firstId);
-		manager.appendMessage(question("x".repeat(BRANCH_LABEL_MAX + 50), 4));
-		const capped = (manager.getBranchPoints()[0]?.options ?? []).find((option) => option.label.startsWith("xxx"))?.label ?? "";
+		branch(manager, firstId);
+		appendMessage(manager, question("x".repeat(BRANCH_LABEL_MAX + 50), 4));
+		const capped = (getBranchPoints(manager)[0]?.options ?? []).find((option) => option.label.startsWith("xxx"))?.label ?? "";
 		return capped.length === BRANCH_LABEL_MAX && capped.endsWith("...");
 	})());
 }
@@ -476,27 +497,27 @@ async function exerciseFileFormat(): Promise<void> {
 	];
 	await writeFile(path, `${lines.join("\n")}\n`, "utf8");
 
-	const manager = SessionManager.open(path);
-	check("reads both messages", manager.buildSessionContext().messages.length === 2, String(manager.buildSessionContext().messages.length));
-	check("chains the entries it was given", manager.getEntries()[1]?.parentId === "aaaa0001", String(manager.getEntries()[1]?.parentId));
-	check("the leaf is the last entry", manager.getLeafId() === "aaaa0003", String(manager.getLeafId()));
-	check("keeps the messages an unknown entry does not touch", manager.buildSessionContext().messages.length === 2);
+	const manager = fillSession(path);
+	check("reads both messages", buildSessionContext(manager).messages.length === 2, String(buildSessionContext(manager).messages.length));
+	check("chains the entries it was given", getEntries(manager)[1]?.parentId === "aaaa0001", String(getEntries(manager)[1]?.parentId));
+	check("the leaf is the last entry", getLeafId(manager) === "aaaa0003", String(getLeafId(manager)));
+	check("keeps the messages an unknown entry does not touch", buildSessionContext(manager).messages.length === 2);
 
-	const unknown = manager.getEntries().find((entry) => entry.type === "future_thing");
+	const unknown = getEntries(manager).find((entry) => entry.type === "future_thing");
 	check("keeps an unknown entry kind", unknown !== undefined);
 	check("with the fields it arrived with", JSON.stringify(unknown).includes('"kept":true'), JSON.stringify(unknown));
 
-	const appended = manager.appendMessage({ role: "user", content: [{ type: "text", text: "after the upgrade" }], timestamp: 20 });
+	const appended = appendMessage(manager, { role: "user", content: [{ type: "text", text: "after the upgrade" }], timestamp: 20 });
 	check("gives the new entry an id of its own", appended !== "aaaa0003" && appended.length === 8, appended);
-	check("chained to the entry that was the tip", manager.getEntries().at(-1)?.parentId === "aaaa0003", String(manager.getEntries().at(-1)?.parentId));
+	check("chained to the entry that was the tip", getEntries(manager).at(-1)?.parentId === "aaaa0003", String(getEntries(manager).at(-1)?.parentId));
 
 	const text = await readFile(path, "utf8");
 	check("never rewrites earlier lines", text.startsWith(lines.join("\n")), text.slice(0, 48));
 	check("the unknown entry is still in the file", text.includes("future_thing"));
 
-	const reopened = SessionManager.open(path);
-	check("reopens with the same transcript", reopened.buildSessionContext().messages.length === 3, String(reopened.buildSessionContext().messages.length));
-	check("and the same leaf", reopened.getLeafId() === appended, String(reopened.getLeafId()));
+	const reopened = fillSession(path);
+	check("reopens with the same transcript", buildSessionContext(reopened).messages.length === 3, String(buildSessionContext(reopened).messages.length));
+	check("and the same leaf", getLeafId(reopened) === appended, String(getLeafId(reopened)));
 
 	check("sessions live under the agent home", dir.startsWith(sessionsDir()), dir);
 	check("in a directory named after the workspace", dir.endsWith("--") && dir.includes("my-agent-tools-"), dir);
@@ -585,9 +606,9 @@ async function exerciseSettings(): Promise<void> {
  * from the old one. These assertions pin the "settles rather than hangs" half of it.
  */
 async function exerciseSessionLifecycle(): Promise<void> {
-	const sessionManager = SessionManager.create(root);
+	const state = createSessionState(root);
 	const question: Message = { role: "user", content: [{ type: "text", text: "lifecycle question" }], timestamp: 1 };
-	sessionManager.appendMessage(question);
+	appendMessage(state, question);
 
 	// In memory: a config change must land in the manager the caller holds, and never in the
 	// developer's `~/.my-agent/settings.json`. Before settings became an injected manager, this test
@@ -607,7 +628,7 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	};
 	const session = await openAgent({
 		absWorkspaceRoot: root,
-		sessionManager,
+		sessionState: state,
 		models: { list: () => [configured] },
 		settingsManager,
 	});
@@ -628,13 +649,13 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	check("and the session reflects it", session.snapshot.approvals.bash === true, JSON.stringify(session.snapshot.approvals));
 	check(
 		"recording the choice in the transcript",
-		sessionManager.getRecordedToolConfig().approval?.bash === true,
-		JSON.stringify(sessionManager.getRecordedToolConfig()),
+		getRecordedToolConfig(state).approval?.bash === true,
+		JSON.stringify(getRecordedToolConfig(state)),
 	);
 	check(
 		"beside the tool set in force",
-		JSON.stringify(sessionManager.getRecordedToolConfig().activeTools) === JSON.stringify(session.activeTools),
-		JSON.stringify(sessionManager.getRecordedToolConfig().activeTools),
+		JSON.stringify(getRecordedToolConfig(state).activeTools) === JSON.stringify(session.activeTools),
+		JSON.stringify(getRecordedToolConfig(state).activeTools),
 	);
 
 	// Both calls must resolve without an active run, and must not disturb the transcript.
@@ -644,38 +665,38 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	check("close() settles", closed.ok);
 	check("lifecycle calls keep the transcript", session.snapshot.messages.length === 1, String(session.snapshot.messages.length));
 
-	const reloaded = SessionManager.open(session.sessionFile ?? "");
+	const reloaded = fillSession(session.sessionFile ?? "");
 	check(
 		"the transcript is still on disk",
-		reloaded.getEntries().filter((entry) => entry.type === "message").length === 1,
-		String(reloaded.getEntries().length),
+		getEntries(reloaded).filter((entry) => entry.type === "message").length === 1,
+		String(getEntries(reloaded).length),
 	);
 	// Assembly writes nothing, and neither does a config change: a session that opened on a model and
 	// was never spoken to has not used it, so the transcript stays the transcript it opened with. The
 	// entries land with the first request that carries them — see `smoke-session.ts`.
 	check(
 		"and neither assembly nor a config change recorded a model",
-		reloaded.getRecordedSettings().model === undefined,
-		JSON.stringify(reloaded.getRecordedSettings()),
+		getRecordedSettings(reloaded).model === undefined,
+		JSON.stringify(getRecordedSettings(reloaded)),
 	);
 
 	// The choice is durable and session-scoped: reopening the same file restores it, while a second
 	// session over the same workspace still opens on the settings defaults.
 	check(
 		"the transcript kept the tool choices",
-		reloaded.getRecordedToolConfig().approval?.bash === true,
-		JSON.stringify(reloaded.getRecordedToolConfig()),
+		getRecordedToolConfig(reloaded).approval?.bash === true,
+		JSON.stringify(getRecordedToolConfig(reloaded)),
 	);
 	const reopened = await openAgent({
 		absWorkspaceRoot: root,
-		sessionManager: reloaded,
+		sessionState: reloaded,
 		models: { list: () => [configured] },
 		settingsManager,
 	});
 	check("reopening restores the approval the session chose", reopened.snapshot.approvals.bash === true, JSON.stringify(reopened.snapshot.approvals));
 	const other = await openAgent({
 		absWorkspaceRoot: root,
-		sessionManager: SessionManager.create(root),
+		sessionState: createSessionState(root),
 		models: { list: () => [configured] },
 		settingsManager,
 	});
@@ -740,10 +761,10 @@ function exerciseFillTools(): void {
 }
 
 function exerciseCompaction(): void {
-	const manager = SessionManager.inMemory(root);
+	const manager = inMemorySessionState(root);
 	for (let index = 0; index < 10; index += 1) {
-		manager.appendMessage({ role: "user", content: [{ type: "text", text: `question ${index} ${"x".repeat(50)}` }], timestamp: index * 2 + 1 });
-		manager.appendMessage({
+		appendMessage(manager, { role: "user", content: [{ type: "text", text: `question ${index} ${"x".repeat(50)}` }], timestamp: index * 2 + 1 });
+		appendMessage(manager, {
 			role: "assistant",
 			content: [{ type: "text", text: `answer ${index}` }],
 			api: "t",
@@ -763,19 +784,19 @@ function exerciseCompaction(): void {
 	);
 	check("a window nobody declared never triggers", compactionThresholdFor(0) === 0, String(compactionThresholdFor(0)));
 
-	const messages = manager.buildSessionContext().messages;
+	const messages = buildSessionContext(manager).messages;
 	const threshold = 10;
 
 	check("estimates tokens from content", estimateTokens(messages) > 0);
 	check("does not compact below the threshold", shouldCompact(messages, 1_000_000) === false);
 	check("compacts above the threshold", shouldCompact(messages, threshold) === true);
 
-	const prepared = prepareCompaction(manager.buildContextEntries() as SessionEntry[]);
+	const prepared = prepareCompaction(buildContextEntries(manager) as SessionEntry[]);
 	check("produces a preparation", prepared !== undefined);
 	if (!prepared) return;
 
 	// Nothing is kept verbatim: every finished turn is folded, and only the turn in flight survives.
-	const entries = manager.getEntries();
+	const entries = getEntries(manager);
 	check(
 		"summarizing every finished turn",
 		prepared.messagesToSummarize.length === messages.length - 2,
@@ -783,17 +804,17 @@ function exerciseCompaction(): void {
 	);
 	check("cutting between turns rather than inside one", prepared.messagesToSummarize.length % 2 === 0, String(prepared.messagesToSummarize.length));
 	check("and keeping the newest turn", prepared.firstKeptEntryId === entries[entries.length - 2]?.id, String(prepared.firstKeptEntryId));
-	check("naming an entry the transcript still has", manager.getEntry(prepared.firstKeptEntryId) !== undefined);
+	check("naming an entry the transcript still has", getEntry(manager, prepared.firstKeptEntryId) !== undefined);
 
-	manager.appendCompaction("summary of the dropped turns", prepared.firstKeptEntryId, prepared.tokensBefore);
-	check("is smaller after compaction", estimateTokens(manager.buildSessionContext().messages) < estimateTokens(messages));
-	check("with the summary in front", compactionSummaryText(manager.buildSessionContext().messages[0]) !== undefined);
+	appendCompaction(manager, "summary of the dropped turns", prepared.firstKeptEntryId, prepared.tokensBefore);
+	check("is smaller after compaction", estimateTokens(buildSessionContext(manager).messages) < estimateTokens(messages));
+	check("with the summary in front", compactionSummaryText(buildSessionContext(manager).messages[0]) !== undefined);
 	check(
 		"and nothing left but the turn it kept",
-		manager.buildSessionContext().messages.length === 3,
-		String(manager.buildSessionContext().messages.length),
+		buildSessionContext(manager).messages.length === 3,
+		String(buildSessionContext(manager).messages.length),
 	);
-	check("and nothing left to compact again", prepareCompaction(manager.buildContextEntries() as SessionEntry[]) === undefined);
+	check("and nothing left to compact again", prepareCompaction(buildContextEntries(manager) as SessionEntry[]) === undefined);
 }
 
 /** One entry as the store writes it, with the timestamp the test needs rather than today's. */
@@ -880,22 +901,22 @@ async function exercisePruning(): Promise<void> {
 	// five newest are small and survive, which is the "keep the newest five" half of the rule.
 	const bodyOf = (index: number): string => (index < 3 ? `body ${index} ${"x".repeat(20_000)}` : `body ${index}`);
 
-	const store = SessionManager.create(root);
-	store.appendMessage({ role: "user", content: [{ type: "text", text: "look through the package" }], timestamp: longAgo });
+	const store = createSessionState(root);
+	appendMessage(store, { role: "user", content: [{ type: "text", text: "look through the package" }], timestamp: longAgo });
 	const resultEntryIds: string[] = [];
 	for (let index = 0; index < 8; index += 1) {
-		store.appendMessage(callMessage(`call-${index}`, "read", longAgo));
-		resultEntryIds.push(store.appendMessage(resultMessage(`call-${index}`, "read", bodyOf(index), longAgo)));
+		appendMessage(store, callMessage(`call-${index}`, "read", longAgo));
+		resultEntryIds.push(appendMessage(store, resultMessage(`call-${index}`, "read", bodyOf(index), longAgo)));
 	}
-	store.appendMessage(callMessage("call-task", "task", longAgo));
-	store.appendMessage(resultMessage("call-task", "task", "SUBAGENT REPORT: rewrote the parser", longAgo));
-	store.appendMessage(answerMessage("done", longAgo));
+	appendMessage(store, callMessage("call-task", "task", longAgo));
+	appendMessage(store, resultMessage("call-task", "task", "SUBAGENT REPORT: rewrote the parser", longAgo));
+	appendMessage(store, answerMessage("done", longAgo));
 
 	// The entries are appended with today's stamps, so the store is rewound to the idle conversation the
 	// clock test is about: this is the only way to hand a session a transcript that sat for two hours.
-	const fixture = await writeIdleSession(root, store.getEntries(), longAgo);
-	const store2 = SessionManager.open(fixture);
-	const entries = store2.getEntries();
+	const fixture = await writeIdleSession(root, getEntries(store), longAgo);
+	const store2 = fillSession(fixture);
+	const entries = getEntries(store2);
 
 	const text = (view: readonly SessionEntry[]): string => JSON.stringify(project(view));
 
@@ -909,7 +930,7 @@ async function exercisePruning(): Promise<void> {
 	);
 
 	// Which results a clear would empty: the three oldest, because the newest five are kept.
-	const view = store2.buildContextEntries();
+	const view = buildContextEntries(store2);
 	const clearable = clearableToolResultIds(view);
 	check(
 		"the three oldest read results are the ones to clear",
@@ -946,7 +967,7 @@ async function exercisePruning(): Promise<void> {
 	};
 	const session = await openAgent({
 		absWorkspaceRoot: root,
-		sessionManager: store2,
+		sessionState: store2,
 		models: { list: () => [configured] },
 		settingsManager: SettingsManager.inMemory({ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } }),
 	});
@@ -955,8 +976,8 @@ async function exercisePruning(): Promise<void> {
 		if (event.type === "compaction" || event.type === "compaction_failed" || event.type === "tool_results_cleared") announced.push(event.type);
 	});
 
-	check("the trigger fired before the clear", estimateTokens(project(store2.buildContextEntries())) > 500);
-	const kept = await session.maybeCompact(store2.buildContextEntries(), now);
+	check("the trigger fired before the clear", estimateTokens(project(buildContextEntries(store2))) > 500);
+	const kept = await session.maybeCompact(buildContextEntries(store2), now);
 	const keptText = text(kept);
 	check("the clear alone left it under the trigger", estimateTokens(project(kept)) <= 500, String(estimateTokens(project(kept))));
 	check("so the request carries the cleared view", keptText.includes(clearedToolResultText("read")) && !keptText.includes("body 0 "));
@@ -964,25 +985,25 @@ async function exercisePruning(): Promise<void> {
 	check("the clear was announced and nothing was summarized", announced.join() === "tool_results_cleared", JSON.stringify(announced));
 	check(
 		"and one record now says what it cleared",
-		store2.getEntries().filter((entry) => entry.type === "clear_tool_result").length === 1,
-		JSON.stringify(store2.getEntries().map((entry) => entry.type)),
+		getEntries(store2).filter((entry) => entry.type === "clear_tool_result").length === 1,
+		JSON.stringify(getEntries(store2).map((entry) => entry.type)),
 	);
 
 	// A second pass has nothing left to clear and the trigger no longer fires, so nothing is written.
-	await session.maybeCompact(store2.buildContextEntries(), now);
-	check("a second pass writes no second record", store2.getEntries().filter((entry) => entry.type === "clear_tool_result").length === 1);
+	await session.maybeCompact(buildContextEntries(store2), now);
+	check("a second pass writes no second record", getEntries(store2).filter((entry) => entry.type === "clear_tool_result").length === 1);
 	await session.close();
 
 	// The point of recording it: a process that reads the file again sees the cleared view without
 	// re-deciding anything, and the file still holds every result the view dropped.
-	const reread = SessionManager.open(fixture);
-	const rereadText = text(reread.buildContextEntries());
+	const reread = fillSession(fixture);
+	const rereadText = text(buildContextEntries(reread));
 	check("a reload reads the cleared view", rereadText.includes(clearedToolResultText("read")) && !rereadText.includes("body 0 "));
 	check("with the newest results still there", rereadText.includes("body 7") && rereadText.includes("SUBAGENT REPORT"));
-	check("and nothing left for a clear to do", clearableToolResultIds(reread.buildContextEntries()).length === 0);
+	check("and nothing left for a clear to do", clearableToolResultIds(buildContextEntries(reread)).length === 0);
 	check(
 		"while the file itself keeps what the view dropped",
-		reread.getEntries().some((entry) => JSON.stringify(entry).includes("body 0 ")),
+		getEntries(reread).some((entry) => JSON.stringify(entry).includes("body 0 ")),
 	);
 }
 
@@ -995,10 +1016,10 @@ async function exercisePruning(): Promise<void> {
  * recorded view, so the file keeps the full body while every reader of the context sees the marker.
  */
 function exerciseTrimToolCallArgs(): void {
-	const manager = SessionManager.create(root);
+	const manager = createSessionState(root);
 	const body = Array.from({ length: 500 }, (_, index) => `line-${index} ${"x".repeat(10)}`).join("\n");
-	manager.appendMessage({ role: "user", content: [{ type: "text", text: "write a big file" }], timestamp: 1 });
-	const answeredWrite = manager.appendMessage({
+	appendMessage(manager, { role: "user", content: [{ type: "text", text: "write a big file" }], timestamp: 1 });
+	const answeredWrite = appendMessage(manager, {
 		role: "assistant",
 		content: [{ type: "toolCall", id: "big-write", name: "write", arguments: { path: "src/big.ts", content: body } }],
 		api: "t",
@@ -1007,9 +1028,9 @@ function exerciseTrimToolCallArgs(): void {
 		stopReason: "toolUse",
 		timestamp: 2,
 	});
-	manager.appendMessage(resultMessage("big-write", "write", "Created src/big.ts.", 3));
+	appendMessage(manager, resultMessage("big-write", "write", "Created src/big.ts.", 3));
 	// Same shape, but its result has not been recorded: the call may still be the turn in flight.
-	const openWrite = manager.appendMessage({
+	const openWrite = appendMessage(manager, {
 		role: "assistant",
 		content: [{ type: "toolCall", id: "open-write", name: "write", arguments: { path: "src/other.ts", content: body } }],
 		api: "t",
@@ -1019,13 +1040,13 @@ function exerciseTrimToolCallArgs(): void {
 		timestamp: 4,
 	});
 
-	const candidates = trimmableToolArgEntryIds(manager.buildContextEntries());
+	const candidates = trimmableToolArgEntryIds(buildContextEntries(manager));
 	check("an answered write call is the candidate", candidates.join() === answeredWrite, candidates.join());
 	check("a call awaiting its result is not", !candidates.includes(openWrite), candidates.join());
 
-	const before = estimateTokens(project(manager.buildContextEntries()));
-	manager.appendTrimToolCallArgs(candidates, before);
-	const view = manager.buildContextEntries();
+	const before = estimateTokens(project(buildContextEntries(manager)));
+	appendTrimToolCallArgs(manager, candidates, before);
+	const view = buildContextEntries(manager);
 	// The open write keeps its body on purpose, so the assertions below target the answered call only.
 	const entryText = (needle: string): string => {
 		const entry = view.find((candidate) => candidate.type === "message" && JSON.stringify(candidate.message).includes(needle));
@@ -1038,10 +1059,10 @@ function exerciseTrimToolCallArgs(): void {
 	check("keeping the arguments that say what happened", answeredText.includes("src/big.ts"));
 	check("while the call in flight keeps its body whole", openText.includes("line-250"));
 	check("the estimate fell with the body", estimateTokens(project(view)) < before);
-	check("the file keeps the full argument", manager.getEntries().some((entry) => JSON.stringify(entry).includes("line-250")));
+	check("the file keeps the full argument", getEntries(manager).some((entry) => JSON.stringify(entry).includes("line-250")));
 	check(
 		"a reload reads the same trimmed view",
-		!JSON.stringify(project(SessionManager.open(manager.getAbsSessionFile() ?? "").buildContextEntries()).find((message) => JSON.stringify(message).includes("big-write"))).includes("line-250"),
+		!JSON.stringify(project(buildContextEntries(fillSession(getAbsSessionFile(manager) ?? ""))).find((message) => JSON.stringify(message).includes("big-write"))).includes("line-250"),
 	);
 	check("and nothing is left for a second trim", trimmableToolArgEntryIds(view).length === 0);
 }

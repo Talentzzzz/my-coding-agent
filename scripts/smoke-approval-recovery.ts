@@ -26,7 +26,7 @@ import { createAssistantMessageEventStream, type ChatTransport, type Message, ty
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import {
 	openAgent,
-	SessionManager,
+	createSessionState,
 	SettingsManager,
 	type Agent,
 	type ModelConfig,
@@ -128,7 +128,7 @@ function gatedApi(holds: number[]): { api: ChatTransport; release(index: number)
 async function openSession(overrides: { approval?: Record<string, boolean>; api?: ChatTransport } = {}): Promise<Agent> {
 	return openAgent({
 		absWorkspaceRoot: root,
-		sessionManager: SessionManager.create(root),
+		sessionState: createSessionState(root),
 		models,
 		api: overrides.api ?? fake.api,
 		model: modelName,
@@ -193,8 +193,8 @@ process.stdout.write("\ndangling calls no answer names are closed before the fir
 	const session = await openSession();
 	// The crash shape: two calls in the transcript, no results behind either — appended the way a
 	// process that died mid-batch leaves them.
-	session.sessionManager.appendMessage(fakeAssistantMessage(fakeToolCall("read", { path: "a.txt" }, { id: "call_a" })));
-	session.sessionManager.appendMessage(fakeAssistantMessage(fakeToolCall("read", { path: "b.txt" }, { id: "call_b" })));
+	session.sessionManager.appendMessage(session.sessionState, fakeAssistantMessage(fakeToolCall("read", { path: "a.txt" }, { id: "call_a" })));
+	session.sessionManager.appendMessage(session.sessionState, fakeAssistantMessage(fakeToolCall("read", { path: "b.txt" }, { id: "call_b" })));
 	check("both dangling calls are derived from the ledger", session.snapshot.pendingApprovals.length === 2, JSON.stringify(session.snapshot.pendingApprovals));
 
 	const prompts: { roles: string[] }[] = [];

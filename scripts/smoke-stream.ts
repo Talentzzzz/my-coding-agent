@@ -129,15 +129,22 @@ async function openRig(): Promise<Rig> {
  * This is the seam ticket 08 named for the mechanical-failure shape: the transcript is the thing that
  * broke, so nothing about the failure can be written where failures usually go. The user message
  * still lands — `prompt` writes it before the loop starts — so the patch lets it through.
+ *
+ * The patch lands on the session's service, which the whole hub shares — it is stateless, one
+ * instance per hub — so it must not outlive the section that installed it: the returned function
+ * puts the real method back, and every caller runs it once its failing run is over.
  */
-function sabotagePersistence(host: HostedSession): void {
+function sabotagePersistence(host: HostedSession): () => void {
 	const manager = host.session.sessionManager as unknown as {
-		appendMessage: (message: { role?: string }) => string;
+		appendMessage: (state: unknown, message: { role?: string }) => string;
 	};
 	const original = manager.appendMessage.bind(manager);
-	manager.appendMessage = (message) => {
+	manager.appendMessage = (state, message) => {
 		if (message.role !== "user") throw new Error("smoke-stream: 磁盘写不进去了");
-		return original(message);
+		return original(state, message);
+	};
+	return () => {
+		manager.appendMessage = original;
 	};
 }
 
@@ -239,7 +246,7 @@ try {
 	const watched = await request(rig.url, "POST", "/api/sessions");
 	const watchedId = (watched.payload as { sessionId: string }).sessionId;
 	const watchedBench = await rig.hub.claim(watchedId);
-	sabotagePersistence(watchedBench);
+	const restoreWatched = sabotagePersistence(watchedBench);
 	const watchedLane = await wire.open(watchedId);
 	check("the lane opened on the session about to fail", watchedLane.id === watchedId);
 
@@ -257,6 +264,8 @@ try {
 
 	check("and the server logged what no frame could carry", logged.length > 0, JSON.stringify(logged));
 	check("the transcript is exactly what the failure let survive", ((await request(rig.url, "GET", `/api/sessions/${encodeURIComponent(watchedId)}`)).payload as { session: { messages: unknown[] } }).session.messages.length === 1);
+	// The patch comes off before the next section runs: the service it landed on is the hub's own.
+	restoreWatched();
 
 	// The bench claim still holds the host; letting it go reaps the session. No leak.
 	rig.hub.release(watchedBench);
@@ -270,7 +279,7 @@ try {
 	const unwatched = await request(rig.url, "POST", "/api/sessions");
 	const unwatchedId = (unwatched.payload as { sessionId: string }).sessionId;
 	const unwatchedBench = await rig.hub.claim(unwatchedId);
-	sabotagePersistence(unwatchedBench);
+	const restoreUnwatched = sabotagePersistence(unwatchedBench);
 
 	const loggedAlone: string[] = [];
 	console.error = (...parts: unknown[]) => {
@@ -301,6 +310,7 @@ try {
 		await sleep(50);
 	}
 	console.error = realError;
+	restoreUnwatched();
 
 	check("no lane existed to announce on, and the log line went out anyway", loggedAlone.length > 0, JSON.stringify(loggedAlone));
 	check("and nothing leaked: the session was reaped", await until(() => !rig.hub.live.includes(unwatchedId), 10_000), rig.hub.live.join(","));

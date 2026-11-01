@@ -42,7 +42,7 @@ import { connect, until, type WireClient } from "./wire/client.ts";
 import type { PendingApproval } from "@my-agent/core/protocol";
 import {
 	openAgent,
-	SessionManager,
+	createSessionState,
 	SettingsManager,
 	type Agent,
 	type ModelSource,
@@ -151,7 +151,7 @@ fake.setResponses([
 ]);
 const session = await openAgent({
 	absWorkspaceRoot: root,
-	sessionManager: SessionManager.create(root),
+	sessionState: createSessionState(root),
 	models,
 	api: fake.api,
 	model: modelName,
@@ -724,7 +724,7 @@ async function openRig(approvalGraceMs: number): Promise<Rig> {
 	]);
 	const session = await openAgent({
 		absWorkspaceRoot: root,
-		sessionManager: SessionManager.create(root),
+		sessionState: createSessionState(root),
 		models,
 		api: transport.api,
 		model: modelName,
@@ -778,7 +778,7 @@ async function openCrossRig(): Promise<CrossRig> {
 		]);
 		const session = await openAgent({
 			absWorkspaceRoot: root,
-			sessionManager: SessionManager.create(root),
+			sessionState: createSessionState(root),
 			models,
 			api: transport.api,
 			model: modelName,

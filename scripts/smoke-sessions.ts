@@ -20,7 +20,10 @@ import {
 	buildSessionContext,
 	createSessionState,
 	fillSession,
+	getContextMessageEntryIds,
 	getEntry,
+	getEntries,
+	getHeader,
 	getLeafId,
 	getTitle,
 	openAgent,
@@ -30,6 +33,7 @@ import {
 	toolResultViewsOf,
 	workspaceDir,
 	type SessionSnapshot,
+	type SessionState,
 } from "@my-agent/core";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-sessions-"));
@@ -105,16 +109,16 @@ function ids(entries: readonly { id: string }[]): string {
 	return entries.map((entry) => entry.id).join(",");
 }
 
-/** The messages of a manager's current branch, which is what a provider would be sent. */
-function messagesOf(manager: SessionManager): Message[] {
-	return manager.buildSessionContext().messages;
+/** The messages of a state's current branch, which is what a provider would be sent. */
+function messagesOf(state: SessionState): Message[] {
+	return buildSessionContext(state).messages;
 }
 
-/** Open the stored file for a session id, the way a later process would. */
-function openFile(id: string): SessionManager {
+/** Replay the stored file for a session id, the way a later process would. */
+function openFile(id: string): SessionState {
 	const path = SessionManager.findSessionFilePathById(id);
 	if (path === undefined) throw new Error(`no session file for ${id}`);
-	return SessionManager.open(path);
+	return fillSession(path);
 }
 
 /** Poll until `ready` holds, and report whether it did, so no test guesses at a reap's timing. */
@@ -154,7 +158,7 @@ try {
 	check("a claimed session is never forgotten", hub.live.includes(first.id));
 
 	process.stdout.write("the last release forgets an idle session\n");
-	first.session.sessionManager.appendMessage(userMessage("survives the reap"));
+	first.session.sessionManager.appendMessage(first.session.sessionState, userMessage("survives the reap"));
 	hub.release(first);
 	check("the session is closed and dropped", await until(() => !hub.live.includes(first.id)));
 
@@ -176,13 +180,13 @@ try {
 	const parentId = await hub.newSession();
 	const parent = await hub.claim(parentId);
 	const parentFile = parent.session.sessionFile ?? "";
-	const entryOne = parent.session.sessionManager.appendMessage(userMessage("first"));
-	parent.session.sessionManager.appendMessage(userMessage("second"));
+	const entryOne = parent.session.sessionManager.appendMessage(parent.session.sessionState, userMessage("first"));
+	parent.session.sessionManager.appendMessage(parent.session.sessionState, userMessage("second"));
 
 	const forkedId = await hub.fork(parentId, entryOne);
 	// Read the file the fork wrote, before a session opens over it and records its own model.
 	const forkedFile = openFile(forkedId);
-	const branch = parent.session.sessionManager.getBranch(entryOne);
+	const branch = parent.session.sessionManager.getBranch(parent.session.sessionState, entryOne);
 	check("the fork is a new session id", forkedId !== parentId, `${forkedId} vs ${parentId}`);
 	check(
 		"it holds the prefix through that message",
@@ -191,81 +195,81 @@ try {
 	);
 	check(
 		"with the same entry ids",
-		ids(forkedFile.getEntries()) === ids(branch),
-		`${ids(forkedFile.getEntries())} vs ${ids(branch)}`,
+		ids(getEntries(forkedFile)) === ids(branch),
+		`${ids(getEntries(forkedFile))} vs ${ids(branch)}`,
 	);
 	check(
 		"and the message entry ids line up",
-		JSON.stringify(forkedFile.getContextMessageEntryIds()) === JSON.stringify([entryOne]),
-		JSON.stringify(forkedFile.getContextMessageEntryIds()),
+		JSON.stringify(getContextMessageEntryIds(forkedFile)) === JSON.stringify([entryOne]),
+		JSON.stringify(getContextMessageEntryIds(forkedFile)),
 	);
-	check("its leaf is that entry's id", forkedFile.getLeafId() === entryOne, String(forkedFile.getLeafId()));
-	check("the header names the file it came from", forkedFile.getHeader()?.parentSession === parentFile, String(forkedFile.getHeader()?.parentSession));
+	check("its leaf is that entry's id", getLeafId(forkedFile) === entryOne, String(getLeafId(forkedFile)));
+	check("the header names the file it came from", getHeader(forkedFile)?.parentSession === parentFile, String(getHeader(forkedFile)?.parentSession));
 	check(
 		"the source keeps the entries the fork did not take",
-		parent.session.sessionManager.getChildren(entryOne).length === 1,
-		`children=${parent.session.sessionManager.getChildren(entryOne).length}`,
+		parent.session.sessionManager.getChildren(parent.session.sessionState, entryOne).length === 1,
+		`children=${parent.session.sessionManager.getChildren(parent.session.sessionState, entryOne).length}`,
 	);
 
 	const forked = await hub.claim(forkedId);
 	check("the fork runs as a session of its own", forked.session !== parent.session);
-	check("and it reports the file it came from", forked.session.sessionManager.getHeader()?.parentSession === parentFile);
+	check("and it reports the file it came from", forked.session.sessionManager.getHeader(forked.session.sessionState)?.parentSession === parentFile);
 
 	process.stdout.write("forking without an entry copies the whole log\n");
-	const whole = SessionManager.forkFrom(parentFile, root, null, workspaceDir(root));
-	check("every entry came with it", ids(whole.getEntries()) === ids(parent.session.sessionManager.getEntries()));
-	check("and the transcript matches", messagesOf(whole).length === messagesOf(parent.session.sessionManager).length);
-	check("its leaf is the source's leaf", whole.getLeafId() === parent.session.sessionManager.getLeafId());
-	check("it points back at the source too", whole.getHeader()?.parentSession === parentFile);
+	const whole = new SessionManager().forkFrom(parentFile, root, null, workspaceDir(root));
+	check("every entry came with it", ids(getEntries(whole)) === ids(parent.session.sessionManager.getEntries(parent.session.sessionState)));
+	check("and the transcript matches", messagesOf(whole).length === messagesOf(parent.session.sessionState).length);
+	check("its leaf is the source's leaf", getLeafId(whole) === parent.session.sessionManager.getLeafId(parent.session.sessionState));
+	check("it points back at the source too", getHeader(whole)?.parentSession === parentFile);
 
 	process.stdout.write("forking leaves the source alone\n");
 	const before = await readFile(parentFile, "utf8");
-	const leafBefore = parent.session.sessionManager.getLeafId();
+	const leafBefore = parent.session.sessionManager.getLeafId(parent.session.sessionState);
 	const secondFork = openFile(await hub.fork(parentId, entryOne));
-	check("the source keeps its own leaf", parent.session.sessionManager.getLeafId() === leafBefore);
+	check("the source keeps its own leaf", parent.session.sessionManager.getLeafId(parent.session.sessionState) === leafBefore);
 	check("its file is byte-identical afterwards", (await readFile(parentFile, "utf8")) === before);
 	check("the claim on it survived", parent.claims === 1 && hub.live.includes(parentId), `claims=${parent.claims}`);
 
 	process.stdout.write("a fork and its parent run side by side\n");
 	check("both are live", hub.live.includes(parentId) && hub.live.includes(forkedId));
-	const forkBefore = JSON.stringify(messagesOf(forked.session.sessionManager));
-	const forkLeaf = forked.session.sessionManager.getLeafId();
-	parent.session.sessionManager.appendMessage(userMessage("only the parent"));
+	const forkBefore = JSON.stringify(messagesOf(forked.session.sessionState));
+	const forkLeaf = forked.session.sessionManager.getLeafId(forked.session.sessionState);
+	parent.session.sessionManager.appendMessage(parent.session.sessionState, userMessage("only the parent"));
 	check(
 		"appending to the parent leaves the fork's transcript alone",
-		JSON.stringify(messagesOf(forked.session.sessionManager)) === forkBefore,
+		JSON.stringify(messagesOf(forked.session.sessionState)) === forkBefore,
 	);
-	check("and the fork's leaf did not move", forked.session.sessionManager.getLeafId() === forkLeaf);
-	const parentBefore = JSON.stringify(messagesOf(parent.session.sessionManager));
-	forked.session.sessionManager.appendMessage(userMessage("only the fork"));
+	check("and the fork's leaf did not move", forked.session.sessionManager.getLeafId(forked.session.sessionState) === forkLeaf);
+	const parentBefore = JSON.stringify(messagesOf(parent.session.sessionState));
+	forked.session.sessionManager.appendMessage(forked.session.sessionState, userMessage("only the fork"));
 	check(
 		"appending to the fork leaves the parent's transcript alone",
-		JSON.stringify(messagesOf(parent.session.sessionManager)) === parentBefore,
+		JSON.stringify(messagesOf(parent.session.sessionState)) === parentBefore,
 	);
 
 	process.stdout.write("reopening a fork reports where it came from\n");
-	const leafAtClose = forked.session.sessionManager.getLeafId();
+	const leafAtClose = forked.session.sessionManager.getLeafId(forked.session.sessionState);
 	hub.release(forked);
 	check("the fork is closed and dropped", await until(() => !hub.live.includes(forkedId)));
 	const reread = openFile(forkedId);
-	check("reopening reports its parent session", reread.getHeader()?.parentSession === parentFile);
-	check("and the same leaf", reread.getLeafId() === leafAtClose, `${reread.getLeafId()} vs ${leafAtClose}`);
-	check("with the messages it had", messagesOf(reread).length === messagesOf(forked.session.sessionManager).length);
+	check("reopening reports its parent session", getHeader(reread)?.parentSession === parentFile);
+	check("and the same leaf", getLeafId(reread) === leafAtClose, `${getLeafId(reread)} vs ${leafAtClose}`);
+	check("with the messages it had", messagesOf(reread).length === messagesOf(forked.session.sessionState).length);
 	const reopenedFork = await hub.claim(forkedId);
 	check("a claimed reopen builds a different session object", reopenedFork.session !== forked.session);
-	check("and still reports the session it came from", reopenedFork.session.sessionManager.getHeader()?.parentSession === parentFile);
+	check("and still reports the session it came from", reopenedFork.session.sessionManager.getHeader(reopenedFork.session.sessionState)?.parentSession === parentFile);
 
 	process.stdout.write("forking a session nobody is watching\n");
 	hub.release(reopenedFork);
 	await until(() => !hub.live.includes(forkedId));
 	const onDisk = openFile(forkedId);
-	const cold = await hub.fork(forkedId, onDisk.getLeafId());
+	const cold = await hub.fork(forkedId, getLeafId(onDisk));
 	check("an on-disk session forks too", cold !== forkedId && cold !== parentId, cold);
 	check("it is not running until someone claims it", !hub.live.includes(cold));
 	const coldFile = openFile(cold);
-	check("its branch ends where it was told to", coldFile.getLeafId() === onDisk.getLeafId());
-	check("and it points at the session it came from", coldFile.getHeader()?.parentSession === SessionManager.findSessionFilePathById(forkedId));
-	check("the other fork is a session of its own", secondFork.getSessionId() !== forkedId && secondFork.getSessionId() !== cold);
+	check("its branch ends where it was told to", getLeafId(coldFile) === getLeafId(onDisk));
+	check("and it points at the session it came from", getHeader(coldFile)?.parentSession === SessionManager.findSessionFilePathById(forkedId));
+	check("the other fork is a session of its own", secondFork.sessionId !== forkedId && secondFork.sessionId !== cold);
 
 	process.stdout.write("a listing resolves a fork's parent\n");
 	// The header names the source's *file path*, because that is what a reader of one file has in hand;
@@ -300,7 +304,7 @@ try {
 	{
 		const renamedId = await hub.newSession();
 		const host = await hub.claim(renamedId);
-		host.session.sessionManager.appendMessage(userMessage("改名的会话"));
+		host.session.sessionManager.appendMessage(host.session.sessionState, userMessage("改名的会话"));
 		await hub.rename(renamedId, "新名字");
 		check("a live session reports the stored name", host.session.snapshot.title === "新名字", host.session.snapshot.title);
 
@@ -341,10 +345,10 @@ try {
 	const settingsRoot = await mkdtemp(join(tmpdir(), "my-agent-settings-"));
 	try {
 		const settings = SettingsManager.inMemory({ tools: ["read", "bash"] });
-		const manager = SessionManager.create(settingsRoot);
+		const state = createSessionState(settingsRoot);
 		const options = {
 			absWorkspaceRoot: settingsRoot,
-			sessionManager: manager,
+			sessionState: state,
 			models: { list: () => [] },
 			settingsManager: settings,
 		};
@@ -356,7 +360,7 @@ try {
 		const live = await openAgent(options);
 		try {
 			// The one message the branch test below can rewind to with nothing recorded after it.
-			const firstEntry = manager.appendMessage(userMessage("before any choice"));
+			const firstEntry = appendMessage(state, userMessage("before any choice"));
 
 			live.setActiveTools(["read"]);
 			check("a recorded choice wins over the default", live.snapshot.activeTools.join(",") === "read", live.snapshot.activeTools.join(","));
@@ -400,8 +404,8 @@ try {
 	try {
 		const readId = await http.hub.newSession();
 		const opened = await http.hub.claim(readId);
-		opened.session.sessionManager.appendMessage(userMessage("read me"));
-		opened.session.sessionManager.appendMessage(userMessage("and me"));
+		opened.session.sessionManager.appendMessage(opened.session.sessionState, userMessage("read me"));
+		opened.session.sessionManager.appendMessage(opened.session.sessionState, userMessage("and me"));
 		http.hub.release(opened);
 		check("the session is idle before the read", await until(() => !http.hub.live.includes(readId)), http.hub.live.join(","));
 
@@ -507,7 +511,7 @@ try {
 				!(created.payload.sessions as { id: string }[]).some((session) => session.id === landed),
 			);
 			const spoke = await http.hub.claim(landed);
-			spoke.session.sessionManager.appendMessage(userMessage("a first message"));
+			spoke.session.sessionManager.appendMessage(spoke.session.sessionState, userMessage("a first message"));
 			http.hub.release(spoke);
 			const groups = ((await call("GET", `${http.url}/api/workspaces`)).payload.workspaces as {
 				absCwd: string;
@@ -570,7 +574,7 @@ try {
 				// its first message — so each of these says one thing before the sidebar can draw it.
 				const speak = async (sessionId: string, text: string): Promise<void> => {
 					const host = await http.hub.claim(sessionId);
-					host.session.sessionManager.appendMessage(userMessage(text));
+					host.session.sessionManager.appendMessage(host.session.sessionState, userMessage(text));
 					http.hub.release(host);
 				};
 				await speak(id, "before");
@@ -663,7 +667,7 @@ try {
 		{
 			const victim = await http.hub.newSession();
 			const host = await http.hub.claim(victim);
-			host.session.sessionManager.appendMessage(userMessage("要删的会话"));
+			host.session.sessionManager.appendMessage(host.session.sessionState, userMessage("要删的会话"));
 			http.hub.release(host);
 			check("the victim goes idle", await until(() => !http.hub.live.includes(victim)), http.hub.live.join(","));
 
@@ -697,9 +701,9 @@ try {
 	}
 
 	process.stdout.write("the stateless form replays the ledger per request\n");
-	// The operations the SessionManager shell delegates to, called with a bare SessionState. A state
-	// is transient — built by fillSession from the file, discarded when the request ends — so nothing
-	// here holds a state between sections except where a check says otherwise.
+	// The session operations, called with a bare SessionState. A state is transient — built by
+	// fillSession from the file, discarded when the request ends — so nothing here holds a state
+	// between sections except where a check says otherwise.
 	{
 		const statelessRoot = await mkdtemp(join(tmpdir(), "my-agent-stateless-"));
 		try {
@@ -728,11 +732,30 @@ try {
 			const rebranched = fillSession(s.absSessionFile!);
 			check("the branch move is replayed from the file", getLeafId(rebranched) === one, String(getLeafId(rebranched)));
 
-			const live = SessionManager.open(s.absSessionFile!);
+			// The service's fill-at-open cache: the first stateOf fills from the file, and every stateOf
+			// after answers the same bag — which is what keeps a rename appended through the service and
+			// a turn appended by the session's own loop on one object.
+			const service = new SessionManager();
+			const live = service.stateOf(s.sessionId);
 			check(
-				"the shell and the stateless form agree",
-				JSON.stringify(live.buildSessionContext().messages) === JSON.stringify(buildSessionContext(replayed).messages),
+				"the service and the stateless form agree",
+				JSON.stringify(buildSessionContext(live).messages) === JSON.stringify(buildSessionContext(replayed).messages),
 			);
+			check("stateOf reuses the bag it filled", service.stateOf(s.sessionId) === live);
+			appendMessage(live, userMessage("written through the cache"));
+			const throughCache = fillSession(s.absSessionFile!);
+			check(
+				"a write through the cached bag reaches the file",
+				getLeafId(throughCache) === getLeafId(live) &&
+					JSON.stringify(buildSessionContext(throughCache).messages) === JSON.stringify(buildSessionContext(live).messages),
+			);
+			let refused = false;
+			try {
+				new SessionManager().stateOf("no session has this id");
+			} catch {
+				refused = true;
+			}
+			check("stateOf refuses an id with no file behind it", refused);
 		} finally {
 			await rm(workspaceDir(statelessRoot), { recursive: true, force: true });
 			await rm(statelessRoot, { recursive: true, force: true });

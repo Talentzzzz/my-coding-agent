@@ -2,7 +2,7 @@ import { APPROVAL_TOOLS, type ToolApprovalKey } from "../protocol.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
 import { fillTools, narrowToKnown, type ToolState } from "../tools/manager.ts";
-import type { SessionManager } from "./session-manager.ts";
+import { type SessionState, getRecordedToolConfig } from "./session-manager.ts";
 
 /** The tools an approval map gates, in the loadout's order. */
 export function approvalToolsOf(approval: Record<ToolApprovalKey, boolean>): ToolApprovalKey[] {
@@ -53,11 +53,11 @@ export function globalDefaultToolState(settingsManager: SettingsManager, registr
  * global default is "follow the settings", kept live.
  */
 export function applyRecordedToolConfig(
-	sessionManager: SessionManager,
+	state: SessionState,
 	registry: ToolRegistry,
 	fallback: ToolState,
 ): void {
-	const recorded = sessionManager.getRecordedToolConfig();
+	const recorded = getRecordedToolConfig(state);
 	const names = recorded.activeTools ?? fallback.activeToolNames;
 	registry.setActive(narrowToKnown(names, registry.names()));
 	registry.setApprovalOverride(recorded.approval ?? fallback.approvalOverride ?? {});
@@ -105,12 +105,12 @@ function toolConfigFollowsGlobal(
  * global default the judgement compares against is read here rather than passed in a second time.
  */
 export function followsGlobalOf(
-	sessionManager: SessionManager,
+	state: SessionState,
 	settingsManager: SettingsManager,
 	registry: ToolRegistry,
 ): { toolsFollowGlobal: boolean; approvalsFollowGlobal: boolean } {
 	const follows = toolConfigFollowsGlobal(
-		sessionManager.getRecordedToolConfig(),
+		getRecordedToolConfig(state),
 		defaultToolNames(settingsManager, registry),
 		settingsManager.getApprovals(),
 	);

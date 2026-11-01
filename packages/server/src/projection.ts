@@ -170,20 +170,21 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 			return;
 		}
 		const manager = host.session.sessionManager;
+		const state = host.session.sessionState;
 
 		if (event.type === "branch_changed") {
-			publish({ ...current, title: manager.getTitle() });
+			publish({ ...current, title: manager.getTitle(state) });
 			return;
 		}
 		if (event.type !== "entry_appended") return;
 
-		const entry = manager.getEntry(event.entryId);
+		const entry = manager.getEntry(state, event.entryId);
 		if (entry?.type !== "message") return;
 		const at = messageTime(entry);
 		if (at === undefined || at <= current.modified) return;
 		// The title only moves when a *user* message lands on the branch, since that is the only
 		// message a title is read from — an assistant reply cannot rename the conversation.
-		const titled = entry.message.role === "user" ? manager.getTitle() : current.title;
+		const titled = entry.message.role === "user" ? manager.getTitle(state) : current.title;
 		publish({ ...current, modified: at, title: titled });
 	};
 
