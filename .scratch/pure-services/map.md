@@ -42,6 +42,7 @@ ToolManager)全部成为「无属性服务」:构造只收服务依赖,方法收
 <!-- the index: one line per closed ticket, enough to judge relevance, then zoom the link for the detail the ticket holds -->
 
 - [01 ADR-0007 服务无属性化](issues/01-adr-0007.md):[ADR-0007](../../docs/adr/0007-services-drop-instance-state.md) 落库,正式重开 ADR-0006 落地序列的「薄壳门面」条款(票 08/09/16 的私有状态袋裁决);六条形状契约入文——无聚合袋、类壳保留为无状态服务、Manager 内部键控缓存不被传递、活的一半居窄登记处(归属与命名留 03 票)、modelState 消失、进程级不可变配置构造注入。ADR-0006 加取代者指针(部分重开),README 清单表更新。
+- [02 SessionManager 去壳](issues/02-session-manager-stateless-class.md):`private s` 与三个 per-session 静态工厂删除,类保留为首参收 `SessionState` 的无状态服务;`stateOf(id)` fill-at-open 缓存入类,失效只定 remove 丢 id、forkFrom 注册新 state 两处,未落盘会话不入缓存(归 hub 的 pending 表,窄登记处仍归 03 票);Agent 显式传袋、hub/工厂/smoke 全量迁移,smoke-sessions 增缓存三条,全套绿。
 
 ## Not yet specified
 
