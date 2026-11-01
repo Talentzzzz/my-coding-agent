@@ -19,6 +19,10 @@ import {
 	createOpenSession,
 	type OpenSession,
 	SettingsManager,
+	type SettingsState,
+	getFollowUpMode,
+	getHiddenWorkspaces,
+	getSteeringMode,
 	workspaceDir,
 	type ModelConfig,
 	ModelConfigStore,
@@ -177,8 +181,15 @@ export class SessionHub {
 	private readonly modelStore: ModelConfigStore;
 	/** How long a parked approval is waited out before it is denied. See {@link HubOptions.approvalGraceMs}. */
 	private readonly approvalGraceMs: number;
-	/** One settings manager per workspace, so two sessions over one directory share a single view. */
-	private readonly settingsManagers = new Map<string, SettingsManager>();
+	/**
+	 * The stateless settings service every workspace's settings read and write goes through.
+	 *
+	 * One instance rather than one per call, because the service's per-workspace cache is what keeps
+	 * every reader and writer of a workspace on one `SettingsState`: a toggle written by a session is
+	 * the value the next session reads, and the value the panel command below writes, rather than
+	 * copies taken when each was assembled. See `SettingsManager.stateOf`.
+	 */
+	private readonly settings = new SettingsManager();
 	private readonly hosts = new Map<string, HostedSession>();
 	/**
 	 * The stateless session service every open, rename, fork, and delete below goes through.
@@ -255,13 +266,9 @@ export class SessionHub {
 		this.modelStore.replace(models);
 	}
 
-	/** The settings of one workspace, built once and shared by every session over it. */
-	settingsFor(absWorkspaceRoot: string): SettingsManager {
-		const existing = this.settingsManagers.get(absWorkspaceRoot);
-		if (existing) return existing;
-		const created = SettingsManager.create(absWorkspaceRoot, this.options.settingsHome);
-		this.settingsManagers.set(absWorkspaceRoot, created);
-		return created;
+	/** The settings of one workspace, filled once by the service and shared by every session over it. */
+	settingsStateOf(absWorkspaceRoot: string): SettingsState {
+		return this.settings.stateOf(absWorkspaceRoot, this.options.settingsHome);
 	}
 
 	/**
@@ -280,7 +287,7 @@ export class SessionHub {
 	 */
 	listsWorkspace(absCwd: string): boolean {
 		if (typeof this.absRoot !== "string") return true;
-		return !this.settingsFor(this.absRoot).getHiddenWorkspaces().some((path) => samePath(path, absCwd));
+		return !getHiddenWorkspaces(this.settingsStateOf(this.absRoot)).some((path) => samePath(path, absCwd));
 	}
 
 	/**
@@ -676,7 +683,8 @@ export class SessionHub {
 			sessionManager: this.sessions,
 			sessionState: state,
 			models: this.models,
-			settingsManager: this.settingsFor(absWorkspaceRoot),
+			settingsManager: this.settings,
+			settingsState: this.settingsStateOf(absWorkspaceRoot),
 			...(this.options.model === undefined ? {} : { model: this.options.model }),
 			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),
 			...(this.options.api === undefined ? {} : { api: this.options.api }),
@@ -698,8 +706,8 @@ export class SessionHub {
 	 */
 	private openSessionFor(id: string, absWorkspaceRoot: string): OpenSession {
 		return this.openSessions.ensure(id, () => {
-			const settings = this.settingsFor(absWorkspaceRoot);
-			return createOpenSession(settings.getSteeringMode(), settings.getFollowUpMode());
+			const settings = this.settingsStateOf(absWorkspaceRoot);
+			return createOpenSession(getSteeringMode(settings), getFollowUpMode(settings));
 		});
 	}
 

@@ -31,7 +31,7 @@ import {
 	SessionManager,
 	OpenSessions,
 	createOpenSession,
-	SettingsManager,
+	inMemorySettingsState,
 	toolResultViewsOf,
 	workspaceDir,
 	type SessionSnapshot,
@@ -342,17 +342,17 @@ try {
 	// The global default tool set is a settings field, so the seam is assembly itself: a session with
 	// no `tool_config` entry opens on the configured set, one with an entry keeps its own, and a
 	// branch move onto an unrecorded chain restores the default rather than the previous branch's set.
-	// Everything here runs on an in-memory settings manager, so no file outside the temporary
+	// Everything here runs on an in-memory settings state, so no file outside the temporary
 	// workspace is ever touched.
 	const settingsRoot = await mkdtemp(join(tmpdir(), "my-agent-settings-"));
 	try {
-		const settings = SettingsManager.inMemory({ tools: ["read", "bash"] });
+		const settings = inMemorySettingsState({ tools: ["read", "bash"] });
 		const state = createSessionState(settingsRoot);
 		const options = {
 			absWorkspaceRoot: settingsRoot,
 			sessionState: state,
 			models: { list: () => [] },
-			settingsManager: settings,
+			settingsState: settings,
 		};
 
 		const cold = await readSessionSnapshot(options);

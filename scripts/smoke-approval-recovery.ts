@@ -27,7 +27,7 @@ import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-
 import {
 	openAgent,
 	createSessionState,
-	SettingsManager,
+	inMemorySettingsState,
 	type Agent,
 	type ModelConfig,
 	type ModelSource,
@@ -132,7 +132,7 @@ async function openSession(overrides: { approval?: Record<string, boolean>; api?
 		models,
 		api: overrides.api ?? fake.api,
 		model: modelName,
-		settingsManager: SettingsManager.inMemory({ approval: overrides.approval ?? {} }),
+		settingsState: inMemorySettingsState({ approval: overrides.approval ?? {} }),
 	});
 }
 

@@ -1,5 +1,5 @@
 import { APPROVAL_TOOLS, type ToolApprovalKey } from "../protocol.ts";
-import type { SettingsManager } from "../settings-manager.ts";
+import { type SettingsState, getApprovals, getSettings, getTools } from "../settings-manager.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
 import { fillTools, narrowToKnown, type ToolState } from "../tools/manager.ts";
 import { type SessionState, getRecordedToolConfig } from "./session-manager.ts";
@@ -16,8 +16,8 @@ export function approvalToolsOf(approval: Record<ToolApprovalKey, boolean>): Too
  * judgement — because three spellings of "the default" would let a reset write one set while the
  * panel judged the session against another, and a just-reset session would read as having chosen.
  */
-export function defaultToolNames(settingsManager: SettingsManager, registry: ToolRegistry): string[] {
-	const configured = settingsManager.getTools();
+export function defaultToolNames(s: SettingsState, registry: ToolRegistry): string[] {
+	const configured = getTools(s);
 	const names = configured === undefined ? registry.names() : configured;
 	return narrowToKnown(names, registry.names());
 }
@@ -30,10 +30,10 @@ export function defaultToolNames(settingsManager: SettingsManager, registry: Too
  * {@link fillTools} the same way a named mode would be. Undefined approvals mean "the session never
  * chose", so the view stays live: a settings change is this mode's change.
  */
-export function globalDefaultToolState(settingsManager: SettingsManager, registry: ToolRegistry): ToolState {
+export function globalDefaultToolState(s: SettingsState, registry: ToolRegistry): ToolState {
 	return fillTools(undefined, {
-		modes: settingsManager.getSettings().modes ?? [],
-		globalTools: defaultToolNames(settingsManager, registry),
+		modes: getSettings(s).modes ?? [],
+		globalTools: defaultToolNames(s, registry),
 		known: registry.names(),
 	});
 }
@@ -106,13 +106,13 @@ function toolConfigFollowsGlobal(
  */
 export function followsGlobalOf(
 	state: SessionState,
-	settingsManager: SettingsManager,
+	s: SettingsState,
 	registry: ToolRegistry,
 ): { toolsFollowGlobal: boolean; approvalsFollowGlobal: boolean } {
 	const follows = toolConfigFollowsGlobal(
 		getRecordedToolConfig(state),
-		defaultToolNames(settingsManager, registry),
-		settingsManager.getApprovals(),
+		defaultToolNames(s, registry),
+		getApprovals(s),
 	);
 	return { toolsFollowGlobal: follows.tools, approvalsFollowGlobal: follows.approvals };
 }

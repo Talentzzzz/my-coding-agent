@@ -30,7 +30,15 @@ import {
 	followsGlobalOf,
 	globalDefaultToolState,
 } from "./session/tool-config.ts";
-import { SettingsManager } from "./settings-manager.ts";
+import {
+	SettingsManager,
+	type SettingsState,
+	getApprovals,
+	getFollowUpMode,
+	getSettings,
+	getSteeringMode,
+	inMemorySettingsState,
+} from "./settings-manager.ts";
 import { type ToolRegistry, type ToolState, createToolRegistry, toolDefinitions } from "./tools/index.ts";
 import { createSubagentTools } from "./tools/subagent.ts";
 import { createOpenSession, type OpenSession } from "./session/open-session.ts";
@@ -68,13 +76,23 @@ export interface OpenAgentOptions {
 	 */
 	api?: ChatTransport;
 	/**
-	 * The settings of this workspace.
+	 * The settings service this session reads and writes through.
 	 *
-	 * Defaults to the agent home's file merged with the workspace's own. A host that runs several
-	 * sessions over one workspace builds one and passes it to each, so a change made through any of
-	 * them is what the others read; a test passes {@link SettingsManager.inMemory} instead.
+	 * Defaults to a fresh service. A host that owns one — the hub, whose per-workspace cache must be
+	 * the same object every session over that workspace reads — hands its own in. A service built
+	 * around a non-default agent home must arrive with {@link settingsState} beside it: the fallback
+	 * below fills from the default home, and has no way to know this one's.
 	 */
 	settingsManager?: SettingsManager;
+	/**
+	 * The settings of this workspace, as the bag every call passes.
+	 *
+	 * Defaults to the service's own answer for this workspace — the agent home's file merged with the
+	 * workspace's own, filled once and shared. A host that runs several sessions over one workspace
+	 * passes the same state to each, so a change made through any of them is what the others read; a
+	 * test passes {@link inMemorySettingsState} instead.
+	 */
+	settingsState?: SettingsState;
 	/** Defaults to the six built-ins. A test passes a registry of its own to add a tool. */
 	tools?: ToolRegistry;
 	/**
@@ -114,6 +132,8 @@ export interface OpenAgentOptions {
 interface Assembled {
 	workspace: Workspace;
 	settingsManager: SettingsManager;
+	/** The workspace's settings as the bag every settings call in the session passes. */
+	settingsState: SettingsState;
 	/** The session's model as a bag: the seed, with the row's facts laid in once by assembly. */
 	modelState: ModelState;
 	registry: ToolRegistry;
@@ -134,12 +154,15 @@ interface Assembled {
 async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 	const workspace = new Workspace(options.absWorkspaceRoot);
 	// The project settings file is looked up beside the workspace, so it is resolved after the
-	// workspace is: `<workspace>/.my-agent/settings.json`, over the agent home's own file.
-	const settingsManager = options.settingsManager ?? SettingsManager.create(workspace.absRoot);
+	// workspace is: `<workspace>/.my-agent/settings.json`, over the agent home's own file. The state
+	// comes from the service's per-workspace cache, so a host that handed its own service in — the
+	// hub — answers every session over the workspace with the same bag.
+	const settingsManager = options.settingsManager ?? new SettingsManager();
+	const settingsState = options.settingsState ?? settingsManager.stateOf(workspace.absRoot);
 	// One service per assembly, so the subagent tools and the session itself forward through the
 	// same instance; omitted means a fresh one, which behaves identically (ADR-0007 §2).
 	const sessionManager = options.sessionManager ?? new SessionManager();
-	const settings = settingsManager.getSettings();
+	const settings = getSettings(settingsState);
 	const agentsMd = await loadAgentsMd(workspace.absRoot);
 	const recorded = getRecordedSettings(options.sessionState);
 	const rows = options.models.list();
@@ -198,11 +221,11 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 		options.sessionState,
 		registry,
 		options.tools === undefined && options.toolState === undefined
-			? globalDefaultToolState(settingsManager, registry)
+			? globalDefaultToolState(settingsState, registry)
 			: registry.toolState(),
 	);
 
-	return { workspace, settingsManager, modelState, registry, agentsMd, sessionManager };
+	return { workspace, settingsManager, settingsState, modelState, registry, agentsMd, sessionManager };
 }
 
 /**
@@ -217,7 +240,7 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
  * session's history would be indistinguishable from using it.
  */
 export async function readSessionSnapshot(options: OpenAgentOptions): Promise<SessionSnapshot> {
-	const { workspace, settingsManager, modelState, registry } = await assemble(options);
+	const { workspace, settingsState, modelState, registry } = await assemble(options);
 	return sessionSnapshot({
 		sessionState: options.sessionState,
 		absWorkspaceRoot: workspace.absRoot,
@@ -227,14 +250,14 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 		// The same merge `Agent.getApprovals` performs: the workspace's defaults with the session's own
 		// recorded choices over them. Neither half is optional, or the header's toggles would show a
 		// gate the live session does not have.
-		approvals: { ...settingsManager.getApprovals(), ...registry.toolState().approvalOverride },
+		approvals: { ...getApprovals(settingsState), ...registry.toolState().approvalOverride },
 		// Read off the registry *after* the replay, so the toggles match a live session's exactly.
 		allTools: registry.names(),
 		activeTools: registry.activeNames(),
 		// Judged against this workspace's own settings, the same way the live session's getter does it:
 		// a cold read and a live snapshot must agree here, or the panel would flip its "沿用全局" label
 		// the moment a session went from open to merely read.
-		...followsGlobalOf(options.sessionState, settingsManager, registry),
+		...followsGlobalOf(options.sessionState, settingsState, registry),
 		submitting: false,
 		queued: 0,
 		isRetrying: false,
@@ -258,9 +281,10 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
  * session has — the hooks, whose handlers need the session they belong to, and the object itself.
  */
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
-	const { workspace, settingsManager, modelState, registry, agentsMd, sessionManager } = await assemble(options);
+	const { workspace, settingsManager, settingsState, modelState, registry, agentsMd, sessionManager } =
+		await assemble(options);
 	const hooks = createHooks();
-	const openSession = options.openSession ?? createOpenSession(settingsManager.getSteeringMode(), settingsManager.getFollowUpMode());
+	const openSession = options.openSession ?? createOpenSession(getSteeringMode(settingsState), getFollowUpMode(settingsState));
 
 	const config: AgentConfig = {
 		workspace,
@@ -269,6 +293,7 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 		models: options.models,
 		...(options.api === undefined ? {} : { api: options.api }),
 		settingsManager,
+		settingsState,
 		tools: registry,
 		hooks,
 		openSession,

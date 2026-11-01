@@ -8,7 +8,7 @@ import { openAgent } from "../session-factory.ts";
 import { workspaceDir } from "../session/paths.ts";
 import { type SessionState, SessionManager, createSessionState } from "../session/session-manager.ts";
 import { entryUsage } from "../session/snapshot.ts";
-import { SettingsManager } from "../settings-manager.ts";
+import { inMemorySettingsState } from "../settings-manager.ts";
 import type { ModelSource } from "../models.ts";
 import type { Workspace } from "../workspace.ts";
 import { subagentToolState } from "./manager.ts";
@@ -119,7 +119,7 @@ export function createSubagentTools(deps: SubagentToolDeps): AgentTool<any>[] {
 			toolState: subagentToolState(),
 			// The child's settings are never the workspace's files: they exist so nothing here reads or
 			// writes a real settings.json, and the tools it runs need no setting of their own.
-			settingsManager: SettingsManager.inMemory({}),
+			settingsState: inMemorySettingsState({}),
 			subagents: false,
 		});
 	}

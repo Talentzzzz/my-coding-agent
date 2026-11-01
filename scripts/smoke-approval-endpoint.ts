@@ -21,7 +21,7 @@ import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-
 import {
 	openAgent,
 	createSessionState,
-	SettingsManager,
+	inMemorySettingsState,
 	type ModelSource,
 	type ModelConfig,
 	workspaceDir,
@@ -69,7 +69,7 @@ const session = await openAgent({
 	models,
 	api: fake.api,
 	model: modelName,
-	settingsManager: SettingsManager.inMemory({ approval: { read: true } }),
+	settingsState: inMemorySettingsState({ approval: { read: true } }),
 });
 
 // Mounted the way `SessionHub.open()` mounts one, so the controller claims through the real hub.

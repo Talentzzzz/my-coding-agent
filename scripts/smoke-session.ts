@@ -22,7 +22,8 @@ import {
 	MAX_TOOL_RESULT_BYTES,
 	openAgent,
 	resetLeaf,
-	SettingsManager,
+	getApprovals,
+	inMemorySettingsState,
 	toolDefinitions,
 	Workspace,
 	type Agent,
@@ -214,8 +215,8 @@ interface RunOptions {
 /**
  * One session over its own transcript, with settings that live in memory.
  *
- * `SettingsManager.inMemory` is the seam that keeps these runs off the developer's
- * `~/.my-agent/settings.json`: it has the same shape as the file-backed manager, so a config change
+ * `inMemorySettingsState` is the seam that keeps these runs off the developer's
+ * `~/.my-agent/settings.json`: it has the same shape as the file-backed state, so a config change
  * here is written and read back exactly as it would be for real —just nowhere.
  */
 async function openSession(
@@ -230,7 +231,7 @@ async function openSession(
 		models: run.models ?? models,
 		api: run.api ?? fake.api,
 		model,
-		settingsManager: SettingsManager.inMemory(settings(overrides)),
+		settingsState: inMemorySettingsState(settings(overrides)),
 		tools,
 	});
 }
@@ -985,7 +986,7 @@ async function exerciseAfterToolHook(): Promise<void> {
 		sessionState: reopenedFile,
 		models,
 		api: fake.api,
-		settingsManager: SettingsManager.inMemory(settings()),
+		settingsState: inMemorySettingsState(settings()),
 	});
 	try {
 		await within("the reopened run", 10_000, replayed.prompt("one more time"));
@@ -2188,7 +2189,7 @@ async function exerciseSubagent(): Promise<void> {
 		absWorkspaceRoot: root,
 		sessionState: createSessionState(root),
 		models,
-		settingsManager: SettingsManager.inMemory(settings()),
+		settingsState: inMemorySettingsState(settings()),
 		subagents: false,
 	});
 	check("subagents: false leaves the delegation tools out", !bare.snapshot.allTools.includes("SubAgent") && !bare.snapshot.allTools.includes("SubAgentControl"), JSON.stringify(bare.snapshot.allTools));
@@ -2370,7 +2371,7 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	check("its tool set is restored", session.snapshot.activeTools.includes("bash") === false, JSON.stringify(session.snapshot.activeTools));
 	check("and its approval is too", session.snapshot.approvals.bash === true, JSON.stringify(session.snapshot.approvals));
 	check("which is the map the gate reads", session.getApprovals().bash === true, JSON.stringify(session.getApprovals()));
-	check("leaving the settings file alone", session.settingsManager.getApprovals().bash === false, JSON.stringify(session.settingsManager.getApprovals()));
+	check("leaving the settings file alone", getApprovals(session.settingsState).bash === false, JSON.stringify(getApprovals(session.settingsState)));
 	const moved = events.slice(before).find((event) => event.type === "config_changed");
 	check(
 		"and every other window is told what the branch chose",
@@ -2423,8 +2424,8 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	);
 	check(
 		"since the settings files are what a session that never chose runs on",
-		fallback.settingsManager.getApprovals().bash === false,
-		JSON.stringify(fallback.settingsManager.getApprovals()),
+		getApprovals(fallback.settingsState).bash === false,
+		JSON.stringify(getApprovals(fallback.settingsState)),
 	);
 	await fallback.close();
 }

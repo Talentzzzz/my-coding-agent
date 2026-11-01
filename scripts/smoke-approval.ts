@@ -43,7 +43,7 @@ import type { PendingApproval } from "@my-agent/core/protocol";
 import {
 	openAgent,
 	createSessionState,
-	SettingsManager,
+	inMemorySettingsState,
 	type Agent,
 	type ModelSource,
 	type ModelConfig,
@@ -155,7 +155,7 @@ const session = await openAgent({
 	models,
 	api: fake.api,
 	model: modelName,
-	settingsManager: SettingsManager.inMemory({ approval: { read: true } }),
+	settingsState: inMemorySettingsState({ approval: { read: true } }),
 });
 // Mounted the way `SessionHub.open()` mounts one, so every request below claims through the real hub.
 (hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(session.id, new HostedSession(session, root));
@@ -728,7 +728,7 @@ async function openRig(approvalGraceMs: number): Promise<Rig> {
 		models,
 		api: transport.api,
 		model: modelName,
-		settingsManager: SettingsManager.inMemory({ approval: { read: true } }),
+		settingsState: inMemorySettingsState({ approval: { read: true } }),
 	});
 
 	const host = new HostedSession(session, root);
@@ -782,7 +782,7 @@ async function openCrossRig(): Promise<CrossRig> {
 			models,
 			api: transport.api,
 			model: modelName,
-			settingsManager: SettingsManager.inMemory({ approval: { read: true } }),
+			settingsState: inMemorySettingsState({ approval: { read: true } }),
 		});
 		(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(session.id, new HostedSession(session, root));
 		sessions.push(session);

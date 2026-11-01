@@ -49,7 +49,14 @@ import {
 	SessionManager,
 	sessionPath,
 	sessionsDir,
-	SettingsManager,
+	applySettings,
+	fillSettings,
+	getApprovals,
+	getBashSettings,
+	getModel,
+	getSteeringMode,
+	inMemorySettingsState,
+	isApprovalRequired,
 	shouldCompact,
 	spillOversizedToolResult,
 	spillPathFor,
@@ -547,24 +554,24 @@ async function exerciseSettings(): Promise<void> {
 	);
 	await writeFile(projectFile, JSON.stringify({ approval: { write: false } }), "utf8");
 
-	const settings = SettingsManager.create(workspace, agentDir);
-	check("reads the agent home's file", settings.getModel() === "faux/faux-1", String(settings.getModel()));
-	check("the project file overrides the field it names", settings.getApprovals().write === false, JSON.stringify(settings.getApprovals()));
-	check("and the global value beside it survives", settings.getApprovals().bash === false, JSON.stringify(settings.getApprovals()));
-	check("while an unnamed field keeps its default", settings.getApprovals().edit === true, JSON.stringify(settings.getApprovals()));
+	const settings = fillSettings(workspace, agentDir);
+	check("reads the agent home's file", getModel(settings) === "faux/faux-1", String(getModel(settings)));
+	check("the project file overrides the field it names", getApprovals(settings).write === false, JSON.stringify(getApprovals(settings)));
+	check("and the global value beside it survives", getApprovals(settings).bash === false, JSON.stringify(getApprovals(settings)));
+	check("while an unnamed field keeps its default", getApprovals(settings).edit === true, JSON.stringify(getApprovals(settings)));
 
 	// `approval` is the project file's to own, so this change belongs there and only this tool's key
 	// may move: writing the whole merged map would pin all six tools in the repository's file.
-	settings.applySettings({ approval: { read: true } });
+	applySettings(settings, { approval: { read: true } });
 	const project = JSON.parse(await readFile(projectFile, "utf8")) as { approval?: Record<string, boolean> };
 	check("an approval is written to the file that owns it", project.approval?.read === true, JSON.stringify(project));
 	check("keeping the other entries that file had", project.approval?.write === false, JSON.stringify(project));
 	check("and adding no key it never named", project.approval?.bash === undefined, JSON.stringify(project));
-	check("the change is in effect", settings.isApprovalRequired("read") === true);
-	check("with the other layer still supplying its own value", settings.isApprovalRequired("bash") === false);
+	check("the change is in effect", isApprovalRequired(settings, "read") === true);
+	check("with the other layer still supplying its own value", isApprovalRequired(settings, "bash") === false);
 
 	// No file names the queue mode, so it is a new setting and goes to the agent home's file.
-	settings.applySettings({ steeringMode: "all" });
+	applySettings(settings, { steeringMode: "all" });
 	const global = JSON.parse(await readFile(globalFile, "utf8")) as Record<string, unknown>;
 	check("a setting no file names goes to the global file", global.steeringMode === "all", JSON.stringify(global));
 	check(
@@ -572,17 +579,17 @@ async function exerciseSettings(): Promise<void> {
 		global.customKey === "kept" && global.model === "faux/faux-1" && global.keepRecentTokens === 5_000,
 		JSON.stringify(global),
 	);
-	check("and the mode is in effect", settings.getSteeringMode() === "all", settings.getSteeringMode());
+	check("and the mode is in effect", getSteeringMode(settings) === "all", getSteeringMode(settings));
 
-	settings.applySettings({ bash: { maxTimeoutMs: 1_800_000 } });
-	check("the bash ceiling moves with the patch", settings.getBashSettings().maxTimeoutMs === 1_800_000, JSON.stringify(settings.getBashSettings()));
-	check("leaving the default timeout beside it", settings.getBashSettings().defaultTimeoutMs === 120_000, JSON.stringify(settings.getBashSettings()));
-	const lowered = SettingsManager.inMemory({ bash: { defaultTimeoutMs: 9_000_000, maxTimeoutMs: 600_000 } });
-	check("a default above the ceiling is pulled down to it", lowered.getBashSettings().defaultTimeoutMs === 600_000, JSON.stringify(lowered.getBashSettings()));
+	applySettings(settings, { bash: { maxTimeoutMs: 1_800_000 } });
+	check("the bash ceiling moves with the patch", getBashSettings(settings).maxTimeoutMs === 1_800_000, JSON.stringify(getBashSettings(settings)));
+	check("leaving the default timeout beside it", getBashSettings(settings).defaultTimeoutMs === 120_000, JSON.stringify(getBashSettings(settings)));
+	const lowered = inMemorySettingsState({ bash: { defaultTimeoutMs: 9_000_000, maxTimeoutMs: 600_000 } });
+	check("a default above the ceiling is pulled down to it", getBashSettings(lowered).defaultTimeoutMs === 600_000, JSON.stringify(getBashSettings(lowered)));
 
 	// An edit made outside this process must survive the next write.
 	await writeFile(globalFile, JSON.stringify({ ...global, model: "hand/edited" }), "utf8");
-	settings.applySettings({ followUpMode: "all" });
+	applySettings(settings, { followUpMode: "all" });
 	const rewritten = JSON.parse(await readFile(globalFile, "utf8")) as Record<string, unknown>;
 	check("a hand edit is not reverted by the next write", rewritten.model === "hand/edited", JSON.stringify(rewritten));
 	check("which still lands its own change", rewritten.followUpMode === "all", JSON.stringify(rewritten));
@@ -591,7 +598,7 @@ async function exerciseSettings(): Promise<void> {
 	await writeFile(projectFile, "{ not json", "utf8");
 	let failure = "";
 	try {
-		SettingsManager.create(workspace, agentDir);
+		fillSettings(workspace, agentDir);
 	} catch (error) {
 		failure = (error as Error).message;
 	}
@@ -610,10 +617,10 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	const question: Message = { role: "user", content: [{ type: "text", text: "lifecycle question" }], timestamp: 1 };
 	appendMessage(state, question);
 
-	// In memory: a config change must land in the manager the caller holds, and never in the
-	// developer's `~/.my-agent/settings.json`. Before settings became an injected manager, this test
+	// In memory: a config change must land in the state the caller holds, and never in the
+	// developer's `~/.my-agent/settings.json`. Before settings became an injected state, this test
 	// wrote that file.
-	const settingsManager = SettingsManager.inMemory({
+	const settingsState = inMemorySettingsState({
 		approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false },
 	});
 	// A model has to be imported for assembly to have one to record: the catalog is the user's now, and
@@ -630,21 +637,21 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		absWorkspaceRoot: root,
 		sessionState: state,
 		models: { list: () => [configured] },
-		settingsManager,
+		settingsState,
 	});
 
 	check("opens with the stored transcript", session.snapshot.messages.length === 1, String(session.snapshot.messages.length));
 	check("is idle before any prompt", session.isLooping === false);
 
 	session.applyConfig({ approval: { bash: true } });
-	check("the session exposes the manager it was given", session.settingsManager === settingsManager);
+	check("the session exposes the state it was given", session.settingsState === settingsState);
 	// An approval chosen in a session is that session's own: it lives in the transcript as a
-	// `tool_config` entry, and the settings file 鈥攚hich every other session over this workspace reads
-	// 鈥攊s left exactly as it was.
+	// `tool_config` entry, and the settings file — which every other session over this workspace reads
+	// — is left exactly as it was.
 	check(
 		"applyConfig leaves the settings file alone",
-		settingsManager.getApprovals().bash === false,
-		JSON.stringify(settingsManager.getApprovals()),
+		getApprovals(settingsState).bash === false,
+		JSON.stringify(getApprovals(settingsState)),
 	);
 	check("and the session reflects it", session.snapshot.approvals.bash === true, JSON.stringify(session.snapshot.approvals));
 	check(
@@ -691,14 +698,14 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		absWorkspaceRoot: root,
 		sessionState: reloaded,
 		models: { list: () => [configured] },
-		settingsManager,
+		settingsState,
 	});
 	check("reopening restores the approval the session chose", reopened.snapshot.approvals.bash === true, JSON.stringify(reopened.snapshot.approvals));
 	const other = await openAgent({
 		absWorkspaceRoot: root,
 		sessionState: createSessionState(root),
 		models: { list: () => [configured] },
-		settingsManager,
+		settingsState,
 	});
 	check(
 		"while another session over the workspace keeps the defaults",
@@ -969,7 +976,7 @@ async function exercisePruning(): Promise<void> {
 		absWorkspaceRoot: root,
 		sessionState: store2,
 		models: { list: () => [configured] },
-		settingsManager: SettingsManager.inMemory({ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } }),
+		settingsState: inMemorySettingsState({ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } }),
 	});
 	const announced: string[] = [];
 	session.onEvent((event) => {

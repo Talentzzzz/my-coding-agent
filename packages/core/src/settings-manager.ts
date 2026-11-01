@@ -130,9 +130,9 @@ class InMemorySettingsStorage implements SettingsStorage {
  * nothing else.
  *
  * Every settings operation is a file-level function taking a `SettingsState` as its first parameter —
- * there is no class holding this state between calls (the `SettingsManager` class at the bottom of
- * this file is a thin shell over these functions, kept only until every caller has moved onto the
- * stateless form). The state is plain data on purpose: which function touches which field is visible
+ * no class holds this state between calls (the `SettingsManager` class at the bottom of this file is
+ * a stateless service whose methods take the state explicitly, plus the one per-workspace cache).
+ * The state is plain data on purpose: which function touches which field is visible
  * in the signatures, and a test can construct a bare state and call any operation on it directly.
  *
  * The state is shared per workspace, not per request: the host holds one {@link SettingsState} per
@@ -384,83 +384,101 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * The settings shell: a per-workspace handle over one {@link SettingsState}.
+ * The settings service: a stateless shell over the operations above (ADR-0007 §2).
  *
- * Every method is a one-line delegation to the stateless operation of the same name, which carries
- * the real logic and its documentation. This class is what callers hold until they have each moved
- * onto the stateless form; it owns no logic and adds none.
+ * Every method is a one-line delegation to the stateless operation of the same name — which carries
+ * the real logic and its documentation — with the workspace's {@link SettingsState} as its first
+ * parameter. The class owns no logic and holds no settings of its own; what it holds is the one
+ * cache the files' sharing needs: {@link stateOf}, which keeps every reader and writer of one
+ * workspace on the same state object, the way the hub's per-workspace table used to before the
+ * cache moved in here.
  */
 export class SettingsManager {
-	private readonly s: SettingsState;
+	/**
+	 * Open workspace states by agent home and workspace root — fill-at-open, rebuildable from disk at
+	 * any time (ADR-0007 §3).
+	 *
+	 * A workspace is filled the first time {@link stateOf} touches it and the same reference is reused
+	 * after: every write lands on the one bag the next reader answers from, so a toggle written by one
+	 * session is the value the next session reads rather than a copy taken when it was assembled. The
+	 * key is the pair, not the root alone, because the two files a workspace's settings come from are
+	 * looked up under one agent home — a process serving two homes must not answer one workspace's
+	 * root with the other home's merge.
+	 *
+	 * The cache is never authoritative, which is why its rules are about writes and not about loss:
+	 *
+	 * - Nothing drops on write-back. {@link applySettings} mutates the cached bag in place — it
+	 *   re-reads each file it touches before writing, so a hand edit to that file folds in rather than
+	 *   being reverted, and the re-merged view is the cached one. The bag equals the files after every
+	 *   write.
+	 * - Nothing drops on workspace close, because this process never closes one: a workspace put aside
+	 *   is a stored `hiddenWorkspaces` fact, not a teardown. A host that gains one drops the entry
+	 *   there, the way the session service's `remove` does for a deleted session.
+	 * - A hand edit to a field this process never writes stays invisible until restart. That is the
+	 *   visibility the files had when this cache lived in the hub, and the price of one merged view
+	 *   shared by every reader over the workspace.
+	 */
+	private readonly states = new Map<string, SettingsState>();
 
-	private constructor(s: SettingsState) {
-		this.s = s;
+	/** The state of one workspace, filled from its files the first time it is touched. */
+	stateOf(absWorkspaceRoot: string, agentDir: string = AGENT_HOME): SettingsState {
+		const key = `${agentDir}\u0000${absWorkspaceRoot}`;
+		const existing = this.states.get(key);
+		if (existing) return existing;
+		const created = fillSettings(absWorkspaceRoot, agentDir);
+		this.states.set(key, created);
+		return created;
 	}
 
-	/** The settings of a workspace: the agent home's file and the workspace's own, project winning. */
-	static create(absCwd: string, agentDir: string = AGENT_HOME): SettingsManager {
-		return new SettingsManager(fillSettings(absCwd, agentDir));
+	getSettings(s: SettingsState): Settings {
+		return getSettings(s);
 	}
 
-	/** A manager over any storage backend. */
-	static fromStorage(storage: SettingsStorage): SettingsManager {
-		return new SettingsManager(settingsStateFromStorage(storage));
+	getModel(s: SettingsState): string | undefined {
+		return getModel(s);
 	}
 
-	/** A manager over settings that were never written down. */
-	static inMemory(settings: Partial<Settings> = {}, scope: SettingsScope = "global"): SettingsManager {
-		return new SettingsManager(inMemorySettingsState(settings, scope));
+	getTools(s: SettingsState): string[] | undefined {
+		return getTools(s);
 	}
 
-	getSettings(): Settings {
-		return getSettings(this.s);
+	getAppearance(s: SettingsState): AppearanceSettings {
+		return getAppearance(s);
 	}
 
-	getModel(): string | undefined {
-		return getModel(this.s);
+	getHiddenWorkspaces(s: SettingsState): string[] {
+		return getHiddenWorkspaces(s);
 	}
 
-	getTools(): string[] | undefined {
-		return getTools(this.s);
+	getWorkspaceNames(s: SettingsState): Record<string, string> {
+		return getWorkspaceNames(s);
 	}
 
-	getAppearance(): AppearanceSettings {
-		return getAppearance(this.s);
+	getApprovals(s: SettingsState): Record<ToolApprovalKey, boolean> {
+		return getApprovals(s);
 	}
 
-	getHiddenWorkspaces(): string[] {
-		return getHiddenWorkspaces(this.s);
+	isApprovalRequired(s: SettingsState, tool: ToolApprovalKey): boolean {
+		return isApprovalRequired(s, tool);
 	}
 
-	getWorkspaceNames(): Record<string, string> {
-		return getWorkspaceNames(this.s);
+	getSteeringMode(s: SettingsState): QueueMode {
+		return getSteeringMode(s);
 	}
 
-	getApprovals(): Record<ToolApprovalKey, boolean> {
-		return getApprovals(this.s);
+	getFollowUpMode(s: SettingsState): QueueMode {
+		return getFollowUpMode(s);
 	}
 
-	isApprovalRequired(tool: ToolApprovalKey): boolean {
-		return isApprovalRequired(this.s, tool);
+	getRetrySettings(s: SettingsState): RetrySettings {
+		return getRetrySettings(s);
 	}
 
-	getSteeringMode(): QueueMode {
-		return getSteeringMode(this.s);
+	getBashSettings(s: SettingsState): BashSettings {
+		return getBashSettings(s);
 	}
 
-	getFollowUpMode(): QueueMode {
-		return getFollowUpMode(this.s);
-	}
-
-	getRetrySettings(): RetrySettings {
-		return getRetrySettings(this.s);
-	}
-
-	getBashSettings(): BashSettings {
-		return getBashSettings(this.s);
-	}
-
-	applySettings(patch: SettingsPatch, scope?: SettingsScope): void {
-		applySettings(this.s, patch, scope);
+	applySettings(s: SettingsState, patch: SettingsPatch, scope?: SettingsScope): void {
+		applySettings(s, patch, scope);
 	}
 }

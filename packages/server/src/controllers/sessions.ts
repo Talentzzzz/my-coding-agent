@@ -18,7 +18,14 @@ import {
 	type SessionSnapshot,
 	type SettingsPatch,
 	type SettingsSnapshot,
-	SettingsManager,
+	type SettingsState,
+	applySettings,
+	getAppearance,
+	getApprovals,
+	getBashSettings,
+	getHiddenWorkspaces,
+	getSettings,
+	getWorkspaceNames,
 	toSessionRef,
 	type ModelConfig,
 	type WorkspaceGroup,
@@ -34,20 +41,20 @@ export async function listSessions(workspaceRoot: string): Promise<SessionRef[]>
 }
 
 /** What the settings panel reads: the values it can edit, and the ones it shows read-only. */
-function settingsOf(manager: SettingsManager): SettingsSnapshot {
-	const settings = manager.getSettings();
-	const hidden = manager.getHiddenWorkspaces();
-	const names = manager.getWorkspaceNames();
+function settingsOf(settings: SettingsState): SettingsSnapshot {
+	const merged = getSettings(settings);
+	const hidden = getHiddenWorkspaces(settings);
+	const names = getWorkspaceNames(settings);
 	return {
-		appearance: manager.getAppearance(),
-		approval: manager.getApprovals(),
-		bash: manager.getBashSettings(),
-		...(settings.tools === undefined ? {} : { tools: settings.tools }),
-		...(settings.modes === undefined ? {} : { modes: settings.modes }),
+		appearance: getAppearance(settings),
+		approval: getApprovals(settings),
+		bash: getBashSettings(settings),
+		...(merged.tools === undefined ? {} : { tools: merged.tools }),
+		...(merged.modes === undefined ? {} : { modes: merged.modes }),
 		...(hidden.length === 0 ? {} : { hiddenWorkspaces: hidden }),
 		...(Object.keys(names).length === 0 ? {} : { workspaceNames: names }),
-		...(settings.model === undefined ? {} : { model: settings.model }),
-		...(settings.defaultModelSeeded === undefined ? {} : { defaultModelSeeded: settings.defaultModelSeeded }),
+		...(merged.model === undefined ? {} : { model: merged.model }),
+		...(merged.defaultModelSeeded === undefined ? {} : { defaultModelSeeded: merged.defaultModelSeeded }),
 	};
 }
 
@@ -192,9 +199,9 @@ export class SystemController {
 			throw httpStatus.notFound(`Unknown workspace: ${absSource}`);
 		}
 
-		const manager = this.hub.settingsFor(this.hub.absCwd);
-		manager.applySettings({ workspaceNames: { [absSource]: name.trim() } });
-		return { absCwd: absSource, name: name.trim(), settings: settingsOf(manager) };
+		const settings = this.hub.settingsStateOf(this.hub.absCwd);
+		applySettings(settings, { workspaceNames: { [absSource]: name.trim() } });
+		return { absCwd: absSource, name: name.trim(), settings: settingsOf(settings) };
 	}
 
 	/**
@@ -215,29 +222,29 @@ export class SystemController {
 			throw httpStatus.badRequest("`absCwd` must be a workspace path");
 		}
 
-		const manager = this.hub.settingsFor(this.hub.absCwd);
-		const hidden = manager.getHiddenWorkspaces();
+		const settings = this.hub.settingsStateOf(this.hub.absCwd);
+		const hidden = getHiddenWorkspaces(settings);
 		if (!hidden.some((path) => samePath(path, absCwd))) {
-			manager.applySettings({ hiddenWorkspaces: [...hidden, resolve(absCwd)] });
+			applySettings(settings, { hiddenWorkspaces: [...hidden, resolve(absCwd)] });
 			this.listeners.onWorkspaceListingChanged?.();
 		}
 
 		// The listing goes back with the answer because the removal is a *stored* fact rather than a
 		// frame: this command rides REST, and the rows a window draws come from the channel. A client
 		// that applied its own guess would be a second writer for a list the server owns.
-		return this.listing(manager);
+		return this.listing(settings);
 	}
 
 	/** The visible listing, as the hub's rule leaves it. */
-	private async listing(manager: SettingsManager): Promise<{ settings: SettingsSnapshot; workspaces: WorkspaceGroup[] }> {
+	private async listing(settings: SettingsState): Promise<{ settings: SettingsSnapshot; workspaces: WorkspaceGroup[] }> {
 		return {
-			settings: settingsOf(manager),
+			settings: settingsOf(settings),
 			workspaces: (await SessionManager.listWorkspaces()).filter((group) => this.hub.listsWorkspace(group.absCwd)),
 		};
 	}
 
 	settings(): { settings: SettingsSnapshot } {
-		return { settings: settingsOf(this.hub.settingsFor(this.hub.absCwd)) };
+		return { settings: settingsOf(this.hub.settingsStateOf(this.hub.absCwd)) };
 	}
 
 	/**
@@ -261,7 +268,7 @@ export class SystemController {
 		}
 		const fields = patch as Record<string, unknown>;
 
-		const manager = this.hub.settingsFor(this.hub.absCwd);
+		const settings = this.hub.settingsStateOf(this.hub.absCwd);
 		const next: SettingsPatch = {};
 
 		if (fields.tools !== undefined) {
@@ -413,8 +420,8 @@ export class SystemController {
 			next.bash = bash;
 		}
 
-		manager.applySettings(next);
-		return { settings: settingsOf(manager) };
+		applySettings(settings, next);
+		return { settings: settingsOf(settings) };
 	}
 
 	async sessions(): Promise<{ sessions: SessionRef[] }> {
@@ -509,15 +516,15 @@ export class SessionController {
 	 *
 	 * The pair to `SystemController.hideWorkspace`, and the answer to「删除」 being a one-way door: the
 	 * transcripts and the directory were never touched, so the workspace is still there to be used —
-	 * and coming back to it is what says the user wants it listed again. Written through the manager
-	 * the hub's visibility rule reads, so the next listing and the next overview frame already agree.
+	 * and coming back to it is what says the user wants it listed again. Written onto the settings state
+ * the hub's visibility rule reads, so the next listing and the next overview frame already agree.
 	 */
 	private restoreWorkspace(absCwd: string): void {
-		const manager = this.hub.settingsFor(this.hub.absCwd);
-		const hidden = manager.getHiddenWorkspaces();
+		const settings = this.hub.settingsStateOf(this.hub.absCwd);
+		const hidden = getHiddenWorkspaces(settings);
 		const kept = hidden.filter((path) => !samePath(path, absCwd));
 		if (kept.length === hidden.length) return;
-		manager.applySettings({ hiddenWorkspaces: kept });
+		applySettings(settings, { hiddenWorkspaces: kept });
 		this.listeners.onWorkspaceListingChanged?.();
 	}
 

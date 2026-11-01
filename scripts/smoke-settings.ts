@@ -1,7 +1,7 @@
-// Settings smoke: drives the real `SettingsManager` over real files in a scratch agent home, and
+// Settings smoke: drives the settings operations over real files in a scratch agent home, and
 // checks the property the sidebar's paging decision leans on — that the per-workspace paging state
-// survives a full serialization → restore round trip. The state is written through one manager and
-// read back by a *new* manager over the same paths, so it has to come back through
+// survives a full serialization → restore round trip. The state is written through one bag and read
+// back by a *fresh* fill over the same paths, so it has to come back through
 // JSON.stringify → parse → mergeSettings, which an in-memory layer would skip.
 // Nothing here reaches the network, so no server and no provider key are needed.
 // Run with: node scripts/smoke-settings.ts
@@ -13,6 +13,7 @@ import {
 	clampWorkspacePaging,
 	fillSettings,
 	getAppearance,
+	getModel,
 	getSettings,
 	settingsPath,
 	settingsStateFromStorage,
@@ -31,16 +32,16 @@ function check(label: string, condition: boolean, detail = ""): void {
 process.stdout.write("\nsettings：收展状态跟着 appearance 走一遍真实的序列化\n");
 
 {
-	// A scratch agent home, deleted with the block: the manager is pointed at it explicitly rather
+	// A scratch agent home, deleted with the block: the state is pointed at it explicitly rather
 	// than through MY_AGENT_HOME, so the machine's own settings are never read or written.
 	const home = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
 	try {
 		const absCwd = join(home, "workspace");
-		const manager = SettingsManager.create(absCwd, home);
+		const settings = fillSettings(absCwd, home);
 
 		// The window's write, as main.ts's setPaging sends it: one workspace read down to page 2,
 		// one folded away to its heading.
-		manager.applySettings({
+		applySettings(settings, {
 			appearance: {
 				workspaces: {
 					"/w/one": { collapsed: false, page: 2, savedPage: 2 },
@@ -49,14 +50,14 @@ process.stdout.write("\nsettings：收展状态跟着 appearance 走一遍真实
 			},
 		});
 
-		// A fresh manager over the same files — what the next launch reads. The three fields must
+		// A fresh fill over the same files — what the next launch reads. The three fields must
 		// each come back: the page the view was on, the page the collapse saved, and the fold.
-		const restored = SettingsManager.create(absCwd, home).getAppearance();
+		const restored = getAppearance(fillSettings(absCwd, home));
 		check("重读的 appearance 还带着 workspaces", restored.workspaces !== undefined, JSON.stringify(restored));
 		check("第一个工作区的页码原样回来", restored.workspaces?.["/w/one"]?.page === 2 && restored.workspaces?.["/w/one"]?.savedPage === 2, JSON.stringify(restored.workspaces));
 		check("第二个工作区收着、记忆在第 3 页", restored.workspaces?.["/w/two"]?.collapsed === true && restored.workspaces?.["/w/two"]?.savedPage === 3, JSON.stringify(restored.workspaces));
 
-		// The file actually holds it — the manager's in-memory copy would pass even if the write
+		// The file actually holds it — the in-memory copy would pass even if the write
 		// were lost, and the file is what a second process reads.
 		const onDisk = JSON.parse(readFileSync(settingsPath(home), "utf8")) as { appearance?: { workspaces?: unknown } };
 		check("磁盘上的 settings.json 写着同一份", onDisk.appearance?.workspaces !== undefined, JSON.stringify(onDisk));
@@ -73,12 +74,12 @@ process.stdout.write("\nsettings：没动过的工作区不造假，写坏了的
 	const home = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
 	try {
 		const absCwd = join(home, "workspace");
-		const manager = SettingsManager.create(absCwd, home);
+		const settings = fillSettings(absCwd, home);
 
 		// A theme change must not manufacture a workspaces field: an appearance the user never paged
 		// keeps no entry, by the same rule the two widths follow.
-		manager.applySettings({ appearance: { theme: "dark" } });
-		check("只改主题不长出 workspaces", SettingsManager.create(absCwd, home).getAppearance().workspaces === undefined, JSON.stringify(SettingsManager.create(absCwd, home).getAppearance()));
+		applySettings(settings, { appearance: { theme: "dark" } });
+		check("只改主题不长出 workspaces", getAppearance(fillSettings(absCwd, home)).workspaces === undefined, JSON.stringify(getAppearance(fillSettings(absCwd, home))));
 
 		// Hand-edited garbage: the file is writable by hand, so one bad entry is dropped on its own
 		// and must not cost the good one its place — nor an empty result its absence.
@@ -93,7 +94,7 @@ process.stdout.write("\nsettings：没动过的工作区不造假，写坏了的
 			},
 		};
 		writeFileSync(path, `${JSON.stringify(written, null, "\t")}\n`, "utf8");
-		const reread = SettingsManager.create(absCwd, home).getAppearance().workspaces;
+		const reread = getAppearance(fillSettings(absCwd, home)).workspaces;
 		check("坏条目被丢、好条目还在", JSON.stringify(Object.keys(reread ?? {})) === JSON.stringify(["/w/good"]), JSON.stringify(reread));
 		check("好条目的数字没被改", reread?.["/w/good"]?.page === 4 && reread?.["/w/good"]?.savedPage === 9, JSON.stringify(reread));
 
@@ -116,13 +117,13 @@ process.stdout.write("\nsettings：模式跟着整表设置走一遍真实的序
 	const home = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
 	try {
 		const absCwd = join(home, "workspace");
-		const manager = SettingsManager.create(absCwd, home);
+		const settings = fillSettings(absCwd, home);
 
 		// The panel's write, as the modes tab sends it: one saved mode, the whole list at once.
-		manager.applySettings({
+		applySettings(settings, {
 			modes: [{ name: "只读", tools: ["read", "glob", "grep"], approval: { bash: false, write: false, edit: false } }],
 		});
-		const restored = SettingsManager.create(absCwd, home).getSettings();
+		const restored = getSettings(fillSettings(absCwd, home));
 		check("重读的 modes 还带着那一个", restored.modes?.length === 1 && restored.modes[0]!.name === "只读", JSON.stringify(restored.modes));
 		check("工具集整份回来", JSON.stringify(restored.modes?.[0]!.tools) === JSON.stringify(["read", "glob", "grep"]), JSON.stringify(restored.modes));
 		check("审批补齐了没写的键", restored.modes?.[0]!.approval.read === false && restored.modes?.[0]!.approval.bash === false, JSON.stringify(restored.modes));
@@ -131,9 +132,9 @@ process.stdout.write("\nsettings：模式跟着整表设置走一遍真实的序
 		// two widths and the paging state follow.
 		const fresh = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
 		try {
-			const other = SettingsManager.create(join(fresh, "workspace"), fresh);
-			other.applySettings({ model: "a/b" });
-			check("只改模型不长出 modes", SettingsManager.create(join(fresh, "workspace"), fresh).getSettings().modes === undefined);
+			const other = fillSettings(join(fresh, "workspace"), fresh);
+			applySettings(other, { model: "a/b" });
+			check("只改模型不长出 modes", getSettings(fillSettings(join(fresh, "workspace"), fresh)).modes === undefined);
 		} finally {
 			rmSync(fresh, { recursive: true, force: true });
 		}
@@ -150,14 +151,14 @@ process.stdout.write("\nsettings：模式跟着整表设置走一遍真实的序
 			{ name: "空的", tools: [], approval: { bash: true } },
 		];
 		writeFileSync(path, `${JSON.stringify(written, null, "\t")}\n`, "utf8");
-		const reread = SettingsManager.create(absCwd, home).getSettings().modes;
+		const reread = getSettings(fillSettings(absCwd, home)).modes;
 		check("坏条目被丢、重名留第一份", JSON.stringify(reread?.map((mode) => mode.name)) === JSON.stringify(["好的", "空的"]), JSON.stringify(reread));
 		check("好条目的审批落到标准默认", reread?.[0]!.approval.write === true && reread?.[0]!.approval.read === false, JSON.stringify(reread));
 		check("空工具集是选择，不是缺失", reread?.[1]!.tools.length === 0 && reread?.[1]!.approval.bash === true, JSON.stringify(reread));
 
 		// Deleting every mode is also a choice: the empty list survives, and is not read as "no field".
-		manager.applySettings({ modes: [] });
-		check("清空后是空表而不是字段消失", JSON.stringify(SettingsManager.create(absCwd, home).getSettings().modes) === "[]");
+		applySettings(settings, { modes: [] });
+		check("清空后是空表而不是字段消失", JSON.stringify(getSettings(fillSettings(absCwd, home)).modes) === "[]");
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}
@@ -171,48 +172,48 @@ process.stdout.write("\nsettings：种过默认模型的标记活过一次重启
 	const home = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
 	try {
 		const absCwd = join(home, "workspace");
-		const manager = SettingsManager.create(absCwd, home);
+		const settings = fillSettings(absCwd, home);
 		// Never written is its own state — the old file's and the fresh machine's — so the window can
 		// tell "no window ever offered the row" from "the user deleted it".
-		check("没写过时没有标记", manager.getSettings().defaultModelSeeded === undefined, String(manager.getSettings().defaultModelSeeded));
+		check("没写过时没有标记", getSettings(settings).defaultModelSeeded === undefined, String(getSettings(settings).defaultModelSeeded));
 
-		manager.applySettings({ defaultModelSeeded: true });
-		check("写下去之后当场为真", manager.getSettings().defaultModelSeeded === true, String(manager.getSettings().defaultModelSeeded));
+		applySettings(settings, { defaultModelSeeded: true });
+		check("写下去之后当场为真", getSettings(settings).defaultModelSeeded === true, String(getSettings(settings).defaultModelSeeded));
 
-		// A new manager over the same file is what the next launch reads: the marker must come back
+		// A fresh fill over the same file is what the next launch reads: the marker must come back
 		// through JSON → mergeSettings, or the planted row the user deleted would be planted again.
 		check(
 			"新进程从文件里读回真",
-			SettingsManager.create(absCwd, home).getSettings().defaultModelSeeded === true,
-			String(SettingsManager.create(absCwd, home).getSettings().defaultModelSeeded),
+			getSettings(fillSettings(absCwd, home)).defaultModelSeeded === true,
+			String(getSettings(fillSettings(absCwd, home)).defaultModelSeeded),
 		);
 		const onDisk = JSON.parse(readFileSync(settingsPath(home), "utf8")) as Record<string, unknown>;
 		check("磁盘上就写着这个字段", onDisk.defaultModelSeeded === true, JSON.stringify(onDisk.defaultModelSeeded));
 
 		// A hand edit asking for the offer again is representable: `false` is kept rather than read as
 		// an absence, which would be the same thing here but not in the merge's own terms.
-		manager.applySettings({ defaultModelSeeded: false });
-		check("手写的假也留得住", SettingsManager.create(absCwd, home).getSettings().defaultModelSeeded === false, String(SettingsManager.create(absCwd, home).getSettings().defaultModelSeeded));
+		applySettings(settings, { defaultModelSeeded: false });
+		check("手写的假也留得住", getSettings(fillSettings(absCwd, home)).defaultModelSeeded === false, String(getSettings(fillSettings(absCwd, home)).defaultModelSeeded));
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}
 }
 
-// --------------------------------- 5. the stateless form over the same files
+// --------------------------------- 5. the stateless form and the service's cache
 
-process.stdout.write("\nsettings：无状态面用裸 SettingsState 走同一套读写\n");
+process.stdout.write("\nsettings：无状态面用裸 SettingsState 走同一套读写,服务缓存共享同一引用\n");
 
 {
 	const home = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
 	try {
 		const absCwd = join(home, "workspace");
 		// fillSettings takes the workspace root as its seed and reads both json files into the bag —
-		// the same two files `SettingsManager.create` reads, reached without the shell.
+		// the same two files the service's `stateOf` reads, reached without the cache.
 		const s = fillSettings(absCwd, home);
 		check("种子路径读出空默认", getSettings(s).modes === undefined, JSON.stringify(getSettings(s)));
 
 		// The write path works on the bare state: field-to-file routing and the disk write are the
-		// stateless operation's own, none of the shell's.
+		// stateless operation's own, none of a shell's.
 		applySettings(s, { modes: [{ name: "只读", tools: ["read"], approval: {} }] });
 		check("补齐后的 modes 当场可读", getSettings(s).modes?.length === 1, JSON.stringify(getSettings(s).modes));
 
@@ -221,15 +222,25 @@ process.stdout.write("\nsettings：无状态面用裸 SettingsState 走同一套
 		const replayed = fillSettings(absCwd, home);
 		check("重灌的种子读回同一份", JSON.stringify(getSettings(replayed)) === JSON.stringify(getSettings(s)));
 
-		// And the shell stays a view over the same functions: stateless-written, shell-read and the
-		// other way round must agree, because they are the same logic. A shell built *after* the
-		// write reads it — one built before holds its own snapshot, by design.
-		applySettings(s, { model: "a/b" });
-		const after = SettingsManager.create(absCwd, home);
-		check("无状态写的字段门面读得到", after.getModel() === "a/b", String(after.getModel()));
-		applySettings(replayed, { appearance: { theme: "dark" } });
-		check("门面新实例读得到无状态写盘的主题", SettingsManager.create(absCwd, home).getAppearance().theme === "dark");
-		check("共享引用的老状态也跟上了", getAppearance(replayed).theme === "dark");
+		// The service's cache is the sharing point: the first touch fills, and every touch after
+		// answers the same object, so a write through the bare state is the value the service reads.
+		const service = new SettingsManager();
+		const cached = service.stateOf(absCwd, home);
+		check("同一次触碰拿到同一引用", service.stateOf(absCwd, home) === cached, "");
+		applySettings(cached, { model: "a/b" });
+		check("写穿缓存,服务的袋跟上了", getModel(cached) === "a/b", String(getModel(cached)));
+		// The cache is keyed by the agent home as well as the root: another home over the same root
+		// is another workspace's files, and must not answer this one's merge.
+		const other = new SettingsManager();
+		const otherHome = mkdtempSync(join(tmpdir(), "my-agent-settings-other-"));
+		try {
+			check("另一个家是另一只袋", other.stateOf(absCwd, otherHome) !== cached, "");
+		} finally {
+			rmSync(otherHome, { recursive: true, force: true });
+		}
+
+		// A fresh fill over the same files reads the write back — the disk is what a restart reads.
+		check("重灌读回写盘的模型", getModel(fillSettings(absCwd, home)) === "a/b", String(getModel(fillSettings(absCwd, home))));
 
 		// The storage seam is still injectable: a host keeping settings somewhere else builds the
 		// state from its own backend rather than from the two real files.

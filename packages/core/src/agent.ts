@@ -69,7 +69,15 @@ import {
 	followsGlobalOf,
 	globalDefaultToolState,
 } from "./session/tool-config.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+import type { SettingsManager, SettingsState } from "./settings-manager.ts";
+import {
+	applySettings,
+	getApprovals,
+	getBashSettings,
+	getFollowUpMode,
+	getRetrySettings,
+	getSteeringMode,
+} from "./settings-manager.ts";
 import { type ToolRegistry, type ToolRunContext } from "./tools/index.ts";
 import type { Workspace } from "./workspace.ts";
 
@@ -128,13 +136,21 @@ export interface AgentConfig {
 	 */
 	api?: ChatTransport;
 	/**
-	 * The session's settings: the single owner of the values it runs with, and of the files behind them.
+	 * The session's settings service, and the bag every call below passes.
 	 *
-	 * Handed over rather than copied, because settings outlive one session: several sessions over one
-	 * workspace share this object, so a change made through one is what the next one reads. The class
-	 * exposes it unchanged as {@link Agent.settingsManager}.
+	 * The service is stateless (ADR-0007 §2), so the values the session runs with live in the
+	 * {@link SettingsState} beside it — handed over rather than copied, because settings outlive one
+	 * session: several sessions over one workspace share the same state, so a change made through one
+	 * is what the next one reads. The service is exposed unchanged as {@link Agent.settingsManager}
+	 * and the bag as {@link Agent.settingsState}, both until the session's own settings ownership is
+	 * settled.
 	 */
 	settingsManager: SettingsManager;
+	/**
+	 * The bag every settings call below passes: the workspace's own `SettingsState`, shared with every
+	 * other session over that workspace. See {@link AgentConfig.settingsManager}.
+	 */
+	settingsState: SettingsState;
 	/**
 	 * The tool definitions this build knows, and this session's own tool state — the active set and
 	 * the approval choices — which assembly has already put back on the branch's recorded choices.
@@ -420,13 +436,20 @@ export class Agent {
 	/** The user's models, as this session reads them: see {@link AgentConfig.models}. */
 	readonly models: ModelSource;
 	/**
-	 * This session's settings, and the only way it reads or writes them.
+	 * This session's settings service.
 	 *
 	 * Exposed rather than hidden because it is not the session's private state: it is the workspace's
-	 * settings object, shared with every other session over that workspace, and the thing a host writes
-	 * a UI toggle through. A host that reads {@link snapshot} sees the same values this object reports.
+	 * settings service, and the thing a host writes a UI toggle through. A host that reads
+	 * {@link snapshot} sees the same values the bag below reports.
 	 */
 	readonly settingsManager: SettingsManager;
+	/**
+	 * The bag every settings call below passes: see {@link AgentConfig.settingsState}.
+	 *
+	 * Exposed so a host writing a toggle lands it on the same object this session reads, rather than
+	 * on a copy taken when the session was assembled.
+	 */
+	readonly settingsState: SettingsState;
 	/**
 	 * This session's seams, including the defaults `openAgent` installed.
 	 *
@@ -459,6 +482,7 @@ export class Agent {
 		this.sessionState = config.sessionState;
 		this.models = config.models;
 		this.settingsManager = config.settingsManager;
+		this.settingsState = config.settingsState;
 		this.tools = config.tools;
 		this.promptBuilder = config.systemPrompt;
 		this.hooks = config.hooks ?? createHooks();
@@ -516,7 +540,7 @@ export class Agent {
 	 * half is the tool state's override, which assembly replayed from the branch's `tool_config` entry.
 	 */
 	getApprovals(): Record<ToolApprovalKey, boolean> {
-		return { ...this.settingsManager.getApprovals(), ...this.tools.toolState().approvalOverride };
+		return { ...getApprovals(this.settingsState), ...this.tools.toolState().approvalOverride };
 	}
 
 	/**
@@ -572,7 +596,7 @@ export class Agent {
 			activeTools: this.tools.activeNames(),
 			// Judged against this workspace's own settings, the same way a cold read judges it, so the
 			// panel's "沿用全局" label cannot disagree with itself between the two paths.
-			...followsGlobalOf(this.sessionState, this.settingsManager, this.tools),
+			...followsGlobalOf(this.sessionState, this.settingsState, this.tools),
 			...(run?.partial === undefined ? {} : { partial: run.partial }),
 			submitting: run !== undefined,
 			queued: this.queued,
@@ -866,7 +890,7 @@ export class Agent {
 	 * list itself — nothing here outlives the request that carries it.
 	 */
 	private runContext(): ToolRunContext {
-		return { workspace: this.workspace, bash: this.settingsManager.getBashSettings() };
+		return { workspace: this.workspace, bash: getBashSettings(this.settingsState) };
 	}
 
 	/**
@@ -1002,7 +1026,7 @@ export class Agent {
 		try {
 			final = await retryAssistantCall(
 				produce,
-				this.settingsManager.getRetrySettings(),
+				getRetrySettings(this.settingsState),
 				options?.signal,
 				this.retryCallbacks(scope),
 			);
@@ -1133,7 +1157,7 @@ export class Agent {
 	private applyBranchToolConfig(): void {
 		// The fallback is the global default's live view, rebuilt from the settings as they are now, so
 		// a move onto a branch that recorded nothing restores what a fresh session would open on.
-		applyRecordedToolConfig(this.sessionState, this.tools, globalDefaultToolState(this.settingsManager, this.tools));
+		applyRecordedToolConfig(this.sessionState, this.tools, globalDefaultToolState(this.settingsState, this.tools));
 		// Reported because neither map is in the branch payload, and every stream other than the one
 		// that asked is holding a snapshot taken before the move. Both maps travel whole: this is the
 		// branch's state, not a delta, and a client applies either shape.
@@ -1215,9 +1239,9 @@ export class Agent {
 			this.tools.mergeApprovalOverride(patch.approval);
 			this.sessionManager.appendToolConfig(this.sessionState, this.tools.activeNames(), this.getApprovals());
 		}
-		this.settingsManager.applySettings(patch.approval === undefined ? patch : { ...patch, approval: undefined });
-		this.openSession.runtime.steeringQueue.mode = this.settingsManager.getSteeringMode();
-		this.openSession.runtime.followUpQueue.mode = this.settingsManager.getFollowUpMode();
+		applySettings(this.settingsState, patch.approval === undefined ? patch : { ...patch, approval: undefined });
+		this.openSession.runtime.steeringQueue.mode = getSteeringMode(this.settingsState);
+		this.openSession.runtime.followUpQueue.mode = getFollowUpMode(this.settingsState);
 		this.publish();
 		this.emitConfigChanged({
 			approvals: changedApprovals(previousApprovals, this.getApprovals()),
