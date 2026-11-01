@@ -16,9 +16,9 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 
 ## 各 package 的职责
 
-**core** 是无头的：工作区、导入的模型、工具、会话管理器、系统提示词、审批闸门，对 HTTP 和 DOM 一无所知。这五个域是**无状态单例**——账本、设置、模型行、工具定义平级互不依赖，`Agent` 只做跨域编排；编排层自己不持有会话状态：durable 的一半是账本，live 的一半（两条队列与在飞运行）是 hub 持有的 `SessionRuntime`（[ADR-0006](adr/0006-stateless-session-architecture.md) §1、§4）。它发出 `AgentSessionEvent` 值 —— @my-agent/loop 的 `AgentEvent`，加上它自己的成员：队列深度、压缩、entry 落地、配置变更、重试。
+**core** 是无头的：工作区、导入的模型、工具、会话管理器、系统提示词、审批闸门，对 HTTP 和 DOM 一无所知。这五个域是**无状态单例**——账本、设置、模型行、工具定义平级互不依赖，`Agent` 只做跨域编排；编排层自己不持有会话状态：durable 的一半是账本，live 的一半（两条队列与在飞运行）居 hub 持有的活登记处 `OpenSessions`——条目 `OpenSession` 装着 `SessionRuntime`（[ADR-0006](adr/0006-stateless-session-architecture.md) §1、§4，[ADR-0007](adr/0007-services-drop-instance-state.md) §4）。它发出 `AgentSessionEvent` 值 —— @my-agent/loop 的 `AgentEvent`，加上它自己的成员：队列深度、压缩、entry 落地、配置变更、重试。
 
-**server** 拥有传输层和活跃会话：`SessionHub` 持有导入的模型、每 id 至多一个装配好的编排层（hosts 表），以及每 id 一份 `SessionRuntime`（runtimes 表——两条队列与在飞运行，进程里唯一的跨栈内存会话态，随 host 同生共死）；`Router` 把请求变成对某个控制器的一次调用，每个控制器在它做事期间持有 claim；`mux.ts` 的连接层持有一张订阅表（连接 × 会话），**订阅不拿 claim**；`projection.ts` 把"每个会话在做什么"聚成侧边栏的行。模型是**每次请求**都从 `models.json` 读，而不是缓存成一份目录；会话在每次请求前从它命名的那一行重新推导自己的模型，所以设置面板的一次编辑——密钥、端点、窗口、wire id——能抵达**每一个已经打开的会话**。
+**server** 拥有传输层和活跃会话：`SessionHub` 持有导入的模型、每 id 至多一个装配好的编排层（hosts 表），以及一个按 id 键控的活登记处 `OpenSessions`（每 id 一份条目 `OpenSession`——两条队列与在飞运行、订阅集合与跨栈 run 槽，进程里唯一的跨栈内存会话态，随 host 同生共死）；`Router` 把请求变成对某个控制器的一次调用，每个控制器在它做事期间持有 claim；`mux.ts` 的连接层持有一张订阅表（连接 × 会话），**订阅不拿 claim**；`projection.ts` 把"每个会话在做什么"聚成侧边栏的行。模型是**每次请求**都从 `models.json` 读，而不是缓存成一份目录；会话在每次请求前从它命名的那一行重新推导自己的模型，所以设置面板的一次编辑——密钥、端点、窗口、wire id——能抵达**每一个已经打开的会话**。
 
 **web** 拥有呈现：协议消息进，视图模型，DOM 出。它持有一条常驻连接（`client.ts` 的 `MuxClient`），把每条逻辑流的帧喂给对应的一栏，把连接级载荷喂给侧边栏的行表。它永远看不到供应商 SDK、transcript 文件、或服务器没发过来的任何路径。
 
@@ -63,10 +63,10 @@ my-coding-agent/
 
 ## 装配与设置
 
-`Agent` 只用被交给它的东西，别的什么也不用：它的 config 携带工作区、会话管理器、设置管理器、工具注册表、提示词构建器、hook 表面、模型种子，以及**它自己的运行时**（`SessionRuntime`——两条队列与在飞运行，由 hub 建造、随 host 销毁）。它不读设置文件、不加载 AGENTS.md、不构建工具、也不挑模型，更**不持有任何会话状态**：durable 的一半从账本重放出来，live 的一半就是交给它的运行时，所以打开一个会话和恢复一个会话是同一条链（种子→补齐，[ADR-0006](adr/0006-stateless-session-architecture.md) §2；重放出的账本状态是可从磁盘重建的缓存，见*SessionManager 是真相之源*）。
+`Agent` 只用被交给它的东西，别的什么也不用：它的 config 携带工作区、会话管理器、设置管理器、工具注册表、提示词构建器、hook 表面、模型种子，以及**登记处条目**（`OpenSession`——装着两条队列与在飞运行的 `SessionRuntime`，外加订阅集合与跨栈 run 槽，由 hub 的活登记处在首次触碰时建造、随 host 销毁）。它不读设置文件、不加载 AGENTS.md、不构建工具、也不挑模型，更**不持有任何会话状态**：durable 的一半从账本重放出来，live 的一半就是交给它的登记处条目，所以打开一个会话和恢复一个会话是同一条链（种子→补齐，[ADR-0006](adr/0006-stateless-session-architecture.md) §2；重放出的账本状态是可从磁盘重建的缓存，见*SessionManager 是真相之源*）。
 
 ```
-openAgent({ absWorkspaceRoot, sessionManager, models, runtime? })   # 设置、AGENTS.md、导入的模型
+openAgent({ absWorkspaceRoot, sessionManager, models, live? })   # 设置、AGENTS.md、导入的模型
     -> AgentConfig                                     # 普通值 + 注入的协作者
         -> new Agent(config)                            # 使用，从不自行发现
 ```
@@ -247,7 +247,7 @@ type AgentSessionEvent =
 
 ## 谁拥有一个会话
 
-`SessionHub`（`server/src/hub.ts`）为每个会话 id 运行**至多一个** `Agent`，放在一个按 id 索引的 map 里；它自己的 live 半——两条队列与在飞运行——住在旁边的 `runtimes` 表里，与 host 同生共死，进程重启即从零重建（[ADR-0006](adr/0006-stateless-session-architecture.md) §4）。**订阅不拥有会话**：一条逻辑流是 mux 订阅表里的一行（连接 × 会话），它不拿 claim、也不让会话保持打开。持有一个 claim 的只有两类，各在其长度内一个：**会改变会话的请求**，以及**在飞的运行**——审批的恢复运行也走同一条 `claim()`。所以一个会话可以在没人在看的情况下运行，而一个开着却闲置的窗口也不会替谁养着一个 `Agent`。
+`SessionHub`（`server/src/hub.ts`）为每个会话 id 运行**至多一个** `Agent`，放在一个按 id 索引的 map 里；它自己的活登记处 `OpenSessions`——条目装着两条队列与在飞运行、订阅集合与跨栈 run 槽——与 host 同生共死，进程重启即从零重建（[ADR-0006](adr/0006-stateless-session-architecture.md) §4、[ADR-0007](adr/0007-services-drop-instance-state.md) §4）。**订阅不拥有会话**：一条逻辑流是 mux 订阅表里的一行（连接 × 会话），它不拿 claim、也不让会话保持打开。持有一个 claim 的只有两类，各在其长度内一个：**会改变会话的请求**，以及**在飞的运行**——审批的恢复运行也走同一条 `claim()`。所以一个会话可以在没人在看的情况下运行，而一个开着却闲置的窗口也不会替谁养着一个 `Agent`。
 
 读 transcript 不算在内。`SessionController.read()` 既不拿 claim 也不构建 `Agent`：`SessionHub.snapshotOf()` 在本进程运行该会话时从活对象回答，否则从它的 JSONL 文件回答，走的是装配路径用的同一个 `readSessionSnapshot()`——所以一次读取的代价是一次文件读取而不是一个会话，它既不能保活一个会话、也不能驱逐一个、更不会在 hub 里留下痕迹。订阅也一样：`SessionHub.observe(sessionId, observer)` 只往观察表里挂一个观察者，观察者既不保活它看的会话，也不花钱跑它。
 

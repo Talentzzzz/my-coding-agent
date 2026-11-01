@@ -29,6 +29,8 @@ import {
 	openAgent,
 	readSessionSnapshot,
 	SessionManager,
+	OpenSessions,
+	createOpenSession,
 	SettingsManager,
 	toolResultViewsOf,
 	workspaceDir,
@@ -760,6 +762,39 @@ try {
 			await rm(workspaceDir(statelessRoot), { recursive: true, force: true });
 			await rm(statelessRoot, { recursive: true, force: true });
 		}
+	}
+
+	process.stdout.write("the live registry keys the live half by id\n");
+	// ADR-0007 §4: the narrow registry holds exactly what cannot be rebuilt from disk — the queues,
+	// the run in flight, the subscriber sets, the run slot — and nothing else. Its contract is the
+	// runtime's old one, widened: first touch builds the entry, the host closing drops it, and a
+	// process restart (clear) forgets everything, so a reopen never inherits a stale live half.
+	{
+		const opens = new OpenSessions();
+		let built = 0;
+		const entry = opens.ensure("session-a", () => {
+			built += 1;
+			return createOpenSession("all", "one-at-a-time");
+		});
+		check("ensure builds the entry on first touch", built === 1);
+		check("the queue modes are the creation answer's", entry.runtime.steeringQueue.mode === "all" && entry.runtime.followUpQueue.mode === "one-at-a-time");
+		check("ensure answers the same entry afterwards", opens.ensure("session-a", () => {
+			built += 1;
+			return createOpenSession("one-at-a-time", "all");
+		}) === entry && built === 1);
+		entry.listeners.add(() => {});
+		check("delete drops the entry with its subscribers", opens.delete("session-a") && opens.delete("session-a") === false);
+		const rebuilt = opens.ensure("session-a", () => {
+			built += 1;
+			return createOpenSession("all", "all");
+		});
+		check("the next touch builds a fresh entry", built === 2 && rebuilt !== entry && rebuilt.listeners.size === 0);
+		opens.clear();
+		const afterRestart = opens.ensure("session-a", () => {
+			built += 1;
+			return createOpenSession("all", "all");
+		});
+		check("a restart drops every entry", afterRestart !== rebuilt && built === 3);
 	}
 
 	process.stdout.write("a tool_result_view entry replays with its result\n");

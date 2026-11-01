@@ -33,7 +33,7 @@ import {
 import { SettingsManager } from "./settings-manager.ts";
 import { type ToolRegistry, type ToolState, createToolRegistry, toolDefinitions } from "./tools/index.ts";
 import { createSubagentTools } from "./tools/subagent.ts";
-import { createSessionRuntime, type SessionRuntime } from "./session/session-runtime.ts";
+import { createOpenSession, type OpenSession } from "./session/open-session.ts";
 import { Workspace } from "./workspace.ts";
 
 /** What a caller must supply to build a session. Everything else is discovered here. */
@@ -91,14 +91,15 @@ export interface OpenAgentOptions {
 	 */
 	subagents?: boolean;
 	/**
-	 * The session's live half: the queues a run drains, and the run in flight.
+	 * The session's registry entry: its live half plus the attach points and the run slot that ride
+	 * with it.
 	 *
-	 * A host that owns the state — the hub, which holds one per session and drops it when the host
-	 * closes — hands its own in, so what it holds and what the session runs on are one object. A
-	 * caller that does not care gets a fresh one, built empty from this workspace's queue modes,
-	 * which is the same thing a process restart would leave behind.
+	 * A host that owns the state — the hub, whose {@link OpenSessions} registry holds one entry per
+	 * session and drops it when the host closes — hands its own in, so what it holds and what the
+	 * session runs on are one object. A caller that does not care gets a fresh one, built empty from
+	 * this workspace's queue modes, which is the same thing a process restart would leave behind.
 	 */
-	runtime?: SessionRuntime;
+	openSession?: OpenSession;
 }
 
 /**
@@ -259,7 +260,7 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 	const { workspace, settingsManager, modelState, registry, agentsMd, sessionManager } = await assemble(options);
 	const hooks = createHooks();
-	const runtime = options.runtime ?? createSessionRuntime(settingsManager.getSteeringMode(), settingsManager.getFollowUpMode());
+	const openSession = options.openSession ?? createOpenSession(settingsManager.getSteeringMode(), settingsManager.getFollowUpMode());
 
 	const config: AgentConfig = {
 		workspace,
@@ -270,7 +271,7 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 		settingsManager,
 		tools: registry,
 		hooks,
-		runtime,
+		openSession,
 		// Rebuilt whenever the active set or the approval set moves, so the prompt cannot promise tools
 		// or approvals the session no longer has.
 		systemPrompt: (toolNames, approvals) =>

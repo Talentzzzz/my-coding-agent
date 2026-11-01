@@ -1,4 +1,4 @@
-export { Agent, type AgentConfig, type AgentSessionEvent, type SessionEventListener, type SessionListener } from "./agent.ts";
+export { Agent, type AgentConfig, type AgentSessionEvent, type RunScope, type SessionEventListener, type SessionListener } from "./agent.ts";
 export {
 	AGENT_HOME,
 	APP_NAME,
@@ -199,6 +199,7 @@ export {
 	type WorkspaceSessions,
 } from "./session/session-manager.ts";
 export { createSessionRuntime, type ActiveRun, type SessionRuntime } from "./session/session-runtime.ts";
+export { OpenSessions, createOpenSession, type OpenSession } from "./session/open-session.ts";
 export { applyRecordedToolConfig, globalDefaultToolState } from "./session/tool-config.ts";
 export {
 	applySettings,

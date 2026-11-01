@@ -8,7 +8,7 @@ import {
 	type LoopContext,
 	type ToolCallAnswer,
 } from "@my-agent/loop";
-import type { SessionRuntime } from "./session/session-runtime.ts";
+import type { OpenSession } from "./session/open-session.ts";
 import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
@@ -170,19 +170,23 @@ export interface AgentConfig {
 	 */
 	modelState: ModelState;
 	/**
-	 * The session's live half: the queues a run drains, and the run in flight.
+	 * The session's registry entry: its live half plus the attach points and the run slot that ride
+	 * with it.
 	 *
-	 * The only cross-stack in-memory state a session has (ADR-0006 §4), and held by the caller rather
-	 * than built here, because it outlives no one: the hub keeps it per session, builds it the first
-	 * time the session is touched, and drops it when the host closes — which is also what a process
-	 * restart does, so a reopen and a restart land in the same place. Everything else a session knows
-	 * is replayed from disk and configuration per request; nothing of it may be added here.
+	 * The only cross-stack in-memory state a session has (ADR-0006 §4), and held by the caller
+	 * rather than built here, because it outlives no one: the host keeps it per session in its
+	 * {@link OpenSessions} registry, the first touch of a session creates it, and the host closing
+	 * the session drops it — which is also what a process restart does, so a reopen and a restart
+	 * land in the same place. Everything else a session knows is replayed from disk and
+	 * configuration per request; nothing of it may be added here.
 	 *
-	 * The queues' drain modes arrive as the workspace settings' answer at creation and move when a
-	 * config patch does — see {@link Agent.applyConfig}. The loop registers each run's abort
-	 * controller and idle promise on `activeRun`, which is where an abort from any layer lands.
+	 * The queues' drain modes arrive as the workspace settings' answer at entry creation and move
+	 * when a config patch does — see {@link Agent.applyConfig}. The loop registers each run's abort
+	 * controller and idle promise on the entry's `runtime`, which is where an abort from any layer
+	 * lands; the run's cross-stack slot is the entry's `run` field, and the session's subscribers
+	 * live on the entry's two sets.
 	 */
-	runtime: SessionRuntime;
+	openSession: OpenSession;
 }
 
 /** Called with the session's state whenever anything a reader can see has moved. */
@@ -316,11 +320,11 @@ export type SessionEventListener = (event: AgentSessionEvent) => void;
  *
  * Under the end-restart architecture nothing here is session state (ADR-0006 §5): the bag exists
  * while `runLoop` is on the stack and is dropped with it. It is referenced from one place outside
- * the run — the orchestrator's `run` slot, the cross-stack handle a mid-run reader (a snapshot, a
- * queued prompt) reaches through, exactly as `runtime.activeRun` is the handle an abort reaches
- * through — and dropped from that slot the moment the run settles.
+ * the run — the registry entry's `run` slot ({@link OpenSession.run}), the cross-stack handle a
+ * mid-run reader (a snapshot, a queued prompt) reaches through, exactly as `runtime.activeRun` is
+ * the handle an abort reaches through — and dropped from that slot the moment the run settles.
  */
-interface RunScope {
+export interface RunScope {
 	/**
 	 * The assistant message being written right now, as the loop last reported it.
 	 *
@@ -433,13 +437,14 @@ export class Agent {
 
 	/** The caller's prompt builder; {@link buildSystemPrompt} is what a request calls. */
 	private readonly promptBuilder: (toolNames: readonly string[], approvals: Record<ToolApprovalKey, boolean>) => string;
-	private readonly listeners = new Set<SessionListener>();
-	private readonly eventListeners = new Set<SessionEventListener>();
 	private readonly tools: ToolRegistry;
 	/** Where a request actually leaves: the injected transport, before the retry policy wraps it. */
 	private readonly base: ChatTransport;
-	/** The queues a run drains at its take points, and the run in flight. See {@link AgentConfig.runtime}. */
-	private readonly runtime: SessionRuntime;
+	/**
+	 * The session's registry entry: the queues a run drains, the run in flight, the subscribers, and
+	 * the run slot. See {@link AgentConfig.openSession}.
+	 */
+	private readonly openSession: OpenSession;
 	/**
 	 * The model selection as pure data: the seed the caller assembled, moved by a selection or a
 	 * branch move, filled per request. This is the Model domain's state (ADR-0006 §2) — the one bag
@@ -447,15 +452,6 @@ export class Agent {
 	 * with it. No request object outlives the request that built it.
 	 */
 	private readonly modelState: ModelState;
-	/**
-	 * The run in flight, as the handle a cross-stack reader reaches it through.
-	 *
-	 * The run's transients are locals of {@link Agent.startRun}; this slot is what a snapshot or a
-	 * queued prompt reads them through while the run is on the stack — the same structural role
-	 * `runtime.activeRun` plays for an abort. Set before the loop starts, cleared the moment the run
-	 * settles; a process restart drops it with everything else in memory.
-	 */
-	private run: RunScope | undefined;
 
 	constructor(config: AgentConfig) {
 		this.workspace = config.workspace;
@@ -467,7 +463,7 @@ export class Agent {
 		this.promptBuilder = config.systemPrompt;
 		this.hooks = config.hooks ?? createHooks();
 		this.modelState = config.modelState;
-		this.runtime = config.runtime;
+		this.openSession = config.openSession;
 		this.base = config.api ?? anthropicMessages;
 		// What the branch already says is not cached here: `recordSelection` reads it from the ledger
 		// each time it decides, so the baseline cannot drift from what the file holds. No loop is built
@@ -504,7 +500,7 @@ export class Agent {
 
 	/** Whether a run is in flight. True from `prompt` until the run settles, whatever it ends on. */
 	get isLooping(): boolean {
-		return this.run !== undefined;
+		return this.openSession.run !== undefined;
 	}
 
 	/** Names of the tools the model may call right now, in registration order. */
@@ -530,7 +526,7 @@ export class Agent {
 	 * A steered message is not counted — it goes into the turn that is already running.
 	 */
 	get queued(): number {
-		return this.runtime.followUpQueue.size;
+		return this.openSession.runtime.followUpQueue.size;
 	}
 
 	/**
@@ -541,17 +537,17 @@ export class Agent {
 	 * tool batch; the calls that wait for an answer are the ones whose run has already ended.
 	 */
 	get hasPendingApprovals(): boolean {
-		return this.run === undefined && this.danglingApprovals().length > 0;
+		return this.openSession.run === undefined && this.danglingApprovals().length > 0;
 	}
 
 	/** True while a transient provider failure is waiting out its backoff. */
 	get isRetrying(): boolean {
-		return this.run?.retrying ?? false;
+		return this.openSession.run?.retrying ?? false;
 	}
 
 	/** The 1-based retry attempt in flight, or 0 when no retry is pending. */
 	get retryAttempt(): number {
-		return this.run?.retryAttempt ?? 0;
+		return this.openSession.run?.retryAttempt ?? 0;
 	}
 
 	/**
@@ -564,7 +560,7 @@ export class Agent {
 	 * Of those five, four are the run's locals and one is derived from the ledger.
 	 */
 	get snapshot(): SessionSnapshot {
-		const run = this.run;
+		const run = this.openSession.run;
 		return sessionSnapshot({
 			sessionState: this.sessionState,
 			absWorkspaceRoot: this.workspace.absRoot,
@@ -604,14 +600,14 @@ export class Agent {
 
 	/** Subscribe to the session's state. The returned function unsubscribes. */
 	onChange(listener: SessionListener): () => void {
-		this.listeners.add(listener);
-		return () => this.listeners.delete(listener);
+		this.openSession.listeners.add(listener);
+		return () => this.openSession.listeners.delete(listener);
 	}
 
 	/** Subscribe to the session's events. The returned function unsubscribes. */
 	onEvent(listener: SessionEventListener): () => void {
-		this.eventListeners.add(listener);
-		return () => this.eventListeners.delete(listener);
+		this.openSession.eventListeners.add(listener);
+		return () => this.openSession.eventListeners.delete(listener);
 	}
 
 	// ---------------------------------------------------------------------------- the run lifecycle
@@ -638,16 +634,16 @@ export class Agent {
 		// applied. A message that never reaches here — an empty one, a rejected send — moves nothing.
 		if (options.selection !== undefined) this.applyModelSelection(options.selection);
 
-		if (this.run !== undefined) {
+		if (this.openSession.run !== undefined) {
 			const message: Message = {
 				role: "user",
 				content: [{ type: "text", text: trimmed }],
 				timestamp: this.nextStamp(),
 			};
 			const queue = options.behavior ?? "followUp";
-			if (queue === "steer") this.runtime.steeringQueue.enqueue(message);
-			else this.runtime.followUpQueue.enqueue(message);
-			this.run.accepted.push(message);
+			if (queue === "steer") this.openSession.runtime.steeringQueue.enqueue(message);
+			else this.openSession.runtime.followUpQueue.enqueue(message);
+			this.openSession.run.accepted.push(message);
 			this.emitQueueUpdate();
 			this.publish();
 			return;
@@ -700,8 +696,8 @@ export class Agent {
 	 * This is where the run lives, and it is the whole reason the class holds no run state: the loop,
 	 * the transport, the retry scope, and the event handler are all built here, closed over the run's
 	 * locals, and dropped when the run settles. What crosses the stack is exactly what
-	 * {@link AgentConfig.runtime} names — the queues and the active run — plus the `run` slot, which
-	 * is how a reader outside the run sees its transients.
+	 * {@link AgentConfig.openSession} names — the queues, the active run, the subscribers — plus the
+	 * entry's `run` slot, which is how a reader outside the run sees its transients.
 	 */
 	private async startRun(start: { prompt: Message; answers?: undefined } | { prompt?: undefined; answers: Record<string, ToolCallAnswer> }): Promise<void> {
 		const scope: RunScope = {
@@ -716,7 +712,7 @@ export class Agent {
 			retryMaxAttempts: 0,
 			lastQueued: 0,
 		};
-		this.run = scope;
+		this.openSession.run = scope;
 
 		// The run's send policy rides on every request object this run's models are built with. The loop
 		// is never told about it: it asks for a stream from whatever model it holds, and the model
@@ -739,7 +735,7 @@ export class Agent {
 			streamFn: (model, context, options) => model.stream(context, options),
 			// The run registers itself on the session's live half, so an abort from any layer — this
 			// session's, the hub's, a process shutdown's — lands on the one controller the run sleeps on.
-			runtime: this.runtime,
+			runtime: this.openSession.runtime,
 			beforeToolCall: async ({ toolCall, args }) => this.beforeTool(toolCall.id, toolCall.name, args),
 			afterToolCall: async ({ toolCall, result, isError }) =>
 				this.afterTool(scope, toolCall.id, toolCall.name, result, isError),
@@ -768,8 +764,8 @@ export class Agent {
 					// The approval answers a resumed run closes its dangling calls with. A prompted run
 					// carries none: the recovery pass then only sweeps what a crash left behind.
 					recovery: { answers: start.answers },
-					getSteeringMessages: async () => this.runtime.steeringQueue.drain(),
-					getFollowUpMessages: async () => this.runtime.followUpQueue.drain(),
+					getSteeringMessages: async () => this.openSession.runtime.steeringQueue.drain(),
+					getFollowUpMessages: async () => this.openSession.runtime.followUpQueue.drain(),
 				},
 			);
 		} finally {
@@ -781,7 +777,7 @@ export class Agent {
 			// The depth the run is leaving behind, said before the slot is dropped: after this the depth
 			// is zero and the baseline is the idle one.
 			this.emitQueueUpdate();
-			this.run = undefined;
+			this.openSession.run = undefined;
 			// The run is not over until the loop's `runLoop` resolves — after every awaited listener for
 			// `agent_end` and the engine's own `finally`. So this is the first moment nothing is in
 			// flight, and without publishing here nothing ever reports it.
@@ -1069,12 +1065,12 @@ export class Agent {
 	async abort(): Promise<void> {
 		// Read once: the run clears its own registration as it settles, and the promise is what waits
 		// for that settlement.
-		const active = this.runtime.activeRun;
+		const active = this.openSession.runtime.activeRun;
 		active?.abortController.abort();
 		await (active?.promise ?? Promise.resolve());
 		// The run drops its own slot in its `finally`, a microtask after the idle promise resolves;
 		// wait for that too, so the sweep below sees the idle session it is defined on.
-		while (this.run !== undefined) await Promise.resolve();
+		while (this.openSession.run !== undefined) await Promise.resolve();
 		this.denyAllApprovals("The run was aborted.");
 		// The same end a finished run publishes, and for the same reason: an abort is how a run that
 		// nobody asked to stop otherwise reports that it has. See {@link Agent.prompt}.
@@ -1100,7 +1096,7 @@ export class Agent {
 	 * file the rest of that turn under a branch the turn was not answering.
 	 */
 	branchTo(entryId: string, descend = true): string {
-		if (this.run !== undefined) throw new Error("A run is in flight: the branch cannot move under it");
+		if (this.openSession.run !== undefined) throw new Error("A run is in flight: the branch cannot move under it");
 
 		const leafId = descend ? this.sessionManager.getBranchTip(this.sessionState, entryId) : entryId;
 		const previousName = this.modelName;
@@ -1220,8 +1216,8 @@ export class Agent {
 			this.sessionManager.appendToolConfig(this.sessionState, this.tools.activeNames(), this.getApprovals());
 		}
 		this.settingsManager.applySettings(patch.approval === undefined ? patch : { ...patch, approval: undefined });
-		this.runtime.steeringQueue.mode = this.settingsManager.getSteeringMode();
-		this.runtime.followUpQueue.mode = this.settingsManager.getFollowUpMode();
+		this.openSession.runtime.steeringQueue.mode = this.settingsManager.getSteeringMode();
+		this.openSession.runtime.followUpQueue.mode = this.settingsManager.getFollowUpMode();
 		this.publish();
 		this.emitConfigChanged({
 			approvals: changedApprovals(previousApprovals, this.getApprovals()),
@@ -1252,7 +1248,7 @@ export class Agent {
 	 * is worse than an error the client can show.
 	 */
 	hasPendingApproval(toolCallId: string): boolean {
-		return this.run === undefined && this.danglingApprovals().some((call) => call.toolCallId === toolCallId);
+		return this.openSession.run === undefined && this.danglingApprovals().some((call) => call.toolCallId === toolCallId);
 	}
 
 	/**
@@ -1272,7 +1268,7 @@ export class Agent {
 	 * the resumed request provider-legal when a crash left several calls behind.
 	 */
 	async respondApproval(toolCallId: string, approved: boolean): Promise<void> {
-		if (this.run !== undefined) return;
+		if (this.openSession.run !== undefined) return;
 		const call = this.danglingApprovals().find((candidate) => candidate.toolCallId === toolCallId);
 		if (call === undefined) return;
 		const answer: ToolCallAnswer = approved
@@ -1299,7 +1295,7 @@ export class Agent {
 	 * about to write, and closing it here would write the answer twice.
 	 */
 	denyAllApprovals(reason: string): void {
-		if (this.run !== undefined) return;
+		if (this.openSession.run !== undefined) return;
 		const dangling = this.danglingApprovals();
 		if (dangling.length === 0) return;
 		for (const call of dangling) this.appendDanglingResult(call, { approved: false, reason });
@@ -1354,13 +1350,13 @@ export class Agent {
 	async settle(): Promise<void> {
 		// Read through a closure: the run slot is reassigned across the awaits below, and a narrow
 		// taken before them would tell the checker the slot is always empty here.
-		const stillBusy = (): boolean => this.queued > 0 || this.run?.retrying === true;
+		const stillBusy = (): boolean => this.queued > 0 || this.openSession.run?.retrying === true;
 		for (;;) {
-			await (this.runtime.activeRun?.promise ?? Promise.resolve());
+			await (this.openSession.runtime.activeRun?.promise ?? Promise.resolve());
 			// The run drops its own slot a microtask after the idle promise resolves; wait for that too,
 			// so a caller that settles sees the idle session — and the dangling calls the run ended
 			// with — rather than one still finishing its writes. The same bounded wait `abort` makes.
-			while (this.run !== undefined) await Promise.resolve();
+			while (this.openSession.run !== undefined) await Promise.resolve();
 			if (!stillBusy()) return;
 		}
 	}
@@ -1376,7 +1372,7 @@ export class Agent {
 	 * and a reap that has already denied both land here.
 	 */
 	async close(): Promise<void> {
-		this.runtime.activeRun?.abortController.abort();
+		this.openSession.runtime.activeRun?.abortController.abort();
 		await this.settle();
 	}
 
@@ -1711,7 +1707,7 @@ export class Agent {
 
 	/** Fan one event out. The only place a session publishes an event. */
 	private emit(event: AgentSessionEvent): void {
-		for (const listener of this.eventListeners) listener(event);
+		for (const listener of this.openSession.eventListeners) listener(event);
 	}
 
 	/**
@@ -1724,9 +1720,9 @@ export class Agent {
 	 */
 	private emitQueueUpdate(): void {
 		const queued = this.queued;
-		const last = this.run?.lastQueued ?? 0;
+		const last = this.openSession.run?.lastQueued ?? 0;
 		if (queued === last) return;
-		if (this.run !== undefined) this.run.lastQueued = queued;
+		if (this.openSession.run !== undefined) this.openSession.run.lastQueued = queued;
 		this.emit({ type: "queue_update", queued });
 	}
 
@@ -1786,21 +1782,21 @@ export class Agent {
 	 */
 	private flushAccepted(scope: RunScope): void {
 		if (scope.accepted.length === 0) {
-			this.runtime.steeringQueue.clear();
-			this.runtime.followUpQueue.clear();
+			this.openSession.runtime.steeringQueue.clear();
+			this.openSession.runtime.followUpQueue.clear();
 			return;
 		}
 		// Emptied before the writes, so a failed append can never turn into a second copy of one.
 		const pending = scope.accepted.splice(0);
-		this.runtime.steeringQueue.clear();
-		this.runtime.followUpQueue.clear();
+		this.openSession.runtime.steeringQueue.clear();
+		this.openSession.runtime.followUpQueue.clear();
 		for (const message of pending) this.appendMessage(message);
 	}
 
 	/** Tell every listener what the session looks like now. */
 	private publish(): void {
 		const snapshot = this.snapshot;
-		for (const listener of this.listeners) listener(snapshot);
+		for (const listener of this.openSession.listeners) listener(snapshot);
 	}
 }
 
