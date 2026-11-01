@@ -1238,10 +1238,11 @@ async function exerciseToolChangeResend(): Promise<void> {
 }
 
 /**
- * The registry on its own: the shared definitions, the active set as state, and the one rule that
- * keeps them apart.
+ * The registry on its own: the shared definitions, the session-local tools, and the one rule that
+ * keeps them from the choice — which arrives as data with every read, derived from the ledger by the
+ * session, never held here.
  *
- * `executionMode` is checked here because it is the reason the registry stores no such state: it is
+ * `executionMode` is checked here because it is the reason the registry holds no such choice: it is
  * a field on each built tool, so narrowing the active set cannot change how a tool runs. The registry
  * holds no workspace — `active()` builds against the run context it is handed — so the same call
  * twice hands back distinct objects, which is the "built fresh, per request" half of the chain.
@@ -1250,29 +1251,22 @@ async function exerciseToolRegistry(): Promise<void> {
 	process.stdout.write("tool registry\n");
 	const registry = createToolRegistry(toolDefinitions());
 	const builtIns = ["read", "write", "edit", "glob", "grep", "bash"];
+	const full = { activeToolNames: registry.names() };
 	const run = { workspace: new Workspace(root) };
 
 	check("names() holds the six built-ins in registration order", JSON.stringify(registry.names()) === JSON.stringify(builtIns), JSON.stringify(registry.names()));
-	check("and every one starts active", JSON.stringify(registry.activeNames()) === JSON.stringify(builtIns), JSON.stringify(registry.activeNames()));
+	check("and the full set is every one of them active", JSON.stringify(registry.activeNames(full)) === JSON.stringify(builtIns), JSON.stringify(registry.activeNames(full)));
 	check("build() builds the named tool against the run context", registry.build("bash", run)?.name === "bash");
 	check("build() returns undefined for a name nobody knows", registry.build("nope", run) === undefined);
 	check("executionMode is a field on the built tool", registry.build("bash", run)?.executionMode === "sequential", String(registry.build("bash", run)?.executionMode));
-	check("active() builds the set fresh each time", registry.active(run) !== registry.active(run));
-	check("and every built tool it returns is one of the active names", registry.active(run).every((tool, index) => tool.name === registry.activeNames()[index]), JSON.stringify(registry.active(run).map((tool) => tool.name)));
+	check("active() builds the set fresh each time", registry.active(full, run) !== registry.active(full, run));
+	check("and every built tool it returns is one of the active names", registry.active(full, run).every((tool, index) => tool.name === registry.activeNames(full)[index]), JSON.stringify(registry.active(full, run).map((tool) => tool.name)));
 
-	registry.setActive(["read"]);
-	check("setActive narrows activeNames()", JSON.stringify(registry.activeNames()) === JSON.stringify(["read"]), JSON.stringify(registry.activeNames()));
-	check("and active() with it", JSON.stringify(registry.active(run).map((tool) => tool.name)) === JSON.stringify(["read"]), JSON.stringify(registry.active(run).map((tool) => tool.name)));
+	const narrowed = { activeToolNames: ["read"] };
+	check("a narrowed choice narrows activeNames()", JSON.stringify(registry.activeNames(narrowed)) === JSON.stringify(["read"]), JSON.stringify(registry.activeNames(narrowed)));
+	check("and active() with it", JSON.stringify(registry.active(narrowed, run).map((tool) => tool.name)) === JSON.stringify(["read"]), JSON.stringify(registry.active(narrowed, run).map((tool) => tool.name)));
 	check("while names() keeps every definition", registry.names().length === 6, String(registry.names().length));
-
-	let threw = false;
-	try {
-		registry.setActive(["read", "nope"]);
-	} catch {
-		threw = true;
-	}
-	check("setActive throws on an unknown name", threw);
-	check("and the active set is untouched by the throw", JSON.stringify(registry.activeNames()) === JSON.stringify(["read"]), JSON.stringify(registry.activeNames()));
+	check("and a name this build does not know is dropped by the read, not thrown at", JSON.stringify(registry.activeNames({ activeToolNames: ["read", "nope"] })) === JSON.stringify(["read"]), JSON.stringify(registry.activeNames({ activeToolNames: ["read", "nope"] })));
 
 	const noop: AgentTool<any> = {
 		name: "noop",
@@ -1282,8 +1276,8 @@ async function exerciseToolRegistry(): Promise<void> {
 		execute: async () => ({ content: [{ type: "text", text: "noop" }] }),
 	};
 	registry.register(noop);
-	check("register() adds the tool and makes it callable", registry.build("noop", run) === noop && registry.activeNames().includes("noop"), JSON.stringify(registry.activeNames()));
-	check("and toolState() answers what the registry is", JSON.stringify(registry.toolState().activeToolNames) === JSON.stringify(["read", "noop"]), JSON.stringify(registry.toolState()));
+	check("register() adds the tool and makes it callable", registry.build("noop", run) === noop && registry.activeNames({ activeToolNames: registry.names() }).includes("noop"), JSON.stringify(registry.activeNames({ activeToolNames: registry.names() })));
+	check("and the choice, not the registry, decides whether it is offered", registry.activeNames(narrowed).includes("noop") === false, JSON.stringify(registry.activeNames(narrowed)));
 }
 
 /**

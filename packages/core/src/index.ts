@@ -200,7 +200,7 @@ export {
 } from "./session/session-manager.ts";
 export { createSessionRuntime, type ActiveRun, type SessionRuntime } from "./session/session-runtime.ts";
 export { OpenSessions, createOpenSession, type OpenSession } from "./session/open-session.ts";
-export { applyRecordedToolConfig, globalDefaultToolState } from "./session/tool-config.ts";
+export { globalDefaultToolState, toolStateOf } from "./session/tool-config.ts";
 export {
 	applySettings,
 	fillSettings,

@@ -25,10 +25,9 @@ import {
 } from "./session/session-manager.ts";
 import { sessionSnapshot } from "./session/snapshot.ts";
 import {
-	applyRecordedToolConfig,
 	approvalToolsOf,
 	followsGlobalOf,
-	globalDefaultToolState,
+	toolStateOf,
 } from "./session/tool-config.ts";
 import {
 	SettingsManager,
@@ -96,9 +95,10 @@ export interface OpenAgentOptions {
 	/** Defaults to the six built-ins. A test passes a registry of its own to add a tool. */
 	tools?: ToolRegistry;
 	/**
-	 * A deliberate loadout for the default registry, as data: the SubAgent child's read-only
-	 * narrowing is handed in this way. Ignored when `tools` is given — the caller's registry *is*
-	 * the loadout then — and still only the seed: a recorded `tool_config` entry has the last word.
+	 * A deliberate loadout for the session's tool choice, as the fallback seed the derivation reads
+	 * against: the SubAgent child's read-only narrowing is handed in this way. Still only the seed —
+	 * a recorded `tool_config` entry has the last word — and the global default's live view is the
+	 * fallback when this is omitted.
 	 */
 	toolState?: ToolState;
 	/**
@@ -122,7 +122,7 @@ export interface OpenAgentOptions {
 
 /**
  * What a session *is*, resolved but not yet activated: the workspace, the settings, the model, and the
- * tool registry already put back on the branch's recorded choices.
+ * tool registry — structure only, because the tool choice derives from the ledger per read.
  *
  * No `Agent` exists at this point and no entry has been appended. Splitting this out of
  * {@link openAgent} is what lets {@link readSessionSnapshot} answer a transcript this process is not
@@ -136,6 +136,7 @@ interface Assembled {
 	settingsState: SettingsState;
 	/** The session's model as a bag: the seed, with the row's facts laid in once by assembly. */
 	modelState: ModelState;
+	/** The session's tool catalog: what exists, not what is chosen — the choice derives per read. */
 	registry: ToolRegistry;
 	/** The workspace's own instructions, already loaded, for the prompt this session will build. */
 	agentsMd: AgentsMdFile[];
@@ -186,10 +187,12 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 	// The level the bag came back with, which is the level a subagent inherits: `fillModel` already
 	// settled what the seed means for this row, so asking again here could only disagree.
 	const thinkingLevel = normalizeThinkingLevel(modelState.thinkingLevel);
-	// The loadout: the shared read-only definitions, seeded with a deliberate state when the caller
-	// handed one in. No workspace is resident — the executable set is built per request against the
-	// run context, so a child and its parent share the definitions and none of the tools.
-	const registry = options.tools ?? createToolRegistry(toolDefinitions(), options.toolState);
+	// The loadout: the shared read-only definitions, unless the caller handed a registry of its own —
+	// a test's custom tool. No workspace is resident — the executable set is built per request against
+	// the run context, so a child and its parent share the definitions and none of the tools. Nothing
+	// is chosen here either: the active set and the approvals derive from the ledger on every read,
+	// against the seed below.
+	const registry = options.tools ?? createToolRegistry(toolDefinitions());
 
 	// Delegation is part of assembly rather than of the definitions, because a child needs the
 	// model and the transcript this session resolved — things only the factory has in hand. The
@@ -210,21 +213,6 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 		}
 	}
 
-	// The tool set and approvals the session itself chose, replayed from its `tool_config` entries,
-	// over the fallback this session opens on: the global default's live view when nothing was handed
-	// in, or the caller's deliberate loadout — a caller-supplied registry or a handed-in state is a
-	// choice, and is kept rather than defaulted when no entry says otherwise.
-	//
-	// The replay is the last word on the active set, so it runs after the subagent tools — the
-	// default the files name can include a delegation tool.
-	applyRecordedToolConfig(
-		options.sessionState,
-		registry,
-		options.tools === undefined && options.toolState === undefined
-			? globalDefaultToolState(settingsState, registry)
-			: registry.toolState(),
-	);
-
 	return { workspace, settingsManager, settingsState, modelState, registry, agentsMd, sessionManager };
 }
 
@@ -241,6 +229,10 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
  */
 export async function readSessionSnapshot(options: OpenAgentOptions): Promise<SessionSnapshot> {
 	const { workspace, settingsState, modelState, registry } = await assemble(options);
+	// The same derivation a live session runs — the ledger over the seed, or the global default's
+	// live view when nothing was handed in — so a cold read answers the choice a live session opens
+	// on, without replaying it into anything.
+	const tools = toolStateOf(options.sessionState, settingsState, registry, options.toolState);
 	return sessionSnapshot({
 		sessionState: options.sessionState,
 		absWorkspaceRoot: workspace.absRoot,
@@ -250,10 +242,10 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 		// The same merge `Agent.getApprovals` performs: the workspace's defaults with the session's own
 		// recorded choices over them. Neither half is optional, or the header's toggles would show a
 		// gate the live session does not have.
-		approvals: { ...getApprovals(settingsState), ...registry.toolState().approvalOverride },
-		// Read off the registry *after* the replay, so the toggles match a live session's exactly.
+		approvals: { ...getApprovals(settingsState), ...tools.approvalOverride },
+		// Read off the registry with the derived choice, so the toggles match a live session's exactly.
 		allTools: registry.names(),
-		activeTools: registry.activeNames(),
+		activeTools: registry.activeNames(tools),
 		// Judged against this workspace's own settings, the same way the live session's getter does it:
 		// a cold read and a live snapshot must agree here, or the panel would flip its "沿用全局" label
 		// the moment a session went from open to merely read.
@@ -295,6 +287,9 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 		settingsManager,
 		settingsState,
 		tools: registry,
+		// The deliberate loadout is the fallback the session's derivation reads against — undefined
+		// means the global default's live view, and a recorded `tool_config` entry outranks either.
+		...(options.toolState === undefined ? {} : { toolSeed: options.toolState }),
 		hooks,
 		openSession,
 		// Rebuilt whenever the active set or the approval set moves, so the prompt cannot promise tools

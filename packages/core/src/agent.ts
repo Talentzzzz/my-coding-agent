@@ -64,11 +64,7 @@ import {
 	SessionManager,
 	sessionEntryToContextMessages,
 } from "./session/session-manager.ts";
-import {
-	applyRecordedToolConfig,
-	followsGlobalOf,
-	globalDefaultToolState,
-} from "./session/tool-config.ts";
+import { followsGlobalOf, toolStateOf } from "./session/tool-config.ts";
 import type { SettingsManager, SettingsState } from "./settings-manager.ts";
 import {
 	applySettings,
@@ -78,7 +74,7 @@ import {
 	getRetrySettings,
 	getSteeringMode,
 } from "./settings-manager.ts";
-import { type ToolRegistry, type ToolRunContext } from "./tools/index.ts";
+import { type ToolRegistry, type ToolRunContext, type ToolState } from "./tools/index.ts";
 import type { Workspace } from "./workspace.ts";
 
 /**
@@ -152,13 +148,25 @@ export interface AgentConfig {
 	 */
 	settingsState: SettingsState;
 	/**
-	 * The tool definitions this build knows, and this session's own tool state — the active set and
-	 * the approval choices — which assembly has already put back on the branch's recorded choices.
+	 * The tool definitions this build knows, plus this session's own local tools — the delegation
+	 * pair, a test's custom tool. Structure only: the choice is not here.
 	 *
-	 * No workspace is resident here: the executable set is built fresh against the run context every
-	 * request asks for it, so the workspace is a value object that arrives with the request.
+	 * The active set and the approval map are derived from the ledger's `tool_config` entries on every
+	 * read ({@link AgentConfig.toolSeed} is the fallback), so nothing in this object mutates when the
+	 * choice moves. No workspace is resident either: the executable set is built fresh against the run
+	 * context every request asks for it, so the workspace is a value object that arrives with the
+	 * request.
 	 */
 	tools: ToolRegistry;
+	/**
+	 * The deliberate loadout assembly handed in, as the fallback the derivation reads against, or
+	 * undefined when the session follows the global default's live view.
+	 *
+	 * A seed, never a state: the SubAgent child's read-only narrowing arrives this way, and the
+	 * recorded `tool_config` entries still have the last word — the seed answers only on a branch
+	 * that carries no entry.
+	 */
+	toolSeed?: ToolState;
 	/**
 	 * The seams this session dispatches through: the provider transcript, the approval gate, and the
 	 * tool-result backstop. Defaults are installed by {@link openAgent}; a session built without one
@@ -461,6 +469,12 @@ export class Agent {
 	/** The caller's prompt builder; {@link buildSystemPrompt} is what a request calls. */
 	private readonly promptBuilder: (toolNames: readonly string[], approvals: Record<ToolApprovalKey, boolean>) => string;
 	private readonly tools: ToolRegistry;
+	/**
+	 * The fallback the tool choice derives against: the deliberate loadout assembly handed in, or
+	 * undefined for "the global default's live view". A seed, never a state — see
+	 * {@link AgentConfig.toolSeed}.
+	 */
+	private readonly toolSeed: ToolState | undefined;
 	/** Where a request actually leaves: the injected transport, before the retry policy wraps it. */
 	private readonly base: ChatTransport;
 	/**
@@ -484,6 +498,7 @@ export class Agent {
 		this.settingsManager = config.settingsManager;
 		this.settingsState = config.settingsState;
 		this.tools = config.tools;
+		this.toolSeed = config.toolSeed;
 		this.promptBuilder = config.systemPrompt;
 		this.hooks = config.hooks ?? createHooks();
 		this.modelState = config.modelState;
@@ -527,9 +542,21 @@ export class Agent {
 		return this.openSession.run !== undefined;
 	}
 
+	/**
+	 * The tool choice in force, derived from the ledger, on every read.
+	 *
+	 * Never held: every write of it lands in the ledger in the same stack (`setActiveTools`, an
+	 * approval choice), so deriving here is what keeps a branch move — which only moves the leaf —
+	 * answered by the branch's own entries, and a settings edit answered live when the fallback is
+	 * the global default. See {@link toolStateOf}.
+	 */
+	private toolState(): ToolState {
+		return toolStateOf(this.sessionState, this.settingsState, this.tools, this.toolSeed);
+	}
+
 	/** Names of the tools the model may call right now, in registration order. */
 	get activeTools(): string[] {
-		return this.tools.activeNames();
+		return this.toolState().activeToolNames;
 	}
 
 	/**
@@ -537,10 +564,10 @@ export class Agent {
 	 *
 	 * The single read point for the gate, the snapshot, and the prompt — all three answer the same
 	 * question, so none of them may reach past this to the settings manager alone. The session's own
-	 * half is the tool state's override, which assembly replayed from the branch's `tool_config` entry.
+	 * half is the recorded `tool_config` choice, derived with the tool set it was written beside.
 	 */
 	getApprovals(): Record<ToolApprovalKey, boolean> {
-		return { ...getApprovals(this.settingsState), ...this.tools.toolState().approvalOverride };
+		return { ...getApprovals(this.settingsState), ...this.toolState().approvalOverride };
 	}
 
 	/**
@@ -593,7 +620,7 @@ export class Agent {
 			model: resolvedModel(this.modelState),
 			approvals: this.getApprovals(),
 			allTools: this.tools.names(),
-			activeTools: this.tools.activeNames(),
+			activeTools: this.toolState().activeToolNames,
 			// Judged against this workspace's own settings, the same way a cold read judges it, so the
 			// panel's "沿用全局" label cannot disagree with itself between the two paths.
 			...followsGlobalOf(this.sessionState, this.settingsState, this.tools),
@@ -779,7 +806,7 @@ export class Agent {
 			// anyway. The queues' drain hooks are what connect the engine's take points to the queues
 			// the runtime holds.
 			await loop.runLoop(
-				{ messages: this.transcript(), tools: this.tools.active(this.runContext()) },
+				{ messages: this.transcript(), tools: this.tools.active(this.toolState(), this.runContext()) },
 				start.prompt,
 				{
 					// A request object from the bag as it stands; the fill chain fills the bag and hands
@@ -854,9 +881,12 @@ export class Agent {
 		const views = toolResultViewsOf(entries);
 		// The prompt is rebuilt here, not remembered: `applyConfig` can move the approval set and
 		// `setActiveTools` the tool set, and the model must be told about both on the next request.
+		// Both are derived from the ledger at this moment, so a choice that just landed is what the
+		// prompt describes.
+		const toolState = this.toolState();
 		const injected = {
 			messages: messagesOf(entries),
-			systemPrompt: buildSystemPrompt(this.promptBuilder, this.tools.activeNames(), this.getApprovals()),
+			systemPrompt: buildSystemPrompt(this.promptBuilder, this.tools.activeNames(toolState), this.getApprovals()),
 		};
 		const rewritten = await this.hooks.apply("context", injected);
 		const messages = this.forModel(rewritten?.messages ?? injected.messages, views);
@@ -875,11 +905,11 @@ export class Agent {
 			context: {
 				...context,
 				messages: system === undefined ? conversation : [system, ...conversation],
-				// The live executable set, built fresh against this request's run context. The loop declares
-				// it on the request (`toToolDeclaration`) rather than reading it out of the transcript, so
-				// a tool switched on mid-session reaches the model on the next request and the two cannot
-				// drift.
-				tools: this.tools.active(this.runContext()),
+				// The live executable set, built fresh against this request's run context from the choice
+				// derived above. The loop declares it on the request (`toToolDeclaration`) rather than
+				// reading it out of the transcript, so a tool switched on mid-session reaches the model on
+				// the next request and the two cannot drift.
+				tools: this.tools.active(toolState, this.runContext()),
 			},
 		};
 	}
@@ -1127,7 +1157,7 @@ export class Agent {
 		const previousLevel = this.thinkingLevel;
 		this.sessionManager.branch(this.sessionState, leafId);
 		this.applyBranchSelection();
-		this.applyBranchToolConfig();
+		this.emitBranchToolConfig();
 		// Reported because neither field is in the branch payload, and every stream other than the one
 		// that asked is holding a snapshot taken before the move.
 		this.emitConfigChanged({
@@ -1140,46 +1170,42 @@ export class Agent {
 	}
 
 	/**
-	 * Put the session back on the choices the branch now in force recorded.
+	 * Report the choices the branch now in force recorded.
 	 *
-	 * Moving the leaf is the one moment a session's own config can be wrong: the choices belong to the
-	 * branch, so which tools are active and which ask for approval are facts about where the leaf is,
-	 * exactly as the conversation is. Without this, a session that chose on the branch it is leaving
-	 * would carry that choice onto a branch that never had it, while a reopen of the same file restored
-	 * the target branch's — the same session, two answers.
-	 *
-	 * A branch that recorded nothing falls back on the global default the settings files name — or the
-	 * registry's full set when they name none — which is what a session that never chose runs on; the
-	 * settings files say which tools are active, so a move onto an unrecorded branch restores that
-	 * answer rather than keeping the branch it left behind. Only a recorded `tool_config` can name
+	 * Moving the leaf is the one moment a session's own config can be wrong — except there is nothing
+	 * to move: the choice is derived from the ledger on every read, so a leaf that now stands on
+	 * another branch's entries is already answered by them. A branch that recorded nothing falls back
+	 * on the global default the settings files name — or the registry's full set when they name none —
+	 * which is what a session that never chose runs on. Only a recorded `tool_config` can name
 	 * something else, and every move ends on the branch's answer rather than the previous one's.
+	 *
+	 * What is left is the report: every stream other than the one that asked is holding a snapshot
+	 * taken before the move, and neither map is in the branch payload. Both travel whole: this is the
+	 * branch's state, not a delta, and a client applies either shape.
 	 */
-	private applyBranchToolConfig(): void {
-		// The fallback is the global default's live view, rebuilt from the settings as they are now, so
-		// a move onto a branch that recorded nothing restores what a fresh session would open on.
-		applyRecordedToolConfig(this.sessionState, this.tools, globalDefaultToolState(this.settingsState, this.tools));
-		// Reported because neither map is in the branch payload, and every stream other than the one
-		// that asked is holding a snapshot taken before the move. Both maps travel whole: this is the
-		// branch's state, not a delta, and a client applies either shape.
-		this.emitConfigChanged({ approvals: this.getApprovals(), tools: this.tools.activeNames() });
+	private emitBranchToolConfig(): void {
+		this.emitConfigChanged({ approvals: this.getApprovals(), tools: this.toolState().activeToolNames });
 	}
 
 	/**
 	 * Narrow the tools the model may call. An unknown name throws and leaves the session as it was.
 	 *
-	 * The change is recorded as one `tool_config` entry and takes effect on the next request:
-	 * the fill chain offers the registry's live active set with every request, so the
-	 * model is told about the narrowed set when the next prompt is built.
+	 * The change is recorded as one `tool_config` entry and takes effect on the next request: the
+	 * fill chain derives the choice from the ledger with every request, so the model is told about
+	 * the narrowed set when the next prompt is built.
 	 */
 	setActiveTools(names: string[]): void {
-		const previous = this.tools.activeNames();
-		this.tools.setActive(names);
-		const active = this.tools.activeNames();
-		if (active.length === previous.length && active.every((name, index) => name === previous[index])) return;
+		const previous = this.toolState().activeToolNames;
+		const known = new Set(this.tools.names());
+		const unknown = names.filter((name) => !known.has(name));
+		if (unknown.length > 0) {
+			throw new Error(`Unknown tool${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
+		}
+		if (names.length === previous.length && names.every((name, index) => name === previous[index])) return;
 
-		this.sessionManager.appendToolConfig(this.sessionState, active, this.getApprovals());
+		this.sessionManager.appendToolConfig(this.sessionState, [...names], this.getApprovals());
 		this.publish();
-		this.emitConfigChanged({ tools: active });
+		this.emitConfigChanged({ tools: [...names] });
 	}
 
 	/**
@@ -1236,8 +1262,10 @@ export class Agent {
 	applyConfig(patch: ConfigPatch): void {
 		const previousApprovals = this.getApprovals();
 		if (patch.approval !== undefined) {
-			this.tools.mergeApprovalOverride(patch.approval);
-			this.sessionManager.appendToolConfig(this.sessionState, this.tools.activeNames(), this.getApprovals());
+			// The entry records the whole map in force — the settings with this session's choice over
+			// them — which is the shape every read of the ledger answers from.
+			const approvals = { ...previousApprovals, ...patch.approval };
+			this.sessionManager.appendToolConfig(this.sessionState, this.toolState().activeToolNames, approvals);
 		}
 		applySettings(this.settingsState, patch.approval === undefined ? patch : { ...patch, approval: undefined });
 		this.openSession.runtime.steeringQueue.mode = getSteeringMode(this.settingsState);
@@ -1299,8 +1327,10 @@ export class Agent {
 			? { approved: true }
 			: { approved: false, reason: `The user denied permission to run ${call.toolName}.` };
 		if (approved) {
-			this.tools.mergeApprovalOverride({ [call.toolName as ToolApprovalKey]: false });
-			this.sessionManager.appendToolConfig(this.sessionState, this.tools.activeNames(), this.getApprovals());
+			// The grant is the session's own choice for this tool, recorded as the whole map in force
+			// with the tool turned off — the same move a config patch makes.
+			const approvals = { ...this.getApprovals(), [call.toolName as ToolApprovalKey]: false };
+			this.sessionManager.appendToolConfig(this.sessionState, this.toolState().activeToolNames, approvals);
 		}
 		// Said before the run starts: the choice is the session's own and lands now, while the call
 		// itself stays dangling until the run's recovery pass closes it.

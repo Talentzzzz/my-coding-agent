@@ -39,28 +39,34 @@ export function globalDefaultToolState(s: SettingsState, registry: ToolRegistry)
 }
 
 /**
- * Put a registry back on the tool set the active branch recorded, with the fill as the fallback.
+ * The tool choice one session is in, derived from the ledger, on every read.
  *
- * `tool_config` entries hold both maps whole, so the last one on the branch is the state and every
- * earlier one is history. A branch that carries no entry falls back on `fallback` — the global
- * default's live view, or the deliberate loadout the caller handed in — because "the choice the
- * session never made" is the global default, not "whatever the last branch left in the registry".
+ * `tool_config` entries hold both maps whole, so the last one on the branch is the choice and every
+ * earlier one is history — which is why nothing needs to hold it: the registry's active set and the
+ * gate's approvals all read through here, and a write lands in the ledger first, so the next read
+ * already answers from it. A branch that carries no entry falls back on `seed` — the global default's
+ * live view, or the deliberate loadout the caller handed in — because "the choice the session never
+ * made" is the global default, not "whatever the last branch left behind".
  *
- * Both halves are applied to the registry: the recorded set is narrowed to the tools this build still
- * knows, so one an upgrade dropped is dropped by the replay too and cannot refuse the session its
- * reopen — and `fallback` is narrowed the same way, for the same reason. A recorded approval is the
- * session's own choice and is carried whole; without one the fallback's answer stands, which for the
- * global default is "follow the settings", kept live.
+ * The recorded set is narrowed to the tools this build still knows, so one an upgrade dropped is
+ * dropped by the read too and cannot refuse the session its reopen — and the fallback is narrowed the
+ * same way, for the same reason. A recorded approval is the session's own choice and is carried whole;
+ * without one the fallback's answer stands, which for the global default is "follow the settings",
+ * kept live.
  */
-export function applyRecordedToolConfig(
+export function toolStateOf(
 	state: SessionState,
+	s: SettingsState,
 	registry: ToolRegistry,
-	fallback: ToolState,
-): void {
+	seed?: ToolState,
+): ToolState {
 	const recorded = getRecordedToolConfig(state);
-	const names = recorded.activeTools ?? fallback.activeToolNames;
-	registry.setActive(narrowToKnown(names, registry.names()));
-	registry.setApprovalOverride(recorded.approval ?? fallback.approvalOverride ?? {});
+	const fallback = seed ?? globalDefaultToolState(s, registry);
+	const names = narrowToKnown(recorded.activeTools ?? fallback.activeToolNames, registry.names());
+	return {
+		activeToolNames: names,
+		approvalOverride: { ...(recorded.approval ?? fallback.approvalOverride ?? {}) },
+	};
 }
 
 /**
