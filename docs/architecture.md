@@ -4,7 +4,7 @@
 
 ```
 窗口 (packages/web)  --REST 命令-->  server (packages/server)  -->  core (packages/core)  -->  @my-agent/llm  -->  供应商
-                     <--一条常驻 WebSocket--  五个无状态单例 + 编排      @my-agent/loop 循环、工具、hook
+                     <--一条常驻 WebSocket--  四个域服务 + 一个编排层    @my-agent/loop 循环、工具、hook
                         （其上是 N 条逻辑流）
 ```
 
@@ -16,9 +16,9 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 
 ## 各 package 的职责
 
-**core** 是无头的：工作区、导入的模型、工具、会话管理器、系统提示词、审批闸门，对 HTTP 和 DOM 一无所知。这五个域是**无状态单例**——账本、设置、模型行、工具定义平级互不依赖，`Agent` 只做跨域编排；编排层自己不持有会话状态：durable 的一半是账本，live 的一半（两条队列与在飞运行）居 hub 持有的活登记处 `OpenSessions`——条目 `OpenSession` 装着 `SessionRuntime`（[ADR-0006](adr/0006-stateless-session-architecture.md) §1、§4，[ADR-0007](adr/0007-services-drop-instance-state.md) §4）。它发出 `AgentSessionEvent` 值 —— @my-agent/loop 的 `AgentEvent`，加上它自己的成员：队列深度、压缩、entry 落地、配置变更、重试。
+**core** 是无头的：工作区、导入的模型、工具、会话管理器、系统提示词、审批闸门，对 HTTP 和 DOM 一无所知。它是 **ADR-0007 的五个无属性服务**——账本、设置、模型行、工具定义这四个域平级互不依赖，`Agent` 是第五个、只做跨域编排；编排层自己不持有会话状态：durable 的一半是账本，live 的一半（两条队列与在飞运行）居 hub 持有的活登记处 `OpenSessions`——条目 `OpenSession` 装着 `SessionRuntime`（[ADR-0006](adr/0006-stateless-session-architecture.md) §1、§4，[ADR-0007](adr/0007-services-drop-instance-state.md) §4）。它发出 `AgentSessionEvent` 值 —— @my-agent/loop 的 `AgentEvent`，加上它自己的成员：队列深度、压缩、entry 落地、配置变更、重试。
 
-**server** 拥有传输层和活跃会话：`SessionHub` 持有五个单例——模型行、设置、账本、工具目录——加上**一个**编排层 `Agent` 与一个按 id 键控的活登记处 `OpenSessions`（每 id 一份条目 `OpenSession`——两条队列与在飞运行、订阅集合与跨栈 run 槽、一次打开解析出的装配，进程里唯一的跨栈内存会话态，宿主收摊时随之删除）；除此之外它只按 id 记 claim（谁能用这个会话），那本是传输层的事（[ADR-0001](adr/0001-transport-websocket-mux.md)）；`Router` 把请求变成对某个控制器的一次调用，每个控制器在它做事期间持有 claim；`mux.ts` 的连接层持有一张订阅表（连接 × 会话），**订阅不拿 claim**；`projection.ts` 把"每个会话在做什么"聚成侧边栏的行。模型是**每次请求**都从 `models.json` 读，而不是缓存成一份目录；会话在每次请求前从它命名的那一行重新推导自己的模型，所以设置面板的一次编辑——密钥、端点、窗口、wire id——能抵达**每一个已经打开的会话**。
+**server** 拥有传输层和活跃会话：`SessionHub` 持有那五个无属性服务——模型行、设置、账本、工具目录四个域，加**一个**编排层 `Agent`——以及一个按 id 键控的活登记处 `OpenSessions`（每 id 一份条目 `OpenSession`——两条队列与在飞运行、订阅集合与跨栈 run 槽、一次打开解析出的装配，进程里唯一的跨栈内存会话态，宿主收摊时随之删除）；除此之外它只按 id 记 claim（谁能用这个会话），那本是传输层的事（[ADR-0001](adr/0001-transport-websocket-mux.md)）；`Router` 把请求变成对某个控制器的一次调用，每个控制器在它做事期间持有 claim；`mux.ts` 的连接层持有一张订阅表（连接 × 会话），**订阅不拿 claim**；`projection.ts` 把"每个会话在做什么"聚成侧边栏的行。模型是**每次请求**都从 `models.json` 读，而不是缓存成一份目录；会话在每次请求前从它命名的那一行重新推导自己的模型，所以设置面板的一次编辑——密钥、端点、窗口、wire id——能抵达**每一个已经打开的会话**。
 
 **web** 拥有呈现：协议消息进，视图模型，DOM 出。它持有一条常驻连接（`client.ts` 的 `MuxClient`），把每条逻辑流的帧喂给对应的一栏，把连接级载荷喂给侧边栏的行表。它永远看不到供应商 SDK、transcript 文件、或服务器没发过来的任何路径。
 
@@ -110,15 +110,15 @@ level 本身骑在模型上（`Model.thinkingLevel`，由 `createModel(config, l
 
 ## 工具契约
 
-一个工具就是一个 `AgentTool`：名字、描述、一个 TypeBox schema、以及 `execute`。`createToolRegistry(workspace)` 用闭包绑定工作区，所以每一次路径解析都经过 `Workspace.resolve`，它拒绝根之外的任何东西。工具失败即抛出；@my-agent/loop 把一次抛出变成给模型的错误结果。**没有插件注册表。** 注册表持有定义和每会话的活跃集合（`all`、`get`、`active`、`activeNames`、`setActive`、`register`），而 `setActive` 对未知名字的处理是抛出且什么都不改。
+一个工具就是一个 `AgentTool`：名字、描述、一个 TypeBox schema、以及 `execute`。**没有插件注册表。** 工具那一侧分三样东西，各有各的家：`toolDefinitions()` 是六个内置的**定义**，只读、进程级，每条是 `(run) => createReadTool(run.workspace)` 这样的工厂——因为一个 `AgentTool` 闭包着自己的工作区，而一个持着它们的目录就等于持着每会话的工作区；`createToolRegistry(toolDefinitions())` 是进程的**目录**（定义 + `register` 进来的工具，只有测试走这条路）；而"这一轮能调哪些、哪些要问"是**一次选择**，是纯数据 `ToolState`，从账本的 `tool_config` entry 派生、随每次读取到达，不在注册表里、也不在任何一处被持有。注册表因此只有 `names` / `build` / `activeNames` / `active` / `register` 五个方法：`active(state, run)` 拿着随请求来的 `ToolRunContext`（工作区 + bash 超时）现建可执行集合，每一次路径解析都经过同一个 `Workspace.resolve`，它拒绝根之外的任何东西。工具失败即抛出；@my-agent/loop 把一次抛出变成给模型的错误结果。
 
 执行模式是**每个工具上的字段**，不是注册表状态：`read`、`glob`、`grep` 是 `parallel`；`write` 和 `edit` 是 `sequential`，因为对同一个文件的两次并发编辑会竞争；`bash` 是 `sequential`，因为并发命令交错在一起的输出无法阅读。
 
 `write` 和 `edit` 的回答不只是文本。除了模型读到的那份内容，它们结果的 `details` 还携带一个 `FileDiff` —— 形状在 `protocol.ts` 里 —— 包含这次变更的每一行、它在旧文件和新文件里的行号、哪些行是新增、以及一条被重写且**确实不同**的行的字符范围。`tools/diff.ts` 只计算一次：剥掉公共的头和尾，然后对剩下的部分做 LCS，并做了预算控制，使得整段都是变更的中间部分被报告为**一次重写**而不是一张二次方的表，最后按三行上下文切成 hunk。`diffText` 把同一份报告的"模型那一半"投影出来，所以模型据以自查的文本和读者看到的卡片不可能描述不同的变更。这份报告骑在循环自己的 `tool_execution_end` 事件上，所以 wire 不需要为它加成员；而循环记录整个结果——因此 transcript 把报告保留在工具文本旁边。**它永远不会被发给任何供应商**：一次请求只携带工具结果的 content，且只有 content，而 `estimateTokens` 量的是同一个字段，所以一份报告既不花 token，也不会导致更早的压缩。
 
-一个会话拥有一个注册表，而 `setActiveTools(names)` 记录这个决定。注册表的活跃集合就是循环执行的东西——它随每次请求经 `prepareRequest` 递给循环，也是循环对一次脚本化调用说"不"的依据——对未激活工具的调用会返回 `Tool <name> not found`，一个错误结果，而不是静默成功。transcript 的**打头 system 消息**只装提示词，每次请求**重建**而非追加——第二份提示词描述的是一个已经不存在的状态。**工具是请求的参数，不是消息内容**：`prepareRequest` 把活跃集合放进上下文的 `tools`，循环用 `toToolDeclaration` 削成声明，传输层直接拼成请求体的 `tools`，所以改工具集只需要下一次请求。构建器拿到的是注册表当前的名字和会话的**有效审批映射**——设置在下面、本会话自己的选择在上面，**包括那些未激活的工具**，所以一个被收窄掉的受闸工具仍然被声明为受闸，而不是被静默丢掉。重建发生在下一次请求；一次已经在飞的运行保持它启动时的那套。
+`setActiveTools(names)` 记录这个决定（写成一条 entry，不是写进注册表），而活跃集合就是循环执行的东西——它随每次请求经 `prepareRequest` 递给循环，也是循环对一次脚本化调用说"不"的依据——对未激活工具的调用会返回 `Tool <name> not found`，一个错误结果，而不是静默成功。transcript 的**打头 system 消息**只装提示词，每次请求**重建**而非追加——第二份提示词描述的是一个已经不存在的状态。**工具是请求的参数，不是消息内容**：`prepareRequest` 把活跃集合放进上下文的 `tools`，循环用 `toToolDeclaration` 削成声明，传输层直接拼成请求体的 `tools`，所以改工具集只需要下一次请求。构建器拿到的是注册表当前的名字和会话的**有效审批映射**——设置在下面、本会话自己的选择在上面，**包括那些未激活的工具**，所以一个被收窄掉的受闸工具仍然被声明为受闸，而不是被静默丢掉。重建发生在下一次请求；一次已经在飞的运行保持它启动时的那套。
 
-两张映射都是**会话自己的**，记录在由 `setActiveTools` 和 `applyConfig` 写出的 `tool_config` entry 里——两者的一份快照，因为在 UI 里"启用一个工具"和"选择它的审批"是同一个决定，而读取方重放分支、取最后一条。设置文件保持它们的角色：新会话打开时的默认值；一个会话里的切换不再抵达该工作区上的其他每个会话。`applyConfig` 从到达 `settingsManager.applySettings` 的东西里剥掉 `approval`，所以文件不被写入，而队列模式仍然照写。这条 entry 是**状态，绝不是对话**：`prepareRequest` 每一轮都从活注册表重建请求，所以一条 `tool_config` entry 对提示词毫无贡献。第三个读取方是分支：见*分支*。
+两张映射都是**会话自己的**，记录在由 `setActiveTools` 和 `applyConfig` 写出的 `tool_config` entry 里——两者的一份快照，因为在 UI 里"启用一个工具"和"选择它的审批"是同一个决定，而读取方重放分支、取最后一条。设置文件保持它们的角色：新会话打开时的默认值；一个会话里的切换不再抵达该工作区上的其他每个会话。`applyConfig` 从到达 `settingsManager.applySettings` 的东西里剥掉 `approval`，所以文件不被写入，而队列模式仍然照写。这条 entry 是**状态，绝不是对话**：`prepareRequest` 每一轮都从当下的选择重建请求，所以一条 `tool_config` entry 对提示词毫无贡献。第三个读取方是分支：见*分支*。
 
 ## Hook
 
@@ -253,18 +253,18 @@ type AgentSessionEvent =
 
 ## 谁拥有一个会话
 
-`SessionHub`（`server/src/hub.ts`）持有五个单例和一个 `Agent`：编排层是本进程唯一的一份，方法一律以会话 id 调用；模型、设置、账本、工具目录各自是它们自己的服务；活登记处 `OpenSessions` 按 id 装着两条队列、在飞运行、订阅集合、跨栈 run 槽与那次打开的装配，进程重启即从零重建（[ADR-0006](adr/0006-stateless-session-architecture.md) §4、[ADR-0007](adr/0007-services-drop-instance-state.md) §4）。除此之外 hub 只有一张按 id 的 claim 表——那是传输层的事实，所以计数器住在传输层。**订阅不拥有会话**：一条逻辑流是 mux 订阅表里的一行（连接 × 会话），它不拿 claim、也不让会话保持打开。持有一个 claim 的是**会改变会话的请求**，在它自己的长度内一个；审批的恢复运行也走同一条 `claim()`。所以一个会话可以在没人在看的情况下运行，而一个开着却闲置的窗口也不会替谁留住一个条目。
+`SessionHub`（`server/src/hub.ts`）持有五个无属性服务与一个活登记处：编排层是本进程唯一的一份，方法一律以会话 id 调用；模型、设置、账本、工具目录各自是它们自己的服务（四个域加编排层，就是 ADR-0007 的五个）；活登记处 `OpenSessions` 按 id 装着两条队列、在飞运行、订阅集合、跨栈 run 槽与那次打开的装配，进程重启即从零重建（[ADR-0006](adr/0006-stateless-session-architecture.md) §4、[ADR-0007](adr/0007-services-drop-instance-state.md) §4）。除此之外 hub 只有一张按 id 的 claim 表——那是传输层的事实，所以计数器住在传输层。**订阅不拥有会话**：一条逻辑流是 mux 订阅表里的一行（连接 × 会话），它不拿 claim、也不让会话保持打开。持有一个 claim 的是**会改变会话的请求**，在它自己的长度内一个；审批的恢复运行也走同一条 `claim()`。所以一个会话可以在没人在看的情况下运行，而一个开着却闲置的窗口也不会替谁留住一个条目。
 
 读 transcript 不算在内。`SessionController.read()` 既不拿 claim 也不打开会话：`SessionHub.snapshotOf()` 在本进程运行该会话时从活对象回答，否则从它的 JSONL 文件回答，走的是装配路径用的同一个 `readSessionSnapshot()`——所以一次读取的代价是一次文件读取而不是一个会话，它既不能保活一个会话、也不能驱逐一个、更不会在 hub 里留下痕迹。订阅也一样：`SessionHub.observe(sessionId, observer)` 只往观察表里挂一个观察者，观察者既不保活它看的会话，也不花钱跑它。
 
 ```
 一条常驻连接 ─┐ 订阅表（连接 × 会话，不拿 claim）
-一次请求      ─┼─ claim ─> HostedSession { id, claims }         id -> claim     (SessionHub)
+一次请求      ─┼─ claim ─> HostedSession { id, absWorkspaceRoot, claims, reaping }   id -> claim (SessionHub)
 在飞的运行    ─┘                └ id -> OpenSession（队列、在飞运行、订阅、装配）(OpenSessions)
                                  └ 一个 Agent 服务全部 id        (core)
 ```
 
-每个 id 一个循环就是全部要点：**把所有权按连接而不是按会话来决策**，就意味着同一个会话上的两个标签页会在一个 JSONL 文件上构建出两个 `Agent` 对象，并各自独立地追加。`SessionHub.claim()` 是唯一数 claim 的东西——改变会话的请求与在飞的运行都经过它——而订阅故意绕开它："这个请求必须跑在活跃会话上"（claim 回答的）与"这条连接要不要这个会话的内容"（订阅回答的）是两个永不互相换算的问题（[ADR-0001](adr/0001-transport-websocket-mux.md)）。一个标签页落在哪个会话上由它记住的 id 决定，所以重载恢复的是它当时在看的那段对话，而不是 hub 会默认到的那个。
+每个 id 一份所有权就是全部要点：**把所有权按连接而不是按会话来决策**，就意味着同一个会话上的两个标签页各自往一个 JSONL 文件上跑、各自独立地追加，而没有一处能回答"这个会话现在是谁在跑"。（编排层本身已经是全进程一份，所以这条代价今天不再表现为两个 `Agent` 对象，而是表现为两条运行争一份 transcript——结论没变，形状变轻了。）`SessionHub.claim()` 是唯一数 claim 的东西——改变会话的请求与在飞的运行都经过它——而订阅故意绕开它："这个请求必须跑在活跃会话上"（claim 回答的）与"这条连接要不要这个会话的内容"（订阅回答的）是两个永不互相换算的问题（[ADR-0001](adr/0001-transport-websocket-mux.md)）。一个标签页落在哪个会话上由它记住的 id 决定，所以重载恢复的是它当时在看的那段对话，而不是 hub 会默认到的那个。
 
 一条逻辑流结束（客户端 `cancel`、或它看着的宿主被回收）只是停止转发：它**刻意不**中止——正在飞的运行继续跑、继续持久化，所以刷新页面、关掉标签页、或切换会话都不可能截断一份 transcript。看着的宿主被回收时那条车道会收到一帧 `end`；"从来没在跑"与"看着的会话停了"是两件事，只有后者发 `end`。
 
@@ -300,7 +300,7 @@ entry 自格式变更起就携带 `id` / `parentId`，所以一个会话的文�
 
 **报告的是整份日志，不是活跃链。** 一次走遍文件里的每一条 entry，把每一处分叉都报出来，只有 `options[].active` 是与链相关的（哪一条选项是 leaf 现在走的那条）。这是树的**归属**问题：树是这段对话的形状，不是 leaf 当前位置的形状。只报链上的分叉时，回退到第一条之后，它下面的岔就从图上消失了——同一个会话，同一个文件，位置一动就少一半树，而"我能回到哪里去"正是这张图唯一要回答的问题。每个分支点因此还带一个 `anchor`：窗口按 entry 摆卡片（线上的一句 user 消息，或更早某个分叉点已经画出来的那条走法），`anchor` 就是这个点上方最近的那张卡。点本身不一定在线上，`anchor` 一定是它的祖先——所以按文件序折进来的窗口，永远在摆一个点之前就摆好了它要挂上去的那张卡。
 
-**工具选择也属于分支。** 哪些工具是激活的、哪些要请求审批，是关于 leaf 在哪里的**事实**，与对话本身一样，所以 `branchTo` 在移动后重放目标分支的 `tool_config` entry——`applyRecordedToolConfig` 是唯一的读取方，从那里和从 `openAgent` 被调用。一条什么都没记录的分支把注册表放回设置文件里的**全局默认工具集**（没写就是全量），并把审批映射放回设置上。没有这次重放，一个会话会用两种说法回答：活会话保持它离开的那条分支的选择，而重新打开同一个文件却恢复目标分支的。
+**工具选择也属于分支。** 哪些工具是激活的、哪些要请求审批，是关于 leaf 在哪里的**事实**，与对话本身一样，所以 `branchTo` 在移动后重放目标分支的 `tool_config` entry——`applyRecordedToolConfig` 是唯一的读取方，从那里和从 `openAgent` 被调用。一条什么都没记录的分支把这个会话的选择放回设置文件里的**全局默认工具集**（没写就是全量）与设置上的审批映射。没有这次重放，一个会话会用两种说法回答：活会话保持它离开的那条分支的选择，而重新打开同一个文件却恢复目标分支的。
 
 **只有 entry id 在传。** `BranchOption` 携带子节点的 id 和一个标签——**从不**携带那个选择所通向的 tip。一条分支在它的 tip 上生长，所以一个被记住的 tip 在那条分支被继续的那一刻就成了过期指针，而一个持有它的窗口会回退到对话早已离开的地方；服务器在做选择时从 id 往下走。`SessionSnapshot.branchPoints` 就是这条 wire 的全部，所以一个无视它的客户端画的仍然只是它一直在画的那一条链。
 
@@ -337,7 +337,7 @@ header 记录父级的**路径**，因为那是一个手里拿着某个文件的
 
 - **工具集合。** 子级跑 `read`、`glob`、`grep`（`SUBAGENT_TOOLS`），固定写在代码里，而不是调用方模型填的一个参数：子级可以跑哪些工具是**宿主**的决定，而一个能自己点名工具集的模型可以在运行途中给自己授予 `write`。
 - **审批。** 它的设置管理器是内存中的、且所有审批都关——一个子级的审批请求没有窗口可以回答它，而只读集合在默认审批集合下也不需要审批。
-- **嵌套。** `subagents: false` 把这一对挡在子级的注册表之外。
+- **嵌套。** `subagents: false` 把这一对挡在子级的工具集合之外。
 
 报告是子级**最后一条 assistant 消息**的文本，从子级自己的 `SessionManager` 读回来：一次失败的供应商调用**不是**一次拒绝——运行以一条 `stopReason` 为 `"error"` 的 assistant 消息结束——所以结果从 transcript 读出，并作为**工具错误**而不是报告呈现给父级。
 

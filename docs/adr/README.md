@@ -17,8 +17,8 @@
 | [0003](0003-queued-writes-at-drain.md) | 排队消息在取走点落盘——store 的顺序就是循环回放的顺序 | 已接受（2026-10-15，20 号拍板并落地），取代「运行中接受的 prompt 立刻持久化」 |
 | [0004](0004-shell-sandbox-switches-removed.md) | 外壳不再自带 `no-sandbox` 与 GPU 开关——那是给一台已经变了的机器打的补丁 | 已接受（2026-10-16，03 号落地），取代一段**从未提交过**的工作区补丁 |
 | [0005](0005-modes-are-a-tool-config-choice.md) | 模式是一次工具集与审批集的选择，不是一个新状态层 | 已接受（2026-10-17，03 号拍板并落地） |
-| [0006](0006-stateless-session-architecture.md) | 会话架构改为无状态服务与每请求重放，审批改为结束重启 | 已接受（2026-10-31，落地中，见 `.scratch/stateless-agent/`）；「薄壳门面」条款由 0007 重开 |
-| [0007](0007-services-drop-instance-state.md) | 五个单例服务不持有实例状态——聚合袋拆除，「薄壳门面」条款重开 | 已接受（2026-11-01，落地中，见 `.scratch/pure-services/`） |
+| [0006](0006-stateless-session-architecture.md) | 会话架构改为无状态服务与每请求重放，审批改为结束重启 | 已接受（2026-10-31，已落地，见 `.scratch/stateless-agent/`）；「薄壳门面」条款由 0007 重开 |
+| [0007](0007-services-drop-instance-state.md) | 五个单例服务不持有实例状态——聚合袋拆除，「薄壳门面」条款重开 | 已接受（2026-11-01，已落地——08 号票跑绿 check 与 smoke 全套并总校文档，见 `.scratch/pure-services/`） |
 
 ## 门槛
 
