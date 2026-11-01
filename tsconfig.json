@@ -18,6 +18,7 @@
 		"scripts/cdp.ts",
 		"scripts/smoke-projection.ts",
 		"scripts/fake-transport.ts",
+		"scripts/mount-session.ts",
 		"scripts/smoke-default-model.ts",
 		"scripts/wire/**/*.ts",
 		"scripts/smoke-mux.ts",

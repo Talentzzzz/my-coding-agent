@@ -38,17 +38,10 @@ import { createRoutes } from "../packages/server/src/controllers/routes.ts";
 import { Router } from "../packages/server/src/http/routing.ts";
 import { createServer } from "../packages/server/src/http.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
+import { mountSession } from "./mount-session.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
 import type { PendingApproval } from "@my-agent/core/protocol";
-import {
-	openAgent,
-	createSessionState,
-	inMemorySettingsState,
-	type Agent,
-	type ModelSource,
-	type ModelConfig,
-	workspaceDir,
-} from "@my-agent/core";
+import { inMemorySettingsState, type Agent, type ModelConfig, workspaceDir } from "@my-agent/core";
 
 let failures = 0;
 
@@ -112,9 +105,8 @@ async function waitParked(base: string, sessionId: string, ms = 15_000): Promise
 	}
 }
 
-// The row every rig's session runs on. Held here rather than read from the hub: the hub reads the
-// machine's own `models.json`, and a test must not depend on what the person running it happens to
-// have configured.
+// The row every rig's session runs on. Each hub below is given a scratch agent home of its own and
+// these rows, so nothing here depends on — or writes to — what the person running it has configured.
 const rows: ModelConfig[] = [
 	{
 		name: "anthropic",
@@ -125,7 +117,6 @@ const rows: ModelConfig[] = [
 		maxTokens: 8_192,
 	},
 ];
-const models: ModelSource = { list: () => rows };
 const modelName = "anthropic";
 process.stdout.write(`model ${modelName} via the scripted transport\n`);
 
@@ -141,7 +132,6 @@ const root = await mkdtemp(join(tmpdir(), "my-agent-approval-"));
 // `docs/notes.md` §一: left exactly as written, `workspaceRoot` included, even though `HubOptions`
 // declares `absCwd`. This section mounts the session by hand and never asks the hub to resolve a
 // workspace, which is the only reason it works — and why the note says not to "fix" it.
-const hub = new SessionHub({ workspaceRoot: root });
 const fake = createFakeTransport();
 // One response per call: a tool call, then the text that ends the run. Both are assistant messages —
 // `fakeToolCall` is a content block, not a response on its own.
@@ -149,18 +139,16 @@ fake.setResponses([
 	fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 	fakeAssistantMessage("done"),
 ]);
-const sessionState = createSessionState(root);
-const sessionId = sessionState.sessionId;
-const session = await openAgent({
-	absWorkspaceRoot: root,
-	sessionState,
-	models,
-	api: fake.api,
-	model: modelName,
-	settingsState: inMemorySettingsState({ approval: { read: true } }),
-});
+// The hub's one orchestrator sends through the scripted transport, so every session it serves does.
+const hub = new SessionHub({ workspaceRoot: root, api: fake.api, modelsHome: join(root, "agent-home") });
+hub.setModelConfigs(rows);
 // Mounted the way `SessionHub.open()` mounts one, so every request below claims through the real hub.
-(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(sessionId, new HostedSession(sessionId, session, root));
+const { id: sessionId } = await mountSession(hub, {
+	root,
+	model: modelName,
+	settings: inMemorySettingsState({ approval: { read: true } }),
+});
+const session = hub.agent;
 
 const roundTrip = await serve(hub);
 try {
@@ -435,7 +423,7 @@ try {
 	try {
 		const { wire, viewer } = await driveToApproval(patient);
 		const parked = patient.host;
-		check("the run parked at the approval", parked.session.hasPendingApprovals(parked.id));
+		check("the run parked at the approval", patient.session.hasPendingApprovals(parked.id));
 
 		// The viewer switches away, and its claim is the *only* thing keeping the session open — a
 		// subscription takes none. So this release is what starts the reap, and the run parked at the
@@ -444,7 +432,7 @@ try {
 		patient.hub.release(viewer);
 		await sleep(1_500);
 
-		check("the approval is still pending well past the old denial window", parked.session.hasPendingApprovals(parked.id), "it was denied");
+		check("the approval is still pending well past the old denial window", patient.session.hasPendingApprovals(parked.id), "it was denied");
 		check("the session was not reaped out from under it", patient.hub.live.includes(parked.id), patient.hub.live.join(","));
 		check(
 			"and no denial reached the lane",
@@ -498,14 +486,17 @@ try {
 	try {
 		const { wire, viewer } = await driveToApproval(abandoned);
 		const parked = abandoned.host;
-		check("the run parked at the approval", parked.session.hasPendingApprovals(parked.id));
+		check("the run parked at the approval", abandoned.session.hasPendingApprovals(parked.id));
 
 		wire.cancel(abandoned.sessionId);
 		abandoned.hub.release(viewer);
 
+		// Read off the transcript rather than the live session: the denial is what ends the run, and a
+		// reaped session has no registry entry left for a live read to reach. The cold read derives the
+		// question from the ledger, which is the same answer the next process would get.
 		check(
 			"an approval nobody came back to is denied after the grace",
-			await until(() => !parked.session.hasPendingApprovals(parked.id), 8_000),
+			await until(async () => ((await readSession(abandoned.url, parked.id))?.pendingApprovals.length ?? 1) === 0, 8_000),
 			"it was still pending",
 		);
 		check(
@@ -525,7 +516,7 @@ try {
 	try {
 		const { wire, viewer } = await driveToApproval(lookedThenLeft);
 		const parked = lookedThenLeft.host;
-		check("the run parked at the approval", parked.session.hasPendingApprovals(parked.id));
+		check("the run parked at the approval", lookedThenLeft.session.hasPendingApprovals(parked.id));
 
 		wire.cancel(lookedThenLeft.sessionId);
 		lookedThenLeft.hub.release(viewer);
@@ -539,13 +530,13 @@ try {
 			await until(() => !parked.reaping, 6_000),
 			"it stayed reaping, so no later release could ever reap this session",
 		);
-		check("and the approval is still unanswered", parked.session.hasPendingApprovals(parked.id));
+		check("and the approval is still unanswered", lookedThenLeft.session.hasPendingApprovals(parked.id));
 
 		// ...and now they leave without answering. The session must still be reapable.
 		lookedThenLeft.hub.release(back);
 		check(
 			"leaving without answering parks again, and the grace runs out for real",
-			await until(() => !parked.session.hasPendingApprovals(parked.id), 8_000),
+			await until(async () => ((await readSession(lookedThenLeft.url, parked.id))?.pendingApprovals.length ?? 1) === 0, 8_000),
 			"it stayed pending, so nothing reaped it",
 		);
 		check(
@@ -711,40 +702,34 @@ interface Rig {
 }
 
 /**
- * One isolated server: a hub whose approval grace is the number under test, a session running on a
- * scripted transport of its own, and the real routes and mux in front of it.
+ * One isolated server: a hub whose approval grace is the number under test, a session it runs on a
+ * scripted transport, and the real routes and mux in front of it.
  *
  * Only the transport is a stand-in. The session is mounted the way `SessionHub.open()` mounts one, so
  * that every claim below — the viewer's and the reap it drives — is a real claim through the hub.
  */
 async function openRig(approvalGraceMs: number): Promise<Rig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-approval-grace-"));
-	const hub = new SessionHub({ absCwd: root, approvalGraceMs });
-
 	const transport = createFakeTransport();
 	transport.setResponses([
 		fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 		fakeAssistantMessage("done"),
 	]);
-	const sessionState = createSessionState(root);
-	const sessionId = sessionState.sessionId;
-	const session = await openAgent({
-		absWorkspaceRoot: root,
-		sessionState,
-		models,
-		api: transport.api,
+	// The hub's one orchestrator sends through the scripted transport, so the session it is about to
+	// serve is answered by it.
+	const hub = new SessionHub({ absCwd: root, approvalGraceMs, api: transport.api, modelsHome: join(root, "agent-home") });
+	hub.setModelConfigs(rows);
+	const { id: sessionId, host } = await mountSession(hub, {
+		root,
 		model: modelName,
-		settingsState: inMemorySettingsState({ approval: { read: true } }),
+		settings: inMemorySettingsState({ approval: { read: true } }),
 	});
-
-	const host = new HostedSession(sessionId, session, root);
-	(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(sessionId, host);
 
 	const graph = await serve(hub);
 	return {
 		root,
 		hub,
-		session,
+		session: hub.agent,
 		sessionId,
 		host,
 		url: graph.url,
@@ -773,34 +758,33 @@ interface CrossRig {
 /**
  * One server, two sessions, one answers table between them: the shape under test.
  *
- * Each session runs a scripted transport of its own, but both are told the same toolCallId — the
- * collision a random-id provider only makes improbable. Both are mounted the way `SessionHub.open()`
+ * Both sessions park on the same toolCallId — the collision a random-id provider only makes
+ * improbable — and they share the one transport a process has, as the second half of the same point:
+ * an answer is keyed by its session, not by the call. Both are mounted the way `SessionHub.open()`
  * mounts one, so the answers table they share is the real one.
  */
 async function openCrossRig(): Promise<CrossRig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-approval-cross-"));
-	const hub = new SessionHub({ absCwd: root, approvalGraceMs: 60_000 });
+	// One transport for both sessions, as the process has one: the scripted queue holds two identical
+	// tool calls — the same id both sessions park on, which is what a provider that numbers its calls
+	// does, and what the wire's random ids only make improbable — and the two closing answers.
+	const transport = createFakeTransport();
+	transport.setResponses([
+		fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" }, { id: "call_shared" })),
+		fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" }, { id: "call_shared" })),
+		fakeAssistantMessage("done"),
+		fakeAssistantMessage("done"),
+	]);
+	const hub = new SessionHub({ absCwd: root, approvalGraceMs: 60_000, api: transport.api, modelsHome: join(root, "agent-home") });
+	hub.setModelConfigs(rows);
 	const sessions: Mounted[] = [];
 	for (let index = 0; index < 2; index += 1) {
-		const transport = createFakeTransport();
-		transport.setResponses([
-			// The same id from both transports: what a provider that numbers its calls does to two
-			// sessions parked at once, and what the wire's random ids only make improbable.
-			fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" }, { id: "call_shared" })),
-			fakeAssistantMessage("done"),
-		]);
-		const sessionState = createSessionState(root);
-		const id = sessionState.sessionId;
-		const session = await openAgent({
-			absWorkspaceRoot: root,
-			sessionState,
-			models,
-			api: transport.api,
+		const { id } = await mountSession(hub, {
+			root,
 			model: modelName,
-			settingsState: inMemorySettingsState({ approval: { read: true } }),
+			settings: inMemorySettingsState({ approval: { read: true } }),
 		});
-		(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(id, new HostedSession(id, session, root));
-		sessions.push({ id, agent: session });
+		sessions.push({ id, agent: hub.agent });
 	}
 
 	const graph = await serve(hub);

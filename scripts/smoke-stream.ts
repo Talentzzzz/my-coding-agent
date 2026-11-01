@@ -96,7 +96,7 @@ interface Rig {
 async function openRig(): Promise<Rig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-stream-"));
 	const transport = createFakeTransport({ tokensPerSecond: TOKENS_PER_SECOND });
-	const hub = new SessionHub({ absCwd: root, api: transport.api });
+	const hub = new SessionHub({ absCwd: root, api: transport.api, modelsHome: join(root, "agent-home") });
 	hub.setModelConfigs(rows);
 
 	const projection = createSessionProjection(hub);
@@ -124,18 +124,18 @@ async function openRig(): Promise<Rig> {
 }
 
 /**
- * Make every assistant message persist fail, on this host only.
+ * Make every assistant message persist fail, for as long as the patch is installed.
  *
  * This is the seam ticket 08 named for the mechanical-failure shape: the transcript is the thing that
  * broke, so nothing about the failure can be written where failures usually go. The user message
  * still lands — `prompt` writes it before the loop starts — so the patch lets it through.
  *
- * The patch lands on the session's service, which the whole hub shares — it is stateless, one
- * instance per hub — so it must not outlive the section that installed it: the returned function
- * puts the real method back, and every caller runs it once its failing run is over.
+ * The patch lands on the session service the hub's one orchestrator reads through, so it must not
+ * outlive the section that installed it: the returned function puts the real method back, and every
+ * caller runs it once its failing run is over.
  */
-function sabotagePersistence(host: HostedSession): () => void {
-	const manager = host.session.sessionManager as unknown as {
+function sabotagePersistence(hub: SessionHub): () => void {
+	const manager = hub.agent.sessionManager as unknown as {
 		appendMessage: (state: unknown, message: { role?: string }) => string;
 	};
 	const original = manager.appendMessage.bind(manager);
@@ -246,7 +246,7 @@ try {
 	const watched = await request(rig.url, "POST", "/api/sessions");
 	const watchedId = (watched.payload as { sessionId: string }).sessionId;
 	const watchedBench = await rig.hub.claim(watchedId);
-	const restoreWatched = sabotagePersistence(watchedBench);
+	const restoreWatched = sabotagePersistence(rig.hub);
 	const watchedLane = await wire.open(watchedId);
 	check("the lane opened on the session about to fail", watchedLane.id === watchedId);
 
@@ -279,7 +279,7 @@ try {
 	const unwatched = await request(rig.url, "POST", "/api/sessions");
 	const unwatchedId = (unwatched.payload as { sessionId: string }).sessionId;
 	const unwatchedBench = await rig.hub.claim(unwatchedId);
-	const restoreUnwatched = sabotagePersistence(unwatchedBench);
+	const restoreUnwatched = sabotagePersistence(rig.hub);
 
 	const loggedAlone: string[] = [];
 	console.error = (...parts: unknown[]) => {

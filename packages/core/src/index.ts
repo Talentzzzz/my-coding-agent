@@ -91,7 +91,15 @@ export {
 	type ModelSource,
 	type ThinkingLevel,
 } from "./models.ts";
-export { openAgent, readSessionSnapshot, type OpenAgentOptions } from "./session-factory.ts";
+export {
+	createSessionAgent,
+	ensureSession,
+	openAgent,
+	readSessionSnapshot,
+	type OpenAgentOptions,
+	type SessionAgentServices,
+	type SessionServices,
+} from "./session-factory.ts";
 export type { AgentEvent, AgentTool } from "@my-agent/loop";
 export type { Message } from "@my-agent/llm";
 export {

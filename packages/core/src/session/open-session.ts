@@ -1,8 +1,9 @@
-import type { QueueMode } from "@my-agent/loop";
+import type { AgentTool, QueueMode } from "@my-agent/loop";
 import type { ModelState } from "../models.ts";
 import type { ToolState } from "../tools/manager.ts";
 import type { Workspace } from "../workspace.ts";
 import type { RunScope, SessionEventListener, SessionListener } from "../agent.ts";
+import type { AgentsMdFile } from "../context/agents-md.ts";
 import type { SettingsState } from "../settings-manager.ts";
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.ts";
 
@@ -68,6 +69,25 @@ export interface OpenSession {
 	 * that carries no entry.
 	 */
 	readonly toolSeed: ToolState | undefined;
+	/**
+	 * The tools this session has that the shared catalog does not: the delegation pair, built against
+	 * this session's own workspace and transcript.
+	 *
+	 * Here rather than in a registry of the session's own because the registry is process structure —
+	 * one catalog over one set of definitions — while these are assembly products, closing over the
+	 * parent a delegation reports to. The session reads them back through {@link registryView} on
+	 * every tool resolution, so the executable set is still built per request and nothing here is
+	 * mutable. Empty for a session that may not delegate, which is how delegation does not nest.
+	 */
+	readonly localTools: readonly AgentTool<any>[];
+	/**
+	 * The `AGENTS.md` files that apply to this workspace, read once by the open that assembled it.
+	 *
+	 * A prompt input rather than a setting: the builder is handed them, so one builder can serve every
+	 * session this process runs. They are read when the entry is created and not followed afterwards,
+	 * exactly like the rest of the assembly — reopening the session reads the files again.
+	 */
+	readonly agentsMd: readonly AgentsMdFile[];
 }
 
 /** What one open resolved, as the entry's starting contents. */
@@ -76,6 +96,8 @@ export interface OpenSessionSeed {
 	settings: SettingsState;
 	modelSelection: ModelState;
 	toolSeed?: ToolState;
+	localTools?: readonly AgentTool<any>[];
+	agentsMd?: readonly AgentsMdFile[];
 	steeringMode: QueueMode;
 	followUpMode: QueueMode;
 }
@@ -98,6 +120,8 @@ export function createOpenSession(seed: OpenSessionSeed): OpenSession {
 		settings: seed.settings,
 		modelSelection: seed.modelSelection,
 		toolSeed: seed.toolSeed,
+		localTools: seed.localTools ?? [],
+		agentsMd: seed.agentsMd ?? [],
 	};
 }
 

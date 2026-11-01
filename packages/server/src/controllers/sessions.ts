@@ -783,21 +783,22 @@ export class SessionController {
 	/**
 	 * Run something against a session while holding the one claim it needs to stay open.
 	 *
-	 * The hub hands out claims, not sessions, so a request that is not an event stream claims for the
-	 * length of one read or write and gives the claim straight back. That keeps one rule for
-	 * lifetime: a session is open while anything holds a claim on it, and closed once the last claim
-	 * has let go.
+	 * The hub counts claims; the orchestrator that runs the command is the process's own, and every
+	 * call names the session it acts on, so what a request needs from the hub is the claim and nothing
+	 * else. Taking it for the length of one read or write and giving it straight back keeps one rule
+	 * for lifetime: a session is open while anything holds a claim on it, and closed once the last
+	 * claim has let go.
 	 *
 	 * A session that does not exist is a 404. Anything else the hub throws — a transcript file it
 	 * cannot parse, a session it cannot assemble — is this server's problem, and saying "not found"
 	 * about it would send the caller looking for a typo in an id that is perfectly good.
 	 */
-	private async claiming<T>(sessionId: string, use: (session: Agent) => T | Promise<T>): Promise<T> {
+	private async claiming<T>(sessionId: string, use: (agent: Agent) => T | Promise<T>): Promise<T> {
 		if (!this.hub.has(sessionId)) throw httpStatus.notFound(`Unknown session: ${sessionId}`);
 
 		const host = await this.hub.claim(sessionId);
 		try {
-			return await use(host.session);
+			return await use(this.hub.agent);
 		} finally {
 			this.hub.release(host);
 		}

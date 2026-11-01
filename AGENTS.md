@@ -24,8 +24,10 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 
 代码把这些词当作术语来用。
 
-- **tool（工具）** —— `AgentTool`；`createToolRegistry(workspace)` 持有定义和每会话的活跃集合，没有
-  插件注册表。
+- **tool（工具）** —— `AgentTool`；`createToolRegistry(toolDefinitions())` 是**进程**的目录（定义 +
+  注册进来的工具），一条会话自己的工具（委派对）是装配字段、记在登记处条目上，`registryView()`
+  把两半合成它解析时看到的一个目录；活跃集合是从账本派生的一次读取，不在任何一处持有。没有插件
+  注册表。
 - **session（会话）** —— 一个只追加的 JSONL 文件（账本、唯一事实），由无状态的 `SessionManager` 拥有——
   打开时 `fillSession` 重放出纯数据状态，host 在手时它是文件的唯一写者（ADR-0006）；文件随第一条消息
   出现（`create()` 不写 header，没人说过话的会话不落盘、不进侧边栏），entry 的 kind 有
@@ -79,8 +81,9 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 - **compaction（压缩）** —— transcript 收缩而不是被替换，最便宜的步骤先走：**trim_tool_call_arg**（截短
   工具调用参数）、**clear_tool_result**（清空可重取工具的结果），再到模型写的摘要；每一步是一条
   entry，文件永远保留全文。
-- **hook（接缝）** —— 会话三个接缝：`context`、`before_tool`（审批闸门）、`after_tool`（超过 80,000
-  字符的结果归档到 `.my-agent/tool-results/`）。
+- **hook（接缝）** —— 三个进程级接缝：`context`、`before_tool`（审批闸门）、`after_tool`（超过 80,000
+  字符的结果归档到 `.my-agent/tool-results/`）。一个 `Hooks` 服务本进程跑的所有会话，所以每个事件
+  都带 `sessionId`，处理器拿它现取工作区与被闸的工具映射；默认值由 `createSessionAgent()` 构造时装。
 - **retry（重试）** —— 一次瞬时的供应商失败在循环**之下**重试：策略装在模型的 transport 上，`streamFn`
   只是 `(model, context, options) => model.stream(...)` 的适配器；失败的尝试从不被记录。
 - **subagent（子代理）** —— `SubAgent` / `SubAgentControl` 这一对工具；每次委派是一个真实的子
@@ -88,14 +91,16 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   token 没有消息可搭，作为一条 `usage` entry 整笔记在父会话上、计入会话总额。
 - **queue（队列）** —— 一次运行正在流式时被接受的消息：`steer` 在下一个取走点注入，`followUp` 等这一
   轮结束。
-- **assembly（装配）** —— `openAgent()` 按种子→补齐（seed→fill）从设置、AGENTS.md、导入的模型装配一个
-  会话（ADR-0006）；`Agent` 是无状态编排层，不持有会话状态——公开方法收 id、在用到的那一行向属主
-  现取：durable 半经 `stateOf(id)` 重放账本，live 半经 id 从登记处条目读。它只决定 transcript
+- **assembly（装配）** —— `ensureSession()` 按种子→补齐（seed→fill）从设置、AGENTS.md、导入的模型
+  装配一个会话并建出它的登记处条目（ADR-0006）；`createSessionAgent()` 是另一半：把服务组起来变成
+  一个**编排层**，进程只需要一份（hub 构造时建它），测试与子会话用 `openAgent() == ensure + create`
+  自组一份。`Agent` 是无状态编排层，不持有会话状态——公开方法收 id、在用到的那一行向属主现取：
+  durable 半经 `stateOf(id)` 重放账本，live 半经 id 从登记处条目读。它只决定 transcript
   **命名**哪一行（`adoptCurrentRow()` 每次请求都按活行原地重算）。
 - **OpenSessions（活登记处）** —— 按 id 键控的窄表，只装「进行中且磁盘上没有」的东西：条目
-  `OpenSession` 装着 `SessionRuntime`（两条队列与在飞运行）、订阅集合、跨栈 run 槽，以及装配种子
-  （工作区、设置袋、模型选择；ADR-0007 §4）；hub 持有一份，首次触碰建条目、host 收摊删条目，
-  进程重启即清空。
+  `OpenSession` 装着 `SessionRuntime`（两条队列与在飞运行）、订阅集合、跨栈 run 槽，以及装配产物
+  （工作区、设置袋、模型选择、项目指令 AGENTS.md、这个会话自有的工具；ADR-0007 §4）；hub 持有一份，
+  首次触碰建条目、host 收摊删条目，进程重启即清空。
 - **workspace（工作区）** —— agent 可以触碰的目录；它是**按会话**的，从会话自己 header 里的 `cwd`
   取根。
 - **event（事件）** —— 一个 `AgentSessionEvent`：`AgentEvent` 与会话自己的成员（`queue_update`、

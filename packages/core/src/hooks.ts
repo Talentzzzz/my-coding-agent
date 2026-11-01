@@ -9,24 +9,30 @@ export type ToolResultContent = AgentToolResult<unknown>["content"];
 type MaybePromise<T> = T | Promise<T>;
 
 /**
- * The seams one session dispatches through.
+ * The seams every run dispatches through.
  *
  * A handler returns only the fields it decided, and a hook with no handlers changes nothing.
  * {@link Hooks.apply} runs the handlers in registration order, so a later one refines an earlier one's
  * answer rather than replacing the decision outright. Grow this map one entry per consumer; until
  * something calls a hook, adding one is a no-op.
+ *
+ * Every event names the session its run belongs to. The surface itself is process-level configuration
+ * (ADR-0007 §6): one `Hooks` serves every session this process runs, so a handler that had to be told
+ * its session by a closure would be the per-session object this seam exists to remove. The id is what
+ * it resolves the rest with — the workspace, the transcript, the approval map.
  */
 export interface HookMap {
 	/** Rewrite what goes to the provider. Default: fresh system message + the store's messages. */
-	context: (event: { messages: Message[]; systemPrompt: string }) => MaybePromise<
+	context: (event: { sessionId: string; messages: Message[]; systemPrompt: string }) => MaybePromise<
 		{ messages?: Message[]; systemPrompt?: string } | undefined
 	>;
 	/** Runs before a tool call. Default: the approval gate. */
-	before_tool: (event: { toolCallId: string; toolName: string; args: unknown }) => MaybePromise<
+	before_tool: (event: { sessionId: string; toolCallId: string; toolName: string; args: unknown }) => MaybePromise<
 		{ block?: { reason: string }; args?: unknown; terminate?: boolean; suspend?: boolean } | undefined
 	>;
 	/** Runs on the result. Default: the output backstop. */
 	after_tool: (event: {
+		sessionId: string;
 		toolCallId: string;
 		toolName: string;
 		content: ToolResultContent;
@@ -53,11 +59,11 @@ export interface Hooks {
 type AnyHandler = (event: never) => MaybePromise<unknown>;
 
 /**
- * Build one session's hook surface.
+ * Build the hook surface a process dispatches through.
  *
- * Registration order is the only order there is: the default handlers a session installs first run
- * first, and a host that registers later sees their answer and can refine it. State is held per call
- * and nowhere else, so a handler registered while a run is in flight is simply seen by the next call.
+ * Registration order is the only order there is: the default handlers installed first run first, and
+ * a host that registers later sees their answer and can refine it. State is held per call and nowhere
+ * else, so a handler registered while a run is in flight is simply seen by the next call.
  */
 export function createHooks(): Hooks {
 	// Keyed by name rather than one field per hook: a lookup by name cannot carry the name's own types

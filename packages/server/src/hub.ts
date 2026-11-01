@@ -6,7 +6,8 @@ import {
 	type Agent,
 	type AgentSessionEvent,
 	type ModelSource,
-	openAgent,
+	createSessionAgent,
+	ensureSession,
 	readSessionSnapshot,
 	resolvePath,
 	type OpenAgentOptions,
@@ -48,6 +49,15 @@ export interface HubOptions {
 	 * host that kept settings elsewhere would supply a storage backend rather than this path.
 	 */
 	settingsHome?: string;
+	/**
+	 * The agent home the imported model rows are read from and written to. Defaults to the real one.
+	 *
+	 * The same pass-through as {@link settingsHome}, for the sibling file: a smoke that hands the hub
+	 * rows of its own — a scripted transport answers them, no provider key involved — must not leave
+	 * them in the machine's `models.json`, and must not depend on what the person running it happens
+	 * to have configured there.
+	 */
+	modelsHome?: string;
 	/**
 	 * The transport every session this hub opens talks to.
 	 *
@@ -95,33 +105,35 @@ export type SessionObserver = (feeds: SessionFeeds | undefined) => void;
  * The count is what makes ownership work: a request that goes away must not stop a turn another
  * request is watching, and the last claim to go must not leave the session running forever.
  *
- * The session's live half — the queues a run drains and the run in flight — is deliberately not on
- * this class: it is the hub's {@link OpenSessions} registry, whose entries hold it, so the
- * in-progress state of every session is visible in one place and dies with the host that owns it.
+ * Nothing else is on it. The session itself is one stateless orchestrator for the whole process
+ * (ADR-0007 §6) — a method names the id and fetches whatever it needs — and its live half is the
+ * hub's {@link OpenSessions} registry, whose entries hold the queues a run drains and the run in
+ * flight. What is left is the one thing neither of those can answer: who is holding this session
+ * open right now. That is a transport-layer question (ADR-0001), so its counter lives with the
+ * transport layer rather than on an entry core would never read.
  *
  * The workspace is per session rather than per process. A sidebar that lists every workspace this
  * machine has used can open any of them, and the tools of the session that opens must resolve inside
  * the directory its own transcript was written in — which is what the header of its file records.
+ * It is read here because a fork needs it before anything is running, and the registry entry exists
+ * only once a claim has opened one.
  */
 export class HostedSession {
 	readonly id: string;
-	readonly session: Agent;
 	/** The directory this session's tools may touch, absolute. */
 	readonly absWorkspaceRoot: string;
 	/**
 	 * Callers currently holding this session open.
 	 *
-	 * Today that is one per event stream plus one per request in flight, because a stream holds a
-	 * claim for as long as it lives. Under the multiplexed transport the stream half goes away — a
-	 * subscription takes no claim, and only a request that changes the session or a run in flight
-	 * keeps one — but the counter itself does not change, and nothing else may start counting here.
+	 * A request that changes the session or starts a run takes one for its own length and gives it
+	 * back; a subscription takes none. That is the counting rule the whole reap rests on, and nothing
+	 * else may start counting here.
 	 */
 	claims = 0;
 	/** Set while the hub is deciding whether an unclaimed session can be closed. */
 	reaping = false;
 
-	constructor(sessionId: string, session: Agent, absWorkspaceRoot: string) {
-		this.session = session;
+	constructor(sessionId: string, absWorkspaceRoot: string) {
 		this.id = sessionId;
 		this.absWorkspaceRoot = absWorkspaceRoot;
 	}
@@ -143,7 +155,11 @@ export type HostListener = (sessionId: string, host: HostedSession | undefined) 
  *
  * One agent loop per session id, however many browsers are watching it. That is the whole point:
  * deciding per stream meant two tabs on one session built two loops over one JSONL file and appended
- * to it independently. The file is still the durable copy; this map is who is running it.
+ * to it independently. The file is still the durable copy; this table is who is holding a session open.
+ *
+ * The loop itself is not per session: one orchestrator serves every id (ADR-0007 §6). What is per
+ * session is the claim count — a transport-layer fact about who is using it right now — and the entry
+ * the registry holds the live half in. Everything else here is a singleton.
  */
 export class SessionHub {
 	/**
@@ -198,7 +214,8 @@ export class SessionHub {
 	/**
 	 * The live half of every session this process has touched, keyed by session id — the narrow
 	 * registry of ADR-0007 §4, holding exactly what cannot be rebuilt from disk: the queues a run
-	 * drains, the run in flight, the subscriber sets, and the cross-stack run slot.
+	 * drains, the run in flight, the subscriber sets, the cross-stack run slot, and the assembly the
+	 * open resolved.
 	 *
 	 * An entry is created the first time a session is touched ({@link open}, which every first
 	 * message and every claim arrives through) and dropped when its host closes, so the registry
@@ -207,6 +224,18 @@ export class SessionHub {
 	 * lost, the session files are not, and a reopen builds a fresh entry from nothing.
 	 */
 	private readonly openSessions = new OpenSessions();
+	/**
+	 * The one orchestrator every conversation this process runs goes through.
+	 *
+	 * Built once, because it holds no session: a method names the id and resolves what it needs from
+	 * the session manager's cache and the registry entry (ADR-0007 §6). The five services it
+	 * coordinates are the ones declared around this field, so a session assembled here, an edit to a
+	 * model row, and a settings write all reach the same objects the orchestrator reads.
+	 *
+	 * It reads the model rows through {@link models} rather than a copy, which is why a key corrected
+	 * in the settings panel is the key the next message of an already-open session sends.
+	 */
+	readonly agent: Agent;
 	/** Opens in flight, so two callers cannot build two sessions over one id. */
 	private readonly opening = new Map<string, Promise<HostedSession>>();
 	/** Closes in flight, so a new caller cannot open a file that is still being written. */
@@ -241,8 +270,14 @@ export class SessionHub {
 	constructor(options: HubOptions) {
 		this.options = options;
 		this.absRoot = options.absCwd;
-		this.modelStore = ModelConfigStore.create();
+		this.modelStore = ModelConfigStore.create(options.modelsHome);
 		this.approvalGraceMs = options.approvalGraceMs ?? DEFAULT_APPROVAL_GRACE_MS;
+		this.agent = createSessionAgent({
+			sessionManager: this.sessions,
+			models: this.models,
+			openSessions: this.openSessions,
+			...(options.api === undefined ? {} : { api: options.api }),
+		});
 	}
 
 	/** The models the user has entered, in the order they appear in the settings panel. */
@@ -307,10 +342,10 @@ export class SessionHub {
 	 * The session's current state: the live object when this process runs it, the log when it does not.
 	 *
 	 * Reading a transcript is not running a session, and this is where that stops being a slogan: the
-	 * cold path builds the same snapshot {@link openAgent} would have produced, without assembling an
-	 * `Agent`, without a loop, and without a claim. It deliberately does not read or write `hosts`,
-	 * `opening`, or `closing`, and never calls `claim`: the whole point is that a read leaves no trace,
-	 * so opening a session's history cannot keep it alive, evict it, or cost what running it costs.
+	 * cold path builds the same snapshot an open would have produced, without a registry entry, without
+	 * a loop, and without a claim. It deliberately does not read or write `hosts`, `opening`, or
+	 * `closing`, and never calls `claim`: the whole point is that a read leaves no trace, so opening a
+	 * session's history cannot keep it alive, evict it, or cost what running it costs.
 	 *
 	 * A session that *is* already live answers from the live object rather than from its file, because
 	 * the file lags the turn in flight — a resumed read must not show a transcript the session has
@@ -318,12 +353,12 @@ export class SessionHub {
 	 */
 	async snapshotOf(id: string): Promise<SessionSnapshot> {
 		const hosted = this.hosts.get(id);
-		if (hosted) return hosted.session.snapshot(hosted.id);
+		if (hosted) return this.agent.snapshot(hosted.id);
 
 		// A session created and not spoken in has no file to open, but this process still holds the
 		// transcript it is building — reading it is the same cold read, over an empty log.
 		const pending = this.pendingManager(id);
-		if (pending !== undefined) return readSessionSnapshot(this.agentOptions(pending, pending.absCwd));
+		if (pending !== undefined) return readSessionSnapshot(this.sessionOptions(pending, pending.absCwd));
 
 		const absPath = SessionManager.findSessionFilePathById(id);
 		if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
@@ -331,7 +366,7 @@ export class SessionHub {
 		// transcript of a session nobody is running is a trace. `open` goes through the cache instead,
 		// because the state it builds is about to be written to.
 		const state = fillSession(absPath);
-		return readSessionSnapshot(this.agentOptions(state, state.absCwd));
+		return readSessionSnapshot(this.sessionOptions(state, state.absCwd));
 	}
 
 	/**
@@ -349,7 +384,7 @@ export class SessionHub {
 	snapshotNow(id: string): SessionSnapshot {
 		const host = this.hosts.get(id);
 		if (host === undefined) throw new Error(`Session is not running: ${id}`);
-		return host.session.snapshot(host.id);
+		return this.agent.snapshot(host.id);
 	}
 
 	/**
@@ -440,7 +475,7 @@ export class SessionHub {
 		watching.add(observer);
 
 		const host = this.hosts.get(sessionId);
-		observer(host === undefined ? undefined : feedsOf(host));
+		observer(host === undefined ? undefined : this.feedsOf(host));
 
 		return () => {
 			watching.delete(observer);
@@ -534,23 +569,20 @@ export class SessionHub {
 	/**
 	 * Give a session a name of its own, stored as one `rename` entry (ADR-0002).
 	 *
-	 * A session this process runs appends through the bag it writes its turns with, and a stored
-	 * session appends through the service's `stateOf` — which is deliberately not a fresh replay: the
-	 * bag it hands back is the one a previous host of this session wrote, so the rename lands on the
-	 * same object the next open will serve. Neither path takes a claim: a rename is a record beside
-	 * the conversation, the loop never reads titles, and an entry appended mid-run lands on the file
-	 * without disturbing the turn.
+	 * The entry appends through the service's `stateOf` — which is deliberately not a fresh replay:
+	 * the bag it hands back is the one this process's turns are written through, and the one the next
+	 * open will serve. It takes no claim: a rename is a record beside the conversation, the loop never
+	 * reads titles, and an entry appended mid-run lands on the file without disturbing the turn.
 	 *
 	 * The title arrives already shortened; what reaches the file is what a row shows.
 	 */
 	async rename(sessionId: string, title: string): Promise<void> {
-		const hosted = this.hosts.get(sessionId);
-		if (hosted !== undefined) {
-			this.sessions.appendRename(this.sessions.stateOf(sessionId), title);
-			return;
+		// A running session is proof enough that the file is there; one this process is not running has
+		// to be found first, so an id that names nothing stays the 404 it always was.
+		const isHosted = this.hosts.has(sessionId);
+		if (!isHosted && SessionManager.findSessionFilePathById(sessionId) === undefined) {
+			throw new Error(`Unknown session: ${sessionId}`);
 		}
-		const absPath = SessionManager.findSessionFilePathById(sessionId);
-		if (absPath === undefined) throw new Error(`Unknown session: ${sessionId}`);
 		this.sessions.appendRename(this.sessions.stateOf(sessionId), title);
 	}
 
@@ -585,18 +617,18 @@ export class SessionHub {
 		const onDisk = SessionManager.findSessionFilePathById(sessionId) !== undefined;
 		const hosted = this.hosts.get(sessionId);
 		if (hosted !== undefined) {
-			const snapshot = hosted.session.snapshot(sessionId);
-			if (hosted.claims > 0 || this.opening.has(sessionId) || snapshot.submitting || hosted.session.hasPendingApprovals(sessionId)) {
+			const snapshot = this.agent.snapshot(sessionId);
+			if (hosted.claims > 0 || this.opening.has(sessionId) || snapshot.submitting || this.agent.hasPendingApprovals(sessionId)) {
 				throw new Error("这个会话还有运行中的轮次或没答完的审批，等它停下来再删。");
 			}
 			const closing = (async () => {
-				await hosted.session.settle(sessionId);
+				await this.agent.settle(sessionId);
 				if (this.hosts.get(sessionId) === hosted) this.hosts.delete(sessionId);
 				// The same order a reap uses: the observers lose their feeds before the listeners hear
 				// about the loss, so a subscriber never reaches for a session that is already gone.
 				for (const observer of this.observers.get(sessionId) ?? []) observer(undefined);
 				this.announceHost(sessionId, undefined);
-				await hosted.session.close(sessionId);
+				await this.agent.close(sessionId);
 				// The file removal rides inside the same slot: a claim that waited on `closing` resumes
 				// only after the file is gone, so it finds no file instead of reopening one mid-delete.
 				// A session that never spoke has no file, and asking for one would be asking for nothing.
@@ -626,7 +658,7 @@ export class SessionHub {
 	 */
 	async close(): Promise<void> {
 		const hosts = [...this.hosts.values()];
-		await Promise.all(hosts.map((host) => host.session.close(host.id)));
+		await Promise.all(hosts.map((host) => this.agent.close(host.id)));
 		for (const host of hosts) {
 			for (const observer of this.observers.get(host.id) ?? []) observer(undefined);
 			this.announceHost(host.id, undefined);
@@ -647,6 +679,10 @@ export class SessionHub {
 	 * The workspace comes from the transcript's own header rather than from the server's root, because
 	 * the sidebar offers every workspace on the machine: a session opened from another group must have
 	 * its tools resolve where it was written, and its approvals come from that directory's settings.
+	 *
+	 * The entry this builds is the whole of the per-session setup: the orchestrator is the process's
+	 * own ({@link agent}) and needs nothing told to it, because every call it will serve names the id
+	 * the entry is keyed by.
 	 */
 	private async open(id: string): Promise<HostedSession> {
 		// The pending bag before the store: a session created a moment ago has no file to find yet,
@@ -654,15 +690,29 @@ export class SessionHub {
 		const pending = this.pendingManager(id);
 		const state = pending ?? this.sessions.stateOf(id);
 		const absWorkspaceRoot = state.absCwd;
-		const session = await this.sessionOver(state, absWorkspaceRoot);
-		const host = new HostedSession(id, session, absWorkspaceRoot);
+		await ensureSession(this.sessionOptions(state, absWorkspaceRoot));
+		const host = new HostedSession(id, absWorkspaceRoot);
 		this.hosts.set(id, host);
 		// Observers first, then the listeners: a subscriber told "a host opened" and reaching for the
 		// session must find it already handed over.
-		const feeds = feedsOf(host);
+		const feeds = this.feedsOf(host);
 		for (const observer of this.observers.get(id) ?? []) observer(feeds);
 		this.announceHost(id, host);
 		return host;
+	}
+
+	/**
+	 * A live host's own two feeds, wrapped so a subscriber can hold on to the pair.
+	 *
+	 * The orchestrator is the only thing that publishes events, so this is as deep as the hub reaches —
+	 * whatever a subscriber builds from the two feeds is its own business. Binding is the subscriber's
+	 * to undo, because both feeds hand back their own way out.
+	 */
+	private feedsOf(host: HostedSession): SessionFeeds {
+		return {
+			onEvent: (listener) => this.agent.onEvent(host.id, listener),
+			onChange: (listener) => this.agent.onChange(host.id, listener),
+		};
 	}
 
 	/** Tell the process-level listeners that a session appeared, started, or went away. */
@@ -673,12 +723,12 @@ export class SessionHub {
 	/**
 	 * The options one transcript is described by, whether or not this process runs it.
 	 *
-	 * One builder for both paths on purpose. The cold read and the live session must resolve the same
+	 * One builder for both paths on purpose. The cold read and the open must resolve the same
 	 * workspace, the same settings, and the same pinned model and level, so that a snapshot taken
 	 * without assembling is indistinguishable from a snapshot taken after — if these were written out
 	 * twice, the difference would show up as a session that changes when you open it.
 	 */
-	private agentOptions(state: SessionState, absWorkspaceRoot: string): OpenAgentOptions {
+	private sessionOptions(state: SessionState, absWorkspaceRoot: string): OpenAgentOptions {
 		return {
 			absWorkspaceRoot,
 			sessionManager: this.sessions,
@@ -686,14 +736,11 @@ export class SessionHub {
 			models: this.models,
 			settingsManager: this.settings,
 			settingsState: this.settingsStateOf(absWorkspaceRoot),
+			openSessions: this.openSessions,
 			...(this.options.model === undefined ? {} : { model: this.options.model }),
 			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),
 			...(this.options.api === undefined ? {} : { api: this.options.api }),
 		};
-	}
-
-	private sessionOver(state: SessionState, absWorkspaceRoot: string): Promise<Agent> {
-		return openAgent({ ...this.agentOptions(state, absWorkspaceRoot), openSessions: this.openSessions });
 	}
 
 	private async reap(host: HostedSession): Promise<void> {
@@ -707,8 +754,8 @@ export class SessionHub {
 			// at the gate, not while it is in flight, so the run is settled first and the waiting is
 			// decided after — a session released mid-run and one released already waiting take the
 			// same road here.
-			await host.session.settle(host.id);
-			if (host.session.hasPendingApprovals(host.id)) {
+			await this.agent.settle(host.id);
+			if (this.agent.hasPendingApprovals(host.id)) {
 				const answered = await Promise.race([
 					// The answer arrives over REST on a claim of its own; what this wait is for is the
 					// moment the call stops dangling, which is the moment it was answered. The hub can
@@ -716,7 +763,7 @@ export class SessionHub {
 					// a dropped host ends the watch: the question it was waiting on is gone with the
 					// session, and answering it is the closer's business, not a reap nobody holds.
 					(async () => {
-						while (this.hosts.get(host.id) === host && host.session.hasPendingApprovals(host.id)) {
+						while (this.hosts.get(host.id) === host && this.agent.hasPendingApprovals(host.id)) {
 							await delay(APPROVAL_WATCH_MS);
 						}
 						return true;
@@ -728,7 +775,7 @@ export class SessionHub {
 				// no longer holds.
 				if (this.hosts.get(host.id) !== host) return;
 				if (!answered && host.claims === 0) {
-					host.session.denyAllApprovals(host.id, "No window answered this approval.");
+					this.agent.denyAllApprovals(host.id, "No window answered this approval.");
 				}
 				// A claim arrived during the wait, so the person came back and the approval is still
 				// theirs to answer. This reap has nothing left to decide: holding `reaping` — and so
@@ -736,7 +783,7 @@ export class SessionHub {
 				// ever reaping it. Letting go here is what lets their next release do that.
 				if (!answered && host.claims > 0) return;
 			}
-			await host.session.settle(host.id);
+			await this.agent.settle(host.id);
 			if (host.claims > 0) return;
 
 			if (this.hosts.get(host.id) === host) this.hosts.delete(host.id);
@@ -744,7 +791,7 @@ export class SessionHub {
 			// the feeds to be gone first, and a listener reacting to the loss is the later of the two.
 			for (const observer of this.observers.get(host.id) ?? []) observer(undefined);
 			this.announceHost(host.id, undefined);
-			const closing = host.session.close(host.id);
+			const closing = this.agent.close(host.id);
 			this.closing.set(host.id, closing);
 			try {
 				await closing;
@@ -806,20 +853,6 @@ export class SessionHub {
 		}
 		return state;
 	}
-}
-
-/**
- * A live host's own two feeds, wrapped so a subscriber can hold on to the pair.
- *
- * The session is the only thing that publishes events, so this is as deep as the hub reaches —
- * whatever a subscriber builds from the two feeds is its own business. Binding is the subscriber's to
- * undo, because both feeds hand back their own way out.
- */
-function feedsOf(host: HostedSession): SessionFeeds {
-	return {
-		onEvent: (listener) => host.session.onEvent(host.id, listener),
-		onChange: (listener) => host.session.onChange(host.id, listener),
-	};
 }
 
 /**

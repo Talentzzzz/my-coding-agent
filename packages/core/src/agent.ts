@@ -35,6 +35,7 @@ import { trimmableToolArgEntryIds } from "./context/trim-tool-call-args.ts";
 import { clearableToolResultIds, isCacheProbablyExpired } from "./context/clear-tool-results.ts";
 import { toolResultViewsOf, type ToolResultView } from "./context/tool-result-views.ts";
 import { spillOversizedToolResult } from "./context/spill.ts";
+import type { AgentsMdFile } from "./context/agents-md.ts";
 import { danglingApprovalsOf } from "./session/dangling.ts";
 import { boundToolContent, createHooks, type Hooks } from "./hooks.ts";
 import {
@@ -72,7 +73,7 @@ import {
 	getRetrySettings,
 	getSteeringMode,
 } from "./settings-manager.ts";
-import { type ToolRegistry, type ToolRunContext, type ToolState } from "./tools/index.ts";
+import { type ToolRegistry, type ToolRunContext, type ToolState, registryView } from "./tools/index.ts";
 import type { Workspace } from "./workspace.ts";
 
 /**
@@ -144,8 +145,8 @@ export interface AgentConfig {
 	api?: ChatTransport;
 	/**
 	 * The seams sessions dispatch through: the provider transcript, the approval gate, and the
-	 * tool-result backstop. Defaults are installed by {@link openAgent}; a session built without one
-	 * still runs, it just has nothing to dispatch to.
+	 * tool-result backstop. `createSessionAgent` installs the defaults; an orchestrator built without a
+	 * hook surface still runs, it just has nothing to dispatch to.
 	 */
 	hooks?: Hooks;
 	/**
@@ -157,8 +158,18 @@ export interface AgentConfig {
 	 * both answers rather than reaching for them, so the builder never has to know where a session keeps
 	 * its choices: `toolNames` is the active set, and `approvals` is the effective approval map — the
 	 * whole map the gate reads, including the tools that are not active.
+	 *
+	 * The two workspace facts arrive the same way, and for the same reason: the fence a session's tools
+	 * resolve inside, and the project instructions that apply there, are products of that session's
+	 * assembly — read off its registry entry here, because one builder serves every session this
+	 * process runs (ADR-0007 §6) and has no session of its own to borrow them from.
 	 */
-	systemPrompt: (toolNames: readonly string[], approvals: Record<ToolApprovalKey, boolean>) => string;
+	systemPrompt: (
+		workspace: Workspace,
+		agentsMd: readonly AgentsMdFile[],
+		toolNames: readonly string[],
+		approvals: Record<ToolApprovalKey, boolean>,
+	) => string;
 }
 
 /** Called with the session's state whenever anything a reader can see has moved. */
@@ -391,7 +402,7 @@ export class Agent {
 	readonly hooks: Hooks;
 
 	/** The caller's prompt builder; {@link Agent.prepareRequest} is what a request calls it from. */
-	private readonly promptBuilder: (toolNames: readonly string[], approvals: Record<ToolApprovalKey, boolean>) => string;
+	private readonly promptBuilder: AgentConfig["systemPrompt"];
 	private readonly tools: ToolRegistry;
 	/** Where a request actually leaves: the injected transport, before the retry policy wraps it. */
 	private readonly base: ChatTransport;
@@ -483,7 +494,18 @@ export class Agent {
 	 * the global default. See {@link toolStateOf}.
 	 */
 	private toolStateOf(state: SessionState, entry: OpenSession): ToolState {
-		return toolStateOf(state, entry.settings, this.tools, entry.toolSeed);
+		return toolStateOf(state, entry.settings, this.toolsOf(entry), entry.toolSeed);
+	}
+
+	/**
+	 * The catalog as one session sees it: the process's registry plus the tools that session has of its own.
+	 *
+	 * The delegation pair is built by the open that assembled the session — it closes over the
+	 * transcript it reports to — so it rides the registry entry rather than the registry, and this is
+	 * the one line where the two halves become the catalog every read then works over.
+	 */
+	private toolsOf(entry: OpenSession): ToolRegistry {
+		return registryView(this.tools, entry.localTools);
 	}
 
 	/** Names of the tools the model may call right now, in registration order. */
@@ -534,6 +556,7 @@ export class Agent {
 	/** The state one open session publishes, resolved from the bag and the entry its caller named. */
 	private snapshotOf(state: SessionState, entry: OpenSession): SessionSnapshot {
 		const run = entry.run;
+		const tools = this.toolsOf(entry);
 		return sessionSnapshot({
 			sessionState: state,
 			absWorkspaceRoot: entry.workspace.absRoot,
@@ -541,11 +564,11 @@ export class Agent {
 			// filled bag already holds; no transport is needed for a read that sends nothing.
 			model: resolvedModel(entry.modelSelection),
 			approvals: this.approvalsOf(state, entry),
-			allTools: this.tools.names(),
+			allTools: tools.names(),
 			activeTools: this.toolStateOf(state, entry).activeToolNames,
 			// Judged against this workspace's own settings, the same way a cold read judges it, so the
 			// panel's "沿用全局" label cannot disagree with itself between the two paths.
-			...followsGlobalOf(state, entry.settings, this.tools),
+			...followsGlobalOf(state, entry.settings, tools),
 			...(run?.partial === undefined ? {} : { partial: run.partial }),
 			submitting: run !== undefined,
 			queued: entry.runtime.followUpQueue.size,
@@ -705,9 +728,9 @@ export class Agent {
 			// The run registers itself on the session's live half, so an abort from any layer — this
 			// session's, the hub's, a process shutdown's — lands on the one controller the run sleeps on.
 			runtime: entry.runtime,
-			beforeToolCall: async ({ toolCall, args }) => this.beforeTool(toolCall.id, toolCall.name, args),
+			beforeToolCall: async ({ toolCall, args }) => this.beforeTool(sessionId, toolCall.id, toolCall.name, args),
 			afterToolCall: async ({ toolCall, result, isError }) =>
-				this.afterTool(scope, toolCall.id, toolCall.name, result, isError),
+				this.afterTool(sessionId, scope, toolCall.id, toolCall.name, result, isError),
 			// The per-request fill chain (ADR-0006 §2): adopt the live row, record the selection, replay
 			// the ledger into a view, compact it if it is over the window, build the prompt from the live
 			// tool and approval answers, and hand the request back — built here, used once, dropped.
@@ -726,7 +749,7 @@ export class Agent {
 			await loop.runLoop(
 				{
 					messages: this.sessionManager.buildSessionContext(state).messages,
-					tools: this.tools.active(this.toolStateOf(state, entry), this.runContext(entry)),
+					tools: this.toolsOf(entry).active(this.toolStateOf(state, entry), this.runContext(entry)),
 				},
 				start.prompt,
 				{
@@ -808,10 +831,13 @@ export class Agent {
 		// Both are derived from the ledger at this moment, so a choice that just landed is what the
 		// prompt describes.
 		const toolState = this.toolStateOf(state, entry);
-		const injected = {
-			messages: messagesOf(entries),
-			systemPrompt: this.promptBuilder(toolState.activeToolNames, this.approvalsOf(state, entry)),
-		};
+		const prompt = this.promptBuilder(
+			entry.workspace,
+			entry.agentsMd,
+			toolState.activeToolNames,
+			this.approvalsOf(state, entry),
+		);
+		const injected = { sessionId, messages: messagesOf(entries), systemPrompt: prompt };
 		const rewritten = await this.hooks.apply("context", injected);
 		const messages = this.forModel(rewritten?.messages ?? injected.messages, views, entry, sessionId);
 		// The leading system message is replaced rather than appended to, and every other system
@@ -833,7 +859,7 @@ export class Agent {
 				// derived above. The loop declares it on the request (`toToolDeclaration`) rather than
 				// reading it out of the transcript, so a tool switched on mid-session reaches the model on
 				// the next request and the two cannot drift.
-				tools: this.tools.active(toolState, this.runContext(entry)),
+				tools: this.toolsOf(entry).active(toolState, this.runContext(entry)),
 			},
 		};
 	}
@@ -1130,7 +1156,7 @@ export class Agent {
 		const state = this.sessionManager.stateOf(id);
 		const entry = this.entryOf(id);
 		const previous = this.toolStateOf(state, entry).activeToolNames;
-		const known = new Set(this.tools.names());
+		const known = new Set(this.toolsOf(entry).names());
 		const unknown = names.filter((name) => !known.has(name));
 		if (unknown.length > 0) {
 			throw new Error(`Unknown tool${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
@@ -1598,11 +1624,12 @@ export class Agent {
 	 * `authorize` — the same merge the snapshot and the prompt describe, so the three cannot disagree.
 	 */
 	private async beforeTool(
+		sessionId: string,
 		toolCallId: string,
 		toolName: string,
 		args: unknown,
 	): Promise<BeforeToolCallResult | undefined> {
-		const decided = await this.hooks.apply("before_tool", { toolCallId, toolName, args });
+		const decided = await this.hooks.apply("before_tool", { sessionId, toolCallId, toolName, args });
 		if (decided?.suspend === true) return { suspend: true };
 		if (decided?.block === undefined) return undefined;
 		return {
@@ -1621,6 +1648,7 @@ export class Agent {
 	 * the file must still hold what the tool produced.
 	 */
 	private async afterTool(
+		sessionId: string,
 		scope: RunScope,
 		toolCallId: string,
 		toolName: string,
@@ -1628,6 +1656,7 @@ export class Agent {
 		isError: boolean,
 	): Promise<AfterToolCallResult | undefined> {
 		const decided = await this.hooks.apply("after_tool", {
+			sessionId,
 			toolCallId,
 			toolName,
 			content: result.content,

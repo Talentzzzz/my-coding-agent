@@ -13,19 +13,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../packages/server/src/http.ts";
-import { HostedSession, SessionHub } from "../packages/server/src/hub.ts";
+import { SessionHub } from "../packages/server/src/hub.ts";
 import { SessionController, SystemController } from "../packages/server/src/controllers/sessions.ts";
 import { createRoutes } from "../packages/server/src/controllers/routes.ts";
 import { Router } from "../packages/server/src/http/routing.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
-import {
-	openAgent,
-	createSessionState,
-	inMemorySettingsState,
-	type ModelSource,
-	type ModelConfig,
-	workspaceDir,
-} from "@my-agent/core";
+import { mountSession } from "./mount-session.ts";
+import { inMemorySettingsState, type ModelConfig, workspaceDir } from "@my-agent/core";
 
 const PORT = 8094;
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-"));
@@ -51,32 +45,27 @@ const rows: ModelConfig[] = [
 		maxTokens: 8_192,
 	},
 ];
-const models: ModelSource = { list: () => rows };
 const modelName = "anthropic";
 
-const hub = new SessionHub({ absCwd: root, approvalGraceMs: 60_000 });
-
 // The scripted transport stands in for the model: a tool call that parks at the gate, then the text
-// that ends the run once the answer arrives.
+// that ends the run once the answer arrives. The hub's one orchestrator is built over it, so every
+// session this server runs sends through it.
 const fake = createFakeTransport();
 fake.setResponses([
 	fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 	fakeAssistantMessage("done"),
 ]);
-const sessionState = createSessionState(root);
-const sessionId = sessionState.sessionId;
-const session = await openAgent({
-	absWorkspaceRoot: root,
-	sessionState,
-	models,
-	api: fake.api,
-	model: modelName,
-	settingsState: inMemorySettingsState({ approval: { read: true } }),
-});
+const hub = new SessionHub({ absCwd: root, approvalGraceMs: 60_000, api: fake.api, modelsHome: join(root, "agent-home") });
+hub.setModelConfigs(rows);
 
-// Mounted the way `SessionHub.open()` mounts one, so the controller claims through the real hub.
-const host = new HostedSession(sessionId, session, root);
-(hub as unknown as { hosts: Map<string, HostedSession> }).hosts.set(sessionId, host);
+// Mounted the way `SessionHub.open()` mounts one — the entry seeded with this smoke's own settings
+// bag, which is what puts `read` behind the gate — so the controller claims through the real hub.
+const { id: sessionId } = await mountSession(hub, {
+	root,
+	model: modelName,
+	settings: inMemorySettingsState({ approval: { read: true } }),
+});
+const session = hub.agent;
 
 // The spy is the whole point of building the controller by hand: the listener is what the mux's
 // answers table is fed through, so "the refused attempt reached nothing" is asserted right here.

@@ -32,6 +32,7 @@ import {
 	Workspace,
 	OpenSessions,
 	createOpenSession,
+	type OpenSession,
 	inMemorySettingsState,
 	placeholderModelState,
 	toolResultViewsOf,
@@ -136,6 +137,17 @@ function hubSessions(hub: SessionHub): SessionManager {
 	return (hub as unknown as { sessions: SessionManager }).sessions;
 }
 
+/**
+ * The hub's live registry entry for an id — the per-session object a claim opens and a close drops.
+ *
+ * This is what "one session per id" means now: the orchestrator is the process's own and answers by
+ * id, so what a reopen can build a second of is an *entry* (the queues, the run slot, the assembly),
+ * never the object that serves them.
+ */
+function entryOf(hub: SessionHub, id: string): OpenSession | undefined {
+	return (hub as unknown as { openSessions: OpenSessions }).openSessions.get(id);
+}
+
 /** The bag behind a hosted session: what the hub's service adopted at open, file or no file. */
 function bagOf(hub: SessionHub, id: string): SessionState {
 	return hubSessions(hub).stateOf(id);
@@ -161,13 +173,15 @@ try {
 	const landing = await hub.currentSessionId();
 	const first = await hub.claim(landing);
 	const second = await hub.claim(landing);
-	check("two connections with no id share one session", first.session === second.session);
+	check("two connections with no id share one entry", entryOf(hub, first.id) === entryOf(hub, second.id));
 	check("both claims are counted", first.claims === 2, `claims=${first.claims}`);
 	check("the hub runs it once", hub.live.length === 1, hub.live.join(","));
 
 	process.stdout.write("claiming by id\n");
+	// The entry a claim opened: the one thing a second claim must not build a second of.
+	const runningEntry = entryOf(hub, first.id);
 	const again = await hub.claim(first.id);
-	check("returns the session already running", again.session === first.session);
+	check("returns the entry already running", entryOf(hub, again.id) === runningEntry);
 	check("claims add up", first.claims === 3, `claims=${first.claims}`);
 
 	process.stdout.write("a claim outlives the connections that dropped it\n");
@@ -178,16 +192,17 @@ try {
 	check("a claimed session is never forgotten", hub.live.includes(first.id));
 
 	process.stdout.write("the last release forgets an idle session\n");
+	const reapedEntry = entryOf(hub, first.id);
 	hubSessions(hub).appendMessage(bagOf(hub, first.id), userMessage("survives the reap"));
 	hub.release(first);
 	check("the session is closed and dropped", await until(() => !hub.live.includes(first.id)));
 
 	process.stdout.write("the JSONL file is what survives\n");
 	const reopened = await hub.claim(first.id);
-	check("reopening builds a different session object", reopened.session !== first.session);
+	check("reopening builds a different registry entry", entryOf(hub, reopened.id) !== reapedEntry);
 	check(
 		"and it still carries the transcript",
-		JSON.stringify(reopened.session.snapshot(reopened.id).messages).includes("survives the reap"),
+		JSON.stringify(hub.agent.snapshot(reopened.id).messages).includes("survives the reap"),
 	);
 	await hub.close();
 
@@ -199,7 +214,7 @@ try {
 	process.stdout.write("a fork is the branch up to one entry\n");
 	const parentId = await hub.newSession();
 	const parent = await hub.claim(parentId);
-	const parentFile = parent.session.sessionFile(parent.id) ?? "";
+	const parentFile = hub.agent.sessionFile(parent.id) ?? "";
 	const entryOne = hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("first"));
 	hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("second"));
 
@@ -232,7 +247,7 @@ try {
 	);
 
 	const forked = await hub.claim(forkedId);
-	check("the fork runs as a session of its own", forked.session !== parent.session);
+	check("the fork runs as a session of its own", entryOf(hub, forked.id) !== entryOf(hub, parent.id));
 	check("and it reports the file it came from", hubSessions(hub).getHeader(bagOf(hub, forkedId))?.parentSession === parentFile);
 
 	process.stdout.write("forking without an entry copies the whole log\n");
@@ -271,12 +286,13 @@ try {
 	const leafAtClose = hubSessions(hub).getLeafId(bagOf(hub, forkedId));
 	hub.release(forked);
 	check("the fork is closed and dropped", await until(() => !hub.live.includes(forkedId)));
+	const forkEntry = entryOf(hub, forked.id);
 	const reread = openFile(forkedId);
 	check("reopening reports its parent session", getHeader(reread)?.parentSession === parentFile);
 	check("and the same leaf", getLeafId(reread) === leafAtClose, `${getLeafId(reread)} vs ${leafAtClose}`);
 	check("with the messages it had", messagesOf(reread).length === messagesOf(bagOf(hub, forkedId)).length);
 	const reopenedFork = await hub.claim(forkedId);
-	check("a claimed reopen builds a different session object", reopenedFork.session !== forked.session);
+	check("a claimed reopen builds a different registry entry", entryOf(hub, reopenedFork.id) !== forkEntry);
 	check("and still reports the session it came from", hubSessions(hub).getHeader(bagOf(hub, forkedId))?.parentSession === parentFile);
 
 	process.stdout.write("forking a session nobody is watching\n");
@@ -326,14 +342,14 @@ try {
 		const host = await hub.claim(renamedId);
 		hubSessions(hub).appendMessage(bagOf(hub, renamedId), userMessage("改名的会话"));
 		await hub.rename(renamedId, "新名字");
-		check("a live session reports the stored name", host.session.snapshot(host.id).title === "新名字", host.session.snapshot(host.id).title);
+		check("a live session reports the stored name", hub.agent.snapshot(host.id).title === "新名字", hub.agent.snapshot(host.id).title);
 
 		hub.release(host);
 		check("the renamed session closes", await until(() => !hub.live.includes(renamedId)));
 		const rescanned = await SessionManager.findSessionRowById(renamedId);
 		check("the file's row carries the stored name", rescanned?.title === "新名字", rescanned?.title);
 		const reopened = await hub.claim(renamedId);
-		check("a reopen reports it too", reopened.session.snapshot(reopened.id).title === "新名字", reopened.session.snapshot(reopened.id).title);
+		check("a reopen reports it too", hub.agent.snapshot(reopened.id).title === "新名字", hub.agent.snapshot(reopened.id).title);
 
 		const renameFork = await hub.fork(renamedId, null);
 		const forkRow = await SessionManager.findSessionRowById(renameFork);
@@ -468,7 +484,7 @@ try {
 		// one this section makes: everything the transcript can answer has to come out the same.
 		const live = await http.hub.claim(readId);
 		check("a claim is what runs it", claims === 1 && live.id === readId, `claims=${claims}`);
-		const liveSnapshot = live.session.snapshot(live.id);
+		const liveSnapshot = http.hub.agent.snapshot(live.id);
 		http.hub.release(live);
 
 		// Everything a transcript can answer must be identical; only what a loop answers may differ.

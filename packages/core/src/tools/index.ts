@@ -17,7 +17,7 @@ export {
 	toolDefinitions,
 	toolListFor,
 } from "./manager.ts";
-export { createToolRegistry, type ToolRegistry } from "./registry.ts";
+export { createToolRegistry, registryView, type ToolRegistry } from "./registry.ts";
 
 /** Short human-readable summary of a tool call, for the approval prompt and the transcript. */
 export function describeToolCall(name: string, args: unknown): string {

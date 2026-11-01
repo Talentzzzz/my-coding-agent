@@ -1,10 +1,11 @@
 import type { ChatTransport } from "@my-agent/llm";
+import type { AgentTool } from "@my-agent/loop";
 import { Agent } from "./agent.ts";
 import { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
 import { buildSystemPrompt } from "./context/system-prompt.ts";
 import { spillOversizedToolResult } from "./context/spill.ts";
 import { danglingApprovalsOf } from "./session/dangling.ts";
-import { boundToolContent, createHooks } from "./hooks.ts";
+import { boundToolContent, createHooks, type Hooks } from "./hooks.ts";
 import {
 	DEFAULT_MODEL_NAME,
 	fillModel,
@@ -38,7 +39,7 @@ import {
 	getSteeringMode,
 	inMemorySettingsState,
 } from "./settings-manager.ts";
-import { type ToolRegistry, type ToolState, createToolRegistry, toolDefinitions } from "./tools/index.ts";
+import { type ToolRegistry, type ToolState, createToolRegistry, registryView, toolDefinitions } from "./tools/index.ts";
 import { createSubagentTools } from "./tools/subagent.ts";
 import { createOpenSession, OpenSessions } from "./session/open-session.ts";
 import { Workspace } from "./workspace.ts";
@@ -120,8 +121,8 @@ export interface OpenAgentOptions {
 }
 
 /**
- * What a session *is*, resolved but not yet activated: the workspace, the settings, the model, and the
- * tool registry — structure only, because the tool choice derives from the ledger per read.
+ * What a session *is*, resolved but not yet activated: the workspace, the settings, the model, the
+ * project instructions, and the tools that belong to it alone.
  *
  * No `Agent` exists at this point and no entry has been appended. Splitting this out of
  * {@link openAgent} is what lets {@link readSessionSnapshot} answer a transcript this process is not
@@ -134,8 +135,10 @@ interface Assembled {
 	settingsState: SettingsState;
 	/** The session's model as a bag: the seed, with the row's facts laid in once by assembly. */
 	modelState: ModelState;
-	/** The session's tool catalog: what exists, not what is chosen — the choice derives per read. */
+	/** What this build can build: the catalog every session shares, read here only for its names. */
 	registry: ToolRegistry;
+	/** The tools this session has of its own — the delegation pair, or nothing when it may not delegate. */
+	localTools: readonly AgentTool<any>[];
 	/** The workspace's own instructions, already loaded, for the prompt this session will build. */
 	agentsMd: AgentsMdFile[];
 	/** The session service, resolved once here so every consumer of one assembly shares it. */
@@ -185,7 +188,7 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 	// The level the bag came back with, which is the level a subagent inherits: `fillModel` already
 	// settled what the seed means for this row, so asking again here could only disagree.
 	const thinkingLevel = normalizeThinkingLevel(modelState.thinkingLevel);
-	// The loadout: the shared read-only definitions, unless the caller handed a registry of its own —
+	// The catalog: the shared read-only definitions, unless the caller handed a registry of its own —
 	// a test's custom tool. No workspace is resident — the executable set is built per request against
 	// the run context, so a child and its parent share the definitions and none of the tools. Nothing
 	// is chosen here either: the active set and the approvals derive from the ledger on every read,
@@ -193,25 +196,27 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 	const registry = options.tools ?? createToolRegistry(toolDefinitions());
 
 	// Delegation is part of assembly rather than of the definitions, because a child needs the
-	// model and the transcript this session resolved — things only the factory has in hand. The
-	// SubAgent's own sessions pass `subagents: false`, so a child can never spawn a grandchild.
-	if (options.subagents !== false) {
-		const absSessionFile = getAbsSessionFile(options.sessionState);
-		for (const tool of createSubagentTools({
-			workspace,
-			models: options.models,
-			...(row === undefined ? {} : { model: row.name }),
-			thinkingLevel,
-			parentSessionManager: sessionManager,
-			parentSessionState: options.sessionState,
-			...(options.api === undefined ? {} : { api: options.api }),
-			...(absSessionFile === undefined ? {} : { parentSessionFile: absSessionFile }),
-		})) {
-			registry.register(tool);
-		}
-	}
+	// model and the transcript this session resolved — things only the factory has in hand. They are
+	// built here and ride the registry entry ({@link OpenSession.localTools}), because they close over
+	// this session: the process's catalog could not hold one session's delegation without holding it
+	// for every session. The SubAgent's own sessions pass `subagents: false`, so a child can never
+	// spawn a grandchild.
+	const absSessionFile = getAbsSessionFile(options.sessionState);
+	const localTools =
+		options.subagents === false
+			? []
+			: createSubagentTools({
+					workspace,
+					models: options.models,
+					...(row === undefined ? {} : { model: row.name }),
+					thinkingLevel,
+					parentSessionManager: sessionManager,
+					parentSessionState: options.sessionState,
+					...(options.api === undefined ? {} : { api: options.api }),
+					...(absSessionFile === undefined ? {} : { parentSessionFile: absSessionFile }),
+				});
 
-	return { workspace, settingsState, modelState, registry, agentsMd, sessionManager };
+	return { workspace, settingsState, modelState, registry, localTools, agentsMd, sessionManager };
 }
 
 /**
@@ -226,11 +231,14 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
  * session's history would be indistinguishable from using it.
  */
 export async function readSessionSnapshot(options: OpenAgentOptions): Promise<SessionSnapshot> {
-	const { workspace, settingsState, modelState, registry } = await assemble(options);
+	const { workspace, settingsState, modelState, registry, localTools } = await assemble(options);
+	// The catalog this session would run with: the shared definitions plus the tools that are its own,
+	// which is what a live session reads off its registry entry.
+	const catalog = registryView(registry, localTools);
 	// The same derivation a live session runs — the ledger over the seed, or the global default's
 	// live view when nothing was handed in — so a cold read answers the choice a live session opens
 	// on, without replaying it into anything.
-	const tools = toolStateOf(options.sessionState, settingsState, registry, options.toolState);
+	const tools = toolStateOf(options.sessionState, settingsState, catalog, options.toolState);
 	return sessionSnapshot({
 		sessionState: options.sessionState,
 		absWorkspaceRoot: workspace.absRoot,
@@ -242,12 +250,12 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 		// gate the live session does not have.
 		approvals: { ...getApprovals(settingsState), ...tools.approvalOverride },
 		// Read off the registry with the derived choice, so the toggles match a live session's exactly.
-		allTools: registry.names(),
-		activeTools: registry.activeNames(tools),
+		allTools: catalog.names(),
+		activeTools: catalog.activeNames(tools),
 		// Judged against this workspace's own settings, the same way the live session's getter does it:
 		// a cold read and a live snapshot must agree here, or the panel would flip its "沿用全局" label
 		// the moment a session went from open to merely read.
-		...followsGlobalOf(options.sessionState, settingsState, registry),
+		...followsGlobalOf(options.sessionState, settingsState, catalog),
 		submitting: false,
 		queued: 0,
 		isRetrying: false,
@@ -259,36 +267,46 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 	});
 }
 
+/** The two services one open resolves, as the orchestrator that serves it needs them. */
+export interface SessionServices {
+	sessionManager: SessionManager;
+	openSessions: OpenSessions;
+}
+
 /**
- * Build one session: discover the workspace, the prompt, the tools, and the default model, then hand
- * the result to {@link Agent} with the id it is served by.
+ * Assemble a session and give it a registry entry: the seed→fill lifecycle's seeding half (ADR-0006 §2).
  *
- * The resolution is {@link assemble} — the seed→fill lifecycle's seeding half (ADR-0006 §2): the
- * workspace, the settings, the model selection, and the tool choice are resolved into pure-data
- * seeds here, and every request re-runs the fill chain over them (adopt the row, fill the model,
- * replay the ledger, build the context, assemble the tools, merge the approvals, build the prompt),
- * so opening a session and resuming one are the same act by construction. The seeds land on the
- * registry entry — the assembly product is the entry (ADR-0007 §4) — and the caller's transcript bag
- * is adopted by the session service, so the id every later call names answers the same object this
- * open was handed. This adds what only a live session has — the hooks, whose handlers need the
- * session they belong to, and the object itself.
+ * The workspace, the settings, the model selection, the project instructions, and the tools the
+ * session has of its own are resolved once here and land on the entry — the assembly product *is* the
+ * entry (ADR-0007 §4) — so every later call, which names the session by id, reads them back instead of
+ * re-resolving them. The caller's transcript bag is adopted by the session service, so the id answers
+ * the same object this open was handed, before the first message has put a file on disk.
+ *
+ * Nothing here builds an orchestrator. That is the separation {@link createSessionAgent} exists for: a
+ * host that runs many sessions opens one entry per session and keeps one orchestrator over all of
+ * them, and a caller that wants a session of its own composes the two.
+ *
+ * Records nothing: a session opened and never spoken to does not grow entries, and neither does one
+ * opened on another model or level than the branch last used — both reach the transcript in
+ * `recordSelection`, at the moment the first request is built from them.
  */
-export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
-	const { workspace, settingsState, modelState, registry, agentsMd, sessionManager } = await assemble(options);
-	const hooks = createHooks();
+export async function ensureSession(options: OpenAgentOptions): Promise<SessionServices> {
+	const { workspace, settingsState, modelState, localTools, agentsMd, sessionManager } = await assemble(options);
 	const sessionId = options.sessionState.sessionId;
-	// The assembly product is the entry: first touch creates it, and its fields are the resolved
-	// answers every later call reads — the workspace fence, the settings bag, the model selection the
-	// fill chain re-fills per request, and the deliberate loadout the tool choice derives against.
-	// The queue modes are the same settings' answer at this moment; a config patch moves them on the
-	// queues in place afterwards.
 	const openSessions = options.openSessions ?? new OpenSessions();
+	// First touch creates the entry, and its fields are the resolved answers every later call reads —
+	// the workspace fence, the settings bag, the model selection the fill chain re-fills per request,
+	// the deliberate loadout the tool choice derives against, the project instructions the prompt is
+	// built from, and the session's own tools. The queue modes are the same settings' answer at this
+	// moment; a config patch moves them on the queues in place afterwards.
 	openSessions.ensure(sessionId, () =>
 		createOpenSession({
 			workspace,
 			settings: settingsState,
 			modelSelection: modelState,
 			...(options.toolState === undefined ? {} : { toolSeed: options.toolState }),
+			localTools,
+			agentsMd,
 			steeringMode: getSteeringMode(settingsState),
 			followUpMode: getFollowUpMode(settingsState),
 		}),
@@ -298,17 +316,54 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 	// on disk. An id the service already caches is re-registered to the same object, which changes
 	// nothing.
 	sessionManager.adopt(options.sessionState);
+	return { sessionManager, openSessions };
+}
 
+/**
+ * The services one orchestrator coordinates, for a caller that builds one.
+ *
+ * Everything here is process-level: the ledger, the models this process can run, the catalog, the
+ * live registry, and the transport. Nothing in it is a session's — which is what lets a host keep one
+ * orchestrator for every conversation it runs (ADR-0007 §6).
+ */
+export interface SessionAgentServices extends SessionServices {
+	models: ModelSource;
+	/**
+	 * The catalog callers of this orchestrator share. Omitted means the six built-ins alone; a test
+	 * that adds a tool of its own hands in a registry of its own, so nothing it registered reaches a
+	 * session outside the test.
+	 */
+	tools?: ToolRegistry;
+	/** The transport every request this orchestrator makes goes over. Defaults to Anthropic Messages. */
+	api?: ChatTransport;
+}
+
+/**
+ * Build the orchestrator: one object over the services, with the seams it dispatches through installed.
+ *
+ * A host that runs every session of a process calls this once; a caller that wants a session it does
+ * not share — a test, a SubAgent's own child — calls it once per session after {@link ensureSession}.
+ * Either way the two halves of a session's setup are the same two halves, so what the host runs and
+ * what a smoke drives cannot drift apart.
+ *
+ * The defaults are installed on the surface the caller gets back rather than hard-coded in the class,
+ * so a host can add a handler after them and refine what they decided. See
+ * {@link installDefaultHooks}.
+ */
+export function createSessionAgent(services: SessionAgentServices): Agent {
+	const hooks = createHooks();
 	const session = new Agent({
-		sessionManager,
-		models: options.models,
-		tools: registry,
-		openSessions,
-		...(options.api === undefined ? {} : { api: options.api }),
+		sessionManager: services.sessionManager,
+		models: services.models,
+		tools: services.tools ?? createToolRegistry(toolDefinitions()),
+		openSessions: services.openSessions,
+		...(services.api === undefined ? {} : { api: services.api }),
 		hooks,
 		// Rebuilt whenever the active set or the approval set moves, so the prompt cannot promise tools
-		// or approvals the session no longer has.
-		systemPrompt: (toolNames, approvals) =>
+		// or approvals the session no longer has. The workspace and the project instructions are handed
+		// over per request for the same reason they are not captured: one builder serves every session
+		// this orchestrator runs, and both facts belong to the session, not to the builder.
+		systemPrompt: (workspace, agentsMd, toolNames, approvals) =>
 			buildSystemPrompt({
 				absWorkspaceRoot: workspace.absRoot,
 				toolNames,
@@ -319,34 +374,62 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 				agentsMd,
 			}),
 	});
+	installDefaultHooks(hooks, session, services.openSessions);
+	return session;
+}
 
-	// The defaults, on the same surface the session hands back. Registered here rather than hard-coded
-	// in the class so a host can add a handler after them and refine what they decided.
-	//
-	// `before_tool`: the approval gate. The session owns the bookkeeping of what the transcript is
-	// still waiting on and the UI that answers it; the hook only translates an unanswered approval
-	// into the suspend that ends the run (ADR-0006 §5): the call is left dangling in the ledger with
-	// no result — that is what the banner is derived from — and the answer arrives over REST to start
-	// the recovery run that pairs it and continues.
-	hooks.on("before_tool", async ({ toolCallId, toolName, args }) => {
+/**
+ * The two default handlers every orchestrator dispatches through.
+ *
+ * `before_tool` is the approval gate. The session owns the bookkeeping of what the transcript is
+ * still waiting on and the UI that answers it; the hook only translates an unanswered approval into
+ * the suspend that ends the run (ADR-0006 §5): the call is left dangling in the ledger with no result
+ * — that is what the banner is derived from — and the answer arrives over REST to start the recovery
+ * run that pairs it and continues.
+ *
+ * `after_tool` is the output backstop. Every built-in tool bounds its own output; this catches the
+ * tool that forgets. A result too large for the context is archived into the workspace whole and the
+ * model is served its head and tail plus the archive's path, so nothing is lost that cannot be read
+ * back; when the archive cannot be written, the hard clip in `boundToolContent` is the floor.
+ *
+ * Both are process-level: they reach the session their event names, rather than closing over one. The
+ * workspace comes from that session's registry entry, which is also what makes a result arriving as a
+ * session closes fall back to the clip instead of inventing a directory to archive into.
+ */
+function installDefaultHooks(hooks: Hooks, session: Agent, openSessions: OpenSessions): void {
+	hooks.on("before_tool", async ({ sessionId, toolCallId, toolName, args }) => {
 		const needsApproval = await session.authorize(sessionId, toolName, toolCallId, args);
 		return needsApproval ? { suspend: true } : undefined;
 	});
-	// `after_tool`: the output backstop. Every built-in tool bounds its own output; this catches the
-	// tool that forgets. A result too large for the context is archived into the workspace whole and
-	// the model is served its head and tail plus the archive's path, so nothing is lost that cannot be
-	// read back; when the archive cannot be written, the hard clip in `boundToolContent` is the floor.
-	hooks.on("after_tool", (event) => {
-		const spilled = spillOversizedToolResult(workspace, sessionId, event.toolName, event.toolCallId, event.content);
-		const content = spilled ?? boundToolContent(event.content);
-		return content === undefined ? undefined : { content };
+	hooks.on("after_tool", ({ sessionId, toolCallId, toolName, content }) => {
+		const workspace = openSessions.get(sessionId)?.workspace;
+		const spilled =
+			workspace === undefined
+				? undefined
+				: spillOversizedToolResult(workspace, sessionId, toolName, toolCallId, content);
+		const bounded = spilled ?? boundToolContent(content);
+		return bounded === undefined ? undefined : { content: bounded };
 	});
+}
 
-	// Assembly records nothing. A session that opens on another model or another level than the branch
-	// last used has not *used* either yet: both reach the transcript in `recordSelection`, at the moment
-	// the first request is built from them. That is what keeps a session opened and never spoken to
-	// from growing entries, and it is the same rule the composer's choices follow.
-	return session;
+/**
+ * Open one session and hand back an orchestrator of its own.
+ *
+ * The composition of {@link ensureSession} and {@link createSessionAgent}, for a caller that wants a
+ * session it does not share with anything else: a smoke driving a scripted transport, and a SubAgent's
+ * own child, whose catalog is narrowed to the read-only set. A process that runs many sessions builds
+ * the two halves once each instead — see the hub — and that is the shape this exists to keep honest:
+ * opening a session and resuming one are the same act, whichever of the two roads is taken.
+ */
+export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
+	const services = await ensureSession(options);
+	return createSessionAgent({
+		sessionManager: services.sessionManager,
+		models: options.models,
+		openSessions: services.openSessions,
+		...(options.tools === undefined ? {} : { tools: options.tools }),
+		...(options.api === undefined ? {} : { api: options.api }),
+	});
 }
 
 /** The ref a transcript's `model_change` entry recorded: the row name and the wire id it named. */

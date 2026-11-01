@@ -123,6 +123,12 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 		return { ...stored, ...live };
 	};
 
+	/** Read those two fields off a running session. */
+	const liveOf = (host: HostedSession): LiveFields => {
+		const snapshot = hub.agent.snapshot(host.id);
+		return { running: snapshot.submitting, pending: snapshot.pendingApprovals.length };
+	};
+
 	/**
 	 * Follow one live session, for as long as it is live.
 	 *
@@ -132,8 +138,8 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	const follow = (sessionId: string, host: HostedSession): void => {
 		if (following.has(sessionId)) return;
 
-		const offEvent = host.session.onEvent(sessionId, (event) => onEvent(sessionId, host, event));
-		const offChange = host.session.onChange(sessionId, (snapshot) => {
+		const offEvent = hub.agent.onEvent(sessionId, (event) => onEvent(sessionId, event));
+		const offChange = hub.agent.onChange(sessionId, (snapshot) => {
 			const next = liveRow(sessionId, {
 				running: snapshot.submitting,
 				pending: snapshot.pendingApprovals.length,
@@ -156,7 +162,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	 * title reads from. Nothing else an event carries has a row field of its own, and re-deriving the
 	 * title per event would be a walk of the whole transcript for every token of a reply.
 	 */
-	const onEvent = (sessionId: string, host: HostedSession, event: AgentSessionEvent): void => {
+	const onEvent = (sessionId: string, event: AgentSessionEvent): void => {
 		const current = rows.get(sessionId);
 		if (current === undefined) {
 			// No row means this session was created and has only just been written to: the creation
@@ -169,7 +175,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 			void refresh(sessionId).finally(() => probing.delete(sessionId));
 			return;
 		}
-		const manager = host.session.sessionManager;
+		const manager = hub.agent.sessionManager;
 		// The bag the session writes through: the service's own cache answers the id with it.
 		const state = manager.stateOf(sessionId);
 
@@ -359,11 +365,7 @@ interface LiveFields {
 	pending: number;
 }
 
-/** Read those two fields off a running session. */
-function liveOf(host: HostedSession): LiveFields {
-	const snapshot = host.session.snapshot(host.id);
-	return { running: snapshot.submitting, pending: snapshot.pendingApprovals.length };
-}
+
 
 /**
  * Every field a row has, in the order they are declared.
