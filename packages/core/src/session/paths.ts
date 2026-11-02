@@ -6,7 +6,7 @@ import { AGENT_HOME } from "../config.ts";
  * Where sessions live, using pi's layout:
  *
  * ```
- * <agent home>/sessions/--<cwd with its separators dashed out>--/<ISO stamp>_<session id>.jsonl
+ * <agent home>/sessions/--<workDir with its separators dashed out>--/<ISO stamp>_<session id>.jsonl
  * ```
  *
  * One directory per workspace, named after the absolute workspace path rather than a hash, so the

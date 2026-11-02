@@ -2,7 +2,7 @@ import { bootServer } from "./boot.ts";
 import { resolve } from "node:path";
 
 interface Args {
-	absCwd: string;
+	workDirAbsPath: string;
 	host: string;
 	port: number;
 	model?: string;
@@ -13,7 +13,7 @@ interface Args {
 
 function parseArgs(argv: readonly string[]): Args {
 	const args: Args = {
-		absCwd: process.cwd(),
+		workDirAbsPath: process.cwd(),
 		host: "127.0.0.1",
 		// The port a familiar backend listens on, and overridable for anything that wants 5180 back.
 		port: 8080,
@@ -30,8 +30,8 @@ function parseArgs(argv: readonly string[]): Args {
 		};
 
 		switch (arg) {
-			case "--cwd":
-				args.absCwd = resolve(value());
+			case "--workDir":
+				args.workDirAbsPath = resolve(value());
 				break;
 			case "--host":
 				args.host = value();
@@ -74,7 +74,7 @@ function printHelp(): void {
 			"",
 			"Usage: node src/main.ts [options]",
 			"",
-			"  --cwd <dir>        workspace the agent may touch (default: current directory)",
+			"  --workDir <dir>        workspace the agent may touch (default: current directory)",
 			"  --host <host>      bind address (default: 127.0.0.1)",
 			"  --port <port>      port (default: 8080)",
 			"  --model <ref>      <row id>/<model id> from the imported models, or the row id alone",
@@ -114,7 +114,7 @@ async function main(): Promise<void> {
 	const args = parseArgs(process.argv.slice(2));
 
 	const server = await bootServer({
-		absCwd: args.absCwd,
+		workDirAbsPath: args.workDirAbsPath,
 		host: args.host,
 		port: args.port,
 		vite: args.vite,
@@ -126,7 +126,7 @@ async function main(): Promise<void> {
 	process.stdout.write(
 		[
 			`my-agent listening on ${server.url}`,
-			`  workspace: ${args.absCwd}`,
+			`  workspace: ${args.workDirAbsPath}`,
 			`  client:    ${args.vite ? "vite (hot reload)" : "packages/web/dist"}`,
 			`  api:       ${server.url}/api/health`,
 			"",

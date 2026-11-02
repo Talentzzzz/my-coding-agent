@@ -98,3 +98,39 @@ TypeScript 的 `private` 继续守账本不变式。
 - compaction「文件永远保留全文、每步裁剪是一条 entry」；retry 装在模型的
   transport 上；subagent 是一对工具、无注册表无嵌套；密钥只在
   `<agent home>/models.json`、只骑在一次请求上。
+
+## 修订（2026-11-01，票 08 收账后）
+
+落地时留了一层没人要的壳：两个 Manager 的每个方法都是一行
+`getLeafId(s) { return getLeafId(s); }`，真正的实现是同一文件里同名的文件级
+函数。类当时是为了「调用方零改动」才这么写的（票 02/04 的原话），但它把
+本 ADR 批评的那件事换了个方向又做了一遍——签名上看得见 `SessionState`，
+可代码要读两份，改一处得改两处。
+
+收掉的方式：**一层就够**。`SessionManager` 的 append / 读 / 分支方法
+（`appendMessage`、`getBranchPoints`、`buildSessionContext`、`branch` …）
+连实现带文档搬进类里，同名的文件级函数删除；`SessionManager` 只额外留一个
+`newSession` 函数，因为它是两个构造器（`createSessionState` /
+`inMemorySessionState`）的初始化步骤，类里没有调用者。
+
+`SettingsManager` 走的是另一半：那 13 个方法**一个调用者都没有**（core 与
+server 一直直接 import 同名函数），所以删的是方法，留下的是函数——把函数体搬
+进类反而要让每个拿着 `SettingsState` 的模块先去找一个实例，而 `Agent` 手里
+只有袋、没有服务。类因此只剩 `stateOf`，也就是它唯一拥有的东西：缓存。
+
+随之而来的两处形状变化：
+
+- `sessionSnapshot` / `sessionUsage`（`session/snapshot.ts`）与 `toolStateOf` /
+  `followsGlobalOf`（`session/tool-config.ts`）改收一个 `SessionManager`，
+  因为它们要读账本，而读账本的入口现在是方法。它们仍然不读盘、不写盘。
+- `Agent` 的标量 getter（`modelName`、`thinkingLevel`、`thinkingLevels`、
+  `activeTools`、`isLooping`、`isRetrying`、`retryAttempt`、`usage`、
+  `sessionFile`）删除：`snapshot(id)` 里本来就有这些字段，留着就是同一份答案
+  的第二出口。读取面因此只有 `snapshot` 一个入口。
+- 纯粹的字段访问器（`getLeafId`、`getEntry`、`getAbsSessionFile`、
+  `getSessionId`、`getLeafEntry`、`getEntryCount`、`isPersisted`、
+  `getAbsCwd`、`getAbsSessionDir`、`usesDefaultSessionDir`）一并删除——它们
+  包的就是一次字段读，调用点直接读 `SessionState` 的字段。
+
+§2「类壳保留」不变：类还在、可构造注入、程序集里只有一份；变的只是壳里不再
+是转发。

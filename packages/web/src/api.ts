@@ -101,7 +101,7 @@ export class SessionApi {
 	/**
 	 * Start a conversation.
 	 *
-	 * `absCwd` is where the new session lands: the workspace picker's own choice, made with the request
+	 * `workDirAbsPath` is where the new session lands: the workspace picker's own choice, made with the request
 	 * and never a server-side "current directory". Undefined is the server's root, which is what a
 	 * bodyless create has always meant.
 	 *
@@ -109,8 +109,8 @@ export class SessionApi {
 	 * with it is deliberately not exposed: the sidebar's rows have one writer at a time, and while the
 	 * channel is up that writer is the channel — see {@link sessionId}.
 	 */
-	async createSession(absCwd?: string): Promise<{ sessionId: string }> {
-		return this.sessionId("POST", "/api/sessions", absCwd === undefined ? undefined : { absCwd });
+	async createSession(workDirAbsPath?: string): Promise<{ sessionId: string }> {
+		return this.sessionId("POST", "/api/sessions", workDirAbsPath === undefined ? undefined : { workDirAbsPath });
 	}
 
 	/** Branch a session at one entry, or copy the whole log when the entry is null. */
@@ -170,11 +170,11 @@ export class SessionApi {
 	/**
 	 * Where this server is rooted, and what it currently has running.
 	 *
-	 * The whole response is typed, `live` included, even though this client reads only `absCwd`. Declaring
+	 * The whole response is typed, `live` included, even though this client reads only `workDirAbsPath`. Declaring
 	 * a narrower shape would make this file describe something other than the endpoint — and the next
 	 * reader who wants `live` would find a type that insists it does not exist.
 	 */
-	async health(): Promise<{ ok: boolean; absCwd: string; live: string[] }> {
+	async health(): Promise<{ ok: boolean; workDirAbsPath: string; live: string[] }> {
 		return this.send("GET", "/api/health", undefined);
 	}
 
@@ -186,7 +186,7 @@ export class SessionApi {
 	/**
 	 * Give a workspace a name the sidebar shows, touching nothing on disk.
 	 *
-	 * `absCwd` names the group and `name` is the label — they are not two paths: the folder keeps the name
+	 * `workDirAbsPath` names the group and `name` is the label — they are not two paths: the folder keeps the name
 	 * the file system gave it, and this is a view the settings remember. An empty name takes the
 	 * custom one back, and the heading falls to the folder's own name again.
 	 *
@@ -194,8 +194,8 @@ export class SessionApi {
 	 * applies it and repaints the heading, and no row moved, so there is no `session_row` frame on its
 	 * way to disagree with.
 	 */
-	async renameWorkspace(absCwd: string, name: string): Promise<{ absCwd: string; name: string; settings: SettingsSnapshot }> {
-		return this.send("POST", "/api/workspaces/rename", { absCwd, name });
+	async renameWorkspace(workDirAbsPath: string, name: string): Promise<{ workDirAbsPath: string; name: string; settings: SettingsSnapshot }> {
+		return this.send("POST", "/api/workspaces/rename", { workDirAbsPath, name });
 	}
 
 	/**
@@ -206,8 +206,8 @@ export class SessionApi {
 	 * endpoint answers with what the sidebar should now draw — and the client applies it rather than
 	 * guessing, which would be a second writer for a list the server owns.
 	 */
-	async hideWorkspace(absCwd: string): Promise<{ settings: SettingsSnapshot; workspaces: WorkspaceGroup[] }> {
-		return this.send("POST", "/api/workspaces/hide", { absCwd });
+	async hideWorkspace(workDirAbsPath: string): Promise<{ settings: SettingsSnapshot; workspaces: WorkspaceGroup[] }> {
+		return this.send("POST", "/api/workspaces/hide", { workDirAbsPath });
 	}
 
 	async listModels(): Promise<{ models: ModelOption[] }> {

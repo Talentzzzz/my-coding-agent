@@ -78,7 +78,7 @@ const modelRows: ModelConfig[] = [
 process.stdout.write("\n真服务器 + 真 WebSocket + 生产的 MuxClient\n");
 
 const transport = createFakeTransport({ tokensPerSecond: 400 });
-const server = await bootServer({ absCwd: root, port: 0, mux: { heartbeatIntervalMs: 60 }, api: transport.api, settingsHome: home });
+const server = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: 60 }, api: transport.api, settingsHome: home });
 // Handed to the hub after boot, before any prompt: the one run section below needs a model to run.
 server.hub.setModelConfigs(modelRows);
 
@@ -146,7 +146,7 @@ try {
 		if (item.type === "session_row") rows.put(item.session);
 	}
 	check("行 store 拿到了这个会话", rows.get(sessionId) !== undefined, JSON.stringify(rows.list().map((r) => r.id)));
-	const refused = rows.loadFrom([{ absCwd: root, sessions: [] }], true);
+	const refused = rows.loadFrom([{ workDirAbsPath: root, sessions: [] }], true);
 	check("通道 live 时 REST 列表被拒收", refused === false && rows.get(sessionId) !== undefined, `refused=${refused}`);
 
 	// Cancelling is silent by design: the client asked to stop receiving, so a reply would be a frame
@@ -215,32 +215,32 @@ try {
 		return store;
 	};
 	const overviews = (): number => items.filter((item) => item.type === "sessions").length;
-	const postSession = (absCwd: string): Promise<Response> =>
+	const postSession = (workDirAbsPath: string): Promise<Response> =>
 		fetch(`${server.url}/api/sessions`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ absCwd }),
+			body: JSON.stringify({ workDirAbsPath }),
 		});
 	const restWorkspaces = async (): Promise<string[]> =>
-		((await (await fetch(`${server.url}/api/workspaces`)).json()) as { workspaces: { absCwd: string }[] }).workspaces.map((group) => group.absCwd);
+		((await (await fetch(`${server.url}/api/workspaces`)).json()) as { workspaces: { workDirAbsPath: string }[] }).workspaces.map((group) => group.workDirAbsPath);
 
 	const first = (await (await postSession(aside)).json()) as { sessionId: string };
 	// The same lifecycle rule the warm-up above follows: an unspoken session has no file, so the
 	// workspace directory does not exist either — one prompt is what makes both tables know it.
 	transport.setResponses([fakeAssistantMessage("aside answer")]);
 	check("新工作区里的开场 prompt 被接受", (await postPrompt(server.url, first.sessionId, "让工作区落盘")) === 202);
-	check("新工作区的行到达了概览", await until(() => rowTable().get(first.sessionId) !== undefined), JSON.stringify(rowTable().list().map((row) => row.absCwd)));
+	check("新工作区的行到达了概览", await until(() => rowTable().get(first.sessionId) !== undefined), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
 	check("它也被 REST 列表列着", (await restWorkspaces()).includes(aside), JSON.stringify(await restWorkspaces()));
 
 	const beforeHide = overviews();
 	const hidden = await fetch(`${server.url}/api/workspaces/hide`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ absCwd: aside }),
+		body: JSON.stringify({ workDirAbsPath: aside }),
 	});
 	check("搁置一个工作区被接受 (200)", hidden.status === 200, `status=${hidden.status}`);
 	check("服务端因此重发了一份概览", await until(() => overviews() > beforeHide), `overviews=${overviews()}`);
-	check("行表里不再有这个工作区的任何一行", rowTable().list().every((row) => row.absCwd !== aside), JSON.stringify(rowTable().list().map((row) => row.absCwd)));
+	check("行表里不再有这个工作区的任何一行", rowTable().list().every((row) => row.workDirAbsPath !== aside), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
 	check("REST 列表与概览说的是同一件事", !(await restWorkspaces()).includes(aside), JSON.stringify(await restWorkspaces()));
 
 	// And back: the transcripts and the folder were never touched, so a new session in that directory
@@ -249,7 +249,7 @@ try {
 	const reborn = await postSession(aside);
 	check("在搁置的工作区里新建会话被接受 (201)", reborn.status === 201, `status=${reborn.status}`);
 	check("服务端又重发了一份概览", await until(() => overviews() > beforeBack), `overviews=${overviews()}`);
-	check("那个工作区回到了行表里", rowTable().list().some((row) => row.absCwd === aside), JSON.stringify(rowTable().list().map((row) => row.absCwd)));
+	check("那个工作区回到了行表里", rowTable().list().some((row) => row.workDirAbsPath === aside), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
 	check("REST 列表也把它列回来了", (await restWorkspaces()).includes(aside), JSON.stringify(await restWorkspaces()));
 
 	client.close();

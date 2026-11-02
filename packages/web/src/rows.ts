@@ -101,14 +101,14 @@ export class SessionRows {
 	 * reader that each sorted for themselves would disagree the first time a row moved.
 	 */
 	groups(): WorkspaceGroup[] {
-		const byCwd = new Map<string, SessionRow[]>();
+		const byWorkDir = new Map<string, SessionRow[]>();
 		for (const row of this.list()) {
-			const group = byCwd.get(row.absCwd);
-			if (group === undefined) byCwd.set(row.absCwd, [row]);
+			const group = byWorkDir.get(row.workDirAbsPath);
+			if (group === undefined) byWorkDir.set(row.workDirAbsPath, [row]);
 			else group.push(row);
 		}
-		return [...byCwd.entries()]
-			.map(([absCwd, sessions]) => ({ absCwd, sessions }))
+		return [...byWorkDir.entries()]
+			.map(([workDirAbsPath, sessions]) => ({ workDirAbsPath, sessions }))
 			.sort((a, b) => newest(b.sessions) - newest(a.sessions));
 	}
 }

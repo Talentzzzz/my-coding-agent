@@ -47,7 +47,7 @@ const { createObservability, BOOT_BUDGET_MS, LOAD_FAILED_HEADLINE } = nodeRequir
 	createObservability(options: {
 		app: FakeApp;
 		createWindow: () => FakeWindow;
-		boot: (absCwd: string) => Promise<{ url: string }>;
+		boot: (workDirAbsPath: string) => Promise<{ url: string }>;
 		bootBudgetMs?: number;
 		log?: (line: string) => void;
 		dialog?: { showErrorBox(title: string, content: string): void };
@@ -55,7 +55,7 @@ const { createObservability, BOOT_BUDGET_MS, LOAD_FAILED_HEADLINE } = nodeRequir
 	}): {
 		watch(): void;
 		report(headline: string, cause: unknown): FakeWindow | null;
-		bootWithinBudget(absCwd: string): Promise<{ url: string } | null>;
+		bootWithinBudget(workDirAbsPath: string): Promise<{ url: string } | null>;
 	};
 	BOOT_BUDGET_MS: number;
 	/** Named once so the two load-failure sites in the shell cannot drift apart. */

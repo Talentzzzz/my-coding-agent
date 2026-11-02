@@ -111,7 +111,7 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 		route({
 			method: "POST",
 			// The body is optional and usually absent: an empty `POST` still creates a session in the
-			// server's own workspace. An `absCwd` in the body moves where that one session lands — a choice
+			// server's own workspace. An `workDirAbsPath` in the body moves where that one session lands — a choice
 			// made with the request, so it travels with it rather than becoming server state.
 			path: "/api/sessions",
 			params: {},

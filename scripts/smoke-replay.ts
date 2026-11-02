@@ -32,7 +32,7 @@ function snapshotWith(
 ): SessionSnapshot {
 	return {
 		id: "smoke-replay",
-		absCwd: "/tmp/smoke-replay",
+		workDirAbsPath: "/tmp/smoke-replay",
 		createdAt: 1,
 		title: "重放",
 		model: "faux",

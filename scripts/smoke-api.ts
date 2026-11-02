@@ -4,7 +4,7 @@
 //
 //   node scripts/smoke-api.ts
 //
-// Start a server first (npm run start -- --cwd .), or point this at one with MY_AGENT_URL. No
+// Start a server first (npm run start -- --workDir .), or point this at one with MY_AGENT_URL. No
 // provider key is needed: the run is expected to settle on a provider error, which is still a
 // settled run. That failure is a *retryable* one — a refused connection — so the default retry policy
 // spends three backoffs, about fourteen seconds, before the run settles; the watchdog below is sized
@@ -133,14 +133,14 @@ async function handleItem(id: string, item: { type: string; [key: string]: unkno
 	if (item.type === "baseline") {
 		const session = item.session as {
 			id: string;
-			absCwd: string;
+			workDirAbsPath: string;
 			model: string;
 			thinkingLevels: string[];
 			approvals: Record<string, boolean>;
 			messages: unknown[];
 		};
 		pass(
-			`\nbaseline ${session.id}\n  absCwd=${session.absCwd}\n  model=${session.model}\n  thinking=${session.thinkingLevels.join(",")}\n  approvals=${JSON.stringify(session.approvals)}\n  messages=${session.messages.length}`,
+			`\nbaseline ${session.id}\n  workDirAbsPath=${session.workDirAbsPath}\n  model=${session.model}\n  thinking=${session.thinkingLevels.join(",")}\n  approvals=${JSON.stringify(session.approvals)}\n  messages=${session.messages.length}`,
 		);
 
 		// The second stream is the point of it: the server named a session, and this script attached

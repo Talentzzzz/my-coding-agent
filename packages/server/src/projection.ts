@@ -185,7 +185,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 		}
 		if (event.type !== "entry_appended") return;
 
-		const entry = manager.getEntry(state, event.entryId);
+		const entry = state.sessionEntryMapById.get(event.entryId);
 		if (entry?.type !== "message") return;
 		const at = messageTime(entry);
 		if (at === undefined || at <= current.modified) return;
@@ -377,7 +377,7 @@ interface LiveFields {
  */
 const ROW_FIELDS = [
 	"id",
-	"absCwd",
+	"workDirAbsPath",
 	"createdAt",
 	"title",
 	"parentId",

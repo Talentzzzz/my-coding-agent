@@ -119,7 +119,7 @@ const NO_APPROVALS: Record<ToolApprovalKey, boolean> = {
 function snapshot(sessionId: string, submitting = false): SessionSnapshot {
 	return {
 		id: sessionId,
-		absCwd: "/tmp",
+		workDirAbsPath: "/tmp",
 		createdAt: 1,
 		title: sessionId,
 		model: "m/1",
@@ -356,7 +356,7 @@ process.stdout.write("\nmux client: 按 streamId 分派\n");
 process.stdout.write("\n行 store：一个写者\n");
 
 function row(id: string, modified: number, running = false, pending = 0): SessionRow {
-	return { id, absCwd: "/w", createdAt: 1, title: id, modified, running, pending };
+	return { id, workDirAbsPath: "/w", createdAt: 1, title: id, modified, running, pending };
 }
 
 {
@@ -374,10 +374,10 @@ function row(id: string, modified: number, running = false, pending = 0): Sessio
 
 	// The rule that removes the race: while the channel owns the rows, a listing is refused outright
 	// rather than merged, so a file-derived snapshot can never put a working session back to idle.
-	const taken = rows.loadFrom([{ absCwd: "/w", sessions: [row("a", 100, false)] }], true);
+	const taken = rows.loadFrom([{ workDirAbsPath: "/w", sessions: [row("a", 100, false)] }], true);
 	check("通道 live 时 REST 列表被拒收", taken === false && rows.get("a")?.running === true, `taken=${taken}`);
 
-	rows.loadFrom([{ absCwd: "/w", sessions: [row("a", 100, false)] }], false);
+	rows.loadFrom([{ workDirAbsPath: "/w", sessions: [row("a", 100, false)] }], false);
 	check("通道不在时 REST 兜底", rows.get("a")?.running === false);
 	check("兜底也是整表替换（删掉的行会消失）", rows.get("b") === undefined, JSON.stringify([...rows.list()].map((r) => r.id)));
 }

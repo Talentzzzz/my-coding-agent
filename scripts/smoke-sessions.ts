@@ -10,22 +10,8 @@ import type { Message } from "@my-agent/llm";
 import { bootServer } from "../packages/server/src/boot.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import {
-	appendClearToolResults,
-	appendCompaction,
-	appendMessage,
-	appendToolResultView,
-	// The file's own `const branch` (a session branch, an entry list) shadows a bare `branch` import.
-	branch as branchState,
-	buildContextEntries,
-	buildSessionContext,
-	createSessionState,
+	createSession,
 	fillSession,
-	getContextMessageEntryIds,
-	getEntry,
-	getEntries,
-	getHeader,
-	getLeafId,
-	getTitle,
 	openAgent,
 	readSessionSnapshot,
 	SessionManager,
@@ -39,8 +25,11 @@ import {
 	workspaceDir,
 	type QueueMode,
 	type SessionSnapshot,
-	type SessionState,
+	type Session,
 } from "@my-agent/core";
+
+/** The ledger's operations are the service's methods, so a script holds one to call them on. */
+const store = new SessionManager();
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-sessions-"));
 let failures = 0;
@@ -116,12 +105,12 @@ function ids(entries: readonly { id: string }[]): string {
 }
 
 /** The messages of a state's current branch, which is what a provider would be sent. */
-function messagesOf(state: SessionState): Message[] {
-	return buildSessionContext(state).messages;
+function messagesOf(state: Session): Message[] {
+	return store.buildSessionContext(state).messages;
 }
 
 /** Replay the stored file for a session id, the way a later process would. */
-function openFile(id: string): SessionState {
+function openFile(id: string): Session {
 	const path = SessionManager.findSessionFilePathById(id);
 	if (path === undefined) throw new Error(`no session file for ${id}`);
 	return fillSession(path);
@@ -149,7 +138,7 @@ function entryOf(hub: SessionHub, id: string): OpenSession | undefined {
 }
 
 /** The bag behind a hosted session: what the hub's service adopted at open, file or no file. */
-function bagOf(hub: SessionHub, id: string): SessionState {
+function bagOf(hub: SessionHub, id: string): Session {
 	return hubSessions(hub).stateOf(id);
 }
 
@@ -163,7 +152,7 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
 	return ready();
 }
 
-const hub = new SessionHub({ absCwd: root });
+const hub = new SessionHub({ workDirAbsPath: root });
 
 try {
 	process.stdout.write("one session per id\n");
@@ -214,7 +203,7 @@ try {
 	process.stdout.write("a fork is the branch up to one entry\n");
 	const parentId = await hub.newSession();
 	const parent = await hub.claim(parentId);
-	const parentFile = hub.agent.sessionFile(parent.id) ?? "";
+	const parentFile = hub.agent.sessionManager.stateOf(parent.id).sessionFileAbsPath ?? "";
 	const entryOne = hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("first"));
 	hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("second"));
 
@@ -230,16 +219,16 @@ try {
 	);
 	check(
 		"with the same entry ids",
-		ids(getEntries(forkedFile)) === ids(branch),
-		`${ids(getEntries(forkedFile))} vs ${ids(branch)}`,
+		ids(store.getEntries(forkedFile)) === ids(branch),
+		`${ids(store.getEntries(forkedFile))} vs ${ids(branch)}`,
 	);
 	check(
 		"and the message entry ids line up",
-		JSON.stringify(getContextMessageEntryIds(forkedFile)) === JSON.stringify([entryOne]),
-		JSON.stringify(getContextMessageEntryIds(forkedFile)),
+		JSON.stringify(store.getContextMessageEntryIds(forkedFile)) === JSON.stringify([entryOne]),
+		JSON.stringify(store.getContextMessageEntryIds(forkedFile)),
 	);
-	check("its leaf is that entry's id", getLeafId(forkedFile) === entryOne, String(getLeafId(forkedFile)));
-	check("the header names the file it came from", getHeader(forkedFile)?.parentSession === parentFile, String(getHeader(forkedFile)?.parentSession));
+	check("its leaf is that entry's id", forkedFile.leafId === entryOne, String(forkedFile.leafId));
+	check("the header names the file it came from", store.getHeader(forkedFile)?.parentSession === parentFile, String(store.getHeader(forkedFile)?.parentSession));
 	check(
 		"the source keeps the entries the fork did not take",
 		hubSessions(hub).getChildren(bagOf(hub, parentId), entryOne).length === 1,
@@ -252,29 +241,29 @@ try {
 
 	process.stdout.write("forking without an entry copies the whole log\n");
 	const whole = new SessionManager().forkFrom(parentFile, root, null, workspaceDir(root));
-	check("every entry came with it", ids(getEntries(whole)) === ids(hubSessions(hub).getEntries(bagOf(hub, parentId))));
+	check("every entry came with it", ids(store.getEntries(whole)) === ids(hubSessions(hub).getEntries(bagOf(hub, parentId))));
 	check("and the transcript matches", messagesOf(whole).length === messagesOf(bagOf(hub, parentId)).length);
-	check("its leaf is the source's leaf", getLeafId(whole) === hubSessions(hub).getLeafId(bagOf(hub, parentId)));
-	check("it points back at the source too", getHeader(whole)?.parentSession === parentFile);
+	check("its leaf is the source's leaf", whole.leafId === bagOf(hub, parentId).leafId);
+	check("it points back at the source too", store.getHeader(whole)?.parentSession === parentFile);
 
 	process.stdout.write("forking leaves the source alone\n");
 	const before = await readFile(parentFile, "utf8");
-	const leafBefore = hubSessions(hub).getLeafId(bagOf(hub, parentId));
+	const leafBefore = bagOf(hub, parentId).leafId;
 	const secondFork = openFile(await hub.fork(parentId, entryOne));
-	check("the source keeps its own leaf", hubSessions(hub).getLeafId(bagOf(hub, parentId)) === leafBefore);
+	check("the source keeps its own leaf", bagOf(hub, parentId).leafId === leafBefore);
 	check("its file is byte-identical afterwards", (await readFile(parentFile, "utf8")) === before);
 	check("the claim on it survived", parent.claims === 1 && hub.live.includes(parentId), `claims=${parent.claims}`);
 
 	process.stdout.write("a fork and its parent run side by side\n");
 	check("both are live", hub.live.includes(parentId) && hub.live.includes(forkedId));
 	const forkBefore = JSON.stringify(messagesOf(bagOf(hub, forkedId)));
-	const forkLeaf = hubSessions(hub).getLeafId(bagOf(hub, forkedId));
+	const forkLeaf = bagOf(hub, forkedId).leafId;
 	hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("only the parent"));
 	check(
 		"appending to the parent leaves the fork's transcript alone",
 		JSON.stringify(messagesOf(bagOf(hub, forkedId))) === forkBefore,
 	);
-	check("and the fork's leaf did not move", hubSessions(hub).getLeafId(bagOf(hub, forkedId)) === forkLeaf);
+	check("and the fork's leaf did not move", bagOf(hub, forkedId).leafId === forkLeaf);
 	const parentBefore = JSON.stringify(messagesOf(bagOf(hub, parentId)));
 	hubSessions(hub).appendMessage(bagOf(hub, forkedId), userMessage("only the fork"));
 	check(
@@ -283,13 +272,13 @@ try {
 	);
 
 	process.stdout.write("reopening a fork reports where it came from\n");
-	const leafAtClose = hubSessions(hub).getLeafId(bagOf(hub, forkedId));
+	const leafAtClose = bagOf(hub, forkedId).leafId;
 	hub.release(forked);
 	check("the fork is closed and dropped", await until(() => !hub.live.includes(forkedId)));
 	const forkEntry = entryOf(hub, forked.id);
 	const reread = openFile(forkedId);
-	check("reopening reports its parent session", getHeader(reread)?.parentSession === parentFile);
-	check("and the same leaf", getLeafId(reread) === leafAtClose, `${getLeafId(reread)} vs ${leafAtClose}`);
+	check("reopening reports its parent session", store.getHeader(reread)?.parentSession === parentFile);
+	check("and the same leaf", reread.leafId === leafAtClose, `${reread.leafId} vs ${leafAtClose}`);
 	check("with the messages it had", messagesOf(reread).length === messagesOf(bagOf(hub, forkedId)).length);
 	const reopenedFork = await hub.claim(forkedId);
 	check("a claimed reopen builds a different registry entry", entryOf(hub, reopenedFork.id) !== forkEntry);
@@ -299,12 +288,12 @@ try {
 	hub.release(reopenedFork);
 	await until(() => !hub.live.includes(forkedId));
 	const onDisk = openFile(forkedId);
-	const cold = await hub.fork(forkedId, getLeafId(onDisk));
+	const cold = await hub.fork(forkedId, onDisk.leafId);
 	check("an on-disk session forks too", cold !== forkedId && cold !== parentId, cold);
 	check("it is not running until someone claims it", !hub.live.includes(cold));
 	const coldFile = openFile(cold);
-	check("its branch ends where it was told to", getLeafId(coldFile) === getLeafId(onDisk));
-	check("and it points at the session it came from", getHeader(coldFile)?.parentSession === SessionManager.findSessionFilePathById(forkedId));
+	check("its branch ends where it was told to", coldFile.leafId === onDisk.leafId);
+	check("and it points at the session it came from", store.getHeader(coldFile)?.parentSession === SessionManager.findSessionFilePathById(forkedId));
 	check("the other fork is a session of its own", secondFork.sessionId !== forkedId && secondFork.sessionId !== cold);
 
 	process.stdout.write("a listing resolves a fork's parent\n");
@@ -381,11 +370,11 @@ try {
 	const settingsRoot = await mkdtemp(join(tmpdir(), "my-agent-settings-"));
 	try {
 		const settings = inMemorySettingsState({ tools: ["read", "bash"] });
-		const state = createSessionState(settingsRoot);
+		const state = createSession(settingsRoot);
 		const sessionId = state.sessionId;
 		const options = {
 			absWorkspaceRoot: settingsRoot,
-			sessionState: state,
+			session: state,
 			models: { list: () => [] },
 			settingsState: settings,
 		};
@@ -397,7 +386,7 @@ try {
 		const live = await openAgent(options);
 		try {
 			// The one message the branch test below can rewind to with nothing recorded after it.
-			const firstEntry = appendMessage(state, userMessage("before any choice"));
+			const firstEntry = store.appendMessage(state, userMessage("before any choice"));
 
 			live.setActiveTools(sessionId, ["read"]);
 			check("a recorded choice wins over the default", live.snapshot(sessionId).activeTools.join(",") === "read", live.snapshot(sessionId).activeTools.join(","));
@@ -437,7 +426,7 @@ try {
 	// Phase 1 in one section: a read answers from the JSONL log, leaves the registry exactly as it was,
 	// and agrees field-for-field with what claiming the same transcript reports — because both build
 	// their snapshot from the same parts.
-	const http = await bootServer({ absCwd: root, port: 0 });
+	const http = await bootServer({ workDirAbsPath: root, port: 0 });
 	try {
 		const readId = await http.hub.newSession();
 		const opened = await http.hub.claim(readId);
@@ -531,14 +520,14 @@ try {
 		// never worked in is refused by nothing more than "exists and is a directory".
 		const elsewhere = await mkdtemp(join(tmpdir(), "my-agent-elsewhere-"));
 		try {
-			const created = await call("POST", `${http.url}/api/sessions`, { absCwd: elsewhere });
+			const created = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: elsewhere });
 			check("a new directory is accepted (201)", created.status === 201, `status=${created.status}`);
 			const landed = String(created.payload.sessionId ?? "");
 			const landedRead = await get(`${http.url}/api/sessions/${landed}`);
 			check(
 				"and the session runs where it was told",
-				resolve(landedRead.session?.absCwd ?? "") === resolve(elsewhere),
-				`${landedRead.session?.absCwd}`,
+				resolve(landedRead.session?.workDirAbsPath ?? "") === resolve(elsewhere),
+				`${landedRead.session?.workDirAbsPath}`,
 			);
 			// A session writes nothing until its first message, so a listing taken at creation cannot
 			// name it — and that is the rule rather than a race: the sidebar lists conversations, and a
@@ -551,10 +540,10 @@ try {
 			hubSessions(http.hub).appendMessage(bagOf(http.hub, landed), userMessage("a first message"));
 			http.hub.release(spoke);
 			const groups = ((await call("GET", `${http.url}/api/workspaces`)).payload.workspaces as {
-				absCwd: string;
+				workDirAbsPath: string;
 				sessions: { id: string }[];
 			}[]) ?? [];
-			const group = groups.find((candidate) => resolve(candidate.absCwd) === resolve(elsewhere));
+			const group = groups.find((candidate) => resolve(candidate.workDirAbsPath) === resolve(elsewhere));
 			check(
 				"and lists it under that directory once it has a message",
 				(group?.sessions ?? []).some((session) => session.id === landed),
@@ -562,16 +551,16 @@ try {
 			);
 
 			await writeFile(join(elsewhere, "a-file"), "not a directory\n");
-			const missing = await call("POST", `${http.url}/api/sessions`, { absCwd: join(elsewhere, "no-such-dir") });
+			const missing = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: join(elsewhere, "no-such-dir") });
 			check("a directory that does not exist is refused (400)", missing.status === 400, `status=${missing.status}`);
-			const notDir = await call("POST", `${http.url}/api/sessions`, { absCwd: join(elsewhere, "a-file") });
+			const notDir = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: join(elsewhere, "a-file") });
 			check("a path that is not a directory is refused (400)", notDir.status === 400, `status=${notDir.status}`);
-			const wrongType = await call("POST", `${http.url}/api/sessions`, { absCwd: 42 });
-			check("a non-string absCwd is refused (400)", wrongType.status === 400, `status=${wrongType.status}`);
+			const wrongType = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: 42 });
+			check("a non-string workDirAbsPath is refused (400)", wrongType.status === 400, `status=${wrongType.status}`);
 			const bodyless = await call("POST", `${http.url}/api/sessions`);
 			check("an empty POST still creates (201)", bodyless.status === 201, `status=${bodyless.status}`);
 			const bodylessRead = await get(`${http.url}/api/sessions/${String(bodyless.payload.sessionId ?? "")}`);
-			check("and it runs where the server does", resolve(bodylessRead.session?.absCwd ?? "") === resolve(root), bodylessRead.session?.absCwd);
+			check("and it runs where the server does", resolve(bodylessRead.session?.workDirAbsPath ?? "") === resolve(root), bodylessRead.session?.workDirAbsPath);
 		} finally {
 			await rm(workspaceDir(elsewhere), { recursive: true, force: true });
 			await rm(elsewhere, { recursive: true, force: true });
@@ -594,19 +583,19 @@ try {
 		{
 			const home = await mkdtemp(join(tmpdir(), "my-agent-agent-home-"));
 			const host = await mkdtemp(join(tmpdir(), "my-agent-workspaces-"));
-			const http = await bootServer({ absCwd: root, port: 0, settingsHome: home });
+			const http = await bootServer({ workDirAbsPath: root, port: 0, settingsHome: home });
 			const listed = async (): Promise<string[]> =>
-				(((await call("GET", `${http.url}/api/workspaces`)).payload.workspaces as { absCwd: string }[]) ?? []).map(
-					(group) => resolve(group.absCwd),
+				(((await call("GET", `${http.url}/api/workspaces`)).payload.workspaces as { workDirAbsPath: string }[]) ?? []).map(
+					(group) => resolve(group.workDirAbsPath),
 				);
 			const before = join(host, "before");
 			const other = join(host, "other");
 			try {
 				for (const dir of [before, other]) await mkdir(dir, { recursive: true });
 
-				const created = await call("POST", `${http.url}/api/sessions`, { absCwd: before });
+				const created = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: before });
 				const id = String(created.payload.sessionId ?? "");
-				const elsewhere = await call("POST", `${http.url}/api/sessions`, { absCwd: other });
+				const elsewhere = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: other });
 				// A directory earns its group by holding a conversation, and a session has no file until
 				// its first message — so each of these says one thing before the sidebar can draw it.
 				const speak = async (sessionId: string, text: string): Promise<void> => {
@@ -618,20 +607,20 @@ try {
 				await speak(String(elsewhere.payload.sessionId ?? ""), "other");
 				check("two new directories are listed as two workspaces", (await listed()).includes(resolve(before)) && (await listed()).includes(resolve(other)));
 
-				const malformed = await call("POST", `${http.url}/api/workspaces/hide`, { absCwd: 42 });
+				const malformed = await call("POST", `${http.url}/api/workspaces/hide`, { workDirAbsPath: 42 });
 				check("hiding with a non-string path is refused (400)", malformed.status === 400, `status=${malformed.status}`);
 
 				// A name is a label, so the refusals a move needed — a target already taken, a missing
 				// parent — have nothing to answer here. What is left is whether the path is one this
 				// machine lists, and whether a name arrived at all.
-				const unknown = await call("POST", `${http.url}/api/workspaces/rename`, { absCwd: join(host, "nowhere"), name: "x" });
+				const unknown = await call("POST", `${http.url}/api/workspaces/rename`, { workDirAbsPath: join(host, "nowhere"), name: "x" });
 				check("naming a workspace this machine does not list is a 404", unknown.status === 404, `status=${unknown.status}`);
-				const wrongName = await call("POST", `${http.url}/api/workspaces/rename`, { absCwd: before, name: 42 });
+				const wrongName = await call("POST", `${http.url}/api/workspaces/rename`, { workDirAbsPath: before, name: 42 });
 				check("a non-string name is refused (400)", wrongName.status === 400, `status=${wrongName.status}`);
 
-				const named = await call("POST", `${http.url}/api/workspaces/rename`, { absCwd: before, name: "改过的名字" });
+				const named = await call("POST", `${http.url}/api/workspaces/rename`, { workDirAbsPath: before, name: "改过的名字" });
 				check("naming a workspace is accepted (200)", named.status === 200, `status=${named.status}`);
-				check("the answer names the path it was asked about", resolve(String(named.payload.absCwd ?? "")) === resolve(before), JSON.stringify(named.payload));
+				check("the answer names the path it was asked about", resolve(String(named.payload.workDirAbsPath ?? "")) === resolve(before), JSON.stringify(named.payload));
 				const namedSet = (named.payload.settings as { workspaceNames?: Record<string, string> })?.workspaceNames ?? {};
 				check("and the settings carry the label", namedSet[resolve(before)] === "改过的名字", JSON.stringify(namedSet));
 				const storedNames = ((await call("GET", `${http.url}/api/settings`)).payload.settings as { workspaceNames?: Record<string, string> })
@@ -639,20 +628,20 @@ try {
 				check("a later read sees it too", storedNames[resolve(before)] === "改过的名字", JSON.stringify(storedNames));
 
 				// Nothing on disk moves, which is the whole difference from the folder rename this
-				// replaced: the directory, the store keyed by it, and the header's absCwd all stay put.
+				// replaced: the directory, the store keyed by it, and the header's workDirAbsPath all stay put.
 				check("the folder is exactly where it was", existsSync(before));
 				const kept = await get(`${http.url}/api/sessions/${id}`);
-				check("the session still names its own directory", resolve(kept.session?.absCwd ?? "") === resolve(before), kept.session?.absCwd);
+				check("the session still names its own directory", resolve(kept.session?.workDirAbsPath ?? "") === resolve(before), kept.session?.workDirAbsPath);
 				check("and its transcript is still under that key", (await SessionManager.list(before)).some((session) => session.id === id));
 				check("the listing draws the path, not the label", (await listed()).includes(resolve(before)));
 
-				const cleared = await call("POST", `${http.url}/api/workspaces/rename`, { absCwd: before, name: "  " });
+				const cleared = await call("POST", `${http.url}/api/workspaces/rename`, { workDirAbsPath: before, name: "  " });
 				const clearedSet = (cleared.payload.settings as { workspaceNames?: Record<string, string> })?.workspaceNames ?? {};
 				check("an empty name takes the label back (200)", cleared.status === 200 && (clearedSet[resolve(before)] ?? "") === "", JSON.stringify(cleared.payload));
 
-				const hidden = await call("POST", `${http.url}/api/workspaces/hide`, { absCwd: before });
+				const hidden = await call("POST", `${http.url}/api/workspaces/hide`, { workDirAbsPath: before });
 				check("hiding a workspace is accepted (200)", hidden.status === 200, `status=${hidden.status}`);
-				check("the answer's listing no longer draws the group", !((hidden.payload.workspaces as { absCwd: string }[]) ?? []).some((group) => resolve(group.absCwd) === resolve(before)));
+				check("the answer's listing no longer draws the group", !((hidden.payload.workspaces as { workDirAbsPath: string }[]) ?? []).some((group) => resolve(group.workDirAbsPath) === resolve(before)));
 				check(
 					"and the stored setting records it",
 					((hidden.payload.settings as { hiddenWorkspaces?: string[] })?.hiddenWorkspaces ?? []).some((path) => resolve(path) === resolve(before)),
@@ -669,10 +658,10 @@ try {
 				// 删除 is not a one-way door, and this is the door: the transcripts and the folder were
 				// never touched, so a new session in that directory is the user saying they want it listed
 				// again. Nothing else in the window can un-hide one, which is why the road has to exist.
-				const hiddenAgain = await call("POST", `${http.url}/api/workspaces/hide`, { absCwd: before });
+				const hiddenAgain = await call("POST", `${http.url}/api/workspaces/hide`, { workDirAbsPath: before });
 				check("hiding it a second time is accepted (200)", hiddenAgain.status === 200, `status=${hiddenAgain.status}`);
 				check("and it leaves the listing again", !(await listed()).includes(resolve(before)));
-				const reborn = await call("POST", `${http.url}/api/sessions`, { absCwd: before });
+				const reborn = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: before });
 				check("a new session in it is accepted (201)", reborn.status === 201, `status=${reborn.status}`);
 				check("a new session in a put-aside workspace lists it again", (await listed()).includes(resolve(before)));
 				const storedHidden =
@@ -684,7 +673,7 @@ try {
 				// failing on a path nothing on screen says is gone.
 				await rm(before, { recursive: true, force: true });
 				check("the workspace directory is gone", !existsSync(before));
-				const putBack = await call("POST", `${http.url}/api/sessions`, { absCwd: before });
+				const putBack = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: before });
 				check("a new session puts the directory back (201)", putBack.status === 201, `status=${putBack.status}`);
 				check("and the folder exists again", existsSync(before));
 				void elsewhere;
@@ -738,36 +727,36 @@ try {
 	}
 
 	process.stdout.write("the stateless form replays the ledger per request\n");
-	// The session operations, called with a bare SessionState. A state is transient — built by
+	// The session operations, called with a bare Session. A state is transient — built by
 	// fillSession from the file, discarded when the request ends — so nothing here holds a state
 	// between sections except where a check says otherwise.
 	{
 		const statelessRoot = await mkdtemp(join(tmpdir(), "my-agent-stateless-"));
 		try {
-			const s = createSessionState(statelessRoot);
-			check("a fresh state has a path but no file yet", s.absSessionFile !== undefined && !existsSync(s.absSessionFile));
-			const one = appendMessage(s, userMessage("stateless first"));
-			appendMessage(s, userMessage("stateless second"));
-			check("the first message created the file", s.absSessionFile !== undefined && existsSync(s.absSessionFile));
-			check("and the context follows the leaf", buildSessionContext(s).messages.length === 2);
+			const s = createSession(statelessRoot);
+			check("a fresh state has a path but no file yet", s.sessionFileAbsPath !== undefined && !existsSync(s.sessionFileAbsPath));
+			const one = store.appendMessage(s, userMessage("stateless first"));
+			store.appendMessage(s, userMessage("stateless second"));
+			check("the first message created the file", s.sessionFileAbsPath !== undefined && existsSync(s.sessionFileAbsPath));
+			check("and the context follows the leaf", store.buildSessionContext(s).messages.length === 2);
 
-			const replayed = fillSession(s.absSessionFile!);
+			const replayed = fillSession(s.sessionFileAbsPath!);
 			check(
 				"a replay lands on the same leaf",
-				getLeafId(replayed) === getLeafId(s),
-				`${getLeafId(replayed)} vs ${getLeafId(s)}`,
+				replayed.leafId === s.leafId,
+				`${replayed.leafId} vs ${s.leafId}`,
 			);
 			check(
 				"and rebuilds the same transcript",
-				JSON.stringify(buildSessionContext(replayed).messages) === JSON.stringify(buildSessionContext(s).messages),
+				JSON.stringify(store.buildSessionContext(replayed).messages) === JSON.stringify(store.buildSessionContext(s).messages),
 			);
-			check("and the same title", getTitle(replayed) === getTitle(s));
+			check("and the same title", store.getTitle(replayed) === store.getTitle(s));
 
-			branchState(replayed, one);
-			check("a stateless branch moves the leaf", getLeafId(replayed) === one, String(getLeafId(replayed)));
-			check("while the state appended to stays put", getLeafId(s) !== one, String(getLeafId(s)));
-			const rebranched = fillSession(s.absSessionFile!);
-			check("the branch move is replayed from the file", getLeafId(rebranched) === one, String(getLeafId(rebranched)));
+			store.branch(replayed, one);
+			check("a stateless branch moves the leaf", replayed.leafId === one, String(replayed.leafId));
+			check("while the state appended to stays put", s.leafId !== one, String(s.leafId));
+			const rebranched = fillSession(s.sessionFileAbsPath!);
+			check("the branch move is replayed from the file", rebranched.leafId === one, String(rebranched.leafId));
 
 			// The service's fill-at-open cache: the first stateOf fills from the file, and every stateOf
 			// after answers the same bag — which is what keeps a rename appended through the service and
@@ -776,15 +765,15 @@ try {
 			const live = service.stateOf(s.sessionId);
 			check(
 				"the service and the stateless form agree",
-				JSON.stringify(buildSessionContext(live).messages) === JSON.stringify(buildSessionContext(replayed).messages),
+				JSON.stringify(store.buildSessionContext(live).messages) === JSON.stringify(store.buildSessionContext(replayed).messages),
 			);
 			check("stateOf reuses the bag it filled", service.stateOf(s.sessionId) === live);
-			appendMessage(live, userMessage("written through the cache"));
-			const throughCache = fillSession(s.absSessionFile!);
+			store.appendMessage(live, userMessage("written through the cache"));
+			const throughCache = fillSession(s.sessionFileAbsPath!);
 			check(
 				"a write through the cached bag reaches the file",
-				getLeafId(throughCache) === getLeafId(live) &&
-					JSON.stringify(buildSessionContext(throughCache).messages) === JSON.stringify(buildSessionContext(live).messages),
+				throughCache.leafId === live.leafId &&
+					JSON.stringify(store.buildSessionContext(throughCache).messages) === JSON.stringify(store.buildSessionContext(live).messages),
 			);
 			let refused = false;
 			try {
@@ -852,14 +841,14 @@ try {
 	{
 		const viewRoot = await mkdtemp(join(tmpdir(), "my-agent-views-"));
 		try {
-			const s = createSessionState(viewRoot);
-			appendMessage(s, userMessage("ask for a file"));
-			const assistantId = appendMessage(s, {
+			const s = createSession(viewRoot);
+			store.appendMessage(s, userMessage("ask for a file"));
+			const assistantId = store.appendMessage(s, {
 				role: "assistant",
 				content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "x.txt" } }],
 				timestamp: Date.now(),
 			});
-			const resultId = appendMessage(s, {
+			const resultId = store.appendMessage(s, {
 				role: "toolResult",
 				toolCallId: "call-1",
 				toolName: "read",
@@ -867,48 +856,48 @@ try {
 				isError: false,
 				timestamp: Date.now(),
 			});
-			const viewId = appendToolResultView(s, "call-1", [{ type: "text", text: "REPLACED BY THE HOOK" }]);
+			const viewId = store.appendToolResultView(s, "call-1", [{ type: "text", text: "REPLACED BY THE HOOK" }]);
 
-			const replayed = fillSession(s.absSessionFile!);
-			const views = toolResultViewsOf(buildContextEntries(replayed));
+			const replayed = fillSession(s.sessionFileAbsPath!);
+			const views = toolResultViewsOf(store.buildContextEntries(replayed));
 			const view = views.get("call-1");
 			check("the replay pairs the halves by call id", view !== undefined, JSON.stringify([...views.keys()]));
 			check("the stored half is the tool's own output", view?.stored[0]?.type === "text" && view.stored[0].text === "the tool's own words", JSON.stringify(view?.stored));
 			check("the shown half is what the hook left", view?.shown[0]?.type === "text" && view.shown[0].text === "REPLACED BY THE HOOK", JSON.stringify(view?.shown));
-			check("the entry is recorded behind its own result", getEntry(replayed, viewId)?.parentId === resultId, `${getEntry(replayed, viewId)?.parentId} vs ${resultId}`);
+			check("the entry is recorded behind its own result", replayed.sessionEntryMapById.get(viewId)?.parentId === resultId, `${replayed.sessionEntryMapById.get(viewId)?.parentId} vs ${resultId}`);
 			check(
 				"and the transcript itself still reads stored",
-				JSON.stringify(buildSessionContext(replayed).messages).includes("the tool's own words") &&
-					!JSON.stringify(buildSessionContext(replayed).messages).includes("REPLACED BY THE HOOK"),
+				JSON.stringify(store.buildSessionContext(replayed).messages).includes("the tool's own words") &&
+					!JSON.stringify(store.buildSessionContext(replayed).messages).includes("REPLACED BY THE HOOK"),
 			);
 
-			branchState(replayed, assistantId);
+			store.branch(replayed, assistantId);
 			check(
 				"a view recorded on an abandoned way does not follow the leaf",
-				toolResultViewsOf(buildContextEntries(replayed)).size === 0,
-				JSON.stringify([...toolResultViewsOf(buildContextEntries(replayed)).keys()]),
+				toolResultViewsOf(store.buildContextEntries(replayed)).size === 0,
+				JSON.stringify([...toolResultViewsOf(store.buildContextEntries(replayed)).keys()]),
 			);
 
 			// The abandoned-way branch above wrote a leaf record, so a fresh replay lands there; the clear
 			// is a decision about the main line, so the leaf moves back before it is recorded.
-			const backOn = fillSession(s.absSessionFile!);
-			branchState(backOn, viewId);
-			appendClearToolResults(backOn, [resultId], 100);
+			const backOn = fillSession(s.sessionFileAbsPath!);
+			store.branch(backOn, viewId);
+			store.appendClearToolResults(backOn, [resultId], 100);
 			check(
 				"a clear takes the view with the result it emptied",
-				toolResultViewsOf(buildContextEntries(backOn)).size === 0,
-				JSON.stringify([...toolResultViewsOf(buildContextEntries(backOn)).keys()]),
+				toolResultViewsOf(store.buildContextEntries(backOn)).size === 0,
+				JSON.stringify([...toolResultViewsOf(store.buildContextEntries(backOn)).keys()]),
 			);
 			check(
 				"so the model reads the cleared notice, not the rewrite",
-				JSON.stringify(buildSessionContext(backOn).messages).includes("cleared after an hour idle"),
+				JSON.stringify(store.buildSessionContext(backOn).messages).includes("cleared after an hour idle"),
 			);
 
 			const folded = await mkdtemp(join(tmpdir(), "my-agent-views-orphan-"));
 			try {
-				const s2 = createSessionState(folded);
-				appendMessage(s2, userMessage("another ask"));
-				appendMessage(s2, {
+				const s2 = createSession(folded);
+				store.appendMessage(s2, userMessage("another ask"));
+				store.appendMessage(s2, {
 					role: "toolResult",
 					toolCallId: "call-2",
 					toolName: "read",
@@ -916,11 +905,11 @@ try {
 					isError: false,
 					timestamp: Date.now(),
 				});
-				const viewId2 = appendToolResultView(s2, "call-2", [{ type: "text", text: "ANOTHER REWRITE" }]);
-				appendCompaction(s2, "压缩摘要", viewId2, 100);
+				const viewId2 = store.appendToolResultView(s2, "call-2", [{ type: "text", text: "ANOTHER REWRITE" }]);
+				store.appendCompaction(s2, "压缩摘要", viewId2, 100);
 				check(
 					"a view whose result a compaction folded away is dropped",
-					toolResultViewsOf(buildContextEntries(fillSession(s2.absSessionFile!))).size === 0,
+					toolResultViewsOf(store.buildContextEntries(fillSession(s2.sessionFileAbsPath!))).size === 0,
 				);
 			} finally {
 				await rm(workspaceDir(folded), { recursive: true, force: true });

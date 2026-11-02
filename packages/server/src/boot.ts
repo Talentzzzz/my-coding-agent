@@ -24,7 +24,7 @@ const MUX_PATH = "/mux";
 
 export interface BootOptions {
 	/** The directory the agent may touch. */
-	absCwd: string;
+	workDirAbsPath: string;
 	/** Bind address. Defaults to `127.0.0.1`: this server is for its own machine. */
 	host?: string;
 	/**
@@ -67,7 +67,7 @@ export interface BootedServer {
 	/** Where the client and the API are reachable, with the port actually bound. */
 	url: string;
 	port: number;
-	absCwd: string;
+	workDirAbsPath: string;
 	hub: SessionHub;
 	/**
 	 * What this process knows about every session, as sidebar rows.
@@ -92,7 +92,7 @@ export interface BootedServer {
  * command-line face of this function and owns nothing on its own.
  */
 export async function bootServer(options: BootOptions): Promise<BootedServer> {
-	const absCwd = options.absCwd;
+	const workDirAbsPath = options.workDirAbsPath;
 	const host = options.host ?? "127.0.0.1";
 	const port = options.port ?? 8080;
 	const sessionId = options.sessionId ?? process.env.MY_AGENT_SESSION ?? undefined;
@@ -102,7 +102,7 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 	}
 
 	const hub = new SessionHub({
-		absCwd,
+		workDirAbsPath,
 		...(options.model === undefined ? {} : { model: options.model }),
 		...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
 		// A shell with no project picker yet has no other way to be pointed at a conversation; the
@@ -147,7 +147,7 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 	return {
 		url: `http://${host}:${bound}`,
 		port: bound,
-		absCwd,
+		workDirAbsPath,
 		hub,
 		projection,
 		mux,

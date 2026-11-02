@@ -55,7 +55,7 @@ fake.setResponses([
 	fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 	fakeAssistantMessage("done"),
 ]);
-const hub = new SessionHub({ absCwd: root, approvalGraceMs: 60_000, api: fake.api, modelsHome: join(root, "agent-home") });
+const hub = new SessionHub({ workDirAbsPath: root, approvalGraceMs: 60_000, api: fake.api, modelsHome: join(root, "agent-home") });
 hub.setModelConfigs(rows);
 
 // Mounted the way `SessionHub.open()` mounts one — the entry seeded with this smoke's own settings

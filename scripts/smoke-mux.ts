@@ -105,7 +105,7 @@ const TOKENS_PER_SECOND = 400;
 async function openRig(): Promise<Rig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-mux-"));
 	const transport = createFakeTransport({ tokensPerSecond: TOKENS_PER_SECOND });
-	const hub = new SessionHub({ absCwd: root, api: transport.api });
+	const hub = new SessionHub({ workDirAbsPath: root, api: transport.api });
 	hub.setModelConfigs(rows);
 
 	const projection = createSessionProjection(hub);

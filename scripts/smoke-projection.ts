@@ -59,7 +59,7 @@ const ROW: ModelConfig = {
 };
 
 const fake = createFakeTransport();
-const hub = new SessionHub({ absCwd: root, api: fake.api, modelsHome: join(root, "agent-home") });
+const hub = new SessionHub({ workDirAbsPath: root, api: fake.api, modelsHome: join(root, "agent-home") });
 /** The process's one orchestrator: every session this smoke drives goes through it, by id. */
 const agent = hub.agent;
 hub.setModelConfigs([ROW]);
@@ -88,8 +88,8 @@ try {
 	const groupsBefore = await projection.groups();
 	check(
 		"and no group names its workspace yet",
-		groupsBefore.every((group) => group.absCwd !== root),
-		JSON.stringify(groupsBefore.map((group) => group.absCwd)),
+		groupsBefore.every((group) => group.workDirAbsPath !== root),
+		JSON.stringify(groupsBefore.map((group) => group.workDirAbsPath)),
 	);
 
 	process.stdout.write("the first message is what puts the session in the store\n");
@@ -100,7 +100,7 @@ try {
 	hub.release(spokenHost);
 	const spokenRow = await projection.row(first);
 	check("a spoken session has a row", spokenRow !== undefined, String(spokenRow));
-	check("with the workspace as its absCwd", spokenRow?.absCwd === root, spokenRow?.absCwd);
+	check("with the workspace as its workDirAbsPath", spokenRow?.workDirAbsPath === root, spokenRow?.workDirAbsPath);
 	check("a row carries modified, not only createdAt", typeof spokenRow?.modified === "number" && spokenRow.modified > 0, String(spokenRow?.modified));
 	check("and the title is the message the branch starts with", spokenRow?.title === "the conversation starts here", spokenRow?.title);
 
@@ -116,8 +116,8 @@ try {
 	const again = await projection.rows();
 	check("both callers see the same rows", JSON.stringify(rows) === JSON.stringify(again));
 	check("the rows are the ones the seed found", rows.some((row) => row.id === first));
-	const mine = groups.find((group) => group.absCwd === root);
-	check("this workspace's group holds this session's row", mine?.sessions.some((row) => row.id === first) === true, JSON.stringify(mine?.absCwd));
+	const mine = groups.find((group) => group.workDirAbsPath === root);
+	check("this workspace's group holds this session's row", mine?.sessions.some((row) => row.id === first) === true, JSON.stringify(mine?.workDirAbsPath));
 	check(
 		"a group is ordered by activity, newest first",
 		(mine?.sessions ?? []).every((row, index, all) => index === 0 || (all[index - 1]?.modified ?? 0) >= row.modified),
@@ -229,7 +229,7 @@ try {
 	fake.setResponses([fakeAssistantMessage("to fork from")]);
 	await hub.agent.prompt(source, "the conversation being forked");
 	await settle();
-	const forked = await hub.fork(source, agent.sessionManager.getLeafId(agent.sessionManager.stateOf(source)));
+	const forked = await hub.fork(source, agent.sessionManager.stateOf(source).leafId);
 	await until(() => seen.some((row) => row.id === forked));
 	const forkRow = await projection.row(forked);
 	check("the fork reaches the store on its own", forkRow !== undefined, forked);

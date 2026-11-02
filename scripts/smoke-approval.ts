@@ -18,7 +18,7 @@
 //   5. a restart — a second process seeds no pending approval, and the transcript keeps the call.
 //
 // Two things pinned by `docs/notes.md` §一 and §二 are load-bearing here. The first section's
-// `new SessionHub({ workspaceRoot: root })` is deliberately left alone (the hub's option is `absCwd`):
+// `new SessionHub({ workspaceRoot: root })` is deliberately left alone (the hub's option is `workDirAbsPath`):
 // that section drives a session it mounted itself and never asks the hub to resolve a workspace, and
 // "fixing" it would change the one thing the note says not to touch — it is also why this file stays
 // outside `npm run check`'s `include`. And no section may hold a session open through a *subscription*:
@@ -130,7 +130,7 @@ const roundTripWatchdog = deadline("the approval round trip", 60_000);
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-"));
 // `docs/notes.md` §一: left exactly as written, `workspaceRoot` included, even though `HubOptions`
-// declares `absCwd`. This section mounts the session by hand and never asks the hub to resolve a
+// declares `workDirAbsPath`. This section mounts the session by hand and never asks the hub to resolve a
 // workspace, which is the only reason it works — and why the note says not to "fix" it.
 const fake = createFakeTransport();
 // One response per call: a tool call, then the text that ends the run. Both are assistant messages —
@@ -573,7 +573,7 @@ restartFake.setResponses([
 	fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 	fakeAssistantMessage("done"),
 ]);
-const first = await bootServer({ absCwd: restartRoot, port: 0, api: restartFake.api });
+const first = await bootServer({ workDirAbsPath: restartRoot, port: 0, api: restartFake.api });
 let restartSessionId = "";
 try {
 	const landing = (await (await fetch(`${first.url}/api/sessions/current`)).json()) as { sessionId: string };
@@ -596,7 +596,7 @@ try {
 const childPort = await freePort();
 const child = spawn(
 	process.execPath,
-	[join("packages", "server", "src", "main.ts"), "--cwd", restartRoot, "--port", String(childPort)],
+	[join("packages", "server", "src", "main.ts"), "--workDir", restartRoot, "--port", String(childPort)],
 	{
 		stdio: "ignore",
 		env: {
@@ -717,7 +717,7 @@ async function openRig(approvalGraceMs: number): Promise<Rig> {
 	]);
 	// The hub's one orchestrator sends through the scripted transport, so the session it is about to
 	// serve is answered by it.
-	const hub = new SessionHub({ absCwd: root, approvalGraceMs, api: transport.api, modelsHome: join(root, "agent-home") });
+	const hub = new SessionHub({ workDirAbsPath: root, approvalGraceMs, api: transport.api, modelsHome: join(root, "agent-home") });
 	hub.setModelConfigs(rows);
 	const { id: sessionId, host } = await mountSession(hub, {
 		root,
@@ -775,7 +775,7 @@ async function openCrossRig(): Promise<CrossRig> {
 		fakeAssistantMessage("done"),
 		fakeAssistantMessage("done"),
 	]);
-	const hub = new SessionHub({ absCwd: root, approvalGraceMs: 60_000, api: transport.api, modelsHome: join(root, "agent-home") });
+	const hub = new SessionHub({ workDirAbsPath: root, approvalGraceMs: 60_000, api: transport.api, modelsHome: join(root, "agent-home") });
 	hub.setModelConfigs(rows);
 	const sessions: Mounted[] = [];
 	for (let index = 0; index < 2; index += 1) {

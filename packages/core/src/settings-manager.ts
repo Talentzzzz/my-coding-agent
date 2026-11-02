@@ -189,8 +189,8 @@ export function settingsStateFromStorage(storage: SettingsStorage): SettingsStat
  * re-read from disk, since nothing here caches: the state is a snapshot of the files as of this call,
  * and {@link applySettings} keeps it in step with what it writes.
  */
-export function fillSettings(absCwd: string, agentDir: string = AGENT_HOME): SettingsState {
-	return settingsStateFromStorage(new FileSettingsStorage(settingsPath(agentDir), projectSettingsPath(absCwd)));
+export function fillSettings(workDirAbsPath: string, agentDir: string = AGENT_HOME): SettingsState {
+	return settingsStateFromStorage(new FileSettingsStorage(settingsPath(agentDir), projectSettingsPath(workDirAbsPath)));
 }
 
 /**
@@ -252,8 +252,8 @@ export function getHiddenWorkspaces(s: SettingsState): string[] {
  */
 export function getWorkspaceNames(s: SettingsState): Record<string, string> {
 	const names: Record<string, string> = {};
-	for (const [absCwd, name] of Object.entries(s.settings.workspaceNames ?? {})) {
-		if (name.trim().length > 0) names[absCwd] = name;
+	for (const [workDirAbsPath, name] of Object.entries(s.settings.workspaceNames ?? {})) {
+		if (name.trim().length > 0) names[workDirAbsPath] = name;
 	}
 	return names;
 }
@@ -384,14 +384,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * The settings service: a stateless shell over the operations above (ADR-0007 §2).
+ * The settings service: the workspace-keyed cache, and nothing else (ADR-0007 §2–3).
  *
- * Every method is a one-line delegation to the stateless operation of the same name — which carries
- * the real logic and its documentation — with the workspace's {@link SettingsState} as its first
- * parameter. The class owns no logic and holds no settings of its own; what it holds is the one
- * cache the files' sharing needs: {@link stateOf}, which keeps every reader and writer of one
- * workspace on the same state object, the way the hub's per-workspace table used to before the
- * cache moved in here.
+ * The reads are the stateless operations at the top of this file — `getApprovals`, `getBashSettings`,
+ * and their siblings — which take a workspace's {@link SettingsState} and answer from it alone, so a
+ * caller that already holds the bag names the operation it wants rather than a second door onto it.
+ * What the class owns is the one thing a bag cannot own: {@link stateOf}, the cache that keeps every
+ * reader and writer of one workspace on the same state object, the way the hub's per-workspace table
+ * used to before the cache moved in here.
  */
 export class SettingsManager {
 	/**
@@ -428,57 +428,5 @@ export class SettingsManager {
 		const created = fillSettings(absWorkspaceRoot, agentDir);
 		this.states.set(key, created);
 		return created;
-	}
-
-	getSettings(s: SettingsState): Settings {
-		return getSettings(s);
-	}
-
-	getModel(s: SettingsState): string | undefined {
-		return getModel(s);
-	}
-
-	getTools(s: SettingsState): string[] | undefined {
-		return getTools(s);
-	}
-
-	getAppearance(s: SettingsState): AppearanceSettings {
-		return getAppearance(s);
-	}
-
-	getHiddenWorkspaces(s: SettingsState): string[] {
-		return getHiddenWorkspaces(s);
-	}
-
-	getWorkspaceNames(s: SettingsState): Record<string, string> {
-		return getWorkspaceNames(s);
-	}
-
-	getApprovals(s: SettingsState): Record<ToolApprovalKey, boolean> {
-		return getApprovals(s);
-	}
-
-	isApprovalRequired(s: SettingsState, tool: ToolApprovalKey): boolean {
-		return isApprovalRequired(s, tool);
-	}
-
-	getSteeringMode(s: SettingsState): QueueMode {
-		return getSteeringMode(s);
-	}
-
-	getFollowUpMode(s: SettingsState): QueueMode {
-		return getFollowUpMode(s);
-	}
-
-	getRetrySettings(s: SettingsState): RetrySettings {
-		return getRetrySettings(s);
-	}
-
-	getBashSettings(s: SettingsState): BashSettings {
-		return getBashSettings(s);
-	}
-
-	applySettings(s: SettingsState, patch: SettingsPatch, scope?: SettingsScope): void {
-		applySettings(s, patch, scope);
 	}
 }

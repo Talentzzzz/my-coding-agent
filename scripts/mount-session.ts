@@ -11,10 +11,10 @@
 // casts are acceptable: what a smoke needs is the hub's own registry, not a second copy of it.
 import {
 	type SettingsState,
-	type SessionState,
+	type Session,
 	SessionManager,
 	OpenSessions,
-	createSessionState,
+	createSession,
 	ensureSession,
 	inMemorySettingsState,
 } from "@my-agent/core";
@@ -39,7 +39,7 @@ export interface MountOptions {
 /** What a mounted session is: the id every call names, the transcript bag behind it, and its claim token. */
 export interface MountedSession {
 	id: string;
-	state: SessionState;
+	state: Session;
 	host: HostedSession;
 }
 
@@ -51,10 +51,10 @@ export interface MountedSession {
  */
 export async function mountSession(hub: SessionHub, options: MountOptions): Promise<MountedSession> {
 	const internals = hub as unknown as HubInternals;
-	const state = createSessionState(options.root);
+	const state = createSession(options.root);
 	await ensureSession({
 		absWorkspaceRoot: options.root,
-		sessionState: state,
+		session: state,
 		models: hub.models,
 		sessionManager: internals.sessions,
 		openSessions: internals.openSessions,

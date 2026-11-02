@@ -209,7 +209,7 @@ export interface Settings {
 	 * The name the sidebar shows for a workspace, by absolute path.
 	 *
 	 * A view decision exactly like `hiddenWorkspaces`, and for the same reason: the folder on disk
-	 * keeps the name the file system gave it, and every transcript keeps the `absCwd` its header
+	 * keeps the name the file system gave it, and every transcript keeps the `workDirAbsPath` its header
 	 * recorded. Renaming a workspace here therefore cannot make a session unfindable, and it cannot
 	 * touch anything outside the agent's own settings.
 	 *
@@ -242,8 +242,8 @@ export function settingsPath(agentDir: string = AGENT_HOME): string {
 }
 
 /** The settings file a workspace can commit. Only `SettingsManager` decides whether to write it. */
-export function projectSettingsPath(absCwd: string): string {
-	return join(resolve(absCwd), PROJECT_DIR_NAME, "settings.json");
+export function projectSettingsPath(workDirAbsPath: string): string {
+	return join(resolve(workDirAbsPath), PROJECT_DIR_NAME, "settings.json");
 }
 
 /**
@@ -402,11 +402,11 @@ export function clampContentWidth(value: unknown): number | undefined {
 export function clampWorkspacePaging(value: unknown): Record<string, WorkspacePaging> | undefined {
 	if (!isRecord(value)) return undefined;
 	const out: Record<string, WorkspacePaging> = {};
-	for (const [absCwd, entry] of Object.entries(value)) {
-		if (absCwd.trim().length === 0 || !isRecord(entry)) continue;
+	for (const [workDirAbsPath, entry] of Object.entries(value)) {
+		if (workDirAbsPath.trim().length === 0 || !isRecord(entry)) continue;
 		const clampPage = (input: unknown): number =>
 			typeof input === "number" && Number.isInteger(input) && input >= 1 ? input : 1;
-		out[absCwd] = {
+		out[workDirAbsPath] = {
 			collapsed: entry.collapsed === true,
 			page: clampPage(entry.page),
 			savedPage: clampPage(entry.savedPage),

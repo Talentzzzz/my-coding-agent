@@ -512,11 +512,11 @@ function main(): void {
 			[
 				...groups.map((group) => ({
 					icon: "folder" as const,
-					label: state.settings?.workspaceNames?.[group.absCwd] ?? workspaceName(group.absCwd),
-					title: group.absCwd,
-					active: group.absCwd === absChosenDir,
+					label: state.settings?.workspaceNames?.[group.workDirAbsPath] ?? workspaceName(group.workDirAbsPath),
+					title: group.workDirAbsPath,
+					active: group.workDirAbsPath === absChosenDir,
 					onSelect: () => {
-						absPickedWorkspace = group.absCwd;
+						absPickedWorkspace = group.workDirAbsPath;
 						render();
 					},
 				})),
@@ -544,9 +544,9 @@ function main(): void {
 		// The heading's own 「新建会话」 names the workspace it was asked on; the top row names nothing
 		// and follows the picker. The choice is folded into `absPickedWorkspace` *before* the create goes
 		// out, because `openSession` clears it — the picker has done its job once the session exists.
-		onNewSession: (absCwd) => {
-			if (absCwd !== undefined) absPickedWorkspace = absCwd;
-			void newSession(absCwd);
+		onNewSession: (workDirAbsPath) => {
+			if (workDirAbsPath !== undefined) absPickedWorkspace = workDirAbsPath;
+			void newSession(workDirAbsPath);
 		},
 		onSelectSession: (sessionId) => void openSession(sessionId),
 		onToggleCollapsed: () => {
@@ -560,32 +560,32 @@ function main(): void {
 		onForkSession: (sessionId) => void forkSession(sessionId),
 		onDeleteSession: (sessionId) => void deleteSession(sessionId),
 		onRenameSession: (sessionId, title) => void renameSession(sessionId, title),
-		onToggleWorkspace: (absCwd) => {
-			const entry = pagingOf(paging, absCwd);
+		onToggleWorkspace: (workDirAbsPath) => {
+			const entry = pagingOf(paging, workDirAbsPath);
 			// Expanding lands on the page the workspace was read down to when it collapsed; collapsing
 			// saves the page it was on. The two paging buttons write the saved page too — they are
 			// where the reading happens — so the saved page is always the page on screen.
 			setPaging(
-				absCwd,
+				workDirAbsPath,
 				entry.collapsed
 					? { collapsed: false, page: entry.savedPage, savedPage: entry.savedPage }
 					: { collapsed: true, page: entry.page, savedPage: entry.page },
 			);
 		},
-		onPageWorkspace: (absCwd) => {
-			const entry = pagingOf(paging, absCwd);
-			setPaging(absCwd, { collapsed: false, page: entry.page + 1, savedPage: entry.page + 1 });
+		onPageWorkspace: (workDirAbsPath) => {
+			const entry = pagingOf(paging, workDirAbsPath);
+			setPaging(workDirAbsPath, { collapsed: false, page: entry.page + 1, savedPage: entry.page + 1 });
 		},
-		onCollapseWorkspace: (absCwd) => {
+		onCollapseWorkspace: (workDirAbsPath) => {
 			// Step back the one page the last 「展开其余」 added — not a reset to the first, and the
 			// saved page moves with it: un-expanding is un-reading, so reopening a later
 			// heading-collapse lands on the page the user had actually read down to.
-			const entry = pagingOf(paging, absCwd);
+			const entry = pagingOf(paging, workDirAbsPath);
 			const page = Math.max(1, entry.page - 1);
-			setPaging(absCwd, { collapsed: false, page, savedPage: page });
+			setPaging(workDirAbsPath, { collapsed: false, page, savedPage: page });
 		},
-		onRenameWorkspace: (absCwd, name) => void renameWorkspace(absCwd, name),
-		onDeleteWorkspace: (absCwd) => void deleteWorkspace(absCwd),
+		onRenameWorkspace: (workDirAbsPath, name) => void renameWorkspace(workDirAbsPath, name),
+		onDeleteWorkspace: (workDirAbsPath) => void deleteWorkspace(workDirAbsPath),
 	});
 
 	/**
@@ -597,8 +597,8 @@ function main(): void {
 	 * view keeps the click, which is the honest split: the screen is what the user did, the file is
 	 * what survived.
 	 */
-	function setPaging(absCwd: string, next: WorkspacePaging): void {
-		paging = { ...paging, [absCwd]: next };
+	function setPaging(workDirAbsPath: string, next: WorkspacePaging): void {
+		paging = { ...paging, [workDirAbsPath]: next };
 		renderSidebar();
 		void saveSettings({ appearance: { workspaces: paging } });
 	}
@@ -861,7 +861,7 @@ function main(): void {
 	 * disagree with the conversation being read.
 	 */
 	function directoryForNewSession(): string {
-		return absPickedWorkspace || state.snapshot?.absCwd || absCurrentWorkspace;
+		return absPickedWorkspace || state.snapshot?.workDirAbsPath || absCurrentWorkspace;
 	}
 
 	/**
@@ -1126,7 +1126,7 @@ function main(): void {
 			headingTipDrawn = headingTip;
 			heading.title = headingTip;
 		}
-		const subtitleText = snapshot?.absCwd ?? (followed === undefined ? "连接中…" : followed);
+		const subtitleText = snapshot?.workDirAbsPath ?? (followed === undefined ? "连接中…" : followed);
 		if (subtitleText !== subtitleDrawn) {
 			subtitleDrawn = subtitleText;
 			subtitle.textContent = subtitleText;
@@ -1481,14 +1481,14 @@ function main(): void {
 	/**
 	 * Start a conversation in the picker's directory, and point the window at it.
 	 *
-	 * The directory travels with the request (`absCwd`), which is the whole of the picker's contract: a
+	 * The directory travels with the request (`workDirAbsPath`), which is the whole of the picker's contract: a
 	 * choice made for one creation is not a state the server keeps. The session it opens re-reads the
 	 * lists, which is how a first session in a brand-new directory earns its workspace group a place
 	 * in the sidebar.
 	 */
-	async function newSession(absCwd?: string): Promise<void> {
+	async function newSession(workDirAbsPath?: string): Promise<void> {
 		try {
-			const created = await api.createSession(absCwd ?? (directoryForNewSession() || undefined));
+			const created = await api.createSession(workDirAbsPath ?? (directoryForNewSession() || undefined));
 			reachable();
 			await openSession(created.sessionId);
 		} catch (error) {
@@ -1506,9 +1506,9 @@ function main(): void {
 	 *
 	 * An empty name takes the custom one back and the heading falls to the folder's own name.
 	 */
-	async function renameWorkspace(absCwd: string, name: string): Promise<void> {
+	async function renameWorkspace(workDirAbsPath: string, name: string): Promise<void> {
 		try {
-			const answer = await api.renameWorkspace(absCwd, name);
+			const answer = await api.renameWorkspace(workDirAbsPath, name);
 			reachable();
 			apply({ ...state, settings: answer.settings });
 			// The settings snapshot moved but nothing in the gate's signature has to: the rows are the
@@ -1532,9 +1532,9 @@ function main(): void {
 	 * road, and it is applied here. What this window owes either of them is its settings snapshot: the
 	 * hidden list is what the next reload leaves the group out by.
 	 */
-	async function deleteWorkspace(absCwd: string): Promise<void> {
+	async function deleteWorkspace(workDirAbsPath: string): Promise<void> {
 		try {
-			const answer = await api.hideWorkspace(absCwd);
+			const answer = await api.hideWorkspace(workDirAbsPath);
 			reachable();
 			rows.loadFrom(answer.workspaces, channel === "live");
 			applyAppearance(answer.settings);
@@ -1767,7 +1767,7 @@ function main(): void {
 	void (async () => {
 		try {
 			const health = await api.health();
-			absCurrentWorkspace = health.absCwd;
+			absCurrentWorkspace = health.workDirAbsPath;
 			reachable();
 		} catch (error) {
 			unreachable(error);

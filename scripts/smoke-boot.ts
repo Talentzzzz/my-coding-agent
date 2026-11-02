@@ -117,7 +117,7 @@ const neverAnswers: ChatTransport = {
 		});
 	},
 };
-const server: BootedServer = await bootServer({ absCwd: workspace, port: 0, api: neverAnswers });
+const server: BootedServer = await bootServer({ workDirAbsPath: workspace, port: 0, api: neverAnswers });
 
 try {
 	process.stdout.write(`booted on ${server.url} (port ${server.port})\n`);
@@ -225,7 +225,7 @@ try {
 	const port = await freePort();
 	const child = spawn(
 		process.execPath,
-		[join("packages", "server", "src", "main.ts"), "--cwd", childWorkspace, "--port", String(port)],
+		[join("packages", "server", "src", "main.ts"), "--workDir", childWorkspace, "--port", String(port)],
 		{
 			stdio: "ignore",
 			env: {

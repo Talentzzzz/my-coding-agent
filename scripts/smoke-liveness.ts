@@ -60,7 +60,7 @@ const root = await mkdtemp(join(tmpdir(), "my-agent-liveness-"));
 // The heartbeat interval is the whole clock of this smoke: the server speaks every 50 ms, the client
 // tolerates three of those (its own rule, derived from `everyMs`), and both numbers stay far inside
 // the assertion windows below.
-const server: BootedServer = await bootServer({ absCwd: root, port: 0, mux: { heartbeatIntervalMs: 50 } });
+const server: BootedServer = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: 50 } });
 const proxy: FaultyProxy = await faultyProxy(new URL(server.url));
 
 const observed: Observed = { channels: [], heartbeats: 0, baselines: [], ended: [], errors: [] };

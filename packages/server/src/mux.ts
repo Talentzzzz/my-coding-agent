@@ -946,7 +946,7 @@ export class MuxServer {
 	 * of its sessions changed — a group that returns on its own is worse than one that never left.
 	 */
 	private listed(row: SessionRow): boolean {
-		return this.hub.listsWorkspace(row.absCwd);
+		return this.hub.listsWorkspace(row.workDirAbsPath);
 	}
 
 	/** This connection's opening overview: every row this process lists, once. */
