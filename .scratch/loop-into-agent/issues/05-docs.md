@@ -65,5 +65,29 @@ Blocked by: 03
 **验证**：`npm run check` 绿（tsc ×3 + token 审计）。纯文档改动，smoke 不涉及。
 
 **注**：工作树里既有一批未提交的改名与文档改动，凡与本票同文件的部分随本次提交一并落库
-（沿用 03 号票的记法，commit message 里点名）。
+（沿用 03 号票的记法，commit message 里点名）。被带进来的有两处：`AGENTS.md` 的 service 词条
+（「方法体就写在类里」那半句）与 `docs/architecture.md` 的*流式期间的输入*一段（`flushAccepted`
+→ `drainTranscribed`）。
+
+**审查后校正**（两轴 code review，Standards + Spec 各一条子代理）：
+
+- **`docs/architecture.md` 留下一处死标识符**：*流式期间的输入*里「经 `getSteeringMessages` /
+  `getFollowUpMessages` 拉取」——这两个名字在 `packages/` 里已不存在（只在 `pi-main/` 的上游参考
+  里），ADR-0008 也写明取走点「从钩子变成 `drainTranscribed` 直读会话队列」。改成「直读会话自己的
+  两条队列（`drainTranscribed`），并在**取走的那一刻**写进 store」。这是随那半段一并落库的旧句子，
+  本票要的正是「过期陈述不得存活」，故就地修。
+- **`@ts-nocheck` 的作用域**：依赖段原写「引擎并入 `agent.ts`、`@ts-nocheck` 一并退场」，紧跟在前
+  一句「`packages/llm` 逐文件 `@ts-nocheck`」之后，读起来像在说 llm 也退了。改为「它那份
+  `@ts-nocheck` 随文件一起退场」。
+- **新增术语不许成为同义词许可**：初稿写「文档里说的「循环」指的就是它」，等于术语表替同义词背书
+  （`docs/agents/domain.md`「不要漂移到术语表明确避开的同义词上」）。改为「「循环」从此不是组件的
+  名字，只是那些轮次的日常说法」，并删掉与 architecture 重复的那条 `startRun → runEngine → …` 链。
+- **`docs/agents/domain.md` 的术语索引漏了 engine**：那一行逐词枚举 `AGENTS.md` 的术语表，新词进场
+  时它也是索引的一部分，补上。
+- **`map.md` 缺 resolved 指针**（`docs/agents/issue-tracker.md` 的 Resolve 步骤要求）：补一条，
+  把 03 的落地与 05 的文档同步并作一条；03 当时也没记，一并补上。
+
+**审查未采纳的两条**：`agent.ts:1621` 那句「the caller's end-of-run sweep writes it」同样是
+`dropQueued` 改名后留下的旧注释——但它是源码注释、不在本票范围（05 只动三份文档），留待下次动那
+段代码时一并修。
 

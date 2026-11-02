@@ -29,12 +29,11 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   文件级函数可转发，拆掉的只是 per-session 实例字段；
   Manager 内部按 id / 工作区键控的缓存随时可从磁盘重建、且藏在自己内部不被传递——这正是它与聚合袋的
   分界。
-- **engine（引擎）** —— `Agent.runEngine`，**不是对象**：一次运行的入口与出口，文档里说的「循环」
-  指的就是它。它读的每一处接缝都是编排层自己的成员（`prepareRequest`、`dispatchEvent`、会话自己的两条
-  队列、`entry.runtime.activeRun`）或同一个文件的局部变量（这次运行的模型），所以一次运行只走一条链
-  `startRun → runEngine → prepareRequest → dispatchEvent`，运行期瞬态全是局部变量。它曾经是 vendored
-  的 `packages/loop` 与那个只负责把每个问题转回 `Agent` 的 `Loop` 委派对象，两者已删（ADR-0008）。
-  有状态的部分是私有成员，无状态的助手是文件级函数——恢复机器的两个纯函数仍由 `index.ts` 导出。
+- **engine（引擎）** —— `Agent.runEngine`：一次运行的入口与出口，编排层自己的方法，**没有对象**。它读的
+  每一处接缝都是编排层的私有成员或这次运行的局部变量（`prepareRequest`、`dispatchEvent`、会话自己的
+  两条队列、`entry.runtime.activeRun`、这次运行的模型），所以运行期没有一处瞬态被谁持有。原来的
+  `packages/loop` 与它的 `Loop` 委派对象已删（ADR-0008）——「循环」从此不是组件的名字，只是那些轮次
+  的日常说法。
 - **tool（工具）** —— `AgentTool`；`createToolRegistry(toolDefinitions())` 是**进程**的目录（定义 +
   注册进来的工具），一条会话自己的工具（委派对）是装配字段、记在登记处条目上，`registryView()`
   把两半合成它解析时看到的一个目录；活跃集合是从账本派生的一次读取，不在任何一处持有。没有插件

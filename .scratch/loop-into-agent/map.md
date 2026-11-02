@@ -30,6 +30,9 @@ Agent 的成员。`npm run check` 与全部 smoke 绿，ADR-0008 与文档同步
 - [ADR-0008](issues/04-adr-0008.md)：`docs/adr/0008-loop-merged-into-agent.md` 落库，部分取代
   0001「`packages/loop` 一行都不改」那一半；`docs/adr/README.md`、`0001` 的 `取代者` 行、
   `docs/notes.md` 第一节同步标注。
+- [合并落地](issues/03-merge-engine.md)：引擎进 `agent.ts`（`runEngine`）、`packages/loop` 删除、
+  类型进 `types.ts`、smoke 迁到恢复函数；[文档同步](issues/05-docs.md) 把 `AGENTS.md` /
+  `docs/architecture.md` / `README.md` 按合并后的现实校正，术语新增 **engine**。
 
 ## Not yet specified
 

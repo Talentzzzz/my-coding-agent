@@ -35,7 +35,7 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 | 桌面外壳 | 我们 + Electron | `packages/desktop`：窗口、标题栏、主题，以及进程内的服务器 |
 | 窗口 UI | 我们 | Vite + TypeScript，无框架，一个 DOM 渲染器架在常驻通道上 |
 
-运行时依赖是两个包：`@my-agent/llm`、`typebox`。前者是 `@earendil-works/pi-ai` 0.99.2 的 vendored 子集（`packages/llm`），只追踪到本项目真正触达的文件，并保留在 pi 自己的编译设置下（逐文件 `@ts-nocheck`；工作区更严格的根配置仍然检查每一个进入 core 的 import）。它旁边那个 vendored 循环（`packages/loop`，来自 `@earendil-works/pi-agent-core`）已经不存在：引擎并入 `agent.ts`、`@ts-nocheck` 一并退场，也不再跟踪上游（[ADR-0008](adr/0008-loop-merged-into-agent.md)）。`pi-tui`、`pi-mcp`、`pi-codemode`、`pi-durable` 和 pico3 harness 都没有取用。
+运行时依赖是两个包：`@my-agent/llm`、`typebox`。前者是 `@earendil-works/pi-ai` 0.99.2 的 vendored 子集（`packages/llm`），只追踪到本项目真正触达的文件，并保留在 pi 自己的编译设置下（逐文件 `@ts-nocheck`；工作区更严格的根配置仍然检查每一个进入 core 的 import）。它旁边那个 vendored 循环（`packages/loop`，来自 `@earendil-works/pi-agent-core`）已经不存在：引擎并入 `agent.ts`，它那份 `@ts-nocheck` 随文件一起退场，也不再跟踪上游（[ADR-0008](adr/0008-loop-merged-into-agent.md)）。`pi-tui`、`pi-mcp`、`pi-codemode`、`pi-durable` 和 pico3 harness 都没有取用。
 
 ai 子集比"应用触达的那些文件"还要窄：它是**一个传输层**触达的文件。上游 pi-ai 实现了五种 chat API，把每个实现的 import 都推迟到 `api/*.lazy.ts` 之后，好让宿主只为它实际发送的那一种付费；它还通过一个带 OAuth 和环境变量兜底的凭据存储来解析凭据，并让每个请求都经过一个供应商注册表。本应用这些一个都不做：它**永远**说 Anthropic Messages，用的是用户敲进 `models.json` 的密钥。于是 `api/anthropic-messages.ts` 是静态 import 的，另外四个实现和那些懒包装是**被删除**而不是"仅仅不可达"，注册表也跟着它们一起没了：wire 上再没有任何东西提及供应商——`Model` 和 `AssistantMessage` 都不带这个字段——所以被重放的 thinking level 不再与产生它的那一行做匹配。它也不需要匹配，因为 level 表是**单独从 wire id 推导**的（`anthropic-models.ts`）：两行命名同一个 wire id，只可能产出同一套 level，而按行匹配只会在这一个时候丢掉 level——用户把他一直在对话的那一行改了名或重新导入了。`packages/llm/src/models.ts` 里留下的是"一次请求所依赖的、关于某个模型的事实"，而不是曾经拥有这些事实的那次查找。如此只剩下 `@anthropic-ai/sdk` 和 `typebox` 两个依赖。
 
@@ -189,7 +189,7 @@ type AgentSessionEvent =
 
 `Settings.steeringMode` 和 `Settings.followUpMode`（`"all"` 或 `"one-at-a-time"`，默认 `one-at-a-time`）决定每个取走点注入多少条排队消息。`snapshot.queued` 报告已接受、循环还没取走的消息有多少条——**只算 follow-up**，steer 进的是正在跑的那一轮；`applyConfig` 重新施加这两个模式；`settle()` 等的是**队列被取空**，而不只是当前这一轮结束。
 
-**排队消息的落盘点在取走点上，不在接受点上**（[ADR-0003](adr/0003-queued-writes-at-drain.md)，见其文末修订）。循环在取走点经 `getSteeringMessages` / `getFollowUpMessages` 拉取，会话在**拉取的那一刻**把它写进 store（`drainTranscribed`）——文件里的位置就是模型遇到它的位置。于是 store 同时是请求的来源（`prepareRequest` 从它建）和基线的来源（重连、重载、宿主复活都按它重建 items），而两者读到的是同一个顺序：循环回放的那个。两类消息「先于循环的回显」落盘：启动一次运行的那条 prompt（在循环之前写，窗口不必等第一个事件），和取走的插话（在取走点写）；两者的回显都由戳记匹配抑制（`isOptimisticEcho`，戳记统一记在 `RunScope.writtenAhead`，来自会话而不是 `Date.now()`，因为两条消息可能落在同一毫秒）。计数从**被接受**算到**被取走**，而不是从队列深度的一比一换算算——`one-at-a-time` 下一次取走只消费一条，排着的不止一条。
+**排队消息的落盘点在取走点上，不在接受点上**（[ADR-0003](adr/0003-queued-writes-at-drain.md)，见其文末修订）。循环在取走点直读会话自己的两条队列（`drainTranscribed`），并在**取走的那一刻**把消息写进 store——文件里的位置就是模型遇到它的位置。于是 store 同时是请求的来源（`prepareRequest` 从它建）和基线的来源（重连、重载、宿主复活都按它重建 items），而两者读到的是同一个顺序：循环回放的那个。两类消息「先于循环的回显」落盘：启动一次运行的那条 prompt（在循环之前写，窗口不必等第一个事件），和取走的插话（在取走点写）；两者的回显都由戳记匹配抑制（`isOptimisticEcho`，戳记统一记在 `RunScope.writtenAhead`，来自会话而不是 `Date.now()`，因为两条消息可能落在同一毫秒）。计数从**被接受**算到**被取走**，而不是从队列深度的一比一换算算——`one-at-a-time` 下一次取走只消费一条，排着的不止一条。
 
 一次运行结束时**还没被取走**的消息随运行一起丢弃（发送契约即发即弃：取走即落盘，没被取走就没人会回答它），只清空会话自己的两条队列，让深度归零——`settle()` 等的就是这个（[队列住在会话里](adr/0003-queued-writes-at-drain.md)）。中止、失败、以及恰好在循环决定不再找消息之后到达的那条 prompt，都走这一步。
 
