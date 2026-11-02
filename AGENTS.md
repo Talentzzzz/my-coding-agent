@@ -1,9 +1,9 @@
 # my-coding-agent
 
-一个带桌面 UI 的编码 agent。两个 vendored package 承担了重活：`packages/llm`（`@earendil-works/pi-ai`
+一个带桌面 UI 的编码 agent。只有一个 vendored package：`packages/llm`（`@earendil-works/pi-ai`
 0.99.2 的裁剪副本，砍到只剩一个传输层：API-key 认证、流式、wire，以及唯一一个 API 实现
-Anthropic Messages）和 `packages/loop`（pi 的 agent 循环、工具执行、事件、steering）。其余都是我们
-自己的：模型、工具、会话管理器、HTTP API、窗口 UI、Electron 外壳。插件不在范围内。
+Anthropic Messages）。其余都是我们自己的：模型、工具、会话管理器、运行引擎、HTTP API、窗口 UI、
+Electron 外壳。插件不在范围内。
 
 `docs/architecture.md` 是设计参考——请求流程、wire、以及每个选择背后的理由；动手改哪个子系统之前，
 先读它对应的那一节。`README.md` 覆盖安装、设置和桌面外壳。**下面的术语只是索引**，每条一句话；
@@ -13,8 +13,7 @@ Anthropic Messages）和 `packages/loop`（pi 的 agent 循环、工具执行、
 
 ```
 packages/llm       vendored 传输层，只剩 src/api/anthropic-messages.ts；@ts-nocheck
-packages/loop    vendored 循环：四个文件，Loop / LoopState（上游叫 Agent / AgentState）
-packages/core     无头 agent：模型、工具、会话管理器、系统提示词、上下文。没有传输层
+packages/core      无头 agent：agent.ts（编排 + 引擎）、types.ts（引擎与工具的契约）、模型、工具、会话管理器、系统提示词、上下文。没有传输层
 packages/server   node:http、REST 命令 + 一条常驻 WebSocket mux、活跃会话；boot.ts 是整个服务器，main.ts 只解析启动参数
 packages/desktop  Electron 外壳：进程内启动服务器，让一个窗口指向它
 packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的逻辑流
@@ -26,9 +25,16 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 
 - **service（无属性服务）** —— 五个单例的形态（ADR-0007）：`Agent` 编排、会话账本、设置、模型行、工具
   定义。构造只收服务依赖，公开方法收 `(id, 请求自己的参数)`，每样数据在**用到它的那一行**向属主现取、
-  拿到的只是局部变量；不传、不养任何聚合袋。类壳保留（可构造注入），拆掉的只是 per-session 实例字段；
+  拿到的只是局部变量；不传、不养任何聚合袋。类壳保留（可构造注入），方法体就写在类里、没有一层同名的
+  文件级函数可转发，拆掉的只是 per-session 实例字段；
   Manager 内部按 id / 工作区键控的缓存随时可从磁盘重建、且藏在自己内部不被传递——这正是它与聚合袋的
   分界。
+- **engine（引擎）** —— `Agent.runEngine`，**不是对象**：一次运行的入口与出口，文档里说的「循环」
+  指的就是它。它读的每一处接缝都是编排层自己的成员（`prepareRequest`、`dispatchEvent`、会话自己的两条
+  队列、`entry.runtime.activeRun`）或同一个文件的局部变量（这次运行的模型），所以一次运行只走一条链
+  `startRun → runEngine → prepareRequest → dispatchEvent`，运行期瞬态全是局部变量。它曾经是 vendored
+  的 `packages/loop` 与那个只负责把每个问题转回 `Agent` 的 `Loop` 委派对象，两者已删（ADR-0008）。
+  有状态的部分是私有成员，无状态的助手是文件级函数——恢复机器的两个纯函数仍由 `index.ts` 导出。
 - **tool（工具）** —— `AgentTool`；`createToolRegistry(toolDefinitions())` 是**进程**的目录（定义 +
   注册进来的工具），一条会话自己的工具（委派对）是装配字段、记在登记处条目上，`registryView()`
   把两半合成它解析时看到的一个目录；活跃集合是从账本派生的一次读取，不在任何一处持有。没有插件
@@ -68,7 +74,7 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   必须跑在活跃会话上"永不互相换算（ADR-0001）。
 - **approval（审批）** —— 结束重启（ADR-0006 §5）：`before_tool` 对要问的调用返回 suspend，结束本轮
   运行且不写结果，tool call 在账本里悬空（有 tool_use 无 tool_result，派生态）；答案经
-  `POST /api/sessions/{id}/approvals/{toolCallId}` 到达后启动恢复运行，由 loop 的恢复机器按
+  `POST /api/sessions/{id}/approvals/{toolCallId}` 到达后启动恢复运行，由引擎的恢复机器按
   toolCallId 配对续跑——grant 重跑该调用、deny 合成结果，无答案的孤儿合成错误结果收尾。
   哪些工具会问是**按会话**的，记录在一条 `tool_config` entry 里。
 - **tool set（工具集合）** —— 活跃工具和审批映射是**一个**决定，一起写在一条 `tool_config` entry 里；
@@ -89,8 +95,8 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 - **hook（接缝）** —— 三个进程级接缝：`context`、`before_tool`（审批闸门）、`after_tool`（超过 80,000
   字符的结果归档到 `.my-agent/tool-results/`）。一个 `Hooks` 服务本进程跑的所有会话，所以每个事件
   都带 `sessionId`，处理器拿它现取工作区与被闸的工具映射；默认值由 `createSessionAgent()` 构造时装。
-- **retry（重试）** —— 一次瞬时的供应商失败在循环**之下**重试：策略装在模型的 transport 上，`streamFn`
-  只是 `(model, context, options) => model.stream(...)` 的适配器；失败的尝试从不被记录。
+- **retry（重试）** —— 一次瞬时的供应商失败在引擎**之下**重试：`startRun` 给这次运行包一层 transport，
+  策略就装在里面，引擎只是对模型 `stream`；失败的尝试从不被记录。
 - **subagent（子代理）** —— `SubAgent` / `SubAgentControl` 这一对工具；每次委派是一个真实的子
   `Agent`，永不嵌套，跑在收窄到 `read`、`glob`、`grep` 且审批关闭的注册表上；子代理花掉的
   token 没有消息可搭，作为一条 `usage` entry 整笔记在父会话上、计入会话总额。
