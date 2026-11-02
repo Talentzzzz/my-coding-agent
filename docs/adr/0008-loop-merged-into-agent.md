@@ -2,7 +2,7 @@
 
 日期：2026-11-02 · 状态：已接受（loop-into-agent 01/02 号票拍板，03 号票落地）
 取代：[0001](0001-transport-websocket-mux.md)（部分——仅其「`packages/llm` 与 `packages/loop`
-一行都不改」中 **loop** 的那一半；`packages/llm` 那一半原样有效）
+一行都不改」中 loop 的那一半，逐条对照见*被取代的是什么*）
 
 设计过程见 `.scratch/loop-into-agent/`（形状在 2026-11-02 的设计对话与 01/02 号票敲定，
 本 ADR 只记合拢后的决定）。
@@ -20,11 +20,11 @@
 
 到合并之前，这条收益已经被消耗掉了大半：
 
-- **副本早就不是原样。** 票 13 把 `SessionRuntime` 落进会话，票 15 把恢复机器（悬空扫描、
-  答案配对、孤儿合成）搬进循环；更早的 [ADR-0003](0003-queued-writes-at-drain.md) 修订里
-  记过的那次改造之后，`Loop` 已经是无状态运行引擎——不再持有 transcript、工具与模型，一次
-  运行按次接收。合并前 `loop.ts` 相对初版 +242/−22 行、共 1173 行。对着上游 diff 得到的是
-  「上游改动」与「我们改动」的叠加，读一次要先把两层拆开。
+- **副本早就不是原样。** [ADR-0006](0006-stateless-session-architecture.md) 的决定 3 让循环
+  只认识传入的 context、不再持有 transcript 与状态袋；票 13 把 `SessionRuntime` 落进会话，
+  票 15 把恢复机器（悬空扫描、答案配对、孤儿合成）搬进循环。合并前 `loop.ts` 相对初版
+  +242/−22 行、共 1173 行。对着上游 diff 得到的是「上游改动」与「我们改动」的叠加，读一次
+  要先把两层拆开。
 - **`Loop` 是个没有信息的对象。** 它被构造时，`Agent` 把引擎需要的每个答案都递了进去：
   `streamFn`、`runtime` 槽位、`beforeToolCall` / `afterToolCall` 两个闸门、`prepareRequest`
   整条填充链，再加一条 `subscribe` 把每个事件交回 `handleEvent`；`runLoop` 的三个参数里还
@@ -38,24 +38,46 @@
 ## 决定
 
 1. **删掉 `packages/loop` 与 `Loop` 对象。** 引擎的函数体成为 `Agent.runEngine`；`startRun`
-   只剩三件事：开 scope、包 transport、调 `runEngine`。包的目录、root `workspaces`、core 的
-   工作区依赖、根 tsconfig 的 path、`check` 里的那一次 `tsc`、`install-deps` 的清单一起删。
-2. **有状态 → `Agent` 的私有成员，无状态 → 文件级函数。** 前者：`runEngine`、`dispatchEvent`
+   只剩三件事：开 scope、包 transport、调 `runEngine`。包里那份代码连同所有引用它的地方一起
+   删——workspace 清单、core 的依赖、tsconfig 的 path、`check` 与 `install-deps` 里的条目。
+2. **引擎住 `agent.ts`，不另开一个 core 内的文件。** 这两件事是分开的两个决定，理由不同：
+   删包是因为副本不再承担对照的职责（见上），并文件是因为删掉委派对象之后**文件边界也得
+   一起删**。`runEngine` 要的东西没有一件是「引擎自己的」——`prepareRequest`、`dispatchEvent`、
+   两个取走点的队列、`entry.runtime.activeRun`、模型，全是 `Agent` 的私有成员。若把它单独
+   放出成 `engine.ts`，要么把 `Agent` 的后半边改成公开（等于把刚删的接口换个名字装回来），
+   要么把同一个参数袋重新装进一个 `EngineDeps`——那正是这次要拆掉的东西。引擎也不为任何
+   第二个消费者存在：生产路径上构造 `Loop` 的只有 `Agent` 一处，另一个是
+   `smoke-approval-recovery`，它构造 `Loop` 只是为了驱动恢复机器——而那颗种子在决定 4 里
+   改为直接调用函数，不需要引擎在场。
+3. **有状态 → `Agent` 的私有成员，无状态 → 文件级函数。** 前者：`runEngine`、`dispatchEvent`
    （引擎的 sink 与订阅者的出口合成一个）、`prepareRequest`（既有的每轮填充链，引擎直接调）、
    `toolCallHooks`、`finishRun`、`handleRunFailure`。后者：工具批次执行（顺序 / 并行）、截断
    消息的失败处理、悬空扫描、`runToolCall`。
-3. **恢复机器保持文件级导出。** `danglingToolCallsOf` / `recoverPendingToolCalls` 是纯函数，
-   `smoke-approval-recovery` 直接驱动它们——不为了「全部是成员」把这唯一一个测试接缝埋进类里。
-4. **`runToolCall` 不导出。** 全仓库没有调用者；真有工具需要嵌套调用别的工具时再导出。
-   「子代理是一对工具、不是机制」这条边界不变。
-5. **类型并入 core 一个模块** `packages/core/src/types.ts`，`index.ts` 的对外 re-export 原样
-   保留。`LoopContext` 改名 `AgentContext`（与 `AgentEvent` / `AgentTool` 同族）；而**没有
-   对应物的类型直接删**：`StreamFn`（引擎直接 `model.stream`）、`LoopConfig`、`LoopOptions`、
-   `LoopRuntime`（`Agent` 直接操作 `SessionRuntime`）、`LoopQueueHooks`（drain 直读队列）、
-   `RunLoopOptions`、`PrepareRequest` / `PrepareRequestContext`。wire 面留在 `protocol.ts`；
-   `QueueMode` 只留一份定义，`protocol.ts` 改为 re-export。
-6. **去掉 `@ts-nocheck`，整份代码过根 tsconfig**（含 `noUncheckedIndexedAccess`）。
-7. **放弃 vendored 对照。** 不再跟踪上游；头注释里那些「与 pi-main 的 diff 说明」随文件一起
+4. **恢复机器保持文件级导出。** `danglingToolCallsOf` / `recoverPendingToolCalls` 是纯函数，
+   由 `index.ts` 一并对外 re-export，`smoke-approval-recovery` 直接驱动它们——不为了「全部是
+   成员」把这唯一一个测试接缝埋进类里。
+5. **`runToolCall` 降为不导出的内部函数。** 全仓库没有调用者，导出的理由不存在；真有工具
+   需要嵌套调用别的工具时，改一行即可。「子代理是一对工具、不是机制」这条边界不变。
+6. **类型并入 core 一个模块** `packages/core/src/types.ts`，`index.ts` 的对外 re-export 原样
+   保留。为什么不并入 `protocol.ts`：那是 **wire 面**，客户端看得见的东西；工具与事件的契约
+   不是 wire，是引擎交给工具与 hook 的形状，两者不该共用一个模块。`LoopContext` 改名
+   `AgentContext`（与 `AgentEvent` / `AgentTool` 同族）；`ToolCallHooks` 从
+   `Pick<LoopConfig, …>` 变成独立接口——批次助手是文件级函数，这对闸门是它们唯一还接收的
+   参数，值得有自己的名字。**没有对应物的类型直接删**：`StreamFn`、`LoopConfig`、
+   `LoopOptions`、`LoopRuntime`（`Agent` 直接操作 `SessionRuntime`）、`LoopQueueHooks`
+   （drain 直读队列）、`RunLoopOptions`、`PrepareRequest` / `PrepareRequestContext`。删
+   `StreamFn` 删的是那个**函数类型**，接缝本身还在：每次 run 仍包一层 transport，重试策略
+   仍挂在上面，只是引擎直接对模型 `stream`，不再有人递一个 `streamFn` 进来。唯一跨两边的
+   是 `QueueMode`：定义只留一份（在 `types.ts`），`protocol.ts` 改为 re-export。
+7. **去掉 `@ts-nocheck`，整份代码过根 tsconfig**（含 `noUncheckedIndexedAccess`）。
+8. **有两样东西没有搬进成员，按 [ADR-0006](0006-stateless-session-architecture.md) 的
+   「运行期瞬态全部降为局部变量」裁定**（01 号票把它们列进了成员清单，落地时改掉，记在这里
+   以免后人以为是漏做）：`runModel` 是 `runEngine` 里一个 `let model`——它是 per-run 的量，
+   而 `Agent` 是跨会话单例，一个字段会把 A 会话当前请求的模型交给 B 会话并发的 run；
+   `activeRun` 槽位仍住 `SessionRuntime`，`subscribe` / `waitForIdle` 由既有的 `onEvent` /
+   `settle(id)` 承担，`abort` 本来就是 `Agent` 的公开方法（比 `Loop.abort` 更完整：abort 后
+   还扫悬空审批并 publish）。
+9. **放弃 vendored 对照。** 不再跟踪上游；头注释里那些「与 pi-main 的 diff 说明」随文件一起
    删除。合并即分道。
 
 ## 后果
@@ -78,15 +100,9 @@
 
 - **`agent.ts` 从 2043 行长到 2956 行。** 编排与引擎同处一个文件，这是这次合并最直白的代价。
   缓解只到文件内分区为止：引擎、填充链、账本写入、投影各自成段，注释写清每段的边界——也就
-  到此为止，没有第二个文件可以指。
+  到此为止，没有第二个文件可以指（理由见决定 2：那个文件边界本来就不该存在）。
 - **与上游分家。** 此后 pi 对循环的改动不会再以 diff 的形式出现在我们眼前；要跟进只能读上游、
   手抄、自己过类型检查。ADR-0001 当初为 `packages/loop` 保留的那条理由，在这一半上作废。
-- **两处偏离 01 号票字面、按既有 ADR 裁定的地方**（记在这里，以免后人以为是漏做）：`runModel`
-  没有成为成员，而是 `runEngine` 里一个 `let model`——它是 per-run 的量，而 `Agent` 是跨会话
-  单例，一个字段会把 A 会话当前请求的模型交给 B 会话并发的 run（ADR-0006 §5「run 的瞬态是
-  run 的局部变量」）；`activeRun` 槽位仍住 `SessionRuntime`，`subscribe` / `waitForIdle` 由既有
-  的 `onEvent` / `settle(id)` 承担，`abort` 本来就是 `Agent` 的公开方法（比 `Loop.abort` 更
-  完整：abort 后还扫悬空审批并 publish）。
 
 ## 不可逆性与代价
 
@@ -98,7 +114,7 @@
 - **没有上下文会让人困惑。** 后来的人看到 2956 行的 `agent.ts`、找不到 `Loop`、找不到
   `packages/loop`，第一反应必然是「为什么不把它拆出去」。这份 ADR 就是那个「为什么」。
 - **是真实取舍。** 被放弃的是 vendored 对照能力——它有真实价值（上游修 bug 时省事、可逐行
-  核对），也确实在被我们改得面目全非之后才被放弃。
+  核对），也确实是在被改得面目全非之后才被放弃。
 
 ## 被取代的是什么
 
@@ -106,7 +122,7 @@
   `packages/llm` 仍原样适用：它同样被裁过（只剩一个 API 实现与它需要的传输层），但它仍在
   `packages/llm` 里、仍然 vendored、也**没有**被并入任何人。
 - **`Loop` 作为委派对象这一层**——以及它为此付出的四处代价：`prepareRequest` 以函数类型
-  穿过两个包、`dispatchEvent` 之外的第二张 listener 表、`runtime` 槽位透传、两个队列排水钩子。
+  穿过两个包；`dispatchEvent` 之外的第二张 listener 表；`runtime` 槽位透传；两个队列排水钩子。
 - **`@ts-nocheck`**，以及「在 pi 自己的编译设置下检查这份代码」这条安排。
 
 ## 没有被取代的
@@ -114,13 +130,14 @@
 明确不动、读者不该跟着本 ADR 一起重开的：
 
 - **ADR-0001 的其余全部**：REST 命令面 + 常驻 WebSocket mux、有界写侧、`claim` 与订阅分离，
-  以及「`packages/llm` 一行都不改」。
-- **ADR-0003 的取走点落盘**：排队消息仍在取走点写进账本——搬的只是取走点的位置（从
-  `getSteeringMessages` / `getFollowUpMessages` 钩子变成 `drainTranscribed` 直读会话队列），
-  语义不变。
-- **ADR-0006 §5 的结束重启审批**：恢复机器换了个文件住，行为一字不改——grant 重跑、deny 合成、
-  孤儿收尾、无答案的悬空调用按错误收场。
-- **ADR-0007 的五单例无属性化**：`runEngine` 从 `entry` 与 `state` 现取，没有往 `Agent` 上新增
-  会话级实例字段；它的瞬态仍是 run 的局部变量。
+  以及 `packages/llm` 一行都不改、不引入 plugin / MCP 机制。
+- **[ADR-0003](0003-queued-writes-at-drain.md) 的取走点落盘**：排队消息仍在取走点写进账本——
+  搬的只是取走点的位置（从 `getSteeringMessages` / `getFollowUpMessages` 钩子变成
+  `drainTranscribed` 直读会话队列），语义不变。
+- **[ADR-0006](0006-stateless-session-architecture.md) §5 的结束重启审批**：恢复机器本身一字
+  不改——grant 重跑、deny 合成、孤儿收尾、无答案的悬空调用按错误收场。变的是它唯一的测试
+  驱动方式：smoke 不再 `new Loop` 然后读事件，直接拿返回的批次与发出去的帧断言。
+- **[ADR-0007](0007-services-drop-instance-state.md) 的五单例无属性化**：`runEngine` 从
+  `entry` 与 `state` 现取，没有往 `Agent` 上新增会话级实例字段；它的瞬态仍是 run 的局部变量。
 - **retry 装在模型的 transport 上**（不在引擎里）；**compaction 的「文件永远保留全文、每步裁剪
   是一条 entry」**；**subagent 是一对工具、无注册表无嵌套**；**客户端对供应商 SDK 一无所知**。

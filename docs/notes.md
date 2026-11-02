@@ -32,7 +32,7 @@
 
 两者都是 vendored 代码；这些改动属于 core + server 范围。不引入 plugin / MCP 机制。
 
-~~`packages/loop` 一行都不改~~ **取代**（2026-11-02，[ADR-0008](adr/0008-loop-merged-into-agent.md)）：`packages/loop` 已删除，引擎并入 `packages/core/src/agent.ts`，不再跟踪上游。`packages/llm` 原样保留，「不引入 plugin / MCP 机制」原样保留。
+~~`packages/llm` 与 `packages/loop` 一行都不改~~ **部分取代**（2026-11-02，[ADR-0008](adr/0008-loop-merged-into-agent.md)）：`packages/loop` 已删除，引擎并入 `packages/core/src/agent.ts`，不再跟踪上游。`packages/llm` 仍然一行都不改；「不引入 plugin / MCP 机制」原样有效。
 
 ### 测试一次运行不需要供应商密钥 —— **保留**
 
