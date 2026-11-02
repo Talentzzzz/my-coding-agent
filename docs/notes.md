@@ -28,9 +28,11 @@
 
 **部分失效**：~~"每条事件流一个 claim"~~ 这一句**失效**——claim 本身原样活着，新版 claim 的持有者只有两类（会改变会话的请求，以及**在飞的运行**）。上面那句"`claim` 只用于……"与重命名禁令原样有效；订阅不拿 claim 也是在这条之上定的。
 
-### `packages/llm` 与 `packages/loop` 一行都不改 —— **保留**
+### `packages/llm` 与 `packages/loop` 一行都不改 —— **保留一半，loop 那半被 ADR-0008 取代**
 
 两者都是 vendored 代码；这些改动属于 core + server 范围。不引入 plugin / MCP 机制。
+
+~~`packages/loop` 一行都不改~~ **取代**（2026-11-02，[ADR-0008](adr/0008-loop-merged-into-agent.md)）：`packages/loop` 已删除，引擎并入 `packages/core/src/agent.ts`，不再跟踪上游。`packages/llm` 原样保留，「不引入 plugin / MCP 机制」原样保留。
 
 ### 测试一次运行不需要供应商密钥 —— **保留**
 

@@ -19,6 +19,7 @@
 | [0005](0005-modes-are-a-tool-config-choice.md) | 模式是一次工具集与审批集的选择，不是一个新状态层 | 已接受（2026-10-17，03 号拍板并落地） |
 | [0006](0006-stateless-session-architecture.md) | 会话架构改为无状态服务与每请求重放，审批改为结束重启 | 已接受（2026-10-31，已落地，见 `.scratch/stateless-agent/`）；「薄壳门面」条款由 0007 重开 |
 | [0007](0007-services-drop-instance-state.md) | 五个单例服务不持有实例状态——聚合袋拆除，「薄壳门面」条款重开 | 已接受（2026-11-01，已落地——08 号票跑绿 check 与 smoke 全套并总校文档，见 `.scratch/pure-services/`） |
+| [0008](0008-loop-merged-into-agent.md) | 删掉 `Loop` 对象与 `packages/loop`——引擎并入 `agent.ts`，放弃与上游的逐文件对照 | 已接受（2026-11-02，已落地——03 号票合并并删包，见 `.scratch/loop-into-agent/`），取代 0001「`packages/loop` 一行都不改」那一半 |
 
 ## 门槛
 
