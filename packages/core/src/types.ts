@@ -1,52 +1,23 @@
-// Vendored from @earendil-works/pi-agent-core (0.99.2) with the engine renamed against upstream:
-// Agent → Loop, AgentState → LoopState, AgentOptions → LoopOptions, AgentInitialState →
-// LoopInitialState; diff against pi-main with those in mind. `prepareNextTurn`, and the
-// `AgentLoopTurnUpdate` / `PrepareNextTurnContext` types only it used, are deleted here — the
-// loop engine itself now lives on `Loop` in loop.ts. Also deleted here: the `transformContext`
-// and `toolExecution` fields of LoopConfig, which this host never sets. Checked by
-// packages/loop/tsconfig.json under pi's own compiler settings; @ts-nocheck keeps the
-// workspace's stricter root config from flagging this file, while every import into
-// packages/core stays fully checked.
-// @ts-nocheck
+// The engine's contract: what a tool is, what a run publishes, and the shapes the run-side hooks
+// answer with. These types used to live in `packages/loop`; the engine now lives in `agent.ts`, and
+// the shapes it hands across that file's boundary — to tools, to the hooks, to a session's own
+// subscribers — live here, in one module, so a tool and the engine cannot drift about what a result
+// is. The wire types are `protocol.ts`'s business and stay there; `QueueMode` is shared, and
+// `protocol.ts` re-exports this module's copy rather than declaring a second one.
 import type {
-	Api,
 	AssistantMessage,
 	AssistantMessageEvent,
-	AssistantMessageEventStream,
 	Context,
-	LlmContext,
 	ImageContent,
 	JsonValue,
 	Message,
 	Model,
-	SimpleStreamOptions,
 	TextContent,
 	Tool,
 	ToolResultMessage,
 	Usage,
 } from "@my-agent/llm";
 import type { Static, TSchema } from "typebox";
-
-/**
- * Stream function used by the agent loop. A `ChatTransport`'s `stream`
- * satisfies this shape, as does the retry wrapper a host puts around one.
- *
- * The loop passes a normalized transcript: the system prompt and the complete current tool
- * list are carried by the transcript's leading system message. Tool loadout changes are never
- * sent as a later system message, so a transport reads the tool list from that leading message
- * and resends the whole list when it differs from the previous request.
- *
- * Contract:
- * - Must not throw or return a rejected promise for request/model/runtime failures.
- * - Must return an AssistantMessageEventStream.
- * - Failures must be encoded in the returned stream via protocol events and a
- *   final AssistantMessage with stopReason "error" or "aborted" and errorMessage.
- */
-export type StreamFn = (
-	model: Model<Api>,
-	context: LlmContext,
-	options?: SimpleStreamOptions,
-) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
 
 /**
  * Configuration for how tool calls from a single assistant message are executed.
@@ -59,7 +30,7 @@ export type StreamFn = (
 export type ToolExecutionMode = "sequential" | "parallel";
 
 /**
- * Controls how many queued user messages are injected when the agent loop reaches a queue drain point.
+ * Controls how many queued user messages are injected when a run reaches a queue drain point.
  *
  * - "all": drain and inject every queued message at that point.
  * - "one-at-a-time": drain and inject only the oldest queued message, leaving the rest queued for later drain points.
@@ -72,7 +43,7 @@ export type AgentToolCall = Extract<AssistantMessage["content"][number], { type:
 /**
  * Result returned from `beforeToolCall`.
  *
- * Returning `{ block: true }` prevents the tool from executing. The loop emits an error tool result instead.
+ * Returning `{ block: true }` prevents the tool from executing. The run emits an error tool result instead.
  * `reason` becomes the text shown in that error result. If omitted, a default blocked message is used.
  */
 export interface BeforeToolCallResult {
@@ -86,7 +57,7 @@ export interface BeforeToolCallResult {
 	/**
 	 * End the run at this call without writing a result for it: the call stays in the transcript
 	 * unanswered, and the host resumes it later by handing the answer to a recovery run
-	 * (`RunLoopOptions.recovery`). The batch's remaining calls are left unanswered with it, the run
+	 * (`RunRecoveryOptions`). The batch's remaining calls are left unanswered with it, the run
 	 * ends without another provider request, and no `tool_execution_*` event is emitted for this call.
 	 *
 	 * This is the end-restart approval gate's answer (ADR-0006 §5): waiting for a person is not
@@ -100,7 +71,7 @@ export interface BeforeToolCallResult {
  * The answer one recovered tool call is resumed with.
  *
  * It is what the approval flow recorded while the call was dangling: a grant re-runs the call through
- * the loop's normal path (gate included), a denial closes the call with `reason` — or, when no reason
+ * the run's normal path (gate included), a denial closes the call with `reason` — or, when no reason
  * rides the answer, with the sentence that says the user denied it.
  */
 export interface ToolCallAnswer {
@@ -168,7 +139,7 @@ export interface BeforeToolCallContext {
 	/** Validated tool arguments for the target tool schema. */
 	args: unknown;
 	/** Current agent context at the time the tool call is prepared. */
-	context: LoopContext;
+	context: AgentContext;
 }
 
 /** Context passed to `afterToolCall`. */
@@ -180,95 +151,36 @@ export interface AfterToolCallContext {
 	/** Validated tool arguments for the target tool schema. */
 	args: unknown;
 	/** The executed tool result before any `afterToolCall` overrides are applied. */
-	result: AgentToolResult<any>;
+	result: AgentToolResult<unknown>;
 	/** Whether the executed tool result is currently treated as an error. */
 	isError: boolean;
 	/** Current agent context at the time the tool call is finalized. */
-	context: LoopContext;
-}
-
-/** Replacement runtime state for the provider request being prepared. */
-export interface AgentRequestUpdate {
-	/** Context for the next provider request. */
-	context?: LoopContext;
-	/** Model for the next provider request. It carries the thinking level it is asked at. */
-	model?: Model<any>;
-}
-
-/** Runtime state available immediately before a conversational provider request. */
-export interface PrepareRequestContext {
-	context: LoopContext;
-	model: Model<any>;
+	context: AgentContext;
 }
 
 /**
- * Called immediately before every conversational provider request, including the first.
- * Pending messages have already been appended and emitted when this callback runs.
+ * The two tool-call seams one run dispatches through, as the engine sees them.
+ *
+ * A run installs them per run — the session's hooks need that run's own transients — and hands the
+ * pair to the file-level batch machinery, which is the one thing the engine still takes as a
+ * parameter rather than reading off the orchestrator: the helpers run outside any instance.
  */
-export type PrepareRequest = (
-	request: PrepareRequestContext,
-	signal?: AbortSignal,
-) => AgentRequestUpdate | void | Promise<AgentRequestUpdate | undefined> | Promise<void>;
-
-export interface LoopConfig extends SimpleStreamOptions {
-	model: Model<any>;
-
-	/**
-	 * Called immediately before every conversational provider request, including the first.
-	 * Pending messages have already been appended. The returned context, model, and thinking level
-	 * replace the runtime values for this and later requests in the run. This hook does not poll queues.
-	 */
-	prepareRequest?: PrepareRequest;
-
-	/**
-	 * Returns steering messages to inject into the conversation mid-run.
-	 *
-	 * Called after the current assistant turn finishes executing its tool calls.
-	 * If messages are returned, they are added to the context before the next LLM call.
-	 * Tool calls from the current assistant message are not skipped.
-	 *
-	 * Use this for "steering" the agent while it's working.
-	 *
-	 * Contract: must not throw or reject. Return [] when no steering messages are available.
-	 */
-	getSteeringMessages?: () => Promise<Message[]>;
-
-	/**
-	 * Returns follow-up messages to process after the agent would otherwise stop.
-	 *
-	 * Called when the agent has no more tool calls and no steering messages.
-	 * If messages are returned, they're added to the context and the agent
-	 * continues with another turn.
-	 *
-	 * Use this for follow-up messages that should wait until the agent finishes.
-	 *
-	 * Contract: must not throw or reject. Return [] when no follow-up messages are available.
-	 */
-	getFollowUpMessages?: () => Promise<Message[]>;
-
-	/**
-	 * Called before a tool is executed, after arguments have been validated.
-	 *
-	 * Return `{ block: true }` to prevent execution. The loop emits an error tool result instead.
-	 * A blocked result can also set `terminate: true` to participate in the batch early-termination rule.
-	 * The hook receives the agent abort signal and is responsible for honoring it.
-	 */
+export interface ToolCallHooks {
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
-
-	/**
-	 * Called after a tool finishes executing, before `tool_execution_end` and tool-result message events are emitted.
-	 *
-	 * Return an `AfterToolCallResult` to override parts of the executed tool result:
-	 * - `content` replaces the full content array
-	 * - `details` replaces the full details payload
-	 * - `isError` replaces the error flag
-	 * - `usage` replaces the tool result usage
-	 * - `terminate` replaces the early-termination hint
-	 *
-	 * Any omitted fields keep their original values. No deep merge is performed.
-	 * The hook receives the agent abort signal and is responsible for honoring it.
-	 */
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+}
+
+/**
+ * Replacement runtime state for the provider request being built.
+ *
+ * What `Agent.prepareRequest` answers with: the context and the model the next request is made with,
+ * rebuilt from the ledger at that moment rather than carried from the turn before.
+ */
+export interface AgentRequestUpdate {
+	/** Context for the next provider request. */
+	context?: AgentContext;
+	/** Model for the next provider request. It carries the thinking level it is asked at. */
+	model?: Model;
 }
 
 /** Final or partial result produced by a tool. */
@@ -299,7 +211,7 @@ export interface AgentToolResult<T = JsonValue | undefined> {
 /** Final outcome of a tool call after hooks ran. */
 export interface AgentToolCallOutcome {
 	toolCall: AgentToolCall;
-	result: AgentToolResult<any>;
+	result: AgentToolResult<unknown>;
 	isError: boolean;
 }
 
@@ -309,10 +221,10 @@ export interface AgentToolCallOutcome {
  * The callback is scoped to the current `execute()` invocation. Calls made after
  * the tool promise settles are ignored.
  */
-export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;
+export type AgentToolUpdateCallback<T = unknown> = (partialResult: AgentToolResult<T>) => void;
 
 /** Tool definition used by the agent runtime. */
-export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
+export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = unknown> extends Tool<TParameters> {
 	/** Human-readable label for UI display. */
 	label: string;
 	/**
@@ -348,23 +260,23 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 }
 
 /**
- * Context snapshot passed into the low-level loop: the base {@link Context} shape whose
- * tools are the executable counterparts. The loop runs these; a request only declares them.
+ * The transcript and tool set one run works over: the base {@link Context} shape whose tools are the
+ * executable counterparts. The run calls these; a request only declares them.
  */
-export interface LoopContext extends Context {
+export interface AgentContext extends Context {
 	/** Tools available for execution in this run. */
 	tools?: AgentTool<any>[];
 }
 
 /**
- * Events emitted by the Loop for UI updates.
+ * Events a run emits for UI updates.
  *
- * `agent_end` is the last event emitted for a run, but awaited `Loop.subscribe()`
- * listeners for that event are still part of run settlement. The agent becomes
- * idle only after those listeners finish.
+ * `agent_end` is the last event emitted for a run, but the run is not idle until everything the
+ * session does in answer to it — the writes, the fan-out — has settled. The session becomes idle only
+ * after that.
  */
 export type AgentEvent =
-	// Loop lifecycle
+	// Run lifecycle
 	| { type: "agent_start" }
 	| { type: "agent_end"; messages: Message[] }
 	// Turn lifecycle - a turn is one assistant response + any tool calls/results

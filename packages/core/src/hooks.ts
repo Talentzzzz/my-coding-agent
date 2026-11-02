@@ -1,4 +1,4 @@
-import type { AgentToolResult } from "@my-agent/loop";
+import type { AgentToolResult } from "./types.ts";
 import type { Message } from "@my-agent/llm";
 import { truncate } from "./tools/truncate.ts";
 

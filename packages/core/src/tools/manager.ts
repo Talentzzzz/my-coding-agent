@@ -1,4 +1,4 @@
-import type { AgentTool } from "@my-agent/loop";
+import type { AgentTool } from "../types.ts";
 import { DEFAULT_MODE_NAME, type BashSettings, type ModeSettings } from "../config.ts";
 import { APPROVAL_TOOLS, type ToolApprovalKey } from "../protocol.ts";
 import type { Workspace } from "../workspace.ts";
@@ -21,7 +21,7 @@ import { createWriteTool } from "./write.ts";
  * The value objects one request's tools are built against.
  *
  * The tools resolve paths inside {@link workspace} and run `bash` under {@link bash}; both are
- * per-request facts — the workspace comes from the session header's cwd, the timeouts from the
+ * per-request facts — the workspace comes from the session header's workDir, the timeouts from the
  * settings read alongside — so they are injected at build time rather than captured when a session
  * is assembled. A value object lives and dies with the request that carries it.
  */
@@ -181,7 +181,7 @@ export function subagentToolState(): ToolState {
  * The run context's executable set, built fresh: definitions looked up by the active names, each
  * built against the run context, then the session-local tools whose names are active.
  *
- * This is the one place "an active name" becomes "a tool the loop can call", and it builds rather
+ * This is the one place "an active name" becomes "a tool the engine can call", and it builds rather
  * than returns stored tools — the workspace is a per-request value object, so an `AgentTool` cannot
  * outlive the request that asked for the list. Names this build does not know are skipped, the same
  * narrowing a replayed `tool_config` gets: a recorded set is read down to what can run, never thrown

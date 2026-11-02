@@ -1,12 +1,11 @@
-import type { QueueMode } from "@my-agent/loop";
+import type { QueueMode } from "../types.ts";
 import type { Message } from "@my-agent/llm";
 
 /**
  * A pending-message queue with a drain width.
  *
- * Moved out of the vendored loop: the queue belongs to the session that accepts
- * messages, and the loop only pulls at its take points through the
- * `getSteeringMessages` / `getFollowUpMessages` config hooks.
+ * The queue belongs to the session that accepts the messages; the engine reads it at its own
+ * take points, directly, because both live in this process and no seam is needed between them.
  */
 export class PendingMessageQueue {
 	private messages: Message[] = [];

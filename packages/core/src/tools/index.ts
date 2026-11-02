@@ -1,4 +1,4 @@
-import type { AgentTool } from "@my-agent/loop";
+import type { AgentTool } from "../types.ts";
 import type { ToolRunContext } from "./manager.ts";
 import { toolDefinitions } from "./manager.ts";
 

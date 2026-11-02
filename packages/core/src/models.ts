@@ -360,7 +360,7 @@ const ZERO_USAGE: AssistantMessage["usage"] = {
  *
  * Written by hand because there is no request to make: the whole point of a session with no row is to
  * fail with a sentence the user can act on, in the transcript where they are already looking. It is
- * shaped like any transport's stream, so the loop reads it the way it reads a real failure.
+ * shaped like any transport's stream, so the engine reads it the way it reads a real failure.
  */
 export function unconfiguredStream(model: Model<Api>): AssistantMessageEventStream {
 	const stream = createAssistantMessageEventStream();
@@ -374,7 +374,7 @@ export function unconfiguredStream(model: Model<Api>): AssistantMessageEventStre
 		errorMessage: "No model is configured yet. Open Settings and add one, then pick it for this session.",
 		timestamp: Date.now(),
 	};
-	// Pushed asynchronously so a caller that attaches to the stream before it ends — the loop does —
+	// Pushed asynchronously so a caller that attaches to the stream before it ends — the engine does —
 	// sees the failure the same way it would see a transport's.
 	queueMicrotask(() => {
 		stream.push({ type: "error", reason: "error", error: message });

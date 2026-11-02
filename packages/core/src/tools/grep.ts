@@ -1,5 +1,5 @@
 import { glob, readFile, stat } from "node:fs/promises";
-import type { AgentTool, AgentToolResult } from "@my-agent/loop";
+import type { AgentTool, AgentToolResult } from "../types.ts";
 import { resolve } from "node:path";
 import { Type, type Static } from "typebox";
 import type { Workspace } from "../workspace.ts";

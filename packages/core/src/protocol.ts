@@ -4,6 +4,7 @@ import type { ModelConfig } from "@my-agent/llm";
 import type { AgentSessionEvent } from "./agent.ts";
 import type { AppearanceSettings, BashSettings, ModeSettings } from "./config.ts";
 import type { BranchPoint } from "./session/session-manager.ts";
+import type { QueueMode } from "./types.ts";
 
 export type { Message } from "@my-agent/llm";
 export type { AgentSessionEvent } from "./agent.ts";
@@ -21,7 +22,7 @@ export {
 export interface SessionRef {
 	id: string;
 	/** The workspace this session runs in, absolute: the header recorded a resolved path. */
-	absCwd: string;
+	workDirAbsPath: string;
 	createdAt: number;
 	title: string;
 	/**
@@ -62,7 +63,7 @@ export interface SessionRow extends SessionRef {
  * workspace, but every workspace this machine has ever run in has its sessions on disk beside it.
  */
 export interface WorkspaceGroup {
-	absCwd: string;
+	workDirAbsPath: string;
 	sessions: SessionRow[];
 }
 
@@ -208,8 +209,8 @@ export interface DiffLine {
  * same change, so the view never has to parse the text — and the tool's text stays short, which for
  * a whole-file `write` is the difference between naming the file and paying for it twice.
  *
- * It rides inside the loop's own `tool_execution_end` event, so the wire needed no member for it, and
- * the loop records the whole result — so the transcript keeps the report beside the tool's text. No
+ * It rides inside the engine's own `tool_execution_end` event, so the wire needed no member for it, and
+ * the engine records the whole result — so the transcript keeps the report beside the tool's text. No
  * provider ever sees it: a request carries a tool result's content and only its content.
  */
 export interface FileDiff {
@@ -226,7 +227,7 @@ export interface FileDiff {
 
 export interface SessionSnapshot {
 	id: string;
-	absCwd: string;
+	workDirAbsPath: string;
 	createdAt: number;
 	title: string;
 	/** The row's name the session is on. */
@@ -285,7 +286,7 @@ export interface SessionSnapshot {
 	 */
 	partial?: Message;
 	submitting: boolean;
-	/** User messages accepted mid-run that the loop has not drained yet. */
+	/** User messages accepted mid-run that the run has not drained yet. */
 	queued: number;
 	/** True while a transient provider failure is waiting out its backoff. */
 	isRetrying: boolean;
@@ -319,8 +320,13 @@ export type ToolApprovalKey = "read" | "write" | "edit" | "glob" | "grep" | "bas
  */
 export const APPROVAL_TOOLS: readonly ToolApprovalKey[] = ["read", "write", "edit", "glob", "grep", "bash"];
 
-/** How many queued messages one drain point injects. Mirrors pi-agent-core's `QueueMode`. */
-export type QueueMode = "all" | "one-at-a-time";
+/**
+ * How many queued messages one drain point injects.
+ *
+ * The engine's own type, re-exported rather than restated: the wire and the queues answer the same
+ * question, and a second declaration would be a second thing to keep in step with the first.
+ */
+export type { QueueMode } from "./types.ts";
 
 /** What a message sent while the agent is streaming does to the run. */
 export type PromptBehavior = "steer" | "followUp";

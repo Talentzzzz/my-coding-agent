@@ -1,4 +1,4 @@
-import type { AgentToolResult } from "@my-agent/loop";
+import type { AgentToolResult } from "../types.ts";
 
 /** Wrap plain text as a tool result. */
 export function textResult(text: string, details?: unknown): AgentToolResult<unknown> {

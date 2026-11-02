@@ -1,5 +1,5 @@
 import { readFile, stat, writeFile } from "node:fs/promises";
-import type { AgentTool } from "@my-agent/loop";
+import type { AgentTool } from "../types.ts";
 import { Type, type Static } from "typebox";
 import type { Workspace } from "../workspace.ts";
 import { DIFF_MAX_ROWS, diffText, fileDiff } from "./diff.ts";

@@ -5,35 +5,29 @@ import { readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, rm, access, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTool } from "@my-agent/loop";
 import type { Message } from "@my-agent/llm";
 import type { AssistantMessage, ChatTransport, SimpleStreamOptions } from "@my-agent/llm";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall, type FakeResponseStep } from "./fake-transport.ts";
 import {
-	appendMessage,
-	buildContextEntries,
-	buildSessionContext,
-	createSessionState,
+	createSession,
 	createToolRegistry,
 	fillSession,
-	getBranchPoints,
-	getEntries,
-	getLeafId,
 	MAX_TOOL_RESULT_BYTES,
 	openAgent,
-	resetLeaf,
 	getApprovals,
 	inMemorySettingsState,
+	SessionManager,
 	toolDefinitions,
 	Workspace,
 	type Agent,
 	type AgentSessionEvent,
+	type AgentTool,
 	type FileDiff,
 	type MessageEntry,
 	type ModelSource,
 	type Settings,
 	type SessionEntry,
-	type SessionState,
+	type Session,
 	type SettingsState,
 	type ToolRegistry,
 	type ToolResultViewEntry,
@@ -42,7 +36,10 @@ import {
 	toolResultViewsOf,
 } from "@my-agent/core";
 
-// `@my-agent/llm` and `@my-agent/loop` are workspace packages, linked into the repository root's
+/** The ledger's operations are the service's methods, so a script holds one to call them on. */
+const store = new SessionManager();
+
+// `@my-agent/llm` and `@my-agent/core` are workspace packages, linked into the repository root's
 // node_modules so scripts resolve them the same way `packages/core` does.
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-session-"));
@@ -115,10 +112,10 @@ interface Gate {
 /**
  * A transport whose first `hold` calls stop inside the request.
  *
- * The scripted transport answers as soon as the loop asks, which leaves no window in which to send a
+ * The scripted transport answers as soon as the engine asks, which leaves no window in which to send a
  * message mid-run. Delaying the first call is what makes "while streaming" observable at all. The
- * gate is applied before the session is built, because `Agent` captures the transport when it
- * constructs its `Loop`.
+ * gate is applied before the session is built, because `Agent` captures the transport when it is
+ * constructed.
  */
 function gatedTransport(hold = 1): { api: ChatTransport; gate: Gate } {
 	const call = fake.api.stream.bind(fake.api);
@@ -165,17 +162,17 @@ function windowedRows(contextWindow: number): ModelSource {
 /**
  * Wait until a run has actually reached the provider, or record a failure.
  *
- * Waiting for `isLooping` alone is not enough: the session reports that before `prepareRequest` runs, so
+ * Waiting for `submitting` alone is not enough: the snapshot reports it before `prepareRequest` runs, so
  * a test that released the gate on that signal could release it before the call arrived, and the call
  * would then wait for a release that already happened.
  */
 async function whenStreaming(session: Agent, gate: Gate, ms = 5_000): Promise<void> {
 	const started = Date.now();
 	while (Date.now() - started < ms) {
-		if (session.isLooping(sidOf(session)) && gate.held >= 1) return;
+		if (session.snapshot(sidOf(session)).submitting && gate.held >= 1) return;
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
-	check("a run reached the provider", false, `streaming=${session.isLooping(sidOf(session))} held=${gate.held} after ${ms} ms`);
+	check("a run reached the provider", false, `streaming=${session.snapshot(sidOf(session)).submitting} held=${gate.held} after ${ms} ms`);
 }
 
 /** Poll until `ready` holds, so a check reads a state the loop reaches asynchronously. */
@@ -221,13 +218,13 @@ interface RunOptions {
  * opening helpers record what they created here and every check reads the pair back through
  * {@link sidOf} and {@link bagOf}.
  */
-const opened = new WeakMap<Agent, { id: string; state: SessionState; settings: SettingsState }>();
+const opened = new WeakMap<Agent, { id: string; state: Session; settings: SettingsState }>();
 
 function sidOf(session: Agent): string {
 	return opened.get(session)!.id;
 }
 
-function bagOf(session: Agent): SessionState {
+function bagOf(session: Agent): Session {
 	return opened.get(session)!.state;
 }
 
@@ -248,11 +245,11 @@ async function openSession(
 	model?: string,
 	tools?: ToolRegistry,
 ): Promise<Agent> {
-	const state = createSessionState(root);
+	const state = createSession(root);
 	const sessionSettings = inMemorySettingsState(settings(overrides));
 	const session = await openAgent({
 		absWorkspaceRoot: root,
-		sessionState: state,
+		session: state,
 		models: run.models ?? models,
 		api: run.api ?? fake.api,
 		model,
@@ -373,7 +370,7 @@ function toolResultTexts(session: Agent): string[] {
  * A follow-up sent mid-run is accepted, queued, and drained when the turn ends.
  *
  * The transcript must hold both user messages exactly once, and in the order the loop took them: the
- * queued message is written when the loop echoes it — behind the answer it interrupted — rather than
+ * queued message is written when the loop drains it — behind the answer it interrupted — rather than
  * when it was accepted.
  */
 async function exerciseFollowUp(): Promise<void> {
@@ -392,7 +389,7 @@ async function exerciseFollowUp(): Promise<void> {
 
 	const running = session.prompt(sidOf(session), "first question");
 	await whenStreaming(session, gate);
-	check("the first run is streaming", session.isLooping(sidOf(session)) === true);
+	check("the first run is streaming", session.snapshot(sidOf(session)).submitting === true);
 	check("the provider call is held open", gate.held === 1, String(gate.held));
 	check("nothing is queued yet", session.snapshot(sidOf(session)).queued === 0, String(session.snapshot(sidOf(session)).queued));
 
@@ -408,8 +405,8 @@ async function exerciseFollowUp(): Promise<void> {
 	check("the transcript holds both user messages", users.length === 2, JSON.stringify(users));
 	check("the first exactly once", users.filter((text) => text === "first question").length === 1, JSON.stringify(users));
 	check("the second exactly once", users.filter((text) => text === "second question").length === 1, JSON.stringify(users));
-	// The loop's own emit of the drained message *is* the write — nothing wrote it at acceptance — so
-	// "once" here means the echo landed, not that a duplicate was deduplicated away.
+	// The drain wrote the queued message the moment it took it — nothing wrote it at acceptance — so
+	// "once" here means the drain's write landed, not that a duplicate was deduplicated away.
 	check("the drain point injected the queued message", echoed.includes("second question"), JSON.stringify(echoed));
 	check("two provider calls were made", fake.state.callCount - base === 2, String(fake.state.callCount - base));
 	check("nothing is queued after settling", session.snapshot(sidOf(session)).queued === 0, String(session.snapshot(sidOf(session)).queued));
@@ -422,8 +419,8 @@ async function exerciseFollowUp(): Promise<void> {
  *
  * One held provider call gives the injection a window, and what the two queues do in it is what
  * separates them: a steered message goes into the running turn, so the depth a composer shows stays
- * zero, while a follow-up is still waiting and counted. Neither is written yet — the loop's echo is
- * the write — so the entry lands behind the answer it interrupted, and once.
+ * zero, while a follow-up is still waiting and counted. Neither is written yet — the write waits for
+ * the drain — so the entry lands behind the answer it interrupted, and once.
  */
 async function exerciseSteerVersusFollowUp(): Promise<void> {
 	process.stdout.write("steer versus followUp\n");
@@ -528,14 +525,15 @@ async function exerciseAcceptedOrder(): Promise<void> {
 }
 
 /**
- * A message accepted mid-run that the run never reaches is still written, once, at the end.
+ * A message accepted mid-run that the run never reaches is dropped with the run.
  *
  * An abort is the ordinary way this happens: the loop stops before its next drain point, so nothing
- * will ever take the message off the queue. Letting it go would lose words the user typed and would
- * leave the depth above zero — which is what `settle()` waits on.
+ * will ever take the message off the queue. The send contract is fire-and-forget — a message that
+ * was never drained is never stored — and the queues are emptied so the depth falls to zero, which
+ * is what `settle()` waits on.
  */
-async function exerciseAbortFlushesAccepted(): Promise<void> {
-	process.stdout.write("abort flushes the queue\n");
+async function exerciseAbortDropsUnconsumed(): Promise<void> {
+	process.stdout.write("abort drops the unconsumed queue\n");
 	fake.setResponses([fakeAssistantMessage("an answer that never lands")]);
 	const { api: gatedApi, gate } = gatedTransport();
 	const session = await openSession({}, { api: gatedApi });
@@ -543,7 +541,7 @@ async function exerciseAbortFlushesAccepted(): Promise<void> {
 	const running = session.prompt(sidOf(session), "question before the abort");
 	await whenStreaming(session, gate);
 	await session.prompt(sidOf(session), "typed while it was answering", { behavior: "followUp" });
-	check("the run is streaming with one message queued", session.isLooping(sidOf(session)) && session.snapshot(sidOf(session)).queued === 1, String(session.snapshot(sidOf(session)).queued));
+	check("the run is streaming with one message queued", session.snapshot(sidOf(session)).submitting && session.snapshot(sidOf(session)).queued === 1, String(session.snapshot(sidOf(session)).queued));
 
 	const aborting = session.abort(sidOf(session));
 	// The held call has to answer before the aborted run can end; the abort's own signal is what turns
@@ -554,12 +552,7 @@ async function exerciseAbortFlushesAccepted(): Promise<void> {
 	await within("settle()", 10_000, session.settle(sidOf(session)));
 
 	const order = orderOf(session);
-	check("the aborted run still ends with what the user typed", order.at(-1) === "user:typed while it was answering", JSON.stringify(order));
-	check(
-		"written exactly once",
-		order.filter((line) => line === "user:typed while it was answering").length === 1,
-		JSON.stringify(order),
-	);
+	check("the message the run never drained is not in the store", !order.includes("user:typed while it was answering"), JSON.stringify(order));
 	check("and the queue is empty, which is what settle() waits on", session.snapshot(sidOf(session)).queued === 0, String(session.snapshot(sidOf(session)).queued));
 
 	await session.close(sidOf(session));
@@ -625,7 +618,7 @@ async function exerciseLiveStates(): Promise<void> {
 	const streamingSeen: boolean[] = [];
 	session.onEvent(sidOf(session), () => {
 		queuedSeen.push(session.snapshot(sidOf(session)).queued);
-		streamingSeen.push(session.isLooping(sidOf(session)));
+		streamingSeen.push(session.snapshot(sidOf(session)).submitting);
 	});
 
 	const running = session.prompt(sidOf(session), "live question");
@@ -657,7 +650,8 @@ function labelOf(event: AgentSessionEvent): string {
  * Flattening is what makes this readable from one subscription: the loop's events and the session's
  * own members arrive in one stream, ordered by what actually happened. For the message that started
  * the run that means the write comes first; for a drained one it means the queue reports the
- * acceptance, the entry lands at the drain, and the loop's own echo follows.
+ * acceptance, the entry lands at the drain — ahead of the loop's own echo of it — and the echo
+ * follows.
  */
 async function exerciseEventStream(): Promise<void> {
 	process.stdout.write("session events\n");
@@ -716,8 +710,8 @@ async function exerciseEventStream(): Promise<void> {
 		`queue=${queuedUpdate} write=${written} start=${drainedStart}`,
 	);
 	check(
-		"the write is the drain, in the same breath as the echo and before its end",
-		written === drainedStart + 1 && drainedEnd === drainedStart + 2,
+		"the write is the drain itself, ahead of the echo it precedes",
+		written < drainedStart && drainedEnd === drainedStart + 1,
 		`start=${drainedStart} write=${written} end=${drainedEnd}`,
 	);
 	check("and the depth returns to zero once drained", seen.some((event) => event.type === "queue_update" && event.queued === 0), trace);
@@ -853,7 +847,7 @@ async function exerciseConfigChanged(): Promise<void> {
 	session.applyModelSelection(sidOf(session), { model: "faux2" });
 	check("re-selecting the current model says nothing", seen.length === 3, JSON.stringify(seen));
 
-	check("every row offers the same four levels", JSON.stringify(session.thinkingLevels()) === JSON.stringify(["off", "low", "high", "max"]), JSON.stringify(session.thinkingLevels()));
+	check("every row offers the same four levels", JSON.stringify(session.snapshot(sidOf(session)).thinkingLevels) === JSON.stringify(["off", "low", "high", "max"]), JSON.stringify(session.snapshot(sidOf(session)).thinkingLevels));
 	session.applyModelSelection(sidOf(session), { thinkingLevel: "off" });
 	check("so re-applying it says nothing", seen.length === 3, JSON.stringify(seen));
 
@@ -962,12 +956,12 @@ async function exerciseAfterToolHook(): Promise<void> {
 		toolResultViewsOf(session.sessionManager.buildContextEntries(bagOf(session))).size === 1,
 		JSON.stringify(entriesOf(session).map((entry) => entry.type)),
 	);
-	const sessionFile = session.sessionFile(sidOf(session));
+	const sessionFile = session.sessionManager.stateOf(sidOf(session)).sessionFileAbsPath;
 	await session.close(sidOf(session));
 
 	process.stdout.write("after_tool hook — the rewrite outlives the process\n");
 	const reopenedFile = fillSession(sessionFile!);
-	const fileEntries = getEntries(reopenedFile);
+	const fileEntries = store.getEntries(reopenedFile);
 	const storedEntry = fileEntries.find(
 		(entry): entry is MessageEntry =>
 			entry.type === "message" && entry.message.role === "toolResult" && textOf(entry.message).includes("the tool's own words"),
@@ -990,13 +984,13 @@ async function exerciseAfterToolHook(): Promise<void> {
 		viewEntry?.shown.some((block) => block.type === "text" && block.text === "REPLACED BY THE TEST HOOK") === true,
 		JSON.stringify(viewEntry?.shown),
 	);
-	const transcriptTexts = JSON.stringify(buildSessionContext(reopenedFile).messages);
+	const transcriptTexts = JSON.stringify(store.buildSessionContext(reopenedFile).messages);
 	check(
 		"the transcript a window reads still shows the tool's own output",
 		transcriptTexts.includes("the tool's own words") && !transcriptTexts.includes("REPLACED BY THE TEST HOOK"),
 		transcriptTexts.slice(0, 200),
 	);
-	const replayedViews = toolResultViewsOf(buildContextEntries(reopenedFile));
+	const replayedViews = toolResultViewsOf(store.buildContextEntries(reopenedFile));
 	check(
 		"the replayed views pair the halves by call id",
 		storedEntry !== undefined &&
@@ -1011,7 +1005,7 @@ async function exerciseAfterToolHook(): Promise<void> {
 	const replayedSettings = inMemorySettingsState(settings());
 	const replayed = await openAgent({
 		absWorkspaceRoot: root,
-		sessionState: reopenedFile,
+		session: reopenedFile,
 		models,
 		api: fake.api,
 		settingsState: replayedSettings,
@@ -1120,7 +1114,7 @@ async function exerciseApprovalPrompt(): Promise<void> {
 	check("and that message still leads the request", sent[1]?.roles[0] === "system", JSON.stringify(sent[1]?.roles));
 	check(
 		"carrying the tool declarations as well",
-		JSON.stringify(sent[1]?.tools) === JSON.stringify(session.activeTools(sidOf(session))),
+		JSON.stringify(sent[1]?.tools) === JSON.stringify(session.snapshot(sidOf(session)).activeTools),
 		JSON.stringify(sent[1]?.tools),
 	);
 	check("the approval is in the snapshot too", session.snapshot(sidOf(session)).approvals.bash === true, JSON.stringify(session.snapshot(sidOf(session)).approvals));
@@ -1335,7 +1329,7 @@ async function exerciseActiveTools(): Promise<void> {
 	const narrowed = ["read", "edit", "glob", "grep", "bash"];
 	session.setActiveTools(sidOf(session), narrowed);
 	check("snapshot.activeTools loses write", JSON.stringify(session.snapshot(sidOf(session)).activeTools) === JSON.stringify(narrowed), JSON.stringify(session.snapshot(sidOf(session)).activeTools));
-	check("get activeTools() loses write", JSON.stringify(session.activeTools(sidOf(session))) === JSON.stringify(narrowed), JSON.stringify(session.activeTools(sidOf(session))));
+	check("get activeTools() loses write", JSON.stringify(session.snapshot(sidOf(session)).activeTools) === JSON.stringify(narrowed), JSON.stringify(session.snapshot(sidOf(session)).activeTools));
 	check("allTools still reports every registered tool", session.snapshot(sidOf(session)).allTools.length === 8, JSON.stringify(session.snapshot(sidOf(session)).allTools));
 	check("the change is announced, so a client needs no new snapshot", JSON.stringify(changes) === JSON.stringify([narrowed]), JSON.stringify(changes));
 
@@ -1383,7 +1377,7 @@ async function exerciseDeactivatedToolCall(): Promise<void> {
 async function exerciseUnknownTool(): Promise<void> {
 	process.stdout.write("unknown tool\n");
 	const session = await openSession();
-	const before = JSON.stringify(session.activeTools(sidOf(session)));
+	const before = JSON.stringify(session.snapshot(sidOf(session)).activeTools);
 
 	const seen: AgentSessionEvent[] = [];
 	session.onEvent(sidOf(session), (event) => seen.push(event));
@@ -1395,7 +1389,7 @@ async function exerciseUnknownTool(): Promise<void> {
 		threw = true;
 	}
 	check("setActiveTools throws on an unknown name", threw);
-	check("the session keeps its previous active set", JSON.stringify(session.activeTools(sidOf(session))) === before, `${before} -> ${JSON.stringify(session.activeTools(sidOf(session)))}`);
+	check("the session keeps its previous active set", JSON.stringify(session.snapshot(sidOf(session)).activeTools) === before, `${before} -> ${JSON.stringify(session.snapshot(sidOf(session)).activeTools)}`);
 	check("and no change was announced", seen.every((event) => event.type !== "config_changed"), JSON.stringify(seen.map(labelOf)));
 
 	fake.setResponses([fakeAssistantMessage("still here")]);
@@ -1476,7 +1470,7 @@ async function exerciseRetry(): Promise<void> {
 				delayMs: event.delayMs,
 				errorMessage: event.errorMessage,
 			});
-			live.push({ retrying: session.isRetrying(sidOf(session)), attempt: session.retryAttempt(sidOf(session)) });
+			live.push({ retrying: session.snapshot(sidOf(session)).isRetrying, attempt: session.snapshot(sidOf(session)).retryAttempt });
 			return;
 		}
 		if (event.type === "retry_start") {
@@ -1536,8 +1530,8 @@ async function exerciseRetry(): Promise<void> {
 	);
 	check(
 		"and nothing is retrying once it answered",
-		session.isRetrying(sidOf(session)) === false && session.retryAttempt(sidOf(session)) === 0 && session.snapshot(sidOf(session)).isRetrying === false,
-		`retrying=${session.isRetrying(sidOf(session))} attempt=${session.retryAttempt(sidOf(session))}`,
+		session.snapshot(sidOf(session)).isRetrying === false && session.snapshot(sidOf(session)).retryAttempt === 0 && session.snapshot(sidOf(session)).isRetrying === false,
+		`retrying=${session.snapshot(sidOf(session)).isRetrying} attempt=${session.snapshot(sidOf(session)).retryAttempt}`,
 	);
 
 	await within("the second run", 10_000, session.prompt(sidOf(session), "second question"));
@@ -1596,8 +1590,8 @@ async function exerciseNonRetryableError(): Promise<void> {
 	);
 	check(
 		"and nothing claims to be retrying",
-		session.isRetrying(sidOf(session)) === false && session.retryAttempt(sidOf(session)) === 0,
-		`retrying=${session.isRetrying(sidOf(session))} attempt=${session.retryAttempt(sidOf(session))}`,
+		session.snapshot(sidOf(session)).isRetrying === false && session.snapshot(sidOf(session)).retryAttempt === 0,
+		`retrying=${session.snapshot(sidOf(session)).isRetrying} attempt=${session.snapshot(sidOf(session)).retryAttempt}`,
 	);
 
 	await session.close(sidOf(session));
@@ -1648,11 +1642,11 @@ async function exerciseRetryExhaustion(): Promise<void> {
 	);
 	check(
 		"and the session stopped retrying",
-		session.isRetrying(sidOf(session)) === false &&
-			session.retryAttempt(sidOf(session)) === 0 &&
+		session.snapshot(sidOf(session)).isRetrying === false &&
+			session.snapshot(sidOf(session)).retryAttempt === 0 &&
 			session.snapshot(sidOf(session)).isRetrying === false &&
 			session.snapshot(sidOf(session)).retryAttempt === 0,
-		`retrying=${session.isRetrying(sidOf(session))} attempt=${session.retryAttempt(sidOf(session))}`,
+		`retrying=${session.snapshot(sidOf(session)).isRetrying} attempt=${session.snapshot(sidOf(session)).retryAttempt}`,
 	);
 
 	await session.close(sidOf(session));
@@ -1682,15 +1676,15 @@ async function exerciseRetryAbort(): Promise<void> {
 	await within("the backoff", 5_000, scheduled);
 	check(
 		"the retry is pending, not the provider",
-		session.isRetrying(sidOf(session)) === true && session.retryAttempt(sidOf(session)) === 1,
-		String(session.retryAttempt(sidOf(session))),
+		session.snapshot(sidOf(session)).isRetrying === true && session.snapshot(sidOf(session)).retryAttempt === 1,
+		String(session.snapshot(sidOf(session)).retryAttempt),
 	);
 
 	const aborted = await within("abort()", 5_000, session.abort(sidOf(session)));
 	check("abort() returns", aborted.ok);
 	const settled = await within("settle()", 2_000, session.settle(sidOf(session)));
 	check("settle() resolves instead of waiting out the backoff", settled.ok);
-	check("the retry is over", session.isRetrying(sidOf(session)) === false && session.retryAttempt(sidOf(session)) === 0, `retrying=${session.isRetrying(sidOf(session))}`);
+	check("the retry is over", session.snapshot(sidOf(session)).isRetrying === false && session.snapshot(sidOf(session)).retryAttempt === 0, `retrying=${session.snapshot(sidOf(session)).isRetrying}`);
 	check("the provider was asked once", fake.state.callCount - base === 1, String(fake.state.callCount - base));
 	check(
 		"the partial turn is on disk",
@@ -1740,8 +1734,8 @@ async function exerciseRetryDisabled(): Promise<void> {
 	);
 	check(
 		"and the snapshot never claims to be retrying",
-		session.isRetrying(sidOf(session)) === false && session.snapshot(sidOf(session)).retryAttempt === 0,
-		`retrying=${session.isRetrying(sidOf(session))}`,
+		session.snapshot(sidOf(session)).isRetrying === false && session.snapshot(sidOf(session)).retryAttempt === 0,
+		`retrying=${session.snapshot(sidOf(session)).isRetrying}`,
 	);
 
 	await session.close(sidOf(session));
@@ -1785,8 +1779,8 @@ async function exerciseContextOverflow(): Promise<void> {
 	);
 	check(
 		"with nothing left retrying",
-		session.isRetrying(sidOf(session)) === false && session.retryAttempt(sidOf(session)) === 0,
-		`retrying=${session.isRetrying(sidOf(session))}`,
+		session.snapshot(sidOf(session)).isRetrying === false && session.snapshot(sidOf(session)).retryAttempt === 0,
+		`retrying=${session.snapshot(sidOf(session)).isRetrying}`,
 	);
 
 	await session.close(sidOf(session));
@@ -1879,7 +1873,7 @@ async function exerciseModelFromRow(): Promise<void> {
 		sent[0]?.alsoInOptions === "first-key",
 		String(sent[0]?.alsoInOptions),
 	);
-	check("the model names the row it came from", session.modelName(sidOf(session)) === "keyed", session.modelName(sidOf(session)));
+	check("the model names the row it came from", session.snapshot(sidOf(session)).model === "keyed", session.snapshot(sidOf(session)).model);
 
 	// No catalog is rebuilt and no session reopened: the row is read again before the next request, so
 	// every field of it is as fresh as the file was — not just the key.
@@ -1900,7 +1894,7 @@ async function exerciseModelFromRow(): Promise<void> {
 	fake.setResponses([fakeAssistantMessage("answered a third time")]);
 	await within("the third run", 10_000, session.prompt(sidOf(session), "and again"));
 	check("a renamed wire id reaches the request", sent[2]?.id === "faux-2", String(sent[2]?.id));
-	check("and the session stays on the row it came from", session.modelName(sidOf(session)) === "keyed", session.modelName(sidOf(session)));
+	check("and the session stays on the row it came from", session.snapshot(sidOf(session)).model === "keyed", session.snapshot(sidOf(session)).model);
 	check("and is recorded once as a model change", changesOf() === changesBefore + 1, String(changesOf()));
 	fake.setResponses([fakeAssistantMessage("answered a fourth time")]);
 	await within("the fourth run", 10_000, session.prompt(sidOf(session), "once more"));
@@ -1927,16 +1921,16 @@ async function exerciseModelSelection(): Promise<void> {
 	scripted.setResponses([fakeAssistantMessage("first")]);
 	const session = await openSession({}, { models: { list: () => thinkerRows }, api: scripted.api });
 
-	check("a session opens at off, because nothing has been asked for", session.thinkingLevel(sidOf(session)) === "off", session.thinkingLevel(sidOf(session)));
+	check("a session opens at off, because nothing has been asked for", session.snapshot(sidOf(session)).thinkingLevel === "off", session.snapshot(sidOf(session)).thinkingLevel);
 	check(
 		"and offers every level the app has",
-		JSON.stringify(session.thinkingLevels()) === JSON.stringify(["off", "low", "high", "max"]),
-		JSON.stringify(session.thinkingLevels()),
+		JSON.stringify(session.snapshot(sidOf(session)).thinkingLevels) === JSON.stringify(["off", "low", "high", "max"]),
+		JSON.stringify(session.snapshot(sidOf(session)).thinkingLevels),
 	);
 
 	const levelsOf = (): number => entriesOf(session).filter((entry) => entry.type === "thinking_level_change").length;
 	session.applyModelSelection(sidOf(session), { thinkingLevel: "high" });
-	check("choosing a level moves the session", session.thinkingLevel(sidOf(session)) === "high", session.thinkingLevel(sidOf(session)));
+	check("choosing a level moves the session", session.snapshot(sidOf(session)).thinkingLevel === "high", session.snapshot(sidOf(session)).thinkingLevel);
 	check("and writes nothing until a request uses it", levelsOf() === 0, String(levelsOf()));
 
 	await within("the run", 10_000, session.prompt(sidOf(session), "hello", { selection: { thinkingLevel: "high" } }));
@@ -1951,10 +1945,10 @@ async function exerciseModelSelection(): Promise<void> {
 	// Every row takes the same four, so there is nothing left for the session to refuse: `max` is a
 	// level like the rest, and the only string that is not one is a name the app has never had.
 	session.applyModelSelection(sidOf(session), { thinkingLevel: "max" });
-	check("a level the row used to lack is accepted now", session.thinkingLevel(sidOf(session)) === "max", session.thinkingLevel(sidOf(session)));
+	check("a level the row used to lack is accepted now", session.snapshot(sidOf(session)).thinkingLevel === "max", session.snapshot(sidOf(session)).thinkingLevel);
 
 	session.applyModelSelection(sidOf(session), { thinkingLevel: "turbo" });
-	check("a level nobody has lands on off", session.thinkingLevel(sidOf(session)) === "off", session.thinkingLevel(sidOf(session)));
+	check("a level nobody has lands on off", session.snapshot(sidOf(session)).thinkingLevel === "off", session.snapshot(sidOf(session)).thinkingLevel);
 
 	await session.close(sidOf(session));
 }
@@ -1965,7 +1959,7 @@ try {
 	await exerciseFollowUp();
 	await exerciseSteerVersusFollowUp();
 	await exerciseAcceptedOrder();
-	await exerciseAbortFlushesAccepted();
+	await exerciseAbortDropsUnconsumed();
 	await exerciseQueueMode();
 	await exerciseLiveStates();
 	await exerciseEventStream();
@@ -2125,7 +2119,7 @@ async function exerciseSubagent(): Promise<void> {
 	check("the child transcript is on disk under subagents/", childFiles.length === 1, JSON.stringify(childFiles));
 	if (childFiles[0] !== undefined) {
 		const header = JSON.parse(readFileSync(join(childDir, childFiles[0]), "utf8").split("\n")[0] ?? "{}") as { parentSession?: string };
-		check("and its header names the parent session", header.parentSession === syncSession.sessionFile(sidOf(syncSession)), JSON.stringify(header.parentSession));
+		check("and its header names the parent session", header.parentSession === syncSession.sessionManager.stateOf(sidOf(syncSession)).sessionFileAbsPath, JSON.stringify(header.parentSession));
 	}
 
 	// The child's spend owns no message entry in this transcript, so it arrives as its own record and
@@ -2148,8 +2142,8 @@ async function exerciseSubagent(): Promise<void> {
 	const recordedOutput = usageEntries[0]?.type === "usage" ? usageEntries[0].usage.output : 0;
 	check(
 		"the session total counts the child's spend on top of the messages' own",
-		syncSession.usage(sidOf(syncSession)).output === messageOutput + recordedOutput,
-		JSON.stringify({ total: syncSession.usage(sidOf(syncSession)).output, messages: messageOutput, recorded: recordedOutput }),
+		syncSession.snapshot(sidOf(syncSession)).usage.output === messageOutput + recordedOutput,
+		JSON.stringify({ total: syncSession.snapshot(sidOf(syncSession)).usage.output, messages: messageOutput, recorded: recordedOutput }),
 	);
 	await syncSession.close(sidOf(syncSession));
 
@@ -2209,10 +2203,10 @@ async function exerciseSubagent(): Promise<void> {
 
 	// --- Phase 4: subagents: false builds a session without the pair -----------------------------
 	const bareSettings = inMemorySettingsState(settings());
-	const bareState = createSessionState(root);
+	const bareState = createSession(root);
 	const bare = await openAgent({
 		absWorkspaceRoot: root,
-		sessionState: bareState,
+		session: bareState,
 		models,
 		settingsState: bareSettings,
 		subagents: false,
@@ -2373,7 +2367,7 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	// The leaf is read now, while the session is still on this branch: `getBranchTip` follows the last
 	// child written, so once a second branch exists, descending from the first message reaches *that*
 	// one instead. The branch is addressed by its own tip from here on.
-	const firstTip = session.sessionManager.getLeafId(bagOf(session)) ?? "";
+	const firstTip = bagOf(session).leafId ?? "";
 	check("the narrow set is in force", session.snapshot(sidOf(session)).activeTools.includes("bash") === false, JSON.stringify(session.snapshot(sidOf(session)).activeTools));
 	check("with the approval this branch chose", session.snapshot(sidOf(session)).approvals.bash === true, JSON.stringify(session.snapshot(sidOf(session)).approvals));
 
@@ -2382,7 +2376,7 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	// reset it, so un-gating `bash` here is what the second branch actually chose.
 	session.setActiveTools(sidOf(session), [...session.snapshot(sidOf(session)).allTools]);
 	session.applyConfig(sidOf(session), { approval: { bash: false } });
-	const secondTip = session.sessionManager.getLeafId(bagOf(session)) ?? "";
+	const secondTip = bagOf(session).leafId ?? "";
 	check("the full set is back", session.snapshot(sidOf(session)).activeTools.includes("bash") === true, JSON.stringify(session.snapshot(sidOf(session)).activeTools));
 	check("and its approval with it", session.snapshot(sidOf(session)).approvals.bash === false, JSON.stringify(session.snapshot(sidOf(session)).approvals));
 
@@ -2484,21 +2478,21 @@ async function exerciseLeafDurability(): Promise<void> {
 	session.branchTo(sidOf(session), firstId, false);
 	check("moving to the position already held writes nothing", entriesOf(session).length === entriesBefore + 1, String(entriesOf(session).length - entriesBefore));
 
-	const file = session.sessionManager.getAbsSessionFile(bagOf(session)) ?? "";
+	const file = bagOf(session).sessionFileAbsPath ?? "";
 	await session.close(sidOf(session));
 
 	// --- The move is where the file says it is, not where the file ends --------------------------
 	const reopened = fillSession(file);
-	check("the move survived close", getLeafId(reopened) === firstId, `${getLeafId(reopened)} vs ${firstId}`);
+	check("the move survived close", reopened.leafId === firstId, `${reopened.leafId} vs ${firstId}`);
 	check(
 		"and the reopened context is the branch through it, the record reaching no message",
-		JSON.stringify(buildSessionContext(reopened).messages.map(textOf)) === JSON.stringify(["durable question one"]),
-		JSON.stringify(buildSessionContext(reopened).messages.map(textOf)),
+		JSON.stringify(store.buildSessionContext(reopened).messages.map(textOf)) === JSON.stringify(["durable question one"]),
+		JSON.stringify(store.buildSessionContext(reopened).messages.map(textOf)),
 	);
 
 	// The next append is a child of the recorded position, which is what turns it into a branch point.
-	appendMessage(reopened, { role: "user", content: [{ type: "text", text: "carried on" }] } as Message);
-	const points = getBranchPoints(reopened);
+	store.appendMessage(reopened, { role: "user", content: [{ type: "text", text: "carried on" }] } as Message);
+	const points = store.getBranchPoints(reopened);
 	check(
 		"the next append continued from the moved leaf",
 		points.length === 1 && points[0]?.entryId === firstId && points[0]?.options.length === 2,
@@ -2506,28 +2500,28 @@ async function exerciseLeafDurability(): Promise<void> {
 	);
 
 	// --- "Before the first entry" is a position like any other ----------------------------------
-	resetLeaf(reopened);
-	check("resetLeaf moved the leaf before the first entry", getLeafId(reopened) === null, String(getLeafId(reopened)));
+	store.resetLeaf(reopened);
+	check("resetLeaf moved the leaf before the first entry", reopened.leafId === null, String(reopened.leafId));
 	const rereopened = fillSession(file);
-	check("and that position survived the reopen too", getLeafId(rereopened) === null, String(getLeafId(rereopened)));
+	check("and that position survived the reopen too", rereopened.leafId === null, String(rereopened.leafId));
 
 	// --- A file with no leaf record reads as it always did: the last entry is the position -------
 	// Handwritten, because no build that writes this format would ever produce one — the format never
 	// rewrites a line, so old files keep the shape their writer gave them.
 	const fixture = join(root, "fixture-no-leaf.jsonl");
 	const lines = [
-		{ type: "SessionHeader", version: 4, id: "fixture-no-leaf", timestamp: new Date().toISOString(), cwd: root },
+		{ type: "SessionHeader", version: 4, id: "fixture-no-leaf", timestamp: new Date().toISOString(), workDir: root },
 		{ type: "message", id: "fx-u1", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: [{ type: "text", text: "fixture one" }] } },
 		{ type: "message", id: "fx-a1", parentId: "fx-u1", timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "text", text: "fixture answer" }] } },
 		{ type: "message", id: "fx-u2", parentId: "fx-u1", timestamp: new Date().toISOString(), message: { role: "user", content: [{ type: "text", text: "fixture two" }] } },
 	];
 	await writeFile(fixture, lines.map((line) => `${JSON.stringify(line)}\n`).join(""));
 	const legacy = fillSession(fixture);
-	check("a file without a leaf record reads its last entry", getLeafId(legacy) === "fx-u2", String(getLeafId(legacy)));
+	check("a file without a leaf record reads its last entry", legacy.leafId === "fx-u2", String(legacy.leafId));
 	check(
 		"and its tree is read whole, the second child a branch option",
-		getBranchPoints(legacy).length === 1 && getBranchPoints(legacy)[0]?.options.length === 2,
-		JSON.stringify(getBranchPoints(legacy)),
+		store.getBranchPoints(legacy).length === 1 && store.getBranchPoints(legacy)[0]?.options.length === 2,
+		JSON.stringify(store.getBranchPoints(legacy)),
 	);
 }
 

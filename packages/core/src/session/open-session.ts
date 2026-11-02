@@ -1,4 +1,4 @@
-import type { AgentTool, QueueMode } from "@my-agent/loop";
+import type { AgentTool, QueueMode } from "../types.ts";
 import type { ModelState } from "../models.ts";
 import type { ToolState } from "../tools/manager.ts";
 import type { Workspace } from "../workspace.ts";
@@ -26,7 +26,7 @@ import { createSessionRuntime, type SessionRuntime } from "./session-runtime.ts"
  * The name is the entry's, not the state's: {@link SessionRuntime} keeps its narrow definition —
  * the queues and the run in flight — and this entry *holds* one rather than replacing it
  * (ADR-0007 §4). What an entry deliberately does not hold is a session's durable half: the
- * transcript's `SessionState` is its ledger's business, held by the session manager's cache or not
+ * transcript's `Session` is its ledger's business, held by the session manager's cache or not
  * at all, and never here — an entry and a ledger cache are two tables and stay two tables.
  */
 export interface OpenSession {
@@ -41,7 +41,7 @@ export interface OpenSession {
 	 *
 	 * The run's transients ({@link RunScope}) are locals of the run itself; this slot is what a
 	 * snapshot or a queued prompt reads them through while the run is on the stack — the same
-	 * structural role `runtime.activeRun` plays for an abort. Set before the loop starts, cleared
+	 * structural role `runtime.activeRun` plays for an abort. Set before the run starts, cleared
 	 * the moment the run settles.
 	 */
 	run: RunScope | undefined;

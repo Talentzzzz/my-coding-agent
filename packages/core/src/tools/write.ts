@@ -1,5 +1,5 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import type { AgentTool } from "@my-agent/loop";
+import type { AgentTool } from "../types.ts";
 import { dirname } from "node:path";
 import { Type, type Static } from "typebox";
 import type { Workspace } from "../workspace.ts";

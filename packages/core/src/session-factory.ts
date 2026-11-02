@@ -1,5 +1,5 @@
 import type { ChatTransport } from "@my-agent/llm";
-import type { AgentTool } from "@my-agent/loop";
+import type { AgentTool } from "./types.ts";
 import { Agent } from "./agent.ts";
 import { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
 import { buildSystemPrompt } from "./context/system-prompt.ts";
@@ -17,13 +17,7 @@ import {
 	resolvedModel,
 } from "./models.ts";
 import type { SessionSnapshot, ToolApprovalKey } from "./protocol.ts";
-import {
-	type SessionState,
-	SessionManager,
-	buildContextEntries,
-	getAbsSessionFile,
-	getRecordedSettings,
-} from "./session/session-manager.ts";
+import { type Session, SessionManager } from "./session/session-manager.ts";
 import { sessionSnapshot } from "./session/snapshot.ts";
 import {
 	approvalToolsOf,
@@ -63,7 +57,7 @@ export interface OpenAgentOptions {
 	 * Built by the caller rather than here, because deciding *which* session to open — a new one, the
 	 * newest, one named by id — is the host's job, and a test opens an in-memory one instead.
 	 */
-	sessionState: SessionState;
+	session: Session;
 	models: ModelSource;
 	/** Overrides the stored default with a row's name. */
 	model?: string;
@@ -72,7 +66,7 @@ export interface OpenAgentOptions {
 	 * The transport every request in this session goes over.
 	 *
 	 * Omitted in the real process, where it means Anthropic Messages. A smoke passes a scripted
-	 * transport so the loop can be driven with no provider key.
+	 * transport so the run can be driven with no provider key.
 	 */
 	api?: ChatTransport;
 	/**
@@ -166,7 +160,7 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 	const sessionManager = options.sessionManager ?? new SessionManager();
 	const settings = getSettings(settingsState);
 	const agentsMd = await loadAgentsMd(workspace.absRoot);
-	const recorded = getRecordedSettings(options.sessionState);
+	const recorded = sessionManager.getRecordedSettings(options.session);
 	const rows = options.models.list();
 	const row = selectModel(rows, options.model ?? recordedRefOf(recorded.model) ?? settings.model);
 	// A session with no row still runs, on the placeholder: see `placeholderModelState`. What it cannot
@@ -201,7 +195,7 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 	// this session: the process's catalog could not hold one session's delegation without holding it
 	// for every session. The SubAgent's own sessions pass `subagents: false`, so a child can never
 	// spawn a grandchild.
-	const absSessionFile = getAbsSessionFile(options.sessionState);
+	const sessionFileAbsPath = options.session.sessionFileAbsPath;
 	const localTools =
 		options.subagents === false
 			? []
@@ -211,9 +205,9 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 					...(row === undefined ? {} : { model: row.name }),
 					thinkingLevel,
 					parentSessionManager: sessionManager,
-					parentSessionState: options.sessionState,
+					parentSession: options.session,
 					...(options.api === undefined ? {} : { api: options.api }),
-					...(absSessionFile === undefined ? {} : { parentSessionFile: absSessionFile }),
+					...(sessionFileAbsPath === undefined ? {} : { parentSessionFile: sessionFileAbsPath }),
 				});
 
 	return { workspace, settingsState, modelState, registry, localTools, agentsMd, sessionManager };
@@ -231,16 +225,17 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
  * session's history would be indistinguishable from using it.
  */
 export async function readSessionSnapshot(options: OpenAgentOptions): Promise<SessionSnapshot> {
-	const { workspace, settingsState, modelState, registry, localTools } = await assemble(options);
+	const { workspace, settingsState, modelState, registry, localTools, sessionManager } = await assemble(options);
 	// The catalog this session would run with: the shared definitions plus the tools that are its own,
 	// which is what a live session reads off its registry entry.
 	const catalog = registryView(registry, localTools);
 	// The same derivation a live session runs — the ledger over the seed, or the global default's
 	// live view when nothing was handed in — so a cold read answers the choice a live session opens
 	// on, without replaying it into anything.
-	const tools = toolStateOf(options.sessionState, settingsState, catalog, options.toolState);
+	const tools = toolStateOf(sessionManager, options.session, settingsState, catalog, options.toolState);
 	return sessionSnapshot({
-		sessionState: options.sessionState,
+		sessions: sessionManager,
+		session: options.session,
 		absWorkspaceRoot: workspace.absRoot,
 		// The snapshot reads only the name, the level, and the window off the model, all of which the
 		// filled bag already holds; the request object is as throwaway here as it is in a request.
@@ -255,7 +250,7 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 		// Judged against this workspace's own settings, the same way the live session's getter does it:
 		// a cold read and a live snapshot must agree here, or the panel would flip its "沿用全局" label
 		// the moment a session went from open to merely read.
-		...followsGlobalOf(options.sessionState, settingsState, catalog),
+		...followsGlobalOf(sessionManager, options.session, settingsState, catalog),
 		submitting: false,
 		queued: 0,
 		isRetrying: false,
@@ -263,7 +258,7 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 		// Derived from the ledger exactly as the live session derives it: a call left dangling by a
 		// run that ended — the gate's, or a crash's — is a question the cold read shows too, because
 		// the answer that closes it arrives over REST to whichever process is running the session.
-		pendingApprovals: danglingApprovalsOf(buildContextEntries(options.sessionState)),
+		pendingApprovals: danglingApprovalsOf(sessionManager.buildContextEntries(options.session)),
 	});
 }
 
@@ -292,7 +287,7 @@ export interface SessionServices {
  */
 export async function ensureSession(options: OpenAgentOptions): Promise<SessionServices> {
 	const { workspace, settingsState, modelState, localTools, agentsMd, sessionManager } = await assemble(options);
-	const sessionId = options.sessionState.sessionId;
+	const sessionId = options.session.sessionId;
 	const openSessions = options.openSessions ?? new OpenSessions();
 	// First touch creates the entry, and its fields are the resolved answers every later call reads —
 	// the workspace fence, the settings bag, the model selection the fill chain re-fills per request,
@@ -315,7 +310,7 @@ export async function ensureSession(options: OpenAgentOptions): Promise<SessionS
 	// names the session by id — answer with this exact object, before the first message puts the file
 	// on disk. An id the service already caches is re-registered to the same object, which changes
 	// nothing.
-	sessionManager.adopt(options.sessionState);
+	sessionManager.adopt(options.session);
 	return { sessionManager, openSessions };
 }
 

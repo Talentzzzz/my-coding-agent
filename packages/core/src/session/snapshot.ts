@@ -9,17 +9,7 @@ import {
 	type UsageTotals,
 } from "../protocol.ts";
 import { thinkingLevelsFor } from "../models.ts";
-import {
-	buildSessionContext,
-	type SessionEntry,
-	type SessionState,
-	getContextMessageEntryIds,
-	getEntries,
-	getBranchPoints,
-	getHeader,
-	getLeafId,
-	getTitle,
-} from "./session-manager.ts";
+import type { SessionEntry, SessionManager, Session } from "./session-manager.ts";
 
 /**
  * Everything one snapshot is built from, already resolved by the caller.
@@ -30,8 +20,13 @@ import {
  * same object from the same parts without either one owning the other's job.
  */
 export interface SnapshotInput {
+	/**
+	 * The service the transcript's own reads go through — the bag-level ones only, so a snapshot
+	 * still reads no file and writes nothing.
+	 */
+	sessions: SessionManager;
 	/** The transcript's own state: the bag every read below is taken from. */
-	sessionState: SessionState;
+	session: Session;
 	/** The workspace the session runs in, absolute. */
 	absWorkspaceRoot: string;
 	/** Already settled: `createModel(row, level)` or `placeholderModel()`. */
@@ -48,11 +43,11 @@ export interface SnapshotInput {
 	retryAttempt: number;
 	pendingApprovals: PendingApproval[];
 	/**
-	 * The assistant message a live loop is writing right now.
+	 * The assistant message a live run is writing right now.
 	 *
 	 * A cold reader never has one: the store gains a message when it ends. That asymmetry is the
 	 * point of the field — a window attaching mid-run needs the characters already sent, and only the
-	 * process running the loop has them.
+	 * process running that run has them.
 	 */
 	partial?: Message;
 }
@@ -70,13 +65,15 @@ export interface SnapshotInput {
  * comparable: they differ in exactly those five and in nothing else.
  */
 export function sessionSnapshot(input: SnapshotInput): SessionSnapshot {
-	const header = getHeader(input.sessionState);
-	const messages = buildSessionContext(input.sessionState).messages;
+	const sessions = input.sessions;
+	const state = input.session;
+	const header = sessions.getHeader(state);
+	const messages = sessions.buildSessionContext(state).messages;
 	return {
-		id: input.sessionState.sessionId,
-		absCwd: input.absWorkspaceRoot,
+		id: state.sessionId,
+		workDirAbsPath: input.absWorkspaceRoot,
 		createdAt: header ? new Date(header.timestamp).getTime() : Date.now(),
-		title: getTitle(input.sessionState),
+		title: sessions.getTitle(state),
 		model: input.model.name,
 		thinkingLevel: input.model.thinkingLevel ?? "off",
 		thinkingLevels: thinkingLevelsFor(),
@@ -86,16 +83,16 @@ export function sessionSnapshot(input: SnapshotInput): SessionSnapshot {
 		toolsFollowGlobal: input.toolsFollowGlobal,
 		approvalsFollowGlobal: input.approvalsFollowGlobal,
 		messages,
-		messageEntryIds: getContextMessageEntryIds(input.sessionState),
-		branchPoints: getBranchPoints(input.sessionState),
-		leafId: getLeafId(input.sessionState),
+		messageEntryIds: sessions.getContextMessageEntryIds(state),
+		branchPoints: sessions.getBranchPoints(state),
+		leafId: state.leafId,
 		...(input.partial === undefined ? {} : { partial: input.partial }),
 		...(header?.parentSession === undefined ? {} : { parentSession: header.parentSession }),
 		submitting: input.submitting,
 		queued: input.queued,
 		isRetrying: input.isRetrying,
 		retryAttempt: input.retryAttempt,
-		usage: sessionUsage(input.sessionState, input.model.contextWindow),
+		usage: sessionUsage(sessions, state, input.model.contextWindow),
 		pendingApprovals: input.pendingApprovals,
 	};
 }
@@ -121,13 +118,13 @@ export function entryUsage(entry: SessionEntry): Usage | undefined {
  * `contextTokens`, because it is not a sum at all: it is how full the window is right now, which is
  * a property of the branch the leaf is on and of nothing else.
  */
-export function sessionUsage(sessionState: SessionState, contextWindow: number): UsageTotals {
+export function sessionUsage(sessions: SessionManager, session: Session, contextWindow: number): UsageTotals {
 	let totals: UsageTotals = { ...EMPTY_USAGE, contextWindow };
-	for (const entry of getEntries(sessionState)) {
+	for (const entry of sessions.getEntries(session)) {
 		const usage = entryUsage(entry);
 		if (usage) totals = addUsage(totals, usage, contextWindow);
 	}
-	return { ...totals, contextTokens: branchContextTokens(buildSessionContext(sessionState).messages) };
+	return { ...totals, contextTokens: branchContextTokens(sessions.buildSessionContext(session).messages) };
 }
 
 /** The context footprint the branch's last usage-carrying assistant message reported. */

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import type { AgentTool, AgentToolResult } from "@my-agent/loop";
+import type { AgentTool, AgentToolResult } from "../types.ts";
 import { Type, type Static } from "typebox";
 import { DEFAULT_BASH_SETTINGS, type BashSettings } from "../config.ts";
 import { defaultLauncher, type Workspace } from "../workspace.ts";

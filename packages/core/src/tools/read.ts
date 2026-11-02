@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import type { AgentTool, AgentToolResult } from "@my-agent/loop";
+import type { AgentTool, AgentToolResult } from "../types.ts";
 import { Type, type Static } from "typebox";
 import type { Workspace } from "../workspace.ts";
 import { textResult, throwIfAborted } from "./types.ts";

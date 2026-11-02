@@ -1,4 +1,4 @@
-import type { QueueMode } from "@my-agent/loop";
+import type { QueueMode } from "../types.ts";
 import { PendingMessageQueue } from "./queues.ts";
 
 /**
@@ -13,7 +13,7 @@ export interface ActiveRun {
 	abortController: AbortController;
 	/** Resolved when the run and every awaited listener for it have settled. */
 	promise: Promise<void>;
-	/** Internal: completes {@link ActiveRun.promise}. The loop holds it for its own finish. */
+	/** Internal: completes {@link ActiveRun.promise}. The engine holds it for its own finish. */
 	resolve: () => void;
 }
 
@@ -21,7 +21,7 @@ export interface ActiveRun {
  * A session's live half, and the only cross-stack in-memory state a session has (ADR-0006 §4).
  *
  * Everything here answers one question: *what is in progress and nowhere on disk*. The two queues
- * hold messages accepted mid-run that the loop has not drained yet — a drained message is persisted
+ * hold messages accepted mid-run that the run has not drained yet — a drained message is persisted
  * at its drain point, so an unconsumed one exists only here — and `activeRun` is the run in flight.
  * A process restart drops all of it on purpose: queued messages are lost, the session file is not.
  *
@@ -32,7 +32,7 @@ export interface ActiveRun {
 export interface SessionRuntime {
 	/** Messages steered into the running turn, drained at each turn's end. */
 	steeringQueue: PendingMessageQueue;
-	/** Messages waiting for the run to end, drained where the loop would otherwise stop. */
+	/** Messages waiting for the run to end, drained where the run would otherwise stop. */
 	followUpQueue: PendingMessageQueue;
 	/** The run in flight, or nothing when the session is idle. */
 	activeRun?: ActiveRun;

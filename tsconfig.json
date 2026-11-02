@@ -6,7 +6,6 @@
 		"paths": {
 			"@my-agent/llm": ["./packages/llm/src/index.ts"],
 			"@my-agent/llm/api/*": ["./packages/llm/src/api/*.ts"],
-			"@my-agent/loop": ["./packages/loop/src/index.ts"],
 			"@my-agent/core": ["./packages/core/src/index.ts"],
 			"@my-agent/core/protocol": ["./packages/core/src/protocol.ts"],
 			"@my-agent/core/tools": ["./packages/core/src/tools/index.ts"]
