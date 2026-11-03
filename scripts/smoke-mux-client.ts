@@ -614,7 +614,7 @@ process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那�
 	let series = 0;
 	const reported: string[] = [];
 	let drawn: ViewState = initialState();
-	const navigate = (sessionId: string): { series: number; landed: () => Outcome<SessionSnapshot> } => {
+	const navigate = (sessionId: string): (() => Outcome<SessionSnapshot>) => {
 		const mine = (series += 1);
 		const promise = client.retain(sessionId, "pane", mine);
 		const landed = watch(promise);
@@ -629,7 +629,7 @@ process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那�
 				reported.push(error instanceof Error ? error.message : String(error));
 			},
 		);
-		return { series: mine, landed };
+		return landed;
 	};
 
 	const opensOn = (sessionId: string): number =>
@@ -642,7 +642,7 @@ process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那�
 	check("第一次导航发出 open", opensOn("s1") === 1, JSON.stringify(uplink(sockets.all[0]!)));
 	sockets.latest()?.deliver(baseline("s1"));
 	await flushed();
-	check("第一次导航落地", first.landed().state === "resolved", JSON.stringify(first.landed()));
+	check("第一次导航落地", first().state === "resolved", JSON.stringify(first()));
 
 	// Someone else's reason still holds the stream (a send that outlived a run), and the pane points
 	// back at it. Every retain asks, so the send's own reference added an `open` too — what matters
@@ -653,7 +653,7 @@ process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那�
 	check("已订阅的会话再打开仍发 open", opensOn("s1") === beforeComingBack + 1, JSON.stringify(uplink(sockets.all[0]!)));
 	sockets.latest()?.deliver(baseline("s1", true));
 	await flushed();
-	const reopened = back.landed();
+	const reopened = back();
 	check(
 		"重复 open 的基线 settle 这次导航，而不是被拒绝",
 		reopened.state === "resolved" && reopened.value.submitting === true,
@@ -670,12 +670,12 @@ process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那�
 	await flushed();
 	sockets.latest()?.deliver(baseline("b"));
 	await flushed();
-	check("后点的那次先落地", now.landed().state === "resolved", JSON.stringify(now.landed()));
+	check("后点的那次先落地", now().state === "resolved", JSON.stringify(now()));
 	check("先落地的画面是后点的那条", drawn.snapshot?.id === "b", JSON.stringify(drawn.snapshot?.id));
 
 	sockets.latest()?.deliver(baseline("a"));
 	await flushed();
-	const stale = old.landed();
+	const stale = old();
 	// Still answered: the frame is an answer about `a`, and a promise nobody settles is a timer that
 	// fires three seconds later blaming a server that did exactly what it was asked.
 	check("迟到的基线仍答清它自己那次导航", stale.state === "resolved" && stale.value.id === "a", JSON.stringify(stale));
