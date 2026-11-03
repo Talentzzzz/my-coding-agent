@@ -1,8 +1,8 @@
 # 0002：会话标题改为「可写」——一条 `rename` entry，header 不动
 
-- 状态：**已接受**（[11 号](../../.scratch/window-polish/issues/11-session-rename.md)拍板，[14 号](../../.scratch/window-polish/issues/14-session-rename-server.md)落地）
+- 状态：**已接受**（[11 号](../../.scratch/window-polish/issues/11-session-rename.md)拍板，[14 号](../../.scratch/window-polish/issues/14-session-rename-server.md)落地）；存储机制后被 0009 改写，见下「取代者」
 - 取代或失效：无正式 ADR；被取代的是「标题永远派生、不可写」这一隐含决定（`titleOfBranch` / `deriveTitle` 的独占地位，见下文*被取代的是什么*）
-- 取代者：尚无。这份 ADR 本身若被推翻，**不要**悄悄改它——新开一条 ADR，并说明反转的代价
+- 取代者：[0009](0009-session-two-file-format.md) **部分取代**——`rename` entry 的存储机制（「追加一条 entry、文件序最后一条赢」）被会话 `.json` 快照的 `title` 字段取代，本文的读取重放语义随之失效；「标题可写、派生只作兜底」这个决定本身保留，正文未改、按当时实况读。这份 ADR 本身若再被推翻，**不要**悄悄改它——新开一条 ADR，并说明反转的代价。
 
 ## 为什么会有这份 ADR
 

@@ -39,15 +39,17 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   注册进来的工具）。定义是 `(run) => createReadTool(run.workDirAbsPath)` 这样的工厂，所以目录里没有常驻的工作
   目录：`active(state, run)` 拿着随请求来的 `ToolRunContext` 现建可执行集合，活跃集合本身是从账本
   派生的一次读取，不在任何一处持有。没有插件注册表。
-- **session（会话）** —— 一个只追加的 JSONL 文件（账本、唯一事实），由无状态的 `SessionManager` 拥有——
-  打开时 `fillSession` 重放出纯数据状态，host 在手时它是文件的唯一写者（ADR-0006）；文件随第一条消息
-  出现（`create()` 不写 header，没人说过话的会话不落盘、不进侧边栏），entry 的 kind 有
-  `message`、`tool_config`、`compaction` 等，未知 kind 原样带过。标题可被一条 `rename` entry 覆写
-  （文件序最后一条赢、与分支无关，见 ADR-0002）；没有它时标题仍从分支首条 user 消息派生。
+- **session（会话）** —— 两个文件（ADR-0009）：`.json` 快照（身份 + title/model/thinkingLevel/工具/审批
+  的当前值，变更即整体原子重写）配同 stem 的只追加 JSONL 日志（六种 kind，账本、唯一事实），由
+  无状态的 `SessionManager` 拥有——打开时 `fillSession` 合并两份重放出纯数据状态，host 在手时它是
+  这两个文件唯一的写者（ADR-0006）；文件随第一条消息**同时**出生（`.json` 是 commit marker），没说过话的
+  会话不落盘、不进侧边栏；标题是快照的 `title` 字段，没写过就从分支首条 user 消息派生；配对残缺
+  或版本不对的会话直接删、不迁移。
 - **settings（设置）** —— `SettingsManager` 合并全局与目录两份 `settings.json`，变更写回**已经提供
-  该字段**的那一份。窗口里「设置」这个词**分两级**：**会话级**（工具集合与审批，记在会话自己的
-  `tool_config` entry 里，没单独选过就沿用全局；窗口里没有手动编辑入口，改动它只有「选一个模式」
-  这一条路）与**应用级**（外观、模型清单、默认模型、bash 超时，以及全局默认的工具集与审批）。
+  该字段**的那一份。窗口里「设置」这个词**分两级**：**会话级**（工具集合与审批，记在会话 `.json`
+  快照的 `activeTools` 与 `approval` 字段里，没单独选过就沿用全局；窗口里没有手动编辑入口，改动它
+  只有「选一个模式」这一条路）与**应用级**（外观、模型清单、默认模型、bash 超时，以及全局默认的
+  工具集与审批）。
 - **model（模型）** —— `models.json` 里的一行**就是**一个 `ModelConfig`：一个端点、一个密钥、以及模型
   自己的事实（`id` 是接口认识的名字，`name` 既是身份也是标签）。`packages/llm` 的 `Model` 类把它变成发
   请求用的对象（`apiKey`、`thinkingLevel` 都骑在这个对象上），`stream(context, options)` 走它携带的
@@ -63,8 +65,8 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   不是省略一个字段。四档对每个模型都一样，所以档位是**客户端**的事：输入框随消息带来它，行上没有
   默认档，服务端只负责把收到的档位放上模型。
 - **model selection（模型选择）** —— 输入框的 `{ model, thinkingLevel }`，随消息发送（`ModelSelection`），
-  不是一次配置变更；`recordSelection` 在 `prepareRequest` 顶部才写 entry，没说过话的会话因此不增长
-  entry。
+  不是一次配置变更；`recordSelection` 在 `prepareRequest` 顶部才改写快照的 `model` / `thinkingLevel`
+  字段，没说过话的会话因此不落盘。
 - **transport（传输层）** —— 命令面是 REST：一条常驻 WebSocket mux（`/mux`）承载事件与连接级载荷，
   命令一个字不改地留在 REST。`createRoutes()` 是整张 API 表，`Router` 是唯一解释 URL 的地方，命令
   在被施加时作答——mux 的上行帧**不走 URL**，所以"加一个端点"这条形状管不到 `open` / `cancel`。
@@ -79,22 +81,22 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   运行且不写结果，tool call 在账本里悬空（有 tool_use 无 tool_result，派生态）；答案经
   `POST /api/sessions/{id}/approvals/{toolCallId}` 到达后启动恢复运行，由引擎的恢复机器按
   toolCallId 配对续跑——grant 重跑该调用、deny 合成结果，无答案的孤儿合成错误结果收尾。
-  哪些工具会问是**按会话**的，记录在一条 `tool_config` entry 里。
-- **tool set（工具集合）** —— 活跃工具和审批映射是**一个**决定，一起写在一条 `tool_config` entry 里；
-  它是状态，绝不是对话。
+  哪些工具会问是**按会话**的，记在快照的 `approval` 字段里。
+- **tool set（工具集合）** —— 活跃工具和审批映射是**一个**决定，一起写在会话 `.json` 快照的
+  `activeTools` 与 `approval` 两个字段里；它是状态，绝不是对话。
 - **mode（模式）** —— 全局设置里一个命名的预设：工具集合 + 每工具审批映射，整份存进 settings 的
   `modes` 字段。内置「默认」模式不存储——它就是全局默认（`tools` 缺省全量 + `approval`）的活视图，
   在设置 → 模式里可以像普通模式一样点开、保存；选「默认」就是让会话回到全局默认。会话选模式 = 现有的
-  `PUT /tools` + 审批 `PATCH` 两个命令的组合，落既有 `tool_config` entry——没有新模式 entry kind，
-  也没有会话端点；输入框的座位是从快照与模式表**按值匹配**出来的（ADR-0005）。
-- **fork（派生子会话）** —— `forkFrom()` 写出一个**新**文件，把源的**文件路径**记为 `parentSession`，
-  链和 id 原样复制。
-- **branch（分支）** —— 同一个会话里的另一条路径，而 fork 是另一个文件；`branch(entryId)` 移动 leaf，
+  `PUT /tools` + 审批 `PATCH` 两个命令的组合，写的是快照的既有字段——没有新模式端点，也没有新
+  entry kind；输入框的座位是从快照与模式表**按值匹配**出来的（ADR-0005）。
+- **fork（派生子会话）** —— `forkFrom()` 写出**一对**新文件，把源的 `.jsonl` 路径记为 `parentSession`，
+  链和 id 原样复制，title/model/level/工具/审批五个当前值随拷。
+- **branch（分支）** —— 同一个会话里的另一条路径，而 fork 是另一对文件；`branch(entryId)` 移动 leaf，
   `getBranchPoints()` 报告分支点——**整份日志**的，不是活跃链的，所以树不随 leaf 的位置变形（每个点
   带一个 `anchor`，指窗口该把它的卡片挂在谁下面）。
 - **compaction（压缩）** —— transcript 收缩而不是被替换，最便宜的步骤先走：**trim_tool_call_arg**（截短
   工具调用参数）、**clear_tool_result**（清空可重取工具的结果），再到模型写的摘要；每一步是一条
-  entry，文件永远保留全文。
+  entry，日志永远保留全文。
 - **hook（接缝）** —— 三个进程级接缝：`context`、`before_tool`（审批闸门）、`after_tool`（改写即定稿：
   账本存的就是返回的那个版本；要截断先用 `archiveToolResult()` 归档全文，没约束的超大结果由写边界
   兜底归档到 `.my-agent/tool-results/`）。一个 `Hooks` 服务本进程跑的所有会话，所以每个事件
@@ -113,7 +115,7 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   `OpenSession` 装着 `SessionRuntime`（两条队列与在飞运行）、订阅集合、跨栈 run 槽，以及装配产物
   （`workDirAbsPath`、设置袋、模型选择；ADR-0007 §4）；hub 持有一份，
   首次触碰建条目、host 收摊删条目，进程重启即清空。
-- **workDirAbsPath（当前工作目录）** —— 一个会话的相对路径基准与命令起点，**按会话**，从会话自己 header 里的
+- **workDirAbsPath（当前工作目录）** —— 一个会话的相对路径基准与命令起点，**按会话**，从会话自己快照里的
   `workDir` 取（`OpenSession.workDirAbsPath`，绝对）。它**不是围栏**：绝对路径原样接受，`..` 也能走出去，工具
   可以碰这台机器上的任何文件——目录只决定一个裸路径是什么意思。
 - **directory（目录）** —— 侧边栏的分组：在同一目录里开过的会话归在一组。它只是列表的组织方式，

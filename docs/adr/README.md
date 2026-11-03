@@ -13,13 +13,14 @@
 | 编号 | 决定 | 状态 |
 |---|---|---|
 | [0001](0001-transport-websocket-mux.md) | 传输改为一条常驻的 WebSocket mux | 已接受（2026-10-12），取代 `notes.md` 第一节的若干条 |
-| [0002](0002-session-rename-entry.md) | 会话标题改为「可写」——一条 `rename` entry，header 不动 | 已接受（11 号拍板，14 号落地） |
+| [0002](0002-session-rename-entry.md) | 会话标题改为「可写」——一条 `rename` entry，header 不动 | 已接受（11 号拍板，14 号落地）；存储机制由 [0009](0009-session-two-file-format.md) 部分取代（`title` 进快照字段） |
 | [0003](0003-queued-writes-at-drain.md) | 排队消息在取走点落盘——store 的顺序就是循环回放的顺序 | 已接受（2026-10-15，20 号拍板并落地），取代「运行中接受的 prompt 立刻持久化」 |
 | [0004](0004-shell-sandbox-switches-removed.md) | 外壳不再自带 `no-sandbox` 与 GPU 开关——那是给一台已经变了的机器打的补丁 | 已接受（2026-10-16，03 号落地），取代一段**从未提交过**的工作区补丁 |
 | [0005](0005-modes-are-a-tool-config-choice.md) | 模式是一次工具集与审批集的选择，不是一个新状态层 | 已接受（2026-10-17，03 号拍板并落地） |
 | [0006](0006-stateless-session-architecture.md) | 会话架构改为无状态服务与每请求重放，审批改为结束重启 | 已接受（2026-10-31，已落地，见 `.scratch/stateless-agent/`）；「薄壳门面」条款由 0007 重开 |
 | [0007](0007-services-drop-instance-state.md) | 五个单例服务不持有实例状态——聚合袋拆除，「薄壳门面」条款重开 | 已接受（2026-11-01，已落地——08 号票跑绿 check 与 smoke 全套并总校文档，见 `.scratch/pure-services/`） |
 | [0008](0008-loop-merged-into-agent.md) | 删掉 `Loop` 对象与 `packages/loop`——引擎并入 `agent.ts`，放弃与上游的逐文件对照 | 已接受（2026-11-02，已落地——03 号票合并并删包，见 `.scratch/loop-into-agent/`），取代 0001「`packages/loop` 一行都不改」那一半 |
+| [0009](0009-session-two-file-format.md) | 会话是两个文件——`.json` 快照管「是什么」，`.jsonl` 日志管「说过什么」；打不开的配对直接删 | 已接受（2026-11-03，已落地——session-split 02 号拍板并落地，06 号票入档，见 `.scratch/session-split/`），取代 v≤4 的单文件格式与 0002 的 rename entry 机制 |
 
 ## 门槛
 
