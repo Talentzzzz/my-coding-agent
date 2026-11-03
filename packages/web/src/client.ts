@@ -379,7 +379,13 @@ export class MuxClient {
 	 * The `series` itself is the caller's own counter and this layer never reads it as a verdict:
 	 * every baseline this stream produces is handed to whoever is waiting, and which click gets to
 	 * draw is decided by comparing numbers the window kept.
+	 *
+	 * The two signatures are the same call with the union resolved: a reference with no navigation
+	 * has nothing to complete (`undefined`), and a navigation always has a promise — including when
+	 * the answer is a refusal, which is a rejection rather than a missing value.
 	 */
+	retain(sessionId: string, source: SubscriptionSource): undefined;
+	retain(sessionId: string, source: SubscriptionSource, series: number): Promise<SessionSnapshot>;
 	retain(sessionId: string, source: SubscriptionSource, series?: number): Promise<SessionSnapshot> | undefined {
 		// A closed channel answers rather than queues: a navigation is a question, and "this window is
 		// going away" is the answer it gets. Silently returning nothing would leave the caller awaiting

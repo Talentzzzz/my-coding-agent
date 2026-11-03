@@ -58,6 +58,11 @@ export interface PanelSettingsPatch {
  * That split is why this file has no notion of a connection at all. It can fail while the channel is
  * perfectly healthy, and the window reports those two things separately rather than letting one stand
  * in for the other.
+ *
+ * One read is deliberately missing: `GET /api/sessions/{id}` still exists for scripts and diagnostics,
+ * but a window no longer opens a session with it. It opens one with an `open` frame and draws the
+ * baseline that answers (ADR-0010), so there is one baseline on screen instead of a read's copy racing
+ * the channel's.
  */
 export class SessionApi {
 	/**
@@ -231,20 +236,6 @@ export class SessionApi {
 
 	async updateSettings(patch: PanelSettingsPatch): Promise<{ settings: SettingsSnapshot }> {
 		return this.send("PATCH", "/api/settings", { patch });
-	}
-
-	/**
-	 * Read one session's current state.
-	 *
-	 * This is how a window first looks at a conversation: the transcript is a `GET`, and the channel
-	 * subscription that keeps it current comes on top of it. Existence is decided here too — a read of
-	 * an id that names nothing is a 404 — which is why nothing else has to ask whether a session is
-	 * there, and why a subscription for a session that has been deleted is answered on the frame
-	 * rather than here.
-	 */
-	async read(sessionId: string): Promise<SessionSnapshot> {
-		const body = await this.send<{ session: SessionSnapshot }>("GET", `/api/sessions/${encodeURIComponent(sessionId)}`, undefined);
-		return body.session;
 	}
 
 	private async post(path: string, body: unknown): Promise<void> {

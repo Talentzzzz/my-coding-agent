@@ -19,7 +19,7 @@ import { openMenu, openMenuAt, type MenuItem } from "./render/menu.ts";
 import { StatusBar } from "./render/statusbar.ts";
 import { element, icon } from "./dom.ts";
 import { DEFAULT_THINKING_LEVEL, seedDefaultModel } from "./default-model.ts";
-import type { ConnectionItem, ModelOption, ServerMessage, DirectoryPaging } from "@my-agent/core/protocol";
+import type { ConnectionItem, ModelOption, ServerMessage, SessionSnapshot, DirectoryPaging } from "@my-agent/core/protocol";
 
 /**
  * The one thing the desktop shell adds to the page: the OS's own folder picker. The app itself does
@@ -46,21 +46,34 @@ function describe(error: unknown): string {
 }
 
 /**
- * Whether this frame says the session has nothing running.
+ * Whether this frame is the last word of the run a send is waiting on.
  *
  * Two members carry the fact and each hides it in a different place, which is why this is a helper
  * rather than a pair of conditions at the call site: a run's last word is `submitting: false` on
  * whichever of the two happens to arrive, and the release of a send's reference must not depend on
  * which one that was.
  *
- * `undefined` for every other member, because most of them say nothing about runs at all — and "says
+ * `false` for every other member, because most of them say nothing about runs at all — and "says
  * nothing" must never be read as "settled", since releasing on it would drop the reference while the
  * run was still going.
+ *
+ * `submitting: true` is not an answer either, but it is the *question*: it is what marks this session
+ * as one whose run this window has watched begin, and only a session marked that way can be reported
+ * finished. The mark is why the answer cannot be read straight off the frame — see `runSeen` in
+ * `main`, which is where the set lives and why.
  */
-function settled(message: ServerMessage): boolean {
-	if (message.type === "status") return !message.submitting;
-	if (message.type === "baseline") return !message.session.submitting;
-	return false;
+function runEnded(runSeen: Set<string>, sessionId: string, message: ServerMessage): boolean {
+	const submitting =
+		message.type === "status" ? message.submitting : message.type === "baseline" ? message.session.submitting : undefined;
+	if (submitting === undefined) return false;
+	if (submitting) {
+		runSeen.add(sessionId);
+		return false;
+	}
+	// `delete` answers "was this session marked", which is exactly the question: a session that was
+	// never seen running has not finished anything, and dropping a reference over it would end a send
+	// before its run began.
+	return runSeen.delete(sessionId);
 }
 
 function main(): void {
@@ -70,6 +83,19 @@ function main(): void {
 	let state: ViewState = initialState();
 	/** The session this window is streaming. Commands name it explicitly, so it is never inferred. */
 	let followed: string | undefined;
+	/**
+	 * The sessions whose send has been seen running.
+	 *
+	 * A send's reference lives exactly as long as the run it started, and this set is what makes the
+	 * end of that run recognizable. `retain` asks every time it is called now (ADR-0010), so taking the
+	 * `send` reference re-baselines the session — and that baseline is taken *before* the prompt has
+	 * been accepted, so it says `submitting: false` about a session whose run has not begun. Read as
+	 * the run's end, it would drop the reference in the same breath it was taken, and a reader who then
+	 * clicked another row would cancel the one stream the run's own failure would have been reported
+	 * on. The first `submitting: true` is what makes a later `false` an answer; a run that finished
+	 * while the channel was down still gets one, because the mark outlives the connection.
+	 */
+	const runSeen = new Set<string>();
 	/**
 	 * The model's seat's own choice, before any message has carried it.
 	 *
@@ -114,35 +140,59 @@ function main(): void {
 	 * depends on `state.reachable` alone.
 	 */
 	let channel: ChannelState = "connecting";
+	/**
+	 * Resolved the first time the channel reports itself live, and never again.
+	 *
+	 * The page load is the one navigation that has nothing to click first, so it is the one place that
+	 * has to wait for the connection: a session is opened by an `open` frame now (ADR-0010), and there
+	 * is no frame to send on a channel that has not yet proved itself. Every later navigation is a
+	 * gesture, and a gesture on a channel that is not up is refused with a reason rather than parked
+	 * behind this promise — which is why it is resolved once and never replaced.
+	 */
+	let channelProved: () => void = () => {};
+	const channelLive = new Promise<void>((resolve) => {
+		channelProved = resolve;
+	});
 	/** The sidebar's rows, written by the channel when it is up and by REST when it is not. */
 	const rows = new SessionRows();
 
 	/**
-	 * Which read of a session the window is on, counted up at every click.
+	 * Which navigation of a session the window is on, counted up at every click.
 	 *
-	 * Reading a session is a request per click, and two of them are in flight the moment someone
-	 * clicks a second row before the first has answered. The count is what decides which answer to
-	 * keep: a read that is no longer the newest is dropped whole, because applying it would draw the
-	 * conversation the user has already moved off — and retaining it would subscribe the pane to a
-	 * session the click after it had left. Nothing cancels the request itself; a discarded answer
-	 * costs one response body and no work.
+	 * Opening a session is one `open` frame per click now, and the old double-source race is gone with
+	 * the REST read that used to be the other half of it (ADR-0010) — but the shape of the race is the
+	 * same: two clicks, two baselines, and one pane. The count is still what decides which answer to
+	 * keep: a baseline that is no longer the newest is dropped whole, because drawing it would put the
+	 * conversation the user has already moved off on screen. Nothing cancels the stream itself; the
+	 * click that superseded it has already let that reference go.
 	 */
 	let openSeries = 0;
 	/**
-	 * The reads still in flight, by their series, so the loading notice leaves with the last of them.
+	 * The navigations still waiting for their baseline, by their series, so the loading notice leaves
+	 * with the last of them.
 	 *
-	 * A set rather than a count, and the difference is visible: a superseded read finishes *after*
-	 * the read that replaced it started, and a counter would have that late finish add nothing but
-	 * take the notice down for a read that is still running. Removing a read that is not in the set
-	 * is the no-op it should be — the newest read can always speak for the set it is in.
+	 * A set rather than a count, and the difference is visible: a superseded navigation settles
+	 * *after* the one that replaced it started, and a counter would have that late settlement add
+	 * nothing but take the notice down for a pane that is still waiting. Removing a navigation that is
+	 * not in the set is the no-op it should be — the newest one can always speak for the set it is in.
 	 */
-	const openReads = new Set<number>();
+	const openWaits = new Set<number>();
+	/**
+	 * The session the window last asked to open.
+	 *
+	 * An id of its own rather than a read of {@link followed}, because the case it exists for is a
+	 * navigation that never landed: `followed` still names the conversation on screen, while the click
+	 * that failed to open something else is still holding a pane reference. The next navigation is
+	 * what lets that reference go (see `openSession`) — this is the one variable that remembers what
+	 * it would be, and there is at most one of them because every new gesture consults it.
+	 */
+	let opening: string | undefined;
 
-	/** Put the loading notice up for one read, or take it down once nothing is being read. */
+	/** Put the loading notice up for one navigation, or take it down once nothing is being opened. */
 	function showLoading(series: number, on: boolean): void {
-		if (on) openReads.add(series);
-		else openReads.delete(series);
-		sessionLoading.hidden = openReads.size === 0;
+		if (on) openWaits.add(series);
+		else openWaits.delete(series);
+		sessionLoading.hidden = openWaits.size === 0;
 	}
 
 	/**
@@ -398,14 +448,14 @@ function main(): void {
 	 */
 	const transcriptBody = element("div", "transcript-body");
 	/**
-	 * The notice that a session is being read, which is the window's only answer to "did my click
+	 * The notice that a session is being opened, which is the window's only answer to "did my click
 	 * do anything".
 	 *
-	 * Reading a session is one request and then one draw, and until the draw lands the previous
+	 * Opening a session is one `open` and then one baseline, and until the baseline lands the previous
 	 * transcript is still on screen — the deliberate behaviour of a pane that swaps rather than
-	 * blanks, but indistinguishable from "the click was ignored" when the request is slow. So the
-	 * wait gets a face: it appears over the pane the moment the read starts and leaves when the
-	 * snapshot's first slice has been drawn.
+	 * blanks, but indistinguishable from "the click was ignored" while the server has not answered. So
+	 * the wait gets a face: it appears over the pane the moment the navigation starts and leaves when
+	 * the snapshot's first slice has been drawn.
 	 *
 	 * It sits in the wrapper rather than in the transcript because the transcript scrolls: a notice
 	 * inside the scroll container would scroll away with the conversation it is replacing. That is
@@ -728,6 +778,9 @@ function main(): void {
 		{
 			onChannel: (next) => {
 				channel = next;
+				// The page load's gate: until the channel has proved itself there is no `open` to send,
+				// so the one navigation that has no click behind it waits on this.
+				if (next === "live") channelProved();
 				// Coming back up brings a fresh row table with it, and nothing here triggers a fetch:
 				// the channel's own baseline is the authority from that moment on.
 				//
@@ -741,11 +794,13 @@ function main(): void {
 			},
 			onConnectionItem: (item) => onConnectionItem(item),
 			onStreamMessage: (sessionId, message) => {
-				// A send's reference lasts exactly as long as the run it started, and "settled" is the
+				// A send's reference lasts exactly as long as the run it started, and its end is the
 				// stream saying `submitting: false` — not the request being accepted and not the run
-				// beginning. Under the end-restart semantics (ADR-0006 §5) a run waiting on an approval
-				// *is* over — the run ended at the gate and the answer arrives over REST — so settling
-				// here releases the reference while the question stands; while the window stays on the
+				// beginning. `runEnded` is what tells those three apart, because a `retain` now asks for
+				// a baseline every time (ADR-0010) and the one taken with a prompt describes the session
+				// from *before* the run. Under the end-restart semantics (ADR-0006 §5) a run waiting on
+				// an approval *is* over — the run ended at the gate and the answer arrives over REST — so
+				// this releases the reference while the question stands; while the window stays on the
 				// conversation the pane's own reference keeps watching, and the answer's resumed run is
 				// reported on that.
 				//
@@ -755,7 +810,7 @@ function main(): void {
 				// and the run's last `submitting: false` is exactly the frame that has to be read. Bailing
 				// out on the pane first would drop it, and the stream would then be held for the rest of
 				// the window's life and re-opened by every reconnect, for a run that had already finished.
-				if (settled(message)) mux.release(sessionId, "send");
+				if (runEnded(runSeen, sessionId, message)) releaseSend(sessionId);
 
 				// A frame for a session this window has moved away from. Not an error and not worth
 				// redrawing for: the pane's reference was released, so the server has no reason to send
@@ -772,7 +827,7 @@ function main(): void {
 				// `onStreamError` releases before it draws anything — the reference belongs to the run,
 				// not to the pane, so a window that navigated away mid-run still holds it. Releasing
 				// unconditionally is safe: an id this connection does not hold is a no-op.
-				mux.release(sessionId, "send");
+				releaseSend(sessionId);
 				if (followed !== sessionId) return;
 				apply(reduceEnd(state));
 			},
@@ -788,11 +843,25 @@ function main(): void {
 				//
 				// Only for a session's own stream. The empty id is the envelope-level failure, which is
 				// about the connection and names no session, so there is nothing here to release.
-				if (sessionId !== "") mux.release(sessionId, "send");
+				if (sessionId !== "") releaseSend(sessionId);
 			},
 		},
 		{ url: muxUrl(window.location), socket: browserSocket(muxUrl(window.location)), network: window },
 	);
+
+	/**
+	 * Let go of a session's send reference, and of the mark that made its run recognizable.
+	 *
+	 * The two are one act: the mark exists only to answer for a reference that is still held, so a
+	 * release that left it behind would let the *next* send's baseline look like the end of a run it
+	 * never watched — dropping that reference immediately, which is the bug the mark is here to
+	 * prevent. Four exits lead here and all four mean "no run of ours is in flight": the run's own last
+	 * word, a refused run, an ended stream, and a prompt the server did not accept.
+	 */
+	function releaseSend(sessionId: string): void {
+		runSeen.delete(sessionId);
+		mux.release(sessionId, "send");
+	}
 
 	/**
 	 * One connection-level payload: the row table, a changed row, or the heartbeat.
@@ -1279,13 +1348,14 @@ function main(): void {
 	// ---------------------------------------------------------------- commands
 
 	/**
-	 * Note that the server answered a request, which is what `reachable` means.
+	 * Note that the server answered — a request, or a baseline a navigation was waiting for.
 	 *
-	 * This is the old `connected`, renamed to say what it measures, and its meaning is unchanged: any
-	 * successful request proves the server is there. What is new is that it no longer doubles as "the
-	 * channel is up" — that is {@link channel}'s own state machine, and the two disagree routinely, in
-	 * both directions, without either being wrong. A channel that is down while this is true is normal:
-	 * the window can still send, and the request answers for itself.
+	 * This is the old `connected`, renamed to say what it measures, and its meaning is unchanged: an
+	 * answer from the server proves the server is there, whichever face of the API it came through.
+	 * What is new is that it no longer doubles as "the channel is up" — that is {@link channel}'s own
+	 * state machine, and the two disagree routinely, in both directions, without either being wrong. A
+	 * channel that is down while this is true is normal: the window can still send, and the request
+	 * answers for itself.
 	 */
 	function reachable(): void {
 		if (!state.reachable) apply({ ...state, reachable: true });
@@ -1304,62 +1374,80 @@ function main(): void {
 	 * Point the window at a session, and start watching it.
 	 *
 	 * The one path every session change goes through — a click in the sidebar, a new session, a fork,
-	 * and the page load that lands on `GET /api/sessions/current`. Reading it is still a plain `GET`:
-	 * viewing an idle conversation costs one request and one render, and no agent is assembled for it.
-	 * The subscription on top is what makes the window *live* for that session, and it is exactly what
-	 * makes "send" work — the frames a run produces have somewhere to go, so a run that could not start
-	 * can say so.
+	 * and the page load that lands on the session `GET /api/sessions/current` names. Opening it is one
+	 * act: `retain` sends `open`, and the baseline the server answers with is both the first thing
+	 * drawn and the anchor every later frame appends to (ADR-0010). There is no read beside it, and
+	 * therefore no second version of the same conversation arriving a moment later to replace the
+	 * first.
 	 *
-	 * A run already in flight needs nothing extra: its `submitting` flag is in the snapshot, and the
-	 * frames are already coming.
+	 * What that costs is the *completion*. A request used to answer "arrived / failed / no such
+	 * session" by itself, and a frame does not; a navigation's failure semantics are a local clock over
+	 * the stream instead. `retain` returns the promise for exactly that — the baseline resolves it, an
+	 * `error` or `end` frame rejects it, and so does a local timeout — so the window keeps what the
+	 * read gave it: a failure is reported on the error line with the old conversation still on screen,
+	 * and a channel that is not up is a refusal rather than a wait that would blame a slow server
+	 * nobody asked.
 	 *
 	 * Four things about the order are load-bearing, and each was a way the window used to stall or lose
 	 * its place:
 	 *
-	 * - The pane flips to the conversation before the read, not after it. The read is slow enough to
+	 * - The pane flips to the conversation before the wait, not after it. The wait is slow enough to
 	 *   work in, and a reader who has clicked a row, then gone to the branch page, must not have the
-	 *   pane pulled out from under the tree they are looking at when the answer finally lands. A
+	 *   pane pulled out from under the tree they are looking at when the baseline finally lands. A
 	 *   conversation opens to be read, and that is a decision about the click rather than about the
-	 *   answer — so a read that fails leaves the old conversation on screen instead of a blank pane.
-	 * - The read is announced before it starts. It is the window's slowest, least predictable step —
-	 *   a whole conversation over the wire and through `JSON.parse` — and the previous transcript stays
-	 *   up throughout, which is right for the pane and mute about the click.
+	 *   answer — so a navigation that fails leaves the old conversation on screen instead of a blank
+	 *   pane.
+	 * - The wait is announced before it starts. It is the window's slowest, least predictable step —
+	 *   a whole conversation, built from the session on demand and then through `JSON.parse` — and the
+	 *   previous transcript stays up throughout, which is right for the pane and mute about the click.
 	 * - The snapshot is drawn deferred. It is the whole conversation in one frame, and every message in
 	 *   it is new, so the draw is proportional to the session: drawn whole it is the freeze, drawn in
 	 *   slices it is a first paint plus a handful of frames.
-	 * - The subscription is retained before the list refresh, and the list refresh is not awaited. The
-	 *   window is *live* on this session from the moment its baseline is on screen; the sidebar's rows
-	 *   arrive on the channel anyway when it is up, and when it is not, the listing is a repair of a
-	 *   column that is already drawn — not something the pane's liveness may queue behind.
+	 * - The list refresh comes last and is not awaited. The window is *live* on this session from the
+	 *   moment its baseline is on screen — the reference was taken before the wait, so there is no gap
+	 *   between drawing and listening — and the sidebar's rows arrive on the channel anyway when it is
+	 *   up, and when it is not, the listing is a repair of a column that is already drawn, not
+	 *   something the pane's liveness may queue behind.
 	 */
 	async function openSession(sessionId: string): Promise<void> {
+		// The last navigation's target, when it never became the pane: `followed` still names the
+		// conversation on screen, and this click's reference is nobody's. A failed navigation keeps its
+		// reference at the moment it fails — the baseline may still be in the server's write queue, and
+		// a `cancel` sent then would queue behind it and release nothing (ADR-0010) — so the release
+		// happens here, one gesture later, when the window has chosen to look at something else. A
+		// retry of the same session skips it, which is what makes the retry reuse the stream instead of
+		// asking for it again.
+		if (opening !== undefined && opening !== followed && opening !== sessionId) mux.release(opening, "pane");
 		const series = (openSeries += 1);
+		opening = sessionId;
 		setPane("chat");
 		showLoading(series, true);
-		let snapshot;
+
+		let snapshot: SessionSnapshot;
 		try {
-			snapshot = await api.read(sessionId);
+			snapshot = await mux.retain(sessionId, "pane", series);
 		} catch (error) {
 			showLoading(series, false);
-			// A superseded read's failure is not news about the pane: the user is looking at a session
-			// that read fine, and a banner about the one they left — often the same server, often the
-			// same request raced by a newer click — would name a problem that is not on screen. The
-			// read that owns the pane owns the report too.
+			// A superseded navigation's failure is not news about the pane: the user is looking at a
+			// session that opened fine, and a banner about the one they left — often the same server,
+			// often a stream raced by a newer click — would name a problem that is not on screen. The
+			// navigation that owns the pane owns the report too.
 			if (series !== openSeries) return;
 			unreachable(error);
 			return;
 		}
 		showLoading(series, false);
-		// A newer click moved the window while this read was in flight. Its answer names a session the
-		// pane has already left, so it is dropped whole: no state, no draw, no subscription. The read
-		// that superseded it owns all three.
+		// A newer click moved the window while this baseline was on its way. It names a session the
+		// pane has already left, so it is dropped whole: no state, no draw, no report. The navigation
+		// that superseded it owns all three, and the reference this one took was let go by that click.
 		if (series !== openSeries) return;
 
 		reachable();
-		// The previous pane's reference goes before the new one is taken, so a session is never watched
-		// by two panes at once on one connection — which is not two subscriptions but a second `open`
-		// for a stream the server already has, and the server answers that with an error.
-		if (followed !== undefined) mux.release(followed, "pane");
+		// The previous pane's reference goes now that the new one has landed, so this connection
+		// watches one session for the pane. Never for the session being opened: on a second click on
+		// the same row the reference is the same one, and releasing it would take the stream out from
+		// under the pane that is about to draw.
+		if (followed !== undefined && followed !== snapshot.id) mux.release(followed, "pane");
 		followed = snapshot.id;
 		// A different conversation is a different seat: what was chosen for the one before it says
 		// nothing about this one, which opens on whatever its own branch recorded.
@@ -1368,14 +1456,10 @@ function main(): void {
 		// has started — the one on screen now decides which directory the next session lands in, until
 		// the chip is used again.
 		absPickedDirectory = "";
-		// The same rendering the branch command uses: a snapshot is a snapshot, whether it arrived on
-		// the channel or on a read. The channel's own baseline will replace it within a moment.
+		// The same rendering the branch command uses: a snapshot is a snapshot, whether it arrived as
+		// the answer to a navigation or as a re-baseline mid-stream.
 		apply(reduce(state, { type: "baseline", session: snapshot }), { deferred: true });
 
-		// Taken before the list is asked for, and that is the whole point of the order: the pane is live
-		// on this session now, and the subscription is what a send needs. Asking for the listing first
-		// would leave a window in which the conversation is on screen and nothing is listening to it.
-		mux.retain(snapshot.id, "pane");
 		// The listing is not awaited. It redraws the sidebar and nothing else, it is refused outright
 		// while the channel is live (the channel is the authority on rows then), and the frame it would
 		// have held up is the frame the reader is waiting on. A failure to get it is reported against
@@ -1462,7 +1546,7 @@ function main(): void {
 		} catch (error) {
 			// Nothing is running, so the reference has no run to live for. Dropping it here rather
 			// than waiting for a settle that will never come is the release the old code did not have.
-			mux.release(target, "send");
+			releaseSend(target);
 			composer.setDraft(text);
 			unreachable(error);
 		}
@@ -1761,10 +1845,16 @@ function main(): void {
 		}
 	}
 
-	// Fill the panel and the list from the API, independently of the channel: a window that cannot open
-	// a connection can still show what the server has, and can still say what is missing. So the first
-	// connect happens here rather than at module load — the panel is worth having either way.
+	// Fill the panel and the list from the API, independently of the channel: a window whose channel
+	// never comes up can still show what the server has, and can still say what is missing. So the
+	// first connect happens here rather than at module load — the panel is worth having either way,
+	// and none of the reads below waits on the connection.
 	void (async () => {
+		// The channel goes up first, and this is the reverse of the order it used to go up in. The
+		// landing is a navigation now (ADR-0010): the session the page opens is opened by a frame, so a
+		// connection started after the reads would leave the landing waiting on a handshake nobody had
+		// begun. Starting here lets that handshake run under the reads instead of after them.
+		mux.start();
 		try {
 			const health = await api.health();
 			absCurrentDirectory = health.workDirAbsPath;
@@ -1794,19 +1884,21 @@ function main(): void {
 		}
 		// Which session to land on is the server's decision — `--session` pins one, otherwise a new
 		// one is created and the pane opens on the welcome state — so the page asks rather than
-		// picking from the list. From there this is the same path as a click in the sidebar: a read,
-		// a render, and a subscription.
+		// picking from the list. That question still goes over REST: it is about the server's own
+		// memory of the last active session, and the channel is a push channel with no command face.
+		//
+		// The open that follows waits for the channel to prove itself, because opening a session is an
+		// `open` frame and there is no read to fall back on. That wait is the one beat ADR-0010 books
+		// against the page load, and it is also the honest answer for a window whose server never comes
+		// up: the banner says so, instead of a conversation that would never update.
 		try {
 			const { sessionId } = await api.currentSession();
 			reachable();
+			await channelLive;
 			await openSession(sessionId);
 		} catch (error) {
 			unreachable(error);
 		}
-		// Last, so the subscription the pane just took is recorded before the first attempt goes out
-		// and can be replayed onto it. Starting earlier would race: the channel could come up, replay
-		// nothing, and leave a pane that had asked to be watched unwatched until the next reconnect.
-		mux.start();
 	})();
 
 	composer.focus();
