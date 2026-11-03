@@ -52,10 +52,22 @@ Status: open
 与「Agent 自己再判一次」冲突（详见票内 §3、§6）。下游：07 的构建链由 `assembleSession` 产出、08 的表落在
 `Agent`、12 的两处 `openSessions.delete` 改 `agent.evict`（`clear()` 取消——表随编排层对象消失）、14 删类、15 全量。
 
+**02 号票（2026-11-03 解决，冷路径）**：**(a)** —— `SessionManager.open(id)` fill 一份、**不登记**、调用方拥有；
+`stateOf` 删除不留别名；冷写 = `open(id)` + 既有 setter（`recordMeta` / `persistEntry` 自己落盘，**没有**第三个
+persist 动词）。**fork 不 fill 也不入表**（票面 `➡️` 只说不入表、"代价一次重复 fill"；改成不 fill 之后代价是零），
+`forkFrom` 返回 `{ sessionId, sessionFileAbsPath }` 并去掉 `targetWorkDir`（源文件头里就有）。**补票面两条前提**：
+① **活会话永不走冷路**——`hosts` 里有的 id 读写都走 `Agent` 表里那只袋，否则 `writeMetaFile` 写整只快照会把
+跑动刚记的模型/档位/工具集**静默写回旧值**（今天这条正确性挂在 `stateOf` 缓存上，缓存一删就露，落点是 `rename`，
+它本就"活也可能冷"）；② **并发不是 claim 给的**——`rename` 明确不拿 claim，冷写安全靠"open→改→写盘是一段同步块"
+（与 `settleSessionFiles` 的论点同构），文档不许写"靠 claim"。**10 号票禁止把 `agent.ts` 的 15 处 `stateOf`
+机械替换成 `open`**（编译通过、语义错），那是换源不是改名；15 的全量 smoke 是兜底。
+
 ## Not yet specified
 
-- **迁移顺序的中间态**：34 处 `stateOf`（15 在 agent、5 在 hub、5 在 smoke-sessions、其余零散）如何在「每票都绿」
-  的前提下搬；要不要先给 `Agent` 加一个临时兼容读。
+- **迁移顺序的中间态**：`SessionManager.stateOf` 在树里的调用点是 29 处（agent 15、hub 4、`projection.ts` 1、
+  `scripts/` 9；另有 5 处 `SettingsManager.stateOf` 与本迁移无关，别混进清单）如何在「每票都绿」的前提下搬；
+  要不要先给 `Agent` 加一个临时兼容读。02 号票已定：agent 那 15 处是**换源**（`agentStateOf(id).session`），
+  不是把 `stateOf` 改名成 `open`。
 - **常驻内存的代价**：`jsonlEntries` 从「每请求重放」变成「常驻」之后，长会话的内存占用；`evict` 之外要不要再加
   空闲超时或按 token 上限淘汰。
 - **`dropQueued` 与 `evict` 的交界**：驱逐时清队列是否等价于一次 drop；`suspended` 会话的队列要不要保（04 号票
