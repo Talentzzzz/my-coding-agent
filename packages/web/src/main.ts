@@ -1039,7 +1039,7 @@ function main(): void {
 	/**
 	 * Which mode the session on screen is on, matched by value (ADR-0005).
 	 *
-	 * The session records what it runs on as one `tool_config` snapshot, not as a mode reference, so
+	 * The session records what it runs on in its `.json` snapshot, not as a mode reference, so
 	 * the match is the snapshot's tools and approvals against each preset's — the built-in default
 	 * first, since it *is* the global defaults a following-global session holds. No session on screen
 	 * answers with the default, because that is what the next one opens on; a live session that
@@ -1078,7 +1078,7 @@ function main(): void {
 	 * Put the session this window is on onto a mode: its tool set and its approval map, whole.
 	 *
 	 * The two halves are the session's own two commands — `PUT /tools` and the approval `PATCH` —
-	 * and they land as one `tool_config` snapshot in the transcript. There is deliberately no mode
+	 * and they land as one recorded choice in the session's `.json` snapshot. There is deliberately no mode
 	 * endpoint: a preset *is* those two values, and a second spelling of the same command would only
 	 * have to be kept in step with them.
 	 */
@@ -1102,7 +1102,7 @@ function main(): void {
 			return;
 		}
 		// Narrowed to the tools this build knows, so a preset naming one an upgrade dropped applies the
-		// rest instead of being refused whole — the same narrowing a replayed tool_config gets.
+		// rest instead of being refused whole — the same narrowing the session's recorded set gets.
 		const tools = preset.tools.filter((candidate) => snapshot.allTools.includes(candidate));
 		void api.setTools(followed, tools).catch(report);
 		void api.setConfig(followed, { approval: { ...preset.approval } }).catch(report);

@@ -29,6 +29,7 @@ Status: working
 - [SessionManager 两文件重写](issues/02-session-manager.md): `SessionMeta` v5 schema + temp/rename 原子重写；JSON 诞生 = 首条消息 gate 时两文件同写（`.json` 是 commit marker）；版本判定落 `.json`；v≤4/配对残缺在扫描与 fillSession 两处即删；类型缩到六种、四个迁值方法 setTitle/setModel/setThinkingLevel/setToolConfig；dangling 与审批恢复确认成立无新票；branch 不再切换选择（applyBranchSelection/emitBranchToolConfig 删）；票 03 的时机/失败/gate 三问已拍板
 - [写侧改造：agent 与 JSON 快照写点](issues/03-writers.md): 核对收账——recordSelection/rename/tool_config 三类写点全走 recordMeta 快照重写，append 路径六种 kind 原样；三问按票 02 拍板确认（即时写 / 失败抛调用方 / gate 不变）；零代码改动，只清了 server 侧五处「rename append 一条 entry」的滞留注释
 - [server 连带：listing、fork、删除与 protocol](issues/04-server-fork-listing.md): 核对收账——listing 拆两半（settleSessionFiles 配对 + buildSessionInfo 身份从 meta、统计从 JSONL）、fork 复制两文件且 parentSession 指源 `.jsonl`、remove 删两文件、tools/approvals 路由走 setToolConfig 快照且 config_changed 照发；全部已在票 02/03 落地，本票零代码改动，`npm run check` + 相关 smoke（含起服 smoke-api）全绿
+- [web 连带清点与修复](issues/05-web.md): 核对收账——四文件（transcript/sidebar/state/main）逐一核对确认 web 渲染与 state 分支零代码改动（与票 01 第 8 条校准一致），只改四处说旧话的注释（main.ts 三处 + settings.ts 一处，`tool_config` entry 措辞改为 `.json` snapshot/recorded choice）；`npm run check` + 窗口面 smoke（transcript/sidebar/frame/replay）+ 会话系 smoke + 起服 smoke-api 全绿，窗口行为无回归
 
 ## Not yet specified
 

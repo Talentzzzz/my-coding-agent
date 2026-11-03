@@ -105,7 +105,7 @@ function formComplete(form: ModelDraft): boolean {
  * bash timeouts, the global default tool set and approval map (which are the built-in default mode),
  * and the user's named modes. The tools and approvals a session itself runs on are not here: they
  * follow the conversation and are chosen in the composer's mode seat, which applies a preset through
- * the session's own `tool_config`, with no second panel to edit them by hand. What is left here is
+ * the session's own `.json` snapshot, with no second panel to edit them by hand. What is left here is
  * visited rarely and changed deliberately, which is what a panel behind one button is for and a row of
  * always-visible controls is not.
  *
