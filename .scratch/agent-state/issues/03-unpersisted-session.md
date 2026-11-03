@@ -77,6 +77,10 @@ ADR-0011 要按这个新判据重写 §4 那一句。按这条，fork 有文件�
 再判它拿得到的那几条（在飞运行、`suspended`、`fileCreated`），hub 判它自己那几条（observers、claims、`hosts`）。
 注意这两条闸的朝向是相反的，别写成一条：**有 host 不许删**、**没文件不许删**，剩下那条窄缝才是可清的。
 
+**「最后一个 observer 离开」时 host 还在怎么办**——这是这条判据唯一会答「不」的入口，得说清它不落进死胡同：落点
+不是「等下一次」，而是走现行的 `reap`（`hub.ts:747-808`），它本来就以「删 host → 关会话」结束，`drop` 就挂在那条
+尾巴上；没有 host 的那一半才直接 `evict`。两边都以同一句 `drop` 收尾，差别只是前面要不要先 settle 一次。
+
 三处跟着改的话：
 
 - `entryOf` 的抛词（`agent.ts:1219-1223`）「`Session is not running: ${id}`」在 03 之后是假话（表里的会话可以没在跑）。
@@ -280,7 +284,7 @@ async rename(sessionId: string, title: string): Promise<void> {
 | 07 | `sessionFileAbsPath?` 的可选性只服务 `inMemorySession`；`sessionSetting.model` 在创建时即有值、`modelId` 可选 |
 | 08 | `entryOf` 抛词改 `Session is not open`；`assembleSession` 在创建时就被调用；`adopt` 用 01 的先到先得语义，别抄 `SessionManager.adopt` 的三行 |
 | 10 | 删 `adopt`（唯一调用点 `session-factory.ts:266`）＋ `:1373-1375`、`:1839-1840` 两段文档 |
-| 12 | `has` / `snapshotOf` / `open` / `remove` / `rename` 五段见 §3、§4；`hosts ⊆ 表`（不是同生同灭）＋它的执行面（删表只在 host 已删之后，§2）；`observe` 仍以 `hosts` 为准；新增 `agent.has(id)` 与 `agent.drop(id)` 两个公开面；`pending`／`pendingManager`／`createUnpersisted` 里那句 `pending.set` 整条删。另外 hub 里 4 处 `stateOf`（`:402` / `:558` / `:587` / `:692`）的换源按 10 / 02 §① 走，本票改的是它们的**取袋方式**（表里有就用袋），不是把它们机械换成 `open` |
+| 12 | `has` / `snapshotOf` / `open` / `remove` / `rename` 五段见 §3、§4；`hosts ⊆ 表`（不是同生同灭）＋它的执行面（删表只在 host 已删之后，§2；最后一个 observer 离开时 host 还在，就走 `reap` 的尾巴而不是直接 `evict`）；`observe` 仍以 `hosts` 为准；新增 `agent.has(id)` 与 `agent.drop(id)` 两个公开面；`pending`／`pendingManager`／`createUnpersisted` 里那句 `pending.set` 整条删。另外 hub 里 4 处 `stateOf`（`:402` / `:558` / `:587` / `:692`）的换源按 10 / 02 §① 走，本票改的是它们的**取袋方式**（表里有就用袋），不是把它们机械换成 `open` |
 | 14 | `docs/architecture.md:233`、`:21`、`AGENTS.md` 的 `OpenSessions`、`entryOf` 抛词、`snapshotOf`「在跑 / 不在跑」的二分 |
 | 15 | 全量 smoke；建议补一节：`newSession()` 之后 `has` 为真、`snapshotOf` 读得出、`hosts` 里没有它、盘上无文件；`remove` 之后这几样一起翻假；`mount-session` 那只内存设置袋在「释放后重开」时不再被掉包（§4 末） |
 
