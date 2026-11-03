@@ -1,7 +1,9 @@
 // Client channel smoke: drives the production `MuxClient` through a fake socket and a fake clock, and
-// asserts the four behaviours the window depends on — that a connection is only "live" once a frame
-// proves it, that silence kills it, that a reconnect re-opens what the window still wants, and that a
-// stream the server ended is never re-opened.
+// asserts the behaviours the window depends on — that a connection is only "live" once a frame proves
+// it, that silence kills it, that a reconnect re-opens what the window still wants, that a stream the
+// server ended is never re-opened, and that opening a session is a `retain` whose baseline completes
+// it: every `open` is answered, so a repeated one is a fresh snapshot rather than a refusal, and a
+// baseline that arrives after the pane has moved on is handed over to be dropped whole.
 // Nothing here touches the network or the DOM, so no server and no provider key are needed.
 // Run with: node scripts/smoke-mux-client.ts
 import { MuxClient, type ChannelState, type MuxHandlers, type MuxOptions, type MuxSocket, type MuxSocketFactory, type MuxTimers } from "../packages/web/src/client.ts";
@@ -593,6 +595,95 @@ async function flushed(): Promise<void> {
 	client.close();
 	await flushed();
 	check("关掉通道让在等的导航失败", opened().state === "rejected", JSON.stringify(opened()));
+}
+
+// ------------------------------------------- 10. two baselines, one drawer
+
+process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那份不画\n");
+
+{
+	const { client, sockets, saw } = harness();
+	client.start();
+	sockets.latest()?.deliver(heartbeat());
+
+	// The window's half of the rule, restated here because nothing in this suite drives the window
+	// itself: a click is a number, and only the newest number may draw (main.ts keeps it as
+	// `openSeries`). The client has no opinion about it — ADR-0010 决定 3 puts the verdict in the
+	// caller — so what this block checks *about this layer* is that every baseline is handed over and
+	// none is turned into an error.
+	let series = 0;
+	const reported: string[] = [];
+	let drawn: ViewState = initialState();
+	const navigate = (sessionId: string): { series: number; landed: () => Outcome<SessionSnapshot> } => {
+		const mine = (series += 1);
+		const promise = client.retain(sessionId, "pane", mine);
+		const landed = watch(promise);
+		void promise.then(
+			(snapshot) => {
+				// A snapshot for a click the pane has already left is dropped whole: no draw, no report.
+				if (mine !== series) return;
+				drawn = reduce(drawn, { type: "baseline", session: snapshot });
+			},
+			(error: unknown) => {
+				if (mine !== series) return;
+				reported.push(error instanceof Error ? error.message : String(error));
+			},
+		);
+		return { series: mine, landed };
+	};
+
+	const opensOn = (sessionId: string): number =>
+		uplink(sockets.all[0]!).filter((f) => f.type === "open" && f.sessionId === sessionId).length;
+
+	// A second `open` on a session somebody else already holds is not refused — it is answered with a
+	// fresh baseline (ADR-0010 决定 1). That is the whole point of the idempotent primitive: the pane
+	// coming back to a running session is shown the half sentence instead of silence.
+	const first = navigate("s1");
+	check("第一次导航发出 open", opensOn("s1") === 1, JSON.stringify(uplink(sockets.all[0]!)));
+	sockets.latest()?.deliver(baseline("s1"));
+	await flushed();
+	check("第一次导航落地", first.landed().state === "resolved", JSON.stringify(first.landed()));
+
+	// Someone else's reason still holds the stream (a send that outlived a run), and the pane points
+	// back at it. Every retain asks, so the send's own reference added an `open` too — what matters
+	// here is that navigating back asks *again* rather than trusting the entry it finds.
+	client.retain("s1", "send");
+	const beforeComingBack = opensOn("s1");
+	const back = navigate("s1");
+	check("已订阅的会话再打开仍发 open", opensOn("s1") === beforeComingBack + 1, JSON.stringify(uplink(sockets.all[0]!)));
+	sockets.latest()?.deliver(baseline("s1", true));
+	await flushed();
+	const reopened = back.landed();
+	check(
+		"重复 open 的基线 settle 这次导航，而不是被拒绝",
+		reopened.state === "resolved" && reopened.value.submitting === true,
+		JSON.stringify(reopened),
+	);
+	check("这份基线照常交给窗口（它是一次重画，不是一条错误）", saw.messages.filter((m) => m === "s1/baseline").length === 2, JSON.stringify(saw.messages));
+	check("也没有谁把重复 open 说成失败", saw.errors.length === 0 && reported.length === 0, JSON.stringify([saw.errors, reported]));
+	check("画的是刚到的这份（运行中的会话带 submitting）", drawn.snapshot?.id === "s1" && drawn.snapshot.submitting === true, JSON.stringify(drawn.snapshot?.submitting));
+
+	// Two rows clicked in a row: each click asks for its own session, and the two baselines can come
+	// back in the other order — the late one belongs to a click the pane has already left.
+	const old = navigate("a");
+	const now = navigate("b");
+	await flushed();
+	sockets.latest()?.deliver(baseline("b"));
+	await flushed();
+	check("后点的那次先落地", now.landed().state === "resolved", JSON.stringify(now.landed()));
+	check("先落地的画面是后点的那条", drawn.snapshot?.id === "b", JSON.stringify(drawn.snapshot?.id));
+
+	sockets.latest()?.deliver(baseline("a"));
+	await flushed();
+	const stale = old.landed();
+	// Still answered: the frame is an answer about `a`, and a promise nobody settles is a timer that
+	// fires three seconds later blaming a server that did exactly what it was asked.
+	check("迟到的基线仍答清它自己那次导航", stale.state === "resolved" && stale.value.id === "a", JSON.stringify(stale));
+	check("它被交到窗口手里（这层不吞帧）", saw.messages.includes("a/baseline"), JSON.stringify(saw.messages));
+	check("迟到的那份不画：画面仍是最后一次点击", drawn.snapshot?.id === "b", JSON.stringify(drawn.snapshot?.id));
+	check("也不报错（被作废的那次没有变成错误条）", saw.errors.length === 0 && reported.length === 0, JSON.stringify([saw.errors, reported]));
+	check("两条订阅都还在，谁也没有被悄悄撤掉", client.isRetained("a") && client.isRetained("b"));
+	client.close();
 }
 
 process.stdout.write(failures === 0 ? "\nmux client ok\n" : `\n${failures} 项失败\n`);

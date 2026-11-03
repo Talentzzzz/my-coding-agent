@@ -258,7 +258,7 @@ type AgentSessionEvent =
 
 `SessionHub`（`server/src/hub.ts`）持有五个无属性服务与一个活登记处：编排层是本进程唯一的一份，方法一律以会话 id 调用；模型、设置、账本、工具目录各自是它们自己的服务（四个域加编排层，就是 ADR-0007 的五个）；活登记处 `OpenSessions` 按 id 装着两条队列、在飞运行、订阅集合、跨栈 run 槽与那次打开的装配，进程重启即从零重建（[ADR-0006](adr/0006-stateless-session-architecture.md) §4、[ADR-0007](adr/0007-services-drop-instance-state.md) §4）。除此之外 hub 只有一张按 id 的 claim 表——那是传输层的事实，所以计数器住在传输层。**订阅不拥有会话**：一条逻辑流是 mux 订阅表里的一行（连接 × 会话），它不拿 claim、也不让会话保持打开。持有一个 claim 的是**会改变会话的请求**，在它自己的长度内一个；审批的恢复运行也走同一条 `claim()`。所以一个会话可以在没人在看的情况下运行，而一个开着却闲置的窗口也不会替谁留住一个条目。
 
-读 transcript 不算在内。`SessionController.read()` 既不拿 claim 也不打开会话：`SessionHub.snapshotOf()` 在本进程运行该会话时从活对象回答，否则从它的两个文件回答，走的是装配路径用的同一个 `readSessionSnapshot()`——所以一次读取的代价是一次文件读取而不是一个会话，它既不能保活一个会话、也不能驱逐一个、更不会在 hub 里留下痕迹。订阅也一样：`SessionHub.observe(sessionId, observer)` 只往观察表里挂一个观察者，观察者既不保活它看的会话，也不花钱跑它。
+读 transcript 不算在内。`SessionController.read()` 既不拿 claim 也不打开会话：`SessionHub.snapshotOf()` 在本进程运行该会话时从活对象回答，否则从它的两个文件回答，走的是装配路径用的同一个 `readSessionSnapshot()`——所以一次读取的代价是一次文件读取而不是一个会话，它既不能保活一个会话、也不能驱逐一个、更不会在 hub 里留下痕迹。**窗口打开一个会话也不走这条路**：打开、切换、页面加载都是一次订阅，`open` 帧以一份基线作答（[ADR-0010](adr/0010-open-session-over-mux.md)），所以前端导航路径上一次读取都不发生——`read()` 是命令面的读一半，脚本与诊断用它。订阅也一样：`SessionHub.observe(sessionId, observer)` 只往观察表里挂一个观察者，观察者既不保活它看的会话，也不花钱跑它。
 
 ```
 一条常驻连接 ─┐ 订阅表（连接 × 会话，不拿 claim）
@@ -363,7 +363,9 @@ SessionManager.forkFrom(sourcePathInput, targetCwdInput, entryId, sessionDirInpu
 
 `ModelOption` 是用户导入的一行、**去掉密钥**——`hasApiKey` 说明是否存了一个，而密钥从不离开服务器。`PUT /api/models` 替换整份清单，因为设置面板编辑的是一份清单，而一份被半途施加的清单是没人能推理的状态；一行不带 `apiKey` 送来时，保留存在它名下的那个，这正是让面板能够往返一行"它从未被展示过密钥"的数据的原因。名字是一行的**身份**——transcript 记录它、配置补丁命名它——所以重复会被 `400` 拒绝（`The name "X" is already in use`），而不是在用户背后把它改成唯一的：一个加了后缀的名字会改变**每一条**命名它的 transcript 的含义，而显示这次冲突的那个面板才是修复该发生的地方。变更能抵达活会话而不必重新打开它们，因为会话持有一个 `ModelSource`、每次请求都通过它读存储而不是复制一行、并每次都从活行重新推导自己的模型——所以端点、窗口和 wire id 都随密钥一起移动。
 
-`GET /api/directories` 扫描 agent home 的会话目录，所以侧边栏可以按目录分组，尽管本进程是**恰好**在其中一个之上启动的；从另一个分组打开会话要使用该会话自己快照里的 `workDir`。`PATCH /api/settings` 刻意比 `PATCH /api/sessions/{id}` 更窄：主题、字号、审批集合、全局默认工具集在任何会话存在之前就要读，所以它们不能住在某一个会话上。`GET /api/sessions/current` 是落地端点——`--session` 钉住一个，否则新建一个（开窗落在欢迎态，历史归侧边栏）——因为一个去猜的客户端会静默显示与服务器正在服务的**不同**的对话。
+`GET /api/directories` 扫描 agent home 的会话目录，所以侧边栏可以按目录分组，尽管本进程是**恰好**在其中一个之上启动的；从另一个分组打开会话要使用该会话自己快照里的 `workDir`。`PATCH /api/settings` 刻意比 `PATCH /api/sessions/{id}` 更窄：主题、字号、审批集合、全局默认工具集在任何会话存在之前就要读，所以它们不能住在某一个会话上。
+
+表里有两行与"打开一个会话"有关，而它们都不是窗口的路。`GET /api/sessions/{id}` 是一次**读取**——脚本、诊断、以及任何不是窗口的客户端用得上它，窗口从不发它（打开会话就是一次 `open` 帧，基线是那个问题的全部答案，[ADR-0010](adr/0010-open-session-over-mux.md)）。`GET /api/sessions/current` 回答的是"这台机器上一次在看哪个会话"——`--session` 钉住一个，否则新建一个（开窗落在欢迎态，历史归侧边栏）——窗口拿它只当页面加载的起点：**开哪一个**，然后仍然用一帧 `open` 把它打开，所以它自己什么都不画；一个会照着它去猜的客户端才会静默显示与服务器正在服务的**不同**的对话。
 
 路径参数在控制器看到它们之前按段做百分号解码，所以一个不透明的 id——工具调用 id 可能含冒号——能安然走完这段路而不会被二次编码。失败是 JSON——`{ error }`——配上说明发生了什么的 status：`404` 表示 id 不是会话，`400` 表示请求体不是 JSON 或字段类型不对，`409` 表示会话拒绝的一次变更（未知工具名、没有任何行提供的模型），或一个不是待回答审批的 `toolCallId`——会话存在、请求合法，但此刻收不下这个答案，`405` 带 `Allow` 表示该路径在另一个动词下存在。审批端点只在答案真的被收下时才记入答案表（只读检查在 `onApproval` 之前），所以一次被 409 拒掉的请求不会污染任何一条订阅还在展示的审批的差值。
 
@@ -383,7 +385,7 @@ type ServerFrame =
 
 ```ts
 type ServerMessage =
-  | { type: "baseline"; session: SessionSnapshot }   // 这条逻辑流的第一帧，且只有它一份
+  | { type: "baseline"; session: SessionSnapshot }   // 这条逻辑流的起点：每次 open 一份，重复 open 再送一份
   | { type: "event"; event: AgentSessionEvent }
   | { type: "entry"; entryId: string; messageTimestamp?: number }   // entry_appended 背后的那条消息，供 "fork from here" 使用
   | { type: "approval_request"; request: PendingApproval }
@@ -392,7 +394,7 @@ type ServerMessage =
   | { type: "error"; message: string };
 ```
 
-`baseline` 是一次订阅的**全部起点**：`open` 之后的第一帧就是它，而订阅与基线是同一个原子动作——建条目、取快照、挂监听、发基线，中间没有 `await` 点，所以"基线与增量之间没有缺口"是构造出来的、不是论证出来的。重开一条逻辑流拿到的是一份**新的** `baseline`（替换，不是追加），恢复因此收敛到"现在长什么样"，而不是"我错过了哪几帧"。
+`baseline` 是一次订阅的**全部起点**：`open` 之后的第一帧就是它，而订阅与基线是同一个原子动作——建条目、取快照、挂监听、发基线，中间没有 `await` 点，所以"基线与增量之间没有缺口"是构造出来的、不是论证出来的。重开一条逻辑流拿到的是一份**新的** `baseline`（替换，不是追加），恢复因此收敛到"现在长什么样"，而不是"我错过了哪几帧"。**`open` 是幂等的**（[ADR-0010](adr/0010-open-session-over-mux.md) 决定 1）：重复订阅不被拒绝，而是再送一份基线，所以"send 还持有引用时切走又切回"这种不产生新订阅的落点，拿到的也是当下的快照——正在跑的会话那份带 `partial`。因此一条逻辑流上的 `baseline` **不止一份**（分支移动的 `pushBaseline` 同样如此），"第一帧"是事实，"只有一份"不是；窗口按基线到达时自己的 series 决定画不画，迟到的整帧丢弃。
 
 连接级的那条道（`ConnectionFrame`）也是 `item` / `error` 两种形状，但 `item` 装的是 `ConnectionItem`——**不属于任何会话**的载荷：
 
@@ -413,7 +415,7 @@ type ClientFrame =
   | { type: "cancel"; sessionId: string };
 ```
 
-`open` 订阅一条会话、`cancel` 取消订阅（关一条逻辑流，同 DSH 的 `cancel`；**中止运行只叫 `abort`、只在 REST 上**，两个词不混用）。两条都是**连接上的状态**，不是会话上的：同一会话在一条连接上至多一条逻辑流，所以会话 id 就是全部地址，没有单独的订阅句柄要同步。抵达一条未知 `type` 的上行帧会被丢弃并记一行日志，而不是关掉连接。
+`open` 订阅一条会话——**已订阅也照发**，答案是一份新基线而不是沉默——`cancel` 取消订阅（关一条逻辑流，同 DSH 的 `cancel`；**中止运行只叫 `abort`、只在 REST 上**，两个词不混用）。两条都是**连接上的状态**，不是会话上的：同一会话在一条连接上至多一条逻辑流，所以会话 id 就是全部地址，没有单独的订阅句柄要同步。抵达一条未知 `type` 的上行帧会被丢弃并记一行日志，而不是关掉连接。
 
 一个会话 id 可以被多于一条连接订阅，并被任意多个请求读取。hub 为它运行**一个** agent 循环，并把它的事件转发给每一条订阅它的逻辑流，所以 `event` 和 `status` 是**按订阅者**的，尽管它们背后的 transcript 是共享的。这条流是单向的：命令从不是它上面的一帧。扩展任一侧的规则：如果浏览器需要知道某件事，它进一条消息或一个端点；如果只有服务器端需要，它就留在 core。`snapshot.allTools` 是 header 据以给每个工具画一个开关的东西，`snapshot.activeTools` 是那些开关显示为开的东西，而 `PUT /api/sessions/{id}/tools` 带 `{ names }` 替换活跃集合。
 

@@ -21,6 +21,7 @@
 | [0007](0007-services-drop-instance-state.md) | 五个单例服务不持有实例状态——聚合袋拆除，「薄壳门面」条款重开 | 已接受（2026-11-01，已落地——08 号票跑绿 check 与 smoke 全套并总校文档，见 `.scratch/pure-services/`） |
 | [0008](0008-loop-merged-into-agent.md) | 删掉 `Loop` 对象与 `packages/loop`——引擎并入 `agent.ts`，放弃与上游的逐文件对照 | 已接受（2026-11-02，已落地——03 号票合并并删包，见 `.scratch/loop-into-agent/`），取代 0001「`packages/loop` 一行都不改」那一半 |
 | [0009](0009-session-two-file-format.md) | 会话是两个文件——`.json` 快照管「是什么」，`.jsonl` 日志管「说过什么」；打不开的配对直接删 | 已接受（2026-11-03，已落地——session-split 02 号拍板并落地，06 号票入档，见 `.scratch/session-split/`），取代 v≤4 的单文件格式与 0002 的 rename entry 机制 |
+| [0010](0010-open-session-over-mux.md) | 会话的打开与切换只走 mux 基线——`retain` 即导航，REST 读从前端导航路径退场 | 已接受（2026-11-03 用户拍板，已落地——01–04 号票跑绿 check、build:web 与 smoke 全套，见 `.scratch/mux-only-open/`） |
 
 ## 门槛
 
