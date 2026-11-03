@@ -85,6 +85,12 @@ persist 动词）。**fork 不 fill 也不入表**（票面 `➡️` 只说不�
 「少了一个看的人」，删除权在 `Agent.evict`（触发器归 mux，判据归 Agent；13 的触发器设计由此定形）。宽限与 reap
 的 deny 按票面删，代价「审批可悬空到进程重启」写进 ADR。
 
+**05 号票（2026-11-04 解决，设置写入扇出）**：**(a) 只改自己**——设置袋是打开时读到的一份快照，一次写入只
+作用于发起命令那个会话，同目录其余会话下次 open 时 refill；正在跑的会话读旧值与 Live 规则同调，写盘与客户端
+感知都不变（扇出是缓存的副产品，不是语义）。(b) 否决：目录 → 会话反查表正是这次要删的那类表。会话级
+（`sessionSetting` 字段）与目录级（`modes` / `retry` / 默认 `approval`）同读一个袋的边界不变。落点：11 在
+`applySettings` 注释里写那句话；architecture.md 那句归 14（文档不跑在代码前面）；ADR 一句归 06。
+
 ## Not yet specified
 
 - **迁移顺序的中间态**：`SessionManager.stateOf` 在树里的调用点是 29 处（agent 15、hub 4、`projection.ts` 1、
