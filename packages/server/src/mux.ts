@@ -271,24 +271,24 @@ export class MuxConnection {
 	}
 
 	/**
-	 * Start watching one session, or say why not.
+	 * Start watching one session, or bring a watch this connection already holds up to date.
 	 *
-	 * Two ways this can fail and they are not the same. A session that does not exist is a client's
-	 * mistake. A session this connection is *already* watching is not: silently accepting the second
-	 * `open` would leave a client believing it had two streams where the server has one, and that
-	 * mismatch would surface much later as content arriving twice.
+	 * `open` means "this session's state now, then everything after it" and it is idempotent
+	 * (ADR-0010 decision 1). A session this connection is *already* watching is therefore not a
+	 * mistake: the answer is one more baseline on the stream that already exists, and the
+	 * subscription underneath is left exactly as it is — same feeds, same approvals, same stream.
+	 * That is what makes "the pane went away while something else still held the session, and came
+	 * back" work: the reference count meant no `cancel` was sent, so a re-sent baseline is the only
+	 * thing that could answer the trip back.
 	 *
-	 * Both are answered on the stream they concern — an `error` frame carrying the attribution, then an
-	 * `end` so the failed attempt does not go on looking like a stream that is merely quiet — and the
-	 * connection is untouched either way.
+	 * A session that does not exist is still a client's mistake, answered on the stream it concerns —
+	 * an `error` frame carrying the attribution, then an `end` so the failed attempt does not go on
+	 * looking like a stream that is merely quiet — and the connection is untouched either way.
 	 */
 	private open(sessionId: string): void {
-		if (this.subscriptions.has(sessionId)) {
-			// The existing subscription is left alone. The duplicate request is refused, but the stream
-			// that is already open keeps running — a client that sent this by mistake still has the one
-			// conversation it asked for.
-			this.send({ streamId: sessionId, error: { message: "这条连接已经订阅了这个会话。" } });
-			this.endStream(sessionId, false);
+		const watching = this.subscriptions.get(sessionId);
+		if (watching !== undefined) {
+			this.pushBaseline(sessionId, watching);
 			return;
 		}
 		if (!this.hub.has(sessionId)) {
@@ -350,6 +350,10 @@ export class MuxConnection {
 
 	/**
 	 * The baseline for a session this process is not running.
+	 *
+	 * The first one on a cold subscription, and every later one {@link pushBaseline} owes an idle
+	 * watch — the read is the same either way, and re-arming the backlog is what makes the second
+	 * one land behind the state it describes rather than on top of frames that already ran past it.
 	 *
 	 * Reading a transcript is not running a session, so this never assembles anything and never claims
 	 * anything. It is the answer to "watch an idle conversation", which is the case the old
@@ -457,15 +461,25 @@ export class MuxConnection {
 	/**
 	 * Put the baseline out, then everything that piled up behind it.
 	 *
-	 * Called once per subscription, by whichever of the two reads finishes first. Flushed in the order
-	 * it was produced, so a client cannot see the transcript jump backwards.
+	 * Called once per baseline — the first one by whichever of the two reads finishes first, and once
+	 * more for each {@link pushBaseline} that owed a fresh one — and always flushed in the order it
+	 * was produced, so a client cannot see the transcript jump backwards.
 	 */
 	private writeBaseline(sessionId: string, subscription: Subscription, snapshot: SessionSnapshot): void {
 		if (subscription.backlog === null) return;
-		for (const approval of snapshot.pendingApprovals) {
-			subscription.pending.set(approval.toolCallId, approval);
-			this.answers.show(sessionId, approval.toolCallId);
+		// A baseline *replaces* what this subscription was showing, so the counts that say "a reader
+		// has this approval on screen" move by the difference — the same way `pushApprovalChanges`
+		// moves them. Adding the set again would count the same reader twice; dropping it and adding
+		// it again would throw away an answer already recorded for a question that is still standing.
+		const current = new Map(snapshot.pendingApprovals.map((approval) => [approval.toolCallId, approval]));
+		for (const toolCallId of subscription.pending.keys()) {
+			if (!current.has(toolCallId)) this.answers.hide(sessionId, toolCallId);
 		}
+		for (const toolCallId of current.keys()) {
+			if (!subscription.pending.has(toolCallId)) this.answers.show(sessionId, toolCallId);
+		}
+		subscription.pending = current;
+
 		this.send({ streamId: sessionId, item: { type: "baseline", session: snapshot } });
 
 		const backlog = subscription.backlog;
@@ -473,9 +487,31 @@ export class MuxConnection {
 		for (const frame of backlog) this.send(frame);
 	}
 
-	/** Re-send the whole state, because a branch move invalidates the differences since the last one. */
+	/**
+	 * Re-send the whole state: the answer to a branch move, and to a second `open` on a watch this
+	 * connection already holds.
+	 *
+	 * Live, this is synchronous and the snapshot is the session's own — so a second `open` mid-run
+	 * carries the `partial` answer being written rather than the file's last settled state, and the
+	 * frames that follow append to it.
+	 *
+	 * Idle, there is no synchronous state to read, so the answer takes the only road a cold baseline
+	 * takes: re-arm the backlog and let {@link readColdBaseline} produce it. That keeps the promise
+	 * this frame inherits — state first, then everything after it — instead of racing the deltas,
+	 * and it leaves one baseline assembly in the file rather than two.
+	 */
 	private pushBaseline(sessionId: string, subscription: Subscription): void {
-		this.push(sessionId, subscription, { type: "baseline", session: this.hub.snapshotNow(sessionId) });
+		if (this.hub.live.includes(sessionId)) {
+			// Through `push`, like every other frame: a baseline owed but not yet written is one this
+			// must land behind, or the client would see the older state last.
+			this.push(sessionId, subscription, { type: "baseline", session: this.hub.snapshotNow(sessionId) });
+			return;
+		}
+		// One is already owed and on its way, and re-arming the backlog again would make the reader
+		// produce two.
+		if (subscription.backlog !== null) return;
+		subscription.backlog = [];
+		void this.readColdBaseline(sessionId, subscription);
 	}
 
 	/** The entry an `entry_appended` names, paired with the timestamp a transcript orders by. */
@@ -532,9 +568,10 @@ export class MuxConnection {
 	 * Tell a client its `open` did not work, and end the attempt.
 	 *
 	 * Error first, then end: the error carries the attribution and the end stops the attempt from going
-	 * on looking like a stream that is merely quiet. The distinction the client draws is whether this
-	 * stream ever carried a baseline — it did not, so the client knows its own `open` failed and does
-	 * not reopen.
+	 * on looking like a stream that is merely quiet. On a first `open` the client knows its own request
+	 * failed, because that stream never carried a baseline. On a second one — a re-sent baseline whose
+	 * read found the session gone — the stream did carry one, and the end is then the honest answer
+	 * rather than a misreading: the record really is gone, so there is nothing left to reopen.
 	 */
 	private failStream(sessionId: string, message: string): void {
 		this.send({ streamId: sessionId, error: { message } });
@@ -548,16 +585,14 @@ export class MuxConnection {
 	 * further to say about that session — that is the whole meaning of the frame, and a client that saw
 	 * anything after it would have no way to tell which stream it belonged to.
 	 *
-	 * `forget` is what a duplicate `open` needs and what the other two callers must not have: the failed
-	 * attempt here is a *second* request for a stream that is already open and working, so dropping the
-	 * entry would end a healthy subscription and leave its client with a stream that carried a baseline
-	 * and then ended — which a client reads as "this session is gone, do not reopen".
+	 * Every caller ends a stream that has nothing left to say. A second `open` used to be the one
+	 * exception, and it is not one any more: the answer to a duplicate `open` is a baseline on the
+	 * stream that already exists (ADR-0010 decision 1), so no path here reports a failure about a
+	 * subscription that is healthy underneath.
 	 */
-	private endStream(sessionId: string, forget = true): void {
-		if (forget) {
-			const subscription = this.subscriptions.get(sessionId);
-			if (subscription !== undefined) this.teardown(subscription);
-		}
+	private endStream(sessionId: string): void {
+		const subscription = this.subscriptions.get(sessionId);
+		if (subscription !== undefined) this.teardown(subscription);
 		this.send({ streamId: sessionId, end: true });
 	}
 

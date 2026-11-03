@@ -81,6 +81,16 @@ function rowOf(envelope: unknown): SessionRow | undefined {
 	return item?.type === "session_row" ? item.session : undefined;
 }
 
+/** How many baselines one lane has carried: a stream can carry more than the one it opened with. */
+function baselinesOn(wire: WireClient, sessionId: string): number {
+	return wire.items(sessionId).filter((message) => message.type === "baseline").length;
+}
+
+/** The newest baseline on one lane — the state the client is being pointed at last. */
+function lastBaselineOn(wire: WireClient, sessionId: string): { session: SessionSnapshot } | undefined {
+	return wire.items(sessionId).filter((message) => message.type === "baseline").at(-1) as { session: SessionSnapshot } | undefined;
+}
+
 const rows: ModelConfig[] = [
 	{
 		name: "scripted",
@@ -157,7 +167,7 @@ try {
 	);
 
 	// ---------------------------------------------------------------------------------------------
-	// 2. Lanes: a stream's first frame is its baseline; a duplicate open is refused.
+	// 2. Lanes: a stream's first frame is its baseline; a second open is one more of them.
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("one session, one lane, one baseline\n");
 
@@ -167,22 +177,24 @@ try {
 	check("the first frame on the stream is the session's baseline", lane.id === laneId);
 	check("and an idle session says so", lane.submitting === false, String(lane.submitting));
 
-	// The landed answer to a second `open` is a refusal, not a replacement: the entry in the table
-	// already holds this session, and silently accepting would leave a client believing it had two
-	// streams where the server has one. The mistake is answered on the stream it concerns — an error,
-	// then the end that stops the attempt looking merely quiet — while the original subscription
-	// keeps running underneath.
+	// A second `open` asks for the same thing the first one asked for — this session's state now, then
+	// everything after it — so it is answered with one more baseline on the stream that already exists,
+	// and the subscription underneath is left alone (ADR-0010 decision 1). This is the frame a pane
+	// needs after going away while something else still held the session: no `cancel` was sent, so a
+	// re-sent baseline is the only answer the trip back can have.
+	//
+	// Polled rather than sampled after a fixed sleep: the baseline is read off the session's file, and
+	// the frame is what is being waited for, not a duration.
+	const beforeDuplicate = baselinesOn(wire, laneId);
 	wire.send({ type: "open", sessionId: laneId });
-	// Polled rather than sampled after a fixed sleep: answering this costs a scan of every session
-	// directory on the machine, which is fast on a quiet box and slow right after the rest of the
-	// suite has run — the frame is what is being waited for, not a duration.
+	check("the duplicate open was answered with another baseline", await until(() => baselinesOn(wire, laneId) > beforeDuplicate, 5_000), JSON.stringify(wire.endOf(laneId)));
+	// The stream it already had is untouched: no error, no end, and still the same subscription — the
+	// check below proves it by using the lane again.
 	check(
-		"the duplicate open was answered with an error on that stream",
-		await until(() => wire.endOf(laneId).errors.length > 0, 5_000),
+		"and the stream it already had is untouched",
+		wire.endOf(laneId).errors.length === 0 && !wire.endOf(laneId).ended,
 		JSON.stringify(wire.endOf(laneId)),
 	);
-	check("followed by an end, so it does not look merely quiet", await until(() => wire.endOf(laneId).ended, 5_000), JSON.stringify(wire.endOf(laneId)));
-	check("the refused attempt carried no baseline", wire.items(laneId).filter((message) => message.type === "baseline").length === 1);
 
 	// ---------------------------------------------------------------------------------------------
 	// 3. A failed open: error, then end, on the stream that asked — and the connection stays.
@@ -221,10 +233,34 @@ try {
 	const other = await wire.open(otherId);
 	check("the second stream opened with its own baseline", other.id === otherId && otherId !== laneId);
 
-	rig.transport.setResponses([fakeAssistantMessage("a".repeat(600))]);
+	rig.transport.setResponses([fakeAssistantMessage("a".repeat(2000))]);
 	check("the prompt was accepted", (await prompt(rig.url, laneId, "say something long")) === 202);
 	const running = await wire.waitFor(laneId, (message) => message.type === "status" && (message as { submitting?: boolean }).submitting === true, 10_000);
 	check("the run announced itself on its own lane", running !== undefined);
+
+	// The re-attach half of the same edge, and the case a duplicate `open` exists for: something else
+	// still holds this session (here the run), the pane went away and came back, so a second `open`
+	// lands on a subscription that is still live. The baseline it answers with is the session's state
+	// *now* — `partial` included — so the window draws the sentence so far instead of waiting for a
+	// delta to start painting. Waiting for the first delta is what makes `partial` exist: it is the
+	// running message, so a re-attach before the answer began would honestly carry none.
+	await until(
+		() =>
+			wire
+				.items(laneId)
+				.some((message) => message.type === "event" && (message as { event: { type: string } }).event.type === "message_update"),
+		10_000,
+	);
+	const laneEvents = (): number => wire.items(laneId).filter((message) => message.type === "event").length;
+	const eventsBeforeReattach = laneEvents();
+	const baselinesBeforeReattach = baselinesOn(wire, laneId);
+	wire.send({ type: "open", sessionId: laneId });
+	check("a duplicate open mid-run is answered with a baseline too", await until(() => baselinesOn(wire, laneId) > baselinesBeforeReattach, 5_000), JSON.stringify(wire.endOf(laneId)));
+	const reattached = lastBaselineOn(wire, laneId);
+	check("and that baseline is the live state, partial answer included", reattached?.session.partial !== undefined, JSON.stringify(reattached?.session.partial));
+	// Frame order, the property the whole thing rests on: the baseline arrives *inside* the stream and
+	// the deltas keep appending to it — not a second stream, not an end, nothing replayed twice.
+	check("the deltas kept coming after it", await until(() => laneEvents() > eventsBeforeReattach, 10_000), `${eventsBeforeReattach} events before`);
 
 	// While the run streams, the idle lane must stay quiet and the heartbeats keep coming.
 	await sleep(300);
@@ -262,13 +298,16 @@ try {
 	// that timing instead of about convergence.
 	check("the session was reaped once nothing claimed it", await until(() => !rig.hub.live.includes(laneId), 10_000), rig.hub.live.join(","));
 
-	const baselinesBefore = wire.items(laneId).filter((message) => message.type === "baseline").length;
+	const baselinesBefore = baselinesOn(wire, laneId);
 	const reopened = await wire.open(laneId);
-	const baselinesAfter = wire.items(laneId).filter((message) => message.type === "baseline");
-	const fresh = baselinesAfter[baselinesAfter.length - 1] as { session: SessionSnapshot } | undefined;
+	const fresh = lastBaselineOn(wire, laneId);
 	const stored = await readSession(rig.url, laneId);
 	check("reopening answered with a baseline", reopened.id === laneId);
-	check("it is a second baseline, not a continuation", baselinesAfter.length === baselinesBefore + 1, `${baselinesBefore} -> ${baselinesAfter.length}`);
+	check(
+		"it is a second baseline, not a continuation",
+		baselinesOn(wire, laneId) === baselinesBefore + 1,
+		`${baselinesBefore} -> ${baselinesOn(wire, laneId)}`,
+	);
 	check(
 		"and it says what the session looks like now, not what it looked like before",
 		fresh !== undefined && stored !== undefined && fresh.session.messages.length === stored.messages.length,
@@ -296,16 +335,19 @@ try {
 	const branchEntry = before?.messageEntryIds.find((id): id is string => typeof id === "string");
 	check("the session has a message entry to branch at", branchEntry !== undefined);
 	if (branchEntry !== undefined && before !== undefined) {
-		const baselinesAt = wire.items(laneId).filter((message) => message.type === "baseline").length;
+		const baselinesAt = baselinesOn(wire, laneId);
 		const moved = await request(rig.url, "POST", `/api/sessions/${encodeURIComponent(laneId)}/branch`, { entryId: branchEntry, descend: false });
 		check("the branch move was accepted", moved.status === 200, String(moved.status));
 
 		// Wait for the count to grow, then read the newest one: `waitFor` matches from the beginning,
 		// and this lane already carries baselines from the sections above.
-		const grew = await until(() => wire.items(laneId).filter((message) => message.type === "baseline").length > baselinesAt, 5_000);
-		const baselinesNow = wire.items(laneId).filter((message) => message.type === "baseline");
-		const changed = baselinesNow[baselinesNow.length - 1] as unknown as { session: { leafId: string } } | undefined;
-		check("the subscription was told — by a whole new baseline, not a difference", grew && baselinesNow.length === baselinesAt + 1, `${baselinesAt} -> ${baselinesNow.length}`);
+		const grew = await until(() => baselinesOn(wire, laneId) > baselinesAt, 5_000);
+		const changed = lastBaselineOn(wire, laneId);
+		check(
+			"the subscription was told — by a whole new baseline, not a difference",
+			grew && baselinesOn(wire, laneId) === baselinesAt + 1,
+			`${baselinesAt} -> ${baselinesOn(wire, laneId)}`,
+		);
 		check("and the move is inside it", changed?.session.leafId === branchEntry, JSON.stringify(changed?.session.leafId));
 	}
 
