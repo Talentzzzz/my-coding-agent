@@ -116,6 +116,7 @@ export {
 	type PendingApproval,
 	type PromptBehavior,
 	type QueueMode,
+	type QueuedPrompt,
 	type ServerFrame,
 	type ServerMessage,
 	type SessionRef,
@@ -125,7 +126,6 @@ export {
 	type StreamFailure,
 	type StreamFrame,
 	type StreamId,
-	type ToolApprovalKey,
 	type UsageTotals,
 } from "./protocol.ts";
 export {

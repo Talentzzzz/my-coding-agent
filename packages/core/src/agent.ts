@@ -61,8 +61,8 @@ import {
 	type ModelSelection,
 	type PendingApproval,
 	type PromptBehavior,
+	type QueuedPrompt,
 	type SessionSnapshot,
-	type ToolApprovalKey,
 } from "./protocol.ts";
 import { sessionSnapshot } from "./session/snapshot.ts";
 import {
@@ -175,7 +175,7 @@ export interface AgentConfig {
 		workDirAbsPath: string,
 		agentsMd: readonly AgentsMdFile[],
 		toolNames: readonly string[],
-		approvals: Record<ToolApprovalKey, boolean>,
+		approvals: Record<string, boolean>,
 	) => string;
 }
 
@@ -218,7 +218,7 @@ export interface MessageDelta {
 export type AgentSessionEvent =
 	| Exclude<AgentEvent, { type: "message_update" }>
 	| { type: "message_update"; delta: MessageDelta }
-	| { type: "queue_update"; queued: number }
+	| { type: "queue_update"; queued: QueuedPrompt[] }
 	| {
 			type: "compaction";
 			/** The summary that now stands for everything before `firstKeptEntryId`. */
@@ -334,14 +334,6 @@ export interface RunScope {
 	 */
 	model?: Model;
 	/**
-	 * Stamps of the user messages this run wrote ahead of the engine's own emit of them.
-	 *
-	 * Two writes land there: the prompt that starts the run — written before the run starts so the
-	 * composer sees it the moment it is sent — and every message a drain takes off a queue, written
-	 * at the drain. The engine echoes both; the stamp is what keeps that echo from writing them again.
-	 */
-	writtenAhead: number[];
-	/**
 	 * True when the gate ended this run: a call was left dangling for someone to answer.
 	 *
 	 * The one end that keeps the queues. Every other end drops what was accepted and never taken —
@@ -355,8 +347,6 @@ export interface RunScope {
 	/** The attempt the policy is on, 1-based, or 0 when no retry is pending. */
 	retryAttempt: number;
 	retryMaxAttempts: number;
-	/** Queue depth as last published, so `queue_update` fires on a change and not on every touch. */
-	lastQueued: number;
 }
 
 /**
@@ -1267,7 +1257,7 @@ export class Agent {
 			...followsGlobalOf(this.sessionManager, state, entry.settings, this.tools),
 			...(run?.partial === undefined ? {} : { partial: run.partial }),
 			submitting: run !== undefined,
-			queued: entry.runtime.followUpQueue.size,
+			queued: entry.runtime.followUpQueue.previews(),
 			isRetrying: run?.retrying ?? false,
 			retryAttempt: run?.retryAttempt ?? 0,
 			pendingApprovals: run === undefined ? this.danglingApprovals(state) : [],
@@ -1293,13 +1283,13 @@ export class Agent {
 	 * half is the recorded choice, read off the `.json` snapshot beside the tool set it was written
 	 * beside.
 	 */
-	getApprovals(id: string): Record<ToolApprovalKey, boolean> {
+	getApprovals(id: string): Record<string, boolean> {
 		const state = this.sessionManager.stateOf(id);
 		return this.approvalsOf(state, this.entryOf(id));
 	}
 
 	/** The one merge the gate, the snapshot, and the prompt all read through. */
-	private approvalsOf(state: Session, entry: OpenSession): Record<ToolApprovalKey, boolean> {
+	private approvalsOf(state: Session, entry: OpenSession): Record<string, boolean> {
 		return { ...getApprovals(entry.settings), ...this.toolStateOf(state, entry).approvalOverride };
 	}
 
@@ -1362,11 +1352,13 @@ export class Agent {
 				content: [{ type: "text", text: trimmed }],
 				timestamp: this.nextStamp(state),
 			};
-			const queue = options.behavior ?? "followUp";
-			if (queue === "steer") entry.runtime.steeringQueue.enqueue(message);
-			else entry.runtime.followUpQueue.enqueue(message);
+		const queue = options.behavior ?? "followUp";
+		if (queue === "steer") entry.runtime.steeringQueue.enqueue(message);
+		else {
+			entry.runtime.followUpQueue.enqueue(message);
 			this.emitQueueUpdate(entry);
-			this.publish(state, entry);
+		}
+		this.publish(state, entry);
 			return;
 		}
 
@@ -1430,15 +1422,10 @@ export class Agent {
 		const scope: RunScope = {
 			partial: undefined,
 			model: undefined,
-			// The one user message the store already holds is the one that started the run: it is written
-			// before the engine runs, so the engine's own echo of it must not be recorded twice. A drain
-			// stamps the messages it writes for the same reason — see {@link Agent.drainTranscribed}.
-			writtenAhead: start.prompt === undefined ? [] : [start.prompt.timestamp],
 			suspended: false,
 			retrying: false,
 			retryAttempt: 0,
 			retryMaxAttempts: 0,
-			lastQueued: 0,
 		};
 		entry.run = scope;
 
@@ -1470,11 +1457,9 @@ export class Agent {
 			//
 			// A suspended run is the exception: its queues are what the recovery run drains, and the
 			// message someone typed while this run was streaming is theirs, not this run's to bin.
-			if (!scope.suspended) this.dropQueued(entry);
-			// The depth the run is leaving behind, said before the slot is dropped: after this the depth
-			// is the idle one — zero, except for a parked run, whose queue the next one inherits and
-			// whose depth stays up so the window keeps showing what is still owed an answer.
-			this.emitQueueUpdate(entry);
+			// A drop that took something is a queue change the window has not heard yet, so it is the
+			// one end path that publishes here; a parked run keeps its queue and says nothing.
+			if (!scope.suspended && this.dropQueued(entry)) this.emitQueueUpdate(entry);
 			entry.run = undefined;
 			// The run is not over until the engine's `runEngine` resolves — after every awaited listener for
 			// `agent_end` and the engine's own `finally`. So this is the first moment nothing is in
@@ -1671,7 +1656,7 @@ export class Agent {
 					// arrives from outside any run to start the next one.
 					if (suspended) break;
 
-					pendingMessages = await this.drainTranscribed(entry.runtime.steeringQueue, scope, state, entry);
+					pendingMessages = await this.drainTranscribed(entry.runtime.steeringQueue, state, entry);
 				}
 
 				// A suspend ends the follow-up side of the run with it: the queued messages were never
@@ -1679,10 +1664,11 @@ export class Agent {
 				if (suspended) break;
 
 				// The run would stop here. Take whatever the follow-up queue holds.
-				const followUpMessages = await this.drainTranscribed(entry.runtime.followUpQueue, scope, state, entry);
+				const followUpMessages = await this.drainTranscribed(entry.runtime.followUpQueue, state, entry);
 				if (followUpMessages.length > 0) {
 					// Set as pending so the inner loop processes them.
 					pendingMessages = followUpMessages;
+					this.emitQueueUpdate(entry);
 					continue;
 				}
 
@@ -2194,7 +2180,7 @@ export class Agent {
 		if (approved) {
 			// The grant is the session's own choice for this tool, recorded as the whole map in force
 			// with the tool turned off — the same move a config patch makes.
-			const approvals = { ...this.approvalsOf(state, entry), [call.toolName as ToolApprovalKey]: false };
+			const approvals = { ...this.approvalsOf(state, entry), [call.toolName]: false };
 			this.sessionManager.setToolConfig(state, this.toolStateOf(state, entry).activeToolNames, approvals);
 		}
 		// Said before the run starts: the choice is the session's own and lands now, while the call
@@ -2224,8 +2210,7 @@ export class Agent {
 		const dangling = this.danglingApprovals(state);
 		if (dangling.length === 0) return;
 		for (const call of dangling) this.appendDanglingResult(state, entry, call, { approved: false, reason });
-		this.dropQueued(entry);
-		this.emitQueueUpdate(entry);
+		if (this.dropQueued(entry)) this.emitQueueUpdate(entry);
 		this.publish(state, entry);
 	}
 
@@ -2262,7 +2247,7 @@ export class Agent {
 	 */
 	async authorize(id: string, name: string, _toolCallId: string, _args: unknown): Promise<boolean> {
 		const state = this.sessionManager.stateOf(id);
-		return this.approvalsOf(state, this.entryOf(id))[name as ToolApprovalKey] === true;
+		return this.approvalsOf(state, this.entryOf(id))[name] === true;
 	}
 
 	// ---------------------------------------------------------------------------- waiting and closing
@@ -2578,13 +2563,12 @@ export class Agent {
 	 *
 	 * The write rides the drain rather than the engine's echo of it: taking a message off the queue is
 	 * the moment the run takes responsibility for it, so the ledger gains it there and the gap where
-	 * a message was neither queued nor stored never opens. The stamp onto
-	 * {@link RunScope.writtenAhead} is what makes the echo's own pass skip it.
+	 * a message was neither queued nor stored never opens. The echo never persists user messages, so
+	 * nothing has to mark these as already written.
 	 */
-	private drainTranscribed(queue: PendingMessageQueue, scope: RunScope, state: Session, entry: OpenSession): Message[] {
+	private drainTranscribed(queue: PendingMessageQueue, state: Session, entry: OpenSession): Message[] {
 		const messages = queue.drain();
 		for (const message of messages) {
-			scope.writtenAhead.push(message.timestamp);
 			this.appendMessage(state, entry, message);
 		}
 		return messages;
@@ -2610,12 +2594,11 @@ export class Agent {
 		}
 		if (event.type === "message_end" || event.type === "agent_end") scope.partial = undefined;
 		if (event.type === "message_end") {
-			// Two user messages the store already holds echo through here: the one that started the
-			// run, written before the engine ran, and a message the engine just drained off a queue — the
-			// drain wrote it, at the moment the run took it. Both are stamped in `writtenAhead`, so
-			// their echoes skip; everything else the engine announces is written here as it stands —
+			// The echo never persists a user message: every one of them reached the engine already
+			// written — the prompt before the run started, a queued message at the drain. Everything
+			// else the engine announces has no other writer and is written here as it stands —
 			// the content is final by the time it lands (the write boundary is the last rewrite).
-			if (!isOptimisticEcho(scope, event.message)) {
+			if (event.message.role !== "user") {
 				this.appendMessage(state, entry, event.message);
 			}
 		}
@@ -2628,11 +2611,9 @@ export class Agent {
 			// A run the gate ended is the one exception, and it is checked here rather than only in
 			// `startRun`'s `finally` because this fires first: the recovery run drains what this one
 			// leaves behind, so the depth stays up and the window keeps showing it.
-			this.dropQueued(entry);
+			if (this.dropQueued(entry)) this.emitQueueUpdate(entry);
 		}
 		this.emit(entry, event);
-		// The echo of a drained message is what lowers the depth, so this is where the count goes live.
-		this.emitQueueUpdate(entry);
 		if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_end") {
 			this.publish(state, entry);
 		}
@@ -2646,19 +2627,14 @@ export class Agent {
 	}
 
 	/**
-	 * Report the queue depth whenever it moved.
+	 * Publish the queue's current contents.
 	 *
-	 * Called from wherever the depth can change — accepting a message, and the engine echoing a drained
-	 * one — so a composer can show the number without polling `snapshot`. The depth is read off the
-	 * runtime's queues; the baseline it is compared against lives with the run, because the depth is
-	 * meaningful only while one is in flight.
+	 * Called only where the queue itself changed — a message accepted onto it, a drain point taking
+	 * one, a run dropping what it never reached — so no baseline is kept: the fact of the call is the
+	 * change. The queue is read off the runtime's queue.
 	 */
 	private emitQueueUpdate(entry: OpenSession): void {
-		const queued = entry.runtime.followUpQueue.size;
-		const last = entry.run?.lastQueued ?? 0;
-		if (queued === last) return;
-		if (entry.run !== undefined) entry.run.lastQueued = queued;
-		this.emit(entry, { type: "queue_update", queued });
+		this.emit(entry, { type: "queue_update", queued: entry.runtime.followUpQueue.previews() });
 	}
 
 	/** Report a config change with only the fields that moved; silence when none did. */
@@ -2714,14 +2690,19 @@ export class Agent {
 	 * unasked, and the queues empty so the depth falls to zero — which is what `settle()` waits on —
 	 * and no later run inherits what this one never took.
 	 *
+	 * Returns whether anything was actually dropped, so the caller publishes a queue change only
+	 * when there was one.
+	 *
 	 * The one end that does not come here is the gate's: a suspended run keeps its queue for the
 	 * recovery run the answer starts, which drains it at its take points (`RunScope.suspended`). The
 	 * abandonment sweep is the exception to that exception — {@link Agent.denyAllApprovals} calls
 	 * this, because no recovery run is coming to take them.
 	 */
-	private dropQueued(entry: OpenSession): void {
+	private dropQueued(entry: OpenSession): boolean {
+		const dropped = entry.runtime.steeringQueue.size > 0 || entry.runtime.followUpQueue.size > 0;
 		entry.runtime.steeringQueue.clear();
 		entry.runtime.followUpQueue.clear();
+		return dropped;
 	}
 
 	/** Tell every listener what the session looks like now. */
@@ -2732,40 +2713,19 @@ export class Agent {
 }
 
 /**
- * True when the engine is echoing a user message the session already persisted.
- *
- * Two writes land ahead of the engine's own emit: the prompt that starts a run, and a message the
- * drain just took off a queue — both are stamped in `writtenAhead` when they are written, and the
- * stamp is what identifies their echo. Stamps are unique per message because this session issues
- * them.
- */
-function isOptimisticEcho(scope: RunScope, message: Message): boolean {
-	if (message.role !== "user" || message.timestamp === undefined) return false;
-	return consume(scope.writtenAhead, message.timestamp);
-}
-
-/** Take one outstanding write off its list, and say whether there was one. */
-function consume(writes: number[], timestamp: number): boolean {
-	const index = writes.indexOf(timestamp);
-	if (index === -1) return false;
-	writes.splice(index, 1);
-	return true;
-}
-
-/**
  * The approval keys whose value differs, or undefined when none do.
  *
  * `config_changed` carries only what moved, so an `applyConfig` that re-sends the current settings —
  * which is what a reconnect or an unchanged form does — must not claim anything changed.
  */
 function changedApprovals(
-	before: Record<ToolApprovalKey, boolean>,
-	after: Record<ToolApprovalKey, boolean>,
+	before: Record<string, boolean>,
+	after: Record<string, boolean>,
 ): Record<string, boolean> | undefined {
 	const changed: Record<string, boolean> = {};
 	let moved = false;
 	for (const [key, value] of Object.entries(after)) {
-		if (before[key as ToolApprovalKey] === value) continue;
+		if (before[key] === value) continue;
 		changed[key] = value;
 		moved = true;
 	}

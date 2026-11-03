@@ -282,7 +282,7 @@ try {
 	check("and the observer let go", !hub.isWatched(afterStop));
 
 	process.stdout.write("the envelope types describe a multiplexed connection\n");
-	const item: ServerMessage = { type: "status", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2, contextWindow: 100 }, submitting: true, queued: 0, isRetrying: false, retryAttempt: 0 };
+	const item: ServerMessage = { type: "status", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2, contextWindow: 100 }, submitting: true, queued: [], isRetrying: false, retryAttempt: 0 };
 	const onAStream: ServerFrame = { streamId: "session-a", item };
 	const heartbeat: ConnectionItem = { type: "heartbeat", everyMs: 5_000 };
 	const onTheConnection: ServerFrame = { streamId: null, item: heartbeat };

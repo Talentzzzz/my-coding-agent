@@ -1,12 +1,11 @@
-import { APPROVAL_TOOLS, type ToolApprovalKey } from "../protocol.ts";
 import { type SettingsState, getApprovals, getSettings, getTools } from "../settings-manager.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
 import { fillTools, narrowToKnown, type ToolState } from "../tools/manager.ts";
 import { type SessionManager, type Session } from "./session-manager.ts";
 
-/** The tools an approval map gates, in the loadout's order. */
-export function approvalToolsOf(approval: Record<ToolApprovalKey, boolean>): ToolApprovalKey[] {
-	return APPROVAL_TOOLS.filter((name) => approval[name]);
+/** The tools an approval map gates: every name it carries with a true value. */
+export function approvalToolsOf(approval: Record<string, boolean>): string[] {
+	return Object.keys(approval).filter((name) => approval[name]);
 }
 
 /**
@@ -77,9 +76,9 @@ export function toolStateOf(sessions: SessionManager, state: Session, s: Setting
  * order; the approval halves are compared field by field over every key either side names.
  */
 function toolConfigFollowsGlobal(
-	recorded: { activeTools?: string[]; approval?: Record<ToolApprovalKey, boolean> },
+	recorded: { activeTools?: string[]; approval?: Record<string, boolean> },
 	globalTools: readonly string[],
-	globalApprovals: Record<ToolApprovalKey, boolean>,
+	globalApprovals: Record<string, boolean>,
 ): { tools: boolean; approvals: boolean } {
 	const tools =
 		recorded.activeTools === undefined ||
@@ -90,7 +89,7 @@ function toolConfigFollowsGlobal(
 	if (recorded.approval !== undefined) {
 		const keys = new Set([...Object.keys(globalApprovals), ...Object.keys(recorded.approval)]);
 		for (const key of keys) {
-			if (globalApprovals[key as ToolApprovalKey] !== recorded.approval[key as ToolApprovalKey]) {
+			if (globalApprovals[key] !== recorded.approval[key]) {
 				approvals = false;
 				break;
 			}

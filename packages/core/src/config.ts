@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import type { QueueMode, ToolApprovalKey } from "./protocol.ts";
+import type { QueueMode } from "./protocol.ts";
 
 /** Directory holding sessions, settings, and stored credentials. */
 export const AGENT_HOME = resolve(process.env.MY_AGENT_HOME ?? join(homedir(), ".my-agent"));
@@ -153,8 +153,8 @@ export interface ModeSettings {
 	name: string;
 	/** The active tool set the mode applies, whole. An empty list is a choice: nothing active. */
 	tools: string[];
-	/** Per-tool approval over the keys the approval map gates; a session applies it as one patch. */
-	approval: Record<ToolApprovalKey, boolean>;
+	/** Per-tool approval keyed by tool name; a session applies it as one patch. */
+	approval: Record<string, boolean>;
 }
 
 export interface Settings {
@@ -192,8 +192,8 @@ export interface Settings {
 	modes?: ModeSettings[];
 	/** Theme and font size, as the window draws them. */
 	appearance: AppearanceSettings;
-	/** Tools that must be approved in the UI before they run. */
-	approval: Record<ToolApprovalKey, boolean>;
+	/** Tools that must be approved in the UI before they run, keyed by tool name. */
+	approval: Record<string, boolean>;
 	/**
 	 * Directories the sidebar does not list, by absolute path.
 	 *
@@ -286,8 +286,7 @@ export function mergeSettings(input: unknown): Settings {
 	const directoryNames = stringRecordOrUndefined(record.directoryNames);
 	if (directoryNames !== undefined) merged.directoryNames = directoryNames;
 
-	for (const key of Object.keys(merged.approval) as ToolApprovalKey[]) {
-		const value = approval[key];
+	for (const [key, value] of Object.entries(approval)) {
 		if (typeof value === "boolean") merged.approval[key] = value;
 	}
 	return merged;
@@ -479,8 +478,8 @@ function modesOr(value: unknown): ModeSettings[] | undefined {
 		if (tools === undefined) continue;
 		const approvalRecord = isRecord(entry.approval) ? entry.approval : {};
 		const approval = { ...DEFAULT_SETTINGS.approval };
-		for (const key of Object.keys(DEFAULT_SETTINGS.approval) as ToolApprovalKey[]) {
-			if (typeof approvalRecord[key] === "boolean") approval[key] = approvalRecord[key];
+		for (const [key, value] of Object.entries(approvalRecord)) {
+			if (typeof value === "boolean") approval[key] = value;
 		}
 		out.push({ name, tools, approval });
 	}

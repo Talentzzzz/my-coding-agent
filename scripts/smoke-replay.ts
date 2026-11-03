@@ -48,7 +48,7 @@ function snapshotWith(
 		branchPoints: [],
 		leafId: `entry-${messages.length - 1}`,
 		submitting: false,
-		queued: 0,
+		queued: [],
 		isRetrying: false,
 		retryAttempt: 0,
 		usage: USAGE,

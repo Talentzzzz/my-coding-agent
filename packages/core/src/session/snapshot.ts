@@ -4,8 +4,8 @@ import {
 	addUsage,
 	EMPTY_USAGE,
 	type PendingApproval,
+	type QueuedPrompt,
 	type SessionSnapshot,
-	type ToolApprovalKey,
 	type UsageTotals,
 } from "../protocol.ts";
 import { thinkingLevelsFor } from "../models.ts";
@@ -31,14 +31,14 @@ export interface SnapshotInput {
 	workDirAbsPath: string;
 	/** Already settled: `createModel(row, level)` or `placeholderModel()`. */
 	model: Model<Api>;
-	approvals: Record<ToolApprovalKey, boolean>;
+	approvals: Record<string, boolean>;
 	allTools: string[];
 	activeTools: string[];
 	/** Already judged by the caller against the settings it holds; see `SessionSnapshot`. */
 	toolsFollowGlobal: boolean;
 	approvalsFollowGlobal: boolean;
 	submitting: boolean;
-	queued: number;
+	queued: QueuedPrompt[];
 	isRetrying: boolean;
 	retryAttempt: number;
 	pendingApprovals: PendingApproval[];

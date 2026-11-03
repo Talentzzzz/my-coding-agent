@@ -164,7 +164,7 @@ process.stdout.write("\na message queued before the gate survives the park and i
 	await untilHeld(gate, 1);
 
 	await session.prompt(sidOf(session), "and also this", { selection });
-	check("the second message was queued, not turned into a run", session.snapshot(sidOf(session)).queued === 1, String(session.snapshot(sidOf(session)).queued));
+	check("the second message was queued, not turned into a run", session.snapshot(sidOf(session)).queued.length === 1, String(session.snapshot(sidOf(session)).queued.length));
 
 	// Let the held request answer: the model asks for the gated tool, and the run parks there.
 	gate.release(1);
@@ -173,8 +173,8 @@ process.stdout.write("\na message queued before the gate survives the park and i
 	check("the gate ended the run with the call dangling", session.hasPendingApprovals(sidOf(session)), JSON.stringify(session.snapshot(sidOf(session)).pendingApprovals));
 	check(
 		"the queued message is still counted while the approval waits",
-		session.snapshot(sidOf(session)).queued === 1,
-		`queued=${session.snapshot(sidOf(session)).queued}`,
+		session.snapshot(sidOf(session)).queued.length === 1,
+		`queued=${session.snapshot(sidOf(session)).queued.length}`,
 	);
 	check(
 		"and it was not written to the transcript behind the run's back",
@@ -199,7 +199,7 @@ process.stdout.write("\na message queued before the gate survives the park and i
 		indexOfText(session, "toolResult", "notes.txt") < indexOfText(session, "user", "and also this"),
 		`result=${indexOfText(session, "toolResult", "notes.txt")} user=${indexOfText(session, "user", "and also this")}`,
 	);
-	check("the queue is empty once it was taken", session.snapshot(sidOf(session)).queued === 0);
+	check("the queue is empty once it was taken", session.snapshot(sidOf(session)).queued.length === 0);
 	await session.close(sidOf(session));
 }
 
@@ -223,7 +223,7 @@ process.stdout.write("\nan abandoned approval drops what was queued, and settle 
 	await session.prompt(sidOf(session), "and also this", { selection });
 	gate.release(1);
 	await session.settle(sidOf(session));
-	check("the run parked with a message queued behind it", session.snapshot(sidOf(session)).queued === 1, String(session.snapshot(sidOf(session)).queued));
+	check("the run parked with a message queued behind it", session.snapshot(sidOf(session)).queued.length === 1, String(session.snapshot(sidOf(session)).queued.length));
 
 	// The sweep, as an exit or a reap performs it. `abort` is the deliberate stop, and its own route
 	// into the same function is what this pins.
@@ -231,7 +231,7 @@ process.stdout.write("\nan abandoned approval drops what was queued, and settle 
 	await session.settle(sidOf(session));
 
 	check("the unanswered call was closed with the sweep's sentence", !session.hasPendingApprovals(sidOf(session)));
-	check("the queued message went with the run nobody resumed", session.snapshot(sidOf(session)).queued === 0, String(session.snapshot(sidOf(session)).queued));
+	check("the queued message went with the run nobody resumed", session.snapshot(sidOf(session)).queued.length === 0, String(session.snapshot(sidOf(session)).queued.length));
 	check(
 		"and nothing was written for it",
 		indexOfText(session, "user", "and also this") === -1,

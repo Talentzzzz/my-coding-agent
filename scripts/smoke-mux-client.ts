@@ -9,7 +9,7 @@
 import { MuxClient, type ChannelState, type MuxHandlers, type MuxOptions, type MuxSocket, type MuxSocketFactory, type MuxTimers } from "../packages/web/src/client.ts";
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { reduceEnd, initialState, reduce, type ViewState } from "../packages/web/src/state.ts";
-import type { ServerMessage, SessionRow, SessionSnapshot, ToolApprovalKey } from "@my-agent/core/protocol";
+import type { ServerMessage, SessionRow, SessionSnapshot } from "@my-agent/core/protocol";
 
 let failures = 0;
 
@@ -108,7 +108,7 @@ function heartbeat(everyMs = 100): string {
 }
 
 /** The approval map every snapshot has to carry, all six keys, none of them on. */
-const NO_APPROVALS: Record<ToolApprovalKey, boolean> = {
+const NO_APPROVALS: Record<string, boolean> = {
 	read: false,
 	write: false,
 	edit: false,
@@ -137,7 +137,7 @@ function snapshot(sessionId: string, submitting = false): SessionSnapshot {
 		branchPoints: [],
 		leafId: null,
 		submitting,
-		queued: 0,
+		queued: [],
 		isRetrying: false,
 		retryAttempt: 0,
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, contextWindow: 1000 },

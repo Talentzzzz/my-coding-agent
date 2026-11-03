@@ -11,7 +11,7 @@ import {
 	type RetrySettings,
 	type Settings,
 } from "./config.ts";
-import type { QueueMode, ToolApprovalKey } from "./protocol.ts";
+import type { QueueMode } from "./protocol.ts";
 
 /**
  * The two files a session's settings come from.
@@ -52,7 +52,8 @@ export interface SettingsPatch {
 	 * merges per key has no other way to say "forget this one".
 	 */
 	directoryNames?: Record<string, string>;
-	approval?: Partial<Record<ToolApprovalKey, boolean>>;
+	/** The approval entries that moved, keyed by tool name; keys left out keep the value in force. */
+	approval?: Record<string, boolean>;
 	/** Theme and font size. Part of a patch so one field can move without the other. */
 	appearance?: Partial<AppearanceSettings>;
 	steeringMode?: QueueMode;
@@ -259,8 +260,8 @@ export function getDirectoryNames(s: SettingsState): Record<string, string> {
 	return names;
 }
 
-/** The tools that must be approved in the UI before they run. */
-export function getApprovals(s: SettingsState): Record<ToolApprovalKey, boolean> {
+/** The tools that must be approved in the UI before they run, keyed by tool name. */
+export function getApprovals(s: SettingsState): Record<string, boolean> {
 	return { ...s.settings.approval };
 }
 
@@ -271,8 +272,8 @@ export function getApprovals(s: SettingsState): Record<ToolApprovalKey, boolean>
  * chosen: a session's own answer is `Agent.getApprovals()`, which is this map with the session's
  * recorded choices over it. The approval gate reads that one, never this.
  */
-export function isApprovalRequired(s: SettingsState, tool: ToolApprovalKey): boolean {
-	return s.settings.approval[tool];
+export function isApprovalRequired(s: SettingsState, tool: string): boolean {
+	return s.settings.approval[tool] === true;
 }
 
 export function getSteeringMode(s: SettingsState): QueueMode {

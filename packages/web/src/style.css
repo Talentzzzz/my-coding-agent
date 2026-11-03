@@ -2373,6 +2373,43 @@ body:not([data-pane="branch"]) .branch-view {
 	outline: none;
 }
 
+/*
+ * The queued prompts, between the textarea and the bar: one row per accepted-but-undrained message.
+ *
+ * It sits inside the composer rather than beside the send button because the rows are prose — the
+ * things the user said and is waiting on — and prose belongs with the writing, not with the controls.
+ * A row is deliberately quiet: it names a message the agent has not reached yet, and the text it
+ * carries is already the whole story.
+ */
+.composer-queue {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.composer-queue-row {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	min-width: 0;
+}
+
+.composer-queue-tag {
+	flex: none;
+	color: var(--dsw-label-tertiary);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+}
+
+.composer-queue-text {
+	overflow: hidden;
+	color: var(--dsw-label-secondary);
+	font-size: var(--dsw-fs-meta);
+	line-height: var(--dsw-lh-meta);
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
 .composer-bar {
 	display: flex;
 	align-items: center;

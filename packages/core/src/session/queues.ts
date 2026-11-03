@@ -1,4 +1,5 @@
 import type { QueueMode } from "../types.ts";
+import type { QueuedPrompt } from "../protocol.ts";
 import type { Message } from "@my-agent/llm";
 
 /**
@@ -20,6 +21,16 @@ export class PendingMessageQueue {
 		return this.messages.length;
 	}
 
+	/**
+	 * The waiting messages as the wire carries them: text and stamp, nothing else.
+	 *
+	 * This is the read surface a queue change publishes — `queue_update`, the `status` frame, and
+	 * the snapshot all carry it — so a window sees the queue itself rather than a count of it.
+	 */
+	previews(): QueuedPrompt[] {
+		return this.messages.map((message) => ({ text: promptText(message), timestamp: message.timestamp }));
+	}
+
 	enqueue(message: Message): void {
 		this.messages.push(message);
 	}
@@ -35,4 +46,18 @@ export class PendingMessageQueue {
 	clear(): void {
 		this.messages = [];
 	}
+}
+
+/** The text of a queued prompt, joined from its content blocks. */
+function promptText(message: Message): string {
+	const content = message.content;
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	let text = "";
+	for (const block of content) {
+		if (typeof block === "object" && block !== null && (block as { type?: unknown }).type === "text") {
+			text += String((block as { text?: unknown }).text ?? "");
+		}
+	}
+	return text;
 }

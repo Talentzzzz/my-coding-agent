@@ -1043,10 +1043,8 @@ function main(): void {
 			else transcript.render(next.items, next.streaming);
 		}
 		if (next.reachable !== previous.reachable) composer.setDisabled(!next.reachable);
-		if (next.streaming !== previous.streaming || next.queued !== previous.queued) {
-			composer.setStreaming(next.streaming);
-			composer.setQueued(next.queued);
-		}
+		if (next.streaming !== previous.streaming) composer.setStreaming(next.streaming);
+		if (next.queued !== previous.queued) composer.setQueue(next.queued);
 		if (next.usage !== previous.usage) renderStatusBar();
 		if (next.error !== previous.error) {
 			errorBar.hidden = next.error === undefined;

@@ -149,7 +149,7 @@ level 本身骑在模型上（`Model.thinkingLevel`，由 `createModel(config, l
 type AgentSessionEvent =
   | Exclude<AgentEvent, { type: "message_update" }>                                       // 循环的词汇，未改动
   | { type: "message_update"; delta: { timestamp: number; kind: "text" | "thinking"; contentIndex: number; text: string } }
-  | { type: "queue_update"; queued: number }                     // 已接受，尚未被取走
+  | { type: "queue_update"; queued: QueuedPrompt[] }              // 已接受、尚未被取走的消息本身（text + timestamp）
   | { type: "compaction"; summary: string; firstKeptEntryId: string; summarized: number; tokensBefore: number; contextTokens: number }
   | { type: "compaction_failed"; message: string }
   | { type: "tool_results_cleared"; cleared: number; tokensBefore: number; contextTokens: number }
@@ -167,7 +167,7 @@ type AgentSessionEvent =
 
 | 成员 | 何时发出 |
 |---|---|
-| `queue_update` | 深度可能变化的任何地方：接受一条消息时，以及循环回显一条被取走的消息时 |
+| `queue_update` | 队列**真正变化**的三个地方：一条消息被接受进 follow-up 队列时、取走点取走消息时、以及随运行丢弃未取走消息时。事件带的是队列的**内容**（`QueuedPrompt[]`），不是计数；没有去重基线——调用了就是变了，steer 入队、无害的清空都不发 |
 | `compaction` | `maybeCompact` 的末尾，在会话管理器记录该 entry 之后 |
 | `compaction_failed` | 同一位置，当摘要请求抛出时：transcript 未被改动 |
 | `tool_results_cleared` | 同一位置，在 `appendClearToolResults` 命名了被清掉的结果之后——它们没有自己的 entry，所以这是唯一说明它发生过的东西 |
@@ -176,7 +176,7 @@ type AgentSessionEvent =
 | `config_changed` | `applyModelSelection`、`applyConfig`、`setActiveTools` —— 只带变化了的字段 |
 | `retry_scheduled`、`retry_start`、`retry_end` | 重试策略的三个回调，各一个事件 |
 
-成员在**事实发生处**发出，而不是在方便处发出；`config_changed` 只携带移动了的东西，所以重发当前设置是静默的，而不是在声称有什么变了。`onEvent` 发布事件，而 `onChange` 发布快照：队列深度在两者中都出现，因为事件是活的，而快照是晚到的订阅者据以重建的状态。
+成员在**事实发生处**发出，而不是在方便处发出；`config_changed` 只携带移动了的东西，所以重发当前设置是静默的，而不是在声称有什么变了。`onEvent` 发布事件，而 `onChange` 发布快照：队列在两者中都出现（都是 `QueuedPrompt[]`），因为事件是活的，而快照是晚到的订阅者据以重建的状态。
 
 ## 流式期间的输入
 
@@ -187,9 +187,9 @@ type AgentSessionEvent =
 | `steer` | steering | 在正在跑的那一轮的下一个取走点，所以它能改变这一轮做什么 |
 | `followUp`（默认） | follow-up | 当 agent 本来要停下来时，这会开启另一轮 |
 
-`Settings.steeringMode` 和 `Settings.followUpMode`（`"all"` 或 `"one-at-a-time"`，默认 `one-at-a-time`）决定每个取走点注入多少条排队消息。`snapshot.queued` 报告已接受、循环还没取走的消息有多少条——**只算 follow-up**，steer 进的是正在跑的那一轮；`applyConfig` 重新施加这两个模式；`settle()` 等的是**队列被取空**，而不只是当前这一轮结束——唯一的例外是闸门结束的那次运行，见下。
+`Settings.steeringMode` 和 `Settings.followUpMode`（`"all"` 或 `"one-at-a-time"`，默认 `one-at-a-time`）决定每个取走点注入多少条排队消息。`snapshot.queued` 报告已接受、循环还没取走的消息**本身**（`QueuedPrompt[]`：文本与时间戳）——**只算 follow-up**，steer 进的是正在跑的那一轮；`applyConfig` 重新施加这两个模式；`settle()` 等的是**队列被取空**，而不只是当前这一轮结束——唯一的例外是闸门结束的那次运行，见下。
 
-**排队消息的落盘点在取走点上，不在接受点上**（[ADR-0003](adr/0003-queued-writes-at-drain.md)，见其文末修订）。循环在取走点直读会话自己的两条队列（`drainTranscribed`），并在**取走的那一刻**把消息写进 store——文件里的位置就是模型遇到它的位置。于是 store 同时是请求的来源（`prepareRequest` 从它建）和基线的来源（重连、重载、宿主复活都按它重建 items），而两者读到的是同一个顺序：循环回放的那个。两类消息「先于循环的回显」落盘：启动一次运行的那条 prompt（在循环之前写，窗口不必等第一个事件），和取走的插话（在取走点写）；两者的回显都由戳记匹配抑制（`isOptimisticEcho`，戳记统一记在 `RunScope.writtenAhead`，来自会话而不是 `Date.now()`，因为两条消息可能落在同一毫秒）。计数从**被接受**算到**被取走**，而不是从队列深度的一比一换算算——`one-at-a-time` 下一次取走只消费一条，排着的不止一条。
+**排队消息的落盘点在取走点上，不在接受点上**（[ADR-0003](adr/0003-queued-writes-at-drain.md)，见其文末修订）。循环在取走点直读会话自己的两条队列（`drainTranscribed`），并在**取走的那一刻**把消息写进 store——文件里的位置就是模型遇到它的位置。于是 store 同时是请求的来源（`prepareRequest` 从它建）和基线的来源（重连、重载、宿主复活都按它重建 items），而两者读到的是同一个顺序：循环回放的那个。两类消息「先于循环的回显」落盘：启动一次运行的那条 prompt（在循环之前写，窗口不必等第一个事件），和取走的插话（在取走点写）；循环的回显因此**从不落盘 user 消息**——凡走到回显的 user 消息都已被喂入方写好，`message_end` 只落 assistant 与 toolResult（ADR-0003 文末修订）。计数从**被接受**算到**被取走**，而不是从队列深度的一比一换算算——`one-at-a-time` 下一次取走只消费一条，排着的不止一条。
 
 一次运行结束时**还没被取走**的消息随运行一起丢弃（发送契约即发即弃：取走即落盘，没被取走就没人会回答它），只清空会话自己的两条队列，让深度归零——`settle()` 等的就是这个（[队列住在会话里](adr/0003-queued-writes-at-drain.md)）。中止、失败、以及恰好在循环决定不再找消息之后到达的那条 prompt，都走这一步。
 
@@ -390,7 +390,7 @@ type ServerMessage =
   | { type: "entry"; entryId: string; messageTimestamp?: number }   // entry_appended 背后的那条消息，供 "fork from here" 使用
   | { type: "approval_request"; request: PendingApproval }
   | { type: "approval_settled"; toolCallId: string; approved: boolean }
-  | { type: "status"; usage: UsageTotals; submitting: boolean; queued: number; isRetrying: boolean; retryAttempt: number }
+  | { type: "status"; usage: UsageTotals; submitting: boolean; queued: QueuedPrompt[]; isRetrying: boolean; retryAttempt: number }
   | { type: "error"; message: string };
 ```
 

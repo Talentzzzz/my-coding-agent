@@ -153,7 +153,7 @@ export interface SettingsSnapshot {
 	 * user typed, not a property of the directory.
 	 */
 	directoryNames?: Record<string, string>;
-	approval: Record<ToolApprovalKey, boolean>;
+	approval: Record<string, boolean>;
 	/** How long the `bash` tool lets one command run. */
 	bash: BashSettings;
 	model?: string;
@@ -225,6 +225,21 @@ export interface FileDiff {
 	omitted: number;
 }
 
+/**
+ * One accepted-but-undrained user message, as the wire carries it.
+ *
+ * The queue lives in the process running the session and in nothing durable, so this light-weight
+ * view — the text as sent, and the stamp it was given — is all a window can be told. It rides the
+ * snapshot, the `status` frame, and the `queue_update` event, which are the three roads a queue
+ * change can reach a client by.
+ */
+export interface QueuedPrompt {
+	/** The message's text, as the sender wrote it. */
+	text: string;
+	/** When the message was stamped, in epoch milliseconds. */
+	timestamp: number;
+}
+
 export interface SessionSnapshot {
 	id: string;
 	workDirAbsPath: string;
@@ -235,8 +250,8 @@ export interface SessionSnapshot {
 	thinkingLevel: string;
 	/** Thinking levels this model accepts, including "off". */
 	thinkingLevels: string[];
-	/** Tools that currently require approval. */
-	approvals: Record<ToolApprovalKey, boolean>;
+	/** Tools that currently require approval, keyed by tool name. */
+	approvals: Record<string, boolean>;
 	/** Every tool the session registered, in registration order, for the header's tool toggles. */
 	allTools: string[];
 	/** Tools the model may call right now. */
@@ -286,8 +301,8 @@ export interface SessionSnapshot {
 	 */
 	partial?: Message;
 	submitting: boolean;
-	/** User messages accepted mid-run that the run has not drained yet. */
-	queued: number;
+	/** User messages accepted mid-run that the run has not drained yet, as the window draws them. */
+	queued: QueuedPrompt[];
 	/** True while a transient provider failure is waiting out its backoff. */
 	isRetrying: boolean;
 	/** The 1-based retry attempt in flight, or 0 when no retry is pending. */
@@ -304,21 +319,21 @@ export interface SessionSnapshot {
  * request was made with would put a decision in the transcript that never took effect.
  */
 export type ConfigPatch = {
-	approval?: Partial<Record<ToolApprovalKey, boolean>>;
+	/** The approval entries that moved, keyed by tool name; keys left out keep the value in force. */
+	approval?: Record<string, boolean>;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 };
 
-export type ToolApprovalKey = "read" | "write" | "edit" | "glob" | "grep" | "bash";
-
 /**
- * Every tool an approval key can name, in the order the window offers them.
+ * The tools the window's settings offer approval toggles for, in the order it offers them.
  *
- * The map is keyed by *tool*, not by the tools a session happens to have active, so the set of keys is
- * the loadout's and not the session's: a prompt that says which tools are gated, or a settings file
- * that is normalised on write, iterates this rather than the active names.
+ * The approval maps themselves are keyed by tool name, so they are not bound to this list: a
+ * settings file or a session snapshot may name any tool, and the readers that report which tools
+ * are gated iterate the map rather than this. The list is only the window's default offering —
+ * the loadout this build ships, not a limit on what a map may carry.
  */
-export const APPROVAL_TOOLS: readonly ToolApprovalKey[] = ["read", "write", "edit", "glob", "grep", "bash"];
+export const APPROVAL_TOOLS: readonly string[] = ["read", "write", "edit", "glob", "grep", "bash"];
 
 /**
  * How many queued messages one drain point injects.
@@ -351,7 +366,7 @@ export type ServerMessage =
 	| { type: "entry"; entryId: string; messageTimestamp?: number }
 	| { type: "approval_request"; request: PendingApproval }
 	| { type: "approval_settled"; toolCallId: string; approved: boolean }
-	| { type: "status"; usage: UsageTotals; submitting: boolean; queued: number; isRetrying: boolean; retryAttempt: number }
+	| { type: "status"; usage: UsageTotals; submitting: boolean; queued: QueuedPrompt[]; isRetrying: boolean; retryAttempt: number }
 	/**
 	 * Something failed outside any request's reach.
 	 *

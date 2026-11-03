@@ -1,6 +1,6 @@
 import { element, icon } from "./dom.ts";
 import { openMenu } from "./render/menu.ts";
-import type { ModelOption, PromptBehavior } from "@my-agent/core/protocol";
+import type { ModelOption, PromptBehavior, QueuedPrompt } from "@my-agent/core/protocol";
 
 export interface ComposerHandlers {
 	onSubmit(text: string, behavior: PromptBehavior): void;
@@ -49,8 +49,8 @@ function modelLabel(selection: ComposerSelection): string {
  *
  * Enter sends, Shift+Enter inserts a newline, and Escape aborts the run. Submitting while the agent
  * is working is accepted rather than refused: plain Enter queues a follow-up that waits for the run
- * to stop, Ctrl/Cmd+Enter steers it instead. The queued count is the session's, shown beside the
- * buttons by {@link setQueued}.
+ * to stop, Ctrl/Cmd+Enter steers it instead. The queued prompts are the session's own, drawn above
+ * the bar by {@link setQueue} — the queue itself, as the server last published it.
  *
  * The box grows with its content up to a cap. A prompt is often several lines — a stack trace, a
  * list of files — and a box that scrolls after two of them hides the thing being written.
@@ -76,7 +76,7 @@ export class Composer {
 	private readonly textarea: HTMLTextAreaElement;
 	private readonly send: HTMLButtonElement;
 	private readonly stop: HTMLButtonElement;
-	private readonly queue: HTMLElement;
+	private readonly queue: HTMLDivElement;
 	private readonly modeButton: HTMLButtonElement;
 	private readonly modeLabel: HTMLSpanElement;
 	private readonly modelButton: HTMLButtonElement;
@@ -102,7 +102,7 @@ export class Composer {
 		});
 
 		const bar = element("div", "composer-bar");
-		this.queue = element("span", "composer-queued");
+		this.queue = element("div", "composer-queue");
 		this.queue.hidden = true;
 
 		// The mode seat leads the bar's left end: which preset of tools and approvals the session runs
@@ -174,8 +174,8 @@ export class Composer {
 		this.send = element("button", "button primary", undefined, { type: "submit" });
 		this.send.append(element("span", undefined, "发送"), icon("send"));
 
-		bar.append(this.modeButton, seat, this.queue, this.stop, this.send);
-		this.element.append(this.textarea, bar);
+		bar.append(this.modeButton, seat, this.stop, this.send);
+		this.element.append(this.textarea, this.queue, bar);
 
 		this.element.addEventListener("submit", (event) => {
 			event.preventDefault();
@@ -220,10 +220,22 @@ export class Composer {
 		this.syncDisabled();
 	}
 
-	/** How many messages are queued behind the current run. */
-	setQueued(queued: number): void {
-		this.queue.hidden = queued <= 0;
-		this.queue.textContent = `已排队 ${queued} 条`;
+	/**
+	 * Draw the queued prompts, one quiet row each.
+	 *
+	 * The list is the server's last published word, not a local echo: it is replaced whole on every
+	 * queue change, so a drain takes a row away exactly when the server says it did. The text is
+	 * what the sender wrote, first line only — a row names the message rather than retelling it.
+	 */
+	setQueue(queued: readonly QueuedPrompt[]): void {
+		this.queue.hidden = queued.length === 0;
+		this.queue.replaceChildren(
+			...queued.map((prompt) => {
+				const row = element("div", "composer-queue-row");
+				row.append(element("span", "composer-queue-tag", "排队"), element("span", "composer-queue-text", firstLine(prompt.text)));
+				return row;
+			}),
+		);
 	}
 
 	/**
@@ -300,4 +312,13 @@ export class Composer {
 		this.resize();
 		handlers.onSubmit(text, behavior);
 	}
+}
+
+/** The first non-empty line of a message, which is what a queue row has room for. */
+function firstLine(text: string): string {
+	for (const line of text.split("\n")) {
+		const trimmed = line.trim();
+		if (trimmed.length > 0) return trimmed;
+	}
+	return "";
 }

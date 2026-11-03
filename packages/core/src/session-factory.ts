@@ -11,7 +11,7 @@ import {
 	type ModelSource,
 	modelFor,
 } from "./models.ts";
-import type { SessionSnapshot, ToolApprovalKey } from "./protocol.ts";
+import type { SessionSnapshot } from "./protocol.ts";
 import { type Session, SessionManager } from "./session/session-manager.ts";
 import { sessionSnapshot } from "./session/snapshot.ts";
 import {
@@ -209,7 +209,7 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 		// the moment a session went from open to merely read.
 		...followsGlobalOf(sessionManager, options.session, settingsState, registry),
 		submitting: false,
-		queued: 0,
+		queued: [],
 		isRetrying: false,
 		retryAttempt: 0,
 		// Derived from the ledger exactly as the live session derives it: a call left dangling by a

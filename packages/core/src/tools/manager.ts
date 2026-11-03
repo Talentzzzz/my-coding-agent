@@ -1,6 +1,5 @@
 import type { AgentTool } from "../types.ts";
 import { DEFAULT_MODE_NAME, type BashSettings, type ModeSettings } from "../config.ts";
-import type { ToolApprovalKey } from "../protocol.ts";
 import { createBashTool } from "./bash.ts";
 import { createEditTool } from "./edit.ts";
 import { createGlobTool } from "./glob.ts";
@@ -96,7 +95,7 @@ export function toolDefinitions(): ToolDefinitions {
  */
 export interface ToolState {
 	activeToolNames: string[];
-	approvalOverride?: Partial<Record<ToolApprovalKey, boolean>>;
+	approvalOverride?: Record<string, boolean>;
 }
 
 /** The name the built-in default mode answers to, owned by the settings config (ADR-0005). */

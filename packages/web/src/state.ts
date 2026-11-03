@@ -10,6 +10,7 @@ import {
 	type MessageDelta,
 	type ModelOption,
 	type PendingApproval,
+	type QueuedPrompt,
 	type ServerMessage,
 	type SessionSnapshot,
 	type SettingsSnapshot,
@@ -389,8 +390,8 @@ export interface ViewState {
 	streaming: boolean;
 	usage: UsageTotals;
 	approvals: PendingApproval[];
-	/** Accepted messages the loop has not drained yet, for the composer's queue hint. */
-	queued: number;
+	/** Accepted messages the loop has not drained yet, as the server last published them. */
+	queued: QueuedPrompt[];
 	/** A retry in flight, for the header's retrying line. */
 	retry?: RetryState;
 	/** The models the user has imported, for the settings panel and the session's model picker. */
@@ -408,7 +409,7 @@ export function initialState(): ViewState {
 		streaming: false,
 		usage: { ...EMPTY_USAGE },
 		approvals: [],
-		queued: 0,
+		queued: [],
 		models: [],
 	};
 }

@@ -388,11 +388,11 @@ async function exerciseFollowUp(): Promise<void> {
 	await whenStreaming(session, gate);
 	check("the first run is streaming", session.snapshot(sidOf(session)).submitting === true);
 	check("the provider call is held open", gate.held === 1, String(gate.held));
-	check("nothing is queued yet", session.snapshot(sidOf(session)).queued === 0, String(session.snapshot(sidOf(session)).queued));
+	check("nothing is queued yet", session.snapshot(sidOf(session)).queued.length === 0, String(session.snapshot(sidOf(session)).queued.length));
 
 	const queued = await within("followUp prompt", 5_000, session.prompt(sidOf(session), "second question", { behavior: "followUp" }));
 	check("followUp resolves mid-run instead of throwing", queued.ok);
-	check("snapshot.queued is 1 before the turn ends", session.snapshot(sidOf(session)).queued === 1, String(session.snapshot(sidOf(session)).queued));
+	check("snapshot.queued is 1 before the turn ends", session.snapshot(sidOf(session)).queued.length === 1, String(session.snapshot(sidOf(session)).queued.length));
 
 	gate.release();
 	await within("the run", 10_000, running);
@@ -406,7 +406,7 @@ async function exerciseFollowUp(): Promise<void> {
 	// "once" here means the drain's write landed, not that a duplicate was deduplicated away.
 	check("the drain point injected the queued message", echoed.includes("second question"), JSON.stringify(echoed));
 	check("two provider calls were made", fake.state.callCount - base === 2, String(fake.state.callCount - base));
-	check("nothing is queued after settling", session.snapshot(sidOf(session)).queued === 0, String(session.snapshot(sidOf(session)).queued));
+	check("nothing is queued after settling", session.snapshot(sidOf(session)).queued.length === 0, String(session.snapshot(sidOf(session)).queued.length));
 
 	await session.close(sidOf(session));
 }
@@ -443,8 +443,8 @@ async function exerciseSteerVersusFollowUp(): Promise<void> {
 		);
 		check(
 			scenario.counted ? "and the queue counts it" : "and the queue does not count it",
-			session.snapshot(sidOf(session)).queued === (scenario.counted ? 1 : 0),
-			String(session.snapshot(sidOf(session)).queued),
+			session.snapshot(sidOf(session)).queued.length === (scenario.counted ? 1 : 0),
+			String(session.snapshot(sidOf(session)).queued.length),
 		);
 
 		gate.release();
@@ -538,7 +538,7 @@ async function exerciseAbortDropsUnconsumed(): Promise<void> {
 	const running = session.prompt(sidOf(session), "question before the abort");
 	await whenStreaming(session, gate);
 	await session.prompt(sidOf(session), "typed while it was answering", { behavior: "followUp" });
-	check("the run is streaming with one message queued", session.snapshot(sidOf(session)).submitting && session.snapshot(sidOf(session)).queued === 1, String(session.snapshot(sidOf(session)).queued));
+	check("the run is streaming with one message queued", session.snapshot(sidOf(session)).submitting && session.snapshot(sidOf(session)).queued.length === 1, String(session.snapshot(sidOf(session)).queued.length));
 
 	const aborting = session.abort(sidOf(session));
 	// The held call has to answer before the aborted run can end; the abort's own signal is what turns
@@ -550,7 +550,7 @@ async function exerciseAbortDropsUnconsumed(): Promise<void> {
 
 	const order = orderOf(session);
 	check("the message the run never drained is not in the store", !order.includes("user:typed while it was answering"), JSON.stringify(order));
-	check("and the queue is empty, which is what settle() waits on", session.snapshot(sidOf(session)).queued === 0, String(session.snapshot(sidOf(session)).queued));
+	check("and the queue is empty, which is what settle() waits on", session.snapshot(sidOf(session)).queued.length === 0, String(session.snapshot(sidOf(session)).queued.length));
 
 	await session.close(sidOf(session));
 }
@@ -567,13 +567,13 @@ async function exerciseQueueMode(): Promise<void> {
 	await whenStreaming(session, gate);
 	await session.prompt(sidOf(session), "turn two", { behavior: "followUp" });
 	await session.prompt(sidOf(session), "turn three", { behavior: "followUp" });
-	check("two messages are queued", session.snapshot(sidOf(session)).queued === 2, String(session.snapshot(sidOf(session)).queued));
+	check("two messages are queued", session.snapshot(sidOf(session)).queued.length === 2, String(session.snapshot(sidOf(session)).queued.length));
 
 	// Release the first turn. The loop then starts exactly one queued turn and stops inside that
 	// request, which is the hold that makes the drain count observable.
 	gate.release();
 	await gateHeld(gate);
-	check("exactly one queued message was drained", session.snapshot(sidOf(session)).queued === 1, String(session.snapshot(sidOf(session)).queued));
+	check("exactly one queued message was drained", session.snapshot(sidOf(session)).queued.length === 1, String(session.snapshot(sidOf(session)).queued.length));
 	check("and the loop has started its second request", gate.calls === 2, String(gate.calls));
 	// The drained message is in the transcript, the waiting one is still only on a queue — the depth is
 	// what reports it, and since the write waits for the drain the transcript shows it too.
@@ -587,7 +587,7 @@ async function exerciseQueueMode(): Promise<void> {
 	gate.release();
 	await within("the run", 10_000, running);
 	await within("settle()", 10_000, session.settle(sidOf(session)));
-	check("the rest drained once the run ended", session.snapshot(sidOf(session)).queued === 0, String(session.snapshot(sidOf(session)).queued));
+	check("the rest drained once the run ended", session.snapshot(sidOf(session)).queued.length === 0, String(session.snapshot(sidOf(session)).queued.length));
 	check("all three user messages are present", textsOf(session).length === 3, JSON.stringify(textsOf(session)));
 	check("three provider calls were made", fake.state.callCount - base === 3, `${fake.state.callCount - base}`);
 
@@ -614,14 +614,14 @@ async function exerciseLiveStates(): Promise<void> {
 	const queuedSeen: number[] = [];
 	const streamingSeen: boolean[] = [];
 	session.onEvent(sidOf(session), () => {
-		queuedSeen.push(session.snapshot(sidOf(session)).queued);
+		queuedSeen.push(session.snapshot(sidOf(session)).queued.length);
 		streamingSeen.push(session.snapshot(sidOf(session)).submitting);
 	});
 
 	const running = session.prompt(sidOf(session), "live question");
 	await whenStreaming(session, gate);
 	await session.prompt(sidOf(session), "live follow-up", { behavior: "followUp" });
-	check("the snapshot reports the queue while the run is live", session.snapshot(sidOf(session)).queued === 1, String(session.snapshot(sidOf(session)).queued));
+	check("the snapshot reports the queue while the run is live", session.snapshot(sidOf(session)).queued.length === 1, String(session.snapshot(sidOf(session)).queued.length));
 
 	gate.release();
 	await within("the run", 10_000, running);
@@ -694,7 +694,7 @@ async function exerciseEventStream(): Promise<void> {
 
 	const queuedEntry = entryIdsFor(session, "event question two")[0];
 	const written = seen.findIndex((event) => event.type === "entry_appended" && event.entryId === queuedEntry);
-	const queuedUpdate = seen.findIndex((event) => event.type === "queue_update" && event.queued === 1);
+	const queuedUpdate = seen.findIndex((event) => event.type === "queue_update" && event.queued.length === 1);
 	const drainedStart = seen.findIndex(
 		(event) => event.type === "message_start" && event.message.role === "user" && textOf(event.message) === "event question two",
 	);
@@ -711,7 +711,7 @@ async function exerciseEventStream(): Promise<void> {
 		written < drainedStart && drainedEnd === drainedStart + 1,
 		`start=${drainedStart} write=${written} end=${drainedEnd}`,
 	);
-	check("and the depth returns to zero once drained", seen.some((event) => event.type === "queue_update" && event.queued === 0), trace);
+	check("and the queue returns to empty once drained", seen.some((event) => event.type === "queue_update" && event.queued.length === 0), trace);
 
 	await session.close(sidOf(session));
 }

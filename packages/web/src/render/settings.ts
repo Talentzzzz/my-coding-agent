@@ -29,12 +29,12 @@ type ModeDraft = ModeSettings;
 function blankMode(): ModeDraft {
 	const approval: Record<string, boolean> = {};
 	for (const key of APPROVAL_TOOLS) approval[key] = false;
-	return { name: "新模式", tools: [], approval: approval as ModeDraft["approval"] };
+	return { name: "新模式", tools: [], approval };
 }
 
 /** A mode's one-line summary, the same shape the prototype's mode menu showed. */
 export function modeSummaryOf(tools: readonly string[], approval: Record<string, boolean>): string {
-	const ask = tools.filter((tool) => approval[tool as keyof typeof approval] === true).length;
+	const ask = tools.filter((tool) => approval[tool] === true).length;
 	return `${tools.length} 个工具 · ${ask} 项询问`;
 }
 
@@ -813,17 +813,17 @@ export class SettingsPanel {
 			});
 			row.append(box, element("span", "mode-tool-name", name));
 
-			if ((APPROVAL_TOOLS as readonly string[]).includes(name)) {
-				const select = element("select", "input mode-tool-approval");
-				select.append(option("allow", "自动允许"), option("ask", "每次询问"));
-				select.value = mode.approval[name as keyof typeof mode.approval] === true ? "ask" : "allow";
+		if (APPROVAL_TOOLS.includes(name)) {
+			const select = element("select", "input mode-tool-approval");
+			select.append(option("allow", "自动允许"), option("ask", "每次询问"));
+			select.value = mode.approval[name] === true ? "ask" : "allow";
+			select.disabled = standDown || !box.checked;
+			box.addEventListener("change", () => {
 				select.disabled = standDown || !box.checked;
-				box.addEventListener("change", () => {
-					select.disabled = standDown || !box.checked;
-				});
-				select.addEventListener("change", () => {
-					mode.approval[name as keyof typeof mode.approval] = select.value === "ask";
-				});
+			});
+			select.addEventListener("change", () => {
+				mode.approval[name] = select.value === "ask";
+			});
 				row.append(select);
 			}
 			table.append(row);
@@ -934,7 +934,7 @@ export class SettingsPanel {
 		this.defaultForm = {
 			name: DEFAULT_MODE_NAME,
 			tools: settings?.tools === undefined ? [...allTools] : [...settings.tools],
-			approval: { ...(settings?.approval ?? {}) } as ModeDraft["approval"],
+			approval: { ...(settings?.approval ?? {}) },
 		};
 		this.renderBody();
 	}

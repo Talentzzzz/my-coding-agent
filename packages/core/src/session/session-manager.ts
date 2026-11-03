@@ -24,7 +24,7 @@ import { type Usage, uuidv7 } from "@my-agent/llm";
 import { APP_NAME } from "../config.ts";
 import { trimToolCallArgs } from "../context/trim-tool-call-args.ts";
 import { clearToolResult } from "../context/clear-tool-results.ts";
-import type { SessionRef, SessionRow, ToolApprovalKey } from "../protocol.ts";
+import type { SessionRef, SessionRow } from "../protocol.ts";
 import { COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, compactionSummaryOf } from "./messages.ts";
 import { normalizePath, resolvePath, sessionDir, sessionJsonlPath, sessionMetaPath, sessionPath, sessionsDir } from "./paths.ts";
 
@@ -85,7 +85,7 @@ export interface SessionMeta {
 	/** The complete active tool set as of the last change, in registration order. */
 	activeTools?: string[];
 	/** The complete approval map as of the last change, keyed like the settings file's `approval`. */
-	approval?: Record<ToolApprovalKey, boolean>;
+	approval?: Record<string, boolean>;
 }
 
 export interface SessionEntryBase {
@@ -1255,13 +1255,10 @@ function sameToolSet(left: readonly string[], right: readonly string[]): boolean
 }
 
 /** Field equality over the two approval maps, over every key either side names. */
-function metasApprovalEqual(
-	left: Record<ToolApprovalKey, boolean>,
-	right: Record<ToolApprovalKey, boolean>,
-): boolean {
+function metasApprovalEqual(left: Record<string, boolean>, right: Record<string, boolean>): boolean {
 	const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
 	for (const key of keys) {
-		if (left[key as ToolApprovalKey] !== right[key as ToolApprovalKey]) return false;
+		if (left[key] !== right[key]) return false;
 	}
 	return true;
 }
@@ -1437,7 +1434,7 @@ export class SessionManager {
 	 * contract the model and level follow. Both maps are always present, so one call made for a
 	 * tool change carries the approval set along and the other way round.
 	 */
-	setToolConfig(s: Session, activeTools: string[], approval: Record<ToolApprovalKey, boolean>): void {
+	setToolConfig(s: Session, activeTools: string[], approval: Record<string, boolean>): void {
 		recordMeta(s, (meta) => {
 			if (
 				meta.activeTools !== undefined &&
@@ -1759,7 +1756,7 @@ export class SessionManager {
 	 * with the two-file split: moving the leaf no longer switches these values, because they are the
 	 * session's, not a branch's.
 	 */
-	getRecordedToolConfig(s: Session): { activeTools?: string[]; approval?: Record<ToolApprovalKey, boolean> } {
+	getRecordedToolConfig(s: Session): { activeTools?: string[]; approval?: Record<string, boolean> } {
 		return { activeTools: s.meta.activeTools, approval: s.meta.approval };
 	}
 
