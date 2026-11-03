@@ -3,6 +3,9 @@
 日期：2026-11-01 · 状态：已接受（pure-services 01 号票拍板，02–08 号票落地）
 取代：[0006](0006-stateless-session-architecture.md)（部分——仅其落地序列中票
 08/09/16 有意保留的「薄壳门面」条款，其余决定不变）
+取代者：[0011](0011-agent-holds-session-state.md)（部分，2026-11-04——决定 3 的
+Manager 键控缓存与决定 4 的活登记处归属及「只装进行中且磁盘上没有」判据；其余
+决定不变）
 
 设计过程见 `.scratch/pure-services/`（形状在 2026-11-01 的设计对话敲定，本
 ADR 只记合拢后的契约）。
@@ -39,11 +42,16 @@ TypeScript 的 `private` 继续守账本不变式。
    重建、**藏在自己内部、不被传递**——承接 0006 §3 的缓存规则与前作票 16 的
    裁决（每请求全文重放被否决）。缓存不离开属主正是它与聚合袋的分界：袋子
    会被传来传去，缓存不会。
+   **（2026-11-04 Superseded，[0011](0011-agent-holds-session-state.md) 决定 5：两个 Manager 的键控缓存
+   整条删除，冷读改为 `open(id)` 每次 fill 一份、用完即弃。）**
 4. **活的一半例外**。队列、activeRun、订阅集合不能从磁盘现建，居一个按 id
    键控的**窄**登记处，只装「进行中且磁盘上没有」的东西。登记处的归属与命名
    在 03 号票定（候选 `OpenSession`），本 ADR 留指针；`SessionRuntime` 的既有
    窄定义不动——登记处**装着**它，不替换它。不变量不变：进程重启丢弃全部
    条目，重开即重建。
+   **（2026-11-04 Superseded，[0011](0011-agent-holds-session-state.md) 决定 4：登记处搬进 `Agent` 的
+   `Map<id, AgentState>`，判据重写为「装丢了就没了的那一份」——盘上有文件与 `fileCreated === false`
+   的会话都进表。）**
 5. **modelState 消失**。模型选择随消息到达（`ModelSelection`），没带就从账本
    派生 + `fillModel` 现算——不再有驻留内存的 per-session 模型状态。
 6. **进程级不可变配置留作构造注入**。hooks、transport（含 retry 策略）、

@@ -91,6 +91,15 @@ persist 动词）。**fork 不 fill 也不入表**（票面 `➡️` 只说不�
 （`sessionSetting` 字段）与目录级（`modes` / `retry` / 默认 `approval`）同读一个袋的边界不变。落点：11 在
 `applySettings` 注释里写那句话；architecture.md 那句归 14（文档不跑在代码前面）；ADR 一句归 06。
 
+**06 号票（2026-11-04 解决，ADR-0011）**：`docs/adr/0011-agent-holds-session-state.md` 已落档，按 01–05
+的答案合拢成八条决定（一张表四层合一 / `adopt` 唯一门先到先得 / 装配点留在工厂 / 表装「丢了就没了的那一份」
+/ 两个 Manager 缓存清零且 `stateOf` 是换源不是改名 / 删除权随表——六条判据、边沿试全量查、`evict`/`drop`
+两动词、`clear()` 取消 / 设置是打开时的快照 / 宽限与 reap deny 删），代价六笔与被放弃六条照实入档；状态行
+「尚未落地」。0007 头行加取代者、决定 3/4 原文保留就地标 Superseded；adr/README 清单加行。**改口一处**：
+票面「要改的文字」里的 AGENTS.md / architecture.md / README.md 按 01 §8、03 §7、05 §3 的改派**归 14**——
+文档不跑在代码前面，那些句子今天仍为真，代码落地（07–13）之前不改；14 同时负责翻转两处「尚未落地」。
+07 号票解除阻塞。
+
 ## Not yet specified
 
 - **迁移顺序的中间态**：`SessionManager.stateOf` 在树里的调用点是 29 处（agent 15、hub 4、`projection.ts` 1、
