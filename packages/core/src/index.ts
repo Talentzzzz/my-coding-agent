@@ -167,11 +167,13 @@ export {
 	type SessionMeta,
 	type SessionInfo,
 	type Session,
+	type SessionSetting,
 	type MessageEntry,
 	type LeafEntry,
 	type UsageEntry,
 	type DirectorySessions,
 } from "./session/session-manager.ts";
+export { createAgentState, createLive, type AgentState, type Live } from "./session/agent-state.ts";
 export { createSessionRuntime, type ActiveRun, type SessionRuntime } from "./session/session-runtime.ts";
 export { OpenSessions, createOpenSession, type OpenSession } from "./session/open-session.ts";
 export { globalDefaultToolState, toolStateOf } from "./session/tool-config.ts";

@@ -59,6 +59,12 @@ export const CURRENT_SESSION_VERSION = 5;
  * Every change rewrites the whole file (temp + rename), because it is a snapshot, not a log — the
  * JSONL beside it is the log, and the two are paired by stem: a session exists exactly when both
  * files do.
+ *
+ * This is the **disk** shape. In memory a session regroups the choice fields into
+ * {@link SessionSetting} — the thinking level folded into `model` — and the translation between the
+ * two lives in exactly two places: the fill path merges on the way in, {@link metaOf} splits on the
+ * way out. Nothing else on disk changes: the version does not move, and an older session reads
+ * as it always did.
  */
 export interface SessionMeta {
 	version: number;
@@ -400,10 +406,14 @@ function buildSessionPath(sessionEntryMapById: SessionEntryMapById, leafId?: str
  * leaf no longer switches them.
  */
 function getSessionContextSettings(
-	meta: SessionMeta,
+	setting: SessionSetting,
 	chain: SessionEntry[],
 ): Pick<SessionContext, "thinkingLevel" | "model"> {
-	let model = meta.model ?? null;
+	const merged = setting.model;
+	let model =
+		merged?.name !== undefined && merged?.modelId !== undefined
+			? { name: merged.name, modelId: merged.modelId }
+			: null;
 	if (model === null) {
 		for (const entry of chain) {
 			if (entry.type === "message" && entry.message.role === "assistant") {
@@ -411,7 +421,7 @@ function getSessionContextSettings(
 			}
 		}
 	}
-	return { thinkingLevel: meta.thinkingLevel ?? "off", model };
+	return { thinkingLevel: merged?.thinkingLevel ?? "off", model };
 }
 
 /**
@@ -962,6 +972,40 @@ function previewOfMessage(message: Message): string {
 }
 
 /**
+ * One session's own choices, regrouped out of the disk snapshot's flat fields.
+ *
+ * This is a memory grouping only — the `.json` on disk keeps its flat shape ({@link SessionMeta}),
+ * and the fill path / {@link metaOf} are the only two translation points between the two. The
+ * thinking level lives inside `model` rather than beside it: a session's level and its row are one
+ * choice the input box sends together, so memory holds them as one object. Every field but the
+ * working directory is absent until chosen, exactly as the disk fields are.
+ */
+export interface SessionSetting {
+	/** The working directory the session was opened on, absolute. */
+	workDirAbsPath: string;
+	/**
+	 * The session file this one was forked from or delegated by, as the disk's `parentSession` names
+	 * it: the source's `.jsonl`, absolute — a path, not an id, because a fork is traceable to the
+	 * file it copied and the file is what a reader has in hand. The name follows the state's shape;
+	 * the value is whatever the disk carries, so an older session reads unchanged.
+	 */
+	parentSessionId?: string;
+	/** The conversation's own name, when a person gave it one; absent means "derive it". */
+	title?: string;
+	/**
+	 * The model choice in force, with the thinking level it was asked at: `name` / `modelId` name the
+	 * row, `thinkingLevel` is the level the session last chose. Each part is absent until chosen — a
+	 * level recorded with no row is a model with only `thinkingLevel`, which the disk splits back
+	 * into two fields on the way out.
+	 */
+	model?: { name?: string; modelId?: string; thinkingLevel?: string };
+	/** The complete active tool set as of the last change, in registration order. */
+	activeTools?: string[];
+	/** The complete approval map as of the last change, keyed like the settings file's `approval`. */
+	approval?: Record<string, boolean>;
+}
+
+/**
  * The pure-data state of one session's ledger: what the session operations read and write, and
  * nothing else.
  *
@@ -971,26 +1015,29 @@ function previewOfMessage(message: Message): string {
  * state is plain data on purpose: which function touches which field is visible
  * in the signatures, and a test can construct a bare state and call any operation on it directly.
  *
- * The fields are what the two files replay into. `meta` is the `.json` snapshot — the session's
- * identity and its current choices — and `jsonlEntries` is the `.jsonl` entry stream: every entry
+ * The fields are what the two files replay into. The identity is the bag's own — id, creation stamp,
+ * the two file paths — and {@link SessionSetting} holds the `.json` snapshot's current choices,
+ * regrouped in memory: the disk file stays flat, and the fill path / {@link metaOf} are the only
+ * translation points. `jsonlEntries` is the `.jsonl` entry stream: every entry
  * carries an id and its parent's id, so the stream reads as a tree and `leafId` is where the
  * conversation currently is. Appending creates a child of the leaf; {@link branch} moves the leaf to
  * an earlier entry — and records the move as a {@link LeafEntry}, so a fresh reader restores it — so
  * a new line of work continues from there without touching what was already written. The entry
  * stream is never rewritten once it holds an entry, which is what lets an entry kind or a field this
- * build does not understand be carried through untouched; only `meta` is rewritten whole, and only
- * on a change to a value it holds.
+ * build does not understand be carried through untouched; only the snapshot is rewritten whole, and
+ * only on a change to a value it holds.
  *
  * Use {@link buildSessionContext} to get the messages a provider should be sent: it follows the
  * branch from root to leaf and folds in the newest compaction.
  */
 export interface Session {
 	sessionId: string;
+	/** The ISO stamp the session was created at; the file name leads with the same moment. */
+	timestamp: string;
 	/** The `.jsonl` entry stream's path, absolute; the `.json` snapshot lives at the same stem. */
 	sessionFileAbsPath?: string;
 	/** The session directory, absolute; null for a session that is never written. */
 	sessionDirAbsPath: string | null;
-	workDirAbsPath: string;
 	persist: boolean;
 	/**
 	 * True once this session's files exist and hold the log as of the last write.
@@ -1000,11 +1047,75 @@ export interface Session {
 	 * true means entries append and meta changes rewrite the snapshot. See {@link persistEntry}.
 	 */
 	fileCreated: boolean;
-	/** The `.json` snapshot's current contents, in memory; the disk copy trails it only when persisted. */
-	meta: SessionMeta;
+	/** The session's own choices, as the memory regrouping of the disk snapshot's flat fields. */
+	sessionSetting: SessionSetting;
 	jsonlEntries: SessionEntry[];
 	sessionEntryMapById: SessionEntryMapById;
 	leafId: string | null;
+}
+
+/**
+ * Merge a disk snapshot's flat choice fields into the memory's regrouped setting.
+ *
+ * The one direction of the disk↔memory translation that reads a file: the thinking level folds
+ * into `model`, everything else moves under its new name unchanged. Absent means absent — a
+ * session that never chose keeps every field off the object, so "never chose" and "chose the
+ * default" stay distinguishable.
+ */
+function sessionSettingOf(meta: SessionMeta): SessionSetting {
+	return {
+		workDirAbsPath: meta.workDir,
+		...(meta.parentSession === undefined ? {} : { parentSessionId: meta.parentSession }),
+		...(meta.title === undefined ? {} : { title: meta.title }),
+		...(meta.model === undefined && meta.thinkingLevel === undefined
+			? {}
+			: { model: { ...meta.model, ...(meta.thinkingLevel === undefined ? {} : { thinkingLevel: meta.thinkingLevel }) } }),
+		...(meta.activeTools === undefined ? {} : { activeTools: meta.activeTools }),
+		...(meta.approval === undefined ? {} : { approval: meta.approval }),
+	};
+}
+
+/**
+ * Split the merged model choice back into the disk snapshot's two flat fields.
+ *
+ * The row is written only when both of its names are present — a model object carrying only a
+ * thinking level is a level recorded with no row, and the disk holds that as `thinkingLevel` alone.
+ * A session this build wrote always has both names on the row, so the split is lossless for
+ * everything the disk can legally hold.
+ */
+function recordedModelOf(
+	model: SessionSetting["model"],
+): Pick<SessionMeta, "model" | "thinkingLevel"> {
+	if (model === undefined) return {};
+	const { name, modelId, thinkingLevel } = model;
+	return {
+		...(name === undefined || modelId === undefined ? {} : { model: { name, modelId } }),
+		...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+	};
+}
+
+/**
+ * The disk snapshot one session's memory state writes: the flat {@link SessionMeta} rebuilt from
+ * the regrouped {@link SessionSetting}.
+ *
+ * The one direction of the disk↔memory translation that writes a file — {@link writeMetaFile}
+ * serializes this, and `getMeta` hands the same shape to readers. The identity fields come from the
+ * bag's own: the version is always this build's (the read side refuses anything else), and the
+ * creation stamp travels on the bag because the file name cannot give it back losslessly.
+ */
+function metaOf(s: Session): SessionMeta {
+	const setting = s.sessionSetting;
+	return {
+		version: CURRENT_SESSION_VERSION,
+		id: s.sessionId,
+		timestamp: s.timestamp,
+		workDir: setting.workDirAbsPath,
+		...(setting.parentSessionId === undefined ? {} : { parentSession: setting.parentSessionId }),
+		...(setting.title === undefined ? {} : { title: setting.title }),
+		...recordedModelOf(setting.model),
+		...(setting.activeTools === undefined ? {} : { activeTools: setting.activeTools }),
+		...(setting.approval === undefined ? {} : { approval: setting.approval }),
+	};
 }
 
 /**
@@ -1031,11 +1142,11 @@ export function createSession(
 	if (!existsSync(absDir)) mkdirSync(absDir, { recursive: true });
 	const s: Session = {
 		sessionId: "",
+		timestamp: "",
 		sessionDirAbsPath: absDir,
-		workDirAbsPath: resolvePath(workDirInput),
 		persist: true,
 		fileCreated: false,
-		meta: { version: CURRENT_SESSION_VERSION, id: "", timestamp: "", workDir: "" },
+		sessionSetting: { workDirAbsPath: resolvePath(workDirInput) },
 		jsonlEntries: [],
 		sessionEntryMapById: new Map(),
 		leafId: null,
@@ -1048,11 +1159,11 @@ export function createSession(
 export function inMemorySession(workDirInput: string = process.cwd(), parentSessionFileInput?: string): Session {
 	const s: Session = {
 		sessionId: "",
+		timestamp: "",
 		sessionDirAbsPath: null,
-		workDirAbsPath: resolvePath(workDirInput),
 		persist: false,
 		fileCreated: false,
-		meta: { version: CURRENT_SESSION_VERSION, id: "", timestamp: "", workDir: "" },
+		sessionSetting: { workDirAbsPath: resolvePath(workDirInput) },
 		jsonlEntries: [],
 		sessionEntryMapById: new Map(),
 		leafId: null,
@@ -1097,12 +1208,12 @@ export function fillSession(absFilePath: string): Session {
 	}
 	const s: Session = {
 		sessionId: meta.id,
+		timestamp: meta.timestamp,
 		sessionFileAbsPath: absJsonl,
 		sessionDirAbsPath: dirname(absJsonl),
-		workDirAbsPath: meta.workDir,
 		persist: true,
 		fileCreated: true,
-		meta,
+		sessionSetting: sessionSettingOf(meta),
 		jsonlEntries: entries,
 		sessionEntryMapById: new Map(),
 		leafId: null,
@@ -1125,13 +1236,10 @@ export function fillSession(absFilePath: string): Session {
  */
 export function newSession(s: Session, parentSessionFile?: string): string | undefined {
 	s.sessionId = createSessionId();
-	const timestamp = new Date().toISOString();
-	s.meta = {
-		version: CURRENT_SESSION_VERSION,
-		id: s.sessionId,
-		timestamp,
-		workDir: s.workDirAbsPath,
-		...(parentSessionFile === undefined ? {} : { parentSession: resolvePath(parentSessionFile) }),
+	s.timestamp = new Date().toISOString();
+	s.sessionSetting = {
+		workDirAbsPath: s.sessionSetting.workDirAbsPath,
+		...(parentSessionFile === undefined ? {} : { parentSessionId: resolvePath(parentSessionFile) }),
 	};
 	s.jsonlEntries = [];
 	s.sessionEntryMapById.clear();
@@ -1139,7 +1247,7 @@ export function newSession(s: Session, parentSessionFile?: string): string | und
 	s.fileCreated = false;
 
 	const dir = s.sessionDirAbsPath;
-	if (s.persist && dir !== null) s.sessionFileAbsPath = sessionPath(dir, s.sessionId, timestamp);
+	if (s.persist && dir !== null) s.sessionFileAbsPath = sessionPath(dir, s.sessionId, s.timestamp);
 	return s.sessionFileAbsPath;
 }
 
@@ -1185,7 +1293,7 @@ function writeMetaFile(s: Session): void {
 	const absTemp = `${absJson}.${process.pid}.tmp`;
 	const fd = openSync(absTemp, "wx");
 	try {
-		writeFileSync(fd, `${JSON.stringify(s.meta, null, "\t")}\n`);
+		writeFileSync(fd, `${JSON.stringify(metaOf(s), null, "\t")}\n`);
 	} finally {
 		closeSync(fd);
 	}
@@ -1237,15 +1345,15 @@ function appendEntry(s: Session, entry: SessionEntry): void {
 /**
  * Apply one change to the snapshot, and rewrite the file when it actually changed.
  *
- * The mutation lands on the in-memory meta first — that is the bag every reader answers from — and
+ * The mutation lands on the in-memory setting first — that is the bag every reader answers from — and
  * the disk copy follows only when the session has files to rewrite. A session whose files are not
  * born yet keeps the change in memory alone: {@link persistEntry} writes the snapshot at birth, so
  * a choice made before the first message survives without breaking the "no conversation, no files"
  * rule. `change` returns false for a no-op, which is what keeps a run of identical writes from
  * costing a rewrite each.
  */
-function recordMeta(s: Session, change: (meta: SessionMeta) => boolean): void {
-	if (!change(s.meta)) return;
+function recordMeta(s: Session, change: (setting: SessionSetting) => boolean): void {
+	if (!change(s.sessionSetting)) return;
 	if (s.persist && s.fileCreated) writeMetaFile(s);
 }
 
@@ -1404,9 +1512,9 @@ export class SessionManager {
 	 * the choice survives without breaking the "no conversation, no files" rule.
 	 */
 	setThinkingLevel(s: Session, thinkingLevel: string): void {
-		recordMeta(s, (meta) => {
-			if (meta.thinkingLevel === thinkingLevel) return false;
-			meta.thinkingLevel = thinkingLevel;
+		recordMeta(s, (setting) => {
+			if (setting.model?.thinkingLevel === thinkingLevel) return false;
+			setting.model = { ...(setting.model ?? {}), thinkingLevel };
 			return true;
 		});
 	}
@@ -1420,9 +1528,9 @@ export class SessionManager {
 	 * model under another name, and the refs built from the old name are already accounted for.
 	 */
 	setModel(s: Session, name: string, modelId: string): void {
-		recordMeta(s, (meta) => {
-			if (meta.model?.name === name && meta.model.modelId === modelId) return false;
-			meta.model = { name, modelId };
+		recordMeta(s, (setting) => {
+			if (setting.model?.name === name && setting.model.modelId === modelId) return false;
+			setting.model = { ...(setting.model ?? {}), name, modelId };
 			return true;
 		});
 	}
@@ -1435,17 +1543,17 @@ export class SessionManager {
 	 * tool change carries the approval set along and the other way round.
 	 */
 	setToolConfig(s: Session, activeTools: string[], approval: Record<string, boolean>): void {
-		recordMeta(s, (meta) => {
+		recordMeta(s, (setting) => {
 			if (
-				meta.activeTools !== undefined &&
-				sameToolSet(meta.activeTools, activeTools) &&
-				meta.approval !== undefined &&
-				metasApprovalEqual(meta.approval, approval)
+				setting.activeTools !== undefined &&
+				sameToolSet(setting.activeTools, activeTools) &&
+				setting.approval !== undefined &&
+				metasApprovalEqual(setting.approval, approval)
 			) {
 				return false;
 			}
-			meta.activeTools = [...activeTools];
-			meta.approval = { ...approval };
+			setting.activeTools = [...activeTools];
+			setting.approval = { ...approval };
 			return true;
 		});
 	}
@@ -1459,9 +1567,9 @@ export class SessionManager {
 	 * reading ADR-0002 argued for from file order), and the snapshot states it directly.
 	 */
 	setTitle(s: Session, title: string): void {
-		recordMeta(s, (meta) => {
-			if (meta.title === title) return false;
-			meta.title = title;
+		recordMeta(s, (setting) => {
+			if (setting.title === title) return false;
+			setting.title = title;
 			return true;
 		});
 	}
@@ -1716,7 +1824,7 @@ export class SessionManager {
 	 */
 	buildSessionContext(s: Session): SessionContext {
 		const chain = buildSessionPath(s.sessionEntryMapById, s.leafId);
-		const { thinkingLevel, model } = getSessionContextSettings(s.meta, chain);
+		const { thinkingLevel, model } = getSessionContextSettings(s.sessionSetting, chain);
 		const messages = contextEntriesFromPath(chain).flatMap(sessionEntryToContextMessages);
 		return { messages, thinkingLevel, model };
 	}
@@ -1731,9 +1839,8 @@ export class SessionManager {
 	 * assistant message, which can only name a row the user left unnamed.
 	 */
 	getRecordedSettings(s: Session): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
-		const recorded: { model?: { name: string; modelId: string }; thinkingLevel?: string } = {};
-		if (s.meta.model !== undefined) recorded.model = s.meta.model;
-		if (s.meta.thinkingLevel !== undefined) recorded.thinkingLevel = s.meta.thinkingLevel;
+		const recorded: { model?: { name: string; modelId: string }; thinkingLevel?: string } =
+			recordedModelOf(s.sessionSetting.model);
 		if (recorded.model === undefined) {
 			// Only ever a fallback, and a weak one: a message records the wire id it was answered by,
 			// not the row's identity, so this can only name a row the user left unnamed. See
@@ -1757,7 +1864,7 @@ export class SessionManager {
 	 * session's, not a branch's.
 	 */
 	getRecordedToolConfig(s: Session): { activeTools?: string[]; approval?: Record<string, boolean> } {
-		return { activeTools: s.meta.activeTools, approval: s.meta.approval };
+		return { activeTools: s.sessionSetting.activeTools, approval: s.sessionSetting.approval };
 	}
 
 	/**
@@ -1776,9 +1883,12 @@ export class SessionManager {
 		return ids;
 	}
 
-	/** The `.json` snapshot: identity and current choices. Always present on a built session. */
+	/**
+	 * The `.json` snapshot's flat shape, rebuilt from the session's regrouped setting: identity and
+	 * current choices. Always present on a built session.
+	 */
 	getMeta(s: Session): SessionMeta {
-		return s.meta;
+		return metaOf(s);
 	}
 
 	/** Every entry in file order. Use the `append*` methods to add more. */
@@ -1798,7 +1908,7 @@ export class SessionManager {
 	 * rename the session.
 	 */
 	getTitle(s: Session): string {
-		if (s.meta.title !== undefined) return s.meta.title;
+		if (s.sessionSetting.title !== undefined) return s.sessionSetting.title;
 		return deriveTitle(this.getBranch(s).flatMap(sessionEntryToContextMessages));
 	}
 

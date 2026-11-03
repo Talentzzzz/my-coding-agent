@@ -358,7 +358,9 @@ export class SessionHub {
 		// A session created and not spoken in has no file to open, but this process still holds the
 		// transcript it is building — reading it is the same cold read, over an empty log.
 		const pending = this.pendingManager(id);
-		if (pending !== undefined) return readSessionSnapshot(this.sessionOptions(pending, pending.workDirAbsPath));
+		if (pending !== undefined) {
+			return readSessionSnapshot(this.sessionOptions(pending, pending.sessionSetting.workDirAbsPath));
+		}
 
 		const absPath = SessionManager.findSessionFilePathById(id);
 		if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
@@ -366,7 +368,7 @@ export class SessionHub {
 		// transcript of a session nobody is running is a trace. `open` goes through the cache instead,
 		// because the state it builds is about to be written to.
 		const state = fillSession(absPath);
-		return readSessionSnapshot(this.sessionOptions(state, state.workDirAbsPath));
+		return readSessionSnapshot(this.sessionOptions(state, state.sessionSetting.workDirAbsPath));
 	}
 
 	/**
@@ -559,7 +561,7 @@ export class SessionHub {
 		if (absSourcePath === undefined) throw new Error(`Unknown session: ${sessionId}`);
 		// The branch is written where its source lives: forking a conversation held in another
 		// directory must not quietly move it into this one.
-		const absTargetWorkDir = hosted?.workDirAbsPath ?? fillSession(absSourcePath).workDirAbsPath;
+		const absTargetWorkDir = hosted?.workDirAbsPath ?? fillSession(absSourcePath).sessionSetting.workDirAbsPath;
 		const id = this.sessions.forkFrom(absSourcePath, absTargetWorkDir, entryId).sessionId;
 		this.current = Promise.resolve(id);
 		this.announceHost(id, undefined);
@@ -690,7 +692,7 @@ export class SessionHub {
 		// and this is the road its own id takes from the creation to the first message.
 		const pending = this.pendingManager(id);
 		const state = pending ?? this.sessions.stateOf(id);
-		const workDirAbsPath = state.workDirAbsPath;
+		const workDirAbsPath = state.sessionSetting.workDirAbsPath;
 		await ensureSession(this.sessionOptions(state, workDirAbsPath));
 		const host = new HostedSession(id, workDirAbsPath);
 		this.hosts.set(id, host);
