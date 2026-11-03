@@ -28,6 +28,7 @@ Status: working
 - [全仓 entry kind 触点清单](issues/01-touchpoints.md): 五种留 JSONL、四种迁 JSON、tool_result_view 消失、header 进 JSON；触点集中在 core 的 session-manager/agent，web 零文件触点，注意 usage 无写点与 branch 语义变化（清单：research/touchpoints.md）
 - [SessionManager 两文件重写](issues/02-session-manager.md): `SessionMeta` v5 schema + temp/rename 原子重写；JSON 诞生 = 首条消息 gate 时两文件同写（`.json` 是 commit marker）；版本判定落 `.json`；v≤4/配对残缺在扫描与 fillSession 两处即删；类型缩到六种、四个迁值方法 setTitle/setModel/setThinkingLevel/setToolConfig；dangling 与审批恢复确认成立无新票；branch 不再切换选择（applyBranchSelection/emitBranchToolConfig 删）；票 03 的时机/失败/gate 三问已拍板
 - [写侧改造：agent 与 JSON 快照写点](issues/03-writers.md): 核对收账——recordSelection/rename/tool_config 三类写点全走 recordMeta 快照重写，append 路径六种 kind 原样；三问按票 02 拍板确认（即时写 / 失败抛调用方 / gate 不变）；零代码改动，只清了 server 侧五处「rename append 一条 entry」的滞留注释
+- [server 连带：listing、fork、删除与 protocol](issues/04-server-fork-listing.md): 核对收账——listing 拆两半（settleSessionFiles 配对 + buildSessionInfo 身份从 meta、统计从 JSONL）、fork 复制两文件且 parentSession 指源 `.jsonl`、remove 删两文件、tools/approvals 路由走 setToolConfig 快照且 config_changed 照发；全部已在票 02/03 落地，本票零代码改动，`npm run check` + 相关 smoke（含起服 smoke-api）全绿
 
 ## Not yet specified
 
