@@ -1,14 +1,14 @@
 // Session-level smoke test: drives a real Agent against the scripted transport, so streaming,
 // queueing, and steering are testable without a provider key.
 // Run with: node scripts/smoke-session.ts
-import { readdirSync, readFileSync } from "node:fs";
-import { mkdtemp, rm, access, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, access, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Message } from "@my-agent/llm";
 import type { AssistantMessage, ChatTransport, SimpleStreamOptions } from "@my-agent/llm";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall, type FakeResponseStep } from "./fake-transport.ts";
 import {
+	CURRENT_SESSION_VERSION,
 	createSession,
 	createToolRegistry,
 	fillSession,
@@ -18,7 +18,6 @@ import {
 	inMemorySettingsState,
 	SessionManager,
 	toolDefinitions,
-	Workspace,
 	type Agent,
 	type AgentSessionEvent,
 	type AgentTool,
@@ -30,10 +29,8 @@ import {
 	type Session,
 	type SettingsState,
 	type ToolRegistry,
-	type ToolResultViewEntry,
 	type ModelConfig,
-	workspaceDir,
-	toolResultViewsOf,
+	sessionDir,
 } from "@my-agent/core";
 
 /** The ledger's operations are the service's methods, so a script holds one to call them on. */
@@ -248,7 +245,7 @@ async function openSession(
 	const state = createSession(root);
 	const sessionSettings = inMemorySettingsState(settings(overrides));
 	const session = await openAgent({
-		absWorkspaceRoot: root,
+		workDirAbsPath: root,
 		session: state,
 		models: run.models ?? models,
 		api: run.api ?? fake.api,
@@ -671,8 +668,8 @@ async function exerciseEventStream(): Promise<void> {
 	await within("settle()", 10_000, session.settle(sidOf(session)));
 
 	const persisted = entriesOf(session).filter((entry) => entry.type === "message").map((entry) => entry.id);
-	// Only the message entries: the first request of a branch that records nothing also announces the
-	// `model_change` and `thinking_level_change` it writes, and those are checked where they are written.
+	// Only the message entries: the meta values the request wrote go to the `.json` snapshot, not to
+	// the entry stream, so there is nothing else to announce.
 	const appended = seen.flatMap((event) =>
 		event.type === "entry_appended" && event.kind === "message" ? [event.entryId] : [],
 	);
@@ -915,8 +912,9 @@ async function exerciseBeforeToolHook(): Promise<void> {
 }
 
 /**
- * A test `after_tool` handler rewrites what the model is shown, and the transcript keeps what the tool
- * returned: the seam decides the context, the store decides the record.
+ * A test `after_tool` handler rewrites what the model is shown — and that rewrite is final: the
+ * transcript keeps exactly what the hook returned, because the ledger no longer stores a second
+ * version. The write is the decision.
  */
 async function exerciseAfterToolHook(): Promise<void> {
 	process.stdout.write("after_tool hook\n");
@@ -943,68 +941,43 @@ async function exerciseAfterToolHook(): Promise<void> {
 	check("and not what the tool returned", first.every((text) => !text.includes("the tool's own words")), JSON.stringify(first));
 	check("a later request still carries it", (sent[2]?.texts ?? []).some((text) => text.includes("REPLACED BY THE TEST HOOK")), JSON.stringify(sent[2]?.texts));
 	check(
-		"while the transcript kept the tool's own output",
-		toolResultTexts(session).some((text) => text.includes("the tool's own words")),
+		"and the transcript keeps the rewrite, not the tool's output",
+		toolResultTexts(session).some((text) => text.includes("REPLACED BY THE TEST HOOK")) &&
+			toolResultTexts(session).every((text) => !text.includes("the tool's own words")),
 		JSON.stringify(toolResultTexts(session)),
 	);
 
-	// The rewrite outlives the process that made it: the shown half is an entry of its own, written
-	// behind the toolResult message that keeps the stored half. The transcript and the wire read that
-	// message; only the request reads the entry — which is what a reopened session has to prove.
-	check(
-		"the live ledger already pairs the halves",
-		toolResultViewsOf(session.sessionManager.buildContextEntries(bagOf(session))).size === 1,
-		JSON.stringify(entriesOf(session).map((entry) => entry.type)),
-	);
 	const sessionFile = session.sessionManager.stateOf(sidOf(session)).sessionFileAbsPath;
 	await session.close(sidOf(session));
 
-	process.stdout.write("after_tool hook — the rewrite outlives the process\n");
+	process.stdout.write("after_tool hook — the rewrite survives the file\n");
 	const reopenedFile = fillSession(sessionFile!);
 	const fileEntries = store.getEntries(reopenedFile);
-	const storedEntry = fileEntries.find(
+	const rewrittenEntry = fileEntries.find(
 		(entry): entry is MessageEntry =>
-			entry.type === "message" && entry.message.role === "toolResult" && textOf(entry.message).includes("the tool's own words"),
+			entry.type === "message" && entry.message.role === "toolResult" && textOf(entry.message).includes("REPLACED BY THE TEST HOOK"),
 	);
-	check("the stored half is still in the file", storedEntry !== undefined);
-	const viewEntry = fileEntries.find((entry): entry is ToolResultViewEntry => entry.type === "tool_result_view");
-	check("the shown half is an entry of its own", viewEntry !== undefined);
+	check("the rewritten content is in the file itself", rewrittenEntry !== undefined);
+	// Six kinds, and nothing else: the legacy `tool_result_view` kind is gone with the v5 format.
+	const kinds = new Set(fileEntries.map((entry) => entry.type));
 	check(
-		"recorded behind its own toolResult message",
-		storedEntry !== undefined && viewEntry !== undefined && viewEntry.parentId === storedEntry.id,
-		`${viewEntry?.parentId} vs ${storedEntry?.id}`,
-	);
-	check(
-		"for the call it rewrote",
-		storedEntry !== undefined && viewEntry !== undefined && viewEntry.toolCallId === storedEntry.message.toolCallId,
-		`${viewEntry?.toolCallId} vs ${storedEntry?.message.toolCallId}`,
-	);
-	check(
-		"and it carries what the hook put there",
-		viewEntry?.shown.some((block) => block.type === "text" && block.text === "REPLACED BY THE TEST HOOK") === true,
-		JSON.stringify(viewEntry?.shown),
+		"the file holds only the six v5 kinds",
+		JSON.stringify([...kinds].sort()) ===
+			JSON.stringify(["clear_tool_result", "compaction", "leaf", "message", "trim_tool_call_arg", "usage"].filter((kind) => kinds.has(kind))),
+		JSON.stringify([...kinds]),
 	);
 	const transcriptTexts = JSON.stringify(store.buildSessionContext(reopenedFile).messages);
 	check(
-		"the transcript a window reads still shows the tool's own output",
-		transcriptTexts.includes("the tool's own words") && !transcriptTexts.includes("REPLACED BY THE TEST HOOK"),
+		"the transcript a window reads is the rewrite",
+		transcriptTexts.includes("REPLACED BY THE TEST HOOK") && !transcriptTexts.includes("the tool's own words"),
 		transcriptTexts.slice(0, 200),
-	);
-	const replayedViews = toolResultViewsOf(store.buildContextEntries(reopenedFile));
-	check(
-		"the replayed views pair the halves by call id",
-		storedEntry !== undefined &&
-			viewEntry !== undefined &&
-			JSON.stringify(replayedViews.get(viewEntry.toolCallId)?.stored) === JSON.stringify(storedEntry.message.content) &&
-			JSON.stringify(replayedViews.get(viewEntry.toolCallId)?.shown) === JSON.stringify(viewEntry.shown),
-		JSON.stringify([...replayedViews.keys()]),
 	);
 
 	const sentReplay: SentRequest[] = [];
 	recordRequests(sentReplay, [fakeAssistantMessage("replayed")]);
 	const replayedSettings = inMemorySettingsState(settings());
 	const replayed = await openAgent({
-		absWorkspaceRoot: root,
+		workDirAbsPath: root,
 		session: reopenedFile,
 		models,
 		api: fake.api,
@@ -1030,10 +1003,11 @@ async function exerciseAfterToolHook(): Promise<void> {
 }
 
 /**
- * The output backstop clips a result the tool did not bound, and the transcript keeps it whole.
+ * The write boundary's backstop bounds a result nothing else bounded: it is archived whole under the
+ * working directory and the ledger keeps the head-and-tail view that names the file.
  *
  * The tool is registered by this test because every built-in bounds its own output; a tool that forgets
- * is exactly what the session-level budget is for.
+ * is exactly what the backstop at the write is for.
  */
 async function exerciseOutputBackstop(): Promise<void> {
 	process.stdout.write("output backstop\n");
@@ -1055,32 +1029,34 @@ async function exerciseOutputBackstop(): Promise<void> {
 	]);
 	const session = await openSession({}, {}, undefined, registry);
 
-	const delivered: string[] = [];
-	session.onEvent(sidOf(session), (event) => {
-		if (event.type === "tool_execution_end") delivered.push(textOf({ content: event.result?.content } as Message));
-	});
-
 	await within("the run", 10_000, session.prompt(sidOf(session), "run the unbounded tool"));
 	await within("settle()", 10_000, session.settle(sidOf(session)));
 
 	const shown = (sent[1]?.texts ?? []).find((text) => text.includes("HEAD-")) ?? "";
-	check(
-		"the transcript holds the tool's whole output",
-		toolResultTexts(session).some((text) => text.length === huge.length && text.includes("-TAIL-MARKER")),
-		JSON.stringify(toolResultTexts(session).map((text) => text.length)),
-	);
-	check(
-		"the backstop clipped what the loop carried",
-		delivered.some((text) => text.includes("characters omitted")),
-		JSON.stringify(delivered.map((text) => text.length)),
-	);
 	check("so the request the model received is inside the budget", Buffer.byteLength(shown) <= MAX_TOOL_RESULT_BYTES, `${Buffer.byteLength(shown)} bytes`);
 	check("with a notice that it was clipped", shown.includes("characters omitted"), shown.slice(0, 80));
 	check("and it is shorter than what the tool returned", shown.length < huge.length, `${shown.length} of ${huge.length}`);
 	check(
+		"the ledger keeps the bounded version, not the tool's whole output",
+		toolResultTexts(session).some((text) => text.includes("characters omitted")) &&
+			toolResultTexts(session).every((text) => text.length < huge.length),
+		JSON.stringify(toolResultTexts(session).map((text) => text.length)),
+	);
+	check(
 		"the stored result is not an error",
 		allMessages(session).every((message) => (message as { isError?: boolean }).isError !== true),
 		JSON.stringify(allMessages(session).map((message) => message.role)),
+	);
+
+	// The archive is the full text, under the working directory the session ran in.
+	const archiveDir = join(root, ".my-agent", "tool-results", sidOf(session));
+	const archived = (await readdir(archiveDir)).find((name) => name.endsWith(".txt"));
+	check("the full output was archived", archived !== undefined, archiveDir);
+	const archivedText = archived === undefined ? "" : await readFile(join(archiveDir, archived), "utf8");
+	check(
+		"and the archive holds the tool's whole output",
+		archivedText.length === huge.length && archivedText.includes("-TAIL-MARKER"),
+		`${archivedText.length} of ${huge.length}`,
 	);
 
 	await session.close(sidOf(session));
@@ -1267,7 +1243,7 @@ async function exerciseToolChangeResend(): Promise<void> {
  *
  * `executionMode` is checked here because it is the reason the registry holds no such choice: it is
  * a field on each built tool, so narrowing the active set cannot change how a tool runs. The registry
- * holds no workspace — `active()` builds against the run context it is handed — so the same call
+ * holds no directory — `active()` builds against the run context it is handed — so the same call
  * twice hands back distinct objects, which is the "built fresh, per request" half of the chain.
  */
 async function exerciseToolRegistry(): Promise<void> {
@@ -1275,7 +1251,7 @@ async function exerciseToolRegistry(): Promise<void> {
 	const registry = createToolRegistry(toolDefinitions());
 	const builtIns = ["read", "write", "edit", "glob", "grep", "bash"];
 	const full = { activeToolNames: registry.names() };
-	const run = { workspace: new Workspace(root) };
+	const run = { workDirAbsPath: root };
 
 	check("names() holds the six built-ins in registration order", JSON.stringify(registry.names()) === JSON.stringify(builtIns), JSON.stringify(registry.names()));
 	check("and the full set is every one of them active", JSON.stringify(registry.activeNames(full)) === JSON.stringify(builtIns), JSON.stringify(registry.activeNames(full)));
@@ -1322,7 +1298,7 @@ async function exerciseActiveTools(): Promise<void> {
 
 	await within("the run", 10_000, session.prompt(sidOf(session), "what can you do"));
 	await within("settle()", 10_000, session.settle(sidOf(session)));
-	check("the registry reports the built-ins and the delegation pair", JSON.stringify(session.snapshot(sidOf(session)).allTools) === JSON.stringify(["read", "write", "edit", "glob", "grep", "bash", "SubAgent", "SubAgentControl"]), JSON.stringify(session.snapshot(sidOf(session)).allTools));
+	check("the registry reports the built-ins", JSON.stringify(session.snapshot(sidOf(session)).allTools) === JSON.stringify(["read", "write", "edit", "glob", "grep", "bash"]), JSON.stringify(session.snapshot(sidOf(session)).allTools));
 	check("and the model was offered write", availableTools(sent[0]?.prompt ?? "").includes("write"), JSON.stringify(availableTools(sent[0]?.prompt ?? "")));
 	check("which the request also declared", sent[0]?.tools.includes("write") === true, JSON.stringify(sent[0]?.tools));
 
@@ -1330,7 +1306,7 @@ async function exerciseActiveTools(): Promise<void> {
 	session.setActiveTools(sidOf(session), narrowed);
 	check("snapshot.activeTools loses write", JSON.stringify(session.snapshot(sidOf(session)).activeTools) === JSON.stringify(narrowed), JSON.stringify(session.snapshot(sidOf(session)).activeTools));
 	check("get activeTools() loses write", JSON.stringify(session.snapshot(sidOf(session)).activeTools) === JSON.stringify(narrowed), JSON.stringify(session.snapshot(sidOf(session)).activeTools));
-	check("allTools still reports every registered tool", session.snapshot(sidOf(session)).allTools.length === 8, JSON.stringify(session.snapshot(sidOf(session)).allTools));
+	check("allTools still reports every registered tool", session.snapshot(sidOf(session)).allTools.length === 6, JSON.stringify(session.snapshot(sidOf(session)).allTools));
 	check("the change is announced, so a client needs no new snapshot", JSON.stringify(changes) === JSON.stringify([narrowed]), JSON.stringify(changes));
 
 	await within("the run", 10_000, session.prompt(sidOf(session), "and now"));
@@ -1362,7 +1338,7 @@ async function exerciseDeactivatedToolCall(): Promise<void> {
 
 	check("the deactivated call ran and failed", ends.length === 1 && ends[0]?.toolName === "write" && ends[0]?.isError === true, JSON.stringify(ends));
 	check("with a not-found error rather than a result", ends[0]?.text.includes("not found") === true, JSON.stringify(ends[0]?.text));
-	check("the tool did not touch the workspace", (await access(join(root, "blocked.txt")).then(() => true, () => false)) === false);
+	check("the tool did not touch the directory", (await access(join(root, "blocked.txt")).then(() => true, () => false)) === false);
 	check(
 		"the transcript records it as an errored tool result",
 		allMessages(session).some((message) => (message as { role?: string; isError?: boolean }).role === "toolResult" && (message as { isError?: boolean }).isError === true),
@@ -1410,7 +1386,7 @@ async function exerciseEmptyToolSet(): Promise<void> {
 
 	session.setActiveTools(sidOf(session), []);
 	check("an empty active set is allowed", JSON.stringify(session.snapshot(sidOf(session)).activeTools) === "[]", JSON.stringify(session.snapshot(sidOf(session)).activeTools));
-	check("with nothing active and everything still registered", session.snapshot(sidOf(session)).allTools.length === 8, JSON.stringify(session.snapshot(sidOf(session)).allTools));
+	check("with nothing active and everything still registered", session.snapshot(sidOf(session)).allTools.length === 6, JSON.stringify(session.snapshot(sidOf(session)).allTools));
 
 	const run = await within("the run", 10_000, session.prompt(sidOf(session), "hello without tools"));
 	check("a session with no tools still holds a conversation", run.ok);
@@ -1877,28 +1853,28 @@ async function exerciseModelFromRow(): Promise<void> {
 
 	// No catalog is rebuilt and no session reopened: the row is read again before the next request, so
 	// every field of it is as fresh as the file was — not just the key.
-	const changesOf = (): number => entriesOf(session).filter((entry) => entry.type === "model_change").length;
-	const changesBefore = changesOf();
+	const recordedOf = (): string => JSON.stringify(session.sessionManager.getRecordedSettings(bagOf(session)).model);
+	const recordedBefore = recordedOf();
 	keyedRows[0]!.apiKey = "corrected-key";
 	keyedRows[0]!.baseUrl = "http://127.0.0.1:2/v1";
 	fake.setResponses([fakeAssistantMessage("answered again")]);
 	await within("the second run", 10_000, session.prompt(sidOf(session), "again"));
 	check("a corrected key is used by the next message", sent[1]?.key === "corrected-key", String(sent[1]?.key));
 	check("and so is a moved endpoint", sent[1]?.baseUrl === "http://127.0.0.1:2/v1", String(sent[1]?.baseUrl));
-	// Neither of those is part of what the transcript claims about the model, so neither may append a
-	// line to the file: a session that had its key corrected is not a session that changed model.
-	check("and neither appends a model_change entry", changesOf() === changesBefore, `${changesOf()} vs ${changesBefore}`);
+	// Neither of those is part of what the session claims about the model, so neither may rewrite the
+	// snapshot: a session that had its key corrected is not a session that changed model.
+	check("and neither rewrites the recorded model", recordedOf() === recordedBefore, `${recordedOf()} vs ${recordedBefore}`);
 
-	// A wire id that moves is a different model answering, and the transcript says so — once.
+	// A wire id that moves is a different model answering, and the session says so.
 	keyedRows[0]!.id = "faux-2";
 	fake.setResponses([fakeAssistantMessage("answered a third time")]);
 	await within("the third run", 10_000, session.prompt(sidOf(session), "and again"));
 	check("a renamed wire id reaches the request", sent[2]?.id === "faux-2", String(sent[2]?.id));
 	check("and the session stays on the row it came from", session.snapshot(sidOf(session)).model === "keyed", session.snapshot(sidOf(session)).model);
-	check("and is recorded once as a model change", changesOf() === changesBefore + 1, String(changesOf()));
+	check("and records the id it now answers to", recordedOf() === JSON.stringify({ name: "keyed", modelId: "faux-2" }), recordedOf());
 	fake.setResponses([fakeAssistantMessage("answered a fourth time")]);
 	await within("the fourth run", 10_000, session.prompt(sidOf(session), "once more"));
-	check("while a request on the same id records nothing", changesOf() === changesBefore + 1, String(changesOf()));
+	check("while a request on the same id records nothing new", recordedOf() === JSON.stringify({ name: "keyed", modelId: "faux-2" }), recordedOf());
 
 	await session.close(sidOf(session));
 }
@@ -1907,9 +1883,9 @@ async function exerciseModelFromRow(): Promise<void> {
  * The composer's model and level travel with the message, and reach the file only when a request uses
  * them.
  *
- * Both halves are one selection, and neither is a config change of its own: the transcript's account of
+ * Both halves are one selection, and neither is a config change of its own: the session's account of
  * what answered a turn is built from what a request actually carried, so a choice no request was made
- * with must not appear in it — and a session opened and never spoken to must grow no entries at all.
+ * with must not be recorded — and a session opened and never spoken to must write no files at all.
  */
 async function exerciseModelSelection(): Promise<void> {
 	process.stdout.write("the composer's choice travels with the message\n");
@@ -1928,18 +1904,18 @@ async function exerciseModelSelection(): Promise<void> {
 		JSON.stringify(session.snapshot(sidOf(session)).thinkingLevels),
 	);
 
-	const levelsOf = (): number => entriesOf(session).filter((entry) => entry.type === "thinking_level_change").length;
+	const levelsOf = (): string | undefined => session.sessionManager.getRecordedSettings(bagOf(session)).thinkingLevel;
 	session.applyModelSelection(sidOf(session), { thinkingLevel: "high" });
 	check("choosing a level moves the session", session.snapshot(sidOf(session)).thinkingLevel === "high", session.snapshot(sidOf(session)).thinkingLevel);
-	check("and writes nothing until a request uses it", levelsOf() === 0, String(levelsOf()));
+	check("and records nothing until a request uses it", levelsOf() === undefined, String(levelsOf()));
 
 	await within("the run", 10_000, session.prompt(sidOf(session), "hello", { selection: { thinkingLevel: "high" } }));
 	check("the request is asked at that level", scripted.state.thinkingLevels.at(-1) === "high", String(scripted.state.thinkingLevels.at(-1)));
-	check("and the transcript records it once", levelsOf() === 1, String(levelsOf()));
+	check("and the session records it once", levelsOf() === "high", String(levelsOf()));
 
 	scripted.setResponses([fakeAssistantMessage("second")]);
 	await within("the second run", 10_000, session.prompt(sidOf(session), "again"));
-	check("a later turn on the same level records nothing", levelsOf() === 1, String(levelsOf()));
+	check("a later turn on the same level records nothing new", levelsOf() === "high", String(levelsOf()));
 	check("while still being asked at it", scripted.state.thinkingLevels.at(-1) === "high", String(scripted.state.thinkingLevels.at(-1)));
 
 	// Every row takes the same four, so there is nothing left for the session to refuse: `max` is a
@@ -2029,191 +2005,6 @@ async function exerciseFileDiffReport(): Promise<void> {
 	);
 
 	await session.close(sidOf(session));
-}
-
-/**
- * Delegation through the `SubAgent` tool, against the same scripted transport the parent runs on.
- *
- * The responses are scripted as factories that classify each request off its transcript rather than
- * by call order, because parent and child interleave: a request carrying a `SubAgent` tool call is
- * the parent's next turn, one whose user message carries a delegation marker is the child's, and
- * anything else is the parent's first turn.
- */
-async function exerciseSubagent(): Promise<void> {
-	process.stdout.write("subagent delegation\n");
-	const SYNC_MARKER = "SYNC-DELEGATION-MARKER";
-	const BG_MARKER = "BG-DELEGATION-MARKER";
-
-	function hasToolCallNamed(context: { messages: readonly unknown[] }, name: string): boolean {
-		return context.messages.some((message) => {
-			const content = (message as { content?: unknown }).content;
-			return (
-				Array.isArray(content) &&
-				content.some((block) => (block as { type?: unknown }).type === "toolCall" && (block as { name?: unknown }).name === name)
-			);
-		});
-	}
-
-	/** Tool-result texts already in a provider request's transcript, for scripting the control turn. */
-	function toolResultTextsIn(context: { messages: readonly unknown[] }): string[] {
-		return context.messages
-			.filter((message) => (message as { role?: unknown }).role === "toolResult")
-			.map((message) => textOf(message as Message));
-	}
-
-	/** What the model is asked to run, classified off the request the provider was handed. */
-	function classify(context: { messages: readonly unknown[] }): "parent-start" | "parent-next" | "parent-control" | "child" {
-		if (hasToolCallNamed(context, "SubAgentControl")) return "parent-control";
-		if (hasToolCallNamed(context, "SubAgent")) return "parent-next";
-		if (context.messages.some((message) => {
-			const text = textOf(message as Message);
-			return text.includes(SYNC_MARKER) || text.includes(BG_MARKER);
-		})) {
-			return "child";
-		}
-		return "parent-start";
-	}
-
-	// --- Phase 1: a synchronous delegation, the report as the tool result ------------------------
-	const sent: SentRequest[] = [];
-	const syncSession = await openSession();
-	check("a session carries the delegation pair by default", syncSession.snapshot(sidOf(syncSession)).allTools.includes("SubAgent") && syncSession.snapshot(sidOf(syncSession)).allTools.includes("SubAgentControl"), JSON.stringify(syncSession.snapshot(sidOf(syncSession)).allTools));
-
-	// The same recording `recordRequests` does, inlined: the factory here has to classify the
-	// request itself, so it records what it was handed as it answers it.
-	const respondSync = (context: {
-		messages: readonly unknown[];
-		tools?: readonly { name?: string }[];
-	}): AssistantMessage => {
-		sent.push({
-			prompt: context.messages
-				.filter((message) => (message as { role?: string }).role === "system")
-				.map((message) => textOf(message as Message))
-				.join("\n\n"),
-			tools: declaredTools(context),
-			texts: context.messages.map((message) => textOf(message as Message)),
-			roles: context.messages.map((message) => String((message as { role?: string }).role ?? "")),
-		});
-		const kind = classify(context);
-		if (kind === "parent-next") return fakeAssistantMessage("parent done");
-		if (kind === "child") return fakeAssistantMessage("SYNC REPORT");
-		return fakeAssistantMessage(fakeToolCall("SubAgent", { prompt: `${SYNC_MARKER} report what you find.` }));
-	};
-	// A scripted step is consumed by one call, and parent and child interleave, so the classifying
-	// factory is queued once per call the exercise could make.
-	fake.setResponses(Array.from({ length: 8 }, () => respondSync));
-	await within("sync delegation", 15_000, syncSession.prompt(sidOf(syncSession), "delegate some reading"));
-	await within("settle()", 10_000, syncSession.settle(sidOf(syncSession)));
-	check("the report came back as the tool result", toolResultTexts(syncSession).includes("SYNC REPORT"), JSON.stringify(toolResultTexts(syncSession)));
-	check("the parent answered after it", allMessages(syncSession).some((message) => message.role === "assistant" && textOf(message) === "parent done"));
-
-	const childRequest = sent.find((request) => request.texts.some((text) => text.includes(SYNC_MARKER)));
-	check("the child request declared only the read-only set", JSON.stringify(childRequest?.tools) === JSON.stringify(["read", "glob", "grep"]), JSON.stringify(childRequest?.tools));
-	const parentRequest = sent.find((request) => request.tools.includes("SubAgent"));
-	check("the parent's request declared the delegation pair", parentRequest !== undefined && parentRequest.tools.includes("SubAgentControl"), JSON.stringify(parentRequest?.tools));
-
-	// The child transcript is a session like any other, filed under `subagents/` with the parent
-	// recorded in its header —on disk, but out of the directory the sidebar lists.
-	const childDir = join(workspaceDir(root), "subagents");
-	const childFiles = readdirSync(childDir).filter((file) => file.endsWith(".jsonl"));
-	check("the child transcript is on disk under subagents/", childFiles.length === 1, JSON.stringify(childFiles));
-	if (childFiles[0] !== undefined) {
-		const header = JSON.parse(readFileSync(join(childDir, childFiles[0]), "utf8").split("\n")[0] ?? "{}") as { parentSession?: string };
-		check("and its header names the parent session", header.parentSession === syncSession.sessionManager.stateOf(sidOf(syncSession)).sessionFileAbsPath, JSON.stringify(header.parentSession));
-	}
-
-	// The child's spend owns no message entry in this transcript, so it arrives as its own record and
-	// the total folds it in file order — money from a transcript of its own, on the session's books.
-	// The fake transport estimates every answer's usage, so the assertions are structural: one entry,
-	// attributed to the delegation, and a total whose excess over the messages' own sum is exactly it.
-	const usageEntries = entriesOf(syncSession).filter((entry) => entry.type === "usage");
-	check(
-		"the delegation recorded its spend as one usage entry",
-		usageEntries.length === 1 &&
-			usageEntries[0]?.type === "usage" &&
-			usageEntries[0].operation === "subagent" &&
-			usageEntries[0].usage.totalTokens > 0,
-		JSON.stringify(usageEntries),
-	);
-	const messageOutput = entriesOf(syncSession).reduce((sum, entry) => {
-		const usage = entry.type === "message" && entry.message.role === "assistant" ? entry.message.usage : undefined;
-		return sum + (usage?.output ?? 0);
-	}, 0);
-	const recordedOutput = usageEntries[0]?.type === "usage" ? usageEntries[0].usage.output : 0;
-	check(
-		"the session total counts the child's spend on top of the messages' own",
-		syncSession.snapshot(sidOf(syncSession)).usage.output === messageOutput + recordedOutput,
-		JSON.stringify({ total: syncSession.snapshot(sidOf(syncSession)).usage.output, messages: messageOutput, recorded: recordedOutput }),
-	);
-	await syncSession.close(sidOf(syncSession));
-
-	// --- Phase 2: a background job, collected through SubAgentControl ----------------------------
-	const bgSession = await openSession();
-	const respondBg = (context: { messages: readonly unknown[] }): AssistantMessage => {
-		const kind = classify(context);
-		if (kind === "parent-control") {
-			return toolResultTextsIn(context).includes("BACKGROUND REPORT")
-				? fakeAssistantMessage("collected")
-				: fakeAssistantMessage("still collecting");
-		}
-		if (kind === "parent-next") {
-			// The `SubAgent` tool call stays on the transcript for every later turn, so the collect
-			// turn is told apart from the turn right after the spawn by the parent's answer already
-			// being on the record.
-			const parentAnswered = context.messages.some((message) => (message as { role?: unknown }).role === "assistant" && textOf(message as Message) === "bg parent done");
-			if (parentAnswered) {
-				// The job id only exists once the spawn has answered, so it is read back out of the
-				// transcript the same way the model would read it.
-				const result = context.messages.map((message) => textOf(message as Message)).find((text) => text.includes("started in the background"));
-				const id = result?.match(/SubAgent job (\S+) started/)?.[1] ?? "missing";
-				return toolResultTextsIn(context).includes("BACKGROUND REPORT")
-					? fakeAssistantMessage("collected")
-					: fakeAssistantMessage(fakeToolCall("SubAgentControl", { id, action: "output" }));
-			}
-			return fakeAssistantMessage("bg parent done");
-		}
-		if (kind === "child") return fakeAssistantMessage("BACKGROUND REPORT");
-		return fakeAssistantMessage(fakeToolCall("SubAgent", { prompt: `${BG_MARKER} work in the background.`, run_in_background: true }));
-	};
-	fake.setResponses(Array.from({ length: 12 }, () => respondBg));
-	await within("background spawn", 15_000, bgSession.prompt(sidOf(bgSession), "delegate without waiting"));
-	await within("settle()", 10_000, bgSession.settle(sidOf(bgSession)));
-	const spawnResult = toolResultTexts(bgSession).find((text) => text.includes("started in the background"));
-	const bgId = spawnResult?.match(/SubAgent job (\S+) started/)?.[1];
-	check("the spawn answered with a job id instead of a report", bgId !== undefined && spawnResult?.includes("BACKGROUND REPORT") === false, JSON.stringify(spawnResult));
-	check("the parent's own turn answered while the job ran", allMessages(bgSession).some((message) => message.role === "assistant" && textOf(message) === "bg parent done"));
-
-	await within("collect the background report", 15_000, bgSession.prompt(sidOf(bgSession), "collect the report"));
-	await within("settle()", 10_000, bgSession.settle(sidOf(bgSession)));
-	check("SubAgentControl returned the finished job's report", toolResultTexts(bgSession).includes("BACKGROUND REPORT"), JSON.stringify(toolResultTexts(bgSession)));
-	check("and the parent answered after it", allMessages(bgSession).some((message) => message.role === "assistant" && textOf(message) === "collected"));
-	await bgSession.close(sidOf(bgSession));
-
-	// --- Phase 3: a control call for a job that does not exist is a tool error -------------------
-	const missingSession = await openSession();
-	const sentMissing: SentRequest[] = [];
-	recordRequests(sentMissing, [
-		fakeAssistantMessage(fakeToolCall("SubAgentControl", { id: "missing", action: "output" })),
-		fakeAssistantMessage("moved on"),
-	]);
-	await within("unknown job", 15_000, missingSession.prompt(sidOf(missingSession), "collect a job that does not exist"));
-	await within("settle()", 10_000, missingSession.settle(sidOf(missingSession)));
-	check("an unknown job id fails the call", toolResultTexts(missingSession).some((text) => text.includes("Unknown SubAgent job: missing")), JSON.stringify(toolResultTexts(missingSession)));
-	await missingSession.close(sidOf(missingSession));
-
-	// --- Phase 4: subagents: false builds a session without the pair -----------------------------
-	const bareSettings = inMemorySettingsState(settings());
-	const bareState = createSession(root);
-	const bare = await openAgent({
-		absWorkspaceRoot: root,
-		session: bareState,
-		models,
-		settingsState: bareSettings,
-		subagents: false,
-	});
-	opened.set(bare, { id: bareState.sessionId, state: bareState, settings: bareSettings });
-	check("subagents: false leaves the delegation tools out", !bare.snapshot(sidOf(bare)).allTools.includes("SubAgent") && !bare.snapshot(sidOf(bare)).allTools.includes("SubAgentControl"), JSON.stringify(bare.snapshot(sidOf(bare)).allTools));
-	await bare.close(sidOf(bare));
 }
 
 /**
@@ -2334,16 +2125,16 @@ async function exerciseBranching(): Promise<void> {
 }
 
 /**
- * The tool choices belong to the branch, exactly as the conversation does.
+ * The tool choices belong to the session, not to a branch.
  *
- * A session records what it chose as `tool_config` entries, so a move has to land on the target
- * branch's choices rather than keep whatever the branch it left had. Otherwise one session answers two
- * ways: the live session keeps a config the file no longer holds where its leaf now is, while
- * reopening that same file restores the target branch's. This drives both moves and, after each, reads
- * the live maps, the snapshot, the event every other window sees, and the prompt the model is handed.
+ * The two-file split made the recorded choices session-level current values — the `.json` snapshot's
+ * — so moving the leaf no longer switches them: the session keeps exactly what it last chose,
+ * whichever way its leaf points. This drives a move across a choice and reads the live maps, the
+ * snapshot, and the events every other window sees; then reopens the files to check the snapshot
+ * carried the choice out.
  */
 async function exerciseBranchToolConfig(): Promise<void> {
-	process.stdout.write("tool config belongs to the branch\n");
+	process.stdout.write("tool config is the session's, not a branch's\n");
 	const session = await openSession();
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [
@@ -2355,50 +2146,32 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	await within("the first turn", 15_000, session.prompt(sidOf(session), "config branch question one"));
 	const firstId = entryIdsFor(session, "config branch question one")[0] ?? "";
 	await within("the second turn", 15_000, session.prompt(sidOf(session), "config branch question two"));
-	const secondId = entryIdsFor(session, "config branch question two")[0] ?? "";
 
 	const events: AgentSessionEvent[] = [];
 	session.onEvent(sidOf(session), (event) => events.push(event));
 
-	// --- The first branch is narrowed and gates `bash` ------------------------------------------
+	// --- The session narrows and gates `bash` ---------------------------------------------------
 	const narrowed = session.snapshot(sidOf(session)).activeTools.filter((name) => name !== "bash");
 	session.setActiveTools(sidOf(session), narrowed);
 	session.applyConfig(sidOf(session), { approval: { bash: true } });
-	// The leaf is read now, while the session is still on this branch: `getBranchTip` follows the last
-	// child written, so once a second branch exists, descending from the first message reaches *that*
-	// one instead. The branch is addressed by its own tip from here on.
-	const firstTip = bagOf(session).leafId ?? "";
 	check("the narrow set is in force", session.snapshot(sidOf(session)).activeTools.includes("bash") === false, JSON.stringify(session.snapshot(sidOf(session)).activeTools));
-	check("with the approval this branch chose", session.snapshot(sidOf(session)).approvals.bash === true, JSON.stringify(session.snapshot(sidOf(session)).approvals));
-
-	// --- The second branch is the full set, ungated again ---------------------------------------
-	// The approval is a choice of its own: a tool change records the map as it stands, and does not
-	// reset it, so un-gating `bash` here is what the second branch actually chose.
-	session.setActiveTools(sidOf(session), [...session.snapshot(sidOf(session)).allTools]);
-	session.applyConfig(sidOf(session), { approval: { bash: false } });
-	const secondTip = bagOf(session).leafId ?? "";
-	check("the full set is back", session.snapshot(sidOf(session)).activeTools.includes("bash") === true, JSON.stringify(session.snapshot(sidOf(session)).activeTools));
-	check("and its approval with it", session.snapshot(sidOf(session)).approvals.bash === false, JSON.stringify(session.snapshot(sidOf(session)).approvals));
-
-	// --- Moving onto the first branch restores its choices --------------------------------------
-	const before = events.length;
-	session.branchTo(sidOf(session), firstTip, false);
-	check(
-		"the move lands on the first branch",
-		textsOf(session).join(",") === "config branch question one,config branch question two",
-		textsOf(session).join(","),
-	);
-	check("its tool set is restored", session.snapshot(sidOf(session)).activeTools.includes("bash") === false, JSON.stringify(session.snapshot(sidOf(session)).activeTools));
-	check("and its approval is too", session.snapshot(sidOf(session)).approvals.bash === true, JSON.stringify(session.snapshot(sidOf(session)).approvals));
+	check("with the approval the session chose", session.snapshot(sidOf(session)).approvals.bash === true, JSON.stringify(session.snapshot(sidOf(session)).approvals));
 	check("which is the map the gate reads", session.getApprovals(sidOf(session)).bash === true, JSON.stringify(session.getApprovals(sidOf(session))));
 	check("leaving the settings file alone", getApprovals(settingsOf(session)).bash === false, JSON.stringify(getApprovals(settingsOf(session))));
-	const moved = events.slice(before).find((event) => event.type === "config_changed");
+
+	// --- Moving the leaf changes the branch, not the choices ------------------------------------
+	const before = events.length;
+	session.branchTo(sidOf(session), firstId, false);
+	check("the move lands before both turns", textsOf(session).join(",") === "config branch question one", textsOf(session).join(","));
+	check("and the choices stay what the session chose", session.snapshot(sidOf(session)).activeTools.includes("bash") === false && session.snapshot(sidOf(session)).approvals.bash === true, JSON.stringify(session.snapshot(sidOf(session)).activeTools));
+	check("the gate reads the same map on the new branch", session.getApprovals(sidOf(session)).bash === true, JSON.stringify(session.getApprovals(sidOf(session))));
 	check(
-		"and every other window is told what the branch chose",
-		moved?.type === "config_changed" && moved.approvals?.bash === true && moved.tools?.includes("bash") === false,
-		JSON.stringify(moved),
+		"and no config_changed rides the move",
+		events.slice(before).every((event) => event.type !== "config_changed"),
+		JSON.stringify(events.slice(before).map((event) => event.type)),
 	);
 
+	// The request on the rewound branch is narrowed with the same session-level choice.
 	await within("the third turn", 15_000, session.prompt(sidOf(session), "config branch question three"));
 	const asked = sent[2];
 	check(
@@ -2415,39 +2188,12 @@ async function exerciseBranchToolConfig(): Promise<void> {
 		asked?.prompt,
 	);
 
-	// --- Moving back restores the other branch's choices ----------------------------------------
-	session.branchTo(sidOf(session), secondTip, false);
-	check("the second branch's set comes back", session.snapshot(sidOf(session)).activeTools.includes("bash") === true, JSON.stringify(session.snapshot(sidOf(session)).activeTools));
-	check("with its approval", session.snapshot(sidOf(session)).approvals.bash === false, JSON.stringify(session.snapshot(sidOf(session)).approvals));
-
 	await session.close(sidOf(session));
 
-	// --- A branch that recorded nothing falls back to the settings defaults ---------------------
-	// Not the same session: rewinding needs a branch that ends *before* the first `tool_config`. Only
-	// the approval map is restored there, because the settings files own it and a branch that never
-	// chose has no other answer. The registry keeps the set it already had —the settings files say
-	// nothing about which tools are active, so a branch with no `tool_config` cannot put one back.
-	const fallback = await openSession();
-	recordRequests([], [fakeAssistantMessage("fallback answer"), fakeAssistantMessage("fallback answer two")]);
-	await within("the turn before the choice", 15_000, fallback.prompt(sidOf(fallback), "config fallback question"));
-	const earlyId = entryIdsFor(fallback, "config fallback question")[0] ?? "";
-	fallback.setActiveTools(sidOf(fallback), [...fallback.snapshot(sidOf(fallback)).activeTools.filter((name) => name !== "bash")]);
-	fallback.applyConfig(sidOf(fallback), { approval: { bash: true } });
-	await within("the turn after the choice", 15_000, fallback.prompt(sidOf(fallback), "config fallback question two"));
-	check("the choice is in force", fallback.snapshot(sidOf(fallback)).approvals.bash === true, JSON.stringify(fallback.snapshot(sidOf(fallback)).approvals));
-
-	fallback.branchTo(sidOf(fallback), earlyId, false);
-	check(
-		"a branch with no record falls back to the settings defaults",
-		fallback.snapshot(sidOf(fallback)).approvals.bash === false,
-		JSON.stringify(fallback.snapshot(sidOf(fallback)).approvals),
-	);
-	check(
-		"since the settings files are what a session that never chose runs on",
-		getApprovals(settingsOf(fallback)).bash === false,
-		JSON.stringify(getApprovals(settingsOf(fallback))),
-	);
-	await fallback.close(sidOf(fallback));
+	// --- The choice is on the snapshot, so the reopen answers with it ----------------------------
+	const reopened = fillSession(bagOf(session).sessionFileAbsPath ?? "");
+	check("the reopen restores the session's tool set", store.getRecordedToolConfig(reopened).activeTools?.includes("bash") === false, JSON.stringify(store.getRecordedToolConfig(reopened).activeTools));
+	check("and its approval with it", store.getRecordedToolConfig(reopened).approval?.bash === true, JSON.stringify(store.getRecordedToolConfig(reopened).approval));
 }
 
 /**
@@ -2456,9 +2202,8 @@ async function exerciseBranchToolConfig(): Promise<void> {
  * A move that actually changes the position writes one `leaf` entry, and `buildIndex` replays it on
  * load, so close → reopen restores where the conversation went rather than the file's last entry.
  * Also checked on the way: a move to the position already held writes nothing, the record reaches no
- * message, and `resetLeaf`'s "before the first entry" survives a reopen too. A file with no such
- * record — every file written before this build, or written by hand — reads exactly as it always
- * did, which is what keeps "no migration" true.
+ * message, and `resetLeaf`'s "before the first entry" survives a reopen too. A session with no such
+ * record — one no move was ever taken in — reads exactly as it always did.
  */
 async function exerciseLeafDurability(): Promise<void> {
 	process.stdout.write("leaf durability\n");
@@ -2505,18 +2250,20 @@ async function exerciseLeafDurability(): Promise<void> {
 	const rereopened = fillSession(file);
 	check("and that position survived the reopen too", rereopened.leafId === null, String(rereopened.leafId));
 
-	// --- A file with no leaf record reads as it always did: the last entry is the position -------
-	// Handwritten, because no build that writes this format would ever produce one — the format never
-	// rewrites a line, so old files keep the shape their writer gave them.
-	const fixture = join(root, "fixture-no-leaf.jsonl");
-	const lines = [
-		{ type: "SessionHeader", version: 4, id: "fixture-no-leaf", timestamp: new Date().toISOString(), workDir: root },
-		{ type: "message", id: "fx-u1", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: [{ type: "text", text: "fixture one" }] } },
-		{ type: "message", id: "fx-a1", parentId: "fx-u1", timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "text", text: "fixture answer" }] } },
-		{ type: "message", id: "fx-u2", parentId: "fx-u1", timestamp: new Date().toISOString(), message: { role: "user", content: [{ type: "text", text: "fixture two" }] } },
+	// --- A session with no leaf record reads as it always did: the last entry is the position -------
+	// Handwritten as a bare pair, because no branch was ever taken in it — the leaf record is what a
+	// move writes, and a session that never moved has none.
+	const fixtureStem = join(root, "fixture-no-leaf");
+	const fixtureStamp = new Date().toISOString();
+	const fixtureMeta = { version: CURRENT_SESSION_VERSION, id: "fixture-no-leaf", timestamp: fixtureStamp, workDir: root };
+	const fixtureLines = [
+		{ type: "message", id: "fx-u1", parentId: null, timestamp: fixtureStamp, message: { role: "user", content: [{ type: "text", text: "fixture one" }] } },
+		{ type: "message", id: "fx-a1", parentId: "fx-u1", timestamp: fixtureStamp, message: { role: "assistant", content: [{ type: "text", text: "fixture answer" }] } },
+		{ type: "message", id: "fx-u2", parentId: "fx-u1", timestamp: fixtureStamp, message: { role: "user", content: [{ type: "text", text: "fixture two" }] } },
 	];
-	await writeFile(fixture, lines.map((line) => `${JSON.stringify(line)}\n`).join(""));
-	const legacy = fillSession(fixture);
+	await writeFile(`${fixtureStem}.json`, `${JSON.stringify(fixtureMeta, null, "\t")}\n`);
+	await writeFile(`${fixtureStem}.jsonl`, fixtureLines.map((line) => `${JSON.stringify(line)}\n`).join(""));
+	const legacy = fillSession(`${fixtureStem}.jsonl`);
 	check("a file without a leaf record reads its last entry", legacy.leafId === "fx-u2", String(legacy.leafId));
 	check(
 		"and its tree is read whole, the second child a branch option",
@@ -2525,7 +2272,6 @@ async function exerciseLeafDurability(): Promise<void> {
 	);
 }
 
-	await exerciseSubagent();
 	await exerciseApprovalDenial();
 	await exerciseUnknownTool();
 	await exerciseEmptyToolSet();
@@ -2537,9 +2283,9 @@ async function exerciseLeafDurability(): Promise<void> {
 	await exerciseContextOverflow();
 } finally {
 	clearTimeout(watchdog);
-	// Both the workspace and the agent home's directory for it, or every run leaves one behind.
+	// Both the working directory and the agent home's directory for it, or every run leaves one behind.
 	await rm(root, { recursive: true, force: true });
-	await rm(workspaceDir(root), { recursive: true, force: true });
+	await rm(sessionDir(root), { recursive: true, force: true });
 }
 
 process.stdout.write(failures === 0 ? "\nsession ok\n" : `\n${failures} session checks failed\n`);

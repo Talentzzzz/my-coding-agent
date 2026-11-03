@@ -8,14 +8,13 @@ import type { ToolDefinitions } from "./manager.ts";
  *
  * Process structure, not a session's: the definitions come from the shared read-only
  * {@link ToolDefinitions}, and `register` adds tools a caller means every session of this catalog to
- * know — a test's custom tool. A session's own tools (the delegation pair) are assembly products and
- * live on its registry entry; {@link registryView} is the one place the two halves are put together.
- * The choice — which of them the model may call, and which ask for approval — is not held here at
- * all: it is a {@link ToolState} that arrives with each read, derived from the ledger's `tool_config`
- * entries by the session (see `toolStateOf` in `session/tool-config.ts`), because every write of that
- * state lands in the ledger in the same stack and nothing alive outlives it. No workspace is resident
- * either — `active` builds the executable set fresh against the run context it is handed, so the
- * workspace is a value object that arrives with the request and leaves with it.
+ * know — a test's custom tool. The choice — which of them the model may call, and which ask for
+ * approval — is not held here at all: it is a {@link ToolState} that arrives with each read, derived
+ * from the session's recorded choice by the session (see `toolStateOf` in
+ * `session/tool-config.ts`), because every write of that state lands in the ledger in the same stack
+ * and nothing alive outlives it. No working directory is resident either — `active` builds the
+ * executable set fresh against the run context it is handed, so the directory is a value that arrives
+ * with the request and leaves with it.
  */
 export interface ToolRegistry {
 	/** Every tool name this registry knows: the definitions', then the registered ones. */
@@ -33,45 +32,11 @@ export interface ToolRegistry {
 /**
  * The catalog one process knows: the build's definitions, plus whatever a caller registered.
  *
- * There is no loadout to hand in: a deliberate choice — the SubAgent child's read-only narrowing —
- * is a {@link ToolState} the caller keeps as its fallback seed, not something a registry opens on,
- * and a session whose choice is nowhere derives the full set, which is what a session that has not
- * chosen runs on.
+ * There is no loadout to hand in: the choice is a `ToolState` derived per read, never something a
+ * registry opens on, so a session that has not chosen derives the full set.
  */
 export function createToolRegistry(definitions: ToolDefinitions): ToolRegistry {
 	return new Registry(definitions);
-}
-
-/**
- * The catalog as one session sees it: this registry's tools, plus the tools that session has of its own.
- *
- * The session-local half lives on the registry entry rather than here (ADR-0007 §4): the delegation
- * pair closes over the transcript it reports to, which is an assembly product, while the registry is
- * process structure. This view is how the two meet without either holding the other — it is built per
- * resolution, holds nothing, and behaves exactly like a registry that had them registered.
- */
-export function registryView(registry: ToolRegistry, local: readonly AgentTool<any>[]): ToolRegistry {
-	if (local.length === 0) return registry;
-	// A name the session holds is the session's, in every answer this view gives: a registered tool and
-	// a session's own one are one entry of the catalog, not two.
-	const shadowed = new Set(local.map((tool) => tool.name));
-	const names = (): string[] => [...registry.names().filter((name) => !shadowed.has(name)), ...shadowed];
-	return {
-		names,
-		build: (name, run) => local.find((tool) => tool.name === name) ?? registry.build(name, run),
-		activeNames: (state) => {
-			const known = new Set(names());
-			return state.activeToolNames.filter((name) => known.has(name));
-		},
-		// The base's order first — definitions, then the tools registered on it — and the session's own
-		// after them, which is where a registry that had them registered would have put them.
-		active: (state, run) => {
-			const active = new Set(state.activeToolNames);
-			const base = registry.active(state, run).filter((tool) => !shadowed.has(tool.name));
-			return [...base, ...local.filter((tool) => active.has(tool.name))];
-		},
-		register: (tool) => registry.register(tool),
-	};
 }
 
 class Registry implements ToolRegistry {

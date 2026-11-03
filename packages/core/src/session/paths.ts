@@ -9,7 +9,7 @@ import { AGENT_HOME } from "../config.ts";
  * <agent home>/sessions/--<workDir with its separators dashed out>--/<ISO stamp>_<session id>.jsonl
  * ```
  *
- * One directory per workspace, named after the absolute workspace path rather than a hash, so the
+ * One directory per working directory, named after its absolute path rather than a hash, so the
  * folder is readable and a session file is traceable to the project it belongs to without opening it.
  * The file name leads with the creation stamp so a directory listing sorts chronologically.
  */
@@ -17,19 +17,35 @@ export function sessionsDir(): string {
 	return join(AGENT_HOME, "sessions");
 }
 
-/** The directory name for one workspace's sessions. */
-function workspaceDirName(workspaceRootInput: string): string {
-	const absRoot = resolvePath(workspaceRootInput);
-	return `--${absRoot.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+/** The directory name for one working directory's sessions. */
+function sessionDirName(workDirAbsPath: string): string {
+	const absWorkDir = resolvePath(workDirAbsPath);
+	return `--${absWorkDir.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 }
 
-export function workspaceDir(workspaceRootInput: string): string {
-	return join(sessionsDir(), workspaceDirName(workspaceRootInput));
+/** Where the sessions started in `workDirAbsPath` are stored. */
+export function sessionDir(workDirAbsPath: string): string {
+	return join(sessionsDir(), sessionDirName(workDirAbsPath));
 }
 
 /** `absDir` is a session directory; `createdAt` is the ISO stamp the header carries. */
 export function sessionPath(absDir: string, sessionId: string, createdAt: string): string {
 	return join(absDir, `${createdAt.replace(/[:.]/g, "-")}_${sessionId}.jsonl`);
+}
+
+/**
+ * The `.json` snapshot's path for a session whose `.jsonl` is `absJsonlPath`.
+ *
+ * The two files share a stem: the snapshot is the identity half, the stream the transcript half,
+ * and pairing them by stem is what makes a session one thing rather than two.
+ */
+export function sessionMetaPath(absJsonlPath: string): string {
+	return absJsonlPath.replace(/\.jsonl$/, ".json");
+}
+
+/** The `.jsonl` stream's path for a session whose `.json` is `absJsonPath` — the pairing's other half. */
+export function sessionJsonlPath(absJsonPath: string): string {
+	return absJsonPath.replace(/\.json$/, ".jsonl");
 }
 
 /** Convert Git Bash, MSYS, Cygwin, and WSL drive paths to a form native Windows APIs accept. */

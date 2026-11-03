@@ -3,7 +3,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import {
 	ARG_TRIM_MARKER,
 	BRANCH_LABEL_MAX,
@@ -29,6 +29,7 @@ import {
 	resolvePath,
 	sessionEntryToContextMessages,
 	SessionManager,
+	sessionMetaPath,
 	sessionPath,
 	sessionsDir,
 	applySettings,
@@ -43,11 +44,10 @@ import {
 	spillOversizedToolResult,
 	spillPathFor,
 	trimmableToolArgEntryIds,
-	Workspace,
 	toolDefinitions,
 	fillTools,
 	openAgent,
-	workspaceDir,
+	sessionDir,
 	type AgentTool,
 	type FileDiff,
 	type ModelConfig,
@@ -90,7 +90,7 @@ function check(label: string, condition: boolean, detail = ""): void {
 }
 
 function tool(name: string): AgentTool<any> {
-	const found = createTools({ workspace: new Workspace(root) }).find((candidate) => candidate.name === name);
+	const found = createTools({ workDirAbsPath: root }).find((candidate) => candidate.name === name);
 	if (!found) throw new Error(`no tool named ${name}`);
 	return found;
 }
@@ -145,8 +145,8 @@ try {
 	process.stdout.write("glob\n");
 	const found = await call("glob", { pattern: "src/**/*.ts" });
 	check("finds both sources", found.text.includes("app.ts") && found.text.includes("other.ts"), found.text);
-	const globEscapes = await call("glob", { pattern: "*", path: ".." });
-	check("rejects a path above the root", globEscapes.error?.includes("escapes the workspace") === true, globEscapes.error);
+	const globAbove = await call("glob", { pattern: "*", path: ".." });
+	check("walks to a parent directory without complaint", globAbove.error === undefined, globAbove.error);
 
 	process.stdout.write("grep\n");
 	const matches = await call("grep", { pattern: "value", include: "**/*.ts" });
@@ -223,7 +223,7 @@ try {
 	const workDirAbsPath = await call("bash", {
 		command: process.platform === "win32" ? "cd" : "pwd",
 	});
-	check("runs in the workspace", workDirAbsPath.text.toLowerCase().includes(root.toLowerCase().replace(/\\/g, "\\")), `${workDirAbsPath.text} vs ${root}`);
+	check("runs in the directory", workDirAbsPath.text.toLowerCase().includes(root.toLowerCase().replace(/\\/g, "\\")), `${workDirAbsPath.text} vs ${root}`);
 	const failure = await call("bash", { command: "exit 3" });
 	check("reports a non-zero exit", failure.text.includes("exited with code 3"), failure.text);
 	// An hour is the shipped ceiling, so a ten-minute request now runs uncapped and says nothing about
@@ -237,7 +237,7 @@ try {
 	// The timeouts are the run context's, not constants: a request built with a lower ceiling caps the
 	// call at it and names the cap in the result, so the model can plan around it.
 	const cappedTool = createToolRegistry(toolDefinitions()).build("bash", {
-		workspace: new Workspace(root),
+		workDirAbsPath: root,
 		bash: { defaultTimeoutMs: 60_000, maxTimeoutMs: 1_000 },
 	});
 	if (!cappedTool) throw new Error("no tool named bash");
@@ -249,9 +249,18 @@ try {
 		cappedText,
 	);
 
-	process.stdout.write("workspace guard\n");
-	const outside = await call("read", { path: "../../../../etc/hosts" });
-	check("rejects a relative escape", outside.error?.includes("escapes the workspace") === true, outside.error);
+	process.stdout.write("no fence around the working directory\n");
+	// The directory is the frame a relative path is read in, not a boundary: an absolute path is taken
+	// as it stands and `..` walks out of it, which is the whole point of a workDirAbsPath rather than a fence.
+	const outsideRoot = await mkdtemp(join(tmpdir(), "my-agent-tools-outside-"));
+	await writeFile(join(outsideRoot, "outside.txt"), "reachable\n", "utf8");
+	const absoluteOutside = await call("read", { path: join(outsideRoot, "outside.txt") });
+	check("reads an absolute path outside the directory", absoluteOutside.error === undefined && absoluteOutside.text.includes("reachable"), absoluteOutside.error ?? absoluteOutside.text);
+	const relativeOutside = await call("read", { path: relative(root, join(outsideRoot, "outside.txt")) });
+	check("and one reached by walking out with ..", relativeOutside.error === undefined && relativeOutside.text.includes("reachable"), relativeOutside.error ?? relativeOutside.text);
+	const writtenOutside = await call("write", { path: join(outsideRoot, "written.txt"), content: "ok\n" });
+	check("writes outside the directory too", writtenOutside.text.includes("Created") && existsSync(join(outsideRoot, "written.txt")), writtenOutside.error ?? writtenOutside.text);
+	await rm(outsideRoot, { recursive: true, force: true });
 
 	process.stdout.write("session manager\n");
 	await exerciseSessionManager();
@@ -289,9 +298,9 @@ try {
 	process.stdout.write("session lifecycle\n");
 	await exerciseSessionLifecycle();
 } finally {
-	// Sessions live under the agent home, keyed by the workspace path, so removing the temporary
-	// workspace is not enough: without this every run leaves an orphan directory behind.
-	await rm(workspaceDir(root), { recursive: true, force: true });
+	// Sessions live under the agent home, keyed by the working directory path, so removing the temporary
+	// directory is not enough: without this every run leaves an orphan store behind.
+	await rm(sessionDir(root), { recursive: true, force: true });
 	await rm(root, { recursive: true, force: true });
 }
 
@@ -314,10 +323,10 @@ async function exerciseSessionManager(): Promise<void> {
 	const firstEntryId = store.appendMessage(manager, first);
 	store.appendMessage(manager, reply);
 
-	const header = store.getHeader(manager);
-	check("writes a versioned header", header?.version === CURRENT_SESSION_VERSION, String(header?.version));
+	const header = store.getMeta(manager);
+	check("writes a versioned snapshot", header?.version === CURRENT_SESSION_VERSION, String(header?.version));
 	check("stamped with an ISO time", typeof header?.timestamp === "string" && !Number.isNaN(Date.parse(header.timestamp)), header?.timestamp);
-	check("naming the workspace it belongs to", header?.workDir === resolvePath(root), header?.workDir);
+	check("naming the directory it belongs to", header?.workDir === resolvePath(root), header?.workDir);
 	check("and no parent for a root session", header?.parentSession === undefined, String(header?.parentSession));
 	check("the file leads with the creation stamp", (manager.sessionFileAbsPath ?? "").endsWith(`_${manager.sessionId}.jsonl`), String(manager.sessionFileAbsPath));
 	check("derives a title from the first user message", store.getTitle(manager) === "first question", store.getTitle(manager));
@@ -337,7 +346,7 @@ async function exerciseSessionManager(): Promise<void> {
 	check("finds the file by id", SessionManager.findSessionFilePathById(manager.sessionId) === sessionFileAbsPath);
 
 	const listed = (await SessionManager.list(root)).find((entry) => entry.id === manager.sessionId);
-	check("lists the session for the workspace", listed !== undefined);
+	check("lists the session for the directory", listed !== undefined);
 	check("the list shows the derived title", listed?.firstMessage === "first question", listed?.firstMessage);
 	check("and counts the transcript", listed?.messageCount === 2, String(listed?.messageCount));
 
@@ -374,10 +383,9 @@ function exerciseBranchPoints(): void {
 	check("a chain has no branch points", store.getBranchPoints(manager).length === 0, JSON.stringify(store.getBranchPoints(manager)));
 	check("and its tip is where it stopped", store.getBranchTip(manager, firstId) === answerId, `${store.getBranchTip(manager, firstId)} vs ${answerId}`);
 
-	// Rewind, change the model, then ask again. A state entry is not a place a conversation can be
-	// resumed at, so it must not read as an alternative of its own.
+	// Rewind, ask again. The `.json` snapshot carries the model now, so there is no state entry to
+	// write: only a message lands, and it must not read as an alternative of its own either way.
 	store.branch(manager, firstId);
-	const modelEntryId = store.appendModelChange(manager, "t", "m");
 	const secondId = store.appendMessage(manager, question("second", 3));
 
 	const points = store.getBranchPoints(manager);
@@ -393,7 +401,7 @@ function exerciseBranchPoints(): void {
 		points[0]?.options[0]?.active === false && points[0]?.options[1]?.active === true,
 		JSON.stringify(points[0]?.options),
 	);
-	check("a branch resumes at its newest tip", store.getBranchTip(manager, modelEntryId) === secondId, `${store.getBranchTip(manager, modelEntryId)} vs ${secondId}`);
+	check("a branch resumes at its newest tip", store.getBranchTip(manager, firstId) === secondId, `${store.getBranchTip(manager, firstId)} vs ${secondId}`);
 	// The move this exercise made is a real move, so it wrote its record as a child of the answer, and
 	// the subtree's newest tip is that record. Landing on it is landing on the answer's branch — the
 	// next append continues under it, and the replay takes the file's last word.
@@ -469,25 +477,31 @@ function exerciseBranchLabelPreview(): void {
 }
 
 /**
- * The on-disk shape is pi's: a header naming a workspace, then a tree of entries.
+ * The on-disk shape is two files sharing a stem: the `.json` snapshot naming the session, and the
+ * `.jsonl` tree of entries.
  *
- * Two invariants matter more than the field names. An entry kind this build does not understand has to
- * survive a read, because a newer build wrote it and the file is never rewritten; and an append has to
- * leave every earlier line exactly as it was, because that is what makes the file append-only.
+ * Three invariants matter more than the field names. An entry kind this build does not understand has
+ * to survive a read, because a newer build wrote it and the stream is never rewritten; an append has
+ * to leave every earlier line exactly as it was, because that is what makes the stream append-only;
+ * and the snapshot is rewritten whole on a change, never torn — a reader sees one version or the other.
  */
 async function exerciseFileFormat(): Promise<void> {
 	const id = "01a0a0a0-a0a0-70a0-a0a0-a0a0a0a0a0a0";
 	const createdAt = new Date().toISOString();
-	const dir = workspaceDir(root);
+	const dir = sessionDir(root);
 	await mkdir(dir, { recursive: true });
 	const path = sessionPath(dir, id, createdAt);
 	const lines = [
-		JSON.stringify({ type: "SessionHeader", version: CURRENT_SESSION_VERSION, id, timestamp: createdAt, workDir: resolvePath(root) }),
 		JSON.stringify({ type: "message", id: "aaaa0001", parentId: null, timestamp: createdAt, message: { role: "user", content: [{ type: "text", text: "written elsewhere" }], timestamp: 5 } }),
 		JSON.stringify({ type: "message", id: "aaaa0002", parentId: "aaaa0001", timestamp: createdAt, message: { role: "assistant", content: [{ type: "text", text: "answered elsewhere" }], timestamp: 6 } }),
 		JSON.stringify({ type: "future_thing", id: "aaaa0003", parentId: "aaaa0002", timestamp: createdAt, payload: { kept: true } }),
 	];
 	await writeFile(path, `${lines.join("\n")}\n`, "utf8");
+	await writeFile(
+		sessionMetaPath(path),
+		`${JSON.stringify({ version: CURRENT_SESSION_VERSION, id, timestamp: createdAt, workDir: resolvePath(root) }, null, "\t")}\n`,
+		"utf8",
+	);
 
 	const manager = fillSession(path);
 	check("reads both messages", store.buildSessionContext(manager).messages.length === 2, String(store.buildSessionContext(manager).messages.length));
@@ -507,12 +521,19 @@ async function exerciseFileFormat(): Promise<void> {
 	check("never rewrites earlier lines", text.startsWith(lines.join("\n")), text.slice(0, 48));
 	check("the unknown entry is still in the file", text.includes("future_thing"));
 
+	// A meta change rewrites the snapshot in place and leaves the stream alone.
+	store.setTitle(manager, "a name of its own");
+	const metaText = await readFile(sessionMetaPath(path), "utf8");
+	check("a meta change lands on the snapshot", JSON.parse(metaText).title === "a name of its own", metaText.slice(0, 80));
+	check("and the stream is untouched by it", (await readFile(path, "utf8")) === text, "");
+
 	const reopened = fillSession(path);
 	check("reopens with the same transcript", store.buildSessionContext(reopened).messages.length === 3, String(store.buildSessionContext(reopened).messages.length));
 	check("and the same leaf", reopened.leafId === appended, String(reopened.leafId));
+	check("and the recorded title", store.getTitle(reopened) === "a name of its own", store.getTitle(reopened));
 
 	check("sessions live under the agent home", dir.startsWith(sessionsDir()), dir);
-	check("in a directory named after the workspace", dir.endsWith("--") && dir.includes("my-agent-tools-"), dir);
+	check("in a store named after the directory", dir.endsWith("--") && dir.includes("my-agent-tools-"), dir);
 }
 
 /**
@@ -525,10 +546,10 @@ async function exerciseFileFormat(): Promise<void> {
  */
 async function exerciseSettings(): Promise<void> {
 	const agentDir = join(root, "settings-agent-home");
-	const workspace = join(root, "settings-workspace");
+	const projectDir = join(root, "settings-project");
 	const globalFile = join(agentDir, "settings.json");
-	const projectFile = join(workspace, PROJECT_DIR_NAME, "settings.json");
-	await mkdir(join(workspace, PROJECT_DIR_NAME), { recursive: true });
+	const projectFile = join(projectDir, PROJECT_DIR_NAME, "settings.json");
+	await mkdir(join(projectDir, PROJECT_DIR_NAME), { recursive: true });
 	await mkdir(agentDir, { recursive: true });
 	await writeFile(
 		globalFile,
@@ -539,7 +560,7 @@ async function exerciseSettings(): Promise<void> {
 	);
 	await writeFile(projectFile, JSON.stringify({ approval: { write: false } }), "utf8");
 
-	const settings = fillSettings(workspace, agentDir);
+	const settings = fillSettings(projectDir, agentDir);
 	check("reads the agent home's file", getModel(settings) === "faux/faux-1", String(getModel(settings)));
 	check("the project file overrides the field it names", getApprovals(settings).write === false, JSON.stringify(getApprovals(settings)));
 	check("and the global value beside it survives", getApprovals(settings).bash === false, JSON.stringify(getApprovals(settings)));
@@ -583,7 +604,7 @@ async function exerciseSettings(): Promise<void> {
 	await writeFile(projectFile, "{ not json", "utf8");
 	let failure = "";
 	try {
-		fillSettings(workspace, agentDir);
+		fillSettings(projectDir, agentDir);
 	} catch (error) {
 		failure = (error as Error).message;
 	}
@@ -619,7 +640,7 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		maxTokens: 8_192,
 	};
 	const session = await openAgent({
-		absWorkspaceRoot: root,
+		workDirAbsPath: root,
 		session: state,
 		models: { list: () => [configured] },
 		settingsState,
@@ -631,14 +652,14 @@ async function exerciseSessionLifecycle(): Promise<void> {
 
 	session.applyConfig(id, { approval: { bash: true } });
 	// The session reads and writes the settings state it was given — not a copy: a config patch that
-	// lands in the workspace's half of the patch lands in this bag, which is what the write-through
+	// lands in the directory's half of the patch lands in this bag, which is what the write-through
 	// below proves. The value is put back, because the bag is shared by the exercises that follow.
 	const timeoutBefore = getBashSettings(settingsState).defaultTimeoutMs;
 	session.applyConfig(id, { bash: { defaultTimeoutMs: timeoutBefore + 1 } });
 	check("the session reads and writes the settings state it was given", getBashSettings(settingsState).defaultTimeoutMs === timeoutBefore + 1, String(getBashSettings(settingsState).defaultTimeoutMs));
 	session.applyConfig(id, { bash: { defaultTimeoutMs: timeoutBefore } });
-	// An approval chosen in a session is that session's own: it lives in the transcript as a
-	// `tool_config` entry, and the settings file — which every other session over this workspace reads
+	// An approval chosen in a session is that session's own: it lives on the session's `.json`
+	// snapshot, and the settings file — which every other session over this directory reads
 	// — is left exactly as it was.
 	check(
 		"applyConfig leaves the settings file alone",
@@ -647,7 +668,7 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	);
 	check("and the session reflects it", session.snapshot(id).approvals.bash === true, JSON.stringify(session.snapshot(id).approvals));
 	check(
-		"recording the choice in the transcript",
+		"recording the choice on the snapshot",
 		store.getRecordedToolConfig(state).approval?.bash === true,
 		JSON.stringify(store.getRecordedToolConfig(state)),
 	);
@@ -680,14 +701,14 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	);
 
 	// The choice is durable and session-scoped: reopening the same file restores it, while a second
-	// session over the same workspace still opens on the settings defaults.
+	// session over the same directory still opens on the settings defaults.
 	check(
 		"the transcript kept the tool choices",
 		store.getRecordedToolConfig(reloaded).approval?.bash === true,
 		JSON.stringify(store.getRecordedToolConfig(reloaded)),
 	);
 	const reopened = await openAgent({
-		absWorkspaceRoot: root,
+		workDirAbsPath: root,
 		session: reloaded,
 		models: { list: () => [configured] },
 		settingsState,
@@ -695,13 +716,13 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	check("reopening restores the approval the session chose", reopened.snapshot(reloaded.sessionId).approvals.bash === true, JSON.stringify(reopened.snapshot(reloaded.sessionId).approvals));
 	const otherState = createSession(root);
 	const other = await openAgent({
-		absWorkspaceRoot: root,
+		workDirAbsPath: root,
 		session: otherState,
 		models: { list: () => [configured] },
 		settingsState,
 	});
 	check(
-		"while another session over the workspace keeps the defaults",
+		"while another session over the directory keeps the defaults",
 		other.snapshot(otherState.sessionId).approvals.bash === false,
 		JSON.stringify(other.snapshot(otherState.sessionId).approvals),
 	);
@@ -853,7 +874,7 @@ function answerMessage(text: string, at: number): Message {
 	};
 }
 
-/** The messages a selection of entries stands for 鈥攖he view `maybeCompact` answers with. */
+/** The messages a selection of entries stands for — the view `maybeCompact` answers with. */
 function project(entries: readonly SessionEntry[]): Message[] {
 	return entries.flatMap((entry) => sessionEntryToContextMessages(entry));
 }
@@ -867,15 +888,12 @@ function project(entries: readonly SessionEntry[]): Message[] {
  */
 async function writeIdleSession(dir: string, entries: readonly SessionEntry[], at: number): Promise<string> {
 	const file = join(dir, "idle-session.jsonl");
-	const lines = [
-		JSON.stringify({
-			type: "SessionHeader",
-			version: CURRENT_SESSION_VERSION,
-			id: "idle-session",
-			timestamp: new Date(at).toISOString(),
-			workDirAbsPath: resolvePath(dir),
-		}),
-	];
+	await writeFile(
+		sessionMetaPath(file),
+		`${JSON.stringify({ version: CURRENT_SESSION_VERSION, id: "idle-session", timestamp: new Date(at).toISOString(), workDir: resolvePath(dir) }, null, "\t")}\n`,
+		"utf8",
+	);
+	const lines: string[] = [];
 	let clock = at;
 	for (const entry of entries) {
 		clock += 1_000;
@@ -890,9 +908,9 @@ async function writeIdleSession(dir: string, entries: readonly SessionEntry[], a
  * has looked at since are being paid for in full.
  *
  * What a tool can produce again is the cheapest thing in the transcript to lose, and clearing it costs
- * no request at all 鈥攚hich is why it happens before a summary is paid for. What no tool can produce
- * again, such as a subagent's report, is never touched however old it is. The clear is recorded rather
- * than held in memory, so the file is the thing every later reader decides from.
+ * no request at all — which is why it happens before a summary is paid for. What no tool can produce
+ * again, such as a report a tool wrote once, is never touched however old it is. The clear is recorded
+ * rather than held in memory, so the file is the thing every later reader decides from.
  */
 async function exercisePruning(): Promise<void> {
 	const now = Date.now();
@@ -909,7 +927,7 @@ async function exercisePruning(): Promise<void> {
 		resultEntryIds.push(store.appendMessage(bag, resultMessage(`call-${index}`, "read", bodyOf(index), longAgo)));
 	}
 	store.appendMessage(bag, callMessage("call-task", "task", longAgo));
-	store.appendMessage(bag, resultMessage("call-task", "task", "SUBAGENT REPORT: rewrote the parser", longAgo));
+	store.appendMessage(bag, resultMessage("call-task", "task", "REPORT: rewrote the parser", longAgo));
 	store.appendMessage(bag, answerMessage("done", longAgo));
 
 	// The entries are appended with today's stamps, so the store is rewound to the idle conversation the
@@ -937,7 +955,7 @@ async function exercisePruning(): Promise<void> {
 		clearable.join() === resultEntryIds.slice(0, 3).join(),
 		clearable.join(),
 	);
-	check("a subagent report is never a candidate", !clearable.includes(entries[entries.length - 2]!.id), clearable.join());
+	check("a result no tool can produce again is never a candidate", !clearable.includes(entries[entries.length - 2]!.id), clearable.join());
 	check(
 		"clearing keeps the entry and replaces only its text",
 		(() => {
@@ -966,7 +984,7 @@ async function exercisePruning(): Promise<void> {
 		maxTokens: 8_192,
 	};
 	const session = await openAgent({
-		absWorkspaceRoot: root,
+		workDirAbsPath: root,
 		session: store2,
 		models: { list: () => [configured] },
 		settingsState: inMemorySettingsState({ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } }),
@@ -981,7 +999,7 @@ async function exercisePruning(): Promise<void> {
 	const keptText = text(kept);
 	check("the clear alone left it under the trigger", estimateTokens(project(kept)) <= 500, String(estimateTokens(project(kept))));
 	check("so the request carries the cleared view", keptText.includes(clearedToolResultText("read")) && !keptText.includes("body 0 "));
-	check("and the newest results as they were", keptText.includes("body 7") && keptText.includes("SUBAGENT REPORT"));
+	check("and the newest results as they were", keptText.includes("body 7") && keptText.includes("REPORT: rewrote the parser"));
 	check("the clear was announced and nothing was summarized", announced.join() === "tool_results_cleared", JSON.stringify(announced));
 	check(
 		"and one record now says what it cleared",
@@ -999,7 +1017,7 @@ async function exercisePruning(): Promise<void> {
 	const reread = fillSession(fixture);
 	const rereadText = text(store.buildContextEntries(reread));
 	check("a reload reads the cleared view", rereadText.includes(clearedToolResultText("read")) && !rereadText.includes("body 0 "));
-	check("with the newest results still there", rereadText.includes("body 7") && rereadText.includes("SUBAGENT REPORT"));
+	check("with the newest results still there", rereadText.includes("body 7") && rereadText.includes("REPORT: rewrote the parser"));
 	check("and nothing left for a clear to do", clearableToolResultIds(store.buildContextEntries(reread)).length === 0);
 	check(
 		"while the file itself keeps what the view dropped",
@@ -1011,8 +1029,8 @@ async function exercisePruning(): Promise<void> {
  * The heavy bodies a `write` or an `edit` carried are in the files they changed, so the recorded
  * arguments are the cheapest thing compaction can shorten: no request, no clock.
  *
- * What the checks pin: only a call whose result is already on the branch is a candidate 鈥攖he
- * arguments of a call still in flight belong to the turn the model is inside 鈥攁nd the trim is a
+ * What the checks pin: only a call whose result is already on the branch is a candidate — the
+ * arguments of a call still in flight belong to the turn the model is inside — and the trim is a
  * recorded view, so the file keeps the full body while every reader of the context sees the marker.
  */
 function exerciseTrimToolCallArgs(): void {
@@ -1143,31 +1161,31 @@ function exerciseDiffs(): void {
 }
 
 /**
- * A result no tool bounded is archived into the workspace whole, and the model is served its head and
- * tail plus the archive's path 鈥攕o nothing is lost, and the agent can read the rest back itself.
+ * A result no tool bounded is archived under the working directory whole, and the model is served its
+ * head and tail plus the archive's path — so nothing is lost, and the agent can read the rest back.
  */
 function exerciseSpilling(): void {
-	const workspace = new Workspace(root);
+	const workDirAbsPath = root;
 	const middle = Array.from({ length: 10_000 }, (_, index) => `line-${index} ${"y".repeat(8)}`).join("\n");
 	const content = [{ type: "text" as const, text: `BEGIN-OF-OUTPUT\n${middle}\nEND-OF-OUTPUT` }];
 
-	const small = spillOversizedToolResult(workspace, "spill-session", "bash", "small-call", [{ type: "text", text: "small" }]);
+	const small = spillOversizedToolResult(workDirAbsPath, "spill-session", "bash", "small-call", [{ type: "text", text: "small" }]);
 	check("a small result is not touched", small === undefined);
 
-	const view = spillOversizedToolResult(workspace, "spill-session", "bash", "spill/call:1", content);
+	const view = spillOversizedToolResult(workDirAbsPath, "spill-session", "bash", "spill/call:1", content);
 	check("an oversized result comes back as a view", view !== undefined);
 	if (!view) return;
 	const shown = view.find((block) => block.type === "text");
-	const { absPath, relPath } = spillPathFor(workspace, "spill-session", "bash", "spill/call:1");
+	const { absPath, relPath } = spillPathFor(workDirAbsPath, "spill-session", "bash", "spill/call:1");
 	const archived = existsSync(absPath) ? readFileSync(absPath, "utf8") : "";
-	check("the full text is archived in the workspace", archived.startsWith("BEGIN-OF-OUTPUT") && archived.endsWith("END-OF-OUTPUT"), absPath);
+	check("the full text is archived under the directory", archived.startsWith("BEGIN-OF-OUTPUT") && archived.endsWith("END-OF-OUTPUT"), absPath);
 	check("under the path the view names", archived.length > 0 && shown?.type === "text" && shown.text.includes(relPath), relPath);
 	check("the view keeps the head", shown?.type === "text" && shown.text.startsWith("BEGIN-OF-OUTPUT"));
 	check("and the tail", shown?.type === "text" && shown.text.endsWith("END-OF-OUTPUT"));
 	check("and drops the middle", shown?.type === "text" && !shown.text.includes("line-5000"));
 	check("and says how to read the rest", shown?.type === "text" && shown.text.includes("use the read tool"));
 
-	const again = spillOversizedToolResult(workspace, "spill-session", "bash", "spill/call:1", content);
+	const again = spillOversizedToolResult(workDirAbsPath, "spill-session", "bash", "spill/call:1", content);
 	check("a second pass reuses the archive without rewriting it", again !== undefined && existsSync(absPath));
 }
 

@@ -27,8 +27,8 @@ export interface SnapshotInput {
 	sessions: SessionManager;
 	/** The transcript's own state: the bag every read below is taken from. */
 	session: Session;
-	/** The workspace the session runs in, absolute. */
-	absWorkspaceRoot: string;
+	/** The working directory the session runs in, absolute. */
+	workDirAbsPath: string;
 	/** Already settled: `createModel(row, level)` or `placeholderModel()`. */
 	model: Model<Api>;
 	approvals: Record<ToolApprovalKey, boolean>;
@@ -57,7 +57,7 @@ export interface SnapshotInput {
  *
  * Pure, and that is the point: it never constructs an `Agent`, reads the filesystem, or touches a
  * loop. A live session answers with it from what its own loop is doing, and a session this process is
- * *not* running answers with it from the JSONL file alone — so reading a transcript is not as
+ * *not* running answers with it from the session files alone — so reading a transcript is not as
  * expensive as running one, and a read leaves no trace in the hub.
  *
  * The five fields a cold reader cannot know — `submitting`, `queued`, `isRetrying`, `retryAttempt`,
@@ -67,12 +67,13 @@ export interface SnapshotInput {
 export function sessionSnapshot(input: SnapshotInput): SessionSnapshot {
 	const sessions = input.sessions;
 	const state = input.session;
-	const header = sessions.getHeader(state);
+	// The `.json` snapshot: identity and current choices, already in the bag.
+	const meta = sessions.getMeta(state);
 	const messages = sessions.buildSessionContext(state).messages;
 	return {
 		id: state.sessionId,
-		workDirAbsPath: input.absWorkspaceRoot,
-		createdAt: header ? new Date(header.timestamp).getTime() : Date.now(),
+		workDirAbsPath: input.workDirAbsPath,
+		createdAt: new Date(meta.timestamp).getTime(),
 		title: sessions.getTitle(state),
 		model: input.model.name,
 		thinkingLevel: input.model.thinkingLevel ?? "off",
@@ -87,7 +88,7 @@ export function sessionSnapshot(input: SnapshotInput): SessionSnapshot {
 		branchPoints: sessions.getBranchPoints(state),
 		leafId: state.leafId,
 		...(input.partial === undefined ? {} : { partial: input.partial }),
-		...(header?.parentSession === undefined ? {} : { parentSession: header.parentSession }),
+		...(meta.parentSession === undefined ? {} : { parentSession: meta.parentSession }),
 		submitting: input.submitting,
 		queued: input.queued,
 		isRetrying: input.isRetrying,

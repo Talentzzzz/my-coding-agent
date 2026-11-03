@@ -19,14 +19,14 @@ import {
 	OpenSessions,
 	SettingsManager,
 	type SettingsState,
-	getHiddenWorkspaces,
-	workspaceDir,
+	getHiddenDirectories,
+	sessionDir,
 	type ModelConfig,
 	ModelConfigStore,
 } from "@my-agent/core";
 
 export interface HubOptions {
-	/** The directory the process was started in; new sessions take it as their workspace. */
+	/** The directory the process was started in; new sessions take it as their working directory. */
 	workDirAbsPath: string;
 	model?: string;
 	thinkingLevel?: string;
@@ -112,7 +112,7 @@ export type SessionObserver = (feeds: SessionFeeds | undefined) => void;
  * open right now. That is a transport-layer question (ADR-0001), so its counter lives with the
  * transport layer rather than on an entry core would never read.
  *
- * The workspace is per session rather than per process. A sidebar that lists every workspace this
+ * The working directory is per session rather than per process. A sidebar that lists every directory this
  * machine has used can open any of them, and the tools of the session that opens must resolve inside
  * the directory its own transcript was written in — which is what the header of its file records.
  * It is read here because a fork needs it before anything is running, and the registry entry exists
@@ -121,7 +121,7 @@ export type SessionObserver = (feeds: SessionFeeds | undefined) => void;
 export class HostedSession {
 	readonly id: string;
 	/** The directory this session's tools may touch, absolute. */
-	readonly absWorkspaceRoot: string;
+	readonly workDirAbsPath: string;
 	/**
 	 * Callers currently holding this session open.
 	 *
@@ -133,9 +133,9 @@ export class HostedSession {
 	/** Set while the hub is deciding whether an unclaimed session can be closed. */
 	reaping = false;
 
-	constructor(sessionId: string, absWorkspaceRoot: string) {
+	constructor(sessionId: string, workDirAbsPath: string) {
 		this.id = sessionId;
-		this.absWorkspaceRoot = absWorkspaceRoot;
+		this.workDirAbsPath = workDirAbsPath;
 	}
 }
 
@@ -165,9 +165,9 @@ export class SessionHub {
 	/**
 	 * The directory this process was started in.
 	 *
-	 * It is a default, not the workspace: new sessions take it as their workDirAbsPath, and the default listing
-	 * and settings are scoped to it. A session's actual workspace comes from its own header — see
-	 * {@link HostedSession.absWorkspaceRoot} — which may name any directory on the machine.
+	 * It is a default, not the directory a session works in: new sessions take it as their workDirAbsPath,
+	 * and the settings panel is scoped to it. A session's own directory comes from its header — see
+	 * {@link HostedSession.workDirAbsPath} — which may name any directory on the machine.
 	 *
 	 * Nothing moves it after construction, which is why a folder the user renamed behind this
 	 * process's back is not followed: a default that guessed at a new name would put the next new
@@ -175,7 +175,7 @@ export class SessionHub {
 	 */
 	private absRoot: string;
 
-	/** The current default workspace. */
+	/** The current default directory. */
 	get workDirAbsPath(): string {
 		return this.absRoot;
 	}
@@ -194,10 +194,10 @@ export class SessionHub {
 	/** How long a parked approval is waited out before it is denied. See {@link HubOptions.approvalGraceMs}. */
 	private readonly approvalGraceMs: number;
 	/**
-	 * The stateless settings service every workspace's settings read and write goes through.
+	 * The stateless settings service every directory's settings read and write goes through.
 	 *
-	 * One instance rather than one per call, because the service's per-workspace cache is what keeps
-	 * every reader and writer of a workspace on one `SettingsState`: a toggle written by a session is
+	 * One instance rather than one per call, because the service's per-directory cache is what keeps
+	 * every reader and writer of a directory on one `SettingsState`: a toggle written by a session is
 	 * the value the next session reads, and the value the panel command below writes, rather than
 	 * copies taken when each was assembled. See `SettingsManager.stateOf`.
 	 */
@@ -297,35 +297,35 @@ export class SessionHub {
 		this.modelStore.replace(models);
 	}
 
-	/** The settings of one workspace, filled once by the service and shared by every session over it. */
-	settingsStateOf(absWorkspaceRoot: string): SettingsState {
-		return this.settings.stateOf(absWorkspaceRoot, this.options.settingsHome);
+	/** The settings of one directory, filled once by the service and shared by every session over it. */
+	settingsStateOf(workDirAbsPath: string): SettingsState {
+		return this.settings.stateOf(workDirAbsPath, this.options.settingsHome);
 	}
 
 	/**
-	 * Whether this process's listings still name a workspace: one the user put aside is left out.
+	 * Whether this process's listings still name a directory: one the user put aside is left out.
 	 *
 	 * One home for one rule, because there are two roads by which a window learns the machine's
-	 * workspaces — the REST listing and the channel's overview — and two filters would be two answers
+	 * directories — the REST listing and the channel's overview — and two filters would be two answers
 	 * the first time either side changed. The list itself is a settings fact, read through the manager
 	 * that the command writing it goes through, so a hide is visible to both roads on the next look.
 	 *
 	 * A hub with no root answers "everything is listed". That is not a production state — `HubOptions`
 	 * requires `workDirAbsPath` and `bootServer` always passes it — but `scripts/smoke-approval.ts` builds one
 	 * without it on purpose (`docs/notes.md` §一 pins that construction, and the section mounts its own
-	 * session and asks the workspace nothing). The filter's whole job is to leave a group out, and
+	 * session and asks the directory nothing). The filter's whole job is to leave a group out, and
 	 * nothing has been left out.
 	 */
-	listsWorkspace(workDirAbsPath: string): boolean {
+	listsDirectory(workDirAbsPath: string): boolean {
 		if (typeof this.absRoot !== "string") return true;
-		return !getHiddenWorkspaces(this.settingsStateOf(this.absRoot)).some((path) => samePath(path, workDirAbsPath));
+		return !getHiddenDirectories(this.settingsStateOf(this.absRoot)).some((path) => samePath(path, workDirAbsPath));
 	}
 
 	/**
 	 * Whether this id names a session at all: one this process is running, one it created and has not
 	 * written yet, or one on disk.
 	 *
-	 * The search covers every workspace, not just the server's own: a client lists all of them and can
+	 * The search covers every directory, not just the server's own: a client lists all of them and can
 	 * ask for any of them, and answering "no such session" for a row the same server just listed would
 	 * be the one contradiction a client cannot recover from.
 	 */
@@ -520,11 +520,11 @@ export class SessionHub {
 	 *
 	 * `workDirAbsPath` decides where the session lands. Undefined is the server's own root; a path is accepted
 	 * when it exists and is a directory, and nothing more — a first session in a directory nobody has
-	 * worked in is the one way a new workspace enters the known list, and the workspace root is the
-	 * tools' fence rather than the process's, so no known-workspace check belongs here.
+	 * worked in is the one way a new directory enters the known list, and the header's workDir is the
+	 * tools' default rather than the process's, so no known-directory check belongs here.
 	 */
 	async newSession(workDirAbsPath?: string): Promise<string> {
-		const absRoot = await workspaceRootForCreate(workDirAbsPath ?? this.workDirAbsPath);
+		const absRoot = await workDirAbsPathForCreate(workDirAbsPath ?? this.workDirAbsPath);
 		const id = this.createUnpersisted(absRoot);
 		this.current = Promise.resolve(id);
 		this.announceHost(id, undefined);
@@ -558,8 +558,8 @@ export class SessionHub {
 				: this.sessions.stateOf(sessionId).sessionFileAbsPath;
 		if (absSourcePath === undefined) throw new Error(`Unknown session: ${sessionId}`);
 		// The branch is written where its source lives: forking a conversation held in another
-		// workspace must not quietly move it into this one.
-		const absTargetWorkDir = hosted?.absWorkspaceRoot ?? fillSession(absSourcePath).workDirAbsPath;
+		// directory must not quietly move it into this one.
+		const absTargetWorkDir = hosted?.workDirAbsPath ?? fillSession(absSourcePath).workDirAbsPath;
 		const id = this.sessions.forkFrom(absSourcePath, absTargetWorkDir, entryId).sessionId;
 		this.current = Promise.resolve(id);
 		this.announceHost(id, undefined);
@@ -567,12 +567,12 @@ export class SessionHub {
 	}
 
 	/**
-	 * Give a session a name of its own, stored as one `rename` entry (ADR-0002).
+	 * Give a session a name of its own, stored as the title on its `.json` snapshot.
 	 *
-	 * The entry appends through the service's `stateOf` — which is deliberately not a fresh replay:
+	 * The write goes through the service's `stateOf` — which is deliberately not a fresh replay:
 	 * the bag it hands back is the one this process's turns are written through, and the one the next
 	 * open will serve. It takes no claim: a rename is a record beside the conversation, the loop never
-	 * reads titles, and an entry appended mid-run lands on the file without disturbing the turn.
+	 * reads titles, and a rewrite of the snapshot mid-run lands without disturbing the turn.
 	 *
 	 * The title arrives already shortened; what reaches the file is what a row shows.
 	 */
@@ -583,11 +583,11 @@ export class SessionHub {
 		if (!isHosted && SessionManager.findSessionFilePathById(sessionId) === undefined) {
 			throw new Error(`Unknown session: ${sessionId}`);
 		}
-		this.sessions.appendRename(this.sessions.stateOf(sessionId), title);
+		this.sessions.setTitle(this.sessions.stateOf(sessionId), title);
 	}
 
 	/**
-	 * This process's own root changed directory: the renamed workspace. A default, not the workspace —
+	 * This process's own root changed directory: the renamed folder. A default, not the directory a
 	 * see {@link workDirAbsPath} — so only the paths that were already derived from it are dropped, and nothing
 	 * running is touched.
 	 */
@@ -676,8 +676,8 @@ export class SessionHub {
 	/**
 	 * Open a session file this process is not running yet.
 	 *
-	 * The workspace comes from the transcript's own header rather than from the server's root, because
-	 * the sidebar offers every workspace on the machine: a session opened from another group must have
+	 * The working directory comes from the transcript's own header rather than from the server's root, because
+	 * the sidebar offers every directory on the machine: a session opened from another group must have
 	 * its tools resolve where it was written, and its approvals come from that directory's settings.
 	 *
 	 * The entry this builds is the whole of the per-session setup: the orchestrator is the process's
@@ -689,9 +689,9 @@ export class SessionHub {
 		// and this is the road its own id takes from the creation to the first message.
 		const pending = this.pendingManager(id);
 		const state = pending ?? this.sessions.stateOf(id);
-		const absWorkspaceRoot = state.workDirAbsPath;
-		await ensureSession(this.sessionOptions(state, absWorkspaceRoot));
-		const host = new HostedSession(id, absWorkspaceRoot);
+		const workDirAbsPath = state.workDirAbsPath;
+		await ensureSession(this.sessionOptions(state, workDirAbsPath));
+		const host = new HostedSession(id, workDirAbsPath);
 		this.hosts.set(id, host);
 		// Observers first, then the listeners: a subscriber told "a host opened" and reaching for the
 		// session must find it already handed over.
@@ -724,18 +724,18 @@ export class SessionHub {
 	 * The options one transcript is described by, whether or not this process runs it.
 	 *
 	 * One builder for both paths on purpose. The cold read and the open must resolve the same
-	 * workspace, the same settings, and the same pinned model and level, so that a snapshot taken
+	 * directory, the same settings, and the same pinned model and level, so that a snapshot taken
 	 * without assembling is indistinguishable from a snapshot taken after — if these were written out
 	 * twice, the difference would show up as a session that changes when you open it.
 	 */
-	private sessionOptions(state: Session, absWorkspaceRoot: string): OpenAgentOptions {
+	private sessionOptions(state: Session, workDirAbsPath: string): OpenAgentOptions {
 		return {
-			absWorkspaceRoot,
+			workDirAbsPath,
 			sessionManager: this.sessions,
 			session: state,
 			models: this.models,
 			settingsManager: this.settings,
-			settingsState: this.settingsStateOf(absWorkspaceRoot),
+			settingsState: this.settingsStateOf(workDirAbsPath),
 			openSessions: this.openSessions,
 			...(this.options.model === undefined ? {} : { model: this.options.model }),
 			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),
@@ -811,7 +811,7 @@ export class SessionHub {
 	 *
 	 * Resolved once per process, as a promise so two connections arriving together cannot both create
 	 * a session. `--session` pins it, and otherwise the caller gets a new one — a launch opens on the
-	 * welcome state even in a workspace full of history, and the session a page reload lands on is
+	 * welcome state even in a directory full of history, and the session a page reload lands on is
 	 * that same one because this is memoised. History is the sidebar's business: resuming it is a
 	 * click on a row, not something the server guesses.
 	 * `newSession()` moves it.
@@ -872,15 +872,15 @@ function delay(ms: number): Promise<void> {
 /**
  * The root a new session lands on, resolved and checked before anything is written.
  *
- * The check is deliberately only "exists and is a directory". Anything narrower — a known-workspace
+ * The check is deliberately only "exists and is a directory". Anything narrower — a known-directory
  * list, for one — would close the one sanctioned road to a first session in a directory the process
- * has never worked in, which is exactly how a new workspace earns its place in the sidebar.
+ * has never worked in, which is exactly how a new directory earns its place in the sidebar.
  *
  * Exported because the status a refusal deserves is the controller's decision, not the hub's: the
  * controller runs this check itself so a bad path can be answered with a 400, and `newSession`
  * runs it again so no internal caller can write a session without it.
  */
-export async function workspaceRootOrThrow(workDirInput: string): Promise<string> {
+export async function workDirAbsPathOrThrow(workDirInput: string): Promise<string> {
 	const absRoot = resolve(workDirInput);
 	let stats;
 	try {
@@ -901,12 +901,12 @@ export async function workspaceRootOrThrow(workDirInput: string): Promise<string
  * there. A path this machine has no sessions for still refuses: a typo in the picker must not become
  * a folder nobody asked for.
  */
-export async function workspaceRootForCreate(workDirInput: string): Promise<string> {
+export async function workDirAbsPathForCreate(workDirInput: string): Promise<string> {
 	const absRoot = resolve(workDirInput);
 	try {
-		return await workspaceRootOrThrow(absRoot);
+		return await workDirAbsPathOrThrow(absRoot);
 	} catch (error) {
-		if (!existsSync(workspaceDir(absRoot))) throw error;
+		if (!existsSync(sessionDir(absRoot))) throw error;
 		await mkdir(absRoot, { recursive: true });
 		return absRoot;
 	}

@@ -9,55 +9,83 @@ import {
 	readdirSync,
 	readFileSync,
 	readSync,
+	renameSync,
+	rmSync,
 	type Stats,
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { readdir, rename, rm, stat } from "node:fs/promises";
+import { readdir, rm, stat } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 import type { Message } from "@my-agent/llm";
 import { type Usage, uuidv7 } from "@my-agent/llm";
-import type { ToolResultContent } from "../hooks.ts";
 import { APP_NAME } from "../config.ts";
 import { trimToolCallArgs } from "../context/trim-tool-call-args.ts";
 import { clearToolResult } from "../context/clear-tool-results.ts";
 import type { SessionRef, SessionRow, ToolApprovalKey } from "../protocol.ts";
 import { COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, compactionSummaryOf } from "./messages.ts";
-import { normalizePath, resolvePath, sessionPath, sessionsDir, workspaceDir } from "./paths.ts";
+import { normalizePath, resolvePath, sessionDir, sessionJsonlPath, sessionMetaPath, sessionPath, sessionsDir } from "./paths.ts";
 
 /**
  * The on-disk shape this build writes.
  *
- * pi numbers its session format, and the number is kept so a file says which generation wrote it:
- * 1 is flat records with no ids, 2 gave every entry `id`/`parentId` so the file became a tree, 3
- * renamed the `hookMessage` role to `custom`, and 4 renamed the header's discriminator to
- * `"SessionHeader"`. Only 4 is produced here, and the entry kinds this build knows are the ones in
+ * A session is two files, and 5 is the first version that says so: 4 kept everything in one JSONL
+ * with the header as line one, and 5 splits it — `<id>.json` holds what the session *is* (the
+ * header fields plus the current values of title, model, thinking level, and tool config, rewritten
+ * whole on every change), `<id>.jsonl` holds what was *said* (the immutable entry stream, and
+ * nothing else). Only 5 is produced here, and the entry kinds this build knows are the ones in
  * {@link SessionEntry}.
  *
- * There is deliberately no migration. A file from an older build is refused when it cannot be read as
- * one of ours and left exactly as it is otherwise, because rewriting a session this code does not
- * understand is the one way to lose one. A v3 file is refused for that reason: its header says
- * `"session"`, and nothing here reads that word.
+ * There is deliberately no migration. A session whose files do not read as a v5 pair is *deleted*,
+ * not refused and left in place: the format is owned by this build, a v≤4 file cannot be adopted
+ * without a header replay this code no longer has, and keeping it would make every listing pay for
+ * a session nothing can ever open again. The deletion points are the listing scan and
+ * {@link fillSession} — see {@link settleSessionFiles}.
  */
-export const CURRENT_SESSION_VERSION = 4;
+export const CURRENT_SESSION_VERSION = 5;
 
-export interface SessionHeader {
-	type: "SessionHeader";
-	version?: number;
+/**
+ * The `.json` half of a session: what the session *is*, as one atomically rewritten snapshot.
+ *
+ * The first five fields are the identity a v4 header carried — who the session is, when it was
+ * created, where it was opened, and the file it was forked from. The rest are the session's own
+ * current choices, the ones v≤4 recorded as last-wins entries (`rename`, `model_change`,
+ * `thinking_level_change`, `tool_config`): only the value in force is kept, so the history those
+ * entries carried is gone by design — it was never read. A field absent means "never chosen", which
+ * is what lets a reader tell a session that chose `off` from one that never chose.
+ *
+ * Every change rewrites the whole file (temp + rename), because it is a snapshot, not a log — the
+ * JSONL beside it is the log, and the two are paired by stem: a session exists exactly when both
+ * files do.
+ */
+export interface SessionMeta {
+	version: number;
 	id: string;
+	/** The ISO stamp the session was created at; the file name leads with the same moment. */
 	timestamp: string;
+	/** The working directory the session was opened on, absolute. */
 	workDir: string;
 	/**
 	 * The session file this one was forked from or delegated by.
 	 *
-	 * An absolute path, not an id, because a fork is traceable to the file it copied, and the file is
-	 * what a reader has in hand. Absolute because a listing compares paths: a relative one would be
-	 * resolved against whatever directory the process happens to be in. The copied entries keep their
-	 * original ids on top of that.
+	 * An absolute path to the source's `.jsonl`, not an id, because a fork is traceable to the file
+	 * it copied, and the file is what a reader has in hand. Absolute because a listing compares
+	 * paths: a relative one would be resolved against whatever directory the process happens to be
+	 * in. The copied entries keep their original ids on top of that.
 	 */
 	parentSession?: string;
+	/** The conversation's own name, when a person gave it one; absent means "derive it". */
+	title?: string;
+	/** The model row this session last ran on, as the name that identifies it. */
+	model?: { name: string; modelId: string };
+	/** The thinking level this session last asked at; absent means "never chose". */
+	thinkingLevel?: string;
+	/** The complete active tool set as of the last change, in registration order. */
+	activeTools?: string[];
+	/** The complete approval map as of the last change, keyed like the settings file's `approval`. */
+	approval?: Record<ToolApprovalKey, boolean>;
 }
 
 export interface SessionEntryBase {
@@ -70,31 +98,6 @@ export interface SessionEntryBase {
 export interface MessageEntry extends SessionEntryBase {
 	type: "message";
 	message: Message;
-}
-
-export interface ThinkingLevelChangeEntry extends SessionEntryBase {
-	type: "thinking_level_change";
-	thinkingLevel: string;
-}
-
-/**
- * The row this session switched to, recorded as the name it carries.
- *
- * `name` is the row's identity — see `ModelConfig` — so this entry is what later turns "which model was
- * this session on" back into a row. `provider` is the field this build wrote before a name was the
- * identity: it held the row's slug. Files are never rewritten, so it is still read, which is what keeps
- * an upgrade from silently dropping the model a transcript recorded. The two are not both written: a
- * new entry carries `name` alone.
- */
-export interface ModelChangeEntry extends SessionEntryBase {
-	type: "model_change";
-	name: string;
-	modelId: string;
-}
-
-/** The row name a stored `model_change` entry names, whether this build or its predecessor wrote it. */
-function modelChangeName(entry: { name?: string; provider?: string }): string | undefined {
-	return entry.name ?? entry.provider;
 }
 
 export interface CompactionEntry extends SessionEntryBase {
@@ -140,43 +143,6 @@ export interface TrimToolCallArgEntry extends SessionEntryBase {
 }
 
 /**
- * A record of what a hook left for the model to read in one tool result.
- *
- * An `after_tool` rewrite leaves one result with two audiences: the request is served the `shown`
- * half, the transcript keeps the `stored` half — which is the toolResult message this record follows,
- * so the file holds both without carrying either twice. Like a clear or a trim, the record changes
- * what an earlier entry *means* rather than changing it, and a replay pairs it back with that message
- * by tool call id (`toolResultViewsOf`), which is what keeps a restarted process serving the model the
- * same bounded result the live one did. A clear outranks it: a view whose result the view emptied is
- * dead, because the cleared notice exists to send the model back to the tool.
- */
-export interface ToolResultViewEntry extends SessionEntryBase {
-	type: "tool_result_view";
-	/** The tool call the shown half answers. */
-	toolCallId: string;
-	/** What the hooks left for the model to read. */
-	shown: ToolResultContent;
-}
-
-/**
- * A record of the session's own tool choices: which tools are active and which of them ask for
- * approval.
- *
- * Both maps travel whole — a snapshot, not a delta — because the session file is append-only, so the
- * latest entry is the state and every earlier one is history. The settings files keep their approval
- * set as the default a new session opens on; this entry is where a session that chose differently
- * keeps its own. Nothing here reaches the provider: the request is rebuilt from the live registry
- * every turn, and this entry only restores the registry's state on reopen.
- */
-export interface ToolConfigEntry extends SessionEntryBase {
-	type: "tool_config";
-	/** The complete active tool set as of this change, in registration order. */
-	activeTools: string[];
-	/** The complete approval map as of this change, keyed like the settings file's `approval`. */
-	approval: Record<ToolApprovalKey, boolean>;
-}
-
-/**
  * A record of where the conversation moved: the position {@link SessionManager.branch} or
  * {@link SessionManager.resetLeaf} left the leaf at, written when the position actually moved.
  *
@@ -192,51 +158,41 @@ export interface LeafEntry extends SessionEntryBase {
 }
 
 /**
- * A record that the conversation was given a name of its own.
- *
- * The derived title — the first user message on the branch — stays the fallback, and this entry is
- * what a person's own choice writes over it. The title here is the clean name, already shortened at
- * the write; a fork's `（N）` suffix is a rendering fact and is never stored. Read in file order,
- * last one wins, regardless of which way the branch points — see ADR-0002 for why a rename is a fact
- * about the session rather than about one way through it.
- */
-export interface RenameEntry extends SessionEntryBase {
-	type: "rename";
-	/** The name the conversation was given, shortened the same way a derived title is. */
-	title: string;
-}
-
-/**
  * A record of model spend that owns no message entry: usage the engine never attached to an assistant
  * message in this transcript.
  *
- * Delegation is the case that forces the kind into existence — a SubAgent runs on its own transcript,
- * so its spend has no assistant message here to ride on — and `operation` names the spend the way a
- * reader would ask about it, `"subagent"` today. A usage entry is money, not conversation: it reaches
+ * The kind exists so a spend with no message of its own has somewhere to land — a run whose
+ * transcript belongs to another file, a summary written for compaction — and `operation` names the
+ * spend the way a reader would ask about it. A usage entry is money, not conversation: it reaches
  * no message, and it is counted in file order across every branch, because tokens burned on an
  * abandoned way through the tree were burned all the same. An unknown `operation` is read as ordinary
  * usage rather than rejected — the same forward-compatibility rule the file's unknown kinds follow.
  */
 export interface UsageEntry extends SessionEntryBase {
 	type: "usage";
-	/** What the spend is attributed to: `"subagent"` for a delegation's child, for a start. */
+	/** What the spend is attributed to, as the writer named it. */
 	operation: string;
 	/** The model row the spend ran on, as its name. */
 	model: string;
 	usage: Usage;
 }
 
+/**
+ * The six kinds an entry line can be.
+ *
+ * Everything else a session once recorded about itself — its name, its model and thinking level, its
+ * tool choices — is a *current value*, and lives in the `.json` snapshot beside this stream; and the
+ * legacy `tool_result_view` kind is gone outright, because this build stopped writing it and v≤4
+ * files are deleted rather than replayed. What is left is exactly the kinds a transcript cannot
+ * rewrite in place: the conversation, the two view-shrink records, the checkpoint, the leaf
+ * position, and unattributed spend.
+ */
 export type SessionEntry =
 	| MessageEntry
-	| ThinkingLevelChangeEntry
-	| ModelChangeEntry
 	| CompactionEntry
 	| ClearToolResultEntry
 	| TrimToolCallArgEntry
-	| ToolResultViewEntry
-	| ToolConfigEntry
 	| LeafEntry
-	| RenameEntry
 	| UsageEntry;
 
 /**
@@ -248,29 +204,6 @@ export type SessionEntry =
  * JSONL in sequence, and appended to in the same order, so "the last line wins" needs no sort.
  */
 export type SessionEntryMapById = Map<string, SessionEntry>;
-
-/**
- * One line of the session's JSONL file, header included.
- *
- * The line is the unit: the header and every entry share nothing but the fact that each occupies one
- * line, which is why this is a union and not a base type — see {@link SessionHeader}.
- */
-export type JsonlEntry = SessionHeader | SessionEntry;
-
-/**
- * Whether one line of a session file is its header rather than an entry.
- *
- * `JsonlEntry` is a union, so a reader holds a value that is either one. The header's discriminator
- * is its own type name, which is the one place this format departs from the `MessageEntry` /
- * `"message"` rule: a header is not a kind of entry, and naming it `"session"` made
- * `entry.type === "session"` read like a statement about the entry beside it.
- *
- * The check lives here rather than in the dozen places that step over the header, so the literal
- * appears once on the read side.
- */
-function isSessionHeader(entry: JsonlEntry): entry is SessionHeader {
-	return entry.type === "SessionHeader";
-}
 
 export interface SessionContext {
 	messages: Message[];
@@ -392,8 +325,8 @@ export interface UserWay {
 	active: boolean;
 }
 
-/** One workspace the sidebar groups under, and the sessions stored for it. */
-export interface WorkspaceSessions {
+/** One directory the sidebar groups under, and the sessions stored for it. */
+export interface DirectorySessions {
 	workDirAbsPath: string;
 	sessions: SessionRow[];
 }
@@ -455,26 +388,30 @@ function buildSessionPath(sessionEntryMapById: SessionEntryMapById, leafId?: str
 	return chain;
 }
 
-/** The model and thinking level the branch was last set to, read from the entries that recorded it. */
-function getSessionContextSettings(chain: SessionEntry[]): Pick<SessionContext, "thinkingLevel" | "model"> {
-	let thinkingLevel = "off";
-	let model: { name: string; modelId: string } | null = null;
-
-	for (const entry of chain) {
-		if (entry.type === "thinking_level_change") thinkingLevel = entry.thinkingLevel;
-		else if (entry.type === "model_change") {
-			const name = modelChangeName(entry);
-			if (name !== undefined) model = { name, modelId: entry.modelId };
-		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			// A message carries the wire id it was answered by, never the row's identity: the identity
-			// only ever lived on the `model_change` entries this build writes. So this is the fallback
-			// for a transcript that recorded no change, and the name it reports is the wire id — which is
-			// what the row it came from would be called if the user never named it.
-			model = { name: entry.message.model, modelId: entry.message.model };
+/**
+ * The model and thinking level this session is on: the `.json` snapshot's current values, with the
+ * transcript's last assistant message as the model's weak fallback.
+ *
+ * The snapshot is the first word — it is where the session's own choices live — and the message
+ * fallback survives only for the model, because a message carries the wire id it was answered by
+ * even when no choice was ever recorded. The name it reports is the wire id, which is what the row
+ * it came from would be called if the user never named it. The walk is branch-relative by
+ * construction, but only the fallback is: the snapshot's values are session-level, so moving the
+ * leaf no longer switches them.
+ */
+function getSessionContextSettings(
+	meta: SessionMeta,
+	chain: SessionEntry[],
+): Pick<SessionContext, "thinkingLevel" | "model"> {
+	let model = meta.model ?? null;
+	if (model === null) {
+		for (const entry of chain) {
+			if (entry.type === "message" && entry.message.role === "assistant") {
+				model = { name: entry.message.model, modelId: entry.message.model };
+			}
 		}
 	}
-
-	return { thinkingLevel, model };
+	return { thinkingLevel: meta.thinkingLevel ?? "off", model };
 }
 
 /**
@@ -519,10 +456,7 @@ export function sessionEntryToContextMessages(entry: SessionEntry): Message[] {
 
 /** The three view decisions applied to one path, in the order compaction, trim, clear. */
 function contextEntriesFromPath(chain: SessionEntry[]): SessionEntry[] {
-	return applyClears(
-		applyTrims(contextEntriesFrom(chain), trimmedEntryIds(chain)),
-		clearedEntryIds(chain),
-	);
+	return applyClears(applyTrims(contextEntriesFrom(chain), trimmedEntryIds(chain)), clearedEntryIds(chain));
 }
 
 /** The branch with its newest checkpoint applied: the checkpoint itself, then everything it kept. */
@@ -582,42 +516,22 @@ function applyTrims(entries: SessionEntry[], trimmed: ReadonlySet<string>): Sess
 }
 
 const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
-const SESSION_HEADER_READ_BUFFER_SIZE = 4096;
-/**
- * The ceiling on the header line. The header is line one by construction, so this bounds the one
- * field that can grow without limit — the workspace path — and refuses a file that is not a session.
- */
-const MAX_SESSION_HEADER_BYTES = 1024 * 1024;
 
-/**
- * The wire kinds earlier builds wrote for the two view-shrink records, under their old names.
- *
- * Files are never rewritten, so an older session still carries `prune` and `argtrim` lines; the
- * parser maps them to the current kinds so their recorded view edits keep applying. Write side is
- * the current names only.
- */
-const LEGACY_ENTRY_KINDS: Readonly<Record<string, string>> = {
-	prune: "clear_tool_result",
-	argtrim: "trim_tool_call_arg",
-};
-
-function parseJsonlLine(line: string): JsonlEntry | null {
+/** Parse one JSONL line, or null: one unreadable line must not make the rest of a session unreadable. */
+function parseJsonlLine(line: string): SessionEntry | null {
 	if (!line.trim()) return null;
 	try {
-		const entry = JSON.parse(line) as JsonlEntry;
-		const currentKind = LEGACY_ENTRY_KINDS[entry.type];
-		return currentKind ? ({ ...entry, type: currentKind } as JsonlEntry) : entry;
+		return JSON.parse(line) as SessionEntry;
 	} catch {
-		// One unreadable line must not make the rest of a session unreadable.
 		return null;
 	}
 }
 
-/** Read a session file whole. `absFilePath` is already resolved by the caller. */
-function loadJsonlEntries(absFilePath: string): JsonlEntry[] {
+/** Read a session's entry stream whole. `absFilePath` is already resolved by the caller. */
+function loadJsonlEntries(absFilePath: string): SessionEntry[] {
 	if (!existsSync(absFilePath)) return [];
 
-	const entries: JsonlEntry[] = [];
+	const entries: SessionEntry[] = [];
 	let pending = "";
 	const fd = openSync(absFilePath, "r");
 	try {
@@ -647,131 +561,147 @@ function loadJsonlEntries(absFilePath: string): JsonlEntry[] {
 		closeSync(fd);
 	}
 
-	// A file with no header is not a session; refuse it rather than adopting its lines.
-	if (entries.length === 0) return entries;
-	const header = entries[0]!;
-	if (!isSessionHeader(header) || typeof (header as { id?: unknown }).id !== "string") return [];
-
 	// A final line without a trailing newline would otherwise be extended by the next append.
 	if (pending) appendFileSync(absFilePath, "\n");
 	return entries;
 }
 
 /**
- * Read the session header: line one, and nothing else.
+ * Read a session's `.json` snapshot, or refuse it.
  *
- * Every writer in this tree puts the header on the first line, so this reads until the first newline
- * and stops — it never searches for a header further down. The chunked read is about the line's
- * length, not about scanning: a header carries the workspace path, which has no size limit of its
- * own, so no single buffer can be assumed to cover it. A file whose first line is not a header
- * throws, because guessing at a repair is worse than refusing the file.
+ * An unreadable file, one without the identity fields, and one whose version is not this build's
+ * are all the same answer: not a session of this build. The caller decides what a refusal means —
+ * {@link fillSession} turns it into a prune-and-throw, discovery into a skip.
  */
-function readSessionHeader(absFilePath: string): SessionHeader {
-	const fd = openSync(absFilePath, "r");
-	try {
-		const decoder = new StringDecoder("utf8");
-		const buffer = Buffer.allocUnsafe(SESSION_HEADER_READ_BUFFER_SIZE);
-		const lineChunks: string[] = [];
-		let scannedBytes = 0;
-
-		for (;;) {
-			const readLength = Math.min(buffer.length, MAX_SESSION_HEADER_BYTES - scannedBytes);
-			if (readLength <= 0) {
-				throw new Error(`Session header exceeds ${MAX_SESSION_HEADER_BYTES} bytes: ${absFilePath}`);
-			}
-			const bytesRead = readSync(fd, buffer, 0, readLength, null);
-			if (bytesRead === 0) {
-				lineChunks.push(decoder.end());
-				break;
-			}
-			scannedBytes += bytesRead;
-
-			const chunk = decoder.write(buffer.subarray(0, bytesRead));
-			const newlineIndex = chunk.indexOf("\n");
-			if (newlineIndex === -1) {
-				lineChunks.push(chunk);
-				continue;
-			}
-			lineChunks.push(chunk.slice(0, newlineIndex));
-			break;
-		}
-
-		return parseSessionHeaderLine(lineChunks.join(""), absFilePath);
-	} finally {
-		closeSync(fd);
+function readMetaFile(absJsonPath: string): SessionMeta {
+	const raw = JSON.parse(readFileSync(absJsonPath, "utf8")) as SessionMeta;
+	if (
+		typeof raw?.id !== "string" ||
+		typeof raw?.timestamp !== "string" ||
+		typeof raw?.workDir !== "string" ||
+		raw.workDir === ""
+	) {
+		throw new Error(`Session file is not a valid ${APP_NAME} session: ${absJsonPath}`);
 	}
+	if (raw.version !== CURRENT_SESSION_VERSION) {
+		throw new Error(`Session version ${String(raw.version)} is not this build's ${CURRENT_SESSION_VERSION}: ${absJsonPath}`);
+	}
+	return raw;
 }
 
-/** Parse the header line, or refuse the file: a first line that is not a header is not a session. */
-function parseSessionHeaderLine(line: string, absFilePath: string): SessionHeader {
-	const entry = parseJsonlLine(line);
-	if (entry === null || !isSessionHeader(entry) || typeof (entry as { id?: unknown }).id !== "string") {
-		throw new Error(`Session file is not a valid ${APP_NAME} session: ${absFilePath}`);
-	}
-	return entry;
-}
-
-function readSessionHeaderForDiscovery(absFilePath: string): SessionHeader | null {
+/**
+ * Read a session's `.json` snapshot for discovery: best-effort, null on anything.
+ *
+ * `absPath` may name either half — a caller that holds the `.jsonl` in hand derives the snapshot
+ * path from it rather than rescanning the directory. Discovery is best-effort: one unreadable or
+ * wrong-version file must not hide the other sessions.
+ */
+function readMetaForDiscovery(absPath: string): SessionMeta | null {
 	try {
-		return readSessionHeader(absFilePath);
+		return readMetaFile(absPath.endsWith(".json") ? absPath : sessionMetaPath(absPath));
 	} catch {
-		// Discovery is best-effort: one unreadable or oversized file must not hide the other sessions.
 		return null;
 	}
 }
 
-function getSessionHeaderWorkDir(header: SessionHeader): string | undefined {
-	// Older files name the field `cwd`; this build writes `workDir`. Read both so a replay of
-	// a file this build did not write still finds the workspace it was opened on.
-	const raw = header as { workDir?: unknown; cwd?: unknown };
-	if (typeof raw.workDir === "string") return raw.workDir;
-	return typeof raw.cwd === "string" ? raw.cwd : undefined;
+function sessionWorkDirMatches(metaWorkDir: string | undefined, workDirAbsPath: string): boolean {
+	return metaWorkDir !== undefined && metaWorkDir !== "" && resolvePath(metaWorkDir) === workDirAbsPath;
 }
 
-function sessionWorkDirMatches(headerWorkDir: string | undefined, workDirAbsPath: string): boolean {
-	return headerWorkDir !== undefined && headerWorkDir !== "" && resolvePath(headerWorkDir) === workDirAbsPath;
+/**
+ * Delete both halves of a session this build cannot open.
+ *
+ * v5 keeps no migration and no quarantine: a pair this build refuses is a session nothing can ever
+ * open again, so keeping it would make every listing pay for a ghost. The trigger points are the
+ * store scans ({@link settleSessionFiles}) and {@link fillSession} — every reader that proves a
+ * pair unopenable removes it, and the store stays a list of sessions rather than also a graveyard.
+ */
+function pruneSessionFiles(absJsonPath: string, absJsonlPath: string): void {
+	try {
+		rmSync(absJsonPath, { force: true });
+	} catch {
+		// A failed deletion must not mask the reason the pair failed; the next scan tries again.
+	}
+	try {
+		rmSync(absJsonlPath, { force: true });
+	} catch {
+		// Same: the pair is dead either way, and the next scan cleans up what this pass could not.
+	}
 }
 
-/** The newest session file in `absDir`, preferring one whose header names the workspace `workDirAbsPath` when it is given. */
+/** One stem's two files, as a store scan found them. */
+interface SessionFilePair {
+	absJson?: string;
+	absJsonl?: string;
+}
+
+/**
+ * Pair a store's files by stem and remove everything this build cannot open.
+ *
+ * A session is a `.json` + `.jsonl` pair sharing a stem, and the `.json` is the commit marker: it
+ * is written last at birth, so an unpaired half is a birth that died partway, and a version that is
+ * not this build's is a file an older generation wrote. Both are deleted here — the scan is the one
+ * place that walks every file, so it is the one place an unopenable pair can be retired without a
+ * second pass. What comes back is the readable remainder, metas already in hand.
+ *
+ * The pruning cannot catch a birth in progress: this whole function is one synchronous block, and
+ * so is a birth (`persistEntry`), and one process never runs both at once — the concurrent-write
+ * case is outside the format's charter.
+ */
+function settleSessionFiles(absDir: string): { absJson: string; absJsonl: string; meta: SessionMeta }[] {
+	const pairs = new Map<string, SessionFilePair>();
+	for (const file of readdirSync(absDir)) {
+		const dot = file.lastIndexOf(".");
+		if (dot <= 0) continue;
+		const ext = file.slice(dot);
+		if (ext !== ".json" && ext !== ".jsonl") continue;
+		const pair = pairs.get(file.slice(0, dot)) ?? {};
+		if (ext === ".json") pair.absJson = join(absDir, file);
+		else pair.absJsonl = join(absDir, file);
+		pairs.set(file.slice(0, dot), pair);
+	}
+
+	const settled: { absJson: string; absJsonl: string; meta: SessionMeta }[] = [];
+	for (const pair of pairs.values()) {
+		if (pair.absJson === undefined || pair.absJsonl === undefined) {
+			pruneSessionFiles(pair.absJson ?? "", pair.absJsonl ?? "");
+			continue;
+		}
+		try {
+			const meta = readMetaFile(pair.absJson);
+			// The stream cannot legally be empty while the snapshot exists — a birth writes the whole
+			// log before the snapshot — so an empty stream is a pair that died partway.
+			if (statSync(pair.absJsonl).size === 0) {
+				pruneSessionFiles(pair.absJson, pair.absJsonl);
+				continue;
+			}
+			settled.push({ absJson: pair.absJson, absJsonl: pair.absJsonl, meta });
+		} catch {
+			pruneSessionFiles(pair.absJson, pair.absJsonl);
+		}
+	}
+	return settled;
+}
+
+/** The newest session in `absDir`, preferring one whose meta names that directory `workDirAbsPath` when it is given. */
 function findMostRecentSession(absDir: string, workDirAbsPath?: string): string | null {
 	const workDirAbsPathResolved = workDirAbsPath ? resolvePath(workDirAbsPath) : undefined;
 	try {
-		const files = readdirSync(absDir)
-			.filter((file) => file.endsWith(".jsonl"))
-			.map((file) => join(absDir, file))
-			.map((absPath) => ({ absPath, mtime: statSync(absPath).mtimeMs }))
+		const candidates = settleSessionFiles(absDir)
+			.map(({ absJsonl }) => ({ absPath: absJsonl, mtime: statSync(absJsonl).mtimeMs }))
 			.sort((a, b) => b.mtime - a.mtime);
 
-		for (const { absPath } of files) {
-			const header = readSessionHeaderForDiscovery(absPath);
-			if (header === null) continue;
-			if (workDirAbsPathResolved !== undefined && !sessionWorkDirMatches(getSessionHeaderWorkDir(header), workDirAbsPathResolved)) continue;
-			// A header with nothing after it is a creation nobody spoke in — only a file written before
-			// sessions deferred that write can look like this. Resuming it would open an empty
-			// conversation while the sidebar, which filters the same way, shows real ones.
-			if (!hasMessageEntry(absPath)) continue;
+		for (const { absPath } of candidates) {
+			const meta = readMetaForDiscovery(absPath);
+			if (meta === null) continue;
+			if (workDirAbsPathResolved !== undefined && !sessionWorkDirMatches(meta.workDir, workDirAbsPathResolved)) continue;
+			// A session on disk holds a message by construction: both files are born with the first
+			// one (persistEntry), so nothing here can be a creation nobody spoke in.
 			return absPath;
 		}
 		return null;
 	} catch {
 		return null;
-	}
-}
-
-/**
- * Whether a session file holds a message, which is what makes it a conversation rather than a header
- * a creation left behind. Stops at the first one: the header is line one and the first message follows
- * it closely, so this is a read of a few hundred bytes for every file that matters.
- */
-function hasMessageEntry(absFilePath: string): boolean {
-	try {
-		for (const line of readFileSync(absFilePath, "utf8").split("\n")) {
-			if (line === "") continue;
-			if ((JSON.parse(line) as { type?: unknown }).type === "message") return true;
-		}
-		return false;
-	} catch {
-		return false;
 	}
 }
 
@@ -804,15 +734,25 @@ function getMessageActivityTime(entry: MessageEntry): number | undefined {
 }
 
 /**
- * One session file, summarized for a picker: who it is, when it moved, and enough text to search it.
+ * One session, summarized for a picker: who it is, when it moved, and enough text to search it.
  *
- * `modified` prefers the last message's own stamp over the header's, because a session that is being
+ * The scan is split the way the format is: identity fields — id, workDir, parent, created, a
+ * recorded title — come from the `.json` snapshot, and the message statistics come from a line pass
+ * over the `.jsonl`, which is the only half that has to be parsed entry by entry. The scan's caller
+ * ({@link settleSessionFiles}) has already paired the files and pruned the unopenable, so a meta in
+ * hand here means a session this build can open.
+ *
+ * `modified` prefers the last message's own stamp over the meta's, because a session that is being
  * appended to right now has a birthtime that says nothing about its age.
  */
-async function buildSessionInfo(absFilePath: string, signal?: AbortSignal, fileStats?: Stats): Promise<SessionInfo | null> {
+async function buildSessionInfo(
+	absJsonPath: string,
+	absJsonlPath: string,
+	meta: SessionMeta,
+	signal?: AbortSignal,
+): Promise<SessionInfo | null> {
 	try {
-		const stats = fileStats ?? (await stat(absFilePath));
-		let header: SessionHeader | null = null;
+		const stats = await stat(absJsonlPath);
 		let messageCount = 0;
 		let firstMessage = "";
 		const allMessages: string[] = [];
@@ -820,45 +760,26 @@ async function buildSessionInfo(absFilePath: string, signal?: AbortSignal, fileS
 		/**
 		 * The branch, as two tables, read in the loop that was already reading every entry.
 		 *
-		 * A title has to name the branch the session is *on*, not the first message the file happens
-		 * to hold, so the scan needs the same parent links a reader follows. Collecting them here costs
-		 * one `Map` in a pass that already parses each line — as against a second read of the file.
-		 *
-		 * Every entry records its parent, not only the messages: a branch runs through model and tool
-		 * changes on its way back to the root, and a walk that stopped at the first one would never
-		 * reach the messages before it.
+		 * The recorded title is gone with the `rename` entry — the snapshot holds it now — so the
+		 * only thing a title still needs from the scan is the *derived* fallback: the first user
+		 * message on the branch the leaf is on. That needs the same parent links a reader follows,
+		 * and collecting them here costs one `Map` in a pass that already parses each line.
 		 */
 		const parentOf = new Map<string, string | null>();
 		const userTextOf = new Map<string, string>();
 		/** The last entry of any kind, which is where a branch read from the file starts. */
 		let leafId: string | undefined;
-		/**
-		 * The last rename entry's title, in file order.
-		 *
-		 * A rename is a fact about the session rather than about one way through it (ADR-0002), so the
-		 * scan reads it the same way the live manager does: last one in the file wins, before any
-		 * branch walk starts.
-		 */
-		let renamedTitle: string | undefined;
 
 		const lines = createInterface({
-			input: createReadStream(absFilePath, { encoding: "utf8", signal }),
+			input: createReadStream(absJsonlPath, { encoding: "utf8", signal }),
 			crlfDelay: Number.POSITIVE_INFINITY,
 		});
 
 		for await (const line of lines) {
 			const entry = parseJsonlLine(line);
 			if (!entry) continue;
-			if (!header) {
-				if (!isSessionHeader(entry)) return null;
-				header = entry;
-				continue;
-			}
 			leafId = entry.id;
-			// The header has already been consumed above, so this is one of the id-bearing kinds — and
-			// the ones a branch walks through (model and tool changes) are recorded here too.
-			parentOf.set(entry.id, (entry as { parentId?: string | null }).parentId ?? null);
-			if (entry.type === "rename") renamedTitle = entry.title;
+			parentOf.set(entry.id, entry.parentId);
 			if (entry.type !== "message") continue;
 			messageCount++;
 
@@ -876,25 +797,23 @@ async function buildSessionInfo(absFilePath: string, signal?: AbortSignal, fileS
 			if (message.role === "user" && !userTextOf.has(entry.id)) userTextOf.set(entry.id, text);
 		}
 
-		if (!header) return null;
-
-		const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : Number.NaN;
+		const metaTime = new Date(meta.timestamp).getTime();
 		const modified =
 			typeof lastActivityTime === "number" && lastActivityTime > 0
 				? new Date(lastActivityTime)
-				: !Number.isNaN(headerTime)
-					? new Date(headerTime)
+				: !Number.isNaN(metaTime)
+					? new Date(metaTime)
 					: stats.mtime;
 
 		return {
-			absPath: absFilePath,
-			id: header.id,
-			workDirAbsPath: getSessionHeaderWorkDir(header) ?? "",
-			...(header.parentSession === undefined ? {} : { absParentSessionPath: header.parentSession }),
-			created: new Date(header.timestamp),
+			absPath: absJsonlPath,
+			id: meta.id,
+			workDirAbsPath: meta.workDir,
+			...(meta.parentSession === undefined ? {} : { absParentSessionPath: meta.parentSession }),
+			created: new Date(meta.timestamp),
 			modified,
 			messageCount,
-			title: renamedTitle ?? titleOfBranch(parentOf, userTextOf, leafId),
+			title: meta.title ?? titleOfBranch(parentOf, userTextOf, leafId),
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText: allMessages.join(" "),
 		};
@@ -935,11 +854,6 @@ function titleOfBranch(
 }
 
 const MAX_CONCURRENT_SESSION_INFO_LOADS = 10;
-
-interface SessionFileCandidate {
-	absPath: string;
-	stats?: Stats;
-}
 
 async function mapWithConcurrency<T, R>(
 	items: T[],
@@ -996,21 +910,19 @@ async function listSessionsFromDir(absDir: string, signal?: AbortSignal): Promis
 	if (!existsSync(absDir)) return [];
 
 	try {
-		const dirEntries = await readdir(absDir);
-		const files: SessionFileCandidate[] = dirEntries
-			.filter((file) => file.endsWith(".jsonl"))
-			.sort((a, b) => b.localeCompare(a))
-			.map((file) => ({ absPath: join(absDir, file) }));
+		// The scan pairs the files and prunes what it cannot open (settleSessionFiles), so what is
+		// left here is exactly the sessions this build can open.
+		const pairs = settleSessionFiles(absDir);
 		const results = await mapWithConcurrency(
-			files,
+			pairs,
 			MAX_CONCURRENT_SESSION_INFO_LOADS,
-			async (file) => buildSessionInfo(file.absPath, signal, file.stats),
+			async (pair) => buildSessionInfo(pair.absJson, pair.absJsonl, pair.meta, signal),
 			signal,
 		);
 		// A file with no message in it is a creation nobody spoke in, not a conversation: the sidebar
-		// is a list of conversations, so it is left out here rather than drawn as「新会话」. This is
-		// the same rule `persistEntry` writes by — a session earns its file with its first message —
-		// applied to the read side, so the two cannot disagree about what exists.
+		// is a list of conversations, so it is left out here rather than drawn as「新会话」. Under v5
+		// nothing on disk can be empty — both files are born with the first message — so this is a
+		// guard against a corrupt pair rather than a filter the writers need.
 		const sessions = results.filter((info): info is SessionInfo => info !== null && info.messageCount > 0);
 		linkForkParents(sessions);
 		return sessions;
@@ -1059,48 +971,54 @@ function previewOfMessage(message: Message): string {
  * state is plain data on purpose: which function touches which field is visible
  * in the signatures, and a test can construct a bare state and call any operation on it directly.
  *
- * The fields are what a JSONL file replays into. Every entry carries an id and its parent's id, so
- * the file reads as a tree and `leafId` is where the conversation currently is. Appending creates a
- * child of the leaf; {@link branch} moves the leaf to an earlier entry — and records the move as a
- * {@link LeafEntry}, so a fresh reader restores it — so a new line of work continues from there
- * without touching what was already written. A file is never rewritten once it holds an entry, which
- * is what lets an entry kind or a field this build does not understand be carried through untouched.
+ * The fields are what the two files replay into. `meta` is the `.json` snapshot — the session's
+ * identity and its current choices — and `jsonlEntries` is the `.jsonl` entry stream: every entry
+ * carries an id and its parent's id, so the stream reads as a tree and `leafId` is where the
+ * conversation currently is. Appending creates a child of the leaf; {@link branch} moves the leaf to
+ * an earlier entry — and records the move as a {@link LeafEntry}, so a fresh reader restores it — so
+ * a new line of work continues from there without touching what was already written. The entry
+ * stream is never rewritten once it holds an entry, which is what lets an entry kind or a field this
+ * build does not understand be carried through untouched; only `meta` is rewritten whole, and only
+ * on a change to a value it holds.
  *
  * Use {@link buildSessionContext} to get the messages a provider should be sent: it follows the
  * branch from root to leaf and folds in the newest compaction.
  */
 export interface Session {
 	sessionId: string;
+	/** The `.jsonl` entry stream's path, absolute; the `.json` snapshot lives at the same stem. */
 	sessionFileAbsPath?: string;
 	/** The session directory, absolute; null for a session that is never written. */
 	sessionDirAbsPath: string | null;
 	workDirAbsPath: string;
 	persist: boolean;
 	/**
-	 * True once this session's file exists and holds the log as of the last write.
+	 * True once this session's files exist and hold the log as of the last write.
 	 *
 	 * It decides how the next write happens: false means nothing has been written yet, so the first
-	 * entry worth keeping creates the file and writes the whole log; true means appends go straight
-	 * to disk. See {@link persistEntry}.
+	 * entry worth keeping creates both files — the entry stream and the meta snapshot — at once;
+	 * true means entries append and meta changes rewrite the snapshot. See {@link persistEntry}.
 	 */
 	fileCreated: boolean;
-	jsonlEntries: JsonlEntry[];
+	/** The `.json` snapshot's current contents, in memory; the disk copy trails it only when persisted. */
+	meta: SessionMeta;
+	jsonlEntries: SessionEntry[];
 	sessionEntryMapById: SessionEntryMapById;
 	leafId: string | null;
 }
 
 /**
- * A state for a new session under `sessionDirInput` (default: the workspace's own directory), ready
+ * A state for a new session under `sessionDirInput` (default: the directory's own store), ready
  * for the first append.
  *
- * The session *directory* may be created here, but no file is: the file appears with the first entry
+ * The session *directory* may be created here, but no file is: the files appear with the first entry
  * worth keeping — the gate in {@link persistEntry} (`hasConversation`) — so a session nobody has
  * spoken in leaves no transcript on disk and no row in the sidebar. That is the whole point of
- * building the state rather than writing a header: the store is a record of conversations, and a
+ * building the state rather than writing a snapshot: the store is a record of conversations, and a
  * conversation with no message in it is not one yet.
  *
- * The cost is the id's addressability until that first message: {@link findSessionFilePathById} reads
- * header files, so an id with no file cannot be found there. A caller that hands the id out and has
+ * The cost is the id's addressability until that first message: {@link findSessionFilePathById} scans
+ * the stores, so an id with no file cannot be found there. A caller that hands the id out and has
  * to answer for it later therefore holds the state (or the `SessionManager` shell around it) for the
  * length of that window — `SessionHub` holds it for the length of that window.
  */
@@ -1109,7 +1027,7 @@ export function createSession(
 	sessionDirInput?: string,
 	parentSessionFileInput?: string,
 ): Session {
-	const absDir = sessionDirInput ? normalizePath(sessionDirInput) : workspaceDir(workDirInput);
+	const absDir = sessionDirInput ? normalizePath(sessionDirInput) : sessionDir(workDirInput);
 	if (!existsSync(absDir)) mkdirSync(absDir, { recursive: true });
 	const s: Session = {
 		sessionId: "",
@@ -1117,6 +1035,7 @@ export function createSession(
 		workDirAbsPath: resolvePath(workDirInput),
 		persist: true,
 		fileCreated: false,
+		meta: { version: CURRENT_SESSION_VERSION, id: "", timestamp: "", workDir: "" },
 		jsonlEntries: [],
 		sessionEntryMapById: new Map(),
 		leafId: null,
@@ -1133,6 +1052,7 @@ export function inMemorySession(workDirInput: string = process.cwd(), parentSess
 		workDirAbsPath: resolvePath(workDirInput),
 		persist: false,
 		fileCreated: false,
+		meta: { version: CURRENT_SESSION_VERSION, id: "", timestamp: "", workDir: "" },
 		jsonlEntries: [],
 		sessionEntryMapById: new Map(),
 		leafId: null,
@@ -1142,32 +1062,47 @@ export function inMemorySession(workDirInput: string = process.cwd(), parentSess
 }
 
 /**
- * Replay a session file into a fresh {@link Session}: the one entry point that turns a path on
- * disk into the state the session operations work on.
+ * Replay a session's two files into a fresh {@link Session}: the one entry point that turns a path
+ * on disk into the state the session operations work on.
  *
- * This is the combination the old loader spread over three private methods — read the whole JSONL,
- * find the header, index the entries by id, place the leaf — collapsed into one function, so a
- * caller that rebuilds a session per request (the state is transient: built here, discarded when the
- * request ends; appends hit the disk as they happen) has exactly one way to do it and cannot skip
- * the rules the index is built by. A file this build cannot read is refused, never overwritten.
+ * The `.json` snapshot gives the identity and the current choices; the `.jsonl` replays the entry
+ * tree; the leaf is placed from the stream. A pair this build cannot open is *deleted*, not refused
+ * and left in place — a v≤4 file, an unpaired half, a wrong version are all sessions nothing can
+ * ever open again, and keeping them would put a ghost in every scan — and then the open throws. The
+ * path may name either half: a caller that holds the `.jsonl` in hand passes it, and the snapshot
+ * is found at the same stem.
  */
 export function fillSession(absFilePath: string): Session {
 	const absPath = resolvePath(absFilePath);
-	if (!existsSync(absPath)) throw new Error(`Session file does not exist: ${absPath}`);
-	const entries = loadJsonlEntries(absPath);
-	if (entries.length === 0) {
-		throw new Error(`Session file is not a valid ${APP_NAME} session: ${absPath}`);
+	const absJsonl = absPath.endsWith(".json") ? sessionJsonlPath(absPath) : absPath;
+	const absJson = sessionMetaPath(absJsonl);
+	if (!existsSync(absJsonl)) {
+		// Unpaired either way: prune whatever half exists and refuse the open.
+		if (existsSync(absJson)) pruneSessionFiles(absJson, absJsonl);
+		throw new Error(`Session file does not exist: ${absJsonl}`);
 	}
-	// loadJsonlEntries refuses a file whose first entry is not the header, so this finds one.
-	const header = entries.find(isSessionHeader);
-	if (header === undefined) throw new Error(`Session file has no header: ${absPath}`);
+	let meta: SessionMeta;
+	try {
+		meta = readMetaFile(absJson);
+	} catch (error) {
+		pruneSessionFiles(absJson, absJsonl);
+		throw error;
+	}
+	const entries = loadJsonlEntries(absJsonl);
+	if (entries.length === 0) {
+		// The entry stream cannot legally be empty while the snapshot exists: a birth writes both,
+		// so an empty stream is a pair that died partway. Prune it with the rest.
+		pruneSessionFiles(absJson, absJsonl);
+		throw new Error(`Session file is not a valid ${APP_NAME} session: ${absJsonl}`);
+	}
 	const s: Session = {
-		sessionId: header.id,
-		sessionFileAbsPath: absPath,
-		sessionDirAbsPath: dirname(absPath),
-		workDirAbsPath: getSessionHeaderWorkDir(header) ?? process.cwd(),
+		sessionId: meta.id,
+		sessionFileAbsPath: absJsonl,
+		sessionDirAbsPath: dirname(absJsonl),
+		workDirAbsPath: meta.workDir,
 		persist: true,
 		fileCreated: true,
+		meta,
 		jsonlEntries: entries,
 		sessionEntryMapById: new Map(),
 		leafId: null,
@@ -1180,26 +1115,25 @@ export function fillSession(absFilePath: string): Session {
  * Start a fresh session in `s`, discarding whatever it held. Returns the file path.
  *
  * `parentSessionFile` is the absolute path of the session this one descends from — a fork's
- * source, or a subagent's parent — and it lands on the header as `parentSession`. Undefined means
+ * source — and it lands on the snapshot as `parentSession`. Undefined means
  * a root session. A relative path is resolved here against the process's cwd, which is the same
  * base a listing uses when it matches parent to child; recording it as given would let the two
  * sides disagree the moment the process ran somewhere else.
  *
  * The two constructors above are its only callers: a bag is born here, and every later write goes
- * through the service's append methods.
+ * through the service's append and record methods.
  */
 export function newSession(s: Session, parentSessionFile?: string): string | undefined {
 	s.sessionId = createSessionId();
 	const timestamp = new Date().toISOString();
-	const header: SessionHeader = {
-		type: "SessionHeader",
+	s.meta = {
 		version: CURRENT_SESSION_VERSION,
 		id: s.sessionId,
 		timestamp,
 		workDir: s.workDirAbsPath,
 		...(parentSessionFile === undefined ? {} : { parentSession: resolvePath(parentSessionFile) }),
 	};
-	s.jsonlEntries = [header];
+	s.jsonlEntries = [];
 	s.sessionEntryMapById.clear();
 	s.leafId = null;
 	s.fileCreated = false;
@@ -1214,16 +1148,14 @@ function buildIndex(s: Session): void {
 	s.sessionEntryMapById.clear();
 	s.leafId = null;
 	for (const entry of s.jsonlEntries) {
-		if (isSessionHeader(entry)) continue;
 		s.sessionEntryMapById.set(entry.id, entry);
 		if (entry.type === "leaf") {
 			// The record names where the conversation went; every other kind *is* where it went, by
 			// having been appended. File order is the last word, so a later entry of any kind
-			// supersedes what an earlier record said, the way an old `model_change` expires. A
-			// recorded null is a position of its own — "before the first entry" — and only a target
-			// the file does not hold (only a hand-edited file can manage that) falls back to the
-			// record's own tree position, the same family of answer `buildSessionPath` gives an
-			// unknown id.
+			// supersedes what an earlier record said. A recorded null is a position of its own —
+			// "before the first entry" — and only a target the file does not hold (only a
+			// hand-edited file can manage that) falls back to the record's own tree position, the
+			// same family of answer `buildSessionPath` gives an unknown id.
 			s.leafId = entry.leafId === null || s.sessionEntryMapById.has(entry.leafId) ? entry.leafId : (entry.parentId ?? null);
 		} else {
 			s.leafId = entry.id;
@@ -1239,12 +1171,36 @@ function hasConversation(s: Session): boolean {
 }
 
 /**
- * Write one entry to disk, or hold it back when the file does not exist yet.
+ * Rewrite the `.json` snapshot whole: write a sibling temp file, then rename it over the snapshot.
  *
- * The gate is deliberate: a session earns its file with its first message (`hasConversation`), so a
- * session nobody has spoken in never lands on disk. The first write that passes the gate creates the
- * file and writes the whole log at once — the header and every entry so far — because the file was
- * not there to have received them; from then on (`fileCreated`) each entry appends by itself.
+ * A snapshot wants one write, not an append — and a reader scanning the store must never catch it
+ * half-written, which is what the rename buys: the temp is written, closed, and moved into place in
+ * one step, so every reader either sees the old snapshot or the new one, never a torn one. The
+ * rename is within one directory, so it is atomic on the filesystems this runs on.
+ */
+function writeMetaFile(s: Session): void {
+	const absJsonl = s.sessionFileAbsPath;
+	if (absJsonl === undefined) return;
+	const absJson = sessionMetaPath(absJsonl);
+	const absTemp = `${absJson}.${process.pid}.tmp`;
+	const fd = openSync(absTemp, "wx");
+	try {
+		writeFileSync(fd, `${JSON.stringify(s.meta, null, "\t")}\n`);
+	} finally {
+		closeSync(fd);
+	}
+	renameSync(absTemp, absJson);
+}
+
+/**
+ * Write one entry to disk, or hold it back when the files do not exist yet.
+ *
+ * The gate is deliberate: a session earns its files with its first message (`hasConversation`), so a
+ * session nobody has spoken in never lands on disk. The first write that passes the gate creates
+ * both files at once — the whole entry stream, then the meta snapshot as the commit marker — because
+ * there was nothing there to have received them; the snapshot is written **last** so a birth that
+ * dies partway leaves an unpaired half, which the store scans prune rather than adopt. From then on
+ * (`fileCreated`) each entry appends by itself and each meta change rewrites the snapshot.
  */
 export function persistEntry(s: Session, entry: SessionEntry): void {
 	if (!s.persist || !s.sessionFileAbsPath) return;
@@ -1254,9 +1210,15 @@ export function persistEntry(s: Session, entry: SessionEntry): void {
 		const fd = openSync(s.sessionFileAbsPath, "wx");
 		try {
 			for (const existing of s.jsonlEntries) writeFileSync(fd, `${JSON.stringify(existing)}\n`);
-		} finally {
+		} catch (error) {
+			// A stream that did not make it to disk leaves nothing behind; the next gated write
+			// retries the birth from the same in-memory log.
 			closeSync(fd);
+			rmSync(s.sessionFileAbsPath, { force: true });
+			throw error;
 		}
+		closeSync(fd);
+		writeMetaFile(s);
 		s.fileCreated = true;
 		return;
 	}
@@ -1270,6 +1232,38 @@ function appendEntry(s: Session, entry: SessionEntry): void {
 	s.sessionEntryMapById.set(entry.id, entry);
 	s.leafId = entry.id;
 	persistEntry(s, entry);
+}
+
+/**
+ * Apply one change to the snapshot, and rewrite the file when it actually changed.
+ *
+ * The mutation lands on the in-memory meta first — that is the bag every reader answers from — and
+ * the disk copy follows only when the session has files to rewrite. A session whose files are not
+ * born yet keeps the change in memory alone: {@link persistEntry} writes the snapshot at birth, so
+ * a choice made before the first message survives without breaking the "no conversation, no files"
+ * rule. `change` returns false for a no-op, which is what keeps a run of identical writes from
+ * costing a rewrite each.
+ */
+function recordMeta(s: Session, change: (meta: SessionMeta) => boolean): void {
+	if (!change(s.meta)) return;
+	if (s.persist && s.fileCreated) writeMetaFile(s);
+}
+
+/** Set equality over two tool-name lists: the recorded set is a choice, not an order. */
+function sameToolSet(left: readonly string[], right: readonly string[]): boolean {
+	return left.length === right.length && left.every((name) => right.includes(name));
+}
+
+/** Field equality over the two approval maps, over every key either side names. */
+function metasApprovalEqual(
+	left: Record<ToolApprovalKey, boolean>,
+	right: Record<ToolApprovalKey, boolean>,
+): boolean {
+	const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+	for (const key of keys) {
+		if (left[key as ToolApprovalKey] !== right[key as ToolApprovalKey]) return false;
+	}
+	return true;
 }
 
 // =========================================================================
@@ -1404,70 +1398,75 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	appendThinkingLevelChange(s: Session, thinkingLevel: string): string {
-		const entry: ThinkingLevelChangeEntry = {
-			type: "thinking_level_change",
-			id: generateId(s.sessionEntryMapById),
-			parentId: s.leafId,
-			timestamp: new Date().toISOString(),
-			thinkingLevel,
-		};
-		appendEntry(s, entry);
-		return entry.id;
+	/**
+	 * Record the thinking level this session last asked at, as the snapshot's current value.
+	 *
+	 * Not an entry: the level is a *current value*, so the `.json` snapshot holds it and the history
+	 * of what it was before is gone by design — nothing ever read it. A session whose files are not
+	 * born yet carries the change in memory; {@link persistEntry} writes the snapshot at birth, so
+	 * the choice survives without breaking the "no conversation, no files" rule.
+	 */
+	setThinkingLevel(s: Session, thinkingLevel: string): void {
+		recordMeta(s, (meta) => {
+			if (meta.thinkingLevel === thinkingLevel) return false;
+			meta.thinkingLevel = thinkingLevel;
+			return true;
+		});
 	}
 
-	appendModelChange(s: Session, name: string, modelId: string): string {
-		const entry: ModelChangeEntry = {
-			type: "model_change",
-			id: generateId(s.sessionEntryMapById),
-			parentId: s.leafId,
-			timestamp: new Date().toISOString(),
-			name,
-			modelId,
-		};
-		appendEntry(s, entry);
-		return entry.id;
+	/**
+	 * Record the model row this session last ran on, as the snapshot's current value.
+	 *
+	 * `name` is the row's identity — see `ModelConfig` — so this is what later turns "which model
+	 * was this session on" back into a row. Not an entry: the choice is a *current value*, and the
+	 * snapshot holds only what is in force. A rename is deliberately not this: a rename is the same
+	 * model under another name, and the refs built from the old name are already accounted for.
+	 */
+	setModel(s: Session, name: string, modelId: string): void {
+		recordMeta(s, (meta) => {
+			if (meta.model?.name === name && meta.model.modelId === modelId) return false;
+			meta.model = { name, modelId };
+			return true;
+		});
 	}
 
 	/**
 	 * Record the session's tool choices: the active set and the approval map, both whole.
 	 *
-	 * A snapshot rather than a delta, because the reader replays the branch and takes the last entry —
-	 * the same contract as `model_change`, which also records the value, not the move. Both maps are
-	 * always present, so one entry written for a tool change carries the approval set along and the
-	 * other way round.
+	 * A snapshot rather than a delta, because the reader takes the value in force — the same
+	 * contract the model and level follow. Both maps are always present, so one call made for a
+	 * tool change carries the approval set along and the other way round.
 	 */
-	appendToolConfig(s: Session, activeTools: string[], approval: Record<ToolApprovalKey, boolean>): string {
-		const entry: ToolConfigEntry = {
-			type: "tool_config",
-			id: generateId(s.sessionEntryMapById),
-			parentId: s.leafId,
-			timestamp: new Date().toISOString(),
-			activeTools: [...activeTools],
-			approval: { ...approval },
-		};
-		appendEntry(s, entry);
-		return entry.id;
+	setToolConfig(s: Session, activeTools: string[], approval: Record<ToolApprovalKey, boolean>): void {
+		recordMeta(s, (meta) => {
+			if (
+				meta.activeTools !== undefined &&
+				sameToolSet(meta.activeTools, activeTools) &&
+				meta.approval !== undefined &&
+				metasApprovalEqual(meta.approval, approval)
+			) {
+				return false;
+			}
+			meta.activeTools = [...activeTools];
+			meta.approval = { ...approval };
+			return true;
+		});
 	}
 
 	/**
 	 * Record the conversation's own name, over the derived one.
 	 *
 	 * The title is expected already shortened — the endpoint that takes a user's typing applies
-	 * {@link shortenTitle} before it gets here, so what lands in the file is what a row shows. Like
-	 * every state entry this one is not transcript: it reaches no message, and a reader takes the
-	 * last one in file order, whichever way the branch points.
+	 * {@link shortenTitle} before it gets here, so what lands in the snapshot is what a row shows.
+	 * Not an entry: the name is a fact about the session rather than about one way through it (the
+	 * reading ADR-0002 argued for from file order), and the snapshot states it directly.
 	 */
-	appendRename(s: Session, title: string): string {
-		const entry: RenameEntry = {
-			type: "rename",
-			id: generateId(s.sessionEntryMapById),
-			parentId: s.leafId,
-			timestamp: new Date().toISOString(),
-			title,
-		};
-		appendEntry(s, entry);
-		return entry.id;
+	setTitle(s: Session, title: string): void {
+		recordMeta(s, (meta) => {
+			if (meta.title === title) return false;
+			meta.title = title;
+			return true;
+		});
 	}
 
 	/**
@@ -1560,27 +1559,6 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/**
-	 * Record the shown half of a tool result a hook rewrote.
-	 *
-	 * Written the moment the toolResult message entry lands, as its child — the order the two facts
-	 * happened in, and the order a replay reads them in. The stored half is not repeated here: it is
-	 * already the message's own content, and carrying it twice would make every rewrite cost its result
-	 * twice on disk.
-	 */
-	appendToolResultView(s: Session, toolCallId: string, shown: ToolResultContent): string {
-		const entry: ToolResultViewEntry = {
-			type: "tool_result_view",
-			id: generateId(s.sessionEntryMapById),
-			parentId: s.leafId,
-			timestamp: new Date().toISOString(),
-			toolCallId,
-			shown,
-		};
-		appendEntry(s, entry);
-		return entry.id;
-	}
-
 	/** Every entry that follows `parentId`, in file order. */
 	getChildren(s: Session, parentId: string): SessionEntry[] {
 		const children: SessionEntry[] = [];
@@ -1594,10 +1572,10 @@ export class SessionManager {
 	 * The branch points of the log, in file order.
 	 *
 	 * A child counts as an alternative only when a message is reachable through it: this format carries
-	 * state entries too — a model change, a tool config, a tool-result clear, a compaction, a leaf record — and a
+	 * state entries too — a tool-result clear, a compaction, a leaf record — and a
 	 * conversation cannot be resumed at one of those, so counting them would offer an empty
 	 * alternative. A state entry in front of a message is descended through for the same reason:
-	 * rewinding, switching the model, and asking again is one alternative, not two.
+	 * rewinding, trimming the view, and asking again is one alternative, not two.
 	 *
 	 * The walk covers **every** entry rather than only the active chain's, which is what makes the tree
 	 * a property of the conversation instead of of the leaf's current position: rewind to the first
@@ -1741,52 +1719,48 @@ export class SessionManager {
 	 */
 	buildSessionContext(s: Session): SessionContext {
 		const chain = buildSessionPath(s.sessionEntryMapById, s.leafId);
-		const { thinkingLevel, model } = getSessionContextSettings(chain);
+		const { thinkingLevel, model } = getSessionContextSettings(s.meta, chain);
 		const messages = contextEntriesFromPath(chain).flatMap(sessionEntryToContextMessages);
 		return { messages, thinkingLevel, model };
 	}
 
 	/**
-	 * The model and thinking level the active branch was last set to, each undefined when it never was.
+	 * The model and thinking level this session is on, each undefined when it never chose.
 	 *
 	 * {@link SessionManager.buildSessionContext} answers with those values and the defaults to run with.
 	 * This is for a caller that has to tell "the session chose off" from "the session never chose" —
-	 * assembly, which decides whether a stored value may override the settings file.
+	 * assembly, which decides whether a stored value may override the settings file. The snapshot is
+	 * the first word and the transcript the fallback: the model falls back to the branch's last
+	 * assistant message, which can only name a row the user left unnamed.
 	 */
 	getRecordedSettings(s: Session): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
 		const recorded: { model?: { name: string; modelId: string }; thinkingLevel?: string } = {};
-		for (const entry of this.getBranch(s)) {
-			if (entry.type === "thinking_level_change") recorded.thinkingLevel = entry.thinkingLevel;
-			else if (entry.type === "model_change") {
-				const name = modelChangeName(entry);
-				if (name !== undefined) recorded.model = { name, modelId: entry.modelId };
-			} else if (entry.type === "message" && entry.message.role === "assistant") {
-				// Only ever a fallback, and a weak one: a message records the wire id it was answered by,
-				// not the row's identity, so this can only name a row the user left unnamed. See
-				// {@link getSessionContextSettings}.
-				recorded.model = { name: entry.message.model, modelId: entry.message.model };
+		if (s.meta.model !== undefined) recorded.model = s.meta.model;
+		if (s.meta.thinkingLevel !== undefined) recorded.thinkingLevel = s.meta.thinkingLevel;
+		if (recorded.model === undefined) {
+			// Only ever a fallback, and a weak one: a message records the wire id it was answered by,
+			// not the row's identity, so this can only name a row the user left unnamed. See
+			// {@link getSessionContextSettings}.
+			for (const entry of this.getBranch(s)) {
+				if (entry.type === "message" && entry.message.role === "assistant") {
+					recorded.model = { name: entry.message.model, modelId: entry.message.model };
+				}
 			}
 		}
 		return recorded;
 	}
 
 	/**
-	 * The tool choices the active branch was last recorded with, each undefined when it never was.
+	 * The tool choices this session last recorded, each undefined when it never chose.
 	 *
-	 * Undefined is meaningful and is what this exists to preserve: a session with no `tool_config`
-	 * entry opens on the defaults, while one with an entry reopens exactly as its user left it. Like
-	 * {@link SessionManager.getRecordedSettings}, this reads the branch, not the file, so a fork answers
-	 * with the choices in force where it split off.
+	 * Undefined is meaningful and is what this exists to preserve: a session that never chose opens
+	 * on the defaults, while one that did reopens exactly as its user left it. The snapshot is the
+	 * whole answer, so this reads the session rather than the branch — which is also what changed
+	 * with the two-file split: moving the leaf no longer switches these values, because they are the
+	 * session's, not a branch's.
 	 */
 	getRecordedToolConfig(s: Session): { activeTools?: string[]; approval?: Record<ToolApprovalKey, boolean> } {
-		const recorded: { activeTools?: string[]; approval?: Record<ToolApprovalKey, boolean> } = {};
-		for (const entry of this.getBranch(s)) {
-			if (entry.type === "tool_config") {
-				recorded.activeTools = entry.activeTools;
-				recorded.approval = entry.approval;
-			}
-		}
-		return recorded;
+		return { activeTools: s.meta.activeTools, approval: s.meta.approval };
 	}
 
 	/**
@@ -1805,29 +1779,29 @@ export class SessionManager {
 		return ids;
 	}
 
-	getHeader(s: Session): SessionHeader | null {
-		return s.jsonlEntries.find(isSessionHeader) ?? null;
+	/** The `.json` snapshot: identity and current choices. Always present on a built session. */
+	getMeta(s: Session): SessionMeta {
+		return s.meta;
 	}
 
-	/** Every entry, header aside, in file order. Use the `append*` methods to add more. */
+	/** Every entry in file order. Use the `append*` methods to add more. */
 	getEntries(s: Session): SessionEntry[] {
-		return s.jsonlEntries.filter((entry): entry is SessionEntry => !isSessionHeader(entry));
+		return s.jsonlEntries;
 	}
 
 	/**
-	 * The conversation's own name: a recorded rename if there is one, else the branch's first user
+	 * The conversation's own name: a recorded title if there is one, else the branch's first user
 	 * message, else a placeholder.
 	 *
-	 * The rename is read in **file order**, not along the branch, and that is deliberate: the left
-	 * column draws one row per session, not per way through it, so a name a person gave the session
-	 * does not stop being theirs because the leaf moved. The branch walk below stays exactly as it
-	 * was — it is the fallback, and summarizing the oldest turn away still cannot rename the session.
+	 * The recorded title comes from the snapshot, and that placement is deliberate: the left column
+	 * draws one row per session, not per way through it, so a name a person gave the session does not
+	 * stop being theirs because the leaf moved — which is exactly the reading ADR-0002 argued for,
+	 * now stated by the format instead of reconstructed from file order. The branch walk below stays
+	 * exactly as it was — it is the fallback, and summarizing the oldest turn away still cannot
+	 * rename the session.
 	 */
 	getTitle(s: Session): string {
-		for (let index = s.jsonlEntries.length - 1; index >= 0; index--) {
-			const entry = s.jsonlEntries[index];
-			if (entry?.type === "rename") return entry.title;
-		}
+		if (s.meta.title !== undefined) return s.meta.title;
 		return deriveTitle(this.getBranch(s).flatMap(sessionEntryToContextMessages));
 	}
 
@@ -1841,8 +1815,8 @@ export class SessionManager {
 	 * lets a process that reopens the file put the leaf back where the conversation went. The record
 	 * is appended as a child of the leaf it leaves behind and does not advance it — the tree position
 	 * says where the append happened, the `leafId` field says where the conversation went. Moving to
-	 * the position already held writes nothing, the same guard `recordSelection` applies to its own
-	 * entries: a run of no-op moves costs no file.
+	 * the position already held writes nothing, the same guard the meta setters apply to their own
+	 * writes: a run of no-op moves costs no file.
 	 */
 	branch(s: Session, branchFromId: string): void {
 		if (!s.sessionEntryMapById.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
@@ -1899,16 +1873,18 @@ export class SessionManager {
 	// =========================================================================
 
 	/**
-	 * Copy a branch of a session file into a new session under `targetWorkDir`, and cache the new state.
+	 * Copy a branch of a session into a new session under `targetWorkDir`, and cache the new state.
 	 *
-	 * `entryId` is the entry the branch ends at, or null for the whole log. The new header points at the
-	 * source file as `parentSession`, and the copied entries keep the ids and parent links the source
-	 * wrote, which is what makes a fork traceable back to where it came from.
+	 * `entryId` is the entry the branch ends at, or null for the whole log. The new snapshot points at
+	 * the source's entry stream as `parentSession`, and the copied entries keep the ids and parent
+	 * links the source wrote, which is what makes a fork traceable back to where it came from. The
+	 * snapshot's current choices travel whole — title, model, level, tool config — because those are
+	 * the session's own values now, not entries a branch replay could restore.
 	 *
-	 * The source is only read: a fork is a new file, and the file it came from is never rewritten. The
-	 * new state goes into the cache under its own id — the caller that takes it and the next
-	 * {@link stateOf} on that id must answer the same bag, or the fork's first turn would land on an
-	 * object the fork result knows nothing about.
+	 * The source is only read: a fork is a new pair of files, and the session it came from is never
+	 * rewritten. The new state goes into the cache under its own id — the caller that takes it and the
+	 * next {@link stateOf} on that id must answer the same bag, or the fork's first turn would land on
+	 * an object the fork result knows nothing about.
 	 */
 	forkFrom(
 		sourcePathInput: string,
@@ -1918,35 +1894,38 @@ export class SessionManager {
 	): Session {
 		const absSourcePath = resolvePath(sourcePathInput);
 		const absTargetWorkDir = resolvePath(targetWorkDirInput);
-		const sourceEntries = loadJsonlEntries(absSourcePath);
+		const absSourceJsonl = absSourcePath.endsWith(".json") ? sessionJsonlPath(absSourcePath) : absSourcePath;
+		const sourceMeta = readMetaFile(sessionMetaPath(absSourceJsonl));
+		const sourceEntries = loadJsonlEntries(absSourceJsonl);
 		if (sourceEntries.length === 0) {
-			throw new Error(`Cannot fork: source session file is empty or invalid: ${absSourcePath}`);
+			throw new Error(`Cannot fork: source session file is empty or invalid: ${absSourceJsonl}`);
 		}
-		const sourceHeader = sourceEntries.find(isSessionHeader);
-		if (!sourceHeader) throw new Error(`Cannot fork: source session has no header: ${absSourcePath}`);
 
-		const entries = sourceEntries.filter((entry): entry is SessionEntry => !isSessionHeader(entry));
-		const branch = entryId === null ? entries : buildSessionPath(buildEntryIndex(entries), entryId);
+		const branch = entryId === null ? sourceEntries : buildSessionPath(buildEntryIndex(sourceEntries), entryId);
 		if (entryId !== null && branch.length === 0) {
-			throw new Error(`Session ${sourceHeader.id} has no entry ${entryId}`);
+			throw new Error(`Session ${sourceMeta.id} has no entry ${entryId}`);
 		}
 
-		const absDir = sessionDirInput ? normalizePath(sessionDirInput) : workspaceDir(absTargetWorkDir);
+		const absDir = sessionDirInput ? normalizePath(sessionDirInput) : sessionDir(absTargetWorkDir);
 		if (!existsSync(absDir)) mkdirSync(absDir, { recursive: true });
 
 		const newSessionId = createSessionId();
 		const timestamp = new Date().toISOString();
 		const absNewSessionFile = sessionPath(absDir, newSessionId, timestamp);
-		const header: SessionHeader = {
-			type: "SessionHeader",
+		const meta: SessionMeta = {
 			version: CURRENT_SESSION_VERSION,
 			id: newSessionId,
 			timestamp,
 			workDir: absTargetWorkDir,
-			parentSession: absSourcePath,
+			parentSession: absSourceJsonl,
+			...(sourceMeta.title === undefined ? {} : { title: sourceMeta.title }),
+			...(sourceMeta.model === undefined ? {} : { model: sourceMeta.model }),
+			...(sourceMeta.thinkingLevel === undefined ? {} : { thinkingLevel: sourceMeta.thinkingLevel }),
+			...(sourceMeta.activeTools === undefined ? {} : { activeTools: sourceMeta.activeTools }),
+			...(sourceMeta.approval === undefined ? {} : { approval: sourceMeta.approval }),
 		};
-		writeFileSync(absNewSessionFile, `${JSON.stringify(header)}\n`, { flag: "wx" });
-		for (const entry of branch) appendFileSync(absNewSessionFile, `${JSON.stringify(entry)}\n`);
+		writeFileSync(absNewSessionFile, branch.map((entry) => `${JSON.stringify(entry)}\n`).join(""), { flag: "wx" });
+		writeFileSync(sessionMetaPath(absNewSessionFile), `${JSON.stringify(meta, null, "\t")}\n`, { flag: "wx" });
 
 		const s = fillSession(absNewSessionFile);
 		this.states.set(s.sessionId, s);
@@ -1955,8 +1934,8 @@ export class SessionManager {
 
 	/** Every session stored for `workDir`, newest activity first. */
 	static async list(workDirInput: string, sessionDirInput?: string, signal?: AbortSignal): Promise<SessionInfo[]> {
-		const absDir = sessionDirInput ? normalizePath(sessionDirInput) : workspaceDir(workDirInput);
-		const filterWorkDir = sessionDirInput !== undefined && absDir !== workspaceDir(workDirInput);
+		const absDir = sessionDirInput ? normalizePath(sessionDirInput) : sessionDir(workDirInput);
+		const filterWorkDir = sessionDirInput !== undefined && absDir !== sessionDir(workDirInput);
 		const workDirAbsPath = resolvePath(workDirInput);
 		const sessions = (await listSessionsFromDir(absDir, signal)).filter(
 			(session) => !filterWorkDir || sessionWorkDirMatches(session.workDirAbsPath, workDirAbsPath),
@@ -1965,17 +1944,17 @@ export class SessionManager {
 	}
 
 	/**
-	 * Every workspace this machine has stored sessions for, each with its own list.
+	 * Every directory this machine has stored sessions for, each with its own list.
 	 *
-	 * The sidebar groups by workspace, and one process is only ever bound to one of them, so the
+	 * The sidebar groups by directory, and one process is only ever started in one of them, so the
 	 * grouping has to come from the store rather than from the server's own root. The workDir is read from
 	 * a session header instead of being decoded back out of the directory name: the name dashes the
 	 * separators out of a path, which is readable but not reversible.
 	 *
-	 * Workspaces come back most recently active first, and the empty ones — a directory left behind by
+	 * Directories come back most recently active first, and the empty ones — a store left behind by
 	 * a session whose file was deleted — are dropped rather than shown as headless groups.
 	 */
-	static async listWorkspaces(signal?: AbortSignal): Promise<WorkspaceSessions[]> {
+	static async listDirectories(signal?: AbortSignal): Promise<DirectorySessions[]> {
 		let absDirs: string[];
 		try {
 			absDirs = readdirSync(sessionsDir(), { withFileTypes: true })
@@ -1986,12 +1965,12 @@ export class SessionManager {
 			return [];
 		}
 
-		const groups: WorkspaceSessions[] = [];
+		const groups: DirectorySessions[] = [];
 		for (const absDir of absDirs) {
 			const absNewest = findMostRecentSession(absDir);
 			if (absNewest === null) continue;
-			const header = readSessionHeaderForDiscovery(absNewest);
-			const workDirAbsPath = header === null ? undefined : getSessionHeaderWorkDir(header);
+			const meta = readMetaForDiscovery(absNewest);
+			const workDirAbsPath = meta?.workDir;
 			if (workDirAbsPath === undefined || workDirAbsPath === "") continue;
 
 			const sessions = (await SessionManager.list(workDirAbsPath, absDir, signal)).map(toSessionRow);
@@ -2003,25 +1982,27 @@ export class SessionManager {
 	}
 
 	/**
-	 * The one row a session id names, from whichever workspace holds it, or `undefined` when no file
+	 * The one row a session id names, from whichever directory holds it, or `undefined` when no file
 	 * does.
 	 *
 	 * The listing answers the same question for every session at once, which is the wrong cost when
 	 * exactly one session is what changed — one just created, or just forked, or one the store picked
-	 * up by hand. So this locates that one file and parses only it: a session appearing costs one
-	 * parse rather than a scan of the machine. The locate half is the header read, not a transcript
-	 * read; only the file that matched is parsed whole.
+	 * up by hand. So this locates that one session and parses only it: a session appearing costs one
+	 * parse rather than a scan of the machine. The locate half is the snapshot read, not a transcript
+	 * read; only the session that matched has its `.jsonl` parsed.
 	 */
 	static async findSessionRowById(id: string, signal?: AbortSignal): Promise<SessionRow | undefined> {
 		const absPath = SessionManager.findSessionFilePathById(id);
 		if (absPath === undefined) return undefined;
-		const info = await buildSessionInfo(absPath, signal);
+		const meta = readMetaForDiscovery(absPath);
+		if (meta === null) return undefined;
+		const info = await buildSessionInfo(sessionMetaPath(absPath), absPath, meta, signal);
 		if (info === null) return undefined;
-		// A fork's parent is named by *path* in the header, so it is knowable from one file alone once
-		// that path is resolved to an id — which matters because a fork reaches a store one row at a
-		// time, where the listing that would have linked it is not in play.
+		// A fork's parent is named by *path* in the snapshot, so it is knowable from one session alone
+		// once that path is resolved to an id — which matters because a fork reaches a store one row at
+		// a time, where the listing that would have linked it is not in play.
 		if (info.parentId === undefined && info.absParentSessionPath !== undefined) {
-			const parent = readSessionHeaderForDiscovery(info.absParentSessionPath);
+			const parent = readMetaForDiscovery(info.absParentSessionPath);
 			const parentId = parent?.id;
 			if (parentId !== undefined && parentId !== info.id) info.parentId = parentId;
 		}
@@ -2029,11 +2010,12 @@ export class SessionManager {
 	}
 
 	/**
-	 * The path of the file a session id names, searching every workspace on this machine.
+	 * The path of the entry stream a session id names, searching every directory store on this
+	 * machine.
 	 *
-	 * A session opened from the sidebar may live in a workspace this process was not started over, and
-	 * its header — not the server's root — is what says which directory its tools resolve inside. The
-	 * search is header reads only: every candidate file is opened for its first line and closed, so a
+	 * A session opened from the sidebar may live in a directory this process was not started in, and
+	 * its snapshot — not the server's root — is what says which directory its tools resolve inside.
+	 * The search is snapshot reads only: every candidate `.json` is opened and closed whole, so a
 	 * miss costs one cheap read per session rather than one transcript parse per session.
 	 */
 	static findSessionFilePathById(id: string): string | undefined {
@@ -2049,9 +2031,12 @@ export class SessionManager {
 		for (const absDir of entries) {
 			try {
 				for (const file of readdirSync(absDir)) {
-					if (!file.endsWith(".jsonl")) continue;
-					const absPath = join(absDir, file);
-					if (readSessionHeaderForDiscovery(absPath)?.id === id) return absPath;
+					if (!file.endsWith(".json")) continue;
+					const absJson = join(absDir, file);
+					const meta = readMetaForDiscovery(absJson);
+					// A `.json` is only ever written beside its `.jsonl` — the snapshot is the birth's
+					// commit marker — so an id match here can answer with the stream path directly.
+					if (meta?.id === id) return sessionJsonlPath(absJson);
 				}
 			} catch {
 				// One unreadable directory must not hide a session stored in another.
@@ -2062,38 +2047,40 @@ export class SessionManager {
 	}
 
 	/**
-	 * Delete the file a session id names, from whichever workspace holds it, and drop the id's cached
+	 * Delete the session an id names, from whichever directory holds it, and drop the id's cached
 	 * state.
 	 *
-	 * One file, not a directory: a workspace's sessions share a directory, so anything wider than the
-	 * one `.jsonl` the header names is a different conversation's transcript. Throwing for an unknown
-	 * id rather than answering "already gone" keeps the two failures apart — the caller decides what
-	 * a second delete means, and the hub turns it into a status the client can show. The cache drop
-	 * rides here rather than on the caller, because a cached state that outlived its file would let
-	 * the next {@link stateOf} answer a deleted session — the one divergence this class cannot permit.
+	 * One session, not a directory: a directory's sessions share one store, so anything wider than
+	 * the two files one session is named by is a different conversation's transcript. Throwing for an
+	 * unknown id rather than answering "already gone" keeps the two failures apart — the caller
+	 * decides what a second delete means, and the hub turns it into a status the client can show. The
+	 * cache drop rides here rather than on the caller, because a cached state that outlived its file
+	 * would let the next {@link stateOf} answer a deleted session — the one divergence this class
+	 * cannot permit.
 	 */
 	async remove(id: string): Promise<void> {
 		const absPath = SessionManager.findSessionFilePathById(id);
 		if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
 		this.states.delete(id);
 		await rm(absPath);
+		await rm(sessionMetaPath(absPath));
 	}
 
 }
 
-/** The most recent activity in a group, for ordering the sidebar's workspaces. */
-function newestAt(group: WorkspaceSessions): number {
+/** The most recent activity in a group, for ordering the sidebar's directories. */
+function newestAt(group: DirectorySessions): number {
 	return group.sessions.reduce((newest, session) => Math.max(newest, session.modified), 0);
 }
 
 /**
- * Group rows by workspace and order them the way the sidebar draws them.
+ * Group rows by directory and order them the way the sidebar draws them.
  *
  * Newest activity first within a group, and groups ordered by their own newest row. Exported because
  * the server's projection holds the same rows and has to order them the same way — a store and a
  * reader that each sorted for themselves would disagree the moment a row moved.
  */
-export function groupSessionsByWorkspace(rows: readonly SessionRow[]): WorkspaceSessions[] {
+export function groupSessionsByDirectory(rows: readonly SessionRow[]): DirectorySessions[] {
 	const groups = new Map<string, SessionRow[]>();
 	for (const row of rows) {
 		const group = groups.get(row.workDirAbsPath);

@@ -10,7 +10,7 @@ export type { Message } from "@my-agent/llm";
 export type { AgentSessionEvent } from "./agent.ts";
 export type { MessageDelta } from "./agent.ts";
 export type { BranchOption, BranchPoint } from "./session/session-manager.ts";
-export type { BashSettings, ModeSettings, WorkspacePaging } from "./config.ts";
+export type { BashSettings, DirectoryPaging, ModeSettings } from "./config.ts";
 // The compaction checkpoint crosses the wire inside snapshot `messages` as a user message wrapped
 // in these tags, so the tags are wire facts: the client recognizes the summary by them.
 export {
@@ -21,7 +21,7 @@ export {
 
 export interface SessionRef {
 	id: string;
-	/** The workspace this session runs in, absolute: the header recorded a resolved path. */
+	/** The directory this session works in, absolute: the header recorded a resolved path. */
 	workDirAbsPath: string;
 	createdAt: number;
 	title: string;
@@ -29,7 +29,7 @@ export interface SessionRef {
 	 * The session this one was forked from, when that session is stored beside it.
 	 *
 	 * Absent for a root session, and for a fork whose parent is not in the same list — another
-	 * workspace's directory, or a file moved by hand. A client draws a missing parent as a root rather
+	 * directory's store, or a file moved by hand. A client draws a missing parent as a root rather
 	 * than inventing a place for it.
 	 */
 	parentId?: string;
@@ -57,12 +57,12 @@ export interface SessionRow extends SessionRef {
 }
 
 /**
- * The stored sessions of one workspace, for the sidebar's groups.
+ * The stored sessions of one directory, for the sidebar's groups.
  *
- * The groups come from the store rather than from the server's own root: one process is bound to one
- * workspace, but every workspace this machine has ever run in has its sessions on disk beside it.
+ * The groups come from the store rather than from the server's own root: one process is started in
+ * one directory, but every directory this machine has ever run in has its sessions on disk beside it.
  */
-export interface WorkspaceGroup {
+export interface DirectoryGroup {
 	workDirAbsPath: string;
 	sessions: SessionRow[];
 }
@@ -137,22 +137,22 @@ export interface SettingsSnapshot {
 	 */
 	modes?: ModeSettings[];
 	/**
-	 * Workspaces the sidebar does not list, by absolute path; absent means none are put aside.
+	 * Directories the sidebar does not list, by absolute path; absent means none are put aside.
 	 *
 	 * Carried here rather than kept to the server because it is what the window has to know to draw the
-	 * list it was sent: a workspace missing from `GET /api/workspaces` for a reason no one can see
+	 * list it was sent: a directory missing from `GET /api/directories` for a reason no one can see
 	 * would be a group that vanished with nothing to explain it.
 	 */
-	hiddenWorkspaces?: string[];
+	hiddenDirectories?: string[];
 	/**
-	 * The names the sidebar shows for workspaces, by absolute path; absent means every group wears
+	 * The names the sidebar shows for directories, by absolute path; absent means every group wears
 	 * the folder's own name.
 	 *
-	 * Carried beside `hiddenWorkspaces` and for the same reason: the window draws a group's heading,
+	 * Carried beside `hiddenDirectories` and for the same reason: the window draws a group's heading,
 	 * and the name it draws is not derivable from anything else the snapshot holds — it is a view the
 	 * user typed, not a property of the directory.
 	 */
-	workspaceNames?: Record<string, string>;
+	directoryNames?: Record<string, string>;
 	approval: Record<ToolApprovalKey, boolean>;
 	/** How long the `bash` tool lets one command run. */
 	bash: BashSettings;
@@ -214,7 +214,7 @@ export interface DiffLine {
  * provider ever sees it: a request carries a tool result's content and only its content.
  */
 export interface FileDiff {
-	/** The file as the workspace displays it — relative to the workspace root, forward slashes. */
+	/** The file as the working directory displays it — relative when inside it, absolute otherwise. */
 	relPath: string;
 	lines: DiffLine[];
 	added: number;
@@ -242,12 +242,12 @@ export interface SessionSnapshot {
 	/** Tools the model may call right now. */
 	activeTools: string[];
 	/**
-	 * Whether the branch's last recorded tool set equals the current global default.
+	 * Whether the session's recorded tool set equals the current global default.
 	 *
-	 * The two maps ride one `tool_config` entry, but a user may have moved only one of them, so each
-	 * half is judged on its own. True for a branch with no entry at all: a session that never chose
-	 * *is* on the global default. Equality is against the global value *now* — a session reset and
-	 * then left behind by a later default change reports false, which is the honest answer.
+	 * The two maps ride one recorded choice, but a user may have moved only one of them, so each
+	 * half is judged on its own. True for a session with no recorded choice at all: a session that
+	 * never chose *is* on the global default. Equality is against the global value *now* — a session
+	 * reset and then left behind by a later default change reports false, which is the honest answer.
 	 */
 	toolsFollowGlobal: boolean;
 	/** The approval map's half of the same judgement. */

@@ -1,7 +1,6 @@
 import type { AgentTool } from "../types.ts";
 import { DEFAULT_MODE_NAME, type BashSettings, type ModeSettings } from "../config.ts";
-import { APPROVAL_TOOLS, type ToolApprovalKey } from "../protocol.ts";
-import type { Workspace } from "../workspace.ts";
+import type { ToolApprovalKey } from "../protocol.ts";
 import { createBashTool } from "./bash.ts";
 import { createEditTool } from "./edit.ts";
 import { createGlobTool } from "./glob.ts";
@@ -12,7 +11,7 @@ import { createWriteTool } from "./write.ts";
 /**
  * The tool side of the stateless chain (ADR-0006): the definitions are global and read-only, the
  * per-session choice is pure data ({@link ToolState}), and the executable set is built fresh against
- * the run context every time it is asked for. Nothing here holds a workspace between calls.
+ * the run context every time it is asked for. Nothing here holds a working directory between calls.
  */
 
 // ---------------------------------------------------------------------------- the definitions
@@ -20,13 +19,14 @@ import { createWriteTool } from "./write.ts";
 /**
  * The value objects one request's tools are built against.
  *
- * The tools resolve paths inside {@link workspace} and run `bash` under {@link bash}; both are
- * per-request facts — the workspace comes from the session header's workDir, the timeouts from the
- * settings read alongside — so they are injected at build time rather than captured when a session
- * is assembled. A value object lives and dies with the request that carries it.
+ * The tools read relative paths against {@link workDirAbsPath} and start `bash` there; both are per-request
+ * facts — the directory comes from the session header's workDir, the timeouts from the settings read
+ * alongside — so they are injected at build time rather than captured when a session is assembled. A
+ * value object lives and dies with the request that carries it.
  */
 export interface ToolRunContext {
-	workspace: Workspace;
+	/** The directory relative paths resolve against, and where a command starts. No fence. */
+	workDirAbsPath: string;
 	/** The `bash` timeouts; the defaults when the caller names none. */
 	bash?: BashSettings;
 }
@@ -34,9 +34,10 @@ export interface ToolRunContext {
 /**
  * One built-in tool as a definition: a factory over the run context.
  *
- * A definition is everything about the tool except the workspace it acts in, which is why it is a
- * function and not an `AgentTool` — an `AgentTool` closes over its workspace, and a registry that
- * held those would hold a workspace per session, which is the residency this file exists to remove.
+ * A definition is everything about the tool except the directory it acts in, which is why it is a
+ * function and not an `AgentTool` — an `AgentTool` closes over its working directory, and a registry
+ * that held those would hold a directory per session, which is the residency this file exists to
+ * remove.
  */
 export type ToolDefinition = (run: ToolRunContext) => AgentTool<any>;
 
@@ -56,12 +57,12 @@ export interface ToolDefinitions {
 /** The six built-ins, in the order the model is offered them. */
 export function createToolDefinitions(): ToolDefinitions {
 	const definitions = new Map<string, ToolDefinition>([
-		["read", (run) => createReadTool(run.workspace)],
-		["write", (run) => createWriteTool(run.workspace)],
-		["edit", (run) => createEditTool(run.workspace)],
-		["glob", (run) => createGlobTool(run.workspace)],
-		["grep", (run) => createGrepTool(run.workspace)],
-		["bash", (run) => createBashTool(run.workspace, run.bash)],
+		["read", (run) => createReadTool(run.workDirAbsPath)],
+		["write", (run) => createWriteTool(run.workDirAbsPath)],
+		["edit", (run) => createEditTool(run.workDirAbsPath)],
+		["glob", (run) => createGlobTool(run.workDirAbsPath)],
+		["grep", (run) => createGrepTool(run.workDirAbsPath)],
+		["bash", (run) => createBashTool(run.workDirAbsPath, run.bash)],
 	]);
 	return {
 		names: () => [...definitions.keys()],
@@ -74,7 +75,7 @@ export function createToolDefinitions(): ToolDefinitions {
  * The process-wide definitions, built once.
  *
  * The definitions are constants of this build — the same six for every session, over every
- * workspace — so one shared catalog is the "global read-only, built at startup" form the stateless
+ * directory — so one shared catalog is the "global read-only, built at startup" form the stateless
  * architecture asks for. Read-only is the point: a session narrows what the model may call through
  * its own {@link ToolState}, never by adding to or reshaping the catalog.
  */
@@ -86,10 +87,10 @@ export function toolDefinitions(): ToolDefinitions {
 // ---------------------------------------------------------------------------- the state
 
 /**
- * The tool choice one session is in, as pure data: what a `tool_config` entry records.
+ * The tool choice one session is in, as pure data: what the session's `.json` snapshot records.
  *
  * `activeToolNames` is what the model may call; `approvalOverride` is the session's own approval
- * map over the workspace's defaults, undefined when the session never chose and follows global.
+ * map over the global defaults, undefined when the session never chose and follows global.
  * The names may include tools this build no longer knows — the recorded set is narrowed at fill and
  * assembly time, never stored back shortened, so a downgrade and re-upgrade keeps the choice.
  */
@@ -149,42 +150,16 @@ export function fillTools(modeName: string | undefined, context: ToolFillContext
 	};
 }
 
-// ---------------------------------------------------------------------------- the subagent loadout
-
-/**
- * What the SubAgent's own session may call, and nothing else.
- *
- * Read-only covers the work delegation is for — reading many files, reporting back — and makes "the
- * SubAgent cannot change anything" a property of the loadout, not of model behavior. These three
- * also need no approval under the default approval set, so the child never stalls.
- */
-export const SUBAGENT_TOOL_NAMES = ["read", "glob", "grep"] as const;
-
-/**
- * The child session's loadout as one {@link ToolState}: the narrowed set, and every approval off.
- *
- * The approvals are off here rather than left to the settings, because a SubAgent's approval request
- * has no window to answer it — the override is what makes "the child cannot stall" true whatever the
- * workspace's settings say. Delegation does not nest: the child's loadout carries no delegation tool,
- * and its session is built with `subagents: false` to hold the rule structurally.
- */
-export function subagentToolState(): ToolState {
-	// `APPROVAL_TOOLS` enumerates every key the map gates, so the table it builds is complete — the
-	// assertion is where the keys come from, not a cast past the type system.
-	const approval = Object.fromEntries(APPROVAL_TOOLS.map((name) => [name, false])) as Record<ToolApprovalKey, boolean>;
-	return { activeToolNames: [...SUBAGENT_TOOL_NAMES], approvalOverride: approval };
-}
-
 // ---------------------------------------------------------------------------- the run-context assembly
 
 /**
  * The run context's executable set, built fresh: definitions looked up by the active names, each
- * built against the run context, then the session-local tools whose names are active.
+ * built against the run context, then the tools a caller registered whose names are active.
  *
  * This is the one place "an active name" becomes "a tool the engine can call", and it builds rather
- * than returns stored tools — the workspace is a per-request value object, so an `AgentTool` cannot
+ * than returns stored tools — the working directory is a per-request value, so an `AgentTool` cannot
  * outlive the request that asked for the list. Names this build does not know are skipped, the same
- * narrowing a replayed `tool_config` gets: a recorded set is read down to what can run, never thrown
+ * narrowing a recorded choice gets: a recorded set is read down to what can run, never thrown
  * at.
  */
 export function toolListFor(

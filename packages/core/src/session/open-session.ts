@@ -1,9 +1,6 @@
-import type { AgentTool, QueueMode } from "../types.ts";
-import type { ModelState } from "../models.ts";
-import type { ToolState } from "../tools/manager.ts";
-import type { Workspace } from "../workspace.ts";
+import type { QueueMode } from "../types.ts";
+import type { ModelChoice } from "../models.ts";
 import type { RunScope, SessionEventListener, SessionListener } from "../agent.ts";
-import type { AgentsMdFile } from "../context/agents-md.ts";
 import type { SettingsState } from "../settings-manager.ts";
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.ts";
 
@@ -15,10 +12,10 @@ import { createSessionRuntime, type SessionRuntime } from "./session-runtime.ts"
  * Everything here answers one of two questions. *What is in progress and nowhere on disk*: the
  * queues and the active run cannot be rebuilt from the ledger; neither can the subscriber sets a
  * window attached through `onChange` / `onEvent`, or the run slot a mid-run reader reaches through.
- * *What one open resolved*: the workspace fence, the settings bag, the model selection, and the
- * tool seed are the products of the seed→fill assembly (ADR-0006 §2) — the per-session answers a
- * stateless orchestrator would otherwise have nowhere to put, arrived at when the entry was created
- * and read by every call that follows. A process restart drops the whole entry on purpose — queued
+ * *What one open resolved*: the working directory, the settings bag, and the model selection are the
+ * products of the seed→fill assembly (ADR-0006 §2) — the per-session answers a stateless orchestrator
+ * would otherwise have nowhere to put, arrived at when the entry was created and read by every call
+ * that follows. A process restart drops the whole entry on purpose — queued
  * messages are lost, subscribers are re-attached by the next connection, the run slot is empty, and
  * the assembly is re-run by the reopen — and the session file is not, so a reopen and a restart land
  * in the same place.
@@ -45,59 +42,36 @@ export interface OpenSession {
 	 * the moment the run settles.
 	 */
 	run: RunScope | undefined;
-	/** The directory this session's tools resolve inside, resolved once at assembly. */
-	readonly workspace: Workspace;
-	/** The workspace's settings, as the bag every settings call in this session passes. */
+	/**
+	 * The working directory this session's tools resolve against and start commands in.
+	 *
+	 * Resolved once at assembly and a plain path, not an object with rules: it is the reference frame
+	 * for a relative path, and nothing more. An absolute path a tool receives is taken as it stands,
+	 * wherever it points.
+	 */
+	readonly workDirAbsPath: string;
+	/** The directory's settings, as the bag every settings call in this session passes. */
 	readonly settings: SettingsState;
 	/**
-	 * The model selection in force, as the seed assembly resolved: the row's name and the level.
+	 * The model choice in force, as the seed assembly resolved it: the row's name and the level.
 	 *
-	 * The bag is the session's one live model state, and it lives here rather than on the session
-	 * because the orchestrator is stateless (ADR-0007 §5): a selection that arrived with a message
-	 * is written onto it by the session, a branch move rewrites it from the branch's own recording,
-	 * and every request lays the live row's facts over it with `fillModel` before anything reads
-	 * them. What is *recorded* is the ledger's account, written by the request that is made with the
-	 * selection — this bag is what that request was made from.
+	 * The choice lives here rather than on the session because the orchestrator is stateless
+	 * (ADR-0007 §5): a selection that arrived with a message is written onto it by the session, and
+	 * every read — a snapshot, a request, a compaction trigger — builds its model from it by looking
+	 * the name up in the catalog. Nothing of the row is kept: the key, the endpoint, and the window
+	 * are read at that moment, which is what makes an edit to the file reach the very next request
+	 * with nothing refreshed. What is *recorded* is the ledger's account, written by the request that
+	 * is made with the choice — this is what that request was made from.
 	 */
-	readonly modelSelection: ModelState;
-	/**
-	 * The deliberate loadout assembly handed in, as the fallback the tool choice derives against, or
-	 * undefined when the session follows the global default's live view.
-	 *
-	 * A seed, never a state: the SubAgent child's read-only narrowing arrives this way, and the
-	 * recorded `tool_config` entries still have the last word — the seed answers only on a branch
-	 * that carries no entry.
-	 */
-	readonly toolSeed: ToolState | undefined;
-	/**
-	 * The tools this session has that the shared catalog does not: the delegation pair, built against
-	 * this session's own workspace and transcript.
-	 *
-	 * Here rather than in a registry of the session's own because the registry is process structure —
-	 * one catalog over one set of definitions — while these are assembly products, closing over the
-	 * parent a delegation reports to. The session reads them back through {@link registryView} on
-	 * every tool resolution, so the executable set is still built per request and nothing here is
-	 * mutable. Empty for a session that may not delegate, which is how delegation does not nest.
-	 */
-	readonly localTools: readonly AgentTool<any>[];
-	/**
-	 * The `AGENTS.md` files that apply to this workspace, read once by the open that assembled it.
-	 *
-	 * A prompt input rather than a setting: the builder is handed them, so one builder can serve every
-	 * session this process runs. They are read when the entry is created and not followed afterwards,
-	 * exactly like the rest of the assembly — reopening the session reads the files again.
-	 */
-	readonly agentsMd: readonly AgentsMdFile[];
+	readonly modelSelection: ModelChoice;
 }
 
 /** What one open resolved, as the entry's starting contents. */
 export interface OpenSessionSeed {
-	workspace: Workspace;
+	/** The working directory, absolute: the header's own `workDirAbsPath`, resolved. */
+	workDirAbsPath: string;
 	settings: SettingsState;
-	modelSelection: ModelState;
-	toolSeed?: ToolState;
-	localTools?: readonly AgentTool<any>[];
-	agentsMd?: readonly AgentsMdFile[];
+	modelSelection: ModelChoice;
 	steeringMode: QueueMode;
 	followUpMode: QueueMode;
 }
@@ -105,10 +79,10 @@ export interface OpenSessionSeed {
 /**
  * Build one session's registry entry.
  *
- * The queue modes are the workspace settings' answer at creation time; a config patch that moves
- * either mode later writes it onto the queue in place, so nothing here is captured for good. The
- * assembly fields are the caller's resolved answers — the orchestrator reads them and never
- * re-resolves them, so there is exactly one place a session's assembly lives.
+ * The queue modes are the settings' answer at creation time; a config patch that moves either mode
+ * later writes it onto the queue in place, so nothing here is captured for good. The assembly fields
+ * are the caller's resolved answers — the orchestrator reads them and never re-resolves them, so
+ * there is exactly one place a session's assembly lives.
  */
 export function createOpenSession(seed: OpenSessionSeed): OpenSession {
 	return {
@@ -116,12 +90,9 @@ export function createOpenSession(seed: OpenSessionSeed): OpenSession {
 		listeners: new Set(),
 		eventListeners: new Set(),
 		run: undefined,
-		workspace: seed.workspace,
+		workDirAbsPath: seed.workDirAbsPath,
 		settings: seed.settings,
 		modelSelection: seed.modelSelection,
-		toolSeed: seed.toolSeed,
-		localTools: seed.localTools ?? [],
-		agentsMd: seed.agentsMd ?? [],
 	};
 }
 

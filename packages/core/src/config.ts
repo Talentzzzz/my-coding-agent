@@ -9,9 +9,9 @@ export const AGENT_HOME = resolve(process.env.MY_AGENT_HOME ?? join(homedir(), "
 export const APP_NAME = "my-agent";
 
 /**
- * The directory a workspace uses for its own settings, beside the agent home's name.
+ * The directory a session uses for its own settings, beside the agent home's name.
  *
- * A repository can commit `<workspace>/.my-agent/settings.json`; `SettingsManager` merges it over the
+ * A repository can commit `<workDirAbsPath>/.my-agent/settings.json`; `SettingsManager` merges it over the
  * agent home's file, so a checkout can carry its own approvals and limits without touching the
  * machine-wide ones. Nothing writes this directory until something is set at project scope.
  */
@@ -65,29 +65,29 @@ export interface AppearanceSettings {
 	 */
 	contentWidth?: number;
 	/**
-	 * The sidebar's per-workspace paging state, keyed by the workspace's absolute path.
+	 * The sidebar's per-directory paging state, keyed by the directory's absolute path.
 	 *
-	 * Absent until a workspace has actually been paged or collapsed — a list the user never touched
+	 * Absent until a directory has actually been paged or collapsed — a list the user never touched
 	 * keeps no entry, by the same rule the two widths follow. The path is the key rather than an id
-	 * because it is the only identity a workspace group carries on the wire.
+	 * because it is the only identity a directory group carries on the wire.
 	 */
-	workspaces?: Record<string, WorkspacePaging>;
+	directories?: Record<string, DirectoryPaging>;
 }
 
 /**
- * One workspace's paging state, as the sidebar last left it.
+ * One directory's paging state, as the sidebar last left it.
  *
  * Three fields, because two of the decided behaviours need a memory that survives the third: the
  * 「收起」 button steps {@link page} back one page — undoing the page the last 「展开其余」 added —
  * and {@link savedPage} moves with it, so reopening a later heading-collapse lands on the page the
  * user had actually read down to.
  */
-export interface WorkspacePaging {
-	/** Whether the workspace shows only its heading. */
+export interface DirectoryPaging {
+	/** Whether the directory shows only its heading. */
 	collapsed: boolean;
 	/** How many pages of conversations are expanded right now; the cap is `page * 5`. */
 	page: number;
-	/** The page the workspace was expanded to when its heading last collapsed it. */
+	/** The page the directory was expanded to when its heading last collapsed it. */
 	savedPage: number;
 }
 
@@ -143,7 +143,8 @@ export const DEFAULT_MODE_NAME = "默认";
  * One mode: a named preset of tools and approvals, edited in the app-level settings and applied to
  * a session wholesale.
  *
- * Both halves travel whole, on the same contract the session's own `tool_config` entries follow:
+ * Both halves travel whole, on the same contract the session's own recorded choices follow (the
+ * `.json` snapshot's active set and approval map):
  * a mode is one decision, so applying it must not merge into whatever the session held before. The
  * name is the mode's identity — the composer names the active mode by matching values against this
  * list, which is why a duplicate name is refused rather than made unique.
@@ -194,29 +195,29 @@ export interface Settings {
 	/** Tools that must be approved in the UI before they run. */
 	approval: Record<ToolApprovalKey, boolean>;
 	/**
-	 * Workspaces the sidebar does not list, by absolute path.
+	 * Directories the sidebar does not list, by absolute path.
 	 *
-	 * The list is a *view* decision and nothing more: 「删除」 on a workspace heading removes the group
-	 * from the list and leaves every transcript exactly where it lies, so a workspace can be put aside
+	 * The list is a *view* decision and nothing more: 「删除」 on a directory heading removes the group
+	 * from the list and leaves every transcript exactly where it lies, so a directory can be put aside
 	 * without anything on disk being touched. That is the whole reason this is a stored setting rather
 	 * than a delete — the sessions are still openable by id, and un-hiding is emptying this list.
 	 *
 	 * Absent rather than `[]` until the user hides the first one, by the same rule the two widths
 	 * follow: a preference nobody expressed is not written down.
 	 */
-	hiddenWorkspaces?: string[];
+	hiddenDirectories?: string[];
 	/**
-	 * The name the sidebar shows for a workspace, by absolute path.
+	 * The name the sidebar shows for a directory, by absolute path.
 	 *
-	 * A view decision exactly like `hiddenWorkspaces`, and for the same reason: the folder on disk
+	 * A view decision exactly like `hiddenDirectories`, and for the same reason: the folder on disk
 	 * keeps the name the file system gave it, and every transcript keeps the `workDirAbsPath` its header
-	 * recorded. Renaming a workspace here therefore cannot make a session unfindable, and it cannot
+	 * recorded. Renaming a directory here therefore cannot make a session unfindable, and it cannot
 	 * touch anything outside the agent's own settings.
 	 *
 	 * An empty string is how a name is taken back — the group falls to the folder's own name again —
 	 * because a record that merges per key cannot express "forget this one" by omission.
 	 */
-	workspaceNames?: Record<string, string>;
+	directoryNames?: Record<string, string>;
 	/** How many steered messages one drain point injects. */
 	steeringMode: QueueMode;
 	/** How many follow-up messages one drain point injects. */
@@ -241,7 +242,7 @@ export function settingsPath(agentDir: string = AGENT_HOME): string {
 	return join(agentDir, "settings.json");
 }
 
-/** The settings file a workspace can commit. Only `SettingsManager` decides whether to write it. */
+/** The settings file a working directory can commit. Only `SettingsManager` decides whether to write it. */
 export function projectSettingsPath(workDirAbsPath: string): string {
 	return join(resolve(workDirAbsPath), PROJECT_DIR_NAME, "settings.json");
 }
@@ -279,11 +280,11 @@ export function mergeSettings(input: unknown): Settings {
 	const modes = modesOr(record.modes);
 	if (modes !== undefined) merged.modes = modes;
 
-	const hiddenWorkspaces = stringListOrUndefined(record.hiddenWorkspaces);
-	if (hiddenWorkspaces !== undefined) merged.hiddenWorkspaces = hiddenWorkspaces;
+	const hiddenDirectories = stringListOrUndefined(record.hiddenDirectories);
+	if (hiddenDirectories !== undefined) merged.hiddenDirectories = hiddenDirectories;
 
-	const workspaceNames = stringRecordOrUndefined(record.workspaceNames);
-	if (workspaceNames !== undefined) merged.workspaceNames = workspaceNames;
+	const directoryNames = stringRecordOrUndefined(record.directoryNames);
+	if (directoryNames !== undefined) merged.directoryNames = directoryNames;
 
 	for (const key of Object.keys(merged.approval) as ToolApprovalKey[]) {
 		const value = approval[key];
@@ -344,7 +345,7 @@ function appearanceOr(value: unknown): AppearanceSettings {
 	const theme = record.theme;
 	const sidebarWidth = clampSidebarWidth(record.sidebarWidth);
 	const contentWidth = clampContentWidth(record.contentWidth);
-	const workspaces = clampWorkspacePaging(record.workspaces);
+	const directories = clampDirectoryPaging(record.directories);
 	return {
 		theme: theme === "light" || theme === "dark" || theme === "system" ? theme : DEFAULT_APPEARANCE.theme,
 		fontSize: clampFontSize(record.fontSize),
@@ -352,7 +353,7 @@ function appearanceOr(value: unknown): AppearanceSettings {
 		// stylesheet's, and writing one here would turn "never chose" into "chose the default".
 		...(sidebarWidth === undefined ? {} : { sidebarWidth }),
 		...(contentWidth === undefined ? {} : { contentWidth }),
-		...(workspaces === undefined ? {} : { workspaces }),
+		...(directories === undefined ? {} : { directories }),
 	};
 }
 
@@ -392,16 +393,16 @@ export function clampContentWidth(value: unknown): number | undefined {
 }
 
 /**
- * The workspaces' paging state, entry by entry, or undefined for "never touched".
+ * The directories' paging state, entry by entry, or undefined for "never touched".
  *
  * Clamped rather than rejected, for the same reason the widths are: the file is hand-editable, and
- * one workspace's bad entry is dropped on its own — it should not cost the other workspaces their
+ * one directory's bad entry is dropped on its own — it should not cost the other directories their
  * state, and it should not cost the whole field its place in the appearance. A page counter that is
  * not a positive integer falls back to the first page rather than being believed.
  */
-export function clampWorkspacePaging(value: unknown): Record<string, WorkspacePaging> | undefined {
+export function clampDirectoryPaging(value: unknown): Record<string, DirectoryPaging> | undefined {
 	if (!isRecord(value)) return undefined;
-	const out: Record<string, WorkspacePaging> = {};
+	const out: Record<string, DirectoryPaging> = {};
 	for (const [workDirAbsPath, entry] of Object.entries(value)) {
 		if (workDirAbsPath.trim().length === 0 || !isRecord(entry)) continue;
 		const clampPage = (input: unknown): number =>

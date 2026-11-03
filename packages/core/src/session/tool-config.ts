@@ -41,12 +41,13 @@ export function globalDefaultToolState(s: SettingsState, registry: ToolRegistry)
 /**
  * The tool choice one session is in, derived from the ledger, on every read.
  *
- * `tool_config` entries hold both maps whole, so the last one on the branch is the choice and every
- * earlier one is history — which is why nothing needs to hold it: the registry's active set and the
- * gate's approvals all read through here, and a write lands in the ledger first, so the next read
- * already answers from it. A branch that carries no entry falls back on `seed` — the global default's
- * live view, or the deliberate loadout the caller handed in — because "the choice the session never
- * made" is the global default, not "whatever the last branch left behind".
+ * The session's recorded choice — the `.json` snapshot's active set and approval map, both held
+ * whole — is the first word, and every earlier one is gone by design, which is why nothing needs to
+ * hold it: the registry's active set and the gate's approvals all read through here, and a write
+ * lands in the ledger first, so the next read already answers from it. A session that never chose
+ * falls back on the global default's live view — because "the choice the session never made" is the
+ * global default. A session whose loadout is not its directory's own (the delegated child) says
+ * so through its settings, which for it are the default this reads.
  *
  * The recorded set is narrowed to the tools this build still knows, so one an upgrade dropped is
  * dropped by the read too and cannot refuse the session its reopen — and the fallback is narrowed the
@@ -54,15 +55,9 @@ export function globalDefaultToolState(s: SettingsState, registry: ToolRegistry)
  * without one the fallback's answer stands, which for the global default is "follow the settings",
  * kept live.
  */
-export function toolStateOf(
-	sessions: SessionManager,
-	state: Session,
-	s: SettingsState,
-	registry: ToolRegistry,
-	seed?: ToolState,
-): ToolState {
+export function toolStateOf(sessions: SessionManager, state: Session, s: SettingsState, registry: ToolRegistry): ToolState {
 	const recorded = sessions.getRecordedToolConfig(state);
-	const fallback = seed ?? globalDefaultToolState(s, registry);
+	const fallback = globalDefaultToolState(s, registry);
 	const names = narrowToKnown(recorded.activeTools ?? fallback.activeToolNames, registry.names());
 	return {
 		activeToolNames: names,
@@ -71,12 +66,12 @@ export function toolStateOf(
 }
 
 /**
- * Whether the branch's recorded tool config equals the current global default, one half at a time.
+ * Whether the session's recorded tool config equals the current global default, one half at a time.
  *
- * The judgement is field equality rather than "an entry exists": a reset is written as a new entry
- * that *holds* the global values, so "has an entry" would report a just-reset session as having
- * chosen. A branch with no entry at all follows global on both halves — the effective value there
- * *is* the global one.
+ * The judgement is field equality rather than "a choice exists": a reset is recorded as the *global*
+ * values, so "has recorded anything" would report a just-reset session as having
+ * chosen. A session with no recorded choice at all follows global on both halves — the effective
+ * value there *is* the global one.
  *
  * The tool halves are compared as sets, because a hand-edited settings file owes the registry no
  * order; the approval halves are compared field by field over every key either side names.
@@ -105,11 +100,13 @@ function toolConfigFollowsGlobal(
 }
 
 /**
- * The follow-global judgement for one session over its workspace's settings.
+ * The follow-global judgement for one session over its directory's settings.
  *
  * The one shape both snapshot paths share — a live `Agent` and a cold read must answer the field
  * identically, or the panel's "沿用全局" label would disagree with itself between the two — so the
  * global default the judgement compares against is read here rather than passed in a second time.
+ * (The judgement reads the session's recorded choice, which is no longer branch-relative: the
+ * two-file split made it a session-level value.)
  */
 export function followsGlobalOf(
 	sessions: SessionManager,

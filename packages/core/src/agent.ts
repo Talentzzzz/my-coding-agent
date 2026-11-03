@@ -42,17 +42,17 @@ import {
 } from "./context/compaction.ts";
 import { trimmableToolArgEntryIds } from "./context/trim-tool-call-args.ts";
 import { clearableToolResultIds, isCacheProbablyExpired } from "./context/clear-tool-results.ts";
-import { toolResultViewsOf, type ToolResultView } from "./context/tool-result-views.ts";
 import { spillOversizedToolResult } from "./context/spill.ts";
-import type { AgentsMdFile } from "./context/agents-md.ts";
+import { type AgentsMdFile, loadAgentsMd } from "./context/agents-md.ts";
 import { danglingApprovalsOf } from "./session/dangling.ts";
 import { boundToolContent, createHooks, type Hooks } from "./hooks.ts";
 import {
 	type Model,
-	fillModel,
+	type ModelConfig,
 	type ModelSource,
+	modelFor,
 	normalizeThinkingLevel,
-	resolvedModel,
+	rowFor,
 	type ThinkingLevel,
 	unconfiguredStream,
 } from "./models.ts";
@@ -80,13 +80,12 @@ import {
 	getRetrySettings,
 	getSteeringMode,
 } from "./settings-manager.ts";
-import { type ToolRegistry, type ToolRunContext, type ToolState, registryView } from "./tools/index.ts";
-import type { Workspace } from "./workspace.ts";
+import { type ToolRegistry, type ToolRunContext, type ToolState } from "./tools/index.ts";
 
 /**
  * The services one orchestrator coordinates, already built by the caller.
  *
- * The session never loads settings, creates a workspace, reads AGENTS.md, or picks a model: every
+ * The session never loads settings, creates a working directory, reads AGENTS.md, or picks a model: every
  * method names a session by id and fetches what it needs, at the line that needs it, from the
  * service that owns it — the transcript from the session manager's cache, the live half from the
  * registry entry, the model from the ledger and the live rows. That is what makes the class
@@ -121,21 +120,22 @@ export interface AgentConfig {
 	 */
 	models: ModelSource;
 	/**
-	 * The tool definitions this build knows, plus whatever local tools assembly registered — the
-	 * delegation pair, a test's custom tool. Structure only: the choice is not here.
+	 * The tool definitions this build knows, plus whatever a caller registered on it — a test's custom
+	 * tool. Structure only: the choice is not here.
 	 *
-	 * The active set and the approval map are derived from the ledger's `tool_config` entries on every
-	 * read (the entry's `toolSeed` is the fallback), so nothing mutates when the choice moves. No
-	 * workspace is resident either: the executable set is built fresh against the run context every
-	 * request asks for it, so the workspace is a value object that arrives with the request.
+	 * The active set and the approval map are derived from the session's recorded choices — the
+	 * `.json` snapshot's current values — on every read (the global default's live view is the
+	 * fallback), so nothing mutates when the choice moves. No
+	 * directory is resident either: the executable set is built fresh against the run context every
+	 * request asks for it, so the workDirAbsPath is a value that arrives with the request and leaves with it.
 	 */
 	tools: ToolRegistry;
 	/**
 	 * The live registry: one entry per session this process runs, keyed by id (ADR-0007 §4).
 	 *
 	 * Every method resolves the entry its id names — the queues a run drains, the run in flight, the
-	 * subscribers, the run slot, and the assembly the open resolved (workspace, settings, model
-	 * selection, tool seed). Entries are built by the first touch of a session and dropped when its
+	 * subscribers, the run slot, and the assembly the open resolved (workDirAbsPath, settings, model
+	 * selection). Entries are built by the first touch of a session and dropped when its
 	 * host closes, so a method called on an id nobody runs is refused rather than answered from
 	 * something stale.
 	 */
@@ -166,13 +166,13 @@ export interface AgentConfig {
 	 * its choices: `toolNames` is the active set, and `approvals` is the effective approval map — the
 	 * whole map the gate reads, including the tools that are not active.
 	 *
-	 * The two workspace facts arrive the same way, and for the same reason: the fence a session's tools
-	 * resolve inside, and the project instructions that apply there, are products of that session's
-	 * assembly — read off its registry entry here, because one builder serves every session this
-	 * process runs (ADR-0007 §6) and has no session of its own to borrow them from.
+	 * The working directory arrives the same way, and for the same reason: it is read for the request
+	 * that names it — off the session's entry, beside the project instructions read off disk — because
+	 * one builder serves every session this process runs (ADR-0007 §6) and has no session of its own
+	 * to borrow them from.
 	 */
 	systemPrompt: (
-		workspace: Workspace,
+		workDirAbsPath: string,
 		agentsMd: readonly AgentsMdFile[],
 		toolNames: readonly string[],
 		approvals: Record<ToolApprovalKey, boolean>,
@@ -325,6 +325,15 @@ export interface RunScope {
 	 */
 	partial: Message | undefined;
 	/**
+	 * The model the run is on, as the request in flight was built from it: the name the composer
+	 * shows, and the window the usage meter measures against.
+	 *
+	 * Here rather than rebuilt per snapshot because publishing must not read a file — `models.list()`
+	 * is the disk, and a snapshot is emitted once per delta. A run that has not reached its first
+	 * request yet leaves it undefined, and the read falls back to the catalog.
+	 */
+	model?: Model;
+	/**
 	 * Stamps of the user messages this run wrote ahead of the engine's own emit of them.
 	 *
 	 * Two writes land there: the prompt that starts the run — written before the run starts so the
@@ -333,14 +342,14 @@ export interface RunScope {
 	 */
 	writtenAhead: number[];
 	/**
-	 * Tool results a hook rewrote during the run, awaiting the entry that makes them durable.
+	 * True when the gate ended this run: a call was left dangling for someone to answer.
 	 *
-	 * `after_tool` answers with what the model should see, but the shown half becomes a
-	 * `tool_result_view` entry only when its toolResult message lands — see
-	 * {@link Agent.recordToolResultView}. From that moment the ledger is the only source: the request reads
-	 * the views back through `toolResultViewsOf`, so each pending copy is dropped as it is written out.
+	 * The one end that keeps the queues. Every other end drops what was accepted and never taken —
+	 * the send contract is fire-and-forget, and a message nothing will drain must not outlive the run
+	 * that took it — but a suspended run is owed an answer to that message by the recovery run, so
+	 * dropping it here would throw away something a person typed. See {@link Agent.dropQueued}.
 	 */
-	pendingToolResultViews: Map<string, ToolResultView>;
+	suspended: boolean;
 	/** True between `retry_scheduled` and `retry_end`: the run is waiting out a backoff. */
 	retrying: boolean;
 	/** The attempt the policy is on, 1-based, or 0 when no retry is pending. */
@@ -1123,6 +1132,34 @@ async function emitToolResultMessage(toolResultMessage: ToolResultMessage, emit:
 }
 
 /**
+ * The version of a tool result the ledger keeps, decided once at the write boundary.
+ *
+ * This is the backstop for a result nothing bounded on the way in — every built-in tool bounds its
+ * own output, and an `after_tool` rewrite is final by the time it gets here, so what remains is the
+ * tool that forgot. A result too large for the context is archived whole under the working directory
+ * (`context/spill.ts`) and stored as its head and tail plus the archive's path, so nothing is lost
+ * that cannot be read back; when the archive cannot be written, the hard clip in `boundToolContent`
+ * is the floor. Anything else passes through untouched: for a well-bounded result the whole check is
+ * one length sum.
+ *
+ * Running it here, at the one door every write walks through, is what lets the request read the
+ * ledger as it is: the content on disk is the content the model is served, on this process and on
+ * every later one.
+ */
+function finalizeToolResult(state: Session, entry: OpenSession, message: Message): Message {
+	if (message.role !== "toolResult") return message;
+	const spilled = spillOversizedToolResult(
+		entry.workDirAbsPath,
+		state.sessionId,
+		message.toolName,
+		message.toolCallId,
+		message.content,
+	);
+	const content = spilled ?? boundToolContent(message.content);
+	return content === undefined ? message : { ...message, content };
+}
+
+/**
  * One orchestration service for every conversation this process runs.
  *
  * This is the orchestration layer of the stateless architecture (ADR-0006 §1): the four domains are
@@ -1214,20 +1251,20 @@ export class Agent {
 		const state = this.sessionManager.stateOf(id);
 		const entry = this.entryOf(id);
 		const run = entry.run;
-		const tools = this.toolsOf(entry);
 		return sessionSnapshot({
 			sessions: this.sessionManager,
 			session: state,
-			absWorkspaceRoot: entry.workspace.absRoot,
-			// The snapshot reads only the name, the level, and the window off the model, all of which the
-			// filled bag already holds; no transport is needed for a read that sends nothing.
-			model: resolvedModel(entry.modelSelection),
+			workDirAbsPath: entry.workDirAbsPath,
+			// The run's own model is the one its request went out with, so the meter measures the window
+			// the answer was actually asked against. An idle session has no run to ask, and builds it
+			// from the catalog — one small file read, on a command rather than on a delta.
+			model: run?.model ?? modelFor(entry.modelSelection, this.models.list()),
 			approvals: this.approvalsOf(state, entry),
-			allTools: tools.names(),
+			allTools: this.tools.names(),
 			activeTools: this.toolStateOf(state, entry).activeToolNames,
-			// Judged against this workspace's own settings, the same way a cold read judges it, so the
+			// Judged against this directory's own settings, the same way a cold read judges it, so the
 			// panel's "沿用全局" label cannot disagree with itself between the two paths.
-			...followsGlobalOf(this.sessionManager, state, entry.settings, tools),
+			...followsGlobalOf(this.sessionManager, state, entry.settings, this.tools),
 			...(run?.partial === undefined ? {} : { partial: run.partial }),
 			submitting: run !== undefined,
 			queued: entry.runtime.followUpQueue.size,
@@ -1241,31 +1278,20 @@ export class Agent {
 	 * The tool choice in force, derived from the ledger, on every read.
 	 *
 	 * Never held: every write of it lands in the ledger in the same stack (`setActiveTools`, an
-	 * approval choice), so deriving here is what keeps a branch move — which only moves the leaf —
-	 * answered by the branch's own entries, and a settings edit answered live when the fallback is
-	 * the global default. See {@link toolStateOf}.
+	 * approval choice), so deriving here is what keeps the snapshot and a settings edit answered live
+	 * when the fallback is the global default. See {@link toolStateOf}.
 	 */
 	private toolStateOf(state: Session, entry: OpenSession): ToolState {
-		return toolStateOf(this.sessionManager, state, entry.settings, this.toolsOf(entry), entry.toolSeed);
+		return toolStateOf(this.sessionManager, state, entry.settings, this.tools);
 	}
 
 	/**
-	 * The catalog as one session sees it: the process's registry plus the tools that session has of its own.
-	 *
-	 * The delegation pair is built by the open that assembled the session — it closes over the
-	 * transcript it reports to — so it rides the registry entry rather than the registry, and this is
-	 * the one line where the two halves become the catalog every read then works over.
-	 */
-	private toolsOf(entry: OpenSession): ToolRegistry {
-		return registryView(this.tools, entry.localTools);
-	}
-
-	/**
-	 * The approval map in force: the workspace's settings with this session's own choices over them.
+	 * The approval map in force: the directory's settings with this session's own choices over them.
 	 *
 	 * The single read point for the gate, the snapshot, and the prompt — all three answer the same
 	 * question, so none of them may reach past this to the settings alone. The session's own
-	 * half is the recorded `tool_config` choice, derived with the tool set it was written beside.
+	 * half is the recorded choice, read off the `.json` snapshot beside the tool set it was written
+	 * beside.
 	 */
 	getApprovals(id: string): Record<ToolApprovalKey, boolean> {
 		const state = this.sessionManager.stateOf(id);
@@ -1403,11 +1429,12 @@ export class Agent {
 	): Promise<void> {
 		const scope: RunScope = {
 			partial: undefined,
+			model: undefined,
 			// The one user message the store already holds is the one that started the run: it is written
 			// before the engine runs, so the engine's own echo of it must not be recorded twice. A drain
 			// stamps the messages it writes for the same reason — see {@link Agent.drainTranscribed}.
 			writtenAhead: start.prompt === undefined ? [] : [start.prompt.timestamp],
-			pendingToolResultViews: new Map(),
+			suspended: false,
 			retrying: false,
 			retryAttempt: 0,
 			retryMaxAttempts: 0,
@@ -1440,9 +1467,13 @@ export class Agent {
 			// stop looking for one — is on a queue nothing will drain, so it is dropped here rather than
 			// carried into a later run. The ordinary end path has already emptied both lists by this
 			// point, which is what makes this a no-op for a run that ended the way it should.
-			this.dropQueued(entry);
+			//
+			// A suspended run is the exception: its queues are what the recovery run drains, and the
+			// message someone typed while this run was streaming is theirs, not this run's to bin.
+			if (!scope.suspended) this.dropQueued(entry);
 			// The depth the run is leaving behind, said before the slot is dropped: after this the depth
-			// is zero and the baseline is the idle one.
+			// is the idle one — zero, except for a parked run, whose queue the next one inherits and
+			// whose depth stays up so the window keeps showing what is still owed an answer.
 			this.emitQueueUpdate(entry);
 			entry.run = undefined;
 			// The run is not over until the engine's `runEngine` resolves — after every awaited listener for
@@ -1469,7 +1500,8 @@ export class Agent {
 	 * {@link Agent.dispatchEvent} — which persists it and fans it out — the per-turn fill is
 	 * {@link Agent.prepareRequest}, and both take points drain this session's own queues. Nothing here
 	 * outlives the stack, which is why the model the run is on is a local rather than a field: it is
-	 * the one thing a request may replace, and a member would hand it to a second session's run.
+	 * the one thing a request may replace, and a member would hand it to a second session's run. What
+	 * crosses the stack is a copy on the run's own scope, for the snapshot that reads it mid-delta.
 	 *
 	 * A run either starts on a prompt — which enters the transcript at the first drain point, exactly
 	 * where a steered message enters on a later turn — or resumes: it opens on the transcript as it
@@ -1497,18 +1529,20 @@ export class Agent {
 		entry.runtime.activeRun = { promise, resolve: settle, abortController };
 		const signal = abortController.signal;
 
-		// The model the run is on. Seeded from the selection as it stands; `prepareRequest` answers with
+		// The model the run is on. Seeded from the choice as it stands; `prepareRequest` answers with
 		// the one each request is actually sent with, so a synthesized failure still names a real model
-		// even when the run dies before its first request.
-		let model: Model = resolvedModel(entry.modelSelection, transport);
-		const hooks = this.toolCallHooks(scope, state, entry);
+		// even when the run dies before its first request. The slot on the scope is what a snapshot
+		// outside this stack reads instead of going back to the catalog.
+		let model: Model = modelFor(entry.modelSelection, this.models.list(), transport);
+		scope.model = model;
+		const hooks = this.toolCallHooks(state);
 		const emit: AgentEventSink = (event) => this.dispatchEvent(scope, state, entry, event);
 
 		try {
 			const newMessages: Message[] = [];
 			let currentContext: AgentContext = {
 				messages: [...this.sessionManager.buildSessionContext(state).messages],
-				tools: [...this.toolsOf(entry).active(this.toolStateOf(state, entry), this.runContext(entry))],
+				tools: [...this.tools.active(this.toolStateOf(state, entry), this.runContext(entry))],
 			};
 
 			await emit({ type: "agent_start" });
@@ -1535,6 +1569,9 @@ export class Agent {
 				suspendedAtEntry = recovered.suspended === true;
 			}
 			if (suspendedAtEntry) {
+				// The recovery pass re-ran the granted call and the gate refused it again, so this run
+				// ends the same way the last one did — and keeps the queues for the same reason.
+				scope.suspended = true;
 				await emit({ type: "agent_end", messages: newMessages });
 				return newMessages;
 			}
@@ -1580,7 +1617,18 @@ export class Agent {
 					if (requestUpdate) {
 						currentContext = requestUpdate.context ?? currentContext;
 						model = requestUpdate.model ?? model;
+						// The model this request goes out with is the one a snapshot taken during it
+						// should report, and the one the meter measures the answer against.
+						scope.model = model;
 					}
+
+					// A run can be cut short while its request is being built — an abort from `close()`,
+					// a stop from the window — and `prepareRequest` has awaits of its own (a compaction
+					// summary, the project instructions read off disk). A request issued after that point
+					// would go out on a dead signal: nothing it returns could be used, and a transport is
+					// free to answer an already-aborted call however it likes. Ending here is the same
+					// ending an abort mid-stream gets, arrived at one step earlier.
+					if (signal?.aborted === true) throw signal.reason ?? new Error("The run was aborted");
 
 					// Stream assistant response.
 					const message = await streamAssistantResponse(currentContext, model, signal, emit);
@@ -1607,6 +1655,7 @@ export class Agent {
 						toolResults.push(...executedToolBatch.messages);
 						hasMoreToolCalls = !executedToolBatch.terminate;
 						suspended = executedToolBatch.suspended === true;
+						if (suspended) scope.suspended = true;
 
 						for (const result of toolResults) {
 							currentContext.messages.push(result);
@@ -1657,15 +1706,16 @@ export class Agent {
 	 * The two tool-call gates, as this run's own pair.
 	 *
 	 * The batch helpers are file-level and hold no session, so the run hands them the seams it needs:
-	 * the session's `before_tool` gate and its `after_tool` one, each closed over the run's transients
-	 * so a hook's decision lands on this run's own scope and on no other's.
+	 * the session's `before_tool` gate and its `after_tool` one. An `after_tool` rewrite is final —
+	 * the message is written with exactly the content the hooks left — so neither gate closes over the
+	 * run's transients any more; the session id is all either one reads through.
 	 */
-	private toolCallHooks(scope: RunScope, state: Session, entry: OpenSession): ToolCallHooks {
+	private toolCallHooks(state: Session): ToolCallHooks {
 		const sessionId = state.sessionId;
 		return {
 			beforeToolCall: async ({ toolCall, args }) => this.beforeTool(sessionId, toolCall.id, toolCall.name, args),
 			afterToolCall: async ({ toolCall, result, isError }) =>
-				this.afterTool(sessionId, scope, toolCall.id, toolCall.name, result, isError),
+				this.afterTool(sessionId, toolCall.id, toolCall.name, result, isError),
 		};
 	}
 
@@ -1722,40 +1772,45 @@ export class Agent {
 		state: Session,
 		entry: OpenSession,
 	): Promise<AgentRequestUpdate> {
-		// The model is re-derived from the live row before anything else reads it, because the
-		// compaction decision below is measured against its context window and a threshold taken from
-		// the window the row had a moment ago would compact the wrong transcript. This is the whole of
-		// "an edit takes effect without reopening anything": the endpoint, the wire id, the window, and
-		// the key are all read here rather than captured when the session was assembled. A row that is
-		// gone — deleted, or renamed under a session that was using it — leaves the selection as it is,
-		// and `unconfiguredStream` is what answers for that.
-		this.adoptCurrentRow(entry);
+		// The model this request is made with, built from the live row before anything else reads it,
+		// because the compaction decision below is measured against its context window and a threshold
+		// taken from a window the row had a moment ago would compact the wrong transcript. This is the
+		// whole of "an edit takes effect without reopening anything": the endpoint, the wire id, the
+		// window, and the key are read here, from the catalog, and never captured when the session was
+		// assembled. A row that is gone — deleted, or renamed under a session that was using it —
+		// leaves the choice as it is, and `unconfiguredStream` is what answers for that.
+		const catalog = this.models.list();
+		const model = modelFor(entry.modelSelection, catalog, transport);
 		// The choice this request is made with reaches the transcript here, at the moment a request
 		// is built from it — so a model or a level the user moved and never sent with is not in the
 		// file at all. It runs before the compaction decision below, which measures the prompt
 		// against this model's window.
-		this.recordSelection(state, entry);
+		this.recordSelection(state, entry, catalog);
 		// One pass decides both what the request carries and whether it has to be summarized: the
 		// trigger, the clearing of stale tool results, and the summary all read the same entries, so the
 		// decision and the request cannot disagree about how large the prompt is.
-		const entries = await this.compactFor(state, entry, this.sessionManager.buildContextEntries(state), Date.now(), signal, transport);
-		// The views come from the same selection of entries the request is built from, so what the
-		// model is shown and what the request carries cannot disagree about a rewrite.
-		const views = toolResultViewsOf(entries);
+		const entries = await this.compactFor(state, entry, this.sessionManager.buildContextEntries(state), Date.now(), signal, model);
 		// The prompt is rebuilt here, not remembered: `applyConfig` can move the approval set and
 		// `setActiveTools` the tool set, and the model must be told about both on the next request.
 		// Both are derived from the ledger at this moment, so a choice that just landed is what the
 		// prompt describes.
 		const toolState = this.toolStateOf(state, entry);
+		// The project instructions are read here, per request, rather than taken from the entry: an
+		// edit to a file on disk is meant to reach the very next request, the same way an edit to a
+		// model row does, and the walk is a handful of stats. What it costs is a prompt that can change
+		// between two requests of one run — the tool set already can, for the same reason.
+		const agentsMd = await loadAgentsMd(entry.workDirAbsPath);
 		const prompt = this.promptBuilder(
-			entry.workspace,
-			entry.agentsMd,
+			entry.workDirAbsPath,
+			agentsMd,
 			toolState.activeToolNames,
 			this.approvalsOf(state, entry),
 		);
+		// The tool results the request carries are read replay-side (`buildContextEntries` applied the
+		// ledger's own view records), so there is no per-request pass over them: a tool result in the
+		// ledger is already the version the model is served.
 		const injected = { sessionId, messages: messagesOf(entries), systemPrompt: prompt };
 		const rewritten = await this.hooks.apply("context", injected);
-		const messages = this.forModel(rewritten?.messages ?? injected.messages, views, entry, sessionId);
 		// The leading system message is replaced rather than appended to, and every other system
 		// message is dropped: the prompt is rebuilt whole on this request, so a second one would
 		// describe a state that is already gone. A hook that wants to change the prompt returns
@@ -1763,11 +1818,11 @@ export class Agent {
 		const system = createSystemMessage(rewritten?.systemPrompt ?? injected.systemPrompt);
 		// A compaction checkpoint is already the user turn it stands for — `sessionEntryToContextMessages`
 		// wraps the summary in tags — so the transcript goes to the provider as it is.
-		const conversation = pairLateToolResults(messages.filter((message) => message.role !== "system"));
+		const conversation = pairLateToolResults((rewritten?.messages ?? injected.messages).filter((message) => message.role !== "system"));
 		return {
-			// Built here, from the selection this request just filled: run-local, used for the one
+			// Built above, from the row this request is made with: run-local, used for the one
 			// request, dropped.
-			model: resolvedModel(entry.modelSelection, transport),
+			model,
 			context: {
 				...context,
 				messages: system === undefined ? conversation : [system, ...conversation],
@@ -1775,93 +1830,43 @@ export class Agent {
 				// derived above. The engine declares it on the request (`toToolDeclaration`) rather than
 				// reading it out of the transcript, so a tool switched on mid-session reaches the model on
 				// the next request and the two cannot drift.
-				tools: this.toolsOf(entry).active(toolState, this.runContext(entry)),
+				tools: this.tools.active(toolState, this.runContext(entry)),
 			},
 		};
 	}
 
 	/**
-	 * The value objects this request's tools are built against: the workspace, read off the entry's
-	 * assembly, and the bash timeouts, read off the settings the same way. Per request, like the tool
-	 * list itself — nothing here outlives the request that carries it.
+	 * The value objects this request's tools are built against: the working directory, read off the
+	 * entry's assembly, and the bash timeouts, read off the settings the same way. Per request, like
+	 * the tool list itself — nothing here outlives the request that carries it.
 	 */
 	private runContext(entry: OpenSession): ToolRunContext {
-		return { workspace: entry.workspace, bash: getBashSettings(entry.settings) };
+		return { workDirAbsPath: entry.workDirAbsPath, bash: getBashSettings(entry.settings) };
 	}
 
 	/**
-	 * Lay the live row the selection names over the selection, if that row still exists.
-	 *
-	 * A row is the user's to edit, so this runs before every request: the key, the endpoint, the wire
-	 * id, the window, and the compat overrides are all read fresh, which is what `Model.apiKey` and
-	 * `Model.compat` riding on the request object depend on. The fill is `fillModel` — idempotent, in
-	 * place — so a corrected key, a moved endpoint and a resized window all reach the next request
-	 * with nothing rebuilt, and the level, the context meter, and the reported ref are about the model
-	 * the request is actually made with.
-	 *
-	 * A row that is gone — deleted, or renamed under a session that was using it — leaves the bag as it
-	 * last was, and `unconfiguredStream` is what answers for that, in the transport where the "no row"
-	 * answer has always lived.
-	 *
-	 * Nothing is recorded here: {@link Agent.recordSelection} does that once the model is final, because a row
-	 * read mid-flight is not yet what the request went out with.
-	 */
-	private adoptCurrentRow(entry: OpenSession): void {
-		try {
-			fillModel(this.models.list(), entry.modelSelection);
-		} catch {
-			// No row answers the name any more. The bag keeps what it last had, which is never sent: the
-			// transport's own lookup answers `unconfiguredStream` first.
-		}
-	}
-
-	/**
-	 * Write what this request is being made with into the transcript, once per move.
+	 * Write what this request is being made with into the session, once per move.
 	 *
 	 * The model and the level are recorded here rather than where the user chose them, because these
-	 * entries are the transcript's account of what answered a turn: a row the user picked and never
+	 * are the transcript's account of what answered a turn: a row the user picked and never
 	 * sent with answered nothing, and a level that was never asked at was never in force. Both guards
-	 * key on what the branch already says — read from the ledger, not cached, so the
-	 * baseline is the file's own and cannot drift from it — so a run of turns on one selection costs
-	 * one entry.
+	 * key on what the session already records — read from the ledger, not cached, so the
+	 * baseline is the snapshot's own and cannot drift from it — so a run of turns on one selection costs
+	 * one write.
 	 *
-	 * Only the wire id moves a `model_change`: a rename is the same model under another name, and the
-	 * refs built from the old name are already accounted for as a rename.
+	 * The catalog is the caller's, so this and the model the request is built with read the file once
+	 * between them. A choice no row answers records nothing: there is no wire id to write, and the
+	 * request it belongs to is about to be refused by the transport rather than sent.
 	 */
-	private recordSelection(state: Session, entry: OpenSession): void {
+	private recordSelection(state: Session, entry: OpenSession, catalog: readonly ModelConfig[]): void {
 		const recorded = this.sessionManager.getRecordedSettings(state);
-		if (entry.modelSelection.id !== recorded.model?.modelId) {
-			const entryId = this.sessionManager.appendModelChange(state, entry.modelSelection.name!, entry.modelSelection.id!);
-			this.emit(entry, { type: "entry_appended", entryId, kind: "model_change" });
+		const row = rowFor(entry.modelSelection, catalog);
+		if (row !== undefined && row.id !== recorded.model?.modelId) {
+			this.sessionManager.setModel(state, row.name, row.id);
 		}
 		const level = normalizeThinkingLevel(entry.modelSelection.thinkingLevel) as ThinkingLevel;
 		if (level !== recorded.thinkingLevel) {
-			const entryId = this.sessionManager.appendThinkingLevelChange(state, level);
-			this.emit(entry, { type: "entry_appended", entryId, kind: "thinking_level_change" });
-		}
-	}
-
-	/**
-	 * Put the session back on the model and level the branch now in force recorded.
-	 *
-	 * The same argument as the branch move's tool report: which model answered and how hard it was
-	 * asked are facts about where the leaf is, so moving the leaf moves them, and a session that
-	 * carried the choice from the branch it left would be one session with two answers. The precedence
-	 * is assembly's — the branch's recorded level, else nothing asked for — so a move and a reopen
-	 * of the same file land in the same place.
-	 *
-	 * The branch's choices are the seed now, and the row's facts reach the bag with the same fill a
-	 * request would run, so a snapshot taken before the next request already reads the branch's model.
-	 * There is no baseline to update: {@link Agent.recordSelection} reads what the branch says each time,
-	 * which is what keeps a move from being recorded twice.
-	 */
-	private applyBranchSelection(state: Session, entry: OpenSession): void {
-		const recorded = this.sessionManager.getRecordedSettings(state);
-		const userModel = this.models.list().find((userModel) => userModel.name === (recorded.model?.name ?? entry.modelSelection.name));
-		if (userModel !== undefined) {
-			entry.modelSelection.name = userModel.name;
-			entry.modelSelection.thinkingLevel = recorded.thinkingLevel ?? entry.modelSelection.thinkingLevel;
-			fillModel(this.models.list(), entry.modelSelection);
+			this.sessionManager.setThinkingLevel(state, level);
 		}
 	}
 
@@ -2025,61 +2030,34 @@ export class Agent {
 		if (entry.run !== undefined) throw new Error("A run is in flight: the branch cannot move under it");
 
 		const leafId = descend ? this.sessionManager.getBranchTip(state, entryId) : entryId;
-		const previousName = entry.modelSelection.name!;
-		const previousLevel = normalizeThinkingLevel(entry.modelSelection.thinkingLevel);
 		this.sessionManager.branch(state, leafId);
-		this.applyBranchSelection(state, entry);
-		this.emitBranchToolConfig(state, entry);
-		// Reported because neither field is in the branch payload, and every stream other than the one
-		// that asked is holding a snapshot taken before the move.
-		this.emitConfigChanged(entry, {
-			...(entry.modelSelection.name === previousName ? {} : { model: entry.modelSelection.name! }),
-			...(normalizeThinkingLevel(entry.modelSelection.thinkingLevel) === previousLevel
-				? {}
-				: { thinkingLevel: normalizeThinkingLevel(entry.modelSelection.thinkingLevel) }),
-		});
+		// No config report rides the move: the model, the level, and the tool choices are the
+		// session's own values now (the `.json` snapshot), so a leaf move changes none of them —
+		// unlike the days when they were replayed off the branch's entries.
 		this.emit(entry, { type: "branch_changed", leafId });
 		this.publish(state, entry);
 		return leafId;
 	}
 
 	/**
-	 * Report the choices the branch now in force recorded.
-	 *
-	 * Moving the leaf is the one moment a session's own config can be wrong — except there is nothing
-	 * to move: the choice is derived from the ledger on every read, so a leaf that now stands on
-	 * another branch's entries is already answered by them. A branch that recorded nothing falls back
-	 * on the global default the settings files name — or the assembly's seed when they name none —
-	 * which is what a session that never chose runs on. Only a recorded `tool_config` can name
-	 * something else, and every move ends on the branch's answer rather than the previous one's.
-	 *
-	 * What is left is the report: every stream other than the one that asked is holding a snapshot
-	 * taken before the move, and neither map is in the branch payload. Both travel whole: this is the
-	 * branch's state, not a delta, and a client applies either shape.
-	 */
-	private emitBranchToolConfig(state: Session, entry: OpenSession): void {
-		this.emitConfigChanged(entry, { approvals: this.approvalsOf(state, entry), tools: this.toolStateOf(state, entry).activeToolNames });
-	}
-
-	/**
 	 * Narrow the tools the model may call. An unknown name throws and leaves the session as it was.
 	 *
-	 * The change is recorded as one `tool_config` entry and takes effect on the next request: the
-	 * fill chain derives the choice from the ledger with every request, so the model is told about
+	 * The change is recorded on the session's `.json` snapshot and takes effect on the next request:
+	 * the fill chain derives the choice from the ledger with every request, so the model is told about
 	 * the narrowed set when the next prompt is built.
 	 */
 	setActiveTools(id: string, names: string[]): void {
 		const state = this.sessionManager.stateOf(id);
 		const entry = this.entryOf(id);
 		const previous = this.toolStateOf(state, entry).activeToolNames;
-		const known = new Set(this.toolsOf(entry).names());
+		const known = new Set(this.tools.names());
 		const unknown = names.filter((name) => !known.has(name));
 		if (unknown.length > 0) {
 			throw new Error(`Unknown tool${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
 		}
 		if (names.length === previous.length && names.every((name, index) => name === previous[index])) return;
 
-		this.sessionManager.appendToolConfig(state, [...names], this.approvalsOf(state, entry));
+		this.sessionManager.setToolConfig(state, [...names], this.approvalsOf(state, entry));
 		this.publish(state, entry);
 		this.emitConfigChanged(entry, { tools: [...names] });
 	}
@@ -2109,13 +2087,12 @@ export class Agent {
 		const userModel = this.models.list().find((userModel) => userModel.name === name);
 		if (userModel === undefined) throw new Error(`Unknown model: ${name}`);
 
-		// The seed is the client's selection, written as it arrived: the row's name, and the level the
-		// caller named or the one already in force. The row's facts are laid in with the same fill a
-		// request would run, so a snapshot taken before that request already reads the row it names —
-		// and the per-request fill re-derives all of it, so an edit between the two still wins.
+		// The choice is the client's selection, written as it arrived: the row's name, and the level
+		// the caller named or the one already in force. Nothing of the row follows it — a snapshot
+		// taken before the next request already reads the row it names, because every build looks the
+		// name up in the catalog, and an edit to that row wins without anything here being refreshed.
 		entry.modelSelection.name = userModel.name;
 		entry.modelSelection.thinkingLevel = selection.thinkingLevel ?? normalizeThinkingLevel(entry.modelSelection.thinkingLevel);
-		fillModel(this.models.list(), entry.modelSelection);
 
 		this.publish(state, entry);
 		this.emitConfigChanged(entry, {
@@ -2130,8 +2107,8 @@ export class Agent {
 	 * Update settings and persist them. Approval changes take effect on the next tool call.
 	 *
 	 * The two halves of a patch live in different places. Approval is session-scoped: it merges into
-	 * this session's own choices and is recorded as one `tool_config` entry, so another session over
-	 * this workspace is untouched. The queue modes go to the settings bag, which owns both the
+	 * this session's own choices and is recorded on its `.json` snapshot, so another session over
+	 * this directory is untouched. The queue modes go to the settings bag, which owns both the
 	 * merged value and the file it goes in — and onto the runtime's queues, which read the mode at
 	 * each drain.
 	 *
@@ -2144,10 +2121,10 @@ export class Agent {
 		const entry = this.entryOf(id);
 		const previousApprovals = this.approvalsOf(state, entry);
 		if (patch.approval !== undefined) {
-			// The entry records the whole map in force — the settings with this session's choice over
+			// The snapshot records the whole map in force — the settings with this session's choice over
 			// them — which is the shape every read of the ledger answers from.
 			const approvals = { ...previousApprovals, ...patch.approval };
-			this.sessionManager.appendToolConfig(state, this.toolStateOf(state, entry).activeToolNames, approvals);
+			this.sessionManager.setToolConfig(state, this.toolStateOf(state, entry).activeToolNames, approvals);
 		}
 		applySettings(entry.settings, patch.approval === undefined ? patch : { ...patch, approval: undefined });
 		entry.runtime.steeringQueue.mode = getSteeringMode(entry.settings);
@@ -2197,8 +2174,8 @@ export class Agent {
 	 * pairs the answer with the call by id — a grant re-runs the call through the gate and the tool
 	 * itself, a denial closes it with the sentence a press of "deny" writes — and the run continues
 	 * from there, so the model sees the call resolved and carries on in the same run. A grant also
-	 * records the session's approval choice for that tool — the tool stops asking — as one
-	 * `tool_config` entry, the same move a config patch makes: the recovery pass re-runs the call
+	 * records the session's approval choice for that tool — the tool stops asking — on the session's
+	 * `.json` snapshot, the same move a config patch makes: the recovery pass re-runs the call
 	 * through the gate, and the gate lets through only a tool the map no longer gates.
 	 *
 	 * An id nothing is waiting on is ignored: the caller checked first, and answered it. A dangling
@@ -2218,7 +2195,7 @@ export class Agent {
 			// The grant is the session's own choice for this tool, recorded as the whole map in force
 			// with the tool turned off — the same move a config patch makes.
 			const approvals = { ...this.approvalsOf(state, entry), [call.toolName as ToolApprovalKey]: false };
-			this.sessionManager.appendToolConfig(state, this.toolStateOf(state, entry).activeToolNames, approvals);
+			this.sessionManager.setToolConfig(state, this.toolStateOf(state, entry).activeToolNames, approvals);
 		}
 		// Said before the run starts: the choice is the session's own and lands now, while the call
 		// itself stays dangling until the run's recovery pass closes it.
@@ -2235,6 +2212,10 @@ export class Agent {
 	 *
 	 * Only an idle session closes anything: a call that dangles mid-run is a result the engine itself is
 	 * about to write, and closing it here would write the answer twice.
+	 *
+	 * The queues go with it. A suspended run keeps them because the recovery run it is waiting for is
+	 * what drains them; this is the notice that no recovery run is coming, so nothing would ever take
+	 * what was accepted — and a depth nobody will lower is a session `settle` waits on forever.
 	 */
 	denyAllApprovals(id: string, reason: string): void {
 		const state = this.sessionManager.stateOf(id);
@@ -2243,6 +2224,8 @@ export class Agent {
 		const dangling = this.danglingApprovals(state);
 		if (dangling.length === 0) return;
 		for (const call of dangling) this.appendDanglingResult(state, entry, call, { approved: false, reason });
+		this.dropQueued(entry);
+		this.emitQueueUpdate(entry);
 		this.publish(state, entry);
 	}
 
@@ -2293,6 +2276,11 @@ export class Agent {
 	 * transcript is complete" must not resolve on. {@link Agent.close} stops the run first, which is
 	 * what makes it terminate.
 	 *
+	 * A run the gate ended is settled, not awaited: its queue is kept for the recovery run, and
+	 * `stillBusy` reads a dangling call as "a question, not work" — the same reading {@link
+	 * Agent.close} makes when it leaves a parkable call unanswered for a person. Without that, a
+	 * parked session would look busy to every caller that settles one — the hub's reap above all.
+	 *
 	 * A pending retry is part of the run too, so it is waited for rather than resolved past: the
 	 * retry runs inside the stream the engine is awaiting, which keeps the agent non-idle for the whole
 	 * backoff, and the condition is here so that stays true if that ever changes.
@@ -2301,7 +2289,9 @@ export class Agent {
 		const entry = this.entryOf(id);
 		// Read through a closure: the run slot is reassigned across the awaits below, and a narrow
 		// taken before them would tell the checker the slot is always empty here.
-		const stillBusy = (): boolean => entry.runtime.followUpQueue.size > 0 || entry.run?.retrying === true;
+		const stillBusy = (): boolean =>
+			(entry.runtime.followUpQueue.size > 0 && this.danglingApprovals(this.sessionManager.stateOf(id)).length === 0) ||
+			entry.run?.retrying === true;
 		for (;;) {
 			await (entry.runtime.activeRun?.promise ?? Promise.resolve());
 			// The run drops its own slot a microtask after the idle promise resolves; wait for that too,
@@ -2340,7 +2330,9 @@ export class Agent {
 		transport?: ChatTransport,
 	): Promise<readonly SessionEntry[]> {
 		const state = this.sessionManager.stateOf(id);
-		return this.compactFor(state, this.entryOf(id), entries, now, signal, transport);
+		const entry = this.entryOf(id);
+		const model = modelFor(entry.modelSelection, this.models.list(), transport);
+		return this.compactFor(state, entry, entries, now, signal, model);
 	}
 
 	/**
@@ -2374,10 +2366,9 @@ export class Agent {
 		entry: OpenSession,
 		entries: readonly SessionEntry[],
 		now: number,
-		signal?: AbortSignal,
-		transport?: ChatTransport,
+		signal: AbortSignal | undefined,
+		model: Model,
 	): Promise<readonly SessionEntry[]> {
-		const model = resolvedModel(entry.modelSelection, transport);
 		const threshold = compactionThresholdFor(model.contextWindow);
 		if (!shouldCompact(messagesOf(entries), threshold)) return entries;
 
@@ -2387,15 +2378,14 @@ export class Agent {
 		const cleared = this.clearStaleToolResults(state, entry, trimmed, now);
 		if (!shouldCompact(messagesOf(cleared), threshold)) return cleared;
 
-		// The one completion compaction makes: the session's own model, with the summary instructions.
-		// It goes over the model a turn goes over — the selection, filled and built into a request
-		// object here — so the summary carries the same key, endpoint, and window as the conversation it
-		// summarizes rather than reaching for a second configuration. Built per call, because the
-		// transport it goes over is the run's own.
+		// The one completion compaction makes: the same model the turn is on, with the summary
+		// instructions. It is the caller's model — the one this request is built from — so the summary
+		// carries the same key, endpoint, and window as the conversation it summarizes rather than
+		// reaching for a second configuration.
 		const summarize: Summarize = async (request) => {
 			// The same absence a turn meets: a session with no row answers with the sentence that says what
 			// to add, rather than sending a summary request to a placeholder endpoint.
-			if (this.models.list().find((userModel) => userModel.name === entry.modelSelection.name) === undefined) {
+			if (this.models.list().find((userModel) => userModel.name === model.name) === undefined) {
 				return unconfiguredStream(model).result();
 			}
 			const messages: Message[] = [
@@ -2405,7 +2395,7 @@ export class Agent {
 				.stream({ messages, system: createSystemMessage(request.systemPrompt) }, {
 					// The row's key, said here rather than only carried on the model: this is the one call
 					// that does not travel through the engine, and the engine is what copies the key into options.
-					apiKey: entry.modelSelection.apiKey,
+					apiKey: model.apiKey,
 					maxTokens: request.maxTokens,
 					// A one-off summary is never sent again, so paying to cache it would buy nothing.
 					cacheRetention: "none",
@@ -2457,7 +2447,8 @@ export class Agent {
 	 *
 	 * This is the cheapest step compaction has: no request, and no clock to wait out — the bodies a
 	 * `write` or an `edit` carried are already in the files they changed, so the view loses nothing the
-	 * workspace does not hold. It is also the reason this runs before the clear rather than beside it:
+	 * the files they changed, so the view loses nothing the machine does not hold. It is also the
+	 * reason this runs before the clear rather than beside it:
 	 * the clear needs an expired cache to be worth its cache invalidation, and this does not, because
 	 * when the transcript is over the trigger the next request is in trouble whatever the cache says.
 	 */
@@ -2556,16 +2547,16 @@ export class Agent {
 	}
 
 	/**
-	 * Run the `after_tool` hooks and keep both halves of their answer.
+	 * Run the `after_tool` hooks. Their answer is final.
 	 *
-	 * The engine builds the transcript message from what this returns, so the hooks' content goes back to
-	 * it: that is what the model is shown for this turn. {@link Agent.transcriptMessage} then records the
-	 * tool's own output instead, because a bound — or any rewrite — is about what the model sees, and
-	 * the file must still hold what the tool produced.
+	 * The engine builds the transcript message from what this returns, and the message is written with
+	 * exactly that content: a rewrite is a decision about the one version of the result that will ever
+	 * exist, made the moment the result does. A hook that means to bound a result archives the full
+	 * text itself (`archiveToolResult`, `context/spill.ts`) and puts the path in what it returns; the
+	 * write boundary's backstop below still catches a result nobody bounded.
 	 */
 	private async afterTool(
 		sessionId: string,
-		scope: RunScope,
 		toolCallId: string,
 		toolName: string,
 		result: AgentToolResult<unknown>,
@@ -2579,62 +2570,7 @@ export class Agent {
 			isError,
 		});
 		if (decided?.content === undefined) return undefined;
-		scope.pendingToolResultViews.set(toolCallId, { stored: result.content, shown: decided.content });
 		return { content: decided.content };
-	}
-
-	/**
-	 * The message the store records for a tool result.
-	 *
-	 * The engine hands back the content the hooks produced; the store keeps what the tool actually
-	 * returned, so bounding the model's context can never lose the tool's output.
-	 */
-	private transcriptMessage(scope: RunScope, message: Message): Message {
-		if (message.role !== "toolResult") return message;
-		const view = scope.pendingToolResultViews.get(message.toolCallId);
-		return view === undefined ? message : { ...message, content: view.stored };
-	}
-
-	/**
-	 * Write the shown half of a rewritten result as its own entry, now that the stored half is in the
-	 * file.
-	 *
-	 * The entry follows its toolResult message in the log — as its child, and so on every replay of
-	 * the branch — which is both the order the two facts happened in and the order the red line asks
-	 * the replay to keep. From here on the ledger is the only source of the view: the next request
-	 * reads it back through `toolResultViewsOf`, so the pending copy is dropped as it is written out.
-	 */
-	private recordToolResultView(scope: RunScope, state: Session, message: Message): void {
-		if (message.role !== "toolResult") return;
-		const view = scope.pendingToolResultViews.get(message.toolCallId);
-		if (view === undefined) return;
-		scope.pendingToolResultViews.delete(message.toolCallId);
-		this.sessionManager.appendToolResultView(state, message.toolCallId, view.shown);
-	}
-
-	/**
-	 * The messages the provider is sent.
-	 *
-	 * A tool result a hook rewrote is served back as the hook left it, so the model sees the bounded
-	 * version of a result the transcript holds in full. The views are the ledger's — replayed from the
-	 * `tool_result_view` entries of the same selection of entries the request is built from — so a
-	 * rewrite outlives the process that made it, and a clear takes the view with the result it emptied.
-	 * A result too large for the context is served head and tail with the full text archived in the
-	 * workspace (`context/spill.ts`) — the backstop for a tool that does not bound or paginate its own
-	 * output, and the one that survives a restart, because the archive path is derived from the session
-	 * and the call id. Anything else oversized is clipped here: a result with no view to replay and no
-	 * archive is kept out of the context by the budget.
-	 */
-	private forModel(messages: readonly Message[], views: ReadonlyMap<string, ToolResultView>, entry: OpenSession, sessionId: string): Message[] {
-		return messages.map((message) => {
-			if (message.role !== "toolResult") return message;
-			const view = views.get(message.toolCallId);
-			if (view !== undefined) return { ...message, content: view.shown };
-			const spilled = spillOversizedToolResult(entry.workspace, sessionId, message.toolName, message.toolCallId, message.content);
-			if (spilled !== undefined) return { ...message, content: spilled };
-			const content = boundToolContent(message.content);
-			return content === undefined ? message : { ...message, content };
-		});
 	}
 
 	/**
@@ -2677,17 +2613,21 @@ export class Agent {
 			// Two user messages the store already holds echo through here: the one that started the
 			// run, written before the engine ran, and a message the engine just drained off a queue — the
 			// drain wrote it, at the moment the run took it. Both are stamped in `writtenAhead`, so
-			// their echoes skip; everything else the engine announces is written here.
+			// their echoes skip; everything else the engine announces is written here as it stands —
+			// the content is final by the time it lands (the write boundary is the last rewrite).
 			if (!isOptimisticEcho(scope, event.message)) {
-				this.appendMessage(state, entry, this.transcriptMessage(scope, event.message));
-				this.recordToolResultView(scope, state, event.message);
+				this.appendMessage(state, entry, event.message);
 			}
 		}
-		if (event.type === "agent_end") {
+		if (event.type === "agent_end" && !scope.suspended) {
 			// A message still queued is one the run never reached — an abort, a failure, a prompt that
 			// arrived in the moment the engine stopped looking. Nothing will drain it, and the send
 			// contract is fire-and-forget: it goes with the run, and the queues empty so the depth
 			// falls to zero, which is what `settle()` waits on. See {@link Agent.dropQueued}.
+			//
+			// A run the gate ended is the one exception, and it is checked here rather than only in
+			// `startRun`'s `finally` because this fires first: the recovery run drains what this one
+			// leaves behind, so the depth stays up and the window keeps showing it.
 			this.dropQueued(entry);
 		}
 		this.emit(entry, event);
@@ -2755,12 +2695,12 @@ export class Agent {
 		// gained a branch point there, so the windows are told where the leaf is, exactly as a move does:
 		// their branch points came from a snapshot and this append changed them.
 		// The count is the raw child count, so a `leaf` entry — the record a branch move writes — counts
-		// too, the same way a `model_change` written in front of a message already does. The cost is one
+		// too. The cost is one
 		// extra full-snapshot frame that shows no extra branch point, which is harmless.
 		const parent = state.leafId;
 		const continued = parent !== null && this.sessionManager.getChildren(state, parent).length > 0;
 
-		const entryId = this.sessionManager.appendMessage(state, message);
+		const entryId = this.sessionManager.appendMessage(state, finalizeToolResult(state, entry, message));
 		if (continued) this.emit(entry, { type: "branch_changed", leafId: entryId });
 		this.emit(entry, { type: "entry_appended", entryId, kind: "message" });
 	}
@@ -2773,6 +2713,11 @@ export class Agent {
 	 * send contract is fire-and-forget: the message drops with the run rather than being stored
 	 * unasked, and the queues empty so the depth falls to zero — which is what `settle()` waits on —
 	 * and no later run inherits what this one never took.
+	 *
+	 * The one end that does not come here is the gate's: a suspended run keeps its queue for the
+	 * recovery run the answer starts, which drains it at its take points (`RunScope.suspended`). The
+	 * abandonment sweep is the exception to that exception — {@link Agent.denyAllApprovals} calls
+	 * this, because no recovery run is coming to take them.
 	 */
 	private dropQueued(entry: OpenSession): void {
 		entry.runtime.steeringQueue.clear();

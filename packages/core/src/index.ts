@@ -5,9 +5,9 @@ export {
 	AGENT_HOME,
 	APP_NAME,
 	clampContentWidth,
+	clampDirectoryPaging,
 	clampFontSize,
 	clampSidebarWidth,
-	clampWorkspacePaging,
 	DEFAULT_APPEARANCE,
 	DEFAULT_MODE_NAME,
 	DEFAULT_SETTINGS,
@@ -19,10 +19,10 @@ export {
 	SIDEBAR_WIDTH_RANGE,
 	settingsPath,
 	type AppearanceSettings,
+	type DirectoryPaging,
 	type ModeSettings,
 	type RetrySettings,
 	type Settings,
-	type WorkspacePaging,
 } from "./config.ts";
 export { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
 export {
@@ -53,7 +53,6 @@ export {
 	isClearedToolResult,
 	REFETCHABLE_TOOLS,
 } from "./context/clear-tool-results.ts";
-export { toolResultViewsOf, type ToolResultView } from "./context/tool-result-views.ts";
 export {
 	spillOversizedToolResult,
 	spillPathFor,
@@ -61,6 +60,7 @@ export {
 	SPILL_RESULT_CHARS,
 } from "./context/spill.ts";
 export {
+	archiveToolResult,
 	boundToolContent,
 	createHooks,
 	MAX_TOOL_RESULT_BYTES,
@@ -76,8 +76,8 @@ export {
 	isUnconfigured,
 	listModelOptions,
 	createModel,
-	fillModel,
-	resolvedModel,
+	modelFor,
+	rowFor,
 	DEFAULT_MODEL_NAME,
 	modelsPath,
 	NEW_MODEL_DEFAULTS,
@@ -85,11 +85,10 @@ export {
 	Model,
 	ModelConfigStore,
 	placeholderModel,
-	placeholderModelState,
 	thinkingLevelsFor,
 	unconfiguredStream,
+	type ModelChoice,
 	type ModelConfig,
-	type ModelState,
 	type ModelSource,
 	type ThinkingLevel,
 } from "./models.ts";
@@ -109,6 +108,7 @@ export {
 	type ConfigPatch,
 	type ConnectionItem,
 	type DiffLine,
+	type DirectoryGroup,
 	type FileDiff,
 	type ModelInput,
 	type ModelOption,
@@ -127,7 +127,6 @@ export {
 	type StreamId,
 	type ToolApprovalKey,
 	type UsageTotals,
-	type WorkspaceGroup,
 } from "./protocol.ts";
 export {
 	COMPACTION_SUMMARY_PREFIX,
@@ -137,9 +136,10 @@ export {
 export {
 	normalizePath,
 	resolvePath,
+	sessionDir,
+	sessionMetaPath,
 	sessionPath,
 	sessionsDir,
-	workspaceDir,
 } from "./session/paths.ts";
 export {
 	BRANCH_LABEL_MAX,
@@ -148,7 +148,7 @@ export {
 	createSession,
 	deriveTitle,
 	fillSession,
-	groupSessionsByWorkspace,
+	groupSessionsByDirectory,
 	inMemorySession,
 	newSession,
 	persistEntry,
@@ -156,25 +156,21 @@ export {
 	shortenTitle,
 	toSessionRef,
 	type CompactionEntry,
-	type JsonlEntry,
 	type TrimToolCallArgEntry,
 	type BranchOption,
 	type BranchPoint,
-	type ModelChangeEntry,
 	type ClearToolResultEntry,
-	type RenameEntry,
 	type SessionContext,
 	type SessionEntry,
 	type SessionEntryBase,
 	type SessionEntryMapById,
-	type SessionHeader,
+	type SessionMeta,
 	type SessionInfo,
 	type Session,
 	type MessageEntry,
-	type ThinkingLevelChangeEntry,
-	type ToolConfigEntry,
-	type ToolResultViewEntry,
-	type WorkspaceSessions,
+	type LeafEntry,
+	type UsageEntry,
+	type DirectorySessions,
 } from "./session/session-manager.ts";
 export { createSessionRuntime, type ActiveRun, type SessionRuntime } from "./session/session-runtime.ts";
 export { OpenSessions, createOpenSession, type OpenSession } from "./session/open-session.ts";
@@ -185,14 +181,14 @@ export {
 	getApprovals,
 	getAppearance,
 	getBashSettings,
+	getDirectoryNames,
 	getFollowUpMode,
-	getHiddenWorkspaces,
+	getHiddenDirectories,
 	getModel,
 	getRetrySettings,
 	getSettings,
 	getSteeringMode,
 	getTools,
-	getWorkspaceNames,
 	inMemorySettingsState,
 	isApprovalRequired,
 	SettingsManager,
@@ -210,14 +206,12 @@ export {
 	narrowToKnown,
 	toolDefinitions,
 	toolListFor,
-	SUBAGENT_TOOL_NAMES,
-	subagentToolState,
 	type ToolDefinition,
 	type ToolDefinitions,
 	type ToolRegistry,
 	type ToolRunContext,
 	type ToolState,
-	} from "./tools/index.ts";
+} from "./tools/index.ts";
 export {
 	DIFF_CONTEXT,
 	DIFF_MAX_ROWS,
@@ -226,10 +220,4 @@ export {
 	fileDiff,
 	type DiffOptions,
 } from "./tools/diff.ts";
-export {
-	createSubagentTools,
-	type SubagentControlParams,
-	type SubagentParams,
-	type SubagentToolDeps,
-} from "./tools/subagent.ts";
-export { defaultLauncher, Workspace, type Launcher } from "./workspace.ts";
+export { defaultLauncher, type Launcher } from "./shell.ts";
