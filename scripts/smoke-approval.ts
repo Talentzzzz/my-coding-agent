@@ -18,10 +18,9 @@
 //   5. a restart — a second process seeds no pending approval, and the transcript keeps the call.
 //
 // Two things pinned by `docs/notes.md` §一 and §二 are load-bearing here. The first section's
-// `new SessionHub({ workspaceRoot: root })` is deliberately left alone (the hub's option is `workDirAbsPath`):
-// that section drives a session it mounted itself and never asks the hub to resolve a workspace, and
-// "fixing" it would change the one thing the note says not to touch — it is also why this file stays
-// outside `npm run check`'s `include`. And no section may hold a session open through a *subscription*:
+// `new SessionHub({ workDirAbsPath: root })` names the hub's one directory option: that section
+// drives a session it mounted itself, so the hub never has to open one of its own. And no section
+// may hold a session open through a *subscription*:
 // a subscription takes no claim, so wherever a check needs the host to outlive a request it takes a
 // claim of its own (the bench claim), exactly as `smoke-stream` and `smoke-mux` do.
 import { mkdtemp, rm } from "node:fs/promises";
@@ -41,7 +40,7 @@ import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-
 import { mountSession } from "./mount-session.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
 import type { PendingApproval } from "@my-agent/core/protocol";
-import { inMemorySettingsState, type Agent, type ModelConfig, workspaceDir } from "@my-agent/core";
+import { inMemorySettingsState, type Agent, type ModelConfig, sessionDir } from "@my-agent/core";
 
 let failures = 0;
 
@@ -129,9 +128,6 @@ process.stdout.write("\na run parked at the gate is announced on the wire and an
 const roundTripWatchdog = deadline("the approval round trip", 60_000);
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-"));
-// `docs/notes.md` §一: left exactly as written, `workspaceRoot` included, even though `HubOptions`
-// declares `workDirAbsPath`. This section mounts the session by hand and never asks the hub to resolve a
-// workspace, which is the only reason it works — and why the note says not to "fix" it.
 const fake = createFakeTransport();
 // One response per call: a tool call, then the text that ends the run. Both are assistant messages —
 // `fakeToolCall` is a content block, not a response on its own.
@@ -140,7 +136,7 @@ fake.setResponses([
 	fakeAssistantMessage("done"),
 ]);
 // The hub's one orchestrator sends through the scripted transport, so every session it serves does.
-const hub = new SessionHub({ workspaceRoot: root, api: fake.api, modelsHome: join(root, "agent-home") });
+const hub = new SessionHub({ workDirAbsPath: root, api: fake.api, modelsHome: join(root, "agent-home") });
 hub.setModelConfigs(rows);
 // Mounted the way `SessionHub.open()` mounts one, so every request below claims through the real hub.
 const { id: sessionId } = await mountSession(hub, {
@@ -239,7 +235,7 @@ try {
 	clearTimeout(roundTripWatchdog);
 	await roundTrip.close();
 	await rm(root, { recursive: true, force: true });
-	await rm(workspaceDir(root), { recursive: true, force: true }).catch(() => {});
+	await rm(sessionDir(root), { recursive: true, force: true }).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -559,7 +555,7 @@ try {
 // only state, so the waiting call survives the restart *as a question* — the new process derives it
 // from the ledger the way the old one did, and the banner it shows is still answerable. What must
 // NOT survive is a memory-resident promise: nothing here is "an entry remembers it", and the child
-// is a real `main.ts` over the same agent home and the same workspace, so it can only see what the
+// is a real `main.ts` over the same agent home and the same working directory, so it can only see what the
 // first one left on disk. (The answer itself is not exercised: the child speaks to real providers.)
 // ---------------------------------------------------------------------------------------------------
 
@@ -648,7 +644,7 @@ try {
 	await Promise.race([exited, sleep(5_000)]);
 	clearTimeout(restartWatchdog);
 	await rm(restartRoot, { recursive: true, force: true });
-	await rm(workspaceDir(restartRoot), { recursive: true, force: true }).catch(() => {});
+	await rm(sessionDir(restartRoot), { recursive: true, force: true }).catch(() => {});
 }
 
 process.stdout.write(failures === 0 ? "\napproval ok\n" : `\n${failures} FAILED\n`);
@@ -736,7 +732,7 @@ async function openRig(approvalGraceMs: number): Promise<Rig> {
 		close: async () => {
 			await graph.close();
 			await rm(root, { recursive: true, force: true });
-			await rm(workspaceDir(root), { recursive: true, force: true }).catch(() => {});
+			await rm(sessionDir(root), { recursive: true, force: true }).catch(() => {});
 		},
 	};
 }
@@ -795,7 +791,7 @@ async function openCrossRig(): Promise<CrossRig> {
 		close: async () => {
 			await graph.close();
 			await rm(root, { recursive: true, force: true });
-			await rm(workspaceDir(root), { recursive: true, force: true }).catch(() => {});
+			await rm(sessionDir(root), { recursive: true, force: true }).catch(() => {});
 		},
 	};
 }

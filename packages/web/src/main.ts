@@ -13,17 +13,17 @@ import { SessionRows } from "./rows.ts";
 import { Composer, type ComposerSelection } from "./composer.ts";
 import { TranscriptView } from "./render/transcript.ts";
 import { BranchView, shortId } from "./render/branch-view.ts";
-import { Sidebar, pagingOf, workspaceName } from "./render/sidebar.ts";
+import { Sidebar, pagingOf, directoryName } from "./render/sidebar.ts";
 import { SettingsPanel, modeSummaryOf } from "./render/settings.ts";
 import { openMenu, openMenuAt, type MenuItem } from "./render/menu.ts";
 import { StatusBar } from "./render/statusbar.ts";
 import { element, icon } from "./dom.ts";
 import { DEFAULT_THINKING_LEVEL, seedDefaultModel } from "./default-model.ts";
-import type { ConnectionItem, ModelOption, ServerMessage, WorkspacePaging } from "@my-agent/core/protocol";
+import type { ConnectionItem, ModelOption, ServerMessage, DirectoryPaging } from "@my-agent/core/protocol";
 
 /**
  * The one thing the desktop shell adds to the page: the OS's own folder picker. The app itself does
- * not browse the filesystem — "添加工作区" hands the browsing to the system dialog — so a browser
+ * not browse the filesystem — "添加目录" hands the browsing to the system dialog — so a browser
  * without the shell has no picker, and the menu item says so rather than pretending.
  */
 declare global {
@@ -81,30 +81,30 @@ function main(): void {
 	 */
 	let chosen: { model?: string; thinkingLevel?: string } = {};
 	/** The directory this server runs over, which is where "新建会话" writes by default. */
-	let absCurrentWorkspace = "";
+	let absCurrentDirectory = "";
 	/**
-	 * The workspace picker's own choice, held by the window and never by the server.
+	 * The directory picker's own choice, held by the window and never by the server.
 	 *
 	 * Three controls read it and nothing else does: the composer chip that displays it, the new-session
 	 * button that creates into it, and the sidebar's shadowed heading that names it. Empty means "no
-	 * explicit choice", and the answer is then the active session's workspace — so that heading can
+	 * explicit choice", and the answer is then the active session's directory — so that heading can
 	 * never contradict the conversation on screen — or the server's root when there is no session.
 	 * Opening a session clears it, which is what keeps the choice a "next time" answer rather than a
 	 * state that quietly outlives the moment it was made in. It survives no restart and lands in no
 	 * file, by decision: a transient preference re-chosen at the moment it is needed is not worth a
 	 * store.
 	 */
-	let absPickedWorkspace = "";
+	let absPickedDirectory = "";
 	let collapsed = false;
 	/**
-	 * The sidebar's per-workspace paging state, keyed by the workspace's path.
+	 * The sidebar's per-directory paging state, keyed by the directory's path.
 	 *
 	 * Seeded from the appearance settings when they arrive and written back through them on every
 	 * click — the decision 09 号 landed: the state follows appearance, not `localStorage`, which the
-	 * desktop shell's fresh port on every launch would strand. A workspace the user never touched
+	 * desktop shell's fresh port on every launch would strand. A directory the user never touched
 	 * keeps no entry, so the map stays empty until a collapse or a page turn happens.
 	 */
-	let paging: Record<string, WorkspacePaging> = {};
+	let paging: Record<string, DirectoryPaging> = {};
 	/**
 	 * Whether the resident channel is up.
 	 *
@@ -433,7 +433,7 @@ function main(): void {
 	 */
 	const approvalSeat = element("div", "approval-seat");
 	approvalSeat.hidden = true;
-	/** The composer head: the workspace chip on the row above the input card, leftmost. */
+	/** The composer head: the directory chip on the row above the input card, leftmost. */
 	const composerHead = element("div", "composer-head");
 	const composer = new Composer({
 		onSubmit: (text, behavior) => void prompt(text, behavior),
@@ -483,53 +483,53 @@ function main(): void {
 	composerWrap.append(errorBar, approvalSeat, composerHead, composer.element);
 
 	/**
-	 * The workspace chip, and the menu it opens.
+	 * The directory chip, and the menu it opens.
 	 *
 	 * The chip is the picker's face: it shows where the *next* new session will land, and it lives on
 	 * the row above the input card, leftmost — the composer is where a session starts, so that is
 	 * where "where the next one starts" belongs (01 ⑦). The choice never rewrites the session on
 	 * screen, and the chip is placed by the input it sits over rather than by what the transcript
-	 * says, so it needs no phase to come and go with. Its menu lists the workspaces this machine
+	 * says, so it needs no phase to come and go with. Its menu lists the directories this machine
 	 * already knows plus the one road in for one it does not; the list is drawn from the sidebar's
-	 * own rows, so a workspace that earned its place by having a session is the same list here.
+	 * own rows, so a directory that earned its place by having a session is the same list here.
 	 */
-	const workspaceChip = element("button", "workspace-chip", undefined, { type: "button", "aria-haspopup": "menu" });
-	const chipLabel = element("span", "workspace-chip-label");
-	workspaceChip.append(icon("folder"), chipLabel, icon("chevron"));
-	workspaceChip.addEventListener("click", () => {
+	const directoryChip = element("button", "directory-chip", undefined, { type: "button", "aria-haspopup": "menu" });
+	const chipLabel = element("span", "directory-chip-label");
+	directoryChip.append(icon("folder"), chipLabel, icon("chevron"));
+	directoryChip.addEventListener("click", () => {
 		const groups = rows.groups();
 		// Nothing known yet: a one-row menu whose only row is the add action is a menu that pretends
 		// there was a choice, so the click goes straight to the picker, as the reference does.
 		if (groups.length === 0) {
-			void addWorkspace();
+			void addDirectory();
 			return;
 		}
 		const absChosenDir = directoryForNewSession();
 		// Upward like the bar's three seats: the chip sits at the bottom of the window too, and a menu
 		// that fell below it would land on the input card it hangs over.
 		openMenu(
-			workspaceChip,
+			directoryChip,
 			[
 				...groups.map((group) => ({
 					icon: "folder" as const,
-					label: state.settings?.workspaceNames?.[group.workDirAbsPath] ?? workspaceName(group.workDirAbsPath),
+					label: state.settings?.directoryNames?.[group.workDirAbsPath] ?? directoryName(group.workDirAbsPath),
 					title: group.workDirAbsPath,
 					active: group.workDirAbsPath === absChosenDir,
 					onSelect: () => {
-						absPickedWorkspace = group.workDirAbsPath;
+						absPickedDirectory = group.workDirAbsPath;
 						render();
 					},
 				})),
 				{ kind: "separator" as const },
 				{
-					label: "添加工作区…",
-					onSelect: () => void addWorkspace(),
+					label: "添加目录…",
+					onSelect: () => void addDirectory(),
 				},
 			],
 			{ placement: "above" },
 		);
 	});
-	composerHead.append(workspaceChip);
+	composerHead.append(directoryChip);
 
 	const statusBar = new StatusBar();
 
@@ -541,11 +541,11 @@ function main(): void {
 	// ------------------------------------------------------------------ sidebar
 
 	const sidebar = new Sidebar({
-		// The heading's own 「新建会话」 names the workspace it was asked on; the top row names nothing
-		// and follows the picker. The choice is folded into `absPickedWorkspace` *before* the create goes
+		// The heading's own 「新建会话」 names the directory it was asked on; the top row names nothing
+		// and follows the picker. The choice is folded into `absPickedDirectory` *before* the create goes
 		// out, because `openSession` clears it — the picker has done its job once the session exists.
 		onNewSession: (workDirAbsPath) => {
-			if (workDirAbsPath !== undefined) absPickedWorkspace = workDirAbsPath;
+			if (workDirAbsPath !== undefined) absPickedDirectory = workDirAbsPath;
 			void newSession(workDirAbsPath);
 		},
 		onSelectSession: (sessionId) => void openSession(sessionId),
@@ -554,15 +554,15 @@ function main(): void {
 			render();
 		},
 		onOpenSettings: () => openSettings(),
-		onAddWorkspace: () => void addWorkspace(),
+		onAddDirectory: () => void addDirectory(),
 		// The row menu's fork copies a session whole — it acts on a session, not on a message, so this
 		// is the `entryId: null` fork rather than anything a message used to offer.
 		onForkSession: (sessionId) => void forkSession(sessionId),
 		onDeleteSession: (sessionId) => void deleteSession(sessionId),
 		onRenameSession: (sessionId, title) => void renameSession(sessionId, title),
-		onToggleWorkspace: (workDirAbsPath) => {
+		onToggleDirectory: (workDirAbsPath) => {
 			const entry = pagingOf(paging, workDirAbsPath);
-			// Expanding lands on the page the workspace was read down to when it collapsed; collapsing
+			// Expanding lands on the page the directory was read down to when it collapsed; collapsing
 			// saves the page it was on. The two paging buttons write the saved page too — they are
 			// where the reading happens — so the saved page is always the page on screen.
 			setPaging(
@@ -572,11 +572,11 @@ function main(): void {
 					: { collapsed: true, page: entry.page, savedPage: entry.page },
 			);
 		},
-		onPageWorkspace: (workDirAbsPath) => {
+		onPageDirectory: (workDirAbsPath) => {
 			const entry = pagingOf(paging, workDirAbsPath);
 			setPaging(workDirAbsPath, { collapsed: false, page: entry.page + 1, savedPage: entry.page + 1 });
 		},
-		onCollapseWorkspace: (workDirAbsPath) => {
+		onCollapseDirectory: (workDirAbsPath) => {
 			// Step back the one page the last 「展开其余」 added — not a reset to the first, and the
 			// saved page moves with it: un-expanding is un-reading, so reopening a later
 			// heading-collapse lands on the page the user had actually read down to.
@@ -584,12 +584,12 @@ function main(): void {
 			const page = Math.max(1, entry.page - 1);
 			setPaging(workDirAbsPath, { collapsed: false, page, savedPage: page });
 		},
-		onRenameWorkspace: (workDirAbsPath, name) => void renameWorkspace(workDirAbsPath, name),
-		onDeleteWorkspace: (workDirAbsPath) => void deleteWorkspace(workDirAbsPath),
+		onRenameDirectory: (workDirAbsPath, name) => void renameDirectory(workDirAbsPath, name),
+		onDeleteDirectory: (workDirAbsPath) => void deleteDirectory(workDirAbsPath),
 	});
 
 	/**
-	 * Fold one workspace's paging state in, redraw, and persist it through appearance.
+	 * Fold one directory's paging state in, redraw, and persist it through appearance.
 	 *
 	 * The local map moves first so the redraw does not wait on a round trip; the map is then sent
 	 * whole, the way every appearance field is. The server's answer lands in `apply`, which re-seeds
@@ -597,10 +597,10 @@ function main(): void {
 	 * view keeps the click, which is the honest split: the screen is what the user did, the file is
 	 * what survived.
 	 */
-	function setPaging(workDirAbsPath: string, next: WorkspacePaging): void {
+	function setPaging(workDirAbsPath: string, next: DirectoryPaging): void {
 		paging = { ...paging, [workDirAbsPath]: next };
 		renderSidebar();
-		void saveSettings({ appearance: { workspaces: paging } });
+		void saveSettings({ appearance: { directories: paging } });
 	}
 
 	/**
@@ -832,23 +832,23 @@ function main(): void {
 		// of the inputs the sidebar reads — the row table's version, the followed session, and the
 		// window's own three facts — so it is skipped here rather than walked and patched inside.
 		// Rendering the sidebar on every token was the profile's H7, a flat per-frame tax that grew
-		// with the workspace count; the rows bump `rows.version` when they actually change.
+		// with the directory count; the rows bump `rows.version` when they actually change.
 		// The paging state is in the signature because it is one of the sidebar's inputs now: a
 		// collapse or a page turn changes nothing in the row table, so a signature without it would
 		// mean the click redraws nothing at all. Serialization is deterministic — the entries are
 		// built with one fixed field order — so the string is stable across equal maps.
 		// The names are in the signature for the same reason the paging map is: a rename moves nothing
 		// in the row table, so a signature that ignored the labels would mean the click repaints nothing.
-		const names = state.settings?.workspaceNames;
-		const drawn = `${rows.version}|${followed ?? ""}|${absPickedWorkspace}|${collapsed ? 1 : 0}|${channel}|${JSON.stringify(paging)}|${JSON.stringify(names ?? {})}`;
+		const names = state.settings?.directoryNames;
+		const drawn = `${rows.version}|${followed ?? ""}|${absPickedDirectory}|${collapsed ? 1 : 0}|${channel}|${JSON.stringify(paging)}|${JSON.stringify(names ?? {})}`;
 		if (drawn === sidebarDrawn) return;
 		sidebarDrawn = drawn;
 		sidebar.render({
-			workspaces: rows.groups(),
+			directories: rows.groups(),
 			...(followed === undefined ? {} : { activeSessionId: followed }),
 			collapsed,
 			paging,
-			...(names === undefined ? {} : { workspaceNames: names }),
+			...(names === undefined ? {} : { directoryNames: names }),
 			channel,
 		});
 	}
@@ -856,22 +856,22 @@ function main(): void {
 	/**
 	 * Where the next new session lands, and the one answer to the question the picker exists for.
 	 *
-	 * The explicit choice wins, then the session on screen's workspace, then the server's root — the
+	 * The explicit choice wins, then the session on screen's directory, then the server's root — the
 	 * order the shadowed heading's promise needs, since that heading names this answer and must never
 	 * disagree with the conversation being read.
 	 */
 	function directoryForNewSession(): string {
-		return absPickedWorkspace || state.snapshot?.workDirAbsPath || absCurrentWorkspace;
+		return absPickedDirectory || state.snapshot?.workDirAbsPath || absCurrentDirectory;
 	}
 
 	/**
-	 * The OS folder picker, which is the only road a new workspace enters the list by.
+	 * The OS folder picker, which is the only road a new directory enters the list by.
 	 *
 	 * The app never browses the filesystem itself: the system dialog does the browsing, and the path
-	 * it answers becomes the picker's choice and a session in the same breath — a workspace earns its
+	 * it answers becomes the picker's choice and a session in the same breath — a directory earns its
 	 * place in the list by having a session, so adding one *is* starting one.
 	 */
-	async function addWorkspace(): Promise<void> {
+	async function addDirectory(): Promise<void> {
 		if (window.desktop?.pickFolder === undefined) {
 			report(new Error("选择文件夹需要桌面外壳；浏览器里可以直接用命令行把会话开在目标目录。"));
 			return;
@@ -884,7 +884,7 @@ function main(): void {
 			return;
 		}
 		if (absPath === undefined) return;
-		absPickedWorkspace = absPath;
+		absPickedDirectory = absPath;
 		await newSession(absPath);
 	}
 
@@ -962,9 +962,9 @@ function main(): void {
 			contentPref = next.settings?.appearance.contentWidth;
 			applyContentWidth(contentPref);
 			// The sidebar's paging state rides the same snapshot. Re-seeded rather than merged: the
-			// settings are the authority, and a workspace whose entry the server dropped — a bad line
+			// settings are the authority, and a directory whose entry the server dropped — a bad line
 			// in a hand-edited file — falls back to its default, not to this window's memory of it.
-			paging = next.settings?.appearance.workspaces ?? {};
+			paging = next.settings?.appearance.directories ?? {};
 		}
 		if (next.items !== previous.items || next.streaming !== previous.streaming) {
 			// `deferred` is set by the one caller that hands over a whole conversation at once — the
@@ -1165,8 +1165,8 @@ function main(): void {
 		const directory = directoryForNewSession();
 		if (chipDrawn !== directory) {
 			chipDrawn = directory;
-			chipLabel.textContent = workspaceName(directory);
-			workspaceChip.title = directory;
+			chipLabel.textContent = directoryName(directory);
+			directoryChip.title = directory;
 		}
 
 		// What a send would carry is what the seat shows, so the seat is drawn from the same values
@@ -1365,9 +1365,9 @@ function main(): void {
 		// nothing about this one, which opens on whatever its own branch recorded.
 		chosen = {};
 		// The picker's explicit choice is about the session that was *about* to start, and that session
-		// has started — the one on screen now decides which workspace the next session lands in, until
+		// has started — the one on screen now decides which directory the next session lands in, until
 		// the chip is used again.
-		absPickedWorkspace = "";
+		absPickedDirectory = "";
 		// The same rendering the branch command uses: a snapshot is a snapshot, whether it arrived on
 		// the channel or on a read. The channel's own baseline will replace it within a moment.
 		apply(reduce(state, { type: "baseline", session: snapshot }), { deferred: true });
@@ -1385,12 +1385,12 @@ function main(): void {
 
 	/** Re-read the sidebar's rows over REST, but only while the channel is not the authority. */
 	async function refreshLists(): Promise<void> {
-		const { workspaces } = await api.listWorkspaces();
+		const { directories } = await api.listDirectories();
 		reachable();
 		// Refused while the channel is live. Two writers for one table is the race this avoids: a
 		// listing computed from files would land after a `running: true` and put the row back to idle,
 		// and the window would show a session that is working as one that is not.
-		if (!rows.loadFrom(workspaces, channel === "live")) return;
+		if (!rows.loadFrom(directories, channel === "live")) return;
 		renderSidebar();
 	}
 
@@ -1483,7 +1483,7 @@ function main(): void {
 	 *
 	 * The directory travels with the request (`workDirAbsPath`), which is the whole of the picker's contract: a
 	 * choice made for one creation is not a state the server keeps. The session it opens re-reads the
-	 * lists, which is how a first session in a brand-new directory earns its workspace group a place
+	 * lists, which is how a first session in a brand-new directory earns its directory group a place
 	 * in the sidebar.
 	 */
 	async function newSession(workDirAbsPath?: string): Promise<void> {
@@ -1497,18 +1497,18 @@ function main(): void {
 	}
 
 	/**
-	 * Give a workspace a name the sidebar shows, and leave the disk alone.
+	 * Give a directory a name the sidebar shows, and leave the disk alone.
 	 *
 	 * `name` is a label, not a path: nothing here builds a directory, and the answer carries the
-	 * settings because that is where the label lives. The rows are untouched — a workspace is
+	 * settings because that is where the label lives. The rows are untouched — a directory is
 	 * identified by the directory its transcripts recorded — so the only thing this window owes the
 	 * change is a repaint, which a cleared `sidebarDrawn` forces past the gate below.
 	 *
 	 * An empty name takes the custom one back and the heading falls to the folder's own name.
 	 */
-	async function renameWorkspace(workDirAbsPath: string, name: string): Promise<void> {
+	async function renameDirectory(workDirAbsPath: string, name: string): Promise<void> {
 		try {
-			const answer = await api.renameWorkspace(workDirAbsPath, name);
+			const answer = await api.renameDirectory(workDirAbsPath, name);
 			reachable();
 			apply({ ...state, settings: answer.settings });
 			// The settings snapshot moved but nothing in the gate's signature has to: the rows are the
@@ -1523,7 +1523,7 @@ function main(): void {
 	}
 
 	/**
-	 * Take a workspace out of the sidebar, touching nothing on disk (票 06).
+	 * Take a directory out of the sidebar, touching nothing on disk (票 06).
 	 *
 	 * Two roads, one per channel state, and the difference is not a detail: while the channel is live
 	 * the *server* removes the group by re-sending the overview — the row table's one writer is the
@@ -1532,11 +1532,11 @@ function main(): void {
 	 * road, and it is applied here. What this window owes either of them is its settings snapshot: the
 	 * hidden list is what the next reload leaves the group out by.
 	 */
-	async function deleteWorkspace(workDirAbsPath: string): Promise<void> {
+	async function deleteDirectory(workDirAbsPath: string): Promise<void> {
 		try {
-			const answer = await api.hideWorkspace(workDirAbsPath);
+			const answer = await api.hideDirectory(workDirAbsPath);
 			reachable();
-			rows.loadFrom(answer.workspaces, channel === "live");
+			rows.loadFrom(answer.directories, channel === "live");
 			applyAppearance(answer.settings);
 			branchView.remeasure();
 			apply({ ...state, settings: answer.settings });
@@ -1767,7 +1767,7 @@ function main(): void {
 	void (async () => {
 		try {
 			const health = await api.health();
-			absCurrentWorkspace = health.workDirAbsPath;
+			absCurrentDirectory = health.workDirAbsPath;
 			reachable();
 		} catch (error) {
 			unreachable(error);

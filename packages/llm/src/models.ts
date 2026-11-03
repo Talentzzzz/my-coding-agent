@@ -3,8 +3,8 @@
 // `Models`, `createProvider`, auth resolution, and the per-type dispatch that goes with them — and
 // none of that survives here. This app has one transport and one key per model, so a catalog of
 // providers was a registry of one entry whose only content was a string it already had. Checked by
-// packages/llm/tsconfig.json under pi's own compiler settings; @ts-nocheck keeps the workspace's
-// stricter root config from flagging this file, while every import into packages/core stays fully
+// packages/llm/tsconfig.json under pi's own compiler settings; @ts-nocheck keeps the repo root's
+// stricter config from flagging this file, while every import into packages/core stays fully
 // checked.
 // @ts-nocheck
 import type { ThinkingLevel } from "./types.ts";

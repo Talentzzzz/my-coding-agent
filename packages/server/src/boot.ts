@@ -39,7 +39,7 @@ export interface BootOptions {
 	 * The agent home the global settings are read from and written to. Defaults to the real one.
 	 *
 	 * A pass-through for one reason: a smoke that drives a command which writes settings — hiding a
-	 * workspace, say — would otherwise edit the machine's own `settings.json`. Nothing in production
+	 * directory, say — would otherwise edit the machine's own `settings.json`. Nothing in production
 	 * sets it.
 	 */
 	settingsHome?: string;
@@ -120,7 +120,7 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 	// the overview, so it has to be able to answer "what sessions exist" before any window asks.
 	const projection = createSessionProjection(hub);
 	const mux = createMuxServer(hub, projection, options.mux ?? {});
-	// One listener set for both controllers, and built before either: a workspace rename is received
+	// One listener set for both controllers, and built before either: a directory rename is received
 	// by the system controller and lands on the projection, which is the same piece the session
 	// controller's rename and delete go through.
 	const listeners = sessionListeners(mux, projection);
@@ -299,7 +299,7 @@ export function sessionListeners(mux: MuxServer, projection: SessionProjection):
 		// the list rather than any row, so the frame that answers it is the overview every connection
 		// opened on. Sent to all of them: the window that asked already has the answer in its response,
 		// and the window that did not ask is the one this is for.
-		onWorkspaceListingChanged: () => void mux.broadcastSessions(),
+		onDirectoryListingChanged: () => void mux.broadcastSessions(),
 	};
 }
 

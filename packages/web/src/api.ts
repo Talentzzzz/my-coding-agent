@@ -8,8 +8,8 @@ import type {
 	PromptBehavior,
 	SessionSnapshot,
 	SettingsSnapshot,
-	WorkspaceGroup,
-	WorkspacePaging,
+	DirectoryGroup,
+	DirectoryPaging,
 } from "@my-agent/core/protocol";
 
 /** What the settings panel can change. Narrower than the server's own patch, which is the point. */
@@ -26,20 +26,20 @@ export interface PanelSettingsPatch {
 	 */
 	modes?: ModeSettings[];
 	/**
-	 * Workspaces the sidebar does not list, by absolute path, sent whole like `tools`.
+	 * Directories the sidebar does not list, by absolute path, sent whole like `tools`.
 	 *
-	 * The panel has no control for this and probably never will: it is the shape 「删除」 on a workspace
-	 * heading goes through, and hiding a workspace from a settings list would be a second door to the
+	 * The panel has no control for this and probably never will: it is the shape 「删除」 on a directory
+	 * heading goes through, and hiding a directory from a settings list would be a second door to the
 	 * one act that needs the group in front of you to mean anything.
 	 */
-	hiddenWorkspaces?: string[];
+	hiddenDirectories?: string[];
 	appearance?: {
 		theme?: "system" | "light" | "dark";
 		fontSize?: number;
 		sidebarWidth?: number;
 		contentWidth?: number;
-		/** The sidebar's per-workspace paging state, sent whole like every other appearance field. */
-		workspaces?: Record<string, WorkspacePaging>;
+		/** The sidebar's per-directory paging state, sent whole like every other appearance field. */
+		directories?: Record<string, DirectoryPaging>;
 	};
 	approval?: Record<string, boolean>;
 	/** Partial so one timeout can be committed without naming the other. */
@@ -101,7 +101,7 @@ export class SessionApi {
 	/**
 	 * Start a conversation.
 	 *
-	 * `workDirAbsPath` is where the new session lands: the workspace picker's own choice, made with the request
+	 * `workDirAbsPath` is where the new session lands: the directory picker's own choice, made with the request
 	 * and never a server-side "current directory". Undefined is the server's root, which is what a
 	 * bodyless create has always meant.
 	 *
@@ -178,13 +178,13 @@ export class SessionApi {
 		return this.send("GET", "/api/health", undefined);
 	}
 
-	/** Every workspace this machine has sessions for, for the sidebar's groups. */
-	async listWorkspaces(): Promise<{ workspaces: WorkspaceGroup[] }> {
-		return this.send("GET", "/api/workspaces", undefined);
+	/** Every directory this machine has sessions for, for the sidebar's groups. */
+	async listDirectories(): Promise<{ directories: DirectoryGroup[] }> {
+		return this.send("GET", "/api/directories", undefined);
 	}
 
 	/**
-	 * Give a workspace a name the sidebar shows, touching nothing on disk.
+	 * Give a directory a name the sidebar shows, touching nothing on disk.
 	 *
 	 * `workDirAbsPath` names the group and `name` is the label — they are not two paths: the folder keeps the name
 	 * the file system gave it, and this is a view the settings remember. An empty name takes the
@@ -194,20 +194,20 @@ export class SessionApi {
 	 * applies it and repaints the heading, and no row moved, so there is no `session_row` frame on its
 	 * way to disagree with.
 	 */
-	async renameWorkspace(workDirAbsPath: string, name: string): Promise<{ workDirAbsPath: string; name: string; settings: SettingsSnapshot }> {
-		return this.send("POST", "/api/workspaces/rename", { workDirAbsPath, name });
+	async renameDirectory(workDirAbsPath: string, name: string): Promise<{ workDirAbsPath: string; name: string; settings: SettingsSnapshot }> {
+		return this.send("POST", "/api/directories/rename", { workDirAbsPath, name });
 	}
 
 	/**
-	 * Take a workspace out of the list, touching nothing on disk.
+	 * Take a directory out of the list, touching nothing on disk.
 	 *
-	 * The whole stored list and the visible listing come back because this is the one workspace
-	 * command that does not ride the channel: nothing about a hidden workspace is a row fact, so the
+	 * The whole stored list and the visible listing come back because this is the one directory
+	 * command that does not ride the channel: nothing about a hidden directory is a row fact, so the
 	 * endpoint answers with what the sidebar should now draw — and the client applies it rather than
 	 * guessing, which would be a second writer for a list the server owns.
 	 */
-	async hideWorkspace(workDirAbsPath: string): Promise<{ settings: SettingsSnapshot; workspaces: WorkspaceGroup[] }> {
-		return this.send("POST", "/api/workspaces/hide", { workDirAbsPath });
+	async hideDirectory(workDirAbsPath: string): Promise<{ settings: SettingsSnapshot; directories: DirectoryGroup[] }> {
+		return this.send("POST", "/api/directories/hide", { workDirAbsPath });
 	}
 
 	async listModels(): Promise<{ models: ModelOption[] }> {
@@ -257,7 +257,7 @@ export class SessionApi {
 	 *
 	 * The narrowing is the point rather than an accident of typing: every one of them carries a listing
 	 * this client has no business applying, because the sidebar's rows are written by the channel while
-	 * it is up and by {@link listWorkspaces} while it is not. Returning the full body would invite the
+	 * it is up and by {@link listDirectories} while it is not. Returning the full body would invite the
 	 * second writer, and a second writer is a row that says a working session is idle.
 	 *
 	 * The wire shape is still declared in full at the call to `send`, so this stays a narrowing rather

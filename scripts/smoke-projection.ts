@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	SessionManager,
-	workspaceDir,
+	sessionDir,
 	type ClientFrame,
 	type ConnectionItem,
 	type ServerFrame,
@@ -87,7 +87,7 @@ try {
 	check("an unspoken session has no row", seeded === undefined, String(seeded));
 	const groupsBefore = await projection.groups();
 	check(
-		"and no group names its workspace yet",
+		"and no group names its directory yet",
 		groupsBefore.every((group) => group.workDirAbsPath !== root),
 		JSON.stringify(groupsBefore.map((group) => group.workDirAbsPath)),
 	);
@@ -100,7 +100,7 @@ try {
 	hub.release(spokenHost);
 	const spokenRow = await projection.row(first);
 	check("a spoken session has a row", spokenRow !== undefined, String(spokenRow));
-	check("with the workspace as its workDirAbsPath", spokenRow?.workDirAbsPath === root, spokenRow?.workDirAbsPath);
+	check("with the working directory as its workDirAbsPath", spokenRow?.workDirAbsPath === root, spokenRow?.workDirAbsPath);
 	check("a row carries modified, not only createdAt", typeof spokenRow?.modified === "number" && spokenRow.modified > 0, String(spokenRow?.modified));
 	check("and the title is the message the branch starts with", spokenRow?.title === "the conversation starts here", spokenRow?.title);
 
@@ -117,7 +117,7 @@ try {
 	check("both callers see the same rows", JSON.stringify(rows) === JSON.stringify(again));
 	check("the rows are the ones the seed found", rows.some((row) => row.id === first));
 	const mine = groups.find((group) => group.workDirAbsPath === root);
-	check("this workspace's group holds this session's row", mine?.sessions.some((row) => row.id === first) === true, JSON.stringify(mine?.workDirAbsPath));
+	check("this directory's group holds this session's row", mine?.sessions.some((row) => row.id === first) === true, JSON.stringify(mine?.workDirAbsPath));
 	check(
 		"a group is ordered by activity, newest first",
 		(mine?.sessions ?? []).every((row, index, all) => index === 0 || (all[index - 1]?.modified ?? 0) >= row.modified),
@@ -310,9 +310,9 @@ try {
 	await hub.close();
 	check("nothing is left running", hub.live.length === 0, hub.live.join(","));
 } finally {
-	// Sessions live under the agent home, keyed by the workspace path, so removing the temporary
-	// workspace is not enough: without this every run leaves an orphan directory behind.
-	await rm(workspaceDir(root), { recursive: true, force: true });
+	// Sessions live under the agent home, keyed by the working directory path, so removing the temporary
+	// directory is not enough: without this every run leaves an orphan directory behind.
+	await rm(sessionDir(root), { recursive: true, force: true });
 	await rm(root, { recursive: true, force: true });
 }
 

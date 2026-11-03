@@ -40,7 +40,7 @@ export interface MenuPlacement {
 /**
  * The one self-drawn dropdown, and the only one.
  *
- * It was drawn for the workspace picker — rows with icons, a full-path tooltip, and a footer action
+ * It was drawn for the directory picker — rows with icons, a full-path tooltip, and a footer action
  * that is not a choice among the listed values, none of which a native `select` can carry. The
  * composer's model and level seats joined it for the other thing a native control cannot do: its
  * popup is the platform's, not the theme's, so on a dark window it arrives as a light rectangle. The

@@ -71,30 +71,30 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 		}),
 		route({
 			method: "GET",
-			path: "/api/workspaces",
+			path: "/api/directories",
 			params: {},
-			handle: async (_params, _request, response) => sendJson(response, 200, await controllers.system.workspaces()),
+			handle: async (_params, _request, response) => sendJson(response, 200, await controllers.system.directories()),
 		}),
 		route({
 			method: "POST",
-			// A command rather than a `PATCH` on a workspace resource, because a workspace has no id
+			// A command rather than a `PATCH` on a directory resource, because a directory has no id
 			// here: it is named by the directory it is, and the body carries that path beside the
 			// name the user typed. A command because it changes no resource: it writes a label into
 			// the settings, and the directory keeps the name the file system gave it.
-			path: "/api/workspaces/rename",
+			path: "/api/directories/rename",
 			params: {},
 			handle: async (_params, request, response) =>
-				sendJson(response, 200, await controllers.system.renameWorkspace(await readObjectBody(request))),
+				sendJson(response, 200, await controllers.system.renameDirectory(await readObjectBody(request))),
 		}),
 		route({
 			method: "POST",
 			// Removal from the list and nothing else: the transcripts and the directory they name stay
 			// exactly where they are. `hide` rather than `delete` says so in the URL, because a DELETE
 			// here would promise the one thing this deliberately does not do.
-			path: "/api/workspaces/hide",
+			path: "/api/directories/hide",
 			params: {},
 			handle: async (_params, request, response) =>
-				sendJson(response, 200, await controllers.system.hideWorkspace(await readObjectBody(request))),
+				sendJson(response, 200, await controllers.system.hideDirectory(await readObjectBody(request))),
 		}),
 		route({
 			method: "GET",
@@ -111,7 +111,7 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 		route({
 			method: "POST",
 			// The body is optional and usually absent: an empty `POST` still creates a session in the
-			// server's own workspace. An `workDirAbsPath` in the body moves where that one session lands — a choice
+			// server's own directory. A `workDirAbsPath` in the body moves where that one session lands — a choice
 			// made with the request, so it travels with it rather than becoming server state.
 			path: "/api/sessions",
 			params: {},

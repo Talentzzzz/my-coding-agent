@@ -18,7 +18,7 @@ import { element } from "../dom.ts";
 
 /** What the card is asked for. */
 export interface TextDialogOptions {
-	/** The heading, one short line: "重命名工作区". */
+	/** The heading, one short line: "重命名目录". */
 	title: string;
 	/** The label above the field, which is also what the field is announced as. */
 	label: string;

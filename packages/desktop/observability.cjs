@@ -54,7 +54,7 @@ const LOAD_FAILED_HEADLINE = "窗口没能加载 agent 服务";
  *   Electron application object: only `on` is used on it.
  * @param {() => object} options.createWindow Builds the window a report is drawn in. The shell's own
  *   factory is what decides frame, theme and preload; a report must not be a second kind of window.
- * @param {(cwd: string) => Promise<{ url: string }>} options.boot Starts the server, rejecting if it
+ * @param {(workDirAbsPath: string) => Promise<{ url: string }>} options.boot Starts the server, rejecting if it
  *   cannot be started.
  * @param {number} [options.bootBudgetMs] Override for {@link BOOT_BUDGET_MS}, so a smoke can drive a
  *   hanging boot in milliseconds instead of waiting the real budget out.
@@ -230,11 +230,11 @@ function createObservability(options) {
 	 * a boot that arrives after the budget is logged when it lands, so a slow machine is
 	 * distinguished from a stuck one instead of being guessed at.
 	 *
-	 * @param {string} cwd The workspace the server is starting against.
+	 * @param {string} workDirAbsPath The directory the server is starting in.
 	 * @returns {Promise<{ url: string } | null>} The server, or `null` once the failure was reported.
 	 */
-	async function bootWithinBudget(cwd) {
-		const booting = boot(cwd);
+	async function bootWithinBudget(workDirAbsPath) {
+		const booting = boot(workDirAbsPath);
 		let timer;
 		const deadline = new Promise((_settle, fail) => {
 			timer = setTimeout(() => fail(new Error(`the server did not come up within ${budgetMs} ms`)), budgetMs);

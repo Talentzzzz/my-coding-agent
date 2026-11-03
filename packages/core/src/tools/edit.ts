@@ -1,12 +1,12 @@
 import { readFile, stat, writeFile } from "node:fs/promises";
 import type { AgentTool } from "../types.ts";
 import { Type, type Static } from "typebox";
-import type { Workspace } from "../workspace.ts";
+import { displayToolPath, resolveToolPath } from "../workdir.ts";
 import { DIFF_MAX_ROWS, diffText, fileDiff } from "./diff.ts";
 import { textResult, throwIfAborted } from "./types.ts";
 
 const parameters = Type.Object({
-	path: Type.String({ description: "File path, relative to the workspace root or absPath inside it" }),
+	path: Type.String({ description: "File path. Relative paths resolve against the working directory; absolute paths are taken as they are." }),
 	old_string: Type.String({ description: "Exact text to replace, including indentation, as it appears in read" }),
 	new_string: Type.String({ description: "Replacement text. Use an empty string to delete the matched text." }),
 	replace_all: Type.Optional(Type.Boolean({ description: "Replace every occurrence. Defaults to false." })),
@@ -18,7 +18,7 @@ export type EditParams = Static<typeof parameters>;
  * `edit` replaces exact text. Line endings are normalized before matching, so a file with CRLF
  * endings still matches the LF text the model saw in `read`; the file keeps its original endings.
  */
-export function createEditTool(workspace: Workspace): AgentTool<typeof parameters> {
+export function createEditTool(workDirAbsPath: string): AgentTool<typeof parameters> {
 	return {
 		name: "edit",
 		label: "Edit",
@@ -27,13 +27,13 @@ export function createEditTool(workspace: Workspace): AgentTool<typeof parameter
 		parameters,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal) {
-			return runEdit(workspace, { ...params, replace_all: params.replace_all ?? false }, signal);
+			return runEdit(workDirAbsPath, { ...params, replace_all: params.replace_all ?? false }, signal);
 		},
 	};
 }
 
 export async function runEdit(
-	workspace: Workspace,
+	workDirAbsPath: string,
 	params: EditParams,
 	signal?: AbortSignal,
 ): Promise<ReturnType<typeof textResult>> {
@@ -45,8 +45,8 @@ export async function runEdit(
 		throw new Error("old_string must not be empty.");
 	}
 
-	const absPath = workspace.resolve(params.path);
-	const relPath = workspace.display(absPath);
+	const absPath = resolveToolPath(workDirAbsPath, params.path);
+	const relPath = displayToolPath(workDirAbsPath, absPath);
 	const info = await stat(absPath).catch(() => undefined);
 	if (!info) throw new Error(`File not found: ${relPath}`);
 	if (info.isDirectory()) throw new Error(`Not a file (it is a directory): ${relPath}`);

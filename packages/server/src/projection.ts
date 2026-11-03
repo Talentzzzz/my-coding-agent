@@ -1,9 +1,9 @@
 import {
 	type AgentSessionEvent,
-	groupSessionsByWorkspace,
+	groupSessionsByDirectory,
 	SessionManager,
 	type SessionRow,
-	type WorkspaceGroup,
+	type DirectoryGroup,
 } from "@my-agent/core";
 import type { HostedSession, SessionHub } from "./hub.ts";
 
@@ -25,12 +25,12 @@ export interface RowGoneListener {
 
 export interface SessionProjection {
 	/**
-	 * Every row, grouped by workspace and ordered the way the sidebar draws them.
+	 * Every row, grouped by directory and ordered the way the sidebar draws them.
 	 *
 	 * Seeded on the first call and served from memory after that: this process is the only writer of
 	 * these values, so a rescan would re-read every transcript to learn nothing.
 	 */
-	groups(): Promise<WorkspaceGroup[]>;
+	groups(): Promise<DirectoryGroup[]>;
 	/** Every row, unordered, for a caller that draws its own groups. */
 	rows(): Promise<SessionRow[]>;
 	/** One row by id, or `undefined` for a session this process has never heard of. */
@@ -292,7 +292,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	 * never leave a running session's row claiming to be idle.
 	 */
 	const seed = async (): Promise<void> => {
-		for (const group of await SessionManager.listWorkspaces()) {
+		for (const group of await SessionManager.listDirectories()) {
 			// Through `publish` rather than `rows.set`: a row may already be here from a probe, and a
 			// listing knows things a single file does not — a fork's parent, above all. Going around the
 			// comparison would leave that correction sitting in the store with nobody told.
@@ -317,11 +317,11 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	const stopHosting = hub.onHostChange(onHost);
 
 	return {
-		async groups(): Promise<WorkspaceGroup[]> {
+		async groups(): Promise<DirectoryGroup[]> {
 			await ensureSeeded();
 			// Grouped by the store's own rule rather than a second copy of it: the sidebar draws one
 			// order, and a reader that ordered differently would disagree with the listing it came from.
-			return groupSessionsByWorkspace([...rows.values()]);
+			return groupSessionsByDirectory([...rows.values()]);
 		},
 		async rows(): Promise<SessionRow[]> {
 			await ensureSeeded();

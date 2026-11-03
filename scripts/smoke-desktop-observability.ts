@@ -439,7 +439,7 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 		dialog: native.dialog,
 	});
 
-	const booted = await observed.bootWithinBudget("C:\\workspace");
+	const booted = await observed.bootWithinBudget("C:\\projects\\demo");
 	check("a rejecting boot returns null", booted === null, JSON.stringify(booted));
 	check("the reason is a line", logs.some((line) => line.includes("the port was taken")), logs.join(" | "));
 	check("and it reaches a window", factory.made.length === 1, String(factory.made.length));
@@ -463,7 +463,7 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 	});
 
 	const askedAt = Date.now();
-	const booted = await observed.bootWithinBudget("C:\\workspace");
+	const booted = await observed.bootWithinBudget("C:\\projects\\demo");
 	const waited = Date.now() - askedAt;
 	check("a hanging boot returns null instead of waiting forever", booted === null, JSON.stringify(booted));
 	check("it waited the budget it was given, not the default", waited >= 25 && waited < 1_000, `${waited} ms`);
@@ -486,7 +486,7 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 		log: (line) => lateLogs.push(line),
 		dialog: dialogRecorder().dialog,
 	});
-	check("a late boot still reports its deadline", (await lateObserved.bootWithinBudget("C:\\workspace")) === null);
+	check("a late boot still reports its deadline", (await lateObserved.bootWithinBudget("C:\\projects\\demo")) === null);
 	settle({ url: "http://127.0.0.1:9" });
 	check("and says so when it finally arrives", await until(() => lateLogs.some((line) => line.includes("http://127.0.0.1:9")), 1_000), lateLogs.join(" | "));
 }
@@ -503,7 +503,7 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 		log: (line) => logs.push(line),
 		dialog: dialogRecorder().dialog,
 	});
-	const booted = await observed.bootWithinBudget("C:\\workspace");
+	const booted = await observed.bootWithinBudget("C:\\projects\\demo");
 	check("a boot inside the budget comes back as the server", booted?.url === "http://127.0.0.1:1234", JSON.stringify(booted));
 	check("nothing was logged", logs.length === 0, logs.join(" | "));
 	check("and no report window was opened", factory.made.length === 0, String(factory.made.length));

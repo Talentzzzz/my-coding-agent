@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import type { AgentTool, AgentToolResult } from "../types.ts";
 import { Type, type Static } from "typebox";
 import { DEFAULT_BASH_SETTINGS, type BashSettings } from "../config.ts";
-import { defaultLauncher, type Workspace } from "../workspace.ts";
+import { defaultLauncher } from "../shell.ts";
 import { truncate } from "./truncate.ts";
 import { textResult, throwIfAborted } from "./types.ts";
 
@@ -10,7 +10,7 @@ const MAX_CAPTURE_BYTES = 256 * 1024;
 const UPDATE_INTERVAL_MS = 150;
 
 const parameters = Type.Object({
-	command: Type.String({ description: "Shell command to run, in the workspace directory" }),
+	command: Type.String({ description: "Shell command to run, starting in the working directory" }),
 	description: Type.Optional(
 		Type.String({ description: "Short description of what the command does, shown to the user" }),
 	),
@@ -26,26 +26,28 @@ const parameters = Type.Object({
 export type BashParams = Static<typeof parameters>;
 
 /**
- * `bash` runs one command in the workspace and streams its output.
+ * `bash` runs one command in the working directory and streams its output.
  *
- * Running it in the workspace directory (not the server's cwd) keeps `git status`, `npm test` and
- * friends pointed at the project the user is actually talking about.
+ * Starting there (rather than in the server process's own working directory) keeps `git status`, `npm test` and friends
+ * pointed at the project the user is talking about. Nothing confines the command: one that walks out
+ * of the directory with `cd` is a command the user asked for, and the tool has no second opinion
+ * about it.
  *
  * The timeouts arrive with the run context — the same request that built the tool — rather than being
  * bound here, so a change made in the settings panel reaches the next request's build without
- * anything being rebuilt by hand. A caller that names none — a test, a SubAgent's loadout — runs on
- * the defaults.
+ * anything being rebuilt by hand. A caller that names none — a test building the tool directly —
+ * runs on the defaults.
  */
-export function createBashTool(workspace: Workspace, timeouts?: BashSettings): AgentTool<typeof parameters> {
+export function createBashTool(workDirAbsPath: string, timeouts?: BashSettings): AgentTool<typeof parameters> {
 	return {
 		name: "bash",
 		label: "Bash",
 		description:
-			"Run a shell command in the workspace and return its combined output. Use for tests, builds, git, and package managers.",
+			"Run a shell command from the working directory and return its combined output. Use for tests, builds, git, and package managers.",
 		parameters,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal, onUpdate) {
-			return runBash(workspace, params, { signal, onUpdate, timeouts });
+			return runBash(workDirAbsPath, params, { signal, onUpdate, timeouts });
 		},
 	};
 }
@@ -63,7 +65,7 @@ export interface BashHooks {
 }
 
 export async function runBash(
-	workspace: Workspace,
+	workDirAbsPath: string,
 	params: BashParams,
 	hooks: BashHooks = {},
 ): Promise<AgentToolResult<unknown>> {
@@ -75,7 +77,7 @@ export async function runBash(
 
 	return new Promise<AgentToolResult<unknown>>((resolvePromise, rejectPromise) => {
 		const child = spawn(launcher.file, [...launcher.args, params.command], {
-			cwd: workspace.absRoot,
+			cwd: workDirAbsPath,
 			windowsHide: true,
 			stdio: ["ignore", "pipe", "pipe"],
 		});

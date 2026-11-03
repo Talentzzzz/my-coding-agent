@@ -3,7 +3,7 @@ import {
 	clampContentWidth,
 	clampFontSize,
 	clampSidebarWidth,
-	clampWorkspacePaging,
+	clampDirectoryPaging,
 	coerceModelConfig,
 	type ConfigPatch,
 	DEFAULT_MODE_NAME,
@@ -23,36 +23,36 @@ import {
 	getAppearance,
 	getApprovals,
 	getBashSettings,
-	getHiddenWorkspaces,
+	getHiddenDirectories,
 	getSettings,
-	getWorkspaceNames,
+	getDirectoryNames,
 	toSessionRef,
 	type ModelConfig,
-	type WorkspaceGroup,
-	type WorkspacePaging,
+	type DirectoryGroup,
+	type DirectoryPaging,
 } from "@my-agent/core";
 import { dirname, resolve, sep } from "node:path";
 import { httpStatus } from "../http/errors.ts";
-import { samePath, workspaceRootForCreate, workspaceRootOrThrow, type SessionHub } from "../hub.ts";
+import { samePath, workDirAbsPathForCreate, workDirAbsPathOrThrow, type SessionHub } from "../hub.ts";
 
-/** The stored sessions for a workspace, narrowed from the session files to what the wire carries. */
-export async function listSessions(workspaceRoot: string): Promise<SessionRef[]> {
-	return (await SessionManager.list(workspaceRoot)).map(toSessionRef);
+/** The stored sessions for one directory, narrowed from the session files to what the wire carries. */
+export async function listSessions(workDirAbsPath: string): Promise<SessionRef[]> {
+	return (await SessionManager.list(workDirAbsPath)).map(toSessionRef);
 }
 
 /** What the settings panel reads: the values it can edit, and the ones it shows read-only. */
 function settingsOf(settings: SettingsState): SettingsSnapshot {
 	const merged = getSettings(settings);
-	const hidden = getHiddenWorkspaces(settings);
-	const names = getWorkspaceNames(settings);
+	const hidden = getHiddenDirectories(settings);
+	const names = getDirectoryNames(settings);
 	return {
 		appearance: getAppearance(settings),
 		approval: getApprovals(settings),
 		bash: getBashSettings(settings),
 		...(merged.tools === undefined ? {} : { tools: merged.tools }),
 		...(merged.modes === undefined ? {} : { modes: merged.modes }),
-		...(hidden.length === 0 ? {} : { hiddenWorkspaces: hidden }),
-		...(Object.keys(names).length === 0 ? {} : { workspaceNames: names }),
+		...(hidden.length === 0 ? {} : { hiddenDirectories: hidden }),
+		...(Object.keys(names).length === 0 ? {} : { directoryNames: names }),
 		...(merged.model === undefined ? {} : { model: merged.model }),
 		...(merged.defaultModelSeeded === undefined ? {} : { defaultModelSeeded: merged.defaultModelSeeded }),
 	};
@@ -79,18 +79,18 @@ export interface SessionListener {
 	/** A session was deleted. The projection drops its row, and the transport tells its clients. */
 	onRemoved?(sessionId: string): void;
 	/**
-	 * A workspace entered or left the machine's listing: it was put aside, or taken back.
+	 * A directory entered or left the machine's listing: it was put aside, or taken back.
 	 *
 	 * No row changed, so there is no `session_row` frame that could carry this: the group list itself
 	 * is what moved, and the transport answers by re-sending the
 	 * overview the rows are drawn from. A window told nothing would keep drawing a group the server
 	 * has stopped listing — which is the one thing 「删除」 promises not to happen.
 	 */
-	onWorkspaceListingChanged?(): void;
+	onDirectoryListingChanged?(): void;
 }
 
 /**
- * The models, the workspace groups, and the stored settings.
+ * The models, the directory groups, and the stored settings.
  *
  * All three are read-only views of something the hub already owns, and all three used to be frames a
  * socket pushed. Over HTTP the client asks for them, which is what lets a page reload with no session
@@ -101,7 +101,7 @@ export class SystemController {
 	/**
 	 * Where a command's consequences go when they are not its answer.
 	 *
-	 * A workspace rename is the one thing here with a consequence wider than its response: every row
+	 * A directory rename is the one thing here with a consequence wider than its response: every row
 	 * of the group moves at once, and the projection is the one writer of rows, so the caller is told
 	 * rather than left to guess. Optional for the same reason it is on {@link SessionController}: a
 	 * smoke that only wants the HTTP surface wires no transport at all.
@@ -166,15 +166,15 @@ export class SystemController {
 		return { models: listModelOptions(rows) };
 	}
 
-	/** Every workspace this machine has sessions for, each with its own list, most recent first. */
-	async workspaces(): Promise<{ workspaces: WorkspaceGroup[] }> {
-		return { workspaces: (await SessionManager.listWorkspaces()).filter((group) => this.hub.listsWorkspace(group.workDirAbsPath)) };
+	/** Every directory this machine has sessions for, each with its own list, most recent first. */
+	async directories(): Promise<{ directories: DirectoryGroup[] }> {
+		return { directories: (await SessionManager.listDirectories()).filter((group) => this.hub.listsDirectory(group.workDirAbsPath)) };
 	}
 
 	/**
-	 * Give a workspace a name this window shows instead of its folder name.
+	 * Give a directory a name this window shows instead of its folder name.
 	 *
-	 * A view decision, and deliberately the only rename this app offers: a workspace is identified by
+	 * A view decision, and deliberately the only rename this app offers: a directory is identified by
 	 * the directory its transcripts recorded, so renaming that directory would be a *move*. It would
 	 * have to rewrite every header, it would break the moment the user renamed the folder behind our
 	 * back, and it would put a destructive operation behind a menu item that reads like a label. What
@@ -183,29 +183,29 @@ export class SystemController {
 	 *
 	 * An empty name takes the custom name back, so the heading wears the folder's own name again.
 	 */
-	async renameWorkspace(body: Record<string, unknown>): Promise<{ workDirAbsPath: string; name: string; settings: SettingsSnapshot }> {
+	async renameDirectory(body: Record<string, unknown>): Promise<{ workDirAbsPath: string; name: string; settings: SettingsSnapshot }> {
 		const workDirAbsPath = body.workDirAbsPath;
 		const name = body.name;
 		if (typeof workDirAbsPath !== "string" || workDirAbsPath.trim().length === 0) {
-			throw httpStatus.badRequest("`workDirAbsPath` must be a workspace path");
+			throw httpStatus.badRequest("`workDirAbsPath` must be a directory path");
 		}
 		if (typeof name !== "string") throw httpStatus.badRequest("`name` must be a string");
 
 		const absSource = resolve(workDirAbsPath);
-		// The same check the listing makes: a path this machine has no sessions for is not a workspace,
+		// The same check the listing makes: a path this machine has no sessions for is not a directory,
 		// so naming it would store a label nothing ever draws.
-		const groups = await SessionManager.listWorkspaces();
+		const groups = await SessionManager.listDirectories();
 		if (!groups.some((group) => samePath(group.workDirAbsPath, absSource))) {
-			throw httpStatus.notFound(`Unknown workspace: ${absSource}`);
+			throw httpStatus.notFound(`Unknown directory: ${absSource}`);
 		}
 
 		const settings = this.hub.settingsStateOf(this.hub.workDirAbsPath);
-		applySettings(settings, { workspaceNames: { [absSource]: name.trim() } });
+		applySettings(settings, { directoryNames: { [absSource]: name.trim() } });
 		return { workDirAbsPath: absSource, name: name.trim(), settings: settingsOf(settings) };
 	}
 
 	/**
-	 * Remove a workspace from the list, touching nothing on disk.
+	 * Remove a directory from the list, touching nothing on disk.
 	 *
 	 * The stored list is sent whole, the way the client's own `hidden` list reads it, and the field
 	 * goes through the ordinary settings road — so「删除」 is a view decision that survives a reload
@@ -213,20 +213,20 @@ export class SystemController {
 	 *
 	 * Two things are told rather than returned, because they are the facts a second window is not
 	 * asking about: the listing itself went back with the answer, and every other window hears the same
-	 * news as a fresh overview — see {@link SessionListener.onWorkspaceListingChanged}. Re-adding the
-	 * workspace is a new session in it, which is {@link SessionController.create}'s half of the pair.
+	 * news as a fresh overview — see {@link SessionListener.onDirectoryListingChanged}. Re-adding the
+	 * directory is a new session in it, which is {@link SessionController.create}'s half of the pair.
 	 */
-	hideWorkspace(body: Record<string, unknown>): Promise<{ settings: SettingsSnapshot; workspaces: WorkspaceGroup[] }> {
+	hideDirectory(body: Record<string, unknown>): Promise<{ settings: SettingsSnapshot; directories: DirectoryGroup[] }> {
 		const workDirAbsPath = body.workDirAbsPath;
 		if (typeof workDirAbsPath !== "string" || workDirAbsPath.trim().length === 0) {
-			throw httpStatus.badRequest("`workDirAbsPath` must be a workspace path");
+			throw httpStatus.badRequest("`workDirAbsPath` must be a directory path");
 		}
 
 		const settings = this.hub.settingsStateOf(this.hub.workDirAbsPath);
-		const hidden = getHiddenWorkspaces(settings);
+		const hidden = getHiddenDirectories(settings);
 		if (!hidden.some((path) => samePath(path, workDirAbsPath))) {
-			applySettings(settings, { hiddenWorkspaces: [...hidden, resolve(workDirAbsPath)] });
-			this.listeners.onWorkspaceListingChanged?.();
+			applySettings(settings, { hiddenDirectories: [...hidden, resolve(workDirAbsPath)] });
+			this.listeners.onDirectoryListingChanged?.();
 		}
 
 		// The listing goes back with the answer because the removal is a *stored* fact rather than a
@@ -236,10 +236,10 @@ export class SystemController {
 	}
 
 	/** The visible listing, as the hub's rule leaves it. */
-	private async listing(settings: SettingsState): Promise<{ settings: SettingsSnapshot; workspaces: WorkspaceGroup[] }> {
+	private async listing(settings: SettingsState): Promise<{ settings: SettingsSnapshot; directories: DirectoryGroup[] }> {
 		return {
 			settings: settingsOf(settings),
-			workspaces: (await SessionManager.listWorkspaces()).filter((group) => this.hub.listsWorkspace(group.workDirAbsPath)),
+			directories: (await SessionManager.listDirectories()).filter((group) => this.hub.listsDirectory(group.workDirAbsPath)),
 		};
 	}
 
@@ -253,7 +253,7 @@ export class SystemController {
 	 *
 	 * Narrower than {@link SessionController.updateConfig} on purpose: these are the defaults the window
 	 * itself runs on, and they are read before any session exists, so they cannot live on a session.
-	 * `approval` here is therefore the **workspace default** — what a session that never chose opens on
+	 * `approval` here is therefore the **directory default** — what a session that never chose opens on
 	 * — not a running session's own answer, which travels as a config patch on that session. `model` is
 	 * the row a *new* session starts on; the model a live session is on is the composer's, and reaches
 	 * the server with the message rather than here. `tools` is the global default active set, whole,
@@ -316,28 +316,28 @@ export class SystemController {
 			next.modes = modes;
 		}
 
-		if (fields.hiddenWorkspaces !== undefined) {
-			if (!Array.isArray(fields.hiddenWorkspaces) || fields.hiddenWorkspaces.some((path) => typeof path !== "string")) {
-				throw httpStatus.badRequest("`hiddenWorkspaces` must be an array of workspace paths");
+		if (fields.hiddenDirectories !== undefined) {
+			if (!Array.isArray(fields.hiddenDirectories) || fields.hiddenDirectories.some((path) => typeof path !== "string")) {
+				throw httpStatus.badRequest("`hiddenDirectories` must be an array of directory paths");
 			}
 			// Empty is a choice and not an absence — "nothing is hidden" — so it is stored as it
 			// arrives, the same rule the empty tool set follows.
-			next.hiddenWorkspaces = fields.hiddenWorkspaces as string[];
+			next.hiddenDirectories = fields.hiddenDirectories as string[];
 		}
 
-		if (fields.workspaceNames !== undefined) {
-			const names = fields.workspaceNames;
+		if (fields.directoryNames !== undefined) {
+			const names = fields.directoryNames;
 			if (typeof names !== "object" || names === null || Array.isArray(names)) {
-				throw httpStatus.badRequest("`workspaceNames` must be an object of workspace paths to names");
+				throw httpStatus.badRequest("`directoryNames` must be an object of directory paths to names");
 			}
 			for (const [workDirAbsPath, name] of Object.entries(names as Record<string, unknown>)) {
 				if (typeof name !== "string") {
-					throw httpStatus.badRequest(`\`workspaceNames.${workDirAbsPath}\` must be a string`);
+					throw httpStatus.badRequest(`\`directoryNames.${workDirAbsPath}\` must be a string`);
 				}
 			}
 			// Sent as the entries that changed, merged per key by the settings writer. An empty string
 			// is how a name is taken back, so it is stored rather than dropped here.
-			next.workspaceNames = names as Record<string, string>;
+			next.directoryNames = names as Record<string, string>;
 		}
 
 		if (fields.model !== undefined) {
@@ -381,14 +381,14 @@ export class SystemController {
 				...(appearance.contentWidth === undefined
 					? {}
 					: { contentWidth: clampContentWidth(appearance.contentWidth) }),
-				// The sidebar's per-workspace paging state, normalized entry by entry the same way: a
-				// workspace whose entry is not a record is dropped, not stored. A field that is not a
-				// record at all — or a record with no workspace left in it — clamps to undefined, and
+				// The sidebar's per-directory paging state, normalized entry by entry the same way: a
+				// directory whose entry is not a record is dropped, not stored. A field that is not a
+				// record at all — or a record with no directory left in it — clamps to undefined, and
 				// spreading `undefined` into the object literal is what leaves the field out of the
 				// patch entirely, so nothing is stored and nothing is manufactured.
-				...(appearance.workspaces === undefined
+				...(appearance.directories === undefined
 					? {}
-					: { workspaces: clampWorkspacePaging(appearance.workspaces) }),
+					: { directories: clampDirectoryPaging(appearance.directories) }),
 			};
 		}
 
@@ -501,31 +501,31 @@ export class SessionController {
 			try {
 				// A directory this machine already stores sessions for is put back when it is gone:
 				// the user renamed the folder behind us, and the group they see is still that path.
-				await workspaceRootForCreate(absRoot);
+				await workDirAbsPathForCreate(absRoot);
 			} catch (error) {
 				throw httpStatus.badRequest(messageOf(error));
 			}
 		}
 		const sessionId = await this.hub.newSession(absRoot);
-		this.restoreWorkspace(absRoot ?? this.hub.workDirAbsPath);
+		this.restoreDirectory(absRoot ?? this.hub.workDirAbsPath);
 		return { sessionId, sessions: await listSessions(absRoot ?? this.hub.workDirAbsPath) };
 	}
 
 	/**
-	 * A new session in a workspace that was put aside takes it back onto the list.
+	 * A new session in a directory that was put aside takes it back onto the list.
 	 *
-	 * The pair to `SystemController.hideWorkspace`, and the answer to「删除」 being a one-way door: the
-	 * transcripts and the directory were never touched, so the workspace is still there to be used —
+	 * The pair to `SystemController.hideDirectory`, and the answer to「删除」 being a one-way door: the
+	 * transcripts and the directory were never touched, so it is still there to be used —
 	 * and coming back to it is what says the user wants it listed again. Written onto the settings state
  * the hub's visibility rule reads, so the next listing and the next overview frame already agree.
 	 */
-	private restoreWorkspace(workDirAbsPath: string): void {
+	private restoreDirectory(workDirAbsPath: string): void {
 		const settings = this.hub.settingsStateOf(this.hub.workDirAbsPath);
-		const hidden = getHiddenWorkspaces(settings);
+		const hidden = getHiddenDirectories(settings);
 		const kept = hidden.filter((path) => !samePath(path, workDirAbsPath));
 		if (kept.length === hidden.length) return;
-		applySettings(settings, { hiddenWorkspaces: kept });
-		this.listeners.onWorkspaceListingChanged?.();
+		applySettings(settings, { hiddenDirectories: kept });
+		this.listeners.onDirectoryListingChanged?.();
 	}
 
 	/**
@@ -815,20 +815,20 @@ function messageOf(error: unknown): string {
 }
 
 /**
- * Whether a workspace path lives under a directory that moved.
+ * Whether a directory key lives under a directory that moved.
  *
- * Strictly below, not equal: the key that *is* the moved workspace is re-keyed rather than dropped,
- * and this answers the question the other keys are filtered by — a workspace nested inside the one
+ * Strictly below, not equal: the key that *is* the moved directory is re-keyed rather than dropped,
+ * and this answers the question the other keys are filtered by — a directory nested inside the one
  * that was renamed now names a directory that does not exist, so its entry is forgotten with
  * everything it held.
  *
  * Resolved and case-folded the way {@link samePath} compares, so the two directions of the same
  * comparison cannot disagree about what "under" means on Windows.
  */
-function underPath(absWorkspaceWorkDir: string, dirInput: string): boolean {
+function underPath(workDirAbsPath: string, dirInput: string): boolean {
 	const absDir = resolvePath(dirInput);
 	const key = process.platform === "win32" ? absDir.toLowerCase() : absDir;
-	const absTarget = resolvePath(absWorkspaceWorkDir);
+	const absTarget = resolvePath(workDirAbsPath);
 	const candidate = process.platform === "win32" ? absTarget.toLowerCase() : absTarget;
 	return candidate.startsWith(key.endsWith(sep) ? key : key + sep);
 }

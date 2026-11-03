@@ -11,15 +11,15 @@ const MAX_FILE_BYTES = 64 * 1024;
 const MAX_TOTAL_CHARS = 32_000;
 
 /**
- * Collect `AGENTS.md` files that apply to a workspace.
+ * Collect the `AGENTS.md` files that apply to a working directory.
  *
- * The walk climbs from the workspace root to the file-system root, so a repo inside a monorepo
- * inherits the outer conventions, and reads the nearest file last: later entries override earlier
- * ones in the assembled prompt.
+ * The walk climbs from `workDirAbsPath` to the file-system root, so a repo inside a monorepo inherits the outer
+ * conventions, and reads the nearest file last: later entries override earlier ones in the assembled
+ * prompt.
  */
-export async function loadAgentsMd(workspaceRootInput: string): Promise<AgentsMdFile[]> {
+export async function loadAgentsMd(workDirAbsPath: string): Promise<AgentsMdFile[]> {
 	const files: AgentsMdFile[] = [];
-	for (const absDirectory of ancestors(workspaceRootInput)) {
+	for (const absDirectory of ancestors(workDirAbsPath)) {
 		for (const name of ["AGENTS.md", "CLAUDE.md"]) {
 			const absPath = join(absDirectory, name);
 			const info = await stat(absPath).catch(() => undefined);
@@ -33,12 +33,12 @@ export async function loadAgentsMd(workspaceRootInput: string): Promise<AgentsMd
 }
 
 /** Fold the collected files into one prompt section, nearest file last. */
-export function formatAgentsMd(files: readonly AgentsMdFile[], workspaceRootInput: string): string | undefined {
+export function formatAgentsMd(files: readonly AgentsMdFile[], workDirAbsPath: string): string | undefined {
 	if (files.length === 0) return undefined;
 	let budget = MAX_TOTAL_CHARS;
 	const sections: string[] = [];
 	for (const file of files.toReversed()) {
-		const label = file.absPath === join(workspaceRootInput, "AGENTS.md") ? "AGENTS.md" : file.absPath;
+		const label = file.absPath === join(workDirAbsPath, "AGENTS.md") ? "AGENTS.md" : file.absPath;
 		const content = file.content.length > budget ? `${file.content.slice(0, budget)}\n[... truncated ...]` : file.content;
 		budget -= content.length;
 		sections.push(`### ${label}\n${content}`);

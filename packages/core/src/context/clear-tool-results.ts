@@ -8,8 +8,8 @@ import type { SessionEntry } from "../session/session-manager.ts";
  * on disk to read, the command is still there to run. Dropping it costs a re-run and nothing else.
  *
  * Everything else is kept whatever its age, and that is the point of listing these rather than the
- * ones to protect: a report from a subagent, a task's state, or any other answer the conversation
- * itself produced cannot be recovered by asking again, so losing it would lose work instead of tokens.
+ * ones to protect: a report, a task's state, or any other answer the conversation itself produced
+ * cannot be recovered by asking again, so losing it would lose work instead of tokens.
  * A tool that can be re-run has to be named here; nothing is prunable by default.
  */
 export const REFETCHABLE_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "glob", "bash", "edit", "write"]);

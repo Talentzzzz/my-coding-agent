@@ -11,19 +11,18 @@ import { join } from "node:path";
 import { anthropicMessages, type SimpleStreamOptions } from "@my-agent/llm";
 import {
 	coerceModelConfig,
-	fillModel,
 	isUnconfigured,
 	listModelOptions,
 	createModel,
+	modelFor,
 	modelsPath,
 	normalizeThinkingLevel,
 	placeholderModel,
-	placeholderModelState,
-	resolvedModel,
+	rowFor,
 	thinkingLevelsFor,
 	unconfiguredStream,
 	ModelConfigStore,
-	type ModelState,
+	type ModelChoice,
 	type ModelSource,
 	type ModelConfig,
 } from "@my-agent/core";
@@ -357,91 +356,65 @@ try {
 		check("and the transport is the one this build speaks", options[0]?.api === "anthropic-messages", String(options[0]?.api));
 	}
 
-	// The stateless surface: a session holds the seed the client sent — the row's name and the level —
-	// and `fillModel` lays the row's facts over it, in place, before anything reads them. The request
-	// object is built from the bag at send time and dropped. These read the bag and the wire, so no
-	// provider key is needed here either.
-	heading("a bag is seeded with a name and filled from the catalog");
+	// The stateless surface: a session holds the choice the client sent — the row's name and the level —
+	// and every model is built from it by looking the name up in the catalog. Nothing of the row is
+	// kept anywhere, so an edit to the file reaches the next build with nothing to refresh. These read
+	// the built model and the wire, so no provider key is needed here either.
+	heading("a choice is looked up in the catalog, and every build reads it fresh");
 	{
 		const rows = [row()];
-		const state: ModelState = { name: "mine", thinkingLevel: "high" };
-		const filled = state;
-		fillModel(rows, state);
-		check("fill lays the row's facts into the same bag, not a copy", filled === state && filled.id === "wire-model", String(filled?.id));
-		check("the endpoint arrives", filled.baseUrl === "http://127.0.0.1:1/v1", String(filled.baseUrl));
-		check("the key arrives, for the request path only", filled.apiKey === "secret", String(filled.apiKey));
-		check("the window arrives", filled.contextWindow === 64_000, String(filled.contextWindow));
-		check("and the seed's level is kept", filled.thinkingLevel === "high", String(filled.thinkingLevel));
+		const choice: ModelChoice = { name: "mine", thinkingLevel: "high" };
+		const model = modelFor(choice, rows);
+		check("the row is what answers the name", rowFor(choice, rows)?.id === "wire-model", String(rowFor(choice, rows)?.id));
+		check("the build carries the row's wire id", model.id === "wire-model", String(model.id));
+		check("the endpoint", model.baseUrl === "http://127.0.0.1:1/v1", String(model.baseUrl));
+		check("the key, for the request path only", model.apiKey === "secret", String(model.apiKey));
+		check("the window", model.contextWindow === 64_000, String(model.contextWindow));
+		check("and the choice's level", model.thinkingLevel === "high", String(model.thinkingLevel));
+		check("the constants the row never names are the constructor's", model.api === "anthropic-messages" && JSON.stringify(model.input) === JSON.stringify(["text"]), `${model.api} / ${JSON.stringify(model.input)}`);
+		check("the choice itself gained nothing: it is a choice, not a copy of the row", JSON.stringify(choice) === '{"name":"mine","thinkingLevel":"high"}', JSON.stringify(choice));
 
-		// Nothing of the row it last saw survives a refill: the whole of "editing a model takes effect
-		// on the next request" is this, run again before every request.
+		// The whole of "editing a model takes effect on the next request" is now this: nothing was cached
+		// to invalidate, so the next build simply reads what the file says.
 		rows[0]!.apiKey = "corrected";
 		rows[0]!.contextWindow = 32_000;
-		fillModel(rows, state);
-		check("a corrected key is laid in on the next fill, with nothing rebuilt", filled.apiKey === "corrected", String(filled.apiKey));
-		check("and a resized window is too", filled.contextWindow === 32_000, String(filled.contextWindow));
+		const reread = modelFor(choice, rows);
+		check("a corrected key is on the next build, with nothing refreshed", reread.apiKey === "corrected", String(reread.apiKey));
+		check("and a resized window is too", reread.contextWindow === 32_000, String(reread.contextWindow));
 
-		// A bag moving to a row that does not name a compat override must lose the old one, not keep it:
-		// the override described the endpoint that used to be here.
+		// A build never inherits a field from an earlier one, because no state survives between them: a
+		// row with no compat override builds without one, and a row that has one brings it.
 		rows.push(row({ name: "plain", id: "deepseek-v4.1-flash" }));
-		state.name = "plain";
-		fillModel(rows, state);
-		check("a row without a compat override leaves none behind", filled.compat === undefined, JSON.stringify(filled.compat));
+		check("a row without a compat override builds without one", modelFor({ name: "plain" }, rows).compat === undefined, JSON.stringify(modelFor({ name: "plain" }, rows).compat));
 		rows.push(row({ name: "claude", id: "claude-opus-4-7" }));
-		state.name = "claude";
-		fillModel(rows, state);
-		check("and a row that has one lays it in", filled.compat?.supportsTemperature === false, JSON.stringify(filled.compat));
-		state.name = "plain";
-		fillModel(rows, state);
-		check("and moving back drops it again", filled.compat === undefined, JSON.stringify(filled.compat));
-		state.name = "mine";
+		check("and a row with one brings it", modelFor({ name: "claude" }, rows).compat?.supportsTemperature === false, JSON.stringify(modelFor({ name: "claude" }, rows).compat));
 
-		// A level is the seed's to name and the fill's to normalize: a string the app has no name for
-		// lands on "off" by the time it is asked at, and no level at all stays none.
-		state.thinkingLevel = "turbo";
-		fillModel(rows, state);
-		check("a level nobody has fills as off", filled.thinkingLevel === "off", String(filled.thinkingLevel));
-		delete filled.thinkingLevel;
-		fillModel(rows, state);
-		check("no level fills as none", filled.thinkingLevel === undefined, String(filled.thinkingLevel));
+		// A level is normalized on the way into the model: a string the app has no name for lands on
+		// "off", and no level at all stays none, which the wire reads as "do not think".
+		check("a level nobody has builds as off", modelFor({ name: "mine", thinkingLevel: "turbo" }, rows).thinkingLevel === "off", String(modelFor({ name: "mine", thinkingLevel: "turbo" }, rows).thinkingLevel));
+		check("no level builds as none", modelFor({ name: "mine" }, rows).thinkingLevel === undefined, String(modelFor({ name: "mine" }, rows).thinkingLevel));
 
-		// The request object is run-local: built from the bag, used once, dropped. The constants the
-		// row never names are its constructor's, not the fill's.
-		filled.thinkingLevel = "max";
-		const request = resolvedModel(filled);
-		check("the request object carries the bag's wire id", request.id === "wire-model", String(request.id));
-		check("and its level", request.thinkingLevel === "max", String(request.thinkingLevel));
-		check("and the build's one transport is defaulted in", request.api === "anthropic-messages", String(request.api));
-		check("and the build's input is too", JSON.stringify(request.input) === JSON.stringify(["text"]), JSON.stringify(request.input));
-
-		let threw: string | undefined;
-		try {
-			fillModel(rows, { name: "nope" });
-		} catch (error) {
-			threw = error instanceof Error ? error.message : String(error);
-		}
-		check("a name no row answers throws", threw !== undefined, String(threw));
-		check("and says which name went unanswered", (threw ?? "").includes("nope"), String(threw));
+		// A name no row answers does not throw. A session has to stay buildable — a snapshot, a usage
+		// meter, and a failure message all read it — so the placeholder's facts answer under the name
+		// that was asked for, and the transport is what refuses to send.
+		check("a name no row answers finds no row", rowFor({ name: "nope" }, rows) === undefined);
+		const missing = modelFor({ name: "nope" }, rows);
+		check("but still builds, keeping the name that was asked for", missing.name === "nope", String(missing.name));
+		check("on the placeholder's field table", missing.id === "no-model" && missing.contextWindow === 200_000, `${missing.id} / ${missing.contextWindow}`);
+		const refused = await unconfiguredStream(missing).result();
+		check("asking it for an answer fails", refused.stopReason === "error", String(refused.stopReason));
+		check("with the sentence that says what to add", (refused.errorMessage ?? "").includes("No model is configured"), String(refused.errorMessage));
 	}
 
-	heading("the placeholder seed is complete and never fills");
+	heading("the placeholder is a whole field table, and no row answers it");
 	{
-		const state = placeholderModelState();
-		check("the seed is recognised as the placeholder", isUnconfigured(state));
-		check("and it is a whole field table, not a bare name", state.id === "no-model" && state.contextWindow === 200_000, JSON.stringify(state));
-		check("with no key of its own", state.apiKey === undefined, String(state.apiKey));
+		const model = placeholderModel();
+		check("it is recognised as the placeholder", isUnconfigured(model));
+		check("and it is a whole field table, not a bare name", model.id === "no-model" && model.contextWindow === 200_000, `${model.id} / ${model.contextWindow}`);
+		check("with no key of its own", model.apiKey === undefined, String(model.apiKey));
+		check("no row's name answers it", rowFor({ name: model.name }, [row()]) === undefined);
 
-		// The name is reserved, so no catalog row can ever answer it: the fill refuses, and the stream
-		// — not a request to the dead endpoint — is what a session answers with.
-		let threw: string | undefined;
-		try {
-			fillModel([row()], state);
-		} catch (error) {
-			threw = error instanceof Error ? error.message : String(error);
-		}
-		check("no row fills a reserved name", threw !== undefined, String(threw));
-
-		const message = await unconfiguredStream(resolvedModel(state)).result();
+		const message = await unconfiguredStream(model).result();
 		check("asking it for an answer fails", message.stopReason === "error", String(message.stopReason));
 		check("with a well-formed model on the failure", message.model === "no-model" && message.api === "anthropic-messages", `${message.model} / ${message.api}`);
 	}

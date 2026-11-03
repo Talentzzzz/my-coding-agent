@@ -7,7 +7,7 @@
  * rather than two.
  *
  * It is plain CommonJS because that is what Electron loads before any toolchain runs: the server
- * below is the workspace's TypeScript, executed by Node's own type stripping.
+ * below is this repository's TypeScript, executed by Node's own type stripping.
  */
 const { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell } = require("electron");
 const { existsSync } = require("node:fs");
@@ -53,22 +53,22 @@ const lifecycle = createShutdown({ app });
 /** The repository root: this file lives in packages/desktop. */
 const packageRoot = resolve(__dirname, "..", "..");
 
-/** Where a user's `--workspace` choice is remembered between launches. */
+/** Where a user's `--workDir` choice is remembered between launches. */
 function statePath() {
-	return join(app.getPath("userData"), "workspace.txt");
+	return join(app.getPath("userData"), "workdir.txt");
 }
 
 /**
  * Which directory the agent may touch.
  *
- * `--workspace <dir>` wins, then `MY_AGENT_WORKSPACE` (how a second launcher pins one), then the
+ * `--workDir <dir>` wins, then `MY_AGENT_WORKDIR` (how a second launcher pins one), then the
  * parent of the app's own checkout, then the home directory. The app is not started from a shell
- * with a meaningful cwd — a shortcut has none — so an explicit answer is the only reliable one.
+ * with a meaningful workDirAbsPath — a shortcut has none — so an explicit answer is the only reliable one.
  */
-function workspaceDirectory() {
-	const flag = process.argv.indexOf("--workspace");
+function defaultWorkDir() {
+	const flag = process.argv.indexOf("--workDir");
 	if (flag !== -1 && process.argv[flag + 1]) return resolve(process.argv[flag + 1]);
-	if (process.env.MY_AGENT_WORKSPACE) return resolve(process.env.MY_AGENT_WORKSPACE);
+	if (process.env.MY_AGENT_WORKDIR) return resolve(process.env.MY_AGENT_WORKDIR);
 	return packageRoot;
 }
 
@@ -78,15 +78,15 @@ function workspaceDirectory() {
  * A subprocess would need its own supervisor for crashes and shutdown; importing it in-process means
  * one lifetime to manage, and `close()` is the same call the CLI's signal handler makes.
  */
-async function bootServer(cwd) {
+async function bootServer(workDirAbsPath) {
 	const entry = join(packageRoot, "packages", "server", "src", "boot.ts");
 	if (!existsSync(entry)) {
 		throw new Error(`The server entry is missing at ${entry}. This shell must run from the repository.`);
 	}
 	const module = await import(pathToFileURL(entry).href);
 	return module.bootServer({
-		// The option is `workDirAbsPath` (BootOptions): the workspace the agent may touch, absolute.
-		workDirAbsPath: cwd,
+		// The option is `workDirAbsPath` (BootOptions): the directory new sessions start in, absolute.
+		workDirAbsPath,
 		host: "127.0.0.1",
 		// Port 0: the operating system picks a free one, so a second launch never collides with the
 		// first and a fixed number never has to be reserved.
@@ -182,7 +182,7 @@ function registerWindowControls() {
 		return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false;
 	});
 
-	// The system folder picker, for the workspace picker's "添加工作区…". The browsing belongs to the
+	// The system folder picker, for the directory picker's "添加目录…". The browsing belongs to the
 	// OS dialog and nothing else: the page learns the chosen path and reads no filesystem.
 	ipcMain.handle("desktop:pick-folder", async (event) => {
 		const window = BrowserWindow.fromWebContents(event.sender);
@@ -296,10 +296,10 @@ app.whenReady().then(async () => {
 		return;
 	}
 
-	const cwd = workspaceDirectory();
-	const booted = await observability.bootWithinBudget(cwd);
+	const workDirAbsPath = defaultWorkDir();
+	const booted = await observability.bootWithinBudget(workDirAbsPath);
 	if (booted === null) return;
-	console.log(`desktop: server on ${booted.url}  workspace ${cwd}`);
+	console.log(`desktop: server on ${booted.url}  workDir ${workDirAbsPath}`);
 	lifecycle.serve(booted);
 
 	mainWindow = createWindow();

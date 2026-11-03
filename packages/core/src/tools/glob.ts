@@ -2,7 +2,7 @@ import { glob, stat } from "node:fs/promises";
 import type { AgentTool } from "../types.ts";
 import { isAbsolute, resolve } from "node:path";
 import { Type, type Static } from "typebox";
-import type { Workspace } from "../workspace.ts";
+import { displayToolPath, resolveToolPath } from "../workdir.ts";
 import { truncateList } from "./truncate.ts";
 import { textResult, throwIfAborted } from "./types.ts";
 
@@ -23,12 +23,12 @@ const parameters = Type.Object({
 	pattern: Type.String({
 		description: 'Glob pattern such as "**/*.ts" or "src/**/test_*.py", matched against paths relative to the search root',
 	}),
-	path: Type.Optional(Type.String({ description: "Directory to search in. Defaults to the workspace root." })),
+	path: Type.Optional(Type.String({ description: "Directory to search in. Defaults to the working directory." })),
 });
 
 export type GlobParams = Static<typeof parameters>;
 
-export function createGlobTool(workspace: Workspace): AgentTool<typeof parameters> {
+export function createGlobTool(workDirAbsPath: string): AgentTool<typeof parameters> {
 	return {
 		name: "glob",
 		label: "Glob",
@@ -37,20 +37,20 @@ export function createGlobTool(workspace: Workspace): AgentTool<typeof parameter
 		parameters,
 		executionMode: "parallel",
 		async execute(_toolCallId, params, signal, onUpdate) {
-			return runGlob(workspace, params, { signal, onUpdate });
+			return runGlob(workDirAbsPath, params, { signal, onUpdate });
 		},
 	};
 }
 
 export async function runGlob(
-	workspace: Workspace,
+	workDirAbsPath: string,
 	params: GlobParams,
 	hooks: { signal?: AbortSignal; onUpdate?: (partial: ReturnType<typeof textResult>) => void } = {},
 ): Promise<ReturnType<typeof textResult>> {
 	throwIfAborted(hooks.signal);
-	const absRoot = params.path === undefined ? workspace.absRoot : workspace.resolve(params.path);
+	const absRoot = params.path === undefined ? workDirAbsPath : resolveToolPath(workDirAbsPath, params.path);
 	const info = await stat(absRoot).catch(() => undefined);
-	if (!info?.isDirectory()) throw new Error(`Not a directory: ${workspace.display(absRoot)}`);
+	if (!info?.isDirectory()) throw new Error(`Not a directory: ${displayToolPath(workDirAbsPath, absRoot)}`);
 
 	const matches: string[] = [];
 	for await (const entry of glob(params.pattern, {
@@ -72,7 +72,7 @@ export async function runGlob(
 	withStats.sort((a, b) => b.mtime - a.mtime);
 
 	const { items, dropped } = truncateList(withStats, MAX_RESULTS);
-	const relRoot = workspace.display(absRoot);
+	const relRoot = displayToolPath(workDirAbsPath, absRoot);
 	const header = `${withStats.length} file${withStats.length === 1 ? "" : "s"} matching ${params.pattern} in ${relRoot}`;
 	const body = items.map((item) => `${item.relPath} (${item.size} B)`).join("\n");
 	const suffix = dropped > 0 ? `\n[... ${dropped} more matches not shown; narrow the pattern ...]` : "";

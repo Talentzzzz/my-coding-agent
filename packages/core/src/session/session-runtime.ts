@@ -41,7 +41,7 @@ export interface SessionRuntime {
 /**
  * Build a session's live half, empty.
  *
- * The queue modes are the workspace settings' answer at creation time; a config patch that moves
+ * The queue modes are the settings' answer at creation time; a config patch that moves
  * either mode later writes it onto the queue in place, so nothing here is captured for good.
  */
 export function createSessionRuntime(steeringMode: QueueMode, followUpMode: QueueMode): SessionRuntime {

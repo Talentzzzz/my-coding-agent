@@ -19,7 +19,7 @@ import { createRoutes } from "../packages/server/src/controllers/routes.ts";
 import { Router } from "../packages/server/src/http/routing.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import { mountSession } from "./mount-session.ts";
-import { inMemorySettingsState, type ModelConfig, workspaceDir } from "@my-agent/core";
+import { inMemorySettingsState, type ModelConfig, sessionDir } from "@my-agent/core";
 
 const PORT = 8094;
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-"));
@@ -156,7 +156,7 @@ try {
 	await hub.close();
 	await handle.close();
 	await rm(root, { recursive: true, force: true });
-	await rm(workspaceDir(root), { recursive: true, force: true }).catch(() => {});
+	await rm(sessionDir(root), { recursive: true, force: true }).catch(() => {});
 }
 
 process.stdout.write(failures === 0 ? "\napproval endpoint ok\n" : `\n${failures} FAILED\n`);

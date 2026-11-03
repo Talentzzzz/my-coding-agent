@@ -1,5 +1,5 @@
 // Settings smoke: drives the settings operations over real files in a scratch agent home, and
-// checks the property the sidebar's paging decision leans on — that the per-workspace paging state
+// checks the property the sidebar's paging decision leans on — that the per-directory paging state
 // survives a full serialization → restore round trip. The state is written through one bag and read
 // back by a *fresh* fill over the same paths, so it has to come back through
 // JSON.stringify → parse → mergeSettings, which an in-memory layer would skip.
@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	applySettings,
-	clampWorkspacePaging,
+	clampDirectoryPaging,
 	fillSettings,
 	getAppearance,
 	getModel,
@@ -36,14 +36,14 @@ process.stdout.write("\nsettings：收展状态跟着 appearance 走一遍真实
 	// than through MY_AGENT_HOME, so the machine's own settings are never read or written.
 	const home = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
 	try {
-		const workDirAbsPath = join(home, "workspace");
+		const workDirAbsPath = join(home, "workdir");
 		const settings = fillSettings(workDirAbsPath, home);
 
-		// The window's write, as main.ts's setPaging sends it: one workspace read down to page 2,
+		// The window's write, as main.ts's setPaging sends it: one directory read down to page 2,
 		// one folded away to its heading.
 		applySettings(settings, {
 			appearance: {
-				workspaces: {
+				directories: {
 					"/w/one": { collapsed: false, page: 2, savedPage: 2 },
 					"/w/two": { collapsed: true, page: 1, savedPage: 3 },
 				},
@@ -53,14 +53,14 @@ process.stdout.write("\nsettings：收展状态跟着 appearance 走一遍真实
 		// A fresh fill over the same files — what the next launch reads. The three fields must
 		// each come back: the page the view was on, the page the collapse saved, and the fold.
 		const restored = getAppearance(fillSettings(workDirAbsPath, home));
-		check("重读的 appearance 还带着 workspaces", restored.workspaces !== undefined, JSON.stringify(restored));
-		check("第一个工作区的页码原样回来", restored.workspaces?.["/w/one"]?.page === 2 && restored.workspaces?.["/w/one"]?.savedPage === 2, JSON.stringify(restored.workspaces));
-		check("第二个工作区收着、记忆在第 3 页", restored.workspaces?.["/w/two"]?.collapsed === true && restored.workspaces?.["/w/two"]?.savedPage === 3, JSON.stringify(restored.workspaces));
+		check("重读的 appearance 还带着 directories", restored.directories !== undefined, JSON.stringify(restored));
+		check("第一个目录的页码原样回来", restored.directories?.["/w/one"]?.page === 2 && restored.directories?.["/w/one"]?.savedPage === 2, JSON.stringify(restored.directories));
+		check("第二个目录收着、记忆在第 3 页", restored.directories?.["/w/two"]?.collapsed === true && restored.directories?.["/w/two"]?.savedPage === 3, JSON.stringify(restored.directories));
 
 		// The file actually holds it — the in-memory copy would pass even if the write
 		// were lost, and the file is what a second process reads.
-		const onDisk = JSON.parse(readFileSync(settingsPath(home), "utf8")) as { appearance?: { workspaces?: unknown } };
-		check("磁盘上的 settings.json 写着同一份", onDisk.appearance?.workspaces !== undefined, JSON.stringify(onDisk));
+		const onDisk = JSON.parse(readFileSync(settingsPath(home), "utf8")) as { appearance?: { directories?: unknown } };
+		check("磁盘上的 settings.json 写着同一份", onDisk.appearance?.directories !== undefined, JSON.stringify(onDisk));
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}
@@ -68,18 +68,18 @@ process.stdout.write("\nsettings：收展状态跟着 appearance 走一遍真实
 
 // ------------------------------------------------- 2. never manufactured, bad entries dropped
 
-process.stdout.write("\nsettings：没动过的工作区不造假，写坏了的条目按条丢\n");
+process.stdout.write("\nsettings：没动过的目录不造假，写坏了的条目按条丢\n");
 
 {
 	const home = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
 	try {
-		const workDirAbsPath = join(home, "workspace");
+		const workDirAbsPath = join(home, "workdir");
 		const settings = fillSettings(workDirAbsPath, home);
 
-		// A theme change must not manufacture a workspaces field: an appearance the user never paged
+		// A theme change must not manufacture a directories field: an appearance the user never paged
 		// keeps no entry, by the same rule the two widths follow.
 		applySettings(settings, { appearance: { theme: "dark" } });
-		check("只改主题不长出 workspaces", getAppearance(fillSettings(workDirAbsPath, home)).workspaces === undefined, JSON.stringify(getAppearance(fillSettings(workDirAbsPath, home))));
+		check("只改主题不长出 directories", getAppearance(fillSettings(workDirAbsPath, home)).directories === undefined, JSON.stringify(getAppearance(fillSettings(workDirAbsPath, home))));
 
 		// Hand-edited garbage: the file is writable by hand, so one bad entry is dropped on its own
 		// and must not cost the good one its place — nor an empty result its absence.
@@ -87,23 +87,23 @@ process.stdout.write("\nsettings：没动过的工作区不造假，写坏了的
 		const written = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
 		written.appearance = {
 			...(written.appearance as Record<string, unknown>),
-			workspaces: {
+			directories: {
 				"/w/good": { collapsed: false, page: 4, savedPage: 9 },
 				"/w/bad": "不是一条记录",
 				"": { collapsed: true, page: 1, savedPage: 1 },
 			},
 		};
 		writeFileSync(path, `${JSON.stringify(written, null, "\t")}\n`, "utf8");
-		const reread = getAppearance(fillSettings(workDirAbsPath, home)).workspaces;
+		const reread = getAppearance(fillSettings(workDirAbsPath, home)).directories;
 		check("坏条目被丢、好条目还在", JSON.stringify(Object.keys(reread ?? {})) === JSON.stringify(["/w/good"]), JSON.stringify(reread));
 		check("好条目的数字没被改", reread?.["/w/good"]?.page === 4 && reread?.["/w/good"]?.savedPage === 9, JSON.stringify(reread));
 
 		// The normalizer the REST patch uses, driven directly: a page counter that is not a positive
 		// integer falls back to the first page rather than being believed.
-		const clamped = clampWorkspacePaging({ "/w/x": { collapsed: true, page: 0, savedPage: "two" } });
+		const clamped = clampDirectoryPaging({ "/w/x": { collapsed: true, page: 0, savedPage: "two" } });
 		check("坏页码落回第一页", clamped?.["/w/x"]?.page === 1 && clamped?.["/w/x"]?.savedPage === 1, JSON.stringify(clamped));
-		check("整个字段不是记录时是 undefined", clampWorkspacePaging("不是记录") === undefined, String(clampWorkspacePaging("不是记录")));
-		check("空记录钳成 undefined 而不是空表", clampWorkspacePaging({}) === undefined, String(clampWorkspacePaging({})));
+		check("整个字段不是记录时是 undefined", clampDirectoryPaging("不是记录") === undefined, String(clampDirectoryPaging("不是记录")));
+		check("空记录钳成 undefined 而不是空表", clampDirectoryPaging({}) === undefined, String(clampDirectoryPaging({})));
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}
@@ -116,7 +116,7 @@ process.stdout.write("\nsettings：模式跟着整表设置走一遍真实的序
 {
 	const home = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
 	try {
-		const workDirAbsPath = join(home, "workspace");
+		const workDirAbsPath = join(home, "workdir");
 		const settings = fillSettings(workDirAbsPath, home);
 
 		// The panel's write, as the modes tab sends it: one saved mode, the whole list at once.
@@ -132,9 +132,9 @@ process.stdout.write("\nsettings：模式跟着整表设置走一遍真实的序
 		// two widths and the paging state follow.
 		const fresh = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
 		try {
-			const other = fillSettings(join(fresh, "workspace"), fresh);
+			const other = fillSettings(join(fresh, "workdir"), fresh);
 			applySettings(other, { model: "a/b" });
-			check("只改模型不长出 modes", getSettings(fillSettings(join(fresh, "workspace"), fresh)).modes === undefined);
+			check("只改模型不长出 modes", getSettings(fillSettings(join(fresh, "workdir"), fresh)).modes === undefined);
 		} finally {
 			rmSync(fresh, { recursive: true, force: true });
 		}
@@ -171,7 +171,7 @@ process.stdout.write("\nsettings：种过默认模型的标记活过一次重启
 {
 	const home = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
 	try {
-		const workDirAbsPath = join(home, "workspace");
+		const workDirAbsPath = join(home, "workdir");
 		const settings = fillSettings(workDirAbsPath, home);
 		// Never written is its own state — the old file's and the fresh machine's — so the window can
 		// tell "no window ever offered the row" from "the user deleted it".
@@ -206,8 +206,8 @@ process.stdout.write("\nsettings：无状态面用裸 SettingsState 走同一套
 {
 	const home = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
 	try {
-		const workDirAbsPath = join(home, "workspace");
-		// fillSettings takes the workspace root as its seed and reads both json files into the bag —
+		const workDirAbsPath = join(home, "workdir");
+		// fillSettings takes the working directory as its seed and reads both json files into the bag —
 		// the same two files the service's `stateOf` reads, reached without the cache.
 		const s = fillSettings(workDirAbsPath, home);
 		check("种子路径读出空默认", getSettings(s).modes === undefined, JSON.stringify(getSettings(s)));
@@ -218,7 +218,7 @@ process.stdout.write("\nsettings：无状态面用裸 SettingsState 走同一套
 		check("补齐后的 modes 当场可读", getSettings(s).modes?.length === 1, JSON.stringify(getSettings(s).modes));
 
 		// A replay from the same seed must land on the same merged view — that is what lets a host
-		// re-fill a workspace's state at any time without losing a write.
+		// re-fill a directory's state at any time without losing a write.
 		const replayed = fillSettings(workDirAbsPath, home);
 		check("重灌的种子读回同一份", JSON.stringify(getSettings(replayed)) === JSON.stringify(getSettings(s)));
 
@@ -230,7 +230,7 @@ process.stdout.write("\nsettings：无状态面用裸 SettingsState 走同一套
 		applySettings(cached, { model: "a/b" });
 		check("写穿缓存,服务的袋跟上了", getModel(cached) === "a/b", String(getModel(cached)));
 		// The cache is keyed by the agent home as well as the root: another home over the same root
-		// is another workspace's files, and must not answer this one's merge.
+		// is another directory's files, and must not answer this one's merge.
 		const other = new SettingsManager();
 		const otherHome = mkdtempSync(join(tmpdir(), "my-agent-settings-other-"));
 		try {

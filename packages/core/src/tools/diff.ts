@@ -48,7 +48,7 @@ type Op = { kind: "context" | "add" | "remove"; text: string };
 /**
  * The change from `before` to `after`, as rows a card can draw.
  *
- * `path` is carried through rather than derived: only the caller knows how its workspace displays
+ * `path` is carried through rather than derived: only the caller knows how the run's working directory displays
  * the file, and the card names the same path the tool's own text does.
  */
 export function fileDiff(relPath: string, before: string, after: string, options: DiffOptions = {}): FileDiff {

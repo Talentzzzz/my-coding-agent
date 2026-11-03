@@ -2,7 +2,7 @@ import { glob, readFile, stat } from "node:fs/promises";
 import type { AgentTool, AgentToolResult } from "../types.ts";
 import { resolve } from "node:path";
 import { Type, type Static } from "typebox";
-import type { Workspace } from "../workspace.ts";
+import { displayToolPath, resolveToolPath } from "../workdir.ts";
 import { DEFAULT_EXCLUDES } from "./glob.ts";
 import { truncate, truncateList } from "./truncate.ts";
 import { textResult, throwIfAborted } from "./types.ts";
@@ -14,14 +14,14 @@ const MAX_LINE_LENGTH = 400;
 
 const parameters = Type.Object({
 	pattern: Type.String({ description: "Regular expression (JavaScript syntax) to search for" }),
-	path: Type.Optional(Type.String({ description: "Directory to search. Defaults to the workspace root." })),
+	path: Type.Optional(Type.String({ description: "Directory to search. Defaults to the working directory." })),
 	include: Type.Optional(Type.String({ description: 'Glob for files to search, for example "**/*.ts"' })),
 	fixed: Type.Optional(Type.Boolean({ description: "Treat pattern as literal text instead of a regex" })),
 });
 
 export type GrepParams = Static<typeof parameters>;
 
-export function createGrepTool(workspace: Workspace): AgentTool<typeof parameters> {
+export function createGrepTool(workDirAbsPath: string): AgentTool<typeof parameters> {
 	return {
 		name: "grep",
 		label: "Grep",
@@ -30,20 +30,20 @@ export function createGrepTool(workspace: Workspace): AgentTool<typeof parameter
 		parameters,
 		executionMode: "parallel",
 		async execute(_toolCallId, params, signal, onUpdate) {
-			return runGrep(workspace, params, { signal, onUpdate });
+			return runGrep(workDirAbsPath, params, { signal, onUpdate });
 		},
 	};
 }
 
 export async function runGrep(
-	workspace: Workspace,
+	workDirAbsPath: string,
 	params: GrepParams,
 	hooks: { signal?: AbortSignal; onUpdate?: (partial: AgentToolResult<unknown>) => void } = {},
 ): Promise<AgentToolResult<unknown>> {
 	throwIfAborted(hooks.signal);
-	const absRoot = params.path === undefined ? workspace.absRoot : workspace.resolve(params.path);
+	const absRoot = params.path === undefined ? workDirAbsPath : resolveToolPath(workDirAbsPath, params.path);
 	const info = await stat(absRoot).catch(() => undefined);
-	if (!info?.isDirectory()) throw new Error(`Not a directory: ${workspace.display(absRoot)}`);
+	if (!info?.isDirectory()) throw new Error(`Not a directory: ${displayToolPath(workDirAbsPath, absRoot)}`);
 
 	let expression: RegExp;
 	try {
@@ -81,7 +81,7 @@ export async function runGrep(
 			if (!expression.test(line)) continue;
 			matchCount += 1;
 			if (hits.length < MAX_MATCHES) {
-				hits.push(`${workspace.display(absPath)}:${index + 1}: ${line.trim().slice(0, MAX_LINE_LENGTH)}`);
+				hits.push(`${displayToolPath(workDirAbsPath, absPath)}:${index + 1}: ${line.trim().slice(0, MAX_LINE_LENGTH)}`);
 			}
 			hooks.onUpdate?.(textResult(`${matchCount} matches`));
 		}

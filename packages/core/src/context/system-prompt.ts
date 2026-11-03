@@ -3,18 +3,21 @@ import type { AgentsMdFile } from "./agents-md.ts";
 import { formatAgentsMd } from "./agents-md.ts";
 
 export interface SystemPromptInput {
-	absWorkspaceRoot: string;
+	/** The directory relative paths resolve against and commands start in. Not a boundary. */
+	workDirAbsPath: string;
 	toolNames: readonly string[];
 	/** Tools that require user approval before they run. */
 	approvalTools: readonly string[];
 	agentsMd: readonly AgentsMdFile[];
 }
 
-const IDENTITY = `You are a coding agent working inside one workspace directory on the user's machine.
+const IDENTITY = `You are a coding agent working directly on the user's machine.
 You read and change files through tools, run commands, and report what you actually did.
 
 How to work:
 - Inspect before you change. Find the relevant files with glob and grep, read them, then edit.
+- Relative paths resolve against your working directory; absolute paths are taken as given, and the
+  rest of the machine is reachable too. Leave the directory when the task needs it.
 - Prefer the smallest change that solves the problem. Keep the existing style of the file.
 - Use edit for targeted changes and write only for new files or a deliberate full rewrite.
 - Run the project's own checks (tests, type check, lint) when they exist, and report the result.
@@ -33,7 +36,7 @@ export function buildSystemPrompt(input: SystemPromptInput): string {
 	sections.push(
 		[
 			"## Environment",
-			`- Workspace root: ${input.absWorkspaceRoot}`,
+			`- Working directory: ${input.workDirAbsPath}`,
 			`- Platform: ${platform()}`,
 			`- Today: ${new Date().toISOString().slice(0, 10)}`,
 		].join("\n"),
@@ -47,7 +50,7 @@ export function buildSystemPrompt(input: SystemPromptInput): string {
 	const available = input.toolNames.length === 0 ? "none" : input.toolNames.join(", ");
 	sections.push(`## Tools\nAvailable: ${available}.${approval}`);
 
-	const project = formatAgentsMd(input.agentsMd, input.absWorkspaceRoot);
+	const project = formatAgentsMd(input.agentsMd, input.workDirAbsPath);
 	if (project !== undefined) {
 		sections.push(`## Project instructions\nThe user's project ships these instructions. Follow them.\n\n${project}`);
 	}

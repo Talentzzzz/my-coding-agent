@@ -1,6 +1,7 @@
 import type { AgentToolResult } from "./types.ts";
 import type { Message } from "@my-agent/llm";
 import { truncate } from "./tools/truncate.ts";
+import { spillPathFor, spillText, spillView, writeSpillFile, SPILL_KEEP_CHARS } from "./context/spill.ts";
 
 /** How a tool result carries its content: text and image blocks, in order. */
 export type ToolResultContent = AgentToolResult<unknown>["content"];
@@ -19,7 +20,7 @@ type MaybePromise<T> = T | Promise<T>;
  * Every event names the session its run belongs to. The surface itself is process-level configuration
  * (ADR-0007 §6): one `Hooks` serves every session this process runs, so a handler that had to be told
  * its session by a closure would be the per-session object this seam exists to remove. The id is what
- * it resolves the rest with — the workspace, the transcript, the approval map.
+ * it resolves the rest with — the working directory, the transcript, the approval map.
  */
 export interface HookMap {
 	/** Rewrite what goes to the provider. Default: fresh system message + the store's messages. */
@@ -30,7 +31,10 @@ export interface HookMap {
 	before_tool: (event: { sessionId: string; toolCallId: string; toolName: string; args: unknown }) => MaybePromise<
 		{ block?: { reason: string }; args?: unknown; terminate?: boolean; suspend?: boolean } | undefined
 	>;
-	/** Runs on the result. Default: the output backstop. */
+	/**
+	 * Runs on the result. Default: none — a rewrite is final, and the write boundary in `agent.ts`
+	 * is the backstop for a result nobody bounded.
+	 */
 	after_tool: (event: {
 		sessionId: string;
 		toolCallId: string;
@@ -114,9 +118,9 @@ function defined(patch: Record<string, unknown>): Record<string, unknown> {
  *
  * Tools bound their own output (`tools/truncate.ts`, 60,000 characters), so a well-behaved tool never
  * reaches this. It is the floor under the spill (`context/spill.ts`), which archives a result over
- * 80,000 characters into the workspace instead of clipping it: when that archive cannot be written,
- * this is what still keeps one result from blowing the context. Deliberately far above the per-tool
- * budget, so a result a tool already bounded is never clipped a second time.
+ * 80,000 characters into the session's working directory instead of clipping it: when that archive
+ * cannot be written, this is what still keeps one result from blowing the context. Deliberately far
+ * above the per-tool budget, so a result a tool already bounded is never clipped a second time.
  */
 export const MAX_TOOL_RESULT_BYTES = 200_000;
 
@@ -154,4 +158,32 @@ function charsForBytes(text: string, maxBytes: number): number {
 	const bytes = Buffer.byteLength(text);
 	if (bytes <= maxBytes) return text.length;
 	return Math.floor((text.length * maxBytes) / bytes);
+}
+
+/**
+ * Archive one tool result whole and answer with what an `after_tool` handler returns for it.
+ *
+ * The write-side rule the seam now carries is: **a rewrite is the final version** — the ledger keeps
+ * exactly the content the handler returns, so bounding a result means the full text has to be
+ * somewhere else first. This is that somewhere else, one call: it writes the result's text whole
+ * under the working directory (`.my-agent/tool-results/`, the same path derivation the write
+ * boundary's own backstop uses) and answers with the head-and-tail view that names the file, so a
+ * model that needs the rest reads it back itself. A result the file could not take comes back
+ * untouched rather than truncated-with-a-path-that-is-not-there — the write boundary still bounds it.
+ *
+ * The `workDirAbsPath` is the handler's to supply: the hook event names the session, and the handler
+ * closes over the directory it is archiving into.
+ *
+ * ```ts
+ * hooks.on("after_tool", (event) => archiveToolResult(event, workDirAbsPath));
+ * ```
+ */
+export function archiveToolResult(
+	event: { sessionId: string; toolCallId: string; toolName: string; content: ToolResultContent },
+	workDirAbsPath: string,
+): { content: ToolResultContent } {
+	const text = spillText(event.content);
+	const { absPath, relPath } = spillPathFor(workDirAbsPath, event.sessionId, event.toolName, event.toolCallId);
+	if (!writeSpillFile(absPath, text)) return { content: event.content };
+	return { content: spillView(event.content, text, relPath, SPILL_KEEP_CHARS) };
 }

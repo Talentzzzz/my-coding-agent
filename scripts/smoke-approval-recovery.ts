@@ -36,7 +36,7 @@ import {
 	type ModelConfig,
 	type ModelSource,
 	type ModelSelection,
-	workspaceDir,
+	sessionDir,
 } from "@my-agent/core";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-recovery-"));
@@ -148,7 +148,7 @@ function sidOf(session: Agent): string {
 async function openSession(overrides: { approval?: Record<string, boolean>; api?: ChatTransport } = {}): Promise<Agent> {
 	const state = createSession(root);
 	const session = await openAgent({
-		absWorkspaceRoot: root,
+		workDirAbsPath: root,
 		session: state,
 		models,
 		api: overrides.api ?? fake.api,
@@ -396,4 +396,4 @@ process.exitCode = failures === 0 ? 0 : 1;
 
 clearTimeout(watchdog);
 await rm(root, { recursive: true, force: true });
-await rm(workspaceDir(root), { recursive: true, force: true }).catch(() => {});
+await rm(sessionDir(root), { recursive: true, force: true }).catch(() => {});

@@ -1,7 +1,7 @@
 # my-coding-agent
 
-一个在你本机、自己的桌面窗口里运行的编码 agent。pi 的一个 package 作为裁剪副本 vendored 进本仓库：`packages/llm`（`@my-agent/llm`，来自
-[`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层——只取本项目真正调用的部分，不是完整的 package。运行引擎是我们的代码：它原先是 pi 循环的 vendored 副本，已并入 `packages/core/src/agent.ts`（[ADR-0008](docs/adr/0008-loop-merged-into-agent.md)），不再跟踪上游。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳也都是我们自己的。
+一个在你本机、自己的桌面窗口里运行的编码 agent。pi 的一个 package 作为裁剪副本收进本仓库：`packages/llm`（`@my-agent/llm`，来自
+[`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层——只取本项目真正调用的部分，不是完整的 package。运行引擎是我们的代码：它原先是 pi 循环的副本，已并入 `packages/core/src/agent.ts`（[ADR-0008](docs/adr/0008-loop-merged-into-agent.md)），不再跟踪上游。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳也都是我们自己的。
 
 agent 跑在一个 Node 进程里，而不是渲染进程里：它持有你的 API 密钥，而它的本职就是读写文件。窗口是一个客户端——它用 REST 发送 prompt，并从一条常驻 WebSocket 通道上读取 agent 的输出，这也是为什么每一条命令同样能用 `curl` 或脚本发。[docs/architecture.md](docs/architecture.md) 是设计文档：请求流程、API 表、会话格式，以及每一块为什么在那个位置。
 
@@ -61,20 +61,16 @@ ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/ node packages/
 | `edit` | 替换一个精确字符串，拒绝有歧义的匹配 |
 | `glob` | 按模式查找文件 |
 | `grep` | 按正则搜索文件内容 |
-| `bash` | 在工作区里跑一条 shell 命令 |
-| `SubAgent` | 把一个自成一体的小任务委派给一个全新的、只读的助手，并取回它的报告 |
-| `SubAgentControl` | 收走或停掉一个后台 `SubAgent` job |
-
-最后两个就是那对委派工具。一个子级是它自己的一个真实会话，只用 `read`、`glob`、`grep`——**永远不用** `write`、`edit`、`bash`——有它自己的 transcript 文件放在 `subagents/` 下，并且它从不请求审批，因为没有窗口去回答一个子级的请求。`subagents: false` 会把这两个工具都排除在外，这就是子级无法启动孙级的方式。
+| `bash` | 在会话的工作目录里跑一条 shell 命令 |
 
 `write`、`edit` 和 `bash` 默认会在 UI 里请求审批。
 
 ## 设置
 
-设置来自两个文件，按字段合并、工作区那份赢：
+设置来自两个文件，按字段合并、目录那份赢：
 
 - `~/.my-agent/settings.json` —— 你在本机上的那份。
-- `<workspace>/.my-agent/settings.json` —— 工作区自己的那份，仓库可以提交它。
+- `<workDirAbsPath>/.my-agent/settings.json` —— 那个目录自己的那份，仓库可以提交它。
 
 两个文件接受同一套键：
 
@@ -89,9 +85,9 @@ ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/ node packages/
 
 `model` 是一个**新**会话打开时所在的行；一段已经在进行中的对话用哪个模型，是在输入框上选的、就在消息框下面那一行，并且属于那段对话。把 `model` 留空会打开你导入的第一行。
 
-`bash` 是一条 shell 命令可以跑多久：`defaultTimeoutMs` 在该调用自己没有指定 `timeout_ms` 时生效，`maxTimeoutMs` 是任何调用的**上限**——要求更久的命令会被压到它，而这个压顶会在工具结果里说明。构建跑得久的工作区，就把上限调高。
+`bash` 是一条 shell 命令可以跑多久：`defaultTimeoutMs` 在该调用自己没有指定 `timeout_ms` 时生效，`maxTimeoutMs` 是任何调用的**上限**——要求更久的命令会被压到它，而这个压顶会在工具结果里说明。构建跑得久的项目，就把上限调高。
 
-UI 里做出的变更会回到**已经提供那个键**的文件，所以一个钉住了 `approval.bash` 的项目继续拥有它，其他一切则落到你 home 里的那份。`SettingsManager`（`packages/core/src/settings-manager.ts`）读写两者；它是**无属性服务**，进程里只有一份（hub 构造时建它），一处工作区的设置在装配时解析一次、随登记处条目交给那个会话——所以同一个工作区上的两个会话读到的永远是同一个对象，而会话自己什么都不持有。
+UI 里做出的变更会回到**已经提供那个键**的文件，所以一个钉住了 `approval.bash` 的项目继续拥有它，其他一切则落到你 home 里的那份。`SettingsManager`（`packages/core/src/settings-manager.ts`）读写两者；它是**无属性服务**，进程里只有一份（hub 构造时建它），一处目录的设置在装配时解析一次、随登记处条目交给那个会话——所以同一个目录上的两个会话读到的永远是同一个对象，而会话自己什么都不持有。
 
 `appearance` 是一项设置而不是浏览器存储，这是有意的：桌面外壳每次启动都会挑一个新端口，而 `localStorage` 是按 origin 隔离的，所以存在那里的偏好会在窗口重新打开的那一刻被忘掉。`fontSize` 是整窗字号的基准，量程 10–22、默认 15（服务端会把它夹回这个区间）：滑杆改的是基准，标题、侧栏、代码、状态行等各档从它按各自的步差派生，整窗一起动。
 
@@ -178,7 +174,7 @@ const models: ModelSource = { list: () => rows };
 const api: ChatTransport = fake.api;
 ```
 
-每次供应商调用一个响应、按顺序，所以一次运行可以按需流式、调工具、失败或卡住。在一个临时目录上、用 `openAgent({ absWorkspaceRoot, sessionState, models, settingsState, api? })` 构建会话——`sessionState` 由 `createSessionState(root)` 交出，`models` 只是一个 `{ list: () => rows }`——就像 `scripts/smoke-tools.ts` 那样，并抄走它的**两个坑**：`finally` 必须**同时**删除临时工作区和 `workspaceDir(root)`，否则每次运行都会留下一个孤儿目录；以及除非这个测试就是在测持久化，否则传 `settingsState: inMemorySettingsState({...})`。
+每次供应商调用一个响应、按顺序，所以一次运行可以按需流式、调工具、失败或卡住。在一个临时目录上、用 `openAgent({ workDirAbsPath, sessionState, models, settingsState, api? })` 构建会话——`sessionState` 由 `createSessionState(root)` 交出，`models` 只是一个 `{ list: () => rows }`——就像 `scripts/smoke-tools.ts` 那样，并抄走它的**两个坑**：`finally` 必须**同时**删除临时目录和 `sessionDir(root)`，否则每次运行都会留下一个孤儿 store；以及除非这个测试就是在测持久化，否则传 `settingsState: inMemorySettingsState({...})`。
 
 看一眼真窗口里客户端到底构建了什么（而不是只看一张图），跑 `packages/desktop/scripts/inspect-app`：它进程内启动服务器、加载真客户端，dump 出侧栏、标题、状态行与设置面板的文本，并演练一次会话切换。`--screenshot` 那条路截不到它——见上面的说明。
 

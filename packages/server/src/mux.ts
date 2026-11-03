@@ -940,13 +940,13 @@ export class MuxServer {
 	/**
 	 * Whether this connection's window is allowed to see a row.
 	 *
-	 * The rule is the hub's ({@link SessionHub.listsWorkspace}) and the filter is applied here, at both
+	 * The rule is the hub's ({@link SessionHub.listsDirectory}) and the filter is applied here, at both
 	 * points a row reaches a window: the overview a connection opens on, and every changed row after
-	 * it. Filtering only the overview would let a workspace the user put aside come back the moment one
+	 * it. Filtering only the overview would let a directory the user put aside come back the moment one
 	 * of its sessions changed — a group that returns on its own is worse than one that never left.
 	 */
 	private listed(row: SessionRow): boolean {
-		return this.hub.listsWorkspace(row.workDirAbsPath);
+		return this.hub.listsDirectory(row.workDirAbsPath);
 	}
 
 	/** This connection's opening overview: every row this process lists, once. */
@@ -957,7 +957,7 @@ export class MuxServer {
 	/**
 	 * Send every connection a fresh overview.
 	 *
-	 * The one thing a window cannot be told by a row: a workspace entering or leaving the list is a
+	 * The one thing a window cannot be told by a row: a directory entering or leaving the list is a
 	 * change to the list itself, and there is no `session_row` for a group. Re-sending the overview is
 	 * how the frame that already means "here is the machine's list" says "…and it moved" — the same
 	 * frame a connection opens on, so no client learns a second shape of news about a sidebar.

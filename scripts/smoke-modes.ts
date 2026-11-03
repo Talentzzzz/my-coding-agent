@@ -35,7 +35,7 @@ function byTitle(root: FakeNode, title: string): FakeNode | undefined {
 	return all(root, "icon-button").find((node) => node.getAttribute("title") === title);
 }
 
-const ALL_TOOLS = ["read", "write", "edit", "glob", "grep", "bash", "SubAgent", "SubAgentControl"];
+const ALL_TOOLS = ["read", "write", "edit", "glob", "grep", "bash"];
 
 function settingsOf(modes: ModeSettings[] | undefined, tools?: string[]): SettingsSnapshot {
 	return {

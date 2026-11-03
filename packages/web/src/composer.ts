@@ -67,7 +67,7 @@ function modelLabel(selection: ComposerSelection): string {
  * menu over itself. They used to be native `select`s, and the model and level ones were the last
  * two in the window, but a native popup is drawn by the platform rather than by the theme: on a dark
  * window it arrives as a light rectangle. The seats read at every glance are the worst place for a
- * control that leaves the theme, so they wear the menu the workspace picker already had. All three
+ * control that leaves the theme, so they wear the menu the directory picker already had. All three
  * open upward, because the bar sits on the window's bottom edge and a menu hung underneath it would
  * have nowhere to go.
  */

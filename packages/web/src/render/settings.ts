@@ -1101,7 +1101,7 @@ export class SettingsPanel {
 		const group = element("div", "settings-field stack");
 		group.append(element("span", "settings-label", "Bash 命令超时"));
 		group.append(
-			element("span", "model-hint", "对所有工作区生效。命令超过时限会被终止；默认 120 秒，上限 3600 秒。"),
+			element("span", "model-hint", "对所有会话生效。命令超过时限会被终止；默认 120 秒，上限 3600 秒。"),
 		);
 		const bash = this.state.settings?.bash;
 		if (bash) {

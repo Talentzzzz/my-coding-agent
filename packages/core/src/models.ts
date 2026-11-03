@@ -155,7 +155,7 @@ const UNCONFIGURED_NAME = "my-agent:unconfigured";
 const UNCONFIGURED_MODEL_ID = "no-model";
 
 /**
- * The field table the placeholder answers with, shared by the model and the state seed.
+ * The field table the placeholder answers with, and the one a choice with no name falls back on.
  *
  * The endpoint points nowhere on purpose: a request to it is never made, because the transport
  * answers for the placeholder before anything is sent. The window is a real one so a usage read has
@@ -265,7 +265,7 @@ export function createModel(config: ModelConfig, thinkingLevel?: string, transpo
  * one, which is what {@link isUnconfigured} tests and what no stored row may claim.
  */
 export function placeholderModel(transport?: ChatTransport): Model {
-	return resolvedModel(placeholderModelState(), transport);
+	return createModel(PLACEHOLDER_CONFIG, undefined, transport);
 }
 
 /** Whether a model is the placeholder rather than something the user entered. */
@@ -276,74 +276,56 @@ export function isUnconfigured(model: { name: string }): boolean {
 // ---------------------------------------------------------------------------- the stateless surface
 
 /**
- * One model as pure data: the seed the client sent, plus whatever the last fill laid in.
+ * What a session is on: the row's name, and how hard it is asked.
  *
- * A session holds no live model object any more than it holds its transcript. What it holds is the
- * selection — the row's name and the level it is asked at, exactly what the composer's
- * {@link ModelSelection} carries — and {@link fillModel} lays the row's facts over the bag, in place,
- * before anything reads them. The seed is the bag's only source of truth about *which* model; every
- * field a request needs is a fill product, so a key corrected between two requests is the key the
- * second request sends with, and nothing in the bag can outlive the row it came from.
+ * This is the whole of a session's model state, and deliberately nothing more. Everything a request
+ * needs beyond it — the endpoint, the key, the window, the compat flags — belongs to the row the name
+ * points at, and is read from the catalog at the moment a model is built ({@link modelFor}), never
+ * copied in here. A copy is a second thing that has to be kept in step with an edit to the file; a
+ * name is not.
+ *
+ * The shape is the composer's own ({@link ModelSelection}) with the field named for what it is: the
+ * wire calls it `model` because a window is picking a name off a list, while everything inside this
+ * package calls a row by its name.
  */
-export type ModelState = Partial<Omit<ModelConfig, "thinkingLevel">> & {
+export type ModelChoice = {
+	/** The row's name — the identity the panel shows and the transcript records. */
+	name?: string;
 	/**
-	 * The level as the seed named it, verbatim. `fillModel` normalizes what it keeps, and the readers
-	 * normalize what they read, so a string the app has no name for lands on "off" by the time it is
-	 * asked at. Undefined means nothing was asked for, which the wire reads as "do not think".
+	 * The level as it arrived, verbatim. {@link modelFor} normalizes it, so a string the app has no
+	 * name for lands on "off" by the time it is asked at. Undefined means nothing was asked for, which
+	 * the wire reads as "do not think".
 	 */
 	thinkingLevel?: string;
 };
 
-/**
- * The state a session with no row holds: the placeholder's own field table, laid in once.
- *
- * It never fills — the name is reserved, so no catalog row can answer it — and the stream it answers
- * with is the sentence that says what to add. The table is complete rather than a bare seed so a
- * snapshot, a usage read, and the error message all read a well-formed model without a special case.
- */
-export function placeholderModelState(): ModelState {
-	return { ...PLACEHOLDER_CONFIG };
+/** The row a choice names, or undefined when no row answers it. */
+export function rowFor(choice: ModelChoice, catalog: readonly ModelConfig[]): ModelConfig | undefined {
+	return catalog.find((candidate) => candidate.name === choice.name);
 }
 
 /**
- * Lay the row a state names over the state, in place.
+ * The model a choice names: looked up in the catalog, built fresh, used for one request, dropped.
  *
- * The lookup is by the seed's name — a row's name is its identity — and a name no row answers throws:
- * the caller decides what an unknown model means, and a session answers it with the sentence that says
- * what to add rather than with a request to a placeholder endpoint. Idempotent by construction, and
- * meant to be re-run before every request: the bag keeps nothing of the row it last saw, so an
- * endpoint moved or a key corrected reaches the next request with nothing rebuilt.
+ * The lookup is by name — a row's name is its identity — and it happens here, once per construction,
+ * instead of being laid into the choice beforehand. That is what makes a corrected key, a moved
+ * endpoint, or a resized window reach the very next request with no invalidation step and nothing to
+ * keep in step: there is no copy to go stale.
  *
- * Every field a row can carry is assigned, present or not — a bag moving from a row that had a compat
- * override to one that does not must lose the old one, not keep it. The fields a row never carries are
- * the build's constants, and those are the request object's constructor's to default. The key is laid
- * in like any other row fact: it rides to the request path and nowhere else, never to an event, a
- * snapshot, or a REST answer.
+ * A name no row answers does not throw. A session still has to be buildable — a snapshot, a usage
+ * meter, and a failure message all need a well-formed model — so this answers with the placeholder's
+ * facts under the name that was asked for, and the transport's own "no row behind this model" check
+ * ({@link unconfiguredStream}) is what refuses to send anything. The level is normalized in `createModel`,
+ * so a string this app has no name for lands on "off" rather than on a value the endpoint rejects.
  */
-export function fillModel(catalog: readonly ModelConfig[], model: ModelState): void {
-	const row = catalog.find((candidate) => candidate.name === model.name);
-	if (row === undefined) throw new Error(`No model row is named ${model.name ?? "(nothing)"}`);
-	const capable = withCapabilities(row);
-	model.id = capable.id;
-	model.name = capable.name;
-	model.baseUrl = capable.baseUrl;
-	model.apiKey = capable.apiKey;
-	model.contextWindow = capable.contextWindow;
-	model.maxTokens = capable.maxTokens;
-	model.compat = capable.compat;
-	if (model.thinkingLevel !== undefined) model.thinkingLevel = normalizeThinkingLevel(model.thinkingLevel);
-}
-
-/**
- * The run-local request object a filled state is sent with: built fresh, used for the one request,
- * dropped.
- *
- * The bag is the state; this is the request. `Model`'s constructor defaults the constants a row never
- * names, so the only precondition is that the state went through {@link fillModel} — or the
- * placeholder seed — first, which is what makes the cast safe to make here and nowhere else.
- */
-export function resolvedModel(model: ModelState, transport?: ChatTransport): Model {
-	return new Model(model as ModelConfig, transport);
+export function modelFor(choice: ModelChoice, catalog: readonly ModelConfig[], transport?: ChatTransport): Model {
+	const row = rowFor(choice, catalog);
+	if (row !== undefined) return createModel(row, choice.thinkingLevel, transport);
+	// The chosen name is kept rather than replaced: a window looking at a session whose row was
+	// deleted should say which model it lost, not that it has none.
+	const placeholder: ModelConfig =
+		choice.name === undefined ? PLACEHOLDER_CONFIG : { ...PLACEHOLDER_CONFIG, name: choice.name };
+	return createModel(placeholder, choice.thinkingLevel, transport);
 }
 
 const ZERO_USAGE: AssistantMessage["usage"] = {

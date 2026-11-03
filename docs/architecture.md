@@ -8,7 +8,7 @@
                         （其上是 N 条逻辑流）
 ```
 
-agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程；而读写文件是它的本职，浏览器做不到。工作区是这台机器上**真实的目录**，不是虚拟文件系统。
+agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程；而读写文件是它的本职，浏览器做不到。它工作的地方是这台机器上**真实的目录**，不是虚拟文件系统。
 
 命令用 `POST`，事件走一条**常驻的 WebSocket**（`/mux`），因为两个方向的性子不同：命令是每个用户动作一条，要的是状态码；事件是每秒多条、跨会话、要的是有序且无缺口。一条连接的生命周期是**连接**而不是某一次运行：它随标签页存活、跨多次运行、跨会话切换，其上的逻辑流身份是 `streamId`（就是会话 id）。值得点名的后果是 `abort` —— 它继续留在 REST 上（`POST /api/sessions/{id}/abort`），不是 mux 上的一帧，所以卡住的标签页、一个脚本、另一个标签页，都能停掉同一次运行；而"取消订阅"与"中止运行"是两回事，mux 上行的 `cancel` 帧只用来关掉一条逻辑流，从不中止运行（[ADR-0001](adr/0001-transport-websocket-mux.md)）。
 
@@ -16,7 +16,7 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 
 ## 各 package 的职责
 
-**core** 是无头的：工作区、导入的模型、工具、会话管理器、系统提示词、审批闸门，对 HTTP 和 DOM 一无所知。它是 **ADR-0007 的五个无属性服务**——账本、设置、模型行、工具定义这四个域平级互不依赖，`Agent` 是第五个、只做跨域编排；编排层自己不持有会话状态：durable 的一半是账本，live 的一半（两条队列与在飞运行）居 hub 持有的活登记处 `OpenSessions`——条目 `OpenSession` 装着 `SessionRuntime`（[ADR-0006](adr/0006-stateless-session-architecture.md) §1、§4，[ADR-0007](adr/0007-services-drop-instance-state.md) §4）。它发出 `AgentSessionEvent` 值 —— `types.ts` 的 `AgentEvent`，加上它自己的成员：队列深度、压缩、entry 落地、配置变更、重试。运行引擎也住在这里：`Agent.runEngine` 是编排层的一个方法，而不是它旁边的一个对象——读代码不需要在两层之间来回换算，一次运行只走一条链 `startRun → runEngine → prepareRequest → dispatchEvent`（[ADR-0008](adr/0008-loop-merged-into-agent.md)）。
+**core** 是无头的：工作目录、导入的模型、工具、会话管理器、系统提示词、审批闸门，对 HTTP 和 DOM 一无所知。它是 **ADR-0007 的五个无属性服务**——账本、设置、模型行、工具定义这四个域平级互不依赖，`Agent` 是第五个、只做跨域编排；编排层自己不持有会话状态：durable 的一半是账本，live 的一半（两条队列与在飞运行）居 hub 持有的活登记处 `OpenSessions`——条目 `OpenSession` 装着 `SessionRuntime`（[ADR-0006](adr/0006-stateless-session-architecture.md) §1、§4，[ADR-0007](adr/0007-services-drop-instance-state.md) §4）。它发出 `AgentSessionEvent` 值 —— `types.ts` 的 `AgentEvent`，加上它自己的成员：队列深度、压缩、entry 落地、配置变更、重试。运行引擎也住在这里：`Agent.runEngine` 是编排层的一个方法，而不是它旁边的一个对象——读代码不需要在两层之间来回换算，一次运行只走一条链 `startRun → runEngine → prepareRequest → dispatchEvent`（[ADR-0008](adr/0008-loop-merged-into-agent.md)）。
 
 **server** 拥有传输层和活跃会话：`SessionHub` 持有那五个无属性服务——模型行、设置、账本、工具目录四个域，加**一个**编排层 `Agent`——以及一个按 id 键控的活登记处 `OpenSessions`（每 id 一份条目 `OpenSession`——两条队列与在飞运行、订阅集合与跨栈 run 槽、一次打开解析出的装配，进程里唯一的跨栈内存会话态，宿主收摊时随之删除）；除此之外它只按 id 记 claim（谁能用这个会话），那本是传输层的事（[ADR-0001](adr/0001-transport-websocket-mux.md)）；`Router` 把请求变成对某个控制器的一次调用，每个控制器在它做事期间持有 claim；`mux.ts` 的连接层持有一张订阅表（连接 × 会话），**订阅不拿 claim**；`projection.ts` 把"每个会话在做什么"聚成侧边栏的行。模型是**每次请求**都从 `models.json` 读，而不是缓存成一份目录；会话在每次请求前从它命名的那一行重新推导自己的模型，所以设置面板的一次编辑——密钥、端点、窗口、wire id——能抵达**每一个已经打开的会话**。
 
@@ -28,14 +28,14 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 | 导入的模型 | 我们 | `core/src/models.ts`：用户手打的那些行，每行由**手写的一个名字**命名——这个名字既是该行的身份也是它的标签，因为 transcript、配置补丁、选择器三处必须指同一行——每一行都直接变成发请求时用的模型；旧行的 `label` 被读作它的 `name`，这保住了用户选定的名字，代价是一次性的：用旧 slug 构建的引用会失效。上游的 `builtinModels()`、它的每供应商工厂、以及在其中路由的 `Models`/`Provider` 注册表，是被**刻意删除**的 |
 | 每模型能力 | 我们 | `core/src/anthropic-models.ts`：某个 Claude 模型接受什么，从它的 wire id 推导——因为手打的一行没有别的东西可以作键 |
 | 运行引擎、steering、事件 | 我们 | `agent.ts` 的 `Agent.runEngine`、工具调用、流事件——引擎是编排层的方法，不是委派对象（[ADR-0008](adr/0008-loop-merged-into-agent.md)） |
-| 工具 | 我们 | 基于 `node:fs` / `node:child_process` 的六个文件工具，加 `SubAgent` / `SubAgentControl` |
+| 工具 | 我们 | 基于 `node:fs` / `node:child_process` 的六个文件工具 |
 | 会话持久化 | 我们 | `SessionManager`：一棵只追加的 JSONL entry 树 |
 | 提示词、压缩、视图收缩 | 我们 | `context/system-prompt.ts`、`trim-tool-call-args.ts`、`spill.ts`、`clear-tool-results.ts`、`compaction.ts` |
 | HTTP + WebSocket | 我们 | `node:http`：命令走 REST，事件走一条常驻 WebSocket mux（`/mux`）；RFC6455 手写，不引入 `ws` 依赖 |
 | 桌面外壳 | 我们 + Electron | `packages/desktop`：窗口、标题栏、主题，以及进程内的服务器 |
 | 窗口 UI | 我们 | Vite + TypeScript，无框架，一个 DOM 渲染器架在常驻通道上 |
 
-运行时依赖是两个包：`@my-agent/llm`、`typebox`。前者是 `@earendil-works/pi-ai` 0.99.2 的 vendored 子集（`packages/llm`），只追踪到本项目真正触达的文件，并保留在 pi 自己的编译设置下（逐文件 `@ts-nocheck`；工作区更严格的根配置仍然检查每一个进入 core 的 import）。它旁边那个 vendored 循环（`packages/loop`，来自 `@earendil-works/pi-agent-core`）已经不存在：引擎并入 `agent.ts`，它那份 `@ts-nocheck` 随文件一起退场，也不再跟踪上游（[ADR-0008](adr/0008-loop-merged-into-agent.md)）。`pi-tui`、`pi-mcp`、`pi-codemode`、`pi-durable` 和 pico3 harness 都没有取用。
+运行时依赖是两个包：`@my-agent/llm`、`typebox`。前者是 `@earendil-works/pi-ai` 0.99.2 的裁剪子集（`packages/llm`），只追踪到本项目真正触达的文件，并保留在 pi 自己的编译设置下（逐文件 `@ts-nocheck`；仓库根更严格的 tsconfig 仍然检查每一个进入 core 的 import）；上游对照已放弃（ADR-0008），它由本仓库自己维护。它旁边那个同源的循环（`packages/loop`，来自 `@earendil-works/pi-agent-core`）已经不存在：引擎并入 `agent.ts`，它那份 `@ts-nocheck` 随文件一起退场，也不再跟踪上游（[ADR-0008](adr/0008-loop-merged-into-agent.md)）。`pi-tui`、`pi-mcp`、`pi-codemode`、`pi-durable` 和 pico3 harness 都没有取用。
 
 ai 子集比"应用触达的那些文件"还要窄：它是**一个传输层**触达的文件。上游 pi-ai 实现了五种 chat API，把每个实现的 import 都推迟到 `api/*.lazy.ts` 之后，好让宿主只为它实际发送的那一种付费；它还通过一个带 OAuth 和环境变量兜底的凭据存储来解析凭据，并让每个请求都经过一个供应商注册表。本应用这些一个都不做：它**永远**说 Anthropic Messages，用的是用户敲进 `models.json` 的密钥。于是 `api/anthropic-messages.ts` 是静态 import 的，另外四个实现和那些懒包装是**被删除**而不是"仅仅不可达"，注册表也跟着它们一起没了：wire 上再没有任何东西提及供应商——`Model` 和 `AssistantMessage` 都不带这个字段——所以被重放的 thinking level 不再与产生它的那一行做匹配。它也不需要匹配，因为 level 表是**单独从 wire id 推导**的（`anthropic-models.ts`）：两行命名同一个 wire id，只可能产出同一套 level，而按行匹配只会在这一个时候丢掉 level——用户把他一直在对话的那一行改了名或重新导入了。`packages/llm/src/models.ts` 里留下的是"一次请求所依赖的、关于某个模型的事实"，而不是曾经拥有这些事实的那次查找。如此只剩下 `@anthropic-ai/sdk` 和 `typebox` 两个依赖。
 
@@ -48,7 +48,7 @@ my-coding-agent/
 └── packages/
     ├── core/src/     # @my-agent/core - 无头 agent：agent.ts（编排层 + 引擎）、session-factory.ts
     │                 #   （装配）、types.ts（引擎与工具的契约）、hooks.ts（三个接缝）、models.ts、
-    │                 #   settings-manager.ts、workspace.ts、protocol.ts、session/（会话管理器）、
+    │                 #   settings-manager.ts、workdir.ts、protocol.ts、session/（会话管理器）、
     │                 #   context/（提示词、trim-tool-call-args、spill、clear-tool-results、
     │                 #   compaction）、tools/（每工具一个文件 + 委派对）
     ├── server/src/   # @my-agent/server - 传输层：boot.ts、main.ts、http.ts、http/（routing.ts 是
@@ -64,12 +64,12 @@ my-coding-agent/
 
 ## 装配与设置
 
-`Agent` 只用被交给它的东西，别的什么也不用：构造只收**服务**——会话管理器、导入的模型、工具注册表、活登记处（`OpenSessions`）、传输层、hook 表面与提示词构建器——它的每个公开方法都以会话 id 打头，每样数据在用到它的那一行向属主现取：durable 的一半经 `sessions.stateOf(id)` 从账本重放，live 的一半经 id 从登记处条目读（条目 `OpenSession` 装着两条队列与在飞运行的 `SessionRuntime`，外加订阅集合、跨栈 run 槽，以及一次打开解析出的装配——工作区、设置袋、模型选择、项目指令与这个会话自有的工具；由打开链路在首次触碰时建造、宿主收摊时删除）。它不读设置文件、不加载 AGENTS.md、不构建工具、也不挑模型，更**不持有任何会话状态**，所以打开一个会话和恢复一个会话是同一条链（种子→补齐，[ADR-0006](adr/0006-stateless-session-architecture.md) §2；重放出的账本状态是可从磁盘重建的缓存，见*SessionManager 是真相之源*）。
+`Agent` 只用被交给它的东西，别的什么也不用：构造只收**服务**——会话管理器、导入的模型、工具注册表、活登记处（`OpenSessions`）、传输层、hook 表面与提示词构建器——它的每个公开方法都以会话 id 打头，每样数据在用到它的那一行向属主现取：durable 的一半经 `sessions.stateOf(id)` 从账本重放，live 的一半经 id 从登记处条目读（条目 `OpenSession` 装着两条队列与在飞运行的 `SessionRuntime`，外加订阅集合、跨栈 run 槽，以及一次打开解析出的装配——`workDirAbsPath`、设置袋、模型选择；由打开链路在首次触碰时建造、宿主收摊时删除）。它不读设置文件、不构建工具、也不挑模型（项目指令 `AGENTS.md` 是每次请求现读的提示词输入，本身不进条目），更**不持有任何会话状态**，所以打开一个会话和恢复一个会话是同一条链（种子→补齐，[ADR-0006](adr/0006-stateless-session-architecture.md) §2；重放出的账本状态是可从磁盘重建的缓存，见*SessionManager 是真相之源*）。
 
-构造只收服务这件事有一条直接的后果：**一个进程只需要一个编排层**。hub 在构造时建它一次，此后每个会话都经它、以 id 调用（[ADR-0007](adr/0007-services-drop-instance-state.md) §6：hooks、transport、提示词构建函数是进程级不可变配置，不是会话状态）；而"想独占一个会话"的调用者——测试、SubAgent 的子会话——自己组一个，两条路走的是同一对函数：
+构造只收服务这件事有一条直接的后果：**一个进程只需要一个编排层**。hub 在构造时建它一次，此后每个会话都经它、以 id 调用（[ADR-0007](adr/0007-services-drop-instance-state.md) §6：hooks、transport、提示词构建函数是进程级不可变配置，不是会话状态）；而"想独占一个会话"的调用者——一个 smoke、或只跑一个会话的调用方——自己组一个，两条路走的是同一对函数：
 
 ```
-ensureSession({ absWorkspaceRoot, sessionState, sessionManager?, openSessions?, … })  # 装配 + ensure 条目 + adopt 袋
+ensureSession({ workDirAbsPath, sessionState, sessionManager?, openSessions?, … })  # 装配 + ensure 条目 + adopt 袋
 createSessionAgent({ sessionManager, models, openSessions, api?, tools? })            # 一个编排层，默认 hooks 已装
         -> agent.prompt(sessionId, …)                        # 公开方法一律以 id 打头
 
@@ -78,12 +78,12 @@ openAgent(options) == ensureSession(options) + createSessionAgent(…)   # 一�
 
 `openAgent()` / `ensureSession()`（`core/src/session-factory.ts`）负责向外伸手。会话管理器是唯一一个**由调用者决定而非发现**的协作者，因为"要打开**哪一个**会话"是宿主的问题：hub 用 `create` / `open` 回答它，测试用 `inMemory` 回答它。模型及其 level 在任何地方都遵循同一套优先级：调用者指定的 → transcript 记录的 → `off`（没人要求过，就不要求）。因此测试可以在一份临时管理器和 `SettingsManager.inMemory` 上打开会话，完全不碰 `~/.my-agent/settings.json`。
 
-设置是**一个对象** `SettingsManager`（`core/src/settings-manager.ts`），没有别的地方保留副本：工作区的设置袋在装配时解析一次、作为装配字段记在登记处条目上，`applyConfig` 搬运**会话**缓存的东西——两条队列的模式（队列住在条目里，循环只在取走点拉取）——而把值经袋写回文件。模型和 thinking level 根本不在补丁里：两者都属于某一次对话，也都随使用它们的消息一起到达（见*输入框的模型座位*）。
+设置是**一个对象** `SettingsManager`（`core/src/settings-manager.ts`），没有别的地方保留副本：目录的设置袋在装配时解析一次、作为装配字段记在登记处条目上，`applyConfig` 搬运**会话**缓存的东西——两条队列的模式（队列住在条目里，循环只在取走点拉取）——而把值经袋写回文件。模型和 thinking level 根本不在补丁里：两者都属于某一次对话，也都随使用它们的消息一起到达（见*输入框的模型座位*）。
 
 | 作用域 | 文件 | 变更写到哪 |
 |---|---|---|
 | 全局 | `<agent home>/settings.json`（`~/.my-agent/settings.json`） | 还没有任何一层命名过该字段 |
-| 项目 | `<workspace>/.my-agent/settings.json` | 项目文件已经命名过该字段 |
+| 项目 | `<workDirAbsPath>/.my-agent/settings.json` | 项目文件已经命名过该字段 |
 
 这条规则叫**写到值所在之处**：一个仓库把 `"approval": { "bash": false }` 钉在项目文件里，它就继续拥有那套审批设置，于是 UI 里的一次切换被写在它旁边。嵌套对象做合并，所以一个只命名某个工具审批的补丁不会动到文件里的其他条目。每一层都按它文件里写的样子保留，未知键也在内，而合并视图是单独归一化的；写之前会重读文件，所以进程运行期间的手工编辑能存活。写入是同步的，而一个无法解析的设置文件会**抛出并点名该文件**，而不是悄悄按默认值跑下去。
 
@@ -107,13 +107,13 @@ level 本身骑在模型上（`Model.thinkingLevel`，由 `createModel(config, l
 2. `SessionController.prompt` 认领会话，在它上面调用 `prompt`，并回答 `202`。
 3. 会话施加这个选择，追加用户消息，并调用 `Agent.prompt(sessionId, message)` —— 当一次运行正在流式时，同一个入口按 `behavior` 把消息排进会话自己的 steer / followUp 队列，等循环在取走点取走。
 4. `prepareRequest` 重读活行、记录移动了什么、从 `buildSessionContext()` 取得 transcript —— 压缩和分支就住在那里 —— 会话在它前面放一条新的打头 system 消息，`context` hook 施加在这一对之上，然后从 @my-agent/llm 开始流式。
-5. 工具调用到达：`beforeToolCall` 跑 `before_tool` hook，后者在设置要求时默认请求审批；`afterToolCall` 跑 `after_tool`，后者归档或约束结果。
+5. 工具调用到达：`beforeToolCall` 跑 `before_tool` hook，后者在设置要求时默认请求审批；`afterToolCall` 跑 `after_tool`，后者的改写即定稿；写边界（`appendMessage`）兜底归档没人约束过的超大结果。
 6. 每个会话事件都作为 `{ type: "event", event }` 发给每一条订阅了该会话的逻辑流；连接级的心跳与行表走 `streamId: null` 那条道。
 7. `message_end` 把消息持久化到 JSONL 文件；浏览器从事件增量修补它的 DOM。
 
 ## 工具契约
 
-一个工具就是一个 `AgentTool`：名字、描述、一个 TypeBox schema、以及 `execute`。**没有插件注册表。** 工具那一侧分三样东西，各有各的家：`toolDefinitions()` 是六个内置的**定义**，只读、进程级，每条是 `(run) => createReadTool(run.workspace)` 这样的工厂——因为一个 `AgentTool` 闭包着自己的工作区，而一个持着它们的目录就等于持着每会话的工作区；`createToolRegistry(toolDefinitions())` 是进程的**目录**（定义 + `register` 进来的工具，只有测试走这条路）；而"这一轮能调哪些、哪些要问"是**一次选择**，是纯数据 `ToolState`，从账本的 `tool_config` entry 派生、随每次读取到达，不在注册表里、也不在任何一处被持有。注册表因此只有 `names` / `build` / `activeNames` / `active` / `register` 五个方法：`active(state, run)` 拿着随请求来的 `ToolRunContext`（工作区 + bash 超时）现建可执行集合，每一次路径解析都经过同一个 `Workspace.resolve`，它拒绝根之外的任何东西。工具失败即抛出；引擎（`agent.ts`）把一次抛出变成给模型的错误结果。
+一个工具就是一个 `AgentTool`：名字、描述、一个 TypeBox schema、以及 `execute`。**没有插件注册表。** 工具那一侧分三样东西，各有各的家：`toolDefinitions()` 是六个内置的**定义**，只读、进程级，每条是 `(run) => createReadTool(run.workDirAbsPath)` 这样的工厂——因为一个 `AgentTool` 闭包着自己的工作目录，而一个持着它们的目录就等于持着每会话的目录；`createToolRegistry(toolDefinitions())` 是进程的**目录**（定义 + `register` 进来的工具，只有测试走这条路）；而"这一轮能调哪些、哪些要问"是**一次选择**，是纯数据 `ToolState`，从账本的 `tool_config` entry 派生、随每次读取到达，不在注册表里、也不在任何一处被持有。注册表因此只有 `names` / `build` / `activeNames` / `active` / `register` 五个方法：`active(state, run)` 拿着随请求来的 `ToolRunContext`（`workDirAbsPath` + bash 超时）现建可执行集合，每一次路径解析都经过同一个 `resolveToolPath`：绝对路径原样接受、相对路径按 `workDirAbsPath` 解析，**没有围栏**——工具可以碰目录之外的任何东西。工具失败即抛出；引擎（`agent.ts`）把一次抛出变成给模型的错误结果。
 
 执行模式是**每个工具上的字段**，不是注册表状态：`read`、`glob`、`grep` 是 `parallel`；`write` 和 `edit` 是 `sequential`，因为对同一个文件的两次并发编辑会竞争；`bash` 是 `sequential`，因为并发命令交错在一起的输出无法阅读。
 
@@ -121,25 +121,25 @@ level 本身骑在模型上（`Model.thinkingLevel`，由 `createModel(config, l
 
 `setActiveTools(names)` 记录这个决定（写成一条 entry，不是写进注册表），而活跃集合就是循环执行的东西——它随每次请求经 `prepareRequest` 递给循环，也是循环对一次脚本化调用说"不"的依据——对未激活工具的调用会返回 `Tool <name> not found`，一个错误结果，而不是静默成功。transcript 的**打头 system 消息**只装提示词，每次请求**重建**而非追加——第二份提示词描述的是一个已经不存在的状态。**工具是请求的参数，不是消息内容**：`prepareRequest` 把活跃集合放进上下文的 `tools`，循环用 `toToolDeclaration` 削成声明，传输层直接拼成请求体的 `tools`，所以改工具集只需要下一次请求。构建器拿到的是注册表当前的名字和会话的**有效审批映射**——设置在下面、本会话自己的选择在上面，**包括那些未激活的工具**，所以一个被收窄掉的受闸工具仍然被声明为受闸，而不是被静默丢掉。重建发生在下一次请求；一次已经在飞的运行保持它启动时的那套。
 
-两张映射都是**会话自己的**，记录在由 `setActiveTools` 和 `applyConfig` 写出的 `tool_config` entry 里——两者的一份快照，因为在 UI 里"启用一个工具"和"选择它的审批"是同一个决定，而读取方重放分支、取最后一条。设置文件保持它们的角色：新会话打开时的默认值；一个会话里的切换不再抵达该工作区上的其他每个会话。`applyConfig` 从到达 `settingsManager.applySettings` 的东西里剥掉 `approval`，所以文件不被写入，而队列模式仍然照写。这条 entry 是**状态，绝不是对话**：`prepareRequest` 每一轮都从当下的选择重建请求，所以一条 `tool_config` entry 对提示词毫无贡献。第三个读取方是分支：见*分支*。
+两张映射都是**会话自己的**，记录在由 `setActiveTools` 和 `applyConfig` 写出的 `tool_config` entry 里——两者的一份快照，因为在 UI 里"启用一个工具"和"选择它的审批"是同一个决定，而读取方重放分支、取最后一条。设置文件保持它们的角色：新会话打开时的默认值；一个会话里的切换不再抵达该目录上的其他每个会话。`applyConfig` 从到达 `settingsManager.applySettings` 的东西里剥掉 `approval`，所以文件不被写入，而队列模式仍然照写。这条 entry 是**状态，绝不是对话**：`prepareRequest` 每一轮都从当下的选择重建请求，所以一条 `tool_config` entry 对提示词毫无贡献。第三个读取方是分支：见*分支*。
 
 ## Hook
 
 三个接缝从前接在 `Agent` 内部；现在它们是一个注册表，`core/src/hooks.ts` 里的 `createHooks()`。处理器按注册顺序运行，`apply` 逐字段合并它们返回的东西，所以后一个处理器细化前一个的答案；`on` 返回一个可以再次移除它的调用。`createSessionAgent` 在任何宿主能注册之前先装好默认值（内部就是 `installDefaultHooks`）。
 
-这个表面是**进程级**配置（[ADR-0007](adr/0007-services-drop-instance-state.md) §6），一个实例服务本进程跑的所有会话，所以每个事件都点名它属于哪个会话——处理器用这个 id 现取它要的其余东西（工作区、账本、审批映射），而不是靠闭包记住一个会话。
+这个表面是**进程级**配置（[ADR-0007](adr/0007-services-drop-instance-state.md) §6），一个实例服务本进程跑的所有会话，所以每个事件都点名它属于哪个会话——处理器用这个 id 现取它要的其余东西（目录、账本、审批映射），而不是靠闭包记住一个会话。
 
 | Hook | 事件 | 默认处理器 | 从哪调用 |
 |---|---|---|---|
 | `context` | `{ sessionId, messages, systemPrompt }` | 无 —— 会话已经有 transcript 了 | `prepareRequest`，在每次供应商请求之前 |
 | `before_tool` | `{ sessionId, toolCallId, toolName, args }` | 审批闸门，`Agent.authorize` | 引擎的 `beforeToolCall`（`toolCallHooks()`） |
-| `after_tool` | `{ sessionId, toolCallId, toolName, content, isError }` | 输出兜底，`boundToolContent` | 引擎的 `afterToolCall`（`toolCallHooks()`） |
+| `after_tool` | `{ sessionId, toolCallId, toolName, content, isError }` | 无 —— 改写即定稿；兜底住在写边界 | 引擎的 `afterToolCall`（`toolCallHooks()`） |
 
 - **`context`** 是一个纯覆盖接缝：没有注册任何处理器时，供应商拿到的正是会话自己本来会发的那些。
 - **`before_tool`** 是审批闸门。审批集合决定哪些工具要问，UI 通过审批端点 / `denyAllApprovals` / `snapshot.pendingApprovals` 回答，而这个 hook 把一次未答的审批变成 `{ suspend: true }`——运行在这里结束而不是等在内存里，tool call 不写结果、在账本里悬空，答案经审批端点到达后启动恢复运行，由引擎的恢复机器按 `toolCallId` 配对续跑：grant 重跑该调用、deny 合成结果，无答案的孤儿合成错误结果收尾（ADR-0006 §5）。后一个处理器可以**细化**这道闸门，但不能**撤掉**它。
-- **`after_tool`** 是给"忘记约束自己输出的工具"的兜底。超过 80,000 字符的结果（`SPILL_RESULT_CHARS`，`context/spill.ts`）会被整份归档到工作区的 `.my-agent/tool-results/<session id>/<call id>-<tool name>.txt`，模型拿到的则是它的头尾各 2,000 字符加上归档路径，这样 agent 可以自己 `read` 剩下的部分。归档写不出去时，`boundToolContent` 仍然把文本限制在 `MAX_TOOL_RESULT_BYTES`（200 KB）。
+- **`after_tool`** 没有默认处理器，因为在这里改写就是**定稿**：消息落盘那一刻，content 就是最终版本，账本不再存第二份。要截断一个结果，先自己把全文归档——`archiveToolResult()`（`hooks.ts`，一行调用，内部复用 `spill.ts` 的路径推导）把全文写进工作目录的 `.my-agent/tool-results/<session id>/` 并返回带路径的头尾视图——再把返回的内容放进 `{ content }`。不强制：强制不了，也不该强制。没人约束的超大结果由**写边界**兜底（`finalizeToolResult`，`agent.ts` 的 `appendMessage`）：超过 80,000 字符（`SPILL_RESULT_CHARS`）的整份归档、模型拿头尾各 2,000 字符加归档路径；归档写不出去时 `boundToolContent` 仍把文本限制在 `MAX_TOOL_RESULT_BYTES`（200 KB）。
 
-由此得出一条规则：**hook 决定模型看到什么，transcript 保留工具产出了什么。** 被改写的 content 回到循环、用于这一轮；而会话管理器记录的是工具自己的输出。改写也**落账**：工具结果消息落账时，hook 留给模型的 `shown` 半边作为一条 `tool_result_view` entry 紧随其后写进文件（`Agent.recordToolResultView`），发请求时由 `toolResultViewsOf` 从账本里把它和那条消息按 call id 配回成对——`forModel` 读它，所以重启后的进程服务给模型的仍是那个被约束过的版本；文件里也仍然保有工具实际返回的东西，快照与 wire 读到的也是它。
+由此得出一条规则：**改写即定稿，账本存的就是你返回的那个版本。** 过去这里是「两半」——transcript 存工具的原话、一条 `tool_result_view` entry 记 hook 留给模型的 `shown`，每次请求现配——现在那一机制已删：hook 的返回就是消息的内容，落盘即冻结，请求、快照、重启后的进程读到的都是同一份。代价是两条约束：截断的决定必须在 `after_tool` 即时做出且不可反悔；归档的完整性从此依赖工作目录（路径由 session id + call id 推导），不依赖账本——fork 只复制 JSONL，原目录在就能读全文，原目录没了就只剩截短版。老文件里的 `tool_result_view` entry 照旧生效：重放时（`applyToolResultViews`，`buildContextEntries` 的一步）`shown` 覆盖它身后那条消息的 content，clear 仍然后到后赢。
 
 ## 会话事件
 
@@ -187,11 +187,13 @@ type AgentSessionEvent =
 | `steer` | steering | 在正在跑的那一轮的下一个取走点，所以它能改变这一轮做什么 |
 | `followUp`（默认） | follow-up | 当 agent 本来要停下来时，这会开启另一轮 |
 
-`Settings.steeringMode` 和 `Settings.followUpMode`（`"all"` 或 `"one-at-a-time"`，默认 `one-at-a-time`）决定每个取走点注入多少条排队消息。`snapshot.queued` 报告已接受、循环还没取走的消息有多少条——**只算 follow-up**，steer 进的是正在跑的那一轮；`applyConfig` 重新施加这两个模式；`settle()` 等的是**队列被取空**，而不只是当前这一轮结束。
+`Settings.steeringMode` 和 `Settings.followUpMode`（`"all"` 或 `"one-at-a-time"`，默认 `one-at-a-time`）决定每个取走点注入多少条排队消息。`snapshot.queued` 报告已接受、循环还没取走的消息有多少条——**只算 follow-up**，steer 进的是正在跑的那一轮；`applyConfig` 重新施加这两个模式；`settle()` 等的是**队列被取空**，而不只是当前这一轮结束——唯一的例外是闸门结束的那次运行，见下。
 
 **排队消息的落盘点在取走点上，不在接受点上**（[ADR-0003](adr/0003-queued-writes-at-drain.md)，见其文末修订）。循环在取走点直读会话自己的两条队列（`drainTranscribed`），并在**取走的那一刻**把消息写进 store——文件里的位置就是模型遇到它的位置。于是 store 同时是请求的来源（`prepareRequest` 从它建）和基线的来源（重连、重载、宿主复活都按它重建 items），而两者读到的是同一个顺序：循环回放的那个。两类消息「先于循环的回显」落盘：启动一次运行的那条 prompt（在循环之前写，窗口不必等第一个事件），和取走的插话（在取走点写）；两者的回显都由戳记匹配抑制（`isOptimisticEcho`，戳记统一记在 `RunScope.writtenAhead`，来自会话而不是 `Date.now()`，因为两条消息可能落在同一毫秒）。计数从**被接受**算到**被取走**，而不是从队列深度的一比一换算算——`one-at-a-time` 下一次取走只消费一条，排着的不止一条。
 
 一次运行结束时**还没被取走**的消息随运行一起丢弃（发送契约即发即弃：取走即落盘，没被取走就没人会回答它），只清空会话自己的两条队列，让深度归零——`settle()` 等的就是这个（[队列住在会话里](adr/0003-queued-writes-at-drain.md)）。中止、失败、以及恰好在循环决定不再找消息之后到达的那条 prompt，都走这一步。
+
+**闸门结束的那次运行是唯一的例外。** 它把队列留下（`RunScope.suspended`），因为**恢复运行就是来取走它们的**：批准或拒绝之后开的那次运行，在它的取走点上把消息取走、落盘，位置在恢复出来的工具结果之后——那也是 provider 唯一接受它的位置（`tool_result` 必须紧跟 `tool_use`，所以它不能提前写）。等它的人因此看到的是「排队中 1」一直亮着，而不是那句话悄悄消失。相应地，`settle()` 把「有悬空调用在等人答」读作**一个问题而不是活**，所以挂起的会话照样能落定——否则 hub 的回收会卡在第一次 `settle()` 上。真正没人来接的时候（回收宽限走完、`abort` 结束会话）由 `denyAllApprovals` 一并清空队列：那是「不会再有运行来取」的通知，不是又一处随意丢弃。
 
 ## 重试
 
@@ -213,7 +215,7 @@ type AgentSessionEvent =
 
 `Agent` 自己不保留 transcript。`SessionManager`（`core/src/session/session-manager.ts`）保留，而且它是会话 config 里的**一个对象**，不是会话记得去写的一个文件：会话通过 `session.sessionManager` 追加，并从它那里读回每一次请求，所以"发给供应商的"、"恢复的进程看到的"、"磁盘上的"是同一件东西，而不是三件需要保持同步的东西。账本的形状也是 ADR-0006 的：`SessionState` 是纯数据，`fillSession` 是磁盘到状态的**唯一**入口——hub 打开一个会话、冷读一份 transcript、进程重启后重开，走的都是它；host 在手时它就是该文件**唯一的写者**（claim 保证），追加即时落盘，所以内存里重放出的状态从不与文件分叉——它是 ADR 允许的那种**可从磁盘重建的缓存**，不是第二份事实。
 
-在磁盘上，一个会话是一个 JSONL 文件，位于 `<agent home>/sessions/--<把分隔符换成短横的 cwd>--/<ISO 时间戳>_<id>.jsonl`。每个工作区一个目录，以**绝对路径**命名而不是哈希，所以一个文件不必打开就能追溯到它的项目。文件以一条 header 开头——`{type, version, id, timestamp, cwd, parentSession}`，`version` 为 `CURRENT_SESSION_VERSION = 4`——它之后的每一行是一条 **entry**，携带 `id`、`parentId`、`timestamp` 和一种 kind。父链接是让这个文件成为一棵树的东西；`leafId` 是对话当前所在之处，而移动它就是窗口在这棵树上行走的方式——见*会话树*。存在十一种 kind：
+在磁盘上，一个会话是一个 JSONL 文件，位于 `<agent home>/sessions/--<把分隔符换成短横的 workDirAbsPath>--/<ISO 时间戳>_<id>.jsonl`。每个工作目录一个 store 目录，以**绝对路径**命名而不是哈希，所以一个文件不必打开就能追溯到它的项目。文件以一条 header 开头——`{type, version, id, timestamp, workDir, parentSession}`，`version` 为 `CURRENT_SESSION_VERSION = 4`——它之后的每一行是一条 **entry**，携带 `id`、`parentId`、`timestamp` 和一种 kind。父链接是让这个文件成为一棵树的东西；`leafId` 是对话当前所在之处，而移动它就是窗口在这棵树上行走的方式——见*会话树*。存在十一种 kind：
 
 - `message`，持有循环产生的或用户发出的 `Message`；
 - `thinking_level_change` 和 `model_change`，会话自己的配置历史——记录为 **entry** 而不是一条元数据记录，所以 transcript 本身就能回答"这个会话当时在哪个模型上"。两者都由 `recordSelection` 写在 `prepareRequest` 的开头，也就是说：**在带着它们发出请求时**。用户指向过、却从未用它发过的模型什么也没回答，所以它不在文件里。`model_change` 用那一行**唯一的名字**来命名它；而由于文件从不被重写，读取方取这个字段，并回落到旧构建写在它位置上的 `provider`。assistant 消息的 wire id 是回到某一行的第二条路，用于没有记录过变更的 transcript；但一条消息除了 wire id 之外不携带任何行身份，所以它只有在用户**没给那一行命名**时才能指出是哪一行——两者都没有的会话，启动时没有模型，并提示去挑一个；
@@ -221,20 +223,20 @@ type AgentSessionEvent =
 - `compaction`，一个检查点（见下）；
 - `clear_tool_result`，它命名那些其文本被从视图中清掉的工作结果（见下）；
 - `trim_tool_call_arg`，它命名那些其记录的 tool-call 参数被缩短的 assistant 消息（见下）；
-- `tool_result_view`，hook 改写过的工具结果的 `shown` 半边——`toolCallId` 加上留给模型读的内容，作为它所注解的 toolResult 消息 entry 的 child 紧随其后写；`stored` 半边就是那条消息自己，不重复存。发请求时 `toolResultViewsOf` 按 call id 把两半配回（见*Hook*）；
+- `tool_result_view`，**老文件专读**：两半构建记录 hook 改写结果的 `shown` 半边——`toolCallId` 加上留给模型读的内容，紧跟它所注解的 toolResult 消息 entry 之后。这个构建已不再写它（改写即定稿，消息自己就是最终版），但重放照旧应用老文件里的记录（见*Hook*）；
 - `leaf`，对话**去了哪里**的记录——`branch()` / `resetLeaf()` 在位置真的移动时写出的一条状态 entry，`buildIndex()` 重放它，让一次移动活过回收与进程退出（见*会话树*）；
 - `rename`，人自己起的会话名，按文件序取最后一条、与分支无关（[ADR-0002](adr/0002-session-rename-entry.md)）；
-- `usage`，一笔**不挂在任何消息上**的模型花销：`operation`（今天只有委派子代理的 `"subagent"`）、`model` 与整份 `usage`，由子代理工具在子会话落定时整笔写入父会话。子代理跑在它自己的 transcript 上，它的花销在本会话里没有 assistant 消息可搭，这是它唯一的落点（见下）。
+- `usage`，一笔**不挂在任何消息上**的模型花销：`operation`、`model` 与整份 `usage`。这个构建已经不再写它（委派不在第一版范围内），但读取照旧——老文件里的记录照样按文件序计入总额，未知的 `operation` 按普通花销读，不拒绝。
 
 别的任何东西都整份保留并原样交回：**这个构建不认识的 kind 必须能活过一次读取**，因为是更新的构建写了它，而文件从不被重写。`prune` 和 `argtrim` 是反向的例子——更早的构建用这两个名字写了如今叫 `clear_tool_result` 和 `trim_tool_call_arg` 的记录，解析时归一化到新名字，让旧文件里的视图改写继续生效。唯一的例外是**完全读不了**的文件，`loadJsonlEntries` 会拒绝它而不是修复它。读取是逐行独立解析的，所以一行读不了不会让会话的其余部分也读不了。
 
-`buildContextEntries` 把分支变成仍在上下文里的 entry，施加那三个被记录成 entry 的决定：沿父链接从根走到 `leafId`，在那条分支上找到最新的 `compaction`，从它的 `firstKeptEntryId` 起全部取用、并丢掉之前的（换成这个检查点），然后清掉任何 `clear_tool_result` 记录命名的结果、缩短任何 `trim_tool_call_arg` 记录命名的参数。`buildSessionContext` 把这份清单投影成发给模型的东西，并报告这条分支最后一次被设成的 thinking level 和模型。
+`buildContextEntries` 把分支变成仍在上下文里的 entry，施加那四个被记录成 entry 的决定：沿父链接从根走到 `leafId`，在那条分支上找到最新的 `compaction`，从它的 `firstKeptEntryId` 起全部取用、并丢掉之前的（换成这个检查点），然后应用老文件里 `tool_result_view` 记录的改写（`applyToolResultViews`）、清掉任何 `clear_tool_result` 记录命名的结果、缩短任何 `trim_tool_call_arg` 记录命名的参数。`buildSessionContext` 把这份清单投影成发给模型的东西，并报告这条分支最后一次被设成的 thinking level 和模型。
 
-写入是同步的：`appendMessage`、`appendThinkingLevelChange`、`appendModelChange`、`appendToolConfig`、`appendCompaction`、`appendTrimToolCallArgs`、`appendClearToolResults`、`appendToolResultView`、`appendRename`、`appendUsage` 把新 entry 链接到 leaf、移动 leaf，并追加一行。`SessionManager.create()` **不写任何东西**：文件随第一条消息出现（`persistEntry` 里 `hasConversation` 那道闸），所以没人说过话的会话在盘上没有痕迹、在侧边栏没有一行。pi 的延迟创建因此被保留下来，代价是 id 在那之前不可寻址——`findAnywhere` 读的是 header 文件——而这段窗口由 `SessionHub` 手里那份 manager 承担（`pending` 表），因为唯一会把这个 id 发出去的就是它自己；进程重启，这份窗口一并消失，那条会话本来也没有内容可丢。标题从第一条**有文本的**用户消息推导，活会话和列表一视同仁，因为 header 的创建时间戳会把每个恢复的会话都叫成「新会话」。
+写入是同步的：`appendMessage`、`appendThinkingLevelChange`、`appendModelChange`、`appendToolConfig`、`appendCompaction`、`appendTrimToolCallArgs`、`appendClearToolResults`、`appendRename`、`appendUsage` 把新 entry 链接到 leaf、移动 leaf，并追加一行。`SessionManager.create()` **不写任何东西**：文件随第一条消息出现（`persistEntry` 里 `hasConversation` 那道闸），所以没人说过话的会话在盘上没有痕迹、在侧边栏没有一行。pi 的延迟创建因此被保留下来，代价是 id 在那之前不可寻址——`findAnywhere` 读的是 header 文件——而这段窗口由 `SessionHub` 手里那份 manager 承担（`pending` 表），因为唯一会把这个 id 发出去的就是它自己；进程重启，这份窗口一并消失，那条会话本来也没有内容可丢。标题从第一条**有文本的**用户消息推导，活会话和列表一视同仁，因为 header 的创建时间戳会把每个恢复的会话都叫成「新会话」。
 
 **用量是按文件记的账，不是按分支。** 状态行的 token 总数由 `sessionUsage` 从**整个文件**的 entry 折出——assistant 消息身上的 `usage`、`compaction` entry 存的摘要调用花销、`usage` entry 记的委派花销，三处来源、一个总数——而不是从活跃分支的消息折：被切走的分支上烧掉的 token 也烧掉了，压缩之前的消息不再出现在上下文里、可它们的请求曾经发出，这两个事实都不随 leaf 在哪而改变。总和里唯一的例外是 `contextTokens`（当前上下文占用）：它不是累计值，而是活跃分支最后一条带 usage 的 assistant 消息报出的占用量，属于 leaf 所在的那条分支。窗口客户端在 `turn_end` 上增量折 assistant 消息、由 `status` 帧与服务端的总额对齐，所以一笔 `usage` entry 落账后，客户端在下一个状态帧到来时收回这笔账。
 
-这就是 `prepareRequest` 要紧的原因：它让供应商请求和文件一致，无论会话是一秒前创建的还是重启后恢复的。hook 改写过的工具结果（见*Hook*）不是例外，只是**按受众分读**：文件同时保有 `stored`（那条消息自己）和 `shown`（紧跟其后的一条 `tool_result_view` entry），请求按 call id 配走 `shown`，快照与 wire 读 `stored`；result 被清掉时视图随它失效，被压缩折掉时配对自然落空。
+这就是 `prepareRequest` 要紧的原因：它让供应商请求和文件一致，无论会话是一秒前创建的还是重启后恢复的。hook 改写过的工具结果不是例外，也不需要任何按请求的现算：落盘的 content 就是最终版（写边界兜底归档超大结果），请求、快照与 wire 读到的是同一份；result 被清掉时 clear 后到后赢，被压缩折掉时消息连同它的版本一起离开视图。
 
 ### 压缩
 
@@ -243,7 +245,7 @@ type AgentSessionEvent =
 **先截参数，再清结果，只有还不够时才摘要。** `maybeCompact` 走三步：
 
 1. `write` 和 `edit` 记录下来的参数——`ARG_TRIM_TOOLS`（`context/trim-tool-call-args.ts`）里仅有的两个——携带的正文就活在它们改过的那些文件里，所以一旦某次调用的结果上了分支，视图就只保留它们的前 200 个字符加一个 `... [truncated] ...` 标记。这一步不花钱、也不需要时钟，所以即使 transcript 是热的它也照跑。
-2. 一小时没有请求，意味着供应商已经丢掉了这个提示词的缓存，所以此后每个没人看过一眼的结果都在被全额计费；`context/clear-tool-results.ts` 命名那些**可重新取得**的——`REFETCHABLE_TOOLS`，一次运行通过重新跑一遍就能产出的所有东西——**除了最新的五个**。这份清单说的是"哪些可以走"，不是"哪些必须留"：子代理的报告、或对话本身产出的任何其他答案，无论多旧都保留，因为再问一次也复现不出来。
+2. 一小时没有请求，意味着供应商已经丢掉了这个提示词的缓存，所以此后每个没人看过一眼的结果都在被全额计费；`context/clear-tool-results.ts` 命名那些**可重新取得**的——`REFETCHABLE_TOOLS`，一次运行通过重新跑一遍就能产出的所有东西——**除了最新的五个**。这份清单说的是"哪些可以走"，不是"哪些必须留"：一份只写过一次的报告、或对话本身产出的任何其他答案，无论多旧都保留，因为再问一次也复现不出来。
 3. 只有到这时才为一份摘要付费。
 
 缓存是否已经没了，是从最新的 **assistant** 消息——最后一次供应商调用——量的，而不是从最新的 entry 量：用户刚敲的消息只有几秒大，关于被缓存了什么它什么也没说。如果截短后或清空后的视图已经在触发条件之下，那就到此为止、不发请求——这正是排序的意义所在，因为重写一段供应商已经读过的提示词的中间部分，比它省下的 token 更贵。
@@ -262,7 +264,7 @@ type AgentSessionEvent =
 
 ```
 一条常驻连接 ─┐ 订阅表（连接 × 会话，不拿 claim）
-一次请求      ─┼─ claim ─> HostedSession { id, absWorkspaceRoot, claims, reaping }   id -> claim (SessionHub)
+一次请求      ─┼─ claim ─> HostedSession { id, workDirAbsPath, claims, reaping }   id -> claim (SessionHub)
 在飞的运行    ─┘                └ id -> OpenSession（队列、在飞运行、订阅、装配）(OpenSessions)
                                  └ 一个 Agent 服务全部 id        (core)
 ```
@@ -325,26 +327,13 @@ SessionManager.forkFrom(sourcePathInput, targetCwdInput, entryId, sessionDirInpu
 
 `SessionHub.fork(sessionId, entryId)` 拥有这个操作，因为一条分支必须比请求它的那个请求活得更久。在 HTTP 上它是 `POST /api/sessions/{id}/forks`，用新 id 作答；调用方随后订阅那个 id，走的是其他每个会话都走的同一条 `open` 帧。`SessionSnapshot` 携带 `parentSession`、`leafId`、以及每条消息一个 entry id，所以一份 transcript 可以就一条它并未看着被写下的消息提供"从这里 fork"。
 
-header 记录父级的**路径**，因为那是一个手里拿着某个文件的读取者所持有的东西。列表是两端同时已知的**第一个**地方，所以 `linkForkParents` 把那个路径解析成父级的 **id**——是 id 而不是路径，因为侧边栏其他每一行都是用 id 命名的——而 `SessionRef.parentId` 携带它。父级在该目录之外的 fork 保持未解析、显示为根，这是诚实的读法：那里也没有东西能打开它。用它的是侧边栏，它把一个工作区的会话按深度优先铺开，一个 fork 放在它所来自的那个会话下面。
+header 记录父级的**路径**，因为那是一个手里拿着某个文件的读取者所持有的东西。列表是两端同时已知的**第一个**地方，所以 `linkForkParents` 把那个路径解析成父级的 **id**——是 id 而不是路径，因为侧边栏其他每一行都是用 id 命名的——而 `SessionRef.parentId` 携带它。父级在该目录之外的 fork 保持未解析、显示为根，这是诚实的读法：那里也没有东西能打开它。用它的是侧边栏，它把一个目录的会话按深度优先铺开，一个 fork 放在它所来自的那个会话下面。
 
-## 子代理
+## 委派（第一版不做）
 
-委派是**一对工具**，不是机制：`core/src/tools/subagent.ts` 里的 `SubAgent` 和 `SubAgentControl`。装配为每个会话做出来它们，除非调用方传 `subagents: false`；它们**不进**进程的工具目录，而是作为装配字段记在登记处条目上（`entry.localTools`），解析工具时与目录合成一个视图（`registryView`）——因为一个子级需要模型、thinking level、以及父级的 transcript 文件，而这些东西只有那次打开刚刚解析出来。
+`SubAgent` / `SubAgentControl` 曾经是一对**装配出来的**工具：不进进程目录，而是作为 `entry.localTools` 记在登记处条目上，解析工具时与目录合成一个视图（`registryView`）——因为一个子级需要父级的模型、thinking level 与 transcript 文件，而这些东西只有那次打开刚刚解析出来。
 
-| 工具 | 回答 |
-|---|---|
-| `SubAgent` | 启动一个子级并等它的报告；带 `run_in_background` 时立刻用一个 job id 作答 |
-| `SubAgentControl` | `output` 等一个 job 并返回它的报告（`wait_ms`，默认 30 s；`0` 只轮询一次），`stop` 取消它 |
-
-一个子级是每次委派一个**真正的** `Agent`，通过其他每个会话都走的同一个 `openAgent` 装配：同一个工作区、父级的模型和 thinking level、以及它自己的一个 transcript 文件，位于 `<agent home>/sessions/--<cwd>--/subagents/`，其 header 把父级的文件记录为 `parentSession`。有三样东西被刻意**不**继承：
-
-- **工具集合。** 子级跑 `read`、`glob`、`grep`（`SUBAGENT_TOOLS`），固定写在代码里，而不是调用方模型填的一个参数：子级可以跑哪些工具是**宿主**的决定，而一个能自己点名工具集的模型可以在运行途中给自己授予 `write`。
-- **审批。** 它的设置管理器是内存中的、且所有审批都关——一个子级的审批请求没有窗口可以回答它，而只读集合在默认审批集合下也不需要审批。
-- **嵌套。** `subagents: false` 把这一对挡在子级的工具集合之外。
-
-报告是子级**最后一条 assistant 消息**的文本，从子级自己的 `SessionManager` 读回来：一次失败的供应商调用**不是**一次拒绝——运行以一条 `stopReason` 为 `"error"` 的 assistant 消息结束——所以结果从 transcript 读出，并作为**工具错误**而不是报告呈现给父级。
-
-后台 job 是进程内的：持有它们的表活在工具对的闭包里，所以一个 job 与启动它的那个会话同死，而一个会话的 `SubAgentControl` 够不到另一个会话的 job——未知 id 是一个工具错误。子级的 transcript 照样在磁盘上，就在它所在工作区的会话旁边的 `subagents/` 目录里，这也是侧边栏从不列出它的原因：列表扫的是**工作区的会话目录**，不是它的子目录。
+第一版把整条链删掉了：工具本身、`localTools` 字段、`registryView`、`subagents: false` 选项，以及它的冒烟用例。现在每个会话跑的就是进程目录那一份定义，"会话自有的工具"这个概念不存在。`usage` 这种「没有消息可搭的花销」仍然可读（见*会话文件*），只是不再有人写它。
 
 ## API
 
@@ -352,17 +341,17 @@ header 记录父级的**路径**，因为那是一个手里拿着某个文件的
 
 | 方法 | 路径 | 请求体 | 回答 |
 |---|---|---|---|
-| `GET` | `/api/health` | — | `{ ok, absCwd, live }`——`live` 是本进程正在运行的会话 id |
+| `GET` | `/api/health` | — | `{ ok, absWorkDir, live }`——`live` 是本进程正在运行的会话 id |
 | `GET` | `/api/models` | — | `{ models: ModelOption[] }` |
 | `PUT` | `/api/models` | `{ models: ModelInput[] }` | `{ models: ModelOption[] }` |
 | `GET` | `/api/settings` | — | `{ settings: SettingsSnapshot }` |
-| `PATCH` | `/api/settings` | `{ patch: { appearance?, approval?, tools?, modes?, bash? } }` | `{ settings }` —— 工作区**默认值**，在任何会话存在之前读取；按会话的审批变更发往 `PATCH /api/sessions/{id}`；`modes` 整表替换（ADR-0005） |
-| `GET` | `/api/workspaces` | — | `{ workspaces: WorkspaceGroup[] }`——每组的 `sessions` 是 `SessionRow[]`（含 `modified` / `running` / `pending`）；被搁置的工作区不在其中 |
-| `POST` | `/api/workspaces/rename` | `{ from, to }`（两个绝对路径） | `{ cwd, sessions: string[] }`——**一个**操作：先把文件夹搬过去，再把 store 目录与每条 header 的 `cwd` 跟上；有活会话、目标被占、父目录不存在都是 `409` |
-| `POST` | `/api/workspaces/hide` | `{ absCwd }` | `{ settings, workspaces }`——只从列表移除，磁盘原样；把 `absCwd` 从那轮设置里去掉（`PATCH /api/settings` 带 `hiddenWorkspaces`）即可放回，在该目录里新建会话也同样 |
+| `PATCH` | `/api/settings` | `{ patch: { appearance?, approval?, tools?, modes?, bash? } }` | `{ settings }` —— 目录**默认值**，在任何会话存在之前读取；按会话的审批变更发往 `PATCH /api/sessions/{id}`；`modes` 整表替换（ADR-0005） |
+| `GET` | `/api/directories` | — | `{ directories: DirectoryGroup[] }`——每组的 `sessions` 是 `SessionRow[]`（含 `modified` / `running` / `pending`）；被搁置的目录不在其中 |
+| `POST` | `/api/directories/rename` | `{ workDirAbsPath, name }` | `{ workDirAbsPath, name, settings }`——只改这个列表里显示的名字，写进 `directoryNames`；磁盘上的文件夹与每条 header 的 `workDir` 都不动 |
+| `POST` | `/api/directories/hide` | `{ workDirAbsPath }` | `{ settings, directories }`——只从列表移除，磁盘原样；把该路径从 `hiddenDirectories` 里去掉（`PATCH /api/settings`）即可放回，在该目录里新建会话也同样 |
 | `GET` | `/api/sessions` | — | `{ sessions: SessionRef[] }` |
 | `GET` | `/api/sessions/current` | — | `{ sessionId, sessions }` |
-| `POST` | `/api/sessions` | `{ absCwd?: string }`（可为空体） | `201 { sessionId, sessions }`——带 `absCwd` 时会话落在那个目录，`sessions` 列**该目录**的会话 |
+| `POST` | `/api/sessions` | `{ absWorkDir?: string }`（可为空体） | `201 { sessionId, sessions }`——带 `absWorkDir` 时会话落在那个目录，`sessions` 列**该目录**的会话 |
 | `GET` | `/api/sessions/{id}` | — | `{ session: SessionSnapshot }` |
 | `POST` | `/api/sessions/{id}/messages` | `{ text, behavior? }` | `202 { accepted }` |
 | `POST` | `/api/sessions/{id}/abort` | — | `{ stopped }` |
@@ -372,11 +361,11 @@ header 记录父级的**路径**，因为那是一个手里拿着某个文件的
 | `POST` | `/api/sessions/{id}/forks` | `{ entryId: string \| null }` | `201 { sessionId, sessions }` |
 | `POST` | `/api/sessions/{id}/branch` | `{ entryId: string, descend?: boolean }` | `{ session }` |
 
-这里没有一行是会话事件的端点——唯一的流式通道是 `/mux`（不在 `/api` 之下，因为它不是一个 REST 资源）；`abort` 也留在 REST 上，不帧化。`/api/workspaces` 的行是这个进程知道的每一行，而**无人在看时一个会话的行也照样更新**（它由 `projection.ts` 喂，不由某条恰好开着的流喂）；通道不可用时，客户端把 `GET /api/workspaces` 当作侧边栏行表的 REST 兜底。**被搁置的工作区是这里唯一的例外，而它只有一条规则**（`SessionHub.listsWorkspace`）：REST 列表与通道概览都按它过滤，所以两条路永远说同一件事——只过滤概览会让一个被删掉的分组在它某个会话下次变动时自己长回来。搁置或取回不改变任何一行，所以它由**重发一份概览**（`broadcastSessions()`）通知，而不是靠 `session_row`。
+这里没有一行是会话事件的端点——唯一的流式通道是 `/mux`（不在 `/api` 之下，因为它不是一个 REST 资源）；`abort` 也留在 REST 上，不帧化。`/api/directories` 的行是这个进程知道的每一行，而**无人在看时一个会话的行也照样更新**（它由 `projection.ts` 喂，不由某条恰好开着的流喂）；通道不可用时，客户端把 `GET /api/directories` 当作侧边栏行表的 REST 兜底。**被搁置的目录是这里唯一的例外，而它只有一条规则**（`SessionHub.listsDirectory`）：REST 列表与通道概览都按它过滤，所以两条路永远说同一件事——只过滤概览会让一个被删掉的分组在它某个会话下次变动时自己长回来。搁置或取回不改变任何一行，所以它由**重发一份概览**（`broadcastSessions()`）通知，而不是靠 `session_row`。
 
 `ModelOption` 是用户导入的一行、**去掉密钥**——`hasApiKey` 说明是否存了一个，而密钥从不离开服务器。`PUT /api/models` 替换整份清单，因为设置面板编辑的是一份清单，而一份被半途施加的清单是没人能推理的状态；一行不带 `apiKey` 送来时，保留存在它名下的那个，这正是让面板能够往返一行"它从未被展示过密钥"的数据的原因。名字是一行的**身份**——transcript 记录它、配置补丁命名它——所以重复会被 `400` 拒绝（`The name "X" is already in use`），而不是在用户背后把它改成唯一的：一个加了后缀的名字会改变**每一条**命名它的 transcript 的含义，而显示这次冲突的那个面板才是修复该发生的地方。变更能抵达活会话而不必重新打开它们，因为会话持有一个 `ModelSource`、每次请求都通过它读存储而不是复制一行、并每次都从活行重新推导自己的模型——所以端点、窗口和 wire id 都随密钥一起移动。
 
-`GET /api/workspaces` 扫描 agent home 的会话目录，所以侧边栏可以按工作区分组，尽管本进程是**恰好**在其中一个之上启动的；从另一个分组打开会话要使用该会话自己 header 里的 `cwd`。`PATCH /api/settings` 刻意比 `PATCH /api/sessions/{id}` 更窄：主题、字号、审批集合、全局默认工具集在任何会话存在之前就要读，所以它们不能住在某一个会话上。`GET /api/sessions/current` 是落地端点——`--session` 钉住一个，否则新建一个（开窗落在欢迎态，历史归侧边栏）——因为一个去猜的客户端会静默显示与服务器正在服务的**不同**的对话。
+`GET /api/directories` 扫描 agent home 的会话目录，所以侧边栏可以按目录分组，尽管本进程是**恰好**在其中一个之上启动的；从另一个分组打开会话要使用该会话自己 header 里的 `workDir`。`PATCH /api/settings` 刻意比 `PATCH /api/sessions/{id}` 更窄：主题、字号、审批集合、全局默认工具集在任何会话存在之前就要读，所以它们不能住在某一个会话上。`GET /api/sessions/current` 是落地端点——`--session` 钉住一个，否则新建一个（开窗落在欢迎态，历史归侧边栏）——因为一个去猜的客户端会静默显示与服务器正在服务的**不同**的对话。
 
 路径参数在控制器看到它们之前按段做百分号解码，所以一个不透明的 id——工具调用 id 可能含冒号——能安然走完这段路而不会被二次编码。失败是 JSON——`{ error }`——配上说明发生了什么的 status：`404` 表示 id 不是会话，`400` 表示请求体不是 JSON 或字段类型不对，`409` 表示会话拒绝的一次变更（未知工具名、没有任何行提供的模型），或一个不是待回答审批的 `toolCallId`——会话存在、请求合法，但此刻收不下这个答案，`405` 带 `Allow` 表示该路径在另一个动词下存在。审批端点只在答案真的被收下时才记入答案表（只读检查在 `onApproval` 之前），所以一次被 409 拒掉的请求不会污染任何一条订阅还在展示的审批的差值。
 
@@ -430,7 +419,7 @@ type ClientFrame =
 
 一个会话 id 可以被多于一条连接订阅，并被任意多个请求读取。hub 为它运行**一个** agent 循环，并把它的事件转发给每一条订阅它的逻辑流，所以 `event` 和 `status` 是**按订阅者**的，尽管它们背后的 transcript 是共享的。这条流是单向的：命令从不是它上面的一帧。扩展任一侧的规则：如果浏览器需要知道某件事，它进一条消息或一个端点；如果只有服务器端需要，它就留在 core。`snapshot.allTools` 是 header 据以给每个工具画一个开关的东西，`snapshot.activeTools` 是那些开关显示为开的东西，而 `PUT /api/sessions/{id}/tools` 带 `{ names }` 替换活跃集合。
 
-`models`、`sessions`、`workspaces`、`settings` 从前是这条流上的帧；它们现在是端点，因为一个无法订阅任何会话的页面仍然需要填充它的侧边栏、设置面板和窗口 chrome。连接级载荷里唯一替代了旧行为的是 `sessions` / `session_row`：一个窗口的行表由投影喂，不再由它恰好在看的那条流喂——**没人在看时一个会话的行也照样更新**。
+`models`、`sessions`、`directories`、`settings` 从前是这条流上的帧；它们现在是端点，因为一个无法订阅任何会话的页面仍然需要填充它的侧边栏、设置面板和窗口 chrome。连接级载荷里唯一替代了旧行为的是 `sessions` / `session_row`：一个窗口的行表由投影喂，不再由它恰好在看的那条流喂——**没人在看时一个会话的行也照样更新**。
 
 `approval_request` 和 `approval_settled` 是**订阅自己的**活儿，不是会话的：会话把一次待回答的审批作为一次普通变更发布，所以 mux 把 `snapshot.pendingApprovals` 与这条订阅已经告诉过窗口的东西相比较，只发差值——没有这一步，横幅只会出现在"prompt 上去之后才重载"的页面上。答案表按**会话**键控（`Map<sessionId, Map<toolCallId, ShownApproval>>`），因为几个 Anthropic 兼容端点会把不同会话的 `toolCallId` 编成同一个；一条准予绝不能因此抵达另一个会话的窗口。
 
@@ -467,7 +456,7 @@ type ClientFrame =
 | 失败面 | `observability.cjs` 监听 `child-process-gone` / `render-process-gone` / `uncaughtException` / `unhandledRejection`，启动带一个 20 s 的看门狗；报告先写一行日志，再画一张 `data:` 说明页，原生对话框只在页面画不出来时兜底 | 子进程成批死亡（GPU、network）过去是靠人肉翻日志才看清的，而"什么都没发生"正是 10/13 那次的样子；`data:` 页由外壳自己画、不经过那个没起来的服务器，而**渲染进程死后换上的新渲染进程照样能画它**（本机 `forcefullyCrashRenderer()` 实测），所以它排在原生对话框前面——`showErrorBox` 会阻塞到有人点掉它 |
 | 外壳诊断的语言 | **英文**（`desktop: …`），与 `shutdown.cjs` 及 `main.cjs` 既有的行一致；说明页与原生对话框里的文案是中文 | AGENTS.md 把诊断日志划给中文，而外壳从第一行起就是这条规则的例外；新模块跟着邻居比一半中文一半英文更小。用户看得到的字符串仍按窗口文案走中文 |
 | 看门狗 | 启动有预算（挂起也会被报告），重试/换端口的**策略**没有 | 失败必须可见是这张表的事；等多久、重试几次是另一个决定，没有它就只是永远没有窗口 |
-| 沙箱与 GPU 开关 | **一条都不加**——Chromium 默认的沙箱与进程模型原样使用，`webPreferences.sandbox: true` 因此是生效的配置 | 曾经加过四条（`no-sandbox` 等）来自一段**从未提交**的工作区规避；为什么删、什么条件下按什么顺序加回来，全在 [ADR-0004](adr/0004-shell-sandbox-switches-removed.md) |
+| 沙箱与 GPU 开关 | **一条都不加**——Chromium 默认的沙箱与进程模型原样使用，`webPreferences.sandbox: true` 因此是生效的配置 | 曾经加过四条（`no-sandbox` 等）来自一段**从未提交**的本机规避；为什么删、什么条件下按什么顺序加回来，全在 [ADR-0004](adr/0004-shell-sandbox-switches-removed.md) |
 | 打包 | 未构建 | 安装包、签名、更新、ASAR 布局，在决定要发布之前都太早 |
 
 外壳必须通过 `scripts/launch.mjs` 启动，而不是直接调 `electron` 二进制：环境里**任何地方**设置了 `ELECTRON_RUN_AS_NODE` 都会把 Electron 变成普通 Node，而应用会死在 `require("electron")` 返回一个路径而不是 API 上。客户端从不 import `@my-agent/llm`，也不 import core 的引擎与其他内部模块——它只看得到 `protocol.ts` 的类型，这正是让第二个界面（终端、RPC）成为一个**新客户端**而不是一次 core 改动的原因。
@@ -478,13 +467,14 @@ type ClientFrame =
 |---|---|---|
 | 一条 WebSocket 同时承载命令和事件 | 命令走 REST，事件走一条常驻 WebSocket mux；`channel.ts` 长成 `mux.ts` | 浏览器发的一切都是带状态码的请求，服务器发的一切都是单向的；命令面留在 REST 不动，而事件合流到一条常驻连接上（[ADR-0001](adr/0001-transport-websocket-mux.md)） |
 | `channel.ts` 拥有会话 | `hub.ts`，claim 由改变会话的请求与在飞的运行持有（**订阅不拿**） | 同一个会话 id 上的两条连接会构建两个 agent 循环、跑在一个 JSONL 文件上并各自独立追加 |
-| 每个会话读一次 `settings.json`，用一个 `SettingsStore` 去写 | 每个工作区一个管理器，两层 | 一个工作区上的两个会话持有同一个文件的两个版本，最后写的人赢 |
+| 每个会话读一次 `settings.json`，用一个 `SettingsStore` 去写 | 每个目录一个管理器，两层 | 一个目录上的两个会话持有同一个文件的两个版本，最后写的人赢 |
 | @my-agent/llm 内置的模型目录 | `<agent home>/models.json`，前面没有注册表 | 存在哪些端点、它们的上下文多大，是**用户的事实**；一行本来就**是**一个端点加一个密钥，所以"每行一个 provider"持有的只是行自己已经有的一个字符串——而那个字符串现在就是该行的 `name`，它既是选择器显示的标签，也是 transcript 记录的身份 |
 | 每行一个传输层 | 每一行都走 Anthropic Messages，每模型能力从 wire id 推导 | 本应用只说一种 API，所以传输层选择会是一个没人能采取行动的选择；某个 Claude 模型接受什么仍然必须按模型来，而 wire id 是手打的一行所携带的唯一事实 |
 | pi-ai 的懒加载 API，以及它推迟的那四个 API | `api/anthropic-messages.ts` 静态导入，其他实现删除 | 本应用能发的唯一请求就是它一直在发的那一个，所以推迟一个它总要加载的模块买不到什么，却会在树里留下四个任何行都够不到的实现 |
 | pi-ai 的服务端拒绝回退：`compat.allowedFallbackModels`、`fallbacks` 请求字段、它的 beta header、标记流中途模型切换的 `fallback` content block、以及为答案计价的目标成本 | 删除 | 被允许的目标是 pi 生成目录的一个事实，而本应用没有那份目录：手打的一行无法说明它的端点接受哪些模型作为回退，所以 `allowedFallbackModels` 从未被设置、没有任何请求携带过 `fallbacks`、每个读它的分支都不可达。这样的响应会把什么价钱算错，不是一个能从 wire id 推导出来的能力，所以它不是本应用声称拥有的能力 |
 | pi-ai 的 `Models`/`Provider` 注册表、凭据存储、OAuth 登录、环境变量密钥查找 | 该行自己的密钥，骑在发请求所用的模型上（`Model.apiKey`），并由 `Agent.adoptCurrentRow()` 在每次请求前按活行原地重算整个模型 | 这里的模型**就是**端点加上到达它的密钥，两者都存于 `models.json`；用户没有输入的密钥是本应用看不到的密钥，而浏览器配对和令牌刷新没有可以发生的表面。重新推导而不是在旁边解析密钥，是更强的陈述：对端点、窗口或 wire id 的一次手工编辑，能抵达一个**一直开着**的会话，而不只是它的密钥 |
-| 会话属于进程启动时所在的那个工作区 | 会话属于它自己 header 里的 `cwd` | 从另一个工作区分组打开一行，必须在那份目录内解析它的工具 |
+| 会话属于进程启动时所在的那个目录 | 会话属于它自己 header 里的 `workDir` | 从另一个目录分组打开一行，必须按它自己的 `workDirAbsPath` 解析相对路径 |
+| 工具被限制在会话的工作区里（`Workspace.resolve` 拒绝根之外的路径） | 目录只是相对路径的基准：`resolveToolPath(workDirAbsPath, …)` 原样接受绝对路径、允许 `..` 走出去，`Workspace` 类整个删除 | 「agent 只能碰这个文件夹」把一个本地对话当成了沙箱：要求它改 `/tmp` 里的一份配置、或看 `~/notes` 里的一条日志，用户都得先搬文件。目录仍然决定一个裸路径是什么意思、命令从哪里开始，这就够了；真正的边界不是路径 |
 | 模型切换在顶栏、工具集合在弹层、计量表在侧边栏 | 侧边栏角落一个按钮后的统一设置面板，加上输入框上的一个模型座位 | 那些是很少碰的控件，却坐在"对话被读取"的那片 chrome 里；状态行只保留会话的 token 总数、缓存命中率和上下文占用，别无其他。模型及其 thinking level 是证明这条规则的那个例外：它们跟随**对话**，所以属于书写区下方那一行，而新会话打开时的默认值是模型行的字段 |
 | 模型和 thinking level 作为 `PATCH /api/sessions/{id}` 的补丁字段 | 消息体上的一个 `ModelSelection`，由 `prepareRequest` 记录 | 配置变更在发出的那一刻就被施加，所以指向一个模型会写下一条 `model_change`、选一个 level 会写下一条 `thinking_level_change`——为的是一个**两者都没用它发过请求**的会话。entry 是 transcript 对"什么回答了某一轮"的交代，所以它们属于一轮被准备的地方 |
 | thinking level 作为流上的一个选项（`SimpleStreamOptions.reasoning`） | 模型上的一个字段（`Model.thinkingLevel`） | 这里的模型就是一次请求的配置，而 level 是它的一部分：level 待在模型旁边时，wire 就有了同一个强度的两个来源，而 `streamSimple` 原本就是为了把一个翻译成另一个而存在。放在模型上，effort 就在端点所在之处被读取，翻译失去了对象，两个入口也随之合并成一个 `stream` |

@@ -8,7 +8,7 @@ import { Sidebar, pagingOf, type SidebarHandlers, type SidebarState } from "../p
 import { askForText } from "../packages/web/src/render/text-dialog.ts";
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { installDom, type FakeNode } from "./dom-shim.ts";
-import type { SessionRow, WorkspacePaging } from "@my-agent/core/protocol";
+import type { SessionRow, DirectoryPaging } from "@my-agent/core/protocol";
 
 let failures = 0;
 
@@ -30,15 +30,15 @@ function handlers(over: Partial<SidebarHandlers> = {}): SidebarHandlers {
 		onSelectSession: () => {},
 		onToggleCollapsed: () => {},
 		onOpenSettings: () => {},
-		onAddWorkspace: () => {},
+		onAddDirectory: () => {},
 		onForkSession: () => {},
 		onDeleteSession: () => {},
 		onRenameSession: () => {},
-		onToggleWorkspace: () => {},
-		onPageWorkspace: () => {},
-		onCollapseWorkspace: () => {},
-		onRenameWorkspace: () => {},
-		onDeleteWorkspace: () => {},
+		onToggleDirectory: () => {},
+		onPageDirectory: () => {},
+		onCollapseDirectory: () => {},
+		onRenameDirectory: () => {},
+		onDeleteDirectory: () => {},
 		...over,
 	};
 }
@@ -52,20 +52,20 @@ function handlers(over: Partial<SidebarHandlers> = {}): SidebarHandlers {
  * because the sidebar's own behaviour is only half the contract: the other half is that some window
  * turns its reports back into state. If `main.ts` drifts from this, the smoke's red is the drift.
  */
-function pagingDriver(over: Partial<SidebarHandlers> = {}): { handlers: SidebarHandlers; paging: Record<string, WorkspacePaging> } {
-	const paging: Record<string, WorkspacePaging> = {};
+function pagingDriver(over: Partial<SidebarHandlers> = {}): { handlers: SidebarHandlers; paging: Record<string, DirectoryPaging> } {
+	const paging: Record<string, DirectoryPaging> = {};
 	const driver = handlers({
-		onToggleWorkspace: (workDirAbsPath) => {
+		onToggleDirectory: (workDirAbsPath) => {
 			const entry = pagingOf(paging, workDirAbsPath);
 			paging[workDirAbsPath] = entry.collapsed
 				? { collapsed: false, page: entry.savedPage, savedPage: entry.savedPage }
 				: { collapsed: true, page: entry.page, savedPage: entry.page };
 		},
-		onPageWorkspace: (workDirAbsPath) => {
+		onPageDirectory: (workDirAbsPath) => {
 			const entry = pagingOf(paging, workDirAbsPath);
 			paging[workDirAbsPath] = { collapsed: false, page: entry.page + 1, savedPage: entry.page + 1 };
 		},
-		onCollapseWorkspace: (workDirAbsPath) => {
+		onCollapseDirectory: (workDirAbsPath) => {
 			const entry = pagingOf(paging, workDirAbsPath);
 			const page = Math.max(1, entry.page - 1);
 			paging[workDirAbsPath] = { collapsed: false, page, savedPage: page };
@@ -119,7 +119,7 @@ function row(id: string, modified: number, extra: Partial<SessionRow> = {}): Ses
 }
 
 function state(rows: SessionRow[], over: Partial<SidebarState> = {}): SidebarState {
-	return { workspaces: [{ workDirAbsPath: "/w", sessions: rows }], collapsed: false, paging: {}, channel: "live", ...over };
+	return { directories: [{ workDirAbsPath: "/w", sessions: rows }], collapsed: false, paging: {}, channel: "live", ...over };
 }
 
 /**
@@ -187,7 +187,7 @@ function rowsByName(sidebar: Sidebar): Map<string, { state: string | null; toolt
  * `created` counts constructions, so a rebuilt row shows up as 2.
  *
  * Membership rather than equality, the way `classList.contains` reads a class: a heading wears
- * `workspace-head` and, when it is the current workspace, one more class beside it.
+ * `directory-head` and, when it is the current directory, one more class beside it.
  */
 function all(sidebar: Sidebar, className: string): { node: FakeNode; detached: boolean; created: number }[] {
 	const found: { node: FakeNode; detached: boolean; created: number }[] = [];
@@ -320,11 +320,11 @@ process.stdout.write("\nsidebar：分组标题在会话行之上\n");
 {
 	const sidebar = new Sidebar(handlers());
 
-	// Two workspaces, so this is about each group rather than about the one group a single-workspace
+	// Two directories, so this is about each group rather than about the one group a single-directory
 	// list happens to have. The reported symptom — the rows first, then "📁项目名" — showed up in
 	// every group and only got more obvious with more of them.
 	sidebar.render({
-		workspaces: [
+		directories: [
 			{ workDirAbsPath: "/one", sessions: [row("a", 300), row("b", 200)] },
 			{ workDirAbsPath: "/two", sessions: [row("c", 100)] },
 		],
@@ -337,14 +337,14 @@ process.stdout.write("\nsidebar：分组标题在会话行之上\n");
 	// testing the sort. What this looks at instead is the group's own child sequence: the heading is
 	// its first child, and no row is allowed above it. Before the fix the first row was inserted
 	// before the heading, so the list read "会话 a, 会话 b, 📁one".
-	const groups = all(sidebar, "workspace").map((entry) => entry.node.children.map((child) => child.className));
+	const groups = all(sidebar, "directory").map((entry) => entry.node.children.map((child) => child.className));
 	check("两个分组都在", groups.length === 2, JSON.stringify(groups));
 	for (const order of groups) {
-		// The heading may carry the current-workspace class beside its own, so the check is that the
+		// The heading may carry the current-directory class beside its own, so the check is that the
 		// first child *is* the heading — `all`'s membership rule, one group at a time.
 		check(
 			`标题在它那些行之上：${order.join(" > ")}`,
-			order[0]?.startsWith("workspace-head") === true && !order.slice(1).some((name) => name.startsWith("workspace-head")),
+			order[0]?.startsWith("directory-head") === true && !order.slice(1).some((name) => name.startsWith("directory-head")),
 			JSON.stringify(order),
 		);
 	}
@@ -367,16 +367,16 @@ process.stdout.write("\nsidebar：行会消失\n");
 	check("空列表不留残骸", titlesOf(sidebar).length === 0, JSON.stringify(titlesOf(sidebar)));
 
 	// The first paint lands before the list is fetched, so the 「暂无会话」 note is a phase rather than
-	// a row. It has to go when the first workspace arrives — otherwise every session of every group is
+	// a row. It has to go when the first directory arrives — otherwise every session of every group is
 	// drawn under a sentence saying there are none, which is what the window used to show.
-	sidebar.render(state([], { workspaces: [] }));
+	sidebar.render(state([], { directories: [] }));
 	const phase = all(sidebar, "session-list-empty").map((entry) => entry.node.textContent);
-	check("还没有工作区时说暂无会话", phase.includes("暂无会话"), JSON.stringify(phase));
+	check("还没有目录时说暂无会话", phase.includes("暂无会话"), JSON.stringify(phase));
 	sidebar.render(state([row("a", 300)]));
 	const leftOver = all(sidebar, "session-list-empty")
 		.filter((entry) => !entry.detached)
 		.map((entry) => entry.node.textContent);
-	check("工作区一到，「暂无会话」就撤掉", !leftOver.includes("暂无会话"), JSON.stringify(leftOver));
+	check("目录一到，「暂无会话」就撤掉", !leftOver.includes("暂无会话"), JSON.stringify(leftOver));
 	check("撤掉之后行还在", titlesOf(sidebar).length === 1, JSON.stringify(titlesOf(sidebar).map((t) => t.title)));
 }
 
@@ -412,8 +412,8 @@ process.stdout.write("\nsidebar：搜索真的过滤\n");
 		input.dispatch("input");
 		const restored = titlesOf(sidebar).map((t) => t.title);
 		check("清空搜索把行都放回来", restored.join(",") === "会话 alpha,会话 beta", JSON.stringify(restored));
-		const workspaces = all(sidebar, "workspace");
-		check("分组不是被删掉的", workspaces.every((entry) => entry.created === 1), JSON.stringify(workspaces.map((entry) => entry.created)));
+		const directories = all(sidebar, "directory");
+		check("分组不是被删掉的", directories.every((entry) => entry.created === 1), JSON.stringify(directories.map((entry) => entry.created)));
 	}
 }
 
@@ -577,13 +577,13 @@ process.stdout.write("\nsidebar：就地改名\n");
 	check("Escape 取消，什么都没提交", renamed.length === 1 && titlesOf(sidebar).map((t) => t.title).join(",") === "会话 s,新名字（1）", `${JSON.stringify(renamed)} / ${JSON.stringify(titlesOf(sidebar).map((t) => t.title))}`);
 }
 
-// ------------------------------------------------- 7. workspace group ordering
+// ------------------------------------------------- 7. directory group ordering
 
-process.stdout.write("\nsidebar：工作区按最近活跃在前\n");
+process.stdout.write("\nsidebar：目录按最近活跃在前\n");
 
 {
 	// The server's own listing sorts groups by their newest activity, most recent first, and the
-	// window's live path must agree with it — a message landing in a workspace moves that workspace
+	// window's live path must agree with it — a message landing in a directory moves that directory
 	// to the top of the sidebar. The store, not the view, owns this sort, so the check drives
 	// `SessionRows` directly: two groups whose newest rows disagree in both directions.
 	const store = new SessionRows();
@@ -591,7 +591,7 @@ process.stdout.write("\nsidebar：工作区按最近活跃在前\n");
 	store.put(row("c", 300, { workDirAbsPath: "/new" }));
 	check("初始：最近活跃的在前", store.groups().map((group) => group.workDirAbsPath).join(",") === "/new,/old", JSON.stringify(store.groups().map((group) => group.workDirAbsPath)));
 
-	// A message lands in the older workspace: its row's `modified` moves forward and the group order
+	// A message lands in the older directory: its row's `modified` moves forward and the group order
 	// follows — the one frame the projection sends for every appended message.
 	store.put(row("a", 400, { workDirAbsPath: "/old" }));
 	check("活跃后：老的反超到第一", store.groups().map((group) => group.workDirAbsPath).join(",") === "/old,/new", JSON.stringify(store.groups().map((group) => group.workDirAbsPath)));
@@ -644,11 +644,11 @@ process.stdout.write("\nsidebar：分页 ——「展开其余」一次加一页
 	check("退回第一页后「收起」又没了", !collapseShown(), String(collapseShown()));
 	check("「展开其余」还写着 7 个", more().textContent === "展开其余 7 个会话", more().textContent);
 
-	// A workspace with no more than a page never wears any paging control: there was nothing held
+	// A directory with no more than a page never wears any paging control: there was nothing held
 	// back, so there is nothing to expand and nothing to collapse.
 	const small = new Sidebar(handlers());
 	small.render(state([row("a", 300), row("b", 200), row("c", 100)]));
-	check("一页装得下的工作区没有分页按钮", all(small, "session-paging").length === 0, String(all(small, "session-paging").length));
+	check("一页装得下的目录没有分页按钮", all(small, "session-paging").length === 0, String(all(small, "session-paging").length));
 }
 
 // ------------------------- 14. the head collapses to itself and reopens on the saved page
@@ -662,18 +662,18 @@ process.stdout.write("\nsidebar：表头收起只剩表头，重开回到上次�
 	const render = (): void => sidebar.render(state(rows, { activeSessionId: "s0", paging }));
 	render();
 
-	// Read down to the second page, then fold the whole workspace away with its head.
+	// Read down to the second page, then fold the whole directory away with its head.
 	all(sidebar, "session-more")[0]!.node.dispatch("click");
 	render();
 	check("第二页在屏上", titlesOf(sidebar).length === 10, String(titlesOf(sidebar).length));
-	const head = (): FakeNode => all(sidebar, "workspace-head")[0]!.node;
+	const head = (): FakeNode => all(sidebar, "directory-head")[0]!.node;
 	check("表头是个真按钮", head().tagName === "BUTTON", head().tagName);
 	check("展开时 aria-expanded=true", head().getAttribute("aria-expanded") === "true", String(head().getAttribute("aria-expanded")));
 	head().dispatch("click");
 	render();
 	check("收起后这个分组没有会话行", titlesOf(sidebar).length === 0, JSON.stringify(titlesOf(sidebar).map((t) => t.title)));
 	check("收起后只剩表头：没有分页按钮", all(sidebar, "session-more").length === 0, String(all(sidebar, "session-more").length));
-	check("表头还在", all(sidebar, "workspace-head").length === 1);
+	check("表头还在", all(sidebar, "directory-head").length === 1);
 	check("收起时 aria-expanded=false", head().getAttribute("aria-expanded") === "false", String(head().getAttribute("aria-expanded")));
 
 	head().dispatch("click");
@@ -714,9 +714,9 @@ process.stdout.write("\nsidebar：搜索翻出全部匹配，收起与分页都�
 	const sidebar = new Sidebar(handlers());
 	const rows = Array.from({ length: 12 }, (_unused, index) => row(`s${index}`, 1200 - index * 100));
 	// Drawn collapsed straight from the state, without any click: the draw must honour whatever the
-	// appearance settings hold, including a workspace that was folded away in another window.
+	// appearance settings hold, including a directory that was folded away in another window.
 	sidebar.render(state(rows, { activeSessionId: "s0", paging: { "/w": { collapsed: true, page: 1, savedPage: 1 } } }));
-	check("收起的工作区不出行", titlesOf(sidebar).length === 0, String(titlesOf(sidebar).length));
+	check("收起的目录不出行", titlesOf(sidebar).length === 0, String(titlesOf(sidebar).length));
 
 	all(sidebar, "icon-button")
 		.find((entry) => entry.node.getAttribute("title") === "搜索会话")
@@ -726,12 +726,12 @@ process.stdout.write("\nsidebar：搜索翻出全部匹配，收起与分页都�
 	input.dispatch("input");
 	const titles = titlesOf(sidebar).map((t) => t.title);
 	// s1, s10, s11 — every match, in a group whose own list was folded away.
-	check("收着的工作区照样给出全部匹配", titles.length === 3, JSON.stringify(titles));
+	check("收着的目录照样给出全部匹配", titles.length === 3, JSON.stringify(titles));
 }
 
-// ----------------------------------- 18. the workspace head's own context menu
+// ----------------------------------- 18. the directory head's own context menu
 
-process.stdout.write("\nsidebar：工作区表头的右键菜单\n");
+process.stdout.write("\nsidebar：目录表头的右键菜单\n");
 
 await (async (): Promise<void> => {
 	const started: (string | undefined)[] = [];
@@ -740,13 +740,13 @@ await (async (): Promise<void> => {
 	const sidebar = new Sidebar(
 		handlers({
 			onNewSession: (workDirAbsPath) => started.push(workDirAbsPath),
-			onDeleteWorkspace: (workDirAbsPath) => deleted.push(workDirAbsPath),
-			onRenameWorkspace: (workDirAbsPath, name) => renamed.push({ workDirAbsPath, name }),
+			onDeleteDirectory: (workDirAbsPath) => deleted.push(workDirAbsPath),
+			onRenameDirectory: (workDirAbsPath, name) => renamed.push({ workDirAbsPath, name }),
 		}),
 	);
 
 	sidebar.render({
-		workspaces: [
+		directories: [
 			{ workDirAbsPath: "/one", sessions: [row("a", 300)] },
 			{ workDirAbsPath: "/two", sessions: [row("b", 200)] },
 		],
@@ -756,8 +756,8 @@ await (async (): Promise<void> => {
 	});
 
 	// Right-clicked on the *second* group's heading, so an answer that ignored which heading was under
-	// the pointer would name the wrong workspace and be caught here.
-	const heads = all(sidebar, "workspace-head");
+	// the pointer would name the wrong directory and be caught here.
+	const heads = all(sidebar, "directory-head");
 	check("两个表头都画出来了", heads.length === 2, String(heads.length));
 	heads[1]?.node.dispatch("contextmenu", { clientX: 30, clientY: 40, preventDefault() {} });
 
@@ -769,18 +769,18 @@ await (async (): Promise<void> => {
 	check("三项都在：新建会话、重命名…、删除", labels.join("|") === "新建会话|重命名…|删除", JSON.stringify(labels));
 
 	// 新建会话 carries the workDirAbsPath it was asked on, which is the acceptance criterion of 票 06 in one line:
-	// the new session lands in the workspace that was right-clicked, not in whatever is current.
+	// the new session lands in the directory that was right-clicked, not in whatever is current.
 	const item = (label: string): FakeNode | undefined =>
 		(menu()?.children ?? []).find(
 			(child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === label,
 		);
 	item("新建会话")?.dispatch("click");
-	check("新建会话拿到的是右键那个工作区的路径", started.join(",") === "/two", JSON.stringify(started));
+	check("新建会话拿到的是右键那个目录的路径", started.join(",") === "/two", JSON.stringify(started));
 	check("选完菜单收起了", menu() === undefined);
 
 	heads[1]?.node.dispatch("contextmenu", { clientX: 30, clientY: 40, preventDefault() {} });
 	item("删除")?.dispatch("click");
-	check("删除拿到的是同一个工作区", deleted.join(",") === "/two", JSON.stringify(deleted));
+	check("删除拿到的是同一个目录", deleted.join(",") === "/two", JSON.stringify(deleted));
 
 	// 重命名 opens the card rather than reporting straight away: the name the user types is a segment,
 	// and the heading passes it on with the group it was asked on. Committing here is the card's own
@@ -829,26 +829,26 @@ process.stdout.write("\nsidebar：重命名后表头跟着新路径走\n");
 {
 	const sidebar = new Sidebar(handlers());
 	const two = (workDirAbsPath: string): SidebarState => ({
-		workspaces: [{ workDirAbsPath, sessions: [row("a", 300, { workDirAbsPath })] }],
+		directories: [{ workDirAbsPath, sessions: [row("a", 300, { workDirAbsPath })] }],
 		collapsed: false,
 		paging: {},
 		channel: "live",
 	});
 
 	sidebar.render(two("/work/old"));
-	const head = all(sidebar, "workspace-head")[0]!.node;
+	const head = all(sidebar, "directory-head")[0]!.node;
 	// The *wrapper* is what the sweep drops, and `remove()` only detaches the node it was called on — so
 	// the node whose survival is being checked has to be the wrapper, not the heading inside it.
 	const wrapper = head.parent!;
-	check("表头写着旧名字", head.querySelector(".workspace-name")?.textContent === "old", String(head.querySelector(".workspace-name")?.textContent));
+	check("表头写着旧名字", head.querySelector(".directory-name")?.textContent === "old", String(head.querySelector(".directory-name")?.textContent));
 
 	// The group comes back under its new path, which is what the channel's row frames produce after the
 	// rename. The node that wore the old path must lose it rather than be joined by a second heading:
 	// a stale heading is a folder the user can right-click that no longer exists.
 	sidebar.render(two("/work/new"));
-	const heads = all(sidebar, "workspace-head");
+	const heads = all(sidebar, "directory-head");
 	check("只剩一个表头", heads.length === 1, String(heads.length));
-	check("名字换成了新文件夹名", heads[0]?.node.querySelector(".workspace-name")?.textContent === "new", String(heads[0]?.node.querySelector(".workspace-name")?.textContent));
+	check("名字换成了新文件夹名", heads[0]?.node.querySelector(".directory-name")?.textContent === "new", String(heads[0]?.node.querySelector(".directory-name")?.textContent));
 	check("tooltip 也换成了新路径", heads[0]?.node.getAttribute("title") === "/work/new", String(heads[0]?.node.getAttribute("title")));
 	check("旧分组连同它的表头一起从文档里摘掉了", wrapper.detached && head.parent === wrapper, `detached=${wrapper.detached} headParentKept=${head.parent === wrapper}`);
 }
@@ -862,7 +862,7 @@ process.stdout.write("\nsidebar：取消与被顶掉都要给出答案\n");
 	// took the card away without settling anything, and the caller waited for the rest of the window's
 	// life. None of that is visible on screen, which is why it is asserted here on the promise itself
 	// rather than through the sidebar's handler.
-	const dialog = { title: "重命名工作区", label: "新的文件夹名", value: "two", confirm: "重命名" };
+	const dialog = { title: "重命名目录", label: "新的文件夹名", value: "two", confirm: "重命名" };
 	const settled = (): FakeNode | undefined => bodyChildren().find((child) => child.className === "text-dialog-overlay");
 	const keydownsBefore = shim.document.listenerCount("keydown");
 	/**

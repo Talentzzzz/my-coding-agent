@@ -12,12 +12,10 @@ export {
 	DEFAULT_MODE_NAME,
 	fillTools,
 	narrowToKnown,
-	subagentToolState,
-	SUBAGENT_TOOL_NAMES,
 	toolDefinitions,
 	toolListFor,
 } from "./manager.ts";
-export { createToolRegistry, registryView, type ToolRegistry } from "./registry.ts";
+export { createToolRegistry, type ToolRegistry } from "./registry.ts";
 
 /** Short human-readable summary of a tool call, for the approval prompt and the transcript. */
 export function describeToolCall(name: string, args: unknown): string {
@@ -33,15 +31,6 @@ export function describeToolCall(name: string, args: unknown): string {
 			const command = stringField(record, "command") ?? "";
 			return command.length > 160 ? `${command.slice(0, 157)}...` : command;
 		}
-		case "SubAgent": {
-			// The delegation prompt is the call's identity in the transcript; the background flag rides along.
-			const prompt = stringField(record, "prompt") ?? "";
-			const suffix = record["run_in_background"] === true ? " (background)" : "";
-			const summary = prompt.length > 160 ? `${prompt.slice(0, 157)}...` : prompt;
-			return `SubAgent${suffix} ${summary}`.trim();
-		}
-		case "SubAgentControl":
-			return `SubAgentControl ${stringField(record, "action") ?? ""} ${stringField(record, "id") ?? ""}`.trim();
 		default:
 			return name;
 	}

@@ -1,4 +1,4 @@
-import type { SessionRow, WorkspaceGroup } from "@my-agent/core/protocol";
+import type { SessionRow, DirectoryGroup } from "@my-agent/core/protocol";
 
 /**
  * The sidebar's rows, kept at the connection level.
@@ -72,7 +72,7 @@ export class SessionRows {
 	 * running session's row with an idle one. Returns whether it was taken, so a caller can tell the
 	 * difference between "refreshed" and "the channel owns this now".
 	 */
-	loadFrom(groups: readonly WorkspaceGroup[], channelIsLive: boolean): boolean {
+	loadFrom(groups: readonly DirectoryGroup[], channelIsLive: boolean): boolean {
 		if (channelIsLive) return false;
 		this.rows.clear();
 		for (const group of groups) {
@@ -96,11 +96,11 @@ export class SessionRows {
 	 * The rows as the sidebar's groups, each group ordered by its own newest row.
 	 *
 	 * The same shape the server's projection answers with, and the same ordering — groups by their
-	 * newest activity, most recent first, so the workspace a message just landed in is the first one
+	 * newest activity, most recent first, so the directory a message just landed in is the first one
 	 * the sidebar shows. A REST fallback and a live channel produce an identical list: a store and a
 	 * reader that each sorted for themselves would disagree the first time a row moved.
 	 */
-	groups(): WorkspaceGroup[] {
+	groups(): DirectoryGroup[] {
 		const byWorkDir = new Map<string, SessionRow[]>();
 		for (const row of this.list()) {
 			const group = byWorkDir.get(row.workDirAbsPath);

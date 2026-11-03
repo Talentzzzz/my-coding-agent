@@ -2,13 +2,13 @@ import { element, icon, iconButton } from "../dom.ts";
 import type { ChannelState } from "../client.ts";
 import { openMenuAt } from "./menu.ts";
 import { askForText } from "./text-dialog.ts";
-import type { SessionRow, WorkspaceGroup, WorkspacePaging } from "@my-agent/core/protocol";
+import type { SessionRow, DirectoryGroup, DirectoryPaging } from "@my-agent/core/protocol";
 
 export interface SidebarHandlers {
 	/**
 	 * Start a conversation.
 	 *
-	 * `workDirAbsPath` is the workspace the request was made *from*, and it is what makes the workspace heading's
+	 * `workDirAbsPath` is the directory the request was made *from*, and it is what makes the directory heading's
 	 * own 「新建会话」 land where the right click was: the top row's button asks for the picker's
 	 * directory (no argument), and the heading names its own. One door rather than two, because a
 	 * new session is the same act wherever it is asked for.
@@ -17,8 +17,8 @@ export interface SidebarHandlers {
 	onSelectSession(sessionId: string): void;
 	onToggleCollapsed(): void;
 	onOpenSettings(): void;
-	/** The system folder picker, which is the only road a new workspace enters the list by. */
-	onAddWorkspace(): void;
+	/** The system folder picker, which is the only road a new directory enters the list by. */
+	onAddDirectory(): void;
 	/** Copy the session this row names whole, and open the copy. */
 	onForkSession(sessionId: string): void;
 	/** Delete the session this row names, transcript and all. */
@@ -31,51 +31,51 @@ export interface SidebarHandlers {
 	 * takes, and deliberately not a local edit this column would have to reconcile afterwards.
 	 */
 	onRenameSession(sessionId: string, title: string): void;
-	/** The workspace head was clicked: collapse it to its heading, or reopen it on its saved page. */
-	onToggleWorkspace(workDirAbsPath: string): void;
-	/** The workspace's 「展开其余」 was clicked: show one more page of its conversations. */
-	onPageWorkspace(workDirAbsPath: string): void;
-	/** The workspace's 「收起」 was clicked: step the expansion back one page. */
-	onCollapseWorkspace(workDirAbsPath: string): void;
+	/** The directory head was clicked: collapse it to its heading, or reopen it on its saved page. */
+	onToggleDirectory(workDirAbsPath: string): void;
+	/** The directory's 「展开其余」 was clicked: show one more page of its conversations. */
+	onPageDirectory(workDirAbsPath: string): void;
+	/** The directory's 「收起」 was clicked: step the expansion back one page. */
+	onCollapseDirectory(workDirAbsPath: string): void;
 	/**
-	 * Give the workspace this heading names a new label (票 06).
+	 * Give the directory this heading names a new label (票 06).
 	 *
 	 * `workDirAbsPath` is the group the card was opened on and `name` is what the user typed. Nothing on disk is
 	 * named by either: the label is a view the settings remember, so the window's only job is to store
 	 * it and repaint the heading that wears it.
 	 */
-	onRenameWorkspace(workDirAbsPath: string, name: string): void;
+	onRenameDirectory(workDirAbsPath: string, name: string): void;
 	/**
-	 * Remove the workspace this heading names from the list, touching nothing on disk.
+	 * Remove the directory this heading names from the list, touching nothing on disk.
 	 *
 	 * Named `delete` in the menu because that is what the user is doing from where they sit; the
 	 * handler's job — and the endpoint's name — is the narrower 「hide」.
 	 */
-	onDeleteWorkspace(workDirAbsPath: string): void;
+	onDeleteDirectory(workDirAbsPath: string): void;
 }
 
 export interface SidebarState {
-	/** Every workspace with stored sessions, most recently used first. */
-	workspaces: readonly WorkspaceGroup[];
+	/** Every directory with stored sessions, most recently used first. */
+	directories: readonly DirectoryGroup[];
 	activeSessionId?: string;
 	collapsed: boolean;
 	/**
-	 * Per-workspace paging state, keyed by the workspace's path, as the appearance settings hold it.
+	 * Per-directory paging state, keyed by the directory's path, as the appearance settings hold it.
 	 *
 	 * Read-only here: the sidebar draws from it and reports the clicks, and the window — which owns
 	 * the settings write — answers with a new map. Holding it in the state rather than in the view
 	 * is what makes it survive a window: it rides appearance, and appearance rides the server's
 	 * settings files, not an origin-scoped `localStorage` the desktop shell's fresh port strands.
 	 */
-	paging: Record<string, WorkspacePaging>;
+	paging: Record<string, DirectoryPaging>;
 	/**
-	 * The names the user gave workspaces, by path, as the settings hold them.
+	 * The names the user gave directories, by path, as the settings hold them.
 	 *
-	 * A heading wears `workspaceNames[workDirAbsPath]` when there is one and the folder's own name otherwise. The
+	 * A heading wears `directoryNames[workDirAbsPath]` when there is one and the folder's own name otherwise. The
 	 * entry is a *view*: the folder on disk is never renamed, so this is the whole of what a rename
 	 * changes — which is also why it rides the settings and not the group the server lists.
 	 */
-	workspaceNames?: Record<string, string>;
+	directoryNames?: Record<string, string>;
 	/**
 	 * Whether the resident channel is up.
 	 *
@@ -107,7 +107,7 @@ function busyOf(row: SessionRow): string | undefined {
 /**
  * The navigation column.
  *
- * It owns everything about *which* conversation is on screen — the workspace groups, the tree under
+ * It owns everything about *which* conversation is on screen — the directory groups, the tree under
  * each, the new-session control, and the way into the settings — and nothing about the conversation
  * itself. That split is what keeps the right-hand column replaceable: the sidebar never reads a
  * transcript.
@@ -177,16 +177,16 @@ export class Sidebar {
 
 		// The heading row and its three controls, per the reference layout: a search that really
 		// filters the list, a view-options control that is look-only for now, and the road in for a
-		// workspace this machine has never had a session in.
+		// directory this machine has never had a session in.
 		this.headRow = element("div", "list-head");
-		this.headRow.append(element("div", "session-list-heading", "工作区"));
+		this.headRow.append(element("div", "session-list-heading", "目录"));
 		const headActions = element("div", "list-head-actions");
 		headActions.append(
 			iconButton("search", "搜索会话", () => this.toggleSearch()),
 			// Look-only by decision: sorting stays `modified` descending, and the control is here so
 			// the row reads like the reference rather than so it can be used. Clicking says so.
 			iconButton("sliders", "视图选项（暂未启用）", () => {}),
-			iconButton("folder-add", "添加工作区", () => this.handlers.onAddWorkspace()),
+			iconButton("folder-add", "添加目录", () => this.handlers.onAddDirectory()),
 		);
 		this.headRow.append(headActions);
 
@@ -256,7 +256,7 @@ export class Sidebar {
 	 */
 	private renderRows(state: SidebarState): void {
 		const wanted = new Set<string>();
-		const groups = state.workspaces;
+		const groups = state.directories;
 		const filter = this.filterText.trim().toLowerCase();
 		this.rowsById.clear();
 
@@ -274,7 +274,7 @@ export class Sidebar {
 		let matches = 0;
 		for (const group of groups) {
 			const entry = pagingOf(state.paging, group.workDirAbsPath);
-			const label = state.workspaceNames?.[group.workDirAbsPath] ?? workspaceName(group.workDirAbsPath);
+			const label = state.directoryNames?.[group.workDirAbsPath] ?? directoryName(group.workDirAbsPath);
 			const wrapper = this.groupFor(group.workDirAbsPath, entry, label);
 			const rows = rowsOf(group);
 			for (const row of rows) this.rowsById.set(row.session.id, row);
@@ -313,8 +313,8 @@ export class Sidebar {
 			// The paging row under the list, two buttons on one line: 「展开其余」 while rows are
 			// held back, and — beside it, once a page has been added — the 「收起」 that steps the
 			// expansion back one page. Neither appears where paging was never a thing, which is a
-			// workspace with no more conversations than a page holds; a filtering list shows
-			// everything it matched, so it wears neither; and a collapsed workspace wears neither
+			// directory with no more conversations than a page holds; a filtering list shows
+			// everything it matched, so it wears neither; and a collapsed directory wears neither
 			// either — the decision is 全部收起、只留表头, and a paging row under a heading would
 			// contradict the collapse it sits inside.
 			const paged = open && filter === "";
@@ -337,7 +337,7 @@ export class Sidebar {
 		this.noMatch.hidden = !(filter !== "" && matches === 0);
 
 		// Everything this column drew and no longer wants goes, headings included, and this is where a
-		// *stale* entry is the one that matters: a heading whose workspace was renamed is no longer
+		// *stale* entry is the one that matters: a heading whose directory was renamed is no longer
 		// named by any key, and the only thing still holding its wrapper is this map. Nothing is walked
 		// backwards from the list, so a group without rows — the renamed one, whose rows are already
 		// under the new path — is not reachable from the DOM at all.
@@ -381,18 +381,18 @@ export class Sidebar {
 	}
 
 	/**
-	 * The heading for one workspace, built once and then only labelled.
+	 * The heading for one directory, built once and then only labelled.
 	 *
-	 * The heading is a real button since the paging decision: clicking it is how a workspace
+	 * The heading is a real button since the paging decision: clicking it is how a directory
 	 * collapses to its heading and opens again, so Enter and Space reach it like any other control,
 	 * and `[aria-expanded]` is the state a screen reader — and the stylesheet's chevron — read.
 	 * The state is patched like everything else on a drawn node: written only when it moved.
 	 *
-	 * `label` is what the user called this workspace, already resolved from the settings by the
+	 * `label` is what the user called this directory, already resolved from the settings by the
 	 * caller: a rename changes that string and nothing else, so the node is keyed by `workDirAbsPath` — which a
 	 * rename no longer moves — and only its text is patched.
 	 */
-	private groupFor(workDirAbsPath: string, entry: WorkspacePaging, label: string): HTMLElement {
+	private groupFor(workDirAbsPath: string, entry: DirectoryPaging, label: string): HTMLElement {
 		const key = `head:${workDirAbsPath}`;
 		const existing = this.drawn.get(key);
 		if (existing !== undefined) {
@@ -410,29 +410,29 @@ export class Sidebar {
 			return existing.button;
 		}
 
-		const head = element("button", "workspace-head", undefined, {
+		const head = element("button", "directory-head", undefined, {
 			type: "button",
 			title: workDirAbsPath,
 			"aria-expanded": entry.collapsed ? "false" : "true",
 		});
 		// Both icons ride every head, and the hover — not the DOM — decides which shows: the folder is
 		// the content, the chevron the affordance, and the swap keeps one position for both meanings.
-		const folder = element("span", "workspace-icon-folder");
+		const folder = element("span", "directory-icon-folder");
 		folder.append(icon("folder"));
-		const chev = element("span", "workspace-icon-chev");
+		const chev = element("span", "directory-icon-chev");
 		chev.append(icon("chevron"));
-		const name = element("span", "workspace-name", label);
+		const name = element("span", "directory-name", label);
 		head.append(folder, chev, name);
-		head.addEventListener("click", () => this.handlers.onToggleWorkspace(workDirAbsPath));
+		head.addEventListener("click", () => this.handlers.onToggleDirectory(workDirAbsPath));
 		// The heading's whole menu lives here rather than on any resident control: a right click names
-		// the workspace, and the menu it opens is the only place new-session-here, rename, and delete
+		// the directory, and the menu it opens is the only place new-session-here, rename, and delete
 		// are offered from — the same road a session row's menu takes.
 		head.addEventListener("contextmenu", (event) => {
 			event.preventDefault();
-			this.openWorkspaceMenu(workDirAbsPath, label, event.clientX, event.clientY);
+			this.openDirectoryMenu(workDirAbsPath, label, event.clientX, event.clientY);
 		});
 
-		const wrapper = element("div", "workspace");
+		const wrapper = element("div", "directory");
 		wrapper.append(head);
 		this.list.append(wrapper);
 		this.drawn.set(key, { button: wrapper, head, name });
@@ -440,7 +440,7 @@ export class Sidebar {
 	}
 
 	/**
-	 * The one menu a workspace heading has: new session here, rename, delete.
+	 * The one menu a directory heading has: new session here, rename, delete.
 	 *
 	 * 新建会话 names the workDirAbsPath it was asked on, which is the whole point of the item — the top row's
 	 * button starts a session wherever the picker points, and this one starts it *here*.
@@ -449,22 +449,22 @@ export class Sidebar {
 	 * looking for; the endpoint behind it and the sentence under it are both narrower, and a person
 	 * deleting a project from a sidebar deserves to know the folder is not going anywhere.
 	 */
-	private openWorkspaceMenu(workDirAbsPath: string, label: string, x: number, y: number): void {
+	private openDirectoryMenu(workDirAbsPath: string, label: string, x: number, y: number): void {
 		openMenuAt(x, y, [
 			{
 				icon: "plus",
 				label: "新建会话",
-				title: `在这个工作区里新建：${workDirAbsPath}`,
+				title: `在这个目录里新建：${workDirAbsPath}`,
 				onSelect: () => this.handlers.onNewSession(workDirAbsPath),
 			},
 			{ kind: "separator" },
-			{ label: "重命名…", title: "改它在这个列表里显示的名字，磁盘上的文件夹不动", onSelect: () => void this.renameWorkspace(workDirAbsPath, label) },
+			{ label: "重命名…", title: "改它在这个列表里显示的名字，磁盘上的文件夹不动", onSelect: () => void this.renameDirectory(workDirAbsPath, label) },
 			{
 				icon: "trash",
 				label: "删除",
 				danger: true,
 				title: "只从列表里移除，不碰磁盘：会话文件与文件夹都留在原地",
-				onSelect: () => this.handlers.onDeleteWorkspace(workDirAbsPath),
+				onSelect: () => this.handlers.onDeleteDirectory(workDirAbsPath),
 			},
 		]);
 	}
@@ -476,12 +476,12 @@ export class Sidebar {
 	 * is still dropped — the heading sits in a list of real directory names, and one that looks like a
 	 * directory move can only misread. An empty box is the shared dialog's way of saying nothing was
 	 * asked, so taking a custom name back is the settings road's own answer
-	 * (`workspaceNames[workDirAbsPath] = ""`), not this card's. A label the heading already wears is dropped
+	 * (`directoryNames[workDirAbsPath] = ""`), not this card's. A label the heading already wears is dropped
 	 * for the simpler reason: it is not a change.
 	 */
-	private async renameWorkspace(workDirAbsPath: string, label: string): Promise<void> {
+	private async renameDirectory(workDirAbsPath: string, label: string): Promise<void> {
 		const typed = await askForText({
-			title: "重命名工作区",
+			title: "重命名目录",
 			label: "显示名称",
 			value: label,
 			hint: "只改这个列表里显示的名字，磁盘上的文件夹和会话记录都不动。",
@@ -491,7 +491,7 @@ export class Sidebar {
 		const name = typed.trim();
 		if (name === label) return;
 		if (name.includes("/") || name.includes("\\") || name === "." || name === "..") return;
-		this.handlers.onRenameWorkspace(workDirAbsPath, name);
+		this.handlers.onRenameDirectory(workDirAbsPath, name);
 	}
 
 	private paintExpanded(head: HTMLElement, collapsed: boolean): void {
@@ -693,7 +693,7 @@ export class Sidebar {
 	}
 
 	/**
-	 * The paging row under a workspace's conversations: 「展开其余」 first, and — beside it, not
+	 * The paging row under a directory's conversations: 「展开其余」 first, and — beside it, not
 	 * beneath it — 「收起」.
 	 *
 	 * One drawn node holding both buttons rather than two drawn nodes placed one after another,
@@ -709,9 +709,9 @@ export class Sidebar {
 		if (existing?.paging !== undefined) return existing.paging;
 
 		const more = element("button", "session-more", undefined, { type: "button" });
-		more.addEventListener("click", () => this.handlers.onPageWorkspace(workDirAbsPath));
+		more.addEventListener("click", () => this.handlers.onPageDirectory(workDirAbsPath));
 		const collapse = element("button", "session-more session-collapse", "收起", { type: "button" });
-		collapse.addEventListener("click", () => this.handlers.onCollapseWorkspace(workDirAbsPath));
+		collapse.addEventListener("click", () => this.handlers.onCollapseDirectory(workDirAbsPath));
 		const row = element("div", "session-paging");
 		row.append(more, collapse);
 		const paging: PagingRow = { row, more, collapse };
@@ -756,7 +756,7 @@ export class Sidebar {
 /**
  * One drawn node, plus what is remembered about it between renders.
  *
- * Three kinds of thing live in this map and only one of them is a session row — a workspace heading
+ * Three kinds of thing live in this map and only one of them is a session row — a directory heading
  * and the paging row are drawn the same way, kept for the same reason, and never rebuilt. `parts` and
  * `paging` are what separate them: `parts` is present exactly for the rows, `paging` exactly for the
  * paging row, which is why the patching code can reach through either without asking whether the
@@ -821,25 +821,25 @@ interface RowParts {
 }
 
 /**
- * One workspace's paging state, or the untouched default: one page, open, nothing saved.
+ * One directory's paging state, or the untouched default: one page, open, nothing saved.
  *
- * The missing entry is the common case — a workspace the user never paged or collapsed keeps no
+ * The missing entry is the common case — a directory the user never paged or collapsed keeps no
  * record of it — so both the draw and the window's three handlers read through this rather than
  * indexing and defaulting at each site.
  */
-export function pagingOf(paging: Record<string, WorkspacePaging>, workDirAbsPath: string): WorkspacePaging {
+export function pagingOf(paging: Record<string, DirectoryPaging>, workDirAbsPath: string): DirectoryPaging {
 	return paging[workDirAbsPath] ?? { collapsed: false, page: 1, savedPage: 1 };
 }
 
 /**
- * The rows a workspace shows after `pageCount` pages of its conversations: the first
+ * The rows a directory shows after `pageCount` pages of its conversations: the first
  * `pageCount * PAGE_SIZE` conversations, each with the forks that came from it, and always the one
  * the window is on.
  *
  * The last part is why this is not a `slice`: a session that has been forked from is often older
  * than the first page's most recent, and the list still has to say where the conversation on screen
  * came from. A fork counts as part of the conversation it branched off rather than as a row of its
- * own, which is what keeps a heavily forked workspace from crowding out the others — and which is
+ * own, which is what keeps a heavily forked directory from crowding out the others — and which is
  * also why paging is counted in conversations here, the unit the limit actually caps, rather than
  * in rows the way the shape prototype demoed it.
  *
@@ -862,7 +862,7 @@ function pagedRows(rows: readonly TreeRow[], activeSessionId: string | undefined
 }
 
 /**
- * One row of a workspace's list: a session, and the name it is drawn under.
+ * One row of a directory's list: a session, and the name it is drawn under.
  *
  * Named apart from the protocol's `SessionRow` on purpose, because the two are not the same thing and
  * the difference is easy to miss. A protocol row is a session plus three facts only a running process
@@ -889,7 +889,7 @@ interface TreeRow {
 }
 
 /**
- * Lay a workspace's sessions out as the tree they are, and name each row.
+ * Lay a directory's sessions out as the tree they are, and name each row.
  *
  * A fork records its parent as a file path, the listing resolves that to an id, and this is where the
  * id becomes a row: roots sorted by when they were last active, each fork directly beneath the session
@@ -900,14 +900,14 @@ interface TreeRow {
  * is now a function of a field that moves while nobody is clicking, so the order has to be recomputed
  * from the rows on every render — inheriting it would mean the list silently disagrees with the rule
  * the moment the two sources diverged, which is precisely when the order is what a person is reading.
- * It costs one sort over a workspace's roots.
+ * It costs one sort over a directory's roots.
  *
  * A fork whose parent is not in this list was already a root for every other purpose, and stays one
  * here — which is also what happens to a fork whose parent has been deleted: no parent, no suffix,
  * the name stands on its own. A file hand-edited into a cycle must not lose rows to a walk that never
  * returns, so anything the descent did not reach is placed at the top level rather than dropped.
  */
-function rowsOf(group: WorkspaceGroup): TreeRow[] {
+function rowsOf(group: DirectoryGroup): TreeRow[] {
 	const byId = new Map(group.sessions.map((session) => [session.id, session]));
 	const children = new Map<string, SessionRow[]>();
 	const roots: SessionRow[] = [];
@@ -955,10 +955,10 @@ function rowsOf(group: WorkspaceGroup): TreeRow[] {
 }
 
 /**
- * How many conversations one page of a workspace holds.
+ * How many conversations one page of a directory holds.
  *
- * The page, not a collapsed cap: a workspace shows this many conversations before 「展开其余」
- * offers one more page, and a workspace with no more than this never wears a paging control at all.
+ * The page, not a collapsed cap: a directory shows this many conversations before 「展开其余」
+ * offers one more page, and a directory with no more than this never wears a paging control at all.
  * Counted in conversations rather than rows, so a fork never costs another session its place. The
  * second status line makes each row taller, which is a density question rather than a correctness
  * one — the cap is about how much a scan can hold, and that has not changed.
@@ -966,7 +966,7 @@ function rowsOf(group: WorkspaceGroup): TreeRow[] {
 const PAGE_SIZE = 5;
 
 /** The last segment of a path, which is what a person calls the project. */
-export function workspaceName(workDirAbsPath: string): string {
+export function directoryName(workDirAbsPath: string): string {
 	const parts = workDirAbsPath.split(/[/\\]/).filter((part) => part.length > 0);
 	return parts.at(-1) ?? workDirAbsPath;
 }

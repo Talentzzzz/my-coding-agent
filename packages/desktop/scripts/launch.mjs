@@ -5,7 +5,7 @@
 // API. Deleting that variable for the child is not something a package script can do portably, and
 // it is exactly the kind of environment difference that should not decide whether the app opens.
 //
-//   node scripts/launch.mjs [--dev] [--workspace <dir>]
+//   node scripts/launch.mjs [--dev] [--workDir <dir>]
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";

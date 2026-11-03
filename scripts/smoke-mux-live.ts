@@ -1,7 +1,7 @@
 // A live check that the browser client and the server actually agree: boots the real server, opens a
 // real WebSocket to `/mux`, and drives it through the production `MuxClient` — the same class the
 // window uses. So this is the seam the desktop shell runs on, not a mock of it.
-// The last two sections drive a real run through the scripted transport, and a workspace put aside and
+// The last two sections drive a real run through the scripted transport, and a directory put aside and
 // taken back, which is the one change no row frame can carry.
 // No provider key is needed — where a run happens, the model is the scripted transport.
 // Run with: node scripts/smoke-mux-live.ts
@@ -13,7 +13,7 @@ import { MuxClient, browserSocket, type MuxHandlers } from "../packages/web/src/
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
 import type { ConnectionItem, ServerMessage } from "@my-agent/core/protocol";
-import { workspaceDir, type ModelConfig } from "@my-agent/core";
+import { sessionDir, type ModelConfig } from "@my-agent/core";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-mux-live-"));
 /** A scratch agent home, so the settings this smoke writes are not the machine's own. */
@@ -196,11 +196,11 @@ try {
 	check("第二条 prompt 也必须再次收到帧", await until(() => framesFor() > beforeSecond, 10_000), JSON.stringify(messages.slice(beforeSecond)));
 
 	// ---------------------------------------------------------------------------------------------
-	// A workspace put aside leaves the *list*, which is the one change no row frame can carry: no row
+	// A directory put aside leaves the *list*, which is the one change no row frame can carry: no row
 	// changed, so the server re-sends the overview — the same frame a connection opens on. Both
 	// directions matter and both are checked against the row table the window actually keeps.
 	// ---------------------------------------------------------------------------------------------
-	process.stdout.write("被搁置的工作区离开概览，回来时也回到概览\n");
+	process.stdout.write("被搁置的目录离开概览，回来时也回到概览\n");
 
 	const aside = join(root, "aside");
 	await mkdir(aside, { recursive: true });
@@ -221,46 +221,46 @@ try {
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ workDirAbsPath }),
 		});
-	const restWorkspaces = async (): Promise<string[]> =>
-		((await (await fetch(`${server.url}/api/workspaces`)).json()) as { workspaces: { workDirAbsPath: string }[] }).workspaces.map((group) => group.workDirAbsPath);
+	const restDirectories = async (): Promise<string[]> =>
+		((await (await fetch(`${server.url}/api/directories`)).json()) as { directories: { workDirAbsPath: string }[] }).directories.map((group) => group.workDirAbsPath);
 
 	const first = (await (await postSession(aside)).json()) as { sessionId: string };
 	// The same lifecycle rule the warm-up above follows: an unspoken session has no file, so the
-	// workspace directory does not exist either — one prompt is what makes both tables know it.
+	// directory does not exist either — one prompt is what makes both tables know it.
 	transport.setResponses([fakeAssistantMessage("aside answer")]);
-	check("新工作区里的开场 prompt 被接受", (await postPrompt(server.url, first.sessionId, "让工作区落盘")) === 202);
-	check("新工作区的行到达了概览", await until(() => rowTable().get(first.sessionId) !== undefined), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
-	check("它也被 REST 列表列着", (await restWorkspaces()).includes(aside), JSON.stringify(await restWorkspaces()));
+	check("新目录里的开场 prompt 被接受", (await postPrompt(server.url, first.sessionId, "让目录落盘")) === 202);
+	check("新目录的行到达了概览", await until(() => rowTable().get(first.sessionId) !== undefined), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
+	check("它也被 REST 列表列着", (await restDirectories()).includes(aside), JSON.stringify(await restDirectories()));
 
 	const beforeHide = overviews();
-	const hidden = await fetch(`${server.url}/api/workspaces/hide`, {
+	const hidden = await fetch(`${server.url}/api/directories/hide`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ workDirAbsPath: aside }),
 	});
-	check("搁置一个工作区被接受 (200)", hidden.status === 200, `status=${hidden.status}`);
+	check("搁置一个目录被接受 (200)", hidden.status === 200, `status=${hidden.status}`);
 	check("服务端因此重发了一份概览", await until(() => overviews() > beforeHide), `overviews=${overviews()}`);
-	check("行表里不再有这个工作区的任何一行", rowTable().list().every((row) => row.workDirAbsPath !== aside), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
-	check("REST 列表与概览说的是同一件事", !(await restWorkspaces()).includes(aside), JSON.stringify(await restWorkspaces()));
+	check("行表里不再有这个目录的任何一行", rowTable().list().every((row) => row.workDirAbsPath !== aside), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
+	check("REST 列表与概览说的是同一件事", !(await restDirectories()).includes(aside), JSON.stringify(await restDirectories()));
 
 	// And back: the transcripts and the folder were never touched, so a new session in that directory
 	// is the user saying they want it listed again.
 	const beforeBack = overviews();
 	const reborn = await postSession(aside);
-	check("在搁置的工作区里新建会话被接受 (201)", reborn.status === 201, `status=${reborn.status}`);
+	check("在搁置的目录里新建会话被接受 (201)", reborn.status === 201, `status=${reborn.status}`);
 	check("服务端又重发了一份概览", await until(() => overviews() > beforeBack), `overviews=${overviews()}`);
-	check("那个工作区回到了行表里", rowTable().list().some((row) => row.workDirAbsPath === aside), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
-	check("REST 列表也把它列回来了", (await restWorkspaces()).includes(aside), JSON.stringify(await restWorkspaces()));
+	check("那个目录回到了行表里", rowTable().list().some((row) => row.workDirAbsPath === aside), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
+	check("REST 列表也把它列回来了", (await restDirectories()).includes(aside), JSON.stringify(await restDirectories()));
 
 	client.close();
 	check("关掉之后不再有状态变化", channels.at(-1) !== undefined);
 } finally {
 	await server.close();
-	// Both the workspace and the store directory keyed by it: a session that is created and never
+	// Both the working directory and the store directory keyed by it: a session that is created and never
 	// cleaned leaves an orphan directory in the real agent home on every run.
 	await rm(root, { recursive: true, force: true });
-	await rm(workspaceDir(root), { recursive: true, force: true });
-	await rm(workspaceDir(join(root, "aside")), { recursive: true, force: true });
+	await rm(sessionDir(root), { recursive: true, force: true });
+	await rm(sessionDir(join(root, "aside")), { recursive: true, force: true });
 	await rm(home, { recursive: true, force: true });
 }
 

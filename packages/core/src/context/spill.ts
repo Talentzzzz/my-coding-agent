@@ -1,7 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ToolResultContent } from "../hooks.ts";
-import type { Workspace } from "../workspace.ts";
 
 /**
  * The tool-result size at which the full text leaves the context and moves to a file.
@@ -16,7 +15,13 @@ export const SPILL_RESULT_CHARS = 80_000;
 /** How much of a spilled result the model still sees, at each end. */
 export const SPILL_KEEP_CHARS = 2_000;
 
-/** Where a spilled result lives, inside the workspace: `.my-agent/tool-results/<session id>/`. */
+/**
+ * Where a spilled result lives, under the working directory: `.my-agent/tool-results/<session id>/`.
+ *
+ * The directory is the session's own project, so the archive sits beside the files the result is
+ * about and a session that walks away from it leaves the archive where a person would look. Nothing
+ * about the path is a boundary: a result is archived there because that is the useful place for it.
+ */
 const SPILL_DIR_PARTS = [".my-agent", "tool-results"] as const;
 
 /** One filename segment a session id, a tool name, or a call id cannot break. */
@@ -26,29 +31,69 @@ function safeSegment(value: string): string {
 
 /** The file one result's full text belongs in, by session and call, so a view can be rebuilt later. */
 export function spillPathFor(
-	workspace: Workspace,
+	workDirAbsPath: string,
 	sessionId: string,
 	toolName: string,
 	toolCallId: string,
 ): { absPath: string; relPath: string } {
 	const segments = [...SPILL_DIR_PARTS, safeSegment(sessionId), `${safeSegment(toolCallId)}-${safeSegment(toolName)}.txt`];
 	return {
-		absPath: join(workspace.absRoot, ...segments),
+		absPath: join(workDirAbsPath, ...segments),
 		relPath: segments.join("/"),
 	};
 }
 
-/** The text a result carries, with the blocks it is made of joined in order. */
-function resultText(content: ToolResultContent): string | undefined {
+/** The text of a result's blocks that are text, joined in order. Images and other blocks are not in it. */
+export function spillText(content: ToolResultContent): string {
+	return content
+		.filter((block): block is Extract<typeof block, { type: "text" }> => block.type === "text")
+		.map((block) => block.text)
+		.join("\n");
+}
+
+/** The size at which `spillOversizedToolResult` archives rather than passes a result through. */
+function oversizedText(content: ToolResultContent): string | undefined {
 	let total = 0;
-	const parts: string[] = [];
 	for (const block of content) {
 		if (block.type !== "text") continue;
 		total += block.text.length;
-		parts.push(block.text);
 	}
 	if (total <= SPILL_RESULT_CHARS) return undefined;
-	return parts.join("\n");
+	return spillText(content);
+}
+
+/** Write one archive file whole. False when the write failed, so the caller can fall back to the clip. */
+export function writeSpillFile(absPath: string, text: string): boolean {
+	try {
+		if (!existsSync(absPath)) {
+			mkdirSync(dirname(absPath), { recursive: true });
+			writeFileSync(absPath, text, "utf8");
+		}
+	} catch {
+		return false;
+	}
+	return true;
+}
+
+/**
+ * The content a model reads for an archived result: head and tail around a notice naming the file.
+ *
+ * Anything that is not text — an image block — passes through after the notice. A text short enough
+ * that head and tail would overlap is kept whole: the archive already holds it, and a view that
+ * duplicated characters to save them would be absurd.
+ */
+export function spillView(content: ToolResultContent, text: string, relPath: string, keepChars: number): ToolResultContent {
+	const notice =
+		`\n\n[... the full output was saved to ${relPath}; ` +
+		`use the read tool on that file if you need the rest ...]\n\n`;
+	if (text.length <= keepChars * 2) {
+		return [{ type: "text", text: `${text}${notice}` }, ...content.filter((block) => block.type !== "text")];
+	}
+	const head = text.slice(0, keepChars);
+	const tail = text.slice(text.length - keepChars);
+	const omitted = `\n\n[... ${text.length - head.length - tail.length} characters omitted — the full output was saved to ${relPath}; ` +
+		`use the read tool on that file if you need the rest ...]\n\n`;
+	return [{ type: "text", text: `${head}${omitted}${tail}` }, ...content.filter((block) => block.type !== "text")];
 }
 
 /**
@@ -56,35 +101,20 @@ function resultText(content: ToolResultContent): string | undefined {
  *
  * `undefined` means "not oversized", or the file could not be written — the caller falls back to the
  * hard clip in `boundToolContent` rather than showing a notice that names a file that is not there.
- * The path is derived from the session and the call id, which is what lets `forModel` rebuild the same
- * view for a result an earlier process stored, without a record in the transcript.
+ * The path is derived from the session and the call id, which is what makes the archive findable for
+ * as long as the working directory exists.
  */
 export function spillOversizedToolResult(
-	workspace: Workspace,
+	workDirAbsPath: string,
 	sessionId: string,
 	toolName: string,
 	toolCallId: string,
 	content: ToolResultContent,
 ): ToolResultContent | undefined {
-	const text = resultText(content);
+	const text = oversizedText(content);
 	if (text === undefined) return undefined;
 
-	const { absPath, relPath } = spillPathFor(workspace, sessionId, toolName, toolCallId);
-	try {
-		if (!existsSync(absPath)) {
-			mkdirSync(dirname(absPath), { recursive: true });
-			writeFileSync(absPath, text, "utf8");
-		}
-	} catch {
-		return undefined;
-	}
-
-	const head = text.slice(0, SPILL_KEEP_CHARS);
-	const tail = text.slice(text.length - SPILL_KEEP_CHARS);
-	const notice =
-		`\n\n[... ${text.length - head.length - tail.length} characters omitted — the full output was saved to ${relPath}; ` +
-		`use the read tool on that file if you need the rest ...]\n\n`;
-	// The text blocks collapse into one: the archive holds them all, and the view is about what the
-	// model reads first. Anything that is not text — an image block — passes through after it.
-	return [{ type: "text", text: `${head}${notice}${tail}` }, ...content.filter((block) => block.type !== "text")];
+	const { absPath, relPath } = spillPathFor(workDirAbsPath, sessionId, toolName, toolCallId);
+	if (!writeSpillFile(absPath, text)) return undefined;
+	return spillView(content, text, relPath, SPILL_KEEP_CHARS);
 }

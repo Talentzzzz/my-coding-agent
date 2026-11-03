@@ -2,12 +2,12 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import type { AgentTool } from "../types.ts";
 import { dirname } from "node:path";
 import { Type, type Static } from "typebox";
-import type { Workspace } from "../workspace.ts";
+import { displayToolPath, resolveToolPath } from "../workdir.ts";
 import { DIFF_MAX_ROWS, fileDiff } from "./diff.ts";
 import { textResult, throwIfAborted } from "./types.ts";
 
 const parameters = Type.Object({
-	path: Type.String({ description: "File path, relative to the workspace root or absPath inside it" }),
+	path: Type.String({ description: "File path. Relative paths resolve against the working directory; absolute paths are taken as they are." }),
 	content: Type.String({ description: "Complete file content. Trailing newline is added when missing." }),
 	overwrite: Type.Optional(
 		Type.Boolean({ description: "Replace an existing file. Defaults to false; use edit for small changes." }),
@@ -22,7 +22,7 @@ export type WriteParams = Static<typeof parameters>;
  * Refusing to clobber by default matters: a model that means "adjust one line" but calls `write`
  * with a reconstructed file silently destroys the parts it did not reproduce.
  */
-export function createWriteTool(workspace: Workspace): AgentTool<typeof parameters> {
+export function createWriteTool(workDirAbsPath: string): AgentTool<typeof parameters> {
 	return {
 		name: "write",
 		label: "Write",
@@ -31,19 +31,19 @@ export function createWriteTool(workspace: Workspace): AgentTool<typeof paramete
 		parameters,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal) {
-			return runWrite(workspace, params, signal);
+			return runWrite(workDirAbsPath, params, signal);
 		},
 	};
 }
 
 export async function runWrite(
-	workspace: Workspace,
+	workDirAbsPath: string,
 	params: WriteParams,
 	signal?: AbortSignal,
 ): Promise<ReturnType<typeof textResult>> {
 	throwIfAborted(signal);
-	const absPath = workspace.resolve(params.path);
-	const relPath = workspace.display(absPath);
+	const absPath = resolveToolPath(workDirAbsPath, params.path);
+	const relPath = displayToolPath(workDirAbsPath, absPath);
 	const existing = await stat(absPath).catch(() => undefined);
 	if (existing?.isDirectory()) throw new Error(`Not a file (it is a directory): ${relPath}`);
 

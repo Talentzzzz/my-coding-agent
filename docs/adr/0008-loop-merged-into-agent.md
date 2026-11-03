@@ -121,6 +121,8 @@
 - **ADR-0001 的「`packages/llm` 与 `packages/loop` 一行都不改」中 loop 的那一半。**
   `packages/llm` 仍原样适用：它同样被裁过（只剩一个 API 实现与它需要的传输层），但它仍在
   `packages/llm` 里、仍然 vendored、也**没有**被并入任何人。
+  **后续（2026-11-03）**：llm 的那一半也被解除——vendored 概念随上游对照放弃而不再成立，
+  `packages/llm` 由本仓库自己维护（用户拍板，当场标注于本文件与 ADR-0001，未另开 ADR）。
 - **`Loop` 作为委派对象这一层**——以及它为此付出的四处代价：`prepareRequest` 以函数类型
   穿过两个包；`dispatchEvent` 之外的第二张 listener 表；`runtime` 槽位透传；两个队列排水钩子。
 - **`@ts-nocheck`**，以及「在 pi 自己的编译设置下检查这份代码」这条安排。
@@ -130,7 +132,8 @@
 明确不动、读者不该跟着本 ADR 一起重开的：
 
 - **ADR-0001 的其余全部**：REST 命令面 + 常驻 WebSocket mux、有界写侧、`claim` 与订阅分离，
-  以及 `packages/llm` 一行都不改、不引入 plugin / MCP 机制。
+  以及不引入 plugin / MCP 机制。（原列于此的「`packages/llm` 一行都不改」已于 2026-11-03
+  失效，见上文*被取代的是什么*的后续标注。）
 - **[ADR-0003](0003-queued-writes-at-drain.md) 的取走点落盘**：排队消息仍在取走点写进账本——
   搬的只是取走点的位置（从 `getSteeringMessages` / `getFollowUpMessages` 钩子变成
   `drainTranscribed` 直读会话队列），语义不变。

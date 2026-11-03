@@ -16,7 +16,7 @@ import type { QueueMode, ToolApprovalKey } from "./protocol.ts";
 /**
  * The two files a session's settings come from.
  *
- * `global` is this machine's own file under the agent home. `project` is the workspace's
+ * `global` is this machine's own file under the agent home. `project` is the working directory's
  * `.my-agent/settings.json`, which a repository can commit so a checkout brings its own approvals and
  * limits along. Project wins field by field, and nested objects merge — a project that names
  * `approval.write` keeps the global `approval.bash` beside it — so the two layers are read as one
@@ -40,18 +40,18 @@ export interface SettingsPatch {
 	 */
 	modes?: ModeSettings[];
 	/**
-	 * Workspaces the sidebar does not list, by absolute path. A whole list, like `tools`: the setting
-	 * is the set of hidden workspaces, so one more hidden workspace is the previous list with one more
+	 * Directories the sidebar does not list, by absolute path. A whole list, like `tools`: the setting
+	 * is the set of hidden directories, so one more hidden directory is the previous list with one more
 	 * entry.
 	 */
-	hiddenWorkspaces?: string[];
+	hiddenDirectories?: string[];
 	/**
-	 * The name the sidebar shows for a workspace, by absolute path.
+	 * The name the sidebar shows for a directory, by absolute path.
 	 *
 	 * A patch carries the entries it changes, and an empty string takes a name back — a record that
 	 * merges per key has no other way to say "forget this one".
 	 */
-	workspaceNames?: Record<string, string>;
+	directoryNames?: Record<string, string>;
 	approval?: Partial<Record<ToolApprovalKey, boolean>>;
 	/** Theme and font size. Part of a patch so one field can move without the other. */
 	appearance?: Partial<AppearanceSettings>;
@@ -66,7 +66,7 @@ export interface SettingsPatch {
  * Where a scope's settings are read and written.
  *
  * Injected so the manager never picks the files it touches: the real one writes the global and project
- * paths for a workspace, and a test gets an in-memory one. A host that keeps settings somewhere else —
+ * paths for a working directory, and a test gets an in-memory one. A host that keeps settings somewhere else —
  * a database, a per-user store, a sandbox — supplies a different object rather than a manager change.
  */
 export interface SettingsStorage {
@@ -78,7 +78,7 @@ export interface SettingsStorage {
 	path(scope: SettingsScope): string;
 }
 
-/** The two real files: `<agent home>/settings.json` and `<workspace>/.my-agent/settings.json`. */
+/** The two real files: `<agent home>/settings.json` and `<working directory>/.my-agent/settings.json`. */
 class FileSettingsStorage implements SettingsStorage {
 	private readonly absPaths: Record<SettingsScope, string>;
 
@@ -126,17 +126,17 @@ class InMemorySettingsStorage implements SettingsStorage {
 }
 
 /**
- * The pure-data state of one workspace's settings: what the settings operations read and write, and
+ * The pure-data state of one working directory's settings: what the settings operations read and write, and
  * nothing else.
  *
  * Every settings operation is a file-level function taking a `SettingsState` as its first parameter —
  * no class holds this state between calls (the `SettingsManager` class at the bottom of this file is
- * a stateless service whose methods take the state explicitly, plus the one per-workspace cache).
+ * a stateless service whose methods take the state explicitly, plus the one per-directory cache).
  * The state is plain data on purpose: which function touches which field is visible
  * in the signatures, and a test can construct a bare state and call any operation on it directly.
  *
- * The state is shared per workspace, not per request: the host holds one {@link SettingsState} per
- * workspace root and hands the same state to every session over that directory, so a toggle in one
+ * The state is shared per working directory, not per request: the host holds one {@link SettingsState} per
+ * directory and hands the same state to every session over that directory, so a toggle in one
  * session is the same value the next session reads rather than a copy taken when it was assembled.
  * The session never reads a settings file; it goes through these operations.
  *
@@ -162,7 +162,7 @@ export interface SettingsState {
  *
  * This is the combination the old constructor spread over its private fields — read the two layers as
  * each file wrote them, mark which fields each file declares, merge the layers into the defaulted
- * view — collapsed into one function, so a host that (re)builds a workspace's state has exactly one
+ * view — collapsed into one function, so a host that (re)builds a directory's state has exactly one
  * way to do it. A file this build cannot parse is refused, never overwritten.
  */
 export function settingsStateFromStorage(storage: SettingsStorage): SettingsState {
@@ -182,10 +182,11 @@ export function settingsStateFromStorage(storage: SettingsStorage): SettingsStat
 }
 
 /**
- * The settings of one workspace: the agent home's file and the workspace's own, project winning.
+ * The settings of one working directory: the agent home's file and the directory's own, project
+ * winning.
  *
- * The workspace root path is the seed; reading the two json files fills in the whole bag. This is the
- * replay entry a host calls when it first touches a workspace — and again whenever it wants the state
+ * The directory path is the seed; reading the two json files fills in the whole bag. This is the
+ * replay entry a host calls when it first touches a directory — and again whenever it wants the state
  * re-read from disk, since nothing here caches: the state is a snapshot of the files as of this call,
  * and {@link applySettings} keeps it in step with what it writes.
  */
@@ -235,13 +236,13 @@ export function getAppearance(s: SettingsState): AppearanceSettings {
 }
 
 /**
- * The workspaces the sidebar leaves out, by absolute path.
+ * The directories the sidebar leaves out, by absolute path.
  *
  * Always a list, never undefined: every reader of this asks "is this one hidden", and the answer
  * for a file that never named the field is the same as for an empty list.
  */
-export function getHiddenWorkspaces(s: SettingsState): string[] {
-	return [...(s.settings.hiddenWorkspaces ?? [])];
+export function getHiddenDirectories(s: SettingsState): string[] {
+	return [...(s.settings.hiddenDirectories ?? [])];
 }
 
 /**
@@ -250,9 +251,9 @@ export function getHiddenWorkspaces(s: SettingsState): string[] {
  * Empty entries are dropped here rather than at every reader: a cleared name is stored as an empty
  * string, and "the folder's own name" is what the absence of a key means.
  */
-export function getWorkspaceNames(s: SettingsState): Record<string, string> {
+export function getDirectoryNames(s: SettingsState): Record<string, string> {
 	const names: Record<string, string> = {};
-	for (const [workDirAbsPath, name] of Object.entries(s.settings.workspaceNames ?? {})) {
+	for (const [workDirAbsPath, name] of Object.entries(s.settings.directoryNames ?? {})) {
 		if (name.trim().length > 0) names[workDirAbsPath] = name;
 	}
 	return names;
@@ -264,7 +265,7 @@ export function getApprovals(s: SettingsState): Record<ToolApprovalKey, boolean>
 }
 
 /**
- * Whether the workspace's files gate this tool.
+ * Whether the directory's files gate this tool.
  *
  * The files are the defaults a session opens on, so this answers for a session that has not
  * chosen: a session's own answer is `Agent.getApprovals()`, which is this map with the session's
@@ -384,25 +385,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * The settings service: the workspace-keyed cache, and nothing else (ADR-0007 §2–3).
+ * The settings service: the directory-keyed cache, and nothing else (ADR-0007 §2–3).
  *
  * The reads are the stateless operations at the top of this file — `getApprovals`, `getBashSettings`,
- * and their siblings — which take a workspace's {@link SettingsState} and answer from it alone, so a
+ * and their siblings — which take a directory's {@link SettingsState} and answer from it alone, so a
  * caller that already holds the bag names the operation it wants rather than a second door onto it.
  * What the class owns is the one thing a bag cannot own: {@link stateOf}, the cache that keeps every
- * reader and writer of one workspace on the same state object, the way the hub's per-workspace table
+ * reader and writer of one directory on the same state object, the way the hub's per-directory table
  * used to before the cache moved in here.
  */
 export class SettingsManager {
 	/**
-	 * Open workspace states by agent home and workspace root — fill-at-open, rebuildable from disk at
-	 * any time (ADR-0007 §3).
+	 * Open directory states by agent home and working directory — fill-at-open, rebuildable from disk
+	 * at any time (ADR-0007 §3).
 	 *
-	 * A workspace is filled the first time {@link stateOf} touches it and the same reference is reused
+	 * A directory is filled the first time {@link stateOf} touches it and the same reference is reused
 	 * after: every write lands on the one bag the next reader answers from, so a toggle written by one
 	 * session is the value the next session reads rather than a copy taken when it was assembled. The
-	 * key is the pair, not the root alone, because the two files a workspace's settings come from are
-	 * looked up under one agent home — a process serving two homes must not answer one workspace's
+	 * key is the pair, not the path alone, because the two files a directory's settings come from are
+	 * looked up under one agent home — a process serving two homes must not answer one directory's
 	 * root with the other home's merge.
 	 *
 	 * The cache is never authoritative, which is why its rules are about writes and not about loss:
@@ -411,21 +412,21 @@ export class SettingsManager {
 	 *   re-reads each file it touches before writing, so a hand edit to that file folds in rather than
 	 *   being reverted, and the re-merged view is the cached one. The bag equals the files after every
 	 *   write.
-	 * - Nothing drops on workspace close, because this process never closes one: a workspace put aside
-	 *   is a stored `hiddenWorkspaces` fact, not a teardown. A host that gains one drops the entry
+	 * - Nothing drops on directory close, because this process never closes one: a directory put aside
+	 *   is a stored `hiddenDirectories` fact, not a teardown. A host that gains one drops the entry
 	 *   there, the way the session service's `remove` does for a deleted session.
 	 * - A hand edit to a field this process never writes stays invisible until restart. That is the
 	 *   visibility the files had when this cache lived in the hub, and the price of one merged view
-	 *   shared by every reader over the workspace.
+	 *   shared by every reader over the directory.
 	 */
 	private readonly states = new Map<string, SettingsState>();
 
-	/** The state of one workspace, filled from its files the first time it is touched. */
-	stateOf(absWorkspaceRoot: string, agentDir: string = AGENT_HOME): SettingsState {
-		const key = `${agentDir}\u0000${absWorkspaceRoot}`;
+	/** The state of one working directory, filled from its files the first time it is touched. */
+	stateOf(workDirAbsPath: string, agentDir: string = AGENT_HOME): SettingsState {
+		const key = `${agentDir}\u0000${workDirAbsPath}`;
 		const existing = this.states.get(key);
 		if (existing) return existing;
-		const created = fillSettings(absWorkspaceRoot, agentDir);
+		const created = fillSettings(workDirAbsPath, agentDir);
 		this.states.set(key, created);
 		return created;
 	}

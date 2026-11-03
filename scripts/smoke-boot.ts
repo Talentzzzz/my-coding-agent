@@ -24,7 +24,7 @@
 // never sends anything, so the run below never reached its tool call and the approval never arrived
 // (ticket 10: red on 2026-10-16, green the same afternoon, code untouched in between). It also
 // wrote every run's session file into the real home's `sessions/`. Both leaks are gone: the model
-// list is this script's own one-row file, and the home is removed with the workspaces at the end.
+// list is this script's own one-row file, and the home is removed with the work directories at the end.
 import { mkdtemp, rm } from "node:fs/promises";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -87,7 +87,7 @@ async function freePort(): Promise<number> {
 
 // The desktop shell boots against the machine's own home; this script boots against the scratch
 // home above, because what the shell needs from the boot path must not depend on what the machine
-// happens to have in it. The workspaces are scratch directories too — nothing here writes a session
+// happens to have in it. The work directories are scratch directories too — nothing here writes a session
 // into the repo, or anywhere outside the two scratch trees. The scripted transport rides the boot
 // path itself: the worst case below needs a run in residence that nobody will ever answer, and a
 // provider key must not be the price of one. That worst case is a provider call that never answers —
@@ -95,7 +95,7 @@ async function freePort(): Promise<number> {
 // hang is what keeps a run on the stack for `close()` to cut short. The hang honours the abort
 // signal, which is the whole point: `close()` aborts first, and the aborted call is what lets it
 // return.
-const workspace = await mkdtemp(join(tmpdir(), "my-agent-boot-"));
+const workDir = await mkdtemp(join(tmpdir(), "my-agent-boot-"));
 const fake = createFakeTransport();
 fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" }))]);
 // The worst case's own prompt, and nothing else, hangs: every other section's calls pass through.
@@ -117,7 +117,7 @@ const neverAnswers: ChatTransport = {
 		});
 	},
 };
-const server: BootedServer = await bootServer({ workDirAbsPath: workspace, port: 0, api: neverAnswers });
+const server: BootedServer = await bootServer({ workDirAbsPath: workDir, port: 0, api: neverAnswers });
 
 try {
 	process.stdout.write(`booted on ${server.url} (port ${server.port})\n`);
@@ -171,7 +171,7 @@ try {
 	const wire: WireClient = await connect(`${server.url.replace("http", "ws")}/mux`);
 	const baseline = await wire.open(sessionId);
 	check("the lane serves the landing session", baseline.id === sessionId, `baseline=${baseline.id} landing=${sessionId}`);
-	check("a fresh workspace opens an empty session", baseline.messages.length === 0, String(baseline.messages.length));
+	check("a fresh working directory opens an empty session", baseline.messages.length === 0, String(baseline.messages.length));
 
 	// ---------------------------------------------------------------------------------------------
 	// The worst case for shutdown, assembled for real: a window's connection watching a run whose
@@ -221,11 +221,11 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a real server process goes down with a connection attached\n");
 
-	const childWorkspace = await mkdtemp(join(tmpdir(), "my-agent-boot-child-"));
+	const childWorkDir = await mkdtemp(join(tmpdir(), "my-agent-boot-child-"));
 	const port = await freePort();
 	const child = spawn(
 		process.execPath,
-		[join("packages", "server", "src", "main.ts"), "--workDir", childWorkspace, "--port", String(port)],
+		[join("packages", "server", "src", "main.ts"), "--workDir", childWorkDir, "--port", String(port)],
 		{
 			stdio: "ignore",
 			env: {
@@ -274,9 +274,9 @@ try {
 		check("the child exited with a connection attached", await Promise.race([exited, sleep(5_000).then(() => false)]));
 		childSocket.close();
 	}
-	await removeQuiet(childWorkspace);
+	await removeQuiet(childWorkDir);
 } finally {
-	await removeQuiet(workspace);
+	await removeQuiet(workDir);
 	await removeQuiet(agentHome);
 }
 

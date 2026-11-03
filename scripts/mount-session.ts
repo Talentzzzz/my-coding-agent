@@ -1,6 +1,6 @@
 // Mounting a session in a hub by hand, for the smokes that need settings of their own.
 //
-// Production never does this: `SessionHub.open()` resolves a session's workspace settings from disk,
+// Production never does this: `SessionHub.open()` resolves a session's settings from disk,
 // because that is what a window's own directory means. A smoke wants something else — an in-memory
 // settings bag with the approval gate switched on, so a scripted transport can park a run at it — and
 // the hub offers no option for that on purpose (nothing in production sets one).
@@ -28,11 +28,11 @@ interface HubInternals {
 }
 
 export interface MountOptions {
-	/** The workspace the session's tools resolve inside, and where its header says it lives. */
+	/** The working directory the session's tools resolve inside, and where its header says it lives. */
 	root: string;
 	/** The model row the session opens on, by name. */
 	model?: string;
-	/** The workspace settings the session reads and writes, as a bag. Defaults to empty settings. */
+	/** The settings the session reads and writes, as a bag. Defaults to empty settings. */
 	settings?: SettingsState;
 }
 
@@ -53,7 +53,7 @@ export async function mountSession(hub: SessionHub, options: MountOptions): Prom
 	const internals = hub as unknown as HubInternals;
 	const state = createSession(options.root);
 	await ensureSession({
-		absWorkspaceRoot: options.root,
+		workDirAbsPath: options.root,
 		session: state,
 		models: hub.models,
 		sessionManager: internals.sessions,

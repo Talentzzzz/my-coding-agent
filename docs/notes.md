@@ -28,19 +28,19 @@
 
 **部分失效**：~~"每条事件流一个 claim"~~ 这一句**失效**——claim 本身原样活着，新版 claim 的持有者只有两类（会改变会话的请求，以及**在飞的运行**）。上面那句"`claim` 只用于……"与重命名禁令原样有效；订阅不拿 claim 也是在这条之上定的。
 
-### `packages/llm` 与 `packages/loop` 一行都不改 —— **保留一半，loop 那半被 ADR-0008 取代**
+### `packages/llm` 与 `packages/loop` 一行都不改 —— **已被整体取代（2026-11-03）**
 
 `packages/llm` 是 vendored 代码；这些改动属于 core + server 范围。不引入 plugin / MCP 机制。
 
-~~`packages/llm` 与 `packages/loop` 一行都不改~~ **部分取代**（2026-11-02，[ADR-0008](adr/0008-loop-merged-into-agent.md)）：`packages/loop` 已删除，引擎并入 `packages/core/src/agent.ts`，不再跟踪上游。`packages/llm` 仍然一行都不改；「不引入 plugin / MCP 机制」原样有效。
+~~`packages/llm` 与 `packages/loop` 一行都不改~~ **部分取代**（2026-11-02，[ADR-0008](adr/0008-loop-merged-into-agent.md)）：`packages/loop` 已删除，引擎并入 `packages/core/src/agent.ts`，不再跟踪上游。~~`packages/llm` 仍然一行都不改~~ **失效**（2026-11-03，用户拍板）：ADR-0008 放弃上游对照之后，"vendored" 已不再是任何约束——`packages/llm` 就是本仓库自己维护的裁剪子集，禁令随之撤销；「不引入 plugin / MCP 机制」原样有效。
 
 ### 测试一次运行不需要供应商密钥 —— **保留**
 
 `scripts/fake-transport.ts` 就是那个脚本化传输层。
 
-### 不要"顺手修好" `scripts/smoke-approval.ts` 前半段那个怪异之处 —— **保留**
+### 不要"顺手修好" `scripts/smoke-approval.ts` 前半段那个怪异之处 —— **已失效（2026-11-03）**
 
-它构造 `new SessionHub({ workspaceRoot: root })`，而 `HubOptions` 声明的是 `absCwd`（改名前是 `cwd`）。它能通过，是因为该脚本自己驱动自己构建的会话。**保持原样**——第二阶段新增的测试台用的是正确的 `cwd`，别去动旧的那个。
+~~它构造 `new SessionHub({ workspaceRoot: root })`，而 `HubOptions` 声明的是 `absCwd`（改名前是 `cwd`）。它能通过，是因为该脚本自己驱动自己构建的会话。**保持原样**——第二阶段新增的测试台用的是正确的 `cwd`，别去动旧的那个。~~ **失效**：workspace 概念整体删除后，`HubOptions` 只剩 `workDirAbsPath`，该调用已改为 `new SessionHub({ workDirAbsPath: root })`——"别去修"的豁免随 workspace 一起退场，脚本本身"自己 mount 会话"的结构未变。
 
 ### 第四阶段的四个决定（均于 2026-02-19 拍板）—— **D1 保留，D0 / D2 / D3 被 ADR-0001 取代**
 
@@ -51,7 +51,7 @@
 | D2 | 空闲流如何结束，才能让浏览器不重连 | ~~**合用一个终帧 `{ type: "stream_end" }`。**~~ **取代**：终帧改叫 `end`、不带原因，判据是"这条逻辑流上有没有过 `baseline`" |
 | D3 | 发送路径无法挂上流时，还要不要发送 | ~~**报告失败且不发送。**~~ **取代**：订阅改在 POST 之前建立，失败改按形状落到 transcript 或 `item.error` |
 
-**D1 的一个已知后果（已消解）**：`GET /api/sessions/current` 在空工作区仍然会创建一条会话（`resolveCurrentId()` 回落到 `SessionManager.create(this.absCwd)`；客户端每页只调一次），但那条会话不再落盘——`create()` 不写 header，文件随第一条消息出现。于是"读形状的请求带写副作用"这件事今天不再成立：读一份空历史只换来进程内的一份 manager，盘上没有任何文件。
+**D1 的一个已知后果（已消解）**：`GET /api/sessions/current` 在空目录仍然会创建一条会话（`resolveCurrentId()` 回落到 `SessionManager.create(this.absCwd)`；客户端每页只调一次），但那条会话不再落盘——`create()` 不写 header，文件随第一条消息出现。于是"读形状的请求带写副作用"这件事今天不再成立：读一份空历史只换来进程内的一份 manager，盘上没有任何文件。
 
 **本节只记"哪些结论作废"，不记理由。** 理由在 [ADR-0001](adr/0001-transport-websocket-mux.md) 或它引的票里；另外，上面那句"对浏览器而言两种结束是同一个事实"是 `EventSource` 时代的事实，随传输切换一并退场。
 

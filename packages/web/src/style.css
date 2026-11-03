@@ -268,7 +268,7 @@ body {
 
 /*
  * The heading row: the section's name and, at its right end, the three controls the reference puts
- * there — search, view options, add a workspace. One row rather than a heading plus a floating
+ * there — search, view options, add a directory. One row rather than a heading plus a floating
  * cluster, because the controls are about the list the heading names.
  */
 .list-head {
@@ -361,7 +361,7 @@ body {
  * The status slot: the row's one room for a state, a 16px gutter at its left edge.
  *
  * Running and waiting-for-an-approval share the one amber dot — the same fact seen from two sides —
- * and an idle row keeps an empty slot, so a workspace of finished sessions is four ordinary rows
+ * and an idle row keeps an empty slot, so a directory of finished sessions is four ordinary rows
  * rather than four rows insisting on something. "已打开" needs no slot: it is the `aria-current`
  * background itself.
  */
@@ -425,8 +425,8 @@ body {
 	border-color: var(--dsw-state-business);
 }
 
-/* The grouped list. A workspace is a heading and the sessions written under it. */
-.workspace {
+/* The grouped list. A directory is a heading and the sessions written under it. */
+.directory {
 	display: flex;
 	flex-direction: column;
 	gap: 1px;
@@ -434,15 +434,15 @@ body {
 }
 
 /*
- * One workspace's heading, the reference's project row: 34px tall, the same radius and padding as a
+ * One directory's heading, the reference's project row: 34px tall, the same radius and padding as a
  * session row, at the meta tier. A real button since the paging decision — clicking it is how the
- * workspace collapses to its heading and opens again — so Enter and Space reach it like any other
+ * directory collapses to its heading and opens again — so Enter and Space reach it like any other
  * control. On hover the folder — the content — gives its place to the chevron — the affordance —
  * because both icons share one slot and the swap keeps one position for two meanings. Collapsed,
  * `aria-expanded="false"` keeps the chevron on and turned right, so the affordance no longer
  * depends on hover to be visible: that hover promise is what the collapsed state redeems.
  */
-.workspace-head {
+.directory-head {
 	display: flex;
 	align-items: center;
 	gap: 7px;
@@ -464,49 +464,49 @@ body {
 		color var(--dsw-duration-fast) var(--dsw-ease);
 }
 
-.workspace-head:hover {
+.directory-head:hover {
 	background: var(--dsw-bg-hover);
 }
 
-.workspace-head:focus-visible {
+.directory-head:focus-visible {
 	outline: 2px solid var(--dsw-state-business);
 	outline-offset: -2px;
 }
 
-.workspace-head svg {
+.directory-head svg {
 	width: 13px;
 	height: 13px;
 	flex: none;
 	opacity: 0.75;
 }
 
-.workspace-icon-chev {
+.directory-icon-chev {
 	display: none;
 }
 
-.workspace-icon-chev svg {
+.directory-icon-chev svg {
 	transition: transform var(--dsw-duration) var(--dsw-ease);
 }
 
-.workspace-head:hover .workspace-icon-chev,
-.workspace-head[aria-expanded="false"] .workspace-icon-chev {
+.directory-head:hover .directory-icon-chev,
+.directory-head[aria-expanded="false"] .directory-icon-chev {
 	display: inline-flex;
 }
 
-.workspace-head:hover .workspace-icon-folder,
-.workspace-head[aria-expanded="false"] .workspace-icon-folder {
+.directory-head:hover .directory-icon-folder,
+.directory-head[aria-expanded="false"] .directory-icon-folder {
 	display: none;
 }
 
-.workspace-head[aria-expanded="false"] {
+.directory-head[aria-expanded="false"] {
 	color: var(--dsw-label-secondary);
 }
 
-.workspace-head[aria-expanded="false"] .workspace-icon-chev svg {
+.directory-head[aria-expanded="false"] .directory-icon-chev svg {
 	transform: rotate(-90deg);
 }
 
-.workspace-name {
+.directory-name {
 	/* The heading is a button, so it does not stretch its children; the name asks for the room the
 	   chip at the heading's right edge used to leave behind, and ellipsises inside it. */
 	flex: 1;
@@ -522,7 +522,7 @@ body {
  * "the surface the current session row wears". Both read as a raised box sitting in the list, and the
  * reader asked for exactly one thing to wear that surface: **the session row**. So the heading is
  * plain, hover only, and the answer to "where does a new session land" lives where it always did in
- * fact — the workspace chip by the composer — rather than in a box drawn around a folder name.
+ * fact — the directory chip by the composer — rather than in a box drawn around a folder name.
  */
 .session-list-empty {
 	padding: 8px;
@@ -1808,7 +1808,7 @@ input:focus-visible {
  * The pane switch, decided by one attribute on the body.
  *
  * The branch page replaces the conversation whole — not an overlay, not a side panel — so the
- * composer (with the workspace row and the approval seat in it), the status line, and the banners
+ * composer (with the directory row and the approval seat in it), the status line, and the banners
  * all go with it; the page is the tree, the summary line, and the fixed header's tools row, and
  * that is all. The branch view occupies the same flexing grid row the transcript does.
  */
@@ -2073,7 +2073,7 @@ body:not([data-pane="branch"]) .branch-view {
 /* ------------------------------------------------------------------ composer */
 
 /*
- * The composer head: the workspace chip on its own line above the input card, leftmost — where a
+ * The composer head: the directory chip on its own line above the input card, leftmost — where a
  * session starts is where "where the next one starts" belongs (01 ⑦). The chip is permanent here:
  * its choice never rewrites the session on screen, and it is placed by the input it sits over
  * rather than by what the transcript says, so it needs no phase to come and go with.
@@ -2084,7 +2084,7 @@ body:not([data-pane="branch"]) .branch-view {
 	padding: 0 4px 6px;
 }
 
-.workspace-chip {
+.directory-chip {
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
@@ -2104,26 +2104,26 @@ body:not([data-pane="branch"]) .branch-view {
 		border-color var(--dsw-duration-fast) var(--dsw-ease);
 }
 
-.workspace-chip:hover {
+.directory-chip:hover {
 	background: var(--dsw-bg-hover);
 	border-color: var(--dsw-border-l3);
 	color: var(--dsw-label-primary);
 }
 
-.workspace-chip svg {
+.directory-chip svg {
 	width: 14px;
 	height: 14px;
 	flex: none;
 }
 
 /* The chevron is the affordance; the folder is the content. */
-.workspace-chip svg:last-child {
+.directory-chip svg:last-child {
 	width: 12px;
 	height: 12px;
 	color: var(--dsw-label-caption);
 }
 
-.workspace-chip-label {
+.directory-chip-label {
 	min-width: 0;
 	overflow: hidden;
 	white-space: nowrap;
@@ -2135,8 +2135,8 @@ body:not([data-pane="branch"]) .branch-view {
  * else in the window gets one, because a second popup implementation is a second set of dismissal
  * rules to keep honest.
  *
- * A menu is a list, so it is capped and scrolls rather than growing past the window: the workspace
- * picker's list has no ceiling — every workspace this machine ever made a session in is a row — and
+ * A menu is a list, so it is capped and scrolls rather than growing past the window: the directory
+ * picker's list has no ceiling — every directory this machine ever made a session in is a row — and
  * a menu taller than the screen would carry rows nobody can reach.
  */
 .menu {
@@ -2247,7 +2247,7 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * The one self-drawn card that asks for a line of typing — a workspace's new folder name.
+ * The one self-drawn card that asks for a line of typing — a directory's new folder name.
  *
  * It is a modal, unlike the menu above it: centred, keyboard-taking, and undismissable by a stray
  * click on the page behind it. The scrim is the only place either is drawn from, so the dimming
@@ -3230,7 +3230,7 @@ select.input {
 #app[data-sidebar="rail"] .list-head,
 #app[data-sidebar="rail"] .search-row,
 #app[data-sidebar="rail"] .session-list-heading,
-#app[data-sidebar="rail"] .workspace-head,
+#app[data-sidebar="rail"] .directory-head,
 #app[data-sidebar="rail"] .session-item-title,
 #app[data-sidebar="rail"] .session-item-time,
 #app[data-sidebar="rail"] .channel-indicator-text,

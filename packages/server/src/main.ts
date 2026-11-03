@@ -74,7 +74,7 @@ function printHelp(): void {
 			"",
 			"Usage: node src/main.ts [options]",
 			"",
-			"  --workDir <dir>        workspace the agent may touch (default: current directory)",
+			"  --workDir <dir>        working directory for new sessions (default: current directory)",
 			"  --host <host>      bind address (default: 127.0.0.1)",
 			"  --port <port>      port (default: 8080)",
 			"  --model <ref>      <row id>/<model id> from the imported models, or the row id alone",
@@ -95,7 +95,7 @@ function printHelp(): void {
 			"  GET    /api/health",
 			"  GET    /api/models                          PUT    /api/models      { models }",
 			"  GET    /api/settings                        PATCH  /api/settings    { patch }",
-			"  GET    /api/workspaces",
+			"  GET    /api/directories",
 			"  GET    /api/sessions                        POST   /api/sessions",
 			"  GET    /api/sessions/current",
 			"  GET    /api/sessions/{id}                   PATCH  /api/sessions/{id}",
@@ -126,7 +126,7 @@ async function main(): Promise<void> {
 	process.stdout.write(
 		[
 			`my-agent listening on ${server.url}`,
-			`  workspace: ${args.workDirAbsPath}`,
+			`  workDir:   ${args.workDirAbsPath}`,
 			`  client:    ${args.vite ? "vite (hot reload)" : "packages/web/dist"}`,
 			`  api:       ${server.url}/api/health`,
 			"",

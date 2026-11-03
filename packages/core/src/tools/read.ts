@@ -1,14 +1,14 @@
 import { readFile, stat } from "node:fs/promises";
 import type { AgentTool, AgentToolResult } from "../types.ts";
 import { Type, type Static } from "typebox";
-import type { Workspace } from "../workspace.ts";
+import { displayToolPath, resolveToolPath } from "../workdir.ts";
 import { textResult, throwIfAborted } from "./types.ts";
 
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_LINES = 2_000;
 
 const parameters = Type.Object({
-	path: Type.String({ description: "File path, relative to the workspace root or absPath inside it" }),
+	path: Type.String({ description: "File path. Relative paths resolve against the working directory; absolute paths are taken as they are." }),
 	offset: Type.Optional(Type.Integer({ minimum: 1, description: "First line to read, 1-based" })),
 	limit: Type.Optional(Type.Integer({ minimum: 1, description: `Maximum lines to read, default ${MAX_LINES}` })),
 });
@@ -25,30 +25,30 @@ interface ReadHooks {
  * anchors. A minified JSON file is pretty-printed first; other minified files are reported as such,
  * because line numbers on a single 500 KB line help nobody. An image file (PNG, JPEG, GIF, WebP,
  * identified by its file signature, not its extension) is answered with the image itself beside a
- * one-line envelope, which is how a vision model sees a picture in the workspace.
+ * one-line envelope, which is how a vision model sees a picture.
  */
-export function createReadTool(workspace: Workspace): AgentTool<typeof parameters> {
+export function createReadTool(workDirAbsPath: string): AgentTool<typeof parameters> {
 	return {
 		name: "read",
 		label: "Read",
 		description:
-			"Read a file from the workspace and return its contents with line numbers. Use offset and limit for large files. Image files (PNG, JPEG, GIF, WebP) are returned as images.",
+			"Read a file and return its contents with line numbers. Use offset and limit for large files. Image files (PNG, JPEG, GIF, WebP) are returned as images.",
 		parameters,
 		executionMode: "parallel",
 		execute(_toolCallId, params, signal, onUpdate) {
-			return runRead(workspace, params, { signal, onUpdate });
+			return runRead(workDirAbsPath, params, { signal, onUpdate });
 		},
 	};
 }
 
 /** Read implementation, exported so tests can call it without an agent. */
 export async function runRead(
-	workspace: Workspace,
+	workDirAbsPath: string,
 	params: ReadParams,
 	hooks: ReadHooks = {},
 ): Promise<AgentToolResult<unknown>> {
 	throwIfAborted(hooks.signal);
-	const absPath = workspace.resolve(params.path);
+	const absPath = resolveToolPath(workDirAbsPath, params.path);
 	const info = await stat(absPath).catch(() => undefined);
 	if (!info) throw new Error(`File not found: ${params.path}`);
 	if (info.isDirectory()) throw new Error(`Not a file (it is a directory): ${params.path}`);
@@ -59,7 +59,7 @@ export async function runRead(
 	const bytes = await readFile(absPath);
 	throwIfAborted(hooks.signal);
 	const mimeType = sniffImageMimeType(bytes);
-	if (mimeType) return imageResult(workspace, params.path, absPath, bytes, mimeType, hooks);
+	if (mimeType) return imageResult(workDirAbsPath, params.path, absPath, bytes, mimeType, hooks);
 	const raw = bytes.toString("utf8");
 	if (looksBinary(raw)) throw new Error(`Binary file, not shown: ${params.path}`);
 
@@ -81,7 +81,7 @@ export async function runRead(
 	const shown = offset - 1 + slice.length;
 	const suffix =
 		shown < lines.length ? `\n\n[${lines.length - shown} more lines; continue with offset=${shown + 1}]` : "";
-	return textResult(`${body}${suffix}`, { path: workspace.display(absPath), lines: lines.length });
+	return textResult(`${body}${suffix}`, { path: displayToolPath(workDirAbsPath, absPath), lines: lines.length });
 }
 
 /**
@@ -90,7 +90,7 @@ export async function runRead(
  * what the file was.
  */
 function imageResult(
-	workspace: Workspace,
+	workDirAbsPath: string,
 	requestedPath: string,
 	absPath: string,
 	bytes: Buffer,
@@ -103,7 +103,7 @@ function imageResult(
 			{ type: "text", text: `Read image file [${mimeType}], ${formatBytes(bytes.length)}.` },
 			{ type: "image", data: bytes.toString("base64"), mimeType },
 		],
-		details: { path: workspace.display(absPath), mimeType, bytes: bytes.length, requestedPath },
+		details: { path: displayToolPath(workDirAbsPath, absPath), mimeType, bytes: bytes.length, requestedPath },
 	};
 }
 

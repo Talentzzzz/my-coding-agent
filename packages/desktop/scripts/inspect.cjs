@@ -26,8 +26,8 @@ const DOM_REPORT = `(() => ({
 	turns: [...document.querySelectorAll(".turn")].map((t) => t.className + ": " + (t.querySelector(".turn-body")?.textContent ?? "").slice(0, 60)),
 	activeIndex: [...document.querySelectorAll(".session-item")].findIndex((n) => n.getAttribute("aria-current") === "true"),
 	itemCount: document.querySelectorAll(".session-item").length,
-	workspaceCount: document.querySelectorAll(".workspace").length,
-	workspaceNames: [...document.querySelectorAll(".workspace-name")].map((n) => n.textContent),
+	directoryCount: document.querySelectorAll(".directory").length,
+	directoryNames: [...document.querySelectorAll(".directory-name")].map((n) => n.textContent),
 	status: document.querySelector(".status-bar")?.textContent,
 	settingsEntry: document.querySelector(".settings-entry")?.textContent,
 	modelNotice: document.querySelector(".notice-card .notice-text strong")?.textContent,
@@ -46,7 +46,7 @@ async function inspect() {
 	if (!existsSync(entry)) throw new Error(`server entry missing at ${entry}`);
 	const module = await import(pathToFileURL(entry).href);
 	server = await module.bootServer({
-		cwd: repositoryRoot,
+		workDirAbsPath: repositoryRoot,
 		host: "127.0.0.1",
 		port: 0,
 		vite: process.env.INSPECT_DEV === "1",
