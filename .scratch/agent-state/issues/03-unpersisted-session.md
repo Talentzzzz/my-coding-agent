@@ -30,8 +30,8 @@ Status: resolved
 ### 结论（一句话）
 
 **建 id 即入表**——而且这不是一个取舍，是删掉 `pending` 之后**剩下的唯一一条**（第 1 节）；`pending`
-与 `SessionManager.adopt` 一起删（第 5 节）；问题 4 的前提不成立——`sessionFileAbsPath` **从来没有缺过**（第 6 节）；
-由此给 04 补一条驱逐判据（第 7 节）。
+与 `SessionManager.adopt` 一起删（第 5 节）；问题 4 的前提不成立——`sessionFileAbsPath` 在落盘会话上**从来没有缺过**
+（第 6 节）；由此给 04 补一条驱逐判据、给 `hosts ⊆ 表` 配一条执行面（第 7 节）。
 
 ### 1. 为什么「建 id 即入表」不是选项，是剩下的那一个
 
@@ -41,8 +41,9 @@ Status: resolved
    `retain()` 恒发 `open`（`packages/web/src/client.ts:418`，ADR-0010）。
 2. `open` 帧遇到这条还没订过的 id，第一件要问的就是 `this.hub.has(sessionId)`（`mux.ts:294`），假就是「未知的会话」，
    整条流当场 `error` + `end`。
-3. 这一刻磁盘上什么都没有：`findSessionFilePathById` 扫的是每个会话目录里的 `.json`（`session-manager.ts:2018-2035`），
-   而未落盘的会话一个文件都没生（`persistEntry` 的 `hasConversation` 闸，`:1205-1223`）。
+3. 这一刻磁盘上什么都没有：`findSessionFilePathById` 扫的是每个会话目录里的 `.json`（`session-manager.ts:2018-2044`，
+   命中的那一句是 `if (meta?.id === id)`），而未落盘的会话一个文件都没生（`persistEntry` 的 `hasConversation` 闸，
+   `:1205-1223`）。
 4. 所以「这个 id 存在」这件事，只能由内存里某张 id→袋 的 Map 回答。
 
 今天这张 Map 是 `pending`（`hub.ts:267`）。01 号票定了 `agent.adopt(state)` 是进表的**唯一**入口，10 号票删掉
@@ -64,11 +65,19 @@ Status: resolved
 | 有人在看吗 | `observers` | 握着 |
 | 有人在用它／跑它吗 | `hosts` 的 claim 计数与在飞运行 | 握着 |
 
-这件事有个更好的说法，也是给 ADR-0011 的：**表装的从来不是「有文件的」，是「丢了就没了的那一份」**（ADR-0007 §4）。
-按这条，fork 有文件却不入表（02 号票），新建的会话没文件却入表——两个都不矛盾。`fileCreated === false` 的袋是这条
-判据**最纯粹**的样本：磁盘上连半份都没有。
+这件事有个更好的说法，也是给 ADR-0011 的：**表装的从来不是「有文件的」，是「丢了就没了的那一份」**。这条是
+**重读** ADR-0007 §4 的用意，不是引它的原文——§4 写的是「只装『**进行中且**磁盘上没有』的东西」，而本图要放宽的
+正是那个「且」：盘上有文件的会话也进表（它有队列与订阅），盘上什么都没有的会话也进表（它连 id 都只活在这里）。
+ADR-0011 要按这个新判据重写 §4 那一句。按这条，fork 有文件却不入表（02 号票），新建的会话没文件却入表——两个
+都不矛盾。`fileCreated === false` 的袋是这条判据**最纯粹**的样本：磁盘上连半份都没有。
 
-两处跟着改的话：
+**`hosts ⊆ 表` 需要一个执行面，否则它只是断言。** 拿到这个不变式的是一条方向相反的约束：**`evict` / `drop` 只在
+`hosts` 里已经没有那个 id 之后才调**。因为 `has()` 从此不问 `hosts`，反过来删表时问一次是唯一能兑现它的地方；
+而这个判据归 hub（`hosts` 在它手上），不归 Agent——与地图那句「Agent 提供 `evict` 并自己再判一次」并不冲突：Agent
+再判它拿得到的那几条（在飞运行、`suspended`、`fileCreated`），hub 判它自己那几条（observers、claims、`hosts`）。
+注意这两条闸的朝向是相反的，别写成一条：**有 host 不许删**、**没文件不许删**，剩下那条窄缝才是可清的。
+
+三处跟着改的话：
 
 - `entryOf` 的抛词（`agent.ts:1219-1223`）「`Session is not running: ${id}`」在 03 之后是假话（表里的会话可以没在跑）。
   改成 `Session is not open: ${id}`，**并且与 `hub.snapshotNow` 那句（`hub.ts:386`）刻意不同**：那句是关于 host 的，
@@ -76,6 +85,10 @@ Status: resolved
 - **`observe` 的回调仍以 `hosts` 为准，不许看表**（`mux.ts:310-317`）。看着一个「表里有、没 host」的会话，在订阅
   眼里仍是「从未在跑」：`live` 不翻，`bind` 不绑，流不会因为一次驱逐被 `end`。若改成看表，`live` 第一次回调就翻成
   true，之后任何一次 host 消失（删会话、收摊）都会给一条从没跑过的流发 `end`。
+- **对 01 的两处补白（不是推翻）**：① 01 §6 写「两处 `openSessions.delete` → `agent.evict(id)`」，但 01 §4 定的
+  `evict` 是带判据的，而这两处是宿主收摊、判据已经由 `remove` 自己拒过一遍——所以它们用的是不带判据的
+  `drop(id)`（本票 §4）。② 01 §4 的「不公开 getter、表的读点只有一个」指的是**不把 Map 露出去**；`has(id)` 与
+  `drop(id)` 是两个有名字的操作，不是 getter，也不给任何人遍历或整表清空的能力（`clear()` 依旧不造）。
 
 ### 3. 三条判据的新形状
 
@@ -91,9 +104,9 @@ async snapshotOf(id: string): Promise<SessionSnapshot> {
 	// Anything this process holds answers from the bag, live or not: a hosted session must not be
 	// read from a file that lags its turn, and an open one has no file at all.
 	if (this.agent.has(id)) return this.agent.snapshot(id);
-	const absPath = SessionManager.findSessionFilePathById(id);
-	if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
-	const state = fillSession(absPath);
+	// The cold half is 02's `open(id)`: a throwaway bag, no registration, and the refusal for an id
+	// that names nothing is its own.
+	const state = this.sessions.open(id);
 	return readSessionSnapshot(this.sessionOptions(state, state.workDirAbsPath));
 }
 
@@ -103,26 +116,33 @@ private async open(id: string): Promise<HostedSession> {
 	const workDirAbsPath = state.session.sessionSetting.workDirAbsPath;
 	const host = new HostedSession(id, workDirAbsPath);
 	this.hosts.set(id, host);
-	// …observers、announceHost 原样
+	// observers and announceHost are unchanged.
 	return host;
 }
 
 /** The one road a disk-backed session enters the table: fill, assemble, adopt, then read back. */
 private async adoptFromDisk(id: string): Promise<AgentState> {
-	const session = this.sessions.open(id); // 02：fill 一份、不登记
+	const session = this.sessions.open(id);
 	const { state } = await assembleSession(this.sessionOptions(session, session.workDirAbsPath));
 	this.agent.adopt(state);
-	return this.agent.agentState(id); // adopt 先到先得，权威对象是表里那只
+	// `adopt` is first-come: the authority is the state the table holds, not the one just assembled.
+	return this.agent.agentState(id);
 }
 ```
 
-三处要点：
+四处要点：
 
 - **`snapshotOf` 的 hosted 分支被「表」吸收**，用的就是今天 hosted 走的那条 `agent.snapshot`。这是一个行为变化：
   「打开但没 host」的会话不再重新装配一遍，而是读袋。方向是对的——02 §①「活会话永不走冷路」对**写**说的理由
   （整只快照写回会退回旧值）对**读**同样成立，只是读的后果轻：读到的是这个进程最后认为的那份，而不是磁盘上落后
   的那份。冷读从此只留给**这个进程不握**的会话，`readSessionSnapshot` 那句「a session this process is not running」
-  在 14 号票里要跟着改——它现在覆盖的集合从「没在跑」缩成「不握」。
+  在 14 号票里要跟着改——它现在覆盖的集合从「没在跑」缩成「不握」。**冷分支本身也随之变短**：定位 + `fillSession`
+  + 「Unknown session」三步并成 02 定下的一句 `this.sessions.open(id)`，与 02 §8 给 10 的落点
+  （`hub.ts:363-369` 改 `open`）是同一处，本票不再保留那套手写的定位与拒绝文本。
+- **它依赖 08 把 `snapshot` 的入口换掉**：今天 `Agent.snapshot` 前两句是 `this.sessionManager.stateOf(id)` 与
+  `this.entryOf(id)`（`agent.ts:1241-1242`），而 `entryOf` 没有 host 就抛。08 把这两处换成 `agentStateOf(id)` 之后，
+  「表里有、没 host」的会话才读得出来。第 8 节落点表里 15 那行（`newSession()` 之后 `snapshotOf` 读得出）成立的
+  前提就是它，落地顺序不能颠倒。
 - **判据与读取在同一个同步块里**（上面 `has` → `agentState` 之间没有 `await`；`await` 只出现在另一支）。表能被删的
   时机只有 `evict` / `drop` / 进程收尾，全都由 hub 自己在事件循环的同一拍里发起，所以「同一个同步块」就是完备的。
 - **`adopt` 之后读回来**：`adopt` 是先到先得（01 §4），并发下装配出来的那份可能被丢掉；拿表里那只，host 才不会跑在
@@ -150,22 +170,23 @@ private async createUnpersisted(workDirAbsPath: string): Promise<string> {
 
 ```ts
 async remove(sessionId: string): Promise<void> {
-	const held = this.agent.has(sessionId); // 表里有：未落盘的那条会话只有这一半
+	const held = this.agent.has(sessionId); // Held is the whole of an unpersisted session's existence.
 	const onDisk = SessionManager.findSessionFilePathById(sessionId) !== undefined;
 	const hosted = this.hosts.get(sessionId);
 	if (hosted !== undefined) {
-		// …拒（claims / opening / submitting / 审批）原样
+		// The refusals (claims / opening / submitting / approvals) are unchanged.
 		const closing = (async () => {
 			await this.agent.settle(sessionId);
 			if (this.hosts.get(sessionId) === hosted) this.hosts.delete(sessionId);
-			// …observers / announceHost / close 原样
+			// observers / announceHost / close are unchanged.
 			if (onDisk) await this.sessions.remove(sessionId);
-			this.agent.drop(sessionId); // 原 openSessions.delete，同位置
+			this.agent.drop(sessionId); // Was openSessions.delete, same position.
 		})();
 		// …
 	} else {
-		// 建出来、没说过话的会话：忘掉表里那份就是整个删除，盘上没有东西可删。
-		// 而一个谁都没听说过的 id 仍要过一遍 store，让它的抛保持成那个 404。
+		// A session created here and never spoken in: forgetting the held state is the whole removal,
+		// and there is nothing on disk to delete. An id nobody ever heard of still goes to the store,
+		// so its refusal stays the 404 it always was.
 		if (onDisk || !held) await this.sessions.remove(sessionId);
 		this.agent.drop(sessionId);
 	}
@@ -174,14 +195,16 @@ async remove(sessionId: string): Promise<void> {
 ```
 
 **`drop(id)` 与 `evict(id)` 是两个动词，别合并**：`evict` 带判据（04），而删一个正在被看的会话是合法的、`evict` 会
-拒绝，所以 `remove` 与两处宿主收摊用的是不带判据的 `drop`。12 里「或直接 `sessions.delete`，这两处是宿主收摊，
-不需要判据」就是它——只是得有一个公开名字（01 §4 只写了 `evict`，这里补上）。
+拒绝；判据里现在还多了 `hosts` 那条，而 `remove` 删的**正是**有 host 的会话——两件事从此不可能共用一个动词。所以
+`remove` 与两处宿主收摊用的是不带判据的 `drop`。12 里「或直接 `sessions.delete`，这两处是宿主收摊，不需要判据」就是
+它——只是得有一个公开名字（01 §4 只写了 `evict`，这里补上）。
 
 **`rename`（`hub.ts:580-588`）**：`isHosted` 那条旗子可以整个去掉——
 
 ```ts
 async rename(sessionId: string, title: string): Promise<void> {
-	// 握着它就用它那只袋（02 §①），否则 fill 一份；不在盘上的 id 由 open 自己抛 Unknown。
+	// A held session writes through its own bag (02 §①); a cold one fills a throwaway. An id that names
+	// nothing refuses inside `open`, which is the 404 it always was.
 	const bag = this.agent.has(sessionId) ? this.agent.agentState(sessionId).session : this.sessions.open(sessionId);
 	this.sessions.setTitle(bag, title);
 }
@@ -213,7 +236,9 @@ async rename(sessionId: string, title: string): Promise<void> {
 
 票面说未落盘的会话是「`persist: true` + `fileCreated: false` + `sessionFileAbsPath` 暂缺」。**第三项错了**：
 构造器 `newSession(s)`（`session-manager.ts:1126-1144`，与 hub 里那个同名方法是两回事）在袋**出生之前**就把路径写上
-了（`:1141-1143`：`if (s.persist && dir !== null)`，而 `createSession` 永远给得出 `dir`）。所以：
+了（`:1141-1143`：`if (s.persist && dir !== null)`，而 `createSession` 永远给得出 `dir`）。精确地说：**凡
+`createSession` 产出的袋**（也就是全部未落盘的会话）**都有路径**；路径会缺的只有 `inMemorySession` 那一支，见下。
+所以：
 
 - **问题 4 的两个选项都不适用**：没有「补进去」，也没有「换一个新的」。第一次消息落盘只翻一个布尔
   （`persistEntry` 的 `fileCreated = true`，`:1222`），袋是同一个对象，表里那份看见的就是它。「原地」是对的，但理由
@@ -226,7 +251,12 @@ async rename(sessionId: string, title: string): Promise<void> {
 
 ### 7. 由此产生的三处必改
 
-**对 04 号票（驱逐判据）**：判据加一条 **`state.session.fileCreated === true`**。理由是一条无损/有损的分界：
+**对 04 号票（驱逐判据）**：判据分两半分居两处（第 2 节）——**hub 侧**：`observers` 空、`claims === 0`、
+**`hosts` 里没有它**；**Agent 侧**（`evict` 里再判一次）：`live.activeRun === undefined`、`live.suspended === false`、
+**`state.session.fileCreated === true`**。其中 observers / claims / activeRun / suspended 是 04 已有的两条与它的
+「没在跑」；**`hosts` 与 `fileCreated` 是 03 加的两条**，朝向相反：`hosts` 那条兑现 `hosts ⊆ 表`（`has()` 不再问
+`hosts` 之后，这是唯一能兑现它的地方），`fileCreated` 那条挡住「一清就等于删 id」。后一条的理由是一条无损/有损的
+分界：
 
 - 盘上有另一半的会话，驱逐是**无损**的——丢的是队列与 in-flight，重开从 `fillSession` 重建，这正是它能被驱逐的
   唯一理由。
@@ -242,29 +272,30 @@ async rename(sessionId: string, title: string): Promise<void> {
 整句失效 → 由 Agent 的表承担（建 id 即入表）；`:21` 的「活跃会话」要跟着改词（表的成员不再等于活跃，见第 2 节）；
 `AGENTS.md` 的 `OpenSessions` 术语（01 已登记）；本票第 2 节的抛词与第 3 节的冷读定义两句。
 
-### 落点
+### 8. 落点
 
 | 下游票 | 从本票拿走的 |
 |---|---|
-| 04 | 驱逐判据加 `fileCreated === true`（无损/有损的分界与丢失面见 §7） |
+| 04 | 判据分两半：hub 侧加 **`hosts` 里没有它**（第 2 节的执行面），Agent 侧加 **`fileCreated === true`**（无损/有损的分界与丢失面见 §7） |
 | 07 | `sessionFileAbsPath?` 的可选性只服务 `inMemorySession`；`sessionSetting.model` 在创建时即有值、`modelId` 可选 |
 | 08 | `entryOf` 抛词改 `Session is not open`；`assembleSession` 在创建时就被调用；`adopt` 用 01 的先到先得语义，别抄 `SessionManager.adopt` 的三行 |
 | 10 | 删 `adopt`（唯一调用点 `session-factory.ts:266`）＋ `:1373-1375`、`:1839-1840` 两段文档 |
-| 12 | `has` / `snapshotOf` / `open` / `remove` / `rename` 五段见 §3、§4；`hosts ⊆ 表`（不是同生同灭）；`observe` 仍以 `hosts` 为准；新增 `agent.has(id)` 与 `agent.drop(id)` 两个公开面；`pending`／`pendingManager`／`createUnpersisted` 里那句 `pending.set` 整条删 |
+| 12 | `has` / `snapshotOf` / `open` / `remove` / `rename` 五段见 §3、§4；`hosts ⊆ 表`（不是同生同灭）＋它的执行面（删表只在 host 已删之后，§2）；`observe` 仍以 `hosts` 为准；新增 `agent.has(id)` 与 `agent.drop(id)` 两个公开面；`pending`／`pendingManager`／`createUnpersisted` 里那句 `pending.set` 整条删。另外 hub 里 4 处 `stateOf`（`:402` / `:558` / `:587` / `:692`）的换源按 10 / 02 §① 走，本票改的是它们的**取袋方式**（表里有就用袋），不是把它们机械换成 `open` |
 | 14 | `docs/architecture.md:233`、`:21`、`AGENTS.md` 的 `OpenSessions`、`entryOf` 抛词、`snapshotOf`「在跑 / 不在跑」的二分 |
 | 15 | 全量 smoke；建议补一节：`newSession()` 之后 `has` 为真、`snapshotOf` 读得出、`hosts` 里没有它、盘上无文件；`remove` 之后这几样一起翻假；`mount-session` 那只内存设置袋在「释放后重开」时不再被掉包（§4 末） |
 
-### 决定记录
+### 9. 决定记录
 
 | # | 决定 | 直接约束谁 |
 |---|---|---|
 | 1 | 建 id 即入表：创建 = `createSession` + `assembleSession` + `agent.adopt`，`createUnpersisted` 变 `async` | 08、12 |
 | 2 | 表的含义是「这个进程握着它」；`hosts ⊆ 表`，`observers` 与 claim 各自独立 | 04、12 |
-| 3 | 三条判据 = 表 / 盘两分支；`agent.has(id)` 是公开的布尔面，`agentState(id)` 是抛的那个；判与读在同一个同步块内 | 08、12 |
-| 4 | `SessionManager.adopt` 删除；`Agent.adopt` 的语义取自 `OpenSessions.ensure`（先到先得），不是它的（最后写赢） | 08、10 |
-| 5 | `remove` 用不带判据的 `agent.drop(id)`；`evict` 只用于有判据的驱逐 | 04、12 |
-| 6 | 驱逐判据加 `fileCreated === true`：没有另一半的会话一清就是删 id | 04、12 |
-| 7 | `sessionFileAbsPath` 从出生就在袋上，问题 4 不该存在；`pendingManager` 的盘探针随 `pending` 死 | 07、12 |
+| 3 | `hosts ⊆ 表` 的执行面：删表只在 `hosts` 里已经没有它之后（hub 判），`has()` 不再问 `hosts` | 04、12 |
+| 4 | 三条判据 = 表 / 盘两分支；`agent.has(id)` 是公开的布尔面，`agentState(id)` 是抛的那个；判与读在同一个同步块内 | 08、12 |
+| 5 | `SessionManager.adopt` 删除；`Agent.adopt` 的语义取自 `OpenSessions.ensure`（先到先得），不是它的（最后写赢） | 08、10 |
+| 6 | `remove` 用不带判据的 `agent.drop(id)`（对 01 §6「→ `evict`」的修正）；`evict` 只用于有判据的驱逐 | 04、12 |
+| 7 | 驱逐判据加 `fileCreated === true`：没有另一半的会话一清就是删 id | 04、12 |
+| 8 | `sessionFileAbsPath` 对 `createSession` 的袋从出生就在，问题 4 不该存在；`pendingManager` 的盘探针随 `pending` 死 | 07、12 |
 
 **本票没有回答的**：未落盘会话的空闲上限（地图 `Not yet specified` 已登记「常驻内存的代价」）；`fork` 一个未落盘的
 会话仍会抛（今天也抛：hosted 时拿到一条不存在的路径，非 hosted 时 `Unknown session`）——本票不改，只是它现在有了

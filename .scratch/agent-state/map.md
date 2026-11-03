@@ -62,22 +62,20 @@ persist 动词）。**fork 不 fill 也不入表**（票面 `➡️` 只说不�
 （与 `settleSessionFiles` 的论点同构），文档不许写"靠 claim"。**10 号票禁止把 `agent.ts` 的 15 处 `stateOf`
 机械替换成 `open`**（编译通过、语义错），那是换源不是改名；15 的全量 smoke 是兜底。
 
-**03 号票（2026-11-03 解决，未落盘的会话）**：**建 id 即入表**——不是取舍，是删掉 `pending` 之后剩下的唯一一条：`newSession` 交出 id 之后客户端的第一件事是**订阅**（`retain` 恒发 `open`），`open` 先问 `hub.has`，
-而这一刻磁盘上一个文件都没有，所以「这个 id 存在」只能由表回答；不给表就只能把 `pending` 换个名字留着。
-**「打开」从此指「这个进程握着它」**（不是「有人看」也不是「在跑」），`hosts ⊆ 表`——**12 的「两者同生同灭」作废**；
-`observers` 与 claim 各自独立；`entryOf` 的抛词改 `Session is not open`（与 `hub.snapshotNow` 那句 "not running" 刻意
-不同），`observe` 的回调仍只认 `hosts`（否则 `live` 一翻，从没跑过的流会在驱逐时收到 `end`）。**三条判据压成两分支**
-（表 / 盘）并给了实现：`has` = `agent.has || 盘上找得到`；`snapshotOf` = 表里就 `agent.snapshot`、否则 fill 一份冷读
-（hosted 分支被「表」吸收，冷读集合从「没在跑」缩成「不握」）；`open` = 表里取、否则 `open(id)` + `assembleSession` +
-`adopt` 再**读回来**。**创建因此变成一次装配**（`createUnpersisted` 变 `async`，两个调用方都已是 `async`）。
-`remove` 的第一句 `pending.delete` 拆成 `held = agent.has` 加一个新公开面 **`drop(id)`**（不带判据，宿主收摊用）——
-与 `evict` 是两个动词；`rename` 的 `isHosted` 旗子整个去掉，改「表里就用袋，否则 `open(id)`」，副作用是未落盘的会话
-可以被命名（404 → 200，标题只留内存随出生写出）。**`SessionManager.adopt` 删**（唯一调用点 `session-factory.ts:266`），
-且它其实是「最后写赢」，别照抄进 `Agent.adopt`（那个是先到先得）。**更正票面一处前提**：`sessionFileAbsPath` 出生就
-在袋上（`newSession` :1142），问题 4 的两个选项都不适用，真正翻的是 `fileCreated`；`pendingManager` 的 `existsSync`
-探针是它的替身，随 `pending` 一起死。**给 04 补一条判据**：驱逐加 `fileCreated === true`——盘上没有另一半的会话，
-一清就是删掉这个 id（`has` 变假、`snapshotOf` 404、`open` 无处 fill）。**给 07/08 的约束**：创建即装配，所以
-`sessionSetting.model` 在第一条消息之前就有值，只能读作「在 force 的选择」而非「记下的选择」，`modelId` 必须可选。
+**03 号票（2026-11-03 解决，未落盘的会话）**：**建 id 即入表**——不是取舍，是删掉 `pending` 之后剩下的唯一一条：
+`newSession` 交出 id 之后客户端的第一件事是**订阅**（`retain` 恒发 `open`），`open` 先问 `hub.has`，而这一刻磁盘上
+一个文件都没有，所以「这个 id 存在」只能由表回答。**「打开」从此指「这个进程握着它」**（不是「有人看」也不是
+「在跑」），`hosts ⊆ 表`——**12 的「两者同生同灭」作废**；执行面是把 `hosts` 加进 04 的驱逐判据（删表只在 host 已删
+之后，因为 `has()` 不再问 `hosts`）。三条判据压成**表 / 盘两分支**：`snapshotOf` 表里就 `agent.snapshot`、否则 02 的
+`open(id)` 冷读（hosted 分支被「表」吸收，冷读集合从「没在跑」缩成「不握」）；`open` 表里取、否则 `open(id)` +
+`assembleSession` + `adopt` 再**读回来**；创建因此变成一次装配（`createUnpersisted` 变 `async`）。`remove` 的第一句
+`pending.delete` 拆成 `held = agent.has` 加一个新公开面 **`drop(id)`**（不带判据——**对 01 §6「两处 → `evict`」的
+修正**）。`entryOf` 的抛词改 `Session is not open`（与 `hub.snapshotNow` 的 "not running" 刻意不同），`observe` 仍
+只认 `hosts`。**`SessionManager.adopt` 删**（唯一调用点 `session-factory.ts:266`；它其实是「最后写赢」，别照抄进
+`Agent.adopt`）。**更正票面一处前提**：`createSession` 的袋出生就有 `sessionFileAbsPath`（:1142），问题 4 不存在，
+真正翻的是 `fileCreated`（`pendingManager` 的盘探针是它的替身）。**给 04 的另一半判据**：`fileCreated === true`——
+盘上没有另一半的会话，一清就是删 id。**给 07/08**：创建即装配，`sessionSetting.model` 在第一条消息之前就有值，
+只能读作「在 force 的选择」，`modelId` 必须可选。
 
 ## Not yet specified
 
