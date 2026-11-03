@@ -77,6 +77,14 @@ persist 动词）。**fork 不 fill 也不入表**（票面 `➡️` 只说不�
 盘上没有另一半的会话，一清就是删 id。**给 07/08**：创建即装配，`sessionSetting.model` 在第一条消息之前就有值，
 只能读作「在 force 的选择」，`modelId` 必须可选。
 
+**04 号票（2026-11-04 解决，驱逐判据与时机）**：票面推荐照批。判据按 03 §7 的形状记全——六条分两半：hub 侧
+`observers` 空 / `claims === 0` / `hosts` 里没有它，Agent 侧 `!activeRun` / `!suspended` / `fileCreated === true`。
+**驱逐的时机 = 每条「判据从假变真」的边沿上试一次、当场全量重查**：最后订阅离开、run 收尾、恢复收尾、claim 释放、
+首条消息落盘；边沿漏接安全（多驻留）、错删危险，所以触发点接全是效率要求、删除点同步全查是硬要求。讨论中否掉
+「cancel 即删」：cancel（及其等效的连接 teardown，`mux.ts:667`）是连接级信号，四条判据不在帧上——mux 只报告
+「少了一个看的人」，删除权在 `Agent.evict`（触发器归 mux，判据归 Agent；13 的触发器设计由此定形）。宽限与 reap
+的 deny 按票面删，代价「审批可悬空到进程重启」写进 ADR。
+
 ## Not yet specified
 
 - **迁移顺序的中间态**：`SessionManager.stateOf` 在树里的调用点是 29 处（agent 15、hub 4、`projection.ts` 1、
