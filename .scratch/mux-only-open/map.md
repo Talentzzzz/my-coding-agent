@@ -4,7 +4,7 @@ Status: done
 
 ## Destination
 
-窗口对会话的打开、切换、页面加载只依赖 mux 订阅：`retain` 即导航，`baseline` 帧即第一次绘制；REST 读从前端导航路径退场。终点 = 决定与行为语义见 [ADR-0010](../../docs/adr/0010-open-session-over-mux.md)（**施工前必读**，本图不重复它的理由），落地清单七行全做，验收边五条成立，`npm run check` 与相关 smoke 全绿，`docs/architecture.md` 与 ADR 状态行与实况一致。
+窗口对会话的打开、切换、页面加载只依赖 mux 订阅：`retain` 即导航，`baseline` 帧即第一次绘制；REST 读从前端导航路径退场。终点 = 决定与行为语义见 [ADR-0010](../../docs/adr/0010-open-session-over-mux.md)（**施工前必读**，本图不重复它的理由），落地清单八行全做，验收边五条成立，`npm run check` 与相关 smoke 全绿，`docs/architecture.md` 与 ADR 状态行与实况一致。
 
 ## Notes
 

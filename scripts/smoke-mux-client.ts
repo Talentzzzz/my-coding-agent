@@ -608,9 +608,9 @@ process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那�
 
 	// The window's half of the rule, restated here because nothing in this suite drives the window
 	// itself: a click is a number, and only the newest number may draw (main.ts keeps it as
-	// `openSeries`). The client has no opinion about it — ADR-0010 决定 3 puts the verdict in the
-	// caller — so what this block checks *about this layer* is that every baseline is handed over and
-	// none is turned into an error.
+	// `openSeries`). The client has no opinion about it — ADR-0010's first behaviour row puts that
+	// verdict in the caller — so what this block checks *about this layer* is that every baseline is
+	// handed over and none is turned into an error.
 	let series = 0;
 	const reported: string[] = [];
 	let drawn: ViewState = initialState();
@@ -636,8 +636,8 @@ process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那�
 		uplink(sockets.all[0]!).filter((f) => f.type === "open" && f.sessionId === sessionId).length;
 
 	// A second `open` on a session somebody else already holds is not refused — it is answered with a
-	// fresh baseline (ADR-0010 决定 1). That is the whole point of the idempotent primitive: the pane
-	// coming back to a running session is shown the half sentence instead of silence.
+	// fresh baseline (ADR-0010, decision 1). That is the whole point of the idempotent primitive: the
+	// pane coming back to a running session is shown the half sentence instead of silence.
 	const first = navigate("s1");
 	check("第一次导航发出 open", opensOn("s1") === 1, JSON.stringify(uplink(sockets.all[0]!)));
 	sockets.latest()?.deliver(baseline("s1"));
@@ -682,7 +682,11 @@ process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那�
 	check("它被交到窗口手里（这层不吞帧）", saw.messages.includes("a/baseline"), JSON.stringify(saw.messages));
 	check("迟到的那份不画：画面仍是最后一次点击", drawn.snapshot?.id === "b", JSON.stringify(drawn.snapshot?.id));
 	check("也不报错（被作废的那次没有变成错误条）", saw.errors.length === 0 && reported.length === 0, JSON.stringify([saw.errors, reported]));
-	check("两条订阅都还在，谁也没有被悄悄撤掉", client.isRetained("a") && client.isRetained("b"));
+	check(
+		"两条订阅都还在，也没有谁替它们发过 cancel",
+		client.isRetained("a") && client.isRetained("b") && !uplink(sockets.all[0]!).some((f) => f.type === "cancel"),
+		JSON.stringify(uplink(sockets.all[0]!)),
+	);
 	client.close();
 }
 

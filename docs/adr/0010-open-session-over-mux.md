@@ -1,6 +1,6 @@
 # 0010：会话的打开与切换只走 mux 基线
 
-- 状态：**已接受**（用户 2026-11-03 拍板），**已落地**（2026-11-03，01–04 号票，见 `.scratch/mux-only-open/`）
+- 状态：**已接受**（2026-11-03 用户拍板，已落地——01–04 号票跑绿 check、build:web 与 smoke 全套，见 `.scratch/mux-only-open/`）
 - 取代或失效：`packages/web/src/main.ts` `openSession()` 的"REST 读先画、channel baseline 幂等替换"双源结构（取代）；`packages/server/src/mux.ts` `open()` 对重复订阅的拒绝行为（取代，改为重发基线）；`packages/web/src/client.ts` `retain()` "已订阅则只记账不发帧"的分支（取代，retain 恒发 `open`）
 
 ## 为什么会有这份 ADR
@@ -21,7 +21,7 @@
 
 1. **`open` 的语义改为幂等的"给我现在的快照 + 之后的事件"。** 服务端 `mux.ts` `open()` 的重复订阅分支从拒绝（"这条连接已经订阅了这个会话"）改为**重发一份基线**（`pushBaseline`）。这是本方案的地基——没有它，"send 还持有引用时切走又切回"（retain 不产生新帧）会永远等不到基线；有了它，"切走正在跑的会话再切回"天然拿到一份带 `partial` 的新快照。
 2. **客户端恒发 `open`。** `retain()` 不再区分"订阅已存在"——每次 pane 落点都发 `open`；引用计数（`pane` / `send` 两个 source）原样保留，`cancel` 仍然只在计数归零时发。
-3. **导航的完成与失败是一层本地状态机，不是协议。** 协议**零新增帧类型**。`MuxClient` 新增 pending-open 记账：发出 `open` 时挂一个 per-session 的 promise，`baseline` / `error` / `end` 帧 settle 它，本地超时（初始 3 s，待实测校准）兜底。
+3. **导航的完成与失败是一层本地状态机，不是协议。** 协议**零新增帧类型**。`MuxClient` 新增 pending-open 记账：发出 `open` 时挂一个 per-session 的 promise，`baseline` / `error` / `end` 帧 settle 它，本地超时兜底——取值 3 s，定稿依据见文末未决事项。
 
 ### 三个必须答清的行为
 
@@ -33,7 +33,7 @@
 
 ### REST 读端点的去留
 
-`GET /api/sessions/{id}` 与 `GET /api/sessions/current` **保留**：它们是资源式命令面的读一半（[0001](0001-transport-websocket-mux.md)），mux 是推送通道、不是命令面，两者不相干；脚本与诊断仍可用。**前端**不再消费它们——`api.read` 的窗口侧调用点删除。
+`GET /api/sessions/{id}` 与 `GET /api/sessions/current` **保留**：它们是资源式命令面的读一半（[0001](0001-transport-websocket-mux.md)），mux 是推送通道、不是命令面，两者不相干；脚本与诊断仍可用。**前端**不再用 `read` 打开会话——`api.read` 的窗口侧调用点删除；`current` 例外，它在页面加载时回答"该开哪一个"，然后由一帧 `open` 打开（见文末未决事项）。
 
 ## 换来了什么
 
@@ -58,7 +58,7 @@
 
 ## 不可逆性与代价
 
-**中等，且可回退。** 全部改动集中在 `packages/server/src/mux.ts`（一个分支）、`packages/web/src/client.ts`（retain + pending-open）、`packages/web/src/main.ts`（`openSession` 重写）、两个 smoke 断言；`git revert` 单提交可退。
+**中等，且可回退。** 全部改动集中在 `packages/server/src/mux.ts`（一个分支）、`packages/web/src/client.ts`（retain + pending-open）、`packages/web/src/main.ts`（`openSession` 重写）、以及两张 smoke 脚本（客户端一张新增一节、wire 一张改断言）；`git revert` 单提交可退。
 
 **重开这条决定的人要重新回答**：重复 `open` 的幂等语义要不要保留（建议保留——它独立成立）、断线浏览要不要 REST 后备、以及超时取值在慢机器/大会话上的实测依据。这三条都答了才谈得上推翻。
 
