@@ -207,8 +207,8 @@ export class SessionHub {
 	 * The stateless session service every open, rename, fork, and delete below goes through.
 	 *
 	 * One instance rather than one per call, because the service's fill-at-open cache is what keeps
-	 * every write to a session on one bag: a rename appended here and a turn appended by the session's
-	 * own loop land on the same `Session`. See `SessionManager.stateOf`.
+	 * every write to a session on one bag: a rename recorded here and a turn appended by the
+	 * session's own loop land on the same `Session`. See `SessionManager.stateOf`.
 	 */
 	private readonly sessions = new SessionManager();
 	/**
@@ -571,8 +571,9 @@ export class SessionHub {
 	 *
 	 * The write goes through the service's `stateOf` — which is deliberately not a fresh replay:
 	 * the bag it hands back is the one this process's turns are written through, and the one the next
-	 * open will serve. It takes no claim: a rename is a record beside the conversation, the loop never
-	 * reads titles, and a rewrite of the snapshot mid-run lands without disturbing the turn.
+	 * open will serve. It takes no claim: a title is a fact about the session rather than about one
+	 * way through it, the loop never reads titles, and a rewrite of the snapshot mid-run lands
+	 * without disturbing the turn.
 	 *
 	 * The title arrives already shortened; what reaches the file is what a row shows.
 	 */

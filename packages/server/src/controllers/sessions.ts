@@ -545,16 +545,16 @@ export class SessionController {
 	}
 
 	/**
-	 * Give the session a name of its own, stored as one `rename` entry (ADR-0002).
+	 * Give the session a name of its own, stored as the title on its `.json` snapshot.
 	 *
 	 * The store's own shortening rule is applied here, before anything is written — a user's typing is
 	 * not a title until it has been collapsed and cut the same way a derived one is, so a renamed row
 	 * and a derived row are indistinguishable in width and shape. An empty name is refused rather than
-	 * stored: an entry whose title is nothing would silently restore the derived title, which is what
+	 * stored: a stored title of nothing would silently restore the derived title, which is what
 	 * *not renaming* already does. There is no clear-rename; changing the name back is another rename.
 	 *
-	 * No claim is taken and a run in flight is no obstacle: the entry lands beside the conversation,
-	 * and nothing the loop reads depends on a title.
+	 * No claim is taken and a run in flight is no obstacle: the title is a fact about the session
+	 * rather than about one way through it, and nothing the loop reads depends on it.
 	 */
 	async rename(sessionId: string, body: Record<string, unknown>): Promise<{ sessionId: string; title: string }> {
 		const title = body.title;
