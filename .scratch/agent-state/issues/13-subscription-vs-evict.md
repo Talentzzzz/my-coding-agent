@@ -1,0 +1,26 @@
+# 13：订阅与驱逐——被清掉的会话不能静默失聪
+
+Type: task
+Status: open
+Blocked by: 04, 12
+
+## Question
+
+mux 的订阅表是「连接 × 会话」（ADR-0001：**订阅不拿 claim**，也不让会话保持打开）。驱逐一旦发生，被清掉的
+`AgentState` 连同它的两个 listener 集合一起消失，而连接那边的订阅表仍然记着「我订了它」——之后的帧再也不会到，
+而且是**静默**的：窗口以为自己在看，其实什么都没收到。
+
+现在这个问题被 `reap` 的「删 host → announceHost → close」顺序掩盖着（观察者先被告知「没了」），
+但新规则下驱逐的触发点从「reap」变成「最后一个 observer 离开」，且 `send` 引用可能在驱逐之后仍然存在
+（`packages/web/src/main.ts:861` 的 `releaseSend`）。
+
+要定并落地：
+
+- 驱逐时**先**通知观察者与 `hostListeners`，**再**删表（沿用 reap 的顺序，不能反）；
+- `mux` 的订阅表在 host 消失时是否要主动清行（现在是靠客户端自己 `release`）；
+- `send` 引用保留、pane 引用已释放的场景：`evict` 应该拒绝（那说明还有人在等结果），还是照清并把 fetch 的
+  连接掐掉？——推荐**拒绝**：`claims > 0` 已经覆盖「改变会话的请求」，`send` 引用需要另给一个不拿 claim 的
+  信号，否则它会被清掉；
+- ADR-0010 的 `retain` 语义要不要补一句：「被驱逐后的 retain 是一次重新打开，基线是新的」。
+
+## Answer
