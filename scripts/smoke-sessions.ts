@@ -1,7 +1,8 @@
 // Session-registry smoke test: proves one agent loop per session id, that a session survives losing
-// its last connection, and that the JSONL file is what a later connection gets back.
+// its last connection, and that the two files a session is (the `.json` snapshot and the `.jsonl`
+// entry stream) are what a later connection gets back.
 // Nothing here reaches a model, so no provider key is needed. Run with: node scripts/smoke-sessions.ts
-import { appendFileSync, existsSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -112,6 +113,11 @@ function openFile(id: string): Session {
 	const path = SessionManager.findSessionFilePathById(id);
 	if (path === undefined) throw new Error(`no session file for ${id}`);
 	return fillSession(path);
+}
+
+/** The snapshot path of a session: same stem as the `.jsonl` stream, `.json` for the `.json` file. */
+function snapshotPathOf(jsonlPath: string): string {
+	return jsonlPath.replace(/\.jsonl$/, ".json");
 }
 
 /**
@@ -349,6 +355,90 @@ try {
 			`${(await SessionManager.findSessionRowById(renamedId))?.title} / ${(await SessionManager.findSessionRowById(renameFork))?.title}`,
 		);
 		await hub.release(reopened);
+	}
+
+	process.stdout.write("a meta change rewrites the snapshot whole\n");
+	// The v5 format's central promise, driven by the same four setters production uses: a choice
+	// rewrites the `.json` snapshot by temp+rename and never touches the `.jsonl` append stream. The
+	// atomicity itself has no outside observer — a rename is one step — so what the checks below
+	// pin is its observable half: the log untouched, no half-written temp left behind, and a choice
+	// that changes nothing leaving the file exactly as it was.
+	{
+		const metaId = await hub.newSession();
+		const host = await hub.claim(metaId);
+		hubSessions(hub).appendMessage(bagOf(hub, metaId), userMessage("重写的会话"));
+		const jsonlPath = bagOf(hub, metaId).sessionFileAbsPath!;
+		const jsonPath = snapshotPathOf(jsonlPath);
+		const logBefore = await readFile(jsonlPath, "utf8");
+		check("the snapshot sits beside the stream it commits", existsSync(jsonPath));
+
+		hubSessions(hub).setTitle(bagOf(hub, metaId), "重写的名字");
+		hubSessions(hub).setModel(bagOf(hub, metaId), "row-a", "model-a");
+		hubSessions(hub).setThinkingLevel(bagOf(hub, metaId), "high");
+		hubSessions(hub).setToolConfig(bagOf(hub, metaId), ["read"], { bash: true });
+		check("the stream is byte-identical after the choices", (await readFile(jsonlPath, "utf8")) === logBefore);
+		const stored = JSON.parse(await readFile(jsonPath, "utf8")) as Record<string, unknown>;
+		check(
+			"the snapshot carries every current value and the identity",
+			stored.title === "重写的名字" &&
+				JSON.stringify(stored.model) === JSON.stringify({ name: "row-a", modelId: "model-a" }) &&
+				stored.thinkingLevel === "high" &&
+				JSON.stringify(stored.activeTools) === JSON.stringify(["read"]) &&
+				JSON.stringify(stored.approval) === JSON.stringify({ bash: true }) &&
+				stored.version === CURRENT_SESSION_VERSION &&
+				stored.id === metaId,
+			JSON.stringify(stored),
+		);
+		check(
+			"no temp file survived the rewrite",
+			readdirSync(sessionDir(root)).every((name) => !name.endsWith(".tmp")),
+			JSON.stringify(readdirSync(sessionDir(root))),
+		);
+
+		// A choice is a *change*: recording what the snapshot already says must not rewrite it, or
+		// every no-op patch would cost a temp+rename. The wait gives a rewrite a measurable mtime to
+		// land in — same-value or not, a write cannot land with the file's own earlier timestamp.
+		const quiet = statSync(jsonPath).mtimeMs;
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		hubSessions(hub).setTitle(bagOf(hub, metaId), "重写的名字");
+		hubSessions(hub).setToolConfig(bagOf(hub, metaId), ["read"], { bash: true });
+		check("an unchanged value does not rewrite the snapshot", statSync(jsonPath).mtimeMs === quiet, `${statSync(jsonPath).mtimeMs} vs ${quiet}`);
+
+		// The restore seam: a reopen is fillSession, and the recorded answers come back whole — the
+		// same parts the snapshot path a window reads is built from.
+		hub.release(host);
+		check("the session goes idle", await until(() => !hub.live.includes(metaId)));
+		const restored = fillSession(jsonlPath);
+		check(
+			"a reopen restores the model and level",
+			JSON.stringify(store.getRecordedSettings(restored)) ===
+				JSON.stringify({ model: { name: "row-a", modelId: "model-a" }, thinkingLevel: "high" }),
+			JSON.stringify(store.getRecordedSettings(restored)),
+		);
+		check(
+			"and the tool choices",
+			JSON.stringify(store.getRecordedToolConfig(restored)) === JSON.stringify({ activeTools: ["read"], approval: { bash: true } }),
+			JSON.stringify(store.getRecordedToolConfig(restored)),
+		);
+
+		// A fork is a new pair of files, and the source's current values travel whole: title, model,
+		// level, tool config — the session's own facts now, not entries a branch replay could restore.
+		const carryId = await hub.fork(metaId, null);
+		const carryFile = openFile(carryId);
+		const carryJson = snapshotPathOf(carryFile.sessionFileAbsPath!);
+		check("a fork is two files on disk", existsSync(carryJson) && existsSync(carryFile.sessionFileAbsPath!));
+		const carryMeta = store.getMeta(carryFile);
+		check(
+			"the fork's snapshot carries the source's current values",
+			carryMeta?.title === "重写的名字" &&
+				carryMeta?.model?.name === "row-a" &&
+				carryMeta?.model?.modelId === "model-a" &&
+				carryMeta?.thinkingLevel === "high" &&
+				carryMeta?.activeTools?.join(",") === "read" &&
+				carryMeta?.approval?.bash === true,
+			JSON.stringify(carryMeta),
+		);
+		check("and names the source's stream as its parent", carryMeta?.parentSession === jsonlPath, String(carryMeta?.parentSession));
 	}
 
 	process.stdout.write("an unknown id fails instead of quietly starting one\n");
