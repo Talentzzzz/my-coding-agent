@@ -1,4 +1,4 @@
-import type { ConnectionFrame, ConnectionItem, ServerMessage, StreamFrame } from "@my-agent/core/protocol";
+import type { ConnectionFrame, ConnectionItem, ServerMessage, SessionSnapshot, StreamFrame } from "@my-agent/core/protocol";
 
 /**
  * What the window believes about the physical channel.
@@ -91,6 +91,8 @@ export interface MuxOptions {
 	readyTimeoutMs?: number;
 	/** The tolerance before any heartbeat has reported an interval. See {@link WATCHDOG_MULTIPLIER}. */
 	watchdogTimeoutMs?: number;
+	/** How long one navigation waits for its baseline. See {@link OPEN_TIMEOUT_MS}. */
+	openTimeoutMs?: number;
 	/** Where the one line per disconnect goes. Defaults to the console. */
 	log?: (line: string) => void;
 }
@@ -100,11 +102,22 @@ export interface MuxHandlers {
 	onChannel(state: ChannelState): void;
 	/** A payload that belongs to no session: the row table, a row change, or a heartbeat. */
 	onConnectionItem(item: ConnectionItem): void;
-	/** One frame of one session's stream. */
+	/**
+	 * One frame of one session's stream.
+	 *
+	 * A `baseline` is the one member that does double duty: it is also the answer to a navigation in
+	 * flight, so a window that passed a `series` to `retain` is told twice — through the promise and
+	 * through this handler. Both are the same snapshot, and neither is conditional on the other.
+	 */
 	onStreamMessage(sessionId: string, message: ServerMessage): void;
-	/** The server ended this stream. It will not be reopened until its references drop. */
+	/** The server ended this stream. It is not reopened by a reconnect; a fresh retain revives it. */
 	onStreamEnd(sessionId: string): void;
-	/** A stream failed without ending — a refused `open`, or `announce`d trouble. */
+	/**
+	 * A stream failed without ending — an `open` the server refused, or `announce`d trouble.
+	 *
+	 * Also answers a navigation in flight, which is why a window waiting for a baseline may hear the
+	 * same failure twice: once here, once as the rejection of the promise `retain` returned.
+	 */
 	onStreamError(sessionId: string, message: string): void;
 }
 
@@ -145,6 +158,20 @@ const WATCHDOG_TIMEOUT_MS = 15_000;
 /** Tolerance, in heartbeat intervals, before a live connection is declared dead. */
 const WATCHDOG_MULTIPLIER = 3;
 
+/**
+ * How long one navigation may wait for the baseline that completes it.
+ *
+ * A bound on the *window*, not on the server: `open` was accepted and a baseline was promised, and
+ * this is the point at which the window stops pretending it is still coming. What it is really sized
+ * for is the wait behind the write queue (a baseline is a whole transcript and it queues behind
+ * whatever a busy session is streaming), not for the cost of building one — that cost was measured at
+ * a few milliseconds for a 3,000-message / 1.9 MiB snapshot, so three seconds is roughly three orders
+ * of magnitude of headroom over it and is dominated by "how long will a person watch a pane that has
+ * not changed yet". Tightening it toward the measured cost would start reporting a merely busy
+ * connection as a broken one, which is the failure the number exists to avoid.
+ */
+const OPEN_TIMEOUT_MS = 3_000;
+
 /** The code this client closes with when it decides the connection is dead. A client-chosen code. */
 const CLOSE_RECONNECT_REQUESTED = 4000;
 
@@ -155,12 +182,45 @@ interface Subscription {
 	status: SubscriptionStatus;
 }
 
+/**
+ * The navigations one session's next baseline will answer.
+ *
+ * "The window asked to look at this session" — a promise the caller awaits — is a local completion
+ * and deliberately not a protocol one: the wire gained no frame type for it (ADR-0010). The baseline
+ * that answers the `open` is the same frame the stream anchors itself on, so one record per session
+ * is the whole of the bookkeeping; there is nothing to match beyond the session id.
+ *
+ * More than one ask can be waiting on it. Clicking the same row twice is two asks and one stream,
+ * and the answer is the same snapshot either way — so they wait together rather than the second one
+ * cancelling the first. Which of them *draws* is the caller's decision, made against its own series;
+ * nothing here rejects an ask merely for being older.
+ */
+interface PendingOpen {
+	/** Every navigation waiting on this stream, oldest ask first. */
+	waiters: {
+		/**
+		 * The caller's number for the navigation. Kept only to name it in the log line a timeout
+		 * writes: this layer never compares it with anything, because which click is newest is the
+		 * window's own counter.
+		 */
+		series: number;
+		resolve(session: SessionSnapshot): void;
+		reject(error: Error): void;
+	}[];
+	/**
+	 * The deadline all of them share, because the wait belongs to the stream rather than to any one
+	 * click. Cleared when the record settles.
+	 */
+	timer: unknown;
+}
+
 /** Every option resolved, which is what the state machine actually reads. */
 interface ResolvedMuxOptions {
 	url: string;
 	socket: MuxSocketFactory;
 	readyTimeoutMs: number;
 	watchdogTimeoutMs: number;
+	openTimeoutMs: number;
 	log: (line: string) => void;
 }
 
@@ -178,7 +238,9 @@ interface ResolvedMuxOptions {
  *
  * **Two deadlines that never overlap.** An attempt is bounded by {@link READY_TIMEOUT_MS} until it
  * proves itself; once it has, that deadline is gone and {@link WATCHDOG_TIMEOUT_MS} measures silence
- * instead. They share a value because they are the same question asked in two phases.
+ * instead. They share a value because they are the same question asked in two phases. (A third,
+ * {@link OPEN_TIMEOUT_MS}, is unrelated to both and runs beside them: it bounds one navigation, not
+ * the connection.)
  *
  * **The watchdog.** Idle but healthy produces no frames at all — a logical stream only speaks when
  * the session it watches has something to say — so silence proves nothing on its own. What makes it
@@ -189,6 +251,13 @@ interface ResolvedMuxOptions {
  * survives a failed attempt. Its entries are intent rather than a record of what arrived, so a
  * reconnect re-opens each one and gets a fresh baseline — which is the only recovery this transport
  * has, and the reason no cursor or gap-filling appears anywhere in it.
+ *
+ * The fifth is a small ledger of navigations in flight: the promises a window awaits while it waits
+ * to be shown a session. Those are settled by the frames that answer them and otherwise by a local
+ * timeout, never by a frame type of their own — "opening a session" is a local completion, and giving
+ * it a protocol shape would make the wire carry an acknowledgement it has no use for. Unlike the
+ * subscription table this one does not survive a failed attempt as a rule: a reconnect's replay often
+ * produces the baseline that settles it, and where it does not, the timeout is what closes it out.
  *
  * Nothing here touches the DOM. The socket, the timers, the network events and the jitter are all
  * injected, which is what lets a smoke drive a fifteen-second state machine in milliseconds and
@@ -235,6 +304,14 @@ export class MuxClient {
 	private heartbeatMs: number | undefined;
 	/** What this connection is watching, by session. One entry per session, however many sources. */
 	private readonly subscriptions = new Map<string, Subscription>();
+	/**
+	 * The navigations still waiting for their baseline, by session.
+	 *
+	 * Outside the subscription table on purpose: a reference going away is not an answer, and a
+	 * navigation that nobody is watching any more still has to stop waiting (the timeout is what
+	 * says so). Keeping the two apart is what lets a release be the trivial thing it is.
+	 */
+	private readonly pendingOpens = new Map<string, PendingOpen>();
 
 	constructor(handlers: MuxHandlers, options: MuxOptions) {
 		this.handlers = handlers;
@@ -243,6 +320,7 @@ export class MuxClient {
 			socket: options.socket,
 			readyTimeoutMs: options.readyTimeoutMs ?? READY_TIMEOUT_MS,
 			watchdogTimeoutMs: options.watchdogTimeoutMs ?? WATCHDOG_TIMEOUT_MS,
+			openTimeoutMs: options.openTimeoutMs ?? OPEN_TIMEOUT_MS,
 			log: options.log ?? ((line) => console.warn(line)),
 		};
 		this.timers = options.timers ?? {
@@ -270,6 +348,10 @@ export class MuxClient {
 	close(): void {
 		this.stopped = true;
 		this.clearTimers();
+		// A closing window has nobody left to tell, so every navigation still waiting is settled here
+		// rather than left for a baseline this connection will never receive. Rejecting is the honest
+		// answer: none of them were answered.
+		for (const sessionId of [...this.pendingOpens.keys()]) this.settleOpen(sessionId, new Error("通道已关闭。"));
 		this.socket?.close(1000, "window is closing");
 		this.socket = undefined;
 	}
@@ -278,32 +360,57 @@ export class MuxClient {
 	 * Say that the window wants this session's content, for a reason that outlives one run.
 	 *
 	 * Idempotent per source and per session, so a caller can say "make sure something is watching
-	 * this" without tracking whether it already is. A second `open` for a session this connection is
-	 * already subscribed to is a protocol error the server answers, so this is what prevents it.
+	 * this" without tracking whether it already is. Reference counting is what decides when a
+	 * `cancel` goes out, and it is unchanged: a second reason for the same session still adds a
+	 * source and never a second stream.
+	 *
+	 * Every call also *asks* — `open` is an idempotent primitive (ADR-0010) and an already-open
+	 * stream is answered with a fresh baseline, so a pane that comes back to a session a send is
+	 * still holding is shown "what this looks like now" rather than the silence it used to get. This
+	 * is the one place that used to skip the frame; nothing else about the table changed.
+	 *
+	 * Passing a `series` is how a navigation asks to be told when it landed: the returned promise
+	 * settles with the snapshot of the baseline this `open` produced, and rejects when the stream
+	 * errors or ends instead, or stays quiet past {@link OPEN_TIMEOUT_MS}. That promise is a local
+	 * completion, so nothing about it is on the wire — and a retain without a `series` (a send's
+	 * reference, or a pane taken while the channel is still connecting) has no navigation to
+	 * complete and returns nothing.
+	 *
+	 * The `series` itself is the caller's own counter and this layer never reads it as a verdict:
+	 * every baseline this stream produces is handed to whoever is waiting, and which click gets to
+	 * draw is decided by comparing numbers the window kept.
 	 */
-	retain(sessionId: string, source: SubscriptionSource): void {
-		if (this.stopped) return;
+	retain(sessionId: string, source: SubscriptionSource, series?: number): Promise<SessionSnapshot> | undefined {
+		// A closed channel answers rather than queues: a navigation is a question, and "this window is
+		// going away" is the answer it gets. Silently returning nothing would leave the caller awaiting
+		// a promise it never received.
+		if (this.stopped) return this.refuse(series, "通道已关闭。");
+
 		const existing = this.subscriptions.get(sessionId);
 		if (existing !== undefined) {
 			existing.sources.add(source);
-			// A new want revives a stream the server ended. The `ended` mark exists to keep the
+			// A new want revives a stream the server ended, which is why this is written
+			// unconditionally rather than behind an `if`: the `ended` mark exists to keep the
 			// *reconnect* path — {@link replaySubscriptions} — from asking again for a session the
-			// server has already declared over; it is not a verdict that outlives a fresh gesture of
-			// intent. Without this, a session whose pane never let go could never be watched again:
+			// server has already declared over, and it is not a verdict that outlives a fresh gesture
+			// of intent. Without this, a session whose pane never let go could never be watched again:
 			// the only other way out of `ended` is the reference count dropping to zero, which a pane
 			// still pointing at the session prevents.
-			if (existing.status === "ended") {
-				existing.status = "subscribed";
-				if (this.channelState === "live") this.writeOpen(sessionId);
-			}
-			return;
+			existing.status = "subscribed";
+		} else {
+			this.subscriptions.set(sessionId, { sources: new Set([source]), status: "subscribed" });
 		}
 
-		const subscription: Subscription = { sources: new Set([source]), status: "subscribed" };
-		this.subscriptions.set(sessionId, subscription);
 		// Not sent here when the channel is not live: there is nowhere to send it, and the live
-		// transition replays every entry anyway. Recording the intent is the whole job right now.
-		if (this.channelState === "live" && subscription.status !== "ended") this.writeOpen(sessionId);
+		// transition replays every entry anyway — recording the intent was the whole job just now.
+		// A navigation that asked anyway is refused instead of waiting for a baseline this connection
+		// never requested, because that wait would end in a timeout that says "the server is slow"
+		// about a server nobody asked.
+		if (this.channelState !== "live") return this.refuse(series, "通道未连接，无法打开会话。");
+
+		const opened = series === undefined ? undefined : this.expectBaseline(sessionId, series);
+		this.writeOpen(sessionId);
+		return opened;
 	}
 
 	/**
@@ -471,6 +578,10 @@ export class MuxClient {
 		// payload, and two of them have no `item` key at all — so asking for it is a type error, not a
 		// lookup that happens to miss.
 		if ("item" in frame) {
+			// The baseline is the answer to whatever `open` asked last, so it settles a navigation
+			// before it is handed on to be drawn. It is handed on either way: the same frame is the
+			// stream's own anchor, and a caller that was not navigating still folds it.
+			if (frame.item.type === "baseline") this.settleOpen(sessionId, frame.item.session);
 			this.handlers.onStreamMessage(sessionId, frame.item);
 			return;
 		}
@@ -478,6 +589,11 @@ export class MuxClient {
 			// A stream-level failure is not terminal by itself: a run that could not start is reported
 			// here and the stream stays open. What decides whether this subscription is finished is
 			// whether the server follows it with an `end`, which is handled below.
+			//
+			// A navigation in flight, though, is *answered* by it: a refused stream is not a baseline
+			// that will arrive later, and the window should hear that instead of waiting out its own
+			// timeout.
+			this.settleOpen(sessionId, new Error(frame.error.message));
 			this.handlers.onStreamError(sessionId, frame.error.message);
 			return;
 		}
@@ -496,7 +612,87 @@ export class MuxClient {
 	private endStream(sessionId: string): void {
 		const subscription = this.subscriptions.get(sessionId);
 		if (subscription !== undefined) subscription.status = "ended";
+		// A stream the server declared over will not carry a baseline, so a navigation waiting on it
+		// is answered now instead of at its timeout. The subscription itself stays: see above.
+		this.settleOpen(sessionId, new Error("服务端结束了这条流，没有基线。"));
 		this.handlers.onStreamEnd(sessionId);
+	}
+
+	// -------------------------------------------------------------- navigation
+
+	/**
+	 * Join the queue of navigations this session's next baseline will answer.
+	 *
+	 * One record per session, because a session has one stream — so a second ask while the first is
+	 * still waiting joins it instead of replacing it. Both are asking the same question of the same
+	 * stream, and the snapshot that answers it answers both; saying a click was superseded is left to
+	 * the caller's own series, which is the only place that knows how clicks are counted.
+	 */
+	private expectBaseline(sessionId: string, series: number): Promise<SessionSnapshot> {
+		const waiting = this.pendingOpens.get(sessionId) ?? this.armWait(sessionId);
+		return new Promise<SessionSnapshot>((resolve, reject) => {
+			waiting.waiters.push({ series, resolve, reject });
+		});
+	}
+
+	/**
+	 * Start the clock a session's first waiting navigation opens.
+	 *
+	 * The deadline is the stream's, not the click's: everything waiting on this stream shares it, so a
+	 * pane that has already been waiting for two seconds does not get a fresh three because it was
+	 * asked for again.
+	 */
+	private armWait(sessionId: string): PendingOpen {
+		const pending: PendingOpen = {
+			waiters: [],
+			timer: this.timers.setTimeout(() => this.timeoutOpen(sessionId), this.options.openTimeoutMs),
+		};
+		this.pendingOpens.set(sessionId, pending);
+		return pending;
+	}
+
+	/**
+	 * The wait ran out with no baseline.
+	 *
+	 * Nothing else happens: the subscription stays, because the baseline may still be sitting in the
+	 * server's write queue behind a large frame and a `cancel` would queue behind it too — dropping
+	 * the references would release the stream, not the backlog. A real jam is the server's own 10s
+	 * stall bound, which closes the connection with `1013` and lets the replay heal it.
+	 */
+	private timeoutOpen(sessionId: string): void {
+		const waiting = this.pendingOpens.get(sessionId);
+		if (waiting === undefined) return;
+		const asked = waiting.waiters.map((waiter) => waiter.series).join(", ");
+		this.log(`mux: 第 ${asked} 次打开 ${sessionId} 没等到基线（${this.options.openTimeoutMs} ms）`);
+		this.settleOpen(sessionId, new Error(`等待会话基线超过 ${this.options.openTimeoutMs} ms。`));
+	}
+
+	/**
+	 * Settle whatever navigations this session is waiting on, if any.
+	 *
+	 * The one exit for every settle point — a baseline, a failure, an end, a timeout, a closing window
+	 * — so "every promise is answered exactly once and the timer goes with it" holds by construction
+	 * rather than by each caller remembering.
+	 */
+	private settleOpen(sessionId: string, outcome: SessionSnapshot | Error): void {
+		const waiting = this.pendingOpens.get(sessionId);
+		if (waiting === undefined) return;
+		this.pendingOpens.delete(sessionId);
+		this.timers.clearTimeout(waiting.timer);
+		for (const waiter of waiting.waiters) {
+			if (outcome instanceof Error) waiter.reject(outcome);
+			else waiter.resolve(outcome);
+		}
+	}
+
+	/**
+	 * Refuse a navigation this connection cannot serve.
+	 *
+	 * A retain that named no navigation is simply done — there is nothing to answer — and the union is
+	 * what keeps both of those visible at the call site rather than as an ignored rejection.
+	 */
+	private refuse(series: number | undefined, message: string): Promise<SessionSnapshot> | undefined {
+		return series === undefined ? undefined : Promise.reject(new Error(message));
 	}
 
 	// --------------------------------------------------------------- liveness
@@ -605,6 +801,14 @@ export class MuxClient {
 	 * subscription and answers with a fresh baseline, so what the window ends up showing is "what
 	 * this looks like now" rather than "what I missed" — which is the only recovery this transport
 	 * has, and the reason no cursor or gap-filling exists anywhere in it.
+	 *
+	 * A navigation that was in flight when the connection dropped needs nothing here, and both halves
+	 * of that are deliberate. If the replay reaches its session, the fresh baseline settles the
+	 * pending promise — the wait was for a baseline, and this is one. If it does not (the entry is
+	 * `ended`, or its last reference went while the connection was down), nothing is left to reopen
+	 * and the wait ends the way every wait ends: at its timeout. Note what that rules out — a release
+	 * does not settle a navigation, because "the pane looked away" is not an answer about the
+	 * session, and a send's release would then be able to answer a pane's question.
 	 */
 	private replaySubscriptions(): void {
 		for (const [sessionId, subscription] of this.subscriptions) {
@@ -614,6 +818,7 @@ export class MuxClient {
 		}
 	}
 
+	/** Ask for this session's stream. Every retain does, because the answer is idempotent. */
 	private writeOpen(sessionId: string): void {
 		this.write({ type: "open", sessionId });
 	}
