@@ -1895,7 +1895,13 @@ function main(): void {
 			const { sessionId } = await api.currentSession();
 			reachable();
 			await channelLive;
-			await openSession(sessionId);
+			// Unless a click got there first. The landing is a default — the session the server
+			// remembers, for a window nobody has touched yet — and a person who has already clicked a
+			// row has said something newer than a default. Without this the answer would arrive a beat
+			// later, supersede the click that was already on screen, and pull the pane back to a
+			// conversation the reader had just left. `openSeries` is zero only while nothing has been
+			// opened at all, which is exactly the question being asked here.
+			if (openSeries === 0) await openSession(sessionId);
 		} catch (error) {
 			unreachable(error);
 		}

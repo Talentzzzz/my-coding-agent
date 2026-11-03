@@ -56,7 +56,7 @@ async function openSession(sessionId: string): Promise<void> {
 }
 ```
 
-四件事跟票面有出入，都是落地时撞出来的，逐条记：
+五件事跟票面有出入，都是落地时撞出来的，逐条记：
 
 1. **`opening` 这一格是新长出来的**（票面没提）。引用是 per-session + per-source 的，所以连点同一行时两次导航共用**一个** pane 引用；被作废的那次若 "顺手 release 自己的"，就会把正等着画的那次掏空（页面变哑巴）。于是松手这件事挪到**下一次导航的开头**：目标不是 `followed` 也不是这次要开的会话时，旧的引用才走。副作用是好的——失败/超时留下的引用最多一个，而不是每次失败攒一个。这也顺带满足 ADR "超时不主动撤订阅"（撤的动作晚一个手势，那时迟到的大帧早已落地或被丢弃）。
 2. **页面加载反过来排**：`mux.start()` 从最后挪到最前，`await channelLive` 夹在 `api.currentSession()` 与 `openSession()` 之间。旧的"最后启动、好让 pane 的订阅先记账"的理由随双源一起作废；现在通道必须先活着，因为落地本身就是一帧。`channelLive` 是只 resolve 一次的 promise（`onChannel("live")` 触发），重启/重连不再影响它。**通道起不来 = 落地不发生**，屏幕上留欢迎态 + 既有的连接错误条（ADR 表第三行的代价，接受）。
@@ -75,6 +75,8 @@ async function openSession(sessionId: string): Promise<void> {
    修法：`submitting: true` 记一笔"这个会话的 run 我见过它开跑"，只有见过开跑的 `submitting: false` 才算结局（`Set.delete` 的返回值就是答案）。`releaseSend()` 把"松引用"和"清标记"绑成一件事，四条出口（结局、run 被拒、流结束、prompt 没被接受）全走它。
    对照实验：把 `runEnded` 临时改回旧语义重跑验收，`窗口走开之后那条流仍被观察着` 直接 `isWatched=false` 失败；换回来通过。所以这一条是有区分力的，不是顺手加的防御。
 
+5. **落地会让路**：`await channelLive` 之后再问一次 `openSeries === 0`，有人已经点过一行就不落地了。这是真验收里抓到的：`GET /api/sessions/current` 记的是"这台机器上最新的会话"，而那个请求跑得比一次早到的点击慢，落地于是在点击之后到达、以更大的 series 把用户刚打开的会话作废掉 —— 屏幕弹回上一条（验收连跑 5 次里 3 次碰上）。默认值不该抢人的手势，所以落地只在"这一页还没开过任何会话"时发生。旧的双源结构里也有同一个形状（迟到的读作废先到的点击），只是没人把它写下来。
+
 连带的注释重写：`openSeries` / `openWaits`（原 `openReads`）/ 加载提示 / `reachable()` 的措辞全部从"读/请求"改成"导航/帧"；"the channel's own baseline will replace it within a moment" 那句双源结构的话已消失。`mux.retain` 加了两条 overload（带 `series` 必得 `Promise<SessionSnapshot>`，不带的返回 `undefined`），让窗口那句 `await` 不必再处理半路 `undefined`——纯类型，运行时零改动。
 
 ### 验收边逐条（真服务器 + 真 Chromium，非手点）
@@ -88,6 +90,8 @@ async function openSession(sessionId: string): Promise<void> {
 | 3 | 连点两行三轮：最终画面是最后一击、无错误条 | ✅ 3/3 |
 | 4 | 删掉会话文件后点它的行：错误条「未知的会话：…」，旧对话字数不变 | ✅ 前 196 字 / 后 196 字 |
 | 附 | 窗口自己发一条（输入框 + 回车）拿到回答；窗口发起的长 run 走开后 `hub.isWatched` 仍为真、跑完才松开 | ✅ |
+
+连着跑 6 次，6 次全绿（先前那轮 flaky 两处都是**脚本自己**的毛病：一处是 `GET /api/sessions/current` 被 "会话 REST 读" 的过滤器误伤，一处就是上面第 5 条的真 race）。
 
 **边 1 的一句实话**：`/api/directories` 还在。它不属于"打开会话"，是 `refreshLists` 的列表修复（票面明确要求位置与理由原样保留），而且通道 live 时 `rows.loadFrom` 本来就会拒收。所以 ADR 那句"全过程不产生任何 REST 请求"字面不成立，成立的是"不产生任何**会话** REST 请求"。若要字面成立，得让 `openSession` 在 `channel === "live"` 时跳过 `refreshLists`——不建议在本票顺手做：`newSession()` 依赖它给"新目录里的第一条会话"建出侧边栏分组。留给 04 在 `docs/architecture.md` 里把这句话写准。
 
