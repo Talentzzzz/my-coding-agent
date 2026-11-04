@@ -5,17 +5,16 @@
 // settings bag with the approval gate switched on, so a scripted transport can park a run at it — and
 // the hub offers no option for that on purpose (nothing in production sets one).
 //
-// So the two steps an open takes are taken here instead: seed the registry entry with the assembly
-// the caller wants, then mount the claim token the hub keys it by. The hub's one orchestrator then
-// serves the session like any other, because every call it answers names the id. This is why the two
-// casts are acceptable: what a smoke needs is the hub's own registry, not a second copy of it.
+// So the two steps an open takes are taken here instead: assemble the session's state with the
+// settings the caller wants, hand it to the hub's orchestrator through the same door every state
+// enters (`adopt`), then mount the claim token the hub keys it by. The hub's one orchestrator then
+// serves the session like any other, because every call it answers names the id.
 import {
 	type SettingsState,
 	type Session,
 	SessionManager,
-	OpenSessions,
 	createSession,
-	ensureSession,
+	assembleSession,
 	inMemorySettingsState,
 } from "@my-agent/core";
 import { HostedSession, type SessionHub } from "../packages/server/src/hub.ts";
@@ -24,7 +23,6 @@ import { HostedSession, type SessionHub } from "../packages/server/src/hub.ts";
 interface HubInternals {
 	hosts: Map<string, HostedSession>;
 	sessions: SessionManager;
-	openSessions: OpenSessions;
 }
 
 export interface MountOptions {
@@ -52,15 +50,17 @@ export interface MountedSession {
 export async function mountSession(hub: SessionHub, options: MountOptions): Promise<MountedSession> {
 	const internals = hub as unknown as HubInternals;
 	const state = createSession(options.root);
-	await ensureSession({
+	// Assemble, then adopt: the state enters the hub's orchestrator through the same public door a
+	// production open uses, so the smoke seeds nothing the orchestrator does not know about.
+	const { state: assembled } = await assembleSession({
 		workDirAbsPath: options.root,
 		session: state,
 		models: hub.models,
 		sessionManager: internals.sessions,
-		openSessions: internals.openSessions,
 		settingsState: options.settings ?? inMemorySettingsState({}),
 		...(options.model === undefined ? {} : { model: options.model }),
 	});
+	hub.agent.adopt(assembled);
 	const host = new HostedSession(state.sessionId, options.root);
 	internals.hosts.set(state.sessionId, host);
 	return { id: state.sessionId, state, host };

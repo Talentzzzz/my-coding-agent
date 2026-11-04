@@ -1,4 +1,4 @@
-import type { OpenSession, OpenSessions } from "./session/open-session.ts";
+import type { AgentState, Live } from "./session/agent-state.ts";
 import type { PendingMessageQueue } from "./session/queues.ts";
 import {
 	type AssistantMessage,
@@ -88,17 +88,18 @@ import { type ToolRegistry, type ToolRunContext, type ToolState } from "./tools/
  * The session never loads settings, creates a working directory, reads AGENTS.md, or picks a model: every
  * method names a session by id and fetches what it needs, at the line that needs it, from the
  * service that owns it — the transcript from the session manager's cache, the live half from the
- * registry entry, the model from the ledger and the live rows. That is what makes the class
- * stateless (ADR-0007): there is no session field here to hold state, so a test drives a session by
- * passing an in-memory session manager and registering an in-memory entry, and a host that owns the
- * services hands its own. `session-factory.ts` does the assembling for the real process.
+ * session's own state, the model from the ledger and the live rows. That is what makes the class
+ * stateless (ADR-0007): there is no per-session field here beyond the state table itself, so a test
+ * drives a session by assembling its state in the factory and handing it over with `adopt`, and a
+ * host that owns the services does the same. `session-factory.ts` does the assembling for the real
+ * process.
  *
  * None of these fields is session *state*. The five singletons this orchestrator coordinates — the
  * ledger, the settings, the model rows, the tool definitions, and this class — each hold their own
  * pure-data state (ADR-0006 §1–2); what used to be the `Agent`'s private session fields are gone:
  * the run-time transients are locals of the run (ADR-0006 §5), the approvals are derived from the
- * ledger, the stamps are derived from the file, and the assembly rides the registry entry the open
- * created.
+ * ledger, the stamps are derived from the file, and the assembly rides the state the open adopted
+ * into the table this class holds (ADR-0011).
  */
 export interface AgentConfig {
 	/**
@@ -130,16 +131,6 @@ export interface AgentConfig {
 	 * request asks for it, so the workDirAbsPath is a value that arrives with the request and leaves with it.
 	 */
 	tools: ToolRegistry;
-	/**
-	 * The live registry: one entry per session this process runs, keyed by id (ADR-0007 §4).
-	 *
-	 * Every method resolves the entry its id names — the queues a run drains, the run in flight, the
-	 * subscribers, the run slot, and the assembly the open resolved (workDirAbsPath, settings, model
-	 * selection). Entries are built by the first touch of a session and dropped when its
-	 * host closes, so a method called on an id nobody runs is refused rather than answered from
-	 * something stale.
-	 */
-	openSessions: OpenSessions;
 	/**
 	 * The transport every model this orchestrator builds carries.
 	 *
@@ -308,11 +299,9 @@ export type SessionEventListener = (event: AgentSessionEvent) => void;
 /**
  * The transients of one run, as the run's own locals.
  *
- * Under the end-restart architecture nothing here is session state (ADR-0006 §5): the bag exists
- * while `runLoop` is on the stack and is dropped with it. It is referenced from one place outside
- * the run — the registry entry's `run` slot ({@link OpenSession.run}), the cross-stack handle a
- * mid-run reader (a snapshot, a queued prompt) reaches through, exactly as `runtime.activeRun` is
- * the handle an abort reaches through — and dropped from that slot the moment the run settles.
+ * Superseded in place (ADR-0011): the run now writes these onto the session's live half
+ * ({@link Live}), which is what a mid-run reader reaches through, and this bag has no writer left.
+ * Kept until the registry entry it typed is deleted (issue 09).
  */
 export interface RunScope {
 	/**
@@ -1136,11 +1125,11 @@ async function emitToolResultMessage(toolResultMessage: ToolResultMessage, emit:
  * ledger as it is: the content on disk is the content the model is served, on this process and on
  * every later one.
  */
-function finalizeToolResult(state: Session, entry: OpenSession, message: Message): Message {
+function finalizeToolResult(state: AgentState, message: Message): Message {
 	if (message.role !== "toolResult") return message;
 	const spilled = spillOversizedToolResult(
-		entry.workDirAbsPath,
-		state.sessionId,
+		state.session.sessionSetting.workDirAbsPath,
+		state.session.sessionId,
 		message.toolName,
 		message.toolCallId,
 		message.content,
@@ -1188,38 +1177,88 @@ export class Agent {
 	private readonly tools: ToolRegistry;
 	/** Where a request actually leaves: the injected transport, before the retry policy wraps it. */
 	private readonly base: ChatTransport;
-	/** The live registry every method resolves its session's entry from: see {@link AgentConfig.openSessions}. */
-	private readonly openSessions: OpenSessions;
+	/**
+	 * The states of the sessions this process runs, keyed by id (ADR-0011).
+	 *
+	 * One bag per session — the durable half, the settings the open resolved, the live half, the
+	 * subscribers — and the only thing this class holds between calls. States enter through
+	 * {@link Agent.adopt} and leave through {@link Agent.evict} / {@link Agent.drop}, both owned
+	 * here: one writer, one deleter.
+	 */
+	private readonly sessions = new Map<string, AgentState>();
 
 	constructor(config: AgentConfig) {
 		this.sessionManager = config.sessionManager;
 		this.models = config.models;
 		this.tools = config.tools;
-		this.openSessions = config.openSessions;
 		this.promptBuilder = config.systemPrompt;
 		this.hooks = config.hooks ?? createHooks();
 		this.base = config.api ?? anthropicMessages;
-		// Nothing per session is read or cached here: an id is resolved at the top of each method, the
-		// ledger bag from the session manager and the live half from the registry entry, and the locals
-		// thread through the stack as parameters. No engine object is built here either: the engine is
-		// a method of this class, and everything it holds is the run's own local — see
-		// {@link Agent.runEngine}.
+		// Nothing per session is built here: a state is assembled by the factory and adopted, and an
+		// id is resolved at the top of each method against the table below. No engine object is built
+		// here either: the engine is a method of this class, and everything it holds is the run's own
+		// local — see {@link Agent.runEngine}.
 	}
 
 	// ---------------------------------------------------------------------------- resolution
 
 	/**
-	 * The entry the session's live half lives in.
+	 * Put one assembled state in the table. The only way in.
 	 *
-	 * Every method needs it — the queues, the run in flight, the subscribers, the assembly — and a
-	 * missing one is a bug in the caller rather than a state to invent: only the first touch of a
-	 * session builds an entry, and only its host knows when that is. Refusing here is what keeps a
+	 * The factory (`session-factory.ts`) is what assembles — the working directory, the settings, the
+	 * live half, the model choice seeded onto the session — and the caller hands the result here,
+	 * whether that caller is a host adopting into its long-lived orchestrator or a test adopting
+	 * into one of its own. First adoption wins: a state already in the table is kept, never
+	 * replaced, because the one it would replace holds the queues, the subscribers, and the run in
+	 * flight (ADR-0007 §4) — and re-adopting the same id is the ordinary idempotent move, not an
+	 * error.
+	 */
+	adopt(state: AgentState): void {
+		if (this.sessions.has(state.session.sessionId)) return;
+		this.sessions.set(state.session.sessionId, state);
+	}
+
+	/**
+	 * Drop one session's state from the table, when nothing holds it.
+	 *
+	 * The eviction criteria (ADR-0011, issue 04): no run in flight, nothing parked at the approval
+	 * gate, and a durable half actually on disk — a session whose file is not born yet has no
+	 * half to rebuild from, so dropping its state would be deleting the id, and its life ends
+	 * with the first message or the process, never with a sweep. Refusing (returning `false`) is
+	 * the answer to a caller that named a session still held.
+	 */
+	evict(id: string): boolean {
+		const state = this.sessions.get(id);
+		if (state === undefined) return false;
+		if (state.live.activeRun !== undefined || state.live.suspended) return false;
+		if (state.session.fileCreated !== true) return false;
+		return this.sessions.delete(id);
+	}
+
+	/**
+	 * Drop one session's state from the table, whatever it holds.
+	 *
+	 * The unconditional half of the teardown (issue 03 §7): the user has deleted the session, so
+	 * the id is gone from disk and no criteria apply — there is nothing left for the state to
+	 * protect. Anything queued or in flight dies with it, exactly as a process restart would have
+	 * killed it.
+	 */
+	drop(id: string): boolean {
+		return this.sessions.delete(id);
+	}
+
+	/**
+	 * The state the session's live half lives in.
+	 *
+	 * Every method needs it — the durable half, the settings, the queues, the run in flight, the
+	 * subscribers — and a missing one is a bug in the caller rather than a state to invent: only
+	 * `adopt` puts a state here, and only a host knows when that is. Refusing here is what keeps a
 	 * method from answering a session nobody runs from something it just made up.
 	 */
-	private entryOf(id: string): OpenSession {
-		const entry = this.openSessions.get(id);
-		if (entry === undefined) throw new Error(`Session is not running: ${id}`);
-		return entry;
+	private agentStateOf(id: string): AgentState {
+		const state = this.sessions.get(id);
+		if (state === undefined) throw new Error(`Session is not running: ${id}`);
+		return state;
 	}
 
 	// ---------------------------------------------------------------------------- the read surface
@@ -1238,29 +1277,31 @@ export class Agent {
 	 * Of those five, four are the run's locals and one is derived from the ledger.
 	 */
 	snapshot(id: string): SessionSnapshot {
-		const state = this.sessionManager.stateOf(id);
-		const entry = this.entryOf(id);
-		const run = entry.run;
+		const state = this.agentStateOf(id);
+		const session = state.session;
+		const live = state.live;
 		return sessionSnapshot({
 			sessions: this.sessionManager,
-			session: state,
-			workDirAbsPath: entry.workDirAbsPath,
+			session,
+			workDirAbsPath: session.sessionSetting.workDirAbsPath,
 			// The run's own model is the one its request went out with, so the meter measures the window
 			// the answer was actually asked against. An idle session has no run to ask, and builds it
-			// from the catalog — one small file read, on a command rather than on a delta.
-			model: run?.model ?? modelFor(entry.modelSelection, this.models.list()),
-			approvals: this.approvalsOf(state, entry),
+			// from the catalog — one small file read, on a command rather than on a delta. The choice
+			// read here is the one in force: the assembly seeds it onto the session before the first
+			// message, and a request records it (issue 03 §7).
+			model: live.model ?? modelFor(session.sessionSetting.model ?? {}, this.models.list()),
+			approvals: this.approvalsOf(session, state),
 			allTools: this.tools.names(),
-			activeTools: this.toolStateOf(state, entry).activeToolNames,
+			activeTools: this.toolStateOf(session, state).activeToolNames,
 			// Judged against this directory's own settings, the same way a cold read judges it, so the
 			// panel's "沿用全局" label cannot disagree with itself between the two paths.
-			...followsGlobalOf(this.sessionManager, state, entry.settings, this.tools),
-			...(run?.partial === undefined ? {} : { partial: run.partial }),
-			submitting: run !== undefined,
-			queued: entry.runtime.followUpQueue.previews(),
-			isRetrying: run?.retrying ?? false,
-			retryAttempt: run?.retryAttempt ?? 0,
-			pendingApprovals: run === undefined ? this.danglingApprovals(state) : [],
+			...followsGlobalOf(this.sessionManager, session, state.setting, this.tools),
+			...(live.partial === undefined ? {} : { partial: live.partial }),
+			submitting: live.activeRun !== undefined,
+			queued: live.followUpQueue.previews(),
+			isRetrying: live.retrying,
+			retryAttempt: live.retryAttempt,
+			pendingApprovals: live.activeRun === undefined ? this.danglingApprovals(session) : [],
 		});
 	}
 
@@ -1271,8 +1312,8 @@ export class Agent {
 	 * approval choice), so deriving here is what keeps the snapshot and a settings edit answered live
 	 * when the fallback is the global default. See {@link toolStateOf}.
 	 */
-	private toolStateOf(state: Session, entry: OpenSession): ToolState {
-		return toolStateOf(this.sessionManager, state, entry.settings, this.tools);
+	private toolStateOf(session: Session, state: AgentState): ToolState {
+		return toolStateOf(this.sessionManager, session, state.setting, this.tools);
 	}
 
 	/**
@@ -1284,13 +1325,13 @@ export class Agent {
 	 * beside.
 	 */
 	getApprovals(id: string): Record<string, boolean> {
-		const state = this.sessionManager.stateOf(id);
-		return this.approvalsOf(state, this.entryOf(id));
+		const state = this.agentStateOf(id);
+		return this.approvalsOf(state.session, state);
 	}
 
 	/** The one merge the gate, the snapshot, and the prompt all read through. */
-	private approvalsOf(state: Session, entry: OpenSession): Record<string, boolean> {
-		return { ...getApprovals(entry.settings), ...this.toolStateOf(state, entry).approvalOverride };
+	private approvalsOf(session: Session, state: AgentState): Record<string, boolean> {
+		return { ...getApprovals(state.setting), ...this.toolStateOf(session, state).approvalOverride };
 	}
 
 	/**
@@ -1301,20 +1342,20 @@ export class Agent {
 	 * tool batch; the calls that wait for an answer are the ones whose run has already ended.
 	 */
 	hasPendingApprovals(id: string): boolean {
-		const entry = this.entryOf(id);
-		return entry.run === undefined && this.danglingApprovals(this.sessionManager.stateOf(id)).length > 0;
+		const state = this.agentStateOf(id);
+		return state.live.activeRun === undefined && this.danglingApprovals(state.session).length > 0;
 	}
 
 	/** Subscribe to the session's state. The returned function unsubscribes. */
 	onChange(id: string, listener: SessionListener): () => void {
-		const listeners = this.entryOf(id).listeners;
+		const listeners = this.agentStateOf(id).listeners;
 		listeners.add(listener);
 		return () => listeners.delete(listener);
 	}
 
 	/** Subscribe to the session's events. The returned function unsubscribes. */
 	onEvent(id: string, listener: SessionEventListener): () => void {
-		const listeners = this.entryOf(id).eventListeners;
+		const listeners = this.agentStateOf(id).eventListeners;
 		listeners.add(listener);
 		return () => listeners.delete(listener);
 	}
@@ -1344,25 +1385,24 @@ export class Agent {
 		// applied. A message that never reaches here — an empty one, a rejected send — moves nothing.
 		if (options.selection !== undefined) this.applyModelSelection(id, options.selection);
 
-		const state = this.sessionManager.stateOf(id);
-		const entry = this.entryOf(id);
-		if (entry.run !== undefined) {
+		const state = this.agentStateOf(id);
+		if (state.live.activeRun !== undefined) {
 			const message: Message = {
 				role: "user",
 				content: [{ type: "text", text: trimmed }],
-				timestamp: this.nextStamp(state),
+				timestamp: this.nextStamp(state.session),
 			};
-		const queue = options.behavior ?? "followUp";
-		if (queue === "steer") entry.runtime.steeringQueue.enqueue(message);
-		else {
-			entry.runtime.followUpQueue.enqueue(message);
-			this.emitQueueUpdate(entry);
-		}
-		this.publish(state, entry);
+			const queue = options.behavior ?? "followUp";
+			if (queue === "steer") state.live.steeringQueue.enqueue(message);
+			else {
+				state.live.followUpQueue.enqueue(message);
+				this.emitQueueUpdate(state);
+			}
+			this.publish(state);
 			return;
 		}
 
-		await this.startPromptedRun(state, entry, trimmed);
+		await this.startPromptedRun(state, trimmed);
 	}
 
 	/**
@@ -1387,15 +1427,15 @@ export class Agent {
 	}
 
 	/** Write the prompted message into the transcript, then run over it. */
-	private async startPromptedRun(state: Session, entry: OpenSession, trimmed: string): Promise<void> {
+	private async startPromptedRun(state: AgentState, trimmed: string): Promise<void> {
 		const message: Message = {
 			role: "user",
 			content: [{ type: "text", text: trimmed }],
-			timestamp: this.nextStamp(state),
+			timestamp: this.nextStamp(state.session),
 		};
-		this.appendMessage(state, entry, message);
-		this.publish(state, entry);
-		await this.startRun(state, entry, { prompt: message });
+		this.appendMessage(state, message);
+		this.publish(state);
+		await this.startRun(state, { prompt: message });
 	}
 
 	/**
@@ -1409,25 +1449,18 @@ export class Agent {
 	 * This is where the run lives, and it is the whole reason the class holds no run state: the
 	 * transport, the retry scope, the event handler, and the engine's own take points are all built
 	 * with the run, closed over its locals, and dropped when the run settles. What crosses the stack
-	 * is exactly what the entry names — the queues, the active run, the subscribers — plus the entry's
-	 * `run` slot, which is how a reader outside the run sees its transients. The session the run
-	 * serves is resolved once, at the top, and every closure below threads the same locals: no request
+	 * is exactly what the state names — the queues, the active run, the subscribers — and the live
+	 * half itself, which is how a reader outside the run sees its transients: the run writes its
+	 * partial message, its model, and its retry state onto `state.live` as it goes, and the `finally`
+	 * below wipes them, so an idle session answers from the bag again. The session the run serves is
+	 * resolved once, at the top, and every closure below threads the same locals: no request
 	 * re-resolves its way to a different bag.
 	 */
 	private async startRun(
-		state: Session,
-		entry: OpenSession,
+		state: AgentState,
 		start: RunStart,
 	): Promise<void> {
-		const scope: RunScope = {
-			partial: undefined,
-			model: undefined,
-			suspended: false,
-			retrying: false,
-			retryAttempt: 0,
-			retryMaxAttempts: 0,
-		};
-		entry.run = scope;
+		const live = state.live;
 
 		// The run's send policy rides on every request object this run's models are built with. The
 		// engine is never told about it: it asks for a stream from whatever model it holds, and the
@@ -1439,7 +1472,7 @@ export class Agent {
 				// Deliberately not awaited: the run owns the stream's lifetime, and a failure that
 				// cannot be retried comes back as an error event on it rather than as a rejection out
 				// of the stream function (which the engine's contract forbids anyway).
-				void this.pumpAttempts(scope, state, entry, outer, model as Model, context, options);
+				void this.pumpAttempts(state, outer, model as Model, context, options);
 				return outer;
 			},
 		};
@@ -1448,7 +1481,7 @@ export class Agent {
 			// The transcript and the tools are built per run — the engine keeps no state of its own —
 			// and both are rebuilt for the request that actually goes out by the fill chain anyway.
 			// The engine's take points read this session's own queues, so nothing is wired in.
-			await this.runEngine(scope, state, entry, transport, start);
+			await this.runEngine(state, transport, start);
 		} finally {
 			// A message accepted in the last moment of the run — after the engine had already decided to
 			// stop looking for one — is on a queue nothing will drain, so it is dropped here rather than
@@ -1459,8 +1492,15 @@ export class Agent {
 			// message someone typed while this run was streaming is theirs, not this run's to bin.
 			// A drop that took something is a queue change the window has not heard yet, so it is the
 			// one end path that publishes here; a parked run keeps its queue and says nothing.
-			if (!scope.suspended && this.dropQueued(entry)) this.emitQueueUpdate(entry);
-			entry.run = undefined;
+			if (!live.suspended && this.dropQueued(state)) this.emitQueueUpdate(state);
+			// The transients come down with the run: an idle session answers from the bag again, which
+			// is what makes "in flight, read the run; idle, read the choice" a state rather than a
+			// leak. The suspended flag is read by the sweep above, so it is wiped last.
+			live.model = undefined;
+			live.partial = undefined;
+			live.retrying = false;
+			live.retryAttempt = 0;
+			live.suspended = false;
 			// The run is not over until the engine's `runEngine` resolves — after every awaited listener for
 			// `agent_end` and the engine's own `finally`. So this is the first moment nothing is in
 			// flight, and without publishing here nothing ever reports it.
@@ -1472,7 +1512,7 @@ export class Agent {
 			// exactly the run that most needs the frame. Every end path a run has goes through this one
 			// block; the error frame that may precede it is announced by the caller that learns of the
 			// rejection, not by the session.
-			this.publish(state, entry);
+			this.publish(state);
 		}
 	}
 
@@ -1481,12 +1521,12 @@ export class Agent {
 	 *
 	 * The body is what `packages/loop` used to run, rewritten to read its seams off this orchestrator
 	 * instead of off a constructor argument: the run registers itself on the session's live half
-	 * (`runtime.activeRun`, where an abort from any layer lands), every event goes through
+	 * (`live.activeRun`, where an abort from any layer lands), every event goes through
 	 * {@link Agent.dispatchEvent} — which persists it and fans it out — the per-turn fill is
 	 * {@link Agent.prepareRequest}, and both take points drain this session's own queues. Nothing here
 	 * outlives the stack, which is why the model the run is on is a local rather than a field: it is
 	 * the one thing a request may replace, and a member would hand it to a second session's run. What
-	 * crosses the stack is a copy on the run's own scope, for the snapshot that reads it mid-delta.
+	 * crosses the stack is the live half's own slot, for the snapshot that reads it mid-delta.
 	 *
 	 * A run either starts on a prompt — which enters the transcript at the first drain point, exactly
 	 * where a steered message enters on a later turn — or resumes: it opens on the transcript as it
@@ -1494,13 +1534,13 @@ export class Agent {
 	 * Returns the messages the run produced.
 	 */
 	private async runEngine(
-		scope: RunScope,
-		state: Session,
-		entry: OpenSession,
+		state: AgentState,
 		transport: ChatTransport,
 		start: RunStart,
 	): Promise<Message[]> {
-		if (entry.runtime.activeRun !== undefined) {
+		const session = state.session;
+		const live = state.live;
+		if (live.activeRun !== undefined) {
 			throw new Error(
 				"A run is already in flight. Use steer() or followUp() to queue messages, or wait for completion.",
 			);
@@ -1511,23 +1551,23 @@ export class Agent {
 		const promise = new Promise<void>((done) => {
 			settle = done;
 		});
-		entry.runtime.activeRun = { promise, resolve: settle, abortController };
+		live.activeRun = { promise, resolve: settle, abortController };
 		const signal = abortController.signal;
 
 		// The model the run is on. Seeded from the choice as it stands; `prepareRequest` answers with
 		// the one each request is actually sent with, so a synthesized failure still names a real model
-		// even when the run dies before its first request. The slot on the scope is what a snapshot
+		// even when the run dies before its first request. The slot on the live half is what a snapshot
 		// outside this stack reads instead of going back to the catalog.
-		let model: Model = modelFor(entry.modelSelection, this.models.list(), transport);
-		scope.model = model;
-		const hooks = this.toolCallHooks(state);
-		const emit: AgentEventSink = (event) => this.dispatchEvent(scope, state, entry, event);
+		let model: Model = modelFor(session.sessionSetting.model ?? {}, this.models.list(), transport);
+		live.model = model;
+		const hooks = this.toolCallHooks(session);
+		const emit: AgentEventSink = (event) => this.dispatchEvent(state, event);
 
 		try {
 			const newMessages: Message[] = [];
 			let currentContext: AgentContext = {
-				messages: [...this.sessionManager.buildSessionContext(state).messages],
-				tools: [...this.tools.active(this.toolStateOf(state, entry), this.runContext(entry))],
+				messages: [...this.sessionManager.buildSessionContext(session).messages],
+				tools: [...this.tools.active(this.toolStateOf(session, state), this.runContext(state))],
 			};
 
 			await emit({ type: "agent_start" });
@@ -1556,7 +1596,7 @@ export class Agent {
 			if (suspendedAtEntry) {
 				// The recovery pass re-ran the granted call and the gate refused it again, so this run
 				// ends the same way the last one did — and keeps the queues for the same reason.
-				scope.suspended = true;
+				live.suspended = true;
 				await emit({ type: "agent_end", messages: newMessages });
 				return newMessages;
 			}
@@ -1591,20 +1631,13 @@ export class Agent {
 					// replay the ledger into a view, compact it if it is over the window, build the prompt
 					// from the live tool and approval answers, and hand the request back — built here, used
 					// once, dropped.
-					const requestUpdate = await this.prepareRequest(
-						transport,
-						currentContext,
-						signal,
-						state.sessionId,
-						state,
-						entry,
-					);
+					const requestUpdate = await this.prepareRequest(transport, currentContext, signal, state);
 					if (requestUpdate) {
 						currentContext = requestUpdate.context ?? currentContext;
 						model = requestUpdate.model ?? model;
 						// The model this request goes out with is the one a snapshot taken during it
 						// should report, and the one the meter measures the answer against.
-						scope.model = model;
+						live.model = model;
 					}
 
 					// A run can be cut short while its request is being built — an abort from `close()`,
@@ -1640,7 +1673,7 @@ export class Agent {
 						toolResults.push(...executedToolBatch.messages);
 						hasMoreToolCalls = !executedToolBatch.terminate;
 						suspended = executedToolBatch.suspended === true;
-						if (suspended) scope.suspended = true;
+						if (suspended) live.suspended = true;
 
 						for (const result of toolResults) {
 							currentContext.messages.push(result);
@@ -1656,7 +1689,7 @@ export class Agent {
 					// arrives from outside any run to start the next one.
 					if (suspended) break;
 
-					pendingMessages = await this.drainTranscribed(entry.runtime.steeringQueue, state, entry);
+					pendingMessages = await this.drainTranscribed(live.steeringQueue, state);
 				}
 
 				// A suspend ends the follow-up side of the run with it: the queued messages were never
@@ -1664,11 +1697,11 @@ export class Agent {
 				if (suspended) break;
 
 				// The run would stop here. Take whatever the follow-up queue holds.
-				const followUpMessages = await this.drainTranscribed(entry.runtime.followUpQueue, state, entry);
+				const followUpMessages = await this.drainTranscribed(live.followUpQueue, state);
 				if (followUpMessages.length > 0) {
 					// Set as pending so the inner loop processes them.
 					pendingMessages = followUpMessages;
-					this.emitQueueUpdate(entry);
+					this.emitQueueUpdate(state);
 					continue;
 				}
 
@@ -1684,7 +1717,7 @@ export class Agent {
 			await this.handleRunFailure(emit, model, error, signal.aborted);
 			return [];
 		} finally {
-			this.finishRun(entry);
+			this.finishRun(state);
 		}
 	}
 
@@ -1735,9 +1768,9 @@ export class Agent {
 	}
 
 	/** Settle the run: fire the promise idle-waiters sleep on, then give the slot up. */
-	private finishRun(entry: OpenSession): void {
-		entry.runtime.activeRun?.resolve();
-		entry.runtime.activeRun = undefined;
+	private finishRun(state: AgentState): void {
+		state.live.activeRun?.resolve();
+		state.live.activeRun = undefined;
 	}
 
 	/**
@@ -1754,10 +1787,9 @@ export class Agent {
 		transport: ChatTransport,
 		context: AgentContext,
 		signal: AbortSignal | undefined,
-		sessionId: string,
-		state: Session,
-		entry: OpenSession,
+		state: AgentState,
 	): Promise<AgentRequestUpdate> {
+		const session = state.session;
 		// The model this request is made with, built from the live row before anything else reads it,
 		// because the compaction decision below is measured against its context window and a threshold
 		// taken from a window the row had a moment ago would compact the wrong transcript. This is the
@@ -1766,36 +1798,36 @@ export class Agent {
 		// assembled. A row that is gone — deleted, or renamed under a session that was using it —
 		// leaves the choice as it is, and `unconfiguredStream` is what answers for that.
 		const catalog = this.models.list();
-		const model = modelFor(entry.modelSelection, catalog, transport);
+		const model = modelFor(session.sessionSetting.model ?? {}, catalog, transport);
 		// The choice this request is made with reaches the transcript here, at the moment a request
 		// is built from it — so a model or a level the user moved and never sent with is not in the
 		// file at all. It runs before the compaction decision below, which measures the prompt
 		// against this model's window.
-		this.recordSelection(state, entry, catalog);
+		this.recordSelection(session, catalog);
 		// One pass decides both what the request carries and whether it has to be summarized: the
 		// trigger, the clearing of stale tool results, and the summary all read the same entries, so the
 		// decision and the request cannot disagree about how large the prompt is.
-		const entries = await this.compactFor(state, entry, this.sessionManager.buildContextEntries(state), Date.now(), signal, model);
+		const entries = await this.compactFor(state, this.sessionManager.buildContextEntries(session), Date.now(), signal, model);
 		// The prompt is rebuilt here, not remembered: `applyConfig` can move the approval set and
 		// `setActiveTools` the tool set, and the model must be told about both on the next request.
 		// Both are derived from the ledger at this moment, so a choice that just landed is what the
 		// prompt describes.
-		const toolState = this.toolStateOf(state, entry);
-		// The project instructions are read here, per request, rather than taken from the entry: an
+		const toolState = this.toolStateOf(session, state);
+		// The project instructions are read here, per request, rather than taken from the state: an
 		// edit to a file on disk is meant to reach the very next request, the same way an edit to a
 		// model row does, and the walk is a handful of stats. What it costs is a prompt that can change
 		// between two requests of one run — the tool set already can, for the same reason.
-		const agentsMd = await loadAgentsMd(entry.workDirAbsPath);
+		const agentsMd = await loadAgentsMd(session.sessionSetting.workDirAbsPath);
 		const prompt = this.promptBuilder(
-			entry.workDirAbsPath,
+			session.sessionSetting.workDirAbsPath,
 			agentsMd,
 			toolState.activeToolNames,
-			this.approvalsOf(state, entry),
+			this.approvalsOf(session, state),
 		);
 		// The tool results the request carries are read replay-side (`buildContextEntries` applied the
 		// ledger's own view records), so there is no per-request pass over them: a tool result in the
 		// ledger is already the version the model is served.
-		const injected = { sessionId, messages: messagesOf(entries), systemPrompt: prompt };
+		const injected = { sessionId: session.sessionId, messages: messagesOf(entries), systemPrompt: prompt };
 		const rewritten = await this.hooks.apply("context", injected);
 		// The leading system message is replaced rather than appended to, and every other system
 		// message is dropped: the prompt is rebuilt whole on this request, so a second one would
@@ -1816,18 +1848,21 @@ export class Agent {
 				// derived above. The engine declares it on the request (`toToolDeclaration`) rather than
 				// reading it out of the transcript, so a tool switched on mid-session reaches the model on
 				// the next request and the two cannot drift.
-				tools: this.tools.active(toolState, this.runContext(entry)),
+				tools: this.tools.active(toolState, this.runContext(state)),
 			},
 		};
 	}
 
 	/**
 	 * The value objects this request's tools are built against: the working directory, read off the
-	 * entry's assembly, and the bash timeouts, read off the settings the same way. Per request, like
-	 * the tool list itself — nothing here outlives the request that carries it.
+	 * session's own setting, and the bash timeouts, read off the settings the same way. Per request,
+	 * like the tool list itself — nothing here outlives the request that carries it.
 	 */
-	private runContext(entry: OpenSession): ToolRunContext {
-		return { workDirAbsPath: entry.workDirAbsPath, bash: getBashSettings(entry.settings) };
+	private runContext(state: AgentState): ToolRunContext {
+		return {
+			workDirAbsPath: state.session.sessionSetting.workDirAbsPath,
+			bash: getBashSettings(state.setting),
+		};
 	}
 
 	/**
@@ -1835,25 +1870,35 @@ export class Agent {
 	 *
 	 * The model and the level are recorded here rather than where the user chose them, because these
 	 * are the transcript's account of what answered a turn: a row the user picked and never
-	 * sent with answered nothing, and a level that was never asked at was never in force. Both guards
-	 * key on what the session already records — read from the ledger, not cached, so the
-	 * baseline is the snapshot's own and cannot drift from it — so a run of turns on one selection costs
-	 * one write.
+	 * sent with answered nothing, and a level that was never asked at was never in force. The write
+	 * baseline is the snapshot on disk, read fresh — not the bag, which already carries the choice in
+	 * force (`applyModelSelection` and the assembly seed put it there, issue 03 §7), so comparing
+	 * against the bag would be self-comparison and a level-only move would never reach the file. A
+	 * run of turns on one selection still costs one write: when the disk already says what is in
+	 * force, nothing is written.
 	 *
 	 * The catalog is the caller's, so this and the model the request is built with read the file once
-	 * between them. A choice no row answers records nothing: there is no wire id to write, and the
-	 * request it belongs to is about to be refused by the transport rather than sent.
+	 * between them. A choice no row answers records no row — there is no wire id to write, and the
+	 * request it belongs to is about to be refused by the transport rather than sent; its level, if
+	 * it has one, still records. This is the one place a choice reaches the disk: `applyModelSelection`
+	 * and the assembly seed only move the in-memory field (issue 03 §7), and the request made with the
+	 * choice is what commits it. The setters run first to keep the bag the whole truth (the wire id
+	 * only lands here), then the flush carries whatever the bag holds to the snapshot — the setters'
+	 * own gates compare against the bag, so a level already in the bag passes them silently.
 	 */
-	private recordSelection(state: Session, entry: OpenSession, catalog: readonly ModelConfig[]): void {
-		const recorded = this.sessionManager.getRecordedSettings(state);
-		const row = rowFor(entry.modelSelection, catalog);
-		if (row !== undefined && row.id !== recorded.model?.modelId) {
-			this.sessionManager.setModel(state, row.name, row.id);
+	private recordSelection(session: Session, catalog: readonly ModelConfig[]): void {
+		const recorded = this.sessionManager.recordedOnDisk(session);
+		const row = rowFor(session.sessionSetting.model ?? {}, catalog);
+		const level = normalizeThinkingLevel(session.sessionSetting.model?.thinkingLevel) as ThinkingLevel;
+		if (
+			level === recorded.thinkingLevel &&
+			(row === undefined || (row.name === recorded.model?.name && row.id === recorded.model?.modelId))
+		) {
+			return;
 		}
-		const level = normalizeThinkingLevel(entry.modelSelection.thinkingLevel) as ThinkingLevel;
-		if (level !== recorded.thinkingLevel) {
-			this.sessionManager.setThinkingLevel(state, level);
-		}
+		if (row !== undefined) this.sessionManager.setModel(session, row.name, row.id);
+		this.sessionManager.setThinkingLevel(session, level);
+		this.sessionManager.flushMeta(session);
 	}
 
 	/**
@@ -1878,14 +1923,13 @@ export class Agent {
 	 * deltas overwrite that same slot in place.
 	 */
 	private async pumpAttempts(
-		scope: RunScope,
-		state: Session,
-		entry: OpenSession,
+		state: AgentState,
 		outer: AssistantMessageEventStream,
 		model: Model,
 		context: LlmContext,
 		options: SimpleStreamOptions | undefined,
 	): Promise<void> {
+		const live = state.live;
 		let started = false;
 		const produce = async (): Promise<AssistantMessage> => {
 			// A session with no row has nothing to send with, so it answers with the sentence that says
@@ -1915,9 +1959,9 @@ export class Agent {
 		try {
 			final = await retryAssistantCall(
 				produce,
-				getRetrySettings(entry.settings),
+				getRetrySettings(state.setting),
 				options?.signal,
-				this.retryCallbacks(scope, state, entry),
+				this.retryCallbacks(state),
 			);
 		} catch (error) {
 			// A stream function that throws breaks the engine's contract, so it ends up as an error
@@ -1926,40 +1970,41 @@ export class Agent {
 		}
 		// A retry the policy never announced an end for — the run was cut short above — still has to
 		// close, or `isRetrying` would outlive the run.
-		if (scope.retrying) this.endRetry(scope, state, entry, false, scope.retryAttempt, final.errorMessage);
+		if (live.retrying) this.endRetry(state, false, live.retryAttempt, final.errorMessage);
 		pushTerminal(outer, final);
 		outer.end();
 	}
 
 	/** The three notifications `retryAssistantCall` makes, mapped one-to-one onto session events. */
-	private retryCallbacks(scope: RunScope, state: Session, entry: OpenSession): RetryCallbacks {
+	private retryCallbacks(state: AgentState): RetryCallbacks {
+		const live = state.live;
+		let retryMaxAttempts = 0;
 		return {
 			onRetryScheduled: (attempt, maxAttempts, delayMs, errorMessage) => {
-				scope.retrying = true;
-				scope.retryAttempt = attempt;
-				scope.retryMaxAttempts = maxAttempts;
-				this.emit(entry, { type: "retry_scheduled", attempt, maxAttempts, delayMs, errorMessage });
-				this.publish(state, entry);
+				live.retrying = true;
+				live.retryAttempt = attempt;
+				retryMaxAttempts = maxAttempts;
+				this.emit(state, { type: "retry_scheduled", attempt, maxAttempts, delayMs, errorMessage });
+				this.publish(state);
 			},
 			onRetryAttemptStart: () => {
-				this.emit(entry, {
+				this.emit(state, {
 					type: "retry_start",
-					attempt: scope.retryAttempt,
-					maxAttempts: scope.retryMaxAttempts,
+					attempt: live.retryAttempt,
+					maxAttempts: retryMaxAttempts,
 				});
-				this.publish(state, entry);
+				this.publish(state);
 			},
-			onRetryFinished: (success, attempt, finalError) => this.endRetry(scope, state, entry, success, attempt, finalError),
+			onRetryFinished: (success, attempt, finalError) => this.endRetry(state, success, attempt, finalError),
 		};
 	}
 
 	/** Leave the retrying state and say how the retry ended. */
-	private endRetry(scope: RunScope, state: Session, entry: OpenSession, success: boolean, attempt: number, finalError?: string): void {
-		scope.retrying = false;
-		scope.retryAttempt = 0;
-		scope.retryMaxAttempts = 0;
-		this.emit(entry, { type: "retry_end", success, attempt, finalError });
-		this.publish(state, entry);
+	private endRetry(state: AgentState, success: boolean, attempt: number, finalError?: string): void {
+		state.live.retrying = false;
+		state.live.retryAttempt = 0;
+		this.emit(state, { type: "retry_end", success, attempt, finalError });
+		this.publish(state);
 	}
 
 	/**
@@ -1976,20 +2021,19 @@ export class Agent {
 	 * the end. Nothing here has to know whether the run is live or in a backoff.
 	 */
 	async abort(id: string): Promise<void> {
-		const state = this.sessionManager.stateOf(id);
-		const entry = this.entryOf(id);
+		const state = this.agentStateOf(id);
 		// Read once: the run clears its own registration as it settles, and the promise is what waits
 		// for that settlement.
-		const active = entry.runtime.activeRun;
+		const active = state.live.activeRun;
 		active?.abortController.abort();
 		await (active?.promise ?? Promise.resolve());
 		// The run drops its own slot in its `finally`, a microtask after the idle promise resolves;
 		// wait for that too, so the sweep below sees the idle session it is defined on.
-		while (entry.run !== undefined) await Promise.resolve();
+		while (state.live.activeRun !== undefined) await Promise.resolve();
 		this.denyAllApprovals(id, "The run was aborted.");
 		// The same end a finished run publishes, and for the same reason: an abort is how a run that
 		// nobody asked to stop otherwise reports that it has. See {@link Agent.prompt}.
-		this.publish(state, entry);
+		this.publish(state);
 	}
 
 	// ---------------------------------------------------------------------------- config moves
@@ -2011,17 +2055,16 @@ export class Agent {
 	 * file the rest of that turn under a branch the turn was not answering.
 	 */
 	branchTo(id: string, entryId: string, descend = true): string {
-		const state = this.sessionManager.stateOf(id);
-		const entry = this.entryOf(id);
-		if (entry.run !== undefined) throw new Error("A run is in flight: the branch cannot move under it");
+		const state = this.agentStateOf(id);
+		if (state.live.activeRun !== undefined) throw new Error("A run is in flight: the branch cannot move under it");
 
-		const leafId = descend ? this.sessionManager.getBranchTip(state, entryId) : entryId;
-		this.sessionManager.branch(state, leafId);
+		const leafId = descend ? this.sessionManager.getBranchTip(state.session, entryId) : entryId;
+		this.sessionManager.branch(state.session, leafId);
 		// No config report rides the move: the model, the level, and the tool choices are the
 		// session's own values now (the `.json` snapshot), so a leaf move changes none of them —
 		// unlike the days when they were replayed off the branch's entries.
-		this.emit(entry, { type: "branch_changed", leafId });
-		this.publish(state, entry);
+		this.emit(state, { type: "branch_changed", leafId });
+		this.publish(state);
 		return leafId;
 	}
 
@@ -2033,9 +2076,8 @@ export class Agent {
 	 * the narrowed set when the next prompt is built.
 	 */
 	setActiveTools(id: string, names: string[]): void {
-		const state = this.sessionManager.stateOf(id);
-		const entry = this.entryOf(id);
-		const previous = this.toolStateOf(state, entry).activeToolNames;
+		const state = this.agentStateOf(id);
+		const previous = this.toolStateOf(state.session, state).activeToolNames;
 		const known = new Set(this.tools.names());
 		const unknown = names.filter((name) => !known.has(name));
 		if (unknown.length > 0) {
@@ -2043,18 +2085,19 @@ export class Agent {
 		}
 		if (names.length === previous.length && names.every((name, index) => name === previous[index])) return;
 
-		this.sessionManager.setToolConfig(state, [...names], this.approvalsOf(state, entry));
-		this.publish(state, entry);
-		this.emitConfigChanged(entry, { tools: [...names] });
+		this.sessionManager.setToolConfig(state.session, [...names], this.approvalsOf(state.session, state));
+		this.publish(state);
+		this.emitConfigChanged(state, { tools: [...names] });
 	}
 
 	/**
 	 * Point this session at another row, another level, or both.
 	 *
 	 * There is no entry here and no settings write: a choice is not something that happened until a
-	 * request is made with it, so it lands on the session's selection and reaches the transcript in
-	 * {@link Agent.recordSelection}, at the moment the request it belongs to is built. What a caller gets
-	 * back immediately is the change itself — the snapshot, the level, and the next request are
+	 * request is made with it, so it lands on the session's own setting field — in memory, where the
+	 * snapshot and the next request read it — and reaches the transcript in
+	 * {@link Agent.recordSelection}, at the moment the request it belongs to is built. What a caller
+	 * gets back immediately is the change itself — the snapshot, the level, and the next request are
 	 * all about the new model, whether or not that request is ever sent.
 	 *
 	 * A level the chosen model has no room for is refused rather than clamped, because the caller is a
@@ -2062,10 +2105,10 @@ export class Agent {
 	 * always accepted, since it means "as quiet as this model gets".
 	 */
 	applyModelSelection(id: string, selection: ModelSelection): void {
-		const state = this.sessionManager.stateOf(id);
-		const entry = this.entryOf(id);
-		const previousName = entry.modelSelection.name!;
-		const previousLevel = normalizeThinkingLevel(entry.modelSelection.thinkingLevel);
+		const state = this.agentStateOf(id);
+		const setting = state.session.sessionSetting;
+		const previousName = setting.model?.name;
+		const previousLevel = normalizeThinkingLevel(setting.model?.thinkingLevel);
 		// Nothing named is nothing to do, which is how a caller sends an ordinary message.
 		if (selection.model === undefined && selection.thinkingLevel === undefined) return;
 
@@ -2073,19 +2116,27 @@ export class Agent {
 		const userModel = this.models.list().find((userModel) => userModel.name === name);
 		if (userModel === undefined) throw new Error(`Unknown model: ${name}`);
 
-		// The choice is the client's selection, written as it arrived: the row's name, and the level
-		// the caller named or the one already in force. Nothing of the row follows it — a snapshot
-		// taken before the next request already reads the row it names, because every build looks the
-		// name up in the catalog, and an edit to that row wins without anything here being refreshed.
-		entry.modelSelection.name = userModel.name;
-		entry.modelSelection.thinkingLevel = selection.thinkingLevel ?? normalizeThinkingLevel(entry.modelSelection.thinkingLevel);
+		// The choice is the client's selection, written as it arrived onto the session's own setting:
+		// the row's name, and the level the caller named or the one already in force. Nothing of the
+		// row follows it — the wire id is what the request made with the choice records
+		// (`recordSelection`), and a snapshot taken before the next request already reads the row the
+		// name picks out, because every build looks the name up in the catalog, so an edit to that row
+		// wins without anything here being refreshed. The write is in memory only: until a request is
+		// made with the choice, the file keeps the choice it was last made with.
+		const renamed = previousName !== userModel.name;
+		setting.model = {
+			// A rename drops the wire id along with the name it belonged to.
+			...(renamed ? {} : setting.model),
+			name: userModel.name,
+			thinkingLevel: selection.thinkingLevel ?? normalizeThinkingLevel(setting.model?.thinkingLevel),
+		};
 
-		this.publish(state, entry);
-		this.emitConfigChanged(entry, {
-			...(entry.modelSelection.name === previousName ? {} : { model: entry.modelSelection.name! }),
-			...(normalizeThinkingLevel(entry.modelSelection.thinkingLevel) === previousLevel
+		this.publish(state);
+		this.emitConfigChanged(state, {
+			...(setting.model.name === previousName ? {} : { model: userModel.name }),
+			...(normalizeThinkingLevel(setting.model.thinkingLevel) === previousLevel
 				? {}
-				: { thinkingLevel: normalizeThinkingLevel(entry.modelSelection.thinkingLevel) }),
+				: { thinkingLevel: setting.model.thinkingLevel }),
 		});
 	}
 
@@ -2103,21 +2154,20 @@ export class Agent {
 	 * apply: a config change that no request followed is not a config change.
 	 */
 	applyConfig(id: string, patch: ConfigPatch): void {
-		const state = this.sessionManager.stateOf(id);
-		const entry = this.entryOf(id);
-		const previousApprovals = this.approvalsOf(state, entry);
+		const state = this.agentStateOf(id);
+		const previousApprovals = this.approvalsOf(state.session, state);
 		if (patch.approval !== undefined) {
 			// The snapshot records the whole map in force — the settings with this session's choice over
 			// them — which is the shape every read of the ledger answers from.
 			const approvals = { ...previousApprovals, ...patch.approval };
-			this.sessionManager.setToolConfig(state, this.toolStateOf(state, entry).activeToolNames, approvals);
+			this.sessionManager.setToolConfig(state.session, this.toolStateOf(state.session, state).activeToolNames, approvals);
 		}
-		applySettings(entry.settings, patch.approval === undefined ? patch : { ...patch, approval: undefined });
-		entry.runtime.steeringQueue.mode = getSteeringMode(entry.settings);
-		entry.runtime.followUpQueue.mode = getFollowUpMode(entry.settings);
-		this.publish(state, entry);
-		this.emitConfigChanged(entry, {
-			approvals: changedApprovals(previousApprovals, this.approvalsOf(state, entry)),
+		applySettings(state.setting, patch.approval === undefined ? patch : { ...patch, approval: undefined });
+		state.live.steeringQueue.mode = getSteeringMode(state.setting);
+		state.live.followUpQueue.mode = getFollowUpMode(state.setting);
+		this.publish(state);
+		this.emitConfigChanged(state, {
+			approvals: changedApprovals(previousApprovals, this.approvalsOf(state.session, state)),
 		});
 	}
 
@@ -2130,8 +2180,8 @@ export class Agent {
 	 * call in the view, and the answer arrives over REST to close it. See
 	 * {@link Agent.hasPendingApprovals} for why a run in flight reports none.
 	 */
-	private danglingApprovals(state: Session): PendingApproval[] {
-		return danglingApprovalsOf(this.sessionManager.buildContextEntries(state));
+	private danglingApprovals(session: Session): PendingApproval[] {
+		return danglingApprovalsOf(this.sessionManager.buildContextEntries(session));
 	}
 
 	/**
@@ -2145,10 +2195,10 @@ export class Agent {
 	 * is worse than an error the client can show.
 	 */
 	hasPendingApproval(id: string, toolCallId: string): boolean {
-		const entry = this.entryOf(id);
+		const state = this.agentStateOf(id);
 		return (
-			entry.run === undefined &&
-			this.danglingApprovals(this.sessionManager.stateOf(id)).some((call) => call.toolCallId === toolCallId)
+			state.live.activeRun === undefined &&
+			this.danglingApprovals(state.session).some((call) => call.toolCallId === toolCallId)
 		);
 	}
 
@@ -2169,10 +2219,9 @@ export class Agent {
 	 * the resumed request provider-legal when a crash left several calls behind.
 	 */
 	async respondApproval(id: string, toolCallId: string, approved: boolean): Promise<void> {
-		const state = this.sessionManager.stateOf(id);
-		const entry = this.entryOf(id);
-		if (entry.run !== undefined) return;
-		const call = this.danglingApprovals(state).find((candidate) => candidate.toolCallId === toolCallId);
+		const state = this.agentStateOf(id);
+		if (state.live.activeRun !== undefined) return;
+		const call = this.danglingApprovals(state.session).find((candidate) => candidate.toolCallId === toolCallId);
 		if (call === undefined) return;
 		const answer: ToolCallAnswer = approved
 			? { approved: true }
@@ -2180,13 +2229,13 @@ export class Agent {
 		if (approved) {
 			// The grant is the session's own choice for this tool, recorded as the whole map in force
 			// with the tool turned off — the same move a config patch makes.
-			const approvals = { ...this.approvalsOf(state, entry), [call.toolName]: false };
-			this.sessionManager.setToolConfig(state, this.toolStateOf(state, entry).activeToolNames, approvals);
+			const approvals = { ...this.approvalsOf(state.session, state), [call.toolName]: false };
+			this.sessionManager.setToolConfig(state.session, this.toolStateOf(state.session, state).activeToolNames, approvals);
 		}
 		// Said before the run starts: the choice is the session's own and lands now, while the call
 		// itself stays dangling until the run's recovery pass closes it.
-		this.publish(state, entry);
-		await this.startRun(state, entry, { answers: { [toolCallId]: answer } });
+		this.publish(state);
+		await this.startRun(state, { answers: { [toolCallId]: answer } });
 	}
 
 	/**
@@ -2204,20 +2253,18 @@ export class Agent {
 	 * what was accepted — and a depth nobody will lower is a session `settle` waits on forever.
 	 */
 	denyAllApprovals(id: string, reason: string): void {
-		const state = this.sessionManager.stateOf(id);
-		const entry = this.entryOf(id);
-		if (entry.run !== undefined) return;
-		const dangling = this.danglingApprovals(state);
+		const state = this.agentStateOf(id);
+		if (state.live.activeRun !== undefined) return;
+		const dangling = this.danglingApprovals(state.session);
 		if (dangling.length === 0) return;
-		for (const call of dangling) this.appendDanglingResult(state, entry, call, { approved: false, reason });
-		if (this.dropQueued(entry)) this.emitQueueUpdate(entry);
-		this.publish(state, entry);
+		for (const call of dangling) this.appendDanglingResult(state, call, { approved: false, reason });
+		if (this.dropQueued(state)) this.emitQueueUpdate(state);
+		this.publish(state);
 	}
 
 	/** Write the result that closes one dangling call, and announce the entry like any other message. */
 	private appendDanglingResult(
-		state: Session,
-		entry: OpenSession,
+		state: AgentState,
 		call: PendingApproval,
 		answer: { approved: boolean; reason?: string },
 	): void {
@@ -2233,7 +2280,7 @@ export class Agent {
 			isError: !answer.approved,
 			timestamp: Date.now(),
 		};
-		this.appendMessage(state, entry, message);
+		this.appendMessage(state, message);
 	}
 
 	/**
@@ -2246,8 +2293,8 @@ export class Agent {
 	 * it. A tool the map does not gate runs without asking.
 	 */
 	async authorize(id: string, name: string, _toolCallId: string, _args: unknown): Promise<boolean> {
-		const state = this.sessionManager.stateOf(id);
-		return this.approvalsOf(state, this.entryOf(id))[name] === true;
+		const state = this.agentStateOf(id);
+		return this.approvalsOf(state.session, state)[name] === true;
 	}
 
 	// ---------------------------------------------------------------------------- waiting and closing
@@ -2271,18 +2318,18 @@ export class Agent {
 	 * backoff, and the condition is here so that stays true if that ever changes.
 	 */
 	async settle(id: string): Promise<void> {
-		const entry = this.entryOf(id);
+		const state = this.agentStateOf(id);
 		// Read through a closure: the run slot is reassigned across the awaits below, and a narrow
 		// taken before them would tell the checker the slot is always empty here.
 		const stillBusy = (): boolean =>
-			(entry.runtime.followUpQueue.size > 0 && this.danglingApprovals(this.sessionManager.stateOf(id)).length === 0) ||
-			entry.run?.retrying === true;
+			(state.live.followUpQueue.size > 0 && this.danglingApprovals(state.session).length === 0) ||
+			state.live.retrying === true;
 		for (;;) {
-			await (entry.runtime.activeRun?.promise ?? Promise.resolve());
+			await (state.live.activeRun?.promise ?? Promise.resolve());
 			// The run drops its own slot a microtask after the idle promise resolves; wait for that too,
 			// so a caller that settles sees the idle session — and the dangling calls the run ended
 			// with — rather than one still finishing its writes. The same bounded wait `abort` makes.
-			while (entry.run !== undefined) await Promise.resolve();
+			while (state.live.activeRun !== undefined) await Promise.resolve();
 			if (!stillBusy()) return;
 		}
 	}
@@ -2298,7 +2345,7 @@ export class Agent {
 	 * and a reap that has already denied both land here.
 	 */
 	async close(id: string): Promise<void> {
-		this.entryOf(id).runtime.activeRun?.abortController.abort();
+		this.agentStateOf(id).live.activeRun?.abortController.abort();
 		await this.settle(id);
 	}
 
@@ -2314,10 +2361,9 @@ export class Agent {
 		signal?: AbortSignal,
 		transport?: ChatTransport,
 	): Promise<readonly SessionEntry[]> {
-		const state = this.sessionManager.stateOf(id);
-		const entry = this.entryOf(id);
-		const model = modelFor(entry.modelSelection, this.models.list(), transport);
-		return this.compactFor(state, entry, entries, now, signal, model);
+		const state = this.agentStateOf(id);
+		const model = modelFor(state.session.sessionSetting.model ?? {}, this.models.list(), transport);
+		return this.compactFor(state, entries, now, signal, model);
 	}
 
 	/**
@@ -2347,8 +2393,7 @@ export class Agent {
 	 * reported by the `tool_call_args_trimmed`, `tool_results_cleared`, and `compaction` events, not by this answer.
 	 */
 	private async compactFor(
-		state: Session,
-		entry: OpenSession,
+		state: AgentState,
 		entries: readonly SessionEntry[],
 		now: number,
 		signal: AbortSignal | undefined,
@@ -2357,10 +2402,10 @@ export class Agent {
 		const threshold = compactionThresholdFor(model.contextWindow);
 		if (!shouldCompact(messagesOf(entries), threshold)) return entries;
 
-		const trimmed = this.trimRecordedArgs(state, entry, entries);
+		const trimmed = this.trimRecordedArgs(state, entries);
 		if (!shouldCompact(messagesOf(trimmed), threshold)) return trimmed;
 
-		const cleared = this.clearStaleToolResults(state, entry, trimmed, now);
+		const cleared = this.clearStaleToolResults(state, trimmed, now);
 		if (!shouldCompact(messagesOf(cleared), threshold)) return cleared;
 
 		// The one completion compaction makes: the same model the turn is on, with the summary
@@ -2397,7 +2442,7 @@ export class Agent {
 			// history it already had. Anything else is worth saying out loud, because the next request may
 			// then be the one that overflows.
 			if (signal?.aborted !== true) {
-				this.emit(entry, {
+				this.emit(state, {
 					type: "compaction_failed",
 					message: error instanceof Error ? error.message : String(error),
 				});
@@ -2407,7 +2452,7 @@ export class Agent {
 		if (!outcome) return cleared;
 
 		this.sessionManager.appendCompaction(
-			state,
+			state.session,
 			outcome.summary,
 			outcome.firstKeptEntryId,
 			outcome.tokensBefore,
@@ -2415,8 +2460,8 @@ export class Agent {
 		);
 		// Published after the transcript moved, so a listener that reacts reads back the same numbers:
 		// `summarized` is what this pass folded in, `contextTokens` is what the provider will now be sent.
-		const compacted = this.sessionManager.buildContextEntries(state);
-		this.emit(entry, {
+		const compacted = this.sessionManager.buildContextEntries(state.session);
+		this.emit(state, {
 			type: "compaction",
 			summary: outcome.summary,
 			firstKeptEntryId: outcome.firstKeptEntryId,
@@ -2437,14 +2482,14 @@ export class Agent {
 	 * the clear needs an expired cache to be worth its cache invalidation, and this does not, because
 	 * when the transcript is over the trigger the next request is in trouble whatever the cache says.
 	 */
-	private trimRecordedArgs(state: Session, entry: OpenSession, entries: readonly SessionEntry[]): readonly SessionEntry[] {
+	private trimRecordedArgs(state: AgentState, entries: readonly SessionEntry[]): readonly SessionEntry[] {
 		const trimmed = trimmableToolArgEntryIds(entries);
 		if (trimmed.length === 0) return entries;
 
 		const tokensBefore = estimateTokens(messagesOf(entries));
-		this.sessionManager.appendTrimToolCallArgs(state, trimmed, tokensBefore);
-		const view = this.sessionManager.buildContextEntries(state);
-		this.emit(entry, {
+		this.sessionManager.appendTrimToolCallArgs(state.session, trimmed, tokensBefore);
+		const view = this.sessionManager.buildContextEntries(state.session);
+		this.emit(state, {
 			type: "tool_call_args_trimmed",
 			trimmed: trimmed.length,
 			tokensBefore,
@@ -2461,8 +2506,7 @@ export class Agent {
 	 * invalidation that shrinks the transcript for good — is the answer for a warm transcript.
 	 */
 	private clearStaleToolResults(
-		state: Session,
-		entry: OpenSession,
+		state: AgentState,
 		entries: readonly SessionEntry[],
 		now: number,
 	): readonly SessionEntry[] {
@@ -2472,9 +2516,9 @@ export class Agent {
 		if (cleared.length === 0) return entries;
 
 		const tokensBefore = estimateTokens(messagesOf(entries));
-		this.sessionManager.appendClearToolResults(state, cleared, tokensBefore);
-		const view = this.sessionManager.buildContextEntries(state);
-		this.emit(entry, {
+		this.sessionManager.appendClearToolResults(state.session, cleared, tokensBefore);
+		const view = this.sessionManager.buildContextEntries(state.session);
+		this.emit(state, {
 			type: "tool_results_cleared",
 			cleared: cleared.length,
 			tokensBefore,
@@ -2566,10 +2610,10 @@ export class Agent {
 	 * a message was neither queued nor stored never opens. The echo never persists user messages, so
 	 * nothing has to mark these as already written.
 	 */
-	private drainTranscribed(queue: PendingMessageQueue, state: Session, entry: OpenSession): Message[] {
+	private drainTranscribed(queue: PendingMessageQueue, state: AgentState): Message[] {
 		const messages = queue.drain();
 		for (const message of messages) {
-			this.appendMessage(state, entry, message);
+			this.appendMessage(state, message);
 		}
 		return messages;
 	}
@@ -2582,27 +2626,28 @@ export class Agent {
 	 * anything on the session. It is the successor of the `Loop.subscribe` callback the engine used to
 	 * be handed, and it is why the engine needs no listener registry of its own.
 	 */
-	private async dispatchEvent(scope: RunScope, state: Session, entry: OpenSession, event: AgentEvent): Promise<void> {
+	private async dispatchEvent(state: AgentState, event: AgentEvent): Promise<void> {
+		const live = state.live;
 		if (event.type === "message_update") {
 			// The hot path: one event per provider delta. Keep the running message for a baseline that
 			// has to hand a mid-run attach the text it missed, and publish only what moved since the
 			// last frame. Nothing is written here — the message is persisted when it ends.
-			scope.partial = event.message;
+			live.partial = event.message;
 			const delta = messageDeltaOf(event);
-			if (delta !== undefined) this.emit(entry, { type: "message_update", delta });
+			if (delta !== undefined) this.emit(state, { type: "message_update", delta });
 			return;
 		}
-		if (event.type === "message_end" || event.type === "agent_end") scope.partial = undefined;
+		if (event.type === "message_end" || event.type === "agent_end") live.partial = undefined;
 		if (event.type === "message_end") {
 			// The echo never persists a user message: every one of them reached the engine already
 			// written — the prompt before the run started, a queued message at the drain. Everything
 			// else the engine announces has no other writer and is written here as it stands —
 			// the content is final by the time it lands (the write boundary is the last rewrite).
 			if (event.message.role !== "user") {
-				this.appendMessage(state, entry, event.message);
+				this.appendMessage(state, event.message);
 			}
 		}
-		if (event.type === "agent_end" && !scope.suspended) {
+		if (event.type === "agent_end" && !live.suspended) {
 			// A message still queued is one the run never reached — an abort, a failure, a prompt that
 			// arrived in the moment the engine stopped looking. Nothing will drain it, and the send
 			// contract is fire-and-forget: it goes with the run, and the queues empty so the depth
@@ -2611,19 +2656,19 @@ export class Agent {
 			// A run the gate ended is the one exception, and it is checked here rather than only in
 			// `startRun`'s `finally` because this fires first: the recovery run drains what this one
 			// leaves behind, so the depth stays up and the window keeps showing it.
-			if (this.dropQueued(entry)) this.emitQueueUpdate(entry);
+			if (this.dropQueued(state)) this.emitQueueUpdate(state);
 		}
-		this.emit(entry, event);
+		this.emit(state, event);
 		if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_end") {
-			this.publish(state, entry);
+			this.publish(state);
 		}
 	}
 
 	// ---------------------------------------------------------------------------- the fan-out
 
 	/** Fan one event out. The only place a session publishes an event. */
-	private emit(entry: OpenSession, event: AgentSessionEvent): void {
-		for (const listener of entry.eventListeners) listener(event);
+	private emit(state: AgentState, event: AgentSessionEvent): void {
+		for (const listener of state.eventListeners) listener(event);
 	}
 
 	/**
@@ -2631,15 +2676,15 @@ export class Agent {
 	 *
 	 * Called only where the queue itself changed — a message accepted onto it, a drain point taking
 	 * one, a run dropping what it never reached — so no baseline is kept: the fact of the call is the
-	 * change. The queue is read off the runtime's queue.
+	 * change. The queue is read off the live half.
 	 */
-	private emitQueueUpdate(entry: OpenSession): void {
-		this.emit(entry, { type: "queue_update", queued: entry.runtime.followUpQueue.previews() });
+	private emitQueueUpdate(state: AgentState): void {
+		this.emit(state, { type: "queue_update", queued: state.live.followUpQueue.previews() });
 	}
 
 	/** Report a config change with only the fields that moved; silence when none did. */
 	private emitConfigChanged(
-		entry: OpenSession,
+		state: AgentState,
 		changes: {
 			model?: string;
 			thinkingLevel?: string;
@@ -2655,7 +2700,7 @@ export class Agent {
 		) {
 			return;
 		}
-		this.emit(entry, { type: "config_changed", ...changes });
+		this.emit(state, { type: "config_changed", ...changes });
 	}
 
 	/**
@@ -2665,7 +2710,7 @@ export class Agent {
 	 * {@link Agent.dispatchEvent} for everything the engine hands back — so a listener that follows
 	 * `entry_appended` sees the whole transcript, not just the engine's half of it.
 	 */
-	private appendMessage(state: Session, entry: OpenSession, message: Message): void {
+	private appendMessage(state: AgentState, message: Message): void {
 		// A message appended where something already followed is a *second* alternative at that message
 		// rather than a continuation of its tip — which is what rewinding and asking again is. The tree
 		// gained a branch point there, so the windows are told where the leaf is, exactly as a move does:
@@ -2673,12 +2718,12 @@ export class Agent {
 		// The count is the raw child count, so a `leaf` entry — the record a branch move writes — counts
 		// too. The cost is one
 		// extra full-snapshot frame that shows no extra branch point, which is harmless.
-		const parent = state.leafId;
-		const continued = parent !== null && this.sessionManager.getChildren(state, parent).length > 0;
+		const parent = state.session.leafId;
+		const continued = parent !== null && this.sessionManager.getChildren(state.session, parent).length > 0;
 
-		const entryId = this.sessionManager.appendMessage(state, finalizeToolResult(state, entry, message));
-		if (continued) this.emit(entry, { type: "branch_changed", leafId: entryId });
-		this.emit(entry, { type: "entry_appended", entryId, kind: "message" });
+		const entryId = this.sessionManager.appendMessage(state.session, finalizeToolResult(state, message));
+		if (continued) this.emit(state, { type: "branch_changed", leafId: entryId });
+		this.emit(state, { type: "entry_appended", entryId, kind: "message" });
 	}
 
 	/**
@@ -2698,17 +2743,17 @@ export class Agent {
 	 * abandonment sweep is the exception to that exception — {@link Agent.denyAllApprovals} calls
 	 * this, because no recovery run is coming to take them.
 	 */
-	private dropQueued(entry: OpenSession): boolean {
-		const dropped = entry.runtime.steeringQueue.size > 0 || entry.runtime.followUpQueue.size > 0;
-		entry.runtime.steeringQueue.clear();
-		entry.runtime.followUpQueue.clear();
+	private dropQueued(state: AgentState): boolean {
+		const dropped = state.live.steeringQueue.size > 0 || state.live.followUpQueue.size > 0;
+		state.live.steeringQueue.clear();
+		state.live.followUpQueue.clear();
 		return dropped;
 	}
 
 	/** Tell every listener what the session looks like now. */
-	private publish(state: Session, entry: OpenSession): void {
-		const snapshot = this.snapshot(state.sessionId);
-		for (const listener of entry.listeners) listener(snapshot);
+	private publish(state: AgentState): void {
+		const snapshot = this.snapshot(state.session.sessionId);
+		for (const listener of state.listeners) listener(snapshot);
 	}
 }
 

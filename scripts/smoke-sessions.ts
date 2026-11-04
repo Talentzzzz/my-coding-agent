@@ -12,6 +12,7 @@ import { bootServer } from "../packages/server/src/boot.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import {
 	CURRENT_SESSION_VERSION,
+	type AgentState,
 	createSession,
 	fillSession,
 	openAgent,
@@ -19,7 +20,6 @@ import {
 	SessionManager,
 	OpenSessions,
 	createOpenSession,
-	type OpenSession,
 	inMemorySettingsState,
 	sessionDir,
 	type QueueMode,
@@ -131,14 +131,16 @@ function hubSessions(hub: SessionHub): SessionManager {
 }
 
 /**
- * The hub's live registry entry for an id — the per-session object a claim opens and a close drops.
+ * The orchestrator's state for an id — the per-session object a claim adopts and a close drops.
  *
  * This is what "one session per id" means now: the orchestrator is the process's own and answers by
- * id, so what a reopen can build a second of is an *entry* (the queues, the run slot, the assembly),
- * never the object that serves them.
+ * id, so what a reopen can build a second of is a *state* (the queues, the live half, the assembly),
+ * never the object that serves them. A cast into the orchestrator's private table, because the table
+ * has no public getter by design (issue 01 §4); when the hub adapts (issue 12) these identity
+ * assertions move onto behavior and the probe goes away.
  */
-function entryOf(hub: SessionHub, id: string): OpenSession | undefined {
-	return (hub as unknown as { openSessions: OpenSessions }).openSessions.get(id);
+function entryOf(hub: SessionHub, id: string): AgentState | undefined {
+	return (hub.agent as unknown as { sessions: Map<string, AgentState> }).sessions.get(id);
 }
 
 /** The bag behind a hosted session: what the hub's service adopted at open, file or no file. */

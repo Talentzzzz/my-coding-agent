@@ -7,7 +7,7 @@ import {
 	type AgentSessionEvent,
 	type ModelSource,
 	createSessionAgent,
-	ensureSession,
+	assembleSession,
 	readSessionSnapshot,
 	resolvePath,
 	type OpenAgentOptions,
@@ -16,7 +16,6 @@ import {
 	createSession,
 	fillSession,
 	type Session,
-	OpenSessions,
 	SettingsManager,
 	type SettingsState,
 	getHiddenDirectories,
@@ -107,15 +106,15 @@ export type SessionObserver = (feeds: SessionFeeds | undefined) => void;
  *
  * Nothing else is on it. The session itself is one stateless orchestrator for the whole process
  * (ADR-0007 §6) — a method names the id and fetches whatever it needs — and its live half is the
- * hub's {@link OpenSessions} registry, whose entries hold the queues a run drains and the run in
- * flight. What is left is the one thing neither of those can answer: who is holding this session
+ * state that orchestrator's table holds for the id (ADR-0011): the queues a run drains and the run
+ * in flight. What is left is the one thing neither of those can answer: who is holding this session
  * open right now. That is a transport-layer question (ADR-0001), so its counter lives with the
- * transport layer rather than on an entry core would never read.
+ * transport layer rather than on core state it would never read.
  *
  * The working directory is per session rather than per process. A sidebar that lists every directory this
  * machine has used can open any of them, and the tools of the session that opens must resolve inside
  * the directory its own transcript was written in — which is what the header of its file records.
- * It is read here because a fork needs it before anything is running, and the registry entry exists
+ * It is read here because a fork needs it before anything is running, and the session's state exists
  * only once a claim has opened one.
  */
 export class HostedSession {
@@ -212,25 +211,15 @@ export class SessionHub {
 	 */
 	private readonly sessions = new SessionManager();
 	/**
-	 * The live half of every session this process has touched, keyed by session id — the narrow
-	 * registry of ADR-0007 §4, holding exactly what cannot be rebuilt from disk: the queues a run
-	 * drains, the run in flight, the subscriber sets, the cross-stack run slot, and the assembly the
-	 * open resolved.
-	 *
-	 * An entry is created the first time a session is touched ({@link open}, which every first
-	 * message and every claim arrives through) and dropped when its host closes, so the registry
-	 * holds exactly the sessions this process is running and nothing else. A process restart clears
-	 * it with everything else in memory and that is the whole recovery story: queued messages are
-	 * lost, the session files are not, and a reopen builds a fresh entry from nothing.
-	 */
-	private readonly openSessions = new OpenSessions();
-	/**
 	 * The one orchestrator every conversation this process runs goes through.
 	 *
 	 * Built once, because it holds no session: a method names the id and resolves what it needs from
-	 * the session manager's cache and the registry entry (ADR-0007 §6). The five services it
-	 * coordinates are the ones declared around this field, so a session assembled here, an edit to a
-	 * model row, and a settings write all reach the same objects the orchestrator reads.
+	 * the session's state in its own table — the durable half, the settings, the live half (ADR-0011).
+	 * The five services it coordinates are the ones declared around this field, so a session assembled
+	 * here, an edit to a model row, and a settings write all reach the same objects the orchestrator
+	 * reads. A session's state enters that table when {@link open} assembles it
+	 * (`assembleSession` + `adopt`), and leaves it when the host closes — the drop is the
+	 * orchestrator's own `evict` / `drop`, because the table has one deleter.
 	 *
 	 * It reads the model rows through {@link models} rather than a copy, which is why a key corrected
 	 * in the settings panel is the key the next message of an already-open session sends.
@@ -275,7 +264,6 @@ export class SessionHub {
 		this.agent = createSessionAgent({
 			sessionManager: this.sessions,
 			models: this.models,
-			openSessions: this.openSessions,
 			...(options.api === undefined ? {} : { api: options.api }),
 		});
 	}
@@ -547,8 +535,8 @@ export class SessionHub {
 	 *
 	 * The registry gains nothing here either: a fork nobody has claimed has no live half to hold —
 	 * no queue has drained, no run is in flight — so its first touch is its first claim, and that is
-	 * what builds its entry through {@link open}. Only `close` moves the registry, by dropping the
-	 * entries of the sessions this process stops running.
+	 * what assembles its state through {@link open}. Only `close` moves the orchestrator's table, by
+	 * dropping the states of the sessions this process stops running.
 	 */
 	async fork(sessionId: string, entryId: string | null): Promise<string> {
 		const hosted = this.hosts.get(sessionId);
@@ -636,9 +624,11 @@ export class SessionHub {
 				// only after the file is gone, so it finds no file instead of reopening one mid-delete.
 				// A session that never spoke has no file, and asking for one would be asking for nothing.
 				if (onDisk) await this.sessions.remove(sessionId);
-				// The live half goes with the host, after the run has settled — deleting the entry
-				// earlier would leave a settling turn draining queues nobody holds.
-				this.openSessions.delete(sessionId);
+				// The live half goes with the host, after the run has settled — dropping the state
+				// earlier would leave a settling turn draining queues nobody holds. The user deleted
+				// the session, so this is the unconditional half of the teardown: no criteria apply
+				// to an id that is gone from disk.
+				this.agent.drop(sessionId);
 			})();
 			this.closing.set(sessionId, closing);
 			try {
@@ -668,7 +658,9 @@ export class SessionHub {
 		}
 		this.hosts.clear();
 		this.pending.clear();
-		this.openSessions.clear();
+		// The orchestrator's state table is not swept here: it lives on the orchestrator, and the
+		// process that closes the hub takes the orchestrator with it. A table-clear on a live hub
+		// would be a second writer reaching past the orchestrator that owns the states.
 	}
 
 	private hold(host: HostedSession): HostedSession {
@@ -683,9 +675,9 @@ export class SessionHub {
 	 * the sidebar offers every directory on the machine: a session opened from another group must have
 	 * its tools resolve where it was written, and its approvals come from that directory's settings.
 	 *
-	 * The entry this builds is the whole of the per-session setup: the orchestrator is the process's
+	 * The state this assembles is the whole of the per-session setup: the orchestrator is the process's
 	 * own ({@link agent}) and needs nothing told to it, because every call it will serve names the id
-	 * the entry is keyed by.
+	 * the state is keyed by.
 	 */
 	private async open(id: string): Promise<HostedSession> {
 		// The pending bag before the store: a session created a moment ago has no file to find yet,
@@ -693,7 +685,11 @@ export class SessionHub {
 		const pending = this.pendingManager(id);
 		const state = pending ?? this.sessions.stateOf(id);
 		const workDirAbsPath = state.sessionSetting.workDirAbsPath;
-		await ensureSession(this.sessionOptions(state, workDirAbsPath));
+		// Assemble, then adopt: the state enters the orchestrator's table through its one door, and a
+		// first-touch reopen keeps the state already there — the queues, the subscribers, the run in
+		// flight are never replaced from underneath their holders.
+		const { state: assembled } = await assembleSession(this.sessionOptions(state, workDirAbsPath));
+		this.agent.adopt(assembled);
 		const host = new HostedSession(id, workDirAbsPath);
 		this.hosts.set(id, host);
 		// Observers first, then the listeners: a subscriber told "a host opened" and reaching for the
@@ -739,7 +735,6 @@ export class SessionHub {
 			models: this.models,
 			settingsManager: this.settings,
 			settingsState: this.settingsStateOf(workDirAbsPath),
-			openSessions: this.openSessions,
 			...(this.options.model === undefined ? {} : { model: this.options.model }),
 			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),
 			...(this.options.api === undefined ? {} : { api: this.options.api }),
@@ -803,7 +798,9 @@ export class SessionHub {
 			}
 			// The host is gone, so its live half goes with it: whatever was queued or running dies with
 			// the session, which is the same thing a process restart would have done, one host at a time.
-			this.openSessions.delete(host.id);
+			// The eviction criteria are the orchestrator's own judgment; a host teardown after a settle
+			// is the ordinary case where they hold.
+			this.agent.evict(host.id);
 		} finally {
 			host.reaping = false;
 		}

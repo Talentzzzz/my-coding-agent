@@ -1,5 +1,6 @@
 import type { ChatTransport } from "@my-agent/llm";
 import { Agent } from "./agent.ts";
+import { createAgentState, type AgentState, createLive } from "./session/agent-state.ts";
 import type { AgentsMdFile } from "./context/agents-md.ts";
 import { buildSystemPrompt } from "./context/system-prompt.ts";
 import { danglingApprovalsOf } from "./session/dangling.ts";
@@ -23,13 +24,10 @@ import {
 	SettingsManager,
 	type SettingsState,
 	getApprovals,
-	getFollowUpMode,
 	getSettings,
-	getSteeringMode,
 	inMemorySettingsState,
 } from "./settings-manager.ts";
 import { type ToolRegistry, createToolRegistry, toolDefinitions } from "./tools/index.ts";
-import { createOpenSession, OpenSessions } from "./session/open-session.ts";
 import { resolve as resolvePath } from "node:path";
 
 /** What a caller must supply to build a session. Everything else is discovered here. */
@@ -38,7 +36,7 @@ export interface OpenAgentOptions {
 	 * The working directory the session's tools resolve relative paths against and start commands in.
 	 *
 	 * A starting point, not a boundary: an absolute path a tool is given is taken as it stands. It is
-	 * resolved here so every later read of `entry.workDirAbsPath` is absolute.
+	 * resolved here so every later read of `session.sessionSetting.workDirAbsPath` is absolute.
 	 */
 	workDirAbsPath: string;
 	/**
@@ -88,15 +86,6 @@ export interface OpenAgentOptions {
 	settingsState?: SettingsState;
 	/** Defaults to the six built-ins. A test passes a registry of its own to add a tool. */
 	tools?: ToolRegistry;
-	/**
-	 * The session's registry: its live half plus the assembly the open resolved, keyed by id.
-	 *
-	 * A host that owns the state — the hub, whose {@link OpenSessions} registry holds one entry per
-	 * session and drops it when the host closes — hands its own in, so what it holds and what the
-	 * session runs on are one object. A caller that does not care gets a fresh one, which behaves
-	 * identically for the one session it serves.
-	 */
-	openSessions?: OpenSessions;
 }
 
 /**
@@ -219,62 +208,71 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 	});
 }
 
-/** The two services one open resolves, as the orchestrator that serves it needs them. */
-export interface SessionServices {
-	sessionManager: SessionManager;
-	openSessions: OpenSessions;
-}
-
 /**
- * Assemble a session and give it a registry entry: the seed→fill lifecycle's seeding half (ADR-0006 §2).
+ * Assemble a session's state: the seed→fill lifecycle's seeding half (ADR-0006 §2).
  *
- * The working directory, the settings, the model selection, and the catalog are resolved once here
- * and land on the entry — the assembly product *is* the
- * entry (ADR-0007 §4) — so every later call, which names the session by id, reads them back instead of
- * re-resolving them. The caller's transcript bag is adopted by the session service, so the id answers
- * the same object this open was handed, before the first message has put a file on disk.
+ * The working directory, the settings, the live half, and the model choice in force are resolved
+ * once here and land in the {@link AgentState} — the assembly product *is* the state (ADR-0011) —
+ * so every later call, which names the session by id, reads them back instead of re-resolving them.
+ * The model choice is seeded onto the session's own setting field, in memory: the choice in force
+ * before the first request is the assembly's answer, and the request made with the choice is what
+ * records it on disk (`Agent.recordSelection`). The build chain runs in the order the state's shape
+ * fixes — the session first, then the settings it runs against, then the live half whose queue
+ * modes are those settings' answer (ADR-0011).
+ *
+ * Registration is the caller's: `Agent.adopt(state)` is the only way a state enters an orchestrator's
+ * table, and a host that runs many sessions adopts each one as it assembles it (ADR-0011).
  *
  * Nothing here builds an orchestrator. That is the separation {@link createSessionAgent} exists for: a
- * host that runs many sessions opens one entry per session and keeps one orchestrator over all of
- * them, and a caller that wants a session of its own composes the two.
+ * host that runs many sessions assembles one state per session and keeps one orchestrator over all
+ * of them, and a caller that wants a session of its own composes the two.
  *
- * Records nothing: a session opened and never spoken to does not grow entries, and neither does one
- * opened on another model or level than the branch last used — both reach the transcript in
+ * Records nothing else: a session opened and never spoken to does not grow entries, and neither does
+ * one opened on another model or level than the branch last used — both reach the transcript in
  * `recordSelection`, at the moment the first request is built from them.
  */
-export async function ensureSession(options: OpenAgentOptions): Promise<SessionServices> {
+export async function assembleSession(options: OpenAgentOptions): Promise<{
+	sessionManager: SessionManager;
+	state: AgentState;
+}> {
 	const { workDirAbsPath, settingsState, modelChoice, sessionManager } = await assemble(options);
-	const sessionId = options.session.sessionId;
-	const openSessions = options.openSessions ?? new OpenSessions();
-	// First touch creates the entry, and its fields are the resolved answers every later call reads —
-	// the working directory, the settings bag, and the model choice every request builds its row from.
-	// The queue modes are the same settings' answer at this moment; a config patch moves them on the
+	const session = options.session;
+	// The choice in force before the first request (issue 03 §7): the assembly's answer, merged onto
+	// the session's own setting field in memory. The write is deliberately not a recorded one — the
+	// disk write belongs to the request that is made with the choice, so a choice nobody sent with
+	// stays out of the file. A rename drops the recorded wire id along with the name it belonged to.
+	if (modelChoice.name !== undefined || modelChoice.thinkingLevel !== undefined) {
+		const previous = session.sessionSetting.model;
+		const renamed = modelChoice.name !== undefined && previous?.name !== modelChoice.name;
+		session.sessionSetting.model = {
+			...(renamed ? {} : previous),
+			...(modelChoice.name === undefined ? {} : { name: modelChoice.name }),
+			...(modelChoice.thinkingLevel === undefined ? {} : { thinkingLevel: modelChoice.thinkingLevel }),
+		};
+	}
+	// First touch creates the state: the durable half is the caller's transcript bag as it stands, the
+	// settings are the bag every settings call in this session passes, and the live half is empty —
+	// its queue modes are the same settings' answer at this moment; a config patch moves them on the
 	// queues in place afterwards.
-	openSessions.ensure(sessionId, () =>
-		createOpenSession({
-			workDirAbsPath,
-			settings: settingsState,
-			modelSelection: modelChoice,
-			steeringMode: getSteeringMode(settingsState),
-			followUpMode: getFollowUpMode(settingsState),
-		}),
-	);
+	const state = createAgentState(session, settingsState, createLive(settingsState));
 	// The caller's bag is the session's bag: registering it is what lets every later call — which
 	// names the session by id — answer with this exact object, before the first message puts the file
 	// on disk. An id the service already caches is re-registered to the same object, which changes
 	// nothing.
-	sessionManager.adopt(options.session);
-	return { sessionManager, openSessions };
+	sessionManager.adopt(session);
+	return { sessionManager, state };
 }
 
 /**
  * The services one orchestrator coordinates, for a caller that builds one.
  *
- * Everything here is process-level: the ledger, the models this process can run, the catalog, the
- * live registry, and the transport. Nothing in it is a session's — which is what lets a host keep one
- * orchestrator for every conversation it runs (ADR-0007 §6).
+ * Everything here is process-level: the ledger, the models this process can run, the catalog, and
+ * the transport. Nothing in it is a session's — which is what lets a host keep one
+ * orchestrator for every conversation it runs (ADR-0007 §6). A session's state is not here either:
+ * it is assembled by {@link assembleSession} and adopted by the orchestrator the host owns.
  */
-export interface SessionAgentServices extends SessionServices {
+export interface SessionAgentServices {
+	sessionManager: SessionManager;
 	models: ModelSource;
 	/**
 	 * The catalog callers of this orchestrator share. Omitted means the six built-ins alone; a test
@@ -290,7 +288,7 @@ export interface SessionAgentServices extends SessionServices {
  * Build the orchestrator: one object over the services, with the seams it dispatches through installed.
  *
  * A host that runs every session of a process calls this once; a caller that wants a session it does
- * not share — a smoke, a test — calls it once per session after {@link ensureSession}.
+ * not share — a smoke, a test — calls it once per session after {@link assembleSession}.
  * Either way the two halves of a session's setup are the same two halves, so what the host runs and
  * what a smoke drives cannot drift apart.
  *
@@ -304,7 +302,6 @@ export function createSessionAgent(services: SessionAgentServices): Agent {
 		sessionManager: services.sessionManager,
 		models: services.models,
 		tools: services.tools ?? createToolRegistry(toolDefinitions()),
-		openSessions: services.openSessions,
 		...(services.api === undefined ? {} : { api: services.api }),
 		hooks,
 		// Rebuilt whenever the active set or the approval set moves, so the prompt cannot promise tools
@@ -351,21 +348,25 @@ function installDefaultHooks(hooks: Hooks, session: Agent): void {
 /**
  * Open one session and hand back an orchestrator of its own.
  *
- * The composition of {@link ensureSession} and {@link createSessionAgent}, for a caller that wants a
+ * The composition of {@link assembleSession} and {@link createSessionAgent}, for a caller that wants a
  * session it does not share with anything else: a smoke driving a scripted transport, or a test
  * opening one directory by hand. A process that runs many sessions builds
  * the two halves once each instead — see the hub — and that is the shape this exists to keep honest:
  * opening a session and resuming one are the same act, whichever of the two roads is taken.
  */
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
-	const services = await ensureSession(options);
-	return createSessionAgent({
-		sessionManager: services.sessionManager,
+	const { sessionManager, state } = await assembleSession(options);
+	const agent = createSessionAgent({
+		sessionManager,
 		models: options.models,
-		openSessions: services.openSessions,
 		...(options.tools === undefined ? {} : { tools: options.tools }),
 		...(options.api === undefined ? {} : { api: options.api }),
 	});
+	// The state enters the orchestrator's table here, through the same door a host uses: the
+	// orchestrator was built first and reads nothing at construction, so the order — state, then
+	// adopt — is the only one there is.
+	agent.adopt(state);
+	return agent;
 }
 
 /** The ref the session's recorded model choice names: the row name and the wire id it named. */

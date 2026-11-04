@@ -849,12 +849,12 @@ async function exerciseConfigChanged(): Promise<void> {
 	check("so re-applying it says nothing", seen.length === 3, JSON.stringify(seen));
 
 	// The whole point of choosing on the composer: a choice no request was made with is not something
-	// that happened, so nothing about it is in the transcript. Both rows are the same wire id, so this
-	// is the level half as well — neither has been asked at yet.
+	// that happened, so nothing about it reaches the disk. The choice in force lives in memory now
+	// (issue 03 §7), so the disk is what the assertion reads — and this session has not spoken, so
+	// its files are not born and a premature write has nowhere to land.
 	check(
 		"and none of it is written down before a request uses it",
-		session.sessionManager.getRecordedSettings(bagOf(session)).model === undefined &&
-			session.sessionManager.getRecordedSettings(bagOf(session)).thinkingLevel === undefined,
+		bagOf(session).fileCreated === false,
 		JSON.stringify(session.sessionManager.getRecordedSettings(bagOf(session))),
 	);
 
@@ -1907,7 +1907,9 @@ async function exerciseModelSelection(): Promise<void> {
 	const levelsOf = (): string | undefined => session.sessionManager.getRecordedSettings(bagOf(session)).thinkingLevel;
 	session.applyModelSelection(sidOf(session), { thinkingLevel: "high" });
 	check("choosing a level moves the session", session.snapshot(sidOf(session)).thinkingLevel === "high", session.snapshot(sidOf(session)).thinkingLevel);
-	check("and records nothing until a request uses it", levelsOf() === undefined, String(levelsOf()));
+	// The choice in force lives in memory now (issue 03 §7), so "records nothing" reads the disk: the
+	// session has not spoken yet, so its files are not born and a premature write has nowhere to land.
+	check("and records nothing until a request uses it", bagOf(session).fileCreated === false, String(bagOf(session).fileCreated));
 
 	await within("the run", 10_000, session.prompt(sidOf(session), "hello", { selection: { thinkingLevel: "high" } }));
 	check("the request is asked at that level", scripted.state.thinkingLevels.at(-1) === "high", String(scripted.state.thinkingLevels.at(-1)));

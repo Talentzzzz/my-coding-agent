@@ -94,12 +94,11 @@ export {
 } from "./models.ts";
 export {
 	createSessionAgent,
-	ensureSession,
+	assembleSession,
 	openAgent,
 	readSessionSnapshot,
 	type OpenAgentOptions,
 	type SessionAgentServices,
-	type SessionServices,
 } from "./session-factory.ts";
 export {
 	addUsage,

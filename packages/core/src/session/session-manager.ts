@@ -1536,6 +1536,19 @@ export class SessionManager {
 	}
 
 	/**
+	 * Rewrite the snapshot from the bag, whatever the change detectors think.
+	 *
+	 * The setters' gates compare against the bag — the bag is what every reader answers from — so a
+	 * change already in the bag but not yet on the disk passes them silently: the disk holds the
+	 * choice the session was last made with, and the bag the one in force can differ from it. This is
+	 * the escape hatch: the whole bag goes to the snapshot in one atomic rewrite. A session whose
+	 * files are not born yet keeps the bag as it is; the birth write picks it up whole.
+	 */
+	flushMeta(s: Session): void {
+		if (s.persist && s.fileCreated) writeMetaFile(s);
+	}
+
+	/**
 	 * Record the session's tool choices: the active set and the approval map, both whole.
 	 *
 	 * A snapshot rather than a delta, because the reader takes the value in force — the same
@@ -1827,6 +1840,21 @@ export class SessionManager {
 		const { thinkingLevel, model } = getSessionContextSettings(s.sessionSetting, chain);
 		const messages = contextEntriesFromPath(chain).flatMap(sessionEntryToContextMessages);
 		return { messages, thinkingLevel, model };
+	}
+
+	/**
+	 * The model and thinking level the session's snapshot on disk records, each undefined when it
+	 * never chose.
+	 *
+	 * The disk copy, not the bag, is the write baseline for a caller that commits a choice: the bag
+	 * already carries the choice in force, so comparing against it is self-comparison and never sees
+	 * a difference. Read fresh each call, not cached, so the baseline is the file's own. A session
+	 * whose files are not born yet has no snapshot to read and answers with the empty record — the
+	 * birth write picks the bag up whole.
+	 */
+	recordedOnDisk(s: Session): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
+		if (!s.fileCreated || s.sessionFileAbsPath === undefined) return {};
+		return recordedModelOf(sessionSettingOf(readMetaFile(sessionMetaPath(s.sessionFileAbsPath))).model);
 	}
 
 	/**
