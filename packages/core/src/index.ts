@@ -1,6 +1,6 @@
 export { Agent, type AgentConfig, type AgentSessionEvent, type SessionEventListener, type SessionListener } from "./agent.ts";
 export { danglingToolCallsOf, recoverPendingToolCalls } from "./agent.ts";
-export type { AgentContext, AgentEvent, AgentTool, AgentToolResult } from "./types.ts";
+export type { AgentEvent } from "./types.ts";
 export type { Message } from "./llm/index.ts";
 // The transport surface a caller outside core still names directly: the server holds a
 // `ChatTransport`, and the smokes drive streams and models the way the engine does.
@@ -11,13 +11,17 @@ export {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type ChatTransport,
+	type Context,
 	type ImageContent,
-	type LlmContext,
 	type SimpleStreamOptions,
 	type TextContent,
 	type ThinkingContent,
+	type Tool,
 	type ToolCall,
+	type ToolExecutionMode,
+	type ToolResult,
 	type ToolResultMessage,
+	type ToolUpdateCallback,
 	type Usage,
 } from "./llm/index.ts";
 export {

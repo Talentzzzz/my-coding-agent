@@ -1,7 +1,7 @@
 // Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
 // from flagging this file, while every import into packages/core stays fully checked.
 // @ts-nocheck
-import type { AssistantMessage, LlmContext, ImageContent, Message, TextContent, Usage } from "../types.ts";
+import type { AssistantMessage, Context, ImageContent, Message, TextContent, Usage } from "../types.ts";
 import { getSystemMessageText } from "./text.ts";
 
 export interface ContextUsageEstimate {
@@ -93,7 +93,7 @@ function getLastAssistantUsageInfo(messages: readonly Message[]): { usage: Usage
 	return usageInfo;
 }
 
-export function estimateContextTokens(context: LlmContext): ContextUsageEstimate {
+export function estimateContextTokens(context: Context): ContextUsageEstimate {
 	const messages = context.messages;
 	// Tools are not part of any message, so they are counted here rather than by
 	// `estimateMessageTokens`. Leaving them out would under-report the context by every tool schema

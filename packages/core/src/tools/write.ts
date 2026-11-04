@@ -1,5 +1,5 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import type { AgentTool } from "../types.ts";
+import type { Tool } from "../llm/index.ts";
 import { dirname } from "node:path";
 import { Type, type Static } from "typebox";
 import { displayToolPath, resolveToolPath } from "../workdir.ts";
@@ -22,7 +22,7 @@ export type WriteParams = Static<typeof parameters>;
  * Refusing to clobber by default matters: a model that means "adjust one line" but calls `write`
  * with a reconstructed file silently destroys the parts it did not reproduce.
  */
-export function createWriteTool(workDirAbsPath: string): AgentTool<typeof parameters> {
+export function createWriteTool(workDirAbsPath: string): Tool<typeof parameters> {
 	return {
 		name: "write",
 		label: "Write",

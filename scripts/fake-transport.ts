@@ -13,7 +13,7 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type ChatTransport,
-	type LlmContext,
+	type Context,
 	type ImageContent,
 	type Message,
 	type Model,
@@ -101,7 +101,7 @@ export interface FakeState {
 }
 
 export type FakeResponseFactory = (
-	context: LlmContext,
+	context: Context,
 	options: SimpleStreamOptions | undefined,
 	state: FakeState,
 	model: Model<string>,
@@ -172,8 +172,8 @@ function messageToText(message: Message): string {
 	return toolResultToText(message);
 }
 
-function serializeContext(context: LlmContext): string {
-	const tools = (context.tools ?? []).map((tool) => `tool:${JSON.stringify(tool)}`);
+function serializeContext(context: Context): string {
+	const tools = context.tools.map((tool) => `tool:${JSON.stringify(tool)}`);
 	const messages = context.messages.map((message) => `${message.role}:${messageToText(message)}`);
 	return [...tools, ...messages].join("\n\n");
 }
@@ -184,7 +184,7 @@ function serializeContext(context: LlmContext): string {
  * Cache reads and writes stay zero: this double answers from a queue rather than a provider, and it
  * has no prompt-cache identity to key a simulation by.
  */
-function withUsageEstimate(message: AssistantMessage, context: LlmContext): AssistantMessage {
+function withUsageEstimate(message: AssistantMessage, context: Context): AssistantMessage {
 	const input = estimateTokens(serializeContext(context));
 	const outputTokens = estimateTokens(assistantContentToText(message.content));
 
@@ -361,7 +361,7 @@ export function createFakeTransport(options: FakeTransportOptions = {}): FakeTra
 
 	const resolveResponse = async (
 		step: FakeResponseStep,
-		context: LlmContext,
+		context: Context,
 		streamOptions: SimpleStreamOptions | undefined,
 		requestModel: Model<string>,
 	): Promise<AssistantMessage> => {
@@ -369,7 +369,7 @@ export function createFakeTransport(options: FakeTransportOptions = {}): FakeTra
 		return withUsageEstimate(cloneMessage(resolved, requestModel), context);
 	};
 
-	const stream = (requestModel: Model<string>, context: LlmContext, streamOptions?: SimpleStreamOptions) => {
+	const stream = (requestModel: Model<string>, context: Context, streamOptions?: SimpleStreamOptions) => {
 		const outer = createAssistantMessageEventStream();
 		const step = pendingResponses.shift();
 		state.callCount++;

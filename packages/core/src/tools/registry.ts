@@ -1,4 +1,4 @@
-import type { AgentTool } from "../types.ts";
+import type { Tool } from "../llm/index.ts";
 import type { ToolRunContext, ToolState } from "./manager.ts";
 import { toolListFor } from "./manager.ts";
 import type { ToolDefinitions } from "./manager.ts";
@@ -20,13 +20,13 @@ export interface ToolRegistry {
 	/** Every tool name this registry knows: the definitions', then the registered ones. */
 	names(): string[];
 	/** Build one tool against a run context, or undefined when the name is not this registry's. */
-	build(name: string, run: ToolRunContext): AgentTool<any> | undefined;
+	build(name: string, run: ToolRunContext): Tool<any> | undefined;
 	/** What the model may call right now, as names, in the order it is offered them. */
 	activeNames(state: ToolState): string[];
 	/** The run context's executable set for this choice, built fresh — see {@link toolListFor}. */
-	active(state: ToolState, run: ToolRunContext): AgentTool<any>[];
+	active(state: ToolState, run: ToolRunContext): Tool<any>[];
 	/** A tool joins the catalog; whether it is active is the choice, not this. */
-	register(tool: AgentTool<any>): void;
+	register(tool: Tool<any>): void;
 }
 
 /**
@@ -41,7 +41,7 @@ export function createToolRegistry(definitions: ToolDefinitions): ToolRegistry {
 
 class Registry implements ToolRegistry {
 	/** Registered tools, in registration order; the definitions come first in every listing. */
-	private readonly local = new Map<string, AgentTool<any>>();
+	private readonly local = new Map<string, Tool<any>>();
 	private readonly definitions: ToolDefinitions;
 
 	constructor(definitions: ToolDefinitions) {
@@ -52,7 +52,7 @@ class Registry implements ToolRegistry {
 		return [...this.definitions.names(), ...this.local.keys()];
 	}
 
-	build(name: string, run: ToolRunContext): AgentTool<any> | undefined {
+	build(name: string, run: ToolRunContext): Tool<any> | undefined {
 		const local = this.local.get(name);
 		if (local !== undefined) return local;
 		return this.definitions.get(name)?.(run);
@@ -63,11 +63,11 @@ class Registry implements ToolRegistry {
 		return state.activeToolNames.filter((name) => known.has(name));
 	}
 
-	active(state: ToolState, run: ToolRunContext): AgentTool<any>[] {
+	active(state: ToolState, run: ToolRunContext): Tool<any>[] {
 		return toolListFor(this.definitions, state, run, [...this.local.values()]);
 	}
 
-	register(tool: AgentTool<any>): void {
+	register(tool: Tool<any>): void {
 		if (this.names().includes(tool.name)) throw new Error(`Tool already registered: ${tool.name}`);
 		this.local.set(tool.name, tool);
 	}

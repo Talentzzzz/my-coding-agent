@@ -1,4 +1,4 @@
-import type { AgentTool } from "../types.ts";
+import type { Tool } from "../llm/index.ts";
 import type { ToolRunContext } from "./manager.ts";
 import { toolDefinitions } from "./manager.ts";
 
@@ -43,7 +43,7 @@ export function describeToolCall(name: string, args: unknown): string {
  * themselves — a smoke exercising a tool by name, a test driving `execute` directly. Each is built
  * fresh against the context given, the same way the run-context assembly builds them.
  */
-export function createTools(run: ToolRunContext): AgentTool<any>[] {
+export function createTools(run: ToolRunContext): Tool<any>[] {
 	return toolDefinitions().all().map((definition) => definition(run));
 }
 

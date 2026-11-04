@@ -42,7 +42,7 @@ import {
 	openAgent,
 	sessionDir,
 	SettingManager,
-	type AgentTool,
+	type Tool,
 	type FileDiff,
 	type Message,
 	type ModelConfig,
@@ -83,7 +83,7 @@ function check(label: string, condition: boolean, detail = ""): void {
 	if (!condition) failures += 1;
 }
 
-function tool(name: string): AgentTool<any> {
+function tool(name: string): Tool<any> {
 	const found = createTools({ workDirAbsPath: root }).find((candidate) => candidate.name === name);
 	if (!found) throw new Error(`no tool named ${name}`);
 	return found;

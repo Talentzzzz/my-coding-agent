@@ -193,7 +193,7 @@ export type ApiStreamOptions<TApi extends Api> = TApi extends keyof ApiOptionsMa
  * lives on the implementation module itself and reaches it through `ApiStreamOptions`.
  */
 export interface ChatTransport {
-	stream(model: Model<Api>, context: LlmContext, options?: SimpleStreamOptions): AssistantMessageEventStream;
+	stream(model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream;
 }
 
 // Unified options passed to stream(). The thinking level is deliberately
@@ -217,7 +217,7 @@ export interface SimpleStreamOptions extends StreamOptions {
 //   "error" or "aborted" and errorMessage, emitted via the stream protocol.
 export type StreamFunction<TApi extends Api = Api, TOptions extends StreamOptions = StreamOptions> = (
 	model: Model<TApi>,
-	context: LlmContext,
+	context: Context,
 	options?: TOptions,
 ) => AssistantMessageEventStream;
 
@@ -328,7 +328,7 @@ export type JsonRepresentation<T> = IsAny<T> extends true
  *
  * One per request and always first: nothing in this build appends a system message to the
  * middle of a conversation, and a transport drops any it is handed. Tools are not part of it —
- * they travel on the request (`LlmContext.tools`), not inside a message.
+ * they travel on the request (`Context.tools`), not inside a message.
  */
 export interface SystemMessage {
 	role: "system";
@@ -404,7 +404,7 @@ export type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails>
 
 export type Message = SystemMessage | UserMessage | AssistantMessage | ToolResultMessage;
 
-import type { TSchema } from "typebox";
+import type { Static, TSchema } from "typebox";
 
 /**
  * Optional provider-side constrained sampling config for a tool.
@@ -417,26 +417,107 @@ export interface ConstrainedSamplingConfig {
 	strict: "prefer" | "require";
 }
 
-export interface Tool<TParameters extends TSchema = TSchema> {
+/**
+ * How a run may execute the tool calls of one assistant message.
+ *
+ * - "sequential": each tool call is prepared, executed, and finalized before the next one starts.
+ * - "parallel": tool calls are prepared sequentially, then allowed tools execute concurrently.
+ *   `tool_execution_end` is emitted in tool completion order after each tool is finalized,
+ *   while tool-result message artifacts are emitted later in assistant source order.
+ */
+export type ToolExecutionMode = "sequential" | "parallel";
+
+/**
+ * The one tool type.
+ *
+ * The declaration a transport reads — name, description, parameters, and the optional
+ * constrained-sampling config — and the executable counterpart the engine calls — label, argument
+ * shim, output schema, `execute`, replay policy, execution mode — are one shape, so a request and a
+ * run cannot drift about what a tool is. A transport reads the declaration fields and never calls
+ * `execute`; the engine calls `execute` and never reads a declaration from the wire.
+ */
+export interface Tool<TParameters extends TSchema = TSchema, TDetails = unknown> {
 	name: string;
 	description: string;
 	parameters: TParameters;
 	constrainedSampling?: false | ConstrainedSamplingConfig;
+	/** Human-readable label for UI display. */
+	label: string;
+	/**
+	 * Optional compatibility shim for raw tool-call arguments before schema validation.
+	 * Must return an object that matches `TParameters`.
+	 */
+	prepareArguments?: (args: unknown) => Static<TParameters>;
+	/**
+	 * JSON Schema of `structuredContent` in successful results. Tools that declare it should always
+	 * set `structuredContent`.
+	 */
+	outputSchema?: TSchema;
+	/**
+	 * Execute the tool call. Throw on failure, or return a result with `isError: true`; do not only
+	 * describe the failure in `content`.
+	 */
+	execute: (
+		toolCallId: string,
+		params: Static<TParameters>,
+		signal?: AbortSignal,
+		onUpdate?: ToolUpdateCallback<TDetails>,
+	) => Promise<ToolResult<TDetails>>;
+	/** Recovery policy for an effect whose durable intent exists but whose outcome is unknown. */
+	replay?: "never" | "safe";
+	/**
+	 * Per-tool execution mode override.
+	 * - "sequential": this tool must execute one at a time with other tool calls.
+	 * - "parallel": this tool can execute concurrently with other tool calls.
+	 *
+	 * If omitted, the default execution mode applies.
+	 */
+	executionMode?: ToolExecutionMode;
+}
+
+/** Final or partial result produced by a tool. */
+export interface ToolResult<T = JsonValue | undefined> {
+	/** Text or image content returned to the model. */
+	content: (TextContent | ImageContent)[];
+	/** Arbitrary structured details for logs or UI rendering. */
+	details: T;
+	/**
+	 * Machine-readable result matching the tool's `outputSchema`, for programmatic callers. Not sent
+	 * to the model; `content` remains the model-facing result.
+	 */
+	structuredContent?: JsonValue;
+	/** Usage from the final tool execution itself, if available. Not used for main LLM context accounting. */
+	usage?: Usage;
+	/**
+	 * Report a failure without throwing. The model sees `content` as an error result, like a thrown
+	 * error, but `details` and `structuredContent` are kept for the UI and programmatic callers.
+	 */
+	isError?: boolean;
+	/**
+	 * Hint that the agent should stop after the current tool batch.
+	 * Early termination only happens when every finalized tool result in the batch sets this to true.
+	 */
+	terminate?: boolean;
 }
 
 /**
- * Base request context: the conversation messages plus, optionally, the system prompt as an
- * explicit system message. Tool-carrying variants extend this — {@link LlmContext} declares the
- * tools to the model; the loop package's context carries the executable counterparts.
+ * Callback used by tools to stream partial execution updates.
+ *
+ * The callback is scoped to the current `execute()` invocation. Calls made after
+ * the tool promise settles are ignored.
+ */
+export type ToolUpdateCallback<T = unknown> = (partialResult: ToolResult<T>) => void;
+
+/**
+ * The context one request is made with: the conversation messages, the system prompt as an explicit
+ * leading message, and the tools the request carries. A transport reads the declaration fields of
+ * each tool and calls nothing on them; the engine passes the same executable shapes.
  */
 export interface Context {
 	messages: Message[];
 	system?: SystemMessage;
-}
-
-/** The context a transport entry point (`stream()`) takes: the base plus the request's tool declarations. */
-export interface LlmContext extends Context {
-	tools?: Tool[];
+	/** The tools this request carries. An empty array is legal; omitting the field is not. */
+	tools: Tool[];
 }
 
 /**

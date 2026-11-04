@@ -1,7 +1,7 @@
-import type { AgentToolResult } from "../types.ts";
+import type { ToolResult } from "../llm/index.ts";
 
 /** Wrap plain text as a tool result. */
-export function textResult(text: string, details?: unknown): AgentToolResult<unknown> {
+export function textResult(text: string, details?: unknown): ToolResult<unknown> {
 	return { content: [{ type: "text", text }], details };
 }
 

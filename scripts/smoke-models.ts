@@ -151,7 +151,7 @@ try {
 			}) as typeof fetch;
 			const messages = [{ role: "user" as const, content: [{ type: "text" as const, text: "hi" }], timestamp: Date.now() }];
 			try {
-				const stream = anthropicMessages.stream(model, { messages }, {
+				const stream = anthropicMessages.stream(model, { messages, tools: [] }, {
 					...options,
 					fetch: capture,
 				});
@@ -271,7 +271,7 @@ try {
 			}) as typeof fetch;
 			const messages = [{ role: "user" as const, content: [{ type: "text" as const, text: "hi" }], timestamp: Date.now() }];
 			await anthropicMessages
-				.stream(createModel(row, level), { messages }, {
+				.stream(createModel(row, level), { messages, tools: [] }, {
 					apiKey: "secret",
 					fetch: capture,
 				} satisfies SimpleStreamOptions)

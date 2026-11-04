@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import type { AgentTool, AgentToolResult } from "../types.ts";
+import type { Tool, ToolResult } from "../llm/index.ts";
 import { Type, type Static } from "typebox";
 import { displayToolPath, resolveToolPath } from "../workdir.ts";
 import { textResult, throwIfAborted } from "./types.ts";
@@ -17,7 +17,7 @@ export type ReadParams = Static<typeof parameters>;
 
 interface ReadHooks {
 	signal?: AbortSignal;
-	onUpdate?: (partial: AgentToolResult<unknown>) => void;
+	onUpdate?: (partial: ToolResult<unknown>) => void;
 }
 
 /**
@@ -27,7 +27,7 @@ interface ReadHooks {
  * identified by its file signature, not its extension) is answered with the image itself beside a
  * one-line envelope, which is how a vision model sees a picture.
  */
-export function createReadTool(workDirAbsPath: string): AgentTool<typeof parameters> {
+export function createReadTool(workDirAbsPath: string): Tool<typeof parameters> {
 	return {
 		name: "read",
 		label: "Read",
@@ -46,7 +46,7 @@ export async function runRead(
 	workDirAbsPath: string,
 	params: ReadParams,
 	hooks: ReadHooks = {},
-): Promise<AgentToolResult<unknown>> {
+): Promise<ToolResult<unknown>> {
 	throwIfAborted(hooks.signal);
 	const absPath = resolveToolPath(workDirAbsPath, params.path);
 	const info = await stat(absPath).catch(() => undefined);
@@ -96,7 +96,7 @@ function imageResult(
 	bytes: Buffer,
 	mimeType: string,
 	hooks: ReadHooks,
-): AgentToolResult<unknown> {
+): ToolResult<unknown> {
 	hooks.onUpdate?.(textResult(`image ${mimeType}, ${formatBytes(bytes.length)}`));
 	return {
 		content: [

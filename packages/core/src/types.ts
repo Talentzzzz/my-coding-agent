@@ -1,9 +1,10 @@
-// The engine's contract: what a tool is, what a run publishes, and the shapes the run-side hooks
-// answer with. These types used to live in `packages/loop`; the engine now lives in `agent.ts`, and
-// the shapes it hands across that file's boundary — to tools, to the hooks, to a session's own
-// subscribers — live here, in one module, so a tool and the engine cannot drift about what a result
-// is. The wire types are `protocol.ts`'s business and stay there; `QueueMode` is shared, and
-// `protocol.ts` re-exports this module's copy rather than declaring a second one.
+// The engine's contract: what a run publishes, and the shapes the run-side hooks answer with. These
+// types used to live in `packages/loop`; the engine now lives in `agent.ts`, and the shapes it hands
+// across that file's boundary — to the hooks, to a session's own subscribers — live here, in one
+// module. A tool and a tool result are `Tool` and `ToolResult`, defined beside the transport in
+// `llm/types.ts` and shared by request and run. The wire types are `protocol.ts`'s business and stay
+// there; `QueueMode` is shared, and `protocol.ts` re-exports this module's copy rather than
+// declaring a second one.
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -13,21 +14,15 @@ import type {
 	Message,
 	Model,
 	TextContent,
-	Tool,
+	ToolCall,
+	ToolResult,
 	ToolResultMessage,
 	Usage,
 } from "./llm/index.ts";
-import type { Static, TSchema } from "typebox";
 
-/**
- * Configuration for how tool calls from a single assistant message are executed.
- *
- * - "sequential": each tool call is prepared, executed, and finalized before the next one starts.
- * - "parallel": tool calls are prepared sequentially, then allowed tools execute concurrently.
- *   `tool_execution_end` is emitted in tool completion order after each tool is finalized,
- *   while tool-result message artifacts are emitted later in assistant source order.
- */
-export type ToolExecutionMode = "sequential" | "parallel";
+// The single names this module used to define with an `Agent` prefix, re-exported so it still
+// answers for them: the definitions live beside the transport, in `llm/types.ts`.
+export type { Context, Tool, ToolExecutionMode, ToolResult, ToolUpdateCallback } from "./llm/index.ts";
 
 /**
  * Controls how many queued user messages are injected when a run reaches a queue drain point.
@@ -36,9 +31,6 @@ export type ToolExecutionMode = "sequential" | "parallel";
  * - "one-at-a-time": drain and inject only the oldest queued message, leaving the rest queued for later drain points.
  */
 export type QueueMode = "all" | "one-at-a-time";
-
-/** A single tool call content block emitted by an assistant message. */
-export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
 
 /**
  * Result returned from `beforeToolCall`.
@@ -135,11 +127,11 @@ export interface BeforeToolCallContext {
 	/** The assistant message that requested the tool call. */
 	assistantMessage: AssistantMessage;
 	/** The raw tool call block from `assistantMessage.content`. */
-	toolCall: AgentToolCall;
+	toolCall: ToolCall;
 	/** Validated tool arguments for the target tool schema. */
 	args: unknown;
 	/** Current agent context at the time the tool call is prepared. */
-	context: AgentContext;
+	context: Context;
 }
 
 /** Context passed to `afterToolCall`. */
@@ -147,15 +139,15 @@ export interface AfterToolCallContext {
 	/** The assistant message that requested the tool call. */
 	assistantMessage: AssistantMessage;
 	/** The raw tool call block from `assistantMessage.content`. */
-	toolCall: AgentToolCall;
+	toolCall: ToolCall;
 	/** Validated tool arguments for the target tool schema. */
 	args: unknown;
 	/** The executed tool result before any `afterToolCall` overrides are applied. */
-	result: AgentToolResult<unknown>;
+	result: ToolResult<unknown>;
 	/** Whether the executed tool result is currently treated as an error. */
 	isError: boolean;
 	/** Current agent context at the time the tool call is finalized. */
-	context: AgentContext;
+	context: Context;
 }
 
 /**
@@ -178,94 +170,16 @@ export interface ToolCallHooks {
  */
 export interface AgentRequestUpdate {
 	/** Context for the next provider request. */
-	context?: AgentContext;
+	context?: Context;
 	/** Model for the next provider request. It carries the thinking level it is asked at. */
 	model?: Model;
 }
 
-/** Final or partial result produced by a tool. */
-export interface AgentToolResult<T = JsonValue | undefined> {
-	/** Text or image content returned to the model. */
-	content: (TextContent | ImageContent)[];
-	/** Arbitrary structured details for logs or UI rendering. */
-	details: T;
-	/**
-	 * Machine-readable result matching the tool's `outputSchema`, for programmatic callers. Not sent
-	 * to the model; `content` remains the model-facing result.
-	 */
-	structuredContent?: JsonValue;
-	/** Usage from the final tool execution itself, if available. Not used for main LLM context accounting. */
-	usage?: Usage;
-	/**
-	 * Report a failure without throwing. The model sees `content` as an error result, like a thrown
-	 * error, but `details` and `structuredContent` are kept for the UI and programmatic callers.
-	 */
-	isError?: boolean;
-	/**
-	 * Hint that the agent should stop after the current tool batch.
-	 * Early termination only happens when every finalized tool result in the batch sets this to true.
-	 */
-	terminate?: boolean;
-}
-
 /** Final outcome of a tool call after hooks ran. */
-export interface AgentToolCallOutcome {
-	toolCall: AgentToolCall;
-	result: AgentToolResult<unknown>;
+export interface ToolCallOutcome {
+	toolCall: ToolCall;
+	result: ToolResult<unknown>;
 	isError: boolean;
-}
-
-/**
- * Callback used by tools to stream partial execution updates.
- *
- * The callback is scoped to the current `execute()` invocation. Calls made after
- * the tool promise settles are ignored.
- */
-export type AgentToolUpdateCallback<T = unknown> = (partialResult: AgentToolResult<T>) => void;
-
-/** Tool definition used by the agent runtime. */
-export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = unknown> extends Tool<TParameters> {
-	/** Human-readable label for UI display. */
-	label: string;
-	/**
-	 * Optional compatibility shim for raw tool-call arguments before schema validation.
-	 * Must return an object that matches `TParameters`.
-	 */
-	prepareArguments?: (args: unknown) => Static<TParameters>;
-	/**
-	 * JSON Schema of `structuredContent` in successful results. Tools that declare it should always
-	 * set `structuredContent`.
-	 */
-	outputSchema?: TSchema;
-	/**
-	 * Execute the tool call. Throw on failure, or return a result with `isError: true`; do not only
-	 * describe the failure in `content`.
-	 */
-	execute: (
-		toolCallId: string,
-		params: Static<TParameters>,
-		signal?: AbortSignal,
-		onUpdate?: AgentToolUpdateCallback<TDetails>,
-	) => Promise<AgentToolResult<TDetails>>;
-	/** Recovery policy for an effect whose durable intent exists but whose outcome is unknown. */
-	replay?: "never" | "safe";
-	/**
-	 * Per-tool execution mode override.
-	 * - "sequential": this tool must execute one at a time with other tool calls.
-	 * - "parallel": this tool can execute concurrently with other tool calls.
-	 *
-	 * If omitted, the default execution mode applies.
-	 */
-	executionMode?: ToolExecutionMode;
-}
-
-/**
- * The transcript and tool set one run works over: the base {@link Context} shape whose tools are the
- * executable counterparts. The run calls these; a request only declares them.
- */
-export interface AgentContext extends Context {
-	/** Tools available for execution in this run. */
-	tools?: AgentTool<any>[];
 }
 
 /**

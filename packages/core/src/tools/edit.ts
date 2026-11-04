@@ -1,5 +1,5 @@
 import { readFile, stat, writeFile } from "node:fs/promises";
-import type { AgentTool } from "../types.ts";
+import type { Tool } from "../llm/index.ts";
 import { Type, type Static } from "typebox";
 import { displayToolPath, resolveToolPath } from "../workdir.ts";
 import { DIFF_MAX_ROWS, diffText, fileDiff } from "./diff.ts";
@@ -18,7 +18,7 @@ export type EditParams = Static<typeof parameters>;
  * `edit` replaces exact text. Line endings are normalized before matching, so a file with CRLF
  * endings still matches the LF text the model saw in `read`; the file keeps its original endings.
  */
-export function createEditTool(workDirAbsPath: string): AgentTool<typeof parameters> {
+export function createEditTool(workDirAbsPath: string): Tool<typeof parameters> {
 	return {
 		name: "edit",
 		label: "Edit",

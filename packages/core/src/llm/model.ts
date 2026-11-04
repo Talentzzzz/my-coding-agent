@@ -7,8 +7,8 @@ import type {
 	AnthropicMessagesCompat,
 	Api,
 	ChatTransport,
+	Context,
 	KnownApi,
-	LlmContext,
 	ModelCost,
 	ModelInputLimits,
 	ModelPromptCache,
@@ -165,7 +165,7 @@ export class Model<TApi extends Api = Api> {
 	 * the retry policy or a scripted answer replaces {@link Model.transport} rather than wrapping this
 	 * method, so there is exactly one way a request leaves this object.
 	 */
-	stream(context: LlmContext, options?: SimpleStreamOptions): AssistantMessageEventStream {
+	stream(context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 		return this.transport.stream(this, context, options);
 	}
 }

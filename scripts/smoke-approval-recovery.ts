@@ -31,7 +31,7 @@ import {
 	inMemorySettingManager,
 	type Agent,
 	type AgentEvent,
-	type AgentTool,
+	type Tool,
 	type Session,
 	type ModelConfig,
 	type ModelSelection,
@@ -251,7 +251,7 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 	const dangling = fakeAssistantMessage(fakeToolCall("read", { path: "a.txt" }, { id: "call_x" }));
 	// A tool the recovery pass can resolve, so a re-suspending gate is what stops it — not a missing
 	// tool, which the machine answers before any hook runs.
-	const readTool: AgentTool = {
+	const readTool: Tool = {
 		name: "read",
 		label: "read",
 		description: "reads a file",

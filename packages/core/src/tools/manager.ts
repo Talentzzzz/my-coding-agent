@@ -1,4 +1,4 @@
-import type { AgentTool } from "../types.ts";
+import type { Tool } from "../llm/index.ts";
 import { DEFAULT_MODE_NAME, type BashSettings, type ModeSettings } from "../config.ts";
 import { createBashTool } from "./bash.ts";
 import { createEditTool } from "./edit.ts";
@@ -34,11 +34,11 @@ export interface ToolRunContext {
  * One built-in tool as a definition: a factory over the run context.
  *
  * A definition is everything about the tool except the directory it acts in, which is why it is a
- * function and not an `AgentTool` — an `AgentTool` closes over its working directory, and a registry
+ * function and not a `Tool` — a `Tool` closes over its working directory, and a registry
  * that held those would hold a directory per session, which is the residency this file exists to
  * remove.
  */
-export type ToolDefinition = (run: ToolRunContext) => AgentTool<any>;
+export type ToolDefinition = (run: ToolRunContext) => Tool<any>;
 
 /**
  * The full set of tool definitions this build knows, read-only.
@@ -156,7 +156,7 @@ export function fillTools(modeName: string | undefined, context: ToolFillContext
  * built against the run context, then the tools a caller registered whose names are active.
  *
  * This is the one place "an active name" becomes "a tool the engine can call", and it builds rather
- * than returns stored tools — the working directory is a per-request value, so an `AgentTool` cannot
+ * than returns stored tools — the working directory is a per-request value, so a `Tool` cannot
  * outlive the request that asked for the list. Names this build does not know are skipped, the same
  * narrowing a recorded choice gets: a recorded set is read down to what can run, never thrown
  * at.
@@ -165,10 +165,10 @@ export function toolListFor(
 	definitions: ToolDefinitions,
 	state: ToolState,
 	run: ToolRunContext,
-	local: readonly AgentTool<any>[] = [],
-): AgentTool<any>[] {
+	local: readonly Tool<any>[] = [],
+): Tool<any>[] {
 	const active = new Set(state.activeToolNames);
-	const built: AgentTool<any>[] = [];
+	const built: Tool<any>[] = [];
 	for (const name of definitions.names()) {
 		if (!active.has(name)) continue;
 		const tool = definitions.get(name)?.(run);

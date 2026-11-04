@@ -1,5 +1,5 @@
 import { glob, readFile, stat } from "node:fs/promises";
-import type { AgentTool, AgentToolResult } from "../types.ts";
+import type { Tool, ToolResult } from "../llm/index.ts";
 import { resolve } from "node:path";
 import { Type, type Static } from "typebox";
 import { displayToolPath, resolveToolPath } from "../workdir.ts";
@@ -21,7 +21,7 @@ const parameters = Type.Object({
 
 export type GrepParams = Static<typeof parameters>;
 
-export function createGrepTool(workDirAbsPath: string): AgentTool<typeof parameters> {
+export function createGrepTool(workDirAbsPath: string): Tool<typeof parameters> {
 	return {
 		name: "grep",
 		label: "Grep",
@@ -38,8 +38,8 @@ export function createGrepTool(workDirAbsPath: string): AgentTool<typeof paramet
 export async function runGrep(
 	workDirAbsPath: string,
 	params: GrepParams,
-	hooks: { signal?: AbortSignal; onUpdate?: (partial: AgentToolResult<unknown>) => void } = {},
-): Promise<AgentToolResult<unknown>> {
+	hooks: { signal?: AbortSignal; onUpdate?: (partial: ToolResult<unknown>) => void } = {},
+): Promise<ToolResult<unknown>> {
 	throwIfAborted(hooks.signal);
 	const absRoot = params.path === undefined ? workDirAbsPath : resolveToolPath(workDirAbsPath, params.path);
 	const info = await stat(absRoot).catch(() => undefined);

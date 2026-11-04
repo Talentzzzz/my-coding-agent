@@ -204,7 +204,7 @@ export interface DiffLine {
 /**
  * What one tool call did to one file.
  *
- * A tool that changes a file answers with this in `AgentToolResult.details`, beside the text the
+ * A tool that changes a file answers with this in `ToolResult.details`, beside the text the
  * model reads: the text is written for a model, and this is written for the window. Both are the
  * same change, so the view never has to parse the text — and the tool's text stays short, which for
  * a whole-file `write` is the difference between naming the file and paying for it twice.

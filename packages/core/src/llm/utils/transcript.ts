@@ -9,7 +9,7 @@ import type { Message, SystemMessage, Tool } from "../types.ts";
  *
  * Named for what it makes, not for when: this runs before every request rather than once
  * per conversation, because the prompt is resent whole each time. Tools do not come through here —
- * they are a request parameter, carried by `LlmContext.tools`.
+ * they are a request parameter, carried by `Context.tools`.
  */
 export function createSystemMessage(systemPrompt: string | undefined): SystemMessage | undefined {
 	if (systemPrompt === undefined || systemPrompt.length === 0) return undefined;

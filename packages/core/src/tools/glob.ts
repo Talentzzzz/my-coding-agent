@@ -1,5 +1,5 @@
 import { glob, stat } from "node:fs/promises";
-import type { AgentTool } from "../types.ts";
+import type { Tool } from "../llm/index.ts";
 import { isAbsolute, resolve } from "node:path";
 import { Type, type Static } from "typebox";
 import { displayToolPath, resolveToolPath } from "../workdir.ts";
@@ -28,7 +28,7 @@ const parameters = Type.Object({
 
 export type GlobParams = Static<typeof parameters>;
 
-export function createGlobTool(workDirAbsPath: string): AgentTool<typeof parameters> {
+export function createGlobTool(workDirAbsPath: string): Tool<typeof parameters> {
 	return {
 		name: "glob",
 		label: "Glob",

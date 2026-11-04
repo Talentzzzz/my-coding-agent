@@ -26,7 +26,7 @@ import type {
 	StopReason,
 	StreamFunction,
 	StreamOptions,
-	LlmContext,
+	Context,
 	TextContent,
 	ThinkingContent,
 	Tool,
@@ -441,7 +441,7 @@ async function* iterateAnthropicEvents(
  */
 export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> = (
 	model: Model<"anthropic-messages">,
-	context: LlmContext,
+	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	const apiKey = resolveApiKey(model, options);
@@ -733,7 +733,7 @@ function createClient(
 
 function getBetaFeatures(
 	model: Model<"anthropic-messages">,
-	context: LlmContext,
+	context: Context,
 	options?: AnthropicOptions,
 ): NonNullable<MessageCreateParamsStreaming["betas"]> {
 	let configuredFeatures: string | null | undefined;
@@ -761,7 +761,7 @@ function getBetaFeatures(
 
 function buildParams(
 	model: Model<"anthropic-messages">,
-	context: LlmContext,
+	context: Context,
 	options?: AnthropicOptions,
 ): MessageCreateParamsStreaming {
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention, options?.env);
@@ -802,7 +802,7 @@ function buildParams(
 	const toolCacheControl = compat.supportsCacheControlOnTools ? cacheControl : undefined;
 	// Every request carries the complete current list, so a tool switched on mid-session reaches the
 	// model on the next one without anything having to be recorded in the transcript.
-	const tools = context.tools ?? [];
+	const tools = context.tools;
 	if (tools.length > 0) {
 		params.tools = convertTools(
 			tools,
@@ -1053,9 +1053,9 @@ function mergeAdjacentUserMessages(params: MessageParam[]): MessageParam[] {
 
 function shouldUseFineGrainedToolStreamingBeta(
 	model: Model<"anthropic-messages">,
-	context: LlmContext,
+	context: Context,
 ): boolean {
-	return (context.tools ?? []).length > 0 && !getAnthropicCompat(model).supportsEagerToolInputStreaming;
+	return context.tools.length > 0 && !getAnthropicCompat(model).supportsEagerToolInputStreaming;
 }
 
 // Keywords Anthropic strict tool use rejects with a 400 for the whole request.

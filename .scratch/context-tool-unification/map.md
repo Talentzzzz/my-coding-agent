@@ -41,6 +41,10 @@ Label: wayfinder:map
 - [01](issues/01-llm-fold-and-imports.md) resolved(045140a):llm 目录折叠进 `packages/core/src/llm/`,
   全树改线完毕,check+smoke 绿、零行为变化;docs 引用留给 03。前置:工作区在制的
   loop-manager/SettingManager 线先原样入库(511fc09)。
+- [02](issues/02-single-context-tool.md) resolved(本笔):`Tool`/`Context` 合一落进
+  `core/src/llm/types.ts`,`LlmContext` 与全部 Agent 撞名前缀清零,`Context.tools` 必填;
+  check+smoke 全套绿、零行为变化;docs 引用同 01 留给 03;`toToolDeclaration` 的类型诚实性
+  后果留观(票 Answer 有记)。
 
 ## Not yet specified
 

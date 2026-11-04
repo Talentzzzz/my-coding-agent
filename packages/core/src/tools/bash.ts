@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import type { AgentTool, AgentToolResult } from "../types.ts";
+import type { Tool, ToolResult, ToolUpdateCallback } from "../llm/index.ts";
 import { Type, type Static } from "typebox";
 import { DEFAULT_BASH_SETTINGS, type BashSettings } from "../config.ts";
 import { defaultLauncher } from "../shell.ts";
@@ -38,7 +38,7 @@ export type BashParams = Static<typeof parameters>;
  * anything being rebuilt by hand. A caller that names none — a test building the tool directly —
  * runs on the defaults.
  */
-export function createBashTool(workDirAbsPath: string, timeouts?: BashSettings): AgentTool<typeof parameters> {
+export function createBashTool(workDirAbsPath: string, timeouts?: BashSettings): Tool<typeof parameters> {
 	return {
 		name: "bash",
 		label: "Bash",
@@ -53,13 +53,13 @@ export function createBashTool(workDirAbsPath: string, timeouts?: BashSettings):
 }
 
 /**
- * Tools pass a callback that accepts a partial `AgentToolResult`. `AgentTool` from pi-agent-core
- * types `onUpdate` as `AgentToolUpdateCallback<TDetails>`, so the wrapper in `tools/index.ts`
- * narrows it to this shape.
+ * Tools pass a callback that accepts a partial `ToolResult`. `Tool` — defined beside the transport
+ * in `llm/types.ts` — types `onUpdate` as `ToolUpdateCallback<TDetails>`, so the wrapper in
+ * `tools/index.ts` narrows it to this shape.
  */
 export interface BashHooks {
 	signal?: AbortSignal;
-	onUpdate?: (partial: AgentToolResult<unknown>) => void;
+	onUpdate?: (partial: ToolResult<unknown>) => void;
 	/** The timeouts to run under; the defaults when the caller named none. */
 	timeouts?: BashSettings;
 }
@@ -68,14 +68,14 @@ export async function runBash(
 	workDirAbsPath: string,
 	params: BashParams,
 	hooks: BashHooks = {},
-): Promise<AgentToolResult<unknown>> {
+): Promise<ToolResult<unknown>> {
 	throwIfAborted(hooks.signal);
 	const timeouts = hooks.timeouts ?? DEFAULT_BASH_SETTINGS;
 	const capped = params.timeout_ms !== undefined && params.timeout_ms > timeouts.maxTimeoutMs;
 	const timeoutMs = Math.min(params.timeout_ms ?? timeouts.defaultTimeoutMs, timeouts.maxTimeoutMs);
 	const launcher = defaultLauncher();
 
-	return new Promise<AgentToolResult<unknown>>((resolvePromise, rejectPromise) => {
+	return new Promise<ToolResult<unknown>>((resolvePromise, rejectPromise) => {
 		const child = spawn(launcher.file, [...launcher.args, params.command], {
 			cwd: workDirAbsPath,
 			windowsHide: true,

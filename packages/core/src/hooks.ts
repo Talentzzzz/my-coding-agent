@@ -1,10 +1,9 @@
-import type { AgentToolResult } from "./types.ts";
-import type { Message } from "./llm/index.ts";
+import type { Message, ToolResult } from "./llm/index.ts";
 import { truncate } from "./tools/truncate.ts";
 import { spillPathFor, spillText, spillView, writeSpillFile, SPILL_KEEP_CHARS } from "./context/spill.ts";
 
 /** How a tool result carries its content: text and image blocks, in order. */
-export type ToolResultContent = AgentToolResult<unknown>["content"];
+export type ToolResultContent = ToolResult<unknown>["content"];
 
 /** A handler's answer, or a promise of it: the approval gate cannot answer before the user does. */
 type MaybePromise<T> = T | Promise<T>;

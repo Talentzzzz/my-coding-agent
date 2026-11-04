@@ -5,13 +5,16 @@ import {
 	createAssistantMessageEventStream,
 	createSystemMessage,
 	isContextOverflow,
+	type Context,
 	type JsonValue,
-	type LlmContext,
 	type Message,
 	type RetryCallbacks,
 	retryAssistantCall,
 	type SimpleStreamOptions,
 	toToolDeclaration,
+	type Tool,
+	type ToolCall,
+	type ToolResult,
 	type ToolResultMessage,
 	type Usage,
 	validateToolArguments,
@@ -63,17 +66,13 @@ import type { SettingManager } from "./setting-manager.ts";
 import type { ToolRegistry, ToolRunContext, ToolState } from "./tools/index.ts";
 import type {
 	AfterToolCallResult,
-	AgentContext,
 	AgentEvent,
 	AgentRequestUpdate,
-	AgentTool,
-	AgentToolCall,
-	AgentToolCallOutcome,
-	AgentToolResult,
 	BeforeToolCallResult,
 	RunRecoveryOptions,
 	ToolCallAnswer,
 	ToolCallHooks,
+	ToolCallOutcome,
 } from "./types.ts";
 
 // The event surface is defined beside the fan-out that publishes it (`session/events.ts`) and
@@ -995,7 +994,7 @@ export class Agent {
 
 		try {
 			const newMessages: Message[] = [];
-			let currentContext: AgentContext = {
+			let currentContext: Context = {
 				messages: [...sessionManager.buildSessionContext(session).messages],
 				tools: [...tools.active(toolStateOf(sessionManager, session, settings, tools), this.runContext(state))],
 			};
@@ -1088,7 +1087,7 @@ export class Agent {
 						return newMessages;
 					}
 
-					const toolCalls = message.content.filter((block): block is AgentToolCall => block.type === "toolCall");
+					const toolCalls = message.content.filter((block): block is ToolCall => block.type === "toolCall");
 
 					const toolResults: ToolResultMessage[] = [];
 					hasMoreToolCalls = false;
@@ -1216,7 +1215,7 @@ export class Agent {
 	 */
 	private async prepareRequest(
 		transport: ChatTransport,
-		context: AgentContext,
+		context: Context,
 		signal: AbortSignal | undefined,
 		state: AgentState,
 	): Promise<AgentRequestUpdate> {
@@ -1368,7 +1367,7 @@ export class Agent {
 		state: AgentState,
 		outer: AssistantMessageEventStream,
 		model: Model,
-		context: LlmContext,
+		context: Context,
 		options: SimpleStreamOptions | undefined,
 	): Promise<void> {
 		const { settings, api } = this;
@@ -1532,7 +1531,7 @@ export class Agent {
 				{ role: "user", content: [{ type: "text", text: request.prompt }], timestamp: Date.now() },
 			];
 			return model
-				.stream({ messages, system: createSystemMessage(request.systemPrompt) }, {
+				.stream({ messages, system: createSystemMessage(request.systemPrompt), tools: [] }, {
 					// The row's key, said here rather than only carried on the model: this is the one call
 					// that does not travel through the engine, and the engine is what copies the key into options.
 					apiKey: model.apiKey,
@@ -1685,7 +1684,7 @@ export class Agent {
 		sessionId: string,
 		toolCallId: string,
 		toolName: string,
-		result: AgentToolResult<unknown>,
+		result: ToolResult<unknown>,
 		isError: boolean,
 	): Promise<AfterToolCallResult | undefined> {
 		const decided = await this.hooks.apply("after_tool", {
@@ -1805,8 +1804,8 @@ type ExecutedToolCallBatch = {
 
 type PreparedToolCall = {
 	kind: "prepared";
-	toolCall: AgentToolCall;
-	tool: AgentTool<any>;
+	toolCall: ToolCall;
+	tool: Tool<any>;
 	args: unknown;
 };
 
@@ -1816,18 +1815,18 @@ type SuspendedToolCall = {
 
 type ImmediateToolCallOutcome = {
 	kind: "immediate";
-	result: AgentToolResult<unknown>;
+	result: ToolResult<unknown>;
 	isError: boolean;
 };
 
 type ExecutedToolCallOutcome = {
-	result: AgentToolResult<unknown>;
+	result: ToolResult<unknown>;
 	isError: boolean;
 };
 
-type ToolUpdateSink = (partialResult: AgentToolResult<unknown>) => Promise<void> | void;
+type ToolUpdateSink = (partialResult: ToolResult<unknown>) => Promise<void> | void;
 
-type FinalizedToolCallEntry = AgentToolCallOutcome | (() => Promise<AgentToolCallOutcome>);
+type FinalizedToolCallEntry = ToolCallOutcome | (() => Promise<ToolCallOutcome>);
 
 /**
  * Stream one assistant response from the model, into the transcript and out through the sink.
@@ -1840,17 +1839,17 @@ type FinalizedToolCallEntry = AgentToolCallOutcome | (() => Promise<AgentToolCal
  * when the request carries no explicit `system`.
  */
 async function streamAssistantResponse(
-	context: AgentContext,
+	context: Context,
 	model: Model,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<AssistantMessage> {
-	const llmContext: LlmContext = {
+	const requestContext: Context = {
 		messages: context.messages,
-		tools: context.tools?.map((tool) => toToolDeclaration(tool)),
+		tools: context.tools.map((tool) => toToolDeclaration(tool)),
 	};
 
-	const response = await model.stream(llmContext, {
+	const response = await model.stream(requestContext, {
 		apiKey: model.apiKey,
 		signal,
 	});
@@ -1929,7 +1928,7 @@ async function streamAssistantResponse(
  * them are safe to execute; report each as an error so the model can re-issue them.
  */
 async function failToolCallsFromTruncatedMessage(
-	toolCalls: AgentToolCall[],
+	toolCalls: ToolCall[],
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const messages: ToolResultMessage[] = [];
@@ -1940,7 +1939,7 @@ async function failToolCallsFromTruncatedMessage(
 			toolName: toolCall.name,
 			args: toolCall.arguments,
 		});
-		const finalized: AgentToolCallOutcome = {
+		const finalized: ToolCallOutcome = {
 			toolCall,
 			result: createErrorToolResult(
 				`Tool call "${toolCall.name}" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.`,
@@ -1957,7 +1956,7 @@ async function failToolCallsFromTruncatedMessage(
 
 /** One tool call the transcript still waits on: the call block, and the message that issued it. */
 export type DanglingToolCall = {
-	toolCall: AgentToolCall;
+	toolCall: ToolCall;
 	assistantMessage: AssistantMessage;
 };
 
@@ -2004,7 +2003,7 @@ export function danglingToolCallsOf(messages: Message[]): DanglingToolCall[] {
  * pins this contract calls it with a transcript and a set of answers, and nothing else.
  */
 export async function recoverPendingToolCalls(
-	currentContext: AgentContext,
+	currentContext: Context,
 	dangling: DanglingToolCall[],
 	recovery: RunRecoveryOptions | undefined,
 	hooks: ToolCallHooks,
@@ -2028,7 +2027,7 @@ export async function recoverPendingToolCalls(
 				toolName: toolCall.name,
 				args: toolCall.arguments,
 			});
-			let finalized: AgentToolCallOutcome;
+			let finalized: ToolCallOutcome;
 			if (preparation.kind === "immediate") {
 				finalized = { toolCall, result: preparation.result, isError: preparation.isError };
 			} else {
@@ -2055,7 +2054,7 @@ export async function recoverPendingToolCalls(
 
 /** Close one unanswered call with a synthesized error result, carrying the events of a live batch. */
 async function synthesizeToolResult(
-	toolCall: AgentToolCall,
+	toolCall: ToolCall,
 	text: string,
 	emit: AgentEventSink,
 ): Promise<ToolResultMessage> {
@@ -2065,7 +2064,7 @@ async function synthesizeToolResult(
 		toolName: toolCall.name,
 		args: toolCall.arguments,
 	});
-	const finalized: AgentToolCallOutcome = {
+	const finalized: ToolCallOutcome = {
 		toolCall,
 		result: createErrorToolResult(text),
 		isError: true,
@@ -2081,15 +2080,15 @@ async function synthesizeToolResult(
  * otherwise. Both paths prepare the calls in source order and write their results as messages.
  */
 async function executeToolCalls(
-	currentContext: AgentContext,
+	currentContext: Context,
 	assistantMessage: AssistantMessage,
 	hooks: ToolCallHooks,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
-	const toolCalls = assistantMessage.content.filter((block): block is AgentToolCall => block.type === "toolCall");
+	const toolCalls = assistantMessage.content.filter((block): block is ToolCall => block.type === "toolCall");
 	const hasSequentialToolCall = toolCalls.some(
-		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
+		(tc) => currentContext.tools.find((t) => t.name === tc.name)?.executionMode === "sequential",
 	);
 	if (hasSequentialToolCall) {
 		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, hooks, signal, emit);
@@ -2098,14 +2097,14 @@ async function executeToolCalls(
 }
 
 async function executeToolCallsSequential(
-	currentContext: AgentContext,
+	currentContext: Context,
 	assistantMessage: AssistantMessage,
-	toolCalls: AgentToolCall[],
+	toolCalls: ToolCall[],
 	hooks: ToolCallHooks,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
-	const finalizedCalls: AgentToolCallOutcome[] = [];
+	const finalizedCalls: ToolCallOutcome[] = [];
 	const messages: ToolResultMessage[] = [];
 
 	for (const toolCall of toolCalls) {
@@ -2123,7 +2122,7 @@ async function executeToolCallsSequential(
 			args: toolCall.arguments,
 		});
 
-		let finalized: AgentToolCallOutcome;
+		let finalized: ToolCallOutcome;
 		if (preparation.kind === "immediate") {
 			finalized = {
 				toolCall,
@@ -2160,9 +2159,9 @@ async function executeToolCallsSequential(
 }
 
 async function executeToolCallsParallel(
-	currentContext: AgentContext,
+	currentContext: Context,
 	assistantMessage: AssistantMessage,
-	toolCalls: AgentToolCall[],
+	toolCalls: ToolCall[],
 	hooks: ToolCallHooks,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
@@ -2191,7 +2190,7 @@ async function executeToolCallsParallel(
 				toolCall,
 				result: preparation.result,
 				isError: preparation.isError,
-			} satisfies AgentToolCallOutcome;
+			} satisfies ToolCallOutcome;
 			await emitToolExecutionEnd(finalized, emit);
 			finalizedCalls.push(finalized);
 			if (signal?.aborted) {
@@ -2206,7 +2205,7 @@ async function executeToolCallsParallel(
 					toolCall,
 					result: createErrorToolResult("Operation aborted"),
 					isError: true,
-				} satisfies AgentToolCallOutcome;
+				} satisfies ToolCallOutcome;
 				await emitToolExecutionEnd(finalized, emit);
 				return finalized;
 			}
@@ -2244,11 +2243,11 @@ async function executeToolCallsParallel(
 	};
 }
 
-function shouldTerminateToolBatch(finalizedCalls: AgentToolCallOutcome[]): boolean {
+function shouldTerminateToolBatch(finalizedCalls: ToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
 }
 
-function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {
+function prepareToolCallArguments(tool: Tool<any>, toolCall: ToolCall): ToolCall {
 	if (!tool.prepareArguments) {
 		return toolCall;
 	}
@@ -2263,12 +2262,12 @@ function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall)
 }
 
 async function prepareToolCall(
-	currentContext: AgentContext,
+	currentContext: Context,
 	assistantMessage: AssistantMessage,
-	toolCall: AgentToolCall,
+	toolCall: ToolCall,
 	hooks: ToolCallHooks,
 	signal: AbortSignal | undefined,
-	tools: readonly AgentTool<any>[] = currentContext.tools ?? [],
+	tools: readonly Tool<any>[] = currentContext.tools,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome | SuspendedToolCall> {
 	const tool = tools.find((t) => t.name === toolCall.name);
 	if (!tool) {
@@ -2339,7 +2338,7 @@ async function prepareToolCall(
 	}
 }
 
-function emitToolExecutionUpdate(toolCall: AgentToolCall, emit: AgentEventSink): ToolUpdateSink {
+function emitToolExecutionUpdate(toolCall: ToolCall, emit: AgentEventSink): ToolUpdateSink {
 	return (partialResult) =>
 		emit({
 			type: "tool_execution_update",
@@ -2353,11 +2352,11 @@ function emitToolExecutionUpdate(toolCall: AgentToolCall, emit: AgentEventSink):
 /** Options for {@link runToolCall}. */
 interface RunToolCallOptions extends ToolCallHooks {
 	/** Tools the call resolves against. */
-	tools: readonly AgentTool<any>[];
+	tools: readonly Tool<any>[];
 	/** Passed to the hooks as the message that issued the call. */
 	assistantMessage: AssistantMessage;
 	/** Passed to the hooks as the current agent context. */
-	context: AgentContext;
+	context: Context;
 	signal?: AbortSignal;
 	onUpdate?: ToolUpdateSink;
 }
@@ -2372,7 +2371,7 @@ interface RunToolCallOptions extends ToolCallHooks {
  * errors come back as `isError: true`. Nothing in this build calls it yet — a tool that wants to
  * nest another call would — so it stays internal to this file rather than exported.
  */
-async function runToolCall(toolCall: AgentToolCall, options: RunToolCallOptions): Promise<AgentToolCallOutcome> {
+async function runToolCall(toolCall: ToolCall, options: RunToolCallOptions): Promise<ToolCallOutcome> {
 	const { assistantMessage, context, signal } = options;
 	const preparation = await prepareToolCall(context, assistantMessage, toolCall, options, signal, options.tools);
 	if (preparation.kind === "immediate") {
@@ -2425,13 +2424,13 @@ async function executePreparedToolCall(
 }
 
 async function finalizeExecutedToolCall(
-	currentContext: AgentContext,
+	currentContext: Context,
 	assistantMessage: AssistantMessage,
 	prepared: PreparedToolCall,
 	executed: ExecutedToolCallOutcome,
 	hooks: ToolCallHooks,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolCallOutcome> {
+): Promise<ToolCallOutcome> {
 	let result = executed.result;
 	let isError = executed.isError;
 
@@ -2476,14 +2475,14 @@ async function finalizeExecutedToolCall(
 	};
 }
 
-function createErrorToolResult(message: string): AgentToolResult<unknown> {
+function createErrorToolResult(message: string): ToolResult<unknown> {
 	return {
 		content: [{ type: "text", text: message }],
 		details: {},
 	};
 }
 
-async function emitToolExecutionEnd(finalized: AgentToolCallOutcome, emit: AgentEventSink): Promise<void> {
+async function emitToolExecutionEnd(finalized: ToolCallOutcome, emit: AgentEventSink): Promise<void> {
 	await emit({
 		type: "tool_execution_end",
 		toolCallId: finalized.toolCall.id,
@@ -2493,7 +2492,7 @@ async function emitToolExecutionEnd(finalized: AgentToolCallOutcome, emit: Agent
 	});
 }
 
-function createToolResultMessage(finalized: AgentToolCallOutcome): ToolResultMessage {
+function createToolResultMessage(finalized: ToolCallOutcome): ToolResultMessage {
 	return {
 		role: "toolResult",
 		toolCallId: finalized.toolCall.id,

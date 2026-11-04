@@ -17,7 +17,7 @@ import {
 	toolDefinitions,
 	type Agent,
 	type AgentSessionEvent,
-	type AgentTool,
+	type Tool,
 	type FileDiff,
 	type Message,
 	type MessageEntry,
@@ -1270,7 +1270,7 @@ async function exerciseToolRegistry(): Promise<void> {
 	check("while names() keeps every definition", registry.names().length === 6, String(registry.names().length));
 	check("and a name this build does not know is dropped by the read, not thrown at", JSON.stringify(registry.activeNames({ activeToolNames: ["read", "nope"] })) === JSON.stringify(["read"]), JSON.stringify(registry.activeNames({ activeToolNames: ["read", "nope"] })));
 
-	const noop: AgentTool<any> = {
+	const noop: Tool<any> = {
 		name: "noop",
 		label: "noop",
 		description: "Does nothing; registered by the smoke test.",
