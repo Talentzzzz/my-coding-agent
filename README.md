@@ -1,7 +1,7 @@
 # my-coding-agent
 
 一个在你本机、自己的桌面窗口里运行的编码 agent。pi 的一个 package 作为裁剪副本收进本仓库：`packages/llm`（`@my-agent/llm`，来自
-[`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层——只取本项目真正调用的部分，不是完整的 package。运行引擎是我们的代码：它原先是 pi 循环的副本，已并入 `packages/core/src/agent.ts`（[ADR-0008](docs/adr/0008-loop-merged-into-agent.md)），不再跟踪上游。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳也都是我们自己的。
+[`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层——只取本项目真正调用的部分，不是完整的 package。运行引擎是我们的代码：它原先是 pi 循环的副本，先并入 core（[ADR-0008](docs/adr/0008-loop-merged-into-agent.md)），现在是 `packages/core/src/loop-manager.ts` 里的一个对象（[ADR-0012](docs/adr/0012-loop-manager-object.md)），不再跟踪上游。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳也都是我们自己的。
 
 agent 跑在一个 Node 进程里，而不是渲染进程里：它持有你的 API 密钥，而它的本职就是读写文件。窗口是一个客户端——它用 REST 发送 prompt，并从一条常驻 WebSocket 通道上读取 agent 的输出，这也是为什么每一条命令同样能用 `curl` 或脚本发。[docs/architecture.md](docs/architecture.md) 是设计文档：请求流程、API 表、会话格式，以及每一块为什么在那个位置。
 
@@ -164,17 +164,18 @@ MY_AGENT_URL=http://127.0.0.1:8080 node scripts/smoke-api.ts
 
 ```ts
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./scripts/fake-transport.ts";
-import type { ChatTransport, ModelConfig, ModelSource } from "@my-agent/core";
+import { createSession, inMemorySettingManager } from "@my-agent/core";
+import type { ChatTransport, ModelConfig } from "@my-agent/core";
 
 const fake = createFakeTransport();
 fake.setResponses([fakeAssistantMessage("hello"), fakeToolCall("read", { path: "a.txt" }), fakeAssistantMessage("done")]);
 
 const rows: ModelConfig[] = [{ name: "test", baseUrl: "http://127.0.0.1:1/v1", apiKey: "unused", id: "test-model", contextWindow: 200_000, maxTokens: 8_192 }];
-const models: ModelSource = { list: () => rows };
+const settings = inMemorySettingManager({ approval: { read: true } }, rows);
 const api: ChatTransport = fake.api;
 ```
 
-每次供应商调用一个响应、按顺序，所以一次运行可以按需流式、调工具、失败或卡住。在一个临时目录上、用 `openAgent({ workDirAbsPath, sessionState, models, settingsState, api? })` 构建会话——`sessionState` 由 `createSessionState(root)` 交出，`models` 只是一个 `{ list: () => rows }`——就像 `scripts/smoke-tools.ts` 那样，并抄走它的**两个坑**：`finally` 必须**同时**删除临时目录和 `sessionDir(root)`，否则每次运行都会留下一个孤儿 store；以及除非这个测试就是在测持久化，否则传 `settingsState: inMemorySettingsState({...})`。
+每次供应商调用一个响应、按顺序，所以一次运行可以按需流式、调工具、失败或卡住。在一个临时目录上、用 `openAgent({ workDirAbsPath, session, settings, api? })` 构建会话——`session` 由 `createSession(root)` 交出，`settings` 是一只内存 manager（设置与模型行共用的门，`inMemorySettingManager(settings, rows)`），就像 `scripts/smoke-tools.ts` 那样，并抄走它的**两个坑**：`finally` 必须**同时**删除临时目录和 `sessionDir(root)`，否则每次运行都会留下一个孤儿 store；以及除非这个测试就是在测持久化，否则别用缺省的文件版 manager。
 
 看一眼真窗口里客户端到底构建了什么（而不是只看一张图），跑 `packages/desktop/scripts/inspect-app`：它进程内启动服务器、加载真客户端，dump 出侧栏、标题、状态行与设置面板的文本，并演练一次会话切换。`--screenshot` 那条路截不到它——见上面的说明。
 
@@ -185,7 +186,7 @@ env -u ELECTRON_RUN_AS_NODE packages/desktop/node_modules/electron/dist/electron
 
 ## 状态
 
-运行引擎（`Agent.runEngine`：多轮循环、steering、工具执行与恢复）、六个工具与那对委派工具、会话持久化与恢复、压缩、审批闸门、会话替换、REST API 加一条常驻 WebSocket 通道（`/mux`，同时订阅多个会话、断线判活与重连、写侧背压都有界）、桌面外壳、窗口客户端、以及会话树——会话内部分支和侧边栏里嵌套的 fork——全部可用；类型检查与 smoke 脚本通过（清单见上，均不需要供应商密钥；`smoke:boot` 另自带封闭的 agent home，不读机器上的用户配置）。
+运行引擎（`Agent.run`：多轮循环、steering、工具执行与恢复）、六个工具与那对委派工具、会话持久化与恢复、压缩、审批闸门、会话替换、REST API 加一条常驻 WebSocket 通道（`/mux`，同时订阅多个会话、断线判活与重连、写侧背压都有界）、桌面外壳、窗口客户端、以及会话树——会话内部分支和侧边栏里嵌套的 fork——全部可用；类型检查与 smoke 脚本通过（清单见上，均不需要供应商密钥；`smoke:boot` 另自带封闭的 agent home，不读机器上的用户配置）。
 
 **未验证**：第一次真实的模型往返，以及因此只有真实供应商才会走到的部分——token 流式、一次重试退避、压缩的摘要调用。这台机器上没有配置供应商密钥；它们周围的一切由脚本化模型覆盖，而指向一个死端点的一行已经被驱动到一次真实的连接错误。
 

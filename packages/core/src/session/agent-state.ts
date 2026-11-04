@@ -1,6 +1,5 @@
 import type { Message, Model } from "@my-agent/llm";
-import type { SettingsState } from "../settings-manager.ts";
-import { getFollowUpMode, getSteeringMode } from "../settings-manager.ts";
+import type { QueueMode } from "../protocol.ts";
 import type { SessionListener, SessionEventListener } from "../agent.ts";
 import type { Session } from "./session-manager.ts";
 import { PendingMessageQueue } from "./queues.ts";
@@ -22,23 +21,22 @@ export interface ActiveRun {
 }
 
 /**
- * One session this process holds, as a single bag: the durable half, the settings it was opened
- * against, its subscribers, and the live half (ADR-0011).
+ * One session this process holds, as a single bag: the durable half, its subscribers, and the live
+ * half (ADR-0011).
  *
  * The registry entry this replaces carried the live half and the assembly side by side; the state
  * carries them as one object because the two halves answer one id. The durable half is the session's
- * own bag — the ledger's replayed state, not a copy — and the settings are the bag every settings
- * call in this session passes, exactly what the open resolved. A process restart drops the whole
- * state on purpose: the durable half replays from the files, the live half is the part that was
- * nowhere on disk, and the settings are re-resolved by the reopen.
+ * own bag — the ledger's replayed state, not a copy. The settings are deliberately *not* here: they
+ * are read live through the {@link SettingManager} the orchestrator holds, so a settings edit reaches
+ * every session over the directory without anything being reopened or refreshed. A process restart
+ * drops the whole state on purpose: the durable half replays from the files, the live half is the
+ * part that was nowhere on disk.
  */
 export interface AgentState {
 	/** Subscribers to the session's state, attached through the session's `onChange`. */
 	readonly listeners: Set<SessionListener>;
 	/** Subscribers to the session's events, attached through the session's `onEvent`. */
 	readonly eventListeners: Set<SessionEventListener>;
-	/** The directory's settings, as the bag every settings call in this session passes. */
-	readonly setting: SettingsState;
 	/** The session's durable half: the bag the ledger replays into and every session read answers from. */
 	readonly session: Session;
 	/** The session's live half: what is in progress and nowhere on disk. */
@@ -82,13 +80,14 @@ export interface Live {
 /**
  * Build a session's live half, empty.
  *
- * The queue modes are the settings' answer at creation time; a config patch that moves either mode
- * later writes it onto the queue in place, so nothing here is captured for good.
+ * The queue modes arrive as arguments — the settings' answer at creation time, read by the caller
+ * through its own {@link SettingManager}; a config patch that moves either mode later writes it onto
+ * the queue in place, so nothing here is captured for good.
  */
-export function createLive(setting: SettingsState): Live {
+export function createLive(steeringMode: QueueMode, followUpMode: QueueMode): Live {
 	return {
-		steeringQueue: new PendingMessageQueue(getSteeringMode(setting)),
-		followUpQueue: new PendingMessageQueue(getFollowUpMode(setting)),
+		steeringQueue: new PendingMessageQueue(steeringMode),
+		followUpQueue: new PendingMessageQueue(followUpMode),
 		partial: undefined,
 		retrying: false,
 		retryAttempt: 0,
@@ -97,19 +96,18 @@ export function createLive(setting: SettingsState): Live {
 }
 
 /**
- * Assemble one session's state from its three already-resolved halves.
+ * Assemble one session's state from its two already-resolved halves.
  *
- * The build chain this sits at the end of is `fillSession` → `fillSettings` → `createLive`, and the
- * order is not free: the session names the model and thinking level it runs on, so it is filled
- * first and the settings only provide the defaults a choice may override. The subscriber sets start
- * empty — attaching is the session's own business — and the live half arrives built, because its
- * queue modes are the settings' answer and this call only gathers what the chain produced.
+ * The build chain this sits at the end of is `fillSession` → `createLive`, and the order is not
+ * free: the session names the model and thinking level it runs on, so it is filled first. The
+ * subscriber sets start empty — attaching is the session's own business — and the live half arrives
+ * built, because its queue modes are the settings' answer and this call only gathers what the chain
+ * produced.
  */
-export function createAgentState(session: Session, setting: SettingsState, live: Live): AgentState {
+export function createAgentState(session: Session, live: Live): AgentState {
 	return {
 		listeners: new Set(),
 		eventListeners: new Set(),
-		setting,
 		session,
 		live,
 	};

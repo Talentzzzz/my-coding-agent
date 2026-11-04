@@ -23,7 +23,6 @@ import {
 	unconfiguredStream,
 	ModelConfigStore,
 	type ModelChoice,
-	type ModelSource,
 	type ModelConfig,
 } from "@my-agent/core";
 
@@ -60,8 +59,7 @@ try {
 	heading("a row becomes a runnable model");
 	{
 		const rows = [row()];
-		const source: ModelSource = { list: () => rows };
-		const resolved = source.list().find((userModel) => userModel.name === "mine");
+		const resolved = rows.find((userModel) => userModel.name === "mine");
 		check("the row is found by the name the user typed", resolved?.name === "mine", String(resolved?.name));
 
 		const model = createModel(resolved!);
@@ -72,36 +70,34 @@ try {
 		check("and its key, so the request carries its own credential", model.apiKey === "secret", String(model.apiKey));
 		check("and is not the placeholder", !isUnconfigured(model));
 
-		check("an unknown name resolves to nothing", source.list().find((userModel) => userModel.name === "nope") === undefined);
+		check("an unknown name resolves to nothing", rows.find((userModel) => userModel.name === "nope") === undefined);
 	}
 
 	heading("the row behind a model is found by the name it carries");
 	{
 		const rows = [row()];
-		const source: ModelSource = { list: () => rows };
 		const model = createModel(rows[0]!);
-		check("the model's row is found by the name it carries", source.list().find((userModel) => userModel.name === model.name)?.apiKey === "secret");
-		check("and a model with no row behind it has none", source.list().find((userModel) => userModel.name === placeholderModel().name) === undefined);
+		check("the model's row is found by the name it carries", rows.find((userModel) => userModel.name === model.name)?.apiKey === "secret");
+		check("and a model with no row behind it has none", rows.find((userModel) => userModel.name === placeholderModel().name) === undefined);
 		// Renaming the row is exactly what breaks the link, which is the documented cost of a name being
 		// an identity: the model that was built from the old name no longer finds anything.
 		rows[0]!.name = "renamed";
 		const stale = createModel(row({ name: "mine" }));
-		check("a renamed row stops answering to the old name", source.list().find((userModel) => userModel.name === stale.name) === undefined);
+		check("a renamed row stops answering to the old name", rows.find((userModel) => userModel.name === stale.name) === undefined);
 	}
 	heading("two rows on one vendor keep their own keys");
 	{
 		const rows = [row({ name: "work", apiKey: "work-key" }), row({ name: "home", apiKey: "home-key" })];
-		const source: ModelSource = { list: () => rows };
 		const first = createModel(rows[0]!);
 		const second = createModel(rows[1]!);
-		check("the first row's key is the first row's", source.list().find((userModel) => userModel.name === first.name)?.apiKey === "work-key");
-		check("and the second row's is not it", source.list().find((userModel) => userModel.name === second.name)?.apiKey === "home-key");
+		check("the first row's key is the first row's", rows.find((userModel) => userModel.name === first.name)?.apiKey === "work-key");
+		check("and the second row's is not it", rows.find((userModel) => userModel.name === second.name)?.apiKey === "home-key");
 	}
 
 	heading("with no rows, the answer says what to add");
 	{
 		const placeholder = placeholderModel();
-		check("the placeholder has no row behind it", { list: () => [] }.list().find((userModel) => userModel.name === placeholder.name) === undefined);
+		check("the placeholder has no row behind it", ([] as ModelConfig[]).find((userModel) => userModel.name === placeholder.name) === undefined);
 		check("and is recognised as the placeholder", isUnconfigured(placeholder));
 		check("by a name no stored row may claim", placeholder.name === "my-agent:unconfigured", placeholder.name);
 		check("and it carries no key at all", placeholder.apiKey === undefined, String(placeholder.apiKey));
@@ -118,21 +114,21 @@ try {
 	heading("a session reads the rows rather than a copy of them");
 	{
 		// The whole of "editing a model takes effect on the next request": there is no catalog to
-		// rebuild, because a session holds the source and re-derives the model from it each time.
+		// rebuild, because the manager re-reads the rows behind it each time and the model is
+		// re-derived from the row it finds.
 		const rows: ModelConfig[] = [];
-		const source: ModelSource = { list: () => rows };
-		check("an empty source resolves nothing", source.list().find((userModel) => userModel.name === "added") === undefined);
+		check("an empty source resolves nothing", rows.find((userModel) => userModel.name === "added") === undefined);
 
 		rows.push(row({ name: "added", apiKey: "first" }));
-		check("a row added to the source is resolvable", source.list().find((userModel) => userModel.name === "added") !== undefined);
+		check("a row added to the source is resolvable", rows.find((userModel) => userModel.name === "added") !== undefined);
 		check("and its key is on the model a request would use", createModel(rows[0]!).apiKey === "first");
 
 		rows[0]!.apiKey = "corrected";
-		const rederived = createModel(source.list().find((userModel) => userModel.name === "added")!);
+		const rederived = createModel(rows.find((userModel) => userModel.name === "added")!);
 		check("a corrected key is read on the next lookup, with nothing rebuilt", rederived.apiKey === "corrected");
 
 		rows.length = 0;
-		check("a removed row stops resolving", source.list().find((userModel) => userModel.name === "added") === undefined);
+		check("a removed row stops resolving", rows.find((userModel) => userModel.name === "added") === undefined);
 	}
 
 	heading("the model's own key is what a caller without one authenticates with");
@@ -270,7 +266,7 @@ try {
 			let headers = new Headers();
 			const capture = (async (_input: unknown, init?: RequestInit) => {
 				body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-				headers = new Headers(init?.headers as HeadersInit);
+				headers = new Headers(init?.headers as [string, string][]);
 				throw new Error("captured on the way out");
 			}) as typeof fetch;
 			const messages = [{ role: "user" as const, content: [{ type: "text" as const, text: "hi" }], timestamp: Date.now() }];

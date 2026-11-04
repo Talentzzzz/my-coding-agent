@@ -1,4 +1,5 @@
-export { Agent, danglingToolCallsOf, recoverPendingToolCalls, type AgentConfig, type AgentSessionEvent, type SessionEventListener, type SessionListener } from "./agent.ts";
+export { Agent, type AgentConfig, type AgentSessionEvent, type SessionEventListener, type SessionListener } from "./agent.ts";
+export { danglingToolCallsOf, recoverPendingToolCalls } from "./agent.ts";
 export type { AgentContext, AgentEvent, AgentTool, AgentToolResult } from "./types.ts";
 export type { Message } from "@my-agent/llm";
 export {
@@ -89,7 +90,6 @@ export {
 	unconfiguredStream,
 	type ModelChoice,
 	type ModelConfig,
-	type ModelSource,
 	type ThinkingLevel,
 } from "./models.ts";
 export {
@@ -175,27 +175,13 @@ export {
 export { createAgentState, createLive, type ActiveRun, type AgentState, type Live } from "./session/agent-state.ts";
 export { globalDefaultToolState, toolStateOf } from "./session/tool-config.ts";
 export {
-	applySettings,
-	fillSettings,
-	getApprovals,
-	getAppearance,
-	getBashSettings,
-	getDirectoryNames,
-	getFollowUpMode,
-	getHiddenDirectories,
-	getModel,
-	getRetrySettings,
-	getSettings,
-	getSteeringMode,
-	getTools,
-	inMemorySettingsState,
-	isApprovalRequired,
-	settingsStateFromStorage,
+	inMemorySettingManager,
+	SettingManager,
+	type SettingManagerOptions,
 	type SettingsPatch,
 	type SettingsScope,
-	type SettingsState,
 	type SettingsStorage,
-} from "./settings-manager.ts";
+} from "./setting-manager.ts";
 export {
 	createToolRegistry,
 	createTools,

@@ -19,10 +19,13 @@
 | [0005](0005-modes-are-a-tool-config-choice.md) | 模式是一次工具集与审批集的选择，不是一个新状态层 | 已接受（2026-10-17，03 号拍板并落地） |
 | [0006](0006-stateless-session-architecture.md) | 会话架构改为无状态服务与每请求重放，审批改为结束重启 | 已接受（2026-10-31，已落地，见 `.scratch/stateless-agent/`）；「薄壳门面」条款由 0007 重开 |
 | [0007](0007-services-drop-instance-state.md) | 五个单例服务不持有实例状态——聚合袋拆除，「薄壳门面」条款重开 | 已接受（2026-11-01，已落地——08 号票跑绿 check 与 smoke 全套并总校文档，见 `.scratch/pure-services/`） |
-| [0008](0008-loop-merged-into-agent.md) | 删掉 `Loop` 对象与 `packages/loop`——引擎并入 `agent.ts`，放弃与上游的逐文件对照 | 已接受（2026-11-02，已落地——03 号票合并并删包，见 `.scratch/loop-into-agent/`），取代 0001「`packages/loop` 一行都不改」那一半 |
+| [0008](0008-loop-merged-into-agent.md) | 删掉 `Loop` 对象与 `packages/loop`——引擎并入 `agent.ts`，放弃与上游的逐文件对照 | 已接受（2026-11-02，已落地——03 号票合并并删包，见 `.scratch/loop-into-agent/`），取代 0001「`packages/loop` 一行都不改」那一半；决定 1/2 由 [0012](0012-loop-manager-object.md) 取代 |
 | [0009](0009-session-two-file-format.md) | 会话是两个文件——`.json` 快照管「是什么」，`.jsonl` 日志管「说过什么」；打不开的配对直接删 | 已接受（2026-11-03，已落地——session-split 02 号拍板并落地，06 号票入档，见 `.scratch/session-split/`），取代 v≤4 的单文件格式与 0002 的 rename entry 机制 |
 | [0010](0010-open-session-over-mux.md) | 会话的打开与切换只走 mux 基线——`retain` 即导航，REST 读从前端导航路径退场 | 已接受（2026-11-03 用户拍板，已落地——01–04 号票跑绿 check、build:web 与 smoke 全套，见 `.scratch/mux-only-open/`） |
 | [0011](0011-agent-holds-session-state.md) | 会话状态搬进 Agent——一张 `Map<id, AgentState>` 合一四层登记结构，两个 Manager 不再持有任何缓存 | 已接受，已落地（2026-11-04，agent-state 01–14 号票，见 `.scratch/agent-state/`） |
+| [0012](0012-loop-manager-object.md) | 一次运行成为一个对象——`LoopManager` 自带六件依赖、由 `AgentConfig.loop` 构造注入 | 已接受（2026-11-04），后被 [0013](0013-loop-services-are-arguments.md) 削去依赖、被 [0014](0014-loop-manager-removed.md) 整体取代（对象已删） |
+| [0013](0013-loop-services-are-arguments.md) | `LoopManager` 不持有任何服务——运行要用的六件随调用以 `LoopServices` 递进去，类零字段 | 已接受（2026-11-04），同日被 [0014](0014-loop-manager-removed.md) 取代（对象已删，参数形状随之消失） |
+| [0014](0014-loop-manager-removed.md) | 删掉 `LoopManager`——引擎回到 `Agent` 的方法，六项服务重新是它的字段 | 已接受，已落地（2026-11-04，跑绿 `check` 与除 `smoke-api` 外的 smoke 全套），取代 0012 与 0013 全部决定，复活 0008 的决定 1/2 |
 
 ## 门槛
 

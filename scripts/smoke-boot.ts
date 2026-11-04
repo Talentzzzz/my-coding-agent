@@ -32,7 +32,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { createServer as createTcpServer } from "node:net";
 import { spawn } from "node:child_process";
-import type { ChatTransport } from "@my-agent/llm";
+import type { ChatTransport } from "@my-agent/core";
 import type { BootedServer } from "../packages/server/src/boot.ts";
 import type { WireClient } from "./wire/client.ts";
 

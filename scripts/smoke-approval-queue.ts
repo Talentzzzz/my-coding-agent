@@ -19,13 +19,12 @@ import { createAssistantMessageEventStream, type ChatTransport, type Message } f
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import {
 	createSession,
-	inMemorySettingsState,
+	inMemorySettingManager,
 	openAgent,
 	sessionDir,
 	type Agent,
 	type ModelConfig,
 	type ModelSelection,
-	type ModelSource,
 	type Session,
 } from "@my-agent/core";
 
@@ -52,7 +51,6 @@ const rows: ModelConfig[] = [
 		maxTokens: 8_192,
 	},
 ];
-const models: ModelSource = { list: () => rows };
 const modelName = "anthropic";
 const selection: ModelSelection = { model: modelName };
 
@@ -127,10 +125,9 @@ async function openSession(overrides: { approval?: Record<string, boolean>; api?
 	const session = await openAgent({
 		workDirAbsPath: root,
 		session: state,
-		models,
 		api: overrides.api ?? fake.api,
 		model: modelName,
-		settingsState: inMemorySettingsState({ approval: overrides.approval ?? {} }),
+		settings: inMemorySettingManager({ approval: overrides.approval ?? {} }, rows),
 	});
 	opened.set(session, { id: state.sessionId, state });
 	return session;

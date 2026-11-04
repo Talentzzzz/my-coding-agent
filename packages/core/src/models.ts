@@ -51,18 +51,6 @@ export type { ModelConfig } from "@my-agent/llm";
  * a config that came from a window or a text editor is not yet a config this app will send.
  */
 
-/**
- * The user's models, as a session sees them.
- *
- * A session holds this for its whole life and reads it on every request rather than copying it, which
- * is what makes an edit take effect without reopening anything: a key corrected in the settings panel
- * is the key the next message uses, including from a window that has been open the whole time. The
- * read is one small file, so nothing here is cached and nothing has to be invalidated.
- */
-export interface ModelSource {
-	list(): readonly ModelConfig[];
-}
-
 /** The defaults a new row starts from, so the form never shows an empty numeric field. */
 export const NEW_MODEL_DEFAULTS = {
 	contextWindow: 200_000,

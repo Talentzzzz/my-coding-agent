@@ -14,7 +14,7 @@ Electron 外壳。插件不在范围内。
 
 ```
 packages/llm       裁剪自 pi-ai 的传输层，只剩 src/api/anthropic-messages.ts；@ts-nocheck
-packages/core      无头 agent：agent.ts（编排 + 引擎）、types.ts（引擎与工具的契约）、模型、工具、会话管理器、系统提示词、上下文。没有传输层
+packages/core      无头 agent：agent.ts（编排：会话表、命令、审批、投影，以及一次运行的引擎 + 填充链 + 压缩 + 重试 + 闸门）、session/（账本、状态、fanout、事件）、types.ts（引擎与工具的契约）、模型、工具、系统提示词、上下文。没有传输层
 packages/server   node:http、REST 命令 + 一条常驻 WebSocket mux、活跃会话；boot.ts 是整个服务器，main.ts 只解析启动参数
 packages/desktop  Electron 外壳：进程内启动服务器，让一个窗口指向它
 packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的逻辑流
@@ -25,17 +25,20 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 代码把这些词当作术语来用。
 
 - **service（无属性服务）** —— 无属性服务的形态（ADR-0007）：`Agent` 编排、会话账本（`SessionManager`）、
-  模型行（`ModelConfigStore`）、工具目录（`ToolRegistry`）；设置没有 Manager——`fillSettings` 函数族 +
-  每会话一只袋（ADR-0011）。构造只收服务依赖，公开方法收 `(id, 请求自己的参数)`，每样数据在**用到它的那一行**向属主现取、
+  配置（`SettingManager`——设置与模型行共用的无状态门面，ADR-0011 修订节）、工具目录（`ToolRegistry`）。构造只收服务依赖，公开方法收 `(id, 请求自己的参数)`，每样数据在**用到它的那一行**向属主现取、
   拿到的只是局部变量；不传、不养任何聚合袋。类壳保留（可构造注入），方法体就写在类里、没有一层同名的
   文件级函数可转发，拆掉的只是 per-session 实例字段；
   Manager 内部按 id / 目录键控的缓存随时可从磁盘重建、且藏在自己内部不被传递——这正是它与聚合袋的
   分界。
-- **engine（引擎）** —— `Agent.runEngine`：一次运行的入口与出口，编排层自己的方法，**没有对象**。它读的
-  每一处接缝都是编排层的私有成员或这次运行的局部变量（`prepareRequest`、`dispatchEvent`、会话自己的
-  两条队列、`state.live.activeRun`、这次运行的模型），所以运行期没有一处瞬态被谁持有。原来的
-  `packages/loop` 与它的 `Loop` 委派对象已删（ADR-0008）——「循环」从此不是组件的名字，只是那些轮次
-  的日常说法。
+- **engine（引擎）** —— `Agent.run`（私有）：一次运行的入口与出口，与 `runEngine`、`prepareRequest`、
+  `dispatchEvent`、压缩阶梯、重试泵、两个闸门一起是 `Agent` 的方法（ADR-0014）。它读的每一处接缝要么是
+  这次运行的局部变量（模型、abort controller、事件 sink、闸门），要么是 `this` 上的服务，所以运行期
+  没有一处瞬态被谁持有。它曾是一个独立对象（ADR-0012、0013），被删是因为那个对象不持有任何东西——
+  一个空的 `this` 对 1900 行方法没有帮助。「循环」只是那些轮次的日常说法。
+- **fanout（扇出）** —— `session/fanout.ts`：`emitEvent`、`publishState`、`appendMessageEntry`、
+  `dropQueued`、`emitQueueUpdate`、`nextStamp`、`snapshotOf`、`approvalsOf`，参数是
+  `(state, SessionServices)`。编排层与运行对象都发事件、都写账本，所以这些无状态件谁的成员都不是；
+  写边界 `finalizeToolResult` 也住这里。
 - **tool（工具）** —— `AgentTool`；`createToolRegistry(toolDefinitions())` 是**进程**的目录（定义 +
   注册进来的工具）。定义是 `(run) => createReadTool(run.workDirAbsPath)` 这样的工厂，所以目录里没有常驻的工作
   目录：`active(state, run)` 拿着随请求来的 `ToolRunContext` 现建可执行集合，活跃集合本身是从账本
@@ -46,8 +49,10 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   这两个文件唯一的写者（ADR-0006）；文件随第一条消息**同时**出生（`.json` 是 commit marker），没说过话的
   会话不落盘、不进侧边栏；标题是快照的 `title` 字段，没写过就从分支首条 user 消息派生；配对残缺
   或版本不对的会话直接删、不迁移。
-- **settings（设置）** —— `fillSettings` 合并全局与目录两份 `settings.json`（每次打开现读一份快照，
-  没有任何缓存），变更写回**已经提供该字段**的那一份。窗口里「设置」这个词**分两级**：**会话级**（工具集合与审批，记在会话 `.json`
+- **settings（设置）** —— `SettingManager` 是设置与模型行**唯一**的门（ADR-0011 修订节）：无状态门面、
+  不做任何缓存，每个方法现读全局与目录两份 `settings.json`，变更写回**已经提供该字段**的那一份；一次写入
+  对一切会话的下一次读取即生效，没有需要失效的副本。会话的模型行走同一只门（`modelCatalog()` /
+  `replaceModels()`）。窗口里「设置」这个词**分两级**：**会话级**（工具集合与审批，记在会话 `.json`
   快照的 `activeTools` 与 `approval` 字段里，没单独选过就沿用全局；窗口里没有手动编辑入口，改动它
   只有「选一个模式」这一条路）与**应用级**（外观、模型清单、默认模型、bash 超时，以及全局默认的
   工具集与审批）。
@@ -102,11 +107,11 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   账本存的就是返回的那个版本；要截断先用 `archiveToolResult()` 归档全文，没约束的超大结果由写边界
   兜底归档到 `.my-agent/tool-results/`）。一个 `Hooks` 服务本进程跑的所有会话，所以每个事件
   都带 `sessionId`，处理器拿它现取目录与被闸的工具映射；默认值由 `createSessionAgent()` 构造时装。
-- **retry（重试）** —— 一次瞬时的供应商失败在引擎**之下**重试：`startRun` 给这次运行包一层 transport，
+- **retry（重试）** —— 一次瞬时的供应商失败在引擎**之下**重试：`Agent.run` 给这次运行包一层 transport，
   策略就装在里面，引擎只是对模型 `stream`；失败的尝试从不被记录。
 - **queue（队列）** —— 一次运行正在流式时被接受的消息：`steer` 在下一个取走点注入，`followUp` 等这一
   轮结束。
-- **assembly（装配）** —— `assembleSession()` 按会话先、设置后的链（`fillSession` → `fillSettings` →
+- **assembly（装配）** —— `assembleSession()` 按会话先、设置后的链（`fillSession` → 设置现读 →
   `createLive`）装配出一份 `AgentState`——装配产物**就是**状态（ADR-0011），只装配、不激活；
   `createSessionAgent()` 是另一半：把服务组起来变成一个**编排层**，进程只需要一份（hub 构造时建它），
   测试与只跑一个会话的调用者用 `openAgent() == assemble + create + adopt` 自组一份。`Agent` 按 id 键控
@@ -114,7 +119,7 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   live 半是 `state.live`。它只决定 transcript
   **命名**哪一行（`modelFor()` 每次请求按选择现查目录，不缓存行的事实）。
 - **AgentState（会话状态）** —— 一个会话的全部状态是一件东西（ADR-0011）：`state.session`（账本重放出的
-  durable 半）、`state.setting`（本次打开解析出的设置袋）、两个订阅集合，与 `state.live`（`Live`：两条
+  durable 半）、两个订阅集合，与 `state.live`（`Live`：两条
   队列、在飞运行、partial、重试与挂起位——「进行中且磁盘上没有」的东西）。由 `Agent` 按 id 键控持有，
   `adopt` 是唯一入口、`evict` / `drop` 是唯一出口，进程重启即清空。
 - **workDirAbsPath（当前工作目录）** —— 一个会话的相对路径基准与命令起点，**按会话**，从会话自己快照的

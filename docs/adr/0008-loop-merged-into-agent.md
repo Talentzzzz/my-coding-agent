@@ -1,6 +1,7 @@
 # 0008：删掉 `Loop` 对象与 `packages/loop`——引擎并入 `agent.ts`，放弃与上游的逐文件对照
 
-日期：2026-11-02 · 状态：已接受（loop-into-agent 01/02 号票拍板，03 号票落地）
+日期：2026-11-02 · 状态：已接受（loop-into-agent 01/02 号票拍板，03 号票落地）；决定 1、2 已由
+[0012](0012-loop-manager-object.md) 取代（2026-11-04）
 取代：[0001](0001-transport-websocket-mux.md)（部分——仅其「`packages/llm` 与 `packages/loop`
 一行都不改」中 loop 的那一半，逐条对照见*被取代的是什么*）
 

@@ -19,7 +19,7 @@ import { createRoutes } from "../packages/server/src/controllers/routes.ts";
 import { Router } from "../packages/server/src/http/routing.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import { mountSession } from "./mount-session.ts";
-import { inMemorySettingsState, type ModelConfig, sessionDir } from "@my-agent/core";
+import { inMemorySettingManager, type ModelConfig, sessionDir } from "@my-agent/core";
 
 const PORT = 8094;
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-"));
@@ -55,15 +55,20 @@ fake.setResponses([
 	fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 	fakeAssistantMessage("done"),
 ]);
-const hub = new SessionHub({ workDirAbsPath: root, api: fake.api, modelsHome: join(root, "agent-home") });
-hub.setModelConfigs(rows);
+// The hub is built over an in-memory manager, because the approval gate is a settings read the
+// orchestrator makes per request: `read` sits behind the gate for every session this hub serves,
+// and nothing lands in the machine's files. The rows ride on the same manager.
+const hub = new SessionHub({
+	workDirAbsPath: root,
+	api: fake.api,
+	settings: inMemorySettingManager({ approval: { read: true } }, rows),
+});
 
-// Mounted the way `SessionHub.open()` mounts one — the entry seeded with this smoke's own settings
-// bag, which is what puts `read` behind the gate — so the controller claims through the real hub.
+// Mounted the way `SessionHub.open()` mounts one — the entry parked at the gate is what the checks
+// below drive — so the controller claims through the real hub.
 const { id: sessionId } = await mountSession(hub, {
 	root,
 	model: modelName,
-	settings: inMemorySettingsState({ approval: { read: true } }),
 });
 const session = hub.agent;
 

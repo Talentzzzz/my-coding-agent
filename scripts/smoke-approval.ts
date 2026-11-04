@@ -41,7 +41,7 @@ import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-
 import { mountSession } from "./mount-session.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
 import type { PendingApproval } from "@my-agent/core/protocol";
-import { inMemorySettingsState, type Agent, type ModelConfig, type Session, sessionDir } from "@my-agent/core";
+import { inMemorySettingManager, type Agent, type ModelConfig, type Session, sessionDir } from "@my-agent/core";
 
 let failures = 0;
 
@@ -137,13 +137,17 @@ fake.setResponses([
 	fakeAssistantMessage("done"),
 ]);
 // The hub's one orchestrator sends through the scripted transport, so every session it serves does.
-const hub = new SessionHub({ workDirAbsPath: root, api: fake.api, modelsHome: join(root, "agent-home") });
-hub.setModelConfigs(rows);
+// It is built over an in-memory manager: `read` behind the gate is a settings read the orchestrator
+// makes per request, and the machine's files stay out of it.
+const hub = new SessionHub({
+	workDirAbsPath: root,
+	api: fake.api,
+	settings: inMemorySettingManager({ approval: { read: true } }, rows),
+});
 // Mounted the way `SessionHub.open()` mounts one, so every request below claims through the real hub.
 const { id: sessionId } = await mountSession(hub, {
 	root,
 	model: modelName,
-	settings: inMemorySettingsState({ approval: { read: true } }),
 });
 const session = hub.agent;
 
@@ -253,7 +257,7 @@ process.stdout.write("\nevery window on a session hears how an approval was answ
 
 const sharedWatchdog = deadline("the shared-answer checks", 60_000);
 
-const shared = await openRig(60_000);
+const shared = await openRig();
 try {
 	const bench = await shared.hub.claim(shared.sessionId);
 	// Every window is attached before anything runs, so the request is a difference frame on each of
@@ -335,17 +339,19 @@ const crossWatchdog = deadline("the cross-session checks", 60_000);
 const cross = await openCrossRig();
 try {
 	const [firstSession, secondSession] = cross.sessions;
-	const firstBench = await cross.hub.claim(firstSession.id);
-	const secondBench = await cross.hub.claim(secondSession.id);
+	const first = firstSession!;
+	const second = secondSession!;
+	const firstBench = await cross.hub.claim(first.id);
+	const secondBench = await cross.hub.claim(second.id);
 	const firstWire = await connect(muxUrl(cross.url));
 	const secondWire = await connect(muxUrl(cross.url));
 	const [firstBaseline, secondBaseline] = await Promise.all([
-		firstWire.open(firstSession.id),
-		secondWire.open(secondSession.id),
+		firstWire.open(first.id),
+		secondWire.open(second.id),
 	]);
 	check(
 		"two sessions on one hub are both watchable",
-		firstBaseline.id === firstSession.id && secondBaseline.id === secondSession.id,
+		firstBaseline.id === first.id && secondBaseline.id === second.id,
 	);
 	check("and both started idle", !firstBaseline.submitting && !secondBaseline.submitting);
 
@@ -355,8 +361,8 @@ try {
 	}
 
 	const [firstAsked, secondAsked] = await Promise.all([
-		firstWire.waitFor(firstSession.id, (message) => message.type === "approval_request", 10_000),
-		secondWire.waitFor(secondSession.id, (message) => message.type === "approval_request", 10_000),
+		firstWire.waitFor(first.id, (message) => message.type === "approval_request", 10_000),
+		secondWire.waitFor(second.id, (message) => message.type === "approval_request", 10_000),
 	]);
 	const firstId = firstAsked?.type === "approval_request" ? firstAsked.request.toolCallId : "";
 	const secondId = secondAsked?.type === "approval_request" ? secondAsked.request.toolCallId : "";
@@ -371,17 +377,17 @@ try {
 	const granted = await request(
 		cross.url,
 		"POST",
-		`/api/sessions/${firstSession.id}/approvals/${encodeURIComponent(firstId)}`,
+		`/api/sessions/${first.id}/approvals/${encodeURIComponent(firstId)}`,
 		{ approved: true },
 	);
 	check("the first session's answer was accepted", granted.status === 200, `status ${granted.status}`);
 
-	const stopped = await request(cross.url, "POST", `/api/sessions/${secondSession.id}/abort`);
+	const stopped = await request(cross.url, "POST", `/api/sessions/${second.id}/abort`);
 	check("the second session was aborted", stopped.status === 200, `status ${stopped.status}`);
 
 	await Promise.all([
-		firstWire.waitFor(firstSession.id, (message) => message.type === "approval_settled", 10_000),
-		secondWire.waitFor(secondSession.id, (message) => message.type === "approval_settled", 10_000),
+		firstWire.waitFor(first.id, (message) => message.type === "approval_settled", 10_000),
+		secondWire.waitFor(second.id, (message) => message.type === "approval_settled", 10_000),
 	]);
 
 	const reported = [firstWire, secondWire].map((wire, index) =>
@@ -665,10 +671,11 @@ interface Graph {
 async function serve(hub: SessionHub): Promise<Graph> {
 	const projection = createSessionProjection(hub);
 	const mux = createMuxServer(hub, projection, { heartbeatIntervalMs: 150 });
+	const listeners = sessionListeners(mux, projection);
 	const router = new Router(
 		createRoutes({
-			system: new SystemController(hub),
-			sessions: new SessionController(hub, sessionListeners(mux)),
+			system: new SystemController(hub, listeners),
+			sessions: new SessionController(hub, listeners),
 		}),
 	);
 	const handle = await createServer({ router, clientDir: "packages/web/dist", onUpgrade: muxUpgrade(mux) });
@@ -715,13 +722,16 @@ async function openRig(): Promise<Rig> {
 		fakeAssistantMessage("done"),
 	]);
 	// The hub's one orchestrator sends through the scripted transport, so the session it is about to
-	// serve is answered by it.
-	const hub = new SessionHub({ workDirAbsPath: root, api: transport.api, modelsHome: join(root, "agent-home") });
-	hub.setModelConfigs(rows);
+	// serve is answered by it. The hub is built over an in-memory manager: `read` behind the gate is
+	// a settings read the orchestrator makes per request, and the machine's files stay out of it.
+	const hub = new SessionHub({
+		workDirAbsPath: root,
+		api: transport.api,
+		settings: inMemorySettingManager({ approval: { read: true } }, rows),
+	});
 	const { id: sessionId, host, state } = await mountSession(hub, {
 		root,
 		model: modelName,
-		settings: inMemorySettingsState({ approval: { read: true } }),
 	});
 
 	const graph = await serve(hub);
@@ -775,14 +785,18 @@ async function openCrossRig(): Promise<CrossRig> {
 		fakeAssistantMessage("done"),
 		fakeAssistantMessage("done"),
 	]);
-	const hub = new SessionHub({ workDirAbsPath: root, api: transport.api, modelsHome: join(root, "agent-home") });
-	hub.setModelConfigs(rows);
+	// The manager rides the hub for the same reason openRig's does: one orchestrator, one settings
+	// door, and the gate both sessions park on is a read through it.
+	const hub = new SessionHub({
+		workDirAbsPath: root,
+		api: transport.api,
+		settings: inMemorySettingManager({ approval: { read: true } }, rows),
+	});
 	const sessions: Mounted[] = [];
 	for (let index = 0; index < 2; index += 1) {
 		const { id } = await mountSession(hub, {
 			root,
 			model: modelName,
-			settings: inMemorySettingsState({ approval: { read: true } }),
 		});
 		sessions.push({ id, agent: hub.agent });
 	}

@@ -21,7 +21,8 @@ import {
 	openAgent,
 	readSessionSnapshot,
 	SessionManager,
-	inMemorySettingsState,
+	inMemorySettingManager,
+	SettingManager,
 	sessionDir,
 	type SessionSnapshot,
 	type Session,
@@ -456,18 +457,17 @@ try {
 	process.stdout.write("the settings files name the tools a session that never chose opens on\n");
 	// The global default tool set is a settings field, so the seam is assembly itself: a session with
 	// no recorded choice opens on the configured set, and one that chose keeps its own. Everything
-	// here runs on an in-memory settings state, so no file outside the temporary
+	// here runs on an in-memory settings manager, so no file outside the temporary
 	// working directory is ever touched.
 	const settingsRoot = await mkdtemp(join(tmpdir(), "my-agent-settings-"));
 	try {
-		const settings = inMemorySettingsState({ tools: ["read", "bash"] });
+		const settings = inMemorySettingManager({ tools: ["read", "bash"] }, []);
 		const state = createSession(settingsRoot);
 		const sessionId = state.sessionId;
 		const options = {
 			workDirAbsPath: settingsRoot,
 			session: state,
-			models: { list: () => [] },
-			settingsState: settings,
+			settings,
 		};
 
 		const cold = await readSessionSnapshot(options);
@@ -885,12 +885,13 @@ try {
 	// The exits are two and deliberately different: `evict` refuses unless the criteria hold, and
 	// `drop` does not ask. There is no clear — the table lives and dies with the orchestrator itself.
 	{
-		const agent = createSessionAgent({ sessionManager: new SessionManager(), models: { list: () => [] } });
+		const agent = createSessionAgent({ sessionManager: new SessionManager(), settings: new SettingManager({ models: [] }) });
 		// The seed's assembly fields are irrelevant to what this block pins — the table and its
 		// doors — so it hands the placeholder answers a session with no row would carry.
-		const settings = inMemorySettingsState({});
+		const settings = inMemorySettingManager({});
 		const session = createSession(tmpdir());
-		const seed = () => createAgentState(session, settings, createLive(settings));
+		const seed = () =>
+			createAgentState(session, createLive(settings.getSteeringMode(tmpdir()), settings.getFollowUpMode(tmpdir())));
 		const state = seed();
 		agent.adopt(state);
 		check("adopt is the one way in, and the id answers it", agent.agentState(session.sessionId) === state);

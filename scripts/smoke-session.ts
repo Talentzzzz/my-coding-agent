@@ -14,8 +14,7 @@ import {
 	fillSession,
 	MAX_TOOL_RESULT_BYTES,
 	openAgent,
-	getApprovals,
-	inMemorySettingsState,
+	inMemorySettingManager,
 	SessionManager,
 	toolDefinitions,
 	type Agent,
@@ -23,11 +22,10 @@ import {
 	type AgentTool,
 	type FileDiff,
 	type MessageEntry,
-	type ModelSource,
 	type Settings,
 	type SessionEntry,
 	type Session,
-	type SettingsState,
+	type SettingManager,
 	type ToolRegistry,
 	type ModelConfig,
 	sessionDir,
@@ -67,7 +65,6 @@ const ROW: ModelConfig = {
 
 /** The rows the sessions read. Shared, so every check counts responses from one queue. */
 const rows: ModelConfig[] = [ROW];
-const models: ModelSource = { list: () => rows };
 const fake = createFakeTransport();
 
 function check(label: string, condition: boolean, detail = ""): void {
@@ -120,14 +117,18 @@ function gatedTransport(hold = 1): { api: ChatTransport; gate: Gate } {
 	let calls = 0;
 	const releases: (() => void)[] = [];
 
-	const stream: ChatTransport["stream"] = async (model, context, options) => {
+	// The gate holds the call before the fake stream is built, so the wrapper must wait — an async
+	// body behind the sync-returning `stream` shape. Call sites await the result, which a thenable
+	// survives, so both shapes behave the same at runtime; the cast is the declared shape only.
+	type StreamArgs = Parameters<ChatTransport["stream"]>;
+	const stream = (async (model: StreamArgs[0], context: StreamArgs[1], options: StreamArgs[2]) => {
 		calls += 1;
 		if (held < hold) {
 			held += 1;
 			await new Promise<void>((resolve) => releases.push(resolve));
 		}
 		return call(model, context, options);
-	};
+	}) as unknown as ChatTransport["stream"];
 
 	return {
 		api: { stream },
@@ -152,8 +153,8 @@ function gatedTransport(hold = 1): { api: ChatTransport; gate: Gate } {
  * of it moves the window rather than a setting. Only the row is copied: the scripted responses and
  * `fake.state` stay the shared ones every check counts on.
  */
-function windowedRows(contextWindow: number): ModelSource {
-	return { list: () => rows.map((row) => ({ ...row, contextWindow })) };
+function windowedRows(contextWindow: number): ModelConfig[] {
+	return rows.map((row) => ({ ...row, contextWindow }));
 }
 
 /**
@@ -193,18 +194,20 @@ function retryPolicy(overrides: Partial<Settings["retry"]> = {}): Settings["retr
 }
 
 function settings(overrides: Partial<Settings> = {}): Settings {
+	// The cast is the spread talking, not the data: every key here is present, and spreading a
+	// Partial over it only makes the checker doubt the optionals it could not see.
 	return {
 		approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false },
 		steeringMode: "one-at-a-time",
 		followUpMode: "one-at-a-time",
 		retry: retryPolicy(),
 		...overrides,
-	};
+	} as Settings;
 }
 
 /** What one run is driven through: which rows a session reads, and which transport it sends over. */
 interface RunOptions {
-	models?: ModelSource;
+	models?: readonly ModelConfig[];
 	api?: ChatTransport;
 }
 
@@ -215,7 +218,7 @@ interface RunOptions {
  * opening helpers record what they created here and every check reads the pair back through
  * {@link sidOf} and {@link bagOf}.
  */
-const opened = new WeakMap<Agent, { id: string; state: Session; settings: SettingsState }>();
+const opened = new WeakMap<Agent, { id: string; state: Session; settings: SettingManager }>();
 
 function sidOf(session: Agent): string {
 	return opened.get(session)!.id;
@@ -225,15 +228,15 @@ function bagOf(session: Agent): Session {
 	return opened.get(session)!.state;
 }
 
-function settingsOf(session: Agent): SettingsState {
+function settingsOf(session: Agent): SettingManager {
 	return opened.get(session)!.settings;
 }
 
 /**
  * One session over its own transcript, with settings that live in memory.
  *
- * `inMemorySettingsState` is the seam that keeps these runs off the developer's
- * `~/.my-agent/settings.json`: it has the same shape as the file-backed state, so a config change
+ * `inMemorySettingManager` is the seam that keeps these runs off the developer's
+ * `~/.my-agent/settings.json`: it has the same shape as the file-backed manager, so a config change
  * here is written and read back exactly as it would be for real —just nowhere.
  */
 async function openSession(
@@ -243,14 +246,13 @@ async function openSession(
 	tools?: ToolRegistry,
 ): Promise<Agent> {
 	const state = createSession(root);
-	const sessionSettings = inMemorySettingsState(settings(overrides));
+	const sessionSettings = inMemorySettingManager(settings(overrides), run.models ?? rows);
 	const session = await openAgent({
 		workDirAbsPath: root,
 		session: state,
-		models: run.models ?? models,
 		api: run.api ?? fake.api,
 		model,
-		settingsState: sessionSettings,
+		settings: sessionSettings,
 		tools,
 	});
 	opened.set(session, { id: state.sessionId, state, settings: sessionSettings });
@@ -807,7 +809,7 @@ async function exerciseConfigChanged(): Promise<void> {
 	// A second row gives the source a second model, so a model change is observable at all. Both are
 	// answered by the same scripted transport: nothing here sends a request.
 	const twoRows: ModelConfig[] = [ROW, { ...ROW, name: "faux2" }];
-	const session = await openSession({}, { models: { list: () => twoRows } }, "faux/faux-1");
+	const session = await openSession({}, { models: twoRows }, "faux/faux-1");
 
 	const seen: Extract<AgentSessionEvent, { type: "config_changed" }>[] = [];
 	session.onEvent(sidOf(session), (event) => {
@@ -959,7 +961,7 @@ async function exerciseAfterToolHook(): Promise<void> {
 	);
 	check("the rewritten content is in the file itself", rewrittenEntry !== undefined);
 	// Six kinds, and nothing else: the legacy `tool_result_view` kind is gone with the v5 format.
-	const kinds = new Set(fileEntries.map((entry) => entry.type));
+	const kinds = new Set<string>(fileEntries.map((entry) => entry.type));
 	check(
 		"the file holds only the six v5 kinds",
 		JSON.stringify([...kinds].sort()) ===
@@ -975,13 +977,12 @@ async function exerciseAfterToolHook(): Promise<void> {
 
 	const sentReplay: SentRequest[] = [];
 	recordRequests(sentReplay, [fakeAssistantMessage("replayed")]);
-	const replayedSettings = inMemorySettingsState(settings());
+	const replayedSettings = inMemorySettingManager(settings(), rows);
 	const replayed = await openAgent({
 		workDirAbsPath: root,
 		session: reopenedFile,
-		models,
 		api: fake.api,
-		settingsState: replayedSettings,
+		settings: replayedSettings,
 	});
 	opened.set(replayed, { id: reopenedFile.sessionId, state: reopenedFile, settings: replayedSettings });
 	try {
@@ -1018,7 +1019,7 @@ async function exerciseOutputBackstop(): Promise<void> {
 		label: "unbounded",
 		description: "Returns more than the session's budget; registered by the smoke test.",
 		parameters: { type: "object", properties: {} },
-		execute: async () => ({ content: [{ type: "text", text: huge }] }),
+		execute: async () => ({ content: [{ type: "text", text: huge }], details: undefined }),
 	});
 
 	const sent: SentRequest[] = [];
@@ -1272,7 +1273,7 @@ async function exerciseToolRegistry(): Promise<void> {
 		label: "noop",
 		description: "Does nothing; registered by the smoke test.",
 		parameters: { type: "object", properties: {} },
-		execute: async () => ({ content: [{ type: "text", text: "noop" }] }),
+		execute: async () => ({ content: [{ type: "text", text: "noop" }], details: undefined }),
 	};
 	registry.register(noop);
 	check("register() adds the tool and makes it callable", registry.build("noop", run) === noop && registry.activeNames({ activeToolNames: registry.names() }).includes("noop"), JSON.stringify(registry.activeNames({ activeToolNames: registry.names() })));
@@ -1839,9 +1840,8 @@ async function exerciseModelFromRow(): Promise<void> {
 	};
 
 	const keyedRows: ModelConfig[] = [{ ...ROW, name: "keyed", apiKey: "first-key", baseUrl: "http://127.0.0.1:1/v1" }];
-	const source: ModelSource = { list: () => keyedRows };
 	fake.setResponses([fakeAssistantMessage("answered")]);
-	const session = await openSession({}, { models: source, api: recording });
+	const session = await openSession({}, { models: keyedRows, api: recording });
 	await within("the run", 10_000, session.prompt(sidOf(session), "hello"));
 	check("the model carries the row's key", sent[0]?.key === "first-key", String(sent[0]?.key));
 	check(
@@ -1895,7 +1895,7 @@ async function exerciseModelSelection(): Promise<void> {
 	const thinkerRows: ModelConfig[] = [{ ...ROW, name: "thinker", id: "claude-sonnet-4-5" }];
 	const scripted = createFakeTransport();
 	scripted.setResponses([fakeAssistantMessage("first")]);
-	const session = await openSession({}, { models: { list: () => thinkerRows }, api: scripted.api });
+	const session = await openSession({}, { models: thinkerRows, api: scripted.api });
 
 	check("a session opens at off, because nothing has been asked for", session.snapshot(sidOf(session)).thinkingLevel === "off", session.snapshot(sidOf(session)).thinkingLevel);
 	check(
@@ -2159,7 +2159,7 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	check("the narrow set is in force", session.snapshot(sidOf(session)).activeTools.includes("bash") === false, JSON.stringify(session.snapshot(sidOf(session)).activeTools));
 	check("with the approval the session chose", session.snapshot(sidOf(session)).approvals.bash === true, JSON.stringify(session.snapshot(sidOf(session)).approvals));
 	check("which is the map the gate reads", session.getApprovals(sidOf(session)).bash === true, JSON.stringify(session.getApprovals(sidOf(session))));
-	check("leaving the settings file alone", getApprovals(settingsOf(session)).bash === false, JSON.stringify(getApprovals(settingsOf(session))));
+	check("leaving the settings file alone", settingsOf(session).getApprovals(root).bash === false, JSON.stringify(settingsOf(session).getApprovals(root)));
 
 	// --- Moving the leaf changes the branch, not the choices ------------------------------------
 	const before = events.length;

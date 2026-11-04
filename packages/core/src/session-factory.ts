@@ -1,4 +1,4 @@
-import type { ChatTransport } from "@my-agent/llm";
+import { anthropicMessages, type ChatTransport } from "@my-agent/llm";
 import { Agent } from "./agent.ts";
 import { createAgentState, type AgentState, createLive } from "./session/agent-state.ts";
 import type { AgentsMdFile } from "./context/agents-md.ts";
@@ -9,7 +9,6 @@ import {
 	DEFAULT_MODEL_NAME,
 	type ModelChoice,
 	type ModelConfig,
-	type ModelSource,
 	modelFor,
 } from "./models.ts";
 import type { SessionSnapshot } from "./protocol.ts";
@@ -20,13 +19,7 @@ import {
 	followsGlobalOf,
 	toolStateOf,
 } from "./session/tool-config.ts";
-import {
-	type SettingsState,
-	fillSettings,
-	getApprovals,
-	getSettings,
-	inMemorySettingsState,
-} from "./settings-manager.ts";
+import { SettingManager } from "./setting-manager.ts";
 import { type ToolRegistry, createToolRegistry, toolDefinitions } from "./tools/index.ts";
 import { resolve as resolvePath } from "node:path";
 
@@ -55,7 +48,16 @@ export interface OpenAgentOptions {
 	 * newest, one named by id — is the host's job, and a test opens an in-memory one instead.
 	 */
 	session: Session;
-	models: ModelSource;
+	/**
+	 * The configuration every settings and model read goes through.
+	 *
+	 * Omitted means a fresh manager over the machine's own files — the same default a hub without
+	 * options would build. A host that reads under a non-default agent home — the hub — hands its own
+	 * in, because the fallback has no way to know that home; a test hands in an in-memory one so the
+	 * machine's files are never touched. The manager holds nothing: every read is a fresh read of the
+	 * files behind it, which is what makes an edit reach a session that never reopened.
+	 */
+	settings?: SettingManager;
 	/** Overrides the stored default with a row's name. */
 	model?: string;
 	thinkingLevel?: string;
@@ -66,15 +68,6 @@ export interface OpenAgentOptions {
 	 * transport so the run can be driven with no provider key.
 	 */
 	api?: ChatTransport;
-	/**
-	 * The settings of this working directory, as the bag every call passes.
-	 *
-	 * Defaults to a fresh {@link fillSettings} over the default agent home — the home's file merged
-	 * with the project's own, nothing cached: the bag is the snapshot this assembly read, and each
-	 * open of a session fills its own. A host that fills under a non-default agent home — the hub —
-	 * passes its own bag in, because the fallback has no way to know that home.
-	 */
-	settingsState?: SettingsState;
 	/** Defaults to the six built-ins. A test passes a registry of its own to add a tool. */
 	tools?: ToolRegistry;
 }
@@ -91,8 +84,8 @@ export interface OpenAgentOptions {
 interface Assembled {
 	/** The working directory, absolute. */
 	workDirAbsPath: string;
-	/** The directory's settings as the bag every settings call in the session passes. */
-	settingsState: SettingsState;
+	/** The manager every settings and model read of this session goes through. */
+	settings: SettingManager;
 	/** The session's model choice: the row's name and the level, and nothing the row itself owns. */
 	modelChoice: ModelChoice;
 	/** The rows this assembly read, so a caller that builds a model from the choice does not re-read. */
@@ -117,16 +110,16 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 	const workDirAbsPath = resolvePath(options.workDirAbsPath);
 	// The project settings file lives under the working directory, so it is found from the same path:
 	// `<workDirAbsPath>/.my-agent/settings.json`, over the agent home's own file. Nothing is cached:
-	// the caller's own bag wins — the hub fills under its own agent home and hands it over — and the
-	// fallback is a fresh fill, this assembly's own snapshot of the two files.
-	const settingsState = options.settingsState ?? fillSettings(workDirAbsPath);
+	// the caller's own manager wins — the hub builds one over its own agent home and hands it over —
+	// and the fallback is a fresh manager over the machine's files.
+	const settings = options.settings ?? new SettingManager();
 	// One service per assembly, so the session and anything it builds forward through the same
 	// instance; omitted means a fresh one, which behaves identically (ADR-0007 §2).
 	const sessionManager = options.sessionManager ?? new SessionManager();
-	const settings = getSettings(settingsState);
+	const merged = settings.getSettings(workDirAbsPath);
 	const recorded = sessionManager.getRecordedSettings(options.session);
-	const rows = options.models.list();
-	const row = selectModel(rows, options.model ?? recordedRefOf(recorded.model) ?? settings.model);
+	const rows = settings.modelCatalog();
+	const row = selectModel(rows, options.model ?? recordedRefOf(recorded.model) ?? merged.model);
 	// A session with no row still runs, and `Agent` answers for it with the sentence that says what to
 	// add: `modelFor` builds the placeholder's facts under no name at all, and the transport is what
 	// refuses to send.
@@ -148,7 +141,7 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 	// ledger on every read, against the global default's live view.
 	const registry = options.tools ?? createToolRegistry(toolDefinitions());
 
-	return { workDirAbsPath, settingsState, modelChoice, rows, registry, sessionManager };
+	return { workDirAbsPath, settings, modelChoice, rows, registry, sessionManager };
 }
 
 /**
@@ -164,10 +157,10 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
  * session's history would be indistinguishable from using it.
  */
 export async function readSessionSnapshot(options: OpenAgentOptions): Promise<SessionSnapshot> {
-	const { workDirAbsPath, settingsState, modelChoice, rows, registry, sessionManager } = await assemble(options);
+	const { workDirAbsPath, settings, modelChoice, rows, registry, sessionManager } = await assemble(options);
 	// The same derivation a live session runs — the ledger over the global default's live view — so a
 	// cold read answers the choice a live session opens on, without replaying it into anything.
-	const tools = toolStateOf(sessionManager, options.session, settingsState, registry);
+	const tools = toolStateOf(sessionManager, options.session, settings, registry);
 	return sessionSnapshot({
 		sessions: sessionManager,
 		session: options.session,
@@ -179,14 +172,14 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 		// The same merge `Agent.getApprovals` performs: the directory's defaults with the session's own
 		// recorded choices over them. Neither half is optional, or the header's toggles would show a
 		// gate the live session does not have.
-		approvals: { ...getApprovals(settingsState), ...tools.approvalOverride },
+		approvals: { ...settings.getApprovals(workDirAbsPath), ...tools.approvalOverride },
 		// Read off the registry with the derived choice, so the toggles match a live session's exactly.
 		allTools: registry.names(),
 		activeTools: registry.activeNames(tools),
 		// Judged against this directory's own settings, the same way the live session's getter does it:
 		// a cold read and a live snapshot must agree here, or the panel would flip its "沿用全局" label
 		// the moment a session went from open to merely read.
-		...followsGlobalOf(sessionManager, options.session, settingsState, registry),
+		...followsGlobalOf(sessionManager, options.session, settings, registry),
 		submitting: false,
 		queued: [],
 		isRetrying: false,
@@ -201,14 +194,14 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 /**
  * Assemble a session's state: the seed→fill lifecycle's seeding half (ADR-0006 §2).
  *
- * The working directory, the settings, the live half, and the model choice in force are resolved
- * once here and land in the {@link AgentState} — the assembly product *is* the state (ADR-0011) —
- * so every later call, which names the session by id, reads them back instead of re-resolving them.
- * The model choice is seeded onto the session's own setting field, in memory: the choice in force
- * before the first request is the assembly's answer, and the request made with the choice is what
- * records it on disk (`Agent.recordSelection`). The build chain runs in the order the state's shape
- * fixes — the session first, then the settings it runs against, then the live half whose queue
- * modes are those settings' answer (ADR-0011).
+ * The working directory, the model choice in force, and the live half are resolved once here and
+ * land in the {@link AgentState} — the assembly product *is* the state (ADR-0011) — so every later
+ * call, which names the session by id, reads them back instead of re-resolving them. The settings are
+ * deliberately *not* part of the state: they are read live through the {@link SettingManager} the
+ * orchestrator holds, so a settings edit reaches every session over the directory with nothing to
+ * refresh. The model choice is seeded onto the session's own setting field, in memory: the choice in
+ * force before the first request is the assembly's answer, and the request made with the choice is
+ * what records it on disk (`Agent.recordSelection`).
  *
  * Registration is the caller's: `Agent.adopt(state)` is the only way a state enters an orchestrator's
  * table, and a host that runs many sessions adopts each one as it assembles it (ADR-0011).
@@ -225,7 +218,7 @@ export async function assembleSession(options: OpenAgentOptions): Promise<{
 	sessionManager: SessionManager;
 	state: AgentState;
 }> {
-	const { workDirAbsPath, settingsState, modelChoice, sessionManager } = await assemble(options);
+	const { workDirAbsPath, settings, modelChoice, sessionManager } = await assemble(options);
 	const session = options.session;
 	// The choice in force before the first request (issue 03 §7): the assembly's answer, merged onto
 	// the session's own setting field in memory. The write is deliberately not a recorded one — the
@@ -240,25 +233,28 @@ export async function assembleSession(options: OpenAgentOptions): Promise<{
 			...(modelChoice.thinkingLevel === undefined ? {} : { thinkingLevel: modelChoice.thinkingLevel }),
 		};
 	}
-	// First touch creates the state: the durable half is the caller's transcript bag as it stands, the
-	// settings are the bag every settings call in this session passes, and the live half is empty —
-	// its queue modes are the same settings' answer at this moment; a config patch moves them on the
-	// queues in place afterwards.
-	const state = createAgentState(session, settingsState, createLive(settingsState));
+	// First touch creates the state: the durable half is the caller's transcript bag as it stands, and
+	// the live half is empty — its queue modes are the settings' answer at this moment, read live
+	// through the manager; a config patch moves them on the queues in place afterwards.
+	const state = createAgentState(
+		session,
+		createLive(settings.getSteeringMode(workDirAbsPath), settings.getFollowUpMode(workDirAbsPath)),
+	);
 	return { sessionManager, state };
 }
 
 /**
  * The services one orchestrator coordinates, for a caller that builds one.
  *
- * Everything here is process-level: the ledger, the models this process can run, the catalog, and
- * the transport. Nothing in it is a session's — which is what lets a host keep one
- * orchestrator for every conversation it runs (ADR-0007 §6). A session's state is not here either:
- * it is assembled by {@link assembleSession} and adopted by the orchestrator the host owns.
+ * Everything here is process-level: the ledger, the configuration every settings and model read goes
+ * through, the catalog, and the transport. Nothing in it is a session's — which is what lets a host
+ * keep one orchestrator for every conversation it runs (ADR-0007 §6). A session's state is not here
+ * either: it is assembled by {@link assembleSession} and adopted by the orchestrator the host owns.
  */
 export interface SessionAgentServices {
 	sessionManager: SessionManager;
-	models: ModelSource;
+	/** The configuration every settings and model read of every session this orchestrator runs goes through. */
+	settings: SettingManager;
 	/**
 	 * The catalog callers of this orchestrator share. Omitted means the six built-ins alone; a test
 	 * that adds a tool of its own hands in a registry of its own, so nothing it registered reaches a
@@ -283,12 +279,18 @@ export interface SessionAgentServices {
  */
 export function createSessionAgent(services: SessionAgentServices): Agent {
 	const hooks = createHooks();
+	// Resolved once and handed to both halves: the registry a run's executable set is built from and
+	// the registry a command narrows are the same one, and a second resolution here would let a
+	// caller's own tool reach one and not the other.
+	const tools = services.tools ?? createToolRegistry(toolDefinitions());
 	const session = new Agent({
 		sessionManager: services.sessionManager,
-		models: services.models,
-		tools: services.tools ?? createToolRegistry(toolDefinitions()),
-		...(services.api === undefined ? {} : { api: services.api }),
+		settings: services.settings,
+		tools,
 		hooks,
+		// The one assembly of a process: the transport is resolved here rather than defaulted inside
+		// the orchestrator, so everything a run can leave the process through is decided in one file.
+		api: services.api ?? anthropicMessages,
 		// Rebuilt whenever the active set or the approval set moves, so the prompt cannot promise tools
 		// or approvals the session no longer has. The working directory and the project instructions are
 		// handed over per request for the same reason they are not captured: one builder serves every
@@ -343,7 +345,7 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 	const { sessionManager, state } = await assembleSession(options);
 	const agent = createSessionAgent({
 		sessionManager,
-		models: options.models,
+		settings: options.settings ?? new SettingManager(),
 		...(options.tools === undefined ? {} : { tools: options.tools }),
 		...(options.api === undefined ? {} : { api: options.api }),
 	});

@@ -1,6 +1,7 @@
 # 0011：会话状态搬进 Agent——一张 `Map<id, AgentState>`，四层登记结构合一
 
 日期：2026-11-04 · 状态：已接受，**已落地**（agent-state 01–14 号票；01–05 拍板、06–13 落地、14 号票清旧删废并翻转此行）
+修订：2026-11-04 配置收拢进 `SettingManager`——`state.setting` 废除、决定 7 推翻，见[修订节](#修订2026-11-04配置收拢进-settingmanager)
 取代：[0007](0007-services-drop-instance-state.md)（部分，2026-11-04——决定 3 的 Manager 键控缓存与决定 4 的活登记处归属及判据；其余决定不变）
 
 设计过程见 `.scratch/agent-state/`（票 01–05 是各决定的明细，本 ADR 只记合拢后的结论）。
@@ -31,9 +32,10 @@ fill-at-open 的键控缓存重放，live 的一半（两条队列、在飞运�
 仍是编排层，只是多一个 Map 属性；per-session 实例的路（0006 的 A 路线）仍然否掉。
 
 1. **一张表，四层合一**。`Agent` 持有 `private readonly sessions: Map<string, AgentState>`；
-   `AgentState = { listeners, eventListeners, setting, session, live }`（类型由 07 号票落地）合并
+   `AgentState = { listeners, eventListeners, session, live }`（类型由 07 号票落地；`setting` 一员由
+   [修订节](#修订2026-11-04配置收拢进-settingmanager)删除）合并
    `OpenSessions` / `OpenSession` / `SessionRuntime` / `RunScope` 的全部内容；构建链固定为
-   `fillSession` → `fillSettings` → `live`（先会话后设置——会话记着自己选了哪个模型、哪档思考强度），
+   `fillSession` → 设置现读 → `createLive`（先会话后设置——会话记着自己选了哪个模型、哪档思考强度），
    由工厂的 `assembleSession` 一次跑完。
 2. **唯一的门**。状态进表的唯一入口是 `Agent.adopt(state)`：**先到先得**——已有该 id 时不覆盖、不抛
    （继承 `OpenSessions.ensure` 的语义，**不是** `SessionManager.adopt` 的最后写赢；覆盖会换掉在飞的
@@ -42,7 +44,7 @@ fill-at-open 的键控缓存重放，live 的一半（两条队列、在飞运�
    **不**换成 `sessions?: Map`——注入一张表等于给表的写者与删者各留第二个（01 号票 §3、§6）。
 3. **装配点唯一，留在工厂**。`assembleSession`（原 `ensureSession`）造出 `AgentState`，调用方
    `agent.adopt(state)` 交表；`Agent` 不新增 `SettingsManager` 依赖——构造依赖就是权限，编排层读设置
-   的唯一路径仍是随条目进来的 `entry.settings`（今天的 `state.setting`）。冷读继续走私有的 `assemble()`，
+   的唯一路径曾是随条目进来的 `entry.settings`（`state.setting`；已由[修订节](#修订2026-11-04配置收拢进-settingmanager)换为注入的 `SettingManager`）。冷读继续走私有的 `assemble()`，
    **不进表**。`SessionServices` 删除，`SessionAgentServices` 断开 `extends`。
 4. **表装的是「丢了就没了的那一份」**——这是对 0007 §4 判据的**重写**，不是引用：登记处不再只装
    「进行中且磁盘上没有」的东西。盘上有文件的会话也进表（它有队列与订阅），盘上什么都没有的会话也进表
@@ -72,11 +74,47 @@ fill-at-open 的键控缓存重放，live 的一半（两条队列、在飞运�
    ——cancel（连同它的等效事件：关窗、刷新、断网、背压踢连接）是连接级的话，判据本身没有一样在帧上；
    `wait` 是唯一的客户端自报，它不是判据的事实来源（run 是否在飞仍只有服务端知道），只是把「我还在等」
    这句话送到服务端——客户端的引用计数是副本，副本的迟到由这条判据买单（13 号票）。
-7. **设置是打开时读到的一份快照**。一次写入只作用于发起命令那个会话的袋，同目录其余会话下次 open 时
+7. **设置是打开时读到的一份快照**。（已被[修订节](#修订2026-11-04配置收拢进-settingmanager)推翻：设置
+   现经无状态的 `SettingManager` 实时穿透，写入对一切会话的下一次读取即生效。）一次写入只作用于发起命令那个会话的袋，同目录其余会话下次 open 时
    refill；正在跑的会话读旧值与 Live 规则同调。会话级（快照的 `activeTools` / `approval` 字段）与
    目录级（`modes` / `retry` / 默认 `approval`）的边界不变——袋还是那个袋，只是每个会话一份、不再共享。
 8. **审批宽限与 reap 的 deny 删除**。「没人回答就拒」退化成「下一次运行的恢复机器把孤儿合成错误结果」；
    `suspended` 队列照旧保留（恢复运行要取走），`suspended` 本身挡驱逐。
+
+## 修订（2026-11-04）：配置收拢进 SettingManager
+
+落地当天，用户要求把全部配置读取（设置与模型行）收进一个 `SettingManager` 类，构造注入 `Agent`。
+本节记录它对本 ADR 的推翻与保留；设计定案经两轮拷问后直接执行。
+
+**推翻的是决定 7 与 `state.setting` 这一员**：
+
+- `AgentState` 缩成 `{ listeners, eventListeners, session, live }`——「本次打开解析出的设置袋」不再是
+  状态。这本来就是决定 4 判据的反面：设置随时能从两个文件重建、没有任何「丢了就没了」的内容，装进表
+  只是装配顺手留下的行李。
+- 「设置是打开时快照」换成「**配置实时穿透**」：`SettingManager` 是无状态门面，不做任何缓存，每个方法
+  现读全局与目录两份 `settings.json`、写入仍回**已经提供该字段**的那一份。一次写入对一切会话（含正在
+  跑的）的下一次读取即生效——旧的「同目录两个活会话要等重开才看到修改」这条代价（见后果）随之作废，
+  换来的代价是每次读一次文件。「活会话不走冷路」（决定 4）不受影响：它说的是会话的 durable 袋，不是
+  设置。
+- 会话级选择不变：工具集与审批仍是快照的 `activeTools` / `approval` 字段，「沿用全局」的判读从
+  「与袋里的值作字段等价比对」改为「与 manager 现读的值比对」——判据的形状一样，只是值的来源换了。
+
+**新增的形状**：
+
+- `SettingManager`（文件 `setting-manager.ts`，原 `settings-manager.ts`）构造注入 `Agent`
+  （`AgentConfig.settings`，取代已删的 `Agent.models: ModelSource`）与 `SessionHub`
+  （`HubOptions.settings`，缺省在 agent home 上自建一只）。它是进程一份的门面：模型目录读
+  `modelCatalog()`、写 `replaceModels()`（`ModelConfigStore` 类保留，降为它的内部件）；
+  `ModelSource` 接口删除——「一个源」的抽象被「一只门面」取代。
+- 旧的文件级函数族（`fillSettings` / `getSettings` / `applySettings` / `getApprovals` /
+  `inMemorySettingsState` / `settingsStateFromStorage` / `SettingsState`）从公开面删除；冒烟与测试
+  走 `inMemorySettingManager(settings, rows)` 或 `new SettingManager({ storage })`。
+- `assembleSession` 装配链里设置那一环从「读出一份袋装进状态」改为「现读两次队列模式喂给
+  `createLive(steeringMode, followUpMode)`」；挂载冒烟（`mountSession`）不得给单个会话换 manager——
+  一个编排层一扇门，要自己的设置的冒烟在 `HubOptions.settings` 上换。
+
+**保留的**：决定 1/2/4/5/6/8 全部原样有效——表、`adopt` 先到先得、判据、两个 Manager 无缓存、删除权
+与审批收尾，都不随这次改动移动。
 
 ## 后果
 

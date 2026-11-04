@@ -18,14 +18,7 @@ import {
 	type SessionSnapshot,
 	type SettingsPatch,
 	type SettingsSnapshot,
-	type SettingsState,
-	applySettings,
-	getAppearance,
-	getApprovals,
-	getBashSettings,
-	getHiddenDirectories,
-	getSettings,
-	getDirectoryNames,
+	SettingManager,
 	toSessionRef,
 	type ModelConfig,
 	type DirectoryGroup,
@@ -41,14 +34,17 @@ export async function listSessions(workDirAbsPath: string): Promise<SessionRef[]
 }
 
 /** What the settings panel reads: the values it can edit, and the ones it shows read-only. */
-function settingsOf(settings: SettingsState): SettingsSnapshot {
-	const merged = getSettings(settings);
-	const hidden = getHiddenDirectories(settings);
-	const names = getDirectoryNames(settings);
+function settingsOf(settings: SettingManager, workDirAbsPath: string): SettingsSnapshot {
+	const merged = settings.getSettings(workDirAbsPath);
+	const hidden = merged.hiddenDirectories ?? [];
+	const names: Record<string, string> = {};
+	for (const [dir, name] of Object.entries(merged.directoryNames ?? {})) {
+		if (name.trim().length > 0) names[dir] = name;
+	}
 	return {
-		appearance: getAppearance(settings),
-		approval: getApprovals(settings),
-		bash: getBashSettings(settings),
+		appearance: merged.appearance,
+		approval: merged.approval,
+		bash: merged.bash,
 		...(merged.tools === undefined ? {} : { tools: merged.tools }),
 		...(merged.modes === undefined ? {} : { modes: merged.modes }),
 		...(hidden.length === 0 ? {} : { hiddenDirectories: hidden }),
@@ -199,9 +195,8 @@ export class SystemController {
 			throw httpStatus.notFound(`Unknown directory: ${absSource}`);
 		}
 
-		const settings = this.hub.settingsStateOf(this.hub.workDirAbsPath);
-		applySettings(settings, { directoryNames: { [absSource]: name.trim() } });
-		return { workDirAbsPath: absSource, name: name.trim(), settings: settingsOf(settings) };
+		this.hub.settings.applySettings(this.hub.workDirAbsPath, { directoryNames: { [absSource]: name.trim() } });
+		return { workDirAbsPath: absSource, name: name.trim(), settings: settingsOf(this.hub.settings, this.hub.workDirAbsPath) };
 	}
 
 	/**
@@ -222,29 +217,28 @@ export class SystemController {
 			throw httpStatus.badRequest("`workDirAbsPath` must be a directory path");
 		}
 
-		const settings = this.hub.settingsStateOf(this.hub.workDirAbsPath);
-		const hidden = getHiddenDirectories(settings);
+		const hidden = this.hub.settings.getHiddenDirectories(this.hub.workDirAbsPath);
 		if (!hidden.some((path) => samePath(path, workDirAbsPath))) {
-			applySettings(settings, { hiddenDirectories: [...hidden, resolve(workDirAbsPath)] });
+			this.hub.settings.applySettings(this.hub.workDirAbsPath, { hiddenDirectories: [...hidden, resolve(workDirAbsPath)] });
 			this.listeners.onDirectoryListingChanged?.();
 		}
 
 		// The listing goes back with the answer because the removal is a *stored* fact rather than a
 		// frame: this command rides REST, and the rows a window draws come from the channel. A client
 		// that applied its own guess would be a second writer for a list the server owns.
-		return this.listing(settings);
+		return this.listing();
 	}
 
 	/** The visible listing, as the hub's rule leaves it. */
-	private async listing(settings: SettingsState): Promise<{ settings: SettingsSnapshot; directories: DirectoryGroup[] }> {
+	private async listing(): Promise<{ settings: SettingsSnapshot; directories: DirectoryGroup[] }> {
 		return {
-			settings: settingsOf(settings),
+			settings: settingsOf(this.hub.settings, this.hub.workDirAbsPath),
 			directories: (await SessionManager.listDirectories()).filter((group) => this.hub.listsDirectory(group.workDirAbsPath)),
 		};
 	}
 
 	settings(): { settings: SettingsSnapshot } {
-		return { settings: settingsOf(this.hub.settingsStateOf(this.hub.workDirAbsPath)) };
+		return { settings: settingsOf(this.hub.settings, this.hub.workDirAbsPath) };
 	}
 
 	/**
@@ -268,7 +262,7 @@ export class SystemController {
 		}
 		const fields = patch as Record<string, unknown>;
 
-		const settings = this.hub.settingsStateOf(this.hub.workDirAbsPath);
+		const workDirAbsPath = this.hub.workDirAbsPath;
 		const next: SettingsPatch = {};
 
 		if (fields.tools !== undefined) {
@@ -345,7 +339,7 @@ export class SystemController {
 			// A default that names no row is refused rather than stored: `selectModel` would fall back to
 			// the first row, so a typo here would look like a preference that quietly did nothing. The
 			// rows are the hub's, read fresh, so a row deleted since the panel loaded is caught too.
-			if (this.hub.models.list().find((userModel) => userModel.name === fields.model) === undefined) {
+			if (this.hub.settings.modelCatalog().find((userModel) => userModel.name === fields.model) === undefined) {
 				throw httpStatus.conflict(`Unknown model: ${fields.model}`);
 			}
 			next.model = fields.model;
@@ -420,8 +414,8 @@ export class SystemController {
 			next.bash = bash;
 		}
 
-		applySettings(settings, next);
-		return { settings: settingsOf(settings) };
+		this.hub.settings.applySettings(workDirAbsPath, next);
+		return { settings: settingsOf(this.hub.settings, workDirAbsPath) };
 	}
 
 	async sessions(): Promise<{ sessions: SessionRef[] }> {
@@ -520,11 +514,10 @@ export class SessionController {
  * the hub's visibility rule reads, so the next listing and the next overview frame already agree.
 	 */
 	private restoreDirectory(workDirAbsPath: string): void {
-		const settings = this.hub.settingsStateOf(this.hub.workDirAbsPath);
-		const hidden = getHiddenDirectories(settings);
+		const hidden = this.hub.settings.getHiddenDirectories(this.hub.workDirAbsPath);
 		const kept = hidden.filter((path) => !samePath(path, workDirAbsPath));
 		if (kept.length === hidden.length) return;
-		applySettings(settings, { hiddenDirectories: kept });
+		this.hub.settings.applySettings(this.hub.workDirAbsPath, { hiddenDirectories: kept });
 		this.listeners.onDirectoryListingChanged?.();
 	}
 

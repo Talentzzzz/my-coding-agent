@@ -249,12 +249,14 @@ function wireOver(socket: WebSocket): WireClient {
 }
 
 /** 冒烟里最常用的一段轮询：等到谓词成立或超时。装置自己不用，留给各 rig。 */
-export function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
+export function until(ready: () => boolean | Promise<boolean>, ms = 5_000): Promise<boolean> {
 	const deadline = Date.now() + ms;
 	const sleep = (step: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, step));
 	return (async () => {
 		while (Date.now() < deadline) {
-			if (ready()) return true;
+			// Awaited, not just tested: a truthy Promise from an async predicate would read as
+			// "ready" on the first poll and turn the whole wait into a no-op.
+			if (await ready()) return true;
 			await sleep(POLL_MS);
 		}
 		return ready();

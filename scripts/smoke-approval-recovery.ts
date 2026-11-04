@@ -28,13 +28,12 @@ import {
 	openAgent,
 	recoverPendingToolCalls,
 	createSession,
-	inMemorySettingsState,
+	inMemorySettingManager,
 	type Agent,
 	type AgentEvent,
 	type AgentTool,
 	type Session,
 	type ModelConfig,
-	type ModelSource,
 	type ModelSelection,
 	sessionDir,
 } from "@my-agent/core";
@@ -62,7 +61,6 @@ const rows: ModelConfig[] = [
 		maxTokens: 8_192,
 	},
 ];
-const models: ModelSource = { list: () => rows };
 const modelName = "anthropic";
 const selection: ModelSelection = { model: modelName };
 
@@ -150,10 +148,9 @@ async function openSession(overrides: { approval?: Record<string, boolean>; api?
 	const session = await openAgent({
 		workDirAbsPath: root,
 		session: state,
-		models,
 		api: overrides.api ?? fake.api,
 		model: modelName,
-		settingsState: inMemorySettingsState({ approval: overrides.approval ?? {} }),
+		settings: inMemorySettingManager({ approval: overrides.approval ?? {} }, rows),
 	});
 	opened.set(session, { id: state.sessionId, state });
 	return session;

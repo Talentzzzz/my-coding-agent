@@ -24,6 +24,15 @@
 		"scripts/smoke-liveness.ts",
 		"scripts/smoke-backpressure.ts",
 		"scripts/smoke-desktop-close.ts",
-		"scripts/smoke-desktop-observability.ts"
+		"scripts/smoke-desktop-observability.ts",
+		"scripts/smoke-session.ts",
+		"scripts/smoke-settings.ts",
+		"scripts/smoke-tools.ts",
+		"scripts/smoke-sessions.ts",
+		"scripts/smoke-approval.ts",
+		"scripts/smoke-approval-endpoint.ts",
+		"scripts/smoke-approval-queue.ts",
+		"scripts/smoke-approval-recovery.ts",
+		"scripts/smoke-models.ts"
 	]
 }

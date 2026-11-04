@@ -1,21 +1,21 @@
-// Mounting a session in a hub by hand, for the smokes that need settings of their own.
+// Mounting a session in a hub by hand, for the smokes that need a session without an open.
 //
-// Production never does this: `SessionHub.open()` resolves a session's settings from disk,
-// because that is what a window's own directory means. A smoke wants something else — an in-memory
-// settings bag with the approval gate switched on, so a scripted transport can park a run at it — and
-// the hub offers no option for that on purpose (nothing in production sets one).
+// Production never does this: `SessionHub.open()` resolves which session to run from a request, and
+// reads its settings through the hub's own manager. A smoke wants a session whose id it knows up
+// front, so the two steps an open takes are taken here instead: assemble the session's state, hand
+// it to the hub's orchestrator through the same door every state enters (`adopt`), then mount the
+// claim token the hub keys it by. The hub's one orchestrator then serves the session like any
+// other, because every call it answers names the id.
 //
-// So the two steps an open takes are taken here instead: assemble the session's state with the
-// settings the caller wants, hand it to the hub's orchestrator through the same door every state
-// enters (`adopt`), then mount the claim token the hub keys it by. The hub's one orchestrator then
-// serves the session like any other, because every call it answers names the id.
+// Settings are not part of what a mount can choose: the manager is the orchestrator's, and one
+// orchestrator serves every session of the process through the one it was built with. A smoke that
+// wants its own settings — an in-memory approval gate, rows of its own — builds the hub over a
+// manager of its own (`HubOptions.settings`), and every session it mounts reads through that.
 import {
-	type SettingsState,
 	type Session,
 	SessionManager,
 	createSession,
 	assembleSession,
-	inMemorySettingsState,
 } from "@my-agent/core";
 import { HostedSession, type SessionHub } from "../packages/server/src/hub.ts";
 
@@ -30,8 +30,6 @@ export interface MountOptions {
 	root: string;
 	/** The model row the session opens on, by name. */
 	model?: string;
-	/** The settings the session reads and writes, as a bag. Defaults to empty settings. */
-	settings?: SettingsState;
 }
 
 /** What a mounted session is: the id every call names, the transcript bag behind it, and its claim token. */
@@ -55,9 +53,8 @@ export async function mountSession(hub: SessionHub, options: MountOptions): Prom
 	const { state: assembled } = await assembleSession({
 		workDirAbsPath: options.root,
 		session: state,
-		models: hub.models,
 		sessionManager: internals.sessions,
-		settingsState: options.settings ?? inMemorySettingsState({}),
+		settings: hub.settings,
 		...(options.model === undefined ? {} : { model: options.model }),
 	});
 	hub.agent.adopt(assembled);

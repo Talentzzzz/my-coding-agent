@@ -6,7 +6,6 @@ import {
 	type Agent,
 	type AgentSessionEvent,
 	type AgentState,
-	type ModelSource,
 	createSessionAgent,
 	assembleSession,
 	readSessionSnapshot,
@@ -16,12 +15,9 @@ import {
 	SessionManager,
 	createSession,
 	type Session,
-	fillSettings,
-	type SettingsState,
-	getHiddenDirectories,
+	SettingManager,
 	sessionDir,
 	type ModelConfig,
-	ModelConfigStore,
 } from "@my-agent/core";
 
 export interface HubOptions {
@@ -48,6 +44,16 @@ export interface HubOptions {
 	 * to have configured there.
 	 */
 	modelsHome?: string;
+	/**
+	 * The manager every settings and model read of this hub goes through. Defaults to a fresh one
+	 * over {@link settingsHome} and {@link modelsHome}.
+	 *
+	 * The whole door, not a per-session override: the orchestrator reads every session's settings
+	 * and model rows through it, so a smoke that wants its own approval gate or rows hands one in
+	 * here — an in-memory manager keeps the machine's files out of it. Nothing in production sets
+	 * it, for the same reason nothing sets the two homes.
+	 */
+	settings?: SettingManager;
 	/**
 	 * The transport every session this hub opens talks to.
 	 *
@@ -170,17 +176,17 @@ export class SessionHub {
 		return this.absRoot;
 	}
 	/**
-	 * The models this process can run, read from the rows the user entered.
+	 * The configuration every settings and model read of this process goes through.
 	 *
-	 * One object for the whole process, handed to every session and read on each request rather than
-	 * copied into it. That is what lets an edit reach a session that is already running: a key
-	 * corrected in the panel is the key the next message uses, from a window that has been open the
-	 * whole time, and it also means a row added with an editor is picked up without a restart.
+	 * One manager for the whole process, handed to every session and read on each request rather than
+	 * copied into it. It holds nothing: every read is a fresh read of the files behind it, which is
+	 * what lets an edit reach a session that is already running — a key corrected in the panel is the
+	 * key the next message uses, from a window that has been open the whole time, and a row added with
+	 * an editor is picked up without a restart.
 	 */
-	readonly models: ModelSource = { list: () => this.modelStore.list() };
+	readonly settings: SettingManager;
 
 	private readonly options: HubOptions;
-	private readonly modelStore: ModelConfigStore;
 	private readonly hosts = new Map<string, HostedSession>();
 	/**
 	 * The stateless session service every open, rename, fork, and delete below goes through.
@@ -241,42 +247,30 @@ export class SessionHub {
 	constructor(options: HubOptions) {
 		this.options = options;
 		this.absRoot = options.workDirAbsPath;
-		this.modelStore = ModelConfigStore.create(options.modelsHome);
+		this.settings = options.settings ?? new SettingManager({ home: options.settingsHome, modelsHome: options.modelsHome });
 		this.agent = createSessionAgent({
 			sessionManager: this.sessions,
-			models: this.models,
+			settings: this.settings,
 			...(options.api === undefined ? {} : { api: options.api }),
 		});
 	}
 
 	/** The models the user has entered, in the order they appear in the settings panel. */
-	get userModels(): ModelConfig[] {
-		return this.modelStore.list();
+	get userModels(): readonly ModelConfig[] {
+		return this.settings.modelCatalog();
 	}
 
 	/**
 	 * Replace the stored models.
 	 *
-	 * Nothing has to be brought in line afterwards: sessions read the store through {@link models} on
-	 * every request and re-derive the model from the row it names, so the next message already uses the
-	 * new rows — a key corrected in the panel is the key that message sends, and so is an endpoint, a
-	 * window, or a wire id, including from a window that has been open the whole time.
+	 * Nothing has to be brought in line afterwards: sessions read the catalog through
+	 * {@link settings} on every request and re-derive the model from the row it names, so the next
+	 * message already uses the new rows — a key corrected in the panel is the key that message sends,
+	 * and so is an endpoint, a window, or a wire id, including from a window that has been open the
+	 * whole time.
 	 */
 	setModelConfigs(models: readonly ModelConfig[]): void {
-		this.modelStore.replace(models);
-	}
-
-	/**
-	 * The settings of one directory, filled fresh from its files on every call.
-	 *
-	 * The one line that exists so no caller has to know where this process keeps its global settings
-	 * file: the fill is seeded by the working directory and reads under {@link HubOptions.settingsHome}
-	 * when one was set. Nothing is cached behind it — each open fills its own bag, a snapshot of the
-	 * two files as of that open; a settings write acts on the bag it was made through and on disk, and
-	 * the other sessions over the directory see it the next time they are opened.
-	 */
-	settingsStateOf(workDirAbsPath: string): SettingsState {
-		return fillSettings(workDirAbsPath, this.options.settingsHome);
+		this.settings.replaceModels(models);
 	}
 
 	/**
@@ -285,7 +279,7 @@ export class SessionHub {
 	 * One home for one rule, because there are two roads by which a window learns the machine's
 	 * directories — the REST listing and the channel's overview — and two filters would be two answers
 	 * the first time either side changed. The list itself is a settings fact, read through the same
-	 * fresh fill the command writing it goes through, so a hide is visible to both roads on the next
+	 * fresh read the command writing it goes through, so a hide is visible to both roads on the next
 	 * look.
 	 *
 	 * A hub with no root answers "everything is listed". That is not a production state — `HubOptions`
@@ -296,7 +290,7 @@ export class SessionHub {
 	 */
 	listsDirectory(workDirAbsPath: string): boolean {
 		if (typeof this.absRoot !== "string") return true;
-		return !getHiddenDirectories(this.settingsStateOf(this.absRoot)).some((path) => samePath(path, workDirAbsPath));
+		return !this.settings.getHiddenDirectories(this.absRoot).some((path) => samePath(path, workDirAbsPath));
 	}
 
 	/**
@@ -800,8 +794,7 @@ export class SessionHub {
 			workDirAbsPath,
 			sessionManager: this.sessions,
 			session: state,
-			models: this.models,
-			settingsState: this.settingsStateOf(workDirAbsPath),
+			settings: this.settings,
 			...(this.options.model === undefined ? {} : { model: this.options.model }),
 			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),
 			...(this.options.api === undefined ? {} : { api: this.options.api }),

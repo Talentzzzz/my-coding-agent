@@ -1,4 +1,4 @@
-import { type SettingsState, getApprovals, getSettings, getTools } from "../settings-manager.ts";
+import type { SettingManager } from "../setting-manager.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
 import { fillTools, narrowToKnown, type ToolState } from "../tools/manager.ts";
 import { type SessionManager, type Session } from "./session-manager.ts";
@@ -15,8 +15,8 @@ export function approvalToolsOf(approval: Record<string, boolean>): string[] {
  * judgement — because three spellings of "the default" would let a reset write one set while the
  * panel judged the session against another, and a just-reset session would read as having chosen.
  */
-export function defaultToolNames(s: SettingsState, registry: ToolRegistry): string[] {
-	const configured = getTools(s);
+export function defaultToolNames(settings: SettingManager, workDirAbsPath: string, registry: ToolRegistry): string[] {
+	const configured = settings.getTools(workDirAbsPath);
 	const names = configured === undefined ? registry.names() : configured;
 	return narrowToKnown(names, registry.names());
 }
@@ -29,10 +29,14 @@ export function defaultToolNames(s: SettingsState, registry: ToolRegistry): stri
  * {@link fillTools} the same way a named mode would be. Undefined approvals mean "the session never
  * chose", so the view stays live: a settings change is this mode's change.
  */
-export function globalDefaultToolState(s: SettingsState, registry: ToolRegistry): ToolState {
+export function globalDefaultToolState(
+	settings: SettingManager,
+	workDirAbsPath: string,
+	registry: ToolRegistry,
+): ToolState {
 	return fillTools(undefined, {
-		modes: getSettings(s).modes ?? [],
-		globalTools: defaultToolNames(s, registry),
+		modes: settings.getSettings(workDirAbsPath).modes ?? [],
+		globalTools: defaultToolNames(settings, workDirAbsPath, registry),
 		known: registry.names(),
 	});
 }
@@ -48,15 +52,22 @@ export function globalDefaultToolState(s: SettingsState, registry: ToolRegistry)
  * global default. A session whose loadout is not its directory's own (the delegated child) says
  * so through its settings, which for it are the default this reads.
  *
- * The recorded set is narrowed to the tools this build still knows, so one an upgrade dropped is
- * dropped by the read too and cannot refuse the session its reopen — and the fallback is narrowed the
- * same way, for the same reason. A recorded approval is the session's own choice and is carried whole;
- * without one the fallback's answer stands, which for the global default is "follow the settings",
- * kept live.
+ * The fallback is read live through the settings manager, at the directory the session's own header
+ * names — never held, so a settings edit reaches the next read with nothing to refresh. The recorded
+ * set is narrowed to the tools this build still knows, so one an upgrade dropped is dropped by the
+ * read too and cannot refuse the session its reopen — and the fallback is narrowed the same way, for
+ * the same reason. A recorded approval is the session's own choice and is carried whole; without one
+ * the fallback's answer stands, which for the global default is "follow the settings", kept live.
  */
-export function toolStateOf(sessions: SessionManager, state: Session, s: SettingsState, registry: ToolRegistry): ToolState {
+export function toolStateOf(
+	sessions: SessionManager,
+	state: Session,
+	settings: SettingManager,
+	registry: ToolRegistry,
+): ToolState {
 	const recorded = sessions.getRecordedToolConfig(state);
-	const fallback = globalDefaultToolState(s, registry);
+	const workDirAbsPath = state.sessionSetting.workDirAbsPath;
+	const fallback = globalDefaultToolState(settings, workDirAbsPath, registry);
 	const names = narrowToKnown(recorded.activeTools ?? fallback.activeToolNames, registry.names());
 	return {
 		activeToolNames: names,
@@ -110,13 +121,13 @@ function toolConfigFollowsGlobal(
 export function followsGlobalOf(
 	sessions: SessionManager,
 	state: Session,
-	s: SettingsState,
+	settings: SettingManager,
 	registry: ToolRegistry,
 ): { toolsFollowGlobal: boolean; approvalsFollowGlobal: boolean } {
 	const follows = toolConfigFollowsGlobal(
 		sessions.getRecordedToolConfig(state),
-		defaultToolNames(s, registry),
-		getApprovals(s),
+		defaultToolNames(settings, state.sessionSetting.workDirAbsPath, registry),
+		settings.getApprovals(state.sessionSetting.workDirAbsPath),
 	);
 	return { toolsFollowGlobal: follows.tools, approvalsFollowGlobal: follows.approvals };
 }

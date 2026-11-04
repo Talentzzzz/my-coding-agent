@@ -16,7 +16,7 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 
 ## 各 package 的职责
 
-**core** 是无头的：工作目录、导入的模型、工具、会话管理器、系统提示词、审批闸门，对 HTTP 和 DOM 一无所知。它是 **ADR-0007 的无属性服务**——账本、模型行、工具目录三个域平级互不依赖，`Agent` 是编排层、只做跨域编排；一个会话的全部状态是一件东西 `AgentState`：durable 的一半是账本重放出的袋子（`state.session`），live 的一半（`Live`：两条队列、在飞运行、partial、重试与挂起位）与设置袋、订阅集合同住一份状态，由 `Agent` 按 id 键控持有（[ADR-0011](adr/0011-agent-holds-session-state.md)）。它发出 `AgentSessionEvent` 值 —— `types.ts` 的 `AgentEvent`，加上它自己的成员：队列深度、压缩、entry 落地、配置变更、重试。运行引擎也住在这里：`Agent.runEngine` 是编排层的一个方法，而不是它旁边的一个对象——读代码不需要在两层之间来回换算，一次运行只走一条链 `startRun → runEngine → prepareRequest → dispatchEvent`（[ADR-0008](adr/0008-loop-merged-into-agent.md)）。
+**core** 是无头的：工作目录、导入的模型、工具、会话管理器、系统提示词、审批闸门，对 HTTP 和 DOM 一无所知。它是 **ADR-0007 的无属性服务**——账本、模型行、工具目录三个域平级互不依赖，`Agent` 是编排层、只做跨域编排；一个会话的全部状态是一件东西 `AgentState`：durable 的一半是账本重放出的袋子（`state.session`），live 的一半（`Live`：两条队列、在飞运行、partial、重试与挂起位）与设置袋、订阅集合同住一份状态，由 `Agent` 按 id 键控持有（[ADR-0011](adr/0011-agent-holds-session-state.md)）。它发出 `AgentSessionEvent` 值 —— `types.ts` 的 `AgentEvent`，加上它自己的成员：队列深度、压缩、entry 落地、配置变更、重试。运行引擎也住在这里，但是**一个对象**：`LoopManager`（`loop-manager.ts`）持有一次运行的全部——引擎、每轮填充链、压缩、重试泵、两个工具闸门、事件 sink——`Agent` 通过 `AgentConfig.loop` 构造注入它，一次运行只走一条链 `Agent.prompt → LoopManager.run → prepareRequest → dispatchEvent`（[ADR-0012](adr/0012-loop-manager-object.md)）。两者都不回头问对方：`AgentState` 作为参数递进运行对象，事件与投影走 `session/fanout.ts` 的文件级函数。
 
 **server** 拥有传输层和活跃会话：`SessionHub` 持有无属性服务——模型行、账本、工具目录——加**一个**编排层 `Agent`；会话状态的那张表由编排层自己持有：每 id 一份 `AgentState`（账本重放、设置袋、订阅集合与 live 半——两条队列与在飞运行），进程里唯一的跨栈内存会话态，宿主收摊时由 `Agent.evict` / `Agent.drop` 删除（[ADR-0011](adr/0011-agent-holds-session-state.md)）。除此之外 hub 只按 id 记 claim（谁能用这个会话），那本是传输层的事（[ADR-0001](adr/0001-transport-websocket-mux.md)）；`Router` 把请求变成对某个控制器的一次调用，每个控制器在它做事期间持有 claim；`mux.ts` 的连接层持有一张订阅表（连接 × 会话），**订阅不拿 claim**；`projection.ts` 把"每个会话在做什么"聚成侧边栏的行。模型是**每次请求**都从 `models.json` 读，而不是缓存成一份目录；会话在每次请求前从它命名的那一行重新推导自己的模型，所以设置面板的一次编辑——密钥、端点、窗口、wire id——能抵达**每一个已经打开的会话**。
 
@@ -27,7 +27,7 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 | 认证、流式、wire | `@my-agent/llm` | `api/anthropic-messages.ts` —— 该 package 里留下的唯一一个 API 实现，导出为 `anthropicMessages` 传输层 |
 | 导入的模型 | 我们 | `core/src/models.ts`：用户手打的那些行，每行由**手写的一个名字**命名——这个名字既是该行的身份也是它的标签，因为 transcript、配置补丁、选择器三处必须指同一行——每一行都直接变成发请求时用的模型；旧行的 `label` 被读作它的 `name`，这保住了用户选定的名字，代价是一次性的：用旧 slug 构建的引用会失效。上游的 `builtinModels()`、它的每供应商工厂、以及在其中路由的 `Models`/`Provider` 注册表，是被**刻意删除**的 |
 | 每模型能力 | 我们 | `core/src/anthropic-models.ts`：某个 Claude 模型接受什么，从它的 wire id 推导——因为手打的一行没有别的东西可以作键 |
-| 运行引擎、steering、事件 | 我们 | `agent.ts` 的 `Agent.runEngine`、工具调用、流事件——引擎是编排层的方法，不是委派对象（[ADR-0008](adr/0008-loop-merged-into-agent.md)） |
+| 运行引擎、steering、事件 | 我们 | `agent.ts` 的 `Agent.run`、工具调用、流事件——引擎是编排层的私有方法，与命令面同一个对象（[ADR-0014](adr/0014-loop-manager-removed.md)） |
 | 工具 | 我们 | 基于 `node:fs` / `node:child_process` 的六个文件工具 |
 | 会话持久化 | 我们 | `SessionManager`：`.json` 快照（会话是什么）+ 同 stem 的只追加 JSONL 日志（说过什么），配对残缺即删（[ADR-0009](adr/0009-session-two-file-format.md)） |
 | 提示词、压缩、视图收缩 | 我们 | `context/system-prompt.ts`、`trim-tool-call-args.ts`、`spill.ts`、`clear-tool-results.ts`、`compaction.ts` |
@@ -35,7 +35,7 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 | 桌面外壳 | 我们 + Electron | `packages/desktop`：窗口、标题栏、主题，以及进程内的服务器 |
 | 窗口 UI | 我们 | Vite + TypeScript，无框架，一个 DOM 渲染器架在常驻通道上 |
 
-运行时依赖是两个包：`@my-agent/llm`、`typebox`。前者是 `@earendil-works/pi-ai` 0.99.2 的裁剪子集（`packages/llm`），只追踪到本项目真正触达的文件，并保留在 pi 自己的编译设置下（逐文件 `@ts-nocheck`；仓库根更严格的 tsconfig 仍然检查每一个进入 core 的 import）；上游对照已放弃（ADR-0008），它由本仓库自己维护。它旁边那个同源的循环（`packages/loop`，来自 `@earendil-works/pi-agent-core`）已经不存在：引擎并入 `agent.ts`，它那份 `@ts-nocheck` 随文件一起退场，也不再跟踪上游（[ADR-0008](adr/0008-loop-merged-into-agent.md)）。`pi-tui`、`pi-mcp`、`pi-codemode`、`pi-durable` 和 pico3 harness 都没有取用。
+运行时依赖是两个包：`@my-agent/llm`、`typebox`。前者是 `@earendil-works/pi-ai` 0.99.2 的裁剪子集（`packages/llm`），只追踪到本项目真正触达的文件，并保留在 pi 自己的编译设置下（逐文件 `@ts-nocheck`；仓库根更严格的 tsconfig 仍然检查每一个进入 core 的 import）；上游对照已放弃（ADR-0008），它由本仓库自己维护。它旁边那个同源的循环（`packages/loop`，来自 `@earendil-works/pi-agent-core`）已经不存在：引擎先在 ADR-0008 并入 core，随后（ADR-0012）成为 `loop-manager.ts` 里的 `LoopManager`，它那份 `@ts-nocheck` 随文件一起退场，也不再跟踪上游。`pi-tui`、`pi-mcp`、`pi-codemode`、`pi-durable` 和 pico3 harness 都没有取用。
 
 ai 子集比"应用触达的那些文件"还要窄：它是**一个传输层**触达的文件。上游 pi-ai 实现了五种 chat API，把每个实现的 import 都推迟到 `api/*.lazy.ts` 之后，好让宿主只为它实际发送的那一种付费；它还通过一个带 OAuth 和环境变量兜底的凭据存储来解析凭据，并让每个请求都经过一个供应商注册表。本应用这些一个都不做：它**永远**说 Anthropic Messages，用的是用户敲进 `models.json` 的密钥。于是 `api/anthropic-messages.ts` 是静态 import 的，另外四个实现和那些懒包装是**被删除**而不是"仅仅不可达"，注册表也跟着它们一起没了：wire 上再没有任何东西提及供应商——`Model` 和 `AssistantMessage` 都不带这个字段——所以被重放的 thinking level 不再与产生它的那一行做匹配。它也不需要匹配，因为 level 表是**单独从 wire id 推导**的（`anthropic-models.ts`）：两行命名同一个 wire id，只可能产出同一套 level，而按行匹配只会在这一个时候丢掉 level——用户把他一直在对话的那一行改了名或重新导入了。`packages/llm/src/models.ts` 里留下的是"一次请求所依赖的、关于某个模型的事实"，而不是曾经拥有这些事实的那次查找。如此只剩下 `@anthropic-ai/sdk` 和 `typebox` 两个依赖。
 
@@ -46,11 +46,12 @@ my-coding-agent/
 ├── package.json, tsconfig*.json, AGENTS.md, README.md, docs/architecture.md
 ├── scripts/          # install-deps.ts（此处 npm 的替代品）、check-tokens.ts，以及各个 smoke 脚本
 └── packages/
-    ├── core/src/     # @my-agent/core - 无头 agent：agent.ts（编排层 + 引擎）、session-factory.ts
+    ├── core/src/     # @my-agent/core - 无头 agent：agent.ts（编排层：会话表、命令、审批、投影）、
+    │                 #   （引擎、填充链、压缩、重试、闸门同在 agent.ts）、session-factory.ts
     │                 #   （装配）、types.ts（引擎与工具的契约）、hooks.ts（三个接缝）、models.ts、
-    │                 #   settings-manager.ts、workdir.ts、protocol.ts、session/（会话管理器）、
-    │                 #   context/（提示词、trim-tool-call-args、spill、clear-tool-results、
-    │                 #   compaction）、tools/（每工具一个文件 + 委派对）
+    │                 #   settings-manager.ts、workdir.ts、protocol.ts、session/（会话管理器、状态、
+    │                 #   fanout、事件）、context/（提示词、trim-tool-call-args、spill、
+    │                 #   clear-tool-results、compaction）、tools/（每工具一个文件 + 委派对）
     ├── server/src/   # @my-agent/server - 传输层：boot.ts、main.ts、http.ts、http/（routing.ts 是
     │                 #   唯一读 URL 的地方，websocket.ts 是手写的 RFC6455，client-frame.ts 解析上行帧）、
     │                 #   mux.ts（常驻连接、订阅表、写侧有界队列）、projection.ts（侧边栏行）、
@@ -64,21 +65,21 @@ my-coding-agent/
 
 ## 装配与设置
 
-`Agent` 只用被交给它的东西，别的什么也不用：构造只收**服务**——会话管理器、导入的模型、工具注册表、传输层、hook 表面与提示词构建器——它的每个公开方法都以会话 id 打头，每样数据在用到它的那一行向属主现取：durable 的一半是 `state.session`（打开时 `fillSession` 重放出的账本袋子），live 的一半是 `state.live`（两条队列、在飞运行、partial、重试与挂起位），设置袋与订阅集合是 `state.setting` 与两个 listener 集合——一份状态是一件东西（[ADR-0011](adr/0011-agent-holds-session-state.md)）。状态经 `Agent.adopt(state)` 进表、经 `Agent.evict` / `Agent.drop` 出表；工作目录从会话自己的快照 setting 读（`session.sessionSetting.workDirAbsPath`），模型选择记在同一处、由装配先把选择放到上面（见*输入框的模型座位*）。它不读设置文件、不构建工具、也不挑模型（项目指令 `AGENTS.md` 是每次请求现读的提示词输入，本身不进状态），所以打开一个会话和恢复一个会话是同一条链（装配出状态、adopt 进表，[ADR-0006](adr/0006-stateless-session-architecture.md) §2；重放出的账本状态是可从磁盘重建的缓存，见*SessionManager 是真相之源*）。
+`Agent` 只用被交给它的东西，别的什么也不用：构造只收**服务**——会话管理器、配置（`SettingManager`，设置与模型行共用的无状态门面）、工具注册表、传输层、hook 表面与提示词构建器——它的每个公开方法都以会话 id 打头，每样数据在用到它的那一行向属主现取：durable 的一半是 `state.session`（打开时 `fillSession` 重放出的账本袋子），live 的一半是 `state.live`（两条队列、在飞运行、partial、重试与挂起位），订阅集合是两个 listener 集合——一份状态是一件东西（[ADR-0011](adr/0011-agent-holds-session-state.md)）。状态经 `Agent.adopt(state)` 进表、经 `Agent.evict` / `Agent.drop` 出表；工作目录从会话自己的快照 setting 读（`session.sessionSetting.workDirAbsPath`），模型选择记在同一处、由装配先把选择放到上面（见*输入框的模型座位*）。它不读设置文件、不构建工具、也不挑模型（项目指令 `AGENTS.md` 是每次请求现读的提示词输入，本身不进状态），所以打开一个会话和恢复一个会话是同一条链（装配出状态、adopt 进表，[ADR-0006](adr/0006-stateless-session-architecture.md) §2；重放出的账本状态是可从磁盘重建的缓存，见*SessionManager 是真相之源*）。
 
 构造只收服务这件事有一条直接的后果：**一个进程只需要一个编排层**。hub 在构造时建它一次，此后每个会话都经它、以 id 调用（[ADR-0007](adr/0007-services-drop-instance-state.md) §6：hooks、transport、提示词构建函数是进程级不可变配置，不是会话状态）；而"想独占一个会话"的调用者——一个 smoke、或只跑一个会话的调用方——自己组一个，两条路走的是同一对函数：
 
 ```
-assembleSession({ workDirAbsPath, session, sessionManager?, models, settingsState?, … })  # 装配出一份 AgentState（只装配、不激活）
-createSessionAgent({ sessionManager, models, api?, tools? })                              # 一个编排层，默认 hooks 已装
+assembleSession({ workDirAbsPath, session, sessionManager?, settings?, … })               # 装配出一份 AgentState（只装配、不激活）
+createSessionAgent({ sessionManager, settings, api?, tools? })                            # 一个编排层，默认 hooks 已装
         -> agent.adopt(state)  -> agent.prompt(sessionId, …)   # 状态经 adopt 入表；公开方法一律以 id 打头
 
 openAgent(options) == assembleSession(options) + createSessionAgent(…) + adopt   # 一次性的那对，给测试与子会话
 ```
 
-`openAgent()` / `assembleSession()`（`core/src/session-factory.ts`）负责向外伸手。会话管理器是唯一一个**由调用者决定而非发现**的协作者，因为"要打开**哪一个**会话"是宿主的问题：hub 用 `create` / `open` 回答它，测试用 `inMemorySession` 回答它。模型及其 level 在任何地方都遵循同一套优先级：调用者指定的 → transcript 记录的 → `off`（没人要求过，就不要求）。因此测试可以在一份临时管理器和 `inMemorySettingsState` 上打开会话，完全不碰 `~/.my-agent/settings.json`。
+`openAgent()` / `assembleSession()`（`core/src/session-factory.ts`）负责向外伸手。会话管理器是唯一一个**由调用者决定而非发现**的协作者，因为"要打开**哪一个**会话"是宿主的问题：hub 用 `create` / `open` 回答它，测试用 `inMemorySession` 回答它。配置同理：`settings` 缺省是真实文件上的一只新 manager，测试递进一只 `inMemorySettingManager`，完全不碰 `~/.my-agent/settings.json`。模型及其 level 在任何地方都遵循同一套优先级：调用者指定的 → transcript 记录的 → `off`（没人要求过，就不要求）。
 
-设置没有 Manager 对象：`fillSettings`（`core/src/settings-manager.ts`）是磁盘到设置袋的**唯一**入口，每次打开现读一份快照、没有任何缓存。目录的设置袋在装配时解析一次，作为 `AgentState.setting` 跟着那份状态走；`applyConfig` 搬运会话自己的东西——两条队列的模式（队列住在 `state.live` 里，循环只在取走点拉取）——而把值经袋写回文件。模型和 thinking level 根本不在补丁里：两者都属于某一次对话，也都随使用它们的消息一起到达（见*输入框的模型座位*）。
+设置与模型行共用一只 `SettingManager`（`core/src/setting-manager.ts`），它是磁盘的**唯一**入口：无状态门面、没有任何缓存，每个方法现读全局与目录两份 `settings.json`（ADR-0011 修订节）。编排层读它、控制器读它、hub 持有它——一个进程一扇门，要自己的设置的冒烟在 `HubOptions.settings` 上换。`applyConfig` 搬运会话自己的东西——两条队列的模式（队列住在 `state.live` 里，循环只在取走点拉取）——而把值经 manager 写回文件。模型和 thinking level 根本不在补丁里：两者都属于某一次对话，也都随使用它们的消息一起到达（见*输入框的模型座位*）。
 
 | 作用域 | 文件 | 变更写到哪 |
 |---|---|---|
@@ -99,9 +100,9 @@ openAgent(options) == assembleSession(options) + createSessionAgent(…) + adopt
 
 level 本身骑在模型上（`Model.thinkingLevel`，由 `createModel(config, level)` 在构造之后设定、由 `reconfigure` 在原地重算），而不是在传输层选项里待在它旁边。这就是"哪个端点"和"多用力"成为**一个**发请求时用的对象的原因，也是发请求只有一个入口（`Model.stream`，转给它携带的 transport）的原因：effort 在 `buildParams` 里从模型上读取，而一个不带 level 的模型与 `off` 是同一次请求——都是显式把开关关掉。四档（`off`、`low`、`high`、`max`）对每一行都一样，所以档位是客户端的：输入框随消息带来它，行上没有默认档，`GET /api/models` 发出的 `thinkingLevels` 只是让输入框有一个能读的形状。
 
-## 循环（`runEngine`），端到端
+## 循环（`Agent.run`），端到端
 
-这一段里的「循环」就是 `Agent.runEngine`——引擎不再是对象，而是编排层自己的方法（[ADR-0008](adr/0008-loop-merged-into-agent.md)），所以下面每一步里「循环做的事」都是同一个文件里的代码。
+这一段里的「循环」就是 `Agent.run`——引擎是编排层的私有方法，不是第二个对象（它曾短暂是，[ADR-0012](adr/0012-loop-manager-object.md) 立起、[ADR-0013](adr/0013-loop-services-are-arguments.md) 削空、[ADR-0014](adr/0014-loop-manager-removed.md) 删除）：账本、settings、tools、hooks、prompt builder、transport 都是 `Agent` 的字段，所以下面每一步里「循环做的事」都是 `agent.ts` 里 `// the engine` 那一节之后的代码。
 
 1. 输入框发送 `POST /api/sessions/{id}/messages`，带 `{ text, behavior?, model?, thinkingLevel? }`。
 2. `SessionController.prompt` 认领会话，在它上面调用 `prompt`，并回答 `202`。
@@ -113,7 +114,7 @@ level 本身骑在模型上（`Model.thinkingLevel`，由 `createModel(config, l
 
 ## 工具契约
 
-一个工具就是一个 `AgentTool`：名字、描述、一个 TypeBox schema、以及 `execute`。**没有插件注册表。** 工具那一侧分三样东西，各有各的家：`toolDefinitions()` 是六个内置的**定义**，只读、进程级，每条是 `(run) => createReadTool(run.workDirAbsPath)` 这样的工厂——因为一个 `AgentTool` 闭包着自己的工作目录，而一个持着它们的目录就等于持着每会话的目录；`createToolRegistry(toolDefinitions())` 是进程的**目录**（定义 + `register` 进来的工具，只有测试走这条路）；而"这一轮能调哪些、哪些要问"是**一次选择**，是纯数据 `ToolState`，从快照的 `activeTools` / `approval` 字段派生、随每次读取到达，不在注册表里、也不在任何一处被持有。注册表因此只有 `names` / `build` / `activeNames` / `active` / `register` 五个方法：`active(state, run)` 拿着随请求来的 `ToolRunContext`（`workDirAbsPath` + bash 超时）现建可执行集合，每一次路径解析都经过同一个 `resolveToolPath`：绝对路径原样接受、相对路径按 `workDirAbsPath` 解析，**没有围栏**——工具可以碰目录之外的任何东西。工具失败即抛出；引擎（`agent.ts`）把一次抛出变成给模型的错误结果。
+一个工具就是一个 `AgentTool`：名字、描述、一个 TypeBox schema、以及 `execute`。**没有插件注册表。** 工具那一侧分三样东西，各有各的家：`toolDefinitions()` 是六个内置的**定义**，只读、进程级，每条是 `(run) => createReadTool(run.workDirAbsPath)` 这样的工厂——因为一个 `AgentTool` 闭包着自己的工作目录，而一个持着它们的目录就等于持着每会话的目录；`createToolRegistry(toolDefinitions())` 是进程的**目录**（定义 + `register` 进来的工具，只有测试走这条路）；而"这一轮能调哪些、哪些要问"是**一次选择**，是纯数据 `ToolState`，从快照的 `activeTools` / `approval` 字段派生、随每次读取到达，不在注册表里、也不在任何一处被持有。注册表因此只有 `names` / `build` / `activeNames` / `active` / `register` 五个方法：`active(state, run)` 拿着随请求来的 `ToolRunContext`（`workDirAbsPath` + bash 超时）现建可执行集合，每一次路径解析都经过同一个 `resolveToolPath`：绝对路径原样接受、相对路径按 `workDirAbsPath` 解析，**没有围栏**——工具可以碰目录之外的任何东西。工具失败即抛出；引擎（`loop-manager.ts`）把一次抛出变成给模型的错误结果。
 
 执行模式是**每个工具上的字段**，不是注册表状态：`read`、`glob`、`grep` 是 `parallel`；`write` 和 `edit` 是 `sequential`，因为对同一个文件的两次并发编辑会竞争；`bash` 是 `sequential`，因为并发命令交错在一起的输出无法阅读。
 
@@ -137,7 +138,7 @@ level 本身骑在模型上（`Model.thinkingLevel`，由 `createModel(config, l
 
 - **`context`** 是一个纯覆盖接缝：没有注册任何处理器时，供应商拿到的正是会话自己本来会发的那些。
 - **`before_tool`** 是审批闸门。审批集合决定哪些工具要问，UI 通过审批端点 / `denyAllApprovals` / `snapshot.pendingApprovals` 回答，而这个 hook 把一次未答的审批变成 `{ suspend: true }`——运行在这里结束而不是等在内存里，tool call 不写结果、在账本里悬空，答案经审批端点到达后启动恢复运行，由引擎的恢复机器按 `toolCallId` 配对续跑：grant 重跑该调用、deny 合成结果，无答案的孤儿合成错误结果收尾（ADR-0006 §5）。后一个处理器可以**细化**这道闸门，但不能**撤掉**它。
-- **`after_tool`** 没有默认处理器，因为在这里改写就是**定稿**：消息落盘那一刻，content 就是最终版本，账本不再存第二份。要截断一个结果，先自己把全文归档——`archiveToolResult()`（`hooks.ts`，一行调用，内部复用 `spill.ts` 的路径推导）把全文写进工作目录的 `.my-agent/tool-results/<session id>/` 并返回带路径的头尾视图——再把返回的内容放进 `{ content }`。不强制：强制不了，也不该强制。没人约束的超大结果由**写边界**兜底（`finalizeToolResult`，`agent.ts` 的 `appendMessage`）：超过 80,000 字符（`SPILL_RESULT_CHARS`）的整份归档、模型拿头尾各 2,000 字符加归档路径；归档写不出去时 `boundToolContent` 仍把文本限制在 `MAX_TOOL_RESULT_BYTES`（200 KB）。
+- **`after_tool`** 没有默认处理器，因为在这里改写就是**定稿**：消息落盘那一刻，content 就是最终版本，账本不再存第二份。要截断一个结果，先自己把全文归档——`archiveToolResult()`（`hooks.ts`，一行调用，内部复用 `spill.ts` 的路径推导）把全文写进工作目录的 `.my-agent/tool-results/<session id>/` 并返回带路径的头尾视图——再把返回的内容放进 `{ content }`。不强制：强制不了，也不该强制。没人约束的超大结果由**写边界**兜底（`finalizeToolResult`，`session/fanout.ts` 的 `appendMessageEntry`）：超过 80,000 字符（`SPILL_RESULT_CHARS`）的整份归档、模型拿头尾各 2,000 字符加归档路径；归档写不出去时 `boundToolContent` 仍把文本限制在 `MAX_TOOL_RESULT_BYTES`（200 KB）。
 
 由此得出一条规则：**改写即定稿，账本存的就是你返回的那个版本。** 过去这里是「两半」——transcript 存工具的原话、一条 `tool_result_view` entry 记 hook 留给模型的 `shown`，每次请求现配——现在那一机制已删，连老文件里的重放层也随 v≤4 文件的删除一起消失：hook 的返回就是消息的内容，落盘即冻结，请求、快照、重启后的进程读到的都是同一份。代价是两条约束：截断的决定必须在 `after_tool` 即时做出且不可反悔；归档的完整性从此依赖工作目录（路径由 session id + call id 推导），不依赖账本——fork 只复制 entry 流，原目录在就能读全文，原目录没了就只剩截短版。
 
@@ -201,7 +202,7 @@ type AgentSessionEvent =
 
 `Settings.retry` 就是这个策略逐字段的翻版：`enabled`（默认 `true`）、`maxRetries`（`3`）、`baseDelayMs`（`2000`）、`maxAgentDelayMs`（`60000`）。第 `k` 次尝试等待 `min(baseDelayMs * 2^(k-1), maxAgentDelayMs)`；`maxRetries` 数的是**重试**而不是调用，而 `0` 是一个设置值，不是一个缺失值。
 
-**接缝在模型的 transport 上，在引擎之下。** 另一个候选是引擎在两轮之间留的钩子 `prepareNextTurn`，它行不通：错误响应是一次硬退出，引擎发出 `turn_end` 和 `agent_end` 就返回了，**根本走不到下一轮**。该钩子在 vendored 循环里从未被装配过，随合并一起删除；引擎现在是 `agent.ts` 的 `Agent.runEngine`，而它不再收到一个 `streamFn`：`startRun` 给这次运行包一层 transport，策略装在那一层里，所以它既拦得住引擎的每一次请求，也拦得住压缩摘要那次不经过引擎的请求。`pumpAttempts` 包裹每一次尝试，把它的 `AssistantMessageEventStream` 排进会话自己的流，并让 `retryAssistantCall` 来分类：
+**接缝在模型的 transport 上，在引擎之下。** 另一个候选是引擎在两轮之间留的钩子 `prepareNextTurn`，它行不通：错误响应是一次硬退出，引擎发出 `turn_end` 和 `agent_end` 就返回了，**根本走不到下一轮**。该钩子在 vendored 循环里从未被装配过，随合并一起删除；引擎现在是 `loop-manager.ts` 的 `LoopManager.run`，而它不再收到一个 `streamFn`：`run` 给这次运行包一层 transport，策略装在那一层里，所以它既拦得住引擎的每一次请求，也拦得住压缩摘要那次不经过引擎的请求。`pumpAttempts` 包裹每一次尝试，把它的 `AssistantMessageEventStream` 排进会话自己的流，并让 `retryAssistantCall` 来分类：
 
 - 成功尝试的事件原样通过；
 - 将被重试的尝试，除了它的**终态事件**之外全部通过——所以循环从不记录它，而被重试的尝试的增量会**原地覆盖**同一个 assistant 槽位。循环必须看到每次请求**恰好一个** `start`，否则它会追加第二条 assistant 消息，而不是替换那条被放弃的；
@@ -256,7 +257,7 @@ type AgentSessionEvent =
 
 ## 谁拥有一个会话
 
-`SessionHub`（`server/src/hub.ts`）持有无属性服务与一个编排层：编排层是本进程唯一的一份，方法一律以会话 id 调用；模型、账本、工具目录各自是它们自己的服务（设置是 `fillSettings` 函数族，见*装配与设置*）；会话状态的那张表在编排层手里——每 id 一份 `AgentState`（账本重放、设置袋、订阅集合与 live 半：两条队列、在飞运行），进程重启即从零重建（[ADR-0011](adr/0011-agent-holds-session-state.md)）。除此之外 hub 只有一张按 id 的 claim 表——那是传输层的事实，所以计数器住在传输层。**订阅不拥有会话**：一条逻辑流是 mux 订阅表里的一行（连接 × 会话），它不拿 claim、也不让会话保持打开。持有一个 claim 的是**会改变会话的请求**，在它自己的长度内一个；审批的恢复运行也走同一条 `claim()`。所以一个会话可以在没人在看的情况下运行，而一个开着却闲置的窗口也不会替谁留住一份状态。
+`SessionHub`（`server/src/hub.ts`）持有无属性服务与一个编排层：编排层是本进程唯一的一份，方法一律以会话 id 调用；账本、配置（`SettingManager`，构造时可注入，见*装配与设置*）、工具目录各自是它们自己的服务（模型行走同一只 manager，见*装配与设置*）；会话状态的那张表在编排层手里——每 id 一份 `AgentState`（账本重放、订阅集合与 live 半：两条队列、在飞运行），进程重启即从零重建（[ADR-0011](adr/0011-agent-holds-session-state.md)）。除此之外 hub 只有一张按 id 的 claim 表——那是传输层的事实，所以计数器住在传输层。**订阅不拥有会话**：一条逻辑流是 mux 订阅表里的一行（连接 × 会话），它不拿 claim、也不让会话保持打开。持有一个 claim 的是**会改变会话的请求**，在它自己的长度内一个；审批的恢复运行也走同一条 `claim()`。所以一个会话可以在没人在看的情况下运行，而一个开着却闲置的窗口也不会替谁留住一份状态。
 
 读 transcript 不算在内。`SessionController.read()` 既不拿 claim 也不打开会话：`SessionHub.snapshotOf()` 在本进程运行该会话时从活对象回答，否则从它的两个文件回答，走的是装配路径用的同一个 `readSessionSnapshot()`——所以一次读取的代价是一次文件读取而不是一个会话，它既不能保活一个会话、也不能驱逐一个、更不会在 hub 里留下痕迹。**窗口打开一个会话也不走这条路**：打开与切换都是一次订阅，`open` 帧以一份基线作答（[ADR-0010](adr/0010-open-session-over-mux.md)），导航路径上没有一次读取；`read()` 是命令面的读一半，脚本与诊断用它。页面加载是唯一的例外，而且是"开哪一个"的例外：先问一次 `GET /api/sessions/current`，再由同一帧 `open` 把它打开（见*API*一节）。订阅也一样：`SessionHub.observe(sessionId, observer)` 只往观察表里挂一个观察者，观察者既不保活它看的会话，也不花钱跑它。
 
@@ -361,7 +362,7 @@ SessionManager.forkFrom(sourcePathInput, targetCwdInput, entryId, sessionDirInpu
 
 这里没有一行是会话事件的端点——唯一的流式通道是 `/mux`（不在 `/api` 之下，因为它不是一个 REST 资源）；`abort` 也留在 REST 上，不帧化。`/api/directories` 的行是这个进程知道的每一行，而**无人在看时一个会话的行也照样更新**（它由 `projection.ts` 喂，不由某条恰好开着的流喂）；通道不可用时，客户端把 `GET /api/directories` 当作侧边栏行表的 REST 兜底。**被搁置的目录是这里唯一的例外，而它只有一条规则**（`SessionHub.listsDirectory`）：REST 列表与通道概览都按它过滤，所以两条路永远说同一件事——只过滤概览会让一个被删掉的分组在它某个会话下次变动时自己长回来。搁置或取回不改变任何一行，所以它由**重发一份概览**（`broadcastSessions()`）通知，而不是靠 `session_row`。
 
-`ModelOption` 是用户导入的一行、**去掉密钥**——`hasApiKey` 说明是否存了一个，而密钥从不离开服务器。`PUT /api/models` 替换整份清单，因为设置面板编辑的是一份清单，而一份被半途施加的清单是没人能推理的状态；一行不带 `apiKey` 送来时，保留存在它名下的那个，这正是让面板能够往返一行"它从未被展示过密钥"的数据的原因。名字是一行的**身份**——transcript 记录它、配置补丁命名它——所以重复会被 `400` 拒绝（`The name "X" is already in use`），而不是在用户背后把它改成唯一的：一个加了后缀的名字会改变**每一条**命名它的 transcript 的含义，而显示这次冲突的那个面板才是修复该发生的地方。变更能抵达活会话而不必重新打开它们，因为会话持有一个 `ModelSource`、每次请求都通过它读存储而不是复制一行、并每次都从活行重新推导自己的模型——所以端点、窗口和 wire id 都随密钥一起移动。
+`ModelOption` 是用户导入的一行、**去掉密钥**——`hasApiKey` 说明是否存了一个，而密钥从不离开服务器。`PUT /api/models` 替换整份清单，因为设置面板编辑的是一份清单，而一份被半途施加的清单是没人能推理的状态；一行不带 `apiKey` 送来时，保留存在它名下的那个，这正是让面板能够往返一行"它从未被展示过密钥"的数据的原因。名字是一行的**身份**——transcript 记录它、配置补丁命名它——所以重复会被 `400` 拒绝（`The name "X" is already in use`），而不是在用户背后把它改成唯一的：一个加了后缀的名字会改变**每一条**命名它的 transcript 的含义，而显示这次冲突的那个面板才是修复该发生的地方。变更能抵达活会话而不必重新打开它们，因为编排层每次请求都经 `SettingManager.modelCatalog()` 现读存储而不是复制一行、并每次都从活行重新推导自己的模型——所以端点、窗口和 wire id 都随密钥一起移动。
 
 `GET /api/directories` 扫描 agent home 的会话目录，所以侧边栏可以按目录分组，尽管本进程是**恰好**在其中一个之上启动的；从另一个分组打开会话要使用该会话自己快照里的 `workDir`。`PATCH /api/settings` 刻意比 `PATCH /api/sessions/{id}` 更窄：主题、字号、审批集合、全局默认工具集在任何会话存在之前就要读，所以它们不能住在某一个会话上。
 
@@ -433,11 +434,11 @@ type ClientFrame =
   -> server/http/routing.ts                    路由表匹配 method + path
   -> server/controllers/sessions.ts            控制器：claim、调用、释放
   -> server/hub.ts                             claim 表 + 活登记处条目（编排层是本进程唯一的一份）
-  -> core/agent.ts                             Agent.prompt()
-  -> core/agent.ts                             runEngine：流、工具调用、before_tool 与 after_tool hook
+  -> core/agent.ts                             Agent.prompt()：写用户消息，交给 Agent.run
+  -> core/agent.ts (# the engine)              run：流、工具调用、before_tool 与 after_tool hook
   -> core/hooks.ts                             context、审批闸门、工具输出兜底
   -> core/tools/*                              针对服务器文件系统执行
-  -> core/session/*                            追加每条消息和每个工具结果
+  -> core/session/*                            追加每条消息和每个工具结果（fanout.ts 是写入口）
   -> server/mux.ts                             observe 这条会话的订阅，把每条 ServerMessage 装进信封
   -> web/client.ts, web/state.ts               按 streamId 分道，解析、折叠，交给渲染器
   -> web/render/*                              增量更新 DOM
@@ -480,7 +481,7 @@ type ClientFrame =
 | 模型切换在顶栏、工具集合在弹层、计量表在侧边栏 | 侧边栏角落一个按钮后的统一设置面板，加上输入框上的一个模型座位 | 那些是很少碰的控件，却坐在"对话被读取"的那片 chrome 里；状态行只保留会话的 token 总数、缓存命中率和上下文占用，别无其他。模型及其 thinking level 是证明这条规则的那个例外：它们跟随**对话**，所以属于书写区下方那一行，而新会话打开时的默认值是模型行的字段 |
 | 模型和 thinking level 作为 `PATCH /api/sessions/{id}` 的补丁字段 | 消息体上的一个 `ModelSelection`，由 `prepareRequest` 记录 | 配置变更在发出的那一刻就被施加——为的是一个两者都没用它发过请求的会话。transcript 只交代"什么回答了某一轮"，所以记录发生在 `prepareRequest` 改写快照的那一刻，而不是用户指向某个东西的那一刻 |
 | thinking level 作为流上的一个选项（`SimpleStreamOptions.reasoning`） | 模型上的一个字段（`Model.thinkingLevel`） | 这里的模型就是一次请求的配置，而 level 是它的一部分：level 待在模型旁边时，wire 就有了同一个强度的两个来源，而 `streamSimple` 原本就是为了把一个翻译成另一个而存在。放在模型上，effort 就在端点所在之处被读取，翻译失去了对象，两个入口也随之合并成一个 `stream` |
-| 压缩建立在 vendored 循环的辅助函数上 | 我们的切口规则加 pi 的提示词对，作用在我们的 entry 上（提示词对随引擎一起并入 `agent.ts`） | pi 的压缩期望它自己的 entry 格式；切口是我们的——每个已完成的轮次折叠、正在飞的轮次保留——而提示词对是 pi 的 |
+| 压缩建立在 vendored 循环的辅助函数上 | 我们的切口规则加 pi 的提示词对，作用在我们的 entry 上（提示词对随引擎一起搬进了 `loop-manager.ts`） | pi 的压缩期望它自己的 entry 格式；切口是我们的——每个已完成的轮次折叠、正在飞的轮次保留——而提示词对是 pi 的 |
 | `server/protocol.ts` | `core/src/protocol.ts` | 客户端 import 同一套 wire 类型，所以它们属于双方都能触达的地方 |
 | 审批作为 `Agent` 内部的逻辑 | `settings.approval` 加默认的 `before_tool` hook | transcript、闸门和工具输出兜底是同一个 hook 表面上的默认值，而不是会话内部的逻辑 |
 | `scripts/` 按原计划的样子 | 加了 `install-deps.ts`、各个 smoke 脚本、`fake-transport.ts` | 这台机器上 npm 取不到最大的那些 packument；而这些脚本在没有供应商密钥的情况下验证循环、会话注册表、导入的模型、审批往返、以及 HTTP 表面；脚本化传输层住在这里而不是 `@my-agent/llm` 里，因为它是本应用的测试替身，而 pi-ai 附带的那个是建立在那个已经消失的注册表之上的 |
