@@ -1,4 +1,4 @@
-export { Agent, danglingToolCallsOf, recoverPendingToolCalls, type AgentConfig, type AgentSessionEvent, type RunScope, type SessionEventListener, type SessionListener } from "./agent.ts";
+export { Agent, danglingToolCallsOf, recoverPendingToolCalls, type AgentConfig, type AgentSessionEvent, type SessionEventListener, type SessionListener } from "./agent.ts";
 export type { AgentContext, AgentEvent, AgentTool, AgentToolResult } from "./types.ts";
 export type { Message } from "@my-agent/llm";
 export {

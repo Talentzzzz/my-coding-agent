@@ -1,22 +1,21 @@
 import type { QueueMode } from "../types.ts";
 import type { ModelChoice } from "../models.ts";
-import type { RunScope, SessionEventListener, SessionListener } from "../agent.ts";
+import type { SessionEventListener, SessionListener } from "../agent.ts";
 import type { SettingsState } from "../settings-manager.ts";
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.ts";
 
 /**
  * One session this process has touched, as a registry entry: the live half (ADR-0006 §4) plus the
- * assembly the session runs on, and the two attach points and the cross-stack run slot that ride
- * with it.
+ * assembly the session runs on, and the two attach points that ride with it.
  *
  * Everything here answers one of two questions. *What is in progress and nowhere on disk*: the
  * queues and the active run cannot be rebuilt from the ledger; neither can the subscriber sets a
- * window attached through `onChange` / `onEvent`, or the run slot a mid-run reader reaches through.
- * *What one open resolved*: the working directory, the settings bag, and the model selection are the
+ * window attached through `onChange` / `onEvent`. *What one open resolved*: the working directory,
+ * the settings bag, and the model selection are the
  * products of the seed→fill assembly (ADR-0006 §2) — the per-session answers a stateless orchestrator
  * would otherwise have nowhere to put, arrived at when the entry was created and read by every call
  * that follows. A process restart drops the whole entry on purpose — queued
- * messages are lost, subscribers are re-attached by the next connection, the run slot is empty, and
+ * messages are lost, subscribers are re-attached by the next connection, and
  * the assembly is re-run by the reopen — and the session file is not, so a reopen and a restart land
  * in the same place.
  *
@@ -33,15 +32,6 @@ export interface OpenSession {
 	readonly listeners: Set<SessionListener>;
 	/** Subscribers to the session's events, attached through the session's `onEvent`. */
 	readonly eventListeners: Set<SessionEventListener>;
-	/**
-	 * The run in flight, as the handle a cross-stack reader reaches it through.
-	 *
-	 * The run's transients ({@link RunScope}) are locals of the run itself; this slot is what a
-	 * snapshot or a queued prompt reads them through while the run is on the stack — the same
-	 * structural role `runtime.activeRun` plays for an abort. Set before the run starts, cleared
-	 * the moment the run settles.
-	 */
-	run: RunScope | undefined;
 	/**
 	 * The working directory this session's tools resolve against and start commands in.
 	 *
@@ -89,7 +79,6 @@ export function createOpenSession(seed: OpenSessionSeed): OpenSession {
 		runtime: createSessionRuntime(seed.steeringMode, seed.followUpMode),
 		listeners: new Set(),
 		eventListeners: new Set(),
-		run: undefined,
 		workDirAbsPath: seed.workDirAbsPath,
 		settings: seed.settings,
 		modelSelection: seed.modelSelection,

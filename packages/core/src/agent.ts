@@ -297,48 +297,6 @@ export type AgentSessionEvent =
 export type SessionEventListener = (event: AgentSessionEvent) => void;
 
 /**
- * The transients of one run, as the run's own locals.
- *
- * Superseded in place (ADR-0011): the run now writes these onto the session's live half
- * ({@link Live}), which is what a mid-run reader reaches through, and this bag has no writer left.
- * Kept until the registry entry it typed is deleted (issue 09).
- */
-export interface RunScope {
-	/**
-	 * The assistant message being written right now, as the engine last reported it.
-	 *
-	 * The engine's `message_update` carries the whole partial message and the session republishes only
-	 * its delta — but a window that attaches mid-run has missed every delta so far, so a baseline has
-	 * to carry the running text once. Cleared when the message ends, which is also when the store
-	 * gains it and a snapshot starts reading it from the transcript instead.
-	 */
-	partial: Message | undefined;
-	/**
-	 * The model the run is on, as the request in flight was built from it: the name the composer
-	 * shows, and the window the usage meter measures against.
-	 *
-	 * Here rather than rebuilt per snapshot because publishing must not read a file — `models.list()`
-	 * is the disk, and a snapshot is emitted once per delta. A run that has not reached its first
-	 * request yet leaves it undefined, and the read falls back to the catalog.
-	 */
-	model?: Model;
-	/**
-	 * True when the gate ended this run: a call was left dangling for someone to answer.
-	 *
-	 * The one end that keeps the queues. Every other end drops what was accepted and never taken —
-	 * the send contract is fire-and-forget, and a message nothing will drain must not outlive the run
-	 * that took it — but a suspended run is owed an answer to that message by the recovery run, so
-	 * dropping it here would throw away something a person typed. See {@link Agent.dropQueued}.
-	 */
-	suspended: boolean;
-	/** True between `retry_scheduled` and `retry_end`: the run is waiting out a backoff. */
-	retrying: boolean;
-	/** The attempt the policy is on, 1-based, or 0 when no retry is pending. */
-	retryAttempt: number;
-	retryMaxAttempts: number;
-}
-
-/**
  * What one run is started with: the message that opened it, or the answers a resume closes its
  * dangling calls with.
  *
@@ -1451,8 +1409,11 @@ export class Agent {
 	 * with the run, closed over its locals, and dropped when the run settles. What crosses the stack
 	 * is exactly what the state names — the queues, the active run, the subscribers — and the live
 	 * half itself, which is how a reader outside the run sees its transients: the run writes its
-	 * partial message, its model, and its retry state onto `state.live` as it goes, and the `finally`
-	 * below wipes them, so an idle session answers from the bag again. The session the run serves is
+	 * partial message, its model, and its retry state onto `state.live` as it goes. The zeroing is
+	 * the run's first act, so it never inherits what a previous run left; the `finally` retires only
+	 * the model, so an idle session answers from the catalog again — the other readings stay as the
+	 * run left them, which is how a session parked at the gate reads as parked until the recovery
+	 * run or the abandonment sweep says otherwise. The session the run serves is
 	 * resolved once, at the top, and every closure below threads the same locals: no request
 	 * re-resolves its way to a different bag.
 	 */
@@ -1461,6 +1422,15 @@ export class Agent {
 		start: RunStart,
 	): Promise<void> {
 		const live = state.live;
+		// The run's readings start at zero, in one place: a run neither inherits the previous run's
+		// model nor answers for its leftover partial or retry state. The suspended flag is the one
+		// with a life between runs — a recovery run starts while it is still set from the run before
+		// it, which is why the reset is here rather than in the `finally`.
+		live.partial = undefined;
+		live.model = undefined;
+		live.suspended = false;
+		live.retrying = false;
+		live.retryAttempt = 0;
 
 		// The run's send policy rides on every request object this run's models are built with. The
 		// engine is never told about it: it asks for a stream from whatever model it holds, and the
@@ -1493,14 +1463,12 @@ export class Agent {
 			// A drop that took something is a queue change the window has not heard yet, so it is the
 			// one end path that publishes here; a parked run keeps its queue and says nothing.
 			if (!live.suspended && this.dropQueued(state)) this.emitQueueUpdate(state);
-			// The transients come down with the run: an idle session answers from the bag again, which
+			// The model comes down with the run: an idle session answers from the catalog again, which
 			// is what makes "in flight, read the run; idle, read the choice" a state rather than a
-			// leak. The suspended flag is read by the sweep above, so it is wiped last.
+			// leak. The other readings are left as the run ended them — a suspended run's flag is
+			// what says the session is parked, and it is the recovery run's or the abandonment
+			// sweep's to clear, not the end path's.
 			live.model = undefined;
-			live.partial = undefined;
-			live.retrying = false;
-			live.retryAttempt = 0;
-			live.suspended = false;
 			// The run is not over until the engine's `runEngine` resolves — after every awaited listener for
 			// `agent_end` and the engine's own `finally`. So this is the first moment nothing is in
 			// flight, and without publishing here nothing ever reports it.
@@ -1955,13 +1923,19 @@ export class Agent {
 			return message;
 		};
 
+		// One read for the whole pump: the policy the retry loop enforces and the `maxAttempts` the
+		// `retry_start` event reports are the same answer, taken at the call site rather than stored —
+		// a settings edit mid-backoff lands with the next request, not this one. The counting matches
+		// `retryAssistantCall`'s own: retries, not calls.
+		const retrySettings = getRetrySettings(state.setting);
+		const maxAttempts = retrySettings.enabled ? retrySettings.maxRetries : 0;
 		let final: AssistantMessage;
 		try {
 			final = await retryAssistantCall(
 				produce,
-				getRetrySettings(state.setting),
+				retrySettings,
 				options?.signal,
-				this.retryCallbacks(state),
+				this.retryCallbacks(state, maxAttempts),
 			);
 		} catch (error) {
 			// A stream function that throws breaks the engine's contract, so it ends up as an error
@@ -1975,23 +1949,33 @@ export class Agent {
 		outer.end();
 	}
 
-	/** The three notifications `retryAssistantCall` makes, mapped one-to-one onto session events. */
-	private retryCallbacks(state: AgentState): RetryCallbacks {
+	/**
+	 * The three notifications `retryAssistantCall` makes, mapped one-to-one onto session events.
+	 *
+	 * `maxAttempts` arrives from the pump — the one read of the policy this run's retries answer to —
+	 * because the callback the policy makes for `retry_start` carries no policy of its own, and
+	 * nothing here stores the answer between events.
+	 */
+	private retryCallbacks(state: AgentState, maxAttempts: number): RetryCallbacks {
 		const live = state.live;
-		let retryMaxAttempts = 0;
 		return {
-			onRetryScheduled: (attempt, maxAttempts, delayMs, errorMessage) => {
+			onRetryScheduled: (attempt, scheduledMax, delayMs, errorMessage) => {
 				live.retrying = true;
 				live.retryAttempt = attempt;
-				retryMaxAttempts = maxAttempts;
-				this.emit(state, { type: "retry_scheduled", attempt, maxAttempts, delayMs, errorMessage });
+				this.emit(state, {
+					type: "retry_scheduled",
+					attempt,
+					maxAttempts: scheduledMax,
+					delayMs,
+					errorMessage,
+				});
 				this.publish(state);
 			},
 			onRetryAttemptStart: () => {
 				this.emit(state, {
 					type: "retry_start",
 					attempt: live.retryAttempt,
-					maxAttempts: retryMaxAttempts,
+					maxAttempts,
 				});
 				this.publish(state);
 			},
@@ -2258,6 +2242,10 @@ export class Agent {
 		const dangling = this.danglingApprovals(state.session);
 		if (dangling.length === 0) return;
 		for (const call of dangling) this.appendDanglingResult(state, call, { approved: false, reason });
+		// The abandonment sweep is where a parked session's reading ends: no recovery run is coming,
+		// so the suspended flag has nothing left to say — and left standing it would keep the state's
+		// own eviction refused forever (the criteria read this flag).
+		state.live.suspended = false;
 		if (this.dropQueued(state)) this.emitQueueUpdate(state);
 		this.publish(state);
 	}
@@ -2739,7 +2727,7 @@ export class Agent {
 	 * when there was one.
 	 *
 	 * The one end that does not come here is the gate's: a suspended run keeps its queue for the
-	 * recovery run the answer starts, which drains it at its take points (`RunScope.suspended`). The
+	 * recovery run the answer starts, which drains it at its take points (`live.suspended`). The
 	 * abandonment sweep is the exception to that exception — {@link Agent.denyAllApprovals} calls
 	 * this, because no recovery run is coming to take them.
 	 */
