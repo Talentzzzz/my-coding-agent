@@ -3,8 +3,23 @@ import type { SettingsState } from "../settings-manager.ts";
 import { getFollowUpMode, getSteeringMode } from "../settings-manager.ts";
 import type { SessionListener, SessionEventListener } from "../agent.ts";
 import type { Session } from "./session-manager.ts";
-import type { ActiveRun } from "./session-runtime.ts";
 import { PendingMessageQueue } from "./queues.ts";
+
+/**
+ * One run in flight: the handle a caller uses to stop it, and the run-local handles it leaves behind.
+ *
+ * The abort controller is where an abort from any layer lands — the session's, the hub's, a process
+ * shutdown's. The promise/resolve pair is the run's context handle for everyone else: "wait for this
+ * run to settle" resolves on the promise, and the engine that finishes the run is the one that fires
+ * the resolve, so the pair travels with the run rather than living anywhere longer.
+ */
+export interface ActiveRun {
+	abortController: AbortController;
+	/** Resolved when the run and every awaited listener for it have settled. */
+	promise: Promise<void>;
+	/** Internal: completes {@link ActiveRun.promise}. The engine holds it for its own finish. */
+	resolve: () => void;
+}
 
 /**
  * One session this process holds, as a single bag: the durable half, the settings it was opened

@@ -22,7 +22,7 @@
 | [0008](0008-loop-merged-into-agent.md) | 删掉 `Loop` 对象与 `packages/loop`——引擎并入 `agent.ts`，放弃与上游的逐文件对照 | 已接受（2026-11-02，已落地——03 号票合并并删包，见 `.scratch/loop-into-agent/`），取代 0001「`packages/loop` 一行都不改」那一半 |
 | [0009](0009-session-two-file-format.md) | 会话是两个文件——`.json` 快照管「是什么」，`.jsonl` 日志管「说过什么」；打不开的配对直接删 | 已接受（2026-11-03，已落地——session-split 02 号拍板并落地，06 号票入档，见 `.scratch/session-split/`），取代 v≤4 的单文件格式与 0002 的 rename entry 机制 |
 | [0010](0010-open-session-over-mux.md) | 会话的打开与切换只走 mux 基线——`retain` 即导航，REST 读从前端导航路径退场 | 已接受（2026-11-03 用户拍板，已落地——01–04 号票跑绿 check、build:web 与 smoke 全套，见 `.scratch/mux-only-open/`） |
-| [0011](0011-agent-holds-session-state.md) | 会话状态搬进 Agent——一张 `Map<id, AgentState>` 合一四层登记结构，两个 Manager 不再持有任何缓存 | 已接受（2026-11-04，agent-state 01–05 号票拍板，见 `.scratch/agent-state/`）；**尚未落地**——07–14 号票落地后由 14 号票翻转 |
+| [0011](0011-agent-holds-session-state.md) | 会话状态搬进 Agent——一张 `Map<id, AgentState>` 合一四层登记结构，两个 Manager 不再持有任何缓存 | 已接受，已落地（2026-11-04，agent-state 01–14 号票，见 `.scratch/agent-state/`） |
 
 ## 门槛
 

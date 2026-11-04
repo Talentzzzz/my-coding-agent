@@ -24,15 +24,16 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 
 代码把这些词当作术语来用。
 
-- **service（无属性服务）** —— 五个单例的形态（ADR-0007）：`Agent` 编排、会话账本、设置、模型行、工具
-  定义。构造只收服务依赖，公开方法收 `(id, 请求自己的参数)`，每样数据在**用到它的那一行**向属主现取、
+- **service（无属性服务）** —— 无属性服务的形态（ADR-0007）：`Agent` 编排、会话账本（`SessionManager`）、
+  模型行（`ModelConfigStore`）、工具目录（`ToolRegistry`）；设置没有 Manager——`fillSettings` 函数族 +
+  每会话一只袋（ADR-0011）。构造只收服务依赖，公开方法收 `(id, 请求自己的参数)`，每样数据在**用到它的那一行**向属主现取、
   拿到的只是局部变量；不传、不养任何聚合袋。类壳保留（可构造注入），方法体就写在类里、没有一层同名的
   文件级函数可转发，拆掉的只是 per-session 实例字段；
   Manager 内部按 id / 目录键控的缓存随时可从磁盘重建、且藏在自己内部不被传递——这正是它与聚合袋的
   分界。
 - **engine（引擎）** —— `Agent.runEngine`：一次运行的入口与出口，编排层自己的方法，**没有对象**。它读的
   每一处接缝都是编排层的私有成员或这次运行的局部变量（`prepareRequest`、`dispatchEvent`、会话自己的
-  两条队列、`entry.runtime.activeRun`、这次运行的模型），所以运行期没有一处瞬态被谁持有。原来的
+  两条队列、`state.live.activeRun`、这次运行的模型），所以运行期没有一处瞬态被谁持有。原来的
   `packages/loop` 与它的 `Loop` 委派对象已删（ADR-0008）——「循环」从此不是组件的名字，只是那些轮次
   的日常说法。
 - **tool（工具）** —— `AgentTool`；`createToolRegistry(toolDefinitions())` 是**进程**的目录（定义 +
@@ -45,8 +46,8 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   这两个文件唯一的写者（ADR-0006）；文件随第一条消息**同时**出生（`.json` 是 commit marker），没说过话的
   会话不落盘、不进侧边栏；标题是快照的 `title` 字段，没写过就从分支首条 user 消息派生；配对残缺
   或版本不对的会话直接删、不迁移。
-- **settings（设置）** —— `SettingsManager` 合并全局与目录两份 `settings.json`，变更写回**已经提供
-  该字段**的那一份。窗口里「设置」这个词**分两级**：**会话级**（工具集合与审批，记在会话 `.json`
+- **settings（设置）** —— `fillSettings` 合并全局与目录两份 `settings.json`（每次打开现读一份快照，
+  没有任何缓存），变更写回**已经提供该字段**的那一份。窗口里「设置」这个词**分两级**：**会话级**（工具集合与审批，记在会话 `.json`
   快照的 `activeTools` 与 `approval` 字段里，没单独选过就沿用全局；窗口里没有手动编辑入口，改动它
   只有「选一个模式」这一条路）与**应用级**（外观、模型清单、默认模型、bash 超时，以及全局默认的
   工具集与审批）。
@@ -105,18 +106,19 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   策略就装在里面，引擎只是对模型 `stream`；失败的尝试从不被记录。
 - **queue（队列）** —— 一次运行正在流式时被接受的消息：`steer` 在下一个取走点注入，`followUp` 等这一
   轮结束。
-- **assembly（装配）** —— `ensureSession()` 按种子→补齐（seed→fill）从设置、导入的模型装配一个会话
-  并建出它的登记处条目（ADR-0006）；`createSessionAgent()` 是另一半：把服务组起来变成一个**编排层**，
-  进程只需要一份（hub 构造时建它），测试与只跑一个会话的调用者用 `openAgent() == ensure + create`
-  自组一份。`Agent` 是无状态编排层，不持有会话状态——公开方法收 id、在用到的那一行向属主现取：
-  durable 半经 `stateOf(id)` 重放账本，live 半经 id 从登记处条目读。它只决定 transcript
+- **assembly（装配）** —— `assembleSession()` 按会话先、设置后的链（`fillSession` → `fillSettings` →
+  `createLive`）装配出一份 `AgentState`——装配产物**就是**状态（ADR-0011），只装配、不激活；
+  `createSessionAgent()` 是另一半：把服务组起来变成一个**编排层**，进程只需要一份（hub 构造时建它），
+  测试与只跑一个会话的调用者用 `openAgent() == assemble + create + adopt` 自组一份。`Agent` 按 id 键控
+  持有各会话的状态——公开方法收 id、从状态现取：durable 半是 `state.session`（账本重放出的袋子），
+  live 半是 `state.live`。它只决定 transcript
   **命名**哪一行（`modelFor()` 每次请求按选择现查目录，不缓存行的事实）。
-- **OpenSessions（活登记处）** —— 按 id 键控的窄表，只装「进行中且磁盘上没有」的东西：条目
-  `OpenSession` 装着 `SessionRuntime`（两条队列与在飞运行）、订阅集合、跨栈 run 槽，以及装配产物
-  （`workDirAbsPath`、设置袋、模型选择；ADR-0007 §4）；hub 持有一份，
-  首次触碰建条目、host 收摊删条目，进程重启即清空。
-- **workDirAbsPath（当前工作目录）** —— 一个会话的相对路径基准与命令起点，**按会话**，从会话自己快照里的
-  `workDir` 取（`OpenSession.workDirAbsPath`，绝对）。它**不是围栏**：绝对路径原样接受，`..` 也能走出去，工具
+- **AgentState（会话状态）** —— 一个会话的全部状态是一件东西（ADR-0011）：`state.session`（账本重放出的
+  durable 半）、`state.setting`（本次打开解析出的设置袋）、两个订阅集合，与 `state.live`（`Live`：两条
+  队列、在飞运行、partial、重试与挂起位——「进行中且磁盘上没有」的东西）。由 `Agent` 按 id 键控持有，
+  `adopt` 是唯一入口、`evict` / `drop` 是唯一出口，进程重启即清空。
+- **workDirAbsPath（当前工作目录）** —— 一个会话的相对路径基准与命令起点，**按会话**，从会话自己快照的
+  setting 字段取（`session.sessionSetting.workDirAbsPath`，绝对）。它**不是围栏**：绝对路径原样接受，`..` 也能走出去，工具
   可以碰这台机器上的任何文件——目录只决定一个裸路径是什么意思。
 - **directory（目录）** —— 侧边栏的分组：在同一目录里开过的会话归在一组。它只是列表的组织方式，
   没有边界含义；组名可改、可「删除」（只从列表移除，磁盘不动），都是存在设置里的视图决定。

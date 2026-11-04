@@ -1,7 +1,7 @@
 # 11：SettingsManager 去 state
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 05, 08
 
 ## Question
