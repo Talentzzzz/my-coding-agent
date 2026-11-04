@@ -10,16 +10,16 @@ import {
 	Model,
 	type ModelConfig,
 	type ThinkingLevel as LlmThinkingLevel,
-} from "@my-agent/llm";
+} from "./llm/index.ts";
 import { anthropicCompatFor } from "./anthropic-models.ts";
 import { AGENT_HOME } from "./config.ts";
 import type { ModelOption } from "./protocol.ts";
 
 /** The class itself, so a caller that only wants "a model" does not reach into the transport package. */
-export { Model } from "@my-agent/llm";
+export { Model } from "./llm/index.ts";
 
 /** The shape a row is written down in, re-exported so a caller need not name the package it lives in. */
-export type { ModelConfig } from "@my-agent/llm";
+export type { ModelConfig } from "./llm/index.ts";
 
 /**
  * The models this installation runs, as configs a person wrote.
@@ -384,7 +384,7 @@ export function thinkingLevelsFor(): string[] {
  * Thinking levels a session can be in.
  *
  * The scale is the transport's, re-exported so a caller in this package does not reach for
- * `@my-agent/llm` merely to spell a level — and re-exported rather than restated, because two
+ * `./llm/index.ts` merely to spell a level — and re-exported rather than restated, because two
  * hand-written copies of four string literals is the drift this file just spent a type removing.
  */
 export type ThinkingLevel = LlmThinkingLevel;

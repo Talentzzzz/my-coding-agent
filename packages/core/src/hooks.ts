@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "./types.ts";
-import type { Message } from "@my-agent/llm";
+import type { Message } from "./llm/index.ts";
 import { truncate } from "./tools/truncate.ts";
 import { spillPathFor, spillText, spillView, writeSpillFile, SPILL_KEEP_CHARS } from "./context/spill.ts";
 

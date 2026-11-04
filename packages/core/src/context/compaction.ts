@@ -1,4 +1,4 @@
-import { type Api, type AssistantMessage, contentText, type Message, type Model, type Usage } from "@my-agent/llm";
+import { type Api, type AssistantMessage, contentText, type Message, type Model, type Usage } from "../llm/index.ts";
 import { sessionEntryToContextMessages, type SessionEntry } from "../session/session-manager.ts";
 
 /**

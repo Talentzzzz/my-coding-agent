@@ -1,4 +1,4 @@
-import { anthropicMessages, type ChatTransport } from "@my-agent/llm";
+import { anthropicMessages, type ChatTransport } from "./llm/index.ts";
 import { Agent } from "./agent.ts";
 import { createAgentState, type AgentState, createLive } from "./session/agent-state.ts";
 import type { AgentsMdFile } from "./context/agents-md.ts";

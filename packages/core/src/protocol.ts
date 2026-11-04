@@ -1,12 +1,12 @@
-import type { Message } from "@my-agent/llm";
-import type { Usage } from "@my-agent/llm";
-import type { ModelConfig } from "@my-agent/llm";
+import type { Message } from "./llm/index.ts";
+import type { Usage } from "./llm/index.ts";
+import type { ModelConfig } from "./llm/index.ts";
 import type { AgentSessionEvent } from "./agent.ts";
 import type { AppearanceSettings, BashSettings, ModeSettings } from "./config.ts";
 import type { BranchPoint } from "./session/session-manager.ts";
 import type { QueueMode } from "./types.ts";
 
-export type { Message } from "@my-agent/llm";
+export type { Message } from "./llm/index.ts";
 export type { AgentSessionEvent } from "./agent.ts";
 export type { MessageDelta } from "./agent.ts";
 export type { BranchOption, BranchPoint } from "./session/session-manager.ts";

@@ -44,11 +44,11 @@ import {
 	SettingManager,
 	type AgentTool,
 	type FileDiff,
+	type Message,
 	type ModelConfig,
 	type SessionEntry,
 	compactionSummaryOf,
 } from "@my-agent/core";
-import type { Message } from "@my-agent/llm";
 
 /** The ledger's operations are the service's methods, so a script holds one to call them on. */
 const store = new SessionManager();

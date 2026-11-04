@@ -1,4 +1,4 @@
-import type { Message } from "@my-agent/llm";
+import type { Message } from "../llm/index.ts";
 import { spillOversizedToolResult } from "../context/spill.ts";
 import { boundToolContent } from "../hooks.ts";
 import { modelFor } from "../models.ts";

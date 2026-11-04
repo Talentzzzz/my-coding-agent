@@ -1,4 +1,4 @@
-import type { AnthropicMessagesCompat } from "@my-agent/llm";
+import type { AnthropicMessagesCompat } from "./llm/index.ts";
 
 /**
  * What a model has to be told, derived from its wire id.

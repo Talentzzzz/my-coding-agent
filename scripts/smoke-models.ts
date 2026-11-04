@@ -2,13 +2,13 @@
 // stands in for none. Run with: node scripts/smoke-models.ts
 //
 // No provider key: everything here is the mapping from a row the user typed to the pi-ai model a
-// session runs (vendored as @my-agent/llm), plus the one request this app never wants to make — the one
+// session runs (vendored under packages/core/src/llm), plus the one request this app never wants to make — the one
 // that has no model to make it with. One heading reaches the real transport with a key, and captures
 // the request before it leaves, so what it reads is the credential rather than a provider's answer.
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { anthropicMessages, type SimpleStreamOptions } from "@my-agent/llm";
+import { anthropicMessages, type SimpleStreamOptions } from "@my-agent/core";
 import {
 	coerceModelConfig,
 	isUnconfigured,

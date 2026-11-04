@@ -15,7 +15,7 @@ import {
 	type ToolResultMessage,
 	type Usage,
 	validateToolArguments,
-} from "@my-agent/llm";
+} from "./llm/index.ts";
 import { type AgentsMdFile, loadAgentsMd } from "./context/agents-md.ts";
 import {
 	compact as compactTranscript,

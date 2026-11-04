@@ -1,8 +1,7 @@
 // Vendored from @earendil-works/pi-ai (0.99.2). Trimmed for this repo — see `transformMessages`
 // for what came out and why. Re-vendoring from upstream means reapplying that trim.
-// Checked by packages/llm/tsconfig.json under pi's own compiler settings; @ts-nocheck keeps the
-// repo root's stricter config from flagging this file, while every import into packages/core
-// stays fully checked.
+// @ts-nocheck keeps the repo root's stricter config from flagging this file, while every import
+// into packages/core stays fully checked.
 // @ts-nocheck
 import type { Model } from "../model.ts";
 import type {

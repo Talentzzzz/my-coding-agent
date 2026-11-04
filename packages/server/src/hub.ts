@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { ChatTransport } from "@my-agent/llm";
+import type { ChatTransport } from "@my-agent/core";
 import {
 	type Agent,
 	type AgentSessionEvent,

@@ -15,7 +15,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAssistantMessageEventStream, type ChatTransport, type Message } from "@my-agent/llm";
+import { createAssistantMessageEventStream, type ChatTransport, type Message } from "@my-agent/core";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import {
 	createSession,

@@ -16,7 +16,7 @@ import type {
 	Tool,
 	ToolResultMessage,
 	Usage,
-} from "@my-agent/llm";
+} from "./llm/index.ts";
 import type { Static, TSchema } from "typebox";
 
 /**

@@ -51,7 +51,7 @@ export interface ToolCard {
  * A reasoning block and the text that follows it arrive on the same message, but they are read
  * differently — the answer is the point, the reasoning is behind it — so the transcript draws them
  * as separate rows and only the reasoning one collapses. `text` is the provider's Markdown as it
- * came (`packages/llm/src/api/anthropic-messages.ts` concatenates the deltas verbatim), and several
+ * came (`packages/core/src/llm/api/anthropic-messages.ts` concatenates the deltas verbatim), and several
  * reasoning blocks in one message are joined with a blank line, which is where a paragraph break is.
  */
 export interface MessageThinking {

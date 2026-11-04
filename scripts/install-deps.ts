@@ -20,7 +20,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const registry = "https://registry.npmjs.org";
 const cache = join(root, ".npm-tarball-cache");
 
-const workspaces = ["packages/llm", "packages/core", "packages/server", "packages/web", "packages/desktop", "."];
+const workspaces = ["packages/core", "packages/server", "packages/web", "packages/desktop", "."];
 
 async function main(): Promise<void> {
 	await mkdir(cache, { recursive: true });

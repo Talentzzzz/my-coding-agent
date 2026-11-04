@@ -1,6 +1,6 @@
 import type { QueueMode } from "../types.ts";
 import type { QueuedPrompt } from "../protocol.ts";
-import type { Message } from "@my-agent/llm";
+import type { Message } from "../llm/index.ts";
 
 /**
  * A pending-message queue with a drain width.

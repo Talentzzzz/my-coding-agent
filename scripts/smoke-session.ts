@@ -4,8 +4,6 @@
 import { mkdtemp, rm, access, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Message } from "@my-agent/llm";
-import type { AssistantMessage, ChatTransport, SimpleStreamOptions } from "@my-agent/llm";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall, type FakeResponseStep } from "./fake-transport.ts";
 import {
 	CURRENT_SESSION_VERSION,
@@ -21,6 +19,7 @@ import {
 	type AgentSessionEvent,
 	type AgentTool,
 	type FileDiff,
+	type Message,
 	type MessageEntry,
 	type Settings,
 	type SessionEntry,
@@ -29,13 +28,16 @@ import {
 	type ToolRegistry,
 	type ModelConfig,
 	sessionDir,
+	type AssistantMessage,
+	type ChatTransport,
+	type SimpleStreamOptions,
 } from "@my-agent/core";
 
 /** The ledger's operations are the service's methods, so a script holds one to call them on. */
 const store = new SessionManager();
 
-// `@my-agent/llm` and `@my-agent/core` are workspace packages, linked into the repository root's
-// node_modules so scripts resolve them the same way `packages/core` does.
+// `@my-agent/core` is a workspace package, linked into the repository root's
+// node_modules so scripts resolve it the same way `packages/core` does.
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-session-"));
 let failures = 0;

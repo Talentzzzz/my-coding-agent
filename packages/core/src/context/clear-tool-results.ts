@@ -1,4 +1,4 @@
-import type { ToolResultMessage } from "@my-agent/llm";
+import type { ToolResultMessage } from "../llm/index.ts";
 import type { SessionEntry } from "../session/session-manager.ts";
 
 /**

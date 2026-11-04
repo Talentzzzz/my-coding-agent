@@ -1,4 +1,4 @@
-import type { Message, Model } from "@my-agent/llm";
+import type { Message, Model } from "../llm/index.ts";
 import type { QueueMode } from "../protocol.ts";
 import type { SessionListener, SessionEventListener } from "../agent.ts";
 import type { Session } from "./session-manager.ts";

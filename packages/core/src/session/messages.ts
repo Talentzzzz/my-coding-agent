@@ -1,4 +1,4 @@
-import type { Message } from "@my-agent/llm";
+import type { Message } from "../llm/index.ts";
 
 /**
  * One compaction checkpoint, as the transcript carries it.

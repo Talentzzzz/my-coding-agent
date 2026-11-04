@@ -2,7 +2,8 @@
 // network, so streaming, queueing, steering, retries, and compaction are testable with no provider
 // key. Run with any smoke: `node scripts/smoke-session.ts`.
 //
-// It lives here rather than in `@my-agent/llm` because it is this app's test double and nothing else's.
+// It lives here rather than in the vendored transport under `packages/core/src/llm` because it is
+// this app's test double and nothing else's.
 // pi-ai ships a faux provider, but it was built on the provider registry this app no longer has — it
 // registered itself into a `Models` collection, which is exactly the indirection that was removed.
 // What is left to fake is one transport, so the double is one object with two methods.
@@ -23,7 +24,7 @@ import {
 	type ToolCall,
 	type ToolResultMessage,
 	type Usage,
-} from "@my-agent/llm";
+} from "@my-agent/core";
 
 const DEFAULT_USAGE: Usage = {
 	input: 0,

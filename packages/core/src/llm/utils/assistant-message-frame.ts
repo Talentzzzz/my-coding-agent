@@ -1,6 +1,5 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). Checked by packages/llm/tsconfig.json under pi's own compiler
-// settings; @ts-nocheck keeps the repo root's stricter config from flagging this file,
-// while every import into packages/core stays fully checked.
+// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
+// from flagging this file, while every import into packages/core stays fully checked.
 // @ts-nocheck
 import type { AssistantMessage, AssistantMessageEvent, TextContent, ThinkingContent, ToolCall } from "../types.ts";
 import { parseStreamingJson } from "./json-parse.ts";

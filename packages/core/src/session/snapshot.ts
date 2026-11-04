@@ -1,5 +1,5 @@
-import type { Message } from "@my-agent/llm";
-import type { Api, Model, Usage } from "@my-agent/llm";
+import type { Message } from "../llm/index.ts";
+import type { Api, Model, Usage } from "../llm/index.ts";
 import {
 	addUsage,
 	EMPTY_USAGE,
