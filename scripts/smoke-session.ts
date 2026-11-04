@@ -947,7 +947,7 @@ async function exerciseAfterToolHook(): Promise<void> {
 		JSON.stringify(toolResultTexts(session)),
 	);
 
-	const sessionFile = session.sessionManager.stateOf(sidOf(session)).sessionFileAbsPath;
+	const sessionFile = session.agentState(sidOf(session)).session.sessionFileAbsPath;
 	await session.close(sidOf(session));
 
 	process.stdout.write("after_tool hook — the rewrite survives the file\n");

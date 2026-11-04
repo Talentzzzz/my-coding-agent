@@ -1307,7 +1307,7 @@ function writeMetaFile(s: Session): void {
  * session nobody has spoken in never lands on disk. The first write that passes the gate creates
  * both files at once — the whole entry stream, then the meta snapshot as the commit marker — because
  * there was nothing there to have received them; the snapshot is written **last** so a birth that
- * dies partway leaves an unpaired half, which the store scans prune rather than adopt. From then on
+ * dies partway leaves an unpaired half, which the store scans prune rather than keep. From then on
  * (`fileCreated`) each entry appends by itself and each meta change rewrites the snapshot.
  */
 export function persistEntry(s: Session, entry: SessionEntry): void {
@@ -1449,41 +1449,20 @@ function appendLeafRecord(s: Session, leafId: string | null): void {
 }
 
 /**
- * The session service: the ledger's operations, and the id-keyed cache they run on.
+ * The session service: the ledger's operations, and the file I/O under them.
  *
  * Every per-session method takes its {@link Session} as the first parameter and does the work
  * here — there is no second layer of same-named file-level functions to forward to, so a caller
- * reading this file reads the implementation. The class holds no per-session state (ADR-0007 §2): it
- * is a Spring-style service a host constructs once and hands around, and the bag a call operates on
- * is named at the call.
+ * reading this file reads the implementation. The class holds no per-session state (ADR-0007 §2)
+ * and no cache: a bag is owned by whoever filled or built it, and the orchestrator's table
+ * (`Agent`) is the only place a running session's bag is held between calls.
  *
- * What the class *does* own is the fill-at-open cache (ADR-0007 §3), keyed by session id: see
- * {@link SessionManager.stateOf}.
+ * What the class does own is the store's format knowledge: how an id becomes a file path
+ * ({@link SessionManager.findSessionFilePathById}), how a file becomes a bag
+ * ({@link fillSession}, with its pruning and version refusal), and how a write reaches the disk
+ * (`persistEntry`, `writeMetaFile`).
  */
 export class SessionManager {
-	/**
-	 * Open states by session id — fill-at-open, rebuildable from disk at any time (ADR-0007 §3).
-	 *
-	 * An id is filled the first time {@link stateOf} touches it and the same reference is reused after.
-	 * That is the whole point of the cache: every write to one session lands on one bag, so a rename
-	 * appended through the service and a turn appended by the session's own loop cannot drift from
-	 * each other the way two independently opened states would.
-	 *
-	 * The cache is never authoritative, which is why its rules are about divergence and not about loss:
-	 *
-	 * - {@link SessionManager.remove} drops the id. The file is gone, and a cached state would
-	 *   resurrect a deleted session.
-	 * - {@link SessionManager.forkFrom} registers the fork's own fresh state. Its file was just
-	 *   written, and the next `stateOf` on its id must answer the same object the fork returned.
-	 * - Nothing else drops. Appends, renames, and branch moves mutate the cached bag in place, and a
-	 *   host closes only after its run has settled, so the bag equals the file at that moment.
-	 *
-	 * A session created but not yet on disk has no file to fill from, so it enters only through
-	 * {@link SessionManager.adopt}, when the host that created the bag hands it over at first touch —
-	 * the same hand-off the creating host used to hold across itself.
-	 */
-	private readonly states = new Map<string, Session>();
-
 	/**
 	 * Append a message as a child of the leaf and advance the leaf. Returns the new entry's id.
 	 *
@@ -1968,39 +1947,28 @@ export class SessionManager {
 	}
 
 	/**
-	 * The open state of the session `id` names: the cached bag when there is one, a fresh replay of the
-	 * file when there is not.
+	 * Replay the session `id` names into a bag this call owns: no registration, no cache, and the
+	 * caller drops it when it is done.
 	 *
-	 * This is the read side of the fill-at-open contract: a caller that holds a session by id — a host
-	 * about to run it, a rename arriving over REST — takes the bag here, and from then on every write
-	 * through this service lands on that same object. An id with no file on disk is refused, because
-	 * there is nothing to fill from — unless the bag was {@link adopt}ed, which is how a session
-	 * created but not yet spoken in is answerable by id at all.
+	 * This is the cold path, and the only one: a session this process is running is written through
+	 * the bag its orchestrator holds (`Agent`'s table), never through a replay of its file — the
+	 * snapshot is written whole, so a stale bag would revert whatever that session's turns just
+	 * recorded. What it answers is a pair that was born: the `.json` snapshot is the birth's commit
+	 * marker, so an id it matches names a `.jsonl` beside it, and an id neither file names is refused
+	 * with the same sentence every reader of this store uses. A pair that exists but cannot be opened
+	 * is pruned by {@link fillSession} itself, so this is a read that can delete.
+	 *
+	 * A cold write is two moves, not three — this for the bag, then a setter, which writes the file
+	 * itself (`setTitle` records the meta, and recording persists). There is no third persist verb to
+	 * remember, and no dirty state to flush. Safety here is not a claim's work: while a session is
+	 * held, its only writer is the bag the orchestrator holds; when it is not held, one cold write is
+	 * one synchronous block no other writer can step into — and the two windows never overlap,
+	 * because the cold path only serves sessions nothing holds.
 	 */
-	stateOf(id: string): Session {
-		const cached = this.states.get(id);
-		if (cached !== undefined) return cached;
+	open(id: string): Session {
 		const absPath = SessionManager.findSessionFilePathById(id);
 		if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
-		const s = fillSession(absPath);
-		this.states.set(id, s);
-		return s;
-	}
-
-	/**
-	 * Register a caller-built bag as the state its id answers with, file or no file.
-	 *
-	 * This is the one road a not-yet-on-disk bag enters the cache, and it exists because the id-keyed
-	 * read side needs somewhere to answer from before the first message writes the file: a session
-	 * created but not spoken in has no file to fill from, so the host that created the bag hands it
-	 * over here, and every later {@link stateOf} on that id answers this exact object. The first
-	 * message makes the entry disk-backed like any other; until then the bag lives only here, which
-	 * is the same window the creating host used to hold it across itself. Re-adopting a bag the
-	 * cache already holds re-registers the same object, which is what an open that received its bag
-	 * from {@link stateOf} does, harmlessly.
-	 */
-	adopt(s: Session): void {
-		this.states.set(s.sessionId, s);
+		return fillSession(absPath);
 	}
 
 	// =========================================================================
@@ -2008,27 +1976,29 @@ export class SessionManager {
 	// =========================================================================
 
 	/**
-	 * Copy a branch of a session into a new session under `targetWorkDir`, and cache the new state.
+	 * Copy a branch of a session into a new session beside its source, and name what was written.
 	 *
 	 * `entryId` is the entry the branch ends at, or null for the whole log. The new snapshot points at
 	 * the source's entry stream as `parentSession`, and the copied entries keep the ids and parent
 	 * links the source wrote, which is what makes a fork traceable back to where it came from. The
 	 * snapshot's current choices travel whole — title, model, level, tool config — because those are
-	 * the session's own values now, not entries a branch replay could restore.
+	 * the session's own values now, not entries a branch replay could restore. The working directory
+	 * is the source header's own: the fork is written where its source lives, and the caller is not
+	 * asked to replay the file to learn where that is.
 	 *
 	 * The source is only read: a fork is a new pair of files, and the session it came from is never
-	 * rewritten. The new state goes into the cache under its own id — the caller that takes it and the
-	 * next {@link stateOf} on that id must answer the same bag, or the fork's first turn would land on
-	 * an object the fork result knows nothing about.
+	 * rewritten. The fork fills nothing and registers nothing — the files are the whole of what it
+	 * returns, and the new session's first bag comes from its first {@link open}, which reads the
+	 * pair just written. Both files are written synchronously before this returns, with the snapshot
+	 * last (`wx`, the birth's commit marker), so an id handed out here is openable by the time the
+	 * caller has it.
 	 */
 	forkFrom(
 		sourcePathInput: string,
-		targetWorkDirInput: string,
 		entryId: string | null,
 		sessionDirInput?: string,
-	): Session {
+	): { sessionId: string; sessionFileAbsPath: string } {
 		const absSourcePath = resolvePath(sourcePathInput);
-		const absTargetWorkDir = resolvePath(targetWorkDirInput);
 		const absSourceJsonl = absSourcePath.endsWith(".json") ? sessionJsonlPath(absSourcePath) : absSourcePath;
 		const sourceMeta = readMetaFile(sessionMetaPath(absSourceJsonl));
 		const sourceEntries = loadJsonlEntries(absSourceJsonl);
@@ -2041,6 +2011,9 @@ export class SessionManager {
 			throw new Error(`Session ${sourceMeta.id} has no entry ${entryId}`);
 		}
 
+		// The header is the workDir's one authority: it named the source's tools' frame, and the fork
+		// lives in the same conversation, so it keeps the same frame.
+		const absTargetWorkDir = resolvePath(sourceMeta.workDir);
 		const absDir = sessionDirInput ? normalizePath(sessionDirInput) : sessionDir(absTargetWorkDir);
 		if (!existsSync(absDir)) mkdirSync(absDir, { recursive: true });
 
@@ -2062,9 +2035,7 @@ export class SessionManager {
 		writeFileSync(absNewSessionFile, branch.map((entry) => `${JSON.stringify(entry)}\n`).join(""), { flag: "wx" });
 		writeFileSync(sessionMetaPath(absNewSessionFile), `${JSON.stringify(meta, null, "\t")}\n`, { flag: "wx" });
 
-		const s = fillSession(absNewSessionFile);
-		this.states.set(s.sessionId, s);
-		return s;
+		return { sessionId: newSessionId, sessionFileAbsPath: absNewSessionFile };
 	}
 
 	/** Every session stored for `workDir`, newest activity first. */
@@ -2182,21 +2153,19 @@ export class SessionManager {
 	}
 
 	/**
-	 * Delete the session an id names, from whichever directory holds it, and drop the id's cached
-	 * state.
+	 * Delete the session an id names, from whichever directory holds it.
 	 *
 	 * One session, not a directory: a directory's sessions share one store, so anything wider than
 	 * the two files one session is named by is a different conversation's transcript. Throwing for an
 	 * unknown id rather than answering "already gone" keeps the two failures apart — the caller
-	 * decides what a second delete means, and the hub turns it into a status the client can show. The
-	 * cache drop rides here rather than on the caller, because a cached state that outlived its file
-	 * would let the next {@link stateOf} answer a deleted session — the one divergence this class
-	 * cannot permit.
+	 * decides what a second delete means, and the hub turns it into a status the client can show.
+	 *
+	 * Pure file I/O: whatever table held a live bag for this id is someone else's, and the caller
+	 * that decided the session is gone drops that half itself (`Agent.drop`).
 	 */
 	async remove(id: string): Promise<void> {
 		const absPath = SessionManager.findSessionFilePathById(id);
 		if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
-		this.states.delete(id);
 		await rm(absPath);
 		await rm(sessionMetaPath(absPath));
 	}

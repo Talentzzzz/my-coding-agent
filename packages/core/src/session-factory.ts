@@ -42,10 +42,10 @@ export interface OpenAgentOptions {
 	/**
 	 * The stateless session service the bag-passing calls inside the session go through.
 	 *
-	 * A host that owns one — the hub, whose `stateOf` cache must be the same object the session
-	 * writes through — hands its own in. Omitted means a fresh service, which behaves identically:
-	 * the service is stateless (ADR-0007 §2) and its cache is only filled through `stateOf` and
-	 * `forkFrom`, neither of which the session itself calls.
+	 * A host that owns one — the hub, so every session of the process shares a single service and
+	 * its single store knowledge — hands its own in. Omitted means a fresh service, which behaves
+	 * identically: the service holds no bag of its own (ADR-0007 §2), and the calls the session
+	 * makes name their bag at the call site.
 	 */
 	sessionManager?: SessionManager;
 	/**
@@ -255,11 +255,6 @@ export async function assembleSession(options: OpenAgentOptions): Promise<{
 	// its queue modes are the same settings' answer at this moment; a config patch moves them on the
 	// queues in place afterwards.
 	const state = createAgentState(session, settingsState, createLive(settingsState));
-	// The caller's bag is the session's bag: registering it is what lets every later call — which
-	// names the session by id — answer with this exact object, before the first message puts the file
-	// on disk. An id the service already caches is re-registered to the same object, which changes
-	// nothing.
-	sessionManager.adopt(session);
 	return { sessionManager, state };
 }
 

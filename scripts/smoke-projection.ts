@@ -209,7 +209,7 @@ try {
 	// and the only way a title can move at all is to drop the messages that gave it, because a branch
 	// always runs back to the root. Resetting the leaf and asking again starts a new root, and the file
 	// keeps the conversation it replaced alongside the new one.
-	agent.sessionManager.resetLeaf(agent.sessionManager.stateOf(first));
+	agent.sessionManager.resetLeaf(agent.agentState(first).session);
 	await hub.agent.prompt(first, "a different opening");
 	await settle();
 	const reopened = await projection.row(first);
@@ -229,7 +229,7 @@ try {
 	fake.setResponses([fakeAssistantMessage("to fork from")]);
 	await hub.agent.prompt(source, "the conversation being forked");
 	await settle();
-	const forked = await hub.fork(source, agent.sessionManager.stateOf(source).leafId);
+	const forked = await hub.fork(source, agent.agentState(source).session.leafId);
 	await until(() => seen.some((row) => row.id === forked));
 	const forkRow = await projection.row(forked);
 	check("the fork reaches the store on its own", forkRow !== undefined, forked);

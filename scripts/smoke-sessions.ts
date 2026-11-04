@@ -13,16 +13,16 @@ import { SessionHub } from "../packages/server/src/hub.ts";
 import {
 	CURRENT_SESSION_VERSION,
 	type AgentState,
+	createAgentState,
+	createLive,
 	createSession,
+	createSessionAgent,
 	fillSession,
 	openAgent,
 	readSessionSnapshot,
 	SessionManager,
-	OpenSessions,
-	createOpenSession,
 	inMemorySettingsState,
 	sessionDir,
-	type QueueMode,
 	type SessionSnapshot,
 	type Session,
 } from "@my-agent/core";
@@ -121,10 +121,9 @@ function snapshotPathOf(jsonlPath: string): string {
 }
 
 /**
- * The hub's own session service: the one whose open adopted every hosted bag into its cache, so the
- * bag behind a live session is answerable here the same way the session itself reads and writes it.
- * The tests append directly to the transcript rather than speaking to a provider, which is what the
- * id-keyed `Agent` no longer exposes.
+ * The hub's own session service: the one whose open the hub's cold paths go through. The tests
+ * append directly to the transcript rather than speaking to a provider, which is what the id-keyed
+ * `Agent` no longer exposes.
  */
 function hubSessions(hub: SessionHub): SessionManager {
 	return (hub as unknown as { sessions: SessionManager }).sessions;
@@ -135,17 +134,17 @@ function hubSessions(hub: SessionHub): SessionManager {
  *
  * This is what "one session per id" means now: the orchestrator is the process's own and answers by
  * id, so what a reopen can build a second of is a *state* (the queues, the live half, the assembly),
- * never the object that serves them. A cast into the orchestrator's private table, because the table
- * has no public getter by design (issue 01 §4); when the hub adapts (issue 12) these identity
+ * never the object that serves them. A cast into the orchestrator's private table, because the
+ * probe wants `undefined` rather than a throw; when the hub adapts (issue 12) these identity
  * assertions move onto behavior and the probe goes away.
  */
 function entryOf(hub: SessionHub, id: string): AgentState | undefined {
 	return (hub.agent as unknown as { sessions: Map<string, AgentState> }).sessions.get(id);
 }
 
-/** The bag behind a hosted session: what the hub's service adopted at open, file or no file. */
+/** The bag behind a hosted session: the one the orchestrator's table holds and its turns write through. */
 function bagOf(hub: SessionHub, id: string): Session {
-	return hubSessions(hub).stateOf(id);
+	return hub.agent.agentState(id).session;
 }
 
 /** Poll until `ready` holds, and report whether it did, so no test guesses at a reap's timing. */
@@ -209,7 +208,7 @@ try {
 	process.stdout.write("a fork is the branch up to one entry\n");
 	const parentId = await hub.newSession();
 	const parent = await hub.claim(parentId);
-	const parentFile = hub.agent.sessionManager.stateOf(parent.id).sessionFileAbsPath ?? "";
+	const parentFile = hub.agent.agentState(parent.id).session.sessionFileAbsPath ?? "";
 	const entryOne = hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("first"));
 	hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("second"));
 
@@ -246,7 +245,7 @@ try {
 	check("and it reports the file it came from", hubSessions(hub).getMeta(bagOf(hub, forkedId))?.parentSession === parentFile);
 
 	process.stdout.write("forking without an entry copies the whole log\n");
-	const whole = new SessionManager().forkFrom(parentFile, root, null, sessionDir(root));
+	const whole = fillSession(new SessionManager().forkFrom(parentFile, null, sessionDir(root)).sessionFileAbsPath);
 	check("every entry came with it", ids(store.getEntries(whole)) === ids(hubSessions(hub).getEntries(bagOf(hub, parentId))));
 	check("and the transcript matches", messagesOf(whole).length === messagesOf(bagOf(hub, parentId)).length);
 	check("its leaf is the source's leaf", whole.leafId === bagOf(hub, parentId).leafId);
@@ -279,13 +278,16 @@ try {
 
 	process.stdout.write("reopening a fork reports where it came from\n");
 	const leafAtClose = bagOf(hub, forkedId).leafId;
+	const messagesAtClose = messagesOf(bagOf(hub, forkedId)).length;
 	hub.release(forked);
 	check("the fork is closed and dropped", await until(() => !hub.live.includes(forkedId)));
 	const forkEntry = entryOf(hub, forked.id);
 	const reread = openFile(forkedId);
 	check("reopening reports its parent session", store.getMeta(reread)?.parentSession === parentFile);
 	check("and the same leaf", reread.leafId === leafAtClose, `${reread.leafId} vs ${leafAtClose}`);
-	check("with the messages it had", messagesOf(reread).length === messagesOf(bagOf(hub, forkedId)).length);
+	// Counted before the release: the drop takes the bag with it, so what the file kept is compared
+	// against what the session had when it was still held.
+	check("with the messages it had", messagesOf(reread).length === messagesAtClose, `${messagesOf(reread).length} vs ${messagesAtClose}`);
 	const reopenedFork = await hub.claim(forkedId);
 	check("a claimed reopen builds a different registry entry", entryOf(hub, reopenedFork.id) !== forkEntry);
 	check("and still reports the session it came from", hubSessions(hub).getMeta(bagOf(hub, forkedId))?.parentSession === parentFile);
@@ -847,79 +849,62 @@ try {
 			const rebranched = fillSession(s.sessionFileAbsPath!);
 			check("the branch move is replayed from the file", rebranched.leafId === one, String(rebranched.leafId));
 
-			// The service's fill-at-open cache: the first stateOf fills from the file, and every stateOf
-			// after answers the same bag — which is what keeps a rename appended through the service and
-			// a turn appended by the session's own loop on one object.
+			// The service's open: one replay per call, no registration, the caller drops the bag. Two
+			// opens answer two bags on purpose — there is no cache to reuse, and anything that needed
+			// "the same bag twice" is a held session's business, the orchestrator table's.
 			const service = new SessionManager();
-			const live = service.stateOf(s.sessionId);
+			const cold = service.open(s.sessionId);
 			check(
 				"the service and the stateless form agree",
-				JSON.stringify(store.buildSessionContext(live).messages) === JSON.stringify(store.buildSessionContext(replayed).messages),
+				JSON.stringify(store.buildSessionContext(cold).messages) === JSON.stringify(store.buildSessionContext(replayed).messages),
 			);
-			check("stateOf reuses the bag it filled", service.stateOf(s.sessionId) === live);
-			store.appendMessage(live, userMessage("written through the cache"));
-			const throughCache = fillSession(s.sessionFileAbsPath!);
+			store.appendMessage(cold, userMessage("written through the cold bag"));
+			const throughCold = fillSession(s.sessionFileAbsPath!);
 			check(
-				"a write through the cached bag reaches the file",
-				throughCache.leafId === live.leafId &&
-					JSON.stringify(store.buildSessionContext(throughCache).messages) === JSON.stringify(store.buildSessionContext(live).messages),
+				"a write through the cold bag reaches the file",
+				throughCold.leafId === cold.leafId &&
+					JSON.stringify(store.buildSessionContext(throughCold).messages) === JSON.stringify(store.buildSessionContext(cold).messages),
 			);
 			let refused = false;
 			try {
-				new SessionManager().stateOf("no session has this id");
+				new SessionManager().open("no session has this id");
 			} catch {
 				refused = true;
 			}
-			check("stateOf refuses an id with no file behind it", refused);
+			check("open refuses an id with no file behind it", refused);
 		} finally {
 			await rm(sessionDir(statelessRoot), { recursive: true, force: true });
 			await rm(statelessRoot, { recursive: true, force: true });
 		}
 	}
 
-	process.stdout.write("the live registry keys the live half by id\n");
-	// ADR-0007 §4: the narrow registry holds exactly what cannot be rebuilt from disk — the queues,
-	// the run in flight, the subscriber sets, the run slot — and nothing else. Its contract is the
-	// runtime's old one, widened: first touch builds the entry, the host closing drops it, and a
-	// process restart (clear) forgets everything, so a reopen never inherits a stale live half.
+	process.stdout.write("the orchestrator's table keys the live half by id\n");
+	// ADR-0011: the table on the orchestrator holds exactly what cannot be rebuilt from disk — the
+	// queues, the run in flight, the subscriber sets. `adopt` is its one way in, first-come: a state
+	// already there is kept, never replaced, because the one it would replace holds the live half.
+	// The exits are two and deliberately different: `evict` refuses unless the criteria hold, and
+	// `drop` does not ask. There is no clear — the table lives and dies with the orchestrator itself.
 	{
-		const opens = new OpenSessions();
-		// The seed's assembly fields are irrelevant to what this block pins — the queue modes and the
-		// lifecycle — so it hands the placeholder answers a session with no row would carry.
-		const seed = (steeringMode: QueueMode, followUpMode: QueueMode) =>
-			createOpenSession({
-				// The directory is never resolved against here — the block pins the queue modes and the
-				// lifecycle, not the path — so any real directory will do.
-				workDirAbsPath: tmpdir(),
-				settings: inMemorySettingsState({}),
-				modelSelection: {},
-				steeringMode,
-				followUpMode,
-			});
-		let built = 0;
-		const entry = opens.ensure("session-a", () => {
-			built += 1;
-			return seed("all", "one-at-a-time");
-		});
-		check("ensure builds the entry on first touch", built === 1);
-		check("the queue modes are the creation answer's", entry.runtime.steeringQueue.mode === "all" && entry.runtime.followUpQueue.mode === "one-at-a-time");
-		check("ensure answers the same entry afterwards", opens.ensure("session-a", () => {
-			built += 1;
-			return seed("one-at-a-time", "all");
-		}) === entry && built === 1);
-		entry.listeners.add(() => {});
-		check("delete drops the entry with its subscribers", opens.delete("session-a") && opens.delete("session-a") === false);
-		const rebuilt = opens.ensure("session-a", () => {
-			built += 1;
-			return seed("all", "all");
-		});
-		check("the next touch builds a fresh entry", built === 2 && rebuilt !== entry && rebuilt.listeners.size === 0);
-		opens.clear();
-		const afterRestart = opens.ensure("session-a", () => {
-			built += 1;
-			return seed("all", "all");
-		});
-		check("a restart drops every entry", afterRestart !== rebuilt && built === 3);
+		const agent = createSessionAgent({ sessionManager: new SessionManager(), models: { list: () => [] } });
+		// The seed's assembly fields are irrelevant to what this block pins — the table and its
+		// doors — so it hands the placeholder answers a session with no row would carry.
+		const settings = inMemorySettingsState({});
+		const session = createSession(tmpdir());
+		const seed = () => createAgentState(session, settings, createLive(settings));
+		const state = seed();
+		agent.adopt(state);
+		check("adopt is the one way in, and the id answers it", agent.agentState(session.sessionId) === state);
+		agent.adopt(seed());
+		check("re-adopting an id keeps the state already there", agent.agentState(session.sessionId) === state);
+		check("an unborn session refuses to be evicted", agent.evict(session.sessionId) === false);
+		check("drop removes the state whatever it holds", agent.drop(session.sessionId) === true && agent.drop(session.sessionId) === false);
+		let refused = false;
+		try {
+			agent.agentState(session.sessionId);
+		} catch {
+			refused = true;
+		}
+		check("an id no longer in the table refuses to answer", refused);
 	}
 
 	process.stdout.write("a pair this build cannot open is deleted, not kept\n");

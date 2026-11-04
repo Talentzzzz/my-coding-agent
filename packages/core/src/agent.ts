@@ -105,9 +105,10 @@ export interface AgentConfig {
 	/**
 	 * The stateless session service every transcript read and write goes through.
 	 *
-	 * A host that owns one — the hub, whose `stateOf` cache must be the same object the session
-	 * writes through — hands its own in. Methods resolve a session's bag with `stateOf(id)`, so the
-	 * cache is what makes an id answer the one bag every writer shares.
+	 * A host that owns one — the hub, so every session of the process shares a single service and
+	 * its single store knowledge — hands its own in. The service holds no bag of its own: a held
+	 * session's bag is the one this class's table answers with (`agentState(id).session`), and a
+	 * cold one is `open(id)`, a replay the caller drops.
 	 */
 	sessionManager: SessionManager;
 	/**
@@ -1116,8 +1117,8 @@ export class Agent {
 	 *
 	 * Exposed rather than hidden because it is the durable half's owner: a host that has to fork,
 	 * list, or name the file reads it here, and there is no second copy of that state to keep in step.
-	 * The bag a call operates on is never exposed — it is `stateOf(id)`'s answer, and the id is the
-	 * caller's.
+	 * The bag a call operates on is never held here — a held session's is the table's
+	 * (`agentState(id).session`), a cold one is `open(id)`'s, and the id is the caller's.
 	 */
 	readonly sessionManager: SessionManager;
 	/** The user's models, as every session reads them: see {@link AgentConfig.models}. */
@@ -1206,14 +1207,27 @@ export class Agent {
 	}
 
 	/**
-	 * The state the session's live half lives in.
+	 * Whether the table holds a state for `id` — whether this process is holding the session.
 	 *
-	 * Every method needs it — the durable half, the settings, the queues, the run in flight, the
-	 * subscribers — and a missing one is a bug in the caller rather than a state to invent: only
-	 * `adopt` puts a state here, and only a host knows when that is. Refusing here is what keeps a
-	 * method from answering a session nobody runs from something it just made up.
+	 * The public boolean beside {@link Agent.agentState}, for a caller that needs to branch before it
+	 * reads: a held session is written through its own bag, a cold one is a replay of its file, and
+	 * the two roads must be chosen before either is walked. Answering nothing about observers or
+	 * claims — those are other questions with other answers — it is only the table's membership.
 	 */
-	private agentStateOf(id: string): AgentState {
+	has(id: string): boolean {
+		return this.sessions.has(id);
+	}
+
+	/**
+	 * The state the session `id` names — the durable half, the settings, the live half, the
+	 * subscribers — or the refusal that says this process is not holding it.
+	 *
+	 * The public read of the table, for a caller outside the class that must reach the same bag a
+	 * method here would: a hub reading the entry map behind a live session, a projection reading a
+	 * title off the bag a turn is being written through. A missing one is a wrong road rather than a
+	 * state to invent — `has` is how a caller asks first — and only `adopt` puts a state here.
+	 */
+	agentState(id: string): AgentState {
 		const state = this.sessions.get(id);
 		if (state === undefined) throw new Error(`Session is not running: ${id}`);
 		return state;
@@ -1235,7 +1249,7 @@ export class Agent {
 	 * Of those five, four are the run's locals and one is derived from the ledger.
 	 */
 	snapshot(id: string): SessionSnapshot {
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		const session = state.session;
 		const live = state.live;
 		return sessionSnapshot({
@@ -1283,7 +1297,7 @@ export class Agent {
 	 * beside.
 	 */
 	getApprovals(id: string): Record<string, boolean> {
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		return this.approvalsOf(state.session, state);
 	}
 
@@ -1300,20 +1314,20 @@ export class Agent {
 	 * tool batch; the calls that wait for an answer are the ones whose run has already ended.
 	 */
 	hasPendingApprovals(id: string): boolean {
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		return state.live.activeRun === undefined && this.danglingApprovals(state.session).length > 0;
 	}
 
 	/** Subscribe to the session's state. The returned function unsubscribes. */
 	onChange(id: string, listener: SessionListener): () => void {
-		const listeners = this.agentStateOf(id).listeners;
+		const listeners = this.agentState(id).listeners;
 		listeners.add(listener);
 		return () => listeners.delete(listener);
 	}
 
 	/** Subscribe to the session's events. The returned function unsubscribes. */
 	onEvent(id: string, listener: SessionEventListener): () => void {
-		const listeners = this.agentStateOf(id).eventListeners;
+		const listeners = this.agentState(id).eventListeners;
 		listeners.add(listener);
 		return () => listeners.delete(listener);
 	}
@@ -1343,7 +1357,7 @@ export class Agent {
 		// applied. A message that never reaches here — an empty one, a rejected send — moves nothing.
 		if (options.selection !== undefined) this.applyModelSelection(id, options.selection);
 
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		if (state.live.activeRun !== undefined) {
 			const message: Message = {
 				role: "user",
@@ -2005,7 +2019,7 @@ export class Agent {
 	 * the end. Nothing here has to know whether the run is live or in a backoff.
 	 */
 	async abort(id: string): Promise<void> {
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		// Read once: the run clears its own registration as it settles, and the promise is what waits
 		// for that settlement.
 		const active = state.live.activeRun;
@@ -2039,7 +2053,7 @@ export class Agent {
 	 * file the rest of that turn under a branch the turn was not answering.
 	 */
 	branchTo(id: string, entryId: string, descend = true): string {
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		if (state.live.activeRun !== undefined) throw new Error("A run is in flight: the branch cannot move under it");
 
 		const leafId = descend ? this.sessionManager.getBranchTip(state.session, entryId) : entryId;
@@ -2060,7 +2074,7 @@ export class Agent {
 	 * the narrowed set when the next prompt is built.
 	 */
 	setActiveTools(id: string, names: string[]): void {
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		const previous = this.toolStateOf(state.session, state).activeToolNames;
 		const known = new Set(this.tools.names());
 		const unknown = names.filter((name) => !known.has(name));
@@ -2089,7 +2103,7 @@ export class Agent {
 	 * always accepted, since it means "as quiet as this model gets".
 	 */
 	applyModelSelection(id: string, selection: ModelSelection): void {
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		const setting = state.session.sessionSetting;
 		const previousName = setting.model?.name;
 		const previousLevel = normalizeThinkingLevel(setting.model?.thinkingLevel);
@@ -2138,7 +2152,7 @@ export class Agent {
 	 * apply: a config change that no request followed is not a config change.
 	 */
 	applyConfig(id: string, patch: ConfigPatch): void {
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		const previousApprovals = this.approvalsOf(state.session, state);
 		if (patch.approval !== undefined) {
 			// The snapshot records the whole map in force — the settings with this session's choice over
@@ -2179,7 +2193,7 @@ export class Agent {
 	 * is worse than an error the client can show.
 	 */
 	hasPendingApproval(id: string, toolCallId: string): boolean {
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		return (
 			state.live.activeRun === undefined &&
 			this.danglingApprovals(state.session).some((call) => call.toolCallId === toolCallId)
@@ -2203,7 +2217,7 @@ export class Agent {
 	 * the resumed request provider-legal when a crash left several calls behind.
 	 */
 	async respondApproval(id: string, toolCallId: string, approved: boolean): Promise<void> {
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		if (state.live.activeRun !== undefined) return;
 		const call = this.danglingApprovals(state.session).find((candidate) => candidate.toolCallId === toolCallId);
 		if (call === undefined) return;
@@ -2237,7 +2251,7 @@ export class Agent {
 	 * what was accepted — and a depth nobody will lower is a session `settle` waits on forever.
 	 */
 	denyAllApprovals(id: string, reason: string): void {
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		if (state.live.activeRun !== undefined) return;
 		const dangling = this.danglingApprovals(state.session);
 		if (dangling.length === 0) return;
@@ -2281,7 +2295,7 @@ export class Agent {
 	 * it. A tool the map does not gate runs without asking.
 	 */
 	async authorize(id: string, name: string, _toolCallId: string, _args: unknown): Promise<boolean> {
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		return this.approvalsOf(state.session, state)[name] === true;
 	}
 
@@ -2306,7 +2320,7 @@ export class Agent {
 	 * backoff, and the condition is here so that stays true if that ever changes.
 	 */
 	async settle(id: string): Promise<void> {
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		// Read through a closure: the run slot is reassigned across the awaits below, and a narrow
 		// taken before them would tell the checker the slot is always empty here.
 		const stillBusy = (): boolean =>
@@ -2333,7 +2347,7 @@ export class Agent {
 	 * and a reap that has already denied both land here.
 	 */
 	async close(id: string): Promise<void> {
-		this.agentStateOf(id).live.activeRun?.abortController.abort();
+		this.agentState(id).live.activeRun?.abortController.abort();
 		await this.settle(id);
 	}
 
@@ -2349,7 +2363,7 @@ export class Agent {
 		signal?: AbortSignal,
 		transport?: ChatTransport,
 	): Promise<readonly SessionEntry[]> {
-		const state = this.agentStateOf(id);
+		const state = this.agentState(id);
 		const model = modelFor(state.session.sessionSetting.model ?? {}, this.models.list(), transport);
 		return this.compactFor(state, entries, now, signal, model);
 	}

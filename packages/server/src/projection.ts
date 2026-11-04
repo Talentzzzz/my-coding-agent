@@ -176,8 +176,9 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 			return;
 		}
 		const manager = hub.agent.sessionManager;
-		// The bag the session writes through: the service's own cache answers the id with it.
-		const state = manager.stateOf(sessionId);
+		// The bag the session writes through: this session is followed, so the orchestrator's table
+		// holds it — a replay here would parse the whole transcript per token and lag the turn.
+		const state = hub.agent.agentState(sessionId).session;
 
 		if (event.type === "branch_changed") {
 			publish({ ...current, title: manager.getTitle(state) });

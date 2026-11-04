@@ -205,9 +205,9 @@ export class SessionHub {
 	/**
 	 * The stateless session service every open, rename, fork, and delete below goes through.
 	 *
-	 * One instance rather than one per call, because the service's fill-at-open cache is what keeps
-	 * every write to a session on one bag: a rename recorded here and a turn appended by the
-	 * session's own loop land on the same `Session`. See `SessionManager.stateOf`.
+	 * It holds no bag of its own: a hosted session writes through the bag its orchestrator's table
+	 * holds (`agent.agentState(id).session`), a cold one is `open(id)` — a replay the call owns and
+	 * drops, safe because one cold write is one synchronous block for a session nothing holds.
 	 */
 	private readonly sessions = new SessionManager();
 	/**
@@ -352,9 +352,9 @@ export class SessionHub {
 
 		const absPath = SessionManager.findSessionFilePathById(id);
 		if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
-		// A transient replay rather than `stateOf`: a read must leave no trace, and pinning the whole
-		// transcript of a session nobody is running is a trace. `open` goes through the cache instead,
-		// because the state it builds is about to be written to.
+		// `open` is the no-trace road: a read must leave no trace, and holding the whole transcript
+		// of a session nobody is running would be one. (The open below the claim path is the other
+		// kind: the bag it builds is about to be written to.)
 		const state = fillSession(absPath);
 		return readSessionSnapshot(this.sessionOptions(state, state.sessionSetting.workDirAbsPath));
 	}
@@ -389,7 +389,9 @@ export class SessionHub {
 	timestampOf(id: string, entryId: string): number | undefined {
 		const host = this.hosts.get(id);
 		if (host === undefined) return undefined;
-		const entry = this.sessions.stateOf(id).sessionEntryMapById.get(entryId);
+		// The hosted bag, never a replay: this runs per frame, and a replay would parse the whole
+		// transcript for one timestamp — besides lagging the turn the file has not caught up with.
+		const entry = this.agent.agentState(id).session.sessionEntryMapById.get(entryId);
 		return entry?.type === "message" ? entry.message.timestamp : undefined;
 	}
 
@@ -540,17 +542,19 @@ export class SessionHub {
 	 */
 	async fork(sessionId: string, entryId: string | null): Promise<string> {
 		const hosted = this.hosts.get(sessionId);
-		// A hosted session's file is named by its own bag — the same object the service's cache answers
-		// with, since the open that hosted it handed this service the bag.
+		// A hosted session's file is named by its own bag — the one its turns write through. A cold
+		// one is located by scan. Either way the fork reads the *file*, not a bag: the fork's two
+		// sides are one read of a source path and one pair of writes, and the file is the authority
+		// every entry has already landed on.
 		const absSourcePath =
 			hosted === undefined
 				? SessionManager.findSessionFilePathById(sessionId)
-				: this.sessions.stateOf(sessionId).sessionFileAbsPath;
+				: this.agent.agentState(sessionId).session.sessionFileAbsPath;
 		if (absSourcePath === undefined) throw new Error(`Unknown session: ${sessionId}`);
-		// The branch is written where its source lives: forking a conversation held in another
-		// directory must not quietly move it into this one.
-		const absTargetWorkDir = hosted?.workDirAbsPath ?? fillSession(absSourcePath).sessionSetting.workDirAbsPath;
-		const id = this.sessions.forkFrom(absSourcePath, absTargetWorkDir, entryId).sessionId;
+		// The branch is written where its source lives — the source header says where that is, so
+		// forking a conversation held in another directory does not quietly move it into this one,
+		// and nothing here replays the file to learn it.
+		const id = this.sessions.forkFrom(absSourcePath, entryId).sessionId;
 		this.current = Promise.resolve(id);
 		this.announceHost(id, undefined);
 		return id;
@@ -559,22 +563,21 @@ export class SessionHub {
 	/**
 	 * Give a session a name of its own, stored as the title on its `.json` snapshot.
 	 *
-	 * The write goes through the service's `stateOf` — which is deliberately not a fresh replay:
-	 * the bag it hands back is the one this process's turns are written through, and the one the next
-	 * open will serve. It takes no claim: a title is a fact about the session rather than about one
-	 * way through it, the loop never reads titles, and a rewrite of the snapshot mid-run lands
-	 * without disturbing the turn.
+	 * A held session writes through its own bag — the snapshot is written whole, so a fresh replay
+	 * would revert whatever its turns just recorded onto the file. A cold one fills a throwaway, and
+	 * a cold write is one synchronous block (`open`, then the setter that persists), which is the
+	 * whole of its safety — it takes no claim either way: a title is a fact about the session rather
+	 * than about one way through it, the loop never reads titles, and a rewrite of the snapshot
+	 * mid-run lands without disturbing the turn. An id that names nothing refuses inside `open`,
+	 * which is the 404 it always was.
 	 *
 	 * The title arrives already shortened; what reaches the file is what a row shows.
 	 */
 	async rename(sessionId: string, title: string): Promise<void> {
-		// A running session is proof enough that the file is there; one this process is not running has
-		// to be found first, so an id that names nothing stays the 404 it always was.
-		const isHosted = this.hosts.has(sessionId);
-		if (!isHosted && SessionManager.findSessionFilePathById(sessionId) === undefined) {
-			throw new Error(`Unknown session: ${sessionId}`);
-		}
-		this.sessions.setTitle(this.sessions.stateOf(sessionId), title);
+		const bag = this.agent.has(sessionId)
+			? this.agent.agentState(sessionId).session
+			: this.sessions.open(sessionId);
+		this.sessions.setTitle(bag, title);
 	}
 
 	/**
@@ -681,9 +684,11 @@ export class SessionHub {
 	 */
 	private async open(id: string): Promise<HostedSession> {
 		// The pending bag before the store: a session created a moment ago has no file to find yet,
-		// and this is the road its own id takes from the creation to the first message.
+		// and this is the road its own id takes from the creation to the first message. A disk-backed
+		// one replays its file into a bag this call owns — nothing is registered by the replay; the
+		// assembly below is what the table will hold.
 		const pending = this.pendingManager(id);
-		const state = pending ?? this.sessions.stateOf(id);
+		const state = pending ?? this.sessions.open(id);
 		const workDirAbsPath = state.sessionSetting.workDirAbsPath;
 		// Assemble, then adopt: the state enters the orchestrator's table through its one door, and a
 		// first-touch reopen keeps the state already there — the queues, the subscribers, the run in
