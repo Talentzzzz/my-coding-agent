@@ -131,15 +131,15 @@ class InMemorySettingsStorage implements SettingsStorage {
  * nothing else.
  *
  * Every settings operation is a file-level function taking a `SettingsState` as its first parameter —
- * no class holds this state between calls (the `SettingsManager` class at the bottom of this file is
- * a stateless service whose methods take the state explicitly, plus the one per-directory cache).
- * The state is plain data on purpose: which function touches which field is visible
- * in the signatures, and a test can construct a bare state and call any operation on it directly.
+ * no class holds this state between calls, and no cache sits behind {@link fillSettings}: the state is
+ * plain data on purpose, so which function touches which field is visible in the signatures, and a test
+ * can construct a bare state and call any operation on it directly.
  *
- * The state is shared per working directory, not per request: the host holds one {@link SettingsState} per
- * directory and hands the same state to every session over that directory, so a toggle in one
- * session is the same value the next session reads rather than a copy taken when it was assembled.
- * The session never reads a settings file; it goes through these operations.
+ * The state is a snapshot, not a directory's resident view: each open fills its own bag by calling
+ * {@link fillSettings}, and two sessions over one directory hold two bags. A write through one bag
+ * lands on that bag and on disk — the files are the shared truth — while the other sessions keep the
+ * snapshot they opened on and see the change the next time they fill. The session never reads a
+ * settings file; it goes through these operations.
  *
  * The merged view is kept as {@link Settings} — every field filled with its default — while each layer
  * is kept as the file wrote it, unknown keys included. That split is what makes a write safe: only the
@@ -304,6 +304,11 @@ export function getBashSettings(s: SettingsState): BashSettings {
  *
  * Only the named fields move, and nested ones merge, so a patch that changes one tool's approval
  * leaves the other tools' entries in the file alone.
+ *
+ * The change reaches the bag it was made through and the files behind it, and nothing else: settings
+ * are the snapshot a session read when it was opened, so one write acts on the current session only —
+ * the other sessions over the directory keep their own bags and see the change the next time they
+ * are opened. The disk is what they re-read into a fresh bag, and the disk has the write.
  */
 export function applySettings(s: SettingsState, patch: SettingsPatch, scope?: SettingsScope): void {
 	const fields = Object.entries(patch)
@@ -383,52 +388,4 @@ function mergeLayers(base: SettingsLayer, overrides: SettingsLayer): SettingsLay
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/**
- * The settings service: the directory-keyed cache, and nothing else (ADR-0007 §2–3).
- *
- * The reads are the stateless operations at the top of this file — `getApprovals`, `getBashSettings`,
- * and their siblings — which take a directory's {@link SettingsState} and answer from it alone, so a
- * caller that already holds the bag names the operation it wants rather than a second door onto it.
- * What the class owns is the one thing a bag cannot own: {@link stateOf}, the cache that keeps every
- * reader and writer of one directory on the same state object, the way the hub's per-directory table
- * used to before the cache moved in here.
- */
-export class SettingsManager {
-	/**
-	 * Open directory states by agent home and working directory — fill-at-open, rebuildable from disk
-	 * at any time (ADR-0007 §3).
-	 *
-	 * A directory is filled the first time {@link stateOf} touches it and the same reference is reused
-	 * after: every write lands on the one bag the next reader answers from, so a toggle written by one
-	 * session is the value the next session reads rather than a copy taken when it was assembled. The
-	 * key is the pair, not the path alone, because the two files a directory's settings come from are
-	 * looked up under one agent home — a process serving two homes must not answer one directory's
-	 * root with the other home's merge.
-	 *
-	 * The cache is never authoritative, which is why its rules are about writes and not about loss:
-	 *
-	 * - Nothing drops on write-back. {@link applySettings} mutates the cached bag in place — it
-	 *   re-reads each file it touches before writing, so a hand edit to that file folds in rather than
-	 *   being reverted, and the re-merged view is the cached one. The bag equals the files after every
-	 *   write.
-	 * - Nothing drops on directory close, because this process never closes one: a directory put aside
-	 *   is a stored `hiddenDirectories` fact, not a teardown. A host that gains one drops the entry
-	 *   there, the way the session service's `remove` does for a deleted session.
-	 * - A hand edit to a field this process never writes stays invisible until restart. That is the
-	 *   visibility the files had when this cache lived in the hub, and the price of one merged view
-	 *   shared by every reader over the directory.
-	 */
-	private readonly states = new Map<string, SettingsState>();
-
-	/** The state of one working directory, filled from its files the first time it is touched. */
-	stateOf(workDirAbsPath: string, agentDir: string = AGENT_HOME): SettingsState {
-		const key = `${agentDir}\u0000${workDirAbsPath}`;
-		const existing = this.states.get(key);
-		if (existing) return existing;
-		const created = fillSettings(workDirAbsPath, agentDir);
-		this.states.set(key, created);
-		return created;
-	}
 }

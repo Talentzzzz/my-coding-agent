@@ -11,7 +11,7 @@ export const APP_NAME = "my-agent";
 /**
  * The directory a session uses for its own settings, beside the agent home's name.
  *
- * A repository can commit `<workDirAbsPath>/.my-agent/settings.json`; `SettingsManager` merges it over the
+ * A repository can commit `<workDirAbsPath>/.my-agent/settings.json`; `fillSettings` merges it over the
  * agent home's file, so a checkout can carry its own approvals and limits without touching the
  * machine-wide ones. Nothing writes this directory until something is set at project scope.
  */
@@ -242,7 +242,7 @@ export function settingsPath(agentDir: string = AGENT_HOME): string {
 	return join(agentDir, "settings.json");
 }
 
-/** The settings file a working directory can commit. Only `SettingsManager` decides whether to write it. */
+/** The settings file a working directory can commit. Only the settings operations decide whether to write it. */
 export function projectSettingsPath(workDirAbsPath: string): string {
 	return join(resolve(workDirAbsPath), PROJECT_DIR_NAME, "settings.json");
 }
@@ -250,8 +250,9 @@ export function projectSettingsPath(workDirAbsPath: string): string {
 /**
  * Merge a partial settings object over the defaults. Unknown keys are ignored.
  *
- * Only the values are normalized here; reading and writing the files is `SettingsManager`'s job, which
- * is what lets the same normalization serve one layer, both layers at once, and a change made in memory.
+ * Only the values are normalized here; reading and writing the files is the settings operations' job
+ * (`fillSettings` reads a directory's two layers, `applySettings` writes a change back), which is
+ * what lets the same normalization serve one layer, both layers at once, and a change made in memory.
  */
 export function mergeSettings(input: unknown): Settings {
 	const record = isRecord(input) ? input : {};

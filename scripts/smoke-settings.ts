@@ -17,7 +17,6 @@ import {
 	getSettings,
 	settingsPath,
 	settingsStateFromStorage,
-	SettingsManager,
 } from "@my-agent/core";
 
 let failures = 0;
@@ -199,16 +198,16 @@ process.stdout.write("\nsettings：种过默认模型的标记活过一次重启
 	}
 }
 
-// --------------------------------- 5. the stateless form and the service's cache
+// --------------------------------- 5. the stateless form: fill, write, re-fill
 
-process.stdout.write("\nsettings：无状态面用裸 SettingsState 走同一套读写,服务缓存共享同一引用\n");
+process.stdout.write("\nsettings：无状态面用裸 SettingsState 走同一套读写,每次 fill 一份新袋\n");
 
 {
 	const home = mkdtempSync(join(tmpdir(), "my-agent-settings-"));
 	try {
 		const workDirAbsPath = join(home, "workdir");
 		// fillSettings takes the working directory as its seed and reads both json files into the bag —
-		// the same two files the service's `stateOf` reads, reached without the cache.
+		// a fresh snapshot of the two files as of this call, nothing cached behind it.
 		const s = fillSettings(workDirAbsPath, home);
 		check("种子路径读出空默认", getSettings(s).modes === undefined, JSON.stringify(getSettings(s)));
 
@@ -222,25 +221,25 @@ process.stdout.write("\nsettings：无状态面用裸 SettingsState 走同一套
 		const replayed = fillSettings(workDirAbsPath, home);
 		check("重灌的种子读回同一份", JSON.stringify(getSettings(replayed)) === JSON.stringify(getSettings(s)));
 
-		// The service's cache is the sharing point: the first touch fills, and every touch after
-		// answers the same object, so a write through the bare state is the value the service reads.
-		const service = new SettingsManager();
-		const cached = service.stateOf(workDirAbsPath, home);
-		check("同一次触碰拿到同一引用", service.stateOf(workDirAbsPath, home) === cached, "");
-		applySettings(cached, { model: "a/b" });
-		check("写穿缓存,服务的袋跟上了", getModel(cached) === "a/b", String(getModel(cached)));
-		// The cache is keyed by the agent home as well as the root: another home over the same root
-		// is another directory's files, and must not answer this one's merge.
-		const other = new SettingsManager();
+		// No cache shares the bags: two fills over one directory are two states. A write lands on the
+		// bag it was made through and on disk; the other bag keeps the snapshot it opened on until the
+		// next fill — settings are the snapshot read at open time, one write acts on the current
+		// session only, and the other sessions see the change the next time they are opened.
+		applySettings(replayed, { model: "a/b" });
+		check("另一只袋保持自己打开时的快照", getModel(s) === undefined, String(getModel(s)));
+		const reread = fillSettings(workDirAbsPath, home);
+		check("重灌读回写盘的模型", getModel(reread) === "a/b", String(getModel(reread)));
+
+		// The agent home is a fill argument, not a cache key: the same root filled under another home
+		// reads that home's global file, so it never answers this home's merge. (The model above went
+		// to this home's file — no layer had named the field yet.)
 		const otherHome = mkdtempSync(join(tmpdir(), "my-agent-settings-other-"));
 		try {
-			check("另一个家是另一只袋", other.stateOf(workDirAbsPath, otherHome) !== cached, "");
+			const other = fillSettings(workDirAbsPath, otherHome);
+			check("另一个家读不到这只家的合并", getModel(other) === undefined, String(getModel(other)));
 		} finally {
 			rmSync(otherHome, { recursive: true, force: true });
 		}
-
-		// A fresh fill over the same files reads the write back — the disk is what a restart reads.
-		check("重灌读回写盘的模型", getModel(fillSettings(workDirAbsPath, home)) === "a/b", String(getModel(fillSettings(workDirAbsPath, home))));
 
 		// The storage seam is still injectable: a host keeping settings somewhere else builds the
 		// state from its own backend rather than from the two real files.

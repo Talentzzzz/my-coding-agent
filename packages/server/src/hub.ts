@@ -16,7 +16,7 @@ import {
 	createSession,
 	fillSession,
 	type Session,
-	SettingsManager,
+	fillSettings,
 	type SettingsState,
 	getHiddenDirectories,
 	sessionDir,
@@ -192,15 +192,6 @@ export class SessionHub {
 	private readonly modelStore: ModelConfigStore;
 	/** How long a parked approval is waited out before it is denied. See {@link HubOptions.approvalGraceMs}. */
 	private readonly approvalGraceMs: number;
-	/**
-	 * The stateless settings service every directory's settings read and write goes through.
-	 *
-	 * One instance rather than one per call, because the service's per-directory cache is what keeps
-	 * every reader and writer of a directory on one `SettingsState`: a toggle written by a session is
-	 * the value the next session reads, and the value the panel command below writes, rather than
-	 * copies taken when each was assembled. See `SettingsManager.stateOf`.
-	 */
-	private readonly settings = new SettingsManager();
 	private readonly hosts = new Map<string, HostedSession>();
 	/**
 	 * The stateless session service every open, rename, fork, and delete below goes through.
@@ -246,8 +237,8 @@ export class SessionHub {
 	 * gates on `hasConversation`). Between the id being handed out and that first message there is no
 	 * file, so {@link has}, {@link snapshotOf}, and {@link open} read this map before the store —
 	 * otherwise a window that creates a session and immediately opens it would be told the id it was
-	 * just given names nothing. The map holds the bag itself, because a session with no file is the
-	 * one state the service's fill-at-open cache cannot rebuild from disk (ADR-0007 §4).
+	 * just given names nothing. The map holds the bag itself, because a session with no file is a
+	 * state nothing on disk can rebuild (ADR-0007 §4).
 	 *
 	 * An entry leaves on the first lookup that finds the file on disk, so the map holds only the
 	 * window it was made for. It is process state, so a session nobody ever spoke in dies with the
@@ -285,9 +276,17 @@ export class SessionHub {
 		this.modelStore.replace(models);
 	}
 
-	/** The settings of one directory, filled once by the service and shared by every session over it. */
+	/**
+	 * The settings of one directory, filled fresh from its files on every call.
+	 *
+	 * The one line that exists so no caller has to know where this process keeps its global settings
+	 * file: the fill is seeded by the working directory and reads under {@link HubOptions.settingsHome}
+	 * when one was set. Nothing is cached behind it — each open fills its own bag, a snapshot of the
+	 * two files as of that open; a settings write acts on the bag it was made through and on disk, and
+	 * the other sessions over the directory see it the next time they are opened.
+	 */
 	settingsStateOf(workDirAbsPath: string): SettingsState {
-		return this.settings.stateOf(workDirAbsPath, this.options.settingsHome);
+		return fillSettings(workDirAbsPath, this.options.settingsHome);
 	}
 
 	/**
@@ -295,8 +294,9 @@ export class SessionHub {
 	 *
 	 * One home for one rule, because there are two roads by which a window learns the machine's
 	 * directories — the REST listing and the channel's overview — and two filters would be two answers
-	 * the first time either side changed. The list itself is a settings fact, read through the manager
-	 * that the command writing it goes through, so a hide is visible to both roads on the next look.
+	 * the first time either side changed. The list itself is a settings fact, read through the same
+	 * fresh fill the command writing it goes through, so a hide is visible to both roads on the next
+	 * look.
 	 *
 	 * A hub with no root answers "everything is listed". That is not a production state — `HubOptions`
 	 * requires `workDirAbsPath` and `bootServer` always passes it — but `scripts/smoke-approval.ts` builds one
@@ -738,7 +738,6 @@ export class SessionHub {
 			sessionManager: this.sessions,
 			session: state,
 			models: this.models,
-			settingsManager: this.settings,
 			settingsState: this.settingsStateOf(workDirAbsPath),
 			...(this.options.model === undefined ? {} : { model: this.options.model }),
 			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),

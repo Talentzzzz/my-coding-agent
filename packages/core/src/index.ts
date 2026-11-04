@@ -192,7 +192,6 @@ export {
 	getTools,
 	inMemorySettingsState,
 	isApprovalRequired,
-	SettingsManager,
 	settingsStateFromStorage,
 	type SettingsPatch,
 	type SettingsScope,

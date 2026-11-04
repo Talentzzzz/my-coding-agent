@@ -21,8 +21,8 @@ import {
 	toolStateOf,
 } from "./session/tool-config.ts";
 import {
-	SettingsManager,
 	type SettingsState,
+	fillSettings,
 	getApprovals,
 	getSettings,
 	inMemorySettingsState,
@@ -67,21 +67,12 @@ export interface OpenAgentOptions {
 	 */
 	api?: ChatTransport;
 	/**
-	 * The settings service this session reads and writes through.
-	 *
-	 * Defaults to a fresh service. A host that owns one — the hub, whose per-directory cache must be
-	 * the same object every session over that directory reads — hands its own in. A service built
-	 * around a non-default agent home must arrive with {@link settingsState} beside it: the fallback
-	 * below fills from the default home, and has no way to know this one's.
-	 */
-	settingsManager?: SettingsManager;
-	/**
 	 * The settings of this working directory, as the bag every call passes.
 	 *
-	 * Defaults to the service's own answer for the directory — the agent home's file merged with the
-	 * project's own, filled once and shared. A host that runs several sessions over one directory
-	 * passes the same state to each, so a change made through any of them is what the others read; a
-	 * test passes {@link inMemorySettingsState} instead.
+	 * Defaults to a fresh {@link fillSettings} over the default agent home — the home's file merged
+	 * with the project's own, nothing cached: the bag is the snapshot this assembly read, and each
+	 * open of a session fills its own. A host that fills under a non-default agent home — the hub —
+	 * passes its own bag in, because the fallback has no way to know that home.
 	 */
 	settingsState?: SettingsState;
 	/** Defaults to the six built-ins. A test passes a registry of its own to add a tool. */
@@ -125,11 +116,10 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 	// run context, the prompt, a snapshot — is the same value.
 	const workDirAbsPath = resolvePath(options.workDirAbsPath);
 	// The project settings file lives under the working directory, so it is found from the same path:
-	// `<workDirAbsPath>/.my-agent/settings.json`, over the agent home's own file. The state comes from the
-	// service's per-directory cache, so a host that handed its own service in — the hub — answers
-	// every session over the directory with the same bag.
-	const settingsManager = options.settingsManager ?? new SettingsManager();
-	const settingsState = options.settingsState ?? settingsManager.stateOf(workDirAbsPath);
+	// `<workDirAbsPath>/.my-agent/settings.json`, over the agent home's own file. Nothing is cached:
+	// the caller's own bag wins — the hub fills under its own agent home and hands it over — and the
+	// fallback is a fresh fill, this assembly's own snapshot of the two files.
+	const settingsState = options.settingsState ?? fillSettings(workDirAbsPath);
 	// One service per assembly, so the session and anything it builds forward through the same
 	// instance; omitted means a fresh one, which behaves identically (ADR-0007 §2).
 	const sessionManager = options.sessionManager ?? new SessionManager();
