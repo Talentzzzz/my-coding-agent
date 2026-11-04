@@ -457,15 +457,22 @@ export type ServerFrame =
 	| ({ streamId: null } & ConnectionFrame);
 
 /**
- * What a client may send. Two actions, no envelope — the frame is the protocol.
+ * What a client may send. Four actions, no envelope — the frame is the protocol.
  *
- * Commands stay on REST. A frame that arrives with an unknown `type` is dropped and logged rather
- * than closing the connection: the only two actions here cannot be abused into anything, and turning
- * a stray frame into a dead page costs more than a log line.
+ * Commands stay on REST. `open` / `cancel` are the subscription's two words; `wait` / `unwait` carry
+ * the one fact a subscription deliberately does not carry (ADR-0001: watching keeps nothing alive) —
+ * that this connection is still waiting for a run's result on the session, the send reference's
+ * server-side signal (issue 13). It takes no claim: it does not keep a session running, it only
+ * asks the eviction judgment to wait until the waiter has been answered. A frame that arrives with
+ * an unknown `type` is dropped and logged rather than closing the connection: none of the four
+ * actions can be abused into anything, and turning a stray frame into a dead page costs more than a
+ * log line.
  */
 export type ClientFrame =
 	| { type: "open"; sessionId: string; window?: unknown }
-	| { type: "cancel"; sessionId: string };
+	| { type: "cancel"; sessionId: string }
+	| { type: "wait"; sessionId: string }
+	| { type: "unwait"; sessionId: string };
 
 export const EMPTY_USAGE: UsageTotals = {
 	input: 0,

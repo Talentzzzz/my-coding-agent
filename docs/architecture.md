@@ -335,7 +335,7 @@ SessionManager.forkFrom(sourcePathInput, targetCwdInput, entryId, sessionDirInpu
 
 ## API
 
-命令面全是 JSON 请求与响应；**会话事件不是其中任何一个**——它们是一条常驻 WebSocket 上的帧。`createRoutes()` 就是整张 REST 表，而 `Router` 是唯一读 URL 的东西。mux 的上行帧（`open` / `cancel`）**不走 URL**，所以这张表与它们互不覆盖：表里每一条都是任何人能用 `curl` 发的请求，而帧是窗口说它要订阅什么的方式。
+命令面全是 JSON 请求与响应；**会话事件不是其中任何一个**——它们是一条常驻 WebSocket 上的帧。`createRoutes()` 就是整张 REST 表，而 `Router` 是唯一读 URL 的东西。mux 的上行帧（`open` / `cancel` / `wait` / `unwait`）**不走 URL**，所以这张表与它们互不覆盖：表里每一条都是任何人能用 `curl` 发的请求，而帧是窗口说它要订阅什么、还在等什么的方式。
 
 | 方法 | 路径 | 请求体 | 回答 |
 |---|---|---|---|
@@ -407,15 +407,17 @@ type ConnectionItem =
 
 `heartbeat` 是**应用层**的判活：浏览器一侧根本看不到协议层的 Pong，所以它必须有一个有人读的信号，那正是它能喂给读超时 watchdog 的东西。协议层的 Ping/Pong 另有一份职责，它判的是**客户端**死没死（2 秒一次、容忍两次未回应，第三次 `terminate()`）——两个计时器回答两个不同的问题，刻意不让一个成为另一个的函数。
 
-上行帧 `ClientFrame` 只有两个成员，且**没有信封**——帧本身就是协议：
+上行帧 `ClientFrame` 有四个成员，且**没有信封**——帧本身就是协议：
 
 ```ts
 type ClientFrame =
   | { type: "open"; sessionId: string; window?: unknown }
-  | { type: "cancel"; sessionId: string };
+  | { type: "cancel"; sessionId: string }
+  | { type: "wait"; sessionId: string }
+  | { type: "unwait"; sessionId: string };
 ```
 
-`open` 订阅一条会话，**重复也照发**（见上：答案是再一份基线）——`cancel` 取消订阅（关一条逻辑流，同 DSH 的 `cancel`；**中止运行只叫 `abort`、只在 REST 上**，两个词不混用）。两条都是**连接上的状态**，不是会话上的：同一会话在一条连接上至多一条逻辑流，所以会话 id 就是全部地址，没有单独的订阅句柄要同步。抵达一条未知 `type` 的上行帧会被丢弃并记一行日志，而不是关掉连接。
+`open` 订阅一条会话，**重复也照发**（见上：答案是再一份基线）——`cancel` 取消订阅（关一条逻辑流，同 DSH 的 `cancel`；**中止运行只叫 `abort`、只在 REST 上**，两个词不混用）。`wait` / `unwait` 是第三种话：这条连接还在等某个会话一轮运行的结果（send 引用的服务端信号，13 号票）——它**不拿 claim**、也不让会话保持运行，只让驱逐判据在结果被等到之前不动那张表。四条都是**连接上的状态**，不是会话上的：同一会话在一条连接上至多一条逻辑流，所以会话 id 就是全部地址，没有单独的订阅句柄要同步。抵达一条未知 `type` 的上行帧会被丢弃并记一行日志，而不是关掉连接。
 
 一个会话 id 可以被多于一条连接订阅，并被任意多个请求读取。hub 为它运行**一个** agent 循环，并把它的事件转发给每一条订阅它的逻辑流，所以 `event` 和 `status` 是**按订阅者**的，尽管它们背后的 transcript 是共享的。这条流是单向的：命令从不是它上面的一帧。扩展任一侧的规则：如果浏览器需要知道某件事，它进一条消息或一个端点；如果只有服务器端需要，它就留在 core。`snapshot.allTools` 是 header 据以给每个工具画一个开关的东西，`snapshot.activeTools` 是那些开关显示为开的东西，而 `PUT /api/sessions/{id}/tools` 带 `{ names }` 替换活跃集合。
 

@@ -192,6 +192,11 @@ function uplink(socket: FakeSocket): { type: string; sessionId: string }[] {
 	return socket.sent.map((text) => JSON.parse(text) as { type: string; sessionId: string });
 }
 
+/** The `open` frames alone — the wait/unwait pair rides the same uplink since issue 13. */
+function opens(socket: FakeSocket): { type: string; sessionId: string }[] {
+	return uplink(socket).filter((f) => f.type === "open");
+}
+
 // ---------------------------------------------------------------- 1. liveness
 
 process.stdout.write("\nmux client: 就绪与判活\n");
@@ -268,8 +273,13 @@ process.stdout.write("\nmux client: 重连后按引用重放\n");
 	// second one still *asks*. `open` is an idempotent primitive now, so re-asking is how a pane
 	// coming back to a session a send is still holding gets a fresh baseline instead of silence.
 	client.retain("s2", "send");
-	check("每次 retain 都发 open，重复订阅也发", uplink(sockets.all[0]!).length === 3, JSON.stringify(uplink(sockets.all[0]!)));
-	check("同一会话的第二个理由再发一次 open", uplink(sockets.all[0]!).filter((f) => f.sessionId === "s2").length === 2, JSON.stringify(uplink(sockets.all[0]!)));
+	check("每次 retain 都发 open，重复订阅也发", opens(sockets.all[0]!).length === 3, JSON.stringify(uplink(sockets.all[0]!)));
+	check("同一会话的第二个理由再发一次 open", opens(sockets.all[0]!).filter((f) => f.sessionId === "s2").length === 2, JSON.stringify(uplink(sockets.all[0]!)));
+	// The send reference carries its own frame (issue 13): one `wait` for the run's result, reported
+	// when the source was first taken — a pane's retain says nothing about results, and a repeated
+	// retain of the same source does not report again.
+	const waits = uplink(sockets.all[0]!).filter((f) => f.type === "wait");
+	check("send 的引用恰好报告了一次 wait", waits.length === 1 && waits[0]?.sessionId === "s2", JSON.stringify(uplink(sockets.all[0]!)));
 
 	// The drop. Everything the window still wants has to come back, and it comes back by reference —
 	// not because anything here remembered which sessions were open.
@@ -279,8 +289,11 @@ process.stdout.write("\nmux client: 重连后按引用重放\n");
 	sockets.latest()?.deliver(heartbeat());
 
 	const replayed = uplink(sockets.all[1]!);
-	check("重连后逐条重放 open", replayed.length === 2, JSON.stringify(replayed));
-	check("重放的是窗口仍持有的会话", new Set(replayed.map((f) => f.sessionId)).size === 2, JSON.stringify(replayed));
+	check("重连后逐条重放 open", opens(sockets.all[1]!).length === 2, JSON.stringify(replayed));
+	check("重放的是窗口仍持有的会话", new Set(opens(sockets.all[1]!).map((f) => f.sessionId)).size === 2, JSON.stringify(replayed));
+	// The wait rides the same replay: the connection that held it is dead, and a send reference that
+	// survived the drop is still waiting for its run's result on the new one (issue 13).
+	check("仍持有的 send 引用重放了 wait", replayed.filter((f) => f.type === "wait").length === 1, JSON.stringify(replayed));
 	client.close();
 }
 
@@ -330,6 +343,9 @@ process.stdout.write("\nmux client: 引用归零\n");
 	check("还有理由时不发 cancel", !uplink(sockets.all[0]!).some((f) => f.type === "cancel"), JSON.stringify(uplink(sockets.all[0]!)));
 
 	client.release("s", "send");
+	// The wait is the send reference's own frame, released with the reference and before the last
+	// reference's `cancel` — the two answer different questions (issue 13).
+	check("send 释放时发出 unwait", uplink(sockets.all[0]!).some((f) => f.type === "unwait" && f.sessionId === "s"), JSON.stringify(uplink(sockets.all[0]!)));
 	check("最后一个理由消失才发 cancel", uplink(sockets.all[0]!).some((f) => f.type === "cancel" && f.sessionId === "s"), JSON.stringify(uplink(sockets.all[0]!)));
 	check("之后不再持有这个会话", !client.isRetained("s"));
 	client.close();

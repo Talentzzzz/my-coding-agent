@@ -406,6 +406,14 @@ export class MuxClient {
 		} else {
 			this.subscriptions.set(sessionId, { sources: new Set([source]), status: "subscribed" });
 		}
+		// The send reference reports itself on every retain rather than only when the source was
+		// newly added: the report is idempotent on the server (one entry per connection and session),
+		// and "this reference is new" is a distinction the table cannot make honestly — a stream the
+		// server ended can leave a copy of the source behind for the moment between the `end` frame
+		// and its release, and a second send in that moment is a genuinely new wait, not a repeated
+		// one (issue 13). A frame this channel cannot carry right now is dropped by `write`, and the
+		// replay picks the intent back up.
+		this.reportWait(sessionId, source, "wait");
 
 		// Not sent here when the channel is not live: there is nowhere to send it, and the live
 		// transition replays every entry anyway — recording the intent was the whole job just now.
@@ -424,12 +432,24 @@ export class MuxClient {
 	 *
 	 * The last one out sends `cancel` and drops the entry, which is also what releases the window's
 	 * copy of that session — there is no second place to clean up, so "nobody is watching it" and
-	 * "we hold nothing for it" are the same event by construction.
+	 * "we hold nothing for it" are the same event by construction. A send's release carries its own
+	 * `unwait` before that, whether or not it is the last one out: the wait lives exactly as long as
+	 * the send reference, not as long as the entry (issue 13).
 	 */
 	release(sessionId: string, source: SubscriptionSource): void {
 		const subscription = this.subscriptions.get(sessionId);
 		if (subscription === undefined) return;
-		subscription.sources.delete(source);
+		// The boolean return is the guard the old code lacked: a source that was never held must not
+		// be released, or the last-reference logic below would fire on a set this call did not
+		// actually change.
+		if (!subscription.sources.delete(source)) return;
+		// The wait is the send reference's own frame, reported on both ends of its life and
+		// independent of the stream's: an entry left behind by a still-pointing pane (or by an
+		// `ended` mark) still owes the server its `unwait`, because what the wait protects is the
+		// run's result, not the stream (issue 13). A frame this channel cannot carry right now is
+		// dropped by `write` — and the drop is safe in both directions, since a wait the server
+		// never heard of dies with the connection that never reported it.
+		this.reportWait(sessionId, source, "unwait");
 		if (subscription.sources.size > 0) return;
 
 		this.subscriptions.delete(sessionId);
@@ -821,6 +841,12 @@ export class MuxClient {
 			if (subscription.status === "ended" || subscription.sources.size === 0) continue;
 			subscription.status = "subscribed";
 			this.writeOpen(sessionId);
+			// The wait rides the same replay: the connection that held it is dead, and a send
+			// reference that survived the drop is still waiting for its run's result on the new one
+			// (issue 13). The `ended` skip above needs no wait caveat of its own — the end handler
+			// released the send reference in the same beat it marked the stream over, so an `ended`
+			// entry has no `send` source left for this check to find.
+			if (subscription.sources.has("send")) this.write({ type: "wait", sessionId });
 		}
 	}
 
@@ -830,15 +856,28 @@ export class MuxClient {
 	}
 
 	/**
+	 * Report the send reference's server-side signal, at the start of its life or at its end.
+	 *
+	 * One frame either way, and only for the `send` source: a pane's want is open-ended watching and
+	 * says nothing about results, while a send's is bounded by the run it started — which is exactly
+	 * the fact the server cannot derive from the frames alone (issue 13).
+	 */
+	private reportWait(sessionId: string, source: SubscriptionSource, frame: "wait" | "unwait"): void {
+		if (source !== "send") return;
+		this.write({ type: frame, sessionId });
+	}
+
+	/**
 	 * Send one uplink frame, or drop it because there is no channel.
 	 *
-	 * Dropping rather than queueing is deliberate. The only two frames are `open` and `cancel`, and
-	 * both are statements about *intent* that the subscription table already holds — a dropped
-	 * `open` is re-sent by the next `live`, and a dropped `cancel` refers to a session this
-	 * connection has already forgotten. A queue would be a second copy of the table, and the one
-	 * thing that must never be wrong about a reconnect is what it thinks it is watching.
+	 * Dropping rather than queueing is deliberate. All four frames are statements about *intent*
+	 * that the subscription table already holds — a dropped `open` or `wait` is re-sent by the next
+	 * `live` from the entry that wanted it, and a dropped `cancel` or `unwait` refers to a session
+	 * this connection has already stopped holding (or never held, so the server heard no `wait` to
+	 * undo). A queue would be a second copy of the table, and the one thing that must never be
+	 * wrong about a reconnect is what it thinks it is watching.
 	 */
-	private write(frame: { type: "open" | "cancel"; sessionId: string }): void {
+	private write(frame: { type: "open" | "cancel" | "wait" | "unwait"; sessionId: string }): void {
 		const socket = this.socket;
 		if (socket === undefined || this.channelState !== "live") return;
 		try {

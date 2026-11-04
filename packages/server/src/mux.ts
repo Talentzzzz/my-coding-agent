@@ -183,6 +183,18 @@ export class MuxConnection {
 	/** What this connection is watching, by session id. One stream per session, never two. */
 	private readonly subscriptions = new Map<string, Subscription>();
 	/**
+	 * The run results this connection is still waiting for, by session id — the hub stopper each
+	 * `wait` frame bought, kept so the matching `unwait` (or this connection's death) can call it.
+	 *
+	 * Deliberately outside the subscription table. A wait is not a watch: it can be reported before
+	 * the `open` beside it has been processed, it survives an `end` (the client releases it when it
+	 * has *read* the run's last word, not when the stream is torn), and it does not participate in
+	 * the baseline/backlog machinery at all. One per session — the client holds at most one send
+	 * reference per session — and idempotent, because a reconnect's replay re-reports the waits it
+	 * still holds (issue 13).
+	 */
+	private readonly waits = new Map<string, () => void>();
+	/**
 	 * Frames that could not be written, oldest first.
 	 *
 	 * The queue exists because there is nowhere to push back. Events are produced by the agent loop and
@@ -267,7 +279,29 @@ export class MuxConnection {
 			return;
 		}
 		if (frame.type === "open") this.open(frame.sessionId);
-		else this.cancel(frame.sessionId);
+		else if (frame.type === "cancel") this.cancel(frame.sessionId);
+		else if (frame.type === "wait") this.startWaiting(frame.sessionId);
+		else this.stopWaiting(frame.sessionId);
+	}
+
+	/**
+	 * Record that this connection is waiting for a run's result on a session.
+	 *
+	 * The `wait` frame's whole meaning, and it is one call into the hub: the judgment that reads
+	 * this lives there ({@link SessionHub.awaitResult}), and this layer only carries the report —
+	 * the same division that has `cancel` report a watcher's departure rather than decide anything
+	 * about the session. Idempotent: a second `wait` for a session already waited on is the
+	 * reconnect's replay, and one entry covers it.
+	 */
+	private startWaiting(sessionId: string): void {
+		if (this.waits.has(sessionId)) return;
+		this.waits.set(sessionId, this.hub.awaitResult(sessionId));
+	}
+
+	/** Release one wait: the client answered the run's result, or is giving up on it. */
+	private stopWaiting(sessionId: string): void {
+		this.waits.get(sessionId)?.();
+		this.waits.delete(sessionId);
 	}
 
 	/**
@@ -665,13 +699,20 @@ export class MuxConnection {
 	 * Give up every subscription and stop.
 	 *
 	 * Subscriptions go first so their feeds are released before anything tries to close the sessions
-	 * they were watching.
+	 * they were watching; the waits follow. The order is a convenience rather than a load-bearing
+	 * fact — the eviction funnel re-checks every criterion on each edge, so either order is caught
+	 * up by the later one — but clearing the watchers before firing the waits' edge spares that
+	 * edge an attempt it would spend and retake on the next one (issue 13). A dropped connection is
+	 * a client that will never be answered, so every wait it held is given up here: the same
+	 * equivalence the subscription table already grants a `cancel`, a refresh, and a broken socket.
 	 */
 	close(): void {
 		if (this.closed) return;
 		this.closed = true;
 		for (const subscription of [...this.subscriptions.values()]) this.teardown(subscription);
 		this.subscriptions.clear();
+		for (const stop of this.waits.values()) stop();
+		this.waits.clear();
 		this.queue.length = 0;
 		this.queuedBytes = 0;
 		// The stall bookkeeping goes too, so a connection inspected after closing reports a settled state

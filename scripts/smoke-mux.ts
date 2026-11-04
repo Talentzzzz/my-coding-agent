@@ -405,7 +405,65 @@ try {
 	);
 
 	// ---------------------------------------------------------------------------------------------
-	// 9. Shutdown: the server lets go of its connections, and the rig closes.
+	// 9. The wait: a send reference's signal holds the state against eviction until it is answered
+	//    (issue 13).
+	// ---------------------------------------------------------------------------------------------
+	process.stdout.write("a wait holds the state against eviction until it is answered\n");
+
+	// The shape the send reference guards: a run whose claim was released at acceptance, a result
+	// already published to the stream, and a client that has not said it is done reading yet. The
+	// reap's tail reaches its eviction and must find the wait standing — the state stays, and the
+	// wait's release is the edge that finishes the job.
+	const waited = await request(rig.url, "POST", "/api/sessions");
+	const waitedId = (waited.payload as { sessionId: string }).sessionId;
+	// Reported twice on purpose: the reconnect's replay can re-report a wait it still holds, and one
+	// entry must cover both reports — the single `unwait` below would otherwise leave a leak behind.
+	wire.send({ type: "wait", sessionId: waitedId });
+	wire.send({ type: "wait", sessionId: waitedId });
+	rig.transport.setResponses([fakeAssistantMessage("waited run ".repeat(20))]);
+	check("the prompt was accepted", (await prompt(rig.url, waitedId, "run under a wait")) === 202);
+	check("it settled", await settleRun(rig.url, waitedId));
+	check("the host was reaped", await until(() => !rig.hub.live.includes(waitedId), 10_000), rig.hub.live.join(","));
+	// Point-in-time, read after the reap has finished: the tail's eviction attempt ran gated on the
+	// wait, and the wait was standing, so the state is still here.
+	check("but the wait kept the state in the table", rig.hub.agent.has(waitedId), String(rig.hub.agent.has(waitedId)));
+
+	wire.send({ type: "unwait", sessionId: waitedId });
+	wire.send({ type: "unwait", sessionId: waitedId });
+	check("releasing the wait evicted it", await until(() => !rig.hub.agent.has(waitedId), 5_000), String(rig.hub.agent.has(waitedId)));
+
+	// A wait reported by a connection that then dies is given up with the connection — a waiter that
+	// will never be answered must not hold a state forever. This one rides no subscription at all,
+	// which is also the wait's independence from the subscription table: it is reported before any
+	// `open` beside it and survives the stream's end.
+	const dying = await connect(`${rig.url.replace("http", "ws")}/mux`);
+	const mortal = await request(rig.url, "POST", "/api/sessions");
+	const mortalId = (mortal.payload as { sessionId: string }).sessionId;
+	dying.send({ type: "wait", sessionId: mortalId });
+	rig.transport.setResponses([fakeAssistantMessage("mortal run ".repeat(20))]);
+	check("the prompt was accepted", (await prompt(rig.url, mortalId, "run under a dying connection's wait")) === 202);
+	check("it settled", await settleRun(rig.url, mortalId));
+	check("the host was reaped under the dying connection's wait", await until(() => !rig.hub.live.includes(mortalId), 10_000), rig.hub.live.join(","));
+	check("and that wait held the state too", rig.hub.agent.has(mortalId), String(rig.hub.agent.has(mortalId)));
+	await dying.close().catch(() => {});
+	check("the connection's death released its wait", await until(() => !rig.hub.agent.has(mortalId), 5_000), String(rig.hub.agent.has(mortalId)));
+
+	// Tolerance, the same kind sections 3 and 4 granted the other frames: a wait for a session this
+	// server does not know is recorded (it costs one table row and one `unwait`), not refused — and
+	// the connection lives on. The frames are processed in arrival order, so a heartbeat that
+	// arrives after them is the deterministic mark that both were handled before the absence check.
+	wire.send({ type: "wait", sessionId: "does-not-exist-yet" });
+	wire.send({ type: "unwait", sessionId: "does-not-exist-yet" });
+	const heartbeatsBeforeTolerance = wire.connection().filter((envelope) => envelope.item?.type === "heartbeat").length;
+	check("the tolerance wait was followed by more traffic", await until(() => wire.connection().filter((envelope) => envelope.item?.type === "heartbeat").length > heartbeatsBeforeTolerance, 5_000));
+	check(
+		"waits for unknown sessions are tolerated",
+		wire.endOf("does-not-exist-yet").errors.length === 0 && !wire.endOf("does-not-exist-yet").ended,
+		JSON.stringify(wire.endOf("does-not-exist-yet")),
+	);
+
+	// ---------------------------------------------------------------------------------------------
+	// 10. Shutdown: the server lets go of its connections, and the rig closes.
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("shutdown takes the connections with it\n");
 

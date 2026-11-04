@@ -219,6 +219,21 @@ export class SessionHub {
 	 * leaves (issue 04 §3).
 	 */
 	private readonly observers = new Map<string, Set<SessionObserver>>();
+	/**
+	 * Who is still waiting for a run's result on each session, by id — the send reference's
+	 * server-side signal (issue 13), reported by the mux's `wait` / `unwait` frames.
+	 *
+	 * A subscription's twin in shape and its opposite in meaning: watching is open-ended (a pane
+	 * stays as long as the window looks), a wait is bounded (a send lives exactly as long as the run
+	 * it started, and the client releases it when the run's last word arrives). Like `observers` it
+	 * is never a count and never a reason to keep a session *running* — it takes no claim, and a
+	 * host that loses its claims reaps with waits standing. Its one reader is the eviction judgment:
+	 * the criteria refuse a session somebody is still waiting on, because eviction between the run's
+	 * end and the client's release would be exactly the silent tear the send reference exists to
+	 * prevent. The client's copy of "the run is over" is a frame behind the server's own — this
+	 * table is where the difference is paid for rather than argued away.
+	 */
+	private readonly waiting = new Map<string, Set<() => void>>();
 	/** The process-level listeners, told about every session this process gains or loses. */
 	private readonly hostListeners = new Set<HostListener>();
 	private current?: Promise<string>;
@@ -410,9 +425,9 @@ export class SessionHub {
 	 * Deliberately neither aborts nor closes here: a turn in flight keeps running and keeps
 	 * persisting, so refreshing, closing a tab, or switching sessions cannot truncate a transcript.
 	 * Once the last claim is gone the session is closed after its run settles; the orchestrator's
-	 * state follows its own criteria at the reap's tail — a parked approval or an unborn file keeps
-	 * it, an idle session loses it. The JSONL file remains, and the next connection to ask for this
-	 * id gets an equivalent session.
+	 * state follows its own criteria at the reap's tail — a parked approval, an unborn file, or a
+	 * caller still waiting for the run's result (issue 13) keeps it, an idle session loses it. The
+	 * JSONL file remains, and the next connection to ask for this id gets an equivalent session.
 	 */
 	release(host: HostedSession): void {
 		host.claims -= 1;
@@ -443,19 +458,67 @@ export class SessionHub {
 			if (watching.size === 0) {
 				this.observers.delete(sessionId);
 				// The last watcher leaving is one of eviction's edges (issue 04 §3): an obstacle just
-				// fell, so the criteria get their one try. What the try is depends on the half of the
-				// criteria that failed. With no host the table may hold a session nothing answers for
-				// any more, and `evict` is the whole judgment — the orchestrator re-checks its own
-				// three (a run in flight, a parked approval, a file not yet born) and refuses the
-				// lossy ones, so a session nobody ever spoke in stays exactly as long as it is
-				// supposed to. With a host still standing, the deletion cannot be asked for directly —
-				// the table is only ever cleared once the host is gone — so the host's own road out,
-				// the reap, is walked: it settles, closes, and ends on the same `evict`.
-				const held = this.hosts.get(sessionId);
-				if (held === undefined) this.agent.evict(sessionId);
-				else if (!held.reaping) void this.reap(held);
+				// fell, so the criteria get their one try — funnelled through `tryEvict`, which
+				// re-checks the whole set rather than only the edge that fired.
+				this.tryEvict(sessionId);
 			}
 		};
+	}
+
+	/**
+	 * Note that this caller is waiting for a run's result on a session, until it says stop.
+	 *
+	 * The send reference's server-side half (issue 13). It takes no claim — a claim says somebody is
+	 * *changing* the session, and the wait says only that the answer still has somewhere to land —
+	 * and it keeps nothing running: a host whose claims are gone reaps with waits standing, because
+	 * the result the waiter is owed was already published to the stream when the run ended. What the
+	 * wait buys is the window between that publication and the client's own release: eviction is
+	 * refused there, so a pane coming back inside the window finds the session still held rather
+	 * than silently rebuilt from disk mid-gesture.
+	 *
+	 * Keyed and shaped like {@link observe} on purpose — one entry per waiting caller, the return
+	 * value the way to stop — so the mux can hold one of these per reported `wait` frame and let
+	 * connection teardown release them the way it releases subscriptions. Idempotent per caller:
+	 * a reconnect's replay re-reports waits, and reporting twice is one entry.
+	 */
+	awaitResult(sessionId: string): () => void {
+		const waiting = this.waiting.get(sessionId) ?? new Set<() => void>();
+		if (!this.waiting.has(sessionId)) this.waiting.set(sessionId, waiting);
+		const stop = (): void => {
+			waiting.delete(stop);
+			if (waiting.size === 0) {
+				this.waiting.delete(sessionId);
+				// The last waiter being answered is one of eviction's edges (issue 04 §3, with the
+				// wait added by 13): another obstacle just fell, and the same funnel that serves the
+				// watchers' departure serves this one.
+				this.tryEvict(sessionId);
+			}
+		};
+		waiting.add(stop);
+		return stop;
+	}
+
+	/**
+	 * One eviction try: the funnel every edge goes through, and the one place the hub-side criteria
+	 * are re-checked whole.
+	 *
+	 * An edge is an obstacle falling — the last watcher leaving, the last waiter answered — and the
+	 * rule (issue 04 §3) is that the fall triggers one attempt in which *every* condition is read
+	 * again, not just the one that moved: state changes are asynchronous with the delete points, so
+	 * another obstacle may have risen in the meantime. `observers` and `waiting` are read here
+	 * because they are the hub's own halves of the judgment; the orchestrator re-checks its three
+	 * (a run in flight, a parked approval, a file not yet born) inside `evict` and refuses the lossy
+	 * ones. A host still standing means claims hold the session — the deletion cannot be asked for
+	 * directly (the table is only ever cleared once the host is gone), so the host's own road out,
+	 * the reap, is walked: it settles, closes, and ends on the same judgment, now with the waits
+	 * inside it.
+	 */
+	private tryEvict(sessionId: string): void {
+		if (this.observers.has(sessionId)) return;
+		if (this.waiting.has(sessionId)) return;
+		const held = this.hosts.get(sessionId);
+		if (held === undefined) this.agent.evict(sessionId);
+		else if (!held.reaping) void this.reap(held);
 	}
 
 	/**
@@ -778,10 +841,15 @@ export class SessionHub {
 				}
 				// The host is gone, so its live half goes with it: whatever was queued or running dies
 				// with the session, which is the same thing a process restart would have done, one host
-				// at a time. The eviction criteria are the orchestrator's own judgment — a run still
-				// parked, or a file never born, keeps the state in the table (issue 03 §7) — and this is
-				// the ordinary case where they hold.
-				this.agent.evict(host.id);
+				// at a time. This delete point reads the hub's own halves of the judgment whole rather
+				// than arguing its preconditions (issue 04 §3): claims were answered at the settle gate
+				// above, the watchers read here even though the notification above emptied them — the
+				// reading is what makes that a rule — and the wait is the hub's fourth criterion (issue
+				// 13): a caller still waiting for the run's result keeps the state in the table, and
+				// the wait's release is the edge that evicts it once the last one has been answered.
+				// The close above still happens — the run is settled, so it stops nothing, and the
+				// host's road out is the claims' to decide, not a wait's.
+				if (!this.observers.has(host.id) && !this.waiting.has(host.id)) this.agent.evict(host.id);
 			}
 		} finally {
 			host.reaping = false;
