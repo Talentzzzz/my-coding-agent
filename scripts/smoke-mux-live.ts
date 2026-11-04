@@ -78,7 +78,10 @@ const modelRows: ModelConfig[] = [
 process.stdout.write("\n真服务器 + 真 WebSocket + 生产的 MuxClient\n");
 
 const transport = createFakeTransport({ tokensPerSecond: 400 });
-const server = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: 60 }, api: transport.api, settingsHome: home });
+/** One second: fast enough to keep the smoke short, slow enough that Windows scheduling noise
+ * cannot starve the client's watchdog (its tolerance is three of these intervals). */
+const heartbeatEveryMs = 1_000;
+const server = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: heartbeatEveryMs }, api: transport.api, settingsHome: home });
 // Handed to the hub after boot, before any prompt: the one run section below needs a model to run.
 server.hub.setModelConfigs(modelRows);
 
@@ -124,7 +127,7 @@ try {
 
 	// The channel's own first frame is a heartbeat, so this is the real "connected and known good".
 	check("收到第一帧心跳即 live", await until(() => client.channel === "live"), `got ${client.channel}`);
-	check("心跳带服务端自己的间隔", items.some((i) => i.type === "heartbeat" && i.everyMs === 60), JSON.stringify(items));
+	check("心跳带服务端自己的间隔", items.some((i) => i.type === "heartbeat" && i.everyMs === heartbeatEveryMs), JSON.stringify(items));
 
 	// The row table arrives on the connection seat with no subscription at all — the whole reason the
 	// overview exists is that a row must not freeze when nobody is watching.

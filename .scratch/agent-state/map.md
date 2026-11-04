@@ -100,6 +100,14 @@ persist 动词）。**fork 不 fill 也不入表**（票面 `➡️` 只说不�
 文档不跑在代码前面，那些句子今天仍为真，代码落地（07–13）之前不改；14 同时负责翻转两处「尚未落地」。
 07 号票解除阻塞。
 
+**15 号票（2026-11-04 解决，全量验证）**：check 与 build:web 一次绿；smoke 全套 28 条（票面 22 +
+sessions + 库内另 5 条）全绿，**零真回归**。首跑两条失败均非票面二分中的任一类：smoke-mux-live 是
+自身时序配置（60ms 心跳 → watchdog 180ms 低于 Windows 调度噪声 → 重连循环），心跳提为
+`heartbeatEveryMs = 1_000` 常量；smoke-api 是环境问题（按设计需外部服务器 + 本机代理拦 localhost），
+复现命令记在票 Comments。桌面用 inspect.cjs DOM 探针验证渲染与会话切换正常（capturePage 全黑是
+GPU 伪影）；人工手测清单留在票 Comments，勾完再翻 resolved——这是本 effort 最后一项未清账。
+（[票 15](issues/15-verify-all.md)）
+
 ## Not yet specified
 
 - **迁移顺序的中间态**：`SessionManager.stateOf` 在树里的调用点是 29 处（agent 15、hub 4、`projection.ts` 1、
