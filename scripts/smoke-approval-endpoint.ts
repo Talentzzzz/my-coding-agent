@@ -55,7 +55,7 @@ fake.setResponses([
 	fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 	fakeAssistantMessage("done"),
 ]);
-const hub = new SessionHub({ workDirAbsPath: root, approvalGraceMs: 60_000, api: fake.api, modelsHome: join(root, "agent-home") });
+const hub = new SessionHub({ workDirAbsPath: root, api: fake.api, modelsHome: join(root, "agent-home") });
 hub.setModelConfigs(rows);
 
 // Mounted the way `SessionHub.open()` mounts one — the entry seeded with this smoke's own settings
@@ -106,6 +106,11 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
 	return ready();
 }
 
+// The bench holds a claim for the length of the checks below. A run that ends with nobody holding
+// the session is reaped and its idle state evicted, so the snapshot reads would race the eviction —
+// holding the claim is what keeps the state in hand while they run.
+const bench = await hub.claim(sessionId);
+
 try {
 	const accepted = await request("POST", `/api/sessions/${sessionId}/messages`, { text: "read the notes" });
 	check("the prompt was accepted", accepted.status === 202, `status ${accepted.status}`);
@@ -153,6 +158,7 @@ try {
 	check("and the settled answer was not recorded twice", remembered.length === 1, JSON.stringify(remembered));
 } finally {
 	clearTimeout(watchdog);
+	hub.release(bench);
 	await hub.close();
 	await handle.close();
 	await rm(root, { recursive: true, force: true });

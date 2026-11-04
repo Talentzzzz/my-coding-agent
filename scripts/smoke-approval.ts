@@ -13,8 +13,9 @@
 //   2. three *connections* on one session — every window hears the same answer (the ticket-13 defect:
 //      the first reader used to take the answer and every later one reported a denial);
 //   3. one id, two sessions — an answer reaches only the session it was given on (ticket 19);
-//   4. a parked approval — it outlives the last claim only up to the hub's grace, and an
-//      abandonment is a denial rather than a lost question;
+//   4. a parked approval — it outlives its host: the reap closes the host once the last claim lets
+//      go, and the question survives unanswered and undenied until someone answers it or the process
+//      ends (issue 04);
 //   5. a restart — a second process seeds no pending approval, and the transcript keeps the call.
 //
 // Two things pinned by `docs/notes.md` §一 and §二 are load-bearing here. The first section's
@@ -40,7 +41,7 @@ import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-
 import { mountSession } from "./mount-session.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
 import type { PendingApproval } from "@my-agent/core/protocol";
-import { inMemorySettingsState, type Agent, type ModelConfig, sessionDir } from "@my-agent/core";
+import { inMemorySettingsState, type Agent, type ModelConfig, type Session, sessionDir } from "@my-agent/core";
 
 let failures = 0;
 
@@ -402,43 +403,50 @@ try {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 4. A parked approval outlives the last claim, up to the hub's grace.
+// 4. A parked approval outlives the host that was showing it.
 //
 // The phase this covers: a claim answers "is anyone running or changing this", which is not the
-// question "will anyone answer". The rigs take their claims through the hub itself, so the reap under
-// test is the real one — the sections above mount a session by hand and keep a bench claim on it.
+// question "will anyone answer". There is no grace and no abandonment denial (issue 04 §4): the
+// reap closes the host once the last claim lets go, the orchestrator's state stays — a run parked
+// at the gate refuses eviction, and with it the queues a recovery run must drain — so the question
+// survives as the ledger's, to be answered on a later claim or carried to the next process. The
+// rigs take their claims through the hub itself, so the reap under test is the real one — the
+// sections above mount a session by hand and keep a bench claim on it.
 // ---------------------------------------------------------------------------------------------------
 
-process.stdout.write("\nan approval waits for its grace before it is called abandoned\n");
+process.stdout.write("\na parked approval outlives its host, unanswered and undenied\n");
 
-const graceWatchdog = deadline("the parked-approval checks", 90_000);
+const parkedWatchdog = deadline("the parked-approval checks", 90_000);
 
 try {
-	// Waited out, not denied: the viewer looked elsewhere and came back.
-	const patient = await openRig(60_000);
+	// Released while parked: the host closes, and the question waits for whoever comes back.
+	const patient = await openRig();
 	try {
 		const { wire, viewer } = await driveToApproval(patient);
 		const parked = patient.host;
 		check("the run parked at the approval", patient.session.hasPendingApprovals(parked.id));
 
 		// The viewer switches away, and its claim is the *only* thing keeping the session open — a
-		// subscription takes none. So this release is what starts the reap, and the run parked at the
-		// gate is what the reap must not settle through.
+		// subscription takes none. So this release is what starts the reap, and it does not wait for
+		// an answer: the host closes, the parked state refuses eviction, and the question stays.
 		wire.cancel(patient.sessionId);
 		patient.hub.release(viewer);
-		await sleep(1_500);
-
-		check("the approval is still pending well past the old denial window", patient.session.hasPendingApprovals(parked.id), "it was denied");
-		check("the session was not reaped out from under it", patient.hub.live.includes(parked.id), patient.hub.live.join(","));
+		check(
+			"the host was reaped while the question stood",
+			await until(() => !patient.hub.live.includes(parked.id), 8_000),
+			patient.hub.live.join(","),
+		);
+		check("the approval is still pending, undenied", patient.session.hasPendingApprovals(parked.id), "it was denied");
 		check(
 			"and no denial reached the lane",
 			wire.items(patient.sessionId).every((message) => message.type !== "approval_settled"),
 			JSON.stringify(wire.items(patient.sessionId).map((message) => message.type)),
 		);
 
-		// The person came back: the same session, the same unanswered question, still theirs to answer.
+		// The person came back: a new host, but the same state — the one the table kept.
 		const again = await patient.hub.claim(parked.id);
-		check("claiming it again hands back the same session", again === parked, "the old host was gone, so a new one was built");
+		check("a new host opens over the retained state", again !== parked && again.id === parked.id, `${again.id} vs ${parked.id}`);
+		check("the state the table holds is the one the session was mounted with", patient.hub.agent.agentState(parked.id).session === patient.bag);
 
 		const returned = await wire.open(patient.sessionId);
 		check(
@@ -477,8 +485,10 @@ try {
 		await patient.close();
 	}
 
-	// Abandoned for real: nobody came back, so the run must not be parked forever.
-	const abandoned = await openRig(30);
+	// Nobody ever comes back: no grace runs out and nothing is denied — the question hangs, in the
+	// ledger and in the state the table keeps, until a later answer or the process itself. That is
+	// the cost the grace's deletion was taken for (issue 04 §4), stated here rather than hidden.
+	const abandoned = await openRig();
 	try {
 		const { wire, viewer } = await driveToApproval(abandoned);
 		const parked = abandoned.host;
@@ -486,29 +496,27 @@ try {
 
 		wire.cancel(abandoned.sessionId);
 		abandoned.hub.release(viewer);
-
-		// Read off the transcript rather than the live session: the denial is what ends the run, and a
-		// reaped session has no registry entry left for a live read to reach. The cold read derives the
-		// question from the ledger, which is the same answer the next process would get.
 		check(
-			"an approval nobody came back to is denied after the grace",
-			await until(async () => ((await readSession(abandoned.url, parked.id))?.pendingApprovals.length ?? 1) === 0, 8_000),
-			"it was still pending",
-		);
-		check(
-			"and the session is then reaped out of the registry",
+			"the host was reaped once the claim let go",
 			await until(() => !abandoned.hub.live.includes(parked.id), 8_000),
 			abandoned.hub.live.join(","),
+		);
+		// Read the way a returning window would — over REST, through the same snapshot the lane's
+		// baseline is built from: the question is derived from the ledger, so this is also what the
+		// next process would be shown.
+		check(
+			"an approval nobody came back to is never denied",
+			await until(async () => ((await readSession(abandoned.url, parked.id))?.pendingApprovals.length ?? 0) === 1, 8_000),
+			"the question is not showing",
 		);
 		await wire.close().catch(() => {});
 	} finally {
 		await abandoned.close();
 	}
 
-	// Somebody looked, then left again without answering. The reap that was waiting has to step aside
-	// for them — and then be startable again, or the session would be stuck in the registry for good
-	// with `reaping` still set and no release able to schedule another one.
-	const lookedThenLeft = await openRig(3_000);
+	// Look, leave, come back, leave again: the open/close cycle must not wedge the session, and the
+	// host must be reapable every time.
+	const lookedThenLeft = await openRig();
 	try {
 		const { wire, viewer } = await driveToApproval(lookedThenLeft);
 		const parked = lookedThenLeft.host;
@@ -516,27 +524,20 @@ try {
 
 		wire.cancel(lookedThenLeft.sessionId);
 		lookedThenLeft.hub.release(viewer);
-
-		check("the reap begins once the last claim is gone", await until(() => parked.reaping, 6_000));
+		check(
+			"the first leaving reaps the host",
+			await until(() => !lookedThenLeft.hub.live.includes(parked.id), 8_000),
+			lookedThenLeft.hub.live.join(","),
+		);
 
 		const back = await lookedThenLeft.hub.claim(parked.id);
-		check("the returning viewer gets the session back", back === parked);
-		check(
-			"the reap stepped aside rather than denying a question someone came back for",
-			await until(() => !parked.reaping, 6_000),
-			"it stayed reaping, so no later release could ever reap this session",
-		);
+		check("the returning viewer gets the session back", back.id === parked.id, `${back.id} vs ${parked.id}`);
 		check("and the approval is still unanswered", lookedThenLeft.session.hasPendingApprovals(parked.id));
 
-		// ...and now they leave without answering. The session must still be reapable.
+		// ...and now they leave without answering. The session must be reapable again.
 		lookedThenLeft.hub.release(back);
 		check(
-			"leaving without answering parks again, and the grace runs out for real",
-			await until(async () => ((await readSession(lookedThenLeft.url, parked.id))?.pendingApprovals.length ?? 1) === 0, 8_000),
-			"it stayed pending, so nothing reaped it",
-		);
-		check(
-			"so the session is not stuck in the registry",
+			"leaving without answering parks it again, reapable as ever",
 			await until(() => !lookedThenLeft.hub.live.includes(parked.id), 8_000),
 			lookedThenLeft.hub.live.join(","),
 		);
@@ -545,7 +546,7 @@ try {
 		await lookedThenLeft.close();
 	}
 } finally {
-	clearTimeout(graceWatchdog);
+	clearTimeout(parkedWatchdog);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -693,19 +694,21 @@ interface Rig {
 	sessionId: string;
 	/** The mounted host, as the hub holds it: the object the reap decides about. */
 	host: HostedSession;
+	/** The transcript bag the mount created — the one the orchestrator's table should hold. */
+	bag: Session;
 	url: string;
 	close(): Promise<void>;
 }
 
 /**
- * One isolated server: a hub whose approval grace is the number under test, a session it runs on a
- * scripted transport, and the real routes and mux in front of it.
+ * One isolated server: a hub over a session it runs on a scripted transport, and the real routes and
+ * mux in front of it.
  *
  * Only the transport is a stand-in. The session is mounted the way `SessionHub.open()` mounts one, so
  * that every claim below — the viewer's and the reap it drives — is a real claim through the hub.
  */
-async function openRig(approvalGraceMs: number): Promise<Rig> {
-	const root = await mkdtemp(join(tmpdir(), "my-agent-approval-grace-"));
+async function openRig(): Promise<Rig> {
+	const root = await mkdtemp(join(tmpdir(), "my-agent-approval-"));
 	const transport = createFakeTransport();
 	transport.setResponses([
 		fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
@@ -713,9 +716,9 @@ async function openRig(approvalGraceMs: number): Promise<Rig> {
 	]);
 	// The hub's one orchestrator sends through the scripted transport, so the session it is about to
 	// serve is answered by it.
-	const hub = new SessionHub({ workDirAbsPath: root, approvalGraceMs, api: transport.api, modelsHome: join(root, "agent-home") });
+	const hub = new SessionHub({ workDirAbsPath: root, api: transport.api, modelsHome: join(root, "agent-home") });
 	hub.setModelConfigs(rows);
-	const { id: sessionId, host } = await mountSession(hub, {
+	const { id: sessionId, host, state } = await mountSession(hub, {
 		root,
 		model: modelName,
 		settings: inMemorySettingsState({ approval: { read: true } }),
@@ -728,6 +731,7 @@ async function openRig(approvalGraceMs: number): Promise<Rig> {
 		session: hub.agent,
 		sessionId,
 		host,
+		bag: state,
 		url: graph.url,
 		close: async () => {
 			await graph.close();
@@ -771,7 +775,7 @@ async function openCrossRig(): Promise<CrossRig> {
 		fakeAssistantMessage("done"),
 		fakeAssistantMessage("done"),
 	]);
-	const hub = new SessionHub({ workDirAbsPath: root, approvalGraceMs: 60_000, api: transport.api, modelsHome: join(root, "agent-home") });
+	const hub = new SessionHub({ workDirAbsPath: root, api: transport.api, modelsHome: join(root, "agent-home") });
 	hub.setModelConfigs(rows);
 	const sessions: Mounted[] = [];
 	for (let index = 0; index < 2; index += 1) {
