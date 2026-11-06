@@ -24,28 +24,35 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 代码把这些词当作术语来用。
 
 - **service（无属性服务）** —— 无属性服务的形态（ADR-0007）：`Agent` 编排、会话账本（`SessionManager`）、
-  配置（`SettingManager`——设置与模型行共用的无状态门面，ADR-0011 修订节）、工具目录（`ToolRegistry`）。构造只收服务依赖，公开方法收 `(id, 请求自己的参数)`，每样数据在**用到它的那一行**向属主现取、
+  配置（`SettingManager`——设置与模型行共用的无状态门面，ADR-0011 修订节）、工具表（`ToolManager`）。构造只收服务依赖，公开方法收 `(id, 请求自己的参数)`，每样数据在**用到它的那一行**向属主现取、
   拿到的只是局部变量；不传、不养任何聚合袋。类壳保留（可构造注入），方法体就写在类里、没有一层同名的
   文件级函数可转发，拆掉的只是 per-session 实例字段；
   Manager 内部按 id / 目录键控的缓存随时可从磁盘重建、且藏在自己内部不被传递——这正是它与聚合袋的
-  分界。
+  分界。**工具域有一个例外**：`ToolManager` 持一张常驻实例表
+  （[ADR-0016](docs/adr/0016-tool-manager-instance-table.md)），是这条形态里唯一持有实例的服务；
+  `SessionManager` / `SettingManager` 与 `Agent` 编排仍是原来的形态：每样数据在用到它的那一行现取、
+  不养聚合袋，这条不变。理由与边界只在那条 ADR，这里不复述。
 - **engine（引擎）** —— `Agent.run`（私有）：一次运行的入口与出口，与 `runEngine`、`prepareRequest`、
   `dispatchEvent`、压缩阶梯、重试泵、两个闸门一起是 `Agent` 的方法（ADR-0014）。它读的每一处接缝要么是
   这次运行的局部变量（模型、abort controller、事件 sink、闸门），要么是 `this` 上的服务，所以运行期
   没有一处瞬态被谁持有。它曾是一个独立对象（ADR-0012、0013），被删是因为那个对象不持有任何东西——
-  一个空的 `this` 对 1900 行方法没有帮助。「循环」只是那些轮次的日常说法。它调的是 `Tool.execute`，
-  发给模型的是带 `tools` 的 `Context`——同一个 `Tool` 的两半都经它手，而传输层只读另一半（ADR-0015）。
+  一个空的 `this` 对 1900 行方法没有帮助。「循环」只是那些轮次的日常说法。它经 `ToolManager` 取实例、
+  经它的执行入口调用（[ADR-0016](docs/adr/0016-tool-manager-instance-table.md)），发给模型的是带
+  `tools` 的 `Context`——同一个 `Tool` 的两半都经它手，而传输层只读另一半（ADR-0015）。
 - **fanout（扇出）** —— `session/fanout.ts`：`emitEvent`、`publishState`、`appendMessageEntry`、
   `dropQueued`、`emitQueueUpdate`、`nextStamp`、`snapshotOf`、`approvalsOf`，参数是
   `(state, SessionServices)`。编排层与运行对象都发事件、都写账本，所以这些无状态件谁的成员都不是；
   写边界 `finalizeToolResult` 也住这里。
 - **tool（工具）** —— `Tool`（`llm/types.ts`）：声明（`name` / `description` / `parameters` /
   `constrainedSampling`）与执行（`label` / `prepareArguments` / `outputSchema` / `execute` / `replay` /
-  `executionMode`）在**一个**类型里，传输层只读前一半、引擎只用后一半（ADR-0015）。
-  `createToolRegistry(toolDefinitions())` 是**进程**的目录（定义 + 注册进来的工具）。定义是
-  `(run) => createReadTool(run.workDirAbsPath)` 这样的工厂，所以目录里没有常驻的工作目录：
-  `active(state, run)` 拿着随请求来的 `ToolRunContext` 现建可执行集合，活跃集合本身是从账本派生的一次
-  读取，不在任何一处持有。没有插件注册表。
+  `executionMode`）在**一个**类型里，传输层只读前一半、引擎只用后一半（ADR-0015）。`Tool` 与目录无关：
+  `execute` 的第三个实参是本轮栈上的 `ToolRunContext`（`workDirAbsPath` + bash 超时），所以六个内置都由
+  零参工厂造出、一个实例服务所有会话。`ToolManager`（`tools/manager.ts`，
+  [ADR-0016](docs/adr/0016-tool-manager-instance-table.md)）是**进程**的那只服务：一张 `Map<name, Tool>`
+  装全部实例（首次访问一次填满六个，懒），公开面四法 `names` / `get` / `execute` / `register`——
+  `execute` 是生产代码唯一调 `Tool.execute` 的地方，`register()` 是测试接缝（只加新名字，同名连内置也
+  抛错）。「这一轮能调哪些、哪些要问」仍是**一次选择**，纯数据 `ToolState` 从账本派生、每次读取现算：
+  **Map 持全部实例、活跃名单不进 Map**，判活的是引擎手里那个 `ReadonlySet<string>`。没有插件注册表。
 - **session（会话）** —— 两个文件（ADR-0009）：`.json` 快照（身份 + title/model/thinkingLevel/工具/审批
   的当前值，变更即整体原子重写）配同 stem 的只追加 JSONL 日志（六种 kind，账本、唯一事实），由
   无状态的 `SessionManager` 拥有——打开时 `fillSession` 合并两份重放出纯数据状态，host 在手时它是

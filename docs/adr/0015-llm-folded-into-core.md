@@ -6,6 +6,9 @@
 取代：[0008](0008-loop-merged-into-agent.md)（部分——决定 6 里 `LoopContext` → `AgentContext` 的命名，
 以及「工具与上下文的形状也住在 `core/src/types.ts`」那一半；还有其*被取代的是什么*一节里
 「`packages/llm` 仍原样适用……也**没有**被并入任何人」这句现状陈述）
+取代者：[0016](0016-tool-manager-instance-table.md)（部分，2026-11-06——*后果* 里「一次请求只有一个
+`Context` 穿过边界」那条中「`prepareRequest` 建它（`tools` 就是活跃的可执行集合）、引擎用它」这句
+现状陈述；决定 2/3/7 全部成立）
 
 设计过程见 `.scratch/context-tool-unification/`（形状在 2026-11-05 的绘图会话里盘问定案，四张票是执行票，
 逐条不得推翻）。
@@ -74,6 +77,10 @@ package.json 与 tsconfig、根 tsconfig 里两条 `@my-agent/llm` 路径别名�
   `toToolDeclaration` 仍然是削薄的那一步，但它现在削的是同一个类型的字段，而不是翻译成另一个类型。
 - **一次请求只有一个 `Context` 穿过边界。** `prepareRequest` 建它（`tools` 就是活跃的可执行集合）、
   引擎用它、`streamAssistantResponse` 削薄它的 `tools`、传输层读它——没有第二种形状要在中途换算。
+
+  **（2026-11-06 Superseded，[0016](0016-tool-manager-instance-table.md)：仅「`tools` 就是活跃的可执行
+  集合、引擎用它」这句现状陈述——`tools` 今天是声明载体（元素是工具表里的实例、按本轮名单取子集），
+  引擎执行经 `ToolManager`。一次请求一个 `Context` 的形状不变。）**
 - **依赖图少一层。** core 的依赖表里不再有 workspace 内部包；server 与 script 的 import 回到唯一的
   公开出口 `@my-agent/core`，core 自己的那 16 处改用相对路径，不再有一个只有本仓库认识的包名。
 - **三处配置账消失。** workspace 清单、两条 path 别名、`check` 的一棒；`install-deps` 的硬编码表

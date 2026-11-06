@@ -147,6 +147,16 @@ Status: open
   `exerciseDeactivatedToolBatch` 钉住批次模式，`smoke-approval-recovery` 补三条（名单外的 grant
   不到闸门、不进工具代码）。**代码面到此收口**，只剩 10 的文档收账与 11 的全量验收。
 
+- **10 · 文档与 ADR 收账（resolved）**：[10 - 文档与 ADR 收账](issues/10-docs-and-adr-closeout.md) ——
+  `docs/adr/0016-tool-manager-instance-table.md` 落地（背景 / 同名反义 / 七条决定 / 「为什么明知
+  0007·0011 仍要反转」/ 后果 / 不可逆性与代价 / 被取代的是什么 / 没有被取代的），四份旧 ADR 各加一行
+  头部 `取代者`、正文零改写地就地标八处 `Superseded`（0006×2、0007×3、0011×2、0015×1；`git diff
+  --numstat` 四份全 0 删行），`docs/adr/README.md` 清单 +1 行；`AGENTS.md` 改 `service` / `engine` /
+  `tool` 三词条（`tool set` / `assembly` / `workDirAbsPath` / `布局` 核对后不动）、
+  `docs/architecture.md` 十二处逐句改写（「没有插件注册表」保留）；`README.md` 与 `docs/notes.md`
+  核对无命中、不动。`npm run check` 绿（137/111）；grep 清零面十二个词条文档面与源码面全 0
+  （豁免：0012/0013 各 1 处、0016 自己 4 行、`.scratch/` 16 文件 69 处）。0016 状态行的验收数字待 11。
+
 ## Not yet specified
 
 **本图 2026-11-06 已 graduate：02–06 全部定案，执行票按「每一笔都能让 `npm run check` 绿」的切口开出，

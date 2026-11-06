@@ -3,6 +3,7 @@
 日期：2026-11-04 · 状态：已接受，**已落地**（agent-state 01–14 号票；01–05 拍板、06–13 落地、14 号票清旧删废并翻转此行）
 修订：2026-11-04 配置收拢进 `SettingManager`——`state.setting` 废除、决定 7 推翻，见[修订节](#修订2026-11-04配置收拢进-settingmanager)
 取代：[0007](0007-services-drop-instance-state.md)（部分，2026-11-04——决定 3 的 Manager 键控缓存与决定 4 的活登记处归属及判据；其余决定不变）
+取代者：[0016](0016-tool-manager-instance-table.md)（部分，2026-11-06——决定 2 的「不注入一张表」判据与被放弃的选项里同名那一条，都只在**工具域**不再适用；会话状态表与 `adopt` / `evict` / `drop` 不变）
 
 设计过程见 `.scratch/agent-state/`（票 01–05 是各决定的明细，本 ADR 只记合拢后的结论）。
 
@@ -42,6 +43,10 @@ fill-at-open 的键控缓存重放，live 的一半（两条队列、在飞运�
    队列、订阅集合与 run 槽）。表私有、不公开 getter；公开面只有 `has(id)`、`agentState(id)`（缺失抛
    `Session is not open`）、`adopt` / `evict` / `drop` / `close`。`AgentConfig.openSessions` 整条删除，
    **不**换成 `sessions?: Map`——注入一张表等于给表的写者与删者各留第二个（01 号票 §3、§6）。
+
+   **（2026-11-06 Superseded，[0016](0016-tool-manager-instance-table.md)：仅这条判据在工具域不再
+   适用——工具表正是注入的（`AgentConfig.tools`）；会话状态表仍不注入、仍私有，`adopt` / `evict` /
+   `drop` / `close` 的公开面一字不动。）**
 3. **装配点唯一，留在工厂**。`assembleSession`（原 `ensureSession`）造出 `AgentState`，调用方
    `agent.adopt(state)` 交表；`Agent` 不新增 `SettingsManager` 依赖——构造依赖就是权限，编排层读设置
    的唯一路径曾是随条目进来的 `entry.settings`（`state.setting`；已由[修订节](#修订2026-11-04配置收拢进-settingmanager)换为注入的 `SettingManager`）。冷读继续走私有的 `assemble()`，
@@ -169,6 +174,9 @@ fill-at-open 的键控缓存重放，live 的一半（两条队列、在飞运�
   没有落点；表的写者与删者各变成两个，买不到本图唯一要的东西。
 - **注入一张表（`AgentConfig.sessions?: Map`）**：与上一条同罪——一个便利参数就是第二个写者；`adopt`
   一个动词就够表达注入能表达的全部四件事。
+
+  **（2026-11-06 Superseded，[0016](0016-tool-manager-instance-table.md)：仅其适用范围——会话状态表仍按
+  它办（不注入）；工具域今天就是一张注入的表。）**
 - **cancel 即删**（04 号票 §2）：订阅归零是驱逐的**触发器**之一，不是**判据**；REST（审批答案、rename）
   不过帧，「open 建、cancel 删」留不出它们的路径。
 - **按目录扇出设置修改（05 号票 (b)）**：需要一张「目录 → 会话」反查表，正是这次要删的那类表。
