@@ -132,6 +132,21 @@ Status: open
   仍绿）」与之互斥，经用户裁决改为**断言钉住中间态**（`exerciseDeactivatedToolCall` 四条），09 翻回。
   `activeNames` 未进执行链（09 的两处落点已就位，见票内 §6）。
 
+- **09 · 本轮名单进执行链（resolved）**：[09 - 本轮名单进执行链](issues/09-active-names-threading.md) ——
+  04 §2.4 落成代码：`activeNames` 是 **`ReadonlySet<string>`**，`runEngine:1005` 与
+  `prepareRequest:1275` 各派生一次，随 `AgentRequestUpdate.activeNames` 在请求边界换掉（`:1085`），
+  与 Manager、`run` 一样显式穿过恢复机器（`recoverPendingToolCalls` 第 6 位）与两条批次路径。
+  两处判活共用 `agent.ts:2021` 的 `activeTool(manager, activeNames, name)`（先 `activeNames.has` 再
+  `manager.get`）：`prepareToolCall:2386` 落空仍回 `Tool <name> not found`（**仍只有这一处产出**）、
+  `executeToolCalls:2174` 的 `executionMode` 判定同样先判活（禁用的 `bash` 不再把批次翻成 sequential）。
+  `check` 绿（137/111）、28 条 smoke **25 绿 / 3 红**
+  （第三条本机轮换：本轮 `smoke-mux-live`、上一轮 `smoke-approval`，各自单独复跑 1/1 绿）
+  ⇒ 对跑口径 **26 绿 / 2 既有红、零新红**、
+  `smoke-tools.log` 逐字节相同。断言：`exerciseDeactivatedToolCall` 按 08 §6 翻回 not-found 四条
+  并补「重新启用即照跑」两条（钉住「拒绝来自名单而非 `get` 找不到」），新增
+  `exerciseDeactivatedToolBatch` 钉住批次模式，`smoke-approval-recovery` 补三条（名单外的 grant
+  不到闸门、不进工具代码）。**代码面到此收口**，只剩 10 的文档收账与 11 的全量验收。
+
 ## Not yet specified
 
 **本图 2026-11-06 已 graduate：02–06 全部定案，执行票按「每一笔都能让 `npm run check` 绿」的切口开出，

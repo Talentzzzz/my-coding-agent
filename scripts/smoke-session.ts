@@ -1389,21 +1389,13 @@ async function exerciseActiveTools(): Promise<void> {
 }
 
 /**
- * A scripted call to a tool that is not active: the request stops declaring it, the table still
- * answers for it.
+ * A scripted call to a tool that is not active is a tool error, and the tool never runs.
  *
  * Deactivating a tool takes it out of the snapshot, the prompt, and the declarations the model gets
  * — that half is asserted by `exerciseActiveTools`, and the narrowing below is the other half of it:
- * a model that asks anyway names a tool this request no longer offers. What the call resolves
- * against, though, is the process table, which holds every tool (ADR-0016); so at this point in the
- * refactor the call is found and runs.
- *
- * That is the interim shape of ticket 08: the active set has not reached the execution chain yet, so
- * "not in the list" and "not in the table" are still two different questions, and only the second
- * one is asked. Ticket 09 threads the list through `prepareToolCall`, which turns this call back into
- * the `Tool write not found` error — and the writing below back into "did not touch the directory".
- * Until then the gap is pinned here instead of left as an unexplained red: a deactivated tool that
- * starts being refused, or one that stops running, both fail this exercise.
+ * a model that asks anyway names a tool this request no longer offers. The table still holds it
+ * (ADR-0016), so "the name exists" and "this run may call it" are two answers, and the run's own
+ * list is the one that refuses: the same name runs again, unchanged, once it is switched back on.
  */
 async function exerciseDeactivatedToolCall(): Promise<void> {
 	process.stdout.write("deactivated tool call\n");
@@ -1421,15 +1413,76 @@ async function exerciseDeactivatedToolCall(): Promise<void> {
 	await within("the run", 10_000, session.prompt(sidOf(session), "write blocked.txt"));
 	await within("settle()", 10_000, session.settle(sidOf(session)));
 
-	check("the call to the deactivated tool still ran", ends.length === 1 && ends[0]?.toolName === "write" && ends[0]?.isError === false, JSON.stringify(ends));
-	check("found in the table rather than answered as not found", ends[0]?.text.includes("not found") === false, JSON.stringify(ends[0]?.text));
-	check("and it reached the directory it was told to write to", (await access(join(root, "blocked.txt")).then(() => true, () => false)) === true);
+	check("the deactivated call ran and failed", ends.length === 1 && ends[0]?.toolName === "write" && ends[0]?.isError === true, JSON.stringify(ends));
+	check("with a not-found error rather than a result", ends[0]?.text.includes("not found") === true, JSON.stringify(ends[0]?.text));
+	check("the tool did not touch the directory", (await access(join(root, "blocked.txt")).then(() => true, () => false)) === false);
 	check(
-		"the transcript records it as a tool result, not an error",
-		allMessages(session).some((message) => (message as { role?: string; isError?: boolean }).role === "toolResult" && (message as { isError?: boolean }).isError !== true),
+		"the transcript records it as an errored tool result",
+		allMessages(session).some((message) => (message as { role?: string; isError?: boolean }).role === "toolResult" && (message as { isError?: boolean }).isError === true),
 		JSON.stringify(allMessages(session).map((message) => message.role)),
 	);
 	check("the run carried on to an answer", session.snapshot(sidOf(session)).messages.some((message) => message.role === "assistant" && textOf(message) === "done"));
+
+	// The refusal is the list's, not the table's: the same call, the same table, the tool switched
+	// back on — and it writes. A refusal that came from `get` finding nothing could not be undone
+	// without a restart.
+	session.setActiveTools(sidOf(session), ["read", "write", "edit", "glob", "grep", "bash"]);
+	recordRequests([], [fakeAssistantMessage(fakeToolCall("write", { path: "allowed.txt", content: "yes" })), fakeAssistantMessage("written")]);
+	await within("the run", 10_000, session.prompt(sidOf(session), "write allowed.txt"));
+	await within("settle()", 10_000, session.settle(sidOf(session)));
+	check("switched back on, the same call runs", ends[1]?.toolName === "write" && ends[1]?.isError === false, JSON.stringify(ends[1]));
+	check("and reaches the directory", (await access(join(root, "allowed.txt")).then(() => true, () => false)) === true);
+
+	await session.close(sidOf(session));
+}
+
+/**
+ * A deactivated sequential tool does not make the batch it appears in sequential.
+ *
+ * The mode is a property of the instance, and the table answers for every instance — so a batch
+ * that mentions a tool this run may not call must be judged over the calls that will actually run.
+ * Read as the table answers, a switched-off `bash` would flip a read batch to sequential, which is a
+ * scheduling decision taken on behalf of a call that is answered with an error before it starts.
+ *
+ * What a mode does is observable in the event order: a parallel batch announces every call it will
+ * run before the first result lands, a sequential one announces each call as it reaches it. Both
+ * calls are scripted into one answer, `bash` first-class and refused.
+ */
+async function exerciseDeactivatedToolBatch(): Promise<void> {
+	process.stdout.write("deactivated tool in a batch\n");
+	await writeFile(join(root, "batch.txt"), "batch\n");
+	const session = await openSession();
+	session.setActiveTools(sidOf(session), ["read", "glob", "grep", "edit"]);
+
+	const log: string[] = [];
+	/** What the `bash` call ended with, so "refused" is read off its result and not off its name. */
+	const bashEnd: { isError: boolean; text: string }[] = [];
+	session.onEvent(sidOf(session), (event) => {
+		if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
+			log.push(`${event.type === "tool_execution_start" ? "start" : "end"}:${event.toolName}`);
+		}
+		if (event.type === "tool_execution_end" && event.toolName === "bash") {
+			bashEnd.push({ isError: event.isError, text: textOf({ content: event.result?.content } as Message) });
+		}
+	});
+
+	recordRequests([], [
+		fakeAssistantMessage([fakeToolCall("read", { path: "batch.txt" }), fakeToolCall("bash", { command: "echo hi" })]),
+		fakeAssistantMessage("done"),
+	]);
+	await within("the run", 10_000, session.prompt(sidOf(session), "read the file and run echo"));
+	await within("settle()", 10_000, session.settle(sidOf(session)));
+
+	check(
+		"both calls were announced before either result landed",
+		JSON.stringify(log) === JSON.stringify(["start:read", "start:bash", "end:bash", "end:read"]),
+		JSON.stringify(log),
+	);
+	check(
+		"and the deactivated bash ended as a not-found error, not a run",
+		bashEnd.length === 1 && bashEnd[0]?.isError === true && bashEnd[0]?.text.includes("not found") === true,
+		JSON.stringify(bashEnd),
+	);
 
 	await session.close(sidOf(session));
 }
@@ -2036,6 +2089,7 @@ try {
 	await exerciseToolManager();
 	await exerciseActiveTools();
 	await exerciseDeactivatedToolCall();
+	await exerciseDeactivatedToolBatch();
 	await exerciseFileDiffReport();
 	await exerciseBranching();
 	await exerciseBranchToolConfig();

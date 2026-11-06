@@ -173,6 +173,15 @@ export interface AgentRequestUpdate {
 	context?: Context;
 	/** Model for the next provider request. It carries the thinking level it is asked at. */
 	model?: Model;
+	/**
+	 * The tools this request was built for — the names the session had active when it was derived,
+	 * as one membership test the engine carries past the request.
+	 *
+	 * Not part of `Context`: the context carries the instances the transport declares, this is the
+	 * list the execution chain judges a call against, and it is replaced with the rest of the update
+	 * so a set that moved between two requests moves the list with it.
+	 */
+	activeNames?: ReadonlySet<string>;
 }
 
 /** Final outcome of a tool call after hooks ran. */

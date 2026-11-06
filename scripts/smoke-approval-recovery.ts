@@ -256,20 +256,39 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 	// table this exercise builds itself — there is no orchestrator and no hub in this file. It is
 	// named for the fixture rather than `read`, because a name the six built-ins already answer to is
 	// refused by the table itself.
+	/** How many times the fixture's own code was entered — "refused" read as "did not run". */
+	let ranFixture = 0;
 	const readTool: Tool = {
 		name: "read_fixture",
 		label: "read_fixture",
 		description: "reads a file",
 		parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } as never,
-		execute: async () => ({ content: [{ type: "text", text: "ran" }], details: {} }),
+		execute: async () => {
+			ranFixture += 1;
+			return { content: [{ type: "text", text: "ran" }], details: {} };
+		},
 	};
 	const manager = createToolManager();
 	manager.register(readTool);
+	// The names a run would have active: here the one fixture, which is also the whole table — the
+	// two questions the chain asks ("may this run call it", "does the name exist") are answered
+	// separately on purpose, so this exercise supplies its own answer rather than deriving one.
+	const activeNames = new Set(["read_fixture"]);
 
 	/** What one pass emitted, so "silent" is an assertion and not an unobserved claim. */
 	const events: AgentEvent[] = [];
 	const emitted = (event: AgentEvent): void => {
 		events.push(event);
+	};
+
+	/** How many times a call reached the gate, so "refused before the gate" is observable. */
+	let gatesAsked = 0;
+	/** The gate that answers "suspend", and counts having been asked. */
+	const suspendingGate = {
+		beforeToolCall: async () => {
+			gatesAsked += 1;
+			return { suspend: true };
+		},
 	};
 
 	const off = await recoverPendingToolCalls(
@@ -278,6 +297,7 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 		{ enablePendingToolRecovery: false },
 		{},
 		manager,
+		activeNames,
 		{ workDirAbsPath: process.cwd() },
 		undefined,
 		emitted,
@@ -299,6 +319,7 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 		undefined,
 		{},
 		manager,
+		activeNames,
 		{ workDirAbsPath: process.cwd() },
 		undefined,
 		emitted,
@@ -318,8 +339,9 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 		{ messages: [dangling], tools: [] },
 		danglingToolCallsOf([dangling]),
 		{ answers: { call_x: { approved: true } } },
-		{ beforeToolCall: async () => ({ suspend: true }) },
+		suspendingGate,
 		manager,
+		activeNames,
 		{ workDirAbsPath: process.cwd() },
 		undefined,
 		emitted,
@@ -332,6 +354,34 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 			messages: resuspended.messages.map((message) => message.role),
 		}),
 	);
+	/** The count this case leaves behind: the pass below is measured as a delta from it. */
+	const gatesAfterResuspend = gatesAsked;
+
+	// A grant for a name this run may not use: the same table, the same transcript, only the list
+	// differs — and the call is closed with the sentence an unknown name gets, without the fixture's
+	// own code ever being entered. That is the half the table cannot answer: it holds the tool (the
+	// case above reaches its gate), and it is the run's list that refuses the run.
+	const outside = await recoverPendingToolCalls(
+		{ messages: [dangling], tools: [] },
+		danglingToolCallsOf([dangling]),
+		{ answers: { call_x: { approved: true } } },
+		suspendingGate,
+		manager,
+		new Set<string>(),
+		{ workDirAbsPath: process.cwd() },
+		undefined,
+		emitted,
+	);
+	const closedOutside = outside.messages[0];
+	check(
+		"a granted call outside the run's list is refused, not run",
+		outside.messages.length === 1 && closedOutside?.isError === true && textOf(closedOutside).includes("Tool read_fixture not found"),
+		JSON.stringify(outside.messages.map((message) => textOf(message))),
+	);
+	// The gate was asked by the re-suspended pass above — the case whose list has the tool — and this
+	// pass must not add to it: a refusal that came before the gate leaves the count where it stood.
+	check("and the gate was not asked about it", gatesAsked === gatesAfterResuspend, `${gatesAfterResuspend} -> ${gatesAsked}`);
+	check("with the fixture's own code never entered", ranFixture === 0, String(ranFixture));
 }
 
 // ---------------------------------------------------------------------------------------------------

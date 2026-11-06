@@ -998,9 +998,14 @@ export class Agent {
 
 		try {
 			const newMessages: Message[] = [];
+			// This run's tool list — the names the session has active, as one membership test. It is
+			// the stack-local the whole chain judges a call against (04 §2.4): the table answers "does
+			// this name exist", this answers "may this session call it now", and a set that is
+			// re-derived per request is swapped in at the request boundary below.
+			let activeNames: ReadonlySet<string> = new Set(toolStateOf(sessionManager, session, settings, tools.names()).activeToolNames);
 			let currentContext: Context = {
 				messages: [...sessionManager.buildSessionContext(session).messages],
-				tools: this.declaredTools(tools, toolStateOf(sessionManager, session, settings, tools.names()).activeToolNames),
+				tools: this.declaredTools(tools, activeNames),
 			};
 
 			await emit({ type: "agent_start" });
@@ -1018,6 +1023,7 @@ export class Agent {
 					{ answers: start.answers },
 					hooks,
 					tools,
+					activeNames,
 					run,
 					signal,
 					emit,
@@ -1070,6 +1076,13 @@ export class Agent {
 					if (requestUpdate) {
 						currentContext = requestUpdate.context ?? currentContext;
 						model = requestUpdate.model ?? model;
+						// The list the request was built for replaces last turn's, so the calls this
+						// answer carries are judged against the set the model was just told about. The
+						// optional form is the rest of the update's: a field that is not there leaves
+						// what the run already had. Both are read after `prepareRequest` — a set the
+						// user moved between two turns takes effect on the next answer, never on a call
+						// already in flight.
+						activeNames = requestUpdate.activeNames ?? activeNames;
 						// The model this request goes out with is the one a snapshot taken during it
 						// should report, and the one the meter measures the answer against.
 						live.model = model;
@@ -1104,7 +1117,7 @@ export class Agent {
 						const executedToolBatch =
 							message.stopReason === "length"
 								? await failToolCallsFromTruncatedMessage(toolCalls, emit)
-								: await executeToolCalls(currentContext, message, hooks, tools, run, signal, emit);
+								: await executeToolCalls(currentContext, message, hooks, tools, activeNames, run, signal, emit);
 						toolResults.push(...executedToolBatch.messages);
 						hasMoreToolCalls = !executedToolBatch.terminate;
 						suspended = executedToolBatch.suspended === true;
@@ -1256,6 +1269,10 @@ export class Agent {
 		// Both are derived from the ledger at this moment, so a choice that just landed is what the
 		// prompt describes.
 		const toolState = toolStateOf(sessionManager, session, settings, tools.names());
+		// The names this request is made for, in the one shape the chain after it judges a call with:
+		// the prompt and the declarations below read the same derivation, and the engine replaces its
+		// own copy with this one, so what the model was offered and what it may run cannot drift.
+		const activeNames: ReadonlySet<string> = new Set(toolState.activeToolNames);
 		// The project instructions are read here, per request, rather than taken from the state: an
 		// edit to a file on disk is meant to reach the very next request, the same way an edit to a
 		// model row does, and the walk is a handful of stats. What it costs is a prompt that can change
@@ -1284,6 +1301,9 @@ export class Agent {
 			// Built above, from the row this request is made with: run-local, used for the one
 			// request, dropped.
 			model,
+			// The list the declarations below were cut from: the engine swaps its own copy for it, so
+			// the calls this answer issues are judged against the set the model was just offered.
+			activeNames,
 			context: {
 				...context,
 				messages: system === undefined ? conversation : [system, ...conversation],
@@ -1291,7 +1311,7 @@ export class Agent {
 				// request, its elements are the table's own instances. The engine declares it on the
 				// request (`toToolDeclaration`) rather than reading it out of the transcript, so a tool
 				// switched on mid-session reaches the model on the next request and the two cannot drift.
-				tools: this.declaredTools(tools, toolState.activeToolNames),
+				tools: this.declaredTools(tools, activeNames),
 			},
 		};
 	}
@@ -1303,7 +1323,7 @@ export class Agent {
 	 * while its elements are the table's own instances, so two requests of one session, or two
 	 * sessions, hold the same objects (ADR-0016).
 	 */
-	private declaredTools(manager: ToolManager, names: readonly string[]): Tool<any>[] {
+	private declaredTools(manager: ToolManager, names: Iterable<string>): Tool<any>[] {
 		const declared: Tool<any>[] = [];
 		for (const name of names) {
 			const tool = manager.get(name);
@@ -1989,6 +2009,20 @@ export type DanglingToolCall = {
 };
 
 /**
+ * The instance a run may call by this name, if it may call it at all.
+ *
+ * The one place the two questions are asked, and in this order: the run's list says whether this
+ * session may use the name now, and only then does the table hand back an instance. The table holds
+ * every tool (ADR-0016), so asking it alone would resolve a name the session has switched off — the
+ * list is what keeps a switched-off tool from being run. `undefined` is the answer both callers treat
+ * as "not a call this run makes": one closes it with the error an unknown name has always got, the
+ * other leaves its mode out of the batch's scheduling decision.
+ */
+function activeTool(manager: ToolManager, activeNames: ReadonlySet<string>, name: string): Tool<any> | undefined {
+	return activeNames.has(name) ? manager.get(name) : undefined;
+}
+
+/**
  * The tool calls in a context that no tool-result message answers, in transcript order.
  *
  * A call dangles when its run ended before the result landed — a crash, or the end-restart approval
@@ -2029,9 +2063,9 @@ export function danglingToolCallsOf(messages: Message[]): DanglingToolCall[] {
  *
  * Exported because it is the one part of the engine a host can drive without a run: the smoke that
  * pins this contract calls it with a transcript, a set of answers, and the table the calls run
- * against — no orchestrator, no run of its own. The resume is a run of its own, so the table and the
- * run values arrive the way they do everywhere else on this chain: as arguments, not through the
- * context.
+ * against — no orchestrator, no run of its own. The resume is a run of its own, so the table, the
+ * run's active names, and the run values arrive the way they do everywhere else on this chain: as
+ * arguments, not through the context.
  */
 export async function recoverPendingToolCalls(
 	currentContext: Context,
@@ -2039,6 +2073,7 @@ export async function recoverPendingToolCalls(
 	recovery: RunRecoveryOptions | undefined,
 	hooks: ToolCallHooks,
 	manager: ToolManager,
+	activeNames: ReadonlySet<string>,
 	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
@@ -2050,7 +2085,7 @@ export async function recoverPendingToolCalls(
 	for (const { toolCall, assistantMessage } of dangling) {
 		const answer = answers[toolCall.id];
 		if (answer !== undefined && answer.approved) {
-			const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, manager, signal);
+			const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, manager, activeNames, signal);
 			if (preparation.kind === "suspended") {
 				return { messages, terminate: true, suspended: true };
 			}
@@ -2119,25 +2154,29 @@ async function synthesizeToolResult(
  * otherwise. Both paths prepare the calls in source order and write their results as messages.
  *
  * The mode is read off the table rather than off what the request declared: a call's behaviour is a
- * property of the tool, and the table is where the tool lives.
+ * property of the tool, and the table is where the tool lives. It is read only for the calls this run
+ * may make — a name the session has switched off is answered with an error before it starts, so
+ * letting its mode decide would schedule the batch around a call that never runs (a disabled `bash`
+ * turning a read batch sequential is the case that made this a judgement and not a lookup).
  */
 async function executeToolCalls(
 	currentContext: Context,
 	assistantMessage: AssistantMessage,
 	hooks: ToolCallHooks,
 	manager: ToolManager,
+	activeNames: ReadonlySet<string>,
 	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content.filter((block): block is ToolCall => block.type === "toolCall");
 	const hasSequentialToolCall = toolCalls.some(
-		(tc) => manager.get(tc.name)?.executionMode === "sequential",
+		(tc) => activeTool(manager, activeNames, tc.name)?.executionMode === "sequential",
 	);
 	if (hasSequentialToolCall) {
-		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, hooks, manager, run, signal, emit);
+		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, hooks, manager, activeNames, run, signal, emit);
 	}
-	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, hooks, manager, run, signal, emit);
+	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, hooks, manager, activeNames, run, signal, emit);
 }
 
 async function executeToolCallsSequential(
@@ -2146,6 +2185,7 @@ async function executeToolCallsSequential(
 	toolCalls: ToolCall[],
 	hooks: ToolCallHooks,
 	manager: ToolManager,
+	activeNames: ReadonlySet<string>,
 	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
@@ -2157,7 +2197,7 @@ async function executeToolCallsSequential(
 		// Prepared before it is announced: a suspended call is announced never — the gate ended the
 		// run at it, no result is written, and the events stay silent so the window shows no card for
 		// a call that never ran. The call and everything after it in the batch stay unanswered.
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, manager, signal);
+		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, manager, activeNames, signal);
 		if (preparation.kind === "suspended") {
 			return { messages, terminate: true, suspended: true };
 		}
@@ -2216,6 +2256,7 @@ async function executeToolCallsParallel(
 	toolCalls: ToolCall[],
 	hooks: ToolCallHooks,
 	manager: ToolManager,
+	activeNames: ReadonlySet<string>,
 	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
@@ -2227,7 +2268,7 @@ async function executeToolCallsParallel(
 		// Prepared before it is announced, as in the sequential path: a suspended call gets no events
 		// and no result, and the calls after it are not prepared either. The calls already queued
 		// above run to completion — they were underway when the gate answered.
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, manager, signal);
+		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, manager, activeNames, signal);
 		if (preparation.kind === "suspended") {
 			suspended = true;
 			break;
@@ -2324,12 +2365,12 @@ function prepareToolCallArguments(tool: Tool<any>, toolCall: ToolCall): ToolCall
 /**
  * Resolve one call's tool and take it through the steps that precede execution.
  *
- * The tool is resolved against the process table, not against what the request declared: the table
- * is the one place a tool lives (ADR-0016), and the declaration is that table's view for the
- * transport. `prepareArguments` and the schema validation then read the fields of the resolved
- * instance, so the shim the model's arguments are shaped by and the code that runs them are the
- * same object. An unknown name is answered here, before the gate, because a call nobody can run is
- * not a call to ask permission for.
+ * The instance comes from {@link activeTool}, which asks the run's list before the table: a name the
+ * session has switched off resolves to nothing here and is refused with the sentence an unknown name
+ * always got — the one place that produces it, before the gate, because a call nobody can run is not a
+ * call to ask permission for. `prepareArguments` and the schema validation then read the fields of the
+ * resolved instance, so the shim the model's arguments are shaped by and the code that runs them are
+ * the same object.
  */
 async function prepareToolCall(
 	currentContext: Context,
@@ -2337,9 +2378,10 @@ async function prepareToolCall(
 	toolCall: ToolCall,
 	hooks: ToolCallHooks,
 	manager: ToolManager,
+	activeNames: ReadonlySet<string>,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome | SuspendedToolCall> {
-	const tool = manager.get(toolCall.name);
+	const tool = activeTool(manager, activeNames, toolCall.name);
 	if (!tool) {
 		return {
 			kind: "immediate",
@@ -2422,6 +2464,8 @@ function emitToolExecutionUpdate(toolCall: ToolCall, emit: AgentEventSink): Tool
 interface RunToolCallOptions extends ToolCallHooks {
 	/** The table the nested call resolves and runs against. */
 	manager: ToolManager;
+	/** The names the run this call belongs to may use; a nested call outside them is refused. */
+	activeNames: ReadonlySet<string>;
 	/** This call's run values: the directory it acts in and the bash timeouts it runs under. */
 	run: ToolRunContext;
 	/** Passed to the hooks as the message that issued the call. */
@@ -2444,7 +2488,7 @@ interface RunToolCallOptions extends ToolCallHooks {
  */
 async function runToolCall(toolCall: ToolCall, options: RunToolCallOptions): Promise<ToolCallOutcome> {
 	const { assistantMessage, context, signal } = options;
-	const preparation = await prepareToolCall(context, assistantMessage, toolCall, options, options.manager, signal);
+	const preparation = await prepareToolCall(context, assistantMessage, toolCall, options, options.manager, options.activeNames, signal);
 	if (preparation.kind === "immediate") {
 		return { toolCall, result: preparation.result, isError: preparation.isError };
 	}
