@@ -34,6 +34,8 @@
 
 ~~`packages/llm` 与 `packages/loop` 一行都不改~~ **部分取代**（2026-11-02，[ADR-0008](adr/0008-loop-merged-into-agent.md)）：`packages/loop` 已删除，引擎并入 core 的 `agent.ts`，不再跟踪上游。（2026-11-04 补：引擎随后成为 `loop-manager.ts` 的 `LoopManager`，[ADR-0012](adr/0012-loop-manager-object.md)——`packages/loop` 与「不跟踪上游」两条未变，变的只是引擎住在哪个对象里。）~~`packages/llm` 仍然一行都不改~~ **失效**（2026-11-03，用户拍板）：ADR-0008 放弃上游对照之后，"vendored" 已不再是任何约束——`packages/llm` 就是本仓库自己维护的裁剪子集，禁令随之撤销；「不引入 plugin / MCP 机制」原样有效。
 
+（2026-11-06 补：撤销禁令之后，那个包本身也退场了——`packages/llm` 整棵目录并进 `packages/core/src/llm/`，全树只剩一个 `Context` 与一个 `Tool`，[ADR-0015](adr/0015-llm-folded-into-core.md)。本节原文按本文件第一节的规矩保留，不再逐句改写。）
+
 ### 测试一次运行不需要供应商密钥 —— **保留**
 
 `scripts/fake-transport.ts` 就是那个脚本化传输层。

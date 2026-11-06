@@ -1,10 +1,10 @@
 # my-coding-agent
 
-一个带桌面 UI 的编码 agent。`packages/llm` 是 `@earendil-works/pi-ai` 0.99.2 的裁剪副本，
-砍到只剩一个传输层：API-key 认证、流式、wire，以及唯一一个 API 实现 Anthropic Messages——
-上游对照已放弃（[ADR-0008](docs/adr/0008-loop-merged-into-agent.md)），由本仓库自己维护。
-其余都是我们自己的：模型、工具、会话管理器、运行引擎、HTTP API、窗口 UI、
-Electron 外壳。插件不在范围内。
+一个带桌面 UI 的编码 agent。`packages/core/src/llm/` 里有一份 `@earendil-works/pi-ai` 0.99.2 的裁剪副本，
+砍到只剩一个传输层：API-key 认证、流式、wire，以及唯一一个 API 实现 Anthropic Messages——上游对照已
+放弃（[ADR-0008](docs/adr/0008-loop-merged-into-agent.md)），由本仓库自己维护，并且已经并进 core
+（[ADR-0015](docs/adr/0015-llm-folded-into-core.md)）。其余都是我们自己的：模型、工具、会话管理器、
+运行引擎、HTTP API、窗口 UI、Electron 外壳。插件不在范围内。
 
 `docs/architecture.md` 是设计参考——请求流程、wire、以及每个选择背后的理由；动手改哪个子系统之前，
 先读它对应的那一节。`README.md` 覆盖安装、设置和桌面外壳。**下面的术语只是索引**，每条一句话；
@@ -13,8 +13,7 @@ Electron 外壳。插件不在范围内。
 ## 布局
 
 ```
-packages/llm       裁剪自 pi-ai 的传输层，只剩 src/api/anthropic-messages.ts；@ts-nocheck
-packages/core      无头 agent：agent.ts（编排：会话表、命令、审批、投影，以及一次运行的引擎 + 填充链 + 压缩 + 重试 + 闸门）、session/（账本、状态、fanout、事件）、types.ts（引擎与工具的契约）、模型、工具、系统提示词、上下文。没有传输层
+packages/core      无头 agent：agent.ts（编排：会话表、命令、审批、投影，以及一次运行的引擎 + 填充链 + 压缩 + 重试 + 闸门）、session/（账本、状态、fanout、事件）、types.ts（引擎契约，转发合并后的 Context/Tool 名字）、llm/（裁剪自 pi-ai 的传输层：api/、model.ts、models.ts、types.ts（Context 与 Tool 住这里）、utils/；@ts-nocheck）、模型、工具、系统提示词、上下文。没有 HTTP 传输层
 packages/server   node:http、REST 命令 + 一条常驻 WebSocket mux、活跃会话；boot.ts 是整个服务器，main.ts 只解析启动参数
 packages/desktop  Electron 外壳：进程内启动服务器，让一个窗口指向它
 packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的逻辑流
@@ -34,15 +33,19 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   `dispatchEvent`、压缩阶梯、重试泵、两个闸门一起是 `Agent` 的方法（ADR-0014）。它读的每一处接缝要么是
   这次运行的局部变量（模型、abort controller、事件 sink、闸门），要么是 `this` 上的服务，所以运行期
   没有一处瞬态被谁持有。它曾是一个独立对象（ADR-0012、0013），被删是因为那个对象不持有任何东西——
-  一个空的 `this` 对 1900 行方法没有帮助。「循环」只是那些轮次的日常说法。
+  一个空的 `this` 对 1900 行方法没有帮助。「循环」只是那些轮次的日常说法。它调的是 `Tool.execute`，
+  发给模型的是带 `tools` 的 `Context`——同一个 `Tool` 的两半都经它手，而传输层只读另一半（ADR-0015）。
 - **fanout（扇出）** —— `session/fanout.ts`：`emitEvent`、`publishState`、`appendMessageEntry`、
   `dropQueued`、`emitQueueUpdate`、`nextStamp`、`snapshotOf`、`approvalsOf`，参数是
   `(state, SessionServices)`。编排层与运行对象都发事件、都写账本，所以这些无状态件谁的成员都不是；
   写边界 `finalizeToolResult` 也住这里。
-- **tool（工具）** —— `AgentTool`；`createToolRegistry(toolDefinitions())` 是**进程**的目录（定义 +
-  注册进来的工具）。定义是 `(run) => createReadTool(run.workDirAbsPath)` 这样的工厂，所以目录里没有常驻的工作
-  目录：`active(state, run)` 拿着随请求来的 `ToolRunContext` 现建可执行集合，活跃集合本身是从账本
-  派生的一次读取，不在任何一处持有。没有插件注册表。
+- **tool（工具）** —— `Tool`（`llm/types.ts`）：声明（`name` / `description` / `parameters` /
+  `constrainedSampling`）与执行（`label` / `prepareArguments` / `outputSchema` / `execute` / `replay` /
+  `executionMode`）在**一个**类型里，传输层只读前一半、引擎只用后一半（ADR-0015）。
+  `createToolRegistry(toolDefinitions())` 是**进程**的目录（定义 + 注册进来的工具）。定义是
+  `(run) => createReadTool(run.workDirAbsPath)` 这样的工厂，所以目录里没有常驻的工作目录：
+  `active(state, run)` 拿着随请求来的 `ToolRunContext` 现建可执行集合，活跃集合本身是从账本派生的一次
+  读取，不在任何一处持有。没有插件注册表。
 - **session（会话）** —— 两个文件（ADR-0009）：`.json` 快照（身份 + title/model/thinkingLevel/工具/审批
   的当前值，变更即整体原子重写）配同 stem 的只追加 JSONL 日志（六种 kind，账本、唯一事实），由
   无状态的 `SessionManager` 拥有——打开时 `fillSession` 合并两份重放出纯数据状态，host 在手时它是
@@ -57,9 +60,9 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   只有「选一个模式」这一条路）与**应用级**（外观、模型清单、默认模型、bash 超时，以及全局默认的
   工具集与审批）。
 - **model（模型）** —— `models.json` 里的一行**就是**一个 `ModelConfig`：一个端点、一个密钥、以及模型
-  自己的事实（`id` 是接口认识的名字，`name` 既是身份也是标签）。`packages/llm` 的 `Model` 类把它变成发
-  请求用的对象（`apiKey`、`thinkingLevel` 都骑在这个对象上），`stream(context, options)` 走它携带的
-  transport；`Model` 构造时
+  自己的事实（`id` 是接口认识的名字，`name` 既是身份也是标签）。`llm/model.ts` 的 `Model` 类把它变成发
+  请求用的对象（`apiKey`、`thinkingLevel` 都骑在这个对象上），`stream(context, options)` 收一个
+  `Context`（messages + system + **必填**的 `tools`）并走它携带的 transport；`Model` 构造时
   才补上的 `api`、`input`、`cost` 是本构建的**常量**而不是配置项，所以磁盘上的行里没有它们。core 的
   `coerceModelConfig` 是"什么才允许被存下来"的唯一守门人；`createModel(config, level, transport?)` 是
   "一行 → 一个模型"，`modelFor(choice, catalog, transport?)` 是"一个**选择** → 一个模型"——按 `name` 现查
@@ -79,7 +82,8 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   默认端口 8080。abort 是 REST 命令不帧化、不引入 ack/requestId，mux 上行 `cancel` 只用于取消订阅
   （[ADR-0001](docs/adr/0001-transport-websocket-mux.md)、`.scratch/mux-landing/`）。**一条常驻连接
   是一个 `Writable`，所以写侧必须有界**：`write()` 返回 `false` 之后停写，帧进有界队列（4 MiB /
-  10 秒），超限用 `1013` 关掉整条连接。
+  10 秒），超限用 `1013` 关掉整条连接。模型那一侧另有一个同名的 `ChatTransport`（`llm/types.ts`），
+  只管一次请求的流式，与这里说的命令面不是一回事（ADR-0015）。
 - **claim（认领）** —— 持有者对活跃会话的握持：只有改变会话的请求与在飞的运行各在其长度内一个；读
   transcript 不拿claim，**订阅也不拿**——一张订阅表回答"这条连接订了什么"，与 claim 回答"这个请求
   必须跑在活跃会话上"永不互相换算（ADR-0001）。

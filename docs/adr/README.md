@@ -26,6 +26,7 @@
 | [0012](0012-loop-manager-object.md) | 一次运行成为一个对象——`LoopManager` 自带六件依赖、由 `AgentConfig.loop` 构造注入 | 已接受（2026-11-04），后被 [0013](0013-loop-services-are-arguments.md) 削去依赖、被 [0014](0014-loop-manager-removed.md) 整体取代（对象已删） |
 | [0013](0013-loop-services-are-arguments.md) | `LoopManager` 不持有任何服务——运行要用的六件随调用以 `LoopServices` 递进去，类零字段 | 已接受（2026-11-04），同日被 [0014](0014-loop-manager-removed.md) 取代（对象已删，参数形状随之消失） |
 | [0014](0014-loop-manager-removed.md) | 删掉 `LoopManager`——引擎回到 `Agent` 的方法，六项服务重新是它的字段 | 已接受，已落地（2026-11-04，跑绿 `check` 与除 `smoke-api` 外的 smoke 全套），取代 0012 与 0013 全部决定，复活 0008 的决定 1/2 |
+| [0015](0015-llm-folded-into-core.md) | 把 `packages/llm` 折叠进 core——全树只剩一个 `Context` 与一个 `Tool` | 已接受，已落地（2026-11-06，01–03 号票，`check` 与除 `smoke-api` 外的 smoke 全套绿，零行为变化），取代 0008 决定 6 的 `AgentContext` 命名与「形状也住 `types.ts`」那一半，及其「llm 没有被并入任何人」的现状陈述 |
 
 ## 门槛
 

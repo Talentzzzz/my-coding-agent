@@ -4,6 +4,9 @@
 [0012](0012-loop-manager-object.md) 取代（2026-11-04）
 取代：[0001](0001-transport-websocket-mux.md)（部分——仅其「`packages/llm` 与 `packages/loop`
 一行都不改」中 loop 的那一半，逐条对照见*被取代的是什么*）
+取代者：[0015](0015-llm-folded-into-core.md)（部分，2026-11-06——决定 6 里 `AgentContext` 的命名与
+「类型并进 `core/src/types.ts`」中的工具/上下文那一半，以及*被取代的是什么*一节里「`packages/llm`
+仍在 `packages/llm` 里、仍然 vendored、也没有被并入任何人」这句现状陈述；llm 已被并入 `core`）
 
 设计过程见 `.scratch/loop-into-agent/`（形状在 2026-11-02 的设计对话与 01/02 号票敲定，
 本 ADR 只记合拢后的决定）。

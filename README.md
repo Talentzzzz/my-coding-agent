@@ -1,7 +1,7 @@
 # my-coding-agent
 
-一个在你本机、自己的桌面窗口里运行的编码 agent。pi 的一个 package 作为裁剪副本收进本仓库：`packages/llm`（`@my-agent/llm`，来自
-[`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层——只取本项目真正调用的部分，不是完整的 package。运行引擎是我们的代码：它原先是 pi 循环的副本，先并入 core（[ADR-0008](docs/adr/0008-loop-merged-into-agent.md)），现在是 `packages/core/src/loop-manager.ts` 里的一个对象（[ADR-0012](docs/adr/0012-loop-manager-object.md)），不再跟踪上游。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳也都是我们自己的。
+一个在你本机、自己的桌面窗口里运行的编码 agent。pi 的一段代码作为裁剪副本收进本仓库：`packages/core/src/llm/`（来自
+[`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层——只取本项目真正调用的部分，而且它已经不是一个独立的包，并进了 core（[ADR-0015](docs/adr/0015-llm-folded-into-core.md)）。运行引擎是我们的代码：它原先是 pi 循环的副本，先并入 core（[ADR-0008](docs/adr/0008-loop-merged-into-agent.md)），现在是 `packages/core/src/agent.ts` 里 `Agent` 的私有方法（[ADR-0014](docs/adr/0014-loop-manager-removed.md)），不再跟踪上游。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳也都是我们自己的。
 
 agent 跑在一个 Node 进程里，而不是渲染进程里：它持有你的 API 密钥，而它的本职就是读写文件。窗口是一个客户端——它用 REST 发送 prompt，并从一条常驻 WebSocket 通道上读取 agent 的输出，这也是为什么每一条命令同样能用 `curl` 或脚本发。[docs/architecture.md](docs/architecture.md) 是设计文档：请求流程、API 表、会话格式，以及每一块为什么在那个位置。
 
@@ -87,7 +87,7 @@ ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/ node packages/
 
 `bash` 是一条 shell 命令可以跑多久：`defaultTimeoutMs` 在该调用自己没有指定 `timeout_ms` 时生效，`maxTimeoutMs` 是任何调用的**上限**——要求更久的命令会被压到它，而这个压顶会在工具结果里说明。构建跑得久的项目，就把上限调高。
 
-UI 里做出的变更会回到**已经提供那个键**的文件，所以一个钉住了 `approval.bash` 的项目继续拥有它，其他一切则落到你 home 里的那份。`SettingsManager`（`packages/core/src/settings-manager.ts`）读写两者；它是**无属性服务**，进程里只有一份（hub 构造时建它），一处目录的设置在装配时解析一次、随登记处条目交给那个会话——所以同一个目录上的两个会话读到的永远是同一个对象，而会话自己什么都不持有。
+UI 里做出的变更会回到**已经提供那个键**的文件，所以一个钉住了 `approval.bash` 的项目继续拥有它，其他一切则落到你 home 里的那份。`SettingsManager`（`packages/core/src/setting-manager.ts`）读写两者；它是**无属性服务**，进程里只有一份（hub 构造时建它），一处目录的设置在装配时解析一次、随登记处条目交给那个会话——所以同一个目录上的两个会话读到的永远是同一个对象，而会话自己什么都不持有。
 
 `appearance` 是一项设置而不是浏览器存储，这是有意的：桌面外壳每次启动都会挑一个新端口，而 `localStorage` 是按 origin 隔离的，所以存在那里的偏好会在窗口重新打开的那一刻被忘掉。`fontSize` 是整窗字号的基准，量程 10–22、默认 15（服务端会把它夹回这个区间）：滑杆改的是基准，标题、侧栏、代码、状态行等各档从它按各自的步差派生，整窗一起动。
 
@@ -186,7 +186,7 @@ env -u ELECTRON_RUN_AS_NODE packages/desktop/node_modules/electron/dist/electron
 
 ## 状态
 
-运行引擎（`Agent.run`：多轮循环、steering、工具执行与恢复）、六个工具与那对委派工具、会话持久化与恢复、压缩、审批闸门、会话替换、REST API 加一条常驻 WebSocket 通道（`/mux`，同时订阅多个会话、断线判活与重连、写侧背压都有界）、桌面外壳、窗口客户端、以及会话树——会话内部分支和侧边栏里嵌套的 fork——全部可用；类型检查与 smoke 脚本通过（清单见上，均不需要供应商密钥；`smoke:boot` 另自带封闭的 agent home，不读机器上的用户配置）。
+运行引擎（`Agent.run`：多轮循环、steering、工具执行与恢复）、六个工具、会话持久化与恢复、压缩、审批闸门、会话替换、REST API 加一条常驻 WebSocket 通道（`/mux`，同时订阅多个会话、断线判活与重连、写侧背压都有界）、桌面外壳、窗口客户端、以及会话树——会话内部分支和侧边栏里嵌套的 fork——全部可用；类型检查与 smoke 脚本通过（清单见上，均不需要供应商密钥；`smoke:boot` 另自带封闭的 agent home，不读机器上的用户配置）。
 
 **未验证**：第一次真实的模型往返，以及因此只有真实供应商才会走到的部分——token 流式、一次重试退避、压缩的摘要调用。这台机器上没有配置供应商密钥；它们周围的一切由脚本化模型覆盖，而指向一个死端点的一行已经被驱动到一次真实的连接错误。
 

@@ -45,6 +45,15 @@ Label: wayfinder:map
   `core/src/llm/types.ts`,`LlmContext` 与全部 Agent 撞名前缀清零,`Context.tools` 必填;
   check+smoke 全套绿、零行为变化;docs 引用同 01 留给 03;`toToolDeclaration` 的类型诚实性
   后果留观(票 Answer 有记)。
+- [03](issues/03-docs-and-adr.md) resolved(本笔):文档收账——新 ADR 0015(llm 折叠进 core + 全树
+  单一 `Context`/`Tool`:三层重复声明是痛因、传输层「看见 execute 但不调用」是取舍、与 0008 的
+  因果是折叠的许可条件),`docs/adr/README` 补清单行、0008 头部加「取代者」前向指针;
+  architecture.md 逐句核到新形状(职责段、依赖段、目录布局、package 表、请求流程、工具契约、重试、
+  外壳、偏离表),AGENTS.md 布局与术语表(tool/model/transport/engine),README 导语,notes.md 加
+  2026-11-06 补。验收 grep 在 architecture/AGENTS/README 清零,剩余 37 处全在 ADR 历史叙述、
+  0015 引用旧决策与 notes 第一节「结论清单」(按票 14 同类扩免);check 绿,smoke 全套留给 04。
+  留观:25 个折叠文件头注释的「every import into packages/core stays fully checked」已不成立,
+  待微票。
 
 ## Not yet specified
 
