@@ -109,24 +109,26 @@ Status: open
 
 ## Not yet specified
 
-- **执行票怎么切**：等 02 / 03 / 04 / 05 / 06 定案后一次 graduate——`ToolManager` 类与懒加载、
-  `Agent` / `SessionServices` / `session-factory` / `core/index.ts` 改线、引擎执行改道、smoke 改写、
-  文档与 ADR 收账、全量验收。**02 / 03 / 04 / 05 / 06 全部已定案**（形状与改动面见前四票的
-  §2 / §4，名字与文档处置见 06 §2 / §3）；**现在仍不预切票号与票数**，毕业时按五票清单核、
-  不重开裁决。**文档与 ADR 收账归一张专门的 `task` 票**（06 §3.1：在代码票之后、全量验收票之前，
-  新 ADR-0016 / 四行取代者指针 / 清单行 / 逐句改写同一笔落地）；本图到此只差 graduate 与执行。
-- `register()` 去留、旧五法名字与签名、`build` 的 `run` 怎么收、懒加载与注册的先后、smoke 断言改写、
-  `createTools(run)` / `toolDefinitions()` / 出口面的去留、恢复机器宿主怎么供 Manager + `run`：
-  **05 定案 (a) 已关掉裁决那一层**（四法公开面、无别名、请求级恒等断言）；恢复机器只定到
-  「宿主显式传 Manager + `run` + `activeNames`、不进 `Context` / 不设全局」这条**边界**，
-  分传还是合对象、名字与参数位置、链内怎么穿仍列在 05 §6、归执行票。
-  执行票按 05 §3 / §4 落地；名字 / ADR / 文档已由 **06 定案 (b)** 收口（沿用 `ToolManager`、
-  0016 只增不改、文档收账归 graduate 后的专门票，逐份口径见 06 §3.2），本块雾不再重开裁决。
-- 压缩摘要 `tools: []` / `streamAssistantResponse` 明确排除改道，恢复机器与 `runToolCall`
-  全量覆盖，八个调用点逐条结论见 03 号票 §3 —— 本块雾已由 03 清掉。
-- 会话账本格式：04 定案 (a) —— 活跃集与审批仍由账本派生，`.json` / `.jsonl` 与 `tool_config`
-  entry 一字不动；派生链与 Manager 之间只传名单数据（04 §2.5），
-  `allTools` 仍是 Map 全名表 —— 本块雾已由 04 关掉。
+**本图 2026-11-06 已 graduate：02–06 全部定案，执行票按「每一笔都能让 `npm run check` 绿」的切口开出，
+编号 07–11，`Blocked by` 串成一条链。**
+
+- [07 - Tool 目录无关与 `ToolManager` 落地](issues/07-tool-manager-landing.md)：类型（`execute` 加 `run`、
+  `ToolRunContext` 迁 `llm/types.ts`）、`ToolRegistry` → `ToolManager` 四法、六个零参工厂、出口面、
+  四函数收 `known`、装配收敛到一只、`Context.tools` 生产端改从 Map 取、smoke 按 05 §3 改写。
+- [08 - 引擎执行全量改道](issues/08-execution-reroute-to-manager.md)：03 §3 的六个执行调用点，
+  Manager 的执行入口成为生产代码唯一 `Tool.execute` 调用点。
+- [09 - 本轮名单进执行链](issues/09-active-names-threading.md)：04 §2.4，先判活再取实例，
+  禁用工具仍回 `Tool <name> not found`。
+- [10 - 文档与 ADR 收账](issues/10-docs-and-adr-closeout.md)：06 §3.2 全份（0016 / 四条指针 / 八处标注 /
+  逐句改写 / grep 清零）。
+- [11 - 全量验收](issues/11-full-acceptance.md)：三套数字 + 0016 状态行。
+
+**为什么不再细分**：`tsconfig.json` 把 core、server 与 13 条脚本编在一次 `tsc` 里，删掉 `ToolRegistry`
+的那一笔必须同时改完这些编译面，所以「类 / 装配 / smoke」不能拆成两票；05 §2.6 也断言「一次会话就能把
+所有调用点改完」。**切法与票号到此固定，不再重开**；各票内部形状仍归该票，本图不复述。
+
+四块旧雾已分别由 03（压缩摘要与传输面排除）/ 04（会话账本格式）/ 05（`register()` 与旧五法）/ 06
+（名字与文档处置）关掉，条文在各票 §5，不在本图重述。
 
 ## Out of scope
 
