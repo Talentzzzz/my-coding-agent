@@ -1017,6 +1017,7 @@ export class Agent {
 					dangling,
 					{ answers: start.answers },
 					hooks,
+					tools,
 					run,
 					signal,
 					emit,
@@ -1103,7 +1104,7 @@ export class Agent {
 						const executedToolBatch =
 							message.stopReason === "length"
 								? await failToolCallsFromTruncatedMessage(toolCalls, emit)
-								: await executeToolCalls(currentContext, message, hooks, run, signal, emit);
+								: await executeToolCalls(currentContext, message, hooks, tools, run, signal, emit);
 						toolResults.push(...executedToolBatch.messages);
 						hasMoreToolCalls = !executedToolBatch.terminate;
 						suspended = executedToolBatch.suspended === true;
@@ -1823,10 +1824,16 @@ type ExecutedToolCallBatch = {
 	suspended?: boolean;
 };
 
+/**
+ * A call that passed the gate and the schema: what to run, with which arguments.
+ *
+ * It names the tool and carries the arguments; it does not carry the tool object. Execution resolves
+ * the name against the table again, so what runs is the table's instance rather than a reference
+ * taken earlier (the table is append-only, so the two are the same object — `ToolManager.execute`).
+ */
 type PreparedToolCall = {
 	kind: "prepared";
 	toolCall: ToolCall;
-	tool: Tool<any>;
 	args: unknown;
 };
 
@@ -1854,7 +1861,7 @@ type FinalizedToolCallEntry = ToolCallOutcome | (() => Promise<ToolCallOutcome>)
  *
  * The model carries its own transport — the run's retry-wrapping one — so this asks the model it was
  * handed and the request is authed with exactly the key that model carries. Tools reach the request
- * as a parameter, not as a message, so the executable set the run holds is declared here:
+ * as a parameter, not as a message, so the set this request offers is declared here:
  * `toToolDeclaration` keeps the name, description, and schema and drops the rest. The system prompt
  * stays where the caller put it — a leading system message — and the transport reads it from there
  * when the request carries no explicit `system`.
@@ -2021,13 +2028,17 @@ export function danglingToolCallsOf(messages: Message[]): DanglingToolCall[] {
  * without a request, exactly as a live batch's suspend does.
  *
  * Exported because it is the one part of the engine a host can drive without a run: the smoke that
- * pins this contract calls it with a transcript and a set of answers, and nothing else.
+ * pins this contract calls it with a transcript, a set of answers, and the table the calls run
+ * against — no orchestrator, no run of its own. The resume is a run of its own, so the table and the
+ * run values arrive the way they do everywhere else on this chain: as arguments, not through the
+ * context.
  */
 export async function recoverPendingToolCalls(
 	currentContext: Context,
 	dangling: DanglingToolCall[],
 	recovery: RunRecoveryOptions | undefined,
 	hooks: ToolCallHooks,
+	manager: ToolManager,
 	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
@@ -2039,7 +2050,7 @@ export async function recoverPendingToolCalls(
 	for (const { toolCall, assistantMessage } of dangling) {
 		const answer = answers[toolCall.id];
 		if (answer !== undefined && answer.approved) {
-			const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, signal);
+			const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, manager, signal);
 			if (preparation.kind === "suspended") {
 				return { messages, terminate: true, suspended: true };
 			}
@@ -2053,7 +2064,13 @@ export async function recoverPendingToolCalls(
 			if (preparation.kind === "immediate") {
 				finalized = { toolCall, result: preparation.result, isError: preparation.isError };
 			} else {
-				const executed = await executePreparedToolCall(preparation, run, signal, emitToolExecutionUpdate(toolCall, emit));
+				const executed = await executePreparedToolCall(
+					preparation,
+					manager,
+					run,
+					signal,
+					emitToolExecutionUpdate(toolCall, emit),
+				);
 				finalized = await finalizeExecutedToolCall(currentContext, assistantMessage, preparation, executed, hooks, signal);
 			}
 			await emitToolExecutionEnd(finalized, emit);
@@ -2100,23 +2117,27 @@ async function synthesizeToolResult(
 /**
  * Execute the tool calls one assistant message issued: sequential when any of them says so, parallel
  * otherwise. Both paths prepare the calls in source order and write their results as messages.
+ *
+ * The mode is read off the table rather than off what the request declared: a call's behaviour is a
+ * property of the tool, and the table is where the tool lives.
  */
 async function executeToolCalls(
 	currentContext: Context,
 	assistantMessage: AssistantMessage,
 	hooks: ToolCallHooks,
+	manager: ToolManager,
 	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content.filter((block): block is ToolCall => block.type === "toolCall");
 	const hasSequentialToolCall = toolCalls.some(
-		(tc) => currentContext.tools.find((t) => t.name === tc.name)?.executionMode === "sequential",
+		(tc) => manager.get(tc.name)?.executionMode === "sequential",
 	);
 	if (hasSequentialToolCall) {
-		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, hooks, run, signal, emit);
+		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, hooks, manager, run, signal, emit);
 	}
-	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, hooks, run, signal, emit);
+	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, hooks, manager, run, signal, emit);
 }
 
 async function executeToolCallsSequential(
@@ -2124,6 +2145,7 @@ async function executeToolCallsSequential(
 	assistantMessage: AssistantMessage,
 	toolCalls: ToolCall[],
 	hooks: ToolCallHooks,
+	manager: ToolManager,
 	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
@@ -2135,7 +2157,7 @@ async function executeToolCallsSequential(
 		// Prepared before it is announced: a suspended call is announced never — the gate ended the
 		// run at it, no result is written, and the events stay silent so the window shows no card for
 		// a call that never ran. The call and everything after it in the batch stay unanswered.
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, signal);
+		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, manager, signal);
 		if (preparation.kind === "suspended") {
 			return { messages, terminate: true, suspended: true };
 		}
@@ -2154,7 +2176,13 @@ async function executeToolCallsSequential(
 				isError: preparation.isError,
 			};
 		} else {
-			const executed = await executePreparedToolCall(preparation, run, signal, emitToolExecutionUpdate(toolCall, emit));
+			const executed = await executePreparedToolCall(
+				preparation,
+				manager,
+				run,
+				signal,
+				emitToolExecutionUpdate(toolCall, emit),
+			);
 			finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -2187,6 +2215,7 @@ async function executeToolCallsParallel(
 	assistantMessage: AssistantMessage,
 	toolCalls: ToolCall[],
 	hooks: ToolCallHooks,
+	manager: ToolManager,
 	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
@@ -2198,7 +2227,7 @@ async function executeToolCallsParallel(
 		// Prepared before it is announced, as in the sequential path: a suspended call gets no events
 		// and no result, and the calls after it are not prepared either. The calls already queued
 		// above run to completion — they were underway when the gate answered.
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, signal);
+		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, manager, signal);
 		if (preparation.kind === "suspended") {
 			suspended = true;
 			break;
@@ -2234,7 +2263,13 @@ async function executeToolCallsParallel(
 				await emitToolExecutionEnd(finalized, emit);
 				return finalized;
 			}
-			const executed = await executePreparedToolCall(preparation, run, signal, emitToolExecutionUpdate(toolCall, emit));
+			const executed = await executePreparedToolCall(
+				preparation,
+				manager,
+				run,
+				signal,
+				emitToolExecutionUpdate(toolCall, emit),
+			);
 			const finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -2286,15 +2321,25 @@ function prepareToolCallArguments(tool: Tool<any>, toolCall: ToolCall): ToolCall
 	};
 }
 
+/**
+ * Resolve one call's tool and take it through the steps that precede execution.
+ *
+ * The tool is resolved against the process table, not against what the request declared: the table
+ * is the one place a tool lives (ADR-0016), and the declaration is that table's view for the
+ * transport. `prepareArguments` and the schema validation then read the fields of the resolved
+ * instance, so the shim the model's arguments are shaped by and the code that runs them are the
+ * same object. An unknown name is answered here, before the gate, because a call nobody can run is
+ * not a call to ask permission for.
+ */
 async function prepareToolCall(
 	currentContext: Context,
 	assistantMessage: AssistantMessage,
 	toolCall: ToolCall,
 	hooks: ToolCallHooks,
+	manager: ToolManager,
 	signal: AbortSignal | undefined,
-	tools: readonly Tool<any>[] = currentContext.tools,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome | SuspendedToolCall> {
-	const tool = tools.find((t) => t.name === toolCall.name);
+	const tool = manager.get(toolCall.name);
 	if (!tool) {
 		return {
 			kind: "immediate",
@@ -2351,7 +2396,6 @@ async function prepareToolCall(
 		return {
 			kind: "prepared",
 			toolCall,
-			tool,
 			args: validatedArgs,
 		};
 	} catch (error) {
@@ -2376,10 +2420,10 @@ function emitToolExecutionUpdate(toolCall: ToolCall, emit: AgentEventSink): Tool
 
 /** Options for {@link runToolCall}. */
 interface RunToolCallOptions extends ToolCallHooks {
+	/** The table the nested call resolves and runs against. */
+	manager: ToolManager;
 	/** This call's run values: the directory it acts in and the bash timeouts it runs under. */
 	run: ToolRunContext;
-	/** Tools the call resolves against. */
-	tools: readonly Tool<any>[];
 	/** Passed to the hooks as the message that issued the call. */
 	assistantMessage: AssistantMessage;
 	/** Passed to the hooks as the current agent context. */
@@ -2400,7 +2444,7 @@ interface RunToolCallOptions extends ToolCallHooks {
  */
 async function runToolCall(toolCall: ToolCall, options: RunToolCallOptions): Promise<ToolCallOutcome> {
 	const { assistantMessage, context, signal } = options;
-	const preparation = await prepareToolCall(context, assistantMessage, toolCall, options, signal, options.tools);
+	const preparation = await prepareToolCall(context, assistantMessage, toolCall, options, options.manager, signal);
 	if (preparation.kind === "immediate") {
 		return { toolCall, result: preparation.result, isError: preparation.isError };
 	}
@@ -2413,12 +2457,28 @@ async function runToolCall(toolCall: ToolCall, options: RunToolCallOptions): Pro
 			isError: true,
 		};
 	}
-	const executed = await executePreparedToolCall(preparation, options.run, signal, options.onUpdate ?? (() => {}));
+	const executed = await executePreparedToolCall(
+		preparation,
+		options.manager,
+		options.run,
+		signal,
+		options.onUpdate ?? (() => {}),
+	);
 	return finalizeExecutedToolCall(context, assistantMessage, preparation, executed, options, signal);
 }
 
+/**
+ * Run a call that passed the gate, through the table.
+ *
+ * The name is resolved here rather than carried in `prepared`, so the only `Tool.execute` call in
+ * production code is the table's own (`ToolManager.execute`, ADR-0016): what the engine owns is the
+ * orchestration around one call — the update sink, the abort signal, and turning a throw into the
+ * error result the model reads. An unknown name at this point is a bug upstream (the gate resolves
+ * first) and lands in the same catch, as an error result.
+ */
 async function executePreparedToolCall(
 	prepared: PreparedToolCall,
+	manager: ToolManager,
 	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	onUpdate: ToolUpdateSink,
@@ -2427,9 +2487,10 @@ async function executePreparedToolCall(
 	let acceptingUpdates = true;
 
 	try {
-		const result = await prepared.tool.execute(
+		const result = await manager.execute(
+			prepared.toolCall.name,
 			prepared.toolCall.id,
-			prepared.args as never,
+			prepared.args,
 			run,
 			signal,
 			(partialResult) => {

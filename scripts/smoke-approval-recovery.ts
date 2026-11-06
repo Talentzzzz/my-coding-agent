@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { createAssistantMessageEventStream, type ChatTransport, type Message } from "@my-agent/core";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import {
+	createToolManager,
 	danglingToolCallsOf,
 	openAgent,
 	recoverPendingToolCalls,
@@ -248,16 +249,22 @@ process.stdout.write("\ndangling calls no answer names are closed before the fir
 process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 
 {
-	const dangling = fakeAssistantMessage(fakeToolCall("read", { path: "a.txt" }, { id: "call_x" }));
+	const dangling = fakeAssistantMessage(fakeToolCall("read_fixture", { path: "a.txt" }, { id: "call_x" }));
 	// A tool the recovery pass can resolve, so a re-suspending gate is what stops it — not a missing
-	// tool, which the machine answers before any hook runs.
+	// tool, which the machine answers before any hook runs. The recovery machine resolves against a
+	// table, not against the context, so the tool arrives the way every tool does: registered on a
+	// table this exercise builds itself — there is no orchestrator and no hub in this file. It is
+	// named for the fixture rather than `read`, because a name the six built-ins already answer to is
+	// refused by the table itself.
 	const readTool: Tool = {
-		name: "read",
-		label: "read",
+		name: "read_fixture",
+		label: "read_fixture",
 		description: "reads a file",
 		parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } as never,
 		execute: async () => ({ content: [{ type: "text", text: "ran" }], details: {} }),
 	};
+	const manager = createToolManager();
+	manager.register(readTool);
 
 	/** What one pass emitted, so "silent" is an assertion and not an unobserved claim. */
 	const events: AgentEvent[] = [];
@@ -270,6 +277,7 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 		danglingToolCallsOf([dangling]),
 		{ enablePendingToolRecovery: false },
 		{},
+		manager,
 		{ workDirAbsPath: process.cwd() },
 		undefined,
 		emitted,
@@ -290,6 +298,7 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 		danglingToolCallsOf([dangling]),
 		undefined,
 		{},
+		manager,
 		{ workDirAbsPath: process.cwd() },
 		undefined,
 		emitted,
@@ -303,12 +312,14 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 	// A grant the gate does not actually clear: the recovery pass re-runs the call through the gate,
 	// and a gate that suspends again stops the recovery where it stands — no result is written, and
 	// the run ends before its request, exactly as a live batch's suspend does. The tool must exist
-	// for the gate to be reached at all, so the context carries a real one.
+	// in the table for the gate to be reached at all; the context declares nothing, which is the
+	// point — the declaration is what the transport reads, not what a call resolves against.
 	const resuspended = await recoverPendingToolCalls(
-		{ messages: [dangling], tools: [readTool] },
+		{ messages: [dangling], tools: [] },
 		danglingToolCallsOf([dangling]),
 		{ answers: { call_x: { approved: true } } },
 		{ beforeToolCall: async () => ({ suspend: true }) },
+		manager,
 		{ workDirAbsPath: process.cwd() },
 		undefined,
 		emitted,

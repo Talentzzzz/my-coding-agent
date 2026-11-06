@@ -1,7 +1,7 @@
 # 08 - 引擎执行全量改道 `ToolManager`（03 的六个调用点）
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 07
 
 ## Question
@@ -68,3 +68,126 @@ Blocked by: 07
 
 `## Answer` 记：六个调用点各自改法、`recoverPendingToolCalls` 的最终签名与三条 smoke 调用点的供值形状、
 check / smoke 数字（`../smoke-runs/after-08/`）、以及**「禁用工具在 08 之后仍会被 get 找到」这个已知缺口**。
+
+## Answer
+
+**2026-11-06 落地**（`Type: task`，按 03 §3 的六个调用点逐条改道；本票只动「执行从哪来」，判活仍归 09，
+文档与 ADR 仍归 10）。
+
+### 结论（一句话）
+
+引擎的六个执行调用点全部改道 `ToolManager`：`manager.execute(...)` 成为**生产代码唯一**的
+`Tool.execute` 调用点（`manager.ts:164` 那一次转发），预备与执行都经 `manager.get(name)`，
+`prepared.tool` 字段与 `RunToolCallOptions.tools` 一并退场，`Context.tools` 从此只被传输面读。
+`npm run check` **绿**（`tokens ok: 137 defined, 111 referenced`），28 条 smoke **26 绿 / 2 既有红、
+零新红**（一次偶发红按 01 口径复跑定性），`smoke-tools.log` 与 after-07 **逐字节相同**。
+
+### 1. 六个调用点各自怎么改
+
+| 调用点（改后行号） | 改动 |
+|---|---|
+| `executeToolCalls:2124` | 形参表多一位 `manager: ToolManager`（位置在 `hooks` 之后、`run` 之前）；`:2135` 的 `executionMode` 判定从 `currentContext.tools.find(...)` 改成 `manager.get(tc.name)?.executionMode`；两条批次调用各带 `manager` |
+| `executeToolCallsSequential:2143` / `executeToolCallsParallel:2213` | 各多一位 `manager`；`prepareToolCall(...)` 与 `executePreparedToolCall(...)` 的调用点补 `manager` |
+| `prepareToolCall:2334` | 删掉 `tools: readonly Tool<any>[] = currentContext.tools` 形参，改收 `manager`（`hooks` 之后、`signal` 之前）；`:2342` `const tool = manager.get(toolCall.name)`；`:2282` `prepareArguments` / `:2283` `validateToolArguments` 函数体一字未动，仍读这个实例的字段 |
+| `prepareToolCallArguments:2321` | 一行未动（改道在调用者） |
+| `executePreparedToolCall:2479` | 多一位 `manager`；`:2490` 改 `manager.execute(prepared.toolCall.name, prepared.toolCall.id, prepared.args, run, signal, onUpdate)`；`signal` / `onUpdate` / 异常→错误结果的 `try/catch` 原样 |
+| `recoverPendingToolCalls:2036`（导出） | 多一位 `manager`（`hooks` 之后、`run` 之前）；函数体的 `prepareToolCall` / `executePreparedToolCall` 各补 `manager`，其余（grant 重跑、deny 合成、孤儿收尾、再度 suspend）一字未改 |
+| `runToolCall:2445` | `RunToolCallOptions.tools` 换成 `manager`；预备与执行都从 Manager 走，`options.run` 原样。仍不导出、仍无人调用 |
+
+`PreparedToolCall`（`:1834`）**删掉 `tool` 字段**：它此前唯一读者是 `Tool.execute`，改道后无读者，
+留着就是一份「不从它执行却又摆在那儿」的可执行引用。`prepared` 现在只带 `toolCall` 与 `args`，
+执行时按 name 现取（两次 `get` 由 02 的恒等不变量担保）。
+
+`agent.ts` 内两处入口：`:1015` 的恢复机器调用补 `tools`（`runEngine` 顶部已解构出的那只），
+`:1107` 的 `executeToolCalls` 同理。**明确排除的两处一行未动**：压缩摘要 `tools: []`、
+`streamAssistantResponse` 的 `context.tools.map(toToolDeclaration)`（`:1877`）——后者是
+`Context.tools` 在 `agent.ts` 里的唯一剩余读点。
+
+### 2. `recoverPendingToolCalls` 的最终签名与三条 smoke 的供值形状
+
+```ts
+export async function recoverPendingToolCalls(
+	currentContext: Context,
+	dangling: DanglingToolCall[],
+	recovery: RunRecoveryOptions | undefined,
+	hooks: ToolCallHooks,
+	manager: ToolManager,          // 本票新增：这一轮用哪张表
+	run: ToolRunContext,           // 02 的 per-run 值（07 已加）
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): Promise<ExecutedToolCallBatch>;
+```
+
+参数布局的口径：**服务在前、这一轮的值次之、瞬态在后**（`hooks, manager` → `run` → `signal, emit`），
+与批次链（`hooks, manager, run, signal, emit`）逐位对齐，读一处就够。`activeNames` 在 09 落在
+`manager` 之后、`run` 之前的位置——本票不预放空位。
+
+`scripts/smoke-approval-recovery.ts`（`:249-327`）三条调用点的供值形状：
+
+- 练习自造一只表：`:266` `const manager = createToolManager()`、`:267` `manager.register(readTool)`。
+  **没有 Agent、没有 hub**，只有这两行——这正是 05 §3.5 说的那条差别。
+- 三处 `Context` 字面量**都写 `tools: []`**（`:276` / `:297` / `:318`；第三处原文是 `[readTool]`）；
+  每次调用在第 5 位多一个 `manager` 实参，`run` 仍是 `{ workDirAbsPath: process.cwd() }`。
+- 假 tool 的 `execute: async () => …` 不收 `run`，仍合法（07 的签名里 `run` 是必填实参，而少收实参的
+  函数对多参签名是合法赋值）。
+- **名字从 `read` 改成 `read_fixture`**：表拒绝与内置同名（`Tool already registered: read`，05 §2.1），
+  而这只假 tool 必须进表才「找得到」。`dangling` 那条 transcript 里的 tool call 名随之改，断言不动。
+
+### 3. 验收
+
+- `npm run check`：**绿**，exit 0，`tokens ok: 137 defined, 111 referenced`；`after-08/check.log`。
+- 28 条 smoke（`run-all.sh` 无服务器口径）：**25 绿 / 3 红**，红集合
+  `{ smoke-api（缺服务器，既有）, smoke-liveness（本机时序 12 s，既有）, smoke-desktop-observability（偶发） }`。
+  最后一条是 07 号票记过的同一处：24 ms 预算紧挨 `smoke-approval` 之后跑，串行时偶发
+  `it waited the budget it was given, not the default 24 ms`；单独复跑 **1/1 绿**，日志与 after-07 那份
+  **逐字节相同**（`after-08/rerun-smoke-desktop-observability-1.log`）。按 01 号票口径 ⇒ **零新红**。
+- 逐份 diff 28 条日志（对 after-07）：只有 4 份不等，全部登记在案——`smoke-boot`（随机端口 / 临时 home /
+  UUID）、`smoke-liveness`（毫秒数与 FAIL 组合）、`smoke-desktop-observability`（本轮偶发红那一份）、
+  `smoke-session`（本票的断言改写，见 §4）；**`smoke-tools.log` 223 行逐字节相同**（工具行为未变）。
+- `smoke-approval-recovery` 绿，25 条断言全在，走的是新路（见 §2）。
+- grep：
+  `grep -n "\.execute(" packages/core/src/agent.ts` → 只剩 `:2490` 的 `manager.execute(`；
+  全 `packages/` 生产代码只剩两处——`agent.ts:2490`（Manager 入口的调用）与 `manager.ts:164`
+  （Manager 内部对 `Tool.execute` 的唯一转发）；`prepared.tool` **归零**；
+  `Tool <name> not found` 仍只在 `prepareToolCall`（`:2346`）一处产出。
+- 全部输出在 `../smoke-runs/after-08/`（`check.log`、`summary.txt`、28 份 `<name>.log`、
+  `rerun-smoke-desktop-observability-1.log`）。
+
+### 4. 已知缺口：禁用工具在 08 之后仍会被 `get` 找到
+
+`prepareToolCall` 现在问的是「表里有没有这个名字」，而表恒装六个内置 + 注册项。所以一个被
+`setActiveTools` 关掉的工具，模型若仍点名，**会被找到并执行**——「未激活工具的调用回
+`Tool <name> not found`」这条既有行为（`docs/architecture.md:125`）此刻只剩声明那一半（模型不再被告知它）。
+这正是 04 §2.4 预言的中间态，由 09 把本轮 `activeNames` 穿进执行链补回（两处：`prepareToolCall` 闸门前、
+`executionMode` 判定前）。
+
+**这条缺口与票面「验收」第 4 条互斥**，落地时已与用户确认口径：改道之后
+`scripts/smoke-session.ts` 的 `exerciseDeactivatedToolCall`（`:1408`）必然变红（工具真的跑了、文件真被写），
+「仍绿」在物理上不成立。裁决是**改断言钉住中间态**（用户选定）：该练习现在断言
+「仍被表找到并执行」（`:1424` 起四条），注释与函数文档点名 09 把它翻回 `Tool write not found`。
+09 号票的验收因此要连着这一处一起翻——它写的「仍绿，并且路径经判活」在 09 落地后成立，在 08 这一笔上是
+「绿，但断言的是缺口」。
+
+### 5. 与票面的偏差（照实记）
+
+1. **验收第 4 条按 §4 处理**：不是「仍绿」，而是「改断言钉住中间态」。这是本票唯一一处产品断言的改动，
+   理由与裁决见 §4；除这四条外 `smoke-session.log` 与 after-07 逐字节相同。
+2. **`PreparedToolCall.tool` 删除而非保留**：票面把这个字段的去留留给本票，语义是「不从它执行」；
+   实测改道后它没有任何读者（`finalizeExecutedToolCall` 只读 `toolCall` / `args`），留下就是死字段。
+3. **`recoverPendingToolCalls` 的参数位置**：票面说「参数布局归本票」；`manager` 放在 `hooks` 之后、
+   `run` 之前，与批次链逐位对齐（§2）。没有为 09 的 `activeNames` 预留空位。
+4. **假 tool 改名 `read_fixture`**：票面没点名，但 `register()` 拒绝与内置同名，不改名这条注入根本进不去表。
+5. **`smoke-approval-recovery` 的三处 `Context.tools` 都写 `[]`**：按票面；其中第一、二处原本就是 `[]`，
+   只有第三处从 `[readTool]` 改过来。
+
+### 6. 给 09
+
+- 两处判活落点已经就位、只差名单：`prepareToolCall:2342` 的 `manager.get(toolCall.name)` 前面加
+  `activeNames.has(...)`（落空仍回 `:2346` 那句，不新增来源）；`executeToolCalls:2135` 的
+  `manager.get(tc.name)?.executionMode` 同样先判活，否则被禁用的 `bash` 会把整批翻成 sequential。
+- 传参链：`runEngine:1015` / `:1107` → 两条批次路径 → `prepareToolCall`；`manager` 的座位就是 09 的
+  `activeNames` 该坐的位置（`hooks` 之后、`run` 之前，或紧挨 `manager`）。
+- `scripts/smoke-session.ts:1408` 的四条断言要翻回 `not found` / 「did not touch the directory」/
+  「errored tool result」，函数文档里点名 09 那段注释一并删。
+- `executePreparedToolCall` 不重复判活（03 §2.4）：`manager.execute` 落空仍是一条 `Tool not found:` 的
+  错误结果，那是 bug 兜底、不是第二道闸门。

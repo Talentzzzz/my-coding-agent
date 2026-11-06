@@ -119,6 +119,18 @@ Status: open
   （`prepareToolCall` 不接 `run`、请求级身份改在执行点量、`smoke-approval-recovery` 只补 `run` 实参）
   记在票内 §6。
 
+- **08 · 引擎执行全量改道 `ToolManager`（resolved）**：[08 - 引擎执行全量改道 ToolManager](issues/08-execution-reroute-to-manager.md) ——
+  03 §3 的六个执行调用点全部改道：`executeToolCalls` / 两条批次路径 / `prepareToolCall` /
+  `executePreparedToolCall` / `recoverPendingToolCalls`（导出，第 5 位新增 `manager`）/ 无人调用的
+  `runToolCall`，`manager.execute(...)` 成为**生产代码唯一**的 `Tool.execute` 调用点
+  （`agent.ts:2490` 调用 + `manager.ts:164` 转发），`PreparedToolCall.tool` 与
+  `RunToolCallOptions.tools` 一并退场，`Context.tools` 只剩 `streamAssistantResponse` 一个读点。
+  `check` 绿（137/111）、28 条 smoke **26 绿 / 2 既有红、零新红**（`smoke-desktop-observability`
+  串行偶发一次、复跑 1/1 绿且日志与 after-07 逐字节相同）、`smoke-tools.log` 逐字节相同。
+  **已知中间态**：`get` 装全部六个，禁用工具此刻仍会被找到并执行；票面「验收第 4 条（`smoke-session`
+  仍绿）」与之互斥，经用户裁决改为**断言钉住中间态**（`exerciseDeactivatedToolCall` 四条），09 翻回。
+  `activeNames` 未进执行链（09 的两处落点已就位，见票内 §6）。
+
 ## Not yet specified
 
 **本图 2026-11-06 已 graduate：02–06 全部定案，执行票按「每一笔都能让 `npm run check` 绿」的切口开出，
