@@ -1,7 +1,8 @@
 # 0015：把 `packages/llm` 折叠进 core——全树只剩一个 `Context` 与一个 `Tool`
 
-日期：2026-11-06 · 状态：已接受，**已落地**（01–03 号票；`check` 与除 `smoke-api` 外的 smoke 全套绿、
-`build:web` 绿，零行为变化）
+日期：2026-11-06 · 状态：已接受，**已落地**（01–04 号票；`check` 与 `build:web` 绿，smoke 逐条与改动前的
+树对照零新红——`smoke-api` 要一只在跑的服务器，`smoke-liveness` 的时序断言在本机改动前后同为红，见
+[04 号票](../../.scratch/context-tool-unification/issues/04-final-acceptance.md)；零行为变化）
 取代：[0008](0008-loop-merged-into-agent.md)（部分——决定 6 里 `LoopContext` → `AgentContext` 的命名，
 以及「工具与上下文的形状也住在 `core/src/types.ts`」那一半；还有其*被取代的是什么*一节里
 「`packages/llm` 仍原样适用……也**没有**被并入任何人」这句现状陈述）
@@ -53,6 +54,10 @@ package.json 与 tsconfig、根 tsconfig 里两条 `@my-agent/llm` 路径别名�
 4. **`Agent` 前缀从撞名处清零**：core 的 `types.ts` 删掉那些撞名的定义，改为 re-export 单一名字
    （`Context` / `Tool` / `ToolResult` / `ToolUpdateCallback` / `ToolExecutionMode`）；`AgentToolCall`
    删除，调用点改用 `ToolCall`。`AgentEvent`、`AgentState` 等不与 llm 撞名的会话层词留在原处，不动。
+   一个例外：`ToolCallOutcome`（`{ toolCall, result, isError }`，钩子跑完之后的定稿）**留在
+   `types.ts`**，而绘图会话当时的名单把它列进了 `llm/types.ts`。落地时它只有 `Agent` 一个读者，
+   搬进传输契约会与下面那条保留下来的分界（0008 决定 6：引擎契约住 `types.ts`）打架；04 号票复核
+   确认这个位置成立，所以记在这里而不是改代码。
 5. **`@my-agent/llm` 全仓清零**：core 顶层 `index.ts` 补一段传输面出口（`anthropicMessages`、`Model`、
    `createAssistantMessageEventStream`、`ChatTransport` 等），server（`boot.ts` / `hub.ts`）与当时导入
    它的 7 个 script 改从 `@my-agent/core` 取。不设「别名指回内部路径」的假包名。
@@ -121,8 +126,9 @@ package.json 与 tsconfig、根 tsconfig 里两条 `@my-agent/llm` 路径别名�
 
 明确不动、读者不该跟着本 ADR 一起重开的：
 
-- **零行为。** wire 协议、事件流、工具语义一个字不动；`npm run check`、除 `smoke-api`（环境依赖）外的
-  smoke 全套、`build:web` 是每张票的验收线，合并前后同为绿。
+- **零行为。** wire 协议、事件流、工具语义一个字不动；`npm run check`、smoke 全套、`build:web` 是每张票的
+  验收线，合并前后**逐条同色**（28 条里 26 条两边同为绿；`smoke-api` 要一只在跑的服务器才绿，
+  `smoke-liveness` 的时序断言在本机改动前后同为红——两条都与本 ADR 无关，见 04 号票）。
 - **`@ts-nocheck`**：留下。0008 决定 7 是「去掉它」，这一次是「不动它」——搬目录不等于转正，把 27 个
   文件过一遍严格配置是另一笔工作。
 - **0008 决定 6 的分界**：类型不进 `protocol.ts`。wire 是客户端看得见的东西，引擎交给工具与 hook 的

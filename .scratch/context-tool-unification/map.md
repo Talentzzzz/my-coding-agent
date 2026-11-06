@@ -52,8 +52,21 @@ Label: wayfinder:map
   外壳、偏离表),AGENTS.md 布局与术语表(tool/model/transport/engine),README 导语,notes.md 加
   2026-11-06 补。验收 grep 在 architecture/AGENTS/README 清零,剩余 37 处全在 ADR 历史叙述、
   0015 引用旧决策与 notes 第一节「结论清单」(按票 14 同类扩免);check 绿,smoke 全套留给 04。
-  留观:25 个折叠文件头注释的「every import into packages/core stays fully checked」已不成立,
-  待微票。
+  留观:折叠文件的头注释「every import into packages/core stays fully checked」已不成立(04 号票数过,
+  实为 **23** 个,票 03 记的 25 是估的),加上两处仍把 `core/src/llm/` 叫作「this package」的句子
+  (`llm/index.ts` 开头的注释、`llm/model.ts` 的 `transport` 字段注释),一并等微票。
+- [04](issues/04-final-acceptance.md) resolved(本笔):终验过关,图收口。`npm run check` 绿
+  (137/111 token);`build:web` 绿;清零断言成立——`packages/`、`scripts/`、配置 0 处,`packages/llm`
+  目录不存在,全仓剩余 37 处全在 ADR 历史叙述与 notes(与票 03 的账逐条一致)。smoke 28 条改成
+  **与改动前那棵树(511fc09)同机同环境对跑**:两边同为 26 绿 + 2 红(`smoke-api` 无服务器、
+  `smoke-liveness` 时序断言),起服务器后 `smoke-api` 两边都 ok,故零新红;`smoke-tools` 223 行输出
+  逐字节相同,25/28 份日志完全相同、3 份差异逐份归因(随机端口/id、基线树缺 `dist`、宿主 fs 垫片偶发崩)。
+  「目的地达成」的判据全部落在实测上,不再引用文字记录。ADR-0015 状态行与验收句按实测收紧。
+  code-review 双轴:Standards 零硬违规(6 条判断项,均已判为风格或本就有意,见票 Answer);
+  Spec 轴抓到一处**定案偏离**——`ToolCallOutcome` 住在 `types.ts` 而不是定案 3 点名的 `llm/types.ts`。
+  复核后判定「不动代码、记进 ADR」:它只有 `Agent` 一个读者,是引擎的定稿形状,搬进传输契约会与
+  0008 决定 6 保留下来的分界打架;ADR-0015 决定 4 已补这一笔。另:前三条票记的「smoke 全套绿」是
+  当时的实测,今天 `smoke-liveness` 在本机复现为红(改动前后同红),口径以本条的对照为准。
 
 ## Not yet specified
 
@@ -61,6 +74,10 @@ Label: wayfinder:map
   绕行(保留现状语义),若绕不过去,在对应票 Comments 登记并升级成新票,不得顺手改行为。
 - `ToolResultMessage` / `estimate.ts` 等 llm 侧泛型与 utils 在合并落点上的最终摆放——机械,
   跟着票 02 走,不单独设票;若发现撞名或语义纠缠再 graduate。
+- **登记(04 号票升级,本图不做)**:`smoke-liveness` 的
+  `within three of the heartbeats it was promised…` 这条断言在本机改动前后同为红(实测 ~2.0 s
+  对 1.65 s 预算,去掉宿主垫片也红)。修它要么动客户端判活、要么动断言预算,两边都越过零行为红线,
+  留待下一次专门处理。同理 `smoke-api` 要一只在跑的服务器才算绿,属 rig 的环境依赖,不在本图。
 
 ## Out of scope
 
