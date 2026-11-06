@@ -79,7 +79,7 @@ Status: open
 
 - **04 · 活跃集与审批的归属（resolved）**：[04 - 活跃集与审批的归属：Map 装全部还是只装活跃](issues/04-active-set-and-approval-ownership.md) —— **(a)** Manager 只答「存在什么 + 按名字取实例」（外加 03 的执行转发），Map 恒装全部实例且不可变；活跃集与审批仍是**账本派生的纯数据**，四函数留 `session/tool-config.ts`，`Agent` 把本轮名单收成栈上局部、显式穿过执行链判活（`Tool <name> not found` 仍归引擎），`SessionServices.tools` 换 `ToolManager` 但不带会话状态。两处读点加冷读第三处都从 Manager 的**全部名单**门读；`.json` / `.jsonl` / `tool_config` 格式一字不动。票内 §1 逐条否 (b)/(c)（含并发与会话切换换出两问）、§4 改动面、§5 十条决定记录；`names()` 等方法去留与 smoke 归 05、名字 / ADR / 文档归 06，本票不代答。
 
-- **05 · `register()`、方法面与 smoke 断言（resolved）**：[05 - register()、懒加载与 smoke 断言的处置](issues/05-register-lazy-load-and-smoke-assertions.md) —— **(a)** `register()` 保留为 `map.set`，测试工具与六个内置同表、**随时可加、只加新名字、同名（含内置）抛错**，Map 对象与已有条目不可换（「表不可变」= 值不可变、键集可单调增长）；构造零参、首次访问一次填满六个零参工厂，`register()` 自己也是触发者且先 `ensureFilled()` 再判重。旧五法：`names()` / `register()` 留且签名不动；`build(name, run)` 删、由 `get(name)` 取代（`run` 整个删）；`activeNames(state)` / `active(state, run)` 删；**不留别名、不加批量便利门**；按 03 补执行入口 `execute(name, toolCallId, params, run, signal?, onUpdate?)`（`run` 必填、`get` 后转发），公开面收成四法。出口面删 `createToolRegistry` / `createTools` / `toolDefinitions` / `toolListFor` / `ToolDefinition(s)` 等「现建」链部件，留选择/填充那半；`smoke-tools.ts:733` 改读 `manager.names()`。smoke：`:1264`「每次新对象」翻成「恒为同一实例」（**恒等的是 `Context.tools` 的元素，数组仍每请求新建**）、`:1281` 改 `get("noop") === noop` + 判重，并补一条请求级新不变量「同一会话的两个请求取到同一个实例」（含跨会话那一半）；`exerciseOutputBackstop` 保留注册、`smoke-approval-recovery` 的假 tool 改 `manager.register()` 且恢复机器由宿主显式传一个执行依赖对象；三处直调 `execute` 补 `run`、bash 上限从构造期改调用期。票内 §0 更正「`scripts/mount-session.ts` 导入工具出口」这一事实（它只导入 `assembleSession`，不传 `tools`），并把 04 §3 冷/热一致在冷读路径上的推论列为核对项；§1 逐条否 (b)（删不掉懒填充这次写却要摊进五处生产装配）/ (c)（与 02 §2.3 自相矛盾、隐藏时间耦合），§5 十二条决定记录。名字 / ADR / 文档归 06，执行票内部形状不预切。
+- **05 · `register()`、方法面与 smoke 断言（resolved）**：[05 - register()、懒加载与 smoke 断言的处置](issues/05-register-lazy-load-and-smoke-assertions.md) —— **(a)** `register()` 保留为 `map.set`，测试工具与六个内置同表、**随时可加、只加新名字、同名（含内置）抛错**，Map 对象与已有条目不可换（「表不可变」= 值不可变、键集可单调增长）；构造零参、首次访问一次填满六个零参工厂，`register()` 自己也是触发者且先 `ensureFilled()` 再判重。旧五法：`names()` / `register()` 留且签名不动；`build(name, run)` 删、由 `get(name)` 取代（`run` 整个删）；`activeNames(state)` / `active(state, run)` 删；**不留别名、不加批量便利门**；按 03 补执行入口 `execute(name, toolCallId, params, run, signal?, onUpdate?)`（`run` 必填、`get` 后转发），公开面收成四法。出口面删 `createToolRegistry` / `createTools` / `toolDefinitions` / `toolListFor` / `ToolDefinition(s)` 等「现建」链部件，留选择/填充那半；`smoke-tools.ts:733` 改读 `manager.names()`。smoke：`:1264`「每次新对象」翻成「恒为同一实例」（**恒等的是 `Context.tools` 的元素，数组仍每请求新建**）、`:1281` 改 `get("noop") === noop` + 判重，并补一条请求级新不变量「同一会话的两个请求取到同一个实例」（含跨会话那一半）；`exerciseOutputBackstop` 保留注册、`smoke-approval-recovery` 的假 tool 改 `manager.register()` 且恢复机器由宿主显式传 Manager + `run` + `activeNames`（只定边界，参数布局归执行票）；三处直调 `execute` 补 `run`、bash 上限从构造期改调用期。票内 §0 更正「`scripts/mount-session.ts` 导入工具出口」这一事实（它只导入 `assembleSession`，不传 `tools`），并把 04 §3 冷/热一致在冷读路径上的推论列为核对项；§1 逐条否 (b)（删不掉懒填充这次写却要摊进五处生产装配）/ (c)（与 02 §2.3 自相矛盾、隐藏时间耦合），§5 十二条决定记录。名字 / ADR / 文档归 06，执行票内部形状不预切。
 
 ## Not yet specified
 
@@ -89,8 +89,10 @@ Status: open
   现在不预切，毕业时按 02 / 03 / 04 / 05 票的清单核，不重开裁决。**
 - `register()` 去留、旧五法名字与签名、`build` 的 `run` 怎么收、懒加载与注册的先后、smoke 断言改写、
   `createTools(run)` / `toolDefinitions()` / 出口面的去留、恢复机器宿主怎么供 Manager + `run`：
-  **05 定案 (a) 已逐条关掉**（四法公开面、无别名、请求级恒等断言）；执行票按 05 §3 / §4 落地，
-  06 只收名字与文档，本块雾不再重开。
+  **05 定案 (a) 已关掉裁决那一层**（四法公开面、无别名、请求级恒等断言）；恢复机器只定到
+  「宿主显式传 Manager + `run` + `activeNames`、不进 `Context` / 不设全局」这条**边界**，
+  分传还是合对象、名字与参数位置、链内怎么穿仍列在 05 §6、归执行票。
+  执行票按 05 §3 / §4 落地，06 只收名字与文档，本块雾不再重开裁决。
 - 压缩摘要 `tools: []` / `streamAssistantResponse` 明确排除改道，恢复机器与 `runToolCall`
   全量覆盖，八个调用点逐条结论见 03 号票 §3 —— 本块雾已由 03 清掉。
 - 会话账本格式：04 定案 (a) —— 活跃集与审批仍由账本派生，`.json` / `.jsonl` 与 `tool_config`

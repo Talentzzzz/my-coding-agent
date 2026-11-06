@@ -86,7 +86,8 @@ Blocked by: 02
 04 §5 #9 已把这两处收敛列为核对项，而 hub 的冷读是第三个读者——
 `hub.ts:251` 构造编排层时不传 tools、`:792` 的 `sessionOptions` 也不带 tools，`hub.ts:335` 的
 `readSessionSnapshot` 于是在 `assemble` 里再造一只并在 `:177-182` 真的读它。本票不新增装配约束，
-只记 (a) 保留 `register()` 后的一条形体后果：这只冷读目录必须也是那一张 Map，否则 04 §3 的
+只记一条**核对项**（02 §5 #3 / 04 §3 的推论，不是本票新增的装配约束）：
+(a) 保留 `register()` 后，冷读目录也应是同一张 Map，否则 04 §3 的
 「冷/热 `allTools` 一致」在测试工具上会破（§2.5、§4）。
 
 票面没点名、但定案必须一并交代的：
@@ -206,9 +207,9 @@ Manager（**名字/文件归属 06**）构造**零参**：六个内置是 `tools
   没有 `unregister` / `clear` / `replace` / 换 Map。**注册项也是目录无关的实例**（02 §5 #3）：
   每次不同的值都走 `execute` 的 `run` 实参，不许在闭包里捕会话值；`smoke` 两个假工具今天不读
   `run`，`execute: async () => ...` 少收参数在 TS 里仍可赋给 `Tool`，**函数体不用改**。
-- **测试接缝的口径**：生产代码零 `register()` 调用，只有 `scripts/` 用它；不引入 env 开关或运行时
-  守卫去「识别测试」（那要给进程级服务加一份配置），而是在源码注释里写清它只加新名字、
-  内置条目不可覆盖（源码注释用英文；文档怎么记归 06）。这也意味着 `names()` / `allTools` /
+- **测试接缝的口径**：生产代码零 `register()` 调用，只有 `scripts/` 用它；它只加新名字、
+  内置条目不可覆盖这条边界在源码注释里写清即可（注释用英文；文档怎么记归 06）。
+  要不要额外的运行时识别手段属执行票的实现细节，本票不预设。这也意味着 `names()` / `allTools` /
   `defaultToolNames` 的「全量」在带测试工具的进程里会多一个名字——与今天 `local` 表参与
   `names()` 的行为**逐字等价**（04 §3 的表已按这个语义写）。
 - **并发**：两个在飞会话各持本轮 `run`（02 §2.4）与各自的 `activeNames`（04 §2.4），共享的只有
@@ -267,15 +268,19 @@ execute(
   `signal` / `onUpdate` 的顺序与可选性不动；六个工厂的 `execute` 包装层各多收一个 `run` 形参
   （02 §2.2），`:2402` 则由引擎改调 `manager.execute(...)` 把这一轮的 `run` 显式带下去（02 §2.4）。
 - 方法体只有 `get(name)` + 原样转发 `Tool.execute(toolCallId, params, run, signal, onUpdate)`，
-  成为**生产代码唯一**的 `Tool.execute` 调用点（03 §5 #4）。`get` 落空时抛
-  `Tool ${name} not found` 作防御：`executePreparedToolCall` 现成的 `try/catch` 会把它变成错误结果，
-  行为不变；这不是第二道判活闸门（04 §2.4 的 `activeNames.has(name)` 仍在引擎侧）。
+  成为**生产代码唯一**的 `Tool.execute` 调用点（03 §5 #4）。`get` 返回 `Tool | undefined`，
+  落空怎么处理（交给 `executePreparedToolCall` 现成的 `try/catch`，或由引擎在闸门前拦下）
+  属执行票的形状细节；本票只定它**不得**变成第二道判活闸门、也不新增第二个
+  `Tool <name> not found` 的结果来源（03 §5 #6、04 §2.4）。
   校验 / shim / 两道闸门 / 事件 / 定稿一律不进 Manager（03 §2.4）。
 
 #### 2.5 出口面：`createTools` / `toolDefinitions` / `toolListFor` 与 `core/index.ts`
 
 02 §4 把 `tools/index.ts:46-48` 的 `createTools(run)` 交给 05 收，04 §4 把 `core/index.ts:207-220`
-的出口面交给 05/06 一起定。本票定「哪些出口还在」，**具体类名/符号名归 06**：
+的出口面交给 05/06 一起定。本票只答票面点名的两个问题——「`toolDefinitions().names()` 还留不留」
+与「旧『现建』链上的出口还留不留」——给的是**能力的去留**，不是逐项出口清单：
+`tools/index.ts` / `core/index.ts` 最终逐行增删、以及新 Manager 工厂与类型的**具体符号名**随
+06 的定名与执行票一起落：
 
 - **删**：`createToolRegistry`、`type ToolRegistry`、`createTools`、`toolDefinitions`、
   `createToolDefinitions`、`type ToolDefinition(s)`、`toolListFor`。理由：六个工厂收成零参后
@@ -283,9 +288,9 @@ execute(
   生产读者是 `registry.active`（`:67`），`createTools(run)` 唯一的读者是 `smoke-tools.ts:87`，
   `toolDefinitions()` 剩余读者是三处装配点与 `smoke-tools.ts:733`。留任何一个，都是在
   「一张 Map」之外再留一份「存在什么」或「怎么造」的事实源（02 §2.3）。
-- **留**：`describeToolCall`、`fillTools`、`narrowToKnown`、`type ToolState`、
-  `type ToolRunContext`（02 §2.1 让它从 `llm/types.ts` 经 `tools/manager.ts` 转发，导入路径不变）、
-  `DEFAULT_MODE_NAME` 等与「选择/填充」有关的既有出口（文件与符号名归 06）。
+- **留**：与「选择/填充」有关的那半（如 `fillTools` / `narrowToKnown` / `type ToolState`），
+  以及 `type ToolRunContext`（02 §2.1 让它从 `llm/types.ts` 经 `tools/manager.ts` 转发，
+  导入路径不变）；它们不是本票要删的对象，逐项以执行票核过的出口面为准。
 - **加**：新 Manager 的构造工厂与类型（名字归 06），**零参**；`session-factory.ts:142` / `:285`
   从 `createToolRegistry(toolDefinitions())` 收成 `createToolManager()`。04 §5 #9 要求的
   「两处收敛到同一只」因此是**传同一实例**，不是「两边各自造一只等价的」。
@@ -294,11 +299,11 @@ execute(
   不再有 `toolDefinitions().names()` 这份并列名单。
 - **`scripts/mount-session.ts`**（§0 的更正）：今天不导入工具符号，之后也不需要导入；
   它仍只调 `assembleSession`（那条路径今天把 `assemble` 的 `registry` 丢掉、不读名字）。
-  但 (a) 下有一条形体后果要交执行票核对：hub 的冷读
-  （`hub.ts:335` → `readSessionSnapshot` → `assemble`，`:177` 真的读 `allTools`）必须拿到
-  **同一只 Manager**，否则一只注册了测试工具的 Manager 只在热侧可见，
-  04 §3「冷/热快照一致」在 `allTools` 上就破了。这是 (a) 与 04 §3 / §5 #9 的推论与核对项，
-  **不是本票新增的装配约束**。
+  按 02 §5 #3 与 04 §3 / §5 #9 的既有决定，hub 的冷读
+  （`hub.ts:335` → `readSessionSnapshot` → `assemble`，`:177` 真的读 `allTools`）应与热侧
+  共用**同一只 Manager**，否则一只注册了测试工具的 Manager 只在热侧可见，
+  04 §3「冷/热快照一致」在 `allTools` 上就破了。本票只把它记成执行票的**核对项**，
+  **不是新增的装配约束**。
 - `packages/server` / `desktop` / `web` 源码零改动：它们只消费快照字符串数组，
   `.json` / `.jsonl` / `tool_config` entry 格式一字不动（04 §5 #2 #3）。
 
@@ -365,10 +370,11 @@ execute(
 把改写后的练习做成**两步**：前半是 §3.2 的纯 Manager 形状断言；后半用**这只 Manager**
 开一个真会话，跑两个请求，测 02 §5 #3 的可测不变量。
 
-- **捕获**：给 `SentRequest`（`smoke-session.ts:307-318`）加一个 `instances: readonly Tool<any>[]`，
-  在 `recordRequests:327-345` 的回调里从 `context.tools` 原样存下引用（不是 `declaredTools` 的
-  名字数组）。其余断言只读已有字段，多一个字段不引起别的改动；执行票也可选等价的专用捕获器，
-  但**必须量到真实的 `Context.tools` 元素**，不能拿 `manager.get()` 自己跟自己比来冒充请求级验证。
+- **捕获（推荐形状，机制归执行票）**：给 `SentRequest`（`smoke-session.ts:307-318`）加一个
+  `instances: readonly Tool<any>[]`，在 `recordRequests:327-345` 的回调里从 `context.tools`
+  原样存下引用（不是 `declaredTools` 的名字数组）；等价的专用捕获器也行。
+  本票只钉**断言口径**：必须量到真实的 `Context.tools` 元素，不能拿 `manager.get()` 自己跟自己比
+  来冒充请求级验证。
 - **驱动**：`recordRequests(sent, [fakeAssistantMessage("first"), fakeAssistantMessage("second")])`，
   `openSession({}, {}, undefined, manager)`；两次 `prompt` + `settle` 之间调
   `setActiveTools(sid, ["read"])`（照 `exerciseActiveTools:1308-1316` 的先例）。
@@ -405,14 +411,16 @@ execute(
 
 - `:254-260` 的假 `readTool` 保留（类型 `Tool`，`execute` 不收 `run` 仍合法）。
 - `:306` 「把假 tool 塞进 `Context.tools` 才找得到」按 03 §3 失效：三次调用（`:268` / `:287` / `:305`）
-  的 Context 字面量都写 `tools: []`，改由练习自己造的 `manager.register(readTool)` 供出工具。
+  的 Context 字面量**改后**都写 `tools: []`——今天 `:269` / `:288` 已是 `[]`，`:306` 正是那处
+  `[readTool]`，要改的就是它——改由练习自己造的 `manager.register(readTool)` 供出工具。
   这是 (a) 与 (b) 最具体的差别：这个 smoke **没有 Agent、没有 hub**，只有一只它自己造的 Manager。
 - `recoverPendingToolCalls`（导出，六个位置实参）按 03 §2.3 要多拿 Manager 与 `run`，
-  按 04 §2.4 还要拿本轮 `activeNames`。本票定**边界**：宿主传**一个**执行依赖对象，
-  内容至少 `{ manager, run, activeNames }`，由 `Agent.run:1011` 从这一轮的栈上局部显式攒出；
-  三个 smoke 调用点各传一份字面量（`run: { workDirAbsPath: root }`、`activeNames: ["read"]`）。
-  不把 Manager 塞进 `Context`、不设模块级全局、不把签名摊成八个位置参数（03 §2.3 / 02 决定 4 /
-  04 §2.4 的同一条分界）。对象叫什么、放第几位、内部怎么穿过执行链，属执行票的形状细节。
+  按 04 §2.4 还要拿本轮 `activeNames`。本票只定**边界与内容**，不定参数布局：三者照
+  03 §2.3 的 hooks 先例由 `Agent.run:1011` 从这一轮的栈上局部**显式传下去**，
+  不塞进 `Context`、不设模块级全局、不进 `AgentState.live`（03 §2.3 / 02 决定 4 / 04 §2.4）。
+  三个 smoke 调用点各供一份 `{ manager, run: { workDirAbsPath: root }, activeNames: ["read"] }`
+  等价的值；是分传三个实参还是合成一个对象、对象叫什么、放第几位、内部怎么穿过执行链，
+  **全归执行票**。
 
 #### 3.6 只跟型、不改断言的读点
 
@@ -430,10 +438,10 @@ execute(
 | 子系统 | 落点 |
 |---|---|
 | Manager / 类型 | `tools/registry.ts:19-30, 42-74` → 一张 Map + `ensureFilled` + 四法 `names` / `get` / `execute` / `register`（类名/文件名归 06）；`tools/manager.ts:26-31, 41, 49-54, 57-84, 164-181` 删 `ToolDefinition(s)` / `toolDefinitions` / `toolListFor`、`ToolRunContext` 按 02 §2.1 转发、六个零参工厂收成私有常量；`tools/index.ts:18, 46-48` 与 `core/index.ts:207-220` 按 §2.5 增删出口 |
-| 引擎 `agent.ts` | `:66/:133/:211` 类型；`:528/:999/:1288` 从 `names()` / `get()` 读（04 §2.2 / §3）；`:1011/:2005` 恢复机器多收一个执行依赖对象（§3.5）；`:2091/:2272` 的 `find` 改 `get`（03 §3，先 `activeNames` 判活，04 §2.4）；`:2402` 改 `manager.execute(...)`；`:1298-1306` `runContext` 不动；`:1805-1810` / `:2352-2391` 不再作执行来源（03 §3） |
+| 引擎 `agent.ts` | `:66/:133/:211` 类型；`:528/:999/:1288` 从 `names()` / `get()` 读（04 §2.2 / §3）；`:1011/:2005` 恢复机器显式多收 Manager + `run` + `activeNames`（§3.5 的边界，参数布局归执行票）；`:2091/:2272` 的 `find` 改 `get`（03 §3，先 `activeNames` 判活，04 §2.4）；`:2402` 改 `manager.execute(...)`；`:1298-1306` `runContext` 不动；`:1805-1810` / `:2352-2391` 不再作执行来源（03 §3） |
 | 装配 | `session-factory.ts:23/72/94/142/163/177-178/182/263/285/344-351`、`session/fanout.ts:27/41/85-89`、`session/tool-config.ts` 四函数的 `known`（04 §2.5）；核对项：`:142` 与 `:285` 收敛到同一只（04 §5 #9），hub `:251/:792/:335` 的冷读路径也读它（§2.5） |
 | smoke | `smoke-session.ts:8-34`（导入）、`:244-262`（形参）、`:307-351`（`SentRequest` 增 `instances`）、`:1015-1033`、`:1252-1283`、`:1954`；`smoke-tools.ts:7-52`（导入）、`:86-101`、`:130`、`:231-244`、`:733`；`smoke-approval-recovery.ts:254-260, 268-311`；其余按 §3.6 只跟型 |
-| 文档 / ADR（归 06） | 会被本票推翻的现文：`AGENTS.md` tool 词条「五个方法 / `active(state, run)` 现建 / 没有插件注册表」，`docs/architecture.md:119`「注册表因此只有 `names` / `build` / `activeNames` / `active` / `register` 五个方法」与「`toolDefinitions()` 是六个内置的定义」，`map.md` *Destination* 的「旧名词全仓清零」判据。按 `docs/adr/README.md:43-44` 只增不改原文；逐句改写与取代指针全归 06 |
+| 文档 / ADR（归 06） | 会被本票推翻的现文：`AGENTS.md:42-48` tool 词条「`active(state, run)` 现建」「没有插件注册表」；`docs/architecture.md:119`「注册表因此只有 `names` / `build` / `activeNames` / `active` / `register` 五个方法」与「`toolDefinitions()` 是六个内置的定义」（「五个方法」只在这份文档里，不在 `AGENTS.md`）；`map.md` *Destination* 的「旧名词全仓清零」判据。按 `docs/adr/README.md:43-44` 只增不改原文；逐句改写与取代指针全归 06 |
 
 ### 5. 决定记录（下游可直接依赖）
 
@@ -442,13 +450,13 @@ execute(
 | 1 | 选 (a)：`register()` 保留为 `map.set`，测试工具与六个内置同表，随时可加、只加新名字、同名（含内置）抛 `Tool already registered: <name>`；Map 对象与已有条目永不可替换 | 执行票、06 |
 | 2 | Map 首次访问一次填满六个零参工厂的产物；触发者是 `names` / `get` / `execute` / `register` 四个公开方法；`register()` 先 `ensureFilled()` 再判重再 `set`；`names()` = 键集，内置在前、注册项按调用顺序在后 | 执行票 |
 | 3 | 旧五法：`names()`、`register()` 留且签名不动；`build(name, run)` 删并由 `get(name)` 取代（`run` 整个删）；`activeNames(state)` / `active(state, run)` 删；**不留别名、不加批量便利门** | 执行票、06 |
-| 4 | 新增执行入口 `execute(name, toolCallId, params, run, signal?, onUpdate?)`：`run` 必填无默认，内部 `get(name)` 后转发，是生产代码唯一 `Tool.execute` 调用点；落空抛 `Tool <name> not found` 由现成 `try/catch` 兜底，不是第二道判活 | 执行票 |
+| 4 | 新增执行入口 `execute(name, toolCallId, params, run, signal?, onUpdate?)`：`run` 必填无默认，内部 `get(name)` 后转发，是生产代码唯一 `Tool.execute` 调用点；`get` 落空怎么处理归执行票，但不得变成第二道判活闸门、不新增第二个 `Tool <name> not found` 结果来源（03 §5 #6、04 §2.4） | 执行票 |
 | 5 | Manager 公开面只有 `names` / `get` / `execute` / `register`，只收名字与一次调用的参数；不收 `ToolState` / 服务 / id（04 §5 #1 原样） | 执行票、06 |
 | 6 | 出口面删 `createToolRegistry` / `type ToolRegistry` / `createTools` / `toolDefinitions` / `createToolDefinitions` / `type ToolDefinition(s)` / `toolListFor`；留 `describeToolCall` / `fillTools` / `narrowToKnown` / `type ToolState` / `type ToolRunContext`；加零参的新 Manager 工厂与类型（名字归 06） | 执行票、06 |
-| 7 | `scripts/mount-session.ts` 今天不导入工具符号（票面事实更正）；(a) 的形体后果是冷读（`readSessionSnapshot` / hub `snapshotOf`）必须也读同一只 Manager，否则 04 §3 的冷/热 `allTools` 一致性在注册项上破——这是 04 §3 / §5 #9 的推论与核对项，不是新装配约束 | 执行票、06 |
+| 7 | `scripts/mount-session.ts` 今天不导入工具符号（票面事实更正）；**核对项**（02 §5 #3 / 04 §3 / §5 #9 的推论）：冷读（`readSessionSnapshot` / hub `snapshotOf`）应与热侧共用同一只 Manager，否则 04 §3 的冷/热 `allTools` 一致性在注册项上破。不是新装配约束 | 执行票、06 |
 | 8 | 恒等不变量是**实例级**：`Context.tools` 数组仍每请求新建，元素恒 `=== manager.get(name)`；02 §2.3 的三条读法（同进程两次 `get`、同一会话跨请求、跨会话同名元素）都要在 smoke 里测到 | 执行票 |
 | 9 | smoke 改写：`exerciseOutputBackstop` 保留注册、只换构造；registry 断言区改名并逐行按 §3.2 重写（`:1264` 翻成「恒为同一实例」、`:1281` 改成 `get("noop") === noop` + 判重）；补 §3.3 的请求级身份断言（含「数组仍新建」「跨会话同一实例」） | 执行票 |
-| 10 | `smoke-tools.ts` 三处直调 `execute` 补 `run`（02 §2.1）、bash 上限按 02 §2.5 从构造期改调用期、`:733` 改读 `manager.names()`；`smoke-approval-recovery.ts` 的假 tool 改 `manager.register()`，`Context.tools` 写 `[]`，恢复机器由宿主显式传**一个**执行依赖对象 | 执行票 |
+| 10 | `smoke-tools.ts` 三处直调 `execute` 补 `run`（02 §2.1）、bash 上限按 02 §2.5 从构造期改调用期、`:733` 改读 `manager.names()`；`smoke-approval-recovery.ts` 的假 tool 改 `manager.register()`，`Context.tools` 写 `[]`，恢复机器由宿主按 §3.5 的边界显式传 Manager + `run` + `activeNames`（参数布局归执行票） | 执行票 |
 | 11 | 否 (b)：删不掉懒填充这次写，却要把测试工具摊进五处生产装配，并让没有宿主的恢复机器 smoke 仍得自己造 Manager；否 (c)：与 02 §2.3「`register()` 是首次访问触发者」自相矛盾，把测试能力系于「此前有没有人读过 `names()`」，多一个 `filled` 标志却不增加不变量 | 06、执行票 |
 | 12 | 代价记账：`register()` 让键集在构造后可单调增长，故「表不可变」=「已有条目 + Map 对象不可变」；生产零调用，源码注释写清边界（英文），文档与 ADR 的措辞归 06 | 06 |
 
@@ -458,8 +466,8 @@ execute(
 `AGENTS.md` / `architecture.md` / `README` / `notes.md` 的逐句改写与文档归属（06）；
 `createToolManager()` 的**具体名字**、六个零参常量放哪个文件、`params` 的精确类型与 `as never`
 的落法、`Context.tools` 生产端 `.map(get)` 的窄化写法（`filter` 还是私有 helper）、
-执行依赖对象的名字与参数位置、恢复机器内部怎么把 Manager + `run` + `activeNames` 传过执行链、
-`SentRequest.instances` 之外的等价捕获器、§3.2 里被删断言在脚本中的最终排布（执行票）；
+Manager + `run` + `activeNames` 是分传还是合成一个对象、名字与参数位置、恢复机器内部怎么
+把它们穿过执行链、§3.3 捕获器的具体实现、§3.2 里被删断言在脚本中的最终排布（执行票）；
 执行票怎么切、何时 graduate（本图 *Not yet specified*：02–05 已定案，**06 仍待定**，毕业时按
 02 / 03 / 04 / 05 票的清单核，不重开裁决）。§2 / §4 写的是 (a) 与既有定案**必然带来**的形状后果与
 要跟的读点，不是替 06 或执行票做选择。
@@ -486,3 +494,19 @@ execute(
   那条结论按 01 号票 §4 原样沿用。
 - `Status` 翻 `resolved`；`map.md` 的 Decisions so far 追加 05 指针，Not yet specified 把毕业清单
   更新为「02 / 03 / 04 / 05 已定案、06 仍待定」并关掉「方法面 / `register()` / smoke 断言」这块雾。
+- code-review（固定点 `452ec61`，Standards / Spec 双轴）后的尾修另成一笔：把 §2.1 的
+  「不引入 env 开关 / 运行时守卫」、§2.4 的「`get` 落空抛 `Tool <name> not found`」、
+  §2.5 的单边逐项出口清单、§3.5 的「传**一个**执行依赖对象、不摊成八个位置参数」、
+  §3.3 的 `SentRequest.instances` 捕获机制，从写死的实现形状收回成「边界 + 推荐形状 + 归执行票」
+  （恢复机器改照 03 §2.3 的 hooks 先例「显式传下去」，分传还是合对象全归执行票）；
+  hub 冷读那条从 §5 #7 的「决定」收成 02 §5 #3 / 04 §3 / §5 #9 的**推论与核对项**，
+  `map.md` 的雾条从「已逐条关掉」改成「关掉裁决层，边界之外的形状仍列 05 §6」。
+  修两处事实口径：§4 的「五个方法」从 `AGENTS.md` 改归 `docs/architecture.md:119`
+  （`AGENTS.md:42-48` 只有「现建」「没有插件注册表」）；§3.5 的「三次 Context 字面量都写
+  `tools: []`」改成「**改后**都写，今天 `:269` / `:288` 已是 `[]`、`:306` 是 `[readTool]`
+  正是要改的那处」，与 §0 自述对齐。另统一 `形体后果` → `形状后果`。
+  计数：Standards 轴 **0 硬违规 / 5 判断项**，Spec 轴 **missing 1 / scope-creep 3 / wrong 2**，
+  尾修逐条处理。**未采纳（判断性意见）**：结论/§2/§5/map 指针之间的重复枚举（03 号票已记同口径）、
+  §2.6 / §3.3 的前瞻钩子（守住 (a)/(b) 分界所需，04 号票已记同口径）、中文文档里
+  `// 今天` / `// 之后` 这类比较标签（`AGENTS.md:143` 文档用中文适用）。
+  尾修复跑 `npm run check` 仍绿（`check-after-review.log` 与基线一致）；本笔同样零源码改动。
