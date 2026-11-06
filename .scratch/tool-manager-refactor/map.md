@@ -46,6 +46,8 @@ Status: open
 **引擎真正读的是 `Context.tools`**（ADR-0015 定为必填 wire 字段）：`agent.ts:1288` 每请求 `active()` 现建、
 `:1849` `toToolDeclaration` 削薄声明、`:2091` `executionMode`、`:2272` `find`、`:2402` `execute`、
 `:1534` 压缩摘要 `tools: []`、`:2020` 恢复机器 `recoverPendingToolCalls`、`:2376` `runToolCall`。
+这是**执行票落地前**的读法；03 号票已定案 (a)——字段保留为声明载体、上述执行读点全量改道 Manager，
+见下方 Decisions so far 第三条。
 
 **波及面（绘图会话已核）**：`session/tool-config.ts` 四个函数、`session-factory.ts` 三个构造点
 （`:142` / `:285` / `:344`）、`core/index.ts` 出口、`scripts/smoke-tools.ts`、
@@ -72,14 +74,16 @@ Status: open
 
 - **02 · 一张 Map 如何承载按会话的 workDirAbsPath（resolved）**：[02 - 一张 Map 里的实例 Tool 如何承载按会话的 workDirAbsPath](issues/02-one-map-and-per-session-workdir.md) —— **(a)** `Tool` 目录无关，`ToolRunContext` 作 `execute` 的必填实参、由本轮栈上局部携带；一张 Map 首次访问建满六个、内置条目与 Map 对象都不可替换，bash 超时仍由 `runContext` 每请求现读。票内逐条否掉 (b)/(c)/(d)（含两个在飞会话竞态）、列全 §4 改动面与 §5 决定记录；03 / 05 的阻塞随本票解除。
 
+- **03 · 执行改道后 `Context.tools` 的命运（resolved）**：[03 - 执行改道后 Context.tools 的命运](issues/03-context-tools-after-execution-reroute.md) —— **(a)** `Context.tools` 保留为必填 `Tool[]` **声明载体**（元素是 Map 里的实例引用、按活跃名单取子集），线协议与 `llm/` 零改动；引擎全部执行查找改 `manager.get(name)`、执行改 Manager 新增的入口，`toToolDeclaration` / `streamAssistantResponse` / 压缩摘要 `tools: []` 明确排除。**Manager owns 调用不 owns 实现**：`Tool.execute`（含 02 的 `run`）留在 `Tool` 上，Manager 内部 `get(name)` 后转发，成为全仓唯一调用点；校验 / shim / 闸门 / 事件 / 定稿仍归引擎。票内 §3 逐条点名八个调用点、§5 七条决定记录；否 (b) 的决定性理由是 `Context.tools` 承载 per-request 活跃子集而 Map 装全部六个，删它要么把未启用工具发给模型、要么把 per-session 状态请回常驻服务。04 的唯一前置约束：活跃名单由谁筛归 04，但筛出的元素必须来自 Map。
+
 ## Not yet specified
 
 - **执行票怎么切**：等 02 / 03 / 04 / 05 / 06 定案后一次 graduate——`ToolManager` 类与懒加载、
   `Agent` / `SessionServices` / `session-factory` / `core/index.ts` 改线、引擎执行改道、smoke 改写、
-  文档与 ADR 收账、全量验收。**02 已定案（形状与改动面见票内 §2 / §4），03 / 04 / 05 / 06 仍待定；
-  现在不预切，毕业时按 02 票的清单核，不重开裁决。**
-- 压缩摘要 `tools: []`、恢复机器、`runToolCall`（`agent.ts:2371` 注释称今天无人调用）改道后
-  是否仍绕开 Manager —— 归 03。
+  文档与 ADR 收账、全量验收。**02 / 03 已定案（形状与改动面分别见两票的 §2 / §4），04 / 05 / 06 仍待定；
+  现在不预切，毕业时按 02 / 03 票的清单核，不重开裁决。**
+- 压缩摘要 `tools: []` / `streamAssistantResponse` 明确排除改道，恢复机器与 `runToolCall`
+  全量覆盖，八个调用点逐条结论见 03 号票 §3 —— 本块雾已由 03 清掉。
 - 会话账本 `.json` / `.jsonl` 格式是否要动：若 04 把活跃集也搬进 Map，`toolStateOf` 的派生链与
   `tool_config` entry 一起受影响。
 
@@ -87,6 +91,6 @@ Status: open
 
 - 委派（子代理）、插件、MCP：`AGENTS.md:174-175` 的硬规则，且不得借「工具目录」把它们塞回来。
 - `core/src/llm/` 折叠文件的 `@ts-nocheck` 转正：另开 effort（`context-tool-unification` 已列为 out of scope）。
-- `packages/server` 的 REST 命令表与 mux 帧形状（ADR-0001）：本图只动 core 的工具域，除非 03 号票
-  定案要动 `Context` wire。
+- `packages/server` 的 REST 命令表与 mux 帧形状（ADR-0001）：本图只动 core 的工具域；03 号票已定案
+  (a)，**不动 `Context` wire**，这条许可未启用。
 - 桌面外壳与 web 窗口的工具清单渲染：只消费快照字符串数组，不认识 `Tool` 对象。
