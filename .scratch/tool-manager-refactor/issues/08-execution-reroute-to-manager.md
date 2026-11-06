@@ -79,8 +79,9 @@ check / smoke 数字（`../smoke-runs/after-08/`）、以及**「禁用工具在
 引擎的六个执行调用点全部改道 `ToolManager`：`manager.execute(...)` 成为**生产代码唯一**的
 `Tool.execute` 调用点（`manager.ts:164` 那一次转发），预备与执行都经 `manager.get(name)`，
 `prepared.tool` 字段与 `RunToolCallOptions.tools` 一并退场，`Context.tools` 从此只被传输面读。
-`npm run check` **绿**（`tokens ok: 137 defined, 111 referenced`），28 条 smoke **26 绿 / 2 既有红、
-零新红**（一次偶发红按 01 口径复跑定性），`smoke-tools.log` 与 after-07 **逐字节相同**。
+`npm run check` **绿**（`tokens ok: 137 defined, 111 referenced`）；28 条 smoke 实跑 **25 绿 / 3 红**，
+其中一条是 01 号票口径下的本机偶发（复跑 1/1 绿、日志与 after-07 逐字节相同），对跑口径即
+**26 绿 / 2 既有红、零新红**；`smoke-tools.log` 与 after-07 **逐字节相同**。
 
 ### 1. 六个调用点各自怎么改
 
@@ -179,6 +180,10 @@ export async function recoverPendingToolCalls(
 4. **假 tool 改名 `read_fixture`**：票面没点名，但 `register()` 拒绝与内置同名，不改名这条注入根本进不去表。
 5. **`smoke-approval-recovery` 的三处 `Context.tools` 都写 `[]`**：按票面；其中第一、二处原本就是 `[]`，
    只有第三处从 `[readTool]` 改过来。
+6. **`streamAssistantResponse` 的一处注释措辞**：该函数在票面的排除面上（`toToolDeclaration` 原样，
+   行为一字未动），但它的文档注释里「the executable set the run holds is declared here」在本票之后为假，
+   改成「the set this request offers is declared here」。只此一个从句，wire 与行为零改动；
+   若要严格执行「排除面零触碰」，这一行可以回退给 10 号票。
 
 ### 6. 给 09
 
@@ -191,3 +196,15 @@ export async function recoverPendingToolCalls(
   「errored tool result」，函数文档里点名 09 那段注释一并删。
 - `executePreparedToolCall` 不重复判活（03 §2.4）：`manager.execute` 落空仍是一条 `Tool not found:` 的
   错误结果，那是 bug 兜底、不是第二道闸门。
+
+### 7. 给 10
+
+本票让以下现文变成假话（按 06 §3 只增不改，正文原文保留、就地补注 + 逐句改写）：
+
+- `AGENTS.md:36`「它调的是 `Tool.execute`」——现在是 `manager.execute`；
+  `:42-48` 的 tool 词条里「目录是 `createToolRegistry`…`active(state, run)` 现建可执行集合」整段。
+- `docs/architecture.md:119`「`Context.tools` 里装的就是这些可执行集合本身」；
+  `:125` 那句「循环执行的东西」与「对未激活工具的调用会返回 `Tool <name> not found`」——
+  后者在 08 与 09 之间只剩声明那一半（见 §4），09 落地后才完整成立。
+- ADR-0015 *后果*「`prepareRequest` 建它、引擎用它」——引擎已不用它执行（03 §2.5 已把这条列进 06 的
+  收账清单）。

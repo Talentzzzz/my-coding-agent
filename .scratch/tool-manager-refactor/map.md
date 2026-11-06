@@ -125,8 +125,9 @@ Status: open
   `runToolCall`，`manager.execute(...)` 成为**生产代码唯一**的 `Tool.execute` 调用点
   （`agent.ts:2490` 调用 + `manager.ts:164` 转发），`PreparedToolCall.tool` 与
   `RunToolCallOptions.tools` 一并退场，`Context.tools` 只剩 `streamAssistantResponse` 一个读点。
-  `check` 绿（137/111）、28 条 smoke **26 绿 / 2 既有红、零新红**（`smoke-desktop-observability`
-  串行偶发一次、复跑 1/1 绿且日志与 after-07 逐字节相同）、`smoke-tools.log` 逐字节相同。
+  `check` 绿（137/111）、28 条 smoke 实跑 **25 绿 / 3 红**（第三条是 `smoke-desktop-observability`
+  串行偶发、复跑 1/1 绿且日志与 after-07 逐字节相同）⇒ 对跑口径 **26 绿 / 2 既有红、零新红**、
+  `smoke-tools.log` 逐字节相同。
   **已知中间态**：`get` 装全部六个，禁用工具此刻仍会被找到并执行；票面「验收第 4 条（`smoke-session`
   仍绿）」与之互斥，经用户裁决改为**断言钉住中间态**（`exerciseDeactivatedToolCall` 四条），09 翻回。
   `activeNames` 未进执行链（09 的两处落点已就位，见票内 §6）。
