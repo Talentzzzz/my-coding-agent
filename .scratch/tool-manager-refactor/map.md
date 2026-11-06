@@ -88,7 +88,7 @@ Status: open
 - 压缩摘要 `tools: []` / `streamAssistantResponse` 明确排除改道，恢复机器与 `runToolCall`
   全量覆盖，八个调用点逐条结论见 03 号票 §3 —— 本块雾已由 03 清掉。
 - 会话账本格式：04 定案 (a) —— 活跃集与审批仍由账本派生，`.json` / `.jsonl` 与 `tool_config`
-  entry 一字不动；派生链只把目录侧入参收成 `readonly string[] known`（04 §2.5），
+  entry 一字不动；派生链与 Manager 之间只传名单数据（04 §2.5），
   `allTools` 仍是 Map 全名表 —— 本块雾已由 04 关掉。
 
 ## Out of scope

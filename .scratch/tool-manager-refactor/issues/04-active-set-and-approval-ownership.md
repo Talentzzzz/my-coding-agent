@@ -52,9 +52,10 @@ Map 就不会成为活跃集的第二个写者（这条判据不因 ADR-0011 被
 - `session/tool-config.ts` 收 `registry: ToolRegistry` 的正好**四个**函数：`defaultToolNames`
   （`:18-22`）、`globalDefaultToolState`（`:32-42`）、`toolStateOf`（`:62-76`）、`followsGlobalOf`
   （`:121-133`）。另有 `approvalToolsOf`（`:7-9`，纯映射 helper）与私有 `toolConfigFollowsGlobal`
-  （`:89-110`），都不收目录。四个函数对 registry 的**全部**使用只有 `.names()`：`:20` / `:21`
-  / `:40` / `:71` / `:129`（末一处经 `defaultToolNames`）——「目录只答『存在什么』」按字面成立；
-  `known` 也只用来 `narrowToKnown` 收窄会话记录的名字。
+  （`:89-110`），都不收目录。四个函数对 registry 的使用只有两种：`:20` / `:21` / `:40` / `:71`
+  直接调 `.names()`，`:39` / `:70` / `:129` 把它当「已知名单」继续传给另两个派生函数（终点仍是
+  `.names()`）；没有第三种——「目录只答『存在什么』」按字面成立，`known` 也只用来
+  `narrowToKnown` 收窄会话记录的名字。
 - `ToolState`（`tools/manager.ts:96-99`）是 `{ activeToolNames, approvalOverride? }` 纯数据；
   `narrowToKnown`（`:120-122`）、`fillTools`（`:139-150`）、`toolListFor`（`:164-181`）都是无状态函数。
 - `fanout.ts:24-28` 的 `SessionServices` 三服务，`:27` 是 `tools: ToolRegistry`；`approvalsOf`
@@ -70,7 +71,8 @@ Map 就不会成为活跃集的第二个写者（这条判据不因 ADR-0011 被
 - `:999` / `:1288` 是 `Context.tools` 的两个生产端：`tools.active(toolStateOf(...), this.runContext(state))`；
   `:1252` 的 `toolState` 还喂 `:1261` 的提示词与 `:1262` 的审批映射。`setToolConfig`
   （`session-manager.ts:1537-1551`）把 `activeTools` 与 `approval` 两个字段**整份一起**写进 `.json`
-  快照，`:1873-1875` 一起读回；ADR-0005 决定 3 与 `AGENTS.md` 的 tool set 词条都写明这是**一个决定**。
+  快照，`:1873-1875` 一起读回；ADR-0005 决定 3 写明模式选择落在既有 `tool_config` entry，
+  「这是**一个决定**」的原句在 `AGENTS.md:95` 的 tool set 词条与 `docs/architecture.md:127`。
 
 票面没点名、但 04 必须一并交代的四处：
 
@@ -89,7 +91,7 @@ Map 就不会成为活跃集的第二个写者（这条判据不因 ADR-0011 被
    这是「活跃集归属」真正要裁的那块，见 §2.4。
 3. **`allTools` 是「全部」，不是「当前」**。`protocol.ts:255-258` 写的是「Every tool the session
    registered ... for the header's tool toggles」；窗口把它当全量基准：
-   `web/main.ts:507-508` / `:1133` 的 `settings.tools ?? snapshot.allTools`、
+   `web/main.ts:507-508` 的 `allTools` 基准与 `:1133` 的 `settings.tools ?? snapshot.allTools`、
    `render/settings.ts:715` / `:931` / `:965` 的同形过滤。`defaultToolNames:20` 也用
    `registry.names()` 当「设置没写 tools 时的全量」。于是 (c) 不只是内部结构变化，见 §1(c)。
 4. **装配点今天会造出两只目录**。`session-factory.ts:142`（`assemble`）与 `:285`
@@ -179,7 +181,11 @@ Map 就不会成为活跃集的第二个写者（这条判据不因 ADR-0011 被
 
 #### (c) Map 只装当前活跃工具 —— **否决**（并回答票面点名的两问）
 
-票面要求回答「多会话并发与会话切换时怎么换出」，逐条作答：
+要动什么：Map 的填充从「首次访问建满六个」改成「按某会话的 `activeToolNames` 现建/换出」；
+`get(name)` / `names()` 从此答的是「这一刻装了谁」；执行入口、`Context.tools` 的生产端与恢复机器
+都要按这个会变的 Map 重新定义「未知名」；`setActiveTools` 的校验、`snapshotOf.allTools`、
+`defaultToolNames` 的全量兜底另找一份不变的名单（或接受语义变化）；`session-factory` 的装配与
+换出时机要新增一条会话生命周期管理。票面点名要回答的两问，逐条作答：
 
 1. **并发：无解，除非退回 02 已否的形状**。设会话 A（活跃 `{read}`）与 B（活跃 `{bash}`）
    同时在飞。03 定案 (a) 让 `prepareToolCall` 与执行入口各 `manager.get(name)` 一次；只要
@@ -192,7 +198,8 @@ Map 就不会成为活跃集的第二个写者（这条判据不因 ADR-0011 被
    工具调用串行化）。
 2. **会话切换 / 换出：同样无解**。谁换出、何时换出、换出后在飞的 `Context.tools` 里那些
    **实例引用**怎么办？03 决定 1 让它们活到整个请求结束，换出就把旧引用与新查找劈成两半
-   （02 §1(b) 竞态 2）；审批是「结束重启」（ADR-0006 §5），grant 在**新一轮**按名字现取工具
+   （02 §1(b) 竞态 2）；审批是「结束重启」（ADR-0006 决定 5，即 AGENTS.md 惯写的「§5」），
+   grant 在**新一轮**按名字现取工具
    重跑悬空调用，此刻 Map 可能已换成另一会话的活跃集，于是错的结果被定稿。给条目加引用计数
    或按 id 存多份，就是按 id 键控的表（02 决定 4 明确不许）。
 3. **更硬的一条：`names()` 答不了「存在什么」了**。:528 的未知名校验、:85 / `:177` 的
@@ -202,7 +209,7 @@ Map 就不会成为活跃集的第二个写者（这条判据不因 ADR-0011 被
    打开会撞 409 `Unknown tool`（`controllers/sessions.ts:719-733`），且全局默认从此无法自举。
    要补就得再留一份静态全名表——两张事实源，正是 02 §2.3「首次访问建满六个」的理由。
 4. **恒等不变量作废、一个决定被劈开**：02 §2.3 的可测不变量「任意两次 `get(name)` 恒 `===`、
-   任意两个会话的活跃集里同名工具恒 `===`」（由 §5 #3 的不可变表担保）在 (c) 下按构造为假
+   任意两个会话的活跃集里同名工具恒 `===`」（由 **02 票** §5 #3 的不可变表担保）在 (c) 下按构造为假
    （未活跃时 `get` 恒 undefined）；审批映射还能闸住**未激活**工具
    （`session-factory.ts:302-305`），一个只装活跃工具的 Map 表达不了这半张图。
 5. 定案 1「持有**所有**的 Tool」按字面被推翻，且 06 要收的账从「重新引入常驻实例表」升级成
@@ -248,7 +255,8 @@ Map 就不会成为活跃集的第二个写者（这条判据不因 ADR-0011 被
 而 Map 装全部六个；于是「**未激活**工具的调用回 `Tool <name> not found`」
 （`docs/architecture.md:125`）这条既有行为不能靠 `get` 自己维持。定：
 
-- `activeNames`（§2.2）作为本轮局部，与 Manager、`run` 一样由 `Agent.run` 显式传过
+- `activeNames`（§2.2；数组或现攒的 `Set<string>` 由执行票选，下文用 `.has()` 只表示判活）
+  作为本轮局部，与 Manager、`run` 一样由 `Agent.run` 显式传过
   `:1011` 恢复机器 → `:1101` → `:2082` / `:2099` / `:2161` → `:2264` → `:2393` 这条链
   （03 §2.3 / 决定 5 的传参先例），在 `:1063-1070` 每次 `prepareRequest` 返回后随
   `currentContext` 一起换成这一轮那份（`requestUpdate` 缺省时沿用上一轮）；
@@ -260,13 +268,18 @@ Map 就不会成为活跃集的第二个写者（这条判据不因 ADR-0011 被
 - 判活归**引擎**（03 §2.4「校验 / 闸门 / 事件 / 定稿仍归引擎」），不归 Manager：Manager 只答
   「这个名字存在吗、给我实例」，答不了「这个会话这一轮准不准」。(c) 之所以看着简单，正是
   想让 `get` 顺带当闸门；代价 §1(c) 已逐条否掉。
+- **与 03 的衔接要说死**：03 §5 #6 的「未知名仍回 `Tool <name> not found`」在它写下时
+  「找得到」=「在活跃子集里」；Map 装全部六个之后，这句话只能读作「**不在本轮名单**」，
+  否则一个已禁用工具会被 `get` 找到并执行。本票补的是 (a)「Agent 决定本轮名单」这一半在
+  执行链上的落点，**不改 03 的任何决定**；03 与 04 须并读才得到完整形状。
 
 #### 2.5 四个派生函数的入参：只收名单数据
 
-`defaultToolNames` / `globalDefaultToolState` / `toolStateOf` / `followsGlobalOf` 的目录侧入参
-从 `registry: ToolRegistry` 收成 **`readonly string[] known`**，调用点现传
-`manager.names()`（`agent.ts:527/610/684/1252`、`fanout.ts:41/86/89`、
-`session-factory.ts:163/182`）。理由：它们本来就只调 `.names()`（§0），收一整个服务对象既
+**本票定的边界**：四个派生函数与 Manager 之间只传一份「已知名单」的**数据**，不再收
+`ToolRegistry` / `ToolManager` 对象、更不收会话状态。落地的最小形状是把目录侧入参收成
+`readonly string[] known`，调用点现传 `manager.names()`（`agent.ts:527/610/684/1252`、
+`fanout.ts:41/86/89`、`session-factory.ts:163/182`）；**具体形参形状属执行票**，但不许把
+Manager 对象请回派生链。理由：它们本来就只调 `.names()`（§0），收一整个服务对象既
 把进程服务带进会话域的纯数据派生，又让 06 多一处类型要收账；收一份名字数组后这四个函数
 是「账本 + 设置 + 一份名单」的纯函数，零服务依赖，与 ADR-0006 B 路线「现建现传」同调。
 `names()` 每次都是 Map 键的现读，多读几次没有缓存要失效。`approvalToolsOf` /
@@ -289,7 +302,9 @@ Manager 加 setter。fanout 的全部函数仍是无状态 `(state, SessionServi
 | `fanout.ts:85` `snapshotOf.allTools` | `services.tools.names()` | `services.tools.names()`，`SessionServices.tools: ToolManager` | 同上；`protocol.ts:255` 的「Every tool ... for the header's tool toggles」与窗口的全量基准不变 |
 | `session-factory.ts:177` 冷读 `allTools`（票面未点名） | `registry.names()` | `manager.names()` | 第三读者同门，保证 `fanout.ts:88` 说的冷/热快照一致 |
 
-- 两处（加冷读第三处）**都是 Manager 的「全部名单」门**，即 02 那张 Map 的键集；绝不能改成
+- 本节的「门」指 Manager 答「存在什么」的那**一个**读口（今天叫 `names()`），沿用票面
+  「改从哪只门读」的说法；它不是活跃集查询。两处（加冷读第三处）**都从这只门读**，
+  即 02 那张 Map 的键集；绝不能改成
   `activeNames(state)` 或 `toolStateOf(...).activeToolNames` 之流。05 若给 `names()` 改名/改签名，
   三者一起随门改，但语义仍是「Map 里全部实例的名字」。
 - `activeTools` 则相反：热读 `fanout.ts:86` 已是 `toolStateOf(...).activeToolNames`，
@@ -303,11 +318,11 @@ Manager 加 setter。fanout 的全部函数仍是无状态 `(state, SessionServi
 | 子系统 | 落点 |
 |---|---|
 | 目录 / 类型 | `tools/registry.ts:19-30, 42-74` → `ToolManager`（类名/出口归 06、方法名与 `register()` 归 05）；`tools/index.ts:18` 与 `core/index.ts:207-220` 的出口面随 05/06 定；`tools/manager.ts` 的 `ToolState` / `narrowToKnown` / `fillTools` / `toolListFor` 归属不动 |
-| 派生链 | `session/tool-config.ts:18, 32, 62, 121` 四函数第四参收 `readonly string[] known`；调用点 `agent.ts:527/610/684/1252`、`fanout.ts:41/86/89`、`session-factory.ts:163/182` 现传 `manager.names()`；`:178` 改吃纯数据 |
-| 服务装配 | `fanout.ts:27` `SessionServices.tools`、`agent.ts:133/211/229/245-247`、`session-factory.ts:72/94/142/263/285/344-351`、`core/index.ts` 出口；**`:142` 与 `:285` 收敛到同一只 Manager**（§0 第 4 点），`openAgent` 要把它从 `assemble` 转发下去 |
+| 派生链 | `session/tool-config.ts:18, 32, 62, 121` 四函数的目录侧入参（前两个是第 3 参、后两个是第 4 参）收成名单数据 `readonly string[] known`；调用点 `agent.ts:527/610/684/1252`、`fanout.ts:41/86/89`、`session-factory.ts:163/182` 现传 `manager.names()`；`:178` 改吃纯数据 |
+| 服务装配 | `fanout.ts:27` `SessionServices.tools`、`agent.ts:133/211/229/245-247`、`session-factory.ts:72/94/142/263/285/344-351`、`core/index.ts` 出口；核对项：`:142` 与 `:285` 须收敛到同一只 Manager（§0 第 4 点、02 §5 #3 的推论），`openAgent` 的 `assemble` → `createSessionAgent` 转发怎么落由执行票定 |
 | 引擎 | `agent.ts:999/1288` 按名单从 Map 取实例（03 决定 1，不再接 `run`）；`:1252` 的 `toolState` 派生出本轮 `activeNames`；`:1011/1101/2082/2091/2099/2161/2264/2393` 显式带上 Manager + `run` + `activeNames`，`prepareToolCall` 与 `executionMode` 先判活（§2.4）；`:1298-1306` `runContext` 保留 |
 | 审批 / 账本 | **零改动**：`fanout.ts:38-43`、`agent.ts:753/535/611/685`、`session-manager.ts:1537-1551` 的 `setToolConfig`、`.json` / `.jsonl` / `tool_config` entry 格式、`protocol.ts` wire |
-| 文档 / ADR（归 06） | 会被本票推翻或需核对的现文：`AGENTS.md` tool / service / tool set 词条，`docs/architecture.md:119` 工具契约节「工具那一侧分三样东西」「五个方法」「不在注册表里、也不在任何一处被持有」，以及 `:125` 那句「未激活工具的调用会返回 Tool not found」在 §2.4 下**仍成立但要改述判活位置**；ADR 0005 / 0006 / 0007 / 0011 / 0015 的现状陈述按 `docs/adr/README.md:44` 只增不改原文 |
+| 文档 / ADR（归 06） | 会被本票推翻或需核对的现文：`AGENTS.md` tool / service / tool set 词条，`docs/architecture.md:119` 工具契约节「工具那一侧分三样东西」「五个方法」「不在注册表里、也不在任何一处被持有」，以及 `:125` 那句「未激活工具的调用会返回 Tool not found」在 §2.4 下**仍成立但要改述判活位置**；ADR 0005 / 0006 / 0007 / 0011 / 0015 的现状陈述按 `docs/adr/README.md:43-44`（只增不改、改写已接受的 ADR 时不改原文）处理 |
 | smoke（归 05） | 要跟的读点已在 02 §4 / 03 §4 / 05 票面列出：`smoke-tools.ts:86-94/130/231-244/732-766`、`smoke-session.ts:244-262/1015-1033/1242-1283`、`smoke-approval-recovery.ts:254-260`；另有六条脚本读 `allTools` / `activeTools`（`smoke-modes` / `smoke-mux-client` / `smoke-replay` / `smoke-session` / `smoke-sessions` / `smoke-tools`）。04 新增的可测形状是「冷/热 `allTools` 恒等于 Map 全名表、禁用工具可重新启用、禁用工具的调用仍回 not found」 |
 
 ### 5. 决定记录（下游可直接依赖）
@@ -318,11 +333,11 @@ Manager 加 setter。fanout 的全部函数仍是无状态 `(state, SessionServi
 | 2 | 活跃集与审批仍是账本派生的纯数据，四函数留 `session/tool-config.ts`、不搬进 Manager；`toolStateOf` 仍是唯一派生，`setToolConfig` 仍是两字段唯一写者 | 执行票、06 |
 | 3 | 一个决定两字段不拆：`approvalsOf` 留 fanout，Manager 无审批字段/方法/状态；`.json` / `.jsonl` / `tool_config` entry 格式一字不动，map.md 那块雾关闭 | 执行票、06 |
 | 4 | `Agent` 把 `toolStateOf(...).activeToolNames` 收成本轮栈上局部 `activeNames`，`:999` / `:1288` 按名单从 Map 取实例装 `Context.tools`（03 决定 1），不接 `run` | 执行票 |
-| 5 | `activeNames` 与 Manager、`run` 一样显式穿过执行链；`prepareToolCall` 与 `executionMode` 先判活再 `get`，落空仍回 `Tool <name> not found`；判活归引擎，不归 Manager | 执行票 |
+| 5 | `activeNames` 与 Manager、`run` 一样显式穿过执行链；`prepareToolCall` 与 `executionMode` 先判活再 `get`，落空仍回 `Tool <name> not found`；判活归引擎，不归 Manager。**这是 (a)「Agent 决定本轮名单」与 03 §5 #6 在 Map 装全部六个后的唯一自洽读法，不是改 03 的决定** | 执行票 |
 | 6 | `SessionServices.tools: ToolManager`，仍是 `Agent` 构造注入、进程级一只，由现攒的 `services` getter 填入；fanout 函数仍无状态 | 执行票、06 |
 | 7 | 两处读点（加冷读第三处）都从 Manager 的**全部名单**门读，语义是 Map 键集；`activeTools` 一律吃 `toolStateOf(...).activeToolNames`；05 若改门名三者同改 | 执行票、05 |
-| 8 | 四函数的目录侧入参收成 `readonly string[] known`，调用点现传 `manager.names()`；会话域派生零服务依赖、工具域零会话依赖 | 执行票 |
-| 9 | `session-factory.ts:142` 与 `:285` 收敛到同一只 Manager（今天会造两只无状态目录）；恒等不变量与冷/热一致由此担保 | 执行票 |
+| 8 | 四函数与 Manager 之间**只传名单数据**（推荐形状 `readonly string[] known`、调用点现传 `manager.names()`；具体形参属执行票），会话域派生零服务依赖、工具域零会话依赖——这是「不给 Manager 会话状态」的另一半，不是替 05 定方法签名 | 执行票 |
+| 9 | 执行票须把 `session-factory.ts:142` 与 `:285` 收敛到同一只 Manager（今天会造两只无状态目录）——这是 **02 §5 #3「一张 Map + 恒等不变量」的直接推论与核对项，不是本票新增的装配约束** | 执行票 |
 | 10 | 否 (b)：把 durable 选择的派生搬进进程服务，要么持 per-session 状态、要么让公开面收另外两只服务加整份会话状态，劈开「一个决定」、反转依赖方向、放大冷/热双实例问题。否 (c)：并发与换出两问都只能退回 02 已否的键控表 / 每请求重建 / 全局锁，且 `names()` 答不了「存在什么」，`allTools` 与默认全量当场失真 | 06、执行票 |
 
 ### 6. 本票没有回答的（别当成已定）
@@ -360,3 +375,18 @@ smoke 断言怎么重写、`recoverPendingToolCalls` 宿主怎么供 Manager + `
   本票没有跑 `smoke-api` 的「起服务器后 ok」那一遍——本轮无源码改动，那条结论按 01 号票 §4 原样沿用。
 - `Status` 翻 `resolved`；`map.md` 的 Decisions so far 追加 04 指针、Not yet specified 关掉
   「会话账本格式是否要动」这块雾并把毕业清单更新为「按 02 / 03 / 04 票的清单核」。
+- code-review（固定点 `5d92c5e`，Standards / Spec 双轴）后的尾修另成一笔：补上 (c) 的
+  「要动什么」段，把 §2.5 / §5 #8 #9 从「新签名 / 新装配约束」收成「边界约束 + 02 §5 #3 的
+  推论与核对项」，把 §2.4 与 03 §5 #6 的衔接写死（「未知名」在 Map 装全部六个后须读作
+  「不在本轮名单」）；修正 §0 / §4 的事实口径（四函数对 registry 的两种用法、`:39/:70/:129`
+  是转发而非 `.names()`、`AGENTS.md:95` 与 `architecture.md:127` 才是「一个决定」原句、
+  `web/main.ts:507-508` 与 `:1133` 的归属、ADR-0006 决定 5、`docs/adr/README.md:43-44`、
+  目录侧入参是两处第 3 参 / 两处第 4 参）；给「门」下定义，给 `activeNames` 注明数组或
+  `Set` 由执行票选。计数：Standards 轴 **0 硬违规 / 5 判断项**，Spec 轴
+  **missing 1 / scope-creep 3 / wrong 5**，尾修逐条处理。**未采纳（判断性意见）**：决定记录里
+  file:line 枚举的重复（03 号票已记同口径）、「05 若改门名三者同改」的前瞻钩子（守住 (a)/(b)
+  分界所需）。两轴交叉核对另确认：§2.4 相对 03 §5 #6 是**补定、非字面矛盾**（03 只断言
+  「未知名」，对禁用工具不置一词；`activeNames ⊆ manager.names()` 让 03 的断言在 04 下仍真），
+  故只在 Spec 轴记一次 scope-creep、不双算。归档一条 03 侧旧瑕疵（**不属本提交、本票不改 03**）：
+  03 §2.4 写「未知名行为不变」却引 `architecture.md:125`，而 :125 原句讲的是「**未激活**
+  工具」——这正是禁用工具缺口的根因，04 §2.4 补回的正是 :125 的完整语义。
