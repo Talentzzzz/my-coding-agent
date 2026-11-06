@@ -35,9 +35,13 @@ Status: open
 **02 号票已 resolved（2026-11-06）：形状定案、别的票按票内 §2/§4 落地，不再重开裁决**
 （[02 - 一张 Map 里的实例 Tool 如何承载按会话的 workDirAbsPath](issues/02-one-map-and-per-session-workdir.md)）。
 
-**名字已被占用且含义相反**：ADR-0007 决定 1 把 `ToolManager` 列为五个「无属性单例」之一，
-`.scratch/stateless-agent/issues/11` 的 Answer 把 `tools/manager.ts` 称作「ToolManager 的无状态面」。
-本图复用这个名字给一个持有 Map 的服务，06 号票定处置（含术语表怎么改）。
+**名字已被占用且含义相反（06 已 resolved，2026-11-06）**：ADR-0006/0007 决定 1 把
+`ToolManager` 列为五个「无属性单例」之一，`.scratch/stateless-agent/issues/11` 的 Answer 把
+`tools/manager.ts` 称作「ToolManager 的无状态面」。06 定案 **(b)**：名字沿用（定案 1 不改）、
+新开 ADR-0016 记「重新引入持有实例表的工具服务」并写清「为什么明知 0007/0011 仍要反转」、
+四份旧 ADR 头部加取代者指针 + 就地标 Superseded、正文原文保留、`AGENTS.md` / `architecture.md`
+逐句改写、`docs/adr/README.md` 清单加行；文档收账归 graduate 后专门的 `task` 票。
+见 [06 - ToolManager 名字冲突与 ADR / 文档处置](issues/06-name-collision-and-adr-disposition.md#answer)。
 
 **今天已经成立、别重复做**：`agent.ts:133` 的 `AgentConfig.tools: ToolRegistry` → `:211`
 `private readonly tools` → `:229` `this.tools = config.tools`；构造注入与「Agent 的属性」不是本次新增。
@@ -81,18 +85,43 @@ Status: open
 
 - **05 · `register()`、方法面与 smoke 断言（resolved）**：[05 - register()、懒加载与 smoke 断言的处置](issues/05-register-lazy-load-and-smoke-assertions.md) —— **(a)** `register()` 保留为 `map.set`，测试工具与六个内置同表、**随时可加、只加新名字、同名（含内置）抛错**，Map 对象与已有条目不可换（「表不可变」= 值不可变、键集可单调增长）；构造零参、首次访问一次填满六个零参工厂，`register()` 自己也是触发者且先 `ensureFilled()` 再判重。旧五法：`names()` / `register()` 留且签名不动；`build(name, run)` 删、由 `get(name)` 取代（`run` 整个删）；`activeNames(state)` / `active(state, run)` 删；**不留别名、不加批量便利门**；按 03 补执行入口 `execute(name, toolCallId, params, run, signal?, onUpdate?)`（`run` 必填、`get` 后转发），公开面收成四法。出口面删 `createToolRegistry` / `createTools` / `toolDefinitions` / `toolListFor` / `ToolDefinition(s)` 等「现建」链部件，留选择/填充那半；`smoke-tools.ts:733` 改读 `manager.names()`。smoke：`:1264`「每次新对象」翻成「恒为同一实例」（**恒等的是 `Context.tools` 的元素，数组仍每请求新建**）、`:1281` 改 `get("noop") === noop` + 判重，并补一条请求级新不变量「同一会话的两个请求取到同一个实例」（含跨会话那一半）；`exerciseOutputBackstop` 保留注册、`smoke-approval-recovery` 的假 tool 改 `manager.register()` 且恢复机器由宿主显式传 Manager + `run` + `activeNames`（只定边界，参数布局归执行票）；三处直调 `execute` 补 `run`、bash 上限从构造期改调用期。票内 §0 更正「`scripts/mount-session.ts` 导入工具出口」这一事实（它只导入 `assembleSession`，不传 `tools`），并把 04 §3 冷/热一致在冷读路径上的推论列为核对项；§1 逐条否 (b)（删不掉懒填充这次写却要摊进五处生产装配）/ (c)（与 02 §2.3 自相矛盾、隐藏时间耦合），§5 十二条决定记录。名字 / ADR / 文档归 06，执行票内部形状不预切。
 
+- **06 · `ToolManager` 名字冲突与 ADR / 文档处置（resolved）**：[06 - ToolManager 名字冲突与 ADR / 文档处置](issues/06-name-collision-and-adr-disposition.md) —— **(b)**
+  沿用定案 1 的名字（不改用户拍板），新开 **ADR-0016** 记「本构建重新引入持有实例表的工具服务」；
+  `0006` / `0007` / `0011` / `0015` 头部各加一行 `取代者：[0016]`（0007 已有指向 0011 的那行原样保留、
+  另起一行）、正文原文保留并共八处就地标 `Superseded`（照 0007 决定 3/4 的 0011 先例）；
+  `AGENTS.md` / `architecture.md` 逐句改写、`docs/adr/README.md` 清单加 0016 一行。
+  **新 ADR 必须写清「为什么明知 0007 / 0011 仍要反转」**：终点是用户定案的「一张常驻实例表 +
+  全量改道」，代价是重新承担对象生命周期与失效归属，并由六条边界把代价圈在工具域
+  （只装进程级行为 / 活跃与审批仍账本派生 / 每请求值仍随 `execute` 实参 / 单写者且只增键、
+  在飞引用不变 / `Context.tools` 仍必填声明载体、0015 决定 2·3·7 不动 / 会话表与
+  `adopt`·`evict`·`drop` 不动）。票内 §0 更正三处票面口径：**0011 决定 1 不动**（被反转的是决定 2
+  的「不注入一张表」判据与*被放弃的选项*那一条）、**0015 决定 2/3/7 不动**（只有 *后果* 里
+  「引擎用它（执行）」那句现状陈述失效，03 §5 #2）、**「没有插件注册表」仍成立必须保留**。
+  §1 逐条否 (a)（改名买不到消除冲突的效果、且推翻定案 1）/(c)（违反
+  `docs/adr/README.md:43-44`「只增不改」、切断 0007→0011→0014 等交叉引用）；§2 定名字与符号
+  （类 `ToolManager`、工厂 `createToolManager()`、`ToolRegistry` / `createToolRegistry` / `Registry`
+  三符号全删且不留别名；推荐类住 `tools/manager.ts`、`registry.ts` 删除，只定「不许第二份存在名单」
+  这条边界）、0016 六节与八处标注位置；§3 把**文档收账归 graduate 后专门的 `task`「文档与 ADR
+  收账」票**（照 `context-tool-unification` 03 号票范本，在代码票之后、全量验收票之前，
+  0016 / 四行指针 / 清单行 / 逐句改写同一笔落地），并逐份点名：`README.md` **核对无命中、不动**、
+  `docs/notes.md` 结论清单**不新增条目**（撞上旧形状才就地补注）；grep 清零按
+  「当前实况归零 / ADR 历史正文与 `.scratch/` 决策票豁免」解释。本票零代码、零文档改动。
+
 ## Not yet specified
 
 - **执行票怎么切**：等 02 / 03 / 04 / 05 / 06 定案后一次 graduate——`ToolManager` 类与懒加载、
   `Agent` / `SessionServices` / `session-factory` / `core/index.ts` 改线、引擎执行改道、smoke 改写、
-  文档与 ADR 收账、全量验收。**02 / 03 / 04 / 05 已定案（形状与改动面见四票的 §2 / §4），06 仍待定；
-  现在不预切，毕业时按 02 / 03 / 04 / 05 票的清单核，不重开裁决。**
+  文档与 ADR 收账、全量验收。**02 / 03 / 04 / 05 / 06 全部已定案**（形状与改动面见前四票的
+  §2 / §4，名字与文档处置见 06 §2 / §3）；**现在仍不预切票号与票数**，毕业时按五票清单核、
+  不重开裁决。**文档与 ADR 收账归一张专门的 `task` 票**（06 §3.1：在代码票之后、全量验收票之前，
+  新 ADR-0016 / 四行取代者指针 / 清单行 / 逐句改写同一笔落地）；本图到此只差 graduate 与执行。
 - `register()` 去留、旧五法名字与签名、`build` 的 `run` 怎么收、懒加载与注册的先后、smoke 断言改写、
   `createTools(run)` / `toolDefinitions()` / 出口面的去留、恢复机器宿主怎么供 Manager + `run`：
   **05 定案 (a) 已关掉裁决那一层**（四法公开面、无别名、请求级恒等断言）；恢复机器只定到
   「宿主显式传 Manager + `run` + `activeNames`、不进 `Context` / 不设全局」这条**边界**，
   分传还是合对象、名字与参数位置、链内怎么穿仍列在 05 §6、归执行票。
-  执行票按 05 §3 / §4 落地，06 只收名字与文档，本块雾不再重开裁决。
+  执行票按 05 §3 / §4 落地；名字 / ADR / 文档已由 **06 定案 (b)** 收口（沿用 `ToolManager`、
+  0016 只增不改、文档收账归 graduate 后的专门票，逐份口径见 06 §3.2），本块雾不再重开裁决。
 - 压缩摘要 `tools: []` / `streamAssistantResponse` 明确排除改道，恢复机器与 `runToolCall`
   全量覆盖，八个调用点逐条结论见 03 号票 §3 —— 本块雾已由 03 清掉。
 - 会话账本格式：04 定案 (a) —— 活跃集与审批仍由账本派生，`.json` / `.jsonl` 与 `tool_config`
