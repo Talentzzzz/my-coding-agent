@@ -1,7 +1,11 @@
 # 0016：工具回到一张常驻实例表——`ToolManager` 持有全部 `Tool`，引擎经它执行
 
-日期：2026-11-06 · 状态：已接受，**已落地**（07–09 号票；`npm run check` 在收账时复跑为绿。smoke 全套与
-`build:web` 的对跑、以及本行要引用的验收数字，由 11 号票落定）
+日期：2026-11-06 · 状态：已接受，**已落地**（07–09 号票；2026-11-07 全量验收，见
+[11 号票](../../.scratch/tool-manager-refactor/issues/11-full-acceptance.md)：`npm run check` 与 `build:web` 绿
+（`tokens ok: 137 defined, 111 referenced`），28 条 smoke 与改动前逐条同色、零新红——`smoke-approval` 两边都
+以首轮偶发红、复跑绿收场，`smoke-api` 要一只在跑的服务器（起了就 `api ok`），`smoke-liveness` 的时序断言在
+本机改动前后同为红；五个旧符号与旧说法在 `packages/`、`scripts/`、`AGENTS.md`、`architecture.md`、
+`README.md` 里归零）
 取代：[0006](0006-stateless-session-architecture.md)（部分——决定 1 里 `ToolManager` 那一项，以及决定 3
 的 B 路线里「工具不驻留内存」那一半）、[0007](0007-services-drop-instance-state.md)（部分——决定 1、
 决定 2 的「无状态服务」半、决定 6 的「不可变」前提，三处都只在工具域不再成立）、

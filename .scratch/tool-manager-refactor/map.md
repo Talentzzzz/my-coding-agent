@@ -1,7 +1,7 @@
 # Map：ToolManager——一张 Map 持有全部 Tool，Agent 全量改道
 
 Label: wayfinder:map
-Status: open
+Status: closed
 
 ## Destination
 
@@ -156,29 +156,28 @@ Status: open
   `docs/architecture.md` 十二处逐句改写（「没有插件注册表」保留）；`README.md` 与 `docs/notes.md`
   核对无命中、不动。`npm run check` 绿（137/111）；grep 清零面十二个词条文档面与源码面全 0
   （豁免：0012/0013 各 1 处、0016 自己 4 行、`.scratch/` 16 文件 69 处）。0016 状态行的验收数字待 11。
+  **11 号票按全目录五符号口径重数 `.scratch/` 为 196 处**（同 16 文件，口径差见其 Answer §4）。
+
+- **11 · 全量验收（resolved）**：[11 - 全量验收](issues/11-full-acceptance.md) —— 三套数字一次跑齐：
+  `npm run check` 绿（`tokens ok: 137 defined, 111 referenced`）、`npm run build:web` 绿（25 模块，
+  `dist/assets/index-DG-PbtuT.js` 116.90 kB）、28 条 smoke 实跑 **25 绿 / 3 红**（`smoke-api` 无服务器、
+  `smoke-liveness` 时序、`smoke-approval` 偶发）⇒ 对跑口径 **26 绿 / 2 既有红、零新红**；逐份 diff 的不等项
+  全部落在 01 §5 的随机量清单（`smoke-boot` 端口 / 临时 home / 会话 id、`smoke-api-with-server` 三个 UUID、
+  `smoke-liveness` 毫秒）、07–09 已记的断言改写（`smoke-session` 31 行、`smoke-approval-recovery` 3 行）与
+  两条既有红的同一条断言上。`smoke-api` 起固定 8080 服务器后 `api ok`（44 行，与基线只差 3 个 UUID / 4 行）。
+  grep 清零面十二词条全 0（文档面与源码面各 0）；豁免面 `docs/adr` 7 处（0012/0013 各 1、0016 自己 4 行
+  5 处）、`.scratch/` 16 文件 215 处（写完其 Answer 之后；之前 196）。0016 状态行按本票数字改写。
+  **Destination 逐条达成，本图可关闭。**
 
 ## Not yet specified
 
-**本图 2026-11-06 已 graduate：02–06 全部定案，执行票按「每一笔都能让 `npm run check` 绿」的切口开出，
-编号 07–11，`Blocked by` 串成一条链。**
+**本图已走完（2026-11-07，11 号票收账）：02–06 定案、07–09 代码落地、10 文档收账、11 全量验收，
+Destination 的六条（代码 / `check` / smoke / 两份文档 / ADR / `ToolRegistry` 清零）逐条成立，没有剩下的雾。**
 
-- [07 - Tool 目录无关与 `ToolManager` 落地](issues/07-tool-manager-landing.md)：类型（`execute` 加 `run`、
-  `ToolRunContext` 迁 `llm/types.ts`）、`ToolRegistry` → `ToolManager` 四法、六个零参工厂、出口面、
-  四函数收 `known`、装配收敛到一只、`Context.tools` 生产端改从 Map 取、smoke 按 05 §3 改写。
-- [08 - 引擎执行全量改道](issues/08-execution-reroute-to-manager.md)：03 §3 的六个执行调用点，
-  Manager 的执行入口成为生产代码唯一 `Tool.execute` 调用点。
-- [09 - 本轮名单进执行链](issues/09-active-names-threading.md)：04 §2.4，先判活再取实例，
-  禁用工具仍回 `Tool <name> not found`。
-- [10 - 文档与 ADR 收账](issues/10-docs-and-adr-closeout.md)：06 §3.2 全份（0016 / 四条指针 / 八处标注 /
-  逐句改写 / grep 清零）。
-- [11 - 全量验收](issues/11-full-acceptance.md)：三套数字 + 0016 状态行。
-
-**为什么不再细分**：`tsconfig.json` 把 core、server 与 13 条脚本编在一次 `tsc` 里，删掉 `ToolRegistry`
-的那一笔必须同时改完这些编译面，所以「类 / 装配 / smoke」不能拆成两票；05 §2.6 也断言「一次会话就能把
-所有调用点改完」。**切法与票号到此固定，不再重开**；各票内部形状仍归该票，本图不复述。
-
-四块旧雾已分别由 03（压缩摘要与传输面排除）/ 04（会话账本格式）/ 05（`register()` 与旧五法）/ 06
-（名字与文档处置）关掉，条文在各票 §5，不在本图重述。
+历史留痕：切票理由（`tsconfig.json` 把 core、server 与 13 条脚本编在一次 `tsc` 里，删掉 `ToolRegistry` 的那
+一笔必须同时改完这些编译面）与四块旧雾的归属（03 压缩摘要与传输面、04 会话账本格式、05 `register()` 与旧
+五法、06 名字与文档处置）曾以「票号清单 + 为什么不再细分」写在这里，收口时删去（历史在 git），条文本身
+始终在各票 §5，本图从不复述。
 
 ## Out of scope
 
