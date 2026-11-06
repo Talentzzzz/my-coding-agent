@@ -27,7 +27,7 @@ interface ReadHooks {
  * identified by its file signature, not its extension) is answered with the image itself beside a
  * one-line envelope, which is how a vision model sees a picture.
  */
-export function createReadTool(workDirAbsPath: string): Tool<typeof parameters> {
+export function createReadTool(): Tool<typeof parameters> {
 	return {
 		name: "read",
 		label: "Read",
@@ -35,8 +35,8 @@ export function createReadTool(workDirAbsPath: string): Tool<typeof parameters> 
 			"Read a file and return its contents with line numbers. Use offset and limit for large files. Image files (PNG, JPEG, GIF, WebP) are returned as images.",
 		parameters,
 		executionMode: "parallel",
-		execute(_toolCallId, params, signal, onUpdate) {
-			return runRead(workDirAbsPath, params, { signal, onUpdate });
+		execute(_toolCallId, params, run, signal, onUpdate) {
+			return runRead(run.workDirAbsPath, params, { signal, onUpdate });
 		},
 	};
 }

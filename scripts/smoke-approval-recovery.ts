@@ -270,6 +270,7 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 		danglingToolCallsOf([dangling]),
 		{ enablePendingToolRecovery: false },
 		{},
+		{ workDirAbsPath: process.cwd() },
 		undefined,
 		emitted,
 	);
@@ -289,6 +290,7 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 		danglingToolCallsOf([dangling]),
 		undefined,
 		{},
+		{ workDirAbsPath: process.cwd() },
 		undefined,
 		emitted,
 	);
@@ -307,6 +309,7 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 		danglingToolCallsOf([dangling]),
 		{ answers: { call_x: { approved: true } } },
 		{ beforeToolCall: async () => ({ suspend: true }) },
+		{ workDirAbsPath: process.cwd() },
 		undefined,
 		emitted,
 	);

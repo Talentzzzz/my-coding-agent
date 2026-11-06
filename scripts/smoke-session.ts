@@ -8,13 +8,13 @@ import { createFakeTransport, fakeAssistantMessage, fakeToolCall, type FakeRespo
 import {
 	CURRENT_SESSION_VERSION,
 	createSession,
-	createToolRegistry,
+	createToolManager,
 	fillSession,
 	MAX_TOOL_RESULT_BYTES,
 	openAgent,
 	inMemorySettingManager,
 	SessionManager,
-	toolDefinitions,
+	narrowToKnown,
 	type Agent,
 	type AgentSessionEvent,
 	type Tool,
@@ -25,11 +25,12 @@ import {
 	type SessionEntry,
 	type Session,
 	type SettingManager,
-	type ToolRegistry,
+	type ToolManager,
 	type ModelConfig,
 	sessionDir,
 	type AssistantMessage,
 	type ChatTransport,
+	type Context,
 	type SimpleStreamOptions,
 } from "@my-agent/core";
 
@@ -245,7 +246,7 @@ async function openSession(
 	overrides: Partial<Settings> = {},
 	run: RunOptions = {},
 	model?: string,
-	tools?: ToolRegistry,
+	tools?: ToolManager,
 ): Promise<Agent> {
 	const state = createSession(root);
 	const sessionSettings = inMemorySettingManager(settings(overrides), run.models ?? rows);
@@ -309,6 +310,12 @@ interface SentRequest {
 	prompt: string;
 	/** Tool names that request declared available. */
 	tools: string[];
+	/**
+	 * The tool entries the request carried, as the wire carries them: declarations, one list per
+	 * request. `toToolDeclaration` rebuilds each entry from the instance, so a request's list is the
+	 * one thing about identity it cannot show — the elements are measured where they run.
+	 */
+	instances: readonly Tool<any>[];
 	/** Every message's text, in the order the provider was handed them. */
 	texts: string[];
 	/** Every message's role, in the same order. */
@@ -327,7 +334,7 @@ interface SentRequest {
 function recordRequests(seen: SentRequest[], responses: AssistantMessage[]): void {
 	fake.setResponses(
 		responses.map((response) => (
-			context: { messages: readonly unknown[]; tools?: readonly { name?: string }[] },
+			context: Context,
 			options?: SimpleStreamOptions,
 		) => {
 			seen.push({
@@ -336,6 +343,7 @@ function recordRequests(seen: SentRequest[], responses: AssistantMessage[]): voi
 					.map((message) => textOf(message as Message))
 					.join("\n\n"),
 				tools: declaredTools(context),
+				instances: context.tools,
 				texts: context.messages.map((message) => textOf(message as Message)),
 				roles: context.messages.map((message) => String((message as { role?: string }).role ?? "")),
 				apiKey: options?.apiKey,
@@ -1015,8 +1023,8 @@ async function exerciseAfterToolHook(): Promise<void> {
 async function exerciseOutputBackstop(): Promise<void> {
 	process.stdout.write("output backstop\n");
 	const huge = `HEAD-${"A".repeat(MAX_TOOL_RESULT_BYTES)}-TAIL-MARKER`;
-	const registry = createToolRegistry(toolDefinitions());
-	registry.register({
+	const manager = createToolManager();
+	manager.register({
 		name: "unbounded",
 		label: "unbounded",
 		description: "Returns more than the session's budget; registered by the smoke test.",
@@ -1030,7 +1038,7 @@ async function exerciseOutputBackstop(): Promise<void> {
 		fakeAssistantMessage("clipped"),
 		fakeAssistantMessage("again"),
 	]);
-	const session = await openSession({}, {}, undefined, registry);
+	const session = await openSession({}, {}, undefined, manager);
 
 	await within("the run", 10_000, session.prompt(sidOf(session), "run the unbounded tool"));
 	await within("settle()", 10_000, session.settle(sidOf(session)));
@@ -1240,35 +1248,27 @@ async function exerciseToolChangeResend(): Promise<void> {
 }
 
 /**
- * The registry on its own: the shared definitions, the session-local tools, and the one rule that
- * keeps them from the choice — which arrives as data with every read, derived from the ledger by the
- * session, never held here.
+ * The table on its own: one `Map` of instances, and the rule that keeps its contents from the choice —
+ * which arrives as data with every read, derived from the ledger by the session, never held here.
  *
- * `executionMode` is checked here because it is the reason the registry holds no such choice: it is
- * a field on each built tool, so narrowing the active set cannot change how a tool runs. The registry
- * holds no directory — `active()` builds against the run context it is handed — so the same call
- * twice hands back distinct objects, which is the "built fresh, per request" half of the chain.
+ * `executionMode` is checked here because it is the reason the table holds no such choice: it is a
+ * field on each instance, so narrowing the active set cannot change how a tool runs. What the table
+ * does hold is the instances themselves, so `get(name)` answers the same object every time — and the
+ * request declares that same object, which is the identity half of ADR-0016. The array is still
+ * rebuilt per request; only the elements are invariant.
  */
-async function exerciseToolRegistry(): Promise<void> {
-	process.stdout.write("tool registry\n");
-	const registry = createToolRegistry(toolDefinitions());
+async function exerciseToolManager(): Promise<void> {
+	process.stdout.write("tool manager\n");
+	const manager = createToolManager();
 	const builtIns = ["read", "write", "edit", "glob", "grep", "bash"];
-	const full = { activeToolNames: registry.names() };
-	const run = { workDirAbsPath: root };
 
-	check("names() holds the six built-ins in registration order", JSON.stringify(registry.names()) === JSON.stringify(builtIns), JSON.stringify(registry.names()));
-	check("and the full set is every one of them active", JSON.stringify(registry.activeNames(full)) === JSON.stringify(builtIns), JSON.stringify(registry.activeNames(full)));
-	check("build() builds the named tool against the run context", registry.build("bash", run)?.name === "bash");
-	check("build() returns undefined for a name nobody knows", registry.build("nope", run) === undefined);
-	check("executionMode is a field on the built tool", registry.build("bash", run)?.executionMode === "sequential", String(registry.build("bash", run)?.executionMode));
-	check("active() builds the set fresh each time", registry.active(full, run) !== registry.active(full, run));
-	check("and every built tool it returns is one of the active names", registry.active(full, run).every((tool, index) => tool.name === registry.activeNames(full)[index]), JSON.stringify(registry.active(full, run).map((tool) => tool.name)));
-
-	const narrowed = { activeToolNames: ["read"] };
-	check("a narrowed choice narrows activeNames()", JSON.stringify(registry.activeNames(narrowed)) === JSON.stringify(["read"]), JSON.stringify(registry.activeNames(narrowed)));
-	check("and active() with it", JSON.stringify(registry.active(narrowed, run).map((tool) => tool.name)) === JSON.stringify(["read"]), JSON.stringify(registry.active(narrowed, run).map((tool) => tool.name)));
-	check("while names() keeps every definition", registry.names().length === 6, String(registry.names().length));
-	check("and a name this build does not know is dropped by the read, not thrown at", JSON.stringify(registry.activeNames({ activeToolNames: ["read", "nope"] })) === JSON.stringify(["read"]), JSON.stringify(registry.activeNames({ activeToolNames: ["read", "nope"] })));
+	check("names() holds the six built-ins in registration order", JSON.stringify(manager.names()) === JSON.stringify(builtIns), JSON.stringify(manager.names()));
+	check("get() returns the named tool", manager.get("bash")?.name === "bash");
+	check("get() returns undefined for a name nobody knows", manager.get("nope") === undefined);
+	check("executionMode is a field on the instance", manager.get("bash")?.executionMode === "sequential", String(manager.get("bash")?.executionMode));
+	check("get() answers the same instance every time", manager.get("bash") === manager.get("bash"));
+	check("while names() keeps every tool", manager.names().length === 6, String(manager.names().length));
+	check("and a name this build does not know is dropped by the read, not thrown at", JSON.stringify(narrowToKnown(["read", "nope"], manager.names())) === JSON.stringify(["read"]), JSON.stringify(narrowToKnown(["read", "nope"], manager.names())));
 
 	const noop: Tool<any> = {
 		name: "noop",
@@ -1277,9 +1277,75 @@ async function exerciseToolRegistry(): Promise<void> {
 		parameters: { type: "object", properties: {} },
 		execute: async () => ({ content: [{ type: "text", text: "noop" }], details: undefined }),
 	};
-	registry.register(noop);
-	check("register() adds the tool and makes it callable", registry.build("noop", run) === noop && registry.activeNames({ activeToolNames: registry.names() }).includes("noop"), JSON.stringify(registry.activeNames({ activeToolNames: registry.names() })));
-	check("and the choice, not the registry, decides whether it is offered", registry.activeNames(narrowed).includes("noop") === false, JSON.stringify(registry.activeNames(narrowed)));
+	manager.register(noop);
+	check("register() adds the tool to the table", manager.get("noop") === noop && manager.names().includes("noop"), JSON.stringify(manager.names()));
+	let duplicate = "";
+	try {
+		manager.register(noop);
+	} catch (error) {
+		duplicate = error instanceof Error ? error.message : String(error);
+	}
+	check("and a second registration of one name is refused", duplicate === "Tool already registered: noop", duplicate);
+	let collision = "";
+	try {
+		manager.register({ ...noop, name: "read" });
+	} catch (error) {
+		collision = error instanceof Error ? error.message : String(error);
+	}
+	check("and so is one that would overwrite a built-in", collision === "Tool already registered: read", collision);
+
+	// The identity ADR-0016 promises is measured per request, and the wire alone cannot show it: a
+	// request carries declarations (`toToolDeclaration` replaces each tool with its four declared
+	// fields, and ADR-0015 §2.5 keeps that), so the transport sees names and schemas, never the
+	// instance. What it can show is that the request built a new list. The instance itself is read
+	// where this request's `Context.tools` element is dereferenced — a probe registered on the same
+	// table records `this` from inside its own `execute`.
+	const ran: Tool<any>[] = [];
+	const probe: Tool<any> = {
+		name: "probe",
+		label: "probe",
+		description: "Records the instance the engine ran; registered by the smoke test.",
+		parameters: { type: "object", properties: {} },
+		async execute() {
+			ran.push(this);
+			return { content: [{ type: "text", text: "probed" }], details: undefined };
+		},
+	};
+	manager.register(probe);
+
+	const sent: SentRequest[] = [];
+	recordRequests(sent, [
+		fakeAssistantMessage(fakeToolCall("probe", {})),
+		fakeAssistantMessage("first done"),
+		fakeAssistantMessage(fakeToolCall("probe", {})),
+		fakeAssistantMessage("second done"),
+	]);
+	const session = await openSession({}, {}, undefined, manager);
+	await within("the run", 10_000, session.prompt(sidOf(session), "probe once"));
+	await within("settle()", 10_000, session.settle(sidOf(session)));
+	// A narrowing between the two requests: `read` and `probe` stay, `noop` and the rest go.
+	session.setActiveTools(sidOf(session), ["read", "probe"]);
+	await within("the run", 10_000, session.prompt(sidOf(session), "probe once more"));
+	await within("settle()", 10_000, session.settle(sidOf(session)));
+
+	check("the request ran the table's own instance", ran[0] === manager.get("probe"));
+	check("and the next request ran that same one", ran[0] === ran[1]);
+	check("while the request's tool list itself is new per request", sent[0]?.instances !== sent[1]?.instances);
+	check(
+		"the choice, not the table, decides what a request declares",
+		JSON.stringify(sent[2]?.tools) === JSON.stringify(["read", "probe"]) && sent[2]?.tools.includes("noop") === false,
+		JSON.stringify(sent[2]?.tools),
+	);
+
+	const other: SentRequest[] = [];
+	recordRequests(other, [fakeAssistantMessage(fakeToolCall("probe", {})), fakeAssistantMessage("third done")]);
+	const secondSession = await openSession({}, {}, undefined, manager);
+	await within("the run", 10_000, secondSession.prompt(sidOf(secondSession), "probe from elsewhere"));
+	await within("settle()", 10_000, secondSession.settle(sidOf(secondSession)));
+	check("another session ran that same instance too", ran[2] === manager.get("probe"));
+
+	await session.close(sidOf(session));
+	await secondSession.close(sidOf(secondSession));
 }
 
 /**
@@ -1951,7 +2017,7 @@ try {
 	await exerciseOutputBackstop();
 	await exerciseApprovalPrompt();
 	await exerciseToolChangeResend();
-	await exerciseToolRegistry();
+	await exerciseToolManager();
 	await exerciseActiveTools();
 	await exerciseDeactivatedToolCall();
 	await exerciseFileDiffReport();

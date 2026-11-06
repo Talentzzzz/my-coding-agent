@@ -4,7 +4,7 @@ import { boundToolContent } from "../hooks.ts";
 import { modelFor } from "../models.ts";
 import type { SessionSnapshot } from "../protocol.ts";
 import type { SettingManager } from "../setting-manager.ts";
-import type { ToolRegistry } from "../tools/index.ts";
+import type { ToolManager } from "../tools/index.ts";
 import type { AgentState } from "./agent-state.ts";
 import { danglingApprovalsOf } from "./dangling.ts";
 import type { AgentSessionEvent } from "./events.ts";
@@ -24,7 +24,7 @@ import { followsGlobalOf, toolStateOf } from "./tool-config.ts";
 export interface SessionServices {
 	sessionManager: SessionManager;
 	settings: SettingManager;
-	tools: ToolRegistry;
+	tools: ToolManager;
 }
 
 /**
@@ -38,7 +38,7 @@ export interface SessionServices {
 export function approvalsOf(services: SessionServices, session: Session): Record<string, boolean> {
 	return {
 		...services.settings.getApprovals(session.sessionSetting.workDirAbsPath),
-		...toolStateOf(services.sessionManager, session, services.settings, services.tools).approvalOverride,
+		...toolStateOf(services.sessionManager, session, services.settings, services.tools.names()).approvalOverride,
 	};
 }
 
@@ -83,10 +83,10 @@ export function snapshotOf(state: AgentState, services: SessionServices): Sessio
 		model: live.model ?? modelFor(session.sessionSetting.model ?? {}, services.settings.modelCatalog()),
 		approvals: approvalsOf(services, session),
 		allTools: services.tools.names(),
-		activeTools: toolStateOf(services.sessionManager, session, services.settings, services.tools).activeToolNames,
+		activeTools: toolStateOf(services.sessionManager, session, services.settings, services.tools.names()).activeToolNames,
 		// Judged against this directory's own settings, the same way a cold read judges it, so the
 		// panel's "沿用全局" label cannot disagree with itself between the two paths.
-		...followsGlobalOf(services.sessionManager, session, services.settings, services.tools),
+		...followsGlobalOf(services.sessionManager, session, services.settings, services.tools.names()),
 		...(live.partial === undefined ? {} : { partial: live.partial }),
 		submitting: live.activeRun !== undefined,
 		queued: live.followUpQueue.previews(),

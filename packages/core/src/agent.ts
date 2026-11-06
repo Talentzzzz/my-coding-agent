@@ -63,7 +63,7 @@ import {
 } from "./session/session-manager.ts";
 import { toolStateOf } from "./session/tool-config.ts";
 import type { SettingManager } from "./setting-manager.ts";
-import type { ToolRegistry, ToolRunContext, ToolState } from "./tools/index.ts";
+import type { ToolManager, ToolRunContext, ToolState } from "./tools/index.ts";
 import type {
 	AfterToolCallResult,
 	AgentEvent,
@@ -93,7 +93,7 @@ export type { AgentSessionEvent, MessageDelta, SessionEventListener, SessionList
  *
  * None of these fields is session *state*. The services this class coordinates — the ledger,
  * the configuration (settings and model rows together, one {@link SettingManager}), the tool
- * definitions, the seams, the prompt builder, and the transport — each hold their own pure-data
+ * table, the seams, the prompt builder, and the transport — each hold their own pure-data
  * state (ADR-0006 §1–2); what used to be the `Agent`'s private session fields are gone: the
  * run-time transients are locals of the run (ADR-0006 §5), the approvals are derived from the
  * ledger, the stamps are derived from the file, and the assembly rides the state the open adopted
@@ -121,16 +121,16 @@ export interface AgentConfig {
 	 */
 	settings: SettingManager;
 	/**
-	 * The tool definitions this build knows, plus whatever a caller registered on it — a test's custom
-	 * tool. Structure only: the choice is not here.
+	 * The tools this build knows, plus whatever a caller registered on it — a test's custom tool.
+	 * Structure only: the choice is not here.
 	 *
 	 * The active set and the approval map are derived from the session's recorded choices — the
 	 * `.json` snapshot's current values — on every read (the global default's live view is the
-	 * fallback), so nothing mutates when the choice moves. No directory is resident either: the
-	 * executable set is built fresh against the run context every request asks for it, so the
-	 * workDirAbsPath is a value that arrives with the request and leaves with it.
+	 * fallback), so nothing mutates when the choice moves. The table holds behaviour and no
+	 * directory: a request declares the instances its names resolve to, and the per-request values
+	 * those instances act with arrive on `execute`'s `run` (ADR-0016).
 	 */
-	tools: ToolRegistry;
+	tools: ToolManager;
 	/**
 	 * The seams every dispatch goes through: `context`, `before_tool` (the approval gate), `after_tool`.
 	 *
@@ -173,7 +173,7 @@ export interface AgentConfig {
  * The engine is not a second object: ADR-0012 put it in a `LoopManager` and ADR-0013 took its
  * services away, which left an object with nothing of its own to be — so it is a method again
  * (ADR-0014). What the class holds beyond the session table is the engine's services, and a run
- * reads them off `this`: the ledger, the configuration, the tool definitions, the seams, the prompt
+ * reads them off `this`: the ledger, the configuration, the tool table, the seams, the prompt
  * builder, and the transport. Everything else here is the session's own command surface — the
  * transcript reads, the approvals, the config moves, and the fan-out a command answers through.
  *
@@ -208,7 +208,7 @@ export class Agent {
 	 */
 	readonly hooks: Hooks;
 
-	private readonly tools: ToolRegistry;
+	private readonly tools: ToolManager;
 	/** The prompt builder a request is built from; {@link Agent.prepareRequest} is what calls it. */
 	private readonly systemPrompt: AgentConfig["systemPrompt"];
 	/** Where a request actually leaves: the transport, before the retry policy wraps it. */
@@ -524,7 +524,7 @@ export class Agent {
 	 */
 	setActiveTools(id: string, names: string[]): void {
 		const state = this.agentState(id);
-		const previous = toolStateOf(this.sessionManager, state.session, this.settings, this.tools).activeToolNames;
+		const previous = toolStateOf(this.sessionManager, state.session, this.settings, this.tools.names()).activeToolNames;
 		const known = new Set(this.tools.names());
 		const unknown = names.filter((name) => !known.has(name));
 		if (unknown.length > 0) {
@@ -607,7 +607,7 @@ export class Agent {
 			// The snapshot records the whole map in force — the settings with this session's choice over
 			// them — which is the shape every read of the ledger answers from.
 			const approvals = { ...previousApprovals, ...patch.approval };
-			const activeToolNames = toolStateOf(this.sessionManager, state.session, this.settings, this.tools).activeToolNames;
+			const activeToolNames = toolStateOf(this.sessionManager, state.session, this.settings, this.tools.names()).activeToolNames;
 			this.sessionManager.setToolConfig(state.session, activeToolNames, approvals);
 		}
 		// The rest of the patch goes to the settings through the manager, which owns the write: the
@@ -681,7 +681,7 @@ export class Agent {
 			// The grant is the session's own choice for this tool, recorded as the whole map in force
 			// with the tool turned off — the same move a config patch makes.
 			const approvals = { ...approvalsOf(this.services, state.session), [call.toolName]: false };
-			const activeToolNames = toolStateOf(this.sessionManager, state.session, this.settings, this.tools).activeToolNames;
+			const activeToolNames = toolStateOf(this.sessionManager, state.session, this.settings, this.tools.names()).activeToolNames;
 			this.sessionManager.setToolConfig(state.session, activeToolNames, approvals);
 		}
 		// Said before the run starts: the choice is the session's own and lands now, while the call
@@ -967,6 +967,10 @@ export class Agent {
 		start: RunStart,
 	): Promise<Message[]> {
 		const { sessionManager, settings, tools } = this;
+		// This run's values — the directory and the bash timeouts — collected once and carried by every
+		// call the run makes: they are per-request facts that now travel as a value rather than being
+		// closed over by a tool instance (ADR-0016).
+		const run: ToolRunContext = this.runContext(state);
 		const session = state.session;
 		const live = state.live;
 		if (live.activeRun !== undefined) {
@@ -996,7 +1000,7 @@ export class Agent {
 			const newMessages: Message[] = [];
 			let currentContext: Context = {
 				messages: [...sessionManager.buildSessionContext(session).messages],
-				tools: [...tools.active(toolStateOf(sessionManager, session, settings, tools), this.runContext(state))],
+				tools: this.declaredTools(tools, toolStateOf(sessionManager, session, settings, tools.names()).activeToolNames),
 			};
 
 			await emit({ type: "agent_start" });
@@ -1013,6 +1017,7 @@ export class Agent {
 					dangling,
 					{ answers: start.answers },
 					hooks,
+					run,
 					signal,
 					emit,
 				);
@@ -1098,7 +1103,7 @@ export class Agent {
 						const executedToolBatch =
 							message.stopReason === "length"
 								? await failToolCallsFromTruncatedMessage(toolCalls, emit)
-								: await executeToolCalls(currentContext, message, hooks, signal, emit);
+								: await executeToolCalls(currentContext, message, hooks, run, signal, emit);
 						toolResults.push(...executedToolBatch.messages);
 						hasMoreToolCalls = !executedToolBatch.terminate;
 						suspended = executedToolBatch.suspended === true;
@@ -1249,7 +1254,7 @@ export class Agent {
 		// `setActiveTools` the tool set, and the model must be told about both on the next request.
 		// Both are derived from the ledger at this moment, so a choice that just landed is what the
 		// prompt describes.
-		const toolState = toolStateOf(sessionManager, session, settings, tools);
+		const toolState = toolStateOf(sessionManager, session, settings, tools.names());
 		// The project instructions are read here, per request, rather than taken from the state: an
 		// edit to a file on disk is meant to reach the very next request, the same way an edit to a
 		// model row does, and the walk is a handful of stats. What it costs is a prompt that can change
@@ -1281,26 +1286,42 @@ export class Agent {
 			context: {
 				...context,
 				messages: system === undefined ? conversation : [system, ...conversation],
-				// The live executable set, built fresh against this request's run context from the choice
-				// derived above. The engine declares it on the request (`toToolDeclaration`) rather than
-				// reading it out of the transcript, so a tool switched on mid-session reaches the model on
-				// the next request and the two cannot drift.
-				tools: tools.active(toolState, this.runContext(state)),
+				// The live set, taken from the one table by the choice derived above: the array is new per
+				// request, its elements are the table's own instances. The engine declares it on the
+				// request (`toToolDeclaration`) rather than reading it out of the transcript, so a tool
+				// switched on mid-session reaches the model on the next request and the two cannot drift.
+				tools: this.declaredTools(tools, toolState.activeToolNames),
 			},
 		};
 	}
 
 	/**
-	 * The value objects this request's tools are built against: the working directory, read off the
-	 * session's own setting, and the bash timeouts, read off the settings the same way. Per request,
-	 * like the tool list itself — nothing here outlives the request that carries it.
+	 * The tools one request declares: the names this request derived, looked up in the one table.
+	 *
+	 * The array is rebuilt per request — a session can narrow or widen its set between two of them —
+	 * while its elements are the table's own instances, so two requests of one session, or two
+	 * sessions, hold the same objects (ADR-0016).
+	 */
+	private declaredTools(manager: ToolManager, names: readonly string[]): Tool<any>[] {
+		const declared: Tool<any>[] = [];
+		for (const name of names) {
+			const tool = manager.get(name);
+			if (tool !== undefined) declared.push(tool);
+		}
+		return declared;
+	}
+
+	/**
+	 * The value objects this run's tools are called with: the working directory, read off the
+	 * session's own setting, and the bash timeouts, read off the settings the same way. Collected
+	 * once per run and carried by every call it makes — nothing here outlives the run that reads it.
 	 */
 	private runContext(state: AgentState): ToolRunContext {
 		const workDirAbsPath = state.session.sessionSetting.workDirAbsPath;
 		return {
 			workDirAbsPath,
-			// Read live, like every other settings read: a timeout the user moved reaches the next tool
-			// call without anything being reopened.
+			// Read live, like every other settings read: a timeout the user moved reaches the next
+			// run's calls without anything being reopened.
 			bash: this.settings.getBashSettings(workDirAbsPath),
 		};
 	}
@@ -2007,6 +2028,7 @@ export async function recoverPendingToolCalls(
 	dangling: DanglingToolCall[],
 	recovery: RunRecoveryOptions | undefined,
 	hooks: ToolCallHooks,
+	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
@@ -2031,7 +2053,7 @@ export async function recoverPendingToolCalls(
 			if (preparation.kind === "immediate") {
 				finalized = { toolCall, result: preparation.result, isError: preparation.isError };
 			} else {
-				const executed = await executePreparedToolCall(preparation, signal, emitToolExecutionUpdate(toolCall, emit));
+				const executed = await executePreparedToolCall(preparation, run, signal, emitToolExecutionUpdate(toolCall, emit));
 				finalized = await finalizeExecutedToolCall(currentContext, assistantMessage, preparation, executed, hooks, signal);
 			}
 			await emitToolExecutionEnd(finalized, emit);
@@ -2083,6 +2105,7 @@ async function executeToolCalls(
 	currentContext: Context,
 	assistantMessage: AssistantMessage,
 	hooks: ToolCallHooks,
+	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
@@ -2091,9 +2114,9 @@ async function executeToolCalls(
 		(tc) => currentContext.tools.find((t) => t.name === tc.name)?.executionMode === "sequential",
 	);
 	if (hasSequentialToolCall) {
-		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, hooks, signal, emit);
+		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, hooks, run, signal, emit);
 	}
-	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, hooks, signal, emit);
+	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, hooks, run, signal, emit);
 }
 
 async function executeToolCallsSequential(
@@ -2101,6 +2124,7 @@ async function executeToolCallsSequential(
 	assistantMessage: AssistantMessage,
 	toolCalls: ToolCall[],
 	hooks: ToolCallHooks,
+	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
@@ -2130,7 +2154,7 @@ async function executeToolCallsSequential(
 				isError: preparation.isError,
 			};
 		} else {
-			const executed = await executePreparedToolCall(preparation, signal, emitToolExecutionUpdate(toolCall, emit));
+			const executed = await executePreparedToolCall(preparation, run, signal, emitToolExecutionUpdate(toolCall, emit));
 			finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -2163,6 +2187,7 @@ async function executeToolCallsParallel(
 	assistantMessage: AssistantMessage,
 	toolCalls: ToolCall[],
 	hooks: ToolCallHooks,
+	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
@@ -2209,7 +2234,7 @@ async function executeToolCallsParallel(
 				await emitToolExecutionEnd(finalized, emit);
 				return finalized;
 			}
-			const executed = await executePreparedToolCall(preparation, signal, emitToolExecutionUpdate(toolCall, emit));
+			const executed = await executePreparedToolCall(preparation, run, signal, emitToolExecutionUpdate(toolCall, emit));
 			const finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -2351,6 +2376,8 @@ function emitToolExecutionUpdate(toolCall: ToolCall, emit: AgentEventSink): Tool
 
 /** Options for {@link runToolCall}. */
 interface RunToolCallOptions extends ToolCallHooks {
+	/** This call's run values: the directory it acts in and the bash timeouts it runs under. */
+	run: ToolRunContext;
 	/** Tools the call resolves against. */
 	tools: readonly Tool<any>[];
 	/** Passed to the hooks as the message that issued the call. */
@@ -2386,12 +2413,13 @@ async function runToolCall(toolCall: ToolCall, options: RunToolCallOptions): Pro
 			isError: true,
 		};
 	}
-	const executed = await executePreparedToolCall(preparation, signal, options.onUpdate ?? (() => {}));
+	const executed = await executePreparedToolCall(preparation, options.run, signal, options.onUpdate ?? (() => {}));
 	return finalizeExecutedToolCall(context, assistantMessage, preparation, executed, options, signal);
 }
 
 async function executePreparedToolCall(
 	prepared: PreparedToolCall,
+	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	onUpdate: ToolUpdateSink,
 ): Promise<ExecutedToolCallOutcome> {
@@ -2402,6 +2430,7 @@ async function executePreparedToolCall(
 		const result = await prepared.tool.execute(
 			prepared.toolCall.id,
 			prepared.args as never,
+			run,
 			signal,
 			(partialResult) => {
 				if (!acceptingUpdates) return;

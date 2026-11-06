@@ -1,5 +1,14 @@
-import type { Tool } from "../llm/index.ts";
-import { DEFAULT_MODE_NAME, type BashSettings, type ModeSettings } from "../config.ts";
+// The tool side of this build: one table of every tool it knows, and the pure-data choice of which
+// of them a session may call (ADR-0016).
+//
+// The table is resident and the choice is not. What sits in the table is behaviour only — six
+// directory-free instances, plus whatever a test registered — so holding them costs a process
+// lifetime of constants rather than a session's worth of state. Everything a call needs that changes
+// between requests (the working directory, the `bash` timeouts) arrives on `execute`'s `run`, which
+// is what lets one instance serve every session.
+
+import type { Tool, ToolResult, ToolRunContext, ToolUpdateCallback } from "../llm/index.ts";
+import { DEFAULT_MODE_NAME, type ModeSettings } from "../config.ts";
 import { createBashTool } from "./bash.ts";
 import { createEditTool } from "./edit.ts";
 import { createGlobTool } from "./glob.ts";
@@ -8,80 +17,12 @@ import { createReadTool } from "./read.ts";
 import { createWriteTool } from "./write.ts";
 
 /**
- * The tool side of the stateless chain (ADR-0006): the definitions are global and read-only, the
- * per-session choice is pure data ({@link ToolState}), and the executable set is built fresh against
- * the run context every time it is asked for. Nothing here holds a working directory between calls.
- */
-
-// ---------------------------------------------------------------------------- the definitions
-
-/**
- * The value objects one request's tools are built against.
+ * The per-request values a tool acts with, re-exported from the wire types.
  *
- * The tools read relative paths against {@link workDirAbsPath} and start `bash` there; both are per-request
- * facts — the directory comes from the session header's workDir, the timeouts from the settings read
- * alongside — so they are injected at build time rather than captured when a session is assembled. A
- * value object lives and dies with the request that carries it.
+ * It is `execute`'s third parameter, so its home is beside `Tool` (ADR-0015 §2): this re-export keeps
+ * every existing import path — `tools/index.ts`, `agent.ts`, the smokes — pointing at the same name.
  */
-export interface ToolRunContext {
-	/** The directory relative paths resolve against, and where a command starts. No fence. */
-	workDirAbsPath: string;
-	/** The `bash` timeouts; the defaults when the caller names none. */
-	bash?: BashSettings;
-}
-
-/**
- * One built-in tool as a definition: a factory over the run context.
- *
- * A definition is everything about the tool except the directory it acts in, which is why it is a
- * function and not a `Tool` — a `Tool` closes over its working directory, and a registry
- * that held those would hold a directory per session, which is the residency this file exists to
- * remove.
- */
-export type ToolDefinition = (run: ToolRunContext) => Tool<any>;
-
-/**
- * The full set of tool definitions this build knows, read-only.
- *
- * There is still no plugin registry: a definition is one factory over the six built-ins, and
- * `executionMode` stays a field on the built tool, not something this catalog decides.
- */
-export interface ToolDefinitions {
-	/** Every definition's name, in registration order. */
-	names(): string[];
-	get(name: string): ToolDefinition | undefined;
-	all(): ToolDefinition[];
-}
-
-/** The six built-ins, in the order the model is offered them. */
-export function createToolDefinitions(): ToolDefinitions {
-	const definitions = new Map<string, ToolDefinition>([
-		["read", (run) => createReadTool(run.workDirAbsPath)],
-		["write", (run) => createWriteTool(run.workDirAbsPath)],
-		["edit", (run) => createEditTool(run.workDirAbsPath)],
-		["glob", (run) => createGlobTool(run.workDirAbsPath)],
-		["grep", (run) => createGrepTool(run.workDirAbsPath)],
-		["bash", (run) => createBashTool(run.workDirAbsPath, run.bash)],
-	]);
-	return {
-		names: () => [...definitions.keys()],
-		get: (name) => definitions.get(name),
-		all: () => [...definitions.values()],
-	};
-}
-
-/**
- * The process-wide definitions, built once.
- *
- * The definitions are constants of this build — the same six for every session, over every
- * directory — so one shared catalog is the "global read-only, built at startup" form the stateless
- * architecture asks for. Read-only is the point: a session narrows what the model may call through
- * its own {@link ToolState}, never by adding to or reshaping the catalog.
- */
-let sharedDefinitions: ToolDefinitions | undefined;
-export function toolDefinitions(): ToolDefinitions {
-	return (sharedDefinitions ??= createToolDefinitions());
-}
+export type { ToolRunContext };
 
 // ---------------------------------------------------------------------------- the state
 
@@ -149,33 +90,115 @@ export function fillTools(modeName: string | undefined, context: ToolFillContext
 	};
 }
 
-// ---------------------------------------------------------------------------- the run-context assembly
+// ---------------------------------------------------------------------------- the table
 
 /**
- * The run context's executable set, built fresh: definitions looked up by the active names, each
- * built against the run context, then the tools a caller registered whose names are active.
- *
- * This is the one place "an active name" becomes "a tool the engine can call", and it builds rather
- * than returns stored tools — the working directory is a per-request value, so a `Tool` cannot
- * outlive the request that asked for the list. Names this build does not know are skipped, the same
- * narrowing a recorded choice gets: a recorded set is read down to what can run, never thrown
- * at.
+ * The six built-ins, in the order the model is offered them. Zero-argument factories: a tool closes
+ * over nothing, so the table can hold the products for the life of the process.
  */
-export function toolListFor(
-	definitions: ToolDefinitions,
-	state: ToolState,
-	run: ToolRunContext,
-	local: readonly Tool<any>[] = [],
-): Tool<any>[] {
-	const active = new Set(state.activeToolNames);
-	const built: Tool<any>[] = [];
-	for (const name of definitions.names()) {
-		if (!active.has(name)) continue;
-		const tool = definitions.get(name)?.(run);
-		if (tool !== undefined) built.push(tool);
+const builtIns: readonly (() => Tool<any>)[] = [
+	() => createReadTool(),
+	() => createWriteTool(),
+	() => createEditTool(),
+	() => createGlobTool(),
+	() => createGrepTool(),
+	() => createBashTool(),
+];
+
+/**
+ * The tools one process knows: a `Map<name, Tool>` holding every instance, plus the registered ones.
+ *
+ * Structure only — what exists here, not what is chosen. The choice is a {@link ToolState} derived
+ * per read from the ledger (`toolStateOf` in `session/tool-config.ts`), so this table never answers
+ * "may this session call it": the engine answers that against the names it derived. Whether a
+ * registered tool is offered is the same question, answered in the same place.
+ *
+ * What this class also owns is the call: {@link ToolManager.execute} resolves a name and forwards to
+ * the instance it names, so a caller that holds a name and this call's `run` values needs nothing
+ * else to run a tool. The behaviour stays on the instance, and the validation, the gates, the
+ * events, and the result write-back stay in the engine.
+ */
+export class ToolManager {
+	/** Every tool this process knows, in the order the model is offered them. Never replaced. */
+	private readonly all = new Map<string, Tool<any>>();
+
+	/**
+	 * Names of every tool this table holds: the six built-ins, then whatever was registered.
+	 *
+	 * Read, not remembered — the keys are the table's own, so a name registered later shows up on the
+	 * next read and nothing has to be invalidated.
+	 */
+	names(): string[] {
+		this.ensureFilled();
+		return [...this.all.keys()];
 	}
-	for (const tool of local) {
-		if (active.has(tool.name)) built.push(tool);
+
+	/**
+	 * One tool by name, or undefined when this build does not have it.
+	 *
+	 * The same object every time: the table is filled once and entries are never replaced, so a run
+	 * that held an instance at `prepareRequest` and one that looks it up mid-batch see the same tool.
+	 */
+	get(name: string): Tool<any> | undefined {
+		this.ensureFilled();
+		return this.all.get(name);
 	}
-	return built;
+
+	/**
+	 * Run one tool call: look the tool up and forward, with this call's own run values.
+	 *
+	 * It does not decide whether the call is allowed, and it does not validate: an unknown name here
+	 * is a bug upstream — the engine resolves and gates a name before it asks for the call — so it
+	 * throws rather than synthesizing a second result the model could see.
+	 */
+	async execute(
+		name: string,
+		toolCallId: string,
+		params: unknown,
+		run: ToolRunContext,
+		signal?: AbortSignal,
+		onUpdate?: ToolUpdateCallback<any>,
+	): Promise<ToolResult<any>> {
+		const tool = this.get(name);
+		if (tool === undefined) throw new Error(`Tool not found: ${name}`);
+		return tool.execute(toolCallId, params as never, run, signal, onUpdate);
+	}
+
+	/**
+	 * Put a tool in the table. It joins; whether it is offered is the choice, not this.
+	 *
+	 * The fill happens first, so a name that collides with a built-in is refused by the same rule that
+	 * refuses two registrations of one name — and a later fill can never overwrite what was just
+	 * registered. Only new names are accepted: no unregister, no replace, no second table.
+	 */
+	register(tool: Tool<any>): void {
+		this.ensureFilled();
+		if (this.all.has(tool.name)) throw new Error(`Tool already registered: ${tool.name}`);
+		this.all.set(tool.name, tool);
+	}
+
+	/**
+	 * Fill the table with the six built-ins, once.
+	 *
+	 * On first touch rather than in the constructor, because a process that assembles a session and
+	 * never runs a tool should not pay for six instances — and because the fill has to happen before
+	 * any read that answers "what exists", which is every public method here. Filling all six at once
+	 * rather than one per name is what keeps this table the only answer to "what exists": a per-name
+	 * fill would need a static list of names beside it, and two lists can disagree.
+	 *
+	 * A non-empty table is a filled one: `register` fills before it writes, so nothing can be in here
+	 * without the six already in place.
+	 */
+	private ensureFilled(): void {
+		if (this.all.size > 0) return;
+		for (const create of builtIns) {
+			const tool = create();
+			this.all.set(tool.name, tool);
+		}
+	}
+}
+
+/** The table one process knows. Built zero-argument: the built-ins are this build's constants. */
+export function createToolManager(): ToolManager {
+	return new ToolManager();
 }

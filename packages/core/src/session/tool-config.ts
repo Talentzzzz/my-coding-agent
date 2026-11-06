@@ -1,5 +1,4 @@
 import type { SettingManager } from "../setting-manager.ts";
-import type { ToolRegistry } from "../tools/registry.ts";
 import { fillTools, narrowToKnown, type ToolState } from "../tools/manager.ts";
 import { type SessionManager, type Session } from "./session-manager.ts";
 
@@ -15,10 +14,10 @@ export function approvalToolsOf(approval: Record<string, boolean>): string[] {
  * judgement — because three spellings of "the default" would let a reset write one set while the
  * panel judged the session against another, and a just-reset session would read as having chosen.
  */
-export function defaultToolNames(settings: SettingManager, workDirAbsPath: string, registry: ToolRegistry): string[] {
+export function defaultToolNames(settings: SettingManager, workDirAbsPath: string, known: readonly string[]): string[] {
 	const configured = settings.getTools(workDirAbsPath);
-	const names = configured === undefined ? registry.names() : configured;
-	return narrowToKnown(names, registry.names());
+	const names = configured === undefined ? known : configured;
+	return narrowToKnown(names, known);
 }
 
 /**
@@ -32,12 +31,12 @@ export function defaultToolNames(settings: SettingManager, workDirAbsPath: strin
 export function globalDefaultToolState(
 	settings: SettingManager,
 	workDirAbsPath: string,
-	registry: ToolRegistry,
+	known: readonly string[],
 ): ToolState {
 	return fillTools(undefined, {
 		modes: settings.getSettings(workDirAbsPath).modes ?? [],
-		globalTools: defaultToolNames(settings, workDirAbsPath, registry),
-		known: registry.names(),
+		globalTools: defaultToolNames(settings, workDirAbsPath, known),
+		known,
 	});
 }
 
@@ -46,7 +45,7 @@ export function globalDefaultToolState(
  *
  * The session's recorded choice — the `.json` snapshot's active set and approval map, both held
  * whole — is the first word, and every earlier one is gone by design, which is why nothing needs to
- * hold it: the registry's active set and the gate's approvals all read through here, and a write
+ * hold it: the active set and the gate's approvals all read through here, and a write
  * lands in the ledger first, so the next read already answers from it. A session that never chose
  * falls back on the global default's live view — because "the choice the session never made" is the
  * global default. A session whose loadout is not its directory's own (the delegated child) says
@@ -63,12 +62,12 @@ export function toolStateOf(
 	sessions: SessionManager,
 	state: Session,
 	settings: SettingManager,
-	registry: ToolRegistry,
+	known: readonly string[],
 ): ToolState {
 	const recorded = sessions.getRecordedToolConfig(state);
 	const workDirAbsPath = state.sessionSetting.workDirAbsPath;
-	const fallback = globalDefaultToolState(settings, workDirAbsPath, registry);
-	const names = narrowToKnown(recorded.activeTools ?? fallback.activeToolNames, registry.names());
+	const fallback = globalDefaultToolState(settings, workDirAbsPath, known);
+	const names = narrowToKnown(recorded.activeTools ?? fallback.activeToolNames, known);
 	return {
 		activeToolNames: names,
 		approvalOverride: { ...(recorded.approval ?? fallback.approvalOverride ?? {}) },
@@ -122,11 +121,11 @@ export function followsGlobalOf(
 	sessions: SessionManager,
 	state: Session,
 	settings: SettingManager,
-	registry: ToolRegistry,
+	known: readonly string[],
 ): { toolsFollowGlobal: boolean; approvalsFollowGlobal: boolean } {
 	const follows = toolConfigFollowsGlobal(
 		sessions.getRecordedToolConfig(state),
-		defaultToolNames(settings, state.sessionSetting.workDirAbsPath, registry),
+		defaultToolNames(settings, state.sessionSetting.workDirAbsPath, known),
 		settings.getApprovals(state.sessionSetting.workDirAbsPath),
 	);
 	return { toolsFollowGlobal: follows.tools, approvalsFollowGlobal: follows.approvals };

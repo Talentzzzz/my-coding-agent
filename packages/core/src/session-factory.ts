@@ -20,7 +20,7 @@ import {
 	toolStateOf,
 } from "./session/tool-config.ts";
 import { SettingManager } from "./setting-manager.ts";
-import { type ToolRegistry, createToolRegistry, toolDefinitions } from "./tools/index.ts";
+import { type ToolManager, createToolManager } from "./tools/index.ts";
 import { resolve as resolvePath } from "node:path";
 
 /** What a caller must supply to build a session. Everything else is discovered here. */
@@ -68,8 +68,15 @@ export interface OpenAgentOptions {
 	 * transport so the run can be driven with no provider key.
 	 */
 	api?: ChatTransport;
-	/** Defaults to the six built-ins. A test passes a registry of its own to add a tool. */
-	tools?: ToolRegistry;
+	/**
+	 * The tools this assembly resolves against.
+	 *
+	 * Omitted means a table of this assembly's own, holding the six built-ins — what a smoke that
+	 * opens one session wants. A host hands its own in: the hub keeps one table for the process, so
+	 * a session it runs and one it merely reads a snapshot of answer the same tool names and hold the
+	 * same instances (ADR-0016). A test hands one in after registering a tool of its own.
+	 */
+	tools?: ToolManager;
 }
 
 /**
@@ -90,8 +97,8 @@ interface Assembled {
 	modelChoice: ModelChoice;
 	/** The rows this assembly read, so a caller that builds a model from the choice does not re-read. */
 	rows: readonly ModelConfig[];
-	/** What this build can build: the catalog every session shares, read here only for its names. */
-	registry: ToolRegistry;
+	/** The tools this build knows: one table per process, read here only for its names. */
+	tools: ToolManager;
 	/** The session service, resolved once here so every consumer of one assembly shares it. */
 	sessionManager: SessionManager;
 }
@@ -135,13 +142,13 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
 	// next message without anything here being refreshed.
 	const modelChoice: ModelChoice =
 		row === undefined ? {} : { name: row.name, ...(level === undefined ? {} : { thinkingLevel: level }) };
-	// The catalog: the shared read-only definitions, unless the caller handed a registry of its own —
-	// a test's custom tool. No directory is resident — the executable set is built per request against
-	// the run context. Nothing is chosen here either: the active set and the approvals derive from the
-	// ledger on every read, against the global default's live view.
-	const registry = options.tools ?? createToolRegistry(toolDefinitions());
+	// The table: this process's, unless the caller handed its own — a test's custom tool. Its content
+	// is behaviour and no directory, so one table serves every session. Nothing is chosen here either:
+	// the active set and the approvals derive from the ledger on every read, against the global
+	// default's live view.
+	const tools = options.tools ?? createToolManager();
 
-	return { workDirAbsPath, settings, modelChoice, rows, registry, sessionManager };
+	return { workDirAbsPath, settings, modelChoice, rows, tools, sessionManager };
 }
 
 /**
@@ -157,10 +164,10 @@ async function assemble(options: OpenAgentOptions): Promise<Assembled> {
  * session's history would be indistinguishable from using it.
  */
 export async function readSessionSnapshot(options: OpenAgentOptions): Promise<SessionSnapshot> {
-	const { workDirAbsPath, settings, modelChoice, rows, registry, sessionManager } = await assemble(options);
+	const { workDirAbsPath, settings, modelChoice, rows, tools, sessionManager } = await assemble(options);
 	// The same derivation a live session runs — the ledger over the global default's live view — so a
 	// cold read answers the choice a live session opens on, without replaying it into anything.
-	const tools = toolStateOf(sessionManager, options.session, settings, registry);
+	const toolState = toolStateOf(sessionManager, options.session, settings, tools.names());
 	return sessionSnapshot({
 		sessions: sessionManager,
 		session: options.session,
@@ -172,14 +179,14 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 		// The same merge `Agent.getApprovals` performs: the directory's defaults with the session's own
 		// recorded choices over them. Neither half is optional, or the header's toggles would show a
 		// gate the live session does not have.
-		approvals: { ...settings.getApprovals(workDirAbsPath), ...tools.approvalOverride },
-		// Read off the registry with the derived choice, so the toggles match a live session's exactly.
-		allTools: registry.names(),
-		activeTools: registry.activeNames(tools),
+		approvals: { ...settings.getApprovals(workDirAbsPath), ...toolState.approvalOverride },
+		// Read off the table with the derived choice, so the toggles match a live session's exactly.
+		allTools: tools.names(),
+		activeTools: toolState.activeToolNames,
 		// Judged against this directory's own settings, the same way the live session's getter does it:
 		// a cold read and a live snapshot must agree here, or the panel would flip its "沿用全局" label
 		// the moment a session went from open to merely read.
-		...followsGlobalOf(sessionManager, options.session, settings, registry),
+		...followsGlobalOf(sessionManager, options.session, settings, tools.names()),
 		submitting: false,
 		queued: [],
 		isRetrying: false,
@@ -217,8 +224,9 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 export async function assembleSession(options: OpenAgentOptions): Promise<{
 	sessionManager: SessionManager;
 	state: AgentState;
+	tools: ToolManager;
 }> {
-	const { workDirAbsPath, settings, modelChoice, sessionManager } = await assemble(options);
+	const { workDirAbsPath, settings, modelChoice, sessionManager, tools } = await assemble(options);
 	const session = options.session;
 	// The choice in force before the first request (issue 03 §7): the assembly's answer, merged onto
 	// the session's own setting field in memory. The write is deliberately not a recorded one — the
@@ -240,14 +248,14 @@ export async function assembleSession(options: OpenAgentOptions): Promise<{
 		session,
 		createLive(settings.getSteeringMode(workDirAbsPath), settings.getFollowUpMode(workDirAbsPath)),
 	);
-	return { sessionManager, state };
+	return { sessionManager, state, tools };
 }
 
 /**
  * The services one orchestrator coordinates, for a caller that builds one.
  *
  * Everything here is process-level: the ledger, the configuration every settings and model read goes
- * through, the catalog, and the transport. Nothing in it is a session's — which is what lets a host
+ * through, the tool table, and the transport. Nothing in it is a session's — which is what lets a host
  * keep one orchestrator for every conversation it runs (ADR-0007 §6). A session's state is not here
  * either: it is assembled by {@link assembleSession} and adopted by the orchestrator the host owns.
  */
@@ -256,11 +264,11 @@ export interface SessionAgentServices {
 	/** The configuration every settings and model read of every session this orchestrator runs goes through. */
 	settings: SettingManager;
 	/**
-	 * The catalog callers of this orchestrator share. Omitted means the six built-ins alone; a test
-	 * that adds a tool of its own hands in a registry of its own, so nothing it registered reaches a
-	 * session outside the test.
+	 * The tools callers of this orchestrator share. Omitted means a table of the six built-ins alone;
+	 * a test that adds a tool of its own hands in a table of its own, so nothing it registered reaches
+	 * a session outside the test.
 	 */
-	tools?: ToolRegistry;
+	tools?: ToolManager;
 	/** The transport every request this orchestrator makes goes over. Defaults to Anthropic Messages. */
 	api?: ChatTransport;
 }
@@ -279,10 +287,10 @@ export interface SessionAgentServices {
  */
 export function createSessionAgent(services: SessionAgentServices): Agent {
 	const hooks = createHooks();
-	// Resolved once and handed to both halves: the registry a run's executable set is built from and
-	// the registry a command narrows are the same one, and a second resolution here would let a
-	// caller's own tool reach one and not the other.
-	const tools = services.tools ?? createToolRegistry(toolDefinitions());
+	// Resolved once and handed to both halves: the table a run's executable set is read from and the
+	// table a command narrows are the same one, and a second resolution here would let a caller's own
+	// tool reach one and not the other.
+	const tools = services.tools ?? createToolManager();
 	const session = new Agent({
 		sessionManager: services.sessionManager,
 		settings: services.settings,
@@ -342,11 +350,14 @@ function installDefaultHooks(hooks: Hooks, session: Agent): void {
  * opening a session and resuming one are the same act, whichever of the two roads is taken.
  */
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
-	const { sessionManager, state } = await assembleSession(options);
+	// The assembly's own table is the one the orchestrator runs on: two managers would mean two sets of
+	// instances, and the identity the engine relies on (`get(name)` the same object every time) would
+	// hold per half rather than per process (ADR-0016).
+	const { sessionManager, state, tools } = await assembleSession(options);
 	const agent = createSessionAgent({
 		sessionManager,
 		settings: options.settings ?? new SettingManager(),
-		...(options.tools === undefined ? {} : { tools: options.tools }),
+		tools,
 		...(options.api === undefined ? {} : { api: options.api }),
 	});
 	// The state enters the orchestrator's table here, through the same door a host uses: the

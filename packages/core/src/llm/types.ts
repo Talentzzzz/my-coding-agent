@@ -3,6 +3,7 @@
 // @ts-nocheck
 /** Opaque parent context for telemetry; telemetry is out of scope in this vendored build. */
 export type TelemetryContext = Record<string, unknown>;
+import type { BashSettings } from "../config.ts";
 import type { AnthropicOptions } from "./api/anthropic-messages.ts";
 import type { AssistantMessageEventStream } from "./utils/event-stream.ts";
 
@@ -428,6 +429,27 @@ export interface ConstrainedSamplingConfig {
 export type ToolExecutionMode = "sequential" | "parallel";
 
 /**
+ * The per-request values a tool acts with.
+ *
+ * A tool is directory-free: what it acts on is a value that arrives with the call, not something the
+ * instance closes over. {@link workDirAbsPath} is the base relative paths resolve against and where a
+ * command starts; `bash` carries the timeouts read for the same request. Both leave with the call, so
+ * one instance serves every session and every directory (ADR-0016).
+ *
+ * It lives here, beside {@link Tool}, because it is part of `execute`'s signature: a signature's type
+ * does not get a second home, or the build would have one `Tool` with two sources. A transport never
+ * reads it and never constructs one — it sees `execute` on the declaration it is handed and can never
+ * call it, so this argument is one it cannot obtain. `tools/manager.ts` re-exports the name, so every
+ * existing import path is unchanged.
+ */
+export interface ToolRunContext {
+	/** The directory relative paths resolve against, and where a command starts. No fence. */
+	workDirAbsPath: string;
+	/** The `bash` timeouts; the defaults when the caller names none. */
+	bash?: BashSettings;
+}
+
+/**
  * The one tool type.
  *
  * The declaration a transport reads — name, description, parameters, and the optional
@@ -456,10 +478,15 @@ export interface Tool<TParameters extends TSchema = TSchema, TDetails = unknown>
 	/**
 	 * Execute the tool call. Throw on failure, or return a result with `isError: true`; do not only
 	 * describe the failure in `content`.
+	 *
+	 * `run` is required and third on purpose: made optional, or moved to the end, a caller that
+	 * forgot it would silently act in whatever directory the instance was built against — and the
+	 * instance is built against none. Every call site says which run it belongs to.
 	 */
 	execute: (
 		toolCallId: string,
 		params: Static<TParameters>,
+		run: ToolRunContext,
 		signal?: AbortSignal,
 		onUpdate?: ToolUpdateCallback<TDetails>,
 	) => Promise<ToolResult<TDetails>>;

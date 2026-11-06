@@ -28,7 +28,7 @@ const parameters = Type.Object({
 
 export type GlobParams = Static<typeof parameters>;
 
-export function createGlobTool(workDirAbsPath: string): Tool<typeof parameters> {
+export function createGlobTool(): Tool<typeof parameters> {
 	return {
 		name: "glob",
 		label: "Glob",
@@ -36,8 +36,8 @@ export function createGlobTool(workDirAbsPath: string): Tool<typeof parameters> 
 			"Find files by glob pattern. Returns paths sorted by modification time, newest first. Use it to locate files before reading them.",
 		parameters,
 		executionMode: "parallel",
-		async execute(_toolCallId, params, signal, onUpdate) {
-			return runGlob(workDirAbsPath, params, { signal, onUpdate });
+		async execute(_toolCallId, params, run, signal, onUpdate) {
+			return runGlob(run.workDirAbsPath, params, { signal, onUpdate });
 		},
 	};
 }

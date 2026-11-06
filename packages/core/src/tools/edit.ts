@@ -18,7 +18,7 @@ export type EditParams = Static<typeof parameters>;
  * `edit` replaces exact text. Line endings are normalized before matching, so a file with CRLF
  * endings still matches the LF text the model saw in `read`; the file keeps its original endings.
  */
-export function createEditTool(workDirAbsPath: string): Tool<typeof parameters> {
+export function createEditTool(): Tool<typeof parameters> {
 	return {
 		name: "edit",
 		label: "Edit",
@@ -26,8 +26,8 @@ export function createEditTool(workDirAbsPath: string): Tool<typeof parameters> 
 			"Replace an exact string in a file. Fails when the string is missing or ambiguous, so include enough surrounding context to match once.",
 		parameters,
 		executionMode: "sequential",
-		async execute(_toolCallId, params, signal) {
-			return runEdit(workDirAbsPath, { ...params, replace_all: params.replace_all ?? false }, signal);
+		async execute(_toolCallId, params, run, signal) {
+			return runEdit(run.workDirAbsPath, { ...params, replace_all: params.replace_all ?? false }, signal);
 		},
 	};
 }

@@ -107,6 +107,18 @@ Status: open
   `docs/notes.md` 结论清单**不新增条目**（撞上旧形状才就地补注）；grep 清零按
   「当前实况归零 / ADR 历史正文与 `.scratch/` 决策票豁免」解释。本票零代码、零文档改动。
 
+- **07 · `ToolManager` 落地（resolved）**：[07 - Tool 目录无关与 `ToolManager` 落地](issues/07-tool-manager-landing.md) ——
+  02–06 的定案一次落成代码：`Tool.execute(toolCallId, params, run, signal?, onUpdate?)`（`run` 第三位必填、
+  `ToolRunContext` 迁 `llm/types.ts` 并由 `tools/manager.ts` 转发）、`registry.ts` 删除、
+  `ToolManager`（一张 `Map<string, Tool<any>>` + `names` / `get` / `execute` / `register`，零参工厂）、
+  六个零参工厂改读 `run`、四函数收 `readonly string[] known`、装配收敛到**同一只**（`openAgent` 转交
+  `assemble` 造的那只，hub 冷热两条路共用自己那只）、`Context.tools` 生产端按本轮名单 `map(get)`、
+  `run` 由 `runEngine` 收成本轮局部穿到执行点。`check` 绿（137/111）、28 条 smoke **26 绿 / 2 既有红、
+  零新红**、`smoke-tools.log` 逐字节相同；断言按 05 §3 改写并补「列表每请求新建、元素恒同一」五条。
+  两条接缝留给 08 / 09（执行来源仍是 `prepared.tool`、`activeNames` 未进执行链）；三处与票面的偏差
+  （`prepareToolCall` 不接 `run`、请求级身份改在执行点量、`smoke-approval-recovery` 只补 `run` 实参）
+  记在票内 §6。
+
 ## Not yet specified
 
 **本图 2026-11-06 已 graduate：02–06 全部定案，执行票按「每一笔都能让 `npm run check` 绿」的切口开出，

@@ -21,7 +21,7 @@ const parameters = Type.Object({
 
 export type GrepParams = Static<typeof parameters>;
 
-export function createGrepTool(workDirAbsPath: string): Tool<typeof parameters> {
+export function createGrepTool(): Tool<typeof parameters> {
 	return {
 		name: "grep",
 		label: "Grep",
@@ -29,8 +29,8 @@ export function createGrepTool(workDirAbsPath: string): Tool<typeof parameters> 
 			"Search file contents with a regular expression. Returns file, line number, and matching lines. Narrow with include or a starting path.",
 		parameters,
 		executionMode: "parallel",
-		async execute(_toolCallId, params, signal, onUpdate) {
-			return runGrep(workDirAbsPath, params, { signal, onUpdate });
+		async execute(_toolCallId, params, run, signal, onUpdate) {
+			return runGrep(run.workDirAbsPath, params, { signal, onUpdate });
 		},
 	};
 }

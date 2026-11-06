@@ -33,12 +33,12 @@ export type BashParams = Static<typeof parameters>;
  * of the directory with `cd` is a command the user asked for, and the tool has no second opinion
  * about it.
  *
- * The timeouts arrive with the run context — the same request that built the tool — rather than being
- * bound here, so a change made in the settings panel reaches the next request's build without
- * anything being rebuilt by hand. A caller that names none — a test building the tool directly —
- * runs on the defaults.
+ * The directory and the timeouts arrive with each call (`run`), not with the instance: one `bash`
+ * serves every session and every directory, so a change made in the settings panel reaches the next
+ * run's calls without anything being rebuilt by hand. A call that carries no timeouts — a test
+ * driving the tool directly — runs on the defaults.
  */
-export function createBashTool(workDirAbsPath: string, timeouts?: BashSettings): Tool<typeof parameters> {
+export function createBashTool(): Tool<typeof parameters> {
 	return {
 		name: "bash",
 		label: "Bash",
@@ -46,8 +46,8 @@ export function createBashTool(workDirAbsPath: string, timeouts?: BashSettings):
 			"Run a shell command from the working directory and return its combined output. Use for tests, builds, git, and package managers.",
 		parameters,
 		executionMode: "sequential",
-		async execute(_toolCallId, params, signal, onUpdate) {
-			return runBash(workDirAbsPath, params, { signal, onUpdate, timeouts });
+		async execute(_toolCallId, params, run, signal, onUpdate) {
+			return runBash(run.workDirAbsPath, params, { signal, onUpdate, timeouts: run.bash });
 		},
 	};
 }

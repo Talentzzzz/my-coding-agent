@@ -7,6 +7,7 @@ import {
 	type AgentSessionEvent,
 	type AgentState,
 	createSessionAgent,
+	createToolManager,
 	assembleSession,
 	readSessionSnapshot,
 	resolvePath,
@@ -18,6 +19,7 @@ import {
 	SettingManager,
 	sessionDir,
 	type ModelConfig,
+	type ToolManager,
 } from "@my-agent/core";
 
 export interface HubOptions {
@@ -185,6 +187,16 @@ export class SessionHub {
 	 * an editor is picked up without a restart.
 	 */
 	readonly settings: SettingManager;
+	/**
+	 * The tools every session of this process resolves against: one table of instances (ADR-0016).
+	 *
+	 * Held here rather than left to each assembly, because it must be the *same* table on both roads:
+	 * a session this process runs and one it merely reads a snapshot of have to answer the same tool
+	 * names, and the instances a request declares have to be the ones `get(name)` returns. A second
+	 * table per assembly would make the identity hold per road instead of per process, and would show
+	 * up the moment a tool was registered on one of them and not the other.
+	 */
+	readonly tools: ToolManager = createToolManager();
 
 	private readonly options: HubOptions;
 	private readonly hosts = new Map<string, HostedSession>();
@@ -251,6 +263,7 @@ export class SessionHub {
 		this.agent = createSessionAgent({
 			sessionManager: this.sessions,
 			settings: this.settings,
+			tools: this.tools,
 			...(options.api === undefined ? {} : { api: options.api }),
 		});
 	}
@@ -785,9 +798,9 @@ export class SessionHub {
 	 * The options one transcript is described by, whether or not this process runs it.
 	 *
 	 * One builder for both paths on purpose. The cold read and the open must resolve the same
-	 * directory, the same settings, and the same pinned model and level, so that a snapshot taken
-	 * without assembling is indistinguishable from a snapshot taken after — if these were written out
-	 * twice, the difference would show up as a session that changes when you open it.
+	 * directory, the same settings, the same tool table, and the same pinned model and level, so that
+	 * a snapshot taken without assembling is indistinguishable from a snapshot taken after — if these
+	 * were written out twice, the difference would show up as a session that changes when you open it.
 	 */
 	private sessionOptions(state: Session, workDirAbsPath: string): OpenAgentOptions {
 		return {
@@ -795,6 +808,7 @@ export class SessionHub {
 			sessionManager: this.sessions,
 			session: state,
 			settings: this.settings,
+			tools: this.tools,
 			...(this.options.model === undefined ? {} : { model: this.options.model }),
 			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),
 			...(this.options.api === undefined ? {} : { api: this.options.api }),

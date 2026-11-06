@@ -13,8 +13,7 @@ import {
 	compactionThresholdFor,
 	CURRENT_SESSION_VERSION,
 	createSession,
-	createToolRegistry,
-	createTools,
+	createToolManager,
 	deriveTitle,
 	DIFF_MAX_ROWS,
 	DIFF_TEXT_MAX_ROWS,
@@ -37,7 +36,6 @@ import {
 	spillOversizedToolResult,
 	spillPathFor,
 	trimmableToolArgEntryIds,
-	toolDefinitions,
 	fillTools,
 	openAgent,
 	sessionDir,
@@ -54,6 +52,9 @@ import {
 const store = new SessionManager();
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-tools-"));
+// One table for the whole script: the six built-ins are instances now, and a fresh table per lookup
+// would be a different six every time (ADR-0016).
+const manager = createToolManager();
 let failures = 0;
 
 /**
@@ -84,14 +85,17 @@ function check(label: string, condition: boolean, detail = ""): void {
 }
 
 function tool(name: string): Tool<any> {
-	const found = createTools({ workDirAbsPath: root }).find((candidate) => candidate.name === name);
+	const found = manager.get(name);
 	if (!found) throw new Error(`no tool named ${name}`);
 	return found;
 }
 
+/** This script's run values: the temp directory it writes into, and the settings' default timeouts. */
+const run = { workDirAbsPath: root };
+
 async function call(name: string, args: unknown): Promise<{ text: string; details?: unknown; error?: string }> {
 	try {
-		const result = await tool(name).execute("test", args, undefined, undefined);
+		const result = await tool(name).execute("test", args, run, undefined, undefined);
 		const text = result.content
 			.map((block) => (block.type === "text" ? block.text : ""))
 			.join("");
@@ -127,7 +131,7 @@ try {
 		"base64",
 	);
 	await writeFile(join(root, "dot.png"), png);
-	const image = await tool("read").execute("test", { path: "dot.png" }, undefined, undefined);
+	const image = await tool("read").execute("test", { path: "dot.png" }, run, undefined, undefined);
 	const second = image.content[1];
 	const isPng = second?.type === "image" && second.mimeType === "image/png" && Buffer.from(second.data, "base64").equals(png);
 	check(
@@ -230,12 +234,15 @@ try {
 	);
 	// The timeouts are the run context's, not constants: a request built with a lower ceiling caps the
 	// call at it and names the cap in the result, so the model can plan around it.
-	const cappedTool = createToolRegistry(toolDefinitions()).build("bash", {
-		workDirAbsPath: root,
-		bash: { defaultTimeoutMs: 60_000, maxTimeoutMs: 1_000 },
-	});
+	const cappedTool = manager.get("bash");
 	if (!cappedTool) throw new Error("no tool named bash");
-	const capped = await cappedTool.execute("test", { command: "echo y", timeout_ms: 1_000_000 }, undefined, undefined);
+	const capped = await cappedTool.execute(
+		"test",
+		{ command: "echo y", timeout_ms: 1_000_000 },
+		{ workDirAbsPath: root, bash: { defaultTimeoutMs: 60_000, maxTimeoutMs: 1_000 } },
+		undefined,
+		undefined,
+	);
 	const cappedText = capped.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 	check(
 		"caps at the configured ceiling and says so",
@@ -730,7 +737,7 @@ async function exerciseSessionLifecycle(): Promise<void> {
  * session asked to run in a mode nobody defined has no configuration to fall back on.
  */
 function exerciseFillTools(): void {
-	const known = toolDefinitions().names();
+	const known = manager.names();
 	const modes = [
 		{
 			name: "reader",

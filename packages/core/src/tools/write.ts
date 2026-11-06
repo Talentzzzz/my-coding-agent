@@ -22,7 +22,7 @@ export type WriteParams = Static<typeof parameters>;
  * Refusing to clobber by default matters: a model that means "adjust one line" but calls `write`
  * with a reconstructed file silently destroys the parts it did not reproduce.
  */
-export function createWriteTool(workDirAbsPath: string): Tool<typeof parameters> {
+export function createWriteTool(): Tool<typeof parameters> {
 	return {
 		name: "write",
 		label: "Write",
@@ -30,8 +30,8 @@ export function createWriteTool(workDirAbsPath: string): Tool<typeof parameters>
 			"Write a complete file. Creates missing directories. Refuses to overwrite an existing file unless overwrite is true; prefer edit for small changes.",
 		parameters,
 		executionMode: "sequential",
-		async execute(_toolCallId, params, signal) {
-			return runWrite(workDirAbsPath, params, signal);
+		async execute(_toolCallId, params, run, signal) {
+			return runWrite(run.workDirAbsPath, params, signal);
 		},
 	};
 }

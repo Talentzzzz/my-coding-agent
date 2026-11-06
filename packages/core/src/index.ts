@@ -205,16 +205,11 @@ export {
 	type SettingsStorage,
 } from "./setting-manager.ts";
 export {
-	createToolRegistry,
-	createTools,
+	createToolManager,
 	describeToolCall,
 	fillTools,
 	narrowToKnown,
-	toolDefinitions,
-	toolListFor,
-	type ToolDefinition,
-	type ToolDefinitions,
-	type ToolRegistry,
+	ToolManager,
 	type ToolRunContext,
 	type ToolState,
 } from "./tools/index.ts";
