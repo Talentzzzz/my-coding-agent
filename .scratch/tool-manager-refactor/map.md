@@ -77,16 +77,19 @@ Status: open
 
 - **03 · 执行改道后 `Context.tools` 的命运（resolved）**：[03 - 执行改道后 Context.tools 的命运](issues/03-context-tools-after-execution-reroute.md) —— **(a)** `Context.tools` 保留为必填 `Tool[]` **声明载体**（元素是 Map 里的实例引用、按活跃名单取子集），线协议与 `llm/` 零改动；引擎全部执行查找改 `manager.get(name)`、执行改 Manager 新增的入口，`toToolDeclaration` / `streamAssistantResponse` / 压缩摘要 `tools: []` 明确排除。**Manager owns 调用不 owns 实现**：`Tool.execute`（含 02 的 `run`）留在 `Tool` 上，Manager 内部 `get(name)` 后转发，成为**生产代码**唯一调用点；校验 / shim / 闸门 / 事件 / 定稿仍归引擎。票内 §3 逐条点名八个调用点、§5 七条决定记录；否 (b) 的决定性理由是 `Context.tools` 承载 per-request 活跃子集而 Map 装全部六个，删它要么把未启用工具发给模型、要么把 per-session 状态请回常驻服务。活跃名单由谁筛归 04（03 只按 02 §2.3 + (a) 记下「元素来自那一张 Map」这一形状后果，不替 04 选归属）；方法名/签名、smoke 与 ADR 收账分别归 05 / 06。
 
+- **04 · 活跃集与审批的归属（resolved）**：[04 - 活跃集与审批的归属：Map 装全部还是只装活跃](issues/04-active-set-and-approval-ownership.md) —— **(a)** Manager 只答「存在什么 + 按名字取实例」（外加 03 的执行转发），Map 恒装全部实例且不可变；活跃集与审批仍是**账本派生的纯数据**，四函数留 `session/tool-config.ts`，`Agent` 把本轮名单收成栈上局部、显式穿过执行链判活（`Tool <name> not found` 仍归引擎），`SessionServices.tools` 换 `ToolManager` 但不带会话状态。两处读点加冷读第三处都从 Manager 的**全部名单**门读；`.json` / `.jsonl` / `tool_config` 格式一字不动。票内 §1 逐条否 (b)/(c)（含并发与会话切换换出两问）、§4 改动面、§5 十条决定记录；`names()` 等方法去留与 smoke 归 05、名字 / ADR / 文档归 06，本票不代答。
+
 ## Not yet specified
 
 - **执行票怎么切**：等 02 / 03 / 04 / 05 / 06 定案后一次 graduate——`ToolManager` 类与懒加载、
   `Agent` / `SessionServices` / `session-factory` / `core/index.ts` 改线、引擎执行改道、smoke 改写、
-  文档与 ADR 收账、全量验收。**02 / 03 已定案（形状与改动面分别见两票的 §2 / §4），04 / 05 / 06 仍待定；
-  现在不预切，毕业时按 02 / 03 票的清单核，不重开裁决。**
+  文档与 ADR 收账、全量验收。**02 / 03 / 04 已定案（形状与改动面见三票的 §2 / §4），05 / 06 仍待定；
+  现在不预切，毕业时按 02 / 03 / 04 票的清单核，不重开裁决。**
 - 压缩摘要 `tools: []` / `streamAssistantResponse` 明确排除改道，恢复机器与 `runToolCall`
   全量覆盖，八个调用点逐条结论见 03 号票 §3 —— 本块雾已由 03 清掉。
-- 会话账本 `.json` / `.jsonl` 格式是否要动：若 04 把活跃集也搬进 Map，`toolStateOf` 的派生链与
-  `tool_config` entry 一起受影响。
+- 会话账本格式：04 定案 (a) —— 活跃集与审批仍由账本派生，`.json` / `.jsonl` 与 `tool_config`
+  entry 一字不动；派生链只把目录侧入参收成 `readonly string[] known`（04 §2.5），
+  `allTools` 仍是 Map 全名表 —— 本块雾已由 04 关掉。
 
 ## Out of scope
 
