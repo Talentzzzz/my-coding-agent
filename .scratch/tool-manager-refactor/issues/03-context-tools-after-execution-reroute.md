@@ -51,7 +51,8 @@ Manager 那张 Map 里的**实例引用**（本请求的活跃子集）；引擎
 
 ### 0. 先把票面的行号钉到今天的树（`91f1748`）
 
-票面八个行号逐条对得上，且「今天引擎的工具全部读 `Context.tools`」成立：
+票面八个行号逐条对得上，且「今天引擎的工具全部读 `Context.tools`」成立（`:2020` /
+`:2376` 是函数体内的调用行，函数本体分别在 `:2005` / `:2374`，下文按函数范围引用）：
 
 - `agent.ts:997-1000`：`Agent.run` 建 `currentContext`，`:999` 是
   `tools.active(toolStateOf(sessionManager, session, settings, tools), this.runContext(state))`；
@@ -71,8 +72,9 @@ Manager 那张 Map 里的**实例引用**（本请求的活跃子集）；引擎
 - `:1805-1810` `PreparedToolCall` 持有 `tool`；它今天**只有** `:2402` 一个读者
   （`:2442` / `:2472` 只读 `toolCall` / `args`）。`:2352-2362` `RunToolCallOptions.tools` 是第二份
   工具清单，`:2374-2391` `runToolCall`（`:2371` 注释：今天无人调用）在 `:2376` 把它传给 `prepareToolCall`。
-- `:2393-2424` `executePreparedToolCall`，`:2402-2410` 是全仓 `packages/` 里**唯一**的
-  `Tool.execute` 调用点（全仓 grep `.execute(` 只此一处）。
+- `:2393-2424` `executePreparedToolCall`，`:2402-2410` 是 `packages/` **生产代码里唯一**的
+  `Tool.execute` 调用点（全仓另有 `scripts/smoke-tools.ts:94` / `:130` / `:238` 三处直调，
+  02 §0 / §4 已把它们列为 05 的改写读点；本票说「唯一」时一律指生产代码）。
 
 票面没点名、但同一条决定必须一并交代的传输面读点（都是「线协议零改动」的核对项）：
 
@@ -87,11 +89,11 @@ Manager 那张 Map 里的**实例引用**（本请求的活跃子集）；引擎
   被 `llm/api/simple-options.ts:11-15` 的 `clampMaxTokensToContext` 用来算 `maxTokens`。
 - `scripts/fake-transport.ts:175-179` `serializeContext`、`scripts/smoke-session.ts:348-351`
   `declaredTools(context)`、`scripts/smoke-models.ts:154` / `:274` 两处 `tools: []` wire 捕获；
-  `scripts/smoke-approval-recovery.ts:254-260` 的假 `readTool` 与 `:268` / `:287` / `:305` 三处把工具
-  塞进 `Context.tools` 的调用（05 号票点名过这片断言区）。
+  `scripts/smoke-approval-recovery.ts:254-260` 的假 `readTool` 与 `:269` / `:288` / `:306` 三处
+  `Context.tools` 字面量（前两处 `tools: []`，末一处 `tools: [readTool]`；05 号票点名过这片断言区）。
 - **不是** `Context.tools`、而是从 `this.tools` 读的目录查询：`agent.ts:528` `setActiveTools` 的
   未知名校验、`:610` / `:684` `toolStateOf`、`session/fanout.ts:85` `allTools`、
-  `session/tool-config.ts` 四个函数、`session-factory.ts:142` / `:285` / `:344` 装配点。它们属于
+  `session/tool-config.ts` 四个函数、`session-factory.ts:142` / `:285` / `:349` 装配点。它们属于
   04 / 05 的「活跃集归属 / 方法去留」，本票不改道，也不代答。
 
 ### 1. 三条路逐条裁决（含各自要动什么）
@@ -120,7 +122,8 @@ Manager 那张 Map 里的**实例引用**（本请求的活跃子集）；引擎
 `anthropic-messages.ts:805-813` / `:1058`、`estimate.ts:101` + `simple-options.ts:13`、
 `transcript.ts:33-40` 全都要另找一份声明清单；`agent.ts:1534` 与 `smoke-models.ts:154` / `:274`
 的 `tools: []` 字面量、`fake-transport.ts:176`、`smoke-session.ts:350` 的声明捕获一起改写；
-ADR-0015 决定 2/3/7、*后果*与*没有被取代的*两节，`architecture.md:112` / `:119` / `:125`、
+ADR-0015 决定 2/3/7、*后果*与*没有被取代的*两节的现状陈述（按
+`docs/adr/README.md:44` 是新开 ADR + 取代指针、原文不动），`architecture.md:112` / `:119` / `:125`、
 `AGENTS.md:36-44` 的 wire 那半句，以及 06 号票要收的账。这是把一次 core 工具域重构升级成
 **vendored 传输层 + wire 形状**重构，票面已判「面铺得太大」。
 
@@ -161,8 +164,9 @@ ADR-0015 决定 2/3/7、*后果*与*没有被取代的*两节，`architecture.md
 `llm/types.ts:516-521` 一行不动：`tools: Tool[]` 必填、空数组合法。它的职责从「引擎的执行目录」
 收窄成「**这次请求带哪些声明**」；元素是 Manager 那张 Map 里的实例引用，按活跃名单取出的子集。
 `:999` / `:1288` 两个生产者不再 `active(state, run)` 现建（`run` 不进 `Context`，02 决定 4）；
-**谁筛活跃名单归 04**，但筛出来的元素必须来自 Map、不得新造——这是 (a) 对 04 唯一的前置约束，
-不是替 04 选归属。于是 02 的恒等不变量在 (a) 下可测：`Context.tools` 里每个实例
+**活跃名单由谁筛、`SessionServices.tools` 与审批归谁，全部留给 04**。这里只记 02 §2.3 与 (a)
+合起来的形状后果：无论 04 选哪条，装进 `Context.tools` 的都是那一张 Map 里的实例，不是另一处
+新造的对象——它不是替 04 判归属，也不判 Map 是否接管筛选。于是 02 的恒等不变量在 (a) 下可测：`Context.tools` 里每个实例
 `=== manager.get(name)`。
 
 引擎从此**不读** `Context.tools` 做任何查找：它读的是 Manager。`toToolDeclaration` 仍是请求出
@@ -171,7 +175,7 @@ ADR-0015 决定 2/3/7、*后果*与*没有被取代的*两节，`architecture.md
 #### 2.2 一条来源，两种读法
 
 - `manager.get(name)`：引擎唯一的查表动作（`executionMode` 判定、`prepareToolCall` 的解析）。
-- Manager 的执行入口：全仓唯一的 `Tool.execute` 调用点（名字/签名归 05）。
+- Manager 的执行入口：**生产代码里唯一**的 `Tool.execute` 调用点（名字/签名归 05）。
 - `Context.tools`：只被传输面（`:1849` → `Model.stream` → `anthropic-messages.ts` / `estimate.ts`）
   读声明字段。ADR-0015「传输层只读前一半、引擎只用后一半」的分界原样保留，决定 7 不重写。
 
@@ -200,9 +204,10 @@ ADR-0014）：传参不产生第二个持有者，Manager 仍是那一只进程�
   **一次调用的编排**，搬进 Manager 就要让它拿 hooks / 事件 sink / `run`，等于把 per-run 瞬态
   请回进程级服务，正是 02 §1(b) 的否决理由。
 - **两次查表是可接受的**：`prepareToolCall` 为校验与 shim 先 `get(name)` 一次，执行入口再
-  `get(name)` 一次。02 §2.3 的 Map 不可变 + 恒等不变量保证两次拿到同一个实例；
-  `PreparedToolCall.tool`（`:1808`）遂不必留可执行引用，避免 prepared 记录成为工具的第二持有者
-  （执行票若为省一次查表而保留引用，也必须是同一 Map 实例，不改语义）。
+  `get(name)` 一次。02 §2.3 的 Map 不可变 + 恒等不变量保证两次拿到同一个实例；于是
+  `PreparedToolCall.tool`（`:1808`）**不再承担执行职责**——执行按 name 现取，prepared 记录不必
+  再持有可执行引用（执行票若为省一次查表而保留引用，也必须是同一 Map 实例，不改语义；
+  字段去留属执行票的形状细节，本票只定「不从它执行」）。
 - **未知名行为不变**：仍在 `prepareToolCall` 的闸门前回今天那句 `Tool ${name} not found`
   错误结果（`:2273-2279`、`architecture.md:125`），执行入口不重复判活。异常→错误结果、
   `signal` / `onUpdate` 的转发、审批 grant 重跑的语义全不变。
@@ -212,15 +217,20 @@ ADR-0014）：传参不产生第二个持有者，Manager 仍是那一只进程�
 `execute(…, run, …)` 已经把「行为在实例上、per-request 值在实参里」定死，Manager 没理由接手
 实现；③ 定案 2 说的是「Manager 内部拿 Map 里的 Tool 调用」，不是「把六个实现搬进 Manager」。
 
-#### 2.5 「线协议零改动」的核对清单（都不动）
+#### 2.5 「线协议零改动」的核对清单（代码一行不动）
 
 `llm/types.ts:516-521` / `:195-197` / `:218-222`、`model.ts:168-170`；
 `streamAssistantResponse:1847-1855` 与 `toToolDeclaration`（`transcript.ts:33-40`）；
 `anthropic-messages.ts:805-813` / `:1054-1059` / `:1096+`；
 `estimate.ts:96-125` 与 `simple-options.ts:11-15`；压缩摘要 `:1534` 的 `tools: []` 与
-`smoke-models.ts:154` / `:274`；`fake-transport.ts:176` 与 `smoke-session.ts:350` 的声明捕获；
-ADR-0015 决定 2/3/7 与 *没有被取代的* 一节。06 号票仍要为「重新引入常驻实例表的工具服务」
-收账（名字、新 ADR、取代指针），但那不是「因为 03 动了 wire」——03 没动。
+`smoke-models.ts:154` / `:274`；`fake-transport.ts:176` 与 `smoke-session.ts:350` 的声明捕获。
+
+这里说的是**代码与类型形状**，不是文档原文。ADR-0015 的**决定 2/3/7 本身**在 (a) 下仍成立
+（单一 `Tool`、必填 `tools`、传输层不调 `execute`），但 *后果* 里那句现状陈述——
+「`prepareRequest` 建它（`tools` 就是活跃的可执行集合）、引擎用它」——被 (a) 推翻：引擎不再拿
+它执行，它只是声明载体。那句怎么收账（`docs/adr/README.md:44` 的只增不改、是否新开 ADR、
+取代指针、文档归属）**全归 06**，本票不动任何 ADR 正文；06 仍要为「重新引入常驻实例表的
+工具服务」收账，但那不是「因为 03 动了 wire」——03 没动。
 
 ### 3. 改道覆盖的调用点，逐条点名
 
@@ -229,17 +239,17 @@ ADR-0015 决定 2/3/7 与 *没有被取代的* 一节。06 号票仍要为「重
 | `executeToolCalls` `:2082-2097`（含 `:2099` / `:2161` 两条批次路径） | `:2091` `currentContext.tools.find(...).executionMode` 判顺序/并行 | 改 `manager.get(tc.name)?.executionMode`；两条路径的 `prepareToolCall` / `executePreparedToolCall` 顺链接收 Manager + `run` | **是** |
 | `prepareToolCall` `:2264-2339` | `:2270` 默认 `tools = currentContext.tools`、`:2272` `find` | 删掉 `tools` 覆盖形参，改 `manager.get(toolCall.name)`；`:2282` `prepareArguments` / `:2283` `validateToolArguments` 仍读这个 Manager 实例的字段，函数体不动；未知名错误结果不变 | **是** |
 | `prepareToolCallArguments` `:2250-2262` | 收 `tool: Tool<any>`，自己不查表 | 一行不动；改道在调用者——传进来的必须是 Manager 解析出的那个实例 | **是（传递覆盖，零改动）** |
-| `executePreparedToolCall` `:2393-2424` | `:2402` 全仓唯一 `prepared.tool.execute` | 改调 Manager 执行入口（按 name 现取 + 转发 `run`）；`PreparedToolCall.tool` 不再留可执行引用；`signal` / `onUpdate` / 异常→错误结果不变 | **是** |
-| `recoverPendingToolCalls` `:2005-2053`（导出） | grant 经 `:2020` / `:2034` 复用同一条预备→执行链，工具从 `currentContext.tools` 解析 | `:1011` 的入口把这一轮的 Manager + `run` 传进去（审批是「结束重启」后的新一轮，ADR-0006 §5）；导出签名随之扩展，宿主/smoke 怎么供归 05；`smoke-approval-recovery.ts:305` 把假 tool 塞进 `Context.tools` 的做法随 (a) 失效 | **是** |
-| `runToolCall` `:2374-2391`（今天无人调用） | `RunToolCallOptions.tools`（`:2355`）经 `:2376` 传成第二份清单 | 删 `options.tools`；预备与执行都走 Manager，补 `run` 实参（02 §2.4）。仍不导出、仍无人调用，但形状不许留第二来源 | **是（形状覆盖，零行为）** |
+| `executePreparedToolCall` `:2393-2424` | `:2402` 生产代码唯一 `prepared.tool.execute` | 改调 Manager 执行入口（按 name 现取 + 转发 `run`）；`prepared.tool` 不再承担执行（形状见 §2.4）；`signal` / `onUpdate` / 异常→错误结果不变 | **是** |
+| `recoverPendingToolCalls` `:2005-2053`（导出） | grant 经 `:2020` / `:2034` 复用同一条预备→执行链，工具从 `currentContext.tools` 解析 | `:1011` 的入口把这一轮的 Manager + `run` 传进去（审批是「结束重启」后的新一轮，ADR-0006 §5）；导出签名随之扩展，宿主/smoke 怎么供归 05；`smoke-approval-recovery.ts:306` 把假 tool 塞进 `Context.tools` 的做法随 (a) 失效 | **是** |
+| `runToolCall` `:2374-2391`（今天无人调用） | `RunToolCallOptions.tools`（`:2355`）经 `:2376` 传成第二份清单 | 这份清单不再作为执行来源（执行票据此收 `options.tools`，具体签名归执行票）；预备与执行都走 Manager，补 `run` 实参（02 §2.4）。仍不导出、仍无人调用，但形状不许留第二来源 | **是（形状覆盖，零行为）** |
 | 压缩摘要 `:1530-1544` | `:1534` 直接 `model.stream({ ..., tools: [] })`，绕过引擎 | 原样保留：没有工具、没有查找、没有执行；`Context.tools` 必填所以空数组照写，不引 Manager，两处 wire 捕获不动 | **否，明确排除** |
 | `streamAssistantResponse` `:1841-1855` | `:1849` `toToolDeclaration` 从 `Context.tools` 削薄，`:1852` `model.stream(requestContext)` | 原样保留：它不是执行点，是传输面的声明出口；这正是 (a) 相对 (b) 的全部收益 | **否，明确排除** |
 
 另点名两处票面未列、同样要说清的：
 
-- `:999` / `:1288` 是**生产端**，不是执行查找：受 §2.1 约束（元素必须来自 Map、`run` 不接），
-  筛选归属归 04。
-- `:528` / `session/fanout.ts:85` / `session/tool-config.ts` / `session-factory.ts:142,285,344`
+- `:999` / `:1288` 是**生产端**，不是执行查找：受 §2.1 的形状后果约束（元素来自那一张 Map、
+  `run` 不接），筛选归属归 04。
+- `:528` / `session/fanout.ts:85` / `session/tool-config.ts` / `session-factory.ts:142,285,349`
   从 `this.tools` 读目录，不是 `Context.tools`：归 04 / 05，本票不改道。
 
 ### 4. 改动面清单（交给执行票；本票不动）
@@ -247,20 +257,20 @@ ADR-0015 决定 2/3/7 与 *没有被取代的* 一节。06 号票仍要为「重
 | 子系统 | 落点 |
 |---|---|
 | 类型 / wire | **零改动**；§2.5 那一列是执行票的「核对不动」清单，不是改动清单 |
-| 引擎 `agent.ts` | `:999` / `:1288`（生产端元素改从 Map 取）、`:1011`（恢复入口传 Manager + run）、`:1101` → `:2082` / `:2091` / `:2099` / `:2161`（链上带 Manager + run）、`:2250-2262`（不动，传递覆盖）、`:2264-2339`（`get` 取代 `find`、删 `tools` 形参）、`:1805-1810`（`PreparedToolCall` 收敛）、`:2352-2391`（删 `RunToolCallOptions.tools`）、`:2393-2424`（`:2402` 改走 Manager）、`:1298-1306` 保留 |
-| Manager（名字归 06、方法名与 `register()` 归 05） | 新增执行入口：`get(name)` + 转发 `Tool.execute(…, run, …)`；Map 形状与懒加载仍按 02 §2.3 |
+| 引擎 `agent.ts` | `:999` / `:1288`（生产端元素改从 Map 取）、`:1011`（恢复入口传 Manager + run）、`:1101` → `:2082` / `:2091` / `:2099` / `:2161`（链上带 Manager + run）、`:2250-2262`（不动，传递覆盖）、`:2264-2339`（`get` 取代 `find`、`tools` 形参不再作执行来源）、`:1805-1810`（`PreparedToolCall` 不再承担执行，见 §2.4）、`:2352-2391`（`RunToolCallOptions.tools` 不再作执行来源）、`:2393-2424`（`:2402` 改走 Manager）、`:1298-1306` 保留 |
+| Manager（名字归 06、方法名与 `register()` 归 05） | 新增执行入口，职责见 §2.4（**名字/签名归 05**，本票只定「由 Manager 调用、实现仍在 Tool 上」）；Map 形状与懒加载仍按 02 §2.3 |
 | 服务装配 | `AgentConfig.tools` / `Agent.tools`（`:133` / `:211`）、`SessionServices.tools`（`fanout.ts:27`）、`session-factory.ts` 三个构造点：换成 Manager 的线怎么落归 04 / 05 |
-| smoke | 要跟的读点：`smoke-approval-recovery.ts:254-260, 268, 287, 305`（假 tool 与三处 Context 字面量）、`fake-transport.ts:175-179`、`smoke-session.ts:348-351` 的声明捕获、`smoke-models.ts:154, 274` 的两处 `tools: []`（不动）；断言怎么改写归 05 |
-| 文档 / ADR（归 06） | 会被本票推翻、收账票要核对的现文：`docs/architecture.md:119`「`Context.tools` 里装的就是这些可执行集合本身」、`:125`「循环执行的东西」、`AGENTS.md:36-37`「它调的是 `Tool.execute`」、`:42-48` tool 词条；ADR-0015 决定 7 的分界陈述在 (a) 下**仍成立**，按 `docs/adr/README.md:44` 只增不改原文，是否新开 ADR 与取代指针全归 06 |
+| smoke | 要跟的读点：`smoke-approval-recovery.ts:254-260, 269, 288, 306`（假 tool 与三处 Context 字面量）、`scripts/smoke-tools.ts:94, 130, 238`（三处直调 `execute`，02 §4 已列）、`fake-transport.ts:175-179`、`smoke-session.ts:348-351` 的声明捕获、`smoke-models.ts:154, 274` 的两处 `tools: []`（不动）；断言怎么改写归 05 |
+| 文档 / ADR（归 06） | 会被本票推翻、收账票要核对的现文：`docs/architecture.md:119`「`Context.tools` 里装的就是这些可执行集合本身」、`:125`「循环执行的东西」、`AGENTS.md:36-37`「它调的是 `Tool.execute`」、`:42-48` tool 词条，以及 **ADR-0015 *后果***「`prepareRequest` 建它（`tools` 就是活跃的可执行集合）、引擎用它」这句现状陈述（决定 2/3/7 本身仍成立，见 §2.5）。按 `docs/adr/README.md:44` 只增不改原文；是否新开 ADR、取代指针、文档归属与逐句改写全归 06 |
 
 ### 5. 决定记录（下游可直接依赖）
 
 | # | 决定 | 约束谁 |
 |---|---|---|
-| 1 | 选 (a)：`Context.tools` 保留为必填 `Tool[]` 声明载体，元素是 Manager Map 里的**实例引用**（活跃子集），线协议与 `llm/` 零改动 | 执行票、04、06 |
-| 2 | `Context.tools` 只被传输面读；引擎任何执行查找都不读它。`toToolDeclaration` / `streamAssistantResponse` / 压缩摘要 `tools: []` 一行不动；ADR-0015 决定 2/3/7 的现状陈述在 (a) 下仍成立（06 是否加取代指针另论） | 执行票、06 |
-| 3 | 改道覆盖 §3 的六个执行调用点（含无人调用的 `runToolCall` 与导出的恢复机器）；压缩摘要与 `streamAssistantResponse` 明确排除；`prepareToolCall` 的 `tools` 形参与 `RunToolCallOptions.tools` 删除 | 执行票、05 |
-| 4 | Manager owns 调用、不 owns 实现：`Tool.execute`（含 02 的 `run` 实参）留在 `Tool` 上；Manager 新增执行入口做 `get(name)` + 转发，成为全仓唯一 `Tool.execute` 调用点；校验 / shim / 闸门 / 事件 / 定稿仍归引擎 | 执行票、05、06 |
+| 1 | 选 (a)：`Context.tools` 保留为必填 `Tool[]` 声明载体，元素是 Manager Map 里的**实例引用**（活跃子集），线协议与 `llm/` 零改动。这是 02 §2.3 + (a) 的形状后果，**不是替 04 判归属** | 执行票、06 |
+| 2 | `Context.tools` 只被传输面读；引擎任何执行查找都不读它。`toToolDeclaration` / `streamAssistantResponse` / 压缩摘要 `tools: []` 一行不动；ADR-0015 决定 2/3/7 本身仍成立，但 *后果* 里「引擎用它（执行）」那句现状陈述被推翻，怎么收账归 06 | 执行票、06 |
+| 3 | 改道覆盖 §3 的六个执行调用点（含无人调用的 `runToolCall` 与导出的恢复机器）；压缩摘要与 `streamAssistantResponse` 明确排除；`prepareToolCall` 的 `tools` 形参与 `RunToolCallOptions.tools` 不再作执行来源（具体怎么收归执行票） | 执行票 |
+| 4 | Manager owns 调用、不 owns 实现：`Tool.execute`（含 02 的 `run` 实参）留在 `Tool` 上；Manager 新增执行入口做 `get(name)` + 转发，成为**生产代码**唯一 `Tool.execute` 调用点（smoke 三处直调归 05）；校验 / shim / 闸门 / 事件 / 定稿仍归引擎。入口的名字/签名归 05 | 执行票、05 |
 | 5 | Manager 与 `run` 由 `Agent.run` 像 `hooks` 一样显式传过执行链；不设全局、不进 `Context` / `AgentState.live`；两次 `get(name)` 由 02 的恒等不变量担保 | 执行票 |
 | 6 | 未知名仍由 `prepareToolCall` 在闸门前回 `Tool <name> not found`；异常→错误结果、审批恢复语义不变 | 执行票、05 |
 | 7 | 否 (b)：`Context.tools` 承载的是 per-request 活跃子集，删它要么把未启用工具发给模型、要么把 per-session 状态塞回常驻服务、要么把 `tools` 换个名字加回 `stream`；且要动 vendored 传输层与 ADR-0015。否 (c)：与 02 的恒等不变量冲突，留两份构造源与多条旁路 | 06、执行票 |
@@ -272,7 +282,7 @@ ADR-0015 决定 2/3/7 与 *没有被取代的* 一节。06 号票仍要为「重
 断言与 `recoverPendingToolCalls` 宿主怎么供 Manager + run（05）；`ToolManager` 名字冲突、是否
 新开 ADR、历史 ADR 取代指针与文档归属（06）；执行票怎么切、何时 graduate（本图
 *Not yet specified*，等 02–06 全定案后一次 graduate）。§2 / §4 写的是 (a) **必然带来**的形状
-后果与要跟的读点，不是替这四张票做选择。
+后果与要跟的读点，不是替 04 / 05 / 06 这三张票做选择。
 
 ### 7. 验收（2026-11-06 与 01 号票基线对跑）
 
@@ -295,4 +305,10 @@ ADR-0015 决定 2/3/7 与 *没有被取代的* 一节。06 号票仍要为「重
   本轮无源码改动，那条结论按 01 号票 §4 原样沿用。
 - `Status` 翻 `resolved`；`map.md` 的 Decisions so far 追加 03 指针、Not yet specified 清掉 03 那块雾
   并把毕业清单更新为「按 02 / 03 票的清单核」、Out of scope 记下 03 未启用「动 `Context` wire」的许可。
+- code-review（固定点 `91f1748`，Standards / Spec 双轴）后的尾修另成一笔：收回「全仓唯一」等
+  三处事实口径（生产代码唯一 / smoke 三处直调）、修正 `smoke-approval-recovery` 与
+  `session-factory` 的行号、把 ADR-0015 *后果* 的失效陈述补进 06 的收账清单、把
+  `PreparedToolCall` 与两处第二来源的措辞从「删死」收成「不再作执行来源」、并撤掉对 04 / 06
+  归属的抢跑措辞。未采纳（判断性意见）：设计文档里三处 file:line 枚举属决定记录所需的重复；
+  `claimed → resolved` 折叠为一笔提交。
 

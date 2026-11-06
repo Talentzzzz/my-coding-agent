@@ -50,7 +50,8 @@ Status: open
 见下方 Decisions so far 第三条。
 
 **波及面（绘图会话已核）**：`session/tool-config.ts` 四个函数、`session-factory.ts` 三个构造点
-（`:142` / `:285` / `:344`）、`core/index.ts` 出口、`scripts/smoke-tools.ts`、
+（`:142` / `:285` / `:349`，后者是 `openAgent` 传 `options.tools` 的那行；`:344` 是函数声明）、
+`core/index.ts` 出口、`scripts/smoke-tools.ts`、
 `scripts/smoke-session.ts`（`:1264` 新对象断言、`:1281` register 身份断言、`:1018` output-backstop 自建 registry）、
 `AGENTS.md` 词条、`docs/architecture.md` 工具契约节、ADR 0006/0007/0011/0015。
 `packages/server` / `desktop` / `web` 源码零 `ToolRegistry` 引用，只消费快照里的字符串数组。
@@ -74,7 +75,7 @@ Status: open
 
 - **02 · 一张 Map 如何承载按会话的 workDirAbsPath（resolved）**：[02 - 一张 Map 里的实例 Tool 如何承载按会话的 workDirAbsPath](issues/02-one-map-and-per-session-workdir.md) —— **(a)** `Tool` 目录无关，`ToolRunContext` 作 `execute` 的必填实参、由本轮栈上局部携带；一张 Map 首次访问建满六个、内置条目与 Map 对象都不可替换，bash 超时仍由 `runContext` 每请求现读。票内逐条否掉 (b)/(c)/(d)（含两个在飞会话竞态）、列全 §4 改动面与 §5 决定记录；03 / 05 的阻塞随本票解除。
 
-- **03 · 执行改道后 `Context.tools` 的命运（resolved）**：[03 - 执行改道后 Context.tools 的命运](issues/03-context-tools-after-execution-reroute.md) —— **(a)** `Context.tools` 保留为必填 `Tool[]` **声明载体**（元素是 Map 里的实例引用、按活跃名单取子集），线协议与 `llm/` 零改动；引擎全部执行查找改 `manager.get(name)`、执行改 Manager 新增的入口，`toToolDeclaration` / `streamAssistantResponse` / 压缩摘要 `tools: []` 明确排除。**Manager owns 调用不 owns 实现**：`Tool.execute`（含 02 的 `run`）留在 `Tool` 上，Manager 内部 `get(name)` 后转发，成为全仓唯一调用点；校验 / shim / 闸门 / 事件 / 定稿仍归引擎。票内 §3 逐条点名八个调用点、§5 七条决定记录；否 (b) 的决定性理由是 `Context.tools` 承载 per-request 活跃子集而 Map 装全部六个，删它要么把未启用工具发给模型、要么把 per-session 状态请回常驻服务。04 的唯一前置约束：活跃名单由谁筛归 04，但筛出的元素必须来自 Map。
+- **03 · 执行改道后 `Context.tools` 的命运（resolved）**：[03 - 执行改道后 Context.tools 的命运](issues/03-context-tools-after-execution-reroute.md) —— **(a)** `Context.tools` 保留为必填 `Tool[]` **声明载体**（元素是 Map 里的实例引用、按活跃名单取子集），线协议与 `llm/` 零改动；引擎全部执行查找改 `manager.get(name)`、执行改 Manager 新增的入口，`toToolDeclaration` / `streamAssistantResponse` / 压缩摘要 `tools: []` 明确排除。**Manager owns 调用不 owns 实现**：`Tool.execute`（含 02 的 `run`）留在 `Tool` 上，Manager 内部 `get(name)` 后转发，成为**生产代码**唯一调用点；校验 / shim / 闸门 / 事件 / 定稿仍归引擎。票内 §3 逐条点名八个调用点、§5 七条决定记录；否 (b) 的决定性理由是 `Context.tools` 承载 per-request 活跃子集而 Map 装全部六个，删它要么把未启用工具发给模型、要么把 per-session 状态请回常驻服务。活跃名单由谁筛归 04（03 只按 02 §2.3 + (a) 记下「元素来自那一张 Map」这一形状后果，不替 04 选归属）；方法名/签名、smoke 与 ADR 收账分别归 05 / 06。
 
 ## Not yet specified
 
