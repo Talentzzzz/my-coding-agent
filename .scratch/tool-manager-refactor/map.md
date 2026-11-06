@@ -65,7 +65,8 @@ Status: open
   （`tokens ok: 137 defined, 111 referenced`）；28 条 smoke 稳态 **26 绿 / 2 既有红**
   （`smoke-api` 缺服务器、`smoke-liveness` 本机时序 1943/1898 ms 落在 1650 ms 预算外）；
   `smoke-api` 起固定 8080 服务器后 `api ok`；`smoke-approval` 首轮红判定为偶发（复跑 2/2 绿），
-  不计入既有红。全部日志、环境与可复跑脚本在 [`smoke-runs/baseline/`](smoke-runs/baseline/env.txt)，
+  不计入既有红。日志与环境在 `smoke-runs/baseline/env.txt` 等**本机产物**（不入提交，按 01 号票
+  票内命令复跑），可复跑脚本 [`smoke-runs/run-all.sh`](smoke-runs/run-all.sh) 已入库；
   逐条结论见 [`issues/01-baseline-check-and-smokes.md`](issues/01-baseline-check-and-smokes.md#answer)。
   **每张执行票按同一口径对跑，判据「零新红」而不是「全绿」**；随机 id / 端口 / 毫秒数的归因也在票里。
 

@@ -150,10 +150,14 @@ wire 契约文件依赖工具域。③ `BashSettings` 仍以 `config.ts:124-129`
 `llm/types.ts` 用 `import type { BashSettings } from "../config.ts"`——类型擦除、无运行时依赖、
 无环；ADR-0015 已把 llm 折进 core，包边界不再是反对理由。
 
-配套写进注释与 06 的新 ADR：**传输层既不读也不构造 `run`**。ADR-0015 决定 7
+落地时把这条写进源码注释：**传输层既不读也不构造 `run`**。ADR-0015 决定 7
 「传输层看得见 `execute`，但不调用它」由「看得见一个方法」扩成「看得见一个它永远拿不到的
-实参」，分界不变、反而更清楚。`Context`（`llm/types.ts:516-521`，`tools` 仍必填）与 wire
-零改动，`toToolDeclaration`（`llm/utils/transcript.ts:33-40`，只保留四个声明字段）零改动。
+实参」，分界不变、反而更清楚；这条分界在文档里怎么记、要不要新 ADR，归 06。
+**本票的形状不要求动 `Context` 或 wire**：`Context.tools` 今天仍是必填字段
+（`llm/types.ts:516-521`），但它最终装实例引用还是声明载体、传输层声明是否改从 Manager 现取，
+是 03 号票的问题，02 不预决；无论 03 选哪条，目录无关的 `Tool.execute` 这一半不变。若 03 维持
+`Context.tools` 作声明载体，`toToolDeclaration`（`llm/utils/transcript.ts:33-40`，只保留四个
+声明字段）一行不动。
 
 #### 2.2 六个 `createXxxTool`
 
@@ -182,24 +186,25 @@ Manager（名字归 06）构造时持 `private readonly all = new Map<string, To
   几乎没有收益——定案 1 的「填充尽量懒加载」按「首次访问一次填满」兑现，不按 name 逐个建。
 - **Map 在进程生命周期内不允许被替换**：在飞的 `Context.tools` 持有实例引用，换 Map 会让旧引用
   与新查找分裂（正是 (b) 的第二个竞态），也会重新打开「表的写者与删者是谁」（ADR-0011）。
-  要换工具集 = 换进程 / 换一个 Manager 实例，不是改活表。由此得出一条可测不变量：**同一进程里
-  任意两次 `get(name)` 恒 `===`，任意两个会话的活跃集里同名工具恒 `===`**（05 票建议补的那条
-  smoke 正是测它）。
+  要换工具集 = 换进程 / 换一个 Manager 实例，不是改活表。由此得出一条**可测的形状不变量**：
+  同一进程里任意两次 `get(name)` 恒 `===`，任意两个会话的活跃集里同名工具恒 `===`；把它写成
+  哪条 smoke、旧断言怎么改，归 05。
 - **`register()` 与首次填充的先后**：02 只钉死「内置条目不可被覆盖、同名不得覆盖」；若 05 选
   保留 `register()`，它只能是往表里**加新名字**；「只准填充前调用」还是「随时可加」归 05 定，
   本票不预告。
 - 实例必须**无 per-call 状态**：每次不同的值都是 `execute` 的实参，工具对象不得自带可变字段或
-  在闭包里捕获会话值。这条是 (a) 并发正确的前提，要写进 06 的新 ADR 与 `AGENTS.md` tool 词条。
+  在闭包里捕获会话值。这条是 (a) 并发正确的前提；文档与 ADR 怎么落它归 06。
 
 #### 2.4 run 由谁携带 —— 图上「并发」那条 fog 的答案
 
 `Agent.runContext(state)`（`:1298-1306`）仍是唯一生产者；`Agent.run` 在**这一轮**把它收成一个
 栈上的局部 `run`，显式穿过 `executeToolCalls`（`:2082`）→ `prepareToolCall`（`:2264`）→
 `executePreparedToolCall`（`:2393`）→ `Tool.execute(…, run, …)`；`recoverPendingToolCalls`
-（`:2005-2053`）取同一轮的 `run`，`runToolCall`（`:2374`，今天无人调用）随链条补参。
-`:999` / `:1288` 的活跃集不再接 run，装的是 Map 里的实例引用（**`Context.tools` 最终装实例引用
-还是削薄后的声明视图归 03**；两种都不影响本票结论，只要执行查找落到 Map、run 由调用栈带）。
-活跃名单由谁筛选也归 04。
+（`:2005-2053`）取同一轮的 `run`，`runToolCall`（`:2374`，今天无人调用）随链条补参。这是 run 必须
+穿过的链；**03 号票问的「执行改道要覆盖哪些调用点」是另一问，本票不代答**。`:999` / `:1288`
+按活跃名单取出的工具不再接 run（若 03 维持现 `Context.tools` 的形状，装的就是 Map 里的实例引用；
+**`Context.tools` 最终装实例引用还是声明视图归 03**）。两种 03 结局都不影响本票结论：执行查找
+落到 Map、run 由调用栈带。活跃名单由谁筛选也归 04。
 
 - **不设「当前 run」字段、不按 session id 键控、不把 run 塞进 `Context` 或 `AgentState.live`**：
   前者是 (b)、中者是 (d)，后者把 per-run 值写回会话状态，ADR-0011 对「注入一张表」的论证原样
@@ -232,13 +237,13 @@ Manager（名字归 06）构造时持 `private readonly all = new Map<string, To
 
 | 子系统 | 落点 |
 |---|---|
-| 类型 | `llm/types.ts:439-476`（`execute` 加 `run`、新增/转发 `ToolRunContext`）、`:516-521`（`Context` 不动，注明）；`tools/manager.ts:26-31 / 41 / 49-54 / 57-84 / 164-181`（`ToolRunContext` 改 re-export；`ToolDefinition` / `ToolDefinitions` / `toolListFor` 退成「按名字取实例」）；`tools/index.ts:46-48`（`createTools(run)` 的签名随 05 收） |
+| 类型 | `llm/types.ts:439-476`（`execute` 加 `run`、新增/转发 `ToolRunContext`）、`:516-521`（`Context` 是否动归 03）；`tools/manager.ts:26-31 / 41 / 49-54 / 57-84 / 164-181`（`ToolRunContext` 改 re-export；形状上不再有工厂，具体方法名 / 签名归 05）；`tools/index.ts:46-48`（`createTools(run)` 的签名随 05 收） |
 | 实例表 | `registry.ts:19-30, 42-74` → 一张 `Map<name, Tool>`（方法名与 `register` 归 05）；`session/tool-config.ts` 四个函数的 `registry: ToolRegistry` 形状（`defaultToolNames` / `globalDefaultToolState` / `toolStateOf` / `followsGlobalOf`） |
 | 六个工厂 | `read.ts:30-41`、`write.ts:25-36`、`edit.ts:21-32`、`glob.ts:31-42`、`grep.ts:24-35`、`bash.ts:41-52`；`workdir.ts` 不动 |
 | 引擎 | `agent.ts:999 / 1288`（活跃集不再接 run）、`:1298-1306`（保留，产出 run）、`:2082 / 2099 / 2161 / 2264 / 2374 / 2393`（把 run 穿过执行链）、`:2402`（唯一 `execute` 加实参）、`:1011 / 2005-2053`（恢复机器同轮 run）；`:1849` `toToolDeclaration`、`:2250-2262` `prepareArguments`、`:2091` `executionMode`、`:2452-2462` `structuredContent` 不变 |
 | 服务装配 | `agent.ts:66, 102-133, 211, 528`、`session-factory.ts:23, 72, 94, 142, 163, 177-178, 263, 285, 289, 349`、`session/fanout.ts:24-28, 41, 85-89`、`core/index.ts:207-220`（出口面随 05/06 定） |
-| smoke | `smoke-tools.ts:86-94, 130, 231-244, 732-766`（3 处直调 `execute`、bash 上限用例、`known` 名单）、`smoke-session.ts:244-262, 1015-1033, 1242-1283`（「每次新对象」翻成「恒同一实例」、`register` 身份断言、`openSession` 形参）、`smoke-approval-recovery.ts:254-260`（假 tool 补形参）、`smoke-models.ts:154, 274`（`tools: []` 不变） |
-| 文档（归 06） | `AGENTS.md` 的 tool / service / workDirAbsPath 词条；`docs/architecture.md:119` 那句「一个 `Tool` 闭包着自己的工作目录」整句失效、`:125-127` 跟着改；ADR 0006 决定 3「工具不驻留内存」、0007 决定 1/2/6、0011 被放弃的「注入一张表」、0015 决定 2/3/7 的补注；另开一条新 ADR 记这次反转 |
+| smoke | 形状上要跟的读点：`smoke-tools.ts:86-94, 130, 231-244, 732-766`（3 处直调 `execute`、bash 上限用例、`known` 名单）、`smoke-session.ts:244-262, 1015-1033, 1242-1283`（registry 断言区、`openSession` 形参）、`smoke-approval-recovery.ts:254-260`（假 tool 补形参）、`smoke-models.ts:154, 274`（`tools: []` 不变）；断言怎么改写归 05 |
+| 文档（归 06） | 会被本票推翻、需在收账票核对的现文：`AGENTS.md` 的 tool / service / workDirAbsPath 词条；`docs/architecture.md:119` 那句「一个 `Tool` 闭包着自己的工作目录」整句失效、`:125-127` 跟着改；ADR 0006 决定 3「工具不驻留内存」、0007 决定 1/2/6、0011 被放弃的「注入一张表」、0015 决定 2/3/7 相关的现状陈述。按 `docs/adr/README.md:44` 只增不改原文；名字、取代指针、是否新开 ADR 与文档归属全归 06 定 |
 
 ### 5. 决定记录（下游可直接依赖）
 
@@ -249,17 +254,22 @@ Manager（名字归 06）构造时持 `private readonly all = new Map<string, To
 | 3 | 一张 `Map<name, Tool>`，首次访问一次建满六个、内置条目不可覆盖、Map 对象不换；实例不持 per-call 状态 | 执行票、04、05、06 |
 | 4 | run 是 `Agent.run` 的栈上局部，显式穿过执行链；不设「当前 run」字段、不按 id 键控、不进 `Context` / `AgentState.live` | 执行票、03、04 |
 | 5 | bash 超时仍由 `Agent.runContext(state)` 每请求现读，随 run 到 `execute`；无新读取点、默认值兜底与封顶语义不变 | 执行票、05 |
-| 6 | 六个 `runXxx`、`resolveToolPath` / `displayToolPath`、无围栏约定、`toToolDeclaration`、wire 形状全部不动 | 执行票、03 |
-| 7 | 否 (b) 的两条竞态、否 (c) 的语义代价、否 (d) 的键控表——三者的理由分别落在「第二个写者」「数据写错地方」「违背定案 1 + timeout 仍要 per-call」 | 06 的新 ADR |
+| 6 | 六个 `runXxx`、`resolveToolPath` / `displayToolPath`、无围栏约定不变；本票**不要求**动 `toToolDeclaration` 与 wire（03 决定是否动） | 执行票、03 |
+| 7 | 否 (b) 的两条竞态、否 (c) 的语义代价、否 (d) 的键控表——三者的理由分别落在「第二个写者」「数据写错地方」「违背定案 1 + timeout 仍要 per-call」 | 06、执行票 |
 
 **本票没有回答的**（别当成已定）：`Context.tools` 是实例引用还是声明视图、执行改道覆盖的全部
-调用点（03）；活跃集与审批的归属（04）；`register()` 去留、五个旧方法的名字、smoke 断言怎么重写
-（05）；`ToolManager` 名字冲突、历史 ADR 的取代指针与文档归哪张票（06）；执行票怎么切、何时
-graduate（本图 `Not yet specified`，等 02–06 全定案后一次 graduate）。
+调用点、`toToolDeclaration` 与 wire 是否动（03）；活跃集与审批的归属（04）；`register()` 去留、
+五个旧方法的名字与签名、smoke 断言怎么重写（05）；`ToolManager` 名字冲突、历史 ADR 的取代指针、
+是否新开 ADR 与文档归属（06）；执行票怎么切、何时 graduate（本图 `Not yet specified`，等 02–06
+全定案后一次 graduate）。§2 / §4 写的是本票形状**必然带来**的后果与要跟的读点，不是替这四张票
+做选择；凡与它们的问题重叠处，以上面这张「未回答」清单为准。
 
 ### 6. 验收（2026-11-06 与 01 号票基线对跑）
 
-本票只改 tracker 文档、未动源码与 smoke。按 01 号票的口径复跑，**判据「零新红」成立**：
+本票未改任何 `packages/` 源码或 `scripts/smoke-*.ts`；入库的 `run-all.sh` 是 01 号票基线留下的
+既有脚本，本轮只把它纳入版本控制、内容一字未动。按图「每票收账跑 `npm run check`」是本票的
+验收项；下面这遍全套 28 条对跑是本次实现流程要求的收尾复跑，不是本票新增的验收门槛。
+与 01 号票基线对跑，**零新红成立**：
 
 - `npm run check`：**绿**，`tokens ok: 137 defined, 111 referenced`；`check.log` 与基线逐字节相同。
 - 28 条 smoke（`run-all.sh` 无服务器口径）：**26 绿 / 2 既有红**，红集合仍是
