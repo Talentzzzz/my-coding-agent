@@ -1,30 +1,22 @@
 import { existsSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { ChatTransport } from "@my-agent/core";
 import {
 	type Agent,
 	type AgentSessionEvent,
-	type AgentState,
+	type ChatTransport,
 	createSessionAgent,
-	createToolManager,
-	readSessionSnapshot,
-	resolvePath,
-	type OpenAgentOptions,
-	type OpenSessionOptions,
-	type SessionSnapshot,
-	SessionManager,
-	createSession,
-	type Session,
-	SettingManager,
-	sessionDir,
 	type ModelConfig,
-	type ToolManager,
+	type ModelPins,
+	resolvePath,
+	sessionDir,
+	type SessionSnapshot,
 } from "@my-agent/core";
 
 export interface HubOptions {
 	/** The directory the process was started in; new sessions take it as their working directory. */
 	workDirAbsPath: string;
+	/** The model every session this hub opens is pinned to, when the host pinned one at all. */
 	model?: string;
 	thinkingLevel?: string;
 	/** Session every connection lands on when it does not name one. */
@@ -46,16 +38,6 @@ export interface HubOptions {
 	 * to have configured there.
 	 */
 	modelsHome?: string;
-	/**
-	 * The manager every settings and model read of this hub goes through. Defaults to a fresh one
-	 * over {@link settingsHome} and {@link modelsHome}.
-	 *
-	 * The whole door, not a per-session override: the orchestrator reads every session's settings
-	 * and model rows through it, so a smoke that wants its own approval gate or rows hands one in
-	 * here — an in-memory manager keeps the machine's files out of it. Nothing in production sets
-	 * it, for the same reason nothing sets the two homes.
-	 */
-	settings?: SettingManager;
 	/**
 	 * The transport every session this hub opens talks to.
 	 *
@@ -177,50 +159,21 @@ export class SessionHub {
 	get workDirAbsPath(): string {
 		return this.absRoot;
 	}
-	/**
-	 * The configuration every settings and model read of this process goes through.
-	 *
-	 * One manager for the whole process, handed to every session and read on each request rather than
-	 * copied into it. It holds nothing: every read is a fresh read of the files behind it, which is
-	 * what lets an edit reach a session that is already running — a key corrected in the panel is the
-	 * key the next message uses, from a window that has been open the whole time, and a row added with
-	 * an editor is picked up without a restart.
-	 */
-	readonly settings: SettingManager;
-	/**
-	 * The tools every session of this process resolves against: one table of instances (ADR-0016).
-	 *
-	 * Held here rather than left to each assembly, because it must be the *same* table on both roads:
-	 * a session this process runs and one it merely reads a snapshot of have to answer the same tool
-	 * names, and the instances a request declares have to be the ones `get(name)` returns. A second
-	 * table per assembly would make the identity hold per road instead of per process, and would show
-	 * up the moment a tool was registered on one of them and not the other.
-	 */
-	readonly tools: ToolManager = createToolManager();
-
 	private readonly options: HubOptions;
 	private readonly hosts = new Map<string, HostedSession>();
 	/**
-	 * The stateless session service every open, rename, fork, and delete below goes through.
+	 * The one orchestrator every conversation this process runs goes through, and the only consumer
+	 * of the process's managers (ADR-0007 §6): the settings door, the model rows, the tool table, and
+	 * the session store all live behind its facade, so a session assembled here, an edit to a model
+	 * row, and a settings write all reach the same objects it reads. Built once, because it holds no
+	 * session: a method names the id and resolves what it needs from the state in its own table —
+	 * the durable half, the settings, the live half (ADR-0011). A session's state enters that table
+	 * the moment its id exists — creation assembles and adopts it, and a disk-backed one is adopted
+	 * at its first open — and leaves it through the orchestrator's own `evict` / `drop`, because the
+	 * table has one deleter.
 	 *
-	 * It holds no bag of its own: a hosted session writes through the bag its orchestrator's table
-	 * holds (`agent.agentState(id).session`), a cold one is `open(id)` — a replay the call owns and
-	 * drops, safe because one cold write is one synchronous block for a session nothing holds.
-	 */
-	private readonly sessions = new SessionManager();
-	/**
-	 * The one orchestrator every conversation this process runs goes through.
-	 *
-	 * Built once, because it holds no session: a method names the id and resolves what it needs from
-	 * the session's state in its own table — the durable half, the settings, the live half (ADR-0011).
-	 * The five services it coordinates are the ones declared around this field, so a session assembled
-	 * here, an edit to a model row, and a settings write all reach the same objects the orchestrator
-	 * reads. A session's state enters that table the moment its id exists — creation assembles and
-	 * adopts it, and a disk-backed one is adopted at its first open — and leaves it through the
-	 * orchestrator's own `evict` / `drop`, because the table has one deleter.
-	 *
-	 * It reads the model rows through {@link models} rather than a copy, which is why a key corrected
-	 * in the settings panel is the key the next message of an already-open session sends.
+	 * It reads the model rows through the facade rather than a copy, which is why a key corrected in
+	 * the settings panel is the key the next message of an already-open session sends.
 	 */
 	readonly agent: Agent;
 	/** Opens in flight, so two callers cannot build two sessions over one id. */
@@ -259,18 +212,27 @@ export class SessionHub {
 	constructor(options: HubOptions) {
 		this.options = options;
 		this.absRoot = options.workDirAbsPath;
-		this.settings = options.settings ?? new SettingManager({ home: options.settingsHome, modelsHome: options.modelsHome });
+		// One construction line, and the managers are the orchestrator's own: the homes are all this
+		// hub contributes — a smoke's in-memory gate or rows are seeded onto the files behind them
+		// before this runs, and nothing else about the graph is this hub's to decide.
 		this.agent = createSessionAgent({
-			sessionManager: this.sessions,
-			settings: this.settings,
-			tools: this.tools,
+			...(options.settingsHome === undefined ? {} : { settingsHome: options.settingsHome }),
+			...(options.modelsHome === undefined ? {} : { modelsHome: options.modelsHome }),
 			...(options.api === undefined ? {} : { api: options.api }),
 		});
 	}
 
+	/** The model every open is pinned to, when the host pinned one at all. */
+	private get pins(): ModelPins {
+		return {
+			...(this.options.model === undefined ? {} : { model: this.options.model }),
+			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),
+		};
+	}
+
 	/** The models the user has entered, in the order they appear in the settings panel. */
 	get userModels(): readonly ModelConfig[] {
-		return this.settings.modelCatalog();
+		return this.agent.modelCatalog();
 	}
 
 	/**
@@ -283,7 +245,7 @@ export class SessionHub {
 	 * whole time.
 	 */
 	setModelConfigs(models: readonly ModelConfig[]): void {
-		this.settings.replaceModels(models);
+		this.agent.replaceModels(models);
 	}
 
 	/**
@@ -303,7 +265,7 @@ export class SessionHub {
 	 */
 	listsDirectory(workDirAbsPath: string): boolean {
 		if (typeof this.absRoot !== "string") return true;
-		return !this.settings.getHiddenDirectories(this.absRoot).some((path) => samePath(path, workDirAbsPath));
+		return !this.agent.hiddenDirectories(this.absRoot).some((path) => samePath(path, workDirAbsPath));
 	}
 
 	/**
@@ -318,7 +280,7 @@ export class SessionHub {
 	 * contradiction a client cannot recover from.
 	 */
 	has(id: string): boolean {
-		return this.agent.has(id) || SessionManager.findSessionFilePathById(id) !== undefined;
+		return this.agent.exists(id);
 	}
 
 	/** Session ids this process is running right now. */
@@ -339,13 +301,13 @@ export class SessionHub {
 	 * Anything this process holds answers from the bag, live or not: a hosted session must not be
 	 * read from a file that lags its turn in flight, and one created but not spoken in has no file at
 	 * all — the table is where its transcript lives. Only a session this process does not hold is
-	 * read cold, and `sessions.open` is that road: one replay, no registration, the bag dropped here.
+	 * read cold, and the cold road is the facade's: one replay, no registration, the bag dropped there.
 	 */
 	async snapshotOf(id: string): Promise<SessionSnapshot> {
-		if (this.agent.has(id)) return this.agent.snapshot(id);
-		// `open` is the no-trace road, and the refusal for an id that names nothing is its own.
-		const state = this.sessions.open(id);
-		return readSessionSnapshot(this.sessionOptions(state, state.sessionSetting.workDirAbsPath));
+		// The held and the cold road are one method on the orchestrator now, and the pins ride along
+		// so a cold read shows the model an open would have pinned. The read leaves no trace either
+		// way: no claim, no hosts, nothing appended.
+		return this.agent.snapshotOf(id, this.pins);
 	}
 
 	/**
@@ -378,10 +340,11 @@ export class SessionHub {
 	timestampOf(id: string, entryId: string): number | undefined {
 		const host = this.hosts.get(id);
 		if (host === undefined) return undefined;
-		// The hosted bag, never a replay: this runs per frame, and a replay would parse the whole
-		// transcript for one timestamp — besides lagging the turn the file has not caught up with.
-		const entry = this.agent.agentState(id).session.sessionEntryMapById.get(entryId);
-		return entry?.type === "message" ? entry.message.timestamp : undefined;
+		// The held read only: this runs per frame, and a replay would parse the whole transcript for
+		// one timestamp — besides lagging the turn the file has not caught up with. The rule inside
+		// (message stamp first, entry timestamp as the fallback) is the facade's, so a frame and the
+		// projection's row cannot disagree about where "last active" is.
+		return this.agent.timestampOf(id, entryId);
 	}
 
 	/**
@@ -570,7 +533,7 @@ export class SessionHub {
 	 */
 	async newSession(workDirAbsPath?: string): Promise<string> {
 		const absRoot = await workDirAbsPathForCreate(workDirAbsPath ?? this.workDirAbsPath);
-		const id = await this.createUnpersisted(absRoot);
+		const id = await this.agent.create(absRoot, this.pins);
 		this.current = Promise.resolve(id);
 		this.announceHost(id, undefined);
 		return id;
@@ -594,20 +557,10 @@ export class SessionHub {
 	 * dropping the states of the sessions this process stops running.
 	 */
 	async fork(sessionId: string, entryId: string | null): Promise<string> {
-		const hosted = this.hosts.get(sessionId);
-		// A hosted session's file is named by its own bag — the one its turns write through. A cold
-		// one is located by scan. Either way the fork reads the *file*, not a bag: the fork's two
-		// sides are one read of a source path and one pair of writes, and the file is the authority
-		// every entry has already landed on.
-		const absSourcePath =
-			hosted === undefined
-				? SessionManager.findSessionFilePathById(sessionId)
-				: this.agent.agentState(sessionId).session.sessionFileAbsPath;
-		if (absSourcePath === undefined) throw new Error(`Unknown session: ${sessionId}`);
-		// The branch is written where its source lives — the source header says where that is, so
-		// forking a conversation held in another directory does not quietly move it into this one,
-		// and nothing here replays the file to learn it.
-		const id = this.sessions.forkFrom(absSourcePath, entryId).sessionId;
+		// The source is only located and read — the held bag's own file, or the store's scan — and
+		// both roads are one facade call. The fork's two sides are one read of a source path and one
+		// pair of writes, and the file is the authority every entry has already landed on.
+		const id = this.agent.forkFrom(sessionId, entryId);
 		this.current = Promise.resolve(id);
 		this.announceHost(id, undefined);
 		return id;
@@ -616,21 +569,16 @@ export class SessionHub {
 	/**
 	 * Give a session a name of its own, stored as the title on its `.json` snapshot.
 	 *
-	 * A held session writes through its own bag — the snapshot is written whole, so a fresh replay
-	 * would revert whatever its turns just recorded onto the file. A cold one fills a throwaway, and
-	 * a cold write is one synchronous block (`open`, then the setter that persists), which is the
-	 * whole of its safety — it takes no claim either way: a title is a fact about the session rather
-	 * than about one way through it, the loop never reads titles, and a rewrite of the snapshot
-	 * mid-run lands without disturbing the turn. An id that names nothing refuses inside `open`,
-	 * which is the 404 it always was.
+	 * The held and the cold road are one facade call, and the safety argument travels with it: a
+	 * held session writes through its own bag, a cold write is one synchronous block, and neither
+	 * takes a claim — a title is a fact about the session rather than about one way through it, the
+	 * engine never reads titles, and a rewrite of the snapshot mid-run lands without disturbing the
+	 * turn. An id that names nothing refuses inside the facade, which is the 404 it always was.
 	 *
 	 * The title arrives already shortened; what reaches the file is what a row shows.
 	 */
 	async rename(sessionId: string, title: string): Promise<void> {
-		const bag = this.agent.has(sessionId)
-			? this.agent.agentState(sessionId).session
-			: this.sessions.open(sessionId);
-		this.sessions.setTitle(bag, title);
+		this.agent.setTitle(sessionId, title);
 	}
 
 	/**
@@ -662,11 +610,10 @@ export class SessionHub {
 		// state is the whole removal, and the store has nothing to delete for it. An id this process
 		// never heard of still goes to the store, so its refusal stays the 404 it always was.
 		const held = this.agent.has(sessionId);
-		const onDisk = SessionManager.findSessionFilePathById(sessionId) !== undefined;
+		const onDisk = this.agent.isOnDisk(sessionId);
 		const hosted = this.hosts.get(sessionId);
 		if (hosted !== undefined) {
-			const snapshot = this.agent.snapshot(sessionId);
-			if (hosted.claims > 0 || this.opening.has(sessionId) || snapshot.submitting || this.agent.hasPendingApprovals(sessionId)) {
+			if (hosted.claims > 0 || this.opening.has(sessionId) || this.agent.isSubmitting(sessionId) || this.agent.hasPendingApprovals(sessionId)) {
 				throw new Error("这个会话还有运行中的轮次或没答完的审批，等它停下来再删。");
 			}
 			const closing = (async () => {
@@ -683,7 +630,7 @@ export class SessionHub {
 				// The file removal rides inside the same slot: a claim that waited on `closing` resumes
 				// only after the file is gone, so it finds no file instead of reopening one mid-delete.
 				// A session that never spoke has no file, and asking for one would be asking for nothing.
-				if (onDisk) await this.sessions.remove(sessionId);
+				if (onDisk) await this.agent.removeFromDisk(sessionId);
 				// The live half goes with the host, after the run has settled — dropping the state
 				// earlier would leave a settling turn draining queues nobody holds. The user deleted
 				// the session, so this is the unconditional half of the teardown: no criteria apply
@@ -697,7 +644,7 @@ export class SessionHub {
 				this.closing.delete(sessionId);
 			}
 		} else if (onDisk || !held) {
-			await this.sessions.remove(sessionId);
+			await this.agent.removeFromDisk(sessionId);
 		}
 		this.current = undefined;
 	}
@@ -743,12 +690,14 @@ export class SessionHub {
 	 * the state is keyed by.
 	 */
 	private async open(id: string): Promise<HostedSession> {
-		// The held state first, the store second: a session created a moment ago has no file to find,
+		// The held state first, the disk second: a session created a moment ago has no file to find,
 		// and one already held must not be re-assembled — the table's state is the one its queues,
-		// its subscribers, and any run in flight hang on. A disk-backed one not held yet is opened
-		// from its file below.
-		const state = this.agent.has(id) ? this.agent.agentState(id) : await this.adoptFromDisk(id);
-		const workDirAbsPath = state.session.sessionSetting.workDirAbsPath;
+		// its subscribers, and any run in flight hang on. A disk-backed one not held yet is adopted
+		// from its file; the facade reads the directory back off the table's own state, so under a
+		// concurrent open the host runs on the winner rather than on a rejected assembly.
+		if (!this.agent.has(id)) await this.agent.adoptFromDisk(id, this.pins);
+		const workDirAbsPath = this.agent.workDirOf(id);
+		if (workDirAbsPath === undefined) throw new Error(`Session is not running: ${id}`);
 		const host = new HostedSession(id, workDirAbsPath);
 		this.hosts.set(id, host);
 		// Observers first, then the listeners: a subscriber told "a host opened" and reaching for the
@@ -757,20 +706,6 @@ export class SessionHub {
 		for (const observer of this.observers.get(id) ?? []) observer(feeds);
 		this.announceHost(id, host);
 		return host;
-	}
-
-	/**
-	 * The one road a disk-backed session enters the orchestrator's table: replay, then open.
-	 *
-	 * The read-back that used to be the last line here is the orchestrator's now: `open` is
-	 * first-come-wins, so under a concurrent open the state it just assembled may lose the race to one
-	 * already in the table — and the host must run on the state the table actually holds, never on a
-	 * rejected assembly whose queues nobody would drain. `open` returns that winner, so the rule is
-	 * enforced once instead of remembered here.
-	 */
-	private async adoptFromDisk(id: string): Promise<AgentState> {
-		const session = this.sessions.open(id);
-		return this.agent.open(this.openOptions(session, session.sessionSetting.workDirAbsPath));
 	}
 
 	/**
@@ -790,43 +725,6 @@ export class SessionHub {
 	/** Tell the process-level listeners that a session appeared, started, or went away. */
 	private announceHost(sessionId: string, host: HostedSession | undefined): void {
 		for (const listener of this.hostListeners) listener(sessionId, host);
-	}
-
-	/**
-	 * The options one transcript is described by when this process opens it.
-	 *
-	 * The open's half of the pair below: the transcript, its directory, and the two choices the hub
-	 * pins across every session it runs. Nothing else — the services are the orchestrator's own, which
-	 * is what `Agent.open` refuses to take from a caller.
-	 */
-	private openOptions(state: Session, workDirAbsPath: string): OpenSessionOptions {
-		return {
-			session: state,
-			workDirAbsPath,
-			...(this.options.model === undefined ? {} : { model: this.options.model }),
-			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),
-		};
-	}
-
-	/**
-	 * The options one transcript is described by, whether or not this process runs it.
-	 *
-	 * One builder for both paths on purpose. The cold read and the open must resolve the same
-	 * directory, the same settings, the same tool table, and the same pinned model and level, so that
-	 * a snapshot taken without assembling is indistinguishable from a snapshot taken after — if these
-	 * were written out twice, the difference would show up as a session that changes when you open it.
-	 * The pinned half comes from {@link openOptions}, so the two can differ only in what the cold read
-	 * needs and the open does not: the services, and the transport the cold read never sends on.
-	 */
-	private sessionOptions(state: Session, workDirAbsPath: string): OpenAgentOptions {
-		return {
-			...this.openOptions(state, workDirAbsPath),
-			workDirAbsPath,
-			sessionManager: this.sessions,
-			settings: this.settings,
-			tools: this.tools,
-			...(this.options.api === undefined ? {} : { api: this.options.api }),
-		};
 	}
 
 	private async reap(host: HostedSession): Promise<void> {
@@ -894,30 +792,7 @@ export class SessionHub {
 
 	private async resolveCurrentId(): Promise<string> {
 		if (this.options.sessionId !== undefined) return this.options.sessionId;
-		return this.createUnpersisted(this.workDirAbsPath);
-	}
-
-	/**
-	 * Create a session: build its bag, assemble its state, and put the state in the orchestrator's
-	 * table — the id exists from this line on.
-	 *
-	 * Creation writes nothing: the file appears with the first message (`persistEntry` gates on
-	 * `hasConversation`), and until then the table is the whole of the session's existence —
-	 * {@link has}, {@link snapshotOf}, and {@link open} all answer from it, because there is no file
-	 * to look up and nothing on disk could rebuild the bag. That is also what bounds the session's
-	 * life before its first message: the eviction criteria refuse a file that was never born, so the
-	 * state leaves the table only through {@link remove} or the process itself, and nothing is lost —
-	 * nothing was written for it.
-	 *
-	 * Creating is therefore opening, one `await` on the settings and the model rows (both read
-	 * through the process's own services), and its one failure mode — a settings file that cannot be
-	 * read — is the same failure the following open would have hit, just earlier: the id is not
-	 * handed out past a creation that could not build it.
-	 */
-	private async createUnpersisted(workDirAbsPath: string): Promise<string> {
-		const bag = createSession(workDirAbsPath);
-		const state = await this.agent.open(this.openOptions(bag, workDirAbsPath));
-		return state.session.sessionId;
+		return this.agent.create(this.workDirAbsPath, this.pins);
 	}
 }
 

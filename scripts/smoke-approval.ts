@@ -41,7 +41,7 @@ import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-
 import { mountSession } from "./mount-session.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
 import type { PendingApproval } from "@my-agent/core/protocol";
-import { inMemorySettingManager, type Agent, type ModelConfig, type Session, sessionDir } from "@my-agent/core";
+import { type Agent, type ModelConfig, type Session, sessionDir, SettingManager } from "@my-agent/core";
 
 let failures = 0;
 
@@ -120,6 +120,22 @@ const rows: ModelConfig[] = [
 const modelName = "anthropic";
 process.stdout.write(`model ${modelName} via the scripted transport\n`);
 
+/**
+ * Seed one temp home with the gate's approval map and the scripted rows, and name the home.
+ *
+ * The approval gate is a settings read the orchestrator makes per request, so the map and the rows
+ * have to be on disk before the hub is built; a throwaway manager over a temp home writes them
+ * through the real coercion, and the machine's own settings stay out of it. The caller removes the
+ * home when its rig comes down.
+ */
+async function seedApprovalGate(root: string, modelRows: readonly ModelConfig[]): Promise<string> {
+	const home = await mkdtemp(join(tmpdir(), "my-agent-approval-home-"));
+	const seeder = new SettingManager({ home, modelsHome: home });
+	seeder.applySettings(root, { approval: { read: true } });
+	seeder.replaceModels(modelRows);
+	return home;
+}
+
 // ---------------------------------------------------------------------------------------------------
 // 1. The round trip, and a refused answer that leaves nothing behind.
 // ---------------------------------------------------------------------------------------------------
@@ -136,13 +152,14 @@ fake.setResponses([
 	fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 	fakeAssistantMessage("done"),
 ]);
-// The hub's one orchestrator sends through the scripted transport, so every session it serves does.
-// It is built over an in-memory manager: `read` behind the gate is a settings read the orchestrator
-// makes per request, and the machine's files stay out of it.
+// The hub's one orchestrator sends through the scripted transport, so every session it serves does;
+// its gate is the map `seedApprovalGate` put on the temp home's files.
+const settingsHome = await seedApprovalGate(root, rows);
 const hub = new SessionHub({
 	workDirAbsPath: root,
 	api: fake.api,
-	settings: inMemorySettingManager({ approval: { read: true } }, rows),
+	settingsHome,
+	modelsHome: settingsHome,
 });
 // Mounted the way `SessionHub.open()` mounts one, so every request below claims through the real hub.
 const { id: sessionId } = await mountSession(hub, {
@@ -239,6 +256,7 @@ try {
 } finally {
 	clearTimeout(roundTripWatchdog);
 	await roundTrip.close();
+	await rm(settingsHome, { recursive: true, force: true });
 	await rm(root, { recursive: true, force: true });
 	await rm(sessionDir(root), { recursive: true, force: true }).catch(() => {});
 }
@@ -722,12 +740,15 @@ async function openRig(): Promise<Rig> {
 		fakeAssistantMessage("done"),
 	]);
 	// The hub's one orchestrator sends through the scripted transport, so the session it is about to
-	// serve is answered by it. The hub is built over an in-memory manager: `read` behind the gate is
-	// a settings read the orchestrator makes per request, and the machine's files stay out of it.
+	// serve is answered by it. The gate is a settings read the orchestrator makes per request, so the
+	// approval map and the rows are seeded onto temp-home files first — the machine's own settings
+	// stay out of it.
+	const settingsHome = await seedApprovalGate(root, rows);
 	const hub = new SessionHub({
 		workDirAbsPath: root,
 		api: transport.api,
-		settings: inMemorySettingManager({ approval: { read: true } }, rows),
+		settingsHome,
+		modelsHome: settingsHome,
 	});
 	const { id: sessionId, host, state } = await mountSession(hub, {
 		root,
@@ -745,6 +766,7 @@ async function openRig(): Promise<Rig> {
 		url: graph.url,
 		close: async () => {
 			await graph.close();
+			await rm(settingsHome, { recursive: true, force: true });
 			await rm(root, { recursive: true, force: true });
 			await rm(sessionDir(root), { recursive: true, force: true }).catch(() => {});
 		},
@@ -785,12 +807,14 @@ async function openCrossRig(): Promise<CrossRig> {
 		fakeAssistantMessage("done"),
 		fakeAssistantMessage("done"),
 	]);
-	// The manager rides the hub for the same reason openRig's does: one orchestrator, one settings
-	// door, and the gate both sessions park on is a read through it.
+	// The gate both sessions park on is a settings read the orchestrator makes per request, so the
+	// approval map and the rows are seeded onto temp-home files first, the same way openRig's are.
+	const settingsHome = await seedApprovalGate(root, rows);
 	const hub = new SessionHub({
 		workDirAbsPath: root,
 		api: transport.api,
-		settings: inMemorySettingManager({ approval: { read: true } }, rows),
+		settingsHome,
+		modelsHome: settingsHome,
 	});
 	const sessions: Mounted[] = [];
 	for (let index = 0; index < 2; index += 1) {
@@ -808,6 +832,7 @@ async function openCrossRig(): Promise<CrossRig> {
 		url: graph.url,
 		close: async () => {
 			await graph.close();
+			await rm(settingsHome, { recursive: true, force: true });
 			await rm(root, { recursive: true, force: true });
 			await rm(sessionDir(root), { recursive: true, force: true }).catch(() => {});
 		},

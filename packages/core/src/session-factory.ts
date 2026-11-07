@@ -9,30 +9,43 @@ import { SettingManager } from "./setting-manager.ts";
 import { type ToolManager, createToolManager } from "./tools/index.ts";
 
 /**
- * The services one orchestrator coordinates, for a caller that builds one.
+ * What a caller supplies to build the one orchestrator of a process.
  *
- * Everything here is process-level: the ledger, the configuration every settings and model read goes
- * through, the tool table, and the transport. Nothing in it is a session's — which is what lets a host
- * keep one orchestrator for every conversation it runs (ADR-0007 §6). A session's state is not here
- * either: the orchestrator builds it from the transcript it is handed ({@link Agent.open}), over
- * exactly these services, so the two halves of a session's setup cannot be told apart from outside.
+ * Everything here is process-level: where the configuration lives, and the transport every request
+ * leaves through. The three managers themselves are not on the list — the factory builds them, which
+ * is what makes "every state in the table was assembled over this orchestrator's own services" a fact
+ * of construction rather than a convention a caller has to keep. The two seams that take a built
+ * manager exist for tests alone: a smoke hands an in-memory {@link SettingManager} in so the machine's
+ * files stay out of it, and registers a tool of its own on a table of its own so nothing it registered
+ * reaches a session outside the test. Nothing in production sets either.
  */
-export interface SessionAgentServices {
-	sessionManager: SessionManager;
-	/** The configuration every settings and model read of every session this orchestrator runs goes through. */
-	settings: SettingManager;
+export interface CreateSessionAgentOptions {
 	/**
-	 * The tools callers of this orchestrator share. Omitted means a table of the six built-ins alone;
-	 * a test that adds a tool of its own hands in a table of its own, so nothing it registered reaches
-	 * a session outside the test.
+	 * The agent home the global settings are read from and written to. Defaults to the real one.
+	 *
+	 * A smoke that exercises a command which *writes* settings must not write the machine's own
+	 * `settings.json`; the desktop shell and the server pass through what they were started with.
 	 */
-	tools?: ToolManager;
+	settingsHome?: string;
+	/**
+	 * The agent home the imported model rows are read from and written to. Defaults to
+	 * {@link CreateSessionAgentOptions.settingsHome}.
+	 *
+	 * The sibling home for the other file: a smoke that hands in rows of its own must not leave them
+	 * in the machine's `models.json`, and must not depend on what the person running it configured.
+	 */
+	modelsHome?: string;
 	/** The transport every request this orchestrator makes goes over. Defaults to Anthropic Messages. */
 	api?: ChatTransport;
+	/** Test-only seam: a settings door of the caller's own, in place of the files behind the homes. */
+	settings?: SettingManager;
+	/** Test-only seam: a tool table of the caller's own, in place of the six built-ins. */
+	tools?: ToolManager;
 }
 
 /**
- * Build the orchestrator: one object over the services, with the seams it dispatches through installed.
+ * Build the orchestrator: one object over its own managers, with the seams it dispatches through
+ * installed.
  *
  * A host that runs every session of a process calls this once; a caller that wants a session it does
  * not share — a smoke, a test — calls it once per session and opens that session onto it. Either way
@@ -43,20 +56,20 @@ export interface SessionAgentServices {
  * so a host can add a handler after them and refine what they decided. See
  * {@link installDefaultHooks}.
  */
-export function createSessionAgent(services: SessionAgentServices): Agent {
+export function createSessionAgent(options: CreateSessionAgentOptions = {}): Agent {
 	const hooks = createHooks();
 	// Resolved once and handed to the orchestrator, which is the only table a run's executable set is
 	// read from and the only table a command narrows: a second resolution here would let a caller's own
 	// tool reach one and not the other.
-	const tools = services.tools ?? createToolManager();
+	const tools = options.tools ?? createToolManager();
 	const agent = new Agent({
-		sessionManager: services.sessionManager,
-		settings: services.settings,
+		sessionManager: new SessionManager(),
+		settings: options.settings ?? new SettingManager({ home: options.settingsHome, modelsHome: options.modelsHome }),
 		tools,
 		hooks,
 		// The one assembly of a process: the transport is resolved here rather than defaulted inside
 		// the orchestrator, so everything a run can leave the process through is decided in one file.
-		api: services.api ?? anthropicMessages,
+		api: options.api ?? anthropicMessages,
 		// Rebuilt whenever the active set or the approval set moves, so the prompt cannot promise tools
 		// or approvals the session no longer has. The working directory and the project instructions are
 		// handed over per request for the same reason they are not captured: one builder serves every
@@ -110,23 +123,18 @@ function installDefaultHooks(hooks: Hooks, session: Agent): void {
  * and that is the shape this exists to keep honest: opening a session and resuming one are the same
  * act, whichever of the two roads is taken.
  *
- * The services are resolved *before* the orchestrator is built, and only once: assembly reads the
- * settings through the manager the orchestrator will answer with, so resolving it twice — as this
- * used to — was a second instance that only happened to behave the same because `SettingManager`
- * holds nothing.
+ * The options are a test-seam collection on purpose: the settings and tool seams ride straight
+ * through to the factory, the transcript and the pinned model go to `open`, and nothing here builds
+ * a manager the orchestrator does not keep.
  */
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
-	const settings = options.settings ?? new SettingManager();
-	const sessionManager = options.sessionManager ?? new SessionManager();
-	const tools = options.tools ?? createToolManager();
 	const agent = createSessionAgent({
-		sessionManager,
-		settings,
-		tools,
+		...(options.settings === undefined ? {} : { settings: options.settings }),
+		...(options.tools === undefined ? {} : { tools: options.tools }),
 		...(options.api === undefined ? {} : { api: options.api }),
 	});
 	// The state enters the orchestrator's table here, through the same door the hub uses: the
-	// orchestrator was built first and reads nothing at construction, so the order — services, agent,
+	// orchestrator was built first and reads nothing at construction, so the order — factory, agent,
 	// open — is the only one there is.
 	await agent.open(options);
 	return agent;

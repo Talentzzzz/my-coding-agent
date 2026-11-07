@@ -1,23 +1,23 @@
 // Mounting a session in a hub by hand, for the smokes that need a session without an open.
 //
 // Production never does this: `SessionHub.open()` resolves which session to run from a request, and
-// reads its settings through the hub's own manager. A smoke wants a session whose id it knows up
+// reads its settings through the orchestrator's own. A smoke wants a session whose id it knows up
 // front, so the two steps an open takes are taken here instead: build a transcript bag, open it onto
 // the hub's orchestrator through the same public door a production open uses, then mount the claim
 // token the hub keys it by. The hub's one orchestrator then serves the session like any other,
 // because every call it answers names the id.
 //
-// Settings are not part of what a mount can choose: the manager is the orchestrator's, and one
+// Settings are not part of what a mount can choose: the configuration is the orchestrator's, and one
 // orchestrator serves every session of the process through the one it was built with. A smoke that
-// wants its own settings — an in-memory approval gate, rows of its own — builds the hub over a
-// manager of its own (`HubOptions.settings`), and every session it mounts reads through that.
-import { type Session, SessionManager, createSession } from "@my-agent/core";
+// wants its own settings — a gate of its own, rows of its own — seeds them onto the files behind the
+// hub's settings and models homes (`HubOptions.settingsHome` / `modelsHome`) before the hub is built,
+// and every session it mounts reads through those.
+import { type Session, createSession } from "@my-agent/core";
 import { HostedSession, type SessionHub } from "../packages/server/src/hub.ts";
 
 /** The hub's private half, as a smoke reaches it. */
 interface HubInternals {
 	hosts: Map<string, HostedSession>;
-	sessions: SessionManager;
 }
 
 export interface MountOptions {

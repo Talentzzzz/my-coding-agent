@@ -19,7 +19,7 @@ import { createRoutes } from "../packages/server/src/controllers/routes.ts";
 import { Router } from "../packages/server/src/http/routing.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import { mountSession } from "./mount-session.ts";
-import { inMemorySettingManager, type ModelConfig, sessionDir } from "@my-agent/core";
+import { type ModelConfig, sessionDir, SettingManager } from "@my-agent/core";
 
 const PORT = 8094;
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-"));
@@ -55,13 +55,18 @@ fake.setResponses([
 	fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 	fakeAssistantMessage("done"),
 ]);
-// The hub is built over an in-memory manager, because the approval gate is a settings read the
-// orchestrator makes per request: `read` sits behind the gate for every session this hub serves,
-// and nothing lands in the machine's files. The rows ride on the same manager.
+// The approval gate is a settings read the orchestrator makes per request: `read` sits behind the
+// gate for every session this hub serves. The map and the rows are seeded onto temp-home files
+// first, so nothing lands in the machine's own settings or models file.
+const settingsHome = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-home-"));
+const seeder = new SettingManager({ home: settingsHome, modelsHome: settingsHome });
+seeder.applySettings(root, { approval: { read: true } });
+seeder.replaceModels(rows);
 const hub = new SessionHub({
 	workDirAbsPath: root,
 	api: fake.api,
-	settings: inMemorySettingManager({ approval: { read: true } }, rows),
+	settingsHome,
+	modelsHome: settingsHome,
 });
 
 // Mounted the way `SessionHub.open()` mounts one — the entry parked at the gate is what the checks
@@ -166,6 +171,7 @@ try {
 	hub.release(bench);
 	await hub.close();
 	await handle.close();
+	await rm(settingsHome, { recursive: true, force: true });
 	await rm(root, { recursive: true, force: true });
 	await rm(sessionDir(root), { recursive: true, force: true }).catch(() => {});
 }

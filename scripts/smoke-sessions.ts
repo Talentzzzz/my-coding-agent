@@ -125,7 +125,7 @@ function snapshotPathOf(jsonlPath: string): string {
  * `Agent` no longer exposes.
  */
 function hubSessions(hub: SessionHub): SessionManager {
-	return (hub as unknown as { sessions: SessionManager }).sessions;
+	return hub.agent.sessionManager;
 }
 
 /**
@@ -884,7 +884,7 @@ try {
 	// criteria hold, and `drop` does not ask. There is no clear — the table lives and dies with the
 	// orchestrator itself.
 	{
-		const agent = createSessionAgent({ sessionManager: new SessionManager(), settings: new SettingManager({ models: [] }) });
+		const agent = createSessionAgent({ settings: new SettingManager({ models: [] }) });
 		const session = createSession(tmpdir());
 		const state = await agent.open({ session });
 		check("open is the one way in, and the id answers it", agent.agentState(session.sessionId) === state);

@@ -1,7 +1,6 @@
 import {
 	type AgentSessionEvent,
 	groupSessionsByDirectory,
-	SessionManager,
 	type SessionRow,
 	type DirectoryGroup,
 } from "@my-agent/core";
@@ -175,24 +174,22 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 			void refresh(sessionId).finally(() => probing.delete(sessionId));
 			return;
 		}
-		const manager = hub.agent.sessionManager;
-		// The bag the session writes through: this session is followed, so the orchestrator's table
-		// holds it — a replay here would parse the whole transcript per token and lag the turn.
-		const state = hub.agent.agentState(sessionId).session;
+		// Both narrow reads below are the orchestrator's facade over the bag this session writes
+		// through — this session is followed, so the table holds it, and a replay here would parse
+		// the whole transcript per token and lag the turn.
 
 		if (event.type === "branch_changed") {
-			publish({ ...current, title: manager.getTitle(state) });
+			publish({ ...current, title: hub.agent.titleOf(sessionId) });
 			return;
 		}
-		if (event.type !== "entry_appended") return;
+		if (event.type !== "entry_appended" || event.kind !== "message") return;
 
-		const entry = state.sessionEntryMapById.get(event.entryId);
-		if (entry?.type !== "message") return;
-		const at = messageTime(entry);
+		const at = hub.agent.timestampOf(sessionId, event.entryId);
 		if (at === undefined || at <= current.modified) return;
 		// The title only moves when a *user* message lands on the branch, since that is the only
 		// message a title is read from — an assistant reply cannot rename the conversation.
-		const titled = entry.message.role === "user" ? manager.getTitle(state) : current.title;
+		const titled =
+			hub.agent.messageRoleOf(sessionId, event.entryId) === "user" ? hub.agent.titleOf(sessionId) : current.title;
 		publish({ ...current, modified: at, title: titled });
 	};
 
@@ -207,7 +204,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	 * A session nobody is running may not have a file yet at all, and says so by answering `undefined`;
 	 * the row then appears when the session first writes, which is also when the host opens.
 	 */
-	const probe = (sessionId: string): Promise<SessionRow | undefined> => SessionManager.findSessionRowById(sessionId);
+	const probe = (sessionId: string): Promise<SessionRow | undefined> => hub.agent.findSessionRowById(sessionId);
 
 	/**
 	 * Re-read one row and publish it, live fields included.
@@ -293,7 +290,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	 * never leave a running session's row claiming to be idle.
 	 */
 	const seed = async (): Promise<void> => {
-		for (const group of await SessionManager.listDirectories()) {
+		for (const group of await hub.agent.listDirectories()) {
 			// Through `publish` rather than `rows.set`: a row may already be here from a probe, and a
 			// listing knows things a single file does not — a fork's parent, above all. Going around the
 			// comparison would leave that correction sitting in the store with nobody told.
@@ -402,17 +399,4 @@ void _everyRowFieldIsListed;
  */
 function sameRow(a: SessionRow, b: SessionRow): boolean {
 	return ROW_FIELDS.every((field) => a[field] === b[field]);
-}
-
-/**
- * When a message entry records activity.
- *
- * The message's own stamp, falling back to the entry's — the same order the scan prefers, so a row
- * pushed forward by a live event and a row read off disk afterwards agree on where "last active" is.
- */
-function messageTime(entry: { message: unknown; timestamp: string }): number | undefined {
-	const stamp = (entry.message as { timestamp?: unknown }).timestamp;
-	if (typeof stamp === "number") return stamp;
-	const parsed = new Date(entry.timestamp).getTime();
-	return Number.isNaN(parsed) ? undefined : parsed;
 }

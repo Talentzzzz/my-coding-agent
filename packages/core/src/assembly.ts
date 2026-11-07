@@ -26,12 +26,14 @@ export interface OpenAgentOptions {
 	 */
 	workDirAbsPath: string;
 	/**
-	 * The stateless session service the bag-passing calls inside the session go through.
+	 * The stateless session service the cold read replays against.
 	 *
-	 * A host that owns one — the hub, so every session of the process shares a single service and
-	 * its single store knowledge — hands its own in. Omitted means a fresh service, which behaves
-	 * identically: the service holds no bag of its own (ADR-0007 §2), and the calls the session
-	 * makes name their bag at the call site.
+	 * Only {@link readSessionSnapshot} reads this: the cold read names its bag by the session it is
+	 * handed, and a fresh manager behaves identically because the service holds no bag of its own
+	 * (ADR-0007 §2) — a caller's own instance only changes *which* store knowledge the walk uses.
+	 * An orchestrator does not take one: {@link openAgent} forwards the settings, tools, and
+	 * transport seams to the factory and leaves the ledger to the agent it builds, which owns its
+	 * own.
 	 */
 	sessionManager?: SessionManager;
 	/**
@@ -95,6 +97,16 @@ export interface OpenSessionOptions {
 	model?: string;
 	thinkingLevel?: string;
 }
+
+/**
+ * The model a host pins under the sessions it opens, when it pins one at all: the row's name and the
+ * thinking level, the same two fields {@link OpenSessionOptions} carries without the transcript.
+ *
+ * The facade's open-shaped methods (`create`, `adoptFromDisk`, `snapshotOf`) take one so a host can
+ * keep a `--model`-style default in force across every session without the orchestrator holding it:
+ * a pin is the host's per-open argument, not a resident fact.
+ */
+export type ModelPins = Pick<OpenSessionOptions, "model" | "thinkingLevel">;
 
 /**
  * What a session *is*, resolved but not yet activated: the working directory, the settings, the

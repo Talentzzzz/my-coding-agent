@@ -9,16 +9,15 @@ import {
 	DEFAULT_MODE_NAME,
 	listModelOptions,
 	type ModeSettings,
-	SessionManager,
 	shortenTitle,
 	type ModelOption,
 	type ModelSelection,
 	resolvePath,
 	type SessionRef,
 	type SessionSnapshot,
+	type Settings,
 	type SettingsPatch,
 	type SettingsSnapshot,
-	SettingManager,
 	toSessionRef,
 	type ModelConfig,
 	type DirectoryGroup,
@@ -29,28 +28,27 @@ import { httpStatus } from "../http/errors.ts";
 import { samePath, workDirAbsPathForCreate, workDirAbsPathOrThrow, type SessionHub } from "../hub.ts";
 
 /** The stored sessions for one directory, narrowed from the session files to what the wire carries. */
-export async function listSessions(workDirAbsPath: string): Promise<SessionRef[]> {
-	return (await SessionManager.list(workDirAbsPath)).map(toSessionRef);
+export async function listSessions(agent: Agent, workDirAbsPath: string): Promise<SessionRef[]> {
+	return (await agent.listSessions(workDirAbsPath)).map(toSessionRef);
 }
 
 /** What the settings panel reads: the values it can edit, and the ones it shows read-only. */
-function settingsOf(settings: SettingManager, workDirAbsPath: string): SettingsSnapshot {
-	const merged = settings.getSettings(workDirAbsPath);
-	const hidden = merged.hiddenDirectories ?? [];
+function settingsOf(settings: Settings): SettingsSnapshot {
+	const hidden = settings.hiddenDirectories ?? [];
 	const names: Record<string, string> = {};
-	for (const [dir, name] of Object.entries(merged.directoryNames ?? {})) {
+	for (const [dir, name] of Object.entries(settings.directoryNames ?? {})) {
 		if (name.trim().length > 0) names[dir] = name;
 	}
 	return {
-		appearance: merged.appearance,
-		approval: merged.approval,
-		bash: merged.bash,
-		...(merged.tools === undefined ? {} : { tools: merged.tools }),
-		...(merged.modes === undefined ? {} : { modes: merged.modes }),
+		appearance: settings.appearance,
+		approval: settings.approval,
+		bash: settings.bash,
+		...(settings.tools === undefined ? {} : { tools: settings.tools }),
+		...(settings.modes === undefined ? {} : { modes: settings.modes }),
 		...(hidden.length === 0 ? {} : { hiddenDirectories: hidden }),
 		...(Object.keys(names).length === 0 ? {} : { directoryNames: names }),
-		...(merged.model === undefined ? {} : { model: merged.model }),
-		...(merged.defaultModelSeeded === undefined ? {} : { defaultModelSeeded: merged.defaultModelSeeded }),
+		...(settings.model === undefined ? {} : { model: settings.model }),
+		...(settings.defaultModelSeeded === undefined ? {} : { defaultModelSeeded: settings.defaultModelSeeded }),
 	};
 }
 
@@ -164,7 +162,7 @@ export class SystemController {
 
 	/** Every directory this machine has sessions for, each with its own list, most recent first. */
 	async directories(): Promise<{ directories: DirectoryGroup[] }> {
-		return { directories: (await SessionManager.listDirectories()).filter((group) => this.hub.listsDirectory(group.workDirAbsPath)) };
+		return { directories: (await this.hub.agent.listDirectories()).filter((group) => this.hub.listsDirectory(group.workDirAbsPath)) };
 	}
 
 	/**
@@ -190,13 +188,13 @@ export class SystemController {
 		const absSource = resolve(workDirAbsPath);
 		// The same check the listing makes: a path this machine has no sessions for is not a directory,
 		// so naming it would store a label nothing ever draws.
-		const groups = await SessionManager.listDirectories();
+		const groups = await this.hub.agent.listDirectories();
 		if (!groups.some((group) => samePath(group.workDirAbsPath, absSource))) {
 			throw httpStatus.notFound(`Unknown directory: ${absSource}`);
 		}
 
-		this.hub.settings.applySettings(this.hub.workDirAbsPath, { directoryNames: { [absSource]: name.trim() } });
-		return { workDirAbsPath: absSource, name: name.trim(), settings: settingsOf(this.hub.settings, this.hub.workDirAbsPath) };
+		this.hub.agent.applySettings(this.hub.workDirAbsPath, { directoryNames: { [absSource]: name.trim() } });
+		return { workDirAbsPath: absSource, name: name.trim(), settings: settingsOf(this.hub.agent.settings(this.hub.workDirAbsPath)) };
 	}
 
 	/**
@@ -217,9 +215,9 @@ export class SystemController {
 			throw httpStatus.badRequest("`workDirAbsPath` must be a directory path");
 		}
 
-		const hidden = this.hub.settings.getHiddenDirectories(this.hub.workDirAbsPath);
+		const hidden = this.hub.agent.hiddenDirectories(this.hub.workDirAbsPath);
 		if (!hidden.some((path) => samePath(path, workDirAbsPath))) {
-			this.hub.settings.applySettings(this.hub.workDirAbsPath, { hiddenDirectories: [...hidden, resolve(workDirAbsPath)] });
+			this.hub.agent.applySettings(this.hub.workDirAbsPath, { hiddenDirectories: [...hidden, resolve(workDirAbsPath)] });
 			this.listeners.onDirectoryListingChanged?.();
 		}
 
@@ -232,13 +230,13 @@ export class SystemController {
 	/** The visible listing, as the hub's rule leaves it. */
 	private async listing(): Promise<{ settings: SettingsSnapshot; directories: DirectoryGroup[] }> {
 		return {
-			settings: settingsOf(this.hub.settings, this.hub.workDirAbsPath),
-			directories: (await SessionManager.listDirectories()).filter((group) => this.hub.listsDirectory(group.workDirAbsPath)),
+			settings: settingsOf(this.hub.agent.settings(this.hub.workDirAbsPath)),
+			directories: (await this.hub.agent.listDirectories()).filter((group) => this.hub.listsDirectory(group.workDirAbsPath)),
 		};
 	}
 
 	settings(): { settings: SettingsSnapshot } {
-		return { settings: settingsOf(this.hub.settings, this.hub.workDirAbsPath) };
+		return { settings: settingsOf(this.hub.agent.settings(this.hub.workDirAbsPath)) };
 	}
 
 	/**
@@ -339,7 +337,7 @@ export class SystemController {
 			// A default that names no row is refused rather than stored: `selectModel` would fall back to
 			// the first row, so a typo here would look like a preference that quietly did nothing. The
 			// rows are the hub's, read fresh, so a row deleted since the panel loaded is caught too.
-			if (this.hub.settings.modelCatalog().find((userModel) => userModel.name === fields.model) === undefined) {
+			if (this.hub.agent.modelCatalog().find((userModel) => userModel.name === fields.model) === undefined) {
 				throw httpStatus.conflict(`Unknown model: ${fields.model}`);
 			}
 			next.model = fields.model;
@@ -414,12 +412,12 @@ export class SystemController {
 			next.bash = bash;
 		}
 
-		this.hub.settings.applySettings(workDirAbsPath, next);
-		return { settings: settingsOf(this.hub.settings, workDirAbsPath) };
+		this.hub.agent.applySettings(workDirAbsPath, next);
+		return { settings: settingsOf(this.hub.agent.settings(workDirAbsPath)) };
 	}
 
 	async sessions(): Promise<{ sessions: SessionRef[] }> {
-		return { sessions: await listSessions(this.hub.workDirAbsPath) };
+		return { sessions: await listSessions(this.hub.agent, this.hub.workDirAbsPath) };
 	}
 
 	/**
@@ -430,7 +428,7 @@ export class SystemController {
 	 * instead of guessing from the stored files.
 	 */
 	async current(): Promise<{ sessionId: string; sessions: SessionRef[] }> {
-		const [sessionId, sessions] = await Promise.all([this.hub.currentSessionId(), listSessions(this.hub.workDirAbsPath)]);
+		const [sessionId, sessions] = await Promise.all([this.hub.currentSessionId(), listSessions(this.hub.agent, this.hub.workDirAbsPath)]);
 		return { sessionId, sessions };
 	}
 }
@@ -502,7 +500,7 @@ export class SessionController {
 		}
 		const sessionId = await this.hub.newSession(absRoot);
 		this.restoreDirectory(absRoot ?? this.hub.workDirAbsPath);
-		return { sessionId, sessions: await listSessions(absRoot ?? this.hub.workDirAbsPath) };
+		return { sessionId, sessions: await listSessions(this.hub.agent, absRoot ?? this.hub.workDirAbsPath) };
 	}
 
 	/**
@@ -514,10 +512,10 @@ export class SessionController {
  * the hub's visibility rule reads, so the next listing and the next overview frame already agree.
 	 */
 	private restoreDirectory(workDirAbsPath: string): void {
-		const hidden = this.hub.settings.getHiddenDirectories(this.hub.workDirAbsPath);
+		const hidden = this.hub.agent.hiddenDirectories(this.hub.workDirAbsPath);
 		const kept = hidden.filter((path) => !samePath(path, workDirAbsPath));
 		if (kept.length === hidden.length) return;
-		this.hub.settings.applySettings(this.hub.workDirAbsPath, { hiddenDirectories: kept });
+		this.hub.agent.applySettings(this.hub.workDirAbsPath, { hiddenDirectories: kept });
 		this.listeners.onDirectoryListingChanged?.();
 	}
 
@@ -534,7 +532,7 @@ export class SessionController {
 			throw httpStatus.badRequest("`entryId` must be a string or null");
 		}
 		const sessionId = await this.hub.fork(sourceId, typeof entryId === "string" ? entryId : null);
-		return { sessionId, sessions: await listSessions(this.hub.workDirAbsPath) };
+		return { sessionId, sessions: await listSessions(this.hub.agent, this.hub.workDirAbsPath) };
 	}
 
 	/**
