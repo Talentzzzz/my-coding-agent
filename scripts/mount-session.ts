@@ -51,7 +51,7 @@ export async function mountSession(hub: SessionHub, options: MountOptions): Prom
 		workDirAbsPath: options.root,
 		...(options.model === undefined ? {} : { model: options.model }),
 	});
-	const host = new HostedSession(state.sessionId, options.root);
+	const host = new HostedSession(state.sessionId);
 	internals.hosts.set(state.sessionId, host);
 	return { id: state.sessionId, state, host };
 }

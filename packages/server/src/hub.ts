@@ -80,28 +80,20 @@ export type SessionObserver = (feeds: SessionFeeds | undefined) => void;
  * The count is what makes ownership work: a request that goes away must not stop a turn another
  * request is watching, and the last claim to go must not leave the session running forever.
  *
- * Nothing else is on it. The session itself is one stateless orchestrator for the whole process
- * (ADR-0007 §6) — a method names the id and fetches whatever it needs — and its live half is the
- * state that orchestrator's table holds for the id (ADR-0011): the queues a run drains and the run
- * in flight. What is left is the one thing neither of those can answer: who is holding this session
- * open right now. That is a transport-layer question (ADR-0001), so its counter lives with the
- * transport layer rather than on core state it would never read.
+ * Nothing else is on it. The session itself is the process's one orchestrator (ADR-0017) — a
+ * method names the id and fetches whatever it needs — and its live half is the state that
+ * orchestrator's table holds for the id (ADR-0011). What is left is the one thing neither of
+ * those can answer: who is holding this session open right now. That is a transport-layer
+ * question (ADR-0001), so its counter lives with the transport layer rather than on core state
+ * it would never read.
  *
  * A host is also the gap between the two questions "is the session held" and "is it running": the
  * orchestrator's table answers the first from the moment the id exists, while the host exists only
  * while a claim has opened the session — so `hosts` is always a subset of the table, and the table
  * is only ever cleared once the host it belongs to is gone.
- *
- * The working directory is per session rather than per process. A sidebar that lists every directory this
- * machine has used can open any of them, and the tools of the session that opens must resolve inside
- * the directory its own transcript was written in — which is what the header of its file records.
- * It is read here because a fork needs it before anything is running, and the session's state exists
- * only once a claim has opened one.
  */
 export class HostedSession {
 	readonly id: string;
-	/** The directory this session's tools may touch, absolute. */
-	readonly workDirAbsPath: string;
 	/**
 	 * Callers currently holding this session open.
 	 *
@@ -113,9 +105,8 @@ export class HostedSession {
 	/** Set while the hub is deciding whether an unclaimed session can be closed. */
 	reaping = false;
 
-	constructor(sessionId: string, workDirAbsPath: string) {
+	constructor(sessionId: string) {
 		this.id = sessionId;
-		this.workDirAbsPath = workDirAbsPath;
 	}
 }
 
@@ -137,7 +128,7 @@ export type HostListener = (sessionId: string, host: HostedSession | undefined) 
  * deciding per stream meant two tabs on one session built two loops over one JSONL file and appended
  * to it independently. The file is still the durable copy; this table is who is holding a session open.
  *
- * The loop itself is not per session: one orchestrator serves every id (ADR-0007 §6). What is per
+ * The loop itself is not per session: one orchestrator serves every id (ADR-0017). What is per
  * session is the claim count — a transport-layer fact about who is using it right now — and the state
  * the orchestrator's table holds the live half in. Everything else here is a singleton.
  */
@@ -146,8 +137,9 @@ export class SessionHub {
 	 * The directory this process was started in.
 	 *
 	 * It is a default, not the directory a session works in: new sessions take it as their workDirAbsPath,
-	 * and the settings panel is scoped to it. A session's own directory comes from its header — see
-	 * {@link HostedSession.workDirAbsPath} — which may name any directory on the machine.
+	 * and the settings panel is scoped to it. A session's own directory comes from its header, which
+	 * may name any directory on the machine — the orchestrator's table holds it, and the hub never
+	 * needs it: the fork's source-path resolution lives inside the facade (ADR-0017).
 	 *
 	 * Nothing moves it after construction, which is why a folder the user renamed behind this
 	 * process's back is not followed: a default that guessed at a new name would put the next new
@@ -163,7 +155,7 @@ export class SessionHub {
 	private readonly hosts = new Map<string, HostedSession>();
 	/**
 	 * The one orchestrator every conversation this process runs goes through, and the only consumer
-	 * of the process's managers (ADR-0007 §6): the settings door, the model rows, the tool table, and
+	 * of the process's managers (ADR-0017): the settings door, the model rows, the tool table, and
 	 * the session store all live behind its facade, so a session assembled here, an edit to a model
 	 * row, and a settings write all reach the same objects it reads. Built once, because it holds no
 	 * session: a method names the id and resolves what it needs from the state in its own table —
@@ -212,9 +204,9 @@ export class SessionHub {
 	constructor(options: HubOptions) {
 		this.options = options;
 		this.absRoot = options.workDirAbsPath;
-		// One construction line, and the managers are the orchestrator's own: the homes are all this
-		// hub contributes — a smoke's in-memory gate or rows are seeded onto the files behind them
-		// before this runs, and nothing else about the graph is this hub's to decide.
+		// One construction line, and the managers are the orchestrator's own (ADR-0017): the homes
+		// are all this hub contributes — a smoke's in-memory gate or rows are seeded onto the files
+		// behind them before this runs, and nothing else about the graph is this hub's to decide.
 		this.agent = createSessionAgent({
 			...(options.settingsHome === undefined ? {} : { settingsHome: options.settingsHome }),
 			...(options.modelsHome === undefined ? {} : { modelsHome: options.modelsHome }),
@@ -553,11 +545,12 @@ export class SessionHub {
 	 *
 	 * The registry gains nothing here either: a fork nobody has claimed has no live half to hold —
 	 * no queue has drained, no run is in flight — so its first touch is its first claim, and that is
-	 * what assembles its state through {@link open}. Only `close` moves the orchestrator's table, by
-	 * dropping the states of the sessions this process stops running.
+	 * what assembles its state through {@link open}. The orchestrator's table gains nothing with it:
+	 * the facade's `forkFrom` writes the two files and adopts nothing (ADR-0017). States leave that
+	 * table only through the orchestrator's own close and evict, never through this hub's hand.
 	 */
 	async fork(sessionId: string, entryId: string | null): Promise<string> {
-		// The source is only located and read — the held bag's own file, or the store's scan — and
+		// The source is only located and read — the held bag's own file, or the facade's disk scan — and
 		// both roads are one facade call. The fork's two sides are one read of a source path and one
 		// pair of writes, and the file is the authority every entry has already landed on.
 		const id = this.agent.forkFrom(sessionId, entryId);
@@ -605,10 +598,11 @@ export class SessionHub {
 	 * against what remains rather than answering with a session that no longer exists.
 	 */
 	async remove(sessionId: string): Promise<void> {
-		// A session this process holds answers `has` from the table; the store is what answers for one
-		// it does not. A session created here and never spoken in has no file: forgetting the held
-		// state is the whole removal, and the store has nothing to delete for it. An id this process
-		// never heard of still goes to the store, so its refusal stays the 404 it always was.
+		// A session this process holds answers `has` from the table; the facade is what answers for
+		// one it does not. A session created here and never spoken in has no file: forgetting the
+		// held state is the whole removal, and there is nothing on disk for the facade to delete. An
+		// id this process never heard of still goes to the facade, so its refusal stays the 404 it
+		// always was.
 		const held = this.agent.has(sessionId);
 		const onDisk = this.agent.isOnDisk(sessionId);
 		const hosted = this.hosts.get(sessionId);
@@ -693,12 +687,10 @@ export class SessionHub {
 		// The held state first, the disk second: a session created a moment ago has no file to find,
 		// and one already held must not be re-assembled — the table's state is the one its queues,
 		// its subscribers, and any run in flight hang on. A disk-backed one not held yet is adopted
-		// from its file; the facade reads the directory back off the table's own state, so under a
-		// concurrent open the host runs on the winner rather than on a rejected assembly.
+		// from its file; under a concurrent open the caller runs on the winner rather than on a
+		// rejected assembly, which is what the facade's read-back of the id guarantees.
 		if (!this.agent.has(id)) await this.agent.adoptFromDisk(id, this.pins);
-		const workDirAbsPath = this.agent.workDirOf(id);
-		if (workDirAbsPath === undefined) throw new Error(`Session is not running: ${id}`);
-		const host = new HostedSession(id, workDirAbsPath);
+		const host = new HostedSession(id);
 		this.hosts.set(id, host);
 		// Observers first, then the listeners: a subscriber told "a host opened" and reaching for the
 		// session must find it already handed over.
