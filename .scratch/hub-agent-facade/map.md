@@ -48,6 +48,10 @@ hub 及以下只通过 Agent 的公开方法操作会话。构造由 `createSess
   四处偏离记录在票：pins 保留（票 02 清单漏了 boot 的 `--model`）、增补窄读 `messageRoleOf`、
   `Agent.settings` 字段改名私有 `settingsManager` 让位门面方法、`agentState()` 加 `@deprecated`
   收口随票 07。
+- [05 hub 重写](issues/05-hub-rewrite.md)：hub.ts 注释按新形态改写并引用 ADR-0017（新号，票 08
+  必须占用）；「the store」措辞清零、fork 文档的「Only `close` moves the table」残留重写。
+  票外偏离：摘除零读者死字段 `HostedSession.workDirAbsPath`（fork 源路径解析已进门面），
+  连带 `workDirOf` / `fileAbsPathOf` 零消费者、去留随票 07。
 
 ## Not yet specified
 
