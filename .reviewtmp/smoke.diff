@@ -1,0 +1,201 @@
+diff --git a/scripts/smoke-approval-recovery.ts b/scripts/smoke-approval-recovery.ts
+index a193b16..697aebf 100644
+--- a/scripts/smoke-approval-recovery.ts
++++ b/scripts/smoke-approval-recovery.ts
+@@ -1,9 +1,9 @@
+-// The loop's recovery machine at the session's face (ADR-0006 §5, ticket 15): the approval gate ends
++// The recovery machine at the session's face (ADR-0006 §5, ticket 15): the approval gate ends
+ // the run with the call dangling in the ledger, and what happens to that call afterwards is the
+ // contract this file pins —
+ //
+ //   1. a grant resumes: the answer starts a run whose recovery pass re-runs the call through the
+-//      gate and the tool itself, and the loop carries on in the same run;
++//      gate and the tool itself, and the run carries on in the same turn loop;
+ //   2. a denial closes: the dangling call gets the result the answer's reason names, and the model
+ //      answers it;
+ //   3. orphans close: dangling calls no answer names — the shape a crash leaves — are closed with
+@@ -21,15 +21,18 @@
+ import { mkdtemp, rm } from "node:fs/promises";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+-import { Loop, type AgentTool, type LoopRuntime } from "@my-agent/loop";
+-import { createAssistantMessageEventStream, type ChatTransport, type Message, type Model } from "@my-agent/llm";
++import { createAssistantMessageEventStream, type ChatTransport, type Message } from "@my-agent/llm";
+ import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
+ import {
++	danglingToolCallsOf,
+ 	openAgent,
+-	createSessionState,
++	recoverPendingToolCalls,
++	createSession,
+ 	inMemorySettingsState,
+ 	type Agent,
+-	type SessionState,
++	type AgentEvent,
++	type AgentTool,
++	type Session,
+ 	type ModelConfig,
+ 	type ModelSource,
+ 	type ModelSelection,
+@@ -132,9 +135,9 @@ function gatedApi(holds: number[]): { api: ChatTransport; release(index: number)
+  * The session's methods name it by id now — the orchestrator holds no session state — so the
+  * opening helper records what it created here and every check reads it back through {@link sidOf}.
+  */
+-const opened = new WeakMap<Agent, { id: string; state: SessionState }>();
++const opened = new WeakMap<Agent, { id: string; state: Session }>();
+ 
+-function bagOf(session: Agent): SessionState {
++function bagOf(session: Agent): Session {
+ 	return opened.get(session)!.state;
+ }
+ 
+@@ -143,10 +146,10 @@ function sidOf(session: Agent): string {
+ }
+ 
+ async function openSession(overrides: { approval?: Record<string, boolean>; api?: ChatTransport } = {}): Promise<Agent> {
+-	const state = createSessionState(root);
++	const state = createSession(root);
+ 	const session = await openAgent({
+ 		absWorkspaceRoot: root,
+-		sessionState: state,
++		session: state,
+ 		models,
+ 		api: overrides.api ?? fake.api,
+ 		model: modelName,
+@@ -242,39 +245,15 @@ process.stdout.write("\ndangling calls no answer names are closed before the fir
+ 	await session.close(sidOf(session));
+ }
+ 
+-// The toggle: a host that turns the sweep off owns the unanswered calls itself. Driven at the loop's
+-// own face, because this host never turns it off — the option is the loop's contract, not a setting.
++// The toggle: a host that turns the sweep off owns the unanswered calls itself. Driven at the
++// recovery machine's own face — the function every run calls before its first request — because this
++// host never turns it off: the option is the engine's contract, not a setting.
+ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
+ 
+ {
+-	const bare = createFakeTransport();
+-	const model = {
+-		id: "bare",
+-		name: "bare",
+-		api: "anthropic-messages",
+-		baseUrl: "",
+-		apiKey: "unused",
+-		input: [],
+-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+-		contextWindow: 0,
+-		maxTokens: 0,
+-		thinkingLevel: "off",
+-	} as unknown as Model;
+-	const requests: { roles: string[] }[] = [];
+-	bare.setResponses([
+-		(context) => {
+-			requests.push({ roles: requestRoles(context) });
+-			return fakeAssistantMessage("answered anyway");
+-		},
+-	]);
+-	const runtime: LoopRuntime = {};
+-	const loop = new Loop({
+-		streamFn: (m, context, options) => bare.api.stream(m, context, options),
+-		runtime,
+-	});
+-	const dangling: Message = fakeAssistantMessage(fakeToolCall("read", { path: "a.txt" }, { id: "call_x" }));
++	const dangling = fakeAssistantMessage(fakeToolCall("read", { path: "a.txt" }, { id: "call_x" }));
+ 	// A tool the recovery pass can resolve, so a re-suspending gate is what stops it — not a missing
+-	// tool, which the loop answers before any hook runs.
++	// tool, which the machine answers before any hook runs.
+ 	const readTool: AgentTool = {
+ 		name: "read",
+ 		label: "read",
+@@ -283,52 +262,64 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
+ 		execute: async () => ({ content: [{ type: "text", text: "ran" }], details: {} }),
+ 	};
+ 
+-	const off = await loop.runLoop({ messages: [dangling], tools: [] }, undefined, {
+-		model,
+-		recovery: { enablePendingToolRecovery: false },
+-	});
++	/** What one pass emitted, so "silent" is an assertion and not an unobserved claim. */
++	const events: AgentEvent[] = [];
++	const emitted = (event: AgentEvent): void => {
++		events.push(event);
++	};
++
++	const off = await recoverPendingToolCalls(
++		{ messages: [dangling], tools: [] },
++		danglingToolCallsOf([dangling]),
++		{ enablePendingToolRecovery: false },
++		{},
++		undefined,
++		emitted,
++	);
+ 	check(
+ 		"toggle off: nothing was synthesized for the call",
+-		off.every((message) => message.role !== "toolResult"),
+-		JSON.stringify(off.map((message) => message.role)),
++		off.messages.length === 0,
++		JSON.stringify(off.messages.map((message) => message.role)),
+ 	);
+ 	check(
+ 		"toggle off: the call went to the provider unanswered, as the host asked",
+-		JSON.stringify(requests[0]?.roles) === JSON.stringify(["assistant"]),
+-		JSON.stringify(requests[0]?.roles),
++		off.suspended !== true && events.length === 0,
++		JSON.stringify(events.map((event) => event.type)),
+ 	);
+ 
+-	const on = await loop.runLoop({ messages: [dangling], tools: [] }, undefined, { model });
++	const on = await recoverPendingToolCalls(
++		{ messages: [dangling], tools: [] },
++		danglingToolCallsOf([dangling]),
++		undefined,
++		{},
++		undefined,
++		emitted,
++	);
+ 	check(
+ 		"default: the orphan was closed with the sweep's sentence",
+-		on.some((message) => message.role === "toolResult" && textOf(message).includes("was left unanswered")),
+-		JSON.stringify(on.map((message) => `${message.role}:${textOf(message)}`)),
++		on.messages.some((message) => message.role === "toolResult" && textOf(message).includes("was left unanswered")),
++		JSON.stringify(on.messages.map((message) => `${message.role}:${textOf(message)}`)),
+ 	);
+ 
+ 	// A grant the gate does not actually clear: the recovery pass re-runs the call through the gate,
+ 	// and a gate that suspends again stops the recovery where it stands — no result is written, and
+ 	// the run ends before its request, exactly as a live batch's suspend does. The tool must exist
+ 	// for the gate to be reached at all, so the context carries a real one.
+-	const gated = createFakeTransport();
+-	let asked = 0;
+-	gated.setResponses([fakeAssistantMessage("should never be asked")]);
+-	const resuming = new Loop({
+-		streamFn: (m, context, options) => {
+-			asked += 1;
+-			return gated.api.stream(m, context, options);
+-		},
+-		runtime: {},
+-		beforeToolCall: async () => ({ suspend: true }),
+-	});
+-	const resuspended = await resuming.runLoop(
++	const resuspended = await recoverPendingToolCalls(
+ 		{ messages: [dangling], tools: [readTool] },
++		danglingToolCallsOf([dangling]),
++		{ answers: { call_x: { approved: true } } },
++		{ beforeToolCall: async () => ({ suspend: true }) },
+ 		undefined,
+-		{ model, recovery: { answers: { call_x: { approved: true } } } },
++		emitted,
+ 	);
+ 	check(
+-		"re-suspended: the granted call stayed a question and no request went out",
+-		resuspended.every((message) => message.role !== "toolResult") && asked === 0,
+-		`asked=${asked} ${JSON.stringify(resuspended.map((message) => message.role))}`,
++		"re-suspended: the granted call stayed a question and nothing was written",
++		resuspended.suspended === true && resuspended.messages.length === 0,
++		JSON.stringify({
++			suspended: resuspended.suspended,
++			messages: resuspended.messages.map((message) => message.role),
++		}),
+ 	);
+ }
+ 

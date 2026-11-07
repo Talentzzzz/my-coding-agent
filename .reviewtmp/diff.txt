@@ -1,0 +1,1411 @@
+diff --git a/packages/core/src/agent.ts b/packages/core/src/agent.ts
+index c42bc54..a8fdd2d 100644
+--- a/packages/core/src/agent.ts
++++ b/packages/core/src/agent.ts
+@@ -5,13 +5,16 @@ import {
+ 	createAssistantMessageEventStream,
+ 	createSystemMessage,
+ 	isContextOverflow,
++	type Context,
+ 	type JsonValue,
+-	type LlmContext,
+ 	type Message,
+ 	type RetryCallbacks,
+ 	retryAssistantCall,
+ 	type SimpleStreamOptions,
+ 	toToolDeclaration,
++	type Tool,
++	type ToolCall,
++	type ToolResult,
+ 	type ToolResultMessage,
+ 	type Usage,
+ 	validateToolArguments,
+@@ -63,17 +66,13 @@ import type { SettingManager } from "./setting-manager.ts";
+ import type { ToolRegistry, ToolRunContext, ToolState } from "./tools/index.ts";
+ import type {
+ 	AfterToolCallResult,
+-	AgentContext,
+ 	AgentEvent,
+ 	AgentRequestUpdate,
+-	AgentTool,
+-	AgentToolCall,
+-	AgentToolCallOutcome,
+-	AgentToolResult,
+ 	BeforeToolCallResult,
+ 	RunRecoveryOptions,
+ 	ToolCallAnswer,
+ 	ToolCallHooks,
++	ToolCallOutcome,
+ } from "./types.ts";
+ 
+ // The event surface is defined beside the fan-out that publishes it (`session/events.ts`) and
+@@ -995,7 +994,7 @@ export class Agent {
+ 
+ 		try {
+ 			const newMessages: Message[] = [];
+-			let currentContext: AgentContext = {
++			let currentContext: Context = {
+ 				messages: [...sessionManager.buildSessionContext(session).messages],
+ 				tools: [...tools.active(toolStateOf(sessionManager, session, settings, tools), this.runContext(state))],
+ 			};
+@@ -1088,7 +1087,7 @@ export class Agent {
+ 						return newMessages;
+ 					}
+ 
+-					const toolCalls = message.content.filter((block): block is AgentToolCall => block.type === "toolCall");
++					const toolCalls = message.content.filter((block): block is ToolCall => block.type === "toolCall");
+ 
+ 					const toolResults: ToolResultMessage[] = [];
+ 					hasMoreToolCalls = false;
+@@ -1216,7 +1215,7 @@ export class Agent {
+ 	 */
+ 	private async prepareRequest(
+ 		transport: ChatTransport,
+-		context: AgentContext,
++		context: Context,
+ 		signal: AbortSignal | undefined,
+ 		state: AgentState,
+ 	): Promise<AgentRequestUpdate> {
+@@ -1368,7 +1367,7 @@ export class Agent {
+ 		state: AgentState,
+ 		outer: AssistantMessageEventStream,
+ 		model: Model,
+-		context: LlmContext,
++		context: Context,
+ 		options: SimpleStreamOptions | undefined,
+ 	): Promise<void> {
+ 		const { settings, api } = this;
+@@ -1532,7 +1531,7 @@ export class Agent {
+ 				{ role: "user", content: [{ type: "text", text: request.prompt }], timestamp: Date.now() },
+ 			];
+ 			return model
+-				.stream({ messages, system: createSystemMessage(request.systemPrompt) }, {
++				.stream({ messages, system: createSystemMessage(request.systemPrompt), tools: [] }, {
+ 					// The row's key, said here rather than only carried on the model: this is the one call
+ 					// that does not travel through the engine, and the engine is what copies the key into options.
+ 					apiKey: model.apiKey,
+@@ -1685,7 +1684,7 @@ export class Agent {
+ 		sessionId: string,
+ 		toolCallId: string,
+ 		toolName: string,
+-		result: AgentToolResult<unknown>,
++		result: ToolResult<unknown>,
+ 		isError: boolean,
+ 	): Promise<AfterToolCallResult | undefined> {
+ 		const decided = await this.hooks.apply("after_tool", {
+@@ -1805,8 +1804,8 @@ type ExecutedToolCallBatch = {
+ 
+ type PreparedToolCall = {
+ 	kind: "prepared";
+-	toolCall: AgentToolCall;
+-	tool: AgentTool<any>;
++	toolCall: ToolCall;
++	tool: Tool<any>;
+ 	args: unknown;
+ };
+ 
+@@ -1816,18 +1815,18 @@ type SuspendedToolCall = {
+ 
+ type ImmediateToolCallOutcome = {
+ 	kind: "immediate";
+-	result: AgentToolResult<unknown>;
++	result: ToolResult<unknown>;
+ 	isError: boolean;
+ };
+ 
+ type ExecutedToolCallOutcome = {
+-	result: AgentToolResult<unknown>;
++	result: ToolResult<unknown>;
+ 	isError: boolean;
+ };
+ 
+-type ToolUpdateSink = (partialResult: AgentToolResult<unknown>) => Promise<void> | void;
++type ToolUpdateSink = (partialResult: ToolResult<unknown>) => Promise<void> | void;
+ 
+-type FinalizedToolCallEntry = AgentToolCallOutcome | (() => Promise<AgentToolCallOutcome>);
++type FinalizedToolCallEntry = ToolCallOutcome | (() => Promise<ToolCallOutcome>);
+ 
+ /**
+  * Stream one assistant response from the model, into the transcript and out through the sink.
+@@ -1840,17 +1839,17 @@ type FinalizedToolCallEntry = AgentToolCallOutcome | (() => Promise<AgentToolCal
+  * when the request carries no explicit `system`.
+  */
+ async function streamAssistantResponse(
+-	context: AgentContext,
++	context: Context,
+ 	model: Model,
+ 	signal: AbortSignal | undefined,
+ 	emit: AgentEventSink,
+ ): Promise<AssistantMessage> {
+-	const llmContext: LlmContext = {
++	const requestContext: Context = {
+ 		messages: context.messages,
+-		tools: context.tools?.map((tool) => toToolDeclaration(tool)),
++		tools: context.tools.map((tool) => toToolDeclaration(tool)),
+ 	};
+ 
+-	const response = await model.stream(llmContext, {
++	const response = await model.stream(requestContext, {
+ 		apiKey: model.apiKey,
+ 		signal,
+ 	});
+@@ -1929,7 +1928,7 @@ async function streamAssistantResponse(
+  * them are safe to execute; report each as an error so the model can re-issue them.
+  */
+ async function failToolCallsFromTruncatedMessage(
+-	toolCalls: AgentToolCall[],
++	toolCalls: ToolCall[],
+ 	emit: AgentEventSink,
+ ): Promise<ExecutedToolCallBatch> {
+ 	const messages: ToolResultMessage[] = [];
+@@ -1940,7 +1939,7 @@ async function failToolCallsFromTruncatedMessage(
+ 			toolName: toolCall.name,
+ 			args: toolCall.arguments,
+ 		});
+-		const finalized: AgentToolCallOutcome = {
++		const finalized: ToolCallOutcome = {
+ 			toolCall,
+ 			result: createErrorToolResult(
+ 				`Tool call "${toolCall.name}" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.`,
+@@ -1957,7 +1956,7 @@ async function failToolCallsFromTruncatedMessage(
+ 
+ /** One tool call the transcript still waits on: the call block, and the message that issued it. */
+ export type DanglingToolCall = {
+-	toolCall: AgentToolCall;
++	toolCall: ToolCall;
+ 	assistantMessage: AssistantMessage;
+ };
+ 
+@@ -2004,7 +2003,7 @@ export function danglingToolCallsOf(messages: Message[]): DanglingToolCall[] {
+  * pins this contract calls it with a transcript and a set of answers, and nothing else.
+  */
+ export async function recoverPendingToolCalls(
+-	currentContext: AgentContext,
++	currentContext: Context,
+ 	dangling: DanglingToolCall[],
+ 	recovery: RunRecoveryOptions | undefined,
+ 	hooks: ToolCallHooks,
+@@ -2028,7 +2027,7 @@ export async function recoverPendingToolCalls(
+ 				toolName: toolCall.name,
+ 				args: toolCall.arguments,
+ 			});
+-			let finalized: AgentToolCallOutcome;
++			let finalized: ToolCallOutcome;
+ 			if (preparation.kind === "immediate") {
+ 				finalized = { toolCall, result: preparation.result, isError: preparation.isError };
+ 			} else {
+@@ -2055,7 +2054,7 @@ export async function recoverPendingToolCalls(
+ 
+ /** Close one unanswered call with a synthesized error result, carrying the events of a live batch. */
+ async function synthesizeToolResult(
+-	toolCall: AgentToolCall,
++	toolCall: ToolCall,
+ 	text: string,
+ 	emit: AgentEventSink,
+ ): Promise<ToolResultMessage> {
+@@ -2065,7 +2064,7 @@ async function synthesizeToolResult(
+ 		toolName: toolCall.name,
+ 		args: toolCall.arguments,
+ 	});
+-	const finalized: AgentToolCallOutcome = {
++	const finalized: ToolCallOutcome = {
+ 		toolCall,
+ 		result: createErrorToolResult(text),
+ 		isError: true,
+@@ -2081,13 +2080,13 @@ async function synthesizeToolResult(
+  * otherwise. Both paths prepare the calls in source order and write their results as messages.
+  */
+ async function executeToolCalls(
+-	currentContext: AgentContext,
++	currentContext: Context,
+ 	assistantMessage: AssistantMessage,
+ 	hooks: ToolCallHooks,
+ 	signal: AbortSignal | undefined,
+ 	emit: AgentEventSink,
+ ): Promise<ExecutedToolCallBatch> {
+-	const toolCalls = assistantMessage.content.filter((block): block is AgentToolCall => block.type === "toolCall");
++	const toolCalls = assistantMessage.content.filter((block): block is ToolCall => block.type === "toolCall");
+ 	const hasSequentialToolCall = toolCalls.some(
+ 		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
+ 	);
+@@ -2098,14 +2097,14 @@ async function executeToolCalls(
+ }
+ 
+ async function executeToolCallsSequential(
+-	currentContext: AgentContext,
++	currentContext: Context,
+ 	assistantMessage: AssistantMessage,
+-	toolCalls: AgentToolCall[],
++	toolCalls: ToolCall[],
+ 	hooks: ToolCallHooks,
+ 	signal: AbortSignal | undefined,
+ 	emit: AgentEventSink,
+ ): Promise<ExecutedToolCallBatch> {
+-	const finalizedCalls: AgentToolCallOutcome[] = [];
++	const finalizedCalls: ToolCallOutcome[] = [];
+ 	const messages: ToolResultMessage[] = [];
+ 
+ 	for (const toolCall of toolCalls) {
+@@ -2123,7 +2122,7 @@ async function executeToolCallsSequential(
+ 			args: toolCall.arguments,
+ 		});
+ 
+-		let finalized: AgentToolCallOutcome;
++		let finalized: ToolCallOutcome;
+ 		if (preparation.kind === "immediate") {
+ 			finalized = {
+ 				toolCall,
+@@ -2160,9 +2159,9 @@ async function executeToolCallsSequential(
+ }
+ 
+ async function executeToolCallsParallel(
+-	currentContext: AgentContext,
++	currentContext: Context,
+ 	assistantMessage: AssistantMessage,
+-	toolCalls: AgentToolCall[],
++	toolCalls: ToolCall[],
+ 	hooks: ToolCallHooks,
+ 	signal: AbortSignal | undefined,
+ 	emit: AgentEventSink,
+@@ -2191,7 +2190,7 @@ async function executeToolCallsParallel(
+ 				toolCall,
+ 				result: preparation.result,
+ 				isError: preparation.isError,
+-			} satisfies AgentToolCallOutcome;
++			} satisfies ToolCallOutcome;
+ 			await emitToolExecutionEnd(finalized, emit);
+ 			finalizedCalls.push(finalized);
+ 			if (signal?.aborted) {
+@@ -2206,7 +2205,7 @@ async function executeToolCallsParallel(
+ 					toolCall,
+ 					result: createErrorToolResult("Operation aborted"),
+ 					isError: true,
+-				} satisfies AgentToolCallOutcome;
++				} satisfies ToolCallOutcome;
+ 				await emitToolExecutionEnd(finalized, emit);
+ 				return finalized;
+ 			}
+@@ -2244,11 +2243,11 @@ async function executeToolCallsParallel(
+ 	};
+ }
+ 
+-function shouldTerminateToolBatch(finalizedCalls: AgentToolCallOutcome[]): boolean {
++function shouldTerminateToolBatch(finalizedCalls: ToolCallOutcome[]): boolean {
+ 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
+ }
+ 
+-function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {
++function prepareToolCallArguments(tool: Tool<any>, toolCall: ToolCall): ToolCall {
+ 	if (!tool.prepareArguments) {
+ 		return toolCall;
+ 	}
+@@ -2263,12 +2262,12 @@ function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall)
+ }
+ 
+ async function prepareToolCall(
+-	currentContext: AgentContext,
++	currentContext: Context,
+ 	assistantMessage: AssistantMessage,
+-	toolCall: AgentToolCall,
++	toolCall: ToolCall,
+ 	hooks: ToolCallHooks,
+ 	signal: AbortSignal | undefined,
+-	tools: readonly AgentTool<any>[] = currentContext.tools ?? [],
++	tools: readonly Tool<any>[] = currentContext.tools,
+ ): Promise<PreparedToolCall | ImmediateToolCallOutcome | SuspendedToolCall> {
+ 	const tool = tools.find((t) => t.name === toolCall.name);
+ 	if (!tool) {
+@@ -2339,7 +2338,7 @@ async function prepareToolCall(
+ 	}
+ }
+ 
+-function emitToolExecutionUpdate(toolCall: AgentToolCall, emit: AgentEventSink): ToolUpdateSink {
++function emitToolExecutionUpdate(toolCall: ToolCall, emit: AgentEventSink): ToolUpdateSink {
+ 	return (partialResult) =>
+ 		emit({
+ 			type: "tool_execution_update",
+@@ -2353,11 +2352,11 @@ function emitToolExecutionUpdate(toolCall: AgentToolCall, emit: AgentEventSink):
+ /** Options for {@link runToolCall}. */
+ interface RunToolCallOptions extends ToolCallHooks {
+ 	/** Tools the call resolves against. */
+-	tools: readonly AgentTool<any>[];
++	tools: readonly Tool<any>[];
+ 	/** Passed to the hooks as the message that issued the call. */
+ 	assistantMessage: AssistantMessage;
+ 	/** Passed to the hooks as the current agent context. */
+-	context: AgentContext;
++	context: Context;
+ 	signal?: AbortSignal;
+ 	onUpdate?: ToolUpdateSink;
+ }
+@@ -2372,7 +2371,7 @@ interface RunToolCallOptions extends ToolCallHooks {
+  * errors come back as `isError: true`. Nothing in this build calls it yet — a tool that wants to
+  * nest another call would — so it stays internal to this file rather than exported.
+  */
+-async function runToolCall(toolCall: AgentToolCall, options: RunToolCallOptions): Promise<AgentToolCallOutcome> {
++async function runToolCall(toolCall: ToolCall, options: RunToolCallOptions): Promise<ToolCallOutcome> {
+ 	const { assistantMessage, context, signal } = options;
+ 	const preparation = await prepareToolCall(context, assistantMessage, toolCall, options, signal, options.tools);
+ 	if (preparation.kind === "immediate") {
+@@ -2425,13 +2424,13 @@ async function executePreparedToolCall(
+ }
+ 
+ async function finalizeExecutedToolCall(
+-	currentContext: AgentContext,
++	currentContext: Context,
+ 	assistantMessage: AssistantMessage,
+ 	prepared: PreparedToolCall,
+ 	executed: ExecutedToolCallOutcome,
+ 	hooks: ToolCallHooks,
+ 	signal: AbortSignal | undefined,
+-): Promise<AgentToolCallOutcome> {
++): Promise<ToolCallOutcome> {
+ 	let result = executed.result;
+ 	let isError = executed.isError;
+ 
+@@ -2476,14 +2475,14 @@ async function finalizeExecutedToolCall(
+ 	};
+ }
+ 
+-function createErrorToolResult(message: string): AgentToolResult<unknown> {
++function createErrorToolResult(message: string): ToolResult<unknown> {
+ 	return {
+ 		content: [{ type: "text", text: message }],
+ 		details: {},
+ 	};
+ }
+ 
+-async function emitToolExecutionEnd(finalized: AgentToolCallOutcome, emit: AgentEventSink): Promise<void> {
++async function emitToolExecutionEnd(finalized: ToolCallOutcome, emit: AgentEventSink): Promise<void> {
+ 	await emit({
+ 		type: "tool_execution_end",
+ 		toolCallId: finalized.toolCall.id,
+@@ -2493,7 +2492,7 @@ async function emitToolExecutionEnd(finalized: AgentToolCallOutcome, emit: Agent
+ 	});
+ }
+ 
+-function createToolResultMessage(finalized: AgentToolCallOutcome): ToolResultMessage {
++function createToolResultMessage(finalized: ToolCallOutcome): ToolResultMessage {
+ 	return {
+ 		role: "toolResult",
+ 		toolCallId: finalized.toolCall.id,
+diff --git a/packages/core/src/hooks.ts b/packages/core/src/hooks.ts
+index dfe973f..58a5cf5 100644
+--- a/packages/core/src/hooks.ts
++++ b/packages/core/src/hooks.ts
+@@ -1,10 +1,9 @@
+-import type { AgentToolResult } from "./types.ts";
+-import type { Message } from "./llm/index.ts";
++import type { Message, ToolResult } from "./llm/index.ts";
+ import { truncate } from "./tools/truncate.ts";
+ import { spillPathFor, spillText, spillView, writeSpillFile, SPILL_KEEP_CHARS } from "./context/spill.ts";
+ 
+ /** How a tool result carries its content: text and image blocks, in order. */
+-export type ToolResultContent = AgentToolResult<unknown>["content"];
++export type ToolResultContent = ToolResult<unknown>["content"];
+ 
+ /** A handler's answer, or a promise of it: the approval gate cannot answer before the user does. */
+ type MaybePromise<T> = T | Promise<T>;
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index 50d152c..63cae33 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -1,6 +1,6 @@
+ export { Agent, type AgentConfig, type AgentSessionEvent, type SessionEventListener, type SessionListener } from "./agent.ts";
+ export { danglingToolCallsOf, recoverPendingToolCalls } from "./agent.ts";
+-export type { AgentContext, AgentEvent, AgentTool, AgentToolResult } from "./types.ts";
++export type { AgentEvent, ToolCallOutcome } from "./types.ts";
+ export type { Message } from "./llm/index.ts";
+ // The transport surface a caller outside core still names directly: the server holds a
+ // `ChatTransport`, and the smokes drive streams and models the way the engine does.
+@@ -11,13 +11,17 @@ export {
+ 	type AssistantMessage,
+ 	type AssistantMessageEventStream,
+ 	type ChatTransport,
++	type Context,
+ 	type ImageContent,
+-	type LlmContext,
+ 	type SimpleStreamOptions,
+ 	type TextContent,
+ 	type ThinkingContent,
++	type Tool,
+ 	type ToolCall,
++	type ToolExecutionMode,
++	type ToolResult,
+ 	type ToolResultMessage,
++	type ToolUpdateCallback,
+ 	type Usage,
+ } from "./llm/index.ts";
+ export {
+diff --git a/packages/core/src/llm/api/anthropic-messages.ts b/packages/core/src/llm/api/anthropic-messages.ts
+index 36092fa..c7d5284 100644
+--- a/packages/core/src/llm/api/anthropic-messages.ts
++++ b/packages/core/src/llm/api/anthropic-messages.ts
+@@ -26,7 +26,7 @@ import type {
+ 	StopReason,
+ 	StreamFunction,
+ 	StreamOptions,
+-	LlmContext,
++	Context,
+ 	TextContent,
+ 	ThinkingContent,
+ 	Tool,
+@@ -441,7 +441,7 @@ async function* iterateAnthropicEvents(
+  */
+ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> = (
+ 	model: Model<"anthropic-messages">,
+-	context: LlmContext,
++	context: Context,
+ 	options?: SimpleStreamOptions,
+ ): AssistantMessageEventStream => {
+ 	const apiKey = resolveApiKey(model, options);
+@@ -733,7 +733,7 @@ function createClient(
+ 
+ function getBetaFeatures(
+ 	model: Model<"anthropic-messages">,
+-	context: LlmContext,
++	context: Context,
+ 	options?: AnthropicOptions,
+ ): NonNullable<MessageCreateParamsStreaming["betas"]> {
+ 	let configuredFeatures: string | null | undefined;
+@@ -761,7 +761,7 @@ function getBetaFeatures(
+ 
+ function buildParams(
+ 	model: Model<"anthropic-messages">,
+-	context: LlmContext,
++	context: Context,
+ 	options?: AnthropicOptions,
+ ): MessageCreateParamsStreaming {
+ 	const { cacheControl } = getCacheControl(model, options?.cacheRetention, options?.env);
+@@ -1053,7 +1053,7 @@ function mergeAdjacentUserMessages(params: MessageParam[]): MessageParam[] {
+ 
+ function shouldUseFineGrainedToolStreamingBeta(
+ 	model: Model<"anthropic-messages">,
+-	context: LlmContext,
++	context: Context,
+ ): boolean {
+ 	return (context.tools ?? []).length > 0 && !getAnthropicCompat(model).supportsEagerToolInputStreaming;
+ }
+diff --git a/packages/core/src/llm/api/simple-options.ts b/packages/core/src/llm/api/simple-options.ts
+index 65a9bb7..39f990e 100644
+--- a/packages/core/src/llm/api/simple-options.ts
++++ b/packages/core/src/llm/api/simple-options.ts
+@@ -2,13 +2,13 @@
+ // from flagging this file, while every import into packages/core stays fully checked.
+ // @ts-nocheck
+ import type { Model } from "../model.ts";
+-import type { Api, LlmContext, SimpleStreamOptions, StreamOptions } from "../types.ts";
++import type { Api, Context, SimpleStreamOptions, StreamOptions } from "../types.ts";
+ import { estimateContextTokens } from "../utils/estimate.ts";
+ 
+ const CONTEXT_SAFETY_TOKENS = 4096;
+ const MIN_MAX_TOKENS = 1;
+ 
+-export function clampMaxTokensToContext(model: Model<Api>, context: LlmContext, maxTokens: number): number {
++export function clampMaxTokensToContext(model: Model<Api>, context: Context, maxTokens: number): number {
+ 	if (model.contextWindow <= 0) return Math.max(MIN_MAX_TOKENS, maxTokens);
+ 	const available = model.contextWindow - estimateContextTokens(context).tokens - CONTEXT_SAFETY_TOKENS;
+ 	return Math.min(maxTokens, Math.max(MIN_MAX_TOKENS, available));
+@@ -16,7 +16,7 @@ export function clampMaxTokensToContext(model: Model<Api>, context: LlmContext,
+ 
+ export function buildBaseOptions(
+ 	model: Model<Api>,
+-	context: LlmContext,
++	context: Context,
+ 	options?: SimpleStreamOptions,
+ 	apiKey?: string,
+ ): StreamOptions {
+diff --git a/packages/core/src/llm/model.ts b/packages/core/src/llm/model.ts
+index ea1817e..0e69753 100644
+--- a/packages/core/src/llm/model.ts
++++ b/packages/core/src/llm/model.ts
+@@ -7,8 +7,8 @@ import type {
+ 	AnthropicMessagesCompat,
+ 	Api,
+ 	ChatTransport,
++	Context,
+ 	KnownApi,
+-	LlmContext,
+ 	ModelCost,
+ 	ModelInputLimits,
+ 	ModelPromptCache,
+@@ -165,7 +165,7 @@ export class Model<TApi extends Api = Api> {
+ 	 * the retry policy or a scripted answer replaces {@link Model.transport} rather than wrapping this
+ 	 * method, so there is exactly one way a request leaves this object.
+ 	 */
+-	stream(context: LlmContext, options?: SimpleStreamOptions): AssistantMessageEventStream {
++	stream(context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+ 		return this.transport.stream(this, context, options);
+ 	}
+ }
+diff --git a/packages/core/src/llm/types.ts b/packages/core/src/llm/types.ts
+index 6ff767e..6daef2a 100644
+--- a/packages/core/src/llm/types.ts
++++ b/packages/core/src/llm/types.ts
+@@ -193,7 +193,7 @@ export type ApiStreamOptions<TApi extends Api> = TApi extends keyof ApiOptionsMa
+  * lives on the implementation module itself and reaches it through `ApiStreamOptions`.
+  */
+ export interface ChatTransport {
+-	stream(model: Model<Api>, context: LlmContext, options?: SimpleStreamOptions): AssistantMessageEventStream;
++	stream(model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream;
+ }
+ 
+ // Unified options passed to stream(). The thinking level is deliberately
+@@ -217,7 +217,7 @@ export interface SimpleStreamOptions extends StreamOptions {
+ //   "error" or "aborted" and errorMessage, emitted via the stream protocol.
+ export type StreamFunction<TApi extends Api = Api, TOptions extends StreamOptions = StreamOptions> = (
+ 	model: Model<TApi>,
+-	context: LlmContext,
++	context: Context,
+ 	options?: TOptions,
+ ) => AssistantMessageEventStream;
+ 
+@@ -328,7 +328,7 @@ export type JsonRepresentation<T> = IsAny<T> extends true
+  *
+  * One per request and always first: nothing in this build appends a system message to the
+  * middle of a conversation, and a transport drops any it is handed. Tools are not part of it —
+- * they travel on the request (`LlmContext.tools`), not inside a message.
++ * they travel on the request (`Context.tools`), not inside a message.
+  */
+ export interface SystemMessage {
+ 	role: "system";
+@@ -404,7 +404,7 @@ export type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails>
+ 
+ export type Message = SystemMessage | UserMessage | AssistantMessage | ToolResultMessage;
+ 
+-import type { TSchema } from "typebox";
++import type { Static, TSchema } from "typebox";
+ 
+ /**
+  * Optional provider-side constrained sampling config for a tool.
+@@ -417,26 +417,107 @@ export interface ConstrainedSamplingConfig {
+ 	strict: "prefer" | "require";
+ }
+ 
+-export interface Tool<TParameters extends TSchema = TSchema> {
++/**
++ * How a run may execute the tool calls of one assistant message.
++ *
++ * - "sequential": each tool call is prepared, executed, and finalized before the next one starts.
++ * - "parallel": tool calls are prepared sequentially, then allowed tools execute concurrently.
++ *   `tool_execution_end` is emitted in tool completion order after each tool is finalized,
++ *   while tool-result message artifacts are emitted later in assistant source order.
++ */
++export type ToolExecutionMode = "sequential" | "parallel";
++
++/**
++ * The one tool type.
++ *
++ * The declaration a transport reads — name, description, parameters, and the optional
++ * constrained-sampling config — and the executable counterpart the engine calls — label, argument
++ * shim, output schema, `execute`, replay policy, execution mode — are one shape, so a request and a
++ * run cannot drift about what a tool is. A transport reads the declaration fields and never calls
++ * `execute`; the engine calls `execute` and never reads a declaration from the wire.
++ */
++export interface Tool<TParameters extends TSchema = TSchema, TDetails = unknown> {
+ 	name: string;
+ 	description: string;
+ 	parameters: TParameters;
+ 	constrainedSampling?: false | ConstrainedSamplingConfig;
++	/** Human-readable label for UI display. */
++	label: string;
++	/**
++	 * Optional compatibility shim for raw tool-call arguments before schema validation.
++	 * Must return an object that matches `TParameters`.
++	 */
++	prepareArguments?: (args: unknown) => Static<TParameters>;
++	/**
++	 * JSON Schema of `structuredContent` in successful results. Tools that declare it should always
++	 * set `structuredContent`.
++	 */
++	outputSchema?: TSchema;
++	/**
++	 * Execute the tool call. Throw on failure, or return a result with `isError: true`; do not only
++	 * describe the failure in `content`.
++	 */
++	execute: (
++		toolCallId: string,
++		params: Static<TParameters>,
++		signal?: AbortSignal,
++		onUpdate?: ToolUpdateCallback<TDetails>,
++	) => Promise<ToolResult<TDetails>>;
++	/** Recovery policy for an effect whose durable intent exists but whose outcome is unknown. */
++	replay?: "never" | "safe";
++	/**
++	 * Per-tool execution mode override.
++	 * - "sequential": this tool must execute one at a time with other tool calls.
++	 * - "parallel": this tool can execute concurrently with other tool calls.
++	 *
++	 * If omitted, the default execution mode applies.
++	 */
++	executionMode?: ToolExecutionMode;
++}
++
++/** Final or partial result produced by a tool. */
++export interface ToolResult<T = JsonValue | undefined> {
++	/** Text or image content returned to the model. */
++	content: (TextContent | ImageContent)[];
++	/** Arbitrary structured details for logs or UI rendering. */
++	details: T;
++	/**
++	 * Machine-readable result matching the tool's `outputSchema`, for programmatic callers. Not sent
++	 * to the model; `content` remains the model-facing result.
++	 */
++	structuredContent?: JsonValue;
++	/** Usage from the final tool execution itself, if available. Not used for main LLM context accounting. */
++	usage?: Usage;
++	/**
++	 * Report a failure without throwing. The model sees `content` as an error result, like a thrown
++	 * error, but `details` and `structuredContent` are kept for the UI and programmatic callers.
++	 */
++	isError?: boolean;
++	/**
++	 * Hint that the agent should stop after the current tool batch.
++	 * Early termination only happens when every finalized tool result in the batch sets this to true.
++	 */
++	terminate?: boolean;
+ }
+ 
+ /**
+- * Base request context: the conversation messages plus, optionally, the system prompt as an
+- * explicit system message. Tool-carrying variants extend this — {@link LlmContext} declares the
+- * tools to the model; the loop package's context carries the executable counterparts.
++ * Callback used by tools to stream partial execution updates.
++ *
++ * The callback is scoped to the current `execute()` invocation. Calls made after
++ * the tool promise settles are ignored.
++ */
++export type ToolUpdateCallback<T = unknown> = (partialResult: ToolResult<T>) => void;
++
++/**
++ * The context one request is made with: the conversation messages, the system prompt as an explicit
++ * leading message, and the tools the request carries. A transport reads the declaration fields of
++ * each tool and calls nothing on them; the engine passes the same executable shapes.
+  */
+ export interface Context {
+ 	messages: Message[];
+ 	system?: SystemMessage;
+-}
+-
+-/** The context a transport entry point (`stream()`) takes: the base plus the request's tool declarations. */
+-export interface LlmContext extends Context {
+-	tools?: Tool[];
++	/** The tools this request carries. An empty array is legal; omitting the field is not. */
++	tools: Tool[];
+ }
+ 
+ /**
+diff --git a/packages/core/src/llm/utils/estimate.ts b/packages/core/src/llm/utils/estimate.ts
+index 7279d09..442e536 100644
+--- a/packages/core/src/llm/utils/estimate.ts
++++ b/packages/core/src/llm/utils/estimate.ts
+@@ -1,7 +1,7 @@
+ // Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
+ // from flagging this file, while every import into packages/core stays fully checked.
+ // @ts-nocheck
+-import type { AssistantMessage, LlmContext, ImageContent, Message, TextContent, Usage } from "../types.ts";
++import type { AssistantMessage, Context, ImageContent, Message, TextContent, Usage } from "../types.ts";
+ import { getSystemMessageText } from "./text.ts";
+ 
+ export interface ContextUsageEstimate {
+@@ -93,7 +93,7 @@ function getLastAssistantUsageInfo(messages: readonly Message[]): { usage: Usage
+ 	return usageInfo;
+ }
+ 
+-export function estimateContextTokens(context: LlmContext): ContextUsageEstimate {
++export function estimateContextTokens(context: Context): ContextUsageEstimate {
+ 	const messages = context.messages;
+ 	// Tools are not part of any message, so they are counted here rather than by
+ 	// `estimateMessageTokens`. Leaving them out would under-report the context by every tool schema
+diff --git a/packages/core/src/llm/utils/transcript.ts b/packages/core/src/llm/utils/transcript.ts
+index 3a3eaf1..0b52125 100644
+--- a/packages/core/src/llm/utils/transcript.ts
++++ b/packages/core/src/llm/utils/transcript.ts
+@@ -9,7 +9,7 @@ import type { Message, SystemMessage, Tool } from "../types.ts";
+  *
+  * Named for what it makes, not for when: this runs before every request rather than once
+  * per conversation, because the prompt is resent whole each time. Tools do not come through here —
+- * they are a request parameter, carried by `LlmContext.tools`.
++ * they are a request parameter, carried by `Context.tools`.
+  */
+ export function createSystemMessage(systemPrompt: string | undefined): SystemMessage | undefined {
+ 	if (systemPrompt === undefined || systemPrompt.length === 0) return undefined;
+diff --git a/packages/core/src/protocol.ts b/packages/core/src/protocol.ts
+index be640a2..9667d0c 100644
+--- a/packages/core/src/protocol.ts
++++ b/packages/core/src/protocol.ts
+@@ -204,7 +204,7 @@ export interface DiffLine {
+ /**
+  * What one tool call did to one file.
+  *
+- * A tool that changes a file answers with this in `AgentToolResult.details`, beside the text the
++ * A tool that changes a file answers with this in `ToolResult.details`, beside the text the
+  * model reads: the text is written for a model, and this is written for the window. Both are the
+  * same change, so the view never has to parse the text — and the tool's text stays short, which for
+  * a whole-file `write` is the difference between naming the file and paying for it twice.
+diff --git a/packages/core/src/tools/bash.ts b/packages/core/src/tools/bash.ts
+index 606091e..da387e4 100644
+--- a/packages/core/src/tools/bash.ts
++++ b/packages/core/src/tools/bash.ts
+@@ -1,5 +1,5 @@
+ import { spawn } from "node:child_process";
+-import type { AgentTool, AgentToolResult } from "../types.ts";
++import type { Tool, ToolResult, ToolUpdateCallback } from "../llm/index.ts";
+ import { Type, type Static } from "typebox";
+ import { DEFAULT_BASH_SETTINGS, type BashSettings } from "../config.ts";
+ import { defaultLauncher } from "../shell.ts";
+@@ -38,7 +38,7 @@ export type BashParams = Static<typeof parameters>;
+  * anything being rebuilt by hand. A caller that names none — a test building the tool directly —
+  * runs on the defaults.
+  */
+-export function createBashTool(workDirAbsPath: string, timeouts?: BashSettings): AgentTool<typeof parameters> {
++export function createBashTool(workDirAbsPath: string, timeouts?: BashSettings): Tool<typeof parameters> {
+ 	return {
+ 		name: "bash",
+ 		label: "Bash",
+@@ -53,13 +53,13 @@ export function createBashTool(workDirAbsPath: string, timeouts?: BashSettings):
+ }
+ 
+ /**
+- * Tools pass a callback that accepts a partial `AgentToolResult`. `AgentTool` from pi-agent-core
+- * types `onUpdate` as `AgentToolUpdateCallback<TDetails>`, so the wrapper in `tools/index.ts`
++ * Tools pass a callback that accepts a partial `ToolResult`. `Tool` from pi-agent-core
++ * types `onUpdate` as `ToolUpdateCallback<TDetails>`, so the wrapper in `tools/index.ts`
+  * narrows it to this shape.
+  */
+ export interface BashHooks {
+ 	signal?: AbortSignal;
+-	onUpdate?: (partial: AgentToolResult<unknown>) => void;
++	onUpdate?: (partial: ToolResult<unknown>) => void;
+ 	/** The timeouts to run under; the defaults when the caller named none. */
+ 	timeouts?: BashSettings;
+ }
+@@ -68,14 +68,14 @@ export async function runBash(
+ 	workDirAbsPath: string,
+ 	params: BashParams,
+ 	hooks: BashHooks = {},
+-): Promise<AgentToolResult<unknown>> {
++): Promise<ToolResult<unknown>> {
+ 	throwIfAborted(hooks.signal);
+ 	const timeouts = hooks.timeouts ?? DEFAULT_BASH_SETTINGS;
+ 	const capped = params.timeout_ms !== undefined && params.timeout_ms > timeouts.maxTimeoutMs;
+ 	const timeoutMs = Math.min(params.timeout_ms ?? timeouts.defaultTimeoutMs, timeouts.maxTimeoutMs);
+ 	const launcher = defaultLauncher();
+ 
+-	return new Promise<AgentToolResult<unknown>>((resolvePromise, rejectPromise) => {
++	return new Promise<ToolResult<unknown>>((resolvePromise, rejectPromise) => {
+ 		const child = spawn(launcher.file, [...launcher.args, params.command], {
+ 			cwd: workDirAbsPath,
+ 			windowsHide: true,
+diff --git a/packages/core/src/tools/edit.ts b/packages/core/src/tools/edit.ts
+index 3f64113..52ce14c 100644
+--- a/packages/core/src/tools/edit.ts
++++ b/packages/core/src/tools/edit.ts
+@@ -1,5 +1,5 @@
+ import { readFile, stat, writeFile } from "node:fs/promises";
+-import type { AgentTool } from "../types.ts";
++import type { Tool } from "../llm/index.ts";
+ import { Type, type Static } from "typebox";
+ import { displayToolPath, resolveToolPath } from "../workdir.ts";
+ import { DIFF_MAX_ROWS, diffText, fileDiff } from "./diff.ts";
+@@ -18,7 +18,7 @@ export type EditParams = Static<typeof parameters>;
+  * `edit` replaces exact text. Line endings are normalized before matching, so a file with CRLF
+  * endings still matches the LF text the model saw in `read`; the file keeps its original endings.
+  */
+-export function createEditTool(workDirAbsPath: string): AgentTool<typeof parameters> {
++export function createEditTool(workDirAbsPath: string): Tool<typeof parameters> {
+ 	return {
+ 		name: "edit",
+ 		label: "Edit",
+diff --git a/packages/core/src/tools/glob.ts b/packages/core/src/tools/glob.ts
+index 52f6ca8..0adeab8 100644
+--- a/packages/core/src/tools/glob.ts
++++ b/packages/core/src/tools/glob.ts
+@@ -1,5 +1,5 @@
+ import { glob, stat } from "node:fs/promises";
+-import type { AgentTool } from "../types.ts";
++import type { Tool } from "../llm/index.ts";
+ import { isAbsolute, resolve } from "node:path";
+ import { Type, type Static } from "typebox";
+ import { displayToolPath, resolveToolPath } from "../workdir.ts";
+@@ -28,7 +28,7 @@ const parameters = Type.Object({
+ 
+ export type GlobParams = Static<typeof parameters>;
+ 
+-export function createGlobTool(workDirAbsPath: string): AgentTool<typeof parameters> {
++export function createGlobTool(workDirAbsPath: string): Tool<typeof parameters> {
+ 	return {
+ 		name: "glob",
+ 		label: "Glob",
+diff --git a/packages/core/src/tools/grep.ts b/packages/core/src/tools/grep.ts
+index e02c5a4..4ac6608 100644
+--- a/packages/core/src/tools/grep.ts
++++ b/packages/core/src/tools/grep.ts
+@@ -1,5 +1,5 @@
+ import { glob, readFile, stat } from "node:fs/promises";
+-import type { AgentTool, AgentToolResult } from "../types.ts";
++import type { Tool, ToolResult } from "../llm/index.ts";
+ import { resolve } from "node:path";
+ import { Type, type Static } from "typebox";
+ import { displayToolPath, resolveToolPath } from "../workdir.ts";
+@@ -21,7 +21,7 @@ const parameters = Type.Object({
+ 
+ export type GrepParams = Static<typeof parameters>;
+ 
+-export function createGrepTool(workDirAbsPath: string): AgentTool<typeof parameters> {
++export function createGrepTool(workDirAbsPath: string): Tool<typeof parameters> {
+ 	return {
+ 		name: "grep",
+ 		label: "Grep",
+@@ -38,8 +38,8 @@ export function createGrepTool(workDirAbsPath: string): AgentTool<typeof paramet
+ export async function runGrep(
+ 	workDirAbsPath: string,
+ 	params: GrepParams,
+-	hooks: { signal?: AbortSignal; onUpdate?: (partial: AgentToolResult<unknown>) => void } = {},
+-): Promise<AgentToolResult<unknown>> {
++	hooks: { signal?: AbortSignal; onUpdate?: (partial: ToolResult<unknown>) => void } = {},
++): Promise<ToolResult<unknown>> {
+ 	throwIfAborted(hooks.signal);
+ 	const absRoot = params.path === undefined ? workDirAbsPath : resolveToolPath(workDirAbsPath, params.path);
+ 	const info = await stat(absRoot).catch(() => undefined);
+diff --git a/packages/core/src/tools/index.ts b/packages/core/src/tools/index.ts
+index fb316cd..61f9035 100644
+--- a/packages/core/src/tools/index.ts
++++ b/packages/core/src/tools/index.ts
+@@ -1,4 +1,4 @@
+-import type { AgentTool } from "../types.ts";
++import type { Tool } from "../llm/index.ts";
+ import type { ToolRunContext } from "./manager.ts";
+ import { toolDefinitions } from "./manager.ts";
+ 
+@@ -43,7 +43,7 @@ export function describeToolCall(name: string, args: unknown): string {
+  * themselves — a smoke exercising a tool by name, a test driving `execute` directly. Each is built
+  * fresh against the context given, the same way the run-context assembly builds them.
+  */
+-export function createTools(run: ToolRunContext): AgentTool<any>[] {
++export function createTools(run: ToolRunContext): Tool<any>[] {
+ 	return toolDefinitions().all().map((definition) => definition(run));
+ }
+ 
+diff --git a/packages/core/src/tools/manager.ts b/packages/core/src/tools/manager.ts
+index 2035863..fdfeb3a 100644
+--- a/packages/core/src/tools/manager.ts
++++ b/packages/core/src/tools/manager.ts
+@@ -1,4 +1,4 @@
+-import type { AgentTool } from "../types.ts";
++import type { Tool } from "../llm/index.ts";
+ import { DEFAULT_MODE_NAME, type BashSettings, type ModeSettings } from "../config.ts";
+ import { createBashTool } from "./bash.ts";
+ import { createEditTool } from "./edit.ts";
+@@ -34,11 +34,11 @@ export interface ToolRunContext {
+  * One built-in tool as a definition: a factory over the run context.
+  *
+  * A definition is everything about the tool except the directory it acts in, which is why it is a
+- * function and not an `AgentTool` — an `AgentTool` closes over its working directory, and a registry
++ * function and not an `Tool` — an `Tool` closes over its working directory, and a registry
+  * that held those would hold a directory per session, which is the residency this file exists to
+  * remove.
+  */
+-export type ToolDefinition = (run: ToolRunContext) => AgentTool<any>;
++export type ToolDefinition = (run: ToolRunContext) => Tool<any>;
+ 
+ /**
+  * The full set of tool definitions this build knows, read-only.
+@@ -156,7 +156,7 @@ export function fillTools(modeName: string | undefined, context: ToolFillContext
+  * built against the run context, then the tools a caller registered whose names are active.
+  *
+  * This is the one place "an active name" becomes "a tool the engine can call", and it builds rather
+- * than returns stored tools — the working directory is a per-request value, so an `AgentTool` cannot
++ * than returns stored tools — the working directory is a per-request value, so an `Tool` cannot
+  * outlive the request that asked for the list. Names this build does not know are skipped, the same
+  * narrowing a recorded choice gets: a recorded set is read down to what can run, never thrown
+  * at.
+@@ -165,10 +165,10 @@ export function toolListFor(
+ 	definitions: ToolDefinitions,
+ 	state: ToolState,
+ 	run: ToolRunContext,
+-	local: readonly AgentTool<any>[] = [],
+-): AgentTool<any>[] {
++	local: readonly Tool<any>[] = [],
++): Tool<any>[] {
+ 	const active = new Set(state.activeToolNames);
+-	const built: AgentTool<any>[] = [];
++	const built: Tool<any>[] = [];
+ 	for (const name of definitions.names()) {
+ 		if (!active.has(name)) continue;
+ 		const tool = definitions.get(name)?.(run);
+diff --git a/packages/core/src/tools/read.ts b/packages/core/src/tools/read.ts
+index 54df159..ad444c7 100644
+--- a/packages/core/src/tools/read.ts
++++ b/packages/core/src/tools/read.ts
+@@ -1,5 +1,5 @@
+ import { readFile, stat } from "node:fs/promises";
+-import type { AgentTool, AgentToolResult } from "../types.ts";
++import type { Tool, ToolResult } from "../llm/index.ts";
+ import { Type, type Static } from "typebox";
+ import { displayToolPath, resolveToolPath } from "../workdir.ts";
+ import { textResult, throwIfAborted } from "./types.ts";
+@@ -17,7 +17,7 @@ export type ReadParams = Static<typeof parameters>;
+ 
+ interface ReadHooks {
+ 	signal?: AbortSignal;
+-	onUpdate?: (partial: AgentToolResult<unknown>) => void;
++	onUpdate?: (partial: ToolResult<unknown>) => void;
+ }
+ 
+ /**
+@@ -27,7 +27,7 @@ interface ReadHooks {
+  * identified by its file signature, not its extension) is answered with the image itself beside a
+  * one-line envelope, which is how a vision model sees a picture.
+  */
+-export function createReadTool(workDirAbsPath: string): AgentTool<typeof parameters> {
++export function createReadTool(workDirAbsPath: string): Tool<typeof parameters> {
+ 	return {
+ 		name: "read",
+ 		label: "Read",
+@@ -46,7 +46,7 @@ export async function runRead(
+ 	workDirAbsPath: string,
+ 	params: ReadParams,
+ 	hooks: ReadHooks = {},
+-): Promise<AgentToolResult<unknown>> {
++): Promise<ToolResult<unknown>> {
+ 	throwIfAborted(hooks.signal);
+ 	const absPath = resolveToolPath(workDirAbsPath, params.path);
+ 	const info = await stat(absPath).catch(() => undefined);
+@@ -96,7 +96,7 @@ function imageResult(
+ 	bytes: Buffer,
+ 	mimeType: string,
+ 	hooks: ReadHooks,
+-): AgentToolResult<unknown> {
++): ToolResult<unknown> {
+ 	hooks.onUpdate?.(textResult(`image ${mimeType}, ${formatBytes(bytes.length)}`));
+ 	return {
+ 		content: [
+diff --git a/packages/core/src/tools/registry.ts b/packages/core/src/tools/registry.ts
+index 9e7ae95..f254f16 100644
+--- a/packages/core/src/tools/registry.ts
++++ b/packages/core/src/tools/registry.ts
+@@ -1,4 +1,4 @@
+-import type { AgentTool } from "../types.ts";
++import type { Tool } from "../llm/index.ts";
+ import type { ToolRunContext, ToolState } from "./manager.ts";
+ import { toolListFor } from "./manager.ts";
+ import type { ToolDefinitions } from "./manager.ts";
+@@ -20,13 +20,13 @@ export interface ToolRegistry {
+ 	/** Every tool name this registry knows: the definitions', then the registered ones. */
+ 	names(): string[];
+ 	/** Build one tool against a run context, or undefined when the name is not this registry's. */
+-	build(name: string, run: ToolRunContext): AgentTool<any> | undefined;
++	build(name: string, run: ToolRunContext): Tool<any> | undefined;
+ 	/** What the model may call right now, as names, in the order it is offered them. */
+ 	activeNames(state: ToolState): string[];
+ 	/** The run context's executable set for this choice, built fresh — see {@link toolListFor}. */
+-	active(state: ToolState, run: ToolRunContext): AgentTool<any>[];
++	active(state: ToolState, run: ToolRunContext): Tool<any>[];
+ 	/** A tool joins the catalog; whether it is active is the choice, not this. */
+-	register(tool: AgentTool<any>): void;
++	register(tool: Tool<any>): void;
+ }
+ 
+ /**
+@@ -41,7 +41,7 @@ export function createToolRegistry(definitions: ToolDefinitions): ToolRegistry {
+ 
+ class Registry implements ToolRegistry {
+ 	/** Registered tools, in registration order; the definitions come first in every listing. */
+-	private readonly local = new Map<string, AgentTool<any>>();
++	private readonly local = new Map<string, Tool<any>>();
+ 	private readonly definitions: ToolDefinitions;
+ 
+ 	constructor(definitions: ToolDefinitions) {
+@@ -52,7 +52,7 @@ class Registry implements ToolRegistry {
+ 		return [...this.definitions.names(), ...this.local.keys()];
+ 	}
+ 
+-	build(name: string, run: ToolRunContext): AgentTool<any> | undefined {
++	build(name: string, run: ToolRunContext): Tool<any> | undefined {
+ 		const local = this.local.get(name);
+ 		if (local !== undefined) return local;
+ 		return this.definitions.get(name)?.(run);
+@@ -63,11 +63,11 @@ class Registry implements ToolRegistry {
+ 		return state.activeToolNames.filter((name) => known.has(name));
+ 	}
+ 
+-	active(state: ToolState, run: ToolRunContext): AgentTool<any>[] {
++	active(state: ToolState, run: ToolRunContext): Tool<any>[] {
+ 		return toolListFor(this.definitions, state, run, [...this.local.values()]);
+ 	}
+ 
+-	register(tool: AgentTool<any>): void {
++	register(tool: Tool<any>): void {
+ 		if (this.names().includes(tool.name)) throw new Error(`Tool already registered: ${tool.name}`);
+ 		this.local.set(tool.name, tool);
+ 	}
+diff --git a/packages/core/src/tools/types.ts b/packages/core/src/tools/types.ts
+index 36b9bc6..995ceac 100644
+--- a/packages/core/src/tools/types.ts
++++ b/packages/core/src/tools/types.ts
+@@ -1,7 +1,7 @@
+-import type { AgentToolResult } from "../types.ts";
++import type { ToolResult } from "../llm/index.ts";
+ 
+ /** Wrap plain text as a tool result. */
+-export function textResult(text: string, details?: unknown): AgentToolResult<unknown> {
++export function textResult(text: string, details?: unknown): ToolResult<unknown> {
+ 	return { content: [{ type: "text", text }], details };
+ }
+ 
+diff --git a/packages/core/src/tools/write.ts b/packages/core/src/tools/write.ts
+index a802238..299b447 100644
+--- a/packages/core/src/tools/write.ts
++++ b/packages/core/src/tools/write.ts
+@@ -1,5 +1,5 @@
+ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+-import type { AgentTool } from "../types.ts";
++import type { Tool } from "../llm/index.ts";
+ import { dirname } from "node:path";
+ import { Type, type Static } from "typebox";
+ import { displayToolPath, resolveToolPath } from "../workdir.ts";
+@@ -22,7 +22,7 @@ export type WriteParams = Static<typeof parameters>;
+  * Refusing to clobber by default matters: a model that means "adjust one line" but calls `write`
+  * with a reconstructed file silently destroys the parts it did not reproduce.
+  */
+-export function createWriteTool(workDirAbsPath: string): AgentTool<typeof parameters> {
++export function createWriteTool(workDirAbsPath: string): Tool<typeof parameters> {
+ 	return {
+ 		name: "write",
+ 		label: "Write",
+diff --git a/packages/core/src/types.ts b/packages/core/src/types.ts
+index 2044d49..42274d3 100644
+--- a/packages/core/src/types.ts
++++ b/packages/core/src/types.ts
+@@ -1,9 +1,10 @@
+-// The engine's contract: what a tool is, what a run publishes, and the shapes the run-side hooks
+-// answer with. These types used to live in `packages/loop`; the engine now lives in `agent.ts`, and
+-// the shapes it hands across that file's boundary — to tools, to the hooks, to a session's own
+-// subscribers — live here, in one module, so a tool and the engine cannot drift about what a result
+-// is. The wire types are `protocol.ts`'s business and stay there; `QueueMode` is shared, and
+-// `protocol.ts` re-exports this module's copy rather than declaring a second one.
++// The engine's contract: what a run publishes, and the shapes the run-side hooks answer with. These
++// types used to live in `packages/loop`; the engine now lives in `agent.ts`, and the shapes it hands
++// across that file's boundary — to the hooks, to a session's own subscribers — live here, in one
++// module. A tool and a tool result are `Tool` and `ToolResult`, defined beside the transport in
++// `llm/types.ts` and shared by request and run. The wire types are `protocol.ts`'s business and stay
++// there; `QueueMode` is shared, and `protocol.ts` re-exports this module's copy rather than
++// declaring a second one.
+ import type {
+ 	AssistantMessage,
+ 	AssistantMessageEvent,
+@@ -13,21 +14,11 @@ import type {
+ 	Message,
+ 	Model,
+ 	TextContent,
+-	Tool,
++	ToolCall,
++	ToolResult,
+ 	ToolResultMessage,
+ 	Usage,
+ } from "./llm/index.ts";
+-import type { Static, TSchema } from "typebox";
+-
+-/**
+- * Configuration for how tool calls from a single assistant message are executed.
+- *
+- * - "sequential": each tool call is prepared, executed, and finalized before the next one starts.
+- * - "parallel": tool calls are prepared sequentially, then allowed tools execute concurrently.
+- *   `tool_execution_end` is emitted in tool completion order after each tool is finalized,
+- *   while tool-result message artifacts are emitted later in assistant source order.
+- */
+-export type ToolExecutionMode = "sequential" | "parallel";
+ 
+ /**
+  * Controls how many queued user messages are injected when a run reaches a queue drain point.
+@@ -37,9 +28,6 @@ export type ToolExecutionMode = "sequential" | "parallel";
+  */
+ export type QueueMode = "all" | "one-at-a-time";
+ 
+-/** A single tool call content block emitted by an assistant message. */
+-export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
+-
+ /**
+  * Result returned from `beforeToolCall`.
+  *
+@@ -135,11 +123,11 @@ export interface BeforeToolCallContext {
+ 	/** The assistant message that requested the tool call. */
+ 	assistantMessage: AssistantMessage;
+ 	/** The raw tool call block from `assistantMessage.content`. */
+-	toolCall: AgentToolCall;
++	toolCall: ToolCall;
+ 	/** Validated tool arguments for the target tool schema. */
+ 	args: unknown;
+ 	/** Current agent context at the time the tool call is prepared. */
+-	context: AgentContext;
++	context: Context;
+ }
+ 
+ /** Context passed to `afterToolCall`. */
+@@ -147,15 +135,15 @@ export interface AfterToolCallContext {
+ 	/** The assistant message that requested the tool call. */
+ 	assistantMessage: AssistantMessage;
+ 	/** The raw tool call block from `assistantMessage.content`. */
+-	toolCall: AgentToolCall;
++	toolCall: ToolCall;
+ 	/** Validated tool arguments for the target tool schema. */
+ 	args: unknown;
+ 	/** The executed tool result before any `afterToolCall` overrides are applied. */
+-	result: AgentToolResult<unknown>;
++	result: ToolResult<unknown>;
+ 	/** Whether the executed tool result is currently treated as an error. */
+ 	isError: boolean;
+ 	/** Current agent context at the time the tool call is finalized. */
+-	context: AgentContext;
++	context: Context;
+ }
+ 
+ /**
+@@ -178,96 +166,18 @@ export interface ToolCallHooks {
+  */
+ export interface AgentRequestUpdate {
+ 	/** Context for the next provider request. */
+-	context?: AgentContext;
++	context?: Context;
+ 	/** Model for the next provider request. It carries the thinking level it is asked at. */
+ 	model?: Model;
+ }
+ 
+-/** Final or partial result produced by a tool. */
+-export interface AgentToolResult<T = JsonValue | undefined> {
+-	/** Text or image content returned to the model. */
+-	content: (TextContent | ImageContent)[];
+-	/** Arbitrary structured details for logs or UI rendering. */
+-	details: T;
+-	/**
+-	 * Machine-readable result matching the tool's `outputSchema`, for programmatic callers. Not sent
+-	 * to the model; `content` remains the model-facing result.
+-	 */
+-	structuredContent?: JsonValue;
+-	/** Usage from the final tool execution itself, if available. Not used for main LLM context accounting. */
+-	usage?: Usage;
+-	/**
+-	 * Report a failure without throwing. The model sees `content` as an error result, like a thrown
+-	 * error, but `details` and `structuredContent` are kept for the UI and programmatic callers.
+-	 */
+-	isError?: boolean;
+-	/**
+-	 * Hint that the agent should stop after the current tool batch.
+-	 * Early termination only happens when every finalized tool result in the batch sets this to true.
+-	 */
+-	terminate?: boolean;
+-}
+-
+ /** Final outcome of a tool call after hooks ran. */
+-export interface AgentToolCallOutcome {
+-	toolCall: AgentToolCall;
+-	result: AgentToolResult<unknown>;
++export interface ToolCallOutcome {
++	toolCall: ToolCall;
++	result: ToolResult<unknown>;
+ 	isError: boolean;
+ }
+ 
+-/**
+- * Callback used by tools to stream partial execution updates.
+- *
+- * The callback is scoped to the current `execute()` invocation. Calls made after
+- * the tool promise settles are ignored.
+- */
+-export type AgentToolUpdateCallback<T = unknown> = (partialResult: AgentToolResult<T>) => void;
+-
+-/** Tool definition used by the agent runtime. */
+-export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = unknown> extends Tool<TParameters> {
+-	/** Human-readable label for UI display. */
+-	label: string;
+-	/**
+-	 * Optional compatibility shim for raw tool-call arguments before schema validation.
+-	 * Must return an object that matches `TParameters`.
+-	 */
+-	prepareArguments?: (args: unknown) => Static<TParameters>;
+-	/**
+-	 * JSON Schema of `structuredContent` in successful results. Tools that declare it should always
+-	 * set `structuredContent`.
+-	 */
+-	outputSchema?: TSchema;
+-	/**
+-	 * Execute the tool call. Throw on failure, or return a result with `isError: true`; do not only
+-	 * describe the failure in `content`.
+-	 */
+-	execute: (
+-		toolCallId: string,
+-		params: Static<TParameters>,
+-		signal?: AbortSignal,
+-		onUpdate?: AgentToolUpdateCallback<TDetails>,
+-	) => Promise<AgentToolResult<TDetails>>;
+-	/** Recovery policy for an effect whose durable intent exists but whose outcome is unknown. */
+-	replay?: "never" | "safe";
+-	/**
+-	 * Per-tool execution mode override.
+-	 * - "sequential": this tool must execute one at a time with other tool calls.
+-	 * - "parallel": this tool can execute concurrently with other tool calls.
+-	 *
+-	 * If omitted, the default execution mode applies.
+-	 */
+-	executionMode?: ToolExecutionMode;
+-}
+-
+-/**
+- * The transcript and tool set one run works over: the base {@link Context} shape whose tools are the
+- * executable counterparts. The run calls these; a request only declares them.
+- */
+-export interface AgentContext extends Context {
+-	/** Tools available for execution in this run. */
+-	tools?: AgentTool<any>[];
+-}
+-
+ /**
+  * Events a run emits for UI updates.
+  *
+diff --git a/scripts/fake-transport.ts b/scripts/fake-transport.ts
+index 1f86f30..e5682aa 100644
+--- a/scripts/fake-transport.ts
++++ b/scripts/fake-transport.ts
+@@ -13,7 +13,7 @@ import {
+ 	type AssistantMessage,
+ 	type AssistantMessageEventStream,
+ 	type ChatTransport,
+-	type LlmContext,
++	type Context,
+ 	type ImageContent,
+ 	type Message,
+ 	type Model,
+@@ -101,7 +101,7 @@ export interface FakeState {
+ }
+ 
+ export type FakeResponseFactory = (
+-	context: LlmContext,
++	context: Context,
+ 	options: SimpleStreamOptions | undefined,
+ 	state: FakeState,
+ 	model: Model<string>,
+@@ -172,7 +172,7 @@ function messageToText(message: Message): string {
+ 	return toolResultToText(message);
+ }
+ 
+-function serializeContext(context: LlmContext): string {
++function serializeContext(context: Context): string {
+ 	const tools = (context.tools ?? []).map((tool) => `tool:${JSON.stringify(tool)}`);
+ 	const messages = context.messages.map((message) => `${message.role}:${messageToText(message)}`);
+ 	return [...tools, ...messages].join("\n\n");
+@@ -184,7 +184,7 @@ function serializeContext(context: LlmContext): string {
+  * Cache reads and writes stay zero: this double answers from a queue rather than a provider, and it
+  * has no prompt-cache identity to key a simulation by.
+  */
+-function withUsageEstimate(message: AssistantMessage, context: LlmContext): AssistantMessage {
++function withUsageEstimate(message: AssistantMessage, context: Context): AssistantMessage {
+ 	const input = estimateTokens(serializeContext(context));
+ 	const outputTokens = estimateTokens(assistantContentToText(message.content));
+ 
+@@ -361,7 +361,7 @@ export function createFakeTransport(options: FakeTransportOptions = {}): FakeTra
+ 
+ 	const resolveResponse = async (
+ 		step: FakeResponseStep,
+-		context: LlmContext,
++		context: Context,
+ 		streamOptions: SimpleStreamOptions | undefined,
+ 		requestModel: Model<string>,
+ 	): Promise<AssistantMessage> => {
+@@ -369,7 +369,7 @@ export function createFakeTransport(options: FakeTransportOptions = {}): FakeTra
+ 		return withUsageEstimate(cloneMessage(resolved, requestModel), context);
+ 	};
+ 
+-	const stream = (requestModel: Model<string>, context: LlmContext, streamOptions?: SimpleStreamOptions) => {
++	const stream = (requestModel: Model<string>, context: Context, streamOptions?: SimpleStreamOptions) => {
+ 		const outer = createAssistantMessageEventStream();
+ 		const step = pendingResponses.shift();
+ 		state.callCount++;
+diff --git a/scripts/smoke-approval-recovery.ts b/scripts/smoke-approval-recovery.ts
+index d891cad..4e81310 100644
+--- a/scripts/smoke-approval-recovery.ts
++++ b/scripts/smoke-approval-recovery.ts
+@@ -31,7 +31,7 @@ import {
+ 	inMemorySettingManager,
+ 	type Agent,
+ 	type AgentEvent,
+-	type AgentTool,
++	type Tool,
+ 	type Session,
+ 	type ModelConfig,
+ 	type ModelSelection,
+@@ -251,7 +251,7 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
+ 	const dangling = fakeAssistantMessage(fakeToolCall("read", { path: "a.txt" }, { id: "call_x" }));
+ 	// A tool the recovery pass can resolve, so a re-suspending gate is what stops it — not a missing
+ 	// tool, which the machine answers before any hook runs.
+-	const readTool: AgentTool = {
++	const readTool: Tool = {
+ 		name: "read",
+ 		label: "read",
+ 		description: "reads a file",
+diff --git a/scripts/smoke-models.ts b/scripts/smoke-models.ts
+index 44de6f0..823c75b 100644
+--- a/scripts/smoke-models.ts
++++ b/scripts/smoke-models.ts
+@@ -151,7 +151,7 @@ try {
+ 			}) as typeof fetch;
+ 			const messages = [{ role: "user" as const, content: [{ type: "text" as const, text: "hi" }], timestamp: Date.now() }];
+ 			try {
+-				const stream = anthropicMessages.stream(model, { messages }, {
++				const stream = anthropicMessages.stream(model, { messages, tools: [] }, {
+ 					...options,
+ 					fetch: capture,
+ 				});
+@@ -271,7 +271,7 @@ try {
+ 			}) as typeof fetch;
+ 			const messages = [{ role: "user" as const, content: [{ type: "text" as const, text: "hi" }], timestamp: Date.now() }];
+ 			await anthropicMessages
+-				.stream(createModel(row, level), { messages }, {
++				.stream(createModel(row, level), { messages, tools: [] }, {
+ 					apiKey: "secret",
+ 					fetch: capture,
+ 				} satisfies SimpleStreamOptions)
+diff --git a/scripts/smoke-session.ts b/scripts/smoke-session.ts
+index 842b9f4..ea96e72 100644
+--- a/scripts/smoke-session.ts
++++ b/scripts/smoke-session.ts
+@@ -17,7 +17,7 @@ import {
+ 	toolDefinitions,
+ 	type Agent,
+ 	type AgentSessionEvent,
+-	type AgentTool,
++	type Tool,
+ 	type FileDiff,
+ 	type Message,
+ 	type MessageEntry,
+@@ -1270,7 +1270,7 @@ async function exerciseToolRegistry(): Promise<void> {
+ 	check("while names() keeps every definition", registry.names().length === 6, String(registry.names().length));
+ 	check("and a name this build does not know is dropped by the read, not thrown at", JSON.stringify(registry.activeNames({ activeToolNames: ["read", "nope"] })) === JSON.stringify(["read"]), JSON.stringify(registry.activeNames({ activeToolNames: ["read", "nope"] })));
+ 
+-	const noop: AgentTool<any> = {
++	const noop: Tool<any> = {
+ 		name: "noop",
+ 		label: "noop",
+ 		description: "Does nothing; registered by the smoke test.",
+diff --git a/scripts/smoke-tools.ts b/scripts/smoke-tools.ts
+index 9a2551a..7ab6075 100644
+--- a/scripts/smoke-tools.ts
++++ b/scripts/smoke-tools.ts
+@@ -42,7 +42,7 @@ import {
+ 	openAgent,
+ 	sessionDir,
+ 	SettingManager,
+-	type AgentTool,
++	type Tool,
+ 	type FileDiff,
+ 	type Message,
+ 	type ModelConfig,
+@@ -83,7 +83,7 @@ function check(label: string, condition: boolean, detail = ""): void {
+ 	if (!condition) failures += 1;
+ }
+ 
+-function tool(name: string): AgentTool<any> {
++function tool(name: string): Tool<any> {
+ 	const found = createTools({ workDirAbsPath: root }).find((candidate) => candidate.name === name);
+ 	if (!found) throw new Error(`no tool named ${name}`);
+ 	return found;

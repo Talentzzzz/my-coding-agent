@@ -1,0 +1,1 @@
+smoke-approval                   exit=0  28s
