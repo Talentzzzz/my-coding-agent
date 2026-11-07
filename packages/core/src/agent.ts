@@ -117,8 +117,8 @@ export interface AgentConfig {
 	 *
 	 * A host that owns one — the hub, so every session of the process shares a single service and
 	 * its single store knowledge — hands its own in. The service holds no bag of its own: a held
-	 * session's bag is the one this class's table answers with (`agentState(id).session`), and a
-	 * cold one is `open(id)`, a replay the caller drops.
+	 * session's bag is the one this class's table answers with, and a cold one is `open(id)`, a
+	 * replay the caller drops.
 	 */
 	sessionManager: SessionManager;
 	/**
@@ -198,10 +198,11 @@ export class Agent {
 	/**
 	 * The stateless session service every transcript read and write goes through.
 	 *
-	 * Exposed rather than hidden because it is the durable half's owner: a host that has to fork,
-	 * list, or name the file reads it here, and there is no second copy of that state to keep in step.
-	 * The bag a call operates on is never held here — a held session's is the table's
-	 * (`agentState(id).session`), a cold one is `open(id)`'s, and the id is the caller's.
+	 * Exposed for the test seams that reach past the facade — a smoke that seeds a transcript
+	 * directly, patches the write, or reads a held bag's recorded settings. A production caller has
+	 * no road here: the facade below forwards everything a host may ask, and there is no second copy
+	 * of the store's state to keep in step. The bag a call operates on is never held here — a held
+	 * session's is the table's, a cold one is `open(id)`'s, and the id is the caller's.
 	 */
 	readonly sessionManager: SessionManager;
 	/**
@@ -331,10 +332,10 @@ export class Agent {
 	/**
 	 * Whether the table holds a state for `id` — whether this process is holding the session.
 	 *
-	 * The public boolean beside {@link Agent.agentState}, for a caller that needs to branch before it
-	 * reads: a held session is written through its own bag, a cold one is a replay of its file, and
-	 * the two roads must be chosen before either is walked. Answering nothing about observers or
-	 * claims — those are other questions with other answers — it is only the table's membership.
+	 * The public membership read of the table, for a caller that needs to branch before it reads: a
+	 * held session is written through its own bag, a cold one is a replay of its file, and the two
+	 * roads must be chosen before either is walked. Answering nothing about observers or claims —
+	 * those are other questions with other answers — it is only the table's membership.
 	 */
 	has(id: string): boolean {
 		return this.sessions.has(id);
@@ -344,19 +345,14 @@ export class Agent {
 	 * The state the session `id` names — the durable half, the settings, the live half, the
 	 * subscribers — or the refusal that says this process is not holding it.
 	 *
-	 * The public read of the table, for a caller outside the class that must reach the same bag a
-	 * method here would: a hub reading the entry map behind a live session, a projection reading a
-	 * title off the bag a turn is being written through. A missing one is a wrong road rather than a
-	 * state to invent — `has` is how a caller asks first — and only {@link Agent.open} puts a state here.
-	 *
-	 * On its way out of the public face: the state object is not something a host outside this class
-	 * should hold, and the facade reads below answer the questions a host used to reach through it —
-	 * the working directory, the file path, the title, a message's stamp. The remaining consumers are
-	 * the smokes' seeding seams, and they move when their tickets do.
-	 *
-	 * @deprecated Read the narrow facade methods instead; a state object is this class's own shape.
+	 * The class's own read of the table: every method here names its session by id and resolves
+	 * through this, and no caller outside the class reaches it — the facade below answers the
+	 * questions a host used to ask through the state object (the file path, the title, a message's
+	 * stamp), in pure data, and the smokes that still want the bag probe the table the way they probe
+	 * any private shape. A missing one is a wrong road rather than a state to invent — `has` is how a
+	 * caller asks first — and only {@link Agent.open} puts a state here.
 	 */
-	agentState(id: string): AgentState {
+	private agentState(id: string): AgentState {
 		const state = this.sessions.get(id);
 		if (state === undefined) throw new Error(`Session is not running: ${id}`);
 		return state;
@@ -496,16 +492,10 @@ export class Agent {
 	}
 
 	/**
-	 * The working directory the held session resolves relative paths against, or `undefined` when this
-	 * process is not holding it. Pure data: a read of the bag's own setting field, and nothing else.
-	 */
-	workDirOf(id: string): string | undefined {
-		return this.sessions.get(id)?.session.sessionSetting.workDirAbsPath;
-	}
-
-	/**
 	 * The file the held session's transcript lives in, or `undefined` when this process is not holding
-	 * it. A fork names the source by this path; a session created but never spoken in has none.
+	 * it. A session created but never spoken in has none, and a reader that wants the bytes back — a
+	 * smoke reloading what a turn wrote, say — names the file by this path. Pure data: a read of the
+	 * bag's own field, and nothing else; forking finds its own source and never goes through here.
 	 */
 	fileAbsPathOf(id: string): string | undefined {
 		return this.sessions.get(id)?.session.sessionFileAbsPath;

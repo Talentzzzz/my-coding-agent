@@ -9,11 +9,13 @@ import { join } from "node:path";
 import {
 	SessionManager,
 	sessionDir,
+	type Agent,
 	type ClientFrame,
 	type ConnectionItem,
 	type ServerFrame,
 	type ServerMessage,
 	type SessionRow,
+	type Session,
 	type ModelConfig,
 } from "@my-agent/core";
 import { SessionHub } from "../packages/server/src/hub.ts";
@@ -36,6 +38,19 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
 	return ready();
+}
+
+/**
+ * The held bag of a session, probed out of the orchestrator's own private table.
+ *
+ * The facade answers in pure data by id — a state object is not its to give — so the one test-only
+ * surgery this smoke performs on a transcript (the leaf reset) reaches the bag the way the identity
+ * assertions in the other smokes do: through the table the orchestrator holds.
+ */
+function heldBagOf(agent: Agent, id: string): Session {
+	const bag = (agent as unknown as { sessions: Map<string, { session: Session }> }).sessions.get(id)?.session;
+	if (bag === undefined) throw new Error(`no held state for ${id}`);
+	return bag;
 }
 
 /** Settle the microtask queue plus one macrotask, so a resolved probe has landed. */
@@ -208,8 +223,9 @@ try {
 	// The leaf is in memory, so the only way to learn the branch moved is to hear the session say so —
 	// and the only way a title can move at all is to drop the messages that gave it, because a branch
 	// always runs back to the root. Resetting the leaf and asking again starts a new root, and the file
-	// keeps the conversation it replaced alongside the new one.
-	agent.sessionManager.resetLeaf(agent.agentState(first).session);
+	// keeps the conversation it replaced alongside the new one. The reset is test-only surgery the
+	// facade has no reason to spell, so the bag comes from the private-table probe below.
+	agent.sessionManager.resetLeaf(heldBagOf(agent, first));
 	await hub.agent.prompt(first, "a different opening");
 	await settle();
 	const reopened = await projection.row(first);
@@ -229,7 +245,7 @@ try {
 	fake.setResponses([fakeAssistantMessage("to fork from")]);
 	await hub.agent.prompt(source, "the conversation being forked");
 	await settle();
-	const forked = await hub.fork(source, agent.agentState(source).session.leafId);
+	const forked = await hub.fork(source, agent.snapshot(source).leafId);
 	await until(() => seen.some((row) => row.id === forked));
 	const forkRow = await projection.row(forked);
 	check("the fork reaches the store on its own", forkRow !== undefined, forked);

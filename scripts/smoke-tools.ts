@@ -687,7 +687,7 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	check("close() settles", closed.ok);
 	check("lifecycle calls keep the transcript", session.snapshot(id).messages.length === 1, String(session.snapshot(id).messages.length));
 
-	const reloaded = fillSession(session.agentState(id).session.sessionFileAbsPath ?? "");
+	const reloaded = fillSession(session.fileAbsPathOf(id) ?? "");
 	check(
 		"the transcript is still on disk",
 		store.getEntries(reloaded).filter((entry) => entry.type === "message").length === 1,

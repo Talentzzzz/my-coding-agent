@@ -467,10 +467,13 @@ try {
 			JSON.stringify(wire.items(patient.sessionId).map((message) => message.type)),
 		);
 
-		// The person came back: a new host, but the same state — the one the table kept.
+		// The person came back: a new host, but the same state — the one the table kept. Identity is the
+		// orchestrator's private business, so the assertion probes the table the way the other smokes
+		// do; the facade answers in pure data and never hands the bag out.
 		const again = await patient.hub.claim(parked.id);
 		check("a new host opens over the retained state", again !== parked && again.id === parked.id, `${again.id} vs ${parked.id}`);
-		check("the state the table holds is the one the session was mounted with", patient.hub.agent.agentState(parked.id).session === patient.bag);
+		const heldBag = (patient.hub.agent as unknown as { sessions: Map<string, { session: Session }> }).sessions.get(parked.id)?.session;
+		check("the state the table holds is the one the session was mounted with", heldBag === patient.bag);
 
 		const returned = await wire.open(patient.sessionId);
 		check(

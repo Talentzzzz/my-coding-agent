@@ -57,14 +57,16 @@ hub 及以下只通过 Agent 的公开方法操作会话。构造由 `createSess
   hub holds」/「the store」各处与 projection 的「appended through the hub」/「store」口径改为
   orchestrator + 门面（ADR-0017），顺手修 restoreDirectory 缩进残缺行与 projection 的 EOF 换行；
   按票 03 禁名单口径核对 server 侧为零。零行为变更。
+- [07 守卫落地与全量验收](issues/07-guard-and-acceptance.md)：`scripts/check-server-facade.ts` 按
+  票 03 裁定落地并进 `npm run check`；smoke 直读断言逐条改写（fileAbsPathOf ×3、snapshot().leafId、
+  私有表 probe ×3）；`agentState()` 收成 private、`workDirOf` 删（零消费者）/ `fileAbsPathOf` 留、
+  `sessionManager` 字段保留为 smoke 缝；check + build:web 绿，八条验收 smoke 与基线同色（含
+  smoke-approval 预存在闪失），另十四条 hub 相关 smoke 全绿。
 
 ## Not yet specified
 
 - assembly / `openAgent()` 公开面是否跟着收：AgentState 不出 core 之后，`assembleSession` 的产物
   与返回类型怎么看——票 01 已定下 server 需要的面（create/adoptFromDisk 返回 id），问得尖了：票 04。
-- 既有 smoke 对 `agentState()` / `sessionManager` 的直读断言如何逐条改写（smoke-sessions、
-  smoke-projection、smoke-approval、smoke-session、smoke-tools 各有触点）——方法清单已有（票 01），
-  逐条改写落在票 03（guard）与票 07（验收）。
 
 ## Out of scope
 

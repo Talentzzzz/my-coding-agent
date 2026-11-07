@@ -12,6 +12,7 @@ import { bootServer } from "../packages/server/src/boot.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import {
 	CURRENT_SESSION_VERSION,
+	type Agent,
 	type AgentState,
 	createSession,
 	createSessionAgent,
@@ -134,16 +135,22 @@ function hubSessions(hub: SessionHub): SessionManager {
  * This is what "one session per id" means now: the orchestrator is the process's own and answers by
  * id, so what a reopen can build a second of is a *state* (the queues, the live half, the assembly),
  * never the object that serves them. A cast into the orchestrator's private table, because the
- * probe wants `undefined` rather than a throw; when the hub adapts (issue 12) these identity
- * assertions move onto behavior and the probe goes away.
+ * probe wants `undefined` rather than a throw, and the state object is not the facade's to give.
  */
-function entryOf(hub: SessionHub, id: string): AgentState | undefined {
-	return (hub.agent as unknown as { sessions: Map<string, AgentState> }).sessions.get(id);
+function entryOf(agent: Agent, id: string): AgentState | undefined {
+	return (agent as unknown as { sessions: Map<string, AgentState> }).sessions.get(id);
 }
 
-/** The bag behind a hosted session: the one the orchestrator's table holds and its turns write through. */
+/**
+ * The bag behind a hosted session: the one the orchestrator's table holds and its turns write
+ * through. The facade answers in pure data by id, so the seeding appends below — the one test-only
+ * write that still needs the bag itself — reach it through the same private-table probe as the
+ * identity assertions.
+ */
 function bagOf(hub: SessionHub, id: string): Session {
-	return hub.agent.agentState(id).session;
+	const bag = entryOf(hub.agent, id)?.session;
+	if (bag === undefined) throw new Error(`no held state for ${id}`);
+	return bag;
 }
 
 /** Poll until `ready` holds, and report whether it did, so no test guesses at a reap's timing. */
@@ -166,15 +173,15 @@ try {
 	const landing = await hub.currentSessionId();
 	const first = await hub.claim(landing);
 	const second = await hub.claim(landing);
-	check("two connections with no id share one entry", entryOf(hub, first.id) === entryOf(hub, second.id));
+	check("two connections with no id share one entry", entryOf(hub.agent, first.id) === entryOf(hub.agent, second.id));
 	check("both claims are counted", first.claims === 2, `claims=${first.claims}`);
 	check("the hub runs it once", hub.live.length === 1, hub.live.join(","));
 
 	process.stdout.write("claiming by id\n");
 	// The entry a claim opened: the one thing a second claim must not build a second of.
-	const runningEntry = entryOf(hub, first.id);
+	const runningEntry = entryOf(hub.agent, first.id);
 	const again = await hub.claim(first.id);
-	check("returns the entry already running", entryOf(hub, again.id) === runningEntry);
+	check("returns the entry already running", entryOf(hub.agent, again.id) === runningEntry);
 	check("claims add up", first.claims === 3, `claims=${first.claims}`);
 
 	process.stdout.write("a claim outlives the connections that dropped it\n");
@@ -185,14 +192,14 @@ try {
 	check("a claimed session is never forgotten", hub.live.includes(first.id));
 
 	process.stdout.write("the last release forgets an idle session\n");
-	const reapedEntry = entryOf(hub, first.id);
+	const reapedEntry = entryOf(hub.agent, first.id);
 	hubSessions(hub).appendMessage(bagOf(hub, first.id), userMessage("survives the reap"));
 	hub.release(first);
 	check("the session is closed and dropped", await until(() => !hub.live.includes(first.id)));
 
 	process.stdout.write("the JSONL file is what survives\n");
 	const reopened = await hub.claim(first.id);
-	check("reopening builds a different registry entry", entryOf(hub, reopened.id) !== reapedEntry);
+	check("reopening builds a different registry entry", entryOf(hub.agent, reopened.id) !== reapedEntry);
 	check(
 		"and it still carries the transcript",
 		JSON.stringify(hub.agent.snapshot(reopened.id).messages).includes("survives the reap"),
@@ -207,7 +214,7 @@ try {
 	process.stdout.write("a fork is the branch up to one entry\n");
 	const parentId = await hub.newSession();
 	const parent = await hub.claim(parentId);
-	const parentFile = hub.agent.agentState(parent.id).session.sessionFileAbsPath ?? "";
+	const parentFile = hub.agent.fileAbsPathOf(parent.id) ?? "";
 	const entryOne = hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("first"));
 	hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("second"));
 
@@ -240,7 +247,7 @@ try {
 	);
 
 	const forked = await hub.claim(forkedId);
-	check("the fork runs as a session of its own", entryOf(hub, forked.id) !== entryOf(hub, parent.id));
+	check("the fork runs as a session of its own", entryOf(hub.agent, forked.id) !== entryOf(hub.agent, parent.id));
 	check("and it reports the file it came from", hubSessions(hub).getMeta(bagOf(hub, forkedId))?.parentSession === parentFile);
 
 	process.stdout.write("forking without an entry copies the whole log\n");
@@ -280,7 +287,7 @@ try {
 	const messagesAtClose = messagesOf(bagOf(hub, forkedId)).length;
 	hub.release(forked);
 	check("the fork is closed and dropped", await until(() => !hub.live.includes(forkedId)));
-	const forkEntry = entryOf(hub, forked.id);
+	const forkEntry = entryOf(hub.agent, forked.id);
 	const reread = openFile(forkedId);
 	check("reopening reports its parent session", store.getMeta(reread)?.parentSession === parentFile);
 	check("and the same leaf", reread.leafId === leafAtClose, `${reread.leafId} vs ${leafAtClose}`);
@@ -288,7 +295,7 @@ try {
 	// against what the session had when it was still held.
 	check("with the messages it had", messagesOf(reread).length === messagesAtClose, `${messagesOf(reread).length} vs ${messagesAtClose}`);
 	const reopenedFork = await hub.claim(forkedId);
-	check("a claimed reopen builds a different registry entry", entryOf(hub, reopenedFork.id) !== forkEntry);
+	check("a claimed reopen builds a different registry entry", entryOf(hub.agent, reopenedFork.id) !== forkEntry);
 	check("and still reports the session it came from", hubSessions(hub).getMeta(bagOf(hub, forkedId))?.parentSession === parentFile);
 
 	process.stdout.write("forking a session nobody is watching\n");
@@ -887,17 +894,11 @@ try {
 		const agent = createSessionAgent({ settings: new SettingManager({ models: [] }) });
 		const session = createSession(tmpdir());
 		const state = await agent.open({ session });
-		check("open is the one way in, and the id answers it", agent.agentState(session.sessionId) === state);
+		check("open is the one way in, and the id answers it", entryOf(agent, session.sessionId) === state);
 		check("re-opening an id keeps the state already there", (await agent.open({ session })) === state);
 		check("an unborn session refuses to be evicted", agent.evict(session.sessionId) === false);
 		check("drop removes the state whatever it holds", agent.drop(session.sessionId) === true && agent.drop(session.sessionId) === false);
-		let refused = false;
-		try {
-			agent.agentState(session.sessionId);
-		} catch {
-			refused = true;
-		}
-		check("an id no longer in the table refuses to answer", refused);
+		check("an id no longer in the table answers nothing", !agent.has(session.sessionId));
 	}
 
 	process.stdout.write("a pair this build cannot open is deleted, not kept\n");
