@@ -28,6 +28,7 @@
 | [0014](0014-loop-manager-removed.md) | 删掉 `LoopManager`——引擎回到 `Agent` 的方法，六项服务重新是它的字段 | 已接受，已落地（2026-11-04，跑绿 `check` 与除 `smoke-api` 外的 smoke 全套），取代 0012 与 0013 全部决定，复活 0008 的决定 1/2 |
 | [0015](0015-llm-folded-into-core.md) | 把 `packages/llm` 折叠进 core——全树只剩一个 `Context` 与一个 `Tool` | 已接受，已落地（2026-11-06，01–04 号票，`check` 与 `build:web` 绿、smoke 与改动前逐条同色零新红，零行为变化），取代 0008 决定 6 的 `AgentContext` 命名与「形状也住 `types.ts`」那一半，及其「llm 没有被并入任何人」的现状陈述 |
 | [0016](0016-tool-manager-instance-table.md) | 工具回到一张常驻实例表——`ToolManager` 持有全部 `Tool`，引擎经它执行 | 已接受，已落地（2026-11-06，07–09 号票；2026-11-07 由 11 号票全量验收：`check` 与 `build:web` 绿、smoke 与改动前逐条同色零新红），部分取代 0006 / 0007 / 0011 / 0015 |
+| [0017](0017-agent-facade.md) | server 只认 `Agent` 公开面——Manager 的消费者收进 core，构造由 `createSessionAgent()` 吸收 | 已接受，已落地（2026-11-07，hub-agent-facade 01–07 号票，`check` 含新守卫 `check-server-facade` 与 `build:web` 绿、smoke 与基线逐条同色零新红），部分取代 0007 / 0016 |
 
 ## 门槛
 

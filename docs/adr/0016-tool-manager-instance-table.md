@@ -12,6 +12,9 @@
 [0011](0011-agent-holds-session-state.md)（部分——决定 2 的「不注入一张表」判据，以及*被放弃的选项*里
 「注入一张表」那一条）、[0015](0015-llm-folded-into-core.md)（部分——*后果* 里「`prepareRequest` 建它
 （`tools` 就是活跃的可执行集合）、引擎用它」这句现状陈述）
+取代者：[0017](0017-agent-facade.md)（部分，2026-11-07——决定 7 的「hub 冷热两条路共用
+**自己那只**」那一半：表仍全进程只装配一只、单写者与只增键不动，但它由
+`createSessionAgent()` 造、住编排层手里，hub 不再持表；决定 1–6 与表的形态一字不动）
 
 设计过程见 `.scratch/tool-manager-refactor/`（形状在 2026-11-06 的绘图会话里定案，02–06 号票是裁决、
 07–11 号票是执行，逐条不得推翻）。
@@ -78,6 +81,10 @@
 7. **装配照旧是构造注入**。`AgentConfig.tools: ToolManager`、`SessionServices.tools` 换类型，`Agent` 上
    仍是一个 `private readonly tools`；进程里只装配一只（hub 冷热两条路共用自己那只，`openAgent` 转交
    `assemble` 造的那只）。
+
+   **（2026-11-07 Superseded，[0017](0017-agent-facade.md)：仅「hub 自己那只」那一半——表由
+   `createSessionAgent()` 造、住编排层手里，hub 的冷热两条路经编排层到达同一只表，hub 不再持任何表；
+   「进程里只装配一只」与表的形态不变。）**
 
 ## 为什么明知 0007 / 0011 仍要反转
 

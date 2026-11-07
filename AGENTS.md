@@ -31,7 +31,10 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   分界。**工具域有一个例外**：`ToolManager` 持一张常驻实例表
   （[ADR-0016](docs/adr/0016-tool-manager-instance-table.md)），是这条形态里唯一持有实例的服务；
   `SessionManager` / `SettingManager` 与 `Agent` 编排仍是原来的形态：每样数据在用到它的那一行现取、
-  不养聚合袋，这条不变。理由与边界只在那条 ADR，这里不复述。
+  不养聚合袋，这条不变。理由与边界只在那条 ADR，这里不复述。**消费边界是另一条**：三只 Manager 的
+  构造由 `createSessionAgent()` 吸收、在本进程的唯一消费者是 `Agent` 编排，server 包只认编排层的公开
+  面——这条归 [ADR-0017](docs/adr/0017-agent-facade.md)，由 `npm run check` 的 `check-server-facade`
+  守卫。
 - **engine（引擎）** —— `Agent.run`（私有）：一次运行的入口与出口，与 `runEngine`、`prepareRequest`、
   `dispatchEvent`、压缩阶梯、重试泵、两个闸门一起是 `Agent` 的方法（ADR-0014）。它读的每一处接缝要么是
   这次运行的局部变量（模型、abort controller、事件 sink、闸门），要么是 `this` 上的服务，所以运行期
@@ -126,15 +129,19 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   `OpenSessionOptions`，按会话先、设置后的链（`fillSession` → 设置现读 → `createLive`）装配出一份
   `AgentState`——装配产物**就是**状态（ADR-0011），只装配、不激活；唯一调用者是 `Agent.open`（`adopt`
   已删，装配并进门里，服务由此只能是编排层自己的，不再是包的公开面）。`createSessionAgent()` 是另一半：
-  把服务组起来变成一个**编排层**，进程只需要一份（hub 构造时建它），测试与只跑一个会话的调用者用
-  `openAgent() == create + open` 自组一份。`Agent` 按 id 键控
+  收 `{ settingsHome?, modelsHome?, api? }`（外加 test-only 的 `settings` / `tools` 两缝）并**自己造三只
+  Manager**——Manager 不再是调用者的决定（[ADR-0017](docs/adr/0017-agent-facade.md)）——组成一个
+  **编排层**，进程只需要一份（hub 构造时建它，递的只是 homes、api 与打开钉子 `ModelPins`），测试与
+  只跑一个会话的调用者用 `openAgent() == create + open` 自组一份。`Agent` 按 id 键控
   持有各会话的状态——公开方法收 id、从状态现取：durable 半是 `state.session`（账本重放出的袋子），
-  live 半是 `state.live`。它只决定 transcript
+  live 半是 `state.live`；状态对象不出 core，server 侧读的是窄读一族（`titleOf` / `timestampOf`
+  一类，纯数据）。它只决定 transcript
   **命名**哪一行（`modelFor()` 每次请求按选择现查目录，不缓存行的事实）。
 - **AgentState（会话状态）** —— 一个会话的全部状态是一件东西（ADR-0011）：`state.session`（账本重放出的
   durable 半）、两个订阅集合，与 `state.live`（`Live`：两条
   队列、在飞运行、partial、重试与挂起位——「进行中且磁盘上没有」的东西）。由 `Agent` 按 id 键控持有，
-  `adopt` 是唯一入口、`evict` / `drop` 是唯一出口，进程重启即清空。
+  装配经 `Agent.open` 进表、`evict` / `drop` 是唯一出口，进程重启即清空；类型不出 core，server 侧只见
+  纯数据窄读（ADR-0017）。
 - **workDirAbsPath（当前工作目录）** —— 一个会话的相对路径基准与命令起点，**按会话**，从会话自己快照的
   setting 字段取（`session.sessionSetting.workDirAbsPath`，绝对）。它**不是围栏**：绝对路径原样接受，`..` 也能走出去，工具
   可以碰这台机器上的任何文件——目录只决定一个裸路径是什么意思。

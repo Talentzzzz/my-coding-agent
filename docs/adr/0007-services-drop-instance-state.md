@@ -9,6 +9,10 @@ Manager 键控缓存与决定 4 的活登记处归属及「只装进行中且磁
 取代者：[0016](0016-tool-manager-instance-table.md)（部分，2026-11-06——决定 1、
 决定 2 的「无状态服务」那半、决定 6 的「不可变」前提，三处都只在**工具域**不再
 成立；会话域的同一批决定不变）
+取代者：[0017](0017-agent-facade.md)（部分，2026-11-07——决定 6 的**消费面**：进程级
+构造注入本身不变，被取代的是「这组进程级东西由 hub 装配、在 hub 手里协调」的旧
+叙述——三只 Manager 的构造收进 `createSessionAgent()`、唯一消费者是 core 的编排层，
+hub 只认编排层公开面；其余决定不变）
 
 设计过程见 `.scratch/pure-services/`（形状在 2026-11-01 的设计对话敲定，本
 ADR 只记合拢后的契约）。
@@ -70,6 +74,10 @@ TypeScript 的 `private` 继续守账本不变式。
    **（2026-11-06 Superseded，[0016](0016-tool-manager-instance-table.md)：仅工具域的「不可变」前提
    ——工具表也留在构造注入上，但它可单调增长（`register()` 只增键）；hooks / transport / systemPrompt
    三件本身一字不动。）**
+
+   **（2026-11-07 Superseded，[0017](0017-agent-facade.md)：仅消费面——这组进程级配置仍留在
+   构造注入上，但由 `createSessionAgent()` 造好三只 Manager 再递进编排层，编排层是它们在本进程的
+   唯一消费者；「hub 装配并协调这组服务」的旧叙述不再成立，hub 只认编排层公开面。）**
 
 ## 后果
 
