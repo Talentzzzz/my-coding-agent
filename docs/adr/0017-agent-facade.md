@@ -63,10 +63,10 @@ manager。
 3. **构造吸收。** `createSessionAgent({ settingsHome?, modelsHome?, api?, settings?,
    tools? })` 自己造三只 Manager（`settings` / `tools` 是 test-only 缝：内存设置门、自注册
    的工具表；生产面递 homes 与 api），然后走原有的 `AgentConfig` 构造器——一条构造路，
-   构造器本票不动。`HubOptions` 收缩为 `{ workDirAbsPath, sessionId, settingsHome,
-   modelsHome, api, model?, thinkingLevel? }`，boot 零改动；`SessionAgentServices` 类型
-   退役。编排层公开字段只剩 `sessionManager`——它不再是 server 的路，而是冒烟的缝（见
-   决定 6）。
+   构造器本票不动。`HubOptions` 收缩为 `{ workDirAbsPath, sessionId?, settingsHome?,
+   modelsHome?, api?, model?, thinkingLevel? }`，boot 零改动；`SessionAgentServices` 类型
+   退役。编排层公开的 Manager 字段只剩 `sessionManager`（`hooks` 是接缝面、不是 Manager，照旧
+   公开）——它不再是 server 的路，而是冒烟的缝（见决定 6）。
 4. **「server 不知道 Manager」是机械检查的不变量。** `scripts/check-server-facade.ts`
    （`npm run check` 在 check-tokens 之后追加一步，check-tokens 同款先例：独立小脚本 +
    regex）扫描 `packages/server/src/**/*.ts`：导入禁十名（三只 Manager、`createToolManager`、
@@ -109,7 +109,7 @@ manager。
 
 背上的：
 
-- **`Agent` 的公开面宽了一截。** 三类十九个方法（含票 04 增补的 `messageRoleOf`），其中
+- **`Agent` 的公开面宽了一截。** 三类二十一个方法（含票 04 增补的 `messageRoleOf`），其中
   窄读一族是为「状态对象不出 core」付的价——每一条 server 需要的窄读都得在门面上有名有
   姓，而不是让 server 顺手读一个字段。
 - **`ModelPins` 三个方法都要收。** 钉子不进编排层，于是每个打开形状的方法都多一个可选
@@ -176,5 +176,6 @@ manager。
   「server 不知 Manager」正交；退役的是构造缝上的 `SessionAgentServices`，两者不是同一个
   类型。
 - **`OpenAgentOptions` 与 `openAgent()`。** 形状不动（本就是测试缝集合），唯一变化是
-  `sessionManager` 字段成为死缝——工厂不再收 ledger，字段文档已注明它只服务于冷读；
+  `OpenAgentOptions.sessionManager` 字段成为死缝——工厂不再收 ledger，字段文档已注明它只服务于
+  冷读；`Agent.sessionManager` 公开字段是另一回事，保持公开为冒烟的缝（口径见决定 6）。
   `openAgent() == create + open` 的组合照旧。

@@ -131,7 +131,8 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   已删，装配并进门里，服务由此只能是编排层自己的，不再是包的公开面）。`createSessionAgent()` 是另一半：
   收 `{ settingsHome?, modelsHome?, api? }`（外加 test-only 的 `settings` / `tools` 两缝）并**自己造三只
   Manager**——Manager 不再是调用者的决定（[ADR-0017](docs/adr/0017-agent-facade.md)）——组成一个
-  **编排层**，进程只需要一份（hub 构造时建它，递的只是 homes、api 与打开钉子 `ModelPins`），测试与
+  **编排层**，进程只需要一份（hub 构造时建它，递的只是 homes 与 api；打开钉子 `ModelPins` 随
+  每次打开实参现取），测试与
   只跑一个会话的调用者用 `openAgent() == create + open` 自组一份。`Agent` 按 id 键控
   持有各会话的状态——公开方法收 id、从状态现取：durable 半是 `state.session`（账本重放出的袋子），
   live 半是 `state.live`；状态对象不出 core，server 侧读的是窄读一族（`titleOf` / `timestampOf`

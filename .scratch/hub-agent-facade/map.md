@@ -62,6 +62,12 @@ hub 及以下只通过 Agent 的公开方法操作会话。构造由 `createSess
   私有表 probe ×3）；`agentState()` 收成 private、`workDirOf` 删（零消费者）/ `fileAbsPathOf` 留、
   `sessionManager` 字段保留为 smoke 缝；check + build:web 绿，八条验收 smoke 与基线同色（含
   smoke-approval 预存在闪失），另十四条 hub 相关 smoke 全绿。
+- [08 形态收账](issues/08-adr-and-glossary.md)：ADR-0017 落地（占用票 05 预留的号，hub.ts 六处
+  引用对上），取代 0007 决定 6 的消费面与 0016 决定 7 的「hub 自己那只」那半（指针 + 就地标注）；
+  AGENTS.md service / assembly / AgentState 三条与 architecture.md 十处按新口径改写（含
+  HostedSession 图摘 workDirAbsPath）；两轴 code-review 修正五处事实/口径偏差（方法计数 21、
+  hooks 非公开 Manager 字段、OpenAgentOptions.sessionManager 死缝与 Agent.sessionManager 冒烟缝
+  分开、三类方法口径、钉子随打开实参）。文档零行为变更，check 绿。**feature 到此收口。**
 
 ## Not yet specified
 
