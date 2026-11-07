@@ -8,10 +8,10 @@ import {
 	type AgentState,
 	createSessionAgent,
 	createToolManager,
-	assembleSession,
 	readSessionSnapshot,
 	resolvePath,
 	type OpenAgentOptions,
+	type OpenSessionOptions,
 	type SessionSnapshot,
 	SessionManager,
 	createSession,
@@ -745,7 +745,7 @@ export class SessionHub {
 	private async open(id: string): Promise<HostedSession> {
 		// The held state first, the store second: a session created a moment ago has no file to find,
 		// and one already held must not be re-assembled — the table's state is the one its queues,
-		// its subscribers, and any run in flight hang on. A disk-backed one not held yet is adopted
+		// its subscribers, and any run in flight hang on. A disk-backed one not held yet is opened
 		// from its file below.
 		const state = this.agent.has(id) ? this.agent.agentState(id) : await this.adoptFromDisk(id);
 		const workDirAbsPath = state.session.sessionSetting.workDirAbsPath;
@@ -760,19 +760,17 @@ export class SessionHub {
 	}
 
 	/**
-	 * The one road a disk-backed session enters the orchestrator's table: replay, assemble, adopt,
-	 * then read back.
+	 * The one road a disk-backed session enters the orchestrator's table: replay, then open.
 	 *
-	 * The read-back is the point of the last line: `adopt` is first-come, so under a concurrent
-	 * open the state just assembled may lose the race to one already in the table — and the host
-	 * must run on the state the table actually holds, never on a rejected assembly whose queues
-	 * nobody would drain.
+	 * The read-back that used to be the last line here is the orchestrator's now: `open` is
+	 * first-come-wins, so under a concurrent open the state it just assembled may lose the race to one
+	 * already in the table — and the host must run on the state the table actually holds, never on a
+	 * rejected assembly whose queues nobody would drain. `open` returns that winner, so the rule is
+	 * enforced once instead of remembered here.
 	 */
 	private async adoptFromDisk(id: string): Promise<AgentState> {
 		const session = this.sessions.open(id);
-		const { state } = await assembleSession(this.sessionOptions(session, session.sessionSetting.workDirAbsPath));
-		this.agent.adopt(state);
-		return this.agent.agentState(id);
+		return this.agent.open(this.openOptions(session, session.sessionSetting.workDirAbsPath));
 	}
 
 	/**
@@ -795,22 +793,38 @@ export class SessionHub {
 	}
 
 	/**
+	 * The options one transcript is described by when this process opens it.
+	 *
+	 * The open's half of the pair below: the transcript, its directory, and the two choices the hub
+	 * pins across every session it runs. Nothing else — the services are the orchestrator's own, which
+	 * is what `Agent.open` refuses to take from a caller.
+	 */
+	private openOptions(state: Session, workDirAbsPath: string): OpenSessionOptions {
+		return {
+			session: state,
+			workDirAbsPath,
+			...(this.options.model === undefined ? {} : { model: this.options.model }),
+			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),
+		};
+	}
+
+	/**
 	 * The options one transcript is described by, whether or not this process runs it.
 	 *
 	 * One builder for both paths on purpose. The cold read and the open must resolve the same
 	 * directory, the same settings, the same tool table, and the same pinned model and level, so that
 	 * a snapshot taken without assembling is indistinguishable from a snapshot taken after — if these
 	 * were written out twice, the difference would show up as a session that changes when you open it.
+	 * The pinned half comes from {@link openOptions}, so the two can differ only in what the cold read
+	 * needs and the open does not: the services, and the transport the cold read never sends on.
 	 */
 	private sessionOptions(state: Session, workDirAbsPath: string): OpenAgentOptions {
 		return {
+			...this.openOptions(state, workDirAbsPath),
 			workDirAbsPath,
 			sessionManager: this.sessions,
-			session: state,
 			settings: this.settings,
 			tools: this.tools,
-			...(this.options.model === undefined ? {} : { model: this.options.model }),
-			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),
 			...(this.options.api === undefined ? {} : { api: this.options.api }),
 		};
 	}
@@ -895,15 +909,14 @@ export class SessionHub {
 	 * state leaves the table only through {@link remove} or the process itself, and nothing is lost —
 	 * nothing was written for it.
 	 *
-	 * Creating is therefore assembling, one `await` on the settings and the model rows (both read
+	 * Creating is therefore opening, one `await` on the settings and the model rows (both read
 	 * through the process's own services), and its one failure mode — a settings file that cannot be
 	 * read — is the same failure the following open would have hit, just earlier: the id is not
 	 * handed out past a creation that could not build it.
 	 */
 	private async createUnpersisted(workDirAbsPath: string): Promise<string> {
 		const bag = createSession(workDirAbsPath);
-		const { state } = await assembleSession(this.sessionOptions(bag, workDirAbsPath));
-		this.agent.adopt(state);
+		const state = await this.agent.open(this.openOptions(bag, workDirAbsPath));
 		return state.session.sessionId;
 	}
 }

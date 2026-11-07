@@ -122,10 +122,12 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   策略就装在里面，引擎只是对模型 `stream`；失败的尝试从不被记录。
 - **queue（队列）** —— 一次运行正在流式时被接受的消息：`steer` 在下一个取走点注入，`followUp` 等这一
   轮结束。
-- **assembly（装配）** —— `assembleSession()` 按会话先、设置后的链（`fillSession` → 设置现读 →
-  `createLive`）装配出一份 `AgentState`——装配产物**就是**状态（ADR-0011），只装配、不激活；
-  `createSessionAgent()` 是另一半：把服务组起来变成一个**编排层**，进程只需要一份（hub 构造时建它），
-  测试与只跑一个会话的调用者用 `openAgent() == assemble + create + adopt` 自组一份。`Agent` 按 id 键控
+- **assembly（装配）** —— `assembleSession(services, options)` 收**必填**的三服务 + 窄的
+  `OpenSessionOptions`，按会话先、设置后的链（`fillSession` → 设置现读 → `createLive`）装配出一份
+  `AgentState`——装配产物**就是**状态（ADR-0011），只装配、不激活；唯一调用者是 `Agent.open`（`adopt`
+  已删，装配并进门里，服务由此只能是编排层自己的，不再是包的公开面）。`createSessionAgent()` 是另一半：
+  把服务组起来变成一个**编排层**，进程只需要一份（hub 构造时建它），测试与只跑一个会话的调用者用
+  `openAgent() == create + open` 自组一份。`Agent` 按 id 键控
   持有各会话的状态——公开方法收 id、从状态现取：durable 半是 `state.session`（账本重放出的袋子），
   live 半是 `state.live`。它只决定 transcript
   **命名**哪一行（`modelFor()` 每次请求按选择现查目录，不缓存行的事实）。

@@ -2,21 +2,16 @@
 //
 // Production never does this: `SessionHub.open()` resolves which session to run from a request, and
 // reads its settings through the hub's own manager. A smoke wants a session whose id it knows up
-// front, so the two steps an open takes are taken here instead: assemble the session's state, hand
-// it to the hub's orchestrator through the same door every state enters (`adopt`), then mount the
-// claim token the hub keys it by. The hub's one orchestrator then serves the session like any
-// other, because every call it answers names the id.
+// front, so the two steps an open takes are taken here instead: build a transcript bag, open it onto
+// the hub's orchestrator through the same public door a production open uses, then mount the claim
+// token the hub keys it by. The hub's one orchestrator then serves the session like any other,
+// because every call it answers names the id.
 //
 // Settings are not part of what a mount can choose: the manager is the orchestrator's, and one
 // orchestrator serves every session of the process through the one it was built with. A smoke that
 // wants its own settings — an in-memory approval gate, rows of its own — builds the hub over a
 // manager of its own (`HubOptions.settings`), and every session it mounts reads through that.
-import {
-	type Session,
-	SessionManager,
-	createSession,
-	assembleSession,
-} from "@my-agent/core";
+import { type Session, SessionManager, createSession } from "@my-agent/core";
 import { HostedSession, type SessionHub } from "../packages/server/src/hub.ts";
 
 /** The hub's private half, as a smoke reaches it. */
@@ -48,16 +43,14 @@ export interface MountedSession {
 export async function mountSession(hub: SessionHub, options: MountOptions): Promise<MountedSession> {
 	const internals = hub as unknown as HubInternals;
 	const state = createSession(options.root);
-	// Assemble, then adopt: the state enters the hub's orchestrator through the same public door a
-	// production open uses, so the smoke seeds nothing the orchestrator does not know about.
-	const { state: assembled } = await assembleSession({
-		workDirAbsPath: options.root,
+	// Open, not assemble-then-adopt: the state enters the hub's orchestrator through the same public
+	// door a production open uses, so the smoke seeds nothing the orchestrator does not know about —
+	// and the services it assembles over are the hub's own, which is what makes the mount invisible.
+	await hub.agent.open({
 		session: state,
-		sessionManager: internals.sessions,
-		settings: hub.settings,
+		workDirAbsPath: options.root,
 		...(options.model === undefined ? {} : { model: options.model }),
 	});
-	hub.agent.adopt(assembled);
 	const host = new HostedSession(state.sessionId, options.root);
 	internals.hosts.set(state.sessionId, host);
 	return { id: state.sessionId, state, host };

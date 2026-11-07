@@ -13,8 +13,6 @@ import { SessionHub } from "../packages/server/src/hub.ts";
 import {
 	CURRENT_SESSION_VERSION,
 	type AgentState,
-	createAgentState,
-	createLive,
 	createSession,
 	createSessionAgent,
 	fillSession,
@@ -880,23 +878,17 @@ try {
 
 	process.stdout.write("the orchestrator's table keys the live half by id\n");
 	// ADR-0011: the table on the orchestrator holds exactly what cannot be rebuilt from disk — the
-	// queues, the run in flight, the subscriber sets. `adopt` is its one way in, first-come: a state
-	// already there is kept, never replaced, because the one it would replace holds the live half.
-	// The exits are two and deliberately different: `evict` refuses unless the criteria hold, and
-	// `drop` does not ask. There is no clear — the table lives and dies with the orchestrator itself.
+	// queues, the run in flight, the subscriber sets. `open` is its one way in, and it assembles
+	// first-come: a state already there is kept, never replaced, because the one it would replace
+	// holds the live half. The exits are two and deliberately different: `evict` refuses unless the
+	// criteria hold, and `drop` does not ask. There is no clear — the table lives and dies with the
+	// orchestrator itself.
 	{
 		const agent = createSessionAgent({ sessionManager: new SessionManager(), settings: new SettingManager({ models: [] }) });
-		// The seed's assembly fields are irrelevant to what this block pins — the table and its
-		// doors — so it hands the placeholder answers a session with no row would carry.
-		const settings = inMemorySettingManager({});
 		const session = createSession(tmpdir());
-		const seed = () =>
-			createAgentState(session, createLive(settings.getSteeringMode(tmpdir()), settings.getFollowUpMode(tmpdir())));
-		const state = seed();
-		agent.adopt(state);
-		check("adopt is the one way in, and the id answers it", agent.agentState(session.sessionId) === state);
-		agent.adopt(seed());
-		check("re-adopting an id keeps the state already there", agent.agentState(session.sessionId) === state);
+		const state = await agent.open({ session });
+		check("open is the one way in, and the id answers it", agent.agentState(session.sessionId) === state);
+		check("re-opening an id keeps the state already there", (await agent.open({ session })) === state);
 		check("an unborn session refuses to be evicted", agent.evict(session.sessionId) === false);
 		check("drop removes the state whatever it holds", agent.drop(session.sessionId) === true && agent.drop(session.sessionId) === false);
 		let refused = false;

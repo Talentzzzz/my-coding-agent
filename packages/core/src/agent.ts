@@ -1,3 +1,4 @@
+import { assembleSession, type OpenSessionOptions } from "./assembly.ts";
 import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
@@ -87,9 +88,9 @@ export type { AgentSessionEvent, MessageDelta, SessionEventListener, SessionList
  * service that owns it — the transcript from the session manager's cache, the live half from the
  * session's own state, the model from the ledger and the live rows. That is what makes the class
  * stateless (ADR-0007): there is no per-session field here beyond the state table itself, so a test
- * drives a session by assembling its state in the factory and handing it over with `adopt`, and a
- * host that owns the services does the same. `session-factory.ts` does the assembling for the real
- * process.
+ * drives a session by opening it onto an orchestrator of its own (`openAgent`), and a host that owns
+ * the services opens each transcript onto the one it keeps. The assembly itself lives in
+ * `assembly.ts`, which is where the shape every session is described by is written down once.
  *
  * None of these fields is session *state*. The services this class coordinates — the ledger,
  * the configuration (settings and model rows together, one {@link SettingManager}), the tool
@@ -218,8 +219,8 @@ export class Agent {
 	 *
 	 * One bag per session — the durable half, the settings the open resolved, the live half, the
 	 * subscribers — and the only thing this class holds between calls. States enter through
-	 * {@link Agent.adopt} and leave through {@link Agent.evict} / {@link Agent.drop}, both owned
-	 * here: one writer, one deleter.
+	 * {@link Agent.open}, which assembles them over this class's own services first, and leave through
+	 * {@link Agent.evict} / {@link Agent.drop}: one writer, one deleter, and no caller in between.
 	 */
 	private readonly sessions = new Map<string, AgentState>();
 
@@ -230,17 +231,17 @@ export class Agent {
 		this.hooks = config.hooks;
 		this.systemPrompt = config.systemPrompt;
 		this.api = config.api;
-		// Nothing per session is built here: a state is assembled by the factory and adopted, and an
+		// Nothing per session is built here: a state is assembled by `open` over these services, and an
 		// id is resolved at the top of each method against the table below. No run-scoped object is
 		// built here either: everything a run holds is its own local.
 	}
 
 	/**
-	 * The three services a fan-out call reads through, gathered at the call site.
+	 * The three services a fan-out call and an assembly read through, gathered at the call site.
 	 *
 	 * Not a field: a held bag is the thing ADR-0007 deleted, and every one of these three is
-	 * already a field on this class — this is the shape `session/fanout.ts` asks for, built where
-	 * it is asked for.
+	 * already a field on this class — this is the shape `session/fanout.ts` and `assembleSession`
+	 * ask for, built where it is asked for.
 	 */
 	private get services(): SessionServices {
 		return { sessionManager: this.sessionManager, settings: this.settings, tools: this.tools };
@@ -249,17 +250,40 @@ export class Agent {
 	// ---------------------------------------------------------------------------- resolution
 
 	/**
-	 * Put one assembled state in the table. The only way in.
+	 * Build one session's state and put it in the table. The only way in, and the only door that
+	 * assembles.
 	 *
-	 * The factory (`session-factory.ts`) is what assembles — the working directory, the settings, the
-	 * live half, the model choice seeded onto the session — and the caller hands the result here,
-	 * whether that caller is a host adopting into its long-lived orchestrator or a test adopting
-	 * into one of its own. First adoption wins: a state already in the table is kept, never
-	 * replaced, because the one it would replace holds the queues, the subscribers, and the run in
-	 * flight (ADR-0007 §4) — and re-adopting the same id is the ordinary idempotent move, not an
-	 * error.
+	 * The two halves are one call on purpose. Assembly needs the transcript the caller chose — *which*
+	 * session to open is a host's question, not this class's — while everything else it reads (the
+	 * settings, the model rows, the tool table) belongs to this orchestrator. Handing an assembled
+	 * state in (`adopt`, as this used to) left that join to the caller and nothing checked it: a second
+	 * `SettingManager` reached exactly the state assembled through the first, and `openAgent` built
+	 * one. Here the services are this class's by construction, so the mismatch has nowhere to happen —
+	 * "every state in the table was assembled over this orchestrator's services" is a fact rather than
+	 * a convention.
+	 *
+	 * First-come-wins: a state already in the table is kept, never replaced, because the one it would
+	 * replace holds the queues, the subscribers, and the run in flight (ADR-0007 §4) — and re-opening
+	 * a held id is the ordinary idempotent move, not an error. The return value is therefore the state
+	 * the table holds, not the one just built: under a concurrent open the assembly can lose the race,
+	 * and a caller must run on the winner (its queues are the ones a run drains), so that read-back is
+	 * this method's rather than every caller's. A held id does not even assemble — the transcript
+	 * offered may be a different replay of the same file, and seeding a choice onto it would move
+	 * nothing anyone reads.
 	 */
-	adopt(state: AgentState): void {
+	async open(options: OpenSessionOptions): Promise<AgentState> {
+		const id = options.session.sessionId;
+		const held = this.sessions.get(id);
+		if (held !== undefined) return held;
+		// The services argument is where the door's guarantee lives: it is this getter, so what the
+		// state assembles over cannot be anything but this orchestrator's own.
+		const state = await assembleSession(this.services, options);
+		this.insert(state);
+		return this.sessions.get(id) ?? state;
+	}
+
+	/** First-come-wins insertion. {@link Agent.open} is its only caller, which is what it is for. */
+	private insert(state: AgentState): void {
 		if (this.sessions.has(state.session.sessionId)) return;
 		this.sessions.set(state.session.sessionId, state);
 	}
@@ -312,7 +336,7 @@ export class Agent {
 	 * The public read of the table, for a caller outside the class that must reach the same bag a
 	 * method here would: a hub reading the entry map behind a live session, a projection reading a
 	 * title off the bag a turn is being written through. A missing one is a wrong road rather than a
-	 * state to invent — `has` is how a caller asks first — and only `adopt` puts a state here.
+	 * state to invent — `has` is how a caller asks first — and only {@link Agent.open} puts a state here.
 	 */
 	agentState(id: string): AgentState {
 		const state = this.sessions.get(id);

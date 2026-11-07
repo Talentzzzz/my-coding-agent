@@ -116,12 +116,14 @@ export {
 } from "./models.ts";
 export {
 	createSessionAgent,
-	assembleSession,
 	openAgent,
-	readSessionSnapshot,
-	type OpenAgentOptions,
 	type SessionAgentServices,
 } from "./session-factory.ts";
+export {
+	readSessionSnapshot,
+	type OpenAgentOptions,
+	type OpenSessionOptions,
+} from "./assembly.ts";
 export {
 	addUsage,
 	EMPTY_USAGE,
