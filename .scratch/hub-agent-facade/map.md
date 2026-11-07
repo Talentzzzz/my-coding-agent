@@ -52,6 +52,11 @@ hub 及以下只通过 Agent 的公开方法操作会话。构造由 `createSess
   必须占用）；「the store」措辞清零、fork 文档的「Only `close` moves the table」残留重写。
   票外偏离：摘除零读者死字段 `HostedSession.workDirAbsPath`（fork 源路径解析已进门面），
   连带 `workDirOf` / `fileAbsPathOf` 零消费者、去留随票 07。
+- [06 controllers 与 projection 迁移](issues/06-controllers-projection-migration.md)：机械迁移随票 04
+  落地，本票做剩下的注释改写——controllers 的「hub already owns」/「thin call onto the session the
+  hub holds」/「the store」各处与 projection 的「appended through the hub」/「store」口径改为
+  orchestrator + 门面（ADR-0017），顺手修 restoreDirectory 缩进残缺行与 projection 的 EOF 换行；
+  按票 03 禁名单口径核对 server 侧为零。零行为变更。
 
 ## Not yet specified
 

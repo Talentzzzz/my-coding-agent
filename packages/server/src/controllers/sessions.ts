@@ -86,9 +86,10 @@ export interface SessionListener {
 /**
  * The models, the directory groups, and the stored settings.
  *
- * All three are read-only views of something the hub already owns, and all three used to be frames a
- * socket pushed. Over HTTP the client asks for them, which is what lets a page reload with no session
- * and still fill its sidebar, its settings panel, and its model list.
+ * All three are read-only views of something the orchestrator owns — the hub forwards to its facade
+ * and owns none of it (ADR-0017) — and all three used to be frames a socket pushed. Over HTTP the
+ * client asks for them, which is what lets a page reload with no session and still fill its sidebar,
+ * its settings panel, and its model list.
  */
 export class SystemController {
 	private readonly hub: SessionHub;
@@ -336,7 +337,8 @@ export class SystemController {
 			if (typeof fields.model !== "string") throw httpStatus.badRequest("`model` must be a string");
 			// A default that names no row is refused rather than stored: `selectModel` would fall back to
 			// the first row, so a typo here would look like a preference that quietly did nothing. The
-			// rows are the hub's, read fresh, so a row deleted since the panel loaded is caught too.
+			// rows are the orchestrator's, read fresh through the facade, so a row deleted since the
+			// panel loaded is caught too.
 			if (this.hub.agent.modelCatalog().find((userModel) => userModel.name === fields.model) === undefined) {
 				throw httpStatus.conflict(`Unknown model: ${fields.model}`);
 			}
@@ -437,9 +439,9 @@ export class SystemController {
  * Everything about one session: reading it, changing its configuration, and the commands that each
  * used to be a branch of one `switch` over a message the socket carried.
  *
- * Each method is a thin call onto the session the hub holds. Only two decisions live here: what a
- * failure means as a status, and that a command returns as soon as the session has accepted it — the
- * run itself is reported on the event stream, never on this response.
+ * Each method is a thin call onto the orchestrator, under the claim the hub holds. Only two
+ * decisions live here: what a failure means as a status, and that a command returns as soon as the
+ * session has accepted it — the run itself is reported on the event stream, never on this response.
  */
 export class SessionController {
 	private readonly hub: SessionHub;
@@ -508,8 +510,9 @@ export class SessionController {
 	 *
 	 * The pair to `SystemController.hideDirectory`, and the answer to「删除」 being a one-way door: the
 	 * transcripts and the directory were never touched, so it is still there to be used —
-	 * and coming back to it is what says the user wants it listed again. Written onto the settings state
- * the hub's visibility rule reads, so the next listing and the next overview frame already agree.
+	 * and coming back to it is what says the user wants it listed again. Written onto the settings
+	 * state the hub's visibility rule reads through the facade, so the next listing and the next
+	 * overview frame already agree.
 	 */
 	private restoreDirectory(workDirAbsPath: string): void {
 		const hidden = this.hub.agent.hiddenDirectories(this.hub.workDirAbsPath);
@@ -538,11 +541,12 @@ export class SessionController {
 	/**
 	 * Give the session a name of its own, stored as the title on its `.json` snapshot.
 	 *
-	 * The store's own shortening rule is applied here, before anything is written — a user's typing is
-	 * not a title until it has been collapsed and cut the same way a derived one is, so a renamed row
-	 * and a derived row are indistinguishable in width and shape. An empty name is refused rather than
-	 * stored: a stored title of nothing would silently restore the derived title, which is what
-	 * *not renaming* already does. There is no clear-rename; changing the name back is another rename.
+	 * The shortening rule the derived title follows is applied here, before anything is written — a
+	 * user's typing is not a title until it has been collapsed and cut the same way a derived one is,
+	 * so a renamed row and a derived row are indistinguishable in width and shape. An empty name is
+	 * refused rather than stored: a stored title of nothing would silently restore the derived title,
+	 * which is what *not renaming* already does. There is no clear-rename; changing the name back is
+	 * another rename.
 	 *
 	 * No claim is taken and a run in flight is no obstacle: the title is a fact about the session
 	 * rather than about one way through it, and nothing the loop reads depends on it.
@@ -580,7 +584,7 @@ export class SessionController {
 	/**
 	 * Move the conversation onto another branch of its own tree.
 	 *
-	 * A command, not an edit: the store is not rewritten, only the leaf moves, and sending it twice is
+	 * A command, not an edit: the log is not rewritten, only the leaf moves, and sending it twice is
 	 * the same move twice. It answers with the session's new state because the whole transcript changed
 	 * and the client that asked is the one looking at it. Every *other* stream on this session is sent
 	 * the same snapshot by the transport, from the session's own `branch_changed` — a second window

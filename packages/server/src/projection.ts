@@ -63,8 +63,9 @@ export interface SessionProjection {
  * watching is what makes that row honest.
  *
  * Two rules shape everything here. **This process is the only writer** — sessions are created and
- * appended through the hub — so a directory scan's entire job is noticing files that arrived from
- * outside, which is why seeding happens once and re-scanning never does. And **a row is replaced
+ * appended by the one orchestrator the hub commands (ADR-0017) — so a directory scan's entire job is
+ * noticing files that arrived from outside, which is why seeding happens once and re-scanning never
+ * does. And **a row is replaced
  * whole**, so nothing downstream merges two sources or tracks which of them is newer.
  *
  * It watches the hub's host-level point rather than its subscription mirror, deliberately: that mirror
@@ -197,9 +198,9 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	 * Read one session's row off disk.
 	 *
 	 * Only for a session that no scan has accounted for: created or forked by this process, or dropped
-	 * into the store by hand. The id has to be located first, which reads every store's headers, but
-	 * only the file that matched is parsed — the alternative, a listing, would parse every transcript
-	 * to learn about the one session that just appeared.
+	 * onto disk by hand. The id has to be located first, which reads every file's headers, but only
+	 * the file that matched is parsed — the alternative, a listing, would parse every transcript to
+	 * learn about the one session that just appeared.
 	 *
 	 * A session nobody is running may not have a file yet at all, and says so by answering `undefined`;
 	 * the row then appears when the session first writes, which is also when the host opens.
@@ -317,8 +318,9 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	return {
 		async groups(): Promise<DirectoryGroup[]> {
 			await ensureSeeded();
-			// Grouped by the store's own rule rather than a second copy of it: the sidebar draws one
-			// order, and a reader that ordered differently would disagree with the listing it came from.
+			// Grouped by the same core rule the facade's scan follows rather than a second copy of it: the
+			// sidebar draws one order, and a reader that ordered differently would disagree with the
+			// listing it came from.
 			return groupSessionsByDirectory([...rows.values()]);
 		},
 		async rows(): Promise<SessionRow[]> {
@@ -362,8 +364,6 @@ interface LiveFields {
 	running: boolean;
 	pending: number;
 }
-
-
 
 /**
  * Every field a row has, in the order they are declared.
