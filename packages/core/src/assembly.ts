@@ -19,13 +19,6 @@ import { type ToolManager, createToolManager } from "./tools/index.ts";
 /** What a caller must supply to build a session. Everything else is discovered here. */
 export interface OpenAgentOptions {
 	/**
-	 * The working directory the session's tools resolve relative paths against and start commands in.
-	 *
-	 * A starting point, not a boundary: an absolute path a tool is given is taken as it stands. It is
-	 * resolved here so every later read of `session.sessionSetting.workDirAbsPath` is absolute.
-	 */
-	workDirAbsPath: string;
-	/**
 	 * The stateless session service the cold read replays against.
 	 *
 	 * Only {@link readSessionSnapshot} reads this: the cold read names its bag by the session it is
@@ -62,7 +55,7 @@ export interface OpenAgentOptions {
 	 * Omitted in the real process, where it means Anthropic Messages. A smoke passes a scripted
 	 * transport so the run can be driven with no provider key. Read by the orchestrator's
 	 * construction alone — assembly never sends anything, which is why it is absent from
-	 * {@link OpenSessionOptions}.
+	 * {@link AssembleAgentStateOptions}.
 	 */
 	api?: ChatTransport;
 	/**
@@ -77,36 +70,36 @@ export interface OpenAgentOptions {
 }
 
 /**
- * What {@link Agent.open} needs: the transcript, and the choices a host pins on every session of
- * the process.
+ * What {@link Agent.assembleAgentStateBySession} needs: the transcript, and the choices a host hands
+ * to every open of the process.
  *
  * Deliberately narrower than {@link OpenAgentOptions}. The difference is the authority argument:
  * this door belongs to the orchestrator, so the services are *its own* — a caller cannot hand it a
  * second `SettingManager` or a table of its own, which is exactly the mismatch `adopt` allowed and
  * nothing checked. What remains here is the part the orchestrator cannot know: **which** transcript
- * (the host's decision, and the session manager's replay), and the model and level a host pins
- * across every session it opens (the same two `OpenAgentOptions` carries — see
- * `SessionHub.sessionOptions`, which builds both shapes from one answer).
+ * (the host's decision, and the session manager's replay) — the transcript carries its own working
+ * directory on `sessionSetting.workDirAbsPath` — and the model and level a host hands across every
+ * open it makes (the same two `OpenAgentOptions` carries — see `SessionHub.sessionOptions`, which
+ * builds both shapes from one answer).
  */
-export interface OpenSessionOptions {
-	/** The transcript to assemble and put in the table. */
+export interface AssembleAgentStateOptions {
+	/** The transcript to assemble and put in the table; it carries its own working directory. */
 	session: Session;
-	/** Defaults to the session's own `sessionSetting.workDirAbsPath`, which is what every caller passes. */
-	workDirAbsPath?: string;
 	/** Overrides the stored default with a row's name. */
 	model?: string;
 	thinkingLevel?: string;
 }
 
 /**
- * The model a host pins under the sessions it opens, when it pins one at all: the row's name and the
- * thinking level, the same two fields {@link OpenSessionOptions} carries without the transcript.
+ * The model options a host hands to the sessions it opens, when it hands any at all: the row's name
+ * and the thinking level, the same two fields {@link AssembleAgentStateOptions} carries without the
+ * transcript.
  *
- * The facade's open-shaped methods (`create`, `adoptFromDisk`, `snapshotOf`) take one so a host can
+ * The facade's open-shaped methods (`create`, `ensure`, `snapshotOf`) take one so a host can
  * keep a `--model`-style default in force across every session without the orchestrator holding it:
- * a pin is the host's per-open argument, not a resident fact.
+ * the options are the host's per-open argument, not a resident fact.
  */
-export type ModelPins = Pick<OpenSessionOptions, "model" | "thinkingLevel">;
+export type ModelOptions = Pick<AssembleAgentStateOptions, "model" | "thinkingLevel">;
 
 /**
  * What a session *is*, resolved but not yet activated: the working directory, the settings, the
@@ -145,14 +138,15 @@ interface Assembled {
  * The services are a required argument, not options with fallbacks: the open's are its
  * orchestrator's own by construction, and the cold read has no orchestrator to take them from and
  * resolves a fresh set below. This file imports nothing from `agent.ts`, and that is a hard rule
- * rather than a fact: `Agent.open` is its one caller on the activate side, so an import back would
+ * rather than a fact: `Agent.assembleAgentStateBySession` is its one caller on the activate side, so an import back would
  * close the cycle `agent.ts` → `assembly.ts` → `agent.ts`.
  */
-async function assemble(services: SessionServices, options: OpenSessionOptions): Promise<Assembled> {
+async function assemble(services: SessionServices, options: AssembleAgentStateOptions): Promise<Assembled> {
 	// The one place the workDirAbsPath becomes absolute, so every later read of the entry's `workDirAbsPath` — a tool's
-	// run context, the prompt, a snapshot — is the same value. The fallback is the session's own
-	// directory, which is what every caller passes anyway.
-	const workDirAbsPath = resolvePath(options.workDirAbsPath ?? options.session.sessionSetting.workDirAbsPath);
+	// run context, the prompt, a snapshot — is the same value. The directory is the transcript's own:
+	// `createSession` seeds it resolved and a replay restores it, so there is no override here — the
+	// session decides where it lives, and no caller hands a second answer in.
+	const workDirAbsPath = resolvePath(options.session.sessionSetting.workDirAbsPath);
 	// The project settings file lives under the working directory, so it is found from the same path:
 	// `<workDirAbsPath>/.my-agent/settings.json`, over the agent home's own file. Nothing is cached:
 	// every read is a fresh read of the files behind whichever manager the caller handed over.
@@ -252,10 +246,10 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
  * file.
  *
  * The services are a required argument rather than options, which is what makes the narrow door's
- * guarantee structural: the only caller is {@link Agent.open}, which hands its own three, and a
+ * guarantee structural: the only caller is {@link Agent.assembleInto}, which hands its own three, and a
  * caller cannot reach this function to assemble a state over a second `SettingManager` — the
  * mismatch `adopt` allowed and nothing checked has nowhere to happen. This builds; it does not
- * register. Registration is `Agent.open`'s: that door calls this, puts the result in the table under
+ * register. Registration is `Agent.assembleAgentStateBySession`'s: that door calls this, puts the result in the table under
  * first-come-wins, and hands back the state the table actually holds. Not exported from the package
  * for the same reason: an externally assembled state can enter no table, so a public assembly would
  * be surface with no reader.
@@ -264,7 +258,7 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
  * one opened on another model or level than the branch last used — both reach the transcript in
  * `recordSelection`, at the moment the first request is built from them.
  */
-export async function assembleSession(services: SessionServices, options: OpenSessionOptions): Promise<AgentState> {
+export async function assembleSession(services: SessionServices, options: AssembleAgentStateOptions): Promise<AgentState> {
 	const { workDirAbsPath, settings, modelChoice } = await assemble(services, options);
 	const session = options.session;
 	// The choice in force before the first request (issue 03 §7): the assembly's answer, merged onto

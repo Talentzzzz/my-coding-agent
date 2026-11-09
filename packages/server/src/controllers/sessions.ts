@@ -423,13 +423,16 @@ export class SystemController {
 	}
 
 	/**
-	 * The session a client with no id of its own should open, and the list to draw beside it.
+	 * The session a client with no id of its own should open — `null` for "nothing, stay on the
+	 * welcome state" — and the list to draw beside it.
 	 *
 	 * Both come back together because a client always wants both at boot, and asking the server for
 	 * the id is what makes `--session` observable in the UI: the client follows the server's answer
-	 * instead of guessing from the stored files.
+	 * instead of guessing from the stored files. Without the pin the answer is whatever this process
+	 * last created, or `null` — startup selects nothing, and nothing here creates a session to
+	 * select.
 	 */
-	async current(): Promise<{ sessionId: string; sessions: SessionRef[] }> {
+	async current(): Promise<{ sessionId: string | null; sessions: SessionRef[] }> {
 		const [sessionId, sessions] = await Promise.all([this.hub.currentSessionId(), listSessions(this.hub.agent, this.hub.workDirAbsPath)]);
 		return { sessionId, sessions };
 	}

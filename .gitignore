@@ -17,3 +17,9 @@ open-claude-ui-main/
 
 # Agent state, when the agent home is pointed at the repo with MY_AGENT_HOME
 .my-agent/
+
+# 本地工具状态（agent 生成的计划文件）
+.zcode/
+
+# .scratch 下的整包备份，体积大、可从源重建
+.scratch/**/*.tar.gz

@@ -642,7 +642,6 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		[configured],
 	);
 	const session = await openAgent({
-		workDirAbsPath: root,
 		session: state,
 		settings,
 	});
@@ -710,14 +709,12 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		JSON.stringify(store.getRecordedToolConfig(reloaded)),
 	);
 	const reopened = await openAgent({
-		workDirAbsPath: root,
 		session: reloaded,
 		settings,
 	});
 	check("reopening restores the approval the session chose", reopened.snapshot(reloaded.sessionId).approvals.bash === true, JSON.stringify(reopened.snapshot(reloaded.sessionId).approvals));
 	const otherState = createSession(root);
 	const other = await openAgent({
-		workDirAbsPath: root,
 		session: otherState,
 		settings,
 	});
@@ -984,7 +981,6 @@ async function exercisePruning(): Promise<void> {
 		maxTokens: 8_192,
 	};
 	const session = await openAgent({
-		workDirAbsPath: root,
 		session: store2,
 		settings: inMemorySettingManager(
 			{ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } },

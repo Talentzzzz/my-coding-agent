@@ -42,10 +42,18 @@ manager。
 1. **`Agent` 公开面三类方法，server 及以下只调它们。** 对账（票 01）把 hub、controllers、
    projection 摸 Manager / 状态袋的每个调用点列全，逐一落到三类：
    - **会话生命周期**，held/cold 两路在编排层内部统一、调用点不再写分支：
-     `exists(id)`、`snapshotOf(id, pinned?)`（held 走表、cold 走 open +
-     `readSessionSnapshot`）、`setTitle(id, title)`、`forkFrom(sourceId, entryId)`（源路径
-     解析在门面内部，`HostedSession` 不再为它持目录）、`create(workDirAbsPath, pinned?)`、
-     `adoptFromDisk(id, pinned?)`、`removeFromDisk(id)` + `isOnDisk(id)`。
+     `exists(id)`、`snapshotOf(id, modelOptions?)`（held 走表、cold 走 open +
+     `readSessionSnapshot`）、`ensure(id, modelOptions?)`（held 走表、disk 走 replay + open，
+     hub 不再写 `has` 分支）、`setTitle(id, title)`、`forkFrom(sourceId, entryId)`（源路径
+     解析在门面内部，`HostedSession` 不再为它持目录）、`create(workDirAbsPath, modelOptions?)`、
+     `removeFromDisk(id)` + `isOnDisk(id)`。
+     后续收口（2026-11-09）：`has(id)` 收成 class-private——表成员资格是编排层的内部事实，
+     门面对外的成员答案只有 `exists`（`hub.has` 本就只走它）。为让调用点不再需要先问「持不
+     持有」，`close(id)` 改为容忍未持有的 id：无事可停即立即返回，hub 逐出边缘里「还欠不欠
+     一次 close」的重问被吸收进 close 自身；remove 里仅剩的 held/cold 区分由 `isOnDisk` +
+     `exists` 两个公开读表达（在 `isOnDisk` 为假处 `!exists ≡ !held`，未知 id 的 404 拒绝
+     原样）。`evict` / `drop` 维持公开——它们是出表动词，逐出边缘逻辑留在 hub（见「没有被
+     取代的」），需要它们。
    - **窄状态读**，全部 held-only、返回**纯数据**：`fileAbsPathOf(id)`、`isSubmitting(id)`、
      `titleOf(id)`、`timestampOf(id, entryId)`（消息时间戳优先、entry 时间戳兜底，hub 的帧
      与 projection 的行因此不可能对「最后活跃」各执一词）、`messageRoleOf(id, entryId)`。
@@ -53,13 +61,21 @@ manager。
      `hiddenDirectories(workDir)`、`applySettings(workDir, patch)`、`settings(workDir)`；
      扫描类静态方法同签名转发（`listSessions` / `listDirectories` /
      `findSessionRowById`），不留自由函数例外清单。
-   - 宿主钉死的默认模型（boot 的 `--model`）以 `ModelPins`（`model` + `thinkingLevel`，
-     定义在 `assembly.ts`）随 `create` / `adoptFromDisk` / `snapshotOf` 现取现传——钉子是
+   - 宿主钉死的默认模型（boot 的 `--model`）以 `ModelOptions`（`model` + `thinkingLevel`，
+     定义在 `assembly.ts`）随 `create` / `ensure` / `snapshotOf` 现取现传——模型选项是
      宿主的每次打开实参，不是编排层持有的常驻事实。
 2. **状态对象不出 core。** `agentState()` 收成 private，`AgentState` / `Session` 类型从
    server 可见的面消失（禁名单见决定 4）；server 需要的一切都从窄读拿纯数据。一个会话的
-   状态进表仍走装配（`assembleSession` 的唯一调用者仍是 `Agent.open`），出表仍只有
+   状态进表仍走装配（`assembleSession` 的唯一调用者仍是编排层的装配门 `Agent.assembleInto`，
+   原名 `Agent.open`，见下方后续收口），出表仍只有
    `evict` / `drop`——[0011](0011-agent-holds-session-state.md) 的形态不动。
+   后续收口（票 08 之后）：这扇门本身收成类 private 并更名 `assembleInto`（装配并进表）——
+   外界只需要**读**
+   （`snapshotOf` / `readSessionSnapshot`）与**跑**（`ensure` / `create`）两个动词，何时装配、
+   递哪只 transcript 袋子进表不再是公开面上的事；唯一越过这条 private 的是 `openAgent`
+   与 hub 级冒烟的 `mount-session.ts`，各经一处有类型的 cast 过门（`AssembleAgentStateOptions`
+   类型随之不再出 core；`workDirAbsPath` 覆盖参数同期删除——工作目录是 transcript 袋子自己的
+   `sessionSetting.workDirAbsPath`，所有调用点传的本就是同一个值，冷读路径从未用过覆盖）。
 3. **构造吸收。** `createSessionAgent({ settingsHome?, modelsHome?, api?, settings?,
    tools? })` 自己造三只 Manager（`settings` / `tools` 是 test-only 缝：内存设置门、自注册
    的工具表；生产面递 homes 与 api），然后走原有的 `AgentConfig` 构造器——一条构造路，
@@ -77,7 +93,7 @@ manager。
    包源码；scripts/ 的冒烟按票 02 的裁定保留 Manager 访问。名单加名字 = 加一行。
 5. **冷路径契约落在各自方法的文档上。** `setTitle`（一冷写一次同步块、不拿 claim）、
    `snapshotOf`（不留痕：无 host、无 run、无 claim、不追加任何 entry）、`removeFromDisk`
-   （纯文件 I/O、不触表/hosts/observers）、`adoptFromDisk`（无写窗口可保护——replay 与
+   （纯文件 I/O、不触表/hosts/observers）、`ensure` 的 disk 半（无写窗口可保护——replay 与
    assembly 都不写盘，进表本身就是它的目的）。两个性质（写窗口、不留痕）是 per-method
    的，分开放才不会在某一侧腐化；hub 侧只留一行「为什么敢直接调」。
 6. **两处顺延的收口**（票 05 连带标记、票 07 落定）：全仓零消费者的 `workDirOf` 删除（对
@@ -112,7 +128,7 @@ manager。
 - **`Agent` 的公开面宽了一截。** 三类二十一个方法（含票 04 增补的 `messageRoleOf`），其中
   窄读一族是为「状态对象不出 core」付的价——每一条 server 需要的窄读都得在门面上有名有
   姓，而不是让 server 顺手读一个字段。
-- **`ModelPins` 三个方法都要收。** 钉子不进编排层，于是每个打开形状的方法都多一个可选
+- **`ModelOptions` 三个方法都要收。** 模型选项不进编排层，于是每个打开形状的方法都多一个可选
   实参；这是「编排层不持宿主事实」的直接代价。
 - **守卫名单要跟着公开面长。** 今后 core 新增一个 server 不该碰的出口，守卫的禁名单就得
   加一行——漏加不报错，名单不是完备性证明，只是已知名单。
@@ -144,7 +160,7 @@ manager。
   构造函数上——**一字不动**；工具域那一半已由 0016 处理。被取代的是围绕它的旧叙述：这组
   进程级东西「由 hub 装配、在 hub 手里协调」。今天的装配是 `createSessionAgent()` 造好三只
   Manager（含 transport 的默认解析与 hooks 默认值的安装）再走构造器，编排层是它们在本
-  进程的唯一消费者，hub 贡献给构造的只有 homes、api 与 pins。0007 头部的取代者指针与
+  进程的唯一消费者，hub 贡献给构造的只有 homes、api 与模型选项。0007 头部的取代者指针与
   决定 6 的就地标注都指向本 ADR。
 - **[0016](0016-tool-manager-instance-table.md) 决定 7 的「hub 持表」那一半。** 原文
   「进程里只装配一只（hub 冷热两条路共用自己那只，`openAgent` 转交 `assemble` 造的那只）」
@@ -163,7 +179,7 @@ manager。
   observers、waiting、reaping、`HostedSession`、`opening` / `closing` 全留在 hub——「谁在
   持有这个会话」是传输层的问题，编排层不回答它。REST 命令面与 mux 帧一字不改。
 - **[0011](0011-agent-holds-session-state.md) 的会话状态表。** `Map<id, AgentState>`、
-  装配经 `Agent.open` 进表、`evict` / `drop` 出表、进程重启即清空——本 ADR 只把这张表的
+  装配经 `Agent.assembleInto` 进表、`evict` / `drop` 出表、进程重启即清空——本 ADR 只把这张表的
   读取面收成纯数据窄读，表的形态与出入口不动。
 - **[0016](0016-tool-manager-instance-table.md) 的实例表形态。** 一张常驻 `Map<name, Tool>`、
   四法公开面、引擎经它执行、单写者只增键——变的只是消费入口（编排层经它转发，hub 不再
@@ -178,4 +194,5 @@ manager。
 - **`OpenAgentOptions` 与 `openAgent()`。** 形状不动（本就是测试缝集合），唯一变化是
   `OpenAgentOptions.sessionManager` 字段成为死缝——工厂不再收 ledger，字段文档已注明它只服务于
   冷读；`Agent.sessionManager` 公开字段是另一回事，保持公开为冒烟的缝（口径见决定 6）。
-  `openAgent() == create + open` 的组合照旧。
+  `openAgent() == create + open` 的组合照旧——只是其中那步 open 如今经类 private 的门走
+  （见决定 2 的后续收口），组合本身没有拼出任何新动词。

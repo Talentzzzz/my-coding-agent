@@ -156,20 +156,21 @@ export class SessionApi {
 	}
 
 	/**
-	 * Which session a window with no anchor of its own should open.
+	 * Which session a window with no anchor of its own should open — `null` for "none, stay on the
+	 * welcome state".
 	 *
 	 * The server answers this rather than the client picking from the list, because the choice is the
-	 * server's: `--session` pins a conversation, and otherwise a new session is created — a launch
-	 * lands on the welcome state, not on whatever was last spoken in. A client that chose "the newest
-	 * file" would silently ignore the pin, and an empty history still answers with a session the
-	 * server has just created.
+	 * server's: `--session` pins a conversation, and otherwise the answer is the session the server
+	 * last created, or `null` — startup selects nothing, and the server never creates a session to
+	 * fill the answer. A client that chose "the newest file" would silently ignore the pin.
 	 *
 	 * The listing that comes back with it is left unread. The sidebar's rows come from the channel
 	 * whenever it is up, and this endpoint's copy is the fallback for when it is not — taking it
 	 * unconditionally would mean two writers for one table.
 	 */
-	async currentSession(): Promise<{ sessionId: string }> {
-		return this.sessionId("GET", "/api/sessions/current", undefined);
+	async currentSession(): Promise<{ sessionId: string | null }> {
+		const answer = await this.send<{ sessionId: string | null }>("GET", "/api/sessions/current", undefined);
+		return { sessionId: answer.sessionId };
 	}
 
 	/**

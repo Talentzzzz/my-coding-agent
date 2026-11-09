@@ -135,14 +135,20 @@ try {
 	const body = (await models.json()) as { models?: unknown[] };
 	console.log(`models ${models.status} count=${body.models?.length ?? 0}`);
 
-	// The landing session is the server's decision, not the client's: the pinned session must be the
-	// one the lane serves, which is what makes `--session` (and MY_AGENT_SESSION) visible in the UI.
-	// The old SSE form read this off the first stream frame; the mux form is the lane's first frame,
-	// and the connection-level frames — heartbeat, overview — never count as it.
+	// The landing is the server's decision, not the client's: startup selects nothing, so an
+	// unpinned boot answers `null` and the window stays on its welcome state, and `--session` (and
+	// MY_AGENT_SESSION) is the one road to a non-null answer — pinned further down. The session the
+	// sections below drive is the one an explicit creation returned.
 	const landing = await fetch(`${server.url}/api/sessions/current`);
-	const { sessionId } = (await landing.json()) as { sessionId: string };
+	const landingBody = (await landing.json()) as { sessionId: string | null };
 	const hubId = await server.hub.currentSessionId();
-	console.log(`current ${landing.status} sessionId=${sessionId} hub=${hubId} agrees=${sessionId === hubId}`);
+	console.log(`current ${landing.status} sessionId=${landingBody.sessionId} hub=${hubId}`);
+	check("startup selects nothing", landingBody.sessionId === null && hubId === null, `sessionId=${landingBody.sessionId}`);
+
+	const created = await request(server.url, "POST", "/api/sessions", undefined);
+	check("the creation landed", created.status === 201, String(created.status));
+	const sessionId = ((created.payload ?? {}) as { sessionId?: string }).sessionId ?? "";
+	check("the landing follows the explicit creation", (await server.hub.currentSessionId()) === sessionId, sessionId);
 
 	// The modes surface (ADR-0005): the patch replaces the list whole, the snapshot carries it back,
 	// and a name colliding with the built-in default's — or with another row's — is refused, not made
@@ -214,6 +220,21 @@ try {
 		check("the listener refuses connections after close", true);
 	}
 	await wire.close().catch(() => {});
+
+	// ---------------------------------------------------------------------------------------------
+	// The pin is the one road to a non-null landing: a boot with `--session` answers that id
+	// verbatim — whether anything lives there is the open's problem, not the landing's.
+	// ---------------------------------------------------------------------------------------------
+	process.stdout.write("a pinned boot lands on the pinned id\n");
+	const pinnedWorkDir = await mkdtemp(join(tmpdir(), "my-agent-boot-pin-"));
+	const pinned = await bootServer({ workDirAbsPath: pinnedWorkDir, port: 0, api: fake.api, sessionId: "pinned-session" });
+	try {
+		const answer = (await (await fetch(`${pinned.url}/api/sessions/current`)).json()) as { sessionId: string | null };
+		check("the pin is the landing", answer.sessionId === "pinned-session", String(answer.sessionId));
+	} finally {
+		await pinned.close();
+		await removeQuiet(pinnedWorkDir);
+	}
 
 	// ---------------------------------------------------------------------------------------------
 	// The child-process half: a real `main.ts`, a resident connection held open against it, and a

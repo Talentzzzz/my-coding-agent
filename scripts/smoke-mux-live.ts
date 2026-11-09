@@ -86,7 +86,11 @@ const server = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbea
 server.hub.setModelConfigs(modelRows);
 
 try {
-	const { sessionId } = await (await fetch(`${server.url}/api/sessions/current`)).json() as { sessionId: string };
+	// Startup selects nothing now, so the session this smoke drives is the one an explicit creation
+	// returned.
+	const created = await fetch(`${server.url}/api/sessions`, { method: "POST", headers: { "content-type": "application/json" } });
+	check("驱动会话已创建", created.status === 201, String(created.status));
+	const { sessionId } = await created.json() as { sessionId: string };
 
 	// A session that nobody has spoken in has no file and so no row (ADR-0006 §3) — the sidebar lists
 	// conversations, not intentions. One warm-up turn is what puts this session into the row store

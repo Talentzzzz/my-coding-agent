@@ -1193,11 +1193,20 @@ function main(): void {
 			headingTipDrawn = headingTip;
 			heading.title = headingTip;
 		}
-		const subtitleText = snapshot?.workDirAbsPath ?? (followed === undefined ? "连接中…" : followed);
+		const subtitleText =
+			snapshot?.workDirAbsPath ?? (followed !== undefined ? followed : state.reachable ? "未选择会话" : "连接中…");
 		if (subtitleText !== subtitleDrawn) {
 			subtitleDrawn = subtitleText;
 			subtitle.textContent = subtitleText;
 		}
+
+		// The welcome state has no session to compose into: the composer, its head row, and the status
+		// line are session-bound controls, so they stand down until a session is followed. The error
+		// bar stays — a connection problem is not a session's fact.
+		const welcome = followed === undefined;
+		composerHead.hidden = welcome;
+		composer.element.hidden = welcome;
+		statusBar.element.hidden = welcome;
 
 		// The branch entry follows the session's branch shape, which a baseline or a finished message
 		// can change, so the signature is the tree's identity and the three figures a label is cut
@@ -1880,10 +1889,11 @@ function main(): void {
 		} catch (error) {
 			report(error);
 		}
-		// Which session to land on is the server's decision — `--session` pins one, otherwise a new
-		// one is created and the pane opens on the welcome state — so the page asks rather than
-		// picking from the list. That question still goes over REST: it is about the server's own
-		// memory of the last active session, and the channel is a push channel with no command face.
+		// Which session to land on is the server's decision — `--session` pins one, otherwise the
+		// answer is whatever it last created, or `null` for "nothing, stay on the welcome state" — so
+		// the page asks rather than picking from the list. That question still goes over REST: it is
+		// about the server's own memory of the last active session, and the channel is a push channel
+		// with no command face.
 		//
 		// The open that follows waits for the channel to prove itself, because opening a session is an
 		// `open` frame and there is no read to fall back on. That wait is the one beat ADR-0010 books
@@ -1899,7 +1909,7 @@ function main(): void {
 			// later, supersede the click that was already on screen, and pull the pane back to a
 			// conversation the reader had just left. `openSeries` is zero only while nothing has been
 			// opened at all, which is exactly the question being asked here.
-			if (openSeries === 0) await openSession(sessionId);
+			if (sessionId !== null && openSeries === 0) await openSession(sessionId);
 		} catch (error) {
 			unreachable(error);
 		}

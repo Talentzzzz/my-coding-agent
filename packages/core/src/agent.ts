@@ -1,9 +1,9 @@
 import {
-	type ModelPins,
+	type ModelOptions,
 	assembleSession,
 	readSessionSnapshot,
 	type OpenAgentOptions,
-	type OpenSessionOptions,
+	type AssembleAgentStateOptions,
 } from "./assembly.ts";
 import {
 	type AssistantMessage,
@@ -231,7 +231,7 @@ export class Agent {
 	 *
 	 * One bag per session — the durable half, the settings the open resolved, the live half, the
 	 * subscribers — and the only thing this class holds between calls. States enter through
-	 * {@link Agent.open}, which assembles them over this class's own services first, and leave through
+	 * {@link Agent.assembleAgentStateBySession}, which assembles them over this class's own services first, and leave through
 	 * {@link Agent.evict} / {@link Agent.drop}: one writer, one deleter, and no caller in between.
 	 */
 	private readonly sessions = new Map<string, AgentState>();
@@ -263,7 +263,8 @@ export class Agent {
 
 	/**
 	 * Build one session's state and put it in the table. The only way in, and the only door that
-	 * assembles.
+	 * assembles — `assembleSession` plus the table: the assembly and the first-come-wins insertion
+	 * are one step, and the read-back below is why the two are not split.
 	 *
 	 * The two halves are one call on purpose. Assembly needs the transcript the caller chose — *which*
 	 * session to open is a host's question, not this class's — while everything else it reads (the
@@ -275,15 +276,21 @@ export class Agent {
 	 * a convention.
 	 *
 	 * First-come-wins: a state already in the table is kept, never replaced, because the one it would
-	 * replace holds the queues, the subscribers, and the run in flight (ADR-0007 §4) — and re-opening
+	 * replace holds the queues, the subscribers, and the run in flight (ADR-0007 §4) — and re-entering
 	 * a held id is the ordinary idempotent move, not an error. The return value is therefore the state
-	 * the table holds, not the one just built: under a concurrent open the assembly can lose the race,
-	 * and a caller must run on the winner (its queues are the ones a run drains), so that read-back is
+	 * the table holds, not the one just built: under a concurrent assembly the loser is dropped, and
+	 * a caller must run on the winner (its queues are the ones a run drains), so that read-back is
 	 * this method's rather than every caller's. A held id does not even assemble — the transcript
 	 * offered may be a different replay of the same file, and seeding a choice onto it would move
 	 * nothing anyone reads.
+	 *
+	 * The method is class-private on purpose: the outside world needs only two verbs, **read**
+	 * (`snapshotOf` / `readSessionSnapshot`) and **run** (`ensure` / `create`), and both leave the
+	 * choice of *when* an id is assembled, and over *which* bag, inside the class where the table
+	 * lives. The one sanctioned bypass is `openAgent` in `session-factory.ts`, the composition road
+	 * this class's own docs name as the second way in.
 	 */
-	async open(options: OpenSessionOptions): Promise<AgentState> {
+	private async assembleAgentStateBySession(options: AssembleAgentStateOptions): Promise<AgentState> {
 		const id = options.session.sessionId;
 		const held = this.sessions.get(id);
 		if (held !== undefined) return held;
@@ -294,7 +301,7 @@ export class Agent {
 		return this.sessions.get(id) ?? state;
 	}
 
-	/** First-come-wins insertion. {@link Agent.open} is its only caller, which is what it is for. */
+	/** First-come-wins insertion. {@link Agent.assembleAgentStateBySession} is its only caller, which is what it is for. */
 	private insert(state: AgentState): void {
 		if (this.sessions.has(state.session.sessionId)) return;
 		this.sessions.set(state.session.sessionId, state);
@@ -332,12 +339,14 @@ export class Agent {
 	/**
 	 * Whether the table holds a state for `id` — whether this process is holding the session.
 	 *
-	 * The public membership read of the table, for a caller that needs to branch before it reads: a
-	 * held session is written through its own bag, a cold one is a replay of its file, and the two
-	 * roads must be chosen before either is walked. Answering nothing about observers or claims —
-	 * those are other questions with other answers — it is only the table's membership.
+	 * The table's own membership read, class-internal: a held session is written through its own
+	 * bag, a cold one is a replay of its file, and the two roads must be chosen before either is
+	 * walked — the methods here ask this before they pick one. Answering nothing about observers or
+	 * claims — those are other questions with other answers — it is only the table's membership. The
+	 * membership question a caller outside the class asks is {@link Agent.exists}, which adds the
+	 * disk; holding is not a fact the facade reports.
 	 */
-	has(id: string): boolean {
+	private has(id: string): boolean {
 		return this.sessions.has(id);
 	}
 
@@ -350,7 +359,7 @@ export class Agent {
 	 * questions a host used to ask through the state object (the file path, the title, a message's
 	 * stamp), in pure data, and the smokes that still want the bag probe the table the way they probe
 	 * any private shape. A missing one is a wrong road rather than a state to invent — `has` is how a
-	 * caller asks first — and only {@link Agent.open} puts a state here.
+	 * caller asks first — and only {@link Agent.assembleAgentStateBySession} puts a state here.
 	 */
 	private agentState(id: string): AgentState {
 		const state = this.sessions.get(id);
@@ -395,17 +404,17 @@ export class Agent {
 	 *
 	 * Reading a transcript is not running a session, and this is where that stops being a slogan: the
 	 * cold road builds the same snapshot an open would have produced — through the same assembly, so
-	 * the pinned model and the derived tool and approval answers agree with the live road — without a
+	 * the model the open hands over and the derived tool and approval answers agree with the live road — without a
 	 * host, without a run, and without a claim. It deliberately touches no subscriber table and no
 	 * host: the whole point is that a read leaves no trace, so opening a session's history cannot
 	 * keep it alive, evict it, or cost what running it costs.
 	 *
 	 * An id that names nothing refuses inside the store's `open` — that is the 404, unchanged.
 	 */
-	async snapshotOf(id: string, pinned?: ModelPins): Promise<SessionSnapshot> {
+	async snapshotOf(id: string, modelOptions?: ModelOptions): Promise<SessionSnapshot> {
 		const held = this.sessions.get(id);
 		if (held !== undefined) return snapshotOf(held, this.services);
-		return readSessionSnapshot(this.coldOptions(this.sessionManager.open(id), pinned));
+		return readSessionSnapshot(this.coldOptions(this.sessionManager.open(id), modelOptions));
 	}
 
 	/**
@@ -453,27 +462,33 @@ export class Agent {
 	 * not handed out past a creation that could not build it. The id is the one the table actually
 	 * holds, read back rather than assumed, so a caller under a concurrent open runs on the winner.
 	 */
-	async create(workDirAbsPath: string, pinned?: ModelPins): Promise<string> {
+	async create(workDirAbsPath: string, modelOptions?: ModelOptions): Promise<string> {
 		const bag = createSession(workDirAbsPath);
-		const state = await this.open(this.openOptions(bag, bag.sessionSetting.workDirAbsPath, pinned));
+		const state = await this.assembleAgentStateBySession(this.openOptions(bag, modelOptions));
 		return state.session.sessionId;
 	}
 
 	/**
-	 * Adopt a session from disk: replay its file, assemble its state, and put the state in the table.
+	 * Make sure the session `id` names is held: held short-circuits, disk-backed adopts, and an id
+	 * nothing names refuses.
 	 *
-	 * The one road a disk-backed session enters the table. The read-back that gives the id is the
-	 * same first-come-wins read `open` makes: under a concurrent open the state this replay assembled
-	 * may lose the race to one already in the table, and the caller must run on the winner. An id no
-	 * file names refuses inside the store's `open` — the 404, unchanged.
+	 * The one way a session named by id enters or stays in the table — the held and the cold road
+	 * unified inside the method, the way {@link Agent.snapshotOf} unifies its own, so a caller never
+	 * branches on `has`: a held id returns as it is (the table's state is the one its queues, its
+	 * subscribers, and any run in flight hang on, and re-adopting must not move it), a disk-backed
+	 * one is replayed, assembled, and first-come-wins into the table, and the read-back that gives
+	 * the id is the same read `open` makes — under a concurrent open the caller runs on the winner.
+	 * An id neither the table nor a file names refuses inside the store's `open` — the 404,
+	 * unchanged.
 	 *
-	 * There is no write window to protect and no trace to leave on disk: a replay reads its file and
-	 * the assembly appends nothing, so adopting touches no file at all — the one thing it changes is
-	 * the table, and entering the table is the whole point.
+	 * The cold half has no write window to protect and no trace to leave on disk: a replay reads its
+	 * file and the assembly appends nothing, so adopting touches no file at all — the one thing it
+	 * changes is the table, and entering the table is the whole point.
 	 */
-	async adoptFromDisk(id: string, pinned?: ModelPins): Promise<string> {
+	async ensure(id: string, modelOptions?: ModelOptions): Promise<string> {
+		if (this.has(id)) return id;
 		const bag = this.sessionManager.open(id);
-		const state = await this.open(this.openOptions(bag, bag.sessionSetting.workDirAbsPath, pinned));
+		const state = await this.assembleAgentStateBySession(this.openOptions(bag, modelOptions));
 		return state.session.sessionId;
 	}
 
@@ -602,15 +617,15 @@ export class Agent {
 	}
 
 	/**
-	 * The options one transcript is assembled under when this class opens it: the transcript, its
-	 * directory, and the model the host pinned for the open. The services are this class's own by
-	 * construction — that is the guarantee `open`'s door rests on, and why they are absent here.
+	 * The options one transcript is assembled under when this class opens it: the transcript — which
+	 * carries its own working directory — and the model options the host handed to the open. The
+	 * services are this class's own by construction — that is the guarantee the assembly door rests
+	 * on, and why they are absent here.
 	 */
-	private openOptions(session: Session, workDirAbsPath: string, pinned?: ModelPins): OpenSessionOptions {
+	private openOptions(session: Session, modelOptions?: ModelOptions): AssembleAgentStateOptions {
 		return {
 			session,
-			workDirAbsPath,
-			...spreadPins(pinned),
+			...spreadModelOptions(modelOptions),
 		};
 	}
 
@@ -620,11 +635,10 @@ export class Agent {
 	 * snapshot taken after. The cold read sends nothing, so the transport rides along only to keep
 	 * the one builder honest — a session that changes when you open it is the bug this closes.
 	 */
-	private coldOptions(session: Session, pinned?: ModelPins): OpenAgentOptions {
+	private coldOptions(session: Session, modelOptions?: ModelOptions): OpenAgentOptions {
 		return {
 			session,
-			workDirAbsPath: session.sessionSetting.workDirAbsPath,
-			...spreadPins(pinned),
+			...spreadModelOptions(modelOptions),
 			sessionManager: this.sessionManager,
 			settings: this.settingsManager,
 			tools: this.tools,
@@ -1123,9 +1137,16 @@ export class Agent {
 	 * write recorded an abandonment as a choice, and the reopen that inherited them inherited a lie.
 	 * {@link Agent.abort} is the deliberate stop, and the denial is its answer; a process shutdown
 	 * and a reap that has already denied both land here.
+	 *
+	 * An id the table does not hold has nothing to stop and nothing to wait for, so close answers
+	 * immediately for one — the caller never branches on membership first. This is what absorbs the
+	 * "is a close still owed" re-check an eviction edge used to force: the edge may drop the state
+	 * between the question and the close, and a close that races it is simply a close of nothing.
 	 */
 	async close(id: string): Promise<void> {
-		this.agentState(id).live.activeRun?.abortController.abort();
+		const state = this.sessions.get(id);
+		if (state === undefined) return;
+		state.live.activeRun?.abortController.abort();
 		await this.settle(id);
 	}
 
@@ -2127,13 +2148,13 @@ export class Agent {
 	}}
 
 /**
- * The pinned half of an open's options, as the option object carries it: absent keys, never keys
- * whose value is `undefined` — a pin nobody named must be indistinguishable from no pin at all.
+ * The model half of an open's options, as the option object carries it: absent keys, never keys
+ * whose value is `undefined` — an option nobody named must be indistinguishable from no option at all.
  */
-function spreadPins(pinned: ModelPins | undefined): { model?: string; thinkingLevel?: string } {
+function spreadModelOptions(modelOptions: ModelOptions | undefined): { model?: string; thinkingLevel?: string } {
 	return {
-		...(pinned?.model === undefined ? {} : { model: pinned.model }),
-		...(pinned?.thinkingLevel === undefined ? {} : { thinkingLevel: pinned.thinkingLevel }),
+		...(modelOptions?.model === undefined ? {} : { model: modelOptions.model }),
+		...(modelOptions?.thinkingLevel === undefined ? {} : { thinkingLevel: modelOptions.thinkingLevel }),
 	};
 }
 

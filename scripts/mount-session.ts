@@ -43,12 +43,17 @@ export interface MountedSession {
 export async function mountSession(hub: SessionHub, options: MountOptions): Promise<MountedSession> {
 	const internals = hub as unknown as HubInternals;
 	const state = createSession(options.root);
-	// Open, not assemble-then-adopt: the state enters the hub's orchestrator through the same public
-	// door a production open uses, so the smoke seeds nothing the orchestrator does not know about —
-	// and the services it assembles over are the hub's own, which is what makes the mount invisible.
-	await hub.agent.open({
+	// Enter, not assemble-then-adopt: the state enters the hub's orchestrator through the same door a
+	// production assembly uses, so the smoke seeds nothing the orchestrator does not know about — and
+	// the services it assembles over are the hub's own, which is what makes the mount invisible. The
+	// door is class-private (`ensure` / `create` are the open-shaped verbs a host spells), so the
+	// mount reaches it like any other private half. The bag carries its own working directory, which
+	// is where the mount's `root` lands.
+	const door = hub.agent as unknown as {
+		assembleAgentStateBySession(options: { session: Session; model?: string; thinkingLevel?: string }): Promise<unknown>;
+	};
+	await door.assembleAgentStateBySession({
 		session: state,
-		workDirAbsPath: options.root,
 		...(options.model === undefined ? {} : { model: options.model }),
 	});
 	const host = new HostedSession(state.sessionId);

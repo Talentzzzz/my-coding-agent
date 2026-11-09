@@ -123,7 +123,6 @@ function sidOf(session: Agent): string {
 async function openSession(overrides: { approval?: Record<string, boolean>; api?: ChatTransport } = {}): Promise<Agent> {
 	const state = createSession(root);
 	const session = await openAgent({
-		workDirAbsPath: root,
 		session: state,
 		api: overrides.api ?? fake.api,
 		model: modelName,

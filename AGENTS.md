@@ -126,13 +126,18 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 - **queue（队列）** —— 一次运行正在流式时被接受的消息：`steer` 在下一个取走点注入，`followUp` 等这一
   轮结束。
 - **assembly（装配）** —— `assembleSession(services, options)` 收**必填**的三服务 + 窄的
-  `OpenSessionOptions`，按会话先、设置后的链（`fillSession` → 设置现读 → `createLive`）装配出一份
-  `AgentState`——装配产物**就是**状态（ADR-0011），只装配、不激活；唯一调用者是 `Agent.open`（`adopt`
-  已删，装配并进门里，服务由此只能是编排层自己的，不再是包的公开面）。`createSessionAgent()` 是另一半：
+  `AssembleAgentStateOptions`（原名 `OpenSessionOptions`；只有 transcript 袋子与模型档位，
+  工作目录是袋子自己的 `sessionSetting.workDirAbsPath`，没有覆盖参数），按会话先、设置后的链
+  （`fillSession` → 设置现读 → `createLive`）装配出一份
+  `AgentState`——装配产物**就是**状态（ADR-0011），只装配、不激活；唯一调用者是 `Agent.assembleInto`
+  （原名 `open`，`adopt` 已删，装配并进门里，服务由此只能是编排层自己的，不再是包的公开面），而
+  `assembleInto` 本身已收成类私有：公开面的 open 形状动词只剩 `ensure` / `create`（跑）与
+  `snapshotOf` / `readSessionSnapshot`（读），何时装配、递哪只袋子进表不再是外界的动词。
+  `createSessionAgent()` 是另一半：
   收 `{ settingsHome?, modelsHome?, api? }`（外加 test-only 的 `settings` / `tools` 两缝）并**自己造三只
   Manager**——Manager 不再是调用者的决定（[ADR-0017](docs/adr/0017-agent-facade.md)）——组成一个
-  **编排层**，进程只需要一份（hub 构造时建它，递的只是 homes 与 api；打开钉子 `ModelPins` 随
-  每次打开实参现取），测试与
+  **编排层**，进程只需要一份（hub 构造时建它，递的只是 homes 与 api；打开的模型选项
+  `ModelOptions` 随每次打开实参现取），测试与
   只跑一个会话的调用者用 `openAgent() == create + open` 自组一份。`Agent` 按 id 键控
   持有各会话的状态——公开方法收 id、从状态现取：durable 半是 `state.session`（账本重放出的袋子），
   live 半是 `state.live`；状态对象不出 core，server 侧读的是窄读一族（`titleOf` / `timestampOf`
@@ -141,7 +146,7 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 - **AgentState（会话状态）** —— 一个会话的全部状态是一件东西（ADR-0011）：`state.session`（账本重放出的
   durable 半）、两个订阅集合，与 `state.live`（`Live`：两条
   队列、在飞运行、partial、重试与挂起位——「进行中且磁盘上没有」的东西）。由 `Agent` 按 id 键控持有，
-  装配经 `Agent.open` 进表、`evict` / `drop` 是唯一出口，进程重启即清空；类型不出 core，server 侧只见
+  装配经 `Agent.assembleInto` 进表、`evict` / `drop` 是唯一出口，进程重启即清空；类型不出 core，server 侧只见
   纯数据窄读（ADR-0017）。
 - **workDirAbsPath（当前工作目录）** —— 一个会话的相对路径基准与命令起点，**按会话**，从会话自己快照的
   setting 字段取（`session.sessionSetting.workDirAbsPath`，绝对）。它**不是围栏**：绝对路径原样接受，`..` 也能走出去，工具

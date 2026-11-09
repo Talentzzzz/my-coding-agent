@@ -425,12 +425,15 @@ try {
 	check("it settled", await settleRun(rig.url, waitedId));
 	check("the host was reaped", await until(() => !rig.hub.live.includes(waitedId), 10_000), rig.hub.live.join(","));
 	// Point-in-time, read after the reap has finished: the tail's eviction attempt ran gated on the
-	// wait, and the wait was standing, so the state is still here.
-	check("but the wait kept the state in the table", rig.hub.agent.has(waitedId), String(rig.hub.agent.has(waitedId)));
+	// wait, and the wait was standing, so the state is still here. Membership in the table is the
+	// orchestrator's class-private read; the smoke crosses it with one cast, the same road the other
+	// smokes take to `assembleAgentStateBySession`.
+	const table = rig.hub.agent as unknown as { has(id: string): boolean };
+	check("but the wait kept the state in the table", table.has(waitedId), String(table.has(waitedId)));
 
 	wire.send({ type: "unwait", sessionId: waitedId });
 	wire.send({ type: "unwait", sessionId: waitedId });
-	check("releasing the wait evicted it", await until(() => !rig.hub.agent.has(waitedId), 5_000), String(rig.hub.agent.has(waitedId)));
+	check("releasing the wait evicted it", await until(() => !table.has(waitedId), 5_000), String(table.has(waitedId)));
 
 	// A wait reported by a connection that then dies is given up with the connection — a waiter that
 	// will never be answered must not hold a state forever. This one rides no subscription at all,
@@ -444,9 +447,9 @@ try {
 	check("the prompt was accepted", (await prompt(rig.url, mortalId, "run under a dying connection's wait")) === 202);
 	check("it settled", await settleRun(rig.url, mortalId));
 	check("the host was reaped under the dying connection's wait", await until(() => !rig.hub.live.includes(mortalId), 10_000), rig.hub.live.join(","));
-	check("and that wait held the state too", rig.hub.agent.has(mortalId), String(rig.hub.agent.has(mortalId)));
+	check("and that wait held the state too", table.has(mortalId), String(table.has(mortalId)));
 	await dying.close().catch(() => {});
-	check("the connection's death released its wait", await until(() => !rig.hub.agent.has(mortalId), 5_000), String(rig.hub.agent.has(mortalId)));
+	check("the connection's death released its wait", await until(() => !table.has(mortalId), 5_000), String(table.has(mortalId)));
 
 	// Tolerance, the same kind sections 3 and 4 granted the other frames: a wait for a session this
 	// server does not know is recorded (it costs one table row and one `unwait`), not refused — and

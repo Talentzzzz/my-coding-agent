@@ -251,7 +251,6 @@ async function openSession(
 	const state = createSession(root);
 	const sessionSettings = inMemorySettingManager(settings(overrides), run.models ?? rows);
 	const session = await openAgent({
-		workDirAbsPath: root,
 		session: state,
 		api: run.api ?? fake.api,
 		model,
@@ -989,7 +988,6 @@ async function exerciseAfterToolHook(): Promise<void> {
 	recordRequests(sentReplay, [fakeAssistantMessage("replayed")]);
 	const replayedSettings = inMemorySettingManager(settings(), rows);
 	const replayed = await openAgent({
-		workDirAbsPath: root,
 		session: reopenedFile,
 		api: fake.api,
 		settings: replayedSettings,

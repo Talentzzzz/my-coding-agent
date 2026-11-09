@@ -7,7 +7,7 @@ import {
 	type ChatTransport,
 	createSessionAgent,
 	type ModelConfig,
-	type ModelPins,
+	type ModelOptions,
 	resolvePath,
 	sessionDir,
 	type SessionSnapshot,
@@ -16,7 +16,7 @@ import {
 export interface HubOptions {
 	/** The directory the process was started in; new sessions take it as their working directory. */
 	workDirAbsPath: string;
-	/** The model every session this hub opens is pinned to, when the host pinned one at all. */
+	/** The model every session this hub opens starts with, when the host gave one at all. */
 	model?: string;
 	thinkingLevel?: string;
 	/** Session every connection lands on when it does not name one. */
@@ -199,6 +199,13 @@ export class SessionHub {
 	private readonly waiting = new Map<string, Set<() => void>>();
 	/** The process-level listeners, told about every session this process gains or loses. */
 	private readonly hostListeners = new Set<HostListener>();
+	/**
+	 * What an unnamed landing answers with ({@link currentSessionId}): the last explicitly created
+	 * session, or nothing yet — `undefined` is the welcome state's server-side half. Nothing here
+	 * creates a session; the only writers are the explicit creations (`newSession`, a fork), and
+	 * history is the sidebar's business: resuming it is a click on a row, not something the server
+	 * guesses.
+	 */
 	private current?: Promise<string>;
 
 	constructor(options: HubOptions) {
@@ -214,8 +221,8 @@ export class SessionHub {
 		});
 	}
 
-	/** The model every open is pinned to, when the host pinned one at all. */
-	private get pins(): ModelPins {
+	/** The model options every open is made with, when the host gave any at all. */
+	private get modelOptions(): ModelOptions {
 		return {
 			...(this.options.model === undefined ? {} : { model: this.options.model }),
 			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),
@@ -296,10 +303,10 @@ export class SessionHub {
 	 * read cold, and the cold road is the facade's: one replay, no registration, the bag dropped there.
 	 */
 	async snapshotOf(id: string): Promise<SessionSnapshot> {
-		// The held and the cold road are one method on the orchestrator now, and the pins ride along
-		// so a cold read shows the model an open would have pinned. The read leaves no trace either
-		// way: no claim, no hosts, nothing appended.
-		return this.agent.snapshotOf(id, this.pins);
+		// The held and the cold road are one method on the orchestrator now, and the model options ride
+		// along so a cold read shows the model an open would have been made with. The read leaves no
+		// trace either way: no claim, no hosts, nothing appended.
+		return this.agent.snapshotOf(id, this.modelOptions);
 	}
 
 	/**
@@ -340,15 +347,19 @@ export class SessionHub {
 	}
 
 	/**
-	 * The id a connection lands on when it does not name one.
+	 * The id a connection lands on when it does not name one, or `null` for "nothing to land on".
 	 *
 	 * A client asks for this instead of choosing for itself, because the policy belongs to the
-	 * server: `--session` pins one, and otherwise the first caller creates a session. A client that
+	 * server: `--session` pins one, and otherwise the answer is whatever this process last created
+	 * or was told to point at — or `null`, meaning the window stays on its welcome state with
+	 * nothing selected. Nothing here creates a session: startup selects nothing, and a client that
 	 * picked "the newest file" would silently ignore the pin and show a different conversation from
 	 * the one the server is serving.
 	 */
-	currentSessionId(): Promise<string> {
-		return this.currentId();
+	currentSessionId(): Promise<string | null> {
+		if (this.options.sessionId !== undefined) return Promise.resolve(this.options.sessionId);
+		if (this.current === undefined) return Promise.resolve(null);
+		return this.current;
 	}
 
 	/**
@@ -357,8 +368,8 @@ export class SessionHub {
 	 * Every path out of here either returns a session already in the map or waits for one being
 	 * opened or closed on the same id, so two loops can never end up on one transcript.
 	 */
-	async claim(sessionId?: string): Promise<HostedSession> {
-		const id = sessionId ?? (await this.currentId());
+	async claim(sessionId: string): Promise<HostedSession> {
+		const id = sessionId;
 
 		const existing = this.hosts.get(id);
 		if (existing) return this.hold(existing);
@@ -525,7 +536,7 @@ export class SessionHub {
 	 */
 	async newSession(workDirAbsPath?: string): Promise<string> {
 		const absRoot = await workDirAbsPathForCreate(workDirAbsPath ?? this.workDirAbsPath);
-		const id = await this.agent.create(absRoot, this.pins);
+		const id = await this.agent.create(absRoot, this.modelOptions);
 		this.current = Promise.resolve(id);
 		this.announceHost(id, undefined);
 		return id;
@@ -598,12 +609,11 @@ export class SessionHub {
 	 * against what remains rather than answering with a session that no longer exists.
 	 */
 	async remove(sessionId: string): Promise<void> {
-		// A session this process holds answers `has` from the table; the facade is what answers for
-		// one it does not. A session created here and never spoken in has no file: forgetting the
-		// held state is the whole removal, and there is nothing on disk for the facade to delete. An
-		// id this process never heard of still goes to the facade, so its refusal stays the 404 it
-		// always was.
-		const held = this.agent.has(sessionId);
+		// Holding is the table's own fact and not the facade's to report, so this branch reads the two
+		// membership answers the facade does give: `isOnDisk` for the file, `exists` for the id at all.
+		// A session created here and never spoken in has no file: forgetting the held state is the
+		// whole removal, and there is nothing on disk for the facade to delete. An id this process
+		// never heard of still goes to the facade, so its refusal stays the 404 it always was.
 		const onDisk = this.agent.isOnDisk(sessionId);
 		const hosted = this.hosts.get(sessionId);
 		if (hosted !== undefined) {
@@ -618,9 +628,10 @@ export class SessionHub {
 				for (const observer of this.observers.get(sessionId) ?? []) observer(undefined);
 				this.announceHost(sessionId, undefined);
 				// The observers just told may tear their subscriptions down on the spot, and the last one
-				// out fires the eviction edge — which finds no host and drops the state first. A close is
-				// only owed to a state still in the table; the drop below answers `false` for the rest.
-				if (this.agent.has(sessionId)) await this.agent.close(sessionId);
+				// out fires the eviction edge — which finds no host and drops the state first. Close is
+				// answered immediately for an id the table no longer holds; the drop below answers
+				// `false` for the rest.
+				await this.agent.close(sessionId);
 				// The file removal rides inside the same slot: a claim that waited on `closing` resumes
 				// only after the file is gone, so it finds no file instead of reopening one mid-delete.
 				// A session that never spoke has no file, and asking for one would be asking for nothing.
@@ -637,7 +648,7 @@ export class SessionHub {
 			} finally {
 				this.closing.delete(sessionId);
 			}
-		} else if (onDisk || !held) {
+		} else if (onDisk || !this.agent.exists(sessionId)) {
 			await this.agent.removeFromDisk(sessionId);
 		}
 		this.current = undefined;
@@ -684,12 +695,10 @@ export class SessionHub {
 	 * the state is keyed by.
 	 */
 	private async open(id: string): Promise<HostedSession> {
-		// The held state first, the disk second: a session created a moment ago has no file to find,
-		// and one already held must not be re-assembled — the table's state is the one its queues,
-		// its subscribers, and any run in flight hang on. A disk-backed one not held yet is adopted
-		// from its file; under a concurrent open the caller runs on the winner rather than on a
-		// rejected assembly, which is what the facade's read-back of the id guarantees.
-		if (!this.agent.has(id)) await this.agent.adoptFromDisk(id, this.pins);
+		// The held and the disk road are one call on the orchestrator: a session created a moment ago
+		// has no file to find and one already held must not be re-assembled, and `ensure` branches on
+		// both inside — the hub never asks how the table is organized.
+		await this.agent.ensure(id, this.modelOptions);
 		const host = new HostedSession(id);
 		this.hosts.set(id, host);
 		// Observers first, then the listeners: a subscriber told "a host opened" and reaching for the
@@ -740,9 +749,10 @@ export class SessionHub {
 			this.announceHost(host.id, undefined);
 			// The observers just told may tear their subscriptions down on the spot, and the last one
 			// out fires the eviction edge — which now finds no host in the way and may have dropped the
-			// state already. A close is only owed to a state still in the table; an edge that got there
-			// first did the same work this tail would have.
-			if (this.agent.has(host.id)) {
+			// state already. Close answers immediately for an id the table no longer holds, so the tail
+			// runs whatever the edge did: an edge that got there first did the same work this would
+			// have, only sooner.
+			{
 				const closing = this.agent.close(host.id);
 				this.closing.set(host.id, closing);
 				try {
@@ -758,8 +768,8 @@ export class SessionHub {
 				// reading is what makes that a rule — and the wait is the hub's fourth criterion (issue
 				// 13): a caller still waiting for the run's result keeps the state in the table, and
 				// the wait's release is the edge that evicts it once the last one has been answered.
-				// The close above still happens — the run is settled, so it stops nothing, and the
-				// host's road out is the claims' to decide, not a wait's.
+				// Evict answers `false` for a state the edge already dropped, so the delete needs no
+				// membership branch of its own.
 				if (!this.observers.has(host.id) && !this.waiting.has(host.id)) this.agent.evict(host.id);
 			}
 		} finally {
@@ -767,25 +777,6 @@ export class SessionHub {
 		}
 	}
 
-	/**
-	 * The session a connection lands on when it does not name one.
-	 *
-	 * Resolved once per process, as a promise so two connections arriving together cannot both create
-	 * a session. `--session` pins it, and otherwise the caller gets a new one — a launch opens on the
-	 * welcome state even in a directory full of history, and the session a page reload lands on is
-	 * that same one because this is memoised. History is the sidebar's business: resuming it is a
-	 * click on a row, not something the server guesses.
-	 * `newSession()` moves it.
-	 */
-	private currentId(): Promise<string> {
-		this.current ??= this.resolveCurrentId();
-		return this.current;
-	}
-
-	private async resolveCurrentId(): Promise<string> {
-		if (this.options.sessionId !== undefined) return this.options.sessionId;
-		return this.agent.create(this.workDirAbsPath, this.pins);
-	}
 }
 
 /**

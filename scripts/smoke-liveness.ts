@@ -90,8 +90,11 @@ const client = new MuxClient(
 );
 
 try {
-	const current = await fetch(`${server.url}/api/sessions/current`);
-	watchId = ((await current.json()) as { sessionId: string }).sessionId;
+	// Startup selects nothing now, so the session this smoke watches is the one an explicit creation
+	// returned — the watched session never runs, so the transport stays unscripted.
+	const created = await fetch(`${server.url}/api/sessions`, { method: "POST", headers: { "content-type": "application/json" } });
+	check("the watched session was created", created.status === 201, String(created.status));
+	watchId = ((await created.json()) as { sessionId: string }).sessionId;
 
 	// ---------------------------------------------------------------------------------------------
 	// 1. Live is proven, not assumed: the channel goes live on the first frame, not the handshake.

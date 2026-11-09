@@ -169,8 +169,10 @@ try {
 	process.stdout.write("one session per id\n");
 	// The id is asked for first and then claimed by name, which is the only shape production has: a
 	// request never omits the id, so "which session is current" is `GET /api/sessions/current`'s
-	// question and not the claim's.
-	const landing = await hub.currentSessionId();
+	// question and not the claim's. Startup selects nothing — the landing answer is `null` until an
+	// explicit creation happens, and the session below is claimed by the id that creation returned.
+	check("nothing is selected before anything is created", (await hub.currentSessionId()) === null);
+	const landing = await hub.newSession();
 	const first = await hub.claim(landing);
 	const second = await hub.claim(landing);
 	check("two connections with no id share one entry", entryOf(hub.agent, first.id) === entryOf(hub.agent, second.id));
@@ -208,8 +210,8 @@ try {
 
 	process.stdout.write("new_session moves the landing spot\n");
 	const created = await hub.newSession();
-	const landed = await hub.claim(await hub.currentSessionId());
-	check("an unnamed claim lands on the newest session", landed.id === created, `${landed.id} vs ${created}`);
+	const landed = await hub.claim(created);
+	check("the landing follows the newest session", (await hub.currentSessionId()) === created && landed.id === created, `${landed.id} vs ${created}`);
 
 	process.stdout.write("a fork is the branch up to one entry\n");
 	const parentId = await hub.newSession();
@@ -470,7 +472,6 @@ try {
 		const state = createSession(settingsRoot);
 		const sessionId = state.sessionId;
 		const options = {
-			workDirAbsPath: settingsRoot,
 			session: state,
 			settings,
 		};
@@ -538,7 +539,7 @@ try {
 		// caller is promised, and they hold whatever the read did.
 		let claims = 0;
 		const claim = http.hub.claim.bind(http.hub);
-		http.hub.claim = async (sessionId?: string) => {
+		http.hub.claim = async (sessionId: string) => {
 			claims += 1;
 			return claim(sessionId);
 		};
@@ -893,12 +894,16 @@ try {
 	{
 		const agent = createSessionAgent({ settings: new SettingManager({ models: [] }) });
 		const session = createSession(tmpdir());
-		const state = await agent.open({ session });
+		// The door is class-private (`ensure` / `create` are the open-shaped verbs a caller spells);
+		// this block exercises the table itself — unborn bag, first-come-wins, membership — so it
+		// reaches in the same way `entryOf` does, the cast the one road across.
+		const door = agent as unknown as { assembleAgentStateBySession(options: { session: Session }): Promise<AgentState>; has(id: string): boolean };
+		const state = await door.assembleAgentStateBySession({ session });
 		check("open is the one way in, and the id answers it", entryOf(agent, session.sessionId) === state);
-		check("re-opening an id keeps the state already there", (await agent.open({ session })) === state);
+		check("re-opening an id keeps the state already there", (await door.assembleAgentStateBySession({ session })) === state);
 		check("an unborn session refuses to be evicted", agent.evict(session.sessionId) === false);
 		check("drop removes the state whatever it holds", agent.drop(session.sessionId) === true && agent.drop(session.sessionId) === false);
-		check("an id no longer in the table answers nothing", !agent.has(session.sessionId));
+		check("an id no longer in the table answers nothing", !door.has(session.sessionId));
 	}
 
 	process.stdout.write("a pair this build cannot open is deleted, not kept\n");

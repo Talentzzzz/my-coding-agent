@@ -67,19 +67,19 @@ my-coding-agent/
 
 ## 装配与设置
 
-`Agent` 只用被交给它的东西，别的什么也不用：构造只收**服务**——会话管理器、配置（`SettingManager`，设置与模型行共用的无状态门面）、工具表（`ToolManager`）、传输层、hook 表面与提示词构建器——它的每个公开方法都以会话 id 打头，每样数据在用到它的那一行向属主现取：durable 的一半是 `state.session`（打开时 `fillSession` 重放出的账本袋子），live 的一半是 `state.live`（两条队列、在飞运行、partial、重试与挂起位），订阅集合是两个 listener 集合——一份状态是一件东西（[ADR-0011](adr/0011-agent-holds-session-state.md)）。这六个构造字段由 `createSessionAgent()` 现造后递进（见下），递东西的手不是 hub。状态经 `Agent.open` 装配并进表、经 `Agent.evict` / `Agent.drop` 出表；工作目录从会话自己的快照 setting 读（`session.sessionSetting.workDirAbsPath`），模型选择记在同一处、由装配先把选择放到上面（见*输入框的模型座位*）。它不读设置文件、不构建工具、也不挑模型（项目指令 `AGENTS.md` 是每次请求现读的提示词输入，本身不进状态），所以打开一个会话和恢复一个会话是同一条链（装配出状态、经 open 进表，[ADR-0006](adr/0006-stateless-session-architecture.md) §2；重放出的账本状态是可从磁盘重建的缓存，见*SessionManager 是真相之源*）。
+`Agent` 只用被交给它的东西，别的什么也不用：构造只收**服务**——会话管理器、配置（`SettingManager`，设置与模型行共用的无状态门面）、工具表（`ToolManager`）、传输层、hook 表面与提示词构建器——它的每个公开方法都以会话 id 打头，每样数据在用到它的那一行向属主现取：durable 的一半是 `state.session`（打开时 `fillSession` 重放出的账本袋子），live 的一半是 `state.live`（两条队列、在飞运行、partial、重试与挂起位），订阅集合是两个 listener 集合——一份状态是一件东西（[ADR-0011](adr/0011-agent-holds-session-state.md)）。这六个构造字段由 `createSessionAgent()` 现造后递进（见下），递东西的手不是 hub。状态经 `Agent.assembleInto`（类私有，装配并进表）进表、经 `Agent.evict` / `Agent.drop` 出表——公开面上的 open 形状动词只有 `ensure` / `create`（跑）与 `snapshotOf` / `readSessionSnapshot`（读），何时装配、递哪只 transcript 袋子进表不是调用方的动词（[ADR-0017](adr/0017-agent-facade.md) 决定 2）；工作目录从会话自己的快照 setting 读（`session.sessionSetting.workDirAbsPath`），模型选择记在同一处、由装配先把选择放到上面（见*输入框的模型座位*）。它不读设置文件、不构建工具、也不挑模型（项目指令 `AGENTS.md` 是每次请求现读的提示词输入，本身不进状态），所以打开一个会话和恢复一个会话是同一条链（装配出状态、经 assembleInto 进表，[ADR-0006](adr/0006-stateless-session-architecture.md) §2；重放出的账本状态是可从磁盘重建的缓存，见*SessionManager 是真相之源*）。
 
 构造只收服务这件事有一条直接的后果：**一个进程只需要一个编排层**。hub 在构造时以一行 `createSessionAgent({ homes, api })` 建它一次，此后每个会话都经它、以 id 调用（[ADR-0017](adr/0017-agent-facade.md)：hooks、transport、提示词构建函数是进程级不可变配置，不是会话状态；工具表是同一类构造注入的进程级东西，只是它可增键，[ADR-0016](adr/0016-tool-manager-instance-table.md)）；而"想独占一个会话"的调用者——一个 smoke、或只跑一个会话的调用方——自己组一个，两条路走的是同一对函数：
 
 ```
 assembleSession(services, { session, workDirAbsPath?, … })                                # 装配出一份 AgentState（只装配、不激活）
 createSessionAgent({ settingsHome?, modelsHome?, api?, settings?, tools? })               # 一个编排层，三只 Manager 由它自己造（后两缝仅测试）；默认 hooks 已装
-        -> agent.open(options)  -> agent.prompt(sessionId, …)   # 状态经 open 入表；公开方法一律以 id 打头
+        -> agent.assembleInto(options)  -> agent.prompt(sessionId, …)   # 状态经 assembleInto 入表；公开方法一律以 id 打头
 
-openAgent(options) == createSessionAgent(…) + agent.open(options)   # 一次性的那对，给测试与子会话
+openAgent(options) == createSessionAgent(…) + agent.assembleInto(options)   # 一次性的那对，给测试与子会话
 ```
 
-`openAgent()` / `createSessionAgent()`（`core/src/session-factory.ts`）与 `assembleSession()`（`core/src/assembly.ts`）负责向外伸手。三只 Manager 不再是调用者的决定（[ADR-0017](adr/0017-agent-facade.md)）：工厂照 homes 现造它们，两个 test-only 缝（`settings` / `tools`）除外。"要打开**哪一个**会话"仍是宿主的问题，但答案现在是打给编排层公开面的一个方法：hub 用 `create` / `adoptFromDisk` 回答它，测试在 `openAgent` 的 `session` 上递一只内存里的 transcript。要自己的设置的冒烟在临时 homes 上播种（一只一次性 `SettingManager` 写、编排层读同一份文件），完全不碰 `~/.my-agent/settings.json`。模型及其 level 在任何地方都遵循同一套优先级：调用者指定的 → transcript 记录的 → `off`（没人要求过，就不要求）。
+`openAgent()` / `createSessionAgent()`（`core/src/session-factory.ts`）与 `assembleSession()`（`core/src/assembly.ts`）负责向外伸手。三只 Manager 不再是调用者的决定（[ADR-0017](adr/0017-agent-facade.md)）：工厂照 homes 现造它们，两个 test-only 缝（`settings` / `tools`）除外。"要打开**哪一个**会话"仍是宿主的问题，但答案现在是打给编排层公开面的一个方法：hub 用 `create` / `ensure` 回答它，测试在 `openAgent` 的 `session` 上递一只内存里的 transcript。要自己的设置的冒烟在临时 homes 上播种（一只一次性 `SettingManager` 写、编排层读同一份文件），完全不碰 `~/.my-agent/settings.json`。模型及其 level 在任何地方都遵循同一套优先级：调用者指定的 → transcript 记录的 → `off`（没人要求过，就不要求）。
 
 设置与模型行共用一只 `SettingManager`（`core/src/setting-manager.ts`），它是磁盘的**唯一**入口：无状态门面、没有任何缓存，每个方法现读全局与目录两份 `settings.json`（ADR-0011 修订节）。编排层读它、控制器经编排层公开面读它（[ADR-0017](adr/0017-agent-facade.md)）——一个进程一扇门，要自己的设置的冒烟在临时 homes 上播种（见上）。`applyConfig` 搬运会话自己的东西——两条队列的模式（队列住在 `state.live` 里，循环只在取走点拉取）——而把值经 manager 写回文件。模型和 thinking level 根本不在补丁里：两者都属于某一次对话，也都随使用它们的消息一起到达（见*输入框的模型座位*）。
 
@@ -372,7 +372,7 @@ SessionManager.forkFrom(sourcePathInput, targetCwdInput, entryId, sessionDirInpu
 
 `GET /api/directories` 扫描 agent home 的会话目录，所以侧边栏可以按目录分组，尽管本进程是**恰好**在其中一个之上启动的；从另一个分组打开会话要使用该会话自己快照里的 `workDir`。`PATCH /api/settings` 刻意比 `PATCH /api/sessions/{id}` 更窄：主题、字号、审批集合、全局默认工具集在任何会话存在之前就要读，所以它们不能住在某一个会话上。
 
-表里两行与会话的打开有关，而**打开**都不是它们做的。`GET /api/sessions/{id}` 是一次**读取**——脚本、诊断、以及任何不是窗口的客户端用得上它，窗口从不发它（打开会话就是一次 `open` 帧，基线是那个问题的全部答案，[ADR-0010](adr/0010-open-session-over-mux.md)）。`GET /api/sessions/current` 回答的是"这台机器上一次在看哪个会话"——`--session` 钉住一个，否则新建一个（开窗落在欢迎态，历史归侧边栏）——窗口在页面加载时问它一次，只拿它当**起点**：该开哪一个。打开仍是那一帧 `open`，它自己什么都不画；一个照着它去猜并且照着画的客户端才会静默显示与服务器正在服务的**不同**的对话。所以它不违背"导航不读"这条：读的是"开哪个"，画的从来只有基线。
+表里两行与会话的打开有关，而**打开**都不是它们做的。`GET /api/sessions/{id}` 是一次**读取**——脚本、诊断、以及任何不是窗口的客户端用得上它，窗口从不发它（打开会话就是一次 `open` 帧，基线是那个问题的全部答案，[ADR-0010](adr/0010-open-session-over-mux.md)）。`GET /api/sessions/current` 回答的是"该落在哪一个会话上"——`--session` 钉住一个，否则是本进程最近一次显式创建（新建或 fork）的会话，或 `null`：**启动不选中任何会话**，服务器不造一个来填答案，窗口停在欢迎态（输入框随之隐藏），历史归侧边栏——窗口在页面加载时问它一次，只拿它当**起点**：该开哪一个。打开仍是那一帧 `open`，它自己什么都不画；一个照着它去猜并且照着画的客户端才会静默显示与服务器正在服务的**不同**的对话。所以它不违背"导航不读"这条：读的是"开哪个"，画的从来只有基线。
 
 路径参数在控制器看到它们之前按段做百分号解码，所以一个不透明的 id——工具调用 id 可能含冒号——能安然走完这段路而不会被二次编码。失败是 JSON——`{ error }`——配上说明发生了什么的 status：`404` 表示 id 不是会话，`400` 表示请求体不是 JSON 或字段类型不对，`409` 表示会话拒绝的一次变更（未知工具名、没有任何行提供的模型），或一个不是待回答审批的 `toolCallId`——会话存在、请求合法，但此刻收不下这个答案，`405` 带 `Allow` 表示该路径在另一个动词下存在。审批端点只在答案真的被收下时才记入答案表（只读检查在 `onApproval` 之前），所以一次被 409 拒掉的请求不会污染任何一条订阅还在展示的审批的差值。
 

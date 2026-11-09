@@ -1,6 +1,6 @@
 import { anthropicMessages, type ChatTransport } from "./llm/index.ts";
 import { Agent } from "./agent.ts";
-import type { OpenAgentOptions } from "./assembly.ts";
+import type { AssembleAgentStateOptions, OpenAgentOptions } from "./assembly.ts";
 import { buildSystemPrompt } from "./context/system-prompt.ts";
 import { createHooks, type Hooks } from "./hooks.ts";
 import { SessionManager } from "./session/session-manager.ts";
@@ -124,7 +124,7 @@ function installDefaultHooks(hooks: Hooks, session: Agent): void {
  * act, whichever of the two roads is taken.
  *
  * The options are a test-seam collection on purpose: the settings and tool seams ride straight
- * through to the factory, the transcript and the pinned model go to `open`, and nothing here builds
+ * through to the factory, the transcript and the model options go to `assembleAgentStateBySession`, and nothing here builds
  * a manager the orchestrator does not keep.
  */
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
@@ -133,9 +133,12 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 		...(options.tools === undefined ? {} : { tools: options.tools }),
 		...(options.api === undefined ? {} : { api: options.api }),
 	});
-	// The state enters the orchestrator's table here, through the same door the hub uses: the
-	// orchestrator was built first and reads nothing at construction, so the order — factory, agent,
-	// open — is the only one there is.
-	await agent.open(options);
+	// The state enters the orchestrator's table here, through the same door the hub uses — which is
+	// class-private now (`assembleAgentStateBySession`): the open-shaped verbs a caller spells are
+	// `ensure` and `create`, and TypeScript has no way to say "core-internal", so the one sanctioned
+	// composition road reaches the door the way a smoke reaches any other private half. The cast is
+	// the seam, and this file is its only production-side reader.
+	const door = agent as unknown as { assembleAgentStateBySession(options: AssembleAgentStateOptions): Promise<unknown> };
+	await door.assembleAgentStateBySession(options);
 	return agent;
 }

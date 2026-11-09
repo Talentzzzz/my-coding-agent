@@ -600,9 +600,11 @@ restartFake.setResponses([
 const first = await bootServer({ workDirAbsPath: restartRoot, port: 0, api: restartFake.api });
 let restartSessionId = "";
 try {
-	const landing = (await (await fetch(`${first.url}/api/sessions/current`)).json()) as { sessionId: string };
-	restartSessionId = landing.sessionId;
-	check("the first process landed on a session", restartSessionId.length > 0, restartSessionId);
+	// Startup selects nothing now, so the session this half drives is the one an explicit creation
+	// returned — the landing answer is the pin's business, not this smoke's.
+	const created = await request(first.url, "POST", "/api/sessions", undefined);
+	restartSessionId = ((created.payload ?? {}) as { sessionId?: string }).sessionId ?? "";
+	check("the restart session was created", created.status === 201 && restartSessionId.length > 0, String(created.status));
 
 	const turned = await request(first.url, "PATCH", `/api/sessions/${encodeURIComponent(restartSessionId)}`, {
 		approval: { read: true },

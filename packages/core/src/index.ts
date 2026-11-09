@@ -121,9 +121,8 @@ export {
 } from "./session-factory.ts";
 export {
 	readSessionSnapshot,
-	type ModelPins,
+	type ModelOptions,
 	type OpenAgentOptions,
-	type OpenSessionOptions,
 } from "./assembly.ts";
 export {
 	addUsage,
