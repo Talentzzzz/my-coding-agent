@@ -324,7 +324,7 @@ async function main(): Promise<void> {
 		else if (after.branchPoints.length > 0) fail(`one chain reported ${after.branchPoints.length} branch point(s)`);
 		else pass("a snapshot reports the branch points it has, none for one chain");
 
-		// Nothing is attached, so nothing holds the session: the move's own request was the last claim,
+		// Nothing is attached, so nothing holds the session: the move's own request was the last hold,
 		// and the host closes as soon as it settles — within milliseconds, there being no grace period
 		// left (the one the SSE streams served went with them). This wait is what makes the cold read
 		// below honest: a session still hosted would answer with the same live snapshot and prove

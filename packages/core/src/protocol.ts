@@ -462,7 +462,7 @@ export type ServerFrame =
  * Commands stay on REST. `open` / `cancel` are the subscription's two words; `wait` / `unwait` carry
  * the one fact a subscription deliberately does not carry (ADR-0001: watching keeps nothing alive) —
  * that this connection is still waiting for a run's result on the session, the send reference's
- * server-side signal (issue 13). It takes no claim: it does not keep a session running, it only
+ * server-side signal (issue 13). It takes no hold: it does not keep a session running, it only
  * asks the eviction judgment to wait until the waiter has been answered. A frame that arrives with
  * an unknown `type` is dropped and logged rather than closing the connection: none of the four
  * actions can be abused into anything, and turning a stray frame into a dead page costs more than a

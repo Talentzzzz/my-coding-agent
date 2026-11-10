@@ -94,9 +94,10 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   是一个 `Writable`，所以写侧必须有界**：`write()` 返回 `false` 之后停写，帧进有界队列（4 MiB /
   10 秒），超限用 `1013` 关掉整条连接。模型那一侧另有一个同名的 `ChatTransport`（`llm/types.ts`），
   只管一次请求的流式，与这里说的命令面不是一回事（ADR-0015）。
-- **claim（认领）** —— 持有者对活跃会话的握持：只有改变会话的请求与在飞的运行各在其长度内一个；读
-  transcript 不拿claim，**订阅也不拿**——一张订阅表回答"这条连接订了什么"，与 claim 回答"这个请求
-  必须跑在活跃会话上"永不互相换算（ADR-0001）。
+- **hold（持有）** —— 持有者对活跃会话的握持：只有改变会话的请求与在飞的运行各在其长度内一个；读
+  transcript 不拿 hold，**订阅也不拿**——一张订阅表回答"这条连接订了什么"，与 hold 回答"这个请求
+  必须跑在活跃会话上"永不互相换算（ADR-0001）。名字在 ADR-0018 之前叫 `claim`，语义一字未动；
+  `hub.hold(id)` 计数、`hub.release(host)` 归还。
 - **approval（审批）** —— 结束重启（ADR-0006 §5）：`before_tool` 对要问的调用返回 suspend，结束本轮
   运行且不写结果，tool call 在账本里悬空（有 tool_use 无 tool_result，派生态）；答案经
   `POST /api/sessions/{id}/approvals/{toolCallId}` 到达后启动恢复运行，由引擎的恢复机器按
@@ -136,8 +137,8 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   `createSessionAgent()` 是另一半：
   收 `{ settingsHome?, modelsHome?, api? }`（外加 test-only 的 `settings` / `tools` 两缝）并**自己造三只
   Manager**——Manager 不再是调用者的决定（[ADR-0017](docs/adr/0017-agent-facade.md)）——组成一个
-  **编排层**，进程只需要一份（hub 构造时建它，递的只是 homes 与 api；打开的模型选项
-  `ModelOptions` 随每次打开实参现取），测试与
+  **编排层**，进程只需要一份（hub 构造时建它，递的只是 homes 与 api；打开的模型默认不进公开面——
+  它是设置里的事实，装配每次从磁盘现读），测试与
   只跑一个会话的调用者用 `openAgent() == create + open` 自组一份。`Agent` 按 id 键控
   持有各会话的状态——公开方法收 id、从状态现取：durable 半是 `state.session`（账本重放出的袋子），
   live 半是 `state.live`；状态对象不出 core，server 侧读的是窄读一族（`titleOf` / `timestampOf`
@@ -196,7 +197,7 @@ UTF-8 文件的行连起来、把每一个非 ASCII 字符换成 `?`。
 - 第一版不做委派（子代理）、插件和 MCP：不要以「先加一对工具」的方式把它们塞回来。要加，先改这条规则
   和对应的架构文档，再动代码。
 - 加一个端点 = 控制器上一个方法 + `createRoutes()` 里一条记录：`Router` 之外没有东西解释 URL，
-  `SessionHub.claim()` 之外没有东西持有一个会话。**mux 的上行帧不是端点**——`open` / `cancel` 不走
+  `SessionHub.hold()` 之外没有东西持有一个会话。**mux 的上行帧不是端点**——`open` / `cancel` 不走
   URL，所以这条形状管不到它们，加一个帧类型也不违反它。
 - 改完代码跑 `npm run check` 和对应的 smoke（都不需要供应商密钥）：core 用 `scripts/smoke-tools.ts`，
   模型用 `smoke-models.ts`，会话注册表用 `smoke-sessions.ts`，HTTP 表面用 `smoke-api.ts`，wire 表面用

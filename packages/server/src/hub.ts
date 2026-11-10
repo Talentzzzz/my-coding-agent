@@ -7,7 +7,6 @@ import {
 	type ChatTransport,
 	createSessionAgent,
 	type ModelConfig,
-	type ModelOptions,
 	resolvePath,
 	sessionDir,
 	type SessionSnapshot,
@@ -16,9 +15,6 @@ import {
 export interface HubOptions {
 	/** The directory the process was started in; new sessions take it as their working directory. */
 	workDirAbsPath: string;
-	/** The model every session this hub opens starts with, when the host gave one at all. */
-	model?: string;
-	thinkingLevel?: string;
 	/** Session every connection lands on when it does not name one. */
 	sessionId?: string;
 	/**
@@ -75,10 +71,10 @@ export interface SessionFeeds {
 export type SessionObserver = (feeds: SessionFeeds | undefined) => void;
 
 /**
- * One conversation this process keeps open, plus how many claims are on it.
+ * One conversation this process keeps open, plus how many holds are on it.
  *
- * The count is what makes ownership work: a request that goes away must not stop a turn another
- * request is watching, and the last claim to go must not leave the session running forever.
+ * The count is what makes holding work: a request that goes away must not stop a turn another
+ * request is watching, and the last one to go must not leave the session running forever.
  *
  * Nothing else is on it. The session itself is the process's one orchestrator (ADR-0017) — a
  * method names the id and fetches whatever it needs — and its live half is the state that
@@ -89,7 +85,7 @@ export type SessionObserver = (feeds: SessionFeeds | undefined) => void;
  *
  * A host is also the gap between the two questions "is the session held" and "is it running": the
  * orchestrator's table answers the first from the moment the id exists, while the host exists only
- * while a claim has opened the session — so `hosts` is always a subset of the table, and the table
+ * while a hold has opened the session — so `hosts` is always a subset of the table, and the table
  * is only ever cleared once the host it belongs to is gone.
  */
 export class HostedSession {
@@ -101,8 +97,8 @@ export class HostedSession {
 	 * back; a subscription takes none. That is the counting rule the whole reap rests on, and nothing
 	 * else may start counting here.
 	 */
-	claims = 0;
-	/** Set while the hub is deciding whether an unclaimed session can be closed. */
+	holds = 0;
+	/** Set while the hub is deciding whether a session nobody holds can be closed. */
 	reaping = false;
 
 	constructor(sessionId: string) {
@@ -129,7 +125,7 @@ export type HostListener = (sessionId: string, host: HostedSession | undefined) 
  * to it independently. The file is still the durable copy; this table is who is holding a session open.
  *
  * The loop itself is not per session: one orchestrator serves every id (ADR-0017). What is per
- * session is the claim count — a transport-layer fact about who is using it right now — and the state
+ * session is the hold count — a transport-layer fact about who is using it right now — and the state
  * the orchestrator's table holds the live half in. Everything else here is a singleton.
  */
 export class SessionHub {
@@ -189,8 +185,8 @@ export class SessionHub {
 	 * A subscription's twin in shape and its opposite in meaning: watching is open-ended (a pane
 	 * stays as long as the window looks), a wait is bounded (a send lives exactly as long as the run
 	 * it started, and the client releases it when the run's last word arrives). Like `observers` it
-	 * is never a count and never a reason to keep a session *running* — it takes no claim, and a
-	 * host that loses its claims reaps with waits standing. Its one reader is the eviction judgment:
+	 * is never a count and never a reason to keep a session *running* — it takes no hold, and a
+	 * host that loses its holds reaps with waits standing. Its one reader is the eviction judgment:
 	 * the criteria refuse a session somebody is still waiting on, because eviction between the run's
 	 * end and the client's release would be exactly the silent tear the send reference exists to
 	 * prevent. The client's copy of "the run is over" is a frame behind the server's own — this
@@ -219,14 +215,6 @@ export class SessionHub {
 			...(options.modelsHome === undefined ? {} : { modelsHome: options.modelsHome }),
 			...(options.api === undefined ? {} : { api: options.api }),
 		});
-	}
-
-	/** The model options every open is made with, when the host gave any at all. */
-	private get modelOptions(): ModelOptions {
-		return {
-			...(this.options.model === undefined ? {} : { model: this.options.model }),
-			...(this.options.thinkingLevel === undefined ? {} : { thinkingLevel: this.options.thinkingLevel }),
-		};
 	}
 
 	/** The models the user has entered, in the order they appear in the settings panel. */
@@ -267,21 +255,6 @@ export class SessionHub {
 		return !this.agent.hiddenDirectories(this.absRoot).some((path) => samePath(path, workDirAbsPath));
 	}
 
-	/**
-	 * Whether this id names a session at all: one this process holds, or one on disk.
-	 *
-	 * Two branches, because the hosted and the created-but-unspoken cases both live in the
-	 * orchestrator's table (a session is in the table from the moment its id exists — "holding" is
-	 * what the table means, whether or not a host is running it and whether or not a file has been
-	 * born), and the disk is the only other place an id can name. The search covers every directory,
-	 * not just the server's own: a client lists all of them and can ask for any of them, and
-	 * answering "no such session" for a row the same server just listed would be the one
-	 * contradiction a client cannot recover from.
-	 */
-	has(id: string): boolean {
-		return this.agent.exists(id);
-	}
-
 	/** Session ids this process is running right now. */
 	get live(): readonly string[] {
 		return [...this.hosts.keys()];
@@ -293,8 +266,8 @@ export class SessionHub {
 	 *
 	 * Reading a transcript is not running a session, and this is where that stops being a slogan: the
 	 * cold path builds the same snapshot an open would have produced, without a host, without a loop,
-	 * and without a claim. It deliberately does not read or write `hosts`, `opening`, or `closing`,
-	 * and never calls `claim`: the whole point is that a read leaves no trace, so opening a session's
+	 * and without a hold. It deliberately does not read or write `hosts`, `opening`, or `closing`,
+	 * and never calls `hold`: the whole point is that a read leaves no trace, so opening a session's
 	 * history cannot keep it alive, evict it, or cost what running it costs.
 	 *
 	 * Anything this process holds answers from the bag, live or not: a hosted session must not be
@@ -303,10 +276,10 @@ export class SessionHub {
 	 * read cold, and the cold road is the facade's: one replay, no registration, the bag dropped there.
 	 */
 	async snapshotOf(id: string): Promise<SessionSnapshot> {
-		// The held and the cold road are one method on the orchestrator now, and the model options ride
-		// along so a cold read shows the model an open would have been made with. The read leaves no
-		// trace either way: no claim, no hosts, nothing appended.
-		return this.agent.snapshotOf(id, this.modelOptions);
+		// The held and the cold road are one method on the orchestrator now, and the model the read
+		// shows is the settings default the assembly reads fresh — the same one an open would have
+		// used. The read leaves no trace either way: no hold, no hosts, nothing appended.
+		return this.agent.snapshotOf(id);
 	}
 
 	/**
@@ -363,48 +336,48 @@ export class SessionHub {
 	}
 
 	/**
-	 * Claim a session for one connection, opening it if this process does not run it yet.
+	 * Hold a session for one connection, opening it if this process does not run it yet.
 	 *
 	 * Every path out of here either returns a session already in the map or waits for one being
 	 * opened or closed on the same id, so two loops can never end up on one transcript.
 	 */
-	async claim(sessionId: string): Promise<HostedSession> {
+	async hold(sessionId: string): Promise<HostedSession> {
 		const id = sessionId;
 
 		const existing = this.hosts.get(id);
-		if (existing) return this.hold(existing);
+		if (existing) return this.count(existing);
 
 		const closing = this.closing.get(id);
 		if (closing) await closing;
 
 		const reopened = this.hosts.get(id);
-		if (reopened) return this.hold(reopened);
+		if (reopened) return this.count(reopened);
 
 		const opening = this.opening.get(id);
-		if (opening) return this.hold(await opening);
+		if (opening) return this.count(await opening);
 
 		const started = this.open(id);
 		this.opening.set(id, started);
 		try {
-			return this.hold(await started);
+			return this.count(await started);
 		} finally {
 			this.opening.delete(id);
 		}
 	}
 
 	/**
-	 * Give up one connection's claim.
+	 * Give up one connection's hold.
 	 *
 	 * Deliberately neither aborts nor closes here: a turn in flight keeps running and keeps
 	 * persisting, so refreshing, closing a tab, or switching sessions cannot truncate a transcript.
-	 * Once the last claim is gone the session is closed after its run settles; the orchestrator's
+	 * Once the last hold is gone the session is closed after its run settles; the orchestrator's
 	 * state follows its own criteria at the reap's tail — a parked approval, an unborn file, or a
 	 * caller still waiting for the run's result (issue 13) keeps it, an idle session loses it. The
 	 * JSONL file remains, and the next connection to ask for this id gets an equivalent session.
 	 */
 	release(host: HostedSession): void {
-		host.claims -= 1;
-		if (host.claims > 0 || host.reaping) return;
+		host.holds -= 1;
+		if (host.holds > 0 || host.reaping) return;
 		void this.reap(host);
 	}
 
@@ -415,8 +388,8 @@ export class SessionHub {
 	 * for that id appears, so "look at an idle session, then send it a message" keeps working: the
 	 * moment the message assembles a host, the same observer is attached to it.
 	 *
-	 * Attaching is not claiming. An observer on an idle session neither keeps it assembled nor costs
-	 * what running it costs — a read leaves no trace, and so does a watch.
+	 * Attaching is not holding it open. An observer on an idle session neither keeps it assembled
+	 * nor costs what running it costs — a read leaves no trace, and so does a watch.
 	 */
 	observe(sessionId: string, observer: SessionObserver): () => void {
 		const watching = this.observers.get(sessionId) ?? new Set<SessionObserver>();
@@ -441,9 +414,9 @@ export class SessionHub {
 	/**
 	 * Note that this caller is waiting for a run's result on a session, until it says stop.
 	 *
-	 * The send reference's server-side half (issue 13). It takes no claim — a claim says somebody is
+	 * The send reference's server-side half (issue 13). It takes no hold — a hold says somebody is
 	 * *changing* the session, and the wait says only that the answer still has somewhere to land —
-	 * and it keeps nothing running: a host whose claims are gone reaps with waits standing, because
+	 * and it keeps nothing running: a host whose holds are gone reaps with waits standing, because
 	 * the result the waiter is owed was already published to the stream when the run ended. What the
 	 * wait buys is the window between that publication and the client's own release: eviction is
 	 * refused there, so a pane coming back inside the window finds the session still held rather
@@ -481,10 +454,10 @@ export class SessionHub {
 	 * another obstacle may have risen in the meantime. `observers` and `waiting` are read here
 	 * because they are the hub's own halves of the judgment; the orchestrator re-checks its three
 	 * (a run in flight, a parked approval, a file not yet born) inside `evict` and refuses the lossy
-	 * ones. A host still standing means claims hold the session — the deletion cannot be asked for
-	 * directly (the table is only ever cleared once the host is gone), so the host's own road out,
-	 * the reap, is walked: it settles, closes, and ends on the same judgment, now with the waits
-	 * inside it.
+	 * ones. A host still standing means somebody still holds the session — the deletion cannot be
+	 * asked for directly (the table is only ever cleared once the host is gone), so the host's own
+	 * road out, the reap, is walked: it settles, closes, and ends on the same judgment, now with the
+	 * waits inside it.
 	 */
 	private tryEvict(sessionId: string): void {
 		if (this.observers.has(sessionId)) return;
@@ -526,8 +499,8 @@ export class SessionHub {
 	/**
 	 * Start a conversation and make it what an unnamed connection lands on next.
 	 *
-	 * Returns an id rather than a claimed session so that claiming happens in exactly one place:
-	 * the caller attaches through {@link claim}, which is the only thing that counts claims.
+	 * Returns an id rather than a held session so that holding happens in exactly one place:
+	 * the caller attaches through {@link hold}, which is the only thing that takes a hold.
 	 *
 	 * `workDirAbsPath` decides where the session lands. Undefined is the server's own root; a path is accepted
 	 * when it exists and is a directory, and nothing more — a first session in a directory nobody has
@@ -536,7 +509,7 @@ export class SessionHub {
 	 */
 	async newSession(workDirAbsPath?: string): Promise<string> {
 		const absRoot = await workDirAbsPathForCreate(workDirAbsPath ?? this.workDirAbsPath);
-		const id = await this.agent.create(absRoot, this.modelOptions);
+		const id = await this.agent.create(absRoot);
 		this.current = Promise.resolve(id);
 		this.announceHost(id, undefined);
 		return id;
@@ -545,17 +518,17 @@ export class SessionHub {
 	/**
 	 * Branch a session at one entry and return the new session's id.
 	 *
-	 * Like {@link newSession} this returns an id rather than a claimed session: the caller attaches
-	 * through {@link claim}, so registration and claim counting stay in one place. A fork belongs
+	 * Like {@link newSession} this returns an id rather than a held session: the caller attaches
+	 * through {@link hold}, so registration and hold counting stay in one place. A fork belongs
 	 * here and not in `Connection` because the new session has to outlive the connection that asked
 	 * for it — the same reason every other session does.
 	 *
 	 * The source is only read. Its file is untouched, its own `leafId` does not move, and a session
-	 * this process is running is forked from the file it is writing, so no claim is disturbed and a
+	 * this process is running is forked from the file it is writing, so no hold is disturbed and a
 	 * live turn keeps whatever it was writing.
 	 *
-	 * The registry gains nothing here either: a fork nobody has claimed has no live half to hold —
-	 * no queue has drained, no run is in flight — so its first touch is its first claim, and that is
+	 * The registry gains nothing here either: a fork nobody holds has no live half to keep — no
+	 * queue has drained, no run is in flight — so its first touch is its first hold, and that is
 	 * what assembles its state through {@link open}. The orchestrator's table gains nothing with it:
 	 * the facade's `forkFrom` writes the two files and adopts nothing (ADR-0017). States leave that
 	 * table only through the orchestrator's own close and evict, never through this hub's hand.
@@ -575,7 +548,7 @@ export class SessionHub {
 	 *
 	 * The held and the cold road are one facade call, and the safety argument travels with it: a
 	 * held session writes through its own bag, a cold write is one synchronous block, and neither
-	 * takes a claim — a title is a fact about the session rather than about one way through it, the
+	 * takes a hold — a title is a fact about the session rather than about one way through it, the
 	 * engine never reads titles, and a rewrite of the snapshot mid-run lands without disturbing the
 	 * turn. An id that names nothing refuses inside the facade, which is the 404 it always was.
 	 *
@@ -599,25 +572,22 @@ export class SessionHub {
 	 * Delete a session: transcript, file, and every trace in this process.
 	 *
 	 * A session with work in flight refuses rather than deleting under it — a run writing the file,
-	 * an approval waiting on a person, a request holding a claim, an open mid-flight — and the
+	 * an approval waiting on a person, a request holding on, an open mid-flight — and the
 	 * controller turns that refusal into a 409. An idle session closes the way a reaped one does
 	 * (observers told, listeners announced, `settle` before `close`), and the slot in `closing` is
-	 * held across the whole removal so a claim arriving mid-delete waits and then finds no file
+	 * held across the whole removal so a hold arriving mid-delete waits and then finds no file
 	 * instead of opening one that is about to go away.
 	 *
 	 * The unnamed landing spot is reset: whatever it named is gone, and the next ask re-resolves
 	 * against what remains rather than answering with a session that no longer exists.
 	 */
 	async remove(sessionId: string): Promise<void> {
-		// Holding is the table's own fact and not the facade's to report, so this branch reads the two
-		// membership answers the facade does give: `isOnDisk` for the file, `exists` for the id at all.
-		// A session created here and never spoken in has no file: forgetting the held state is the
-		// whole removal, and there is nothing on disk for the facade to delete. An id this process
-		// never heard of still goes to the facade, so its refusal stays the 404 it always was.
-		const onDisk = this.agent.isOnDisk(sessionId);
+		// The data half is the orchestrator's: whether a file exists, and the state in its table, are
+		// one call (`Agent.remove`) and this method never asks which of the two it is deleting. What
+		// stays here is the hub's own bookkeeping — holds, hosts, observers, and the `closing` slot.
 		const hosted = this.hosts.get(sessionId);
 		if (hosted !== undefined) {
-			if (hosted.claims > 0 || this.opening.has(sessionId) || this.agent.isSubmitting(sessionId) || this.agent.hasPendingApprovals(sessionId)) {
+			if (hosted.holds > 0 || this.opening.has(sessionId) || this.agent.isSubmitting(sessionId) || this.agent.hasPendingApprovals(sessionId)) {
 				throw new Error("这个会话还有运行中的轮次或没答完的审批，等它停下来再删。");
 			}
 			const closing = (async () => {
@@ -629,18 +599,13 @@ export class SessionHub {
 				this.announceHost(sessionId, undefined);
 				// The observers just told may tear their subscriptions down on the spot, and the last one
 				// out fires the eviction edge — which finds no host and drops the state first. Close is
-				// answered immediately for an id the table no longer holds; the drop below answers
-				// `false` for the rest.
+				// answered immediately for an id the table no longer holds.
 				await this.agent.close(sessionId);
-				// The file removal rides inside the same slot: a claim that waited on `closing` resumes
-				// only after the file is gone, so it finds no file instead of reopening one mid-delete.
-				// A session that never spoke has no file, and asking for one would be asking for nothing.
-				if (onDisk) await this.agent.removeFromDisk(sessionId);
-				// The live half goes with the host, after the run has settled — dropping the state
-				// earlier would leave a settling turn draining queues nobody holds. The user deleted
-				// the session, so this is the unconditional half of the teardown: no criteria apply
-				// to an id that is gone from disk.
-				this.agent.drop(sessionId);
+				// Files and held state go together, inside the same slot: a hold that waited on
+				// `closing` resumes only after the files are gone, so it finds no file instead of
+				// reopening one mid-delete. A session that never spoke has no file, and that is the
+				// orchestrator's case to decide, not this method's.
+				await this.agent.remove(sessionId);
 			})();
 			this.closing.set(sessionId, closing);
 			try {
@@ -648,8 +613,10 @@ export class SessionHub {
 			} finally {
 				this.closing.delete(sessionId);
 			}
-		} else if (onDisk || !this.agent.exists(sessionId)) {
-			await this.agent.removeFromDisk(sessionId);
+		} else {
+			// No host: nothing of this process's is running it, so the orchestrator's one delete is the
+			// whole removal. An id that names nothing refuses there, and that refusal is the 404.
+			await this.agent.remove(sessionId);
 		}
 		this.current = undefined;
 	}
@@ -678,8 +645,9 @@ export class SessionHub {
 		// would be a second writer reaching past the orchestrator that owns the states.
 	}
 
-	private hold(host: HostedSession): HostedSession {
-		host.claims += 1;
+	/** Count one holder in, the way `release` counts it out. */
+	private count(host: HostedSession): HostedSession {
+		host.holds += 1;
 		return host;
 	}
 
@@ -698,7 +666,7 @@ export class SessionHub {
 		// The held and the disk road are one call on the orchestrator: a session created a moment ago
 		// has no file to find and one already held must not be re-assembled, and `ensure` branches on
 		// both inside — the hub never asks how the table is organized.
-		await this.agent.ensure(id, this.modelOptions);
+		await this.agent.ensure(id);
 		const host = new HostedSession(id);
 		this.hosts.set(id, host);
 		// Observers first, then the listeners: a subscriber told "a host opened" and reaching for the
@@ -737,10 +705,10 @@ export class SessionHub {
 			// the settle waits on there — and the question it left is not this reap's to answer: the
 			// host closes, the orchestrator's state stays (a parked approval refuses eviction, and
 			// with it the queues a recovery run must drain), and the answer arrives over REST to
-			// whichever claim reopens the session. No window answers and no process reaps it: the
+			// whichever hold reopens the session. No window answers and no process reaps it: the
 			// question hangs until the next run's recovery machine closes it or the process exits.
 			await this.agent.settle(host.id);
-			if (host.claims > 0) return;
+			if (host.holds > 0) return;
 
 			if (this.hosts.get(host.id) === host) this.hosts.delete(host.id);
 			// Tell the observers before the listeners: a subscriber dropping its half-finished work needs
@@ -763,11 +731,11 @@ export class SessionHub {
 				// The host is gone, so its live half goes with it: whatever was queued or running dies
 				// with the session, which is the same thing a process restart would have done, one host
 				// at a time. This delete point reads the hub's own halves of the judgment whole rather
-				// than arguing its preconditions (issue 04 §3): claims were answered at the settle gate
-				// above, the watchers read here even though the notification above emptied them — the
-				// reading is what makes that a rule — and the wait is the hub's fourth criterion (issue
-				// 13): a caller still waiting for the run's result keeps the state in the table, and
-				// the wait's release is the edge that evicts it once the last one has been answered.
+				// than arguing its preconditions (issue 04 §3): the holders were answered at the settle
+				// gate above, the watchers read here even though the notification above emptied them —
+				// the reading is what makes that a rule — and the wait is the hub's fourth criterion
+				// (issue 13): a caller still waiting for the run's result keeps the state in the table,
+				// and the wait's release is the edge that evicts it once the last one has been answered.
 				// Evict answers `false` for a state the edge already dropped, so the delete needs no
 				// membership branch of its own.
 				if (!this.observers.has(host.id) && !this.waiting.has(host.id)) this.agent.evict(host.id);

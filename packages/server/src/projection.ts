@@ -247,7 +247,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	 * host and no row is a session that was created or forked and is not running — exactly the session
 	 * nobody is watching, and the one this store exists for. No host and a row is one that stopped
 	 * running: unbind, and leave the row as it stands, because it already says `running: false` — that
-	 * snapshot was published before the last claim was let go.
+	 * snapshot was published before the last hold was let go.
 	 */
 	const onHost = (sessionId: string, host: HostedSession | undefined): void => {
 		if (host === undefined) {

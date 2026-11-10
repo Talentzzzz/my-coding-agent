@@ -82,7 +82,7 @@ hub.setModelConfigs([ROW]);
 try {
 	process.stdout.write("a session that exists before anything asks stays out of the store until it speaks\n");
 	const first = await hub.newSession();
-	hub.release(await hub.claim(first));
+	hub.release(await hub.hold(first));
 	const projection = createSessionProjection(hub);
 
 	// Every row change from here on, as the listener saw it.
@@ -108,7 +108,7 @@ try {
 	);
 
 	process.stdout.write("the first message is what puts the session in the store\n");
-	const spokenHost = await hub.claim(first);
+	const spokenHost = await hub.hold(first);
 	fake.setResponses([fakeAssistantMessage("a first answer")]);
 	await hub.agent.prompt(first, "the conversation starts here");
 	check("the row arrived with the run", await until(() => seen.some((row) => row.id === first)));
@@ -120,7 +120,7 @@ try {
 	check("and the title is the message the branch starts with", spokenRow?.title === "the conversation starts here", spokenRow?.title);
 
 	process.stdout.write("one scan, however many callers\n");
-	// Let the reap of the claim above land before counting publications: it reports the session it lost,
+	// Let the reap of the hold above land before counting publications: it reports the session it lost,
 	// which builds the row this projection has not seen yet, and that is a real row appearing rather
 	// than a row that moved.
 	await settle();
@@ -150,7 +150,7 @@ try {
 	await checkAbsent("a created session reaches no row without a host", second);
 
 	process.stdout.write("an idle host on an unspoken session builds no row either\n");
-	const host = await hub.claim(second);
+	const host = await hub.hold(second);
 	await settle();
 	await checkAbsent("an idle host leaves the store alone", second);
 	check("and published nothing", !seen.some((row) => row.id === second), JSON.stringify(seen.map((row) => row.id)));
@@ -207,7 +207,7 @@ try {
 	// gave it until the branch moves.
 	const beforeBranch = await projection.row(first);
 	check("the row kept the title its branch gave it", beforeBranch?.title === "the conversation starts here", beforeBranch?.title);
-	const branchHost = await hub.claim(first);
+	const branchHost = await hub.hold(first);
 	fake.setResponses([fakeAssistantMessage("one"), fakeAssistantMessage("two")]);
 	await hub.agent.prompt(first, "first turn");
 	await settle();
@@ -241,7 +241,7 @@ try {
 
 	process.stdout.write("a fork knows its parent without a listing beside it\n");
 	const source = await hub.newSession();
-	const sourceHost = await hub.claim(source);
+	const sourceHost = await hub.hold(source);
 	fake.setResponses([fakeAssistantMessage("to fork from")]);
 	await hub.agent.prompt(source, "the conversation being forked");
 	await settle();
@@ -263,7 +263,7 @@ try {
 	const stopHosting = hub.onHostChange((sessionId, hostSeen) => heard.push(`${sessionId}:${hostSeen === undefined ? "none" : "host"}`));
 	const third = await hub.newSession();
 	check("a created session is reported with no host", heard.includes(`${third}:none`), heard.join(" "));
-	const thirdHost = await hub.claim(third);
+	const thirdHost = await hub.hold(third);
 	check("and again with one", heard.includes(`${third}:host`), heard.join(" "));
 	hub.release(thirdHost);
 	await until(() => heard.filter((entry) => entry === `${third}:none`).length === 2);
@@ -273,7 +273,7 @@ try {
 	await settle();
 	check("a listener that stopped hearing stops hearing", !heard.includes(`${afterStop}:none`), heard.join(" "));
 
-	process.stdout.write("observing a session is not the same as claiming it\n");
+	process.stdout.write("observing a session is not the same as holding it\n");
 	let events = 0;
 	// Told about the session before it was running, so the observer is attached the moment a host opens.
 	const stopObserving = hub.observe(afterStop, (feeds) => {
@@ -283,8 +283,8 @@ try {
 		});
 	});
 	check("watching it did not assemble anything", !hub.live.includes(afterStop), hub.live.join(","));
-	const observedHost = await hub.claim(afterStop);
-	check("and it was attached when the host opened", observedHost.claims === 1, `claims=${observedHost.claims}`);
+	const observedHost = await hub.hold(afterStop);
+	check("and it was attached when the host opened", observedHost.holds === 1, `holds=${observedHost.holds}`);
 	fake.setResponses([fakeAssistantMessage("seen")]);
 	await hub.agent.prompt(afterStop, "does the observer hear this");
 	check("the observer saw the run's events", events > 0, `${events} events`);

@@ -5,8 +5,6 @@ interface Args {
 	workDirAbsPath: string;
 	host: string;
 	port: number;
-	model?: string;
-	thinkingLevel?: string;
 	session?: string;
 	vite: boolean;
 }
@@ -38,12 +36,6 @@ function parseArgs(argv: readonly string[]): Args {
 				break;
 			case "--port":
 				args.port = Number.parseInt(value(), 10);
-				break;
-			case "--model":
-				args.model = value();
-				break;
-			case "--thinking":
-				args.thinkingLevel = value();
 				break;
 			case "--session":
 				args.session = value();
@@ -77,8 +69,6 @@ function printHelp(): void {
 			"  --workDir <dir>        working directory for new sessions (default: current directory)",
 			"  --host <host>      bind address (default: 127.0.0.1)",
 			"  --port <port>      port (default: 8080)",
-			"  --model <ref>      <row id>/<model id> from the imported models, or the row id alone",
-			"  --thinking <level> off | low | medium | high | max",
 			"  --session <id>     open a stored session",
 			"  --vite             serve the client through Vite (hot reload, no build step)",
 			"  --help, -h         show this text",
@@ -118,8 +108,6 @@ async function main(): Promise<void> {
 		host: args.host,
 		port: args.port,
 		vite: args.vite,
-		...(args.model === undefined ? {} : { model: args.model }),
-		...(args.thinkingLevel === undefined ? {} : { thinkingLevel: args.thinkingLevel }),
 		...(args.session === undefined ? {} : { sessionId: args.session }),
 	});
 

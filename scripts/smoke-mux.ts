@@ -292,11 +292,11 @@ try {
 	rig.transport.setResponses([fakeAssistantMessage("second answer")]);
 	check("the prompt was accepted", (await prompt(rig.url, laneId, "another run, unseen")) === 202);
 	check("that run settled", await settleRun(rig.url, laneId));
-	// The run's own claim was the last one, so the host closes as soon as it settles. Waiting for the
+	// The run's own hold was the last one, so the host closes as soon as it settles. Waiting for the
 	// reap to finish makes the re-open below an honest cold open: a subscription that races the reap
 	// can bind to a host that is about to be torn out from under it, and the assertion would be about
 	// that timing instead of about convergence.
-	check("the session was reaped once nothing claimed it", await until(() => !rig.hub.live.includes(laneId), 10_000), rig.hub.live.join(","));
+	check("the session was reaped once nothing held it", await until(() => !rig.hub.live.includes(laneId), 10_000), rig.hub.live.join(","));
 
 	const baselinesBefore = baselinesOn(wire, laneId);
 	const reopened = await wire.open(laneId);
@@ -320,11 +320,11 @@ try {
 	process.stdout.write("a changed tree is everyone's business: it arrives as a baseline\n");
 
 	// Two runs give the first user message a continuation, which is what makes it a branch point.
-	// The bench claim keeps the host alive across both runs and the move: the moment its claims hit
+	// The bench hold keeps the host alive across both runs and the move: the moment its holds hit
 	// zero the host is reaped and the lane would be ended under it ("the watched session went away"),
-	// which is the lifecycle working as designed — the claim decides how long the session lives, and
-	// the test bench is the claim-holder here.
-	const bench = await rig.hub.claim(laneId);
+	// which is the lifecycle working as designed — the hold decides how long the session lives, and
+	// the test bench is the holder here.
+	const bench = await rig.hub.hold(laneId);
 	rig.transport.setResponses([fakeAssistantMessage("one"), fakeAssistantMessage("two")]);
 	check("the first prompt was accepted", (await prompt(rig.url, laneId, "branch here")) === 202);
 	check("it settled", await settleRun(rig.url, laneId));
@@ -351,7 +351,7 @@ try {
 		check("and the move is inside it", changed?.session.leafId === branchEntry, JSON.stringify(changed?.session.leafId));
 	}
 
-	// The bench claim goes back: the reap that follows ends the lane, and that is the expected order
+	// The bench hold goes back: the reap that follows ends the lane, and that is the expected order
 	// of events, not a failure of the lane.
 	rig.hub.release(bench);
 	check("the lane ends when the host it watched goes away", await until(() => wire.endOf(laneId).ended, 10_000), JSON.stringify(wire.endOf(laneId)));
@@ -410,7 +410,7 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a wait holds the state against eviction until it is answered\n");
 
-	// The shape the send reference guards: a run whose claim was released at acceptance, a result
+	// The shape the send reference guards: a run whose hold was released at acceptance, a result
 	// already published to the stream, and a client that has not said it is done reading yet. The
 	// reap's tail reaches its eviction and must find the wait standing — the state stays, and the
 	// wait's release is the edge that finishes the job.

@@ -67,7 +67,7 @@ fill-at-open 的键控缓存重放，live 的一半（两条队列、在飞运�
    编排层的 15 处 `stateOf(id)` 变成 `agentStateOf(id).session`（把 `stateOf` 机械替换成 `open` 会编译
    通过、运行丢数据）。
 6. **删除权随表**。hub 不再有表：有判据的驱逐是 `Agent.evict(id)`，不带判据的删除（`remove`、宿主收摊）
-   是 `Agent.drop(id)`——两个动词不合并，因为删一个正被看的会话合法而 `evict` 会拒绝；`clear()` 取消，
+   是 `Agent.remove(id)`（文件与状态一次做完）——两个动词不合并，因为删一个正被看的会话合法而 `evict` 会拒绝；`clear()` 取消，
    表随编排层对象一起消失（不造第二个绕过逐会话判据的入口）。**驱逐判据七条、分居两处**（hub 侧第四条
    为 13 号票所补）：hub 侧 `observers` 空、没有等待结果的引用（send 引用的信号，mux 的 `wait` / `unwait`
    帧报告，不拿 claim）、`claims === 0`、`hosts` 里没有它；Agent 侧 `live.activeRun === undefined`、

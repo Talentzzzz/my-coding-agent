@@ -1,13 +1,13 @@
-// Stream lifecycle smoke test, in the shape the resident transport gave it: the claim decides how
+// Stream lifecycle smoke test, in the shape the resident transport gave it: the hold decides how
 // long a session lives, and a subscription decides nothing. A lane watching an idle session takes no
-// claim and ends nothing; a run ending does not end the lane — the host going away does, and the host
-// goes away when the last claim lets go. The failure section pins where a run that fails under a
+// hold and ends nothing; a run ending does not end the lane — the host going away does, and the host
+// goes away when the last hold lets go. The failure section pins where a run that fails under a
 // watcher — and one that fails with nobody watching — is heard.
 //
 //   node scripts/smoke-stream.ts
 //
-// No provider key is needed: the model is the scripted transport. The test bench holds its own claims
-// through the real hub wherever a check needs the host to outlive a run — that is the bench's claim,
+// No provider key is needed: the model is the scripted transport. The test bench takes its own holds
+// through the real hub wherever a check needs the host to outlive a run — that is the bench's hold,
 // not the subscription's, which is exactly the distinction under test.
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -151,51 +151,51 @@ function sabotagePersistence(hub: SessionHub): () => void {
 const rig = await openRig();
 const wire = await connect(`${rig.url.replace("http", "ws")}/mux`);
 
-// The claim counter is the load-bearing instrument of this smoke (docs/notes.md §二 bug 4: to verify
-// "x takes no claim", count `hub.claim` calls — never read `hub.live`, which a released claim vanishes
+// The hold counter is the load-bearing instrument of this smoke (docs/notes.md §二 bug 4: to verify
+// "x takes no hold", count `hub.hold` calls — never read `hub.live`, which a released hold vanishes
 // from within a tick).
-let claims = 0;
+let holds = 0;
 {
-	const realClaim = rig.hub.claim.bind(rig.hub);
-	(rig.hub as unknown as { claim: (id?: string) => Promise<HostedSession> }).claim = async (id?: string) => {
-		claims += 1;
-		return realClaim(id);
+	const realHold = rig.hub.hold.bind(rig.hub);
+	(rig.hub as unknown as { hold: (id?: string) => Promise<HostedSession> }).hold = async (id?: string) => {
+		holds += 1;
+		return realHold(id);
 	};
 }
 
 try {
 	// ---------------------------------------------------------------------------------------------
-	// 1. A lane on an idle session: no claim, no host, no end.
+	// 1. A lane on an idle session: no hold, no host, no end.
 	// ---------------------------------------------------------------------------------------------
-	process.stdout.write("a lane on an idle session claims nothing and ends nothing\n");
+	process.stdout.write("a lane on an idle session holds nothing and ends nothing\n");
 
 	const created = await request(rig.url, "POST", "/api/sessions");
 	const idleId = (created.payload as { sessionId: string }).sessionId;
 	const idle = await wire.open(idleId);
 	check("the lane opened with the snapshot", idle.id === idleId);
 	check("and an idle session says so", idle.submitting === false, String(idle.submitting));
-	check("subscribing took no claim", claims === 0, `claims=${claims}`);
+	check("subscribing took no hold", holds === 0, `holds=${holds}`);
 
 	await sleep(QUIET_MS);
 	check("the lane is still there — nothing ended it", !wire.endOf(idleId).ended, JSON.stringify(wire.endOf(idleId)));
 	check("and nothing is hosting the session", !rig.hub.live.includes(idleId), rig.hub.live.join(","));
 
-	// A read is not a claim either — the window's cold path. A session that does not exist is a 404,
-	// and its read claims nothing because it never gets that far.
+	// A read is not a hold either — the window's cold path. A session that does not exist is a 404,
+	// and its read holds nothing because it never gets that far.
 	const cold = await request(rig.url, "GET", `/api/sessions/${encodeURIComponent(idleId)}`);
 	check("a cold read answers", cold.status === 200, String(cold.status));
 	const missing = await request(rig.url, "GET", "/api/sessions/does-not-exist");
 	check("an unknown session is a 404", missing.status === 404, String(missing.status));
-	check("and neither read claimed anything", claims === 0, `claims=${claims}`);
+	check("and neither read held anything", holds === 0, `holds=${holds}`);
 
 	// ---------------------------------------------------------------------------------------------
-	// 2. A run ending does not end the lane; the claim's release does.
+	// 2. A run ending does not end the lane; the hold's release does.
 	// ---------------------------------------------------------------------------------------------
-	process.stdout.write("a run ends, the lane stays, the claim decides the rest\n");
+	process.stdout.write("a run ends, the lane stays, the hold decides the rest\n");
 
-	// The bench holds a claim for as long as it wants the host alive — the same hand a window's send
+	// The bench takes a hold for as long as it wants the host alive — the same hand a window's send
 	// reference plays, taken through the hub so the reap under test is the real one.
-	const bench = await rig.hub.claim(idleId);
+	const bench = await rig.hub.hold(idleId);
 	rig.transport.setResponses([fakeAssistantMessage("a".repeat(500))]);
 	check("the prompt was accepted", (await prompt(rig.url, idleId, "say something long")) === 202);
 	check("the run's own end reached the lane", await waitAgentEnd(wire, idleId));
@@ -203,17 +203,17 @@ try {
 
 	await sleep(QUIET_MS);
 	check("no end arrived after the run — nothing about the run ends a lane", !wire.endOf(idleId).ended, JSON.stringify(wire.endOf(idleId)));
-	check("the host is still there, held by the bench's claim", rig.hub.live.includes(idleId), rig.hub.live.join(","));
+	check("the host is still there, held by the bench", rig.hub.live.includes(idleId), rig.hub.live.join(","));
 
 	// The lane is still usable: the same subscription carries the next run.
 	rig.transport.setResponses([fakeAssistantMessage("b".repeat(500))]);
 	check("the second prompt was accepted", (await prompt(rig.url, idleId, "and again")) === 202);
 	check("and its frames reached the same lane", await waitAgentEnd(wire, idleId));
 
-	// Now the claim goes back, and the order of events is the whole point: the host goes away, and the
+	// Now the hold goes back, and the order of events is the whole point: the host goes away, and the
 	// lane ends because the session it watched is gone — not because anything ended it directly.
 	rig.hub.release(bench);
-	check("the session was reaped once the last claim let go", await until(() => !rig.hub.live.includes(idleId), 10_000), rig.hub.live.join(","));
+	check("the session was reaped once the last hold let go", await until(() => !rig.hub.live.includes(idleId), 10_000), rig.hub.live.join(","));
 	check("and the lane ended with the host it watched", await until(() => wire.endOf(idleId).ended, 5_000), JSON.stringify(wire.endOf(idleId)));
 
 	// ---------------------------------------------------------------------------------------------
@@ -221,7 +221,7 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a lane that opens on a run already in flight\n");
 
-	const again = await rig.hub.claim(idleId);
+	const again = await rig.hub.hold(idleId);
 	rig.transport.setResponses([fakeAssistantMessage("c".repeat(600))]);
 	check("the prompt was accepted", (await prompt(rig.url, idleId, "one more long answer")) === 202);
 	check("the run started", await until(() => rig.hub.live.includes(idleId), 5_000), rig.hub.live.join(","));
@@ -234,7 +234,7 @@ try {
 	await sleep(QUIET_MS);
 	check("and nothing ends the lane while the run goes on", wire.endOf(idleId).ends === endsAtOpen, JSON.stringify(wire.endOf(idleId)));
 	check("the run ended on the lane", await waitAgentEnd(wire, idleId));
-	check("and the lane outlived it, claim still held", wire.endOf(idleId).ends === endsAtOpen, JSON.stringify(wire.endOf(idleId)));
+	check("and the lane outlived it, hold still held", wire.endOf(idleId).ends === endsAtOpen, JSON.stringify(wire.endOf(idleId)));
 	rig.hub.release(again);
 	check("released, the host went, the lane went with it", await until(() => wire.endOf(idleId).ends === endsAtOpen + 1, 5_000), JSON.stringify(wire.endOf(idleId)));
 
@@ -245,7 +245,7 @@ try {
 
 	const watched = await request(rig.url, "POST", "/api/sessions");
 	const watchedId = (watched.payload as { sessionId: string }).sessionId;
-	const watchedBench = await rig.hub.claim(watchedId);
+	const watchedBench = await rig.hub.hold(watchedId);
 	const restoreWatched = sabotagePersistence(rig.hub);
 	const watchedLane = await wire.open(watchedId);
 	check("the lane opened on the session about to fail", watchedLane.id === watchedId);
@@ -267,9 +267,9 @@ try {
 	// The patch comes off before the next section runs: the service it landed on is the hub's own.
 	restoreWatched();
 
-	// The bench claim still holds the host; letting it go reaps the session. No leak.
+	// The bench's hold still keeps the host; letting it go reaps the session. No leak.
 	rig.hub.release(watchedBench);
-	check("the session was reaped once the claim let go", await until(() => !rig.hub.live.includes(watchedId), 10_000), rig.hub.live.join(","));
+	check("the session was reaped once the hold let go", await until(() => !rig.hub.live.includes(watchedId), 10_000), rig.hub.live.join(","));
 
 	// ---------------------------------------------------------------------------------------------
 	// 5. The same failure with nobody watching: the log is the only place it is still audible.
@@ -278,7 +278,7 @@ try {
 
 	const unwatched = await request(rig.url, "POST", "/api/sessions");
 	const unwatchedId = (unwatched.payload as { sessionId: string }).sessionId;
-	const unwatchedBench = await rig.hub.claim(unwatchedId);
+	const unwatchedBench = await rig.hub.hold(unwatchedId);
 	const restoreUnwatched = sabotagePersistence(rig.hub);
 
 	const loggedAlone: string[] = [];
@@ -288,7 +288,7 @@ try {
 	rig.transport.setResponses([fakeAssistantMessage("also never lands")]);
 	check("the prompt was accepted", (await prompt(rig.url, unwatchedId, "this run fails alone")) === 202);
 	// Acceptance edge 3's server-side half: no lane is open on this session anywhere, so what keeps it
-	// alive is the run and nothing else. The bench claim goes back first, on purpose — held, it would
+	// alive is the run and nothing else. The bench's hold goes back first, on purpose — held, it would
 	// be the thing answering this question instead of the run, which is exactly the assertion the
 	// hand-off for this section exists to make. The reap that follows has nothing to settle through
 	// but the run itself, so the session is still here.
@@ -341,7 +341,7 @@ try {
 	const deltaAnswer = "x".repeat(2_400);
 	const deltaSession = await request(rig.url, "POST", "/api/sessions");
 	const deltaId = (deltaSession.payload as { sessionId: string }).sessionId;
-	const deltaBench = await rig.hub.claim(deltaId);
+	const deltaBench = await rig.hub.hold(deltaId);
 	const deltaLane = await wire.open(deltaId);
 	check("the lane opened on the new session", deltaLane.id === deltaId);
 

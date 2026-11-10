@@ -32,8 +32,6 @@ export interface BootOptions {
 	 * desktop shell wants so two applications never fight over a fixed number.
 	 */
 	port?: number;
-	model?: string;
-	thinkingLevel?: string;
 	sessionId?: string;
 	/**
 	 * The agent home the global settings are read from and written to. Defaults to the real one.
@@ -74,7 +72,7 @@ export interface BootedServer {
 	 *
 	 * Built here rather than inside the hub because it is a *reader* of the hub's two observation
 	 * points, not a part of session lifetime: a caller that wants the rows asks this, and nothing about
-	 * a claim, a reap or a host's closing depends on it having asked.
+	 * a hold, a reap or a host's closing depends on it having asked.
 	 */
 	projection: SessionProjection;
 	/** The resident connection layer: one per upgraded socket. */
@@ -103,8 +101,6 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 
 	const hub = new SessionHub({
 		workDirAbsPath,
-		...(options.model === undefined ? {} : { model: options.model }),
-		...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
 		// A shell with no project picker yet has no other way to be pointed at a conversation; the
 		// environment is how a launcher or a capture run says which one to open.
 		...(sessionId === undefined ? {} : { sessionId }),

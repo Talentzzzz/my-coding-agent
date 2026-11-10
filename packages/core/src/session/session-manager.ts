@@ -27,6 +27,7 @@ import { clearToolResult } from "../context/clear-tool-results.ts";
 import type { SessionRef, SessionRow } from "../protocol.ts";
 import { COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, compactionSummaryOf } from "./messages.ts";
 import { normalizePath, resolvePath, sessionDir, sessionJsonlPath, sessionMetaPath, sessionPath, sessionsDir } from "./paths.ts";
+import { UnknownSessionError } from "./unknown-session.ts";
 
 /**
  * The on-disk shape this build writes.
@@ -1960,14 +1961,14 @@ export class SessionManager {
 	 *
 	 * A cold write is two moves, not three — this for the bag, then a setter, which writes the file
 	 * itself (`setTitle` records the meta, and recording persists). There is no third persist verb to
-	 * remember, and no dirty state to flush. Safety here is not a claim's work: while a session is
+	 * remember, and no dirty state to flush. Safety here is not a hold's work: while a session is
 	 * held, its only writer is the bag the orchestrator holds; when it is not held, one cold write is
 	 * one synchronous block no other writer can step into — and the two windows never overlap,
 	 * because the cold path only serves sessions nothing holds.
 	 */
 	open(id: string): Session {
 		const absPath = SessionManager.findSessionFilePathById(id);
-		if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
+		if (absPath === undefined) throw new UnknownSessionError(id);
 		return fillSession(absPath);
 	}
 
@@ -2161,11 +2162,11 @@ export class SessionManager {
 	 * decides what a second delete means, and the hub turns it into a status the client can show.
 	 *
 	 * Pure file I/O: whatever table held a live bag for this id is someone else's, and the caller
-	 * that decided the session is gone drops that half itself (`Agent.drop`).
+	 * that decided the session is gone forgets that half itself (`Agent.remove`).
 	 */
 	async remove(id: string): Promise<void> {
 		const absPath = SessionManager.findSessionFilePathById(id);
-		if (absPath === undefined) throw new Error(`Unknown session: ${id}`);
+		if (absPath === undefined) throw new UnknownSessionError(id);
 		await rm(absPath);
 		await rm(sessionMetaPath(absPath));
 	}

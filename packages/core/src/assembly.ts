@@ -70,36 +70,29 @@ export interface OpenAgentOptions {
 }
 
 /**
- * What {@link Agent.assembleAgentStateBySession} needs: the transcript, and the choices a host hands
- * to every open of the process.
+ * What {@link Agent.assembleAgentStateBySession} needs: the transcript, and — for the composition
+ * road a test takes — the row it should open on.
  *
  * Deliberately narrower than {@link OpenAgentOptions}. The difference is the authority argument:
  * this door belongs to the orchestrator, so the services are *its own* — a caller cannot hand it a
  * second `SettingManager` or a table of its own, which is exactly the mismatch `adopt` allowed and
  * nothing checked. What remains here is the part the orchestrator cannot know: **which** transcript
  * (the host's decision, and the session manager's replay) — the transcript carries its own working
- * directory on `sessionSetting.workDirAbsPath` — and the model and level a host hands across every
- * open it makes (the same two `OpenAgentOptions` carries — see `SessionHub.sessionOptions`, which
- * builds both shapes from one answer).
+ * directory on `sessionSetting.workDirAbsPath`.
+ *
+ * The model fields are not a host's handle on the default. The host-facing verbs (`create`,
+ * `ensure`, `snapshotOf`) do not take one: a session's model is a settings fact, read fresh from
+ * disk by the assembly below on every open. Only `openAgent` — the one-transcript composition a
+ * smoke drives — passes one, so a scripted run can open on a row of its own without writing a
+ * settings file.
  */
 export interface AssembleAgentStateOptions {
 	/** The transcript to assemble and put in the table; it carries its own working directory. */
 	session: Session;
-	/** Overrides the stored default with a row's name. */
+	/** Test-only override: the row this composition opens on, instead of the settings' default. */
 	model?: string;
 	thinkingLevel?: string;
 }
-
-/**
- * The model options a host hands to the sessions it opens, when it hands any at all: the row's name
- * and the thinking level, the same two fields {@link AssembleAgentStateOptions} carries without the
- * transcript.
- *
- * The facade's open-shaped methods (`create`, `ensure`, `snapshotOf`) take one so a host can
- * keep a `--model`-style default in force across every session without the orchestrator holding it:
- * the options are the host's per-open argument, not a resident fact.
- */
-export type ModelOptions = Pick<AssembleAgentStateOptions, "model" | "thinkingLevel">;
 
 /**
  * What a session *is*, resolved but not yet activated: the working directory, the settings, the

@@ -1,5 +1,4 @@
 import {
-	type ModelOptions,
 	assembleSession,
 	readSessionSnapshot,
 	type OpenAgentOptions,
@@ -72,6 +71,7 @@ import {
 	sessionEntryToContextMessages,
 } from "./session/session-manager.ts";
 import { toolStateOf } from "./session/tool-config.ts";
+import { UnknownSessionError } from "./session/unknown-session.ts";
 import type { SettingsPatch } from "./setting-manager.ts";
 import type { SettingManager } from "./setting-manager.ts";
 import type { Settings } from "./config.ts";
@@ -232,7 +232,7 @@ export class Agent {
 	 * One bag per session — the durable half, the settings the open resolved, the live half, the
 	 * subscribers — and the only thing this class holds between calls. States enter through
 	 * {@link Agent.assembleAgentStateBySession}, which assembles them over this class's own services first, and leave through
-	 * {@link Agent.evict} / {@link Agent.drop}: one writer, one deleter, and no caller in between.
+	 * {@link Agent.evict} / {@link Agent.remove}: one writer, one deleter, and no caller in between.
 	 */
 	private readonly sessions = new Map<string, AgentState>();
 
@@ -325,26 +325,15 @@ export class Agent {
 	}
 
 	/**
-	 * Drop one session's state from the table, whatever it holds.
-	 *
-	 * The unconditional half of the teardown (issue 03 §7): the user has deleted the session, so
-	 * the id is gone from disk and no criteria apply — there is nothing left for the state to
-	 * protect. Anything queued or in flight dies with it, exactly as a process restart would have
-	 * killed it.
-	 */
-	drop(id: string): boolean {
-		return this.sessions.delete(id);
-	}
-
-	/**
 	 * Whether the table holds a state for `id` — whether this process is holding the session.
 	 *
 	 * The table's own membership read, class-internal: a held session is written through its own
 	 * bag, a cold one is a replay of its file, and the two roads must be chosen before either is
 	 * walked — the methods here ask this before they pick one. Answering nothing about observers or
-	 * claims — those are other questions with other answers — it is only the table's membership. The
-	 * membership question a caller outside the class asks is {@link Agent.exists}, which adds the
-	 * disk; holding is not a fact the facade reports.
+	 * holds — those are other questions with other answers — it is only the table's membership. It
+	 * stays class-private: "is this held" is not a fact the facade reports, and a caller that needs
+	 * "does this id name anything" gets its answer from the command it was about to run
+	 * ({@link Agent.remove} and the cold reads refuse with {@link UnknownSessionError}).
 	 */
 	private has(id: string): boolean {
 		return this.sessions.has(id);
@@ -363,7 +352,7 @@ export class Agent {
 	 */
 	private agentState(id: string): AgentState {
 		const state = this.sessions.get(id);
-		if (state === undefined) throw new Error(`Session is not running: ${id}`);
+		if (state === undefined) throw new UnknownSessionError(id);
 		return state;
 	}
 
@@ -376,45 +365,22 @@ export class Agent {
 	// them holds anything (ADR-0007).
 
 	/**
-	 * Whether this id names a session at all: one this process holds, or one on disk.
-	 *
-	 * The `has` a host asks before it opens, reads, or deletes — the table answers the held half and
-	 * the disk scan the rest, because a session created but never spoken in has no file and one the
-	 * process never ran lives only in the store. Answering nothing about claims or observers: those
-	 * are other questions with other answers.
-	 */
-	exists(id: string): boolean {
-		return this.has(id) || this.isOnDisk(id);
-	}
-
-	/**
-	 * Whether a session file on disk names this id, across every directory store on this machine.
-	 *
-	 * The disk-only half of {@link Agent.exists}, for the caller that must branch on the two
-	 * separately: a removal asks it because a session that never spoke has no file to delete, and
-	 * forgetting its held state is the whole removal for one of those.
-	 */
-	isOnDisk(id: string): boolean {
-		return SessionManager.findSessionFilePathById(id) !== undefined;
-	}
-
-	/**
 	 * The session's current state: the bag this process holds when it holds the session, the log when
 	 * it does not.
 	 *
 	 * Reading a transcript is not running a session, and this is where that stops being a slogan: the
 	 * cold road builds the same snapshot an open would have produced — through the same assembly, so
 	 * the model the open hands over and the derived tool and approval answers agree with the live road — without a
-	 * host, without a run, and without a claim. It deliberately touches no subscriber table and no
+	 * host, without a run, and without a hold. It deliberately touches no subscriber table and no
 	 * host: the whole point is that a read leaves no trace, so opening a session's history cannot
 	 * keep it alive, evict it, or cost what running it costs.
 	 *
 	 * An id that names nothing refuses inside the store's `open` — that is the 404, unchanged.
 	 */
-	async snapshotOf(id: string, modelOptions?: ModelOptions): Promise<SessionSnapshot> {
+	async snapshotOf(id: string): Promise<SessionSnapshot> {
 		const held = this.sessions.get(id);
 		if (held !== undefined) return snapshotOf(held, this.services);
-		return readSessionSnapshot(this.coldOptions(this.sessionManager.open(id), modelOptions));
+		return readSessionSnapshot(this.coldOptions(this.sessionManager.open(id)));
 	}
 
 	/**
@@ -423,7 +389,7 @@ export class Agent {
 	 * A held session writes through its own bag — the snapshot is written whole, so a fresh replay
 	 * would revert whatever its turns just recorded onto the file. A cold one fills a throwaway, and
 	 * a cold write is one synchronous block (`open`, then the setter that persists), which is the
-	 * whole of its safety — it takes no claim either way: a title is a fact about the session rather
+	 * whole of its safety — it takes no hold either way: a title is a fact about the session rather
 	 * than about one way through it, the engine never reads titles, and a rewrite of the snapshot
 	 * mid-run lands without disturbing the turn. An id that names nothing refuses inside the store's
 	 * `open`, which is the 404 it always was.
@@ -439,9 +405,9 @@ export class Agent {
 	 * The source is located first — a held session's file is the bag its turns write through, a cold
 	 * one is found by scanning the stores — and then only read: its file is untouched, its own leaf
 	 * does not move, and a session this process is running is forked from the file it is writing, so
-	 * no claim is disturbed and a live turn keeps whatever it was writing. Both new files are written
+	 * no hold is disturbed and a live turn keeps whatever it was writing. Both new files are written
 	 * synchronously before this returns, so the id handed back is openable by the time the caller has
-	 * it. Nothing is adopted: a fork nobody has claimed has no live half to hold, and its first touch
+	 * it. Nothing is adopted: a fork nobody holds has no live half to keep, and its first touch
 	 * is what assembles it.
 	 */
 	forkFrom(sourceId: string, entryId: string | null): string {
@@ -461,10 +427,14 @@ export class Agent {
 	 * cannot be read) is the same failure the following open would have hit, just earlier: the id is
 	 * not handed out past a creation that could not build it. The id is the one the table actually
 	 * holds, read back rather than assumed, so a caller under a concurrent open runs on the winner.
+	 *
+	 * No model is taken as an argument: which model a session opens on is a settings fact, and the
+	 * assembly reads the global and per-directory files fresh on every open — so a row corrected in
+	 * the panel is the row this session opens on, with nothing here to invalidate.
 	 */
-	async create(workDirAbsPath: string, modelOptions?: ModelOptions): Promise<string> {
+	async create(workDirAbsPath: string): Promise<string> {
 		const bag = createSession(workDirAbsPath);
-		const state = await this.assembleAgentStateBySession(this.openOptions(bag, modelOptions));
+		const state = await this.assembleAgentStateBySession(this.openOptions(bag));
 		return state.session.sessionId;
 	}
 
@@ -485,25 +455,39 @@ export class Agent {
 	 * file and the assembly appends nothing, so adopting touches no file at all — the one thing it
 	 * changes is the table, and entering the table is the whole point.
 	 */
-	async ensure(id: string, modelOptions?: ModelOptions): Promise<string> {
+	async ensure(id: string): Promise<string> {
 		if (this.has(id)) return id;
 		const bag = this.sessionManager.open(id);
-		const state = await this.assembleAgentStateBySession(this.openOptions(bag, modelOptions));
+		const state = await this.assembleAgentStateBySession(this.openOptions(bag));
 		return state.session.sessionId;
 	}
 
 	/**
-	 * Delete the session an id names, from whichever directory holds it: transcript and file.
+	 * Delete the session an id names: its files where they exist, and the state this process holds
+	 * for it. One operation, because "is there a file?" is not a caller's question.
 	 *
-	 * An id nothing on disk names refuses rather than answering "already gone" — the caller decides
-	 * what a second delete means, and turns the refusal into the status its client can show. Pure
-	 * file I/O, and no claim is taken anywhere on the road: the removal never touches the table, the
-	 * hosts, or the observers — a held session's state is the caller's to drop (`drop`) after the
-	 * files are gone, because the user deleted the session and no criterion applies to an id that is
-	 * no longer on disk.
+	 * Three cases, decided here rather than by the caller: a session with files on disk — remove
+	 * them and forget the state; one created but never spoken in — no file was ever written, so
+	 * forgetting the state is the whole removal; an id nothing names — refuse with
+	 * {@link UnknownSessionError}, which the transport answers as a 404. Files first, then the state:
+	 * a failed unlink leaves the table able to answer for the same id again.
+	 *
+	 * No hold is taken and no run is stopped: the transport settles a session before it asks (a
+	 * delete of a busy one is a 409 there), and hosts, observers and holds are its bookkeeping, not
+	 * this class's.
+	 *
+	 * This is the table's unconditional exit, beside {@link Agent.evict}'s conditional one: the user
+	 * has deleted the session, so no criteria apply — there is nothing left for the state to protect.
+	 * Anything queued or in flight dies with it, exactly as a process restart would have killed it.
 	 */
-	async removeFromDisk(id: string): Promise<void> {
+	async remove(id: string): Promise<void> {
+		const onDisk = SessionManager.findSessionFilePathById(id) !== undefined;
+		if (!onDisk) {
+			if (this.sessions.delete(id)) return;
+			throw new UnknownSessionError(id);
+		}
 		await this.sessionManager.remove(id);
+		this.sessions.delete(id);
 	}
 
 	/**
@@ -617,16 +601,13 @@ export class Agent {
 	}
 
 	/**
-	 * The options one transcript is assembled under when this class opens it: the transcript — which
-	 * carries its own working directory — and the model options the host handed to the open. The
-	 * services are this class's own by construction — that is the guarantee the assembly door rests
-	 * on, and why they are absent here.
+	 * The options one transcript is assembled under when this class opens it: the transcript alone,
+	 * because it carries its own working directory and the model it opens on is a settings fact the
+	 * assembly reads fresh. The services are this class's own by construction — that is the guarantee
+	 * the assembly door rests on, and why they are absent here.
 	 */
-	private openOptions(session: Session, modelOptions?: ModelOptions): AssembleAgentStateOptions {
-		return {
-			session,
-			...spreadModelOptions(modelOptions),
-		};
+	private openOptions(session: Session): AssembleAgentStateOptions {
+		return { session };
 	}
 
 	/**
@@ -635,10 +616,9 @@ export class Agent {
 	 * snapshot taken after. The cold read sends nothing, so the transport rides along only to keep
 	 * the one builder honest — a session that changes when you open it is the bug this closes.
 	 */
-	private coldOptions(session: Session, modelOptions?: ModelOptions): OpenAgentOptions {
+	private coldOptions(session: Session): OpenAgentOptions {
 		return {
 			session,
-			...spreadModelOptions(modelOptions),
 			sessionManager: this.sessionManager,
 			settings: this.settingsManager,
 			tools: this.tools,
@@ -650,7 +630,7 @@ export class Agent {
 	 * The bag one cold write goes through: the held session's own, else a fresh replay.
 	 *
 	 * Safety is not this helper's, it is the caller's discipline, stated on each writer: a cold write
-	 * is one synchronous block (the replay, then the setter that persists) and takes no claim, and it
+	 * is one synchronous block (the replay, then the setter that persists) and takes no hold, and it
 	 * only ever serves a session nothing holds — the moment a state is in the table, the held road is
 	 * the one taken, so the two windows never overlap.
 	 */
@@ -2146,17 +2126,6 @@ export class Agent {
 			publishState(state, this.services);
 		}
 	}}
-
-/**
- * The model half of an open's options, as the option object carries it: absent keys, never keys
- * whose value is `undefined` — an option nobody named must be indistinguishable from no option at all.
- */
-function spreadModelOptions(modelOptions: ModelOptions | undefined): { model?: string; thinkingLevel?: string } {
-	return {
-		...(modelOptions?.model === undefined ? {} : { model: modelOptions.model }),
-		...(modelOptions?.thinkingLevel === undefined ? {} : { thinkingLevel: modelOptions.thinkingLevel }),
-	};
-}
 
 /**
  * The approval keys whose value differs, or undefined when none do.

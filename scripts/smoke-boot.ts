@@ -186,12 +186,12 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("shutdown with the worst case in residence\n");
 
-	// The bench holds a claim of its own across the prompt below, the way `smoke-mux` and
-	// `smoke-stream` do wherever a check needs the host to outlive a request. A session whose claims
-	// reach zero is reaped — which ends the lane watching it, by design (the claim decides how long a
+	// The bench holds a hold of its own across the prompt below, the way `smoke-mux` and
+	// `smoke-stream` do wherever a check needs the host to outlive a request. A session whose holds
+	// reach zero is reaped — which ends the lane watching it, by design (the hold decides how long a
 	// session lives, and a subscription takes none). Reaping that transient host under the lane would
-	// leave the worst case without its window, so the bench is the claim-holder here.
-	const bench = await server.hub.claim(sessionId);
+	// leave the worst case without its window, so the bench is the holder here.
+	const bench = await server.hub.hold(sessionId);
 
 	const accepted = await request(server.url, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
 		text: "read the notes",

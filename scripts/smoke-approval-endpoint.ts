@@ -70,7 +70,7 @@ const hub = new SessionHub({
 });
 
 // Mounted the way `SessionHub.open()` mounts one — the entry parked at the gate is what the checks
-// below drive — so the controller claims through the real hub.
+// below drive — so the controller holds through the real hub.
 const { id: sessionId } = await mountSession(hub, {
 	root,
 	model: modelName,
@@ -116,10 +116,10 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
 	return ready();
 }
 
-// The bench holds a claim for the length of the checks below. A run that ends with nobody holding
+// The bench holds a hold for the length of the checks below. A run that ends with nobody holding
 // the session is reaped and its idle state evicted, so the snapshot reads would race the eviction —
-// holding the claim is what keeps the state in hand while they run.
-const bench = await hub.claim(sessionId);
+// holding the hold is what keeps the state in hand while they run.
+const bench = await hub.hold(sessionId);
 
 try {
 	const accepted = await request("POST", `/api/sessions/${sessionId}/messages`, { text: "read the notes" });

@@ -13,7 +13,7 @@
 //   2. three *connections* on one session — every window hears the same answer (the ticket-13 defect:
 //      the first reader used to take the answer and every later one reported a denial);
 //   3. one id, two sessions — an answer reaches only the session it was given on (ticket 19);
-//   4. a parked approval — it outlives its host: the reap closes the host once the last claim lets
+//   4. a parked approval — it outlives its host: the reap closes the host once the last hold lets
 //      go, and the question survives unanswered and undenied until someone answers it or the process
 //      ends (issue 04);
 //   5. a restart — a second process seeds no pending approval, and the transcript keeps the call.
@@ -22,8 +22,8 @@
 // `new SessionHub({ workDirAbsPath: root })` names the hub's one directory option: that section
 // drives a session it mounted itself, so the hub never has to open one of its own. And no section
 // may hold a session open through a *subscription*:
-// a subscription takes no claim, so wherever a check needs the host to outlive a request it takes a
-// claim of its own (the bench claim), exactly as `smoke-stream` and `smoke-mux` do.
+// a subscription takes no hold, so wherever a check needs the host to outlive a request it takes a
+// hold of its own (the bench hold), exactly as `smoke-stream` and `smoke-mux` do.
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -161,7 +161,7 @@ const hub = new SessionHub({
 	settingsHome,
 	modelsHome: settingsHome,
 });
-// Mounted the way `SessionHub.open()` mounts one, so every request below claims through the real hub.
+// Mounted the way `SessionHub.open()` mounts one, so every request below holds through the real hub.
 const { id: sessionId } = await mountSession(hub, {
 	root,
 	model: modelName,
@@ -170,10 +170,10 @@ const session = hub.agent;
 
 const roundTrip = await serve(hub);
 try {
-	// The bench holds a claim for the length of these checks. A subscription takes none — that is the
-	// model — so without it the reap that follows the run's own claim would end the lane in the middle
+	// The bench holds a hold for the length of these checks. A subscription takes none — that is the
+	// model — so without it the reap that follows the run's own hold would end the lane in the middle
 	// of the assertions below.
-	const bench = await hub.claim(sessionId);
+	const bench = await hub.hold(sessionId);
 	const wire = await connect(muxUrl(roundTrip.url));
 
 	const baseline = await wire.open(sessionId);
@@ -277,7 +277,7 @@ const sharedWatchdog = deadline("the shared-answer checks", 60_000);
 
 const shared = await openRig();
 try {
-	const bench = await shared.hub.claim(shared.sessionId);
+	const bench = await shared.hub.hold(shared.sessionId);
 	// Every window is attached before anything runs, so the request is a difference frame on each of
 	// them rather than part of a baseline — which is the path under test.
 	const windows: WireClient[] = [];
@@ -359,8 +359,8 @@ try {
 	const [firstSession, secondSession] = cross.sessions;
 	const first = firstSession!;
 	const second = secondSession!;
-	const firstBench = await cross.hub.claim(first.id);
-	const secondBench = await cross.hub.claim(second.id);
+	const firstBench = await cross.hub.hold(first.id);
+	const secondBench = await cross.hub.hold(second.id);
 	const firstWire = await connect(muxUrl(cross.url));
 	const secondWire = await connect(muxUrl(cross.url));
 	const [firstBaseline, secondBaseline] = await Promise.all([
@@ -429,13 +429,13 @@ try {
 // ---------------------------------------------------------------------------------------------------
 // 4. A parked approval outlives the host that was showing it.
 //
-// The phase this covers: a claim answers "is anyone running or changing this", which is not the
+// The phase this covers: a hold answers "is anyone running or changing this", which is not the
 // question "will anyone answer". There is no grace and no abandonment denial (issue 04 §4): the
-// reap closes the host once the last claim lets go, the orchestrator's state stays — a run parked
+// reap closes the host once the last hold lets go, the orchestrator's state stays — a run parked
 // at the gate refuses eviction, and with it the queues a recovery run must drain — so the question
-// survives as the ledger's, to be answered on a later claim or carried to the next process. The
-// rigs take their claims through the hub itself, so the reap under test is the real one — the
-// sections above mount a session by hand and keep a bench claim on it.
+// survives as the ledger's, to be answered on a later hold or carried to the next process. The
+// rigs take their holds through the hub itself, so the reap under test is the real one — the
+// sections above mount a session by hand and keep a bench hold on it.
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\na parked approval outlives its host, unanswered and undenied\n");
@@ -450,7 +450,7 @@ try {
 		const parked = patient.host;
 		check("the run parked at the approval", patient.session.hasPendingApprovals(parked.id));
 
-		// The viewer switches away, and its claim is the *only* thing keeping the session open — a
+		// The viewer switches away, and its hold is the *only* thing keeping the session open — a
 		// subscription takes none. So this release is what starts the reap, and it does not wait for
 		// an answer: the host closes, the parked state refuses eviction, and the question stays.
 		wire.cancel(patient.sessionId);
@@ -470,7 +470,7 @@ try {
 		// The person came back: a new host, but the same state — the one the table kept. Identity is the
 		// orchestrator's private business, so the assertion probes the table the way the other smokes
 		// do; the facade answers in pure data and never hands the bag out.
-		const again = await patient.hub.claim(parked.id);
+		const again = await patient.hub.hold(parked.id);
 		check("a new host opens over the retained state", again !== parked && again.id === parked.id, `${again.id} vs ${parked.id}`);
 		const heldBag = (patient.hub.agent as unknown as { sessions: Map<string, { session: Session }> }).sessions.get(parked.id)?.session;
 		check("the state the table holds is the one the session was mounted with", heldBag === patient.bag);
@@ -524,7 +524,7 @@ try {
 		wire.cancel(abandoned.sessionId);
 		abandoned.hub.release(viewer);
 		check(
-			"the host was reaped once the claim let go",
+			"the host was reaped once the hold let go",
 			await until(() => !abandoned.hub.live.includes(parked.id), 8_000),
 			abandoned.hub.live.join(","),
 		);
@@ -557,7 +557,7 @@ try {
 			lookedThenLeft.hub.live.join(","),
 		);
 
-		const back = await lookedThenLeft.hub.claim(parked.id);
+		const back = await lookedThenLeft.hub.hold(parked.id);
 		check("the returning viewer gets the session back", back.id === parked.id, `${back.id} vs ${parked.id}`);
 		check("and the approval is still unanswered", lookedThenLeft.session.hasPendingApprovals(parked.id));
 
@@ -735,7 +735,7 @@ interface Rig {
  * mux in front of it.
  *
  * Only the transport is a stand-in. The session is mounted the way `SessionHub.open()` mounts one, so
- * that every claim below — the viewer's and the reap it drives — is a real claim through the hub.
+ * that every hold below — the viewer's and the reap it drives — is a real hold through the hub.
  */
 async function openRig(): Promise<Rig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-approval-"));
@@ -846,11 +846,11 @@ async function openCrossRig(): Promise<CrossRig> {
 
 /**
  * Attach a viewer, start a run, and bring it to the approval gate — the state every parked-approval
- * check begins from. The viewer's own claim is what keeps the host open across the run: a
+ * check begins from. The viewer's own hold is what keeps the host open across the run: a
  * subscription takes none.
  */
 async function driveToApproval(rig: Rig): Promise<{ wire: WireClient; viewer: HostedSession }> {
-	const viewer = await rig.hub.claim(rig.sessionId);
+	const viewer = await rig.hub.hold(rig.sessionId);
 	const wire = await connect(muxUrl(rig.url));
 	await wire.open(rig.sessionId);
 

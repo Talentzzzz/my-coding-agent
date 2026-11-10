@@ -3,7 +3,7 @@
 // Production never does this: `SessionHub.open()` resolves which session to run from a request, and
 // reads its settings through the orchestrator's own. A smoke wants a session whose id it knows up
 // front, so the two steps an open takes are taken here instead: build a transcript bag, open it onto
-// the hub's orchestrator through the same public door a production open uses, then mount the claim
+// the hub's orchestrator through the same public door a production open uses, then mount the hold
 // token the hub keys it by. The hub's one orchestrator then serves the session like any other,
 // because every call it answers names the id.
 //
@@ -27,7 +27,7 @@ export interface MountOptions {
 	model?: string;
 }
 
-/** What a mounted session is: the id every call names, the transcript bag behind it, and its claim token. */
+/** What a mounted session is: the id every call names, the transcript bag behind it, and its hold token. */
 export interface MountedSession {
 	id: string;
 	state: Session;
@@ -35,10 +35,10 @@ export interface MountedSession {
 }
 
 /**
- * Seed a session into a hub's registry and mount its claim token.
+ * Seed a session into a hub's registry and mount its hold token.
  *
- * The session is idle — no claim is taken here, exactly as `newSession()` returns an id without
- * claiming it — so a caller that wants it held open asks `hub.claim()` for that.
+ * The session is idle — no hold is taken here, exactly as `newSession()` returns an id without
+ * holding it — so a caller that wants it held open asks `hub.hold()` for that.
  */
 export async function mountSession(hub: SessionHub, options: MountOptions): Promise<MountedSession> {
 	const internals = hub as unknown as HubInternals;

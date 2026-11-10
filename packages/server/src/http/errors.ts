@@ -1,3 +1,4 @@
+import { UnknownSessionError } from "@my-agent/core";
 import type { IncomingMessage } from "node:http";
 
 /**
@@ -41,6 +42,9 @@ export const httpStatus = {
 /** The status and message a thrown value deserves, including errors that never meant to be HTTP. */
 export function internalError(error: unknown): { status: number; message: string } {
 	if (error instanceof HttpError) return { status: error.status, message: error.message };
+	// The data layer's own refusal, named as a type instead of sniffed from a sentence: an id that
+	// exists nowhere. Every unknown-session road ends here, which is why no endpoint checks first.
+	if (error instanceof UnknownSessionError) return { status: 404, message: error.message };
 	return { status: 500, message: error instanceof Error ? error.message : String(error) };
 }
 

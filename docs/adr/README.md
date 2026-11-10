@@ -29,6 +29,7 @@
 | [0015](0015-llm-folded-into-core.md) | 把 `packages/llm` 折叠进 core——全树只剩一个 `Context` 与一个 `Tool` | 已接受，已落地（2026-11-06，01–04 号票，`check` 与 `build:web` 绿、smoke 与改动前逐条同色零新红，零行为变化），取代 0008 决定 6 的 `AgentContext` 命名与「形状也住 `types.ts`」那一半，及其「llm 没有被并入任何人」的现状陈述 |
 | [0016](0016-tool-manager-instance-table.md) | 工具回到一张常驻实例表——`ToolManager` 持有全部 `Tool`，引擎经它执行 | 已接受，已落地（2026-11-06，07–09 号票；2026-11-07 由 11 号票全量验收：`check` 与 `build:web` 绿、smoke 与改动前逐条同色零新红），部分取代 0006 / 0007 / 0011 / 0015 |
 | [0017](0017-agent-facade.md) | server 只认 `Agent` 公开面——Manager 的消费者收进 core，构造由 `createSessionAgent()` 吸收 | 已接受，已落地（2026-11-07，hub-agent-facade 01–07 号票，`check` 含新守卫 `check-server-facade` 与 `build:web` 绿、smoke 与基线逐条同色零新红），部分取代 0007 / 0016 |
+| [0018](0018-claim-renamed-to-hold.md) | `claim` 改名为 `hold`——同一个引用计数，一个说得准的名字 | 已接受，已落地（2026-11-10，全仓机械改名，`check` 绿、相关 smoke 全 PASS，零行为变化），部分取代 0001 的「不要重命名 `claim`」 |
 
 ## 门槛
 

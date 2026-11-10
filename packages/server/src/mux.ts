@@ -6,6 +6,7 @@ import type {
 	SessionRow,
 	SessionSnapshot,
 } from "@my-agent/core/protocol";
+import { UnknownSessionError } from "@my-agent/core";
 import { parseClientFrame } from "./http/client-frame.ts";
 import type { SessionFeeds, SessionHub } from "./hub.ts";
 import type { SessionProjection } from "./projection.ts";
@@ -134,9 +135,9 @@ export type ResolvedMuxOptions = Required<MuxOptions>;
  * two windows on one conversation hold two of these, each reporting approval differences from its own
  * starting point, and neither is a fact about the session.
  *
- * It holds no claim. Watching a session does not keep it running — a claim says somebody is running or
+ * It takes no hold. Watching a session does not keep it running — a hold says somebody is running or
  * changing it — so nothing here is an input to the hub's decision about whether a session may be
- * closed. That separation is load-bearing: if a subscription held a claim, a window left open on an
+ * closed. That separation is load-bearing: if a subscription took one, a window left open on an
  * idle conversation would keep an `Agent` assembled for nobody, forever.
  */
 interface Subscription {
@@ -325,15 +326,11 @@ export class MuxConnection {
 			this.pushBaseline(sessionId, watching);
 			return;
 		}
-		if (!this.hub.has(sessionId)) {
-			this.failStream(sessionId, `未知的会话：${sessionId}`);
-			return;
-		}
 
 		const subscription: Subscription = { pending: new Map(), backlog: [], teardown: [] };
 		this.subscriptions.set(sessionId, subscription);
 
-		// Watching is not claiming, and it takes no claim: a window looking at an idle conversation must
+		// Watching is not holding it open, and it takes no hold: a window looking at an idle conversation must
 		// not be the reason an `Agent` stays assembled. `observe` is keyed by id and re-binds itself if
 		// this process later starts running the session, which is what lets "watch it, then send it a
 		// message" work.
@@ -389,7 +386,7 @@ export class MuxConnection {
 	 * watch — the read is the same either way, and re-arming the backlog is what makes the second
 	 * one land behind the state it describes rather than on top of frames that already ran past it.
 	 *
-	 * Reading a transcript is not running a session, so this never assembles anything and never claims
+	 * Reading a transcript is not running a session, so this never assembles anything and never takes a hold
 	 * anything. It is the answer to "watch an idle conversation", which is the case the old
 	 * run-scoped stream refused to serve at all.
 	 *
@@ -403,11 +400,13 @@ export class MuxConnection {
 		try {
 			snapshot = await this.hub.snapshotOf(sessionId);
 		} catch (error) {
-			// The file went away between the existence check and the read. This is a failed `open`, so it
-			// is answered like every other one: an error carrying the attribution, then the end that stops
-			// the attempt from going on looking like a stream that is merely quiet.
+			// A failed `open`, answered like every other one: an error carrying the attribution, then
+			// the end that stops the attempt from going on looking like a stream that is merely quiet.
+			// An id that names nothing is the common case here — there is no pre-check any more, so the
+			// read itself is what discovers it — and its own sentence is clearer than a read failure.
 			if (!this.closed && this.subscriptions.get(sessionId) === subscription) {
-				this.failStream(sessionId, `读不出这个会话的记录：${describe(error)}`);
+				const message = error instanceof UnknownSessionError ? `未知的会话：${sessionId}` : `读不出这个会话的记录：${describe(error)}`;
+				this.failStream(sessionId, message);
 			}
 			return;
 		}
@@ -423,7 +422,7 @@ export class MuxConnection {
 	 *
 	 * The only meaning of dropping a subscription is "no more frames for this session on this
 	 * connection" — not "stop the run", not "close the session", not "release anything". A run started
-	 * from this window keeps its own claim and keeps going, which is what lets a window navigate away
+	 * from this window keeps its own hold and keeps going, which is what lets a window navigate away
 	 * from a conversation that is still answering.
 	 *
 	 * No acknowledgement: the client's intent is complete once it has sent `cancel`, and a reply would

@@ -42,18 +42,18 @@ manager。
 1. **`Agent` 公开面三类方法，server 及以下只调它们。** 对账（票 01）把 hub、controllers、
    projection 摸 Manager / 状态袋的每个调用点列全，逐一落到三类：
    - **会话生命周期**，held/cold 两路在编排层内部统一、调用点不再写分支：
-     `exists(id)`、`snapshotOf(id, modelOptions?)`（held 走表、cold 走 open +
-     `readSessionSnapshot`）、`ensure(id, modelOptions?)`（held 走表、disk 走 replay + open，
-     hub 不再写 `has` 分支）、`setTitle(id, title)`、`forkFrom(sourceId, entryId)`（源路径
-     解析在门面内部，`HostedSession` 不再为它持目录）、`create(workDirAbsPath, modelOptions?)`、
-     `removeFromDisk(id)` + `isOnDisk(id)`。
-     后续收口（2026-11-09）：`has(id)` 收成 class-private——表成员资格是编排层的内部事实，
-     门面对外的成员答案只有 `exists`（`hub.has` 本就只走它）。为让调用点不再需要先问「持不
-     持有」，`close(id)` 改为容忍未持有的 id：无事可停即立即返回，hub 逐出边缘里「还欠不欠
-     一次 close」的重问被吸收进 close 自身；remove 里仅剩的 held/cold 区分由 `isOnDisk` +
-     `exists` 两个公开读表达（在 `isOnDisk` 为假处 `!exists ≡ !held`，未知 id 的 404 拒绝
-     原样）。`evict` / `drop` 维持公开——它们是出表动词，逐出边缘逻辑留在 hub（见「没有被
-     取代的」），需要它们。
+     `snapshotOf(id)`（held 走表、cold 走 open + `readSessionSnapshot`）、`ensure(id)`（held
+     走表、disk 走 replay + open，hub 不再写 `has` 分支）、`setTitle(id, title)`、
+     `forkFrom(sourceId, entryId)`（源路径解析在门面内部，`HostedSession` 不再为它持目录）、
+     `create(workDirAbsPath)`。
+     后续收口（2026-11-09）：`has(id)` 收成 class-private——表成员资格是编排层的内部事实。
+     再收口（2026-11-10）：`exists(id)` / `isOnDisk(id)` / `removeFromDisk(id)` 三个判据从
+     公开面删除，换成一次删操作 `remove(id)`——「有没有文件、表里有没有」是删除内部的事，
+     没有文件（创建未发言）就只忘状态，文件名不响就以 `UnknownSessionError` 拒绝。同一轮把
+     「未知会话 → 404」变成类型：core 抛 `UnknownSessionError`，HTTP 边界（`internalError`）
+     映射 404，于是 controllers 的五处 `if (!hub.has(...)) throw notFound` 与 mux 的 open
+     前置检查一并消失——检查由被调命令自己说。`evict` / `drop` 维持公开——它们是出表动词，
+     逐出边缘逻辑留在 hub（见「没有被取代的」），需要它们。
    - **窄状态读**，全部 held-only、返回**纯数据**：`fileAbsPathOf(id)`、`isSubmitting(id)`、
      `titleOf(id)`、`timestampOf(id, entryId)`（消息时间戳优先、entry 时间戳兜底，hub 的帧
      与 projection 的行因此不可能对「最后活跃」各执一词）、`messageRoleOf(id, entryId)`。
@@ -61,9 +61,10 @@ manager。
      `hiddenDirectories(workDir)`、`applySettings(workDir, patch)`、`settings(workDir)`；
      扫描类静态方法同签名转发（`listSessions` / `listDirectories` /
      `findSessionRowById`），不留自由函数例外清单。
-   - 宿主钉死的默认模型（boot 的 `--model`）以 `ModelOptions`（`model` + `thinkingLevel`，
-     定义在 `assembly.ts`）随 `create` / `ensure` / `snapshotOf` 现取现传——模型选项是
-     宿主的每次打开实参，不是编排层持有的常驻事实。
+   - **（修订）打开的模型默认不收实参。** `create` / `ensure` / `snapshotOf` 只收目录或 id；
+     模型与档位由装配在每次打开时从设置现读（全局与目录两份 `settings.json`），boot 的
+     `--model` / `--thinking` 随之删除。模型默认是设置的事实，宿主不必也不该在每次打开时
+     重说一遍；`create` 里那次 `await` 就是这次现读。
 2. **状态对象不出 core。** `agentState()` 收成 private，`AgentState` / `Session` 类型从
    server 可见的面消失（禁名单见决定 4）；server 需要的一切都从窄读拿纯数据。一个会话的
    状态进表仍走装配（`assembleSession` 的唯一调用者仍是编排层的装配门 `Agent.assembleInto`，
@@ -92,8 +93,8 @@ manager。
    数据字段叫 `tools` 的太多，兜不住也不必，`ToolManager` 由导入名单堵死）。范围仅 server
    包源码；scripts/ 的冒烟按票 02 的裁定保留 Manager 访问。名单加名字 = 加一行。
 5. **冷路径契约落在各自方法的文档上。** `setTitle`（一冷写一次同步块、不拿 claim）、
-   `snapshotOf`（不留痕：无 host、无 run、无 claim、不追加任何 entry）、`removeFromDisk`
-   （纯文件 I/O、不触表/hosts/observers）、`ensure` 的 disk 半（无写窗口可保护——replay 与
+   `snapshotOf`（不留痕：无 host、无 run、无 claim、不追加任何 entry）、`remove`（文件先删、
+   再忘状态；不拿 claim、不碰 hosts/observers——那是 hub 的账）、`ensure` 的 disk 半（无写窗口可保护——replay 与
    assembly 都不写盘，进表本身就是它的目的）。两个性质（写窗口、不留痕）是 per-method
    的，分开放才不会在某一侧腐化；hub 侧只留一行「为什么敢直接调」。
 6. **两处顺延的收口**（票 05 连带标记、票 07 落定）：全仓零消费者的 `workDirOf` 删除（对
@@ -128,8 +129,9 @@ manager。
 - **`Agent` 的公开面宽了一截。** 三类二十一个方法（含票 04 增补的 `messageRoleOf`），其中
   窄读一族是为「状态对象不出 core」付的价——每一条 server 需要的窄读都得在门面上有名有
   姓，而不是让 server 顺手读一个字段。
-- **`ModelOptions` 三个方法都要收。** 模型选项不进编排层，于是每个打开形状的方法都多一个可选
-  实参；这是「编排层不持宿主事实」的直接代价。
+- **（修订）模型默认三个方法都不收实参。** 它不进编排层，早期版本因此让每个打开形状的方法
+  多带一个可选实参；现在默认只在设置里、装配每次现读——编排层仍不持宿主事实，这份代价换成
+  了装配的一次文件读。
 - **守卫名单要跟着公开面长。** 今后 core 新增一个 server 不该碰的出口，守卫的禁名单就得
   加一行——漏加不报错，名单不是完备性证明，只是已知名单。
 - **冒烟的种子方式变了形状。** hub 级冒烟不再注入内存 manager，改为临时 homes + 一次性

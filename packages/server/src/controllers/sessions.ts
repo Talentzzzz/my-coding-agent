@@ -22,6 +22,7 @@ import {
 	type ModelConfig,
 	type DirectoryGroup,
 	type DirectoryPaging,
+	UnknownSessionError,
 } from "@my-agent/core";
 import { dirname, resolve, sep } from "node:path";
 import { httpStatus } from "../http/errors.ts";
@@ -442,7 +443,7 @@ export class SystemController {
  * Everything about one session: reading it, changing its configuration, and the commands that each
  * used to be a branch of one `switch` over a message the socket carried.
  *
- * Each method is a thin call onto the orchestrator, under the claim the hub holds. Only two
+ * Each method is a thin call onto the orchestrator, under the hold it takes from the hub. Only two
  * decisions live here: what a failure means as a status, and that a command returns as soon as the
  * session has accepted it — the run itself is reported on the event stream, never on this response.
  */
@@ -458,23 +459,23 @@ export class SessionController {
 	/**
 	 * The current state of a session this process is running, or can open.
 	 *
-	 * The one read on this controller that does *not* go through {@link claiming}: reading a
+	 * The one read on this controller that does *not* go through {@link holding}: reading a
 	 * transcript must not assemble a session, hold it open, or evict it, so it asks the hub for a
 	 * snapshot rather than for the live object. Every other method here mutates, or has to run against
-	 * the session that is running, and those keep their claim.
+	 * the session that is running, and those keep their hold.
 	 *
-	 * Existence is still checked against the hub, which covers the sessions on disk too — a read of an
-	 * id that names nothing is a 404, exactly as it was when the claim was what discovered that.
+	 * Existence is not checked here either: the read names the session, and the orchestrator refuses
+	 * with {@link UnknownSessionError} when nothing answers to it — the transport turns that into the
+	 * same 404 the pre-check used to spell.
 	 */
 	async read(sessionId: string): Promise<{ session: SessionSnapshot }> {
-		if (!this.hub.has(sessionId)) throw httpStatus.notFound(`Unknown session: ${sessionId}`);
 		return { session: await this.hub.snapshotOf(sessionId) };
 	}
 
 	/**
 	 * Start a conversation and make it what an unnamed stream lands on next.
 	 *
-	 * Returns an id rather than a claimed session, so attaching happens in exactly one place: the mux
+	 * Returns an id rather than a held session, so attaching happens in exactly one place: the mux
 	 * `open` frame the client sends next. Creating a session writes its JSONL header, so a session
 	 * that is created and never opened is still findable by id — and still subscribable, since
 	 * subscribing reads the transcript rather than running it.
@@ -551,7 +552,7 @@ export class SessionController {
 	 * which is what *not renaming* already does. There is no clear-rename; changing the name back is
 	 * another rename.
 	 *
-	 * No claim is taken and a run in flight is no obstacle: the title is a fact about the session
+	 * No hold is taken and a run in flight is no obstacle: the title is a fact about the session
 	 * rather than about one way through it, and nothing the loop reads depends on it.
 	 */
 	async rename(sessionId: string, body: Record<string, unknown>): Promise<{ sessionId: string; title: string }> {
@@ -559,7 +560,6 @@ export class SessionController {
 		if (typeof title !== "string") throw httpStatus.badRequest("`title` must be a string");
 		const stored = shortenTitle(title);
 		if (stored.length === 0) throw httpStatus.badRequest("`title` must be a non-empty string");
-		if (!this.hub.has(sessionId)) throw httpStatus.notFound(`Unknown session: ${sessionId}`);
 		await this.hub.rename(sessionId, stored);
 		this.listeners.onRenamed?.(sessionId);
 		return { sessionId, title: stored };
@@ -574,10 +574,12 @@ export class SessionController {
 	 * tells the windows never precedes the fact it reports.
 	 */
 	async remove(sessionId: string): Promise<{ removed: true }> {
-		if (!this.hub.has(sessionId)) throw httpStatus.notFound(`Unknown session: ${sessionId}`);
 		try {
 			await this.hub.remove(sessionId);
 		} catch (error) {
+			// A session that does not exist is the 404 the command itself refused with; everything else
+			// the hub throws on this road is "still busy", which is the conflict.
+			if (error instanceof UnknownSessionError) throw error;
 			throw httpStatus.conflict(messageOf(error));
 		}
 		this.listeners.onRemoved?.(sessionId);
@@ -608,7 +610,7 @@ export class SessionController {
 			throw httpStatus.badRequest("`descend` must be a boolean");
 		}
 
-		return this.claiming(sessionId, (session) => {
+		return this.holding(sessionId, (session) => {
 			try {
 				session.branchTo(sessionId, entryId, descend ?? true);
 			} catch (error) {
@@ -625,7 +627,7 @@ export class SessionController {
 	 *
 	 * 202, not 200, and answered as soon as the message is persisted: `session.prompt()` resolves when
 	 * the *run* ends, which is minutes later, so awaiting it here would hold the request — and its
-	 * claim — for the whole turn and make the status code a lie. The run is started and watched
+	 * hold — for the whole turn and make the status code a lie. The run is started and watched
 	 * instead, and only a failure to start is reported, on the session's own stream, because by then
 	 * there is no response left to report it on.
 	 *
@@ -656,7 +658,7 @@ export class SessionController {
 			throw httpStatus.badRequest("`thinkingLevel` must be a string");
 		}
 
-		return this.claiming(sessionId, (session) => {
+		return this.holding(sessionId, (session) => {
 			const selection: ModelSelection = {
 				...(model === undefined ? {} : { model }),
 				...(thinkingLevel === undefined ? {} : { thinkingLevel }),
@@ -680,7 +682,7 @@ export class SessionController {
 	 * `curl` — and a client whose stream is stuck still has a way out.
 	 */
 	async abort(sessionId: string): Promise<{ stopped: true }> {
-		return this.claiming(sessionId, async (session) => {
+		return this.holding(sessionId, async (session) => {
 			await session.abort(sessionId);
 			return { stopped: true };
 		});
@@ -703,7 +705,7 @@ export class SessionController {
 		}
 		const fields = patch as ConfigPatch;
 
-		return this.claiming(sessionId, (session) => {
+		return this.holding(sessionId, (session) => {
 			try {
 				session.applyConfig(sessionId, fields);
 			} catch (error) {
@@ -728,7 +730,7 @@ export class SessionController {
 		}
 		const active = names as string[];
 
-		return this.claiming(sessionId, (session) => {
+		return this.holding(sessionId, (session) => {
 			try {
 				session.setActiveTools(sessionId, active);
 			} catch (error) {
@@ -764,7 +766,7 @@ export class SessionController {
 		const approved = body.approved;
 		if (typeof approved !== "boolean") throw httpStatus.badRequest("`approved` must be a boolean");
 
-		return this.claiming(sessionId, (session) => {
+		return this.holding(sessionId, (session) => {
 			// Refused before anything is recorded: an id this session is not waiting on gets a 409, and
 			// neither the answers table nor the session hears about the attempt.
 			if (!session.hasPendingApproval(sessionId, toolCallId)) {
@@ -779,22 +781,21 @@ export class SessionController {
 	}
 
 	/**
-	 * Run something against a session while holding the one claim it needs to stay open.
+	 * Run something against a session while taking the one hold it needs to stay open.
 	 *
-	 * The hub counts claims; the orchestrator that runs the command is the process's own, and every
-	 * call names the session it acts on, so what a request needs from the hub is the claim and nothing
+	 * The hub counts holds; the orchestrator that runs the command is the process's own, and every
+	 * call names the session it acts on, so what a request needs from the hub is the hold and nothing
 	 * else. Taking it for the length of one read or write and giving it straight back keeps one rule
-	 * for lifetime: a session is open while anything holds a claim on it, and closed once the last
-	 * claim has let go.
+	 * for lifetime: a session is open while anyone holds it, and closed once the last hold has let go.
 	 *
-	 * A session that does not exist is a 404. Anything else the hub throws — a transcript file it
-	 * cannot parse, a session it cannot assemble — is this server's problem, and saying "not found"
-	 * about it would send the caller looking for a typo in an id that is perfectly good.
+	 * A session that does not exist is a 404, and the hold is what says so: `hold` opens the
+	 * transcript, so an id that names nothing refuses there with {@link UnknownSessionError} and the
+	 * transport maps it. Anything else the hub throws — a transcript file it cannot parse, a session
+	 * it cannot assemble — is this server's problem, and saying "not found" about it would send the
+	 * caller looking for a typo in an id that is perfectly good.
 	 */
-	private async claiming<T>(sessionId: string, use: (agent: Agent) => T | Promise<T>): Promise<T> {
-		if (!this.hub.has(sessionId)) throw httpStatus.notFound(`Unknown session: ${sessionId}`);
-
-		const host = await this.hub.claim(sessionId);
+	private async holding<T>(sessionId: string, use: (agent: Agent) => T | Promise<T>): Promise<T> {
+		const host = await this.hub.hold(sessionId);
 		try {
 			return await use(this.hub.agent);
 		} finally {
