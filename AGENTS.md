@@ -182,10 +182,11 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   客户端被打包。
 - 相对 import 带 `.ts` 扩展名；只用可擦除语法（没有 `enum`、`namespace`、参数属性），tsconfig 强制。
 - 缩进用 tab，双引号，分号；除非第三方类型所迫，不用 `any`。
-- **文档用中文，源码注释用英文。** `docs/`、`README.md`、`AGENTS.md` 一律中文；代码标识符、路径、
-  命令、API 名、线上协议保持英文。源码注释用英文——这是整棵树的约定，新写的代码照此（既有的两个例外
-  是 `scripts/wire/client.ts` 与 `proxy.ts` 的中文注释，见 `.scratch/mux-landing/issues/08-smoke-wire.md`
-  的登记）。面向人的字符串按用到它的地方写：窗口文案是简体中文（只有一个 locale），诊断日志（服务端
+- **文档与源码注释用中文，可保留必要的英文。** `docs/`、`README.md`、`AGENTS.md` 一律中文；代码
+  标识符、路径、命令、API 名、线上协议保持英文。源码注释也用中文（标识符、术语该是英文的地方照写
+  英文）——2026-11-12 由「注释用英文」改判，原规则连同它的两个既有例外（`scripts/wire/client.ts`
+  与 `proxy.ts` 的中文注释，见 `.scratch/mux-landing/issues/08-smoke-wire.md` 的登记）一并作废，
+  全树统一。面向人的字符串按用到它的地方写：窗口文案是简体中文（只有一个 locale），诊断日志（服务端
   与客户端，多为 `mux: ` 前缀）也是简体中文，状态行的 `total`、`cache`、`context` 保持英文。
 - 工具失败即抛出：一个抛出的工具会被作为错误结果报告给模型。
 - 每个工具路径都经过 `resolveToolPath(workDirAbsPath, …)`：绝对路径原样、相对路径按 `workDirAbsPath` 解析，没有围栏。

@@ -70,6 +70,13 @@ ADR-0014 决定 1 的 18 个私有方法 + 文件级机械）从 `Agent` 抽回 
   smoke 与基线同色（`smoke-tools` / `smoke-desktop-observability` 在干净 HEAD 上同样红，stash 验证）。
   `AGENTS.md` / `docs/architecture.md` / `README.md` 实况同步完成。
 
+- [依赖方向守卫](tickets/005-dependency-guard.md)（closed 2026-11-12）：`scripts/check-loop-boundary.ts`
+  接进 `npm run check`（排在 `check-server-facade` 之后），0012 决定 2 的判据机器化。两条一起查：
+  负向——`loop-manager.ts` 禁模块说明符以 `/agent.ts` 结尾的任何 import（静态 / side-effect /
+  `export … from` / 动态 `import()` 同正则命中，注释先剥掉）；正向——`agent.ts` 必须仍 import
+  `loop-manager.ts` 的公开面，单向性两个方向都钉住；任一文件缺失报错而非空转。ADR-0022
+  「尚未决定」第 3 件标已定（票 005），守卫口径补进「后果」。
+
 ## Not yet specified
 
 - ~~`loopOptions` 的字段清单与回调的确切接口签名~~——票 002 钉死字段，票 003 的 ADR 判据节

@@ -80,7 +80,7 @@ interface LoopOptions {
 换来的：
 
 - **读 loop 只看一个文件。** 18 个方法与文件级机械按「一次运行」的顺序排在 `loop-manager.ts`；`agent.ts` 收缩为会话表、读面、命令、审批账本、投影。0014「背上的」那笔账（读一段先判断它是运行的还是会话的）就此清掉。
-- **依赖方向再次可检查。** 0012 决定 2 的判据复活，且这次白名单把绕回收窄到两条；票 005 的静态守卫让「loop 不认识 `Agent`」成为 `npm run check` 的一部分，而不是评审时的自觉。
+- **依赖方向再次可检查。** 0012 决定 2 的判据复活，且这次白名单把绕回收窄到两条；静态守卫（`scripts/check-loop-boundary.ts`，票 005 落进 `npm run check`）让「loop 不认识 `Agent`」成为机器检查的事实，而不是评审时的自觉。
 - **零字段的结构性安全原样保留。** 两条并发 run 没有任何可以被互相覆盖的字段（0013）；`Agent` 仍只有一份服务、一只会话表，不存在第二个持有者。
 - **白名单是写下来的判据。** 每一条为什么必须绕回都留了答辩，后来的人不必重打 0008 那场仗，也不必猜哪七条曾经是候选。
 
@@ -92,15 +92,15 @@ interface LoopOptions {
 - **`maybeCompact` 退回转发。** 0014 决定 4 省掉的那一层回来了；换来的是 `Agent` 不再摸 `settingsManager`（票 002 的缺口裁决）。
 - **`index.ts` 一行改动。** 恢复机器两个函数的 re-export 源改指 `./loop-manager.ts`（或由 `agent.ts` 原样转出）；包对外的名字不变，但漏改就断 `smoke-approval-recovery`。
 - **实况文档要等落地才同步。** `AGENTS.md` 的 engine 词条、`docs/architecture.md` 的 `// the engine` 小节、根 `README.md` 里指着 0014 的那一句，今天描述的是代码的实际形状；本票只接受决定、不动这三处实况（票 004 落地时一并改指 0022）。在这段窗口里，ADR 与架构文档对「引擎住哪」的说法不同是**有意的**：一个记决定，一个记实况。
-- **行数账已补、守卫待补。** 落地前的基线是 `agent.ts` 2947 行、run 一族 ≈1805 行（61%，票 001 盘点）；落地后（票 004）：`agent.ts` 1172 行，`loop-manager.ts` 1940 行——run 一族 = `loop-manager.ts` 全部 + 编排层留住的 emit 实现（`dispatchEvent`，白名单回调的实现侧）与三处入口的组袋 ≈80 行，合计 ≈2020 行，占两文件合计 3112 行的 ≈65%。一个值得记下的偏差：决定 1 的 18 方法清单里有 `dispatchEvent`，落地时它按决定 4 的白名单答辩留在编排层——「落盘、清队列、投影的组合政策」与命令面的发布是同一契约的两半，分居两文件就是答辩要防的漂移面——所以迁入 `loop-manager.ts` 的是 17 个方法 + 文件级机械，`dispatchEvent` 的**宿主**是编排层、`loopOptions.emit` 是它的出口。`check` 里那条静态守卫由票 005 补进本节（若届时本 ADR 已关，改写票 resolution 与 map 的 Decisions so far）。
+- **行数账与守卫均已补。** 落地前的基线是 `agent.ts` 2947 行、run 一族 ≈1805 行（61%，票 001 盘点）；落地后（票 004）：`agent.ts` 1172 行，`loop-manager.ts` 1940 行——run 一族 = `loop-manager.ts` 全部 + 编排层留住的 emit 实现（`dispatchEvent`，白名单回调的实现侧）与三处入口的组袋 ≈80 行，合计 ≈2020 行，占两文件合计 3112 行的 ≈65%。一个值得记下的偏差：决定 1 的 18 方法清单里有 `dispatchEvent`，落地时它按决定 4 的白名单答辩留在编排层——「落盘、清队列、投影的组合政策」与命令面的发布是同一契约的两半，分居两文件就是答辩要防的漂移面——所以迁入 `loop-manager.ts` 的是 17 个方法 + 文件级机械，`dispatchEvent` 的**宿主**是编排层、`loopOptions.emit` 是它的出口。静态守卫（票 005）落在 `scripts/check-loop-boundary.ts`、接进 `npm run check`：扫 `loop-manager.ts` 与 `agent.ts` 两个文件，前者禁任何模块说明符以 `/agent.ts` 结尾的 import（静态、side-effect、`export … from`、动态 `import()` 一并命中，注释先剥掉——loop 头上那条「绝不 import `agent.ts`」的文档注释不得触发它），后者正向要求仍 import `loop-manager.ts` 的公开面——单向性两个方向都钉住，且任一文件被挪走时守卫报错而不是空转。
 
 ## 尚未决定
 
-按 `docs/adr/README.md` 的写法，以下三件在本 ADR 接受时未定 / 未确认，单独列在这里；**上面每一条决定都不依赖它们**：取代关系、白名单判据、`loopOptions` 形状、出口决定、「没有被取代的」清单在这三件未定项的任意取值下逐字相同。*（票 004 落地后，第 1、2 件已定，答案写进了各自条目与「后果」；第 3 件仍归票 005。）*
+按 `docs/adr/README.md` 的写法，以下三件在本 ADR 接受时未定 / 未确认，单独列在这里；**上面每一条决定都不依赖它们**：取代关系、白名单判据、`loopOptions` 形状、出口决定、「没有被取代的」清单在这三件未定项的任意取值下逐字相同。*（三件均已定：第 1、2 件归票 004，第 3 件归票 005，答案写进了各自条目与「后果」。）*
 
 1. **恢复机器两个函数的 re-export 源路径**：~~`index.ts` 改指 `./loop-manager.ts`，还是 `agent.ts` 原样转出（决定 6）~~——**已定（票 004）**：`index.ts` 的 re-export 源直指 `./loop-manager.ts`，不再经过 `agent.ts` 转手；包对外的名字一字不变，`smoke-approval-recovery` 原样通过。
 2. **落地后的前后行数账**：~~由票 004 补进「后果」~~——**已定（票 004）**：见「后果」的行数账 bullet（2947 → `agent.ts` 1172 + `loop-manager.ts` 1940，run 一族 ≈2020 行）。
-3. **静态守卫的确切形态**：票 005 仿 `check-server-facade` 加的那条 `npm run check` 检查，扫哪些路径、禁哪些 import，尚未决定；不变式本身（loop 不 import `agent.ts`）已由决定 5 定死。
+3. **静态守卫的确切形态**：~~票 005 仿 `check-server-facade` 加的那条 `npm run check` 检查，扫哪些路径、禁哪些 import~~——**已定（票 005）**：`scripts/check-loop-boundary.ts`，扫 `loop-manager.ts` 与 `agent.ts` 两个文件；前者禁模块说明符以 `/agent.ts` 结尾的任何 import（含动态与 side-effect），后者正向要求仍 import `loop-manager.ts`。不变式本身（loop 不 import `agent.ts`）已由决定 5 定死，这里定的是它的检查范围与命中口径。
 
 ## 不可逆性与代价
 
