@@ -1,10 +1,9 @@
-// Minimal dependency installer.
+// 极简依赖安装器。
 //
-// npm 11.12.1 on this machine fails with "zlib: incorrect data check" on very large registry
-// packuments (vite, @types/node), because its HTTP client mis-decodes those gzip responses.
-// Node's own fetch handles the same URLs correctly, so this script resolves and unpacks the
-// dependency tree itself. It is a build-time workaround, not part of the agent: once npm works
-// again, `npm install` replaces it.
+// 本机上的 npm 11.12.1 在处理超大 registry packument（vite、@types/node）时报
+// "zlib: incorrect data check"——它的 HTTP 客户端对那些 gzip 响应解码有误。Node 自带的 fetch 能
+// 正确处理同样的 URL，所以这个脚本自己解析并解开依赖树。它是构建期的权宜之计，不是 agent 的
+// 一部分：npm 恢复正常后，`npm install` 就把它换掉。
 
 import { createWriteStream } from "node:fs";
 import { mkdir, readFile, rm, writeFile, chmod, symlink } from "node:fs/promises";
@@ -50,10 +49,10 @@ async function main(): Promise<void> {
 }
 
 /**
- * Link every workspace package into the repository root's `node_modules/@my-agent`.
+ * 把每个 workspace 包链接到仓库根的 `node_modules/@my-agent`。
  *
- * npm would do this for workspaces; the unpacking above replaces npm, so the links are made here.
- * Node resolves `@my-agent/*` imports by walking up from the importing file to this directory.
+ * npm 本来会为 workspaces 做这件事；上面的解包替代了 npm，所以链接在这里建立。Node 解析
+ * `@my-agent/*` import 时从导入文件一路向上走到这个目录。
  */
 async function linkWorkspaces(): Promise<void> {
 	const scopeDir = join(root, "node_modules", "@my-agent");
@@ -73,9 +72,9 @@ async function linkWorkspaces(): Promise<void> {
 }
 
 /**
- * Create the `node_modules/.bin` shims npm would normally write.
+ * 建立 npm 本来会写的 `node_modules/.bin` shim。
  *
- * Without these, `npm run <script>` cannot find `vite`, `tsc`, or any other tool the scripts call.
+ * 没有它们，`npm run <script>` 找不到 `vite`、`tsc` 或脚本调用的任何其他工具。
  */
 async function linkBins(packageDir: string, modulesDir: string): Promise<void> {
 	let manifest: { name?: string; bin?: string | Record<string, string> };
@@ -144,19 +143,18 @@ async function install(
 
 	const dependencies: Record<string, string> = { ...(manifest.dependencies ?? {}) };
 
-	// Optional dependencies carry the prebuilt native binaries (esbuild, rolldown). Install the ones
-	// that match this platform and skip the rest.
+	// 可选依赖携带预构建的原生二进制（esbuild、rolldown）。安装与本平台匹配的那些，跳过其余。
 	for (const [name, range] of Object.entries(manifest.optionalDependencies ?? {})) {
 		if (await platformMatches(name, range)) dependencies[name] = range;
 	}
 
 	for (const [dependency, dependencyRange] of Object.entries(dependencies)) {
-		// Nested install: the package resolves its own tree when the hoisted copy does not fit.
+		// 嵌套安装：提升的那份不符合时，包解析自己的树。
 		await installNested(dependency, dependencyRange, modulesDir, installed);
 	}
 }
 
-/** True when an optional dependency declares no platform restriction, or one this machine satisfies. */
+/** 可选依赖未声明平台限制、或本机满足其声明时为真。 */
 async function platformMatches(name: string, range: string): Promise<boolean> {
 	let manifest: { os?: string[]; cpu?: string[] };
 	try {
@@ -176,10 +174,10 @@ async function platformMatches(name: string, range: string): Promise<boolean> {
 }
 
 /**
- * Install a dependency of something already unpacked inside `modulesDir`.
+ * 安装 `modulesDir` 内已解包某个包的依赖。
  *
- * Reuse wins: Node looks in every `node_modules` on the way up, so an already present compatible
- * copy is all that is needed. Only a real mismatch adds a nested copy.
+ * 复用优先：Node 会向上查找每一层 `node_modules`，所以一个已存在的兼容副本就足够了。只有真正
+ * 不匹配才添加嵌套副本。
  */
 async function installNested(
 	name: string,
@@ -195,7 +193,7 @@ async function installNested(
 	await install(name, range, modulesDir, installed);
 }
 
-/** Walk up the tree looking for an already installed copy, the way Node resolves modules. */
+/** 沿树向上找已安装的副本，与 Node 解析模块的方式一致。 */
 function findHoisted(from: string, name: string): string | undefined {
 	let current = from;
 	for (;;) {
@@ -245,9 +243,8 @@ async function download(url: string): Promise<string> {
 }
 
 async function extract(tarball: string, target: string): Promise<void> {
-	// Windows ships bsdtar as tar.exe; --strip-components drops the leading "package/" directory.
-	// On this machine tar occasionally reports a missing target directory, so create the parents
-	// explicitly and retry once.
+	// Windows 自带 bsdtar 即 tar.exe；--strip-components 去掉开头的 "package/" 目录。
+	// 本机的 tar 偶尔报目标目录不存在，所以显式创建父目录并重试一次。
 	await mkdir(dirname(target), { recursive: true });
 	for (let attempt = 0; attempt < 2; attempt += 1) {
 		await rm(target, { recursive: true, force: true });
@@ -295,7 +292,7 @@ function parse(version: string): { parts: number[]; prerelease: string } {
 	return { parts: core.split(".").map((part) => Number.parseInt(part, 10) || 0), prerelease };
 }
 
-/** Semver subset: exact, ^, ~, >=, >, <=, <, ||, x-ranges, and hyphen ranges. */
+/** semver 子集：精确、^、~、>=、>、<=、<、||、x-range 与连字符区间。 */
 function satisfies(version: string, range: string): boolean {
 	const trimmed = range.trim();
 	if (trimmed === "" || trimmed === "*" || trimmed === "latest") return true;
@@ -340,7 +337,7 @@ function satisfiesPart(version: string, part: string): boolean {
 		case "<":
 			return compareVersions(version, target) < 0;
 		default:
-			// x-ranges such as 1.x or 1.2.x
+			// 1.x 或 1.2.x 这类 x-range
 			if (target.includes("x") || target.includes("*")) {
 				const parts = target.split(".");
 				return parts.every((part, index) => part === "x" || part === "*" || part === String(current.parts[index] ?? 0));

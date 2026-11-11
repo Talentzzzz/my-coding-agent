@@ -1,49 +1,46 @@
-// The events one session publishes, and the shape a single delta takes.
+// 单个 session 发布的事件，以及单个 delta 的形状。
 //
-// They came here when the fan-out became a module of its own (`fanout.ts`): the engine and the
-// command surface both emit, so neither owns the union. `agent.ts` re-exports the public four, so no
-// caller's import changed — and the engine is back inside `Agent` (ADR-0014), which is why the
-// two sides are again one object and the file boundary still holds.
+// fanout 独立成模块（`fanout.ts`）时它们搬到了这里：引擎和命令面都会发布，谁都不独占这个 union。
+// `agent.ts` re-export 对外的四个，所以没有任何调用方的 import 需要变——而引擎又回到了 `Agent`
+// 里面（ADR-0014），两侧重新成为同一个对象，文件边界依然成立。
 import type { AgentEvent } from "../types.ts";
 import type { Message } from "../llm/index.ts";
 import type { QueuedPrompt, SessionSnapshot } from "../protocol.ts";
 import type { SessionEntry } from "./session-manager.ts";
 
-/** Called with the session's state whenever anything a reader can see has moved. */
+/** 读者能看见的任何东西发生变动时，带着 session 状态被调用。 */
 export type SessionListener = (snapshot: SessionSnapshot) => void;
 
 /**
- * One `message_update` as a session publishes it: the characters that just arrived, not the message.
+ * session 发布的一条 `message_update`：刚到达的字符，而不是整条消息。
  *
- * The engine's own event carries both the whole partial message and the provider's delta, and a session
- * used to republish both — so a token at the end of a long answer cost a frame the size of the answer,
- * serialized once here and parsed once in the window, and the window then re-read the whole text to
- * find what changed. What actually moves between two frames is one delta, so that is what is sent.
- * The full message still travels on `message_start` and `message_end`, and once more in a baseline's
- * `partial` for a window that attaches mid-run.
+ * 引擎自己的事件同时带着完整的 partial 消息和 provider 的 delta，session 曾经两个都转发——于是
+ * 长答案末尾的一个 token 要付一帧整个答案大小的代价，在这里序列化一遍、在窗口里解析一遍，窗口还要
+ * 重读全文才能找出变化。两帧之间真正移动的只是一个 delta，所以发的就是 delta。完整消息仍在
+ * `message_start` 和 `message_end` 上传递，run 中途接上的窗口还会在 baseline 的 `partial` 里再
+ * 拿到一次。
  *
- * The message is named by `timestamp` rather than by entry id: the entry does not exist until the
- * message ends, and the stamp is what a transcript already keys an item on.
+ * 消息用 `timestamp` 而不是条目 id 标识：消息结束之前条目还不存在，而时间戳本来就是 transcript
+ * 给条目建 key 的字段。
  */
 export interface MessageDelta {
 	timestamp: number;
-	/** Which of the two running texts moved; a tool call has its own events and is not a delta. */
+	/** 两段在跑的文本里动的是哪一段；tool call 有自己的事件，不算 delta。 */
 	kind: "text" | "thinking";
-	/** Where the block sits in the message, so a second block can be joined the way a full message is. */
+	/** block 在消息里的位置，第二个 block 才能像完整消息那样接上。 */
 	contentIndex: number;
-	/** The characters that arrived. */
+	/** 到达的字符。 */
 	text: string;
 }
 
 /**
- * Everything one session publishes: the engine's events as they arrive, plus the facts the engine has no
- * words for — queue depth, a compaction, an entry landing in the store, a settings change.
+ * 一个 session 发布的全部事件：引擎的事件原样到达，加上引擎没有词表达的事实——队列深度、一次压缩、
+ * 一条条目落进 store、一次设置变更。
  *
- * The union is flat rather than nested, so a consumer keeps one `switch` over event types. That is
- * safe only because no `AgentEvent` type name collides with the names added here: a new session event
- * must therefore never reuse one of the engine's names. `message_update` is the one member deliberately
- * *replaced* rather than added beside the engine's: the session keeps the engine's full-message shape for
- * itself (it is what a mid-run baseline needs) and republishes the delta alone.
+ * union 是扁平的而不是嵌套的，这样消费方只需要一个对事件类型的 `switch`。之所以安全，是因为没有
+ * 任何 `AgentEvent` 的类型名和这里新增的名字冲突：所以新的 session 事件绝不能复用引擎的名字。
+ * `message_update` 是唯一一个刻意*替换*而非并列新增的成员：session 把引擎的完整消息形状留给自己
+ * （run 中途的 baseline 需要它），只转发 delta。
  */
 export type AgentSessionEvent =
 	| Exclude<AgentEvent, { type: "message_update" }>
@@ -51,50 +48,48 @@ export type AgentSessionEvent =
 	| { type: "queue_update"; queued: QueuedPrompt[] }
 	| {
 			type: "compaction";
-			/** The summary that now stands for everything before `firstKeptEntryId`. */
+			/** 现在代表 `firstKeptEntryId` 之前全部内容的摘要。 */
 			summary: string;
 			firstKeptEntryId: string;
-			/** How many messages were folded into the summary. */
+			/** 折进摘要里的消息数。 */
 			summarized: number;
-			/** The estimated prompt size before the compaction ran. */
+			/** 压缩执行前的预估 prompt 大小。 */
 			tokensBefore: number;
-			/** The estimated prompt size the next request will carry. */
+			/** 下一个请求将携带的预估 prompt 大小。 */
 			contextTokens: number;
 	  }
 	/**
-	 * A compaction that was attempted and could not produce a summary; the transcript is unchanged.
+	 * 一次尝试了压缩但没能产出摘要的压缩；transcript 未变。
 	 */
 	| { type: "compaction_failed"; message: string }
 	| {
 			type: "tool_results_cleared";
 			/**
-			 * Tool results were cleared out of the transcript, and recorded as one `clear_tool_result`
-			 * entry.
+			 * tool result 被清出了 transcript，并记录为一条 `clear_tool_result` 条目。
 			 *
-			 * Reported because it is invisible otherwise: the entries it names keep their place in the
-			 * file, so a reader comparing messages would see the notice appear with nothing to explain it.
+			 * 单独报告是因为它别处不可见：条目指名的消息在文件里原位不动，只对比消息的读者会看到
+			 * 通知凭空出现、没有任何解释。
 			 */
-			/** How many tool results were cleared. */
+			/** 被清空的 tool result 数。 */
 			cleared: number;
-			/** The estimated prompt size before the clear. */
+			/** 清空前的预估 prompt 大小。 */
 			tokensBefore: number;
-			/** The estimated prompt size the next request will carry. */
+			/** 下一个请求将携带的预估 prompt 大小。 */
 			contextTokens: number;
 	  }
 	| {
 			type: "tool_call_args_trimmed";
 			/**
-			 * Recorded tool-call arguments were shortened, and recorded as one `trim_tool_call_arg` entry.
+			 * 记录在案的 tool call 参数被缩短了，并记录为一条 `trim_tool_call_arg` 条目。
 			 *
-			 * Reported for the same reason `tool_results_cleared` is: the file keeps the full arguments,
-			 * and the view drops their bodies, so a reader comparing messages would otherwise see the cut
-			 * with nothing to explain it.
+			 * 报告的理由和 `tool_results_cleared` 相同：文件里保留完整参数，视图里截掉了正文，只
+			 * 对比消息的读者会看到被截断而没有任何解释。
 			 */
-			/** How many entries had their recorded tool-call arguments shortened. */
+			/** 被缩短了记录参数的条目数。 */
 			trimmed: number;
-			/** The estimated prompt size before the trim. */
+			/** 截短前的预估 prompt 大小。 */
 			tokensBefore: number;
-			/** The estimated prompt size the next request will carry. */
+			/** 下一个请求将携带的预估 prompt 大小。 */
 			contextTokens: number;
 	  }
 	| {
@@ -102,34 +97,29 @@ export type AgentSessionEvent =
 			entryId: string;
 			kind: SessionEntry["type"];
 			/**
-			 * When the message was written, in the order a transcript sorts by: the message's own
-			 * stamp, with the entry's timestamp as the fallback.
+			 * 消息写入的时间，按 transcript 排序的次序：消息自己的时间戳，回退用条目的时间戳。
 			 *
-			 * Carried on the event rather than left to be read back because the readers of it — a
-			 * sidebar row ordering by activity, the frame that pairs an entry with its time — run once
-			 * per appended message, and asking the transcript for one stamp would replay it (ADR-0019).
-			 * Absent for an entry that carries no message.
+			 * 放在事件上而不是让读者回头读，是因为它的读者——按活跃度排序的侧栏行、把条目和
+			 * 时间配对的 frame——每追加一条消息都要跑一次，向 transcript 问一次时间戳就要重放
+			 * 一次（ADR-0019）。不带消息的条目没有这个字段。
 			 */
 			at?: number;
-			/** The message's role, for a reader that only re-derives something for one of them. */
+			/** 消息的 role，供只对某一种 role 重新推导什么的读者用。 */
 			role?: Message["role"];
 			/**
-			 * The title in force after this append, and only when the appended message is a user one:
-			 * that is the only message a derived title is read from, so it is the only append that can
-			 * rename the conversation.
+			 * 这次追加之后生效的标题，且仅当追加的是 user 消息时才有：派生标题只从 user 消息读，
+			 * 所以也只有它可能重命名会话。
 			 */
 			title?: string;
 	  }
 	| {
 			type: "branch_changed";
 			/**
-			 * The branch structure changed: the leaf moved, or a message was appended behind one that
-			 * already had a continuation — which is the same event, seen from the other side.
+			 * 分支结构变了：叶子移动了，或者消息追加到了已有后继的消息后面——从另一侧看是同一件事。
 			 *
-			 * Emitted rather than only answered on the request that asked for it, because neither is the
-			 * requesting client's business alone. Every window on this session holds branch points that
-			 * came from a snapshot and may be showing a chain that is no longer the active one, so each
-			 * stream re-reads the snapshot on this event rather than trusting what it drew before.
+			 * 用事件发出而不是只在发起请求的那次应答里回答，是因为这不只是请求方一个客户端的事。
+			 * 这个 session 上的每个窗口都持有来自快照的分支点，可能正在展示一条已不再是活跃分支的
+			 * 链，所以每个流收到这个事件都会重读快照，而不是相信自己先前画的。
 			 */
 			leafId: string;
 	  }
@@ -138,32 +128,31 @@ export type AgentSessionEvent =
 			model?: string;
 			thinkingLevel?: string;
 			approvals?: Record<string, boolean>;
-			/** The active tool names, when `setActiveTools` moved them. */
+			/** `setActiveTools` 移动了激活工具时的工具名列表。 */
 			tools?: string[];
 	  }
 	/**
-	 * A transient provider failure was classified as retryable, before its backoff sleep.
+	 * 一次被归类为可重试的 provider 瞬时失败，处于退避睡眠之前。
 	 */
 	| { type: "retry_scheduled"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	/**
-	 * The backoff ended and the retried provider call is starting.
+	 * 退避结束，重试的 provider 调用开始。
 	 */
 	| { type: "retry_start"; attempt: number; maxAttempts: number }
 	/**
-	 * The retry loop ended, whichever way it ended. Emitted once per scheduled retry.
+	 * 重试循环结束，无论以哪种方式结束。每次排定的重试发一次。
 	 */
 	| { type: "retry_end"; success: boolean; attempt: number; finalError?: string };
 
-/** Called with every event the session publishes, in the order they happened. */
+/** session 发布的每个事件都按发生顺序交给它。 */
 export type SessionEventListener = (event: AgentSessionEvent) => void;
 
 /**
- * The delta an engine `message_update` is worth, or `undefined` for the frames that carry no characters.
+ * 引擎一条 `message_update` 值得的 delta，对不带字符的帧返回 `undefined`。
  *
- * Start/end frames and tool-call deltas are dropped: a block boundary needs no frame of its own — the
- * first delta of a block is what opens it in the window — and a tool call's card is built from the
- * tool events, which carry the arguments and the result rather than the JSON being assembled. An
- * empty delta is dropped for the same reason: it says nothing a frame could carry.
+ * start/end 帧和 tool call 的 delta 都被丢弃：block 边界不需要自己的帧——一个 block 的第一个
+ * delta 就是它在窗口里打开的时刻——而 tool call 的卡片由 tool 事件构建，那些事件带的是参数和
+ * result，不是正在拼装的 JSON。空 delta 同理被丢：它没有任何帧能携带的内容。
  */
 export function messageDeltaOf(event: Extract<AgentEvent, { type: "message_update" }>): MessageDelta | undefined {
 	const inner = event.assistantMessageEvent;

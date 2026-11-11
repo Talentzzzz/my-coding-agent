@@ -1,16 +1,15 @@
 /**
- * The failure "this id names no session", as a type rather than a sentence.
+ * 「这个 id 不指名任何 session」这一失败，以类型而不是句子的形式。
  *
- * It exists so the transport does not have to *ask* before it acts. A caller that has to check
- * existence first is a caller that can get the answer wrong twice — once when it asks, once when the
- * answer changes between the question and the command — and the check has to be spelled in the same
- * place for every endpoint. Here the command itself refuses, and the transport maps one type to one
- * status, which is the shape every unknown-id path takes: a read, a delete, a hold, a prompt.
+ * 它存在的意义是让传输层不必先*问*再行动。要先检查存在性的调用方，是可能把答案搞错两次的调用方
+ * ——问的时候错一次，问题和命令之间答案变化时再错一次——而且这个检查必须在每个端点的同一处拼写。
+ * 在这里由命令本身拒绝，传输层把一个类型映射到一个状态码，这就是每条 unknown-id 路径的形状：读取、
+ * 删除、hold、prompt 都一样。
  *
- * The message is kept stable because it is also the 404 body a client shows: `Unknown session: <id>`.
+ * 消息保持稳定，因为它同时也是客户端展示的 404 body：`Unknown session: <id>`。
  */
 export class UnknownSessionError extends Error {
-	/** The id that named nothing, for a caller that has to tell several of them apart. */
+	/** 没指名任何东西的 id，给需要区分多个 id 的调用方。 */
 	readonly sessionId: string;
 
 	constructor(sessionId: string) {

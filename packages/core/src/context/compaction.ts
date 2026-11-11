@@ -2,10 +2,10 @@ import { type Api, type AssistantMessage, contentText, type Message, type Model,
 import { sessionEntryToContextMessages, type SessionEntry } from "../session/session-manager.ts";
 
 /**
- * Rough token estimate: about four characters per token.
+ * 粗略 token 估算：约四个字符一个 token。
  *
- * The provider reports exact usage after each response, but we need a number before the request to
- * decide whether to compact, and an approximation that is deliberately pessimistic is fine for that.
+ * provider 在每次响应后报告精确 usage，但我们在请求之前就需要一个数字来决定是否压缩，对那个用途
+ * 来说，一个刻意悲观的近似就够了。
  */
 export function estimateTokens(messages: readonly Message[]): number {
 	let characters = 0;
@@ -14,20 +14,18 @@ export function estimateTokens(messages: readonly Message[]): number {
 }
 
 /**
- * Tokens held back from the model's window when the trigger is computed.
+ * 计算触发条件时从模型窗口扣回的 token 数。
  *
- * The estimate the trigger compares measures the conversation and nothing else: the leading system
- * prompt, the tool declarations, and the response about to be generated are all invisible to it, while
- * the provider counts all three. So the trigger sits this far below the window rather than at it.
+ * 触发条件比较的估算只量对话本身：开头的 system prompt、工具声明、即将生成的回答都对它不可见，
+ * 而 provider 三者都算。所以触发点设在窗口之下这么远处，而不是贴着窗口。
  */
 const COMPACTION_RESERVE_TOKENS = 33_000;
 
 /**
- * The prompt size at which a session over this model compacts before its next request: `window − 33k`.
+ * 这个模型上的 session 在下一次请求之前触发压缩的 prompt 大小：`window − 33k`。
  *
- * A window that cannot give up 33k gives up half of itself instead. Without that a small-window model
- * would compute a non-positive trigger, which {@link shouldCompact} reads as "never compact" — the one
- * answer that guarantees the overflow the trigger exists to prevent.
+ * 拿不出 33k 的窗口改为放弃自己的一半。否则小窗口模型会算出一个非正的触发点，{@link shouldCompact}
+ * 把它读作「永不压缩」——这恰恰是保证触发条件要防止的溢出的唯一答案。
  */
 export function compactionThresholdFor(contextWindow: number): number {
 	if (!(contextWindow > 0)) return 0;
@@ -35,17 +33,17 @@ export function compactionThresholdFor(contextWindow: number): number {
 	return contextWindow - reserve;
 }
 
-/** What one compaction produced, ready to be written with `appendCompaction`. */
+/** 一次压缩的产物，随时可用 `appendCompaction` 写入。 */
 export interface CompactionResult {
 	summary: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
-	/** How many messages the summary now stands for. */
+	/** 摘要现在代表多少条消息。 */
 	summarized: number;
 	usage?: Usage;
 }
 
-/** True when the transcript is large enough that the next request risks overflowing the window. */
+/** transcript 大到下一次请求有溢出窗口的风险时为 true。 */
 export function shouldCompact(messages: readonly Message[], threshold: number): boolean {
 	if (threshold <= 0) return false;
 	return estimateTokens(messages) > threshold;
@@ -53,24 +51,23 @@ export function shouldCompact(messages: readonly Message[], threshold: number): 
 
 export interface CompactionPreparation {
 	firstKeptEntryId: string;
-	/** The messages being replaced by the summary, in order. */
+	/** 被摘要替换的消息，按顺序。 */
 	messagesToSummarize: Message[];
 	tokensBefore: number;
-	/** The summary a previous compaction wrote, when this one refines it rather than starting over. */
+	/** 上一次压缩写的摘要，当本次是在其上精修而不是从头再来。 */
 	previousSummary?: string;
 }
 
 /**
- * Decide what a compaction would summarize, without calling a model.
+ * 决定一次压缩会摘要什么，不调用模型。
  *
- * Nothing is kept verbatim: every turn that has finished is folded, and only the turn in flight — the
- * newest turn start and everything after it — survives as messages, because that is what the next
- * request is actually about. The walk starts after the newest compaction, whose summary already stands
- * for everything before it.
+ * 没有任何东西被原样保留：每个已结束的 turn 都被折叠，只有进行中的 turn——最新的 turn 起点及其
+ * 之后的一切——以消息形式存活，因为那才是下一次请求真正关于的内容。遍历从最新的压缩之后开始，
+ * 它的摘要已经代表之前的一切。
  */
 export function prepareCompaction(contextEntries: readonly SessionEntry[]): CompactionPreparation | undefined {
 	const last = contextEntries[contextEntries.length - 1];
-	// A compaction is already the newest thing in context; there is nothing after it to fold in.
+	// 压缩已经是 context 里最新的东西；它之后没有可以折入的。
 	if (last?.type === "compaction") return undefined;
 
 	const boundaryStart = contextEntries[0]?.type === "compaction" ? 1 : 0;
@@ -93,12 +90,11 @@ export function prepareCompaction(contextEntries: readonly SessionEntry[]): Comp
 }
 
 /**
- * The entry index the kept turn starts at, or undefined when there is nothing worth compacting.
+ * 保留的 turn 开始处的条目下标，没有值得压缩的东西时为 undefined。
  *
- * It is the newest turn start, found by walking back from the newest entry: only a turn start is a
- * candidate, because cutting anywhere else could strand an assistant message from the tool results that
- * answer it — a provider rejects a tool result whose call is missing. A cut that would land on the
- * boundary means everything before it is already a summary, which is the same answer as "no compaction".
+ * 它是最新的 turn 起点，从最新条目往回走找到：只有 turn 起点是候选，因为在别处切可能把 assistant
+ * 消息和回答它的 tool result 拆开——provider 会拒绝 call 缺失的 tool result。落在边界上的切点意味
+ * 着之前的一切已经是摘要，与「不压缩」是同一个答案。
  */
 function findCutPoint(contextEntries: readonly SessionEntry[], startIndex: number): number | undefined {
 	for (let index = contextEntries.length - 1; index > startIndex; index--) {
@@ -109,13 +105,13 @@ function findCutPoint(contextEntries: readonly SessionEntry[], startIndex: numbe
 	return undefined;
 }
 
-/** What one entry contributes to a summary: its conversation, with prompt state and checkpoints left out. */
+/** 一条条目为摘要贡献的内容：它的对话部分，prompt 状态和检查点除外。 */
 function entryMessagesForSummary(entry: SessionEntry): Message[] {
 	if (entry.type === "compaction") return [];
 	return sessionEntryToContextMessages(entry).filter((message) => message.role !== "system");
 }
 
-/** A completion the session knows how to make; compaction supplies the prompt, not the plumbing. */
+/** session 知道怎么完成的一次补全；压缩提供 prompt，不管管道。 */
 export interface SummarizeRequest {
 	systemPrompt: string;
 	prompt: string;
@@ -126,11 +122,10 @@ export interface SummarizeRequest {
 export type Summarize = (request: SummarizeRequest) => Promise<AssistantMessage>;
 
 /**
- * Compact the transcript: summarize everything that has finished and report the turn to keep.
+ * 压缩 transcript：摘要一切已结束的内容，报告要保留的 turn。
  *
- * The summary is generated by the same model the session is using, so it costs one request. Nothing is
- * written here: the caller hands the result to `SessionManager.appendCompaction`, which is what makes
- * the on-disk entry the single record of what happened.
+ * 摘要由 session 正在用的同一个模型生成，所以代价是一次请求。这里什么都不写：调用方把结果交给
+ * `SessionManager.appendCompaction`，这让盘上的条目成为所发生之事的唯一记录。
  */
 export async function compact(
 	contextEntries: readonly SessionEntry[],
@@ -154,8 +149,8 @@ export async function compact(
 		throw new Error("Summarization attempted to call a tool");
 	}
 
-	// An empty summary is worse than no compaction: the entry would drop the history it stands for and
-	// replace it with nothing, so the run is left on the transcript it already had instead.
+	// 空摘要比不压缩更糟：条目会丢掉它所代表的历史、换回一个空，所以 run 留在它已有的 transcript
+	// 上。
 	const summary = contentText(response.content);
 	if (summary.trim().length === 0) throw new Error("Summarization returned an empty summary");
 
@@ -169,10 +164,10 @@ export async function compact(
 }
 
 /**
- * The summary budget.
+ * 摘要的预算。
  *
- * pi reserves 16384 tokens for a response and gives the summary 80% of that; the model's own cap wins
- * when it is smaller, because a request over it is rejected outright.
+ * pi 为一次响应保留 16384 token，摘要分得其中 80%；模型自己的上限更小时以它为准，因为超过它的
+ * 请求会被直接拒绝。
  */
 const SUMMARIZATION_RESERVE_TOKENS = 16_384;
 
@@ -182,11 +177,10 @@ function summarizationMaxTokens(model: Model<Api>): number {
 }
 
 /**
- * A response that cannot be trusted as a checkpoint.
+ * 不能作为检查点信任的响应。
  *
- * `length` matters as much as `error`: the text is partial, and a truncated summary silently loses the
- * history it claims to stand for. An abort is the same problem from the other side — the text is
- * whatever had streamed before the run ended — so it is refused here too rather than written down.
+ * `length` 和 `error` 同等重要：文字是不完整的，被截断的摘要无声地丢失它声称代表的历史。abort 是
+ * 同一问题的另一面——文字只是 run 结束前流出来的部分——所以同样在这里拒绝而不是写下来。
  */
 function summarizationFailure(response: AssistantMessage): string | undefined {
 	if (response.stopReason === "error") return `Summarization failed: ${response.errorMessage || "Unknown error"}`;
@@ -280,14 +274,14 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.`;
 
-/** Maximum characters of one tool result in a serialized conversation. */
+/** 一条 tool result 在序列化对话中的最大字符数。 */
 const TOOL_RESULT_MAX_CHARS = 2_000;
 
 /**
- * Write the conversation out as text for the summarizer.
+ * 把对话写成文本交给摘要器。
  *
- * The messages are text rather than a live transcript on purpose: the model must summarize what it is
- * shown, not answer it. Tool results are cut down because their full text is not what a summary needs.
+ * 消息刻意是文本而不是活的 transcript：模型必须摘要它被展示的东西，而不是回答它。tool result 被
+ * 截短，因为摘要需要的不是它们的完整正文。
  */
 function serializeConversation(messages: readonly Message[]): string {
 	const parts: string[] = [];

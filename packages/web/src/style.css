@@ -1,26 +1,20 @@
 /*
- * The application shell.
+ * 应用外壳。
  *
- * One band above two columns. The band is the window's own top strip — full width, the sidebar's
- * fill, and nothing laid out inside it, because the shell's three caption buttons are overlaid onto
- * its right end (`titleBarOverlay`); a band with page content in it is a band the buttons cover.
- * `y >= var(--desktop-titlebar)` is where the columns begin: a sidebar that owns navigation, a drag
- * handle on its right edge, and a conversation column that owns one session. The sidebar is
- * `--dsw-bg-sidebar` — the band's fill continued, one surface from the top of the window down the
- * left column — and never scrolls as a whole — its list does — so the new-session control stays put
- * while the history moves, which is what makes the list feel like a panel rather than a page. The
- * two columns are set off by their fills alone (no divider line); the conversation is
- * `--dsw-bg-base`, the other depth of the theme, and its rounded top-left corner is what reads the
- * panel as a card laid into that surface rather than a third rectangle butted to it.
+ * 两列之上的一条带。带是窗口自己的顶部条 —— 全宽、侧栏的填充、里面不布局任何东西，因为外壳的
+ * 三个标题按钮覆盖在它的右端（`titleBarOverlay`）；带里有页面内容，按钮就会盖住它。
+ * `y >= var(--desktop-titlebar)` 是两列开始的地方：一侧栏拥有导航、右缘一条拖动把手、一对话列
+ * 拥有一个会话。侧栏是 `--dsw-bg-sidebar` —— 带的填充的延续，从窗口顶部到左列是一个表面 ——
+ * 且整体不滚动（滚的是它的列表），所以新建会话控件不动而历史移动，正是列表读起来像面板而不是
+ * 页面的原因。两列只靠填充区分（没有分隔线）；对话列是 `--dsw-bg-base`，主题的另一层深浅，它的
+ * 左上圆角让面板读作嵌进那个表面的卡片，而不是第三块并排的矩形。
  *
- * The conversation column is four stacked rows: the title, the transcript (the only one that
- * scrolls), the composer, and the status line. Nothing sits beside the transcript, because the one
- * thing this window is for is reading it.
+ * 对话列是四行叠放：标题、transcript（唯一滚动的行）、composer、状态行。transcript 旁边不坐
+ * 任何东西，因为这个窗口存在的唯一理由就是读它。
  *
- * Everything here reads a token from `tokens.css`. A literal color in this file is a bug: it would
- * be the one value that does not follow the theme. A literal font size is the same kind of bug:
- * every size comes from the type scale's five tiers (`--dsw-fs-*`, each with its `--dsw-lh-*`),
- * all derived from `--dsw-fs-base`, which the settings panel publishes at runtime.
+ * 这里的每样东西都读 `tokens.css` 的 token。本文件里的字面颜色是 bug：它会是不跟随主题的
+ * 唯一一个值。字面字号是同类 bug：每个字号都来自字阶的五档（`--dsw-fs-*`，各带自己的
+ * `--dsw-lh-*`），全部由设置面板在运行时发布的 `--dsw-fs-base` 派生。
  */
 
 *,
@@ -39,8 +33,8 @@ body {
 	background: var(--dsw-bg-base);
 	color: var(--dsw-label-primary);
 	font-family: var(--dsw-font-family);
-	/* The shell's base step: the title tier, so anything that forgets to pick a size still lands in
-	   the scale — which the slider moves as a family, so unstyled text rides it too. */
+	/* 外壳的基础档：title 档，任何忘了选字号的东西仍落在字阶里 —— 滑块按家族移动它，未加样式的
+	   文字也跟着走。 */
 	font-size: var(--dsw-fs-title);
 	line-height: var(--dsw-lh-title);
 	-webkit-font-smoothing: antialiased;
@@ -48,22 +42,20 @@ body {
 }
 
 /*
- * The fill behind the columns is the sidebar's, not the base's: the band, the sidebar and the
- * handle's 6px column are one surface (the reason each is stated once, at `.titleband`). A base fill
- * here would show the body's tone through the handle's column — a seam the design does not have —
- * and behind the panel's rounded corner, where the sidebar's own tone is what belongs.
+ * 列身后的填充是侧栏的，不是 base 的：带、侧栏和把手的 6px 列是一个表面（每个的声明只在
+ * `.titleband` 写一次的理由）。这里用 base 填充会让 body 的色调从把手那一列透出来 —— 设计里
+ * 不存在的接缝 —— 也会从面板圆角后面透出来，那里属于侧栏自己的色调。
  */
 #app {
 	display: grid;
-	/* The band · Sidebar · drag handle · conversation. The handle's own column is the affordance. */
+	/* 顶带 · 侧栏 · 拖动把手 · 对话列。把手自己的列就是交互提示。 */
 	grid-template-columns: var(--dsw-sidebar-width) 6px minmax(0, 1fr);
 	grid-template-rows: var(--desktop-titlebar) minmax(0, 1fr);
 	background: var(--dsw-bg-sidebar);
 	height: 100vh;
 }
 
-/* A collapsed rail keeps the app usable in a narrow window. The handle goes with it: a rail's width
-   is not a preference, and a drag that moved 52px would only break it. */
+/* 收起的 rail 让应用在窄窗口里保持可用。把手跟着消失：rail 的宽度不是偏好，拖动 52px 只会弄坏它。 */
 #app[data-sidebar="rail"] {
 	grid-template-columns: 52px minmax(0, 1fr);
 }
@@ -73,12 +65,10 @@ body {
 }
 
 /*
- * The top band. Window-level, not any column's: it spans the full width and row 1, and the page
- * lays nothing out inside it — the caption's three buttons live in its right end and every
- * touchable thing begins below it. That emptiness is the whole fix: buttons can only cover what is
- * under them, and under them is now the band's own fill and nothing else. Its fill is `#app`'s —
- * the sidebar's, and for why see `#app`. (Outside the shell's caption the row collapses to 0px, so
- * a browser tab shows no band at all.)
+ * 顶部带。窗口级的，不属于任何列：横跨全宽和第 1 行，页面不在里面布局 —— 标题的三个按钮住在
+ * 它的右端，每个可触摸的东西都从它下面开始。这份空就是全部的修法：按钮只能盖住它下面的东西，
+ * 而它下面现在是带自己的填充，别无其他。填充来自 `#app` —— 侧栏的，原因见 `#app`。（外壳标题
+ * 之外该行收缩为 0px，浏览器标签页就完全没有带。）
  */
 .titleband {
 	grid-column: 1 / -1;
@@ -86,13 +76,12 @@ body {
 	-webkit-app-region: drag;
 }
 
-/* ------------------------------------------------------------------ sidebar */
+/* ------------------------------------------------------------------ 侧栏 */
 
 /*
- * Row 2, column 1 — under the band, where the surface it shares with the band continues. No
- * `border-right`: the two columns are set off by their fills alone (measured on the reference at
- * y=300 — the sidebar's tone ends and the panel's begins with no divider pixel between them), and a
- * hairline there would draw a seam the design does not have.
+ * 第 2 行第 1 列 —— 带之下，与带共享的表面在这里延续。没有 `border-right`：两列只靠填充区分
+ * （在参考图 y=300 处量过 —— 侧栏色调结束、面板色调开始，之间没有分隔像素），那里的细线会画出
+ * 设计里不存在的接缝。
  */
 .sidebar {
 	display: flex;
@@ -106,13 +95,10 @@ body {
 }
 
 /*
- * The column's top row, and it holds the column's two controls: the new-session button and the
- * collapse toggle. It is the first thing under the band — with the band's 40px above and this rule's
- * 6px of sidebar padding, the first control lands at y≈46–47, clear of the caption's buttons. The
- * drag region stays on it for macOS, where the band is 0px tall and the traffic lights overlay this
- * row (hence the inset in the padding); on Windows the band already drags, and this is harmless.
- * The brand that used to share this row is gone — the column is the list, not a product — and with
- * it went the empty seat a logo leaves behind.
+ * 列的顶行，它持有列的两个控件：新建会话按钮和收起开关。它是带之下第一样东西 —— 上面 40px 的
+ * 带加本规则的 6px 侧栏内边距，第一个控件落在 y≈46–47，避开标题按钮。拖动区域留在它是为了
+ * macOS，那里带是 0px 高、红绿灯覆盖这一行（所以内边距有 inset）；Windows 上带已经在拖，留着
+ * 无害。过去与这行共享的品牌没了 —— 列是列表，不是产品 —— 连 logo 留下的空位一起没了。
  */
 .sidebar-top {
 	display: flex;
@@ -128,16 +114,13 @@ body {
 }
 
 /*
- * Whether the resident channel is up.
+ * 常驻通道是否可用。
  *
- * One dot, and words only when there is something to say — a label that always read "已连接" would be
- * one more piece of chrome competing with the conversation, and the states that matter are precisely
- * the ones a person did not cause. It sits in the foot, beside the settings entry, because it is a
- * fact about the window rather than about any one conversation — the foot is where window-level
- * things live, and the top row is the column's own controls.
+ * 一颗圆点，有话可说时才有字 —— 永远写着"已连接"的标签只是又一件和对话抢注意力的 chrome，而
+ * 要紧的状态恰恰是人没有造成的那些。它坐在底部、设置条目旁边，因为它是关于窗口的事实而不是
+ * 关于某段对话的 —— 底部是窗口级事物住的地方，顶行是列自己的控件。
  *
- * Silent when live: the dot is the whole message, and it takes the secondary colour rather than a
- * success colour, because "nothing is wrong" should not look like an achievement.
+ * live 时沉默：圆点就是全部信息，且取次要色而不是成功色，因为"没出事"不该看起来像成就。
  */
 .channel-indicator {
 	display: inline-flex;
@@ -165,8 +148,7 @@ body {
 
 .channel-indicator[data-state="connecting"] .channel-dot {
 	background: var(--dsw-state-warn);
-	/* Pulsing rather than a second colour: this state is transient, and a static dot would read as a
-	   settled condition the window is not in. */
+	/* 脉冲而不是第二种颜色：这个状态是瞬态的，静止的圆点会读成窗口并不处于的一个已定状态。 */
 	animation: channel-pulse 1.2s ease-in-out infinite;
 }
 
@@ -188,7 +170,7 @@ body {
 	}
 }
 
-/* One control shape for every icon button, so they line up on the same grid. */
+/* 所有图标按钮共用一种控件形状，让它们对齐在同一张网格上。 */
 .icon-button {
 	display: grid;
 	place-items: center;
@@ -219,7 +201,7 @@ body {
 	align-items: center;
 	justify-content: center;
 	gap: 6px;
-	/* The top row's other seat: beside the collapse toggle, not below the row it used to headline. */
+	/* 顶行的另一个席位：在收起开关旁边，而不是在它过去领衔的那行下面。 */
 	min-width: 0;
 	flex: 1;
 	height: 34px;
@@ -267,9 +249,8 @@ body {
 }
 
 /*
- * The heading row: the section's name and, at its right end, the three controls the reference puts
- * there — search, view options, add a directory. One row rather than a heading plus a floating
- * cluster, because the controls are about the list the heading names.
+ * 标题行：区块名，右端是参考图放在那里的三个控件 —— 搜索、视图选项、添加目录。一行而不是标题
+ * 加浮动的控件簇，因为这些控件是关于标题所指的那个列表的。
  */
 .list-head {
 	display: flex;
@@ -322,12 +303,10 @@ body {
 }
 
 /*
- * One row of the list, per the reference's spec: 32px tall, one line, `--dsw-radius-md` corners,
- * 8px of air at each side.
+ * 列表的一行，按参考图的规格：32px 高、单行、`--dsw-radius-md` 圆角、两侧各 8px 空隙。
  *
- * A fork wears no indent of its own — it sits under the session it came from, and the `（1）` on its
- * name is the whole difference — so every row is the same shape, and the row is the height the
- * collapsed-count limit was always assuming.
+ * 派生不戴自己的缩进 —— 它坐在自己来自的会话下面，名字上的 `（1）` 就是全部差别 —— 所以每行
+ * 形状相同，行高正是折叠数上限一直在假设的高度。
  */
 .session-item {
 	display: flex;
@@ -358,12 +337,11 @@ body {
 }
 
 /*
- * The status slot: the row's one room for a state, a 16px gutter at its left edge.
+ * 状态席位：行里唯一的放状态的空间，左缘一个 16px 的沟槽。
  *
- * Running and waiting-for-an-approval share the one amber dot — the same fact seen from two sides —
- * and an idle row keeps an empty slot, so a directory of finished sessions is four ordinary rows
- * rather than four rows insisting on something. "已打开" needs no slot: it is the `aria-current`
- * background itself.
+ * 运行中与等待审批共享同一颗琥珀色圆点 —— 同一事实的两侧 —— 空闲的行留一个空席位，于是一目录
+ * 已结束的会话是四行普通行，而不是四行都在强调什么。"已打开"不需要席位：它就是 `aria-current`
+ * 的背景本身。
  */
 .session-item-slot {
 	display: inline-flex;
@@ -399,11 +377,10 @@ body {
 }
 
 /*
- * The in-place rename editor: the row's own title, wearing an input's clothes.
+ * 原地重命名编辑器：行自己的标题，穿着输入的衣服。
  *
- * It replaces the title span inside the same line — same flex, same margins, the title tier's own
- * metrics — so the swap is a change of control, not a change of layout. That it does not jump is the
- * whole point of editing in place.
+ * 它替换同一行里的标题 span —— 同样的 flex、同样的边距、title 档自己的度量 —— 所以换的是控件，
+ * 不是布局。不跳，正是原地编辑的全部意义。
  */
 .rename-input {
 	min-width: 0;
@@ -425,7 +402,7 @@ body {
 	border-color: var(--dsw-state-business);
 }
 
-/* The grouped list. A directory is a heading and the sessions written under it. */
+/* 分组的列表。一个目录是一个标题和写在它下面的会话。 */
 .directory {
 	display: flex;
 	flex-direction: column;
@@ -434,13 +411,11 @@ body {
 }
 
 /*
- * One directory's heading, the reference's project row: 34px tall, the same radius and padding as a
- * session row, at the meta tier. A real button since the paging decision — clicking it is how the
- * directory collapses to its heading and opens again — so Enter and Space reach it like any other
- * control. On hover the folder — the content — gives its place to the chevron — the affordance —
- * because both icons share one slot and the swap keeps one position for two meanings. Collapsed,
- * `aria-expanded="false"` keeps the chevron on and turned right, so the affordance no longer
- * depends on hover to be visible: that hover promise is what the collapsed state redeems.
+ * 一个目录的标题，参考图的项目行：34px 高、与会话行同样的圆角和内边距、meta 档。分页决定之后
+ * 它成了真正的按钮 —— 点击是目录折叠到标题、再次打开的方式 —— 所以 Enter 和 Space 像其他控件
+ * 一样够得到。悬停时文件夹 —— 内容 —— 让位给 chevron —— 交互提示 —— 因为两个图标共享一个
+ * 席位，交换让一个位置承载两个含义。折叠时 `aria-expanded="false"` 让 chevron 亮着并转向右，
+ * 交互提示不再依赖悬停才可见：折叠状态兑现的正是那个悬停承诺。
  */
 .directory-head {
 	display: flex;
@@ -507,8 +482,7 @@ body {
 }
 
 .directory-name {
-	/* The heading is a button, so it does not stretch its children; the name asks for the room the
-	   chip at the heading's right edge used to leave behind, and ellipsises inside it. */
+	/* 标题是按钮，不会拉伸子节点；名称申请右缘 chip 过去留下的那块空间，并在其中省略。 */
 	flex: 1;
 	overflow: hidden;
 	white-space: nowrap;
@@ -516,13 +490,12 @@ body {
 }
 
 /*
- * Which group the new-session button writes into is not painted on the heading.
+ * 新建会话按钮写进哪个组，不画在标题上。
  *
- * It used to be: a ring and a drop shadow first (`优化/1.png`), then a flat `--dsw-bg-active` fill —
- * "the surface the current session row wears". Both read as a raised box sitting in the list, and the
- * reader asked for exactly one thing to wear that surface: **the session row**. So the heading is
- * plain, hover only, and the answer to "where does a new session land" lives where it always did in
- * fact — the directory chip by the composer — rather than in a box drawn around a folder name.
+ * 过去画过：先是环加投影（`优化/1.png`），然后是平的 `--dsw-bg-active` 填充 —— "当前会话行
+ * 穿的那个表面"。两者都读作坐在列表里的一块凸起盒子，而读者要求恰好只有一个东西穿那个表面：
+ * **会话行**。所以标题保持素净、只有悬停，而"新会话落在哪里"的答案住回它事实上一直住的地方
+ * —— composer 旁边的目录 chip —— 而不是围着文件夹名画的一个盒子。
  */
 .session-list-empty {
 	padding: 8px;
@@ -531,16 +504,16 @@ body {
 	line-height: var(--dsw-lh-caption);
 }
 
-/* The paging row: 「展开其余」 and — beside it, once a page has been added — 「收起」. */
+/* 分页行：「展开其余」和 —— 并排、加了一页之后 —— 「收起」。 */
 .session-paging {
 	display: flex;
 	align-items: baseline;
 	gap: 2px;
-	/* Under the names' left edge, the way the rows read: 8px of row padding plus the 16px slot. */
+	/* 对齐行名的左缘，行读起来的方式：8px 行内边距加 16px 席位。 */
 	margin-left: 22px;
 }
 
-/* One of the two paging buttons. The presence of each is patched, never a rebuild. */
+/* 两个分页按钮之一。每个的存在都是补丁的，从不重建。 */
 .session-more {
 	padding: 4px 8px;
 	border: none;
@@ -598,11 +571,10 @@ body {
 }
 
 /*
- * The drag handle on the sidebar's right edge.
+ * 侧栏右缘的拖动把手。
  *
- * Its own 6px grid column is the hit area; the strip the user sees is drawn by `::after`, two pixels
- * in from each side so a grab reads as grabbing the edge rather than a line that happens to be
- * nearby. It is a focusable separator, so the keyboard reaches the same clamp the pointer does.
+ * 它自己的 6px grid 列是命中区；用户看见的条由 `::after` 画，两侧各缩进两像素，让抓取读作抓住
+ * 那条边，而不是恰好在附近的线。它是可聚焦的分隔符，所以键盘够得到与指针相同的截断。
  */
 .side-resizer {
 	position: relative;
@@ -632,13 +604,11 @@ body {
 }
 
 /*
- * The drag handle on the reading column's left edge.
+ * 阅读列左缘的拖动把手。
  *
- * Not a column of the grid — an absolutely positioned strip inside the transcript's own wrapper,
- * centred on the edge the prose starts at: half the leftover space is where the reading column
- * begins, and the handle rides that edge as the width moves. Its width is a hit area; the strip the
- * user sees is drawn by `::after`, the same grammar the sidebar's handle speaks, so the two read as
- * one family of affordances.
+ * 不是 grid 的一列 —— transcript 自己的包裹层里一条绝对定位的条，居中在文字开始的那条边上：
+ * 剩余空间的一半就是阅读列开始的地方，把手骑着那条边随宽度移动。它的宽度是命中区；用户看见
+ * 的条由 `::after` 画，与侧栏把手说的是同一套语法，让两者读作同一家族的交互提示。
  */
 .content-resizer {
 	position: absolute;
@@ -670,21 +640,19 @@ body {
 	outline-offset: -2px;
 }
 
-/* ---------------------------------------------------------------- app region */
+/* ---------------------------------------------------------------- 应用区 */
 
 /*
- * Row 2, column 3 — the reading panel, the theme's other depth.
+ * 第 2 行第 3 列 —— 阅读面板，主题的另一层深浅。
  *
- * The top-left corner is rounded, which is what makes band + sidebar read as one surface with a card
- * laid into it rather than three rectangles butted together. Measured on the reference: the panel's
- * left edge runs from x=290 at y=40 to x=280 at y=50 — a ~10px radius. Stated a step up the radius
- * scale (`--dsw-radius-lg`, 16px) because at 12px the arc is only a few pixels of anti-aliasing
- * against a 24% luminance step and reads as square in a screenshot. Only the top-left: the other
- * three corners are the window's own or sit against nothing.
+ * 左上角是圆的，正是它让"带 + 侧栏"读作一个表面嵌了一张卡片，而不是三块并排的矩形。在参考图
+ * 上量过：面板左缘从 y=40 的 x=290 到 y=50 的 x=280 —— 约 10px 半径。在圆角阶上取高一级
+ * （`--dsw-radius-lg`，16px），因为 12px 的弧对着 24% 的亮度差只是几个像素的抗锯齿，在截图里
+ * 读作直角。只有左上：其余三角是窗口自己的，或背后什么都没有。
  */
 .conversation {
 	display: grid;
-	/* title · transcript · banners · composer · status line. Only the transcript flexes. */
+	/* 标题 · transcript · 横幅 · composer · 状态行。只有 transcript 伸展。 */
 	grid-template-rows: auto 1fr auto auto auto;
 	grid-row: 2;
 	min-width: 0;
@@ -694,27 +662,21 @@ body {
 }
 
 /*
- * The fixed header, whole-column wide and never following the reading column in.
+ * 固定头部，整列宽，从不随阅读列内收。
  *
- * It is NOT the window's top band — the band is `.titleband`, a window-level strip the page lays
- * nothing out in. This header begins below the band, so nothing in it can ever sit under the
- * caption's buttons, and it no longer reserves any titlebar height of its own.
+ * 它不是窗口的顶部带 —— 那是 `.titleband`，一条页面不在其中布局的窗口级条。本头部从带下开始，
+ * 所以其中的任何东西永远不会坐在标题按钮之下，也不再自己预留任何标题栏高度。
  *
- * The first row is the session title on the left and the branch entry on its right; the branch page
- * adds a second row of tools under it. It used to carry the model picker, the thinking level, the
- * tool set, and a retry chip. All of that is a setting now, and settings live behind one button in
- * the sidebar: a control that is touched once a week does not get to sit in the row the conversation
- * is read from.
+ * 第一行左侧是会话标题、右侧是分支条目；分支页在它下面加第二行工具。它曾携带模型选择器、思考
+ * 档位、工具集和一个重试 chip。那些现在都是设置，设置住在侧栏一个按钮后面：一周才碰一次的
+ * 控件，没资格坐在阅读对话的那一行里。
  *
- * `min-width: 0` is load-bearing, and not for the header's own sake. The header is a grid item, so its
- * automatic minimum size is its content; `.conversation` is itself a grid whose single column is
- * `auto`, and that column sizes to the largest minimum contribution among its items — the header's
- * content floor. A column may be wider than its grid container, and this one is: on the branch page it
- * comes out wider than the conversation has room for, so the header's right-hand controls are laid out
- * past the end of the window and clipped away rather than overlapped. `min-width: 0` drops that floor
- * (measured in the real shell at a 720px window: with the declaration the column is 435px and the exit
- * button sits at x 606–696; with it removed the column resolves to 701.4px inside the same 720px window
- * and the button lands at x 872–962, where `elementFromPoint` on its centre answers nothing).
+ * `min-width: 0` 是承重的，且不是为了头部自己。头部是 grid item，它的自动最小尺寸是内容；
+ * `.conversation` 自己也是一个 grid、单列为 `auto`，列的尺寸取各 item 最小贡献中的最大值 ——
+ * 头部的内容下限。列可以比 grid 容器宽，这个就是：分支页上它算出来比对话列的可用空间还宽，
+ * 于是头部的右侧控件被排到窗口末尾之外、被裁掉而不是重叠。`min-width: 0` 丢掉那个下限（在真实
+ * 外壳的 720px 窗口量过：有这条声明时列是 435px、退出按钮坐在 x 606–696；去掉它列在同一
+ * 720px 窗口里解出 701.4px、按钮落到 x 872–962，其中心的 `elementFromPoint` 什么都不回答）。
  */
 .header {
 	display: flex;
@@ -733,7 +695,7 @@ body {
 	min-height: 52px;
 }
 
-/* The title row stays draggable; the controls in it do not. */
+/* 标题行保持可拖；其中的控件不拖。 */
 .header-row > * {
 	-webkit-app-region: no-drag;
 }
@@ -766,12 +728,11 @@ body {
 }
 
 /*
- * The branch entry, the only door into the branch page.
+ * 分支条目，进入分支页的唯一门。
  *
- * It names the way being read — the mark, `当前分支`, the short id cut from that way's store entry,
- * and the first sentence said under it. With fewer than two ways there is no way to name, so the id
- * and the sentence stand empty and the chip reads the mark and the words alone: a single-way
- * conversation is the one that most needs the door, and the page it opens answers with the how-to.
+ * 它指名正在读的那条路 —— 标记、`当前分支`、从那条路的存储条目裁出的短 id、以及它下面说的第一
+ * 句话。路少于两条时没有可指名的，所以 id 和句子空着，chip 只显示标记和文字：单路对话恰恰是最
+ * 需要这扇门的，而它打开的页面给出使用说明。
  */
 .branch-chip {
 	display: inline-flex;
@@ -805,12 +766,10 @@ body {
 }
 
 /*
- * One line, always. The words and the id are fixed parts of the chip's own grammar, so they neither
- * wrap nor give way; the label is the only part that may shrink, because a way's label is a message
- * preview — a whole sentence, and for a branch taken from an answer, Markdown and all. Without the
- * `nowrap` a narrow window broke 「当前分支」 into a vertical column of single characters, and without
- * the label's `flex` the shrink was shared with those fixed parts instead of being taken by the one
- * thing that has somewhere to put the ellipsis.
+ * 永远一行。文字和 id 是 chip 自己语法的固定部件，既不换行也不让位；标签是唯一可以收缩的部分，
+ * 因为一 条路的标签是消息预览 —— 一整句话，派生自回答时连 Markdown 都有。没有 `nowrap`，
+ * 窄窗口会把「当前分支」拆成竖排的单字；没有标签的 `flex`，收缩会分给那些固定部件，而不是
+ * 由唯一放得下省略号的那一个承担。
  */
 .branch-chip > span {
 	white-space: nowrap;
@@ -841,18 +800,15 @@ body {
 }
 
 /*
- * The branch page's row of tools, which lives in the fixed header so panning the tree cannot pull
- * it away. What is selected sits on the left, the zoom fallbacks and the one way out on the right.
+ * 分支页的工具行，住在固定头部里，平移树拽不走它。选中的在左，缩放兜底和唯一的出路在右。
  *
- * The row may not outgrow the header. As a flex item its automatic minimum size is its content, so
- * `min-width: 0` is what lets it shrink at all — without it the zoom group and the exit button, which
- * cannot shrink, push the row's own minimum up; the row then overflows the header and the button is
- * outside the clickable box, which is what "the button does nothing" looks like from the outside.
- * `.header` needs the same declaration for that floor to be able to give at all: the two are one fix,
- * and neither half alone was enough.
+ * 这一行不得长过头部。作为 flex item 它的自动最小尺寸是内容，`min-width: 0` 正是让它能收缩的
+ * 东西 —— 没有它，缩不了的缩放组和退出按钮把行自己的最小值顶上去；行于是溢出头部、按钮落在
+ * 可点击盒之外，从外面看就是"按钮没反应"。`.header` 需要同一条声明，那个下限才能让出位置：
+ * 两者是一个修法，任何一半单独都不够。
  *
- * `no-drag` follows the row's controls, exactly as `.header-row > *` does for the title row: the band
- * is the window's to drag, and everything a person can press has to opt out of it.
+ * `no-drag` 跟随行的控件，与 `.header-row > *` 对标题行做的一样：带是窗口的拖动区，每个能按的
+ * 东西都必须退出它。
  */
 .branch-tools {
 	display: flex;
@@ -881,7 +837,7 @@ body {
 	flex: none;
 }
 
-/* The zoom buttons are the fallback for a pointer without a wheel; Ctrl+wheel is the main path. */
+/* 缩放按钮是没有滚轮的指针的兜底；Ctrl+滚轮才是主路径。 */
 .zoom-group {
 	display: flex;
 	align-items: center;
@@ -927,8 +883,8 @@ body {
 }
 
 /*
- * The one way out of the branch page. Most of the time it says where it leads; once another way is
- * selected it turns primary, because then it moves the session on the way out.
+ * 离开分支页的唯一出路。多数时候它说自己通向哪里；选中另一条路后它变主色，因为那时按下它
+ * 真的会移动会话。
  */
 .back-button {
 	display: inline-flex;
@@ -983,7 +939,7 @@ input:focus-visible {
 	outline-offset: 1px;
 }
 
-/* ----------------------------------------------------------------- transcript */
+/* ---------------------------------------------------------------- transcript */
 
 .transcript {
 	display: flex;
@@ -995,21 +951,19 @@ input:focus-visible {
 }
 
 /*
- * While the view follows the bottom, browser scroll anchoring is off.
+ * 视图跟随底部时，浏览器滚动锚定关闭。
  *
- * Anchoring holds the reader's place when content above the viewport changes — the right policy for
- * someone reading history — and a pinned view is appending below it every frame, so the two policies
- * pull against each other and the column visibly jumps. The class is toggled by `sticky`; scrolling
- * away drops it, because anchoring is then exactly the help it was designed to be.
+ * 锚定在视口上方内容变化时保住读者的位置 —— 对读历史的人是正确的策略 —— 而钉住的视图每帧都在
+ * 下方追加，两种策略互相拉扯，列会明显跳动。类由 `sticky` 切换；滚开时摘下，因为那时锚定恰好
+ * 是它设计出来帮的忙。
  */
 .transcript.pinned {
 	overflow-anchor: none;
 }
 
 /*
- * The transcript's wrapper: the grid row that flexes, and the positioning context the reading
- * column's handle hangs off. The scroll itself is the child's job — an absolutely positioned handle
- * inside a scroll container would scroll away with the content, so the two live one layer apart.
+ * transcript 的包裹层：伸展的 grid 行，阅读列把手挂靠的定位上下文。滚动本身是子节点的职责 ——
+ * 滚动容器里的绝对定位把手会随内容滚走，所以两者相隔一层。
  */
 .transcript-body {
 	position: relative;
@@ -1022,17 +976,14 @@ input:focus-visible {
 }
 
 /*
- * The notice that a session is being read.
+ * 会话正在被读取的提示。
  *
- * It sits over the pane, in the wrapper rather than in the scrolling transcript, because the whole
- * point is that it is visible while the previous conversation is still on screen — a notice inside
- * the scroll container would scroll away with the thing it is replacing.
+ * 它盖在窗格上，住在包裹层而不是滚动的 transcript 里，因为全部意义就是上一段对话还在屏幕上时
+ * 它可见 —— 滚动容器里的提示会随它正在替换的东西一起滚走。
  *
- * It appears late rather than at once. The hidden attribute is toggled the moment the read starts,
- * so on a fast local answer the notice would flash for a frame or two, which reads as a glitch
- * rather than as progress; the delay means it only becomes visible once the wait has lasted long
- * enough to be worth naming. The transition-delay is on the way in only, so taking it down is
- * immediate and cannot be seen lingering over the session it was waiting for.
+ * 它晚出现而不是立即。hidden 属性在读取开始的一瞬切换，本地快速应答时提示会闪一两帧，读起来
+ * 像故障而不是进行中；延迟让它只在等待长到值得指名时才可见。transition-delay 只在进入方向，
+ * 摘下是立即的，不会在它等过的会话上看得见残留。
  */
 .session-loading {
 	position: absolute;
@@ -1054,9 +1005,8 @@ input:focus-visible {
 }
 
 /*
- * The ring, drawn as a border rather than as a glyph: no icon to keep in sync, and its own keyframes
- * rather than one of the pulses around it — a spin is rotation, and every other animation in this file
- * is an opacity fade.
+ * 圆环，以边框画而不是字形：没有要同步的图标，用自己的 keyframes 而不是周围的某个脉冲 ——
+ * 自旋是旋转，而本文件其他动画都是透明度渐变。
  */
 .loading-ring {
 	width: 22px;
@@ -1080,12 +1030,10 @@ input:focus-visible {
 }
 
 /*
- * The reading column: wide enough for code, narrow enough to read prose.
+ * 阅读列：宽到装下代码，窄到读得下文字。
  *
- * The width is the one axis the handle moves — `--dsw-content-width`, computed at runtime from the
- * conversation column and the stored preference. The fixed header above stays whole-column wide and
- * deliberately does not consume this variable: the top of the session is where the session is read
- * from, not part of the prose.
+ * 宽度是把手移动的唯一轴 —— `--dsw-content-width`，运行时由对话列和存储的偏好算出。上面的固定
+ * 头部保持整列宽、刻意不消费这个变量：会话的顶部是阅读会话的地方，不是文字的一部分。
  */
 .transcript > * {
 	width: 100%;
@@ -1107,8 +1055,8 @@ input:focus-visible {
 .welcome h2 {
 	margin: 0;
 	color: var(--dsw-label-primary);
-	/* Twice the body size: the title is the empty state's whole content, and it reads as a
-	   poster line, not as a paragraph heading. Line height keeps the title tier's 20/14 ratio. */
+	/* 两倍正文大小：标题是空状态的全部内容，读作海报一行，而不是段落标题。行高保持 title 档
+	   的 20/14 比例。 */
 	font-size: calc(var(--dsw-fs-body) * 2);
 	line-height: calc(var(--dsw-fs-body) * 2 * 20 / 14);
 	font-weight: 600;
@@ -1119,14 +1067,12 @@ input:focus-visible {
 }
 
 /*
- * A user message is a bubble against the right margin; the agent's work runs the full width of the
- * column. The asymmetry is the point: one is what was asked and is already known, the other is what
- * is being read.
+ * 用户消息是贴着右边距的气泡；agent 的工作占满列宽。不对称就是要点：一个是问过的、已经知道的，
+ * 另一个是要读的。
  *
- * The meta row under the bubble — time, then the copy control, against the bubble's right edge — is
- * the seam between rounds (06 ⑤): the divider it replaces sat too close to the text and said too
- * little, and the row's own bottom margin is the breathing room that keeps a user message and the
- * answer it opened from reading as one block.
+ * 气泡下的 meta 行 —— 时间，然后复制控件，贴着气泡右缘 —— 是回合之间的接缝（06 ⑤）：它替换的
+ * 分隔线离文字太近、说的太少，行自己的下边距就是呼吸空间，让用户消息和它开启的回答不读成
+ * 一块。
  */
 .turn[data-role="user"] {
 	display: flex;
@@ -1147,13 +1093,11 @@ input:focus-visible {
 }
 
 /*
- * The one copy control, in both meta rows: an icon, not a browser button.
+ * 两个 meta 行共用的唯一复制控件：图标，不是浏览器按钮。
  *
- * A `<button>` that states nothing paints the platform's own surface — `buttonface` plus a bevel —
- * and the icon's `currentColor` then lands on a light plate in the dark theme, where it is almost
- * invisible. The reset belongs here rather than on a global `button` rule: `.button`, `.icon-button`
- * and the menu rows each draw their own control, and a blanket reset would be a second owner of
- * every one of them.
+ * 一个什么都不声明的 `<button>` 会画出平台自己的表面 —— `buttonface` 加斜面 —— 图标的
+ * `currentColor` 落在深色主题的一块亮板上，几乎看不见。重置放在这里而不是全局 `button` 规则上：
+ * `.button`、`.icon-button` 和菜单行各自画自己的控件，一刀切的重置会成为它们每一个的第二主人。
  */
 .turn-copy {
 	display: grid;
@@ -1178,7 +1122,7 @@ input:focus-visible {
 	color: var(--dsw-label-secondary);
 }
 
-/* A fork that arrived while a run is writing to the tree: the control is there, the press waits. */
+/* 运行正在写树时到达的派生：控件在，按压等。 */
 .turn-copy:disabled,
 .turn-copy:disabled:hover {
 	background: transparent;
@@ -1193,9 +1137,8 @@ input:focus-visible {
 }
 
 /*
- * The agent footer (06 ⑥): the round's copy control — icon only — then the usage, the wall-clock
- * time, and the elapsed time, one quiet row under the answer that closed the round. No separators:
- * the chips are small enough and quiet enough to read as one line without them.
+ * agent 底部（06 ⑥）：回合的复制控件 —— 仅图标 —— 然后用量、墙钟时间和用时，收尾回合的回答
+ * 下面安静的一行。没有分隔符：chip 够小够安静，一行读下来不需要它们。
  */
 .turn-foot {
 	display: flex;
@@ -1222,13 +1165,11 @@ input:focus-visible {
 }
 
 /*
- * The run's ticking line: one plain label under the conversation while the loop streams — no pill,
- * no verb, just the number moving (01 ⑥). The minutes are the footer's seat too, so the timer and
- * the number it freezes into are set the same way.
+ * 运行的跳动行：循环流式时对话下面的一条朴素标签 —— 没有胶囊、没有动词、只有移动的数字
+ * （01 ⑥）。分钟也是底部的席位，于是计时器和它冻结成的数字以同样的方式设定。
  *
- * Only the block margins are stated here. The inline ones belong to `.transcript > *` above, which
- * centres every child in the reading column; a `margin` shorthand would reset them to zero and pull
- * this one line out to the container's left edge, away from the prose it belongs to.
+ * 这里只声明块向边距。行内的属于上面的 `.transcript > *`，它把每个子节点居中在阅读列里；
+ * `margin` 简写会把它们清零、把这一行拉到容器左缘，脱离它所属的文字。
  */
 .runtime {
 	display: flex;
@@ -1251,7 +1192,7 @@ input:focus-visible {
 	min-width: 0;
 }
 
-/* A user turn is a bubble; the agent's answer is the page itself. */
+/* 用户回合是气泡；agent 的回答就是页面本身。 */
 .turn[data-role="user"] .turn-body {
 	max-width: 80%;
 	padding: 9px 14px;
@@ -1360,7 +1301,7 @@ input:focus-visible {
 	border-top: 1px solid var(--dsw-border-l2);
 }
 
-/* A code block carries its language; the copy button sits in the same row. */
+/* 代码块带着自己的语言；复制按钮坐在同一行。 */
 .code-block {
 	margin: 0 0 0.85em;
 	border: 1px solid var(--dsw-border-l2);
@@ -1417,7 +1358,7 @@ input:focus-visible {
 	white-space: pre;
 }
 
-/* Diff lines, so a patch in a tool result or a code block reads as a change. */
+/* diff 行，让工具结果或代码块里的补丁读作一次变更。 */
 .code-block code .diff-add,
 .diff-add {
 	display: block;
@@ -1431,10 +1372,9 @@ input:focus-visible {
 }
 
 /*
- * The streaming caret, on the one message that is still being written. It is gated twice —
- * the run is in flight, and this turn's own item says it is arriving — because "last turn"
- * is the wrong owner: between an answer's end and the next one's first delta, the last turn
- * is often the user's own bubble, and a caret drawn there reads as an orphan block (16).
+ * 流式光标，画在唯一仍在写的那条消息上。它被双重门控 —— 运行在进行，且本回合自己的 item 说
+ * 自己在到达 —— 因为"最后的回合"是错误的归属：一条回答的结束与下一条的首个 delta 之间，最后
+ * 的回合往往是用户自己的气泡，画在那里读作孤块（16）。
  */
 .streaming .turn.assistant.streaming .turn-body::after {
 	content: "";
@@ -1445,8 +1385,8 @@ input:focus-visible {
 	vertical-align: text-bottom;
 	background: var(--dsw-label-primary);
 	animation: blink 1s steps(2, start) infinite;
-	/* Opacity rather than `visibility`: a visibility flip relayouts the answer's line, while a
-	   composited opacity change is the one thing the WARP fallback can do without touching it. */
+	/* 透明度而不是 `visibility`：visibility 翻转会重排回答所在行，而合成器化的 opacity 变化是
+	   WARP 回退能做、不碰布局的唯一一件事。 */
 	will-change: opacity;
 }
 
@@ -1456,37 +1396,34 @@ input:focus-visible {
 	}
 }
 
-/* --------------------------------------------------------------- reasoning */
+/* --------------------------------------------------------------- 推理 */
 
 /*
- * The row that holds what the model thought before it answered. It shares the tool card's container
- * and head — a `<details class="tool">`, the same chevron and quiet line — with 「思考」 in the name
- * seat, so a run of steps and thoughts reads as one column of lines (01 ④). What a thought needs
- * that a call does not is here: a body that renders Markdown prose, and a collapsed head that moves.
+ * 容纳模型回答前的思考的那一行。它与工具卡片共享容器和头部 —— 一个 `<details class="tool">`、
+ * 同样的 chevron 和安静的一行 —— 名字席位上是「思考」，让一串步骤和思考读作一列线（01 ④）。
+ * 思考需要而调用不需要的在这里：一个渲染 Markdown 的正文，和一个会移动的折叠头部。
  */
 .reasoning {
 	margin: 0 0 10px;
 }
 
 /*
- * The head while the thought is still arriving: the text scrolls instead of ellipsizing.
+ * 思考仍在到达时的头部：文字滚动而不是省略。
  *
- * The track carries the text twice so the `translateX(-50%)` loop is seamless, and the mask fades
- * the line's edges so the text enters and leaves it rather than being cut by it. The loop's duration
- * is solved from the measured width per patch (see `patchMarquee`); the 26s here is only what the
- * animation says before the first patch lands.
+ * 轨道携带文本两次让 `translateX(-50%)` 循环无缝，遮罩让行的两端渐隐，文字进入和离开遮罩而
+ * 不是被它切断。循环时长按每次补丁量出的宽度解出（见 `patchMarquee`）；这里的 26s 只是第一次
+ * 补丁落地前动画声明的东西。
  */
 .reasoning-marquee {
 	display: none;
-	/* Only as wide as what it holds, up to what the row has left: a short thought therefore lines up
-	   right after 「思考」 instead of being pushed to the far edge, and a long one takes the width and
-	   lets its start fall out of the clip. */
+	/* 只和它装的东西一样宽，上限是行剩下的：短思考紧跟在「思考」后面，而不是被推到最远端；
+	   长的占满宽度、让起点落出裁剪。 */
 	flex: 0 1 auto;
 	min-width: 0;
 	overflow: hidden;
 	white-space: nowrap;
-	/* The line's painting is clipped here anyway; `contain: paint` says so to the compositor, so a
-	   growing line cannot invalidate anything outside the strip the reader is watching. */
+	/* 这一行的绘制反正在这里被裁；`contain: paint` 对合成器说明这一点，让生长的行不会让读者
+	   正在看的条之外任何东西失效。 */
 	contain: paint;
 	-webkit-mask-image: linear-gradient(90deg, transparent, var(--dsw-mask-ink) 5%, var(--dsw-mask-ink) 95%, transparent);
 	mask-image: linear-gradient(90deg, transparent, var(--dsw-mask-ink) 5%, var(--dsw-mask-ink) 95%, transparent);
@@ -1494,8 +1431,7 @@ input:focus-visible {
 
 .reasoning.running .reasoning-marquee {
 	display: flex;
-	/* Once the line outgrows the strip, the overflow goes off its left edge rather than its right:
-	   the newest words are the ones worth watching, and no animation is needed to show them. */
+	/* 一旦行长出条，溢出走左缘而不是右缘：最新的话才是值得看的，显示它们不需要动画。 */
 	justify-content: flex-end;
 }
 
@@ -1503,9 +1439,8 @@ input:focus-visible {
 	display: none;
 }
 
-/* The head steps aside while the row is open: the body is the full text, and a summary beside it —
-   one still moving while the thought streams — would say it twice. Hidden rather than gone, so the
-   line's height does not jump on toggle. */
+/* 行打开时头部让位：正文是全文，旁边留一份摘要 —— 流式时仍在动的那份 —— 会把它说两遍。隐藏
+   而不是移除，切换时行高才不跳。 */
 .reasoning[open] .reasoning-preview,
 .reasoning[open] .reasoning-marquee {
 	visibility: hidden;
@@ -1520,11 +1455,9 @@ input:focus-visible {
 	line-height: var(--dsw-lh-caption);
 }
 
-/* The body is prose, not output — Markdown, not mono — but it wears the same unfolded card a tool's
-   output does. The box is stated once, beside `.tool-output` below: fill, border, corner, 22px
-   leading, padding, and the 24rem scroll cap all come from there, so the thought and the command's
-   output cannot drift apart. This rule is only the type inside that box — one tier under the answer
-   rather than the code size. */
+/* 正文是文字，不是输出 —— Markdown，不是等宽 —— 但穿与工具输出同样的展开卡片。盒子只声明一次，
+   在下面 `.tool-output` 旁边：填充、边框、圆角、22px 行距、内边距和 24rem 滚动上限都来自那里，
+   思考与命令输出不可能漂移开。本规则只是那个盒子里的字号 —— 比回答低一档，不是代码字号。 */
 .reasoning-body {
 	color: var(--dsw-label-secondary);
 	font-size: var(--dsw-fs-meta);
@@ -1565,7 +1498,7 @@ input:focus-visible {
 	background: transparent;
 }
 
-/* --------------------------------------------------------------- tool cards */
+/* --------------------------------------------------------------- 工具卡片 */
 
 .tool-group {
 	display: flex;
@@ -1575,13 +1508,11 @@ input:focus-visible {
 }
 
 /*
- * One tool call, read as a line (01 ④).
+ * 一次工具调用，读作一行（01 ④）。
  *
- * The call has no box: a run of steps is a column of quiet lines, each `Name  path`, weakly
- * coloured until hover lifts the line. The chevron is a permanent mark — it says "this line opens",
- * and only its direction changes with the open state — while the running dot is the one thing on the
- * line that moves. Expanding reveals the content as an indented block under the line — the indent is
- * the summary's own leading (chevron 12px + gap 10px), so the block reads as the line's continuation.
+ * 调用没有盒子：一串步骤是一列安静的线，各为 `Name  path`，悬停前弱着色。chevron 是永久标记
+ * —— 它说"这行能打开"，只有方向随开合变化 —— 运行圆点则是行上唯一动的东西。展开把内容揭示为
+ * 行下的缩进块 —— 缩进就是摘要自己的引导（chevron 12px + 间隙 10px），块读作行的延续。
  */
 .tool {
 	background: transparent;
@@ -1615,18 +1546,15 @@ input:focus-visible {
 	transition: transform var(--dsw-duration-fast) var(--dsw-ease);
 }
 
-/* Open is the only state the chevron has to say: it turns right so the row reads as a level being
-   unfolded. Visibility is not a state — a mark that has to be found by hovering promises nothing
-   to someone reading rather than pointing, and a run of tool lines that only shows its marks under
-   the pointer reads as flat text. */
+/* 打开是 chevron 唯一要说的状态：它转向右，让行读作被展开的一层。可见性不是状态 —— 要靠悬停
+   才找得到的标记，对读而不指的人什么都不承诺，只在指针下才亮标记的一串工具行读作平文本。 */
 .tool[open] .tool-chevron {
 	transform: rotate(90deg);
 }
 
-/* The line's right-end mark is the phase, and the two phases share one mark: a dot that pulses while
-   the call executes and holds still while it waits for the answer that lets it run (ADR-0006 §5).
-   A second pulse would say a second call is running, so waiting is the same mark without the
-   animation. Neither mark shares a line with a diffstat, for the same reason. */
+/* 行右端的标记就是阶段，两个阶段共用一个：调用执行时脉冲的圆点、等待让它运行的答案时静止的
+   同一颗（ADR-0006 §5）。第二个脉冲会说明有第二次调用在跑，所以等待是同一颗去掉动画。两个标记
+   都不与 diffstat 共享一行，理由相同。 */
 .tool-spin,
 .tool-wait {
 	flex: none;
@@ -1668,15 +1596,14 @@ input:focus-visible {
 	text-overflow: ellipsis;
 }
 
-/* The diffstat sits at the line's far end, a reading about the change rather than part of the call. */
+/* diffstat 坐在行的远端，一条关于变更的读数，不是调用的一部分。 */
 .tool > summary .diff-stat {
 	margin-left: auto;
 }
 
-/* Expanded content is one indented block under the line, and the bodies share the box: the indent
-   is the summary's own leading (chevron 12px + gap 10px), stated once for the three of them. A
-   thought's body is one of the three — a run unfolds a thought and a command's output, and the two
-   should read as the same block even though one is prose and the other is code. */
+/* 展开内容是行下的一个缩进块，正文共享盒子：缩进就是摘要自己的引导（chevron 12px + 间隙 10px），
+   三者声明一次。思考的正文是三者之一 —— 一次运行展开一个思考和一条命令的输出，即使一个是文字
+   一个是代码，两者也应读作同一个块。 */
 .tool-output,
 .tool > .diff,
 .reasoning-body {
@@ -1685,7 +1612,7 @@ input:focus-visible {
 	border-radius: var(--dsw-radius-sm);
 }
 
-/* The scroll panel the two text bodies share; the diff brings its own copy's padding and gutter. */
+/* 两个文本正文共享的滚动面板；diff 自带它那份的内边距和沟槽。 */
 .tool-output,
 .reasoning-body {
 	padding: 10px 12px;
@@ -1703,15 +1630,13 @@ input:focus-visible {
 	white-space: pre-wrap;
 }
 
-/* ---------------------------------------------------------------- diff view */
+/* ---------------------------------------------------------------- diff 视图 */
 
 /*
- * What a file-changing call did, as the body of its card.
+ * 一次改文件的调用做了什么，作为其卡片的正文。
  *
- * A row is four columns: the number the line had, the number it has now, the sign, and the text. Both
- * number columns are the same width — set per report by the renderer, three digits until it says
- * otherwise — because a gutter that grows partway down the diff reads as a second table rather than
- * as one file.
+ * 一行四列：行曾有的号、现在的号、符号、文本。两个行号列同宽 —— 由渲染器按每份报告设定，
+ * 三位起 —— 因为沟槽中途变宽的 diff 读起来像第二张表，而不是一个文件。
  */
 .diff {
 	--diff-number-width: 3ch;
@@ -1756,7 +1681,7 @@ input:focus-visible {
 	background: var(--dsw-diff-deleted);
 }
 
-/* An elided run and a cut-off report are facts about the view, not lines of the file: no columns. */
+/* 省略段和被截断的报告是关于视图的事实，不是文件的行：没有列。 */
 .diff-row.skip,
 .diff-row.omitted {
 	display: block;
@@ -1787,7 +1712,7 @@ input:focus-visible {
 	color: var(--dsw-state-error);
 }
 
-/* The text is the one column allowed to run past the card: code does not wrap into sense. */
+/* 文本是唯一允许跑出卡片的列：代码不换行成不了句子。 */
 .diff-text {
 	white-space: pre;
 	color: var(--dsw-label-primary);
@@ -1802,15 +1727,14 @@ input:focus-visible {
 	background: var(--dsw-diff-deleted-strong);
 }
 
-/* --------------------------------------------------------------- branch page */
+/* --------------------------------------------------------------- 分支页 */
 
 /*
- * The pane switch, decided by one attribute on the body.
+ * 窗格切换，由 body 上的一个属性决定。
  *
- * The branch page replaces the conversation whole — not an overlay, not a side panel — so the
- * composer (with the directory row and the approval seat in it), the status line, and the banners
- * all go with it; the page is the tree, the summary line, and the fixed header's tools row, and
- * that is all. The branch view occupies the same flexing grid row the transcript does.
+ * 分支页整体替换对话 —— 不是覆盖、不是侧面板 —— 于是 composer（连同目录行和审批席位）、状态行
+ * 和横幅一起走；页面就是树、摘要行和固定头部的工具行，仅此而已。分支视图占据 transcript 同一
+ * 行伸展的 grid。
  */
 body[data-pane="branch"] .transcript-body,
 body[data-pane="branch"] .banners,
@@ -1831,14 +1755,12 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * The canvas is a map, not a scroll box.
+ * 画布是地图，不是滚动盒。
  *
- * It used to be the other thing: `overflow: auto`, with the pan written as `scrollLeft` / `scrollTop`
- * and the scroll range owned by a sizer element sized to the graph. That works until the graph fits
- * the window — which is exactly the state `enter` puts it in — because then the range is zero and
- * dragging does nothing at all. So the viewport never scrolls: the layer inside carries the pan and
- * the zoom as one `translate(...) scale(...)`, both in the layer's own coordinate space (`0 0`
- * origin), and a drag is one number the pointer moves.
+ * 曾经是另一种：`overflow: auto`，平移写成 `scrollLeft` / `scrollTop`，滚动范围归一个按图定尺寸
+ * 的 sizer 元素。到图装得下窗口就失效 —— 恰是 `enter` 把它装到的状态 —— 因为那时范围是零、拖动
+ * 什么都不做。所以视口永不滚动：里面的层以一个 `translate(...) scale(...)` 携带平移和缩放，两者
+ * 都在层自己的坐标空间里（`0 0` 原点），拖动就是指针移动的一个数。
  */
 .graph-viewport {
 	flex: 1;
@@ -1847,8 +1769,7 @@ body:not([data-pane="branch"]) .branch-view {
 	position: relative;
 	cursor: grab;
 	user-select: none;
-	/* The wheel is the view's own gesture here, so the page must not treat it as a scroll to
-	   rubber-band or hand to the browser. */
+	/* 滚轮在这里是视图自己的手势，页面不得把它当作可以橡皮筋的滚动交给浏览器。 */
 	touch-action: none;
 }
 
@@ -1871,9 +1792,9 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * The element the graph measures its geometry on (`cardMetrics` in `branch-view.ts`): it is handed a
- * token as its height and read back, because a `calc()` token's computed value is still a `calc()`
- * string and parsing it yields nothing. It never shows, sits out of the flow, and the paint removes it.
+ * 图量几何所用的元素（`branch-view.ts` 的 `cardMetrics`）：它被塞进一个 token 作高度、再读回，
+ * 因为 `calc()` token 的计算值仍是一条 `calc()` 字符串，解析不出东西。它从不显示、脱离文档流，
+ * 绘制时移除。
  */
 .branch-metric {
 	position: absolute;
@@ -1885,12 +1806,10 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * One node: a dot on the line, then a **fixed-height, one-line** card — the way's first sentence, and
- * under it the short id cut from its store entry plus its round. The sentence is cut by the ellipsis,
- * and the whole of it is the card's `title`: a card that grew on hover covered the row below and made
- * the tree, which is the only reason the page exists, read as prose. Height and the gap under it come
- * from the branch tokens, which follow the font-size scale; the graph measures the same two to lay the
- * lanes out, so a card and its lane can only agree.
+ * 一个节点：线上一颗圆点，然后一张**定高、单行**的卡片 —— 那条路的第一句话，下面是它的存储
+ * 条目裁出的短 id 加回合。句子被省略号截断，整句是卡片的 `title`：悬停时长高的卡片会盖住下面的
+ * 行，让树 —— 页面存在的唯一理由 —— 读作文字。高度和其下的间隙来自分支 token，它们跟随字号
+ * 阶；图量出同样的两个来排行，卡片和它的行于是只能一致。
  */
 .gnode {
 	position: absolute;
@@ -1929,7 +1848,7 @@ body:not([data-pane="branch"]) .branch-view {
 	color: var(--dsw-label-caption);
 }
 
-/* The one line the card shows, cut by the ellipsis; the whole sentence is the card's `title`. */
+/* 卡片显示的唯一一行，被省略号截断；整句是卡片的 `title`。 */
 .gnode .lbl {
 	display: block;
 	min-width: 0;
@@ -1976,7 +1895,7 @@ body:not([data-pane="branch"]) .branch-view {
 	box-shadow: 0 0 0 3px var(--dsw-bubble-highlight);
 }
 
-/* ------------------------------------------------------------------- banners */
+/* ---------------------------------------------------------------- 横幅 */
 
 .banners:empty {
 	display: none;
@@ -1989,12 +1908,11 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * The approval takeover: one card per waiting approval, sitting in the composer's own seat.
+ * 审批接管：每个等待中的审批一张卡片，坐在 composer 自己的席位上。
  *
- * The shape is the reference's — a warning border around the whole card, a status strip on top, the
- * command in the middle, and the two answers at the bottom right — because the card *is* the input
- * for as long as the approval stands, and a question that replaces the thing it interrupted reads as
- * urgent where a banner above an untouched input box reads as a sticky note.
+ * 形状来自参考图 —— 整张卡的警告边框、顶部的状态条、中间的命令、右下两个答案 —— 因为审批站着
+ * 的期间卡片*就是*输入，一个替换了它打断的东西的问题读作紧急，而悬在没人动的输入框上方的横幅
+ * 读作便利贴。
  */
 .approval-seat {
 	display: flex;
@@ -2073,10 +1991,9 @@ body:not([data-pane="branch"]) .branch-view {
 /* ------------------------------------------------------------------ composer */
 
 /*
- * The composer head: the directory chip on its own line above the input card, leftmost — where a
- * session starts is where "where the next one starts" belongs (01 ⑦). The chip is permanent here:
- * its choice never rewrites the session on screen, and it is placed by the input it sits over
- * rather than by what the transcript says, so it needs no phase to come and go with.
+ * composer 头部：输入卡片上方自己一行的目录 chip，最左 —— 会话从哪里开始，"下一个从哪开始"
+ * 就属于哪里（01 ⑦）。chip 永久在这里：它的选择从不改写屏幕上的会话，位置由它覆盖的输入决定
+ * 而不是 transcript 说什么，所以不需要随阶段来去。
  */
 .composer-head {
 	display: flex;
@@ -2116,7 +2033,7 @@ body:not([data-pane="branch"]) .branch-view {
 	flex: none;
 }
 
-/* The chevron is the affordance; the folder is the content. */
+/* chevron 是交互提示；文件夹是内容。 */
 .directory-chip svg:last-child {
 	width: 12px;
 	height: 12px;
@@ -2131,13 +2048,11 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * The one self-drawn menu. Fixed against the viewport, token-shaded, one at a time — and nothing
- * else in the window gets one, because a second popup implementation is a second set of dismissal
- * rules to keep honest.
+ * 唯一自绘的菜单。对视口 fixed、token 着色、一次一个 —— 窗口里其他东西都得不到一个，因为第二
+ * 个弹窗实现就是第二套要维护的关闭规则。
  *
- * A menu is a list, so it is capped and scrolls rather than growing past the window: the directory
- * picker's list has no ceiling — every directory this machine ever made a session in is a row — and
- * a menu taller than the screen would carry rows nobody can reach.
+ * 菜单是列表，所以封顶并滚动而不是长过窗口：目录选择器的列表没有上限 —— 这台机器开过会话的
+ * 每个目录都是一行 —— 比屏幕还高的菜单会带着够不着的行。
  */
 .menu {
 	position: fixed;
@@ -2182,9 +2097,8 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * The active mark rides the row's right end, not the label's: a plain row's label is only as wide as
- * its words, so a mark left in the flow would sit against the text it marks. A row-level `::after`
- * is a flex item like any other, which is what the auto margin needs to push it out.
+ * active 标记骑在行的右端，不是标签的：普通行的标签只和它的字一样宽，留在流里的标记会贴着它
+ * 标记的文字。行级的 `::after` 和其他一样是 flex item，正是 auto 边距把它推出去所需要的。
  */
 .menu-item[data-active="true"]::after {
 	content: "✓";
@@ -2193,7 +2107,7 @@ body:not([data-pane="branch"]) .branch-view {
 	font-weight: 400;
 }
 
-/* A destructive row says so in colour, before its words are read. */
+/* 破坏性的行在字被读之前就用颜色说了。 */
 .menu-item[data-danger="true"] {
 	color: var(--dsw-state-error);
 }
@@ -2220,7 +2134,7 @@ body:not([data-pane="branch"]) .branch-view {
 	text-overflow: ellipsis;
 }
 
-/* A row with a detail stacks its two lines; the active mark still rides the row's own right end. */
+/* 带 detail 的行叠放两行；active 标记仍然骑在行自己的右端。 */
 .menu-text {
 	display: flex;
 	flex-direction: column;
@@ -2247,12 +2161,10 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * The one self-drawn card that asks for a line of typing — a directory's new folder name.
+ * 唯一自绘的、要求一行输入的卡片 —— 目录的新文件夹名。
  *
- * It is a modal, unlike the menu above it: centred, keyboard-taking, and undismissable by a stray
- * click on the page behind it. The scrim is the only place either is drawn from, so the dimming
- * follows the theme without a second rule, and it sits above the menu because the menu is what opens
- * it (z-index 60 there).
+ * 它是模态，与上面的菜单不同：居中、接管键盘、不被身后页面的误点关掉。scrim 是两者唯一的绘制
+ * 来源，所以调暗跟随主题而无需第二条规则，它坐在菜单之上因为菜单是打开它的（那里 z-index 60）。
  */
 .text-dialog-overlay {
 	position: fixed;
@@ -2363,10 +2275,9 @@ body:not([data-pane="branch"]) .branch-view {
 	background: transparent;
 	color: var(--dsw-label-primary);
 	font: inherit;
-	/* The body tier, not the title tier the small inputs wear: this is the user's own prose — the
-	   text that becomes the next message bubble — so it rides the same axis the transcript reads
-	   at, and someone enlarging the window's text enlarges what they type with it. (05's call; 07
-	   left it standing.) */
+	/* 正文档，不是小输入们穿的 title 档：这是用户自己的文字 —— 将成为下一条消息气泡的文本 ——
+	   所以它骑在 transcript 阅读的同一根轴上，放大窗口文字的人放大他们输入的东西。（05 的裁定；
+	   07 让它继续成立。） */
 	font-size: var(--dsw-fs-body);
 	line-height: var(--dsw-lh-body);
 	resize: none;
@@ -2374,12 +2285,11 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * The queued prompts, between the textarea and the bar: one row per accepted-but-undrained message.
+ * 排队的提示，textarea 与输入条之间：每条已接受未排干的消息一行。
  *
- * It sits inside the composer rather than beside the send button because the rows are prose — the
- * things the user said and is waiting on — and prose belongs with the writing, not with the controls.
- * A row is deliberately quiet: it names a message the agent has not reached yet, and the text it
- * carries is already the whole story.
+ * 它坐在 composer 内部而不是发送按钮旁边，因为这些行是文字 —— 用户说过、正在等的话 —— 而文字
+ * 属于书写处，不属于控件区。一行刻意安静：它指名 agent 还没轮到的消息，携带的文本已经是全部
+ * 的故事。
  */
 .composer-queue {
 	display: flex;
@@ -2417,14 +2327,12 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * The model seat: which row answers, and how hard it is asked to think.
+ * 模型席位：哪一行应答，以及要求它多用力思考。
  *
- * On the bar rather than in the settings panel because it follows the session — it is read while
- * working and changed mid-conversation, so it has to be where the writing happens — and on the
- * bar's right end because that is where 01 ④ put it: "选模型的放在输入框右边", just left of the
- * send button. The bar carries no hint lines, so the auto margin is what pins the seat there. Both
- * chips are deliberately quiet: a control read on every glance should not compete with the answer
- * above it.
+ * 在输入条上而不在设置面板里，因为它跟随会话 —— 工作中读、对话中途改，所以必须在书写发生的
+ * 地方 —— 且在输入条右端，因为那是 01 ④ 放它的地方："选模型的放在输入框右边"，紧挨发送按钮
+ * 左侧。输入条不带提示行，所以 auto 边距就是把席位钉在那里的东西。两个 chip 刻意安静：每次扫
+ * 一眼都要读的控件，不该和它上面的回答抢注意力。
  */
 .composer-seat {
 	display: flex;
@@ -2435,9 +2343,8 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * A chip on the bar: the mode seat at its left end, the model and level seats at its right. All
- * three name a current choice and open the one menu over themselves, so all three are one shape —
- * quiet until hovered, with the chevron that says a menu is behind them.
+ * 输入条上的一枚 chip：模式席位在左端，模型和档位席位在右端。三者都指名一个当前选择、都在
+ * 自己上方打开唯一的菜单，所以三者同形 —— 悬停前安静，带着说明菜单在后面的 chevron。
  */
 .composer-mode,
 .composer-pick {
@@ -2473,7 +2380,7 @@ body:not([data-pane="branch"]) .branch-view {
 	outline: none;
 }
 
-/* Nothing to pick: the chip still says why, but it stops looking pressable. */
+/* 没有可挑的：chip 仍然说明原因，但不再看起来能按。 */
 .composer-pick:disabled {
 	color: var(--dsw-label-caption);
 	cursor: default;
@@ -2562,29 +2469,27 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * `display: inline-flex` above would otherwise win over the browser's own `[hidden]` rule, leaving
- * the Stop button on screen next to Send.
+ * 上面的 `display: inline-flex` 会盖过浏览器自己的 `[hidden]` 规则，让 Stop 按钮出现在 Send
+ * 旁边。
  */
 [hidden] {
 	display: none !important;
 }
 
-/* --------------------------------------------------------------- status line */
+/* --------------------------------------------------------------- 状态行 */
 
 /*
- * Three numbers and a bar, under the composer.
+ * 三个数字和一根条，composer 下面。
  *
- * Each reading owns a third of the line and centers inside its own third. Left to itself the row
- * gathers at the left edge, which reads as an unfinished line rather than a line about the request;
- * divided three ways, the figures sit where the composer above them is read from.
+ * 每个读数占一行的三分之一、在自己的三分之一里居中。放任自流时这一行会聚在左缘，读起来像一条
+ * 没画完的线而不是关于请求的线；分成三份，数字就坐在上面 composer 被阅读的轴上。
  *
- * The line is a little narrower than the composer it sits under, so the three figures read as one
- * cluster about the middle rather than as a row pinned to the composer's two corners. That gap is
- * stated as a difference, not a second width, so the relationship survives the reading column
- * handle: however wide the prose is dragged, the line stays one step narrower.
+ * 这一行比它下面的 composer 略窄，三个数字读作关于中间的一簇，而不是钉在 composer 两角的一行。
+ * 那个间隙以差值声明，不是第二个宽度，关系因此在阅读列把手之下幸存：无论文字拖多宽，行保持
+ * 窄一步。
  *
- * Deliberately not in the header: the header is where the conversation starts, and a figure that
- * moves on every turn would pull the eye to it. Down here it is read when it is being looked for.
+ * 刻意不在头部：头部是对话开始的地方，每个回合都动的数字会把眼睛拽过去。在这里，找它的时候
+ * 才被读到。
  */
 .status-bar {
 	display: flex;
@@ -2594,12 +2499,12 @@ body:not([data-pane="branch"]) .branch-view {
 	width: 100%;
 	margin-inline: auto;
 	padding: 0 24px 10px;
-	/* A little left of the composer's centre, which is the axis the line is read from. Like the
-	   middle reading's own nudge below, this is optical: the layout is untouched. */
+	/* 在 composer 中轴左边一点，正是这一行被阅读的轴。与下面中间读数自己的偏移一样，这是视觉
+	   调整：布局未动。 */
 	transform: translateX(-24px);
 	color: var(--dsw-label-caption);
-	/* Technical readings, deliberately a step under the prose and pinned to the caption tier:
-	   numbers one watches for, not text one reads. They do not ride the slider. */
+	/* 技术读数，刻意比文字低一档、钉在 caption 档：是要盯着的数字，不是要读的文字。它们不跟
+	   滑块走。 */
 	font-family: var(--dsw-font-mono);
 	font-size: var(--dsw-fs-caption);
 	line-height: var(--dsw-lh-caption);
@@ -2609,7 +2514,7 @@ body:not([data-pane="branch"]) .branch-view {
 	white-space: nowrap;
 }
 
-/* The line's three seats: the session total, the cache reading, and context with its bar. */
+/* 行的三个席位：会话总计、缓存读数、带条的上下文。 */
 .status-bar > .status-stat,
 .status-group {
 	flex: 1;
@@ -2621,11 +2526,10 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * The middle reading sits a little left of its own middle.
+ * 中间的读数在自己中点的左边一点。
  *
- * The figure to its right carries a bar, so the three even out only when the middle one gives that
- * side some room. It is a transform rather than padding because padding would widen this seat and so
- * move the two readings beside it: this is optical, and the seats stay where they are.
+ * 它右侧的读数带一根条，中间的让出一些空间三者才平。用 transform 而不是 padding，因为 padding
+ * 会加宽这个席位、把两侧的读数也挪动：这是视觉调整，席位原地不动。
  */
 .status-bar > .status-stat:nth-child(2) {
 	transform: translateX(-24px);
@@ -2638,7 +2542,7 @@ body:not([data-pane="branch"]) .branch-view {
 	gap: 10px;
 }
 
-/* The bar is capped, so what the group does not use stays as the space that centers it. */
+/* 条封了顶，组用不掉的空间就成为居中它的空间。 */
 .status-meter {
 	position: relative;
 	flex: 1;
@@ -2662,7 +2566,7 @@ body:not([data-pane="branch"]) .branch-view {
 	background: var(--dsw-state-warn);
 }
 
-/* ------------------------------------------------------------ notices */
+/* ------------------------------------------------------------ 提示 */
 
 .notice-card {
 	display: flex;
@@ -2707,7 +2611,7 @@ body:not([data-pane="branch"]) .branch-view {
 	line-height: var(--dsw-lh-caption);
 }
 
-/* --------------------------------------------------------------- settings */
+/* --------------------------------------------------------------- 设置 */
 
 .settings-overlay {
 	position: fixed;
@@ -2717,14 +2621,13 @@ body:not([data-pane="branch"]) .branch-view {
 	place-items: center;
 	padding: var(--dsw-settings-air);
 	background: var(--dsw-scrim);
-	/* Deliberately no backdrop-filter: this machine composites in software (ADR-0004), and the
-	   measurement in .scratch/window-repair/research/overlay-blur.ts prices blur(2px) at ~2.5ms of
-	   CPU per frame whenever the backdrop moves — for an effect the 32% dim already carries. */
+	/* 刻意不加 backdrop-filter：这台机器软件合成（ADR-0004），.scratch/window-repair/research/
+	   overlay-blur.ts 的测量给 blur(2px) 定价约每帧 2.5ms CPU，只要背景在动 —— 为一个 32% 暗化
+	   本就带来的效果。 */
 }
 
 /*
- * The shared modal surface. The app-level panel is this box, laid out as a nav column plus a content
- * column below.
+ * 共享的模态表面。应用级面板就是这个盒子，排成导航列加内容列。
  */
 .settings {
 	display: flex;
@@ -2738,10 +2641,9 @@ body:not([data-pane="branch"]) .branch-view {
 }
 
 /*
- * The app panel's shape, taken from the viewport rather than the content — one height for every
- * section, because a content-sized panel resizes under the pointer on every nav click. Width 800,
- * the height capped at 800, and the same air at every side (the overlay pads by it, the height
- * subtracts two of it), so the panel stays centered and whole in even the smallest window.
+ * 应用面板的形状，取自视口而不是内容 —— 每个区块同一高度，按内容定尺寸的面板会在每次点击
+ * 导航时在指针下变大小。宽 800，高度封顶 800，四侧同样的 air（overlay 以它内边距、高度减去
+ * 两倍它），面板在最小的窗口里也居中完整。
  */
 .app-settings {
 	flex-direction: row;
@@ -2750,8 +2652,7 @@ body:not([data-pane="branch"]) .branch-view {
 	max-width: calc(100vw - 2 * var(--dsw-settings-air));
 }
 
-/* The left column: the panel's title and the section list, which scrolls on its own when the
-   window is too short for the list — the content column scrolls independently of it. */
+/* 左列：面板的标题和区块列表，窗口矮到装不下清单时它自己滚动 —— 内容列独立于它滚动。 */
 .settings-nav {
 	flex: none;
 	display: flex;
@@ -2808,8 +2709,8 @@ body:not([data-pane="branch"]) .branch-view {
 	font-weight: 500;
 }
 
-/* The right column: fixed head, scrolling body, note. The body stays the only scroller in it, as
-   before; the nav list is the second, independent one. */
+/* 右列：固定头部、滚动正文、note。正文仍是其中唯一的滚动者，与之前一样；导航清单是第二个、
+   独立的一个。 */
 .settings-content {
 	flex: 1;
 	min-width: 0;
@@ -2818,8 +2719,7 @@ body:not([data-pane="branch"]) .branch-view {
 	flex-direction: column;
 }
 
-/* The app panel's head carries the close control alone — its title lives in the nav column — so
-   the space-between has nothing to pair with here. */
+/* 应用面板的头部只带关闭控件 —— 标题住在导航列 —— 所以 space-between 在这里没有配对的东西。 */
 .app-settings .settings-head {
 	justify-content: flex-end;
 	padding: 14px 16px 0;
@@ -2910,7 +2810,7 @@ body:not([data-pane="branch"]) .branch-view {
 	color: var(--dsw-state-error);
 }
 
-/* --------------------------------------------------------- appearance bits */
+/* --------------------------------------------------------- 外观部件 */
 
 .segmented {
 	display: flex;
@@ -2976,11 +2876,10 @@ select.input {
 	cursor: pointer;
 }
 
-/* ---------------------------------------------------------------- models */
+/* ---------------------------------------------------------------- 模型 */
 
-/* One interaction at a time lives in a row: the head opens it, the trash asks once, the form edits
-   it in place. The trash is a sibling of the head rather than a child, because a button cannot hold
-   another — it is laid over the head's reserved right padding instead. */
+/* 一次一个交互住在一行里：头部打开它，回收站问一次，表单就地编辑它。回收站是头部的兄弟而不是
+   子节点，因为按钮不能装按钮 —— 它盖在头部预留的右侧内边距上。 */
 .model-row {
 	position: relative;
 	border: 1px solid var(--dsw-border-l2);
@@ -3008,8 +2907,7 @@ select.input {
 	background: var(--dsw-bg-hover);
 }
 
-/* While the form is open the head is the row's label, not a door: clicks go nowhere, the trash is
-   gone, and the divider sets the form off from what it is editing. */
+/* 表单开着时头部是行的标签，不是门：点击无处去、回收站消失、分隔线把表单和它编辑的东西分开。 */
 .model-row.editing .model-row-head {
 	pointer-events: none;
 	border-bottom: 1px solid var(--dsw-border-l1);
@@ -3073,8 +2971,7 @@ select.input {
 	flex: 1;
 }
 
-/* The add affordance is a dashed invitation, not a boxed button — it reads as an empty slot the
-   next row will fill. */
+/* 添加的交互提示是虚线邀请，不是盒装按钮 —— 读作下一行将要填上的空位。 */
 .model-add {
 	display: flex;
 	align-items: center;
@@ -3135,10 +3032,10 @@ select.input {
 	padding-top: 2px;
 }
 
-/* ---------------------------------------------------------------- modes */
+/* ---------------------------------------------------------------- 模式 */
 
-/* The mode cards reuse the model rows' frame — head, trash, inline form — and add only what a mode
-   needs that a model does not: the built-in badge, the value summary, and one toggle row per tool. */
+/* 模式卡复用模型行的框架 —— 头部、回收站、内联表单 —— 只加模式需要而模型不需要的：内置徽章、
+   值摘要、每个工具一行开关。 */
 .mode-badge {
 	padding: 1px 6px;
 	border: 1px solid var(--dsw-border-l2);
@@ -3154,8 +3051,8 @@ select.input {
 	line-height: var(--dsw-lh-caption);
 }
 
-/* The built-in default's name in its form: the label and badge where a stored mode has an input. It
-   keeps the input's height so the two forms read as the same object, not as one missing a field. */
+/* 内置默认在表单里的名字：存储模式放输入的位置放标签和徽章。它保持输入的高度，两个表单才读作
+   同一个对象，而不是缺了一个字段的。 */
 .mode-name-static {
 	display: flex;
 	align-items: center;
@@ -3163,14 +3060,13 @@ select.input {
 	height: 30px;
 }
 
-/* The built-in card has no trash to sit in the head's reserved right padding. */
+/* 内置卡片没有回收站坐进头部预留的右侧内边距。 */
 .model-row.mode-default .model-row-head {
 	padding-right: 12px;
 }
 
-/* One tool of one mode: toggle, name, and — for the tools the approval map has keys for — the
-   approval select beside them. The 30px row is the select's height rather than the text's line box,
-   and the 8px gap keeps the selects from almost touching the row above. */
+/* 一个模式的一个工具：开关、名字，以及 —— 审批表有键的工具 —— 旁边的审批下拉。30px 的行高是
+   下拉的高度而不是文本的行盒，8px 的间隙让下拉不至于几乎贴到上一行。 */
 .mode-tooltable {
 	display: flex;
 	flex-direction: column;
@@ -3205,7 +3101,7 @@ select.input {
 	padding: 0 6px;
 }
 
-/* ----------------------------------------------------------------- scrollbars */
+/* ----------------------------------------------------------------- 滚动条 */
 
 .transcript,
 .session-list,
@@ -3275,7 +3171,7 @@ select.input {
 	display: none;
 }
 
-/* The rail's foot stacks: the gear above the channel dot, each centred in its own row. */
+/* rail 的底部竖排：齿轮在上、通道圆点在下，各自在自己的行里居中。 */
 #app[data-sidebar="rail"] .sidebar-foot {
 	flex-direction: column;
 	gap: 6px;
@@ -3288,7 +3184,7 @@ select.input {
 	padding: 0;
 }
 
-/* The rail has room for the dot and nothing else, which is the whole message anyway. */
+/* rail 装得下圆点，装不下别的，而那正是全部信息。 */
 #app[data-sidebar="rail"] .channel-indicator {
 	justify-content: center;
 	width: 100%;
@@ -3299,7 +3195,7 @@ select.input {
 	height: 36px;
 	margin-inline: auto;
 	padding: 0;
-	/* The top row is a column here; the seat the full sidebar gives this button must not stretch. */
+	/* 顶行在这里是竖列；完整侧栏给这个按钮的席位绝不能拉伸。 */
 	flex: none;
 }
 

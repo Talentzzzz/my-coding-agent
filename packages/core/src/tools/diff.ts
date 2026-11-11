@@ -1,55 +1,51 @@
 import type { DiffLine, FileDiff } from "../protocol.ts";
 
 /**
- * The line diff a file-changing tool reports.
+ * 文件修改工具报告的行级 diff。
  *
- * Two audiences read one change. The model reads the text form, which has to stay small because it
- * is sent again on every request; the window reads the structured form, which is what a real diff
- * view needs — line numbers in both files, which rows are additions, and where a rewritten line
- * actually differs. Both are projected from one computation, so the text the model verifies itself
- * against and the card the reader looks at can never describe different changes.
+ * 两个读者读同一处变更。模型读文字形式，它必须保持小，因为它在每次请求里都要重发；窗口读结构
+ * 形式，那是真正的 diff 视图需要的——两个文件各自的行号、哪些行是新增、重写的一行究竟哪里不同。
+ * 两者从同一次计算投影而来，所以模型拿来核对自己的文字和读者看到的卡片不可能描述不同的变更。
  *
- * The algorithm is the ordinary one: peel the common head and tail, then an LCS over what is left.
- * The peel is what keeps the common case cheap — a one-line change in a ten-thousand-line file
- * leaves a middle of one line for the LCS to see — and the budget below bounds the rest.
+ * 算法是常规做法：剥掉公共的头尾，然后对剩下的做 LCS。剥头尾是让常见情形保持便宜的原因——
+ * 一万行文件里的一行改动给 LCS 只留下一行的中间段——下面的预算则约束其余情况。
  */
 
-/** Unchanged lines kept on each side of a change, so a change reads in its context. */
+/** 变更两侧各保留多少未变行，让变更在其上下文中可读。 */
 export const DIFF_CONTEXT = 3;
 
-/** Most rows one report may carry. A card is a preview of a change, not a diff viewer. */
+/** 一份报告最多携带的行数。卡片是变更的预览，不是 diff 查看器。 */
 export const DIFF_MAX_ROWS = 500;
 
-/** Most rows of that report the model is shown; the file itself has whatever is left. */
+/** 该报告中最多给模型看多少行；文件本身拥有其余的。 */
 export const DIFF_TEXT_MAX_ROWS = 80;
 
 /**
- * Cells the LCS may fill before the middle is reported as one rewrite.
+ * LCS 允许填充的格子数，超过即把中段整体报告为一次重写。
  *
- * The table is quadratic in the changed region, so a large enough middle is a file rewritten rather
- * than edited — and saying that in one removed block and one added block is both cheap and true. The
- * head and tail peel has already taken everything the two sides share, so this is only reached by a
- * middle that really is all change.
+ * 表格对变更区域是二次方的，所以足够大的中段是一次重写文件而不是一次编辑——用一块删除加一块
+ * 新增来说明它既便宜又真实。头尾的剥离已经拿走了两侧共享的一切，所以只有真正全是变更的中段
+ * 才会到这里。
  */
 const LCS_BUDGET = 200_000;
 
 export interface DiffOptions {
-	/** Unchanged lines kept on each side of a change. Defaults to {@link DIFF_CONTEXT}. */
+	/** 变更两侧各保留多少未变行。默认 {@link DIFF_CONTEXT}。 */
 	context?: number;
-	/** Most rows `lines` may carry; the rest is counted in `omitted`. Defaults to no bound. */
+	/** `lines` 最多携带的行数；其余计入 `omitted`。默认无限制。 */
 	maxLines?: number;
-	/** Whether the file did not exist before. Defaults to `before` being empty. */
+	/** 文件此前是否不存在。默认把 `before` 当作空的。 */
 	created?: boolean;
 }
 
-/** One line of the edit script, before it is given line numbers and cut into hunks. */
+/** 编辑脚本的一行，在被标上行号、切成 hunk 之前。 */
 type Op = { kind: "context" | "add" | "remove"; text: string };
 
 /**
- * The change from `before` to `after`, as rows a card can draw.
+ * 从 `before` 到 `after` 的变更，按卡片能绘制的行。
  *
- * `path` is carried through rather than derived: only the caller knows how the run's working directory displays
- * the file, and the card names the same path the tool's own text does.
+ * `path` 原样携带而不是推导：只有调用方知道 run 的工作目录如何展示该文件，卡片指名的路径与工具
+ * 自己的文字相同。
  */
 export function fileDiff(relPath: string, before: string, after: string, options: DiffOptions = {}): FileDiff {
 	const ops = editScript(splitLines(before), splitLines(after));
@@ -61,8 +57,8 @@ export function fileDiff(relPath: string, before: string, after: string, options
 		else if (op.kind === "remove") removed += 1;
 	}
 
-	// Every row is numbered as it is built, before any hunk drops it: a number that shifted because a
-	// neighbouring hunk was elided would point at the wrong line of the file.
+	// 每一行在构建时就编号，在任何 hunk 丢掉它之前：一个因为相邻 hunk 被省略而移位的编号会指向
+	// 文件的错误一行。
 	const numbered: DiffLine[] = [];
 	let oldLine = 1;
 	let newLine = 1;
@@ -87,18 +83,17 @@ export function fileDiff(relPath: string, before: string, after: string, options
 }
 
 /**
- * The model's half of a report: the familiar `-` / `+` / space prefixes and nothing else.
+ * 报告中模型的那一半：熟悉的 `-` / `+` / 空格前缀，仅此而已。
  *
- * Line numbers are left out on purpose. The card needs them because a reader compares the change
- * against a file; the model is checking what it just did, and every column spent on numbering is a
- * column of context it does not get.
+ * 行号刻意不给。卡片需要它们，因为读者要拿变更对照文件；模型检查的是自己刚做的事，花在编号上的
+ * 每一列都是它得不到的一列上下文。
  */
 export function diffText(diff: FileDiff, maxLines = DIFF_TEXT_MAX_ROWS): string {
 	const rows: string[] = [];
 	let omitted = diff.omitted;
 	for (const line of diff.lines) {
-		// A skip row is a fact about the view, not about the file: the model gets neither the elided
-		// lines nor a line saying they are missing.
+		// skip 行是关于视图的事实，不是关于文件的事实：模型既拿不到被省略的行，也拿不到一行说明
+		// 它们缺失的话。
 		if (line.kind === "skip") continue;
 		if (rows.length >= maxLines) {
 			omitted += 1;
@@ -111,10 +106,10 @@ export function diffText(diff: FileDiff, maxLines = DIFF_TEXT_MAX_ROWS): string 
 }
 
 /**
- * Split text into lines, ignoring the trailing newline.
+ * 把文本切成行，忽略结尾换行。
  *
- * The final newline is a terminator, not a line of its own: kept, it would appear in every diff as a
- * trailing empty context row, which reads like a change nobody made.
+ * 最后的换行是终止符，不是独立的一行：保留它，它会以一行尾部空 context 行出现在每个 diff 里，
+ * 读起来像一次没人做过的变更。
  */
 function splitLines(text: string): string[] {
 	if (text.length === 0) return [];
@@ -124,12 +119,10 @@ function splitLines(text: string): string[] {
 }
 
 /**
- * The shortest edit script between two line lists.
+ * 两个行列表之间的最短编辑脚本。
  *
- * The common head and tail are peeled first, because that is where a pure insertion or deletion is
- * decided for free, and because it leaves the LCS the small middle it is good at. A middle past the
- * budget is reported as one rewrite: at that size the one thing that can be said honestly and
- * cheaply is that these lines went and those arrived.
+ * 公共的头尾先剥掉，因为纯插入或纯删除在这里可以免费判定，也因为这让 LCS 得到它擅长的小中段。
+ * 超出预算的中段报告为一次重写：在那个规模上，唯一既诚实又便宜的说法就是这些行没了、那些行来了。
  */
 function editScript(before: readonly string[], after: readonly string[]): Op[] {
 	let prefix = 0;
@@ -162,10 +155,10 @@ function editScript(before: readonly string[], after: readonly string[]): Op[] {
 	return [...head, ...middle, ...tail];
 }
 
-/** The edit script of two line lists that share neither a head nor a tail. */
+/** 既不共享头也不共享尾的两个行列表的编辑脚本。 */
 function lcsScript(before: readonly string[], after: readonly string[]): Op[] {
 	const width = after.length + 1;
-	// `counts[i * width + j]` is the length of the longest common subsequence from `before[i]` on.
+	// `counts[i * width + j]` 是从 `before[i]` 起的最长公共子序列长度。
 	const counts = new Uint32Array((before.length + 1) * width);
 	for (let i = before.length - 1; i >= 0; i -= 1) {
 		for (let j = after.length - 1; j >= 0; j -= 1) {
@@ -185,8 +178,8 @@ function lcsScript(before: readonly string[], after: readonly string[]): Op[] {
 			i += 1;
 			j += 1;
 		} else if (counts[(i + 1) * width + j]! >= counts[i * width + j + 1]!) {
-			// Ties go to the removal, so a rewritten pair reads as the old line and then the new one
-			// rather than as an addition somewhere above its own deletion.
+			// 平局归给删除，于是重写的一对读作旧行在前、新行在后，而不是一次出现在自己删除上方
+			// 某处的插入。
 			ops.push({ kind: "remove", text: before[i]! });
 			i += 1;
 		} else {
@@ -200,13 +193,11 @@ function lcsScript(before: readonly string[], after: readonly string[]): Op[] {
 }
 
 /**
- * Cut numbered rows into hunks: every change, its surrounding context, and a count of what was left
- * out between them.
+ * 把带编号的行切成 hunk：每个变更、它的周围上下文，以及它们之间被略去内容的计数。
  *
- * Unchanged lines beyond the context at either end of the file are dropped without a row — a diff
- * that opened with "1,200 unchanged lines" would bury the change it exists to show — while a gap
- * *between* two changes is reported, because a reader scrolling through a change needs to know that
- * they skipped something rather than that the file jumped.
+ * 文件两端超出 context 的未变行不带行直接丢弃——以「1,200 行未变」开头的 diff 会把它要展示的变更
+ * 埋掉——而两个变更*之间*的间隙要报告，因为滚动查看一段变更的读者需要知道自己跳过了内容，而不
+ * 是文件突然跳了一下。
  */
 function changedLines(rows: readonly DiffLine[], context: number): DiffLine[] {
 	const keep = new Array<boolean>(rows.length).fill(false);
@@ -229,19 +220,17 @@ function changedLines(rows: readonly DiffLine[], context: number): DiffLine[] {
 			lines.push(row);
 			continue;
 		}
-		// A dropped row only counts once something has been kept: the unchanged head and tail of a
-		// file are not a gap between two hunks.
+		// 一行被丢的行只有在已经保留过东西之后才计数：文件的未变头尾不是两个 hunk 之间的间隙。
 		if (lines.length > 0) skipped += 1;
 	}
 	return lines;
 }
 
 /**
- * Mark the part of a rewritten line that actually differs.
+ * 标出重写的一行里真正不同的部分。
  *
- * Only a lone removed line followed by a lone added one is marked. That is the shape a one-line
- * change takes, and it is the case where the difference is worth pointing at; a block of five lines
- * rewritten as six has no pairing to mark, and guessing one would highlight the wrong text.
+ * 只标记单独一行删除后跟单独一行新增的情况。这是一行变更呈现的形状，也是差异值得指出的情形；
+ * 五行重写成六行没有可标记的配对，硬猜一个会高亮错误的文字。
  */
 function markRewrites(lines: DiffLine[]): void {
 	let index = 0;
@@ -269,7 +258,7 @@ function markRewrites(lines: DiffLine[]): void {
 	}
 }
 
-/** The spans of two lines that differ, or undefined when they differ everywhere but the ends. */
+/** 两行中不同的区段，除两端外全不同时为 undefined。 */
 function rewriteMarks(
 	before: string,
 	after: string,
@@ -285,8 +274,8 @@ function rewriteMarks(
 
 	const removed: [number, number] = [prefix, before.length - suffix];
 	const added: [number, number] = [prefix, after.length - suffix];
-	// Nothing survived at either end, so the whole line changed and the row's own color already says
-	// so; marking all of it would only be a second way of saying the same thing.
+	// 两端什么都没剩下，说明整行都变了，行自己的颜色已经说明了这一点；全部标出来只是换一种方式
+	// 说同一件事。
 	if (prefix === 0 && removed[1] === before.length && added[1] === after.length) return undefined;
 	return { removed, added };
 }

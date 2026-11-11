@@ -2,17 +2,16 @@ import type { SettingManager } from "../setting-manager.ts";
 import { fillTools, narrowToKnown, type ToolState } from "../tools/manager.ts";
 import { type SessionManager, type Session } from "./session-manager.ts";
 
-/** The tools an approval map gates: every name it carries with a true value. */
+/** 审批表闸住的工具：表里每个带 true 值的名字。 */
 export function approvalToolsOf(approval: Record<string, boolean>): string[] {
 	return Object.keys(approval).filter((name) => approval[name]);
 }
 
 /**
- * The global default tool set, narrowed to the tools this build knows.
+ * 全局默认工具集，收窄到本构建认识的工具。
  *
- * The one answer every consumer of the default shares — assembly, a branch move, and the follow-global
- * judgement — because three spellings of "the default" would let a reset write one set while the
- * panel judged the session against another, and a just-reset session would read as having chosen.
+ * 默认的每个消费方共享的唯一答案——装配、分支移动、follow-global 判断——因为「默认」有三种拼法
+ * 会让重置写入一套集合而面板按另一套判断 session，刚重置的 session 就会被读成已经选过。
  */
 export function defaultToolNames(settings: SettingManager, workDirAbsPath: string, known: readonly string[]): string[] {
 	const configured = settings.getTools(workDirAbsPath);
@@ -21,12 +20,11 @@ export function defaultToolNames(settings: SettingManager, workDirAbsPath: strin
 }
 
 /**
- * The global default mode's live view, as a {@link ToolState}.
+ * 全局默认模式的活视图，以 {@link ToolState} 形式。
  *
- * The built-in default mode is never stored (ADR-0005), so this is what it is instead: the settings
- * files' own tool set — the full set when they name none — and their approvals, filled through
- * {@link fillTools} the same way a named mode would be. Undefined approvals mean "the session never
- * chose", so the view stays live: a settings change is this mode's change.
+ * 内置的默认模式从不落盘（ADR-0005），所以这是它替代存在的方式：设置文件自己的工具集——没指名就
+ * 是全集——加上它们的审批，像具名模式一样经 {@link fillTools} 填充。审批为 undefined 意味着「session
+ * 从未选择」，所以视图保持活态：设置变更就是这个模式的变更。
  */
 export function globalDefaultToolState(
 	settings: SettingManager,
@@ -41,22 +39,18 @@ export function globalDefaultToolState(
 }
 
 /**
- * The tool choice one session is in, derived from the ledger, on every read.
+ * 一个 session 所处的工具选择，每次读取时从账本推导。
  *
- * The session's recorded choice — the `.json` snapshot's active set and approval map, both held
- * whole — is the first word, and every earlier one is gone by design, which is why nothing needs to
- * hold it: the active set and the gate's approvals all read through here, and a write
- * lands in the ledger first, so the next read already answers from it. A session that never chose
- * falls back on the global default's live view — because "the choice the session never made" is the
- * global default. A session whose loadout is not its directory's own (the delegated child) says
- * so through its settings, which for it are the default this reads.
+ * session 记录的选择——`.json` 快照里整体持有的激活集和审批表——是第一句话，更早的都被刻意丢弃，
+ * 所以不需要任何东西持有它：激活集和闸门的审批都从这里读，而写入先落账本，下一次读取就已经按它
+ * 回答。从未选择的 session 回落到全局默认的活视图——因为「session 从未做出的选择」就是全局默认。
+ * loadout 不是其目录自己的 session（被委托的子 session）通过它的设置说明这一点，那些设置对它而言
+ * 就是这里读到的默认。
  *
- * The fallback is read live through the settings manager, at the directory the session's own header
- * names — never held, so a settings edit reaches the next read with nothing to refresh. The recorded
- * set is narrowed to the tools this build still knows, so one an upgrade dropped is dropped by the
- * read too and cannot refuse the session its reopen — and the fallback is narrowed the same way, for
- * the same reason. A recorded approval is the session's own choice and is carried whole; without one
- * the fallback's answer stands, which for the global default is "follow the settings", kept live.
+ * 回落值经由设置管理器按 session 自己 header 指名的目录活读——从不持有，所以设置一改下一次读取
+ * 就生效，无须任何刷新。记录的工具集收窄到本构建仍认识的工具，升级中删掉的一个同样在读的时候被
+ * 删掉，不会拒绝 session 重开——回落集出于同样理由同样收窄。记录的审批是 session 自己的选择，整体
+ * 携带；没有记录时回落值作数，对全局默认而言就是「跟随设置」，保持活态。
  */
 export function toolStateOf(
 	sessions: SessionManager,
@@ -75,15 +69,12 @@ export function toolStateOf(
 }
 
 /**
- * Whether the session's recorded tool config equals the current global default, one half at a time.
+ * session 记录的工具配置是否等于当前全局默认，逐半判断。
  *
- * The judgement is field equality rather than "a choice exists": a reset is recorded as the *global*
- * values, so "has recorded anything" would report a just-reset session as having
- * chosen. A session with no recorded choice at all follows global on both halves — the effective
- * value there *is* the global one.
+ * 判断依据是字段相等而不是「存在记录」：重置被记录为*全局*值，按「有记录」判断会把刚重置的 session
+ * 报告成已经选过。完全没有记录的 session 两半都跟随全局——那里的生效值*就是*全局值。
  *
- * The tool halves are compared as sets, because a hand-edited settings file owes the registry no
- * order; the approval halves are compared field by field over every key either side names.
+ * 工具两半按集合比较，因为手改的设置文件不欠注册表一个顺序；审批两半按两侧所有 key 逐字段比较。
  */
 function toolConfigFollowsGlobal(
 	recorded: { activeTools?: string[]; approval?: Record<string, boolean> },
@@ -109,13 +100,11 @@ function toolConfigFollowsGlobal(
 }
 
 /**
- * The follow-global judgement for one session over its directory's settings.
+ * 一个 session 相对其目录设置的 follow-global 判断。
  *
- * The one shape both snapshot paths share — a live `Agent` and a cold read must answer the field
- * identically, or the panel's "沿用全局" label would disagree with itself between the two — so the
- * global default the judgement compares against is read here rather than passed in a second time.
- * (The judgement reads the session's recorded choice, which is no longer branch-relative: the
- * two-file split made it a session-level value.)
+ * 两条快照路径共享的唯一形状——活的 `Agent` 和冷读必须对字段给出完全一致的回答，否则面板的「沿用
+ * 全局」标签会在两者之间自相矛盾——所以判断所比较的全局默认在这里读，而不是第二次传入。（判断读的
+ * 是 session 记录的选择，它已不再分支相对：两文件拆分让它成了 session 级的值。）
  */
 export function followsGlobalOf(
 	sessions: SessionManager,

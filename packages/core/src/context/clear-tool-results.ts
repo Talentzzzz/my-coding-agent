@@ -2,47 +2,43 @@ import type { ToolResultMessage } from "../llm/index.ts";
 import type { SessionEntry } from "../session/session-manager.ts";
 
 /**
- * The tools whose output running them again would produce.
+ * 重跑会产出相同输出的那些工具。
  *
- * A result from one of these is a copy of something that outlives the conversation: the file is still
- * on disk to read, the command is still there to run. Dropping it costs a re-run and nothing else.
+ * 来自这些工具的 result 是某个活得比对话久的对象的副本：文件仍在盘上可读，命令仍在那里可跑。丢弃
+ * 它的代价只是重跑一次，别无其他。
  *
- * Everything else is kept whatever its age, and that is the point of listing these rather than the
- * ones to protect: a report, a task's state, or any other answer the conversation itself produced
- * cannot be recovered by asking again, so losing it would lose work instead of tokens.
- * A tool that can be re-run has to be named here; nothing is prunable by default.
+ * 其余的一切无论多旧都保留，这正是列出这些工具、而不是列出要保护的对象的意义：报告、任务状态、
+ * 或任何对话自身产出的答案都无法靠再问一次恢复，丢掉它丢掉的是工作而不是 token。
+ * 可重跑的工具必须在这里指名；默认没有任何东西可清除。
  */
 export const REFETCHABLE_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "glob", "bash", "edit", "write"]);
 
 /**
- * How long the transcript can sit untouched before the provider's cache is assumed to be gone.
+ * transcript 保持不动多久之后，认定 provider 的缓存已失效。
  *
- * A cached prompt is one the provider re-reads none of. Once that is gone, every result nobody has
- * looked at since is paid for in full to occupy the window, which is what makes dropping them the
- * cheapest thing compaction can do — it costs no request at all.
+ * 被缓存的 prompt 是 provider 一个字都不用重读的。缓存一旦失效，每条此后没人看过的 result 都要全额
+ * 付账才能占据窗口，这正是让丢弃它们成为压缩能做的最便宜的事的原因——它连请求都不用发。
  */
 const CACHE_EXPIRY_MS = 60 * 60 * 1000;
 
-/** How many of the newest re-fetchable results survive a clear, however old they are. */
+/** 一次清空后有多少条最新的可重取 result 存活，无论多旧。 */
 const KEPT_TOOL_RESULTS = 5;
 
 /**
- * What a cleared result says instead of what the tool printed.
+ * 被清空的 result 用来替代工具输出的内容。
  *
- * Short on purpose: a clear empties results in bulk, so a notice that explains itself at length would
- * spend a real share of what it just freed. It still has to say *why* the text is gone, because a
- * model that reads an unexplained empty result re-runs the tool to find out what happened.
+ * 刻意简短：一次清空批量清掉 result，一条长篇大论自我解释的通知会花掉它刚腾出来的一大块。但它仍
+ * 得说明*为什么*文字没了，因为读到一条没有解释的空 result 的模型会重跑工具去弄清发生了什么。
  */
 export function clearedToolResultText(toolName: string): string {
 	return `[cleared after an hour idle — run ${toolName} again if you need this]`;
 }
 
 /**
- * Whether the provider has probably dropped the cache for this transcript.
+ * provider 是否很可能已经丢弃了这个 transcript 的缓存。
  *
- * The clock is the newest assistant message — the last provider call — and not the newest entry: the
- * message a user just typed is seconds old and says nothing about whether the prompt before it is
- * still cached, so counting from that would mean this never fires.
+ * 计时用的是最新的 assistant 消息——最后一次 provider 调用——而不是最新的条目：用户刚输入的消息
+ * 只有几秒新，它对之前的 prompt 是否仍被缓存什么也说明不了，从它算起这个判定永远不会触发。
  */
 export function isCacheProbablyExpired(entries: readonly SessionEntry[], now: number): boolean {
 	let lastCall: number | undefined;
@@ -55,14 +51,12 @@ export function isCacheProbablyExpired(entries: readonly SessionEntry[], now: nu
 }
 
 /**
- * Which results a clear would empty: every re-fetchable one except the newest {@link KEPT_TOOL_RESULTS}.
+ * 一次清空会掏空哪些 result：除最新的 {@link KEPT_TOOL_RESULTS} 条之外的每条可重取 result。
  *
- * A result that already carries the notice is not a candidate again, which is what makes a second
- * clear a no-op rather than another record naming the same entries.
+ * 已经带着通知的 result 不再是候选，这使第二次清空成为 no-op，而不是又一条指名同样条目的记录。
  *
- * The answer is entry ids rather than a rewritten transcript because a clear is recorded, not applied
- * here: the caller writes the record and `buildContextEntries` clears what it names, so a resumed
- * process reads the same view without re-deciding anything.
+ * 答案是条目 id 而不是重写后的 transcript，因为清空是被记录的，不是在这里应用的：调用方写记录，
+ * `buildContextEntries` 清空它指名的内容，恢复的进程由此读到同一个视图，不必重新决定任何事。
  */
 export function clearableToolResultIds(entries: readonly SessionEntry[]): string[] {
 	const candidates: string[] = [];
@@ -74,22 +68,21 @@ export function clearableToolResultIds(entries: readonly SessionEntry[]): string
 	return candidates.slice(0, Math.max(0, candidates.length - KEPT_TOOL_RESULTS));
 }
 
-/** The tool a result answers, when that tool is one a run can reproduce the output of. */
+/** result 所回答的工具，当该工具是 run 能重新产出其输出的工具时。 */
 function refetchableToolName(entry: SessionEntry): string | undefined {
 	if (entry.type !== "message" || entry.message.role !== "toolResult") return undefined;
-	// The name travels on the result itself, so a result whose call has already been compacted away is
-	// still prunable; a file that lost the field simply reads as "not a tool we know", which keeps it.
+	// 名字随 result 本身携带，所以 call 已被压缩掉的 result 仍可清除；丢了该字段的文件简单地读作
+	// 「不是我们认识的工具」，从而被保留。
 	const name: unknown = entry.message.toolName;
 	return typeof name === "string" && REFETCHABLE_TOOLS.has(name) ? name : undefined;
 }
 
 /**
- * Whether one tool result already reads as cleared, so a clear has nothing left to do to it.
+ * 一条 tool result 是否已经读作被清空，从而清空对它无事可做。
  *
- * The check reads the content rather than any record of the clear, because the question is asked of
- * entries the view has already applied the clear to — and of a view that carries no clear record at
- * all. Whatever emptied the result, the notice is what the model would read, and one notice is
- * indistinguishable from another by design.
+ * 这个检查读的是内容而不是任何关于清空的记录，因为这个问题问的是视图已经应用过清空的条目——
+ * 也问的是根本不带清空记录的视图。无论是什么掏空了 result，模型读到的都是通知，而按设计一条通知
+ * 和另一条无法区分。
  */
 export function isClearedToolResult(message: ToolResultMessage): boolean {
 	const content = message.content;
@@ -100,13 +93,13 @@ export function isClearedToolResult(message: ToolResultMessage): boolean {
 	);
 }
 
-/** Whether an entry already reads as cleared, so a clear has nothing left to do to it. */
+/** 一条条目是否已经读作被清空，从而清空对它无事可做。 */
 function isCleared(entry: SessionEntry): boolean {
 	if (entry.type !== "message" || entry.message.role !== "toolResult") return false;
 	return isClearedToolResult(entry.message);
 }
 
-/** The same entry with its result text replaced. Images and other blocks go with it: they were fetchable too. */
+/** 同一条目但 result 正文被替换。图片和其他 block 一起被替换：它们同样是可重取的。 */
 export function clearToolResult(entry: SessionEntry): SessionEntry {
 	if (entry.type !== "message" || entry.message.role !== "toolResult") return entry;
 	return {

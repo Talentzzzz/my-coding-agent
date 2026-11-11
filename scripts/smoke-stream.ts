@@ -1,17 +1,14 @@
-// Stream lifecycle smoke test, in the shape the resident transport gave it: the hold decides how
-// long a session *runs*, and the subscription decides how long its state *lives*. A lane watching an
-// idle session takes no hold and ends nothing, and the read that opens it registers nothing either —
-// the table holds what is running, so a watched-but-idle session is a file and a lane, no more
-// (ADR-0019). A run ending does not end the lane: the host going away does, and the host goes away
-// when the last hold lets go — and the state the run put there leaves with the reap. The failure
-// section pins where a run that fails under a watcher — and one that fails with nobody watching — is
-// heard.
+// Stream lifecycle smoke test，常驻 transport 给它的形状：hold 决定一个 session *运行*多久，
+// 订阅决定它的 state *存活*多久。一条看着 idle session 的车道不取 hold、也不结束任何东西，
+// 打开它的读也不登记任何东西——表持有的是正在运行的东西，所以一个被看着但 idle 的 session
+// 是一份文件加一条车道，仅此而已（ADR-0019）。一次 run 结束不结束车道：host 消失才结束，而
+// host 在最后一个 hold 松手时消失——run 放在那里的 state 随 reap 一起离开。失败那一节钉住
+// 一个在 watcher 之下失败的 run——和一个无人看着失败的 run——分别在哪些地方被听到。
 //
 //   node scripts/smoke-stream.ts
 //
-// No provider key is needed: the model is the scripted transport. The test bench takes its own holds
-// through the real hub wherever a check needs the host to outlive a run — that is the bench's hold,
-// not the subscription's, which is exactly the distinction under test.
+// 无需 provider key：模型就是剧本化 transport。测试台在需要 host 活得比 run 久的地方经真正的
+// hub 取自己的 hold——那是测试台的 hold，不是订阅的，这正是被测的区分。
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,12 +45,12 @@ async function request(base: string, method: string, path: string, body?: unknow
 	return { status: response.status, payload: text.length === 0 ? undefined : (JSON.parse(text) as unknown) };
 }
 
-/** Accept a prompt, which is answered before the run has done anything. */
+/** 收下一次 prompt，run 还没做什么它就被应答了。 */
 async function prompt(base: string, sessionId: string, text: string): Promise<number> {
 	return (await request(base, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/messages`, { text })).status;
 }
 
-/** Wait for the loop's own end event on a lane. */
+/** 在一条车道上等循环自己的 end 事件。 */
 async function waitAgentEnd(wire: WireClient, sessionId: string, ms = 15_000): Promise<boolean> {
 	return until(
 		() =>
@@ -64,7 +61,7 @@ async function waitAgentEnd(wire: WireClient, sessionId: string, ms = 15_000): P
 	);
 }
 
-/** Wait for the status frame that says the run is over, whatever road it took to get there. */
+/** 等说 run 结束了的那个 status 帧，无论它走了哪条路到达那里。 */
 async function waitSettled(wire: WireClient, sessionId: string, ms = 15_000): Promise<boolean> {
 	return until(
 		() => wire.items(sessionId).some((message) => message.type === "status" && (message as { submitting?: boolean }).submitting === false),
@@ -72,10 +69,10 @@ async function waitSettled(wire: WireClient, sessionId: string, ms = 15_000): Pr
 	);
 }
 
-/** Long enough that anything that was going to end an idle lane would have; short enough to stay fast. */
+/** 长到任何本要结束 idle 车道的东西都该已经动手；短到保持快速。 */
 const QUIET_MS = 700;
 
-/** Slow enough that a run is observably in flight; fast enough to keep the whole smoke sub-minute. */
+/** 慢到 run 可观察地在途；快到整个 smoke 保持在一分钟内。 */
 const TOKENS_PER_SECOND = 400;
 
 const rows: ModelConfig[] = [
@@ -127,15 +124,14 @@ async function openRig(): Promise<Rig> {
 }
 
 /**
- * Make every assistant message persist fail, for as long as the patch is installed.
+ * 让每次 assistant 消息的持久化都失败，补丁装着多久就失败多久。
  *
- * This is the seam ticket 08 named for the mechanical-failure shape: the transcript is the thing that
- * broke, so nothing about the failure can be written where failures usually go. The user message
- * still lands — `prompt` writes it before the loop starts — so the patch lets it through.
+ * 这是 ticket 08 为机械失败形状指名的接缝：坏掉的是 transcript 本身，所以关于失败的任何东西
+ * 都写不进失败通常去的地方。用户消息仍然落地——`prompt` 在循环开始之前写它——所以补丁放它
+ * 通过。
  *
- * The patch lands on the session service the hub's one orchestrator reads through, so it must not
- * outlive the section that installed it: the returned function puts the real method back, and every
- * caller runs it once its failing run is over.
+ * 补丁落在 hub 的唯一 orchestrator 经由读取的那个 session 服务上，所以它不得活得比安装它的
+ * 那一节久：返回的函数把真方法放回去，每个调用方在自己那趟失败的 run 结束后运行它。
  */
 function sabotagePersistence(hub: SessionHub): () => void {
 	const manager = hub.agent.sessionManager as unknown as {
@@ -155,18 +151,16 @@ const rig = await openRig();
 const wire = await connect(`${rig.url.replace("http", "ws")}/mux`);
 
 /**
- * Whether the orchestrator's table holds this session right now.
+ * orchestrator 的表此刻是否持有这个 session。
  *
- * Not the synchronous snapshot: that reads the file, so it answers for every born session whether or
- * not anything is running, and a read registers no state at all (ADR-0019). The table is the only
- * instrument, so it is read directly — through the private map, the way the other smokes reach a half
- * the facade does not hand out.
+ * 不是同步快照：那个读文件，所以无论是否有东西在运行它都对每个诞生过的 session 作答，而一次
+ * 读根本不登记 state（ADR-0019）。表是唯一的仪表，所以直接读它——穿过私有 map，与其他 smoke
+ * 到达门面不外发的半区的方式相同。
  */
 const inTable = (id: string): boolean => (rig.hub.agent as unknown as { sessions: Map<string, unknown> }).sessions.has(id);
 
-// The hold counter is the load-bearing instrument of this smoke (docs/notes.md §二 bug 4: to verify
-// "x takes no hold", count `hub.hold` calls — never read `hub.live`, which a released hold vanishes
-// from within a tick).
+// hold 计数器是本 smoke 承重的仪表（docs/notes.md §二 bug 4：要验证"x 不取 hold"，数
+// `hub.hold` 调用——绝不读 `hub.live`，一个被释放的 hold 在一拍之内就从那里消失）。
 let holds = 0;
 {
 	const realHold = rig.hub.hold.bind(rig.hub);
@@ -178,7 +172,7 @@ let holds = 0;
 
 try {
 	// ---------------------------------------------------------------------------------------------
-	// 1. A lane on an idle session: no hold, no host, no end.
+	// 1. 一条 idle session 上的车道：没有 hold、没有 host、没有 end。
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a lane on an idle session holds nothing and ends nothing\n");
 
@@ -193,26 +187,26 @@ try {
 	check("the lane is still there — nothing ended it", !wire.endOf(idleId).ended, JSON.stringify(wire.endOf(idleId)));
 	check("and nothing is hosting the session", !rig.hub.live.includes(idleId), rig.hub.live.join(","));
 
-	// A read is not a hold either — the window's cold path. A session that does not exist is a 404,
-	// and its read holds nothing because it never gets that far.
+	// 读也不是 hold——窗口的冷路径。不存在的 session 是 404，它的读不持有任何东西，因为它根本
+	// 走不到那一步。
 	const cold = await request(rig.url, "GET", `/api/sessions/${encodeURIComponent(idleId)}`);
 	check("a cold read answers", cold.status === 200, String(cold.status));
 	const missing = await request(rig.url, "GET", "/api/sessions/does-not-exist");
 	check("an unknown session is a 404", missing.status === 404, String(missing.status));
 	check("and neither read held anything", holds === 0, `holds=${holds}`);
 
-	// A read passes through the hub's own eviction funnel (`hub.snapshotOf` asks once, so a state
-	// nobody watches does not linger). What must survive it is the session creation left here: it has
-	// no file yet, so its state *is* the session, and dropping it would be deleting the id (ADR-0019).
+	// 一次读要经过 hub 自己的驱逐漏斗（`hub.snapshotOf` 问一次，所以无人看着的 state 不逗留）。
+	// 必须熬过它的是 session 创建在这里留下的东西：它还没有文件，所以它的 state *就是* session，
+	// 丢掉它等于删掉这个 id（ADR-0019）。
 	check("the state creation left behind survived the read", inTable(idleId));
 
 	// ---------------------------------------------------------------------------------------------
-	// 2. A run ending does not end the lane; the hold's release does.
+	// 2. run 结束不结束车道；hold 的释放才结束。
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a run ends, the lane stays, the hold decides the rest\n");
 
-	// The bench takes a hold for as long as it wants the host alive — the same hand a window's send
-	// reference plays, taken through the hub so the reap under test is the real one.
+	// 测试台在想要 host 活着的那段时间里取一个 hold——与窗口的 send 引用玩的同一只手，经 hub
+	// 取，这样被测的 reap 才是真的。
 	const bench = await rig.hub.hold(idleId);
 	rig.transport.setResponses([fakeAssistantMessage("a".repeat(500))]);
 	check("the prompt was accepted", (await prompt(rig.url, idleId, "say something long")) === 202);
@@ -223,22 +217,22 @@ try {
 	check("no end arrived after the run — nothing about the run ends a lane", !wire.endOf(idleId).ended, JSON.stringify(wire.endOf(idleId)));
 	check("the host is still there, held by the bench", rig.hub.live.includes(idleId), rig.hub.live.join(","));
 
-	// The lane is still usable: the same subscription carries the next run.
+	// 车道仍然可用：同一个订阅承载下一次 run。
 	rig.transport.setResponses([fakeAssistantMessage("b".repeat(500))]);
 	check("the second prompt was accepted", (await prompt(rig.url, idleId, "and again")) === 202);
 	check("and its frames reached the same lane", await waitAgentEnd(wire, idleId));
 
-	// Now the hold goes back, and the order of events is the whole point: the host goes away, and the
-	// lane ends because the session it watched is gone — not because anything ended it directly.
+	// 现在 hold 归还，事件的次序正是要点：host 消失，车道随之结束，因为它看着的 session 走了
+	// ——不是因为有什么直接结束了它。
 	rig.hub.release(bench);
 	check("the session was reaped once the last hold let go", await until(() => !rig.hub.live.includes(idleId), 10_000), rig.hub.live.join(","));
 	check("and the lane ended with the host it watched", await until(() => wire.endOf(idleId).ended, 5_000), JSON.stringify(wire.endOf(idleId)));
-	// The run is what put the state in the table; the reap is what takes it out, once nothing runs and
-	// nobody watches. What is left afterwards is the file, which is the whole of "the session".
+	// run 是把 state 放进表的动作；reap 是把它拿出来的动作，一旦没有东西运行、没人看着。之后
+	// 留下的是文件，那是"这个 session"的全部。
 	check("and the state went with the last reader", await until(() => !inTable(idleId), 5_000));
 
 	// ---------------------------------------------------------------------------------------------
-	// 3. Attaching to a run already in flight: the baseline says so, and the lane lives through it.
+	// 3. 挂到已经在途的 run 上：baseline 说着这件事，车道活过它。
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a lane that opens on a run already in flight\n");
 
@@ -249,8 +243,8 @@ try {
 
 	const midflight = await wire.open(idleId);
 	check("the mid-run baseline reports the run", midflight.submitting === true, String(midflight.submitting));
-	// `ended` on the wire client is "ever ended" and idleId's lane ended once in the section above,
-	// so the assertions here count ends across this open instead of reading the flag.
+	// wire 客户端上的 `ended` 是"曾经终过"，而 idleId 的车道在上面那节已经终过一次，所以这里的
+	// 断言数的是这次 open 之后的 end 次数，而不是读那个布尔。
 	const endsAtOpen = wire.endOf(idleId).ends;
 	await sleep(QUIET_MS);
 	check("and nothing ends the lane while the run goes on", wire.endOf(idleId).ends === endsAtOpen, JSON.stringify(wire.endOf(idleId)));
@@ -260,7 +254,7 @@ try {
 	check("released, the host went, the lane went with it", await until(() => wire.endOf(idleId).ends === endsAtOpen + 1, 5_000), JSON.stringify(wire.endOf(idleId)));
 
 	// ---------------------------------------------------------------------------------------------
-	// 4. A run that fails under a watcher: the error frame, the settled frame, the log, the reap.
+	// 4. 一个在 watcher 之下失败的 run：error 帧、settled 帧、日志、reap。
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a run that fails under a watcher is heard in three places\n");
 
@@ -285,15 +279,15 @@ try {
 
 	check("and the server logged what no frame could carry", logged.length > 0, JSON.stringify(logged));
 	check("the transcript is exactly what the failure let survive", ((await request(rig.url, "GET", `/api/sessions/${encodeURIComponent(watchedId)}`)).payload as { session: { messages: unknown[] } }).session.messages.length === 1);
-	// The patch comes off before the next section runs: the service it landed on is the hub's own.
+	// 补丁在下一节运行之前摘掉：它落在的是 hub 自己的服务上。
 	restoreWatched();
 
-	// The bench's hold still keeps the host; letting it go reaps the session. No leak.
+	// 测试台的 hold 仍保着 host；松手就 reap 这个 session。无泄漏。
 	rig.hub.release(watchedBench);
 	check("the session was reaped once the hold let go", await until(() => !rig.hub.live.includes(watchedId), 10_000), rig.hub.live.join(","));
 
 	// ---------------------------------------------------------------------------------------------
-	// 5. The same failure with nobody watching: the log is the only place it is still audible.
+	// 5. 同样的失败、无人看着：日志是它唯一仍可听见的地方。
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a run that fails with nobody watching is heard only in the log\n");
 
@@ -308,21 +302,18 @@ try {
 	};
 	rig.transport.setResponses([fakeAssistantMessage("also never lands")]);
 	check("the prompt was accepted", (await prompt(rig.url, unwatchedId, "this run fails alone")) === 202);
-	// Acceptance edge 3's server-side half: no lane is open on this session anywhere, so what keeps it
-	// alive is the run and nothing else. The bench's hold goes back first, on purpose — held, it would
-	// be the thing answering this question instead of the run, which is exactly the assertion the
-	// hand-off for this section exists to make. The reap that follows has nothing to settle through
-	// but the run itself, so the session is still here.
+	// 验收边界 3 的服务端那一半：任何地方都没有 lane 开在这个 session 上，所以让它活着的是 run
+	// 而不是别的。测试台的 hold 有意先归还——被持着的话，回答这个问题的就是 hold 而不是 run，
+	// 这正是本节的交接要作出的断言。随后的 reap 除了 run 自己没有别的可等，所以 session 仍在。
 	rig.hub.release(unwatchedBench);
 	check(
 		"a run nobody watches still holds its own session open",
 		rig.hub.live.includes(unwatchedId),
 		rig.hub.live.join(","),
 	);
-	// The run's end is observable without any lane: the read path answers `submitting: false` once
-	// the loop has finished. Only then is the log capture closed — restoring it earlier would race
-	// the failure out of the window it is meant to watch. (A hand-rolled poll, because `until` takes
-	// a synchronous predicate and an async one would be read as always-true.)
+	// run 的结束不需要任何 lane 就可观察：循环结束后读路径答 `submitting: false`。只有那时才
+	// 关闭日志捕获——更早恢复会让失败跑出它要监视的窗口。（手写的轮询，因为 `until` 收的是
+	// 同步谓词，async 谓词会被读成永远为真。）
 	const settleDeadline = Date.now() + 10_000;
 	for (;;) {
 		const read = await request(rig.url, "GET", `/api/sessions/${encodeURIComponent(unwatchedId)}`);
@@ -337,11 +328,11 @@ try {
 	check("and nothing leaked: the session was reaped", await until(() => !rig.hub.live.includes(unwatchedId), 10_000), rig.hub.live.join(","));
 
 	// ---------------------------------------------------------------------------------------------
-	// 6. The streamed answer crosses the wire as deltas, and a lane opened mid-run is handed the rest.
+	// 6. 流式回答以 delta 过 wire，run 中打开的车道被交予剩余部分。
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a streamed answer crosses the wire as deltas\n");
 
-	/** The text of an assistant message, as the wire sends it on a start/end/baseline. */
+	/** assistant 消息的文本，按 wire 在 start/end/baseline 上发送它的样子。 */
 	const textOf = (message: unknown): string => {
 		const content = (message as { content?: unknown } | undefined)?.content;
 		if (!Array.isArray(content)) return "";
@@ -370,8 +361,8 @@ try {
 	check("the prompt was accepted", (await prompt(rig.url, deltaId, "say something very long")) === 202);
 	check("the run started producing", await until(() => updatesOf(wire, deltaId).length > 0, 5_000));
 
-	// A second lane, opened while the answer is still arriving. Its baseline is the only frame that
-	// can carry what this window missed — the deltas after it are the rest of the answer.
+	// 第二条车道，在回答仍在到达时打开。它的 baseline 是唯一能携带这个窗口错过内容的帧——它
+	// 之后的 delta 是回答的其余部分。
 	const late = await connect(`${rig.url.replace("http", "ws")}/mux`);
 	const lateBaseline = await late.open(deltaId);
 	const partialText = textOf(lateBaseline.partial);
@@ -390,8 +381,8 @@ try {
 	const sizes = wire.frames
 		.filter((frame) => frame.streamId === deltaId && "item" in frame && frame.item.type === "event" && frame.item.event.type === "message_update")
 		.map((frame) => JSON.stringify(frame).length);
-	// The envelope plus one provider chunk, whatever the answer has grown to. The whole message does
-	// still cross the wire once — on `message_end`, where it is the thing being recorded.
+	// 信封加上一个 provider chunk，无论答案长到多大。整条消息仍然完整过 wire 一次——在
+	// `message_end` 上，在那里它正是被记录的东西。
 	check("no update frame is a copy of the answer", Math.max(...sizes) < 300, `largest ${Math.max(...sizes)} bytes of ${deltaAnswer.length}`);
 	const endSizes = wire.frames
 		.filter((frame) => frame.streamId === deltaId && "item" in frame && frame.item.type === "event" && frame.item.event.type === "message_end")
@@ -406,7 +397,7 @@ try {
 	check("the delta session was reaped", await until(() => !rig.hub.live.includes(deltaId), 10_000), rig.hub.live.join(","));
 
 	// ---------------------------------------------------------------------------------------------
-	// 7. Shutdown waits for nothing.
+	// 7. shutdown 什么都不等。
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("shutdown waits for nothing\n");
 
@@ -424,7 +415,7 @@ try {
 	try {
 		await rig.close();
 	} catch {
-		// The rig may already be closed by the shutdown check above.
+		// 装置可能已被上面的 shutdown 检查关掉。
 	}
 } finally {
 	process.stdout.write(failures === 0 ? "\nstream ok\n" : `\n${failures} failure(s)\n`);

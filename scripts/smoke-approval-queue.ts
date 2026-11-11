@@ -1,17 +1,16 @@
-// The queue across a gate'd end: what happens to a message a person typed while the run was still
-// streaming, when that run then parks at an approval.
+// 一次停在门口的结束横跨的队列：run 还在流式输出时用户敲下的一条消息，在这个 run 停到审批上
+// 之后会遇到什么。
 //
-//   1. a suspended run keeps its queue — the message stays counted, `settle` still returns (a parked
-//      session is a question, not work), and the recovery run the grant starts drains it at its take
-//      points, so the message reaches the transcript after the tool result rather than before it;
-//   2. the abandonment sweep drops it — no recovery run is coming, so nothing would ever take it, and
-//      a depth nobody lowers is a session `settle` waits on forever. That is the path the hub's reap
-//      and `abort` take.
+//   1. 被 suspend 的 run 保留自己的队列——消息仍然计数在册，`settle` 照常返回（停在门口的
+//      session 是一个问题，不是活儿），grant 启动的恢复 run 会在它的取用点把队列排干，消息
+//      因此在工具结果之后而非之前到达 transcript；
+//   2. 遗弃清扫把它丢掉——不会有恢复 run，没有任何东西会取用它，一个没人降低的深度会让
+//      session 的 `settle` 永远等下去。这正是 hub 的 reap 与 `abort` 走的路径。
 //
 //   node scripts/smoke-approval-queue.ts
 //
-// No provider key is needed: the scripted transport makes the tool call, and the held-gate wrapper
-// makes "while the run is streaming" observable — the only window in which a message can be queued.
+// 无需 provider key：剧本化 transport 发出工具调用，持门包装器把"run 还在流式中"变成可观察的
+// ——那是消息唯一能入队的窗口。
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -63,7 +62,7 @@ function textOf(message: Message): string {
 	return message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 }
 
-/** The transcript as a flat list, so an ordering claim can be an index comparison. */
+/** transcript 的平面列表形式，让排序断言可以是一次下标比较。 */
 function messagesOf(session: Agent): Message[] {
 	return session.snapshot(sidOf(session)).messages;
 }
@@ -73,11 +72,10 @@ function indexOfText(session: Agent, role: Message["role"], text: string): numbe
 }
 
 /**
- * A transport whose Nth call stops inside the request until released, one hold per call.
+ * 一个第 N 次调用会停在请求内部、直到被放行的 transport，每次调用一个 hold。
  *
- * The scripted transport answers as soon as the engine asks, which leaves no window in which a run
- * can be mid-flight — and a message accepted while the run is streaming is the only shape this file
- * is about. An abort ends the hold, as a real transport honors its signal.
+ * 剧本化 transport 在引擎一问就答，run 不留任何在途窗口——而"run 流式中收下的消息"正是本文件
+ * 唯一关心的形状。abort 会结束 hold，如同真正的 transport 尊重自己的 signal。
  */
 function gatedApi(holds: number[]): { api: ChatTransport; release(index: number): void; held(index: number): boolean } {
 	const inner = fake.api.stream.bind(fake.api);
@@ -134,20 +132,20 @@ async function openSession(overrides: { approval?: Record<string, boolean>; api?
 	return session;
 }
 
-/** Poll until the held call is the one in hand, so "mid-run" is a fact rather than a guess. */
+/** 轮询到被持住的调用就是手里那次为止，"run 中"因此是事实而不是猜测。 */
 async function untilHeld(gate: { held(index: number): boolean }, index: number, ms = 5_000): Promise<void> {
 	const end = Date.now() + ms;
 	while (!gate.held(index) && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 10));
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 1. A parked run keeps what was queued, and the recovery run drains it.
+// 1. 停住的 run 保留入队的东西，恢复 run 把它排干。
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\na message queued before the gate survives the park and is taken by the recovery run\n");
 
 {
-	// Hold request 1: the prompt's own. Everything below happens while that request is in flight.
+	// 持住第 1 个请求：prompt 自己的那个。下面的一切都发生在该请求在途期间。
 	const gate = gatedApi([1]);
 	const session = await openSession({ approval: { read: true }, api: gate.api });
 	fake.setResponses([
@@ -156,15 +154,15 @@ process.stdout.write("\na message queued before the gate survives the park and i
 		fakeAssistantMessage("answered the queued message"),
 	]);
 
-	// Not awaited: the prompt's promise resolves when the run ends, and the run has to be in flight
-	// for the second prompt to queue rather than open a run of its own.
+	// 不 await：prompt 的 promise 在 run 结束时落定，而 run 必须在途，第二条 prompt 才会入队
+	// 而不是自己开一个 run。
 	void session.prompt(sidOf(session), "read the notes", { selection });
 	await untilHeld(gate, 1);
 
 	await session.prompt(sidOf(session), "and also this", { selection });
 	check("the second message was queued, not turned into a run", session.snapshot(sidOf(session)).queued.length === 1, String(session.snapshot(sidOf(session)).queued.length));
 
-	// Let the held request answer: the model asks for the gated tool, and the run parks there.
+	// 放行被持住的请求：模型要那个被门住的工具，run 停在那里。
 	gate.release(1);
 	await session.settle(sidOf(session));
 
@@ -202,11 +200,10 @@ process.stdout.write("\na message queued before the gate survives the park and i
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 2. The abandonment sweep drops it, and does not leave the session looking busy.
+// 2. 遗弃清扫把它丢掉，且不让 session 看起来还在忙。
 //
-// The path `abort` and the hub's reap take: the call is closed with the sentence that says nothing
-// answered, and no run follows — so nothing would ever drain the queue, and a depth nobody lowers is
-// what `settle` would wait on forever.
+// `abort` 与 hub 的 reap 走的路径：调用带着"无人应答"的那句话被关掉，其后没有 run——于是没有
+// 任何东西会排干队列，一个没人降低的深度正是 `settle` 会永远等下去的东西。
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\nan abandoned approval drops what was queued, and settle still returns\n");
@@ -223,8 +220,8 @@ process.stdout.write("\nan abandoned approval drops what was queued, and settle 
 	await session.settle(sidOf(session));
 	check("the run parked with a message queued behind it", session.snapshot(sidOf(session)).queued.length === 1, String(session.snapshot(sidOf(session)).queued.length));
 
-	// The sweep, as an exit or a reap performs it. `abort` is the deliberate stop, and its own route
-	// into the same function is what this pins.
+	// 清扫，按一次退出或 reap 执行它的方式。`abort` 是刻意的停止，它进入同一函数的路径正是
+	// 这里钉住的。
 	await session.abort(sidOf(session));
 	await session.settle(sidOf(session));
 
@@ -235,7 +232,7 @@ process.stdout.write("\nan abandoned approval drops what was queued, and settle 
 		indexOfText(session, "user", "and also this") === -1,
 		JSON.stringify(messagesOf(session).map((message) => `${message.role}:${textOf(message).slice(0, 20)}`)),
 	);
-	// The session is still usable: dropping the queue must not wedge it.
+	// session 仍然可用：丢掉队列不得把它楔死。
 	fake.setResponses([fakeAssistantMessage("still works")]);
 	await session.prompt(sidOf(session), "carry on", { selection });
 	await session.settle(sidOf(session));

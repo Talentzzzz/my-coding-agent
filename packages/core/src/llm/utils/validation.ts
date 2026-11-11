@@ -1,5 +1,5 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
-// from flagging this file, while every import into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
 import { Compile } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
@@ -296,11 +296,11 @@ function formatValidationPath(error: TLocalizedValidationError): string {
 }
 
 /**
- * Finds a tool by name and validates the tool call arguments against its TypeBox schema
- * @param tools Array of tool definitions
- * @param toolCall The tool call from the LLM
- * @returns The validated arguments
- * @throws Error if tool is not found or validation fails
+ * 按名字查找工具，并对照它的 TypeBox schema 校验 tool call 参数
+ * @param tools 工具定义数组
+ * @param toolCall LLM 发来的 tool call
+ * @returns 校验后的参数
+ * @throws 工具不存在或校验失败时抛 Error
  */
 export function validateToolCall(tools: Tool[], toolCall: ToolCall): any {
 	const tool = tools.find((t) => t.name === toolCall.name);
@@ -311,11 +311,11 @@ export function validateToolCall(tools: Tool[], toolCall: ToolCall): any {
 }
 
 /**
- * Validates tool call arguments against the tool's TypeBox schema
- * @param tool The tool definition with TypeBox schema
- * @param toolCall The tool call from the LLM
- * @returns The validated (and potentially coerced) arguments
- * @throws Error with formatted message if validation fails
+ * 对照工具的 TypeBox schema 校验 tool call 参数
+ * @param tool 带有 TypeBox schema 的工具定义
+ * @param toolCall LLM 发来的 tool call
+ * @returns 校验（并可能被强制转换）后的参数
+ * @throws 校验失败时抛出带格式化消息的 Error
  */
 export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 	const args = structuredClone(toolCall.arguments);

@@ -2,8 +2,8 @@ export { Agent, type AgentConfig, type AgentSessionEvent, type SessionEventListe
 export { danglingToolCallsOf, recoverPendingToolCalls } from "./agent.ts";
 export type { AgentEvent } from "./types.ts";
 export type { Message } from "./llm/index.ts";
-// The transport surface a caller outside core still names directly: the server holds a
-// `ChatTransport`, and the smokes drive streams and models the way the engine does.
+// core 之外的调用方仍会直接点名的传输层出口：server 持有 `ChatTransport`，
+// smoke 则像引擎那样驱动流和模型。
 export {
 	anthropicMessages,
 	createAssistantMessageEventStream,

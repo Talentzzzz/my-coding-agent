@@ -2,12 +2,11 @@ import { createHash } from "node:crypto";
 import type { Duplex } from "node:stream";
 
 /**
- * The constant RFC 6455 §1.3 appends to the client's key before hashing. It exists so that a server
- * which has implemented the handshake cannot be confused with one that has merely heard of it.
+ * RFC 6455 §1.3 规定追加到客户端 key 之后再做哈希的常量。它存在的原因是：让一个真正实现了握手的服务器，不会与一个只是听说过该协议的服务器混淆。
  */
 const HANDSHAKE_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-/** Opcodes this server reads or writes. The reserved ones are named only to be refused. */
+/** 本服务器会读写的 opcode。保留的几个被命名只是为了拒绝它们。 */
 const OPCODE = {
 	continuation: 0x0,
 	text: 0x1,
@@ -17,83 +16,66 @@ const OPCODE = {
 	pong: 0xa,
 } as const;
 
-/** Close codes this server sends. 1013 is the one that means "you stopped reading". */
+/** 本服务器会发送的 Close code。1013 就是那个表示"你停止读取了"的码。 */
 const CLOSE_NORMAL = 1000;
 const CLOSE_PROTOCOL_ERROR = 1002;
 const CLOSE_TOO_LARGE = 1009;
 const CLOSE_TRY_AGAIN_LATER = 1013;
 
 /**
- * The largest frame this server will buffer before giving up on a peer.
+ * 本服务器在放弃一个 peer 之前愿意缓冲的最大 frame 大小。
  *
- * A frame header is ten bytes and its length field is 64-bit, so "read whatever the peer claims" is
- * a promise to allocate up to four exabytes. Client frames are masked, which makes a claim cheap to
- * make and expensive to honour, so the ceiling is enforced before the payload is read rather than
- * after. It is far above any frame this server sends — the largest is a session baseline — so a peer
- * that hits it is either broken or hostile, and both end the same way.
+ * frame 头是十个字节，长度字段是 64 位，所以"peer 声称多大就读多大"等于承诺分配至多四 exabyte。客户端 frame 是带掩码的，声明一个巨大的长度毫无成本、兑现却代价高昂，所以上限在读取 payload 之前强制执行，而不是之后。它远高于本服务器会发送的任何 frame——最大的是一个 session baseline——因此撞上这个上限的 peer 要么坏了要么有恶意，两者的结局相同。
  */
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 
 /**
- * What a connection tells its owner.
+ * 连接向其所有者报告的事情。
  *
- * Three callbacks, because the connection layer has exactly three things to say: a client frame
- * arrived, the connection is over, and — separately — the connection is *unusable*. The last is what
- * a stalled peer looks like from here, and collapsing it into "over" would report a liveness failure
- * as an ordinary disconnect.
+ * 三个回调，因为连接层恰好有三件事要说：一个客户端 frame 到达、连接结束、以及——单独一回事——连接*不可用*。最后一件就是停滞的 peer 从这里看起来的样子；把它并入"结束"会把存活性问题当成一次普通断连报告出去。
  */
 export interface WebSocketHandlers {
-	/** One complete text message, already unmasked and un-fragmented. */
+	/** 一条完整的文本消息，已去掩码、已拼装。 */
 	onMessage(text: string): void;
-	/** The connection ended for any reason. Fires exactly once. */
+	/** 连接因任何原因结束。恰好触发一次。 */
 	onClose(): void;
-	/** The peer violated the protocol; the connection is being closed because of it. */
+	/** peer 违反了协议；连接因此被关闭。 */
 	onProtocolError(reason: string): void;
 	/**
-	 * A Pong arrived, so the peer is still there.
+	 * 收到一个 Pong，说明 peer 还在。
 	 *
-	 * Its own callback rather than something the owner polls for, because the alternative — asking the
-	 * connection whether it has been answered — cannot distinguish "answered just now" from "answered
-	 * long ago", and a liveness check that cannot tell those apart eventually kills a healthy peer.
+	 * 它有自己的回调，而不是让所有者轮询，因为替代方案——问连接是否已被应答——无法区分"刚刚应答"和"很久以前应答"，而一个分不清这两者的存活检查最终会杀掉健康的 peer。
 	 */
 	onPong(): void;
 }
 
 /**
- * One accepted WebSocket connection, as this server sees it.
+ * 一个被接受的 WebSocket 连接，按本服务器所见的形态。
  *
- * Hand-written rather than delegated, and the reason is not the codec. It is that the *write* side
- * has to be inspectable: the bounded queue needs `write()` to return `false` at the moment the
- * socket stops accepting, and it needs a `close()` it can call with a code. A wrapper that swallowed
- * either behind a "send returns void" API could not be given a budget at all.
+ * 手写而不是委托出去，原因不在编解码。而是在于*写入*侧必须可检视：有界队列需要 `write()` 在 socket 停止接收的那一刻返回 `false`，还需要一个可以带 code 调用的 `close()`。一个把这两者都吞在"send 返回 void"背后的包装层，根本无法被给予预算。
  *
- * The read side is deliberately thin. Frames are reassembled here and handed up as whole text
- * messages; nothing above this layer sees an opcode, a mask, or a fragment.
+ * 读取侧刻意很薄。frame 在这里拼装，以整条文本消息上交；这层之上的任何东西都看不到 opcode、掩码或分片。
  */
 export class WebSocketConnection {
 	/**
-	 * Bytes read but not yet forming a whole frame.
+	 * 已读但尚未构成完整 frame 的字节。
 	 *
-	 * Typed as the wide `Buffer` so a chunk handed over by Node's stream types and one allocated here
-	 * are the same type — the narrow default that `Buffer.alloc` infers is not assignable from a
-	 * socket's `data` event, and the two meet on every single read.
+	 * 类型声明为宽的 `Buffer`，让 Node 流类型交来的 chunk 和这里分配的 buffer 是同一类型——`Buffer.alloc` 推导出的窄默认类型无法从 socket 的 `data` 事件赋值，而两者在每次读取时都会相遇。
 	 */
 	private buffer: Buffer = Buffer.alloc(0);
-	/** The opcode a fragmented message started with, or null between messages. */
+	/** 分片消息开始时的 opcode，消息之间为 null。 */
 	private fragmentOpcode: number | null = null;
-	/** The pieces of the message being assembled. */
+	/** 正在拼装的消息的各个片段。 */
 	private fragments: Buffer[] = [];
-	/** Whether this end has sent a Close frame. RFC 6455 §5.5.1: after it, nothing else may be sent. */
+	/** 本端是否已发送 Close frame。RFC 6455 §5.5.1：之后不能再发送任何东西。 */
 	private closeSent = false;
 	private closed = false;
-	/** Whether the underlying socket is gone, whatever the protocol thinks. */
+	/** 底层 socket 是否已经消失，无论协议层怎么认为。 */
 	private gone = false;
 	/**
-	 * The owner, until {@link start} names one.
+	 * 所有者，直到 {@link start} 指定为止。
 	 *
-	 * Defaults rather than a constructor argument so the socket cannot deliver a frame between the
-	 * handshake and the caller's own bookkeeping: `accept` returns a connection, and `start` is where
-	 * the owner says what to do with it.
+	 * 用默认值而不是构造参数，这样 socket 无法在握手与调用者自己的簿记之间投递 frame：`accept` 返回一个连接，`start` 才是所有者决定如何处理它的地方。
 	 */
 	private handlers: WebSocketHandlers = {
 		onMessage: () => {},
@@ -109,12 +91,9 @@ export class WebSocketConnection {
 	}
 
 	/**
-	 * Complete the handshake on a socket that has just been upgraded, or refuse it.
+	 * 在刚被升级的 socket 上完成握手，或拒绝它。
 	 *
-	 * Returns the connection when the request was a valid handshake, or `undefined` after writing a
-	 * refusal — the caller destroys the socket in that case. The refusal is a complete HTTP response
-	 * rather than a bare close, because the peer has not spoken WebSocket yet and will read whatever
-	 * HTTP says.
+	 * 请求是合法握手时返回连接；否则在写完拒绝响应后返回 `undefined`——那种情况下调用者销毁 socket。拒绝是一个完整的 HTTP 响应而不是裸关闭，因为 peer 还没说过 WebSocket，它读到的是 HTTP 说什么。
 	 */
 	static accept(request: { headers: Record<string, unknown> }, socket: Duplex): WebSocketConnection | undefined {
 		const key = request.headers["sec-websocket-key"];
@@ -125,7 +104,7 @@ export class WebSocketConnection {
 			refuse(socket, 400, "Bad Request", "This endpoint speaks WebSocket.");
 			return undefined;
 		}
-		// RFC 6455 §4.2.1: the version is a single token, and 13 is the only one that exists.
+		// RFC 6455 §4.2.1：version 是单个 token，而 13 是唯一存在的一个。
 		if (version !== "13") {
 			refuse(socket, 400, "Bad Request", "Only WebSocket version 13 is supported.");
 			return undefined;
@@ -146,12 +125,9 @@ export class WebSocketConnection {
 	}
 
 	/**
-	 * Start reading, calling back through `handlers`.
+	 * 开始读取，通过 `handlers` 回调。
 	 *
-	 * Separate from construction so the caller can hold the connection before anything can arrive on
-	 * it — a `data` listener attached in the constructor could fire before the owner had a reference
-	 * to store the first frame against. Bytes that arrived between the handshake and this call are
-	 * still in Node's buffer and are delivered as soon as the listener is attached.
+	 * 与构造分离，让调用者能在任何东西到达之前先持有连接——构造函数里挂的 `data` 监听器可能在所有者还没拿到引用去存放第一个 frame 之前就触发。握手与本调用之间到达的字节仍在 Node 的缓冲里，监听器一挂上就会送达。
 	 */
 	start(handlers: WebSocketHandlers): void {
 		this.handlers = handlers;
@@ -165,13 +141,9 @@ export class WebSocketConnection {
 	}
 
 	/**
-	 * Feed in bytes that arrived with the upgrade request itself.
+	 * 喂入随升级请求一起到达的字节。
 	 *
-	 * The last frame a client sends can be part of the same TCP segment as the handshake, and Node hands
-	 * those bytes over as `head` rather than as a `data` event. Dropping them would lose a frame that
-	 * was legitimately sent — and a client whose very first act is `open` is exactly the case, so this
-	 * is not a corner. Idempotent to call with an empty buffer, which is what makes it safe to call
-	 * unconditionally.
+	 * 客户端发送的最后一个 frame 可能与握手在同一个 TCP segment 里，Node 把那些字节作为 `head` 交出而不是作为 `data` 事件。丢掉它们会丢掉一个合法发送的 frame——而客户端的第一个动作就是 `open` 恰恰是常态，所以这不是角落情况。传空 buffer 是幂等的，这正是可以无条件调用的原因。
 	 */
 	replay(head: Buffer): void {
 		if (head.length === 0) return;
@@ -179,16 +151,11 @@ export class WebSocketConnection {
 	}
 
 	/**
-	 * Write one text frame.
+	 * 写一个文本 frame。
 	 *
-	 * Returns what the socket's own `write()` returned, and that return value is the entire basis of
-	 * the backpressure policy above: `false` means the kernel or the socket's buffer is full, and from
-	 * here on this connection must not be written to directly. Nothing here retries, buffers, or
-	 * throws — a caller that needs those has to own them, because only the caller knows what
-	 * dropping a frame would cost.
+	 * 返回 socket 自己的 `write()` 返回的值，而这个返回值就是上面 backpressure 策略的全部依据：`false` 表示内核或 socket 缓冲已满，从这一刻起不得再直接向这个连接写入。这里不做重试、缓冲或抛出——需要这些的调用者必须自己拥有它们，因为只有调用者知道丢一个 frame 的代价。
 	 *
-	 * A connection that has sent its Close frame is inert, and says so by returning `true`: from the
-	 * caller's side there is nothing more to write and nothing more to wait for.
+	 * 已发送 Close frame 的连接是惰性的，通过返回 `true` 表明：从调用者一侧看，没有更多可写，也没有更多可等。
 	 */
 	send(text: string): boolean {
 		if (this.closed || this.gone) return true;
@@ -197,11 +164,9 @@ export class WebSocketConnection {
 	}
 
 	/**
-	 * Send a Ping.
+	 * 发送一个 Ping。
 	 *
-	 * A control frame, so it bypasses the application queue entirely — see {@link send} for why that
-	 * return value is not offered here. RFC 6455 §5.5.2 caps a control payload at 125 bytes, which
-	 * this server never approaches: it sends an empty Ping and correlates by arrival order.
+	 * 控制帧，完全绕开应用层队列——至于为什么这里不提供那个返回值，见 {@link send}。RFC 6455 §5.5.2 把控制帧 payload 上限定在 125 字节，本服务器远达不到：它发送空 Ping，按到达顺序关联。
 	 */
 	ping(): void {
 		if (this.closed || this.gone || this.closeSent) return;
@@ -209,24 +174,21 @@ export class WebSocketConnection {
 	}
 
 	/**
-	 * Send a Close frame and let the socket finish.
+	 * 发送 Close frame 并让 socket 收尾。
 	 *
-	 * `code` and `reason` are the code and text the peer will see. Only the first Close frame counts:
-	 * a second one is a protocol error, and a connection that has already said goodbye answers a
-	 * peer's goodbye with silence rather than with another one.
+	 * `code` 和 `reason` 是 peer 将看到的码和文本。只有第一个 Close frame 有效：第二个是协议错误，已经道过别的连接以沉默回应 peer 的道别，而不是再道一次。
 	 */
 	close(code: number = CLOSE_NORMAL, reason = ""): void {
 		if (this.closed || this.gone) return;
 		if (this.closeSent) {
-			// The peer asked first; our end is done once the frame it sent has been answered.
+			// peer 先请求了关闭；我们发的 frame 被应答后，本端就完成了。
 			this.end();
 			return;
 		}
 		this.closeSent = true;
 
 		const reasonBytes = Buffer.from(reason, "utf8");
-		// RFC 6455 §5.5.1: the reason may not push the control payload past 125 bytes. A longer one is
-		// truncated rather than refused — the code is the part the client acts on.
+		// RFC 6455 §5.5.1：reason 不得让控制帧 payload 超过 125 字节。超长的被截断而不是拒绝——code 才是客户端据此行动的部分。
 		const room = 125 - 2;
 		const trimmed = reasonBytes.length > room ? reasonBytes.subarray(0, room) : reasonBytes;
 		const payload = Buffer.alloc(2 + trimmed.length);
@@ -238,10 +200,9 @@ export class WebSocketConnection {
 	}
 
 	/**
-	 * Drop the connection without a closing handshake.
+	 * 不做关闭握手，直接丢弃连接。
 	 *
-	 * For a peer that has stopped answering, where waiting out a handshake would mean waiting out a
-	 * peer that is not there. Everything the connection held goes with the socket.
+	 * 用于已停止应答的 peer——对这样的 peer 等握手结束等于等一个不在场的东西。连接持有的一切随 socket 一起消失。
 	 */
 	terminate(): void {
 		if (this.gone) return;
@@ -250,24 +211,22 @@ export class WebSocketConnection {
 		this.finish();
 	}
 
-	/** Whether this connection has ended, whoever ended it. */
+	/** 本连接是否已结束，无论由谁结束。 */
 	get isClosed(): boolean {
 		return this.closed || this.gone;
 	}
 
 	/**
-	 * Half-close the socket and let Node finish what is buffered.
+	 * 半关闭 socket，让 Node 把已缓冲的内容写完。
 	 *
-	 * The write side is ended rather than destroyed so a Close frame that has already been queued
-	 * still reaches a peer that is reading — a close the peer never sees is indistinguishable, from
-	 * the peer, from the process having died.
+	 * 结束写入侧而不是销毁，这样已入队的 Close frame 仍能到达正在读取的 peer——一个 peer 永远看不到的关闭，从 peer 的角度与进程已死无异。
 	 */
 	private end(): void {
 		if (this.gone) return;
 		this.socket.end();
 	}
 
-	/** Report the connection over, exactly once. */
+	/** 恰好一次地报告连接已结束。 */
 	private finish(): void {
 		if (this.closed) return;
 		this.closed = true;
@@ -277,16 +236,11 @@ export class WebSocketConnection {
 	}
 
 	/**
-	 * Fail the connection on a protocol violation, and say why with a code of its own.
+	 * 因协议违规判定连接失败，并用专属的 code 说明原因。
 	 *
-	 * `code` is a parameter rather than always 1002 because two of these failures are not the same
-	 * fault: a frame this server cannot represent is 1009 ("too large"), while everything else — a
-	 * reserved bit, a missing mask, bad UTF-8, a stray continuation — is 1002. The distinction matters
-	 * to whoever is looking at the close, and it is invisible if the code is hardcoded here.
+	 * `code` 是参数而不是恒为 1002，因为这些失败里有两个不属于同一种过错：本服务器无法表示的 frame 是 1009（"too large"），其余——保留位、缺掩码、坏 UTF-8、多余的 continuation——是 1002。这个区别对查看关闭原因的人很重要，而 code 硬编码在这里时它就不可见了。
 	 *
-	 * One log line per failure, because a peer speaking the wrong protocol is the one failure a server
-	 * can neither ignore nor retry around: the frames it sent cannot be interpreted, so the only honest
-	 * answer is to say so and stop.
+	 * 每次失败一行日志，因为 peer 说错协议是服务器既不能忽略也不能重试绕过的唯一失败：它发来的 frame 无法解读，唯一诚实的做法就是说明并停止。
 	 */
 	private fail(reason: string, code: number = CLOSE_PROTOCOL_ERROR): void {
 		this.handlers.onProtocolError(reason);
@@ -294,10 +248,9 @@ export class WebSocketConnection {
 	}
 
 	/**
-	 * Take in bytes and hand up whatever whole frames they complete.
+	 * 收下字节，把补齐的整 frame 上交。
 	 *
-	 * Loops rather than recurses on the tail, so a peer that packs many small frames into one chunk
-	 * costs one pass rather than one stack frame each.
+	 * 对尾部循环而不是递归，这样把许多小 frame 塞进一个 chunk 的 peer 只花一趟扫描，而不是每 frame 一个栈帧。
 	 */
 	private consume(chunk: Buffer): void {
 		if (this.closed) return;
@@ -312,12 +265,9 @@ export class WebSocketConnection {
 	}
 
 	/**
-	 * Pull one whole frame off the buffer, or answer `undefined` if the bytes so far do not make one.
+	 * 从缓冲取出一个完整 frame，目前的字节不够一个时返回 `undefined`。
 	 *
-	 * Every length is validated before it is trusted: a masked frame's mask is four bytes that must
-	 * be present before the payload can be located at all, and the 64-bit length is refused outright
-	 * rather than narrowed, because narrowing it is how a peer gets you to allocate a small buffer for
-	 * a large frame.
+	 * 每个长度在被信任之前都先验证：带掩码 frame 的掩码是四个字节，必须先在场上才能定位 payload；64 位长度被直接拒绝而不是收窄，因为收窄正是 peer 让你为大 frame 分配小 buffer 的手法。
 	 */
 	private take(): { fin: boolean; opcode: number; payload: Buffer } | undefined {
 		const buffer = this.buffer;
@@ -326,15 +276,14 @@ export class WebSocketConnection {
 		const first = buffer[0] ?? 0;
 		const second = buffer[1] ?? 0;
 		const fin = (first & 0x80) !== 0;
-		// No extension has been negotiated, so all three reserved bits must be clear.
+		// 未协商任何扩展，所以三个保留位必须全部为零。
 		if ((first & 0x70) !== 0) {
 			this.fail("A reserved bit was set but no extension was negotiated.");
 			return undefined;
 		}
 		const opcode = first & 0x0f;
 		const masked = (second & 0x80) !== 0;
-		// RFC 6455 §5.1: a frame from a client to a server must be masked, and an unmasked one is the
-		// clearest sign that the peer is not speaking this protocol at all.
+		// RFC 6455 §5.1：客户端发给服务器的 frame 必须带掩码，不带掩码是 peer 根本不在说这个协议的最明确信号。
 		if (!masked) {
 			this.fail("A client frame arrived unmasked.");
 			return undefined;
@@ -356,20 +305,19 @@ export class WebSocketConnection {
 			length = Number(wide);
 			offset += 8;
 		}
-		// A control frame carries no continuation and stays under 125 bytes (RFC 6455 §5.5).
+		// 控制帧不携带 continuation，且必须小于 125 字节（RFC 6455 §5.5）。
 		const isControl = (opcode & 0x8) !== 0;
 		if (isControl && (length > 125 || !fin)) {
 			this.fail("A control frame was fragmented or too long.");
 			return undefined;
 		}
 		if (length > MAX_FRAME_BYTES) {
-			// 1009, and the only place that code is used: `fail` closes the connection itself, so calling
-			// `close` again here would be swallowed by the Close frame already sent.
+			// 1009，也是该 code 唯一被使用的地方：`fail` 自己会关闭连接，在这里再调 `close` 会被已发送的 Close frame 吞掉。
 			this.fail(`A frame of ${length} bytes is larger than this server accepts.`, CLOSE_TOO_LARGE);
 			return undefined;
 		}
 
-		// The four mask bytes sit between the length and the payload, and are needed to locate it.
+		// 四个掩码字节位于长度与 payload 之间，定位 payload 需要它们。
 		if (buffer.length < offset + 4) return undefined;
 		const mask = buffer.subarray(offset, offset + 4);
 		offset += 4;
@@ -384,21 +332,18 @@ export class WebSocketConnection {
 		return { fin, opcode, payload };
 	}
 
-	/** Act on one whole frame: control frames here, messages reassembled first. */
+	/** 处理一个完整 frame：控制帧在这里处理，消息先拼装。 */
 	private dispatch(fin: boolean, opcode: number, payload: Buffer): void {
 		switch (opcode) {
 			case OPCODE.close:
 				this.onCloseFrame(payload);
 				return;
 			case OPCODE.ping:
-				// RFC 6455 §5.5.2: a Pong echoing the payload, promptly, and not subject to whatever
-				// the application layer is doing — which is why it is answered from inside the frame
-				// reader rather than handed to the queue below.
+				// RFC 6455 §5.5.2：回一个回显 payload 的 Pong，要及时，且不受应用层正在做什么的影响——这就是为什么在 frame 读取器内部应答，而不是交给下面的队列。
 				if (!this.closeSent) this.socket.write(encode(OPCODE.pong, payload));
 				return;
 			case OPCODE.pong:
-				// The whole point of a Pong: the peer heard a Ping and says so. Reported rather than
-				// swallowed, because it is the only evidence of liveness this side will ever get.
+				// Pong 的全部意义：peer 听到了 Ping 并这样说。上报而不是吞掉，因为这是本侧能得到的唯一存活证据。
 				this.handlers.onPong();
 				return;
 			case OPCODE.continuation:
@@ -414,7 +359,7 @@ export class WebSocketConnection {
 		}
 	}
 
-	/** Start a message, or refuse one that would interleave with the one in progress. */
+	/** 开始一条消息，或拒绝与进行中的消息交错的开始。 */
 	private onData(fin: boolean, opcode: number, payload: Buffer): void {
 		if (this.fragmentOpcode !== null) {
 			this.fail("A new message started before the previous one finished.");
@@ -428,7 +373,7 @@ export class WebSocketConnection {
 		this.fragments = [payload];
 	}
 
-	/** Continue, or finish, the message being assembled. */
+	/** 继续或完成正在拼装的消息。 */
 	private onContinuation(fin: boolean, payload: Buffer): void {
 		const opcode = this.fragmentOpcode;
 		if (opcode === null) {
@@ -445,18 +390,16 @@ export class WebSocketConnection {
 	}
 
 	/**
-	 * Hand a whole message up.
+	 * 把整条消息上交。
 	 *
-	 * Binary is refused rather than base64'd: this protocol's uplink is two JSON frames, and a peer
-	 * sending binary is a peer speaking something else, which is the same situation as a bad opcode.
+	 * 拒绝二进制而不是 base64：本协议的上行是两个 JSON frame，发送二进制的 peer 是在说别的什么，与坏 opcode 同一种情况。
 	 */
 	private deliver(opcode: number, payload: Buffer): void {
 		if (opcode === OPCODE.binary) {
 			this.fail("This protocol carries text frames only.");
 			return;
 		}
-		// RFC 6455 §5.6: a text frame that is not valid UTF-8 fails the connection. Decoding without
-		// `fatal` would substitute replacement characters and hand a peer a message it never sent.
+		// RFC 6455 §5.6：不是合法 UTF-8 的文本帧判定连接失败。不带 `fatal` 解码会替换成替换字符，把一条 peer 从未发过的消息交上去。
 		let text: string;
 		try {
 			text = new TextDecoder("utf-8", { fatal: true }).decode(payload);
@@ -468,11 +411,9 @@ export class WebSocketConnection {
 	}
 
 	/**
-	 * Answer a peer's Close.
+	 * 应答 peer 的 Close。
 	 *
-	 * RFC 6455 §5.5.1: echo the code back when one was given, and close the socket. If this end
-	 * already sent a Close, the handshake is half-done and the socket is simply finished — a second
-	 * Close frame would itself be a protocol error.
+	 * RFC 6455 §5.5.1：对方给了 code 就原样回显，然后关闭 socket。如果本端已发送 Close，握手只完成了一半，socket 直接收尾——第二个 Close frame 本身就是协议错误。
 	 */
 	private onCloseFrame(payload: Buffer): void {
 		if (this.closeSent) {
@@ -485,8 +426,7 @@ export class WebSocketConnection {
 			return;
 		}
 		if (payload.length >= 2) {
-			// Echo the peer's own code rather than inventing one, so a client that asked to leave sees
-			// the reason it asked for.
+			// 回显 peer 自己的 code 而不是编一个，让请求离开的客户端看到它自己要求的理由。
 			this.socket.write(encode(OPCODE.close, payload.subarray(0, 2)));
 		}
 		this.closeSent = true;
@@ -495,7 +435,7 @@ export class WebSocketConnection {
 	}
 }
 
-/** The 101 handshake's companion: an HTTP refusal, for a request that never became a WebSocket. */
+/** 101 握手的同伴：一个 HTTP 拒绝响应，给那个从未成为 WebSocket 的请求。 */
 function refuse(socket: Duplex, status: number, phrase: string, message: string): void {
 	const body = `${message}\n`;
 	socket.write(
@@ -510,11 +450,9 @@ function refuse(socket: Duplex, status: number, phrase: string, message: string)
 }
 
 /**
- * One unmasked, unfragmented frame — the only shape this server ever writes.
+ * 一个已去掩码、未分片的 frame——本服务器唯一会写出的形态。
  *
- * Server-to-client frames are never masked (RFC 6455 §5.1) and never fragmented: a frame this server
- * sends is a whole JSON document, and splitting one would only cost header bytes per fragment to
- * express something the reader has to reassemble anyway.
+ * 服务器到客户端的 frame 从不掩码（RFC 6455 §5.1）也从不分片：本服务器发送的 frame 是一份完整的 JSON 文档，拆开它只会为每个分片多付头部字节，去表达读者反正要重新拼装的东西。
  */
 function encode(opcode: number, payload: Buffer): Buffer {
 	const length = payload.length;

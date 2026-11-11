@@ -1,23 +1,20 @@
-// The recovery machine at the session's face (ADR-0006 §5, ticket 15): the approval gate ends
-// the run with the call dangling in the ledger, and what happens to that call afterwards is the
-// contract this file pins —
+// session 面上的恢复机器（ADR-0006 §5，ticket 15）：审批门让 run 以调用悬在 ledger 里的状态
+// 结束，那个调用之后会遇到什么，正是本文件钉住的契约——
 //
-//   1. a grant resumes: the answer starts a run whose recovery pass re-runs the call through the
-//      gate and the tool itself, and the run carries on in the same turn loop;
-//   2. a denial closes: the dangling call gets the result the answer's reason names, and the model
-//      answers it;
-//   3. orphans close: dangling calls no answer names — the shape a crash leaves — are closed with
-//      synthesized error results at the next run's entry, prompt or resume, so the first request is
-//      provider-legal; and the toggle that turns that sweep off leaves them to the host;
-//   4. abort during recovery: the run stops like any run, the recovered call keeps its own result,
-//      and no denial rides the abort — abort's rejections do not go through the approval chain;
-//   5. the mailbox is the recovery run's too: a message steered into a recovery run is drained and
-//      answered at the take points, exactly as in a run that started from a prompt.
+//   1. grant 即恢复：应答启动一次 run，其恢复趟把调用重新穿过门与工具本身，run 在同一个回合
+//      循环里继续；
+//   2. denial 即关闭：悬着的调用得到应答理由指名的结果，模型对它作答；
+//   3. 孤儿关闭：没有应答指名的悬调用——崩溃留下的形状——在下一次 run 的入口（prompt 或
+//      resume）以合成的错误结果关闭，所以第一个请求是 provider 合法的；关闭这条清扫的开关把
+//      它们留给 host；
+//   4. 恢复期间的 abort：run 像任何 run 一样停下，被恢复的调用保留自己的结果，没有任何 denial
+//      骑在 abort 上——abort 的拒绝不走审批链；
+//   5. 信箱也是恢复 run 的：被 steer 进恢复 run 的消息在取用点被排干并应答，与从 prompt 开始的
+//      run 完全一致。
 //
 //   node scripts/smoke-approval-recovery.ts
 //
-// No provider key is needed: the scripted transport makes the tool calls, and a held-gate wrapper
-// makes "while the recovery run is streaming" observable.
+// 无需 provider key：剧本化 transport 发出工具调用，持门包装器把"恢复 run 流式中"变成可观察的。
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -74,24 +71,23 @@ function textOf(message: Message): string {
 	return message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 }
 
-/** Every tool result in the session's transcript, oldest first. */
+/** session transcript 里的每一个工具结果，从旧到新。 */
 function toolResultTexts(session: Agent): string[] {
 	return session.snapshot(sidOf(session)).messages.filter((message) => message.role === "toolResult").map((message) => textOf(message));
 }
 
-/** The prompt-side view of one request: the roles the provider was sent, in order. */
+/** 一次请求的 prompt 侧视图：被发给 provider 的角色，按序。 */
 function requestRoles(context: { messages: readonly Message[] }): string[] {
 	return context.messages.map((message) => message.role);
 }
 
 /**
- * A transport whose calls stop inside the request until released, one hold per call.
+ * 调用会停在请求内部、直到被放行的 transport，每次调用一个 hold。
  *
- * The scripted transport answers as soon as the loop asks, which leaves no window in which a run can
- * be steered or aborted. Holding the Nth call is what makes mid-run observable; `holds` says which
- * call numbers (1-based, across the transport's lifetime) stop. An abort ends the hold: the signal is
- * what a real transport honors, and letting the scripted answer through on it is what makes the run
- * settle on the aborted message the same way it would over a network.
+ * 剧本化 transport 在循环一问就答，run 不留任何可被 steer 或 abort 的窗口。持住第 N 次调用才
+ * 让"run 中"可观察；`holds` 说出哪些次序的调用（从 1 起，跨 transport 生命周期）要停下。abort
+ * 会结束 hold：signal 正是真 transport 尊重的东西，让剧本回答随它放行正是让 run 以被中止消息
+ * 落定、如同经由真网络一样的办法。
  */
 function gatedApi(holds: number[]): { api: ChatTransport; release(index: number): void; held(index: number): boolean } {
 	const inner = fake.api.stream.bind(fake.api);
@@ -131,10 +127,10 @@ function gatedApi(holds: number[]): { api: ChatTransport; release(index: number)
 }
 
 /**
- * The id each opened session runs under, kept beside the session object the checks hold.
+ * 每个打开的 session 运行时所用的 id，保存在各检查持有的 session 对象旁边。
  *
- * The session's methods name it by id now — the orchestrator holds no session state — so the
- * opening helper records what it created here and every check reads it back through {@link sidOf}.
+ * session 的方法现在按 id 指名它——orchestrator 不持有任何 session 状态——所以打开助手在这里
+ * 记录它创建的东西，每个检查经由 {@link sidOf} 读回。
  */
 const opened = new WeakMap<Agent, { id: string; state: Session }>();
 
@@ -159,7 +155,7 @@ async function openSession(overrides: { approval?: Record<string, boolean>; api?
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 1 + 2. The two answers, each starting the run that closes the call it names.
+// 1 + 2. 两种应答，各自启动收掉它所指名调用的那次 run。
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\na grant resumes the run and re-runs the call; a denial closes it with its reason\n");
@@ -206,15 +202,15 @@ process.stdout.write("\na grant resumes the run and re-runs the call; a denial c
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 3. Orphans: what a crash leaves is closed at the next run's entry, prompt or resume.
+// 3. 孤儿：崩溃留下的东西在下一次 run 的入口（prompt 或 resume）被关闭。
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\ndangling calls no answer names are closed before the first request\n");
 
 {
 	const session = await openSession();
-	// The crash shape: two calls in the transcript, no results behind either — appended the way a
-	// process that died mid-batch leaves them.
+	// 崩溃形状：transcript 里两条调用，身后都没有结果——按一个死于批次中途的进程留下它们的
+	// 方式追加。
 	session.sessionManager.appendMessage(bagOf(session), fakeAssistantMessage(fakeToolCall("read", { path: "a.txt" }, { id: "call_a" })));
 	session.sessionManager.appendMessage(bagOf(session), fakeAssistantMessage(fakeToolCall("read", { path: "b.txt" }, { id: "call_b" })));
 	check("both dangling calls are derived from the ledger", session.snapshot(sidOf(session)).pendingApprovals.length === 2, JSON.stringify(session.snapshot(sidOf(session)).pendingApprovals));
@@ -244,20 +240,17 @@ process.stdout.write("\ndangling calls no answer names are closed before the fir
 	await session.close(sidOf(session));
 }
 
-// The toggle: a host that turns the sweep off owns the unanswered calls itself. Driven at the
-// recovery machine's own face — the function every run calls before its first request — because this
-// host never turns it off: the option is the engine's contract, not a setting.
+// 开关：把清扫关掉的 host 自己拥有那些未获应答的调用。在恢复机器自己的面上驱动——每个 run
+// 第一次请求之前都会调用的那个函数——因为这个 host 从不关它：这个选项是引擎的契约，不是设置。
 process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 
 {
 	const dangling = fakeAssistantMessage(fakeToolCall("read_fixture", { path: "a.txt" }, { id: "call_x" }));
-	// A tool the recovery pass can resolve, so a re-suspending gate is what stops it — not a missing
-	// tool, which the machine answers before any hook runs. The recovery machine resolves against a
-	// table, not against the context, so the tool arrives the way every tool does: registered on a
-	// table this exercise builds itself — there is no orchestrator and no hub in this file. It is
-	// named for the fixture rather than `read`, because a name the six built-ins already answer to is
-	// refused by the table itself.
-	/** How many times the fixture's own code was entered — "refused" read as "did not run". */
+	// 一个恢复趟能解析的工具，所以拦住它的是一次重新挂起的门——而不是一个缺失的工具，那种
+	// 机器在任何 hook 运行之前就应答了。恢复机器对着一张表解析，不对着 context，所以工具按每个
+	// 工具的方式到来：注册在本练习自建的表上——本文件没有 orchestrator 也没有 hub。它以 fixture
+	// 而不是 `read` 命名，因为六个内置工具已经应答的名字会被表本身拒绝。
+	/** fixture 自己的代码被进入了多少次——"被拒"读作"没有运行"。 */
 	let ranFixture = 0;
 	const readTool: Tool = {
 		name: "read_fixture",
@@ -271,20 +264,20 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 	};
 	const manager = createToolManager();
 	manager.register(readTool);
-	// The names a run would have active: here the one fixture, which is also the whole table — the
-	// two questions the chain asks ("may this run call it", "does the name exist") are answered
-	// separately on purpose, so this exercise supplies its own answer rather than deriving one.
+	// 一次 run 会激活的名字：这里只有那个 fixture，它也正是整张表——链条问的两个问题（"这次
+	// run 可以调它吗"、"这个名字存在吗"）被有意分开应答，所以本练习供给自己的答案而不是推导
+	// 一个。
 	const activeNames = new Set(["read_fixture"]);
 
-	/** What one pass emitted, so "silent" is an assertion and not an unobserved claim. */
+	/** 一次趟发出了什么，让"沉默"是一条断言而不是一个未观察的主张。 */
 	const events: AgentEvent[] = [];
 	const emitted = (event: AgentEvent): void => {
 		events.push(event);
 	};
 
-	/** How many times a call reached the gate, so "refused before the gate" is observable. */
+	/** 调用抵达门的次数，让"在门之前被拒"可观察。 */
 	let gatesAsked = 0;
-	/** The gate that answers "suspend", and counts having been asked. */
+	/** 应答"挂起"、并统计自己被问过几次的门。 */
 	const suspendingGate = {
 		beforeToolCall: async () => {
 			gatesAsked += 1;
@@ -331,11 +324,10 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 		JSON.stringify(on.messages.map((message) => `${message.role}:${textOf(message)}`)),
 	);
 
-	// A grant the gate does not actually clear: the recovery pass re-runs the call through the gate,
-	// and a gate that suspends again stops the recovery where it stands — no result is written, and
-	// the run ends before its request, exactly as a live batch's suspend does. The tool must exist
-	// in the table for the gate to be reached at all; the context declares nothing, which is the
-	// point — the declaration is what the transport reads, not what a call resolves against.
+	// 一个门没有真正放行的 grant：恢复趟把调用重新穿过门，而再次挂起的门让恢复就地停下——
+	// 不写任何结果，run 在自己的请求之前结束，与活批次被挂起时一模一样。工具必须存在于表里，
+	// 门才可能被问到；context 什么都不声明，这正是要点——声明是 transport 读的东西，不是调用
+	// 解析所对着的东西。
 	const resuspended = await recoverPendingToolCalls(
 		{ messages: [dangling], tools: [] },
 		danglingToolCallsOf([dangling]),
@@ -355,13 +347,12 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 			messages: resuspended.messages.map((message) => message.role),
 		}),
 	);
-	/** The count this case leaves behind: the pass below is measured as a delta from it. */
+	/** 这个用例留下的计数：下面那趟以它为基准测差值。 */
 	const gatesAfterResuspend = gatesAsked;
 
-	// A grant for a name this run may not use: the same table, the same transcript, only the list
-	// differs — and the call is closed with the sentence an unknown name gets, without the fixture's
-	// own code ever being entered. That is the half the table cannot answer: it holds the tool (the
-	// case above reaches its gate), and it is the run's list that refuses the run.
+	// 一个这次 run 无权使用的名字的 grant：同一张表、同一份 transcript，只有列表不同——调用被
+	// 以未知名字得到的那句话关闭，fixture 自己的代码从未被进入。这正是表回答不了的那一半：
+	// 它持有工具（上面的用例抵达了它的门），而拒绝 run 的是 run 的列表。
 	const outside = await recoverPendingToolCalls(
 		{ messages: [dangling], tools: [] },
 		danglingToolCallsOf([dangling]),
@@ -379,20 +370,20 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 		outside.messages.length === 1 && closedOutside?.isError === true && textOf(closedOutside).includes("Tool read_fixture not found"),
 		JSON.stringify(outside.messages.map((message) => textOf(message))),
 	);
-	// The gate was asked by the re-suspended pass above — the case whose list has the tool — and this
-	// pass must not add to it: a refusal that came before the gate leaves the count where it stood.
+	// 门被上面重新挂起的那趟问过——列表里有工具的那个用例——而这趟不得给它加数：在门之前
+	// 发生的拒绝让计数停在原处。
 	check("and the gate was not asked about it", gatesAsked === gatesAfterResuspend, `${gatesAfterResuspend} -> ${gatesAsked}`);
 	check("with the fixture's own code never entered", ranFixture === 0, String(ranFixture));
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 4. Abort during recovery: the run stops like any run, and no denial rides the abort.
+// 4. 恢复期间的 abort：run 像任何 run 一样停下，没有任何 denial 骑在 abort 上。
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\naborting a recovery run leaves the recovered call with its own result\n");
 
 {
-	// Hold the recovery run's request — the second call, after the prompted run's own.
+	// 持住恢复 run 的请求——第二次调用，在被提示的 run 自己那次之后。
 	const gate = gatedApi([2]);
 	const session = await openSession({ approval: { read: true }, api: gate.api });
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("after the grant")]);
@@ -401,7 +392,7 @@ process.stdout.write("\naborting a recovery run leaves the recovered call with i
 	const callId = session.snapshot(sidOf(session)).pendingApprovals[0]?.toolCallId ?? "";
 	check("the run parked at the gate", callId.length > 0);
 
-	// The grant starts the recovery run; the held provider call is where the abort lands.
+	// grant 启动恢复 run；被持住的 provider 调用正是 abort 落下的地方。
 	void session.respondApproval(sidOf(session), callId, true);
 	const started = Date.now();
 	while (!gate.held(2) && Date.now() - started < 5_000) await new Promise((resolve) => setTimeout(resolve, 10));
@@ -422,14 +413,14 @@ process.stdout.write("\naborting a recovery run leaves the recovered call with i
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 5. The mailbox is the recovery run's too: a steered message is drained and answered at the take
-// points, exactly as in a run that started from a prompt (0003 unchanged).
+// 5. 信箱也是恢复 run 的：被 steer 的消息在取用点被排干并应答，与从 prompt 开始的 run 完全
+// 一致（0003 未变）。
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\na message steered into a recovery run is taken at the take point\n");
 
 {
-	// Hold the recovery run's request — the second call, after the prompted run's own.
+	// 持住恢复 run 的请求——第二次调用，在被提示的 run 自己那次之后。
 	const gate = gatedApi([2]);
 	const session = await openSession({ approval: { read: true }, api: gate.api });
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("answered both")]);
@@ -440,7 +431,7 @@ process.stdout.write("\na message steered into a recovery run is taken at the ta
 	void session.respondApproval(sidOf(session), callId, true);
 	const started = Date.now();
 	while (!gate.held(2) && Date.now() - started < 5_000) await new Promise((resolve) => setTimeout(resolve, 10));
-	// The steer is accepted mid-recovery — the run is streaming, so it queues rather than prompts.
+	// steer 在恢复中途被收下——run 正在流式，所以它入队而不是自己开 prompt。
 	await session.steer(sidOf(session), "and also this", { selection });
 
 	gate.release(2);

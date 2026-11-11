@@ -9,103 +9,91 @@ import { SettingManager } from "./setting-manager.ts";
 import { type ToolManager, createToolManager } from "./tools/index.ts";
 
 /**
- * What a caller supplies to build the one orchestrator of a process.
+ * 调用方为构建一个进程唯一的编排层所提供的东西。
  *
- * Everything here is process-level: where the configuration lives, and the transport every request
- * leaves through. The three managers themselves are not on the list — the factory builds them, which
- * is what makes "every state in the table was assembled over this orchestrator's own services" a fact
- * of construction rather than a convention a caller has to keep. The two seams that take a built
- * manager exist for tests alone: a smoke hands an in-memory {@link SettingManager} in so the machine's
- * files stay out of it, and registers a tool of its own on a table of its own so nothing it registered
- * reaches a session outside the test. Nothing in production sets either.
+ * 这里的一切都是进程级的：配置住在哪，以及每个请求从哪条传输层离开。三只 Manager 本身不在清单上
+ * ——工厂自己造它们，正是这一点让「表里的每个状态都是在该编排层自己的服务之上装配的」成为构造
+ * 的事实，而不是调用方必须遵守的约定。两个接受成品 Manager 的接缝只为测试存在：smoke 递一只内存
+ * {@link SettingManager} 进来，让机器自己的文件靠边站，再在自己的工具表上注册自己的工具，让它
+ * 注册的东西到不了测试之外的会话。生产代码两样都不设。
  */
 export interface CreateSessionAgentOptions {
 	/**
-	 * The agent home the global settings are read from and written to. Defaults to the real one.
+	 * 全局设置读取与写入所在的 agent home。默认用真实的那一个。
 	 *
-	 * A smoke that exercises a command which *writes* settings must not write the machine's own
-	 * `settings.json`; the desktop shell and the server pass through what they were started with.
+	 * 测试「会*写*设置」的命令的 smoke 不得写机器自己的 `settings.json`；桌面外壳与服务器透传它们
+	 * 启动时所带的。
 	 */
 	settingsHome?: string;
 	/**
-	 * The agent home the imported model rows are read from and written to. Defaults to
-	 * {@link CreateSessionAgentOptions.settingsHome}.
+	 * 导入的模型行读取与写入所在的 agent home。默认用
+	 * {@link CreateSessionAgentOptions.settingsHome}。
 	 *
-	 * The sibling home for the other file: a smoke that hands in rows of its own must not leave them
-	 * in the machine's `models.json`, and must not depend on what the person running it configured.
+	 * 另一个文件的同居 home：递入自己模型行的 smoke 不得把它们留在机器的 `models.json` 里，也不得
+	 * 依赖运行它的人配置了什么。
 	 */
 	modelsHome?: string;
-	/** The transport every request this orchestrator makes goes over. Defaults to Anthropic Messages. */
+	/** 该编排层发出的每个请求走的传输层。默认 Anthropic Messages。 */
 	api?: ChatTransport;
-	/** Test-only seam: a settings door of the caller's own, in place of the files behind the homes. */
+	/** 仅测试的接缝：调用方自己的设置门，取代各 home 背后的文件。 */
 	settings?: SettingManager;
-	/** Test-only seam: a tool table of the caller's own, in place of the six built-ins. */
+	/** 仅测试的接缝：调用方自己的工具表，取代六个内置工具。 */
 	tools?: ToolManager;
 }
 
 /**
- * Build the orchestrator: one object over its own managers, with the seams it dispatches through
- * installed.
+ * 构建编排层：一个对象配它自己的几只 Manager，装好它分发所经的接缝。
  *
- * A host that runs every session of a process calls this once; a caller that wants a session it does
- * not share — a smoke, a test — calls it once per session and opens that session onto it. Either way
- * the two halves of a session's setup are the same two halves, so what the host runs and what a
- * smoke drives cannot drift apart.
+ * 跑一个进程所有会话的宿主调用它一次；想要一个不与任何人共享的会话的调用方——smoke、测试——
+ * 每个会话调用一次，并把该会话打开到它上面。无论哪条路，会话设置的两半都是同样的两半，所以宿主
+ * 跑的与 smoke 驱动的不可能漂移开。
  *
- * The defaults are installed on the surface the caller gets back rather than hard-coded in the class,
- * so a host can add a handler after them and refine what they decided. See
- * {@link installDefaultHooks}.
+ * 默认处理器安装在调用方拿回来的那个面上，而不是硬编码进类里，宿主得以在它们之后加处理器、在
+ * 它们的决定上精修。见 {@link installDefaultHooks}。
  */
 export function createSessionAgent(options: CreateSessionAgentOptions = {}): Agent {
 	const hooks = createHooks();
-	// Resolved once and handed to the orchestrator, which is the only table a run's executable set is
-	// read from and the only table a command narrows: a second resolution here would let a caller's own
-	// tool reach one and not the other.
+	// 只解析一次并交给编排层，它是读取一次运行可执行集合的唯一表，也是命令收窄的唯一表：在这里做
+	// 第二次解析，会让调用方自己的工具到达其中一者而到不了另一者。
 	const tools = options.tools ?? createToolManager();
 	const agent = new Agent({
 		sessionManager: new SessionManager(),
 		settings: options.settings ?? new SettingManager({ home: options.settingsHome, modelsHome: options.modelsHome }),
 		tools,
 		hooks,
-		// The one assembly of a process: the transport is resolved here rather than defaulted inside
-		// the orchestrator, so everything a run can leave the process through is decided in one file.
+		// 进程唯一的装配处：传输层在这里解析而不是在编排层内部给默认值，让一次运行能离开进程的每条
+		// 路都由一个文件决定。
 		api: options.api ?? anthropicMessages,
-		// Rebuilt whenever the active set or the approval set moves, so the prompt cannot promise tools
-		// or approvals the session no longer has. The working directory and the project instructions are
-		// handed over per request for the same reason they are not captured: one builder serves every
-		// session this orchestrator runs, and both facts belong to the session, not to the builder.
+		// 活跃集或审批集一变就重建，让 prompt 无法许诺会话已不再拥有的工具或审批。工作目录与项目指示
+		// 按请求递交、出于与不被捕获同样的理由：一个 builder 服务该编排层跑的所有会话，这两个事实属于
+		// 会话，不属于 builder。
 		systemPrompt: (workDirAbsPath, agentsMd, toolNames, approvals) =>
 			buildSystemPrompt({
 				workDirAbsPath,
 				toolNames,
-				// Every tool the map gates, not just the active ones: the map is the session's whole
-				// choice, and a tool narrowed away is a tool the prompt should still say is gated rather
-				// than one it silently drops.
+				// 映射闸住的每个工具，不只是活跃的那些：映射是会话完整的决定，被收窄掉的工具，prompt
+				// 仍该说它被闸着，而不是悄悄略去。
 				approvalTools: approvalToolsOf(approvals),
 				agentsMd,
 			}),
 	});
-	// The gate is installed on the surface the caller gets back, after construction, because it
-	// dispatches through the orchestrator it belongs to (`session.authorize`) — a handler built into
-	// the class could only reach half of what it needs.
+	// 闸门安装在调用方拿回来的面上、在构造之后，因为它经它所属的编排层分发（`session.authorize`）
+	// ——内建在类里的处理器只能够到它所需的一半。
 	installDefaultHooks(hooks, agent);
 	return agent;
 }
 
 /**
- * The default handler every orchestrator dispatches through.
+ * 每个编排层分发所经的默认处理器。
  *
- * `before_tool` is the approval gate. The session owns the bookkeeping of what the transcript is
- * still waiting on and the UI that answers it; the hook only translates an unanswered approval into
- * the suspend that ends the run (ADR-0006 §5): the call is left dangling in the ledger with no result
- * — that is what the banner is derived from — and the answer arrives over REST to start the recovery
- * run that pairs it and continues.
+ * `before_tool` 就是审批闸门。transcript 还在等什么、以及回答它的 UI，这些簿记归会话所有；这个
+ * hook 只把一个未获回答的审批翻译成结束运行的 suspend（ADR-0006 §5）：调用在账本里悬空、没有
+ * 结果——横幅正是从它派生的——答案经 REST 抵达，启动把它配对并续跑的恢复运行。
  *
- * There is no default `after_tool`: a rewrite there is final — the ledger keeps exactly the content
- * the hooks returned — so the seam belongs to whoever has a reason to rewrite. The output backstop
- * that used to live here moved to the write boundary (`finalizeToolResult` in `agent.ts`), where it
- * catches a result nobody bounded without spending a hook on it; a hook that wants to bound a result
- * itself archives the full text with `archiveToolResult` and returns the path in the content.
+ * 没有默认的 `after_tool`：那里的改写是定稿——账本保存的正是 hooks 返回的内容——所以这条接缝
+ * 属于有理由改写的人。曾经住在这里的输出兜底搬去了写边界（`agent.ts` 的 `finalizeToolResult`），
+ * 在那里接住没人约束过的结果而不必花一个 hook；想自己约束结果的 hook 用 `archiveToolResult` 归档
+ * 全文并把路径放进返回的 content。
  */
 function installDefaultHooks(hooks: Hooks, session: Agent): void {
 	hooks.on("before_tool", async ({ sessionId, toolCallId, toolName, args }) => {
@@ -115,17 +103,14 @@ function installDefaultHooks(hooks: Hooks, session: Agent): void {
 }
 
 /**
- * Open one session and hand back an orchestrator of its own.
+ * 打开一个会话，交回一个属于它自己的编排层。
  *
- * The composition a caller wants when it does not share its orchestrator with anything else: a smoke
- * driving a scripted transport, or a test opening one directory by hand. A process that runs many
- * sessions builds the orchestrator once instead and opens each transcript onto it — see the hub —
- * and that is the shape this exists to keep honest: opening a session and resuming one are the same
- * act, whichever of the two roads is taken.
+ * 调用方不与其他任何东西共享编排层时想要的组合方式：驱动脚本化传输层的 smoke，或手工打开一个
+ * 目录的测试。跑很多会话的进程改为只构建一次编排层，并把每份 transcript 打开到它上面——见 hub
+ * ——保持诚实正是这个东西存在的理由：打开会话与恢复会话是同一个动作，无论走两条路中的哪一条。
  *
- * The options are a test-seam collection on purpose: the settings and tool seams ride straight
- * through to the factory, the transcript and the model options go to `assembleAgentStateBySession`, and nothing here builds
- * a manager the orchestrator does not keep.
+ * options 有意是一组测试接缝：settings 与 tools 接缝直通工厂，transcript 与模型 options 交给
+ * `assembleAgentStateBySession`，这里不构建任何编排层不留住的 Manager。
  */
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 	const agent = createSessionAgent({
@@ -133,11 +118,10 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 		...(options.tools === undefined ? {} : { tools: options.tools }),
 		...(options.api === undefined ? {} : { api: options.api }),
 	});
-	// The state enters the orchestrator's table here, through the same door the hub uses — which is
-	// class-private now (`assembleAgentStateBySession`): the verbs a caller spells are `hold` /
-	// `release` and `create`, and TypeScript has no way to say "core-internal", so the one sanctioned
-	// composition road reaches the door the way a smoke reaches any other private half. The cast is
-	// the seam, and this file is its only production-side reader.
+	// 状态在这里进入编排层的表，走的是 hub 用的同一扇门——它如今是类私有的
+	// （`assembleAgentStateBySession`）：调用方拼得出的动词是 `hold` / `release` 与 `create`，而
+	// TypeScript 没法说「core 内部」，所以这条唯一获批的组合之路像 smoke 够其他私有半一样够到这扇
+	// 门。这个断言就是接缝，本文件是它在生产侧唯一的读者。
 	const door = agent as unknown as { assembleAgentStateBySession(options: AssembleAgentStateOptions): Promise<unknown> };
 	await door.assembleAgentStateBySession(options);
 	return agent;

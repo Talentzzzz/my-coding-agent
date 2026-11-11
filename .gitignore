@@ -3,19 +3,10 @@ dist/
 *.log
 .DS_Store
 
-# Two third-party reference trees live in the working copy to be read, not to be carried:
-# `deepseek-harness-master` is the DSH checkout the client-server map borrows properties from, and
-# `pi-main` is upstream pi's source (see docs/README.md). Together they are ~140MB of code that is
-# not ours, so no commit picks them up. `open-claude-ui-main` is the same kind of tree: a UI
-# reference kept for reading, not part of this repository.
-deepseek-harness-master/
-pi-main/
-open-claude-ui-main/
-
-# Tarball cache used by scripts/install-deps.ts
+# scripts/install-deps.ts 的 tarball 缓存
 .npm-tarball-cache/
 
-# Agent state, when the agent home is pointed at the repo with MY_AGENT_HOME
+# agent 状态（MY_AGENT_HOME 指向本仓库时）
 .my-agent/
 
 # 本地工具状态（agent 生成的计划文件）

@@ -1,15 +1,13 @@
-// Liveness smoke test: the client discovers a dead connection without sending a request. It drives
-// the *production* connection layer — the very `MuxClient` the window runs, not a rewritten watchdog
-// (asserting a copy of the watchdog would prove the copy) — against the real server through a relay
-// that can go silent, and asserts the whole arc: live on the first frame, dead within the tolerance
-// the server's own heartbeat names, reconnected, and converged again by a fresh baseline.
+// Liveness 冒烟测试：客户端不发请求也能发现连接已死。它驱动*生产*连接层——正是窗口运行的那个
+// `MuxClient`，不是重写的 watchdog（断言 watchdog 的副本只能证明副本没问题）——经由一条可以
+// 假死的中继对着真服务器，断言完整弧线：第一帧上判活、在服务器心跳自己许诺的容忍度内判死、
+// 重连、再经一份新基线收敛。
 //
 //   node scripts/smoke-liveness.ts
 //
-// The relay is the load-bearing half of the rig: during a blackout it keeps *reading* the server and
-// throws the bytes away, so the proof that "the server was talking all along" is the relay's own
-// dropped-byte counter, and what is being tested is the client's read timeout — not the server's
-// stall policy, which has its own smoke. No provider key is needed: the watched session never runs.
+// 中继是这个装置承重的一半：黑屏期间它继续*读*服务端、把字节丢掉，于是"服务端一直在说话"的
+// 证据就是中继自己的丢字节计数器，被测的正是客户端的读超时——而不是服务端的停滞策略，那个
+// 有自己的 smoke。无需 provider key：被监视的 session 永不运行。
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,8 +27,8 @@ function check(label: string, condition: boolean, detail = ""): void {
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, 10));
 
 /**
- * The browser's socket, over Node's own global `WebSocket`. This is the one adapter between the
- * production layer and this runtime — the same three events and two methods the browser offers.
+ * 浏览器的 socket，跑在 Node 自带的全局 `WebSocket` 上。这是生产层与本运行时之间唯一的适配器
+ * ——与浏览器相同的三个事件、两个方法。
  */
 function nodeSocket(url: string): MuxSocketFactory {
 	return (handlers: MuxSocketHandlers): MuxSocket => {
@@ -46,7 +44,7 @@ function nodeSocket(url: string): MuxSocketFactory {
 	};
 }
 
-/** Everything the assertions read back, in one place. */
+/** 断言要回读的一切，集中在一处。 */
 interface Observed {
 	channels: { state: ChannelState; at: number }[];
 	heartbeats: number;
@@ -57,14 +55,13 @@ interface Observed {
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-liveness-"));
 
-// The heartbeat interval is the whole clock of this smoke: the server speaks every 50 ms, the client
-// tolerates three of those (its own rule, derived from `everyMs`), and both numbers stay far inside
-// the assertion windows below.
+// 心跳间隔是本 smoke 的整个时钟：服务器每 50 ms 说一次话，客户端容忍其中三次（它自己的规则，
+// 由 `everyMs` 推得），两个数字都远小于下方的断言窗口。
 const server: BootedServer = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: 50 } });
 const proxy: FaultyProxy = await faultyProxy(new URL(server.url));
 
 const observed: Observed = { channels: [], heartbeats: 0, baselines: [], ended: [], errors: [] };
-/** The session the pane watches, set once the server has named its landing session. */
+/** 窗格监视的 session，服务器指名它的落地 session 后设置。 */
 let watchId = "";
 const client = new MuxClient(
 	{
@@ -81,8 +78,8 @@ const client = new MuxClient(
 	{
 		url: proxy.url,
 		socket: nodeSocket(proxy.url),
-		// The pre-heartbeat fallback only governs the stretch before the first heartbeat names its
-		// interval; one second is generous for a server that speaks within 50 ms of the handshake.
+		// 心跳前回退只管辖第一声心跳报出自己的间隔之前那段；对一台握手后 50 ms 内就开口的
+		// 服务器，一秒已经很宽裕。
 		watchdogTimeoutMs: 1_000,
 		readyTimeoutMs: 5_000,
 		log: () => {},
@@ -90,15 +87,15 @@ const client = new MuxClient(
 );
 
 try {
-	// Startup selects nothing now, so the session this smoke watches is the one an explicit creation
-	// returned — the watched session never runs, so the transport stays unscripted.
+	// 启动时现在不选任何东西，所以本 smoke 监视的 session 是显式创建返回的那个——被监视的
+	// session 永不运行，transport 保持无剧本。
 	const created = await fetch(`${server.url}/api/sessions`, { method: "POST", headers: { "content-type": "application/json" } });
 	check("the watched session was created", created.status === 201, String(created.status));
 	watchId = ((await created.json()) as { sessionId: string }).sessionId;
 
-	// ---------------------------------------------------------------------------------------------
-	// 1. Live is proven, not assumed: the channel goes live on the first frame, not the handshake.
-	// ---------------------------------------------------------------------------------------------
+	// -----------------------------------------------------------------------------
+	// 1. 活是被证明的，不是被假设的：通道在第一帧上判活，而不是在握手上。
+	// -----------------------------------------------------------------------------
 	process.stdout.write("the channel proves itself with the server's first frame\n");
 
 	client.start();
@@ -107,10 +104,10 @@ try {
 	check("and heartbeats were already arriving", observed.heartbeats > 0, String(observed.heartbeats));
 	check("the watched session's baseline arrived", await until(() => observed.baselines.length === 1, 3_000), String(observed.baselines.length));
 
-	// ---------------------------------------------------------------------------------------------
-	// 2. The blackout: the server keeps talking, the client hears nothing, and the client is the one
-	//    that calls it dead — within the tolerance the heartbeat itself named.
-	// ---------------------------------------------------------------------------------------------
+	// -----------------------------------------------------------------------------
+	// 2. 黑屏：服务器一直在说话，客户端什么都听不到，而判它死的是客户端自己——在心跳自己
+	//    许诺的容忍度之内。
+	// -----------------------------------------------------------------------------
 	process.stdout.write("a connection that stops speaking is declared dead without a request\n");
 
 	const liveAt = observed.channels.find((entry) => entry.state === "live")?.at ?? Date.now();
@@ -130,19 +127,18 @@ try {
 	);
 	check("and no request was sent to find any of this out", observed.errors.length === 0, JSON.stringify(observed.errors));
 
-	// ---------------------------------------------------------------------------------------------
-	// 3. The relay lets go: the client reconnects on its own, re-opens what it still wants by
-	//    reference, and the view is replaced by what the session looks like now.
-	// ---------------------------------------------------------------------------------------------
+	// -----------------------------------------------------------------------------
+	// 3. 中继松手：客户端自己重连，按引用重开它仍想要的东西，视图被 session 现在的样子整体
+	//    替换。
+	// -----------------------------------------------------------------------------
 	process.stdout.write("the reconnect re-opens what the window still wants\n");
 
 	proxy.blackout(false);
 	check("a second connection arrived at the relay", await until(() => proxy.connections === 2, 5_000), String(proxy.connections));
 	check("and the channel proved itself live again", await until(() => client.channel === "live", 3_000), JSON.stringify(observed.channels));
 
-	// The subscription table survived the drop on purpose, so the reconnect re-opened the pane's
-	// session and the server answered with a second baseline — the view is replaced whole, not
-	// appended to and not left showing whatever it remembered.
+	// 订阅表是有意要在断连中存活的，于是重连重开了窗格的 session，服务器以第二份基线作答
+	// ——视图被整体替换，既不是追加，也不是留着它记住的任何东西。
 	check("the session's stream was re-opened with a fresh baseline", await until(() => observed.baselines.length === 2, 3_000), String(observed.baselines.length));
 	check("the re-opened stream was not ended behind the window's back", observed.ended.length === 0, JSON.stringify(observed.ended));
 

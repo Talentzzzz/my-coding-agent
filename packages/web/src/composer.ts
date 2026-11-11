@@ -8,21 +8,20 @@ export interface ComposerHandlers {
 	onSelectModel(ref: string): void;
 	onSelectLevel(level: string): void;
 	/**
-	 * Open the mode menu over the mode button. The menu's rows are the window's to build — which
-	 * modes exist and which is on are state the composer does not hold — so this hands over the
-	 * anchor and nothing else.
+	 * 在模式按钮上方打开模式菜单。菜单的行由窗口来构建 —— 存在哪些模式、哪个开着，都是 composer
+	 * 不持有的状态 —— 所以这里只交出锚点，别无其他。
 	 */
 	onModes(anchor: HTMLElement): void;
-	/** Apply a mode to the session this window is on: its tool set and its approval map, whole. */
+	/** 对本窗口所在的会话应用一个模式：其工具集与审批表，整体生效。 */
 	onSelectMode(name: string): void;
 }
 
-/** The model seat: which row answers, and how hard it is asked to think. */
+/** 模型席位：哪一行应答，以及要求它多用力思考。 */
 export interface ComposerSelection {
 	models: readonly ModelOption[];
 	/**
-	 * The ref on screen, which may name a row that is no longer in `models` — or be the empty
-	 * string when nothing has been chosen yet, the state a window with no session open sits in.
+	 * 屏幕上的 ref，它可能指向 `models` 中已不存在的一行 —— 或者在尚未选择任何东西时为空字符串，
+	 * 即没有打开会话的窗口所处的状态。
 	 */
 	model: string;
 	levels: readonly string[];
@@ -30,11 +29,10 @@ export interface ComposerSelection {
 }
 
 /**
- * The model seat's label: the row's name, or the reason it names none.
+ * 模型席位的标签：行的名字，或它不指名任何一行的原因。
  *
- * Three ways to sit outside the list, and only one of them is a loss: nothing configured at all,
- * nothing chosen yet (the empty name — the seat is where the next conversation starts), and a name
- * whose row is gone. Only the last one names what was lost.
+ * 有三种处在列表之外的情形，只有其中一种是损失：什么都没配置、什么都还没选（空名字 —— 席位是
+ * 下一段对话开始的地方）、以及名字所指的行已不在。只有最后一种说出了丢了什么。
  */
 function modelLabel(selection: ComposerSelection): string {
 	const row = selection.models.find((model) => model.name === selection.model);
@@ -45,31 +43,25 @@ function modelLabel(selection: ComposerSelection): string {
 }
 
 /**
- * The prompt box.
+ * 输入框。
  *
- * Enter sends, Shift+Enter inserts a newline, and Escape aborts the run. Submitting while the agent
- * is working is accepted rather than refused: plain Enter queues a follow-up that waits for the run
- * to stop, Ctrl/Cmd+Enter steers it instead. The queued prompts are the session's own, drawn above
- * the bar by {@link setQueue} — the queue itself, as the server last published it.
+ * Enter 发送，Shift+Enter 换行，Escape 中止本轮运行。agent 工作时提交会被接受而非拒绝：普通
+ * Enter 排队一个等运行停止的后续消息，Ctrl/Cmd+Enter 则是插话（steer）。排队中的提示是会话自己的，
+ * 由 {@link setQueue} 画在输入条上方 —— 队列本身，即服务端最后一次发布的版本。
  *
- * The box grows with its content up to a cap. A prompt is often several lines — a stack trace, a
- * list of files — and a box that scrolls after two of them hides the thing being written.
+ * 输入框随内容增长，直到上限。提示常常有好几行 —— 一段堆栈、一个文件列表 —— 一个两行后就开始
+ * 滚动的框会藏住正在写的东西。
  *
- * There are no hint lines and no placeholder: the two lines of instruction the bar used to carry
- * were chrome the reader had already learned (01 ④), and the seat that names the model sits on the
- * bar's right end for the same reason it sits on the bar at all — which model answers, and how hard
- * it is asked to think, are chosen per conversation and often changed inside one. Both halves are
- * held by the window until a message is sent with them — nothing here reaches the server until
- * then — so the seat is drawn from {@link setSelection} and its changes are reported as plain
- * choices.
+ * 没有提示行也没有占位符：输入条过去带着的两行说明，是读者早已学会的多余装饰（01 ④）；为模型
+ * 命名的席位坐在输入条右端，理由与它坐在输入条上相同 —— 哪个模型应答、要求它多用力思考，都是
+ * 按对话选择的，且经常在一段对话内改变。这两半在消息发出之前都由窗口持有 —— 在那之前这里没有
+ * 任何东西到达服务端 —— 所以席位从 {@link setSelection} 绘制，它的变更以普通选择的形式上报。
  *
- * The bar's three pickers — mode, model, level — are all one thing: a chip that opens the window's
- * menu over itself. They used to be native `select`s, and the model and level ones were the last
- * two in the window, but a native popup is drawn by the platform rather than by the theme: on a dark
- * window it arrives as a light rectangle. The seats read at every glance are the worst place for a
- * control that leaves the theme, so they wear the menu the directory picker already had. All three
- * open upward, because the bar sits on the window's bottom edge and a menu hung underneath it would
- * have nowhere to go.
+ * 输入条的三个选择器 —— 模式、模型、档位 —— 是同一样东西：一个在自己上方打开窗口菜单的 chip。
+ * 它们过去是原生 `select`，模型和档位是窗口里最后两个原生控件，但原生弹窗由平台而不是主题绘制：
+ * 在深色窗口上它是一块亮色矩形。每次都会被看到的席位，是最不该出现脱离主题控件的地方，所以它们
+ * 穿上了目录选择器已有的菜单。三者都向上打开，因为输入条贴着窗口下边缘，挂在下面的菜单将无处
+ * 安放。
  */
 export class Composer {
 	readonly element: HTMLFormElement;
@@ -83,11 +75,11 @@ export class Composer {
 	private readonly modelLabelText: HTMLSpanElement;
 	private readonly levelButton: HTMLButtonElement;
 	private readonly levelLabelText: HTMLSpanElement;
-	/** What the two menus are built from: the choices on screen, as of the last draw. */
+	/** 两个菜单的构建来源：屏幕上的选项，截至上一次绘制。 */
 	private selection: ComposerSelection = { models: [], model: "", levels: [], level: "" };
 	private modelSignature = "";
 	private levelSignature = "";
-	/** The mode name the label was last drawn from; a gate, like the model and level signatures. */
+	/** 标签最后一次绘制所依据的模式名；与模型、档位的签名一样是一道门。 */
 	private modeSignature: string | undefined;
 	private streaming = false;
 	private disabled = false;
@@ -105,11 +97,10 @@ export class Composer {
 		this.queue = element("div", "composer-queue");
 		this.queue.hidden = true;
 
-		// The mode seat leads the bar's left end: which preset of tools and approvals the session runs
-		// on is chosen while working and read at a glance, and the bar's left is where such controls
-		// live. It is the only seat there — the session's tools and approvals are set only by picking
-		// a mode, so there is no second door that could disagree with the one on screen. The menu
-		// itself opens through the handler — the rows are the window's to build from its own state.
+		// 模式席位位于输入条左端：会话运行在哪套工具与审批预设上，是工作中选择、扫一眼就读的东西，
+		// 而输入条左端正是这类控件所在。它是那里唯一的席位 —— 会话的工具与审批只能通过选模式设置，
+		// 所以不存在可能与屏幕上那扇门不一致的第二扇门。菜单本身经 handler 打开 —— 行由窗口用它
+		// 自己的状态来构建。
 		this.modeButton = element("button", "composer-mode", undefined, {
 			type: "button",
 			"aria-haspopup": "menu",
@@ -119,9 +110,8 @@ export class Composer {
 		this.modeButton.append(icon("sliders"), this.modeLabel, icon("chevron"));
 		this.modeButton.addEventListener("click", () => handlers.onModes(this.modeButton));
 
-		// The model seat: two chips of the mode seat's grammar — a label and a chevron — each opening
-		// the window's menu over itself. They are buttons rather than native selects because the menu
-		// they open is drawn from this window's tokens; see the class comment.
+		// 模型席位：模式席位语法里的两个 chip —— 一个标签和一个 chevron —— 各自在自己上方打开
+		// 窗口的菜单。它们是按钮而不是原生 select，因为打开的菜单由本窗口的 token 绘制；见类注释。
 		this.modelButton = element("button", "composer-pick", undefined, {
 			type: "button",
 			"aria-haspopup": "menu",
@@ -162,8 +152,7 @@ export class Composer {
 			);
 		});
 
-		// The model seat keeps the bar's right end, the model picking just left of the send button. The
-		// mode seat is the bar's left end; nothing else leads there.
+		// 模型席位守住输入条右端，紧挨发送按钮左侧。模式席位是输入条左端；没有别的控件在那里打头。
 		const seat = element("div", "composer-seat");
 		seat.append(this.modelButton, this.levelButton);
 
@@ -185,8 +174,8 @@ export class Composer {
 		this.textarea.addEventListener("keydown", (event) => {
 			if (event.key === "Enter" && !event.shiftKey) {
 				event.preventDefault();
-				// Idle either way: the session starts a run rather than queueing. The distinction only
-				// matters while one is streaming, which is where Ctrl/Cmd+Enter steers.
+			// 两种情形都是空闲：会话开启一次运行而不是排队。这个区分只在流式进行中才有意义，
+			// Ctrl/Cmd+Enter 正是在那时插话。
 				this.submit(handlers, this.streaming && (event.ctrlKey || event.metaKey) ? "steer" : "followUp");
 				return;
 			}
@@ -203,7 +192,7 @@ export class Composer {
 		this.textarea.focus();
 	}
 
-	/** Put text back in the box, for a command that consumed it and then failed. */
+	/** 把文本放回输入框，给一条消费了文本却失败了的命令。 */
 	setDraft(text: string): void {
 		this.textarea.value = text;
 		this.resize();
@@ -221,11 +210,11 @@ export class Composer {
 	}
 
 	/**
-	 * Draw the queued prompts, one quiet row each.
+	 * 绘制排队中的提示，每条一行，安静地。
 	 *
-	 * The list is the server's last published word, not a local echo: it is replaced whole on every
-	 * queue change, so a drain takes a row away exactly when the server says it did. The text is
-	 * what the sender wrote, first line only — a row names the message rather than retelling it.
+	 * 列表是服务端最后一次发布的内容，不是本地回显：每次队列变更都整体替换，所以一条消息被排干
+	 * 的时刻正是服务端说它被排干的时刻。文本是发送者写下的第一行 —— 一行只是点名这条消息，而不是
+	 * 复述它。
 	 */
 	setQueue(queued: readonly QueuedPrompt[]): void {
 		this.queue.hidden = queued.length === 0;
@@ -239,17 +228,14 @@ export class Composer {
 	}
 
 	/**
-	 * Draw the model seat.
+	 * 绘制模型席位。
 	 *
-	 * The labels are rewritten only when the thing they name moved, so an ordinary re-render — which
-	 * happens on every token — cannot close a menu the user has open or drop a value mid-choice. The
-	 * menus themselves are built when they open, from {@link selection}, for the same reason: a menu
-	 * built from a stale list would list choices the seat no longer agrees with.
+	 * 只有标签所指的东西移动了才重写标签，于是一次普通的重渲染 —— 每个 token 都会发生 —— 不会
+	 * 关掉用户正打开的菜单，也不会在选择中途丢掉值。菜单本身在打开时才从 {@link selection} 构建，
+	 * 出于同样的原因：用过期列表构建的菜单，会列出席位已不再同意的选项。
 	 *
-	 * The session's own ref is always accounted for: a row may have been deleted, never existed at
-	 * all for a session with nothing configured, or not have been chosen yet at all — and the seat
-	 * has to show where the choice actually stands rather than silently agree with a list that no
-	 * longer mentions it.
+	 * 会话自己的 ref 永远被计入：行可能被删除、对什么都没配置的会话而言从未存在过、或者根本还没选
+	 * —— 席位必须显示选择实际所处的位置，而不是默默附和一份不再提到它的列表。
 	 */
 	setSelection(selection: ComposerSelection): void {
 		this.selection = selection;
@@ -259,8 +245,7 @@ export class Composer {
 			this.modelSignature = modelSignature;
 			const label = modelLabel(selection);
 			this.modelLabelText.textContent = label;
-			// The chip is one line, so a name too long to fit is shortened on screen — the tooltip is
-			// where it stays whole.
+			// chip 只有一行，所以放不下的长名在屏幕上被截短 —— tooltip 是它保持完整的地方。
 			this.modelButton.title = label;
 			this.modelButton.disabled = selection.models.length === 0;
 		}
@@ -270,17 +255,16 @@ export class Composer {
 			this.levelSignature = levelSignature;
 			this.levelLabelText.textContent = selection.level.length === 0 ? "思考档位" : selection.level;
 		}
-		// One level is not a choice: a model that cannot think has nothing to pick between.
+		// 只有一个档位不算选择：不能思考的模型没有可在其间挑选的东西。
 		this.levelButton.hidden = selection.levels.length <= 1;
 	}
 
 	/**
-	 * Draw the mode seat's label.
+	 * 绘制模式席位的标签。
 	 *
-	 * The name is the only thing the button holds: which presets exist and what they contain belong
-	 * to the menu, which is rebuilt on every open. An unmatched session — one whose tools and
-	 * approvals no mode names, usually one left behind by a mode edited since — shows 「自定义」
-	 * rather than pretending to be on a preset it has left.
+	 * 名字是按钮唯一持有的东西：存在哪些预设、预设里有什么，属于每次打开时重建的菜单。一个不匹配
+	 * 的会话 —— 其工具与审批没有哪个模式指名，通常是模式被编辑后留下的 —— 显示「自定义」，而不是
+	 * 假装它还停留在已经离开的预设上。
 	 */
 	setModes(current: string | undefined): void {
 		const label = current ?? "自定义";
@@ -299,7 +283,7 @@ export class Composer {
 		this.send.disabled = this.disabled;
 	}
 
-	/** Grow to fit the content, up to the stylesheet's cap, then scroll. */
+	/** 长到装下内容为止，到达样式表的上限后滚动。 */
 	private resize(): void {
 		this.textarea.style.height = "auto";
 		this.textarea.style.height = `${this.textarea.scrollHeight}px`;
@@ -314,7 +298,7 @@ export class Composer {
 	}
 }
 
-/** The first non-empty line of a message, which is what a queue row has room for. */
+/** 消息的第一个非空行，一行排队提示只有这么多空间。 */
 function firstLine(text: string): string {
 	for (const line of text.split("\n")) {
 		const trimmed = line.trim();

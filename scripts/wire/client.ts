@@ -254,8 +254,8 @@ export function until(ready: () => boolean | Promise<boolean>, ms = 5_000): Prom
 	const sleep = (step: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, step));
 	return (async () => {
 		while (Date.now() < deadline) {
-			// Awaited, not just tested: a truthy Promise from an async predicate would read as
-			// "ready" on the first poll and turn the whole wait into a no-op.
+			// 必须真正 await，而不只是判真值：async 谓词返回的 Promise 在第一次轮询时就会被当成
+			// "ready"，整个等待就退化为一次空转。
 			if (await ready()) return true;
 			await sleep(POLL_MS);
 		}

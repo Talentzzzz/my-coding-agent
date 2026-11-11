@@ -1,15 +1,12 @@
 /**
- * A real-Chromium harness over the DevTools protocol.
+ * 建立在 DevTools protocol 之上的真 Chromium 装置。
  *
- * The smokes drive the client on a DOM shim, which has no layout and no compositor: it can say a
- * node exists, not that it sits in the middle of the canvas, and it cannot show a frame. Anything
- * about what the window looks like or how it paints has to be read back from a browser that lays
- * out — and the browser has to be the same Chromium generation the desktop shell runs, because that
- * is the engine the person is actually looking at.
+ * smoke 在 DOM shim 上驱动客户端，而 shim 没有布局、没有合成器：它能说某个节点存在，说不了它
+ * 是否坐在画布中央，也画不出一帧。窗口看起来什么样、如何绘制这类问题必须从一台真的会做布局的
+ * 浏览器读回——而且这台浏览器必须与桌面外壳运行的 Chromium 同代，因为那才是人真正在看的引擎。
  *
- * Nothing here needs a dependency: Chrome speaks JSON over a WebSocket, and Node has both. The
- * browser is started headless with a throwaway profile, so no session, extension, or theme of the
- * machine's own Chrome leaks into a capture.
+ * 这里不需要任何依赖：Chrome 用 WebSocket 说 JSON，Node 两样都有。浏览器以无头模式、一次性
+ * profile 启动，机器自己的 Chrome 的会话、扩展或主题都不会泄进截图。
  */
 
 import { spawn } from "node:child_process";
@@ -17,7 +14,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-/** Where a Chromium binary might be, most specific first. `CHROME_PATH` always wins. */
+/** Chromium 二进制可能所在的位置，按具体程度排序。`CHROME_PATH` 永远优先。 */
 const CHROME_CANDIDATES = [
 	process.env.CHROME_PATH,
 	process.env.ProgramFiles === undefined ? undefined : join(process.env.ProgramFiles, "Google/Chrome/Application/chrome.exe"),
@@ -34,7 +31,7 @@ const CHROME_CANDIDATES = [
 	"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 ];
 
-/** The Chromium binary this run will drive, or a sentence naming what to install. */
+/** 本次运行要驱动的 Chromium 二进制，或一句说明该装什么的报错。 */
 export function browserPath(): string {
 	for (const candidate of CHROME_CANDIDATES) {
 		if (candidate !== undefined && existsSync(candidate)) return candidate;
@@ -43,20 +40,20 @@ export function browserPath(): string {
 }
 
 export interface Chromium {
-	/** The port the DevTools endpoint listens on, chosen by the OS. */
+	/** DevTools 端点监听的端口，由操作系统挑选。 */
 	port: number;
 	close(): Promise<void>;
 }
 
-/** Start a headless Chromium window of the given size and wait until it is listening. */
+/** 启动一个指定尺寸的无头 Chromium 窗口，等到它开始监听为止。 */
 export async function launchChromium(size: { width: number; height: number } = { width: 1280, height: 820 }): Promise<Chromium> {
 	const profile = mkdtempSync(join(tmpdir(), "my-agent-cdp-"));
 	const child = spawn(
 		browserPath(),
 		[
 			"--headless=new",
-			// Port 0: the OS picks a free one, so two captures never collide. The chosen number and
-			// the browser's WebSocket path land in `DevToolsActivePort` once it is listening.
+			// 端口 0：由操作系统挑一个空闲端口，两次截图不会相撞。选定的号码与浏览器的 WebSocket
+			// 路径在它开始监听后落进 `DevToolsActivePort`。
 			"--remote-debugging-port=0",
 			`--user-data-dir=${profile}`,
 			`--window-size=${size.width},${size.height}`,
@@ -65,13 +62,13 @@ export async function launchChromium(size: { width: number; height: number } = {
 			"--disable-background-networking",
 			"--disable-sync",
 			"--disable-features=Translate,MediaRouter",
-			// The app under measurement is driven by timers and frames; Chromium throttles both in a
-			// window it believes is hidden, which headless is.
+			// 被测应用靠定时器和帧驱动；Chromium 会节流它认为隐藏的窗口里的这两样，无头窗口正是
+			// 隐藏的。
 			"--disable-background-timer-throttling",
 			"--disable-renderer-backgrounding",
 			"--disable-backgrounding-occluded-windows",
-			// The harness only ever drives a localhost dev server, and a machine-level proxy
-			// (HTTP_PROXY or the system's own) would otherwise swallow even that.
+			// 装置只会驱动一个 localhost 开发服务器，而机器级代理（HTTP_PROXY 或系统自己的）
+			// 否则会把它也吞掉。
 			"--no-proxy-server",
 			"about:blank",
 		],
@@ -90,11 +87,11 @@ export async function launchChromium(size: { width: number; height: number } = {
 		if (exited) throw new Error("Chromium 一启动就退出了");
 		if (Date.now() > deadline) throw new Error("等不到 Chromium 的 DevTools 端口");
 		try {
-			// Two lines: the port, then the browser target's path.
+			// 两行：第一行是端口，第二行是浏览器 target 的路径。
 			const first = readFileSync(portFile, "utf8").split("\n")[0];
 			if (first !== undefined && first !== "") port = Number.parseInt(first, 10);
 		} catch {
-			// The file appears only once the browser is listening; until then there is nothing to read.
+			// 文件只在浏览器开始监听后才出现；在那之前没有东西可读。
 		}
 		if (port === undefined) await new Promise((done) => setTimeout(done, 50));
 	}
@@ -113,19 +110,19 @@ export async function launchChromium(size: { width: number; height: number } = {
 }
 
 export interface Page {
-	/** One protocol call; resolves with the `result` member. */
+	/** 一次协议调用；以 `result` 成员落定。 */
 	send(method: string, params?: Record<string, unknown>): Promise<unknown>;
-	/** Listen for one protocol event (only the ones a measurement wants are worth subscribing to). */
+	/** 监听一个协议事件（只订阅测量想要的那些才值得）。 */
 	on(event: string, listener: (params: Record<string, unknown>) => void): void;
-	/** Run an expression in the page and return its value, or throw with the page's own error. */
+	/** 在页面里执行一段表达式并返回其值，页面自己的报错则抛出。 */
 	evaluate<T>(expression: string): Promise<T>;
-	/** Poll an expression until it is true. */
+	/** 轮询一个表达式直到为真。 */
 	waitFor(expression: string, timeoutMs?: number): Promise<void>;
-	/** Press an element; throws when the selector matches nothing. */
+	/** 按下一个元素；selector 匹配不到时抛出。 */
 	click(selector: string): Promise<void>;
-	/** Press an element with the pointer: a press and a release at its centre. */
+	/** 用指针按下元素：在其中心一次按下与一次释放。 */
 	press(selector: string): Promise<void>;
-	/** Write a PNG of the current viewport. */
+	/** 把当前视口写成一张 PNG。 */
 	screenshot(file: string): Promise<void>;
 	close(): Promise<void>;
 }
@@ -141,11 +138,10 @@ interface Target {
 }
 
 /**
- * Open a page target on the browser at `port` and navigate it to `url`.
+ * 在 `port` 的浏览器上打开一个 page target，并导航到 `url`。
  *
- * The viewport is pinned with `Emulation.setDeviceMetricsOverride` rather than left to the window
- * size: a capture has to be the same box every run, and the override is what a CDP client can also
- * change mid-run (a narrower window, a bigger font scale).
+ * 视口用 `Emulation.setDeviceMetricsOverride` 钉住，而不是交给窗口尺寸决定：截图每一次运行都得
+ * 是同一个盒子，而且这份 override 也是 CDP 客户端能在运行中改的（更窄的窗口、更大的字体缩放）。
  */
 export async function openPage(
 	port: number,
@@ -238,8 +234,8 @@ export async function openPage(
 				})()`,
 			);
 			if (centre === null) throw new Error(`找不到可按的元素：${selector}`);
-			// A real press, not `click()`: the branch page decides selection on `pointerup` so a pan
-			// never selects what it stopped on, and a synthetic click would never reach that handler.
+			// 真正的按下，不是 `click()`：branch 页面在 `pointerup` 上才决定选中，这样平移就不会
+			// 选中它停下的东西，而合成的 click 永远到不了那个 handler。
 			await send("Input.dispatchMouseEvent", { type: "mousePressed", x: centre.x, y: centre.y, button: "left", clickCount: 1 });
 			await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: centre.x, y: centre.y, button: "left", clickCount: 1 });
 		},
@@ -255,8 +251,7 @@ export async function openPage(
 	await send("Page.enable");
 	await send("Runtime.enable");
 	if (options.initScript !== undefined) {
-		// Before the document exists: an observer installed after the app has booted would miss the
-		// frames and long tasks this run exists to count.
+		// 在文档存在之前注入：应用启动后才装的 observer 会错过本次运行要统计的帧与长任务。
 		await send("Page.addScriptToEvaluateOnNewDocument", { source: options.initScript });
 	}
 	await send("Emulation.setDeviceMetricsOverride", {

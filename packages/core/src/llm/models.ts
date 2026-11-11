@@ -1,26 +1,23 @@
-// Vendored from @earendil-works/pi-ai (0.99.2) and cut down to what this app drives: the facts about
-// a model that a request depends on. Upstream this file is also the provider registry — `Provider`,
-// `Models`, `createProvider`, auth resolution, and the per-type dispatch that goes with them — and
-// none of that survives here. This app has one transport and one key per model, so a catalog of
-// providers was a registry of one entry whose only content was a string it already had. @ts-nocheck
-// keeps the repo root's stricter config from flagging this file, while every import into
-// packages/core stays fully checked.
+// 从 pi-ai（0.99.2）裁剪到本应用驱动的范围：一次请求所依赖的模型事实。上游这个文件还是 provider
+// 注册表——`Provider`、`Models`、`createProvider`、auth 解析和随之而来的按类型分发——这些在这里
+// 都没有活下来。本应用只有一个传输、每个模型一把 key，所以一目录的 provider 只是一行条目的注册表，
+// 其全部内容还是一个已经持有的字符串。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
 import type { ThinkingLevel } from "./types.ts";
 
 export { ModelsError, type ModelsErrorCode } from "./utils/models-error.ts";
 
 /**
- * The levels every model this build can drive is asked at, lowest first.
+ * 本构建能驱动的每个模型被请求的 level，从低到高。
  *
- * The list is constant because the answer no longer depends on the model: an effort is the one
- * strength this wire carries, every Anthropic-Messages endpoint takes the three, and a model that
- * cannot think is simply left at `off`. It is the same list `ThinkingLevel` names, and the same one
- * the composer renders.
+ * 这个列表是常量，因为答案已不再依赖模型：effort 是这条 wire 携带的唯一强度，每个 Anthropic-Messages
+ * 端点都接受这三档，不能思考的模型就停在 `off`。它就是 `ThinkingLevel` 指名的那个列表，也是
+ * composer 渲染的那个。
  */
 const SUPPORTED_THINKING_LEVELS: ThinkingLevel[] = ["off", "low", "high", "max"];
 
-/** Every thinking level a session can be in, lowest first. */
+/** session 可以处于的所有 thinking level，从低到高。 */
 export function getSupportedThinkingLevels(): ThinkingLevel[] {
 	return [...SUPPORTED_THINKING_LEVELS];
 }

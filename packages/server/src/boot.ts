@@ -13,81 +13,69 @@ import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 /**
- * Client source for `vite`, and the built assets otherwise. Both resolve inside packages/web, so
- * this module has to stay one directory below the package root for them to keep pointing at it.
+ * `vite` 模式下的 client 源码目录，其余情况是构建产物。两者都解析到 packages/web 内，所以本模块必须留在包根的下一级目录，这些路径才能继续指向它。
  */
 const WEB_DIR = fileURLToPath(new URL("../../web", import.meta.url));
 const CLIENT_DIR = fileURLToPath(new URL("../../web/dist", import.meta.url));
 
-/** Where the mux lives. One path, and it is not under `/api`: it is not a REST resource. */
+/** mux 所在的路径。只有这一个，且不在 `/api` 之下：它不是 REST 资源。 */
 const MUX_PATH = "/mux";
 
 export interface BootOptions {
-	/** The directory the agent may touch. */
+	/** agent 可以触碰的目录。 */
 	workDirAbsPath: string;
-	/** Bind address. Defaults to `127.0.0.1`: this server is for its own machine. */
+	/** 绑定地址。默认 `127.0.0.1`：这个服务器只服务自己的机器。 */
 	host?: string;
 	/**
-	 * Port to bind. Defaults to 8080; `0` asks the operating system for a free one, which is what a
-	 * desktop shell wants so two applications never fight over a fixed number.
+	 * 绑定端口。默认 8080；`0` 向操作系统要一个空闲端口，桌面 shell 要的就是这个，两个应用永远不为一个固定数字争执。
 	 */
 	port?: number;
 	sessionId?: string;
 	/**
-	 * The agent home the global settings are read from and written to. Defaults to the real one.
+	 * 读取和写入全局设置所用的 agent home。默认是真实的那一个。
 	 *
-	 * A pass-through for one reason: a smoke that drives a command which writes settings — hiding a
-	 * directory, say — would otherwise edit the machine's own `settings.json`. Nothing in production
-	 * sets it.
+	 * 提供这个透传只有一个原因：驱动写设置命令的 smoke——比如隐藏一个目录——否则会改到机器自己的 `settings.json`。生产中没有任何东西设置它。
 	 */
 	settingsHome?: string;
 	/**
-	 * The transport every session this server opens talks to.
+	 * 本服务器打开的每个会话所对话的 transport。
 	 *
-	 * Omitted in the real process, where it means Anthropic Messages. A smoke passes a scripted
-	 * transport so a run can be driven — parked on an approval, most importantly — with no provider
-	 * key. The pass-through is the whole reason the option exists: the shutdown smoke needs the real
-	 * boot path, including the real hub, behind its worst case.
+	 * 真实进程里省略，意味着 Anthropic Messages。smoke 传入脚本化的 transport，让一次运行可以被驱动——最关键的是停在一个审批上——而完全不需要 provider key。这个透传正是该选项存在的全部理由：shutdown smoke 需要真实的 boot 路径，包括真实的 hub，直面它的最坏情况。
 	 */
 	api?: ChatTransport;
 	/**
-	 * The mux's own timers and budgets, overridable so a smoke can drive them in milliseconds.
+	 * mux 自己的定时器和预算，可覆盖以便 smoke 用毫秒驱动它们。
 	 *
-	 * A pass-through rather than a field per timer: the connection layer owns what these mean, and
-	 * restating them here would be a second place to keep them honest. Nothing in production sets it.
+	 * 用透传而不是逐字段的枚举：连接层拥有这些值的含义，在这里复述等于多一个要保持诚实的地方。生产中没有任何东西设置它。
 	 */
 	mux?: MuxOptions;
-	/** Serve the client through Vite instead of the built assets, for hot reload. */
+	/** 用 Vite 服务 client 而不是构建产物，用于热更新。 */
 	vite?: boolean;
 }
 
 export interface BootedServer {
-	/** Where the client and the API are reachable, with the port actually bound. */
+	/** client 和 API 可达的地址，端口是实际绑定的那个。 */
 	url: string;
 	port: number;
 	workDirAbsPath: string;
 	hub: SessionHub;
 	/**
-	 * What this process knows about every session, as sidebar rows.
+	 * 本进程对每个会话所知的信息，以侧栏行的形式。
 	 *
-	 * Built here rather than inside the hub because it is a *reader* of the hub's two observation
-	 * points, not a part of session lifetime: a caller that wants the rows asks this, and nothing about
-	 * a hold, a reap or a host's closing depends on it having asked.
+	 * 在这里构建而不是在 hub 内部，因为它是 hub 两个观察点的*读取者*，不是会话生命周期的一部分：想要这些行的调用者来这里要，而 hold、reap 或宿主关闭都不依赖它问过。
 	 */
 	projection: SessionProjection;
-	/** The resident connection layer: one per upgraded socket. */
+	/** 常驻连接层：每个升级的 socket 一个。 */
 	mux: MuxServer;
 	server: HttpServerHandle;
-	/** Close the connections first, then the sessions, then the listener. */
+	/** 先关连接，再关会话，最后关监听器。 */
 	close(): Promise<void>;
 }
 
 /**
- * Start the API and the client on one listener.
+ * 在一个监听器上启动 API 和 client。
  *
- * This is the whole server as one call, because a host that embeds it — the CLI, a smoke script, the
- * desktop shell — should not have to rebuild the object graph the wiring describes. `main.ts` is the
- * command-line face of this function and owns nothing on its own.
+ * 整个服务器就是这一次调用，因为嵌入它的宿主——CLI、smoke 脚本、桌面 shell——不应该被迫重建 wiring 描述的对象图。`main.ts` 是这个函数的命令行面孔，自身不拥有任何东西。
  */
 export async function bootServer(options: BootOptions): Promise<BootedServer> {
 	const workDirAbsPath = options.workDirAbsPath;
@@ -101,31 +89,23 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 
 	const hub = new SessionHub({
 		workDirAbsPath,
-		// A shell with no project picker yet has no other way to be pointed at a conversation; the
-		// environment is how a launcher or a capture run says which one to open.
+		// 还没有项目选择器的 shell 除此之外无法被指向某个会话；环境变量是启动器或采集运行指明打开哪个会话的方式。
 		...(sessionId === undefined ? {} : { sessionId }),
 		...(options.settingsHome === undefined ? {} : { settingsHome: options.settingsHome }),
 		...(options.api === undefined ? {} : { api: options.api }),
 	});
 
-	// The mux holds the connections, and the projection is built against the hub rather than wired
-	// into it: the projection observes which sessions exist and what they are doing, and neither of
-	// those is allowed to keep a session alive or hurry its closing.
+	// mux 持有连接，projection 针对 hub 构建而不是接入 hub：projection 观察哪些会话存在、它们在做什么，而这两者都不允许让会话保持存活或催促它关闭。
 	//
-	// Order matters only in that the mux needs the projection — its first frame on every connection is
-	// the overview, so it has to be able to answer "what sessions exist" before any window asks.
+	// 顺序之所以重要，仅仅因为 mux 需要 projection——它在每条连接上的第一帧就是 overview，所以必须能在任何窗口开口之前回答"有哪些会话"。
 	const projection = createSessionProjection(hub);
 	const mux = createMuxServer(hub, projection, options.mux ?? {});
-	// One listener set for both controllers, and built before either: a directory rename is received
-	// by the system controller and lands on the projection, which is the same piece the session
-	// controller's rename and delete go through.
+	// 两个 controller 共用一组 listener，且在两者之前构建：目录改名由 system controller 接收，落在 projection 上——与会话 controller 的 rename 和 delete 走的是同一块。
 	const listeners = sessionListeners(mux, projection);
 	const router = new Router(
 		createRoutes({
 			system: new SystemController(hub, listeners),
-			// Both listeners are facts about a run rather than about a request that is still open, and
-			// both are the transport's business: see {@link sessionListeners}, which is the one home
-			// they have so a smoke can be wired through the same function this server is.
+			// 两个 listener 都是关于一次运行的事实，而不是关于某个仍开着的请求，且都是 transport 的分内事：见 {@link sessionListeners}，那是它们唯一的家，smoke 借此可以经由与本服务器相同的函数接线。
 			sessions: new SessionController(hub, listeners),
 		}),
 	);
@@ -149,21 +129,17 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 		mux,
 		server,
 		close: async () => {
-			// Connections first, and before the sessions: a window's subscriptions are released while the
-			// sessions they were watching are still there, so nothing has to be torn down from underneath
-			// a live feed. The projection goes first of all because it only listens — nothing it holds can
-			// delay what comes after.
+			// 先关连接，且在会话之前：窗口的订阅在它们正在观看的会话还在时被释放，不需要从活着的 feed 底下拆东西。projection 最先关闭，因为它只监听——它持有的任何东西都不能拖住后面的事。
 			projection.close();
 			mux.close();
-			// The upgraded sockets are destroyed by the listener's own close, which is the only place that
-			// can reach them; the mux only stops wanting them.
+			// 升级的 socket 由监听器自己的 close 销毁，那是唯一能碰到它们的地方；mux 只是停止需要它们。
 			await hub.close();
 			await server.close();
 		},
 	};
 }
 
-/** The path of a request URL, without its query. */
+/** 请求 URL 的路径，不含 query。 */
 function pathOf(url: string | undefined): string {
 	const raw = url ?? "/";
 	const end = raw.indexOf("?");
@@ -171,33 +147,23 @@ function pathOf(url: string | undefined): string {
 }
 
 /**
- * The mux's `upgrade` handler, as one function of the server it serves.
+ * mux 的 `upgrade` handler，作为它所服务服务器的一个函数。
  *
- * Lifted out of `bootServer` because the assembly it wires is not a boot-time secret: a smoke that
- * builds its own graph (a scripted model in place of a provider, a hub of its own) needs exactly this
- * wiring in front of its own mux, and duplicating it would put the subtle parts — the frames that
- * arrive before `accept()` returns, the Pong that is the only liveness evidence this side gets —
- * into three copies that drift. The handler is the same for every server; what differs is which mux
- * stands behind it.
+ * 从 `bootServer` 里提出来，因为它接的线不是 boot 期的秘密：自建对象图的 smoke（用脚本化模型替代 provider、用自己的 hub）恰恰需要在自己的 mux 前面接上这段 wiring，复制它会让微妙的部分——在 `accept()` 返回之前到达的 frame、作为本侧唯一存活证据的 Pong——散落成三份各自漂移的拷贝。handler 对每个服务器都相同；不同的只是站在它背后的 mux。
  */
 export function muxUpgrade(
 	mux: MuxServer,
 ): (request: IncomingMessage, socket: Duplex, head: Buffer) => boolean {
 	return (request, socket, head) => {
 		if (pathOf(request.url) !== MUX_PATH) {
-			// Destroyed here rather than declined, because declining is not a thing this server can do:
-			// once any `upgrade` listener exists, Node has already handed the socket over and will
-			// never touch it again. Returning without destroying leaves it open forever — and
-			// `server.close()` never calls back while one is, so a single stray `Upgrade:` header to
-			// any other path would wedge shutdown permanently.
+			// 在这里销毁而不是拒绝，因为拒绝不是本服务器能做的事：只要存在任何 `upgrade` 监听器，Node 就已经把 socket 交出且永远不会再碰它。不销毁就返回会让它永远开着——而只要有一个开着，`server.close()` 就永远不回调，所以任何一个打到别的路径上的 `Upgrade:` 头都会把 shutdown 永久卡死。
 			socket.destroy();
 			return true;
 		}
 		const connection = WebSocketConnection.accept(request, socket);
 		if (connection === undefined) return true;
 
-		// `FrameSink` over the WebSocket, so the connection layer's policy never sees a socket and the
-		// frame codec never sees a subscription. This is the seam the whole split rests on.
+		// WebSocket 之上的 `FrameSink`，让连接层的策略永远看不到 socket，frame 编解码永远看不到订阅。整个分层就系在这条缝上。
 		const sink: FrameSink = {
 			send: (frame) => connection.send(JSON.stringify(frame)),
 			ping: () => connection.ping(),
@@ -209,14 +175,9 @@ export function muxUpgrade(
 		};
 
 		/**
-		 * Uplink frames that arrived before the connection object existed.
+		 * 在连接对象存在之前到达的上行 frame。
 		 *
-		 * `accept()` awaits the projection's first read, so it cannot hand back a connection
-		 * synchronously — and a client whose first act is `open` puts that frame in the very TCP
-		 * segment as the handshake, which is replayed *before* `accept()` is even called. Dropping
-		 * those frames would leave that client waiting for a baseline that was never going to come,
-		 * while heartbeats kept its watchdog fed so it never noticed. So they wait here instead, in
-		 * order, and are replayed the moment there is something to replay them to.
+		 * `accept()` 要 await projection 的首次读取，所以无法同步交回连接——而第一个动作就是 `open` 的客户端会把那个 frame 放在与握手同一个 TCP segment 里，它甚至在 `accept()` 被调用*之前*就被 replay。丢掉这些 frame 会让那个客户端永远等一个不会到来的 baseline，而心跳还在喂它的看门狗，令它毫无察觉。所以它们在这里按顺序等待，一旦有了可交付的对象立刻 replay。
 		 */
 		const waiting: string[] = [];
 
@@ -230,16 +191,14 @@ export function muxUpgrade(
 				mux.handle(owned, text);
 			},
 			onClose: () => {
-				// Nothing to forget if the connection never became one, but the pending frames are
-				// dropped either way: there is no longer anything they could be delivered to.
+				// 连接从未成为会话对象时没有东西要忘，但挂起的 frame 无论如何都要丢：已经没有可以把它们送达的对象了。
 				waiting.length = 0;
 				if (owned !== undefined) mux.forget(owned);
 			},
 			onProtocolError: (reason) => {
 				console.warn(`mux: 协议错误，关闭连接：${reason}`);
 			},
-			// The only evidence of liveness this side gets. Without it the connection layer would
-			// count unanswered Pings against a peer that is answering perfectly well, and drop it.
+			// 本侧能得到的唯一存活证据。没有它，连接层会把未应答的 Ping 记在一个应答完全正常的 peer 头上，并把它丢掉。
 			onPong: () => {
 				if (owned !== undefined) mux.notePong(owned);
 			},
@@ -249,14 +208,12 @@ export function muxUpgrade(
 			.accept(sink)
 			.then((accepted) => {
 				owned = accepted;
-				// A connection that ended during the (awaited) overview read must not be left in the
-				// server's set with nothing left to close it.
+				// 在（被 await 的）overview 读取期间结束的连接，不能留在服务器的集合里却没有留下任何能关闭它的东西。
 				if (connection.isClosed) {
 					mux.forget(accepted);
 					return;
 				}
-				// Only safe once the connection is known to be live: the first frame it receives is the
-				// overview, so a client cannot tell these from its own until it has seen one anyway.
+				// 只有在确认连接活着之后才安全：它收到的第一帧是 overview，客户端反正无法把这些和自己的 frame 区分开。
 				for (const text of waiting.splice(0)) mux.handle(accepted, text);
 			})
 			.catch((error: unknown) => {
@@ -268,19 +225,11 @@ export function muxUpgrade(
 }
 
 /**
- * What a session controller tells the transport about, wired once for every server that serves one.
+ * 会话 controller 向 transport 报告的事项，为每个服务会话的服务器接线一次。
  *
- * Lifted out of `bootServer` for the same reason {@link muxUpgrade} was: this wiring is not a
- * boot-time secret, and a smoke that builds its own graph needs exactly it. The subtle half is the
- * log line — a run's failure is announced on the connections watching the session, and an empty
- * subscription table means the frame has no reader at all, so the log is the only place a failure
- * nobody was watching is still audible. A smoke that copied these lines instead would be asserting
- * its own copy; wired through here, the thing it proves is that deleting this `console.error` turns
- * it red.
+ * 从 `bootServer` 里提出来，理由与 {@link muxUpgrade} 相同：这段 wiring 不是 boot 期的秘密，自建对象图的 smoke 恰恰需要它。微妙的半截是那行日志——一次运行的失败会在观看该会话的连接上宣布，而空的订阅表意味着这个 frame 根本没有读者，所以日志是"没有人在看的失败"仍然可闻的唯一地方。复制这些日志行的 smoke 是在断言自己的拷贝；经由这里接线，它能证明的事情是：删掉这个 `console.error` 它就会变红。
  *
- * The projection rides beside the mux because a rename and a delete are both *row* facts before they
- * are frame facts: the projection's store is updated first, and the frame each one sends is the
- * ordinary publish road — a re-read row for a rename, a gone id for a delete.
+ * projection 与 mux 并肩，因为 rename 和 delete 首先是*行*事实，其次才是 frame 事实：projection 的存储先更新，各自发出的 frame 走的是普通的发布之路——rename 是重新读出的一行，delete 是一个消失的 id。
  */
 export function sessionListeners(mux: MuxServer, projection: SessionProjection): SessionListener {
 	return {
@@ -291,13 +240,10 @@ export function sessionListeners(mux: MuxServer, projection: SessionProjection):
 		onApproval: (sessionId, toolCallId, approved) => mux.rememberApproval(sessionId, toolCallId, approved),
 		onRenamed: (sessionId) => void projection.refresh(sessionId),
 		onRemoved: (sessionId) => projection.forget(sessionId),
-		// A group entered or left the list — put aside, or taken back by a new session — and that moves
-		// the list rather than any row, so the frame that answers it is the overview every connection
-		// opened on. Sent to all of them: the window that asked already has the answer in its response,
-		// and the window that did not ask is the one this is for.
+		// 一个目录组进入或离开列表——被放到一边，或被新会话领回——动的是列表本身而不是任何一行，所以应答它的 frame 是每条连接打开时就收到的 overview。发给所有连接：发问的窗口已经在自己的响应里拿到了答案，而没发问的窗口才是这条消息的服务对象。
 		onDirectoryListingChanged: () => void mux.broadcastSessions(),
 	};
 }
 
-/** Where the built client lives, for a caller that wants to report it. */
+/** 构建产出的 client 所在的位置，供想上报它的调用者使用。 */
 export const clientDirectory = CLIENT_DIR;

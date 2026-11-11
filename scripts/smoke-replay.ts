@@ -1,10 +1,9 @@
-// Replay smoke: proves a session reopened from its snapshot still shows the whole tool process —
-// the call (name, arguments) and its result (text, error flag, diff) — not just the messages around
-// it. The reopen path is the reducer's `baseline` frame, so that is what this drives; the shapes fed
-// in are the ones a real session file holds (assistant message with a `toolCall` block, then a
-// `toolResult` message paired by id), as verified on disk by 03's research (`replay-tools.md`).
-// Nothing reaches a model, so no provider key is needed.
-// Run with: node scripts/smoke-replay.ts
+// Replay smoke：证明一个从快照重开的 session 仍然显示完整的工具过程——调用（名称、参数）与
+// 它的结果（文本、错误标志、diff）——而不只是围绕它们的消息。重开路径就是 reducer 的
+// `baseline` 帧，所以本脚本驱动的是它；喂进去的形状是真实 session 文件持有的形状（带
+// `toolCall` 块的 assistant 消息，随后按 id 配对的 `toolResult` 消息），如 03 的研究
+// （`replay-tools.md`）在磁盘上核实过的那样。不接触任何模型，无需 provider key。
+// 运行：node scripts/smoke-replay.ts
 import { initialState, reduce, type Item, type ViewState } from "../packages/web/src/state.ts";
 import type { ServerMessage, SessionSnapshot, UsageTotals } from "@my-agent/core/protocol";
 
@@ -25,7 +24,7 @@ const USAGE: UsageTotals = {
 	contextWindow: 128_000,
 };
 
-/** A snapshot carrying just these messages, in the shape `buildSessionContext` produces. */
+/** 只携带这些消息的快照，形状与 `buildSessionContext` 产出的相同。 */
 function snapshotWith(
 	messages: unknown[],
 	overrides: Partial<SessionSnapshot> = {},
@@ -57,7 +56,7 @@ function snapshotWith(
 	};
 }
 
-/** One reopen: fold a baseline and hand back the items it rebuilt. */
+/** 一次重开：折叠一份 baseline，交回它重建的条目。 */
 function reopen(messages: unknown[], overrides: Partial<SessionSnapshot> = {}): Item[] {
 	return reduce(initialState(), { type: "baseline", session: snapshotWith(messages, overrides) }).items;
 }
@@ -66,10 +65,10 @@ function toolGroups(items: Item[]): Extract<Item, { kind: "tools" }>[] {
 	return items.filter((item): item is Extract<Item, { kind: "tools" }> => item.kind === "tools");
 }
 
-// ------------------------------------------------------------------ one watched turn, replayed
+// ------------------------------------------------------------------ 一次被监视的回合，重放
 
 process.stdout.write("a reopened session keeps the whole tool turn\n");
-// The turn 03 verified on disk: user asks, the model calls `read`, the call fails, the model answers.
+// 03 在磁盘上核实过的那一回合：用户发问，模型调用 `read`，调用失败，模型作答。
 const failed = reopen([
 	{ role: "user", content: [{ type: "text", text: "看看 notes.txt" }], timestamp: 1_000 },
 	{
@@ -96,8 +95,8 @@ check("with the arguments it was made with", JSON.stringify(failedCard?.args) ==
 check("the result survived the reopen", failedCard?.output === "File not found: notes.txt", JSON.stringify(failedCard?.output));
 check("and its error flag", failedCard?.isError === true, String(failedCard?.isError));
 check("a settled snapshot settles its card", failedCard?.running === false, String(failedCard?.running));
-// The calling message itself has no body — 07 took `[调用 name]` out of the prose path, and a
-// message that is only calls has nothing to say — so the group's lower neighbour is the question.
+// 调用消息本身没有正文——07 把 `[调用 name]` 从散文路径里拿掉了，而一条只有调用的消息无话可
+// 说——所以组的下一位邻居就是那个提问。
 const userIndex = failed.findIndex((item) => item.kind === "message" && item.role === "user");
 const answerIndex = failed.findIndex((item) => item.kind === "message" && item.role === "assistant" && item.id === "assistant:4000");
 const groupIndex = failed.indexOf(failedGroups[0]!);
@@ -204,15 +203,13 @@ const cutShort = reopen([
 const cutCard = toolGroups(cutShort)[0]?.cards[0];
 check("an unanswered call is settled, not spinning", cutCard?.running === false, String(cutCard?.running));
 
-// ------------------------------------------------------------------ one watched turn, folded live
+// ------------------------------------------------------------------ 一次被监视的回合，实时折叠
 //
-// The shape 16 pinned: the echo of a queued message lands in the gap after the previous turn
-// finished streaming (the real wire order — the loop only replays it at a drain point, always
-// after the previous assistant's message_end), and two assistant messages stamped in the same
-// millisecond (the collision 07 hit) must not push the first answer to the other side of the
-// user bubble.
+// 16 钉住的形状：一条入队消息的回声落在上一回合流式结束后的空隙里（真实的 wire 顺序——循环
+// 只在 drain 点重放它，总在上一条 assistant 的 message_end 之后），而两条盖着同一毫秒时间戳的
+// assistant 消息（07 撞上的那次冲突）不得把第一条回答推到 user 气泡的另一侧。
 
-/** Fold one session event the way the wire delivers it. */
+/** 按 wire 送达的方式折叠一个 session 事件。 */
 function fold(state: ViewState, event: unknown): ViewState {
 	return reduce(state, { type: "event", event } as ServerMessage);
 }
@@ -227,15 +224,15 @@ function assistantStart(timestamp: number, text = "") {
 	return { type: "message_start", message: { role: "assistant", content: text.length === 0 ? [] : [{ type: "text", text }], timestamp } };
 }
 function assistantUpdate(timestamp: number, delta: string) {
-	// A delta, not a message: the wire carries the characters that arrived and the client appends
-	// them to the item the stamp names.
+	// 一个 delta 而不是整条消息：wire 只携带已到达的字符，客户端把它们追加到时间戳指名的
+	// 条目上。
 	return { type: "message_update", delta: { timestamp, kind: "text", contentIndex: 0, text: delta } };
 }
 function assistantEnd(timestamp: number, text: string) {
 	return { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], timestamp } };
 }
 
-/** The message items, as `id=text`, in fold order. */
+/** 消息条目，形如 `id=text`，按折叠顺序。 */
 function shapeOf(items: Item[]): string {
 	return items
 		.map((item) => (item.kind === "message" ? `${item.id}=${item.text.slice(0, 12)}` : item.id))
@@ -248,8 +245,7 @@ liveState = fold(liveState, userEcho(1_000, "第一问"));
 liveState = fold(liveState, userEnd(1_000, "第一问"));
 liveState = fold(liveState, assistantStart(2_000));
 liveState = fold(liveState, assistantUpdate(2_000, "第一答"));
-// The queued message is written to the store before the loop replays it: this entry arrives
-// ahead of the echo and waits there for its item.
+// 入队的消息在循环重放它之前就写进了 store：这个 entry 赶在回声之前到达，在那里等它的条目。
 liveState = reduce(liveState, { type: "entry", entryId: "entry-u2", messageTimestamp: 3_000 });
 liveState = fold(liveState, assistantEnd(2_000, "第一答"));
 liveState = fold(liveState, userEcho(3_000, "你有哪些工具"));
@@ -262,8 +258,8 @@ check(
 const echoItem = liveState.items.find((item): item is Extract<Item, { kind: "message" }> => item.kind === "message" && item.id === "user:3000");
 check("the pending entry found its echo", echoItem?.forkEntryId === "entry-u2", JSON.stringify(echoItem?.forkEntryId));
 
-// A second assistant stamped like the first: it must not overwrite the first answer's body,
-// and must not draw the answer on the far side of the user bubble.
+// 一条与第一条盖同样时间戳的 assistant：不得覆盖第一条回答的正文，也不得把回答画到 user
+// 气泡的远侧。
 liveState = fold(liveState, assistantStart(2_000));
 liveState = fold(liveState, assistantUpdate(2_000, "第二答"));
 liveState = fold(liveState, assistantEnd(2_000, "第二答"));
@@ -294,8 +290,8 @@ check(
 
 process.stdout.write("a delta stream appends to one item, and a mid-run baseline seeds it\n");
 {
-	// The ordinary run: reasoning, then the answer, one delta at a time. No frame carries the message,
-	// so every character on screen got there by being appended to the item its stamp names.
+	// 普通的一次 run：先 reasoning 再回答，一次一个 delta。没有任何帧携带整条消息，屏幕上的
+	// 每个字符都是被追加到其时间戳指名的条目上才到达那里的。
 	let state = reduce(initialState(), { type: "baseline", session: snapshotWith([], { submitting: true }) });
 	state = fold(state, assistantStart(20_000));
 	state = fold(state, { type: "message_update", delta: { timestamp: 20_000, kind: "thinking", contentIndex: 0, text: "先想" } });
@@ -316,8 +312,8 @@ process.stdout.write("a delta stream appends to one item, and a mid-run baseline
 	check("the end still replaces the item with the whole message", settled?.kind === "message" && settled.text === "第一答" && settled.streaming === false);
 }
 {
-	// Attaching mid-run: the store has no message yet, so the baseline's `partial` is the only way the
-	// window sees the beginning of the sentence the deltas after it continue.
+	// 运行中途接入：store 里还没有消息，所以 baseline 的 `partial` 是窗口看到这些 delta 之后的
+	// 后半句所属的那个开头句子的唯一途径。
 	const partial = {
 		role: "assistant",
 		content: [{ type: "text", text: "已经写了一半" }],

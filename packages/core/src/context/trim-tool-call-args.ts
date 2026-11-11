@@ -1,38 +1,34 @@
 import type { SessionEntry } from "../session/session-manager.ts";
 
 /**
- * The tools whose recorded arguments are bulky and read by nobody afterwards.
+ * 记录参数庞大、事后无人再读的那些工具。
  *
- * `write` and `edit` carry the full body of what changed — a whole file in `content`, a whole region
- * in `old_string` / `new_string`. Once the call has run, that body is stored twice over: once in the
- * arguments and once in the file on disk. The arguments are what the model is sent every request, and
- * what it could want back from them — the path, the shape of the change — survives a shortening;
- * the body itself is the file's to keep. A tool has to be named here, like in `pruning.ts`: nothing
- * is trimmable by default.
+ * `write` 和 `edit` 携带变更的完整正文——`content` 里是整个文件，`old_string` / `new_string` 里是
+ * 整个区域。call 一旦跑过，那份正文就被存了两遍：一遍在参数里，一遍在盘上的文件里。参数是每次
+ * 请求都发给模型的东西，模型可能想从中找回的——路径、变更的形状——截短后依然存活；正文本身归
+ * 文件保管。工具必须在这里指名，如同 `pruning.ts`：默认没有任何东西可截短。
  */
 export const ARG_TRIM_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
 
-/** A string argument longer than this is a body rather than a reference, and is a trim candidate. */
+/** 超过这个长度的字符串参数是正文而不是引用，是截短的候选。 */
 export const ARG_TRIM_THRESHOLD_CHARS = 2_000;
 
-/** How much of a trimmed argument survives at the front: enough to say what was written where. */
+/** 被截短的参数在开头保留多少：足以说明写了什么、写到哪。 */
 export const ARG_KEEP_CHARS = 200;
 
-/** What a trimmed argument ends with, so the cut is visible rather than silent. */
+/** 被截短的参数以什么结尾，让切断可见而不是无声。 */
 export const ARG_TRIM_MARKER = "... [truncated] ...";
 
 /**
- * The entries whose recorded tool-call arguments a trim would shorten.
+ * 记录的 tool call 参数会被截短的那些条目。
  *
- * A call only qualifies once its result is on the branch: arguments of a call still awaiting its
- * result belong to the turn in flight, and shortening them mid-turn would show the model a call it
- * does not remember making. A result already recorded means the turn is over and the arguments are
- * nobody's working set any more.
+ * 一个 call 只有在它的 result 已在分支上时才合格：还在等 result 的 call 的参数属于进行中的 turn，
+ * 在 turn 中途截短它们会让模型看到一条它不记得发过的 call。result 已记录意味着 turn 已结束，参数
+ * 不再是任何人的工作集。
  *
- * The answer is entry ids rather than rewritten entries because a trim is recorded, not applied here:
- * the caller writes the record and `buildContextEntries` shortens what it names, the same way a clear
- * does. Entries an earlier record named come back from the view already short, so they are not
- * candidates again and a second pass has nothing to do.
+ * 答案是条目 id 而不是重写的条目，因为截短是被记录的，不是在这里应用的：调用方写记录，
+ * `buildContextEntries` 截短它指名的内容，与清空的做法相同。更早的记录指名过的条目从视图回来时
+ * 已经是短的，所以不再是候选，第二遍无事可做。
  */
 export function trimmableToolArgEntryIds(entries: readonly SessionEntry[]): string[] {
 	const answered = new Set<string>();
@@ -49,7 +45,7 @@ export function trimmableToolArgEntryIds(entries: readonly SessionEntry[]): stri
 	return candidates;
 }
 
-/** The same entry with its recorded tool-call arguments shortened, or the entry unchanged. */
+/** 同一条目但记录的 tool call 参数被截短，或条目原样返回。 */
 export function trimToolCallArgs(entry: SessionEntry): SessionEntry {
 	if (entry.type !== "message" || entry.message.role !== "assistant") return entry;
 
@@ -71,15 +67,15 @@ export function trimToolCallArgs(entry: SessionEntry): SessionEntry {
 		}
 		if (!argsChanged) return block;
 		changed = true;
-		// The values kept are the JsonObject the call already had and the one replaced is a string, so
-		// the record is still JSON through and through; the annotation only re-states the block's shape.
+		// 保留的值是 call 原有的 JsonObject，被替换的那个是字符串，所以记录整体仍然是 JSON；这个
+		// 类型标注只是重申 block 的形状。
 		return { ...block, arguments: trimmed as typeof block.arguments };
 	});
 
 	return changed ? { ...entry, message: { ...entry.message, content } } : entry;
 }
 
-/** Whether one entry holds a trimmable call that has already been answered. */
+/** 一条条目是否持有已被回答的可截短 call。 */
 function hasTrimmableArgs(entry: SessionEntry, answered: ReadonlySet<string>): boolean {
 	if (entry.type !== "message" || entry.message.role !== "assistant") return false;
 	return entry.message.content.some((block) => {

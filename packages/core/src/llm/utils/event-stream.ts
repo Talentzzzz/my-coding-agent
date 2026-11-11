@@ -1,5 +1,5 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
-// from flagging this file, while every import into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
 import type { AssistantMessage, AssistantMessageEvent } from "../types.ts";
 
@@ -25,7 +25,6 @@ class FifoQueue<T> {
 	}
 }
 
-// Generic event stream class for async iteration
 export class EventStream<T, R = T> implements AsyncIterable<T> {
 	private queue = new FifoQueue<T>();
 	private waiting = new FifoQueue<(value: IteratorResult<T>) => void>();
@@ -51,7 +50,6 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 			this.resolveFinalResult(this.extractResult(event));
 		}
 
-		// Deliver to waiting consumer or queue it
 		const waiter = this.waiting.dequeue();
 		if (waiter) {
 			waiter({ value: event, done: false });
@@ -65,7 +63,6 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		if (result !== undefined) {
 			this.resolveFinalResult(result);
 		}
-		// Notify all waiting consumers that we're done
 		while (this.waiting.length > 0) {
 			const waiter = this.waiting.dequeue()!;
 			waiter({ value: undefined as any, done: true });
@@ -107,7 +104,7 @@ export class AssistantMessageEventStream extends EventStream<AssistantMessageEve
 	}
 }
 
-/** Factory function for AssistantMessageEventStream (for use in extensions) */
+/** AssistantMessageEventStream 的工厂函数（供扩展使用）。 */
 export function createAssistantMessageEventStream(): AssistantMessageEventStream {
 	return new AssistantMessageEventStream();
 }

@@ -1,5 +1,5 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
-// from flagging this file, while every import into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
 const MAX_UUID_V7_TIMESTAMP = 0xffffffffffff;
 const MAX_SEQUENCE = (1n << 41n) - 1n;
@@ -7,7 +7,7 @@ const MAX_SEQUENCE = (1n << 41n) - 1n;
 let lastOrdinaryTimestamp = -1;
 let sequence: bigint | undefined;
 
-/** Generate a time-ordered UUIDv7. A supplied timestamp is preserved for follower ids. */
+/** 生成按时间排序的 UUIDv7。调用方提供的时间戳被保留，用于 follower id。 */
 export function uuidv7(timestampMs?: number): string {
 	const requestedTimestamp = timestampMs ?? Date.now();
 	if (!Number.isInteger(requestedTimestamp) || requestedTimestamp < 0 || requestedTimestamp > MAX_UUID_V7_TIMESTAMP) {

@@ -1,23 +1,19 @@
-// Transcript smoke: drives the production `TranscriptView` against the shared DOM shim, and checks the
-// properties the transcript's two draw paths live or die by — that spreading a snapshot over frames
-// draws the same thing as drawing it whole, that nothing is rebuilt per frame while it does, that a
-// frame arriving mid-draw supersedes it instead of being overwritten by it later, that a streaming
-// delta touches only the tail (its own item, and not the round bookkeeping above it), and that the
-// rows whose truth depends on a round or a run — the footers — are re-read on the frames that move
-// them even when no item changed.
+// Transcript smoke：对着共享 DOM shim 驱动生产用的 `TranscriptView`，检查 transcript 的两条
+// 绘制路径赖以存活的性质——把快照摊到多帧上画出与整块画出相同的东西、画的过程中每帧不重建任何
+// 东西、绘制中途到来的帧以新为准而不是被旧的覆盖、流式 delta 只碰尾部（它自己的条目，而不碰
+// 它上面的轮次记账）、以及真相取决于轮或 run 的行——脚注——在移动它们的帧上被重读，即使没有任何
+// 条目变化。
 //
-// Why this file exists: until it did, **nothing in `scripts/` drove `TranscriptView` at all**, so the
-// deferred path shipped with no regression cover — and the bug it was written against (a streaming frame
-// pruning against a half-drawn set, so every turn was rebuilt every frame, 2000 frames, 4 GB heap) is
-// invisible to `npm run check` by construction. `transcript.render` is read as "the immediate path" by
-// everything downstream; this is the only place both paths are run side by side.
+// 这个文件存在的原因：在它出现之前，**`scripts/` 里没有任何东西驱动过 `TranscriptView`**，deferred
+// 路径上线时没有回归覆盖——而它所针对的 bug（流式帧对着一份半画好的集合做剪枝，于是每个回合
+// 每帧都被重建：2000 帧、4 GB 堆）从构造上就对 `npm run check` 不可见。下游的一切都把
+// `transcript.render` 读作"立即路径"；这里是唯一把两条路径并排运行的地方。
 //
-// The streaming checks were added by the jank ticket (03): the old path walked every item per token and
-// wrote a footer and a meta row for each one, an O(conversation) tax that this smoke now prices by
-// counting the attribute writes and node moves the shim sees.
+// 流式检查由卡顿 ticket（03）加入：旧路径每个 token 走遍每一条目、为每一个写一条脚注和一条
+// meta 行，一项 O(对话长度) 的税，本 smoke 现在通过数 shim 看到的属性写入与节点移动给它定价。
 //
-// Nothing reaches the network, so no server and no provider key are needed.
-// Run with: node scripts/smoke-transcript.ts
+// 不触网，无需服务器和 provider key。
+// 运行：node scripts/smoke-transcript.ts
 import { TranscriptView } from "../packages/web/src/render/transcript.ts";
 import { renderMarkdown } from "../packages/web/src/render/markdown.ts";
 import type { Item } from "../packages/web/src/state.ts";
@@ -30,20 +26,19 @@ function check(label: string, condition: boolean, detail = ""): void {
 	if (!condition) failures += 1;
 }
 
-// ------------------------------------------------------------------ the DOM and the view
+// ------------------------------------------------------------------ DOM 与视图
 
 /**
- * The shim is the one copy shared with `smoke-sidebar.ts` and the jank harness under
- * `.scratch/window-rework/research/`; it is also what implements animation frames here.
+ * shim 是与 `smoke-sidebar.ts` 及 `.scratch/window-rework/research/` 下卡顿装置共享的那一份；
+ * 它也是这里实现 animation frame 的地方。
  *
- * `shim.frames()` is what makes this file possible at all: production code schedules with
- * `requestAnimationFrame`, the shim queues those callbacks instead of running them, and `frames()` runs
- * the queued batch. Without it the deferred draw would never advance and the assertions below would pass
- * against a transcript that was never drawn.
+ * `shim.frames()` 是让本文件成为可能的全部原因：生产代码用 `requestAnimationFrame` 排程，
+ * shim 把那些回调排队而不运行，`frames()` 跑掉排好的那一批。没有它，deferred 绘制永远不会
+// 前进，下面的断言就会对着一份从未画出的 transcript 通过。
  */
 const shim = installDom();
 
-/** A transcript host shaped like the one `main.ts` builds, plus its view. */
+/** 形状与 `main.ts` 建的那个一样的 transcript 宿主，外加它的视图。 */
 function makeTranscript(onBranch: (entryId: string) => void = () => {}): { host: FakeNode; view: TranscriptView } {
 	const host = shim.document.createElement("main") as unknown as FakeNode;
 	host.className = "transcript";
@@ -53,11 +48,10 @@ function makeTranscript(onBranch: (entryId: string) => void = () => {}): { host:
 }
 
 /**
- * Every node of a class under the host, in document order.
+ * 宿主之下某个类的每一个节点，按文档序。
  *
- * The view's DOM is not under test here; what is under test is *which* nodes are on screen and whether
- * they were built once. Reading that off a walk keeps this file independent of `querySelector`'s
- * attribute syntax in the shim.
+ * 视图的 DOM 不是这里的被测对象；被测的是*哪些*节点在屏幕上、它们是否只建过一次。用一次遍历
+// 读它让本文件不依赖 shim 里 `querySelector` 的属性语法。
  */
 function nodesOfClass(root: FakeNode, className: string): FakeNode[] {
 	const found: FakeNode[] = [];
@@ -69,17 +63,17 @@ function nodesOfClass(root: FakeNode, className: string): FakeNode[] {
 	return found;
 }
 
-/** The turn sections on screen, in order. */
+/** 屏幕上的轮次区块，按序。 */
 function turnsOf(host: FakeNode): FakeNode[] {
 	return nodesOfClass(host, "turn");
 }
 
-/** The footer inside one turn, when that turn has one. */
+/** 一个轮次内的脚注，如果那个轮次有的话。 */
 function footOf(turn: FakeNode): FakeNode | undefined {
 	return nodesOfClass(turn, "turn-foot")[0];
 }
 
-/** The transcript's text, read the way a screenshot would: everything on screen, depth first. */
+/** transcript 的文本，按截图会读的方式：屏幕上的一切，深度优先。 */
 function textOf(host: FakeNode): string {
 	let text = "";
 	const walk = (node: FakeNode): void => {
@@ -90,16 +84,16 @@ function textOf(host: FakeNode): string {
 	return text;
 }
 
-/** How many nodes the host currently holds, the whole tree, as the OOM regression needs to see it. */
+/** 宿主当前持有多少节点，整棵树，OOM 回归需要看到的样子。 */
 function countNodes(host: FakeNode): number {
 	let count = 1;
 	for (const child of host.children) count += countNodes(child);
 	return count;
 }
 
-// ------------------------------------------------------------------ conversations
+// ------------------------------------------------------------------ 会话
 
-/** One message item, shaped the way `state.ts` hands them to the view. */
+/** 一条消息条目，形状与 `state.ts` 交给视图的一致。 */
 function message(index: number, text = `第 ${index} 条消息`): Item {
 	return {
 		kind: "message",
@@ -112,18 +106,18 @@ function message(index: number, text = `第 ${index} 条消息`): Item {
 }
 
 /**
- * A conversation long enough to need more than one frame.
+ * 长到需要不止一帧的会话。
  *
- * The count is the point rather than the content: `BATCH_ITEMS` is 24, so 200 items is nine slices, and a
- * conversation that fitted in one slice would test the immediate path twice and the deferred path never.
- * The bodies are long enough to give `renderMarkdown` real work, which is what the draw actually costs.
+ * 重要的是数量而不是内容：`BATCH_ITEMS` 是 24，所以 200 条是九片，而一个能装进一片的会话会把
+ // 立即路径测两遍、deferred 路径一遍都测不到。正文长到给 `renderMarkdown` 真活干，那才是绘制
+ // 真正花掉的东西。
  */
 function conversation(count: number): Item[] {
 	return Array.from({ length: count }, (_unused, index) =>
 		message(index, `第 ${index} 条消息：段落正文，用来给 renderMarkdown 一点活干。\n\n- 一\n- 二\n`));
 }
 
-// ---------------------------------------------------------- 1. both paths draw the same thing
+// ---------------------------------------------------------- 1. 两条路径画出同一个东西
 
 process.stdout.write("\ntranscript：分批画与整块画结果是同一个\n");
 
@@ -139,9 +133,8 @@ process.stdout.write("\ntranscript：分批画与整块画结果是同一个\n")
 	resetWork();
 	deferred.view.renderDeferred(items, false);
 
-	// The first slice has to be on screen before the frame ends — that is the whole point of not
-	// starting the walk at a `yield`: a click that showed the previous conversation for one more frame
-	// is the symptom this work exists to remove.
+	// 第一片必须在帧结束之前就在屏幕上——这正是"不在 yield 处起走"的全部意义：一次点击让上一份
+	// 会话多显示一帧，正是这项工作要消除的症状。
 	check("第一片落在点击这一帧", turnsOf(deferred.host).length > 0, `${turnsOf(deferred.host).length}`);
 	check("第一片不是全部", turnsOf(deferred.host).length < items.length, `${turnsOf(deferred.host).length} / ${items.length}`);
 
@@ -150,22 +143,22 @@ process.stdout.write("\ntranscript：分批画与整块画结果是同一个\n")
 
 	check("跑完后条数与整块画一致", turnsOf(deferred.host).length === turnsOf(immediate.host).length, `${turnsOf(deferred.host).length} vs ${turnsOf(immediate.host).length}`);
 	check("跑完后正文与整块画一致", textOf(deferred.host) === textOf(immediate.host));
-	// The one measurement that is not the clock: the same conversation must have cost the same nodes.
-	// A deferred draw that re-parsed or rebuilt anything would show up here as extra constructions.
+	// 唯一一个不测时钟的度量：同一份会话必须花同样多的节点。一个重新解析或重建了任何东西的
+	// deferred 绘制会在这里以多余构造的形式现形。
 	check("跑完后构造的节点数与整块画一致", work.nodes === immediateNodes, `${work.nodes} vs ${immediateNodes}`);
-	// And the tree itself, node for node: a deferred draw that left a slice's DOM behind would not cost
-	// an extra construction (it was built once) but would still be on screen twice over.
+	// 以及树本身，逐节点：留下某片 DOM 的 deferred 绘制不会多花一次构造（它只建过一次），但仍会
+	// 在屏幕上出现两份。
 	check("跑完后屏幕上的节点数与整块画一致", countNodes(deferred.host) === countNodes(immediate.host), `${countNodes(deferred.host)} vs ${countNodes(immediate.host)}`);
 	check("每一条只被建过一次", turnsOf(deferred.host).every((turn) => turn.created === 1), JSON.stringify(turnsOf(deferred.host).filter((turn) => turn.created !== 1).length));
 
-	// An immediate draw must be able to finish a deferred one — that is the documented relationship
-	// between the two, and the reason `render` cancels the queue.
+	// 一次立即绘制必须能收完一次 deferred 绘制——这是两者之间被写明的关系，也是 `render` 取消
+	// 队列的原因。
 	deferred.view.render(items, false);
 	check("整块画把队列清空", deferred.view.stepPending() === false);
 	check("整块画之后条数不变", turnsOf(deferred.host).length === items.length, `${turnsOf(deferred.host).length}`);
 }
 
-// -------------------------------------------------- 2. a draw does not grow the tree per frame
+// -------------------------------------------------- 2. 绘制不随帧让树增长
 
 process.stdout.write("\ntranscript：连跑多帧，宿主的孩子数不增长\n");
 
@@ -174,24 +167,22 @@ process.stdout.write("\ntranscript：连跑多帧，宿主的孩子数不增长\
 	const { host, view } = makeTranscript();
 	view.renderDeferred(items, false);
 
-	// The OOM was here: a streaming frame pruned the view's tables against the deferred path's
-	// half-drawn set, so every turn looked like one that had left the conversation and was rebuilt —
-	// and the old ones were left in the DOM. Frames are what expose it; one frame does not.
+	// OOM 就出在这里：一个流式帧对着 deferred 路径的半画好集合剪枝视图的表，于是每个轮次都像
+	// 一个已离开会话的东西那样被重建——而旧的留在了 DOM 里。多帧才暴露它；单帧不暴露。
 	const sizes: number[] = [];
 	for (let frame = 0; frame < 40; frame += 1) {
 		shim.frames();
 		sizes.push(countNodes(host));
 	}
 
-	// Two properties, because either alone can be satisfied by a broken view: the tree stops growing,
-	// and the turns on screen are the ones the conversation has — not more, not fewer.
+	// 两条性质，因为任何一条单独都能被一个坏视图满足：树停止增长，且屏幕上的轮次正是会话有的
+	// 那些——不多，不少。
 	check("最后一帧之后树不再变大", sizes[sizes.length - 1] === sizes[sizes.length - 2], `${sizes[sizes.length - 2]} -> ${sizes[sizes.length - 1]}`);
 	check("条数就是会话的条数", turnsOf(host).length === items.length, `${turnsOf(host).length} vs ${items.length}`);
 	check("多帧之后没有一条被重建", turnsOf(host).every((turn) => turn.created === 1), `${turnsOf(host).filter((turn) => turn.created !== 1).length} 条被重建`);
 
-	// And the same thing while the conversation is *moving*: deltas arrive between frames, which is the
-	// shape that crashed — a streaming frame landing on a half-drawn deferred one, cancelling the draw
-	// and re-entering it 40 times over. The tree must not grow with the number of those frames.
+	// 以及会话*在移动*时的同一件事：delta 在帧与帧之间到达，这正是崩溃的形状——一个流式帧落在
+	// 半画好的 deferred 帧上，取消绘制再重新进入 40 次。树不得随这些帧的数目增长。
 	const streaming = makeTranscript();
 	const growth: number[] = [];
 	for (let frame = 0; frame < 40; frame += 1) {
@@ -205,7 +196,7 @@ process.stdout.write("\ntranscript：连跑多帧，宿主的孩子数不增长\
 	check("流式帧之后没有一条被重建", turnsOf(streaming.host).every((turn) => turn.created === 1), `${turnsOf(streaming.host).filter((turn) => turn.created !== 1).length} 条被重建`);
 }
 
-// -------------------------------------- 3. a frame arriving mid-draw supersedes the deferred one
+// -------------------------------------- 3. 绘制中途到来的帧以新为准
 
 process.stdout.write("\ntranscript：画到一半来了新的帧，以新的为准\n");
 
@@ -213,15 +204,13 @@ process.stdout.write("\ntranscript：画到一半来了新的帧，以新的为�
 	const items = conversation(200);
 	const { host, view } = makeTranscript();
 	view.renderDeferred(items, false);
-	// Deliberately no frame is run first. How many slices a frame gets is the budget's call, not this
-	// file's: at these sizes a quick machine can finish the whole conversation inside the first frame, so
-	// an assertion of the form "one frame in, the draw is still half done" would pass here and fail on a
-	// slower one. What is not machine-dependent is that the first slice is one slice — checked above.
+	// 有意先不跑帧。一帧能画几片是预算的事，不是本文件的：在这些尺寸下，一台快的机器能在第一帧
+	// 里画完整份会话，所以"画了一帧后还剩一半"这类断言会在这里通过、在慢机器上失败。不依赖机器
+	// 的是第一片恰好一片——上面已检查。
 	check("这时确实还没画完", turnsOf(host).length < items.length, `${turnsOf(host).length} / ${items.length}`);
 
-	// A snapshot that dropped everything but the first 30 items — a branch switch, a compaction, a
-	// `session_gone`. The half-drawn slices must not come back afterwards: the deferred producer is
-	// still holding the *old* array, and if it resumed it would redraw the conversation the window left.
+	// 一份只留前 30 条的快照——一次分支切换、一次 compaction、一个 `session_gone`。半画好的那些
+	// 片之后不得回来：deferred 生产者仍持有*旧的*数组，若它恢复就会重画窗口已经离开的那份会话。
 	const shorter = items.slice(0, 30);
 	view.render(shorter, false);
 	check("新的帧画完了", turnsOf(host).length === 30, `${turnsOf(host).length}`);
@@ -232,7 +221,7 @@ process.stdout.write("\ntranscript：画到一半来了新的帧，以新的为�
 	check("屏幕上那 30 条各建了一次", turnsOf(host).every((turn) => turn.created === 1), `${turnsOf(host).filter((turn) => turn.created !== 1).length} 条被重建`);
 }
 
-// ----------------------------------------------- 4. a streaming frame touches only the tail
+// ----------------------------------------------- 4. 流式一帧只碰尾部
 
 process.stdout.write("\ntranscript：流式一帧只碰尾部\n");
 
@@ -245,8 +234,8 @@ process.stdout.write("\ntranscript：流式一帧只碰尾部\n");
 	check("运行中只有一条计时行", runtime.length === 1, `${runtime.length}`);
 
 	/**
-	 * The answer's tail growing, one frame at a time: the shape that used to cost every turn a
-	 * footer patch and the scroll container a forced layout.
+	 * 回答的尾部一帧一帧长出来：那正是曾经让每个轮次付一次脚注补丁、让滚动容器付一次强制布局
+	 * 的形状。
 	 */
 	let current = items;
 	resetWork();
@@ -257,10 +246,9 @@ process.stdout.write("\ntranscript：流式一帧只碰尾部\n");
 		view.render(current, true);
 	}
 
-	// The old path wrote one hidden attribute per assistant turn and one per user turn — every
-	// frame, for every row whose item had not changed at all (20,000 writes over these 100 frames on
-	// 200 items, measured). A burst of deltas therefore cost O(conversation) attribute writes; the
-	// tail-only path costs a couple per frame.
+	// 旧路径给每个 assistant 轮写一个隐藏属性、每个 user 轮写一个——每帧、每一行、哪怕那一行
+	// 的条目毫无变化（实测 200 条会话上这 100 帧共 20,000 次写）。一阵 delta 因此要付 O(对话
+	// 长度) 的属性写入；只碰尾部的路径每帧付几次。
 	process.stdout.write(
 		`     增长 ${FRAMES} 帧：属性写入 ${work.attrs}，新建节点 ${work.nodes}，DOM 移动 ${work.appends}（200 条会话）\n`,
 	);
@@ -276,14 +264,14 @@ process.stdout.write("\ntranscript：流式一帧只碰尾部\n");
 		nodesOfClass(host, "runtime")[0] === runtime[0] && runtime[0]!.created === 1,
 	);
 
-	// A frame with nothing new must touch nothing at all: the streaming timer's node was moved to
-	// the end on every delta before this pass, even when it was already there.
+	// 没有新东西的一帧必须什么都不碰：本趟之前，流式计时器的节点在每次 delta 上都被挪到末尾，
+	// 哪怕它已经在那里。
 	resetWork();
 	view.render(current, true);
 	check("同一份 items 再画一次不碰 DOM", work.appends === 0 && work.attrs === 0 && work.nodes === 0, JSON.stringify(work));
 }
 
-// ------------------------------------------- 5. footers are re-read when a run, not a token, moves
+// ------------------------------------------- 5. 脚注跟着轮与运行走，不跟着 token 走
 
 process.stdout.write("\ntranscript：脚注跟着轮与运行走，不跟着 token 走\n");
 

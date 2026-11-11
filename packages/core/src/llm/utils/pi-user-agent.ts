@@ -1,5 +1,5 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
-// from flagging this file, while every import into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
 import type * as NodeOs from "node:os";
 
@@ -14,7 +14,7 @@ function loadNodeOs(): typeof NodeOs | null {
 	return (process as ProcessWithOsBuiltinModule).getBuiltinModule?.("node:os") ?? null;
 }
 
-// Keep runtime OS loading browser-safe. A top-level runtime import of node:os breaks browser/Vite builds.
+// 运行时按需加载 OS 模块以保持浏览器安全：顶层的运行时 import node:os 会破坏 browser/Vite 构建。
 const nodeOs = loadNodeOs();
 
 export function getPiUserAgent(): string {

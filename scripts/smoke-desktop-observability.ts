@@ -1,38 +1,33 @@
-// The desktop shell's failure surface: which signals are wired, what they say, and which surface a
-// report reaches.
+// 桌面外壳的失败面：哪些信号接了线、它们说什么、一份报告到达哪个表面。
 //
 //   node scripts/smoke-desktop-observability.ts
 //
-// Why this can be a smoke at all: `packages/desktop/observability.cjs` takes everything
-// Electron-shaped as an argument — the application, the window factory, the boot function, the
-// dialog — so the real handlers can be driven here with fakes that record what they were asked to
-// do. A copy of the handlers rewritten in this file would prove nothing, which is why they live in a
-// module. That module is CommonJS — it is what Electron loads — so it is pulled in through
-// `createRequire`; everything else about this script is an ordinary TypeScript smoke.
+// 为什么这能做成 smoke：`packages/desktop/observability.cjs` 把一切 Electron 形状的东西都当
+// 参数收下——应用、窗口工厂、boot 函数、dialog——所以真实的 handler 可以在这里用记录自己被
+// 要求做什么的 fake 驱动。在本文件里重写一份 handler 副本什么也证明不了，这正是它们住在模块里
+// 的原因。那个模块是 CommonJS——Electron 加载的就是它——所以经 `createRequire` 拉进来；
+// 本脚本其余部分就是一个普通的 TypeScript smoke。
 //
-// What is pinned is the shape of the ticket's four holes: a child process that dies says so; a
-// renderer that dies says so *and* reaches a surface that still draws; an exception nobody caught is
-// reported rather than swallowed; and a server that never comes up is reported instead of leaving no
-// window and no line. What a report *looks* like is not asserted here — that a window was made, that
-// it was handed a `data:` page carrying the reason, and that the native dialog is only the fallback
-// is.
+// 被钉住的是 ticket 四个洞的形状：死掉的子进程说出自己；死掉的 renderer 说出自己*并且*到达一个
+// 仍能绘制的表面；无人捕获的异常被报告而不是被吞下；永远起不来的服务器被报告，而不是既没有
+// 窗口也没有一行。报告*长什么样*不断言——断言的是开了一个窗口、它被交予一张带着原因的
+// `data:` 页面、原生 dialog 只是兜底。
 //
-// The wall-clock half: the boot budget is driven in milliseconds rather than waited out, and the
-// script ends by itself — nothing may be left holding the loop open, or the unref'd watchdog at the
-// bottom fires and fails the run. An explicit `process.exit` would mask exactly that.
+// 墙钟那一半：boot 预算以毫秒驱动而不是等完，脚本自己收尾——任何东西都不得把事件循环挂住，
+// 否则底部那个 unref 的 watchdog 会触发并判这次运行失败。显式 `process.exit` 恰好会掩盖这一点。
 import { createRequire } from "node:module";
 import { until } from "./wire/client.ts";
 
 interface FakeWindow {
-	/** Every URL this window was pointed at, in order. */
+	/** 这个窗口被指向过的每个 URL，按序。 */
 	urls: string[];
 	loadURL(url: string): Promise<void>;
 	isDestroyed(): boolean;
-	/** How many times the window was asked to show itself; see the report-window checks. */
+	/** 窗口被要求显示自己多少次；见报告窗口的检查。 */
 	shown: number;
 	show(): void;
 	webContents: { once(event: string, listener: () => void): void };
-	/** Fires the "the page arrived" callback the report path waits on before showing the window. */
+	/** 触发"页面到达"回调——报告路径在显示窗口之前等的就是它。 */
 	finishLoad(): void;
 	destroyed?: boolean;
 }
@@ -58,7 +53,7 @@ const { createObservability, BOOT_BUDGET_MS, LOAD_FAILED_HEADLINE } = nodeRequir
 		bootWithinBudget(workDirAbsPath: string): Promise<{ url: string } | null>;
 	};
 	BOOT_BUDGET_MS: number;
-	/** Named once so the two load-failure sites in the shell cannot drift apart. */
+	/** 只被命名一次，让外壳里两个 load 失败点不会漂移开。 */
 	LOAD_FAILED_HEADLINE: string;
 };
 
@@ -69,7 +64,7 @@ function check(label: string, condition: boolean, detail = ""): void {
 	if (!condition) failures += 1;
 }
 
-/** A fake Electron application: listeners are recorded and can be fired by hand. */
+/** 一个假的 Electron 应用：监听器被记录，可以手工触发。 */
 function fakeApp(): FakeApp {
 	const listeners = new Map<string, ((...args: unknown[]) => void)[]>();
 	return {
@@ -83,12 +78,11 @@ function fakeApp(): FakeApp {
 }
 
 /**
- * One fake window.
+ * 一个假窗口。
  *
- * The report window is a window like any other as far as `observability.cjs` is concerned, so this
- * carries the three things it touches on one: the load, the destroyed check, and the "the page
- * arrived, show me" callback that a `data:` page cannot get from `ready-to-show` — which is why it is
- * here rather than left to each case to remember.
+ * 就 `observability.cjs` 而言，报告窗口与任何窗口无异，所以它触碰的三样东西集于一身：加载、
+ * destroyed 检查，以及"`data:` 页面无法从 `ready-to-show` 得到的'页面到达了，显示我'回调"
+ * ——这正是它住在这里、而不是留给每个用例自己记着的原因。
  */
 function fakeWindow(): FakeWindow {
 	let finishLoad: (() => void) | null = null;
@@ -112,7 +106,7 @@ function fakeWindow(): FakeWindow {
 	return window;
 }
 
-/** Every window a run opened, so the report ones can be told from the ordinary ones. */
+/** 一次运行打开的每个窗口，报告窗口因此可以与普通窗口区分开。 */
 function windows(): { made: FakeWindow[]; create: () => FakeWindow } {
 	const made: FakeWindow[] = [];
 	return {
@@ -125,7 +119,7 @@ function windows(): { made: FakeWindow[]; create: () => FakeWindow } {
 	};
 }
 
-/** Where the native dialog's contents land, counted. */
+/** 原生 dialog 的内容落地的地方，带计数。 */
 function dialogRecorder(): { calls: string[]; dialog: { showErrorBox(title: string, content: string): void } } {
 	const calls: string[] = [];
 	return {
@@ -136,13 +130,13 @@ function dialogRecorder(): { calls: string[]; dialog: { showErrorBox(title: stri
 	};
 }
 
-/** A promise that never settles: a boot that hangs is the whole reason the budget exists. */
+/** 一个永不落定的 promise：会挂起的 boot 正是预算存在的理由。 */
 const never = (): Promise<never> => new Promise<never>(() => {});
 
 const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms));
 
 // ------------------------------------------------------------------------------------------------
-// 1. A child process that goes away says which one, why, and with what exit code.
+// 1. 一个消失的子进程说出它是哪个、为什么、带着什么退出码。
 // ------------------------------------------------------------------------------------------------
 {
 	process.stdout.write("a child process that goes away\n");
@@ -152,8 +146,8 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 	const observed = createObservability({ app, createWindow: factory.create, boot: async () => ({ url: "x" }), log: (line) => logs.push(line) });
 	observed.watch();
 
-	// `0xC0000005` as a Windows exit code arrives as a negative decimal, which is what the crash
-	// dumps print; the line has to be readable without a hex conversion in the reader's head.
+	// `0xC0000005` 作为 Windows 退出码以负十进制到达，那正是崩溃转储打印的样子；这一行必须
+	// 让读者不用在脑子里做十六进制换算就能读懂。
 	app.emit("child-process-gone", {}, { type: "GPU", reason: "crashed", exitCode: -1073741819, name: "GPU Process" });
 	check("the GPU process going away is a line", logs.length === 1, logs.join(" | "));
 	check(
@@ -165,8 +159,8 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 	);
 	check("a child that dies does not open a window", factory.made.length === 0, String(factory.made.length));
 
-	// A child that leaves on purpose is still worth a line, because "nothing happened" is what the
-	// ticket is about — but it must not read like a crash.
+	// 一个故意离开的子进程仍然值得一 行，因为"什么都没发生"正是 ticket 所关乎的——但它不得
+	// 读起来像崩溃。
 	app.emit("child-process-gone", {}, { type: "Utility", reason: "clean-exit", exitCode: 0, name: "Network Service" });
 	check("a clean exit is a line too", logs.length === 2, logs.join(" | "));
 	check(
@@ -175,13 +169,13 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 		logs[1] ?? "",
 	);
 
-	// A child with no name at all must still produce a sentence rather than `undefined process`.
+	// 一个根本没有名字的子进程仍必须产出一个句子，而不是 `undefined process`。
 	app.emit("child-process-gone", {}, { type: "Unknown", reason: "killed", exitCode: 1 });
 	check("an unnamed child still reads", (logs[2] ?? "").includes("unnamed child"), logs[2] ?? "");
 }
 
 // ------------------------------------------------------------------------------------------------
-// 2. A renderer that goes away reaches a surface that can still draw, and says so only once.
+// 2. 消失的 renderer 到达一个仍能绘制的表面，且只说一次。
 // ------------------------------------------------------------------------------------------------
 {
 	process.stdout.write("a renderer that goes away\n");
@@ -189,8 +183,7 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 	const factory = windows();
 	const logs: string[] = [];
 	const native = dialogRecorder();
-	// The window whose renderer is about to die, built by a factory of its own: it is not a report
-	// window, and counting reports means not counting it.
+	// renderer 即将死去的那个窗口，由它自己的工厂构建：它不是报告窗口，数报告就不能数它。
 	const dead = windows().create();
 	const observed = createObservability({
 		app,
@@ -215,15 +208,15 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 	);
 	check("the native dialog was not needed, because the page drew", native.calls.length === 0, native.calls.join(" | "));
 
-	// A `data:` page never fires `ready-to-show`, which is what the shell's own window is shown on —
-	// so a report has to be shown on "the page arrived" instead, or the failure is drawn into a window
-	// nobody ever sees. That is the bug this pins, and it is why the fake carries a `finishLoad`.
+	// `data:` 页面从不触发 `ready-to-show`，而外壳自己的窗口正是在它上面显示的——所以报告必须
+	// 改在"页面到达"上显示，否则失败被画进一个谁也见不到的窗口。这正是本脚本钉住的 bug，也是
+	// fake 带着一份 `finishLoad` 的原因。
 	check("the report window was not shown before its page arrived", (report?.shown ?? -1) === 0, String(report?.shown));
 	report?.finishLoad();
 	check("it is shown once the page arrives", (report?.shown ?? 0) === 1, String(report?.shown));
 
-	// A report whose window was closed between the crash and the page arriving must not be shown:
-	// asking a destroyed window to show itself is how a report becomes a throw.
+	// 在崩溃与页面到达之间被关掉的窗口不得被显示：让一个已销毁的窗口显示自己，正是报告变成
+	// throw 的方式。
 	const late = windows();
 	const lateObserved = createObservability({
 		app: fakeApp(),
@@ -237,14 +230,14 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 	late.made[0]!.finishLoad();
 	check("a window closed before its page arrived is not shown", late.made[0]?.shown === 0, String(late.made[0]?.shown));
 
-	// A second crash of the same window is the same death: it is logged again — the log is where a
-	// count lives — but it must not open a second window in front of the user.
+	// 同一窗口的第二次崩溃是同一次死亡：它再次被记入日志——日志是计数住的地方——但不得在
+	// 用户面前开第二个窗口。
 	app.emit("render-process-gone", {}, { id: 1 }, { reason: "crashed", exitCode: 2 });
 	check("a second death is logged again", logs.length === 2, logs.join(" | "));
 	check("but it does not open a second report window", factory.made.length === 1, String(factory.made.length));
 
-	// A window that is already closed has nothing on screen to explain, and a report for it would be
-	// a window in front of a user for something that is gone.
+	// 已经关上的窗口没有屏幕上的东西可解释，为它出的报告将是一个挡在用户面前的、为已不存在
+	// 之物准备的窗口。
 	const closed = fakeApp();
 	const closedFactory = windows();
 	const closedLogs: string[] = [];
@@ -264,19 +257,18 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 }
 
 // ------------------------------------------------------------------------------------------------
-// 3. When the report page itself cannot be drawn, the native dialog is the fallback — and when that
-//    is unavailable too, the line is still out and nothing throws.
+// 3. 报告页面自己画不出来时，原生 dialog 是兜底——而当它也不可用时，那一行仍然在外面，
+//    且什么都不抛。
 // ------------------------------------------------------------------------------------------------
 {
 	process.stdout.write("a report that cannot be drawn\n");
 	const app = fakeApp();
 	const logs: string[] = [];
 	const native = dialogRecorder();
-	// As in §2: this is the window whose renderer dies, not one of the reports being counted.
+	// 与 §2 相同：这是 renderer 死去的那个窗口，不是被数的报告之一。
 	const dead = windows().create();
-	// Every window the report tries to draw in refuses the page, which is what a renderer that cannot
-	// come up looks like from here. `createWindow` is handed in once, so the factory has to be the
-	// refusing one from the start rather than swapped in after the fact.
+	// 报告试图在其中绘制的每个窗口都拒绝页面，这就是一个起不来的 renderer 从这里看起来的样子。
+	// `createWindow` 只交进来一次，所以工厂必须从一开始就是拒绝的那个，而不是事后换进去的。
 	const refusals = windows();
 	const observed = createObservability({
 		app,
@@ -305,8 +297,8 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 		logs.join(" | "),
 	);
 
-	// The dialog that throws as well — a machine where nothing draws — must not take the process with
-	// it: the report is already in the log, and throwing here would be how a failure becomes silence.
+	// 连 dialog 也抛的 dialog——一台什么都画不出来的机器——不得把进程一起带走：报告已经在
+	// 日志里，在这里 throw 正是失败变成沉默的方式。
 	const throwing = fakeApp();
 	const throwingFactory = windows();
 	const throwingLogs: string[] = [];
@@ -315,8 +307,8 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 		app: throwing,
 		createWindow: () => {
 			const window = throwingFactory.create();
-			// The page cannot be drawn either, so the throwing dialog is the last thing tried: the
-			// question is only whether it takes the process down with it when it throws as well.
+			// 页面也画不出来，所以抛错的 dialog 是最后被尝试的东西：问题只是它连自己也抛时是否
+			// 会把进程带走。
 			window.loadURL = (url) => {
 				window.urls.push(url);
 				return Promise.reject(new Error("ERR_FAILED (-2)"));
@@ -340,9 +332,8 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 		throwingLogs.join(" | "),
 	);
 
-	// The last resort for the last resort: the shell cannot even make a window. There is nothing left
-	// but the OS, the reason still has to reach it, and the stack has to be in the line — a report that
-	// says only "it broke" is the silence this module exists to replace.
+	// 兜底的兜底：外壳连一个窗口都造不出来。剩下的只有操作系统，原因仍然必须到达它，而且
+	// stack 必须在那一行里——一份只说"坏了"的报告正是本模块要替换掉的沉默。
 	const noWindow = fakeApp();
 	const noWindowLogs: string[] = [];
 	const noWindowNative = dialogRecorder();
@@ -376,7 +367,7 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 }
 
 // ------------------------------------------------------------------------------------------------
-// 4. An exception nobody caught is reported instead of ending a conversation in progress.
+// 4. 无人捕获的异常被报告，而不是终结一场正在进行的对话。
 // ------------------------------------------------------------------------------------------------
 {
 	process.stdout.write("an exception nobody caught\n");
@@ -393,9 +384,8 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 	});
 	observed.watch();
 
-	// The listener is registered on the process, and it is the real one this module registered: the
-	// smoke reaches it through the same `on` it called. Fired by hand rather than by throwing,
-	// because this process is the one that would go down with it.
+	// 监听器注册在进程上，而且正是本模块注册的那个真的：smoke 经它自己调用的同一个 `on` 到达
+	// 它。手工触发而不是真的抛，因为这个进程就是会随它一起倒下的那个。
 	const listeners = process.listeners("uncaughtException");
 	check("it subscribed to the process's own exceptions", listeners.length >= 1, String(listeners.length));
 	const own = listeners[listeners.length - 1] as (error: unknown) => void;
@@ -410,9 +400,9 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 	);
 	process.removeListener("uncaughtException", own);
 
-	// A rejected promise nobody handled is the same news as a thrown error, but it arrives without the
-	// process's own alarm — so it has to be subscribed to, or an entire class of failure stays silent.
-	// Counted rather than fired: an unhandled rejection in *this* process is this smoke's own problem.
+	// 无人处理的被拒 promise 与抛出的错误是同一条新闻，但它到达时不带进程自己的警报——所以
+	// 必须订阅它，否则一整类失败保持沉默。只数不触发：*本*进程里的 unhandled rejection 是这个
+	// smoke 自己的问题。
 	check(
 		"it subscribed to unhandled rejections too",
 		process.listeners("unhandledRejection").length >= 1,
@@ -421,8 +411,8 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 }
 
 // ------------------------------------------------------------------------------------------------
-// 5. A server that rejects, and one that never answers, are both reported — the second one is the
-//    hole the ticket names, because it used to be a shell with no window and no line.
+// 5. 一个拒绝的服务器与一个永不作答的服务器都被报告——第二个正是 ticket 指名的洞，因为它
+//    曾经是一个既没有窗口也没有一行的外壳。
 // ------------------------------------------------------------------------------------------------
 {
 	process.stdout.write("a server that will not start\n");
@@ -447,7 +437,7 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 }
 
 // ------------------------------------------------------------------------------------------------
-// 6. A boot that hangs is bounded, reported, and not abandoned in silence when it later arrives.
+// 6. 挂起的 boot 有界、被报告，并且在它后来到达时不被沉默地放弃。
 // ------------------------------------------------------------------------------------------------
 {
 	process.stdout.write("a server that never answers\n");
@@ -471,8 +461,8 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 	check("and the failure reached a window", factory.made.length === 1, String(factory.made.length));
 	check("the default budget is a watchdog, not a deadline", BOOT_BUDGET_MS === 20_000, String(BOOT_BUDGET_MS));
 
-	// A boot that lands after the budget is the one case where "slow" and "stuck" differ, so it is
-	// said out loud when it arrives: a report has already been drawn by then.
+	// 预算之后才落地的 boot 是"慢"与"卡"分开的那一个用例，所以它到达时被大声说出来：那时
+	// 一份报告已经画出去了。
 	const lateLogs: string[] = [];
 	let settle: (booted: { url: string }) => void = () => {};
 	const late = new Promise<{ url: string }>((done) => {
@@ -491,7 +481,7 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 	check("and says so when it finally arrives", await until(() => lateLogs.some((line) => line.includes("http://127.0.0.1:9")), 1_000), lateLogs.join(" | "));
 }
 
-// A boot that succeeds inside the budget is the ordinary path: no line, no window, the server back.
+// 预算之内成功的 boot 是寻常路径：没有行、没有窗口、服务器回来。
 {
 	process.stdout.write("a server that starts\n");
 	const factory = windows();
@@ -509,10 +499,9 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 	check("and no report window was opened", factory.made.length === 0, String(factory.made.length));
 }
 
-// The natural-exit watchdog, last thing in the file: every case above has been torn down, so the
-// loop should drain and this process should leave — before this unref'd timer, which does not hold
-// the loop open, ever fires. If it fires, a budget was left armed, or something else is still
-// holding a handle; both are failures.
+// 自然退出 watchdog，文件里最后一件事：上面每个用例都已拆除，事件循环应当排空、本进程应当
+// 离开——赶在这个不占用循环的 unref 定时器触发之前。它若触发，说明某个预算还挂着，或者别的
+// 什么东西还握着句柄；两者都是失败。
 setTimeout(() => {
 	process.stdout.write("\nFAIL the process did not exit on its own — a handle was left behind\n");
 	process.exit(1);

@@ -1,7 +1,5 @@
-// Find custom properties a stylesheet references but never defines. A missing token does not fail
-// loudly — it makes the declaring rule invalid at computed-value time, so the property silently
-// falls back instead of showing the wrong color, which is exactly the kind of bug a screenshot
-// cannot explain.
+// 找出样式表里引用了却从未定义的自定义属性。缺失的 token 不会大声报错——它会让声明该属性的规则
+// 在计算值阶段整条失效，属性于是静默回退而不是显示错误的颜色，这正是截图无法解释的那类 bug。
 import { readFile } from "node:fs/promises";
 
 const files = process.argv.slice(2);

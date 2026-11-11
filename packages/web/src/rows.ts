@@ -1,38 +1,33 @@
 import type { SessionRow, DirectoryGroup } from "@my-agent/core/protocol";
 
 /**
- * The sidebar's rows, kept at the connection level.
+ * 侧栏的行，保存在连接层。
  *
- * Deliberately not part of `ViewState` and not something {@link reduce} sees. Rows answer "what is
- * every session on this machine doing", which is a question about the connection rather than about
- * the conversation one pane happens to be showing — and the deciding test is whether a field stays
- * true with nothing subscribed. `running` and `pending` do; a token count would not, which is why
- * `usage` never comes here.
+ * 刻意不属于 `ViewState`，也不是 {@link reduce} 能看到的东西。行回答"这台机器上每个会话都在做
+ * 什么"，这是关于连接的问题，而不是关于某个窗格恰好展示的对话 —— 判定标准是：在没有任何订阅者
+ * 时，这个字段是否仍然为真。`running` 和 `pending` 是；token 计数不是，所以 `usage` 永远不来到
+ * 这里。
  *
- * There are two writers, and they never overlap. While the channel is `live` the rows come only from
- * it, and REST is not consulted at all; while the channel is down, a REST listing is the only thing
- * saying anything. One writer at a time is what removes the race: without it, a listing that started
- * before a `running: true` arrived could land afterwards and put the row back to `false`, and the
- * window would show a session as idle while it was working.
+ * 有两个写入者，且它们从不重叠。通道为 `live` 时，行只来自通道，完全不查 REST；通道断开时，REST
+ * 列表是唯一的信息来源。同一时刻只有一个写入者，正是消除竞态的关键：否则，一个在 `running: true`
+ * 到达之前发起的列表可能在之后落地，把行拉回 `false`，窗口就会把一个正在工作的会话显示成空闲。
  */
 export class SessionRows {
 	private readonly rows = new Map<string, SessionRow>();
 
 	/**
-	 * Bumped by every mutation, read by the window's render gate.
+	 * 每次变更都会递增，由窗口的渲染门读取。
 	 *
-	 * The sidebar's rows change on their own schedule while a streaming frame changes none of them,
-	 * and a redraw decision needs to tell those apart without diffing the table. A counter is the
-	 * cheapest honest answer: a frame that changed no row reads the same number it drew last, and a
-	 * frame that changed one does not.
+	 * 侧栏的行按自己的节奏变化，而一个流式 frame 不会改变它们中的任何一个；重绘决策需要在不 diff
+	 * 整表的情况下区分这两者。计数器是最便宜且诚实的答案：没改任何行的 frame 读到和上次绘制相同
+	 * 的数字，改了的则不是。
 	 */
 	version = 0;
 
 	/**
-	 * Replace the whole table, which is what the connection's opening frame is.
+	 * 整表替换，这正是连接的打开帧所做的事。
 	 *
-	 * A replacement rather than a merge, so a row for a session that has since been deleted
-	 * disappears on its own — there is no tombstone to carry and no removal frame to define.
+	 * 用替换而不是合并，这样已被删除会话的行会自行消失 —— 不需要携带墓碑，也不需要定义删除帧。
 	 */
 	replaceAll(rows: readonly SessionRow[]): void {
 		this.rows.clear();
@@ -41,11 +36,10 @@ export class SessionRows {
 	}
 
 	/**
-	 * One row changed.
+	 * 一行变了。
 	 *
-	 * The server sends the whole row because a row is small and a whole row is idempotent — the same
-	 * row arriving twice, or out of order, leaves the same table. Merging field by field would be the
-	 * only thing here that could produce a row that is half old and half new.
+	 * 服务端发送整行，因为行很小而整行是幂等的 —— 同一行到达两次或乱序到达，得到的都是同一张表。
+	 * 逐字段合并将是这里唯一可能产生"一半新一半旧"的行的做法。
 	 */
 	put(row: SessionRow): void {
 		this.rows.set(row.id, row);
@@ -53,11 +47,10 @@ export class SessionRows {
 	}
 
 	/**
-	 * One row went away: the session behind it was deleted.
+	 * 一行消失了：它背后的会话被删除。
 	 *
-	 * A no-op for an id the table never held, because "gone" is only news to a window that had it —
-	 * but the version still moves for the one that did, since a row disappearing is a change the
-	 * render gate has to see.
+	 * 对表中从未持有的 id 是无操作，因为"没了"只对曾持有它的窗口是新闻 —— 但对持有过的那个，版本
+	 * 仍然要动，因为行消失是渲染门必须看到的变化。
 	 */
 	remove(sessionId: string): void {
 		if (!this.rows.delete(sessionId)) return;
@@ -65,12 +58,11 @@ export class SessionRows {
 	}
 
 	/**
-	 * Take a REST listing, as the fallback for a channel that is not up.
+	 * 接收一份 REST 列表，作为通道未启用时的回退。
 	 *
-	 * Rejected while the channel is `live`, which is the whole point of the rule: at that moment the
-	 * channel is the authority on these rows, and a listing computed from files would overwrite a
-	 * running session's row with an idle one. Returns whether it was taken, so a caller can tell the
-	 * difference between "refreshed" and "the channel owns this now".
+	 * 通道为 `live` 时被拒绝，这正是这条规则的意义所在：此时通道是这些行的权威，从文件算出的列表
+	 * 会把一个正在运行的会话的行覆盖成空闲。返回是否被采纳，让调用者能区分"刷新了"和"通道现在
+	 * 拥有这些行"。
 	 */
 	loadFrom(groups: readonly DirectoryGroup[], channelIsLive: boolean): boolean {
 		if (channelIsLive) return false;
@@ -82,23 +74,22 @@ export class SessionRows {
 		return true;
 	}
 
-	/** One row, or `undefined` for a session nothing has told this window about. */
+	/** 一行；对没有任何窗口被告知过的会话返回 `undefined`。 */
 	get(sessionId: string): SessionRow | undefined {
 		return this.rows.get(sessionId);
 	}
 
-	/** Every row, newest activity first — the order the sidebar draws. */
+	/** 所有行，最新活动在前 —— 侧栏绘制的顺序。 */
 	list(): SessionRow[] {
 		return [...this.rows.values()].sort((a, b) => b.modified - a.modified);
 	}
 
 	/**
-	 * The rows as the sidebar's groups, each group ordered by its own newest row.
+	 * 以侧栏分组的形式返回行，每组按自己的最新行排序。
 	 *
-	 * The same shape the server's projection answers with, and the same ordering — groups by their
-	 * newest activity, most recent first, so the directory a message just landed in is the first one
-	 * the sidebar shows. A REST fallback and a live channel produce an identical list: a store and a
-	 * reader that each sorted for themselves would disagree the first time a row moved.
+	 * 与服务端投影的应答形状相同、排序也相同 —— 组按最新活动排，最近的在前，所以刚收到消息的目录
+	 * 是侧栏显示的第一组。REST 回退与 live 通道产生完全相同的列表：各自排序的存储与读者，第一次
+	 * 行移动时就会分歧。
 	 */
 	groups(): DirectoryGroup[] {
 		const byWorkDir = new Map<string, SessionRow[]>();
@@ -113,7 +104,7 @@ export class SessionRows {
 	}
 }
 
-/** A group's most recent activity, which is what orders the groups against each other. */
+/** 一组最近的活动，正是组与组之间排序的依据。 */
 function newest(rows: readonly SessionRow[]): number {
 	return rows.reduce((latest, row) => Math.max(latest, row.modified), 0);
 }

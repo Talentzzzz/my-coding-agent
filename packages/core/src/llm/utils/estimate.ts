@@ -1,17 +1,17 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
-// from flagging this file, while every import into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
 import type { AssistantMessage, Context, ImageContent, Message, TextContent, Usage } from "../types.ts";
 import { getSystemMessageText } from "./text.ts";
 
 export interface ContextUsageEstimate {
-	/** Estimated total context tokens. */
+	/** 估算的总 context token 数。 */
 	tokens: number;
-	/** Tokens reported by the most recent applicable assistant usage block. */
+	/** 最近一条适用的 assistant usage block 报告的 token 数。 */
 	usageTokens: number;
-	/** Estimated tokens after the most recent applicable assistant usage block. */
+	/** 最近一条适用的 assistant usage block 之后的估算 token 数。 */
 	trailingTokens: number;
-	/** Index of the applicable message that provided usage, or null when none exists. */
+	/** 提供 usage 的那条消息的下标，没有时为 null。 */
 	lastUsageIndex: number | null;
 }
 
@@ -75,8 +75,7 @@ function getLastAssistantUsageInfo(messages: readonly Message[]): { usage: Usage
 		const message = messages[i];
 		if (message.role === "assistant") {
 			const assistant = message as AssistantMessage;
-			// A newer prefix message was inserted after this response (for example, a
-			// compaction summary), so its usage cannot describe the current prefix.
+			// 这条响应之后插入过更新的前缀消息（例如压缩摘要），所以它的 usage 描述不了当前前缀。
 			const usageAppliesToPrefix = assistant.timestamp >= latestPrefixTimestamp;
 			if (
 				usageAppliesToPrefix &&
@@ -95,9 +94,8 @@ function getLastAssistantUsageInfo(messages: readonly Message[]): { usage: Usage
 
 export function estimateContextTokens(context: Context): ContextUsageEstimate {
 	const messages = context.messages;
-	// Tools are not part of any message, so they are counted here rather than by
-	// `estimateMessageTokens`. Leaving them out would under-report the context by every tool schema
-	// on the request.
+	// 工具不属于任何消息，所以在这里计数而不是交给 `estimateMessageTokens`。漏掉它们会让 context
+	// 被少报请求上的每个工具 schema。
 	const toolTokens = estimateToolsTokens(context.tools);
 	const usageInfo = getLastAssistantUsageInfo(messages);
 	if (usageInfo) {

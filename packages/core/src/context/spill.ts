@@ -3,33 +3,32 @@ import { dirname, join } from "node:path";
 import type { ToolResultContent } from "../hooks.ts";
 
 /**
- * The tool-result size at which the full text leaves the context and moves to a file.
+ * 完整正文离开 context、移入文件的 tool result 大小门槛。
  *
- * Well-behaved tools bound their own output (`tools/truncate.ts`, 60,000 characters) and paginate what
- * they can, so a result over this line is one a tool did not bound. Roughly 20k tokens: one result of
- * this size is a meaningful share of a context window, which is more than any single answer deserves.
- * Deliberately above the per-tool budget, so a result a tool already bounded never touches this.
+ * 行为良好的工具会自己限流输出（`tools/truncate.ts`，60,000 字符）并尽可能分页，所以超过这条线的
+ * result 是一个没被限流的工具的产物。约 20k token：这个大小的一条 result 已占 context window 的
+ * 可观份额，比任何单个答案应得的多。刻意高于每个工具自身的预算，所以已被工具限流的 result 永远
+ * 碰不到这里。
  */
 export const SPILL_RESULT_CHARS = 80_000;
 
-/** How much of a spilled result the model still sees, at each end. */
+/** 被归档的 result 模型仍能看到的头尾各多少。 */
 export const SPILL_KEEP_CHARS = 2_000;
 
 /**
- * Where a spilled result lives, under the working directory: `.my-agent/tool-results/<session id>/`.
+ * 被归档的 result 存放的位置，在工作目录之下：`.my-agent/tool-results/<session id>/`。
  *
- * The directory is the session's own project, so the archive sits beside the files the result is
- * about and a session that walks away from it leaves the archive where a person would look. Nothing
- * about the path is a boundary: a result is archived there because that is the useful place for it.
+ * 目录是 session 自己的项目，所以归档挨着 result 所谈论的文件，离开这个项目的 session 会把归档留在
+ * 一个人会去找它的地方。路径的任何部分都不是边界：result 归档在那里只是因为那是对它有用的地方。
  */
 const SPILL_DIR_PARTS = [".my-agent", "tool-results"] as const;
 
-/** One filename segment a session id, a tool name, or a call id cannot break. */
+/** 一个文件名段，session id、工具名或 call id 都破坏不了它。 */
 function safeSegment(value: string): string {
 	return value.replace(/[^A-Za-z0-9._-]/g, "_");
 }
 
-/** The file one result's full text belongs in, by session and call, so a view can be rebuilt later. */
+/** 一条 result 的完整正文该写入的文件，按 session 和 call 命名，视图因此可以日后重建。 */
 export function spillPathFor(
 	workDirAbsPath: string,
 	sessionId: string,
@@ -43,7 +42,7 @@ export function spillPathFor(
 	};
 }
 
-/** The text of a result's blocks that are text, joined in order. Images and other blocks are not in it. */
+/** result 的各 text block 的文字，按顺序拼接。图片和其他 block 不在其中。 */
 export function spillText(content: ToolResultContent): string {
 	return content
 		.filter((block): block is Extract<typeof block, { type: "text" }> => block.type === "text")
@@ -51,7 +50,7 @@ export function spillText(content: ToolResultContent): string {
 		.join("\n");
 }
 
-/** The size at which `spillOversizedToolResult` archives rather than passes a result through. */
+/** `spillOversizedToolResult` 改为归档而非放行 result 的大小门槛。 */
 function oversizedText(content: ToolResultContent): string | undefined {
 	let total = 0;
 	for (const block of content) {
@@ -62,7 +61,7 @@ function oversizedText(content: ToolResultContent): string | undefined {
 	return spillText(content);
 }
 
-/** Write one archive file whole. False when the write failed, so the caller can fall back to the clip. */
+/** 整体写一个归档文件。写入失败返回 false，调用方能回落到硬截断。 */
 export function writeSpillFile(absPath: string, text: string): boolean {
 	try {
 		if (!existsSync(absPath)) {
@@ -76,11 +75,10 @@ export function writeSpillFile(absPath: string, text: string): boolean {
 }
 
 /**
- * The content a model reads for an archived result: head and tail around a notice naming the file.
+ * 模型为一条已归档 result 读到的内容：头尾夹着一条指名文件的通知。
  *
- * Anything that is not text — an image block — passes through after the notice. A text short enough
- * that head and tail would overlap is kept whole: the archive already holds it, and a view that
- * duplicated characters to save them would be absurd.
+ * 非 text 的东西——图片 block——在通知之后原样通过。text 短到头尾会重叠时整体保留：归档里已经
+ * 存着它，为了省字符而让视图重复相同文字是荒谬的。
  */
 export function spillView(content: ToolResultContent, text: string, relPath: string, keepChars: number): ToolResultContent {
 	const notice =
@@ -97,12 +95,11 @@ export function spillView(content: ToolResultContent, text: string, relPath: str
 }
 
 /**
- * Archive one oversized result and answer with the view the model should see, or `undefined`.
+ * 归档一条过大的 result，返回模型应看到的视图，否则返回 `undefined`。
  *
- * `undefined` means "not oversized", or the file could not be written — the caller falls back to the
- * hard clip in `boundToolContent` rather than showing a notice that names a file that is not there.
- * The path is derived from the session and the call id, which is what makes the archive findable for
- * as long as the working directory exists.
+ * `undefined` 意味着「不过大」或文件写不出来——调用方回落到 `boundToolContent` 的硬截断，而不是
+ * 展示一条指名了不存在文件的通知。路径由 session 和 call id 推导，这让归档在工作目录存在的期间
+ * 始终找得到。
  */
 export function spillOversizedToolResult(
 	workDirAbsPath: string,

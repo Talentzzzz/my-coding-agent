@@ -13,7 +13,7 @@ function parseArgs(argv: readonly string[]): Args {
 	const args: Args = {
 		workDirAbsPath: process.cwd(),
 		host: "127.0.0.1",
-		// The port a familiar backend listens on, and overridable for anything that wants 5180 back.
+		// 沿用一个常见后端监听的端口，想要回 5180 的场景可以用参数覆盖。
 		port: 8080,
 		vite: false,
 	};

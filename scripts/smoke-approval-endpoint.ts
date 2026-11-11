@@ -1,14 +1,12 @@
-// The approvals endpoint's contract at the REST face: an answerable id is a 200 and reaches the
-// session and the answers listener; an id nothing is waiting on is a 409 — and a refused attempt is
-// recorded nowhere, not even in the listener the mux reports settlements from. The order the endpoint
-// answers in is the part that silently breaks the settlement frames if it is violated, so the read-only
-// check, the listener, and the session's own answer are each asserted in that order.
+// approvals 端点在 REST 面上的契约：可应答的 id 返回 200 并到达 session 与应答监听器；没有
+// 任何东西在等的 id 返回 409——且被拒绝的尝试不记录在任何地方，连 mux 汇报结算用的那个监听器
+// 也不记。端点的应答顺序是那种一旦被破坏就会悄悄弄坏 settlement 帧的部分，所以只读检查、监听器
+// 与 session 自身的应答各按这个顺序断言。
 //
 //   node scripts/smoke-approval-endpoint.ts
 //
-// No provider key is needed: the scripted transport parks the run at the gate. The stream-level half
-// of the approval story — who sees the request, who hears the settlement — belongs to the mux
-// conversion of smoke-approval.ts; this script pins only what the endpoint itself answers.
+// 无需 provider key：剧本化 transport 让 run 停在门口。审批故事的流层面那一半——谁看到请求、
+// 谁听到结算——属于 smoke-approval.ts 的 mux 部分；本脚本只钉住端点自己应答的内容。
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -49,17 +47,15 @@ const rows: ModelConfig[] = [
 ];
 const modelName = "anthropic";
 
-// The scripted transport stands in for the model: a tool call that parks at the gate, then the text
-// that ends the run once the answer arrives. The hub's one orchestrator is built over it, so every
-// session this server runs sends through it.
+// 剧本化 transport 顶替模型：一个停在门口的工具调用，然后是应答到达后结束 run 的文本。
+// hub 的唯一 orchestrator 建立在它之上，这台服务器跑的每个 session 都经由它发送。
 const fake = createFakeTransport();
 fake.setResponses([
 	fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 	fakeAssistantMessage("done"),
 ]);
-// The approval gate is a settings read the orchestrator makes per request: `read` sits behind the
-// gate for every session this hub serves. The map and the rows are seeded onto temp-home files
-// first, so nothing lands in the machine's own settings or models file.
+// 审批门是 orchestrator 每个请求都会读一次的设置：这台 hub 服务的每个 session 里 `read` 都在
+// 门后。映射与模型行先种到临时 home 文件里，任何东西都不会落到机器自己的设置或模型文件上。
 const settingsHome = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-home-"));
 const seeder = new SettingManager({ home: settingsHome, modelsHome: settingsHome });
 seeder.applySettings(root, { approval: { read: true } });
@@ -71,16 +67,16 @@ const hub = new SessionHub({
 	modelsHome: settingsHome,
 });
 
-// Mounted the way `SessionHub.open()` mounts one — the entry parked at the gate is what the checks
-// below drive — so the controller holds through the real hub.
+// 按 `SessionHub.open()` 挂载 session 的方式来挂——停在门口的入口就是下面这些检查要驱动的
+// 对象——所以 controller 经由真正的 hub 持有。
 const { id: sessionId } = await mountSession(hub, {
 	root,
 	model: modelName,
 });
 const session = hub.agent;
 
-// The spy is the whole point of building the controller by hand: the listener is what the mux's
-// answers table is fed through, so "the refused attempt reached nothing" is asserted right here.
+// 手工组装 controller 的全部意义就在这个 spy 上：mux 的应答表正是经由这个监听器喂进来的，
+// 所以"被拒绝的尝试哪儿也没到"就在这里断言。
 const remembered: { sessionId: string; toolCallId: string; approved: boolean }[] = [];
 const router = new Router(
 	createRoutes({
@@ -118,9 +114,9 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
 	return ready();
 }
 
-// The bench holds a hold for the length of the checks below. A run that ends with nobody holding
-// the session is reaped and its idle state evicted, so the snapshot reads would race the eviction —
-// holding the hold is what keeps the state in hand while they run.
+// 测试台在下面这些检查期间持有一个 hold。一个结束于无人持有的 session 的 run 会被收割、其
+// idle 状态被驱逐，快照读取就会与驱逐赛跑——持有 hold 正是在这些读取运行期间把状态留在手里的
+// 办法。
 const bench = await hub.hold(sessionId);
 
 try {
@@ -131,8 +127,7 @@ try {
 	check("the run parked at the approval", pending, JSON.stringify(session.snapshot(sessionId).pendingApprovals));
 	const toolCallId = session.snapshot(sessionId).pendingApprovals[0]?.toolCallId ?? "";
 
-	// The refusal half: an id nothing is waiting on is a conflict, and neither the answers listener
-	// nor the session hears about the attempt.
+	// 拒绝那一半：没有任何东西在等的 id 是冲突，无论应答监听器还是 session 都听不到这次尝试。
 	const unknown = await request("POST", `/api/sessions/${sessionId}/approvals/no-such-call`, { approved: true });
 	check("an unknown toolCallId is a conflict", unknown.status === 409, `status ${unknown.status} ${JSON.stringify(unknown.payload)}`);
 	check("the refusal says what was refused", JSON.stringify(unknown.payload).includes("not a pending approval"), JSON.stringify(unknown.payload));
@@ -142,8 +137,8 @@ try {
 	const denied = await request("POST", `/api/sessions/${sessionId}/approvals/no-such-call`, { approved: false });
 	check("the refusal does not depend on the answer's direction", denied.status === 409, `status ${denied.status}`);
 
-	// The answer half: the real id is accepted, reaches the listener with the session's own identity,
-	// and reaches the session — the run carries on to its answer.
+	// 应答那一半：真 id 被收下，带着 session 自己的身份到达监听器，也到达 session——run 继续
+	// 走到它的回答。
 	const answered = await request("POST", `/api/sessions/${sessionId}/approvals/${encodeURIComponent(toolCallId)}`, {
 		approved: true,
 	});
@@ -162,7 +157,7 @@ try {
 	check("the tool ran", JSON.stringify(session.snapshot(sessionId).messages).includes("notes.txt"), "");
 	check("and the closing answer is there", session.snapshot(sessionId).messages.some((message) => JSON.stringify(message).includes("done")), "");
 
-	// Answered once, it is no longer answerable: the same request now conflicts too.
+	// 应答过一次之后就不再是可应答的：同样的请求现在也冲突。
 	const twice = await request("POST", `/api/sessions/${sessionId}/approvals/${encodeURIComponent(toolCallId)}`, {
 		approved: true,
 	});

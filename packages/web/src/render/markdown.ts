@@ -1,15 +1,12 @@
 /**
- * A Markdown subset renderer, built as DOM nodes.
+ * Markdown 子集渲染器，直接构建 DOM 节点。
  *
- * It renders from a block list rather than an HTML string, so model output can never inject markup.
- * The block list is also what makes streaming cheap: a growing message is re-parsed as text arrives,
- * but only the blocks that changed are touched — complete blocks are appended once and never
- * revisited, and the one block still being written is the only one replaced. Without that split, a
- * long answer would rebuild its whole subtree on every token.
+ * 它从块列表渲染而不是 HTML 字符串，所以模型输出永远无法注入标记。块列表也是让流式便宜的东西：
+ * 生长中的消息随文本到达重新解析，但只有变化的块被触碰 —— 完成的块追加一次之后永不再访，仍在
+ * 写入的块是唯一被替换的。没有这个拆分，长回答会在每个 token 上重建整棵子树。
  *
- * The subset is deliberately small: headings, paragraphs, fenced code, blockquotes, ordered,
- * unordered and task lists, tables, horizontal rules, and inline code, emphasis, strikethrough and
- * links. Anything outside it stays literal text rather than being guessed at.
+ * 子集刻意很小：标题、段落、围栏代码、引用、有序/无序/任务列表、表格、水平线，以及行内代码、
+ * 强调、删除线和链接。子集之外的保持字面文本，而不是去猜。
  */
 
 export type Block =
@@ -23,7 +20,7 @@ export type Block =
 
 type Align = "left" | "center" | "right" | undefined;
 
-/** One member of {@link Block}, named by its kind — what a `switch (block.kind)` case narrows to. */
+/** {@link Block} 的某个成员，按 kind 指名 —— `switch (block.kind)` 分支收窄到的类型。 */
 type BlockOf<Kind extends Block["kind"]> = Extract<Block, { kind: Kind }>;
 
 function isBlank(line: string): boolean {
@@ -83,7 +80,7 @@ function splitRow(line: string): string[] {
 	return cells;
 }
 
-/** A table's delimiter row: `| --- | :-: |`, which is what tells a table from a paragraph. */
+/** 表格的分隔行：`| --- | :-: |`，正是它把表格从段落里认出来。 */
 function tableAlign(line: string): Align[] | undefined {
 	const cells = splitRow(line);
 	if (cells.length === 0) return undefined;
@@ -99,15 +96,13 @@ function tableAlign(line: string): Align[] | undefined {
 }
 
 /**
- * Split Markdown into blocks, from `start` onward, and say where the last block began.
+ * 从 `start` 起把 Markdown 拆成块，并说出最后一个块从哪里开始。
  *
- * An unterminated block — a fence with no closing marker, a table with no delimiter row, a list still
- * being written — becomes the block it looks like so far. A streaming message needs that: the tail
- * is rendered as it stands, then replaced when the next chunk decides what it really is.
+ * 未终结的块 —— 没有闭合标记的围栏、没有分隔行的表格、还在写的列表 —— 按目前为止的样子成为
+ * 那个块。流式消息需要这个：尾部按现状渲染，下一个 chunk 决定它真正是什么之后再替换。
  *
- * Every iteration pushes exactly one block, and lines are consumed in order, so the line index of the
- * final block is also the point past which nothing earlier can change. `lastStart` reports it: the
- * incremental caller keeps everything before it and re-parses only from there.
+ * 每次迭代恰好压入一个块，行按顺序消费，所以最后一个块的行下标也就是更早内容不可能再变化的
+ * 分界点。`lastStart` 报告它：增量调用者保留它之前的一切，只从那里重新解析。
  */
 function parseFrom(lines: string[], start: number): { blocks: Block[]; lastStart: number } {
 	const blocks: Block[] = [];
@@ -122,7 +117,7 @@ function parseFrom(lines: string[], start: number): { blocks: Block[]; lastStart
 			continue;
 		}
 
-		// This line begins the block the iteration will push, so it is the newest safe cut.
+		// 这一行开启了本次迭代将压入的块，所以它是最新的安全切点。
 		lastStart = index;
 
 		const fence = fenceInfo(line);
@@ -181,7 +176,7 @@ function parseFrom(lines: string[], start: number): { blocks: Block[]; lastStart
 					index += 1;
 					continue;
 				}
-				// An indented line continues the item above it.
+				// 缩进行延续它上面的条目。
 				if (!isBlank(current) && /^\s{2,}/.test(current) && items.length > 0) {
 					items[items.length - 1] += `\n${current.trim()}`;
 					index += 1;
@@ -193,7 +188,7 @@ function parseFrom(lines: string[], start: number): { blocks: Block[]; lastStart
 			continue;
 		}
 
-		// A table is a row followed by a delimiter row; anything else here is a paragraph.
+		// 表格是一行加上一个分隔行；其余都是段落。
 		if (line.includes("|") && index + 1 < lines.length) {
 			const align = tableAlign(lines[index + 1]!);
 			if (align) {
@@ -218,7 +213,7 @@ function parseFrom(lines: string[], start: number): { blocks: Block[]; lastStart
 			index += 1;
 		}
 		if (paragraph.length === 0) {
-			// Unreachable in practice, but a parser that cannot advance would hang the renderer.
+			// 实践中不可达，但一个无法前进的解析器会挂死渲染器。
 			paragraph.push(line);
 			index += 1;
 		}
@@ -228,67 +223,60 @@ function parseFrom(lines: string[], start: number): { blocks: Block[]; lastStart
 	return { blocks, lastStart };
 }
 
-/** Split Markdown into blocks. */
+/** 把 Markdown 拆成块。 */
 export function parseBlocks(text: string): Block[] {
 	return parseFrom(text.split("\n"), 0).blocks;
 }
 
 /**
- * What {@link renderMarkdown} carries between calls.
+ * {@link renderMarkdown} 在两次调用之间携带的东西。
  *
- * A streaming message is re-rendered many times a second, and re-parsing the whole answer each time
- * costs O(answer²) over the answer. This keeps the parse: every block before the last one is settled
- * — appending text cannot change it — so the next call keeps those and re-parses only the tail. The
- * tail is cut by character offset rather than by re-splitting the whole text, so a frame's cost is
- * proportional to the block still being written and not to the answer so far. The caller holds one
- * of these per message and threads it back in; it means nothing on its own.
+ * 流式消息每秒重渲染多次，每次重新解析整个答案的成本是 O(答案²)。这里保存解析结果：最后一个块
+ * 之前的每个块都已落定 —— 追加文本不可能改变它 —— 所以下次调用保留它们、只重新解析尾部。尾部
+ * 按字符偏移切，而不是重新切分整个文本，所以一帧的成本正比于仍在写的块，而不是到目前为止的
+ * 答案。调用者为每条消息持有一个并传回来；它单独存在毫无意义。
  */
 export interface MarkdownState {
-	/** The text this state was parsed from. */
+	/** 这份状态解析自的文本。 */
 	text: string;
-	/** Every block parsed from that text, in order. */
+	/** 从那份文本解析出的所有块，按序。 */
 	blocks: Block[];
 	/**
-	 * The character offset at which the last block began — the only block that can still change.
+	 * 最后一个块开始的字符偏移 —— 唯一仍可能变化的块。
 	 *
-	 * An offset rather than a line index, because the next call must not touch the whole text to
-	 * find the tail: slicing here and splitting the slice costs O(tail), where a line index would
-	 * force a full `split` just to be usable.
+	 * 是偏移而不是行下标，因为下次调用绝不能为了找尾部而触碰整个文本：在这里切再切分切片的
+	 * 成本是 O(尾部)，而行下标光是为了可用就得强制一次完整的 `split`。
 	 */
 	tailOffset: number;
 }
 
 /**
- * Render `text` into `container`, touching only what changed.
+ * 把 `text` 渲染进 `container`，只触碰变化的部分。
  *
- * `state` is the previous call's {@link MarkdownState}, and the returned value is the one to pass
- * back next time. When the text only grew, the settled blocks are kept and just the tail is parsed;
- * everything else is a full parse.
+ * `state` 是上一次调用的 {@link MarkdownState}，返回值是下次要传回去的那个。文本只是增长时，
+ * 落定的块被保留、只解析尾部；其他一切都是完整解析。
  *
- * The tail is the block still being written, and while it keeps its kind it is patched in place
- * rather than replaced: a long answer is often one paragraph, and replacing it every token makes the
- * browser rebuild the whole subtree, lay the column out again, and drop any selection inside it. See
- * {@link patchBlock} for what "in place" means per kind; a tail that changed kind, or text that was
- * replaced rather than continued, is re-made the old way.
+ * 尾部是仍在写的块，只要类型不变就原地修补而不是替换：长回答常常就是一个段落，逐 token 替换
+ * 会让浏览器重建整棵子树、重新排版列、丢掉其中的选中。每种"原地"的含义见 {@link patchBlock}；
+ * 类型变了或文本是被替换而非续写的尾部，按老办法重做。
  */
 export function renderMarkdown(container: HTMLElement, text: string, state?: MarkdownState): MarkdownState {
 	const previous = state?.blocks ?? [];
-	// Growth is the one shape a streaming message has; a shorter or rewritten text is a replacement
-	// (a `message_end` that disagrees with the deltas, a turn drawn from a new snapshot).
+	// 增长是流式消息唯一的形态；更短或被改写的文本是替换（与 delta 不一致的 `message_end`、
+	// 从新快照画出的回合）。
 	const continued = state !== undefined && text.length >= state.text.length && text.startsWith(state.text);
 	let blocks: Block[];
 	let tailOffset: number;
 
 	if (continued) {
-		// The text only grew: keep everything before the old tail and re-parse from where it started.
-		// The slice shares its first `state.tailOffset` characters with the old text, so the tail's
-		// own first line is the block that was still open — and nothing earlier is touched at all.
+		// 文本只是增长：保留旧尾部之前的全部，从它开始的地方重新解析。切片的前
+		// `state.tailOffset` 个字符与旧文本共享，所以尾部的第一行就是还开着的那个块 —— 更早的
+		// 什么都没被触碰。
 		const kept = Math.max(0, state.blocks.length - 1);
 		const tailLines = text.slice(state.tailOffset).split("\n");
 		const tail = parseFrom(tailLines, 0);
-		// The tail's blocks may be fewer, equal, or more than the one they replace — a paragraph the
-		// new text just split with a blank line becomes two — and the DOM patch below handles all
-		// three.
+		// 尾部的块可能比被替换的那个更少、相等或更多 —— 新文本用空行拆开的段落变成两个 —— 下面的
+		// DOM 补丁处理这三种。
 		blocks = [...state.blocks.slice(0, kept), ...tail.blocks];
 		tailOffset = state.tailOffset + offsetOfLine(tailLines, tail.lastStart);
 	} else {
@@ -298,9 +286,8 @@ export function renderMarkdown(container: HTMLElement, text: string, state?: Mar
 		tailOffset = offsetOfLine(lines, parsed.lastStart);
 	}
 
-	// The only case worth patching is "same number of blocks, tail kept its kind": every block before
-	// the tail is settled, so the screen differs only in its last element, and the element itself can
-	// keep its identity. Anything else is a shape change, and the old path re-adds from the cut.
+	// 值得补丁的唯一情形是"块数相同、尾部类型未变"：尾部之前的每个块都已落定，所以屏幕只差最后
+	// 一个元素，元素自己还能保住身份。其余都是形状变化，老路径从切点重加。
 	const kept = previous.length - 1;
 	if (continued && blocks.length === previous.length && kept >= 0) {
 		const tail = container.lastElementChild as HTMLElement | null;
@@ -310,13 +297,12 @@ export function renderMarkdown(container: HTMLElement, text: string, state?: Mar
 	}
 
 	if (!continued || blocks.length < previous.length) {
-		// A replacement, or a tail that lost blocks: the container is rebuilt rather than patched
-		// against blocks that no longer exist.
+		// 一次替换，或丢失了块的尾部：容器重建，而不是对着已不存在的块打补丁。
 		container.replaceChildren();
 		appendBlocks(container, blocks, 0);
 	} else {
-		// Drop the tail before re-adding it: it is the block still being written, and the one just
-		// parsed is a different kind (or a list that changed type), so it cannot be patched.
+		// 重加之前先丢掉尾部：它是仍在写的块，刚解析出的那个类型不同（或列表改了类型），无法
+		// 补丁。
 		if (previous.length > 0) container.lastElementChild?.remove();
 		appendBlocks(container, blocks, Math.max(0, previous.length - 1));
 	}
@@ -324,7 +310,7 @@ export function renderMarkdown(container: HTMLElement, text: string, state?: Mar
 	return { text, blocks, tailOffset };
 }
 
-/** The character offset at which line `index` begins, within the text `lines` was split from. */
+/** 行 `index` 在 `lines` 所拆出的文本中的字符偏移。 */
 function offsetOfLine(lines: readonly string[], index: number): number {
 	if (index <= 0) return 0;
 	let offset = 0;
@@ -337,12 +323,11 @@ function appendBlocks(container: HTMLElement, blocks: readonly Block[], from: nu
 }
 
 /**
- * Patch the block still being written, in place, and say whether it worked.
+ * 原地修补仍在写的块，并回答是否成功。
  *
- * The element is the one already on screen, so a successful patch leaves its identity, its place in
- * the column, and everything already laid out around it alone. `false` means the element cannot
- * describe `next` — a kind change, a replacement, or a structure a growth would rewrite — and the
- * caller re-makes it the old way.
+ * 元素是屏幕上已有的那个，所以成功的补丁保住它的身份、它在列中的位置、以及周围已经排好的
+ * 一切。`false` 表示元素无法描述 `next` —— 类型变了、是替换、或一次增长会重写的结构 ——
+ * 调用者按老办法重做。
  */
 function patchBlock(element: HTMLElement, previous: Block, next: Block): boolean {
 	if (previous.kind !== next.kind) return false;
@@ -360,15 +345,15 @@ function patchBlock(element: HTMLElement, previous: Block, next: Block): boolean
 		case "list":
 			return patchListBlock(element, previous as BlockOf<"list">, next);
 		case "quote": {
-			// A quote is a container of blocks rather than one run of text, so its own children are
-			// re-made; the `<blockquote>` itself stays, which is what keeps its margins and place.
+			// 引用是块的容器而不是一段文本，所以它自己的子节点重做；`<blockquote>` 本身保留，这正是
+			// 保住它的边距和位置的东西。
 			element.replaceChildren();
 			for (const child of parseBlocks(next.lines.join("\n"))) element.append(renderBlock(child));
 			return true;
 		}
 		case "table":
-			// A table's rows and alignment are a grid, not a run: the element is cheaper to re-make
-			// than to patch cell by cell, and a streamed table is rare enough not to earn the code.
+			// 表格的行和对齐是一张网格，不是一段流：重做元素比逐格补丁便宜，且流式表格罕见得配不上
+			// 这段代码。
 			return false;
 		case "rule":
 			return true;
@@ -376,23 +361,21 @@ function patchBlock(element: HTMLElement, previous: Block, next: Block): boolean
 }
 
 /**
- * Patch a paragraph or heading whose text only grew.
+ * 修补文本只是增长的段落或标题。
  *
- * The element's **last child** says which write is the cheap correct one, and the whole paragraph is
- * never re-read:
+ * 元素的**最后一个子节点**决定了哪种写入是廉价且正确的，整段从不重读：
  *
- * - A text node is the run of literal text since the last inline form, so everything a suffix can
- *   newly form has to begin inside that run — nothing before it is left unanswered. A suffix of
- *   ordinary prose therefore extends the node (`appendData`); a suffix carrying a marker re-reads
- *   just that run plus the suffix and swaps the nodes in its place.
- * - A form at the end closes the previous text, so nothing before the suffix can open or close
- *   anything: the suffix is rendered on its own and appended.
+ * - 文本节点是上一个行内形态之后的字面文本流，所以后缀可能新形成的任何东西都必须从这段流内部
+ *   开始 —— 它之前的内容不会留下未回应的部分。普通文字的后缀因此只是延长节点（`appendData`）；
+ *   带标记的后缀重读的只是那段流加上后缀，并原地换掉节点。
+ * - 末尾是行内形态时，它关闭了之前的文本，后缀之前的东西不可能开启或关闭任何东西：后缀单独
+ *   渲染后追加。
  *
- * The earlier cut asked "does the whole paragraph hold a form" (`hasInlineMarkup(next)`) and rebuilt
- * the element when it did, which for `思考` and any technical answer — a backtick every few words —
- * meant rebuilding the entire paragraph, node by node, on **every** frame: 456,053 nodes over 666
- * frames for a 16k-character answer, against 2 for plain prose (`.scratch/branch-line-and-smoothness/
- * research/measure-inline.ts`). Re-parsing only the unanswered run costs the same as prose does.
+ * 更早的版本问的是"整段是否含有行内形态"（`hasInlineMarkup(next)`），是就重建元素，这对 `思考`
+ * 和任何技术回答 —— 每几个词一个反引号 —— 意味着**每一帧**逐节点重建整个段落：一段 16k 字符的
+ * 回答在 666 帧里造了 456,053 个节点，而纯文本只要 2 个
+ * （`.scratch/branch-line-and-smoothness/research/measure-inline.ts`）。只重新解析未回应的那段流，
+ * 成本与纯文本一样。
  */
 function patchInlineBlock(element: HTMLElement, previous: string, next: string): boolean {
 	if (!next.startsWith(previous)) return false;
@@ -401,22 +384,20 @@ function patchInlineBlock(element: HTMLElement, previous: string, next: string):
 
 	const literal = !INLINE_MARKER.test(suffix);
 	const last = element.lastChild;
-	// `3` is `Node.TEXT_NODE`; the literal is used because the smoke's DOM shim does not export Node.
+	// `3` 是 `Node.TEXT_NODE`；用字面量是因为冒烟测试的 DOM shim 不导出 Node。
 	if (last != null && last.nodeType === 3) {
 		const tail = last.textContent ?? "";
-		// The node has to be the tail of what was rendered, or offsets in it mean nothing.
+		// 这个节点必须是已渲染内容的尾部，否则它里面的偏移毫无意义。
 		if (!previous.endsWith(tail)) return false;
-		// Ordinary prose on both sides cannot form anything across the join, so the node just grows.
-		// A marker on either side means a form may open or close here, and then only the unanswered
-		// run is re-read — which is this node, never the paragraph behind it.
+		// 两侧都是普通文字时跨连接处形成不了任何东西，节点直接生长。任一侧有标记就可能在这里
+		// 开启或关闭形态，那时只重读未回应的那段流 —— 就是这个节点，绝不是它后面的段落。
 		if (literal && !INLINE_MARKER.test(tail)) {
 			(last as Text).appendData(suffix);
 			return true;
 		}
 		const nodes = hasInlineMarkup(tail + suffix) ? inlineNodes(tail + suffix) : [];
-		// A run that still holds no form parses to the text it already is, so the node simply grows:
-		// this is the ordinary case while a marker sits unanswered (`**粗` becoming `**粗体`), and it
-		// builds nothing at all.
+		// 仍不含形态的一段流解析出的就是它已经是的文本，节点直接生长：标记悬而未决时
+		// （`**粗` 变成 `**粗体`）这是普通情形，什么都不构建。
 		if (nodes.length === 0) {
 			(last as Text).appendData(suffix);
 			return true;
@@ -426,9 +407,8 @@ function patchInlineBlock(element: HTMLElement, previous: string, next: string):
 		return true;
 	}
 
-	// The text ends on a form. A marker still unanswered to the left of that form can bind across it
-	// (`**每一次*` renders as a stray `*` plus an `em`, and the next `*` turns the pair into a
-	// `strong`), and nothing short of the whole paragraph can settle that.
+	// 文本以一个形态结尾。那个形态左侧仍未回应的标记可能跨它绑定（`**每一次*` 渲染成一个孤立的
+	// `*` 加一个 `em`，下一个 `*` 把这一对变成 `strong`），除了整段没有任何东西能定论它。
 	if (pendingMarker(element)) {
 		element.replaceChildren();
 		appendInline(element, next);
@@ -443,12 +423,10 @@ function patchInlineBlock(element: HTMLElement, previous: string, next: string):
 }
 
 /**
- * Whether the literal run that closes `element` still carries an unanswered marker.
+ * 关闭 `element` 的那段字面文本是否仍带着未回应的标记。
  *
- * Read backwards over the trailing form elements to the nearest text: a text node ending on one of
- * {@link INLINE_MARKER}'s characters is a marker nobody closed yet, and the next characters decide
- * whether it stays literal or becomes a form. The walk is over a handful of siblings, never over
- * the paragraph.
+ * 从结尾的形态元素往回走到最近的文本：以 {@link INLINE_MARKER} 字符结尾的文本节点是一个没人闭合
+ * 的标记，接下来的字符决定它保持字面还是成为形态。遍历的是几个兄弟节点，绝不是整段。
  */
 function pendingMarker(element: HTMLElement): boolean {
 	const nodes = element.childNodes;
@@ -461,7 +439,7 @@ function pendingMarker(element: HTMLElement): boolean {
 	return false;
 }
 
-/** Patch a fenced block that grew: the text node, or the diff's spans, extends rather than resets. */
+/** 修补一个变长的围栏块：文本节点或 diff 的 span 延长而不是重置。 */
 function patchCodeBlock(
 	element: HTMLElement,
 	previous: Extract<Block, { kind: "code" }>,
@@ -482,8 +460,8 @@ function patchCodeBlock(
 		return true;
 	}
 
-	// One span per line, so only the last old line and the lines that arrived are touched. The last
-	// old line loses its final-line status the moment a new line follows it, hence the newline.
+	// 每行一个 span，所以只有最后的旧行和到达的新行被触碰。新的行跟上来的一刻，最后的旧行就失去
+	// 了"最后一行"身份，所以有换行。
 	const spans = [...code.children];
 	if (spans.length === 0) return false;
 	const oldLines = previous.code.split("\n");
@@ -500,13 +478,13 @@ function patchCodeBlock(
 	return true;
 }
 
-/** Patch a list item by item; items are the only thing a growing list adds or extends. */
+/** 逐条目修补列表；条目是增长中的列表唯一会新增或延长的东西。 */
 function patchListBlock(
 	element: HTMLElement,
 	previous: Extract<Block, { kind: "list" }>,
 	next: Extract<Block, { kind: "list" }>,
 ): boolean {
-	// Ordered-ness and the starting number are fixed by the first item, which growth cannot move.
+	// 有序性和起始编号由第一个条目固定，增长动不了它。
 	if (previous.ordered !== next.ordered || previous.start !== next.start) return false;
 	const items = [...element.children] as HTMLElement[];
 	const shared = Math.min(previous.items.length, items.length);
@@ -551,8 +529,7 @@ function renderBlock(block: Block): HTMLElement {
 			if (block.ordered && block.start !== 1) (list as HTMLOListElement).start = block.start;
 			for (const item of block.items) {
 				const entry = document.createElement("li");
-				// A task item keeps its box as text: turning `[ ]` into a control would invite a click
-				// that changes nothing about the run.
+				// 任务条目的方框保持为文本：把 `[ ]` 变成控件会招致一次对运行毫无影响的点击。
 				appendInline(entry, item);
 				list.append(entry);
 			}
@@ -590,7 +567,7 @@ function renderBlock(block: Block): HTMLElement {
 	}
 }
 
-/** A fenced block: a head row naming the language with a copy button, then the code itself. */
+/** 一个围栏块：一行标着语言并带复制按钮的头，然后是代码本身。 */
 function renderCode(language: string, code: string): HTMLElement {
 	const wrapper = document.createElement("div");
 	wrapper.className = "code-block";
@@ -610,8 +587,8 @@ function renderCode(language: string, code: string): HTMLElement {
 	if (language.length > 0) element.dataset.language = language;
 	appendDiffLines(element, code);
 
-	// Read at click time: the block can still be streaming, and a later tail patch extends the
-	// element in place rather than replacing it, so a captured string would go stale.
+	// 点击时读取：块可能仍在流式输出，后续的尾部补丁会原地延长元素而不是替换它，所以捕获的字符串
+	// 会过期。
 	copy.addEventListener("click", () => {
 		void navigator.clipboard.writeText(element.textContent ?? "").then(
 			() => {
@@ -632,13 +609,13 @@ function renderCode(language: string, code: string): HTMLElement {
 	return wrapper;
 }
 
-/** Whether a code block renders as a patch — the test the line-by-line painter below applies. */
+/** 代码块是否渲染为补丁 —— 下面逐行绘制器应用的判据。 */
 function isDiffCode(code: string): boolean {
 	const lines = code.split("\n");
 	return lines.some((line) => line.startsWith("@@")) || lines.some((line) => /^\+{3} |^-{3} /.test(line));
 }
 
-/** One line of a patch: a span carrying its add/remove fill, and a newline unless it is the last. */
+/** 补丁的一行：携带增删底色的 span，非最后一行带换行。 */
 function appendDiffLine(target: HTMLElement, line: string, last: boolean): void {
 	const span = document.createElement("span");
 	if (line.startsWith("+") && !line.startsWith("+++")) span.className = "diff-add";
@@ -648,11 +625,10 @@ function appendDiffLine(target: HTMLElement, line: string, last: boolean): void 
 }
 
 /**
- * Mark unified-diff lines.
+ * 标记 unified diff 的行。
  *
- * A tool result pastes a patch verbatim, and the one thing a reader needs from it is which lines were
- * added and which were removed. Syntax highlighting is not attempted: a wrong guess colors correct
- * code misleadingly.
+ * 工具结果会原样粘贴补丁，读者唯一需要的是哪些行被加、哪些被删。语法高亮不做尝试：一次错误的
+ * 猜测会把正确的代码染成误导性的颜色。
  */
 function appendDiffLines(target: HTMLElement, code: string): void {
 	if (!isDiffCode(code)) {
@@ -665,29 +641,28 @@ function appendDiffLines(target: HTMLElement, code: string): void {
 }
 
 /**
- * The inline forms this renderer knows: code, strong, emphasis, strikethrough, and links.
+ * 本渲染器认识的行内形态：代码、加粗、强调、删除线和链接。
  *
- * One pattern with a `g` flag, walked by {@link appendInline} and asked by {@link hasInlineMarkup}.
- * The walk collects its matches before it builds any node, so the recursion into nested emphasis
- * cannot move this pattern's cursor.
+ * 一个带 `g` 标志的模式，由 {@link appendInline} 遍历、被 {@link hasInlineMarkup} 询问。遍历在
+ * 构建任何节点之前先收集所有匹配，递归进嵌套强调时就不会移动这个模式的游标。
  */
 const INLINE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(__[^_]+__)|(\*[^*\n]+\*)|(_[^_\n]+_)|(~~[^~]+~~)|(\[[^\]\n]*\]\([^)\s]+\))/g;
 
 /**
- * Characters that can open or close an inline form.
+ * 可能开启或关闭行内形态的字符。
  *
- * The tail patch reads this against the suffix that just arrived, not against the paragraph: prose
- * carries none of these, so a growing answer needs no scan of what it already said.
+ * 尾部补丁对刚到达的后缀应用它，而不是对整段：普通文字不含这些字符，所以生长中的回答不需要
+ * 扫描已经说过的话。
  */
 const INLINE_MARKER = /[`*_~[\]]/;
 
-/** Whether `text` carries a form {@link appendInline} would render as more than one text node. */
+/** `text` 是否含有 {@link appendInline} 会渲染成多个文本节点的形态。 */
 function hasInlineMarkup(text: string): boolean {
 	INLINE.lastIndex = 0;
 	return INLINE.test(text);
 }
 
-/** The nodes an inline run renders to, in order — what a tail patch swaps in for its literal run. */
+/** 一次行内流渲染出的节点，按序 —— 尾部补丁为它的字面段换入的东西。 */
 function inlineNodes(text: string): Node[] {
 	const nodes: Node[] = [];
 	const found: { at: number; source: string }[] = [];
@@ -705,7 +680,7 @@ function inlineNodes(text: string): Node[] {
 	return nodes;
 }
 
-/** Inline spans within a block: code, strong, emphasis, strikethrough, and links. */
+/** 块内的行内 span：代码、加粗、强调、删除线和链接。 */
 function appendInline(parent: { append(...nodes: Node[]): void }, text: string): void {
 	parent.append(...inlineNodes(text));
 }

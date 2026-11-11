@@ -1,24 +1,13 @@
 import type { ClientFrame } from "@my-agent/core/protocol";
 
 /**
- * Read one uplink frame, or answer `undefined` for anything that is not one.
+ * 读一个上行 frame，不是 frame 的东西一律返回 `undefined`。
  *
- * This is the server's only trust boundary: everything above it works with `ClientFrame` values and
- * trusts them, so the shape is established here and nowhere else. It is deliberately *not* a
- * validation framework — two actions cannot be abused into anything, and a schema library to say so
- * would cost more than the thing it protects.
+ * 这是服务器唯一的信任边界：它之上的一切都在 `ClientFrame` 值上工作并信任它们，所以形状在这里确立、且仅在这里。它刻意*不是*一个校验框架——两个动作没法被滥用成别的什么，为此引入一个 schema 库的代价比它要保护的东西还高。
  *
- * The two rejects are the ones with a stated policy behind them. A frame that is not JSON, or not
- * one of the four known actions, is dropped and logged by the caller rather than closing the
- * connection: the alternative turns one mistake in a hand-written smoke script into a window that
- * will not open at all, and "refresh and it works" is worth a log line.
+ * 两个拒绝背后都有明确的策略。不是 JSON 的、或不属于四个已知动作的 frame，由调用者丢弃并记日志，而不是断开连接：否则手写 smoke 脚本里的一个小错就会让窗口再也打不开，而"刷新一下就好"值得一行日志。
  *
- * `open` for a session that does not exist, `open` for one already subscribed, and `wait` /
- * `unwait` for a session this connection has never named before, are *not* dropped here — those are
- * answers, and the connection layer is what has the state to answer them with. The wait pair in
- * particular is deliberately independent of the subscription table: a send's reference can be
- * reported before the `open` it travels beside has been processed, and a wait recorded for a
- * session that turns out not to exist is one `unwait` away from gone (issue 13).
+ * 对不存在的会话发 `open`、对已订阅的会话发 `open`、以及对这条连接从未提到过的会话发 `wait` / `unwait`，*不*在这里丢弃——那些是要应答的，连接层才是持有状态、能够应答的一方。wait 这对尤其刻意独立于订阅表：send 的引用可能先于它旁边的 `open` 被处理而上报，而给不存在的会话记录的 wait 距离消失只差一个 `unwait`（issue 13）。
  */
 export function parseClientFrame(text: string): ClientFrame | undefined {
 	let value: unknown;
@@ -30,9 +19,7 @@ export function parseClientFrame(text: string): ClientFrame | undefined {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
 
 	const record = value as Record<string, unknown>;
-	// Fields this server does not know are ignored rather than refused: `window` is specified and
-	// carries no meaning yet (nothing produces it), and a client that sends one must not be punished
-	// for it.
+	// 服务器不认识的字段被忽略而不是拒绝：`window` 在协议里有定义但暂无意义（没有任何东西产生它），发送它的客户端不该因此受罚。
 	if (record.type === "open") {
 		if (typeof record.sessionId !== "string" || record.sessionId.length === 0) return undefined;
 		return {

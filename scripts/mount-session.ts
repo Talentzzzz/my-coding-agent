@@ -1,34 +1,32 @@
-// Mounting a session in a hub by hand, for the smokes that need a session without an open.
+// 手工把一个 session 挂载到 hub 上，供那些不需要 open 就要拿到 session 的 smoke 使用。
 //
-// Production never does this: `SessionHub.open()` resolves which session to run from a request, and
-// reads its settings through the orchestrator's own. A smoke wants a session whose id it knows up
-// front, so the two steps an open takes are taken here instead: build a transcript bag, open it onto
-// the hub's orchestrator through the same public door a production open uses, then mount the hold
-// token the hub keys it by. The hub's one orchestrator then serves the session like any other,
-// because every call it answers names the id.
+// 生产路径从不这么做：`SessionHub.open()` 会从请求里解析出要运行哪个 session，并经由
+// orchestrator 自己的配置读取其设置。而 smoke 希望预先知道 session 的 id，所以这里替它走完
+// open 的两个步骤：构建 transcript bag，经由与生产 open 相同的公共入口把它挂到 hub 的
+// orchestrator 上，然后挂上 hub 用作键的 hold token。hub 的唯一 orchestrator 随后像对待其他
+// session 一样服务它，因为它应答的每个调用都会指名这个 id。
 //
-// Settings are not part of what a mount can choose: the configuration is the orchestrator's, and one
-// orchestrator serves every session of the process through the one it was built with. A smoke that
-// wants its own settings — a gate of its own, rows of its own — seeds them onto the files behind the
-// hub's settings and models homes (`HubOptions.settingsHome` / `modelsHome`) before the hub is built,
-// and every session it mounts reads through those.
+// 设置不属于 mount 可选的范围：配置归 orchestrator 所有，一个 orchestrator 以构建时的那份配置
+// 服务进程内的所有 session。想要自己设置的 smoke——自己的 gate、自己的行——要在 hub 构建
+// 之前把配置种到 hub 的 settings 与 models 目录（`HubOptions.settingsHome` / `modelsHome`）
+// 背后的文件里，它挂载的每个 session 都会经由那里读取。
 import { type Session, createSession } from "@my-agent/core";
 import { HostedSession, type SessionHub } from "../packages/server/src/hub.ts";
 
-/** The hub's private half, as a smoke reaches it. */
+/** hub 的私有半区，从 smoke 的视角可达。 */
 interface HubInternals {
 	hosts: Map<string, HostedSession>;
 	announceHost(sessionId: string, host: HostedSession | undefined): void;
 }
 
 export interface MountOptions {
-	/** The working directory the session's tools resolve inside, and where its header says it lives. */
+	/** session 的工具在其中解析的工作目录，也是其头部声明它所在的位置。 */
 	root: string;
-	/** The model row the session opens on, by name. */
+	/** session 打开时使用的模型行，按名称指定。 */
 	model?: string;
 }
 
-/** What a mounted session is: the id every call names, the transcript bag behind it, and its hold token. */
+/** 挂载后的 session：每个调用指名的 id、其背后的 transcript bag，以及它的 hold token。 */
 export interface MountedSession {
 	id: string;
 	state: Session;
@@ -36,20 +34,18 @@ export interface MountedSession {
 }
 
 /**
- * Seed a session into a hub's registry and mount its hold token.
+ * 把一个 session 种入 hub 的注册表并挂载其 hold token。
  *
- * The session is idle — no hold is taken here, exactly as `newSession()` returns an id without
- * holding it — so a caller that wants it held open asks `hub.hold()` for that.
+ * session 处于 idle——这里不取 hold，正如 `newSession()` 只返回 id 而不持有它——需要持有的
+ * 调用方应向 `hub.hold()` 请求。
  */
 export async function mountSession(hub: SessionHub, options: MountOptions): Promise<MountedSession> {
 	const internals = hub as unknown as HubInternals;
 	const state = createSession(options.root);
-	// Enter, not assemble-then-adopt: the state enters the hub's orchestrator through the same door a
-	// production assembly uses, so the smoke seeds nothing the orchestrator does not know about — and
-	// the services it assembles over are the hub's own, which is what makes the mount invisible. The
-	// door is class-private (`hold` / `create` are the verbs a host spells), so the
-	// mount reaches it like any other private half. The bag carries its own working directory, which
-	// is where the mount's `root` lands.
+	// 走入口，而不是组装后收养：state 经由与生产组装相同的门进入 hub 的 orchestrator，smoke 不会
+	// 种下 orchestrator 不知道的东西——其上组装的服务都是 hub 自己的，这正是 mount 不可见的原因。
+	// 这扇门是 class-private（`hold` / `create` 是 host 会拼写的动词），所以 mount 和其他私有半区
+	// 一样直达它。bag 自带工作目录，mount 的 `root` 就落在那里。
 	const door = hub.agent as unknown as {
 		assembleAgentStateBySession(options: { session: Session; model?: string; thinkingLevel?: string }): Promise<unknown>;
 	};
@@ -59,8 +55,8 @@ export async function mountSession(hub: SessionHub, options: MountOptions): Prom
 	});
 	const host = new HostedSession(state.sessionId);
 	internals.hosts.set(state.sessionId, host);
-	// The announcement a production `open` makes: a mount that stays silent leaves the projection
-	// deaf to the session, so its row never wears the live fields the process actually knows.
+	// 生产 `open` 会做的公告：保持沉默的 mount 会让 projection 对这个 session 失聪，它的行就永远
+	// 穿不上进程实际知道的 live 字段。
 	internals.announceHost(state.sessionId, host);
 	return { id: state.sessionId, state, host };
 }

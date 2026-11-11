@@ -26,17 +26,15 @@ const parameters = Type.Object({
 export type BashParams = Static<typeof parameters>;
 
 /**
- * `bash` runs one command in the working directory and streams its output.
+ * `bash` 在工作目录里运行一条命令并流式输出。
  *
- * Starting there (rather than in the server process's own working directory) keeps `git status`, `npm test` and friends
- * pointed at the project the user is talking about. Nothing confines the command: one that walks out
- * of the directory with `cd` is a command the user asked for, and the tool has no second opinion
- * about it.
+ * 从那里启动（而不是 server 进程自己的工作目录）让 `git status`、`npm test` 之类始终指向用户正在
+ * 谈论的项目。没有任何东西限制命令：用 `cd` 走出目录的命令是用户要求的命令，工具对此没有第二
+ * 意见。
  *
- * The directory and the timeouts arrive with each call (`run`), not with the instance: one `bash`
- * serves every session and every directory, so a change made in the settings panel reaches the next
- * run's calls without anything being rebuilt by hand. A call that carries no timeouts — a test
- * driving the tool directly — runs on the defaults.
+ * 目录和超时随每次调用（`run`）而来，不随实例：一个 `bash` 服务所有 session 和所有目录，所以
+ * 设置面板里的改动无需任何手工重建就能到达下一次 run 的调用。不带超时的调用——直接驱动工具的
+ * 测试——按默认值运行。
  */
 export function createBashTool(): Tool<typeof parameters> {
 	return {
@@ -53,14 +51,14 @@ export function createBashTool(): Tool<typeof parameters> {
 }
 
 /**
- * Tools pass a callback that accepts a partial `ToolResult`. `Tool` — defined beside the transport
- * in `llm/types.ts` — types `onUpdate` as `ToolUpdateCallback<TDetails>`, so the wrapper in
- * `tools/index.ts` narrows it to this shape.
+ * 工具传入一个接受 partial `ToolResult` 的回调。`Tool`——定义在传输层旁边的 `llm/types.ts`——把
+ * `onUpdate` 类型化为 `ToolUpdateCallback<TDetails>`，所以 `tools/index.ts` 里的包装把它收窄成
+ * 这个形状。
  */
 export interface BashHooks {
 	signal?: AbortSignal;
 	onUpdate?: (partial: ToolResult<unknown>) => void;
-	/** The timeouts to run under; the defaults when the caller named none. */
+	/** 在其下运行的超时；调用方未指名时用默认值。 */
 	timeouts?: BashSettings;
 }
 
@@ -134,8 +132,8 @@ export async function runBash(
 			finish();
 
 			const { text } = truncate(output);
-			// The cap is named in the result rather than applied silently, so a model that asked for an
-			// hour and was given ten minutes can ask for a shorter plan instead of being surprised.
+			// 上限在 result 里说明而不是静默生效，所以要了一小时却只拿到十分钟的模型可以改要一个
+			// 更短的方案，而不是被吓一跳。
 			const status = `${timedOut
 				? `Command timed out after ${timeoutMs} ms and was killed.`
 				: hooks.signal?.aborted

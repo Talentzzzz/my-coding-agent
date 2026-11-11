@@ -1,22 +1,20 @@
-// Backpressure smoke test: drives the mux write side through an injected fake socket and asserts the
-// stall policy where it lives — the moment `write()` says no, nothing jumps the queue; the queue never
-// crosses the budget it was given; a stalled connection is closed by the deadline, not held forever;
-// and a peer that starts reading again gets its backlog in order, with no holes.
+// Backpressure smoke test：经由一个注入的假 socket 驱动 mux 写侧，在停滞策略所在之处断言它
+// ——`write()` 说不的那一刻起，没有任何东西越过队列；队列绝不越过交给它的预算；一个停滞的
+// 连接在截止时间前被关闭，而不是被永远握着；重新开始读取的 peer 按序拿到自己的积压，无洞。
 //
-// This is the seam the whole test stands on: the connection layer takes a `FrameSink`, not a socket
-// (ticket 04's write side), so the "peer that never reads" case is a stub whose `send` returns `false`
-// — no real network, no RFC6455 client, and nothing to assert about a pong (invisible by design; see
-// ticket 15, decision 10). The end-to-end evidence for a truly stalled peer lives in
-// `.scratch/client-server-refactor/prototype/backpressure-stalled-peer.mjs`.
+// 这是整个测试所站的接缝：连接层收的是 `FrameSink`，不是 socket（ticket 04 的写侧），所以
+// "永不读取的 peer"这个情形就是一个 `send` 返回 `false` 的桩——没有真网络、没有 RFC6455
+// 客户端、也没有任何关于 pong 的断言（pong 按设计不可见；见 ticket 15 决定 10）。对真正停滞的
+// peer 的端到端证据住在
+// `.scratch/client-server-refactor/prototype/backpressure-stalled-peer.mjs`。
 //
-// One behaviour of the policy has to be understood before the assertions make sense: there is no
-// `drain` listener, so *the next write attempt is the drain*. Every `send` pumps the queue head first,
-// and the pump stops at the first refusal — which is why a stalled connection's head frame is retried
-// once per send attempt while everything behind it stays queued. The stub records both what it was
-// handed and what it accepted, and the assertions below pin the difference.
+// 有一项策略行为必须先理解，断言才有意义：没有 `drain` 监听器，所以*下一次写尝试就是 drain*。
+// 每次 `send` 都先把队列头泵出去，泵在第一次拒绝处停下——这就是为什么一条停滞连接的头帧在
+// 每次 send 尝试时重试一次，而它身后的一切留在队列里。桩同时记录它被递交了什么、收下了什么，
+// 下面的断言钉住两者的差别。
 //
-// Nothing here touches a session or a model, so no provider key is needed.
-// Run with: node scripts/smoke-backpressure.ts
+// 这里不触碰任何 session 或模型，无需 provider key。
+// 运行：node scripts/smoke-backpressure.ts
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,13 +33,12 @@ function check(label: string, condition: boolean, detail = ""): void {
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * A sink the test scripts, one behaviour at a time.
+ * 由测试逐个行为编排的 sink。
  *
- * `mode` is read per call, so a test flips it mid-run: `"accept"` is a healthy peer, `"stall"` the
- * peer that stopped reading. Two recordings, because the policy gives a refused frame a different
- * fate from an accepted one: `handed` lists every frame the socket was asked to write (a refusal
- * still hands the frame over — it sits in the socket's own buffer), `accepted` only the ones the
- * peer actually took. The queue's contents are what the layer keeps for later.
+ * `mode` 每次调用都会读，所以测试可以在运行中翻转它：`"accept"` 是健康的 peer，`"stall"` 是
+ * 停止读取的 peer。两份记录，因为策略给被拒的帧与被收下的帧不同的命运：`handed` 列出每个被
+ * 要求写进 socket 的帧（被拒的帧照样递交——它坐在 socket 自己的缓冲里），`accepted` 只有 peer
+ * 真正收下的。队列里的内容才是层替以后保留的东西。
  */
 function scriptedSink(): FrameSink & {
 	handed: ServerFrame[];
@@ -76,7 +73,7 @@ function scriptedSink(): FrameSink & {
 	return sink;
 }
 
-/** The answers table is per-process state no backpressure path reads; a stub is honest here. */
+/** 应答表是没有任何 backpressure 路径会读的进程级状态；stub 在这里是诚实的。 */
 const answers: ApprovalAnswers = {
 	remember(): void {},
 	wasApproved: () => false,
@@ -84,7 +81,7 @@ const answers: ApprovalAnswers = {
 	hide(): void {},
 };
 
-/** A stream frame with a payload sized by the caller, so the byte budget can be aimed precisely. */
+/** 带着调用方指定尺寸载荷的流帧，字节预算因此可以精确瞄准。 */
 function payloadFrame(text: string): ServerFrame {
 	return {
 		streamId: "s",
@@ -94,12 +91,12 @@ function payloadFrame(text: string): ServerFrame {
 
 const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, contextWindow: 0 };
 
-/** The byte size the policy charges a frame: its JSON length. */
+/** 策略向一帧收取的字节尺寸：它的 JSON 长度。 */
 function sizeOf(frame: ServerFrame): number {
 	return Buffer.byteLength(JSON.stringify(frame));
 }
 
-/** What a frame was named by the test, for printing a sequence on failure. */
+/** 一帧被测试起的名字，失败时用来打印序列。 */
 function nameOf(frame: ServerFrame): string {
 	return (frame as { item?: { pad?: string } }).item?.pad ?? "?";
 }
@@ -123,7 +120,7 @@ try {
 	process.stdout.write("the moment write() says no, nothing jumps the queue\n");
 
 	// -------------------------------------------------------------------
-	// 1. One `false`, and the direct path closes.
+	// 1. 一次 `false`，直接路径就关上了。
 	// -------------------------------------------------------------------
 	{
 		const sink = scriptedSink();
@@ -139,8 +136,8 @@ try {
 
 		connection.send(second);
 		connection.send(third);
-		// The pump ran once per send: the first found the queue empty, the second retried `second` and
-		// stopped at the refusal. Nothing behind the head was touched — that is the whole policy.
+		// 泵每次 send 跑一次：第一次发现队列为空，第二次重试 `second` 并停在拒绝处。头之后的
+		// 什么都没被碰——这正是整个策略。
 		check(
 			"the socket saw the refusal and one retry of the head, nothing more",
 			JSON.stringify(sink.handed.map(nameOf)) === JSON.stringify(["first", "second"]),
@@ -158,7 +155,7 @@ try {
 	}
 
 	// -------------------------------------------------------------------
-	// 2. The queue never crosses the budget it was given.
+	// 2. 队列绝不越过交给它的预算。
 	// -------------------------------------------------------------------
 	{
 		const sink = scriptedSink();
@@ -172,9 +169,8 @@ try {
 		);
 
 		connection.send(payloadFrame("x".repeat(100)));
-		// Two frames of ~150 bytes each cross the 300-byte budget on the second one. The policy answers
-		// at once rather than waiting out the deadline: the budget is the thing a broken peer must not
-		// be able to spend.
+		// 两帧各约 150 字节，第二帧就越过了 300 字节预算。策略当场作答而不是等截止时间：预算
+		// 正是一个坏 peer 不许花掉的东西。
 		connection.send(payloadFrame("y".repeat(100)));
 		check("crossing the budget closes the connection at once", sink.closes.length === 1, JSON.stringify(sink.closes));
 		check("the whole connection is done, not half of it", connection.isClosed);
@@ -182,7 +178,7 @@ try {
 	}
 
 	// -------------------------------------------------------------------
-	// 3. A stalled connection is closed by the deadline, and the deadline is real.
+	// 3. 停滞的连接在截止时间前被关闭，且截止时间是真的。
 	// -------------------------------------------------------------------
 	{
 		const sink = scriptedSink();
@@ -221,12 +217,12 @@ try {
 	}
 
 	// -------------------------------------------------------------------
-	// 4. A peer that starts reading again gets its backlog in order, no holes.
+	// 4. 重新开始读取的 peer 按序拿到积压，无洞。
 	// -------------------------------------------------------------------
 	{
 		const sink = scriptedSink();
-		// The first frame lands in the socket's own buffer (that is what `false` means), everything
-		// after it queues, and the next write attempt drains what queued before writing its own frame.
+		// 第一帧落进 socket 自己的缓冲（`false` 的含义就是这个），它身后的一切入队，下一次写
+		// 尝试在写自己的帧之前先排干队列里已有的东西。
 		sink.mode = "stall";
 		const connection = new MuxConnection(sink, hub, options({ stallDeadlineMs: 60_000 }), answers);
 
@@ -251,7 +247,7 @@ try {
 	}
 
 	// -------------------------------------------------------------------
-	// 5. A drain that stalls again mid-pump keeps what is left, in order.
+	// 5. 泵到一半再度停滞的 drain 保住剩余的，按序。
 	// -------------------------------------------------------------------
 	{
 		const sink = scriptedSink();
@@ -259,13 +255,13 @@ try {
 		const connection = new MuxConnection(sink, hub, options({ stallDeadlineMs: 60_000 }), answers);
 
 		const [first, second, third, fourth, fifth] = ["a", "b", "c", "d", "e"].map(payloadFrame);
-		connection.send(first!); // into the socket's buffer; the stall begins here
+		connection.send(first!); // 落进 socket 缓冲；停滞从这里开始
 		connection.send(second!);
 		connection.send(third!);
 		connection.send(fourth!);
 
-		// Accept exactly one frame, then refuse again: the pump writes `b` and stops on `c`, and the
-		// frame that triggered the drain rejoins the queue behind what the refusal saved.
+		// 恰好收下一帧，然后再次拒绝：泵写下 `b` 并停在 `c` 上，触发 drain 的那一帧重新回到拒绝
+		// 所保住的那些之后的队尾。
 		let acceptedCount = 0;
 		sink.mode = "accept";
 		sink.send = (frame: ServerFrame): boolean => {
@@ -294,8 +290,8 @@ try {
 		connection.close();
 	}
 
-	// The smoke never reads RSS: the queue's own byte counter is the number the policy bounds, and an
-	// RSS assertion in a Node process measures the garbage collector as much as the policy.
+	// smoke 从不读 RSS：队列自己的字节计数器才是策略所约束的数字，而 Node 进程里的 RSS 断言
+	// 测量的垃圾收集器与策略一样多。
 } finally {
 	await rm(root, { recursive: true, force: true });
 	process.stdout.write(failures === 0 ? "\nbackpressure ok\n" : `\n${failures} failure(s)\n`);

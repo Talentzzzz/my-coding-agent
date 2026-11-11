@@ -4,31 +4,19 @@ import { route, stringParam, type ApiRoute } from "../http/routing.ts";
 import type { SessionController, SystemController } from "./sessions.ts";
 
 /**
- * The API, as a table.
+ * 以表的形式呈现的 API。
  *
- * This is the equivalent of the annotations on a Spring controller, kept in one file so that one
- * read answers "what does this server expose?". Every entry names a method on a controller; nothing
- * here does work of its own.
+ * 这相当于 Spring controller 上的注解，集中在一个文件里，读一次就能回答"这个服务器暴露了什么"。每个 entry 指名一个 controller 上的方法；这里没有任何东西自己做工作。
  *
- * **The mux's uplink frames are not here, and that is not an omission.** They do not go through a URL:
- * `open` and `cancel` arrive as WebSocket messages on the one resident connection, and the router never
- * sees them. So this table is the whole REST surface — every entry is a request someone could make with
- * `curl` — while the frames above it are how a window says what it wants to watch. The line between the
- * two is not arbitrary: an action that has its own resource, a persistent consequence, and a URL that
- * reproduces it is a command and belongs here; one that only changes "what this connection receives"
- * belongs on the mux.
+ * **mux 的上行 frame 不在这里，而且这不是遗漏。** 它们不走 URL：`open` 和 `cancel` 作为 WebSocket 消息到达那条常驻连接上，router 永远见不到它们。所以这张表就是完整的 REST surface——每个 entry 都是一个用 `curl` 就能发出的请求——而它之上的 frame 是窗口表达想看什么的方式。两者的分界不是任意的：一个拥有自己的资源、有持久后果、且 URL 能复现它的动作是命令，属于这里；只改变"这条连接收到什么"的动作属于 mux。
  *
- * The verbs carry meaning rather than being a convention:
+ * 动词承载语义而不只是约定：
  *
- * - `GET` reads, and never changes a session.
- * - `POST /api/sessions` creates one; `POST` on a sub-resource is a command that has an effect and
- *   returns as soon as it is accepted. Commands are `POST` rather than `PATCH` because they are not
- *   edits: sending the same prompt twice is two prompts, and sending `abort` twice is still one stop.
- *   `POST /api/sessions/:id/title` is the same shape — one accepted rename, one snapshot rewritten.
- * - `PATCH` changes part of a configuration.
- * - `PUT` replaces the active tool set outright, which is exactly the session's own contract.
- * - `DELETE` removes the resource for good. It exists once, on the session itself, because a session
- *   is the one thing here whose removal is the point rather than an effect on something else.
+ * - `GET` 读取，从不改变会话。
+ * - `POST /api/sessions` 创建一个；子资源上的 `POST` 是一个生效即返回的命令。命令用 `POST` 而不是 `PATCH`，因为它们不是编辑：同一 prompt 发两次就是两个 prompt，而 `abort` 发两次仍然是一次停止。`POST /api/sessions/:id/title` 同形——一次被接受的改名，一份快照被重写。
+ * - `PATCH` 改配置的一部分。
+ * - `PUT` 整体替换当前工具集，这正是会话自身的契约。
+ * - `DELETE` 永久移除资源。它只存在一次，在会话本身上，因为会话是这里唯一一个"移除本身是目的"而不是"对别的东西产生影响"的对象。
  */
 export interface Controllers {
 	system: SystemController;
@@ -77,10 +65,7 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 		}),
 		route({
 			method: "POST",
-			// A command rather than a `PATCH` on a directory resource, because a directory has no id
-			// here: it is named by the directory it is, and the body carries that path beside the
-			// name the user typed. A command because it changes no resource: it writes a label into
-			// the settings, and the directory keeps the name the file system gave it.
+			// 是命令而不是对某个目录资源做 `PATCH`，因为目录在这里没有 id：它由它所在的目录命名，body 把路径与用户输入的名字一起带来。之所以是命令，是因为它不改变任何资源：它把一个标签写进 settings，目录保持文件系统给它的名字。
 			path: "/api/directories/rename",
 			params: {},
 			handle: async (_params, request, response) =>
@@ -88,9 +73,7 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 		}),
 		route({
 			method: "POST",
-			// Removal from the list and nothing else: the transcripts and the directory they name stay
-			// exactly where they are. `hide` rather than `delete` says so in the URL, because a DELETE
-			// here would promise the one thing this deliberately does not do.
+			// 只是从列表里移除，别的什么都不动：transcript 及其命名的目录原地保留。URL 里用 `hide` 而不是 `delete` 正是为了说明这一点，因为这里的 DELETE 会承诺一件本命令刻意不做的事。
 			path: "/api/directories/hide",
 			params: {},
 			handle: async (_params, request, response) =>
@@ -110,9 +93,7 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 		}),
 		route({
 			method: "POST",
-			// The body is optional and usually absent: an empty `POST` still creates a session in the
-			// server's own directory. A `workDirAbsPath` in the body moves where that one session lands — a choice
-			// made with the request, so it travels with it rather than becoming server state.
+			// body 可选且通常缺席：空的 `POST` 仍在服务器自己的目录里创建会话。body 里的 `workDirAbsPath` 只挪动这一个会话的落点——随请求做出的选择，随请求传递，而不是变成服务器状态。
 			path: "/api/sessions",
 			params: {},
 			handle: async (_params, request, response) =>
@@ -154,8 +135,7 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 		}),
 		route({
 			method: "POST",
-			// A toolCallId the session is not waiting on is a 409, not a silent no-op — the controller
-			// refuses before either the answers table or the session hears about the attempt.
+			// 会话没有在等的一个 toolCallId 是 409 而不是静默的 no-op——controller 在 answers 表和会话听到这个尝试之前就拒绝了。
 			path: "/api/sessions/:id/approvals/:toolCallId",
 			params: { id: stringParam, toolCallId: stringParam },
 			handle: async (params, request, response) =>
@@ -173,8 +153,7 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 				sendJson(response, 201, await controllers.sessions.fork(params.id, await readObjectBody(request))),
 		}),
 		route({
-			// 201 rather than 200: a rename rewrites the snapshot — the accepted request has a new
-			// value in the session file to show for it, which is what this status says.
+			// 201 而不是 200：改名会重写快照——被接受的请求在会话文件里留下了一个新值可以指认，这正是这个 status 所说的。
 			method: "POST",
 			path: "/api/sessions/:id/title",
 			params: { id: stringParam },

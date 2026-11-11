@@ -1,10 +1,8 @@
-// Inspect the running shell's DOM from the terminal.
+// 从终端检视运行中外壳的 DOM。
 //
-// A screenshot shows what the window looks like; this shows what the client actually built and what
-// the API actually answered, which is the difference that matters when a layout is right but the
-// data behind it is not.
+// 截图显示窗口的样子；这里显示 client 真正构建了什么、API 真正回答了什么——当布局是对的而它背后的数据不对时，这正是要紧的区别。
 //
-//   node scripts/inspect-app --theme dark|light --dev   (via the Electron binary)
+//   node scripts/inspect-app --theme dark|light --dev   (经 Electron 二进制)
 const { app, BrowserWindow, ipcMain, nativeTheme } = require("electron");
 const { existsSync } = require("node:fs");
 const { join, resolve } = require("node:path");
@@ -14,7 +12,7 @@ const repositoryRoot = resolve(__dirname, "..", "..", "..");
 const theme = process.env.INSPECT_THEME === "light" ? "light" : "dark";
 let server = null;
 
-/** Read a compact description of what the page has rendered. */
+/** 读取页面已渲染内容的紧凑描述。 */
 const DOM_REPORT = `(() => ({
 	theme: document.documentElement.dataset.theme,
 	caption: document.documentElement.dataset.desktopCaption,
@@ -70,8 +68,7 @@ async function inspect() {
 
 	console.log("dom: " + JSON.stringify(await window.webContents.executeJavaScript(DOM_REPORT), null, 2));
 
-	// Switching sessions is the sidebar's whole job, so exercise it and confirm the conversation and
-	// the highlight both move together.
+	// 切换会话是侧栏的全部职责，所以演练它，确认对话与高亮一起移动。
 	const switched = await window.webContents.executeJavaScript(`(async () => {
 		const items = [...document.querySelectorAll(".session-item")];
 		const target = items.find((n) => n.getAttribute("aria-current") !== "true");

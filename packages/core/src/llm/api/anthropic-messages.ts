@@ -1,5 +1,5 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
-// from flagging this file, while every import into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
 import Anthropic from "@anthropic-ai/sdk";
 import type {
@@ -51,11 +51,10 @@ import { buildBaseOptions } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 /**
- * Prompt-cache lifetime for this request.
+ * 本次请求的 prompt-cache 寿命。
  *
- * pi-ai reads an environment variable here for backward compatibility. This build does not: cache
- * retention is the caller's choice alone (the transcript pins it), so nothing outside the request
- * decides it.
+ * pi-ai 在这里读一个环境变量做向后兼容。本构建不这样做：cache retention 只由调用方决定
+ * （transcript 把它钉死），所以请求之外的任何东西都不能决定它。
  */
 function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
 	return cacheRetention ?? "short";
@@ -76,9 +75,6 @@ function getCacheControl(
 	};
 }
 
-/**
- * Convert content blocks to Anthropic API format
- */
 function convertContentBlocks(content: (TextContent | ImageContent)[]):
 	| string
 	| Array<
@@ -92,13 +88,12 @@ function convertContentBlocks(content: (TextContent | ImageContent)[]):
 					};
 			  }
 	  > {
-	// If only text blocks, return as concatenated string for simplicity
+	// 只有 text block 时拼成字符串返回，图省事且对端点等价。
 	const hasImages = content.some((c) => c.type === "image");
 	if (!hasImages) {
 		return sanitizeSurrogates(content.map((c) => (c as TextContent).text).join("\n"));
 	}
 
-	// If we have images, convert to content block array
 	const blocks = content.map((block) => {
 		if (block.type === "text") {
 			return {
@@ -116,7 +111,6 @@ function convertContentBlocks(content: (TextContent | ImageContent)[]):
 		};
 	});
 
-	// If only images (no text), add placeholder text block
 	const hasText = blocks.some((b) => b.type === "text");
 	if (!hasText) {
 		blocks.unshift({
@@ -129,10 +123,10 @@ function convertContentBlocks(content: (TextContent | ImageContent)[]):
 }
 
 /**
- * The efforts this wire takes.
+ * 这条 wire 接受的 effort。
  *
- * Four here and three in this app: `medium` is a value the endpoint understands and nothing the app
- * offers, so it never goes out. It stays in the type because the type describes the endpoint.
+ * 这里四个、本应用三个：`medium` 是端点认识但应用不提供的值，所以从不发出。它留在类型里是因为
+ * 类型描述的是端点。
  */
 export type AnthropicEffort = "low" | "medium" | "high" | "max";
 
@@ -153,26 +147,23 @@ function getAnthropicCompat(model: Model<"anthropic-messages">) {
 
 export interface AnthropicOptions extends StreamOptions {
 	/**
-	 * Controls how thinking content is returned in API responses.
-	 * - "summarized": Thinking blocks contain summarized thinking text.
-	 * - "omitted": Thinking blocks return an empty thinking field; the encrypted
-	 *   signature still travels back for multi-turn continuity. Use for faster
-	 *   time-to-first-text-token when your UI does not surface thinking.
+	 * 控制思考内容在 API 响应中的返回方式。
+	 * - "summarized"：thinking block 带摘要后的思考文本。
+	 * - "omitted"：thinking block 返回空 thinking 字段；加密签名仍会传回以维持多轮连续性。
+	 *   当 UI 不展示 thinking 时用它换取更快的首文本 token。
 	 *
-	 * Note: Anthropic's API default for Claude Opus 4.7 and Claude Mythos Preview
-	 * is "omitted". We default to "summarized" here to keep behavior consistent
-	 * with older Claude 4 models. Set this explicitly to "omitted" to opt in.
-	 * Default: "summarized" when thinking is on.
+	 * 注意：Anthropic 对 Claude Opus 4.7 和 Claude Mythos Preview 的 API 默认是 "omitted"。这里
+	 * 默认 "summarized" 以保持与旧 Claude 4 模型一致的行为。要改用就显式设为 "omitted"。
+	 * 默认：thinking 开启时为 "summarized"。
 	 *
-	 * The switch and the strength are not options: they are read off the model
-	 * (`Model.thinkingLevel`), so a request cannot carry two answers to how hard
-	 * the model was asked to think.
+	 * 这个开关和强度都不是选项：它们从模型读取（`Model.thinkingLevel`），所以一次请求不可能对
+	 * 「模型被要求多用力想」携带两个答案。
 	 */
 	thinkingDisplay?: AnthropicThinkingDisplay;
 	/**
-	 * Anthropic tool choice behavior. String values map to Anthropic's built-in
-	 * choices; `{ type: "tool", name }` forces a specific tool.
-	 * Default: omitted (Anthropic default behavior, currently equivalent to auto).
+	 * Anthropic 的 tool choice 行为。字符串值映射到 Anthropic 内置选择；`{ type: "tool", name }`
+	 * 强制指定某个工具。
+	 * 默认：省略（Anthropic 默认行为，当前等价于 auto）。
 	 */
 	toolChoice?: "auto" | "any" | "none" | { type: "tool"; name: string };
 }
@@ -201,14 +192,12 @@ function hasHeader(headers: ProviderHeaders | undefined, name: string): boolean 
 }
 
 /**
- * The key a request authenticates with.
+ * 请求用来认证的 key。
  *
- * The model is read as a fallback, because a model here carries its own key (`Model.apiKey`) rather
- * than being reached through a credential store: the row *is* the endpoint plus the key, so the model
- * that names the endpoint already names the credential. An explicit `options.apiKey` wins over it,
- * which is how the loop hands down the key it took off the model, and it is also how a host with one
- * key for every model it drives overrides a row. An empty string counts as absent, so a row with no
- * key still reaches header-owned auth.
+ * 模型作为回落被读取，因为这里的模型自带 key（`Model.apiKey`）而不经由凭据 store：一行*就是*
+ * 端点加 key，指名端点的模型已经指名了凭据。显式的 `options.apiKey` 盖过它——这是 loop 把从模型
+ * 上取下的 key 传下来的方式，也是持有每模型同一把 key 的 host 覆盖某一行的方式。空字符串算缺席，
+ * 所以没有 key 的行仍能到达 header 式认证。
  */
 function resolveApiKey(
 	model: Model<"anthropic-messages">,
@@ -218,11 +207,10 @@ function resolveApiKey(
 }
 
 /**
- * Fail before a request when there is no key to authenticate it with.
+ * 没有 key 可认证时在请求之前失败。
  *
- * No key may be supplied in-band by a header instead, which is how a gateway that injects its own
- * credential is reached. The message names the endpoint rather than a provider id: a model here is one
- * endpoint the user typed, and the URL is the only part of that a person can act on.
+ * key 也可能由 header 在带内提供，这是到达自行注入凭据的网关的方式。错误消息指名端点而不是
+ * provider id：这里的模型是用户输入的一个端点，URL 是人唯一能对它采取行动的部分。
  */
 function assertRequestAuth(
 	model: Model<"anthropic-messages">,
@@ -433,11 +421,10 @@ async function* iterateAnthropicEvents(
 }
 
 /**
- * The one entry a host calls.
+ * host 调用的唯一入口。
  *
- * Request auth is checked here so a missing key fails synchronously, before a stream exists; once
- * the stream is returned, every failure travels through it as an event. `buildBaseOptions` fits
- * `max_tokens` to what the context leaves.
+ * 请求认证在这里检查，让缺 key 在流存在之前同步失败；流一旦返回，所有失败都作为事件经它传递。
+ * `buildBaseOptions` 把 `max_tokens` 收窄到 context 剩下的空间。
  */
 export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> = (
 	model: Model<"anthropic-messages">,
@@ -446,8 +433,8 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 ): AssistantMessageEventStream => {
 	const apiKey = resolveApiKey(model, options);
 	assertRequestAuth(model, apiKey, options?.headers);
-	// Nothing is translated here any more. The thinking level rides on the model, so effort is read
-	// where the endpoint lives: one object says both which endpoint answers and how hard it thinks.
+	// 这里不再做任何翻译。thinking level 搭在模型上，effort 就在端点所在的地方读取：一个对象同时
+	// 说明哪个端点回答、它多用力地想。
 	const request: AnthropicOptions = {
 		...buildBaseOptions(model, context, options, apiKey),
 		toolChoice: options?.toolChoice,
@@ -504,14 +491,14 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 					output.responseId = event.message.id;
 					const responseModel = event.message.model;
 					if (responseModel !== model.id) output.responseModel = responseModel;
-					// Capture initial token usage from message_start event
-					// This ensures we have input token counts even if the stream is aborted early
+					// 从 message_start 事件捕获初始 token usage：这样即使流被提前 abort，输入 token
+					// 计数也已经到手。
 					output.usage.input = event.message.usage.input_tokens || 0;
 					output.usage.output = event.message.usage.output_tokens || 0;
 					output.usage.cacheRead = event.message.usage.cache_read_input_tokens || 0;
 					output.usage.cacheWrite = event.message.usage.cache_creation_input_tokens || 0;
 					output.usage.cacheWrite1h = event.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0;
-					// Anthropic doesn't provide total_tokens, compute from components
+					// Anthropic 不提供 total_tokens，从各分量计算。
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 				} else if (event.type === "content_block_start") {
@@ -621,8 +608,7 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 							});
 						} else if (block.type === "toolCall") {
 							block.arguments = parseStreamingJson(block.partialJson);
-							// Finalize in-place and strip the scratch buffer so replay only
-							// carries parsed arguments.
+							// 原地收尾并剥掉暂存缓冲，让重放只携带已解析的参数。
 							delete (block as { partialJson?: string }).partialJson;
 							stream.push({
 								type: "toolcall_end",
@@ -641,8 +627,8 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 							output.errorMessage = stopReasonResult.errorMessage;
 						}
 					}
-					// Only update usage fields if present (not null).
-					// Preserves input_tokens from message_start when proxies omit it in message_delta.
+					// 只在字段存在（非 null）时更新 usage：代理在 message_delta 里省略 input_tokens
+					// 时，保住 message_start 报的那份。
 					if (event.usage) {
 						if (event.usage.input_tokens != null) {
 							output.usage.input = event.usage.input_tokens;
@@ -656,20 +642,21 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 						if (event.usage.cache_creation_input_tokens != null) {
 							output.usage.cacheWrite = event.usage.cache_creation_input_tokens;
 						}
-						// Vercel AI Gateway includes the TTL breakdown in deltas, though the SDK only types it on message_start.
+						// Vercel AI Gateway 会在 delta 里带 TTL 拆分，虽然 SDK 只在 message_start 上
+						// 类型化了它。
 						const cacheCreation = (
 							event.usage as typeof event.usage & { cache_creation?: { ephemeral_1h_input_tokens?: number } }
 						).cache_creation;
 						if (cacheCreation?.ephemeral_1h_input_tokens != null) {
 							output.usage.cacheWrite1h = cacheCreation.ephemeral_1h_input_tokens;
 						}
-						// Anthropic reports reasoning tokens as a subset of output tokens.
+						// Anthropic 把推理 token 报告为 output token 的子集。
 						const thinkingTokens = event.usage.output_tokens_details?.thinking_tokens;
 						if (thinkingTokens != null) {
 							output.usage.reasoning = thinkingTokens;
 						}
 					}
-					// Anthropic doesn't provide total_tokens, compute from components
+					// Anthropic 不提供 total_tokens，从各分量计算。
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 				}
@@ -691,7 +678,7 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 		} catch (error) {
 			for (const block of output.content) {
 				delete (block as { index?: number }).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
+				// partialJson 只是流式期间的暂存缓冲；绝不持久化它。
 				delete (block as { partialJson?: string }).partialJson;
 			}
 			output.stopReason = request.signal?.aborted ? "aborted" : "error";
@@ -710,7 +697,6 @@ function createClient(
 	optionsHeaders?: ProviderHeaders,
 	fetch?: typeof globalThis.fetch,
 ): Anthropic {
-	// API key or header-owned auth.
 	const defaultHeaders = mergeClientHeaders(
 		{
 			accept: "application/json",
@@ -781,7 +767,6 @@ function buildParams(
 	};
 
 	if (initialSystemText) {
-		// Add cache control to system prompt
 		params.system = [
 			{
 				type: "text",
@@ -791,17 +776,17 @@ function buildParams(
 		];
 	}
 
-	// The level the model is asked at. Missing is the same request as "off": nothing was asked for.
+	// 模型被请求的 level。缺席与 "off" 是同一个请求：没有要求任何东西。
 	const level: ThinkingLevel = model.thinkingLevel ?? "off";
 
-	// Temperature is incompatible with extended thinking and unsupported on Claude Opus 4.7+.
+	// temperature 与 extended thinking 不兼容，且 Claude Opus 4.7+ 不支持。
 	if (options?.temperature !== undefined && level === "off" && compat.supportsTemperature) {
 		params.temperature = options.temperature;
 	}
 
 	const toolCacheControl = compat.supportsCacheControlOnTools ? cacheControl : undefined;
-	// Every request carries the complete current list, so a tool switched on mid-session reaches the
-	// model on the next one without anything having to be recorded in the transcript.
+	// 每次请求都携带完整的当前工具列表，所以 session 中途开启的工具在下一次请求就到达模型，
+	// 不需要在 transcript 里记录任何东西。
 	const tools = context.tools;
 	if (tools.length > 0) {
 		params.tools = convertTools(
@@ -812,16 +797,14 @@ function buildParams(
 		);
 	}
 
-	// Thinking is one switch plus one effort, and both are read off the model — the same object that
-	// names the endpoint, so a request cannot say two things about how hard the model was asked to
-	// think. The effort is the only strength the request carries: no model is ever handed a
-	// `budget_tokens`. A model with no level at all is in the same place as "off", and "off" is a
-	// request for the switch to be off rather than a request that says nothing.
+	// thinking 是一个开关加一个强度，两者都从模型读取——与指名端点的是同一个对象，所以一次请求
+	// 不可能对「模型被要求多用力想」说两件事。effort 是请求携带的唯一强度：没有任何模型会被递一个
+	// `budget_tokens`。完全没有 level 的模型与 "off" 在同一个位置，而 "off" 是一个要求关闭开关的
+	// 请求，不是一个什么都不说的请求。
 	if (level === "off") {
 		params.thinking = { type: "disabled" };
 	} else {
-		// Default to "summarized" so a model whose own default is "omitted" comes back as
-		// thinking the transcript can show.
+		// 默认 "summarized"，让自身默认 "omitted" 的模型也返回 transcript 能展示的思考。
 		const display: AnthropicThinkingDisplay = options?.thinkingDisplay ?? "summarized";
 		params.thinking = { type: "adaptive", display };
 		params.output_config = { effort: level };
@@ -845,7 +828,7 @@ function buildParams(
 	return params;
 }
 
-// Normalize tool call IDs to match Anthropic's required pattern and length
+// 把 tool call id 归一化到 Anthropic 要求的模式和长度（`^[a-zA-Z0-9_-]{1,64}$`）。
 function normalizeToolCallId(id: string): string {
 	return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
 }
@@ -859,7 +842,7 @@ function convertToolResult(msg: ToolResultMessage): ContentBlockParam {
 	};
 }
 
-/** Convert a transcript to Anthropic's wire messages. */
+/** 把一份 transcript 转换为 Anthropic 的 wire 消息。 */
 function convertMessages(
 	transformedMessages: Message[],
 	cacheControl?: CacheControlEphemeral,
@@ -870,9 +853,8 @@ function convertMessages(
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
 
-		// A system message can only be the leading one, and `buildParams` has already lifted it
-		// into the request's top-level `system` field before this runs. Anything else is skipped
-		// rather than forwarded: Anthropic has no place for it here.
+		// system 消息只能是开头那条，且 `buildParams` 在这里运行之前已经把它提升为请求顶层的
+		// `system` 字段。其余的原地跳过而不是转发：Anthropic 在这里没有放它的位置。
 		if (msg.role === "system") {
 			continue;
 		}
@@ -925,7 +907,7 @@ function convertMessages(
 						text: sanitizeSurrogates(block.text),
 					});
 				} else if (block.type === "thinking") {
-					// Redacted thinking: pass the opaque payload back as redacted_thinking
+					// 被涂黑的思考：把不透明 payload 按.redacted_thinking 原样传回。
 					if (block.redacted) {
 						blocks.push({
 							type: "redacted_thinking",
@@ -936,9 +918,8 @@ function convertMessages(
 					const thinkingSignature = block.thinkingSignature;
 					const hasThinkingSignature = !!thinkingSignature && thinkingSignature.trim().length > 0;
 					if (block.thinking.trim().length === 0 && !hasThinkingSignature) continue;
-					// If thinking signature is missing/empty (e.g., from aborted stream),
-					// convert to plain text for Anthropic. Some compatible providers emit
-					// and accept empty signatures, so let marked models preserve the block.
+					// thinking 签名缺失或为空时（例如来自被 abort 的流），转成纯文本发给 Anthropic。
+					// 一些兼容 provider 会发出并接受空签名，所以被标记的模型保留该 block。
 					if (!hasThinkingSignature) {
 						blocks.push(
 							allowEmptySignature
@@ -974,7 +955,7 @@ function convertMessages(
 				content: blocks,
 			});
 		} else if (msg.role === "toolResult") {
-			// Collect all consecutive toolResult messages, needed for z.ai Anthropic endpoint.
+			// 收集所有连续的 toolResult 消息，z.ai 的 Anthropic 端点需要。
 			const toolResults: ContentBlockParam[] = [];
 			let j = i;
 			while (j < transformedMessages.length && transformedMessages[j].role === "toolResult") {
@@ -982,7 +963,6 @@ function convertMessages(
 				j++;
 			}
 
-			// Skip the messages we've already processed.
 			i = j - 1;
 
 			params.push({
@@ -992,15 +972,13 @@ function convertMessages(
 		}
 	}
 
-	// Anthropic requires user and assistant messages to strictly alternate, but the transcript
-	// can hold adjacent user turns: several steered messages drained at one take point, or a
-	// tool-result turn followed by steered text. Fold each run of user messages into one —
-	// the content block arrays just concatenate, which is exactly what one user turn with
-	// several blocks looks like. Transcript storage keeps the messages separate; this fold
-	// lives only on the wire format.
+	// Anthropic 要求 user 和 assistant 消息严格交替，但 transcript 可以装着相邻的 user turn：在
+	// 一个取走点排空的多条 steering 消息，或一个 tool-result turn 后面跟着 steering 文本。把每一段
+	// 连续的 user 消息折成一条——content block 数组直接拼接，这正是带多个 block 的一个 user turn
+	// 的样子。transcript 存储保持消息各自独立；这个折叠只存在于 wire 格式上。
 	const mergedParams = mergeAdjacentUserMessages(params);
 
-	// Add cache_control to the last user message to cache conversation history
+	// 给最后一条 user 消息加 cache_control，缓存对话历史。
 	if (cacheControl && mergedParams.length > 0) {
 		const lastMessage = mergedParams[mergedParams.length - 1];
 		if (lastMessage.role === "user") {
@@ -1028,11 +1006,9 @@ function convertMessages(
 }
 
 /**
- * Fold each run of adjacent user messages into one. The content block arrays
- * concatenate; a string content is lifted into a text block first so both
- * sides merge uniformly. Assistant messages are left untouched — adjacent
- * assistant turns do not arise from the loop, and merging them would smear
- * distinct turns into one.
+ * 把每一段相邻的 user 消息折成一条。content block 数组直接拼接；字符串 content 先提升为 text
+ * block，两侧才统一合并。assistant 消息不动——循环里不会产生相邻的 assistant turn，合并它们会把
+ * 不同的 turn 糊成一团。
  */
 function mergeAdjacentUserMessages(params: MessageParam[]): MessageParam[] {
 	const merged: MessageParam[] = [];
@@ -1058,7 +1034,7 @@ function shouldUseFineGrainedToolStreamingBeta(
 	return context.tools.length > 0 && !getAnthropicCompat(model).supportsEagerToolInputStreaming;
 }
 
-// Keywords Anthropic strict tool use rejects with a 400 for the whole request.
+// Anthropic 严格工具模式会用 400 拒绝整个请求的关键字。
 // https://platform.claude.com/docs/en/build-with-claude/structured-outputs#json-schema-limitations
 const ANTHROPIC_STRICT_UNSUPPORTED_KEYWORDS = new Set([
 	"minimum",
@@ -1145,23 +1121,22 @@ function mapStopReason(
 				stopReason: "error",
 				errorMessage: stopDetails?.explanation || `The model refused to complete the request`,
 			};
-		case "pause_turn": // Stop is good enough -> resubmit
+		case "pause_turn": // stop 就够了——重发即可
 			return { stopReason: "stop" };
 		case "stop_sequence":
-			return { stopReason: "stop" }; // We don't supply stop sequences, so this should never happen
-		case "sensitive": // Content flagged by safety filters (not yet in SDK types)
+			return { stopReason: "stop" }; // 我们不提供 stop sequence，这本不该发生
+		case "sensitive": // 被安全过滤器标记的内容（SDK 类型里还没有）
 			return { stopReason: "error", errorMessage: "Provider stopped with: sensitive" };
 		default:
-			// Handle unknown stop reasons gracefully (API may add new values)
 			throw new Error(`Unhandled stop reason: ${reason}`);
 	}
 }
 
 /**
- * This module as a `ChatTransport`: the one thing a host hands its requests to.
+ * 本模块作为一个 `ChatTransport`：host 把请求交给的唯一东西。
  *
- * Upstream pi-ai reaches this through `api/anthropic-messages.lazy.ts`, which defers the module load
- * so a host that never sends an Anthropic request never pays for the SDK. This app always does — it
- * speaks nothing else — so the pairing is a plain object and the import above is static.
+ * 上游 pi-ai 经 `api/anthropic-messages.lazy.ts` 到达这里，它推迟模块加载，让从不发送 Anthropic
+ * 请求的 host 不用为 SDK 付代价。本应用总是会发——它不说别的协议——所以配对就是一个普通对象，
+ * 上面的 import 是静态的。
  */
 export const anthropicMessages: ChatTransport = { stream };

@@ -1,15 +1,13 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
-// from flagging this file, while every import into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
 import type { Message, SystemMessage, Tool } from "../types.ts";
 
 /**
- * Build the leading system message for a prompt. Returns undefined when the prompt is empty, so an
- * empty transcript stays empty.
+ * 为 prompt 构建开头的 system 消息。prompt 为空时返回 undefined，空 transcript 保持为空。
  *
- * Named for what it makes, not for when: this runs before every request rather than once
- * per conversation, because the prompt is resent whole each time. Tools do not come through here —
- * they are a request parameter, carried by `Context.tools`.
+ * 以它造的东西命名，而不是以它运行的时刻命名：它在每次请求之前运行，而不是每个会话一次，因为
+ * prompt 每次都整体重发。工具不经过这里——工具是请求参数，由 `Context.tools` 携带。
  */
 export function createSystemMessage(systemPrompt: string | undefined): SystemMessage | undefined {
 	if (systemPrompt === undefined || systemPrompt.length === 0) return undefined;
@@ -17,19 +15,17 @@ export function createSystemMessage(systemPrompt: string | undefined): SystemMes
 }
 
 /**
- * The leading system message, if the transcript starts with one — the fallback a transport reads
- * when the request carries no explicit `Context.system`.
+ * 开头的 system 消息，若 transcript 以它开始——请求不带显式 `Context.system` 时传输读取的回落。
  *
- * The leading message is the only place a system message can be: a later one is dropped
- * before it reaches a transport, because the prompt is rebuilt whole on every request rather
- * than patched from the middle of a conversation.
+ * 开头消息是 system 消息唯一可能在的地方：更晚的一条在到达传输之前就被丢弃，因为 prompt 每次
+ * 请求都整体重建，而不是从对话中间打补丁。
  */
 export function getInitialSystemMessage(messages: readonly Message[]): SystemMessage | undefined {
 	const first = messages[0];
 	return first?.role === "system" ? first : undefined;
 }
 
-/** Strip executable and display-only fields from a tool before transcript comparison or persistence. */
+/** 在做 transcript 比较或持久化之前，剥掉工具上的可执行字段和纯展示字段。 */
 export function toToolDeclaration(tool: Tool): Tool {
 	return {
 		name: tool.name,

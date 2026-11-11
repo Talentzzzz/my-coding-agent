@@ -32,77 +32,66 @@ import { normalizePath, resolvePath, sessionJsonlPath, sessionMetaPath, sessionP
 import { UnknownSessionError } from "./unknown-session.ts";
 
 /**
- * The on-disk shape this build writes.
+ * 本构建写入的盘上格式版本。
  *
- * A session is two files, and 5 is the first version that says so: 4 kept everything in one JSONL
- * with the header as line one, and 5 splits it — `<id>.json` holds what the session *is* (the
- * header fields plus the current values of title, model, thinking level, and tool config, rewritten
- * whole on every change), `<id>.jsonl` holds what was *said* (the immutable entry stream, and
- * nothing else). Only 5 is produced here, and the entry kinds this build knows are the ones in
- * {@link SessionEntry}.
+ * session 是两个文件，5 是第一个这样声明的版本：4 把所有东西放在一个 JSONL 里、header 是第一行，
+ * 5 把它拆开——`<id>.json` 装 session *是什么*（header 字段加上 title、model、thinking level、
+ * tool config 的当前值，每次变更整体重写），`<id>.jsonl` 装*说过什么*（不可变的条目流，仅此而已）。
+ * 这里只产出 5，本构建认识的条目种类即 {@link SessionEntry} 里的那些。
  *
- * There is deliberately no migration. A session whose files do not read as a v5 pair is *deleted*,
- * not refused and left in place: the format is owned by this build, a v≤4 file cannot be adopted
- * without a header replay this code no longer has, and keeping it would make every listing pay for
- * a session nothing can ever open again. The deletion points are the listing scan and
- * {@link fillSession} — see {@link settleSessionFiles}.
+ * 刻意不做迁移。文件读不出 v5 配对的 session 会被*删除*，而不是拒绝后留在原地：格式归本构建所有，
+ * v≤4 的文件在没有本代码已不再具备的 header 重放的情况下无法收养，留着它会让每次列表都为一个永远
+ * 无法再打开的 session 付代价。删除点在列表扫描和 {@link fillSession}——见 {@link settleSessionFiles}。
  */
 export const CURRENT_SESSION_VERSION = 5;
 
 /**
- * The `.json` half of a session: what the session *is*, as one atomically rewritten snapshot.
+ * session 的 `.json` 那一半：session *是什么*，作为一个原子重写的快照。
  *
- * The first five fields are the identity a v4 header carried — who the session is, when it was
- * created, where it was opened, and the file it was forked from. The rest are the session's own
- * current choices, the ones v≤4 recorded as last-wins entries (`rename`, `model_change`,
- * `thinking_level_change`, `tool_config`): only the value in force is kept, so the history those
- * entries carried is gone by design — it was never read. A field absent means "never chosen", which
- * is what lets a reader tell a session that chose `off` from one that never chose. The one field
- * that is not a choice is `suspended`: a rebuildable display cache, absent meaning false.
+ * 前五个字段是 v4 header 携带的身份——session 是谁、何时创建、在哪儿打开、从哪个文件 fork 而来。
+ * 其余是 session 自己的当前选择，即 v≤4 用 last-wins 条目（`rename`、`model_change`、
+ * `thinking_level_change`、`tool_config`）记录的那些：只保留生效值，那些条目承载的历史刻意消失
+ * ——从没人读过它。字段缺席意味着「从未选择」，这让读者能区分选了 `off` 的 session 和从未选的。
+ * 唯一不是选择的字段是 `suspended`：一个可重建的展示缓存，缺席即 false。
  *
- * Every change rewrites the whole file (temp + rename), because it is a snapshot, not a log — the
- * JSONL beside it is the log, and the two are paired by stem: a session exists exactly when both
- * files do.
+ * 每次变更都整体重写文件（temp + rename），因为它是快照不是日志——旁边的 JSONL 才是日志，两者按
+ * stem 配对：两个文件都在，session 才存在。
  *
- * This is the **disk** shape. In memory a session regroups the choice fields into
- * {@link SessionSetting} — the thinking level folded into `model` — and the translation between the
- * two lives in exactly two places: the fill path merges on the way in, {@link metaOf} splits on the
- * way out. Nothing else on disk changes: the version does not move, and an older session reads
- * as it always did.
+ * 这是**磁盘**形状。内存中 session 把选择字段重组为 {@link SessionSetting}——thinking level 折进
+ * `model`——两者之间的翻译只存在于两处：fill 路径在进入时合并，{@link metaOf} 在输出时拆开。盘上
+ * 再无其他变化：版本号不动，旧 session 照旧读取。
  */
 export interface SessionMeta {
 	version: number;
 	id: string;
-	/** The ISO stamp the session was created at; the file name leads with the same moment. */
+	/** session 创建时的 ISO 时间戳；文件名以同一时刻开头。 */
 	timestamp: string;
-	/** The working directory the session was opened on, absolute. */
+	/** session 打开时所在的工作目录，绝对路径。 */
 	workDir: string;
 	/**
-	 * The session file this one was forked from or delegated by.
+	 * 本 session 从之 fork 或被其委托的 session 文件。
 	 *
-	 * An absolute path to the source's `.jsonl`, not an id, because a fork is traceable to the file
-	 * it copied, and the file is what a reader has in hand. Absolute because a listing compares
-	 * paths: a relative one would be resolved against whatever directory the process happens to be
-	 * in. The copied entries keep their original ids on top of that.
+	 * 源的 `.jsonl` 的绝对路径，不是 id，因为 fork 要能追溯到它复制的文件，而文件才是读者手里
+	 * 有的东西。用绝对路径是因为列表要比较路径：相对路径会按进程碰巧所在的目录解析。被复制的
+	 * 条目另外保留原始 id。
 	 */
 	parentSession?: string;
-	/** The conversation's own name, when a person gave it one; absent means "derive it". */
+	/** 会话自己的名字，由人起的；缺席即「去派生」。 */
 	title?: string;
-	/** The model row this session last ran on, as the name that identifies it. */
+	/** session 最后一次运行的模型行，以其标识名记录。 */
 	model?: { name: string; modelId: string };
-	/** The thinking level this session last asked at; absent means "never chose". */
+	/** session 最后一次请求的 thinking level；缺席即「从未选择」。 */
 	thinkingLevel?: string;
-	/** The complete active tool set as of the last change, in registration order. */
+	/** 最近一次变更时的完整激活工具集，按注册顺序。 */
 	activeTools?: string[];
-	/** The complete approval map as of the last change, keyed like the settings file's `approval`. */
+	/** 最近一次变更时的完整审批表，key 与设置文件的 `approval` 一致。 */
 	approval?: Record<string, boolean>;
 	/**
-	 * Whether the session is parked at an approval gate; written only when true, absent means false.
+	 * session 是否停在审批闸门处；只在 true 时写入，缺席即 false。
 	 *
-	 * A display cache for the listing's cold start: the scan reads snapshots only, and pairing tool
-	 * calls with results would cost a full replay of every ledger. The ledger stays the authority —
-	 * this field is rebuildable from it at any time, and no control flow reads it. An older snapshot
-	 * without the field reads as false, so the version does not move and nothing migrates.
+	 * 列表冷启动用的展示缓存：扫描只读快照，把 tool call 与 result 配对要对每个账本做完整重放。
+	 * 账本始终是权威——这个字段随时可从账本重建，且没有任何控制流读它。没有该字段的旧快照按
+	 * false 读，所以版本号不动，也没有迁移。
 	 */
 	suspended?: true;
 }
@@ -122,89 +111,81 @@ export interface MessageEntry extends SessionEntryBase {
 export interface CompactionEntry extends SessionEntryBase {
 	type: "compaction";
 	summary: string;
-	/** The first entry the model still sees; everything before it was folded into `summary`. */
+	/** 模型仍然看得见的第一条条目；它之前的一切都折进了 `summary`。 */
 	firstKeptEntryId: string;
 	tokensBefore: number;
-	/** Usage from the call that generated the summary, when it is known. */
+	/** 生成摘要那次调用的 usage，若可知。 */
 	usage?: Usage;
 }
 
 /**
- * A record of tool results this build cleared out of the view.
+ * 本构建从视图中清出的 tool result 的记录。
  *
- * The results stay in the file — this format never rewrites a line — so the record names them instead
- * and {@link buildContextEntries} applies it. That is the same shape as a compaction: an entry that
- * changes what earlier entries mean rather than changing them, which is what keeps the file a full
- * record and the transcript a view of it.
+ * result 留在文件里——这个格式从不重写一行——所以记录只指名它们，由 {@link buildContextEntries}
+ * 应用。形状与压缩相同：一条改变更早条目含义而不改变其本身的条目，这让文件保持完整记录、transcript
+ * 保持它的一个视图。
  */
 export interface ClearToolResultEntry extends SessionEntryBase {
 	type: "clear_tool_result";
-	/** The entries whose results this record cleared: still in the file, no longer in the view. */
+	/** 本记录清空其 result 的条目：仍在文件里，不再在视图里。 */
 	clearedEntryIds: string[];
-	/** The estimated prompt size before the clear, so the record says what it was worth. */
+	/** 清空前的预估 prompt 大小，让记录说明自己值多少。 */
 	tokensBefore: number;
 }
 
 /**
- * A record of tool-call arguments this build shortened in the view.
+ * 本构建在视图中截短 tool call 参数的记录。
  *
- * Same shape of decision as a clear: the arguments stay whole in the file — this format never
- * rewrites a line — and the record names the message entries whose recorded arguments are shortened,
- * which {@link buildContextEntries} applies. The heavy bodies a `write` or an `edit` carried live in
- * the file they changed; the view keeps only enough of them to say what was written where.
+ * 与 clear 相同的决策形状：参数在文件里保持完整——这个格式从不重写一行——记录指名其记录参数被
+ * 截短的消息条目，由 {@link buildContextEntries} 应用。`write` 或 `edit` 携带的重正文活在它们改的
+ * 文件里；视图只保留足以说明写了什么、写到哪的部分。
  */
 export interface TrimToolCallArgEntry extends SessionEntryBase {
 	type: "trim_tool_call_arg";
-	/** The message entries whose recorded tool-call arguments this record shortened. */
+	/** 本记录截短其记录参数的消息条目。 */
 	trimmedEntryIds: string[];
-	/** The estimated prompt size before the trim, so the record says what it was worth. */
+	/** 截短前的预估 prompt 大小，让记录说明自己值多少。 */
 	tokensBefore: number;
 }
 
 /**
- * A record of where the conversation moved: the position {@link SessionManager.branch} or
- * {@link SessionManager.resetLeaf} left the leaf at, written when the position actually moved.
+ * 对话移动位置的记录：{@link SessionManager.branch} 或 {@link SessionManager.resetLeaf} 把叶子留在
+ * 哪里，位置真的移动时才写入。
  *
- * Appends push the leaf along and need no record — the file's last entry is the position — so this
- * entry is the one exception, and it is what lets a move outlive the process that made it. Like
- * every state entry it is not transcript: it reaches no message, and a fresh reader replays it to
- * put the leaf back where the conversation went.
+ * 追加本身就推进叶子、不需要记录——文件最后一条就是位置——所以这个条目是唯一的例外，它让一次
+ * 移动活得比创建它的进程更久。和每条状态条目一样，它不是 transcript：它不产生任何消息，新读者
+ * 重放它来把叶子放回对话去过的位置。
  */
 export interface LeafEntry extends SessionEntryBase {
 	type: "leaf";
-	/** The position the conversation moved to: an entry id, or null for "before the first entry". */
+	/** 对话移动到的位置：一个条目 id，null 表示「第一条之前」。 */
 	leafId: string | null;
 }
 
 /**
- * A record of model spend that owns no message entry: usage the engine never attached to an assistant
- * message in this transcript.
+ * 不拥有消息条目的模型开销记录：本 transcript 里引擎从未挂到 assistant 消息上的 usage。
  *
- * The kind exists so a spend with no message of its own has somewhere to land — a run whose
- * transcript belongs to another file, a summary written for compaction — and `operation` names the
- * spend the way a reader would ask about it. A usage entry is money, not conversation: it reaches
- * no message, and it is counted in file order across every branch, because tokens burned on an
- * abandoned way through the tree were burned all the same. An unknown `operation` is read as ordinary
- * usage rather than rejected — the same forward-compatibility rule the file's unknown kinds follow.
+ * 这个种类存在的意义，是让没有自己消息的开销有地方落脚——transcript 属于另一个文件的 run、为压缩
+ * 写的摘要——`operation` 按读者会问的方式指名这笔开销。usage 条目是钱，不是对话：它不产生任何消息，
+ * 并且按文件顺序跨所有分支计数，因为在被放弃的树路径上烧掉的 token 同样烧掉了。未知的 `operation`
+ * 按普通 usage 读取而不是拒绝——与文件对未知种类的前向兼容规则相同。
  */
 export interface UsageEntry extends SessionEntryBase {
 	type: "usage";
-	/** What the spend is attributed to, as the writer named it. */
+	/** 开销归因于什么，按写入方命名。 */
 	operation: string;
-	/** The model row the spend ran on, as its name. */
+	/** 开销运行的模型行，按其名字。 */
 	model: string;
 	usage: Usage;
 }
 
 /**
- * The six kinds an entry line can be.
+ * 一行条目可能的六种类型。
  *
- * Everything else a session once recorded about itself — its name, its model and thinking level, its
- * tool choices — is a *current value*, and lives in the `.json` snapshot beside this stream; and the
- * legacy `tool_result_view` kind is gone outright, because this build stopped writing it and v≤4
- * files are deleted rather than replayed. What is left is exactly the kinds a transcript cannot
- * rewrite in place: the conversation, the two view-shrink records, the checkpoint, the leaf
- * position, and unattributed spend.
+ * session 曾记录的其余一切——名字、模型和 thinking level、工具选择——都是*当前值*，放在这条流
+ * 旁边的 `.json` 快照里；遗留的 `tool_result_view` 种类整体废除，因为本构建不再写它，v≤4 文件被
+ * 删除而不是重放。剩下的恰好是 transcript 无法原地重写的种类：对话本身、两条视图收缩记录、
+ * 检查点、叶子位置、无归属的开销。
  */
 export type SessionEntry =
 	| MessageEntry
@@ -215,12 +196,11 @@ export type SessionEntry =
 	| UsageEntry;
 
 /**
- * The entries of one transcript, keyed by their own id.
+ * 一份 transcript 的全部条目，按各自的 id 建键。
  *
- * An entry carries only `parentId`, so every walk up the tree — {@link buildSessionPath}, a branch
- * preview, the id a caller names — is a lookup by id. This map is that lookup, and it is also what
- * makes `generateId` collision-free. Iteration order is file order: it is filled by replaying the
- * JSONL in sequence, and appended to in the same order, so "the last line wins" needs no sort.
+ * 条目只带 `parentId`，所以沿树的每次上溯——{@link buildSessionPath}、分支预览、调用方指名的
+ * id——都是按 id 查找。这个 map 就是那次查找，也是 `generateId` 无冲突的原因。迭代顺序即文件
+ * 顺序：按序重放 JSONL 填充，再按同样顺序追加，所以「最后一行胜出」不需要排序。
  */
 export type SessionEntryMapById = Map<string, SessionEntry>;
 
@@ -231,122 +211,113 @@ export interface SessionContext {
 }
 
 export interface SessionInfo {
-	/** The session file, absolute. */
+	/** session 文件，绝对路径。 */
 	absPath: string;
 	id: string;
-	/** Working directory the session was started in, absolute. Empty for a file whose header has none. */
+	/** session 启动时的工作目录，绝对路径。header 里没有的文件为空。 */
 	workDirAbsPath: string;
-	/** The absolute path of the file this session was forked from, if the header names one. */
+	/** 本 session 从之 fork 的文件的绝对路径，若 header 有指名。 */
 	absParentSessionPath?: string;
 	/**
-	 * Id of the session this one was forked from, when that session is in the same directory.
+	 * 本 session 从之 fork 的 session 的 id，仅当它在同一目录。
 	 *
-	 * Not read from the file: the header names the parent's path, and its id is only knowable where
-	 * both ends of the fork are listed at once. See {@link linkForkParents}.
+	 * 不从文件读：header 记的是父的路径，其 id 只在 fork 两端同时被列出时才可知。见
+	 * {@link linkForkParents}。
 	 */
 	parentId?: string;
 	created: Date;
 	modified: Date;
 	messageCount: number;
 	/**
-	 * The conversation's name, derived exactly as a live session derives it.
+	 * 会话的名字，与活 session 派生的方式完全一致。
 	 *
-	 * One derivation for a row's title, whether or not this process is running it: the first user
-	 * message with text on the active branch, shortened to 72 characters. It is not the file's first
-	 * user message — that one is `firstMessage`, and the two differ once the leaf has moved, so reading
-	 * a title that changes when a host is reaped would be a visible flicker for no reason.
+	 * 一行的标题只有一种派生，无论本进程是否在跑它：活跃分支上第一条带文本的 user 消息，截到
+	 * 72 字符。它不是文件的第一条 user 消息——那是 `firstMessage`，叶子移动后两者会不同，所以
+	 * 读一个会随 host 被回收而变化的标题是无缘由的可见闪烁。
 	 */
 	title: string;
 	firstMessage: string;
 	allMessagesText: string;
-	/** The snapshot's parked-approval marker, absent meaning false — a display cache, not a ledger read. */
+	/** 快照的停闸标记，缺席即 false——展示缓存，不是账本读取。 */
 	suspended: boolean;
 }
 
 /**
- * One alternative continuation of a branch point.
+ * 一个分支点的一种备选延续。
  *
- * `entryId` is the one stable thing here: it is a child of the branch point, written once. The tip the
- * choice leads to is deliberately absent — a branch grows at its tip, so a remembered tip would be a
- * stale pointer the moment that branch was continued, and a window holding one would rewind to a place
- * the conversation had already left. The server descends from `entryId` when the choice is made.
+ * `entryId` 是这里唯一稳定的东西：它是分支点的孩子，一次写入。选择通向的 tip 刻意缺席——分支在
+ * tip 处生长，记住的 tip 在那条分支被续写的那一刻就成了过期指针，持有它的窗口会回退到对话早已
+ * 离开的地方。做出选择时 server 从 `entryId` 向下走。
  */
 export interface BranchOption {
-	/** The entry this alternative begins at: a child of the branch point. */
+	/** 这个备选从哪开始：分支点的一个孩子。 */
 	entryId: string;
-	/** One line of the first message below it, for the switcher's label. */
+	/** 其下第一条消息的一行文字，供切换器的标签。 */
 	label: string;
-	/** True for the alternative the active chain leads through. */
+	/** 活跃链经过的那个备选为 true。 */
 	active: boolean;
 }
 
 /**
- * A message the conversation carried on from in more than one way.
+ * 以不止一种方式延续下去的消息。
  *
- * The entry tree has always had these — an entry may have any number of children — and this is the
- * shape of one a window can draw: the entry to hang a switcher on, and the continuations to choose
- * between, in the order they were written. Every point in the log is reported, not only the ones the
- * active chain runs through: a fork below a way nobody is reading is still a fork, and a page whose
- * tree changed shape because the leaf moved would be answering "where can I go back to" with a
- * different conversation.
+ * 条目树一直有它们——一条条目可以有任意多个孩子——这是一个窗口能画出来的那一种的形状：挂切换器
+ * 的条目，以及按写入顺序排列、供选择的延续。日志里每个点都报告，不只是活跃链经过的：没人读的路径
+ * 下的 fork 依然是 fork，而叶子移动后树形改变、却只报活跃链的页面，回答「能回到哪」时说的将是另
+ * 一段对话。
  */
 export interface BranchPoint {
-	/** The entry the alternatives hang off. */
+	/** 备选挂靠的条目。 */
 	entryId: string;
 	/**
-	 * The entry to hang the alternatives' cards under, as the window draws them.
+	 * 备选卡片挂在其下的条目，按窗口绘制的方式。
 	 *
-	 * A page places cards by entry: a user message on the line, or an alternative some earlier point
-	 * already drew. This is the nearest such entry at or above the point — for a point on the chain
-	 * that is the user message it answers, and for one below a way nobody is reading it is that way's
-	 * own card, so the descent stays in the column the way is in. Always the point's own id or an
-	 * ancestor's, never an entry beside it.
+	 * 页面按条目放置卡片：线上的一条 user 消息，或更早的点已画过的某个备选。这是该点及其上方最近
+	 * 的那个这样的条目——对链上的点，就是它回答的 user 消息；对没人读的路径下的点，就是那条路径
+	 * 自己的卡片，于是下降保持在路径所在的列。始终是该点自己的 id 或祖先的 id，绝不是旁边的条目。
 	 */
 	anchor: string;
 	/**
-	 * One line of the user message at or above the point: the question the point's message answers,
-	 * or the point's own text when the point is a user's.
+	 * 该点及其上方 user 消息的一行文字：该点消息所回答的问题，或点本身就是 user 消息时它自己的
+	 * 文字。
 	 *
-	 * A branch taken from an assistant answer has no user text of its own to name it by, and the
-	 * answer is not what a card says — a card named by its answer would read as prose the tree does not
-	 * carry — so the question is the line an option with no text of its own falls back to. Empty only
-	 * for a conversation that opens with an assistant.
+	 * 从 assistant 回答上分出的分支没有自己的 user 文字可命名，而回答不是卡片该说的——用回答命名
+	 * 的卡片读起来像树里并不存在的散文——所以问题是自身没有文字的选项回落的行。仅当对话以 assistant
+	 * 开场时为空。
 	 */
 	prompt: string;
 	options: BranchOption[];
 }
 
 /**
- * One user message in the session, as the branch page draws it.
+ * session 里的一条 user 消息，按分支页绘制的方式。
  *
- * The page is a line of **questions**, not a list of forks: what a person recognises as a place they
- * can go back to is the thing they asked. So this is folded from the whole entry tree rather than the
- * active chain — a question whose way was left behind is still a question, and it is exactly the card
- * a reader is looking for after a rewind took the rest of the line out of the transcript.
+ * 页面是一列**问题**，不是 fork 的清单：人认得出的「可以回到的地方」是他问过的东西。所以它从整个
+ * 条目树折叠，而不是活跃链——一条路径被抛下的问题仍是问题，恰好就是回退把线上其余部分移出
+ * transcript 后读者要找的那张卡片。
  *
- * `parentId` is the nearest user message **above** it, not the entry's own parent: the entries between
- * two questions are one round's work, and a card hangs off the question that opened the round before.
+ * `parentId` 是它**上方**最近的 user 消息，不是条目自己的 parent：两个问题之间的条目是一轮的工作，
+ * 卡片挂在上一个打开该轮的问题上。
  */
 export interface UserWay {
-	/** The user message entry: the card's identity, and the id a move names. */
+	/** user 消息条目：卡片的身份，也是移动所指的 id。 */
 	entryId: string;
-	/** The user message this one follows on its own way; null for the first question of a line. */
+	/** 这条在自己路径上跟随的 user 消息；一列问题里的第一个为 null。 */
 	parentId: string | null;
-	/** One line of what was asked. */
+	/** 所问内容的一行文字。 */
 	label: string;
 	/**
-	 * Where a press on the card lands: the last message of the round this question opened.
+	 * 按下卡片落在哪里：这个问题打开的那轮的最后一条消息。
 	 *
-	 * Only when that message is an assistant's, because the point of landing there is that the next
-	 * prompt is typed **after** an answer rather than in place of one. A round that stopped mid-tool
-	 * has no answer to keep, so its card lands on the question itself.
+	 * 仅当那条消息是 assistant 的，因为落在那的意义是下一个 prompt 输入在回答**之后**而不是顶替
+	 * 回答。停在 tool 中途的一轮没有可保留的回答，它的卡片落在问题本身上。
 	 */
 	landingId: string;
-	/** True when this message sits on the chain the leaf is on. */
+	/** 这条消息位于叶子所在链上时为 true。 */
 	active: boolean;
 }
 
-/** One directory the sidebar groups under, and the sessions stored for it. */
+/** 侧栏分组下的一个目录，及其存储的 session。 */
 export interface DirectorySessions {
 	workDirAbsPath: string;
 	sessions: SessionRow[];
@@ -356,7 +327,7 @@ function createSessionId(): string {
 	return uuidv7();
 }
 
-/** A short entry id no entry in the map already uses. */
+/** map 中未被任何条目占用的短 id。 */
 function generateId(sessionEntryMapById: { has(id: string): boolean }): string {
 	for (let attempt = 0; attempt < 100; attempt++) {
 		const id = randomUUID().slice(0, 8);
@@ -365,7 +336,7 @@ function generateId(sessionEntryMapById: { has(id: string): boolean }): string {
 	return randomUUID();
 }
 
-/** Index a list of entries by id. Only readers that do not own a `SessionManager` need this. */
+/** 按 id 索引条目列表。只有不拥有 `SessionManager` 的读者才需要它。 */
 function buildEntryIndex(entries: SessionEntry[]): SessionEntryMapById {
 	const index: SessionEntryMapById = new Map();
 	for (const entry of entries) index.set(entry.id, entry);
@@ -373,11 +344,10 @@ function buildEntryIndex(entries: SessionEntry[]): SessionEntryMapById {
 }
 
 /**
- * The last entry in file order.
+ * 文件顺序中的最后一条条目。
  *
- * The map is filled by replaying the file, and appended to in the same order, so its last value is
- * the last line. That is why a fallback can be a walk of the map rather than a copy of the entry
- * list — nothing is allocated, and the cost is only paid when the caller named no position.
+ * map 按重放文件的顺序填充，也按同样的顺序追加，所以 map 的最后一个值就是最后一行。这就是为什么
+ * 回落可以是遍历 map 而不是复制条目列表——不分配任何东西，代价只在调用方没有指名位置时才付。
  */
 function lastEntryOf(sessionEntryMapById: SessionEntryMapById): SessionEntry | undefined {
 	let last: SessionEntry | undefined;
@@ -386,11 +356,10 @@ function lastEntryOf(sessionEntryMapById: SessionEntryMapById): SessionEntry | u
 }
 
 /**
- * The chain from the root to `leafId`, parent links followed, inclusive.
+ * 从根到 `leafId` 的链，沿 parent 链接上溯，含两端。
  *
- * `leafId` defaults to the last entry, and `null` means "before the first entry" and yields an empty
- * chain. An id no entry has falls back to the same default as a missing one, which is what lets a
- * caller walk the whole log without naming an entry.
+ * `leafId` 默认取最后一条条目，`null` 表示「第一条之前」并得到空链。没有条目持有的 id 与缺失的 id
+ * 落到同一个回落值，这让调用方可以不指名条目就遍历整份日志。
  */
 function buildSessionPath(sessionEntryMapById: SessionEntryMapById, leafId?: string | null): SessionEntry[] {
 	if (leafId === null) return [];
@@ -410,15 +379,13 @@ function buildSessionPath(sessionEntryMapById: SessionEntryMapById, leafId?: str
 }
 
 /**
- * The model and thinking level this session is on: the `.json` snapshot's current values, with the
- * transcript's last assistant message as the model's weak fallback.
+ * 这个 session 当前所在的模型和 thinking level：`.json` 快照的当前值，模型以 transcript 的最后一条
+ * assistant 消息作弱回落。
  *
- * The snapshot is the first word — it is where the session's own choices live — and the message
- * fallback survives only for the model, because a message carries the wire id it was answered by
- * even when no choice was ever recorded. The name it reports is the wire id, which is what the row
- * it came from would be called if the user never named it. The walk is branch-relative by
- * construction, but only the fallback is: the snapshot's values are session-level, so moving the
- * leaf no longer switches them.
+ * 快照是第一句话——它是 session 自己的选择存放的地方——消息回落只对模型保留，因为即使从未记录过
+ * 任何选择，消息也带着回答它的 wire id。它报告的名字是 wire id，也就是用户从不指名时该行会被称呼
+ * 的方式。这次遍历按构造就是分支相对的，但只有回落是：快照的值是 session 级的，移动叶子不再切换
+ * 它们。
  */
 function getSessionContextSettings(
 	setting: SessionSetting,
@@ -440,20 +407,18 @@ function getSessionContextSettings(
 }
 
 /**
- * Project one selected entry into the messages the model sees.
+ * 把一条被选中的条目投影成模型看到的消息。
  *
- * A compaction entry stands for everything it replaced: the summary alone, projected as the user
- * turn it stands for and wrapped in the tags `compactionSummaryOf` recognizes — a user message is
- * what the provider is sent, so that is the shape the transcript carries. Every other entry kind is
- * state, not conversation, and contributes nothing. The prompt is not among them: it is rebuilt from
- * settings and the live tool set on every request, so no entry has to carry it.
+ * 压缩条目代表它替换掉的一切：只有摘要，投影成它所代表的 user turn，并包上 `compactionSummaryOf`
+ * 认得的标签——发给 provider 的是 user 消息，所以 transcript 用这个形状携带摘要。其他条目种类都是
+ * 状态而非对话，不贡献任何东西。system prompt 不在其中：它每次请求都从设置和活的工具集重建，所以
+ * 没有条目需要携带它。
  */
 export function sessionEntryToContextMessages(entry: SessionEntry): Message[] {
 	if (entry.type === "message") {
 		const message = entry.message;
-		// Session files are parsed without validation, so a hand-edited or older file can hold a
-		// message with null or missing content. Repair it rather than handing the provider a shape it
-		// cannot read.
+		// session 文件解析时不做校验，所以手改过的或更旧的文件可能装着 content 为 null 或缺失的
+		// 消息。在这里修复它，而不是把 provider 读不了的形状递出去。
 		if (message.role === "system" && message.content == null) return [{ ...message, content: "" }];
 		if (
 			(message.role === "user" || message.role === "assistant" || message.role === "toolResult") &&
@@ -479,12 +444,12 @@ export function sessionEntryToContextMessages(entry: SessionEntry): Message[] {
 	return [];
 }
 
-/** The three view decisions applied to one path, in the order compaction, trim, clear. */
+/** 作用于一条路径的三个视图决定，顺序为压缩、截短、清空。 */
 function contextEntriesFromPath(chain: SessionEntry[]): SessionEntry[] {
 	return applyClears(applyTrims(contextEntriesFrom(chain), trimmedEntryIds(chain)), clearedEntryIds(chain));
 }
 
-/** The branch with its newest checkpoint applied: the checkpoint itself, then everything it kept. */
+/** 应用了最新检查点的分支：检查点本身，然后是它保留的一切。 */
 function contextEntriesFrom(chain: SessionEntry[]): SessionEntry[] {
 	let compaction: CompactionEntry | null = null;
 	for (const entry of chain) {
@@ -508,7 +473,7 @@ function contextEntriesFrom(chain: SessionEntry[]): SessionEntry[] {
 	return contextEntries;
 }
 
-/** Every entry id a `clear_tool_result` record on this branch cleared. Read from the branch, not from the view. */
+/** 本分支上每条 `clear_tool_result` 记录清空的条目 id。从分支读，不从视图读。 */
 function clearedEntryIds(chain: SessionEntry[]): Set<string> {
 	const cleared = new Set<string>();
 	for (const entry of chain) {
@@ -518,13 +483,13 @@ function clearedEntryIds(chain: SessionEntry[]): Set<string> {
 	return cleared;
 }
 
-/** The view, with the results a clear record named emptied in place. */
+/** 视图，clear 记录指名的 result 在原位被掏空。 */
 function applyClears(entries: SessionEntry[], cleared: ReadonlySet<string>): SessionEntry[] {
 	if (cleared.size === 0) return entries;
 	return entries.map((entry) => (cleared.has(entry.id) ? clearToolResult(entry) : entry));
 }
 
-/** Every entry id a `trim_tool_call_arg` record on this branch named. Read from the branch, not from the view. */
+/** 本分支上每条 `trim_tool_call_arg` 记录指名的条目 id。从分支读，不从视图读。 */
 function trimmedEntryIds(chain: SessionEntry[]): Set<string> {
 	const trimmed = new Set<string>();
 	for (const entry of chain) {
@@ -534,7 +499,7 @@ function trimmedEntryIds(chain: SessionEntry[]): Set<string> {
 	return trimmed;
 }
 
-/** The view, with the recorded arguments a trim record named shortened in place. */
+/** 视图，trim 记录指名的记录参数在原位被截短。 */
 function applyTrims(entries: SessionEntry[], trimmed: ReadonlySet<string>): SessionEntry[] {
 	if (trimmed.size === 0) return entries;
 	return entries.map((entry) => (trimmed.has(entry.id) ? trimToolCallArgs(entry) : entry));
@@ -542,7 +507,7 @@ function applyTrims(entries: SessionEntry[], trimmed: ReadonlySet<string>): Sess
 
 const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
 
-/** Parse one JSONL line, or null: one unreadable line must not make the rest of a session unreadable. */
+/** 解析一行 JSONL，失败返回 null：一行读不了不能让 session 其余部分也读不了。 */
 function parseJsonlLine(line: string): SessionEntry | null {
 	if (!line.trim()) return null;
 	try {
@@ -552,7 +517,7 @@ function parseJsonlLine(line: string): SessionEntry | null {
 	}
 }
 
-/** Read a session's entry stream whole. `absFilePath` is already resolved by the caller. */
+/** 整体读取一个 session 的条目流。`absFilePath` 已由调用方解析。 */
 function loadJsonlEntries(absFilePath: string): SessionEntry[] {
 	if (!existsSync(absFilePath)) return [];
 
@@ -586,17 +551,16 @@ function loadJsonlEntries(absFilePath: string): SessionEntry[] {
 		closeSync(fd);
 	}
 
-	// A final line without a trailing newline would otherwise be extended by the next append.
+	// 没有结尾换行的最后一行会被下一次追加接上去。
 	if (pending) appendFileSync(absFilePath, "\n");
 	return entries;
 }
 
 /**
- * Read a session's `.json` snapshot, or refuse it.
+ * 读取 session 的 `.json` 快照，读不了就拒绝。
  *
- * An unreadable file, one without the identity fields, and one whose version is not this build's
- * are all the same answer: not a session of this build. The caller decides what a refusal means —
- * {@link fillSession} turns it into a prune-and-throw, discovery into a skip.
+ * 读不了的文件、缺身份字段的文件、版本不是本构建的文件，答案都一样：不是本构建的 session。拒绝
+ * 意味着什么由调用方决定——{@link fillSession} 把它变成删掉再抛，发现环节变成跳过。
  */
 function readMetaFile(absJsonPath: string): SessionMeta {
 	const raw = JSON.parse(readFileSync(absJsonPath, "utf8")) as SessionMeta;
@@ -615,11 +579,10 @@ function readMetaFile(absJsonPath: string): SessionMeta {
 }
 
 /**
- * Read a session's `.json` snapshot for discovery: best-effort, null on anything.
+ * 为发现环节读取 session 的 `.json` 快照：尽力而为，出错返回 null。
  *
- * `absPath` may name either half — a caller that holds the `.jsonl` in hand derives the snapshot
- * path from it rather than rescanning the directory. Discovery is best-effort: one unreadable or
- * wrong-version file must not hide the other sessions.
+ * `absPath` 可以指两半中的任何一个——手里拿着 `.jsonl` 的调用方由它推导快照路径，而不是重新扫
+ * 目录。发现是尽力而为：一个读不了或版本不对的文件不能把其他 session 藏起来。
  */
 function readMetaForDiscovery(absPath: string): SessionMeta | null {
 	try {
@@ -634,44 +597,41 @@ function sessionWorkDirMatches(metaWorkDir: string | undefined, workDirAbsPath: 
 }
 
 /**
- * Delete both halves of a session this build cannot open.
+ * 删除本构建无法打开的 session 的两半文件。
  *
- * v5 keeps no migration and no quarantine: a pair this build refuses is a session nothing can ever
- * open again, so keeping it would make every listing pay for a ghost. The trigger points are the
- * store scans ({@link settleSessionFiles}) and {@link fillSession} — every reader that proves a
- * pair unopenable removes it, and the store stays a list of sessions rather than also a graveyard.
+ * v5 不保留迁移也不隔离：被本构建拒绝的配对是一个永远无法再打开的 session，留着它会让每次列表都
+ * 为一个幽灵付代价。触发点是 store 扫描（{@link settleSessionFiles}）和 {@link fillSession}——每个
+ * 证明配对打不开的读者都移除它，store 保持是一个 session 清单，而不是同时还是一片坟场。
  */
 function pruneSessionFiles(absJsonPath: string, absJsonlPath: string): void {
 	try {
 		rmSync(absJsonPath, { force: true });
 	} catch {
-		// A failed deletion must not mask the reason the pair failed; the next scan tries again.
+		// 删除失败不能掩盖配对失败的原因；下一次扫描会再试。
 	}
 	try {
 		rmSync(absJsonlPath, { force: true });
 	} catch {
-		// Same: the pair is dead either way, and the next scan cleans up what this pass could not.
+		// 同理：反正配对已死，下一次扫描清理这一轮没清掉的。
 	}
 }
 
-/** One stem's two files, as a store scan found them. */
+/** 一个 stem 的两个文件，按 store 扫描所见。 */
 interface SessionFilePair {
 	absJson?: string;
 	absJsonl?: string;
 }
 
 /**
- * Pair a store's files by stem and remove everything this build cannot open.
+ * 按 stem 配对一个 store 的文件，并移除本构建打不开的一切。
  *
- * A session is a `.json` + `.jsonl` pair sharing a stem, and the `.json` is the commit marker: it
- * is written last at birth, so an unpaired half is a birth that died partway, and a version that is
- * not this build's is a file an older generation wrote. Both are deleted here — the scan is the one
- * place that walks every file, so it is the one place an unopenable pair can be retired without a
- * second pass. What comes back is the readable remainder, metas already in hand.
+ * session 是共享一个 stem 的 `.json` + `.jsonl` 配对，`.json` 是提交标记：诞生时它最后写入，所以
+ * 未配对的半边是半途夭折的诞生，版本不是本构建的文件是上一代写下的文件。两者都在这里删除——扫描
+ * 是唯一走遍每个文件的地方，所以也是唯一一处能不跑第二遍就淘汰打不开的配对的地方。返回的是可读的
+ * 剩余部分，meta 已在手。
  *
- * The pruning cannot catch a birth in progress: this whole function is one synchronous block, and
- * so is a birth (`persistEntry`), and one process never runs both at once — the concurrent-write
- * case is outside the format's charter.
+ * 清除抓不到进行中的诞生：整个函数是一个同步块，诞生（`persistEntry`）也是一个同步块，一个进程
+ * 从不同时跑两者——并发写入的情形不在格式的章程之内。
  */
 function settleSessionFiles(absDir: string): { absJson: string; absJsonl: string; meta: SessionMeta }[] {
 	const pairs = new Map<string, SessionFilePair>();
@@ -694,8 +654,8 @@ function settleSessionFiles(absDir: string): { absJson: string; absJsonl: string
 		}
 		try {
 			const meta = readMetaFile(pair.absJson);
-			// The stream cannot legally be empty while the snapshot exists — a birth writes the whole
-			// log before the snapshot — so an empty stream is a pair that died partway.
+			// 快照存在时流在法律上不可能是空的——诞生先写完整条日志再写快照——所以空流是半途夭折
+			// 的配对。
 			if (statSync(pair.absJsonl).size === 0) {
 				pruneSessionFiles(pair.absJson, pair.absJsonl);
 				continue;
@@ -709,15 +669,13 @@ function settleSessionFiles(absDir: string): { absJson: string; absJsonl: string
 }
 
 /**
- * The legacy layout an older build wrote, still found on machines that ran it:
- * `<sessionsDir>/--<dashed workDir>--/<ISO stamp>_<id>.jsonl`. The flat store cannot read it — the
- * id is buried in the file name behind a stamp — so the first touch of the store moves every pair it
- * names into the flat root and forgets the folders.
+ * 旧构建写入的遗留布局，跑过它的机器上仍然能找到：
+ * `<sessionsDir>/--<dashed workDir>--/<ISO stamp>_<id>.jsonl`。扁平 store 读不了它——id 埋在文件名
+ * 里、藏在时间戳后面——所以第一次触碰 store 时，把每个配对移进扁平根目录并忘掉那些文件夹。
  *
- * Nothing is deleted: a pair this build cannot read, or whose target id is already taken by a born
- * session, stays exactly where it is, and a folder goes only when nothing is left in it. The move
- * happens once per process, lazily, at the first lookup or listing that would otherwise miss the
- * legacy pairs — and after it, `findSessionFilePathById` is a stat.
+ * 什么都不删：本构建读不了的配对，或目标 id 已被已诞生 session 占用的配对，原地不动；文件夹只在
+ * 什么都不剩时才移除。移动每个进程发生一次、惰性触发，在第一个否则会错过遗留配对的查找或列表时
+ * 进行——之后，`findSessionFilePathById` 就是一次 stat。
  */
 let storeMigrated = false;
 
@@ -732,7 +690,7 @@ function migrateLegacyStore(): void {
 	try {
 		entries = readdirSync(sessionsDir(), { withFileTypes: true });
 	} catch {
-		return; // No sessions directory is the normal first run.
+		return; // 没有 sessions 目录就是正常的首次运行。
 	}
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
@@ -741,12 +699,12 @@ function migrateLegacyStore(): void {
 		try {
 			rmdirSync(absDir);
 		} catch {
-			// An empty folder that would not go is harmless, and not worth failing the boot over.
+			// 拿不走的空文件夹无害，不值得为它让启动失败。
 		}
 	}
 }
 
-/** Move every complete pair in `absDir` to the flat store; true when nothing of a pair is left there. */
+/** 把 `absDir` 里的每个完整配对移进扁平 store；该目录里配对的东西都不剩时返回 true。 */
 function migrateLegacyDirectory(absDir: string): boolean {
 	let names: string[];
 	try {
@@ -756,7 +714,7 @@ function migrateLegacyDirectory(absDir: string): boolean {
 	}
 	let empty = true;
 	for (const name of names) {
-		if (!name.endsWith(".json")) continue; // each pair is found by its snapshot, the identity half
+		if (!name.endsWith(".json")) continue; // 每个配对按其快照（身份那一半）找到
 		const absJson = join(absDir, name);
 		const absJsonl = sessionJsonlPath(absJson);
 		if (!existsSync(absJsonl)) continue;
@@ -764,19 +722,18 @@ function migrateLegacyDirectory(absDir: string): boolean {
 		try {
 			id = readMetaFile(absJson).id;
 		} catch {
-			empty = false; // unreadable: the store scan prunes it, this move leaves it alone
+			empty = false; // 读不了：store 扫描会清理它，这次移动不碰它
 			continue;
 		}
 		const target = sessionPath(id);
 		if (existsSync(sessionMetaPath(target))) {
-			empty = false; // a born session already owns this id: the old pair stays where it is
+			empty = false; // 已诞生的 session 占用了这个 id：旧配对原地不动
 			continue;
 		}
 		try {
-			// Stream first, snapshot last: between the two renames the target holds an unpaired
-			// stream, which every reader reads as "no such session" — never as a half-born session.
-			// A stream stranded there by an interrupted earlier pass is this same id's own log, so
-			// clearing it before the rename cannot cost another session anything.
+			// 先移流，后移快照：两次 rename 之间目标处放着一个未配对的流，所有读者把它读成
+			// 「没有这个 session」——绝不会读成半个诞生的 session。被早前中断的一轮遗落在那的流
+			// 本来就是这个 id 自己的日志，所以 rename 之前清掉它不会让另一个 session 付出任何代价。
 			rmSync(target, { force: true });
 			renameSync(absJsonl, target);
 			renameSync(absJson, sessionMetaPath(target));
@@ -816,16 +773,15 @@ function getMessageActivityTime(entry: MessageEntry): number | undefined {
 }
 
 /**
- * One session, summarized for a picker: who it is, when it moved, and enough text to search it.
+ * 一个 session 的摘要，供选择器用：它是谁、何时动过，以及足以搜索它的文本。
  *
- * The scan is split the way the format is: identity fields — id, workDir, parent, created, a
- * recorded title, the suspended marker — come from the `.json` snapshot, and the message statistics
- * come from a line pass over the `.jsonl`, which is the only half that has to be parsed entry by
- * entry. The scan's caller ({@link settleSessionFiles}) has already paired the files and pruned the
- * unopenable, so a meta in hand here means a session this build can open.
+ * 扫描按格式的两半拆开：身份字段——id、workDir、parent、created、记录的标题、suspended 标记——来自
+ * `.json` 快照，消息统计来自对 `.jsonl` 逐行扫一遍，只有那一半需要逐条解析。扫描的调用方
+ * （{@link settleSessionFiles}）已配好文件并清除了打不开的，所以这里拿到 meta 就意味着这是本构建
+ * 能打开的 session。
  *
- * `modified` prefers the last message's own stamp over the meta's, because a session that is being
- * appended to right now has a birthtime that says nothing about its age.
+ * `modified` 优先取最后一条消息自己的时间戳而不是 meta 的，因为正在被追加的 session，其 birthtime
+ * 对它的年龄什么也说不出来。
  */
 async function buildSessionInfo(
 	absJsonPath: string,
@@ -840,16 +796,15 @@ async function buildSessionInfo(
 		const allMessages: string[] = [];
 		let lastActivityTime: number | undefined;
 		/**
-		 * The branch, as two tables, read in the loop that was already reading every entry.
+		 * 分支，以两张表的形式，在本来就在读每条条目的循环里顺带读出。
 		 *
-		 * The recorded title is gone with the `rename` entry — the snapshot holds it now — so the
-		 * only thing a title still needs from the scan is the *derived* fallback: the first user
-		 * message on the branch the leaf is on. That needs the same parent links a reader follows,
-		 * and collecting them here costs one `Map` in a pass that already parses each line.
+		 * 记录的标题已随 `rename` 条目消失——快照现在持有它——所以标题还需要扫描给的只剩*派生的*
+		 * 回落：叶子所在分支上的第一条 user 消息。这需要读者沿用的同一套 parent 链接，在一条本就
+		 * 在逐行解析的流程里收集它们只多付一个 `Map`。
 		 */
 		const parentOf = new Map<string, string | null>();
 		const userTextOf = new Map<string, string>();
-		/** The last entry of any kind, which is where a branch read from the file starts. */
+		/** 任何种类的最后一条条目，也就是从文件读分支时的起点。 */
 		let leafId: string | undefined;
 
 		const lines = createInterface({
@@ -907,13 +862,11 @@ async function buildSessionInfo(
 }
 
 /**
- * The first user message on the branch that ends at `leafId`, shortened — or the placeholder.
+ * 以 `leafId` 结尾的分支上的第一条 user 消息，截短——或占位符。
  *
- * Walked from the leaf back to the root and then reversed, which is the same path
- * {@link SessionManager.getBranch} reports for a live session, so a scanned row and a running one
- * name the same conversation. An entry with no recorded parent ends the walk, and so does one the
- * tables do not hold: a file written by another build can name a parent this scan never saw, and a
- * shorter title is a better answer than none.
+ * 从叶子走回根再反转，与 {@link SessionManager.getBranch} 给活 session 报告的是同一条路径，所以扫描
+ * 出的一行和运行中的一行命名的是同一段对话。没有记录 parent 的条目终止遍历，表里没有的条目也一样
+ * ——另一个构建写的文件可以指名这次扫描从未见过的 parent，一个较短的标题好过没有。
  */
 function titleOfBranch(
 	parentOf: ReadonlyMap<string, string | null>,
@@ -962,13 +915,12 @@ function sortSessionInfos(sessions: SessionInfo[]): SessionInfo[] {
 }
 
 /**
- * Give every fork the id of the session it came from, when both are in this listing.
+ * 给每个 fork 补上它来源 session 的 id，当两者都在本次列表中。
  *
- * The header records the source's *file path*, because that is what a reader holding one file has in
- * hand. A listing is the first place where both ends of a fork are known at once, so the path is
- * resolved here to the id a client opens a session by — an id, not a path, because it is what every
- * other row of the sidebar is named by. A parent outside this directory stays unresolved and the fork
- * appears as a root, which is the honest reading: nothing here could open it either.
+ * header 记录的是源的*文件路径*，因为那是拿着一个文件的读者手里有的东西。列表是第一个 fork 两端
+ * 同时可知的地方，所以路径在这里解析成客户端打开 session 用的 id——是 id 不是路径，因为侧栏其他
+ * 每一行都以 id 命名。本目录之外的 parent 保持未解析、fork 显示为根，这是诚实的读法：这里的东西
+ * 同样打不开它。
  */
 function linkForkParents(sessions: SessionInfo[]): void {
 	const byAbsPath = new Map<string, string>();
@@ -982,7 +934,7 @@ function linkForkParents(sessions: SessionInfo[]): void {
 	}
 }
 
-/** A path a lookup can key on: resolved, and case-folded where the filesystem is. */
+/** 一次查找可以建 key 的路径：已解析，并在文件系统不区分大小写的地方同样折叠。 */
 function absPathKey(absPath: string): string {
 	const absResolved = resolvePath(absPath);
 	return process.platform === "win32" ? absResolved.toLowerCase() : absResolved;
@@ -993,8 +945,8 @@ async function listSessionsFromDir(absDir: string, signal?: AbortSignal): Promis
 	if (!existsSync(absDir)) return [];
 
 	try {
-		// The scan pairs the files and prunes what it cannot open (settleSessionFiles), so what is
-		// left here is exactly the sessions this build can open.
+		// 扫描配好文件并清除打不开的（settleSessionFiles），所以留在这里的恰好是本构建能打开的
+		// session。
 		const pairs = settleSessionFiles(absDir);
 		const results = await mapWithConcurrency(
 			pairs,
@@ -1002,10 +954,9 @@ async function listSessionsFromDir(absDir: string, signal?: AbortSignal): Promis
 			async (pair) => buildSessionInfo(pair.absJson, pair.absJsonl, pair.meta, signal),
 			signal,
 		);
-		// A file with no message in it is a creation nobody spoke in, not a conversation: the sidebar
-		// is a list of conversations, so it is left out here rather than drawn as「新会话」. Under v5
-		// nothing on disk can be empty — both files are born with the first message — so this is a
-		// guard against a corrupt pair rather than a filter the writers need.
+		// 一条消息都没有的文件是一次没人说过话的创建，不是一段对话：侧栏是对话清单，所以在这里
+		// 略掉它而不是画成「新会话」。v5 下盘上没有东西会是空的——两个文件随第一条消息诞生——
+		// 所以这是对损坏配对的防御，不是写入方需要的过滤器。
 		const sessions = results.filter((info): info is SessionInfo => info !== null && info.messageCount > 0);
 		linkForkParents(sessions);
 		return sessions;
@@ -1015,29 +966,27 @@ async function listSessionsFromDir(absDir: string, signal?: AbortSignal): Promis
 	}
 }
 
-/** What the subtree below one entry amounts to, for {@link SessionManager.getBranchPoints}. */
+/** 一条条目之下的子树的总和，供 {@link SessionManager.getBranchPoints} 用。 */
 interface SubtreeDescription {
-	/** The newest tip below the entry, or the entry itself when nothing follows it. */
+	/** 条目下方最新的 tip，没有后续时就是条目本身。 */
 	tip: string;
-	/** True when a message entry is reachable, which is what makes a child a real alternative. */
+	/** 可达一条消息条目时为 true，这是孩子算作真实备选的条件。 */
 	message: boolean;
-	/** A one-line preview of the earliest message below, or empty when there is none. */
+	/** 其下最早一条消息的一行预览，没有则为空。 */
 	label: string;
 }
 
 /**
- * How much of a message's first sentence a branch label carries.
+ * 分支标签携带消息第一句话的多少。
  *
- * A card shows one ellipsised line and nothing else — no hover unfolds the rest — so the bound is
- * sized for a real sentence rather than for a row, and a sentence that needs more is simply cut by the
- * stylesheet: a branch option travels in every snapshot, and these ride whole, which is why the label
- * is a preview at all and not the message. The alternatives that are not on the active chain have no
- * message in the snapshot to read from, so there is nothing longer to fall back to. See ticket
- * `.scratch/ui-pass` 02.
+ * 卡片只显示一行省略号截断的文字，别的什么都没有——没有悬停展开——所以界限按一句真实的话来定，
+ * 而不是按一行定，需要更长的句子由样式表直接截断：分支选项随每个快照传递，这些整体随行，这正是
+ * 标签只是预览而不是消息本身的原因。不在活跃链上的备选在快照里没有消息可读，没有更长的回落可言。
+ * 见 ticket `.scratch/ui-pass` 02。
  */
 export const BRANCH_LABEL_MAX = 200;
 
-/** One short line naming what a message says, for a branch switcher's label. */
+/** 一行简短文字，说明一条消息说了什么，供分支切换器的标签。 */
 function previewOfMessage(message: Message): string {
 	const text = extractTextContent(message).replace(/\s+/g, " ").trim();
 	if (text.length === 0) return "";
@@ -1045,94 +994,81 @@ function previewOfMessage(message: Message): string {
 }
 
 /**
- * One session's own choices, regrouped out of the disk snapshot's flat fields.
+ * 一个 session 自己的选择，从盘上快照的扁平字段重新组合。
  *
- * This is a memory grouping only — the `.json` on disk keeps its flat shape ({@link SessionMeta}),
- * and the fill path / {@link metaOf} are the only two translation points between the two. The
- * thinking level lives inside `model` rather than beside it: a session's level and its row are one
- * choice the input box sends together, so memory holds them as one object. Every choice field is
- * absent until chosen, exactly as the disk fields are; `suspended` is the one exception — a derived
- * fact rather than a choice, always present.
+ * 这只是内存中的组合——盘上的 `.json` 保持扁平形状（{@link SessionMeta}），fill 路径和 {@link metaOf}
+ * 是两者之间仅有的两个翻译点。thinking level 住在 `model` 里面而不是旁边：session 的 level 和它的行
+ * 是输入框一起发送的一个选择，所以内存把它们作为一个对象持有。每个选择字段在选定之前缺席，与盘上
+ * 字段一致；`suspended` 是唯一的例外——是推导出的事实而不是选择，始终存在。
  */
 export interface SessionSetting {
-	/** The working directory the session was opened on, absolute. */
+	/** session 打开时所在的工作目录，绝对路径。 */
 	workDirAbsPath: string;
 	/**
-	 * The session file this one was forked from or delegated by, as the disk's `parentSession` names
-	 * it: the source's `.jsonl`, absolute — a path, not an id, because a fork is traceable to the
-	 * file it copied and the file is what a reader has in hand. The name follows the state's shape;
-	 * the value is whatever the disk carries, so an older session reads unchanged.
+	 * 本 session 从之 fork 或被其委托的 session 文件，按盘上 `parentSession` 的命名方式：源的
+	 * `.jsonl`，绝对路径——是路径不是 id，因为 fork 要能追溯到它复制的文件，而文件才是读者手里
+	 * 有的东西。字段名跟随状态的形状；值就是盘上带的，所以旧 session 照旧读取。
 	 */
 	parentSessionId?: string;
-	/** The conversation's own name, when a person gave it one; absent means "derive it". */
+	/** 会话自己的名字，由人起的；缺席即「去派生」。 */
 	title?: string;
 	/**
-	 * The model choice in force, with the thinking level it was asked at: `name` / `modelId` name the
-	 * row, `thinkingLevel` is the level the session last chose. Each part is absent until chosen — a
-	 * level recorded with no row is a model with only `thinkingLevel`, which the disk splits back
-	 * into two fields on the way out.
+	 * 生效的模型选择，连同请求它的 level：`name` / `modelId` 指名行，`thinkingLevel` 是 session 最后
+	 * 一次选择的级别。每部分选定之前缺席——记下了 level 但没记行，就是一个只有 `thinkingLevel` 的
+	 * model，输出到盘上时再拆回两个字段。
 	 */
 	model?: { name?: string; modelId?: string; thinkingLevel?: string };
-	/** The complete active tool set as of the last change, in registration order. */
+	/** 最近一次变更时的完整激活工具集，按注册顺序。 */
 	activeTools?: string[];
-	/** The complete approval map as of the last change, keyed like the settings file's `approval`. */
+	/** 最近一次变更时的完整审批表，key 与设置文件的 `approval` 一致。 */
 	approval?: Record<string, boolean>;
 	/**
-	 * Whether the session is parked at an approval gate — a rebuildable display cache, not a user
-	 * choice: the ledger's dangling calls are the authority, and this only saves the listing's cold
-	 * scan a full replay. It lives here because the disk↔memory translation has exactly two points,
-	 * and one derived field does not earn a third. Always present in memory (false unless parked);
-	 * only true reaches the disk. No control flow reads it.
+	 * session 是否停在审批闸门处——可重建的展示缓存，不是用户选择：账本的悬空 call 才是权威，这个
+	 * 字段只是给列表的冷扫描省一次完整重放。它住在这里是因为盘↔内存的翻译恰好只有两个点，一个
+	 * 推导字段不值得开第三个。内存中始终存在（未停闸即 false）；只有 true 才会写到盘上。没有
+	 * 任何控制流读它。
 	 */
 	suspended: boolean;
 }
 
 /**
- * The pure-data state of one session's ledger: what the session operations read and write, and
- * nothing else.
+ * 一个 session 账本的纯数据状态：session 操作读写的东西，仅此而已。
  *
- * Every session operation is a file-level function taking a `Session` as its first parameter —
- * no method holds this state between calls (the `SessionManager` class at the bottom of this file is
- * the stateless service over these functions: it adds the fill-at-open cache and nothing else). The
- * state is plain data on purpose: which function touches which field is visible
- * in the signatures, and a test can construct a bare state and call any operation on it directly.
+ * 每个 session 操作都是一个以 `Session` 为第一参数的文件级函数——没有任何方法在调用之间持有这个
+ * 状态（本文件底部的 `SessionManager` 类是这些函数之上的无状态服务：它只加了打开时填充的缓存）。
+ * 状态刻意是纯数据：哪个函数碰哪个字段在签名里一目了然，测试可以直接构造一个裸状态并对它调用
+ * 任何操作。
  *
- * The fields are what the two files replay into. The identity is the bag's own — id, creation stamp,
- * the two file paths — and {@link SessionSetting} holds the `.json` snapshot's current choices,
- * regrouped in memory: the disk file stays flat, and the fill path / {@link metaOf} are the only
- * translation points. `jsonlEntries` is the `.jsonl` entry stream: every entry
- * carries an id and its parent's id, so the stream reads as a tree and `leafId` is where the
- * conversation currently is. Appending creates a child of the leaf; {@link branch} moves the leaf to
- * an earlier entry — and records the move as a {@link LeafEntry}, so a fresh reader restores it — so
- * a new line of work continues from there without touching what was already written. The entry
- * stream is never rewritten once it holds an entry, which is what lets an entry kind or a field this
- * build does not understand be carried through untouched; only the snapshot is rewritten whole, and
- * only on a change to a value it holds.
+ * 这些字段是两个文件重放进去的内容。身份是袋自己的——id、创建时间戳、两个文件路径——
+ * {@link SessionSetting} 持有 `.json` 快照的当前选择，在内存里重新组合：盘上文件保持扁平，fill 路径
+ * 和 {@link metaOf} 是仅有的翻译点。`jsonlEntries` 是 `.jsonl` 条目流：每条条目带自己的 id 和
+ * parent 的 id，所以这条流读起来是一棵树，`leafId` 就是对话此刻所在的位置。追加产生叶子的孩子；
+ * {@link branch} 把叶子移到更早的条目——并把移动记录为一条 {@link LeafEntry}，新读者由此恢复——
+ * 于是一段新的工作从那里继续，不碰已写入的东西。条目流一旦有了条目就从不重写，这让本构建不理解的
+ * 条目种类或字段原样穿过；只有快照会被整体重写，且只在它持有的值发生变化时。
  *
- * Use {@link buildSessionContext} to get the messages a provider should be sent: it follows the
- * branch from root to leaf and folds in the newest compaction.
+ * 用 {@link buildSessionContext} 获取应发给 provider 的消息：它沿分支从根走到叶，并折入最新的压缩。
  */
 export interface Session {
 	sessionId: string;
-	/** The ISO stamp the session was created at; the snapshot carries it, the file name does not. */
+	/** session 创建时的 ISO 时间戳；快照携带它，文件名不带。 */
 	timestamp: string;
-	/** The `.jsonl` entry stream's path, absolute; the `.json` snapshot lives at the same stem. */
+	/** `.jsonl` 条目流的路径，绝对；`.json` 快照在同一个 stem 上。 */
 	sessionFileAbsPath?: string;
 	/**
-	 * The store this session writes into, absolute — the directory `<id>.jsonl` and `<id>.json` live
-	 * in. Null for a session that is never written.
+	 * 本 session 写入的 store，绝对路径——`<id>.jsonl` 和 `<id>.json` 所在的目录。从不落盘的
+	 * session 为 null。
 	 */
 	sessionDirAbsPath: string | null;
 	persist: boolean;
 	/**
-	 * True once this session's files exist and hold the log as of the last write.
+	 * 本 session 的文件已存在且持有最后一次写入时的日志后为 true。
 	 *
-	 * It decides how the next write happens: false means nothing has been written yet, so the first
-	 * entry worth keeping creates both files — the entry stream and the meta snapshot — at once;
-	 * true means entries append and meta changes rewrite the snapshot. See {@link persistEntry}.
+	 * 它决定下一次写入如何发生：false 表示还没写过任何东西，所以第一条值得保留的条目一次性创建
+	 * 两个文件——条目流和 meta 快照；true 表示条目追加、meta 变更重写快照。见 {@link persistEntry}。
 	 */
 	fileCreated: boolean;
-	/** The session's own choices, as the memory regrouping of the disk snapshot's flat fields. */
+	/** session 自己的选择，即盘上快照扁平字段在内存中的重组。 */
 	sessionSetting: SessionSetting;
 	jsonlEntries: SessionEntry[];
 	sessionEntryMapById: SessionEntryMapById;
@@ -1140,13 +1076,11 @@ export interface Session {
 }
 
 /**
- * Merge a disk snapshot's flat choice fields into the memory's regrouped setting.
+ * 把盘上快照的扁平选择字段合并成内存的重组 setting。
  *
- * The one direction of the disk↔memory translation that reads a file: the thinking level folds
- * into `model`, everything else moves under its new name unchanged. Absent means absent — a
- * session that never chose keeps every field off the object, so "never chose" and "chose the
- * default" stay distinguishable. The `suspended` cache is the one field always present: absent on
- * disk reads as false.
+ * 盘↔内存翻译中读文件的那个方向：thinking level 折进 `model`，其余按新名字原样移过去。缺席就是
+ * 缺席——从未选择的 session 不在对象上放任何字段，于是「从未选择」和「选了默认」保持可区分。
+ * `suspended` 缓存是唯一始终存在的字段：盘上缺席按 false 读。
  */
 function sessionSettingOf(meta: SessionMeta): SessionSetting {
 	return {
@@ -1163,12 +1097,11 @@ function sessionSettingOf(meta: SessionMeta): SessionSetting {
 }
 
 /**
- * Split the merged model choice back into the disk snapshot's two flat fields.
+ * 把合并的模型选择拆回盘上快照的两个扁平字段。
  *
- * The row is written only when both of its names are present — a model object carrying only a
- * thinking level is a level recorded with no row, and the disk holds that as `thinkingLevel` alone.
- * A session this build wrote always has both names on the row, so the split is lossless for
- * everything the disk can legally hold.
+ * 只有两处名字都在时才写行——只带 thinking level 的 model 对象是一个没记行的 level，盘上把它单作
+ * `thinkingLevel` 持有。本构建写出的 session 行上总是两个名字都有，所以对盘上合法持有的一切，这次
+ * 拆分是无损的。
  */
 function recordedModelOf(
 	model: SessionSetting["model"],
@@ -1182,13 +1115,12 @@ function recordedModelOf(
 }
 
 /**
- * The disk snapshot one session's memory state writes: the flat {@link SessionMeta} rebuilt from
- * the regrouped {@link SessionSetting}.
+ * 一个 session 的内存状态写出的盘上快照：从重组的 {@link SessionSetting} 重建扁平的
+ * {@link SessionMeta}。
  *
- * The one direction of the disk↔memory translation that writes a file — {@link writeMetaFile}
- * serializes this, and `getMeta` hands the same shape to readers. The identity fields come from the
- * bag's own: the version is always this build's (the read side refuses anything else), and the
- * creation stamp travels on the bag because the file name cannot give it back losslessly.
+ * 盘↔内存翻译中写文件的那个方向——{@link writeMetaFile} 序列化它，`getMeta` 把同样的形状交给
+ * 读者。身份字段来自袋自己：版本号始终是本构建的（读取侧拒绝其他一切），创建时间戳在袋上传递，
+ * 因为文件名无法把它无损地还回来。
  */
 function metaOf(s: Session): SessionMeta {
 	const setting = s.sessionSetting;
@@ -1207,18 +1139,16 @@ function metaOf(s: Session): SessionMeta {
 }
 
 /**
- * A state for a new session, ready for the first append.
+ * 一个新 session 的状态，等待第一次追加。
  *
- * The store directory may be created here, but no file is: the files appear with the first entry
- * worth keeping — the gate in {@link persistEntry} (`hasConversation`) — so a session nobody has
- * spoken in leaves no transcript on disk and no row in the sidebar. That is the whole point of
- * building the state rather than writing a snapshot: the store is a record of conversations, and a
- * conversation with no message in it is not one yet.
+ * store 目录可以在这里创建，但不会创建任何文件：文件随第一条值得保留的条目出现——
+ * {@link persistEntry} 里的闸门（`hasConversation`）——所以没人说过的 session 不在盘上留下
+ * transcript，也不在侧栏留下一行。这就是构建状态而不写快照的全部意义：store 是对话的记录，没有
+ * 消息的对话还不是对话。
  *
- * The cost is the id's addressability until that first message: {@link findSessionFilePathById} asks
- * the store for a pair, and an id with no pair yet cannot be found there. A caller that hands the id
- * out and has to answer for it later therefore holds the state (or the `SessionManager` shell around
- * it) for the length of that window — `SessionHub` holds it for the length of that window.
+ * 代价是在那条首条消息之前 id 无法按址找到：{@link findSessionFilePathById} 向 store 要一个配对，
+ * 还没有配对的 id 在那里找不到。因此把 id 递出去、之后还要为它负责的调用方，会在那个窗口内持有
+ * 状态（或包着它的 `SessionManager` 外壳）——`SessionHub` 就持有那么久。
  */
 export function createSession(
 	workDirInput: string,
@@ -1242,7 +1172,7 @@ export function createSession(
 	return s;
 }
 
-/** A state for a session that is never written to disk. */
+/** 从不落盘的 session 的状态。 */
 export function inMemorySession(workDirInput: string = process.cwd(), parentSessionFileInput?: string): Session {
 	const s: Session = {
 		sessionId: "",
@@ -1260,22 +1190,20 @@ export function inMemorySession(workDirInput: string = process.cwd(), parentSess
 }
 
 /**
- * Replay a session's two files into a fresh {@link Session}: the one entry point that turns a path
- * on disk into the state the session operations work on.
+ * 把一个 session 的两个文件重放成新的 {@link Session}：把盘上路径变成 session 操作所作用状态的唯一
+ * 入口。
  *
- * The `.json` snapshot gives the identity and the current choices; the `.jsonl` replays the entry
- * tree; the leaf is placed from the stream. A pair this build cannot open is *deleted*, not refused
- * and left in place — a v≤4 file, an unpaired half, a wrong version are all sessions nothing can
- * ever open again, and keeping them would put a ghost in every scan — and then the open throws. The
- * path may name either half: a caller that holds the `.jsonl` in hand passes it, and the snapshot
- * is found at the same stem.
+ * `.json` 快照给出身份和当前选择；`.jsonl` 重放条目树；叶子从流上落位。本构建打不开的配对被
+ * *删除*，而不是拒绝后留在原地——v≤4 文件、未配对的半边、错误的版本，都是永远无法再打开的
+ * session，留着它们会让每次扫描都撞见幽灵——然后打开动作抛出异常。路径可以指两半中的任何一个：
+ * 手里拿着 `.jsonl` 的调用方传它，快照在同一 stem 上找到。
  */
 export function fillSession(absFilePath: string): Session {
 	const absPath = resolvePath(absFilePath);
 	const absJsonl = absPath.endsWith(".json") ? sessionJsonlPath(absPath) : absPath;
 	const absJson = sessionMetaPath(absJsonl);
 	if (!existsSync(absJsonl)) {
-		// Unpaired either way: prune whatever half exists and refuse the open.
+		// 无论如何都是未配对：清掉存在的半边，拒绝打开。
 		if (existsSync(absJson)) pruneSessionFiles(absJson, absJsonl);
 		throw new Error(`Session file does not exist: ${absJsonl}`);
 	}
@@ -1288,8 +1216,8 @@ export function fillSession(absFilePath: string): Session {
 	}
 	const entries = loadJsonlEntries(absJsonl);
 	if (entries.length === 0) {
-		// The entry stream cannot legally be empty while the snapshot exists: a birth writes both,
-		// so an empty stream is a pair that died partway. Prune it with the rest.
+		// 快照存在时条目流在法律上不能是空的：诞生是两边一起写的，空流就是半途夭折的配对。和其他
+		// 情况一样清掉。
 		pruneSessionFiles(absJson, absJsonl);
 		throw new Error(`Session file is not a valid ${APP_NAME} session: ${absJsonl}`);
 	}
@@ -1310,16 +1238,13 @@ export function fillSession(absFilePath: string): Session {
 }
 
 /**
- * Start a fresh session in `s`, discarding whatever it held. Returns the file path.
+ * 在 `s` 里开始一个全新的 session，丢弃它原来持有的一切。返回文件路径。
  *
- * `parentSessionFile` is the absolute path of the session this one descends from — a fork's
- * source — and it lands on the snapshot as `parentSession`. Undefined means
- * a root session. A relative path is resolved here against the process's cwd, which is the same
- * base a listing uses when it matches parent to child; recording it as given would let the two
- * sides disagree the moment the process ran somewhere else.
+ * `parentSessionFile` 是本 session 从之而来的 session 的绝对路径——fork 的源——它作为
+ * `parentSession` 落到快照上。undefined 表示根 session。相对路径在这里按进程的 cwd 解析，这也是
+ * 列表把父子配对时用的同一个基准；按原样记录会让两侧在进程换了个地方运行的那一刻开始不一致。
  *
- * The two constructors above are its only callers: a bag is born here, and every later write goes
- * through the service's append and record methods.
+ * 上面两个构造函数是它仅有的调用方：袋在这里诞生，之后的每次写入都走服务的 append 和 record 方法。
  */
 export function newSession(s: Session, parentSessionFile?: string): string | undefined {
 	s.sessionId = createSessionId();
@@ -1339,19 +1264,17 @@ export function newSession(s: Session, parentSessionFile?: string): string | und
 	return s.sessionFileAbsPath;
 }
 
-/** Index `s`'s entries by id and place the leaf, in file order. */
+/** 按 id 索引 `s` 的条目并落位叶子，按文件顺序。 */
 function buildIndex(s: Session): void {
 	s.sessionEntryMapById.clear();
 	s.leafId = null;
 	for (const entry of s.jsonlEntries) {
 		s.sessionEntryMapById.set(entry.id, entry);
 		if (entry.type === "leaf") {
-			// The record names where the conversation went; every other kind *is* where it went, by
-			// having been appended. File order is the last word, so a later entry of any kind
-			// supersedes what an earlier record said. A recorded null is a position of its own —
-			// "before the first entry" — and only a target the file does not hold (only a
-			// hand-edited file can manage that) falls back to the record's own tree position, the
-			// same family of answer `buildSessionPath` gives an unknown id.
+			// 记录指名对话去了哪；其他每个种类靠被追加这件事*就是*对话去了哪。文件顺序是最后一句话，
+			// 所以任何种类的更晚条目推翻更早记录所说的话。记录的 null 是一个自己的位置——「第一条
+			// 之前」——只有文件不持有的目标（只有手改文件能做到这一点）才回落到记录自己的树位置，
+			// 与 `buildSessionPath` 给未知 id 的回答是同一族。
 			s.leafId = entry.leafId === null || s.sessionEntryMapById.has(entry.leafId) ? entry.leafId : (entry.parentId ?? null);
 		} else {
 			s.leafId = entry.id;
@@ -1359,7 +1282,7 @@ function buildIndex(s: Session): void {
 	}
 }
 
-/** True once the session holds a user or assistant message, which is what makes it worth keeping. */
+/** session 一旦持有一条 user 或 assistant 消息即为 true，这就是它值得保留的条件。 */
 function hasConversation(s: Session): boolean {
 	return s.jsonlEntries.some(
 		(entry) => entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant"),
@@ -1367,12 +1290,11 @@ function hasConversation(s: Session): boolean {
 }
 
 /**
- * Rewrite the `.json` snapshot whole: write a sibling temp file, then rename it over the snapshot.
+ * 整体重写 `.json` 快照：写一个同目录的 temp 文件，再 rename 盖到快照上。
  *
- * A snapshot wants one write, not an append — and a reader scanning the store must never catch it
- * half-written, which is what the rename buys: the temp is written, closed, and moved into place in
- * one step, so every reader either sees the old snapshot or the new one, never a torn one. The
- * rename is within one directory, so it is atomic on the filesystems this runs on.
+ * 快照要的是一次写入，不是追加——而且扫描 store 的读者绝不能撞见写到一半的它，这就是 rename 买到
+ * 的东西：temp 被写入、关闭、一步移入位置，所以每个读者要么看到旧快照要么看到新快照，绝不会看到
+ * 撕裂的。rename 发生在同一目录内，所以在本代码运行的文件系统上是原子的。
  */
 function writeMetaFile(s: Session): void {
 	const absJsonl = s.sessionFileAbsPath;
@@ -1389,14 +1311,12 @@ function writeMetaFile(s: Session): void {
 }
 
 /**
- * Write one entry to disk, or hold it back when the files do not exist yet.
+ * 把一条条目写到盘上，文件还不存在时先扣住它。
  *
- * The gate is deliberate: a session earns its files with its first message (`hasConversation`), so a
- * session nobody has spoken in never lands on disk. The first write that passes the gate creates
- * both files at once — the whole entry stream, then the meta snapshot as the commit marker — because
- * there was nothing there to have received them; the snapshot is written **last** so a birth that
- * dies partway leaves an unpaired half, which the store scans prune rather than keep. From then on
- * (`fileCreated`) each entry appends by itself and each meta change rewrites the snapshot.
+ * 闸门是刻意的：session 的第一条消息才换来它的文件（`hasConversation`），所以没人说过的 session
+ * 永不落盘。通过闸门后的第一次写入一次性创建两个文件——完整的条目流，然后是作为提交标记的 meta
+ * 快照——因为此前盘上没有任何东西接收它们；快照**最后**写，半途夭折的诞生就会留下未配对的半边，
+ * 由 store 扫描清除而不是保留。从那以后（`fileCreated`）每条条目自行追加，每次 meta 变更重写快照。
  */
 export function persistEntry(s: Session, entry: SessionEntry): void {
 	if (!s.persist || !s.sessionFileAbsPath) return;
@@ -1407,8 +1327,7 @@ export function persistEntry(s: Session, entry: SessionEntry): void {
 		try {
 			for (const existing of s.jsonlEntries) writeFileSync(fd, `${JSON.stringify(existing)}\n`);
 		} catch (error) {
-			// A stream that did not make it to disk leaves nothing behind; the next gated write
-			// retries the birth from the same in-memory log.
+			// 没能落盘的流什么也不留下；下一次有闸门的写入从同一份内存日志重试诞生。
 			closeSync(fd);
 			rmSync(s.sessionFileAbsPath, { force: true });
 			throw error;
@@ -1422,7 +1341,7 @@ export function persistEntry(s: Session, entry: SessionEntry): void {
 	appendFileSync(s.sessionFileAbsPath, `${JSON.stringify(entry)}\n`);
 }
 
-/** Add `entry` to the log as the new leaf, in memory and on disk. */
+/** 把 `entry` 加进日志成为新叶子，内存和盘上同时进行。 */
 function appendEntry(s: Session, entry: SessionEntry): void {
 	s.jsonlEntries.push(entry);
 	s.sessionEntryMapById.set(entry.id, entry);
@@ -1431,26 +1350,24 @@ function appendEntry(s: Session, entry: SessionEntry): void {
 }
 
 /**
- * Apply one change to the snapshot, and rewrite the file when it actually changed.
+ * 对快照应用一次变更，真的变了才重写文件。
  *
- * The mutation lands on the in-memory setting first — that is the bag every reader answers from — and
- * the disk copy follows only when the session has files to rewrite. A session whose files are not
- * born yet keeps the change in memory alone: {@link persistEntry} writes the snapshot at birth, so
- * a choice made before the first message survives without breaking the "no conversation, no files"
- * rule. `change` returns false for a no-op, which is what keeps a run of identical writes from
- * costing a rewrite each.
+ * 变更先落在内存的 setting 上——那是每个读者回答的来源袋——盘上的副本只在 session 有文件可重写时
+ * 才跟着写。文件还没诞生的 session 把变更单独留在内存里：{@link persistEntry} 在诞生时写快照，所以
+ * 首条消息之前做出的选择得以存活，又不破坏「没有对话就没有文件」的规则。`change` 对 no-op 返回
+ * false，这让一串相同的写入不必每次都付一次重写。
  */
 function recordMeta(s: Session, change: (setting: SessionSetting) => boolean): void {
 	if (!change(s.sessionSetting)) return;
 	if (s.persist && s.fileCreated) writeMetaFile(s);
 }
 
-/** Set equality over two tool-name lists: the recorded set is a choice, not an order. */
+/** 两个工具名列表的集合相等：记录的集合是一个选择，不是一个顺序。 */
 function sameToolSet(left: readonly string[], right: readonly string[]): boolean {
 	return left.length === right.length && left.every((name) => right.includes(name));
 }
 
-/** Field equality over the two approval maps, over every key either side names. */
+/** 两个审批表的字段相等，遍及任一侧指名的所有 key。 */
 function metasApprovalEqual(left: Record<string, boolean>, right: Record<string, boolean>): boolean {
 	const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
 	for (const key of keys) {
@@ -1460,10 +1377,10 @@ function metasApprovalEqual(left: Record<string, boolean>, right: Record<string,
 }
 
 // =========================================================================
-// Tree traversal
+// 树遍历
 // =========================================================================
 
-/** Every entry's children, in file order, built in one pass over the log. */
+/** 每条条目的孩子，按文件顺序，一遍扫完日志建好。 */
 function childrenIndex(s: Session): Map<string, SessionEntry[]> {
 	const index = new Map<string, SessionEntry[]>();
 	for (const entry of s.sessionEntryMapById.values()) {
@@ -1476,9 +1393,9 @@ function childrenIndex(s: Session): Map<string, SessionEntry[]> {
 }
 
 /**
- * What an alternative amounts to: where the subtree below `entryId` ends, and how to label it.
+ * 一个备选的总和：`entryId` 之下的子树在哪里结束，以及如何标注。
  *
- * Memoized per entry, so one call describes the whole log once however many branch points ask.
+ * 按条目记忆化，无论多少分支点询问，一次调用只描述整份日志一遍。
  */
 function subtreeDescription(
 	s: Session,
@@ -1488,8 +1405,7 @@ function subtreeDescription(
 ): SubtreeDescription {
 	const cached = memo.get(entryId);
 	if (cached !== undefined) return cached;
-	// Seeded before the descent: this is what a file hand-edited into a cycle finds when it comes
-	// back around, so the walk ends there instead of spinning.
+	// 下降前先放入种子：这是被手改成环的文件绕回来时找到的东西，于是遍历在此结束而不是空转。
 	memo.set(entryId, { tip: entryId, message: false, label: "" });
 
 	const entry = s.sessionEntryMapById.get(entryId);
@@ -1507,7 +1423,7 @@ function subtreeDescription(
 		}
 	}
 	const described: SubtreeDescription = {
-		// The newest child is the last written, and the file is in write order.
+		// 最新的孩子是最后写入的，而文件按写入顺序排列。
 		tip: descents.length === 0 ? entryId : descents[descents.length - 1]!.tip,
 		message,
 		label,
@@ -1517,11 +1433,10 @@ function subtreeDescription(
 }
 
 /**
- * Write one leaf record as a child of the leaf it leaves behind, without moving the leaf.
+ * 把一条叶子记录写成它所离开的叶子的孩子，不移动叶子。
  *
- * The caller sets {@link Session.leafId} right after: an append advances the leaf, and this one
- * must not — the record's place in the tree and the position it reports are two facts, each with its
- * own field.
+ * 调用方随后自己设置 {@link Session.leafId}：一次追加会推进叶子，而这次不能——记录在树里的位置和
+ * 它报告的位置是两个事实，各有各的字段。
  */
 function appendLeafRecord(s: Session, leafId: string | null): void {
 	const entry: LeafEntry = {
@@ -1537,26 +1452,23 @@ function appendLeafRecord(s: Session, leafId: string | null): void {
 }
 
 /**
- * The session service: the ledger's operations, and the file I/O under them.
+ * session 服务：账本的操作，以及操作之下的文件 I/O。
  *
- * Every per-session method takes its {@link Session} as the first parameter and does the work
- * here — there is no second layer of same-named file-level functions to forward to, so a caller
- * reading this file reads the implementation. The class holds no per-session state (ADR-0007 §2)
- * and no cache: a bag is owned by whoever filled or built it, and the orchestrator's table
- * (`Agent`) is the only place a running session's bag is held between calls.
+ * 每个 per-session 方法都以 {@link Session} 为第一参数、在这里完成工作——没有第二层同名文件级函数
+ * 供转发，所以读这个文件的调用方读到的就是实现。这个类不持有任何 per-session 状态（ADR-0007 §2）
+ * 也没有缓存：袋归填充或构建它的人所有，orchestrator 的表（`Agent`）是唯一在调用之间持有运行中
+ * session 的袋的地方。
  *
- * What the class does own is the store's format knowledge: how an id becomes a file path
- * ({@link SessionManager.findSessionFilePathById}), how a file becomes a bag
- * ({@link fillSession}, with its pruning and version refusal), and how a write reaches the disk
- * (`persistEntry`, `writeMetaFile`).
+ * 这个类拥有的是 store 的格式知识：id 如何变成文件路径
+ * （{@link SessionManager.findSessionFilePathById}），文件如何变成袋（{@link fillSession}，连同它的
+ * 清除和版本拒绝），写入如何到达盘上（`persistEntry`、`writeMetaFile`）。
  */
 export class SessionManager {
 	/**
-	 * Append a message as a child of the leaf and advance the leaf. Returns the new entry's id.
+	 * 追加一条消息作为叶子的孩子并推进叶子。返回新条目的 id。
 	 *
-	 * A compaction summary is deliberately not accepted here: it has to be a top-level entry so that
-	 * {@link SessionManager.buildContextEntries} can find it, which is what {@link appendCompaction}
-	 * is for.
+	 * 这里刻意不接受压缩摘要：它必须是顶层条目，{@link SessionManager.buildContextEntries} 才能找到
+	 * 它，这正是 {@link appendCompaction} 存在的原因。
 	 */
 	appendMessage(s: Session, message: Message): string {
 		const entry: MessageEntry = {
@@ -1571,12 +1483,11 @@ export class SessionManager {
 	}
 
 	/**
-	 * Record the thinking level this session last asked at, as the snapshot's current value.
+	 * 记录这个 session 最后一次请求的 thinking level，作为快照的当前值。
 	 *
-	 * Not an entry: the level is a *current value*, so the `.json` snapshot holds it and the history
-	 * of what it was before is gone by design — nothing ever read it. A session whose files are not
-	 * born yet carries the change in memory; {@link persistEntry} writes the snapshot at birth, so
-	 * the choice survives without breaking the "no conversation, no files" rule.
+	 * 不是条目：level 是*当前值*，所以 `.json` 快照持有它，它之前是什么的历史刻意消失——从没人读过。
+	 * 文件还没诞生的 session 把变更留在内存里；{@link persistEntry} 在诞生时写快照，所以选择得以
+	 * 存活，又不破坏「没有对话就没有文件」的规则。
 	 */
 	setThinkingLevel(s: Session, thinkingLevel: string): void {
 		recordMeta(s, (setting) => {
@@ -1587,12 +1498,11 @@ export class SessionManager {
 	}
 
 	/**
-	 * Record the model row this session last ran on, as the snapshot's current value.
+	 * 记录这个 session 最后一次运行的模型行，作为快照的当前值。
 	 *
-	 * `name` is the row's identity — see `ModelConfig` — so this is what later turns "which model
-	 * was this session on" back into a row. Not an entry: the choice is a *current value*, and the
-	 * snapshot holds only what is in force. A rename is deliberately not this: a rename is the same
-	 * model under another name, and the refs built from the old name are already accounted for.
+	 * `name` 是行的身份——见 `ModelConfig`——所以后来把「这个 session 在哪个模型上」变回一行靠的就是它。
+	 * 不是条目：选择是*当前值*，快照只持有生效的东西。重命名刻意不归这里管：重命名是同一个模型换了
+	 * 个名字，由旧名构建的 ref 已经有了着落。
 	 */
 	setModel(s: Session, name: string, modelId: string): void {
 		recordMeta(s, (setting) => {
@@ -1603,24 +1513,21 @@ export class SessionManager {
 	}
 
 	/**
-	 * Rewrite the snapshot from the bag, whatever the change detectors think.
+	 * 从袋重写快照，无论变更检测器怎么想。
 	 *
-	 * The setters' gates compare against the bag — the bag is what every reader answers from — so a
-	 * change already in the bag but not yet on the disk passes them silently: the disk holds the
-	 * choice the session was last made with, and the bag the one in force can differ from it. This is
-	 * the escape hatch: the whole bag goes to the snapshot in one atomic rewrite. A session whose
-	 * files are not born yet keeps the bag as it is; the birth write picks it up whole.
+	 * setter 的闸门拿袋作比较——袋是每个读者回答的来源——所以已在袋里、还没到盘上的变更会无声地
+	 * 通过闸门：盘上持有的是 session 最后一次落盘的选择，袋里生效的可以与它不同。这是逃生口：整个
+	 * 袋在一次原子重写里进快照。文件还没诞生的 session 保持袋原样；诞生写入会整体带上它。
 	 */
 	flushMeta(s: Session): void {
 		if (s.persist && s.fileCreated) writeMetaFile(s);
 	}
 
 	/**
-	 * Record the session's tool choices: the active set and the approval map, both whole.
+	 * 记录 session 的工具选择：激活集和审批表，都整体记录。
 	 *
-	 * A snapshot rather than a delta, because the reader takes the value in force — the same
-	 * contract the model and level follow. Both maps are always present, so one call made for a
-	 * tool change carries the approval set along and the other way round.
+	 * 是快照不是增量，因为读者拿走的是生效值——与模型和 level 遵循的契约相同。两张表总是同时存在，
+	 * 所以为工具变更做的一次调用会把审批集一起带上，反过来也一样。
 	 */
 	setToolConfig(s: Session, activeTools: string[], approval: Record<string, boolean>): void {
 		recordMeta(s, (setting) => {
@@ -1639,12 +1546,11 @@ export class SessionManager {
 	}
 
 	/**
-	 * Record whether the session is parked at an approval gate, as the snapshot's display cache.
+	 * 记录 session 是否停在审批闸门处，作为快照的展示缓存。
 	 *
-	 * Not a choice and not an entry: the ledger's dangling calls are the authority, and this field
-	 * only saves the listing's cold scan a full replay. The run's end sweep and the abandonment
-	 * sweep write it — an answer never does, because the call stays dangling until the recovery run
-	 * closes it. Only a flip pays a rewrite, and only true reaches the disk ({@link metaOf}).
+	 * 不是选择也不是条目：账本的悬空 call 才是权威，这个字段只是给列表的冷扫描省一次完整重放。
+	 * run 的结束清扫和放弃清扫写它——回答从不写，因为 call 在恢复 run 收尾它之前一直悬空。只有翻转
+	 * 才付一次重写，且只有 true 才会到盘上（{@link metaOf}）。
 	 */
 	setSuspended(s: Session, suspended: boolean): void {
 		recordMeta(s, (setting) => {
@@ -1655,12 +1561,11 @@ export class SessionManager {
 	}
 
 	/**
-	 * Record the conversation's own name, over the derived one.
+	 * 记录会话自己的名字，盖过派生的那个。
 	 *
-	 * The title is expected already shortened — the endpoint that takes a user's typing applies
-	 * {@link shortenTitle} before it gets here, so what lands in the snapshot is what a row shows.
-	 * Not an entry: the name is a fact about the session rather than about one way through it (the
-	 * reading ADR-0002 argued for from file order), and the snapshot states it directly.
+	 * 标题预期已被截短——接收用户输入的端点在到达这里之前先过 {@link shortenTitle}，所以落进快照的
+	 * 就是一行会显示的。不是条目：名字是关于 session 的事实，不是关于某一条路径的事实（ADR-0002
+	 * 从文件顺序论证出的读法），快照直接陈述它。
 	 */
 	setTitle(s: Session, title: string): void {
 		recordMeta(s, (setting) => {
@@ -1671,11 +1576,11 @@ export class SessionManager {
 	}
 
 	/**
-	 * Record spend that owns no message entry, attributed to `operation` on `model`.
+	 * 记录不拥有消息条目的模型开销，归因于 `model` 上的 `operation`。
 	 *
-	 * The whole spend travels in one entry, summed by the writer — a delegation runs many requests on
-	 * its own transcript, and this file wants the total, not the receipt list. Zero-usage records are
-	 * the caller's to skip: an entry costs a line, and a spend of nothing is not a fact worth one.
+	 * 整笔开销装在一条条目里、由写入方求和——一次委托在自己的 transcript 上跑很多请求，这个文件要
+	 * 的是总数，不是收据清单。零 usage 的记录由调用方自行跳过：一条条目值一行，什么都没花的开销
+	 * 不值得占一行。
 	 */
 	appendUsage(s: Session, operation: string, model: string, usage: Usage): string {
 		const entry: UsageEntry = {
@@ -1692,10 +1597,10 @@ export class SessionManager {
 	}
 
 	/**
-	 * Record a compaction checkpoint: everything up to `firstKeptEntryId` is replaced by `summary`.
+	 * 记录一个压缩检查点：`firstKeptEntryId` 之前的一切被 `summary` 替换。
 	 *
-	 * `firstKeptEntryId` of null means this compaction keeps no earlier entry, so the checkpoint is the
-	 * whole remaining history and the entry points at itself.
+	 * `firstKeptEntryId` 为 null 表示这次压缩不保留任何更早的条目，于是检查点就是剩下的全部历史，
+	 * 条目指向自己。
 	 */
 	appendCompaction(
 		s: Session,
@@ -1721,11 +1626,10 @@ export class SessionManager {
 	}
 
 	/**
-	 * Record that tool results were cleared: the named entries keep their place in the file and lose
-	 * their text in the view.
+	 * 记录 tool result 被清空：指名的条目保住文件里的位置，在视图里失去正文。
 	 *
-	 * Unlike a compaction there is nothing to hold back — the results are cleared precisely because a
-	 * run can reproduce them — so the record is only the ids and what the clear was worth.
+	 * 与压缩不同，这里没有要扣下的东西——result 之所以被清空，正是因为 run 能重新产出它们——所以
+	 * 记录只有 id 和这次清空值多少。
 	 */
 	appendClearToolResults(s: Session, clearedEntryIds: readonly string[], tokensBefore: number): string {
 		const entry: ClearToolResultEntry = {
@@ -1741,11 +1645,10 @@ export class SessionManager {
 	}
 
 	/**
-	 * Record that tool-call arguments were shortened: the named entries keep their place in the file
-	 * and lose the heavy bodies of their arguments in the view.
+	 * 记录 tool call 参数被截短：指名的条目保住文件里的位置，在视图里失去参数的重正文。
 	 *
-	 * Like a clear, there is nothing to hold back — the arguments named belong to calls whose results
-	 * are already on the branch — so the record is only the ids and what the trim was worth.
+	 * 与清空一样，没有要扣下的东西——指名的参数属于 result 已在分支上的 call——所以记录只有 id 和
+	 * 这次截短值多少。
 	 */
 	appendTrimToolCallArgs(s: Session, trimmedEntryIds: readonly string[], tokensBefore: number): string {
 		const entry: TrimToolCallArgEntry = {
@@ -1760,7 +1663,7 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/** Every entry that follows `parentId`, in file order. */
+	/** `parentId` 之后的每条条目，按文件顺序。 */
 	getChildren(s: Session, parentId: string): SessionEntry[] {
 		const children: SessionEntry[] = [];
 		for (const entry of s.sessionEntryMapById.values()) {
@@ -1770,23 +1673,19 @@ export class SessionManager {
 	}
 
 	/**
-	 * The branch points of the log, in file order.
+	 * 日志的分支点，按文件顺序。
 	 *
-	 * A child counts as an alternative only when a message is reachable through it: this format carries
-	 * state entries too — a tool-result clear, a compaction, a leaf record — and a
-	 * conversation cannot be resumed at one of those, so counting them would offer an empty
-	 * alternative. A state entry in front of a message is descended through for the same reason:
-	 * rewinding, trimming the view, and asking again is one alternative, not two.
+	 * 一个孩子只有当消息经它可达时才算备选：这个格式也携带状态条目——tool result 清空、压缩、leaf
+	 * 记录——而对话不能在其中一个上恢复，把它们算进来就是提供一个空备选。消息前面的状态条目出于
+	 * 同一理由被穿越下去：回退、收缩视图、再问一次是一个备选，不是两个。
 	 *
-	 * The walk covers **every** entry rather than only the active chain's, which is what makes the tree
-	 * a property of the conversation instead of of the leaf's current position: rewind to the first
-	 * question and the forks further down are still there to draw, where a chain-relative report would
-	 * quietly drop them — a page that forgets half the tree the moment the leaf moves. `options[].active`
-	 * is what stays chain-relative, and it is the only thing that should be.
+	 * 遍历覆盖**每一条**条目而不只是活跃链的，这让树成为对话的属性而不是叶子当前位置的属性：回退到
+	 * 第一个问题，更下面的 fork 仍然在那里可以画出来，而按链报告的实现会在叶子移动的那一刻悄悄丢掉
+	 * 它们——一页在叶子一动就忘掉半棵树的页面。`options[].active` 是保持分支相对的，也是唯一应该
+	 * 分支相对的东西。
 	 *
-	 * File order is also the order a client can fold the points in: a point's `anchor` is one of its
-	 * own ancestors, and an entry is never written before its parent, so the card a point hangs under
-	 * is always already placed when the point arrives.
+	 * 文件顺序也是客户端折叠各点的顺序：一个点的 `anchor` 是它自己的某个祖先，条目从不在其 parent
+	 * 之前写入，所以一个点挂靠的卡片在点到达时总是已经放好了。
 	 */
 	getBranchPoints(s: Session): BranchPoint[] {
 		const chain = this.getBranch(s);
@@ -1794,9 +1693,8 @@ export class SessionManager {
 		const children = childrenIndex(s);
 		const memo = new Map<string, SubtreeDescription>();
 
-		// Pass one: which entries were carried on from in more than one way, and what each
-		// continuation amounts to. Nothing is placed yet — an anchor is only knowable once every point
-		// is known, because a card is either a user message on the line or an earlier point's option.
+		// 第一遍：哪些条目被以不止一种方式延续，以及每种延续的总和。还什么都不放——anchor 要等所有
+		// 点都已知才可知，因为卡片要么是线上的一条 user 消息，要么是更早点的选项。
 		const forks: { entry: SessionEntry; options: BranchOption[] }[] = [];
 		for (const entry of s.sessionEntryMapById.values()) {
 			const options: BranchOption[] = [];
@@ -1813,16 +1711,15 @@ export class SessionManager {
 		}
 		const forkIds = new Set(forks.map((fork) => fork.entry.id));
 
-		/** True for an entry a window draws a card for: a question on the line, or a taken way. */
+		/** 窗口会为它画卡片的条目为 true：线上的一问，或一条被走过的路径。 */
 		const isCard = (entry: SessionEntry): boolean => {
 			if (onChain.has(entry.id)) return entry.type === "message" && entry.message.role === "user";
-			// Off the line, only a fork's own continuation becomes a card. An on-chain entry is
-			// excluded above rather than here: the chain's own continuation is drawn as the line's
-			// next card, and stopping a descent at it would name a card that does not exist.
+			// 线外，只有 fork 自己的延续变成卡片。链上的条目在上面排除而不是在这里：链自己的延续被
+			// 画成线上的下一张卡片，在它那里停下下降会指名一张不存在的卡片。
 			return entry.parentId !== null && forkIds.has(entry.parentId);
 		};
 
-		/** The nearest card at or above `entryId`, or undefined for a point nothing can host. */
+		/** `entryId` 及其上方最近的卡片，没有任何东西能承载它时为 undefined。 */
 		const anchorOf = (entryId: string): string | undefined => {
 			let current: SessionEntry | undefined = s.sessionEntryMapById.get(entryId);
 			while (current !== undefined) {
@@ -1833,12 +1730,12 @@ export class SessionManager {
 		};
 
 		const prompts = new Map<string, string>();
-		/** The nearest question at or above `entryId`, walked up the entry's own parent links. */
+		/** `entryId` 及其上方最近的一问，沿条目自己的 parent 链接上溯。 */
 		const nearestPrompt = (entryId: string): string => {
 			const cached = prompts.get(entryId);
 			if (cached !== undefined) return cached;
-			// Seeded before the descent for the same reason `subtreeDescription` seeds its memo: a file
-			// hand-edited into a cycle has to end the walk rather than spin.
+			// 出于与 `subtreeDescription` 播种 memo 相同的理由在下降前播种：被手改成环的文件必须结束
+			// 遍历而不是空转。
 			prompts.set(entryId, "");
 			const entry = s.sessionEntryMapById.get(entryId);
 			let prompt = "";
@@ -1854,9 +1751,8 @@ export class SessionManager {
 			return prompt;
 		};
 
-		// Pass two: the points, each with the card its alternatives hang under. A point no card can
-		// host keeps its own id, which the client has no card for — dropped there rather than drawn in
-		// a place it does not belong.
+		// 第二遍：各点及其备选挂靠的卡片。没有卡片能承载的点保留自己的 id，客户端没有它的卡片——
+		// 在那里丢掉它，而不是画在不属于它的地方。
 		return forks.map((fork) => ({
 			entryId: fork.entry.id,
 			anchor: anchorOf(fork.entry.id) ?? fork.entry.id,
@@ -1866,10 +1762,10 @@ export class SessionManager {
 	}
 
 	/**
-	 * The newest tip of the subtree `entryId` roots: where that line of work would be resumed.
+	 * `entryId` 所根的子树的最深 tip：那条工作线会从哪里恢复。
 	 *
-	 * The descent follows the last child written at each step, over every entry kind, because a branch
-	 * whose last entry is a compaction or a model change stopped there too.
+	 * 下降每一步跟随最后写入的孩子，遍及所有条目种类，因为一条最后条目是压缩或模型变更的分支也在
+	 * 那里停了。
 	 */
 	getBranchTip(s: Session, entryId: string): string {
 		if (!s.sessionEntryMapById.has(entryId)) throw new Error(`Entry ${entryId} not found`);
@@ -1877,10 +1773,10 @@ export class SessionManager {
 	}
 
 	/**
-	 * Walk from `fromId` to the root, in path order, every entry kind included.
+	 * 从 `fromId` 走到根，按路径顺序，包含所有条目种类。
 	 *
-	 * This is the raw branch; {@link SessionManager.buildContextEntries} is the same walk with
-	 * compaction applied, and is what a provider request is built from.
+	 * 这是原始分支；{@link SessionManager.buildContextEntries} 是应用了压缩的同一条遍历，provider
+	 * 请求由它构建。
 	 */
 	getBranch(s: Session, fromId?: string): SessionEntry[] {
 		const path: SessionEntry[] = [];
@@ -1895,28 +1791,25 @@ export class SessionManager {
 	}
 
 	/**
-	 * The entries that make up the current context, following the branch from the root to the leaf.
+	 * 构成当前 context 的条目，沿分支从根走到叶。
 	 *
-	 * Three decisions recorded as entries are applied here, and they are the only things that make this
-	 * differ from the raw branch: a compaction entry is a checkpoint — the newest one on the branch is
-	 * kept, the entries before the one it names are dropped, and everything from `firstKeptEntryId` on is
-	 * kept — a `clear_tool_result` entry names tool results whose text is cleared, and a `trim_tool_call_arg` entry names
-	 * assistant messages whose recorded tool-call arguments are shortened. Older compactions that happen
-	 * to fall inside the retained range are retained too; the newest one is what contributes the summary.
+	 * 以条目形式记录的三个决定在这里应用，它们也是本方法区别于原始分支的全部：压缩条目是检查点——
+	 * 分支上最新的一个被保留，它指名的条目之前的被丢弃，从 `firstKeptEntryId` 起的被保留——
+	 * `clear_tool_result` 条目指名正文被清空的 tool result，`trim_tool_call_arg` 条目指名记录参数被
+	 * 截短的 assistant 消息。恰好落在保留范围内的更早压缩也一并保留；贡献摘要的是最新的那个。
 	 *
-	 * Applying all three here is what keeps the request, the snapshot, and a resumed process on one
-	 * transcript: the file keeps every line, and every reader derives the same view from it.
+	 * 三个决定都只在这里应用，请求、快照和恢复的进程才共享同一份 transcript：文件保留每一行，每个
+	 * 读者从它推导出同一个视图。
 	 */
 	buildContextEntries(s: Session): SessionEntry[] {
 		return contextEntriesFromPath(buildSessionPath(s.sessionEntryMapById, s.leafId));
 	}
 
 	/**
-	 * Build the transcript the model is sent, from a branch of the entries.
+	 * 从条目的一个分支构建发给模型的消息流。
 	 *
-	 * This is the one method that turns storage into a request, and it is why a resumed session and a
-	 * live one cannot drift: both go through here. The path is walked once and shared by the settings
-	 * read and the view, so asking for both costs one walk rather than two.
+	 * 这是把存储变成请求的唯一方法，也是恢复的 session 与活的 session 不会漂移的原因：两者都经过
+	 * 这里。路径只走一遍，由设置读取和视图共享，所以两个都要只付一次遍历而不是两次。
 	 */
 	buildSessionContext(s: Session): SessionContext {
 		const chain = buildSessionPath(s.sessionEntryMapById, s.leafId);
@@ -1926,14 +1819,11 @@ export class SessionManager {
 	}
 
 	/**
-	 * The model and thinking level the session's snapshot on disk records, each undefined when it
-	 * never chose.
+	 * session 在盘上的快照记录的模型和 thinking level，从未选择时各自为 undefined。
 	 *
-	 * The disk copy, not the bag, is the write baseline for a caller that commits a choice: the bag
-	 * already carries the choice in force, so comparing against it is self-comparison and never sees
-	 * a difference. Read fresh each call, not cached, so the baseline is the file's own. A session
-	 * whose files are not born yet has no snapshot to read and answers with the empty record — the
-	 * birth write picks the bag up whole.
+	 * 对要提交一个选择的调用方，写入基线是盘上的副本而不是袋：袋已经带着生效的选择，拿它比较等于
+	 * 自己比自己，永远看不出差异。每次调用现读而不是缓存，所以基线就是文件自己的。文件还没诞生的
+	 * session 没有快照可读，以空记录回答——诞生写入会整体带上袋。
 	 */
 	recordedOnDisk(s: Session): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
 		if (!s.fileCreated || s.sessionFileAbsPath === undefined) return {};
@@ -1941,21 +1831,19 @@ export class SessionManager {
 	}
 
 	/**
-	 * The model and thinking level this session is on, each undefined when it never chose.
+	 * 这个 session 当前所在的模型和 thinking level，从未选择时各自为 undefined。
 	 *
-	 * {@link SessionManager.buildSessionContext} answers with those values and the defaults to run with.
-	 * This is for a caller that has to tell "the session chose off" from "the session never chose" —
-	 * assembly, which decides whether a stored value may override the settings file. The snapshot is
-	 * the first word and the transcript the fallback: the model falls back to the branch's last
-	 * assistant message, which can only name a row the user left unnamed.
+	 * {@link SessionManager.buildSessionContext} 用这些值连同运行所需的默认值回答。这个方法服务于
+	 * 必须区分「session 选了 off」和「session 从未选择」的调用方——装配环节，它决定存储值能否盖过
+	 * 设置文件。快照是第一句话，transcript 是回落：模型回落到分支的最后一条 assistant 消息，它只可能
+	 * 指名用户没给过名字的行。
 	 */
 	getRecordedSettings(s: Session): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
 		const recorded: { model?: { name: string; modelId: string }; thinkingLevel?: string } =
 			recordedModelOf(s.sessionSetting.model);
 		if (recorded.model === undefined) {
-			// Only ever a fallback, and a weak one: a message records the wire id it was answered by,
-			// not the row's identity, so this can only name a row the user left unnamed. See
-			// {@link getSessionContextSettings}.
+			// 只是回落，而且是弱回落：消息记录的是回答它的 wire id，不是行的身份，所以这只可能指名
+			// 用户没给过名字的行。见 {@link getSessionContextSettings}。
 			for (const entry of this.getBranch(s)) {
 				if (entry.type === "message" && entry.message.role === "assistant") {
 					recorded.model = { name: entry.message.model, modelId: entry.message.model };
@@ -1966,24 +1854,21 @@ export class SessionManager {
 	}
 
 	/**
-	 * The tool choices this session last recorded, each undefined when it never chose.
+	 * 本 session 最后记录的工具选择，从未选择时各自为 undefined。
 	 *
-	 * Undefined is meaningful and is what this exists to preserve: a session that never chose opens
-	 * on the defaults, while one that did reopens exactly as its user left it. The snapshot is the
-	 * whole answer, so this reads the session rather than the branch — which is also what changed
-	 * with the two-file split: moving the leaf no longer switches these values, because they are the
-	 * session's, not a branch's.
+	 * undefined 是有意义的，而且正是这个方法要保住的东西：从未选择的 session 以默认值打开，选过的
+	 * session 完全按用户留下的样子重开。快照是完整的答案，所以这里读的是 session 而不是分支——这也
+	 * 是两文件拆分改变的地方：移动叶子不再切换这些值，因为它们是 session 的，不是分支的。
 	 */
 	getRecordedToolConfig(s: Session): { activeTools?: string[]; approval?: Record<string, boolean> } {
 		return { activeTools: s.sessionSetting.activeTools, approval: s.sessionSetting.approval };
 	}
 
 	/**
-	 * The entry id behind each message in {@link SessionManager.buildSessionContext}'s list, in the same order.
+	 * {@link SessionManager.buildSessionContext} 的消息列表里每条消息背后的条目 id，顺序一致。
 	 *
-	 * A compaction checkpoint produces messages that belong to no message entry, so those read as null.
-	 * This is what a transcript needs to offer "fork from here" on a message it never watched being
-	 * written.
+	 * 压缩检查点产出的消息不属于任何消息条目，那些读作 null。这就是 transcript 能对一条它从未看着
+	 * 写下的消息提供「从这里 fork」的方式。
 	 */
 	getContextMessageEntryIds(s: Session): (string | null)[] {
 		const ids: (string | null)[] = [];
@@ -1995,28 +1880,25 @@ export class SessionManager {
 	}
 
 	/**
-	 * The `.json` snapshot's flat shape, rebuilt from the session's regrouped setting: identity and
-	 * current choices. Always present on a built session.
+	 * `.json` 快照的扁平形状，从 session 的重组 setting 重建：身份和当前选择。构建出的 session 上
+	 * 始终存在。
 	 */
 	getMeta(s: Session): SessionMeta {
 		return metaOf(s);
 	}
 
-	/** Every entry in file order. Use the `append*` methods to add more. */
+	/** 文件顺序中的每一条条目。要加更多用 `append*` 方法。 */
 	getEntries(s: Session): SessionEntry[] {
 		return s.jsonlEntries;
 	}
 
 	/**
-	 * The conversation's own name: a recorded title if there is one, else the branch's first user
-	 * message, else a placeholder.
+	 * 会话自己的名字：有记录的标题就用它，否则用分支的第一条 user 消息，否则占位符。
 	 *
-	 * The recorded title comes from the snapshot, and that placement is deliberate: the left column
-	 * draws one row per session, not per way through it, so a name a person gave the session does not
-	 * stop being theirs because the leaf moved — which is exactly the reading ADR-0002 argued for,
-	 * now stated by the format instead of reconstructed from file order. The branch walk below stays
-	 * exactly as it was — it is the fallback, and summarizing the oldest turn away still cannot
-	 * rename the session.
+	 * 记录的标题来自快照，那个安放是刻意的：左列每个 session 画一行，不按路径画，所以人给会话起的
+	 * 名字不会因为叶子移动就不再是他的——这正是 ADR-0002 论证的读法，现在由格式直接陈述，而不是从
+	 * 文件顺序重建。下面的分支遍历保持原样——它是回落，把最旧的一个 turn 压缩掉也仍然不能重命名
+	 * 会话。
 	 */
 	getTitle(s: Session): string {
 		if (s.sessionSetting.title !== undefined) return s.sessionSetting.title;
@@ -2024,17 +1906,15 @@ export class SessionManager {
 	}
 
 	/**
-	 * Move the leaf to an earlier entry, so the next append starts a new branch from it.
+	 * 把叶子移到更早的条目，让下一次追加从那里开一条新分支。
 	 *
-	 * Nothing is modified or deleted: the entries after the old leaf are still in the file, still
-	 * reachable by id, and are simply no longer on the active branch.
+	 * 什么都不修改、什么都不删除：旧叶子之后的条目仍在文件里，仍可按 id 到达，只是不再位于活跃
+	 * 分支上。
 	 *
-	 * A move that actually changes the position is recorded as one {@link LeafEntry}, which is what
-	 * lets a process that reopens the file put the leaf back where the conversation went. The record
-	 * is appended as a child of the leaf it leaves behind and does not advance it — the tree position
-	 * says where the append happened, the `leafId` field says where the conversation went. Moving to
-	 * the position already held writes nothing, the same guard the meta setters apply to their own
-	 * writes: a run of no-op moves costs no file.
+	 * 真正改变位置的移动记录为一条 {@link LeafEntry}，这让重开文件的进程能把叶子放回对话去过的位置。
+	 * 记录追加为它所离开的叶子的孩子，不推进叶子——树位置说的是追加发生在哪，`leafId` 字段说的是
+	 * 对话去了哪。移动到已持有的位置什么都不写，与 meta setter 对自己的写入施加的守卫相同：一串
+	 * no-op 移动不花任何文件。
 	 */
 	branch(s: Session, branchFromId: string): void {
 		if (!s.sessionEntryMapById.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
@@ -2043,7 +1923,7 @@ export class SessionManager {
 		s.leafId = branchFromId;
 	}
 
-	/** Move the leaf before the first entry, so the next append becomes a new root. */
+	/** 把叶子移到第一条之前，下一次追加就成为新的根。 */
 	resetLeaf(s: Session): void {
 		if (s.leafId === null) return;
 		appendLeafRecord(s, null);
@@ -2051,23 +1931,19 @@ export class SessionManager {
 	}
 
 	/**
-	 * Replay the session `id` names into a bag this call owns: no registration, no cache, and the
-	 * caller drops it when it is done.
+	 * 把 id 指名的 session 重放成本次调用拥有的袋：不注册、不缓存，用完由调用方丢弃。
 	 *
-	 * This is the cold path, and the only one: a session this process is running is written through
-	 * the bag its orchestrator holds (`Agent`'s table), never through a replay of its file — the
-	 * snapshot is written whole, so a stale bag would revert whatever that session's turns just
-	 * recorded. What it answers is a pair that was born: the `.json` snapshot is the birth's commit
-	 * marker, so an id it matches names a `.jsonl` beside it, and an id neither file names is refused
-	 * with the same sentence every reader of this store uses. A pair that exists but cannot be opened
-	 * is pruned by {@link fillSession} itself, so this is a read that can delete.
+	 * 这是冷路径，也是唯一的一条：本进程正在跑的 session 经其 orchestrator 持有的袋写入（`Agent`
+	 * 的表），绝不通过重放它的文件——快照是整体重写的，一个过期的袋会把那个 session 的 turn 刚记下
+	 * 的东西回滚掉。它回答的是一次已经完成的诞生：`.json` 快照是诞生的提交标记，所以与它匹配的 id
+	 * 意味着旁边有一条 `.jsonl`，两个文件都不认的 id 会被本 store 的每个读者共用的那句话拒绝。存在
+	 * 却打不开的配对由 {@link fillSession} 自己清除，所以这是一次可能会删除文件的读取。
 	 *
-	 * A cold write is two moves, not three — this for the bag, then a setter, which writes the file
-	 * itself (`setTitle` records the meta, and recording persists). There is no third persist verb to
-	 * remember, and no dirty state to flush. Safety here is not a hold's work: while a session is
-	 * held, its only writer is the bag the orchestrator holds; when it is not held, one cold write is
-	 * one synchronous block no other writer can step into — and the two windows never overlap,
-	 * because the cold path only serves sessions nothing holds.
+	 * 冷写入是两步不是三步——先这里拿袋，再一个 setter，setter 自己写文件（`setTitle` 记录 meta，
+	 * 记录即持久化）。没有第三个要记住的 persist 动词，也没有要冲刷的脏状态。这里的安全性不是 hold
+	 * 的工作：session 被 hold 时，它唯一的写入方是 orchestrator 持有的袋；不被 hold 时，一次冷写入
+	 * 是一个其他写入方进不来的同步块——两个窗口从不重叠，因为冷路径只服务没有任何东西 hold 的
+	 * session。
 	 */
 	open(id: string): Session {
 		const absPath = SessionManager.findSessionFilePathById(id);
@@ -2076,27 +1952,22 @@ export class SessionManager {
 	}
 
 	// =========================================================================
-	// Construction and discovery
+	// 构建与发现
 	// =========================================================================
 
 	/**
-	 * Copy a branch of a session into a new session beside its source, and name what was written.
+	 * 把一个 session 的一个分支复制成它源旁边的一个新 session，并指名写了什么。
 	 *
-	 * `entryId` is the entry the branch ends at, or null for the whole log. The new snapshot points at
-	 * the source's entry stream as `parentSession`, and the copied entries keep the ids and parent
-	 * links the source wrote, which is what makes a fork traceable back to where it came from. The
-	 * snapshot's current values travel whole — title, model, level, tool config, and the suspended
-	 * marker, because a fork of a parked session copies the dangling calls too — since those are
-	 * the session's own values now, not entries a branch replay could restore. The working directory
-	 * is the source header's own: the fork is written where its source lives, and the caller is not
-	 * asked to replay the file to learn where that is.
+	 * `entryId` 是分支结束的条目，null 表示整份日志。新快照以 `parentSession` 指向源的条目流，被复制
+	 * 的条目保留源写入的 id 和 parent 链接，这让 fork 能追溯回它来的地方。快照的当前值整体随行——
+	 * title、model、level、tool config 和 suspended 标记，因为停在闸门处的 session 的 fork 也复制
+	 * 悬空 call——因为那些现在是 session 自己的值，不是分支重放能恢复的条目。工作目录取源 header
+	 * 自己的：fork 写在它的源住的地方，也不要求调用方重放文件去了解那里是哪。
 	 *
-	 * The source is only read: a fork is a new pair of files, and the session it came from is never
-	 * rewritten. The fork fills nothing and registers nothing — the files are the whole of what it
-	 * returns, and the new session's first bag comes from its first {@link open}, which reads the
-	 * pair just written. Both files are written synchronously before this returns, with the snapshot
-	 * last (`wx`, the birth's commit marker), so an id handed out here is openable by the time the
-	 * caller has it.
+	 * 源只被读取：fork 是新的一对文件，它来源的 session 从不被重写。fork 不填充任何东西也不注册
+	 * 任何东西——文件就是它返回的全部，新 session 的第一个袋来自它的第一次 {@link open}，后者读取
+	 * 刚写下的配对。两个文件都在返回前同步写完，快照最后写（`wx`，诞生的提交标记），所以这里递出去
+	 * 的 id 在调用方拿到时已经可以打开。
 	 */
 	forkFrom(
 		sourcePathInput: string,
@@ -2116,11 +1987,11 @@ export class SessionManager {
 			throw new Error(`Session ${sourceMeta.id} has no entry ${entryId}`);
 		}
 
-		// The header is the workDir's one authority: it named the source's tools' frame, and the fork
-		// lives in the same conversation, so it keeps the same frame.
+		// header 是 workDir 的唯一权威：它为源的各工具指名了工作框架，fork 活在同一段对话里，所以
+		// 保留同一个框架。
 		const absTargetWorkDir = resolvePath(sourceMeta.workDir);
-		// The store is flat, so the fork lands beside every other session; which project it belongs to
-		// travels in the snapshot it copies, not in the directory it sits in.
+		// store 是扁平的，所以 fork 落在所有其他 session 旁边；它属于哪个项目随它复制的快照走，
+		// 不随它所在的目录走。
 		const absDir = storeDirInput ? normalizePath(storeDirInput) : sessionsDir();
 		if (!existsSync(absDir)) mkdirSync(absDir, { recursive: true });
 
@@ -2147,11 +2018,10 @@ export class SessionManager {
 	}
 
 	/**
-	 * Every session stored for `workDir`, newest activity first.
+	 * 为 `workDir` 存储的每个 session，最近活动优先。
 	 *
-	 * The store holds every project's sessions, so the directory is a filter rather than a location:
-	 * each candidate's own snapshot says which directory it belongs to, and that is the value
-	 * compared — not the folder it happens to sit in, which no longer names a project.
+	 * store 持有所有项目的 session，所以目录是一个过滤器而不是一个位置：每个候选自己的快照说它属于
+	 * 哪个目录，比较的就是那个值——不是它碰巧坐落的文件夹，后者已不再指名一个项目。
 	 */
 	static async list(workDirInput: string, storeDirInput?: string, signal?: AbortSignal): Promise<SessionInfo[]> {
 		ensureStoreMigrated();
@@ -2164,15 +2034,13 @@ export class SessionManager {
 	}
 
 	/**
-	 * Every directory this machine has stored sessions for, each with its own list.
+	 * 本机器为之存储过 session 的每个目录，各带自己的清单。
 	 *
-	 * The sidebar groups by directory, and the store no longer lays that grouping out — one flat
-	 * directory holds every project's sessions — so the grouping is derived here, from each session's
-	 * own snapshot: the `workDir` a session was started in is what its group is keyed by, and two
-	 * sessions of one project need never sit beside each other to land in one group.
+	 * 侧栏按目录分组，而 store 不再摆出这个分组——一个扁平目录装下所有项目的 session——所以分组在
+	 * 这里从每个 session 自己的快照推导：session 启动时的 `workDir` 就是其分组的 key，同一项目的
+	 * 两个 session 无须相邻存放也能落进同一组。
 	 *
-	 * Groups come back most recently active first, and a session whose header names no directory is
-	 * dropped rather than shown as a headless group.
+	 * 组按最近活动优先返回，header 没指名目录的 session 被丢弃，而不是显示成一个无头的组。
 	 */
 	static async listDirectories(signal?: AbortSignal): Promise<DirectorySessions[]> {
 		ensureStoreMigrated();
@@ -2199,11 +2067,11 @@ export class SessionManager {
 	}
 
 	/**
-	 * Whether any stored session names `workDirAbsPath` as its own — "this project has sessions".
+	 * 是否有任何存储的 session 把 `workDirAbsPath` 当作自己的——「这个项目有 session」。
 	 *
-	 * The create path asks before it resurrects a working directory the filesystem has lost: a
-	 * project the store knows is put back empty, a typo is refused. One scan, and it answers from
-	 * the snapshots rather than from any folder name, because the store no longer keeps one.
+	 * 创建路径在复活一个文件系统已丢失的工作目录之前先问这里：store 认识的项目被恢复为空目录，
+	 * 打错的路径被拒绝。一次扫描，并且从快照回答而不是从任何文件夹名回答，因为 store 已经不再
+	 * 保存后者。
 	 */
 	static hasSessionsFor(workDirAbsPath: string): boolean {
 		ensureStoreMigrated();
@@ -2216,14 +2084,12 @@ export class SessionManager {
 	}
 
 	/**
-	 * The one row a session id names, from whichever directory holds it, or `undefined` when no file
-	 * does.
+	 * 一个 session id 指名的那一行，来自持有它的任何目录，没有文件指名时为 `undefined`。
 	 *
-	 * The listing answers the same question for every session at once, which is the wrong cost when
-	 * exactly one session is what changed — one just created, or just forked, or one the store picked
-	 * up by hand. So this locates that one session and parses only it: a session appearing costs one
-	 * parse rather than a scan of the machine. The locate half is the snapshot read, not a transcript
-	 * read; only the session that matched has its `.jsonl` parsed.
+	 * 列表为所有 session 一次性回答同一个问题，在恰好只有一个 session 变化时是错误的代价——刚创建
+	 * 的、刚 fork 的、或 store 手工捡回来的一个。所以这里定位那一个 session 并只解析它：一个 session
+	 * 出现的代价是一次解析，而不是对整台机器的一次扫描。定位那一半是快照读取，不是 transcript 读取；
+	 * 只有匹配到的 session 才解析 `.jsonl`。
 	 */
 	static async findSessionRowById(id: string, signal?: AbortSignal): Promise<SessionRow | undefined> {
 		const absPath = SessionManager.findSessionFilePathById(id);
@@ -2232,9 +2098,8 @@ export class SessionManager {
 		if (meta === null) return undefined;
 		const info = await buildSessionInfo(sessionMetaPath(absPath), absPath, meta, signal);
 		if (info === null) return undefined;
-		// A fork's parent is named by *path* in the snapshot, so it is knowable from one session alone
-		// once that path is resolved to an id — which matters because a fork reaches a store one row at
-		// a time, where the listing that would have linked it is not in play.
+		// fork 的 parent 在快照里按*路径*指名，所以一旦该路径解析成 id，单凭一个 session 就可知
+		// ——这很重要，因为 fork 一次一行地到达 store，本可以链接它的列表不在场。
 		if (info.parentId === undefined && info.absParentSessionPath !== undefined) {
 			const parent = readMetaForDiscovery(info.absParentSessionPath);
 			const parentId = parent?.id;
@@ -2244,13 +2109,12 @@ export class SessionManager {
 	}
 
 	/**
-	 * The path of the entry stream a session id names — a stat, not a search.
+	 * 一个 session id 指名的条目流路径——一次 stat，不是一次搜索。
 	 *
-	 * The store is flat and the id is the address (`<id>.jsonl`), so this is one existence check: the
-	 * `.json` snapshot beside the stream is the birth's commit marker, and it is the half whose
-	 * presence says a pair exists at all. A name whose snapshot is gone answers `undefined`, which
-	 * every caller reads as "no such session"; a snapshot whose stream is gone is a birth that died
-	 * partway, and {@link fillSession} prunes it when it is asked to open the pair.
+	 * store 是扁平的、id 就是地址（`<id>.jsonl`），所以这是一次存在性检查：流旁边的 `.json` 快照是
+	 * 诞生的提交标记，它的存在才是「配对存在」的那一半。快照没了的名字回答 `undefined`，每个调用方
+	 * 读作「没有这个 session」；流没了的快照是一次半途夭折的诞生，{@link fillSession} 被要求打开它
+	 * 时会清除。
 	 */
 	static findSessionFilePathById(id: string): string | undefined {
 		ensureStoreMigrated();
@@ -2259,15 +2123,14 @@ export class SessionManager {
 	}
 
 	/**
-	 * Delete the session an id names, from whichever directory holds it.
+	 * 删除一个 id 指名的 session，来自持有它的任何目录。
 	 *
-	 * One session, not a directory: a directory's sessions share one store, so anything wider than
-	 * the two files one session is named by is a different conversation's transcript. Throwing for an
-	 * unknown id rather than answering "already gone" keeps the two failures apart — the caller
-	 * decides what a second delete means, and the hub turns it into a status the client can show.
+	 * 一个 session，不是一个目录：一个目录的 session 共享一个 store，比一个 session 的两个文件更宽的
+	 * 任何东西都是另一段对话的 transcript。对未知 id 抛异常而不是回答「早已不在」，把两种失败分开
+	 * ——调用方决定第二次删除意味着什么，hub 把它变成客户端能展示的状态码。
 	 *
-	 * Pure file I/O: whatever table held a live bag for this id is someone else's, and the caller
-	 * that decided the session is gone forgets that half itself (`Agent.remove`).
+	 * 纯文件 I/O：为这个 id 持有活袋的表是谁的就是谁的，决定 session 已消失的调用方自己忘掉那一半
+	 * （`Agent.remove`）。
 	 */
 	async remove(id: string): Promise<void> {
 		const absPath = SessionManager.findSessionFilePathById(id);
@@ -2278,17 +2141,16 @@ export class SessionManager {
 
 }
 
-/** The most recent activity in a group, for ordering the sidebar's directories. */
+/** 一个组里最近的活动，供侧栏目录排序。 */
 function newestAt(group: DirectorySessions): number {
 	return group.sessions.reduce((newest, session) => Math.max(newest, session.modified), 0);
 }
 
 /**
- * Group rows by directory and order them the way the sidebar draws them.
+ * 按目录分组行，并按侧栏绘制的方式排序。
  *
- * Newest activity first within a group, and groups ordered by their own newest row. Exported because
- * the server's projection holds the same rows and has to order them the same way — a store and a
- * reader that each sorted for themselves would disagree the moment a row moved.
+ * 组内最近活动优先，组按各自最新的行排序。导出是因为 server 的投影持有同样的行、必须以同样的方式
+ * 排序——各自排序的 store 和读者会在一行移动的那一刻开始不一致。
  */
 export function groupSessionsByDirectory(rows: readonly SessionRow[]): DirectorySessions[] {
 	const groups = new Map<string, SessionRow[]>();
@@ -2302,16 +2164,16 @@ export function groupSessionsByDirectory(rows: readonly SessionRow[]): Directory
 		.sort((a, b) => newestAt(b) - newestAt(a));
 }
 
-/** Most recently active first, on a copy so two callers cannot reorder each other's view. */
+/** 最近活动优先，在副本上排，两个调用方不会互相重排对方的视图。 */
 function byModified(rows: readonly SessionRow[]): SessionRow[] {
 	return [...rows].sort((a, b) => b.modified - a.modified);
 }
 
 /**
- * The picker's view of a session: the id a client opens it by, and what to label it with.
+ * 选择器眼中的一个 session：客户端打开它用的 id，以及给它贴标签的文本。
  *
- * `SessionInfo` carries more than the wire needs — a path, a search blob, a message count — so the
- * narrowing happens in one place rather than in every server route that lists sessions.
+ * `SessionInfo` 携带的比 wire 需要的多——路径、搜索 blob、消息数——所以收窄发生在一处，而不是
+ * 每个列出 session 的 server 路由里。
  */
 export function toSessionRef(info: SessionInfo): SessionRef {
 	return {
@@ -2324,14 +2186,12 @@ export function toSessionRef(info: SessionInfo): SessionRef {
 }
 
 /**
- * One row of the sidebar, for a session nothing is running.
+ * 侧栏的一行，对应一个没有东西在跑的 session。
  *
- * `running` is structurally false: whether this process is running a session was never written down.
- * `pending` is a cache of a ledger fact — the snapshot's `suspended` marker, set when a run parks at
- * an approval gate — because under end-restart (ADR-0006 §5) the question outlives the host, and the
- * scan reads snapshots only. The marker carries no count, so a marked row says 1; the exact number
- * is derived from the ledger once the session is opened, and a caller with a host overlays the live
- * values from the in-process snapshot rather than reading them off the disk.
+ * `running` 在结构上就是 false：本进程是否在跑一个 session 从未被写下来。`pending` 是账本事实的
+ * 缓存——快照的 `suspended` 标记，run 停在审批闸门处时置位——因为在 end-restart（ADR-0006 §5）下
+ * 这个问题活得比 host 长，而扫描只读快照。标记不带计数，所以被标记的行报 1；确切数字在 session
+ * 打开后从账本推导，持有 host 的调用方从进程内快照覆盖活值，而不是从盘上读。
  */
 function toSessionRow(info: SessionInfo): SessionRow {
 	return {
@@ -2343,16 +2203,15 @@ function toSessionRow(info: SessionInfo): SessionRow {
 }
 
 /**
- * The conversation's name: the first user message with text, shortened for a picker.
+ * 会话的名字：第一条带文本的 user 消息，为选择器截短。
  *
- * Derived from the transcript rather than stored, so it follows a session that is still being written
- * and does not have to be migrated when the first message changes.
+ * 从 transcript 派生而不是存储，所以它跟随仍在被写入的 session，且首条消息变化时不需要迁移。
  */
 export function deriveTitle(messages: readonly Message[]): string {
 	for (const message of messages) {
 		if (message.role !== "user") continue;
-		// A compaction checkpoint is a user turn by shape but not by speaker; a resumed session whose
-		// context starts at one must not be named by the summary it retained.
+		// 压缩检查点按形状是 user turn，按说话者不是；context 从一个检查点开始的恢复 session，不能被
+		// 它保留的摘要命名。
 		if (compactionSummaryOf(message) !== undefined) continue;
 		const text = shortenTitle(textOf((message as { content?: unknown }).content));
 		if (text.length > 0) return text;
@@ -2361,13 +2220,11 @@ export function deriveTitle(messages: readonly Message[]): string {
 }
 
 /**
- * The one rule for shortening a title: collapse its whitespace, then cut it at 72 characters.
+ * 截短标题的唯一规则：先折叠空白，再在 72 字符处切断。
  *
- * Shared rather than written twice because the callers answer different questions about *which*
- * string they are shortening — a live session walks its branch, a scan walks the file, and the
- * rename endpoint truncates a user's typing — and a row whose title jumped between those worlds
- * would be the flicker this sharing exists to stop. Exported because the endpoint that stores a
- * rename is the controller's, and the rule has to be the store's, not the caller's copy of it.
+ * 共享而不是写两遍，因为调用方对*哪一*字符串被截短回答着不同的问题——活 session 走分支，扫描走
+ * 文件，重命名端点截用户的输入——标题在这些世界之间跳来跳去的行，正是这个共享要阻止的闪烁。导出
+ * 是因为存储重命名的端点是 controller 的，规则必须是 store 的，不是调用方的副本。
  */
 export function shortenTitle(text: string): string {
 	const collapsed = text.replace(/\s+/g, " ").trim();

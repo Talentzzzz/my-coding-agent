@@ -1,17 +1,15 @@
-// Mechanical guard for the hub-facade boundary (issue 03 of .scratch/hub-agent-facade): the server
-// package operates sessions only through the `Agent` public face and never touches a Manager, a
-// construction entry, or a state object. Same precedent as check-tokens: a small script with
-// regexes, wired into `npm run check`, so the invariant is machine-checked instead of a comment
-// that rots. Scope is `packages/server/src` only — the smokes in scripts/ deliberately keep
-// Manager access (test seams), and the guard must not fire on them.
+// hub-facade 边界的机械守卫（.scratch/hub-agent-facade 的 issue 03）：server 包只能经由 `Agent`
+// 公开面操作 session，绝不触碰 Manager、构造入口或 state 对象。与 check-tokens 同一套先例：一个
+// 用正则的小脚本，接进 `npm run check`，让不变量被机器检查而不是靠一条会腐烂的注释。范围仅限
+// `packages/server/src`——scripts/ 里的 smoke 有意保留 Manager 访问（测试接缝），守卫不得对它们报警。
 import { readdir, readFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 
 const root = process.argv[2] ?? "packages/server/src";
 
-// Names whose import the server package must never spell: the three Managers, their factory, the
-// ledger's construction and replay entries, and the pure-data shapes (`SessionAgentServices`,
-// `OpenAgentOptions`, `AgentState`, `Session`) that stopped leaving core with the facade.
+// server 包不得拼写其 import 的名字：三个 Manager、它们的工厂、ledger 的构造与 replay 入口，
+// 以及随门面不再从 core 导出的纯数据形状（`SessionAgentServices`、`OpenAgentOptions`、
+// `AgentState`、`Session`）。
 const bannedImports = [
 	"SessionManager",
 	"SettingManager",
@@ -25,10 +23,9 @@ const bannedImports = [
 	"Session",
 ];
 
-// Member accesses the server package must never spell. `.settings` is banned except in the
-// method-call form `.settings(` — the controller method's own name — and `.tools` is not on the
-// list at all: plain-data fields named `tools` are everywhere and the import ban already walls
-// the `ToolManager` off.
+// server 包不得拼写的成员访问。`.settings` 被禁，但方法调用形式 `.settings(` 例外——那是
+// controller 方法自己的名字；`.tools` 完全不在列表上：名为 `tools` 的纯数据字段到处都是，
+// 且 import 禁令已经把 `ToolManager` 挡住了。
 const bannedMembers: [RegExp, string][] = [
 	[/\.agentState\s*\(/, ".agentState("],
 	[/\.sessionManager\b/, ".sessionManager"],
@@ -45,7 +42,7 @@ async function sources(dir: string): Promise<string[]> {
 	return out;
 }
 
-/** Drop comments so a doc comment explaining the guard cannot trip it; a `://` inside a string survives. */
+/** 去掉注释，免得一段解释守卫自身的文档注释触发它；字符串内的 `://` 不受影响。 */
 function withoutComments(text: string): string {
 	return text
 		.replace(/\/\*[\s\S]*?\*\//g, " ")
@@ -57,7 +54,7 @@ function withoutComments(text: string): string {
 		.join("\n");
 }
 
-/** Every import / re-export statement, multiline braces included, up to its module specifier. */
+/** 全部 import / re-export 语句，含多行大括号，直到模块说明符为止。 */
 function importStatements(text: string): { statement: string; offset: number }[] {
 	return [...text.matchAll(/(?:^|\n)[ \t]*(?:import|export)\b[^;]*?from\s*["'][^"'\n]*["']/g)].map((match) => ({
 		statement: match[0],

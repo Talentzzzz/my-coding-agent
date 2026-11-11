@@ -2,19 +2,16 @@ import { UnknownSessionError } from "@my-agent/core";
 import type { IncomingMessage } from "node:http";
 
 /**
- * A failure that already carries the status it should be answered with.
+ * 一个已经带着应答所用 status 的失败。
  *
- * This is the transport's only error type. Controllers throw it, the router maps it, and nothing in
- * between needs to know about HTTP. An error that is not an `HttpError` is a bug — it is answered as
- * a 500 and reported as such, including the message, because this is a local single-user server.
+ * 这是 transport 唯一的错误类型。controller 抛它，router 映射它，中间的任何东西都不需要知道 HTTP。不是 `HttpError` 的错误就是 bug——按 500 应答并如实上报，包括消息，因为这是本地单用户服务器。
  */
 export class HttpError extends Error {
 	readonly status: number;
 	/**
-	 * Extra response headers this failure needs.
+	 * 这个失败需要的额外响应头。
 	 *
-	 * Only `allow` uses it, for a 405: the header has to be written with the status, and calling
-	 * `setHeader` before the router decides to answer at all is what made a 405 come back as a 500.
+	 * 目前只有 `allow` 用它，用于 405：这个头必须和 status 一起写出，而在 router 尚未决定应答之前就调 `setHeader`，正是让 405 变成 500 的原因。
 	 */
 	headers?: Record<string, string>;
 
@@ -26,12 +23,9 @@ export class HttpError extends Error {
 }
 
 /**
- * The statuses this API uses, by what the caller did rather than by number.
+ * 本 API 用到的 status，按调用者做了什么来命名，而不是按数字。
  *
- * Keeping the names here is what stops a controller from reaching for a bare `404` and leaves one
- * place to read the table: `/api/sessions/{id}` with an unknown id is `notFound`, a body that is not
- * JSON is `badRequest`, a tool name the session does not know is `conflict` (the session refused the
- * change, and the same request can succeed once the name is right).
+ * 把名字集中在这里，正是阻止 controller 顺手写裸 `404` 的东西，也让表格只有一个阅读处：未知 id 的 `/api/sessions/{id}` 是 `notFound`，不是 JSON 的 body 是 `badRequest`，会话不认识的工具名是 `conflict`（会话拒绝了这个变更，名字对了同样的请求就能成功）。
  */
 export const httpStatus = {
 	badRequest: (message: string) => new HttpError(400, message),
@@ -39,24 +33,21 @@ export const httpStatus = {
 	conflict: (message: string) => new HttpError(409, message),
 } as const;
 
-/** The status and message a thrown value deserves, including errors that never meant to be HTTP. */
+/** 一个被抛出的值应得的 status 和消息，包括从未打算成为 HTTP 的错误。 */
 export function internalError(error: unknown): { status: number; message: string } {
 	if (error instanceof HttpError) return { status: error.status, message: error.message };
-	// The data layer's own refusal, named as a type instead of sniffed from a sentence: an id that
-	// exists nowhere. Every unknown-session road ends here, which is why no endpoint checks first.
+	// 数据层自己的拒绝，以类型命名而不是从句子文本里嗅探：一个哪里都不存在的 id。所有未知会话的路都汇到这里，这就是为什么没有任何端点先做存在性检查。
 	if (error instanceof UnknownSessionError) return { status: 404, message: error.message };
 	return { status: 500, message: error instanceof Error ? error.message : String(error) };
 }
 
-/** How much body this server is willing to read: a prompt and a few names, never a file upload. */
+/** 本服务器愿意读多少 body：一个 prompt 加几个名字，绝不是文件上传。 */
 const MAX_BODY_BYTES = 1_000_000;
 
 /**
- * The request body as text, trimmed, bounded by the size cap.
+ * 请求 body 的文本形式，已 trim，受大小上限约束。
  *
- * The one reader both object readers share, because the cap exists to bound memory and is therefore
- * checked before reading — a check written twice would eventually be written once without it. The
- * size limit is reported before the megabyte arrives, not after.
+ * 两个对象读取共用的唯一读取器，因为这个上限的目的是约束内存，所以必须在读取之前检查——写两遍的检查迟早有一遍会漏掉。大小超限在 megabyte 到来之前就上报，而不是之后。
  */
 async function readBodyText(request: IncomingMessage): Promise<string> {
 	const length = Number.parseInt(request.headers["content-length"] ?? "", 10);
@@ -75,7 +66,7 @@ async function readBodyText(request: IncomingMessage): Promise<string> {
 	return Buffer.concat(chunks).toString("utf8").trim();
 }
 
-/** The text as an object, or the two 400s a malformed body deserves. */
+/** 文本作为对象的形式，或格式错误的 body 应得的两个 400。 */
 function parseObject(text: string): Record<string, unknown> {
 	let body: unknown;
 	try {
@@ -90,10 +81,9 @@ function parseObject(text: string): Record<string, unknown> {
 }
 
 /**
- * Read a JSON request body.
+ * 读取 JSON 请求 body。
  *
- * An absent body is refused here rather than answered, because every caller of this reader names a
- * required field off it.
+ * 缺失的 body 在这里被拒绝而不是被应答，因为本读取器的每个调用者都会从结果上取一个必填字段。
  */
 export async function readJsonBody(request: IncomingMessage): Promise<unknown> {
 	const text = await readBodyText(request);
@@ -106,22 +96,18 @@ export async function readJsonBody(request: IncomingMessage): Promise<unknown> {
 }
 
 /**
- * The JSON body as an object, or a 400.
+ * JSON body 作为对象的形式，否则 400。
  *
- * Controllers destructure fields off the result, so this is where "the body is an object at all" is
- * settled once instead of in every handler.
+ * controller 会从结果上解构字段，所以"body 到底是不是对象"在这里一次定死，而不是在每个 handler 里各来一遍。
  */
 export async function readObjectBody(request: IncomingMessage): Promise<Record<string, unknown>> {
 	return parseObject(await readBodyText(request));
 }
 
 /**
- * The JSON body as an object, or `{}` when there is nothing there.
+ * JSON body 作为对象的形式，里面什么都没有时为 `{}`。
  *
- * For the one endpoint whose body names no required field: an empty `POST /api/sessions` has always
- * created a session, and the `workDirAbsPath` that may join it must not turn that into a request that needs a
- * body. Size and shape are checked exactly as {@link readObjectBody} checks them — only "empty" is
- * answered rather than refused.
+ * 服务于唯一一个 body 不指名必填字段的端点：空的 `POST /api/sessions` 一直以来都能创建会话，可能随之而来的 `workDirAbsPath` 不该把它变成一个需要 body 的请求。大小和形状的检查与 {@link readObjectBody} 完全一致——只有"空"被应答而不是被拒绝。
  */
 export async function optionalObjectBody(request: IncomingMessage): Promise<Record<string, unknown>> {
 	const text = await readBodyText(request);

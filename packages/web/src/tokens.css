@@ -1,18 +1,15 @@
 /*
- * The design tokens, ported from DeepSeek Harness's client theme.
+ * 设计 token，移植自 DeepSeek Harness 的客户端主题。
  *
- * Names are kept as the reference spells them (`--dsw-*`) so a value can be traced back to the sheet
- * it came from, and so an alias added later does not have to be invented. Static ramps and alias
- * roles are separate for the same reason: a component picks a role, and only this file decides what
- * that role is made of.
+ * 名字保持参考实现的拼法（`--dsw-*`），让一个值能追溯到它来自的那张表，也让以后添加别名时
+ * 不必凭空发明。静态色阶与别名角色分开的理由相同：组件选角色，只有本文件决定角色由什么构成。
  *
- * Two selectors, not three: the default sheet is light, and `[data-theme="dark"]` on the document
- * element replaces the roles. The static ramps contain a few values that differ between the sheets
- * (`deepseek-400`'s brightening), so they are restated rather than assumed identical.
+ * 两个选择器，不是三个：默认表是浅色，文档元素上的 `[data-theme="dark"]` 替换角色。静态色阶
+ * 含少量两表不同的值（`deepseek-400` 的提亮），所以它们被重述而不是假设相同。
  */
 
 :root {
-	/* Static ramps — the raw palette. */
+	/* 静态色阶 —— 原始调色板。 */
 	--dsw-static-amber-100: rgb(254, 245, 231);
 	--dsw-static-amber-400: rgb(247, 173, 49);
 	--dsw-static-amber-500: rgb(245, 158, 11);
@@ -60,7 +57,7 @@
 	--dsw-static-red-900: rgb(87, 12, 12);
 	--dsw-static-purple-400: rgb(198, 120, 221);
 
-	/* Type, motion, and radius. */
+	/* 字体、动效与圆角。 */
 	--dsw-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
 		"Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
 	--dsw-font-mono: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", Menlo, Courier,
@@ -70,13 +67,11 @@
 	--dsw-duration-fast: 0.1s;
 
 	/*
-	 * The type scale, five tiers derived from one base. Each tier states its size and its leading
-	 * together — a size without the line it sits on is half a decision, and restating the pair per
-	 * rule is the same mistake made twice. The base is the one number that moves: the appearance
-	 * setting's font-size slider publishes its value straight onto `--dsw-fs-base` at runtime
-	 * (state.ts), and every tier reads `--dsw-fs-delta` off it, so the slider drives the whole
-	 * window — body, headings, code, tables, the sidebar, the header, the status line — while each
-	 * tier keeps its own step from the base. The default here is the slider's default.
+	 * 字阶，五档由一个基派生。每档同时声明字号和行高 —— 没有行高的字号是半个决定，逐规则重述
+	 * 这一对就是把同一个错误犯两遍。基是唯一会动的数字：外观设置的字号滑块在运行时把值直接发布
+	 * 到 `--dsw-fs-base`（state.ts），每档从它读 `--dsw-fs-delta`，于是滑块驱动整个窗口 —— 正文、
+	 * 标题、代码、表格、侧栏、头部、状态行 —— 每档保有自己相对基的步长。这里的默认即滑块的
+	 * 默认。
 	 */
 	--dsw-fs-base: 15px;
 	--dsw-fs-delta: calc(var(--dsw-fs-base) - 15px);
@@ -100,29 +95,25 @@
 	--dsw-radius-panel: 28px;
 
 	/*
-	 * The sidebar's width and the range its drag handle can reach.
+	 * 侧栏的宽度，及其拖动把手能够到的范围。
 	 *
-	 * The width is the default, and the one variable the window overrides at runtime: the drag
-	 * handle (main.ts) writes the dragged value straight onto it, and the stored preference lands
-	 * here through applyAppearance on every settings load. The min and max are the same numbers the
-	 * server clamps a stored preference against (`SIDEBAR_WIDTH_RANGE` in core/config.ts); the
-	 * handle reads them back from here at drag time, so this file — not a JS constant — is where
-	 * the clamp lives, and changing it changes both ends at once.
+	 * 宽度是默认值，也是窗口在运行时覆盖的唯一变量：拖动把手（main.ts）把拖出的值直接写上来，
+	 * 存储的偏好随每次设置加载经 applyAppearance 落到这里。min 和 max 与服务端截断存储偏好用的
+	 * 是同一对数字（core/config.ts 的 `SIDEBAR_WIDTH_RANGE`）；把手在拖动时从这里读回，所以截断
+	 * 住在本文件而不是 JS 常量里，改一处就同时改变两端。
 	 */
 	--dsw-sidebar-width: 232px;
 	--dsw-sidebar-min: 208px;
 	--dsw-sidebar-max: 360px;
 
 	/*
-	 * The reading column's width axis.
+	 * 阅读列的宽度轴。
 	 *
-	 * `--dsw-content-width` is the one runtime value: the handle (main.ts) computes it — the stored
-	 * preference, or the conversation column's own width minus a gutter at each side when the user
-	 * never dragged — and writes it here on every layout change, because the default is a formula
-	 * against the column's width and not a value this sheet could state. The min and cap are the
-	 * absolute ends the server clamps a stored preference against (`CONTENT_WIDTH_RANGE` in
-	 * core/config.ts); the two gutters are the resting and the tightest side room the formula
-	 * consumes. The value below is only what the page shows before that first write lands.
+	 * `--dsw-content-width` 是唯一的运行时值：把手（main.ts）计算它 —— 存储的偏好，或用户从未
+	 * 拖过时对话列减去两侧留白 —— 并在每次布局变化时写到这里，因为默认是针对列宽的公式，不是
+	 * 这张表能声明的值。min 和 cap 是服务端截断存储偏好所对的绝对两端（core/config.ts 的
+	 * `CONTENT_WIDTH_RANGE`）；两个留白是公式消耗的静止与最紧侧空。下面的值只是首次写入落地前
+	 * 页面显示的东西。
 	 */
 	--dsw-content-width: 46rem;
 	--dsw-content-min: 600px;
@@ -131,12 +122,11 @@
 	--dsw-content-gutter-tight: 20px;
 
 	/*
-	 * The app settings panel's fixed shape.
+	 * 应用设置面板的固定形状。
 	 *
-	 * One height for every section, taken from the viewport rather than the content: a content-sized
-	 * panel would resize under the pointer on every nav click. The air is the room the panel keeps
-	 * at each side of the viewport — the overlay pads by it and the height subtracts two of it, so
-	 * the panel sits centered and the two numbers cannot drift apart.
+	 * 每个区块同一高度，取自视口而不是内容：按内容定尺寸的面板会在每次点击导航时在指针下变
+	 * 大小。air 是面板距视口每侧保留的空隙 —— overlay 以它内边距、高度减去两倍它，面板因此
+	 * 居中且完整，两个数字也不会漂移。
 	 */
 	--dsw-settings-width: 800px;
 	--dsw-settings-height: 800px;
@@ -144,25 +134,23 @@
 	--dsw-settings-air: 24px;
 
 	/*
-	 * The status line's context meter thickness.
+	 * 状态行上下文条的粗细。
 	 *
-	 * The meter is the one bar on the status line, and it sits beside caption-size text, so it must
-	 * read without ever weighing like the chrome bars (6-8px) elsewhere in the window. One notch
-	 * above its original 3px lands on 5px: a single 1px step is invisible at this scale, and 5 keeps
-	 * the meter under the handle track and toggles it must not compete with.
+	 * 条是状态行上唯一的 bar，坐在 caption 字号的文字旁边，所以它必须能被读出、又绝不能有窗口
+	 * 其他地方的 chrome 条（6-8px）的分量。比原来的 3px 高一档落在 5px：这个尺度上 1px 的变化
+	 * 不可见，而 5 让条低于它不该与之竞争的把手轨道和开关。
 	 */
 	--dsw-status-meter-h: 5px;
 
-	/* Alias roles — light. */
+	/* 别名角色 —— 浅色。 */
 	--dsw-bg-base: var(--dsw-static-neutral-bluish-00);
 	--dsw-bg-layer-1: var(--dsw-static-neutral-bluish-00);
 	--dsw-bg-layer-2: var(--dsw-static-neutral-bluish-00);
 	--dsw-bg-layer-3: var(--dsw-static-neutral-bluish-00);
 	/*
-	 * The sidebar's fill, and the top band's with it — the two are one surface. The step is measured,
-	 * not tasted: the reference window's light sidebar reads `rgb(245,246,247)`, one notch deeper
-	 * than the `bluish-50` the sheet first had, enough for the panel's white and the sidebar's grey
-	 * to carry the two columns without a divider line.
+	 * 侧栏的填充，顶带与之同 —— 两者是一个表面。这一档是量出来的，不是尝出来的：参考窗口的
+	 * 浅色侧栏读作 `rgb(245,246,247)`，比表最初的 `bluish-50` 深一档，正好让面板的白与侧栏的灰
+	 * 在没有分隔线的情况下撑起两列。
 	 */
 	--dsw-bg-sidebar: var(--dsw-static-neutral-bluish-60);
 	--dsw-bg-hover: rgba(38, 49, 72, 0.06);
@@ -185,8 +173,7 @@
 	--dsw-state-error: var(--dsw-static-red-600);
 	--dsw-state-warn: var(--dsw-static-amber-500);
 	--dsw-state-warn-label: var(--dsw-static-amber-600);
-	/* The warn strip's own fill: the tint behind a waiting approval's status line, one step calmer
-	   than the border it sits inside. */
+	/* 警示条自己的填充：等待审批的状态行背后的底色，比它所在的边框冷静一档。 */
 	--dsw-warn-tint: var(--dsw-static-amber-100);
 	--dsw-button-primary-fill: var(--dsw-static-neutral-bluish-1000);
 	--dsw-button-primary-hover: var(--dsw-static-neutral-bluish-750);
@@ -201,56 +188,48 @@
 	--dsw-code-inline: var(--dsw-static-neutral-bluish-75);
 	--dsw-diff-added: var(--dsw-static-green-500-a08);
 	--dsw-diff-deleted: rgb(236 19 19 / 8%);
-	/* The stronger pair marks the part of a rewritten line that differs, inside a row that is already
-	   tinted; at the row's own strength the mark would be invisible. */
+	/* 更强的一对标记重写行中实际不同的部分，那一行本身已经有底色；按行自己的强度标记会看不见。 */
 	--dsw-diff-added-strong: rgb(34 197 94 / 24%);
 	--dsw-diff-deleted-strong: rgb(236 19 19 / 22%);
 	--dsw-shadow-panel: 0 8px 24px rgba(15, 17, 21, 0.12), 0 1px 2px rgba(15, 17, 21, 0.08);
 	/*
-	 * What the page behind a modal is dimmed with — the settings panel and the one card that asks for
-	 * a line of typing, which are the only two modals the window has.
+	 * 模态身后的页面被调暗所用的值 —— 设置面板和唯一一张要求一行输入的卡片，本窗口仅有的两个
+	 * 模态。
 	 *
-	 * One value for both themes rather than a pair: a scrim's job is to push the page back, and the
-	 * surfaces it is drawn over are already as far apart as the two themes can make them. It is a token
-	 * rather than a literal at each call site because a colour written in `style.css` is a colour no
-	 * theme can move — the rule AGENTS.md states, and the reason this one moved here.
+	 * 两种主题一个值而不是一对：scrim 的职责是把页面推回去，它盖着的表面已经远到两种主题能拉开
+	 * 的最大距离。它是 token 而不是各调用点的字面量，因为写进 `style.css` 的颜色是任何主题都动
+	 * 不了的颜色 —— AGENTS.md 陈述的规则，也是它搬到这里的原因。
 	 */
 	--dsw-scrim: rgb(0 0 0 / 32%);
 	/*
-	 * What the reasoning row's fade mask is inked with.
+	 * 推理行的渐隐遮罩用的墨色。
 	 *
-	 * A CSS mask reads the gradient's alpha, not its color, so the ink never shows and is one value
-	 * for both themes — but it is a token rather than a literal at the call site because a colour
-	 * written in `style.css` is a colour no theme can move (the rule AGENTS.md states, the same
-	 * reason the scrim moved here).
+	 * CSS mask 读渐变的 alpha 而不是颜色，所以墨色从不显示、两种主题同值 —— 但它是 token 而不是
+	 * 调用点的字面量，因为写进 `style.css` 的颜色是任何主题都动不了的颜色（AGENTS.md 陈述的规则，
+	 * 与 scrim 搬来的理由相同）。
 	 */
 	--dsw-mask-ink: rgb(0 0 0 / 100%);
 	--dsw-scrollbar-thumb: var(--dsw-static-neutral-300);
 	--dsw-scrollbar-thumb-hover: var(--dsw-static-neutral-300);
 	/*
-	 * The branch page's lane palette, one lane per row of the tree. Four colors, cycling: enough to
-	 * keep a fork's children telling themselves apart, few enough that a deep tree still reads as
-	 * "these lanes are the same kind of thing". The same four in both themes — they are lane markers,
-	 * not surfaces.
+	 * 分支页的行调色板，树的每一行一条。四种颜色循环：足以让一次派生的孩子们互相分清，又少到
+	 * 深树仍读作"这些行是同一类东西"。两种主题同四色 —— 它们是行标记，不是表面。
 	 */
 	--dsw-lane-1: var(--dsw-static-deepseek-400);
 	--dsw-lane-2: var(--dsw-static-green-400);
 	--dsw-lane-3: var(--dsw-static-amber-400);
 	--dsw-lane-4: var(--dsw-static-purple-400);
 	/*
-	 * The branch page's card, and the lane one sits in.
+	 * 分支页的卡片，以及它所在的行高。
 	 *
-	 * Both are derived from the type scale rather than stated, because the card is **fixed** height: the
-	 * label is one ellipsised line and the whole sentence lives in the card's tooltip, so a card that
-	 * sized itself to its text would push the row below it around. A fixed number here would therefore
-	 * be right only at the slider's default size — at the top of the range it would clip the meta line
-	 * instead. The sum is the card's own box, term for term: the two line boxes (`.lbl` on
-	 * `--dsw-lh-meta`, `.meta` on `--dsw-lh-caption`), the 2px flex gap between them, and the vertical
-	 * chrome of `padding: 4px 10px` plus `border: 1px` — 4+4+1+1, the last four pixels being the border,
-	 * without which `box-sizing: border-box` would leave the content box 2px short of its own two lines.
-	 * Only the gap and the padding follow `--dsw-fs-delta`; the border is one device pixel whatever the
-	 * type does. A lane is a card plus air. The graph measures both off a probe element and lays the
-	 * lanes out with them (`branch-view.ts`), which is why they are tokens and not literals there.
+	 * 两者从字阶派生而不是直接声明，因为卡片是**固定**高度：标签是一行被省略的文本、整句活在
+	 * 卡片的 tooltip 里，按文本自适应的卡片会推挤下面的行。这里写固定数字只在滑块默认字号下
+	 * 正确 —— 在范围顶端会裁掉 meta 行。和式逐项对应卡片自己的盒子：两个行盒（`.lbl` 用
+	 * `--dsw-lh-meta`、`.meta` 用 `--dsw-lh-caption`）、其间 2px 的 flex gap、以及 `padding: 4px 10px`
+	 * 加 `border: 1px` 的纵向 chrome —— 4+4+1+1，最后四个像素是边框，没有它 `box-sizing: border-box`
+	 * 会让内容盒比自己的两行矮 2px。只有 gap 和 padding 跟随 `--dsw-fs-delta`；边框无论字号如何
+	 * 都是一个设备像素。一行高是一张卡加空隙。图从探针元素量出两者并据此排行（`branch-view.ts`），
+	 * 正是它们在那里是 token 而不是字面量的原因。
 	 */
 	--dsw-branch-node-h: calc(
 		var(--dsw-lh-meta) + 2px + var(--dsw-fs-delta) + var(--dsw-lh-caption) + 10px + var(--dsw-fs-delta)
@@ -311,7 +290,7 @@
 	color-scheme: dark;
 }
 
-/* Windows draws its caption inset into the page, so the sidebar has to clear the buttons. */
+/* Windows 把标题栏内嵌进页面，所以侧栏必须避开按钮。 */
 :root {
 	--desktop-titlebar: 0px;
 	--desktop-traffic-light-inset: 0px;

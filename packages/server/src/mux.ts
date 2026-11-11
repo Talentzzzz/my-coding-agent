@@ -12,207 +12,156 @@ import type { SessionFeeds, SessionHub } from "./hub.ts";
 import type { SessionProjection } from "./projection.ts";
 
 /**
- * How long the server waits before deciding a client has stopped answering.
+ * 服务器判定客户端已停止应答前等待的时长。
  *
- * RFC 6455 gives a Pong no deadline of its own — a server may ping as often as it likes — so the
- * interval and the tolerance are this layer's choices. Two seconds with two misses tolerated, which
- * makes the *third* unanswered ping the one that ends a connection: about six seconds.
+ * RFC 6455 没有给 Pong 设自己的期限——服务器想 ping 多勤都行——所以间隔和容忍度是这一层自己的选择。两秒一次、容忍两次未应答，也就是说*第三次*未应答的 ping 才会终结一条连接：大约六秒。
  *
- * Two misses rather than one is not caution. RFC 6455 §5.5.3 explicitly allows a peer to answer only
- * the *last* of several pings it received, so a client that batches replies is behaving correctly and
- * a tolerance of one would kill healthy connections on timing alone.
+ * 容忍两次而不是一次并非保守。RFC 6455 §5.5.3 明确允许 peer 只应答它收到的*最后*一个 ping，所以批量回复的客户端是守规矩的，容忍度为 1 会让健康的连接纯粹因为时序而死。
  *
- * The cost of a false positive is a reconnection and a fresh baseline, not a wrong answer.
+ * 误杀的代价是一次重连加一份新 baseline，而不是一个错误的答案。
  */
 const PING_INTERVAL_MS = 2_000;
 
-/** How many pings may go unanswered before the connection is dropped. */
+/** 多少个 ping 未被应答后连接被丢弃。 */
 const MAX_MISSED_PONGS = 2;
 
 /**
- * How often every connection is told, in one frame, that the channel is alive.
+ * 每条连接每隔多久被告知一次"通道还活着"，用一帧完成。
  *
- * Separate from the ping above because they have different readers and no other reason to agree. A
- * Pong is visible only here — the browser never sees one — so it cannot be what the client's read
- * timeout watches. This frame is what the client watches, and it exists because the browser's
- * WebSocket API offers it no equivalent signal of its own.
+ * 与上面的 ping 分开，因为它们的读者不同，也没有别的理由必须一致。Pong 只有这里可见——浏览器永远看不到一个——所以它不可能是客户端读超时所监视的东西。这个帧才是客户端监视的对象，它存在的原因是浏览器的 WebSocket API 不提供任何等价的信号。
  *
- * Five seconds, and deliberately not a multiple of the ping interval: the two timers answer different
- * questions, and making one a function of the other would invite a later reader to treat a Pong as
- * proof the client is well — exactly the assumption that made the SSE heartbeat worthless.
+ * 五秒，且刻意不是 ping 间隔的倍数：两个定时器回答的是不同的问题，让其中一个成为另一个的函数，会诱使后来的读者把 Pong 当成客户端安好的证明——恰恰是让 SSE 心跳失去价值的那个假设。
  */
 const HEARTBEAT_INTERVAL_MS = 5_000;
 
-/** How many bytes may accumulate behind a connection that stopped accepting writes. */
+/** 停止接受写入的连接背后允许积压多少字节。 */
 const STALL_BUDGET_BYTES = 4 * 1024 * 1024;
 
 /**
- * How long a stalled connection may stay stalled before it is closed.
+ * 一条停滞的连接在关闭前允许停滞多久。
  *
- * The other half of the same budget as {@link STALL_BUDGET_BYTES}, and the half that actually fires. A
- * peer that has stopped reading fills its socket buffer within a couple of frames, so the byte ceiling
- * is reached only by a peer reading slowly rather than not at all; the measured behaviour of a fully
- * stalled peer is a queue that levels off in the tens of kilobytes and a deadline that runs out.
+ * 与 {@link STALL_BUDGET_BYTES} 同一预算的另一半，也是真正会触发的那一半。停止读取的 peer 会在几个 frame 内填满它的 socket 缓冲，所以字节上限只有"读得慢"的 peer 才会触到；完全停滞的 peer 的实测行为是队列在几十 KB 处走平、然后期限到期。
  *
- * It must stay below the client's read timeout (fifteen seconds), and that ordering is the whole
- * point: a channel that has stopped moving should end with a *server* close, so the client reconnects
- * at once on a channel it already knows is broken, rather than discovering the problem by waiting out
- * its own watchdog.
+ * 它必须小于客户端的读超时（十五秒），这个先后顺序就是全部要点：一条停止移动的通道应该以*服务器*的 close 收场，让客户端立刻在一条它已经知道坏掉的通道上重连，而不是靠等自己的看门狗发现问题。
  */
 const STALL_DEADLINE_MS = 10_000;
 
-/** RFC 6455 §7.4.1: "try again later". What a stalled connection is closed with. */
+/** RFC 6455 §7.4.1："稍后再试"。停滞连接以此关闭。 */
 const CLOSE_TRY_AGAIN_LATER = 1013;
 
-/** RFC 6455 §7.4.1: going away. What a server that is shutting down closes with. */
+/** RFC 6455 §7.4.1：离开。正在关闭的服务器以此关闭。 */
 const CLOSE_GOING_AWAY = 1001;
 
 /**
- * The reasons that go with those codes, in one place, because they are the same kind of string.
+ * 与那些 code 配套的 reason，集中在一处，因为它们是同一类字符串。
  *
- * English, deliberately: a Close reason is read by a client deciding what to do next, and it sits
- * beside codes like the `4000 "reconnect requested"` the client itself sends. The Chinese in this file
- * is for the people reading it — the one line this layer logs — and that line is deliberately not the
- * one on the wire.
+ * 刻意用英文：Close reason 的读者是决定下一步怎么做的客户端，而且它与客户端自己发送的 `4000 "reconnect requested"` 之类的 code 并排出现。本文件里的中文是给读代码的人看的——本层唯一会打的那行日志——而那行日志刻意不是 wire 上的那条。
  */
 const REASON_STOPPED_READING = "subscription client stopped reading";
 const REASON_SHUTTING_DOWN = "server is shutting down";
 
 /**
- * What this layer writes to, so the queue can be tested without a socket.
+ * 本层写入的对象，让队列可以在没有 socket 的情况下测试。
  *
- * Four members, and they are the four the policy needs: whether the socket will take more, how to ask
- * it a protocol-level question, how to close it politely, and how to drop it when it has stopped
- * answering. Anything more would be a socket this seam cannot fake, which is the point of having it.
+ * 四个成员，恰好是策略需要的四个：socket 还收不收、如何问它一个协议层的问题、如何礼貌地关闭、以及停止应答时如何丢弃。再多一点就是这条缝伪装不了的 socket 了——这正是这条缝存在的意义。
  */
 export interface FrameSink {
 	/**
-	 * Write one frame.
+	 * 写一帧。
 	 *
-	 * Returns what the socket's own `write()` returned. `false` means the connection can no longer be
-	 * written to directly, and it is the only signal the whole stall policy rests on.
+	 * 返回 socket 自己的 `write()` 返回的值。`false` 意味着这条连接不再能被直接写入，它是整个停滞策略赖以成立的唯一信号。
 	 */
 	send(frame: ServerFrame): boolean;
-	/** Ask the peer a protocol-level question it must answer. */
+	/** 向 peer 问一个它必须应答的协议层问题。 */
 	ping(): void;
-	/** Close politely, with a code and reason the peer will see. */
+	/** 礼貌地关闭，带上 peer 将看到的 code 和 reason。 */
 	close(code: number, reason: string): void;
-	/** Drop the connection without waiting for the peer. */
+	/** 不等 peer，直接丢弃连接。 */
 	terminate(): void;
-	/** Whether this sink is finished, whoever finished it. */
+	/** 这个 sink 是否已结束，无论由谁结束。 */
 	readonly isClosed: boolean;
 }
 
 /**
- * How this layer's timers and budgets are measured.
+ * 本层的定时器和预算如何度量。
  *
- * An option only so a smoke can drive them in milliseconds; nothing in production sets it. The same
- * reason `HubOptions.approvalGraceMs` is one: a timer a test cannot reach is a timer a test cannot
- * check, and reaching it with sleeps makes a suite slow and flaky at the same time.
+ * 之所以是选项，只是为了让 smoke 用毫秒驱动它们；生产中没有任何东西设置它。与 `HubOptions.approvalGraceMs` 理由相同：测试够不到的定时器就是测试检查不了的定时器，而用 sleep 去够会让测试套件又慢又飘。
  */
 export interface MuxOptions {
-	/** See {@link PING_INTERVAL_MS}. */
+	/** 见 {@link PING_INTERVAL_MS}。 */
 	pingIntervalMs?: number;
-	/** See {@link MAX_MISSED_PONGS}. */
+	/** 见 {@link MAX_MISSED_PONGS}。 */
 	maxMissedPongs?: number;
-	/** See {@link HEARTBEAT_INTERVAL_MS}. */
+	/** 见 {@link HEARTBEAT_INTERVAL_MS}。 */
 	heartbeatIntervalMs?: number;
-	/** See {@link STALL_BUDGET_BYTES}. */
+	/** 见 {@link STALL_BUDGET_BYTES}。 */
 	stallBudgetBytes?: number;
-	/** See {@link STALL_DEADLINE_MS}. */
+	/** 见 {@link STALL_DEADLINE_MS}。 */
 	stallDeadlineMs?: number;
-	/** Where the one line about a stalled connection goes. Defaults to the console. */
+	/** 关于停滞连接的那一行日志的去处。默认是 console。 */
 	log?: (line: string) => void;
 }
 
-/** Every option resolved, which is what the connection and the server actually take. */
+/** 所有选项解析完毕后的形态，连接和服务器实际接收的就是它。 */
 export type ResolvedMuxOptions = Required<MuxOptions>;
 
 /**
- * One session this connection is watching.
+ * 本连接正在观看的一个会话。
  *
- * A subscription is a *connection × session* pair, which is why it lives here and not on the session:
- * two windows on one conversation hold two of these, each reporting approval differences from its own
- * starting point, and neither is a fact about the session.
+ * 订阅是一个*连接 × 会话*对，这就是它住在这里而不是会话上的原因：同一会话的两个窗口各持有一个，各自从自己的起点上报审批差异，两者都不是关于会话的事实。
  *
- * It takes no hold. Watching a session does not keep it running — a hold says somebody is running or
- * changing it — so nothing here is an input to the hub's decision about whether a session may be
- * closed. That separation is load-bearing: if a subscription took one, a window left open on an
- * idle conversation would keep an `Agent` assembled for nobody, forever.
+ * 它不占 hold。观看一个会话不让它保持运行——hold 表示有人在运行或修改它——所以这里的任何东西都不是 hub 判断会话能否关闭的输入。这个分离是承重的：如果订阅占一个 hold，一个开着窗口盯着空闲会话的浏览器就会让一个无人使用的 `Agent` 永远驻留。
  */
 interface Subscription {
 	/**
-	 * The approvals this subscription has already told its browser about, by `toolCallId`.
+	 * 本订阅已经告诉浏览器的审批，按 `toolCallId`。
 	 *
-	 * Keyed on the assumption that a `toolCallId` is unique within one session — the same assumption
-	 * `Agent.pendingApprovals` is built on, backed by the provider's `tool_use` id semantics. Two
-	 * sessions happening to share an id is a different fact and no defect: the answers table is keyed
-	 * by session first, so one session's answer never reaches the other's window.
+	 * 以"一个 `toolCallId` 在一个会话内唯一"为前提键控——与 `Agent.pendingApprovals` 相同的前提，由 provider 的 `tool_use` id 语义背书。两个会话碰巧共用一个 id 是另一回事，不是缺陷：answers 表先按会话键控，一个会话的答案永远不会到达另一个会话的窗口。
 	 */
 	pending: Map<string, PendingApproval>;
 	/**
-	 * Frames produced before the baseline went out, or `null` once it has.
+	 * baseline 发出之前产生的帧，baseline 发出后为 `null`。
 	 *
-	 * An array means "the baseline is still owed"; `null` means it is out. That distinction is why this
-	 * is not a length test — the array is legitimately empty in both states, and an empty backlog after
-	 * the baseline is the ordinary case rather than a special one.
+	 * 数组表示"还欠一个 baseline"；`null` 表示已经发出。这个区分正是它不做长度判断的原因——两种状态下数组都合法地可以为空，而 baseline 之后空 backlog 是常态而非特例。
 	 */
 	backlog: ServerFrame[] | null;
 	/**
-	 * Everything to undo, in the order it was set up.
+	 * 所有要撤销的东西，按设置的顺序。
 	 *
-	 * A list rather than a single reassignable function, and the reason is the order these things
-	 * happen in: `observe` calls back *synchronously* for a session that is already running, so the
-	 * feeds are attached before this subscription has even finished being created. A function that
-	 * each step wrapped the previous one would have its work overwritten by the next assignment — and
-	 * the lost half is the feed listeners, which is exactly the half that keeps a finished connection
-	 * alive and still writing frames for a subscription the client cancelled.
+	 * 用列表而不是单个可重赋值的函数，原因在于这些事发生的顺序：对已在运行的会话，`observe` *同步*回调，所以 feed 在这个订阅还没创建完之前就已挂上。一个每步包裹前一步的函数会被下一次赋值覆盖掉工作——而丢掉的恰好是 feed 监听器那半，正是让一个已结束的连接保持存活、还在为客户端已取消的订阅写帧的那半。
 	 */
 	teardown: (() => void)[];
 }
 
 /**
- * One client connection: a subscription table, a bounded write queue, and the counter that judges
- * whether the peer is still answering.
+ * 一个客户端连接：一张订阅表、一个有界写队列，以及判定 peer 是否仍在应答的计数器。
  *
- * The connection's lifetime is the connection, not any run. It outlives every subscription on it and
- * every turn of every session they watch, and it ends only when the peer goes away or this server
- * decides it has — which is what lets one window hold several conversations at once instead of
- * reconnecting between them.
+ * 连接的生命周期是连接本身，不是任何一次运行。它活得比它上面的每个订阅、它们观看的每个会话的每一轮都久，只在 peer 离开或本服务器判定它已离开时结束——这才让一个窗口同时看多个会话，而不是在会话之间反复重连。
  */
 export class MuxConnection {
-	/** What this connection is watching, by session id. One stream per session, never two. */
+	/** 本连接正在观看的会话，按会话 id。每个会话一条流，绝无两条。 */
 	private readonly subscriptions = new Map<string, Subscription>();
 	/**
-	 * The run results this connection is still waiting for, by session id — the hub stopper each
-	 * `wait` frame bought, kept so the matching `unwait` (or this connection's death) can call it.
+	 * 本连接仍在等待结果的运行，按会话 id——每个 `wait` frame 买来的那个 hub 停止器，留着让匹配的 `unwait`（或本连接的消亡）调用。
 	 *
-	 * Deliberately outside the subscription table. A wait is not a watch: it can be reported before
-	 * the `open` beside it has been processed, it survives an `end` (the client releases it when it
-	 * has *read* the run's last word, not when the stream is torn), and it does not participate in
-	 * the baseline/backlog machinery at all. One per session — the client holds at most one send
-	 * reference per session — and idempotent, because a reconnect's replay re-reports the waits it
-	 * still holds (issue 13).
+	 * 刻意放在订阅表之外。wait 不是 watch：它可以在旁边的 `open` 被处理之前上报，它能在 `end` 之后存活（客户端在*读到*运行的最后一句话时释放它，而不是在流被拆除时），也完全不参与 baseline/backlog 机制。每个会话一个——客户端对每个会话最多持有一个 send 引用——且幂等，因为重连的 replay 会重新上报它仍持有的 wait（issue 13）。
 	 */
 	private readonly waits = new Map<string, () => void>();
 	/**
-	 * Frames that could not be written, oldest first.
+	 * 未能写入的帧，最旧的在前。
 	 *
-	 * The queue exists because there is nowhere to push back. Events are produced by the agent loop and
-	 * pushed at this layer; making `send` awaitable would propagate that wait into a vendored loop that
-	 * must not change, so one browser pausing would stall the model instead of the window. Buffering
-	 * keeps the loop running and puts the cost on the connection, the only party that can afford it.
+	 * 这个队列存在是因为无处反压。事件由 agent loop 产生、在这一层推入；把 `send` 变成 awaitable 会把那个等待传染进一个不许改动的 vendored loop，于是一个暂停的浏览器会拖住模型而不是窗口。缓冲让 loop 继续跑，把代价放在连接上——唯一付得起的一方。
 	 */
 	private readonly queue: ServerFrame[] = [];
-	/** How many bytes the queue holds, so the budget is a comparison rather than a sum. */
+	/** 队列当前占用的字节数，让预算是一个比较而不是一次求和。 */
 	private queuedBytes = 0;
-	/** Whether the socket has stopped accepting writes, and everything must wait its turn. */
+	/** socket 是否已停止接受写入，之后的一切必须排队等轮次。 */
 	private stalled = false;
-	/** When the socket stopped accepting, which is what the deadline is measured from. */
+	/** socket 停止接受的时刻，期限从这里起算。 */
 	private stalledSince = 0;
-	/** The deadline, or null while nothing is waiting. */
+	/** 期限定时器，没有在等的时候为 null。 */
 	private stallTimer: NodeJS.Timeout | null = null;
-	/** Pings sent since a Pong last arrived. */
+	/** 上一次 Pong 到达以来发出的 ping 数。 */
 	private missedPongs = 0;
 	private closed = false;
 
@@ -234,20 +183,16 @@ export class MuxConnection {
 	}
 
 	/**
-	 * Send one frame, queueing it if the connection has stopped accepting writes.
+	 * 发送一帧，连接停止接受写入时入队。
 	 *
-	 * Synchronous and `void`, and that is the interface the rest of the server is written against
-	 * rather than a simplification. A run's frames are produced from inside the agent loop, which has
-	 * no way to await anything; making this a promise would mean every call site had to become async
-	 * and the loop would have to learn about one window's backpressure.
+	 * 同步且 `void`，这是服务器其余部分所依赖的接口，而不是一个简化。一次运行的帧产自 agent loop 内部，它没有任何 await 的手段；把这变成 promise 意味着每个调用点都得变 async，loop 还得了解某个窗口的 backpressure。
 	 *
-	 * On the normal path this is one `write()` and a return: no copy, no promise, no timer.
+	 * 正常路径就是一次 `write()` 加一个返回：没有拷贝、没有 promise、没有定时器。
 	 */
 	send(frame: ServerFrame): void {
 		if (this.closed) return;
 
-		// A stalled connection is pumped before the new frame joins, so the queue stays in order and a
-		// connection that recovered in the meantime never accumulates behind a burst it could have taken.
+		// 停滞的连接在新帧加入前先泵一次，让队列保持有序，也让中途恢复的连接不必排在一个本可以立刻吃下的突发后面。
 		if (this.stalled) this.pump();
 		if (this.stalled) {
 			this.enqueue(frame);
@@ -255,27 +200,20 @@ export class MuxConnection {
 		}
 		if (this.sink.send(frame)) return;
 
-		// `false` means this frame was accepted into the socket's own buffer and is queued *there*, so
-		// it must not be written again or it would be delivered twice. From here the connection counts
-		// as stalled and everything after this frame waits.
+		// `false` 意味着这帧已被收进 socket 自己的缓冲、排队在*那里*，所以绝不能重写，否则会送达两次。从这一刻起连接算作停滞，这帧之后的一切都要等。
 		this.markStalled();
 	}
 
 	/**
-	 * Deal with one uplink frame.
+	 * 处理一个上行帧。
 	 *
-	 * `open` is the interesting one, and its whole meaning is that the subscription and its baseline
-	 * are one atomic act: the entry is created, the feeds are attached, and the baseline is written
-	 * without an `await` in between on the ordinary path. That is what makes "no gap between baseline
-	 * and increments" true by construction rather than by argument — there is no moment at which a
-	 * change could arrive between reading the session's state and starting to listen for it.
+	 * `open` 是有趣的一个，它的全部意义在于订阅和 baseline 是一个原子动作：entry 被创建、feed 被挂上、baseline 被写出，常规路径中间没有 `await`。这才让"baseline 与增量之间没有缝隙"由构造成立而非靠论证成立——不存在这样一个时刻：读取会话状态与开始监听之间恰好插进一个变更。
 	 */
 	handle(text: string): void {
 		if (this.closed) return;
 		const frame: ClientFrame | undefined = parseClientFrame(text);
 		if (frame === undefined) {
-			// Dropped rather than fatal, and logged rather than silent. See `parseClientFrame`: one
-			// unreadable frame must not cost a window its whole connection.
+			// 丢弃而不是致命错误，记日志而不是沉默。见 `parseClientFrame`：一帧读不懂的东西不能让一个窗口赔上整条连接。
 			this.options.log(`mux: 丢弃一帧看不懂的上行帧（${text.length} 字节）`);
 			return;
 		}
@@ -286,39 +224,27 @@ export class MuxConnection {
 	}
 
 	/**
-	 * Record that this connection is waiting for a run's result on a session.
+	 * 记录本连接正在等一个会话上某次运行的结果。
 	 *
-	 * The `wait` frame's whole meaning, and it is one call into the hub: the judgment that reads
-	 * this lives there ({@link SessionHub.awaitResult}), and this layer only carries the report —
-	 * the same division that has `cancel` report a watcher's departure rather than decide anything
-	 * about the session. Idempotent: a second `wait` for a session already waited on is the
-	 * reconnect's replay, and one entry covers it.
+	 * `wait` frame 的全部意义，就是对 hub 的一次调用：读这个判断的地方在 hub（{@link SessionHub.awaitResult}），本层只负责传达——与 `cancel` 传达一个观看者的离开、而不对会话做任何决定是同一种分工。幂等：对已在等待的会话再发一个 `wait` 是重连的 replay，一个 entry 覆盖它。
 	 */
 	private startWaiting(sessionId: string): void {
 		if (this.waits.has(sessionId)) return;
 		this.waits.set(sessionId, this.hub.awaitResult(sessionId));
 	}
 
-	/** Release one wait: the client answered the run's result, or is giving up on it. */
+	/** 释放一个 wait：客户端应答了运行结果，或正在放弃等待。 */
 	private stopWaiting(sessionId: string): void {
 		this.waits.get(sessionId)?.();
 		this.waits.delete(sessionId);
 	}
 
 	/**
-	 * Start watching one session, or bring a watch this connection already holds up to date.
+	 * 开始观看一个会话，或把本连接已持有的观看刷新到最新。
 	 *
-	 * `open` means "this session's state now, then everything after it" and it is idempotent
-	 * (ADR-0010 decision 1). A session this connection is *already* watching is therefore not a
-	 * mistake: the answer is one more baseline on the stream that already exists, and the
-	 * subscription underneath is left exactly as it is — same feeds, same approvals, same stream.
-	 * That is what makes "the pane went away while something else still held the session, and came
-	 * back" work: the reference count meant no `cancel` was sent, so a re-sent baseline is the only
-	 * thing that could answer the trip back.
+	 * `open` 的意思是"这个会话现在的状态，然后之后的一切"，且是幂等的（ADR-0010 决定 1）。本连接*已经在看*的会话因此不算错：应答是在已有的流上再发一份 baseline，底下的订阅原样保留——同样的 feed、同样的审批、同一条流。这才让"窗格在别处仍持有会话时消失、又回来了"能工作：引用计数意味着没有发过 `cancel`，回来这一程唯一能应答它的就是重发的 baseline。
 	 *
-	 * A session that does not exist is still a client's mistake, answered on the stream it concerns —
-	 * an `error` frame carrying the attribution, then an `end` so the failed attempt does not go on
-	 * looking like a stream that is merely quiet — and the connection is untouched either way.
+	 * 不存在的会话仍然是客户端的错，但应答写在它相关的流上——一个带归因的 `error` 帧，然后一个 `end`，让失败的尝试不至于继续看起来像一条只是安静的流——而连接本身无论哪种情况都不受影响。
 	 */
 	private open(sessionId: string): void {
 		const watching = this.subscriptions.get(sessionId);
@@ -330,15 +256,9 @@ export class MuxConnection {
 		const subscription: Subscription = { pending: new Map(), backlog: [], teardown: [] };
 		this.subscriptions.set(sessionId, subscription);
 
-		// Watching takes no hold, and that is still the whole point: the count belongs to callers that
-		// change or run a session, and a window looking at one is neither. Nor does it keep any state
-		// alive — a read replays and drops (ADR-0019), so the frames below are built from that answer
-		// and from the events of a run nobody here owns. `observe` is keyed by id and re-binds itself
-		// if this process later starts running the session, which is what lets "watch it, then send it
-		// a message" work.
+		// 观看不占 hold，这一点始终是全部关键：计数属于改变或运行会话的调用者，而看着它的窗口两者都不是。它也不让任何状态保持存活——读取是重放后即弃（ADR-0019），所以下面的帧由那次应答和一次不属于这里任何人的运行的事件构成。`observe` 按 id 键控，若本进程之后开始运行该会话会自动重绑，这正是"先看着它，再给它发消息"能工作的原因。
 		//
-		// `live` distinguishes "stopped running while I was watching" from "was never running", which is
-		// the same distinction `bind` relies on: only the first ends the stream.
+		// `live` 区分"我看着看着它停了"和"它从来就没在跑"，与 `bind` 依赖的是同一个区分：只有前者结束流。
 		let live = false;
 		const stopWatching = this.hub.observe(sessionId, (feeds) => {
 			if (feeds === undefined) {
@@ -349,30 +269,24 @@ export class MuxConnection {
 			this.bind(sessionId, subscription, feeds);
 		});
 
-		// Registered after the `observe` call on purpose, and appended rather than assigned: `bind` may
-		// already have appended the feed unsubscribers, and this must not displace them. See
-		// `Subscription.teardown`.
+		// 刻意在 `observe` 调用之后注册，且追加而不是赋值：`bind` 可能已经追加了 feed 的退订器，这一步不能挤掉它们。见 `Subscription.teardown`。
 		subscription.teardown.push(() => {
 			stopWatching();
-			// Whatever this subscription was still showing, nobody here will report it now: an answer
-			// waiting only for readers that are gone is an answer with no reason to be kept.
+			// 这个订阅还在展示的任何东西，这里都不会再有人上报了：一个只等已消失读者的应答，是一个没有理由留着的应答。
 			for (const toolCallId of subscription.pending.keys()) this.answers.hide(sessionId, toolCallId);
 			subscription.pending.clear();
 			subscription.backlog = null;
 			this.subscriptions.delete(sessionId);
 		});
 
-		// Already running: `observe` called back synchronously above and the baseline is out. Cold: read
-		// the transcript off disk, which is the one place an `await` is unavoidable — and the backlog is
-		// what keeps that await from opening a gap.
+		// 已在运行：上面的 `observe` 同步回调了，baseline 已经发出。冷的：从磁盘读 transcript，这是唯一无法绕开 `await` 的地方——而 backlog 正是让这个 await 打不开缝隙的东西。
 		if (subscription.backlog !== null) void this.readColdBaseline(sessionId, subscription);
 	}
 
 	/**
-	 * Undo one subscription: every step it registered, newest first.
+	 * 撤销一个订阅：它注册的每一步，后进先出。
 	 *
-	 * Reverse order because the steps are a stack — the feeds were attached after the watch was
-	 * registered, so they are the later thing to let go of.
+	 * 逆序是因为这些步骤是一个栈——feed 是在观看注册之后挂上的，所以它们也是更晚放下的东西。
 	 */
 	private teardown(subscription: Subscription): void {
 		for (let index = subscription.teardown.length - 1; index >= 0; index -= 1) {
@@ -382,55 +296,38 @@ export class MuxConnection {
 	}
 
 	/**
-	 * The baseline for a session this process is not running.
+	 * 本进程未在运行的会话的 baseline。
 	 *
-	 * The first one on a cold subscription, and every later one {@link pushBaseline} owes an idle
-	 * watch — the read is the same either way, and re-arming the backlog is what makes the second
-	 * one land behind the state it describes rather than on top of frames that already ran past it.
+	 * 冷订阅上的第一个，以及之后每个 {@link pushBaseline} 欠下一个空闲观看的——两种情况的读取相同，重新布防 backlog 正是让第二个落在它所描述的状态之后，而不是落在已经跑过去的帧顶上。
 	 *
-	 * A read assembles nothing (ADR-0019): the orchestrator's `snapshotOf` opens a bag, answers from
-	 * it, and drops it, so a watched-but-idle session costs one replay and leaves nothing behind — no
-	 * state to keep alive, nothing for this subscription to hold open. It takes no hold either,
-	 * because nobody here is changing or running anything. It is the answer to "watch an idle
-	 * conversation", which is the case the old run-scoped stream refused to serve at all.
+	 * 读取不拼装任何东西（ADR-0019）：orchestrator 的 `snapshotOf` 打开一个 bag、从中应答、然后丢弃，所以一个被观看但空闲的会话只花一次重放、什么都不留下——没有要养活的状态，没有这个订阅要撑开的开口。它同样不占 hold，因为这里没有任何人在改变或运行什么。它就是"观看一个空闲会话"的答案——旧有的按运行划分的流根本拒绝服务的那个场景。
 	 *
-	 * Everything produced while the read is in flight waits in the subscription's backlog. That is the
-	 * whole reason the backlog exists: without it, a run that started during the read would put frames
-	 * on this stream *before* the state they describe, and the client would render a transcript
-	 * jumping backwards.
+	 * 读取进行期间产生的一切都在订阅的 backlog 里等。这就是 backlog 存在的全部理由：没有它，读取期间开始的运行会把帧放在*描述它们的状态之前*，客户端会渲染出一条往回跳的 transcript。
 	 */
 	private async readColdBaseline(sessionId: string, subscription: Subscription): Promise<void> {
 		let snapshot: SessionSnapshot;
 		try {
 			snapshot = await this.hub.snapshotOf(sessionId);
 		} catch (error) {
-			// A failed `open`, answered like every other one: an error carrying the attribution, then
-			// the end that stops the attempt from going on looking like a stream that is merely quiet.
-			// An id that names nothing is the common case here — there is no pre-check any more, so the
-			// read itself is what discovers it — and its own sentence is clearer than a read failure.
+			// 一次失败的 `open`，与其他任何失败一样应答：先带归因的 error，再是让尝试不至于继续看起来像一条安静流的 end。这里最常见的情形是 id 什么都不指——已经没有预检查了，读取本身就是发现它的地方——而它自己那句话比一个读取失败更清楚。
 			if (!this.closed && this.subscriptions.get(sessionId) === subscription) {
 				const message = error instanceof UnknownSessionError ? `未知的会话：${sessionId}` : `读不出这个会话的记录：${describe(error)}`;
 				this.failStream(sessionId, message);
 			}
 			return;
 		}
-		// A `cancel` may have landed during the read, or the connection may have ended. Either way this
-		// baseline has nowhere to go, and writing it anyway would put a frame on a stream that is over.
+		// 读取期间可能落进一个 `cancel`，连接也可能已经结束。无论哪种，这份 baseline 都无处可去，硬写上去就是把一帧放到一条已经结束的流上。
 		if (this.closed || this.subscriptions.get(sessionId) !== subscription) return;
 		if (subscription.backlog === null) return;
 		this.writeBaseline(sessionId, subscription, snapshot);
 	}
 
 	/**
-	 * Stop watching one session.
+	 * 停止观看一个会话。
 	 *
-	 * The only meaning of dropping a subscription is "no more frames for this session on this
-	 * connection" — not "stop the run", not "close the session", not "release anything". A run started
-	 * from this window keeps its own hold and keeps going, which is what lets a window navigate away
-	 * from a conversation that is still answering.
+	 * 丢弃订阅的唯一含义是"这条连接上不再有这个会话的帧"——不是"停止运行"，不是"关闭会话"，不是"释放任何东西"。从这个窗口发起的运行保留自己的 hold 继续跑，这才让窗口在会话仍在应答时离开。
 	 *
-	 * No acknowledgement: the client's intent is complete once it has sent `cancel`, and a reply would
-	 * be a frame on a stream it has just said it does not want.
+	 * 没有应答：客户端的意图在发出 `cancel` 时就完整了，回复会是一帧写在它刚刚声明不想要的流上。
 	 */
 	private cancel(sessionId: string): void {
 		const subscription = this.subscriptions.get(sessionId);
@@ -438,53 +335,41 @@ export class MuxConnection {
 	}
 
 	/**
-	 * Bind a subscription to a live session's feeds.
+	 * 把订阅绑到一个活会话的 feed 上。
 	 *
-	 * A session this process is running answers synchronously, and then the whole thing — attach, read,
-	 * baseline — is one block with no `await` in it. That is the case the no-gap guarantee is built
-	 * around, and the cold path in {@link readColdBaseline} is the exception that pays for it.
+	 * 本进程正在运行的会话同步应答，于是 attach、读取、baseline 整个是一段没有 `await` 的同步代码块。no-gap 保证就是围绕这个场景构建的，{@link readColdBaseline} 的冷路径是为它买单的例外。
 	 *
-	 * A session that *starts* running while a cold subscription is still reading its file lands here
-	 * too, and the baseline is not sent again: the subscription has exactly one, and whichever read
-	 * finishes first is the one that owns it.
+	 * 一个冷订阅还在读文件时会话*开始*运行的情况也会落在这里，此时 baseline 不会重发：订阅恰好有一个，哪次读取先完成就归谁。
 	 */
 	private bind(sessionId: string, subscription: Subscription, feeds: SessionFeeds): void {
 		const onEvent = feeds.onEvent((event) => {
 			this.push(sessionId, subscription, { type: "event", event });
-			// A leaf that moved changes the whole transcript, so what goes out for it is the session's
-			// current state rather than a difference: the event says the tree moved, this says where to.
+			// 叶子移动改变整条 transcript，所以为它发出的是会话的当前状态而不是差异：事件说树动了，这帧说动到了哪里。
 			if (event.type === "branch_changed") this.pushBaseline(sessionId, subscription);
 			if (event.type === "entry_appended") this.pushEntry(sessionId, subscription, event.entryId, event.at);
 		});
 
 		const onChange = feeds.onChange((snapshot) => {
 			this.pushStatus(sessionId, subscription, snapshot);
-			// A pending approval is published as a change like any other, so this is where a window
-			// learns to show the banner. The baseline only seeds the ones already waiting.
+			// 待审批和其他变更一样以 change 发布，所以窗口就是在这里学会显示横幅的。baseline 只负责播种已经在等的那些。
 			this.pushApprovalChanges(sessionId, subscription, snapshot);
 		});
 
-		// Appended, never assigned — see `Subscription.teardown`. On the live path this lands *before*
-		// `open` registers its own step, which is why the teardown list is walked in reverse.
+		// 永远追加，从不赋值——见 `Subscription.teardown`。活路径上这里落在 `open` 注册自己那步*之前*，这正是 teardown 列表要逆序遍历的原因。
 		subscription.teardown.push(() => {
 			onEvent();
 			onChange();
 		});
 
-		// Already baselined means a cold read won the race; this subscription keeps the feeds it just
-		// acquired and leaves the frame to the read that is already in flight.
+		// 已有 baseline 意味着冷读赢下了竞速；本订阅保留刚拿到的 feed，把那一帧让给已在途中的读取。
 		if (subscription.backlog === null) return;
 		this.writeBaseline(sessionId, subscription, this.hub.snapshotNow(sessionId));
 	}
 
 	/**
-	 * Put a frame on this subscription's stream, holding it back if the baseline has not gone yet.
+	 * 把一帧放到本订阅的流上，baseline 还没发出时先扣住。
 	 *
-	 * The backlog is the answer to the one gap this design could otherwise have: a *cold* session's
-	 * transcript has to be read from disk, which is asynchronous, and something could be published
-	 * during that read. Buffering until the baseline is out, then flushing in order, keeps the
-	 * guarantee identical to the synchronous case — the client sees the state first and every change
-	 * after it, in the order they happened.
+	 * backlog 是对设计里唯一可能出现的缝隙的回答：*冷*会话的 transcript 必须从磁盘读，那是异步的，读取期间可能有东西被发布。扣到 baseline 发出、再按序冲刷，让保证与同步场景完全一致——客户端先看到状态，然后看到其后的每个变更，按发生顺序。
 	 */
 	private push(sessionId: string, subscription: Subscription, item: ServerMessageItem): void {
 		const frame: ServerFrame = { streamId: sessionId, item };
@@ -496,18 +381,13 @@ export class MuxConnection {
 	}
 
 	/**
-	 * Put the baseline out, then everything that piled up behind it.
+	 * 先发出 baseline，然后是堆积在它后面的一切。
 	 *
-	 * Called once per baseline — the first one by whichever of the two reads finishes first, and once
-	 * more for each {@link pushBaseline} that owed a fresh one — and always flushed in the order it
-	 * was produced, so a client cannot see the transcript jump backwards.
+	 * 每个 baseline 调一次——第一次由两次读取中先完成的那个调，之后每个欠了新 baseline 的 {@link pushBaseline} 各调一次——且永远按产生顺序冲刷，客户端不可能看到 transcript 往回跳。
 	 */
 	private writeBaseline(sessionId: string, subscription: Subscription, snapshot: SessionSnapshot): void {
 		if (subscription.backlog === null) return;
-		// A baseline *replaces* what this subscription was showing, so the counts that say "a reader
-		// has this approval on screen" move by the difference — the same way `pushApprovalChanges`
-		// moves them. Adding the set again would count the same reader twice; dropping it and adding
-		// it again would throw away an answer already recorded for a question that is still standing.
+		// baseline *替换*本订阅此前展示的东西，所以"一个读者正在屏幕上展示这个审批"的计数按差值移动——与 `pushApprovalChanges` 移动它们的方式相同。把集合再加一遍会把同一个读者数两次；先丢再加会扔掉一个已经为仍然悬着的问题记录下的答案。
 		const current = new Map(snapshot.pendingApprovals.map((approval) => [approval.toolCallId, approval]));
 		for (const toolCallId of subscription.pending.keys()) {
 			if (!current.has(toolCallId)) this.answers.hide(sessionId, toolCallId);
@@ -525,37 +405,28 @@ export class MuxConnection {
 	}
 
 	/**
-	 * Re-send the whole state: the answer to a branch move, and to a second `open` on a watch this
-	 * connection already holds.
+	 * 重发整个状态：这是对分支移动、以及对本连接已持有的观看上第二个 `open` 的应答。
 	 *
-	 * Live, this is synchronous and the snapshot is the session's own — so a second `open` mid-run
-	 * carries the `partial` answer being written rather than the file's last settled state, and the
-	 * frames that follow append to it.
+	 * 活会话下这是同步的，快照就是会话自己的——所以运行中途的第二个 `open` 带走的是正在写入的 `partial` 应答，而不是文件里上一次落定的状态，其后的帧追加在它之上。
 	 *
-	 * Idle, there is no synchronous state to read, so the answer takes the only road a cold baseline
-	 * takes: re-arm the backlog and let {@link readColdBaseline} produce it. That keeps the promise
-	 * this frame inherits — state first, then everything after it — instead of racing the deltas,
-	 * and it leaves one baseline assembly in the file rather than two.
+	 * 空闲会话下没有同步状态可读，应答走冷 baseline 的唯一路径：重新布防 backlog，让 {@link readColdBaseline} 去产出。这保住了本帧继承的承诺——先状态、后其后的一切——而不是与增量赛跑，也让文件里只留一份 baseline 拼装而不是两份。
 	 */
 	private pushBaseline(sessionId: string, subscription: Subscription): void {
 		if (this.hub.live.includes(sessionId)) {
-			// Through `push`, like every other frame: a baseline owed but not yet written is one this
-			// must land behind, or the client would see the older state last.
+			// 像其他任何帧一样走 `push`：一份欠着未写的 baseline 是这一帧必须落在其后的东西，否则客户端最后看到的会是较旧的状态。
 			this.push(sessionId, subscription, { type: "baseline", session: this.hub.snapshotNow(sessionId) });
 			return;
 		}
-		// One is already owed and on its way, and re-arming the backlog again would make the reader
-		// produce two.
+		// 已经欠了一份、正在路上；再把 backlog 重新布防一次会让读取者产出两份。
 		if (subscription.backlog !== null) return;
 		subscription.backlog = [];
 		void this.readColdBaseline(sessionId, subscription);
 	}
 
 	/**
-	 * The entry an `entry_appended` names, paired with the timestamp a transcript orders by.
+	 * `entry_appended` 所指的 entry，附上 transcript 用于排序的时间戳。
 	 *
-	 * The stamp rides the event rather than being read back here: this runs once per appended message,
-	 * and a transcript read would parse the whole log for one number (ADR-0019).
+	 * 时间戳随事件而来而不是在这里回读：这里对每条追加的消息只跑一次，而回读 transcript 要解析整份日志只为一个数字（ADR-0019）。
 	 */
 	private pushEntry(sessionId: string, subscription: Subscription, entryId: string, at: number | undefined): void {
 		this.push(sessionId, subscription, {
@@ -577,11 +448,9 @@ export class MuxConnection {
 	}
 
 	/**
-	 * Report the difference in this subscription's pending approvals.
+	 * 上报本订阅待审批集合的差量。
 	 *
-	 * Per subscription, not per session: each window learns about an approval from its own starting
-	 * point. One that disappeared is settled — *denied* unless something recorded an answer for it,
-	 * because an abort and a closing session both deny and that is the honest default.
+	 * 按订阅而不是按会话：每个窗口从自己的起点了解一个审批。消失的一个是已定案的——除非有东西为它记录过答案，否则视为*拒绝*——因为 abort 和关闭会话都会拒绝，这是诚实的默认值。
 	 */
 	private pushApprovalChanges(sessionId: string, subscription: Subscription, snapshot: SessionSnapshot): void {
 		const current = new Map(snapshot.pendingApprovals.map((approval) => [approval.toolCallId, approval]));
@@ -606,13 +475,9 @@ export class MuxConnection {
 	}
 
 	/**
-	 * Tell a client its `open` did not work, and end the attempt.
+	 * 告诉客户端它的 `open` 没有成功，并结束这次尝试。
 	 *
-	 * Error first, then end: the error carries the attribution and the end stops the attempt from going
-	 * on looking like a stream that is merely quiet. On a first `open` the client knows its own request
-	 * failed, because that stream never carried a baseline. On a second one — a re-sent baseline whose
-	 * read found the session gone — the stream did carry one, and the end is then the honest answer
-	 * rather than a misreading: the record really is gone, so there is nothing left to reopen.
+	 * 先 error 后 end：error 带归因，end 让尝试不至于继续看起来像一条只是安静的流。第一次 `open` 时客户端知道自己的请求失败了，因为那条流从未承载过 baseline。第二次——重发的 baseline 的读取发现会话已不在——流承载过一份，end 此时才是诚实的应答而不是误读：记录真的没了，没有什么可重开。
 	 */
 	private failStream(sessionId: string, message: string): void {
 		this.send({ streamId: sessionId, error: { message } });
@@ -620,16 +485,11 @@ export class MuxConnection {
 	}
 
 	/**
-	 * End one logical stream and forget it.
+	 * 结束一条逻辑流并忘记它。
 	 *
-	 * The entry goes *before* the frame, because after an `end` this connection must have nothing
-	 * further to say about that session — that is the whole meaning of the frame, and a client that saw
-	 * anything after it would have no way to tell which stream it belonged to.
+	 * entry 在帧*之前*移除，因为 `end` 之后本连接对那个会话必须再无话可说——这就是这帧的全部含义，在它之后还看到任何东西的客户端将无法分辨那属于哪条流。
 	 *
-	 * Every caller ends a stream that has nothing left to say. A second `open` used to be the one
-	 * exception, and it is not one any more: the answer to a duplicate `open` is a baseline on the
-	 * stream that already exists (ADR-0010 decision 1), so no path here reports a failure about a
-	 * subscription that is healthy underneath.
+	 * 每个调用者结束的都是一条无话可说的流。第二个 `open` 曾经是唯一的例外，现在不是了：重复 `open` 的应答是在已有流上发一份 baseline（ADR-0010 决定 1），所以没有任何路径会为一个底层健康的订阅报告失败。
 	 */
 	private endStream(sessionId: string): void {
 		const subscription = this.subscriptions.get(sessionId);
@@ -637,39 +497,36 @@ export class MuxConnection {
 		this.send({ streamId: sessionId, end: true });
 	}
 
-	/** Say something on every stream this connection has watching one session. */
+	/** 对本连接上每个正在观看某会话的流说同一句话。 */
 	announce(sessionId: string, message: string): void {
 		if (!this.subscriptions.has(sessionId)) return;
 		this.send({ streamId: sessionId, item: { type: "error", message } });
 	}
 
-	/** This connection's opening overview, or a fresh one after the list moved: the rows it may see. */
+	/** 本连接的开场 overview，或列表变动后的一份新的：它可能看到的那些行。 */
 	sendSessions(rows: readonly SessionRow[]): void {
 		this.send({ streamId: null, item: { type: "sessions", sessions: [...rows] } });
 	}
 
-	/** One row changed. The whole row, because a row is small and a replacement is idempotent. */
+	/** 一行变了。整行发出，因为行很小、而整行替换是幂等的。 */
 	sendRow(row: SessionRow): void {
 		this.send({ streamId: null, item: { type: "session_row", session: row } });
 	}
 
-	/** One row went away. The id is the whole payload: dropping it is all a client can do. */
+	/** 一行消失了。id 就是全部 payload：丢弃它是客户端唯一能做的事。 */
 	sendGone(sessionId: string): void {
 		this.send({ streamId: null, item: { type: "session_gone", sessionId } });
 	}
 
-	/** The application-level liveness frame. Connection-level by construction: no stream id. */
+	/** 应用层的存活帧。按构造就是连接层的：没有 stream id。 */
 	heartbeat(): void {
 		this.send({ streamId: null, item: { type: "heartbeat", everyMs: this.options.heartbeatIntervalMs } });
 	}
 
 	/**
-	 * One round of the protocol-level liveness question.
+	 * 协议层存活问题的一轮。
 	 *
-	 * Counts a miss first and only pings if the count is still survivable, so the connection that
-	 * exceeds the tolerance is never pinged again on its way out. Dropping it is `terminate` rather than
-	 * `close`: a peer that has stopped answering Pongs will not read a Close frame either, and waiting
-	 * for one would mean waiting on the thing that has already gone.
+	 * 先计一次未应答，只有计数仍在可容忍范围内才真的 ping，所以超出容忍度的连接在退场的路上不会再被 ping。丢弃用 `terminate` 而不是 `close`：停止应答 Pong 的 peer 也不会读 Close 帧，等它等于等一个已经不在的东西。
 	 */
 	tick(): void {
 		if (this.closed) return;
@@ -683,17 +540,17 @@ export class MuxConnection {
 		this.sink.ping();
 	}
 
-	/** A Pong arrived: the peer is alive and the count starts again. */
+	/** 一个 Pong 到达：peer 活着，计数清零重来。 */
 	notePong(): void {
 		this.missedPongs = 0;
 	}
 
-	/** How many pings are unanswered. */
+	/** 有多少个 ping 未被应答。 */
 	get missed(): number {
 		return this.missedPongs;
 	}
 
-	/** How many bytes are waiting behind a connection that stopped accepting writes. */
+	/** 停止接受写入的连接背后积压了多少字节。 */
 	get queuedByteLength(): number {
 		return this.queuedBytes;
 	}
@@ -703,15 +560,9 @@ export class MuxConnection {
 	}
 
 	/**
-	 * Give up every subscription and stop.
+	 * 放弃所有订阅并停止。
 	 *
-	 * Subscriptions go first so their feeds are released before anything tries to close the sessions
-	 * they were watching; the waits follow. The order is a convenience rather than a load-bearing
-	 * fact — the eviction funnel re-checks every criterion on each edge, so either order is caught
-	 * up by the later one — but clearing the watchers before firing the waits' edge spares that
-	 * edge an attempt it would spend and retake on the next one (issue 13). A dropped connection is
-	 * a client that will never be answered, so every wait it held is given up here: the same
-	 * equivalence the subscription table already grants a `cancel`, a refresh, and a broken socket.
+	 * 订阅先行，让它们的 feed 在任何东西试图关闭它们正在观看的会话之前释放；waits 跟上。这个顺序是便利而不是承重事实——淘汰漏斗在每条边上都重新检查全部条件，哪种顺序都会被后到的那次补上——但先清观看者、再触发 waits 的边，能让那条边省掉一次本要花掉、下一轮还要再来的尝试（issue 13）。被丢弃的连接是一个永远不会被应答的客户端，所以它持有的每个 wait 都在这里放弃：与订阅表已经给 `cancel`、刷新、断线的同一种等价处理。
 	 */
 	close(): void {
 		if (this.closed) return;
@@ -722,30 +573,27 @@ export class MuxConnection {
 		this.waits.clear();
 		this.queue.length = 0;
 		this.queuedBytes = 0;
-		// The stall bookkeeping goes too, so a connection inspected after closing reports a settled state
-		// rather than one that looks like it is still waiting for a socket that will never drain.
+		// 停滞的簿记一并清掉，让关闭后接受检视的连接报告一个已了结的状态，而不是一副还在等一个永远不会排空的 socket 的样子。
 		this.stalled = false;
 		this.stalledSince = 0;
 		this.clearStallTimer();
 	}
 
 	/**
-	 * Remember that the socket stopped accepting writes.
+	 * 记住 socket 停止了接受写入。
 	 *
-	 * The clock starts here rather than when the queue first has something in it, because those are
-	 * the same instant — the frame that got `false` is already in the socket's buffer, so the next one
-	 * is the first this layer holds, and the two readings differ by at most one frame.
+	 * 时钟从这里起算，而不是队列第一次有东西的时刻，因为那是同一瞬间——得到 `false` 的那帧已经在 socket 缓冲里，下一个才是本层持有的第一帧，两种读法最多差一帧。
 	 */
 	private markStalled(): void {
 		if (this.stalled) return;
 		this.stalled = true;
 		this.stalledSince = Date.now();
 		this.stallTimer = setTimeout(() => this.onStallDeadline(), this.options.stallDeadlineMs);
-		// A timer waiting on a peer that may never come back must not be why the process stays up.
+		// 等一个可能永不回来的 peer 的定时器，不能成为进程保持存活的理由。
 		this.stallTimer.unref();
 	}
 
-	/** Hold a frame, and enforce both halves of the budget. */
+	/** 扣住一帧，并强制执行预算的两半。 */
 	private enqueue(frame: ServerFrame): void {
 		this.queue.push(frame);
 		this.queuedBytes += sizeOf(frame);
@@ -753,17 +601,12 @@ export class MuxConnection {
 	}
 
 	/**
-	 * Write what is queued, in order, until the socket refuses again.
+	 * 按序写出队列里的东西，直到 socket 再次拒绝。
 	 *
-	 * The trigger is "this attempt succeeded", not a `'drain'` event. Nothing here listens for one, so
-	 * there is no listener to leak when a connection ends mid-stall and no second timer to keep in step
-	 * with the first: the next attempt is simply the next thing this connection tries to write.
+	 * 触发条件是"这次尝试成功了"，而不是 `'drain'` 事件。这里没有任何东西监听它，停滞中途连接结束时也就没有监听器可泄漏，也不用第二个定时器与第一个保持步调：下一次尝试就是这条连接要写的下一帧。
 	 */
 	private pump(): void {
-		// Whether this attempt actually got a frame out. It is the only thing that may clear the stall,
-		// and the distinction matters: a pump over an *empty* queue writes nothing, so treating it as a
-		// success would clear the stall state and cancel the deadline on the very first frame after a
-		// stall began — leaving a connection that never recovers and never gives up either.
+		// 这次尝试是否真的写出了一帧。它是唯一被允许解除停滞的东西，这个区分很重要：对*空*队列的泵什么都没写，把它当作成功会在停滞开始后的第一帧上就清掉停滞状态、取消期限——留下一条永不恢复、也永不放弃的连接。
 		let wrote = false;
 		while (this.queue.length > 0 && !this.closed) {
 			const frame = this.queue[0] as ServerFrame;
@@ -778,13 +621,9 @@ export class MuxConnection {
 	}
 
 	/**
-	 * The peer is not reading, or not fast enough. Close the whole connection.
+	 * peer 不读取了，或读得不够快。关闭整条连接。
 	 *
-	 * The *whole* connection, and that is not a simplification: one connection is one socket with one
-	 * write buffer, so there is no such thing as sparing one stream from a stalled peer. The client
-	 * recovers by reconnecting and re-subscribing, a path that already exists and needs nothing new —
-	 * whereas ending one stream would need a way to say "you fell behind" on a frame that is defined
-	 * not to carry a reason.
+	 * 是*整条*连接，这不是简化：一条连接就是一个 socket、一个写缓冲，不存在"从停滞的 peer 手里救出一条流"这回事。客户端靠重连重订阅恢复，那条路已经存在、什么都不缺——而只结束一条流，需要在一个定义上就不携带理由的帧上表达"你掉队了"。
 	 */
 	private onStallDeadline(): void {
 		if (this.closed) return;
@@ -803,73 +642,60 @@ export class MuxConnection {
 }
 
 /**
- * What rides a logical stream: the same payloads `ServerMessage` has always carried.
+ * 逻辑流上承载的东西：`ServerMessage` 一直承载的那些 payload。
  *
- * Written out rather than extracted from `ServerFrame`, because that type is an intersection with a
- * union and `Extract` cannot see through it — the property this needs is only reachable after the
- * union has been distributed, which a conditional type over an intersection does not do. Naming the
- * type here rather than importing it also keeps the answer in one place: this is the one payload set a
- * subscription ever writes, and a connection-level payload cannot reach it by construction.
+ * 显式写出而不是从 `ServerFrame` 里提取，因为那个类型是与一个 union 的 intersection，`Extract` 看不穿它——需要的属性只有在 union 被分发之后才可达，而 intersection 上的条件类型做不到。在这里命名而不是导入，也让答案只有一个家：这是订阅会写的唯一一组 payload，连接层的 payload 按构造进不来。
  */
 type ServerMessageItem = ServerMessage;
 
-/** One frame's worth of JSON, which is what the byte budget is denominated in. */
+/** 一帧的 JSON 大小，字节预算就是以它计价的。 */
 function sizeOf(frame: ServerFrame): number {
 	return Buffer.byteLength(JSON.stringify(frame));
 }
 
 /**
- * What went wrong, in words a client can show.
+ * 出了什么问题，用客户端能展示的话说。
  *
- * Only the `Error` case is interesting: `snapshotOf` rejects with one for a session it cannot find, and
- * its message is already written for that. Anything else is a bug, so it is named as one rather than
- * interpolated — a frame is not the place to hand a stack trace to a browser.
+ * 只有 `Error` 一种情况值得关心：`snapshotOf` 对找不到的会话以它拒绝，消息本来就是为此写的。其余都是 bug，按 bug 命名而不是插值——帧不是把堆栈递给浏览器的地方。
  */
 function describe(error: unknown): string {
 	return error instanceof Error ? error.message : "未知的错误";
 }
 
-/** One approval somebody is showing: the answer to report, and how many readers are showing it. */
+/** 一个正被展示的审批：要上报的答案，以及有多少读者在展示它。 */
 interface ShownApproval {
-	/** How it was answered, or denied while nothing has said otherwise. */
+	/** 它被如何应答；无人另有表示时视为拒绝。 */
 	approved: boolean;
-	/** How many subscriptions are showing it right now. */
+	/** 此刻正在展示它的订阅数。 */
 	showing: number;
 }
 
 /**
- * How the approvals on screen were answered, and who is showing them.
+ * 屏幕上的审批如何被应答，以及谁在展示。
  *
- * One entry per approval some subscription has on screen, because that is one fact: the frame that
- * reports an answer is that subscription's own difference, so a subscription showing an approval is
- * the only reader its answer will ever have, and the answer is worth holding exactly as long as the
- * count is above zero.
+ * 每个有订阅在屏幕上展示的审批一个 entry，因为那就是一个事实：上报答案的帧是那个订阅自己的差量，所以展示审批的订阅是它的答案唯一会有的读者，答案值得持有的时间恰好等于计数大于零的时间。
  *
- * Entries live one table per session, and that keying is a decision this layer settles rather than
- * inherits. A `toolCallId` two sessions happen to share is two approvals — several Anthropic-compatible
- * endpoints number their tool calls the same way — and one being granted must never reach the other's
-	* window.
+ * entry 按会话一张表，这个键控是本层自己拍板的决定而不是继承来的。两个会话碰巧共用的 `toolCallId` 是两个审批——若干 Anthropic 兼容端点对 tool call 用同样的编号方式——一个被批准绝不能到达另一个的窗口。
  */
 export interface ApprovalAnswers {
-	/** Note an answer, for the subscriptions that will report it — and only when one of them can. */
+	/** 记下一个答案，给将要上报它的那些订阅——且仅在其中有订阅能上报时。 */
 	remember(sessionId: string, toolCallId: string, approved: boolean): void;
-	/** How this approval was answered. Denied is the answer when nothing recorded one. */
+	/** 这个审批被如何应答。没有记录时，拒绝就是答案。 */
 	wasApproved(sessionId: string, toolCallId: string): boolean;
-	/** One more subscription is showing this approval. */
+	/** 又一个订阅开始展示这个审批。 */
 	show(sessionId: string, toolCallId: string): void;
-	/** One subscription is done with it, dropping it once nobody is left to report the answer. */
+	/** 一个订阅不再展示；最后一个读者离开时随之丢弃。 */
 	hide(sessionId: string, toolCallId: string): void;
 }
 
 function createApprovalAnswers(): ApprovalAnswers {
-	/** Per session, the approvals one of its subscriptions has on screen. */
+	/** 按会话，其订阅正在屏幕上展示的审批。 */
 	const shown = new Map<string, Map<string, ShownApproval>>();
 
 	return {
 		remember(sessionId, toolCallId, approved) {
 			const approval = shown.get(sessionId)?.get(toolCallId);
-			// Nothing to record: no subscription is showing it, so no frame will ever report it. Holding
-			// one anyway would only let unanswered questions outlive the process that was told.
+			// 无可记录：没有订阅在展示它，永远不会有什么帧去上报它。硬存一个只会让没有答案的问题活得比被告知的进程还久。
 			if (approval === undefined) return;
 			approval.approved = approved;
 		},
@@ -889,36 +715,29 @@ function createApprovalAnswers(): ApprovalAnswers {
 			if (perSession === undefined || approval === undefined) return;
 			approval.showing -= 1;
 			if (approval.showing <= 0) perSession.delete(toolCallId);
-			// The same hygiene the per-session entry got: a table with nothing in it has no reason to
-			// outlive the last reader that would have reported from it.
+			// 与按会话的 entry 同样的卫生：空表没有理由活得比最后一个本会从中上报的读者更久。
 			if (perSession.size === 0) shown.delete(sessionId);
 		},
 	};
 }
 
 /**
- * Every connection, and the two timers that judge them.
+ * 所有连接，以及评判它们的两个定时器。
  *
- * One timer each for the whole process rather than one per connection: a hundred idle windows should
- * not be a hundred intervals, and a per-connection timer would make "how often does this server ping"
- * a question with a hundred answers.
+ * 整个进程各一个定时器，而不是每条连接一个：一百个空闲窗口不应该是一百个 interval，而按连接计的定时器会让"这个服务器多久 ping 一次"变成一个有一百个答案的问题。
  */
 export class MuxServer {
 	private readonly connections = new Set<MuxConnection>();
 	private readonly pingTimer: NodeJS.Timeout;
 	private readonly heartbeatTimer: NodeJS.Timeout;
 	/**
-	 * Approval answers, shared by every connection.
+	 * 审批的答案，所有连接共享。
 	 *
-	 * One table for the process rather than one per connection, and the reason is a window that did not
-	 * answer: the frame reporting an approval's answer is the *answering* subscription's own difference,
-	 * so a second window watching the same approval must be told what it was answered with. If each
-	 * connection kept its own table, the second window would find nothing recorded and report a denial —
-	 * which is the cross-session bug this keying exists to prevent, reappearing one level up.
+	 * 整个进程一张表而不是每连接一张，原因是一个没有作答的窗口：上报审批答案的帧是*作答*那个订阅自己的差量，所以观看同一审批的第二个窗口必须被告知它被如何应答。若每个连接各存一张表，第二个窗口会查不到记录而报一个拒绝——这正是这个键控要防的跨会话 bug 在上一层复现。
 	 */
 	private readonly answers: ApprovalAnswers = createApprovalAnswers();
 	private shuttingDown = false;
-	/** Let go of the projection's row listeners, so this server stops being reachable from it. */
+	/** 放开 projection 的行监听器，让本服务器不再能被它触达。 */
 	private readonly stopRows: () => void;
 	private readonly stopGone: () => void;
 
@@ -931,39 +750,31 @@ export class MuxServer {
 		this.projection = projection;
 		this.options = options;
 		this.pingTimer = setInterval(() => this.pingAll(), options.pingIntervalMs);
-		// Never the reason the process stays up: a server with no windows open must still exit.
+		// 永远不是进程保持存活的理由：一个没有窗口开着的服务器仍然必须退出。
 		this.pingTimer.unref();
 
 		this.heartbeatTimer = setInterval(() => this.heartbeatAll(), options.heartbeatIntervalMs);
 		this.heartbeatTimer.unref();
 
-		// The overview is a connection-level stream that is never opened and never cancelled, so it is
-		// fed from the one place that knows a row changed rather than from a subscription table.
+		// overview 是一条从不被 open、从不被 cancel 的连接层流，所以它由唯一知道一行变了的地方供数，而不是由某张订阅表。
 		//
-		// The unsubscribe is kept rather than dropped: a projection outlives any one mux server, and a
-		// listener left behind would keep this whole object graph — and every connection it holds — alive
-		// after `close()`. In the real process the projection is closed first and clears its listeners
-		// anyway, which is why the bug would not have shown up there.
+		// 退订器被保留而不是丢弃：projection 比任何一个 mux 服务器活得久，遗落的监听器会在 `close()` 之后把整个对象图——连同它持有的每条连接——都吊着不放。真实进程里 projection 先关闭、本来就会清掉监听器，这正是这个 bug 在那里不会现形的原因。
 		this.stopRows = projection.onRow((row) => {
 			if (!this.listed(row)) return;
 			for (const connection of this.connections) connection.sendRow(row);
 		});
-		// The removal rides the same connection-level seat the rows do, and for the same reason: it is
-		// about the machine's list, not about any stream. Kept like `stopRows` is — a projection
-		// outlives this server, and a listener left behind would hold the whole graph alive.
+		// 移除与行占同一个连接层的席位，理由相同：它说的是机器的列表，不是任何一条流。像 `stopRows` 一样保留——projection 比本服务器活得久，遗落的监听器会吊住整个对象图。
 		this.stopGone = projection.onGone((sessionId) => {
 			for (const connection of this.connections) connection.sendGone(sessionId);
 		});
 	}
 
 	/**
-	 * Take a connection that has just been upgraded, and start serving it.
+	 * 收下一条刚升级的连接，开始为它服务。
 	 *
-	 * The overview baseline goes out before any subscription can be opened: it is the frame that makes
-	 * the sidebar correct without a single `GET`, and a connection that has to be asked what exists is
-	 * the connection this transport exists to replace.
+	 * overview baseline 在任何订阅能被 open 之前发出：它是让侧栏正确、却一次 `GET` 都不需要的那一帧，而一条还得被问"有什么"的连接，正是这个 transport 要替代的东西。
 	 *
-	 * Returns the connection so a caller that owns the socket can hand uplink frames to it.
+	 * 返回连接，让拥有 socket 的调用者能把上行帧交给它。
 	 */
 	async accept(sink: FrameSink): Promise<MuxConnection> {
 		if (this.shuttingDown) {
@@ -974,9 +785,7 @@ export class MuxServer {
 		const connection = new MuxConnection(sink, this.hub, this.options, this.answers);
 		this.connections.add(connection);
 
-		// A heartbeat first, deliberately: it is the frame the client's watchdog is waiting for, so a
-		// connection that has sent one is a connection the client can already call live. The overview
-		// follows, and the socket's write order is the order they arrive in.
+		// 先发一个心跳，刻意为之：它是客户端看门狗在等的那一帧，所以发出过它的连接已经是客户端可以当作活着的连接。overview 随后跟上，socket 的写出顺序就是到达顺序。
 		connection.heartbeat();
 		connection.sendSessions(await this.overview());
 
@@ -984,73 +793,65 @@ export class MuxServer {
 		return connection;
 	}
 
-	/** One uplink frame, for a connection this server owns. */
+	/** 一个上行帧，交给本服务器拥有的连接。 */
 	handle(connection: MuxConnection, text: string): void {
 		if (!this.connections.has(connection)) return;
 		connection.handle(text);
 	}
 
-	/** A Pong arrived on one connection: the peer is alive. */
+	/** 一条连接上有 Pong 到达：peer 活着。 */
 	notePong(connection: MuxConnection): void {
-		// Guarded like `handle`, and for the same reason: a Pong can arrive after the connection has been
-		// forgotten, and reviving a counter on a connection nobody holds would keep it looking alive to
-		// whatever still has a reference to it.
+		// 与 `handle` 一样设防，理由相同：Pong 可能在连接已被忘记之后到达，给一个无人持有的连接复活计数器，会让它在任何还持有引用的东西眼里看起来仍然活着。
 		if (!this.connections.has(connection)) return;
 		connection.notePong();
 	}
 
-	/** Forget a connection that has ended. */
+	/** 忘记一条已结束的连接。 */
 	forget(connection: MuxConnection): void {
 		this.connections.delete(connection);
 		connection.close();
 	}
 
-	/** How many connections are open. Read by tests; nothing in production does. */
+	/** 有多少连接开着。测试读它；生产中没有任何东西用。 */
 	get size(): number {
 		return this.connections.size;
 	}
 
-	/** Say something on every connection watching one session. */
+	/** 对观看某个会话的每条连接说同一句话。 */
 	announce(sessionId: string, message: string): void {
 		for (const connection of this.connections) connection.announce(sessionId, message);
 	}
 
-	/** Note an approval answer, for every connection showing it. */
+	/** 记下一个审批答案，给正在展示它的每条连接。 */
 	rememberApproval(sessionId: string, toolCallId: string, approved: boolean): void {
 		this.answers.remember(sessionId, toolCallId, approved);
 	}
 
 	/**
-	 * Whether this connection's window is allowed to see a row.
+	 * 这条连接的窗口是否被允许看到一行。
 	 *
-	 * The rule is the hub's ({@link SessionHub.listsDirectory}) and the filter is applied here, at both
-	 * points a row reaches a window: the overview a connection opens on, and every changed row after
-	 * it. Filtering only the overview would let a directory the user put aside come back the moment one
-	 * of its sessions changed — a group that returns on its own is worse than one that never left.
+	 * 规则是 hub 的（{@link SessionHub.listsDirectory}），过滤在这里施加，施加在一行到达窗口的两个点上：连接打开时的 overview，以及其后每一个变了的行。只过滤 overview，会让一个用户放到一边的目录在其某个会话一变的瞬间自己回来——自己回来的组比从未离开的更糟。
 	 */
 	private listed(row: SessionRow): boolean {
 		return this.hub.listsDirectory(row.workDirAbsPath);
 	}
 
-	/** This connection's opening overview: every row this process lists, once. */
+	/** 本连接的开场 overview：本进程列出的每一行，各一次。 */
 	private overview(): Promise<SessionRow[]> {
 		return this.projection.rows().then((rows) => rows.filter((row) => this.listed(row)));
 	}
 
 	/**
-	 * Send every connection a fresh overview.
+	 * 给每条连接发一份新的 overview。
 	 *
-	 * The one thing a window cannot be told by a row: a directory entering or leaving the list is a
-	 * change to the list itself, and there is no `session_row` for a group. Re-sending the overview is
-	 * how the frame that already means "here is the machine's list" says "…and it moved" — the same
-	 * frame a connection opens on, so no client learns a second shape of news about a sidebar.
+	 * 一行承载不了的那件事：目录进出列表是列表本身的变更，组没有对应的 `session_row`。重发 overview，就是让那条本来就说"这是机器的列表"的帧顺带说"……它动了"——与连接打开时收到的是同一帧，客户端不必为侧栏学第二种消息形状。
 	 */
 	async broadcastSessions(): Promise<void> {
 		const rows = await this.overview();
 		for (const connection of this.connections) connection.sendSessions(rows);
 	}
 
-	/** One round of the protocol-level liveness question, and the sweep of whoever it finished. */
+	/** 协议层存活问题的一轮，以及它了结的那些连接的清扫。 */
 	private pingAll(): void {
 		for (const connection of [...this.connections]) {
 			connection.tick();
@@ -1059,11 +860,9 @@ export class MuxServer {
 	}
 
 	/**
-	 * One round of the application-level heartbeat.
+	 * 应用层心跳的一轮。
 	 *
-	 * This doubles as the floor on write attempts, which is why it goes through the ordinary send path
-	 * rather than around the queue: when nothing else is being written, it is the one attempt that will
-	 * still be made, and a connection that recovered gets its backlog flushed by it.
+	 * 它兼任写入尝试的下限，这正是它走普通发送路径而不是绕过队列的原因：当没有别的东西在写时，它是唯一仍会被做出的尝试，一条恢复的连接靠它把 backlog 冲出去。
 	 */
 	private heartbeatAll(): void {
 		for (const connection of [...this.connections]) {
@@ -1072,7 +871,7 @@ export class MuxServer {
 		}
 	}
 
-	/** End every connection, so a closing process is not held open by a window that never leaves. */
+	/** 结束每条连接，让关闭进程不被一个从不离开的窗口吊着。 */
 	close(): void {
 		this.shuttingDown = true;
 		this.stopRows();
@@ -1084,7 +883,7 @@ export class MuxServer {
 	}
 }
 
-/** Build a server with its defaults, or with whatever a test needs to drive them faster. */
+/** 构建一个带默认值的服务器，或带上测试驱动它们加速所需的任何选项。 */
 export function createMuxServer(
 	hub: SessionHub,
 	projection: SessionProjection,

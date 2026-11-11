@@ -1,13 +1,12 @@
 import type { Message } from "../llm/index.ts";
 
 /**
- * One compaction checkpoint, as the transcript carries it.
+ * 一个压缩检查点，transcript 携带它的方式。
  *
- * A compaction is a top-level session entry rather than a message entry, because that is what makes
- * it findable: `buildContextEntries` looks for the newest one on the branch and starts the retained
- * tail at the entry it names. `sessionEntryToContextMessages` projects that entry as the user turn
- * below — the summary wrapped in tags that mark it as a summary rather than something the user said —
- * so a resumed session, a live one, and the provider all see the same transcript.
+ * 压缩是顶层 session 条目而不是消息条目，因为这样才找得到：`buildContextEntries` 在分支上找最新的
+ * 一个，保留的尾巴从它指名的条目开始。`sessionEntryToContextMessages` 把该条目投影成下面的 user
+ * turn——摘要包在表明它是摘要而非用户发言的标签里——这样恢复的 session、活的 session 和 provider
+ * 看到的是同一份 transcript。
  */
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
 
@@ -18,11 +17,10 @@ export const COMPACTION_SUMMARY_SUFFIX = `
 </summary>`;
 
 /**
- * The summary a user message stands for, or undefined when it is an ordinary one.
+ * user 消息所代表的摘要，普通消息时为 undefined。
  *
- * A compaction checkpoint is a user message in the transcript, so callers that must treat it
- * differently from something the user said — title derivation, branch previews, the window's
- * notice rendering — recognize it by its tags rather than by a role of its own.
+ * 压缩检查点在 transcript 里就是一条 user 消息，所以必须区别对待它的调用方——标题派生、分支预览、
+ * 窗口的通知渲染——靠标签而不是靠独立的 role 来识别它。
  */
 export function compactionSummaryOf(
 	message: Message,

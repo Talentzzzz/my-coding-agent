@@ -1,10 +1,9 @@
-// Default-model smoke: the row the window plants when no model is imported.
+// Default-model smoke：没有导入任何模型时窗口种下的那一行。
 //
-// The mechanism is entirely client-side (ticket 04): a constant in `packages/web`, stored through the
-// existing `PUT /api/models`, with a persistent marker that keeps a deleted row deleted. Nothing here
-// reaches the network — the store is a pair of callbacks — so no server and no provider key are
-// needed. What the server *would* keep is checked through the same `coerceModelConfig` the endpoint uses.
-// Run with: node scripts/smoke-default-model.ts
+// 机制完全在客户端（ticket 04）：一个 `packages/web` 里的常量，经由既有的 `PUT /api/models` 存储，
+// 外加一个持久标记，保证被删掉的行不会被种回来。这里不触网——store 就是一对回调——所以无需
+// 服务器和 provider key。服务器*本来会*保留什么，用端点同一个 `coerceModelConfig` 来核对。
+// 运行：node scripts/smoke-default-model.ts
 import { coerceModelConfig, listModelOptions } from "@my-agent/core";
 import type { ModelInput, ModelOption } from "@my-agent/core/protocol";
 import {
@@ -22,7 +21,7 @@ function check(label: string, condition: boolean, detail = ""): void {
 	if (!condition) failures += 1;
 }
 
-/** A row as the client would see one, for the "something is already imported" cases. */
+/** 客户端视角下的一行模型，供"已导入过东西"的用例使用。 */
 function modelOption(name: string): ModelOption {
 	return {
 		name,
@@ -36,7 +35,7 @@ function modelOption(name: string): ModelOption {
 	};
 }
 
-/** The server's answer to a save: the rows it kept, in the wire shape. */
+/** 服务端对一次保存的应答：它收下的那些行，wire 形状。 */
 function savedModels(rows: ModelInput[]): ModelOption[] {
 	return rows.map((row) => modelOption(row.name ?? row.id ?? "row"));
 }
@@ -63,7 +62,7 @@ function host(over: Partial<DefaultModelHost> = {}): Harness {
 	};
 }
 
-// --------------------------------------------------- 1. the row is the one the user named
+// --------------------------------------------------- 1. 那一行逐字是用户要的
 
 process.stdout.write("\ndefault-model：内置的那一行逐字是用户要的\n");
 
@@ -78,12 +77,11 @@ process.stdout.write("\ndefault-model：内置的那一行逐字是用户要的\
 	check("上下文长度是 1,000,000", DEFAULT_MODEL.contextWindow === 1_000_000, String(DEFAULT_MODEL.contextWindow));
 	check("最大输出长度是 384,000", DEFAULT_MODEL.maxTokens === 384_000, String(DEFAULT_MODEL.maxTokens));
 	check("客户端默认思考强度是 high", DEFAULT_THINKING_LEVEL === "high", DEFAULT_THINKING_LEVEL);
-	// The key is the user's to fill: the planted row must not carry one, and must not send a field
-	// that could overwrite one either — the endpoint keeps a stored key when the field is absent.
+	// 密钥由用户自己填：种下的行不得带密钥，也不能带一个可能覆盖已有密钥的字段——字段缺席时
+	// 端点会保留已存储的密钥。
 	check("不带密钥字段，留给用户填", DEFAULT_MODEL.apiKey === undefined, String(DEFAULT_MODEL.apiKey));
 
-	// The endpoint's own coercion, so this is the row the server would actually keep rather than a
-	// shape the panel happens to show.
+	// 用端点自己的 coercion，因此核对的是服务器实际会保留的那一行，而不是面板碰巧显示的形状。
 	const stored = coerceModelConfig(DEFAULT_MODEL);
 	check("服务端收下这一行", stored !== undefined, JSON.stringify(stored));
 	check("存下来的上下文窗口没被改", stored?.contextWindow === 1_000_000, String(stored?.contextWindow));
@@ -99,7 +97,7 @@ process.stdout.write("\ndefault-model：内置的那一行逐字是用户要的\
 	);
 }
 
-// ------------------------------------------- 2. due only when nothing is imported and never seeded
+// ------------------------------------------- 2. 只在「一行都没有、也从没种过」时该种
 
 process.stdout.write("\ndefault-model：只在「一行都没有、也从没种过」时该种\n");
 
@@ -110,7 +108,7 @@ process.stdout.write("\ndefault-model：只在「一行都没有、也从没种�
 	check("已经有行、种过 → 不种", !defaultModelDue([modelOption("mine")], true));
 }
 
-// ------------------------------------------------------------------ 3. the seed writes and marks
+// ------------------------------------------------------------------ 3. 种下之后先存行、再落标记
 
 process.stdout.write("\ndefault-model：种下之后先存行、再落标记\n");
 
@@ -123,15 +121,14 @@ process.stdout.write("\ndefault-model：种下之后先存行、再落标记\n")
 	check("标记在存行之后落地", JSON.stringify(one.events) === JSON.stringify(["save", "markSeeded"]), JSON.stringify(one.events));
 	check("答案是服务端收下的行", answer?.[0]?.name === "deepseek-flash", JSON.stringify(answer));
 
-	// After the seed the marker is set, so the same empty list is no longer due: this is the
-	// "deleted, then restarted" case, asserted as the next launch would ask it.
+	// 种过之后标记已置位，同一份空列表不再该种：这正是"删掉了、又重启"的情形，按下次启动的
+	// 问法来断言。
 	const relaunch = host({ seeded: true });
 	const none = await seedDefaultModel(relaunch);
 	check("种过之后的新窗口不再种", none === undefined, JSON.stringify(none));
 	check("也不再发任何请求", relaunch.events.length === 0, JSON.stringify(relaunch.events));
 
-	// A row that could not be stored must not leave the marker behind: marking first would mean the
-	// next launch believed the row existed and never tried again.
+	// 没能存下的行不得留下标记：先落标记意味着下次启动会以为行已存在，永远不再尝试。
 	const broken = host({
 		save: async () => {
 			throw new Error("put refused");

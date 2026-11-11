@@ -11,8 +11,8 @@ export type { AgentSessionEvent } from "./agent.ts";
 export type { MessageDelta } from "./agent.ts";
 export type { BranchOption, BranchPoint } from "./session/session-manager.ts";
 export type { BashSettings, DirectoryPaging, ModeSettings } from "./config.ts";
-// The compaction checkpoint crosses the wire inside snapshot `messages` as a user message wrapped
-// in these tags, so the tags are wire facts: the client recognizes the summary by them.
+// 压缩检查点作为包在这些标签里的 user 消息穿过快照 `messages` 走上 wire，所以标签是 wire 事实：
+// 客户端靠它们认出摘要。
 export {
 	COMPACTION_SUMMARY_PREFIX,
 	COMPACTION_SUMMARY_SUFFIX,
@@ -21,48 +21,45 @@ export {
 
 export interface SessionRef {
 	id: string;
-	/** The directory this session works in, absolute: the header recorded a resolved path. */
+	/** 本会话工作的目录，绝对路径：头部记录的是解析后的路径。 */
 	workDirAbsPath: string;
 	createdAt: number;
 	title: string;
 	/**
-	 * The session this one was forked from, when that session is stored beside it.
+	 * 本会话从哪个会话 fork 而来，前提是那个会话就存在旁边。
 	 *
-	 * Absent for a root session, and for a fork whose parent is not in the same list — another
-	 * directory's store, or a file moved by hand. A client draws a missing parent as a root rather
-	 * than inventing a place for it.
+	 * 根会话缺失，父会话不在同一份列表里的 fork 也缺失——另一个目录的存储，或被手工挪走的文件。
+	 * 客户端把缺失的父画成根，而不是替它编造一个位置。
 	 */
 	parentId?: string;
 }
 
 /**
- * One sidebar row: the stored identity plus the activity facts a listing adds.
+ * 侧边栏的一行：存储的身份，加上列表化时补充的活动事实。
  *
- * The last three fields are what separates this from {@link SessionRef}. `modified` was already
- * computed by the store for ordering and simply never sent. `running` has no stored form at all —
- * it is a fact about *this* process's loop, never about the transcript. `pending` is a ledger fact
- * with a stored cache: the snapshot's `suspended` marker lights a cold row as 1 (the count is not
- * stored), and a process with the session open overlays the exact count derived from the ledger.
+ * 最后三个字段是它与 {@link SessionRef} 的分界。`modified` 本就由存储为排序算好，只是从不发送。
+ * `running` 完全没有存储形态——它是*本*进程循环的事实，从来不是 transcript 的。`pending` 是带存储
+ * 缓存的账本事实：快照的 `suspended` 标记把冷行点亮成 1（计数不存储），开着该会话的进程用从账本
+ * 派生的精确计数覆盖它。
  *
- * A field earns its place here only when it stays true with nothing subscribed to any content: a row
- * that freezes the moment nobody is watching is the exact failure this type exists to prevent. Token
- * counts deliberately do not qualify — they belong to the session's own stream, and lifting them here
- * would send every pane one column's numbers.
+ * 一个字段能在这里占位，仅当没有任何东西订阅内容时它仍然为真：一旦无人注视就冻结的行，正是这个
+ * 类型要防的失败。token 计数有意不够格——它们属于会话自己的流，抬到这里就是给每个窗格发一整列
+ * 数字。
  */
 export interface SessionRow extends SessionRef {
-	/** Last activity: the newest timestamped user or assistant message, or `createdAt` if none. */
+	/** 最近活动：最新的带时间戳 user 或 assistant 消息，没有则是 `createdAt`。 */
 	modified: number;
-	/** This process is running it right now. */
+	/** 本进程此刻正在运行它。 */
 	running: boolean;
-	/** Approvals waiting for an answer. */
+	/** 正在等答案的审批数。 */
 	pending: number;
 }
 
 /**
- * The stored sessions of one directory, for the sidebar's groups.
+ * 一个目录的已存会话，用于侧边栏的分组。
  *
- * The groups come from the store rather than from the server's own root: one process is started in
- * one directory, but every directory this machine has ever run in has its sessions on disk beside it.
+ * 分组来自存储而不是服务器自己的根：一个进程在一个目录里启动，但这台机器跑过的每个目录的会话都
+ * 在磁盘上各自待着。
  */
 export interface DirectoryGroup {
 	workDirAbsPath: string;
@@ -70,18 +67,16 @@ export interface DirectoryGroup {
 }
 
 /**
- * One model the user entered, as a client sees it.
+ * 用户输入的一个模型，以客户端看到的样子。
  *
- * The API key is deliberately absent — a client may add or replace one, but it is never sent one
- * back, so a key cannot leak through a page that merely renders the list. `hasApiKey` is what the
- * form shows instead, so "a key is stored" and "this row has no key" stay distinguishable.
+ * API 密钥有意缺席——客户端可以添加或替换一把，但永远不会被回发一把，所以密钥无法经由仅仅渲染
+ * 列表的页面泄露。表单显示的是 `hasApiKey`，让「存了密钥」与「这一行没有密钥」保持可区分。
  *
- * `name` is the row's identity, so it is both what the panel shows and what the client sends back to
- * name this row. `api` is reported for the transcript's sake and is always the same value: this app
- * speaks one transport, so it is a fact about the build rather than a field the form edits.
+ * `name` 是行的身份，所以既是面板显示的，也是客户端指名这一行时回发的。`api` 是为 transcript 而
+ * 报告的，且永远是同一个值：本应用只说一种传输层，所以它是关于构建的事实，不是表单编辑的字段。
  */
 export interface ModelOption {
-	/** The wire id, which is also the field a submitted config names this row's model by. */
+	/** wire id，也是提交 config 时指名该模型所用的字段。 */
 	id: string;
 	name: string;
 	api: string;
@@ -89,77 +84,71 @@ export interface ModelOption {
 	contextWindow: number;
 	maxTokens: number;
 	/**
-	 * Every level a session on this row can be in, lowest first.
+	 * 该行上的会话可能处于的每个档位，从低到高。
 	 *
-	 * The same four for every row — an effort is the one strength the wire carries — but reported
-	 * rather than assumed, so the composer reads one shape whether the row is stored, planted locally
-	 * or described by a session snapshot.
+	 * 每行都是同样四个——effort 是 wire 携带的唯一强度——但报告出来而不是假定出来，这样无论行是
+	 * 存储的、本地种下的还是会话快照描述的，输入框读的都是同一个形状。
 	 */
 	thinkingLevels: string[];
 	hasApiKey: boolean;
 }
 
 /**
- * One row as a client submits it.
+ * 一行被客户端提交时的样子。
  *
- * Every field is optional, and that is the entire difference from a {@link ModelConfig}: an omitted
- * field leaves whatever is stored in place, which is what makes a patch ("this row's key is new")
- * expressible at all — a whole config would have to repeat every fact the row already had. The shape
- * is derived rather than restated, so a field added to a config is a field a client can send, and one
- * that is not in this list (`api`, `input`, `cost`) is one it cannot.
+ * 每个字段都可选，这正是它与 {@link ModelConfig} 的全部差别：省略的字段让已存的值原地不动，这才让
+ * 「补丁」（这一行的密钥是新的）成为可表达的东西——整份 config 得把行里已有的每条事实重述一遍。
+ * 形状是派生的而不是重述的，所以加进 config 的字段客户端就能发，不在这份列表里的（`api`、`input`、
+ * `cost`）就不能。
  */
 export type ModelInput = Partial<
 	Pick<ModelConfig, "id" | "name" | "baseUrl" | "apiKey" | "contextWindow" | "maxTokens">
 >;
 
 /**
- * Which model answers a message, and how hard it is asked to think.
+ * 哪个模型回答一条消息，以及被要求多用力地思考。
  *
- * It travels with the message rather than as a session command of its own, because neither half is
- * true until a request is made with it: a choice that was never used is not something that happened,
- * so it is not an entry in the transcript and not a config change. Absent fields leave that half as
- * the session already has it.
+ * 它随消息一起走，而不是作为会话自己的命令，因为两半在被请求真正使用之前都不为真：从未被用过的
+ * 选择不是发生过的事，所以它不是 transcript 的条目，也不是配置变更。缺失的字段让那一半保持会话
+ * 已有的样子。
  */
 export interface ModelSelection {
-	/** The row's name — the identity the settings panel shows and the transcript records. */
+	/** 行的名字——设置面板显示、transcript 记录的身份。 */
 	model?: string;
 	thinkingLevel?: string;
 }
 
-/** What the settings panel reads and writes. */
+/** 设置面板读与写的东西。 */
 export interface SettingsSnapshot {
 	appearance: AppearanceSettings;
-	/** The global default active tool set; absent means every tool the build knows. */
+	/** 全局默认活跃工具集；缺失表示本构建认识的所有工具。 */
 	tools?: string[];
 	/**
-	 * The user's modes, whole, in the order the picker lists them; absent means none were defined.
+	 * 用户的模式，整体存放，按选择器列出的顺序；缺失表示没有定义过。
 	 *
-	 * The built-in default mode is deliberately not among them: it is the global defaults read live
-	 * (ADR-0005), so the client assembles it from `tools` and `approval` rather than expecting a row.
+	 * 内置默认模式有意不在其中：它是实时读取的全局默认（ADR-0005），客户端用 `tools` 与 `approval`
+	 * 拼出它，而不是期望有一行。
 	 */
 	modes?: ModeSettings[];
 	/**
-	 * Directories the sidebar does not list, by absolute path; absent means none are put aside.
+	 * 侧边栏不列出的目录，按绝对路径；缺失表示没有搁置过任何目录。
 	 *
-	 * Carried here rather than kept to the server because it is what the window has to know to draw the
-	 * list it was sent: a directory missing from `GET /api/directories` for a reason no one can see
-	 * would be a group that vanished with nothing to explain it.
+	 * 带在这里而不是只留在服务器，因为这是窗口画它收到的列表必须知道的事：一个目录因谁也看不见的
+	 * 原因从 `GET /api/directories` 里消失，就是一个没有任何解释的凭空消失的分组。
 	 */
 	hiddenDirectories?: string[];
 	/**
-	 * The names the sidebar shows for directories, by absolute path; absent means every group wears
-	 * the folder's own name.
+	 * 侧边栏为目录显示的名字，按绝对路径；缺失表示每个分组都用文件夹自己的名字。
 	 *
-	 * Carried beside `hiddenDirectories` and for the same reason: the window draws a group's heading,
-	 * and the name it draws is not derivable from anything else the snapshot holds — it is a view the
-	 * user typed, not a property of the directory.
+	 * 与 `hiddenDirectories` 并排携带、且出于同样的理由：窗口画的是分组的标题，而它画的名字无法从
+	 * 快照持有的其他任何东西推导出来——它是用户敲下的视图，不是目录的属性。
 	 */
 	directoryNames?: Record<string, string>;
 	approval: Record<string, boolean>;
-	/** How long the `bash` tool lets one command run. */
+	/** `bash` 工具允许一条命令运行多久。 */
 	bash: BashSettings;
 	model?: string;
-	/** Whether the window already planted its built-in default row; see `Settings.defaultModelSeeded`. */
+	/** 窗口是否已种下内置默认行；见 `Settings.defaultModelSeeded`。 */
 	defaultModelSeeded?: boolean;
 }
 
@@ -169,7 +158,7 @@ export interface UsageTotals {
 	cacheRead: number;
 	cacheWrite: number;
 	cost: number;
-	/** Tokens of the most recent request's prompt, for the context meter. */
+	/** 最近一次请求的 prompt 的 token 数，供上下文表使用。 */
 	contextTokens: number;
 	contextWindow: number;
 }
@@ -182,11 +171,10 @@ export interface PendingApproval {
 }
 
 /**
- * One line of a file a tool changed.
+ * 工具改动的文件中的一行。
  *
- * The numbers are the file's own: 1-based, in the old file and in the new one, so a window can show
- * where a change landed without reading anything back. A line only the old file has carries no new
- * number, and the other way round; a `skip` row stands for unchanged lines the report left out.
+ * 行号是文件自己的：1 起算，旧文件与新文件各有一套，所以窗口不用回读任何东西就能显示改动落在哪里。
+ * 只有旧文件有的行不带新行号，反之亦然；`skip` 行代表报告省略的未改动行。
  */
 export interface DiffLine {
 	kind: "add" | "remove" | "context" | "skip";
@@ -194,51 +182,48 @@ export interface DiffLine {
 	newLine: number | null;
 	text: string;
 	/**
-	 * The half-open range of `text` that changed, when one removed line and the added line that
-	 * follows it are the same line rewritten. Absent when the line changed as a whole, where the
-	 * row's own color already says everything the mark would.
+	 * `text` 中发生变化的那段半开区间，用于「一行删除加紧随其后的新增」其实是同一行被重写的情形。
+	 * 整行变更时缺失，那种情况下行本身的颜色已把标记想说的话说完了。
 	 */
 	changed?: [number, number];
-	/** Unchanged lines this `skip` row stands in for. */
+	/** 这条 `skip` 行所代表的未改动行数。 */
 	skipped?: number;
 }
 
 /**
- * What one tool call did to one file.
+ * 一次工具调用对一个文件做了什么。
  *
- * A tool that changes a file answers with this in `ToolResult.details`, beside the text the
- * model reads: the text is written for a model, and this is written for the window. Both are the
- * same change, so the view never has to parse the text — and the tool's text stays short, which for
- * a whole-file `write` is the difference between naming the file and paying for it twice.
+ * 改动文件的工具在 `ToolResult.details` 里以此作答，与模型读的文本并列：文本写给模型，这份写给
+ * 窗口。两者是同一处改动，所以视图永远不必解析文本——工具的文本也得以保持简短，对整个文件的
+ * `write` 而言，这就是「点一下文件名」与「把内容再付一遍钱」的差别。
  *
- * It rides inside the engine's own `tool_execution_end` event, so the wire needed no member for it, and
- * the engine records the whole result — so the transcript keeps the report beside the tool's text. No
- * provider ever sees it: a request carries a tool result's content and only its content.
+ * 它搭引擎自己的 `tool_execution_end` 事件走，wire 无需为它加成员，而引擎记录的是整个结果
+ * ——transcript 便把这份报告存在工具文本旁边。任何供应商都看不到它：请求携带工具结果时只携带
+ * content。
  */
 export interface FileDiff {
-	/** The file as the working directory displays it — relative when inside it, absolute otherwise. */
+	/** 文件按工作目录的显示方式——目录内相对，之外绝对。 */
 	relPath: string;
 	lines: DiffLine[];
 	added: number;
 	removed: number;
-	/** True when the file did not exist before, so every line is an addition. */
+	/** 文件此前不存在时为 true，每一行都是新增。 */
 	created: boolean;
-	/** Rows left out of `lines` because the change was longer than the report's bound. */
+	/** 因改动超出报告上限而未进 `lines` 的行数。 */
 	omitted: number;
 }
 
 /**
- * One accepted-but-undrained user message, as the wire carries it.
+ * 一条已被接受但尚未取走的用户消息，以 wire 携带的样子。
  *
- * The queue lives in the process running the session and in nothing durable, so this light-weight
- * view — the text as sent, and the stamp it was given — is all a window can be told. It rides the
- * snapshot, the `status` frame, and the `queue_update` event, which are the three roads a queue
- * change can reach a client by.
+ * 队列只活在运行会话的进程里，没有任何持久形态，所以这个轻量视图——按发送原样的文本，和它领到的
+ * 时间戳——就是窗口能被告知的全部。它搭快照、`status` 帧与 `queue_update` 事件走，那是队列变更
+ * 抵达客户端的三条路。
  */
 export interface QueuedPrompt {
-	/** The message's text, as the sender wrote it. */
+	/** 消息文本，按发送者写下的原样。 */
 	text: string;
-	/** When the message was stamped, in epoch milliseconds. */
+	/** 消息打戳的时间，epoch 毫秒。 */
 	timestamp: number;
 }
 
@@ -247,185 +232,174 @@ export interface SessionSnapshot {
 	workDirAbsPath: string;
 	createdAt: number;
 	title: string;
-	/** The row's name the session is on. */
+	/** 会话所在行的名字。 */
 	model: string;
 	thinkingLevel: string;
-	/** Thinking levels this model accepts, including "off". */
+	/** 该模型接受的思考档位，含 "off"。 */
 	thinkingLevels: string[];
-	/** Tools that currently require approval, keyed by tool name. */
+	/** 当前需要审批的工具，按工具名为键。 */
 	approvals: Record<string, boolean>;
-	/** Every tool the session registered, in registration order, for the header's tool toggles. */
+	/** 会话注册的每个工具，按注册顺序，供头部的工具开关使用。 */
 	allTools: string[];
-	/** Tools the model may call right now. */
+	/** 模型此刻可以调用的工具。 */
 	activeTools: string[];
 	/**
-	 * Whether the session's recorded tool set equals the current global default.
+	 * 会话记录的工具集是否等于当前的全局默认。
 	 *
-	 * The two maps ride one recorded choice, but a user may have moved only one of them, so each
-	 * half is judged on its own. True for a session with no recorded choice at all: a session that
-	 * never chose *is* on the global default. Equality is against the global value *now* — a session
-	 * reset and then left behind by a later default change reports false, which is the honest answer.
+	 * 两张映射乘在同一份记录选择上，但用户可能只动过其中一个，所以两半各自判断。完全没有记录选择
+	 * 的会话为 true：从未选择过的会话*就*在全局默认上。相等是对全局值*此刻*的判断——被重置过、又
+	 * 被之后的默认变更甩在后面的会话报 false，那才是诚实的答案。
 	 */
 	toolsFollowGlobal: boolean;
-	/** The approval map's half of the same judgement. */
+	/** 同一判断在审批映射那一半的答案。 */
 	approvalsFollowGlobal: boolean;
 	messages: Message[];
 	/**
-	 * The entry id behind each message in `messages`, in the same order.
+	 * `messages` 里每条消息背后的 entry id，顺序一致。
 	 *
-	 * A transcript that did not watch a message being written still needs to name the entry a fork
-	 * starts from, so the session fills this from its session manager. The compaction summary has no
-	 * message entry of its own.
+	 * 没有亲眼看着消息写下的 transcript 仍需要指名 fork 从哪条 entry 开始，所以会话从自己的 session
+	 * manager 填这一栏。压缩摘要没有属于自己的消息条目。
 	 */
 	messageEntryIds: (string | null)[];
 	/**
-	 * Every place in this session's log where it carried on in more than one way.
+	 * 本会话日志里每一个曾以不止一条路走下去的地方。
 	 *
-	 * The entries have always been a tree, so a chain is one path through it; this is what a window
-	 * needs to draw the rest of the tree and to move through it. All of it, not only the chain's —
-	 * moving the leaf must not change the shape of the tree a window draws — and `options[].active`
-	 * is the one field that answers "which of these is the chain I am on". Only the entry ids of the
-	 * alternatives travel, not where they lead: those ids are written once, while a branch grows at
-	 * its tip, so a remembered tip would be a place the conversation had already left.
+	 * entry 从来就是一棵树，链只是穿过它的其中一条路；这是窗口画出树的其余部分并在其中移动所需的
+	 * 全部信息。是整棵树，不只是链上的——挪动 leaf 不得改变窗口所画树的形状——`options[].active`
+	 * 是回答「这些里哪个是我所在的链」的唯一字段。走的只有各备选的 entry id，不是它们通向哪里：
+	 * 那些 id 只写一次，而分支在自己的尖端生长，记住一个尖端就是记住一个对话早已离开的地方。
 	 */
 	branchPoints: BranchPoint[];
-	/** The session this one was forked from, if it is a fork; absent for a root session. */
+	/** 若是 fork：从哪个会话派生而来；根会话缺失。 */
 	parentSession?: string;
-	/** The entry the session is on: the tip of its chain, or null before the first entry. */
+	/** 会话所在的 entry：链的尖端，第一条 entry 之前为 null。 */
 	leafId: string | null;
 	/**
-	 * The assistant message being written right now, when this process is running one.
+	 * 此刻正在写下的 assistant 消息，当本进程正在运行时。
 	 *
-	 * Only a live session can answer it — the store gains the message when it ends — and it exists so
-	 * a window that attaches mid-run is not left waiting for the rest of a sentence whose beginning it
-	 * never saw: the baseline draws these characters, and the deltas that follow append to them.
-	 * Absent for a settled transcript and for every cold read.
+	 * 只有活跃会话能回答它——存储在消息结束时才得到它——它的存在是为了让运行中途挂上来的窗口不
+	 * 必等一句自己从未见过开头的句子：baseline 画这些字符，随后的 delta 接着追加。已落定的
+	 * transcript 与一切冷读都缺失。
 	 */
 	partial?: Message;
 	submitting: boolean;
-	/** User messages accepted mid-run that the run has not drained yet, as the window draws them. */
+	/** 运行中途被接受、尚未被取走的用户消息，按窗口绘制它们的样子。 */
 	queued: QueuedPrompt[];
-	/** True while a transient provider failure is waiting out its backoff. */
+	/** 瞬时供应商失败正在等退避走完时为 true。 */
 	isRetrying: boolean;
-	/** The 1-based retry attempt in flight, or 0 when no retry is pending. */
+	/** 在飞的重试是第几次（1 起算），没有待处理的重试时为 0。 */
 	retryAttempt: number;
 	usage: UsageTotals;
 	pendingApprovals: PendingApproval[];
 }
 
 /**
- * A change to what the session holds without a message: the approval map and the two queue modes.
+ * 不带消息地对会话所持之物做的变更：审批映射与两个队列模式。
  *
- * The model and the thinking level are deliberately absent. Both are chosen in the composer and both
- * arrive with the message they belong to ({@link ModelSelection}), because recording one that no
- * request was made with would put a decision in the transcript that never took effect.
+ * 模型与思考档位有意缺席。两者都在输入框里选择、都随属于它们的消息抵达（{@link ModelSelection}），
+ * 因为记录一个没有请求真正用过它的选择，等于在 transcript 里放一条从未生效的决定。
  */
 export type ConfigPatch = {
-	/** The approval entries that moved, keyed by tool name; keys left out keep the value in force. */
+	/** 变动过的审批条目，按工具名为键；省略的键保持现行值。 */
 	approval?: Record<string, boolean>;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 };
 
 /**
- * The tools the window's settings offer approval toggles for, in the order it offers them.
+ * 窗口设置提供审批开关的工具，按提供的顺序。
  *
- * The approval maps themselves are keyed by tool name, so they are not bound to this list: a
- * settings file or a session snapshot may name any tool, and the readers that report which tools
- * are gated iterate the map rather than this. The list is only the window's default offering —
- * the loadout this build ships, not a limit on what a map may carry.
+ * 审批映射本身以工具名为键，不绑定这份列表：设置文件或会话快照可以点名任何工具，报告哪些工具被
+ * 闸的读取者遍历的是映射而不是它。这份列表只是窗口的默认 offerings——本构建出厂的配置，不是
+ * 映射能装什么的限制。
  */
 export const APPROVAL_TOOLS: readonly string[] = ["read", "write", "edit", "glob", "grep", "bash"];
 
 /**
- * How many queued messages one drain point injects.
+ * 一个取走点注入多少条排队消息。
  *
- * The engine's own type, re-exported rather than restated: the wire and the queues answer the same
- * question, and a second declaration would be a second thing to keep in step with the first.
+ * 引擎自己的类型，转发而不是重述：wire 与队列回答的是同一个问题，第二份声明就是第二件要跟着第一
+ * 份保持同步的东西。
  */
 export type { QueueMode } from "./types.ts";
 
-/** What a message sent while the agent is streaming does to the run. */
+/** agent 流式期间发送的消息对运行做什么。 */
 export type PromptBehavior = "steer" | "followUp";
 
 export type ServerMessage =
 	/**
-	 * Everything this session looks like right now.
+	 * 本会话此刻看起来的一切。
 	 *
-	 * The first frame on a logical stream, and the only one of its kind: a subscription that is opened
-	 * again gets a new one rather than an append, which is what makes recovery converge on "what this
-	 * looks like now" instead of on "what I missed".
+	 * 逻辑流的第一帧，也是唯一一帧这种类型：再次打开的订阅得到新的 baseline 而不是追加，这让恢复
+	 * 收敛到「它现在长什么样」，而不是「我错过了什么」。
 	 */
 	| { type: "baseline"; session: SessionSnapshot }
 	| { type: "event"; event: AgentSessionEvent }
 	/**
-	 * The entry behind a message the session just wrote.
+	 * 会话刚写下的一条消息背后的 entry。
 	 *
-	 * `entry_appended` names an entry but not the message it holds, and a transcript needs the pairing
-	 * to offer "fork from here" on a message that never appeared in a snapshot. It is sent beside the
-	 * event, not instead of it, so a client that ignores this frame behaves exactly as before.
+	 * `entry_appended` 只点名 entry，不点名它装的消息，而 transcript 需要这对配对，才能在一条从未
+	 * 出现在快照里的消息上提供「从这里 fork」。它与事件并排发送、不是取代它，所以忽略这一帧的客户端
+	 * 行为与从前完全一样。
 	 */
 	| { type: "entry"; entryId: string; messageTimestamp?: number }
 	| { type: "approval_request"; request: PendingApproval }
 	| { type: "approval_settled"; toolCallId: string; approved: boolean }
 	| { type: "status"; usage: UsageTotals; submitting: boolean; queued: QueuedPrompt[]; isRetrying: boolean; retryAttempt: number }
 	/**
-	 * Something failed outside any request's reach.
+	 * 某件事在任何请求够不到的地方失败了。
 	 *
-	 * A run that could not start, mainly: the request that accepted its prompt was answered 202 long
-	 * before the failure, so this stream is the only place left to say so.
+	 * 主要是没能启动的运行：接受其 prompt 的请求早在失败发生之前就被 202 应答过了，所以这条流是
+	 * 剩下唯一能说出这件事的地方。
 	 */
 	| { type: "error"; message: string };
 
 /**
- * One logical stream's identity on one connection: the session id itself.
+ * 一条逻辑流在一条连接上的身份：会话 id 本身。
  *
- * A session has at most one logical stream per connection, so the id is the whole address — there is
- * no separate subscription handle to keep in sync with it. `null` is the one reserved seat for
- * payloads that belong to the connection rather than to any stream.
+ * 一个会话在一条连接上至多一条逻辑流，所以 id 就是全部地址——没有需要与之保持同步的独立订阅
+ * 句柄。`null` 是唯一的保留座位，给属于连接而不属于任何流的载荷。
  */
 export type StreamId = string;
 
 /**
- * A failure attributed to one logical stream (or to the connection itself).
+ * 归到一条逻辑流（或连接本身）名下的失败。
  *
- * Not a terminal frame: the stream stays open, and what the client does next depends on whether the
- * stream ever carried a baseline rather than on why it failed.
+ * 不是终结帧：流保持打开，客户端下一步做什么取决于这条流是否曾携带 baseline，而不是取决于它为何
+ * 失败。
  */
 export interface StreamFailure {
-	/** For a person to read — today the one string `announce(sessionId, message)` carries. */
+	/** 给人读的——如今是 `announce(sessionId, message)` 携带的唯一一个字符串。 */
 	message: string;
 }
 
 /**
- * Payloads that ride the connection-level seat, `streamId: null`.
+ * 乘坐连接级座位（`streamId: null`）的载荷。
  *
- * They are a separate union rather than more `ServerMessage` members because every one of them names
- * no session: a heartbeat is about the channel, and a row is about the whole machine. A client routes
- * by `streamId` first, so everything here lands on the store that belongs to no column.
+ * 它们是单独一个 union 而不是更多 `ServerMessage` 成员，因为每个都不点名会话：心跳关于信道，
+ * 一行关于整台机器。客户端先按 `streamId` 路由，所以这里的一切都落在不属于任何栏目的那个存储上。
  */
 export type ConnectionItem =
-	/** How often the server emits this, so the client can size its own read timeout. */
+	/** 服务器发出它的频率，客户端据此定自己的读超时。 */
 	| { type: "heartbeat"; everyMs: number }
-	/** Every row this process knows, once per connection. A replacement, not an append. */
+	/** 本进程认识的每一行，每条连接一次。是替换，不是追加。 */
 	| { type: "sessions"; sessions: SessionRow[] }
-	/** One row changed. The whole row, because a row is small and idempotent beats a diff here. */
+	/** 一行变了。发整行，行很小，幂等胜过 diff。 */
 	| { type: "session_row"; session: SessionRow }
 	/**
-	 * One row went away: the session behind it was deleted. The id is the whole payload, because
-	 * dropping is the only thing a client can do with it — there is no state left to describe.
+	 * 一行消失了：它背后的会话被删除。id 就是全部载荷，因为丢弃是客户端对它唯一能做的事——已经
+	 * 没有状态可供描述了。
 	 */
 	| { type: "session_gone"; sessionId: string };
 
 /**
- * One logical stream's frame: its content, its end, or a failure attributed to it.
+ * 一条逻辑流的帧：它的内容、它的结束，或归到它名下的失败。
  *
- * Three shapes at one level, told apart by field name rather than by a discriminant — `item` carries
- * its own `type`, so an outer `type` would say the same thing twice and make "outer and inner
- * disagree" a representable state.
+ * 同一层的三种形状，靠字段名区分而不是靠判别字段——`item` 自带 `type`，外层再放一个 `type` 会把
+ * 同一件事说两遍，并让「外层与内层不一致」成为可表示的状态。
  *
- * `item` holds only {@link ServerMessage}: the connection-level payloads belong to no session, and
- * letting one ride a column's `streamId` would make "which session is this for" answerable two ways.
+ * `item` 只装 {@link ServerMessage}：连接级载荷不属于任何会话，让其中之一骑在某栏的 `streamId`
+ * 上，会让「这是给哪个会话的」出现两种答案。
  */
 export type StreamFrame =
 	| { item: ServerMessage }
@@ -433,42 +407,36 @@ export type StreamFrame =
 	| { error: StreamFailure };
 
 /**
- * The connection's own frame: a payload belonging to no session, or the failure of the connection.
+ * 连接自己的帧：不属于任何会话的载荷，或连接的失败。
  *
- * A separate type from {@link StreamFrame} rather than a wider `item` on it, because the two travel on
- * different keys and a client routes them differently: one to a column, the other to the store behind
- * all of them.
+ * 与 {@link StreamFrame} 分开成类型，而不是在它上面放宽 `item`，因为两者走在不同的键上、客户端的
+ * 路由也不同：一个进栏目，另一个进所有栏目背后的那个存储。
  */
 export type ConnectionFrame =
 	| { item: ConnectionItem }
 	| { error: StreamFailure };
 
 /**
- * One WebSocket message: an envelope around a frame, told apart by which key carries the id.
+ * 一条 WebSocket 消息：帧外面的一层信封，靠哪个键携带 id 来区分。
  *
- * `streamId` is the session id when the frame belongs to one logical stream and `null` when it belongs
- * to the connection, so the pair of types makes "a connection-level payload on a session's stream" and
- * the reverse unrepresentable rather than merely discouraged.
+ * 帧属于某条逻辑流时 `streamId` 是会话 id，属于连接时是 `null`，这对类型让「连接级载荷出现在会话
+ * 的流上」与反过来都不可表示，而不只是不被鼓励。
  *
- * The envelope is deliberately outside {@link ServerMessage} rather than a field inside each of its
- * members: several callers construct protocol messages with no stream behind them at all (a REST read,
- * a fork), and inlining the id would force them to invent one.
+ * 信封有意留在 {@link ServerMessage} 之外而不是成为其每个成员内部的字段：好几个调用方构造协议
+ * 消息时背后根本没有流（一次 REST 读、一次 fork），把 id 内联进去会逼它们凭空编一个。
  */
 export type ServerFrame =
 	| ({ streamId: StreamId } & StreamFrame)
 	| ({ streamId: null } & ConnectionFrame);
 
 /**
- * What a client may send. Four actions, no envelope — the frame is the protocol.
+ * 客户端可以发送什么。四个动作，没有信封——帧就是协议。
  *
- * Commands stay on REST. `open` / `cancel` are the subscription's two words; `wait` / `unwait` carry
- * the one fact a subscription deliberately does not carry (ADR-0001: watching keeps nothing alive) —
- * that this connection is still waiting for a run's result on the session, the send reference's
- * server-side signal (issue 13). It takes no hold: it does not keep a session running, it only
- * asks the eviction judgment to wait until the waiter has been answered. A frame that arrives with
- * an unknown `type` is dropped and logged rather than closing the connection: none of the four
- * actions can be abused into anything, and turning a stray frame into a dead page costs more than a
- * log line.
+ * 命令留在 REST。`open` / `cancel` 是订阅的两个词；`wait` / `unwait` 携带订阅有意不携带的那一个
+ * 事实（ADR-0001：watching 不让任何东西活着）——这条连接仍在等该会话某次运行的结果，也就是发送
+ * 参考里的服务端信号（issue 13）。它不取 hold：不让会话保持运行，只要求驱逐判断等到等待者被应答
+ * 之后再做。带着未知 `type` 到达的帧被丢弃并记录日志，而不是关掉连接：四个动作没有一个能被滥用
+ * 成什么，而把一个走错门的帧变成一页死掉的白屏，代价高于一行日志。
  */
 export type ClientFrame =
 	| { type: "open"; sessionId: string; window?: unknown }
@@ -486,7 +454,7 @@ export const EMPTY_USAGE: UsageTotals = {
 	contextWindow: 0,
 };
 
-/** Fold one assistant message's usage into the session totals. */
+/** 把一条 assistant 消息的 usage 并进会话总计。 */
 export function addUsage(totals: UsageTotals, usage: Usage, contextWindow: number): UsageTotals {
 	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 	return {

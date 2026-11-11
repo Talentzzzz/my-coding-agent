@@ -17,10 +17,10 @@ const parameters = Type.Object({
 export type WriteParams = Static<typeof parameters>;
 
 /**
- * `write` creates files, or replaces them when `overwrite` is set.
+ * `write` 创建文件，设置了 `overwrite` 时替换文件。
  *
- * Refusing to clobber by default matters: a model that means "adjust one line" but calls `write`
- * with a reconstructed file silently destroys the parts it did not reproduce.
+ * 默认拒绝覆盖很重要：一个本意是「改一行」却用重建的整个文件调用 `write` 的模型，会无声地毁掉它
+ * 没有重现的部分。
  */
 export function createWriteTool(): Tool<typeof parameters> {
 	return {
@@ -49,9 +49,8 @@ export async function runWrite(
 
 	const content = params.content.endsWith("\n") ? params.content : `${params.content}\n`;
 
-	// The file as it was, or undefined for one that is not there. It is read once for both decisions
-	// made here — whether this write changes anything, and what the change is — so the answer the model
-	// gets and the diff the window gets are the same comparison.
+	// 文件此前的内容，不存在时为 undefined。只为这里要做的两个决定——这次写入是否改变任何东西、
+	// 变更是什么——读一次，所以模型得到的回答和窗口得到的 diff 是同一次比较。
 	let before: string | undefined;
 	if (existing) {
 		if (params.overwrite !== true) {
@@ -75,8 +74,8 @@ export async function runWrite(
 		path: relPath,
 		changed: true,
 		lines,
-		// A file nothing could read back has no change to report: a diff against content nobody saw
-		// would be a guess dressed up as a record, so the card falls back to the tool's own text.
+		// 读不回来的文件没有变更可报：对着没人见过的内容做的 diff 是化装成记录的猜测，所以卡片
+		// 回落到工具自己的文字。
 		...(existing && before === undefined
 			? {}
 			: { diff: fileDiff(relPath, before ?? "", content, { maxLines: DIFF_MAX_ROWS, created: existing === undefined }) }),

@@ -1,7 +1,7 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). Trimmed for this repo — see `transformMessages`
-// for what came out and why. Re-vendoring from upstream means reapplying that trim.
-// @ts-nocheck keeps the repo root's stricter config from flagging this file, while every import
-// into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来，按本仓库裁剪——裁掉了什么、为什么见 `transformMessages`。
+// 从上游重新 vendor 意味着重新应用这些裁剪。
+// @ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入 packages/core 的每次 import 仍然被
+// 完整检查。
 // @ts-nocheck
 import type { Model } from "../model.ts";
 import type {
@@ -62,32 +62,31 @@ function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model
 }
 
 /**
- * Make a stored transcript replayable over `anthropic-messages`.
+ * 让一份存储的 transcript 可以经 `anthropic-messages` 重放。
  *
- * A session file is an append-only log, so it carries two things the wire rejects: an assistant
- * turn that ended in `error`/`aborted`, and a tool call nothing answered. Both are normal here — a
- * run killed between the call and its results, a branch moved onto a call, an imported history —
- * and Anthropic refuses a half turn or a `tool_use` without its `tool_result`, so neither is sent.
+ * session 文件是 append-only 日志，所以它带着两样 wire 会拒绝的东西：以 `error`/`aborted` 结束的
+ * assistant turn，以及没有任何东西回答的 tool call。两者在这里都属正常——run 在 call 和 result
+ * 之间被杀、分支移到某个 call 上、导入的历史——而 Anthropic 拒绝半个 turn 或缺 `tool_result` 的
+ * `tool_use`，所以两者都不发送。
  *
- * Trimmed against upstream, because this app drives the one API and every model row goes over it:
+ * 相对上游的裁剪，因为本应用只驱动这一个 API、每个模型行都走它：
  *
- * - Tool-call id normalization is gone, with the ledger that kept rewritten calls and their results
- *   in sync. It existed for providers that mint ids Anthropic's `^[a-zA-Z0-9_-]{1,64}$` rejects;
- *   this wire mints `toolu_…`, and the four vendor APIs that still pass a normalizer are never
- *   routed. `_normalizeToolCallId` is kept only so their call sites still read as written.
- * - The provider-owned metadata field `thoughtSignature` is no longer pruned
- *   for cross-model replay. It is not produced over this wire, so there is nothing to prune.
- * - A mid-conversation system message is no longer held back until its tool results arrive. It
- *   cannot land inside a tool turn here: every request is rebuilt as one leading system message
- *   plus the non-system messages, as `Agent.prepareRequest` documents.
+ * - tool call id 归一化连同保持被重写 call 与其 result 同步的账本一起删除。它服务于那些铸造
+ *   Anthropic 的 `^[a-zA-Z0-9_-]{1,64}$` 所拒绝的 id 的 provider；这条 wire 铸的是 `toolu_…`，
+ *   而仍然传入 normalizer 的那四个 vendor API 从不被路由。`_normalizeToolCallId` 保留只是让它们的
+ *   调用点读起来仍如原样。
+ * - provider 专属的元数据字段 `thoughtSignature` 不再为跨模型重放而修剪。这条 wire 不产出它，
+ *   所以没有东西可修剪。
+ * - 对话中段的 system 消息不再被扣住等它的 tool result 到齐。它在这里不可能落进一个 tool turn：
+ *   每个请求都被重建为一条开头的 system 消息加上非 system 消息，如 `Agent.prepareRequest` 所述。
  */
 export function transformMessages<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
 	_normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
 ): Message[] {
-	// Normalize null/undefined content from untyped callers (custom tools, hand-built
-	// histories, old session files) so downstream code can rely on the type contract.
+	// 归一化无类型调用方（自定义工具、手搭的历史、旧 session 文件）传来的 null/undefined content，
+	// 让下游代码可以依赖类型契约。
 	const normalizedMessages = messages.map((msg) => (msg.content == null ? { ...msg, content: [] } : msg));
 	const transformed = downgradeUnsupportedImages(normalizedMessages, model);
 
@@ -95,7 +94,7 @@ export function transformMessages<TApi extends Api>(
 	let pendingToolCalls: ToolCall[] = [];
 	let existingToolResultIds = new Set<string>();
 
-	/** Answer every call still waiting. */
+	/** 回答每一个仍在等待的 call。 */
 	const closePendingToolCalls = () => {
 		if (pendingToolCalls.length === 0) return;
 		for (const tc of pendingToolCalls) {
@@ -115,16 +114,14 @@ export function transformMessages<TApi extends Api>(
 
 	for (const msg of transformed) {
 		if (msg.role === "assistant") {
-			// Whatever this turn says, it ends the one before it, so close that one first.
+			// 无论这个 turn 说什么，它都结束了前一个，所以先收掉前一个。
 			closePendingToolCalls();
 
-			// An errored or aborted assistant message is an incomplete turn: partial content, and
-			// possibly tool calls that never ran. Replaying it can only earn an API error, so the
-			// model retries from the last valid state instead.
+			// 一条 error/aborted 的 assistant 消息是一个不完整的 turn：内容残缺，还可能带着从未
+			// 运行的 tool call。重放它只会换来一次 API 错误，所以模型改为从最后一个有效状态重试。
 			const assistantMsg = msg as AssistantMessage;
 			if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") continue;
 
-			// Track the calls this turn is now waiting on.
 			const toolCalls = assistantMsg.content.filter((b) => b.type === "toolCall") as ToolCall[];
 			if (toolCalls.length > 0) {
 				pendingToolCalls = toolCalls;
@@ -136,17 +133,17 @@ export function transformMessages<TApi extends Api>(
 			existingToolResultIds.add(msg.toolCallId);
 			result.push(msg);
 		} else if (msg.role === "user") {
-			// A new user turn interrupts tool flow.
+			// 新的 user turn 打断 tool 流。
 			closePendingToolCalls();
 			result.push(msg);
 		} else {
-			// The leading system message is the system prompt and stays first: the caller reads it
-			// with `getInitialSystemMessage` and drops it with `slice(1)`.
+			// 开头的 system 消息就是 system prompt，保持第一：调用方用 `getInitialSystemMessage`
+			// 读它、用 `slice(1)` 丢掉它。
 			result.push(msg);
 		}
 	}
 
-	// A conversation that ends on unresolved tool calls gets their results now.
+	// 以未决 tool call 结尾的对话在此刻得到它们的 result。
 	closePendingToolCalls();
 
 	return result;

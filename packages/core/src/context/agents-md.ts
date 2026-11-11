@@ -2,7 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 export interface AgentsMdFile {
-	/** Where the file was found, absolute. */
+	/** 文件在哪里找到的，绝对路径。 */
 	absPath: string;
 	content: string;
 }
@@ -11,11 +11,10 @@ const MAX_FILE_BYTES = 64 * 1024;
 const MAX_TOTAL_CHARS = 32_000;
 
 /**
- * Collect the `AGENTS.md` files that apply to a working directory.
+ * 收集作用于一个工作目录的 `AGENTS.md` 文件。
  *
- * The walk climbs from `workDirAbsPath` to the file-system root, so a repo inside a monorepo inherits the outer
- * conventions, and reads the nearest file last: later entries override earlier ones in the assembled
- * prompt.
+ * 遍历从 `workDirAbsPath` 向上爬到文件系统根，所以 monorepo 里的仓库会继承外层的约定，并且最后
+ * 读取最近的文件：在拼装 prompt 时后到的条目盖过先前的。
  */
 export async function loadAgentsMd(workDirAbsPath: string): Promise<AgentsMdFile[]> {
 	const files: AgentsMdFile[] = [];
@@ -32,7 +31,7 @@ export async function loadAgentsMd(workDirAbsPath: string): Promise<AgentsMdFile
 	return files;
 }
 
-/** Fold the collected files into one prompt section, nearest file last. */
+/** 把收集到的文件折成一个 prompt 段落，最近的文件放在最后。 */
 export function formatAgentsMd(files: readonly AgentsMdFile[], workDirAbsPath: string): string | undefined {
 	if (files.length === 0) return undefined;
 	let budget = MAX_TOTAL_CHARS;
@@ -47,7 +46,7 @@ export function formatAgentsMd(files: readonly AgentsMdFile[], workDirAbsPath: s
 	return sections.reverse().join("\n\n");
 }
 
-/** Directories from the file-system root down to `start`, inclusive. */
+/** 从文件系统根到 `start` 的各目录，含两端。 */
 function ancestors(startInput: string): string[] {
 	const directories: string[] = [];
 	let absCurrent = resolve(startInput);

@@ -21,11 +21,9 @@ interface ReadHooks {
 }
 
 /**
- * `read` returns numbered lines so the model can quote exact positions and use them as `edit`
- * anchors. A minified JSON file is pretty-printed first; other minified files are reported as such,
- * because line numbers on a single 500 KB line help nobody. An image file (PNG, JPEG, GIF, WebP,
- * identified by its file signature, not its extension) is answered with the image itself beside a
- * one-line envelope, which is how a vision model sees a picture.
+ * `read` 返回带编号的行，让模型能引用精确位置并把它们用作 `edit` 的锚点。压缩过的 JSON 文件先
+ * 美化；其他压缩文件如实报告，因为一行 500 KB 上的行号帮不了任何人。图片文件（PNG、JPEG、GIF、
+ * WebP，按文件签名识别，不按扩展名）以图片本身加一行信封回答，这就是视觉模型看图的方式。
  */
 export function createReadTool(): Tool<typeof parameters> {
 	return {
@@ -41,7 +39,7 @@ export function createReadTool(): Tool<typeof parameters> {
 	};
 }
 
-/** Read implementation, exported so tests can call it without an agent. */
+/** 读取实现，导出以便测试不需要 agent 就能调用。 */
 export async function runRead(
 	workDirAbsPath: string,
 	params: ReadParams,
@@ -85,9 +83,8 @@ export async function runRead(
 }
 
 /**
- * The image result: a one-line text envelope the model reads first, then the image itself. The
- * envelope names the format and size so a non-vision model that receives only the text still learns
- * what the file was.
+ * 图片 result：一行模型先读的文字信封，然后是图片本身。信封说明格式和大小，这样只收到文本的
+ * 非视觉模型仍然知道文件是什么。
  */
 function imageResult(
 	workDirAbsPath: string,
@@ -108,9 +105,8 @@ function imageResult(
 }
 
 /**
- * Identify a supported image format by its file signature. The set is what the providers accept as
- * model input (PNG, JPEG, GIF, WebP); anything else falls through to the text path and, if it is not
- * text either, the usual binary refusal.
+ * 按文件签名识别受支持的图片格式。这个集合是 provider 接受为模型输入的（PNG、JPEG、GIF、WebP）；
+ * 其他的落到文本路径，如果也不是文本，就走常规的二进制拒绝。
  */
 function sniffImageMimeType(bytes: Buffer): string | undefined {
 	if (startsWith(bytes, [0xff, 0xd8, 0xff])) return "image/jpeg";

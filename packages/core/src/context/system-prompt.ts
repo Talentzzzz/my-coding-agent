@@ -3,10 +3,10 @@ import type { AgentsMdFile } from "./agents-md.ts";
 import { formatAgentsMd } from "./agents-md.ts";
 
 export interface SystemPromptInput {
-	/** The directory relative paths resolve against and commands start in. Not a boundary. */
+	/** 相对路径解析的基准目录，命令启动的目录。不是边界。 */
 	workDirAbsPath: string;
 	toolNames: readonly string[];
-	/** Tools that require user approval before they run. */
+	/** 运行前需要用户审批的工具。 */
 	approvalTools: readonly string[];
 	agentsMd: readonly AgentsMdFile[];
 }
@@ -29,7 +29,7 @@ How to answer:
 - Never claim a command succeeded unless you ran it and saw the output.
 - Do not print secrets, tokens, or full environment dumps.`;
 
-/** Assemble the system prompt from the identity, environment, tools, and project instructions. */
+/** 由身份、环境、工具和项目说明拼装 system prompt。 */
 export function buildSystemPrompt(input: SystemPromptInput): string {
 	const sections: string[] = [IDENTITY];
 
@@ -46,7 +46,7 @@ export function buildSystemPrompt(input: SystemPromptInput): string {
 		input.approvalTools.length > 0
 			? `\nThese tools ask the user for approval before running: ${input.approvalTools.join(", ")}. A denial comes back as a tool error; do not retry the same call, adjust your approach.`
 			: "";
-	// A session can be opened with no active tools, which is a conversation and not a broken prompt.
+	// session 可以不带任何激活工具打开，那是一段对话，不是一个坏掉的 prompt。
 	const available = input.toolNames.length === 0 ? "none" : input.toolNames.join(", ");
 	sections.push(`## Tools\nAvailable: ${available}.${approval}`);
 

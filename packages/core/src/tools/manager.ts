@@ -1,11 +1,9 @@
-// The tool side of this build: one table of every tool it knows, and the pure-data choice of which
-// of them a session may call (ADR-0016).
+// 本构建的工具侧：一张它认识的每个工具的表，以及一个 session 可以调用其中哪些的纯数据选择
+// （ADR-0016）。
 //
-// The table is resident and the choice is not. What sits in the table is behaviour only — six
-// directory-free instances, plus whatever a test registered — so holding them costs a process
-// lifetime of constants rather than a session's worth of state. Everything a call needs that changes
-// between requests (the working directory, the `bash` timeouts) arrives on `execute`'s `run`, which
-// is what lets one instance serve every session.
+// 表是常驻的，选择不是。表里放的是纯行为——六个与目录无关的实例，加上测试注册的任何东西——所以
+// 持有它们的代价是进程生命周期的常量，而不是一个 session 的状态。调用所需、且会随请求变化的一切
+// （工作目录、`bash` 超时）随 `execute` 的 `run` 到达，这正是让一个实例服务所有 session 的原因。
 
 import type { Tool, ToolResult, ToolRunContext, ToolUpdateCallback } from "../llm/index.ts";
 import { DEFAULT_MODE_NAME, type ModeSettings } from "../config.ts";
@@ -17,39 +15,36 @@ import { createReadTool } from "./read.ts";
 import { createWriteTool } from "./write.ts";
 
 /**
- * The per-request values a tool acts with, re-exported from the wire types.
+ * 工具行动所用的 per-request 值，从 wire 类型 re-export。
  *
- * It is `execute`'s third parameter, so its home is beside `Tool` (ADR-0015 §2): this re-export keeps
- * every existing import path — `tools/index.ts`, `agent.ts`, the smokes — pointing at the same name.
+ * 它是 `execute` 的第三个参数，所以它的家在 `Tool` 旁边（ADR-0015 §2）：这个 re-export 让所有既有
+ * 的 import 路径——`tools/index.ts`、`agent.ts`、smoke 测试——继续指向同一个名字。
  */
 export type { ToolRunContext };
 
-// ---------------------------------------------------------------------------- the state
+// ---------------------------------------------------------------------------- 状态
 
 /**
- * The tool choice one session is in, as pure data: what the session's `.json` snapshot records.
+ * 一个 session 所处的工具选择，纯数据：session 的 `.json` 快照记录的内容。
  *
- * `activeToolNames` is what the model may call; `approvalOverride` is the session's own approval
- * map over the global defaults, undefined when the session never chose and follows global.
- * The names may include tools this build no longer knows — the recorded set is narrowed at fill and
- * assembly time, never stored back shortened, so a downgrade and re-upgrade keeps the choice.
+ * `activeToolNames` 是模型可以调用的；`approvalOverride` 是 session 自己的审批表叠在全局默认之上，
+ * session 从未选择、跟随全局时为 undefined。名字可以包含本构建已不认识的工具——记录的集合在 fill
+ * 和装配时收窄，从不把收窄后的存回去，所以降级再升级仍能保住选择。
  */
 export interface ToolState {
 	activeToolNames: string[];
 	approvalOverride?: Record<string, boolean>;
 }
 
-/** The name the built-in default mode answers to, owned by the settings config (ADR-0005). */
+/** 内置默认模式的名字，由设置配置持有（ADR-0005）。 */
 export { DEFAULT_MODE_NAME };
 
 /**
- * The context one fill is answered from: the settings the seed is completed against.
+ * 一次 fill 所依据的 context：种子要对照的设置。
  *
- * `globalTools` is the global default's tool set as the settings files name it, or the full set when
- * they name none; `known` is what this build can actually build, and a name outside it is dropped
- * rather than thrown at — a hand-edited settings file owes the catalog no order and no membership.
- * The default view's approval half needs no input: it is "follow the global approvals", which the
- * readers realize by merging against the live settings.
+ * `globalTools` 是全局默认的工具集，按设置文件的拼写，未指名时是全集；`known` 是本构建实际能构建
+ * 的，不在其内的名字被丢弃而不是被抛错——手改的设置文件不欠 catalog 任何顺序和任何成员资格。
+ * 默认视图的审批一半不需要输入：它是「跟随全局审批」，读者通过合并活设置来实现。
  */
 export interface ToolFillContext {
 	modes: readonly ModeSettings[];
@@ -57,25 +52,22 @@ export interface ToolFillContext {
 	known: readonly string[];
 }
 
-/** Drop the names this build does not know, keeping the order the seed named them in. */
+/** 丢掉本构建不认识的名字，保留种子指名的顺序。 */
 export function narrowToKnown(names: readonly string[], known: readonly string[]): string[] {
 	return names.filter((name) => known.includes(name));
 }
 
 /**
- * Fill a mode seed into a complete {@link ToolState}.
+ * 把一个模式种子填成完整的 {@link ToolState}。
  *
- * The product is the truth and the seed is only the pointer: an unknown mode name throws, because a
- * session asked to run in a mode nobody defined has no configuration to fall back on and must say so
- * rather than run on one the caller did not mean. A missing or 「默认」 seed is the built-in default
- * mode — the global default's live view, the full tool set and the global approvals — and reads no
- * stored mode entry, because that mode is never stored: what it answers is the settings files
- * themselves, so a change to them is the change to this mode.
+ * 产物是真相，种子只是指针：未知的模式名抛异常，因为被要求在一个没人定义过的模式里运行的 session
+ * 没有任何配置可回落，必须说出来，而不是按调用方没打算要的配置跑起来。缺失或「默认」的种子就是
+ * 内置默认模式——全局默认的活视图，全套工具加全局审批——不读任何存储的模式条目，因为这个模式
+ * 从不落盘：它回答的就是设置文件本身，设置一改就是这个模式变了。
  *
- * The default view keeps `approvalOverride` undefined rather than copying the global map in: a copy
- * would freeze the approvals at fill time, while undefined means "the session never chose" and every
- * reader merges against the live settings. A named mode's approval map, by contrast, *is* a choice,
- * and is carried whole.
+ * 默认视图让 `approvalOverride` 保持 undefined 而不是把全局表拷进来：拷贝会把审批冻结在 fill 时刻，
+ * 而 undefined 意味着「session 从未选择」，每个读者都对照活设置合并。与之相反，具名模式的审批表
+ * *就是*一个选择，整体携带。
  */
 export function fillTools(modeName: string | undefined, context: ToolFillContext): ToolState {
 	if (modeName === undefined || modeName === DEFAULT_MODE_NAME) {
@@ -90,11 +82,11 @@ export function fillTools(modeName: string | undefined, context: ToolFillContext
 	};
 }
 
-// ---------------------------------------------------------------------------- the table
+// ---------------------------------------------------------------------------- 表
 
 /**
- * The six built-ins, in the order the model is offered them. Zero-argument factories: a tool closes
- * over nothing, so the table can hold the products for the life of the process.
+ * 六个内置工具，按提供给模型的顺序。零参工厂：一个工具不闭包任何东西，所以表可以把产物持有到
+ * 进程结束。
  */
 const builtIns: readonly (() => Tool<any>)[] = [
 	() => createReadTool(),
@@ -106,27 +98,25 @@ const builtIns: readonly (() => Tool<any>)[] = [
 ];
 
 /**
- * The tools one process knows: a `Map<name, Tool>` holding every instance, plus the registered ones.
+ * 一个进程认识的工具：持有每个实例的 `Map<name, Tool>`，加上注册进来的。
  *
- * Structure only — what exists here, not what is chosen. The choice is a {@link ToolState} derived
- * per read from the ledger (`toolStateOf` in `session/tool-config.ts`), so this table never answers
- * "may this session call it": the engine answers that against the names it derived. Whether a
- * registered tool is offered is the same question, answered in the same place.
+ * 只有结构——什么存在于此，不是什么被选择。选择是从账本每次读取时推导的 {@link ToolState}
+ * （`session/tool-config.ts` 的 `toolStateOf`），所以这张表从不回答「这个 session 可以调用它吗」：
+ * 引擎对照它推导的名字回答这个问题。一个注册工具是否被提供是同一个问题，在同一个地方回答。
  *
- * What this class also owns is the call: {@link ToolManager.execute} resolves a name and forwards to
- * the instance it names, so a caller that holds a name and this call's `run` values needs nothing
- * else to run a tool. The behaviour stays on the instance, and the validation, the gates, the
- * events, and the result write-back stay in the engine.
+ * 这个类还拥有的是调用本身：{@link ToolManager.execute} 解析一个名字并转发给它指名的实例，所以
+ * 手里有一个名字加上本次调用的 `run` 值的调用方，运行一个工具不需要别的。行为留在实例上，校验、
+ * 闸门、事件和结果写回留在引擎里。
  */
 export class ToolManager {
-	/** Every tool this process knows, in the order the model is offered them. Never replaced. */
+	/** 本进程认识的每个工具，按提供给模型的顺序。从不替换。 */
 	private readonly all = new Map<string, Tool<any>>();
 
 	/**
-	 * Names of every tool this table holds: the six built-ins, then whatever was registered.
+	 * 这张表持有的每个工具的名字：六个内置，然后是注册的。
 	 *
-	 * Read, not remembered — the keys are the table's own, so a name registered later shows up on the
-	 * next read and nothing has to be invalidated.
+	 * 是读出来的，不是记住的——key 就是表自己的，所以之后注册的名字在下一次读取就会出现，不需要
+	 * 失效任何东西。
 	 */
 	names(): string[] {
 		this.ensureFilled();
@@ -134,10 +124,10 @@ export class ToolManager {
 	}
 
 	/**
-	 * One tool by name, or undefined when this build does not have it.
+	 * 按名字取一个工具，本构建没有它时为 undefined。
 	 *
-	 * The same object every time: the table is filled once and entries are never replaced, so a run
-	 * that held an instance at `prepareRequest` and one that looks it up mid-batch see the same tool.
+	 * 每次都是同一个对象：表填充一次、条目从不替换，所以在 `prepareRequest` 持有实例的 run 和
+	 * 在批次中途查找它的 run 看到的是同一个工具。
 	 */
 	get(name: string): Tool<any> | undefined {
 		this.ensureFilled();
@@ -145,11 +135,10 @@ export class ToolManager {
 	}
 
 	/**
-	 * Run one tool call: look the tool up and forward, with this call's own run values.
+	 * 运行一次工具调用：查工具并转发，带上本次调用自己的 run 值。
 	 *
-	 * It does not decide whether the call is allowed, and it does not validate: an unknown name here
-	 * is a bug upstream — the engine resolves and gates a name before it asks for the call — so it
-	 * throws rather than synthesizing a second result the model could see.
+	 * 它不决定这次调用是否被允许，也不做校验：这里出现未知名字是上游的 bug——引擎在请求调用之前
+	 * 就解析并闸门过名字——所以它抛异常，而不是合成一个模型能看到的第二个 result。
 	 */
 	async execute(
 		name: string,
@@ -165,11 +154,10 @@ export class ToolManager {
 	}
 
 	/**
-	 * Put a tool in the table. It joins; whether it is offered is the choice, not this.
+	 * 把一个工具放进表。它加入；是否被提供是选择的事，不是这里的事。
 	 *
-	 * The fill happens first, so a name that collides with a built-in is refused by the same rule that
-	 * refuses two registrations of one name — and a later fill can never overwrite what was just
-	 * registered. Only new names are accepted: no unregister, no replace, no second table.
+	 * fill 先发生，所以与内置工具撞名的名字被拒绝注册的同一规则拒绝——而且之后的 fill 永远无法
+	 * 盖过刚注册的东西。只接受新名字：没有 unregister、没有 replace、没有第二张表。
 	 */
 	register(tool: Tool<any>): void {
 		this.ensureFilled();
@@ -178,16 +166,14 @@ export class ToolManager {
 	}
 
 	/**
-	 * Fill the table with the six built-ins, once.
+	 * 把六个内置工具填进表，一次。
 	 *
-	 * On first touch rather than in the constructor, because a process that assembles a session and
-	 * never runs a tool should not pay for six instances — and because the fill has to happen before
-	 * any read that answers "what exists", which is every public method here. Filling all six at once
-	 * rather than one per name is what keeps this table the only answer to "what exists": a per-name
-	 * fill would need a static list of names beside it, and two lists can disagree.
+	 * 在第一次触碰时而不是构造函数里，因为一个装配了 session 但从不运行工具的进程不应该为六个
+	 * 实例付代价——而且 fill 必须发生在任何回答「什么存在」的读取之前，也就是这里的每个公开方法。
+	 * 六个一次填齐而不是按名逐个填，是这张表成为「什么存在」的唯一答案的原因：按名逐个填需要在
+	 * 旁边再放一份静态名字清单，两份清单会不一致。
 	 *
-	 * A non-empty table is a filled one: `register` fills before it writes, so nothing can be in here
-	 * without the six already in place.
+	 * 非空的表就是已填充的表：`register` 写之前先 fill，所以没有六个先就位、就不可能有东西进来。
 	 */
 	private ensureFilled(): void {
 		if (this.all.size > 0) return;
@@ -198,7 +184,7 @@ export class ToolManager {
 	}
 }
 
-/** The table one process knows. Built zero-argument: the built-ins are this build's constants. */
+/** 一个进程认识的表。零参构建：内置工具就是本构建的常量。 */
 export function createToolManager(): ToolManager {
 	return new ToolManager();
 }

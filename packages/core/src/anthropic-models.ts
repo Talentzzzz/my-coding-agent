@@ -1,27 +1,24 @@
 import type { AnthropicMessagesCompat } from "./llm/index.ts";
 
 /**
- * What a model has to be told, derived from its wire id.
+ * 模型必须被告知的事，从它的 wire id 推导出来。
  *
- * pi-ai carries these facts as generated metadata in a catalog this app deliberately does not use
- * (`models.ts` says why). A hand-typed row has only its wire id to key them by, which is enough for
- * Claude: what the API accepts moved by generation — 4.7 and later reject a temperature — and the id
- * names the generation.
+ * pi-ai 把这些事实作为生成的元数据放在一份目录里，本应用有意不用它（`models.ts` 说明了为什么）。
+ * 手填的一行只有 wire id 可作键，这对 Claude 已经够用：API 接受什么随代次变动——4.7 及以后拒绝
+ * temperature——而 id 就标明代次。
  *
- * Thinking is deliberately not one of them. Every row is asked the same way, adaptive with an
- * effort, and the four levels this app has are the four names that wire takes, so a level goes out
- * as itself. That is also what removed the per-model level table this file used to carry: the app no
- * longer claims to know which models can think or which of them have a native `max`, it asks and lets
- * an endpoint that disagrees answer for itself.
+ * 思考档位有意不在此列。每一行都以同样的方式询问（adaptive + effort），本应用的四档就是 wire 接受
+ * 的四个名字，所以档位原样发出。这也正是删掉本文件曾维护的按模型档位表的原因：应用不再自称知道
+ * 哪些模型能思考、哪些有原生 `max`，它只管问，让不同意的端点自己作答。
  *
- * A wrong value here is not cosmetic: a temperature a model refuses fails the whole request. So the
- * Claude entries are a port of pi's own `isAnthropicTemperatureUnsupportedModel` rather than a guess.
+ * 这里的一个错误值不是小事：模型拒绝的 temperature 会让整个请求失败。所以 Claude 条目是从 pi 自己
+ * 的 `isAnthropicTemperatureUnsupportedModel` 移植来的，而不是猜测。
  */
 
-/** Families that reject the `temperature` field outright, whatever its value. */
+/** 无论取值如何都直接拒绝 `temperature` 字段的家族。 */
 const REJECTS_TEMPERATURE = ["opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8", "opus-5", "opus.5", "sonnet-5-5", "sonnet-5.5"];
 
-/** The compatibility overrides this model needs, or undefined when it needs none. */
+/** 该模型需要的兼容性覆盖项；不需要时为 undefined。 */
 export function anthropicCompatFor(modelId: string): AnthropicMessagesCompat | undefined {
 	const id = normalize(modelId);
 	const compat: AnthropicMessagesCompat = {};
@@ -29,7 +26,7 @@ export function anthropicCompatFor(modelId: string): AnthropicMessagesCompat | u
 	return Object.keys(compat).length > 0 ? compat : undefined;
 }
 
-/** A gateway id prefixes the vendor path (`anthropic/claude-opus-5`); the model behind it is the same. */
+/** 网关 id 会在厂商路径前加前缀（`anthropic/claude-opus-5`）；背后的模型是同一个。 */
 function normalize(modelId: string): string {
 	return modelId.toLowerCase().replace(/^~?anthropic\//, "");
 }

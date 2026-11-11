@@ -1,25 +1,24 @@
-// Ad-hoc transport check: read a session snapshot off the mux, accept a prompt over HTTP, feed the
-// run back, stop it with an abort request, and start a replacement session — then prove a branch
-// move survives the reap with nothing attached at all.
+// Ad-hoc transport check：从 mux 上读一份 session 快照，经 HTTP 收下一次 prompt，把 run 喂回来，
+// 用一次 abort 请求停掉它，再开一个替代 session——然后证明一次分支移动在完全没有任何东西挂着的
+// 情况下活过 reap。
 //
 //   node scripts/smoke-api.ts
 //
-// Start a server first (npm run start -- --workDir .), or point this at one with MY_AGENT_URL. No
-// provider key is needed: the run is expected to settle on a provider error, which is still a
-// settled run. That failure is a *retryable* one — a refused connection — so the default retry policy
-// spends three backoffs, about fourteen seconds, before the run settles; the watchdog below is sized
-// for the whole script (two runs plus the tree checks), not for one run, so it catches a hang rather
-// than the backoff. Run the server with `retry` disabled in settings to make it immediate.
+// 先启动一台服务器（npm run start -- --workDir .），或用 MY_AGENT_URL 指向一台。无需 provider
+// key：预期 run 以一次 provider 错误落定，那仍是一次落定了的 run。那个失败是*可重试*的——拒绝
+// 连接——所以默认重试策略会花三次 backoff、约十四秒 run 才落定；下面的 watchdog 是按整个脚本
+// （两次 run 加树检查）计的，不是按一次 run，所以它抓的是挂起而不是 backoff。在 settings 里关掉
+// `retry` 运行服务器可让它立刻落定。
 //
-// One check writes the model list and puts it back, so run the server with MY_AGENT_HOME pointing at a
-// scratch directory if you mind a round trip through `models.json`:
+// 有一个检查会写模型列表并放回去，所以若介意一次穿过 `models.json` 的往返，请让服务器以
+// MY_AGENT_HOME 指向临时目录运行：
 //   $env:MY_AGENT_HOME = "$env:TEMP\my-agent-smoke"; npm run start
 const target = new URL(process.env.MY_AGENT_URL ?? "http://127.0.0.1:8080");
 const base = target.origin;
 
-/** The session the stream currently open is watching. */
+/** 当前打开的流正监视的 session。 */
 let sessionId = "";
-/** The replacement the first stream asked the server to open, for the second half of this script. */
+/** 第一条流要求服务器打开的替代 session，供本脚本后半使用。 */
 let replacementId: string | undefined;
 let failed = false;
 
@@ -54,11 +53,10 @@ async function request(method: string, path: string, body?: unknown): Promise<{ 
 // --- The mux ------------------------------------------------------------------------------------
 
 /**
- * One envelope off the mux: a logical stream's frame, or a connection-level payload at `streamId: null`.
+ * 一份来自 mux 的信封：一条逻辑流的帧，或 `streamId: null` 的连接级载荷。
  *
- * The connection-level frames — heartbeat, session rows — belong to no session this script reads, so
- * the sequential reader below skips them rather than asserting anything about their order: a heartbeat
- * may arrive before the first baseline, and a row may arrive at any time.
+ * 连接级帧——心跳、session 行——不属于本脚本读取的任何 session，所以下面的顺序读取器跳过它们
+ * 而不对它们的次序作任何断言：心跳可能在第一份 baseline 之前到达，一行可能在任何时刻到达。
  */
 interface Envelope {
 	streamId: string | null;
@@ -77,19 +75,19 @@ ws.addEventListener("message", (event) => {
 	frames.push(JSON.parse(String(event.data)) as Envelope);
 });
 
-/** Send one uplink frame. Commands stay on REST; the only two actions here are subscribe and cancel. */
+/** 发一个上行帧。命令留在 REST 上；这里仅有的两个动作是 subscribe 与 cancel。 */
 function send(frame: { type: string; [key: string]: unknown }): void {
 	ws.send(JSON.stringify(frame));
 }
 
-/** Frames already consumed by the sequential reader below. */
+/** 已被下面顺序读取器消费的帧。 */
 let cursor = 0;
 
 /**
- * The next frame on one session's stream, in arrival order.
+ * 一条 session 流上的下一帧，按到达顺序。
  *
- * One cursor rather than one per watcher, because this script watches one session at a time: a watch
- * consumes until it returns, and the next watch picks up where it left off.
+ * 一个游标而非每个 watcher 一个，因为本脚本一次只监视一个 session：一次 watch 消费到返回为止，
+// 下一次 watch 从它停下的地方接着来。
  */
 async function nextEnvelope(id: string, deadline: number): Promise<Envelope | undefined> {
 	for (;;) {
@@ -103,11 +101,10 @@ async function nextEnvelope(id: string, deadline: number): Promise<Envelope | un
 }
 
 /**
- * Wait for a session's run to settle.
+ * 等 session 的 run 落定。
  *
- * A branch cannot move while a run is in flight — the loop appends to the leaf — so the tree checks
- * below have to see the provider failure finish first. This is also what makes the 409 below a real
- * answer rather than a race with an unsettled prompt.
+ * run 在途时分支不能动——循环向 leaf 追加——所以下面的树检查必须先看到 provider 失败结束。
+ * 这也是让下面的 409 成为真实回答、而不是与未落定 prompt 的赛跑的原因。
  */
 async function settleRun(id: string, ms = 30_000): Promise<boolean> {
 	const deadline = Date.now() + ms;
@@ -120,7 +117,7 @@ async function settleRun(id: string, ms = 30_000): Promise<boolean> {
 	}
 }
 
-/** The parts of a snapshot these checks read. */
+/** 这些检查会读的快照部分。 */
 interface TreeSession {
 	leafId: string | null;
 	submitting: boolean;
@@ -128,7 +125,7 @@ interface TreeSession {
 	branchPoints: { entryId: string; anchor: string; options: { entryId: string; label: string; role: string; active: boolean }[] }[];
 }
 
-/** Handle one payload from the watched session's stream. Returns true once the watch should end. */
+/** 处理被监视 session 流上的一份载荷。watch 应当结束时返回 true。 */
 async function handleItem(id: string, item: { type: string; [key: string]: unknown }): Promise<boolean> {
 	if (item.type === "baseline") {
 		const session = item.session as {
@@ -143,21 +140,21 @@ async function handleItem(id: string, item: { type: string; [key: string]: unkno
 			`\nbaseline ${session.id}\n  workDirAbsPath=${session.workDirAbsPath}\n  model=${session.model}\n  thinking=${session.thinkingLevels.join(",")}\n  approvals=${JSON.stringify(session.approvals)}\n  messages=${session.messages.length}`,
 		);
 
-		// The second stream is the point of it: the server named a session, and this script attached
-		// to it over the mux exactly as a tab would. Nothing left to wait for.
+		// 第二条流正是要点：服务器指名了一个 session，本脚本像标签页那样经 mux 挂到它上面。
+		// 没有什么可等的了。
 		if (replacementId !== undefined && session.id === replacementId) return true;
 
-		// A prompt is accepted, never awaited: this is the whole reason the transport is HTTP plus a
-		// resident channel rather than one long request.
+		// prompt 被收下、从不被 await：这正是 transport 是 HTTP 加一条常驻通道、而不是一个长
+		// 请求的全部理由。
 		const accepted = await request("POST", `/api/sessions/${encodeURIComponent(session.id)}/messages`, {
 			text: "Reply with exactly: transport ok",
 		});
 		if (accepted.status !== 202) fail(`prompt answered ${accepted.status}, expected 202`);
 		else pass("prompt accepted (202)");
 
-		// The composer's model and level ride on this body rather than as a config change of their own,
-		// so a malformed selection has to be refused here — before the message is persisted. A session
-		// that gained a message it never ran would be a transcript of something that did not happen.
+		// composer 的模型与等级骑在这个请求体上，而不是各自做一次配置变更，所以一个畸形的
+		// 选择必须在这里——消息持久化之前——被拒绝。一个多出一条从未运行过的消息的 session
+		// 会是一份"没有发生过的事情"的 transcript。
 		const refused = await request("POST", `/api/sessions/${encodeURIComponent(session.id)}/messages`, {
 			text: "this must not be stored",
 			thinkingLevel: 5,
@@ -183,7 +180,7 @@ async function handleItem(id: string, item: { type: string; [key: string]: unkno
 			message?: { role?: string; errorMessage?: string; stopReason?: string };
 		};
 		if (process.env.MY_AGENT_TRACE === "1") pass(`  event ${event.type}`);
-		// A streamed update is a delta now: the characters that arrived, not the message so far.
+		// 流式更新现在是 delta：到达的字符，而不是目前为止的消息。
 		if (event.type === "message_update" && event.delta?.kind === "text") {
 			process.stdout.write(event.delta.text ?? "");
 			return false;
@@ -196,13 +193,13 @@ async function handleItem(id: string, item: { type: string; [key: string]: unkno
 		}
 		if (event.type !== "agent_end") return false;
 
-		// The stop path, on the same session, on a request of its own. It must be answered without
-		// touching the stream, which is the whole difference from sending a command over the channel.
+		// 停止路径，同一 session，一次属于自己的请求。它必须在不触碰流的情况下被应答，这正是
+		// 与把命令发给通道的全部差别。
 		const stopped = await request("POST", `/api/sessions/${encodeURIComponent(sessionId)}/abort`);
 		if (stopped.status !== 200) fail(`abort answered ${stopped.status}, expected 200`);
 		else pass("abort accepted (200)");
 
-		// Now switch sessions the way a tab does: ask for a replacement, then read its stream.
+		// 现在像标签页那样换 session：要一个替代，然后读它的流。
 		pass("requesting a replacement session");
 		const replacement = await request("POST", "/api/sessions");
 		if (replacement.status !== 201) {
@@ -220,7 +217,7 @@ async function handleItem(id: string, item: { type: string; [key: string]: unkno
 	return false;
 }
 
-/** Open one logical stream for a session and read it until its turn ends. */
+/** 为一个 session 打开一条逻辑流，读到它的回合结束为止。 */
 async function watch(watching: string): Promise<void> {
 	sessionId = watching;
 	send({ type: "open", sessionId: watching });
@@ -259,10 +256,9 @@ async function main(): Promise<void> {
 	const models = await request("GET", "/api/models");
 	pass(`models ${models.status} (${(models.payload as { models?: unknown[] }).models?.length ?? 0})`);
 
-	// A row's name is its identity, so the list endpoint is the one place a collision can be caught before
-	// it reaches disk: two rows named the same would make every transcript naming that name ambiguous.
-	// The name is deliberately unlikely to collide with anything the person running this has imported.
-	// The trailing check restores what it found, since this is the one request here that persists.
+	// 一行的名字就是它的身份，所以列表端点是唯一能在撞名抵达磁盘之前抓住它的地方：两行同名会让
+	// 每一份指名该名字的 transcript 变得含混。这个名字被刻意取得不会与运行本脚本的人导入的任何
+	// 东西相撞。结尾的检查把它找到的放回去，因为这是这里唯一会持久化的请求。
 	const existing = (models.payload as { models?: unknown[] }).models ?? [];
 	const probe = `smoke-api-${Date.now()}`;
 	const row = { name: probe, baseUrl: "http://127.0.0.1:1/v1", id: "smoke-api-model" };
@@ -276,11 +272,10 @@ async function main(): Promise<void> {
 	if (restored.status !== 200) fail(`restoring the model list answered ${restored.status}, expected 200`);
 	else pass("and the list it was given is put back");
 
-	// The default a new session opens on is the one settings field that names a row, so it is the one
-	// that can name a row that is not there. A typo is refused rather than stored: `selectModel` falls
-	// back to the first row, so a stored-but-wrong default would look like a preference that quietly did
-	// nothing. Only the refusal is checked — accepting one writes the settings file, and this script
-	// leaves the machine as it found it.
+	// 新 session 打开时的默认值是唯一指名一行的 settings 字段，所以也是唯一能指名一行不存在
+	// 的字段。拼错的默认值被拒绝而不被存储：`selectModel` 会回退到第一行，所以一个存下了但错了
+	// 的默认值会像一个悄悄什么都没做的偏好。只检查拒绝——收下一个会写 settings 文件，而本脚本
+	// 把机器留在它原来的样子。
 	const unknownDefault = await request("PATCH", "/api/settings", {
 		patch: { model: `${probe}-gone/smoke-api-model` },
 	});
@@ -291,19 +286,18 @@ async function main(): Promise<void> {
 	if (first.status !== 201) throw new Error(`could not create a session: ${first.status}`);
 	pass(`created ${(first.payload as { sessionId: string }).sessionId}`);
 
-	// A session that does not exist must be a 404 on the read URL, not a snapshot of nothing.
+	// 不存在的 session 必须在读取 URL 上是一个 404，而不是一份什么都没有的快照。
 	const missing = await request("GET", "/api/sessions/does-not-exist");
 	if (missing.status !== 404) fail(`an unknown session answered ${missing.status}, expected 404`);
 
-	// The tree over HTTP, with nothing attached at any point. A move is recorded by the store the
-	// moment it happens, so it survives the reap that follows the run — no stream has to hold the
-	// session's hand, and the run below doubles as the acceptance edge that says sending does not
-	// depend on attaching first: its frames go nowhere, and it is recorded all the same.
+	// HTTP 上的树，任何时刻都没有东西挂在上头。移动在发生的那一刻就被 store 记录，所以它活过
+	// run 之后的 reap——不需要任何流握着 session 的手，而下面的 run 顺带充当了"发送不依赖先
+	// 挂上"这条验收边：它的帧无处可去，却照样被记录。
 	const tree = await request("POST", "/api/sessions");
 	const treeId = (tree.payload as { sessionId: string }).sessionId;
 
-	// A prompt is persisted before its run fails, and the failure does record an assistant message, so
-	// the message this branches at is on the chain with one continuation behind it already.
+	// prompt 在它的 run 失败之前就被持久化，而失败也确实记录了一条 assistant 消息，所以这里要
+	// 分支的消息已经在链上、身后带着一个续接。
 	const asked = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/messages`, { text: "branch at this message" });
 	if (asked.status !== 202) fail(`a prompt on the session to branch answered ${asked.status}, expected 202`);
 	if (!(await settleRun(treeId))) fail("the run never settled, so the branch could not be checked");
@@ -324,25 +318,22 @@ async function main(): Promise<void> {
 		else if (after.branchPoints.length > 0) fail(`one chain reported ${after.branchPoints.length} branch point(s)`);
 		else pass("a snapshot reports the branch points it has, none for one chain");
 
-		// Nothing is attached, so nothing holds the session: the move's own request was the last hold,
-		// and the host closes as soon as it settles — within milliseconds, there being no grace period
-		// left (the one the SSE streams served went with them). This wait is what makes the cold read
-		// below honest: a session still hosted would answer with the same live snapshot and prove
-		// nothing.
+		// 没有任何东西挂着，所以没有任何东西持有这个 session：移动自己的请求是最后一个 hold，
+		// host 一落定就关闭——毫秒级，那里不再有宽限期（SSE 流服务过的那个随它们一起走了）。
+		// 这个等待是让下面的冷读诚实的原因：仍被 host 的 session 会以同样的活快照作答，证明不了
+		// 任何东西。
 		await sleep(2_000);
 
-		// The cold read answers from the file, and the leafId it reports is the moved entry — "because
-		// the leaf is persisted" made observable: the move lives in the file, not in some resident
-		// Agent. Were the leaf memory-only, a reaped session would answer with its file's last entry —
-		// the leaf record itself, not the entry it names.
+		// 冷读从文件作答，它报告的 leafId 就是移动后的 entry——"因为 leaf 被持久化了"由此变成
+		// 可观察的：移动活在文件里，不在某个常驻 Agent 里。若 leaf 只在内存里，被 reap 的 session
+		// 会以它文件的最后一条 entry 作答——leaf 记录本身，而不是它指名的 entry。
 		const cold = await request("GET", `/api/sessions/${encodeURIComponent(treeId)}`);
 		const coldLeaf = (cold.payload as { session: TreeSession }).session.leafId;
 		if (coldLeaf !== entry) fail(`the cold read reports leafId ${String(coldLeaf)}, expected the moved ${entry}`);
 		else pass("the move survived the reap: a cold read reports the leaf the file recorded");
 
-		// The next prompt is assembled from the file by a brand-new host, and it continues from the
-		// recorded position: the message it writes is a child of the moved entry, which is what turns
-		// that entry into a branch point.
+		// 下一次 prompt 由一个全新的 host 从文件组装，它从记录的位置继续：它写的消息是移动后
+		// entry 的孩子，这正是让那个 entry 变成分支点的动作。
 		const again = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/messages`, { text: "and another way" });
 		if (again.status !== 202) fail(`the second prompt answered ${again.status}, expected 202`);
 		if (!(await settleRun(treeId))) fail("the second run never settled");
@@ -355,10 +346,9 @@ async function main(): Promise<void> {
 		else if (point.options.filter((option) => option.active).length !== 1) fail("no single option is marked active");
 		else pass(`the next prompt continued from the moved leaf: ${point.options.map((option) => `${option.role}:${option.label}`).join(" | ")}`);
 
-		// The tree belongs to the conversation, not to where the leaf happens to sit. Rewind to the entry
-		// the fork hangs off — the first question, the page's "back to the beginning" — and the fork is
-		// still reported. A chain-relative report lost it here, which is why the branch page showed half
-		// the tree after a rewind.
+		// 树属于对话，不属于 leaf 碰巧坐在哪里。倒回到 fork 挂着的那条 entry——第一个问题，页面
+		// 的"回到开头"——fork 仍然被报告。链相对的报告在这里会丢掉它，这正是 branch 页面在一次
+		// 倒回后只显示半棵树的原因。
 		const rewound = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/branch`, { entryId: entry, descend: false });
 		const rewoundPoints = (rewound.payload as { session?: TreeSession }).session?.branchPoints ?? [];
 		const kept = rewoundPoints.find((candidate) => candidate.entryId === entry);
@@ -377,10 +367,9 @@ async function main(): Promise<void> {
 		const unknownSession = await request("POST", "/api/sessions/does-not-exist/branch", { entryId: "x" });
 		if (unknownSession.status !== 404) fail(`a branch on an unknown session answered ${unknownSession.status}, expected 404`);
 
-		// An approval answer for an id nothing is waiting on is a conflict, not a silent no-op: the
-		// request was understood and refused. This session is idle, so every id is unanswerable here —
-		// and a refused attempt must reach nothing, which the run staying settled confirms on the REST
-		// face alone.
+		// 一次没有任何东西在等的审批应答是冲突，不是一次沉默的 no-op：请求被理解并被拒绝。这个
+		// session 是 idle 的，所以这里每个 id 都不可应答——且被拒的尝试必须哪儿也没到，run 保持
+		// 已落定这一点仅在 REST 面上就确认了它。
 		const unknownApproval = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/approvals/no-such-call`, { approved: true });
 		if (unknownApproval.status !== 409) fail(`an approval for an unanswerable id answered ${unknownApproval.status}, expected 409`);
 		else if (!JSON.stringify(unknownApproval.payload).includes("not a pending approval")) fail(`the 409 body does not say what was refused: ${JSON.stringify(unknownApproval.payload)}`);
@@ -398,9 +387,8 @@ async function main(): Promise<void> {
 			if (listed?.parentId !== treeId) fail(`the fork lists parentId=${String(listed?.parentId)}, expected ${treeId}`);
 			else pass("the listing gives a fork its parent by id, which is what the tree is drawn from");
 
-			// The rename and the delete, over the same surface the row menu uses. A rename creates one
-			// entry — 201 — and answers with the name it stored; a blank one is refused before the
-			// file hears about it. A delete answers 200 and the session is a 404 ever after.
+			// 改名与删除，走行菜单用的同一张面。改名创建一个条目——201——并以它存储的名字作答；
+			// 空名在文件听说之前就被拒绝。删除答 200，此后 session 永远是 404。
 			const named = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/title`, { title: "改过的名字" });
 			if (named.status !== 201) fail(`a rename answered ${named.status}, expected 201`);
 			else if ((named.payload as { title?: string }).title !== "改过的名字") fail(`a rename answered ${JSON.stringify(named.payload)}`);
@@ -423,7 +411,7 @@ async function main(): Promise<void> {
 
 	await watch((first.payload as { sessionId: string }).sessionId);
 
-	// Reaching here means the first stream was abandoned for the replacement session it asked for.
+	// 走到这里意味着第一条流为了它要求的替代 session 而被放弃。
 	if (replacementId === undefined) {
 		fail("the first stream ended without a replacement session");
 	} else {

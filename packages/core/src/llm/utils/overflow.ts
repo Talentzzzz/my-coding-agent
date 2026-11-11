@@ -1,15 +1,14 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
-// from flagging this file, while every import into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
 import type { AssistantMessage } from "../types.ts";
 
 /**
- * Regex patterns to detect context overflow errors from different providers.
+ * 检测各 provider context 溢出错误的正则模式。
  *
- * These patterns match error messages returned when the input exceeds
- * the model's context window.
+ * 这些模式匹配输入超出模型 context window 时返回的错误消息。
  *
- * Provider-specific patterns (with example error messages):
+ * 各 provider 的专属模式（附示例错误消息）：
  *
  * - Anthropic: "prompt is too long: 213462 tokens > 200000 maximum"
  * - Anthropic: "413 {\"error\":{\"type\":\"request_too_large\",\"message\":\"Request exceeds the maximum size\"}}"
@@ -27,12 +26,12 @@ import type { AssistantMessage } from "../types.ts";
  * - DS4: "Prompt has X tokens, but the configured context size is Y tokens"
  * - Cerebras: "400/413 status code (no body)"
  * - Mistral: "Prompt contains X tokens ... too large for model with Y maximum context length"
- * - z.ai: `{"code":"1261","message":"Prompt too long"}`, `{"code":"1261","message":"Prompt exceeds max length"}` (CN endpoint), or silent overflow via usage.input > contextWindow
- * - Xiaomi MiMo: Truncates input to fill contextWindow exactly, then returns finish_reason "length"
- *   with output=0 (no room left to generate). Detected via stopReason "length" + zero output +
- *   input filling the context window.
- * - DashScope/Qwen: "Range of input length should be [1, X]" (HTTP 400 invalid_parameter_error)
- * - Ollama: Some deployments truncate silently, others return errors like "prompt too long; exceeded max context length by X tokens"
+ * - z.ai: `{"code":"1261","message":"Prompt too long"}`、`{"code":"1261","message":"Prompt exceeds max length"}`（CN 端点），或经 usage.input > contextWindow 的静默溢出
+ * - Xiaomi MiMo: 把输入截到正好填满 contextWindow，然后返回 finish_reason "length" 且 output=0
+ *   （没有空间生成）。经 stopReason "length" + 零输出 + 输入填满 context window 检测。
+ * - DashScope/Qwen: "Range of input length should be [1, X]"（HTTP 400 invalid_parameter_error）
+ * - Ollama: 一些部署静默截断，另一些返回 "prompt too long; exceeded max context length by X tokens"
+ *   之类的错误
  */
 const OVERFLOW_PATTERNS = [
 	/prompt (?:is )?too long/i, // Anthropic and z.ai token overflow
@@ -60,17 +59,15 @@ const OVERFLOW_PATTERNS = [
 	/token limit exceeded/i, // Generic fallback
 ];
 
-/** A 400/413 with no body at all: the endpoint rejected the request before it could explain why. */
+/** 完全没有 body 的 400/413：端点在能解释原因之前就拒绝了请求。 */
 const BODYLESS_REJECTION_OVERFLOW_PATTERN = /^4(?:00|13)\s*(?:status code)?\s*\(no body\)/i;
 
 /**
- * Patterns that indicate non-overflow errors (e.g. rate limiting, server errors).
- * Error messages matching any of these are excluded from overflow detection
- * even if they also match an OVERFLOW_PATTERN.
+ * 表示非溢出错误的模式（例如限流、服务器错误）。
+ * 匹配其中任何一条的错误消息会被排除在溢出检测之外，即使它同时匹配某条 OVERFLOW_PATTERN。
  *
- * Example: Bedrock formats throttling errors as "ThrottlingException: Too many tokens,
- * please wait before trying again." which would match the /too many tokens/i overflow
- * pattern without this exclusion.
+ * 例如：Bedrock 把限流错误格式化为 "ThrottlingException: Too many tokens,
+ * please wait before trying again."，没有这个排除的话它会匹配 /too many tokens/i 的溢出模式。
  */
 const NON_OVERFLOW_PATTERNS = [
 	/^(Throttling error|Service unavailable):/i, // AWS Bedrock non-overflow errors (human-readable prefixes from formatBedrockError)
@@ -79,26 +76,24 @@ const NON_OVERFLOW_PATTERNS = [
 ];
 
 /**
- * Check if an assistant message represents a context overflow error.
+ * 检查一条 assistant 消息是否表示 context 溢出错误。
  *
- * This handles three cases:
- * 1. Error-based overflow: Most providers return stopReason "error" with a
- *    specific error message pattern.
- * 2. Silent overflow: Some providers accept overflow requests and return
- *    successfully. For these, we check if usage.input exceeds the context window.
- * 3. Length-stop overflow: Xiaomi MiMo can return "length" with zero output when
- *    the input fills the context window.
+ * 处理三种情况：
+ * 1. 基于错误的溢出：大多数 provider 返回 stopReason "error" 加一个特定的错误消息模式。
+ * 2. 静默溢出：一些 provider 接受溢出请求并正常返回。对这些，检查 usage.input 是否超过
+ *    context window。
+ * 3. length-stop 溢出：Xiaomi MiMo 在输入填满 context window 时可能返回 "length" 且零输出。
  *
- * ## Reliability by Provider
+ * ## 各 provider 的检测可靠性
  *
- * **Reliable detection (returns error with detectable message):**
- * - Anthropic: "prompt is too long: X tokens > Y maximum" or "request_too_large"
+ * **检测可靠（返回带可识别消息的 error）：**
+ * - Anthropic: "prompt is too long: X tokens > Y maximum" 或 "request_too_large"
  * - Google Gemini: "input token count exceeds the maximum"
  * - xAI (Grok): "maximum prompt length is X but request contains Y"
  * - Groq: "reduce the length of the messages"
  * - Cerebras: 400/413 status code (no body)
  * - Mistral: "Prompt contains X tokens ... too large for model with Y maximum context length"
- * - OpenRouter (most backends): "maximum context length is X tokens"
+ * - OpenRouter（多数后端）: "maximum context length is X tokens"
  * - OpenRouter/Poolside: "Input length X exceeds the maximum allowed input length of Y tokens."
  * - Together AI: "The input (X tokens) is longer than the model's context length (Y tokens)."
  * - llama.cpp: "exceeds the available context size"
@@ -108,41 +103,37 @@ const NON_OVERFLOW_PATTERNS = [
  * - DashScope/Qwen: "Range of input length should be [1, X]"
  * - z.ai: "Prompt too long"
  *
- * **Unreliable detection:**
- * - z.ai: Sometimes accepts overflow silently (detectable via usage.input > contextWindow),
- *   sometimes returns rate limit errors. Pass contextWindow param to detect silent overflow.
- * - Xiaomi MiMo: Truncates input to fit contextWindow then returns stopReason "length" with
- *   output=0. Pass contextWindow param to detect via the "filled context + zero output" signal.
- * - Ollama: May truncate input silently for some setups, but may also return explicit
- *   overflow errors that match the patterns above. Silent truncation still cannot be
- *   detected here because we do not know the expected token count.
+ * **检测不可靠：**
+ * - z.ai: 有时静默接受溢出（经 usage.input > contextWindow 可检测），有时返回限流错误。传入
+ *   contextWindow 参数以检测静默溢出。
+ * - Xiaomi MiMo: 把输入截到适配 contextWindow 然后返回 stopReason "length" 且 output=0。传入
+ *   contextWindow 参数，经「填满 context + 零输出」的信号检测。
+ * - Ollama: 某些配置可能静默截断输入，但也可能返回与上述模式匹配的显式溢出错误。静默截断在
+ *   这里仍然无法检测，因为我们不知道预期的 token 数。
  *
- * ## Custom Providers
+ * ## 自定义 provider
  *
- * If you've added custom models via settings.json, this function may not detect
- * overflow errors from those providers. To add support:
+ * 如果通过 settings.json 添加了自定义模型，本函数可能检测不到那些 provider 的溢出错误。要添加
+ * 支持：
  *
- * 1. Send a request that exceeds the model's context window
- * 2. Check the errorMessage in the response
- * 3. Create a regex pattern that matches the error
- * 4. The pattern should be added to OVERFLOW_PATTERNS in this file, or
- *    check the errorMessage yourself before calling this function
+ * 1. 发送一个超出模型 context window 的请求
+ * 2. 查看响应里的 errorMessage
+ * 3. 写一个匹配该错误的正则模式
+ * 4. 把模式加进本文件的 OVERFLOW_PATTERNS，或在本函数调用之前自己检查 errorMessage
  *
- * @param message - The assistant message to check
- * @param contextWindow - Optional context window size for detecting silent overflow (z.ai)
- * @returns true if the message indicates a context overflow
+ * @param message - 待检查的 assistant 消息
+ * @param contextWindow - 可选的 context window 大小，用于检测静默溢出（z.ai）
+ * @returns 消息表示 context 溢出时为 true
  */
 export function isContextOverflow(message: AssistantMessage, contextWindow?: number): boolean {
-	// Case 1: Check error message patterns
+	// 情况 1：检查错误消息模式
 	if (message.stopReason === "error" && message.errorMessage) {
-		// Skip messages matching known non-overflow patterns (e.g. throttling / rate-limit)
+		// 跳过匹配已知非溢出模式的消息（例如限流）。
 		const isNonOverflow = NON_OVERFLOW_PATTERNS.some((p) => p.test(message.errorMessage!));
 		if (!isNonOverflow) {
-			// A bodyless 400/413 reads as an overflow whatever the endpoint is. Upstream could gate this
-			// on the message's provider, because each of its vendors formatted it differently; a message
-			// here carries no row identity, and a request this transport made that came back with no body
-			// and a rejecting status is over the limit or malformed either way — and retrying a malformed
-			// request forever is worse than compacting one that did not need it.
+			// 无 body 的 400/413 无论端点是谁都读作溢出。上游可以按消息的 provider 来把关，因为它的
+			// 每个 vendor 格式都不同；这里的消息不带行身份，而本传输发出的请求带着拒绝状态码和无
+			// body 回来，不是超限就是畸形——对畸形请求永远重试，比为不需要压缩的对话压缩一次更糟。
 			if (BODYLESS_REJECTION_OVERFLOW_PATTERN.test(message.errorMessage!)) {
 				return true;
 			}
@@ -152,7 +143,7 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
 		}
 	}
 
-	// Case 2: Silent overflow (z.ai style) - successful but usage exceeds context
+	// 情况 2：静默溢出（z.ai 风格）——成功返回但 usage 超出 context。
 	if (contextWindow && message.stopReason === "stop") {
 		const inputTokens = message.usage.input + message.usage.cacheRead;
 		if (inputTokens > contextWindow) {
@@ -160,9 +151,9 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
 		}
 	}
 
-	// Case 3: Length-stop overflow (Xiaomi MiMo style) - server truncates oversized input
-	// to fit the context window, leaving no room for output. Returns stopReason "length"
-	// with output=0 and input+cacheRead filling the context window.
+	// 情况 3：length-stop 溢出（Xiaomi MiMo 风格）——服务器把超大的输入截短以适配 context
+	// window，不留任何输出空间。返回 stopReason "length"、output=0，且 input+cacheRead 填满
+	// context window。
 	if (contextWindow && message.stopReason === "length" && message.usage.output === 0) {
 		const inputTokens = message.usage.input + message.usage.cacheRead;
 		if (inputTokens >= contextWindow * 0.99) {
@@ -174,18 +165,15 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
 }
 
 /**
- * Check whether a length stop ended below the caller or model's intended output limit.
- * Such responses may be caused by context pressure or provider-side truncation, so callers
- * can make one bounded compact-and-retry attempt. `desiredMaxOutput` must be the original
- * limit before any context-based clamping.
+ * 检查一次 length stop 是否在调用方或模型预期的输出上限之下结束。这样的响应可能由 context 压力或
+ * provider 侧截断造成，所以调用方可以做一次有界的压缩再重试。`desiredMaxOutput` 必须是任何基于
+ * context 的钳制之前的原始上限。
  */
 export function isRecoverableLength(message: AssistantMessage, desiredMaxOutput: number): boolean {
 	return message.stopReason === "length" && desiredMaxOutput > 0 && message.usage.output < desiredMaxOutput;
 }
 
-/**
- * Get the overflow patterns for testing purposes.
- */
+/** 供测试使用的溢出模式。 */
 export function getOverflowPatterns(): RegExp[] {
 	return [...OVERFLOW_PATTERNS];
 }

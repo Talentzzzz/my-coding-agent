@@ -1,10 +1,9 @@
-// Model form smoke: the labels the settings → 模型 form draws (ticket 04).
+// Model form smoke：settings → 模型 表单画的标签（ticket 04）。
 //
-// The six labels are a user-facing contract — 「模型」「BASE URL」「上下文长度」… — and a rename that
-// misses one, or a field that goes missing from the form, is exactly what a screenshot review keeps
-// catching late. So they are asserted against the production panel here, in the same minimal DOM the
-// other view smokes use. Nothing reaches the network, so no server and no provider key are needed.
-// Run with: node scripts/smoke-model-form.ts
+// 这六个标签是面向用户的契约——「模型」「BASE URL」「上下文长度」……——漏改一个名字，或某个字段
+// 从表单里消失，正是截图评审反复晚发现的那类问题。所以这里对着生产面板断言它们，用与其他视图
+// smoke 相同的最小 DOM。不触网，无需服务器和 provider key。
+// 运行：node scripts/smoke-model-form.ts
 import { SettingsPanel, type SettingsHandlers } from "../packages/web/src/render/settings.ts";
 import { installDom, type FakeNode } from "./dom-shim.ts";
 import type { SettingsSnapshot } from "@my-agent/core/protocol";
@@ -49,8 +48,7 @@ function handlers(): SettingsHandlers {
 }
 
 /**
- * One field's label, read the way the form draws it: every field puts a `settings-label` above its
- * control.
+ * 一个字段的标签，按表单绘制的方式读取：每个字段都在其控件上方放一个 `settings-label`。
  */
 function fieldLabels(form: FakeNode): (string | undefined)[] {
 	return all(form, "model-field").map((field) => {
@@ -67,7 +65,7 @@ process.stdout.write("\nmodel-form：新建表单的六个标签逐字一致\n")
 	panel.render({ settings: settingsOf(), models: [] });
 	panel.show("models");
 
-	// The add form is the expanded row itself: the button opens it in place.
+	// 添加表单就是展开的那一行本身：按钮把它原地展开。
 	const add = all(panel.element as unknown as FakeNode, "model-add")[0]!;
 	add.dispatch("click");
 	const form = all(panel.element as unknown as FakeNode, "model-form")[0];
@@ -82,8 +80,8 @@ process.stdout.write("\nmodel-form：新建表单的六个标签逐字一致\n")
 		JSON.stringify(labels),
 	);
 
-	// Thinking is no longer a row's business: the strength belongs to the composer, every row takes the
-	// same four, and the form has no control for either half of that.
+	// Thinking 不再是某一行的职责：强度归 composer，每行共用同样的四项，表单里没有任何一处
+	// 与这两者相关的控件。
 	check("表单里没有复选框", form!.querySelector('input[type="checkbox"]') === null);
 	check(
 		"表单里没有下拉",
@@ -91,14 +89,13 @@ process.stdout.write("\nmodel-form：新建表单的六个标签逐字一致\n")
 		String(all(form!, "input").filter((node) => node.tag === "select").length),
 	);
 
-	// Old labels must not survive anywhere in the form: each rename replaces a string, so a missed one
-	// is a second name for the same field.
+	// 旧标签不得在表单里残留：每次改名都是替换一个字符串，漏掉一处就成了同一字段有两个名字。
 	const rendered = JSON.stringify(form!.textContent);
 	for (const stale of ["模型 ID", "服务地址", "上下文窗口", "最大输出（", "该模型支持推理", "默认思考等级", "思考模式", "默认思考强度"]) {
 		check(`没有残留旧标签「${stale}」`, !rendered.includes(stale), rendered.slice(0, 200));
 	}
 
-	// Every field says what it is for.
+	// 每个字段都要说明自己用来做什么。
 	const hints = all(form!, "model-hint").map((node) => node.textContent);
 	check("每个字段都带一句提示", hints.length === 6, JSON.stringify(hints));
 }

@@ -15,8 +15,8 @@ const parameters = Type.Object({
 export type EditParams = Static<typeof parameters>;
 
 /**
- * `edit` replaces exact text. Line endings are normalized before matching, so a file with CRLF
- * endings still matches the LF text the model saw in `read`; the file keeps its original endings.
+ * `edit` 替换精确文本。匹配前先归一化行尾，所以 CRLF 文件也能匹配模型在 `read` 里看到的 LF 文本；
+ * 文件保留其原始行尾。
  */
 export function createEditTool(): Tool<typeof parameters> {
 	return {
@@ -72,8 +72,8 @@ export async function runEdit(
 	throwIfAborted(signal);
 
 	const replaced = params.replace_all === true ? occurrences : 1;
-	// The change is read off the whole file rather than off the needle: a real diff has to know where
-	// in the file it landed, which is what gives the card its line numbers.
+	// 变更从整个文件读出而不是从 needle 读出：真正的 diff 必须知道变更落在文件的哪里，这就是卡片
+	// 行号的来源。
 	const diff = fileDiff(relPath, original, updated, { maxLines: DIFF_MAX_ROWS });
 	const text = diffText(diff);
 	const header = `Edited ${relPath}: ${replaced} replacement${replaced === 1 ? "" : "s"}.`;
@@ -98,7 +98,7 @@ function countOccurrences(haystack: string, needle: string): number {
 	return count;
 }
 
-/** Explain the most likely near miss instead of just saying "not found". */
+/** 解释最可能的近似匹配，而不是只说「没找到」。 */
 function hintFor(original: string, needle: string): string {
 	const originalLines = original.split("\n");
 	const needleFirst = needle.split("\n")[0] ?? "";

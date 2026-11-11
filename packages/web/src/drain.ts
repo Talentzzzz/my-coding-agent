@@ -1,15 +1,13 @@
 /**
- * A bounded-frame queue: work is spread over animation frames instead of paid in one block.
+ * 有上界的 frame 队列：工作分摊到多个动画帧上，而不是一次性付清。
  *
- * Switching sessions hands the transcript a whole conversation at once, and rebuilding it is
- * proportional to the transcript rather than to the delta: every message is new, so every message
- * is parsed and drawn. Doing that in the frame the snapshot lands in freezes the window for as long
- * as the conversation is big — which is what "clicked and nothing happened" is — so the draw is
- * handed here instead: it runs some of the work, gives the frame back, and continues on the next.
+ * 切换会话会把整段对话一次性交给 transcript，重建的成本正比于整份记录而不是增量：每条消息都是
+ * 新的，每条都要解析和绘制。在快照落地的那个 frame 里做这件事，会让窗口冻结与对话长度相等的时间
+ * —— 也就是"点了却没反应"—— 所以绘制工作被移交到这里：它先做一部分，把 frame 还回去，下一帧
+ * 继续。
  *
- * The seam is `produce`, a generator, so a batch is one turn of the producer and the budget is the
- * only thing deciding how many turns a frame gets. One turn per frame is the floor whatever the
- * budget says: a frame that yielded nothing would never finish.
+ * 接缝是 `produce` 这个生成器：一批就是生产者的一轮，预算是唯一决定一个 frame 拿到多少轮的东西。
+ * 无论预算是多少，每帧至少一轮是下限：一帧什么都没产出的队列永远做不完。
  */
 export class Drain {
 	#current: Iterator<undefined> | undefined;
@@ -18,22 +16,22 @@ export class Drain {
 	readonly #budget: number;
 
 	/**
-	 * @param budget Milliseconds each batch may spend.
+	 * @param budget 每批可花费的毫秒数。
 	 */
 	constructor(budget: number) {
 		this.#budget = budget;
 	}
 
-	/** Whether a draw is still outstanding. */
+	/** 是否还有未完成的绘制。 */
 	get pending(): boolean {
 		return this.#current !== undefined;
 	}
 
 	/**
-	 * Hand over everything left to draw, and start.
+	 * 交出所有待绘制的工作，并开始执行。
 	 *
-	 * A producer already in flight is dropped rather than finished: the caller has a newer answer,
-	 * and drawing the old one first would put a superseded conversation on screen.
+	 * 已在执行的生产者会被丢弃而不是做完：调用者手里有了更新的答案，先把旧对话画上屏幕只会展示
+	 * 一份已被取代的记录。
 	 */
 	start(produce: () => Generator<undefined>): void {
 		this.#stop();
@@ -42,17 +40,16 @@ export class Drain {
 	}
 
 	/**
-	 * Give up the outstanding work.
+	 * 放弃未完成的工作。
 	 *
-	 * Called by whoever is about to draw the same items itself — a streaming frame cannot wait for a
-	 * queue to catch up — so the queue must not come back later and draw a transcript the caller has
-	 * already replaced.
+	 * 由即将亲自绘制同样内容的调用者调用 —— 流式 frame 等不了队列追赶 —— 所以队列之后绝不能再
+	 * 回来绘制一份调用者已经替换掉的记录。
 	 */
 	cancel(): void {
 		this.#stop();
 	}
 
-	/** Cancel the frame and forget the producer, leaving the caller's own draw to stand. */
+	/** 取消 frame 并忘记生产者，让调用者自己的绘制保留下来。 */
 	#stop(): void {
 		this.#current = undefined;
 		if (this.#frame === undefined) return;
@@ -61,16 +58,14 @@ export class Drain {
 	}
 
 	/**
-	 * Run one batch, and say whether anything is still outstanding.
+	 * 运行一批，并回答是否还有剩余。
 	 *
-	 * Public because the frame is not: the scheduling above is what a browser does with this, and a
-	 * caller with no animation frame to wait for — a harness, a redraw inside another callback —
-	 * drives the same queue by calling this until it answers false.
+	 * 设为 public 是因为 frame 不是：上面的调度是浏览器做的事，而没有动画帧可等的调用者 —— 测试
+	 * 桩（harness）、另一个回调里的重绘 —— 通过反复调用它直到返回 false 来驱动同一个队列。
 	 *
-	 * The budget is only consulted before a turn that is not the batch's first, so a batch always
-	 * advances: a batch that ran nothing would be a frame of no progress, and a producer that never
-	 * advances is a hung window. One long turn therefore overruns the budget on its own — it is the
-	 * floor the budget is spent against, and the reason a single message is drawn whole.
+	 * 预算只在非首批的那一轮之前检查，所以一批总会前进：一批什么都没跑就是一个毫无进展的 frame，
+	 * 而永不前进的生产者就是一个挂死的窗口。因此一轮很长的时间会自行超出预算 —— 它是预算所对的
+	 * 地板，也是单条消息能被完整绘制的原因。
 	 */
 	step(): boolean {
 		const current = this.#current;

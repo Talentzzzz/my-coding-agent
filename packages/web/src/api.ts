@@ -12,25 +12,24 @@ import type {
 	DirectoryPaging,
 } from "@my-agent/core/protocol";
 
-/** What the settings panel can change. Narrower than the server's own patch, which is the point. */
+/** 设置面板能改的东西。比服务端自己的补丁窄，这正是目的。 */
 export interface PanelSettingsPatch {
-	/** The row a new session starts on, as `<name>/<wire id>`. */
+	/** 新会话起始的行，格式为 `<name>/<wire id>`。 */
 	model?: string;
-	/** The window's "already planted the built-in default" marker; see `Settings.defaultModelSeeded`. */
+	/** 窗口"已种下内置默认"的标记；见 `Settings.defaultModelSeeded`。 */
 	defaultModelSeeded?: boolean;
-	/** The global default active tool set, sent whole like the session-level endpoint's own. */
+	/** 全局默认活跃工具集，像会话级端点自己的那样整体发送。 */
 	tools?: string[];
 	/**
-	 * The user's modes, sent whole like `tools` (ADR-0005): the panel edits a list, and a half-applied
-	 * list is the one state nobody can reason about.
+	 * 用户的模式，像 `tools` 一样整体发送（ADR-0005）：面板编辑的是一个列表，半应用状态的列表
+	 * 是谁也无法推理的唯一状态。
 	 */
 	modes?: ModeSettings[];
 	/**
-	 * Directories the sidebar does not list, by absolute path, sent whole like `tools`.
+	 * 侧栏不列出的目录，按绝对路径，像 `tools` 一样整体发送。
 	 *
-	 * The panel has no control for this and probably never will: it is the shape 「删除」 on a directory
-	 * heading goes through, and hiding a directory from a settings list would be a second door to the
-	 * one act that needs the group in front of you to mean anything.
+	 * 面板没有这个控件，多半永远不会有：它是目录标题上「删除」经过的形状，而把一个目录从设置列表
+	 * 里藏起来，将是那个"需要把组摆在你面前才有意义"的操作的第二扇门。
 	 */
 	hiddenDirectories?: string[];
 	appearance?: {
@@ -38,50 +37,47 @@ export interface PanelSettingsPatch {
 		fontSize?: number;
 		sidebarWidth?: number;
 		contentWidth?: number;
-		/** The sidebar's per-directory paging state, sent whole like every other appearance field. */
+		/** 侧栏按目录的分页状态，像其他每个 appearance 字段一样整体发送。 */
 		directories?: Record<string, DirectoryPaging>;
 	};
 	approval?: Record<string, boolean>;
-	/** Partial so one timeout can be committed without naming the other. */
+	/** Partial 是为了让一个超时可以单独提交而不必指名另一个。 */
 	bash?: Partial<BashSettings>;
 }
 
 /**
- * The API, as this browser sees it.
+ * 这个浏览器眼中的 API。
  *
- * Every command is one request, which is the point of the transport: the browser is a client of the
- * same HTTP surface a script or `curl` would use, so nothing here is privileged and nothing needs a
- * connection to be open. What arrives the other way — a run's events, a changed sidebar row — does not
- * come from here; it comes on one resident channel (`./client.ts`), because a run outlives the request
- * that started it and a list of sessions changes whether or not anyone asked.
+ * 每条命令一个请求，这正是传输的意义：浏览器是与脚本或 `curl` 使用的同一个 HTTP 表面的客户端，
+ * 所以这里没有任何特权，也没有任何东西需要打开连接。反向到达的东西 —— 一次运行的事件、变更的
+ * 侧栏行 —— 不来自这里；它们来自一条常驻通道（`./client.ts`），因为一次运行的寿命超过启动它的
+ * 请求，而会话列表无论有没有人问都会变化。
  *
- * That split is why this file has no notion of a connection at all. It can fail while the channel is
- * perfectly healthy, and the window reports those two things separately rather than letting one stand
- * in for the other.
+ * 这个拆分就是本文件完全没有连接概念的原因。它可以在通道完全健康时失败，窗口把这两件事分别上报
+ * 而不是让一个代替另一个。
  *
- * One read is deliberately missing: `GET /api/sessions/{id}` still exists for scripts and diagnostics,
- * but a window no longer opens a session with it. It opens one with an `open` frame and draws the
- * baseline that answers (ADR-0010), so there is one baseline on screen instead of a read's copy racing
- * the channel's.
+ * 一个读取被刻意省略：`GET /api/sessions/{id}` 仍为脚本和诊断而存在，但窗口不再用它打开会话。
+ * 它用一个 `open` 帧打开会话并绘制应答的基线（ADR-0010），于是屏幕上只有一份基线，而不是一次
+ * 读取的副本与通道的赛跑。
  */
 export class SessionApi {
 	/**
-	 * Accept a prompt.
+	 * 接受一条提示。
 	 *
-	 * Returns as soon as the server has it — the answer arrives on the channel. `behavior`
-	 * applies only mid-run: `steer` interrupts, `followUp` waits for the turn to end.
+	 * 服务端一拿到就返回 —— 答案经通道到达。`behavior` 只在运行中途生效：`steer` 打断，
+	 * `followUp` 等回合结束。
 	 *
-	 * `selection` is which model answers and how hard it is asked to think. It rides here rather than
-	 * as a config change of its own because neither half is in force until this message is sent with
-	 * it, so a composer that moves the seat and never sends moves nothing.
+	 * `selection` 是哪个模型应答、要求它多用力思考。它随这条消息而不是作为独立的配置变更走，
+	 * 因为两半都要到这条消息带着它们发出时才生效，所以只移动席位却从不发送的 composer 什么都没
+	 * 移动。
 	 */
 	async prompt(sessionId: string, text: string, behavior: PromptBehavior | undefined, selection: ModelSelection): Promise<void> {
 		await this.post(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, { text, behavior, ...selection });
 	}
 
 	/**
-	 * Stop the run in flight. A request of its own, and not a frame on the channel: a client that
-	 * cannot send on the channel still has to be able to stop something.
+	 * 停止进行中的运行。一个自己的请求，不是通道上的帧：无法在通道上发送的客户端，仍然必须能够
+	 * 停止某个东西。
 	 */
 	async abort(sessionId: string): Promise<void> {
 		await this.post(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {});
@@ -91,7 +87,7 @@ export class SessionApi {
 		await this.send("PATCH", `/api/sessions/${encodeURIComponent(sessionId)}`, { patch });
 	}
 
-	/** Replace the active tool set; the session refuses a name it does not know and changes nothing. */
+	/** 替换活跃工具集；会话拒绝它不认识的名字且什么都不改。 */
 	async setTools(sessionId: string, names: string[]): Promise<void> {
 		await this.send("PUT", `/api/sessions/${encodeURIComponent(sessionId)}/tools`, { names });
 	}
@@ -104,69 +100,62 @@ export class SessionApi {
 	}
 
 	/**
-	 * Start a conversation.
+	 * 开始一段对话。
 	 *
-	 * `workDirAbsPath` is where the new session lands: the directory picker's own choice, made with the request
-	 * and never a server-side "current directory". Undefined is the server's root, which is what a
-	 * bodyless create has always meant.
+	 * `workDirAbsPath` 是新会话落地的目录：目录选择器自己的选择，随请求做出，绝不是服务端的
+	 * "当前目录"。undefined 是服务端的根，无 body 的 create 一直就是这个意思。
 	 *
-	 * The answer names the new session so the window can point itself at it. The listing that comes
-	 * with it is deliberately not exposed: the sidebar's rows have one writer at a time, and while the
-	 * channel is up that writer is the channel — see {@link sessionId}.
+	 * 答案指名新会话，让窗口把自己指过去。随之而来的列表被刻意不暴露：侧栏的行同一时刻只有一个
+	 * 写入者，通道可用时那个写入者是通道 —— 见 {@link sessionId}。
 	 */
 	async createSession(workDirAbsPath?: string): Promise<{ sessionId: string }> {
 		return this.sessionId("POST", "/api/sessions", workDirAbsPath === undefined ? undefined : { workDirAbsPath });
 	}
 
-	/** Branch a session at one entry, or copy the whole log when the entry is null. */
+	/** 在某个条目处分出会话分支，条目为 null 时复制整份日志。 */
 	async forkSession(sessionId: string, entryId: string | null): Promise<{ sessionId: string }> {
 		return this.sessionId("POST", `/api/sessions/${encodeURIComponent(sessionId)}/forks`, { entryId });
 	}
 
 	/**
-	 * Give a session a name of its own.
+	 * 给会话一个自己的名字。
 	 *
-	 * The answer only says the entry landed: the row a sidebar draws takes the new name when the
-	 * connection's `session_row` frame carries it, which is the same road every other row fact takes.
+	 * 答案只说条目已落地：侧栏画的行等到连接的 `session_row` 帧携带新名时才变，那是所有其他行事实
+	 * 走的同一条路。
 	 */
 	async renameSession(sessionId: string, title: string): Promise<{ sessionId: string; title: string }> {
 		return this.send("POST", `/api/sessions/${encodeURIComponent(sessionId)}/title`, { title });
 	}
 
 	/**
-	 * Delete the session whole — transcript, file, everything.
+	 * 整个删除会话 —— transcript、文件、一切。
 	 *
-	 * This answer says the server did it; the row a sidebar draws leaves on the connection's
-	 * `session_gone` frame rather than on anything returned here, so the list never learns about a
-	 * removal through two roads.
+	 * 这个答案说明服务端做了；侧栏画的行随连接的 `session_gone` 帧离开，而不是随这里返回的任何
+	 * 东西，所以列表永远不会通过两条路得知一次删除。
 	 */
 	async deleteSession(sessionId: string): Promise<void> {
 		await this.send("DELETE", `/api/sessions/${encodeURIComponent(sessionId)}`, undefined);
 	}
 
 	/**
-	 * Move this session onto another branch of its own tree, and answer with what it looks like now.
+	 * 把这个会话移到它自己树上的另一个分支，并以它现在的样子作答。
 	 *
-	 * `descend` is the whole difference between the two gestures a window offers: choosing an existing
-	 * alternative lands on where it stopped, while rewinding to a message lands on the message itself,
-	 * so the next prompt starts a new alternative from there.
+	 * `descend` 是窗口提供的两种手势之间的全部差别：选择一个已存在的备选项落在它停下的地方，而
+	 * 回退到一条消息落在消息本身上，于是下一个提示从那里开启新的备选项。
 	 */
 	async branchSession(sessionId: string, entryId: string, descend: boolean): Promise<{ session: SessionSnapshot }> {
 		return this.send("POST", `/api/sessions/${encodeURIComponent(sessionId)}/branch`, { entryId, descend });
 	}
 
 	/**
-	 * Which session a window with no anchor of its own should open — `null` for "none, stay on the
-	 * welcome state".
+	 * 一个没有自己锚点的窗口应该打开哪个会话 —— `null` 表示"没有，停在欢迎状态"。
 	 *
-	 * The server answers this rather than the client picking from the list, because the choice is the
-	 * server's: `--session` pins a conversation, and otherwise the answer is the session the server
-	 * last created, or `null` — startup selects nothing, and the server never creates a session to
-	 * fill the answer. A client that chose "the newest file" would silently ignore the pin.
+	 * 服务端应答这个而不是客户端从列表里挑，因为选择是服务端的：`--session` 钉住一段对话，否则
+	 * 答案是服务端最后创建的会话，或 `null` —— 启动不选择任何东西，服务端也绝不会为了填这个答案
+	 * 而创建会话。自己挑"最新文件"的客户端会默默忽略钉住的会话。
 	 *
-	 * The listing that comes back with it is left unread. The sidebar's rows come from the channel
-	 * whenever it is up, and this endpoint's copy is the fallback for when it is not — taking it
-	 * unconditionally would mean two writers for one table.
+	 * 随之返回的列表留着不读。侧栏的行在通道可用时来自通道，这个端点的副本只是通道不可用时的
+	 * 兜底 —— 无条件采用它意味着一张表两个写入者。
 	 */
 	async currentSession(): Promise<{ sessionId: string | null }> {
 		const answer = await this.send<{ sessionId: string | null }>("GET", "/api/sessions/current", undefined);
@@ -174,43 +163,39 @@ export class SessionApi {
 	}
 
 	/**
-	 * Where this server is rooted, and what it currently has running.
+	 * 这个服务端根在何处，以及它当前在跑什么。
 	 *
-	 * The whole response is typed, `live` included, even though this client reads only `workDirAbsPath`. Declaring
-	 * a narrower shape would make this file describe something other than the endpoint — and the next
-	 * reader who wants `live` would find a type that insists it does not exist.
+	 * 整个响应都有类型，`live` 包括在内，即使这个客户端只读 `workDirAbsPath`。声明一个更窄的形状
+	 * 会让本文件描述的不是那个端点 —— 下一个想要 `live` 的读者会发现一个坚称它不存在的类型。
 	 */
 	async health(): Promise<{ ok: boolean; workDirAbsPath: string; live: string[] }> {
 		return this.send("GET", "/api/health", undefined);
 	}
 
-	/** Every directory this machine has sessions for, for the sidebar's groups. */
+	/** 这台机器有会话的每个目录，供侧栏的分组。 */
 	async listDirectories(): Promise<{ directories: DirectoryGroup[] }> {
 		return this.send("GET", "/api/directories", undefined);
 	}
 
 	/**
-	 * Give a directory a name the sidebar shows, touching nothing on disk.
+	 * 给目录一个侧栏显示的名字，磁盘上什么都不碰。
 	 *
-	 * `workDirAbsPath` names the group and `name` is the label — they are not two paths: the folder keeps the name
-	 * the file system gave it, and this is a view the settings remember. An empty name takes the
-	 * custom one back, and the heading falls to the folder's own name again.
+	 * `workDirAbsPath` 指名组，`name` 是标签 —— 它们不是两条路径：文件夹保留文件系统给它的名字，
+	 * 这是设置记住的一个视图。空名字收回自定义名，标题落回文件夹自己的名字。
 	 *
-	 * The answer carries the settings snapshot because that is where the label lives: the window
-	 * applies it and repaints the heading, and no row moved, so there is no `session_row` frame on its
-	 * way to disagree with.
+	 * 答案携带设置快照，因为标签住在那里：窗口应用它并重画标题，没有行移动，所以没有会与之分歧的
+	 * `session_row` 帧在路上。
 	 */
 	async renameDirectory(workDirAbsPath: string, name: string): Promise<{ workDirAbsPath: string; name: string; settings: SettingsSnapshot }> {
 		return this.send("POST", "/api/directories/rename", { workDirAbsPath, name });
 	}
 
 	/**
-	 * Take a directory out of the list, touching nothing on disk.
+	 * 把一个目录从列表里拿掉，磁盘上什么都不碰。
 	 *
-	 * The whole stored list and the visible listing come back because this is the one directory
-	 * command that does not ride the channel: nothing about a hidden directory is a row fact, so the
-	 * endpoint answers with what the sidebar should now draw — and the client applies it rather than
-	 * guessing, which would be a second writer for a list the server owns.
+	 * 存储列表和可见列表都返回，因为这是唯一不走通道的目录命令：被隐藏目录的任何东西都不是行事实，
+	 * 所以端点以侧栏现在应该画什么作答 —— 客户端应用它而不是自己猜，猜会是服务端拥有的列表的
+	 * 第二个写入者。
 	 */
 	async hideDirectory(workDirAbsPath: string): Promise<{ settings: SettingsSnapshot; directories: DirectoryGroup[] }> {
 		return this.send("POST", "/api/directories/hide", { workDirAbsPath });
@@ -221,11 +206,10 @@ export class SessionApi {
 	}
 
 	/**
-	 * Replace the imported models.
+	 * 替换已导入的模型。
 	 *
-	 * The list is sent whole: the panel edits a list, and a row removed here and another added there
-	 * have to land together. A row whose `apiKey` is omitted keeps the stored one, which is what lets
-	 * the panel save an edit to a row it was never shown the key for.
+	 * 列表整体发送：面板编辑的是一个列表，这里删一行、那里加一行的两处变更必须一起落地。
+	 * `apiKey` 省略的行保留已存的那个，这让面板可以保存一行它从未见过密钥的编辑。
 	 */
 	async updateModels(models: ModelInput[]): Promise<{ models: ModelOption[] }> {
 		return this.send("PUT", "/api/models", { models });
@@ -244,16 +228,14 @@ export class SessionApi {
 	}
 
 	/**
-	 * One of the three endpoints that answer with a session id plus a whole session listing, narrowed
-	 * to the id.
+	 * 以会话 id 加完整会话列表作答的三个端点之一，收窄到 id。
 	 *
-	 * The narrowing is the point rather than an accident of typing: every one of them carries a listing
-	 * this client has no business applying, because the sidebar's rows are written by the channel while
-	 * it is up and by {@link listDirectories} while it is not. Returning the full body would invite the
-	 * second writer, and a second writer is a row that says a working session is idle.
+	 * 收窄是目的而不是类型的意外：它们每一个都携带一份本客户端无权应用的列表，因为侧栏的行在通道
+	 * 可用时由通道写、不可用时由 {@link listDirectories} 写。返回完整 body 会招来第二个写入者，而
+	 * 第二个写入者就是一行说一个正在工作的会话空闲的行。
 	 *
-	 * The wire shape is still declared in full at the call to `send`, so this stays a narrowing rather
-	 * than a second, smaller claim about what the server sends.
+	 * wire 形状仍然在调用 `send` 时完整声明，所以这保持为一次收窄，而不是关于服务端发送什么的
+	 * 第二个更小的断言。
 	 */
 	private async sessionId(method: string, path: string, body: unknown): Promise<{ sessionId: string }> {
 		const answer = await this.send<{ sessionId: string }>(method, path, body);
@@ -275,7 +257,7 @@ export class SessionApi {
 	}
 }
 
-/** A refused request, with the status that says why in the terms HTTP already has. */
+/** 一次被拒绝的请求，带着以 HTTP 本就有的措辞说出原因的状态码。 */
 export class ApiError extends Error {
 	readonly status: number;
 

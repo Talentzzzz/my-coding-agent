@@ -1,11 +1,10 @@
-// Frame-coalescer smoke: drives the production `OncePerFrame` against the shared DOM shim, which is
-// also the only thing that implements animation frames here. The property under test is the one a
-// streaming run rests on — many asks, one callback, run against the latest state — plus the three
-// edges a caller has to be able to trust: a run that asks again gets the *next* frame, a draw that
-// would land inside the minimum interval is deferred whole, and a cancelled frame never runs.
+// Frame-coalescer smoke：对着共享 DOM shim 驱动生产用的 `OncePerFrame`——这个 shim 也是这里唯一
+// 实现 animation frame 的地方。被测的性质是流式渲染赖以成立的那条——多次请求、一次回调、永远
+// 跑在最新状态上——外加调用方必须能信赖的三个边界：一次运行中再次请求拿到的是*下一*帧；落在
+// 最小间隔内的绘制整体顺延；被取消的帧绝不运行。
 //
-// Nothing reaches the network, so no server and no provider key are needed.
-// Run with: node scripts/smoke-frame.ts
+// 不触网，无需服务器和 provider key。
+// 运行：node scripts/smoke-frame.ts
 import { OncePerFrame } from "../packages/web/src/frame.ts";
 import { installDom } from "./dom-shim.ts";
 
@@ -29,7 +28,7 @@ process.stdout.write("\nframe：一帧只画一次\n");
 		painted = state;
 	});
 
-	// Several deltas inside one refresh: the first arms the frame, the rest are the same draw.
+	// 一次刷新里的多个 delta：第一个把帧装上，其余都是同一次绘制。
 	state = 1;
 	once.schedule();
 	state = 2;
@@ -42,15 +41,14 @@ process.stdout.write("\nframe：一帧只画一次\n");
 	check("跑的是最后的状态", painted === 3, `${painted}`);
 	check("跑完就不再有待跑的帧", !once.pending);
 
-	// A later delta arms a new frame; the coalescer is reusable rather than one-shot.
+	// 之后的 delta 装上新帧；合并器可复用，而不是一次性的。
 	state = 4;
 	once.schedule();
 	check("新的 delta 排了新帧", once.pending);
 	shim.frames();
 	check("新帧跑的是新状态", runs === 2 && painted === 4, `${runs}/${painted}`);
 
-	// Cancellation is what an immediate draw relies on: it paints the same state now, and a frame
-	// left armed would paint it again a refresh later.
+	// 取消正是立即绘制所依赖的机制：它现在就画同一份状态，而一个留着装好的帧会在下次刷新再画一遍。
 	state = 5;
 	once.schedule();
 	once.cancel();
@@ -60,9 +58,8 @@ process.stdout.write("\nframe：一帧只画一次\n");
 }
 
 {
-	// A callback that asks for itself is asking for the *next* frame: arming happens after the handle
-	// it would collide with was cleared, and a frame that ran its callback twice would be a loop
-	// with no yield in it.
+	// 回调里请求自己是在请求*下一*帧：装帧发生在它本会碰撞的那次 handle 被清除之后，一帧里把
+	// 回调跑两遍就成了一个没有让出点的死循环。
 	let runs = 0;
 	const again = new OncePerFrame(() => {
 		runs += 1;
@@ -78,10 +75,9 @@ process.stdout.write("\nframe：一帧只画一次\n");
 }
 
 {
-	// The minimum-interval gate: a draw that would land less than one 60 Hz refresh after the
-	// previous one is pushed to the next frame — the shape a 120 Hz display produces, where two
-	// refreshes fit inside what a reader sees as one. The ask is not lost: the deferred frame
-	// carries it, and it runs on the first frame that meets the interval.
+	// 最小间隔闸门：与前一次绘制相距不足一个 60 Hz 刷新的绘制被推到下一帧——这是 120 Hz 显示器
+	// 产生的形状，两次刷新落在读者感知的一次里。请求不丢失：顺延的帧带着它，在第一个满足间隔
+	// 的帧上运行。
 	let runs = 0;
 	const gated = new OncePerFrame(() => {
 		runs += 1;
@@ -95,8 +91,7 @@ process.stdout.write("\nframe：一帧只画一次\n");
 	shim.frames(8.7);
 	check("间隔够了补跑", runs === 2 && !gated.pending, `${runs}/${gated.pending}`);
 
-	// Cancellation reaches a deferred frame too: an immediate draw preempts it, the same road it
-	// preempts an ordinary armed one.
+	// 取消同样能到达顺延中的帧：立即绘制抢先它，与抢先一个普通装好的帧走同一条路。
 	gated.schedule();
 	shim.frames(8);
 	check("顺延的帧还在队列里", gated.pending);

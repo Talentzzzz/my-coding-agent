@@ -10,29 +10,29 @@ import {
 } from "@my-agent/core/protocol";
 
 /**
- * The built-in default mode's name, restated here rather than imported.
+ * 内置默认模式的名字，在这里复述而不是导入。
  *
- * The constant's home (`@my-agent/core/config.ts`) runs on Node, and the client must not pull that
- * into its bundle — the same restatement rule the font-size range follows.
+ * 常量的家（`@my-agent/core/config.ts`）跑在 Node 上，客户端绝不能把它拉进 bundle —— 与字号
+ * 范围出于同样理由遵循的同一条复述规则。
  */
 const DEFAULT_MODE_NAME = "默认";
 
-/** A row being edited. `apiKey` is present only when the user typed a new one this session. */
+/** 一条被编辑的行。`apiKey` 只有用户本次输入了新密钥时才存在。 */
 export interface ModelDraft extends ModelOption {
 	apiKey?: string;
 }
 
-/** A mode being edited: the stored shape, plus nothing — a mode carries no secret to hold back. */
+/** 一个被编辑的模式：存储形状本身 —— 模式没有要留一手的秘密。 */
 type ModeDraft = ModeSettings;
 
-/** A mode with nothing set: every tool off, every tool auto-allowed — the prototype's new mode. */
+/** 一个什么都不设置的模式：每个工具关、每个工具自动允许 —— 原型的"新模式"。 */
 function blankMode(): ModeDraft {
 	const approval: Record<string, boolean> = {};
 	for (const key of APPROVAL_TOOLS) approval[key] = false;
 	return { name: "新模式", tools: [], approval };
 }
 
-/** A mode's one-line summary, the same shape the prototype's mode menu showed. */
+/** 一个模式的一行摘要，与原型的模式菜单同一形状。 */
 export function modeSummaryOf(tools: readonly string[], approval: Record<string, boolean>): string {
 	const ask = tools.filter((tool) => approval[tool] === true).length;
 	return `${tools.length} 个工具 · ${ask} 项询问`;
@@ -45,9 +45,9 @@ export interface SettingsHandlers {
 	onSaveModels(rows: ModelInput[]): Promise<void>;
 	onSaveModes(modes: ModeSettings[]): Promise<void>;
 	onDefaultModel(ref: string): void;
-	/** The global default active tool set, whole — the built-in default mode's save writes it. */
+	/** 全局默认活跃工具集，整体 —— 内置默认模式的保存写它。 */
 	onGlobalTools(names: string[]): Promise<void>;
-	/** One tool of the global default approval map, which the built-in default mode reads. */
+	/** 全局默认审批表的一个工具，内置默认模式读它。 */
 	onGlobalApproval(tool: string, value: boolean): Promise<void>;
 	onBashTimeouts(patch: Partial<BashSettings>): void;
 }
@@ -56,9 +56,8 @@ export interface SettingsState {
 	settings?: SettingsSnapshot;
 	models: readonly ModelOption[];
 	/**
-	 * The session on screen, when there is one. Its `allTools` is the one list of tool names this
-	 * build has, and the global default tool set needs names to offer, so without a session the
-	 * built-in default mode's form stands down rather than inventing a list.
+	 * 屏幕上的会话，若有。它的 `allTools` 是本构建的工具名清单，全局默认工具集需要名字可提供，
+	 * 所以没有会话时内置默认模式的表单退下，而不是凭空编一份清单。
 	 */
 	snapshot?: SessionSnapshot;
 }
@@ -66,14 +65,13 @@ export interface SettingsState {
 type Tab = "appearance" | "models" | "modes" | "defaults";
 
 /**
- * A starting point for a new row, so the form never opens with empty numbers in it.
+ * 新行的起点，让表单从不带着空数字打开。
  *
- * The endpoint is Anthropic's own, as a filled-in default rather than a choice: every row goes over
- * Anthropic Messages, so a blank form that pointed nowhere would only ask the user to retype the one
- * URL that is nearly always right. A proxy or a relay is the same field with a different value.
+ * 端点是 Anthropic 自己的，作为填好的默认而不是选择：每行都走 Anthropic Messages，指向空处的
+ * 空白表单只会让用户重新输入那个几乎总是对的 URL。代理或中转是同一字段换个值。
  *
- * An empty name is how the form says "not named yet": the server takes the wire id as the name, which
- * is why the card stays open until both fields are filled in.
+ * 空名字是表单说"还没起名"的方式：服务端拿 wire id 当名字，这就是卡片两个都填上之前一直开着
+ * 的原因。
  */
 const BLANK_DRAFT: ModelDraft = {
 	name: "",
@@ -87,32 +85,27 @@ const BLANK_DRAFT: ModelDraft = {
 };
 
 /**
- * Whether a form has the three fields a row cannot exist without.
+ * 表单是否有一行离不开的三个字段。
  *
- * The server refuses a row with no name of its own, no model id, and no endpoint — the same three
- * the old card stayed open on — so 保存 sits disabled until they are filled, rather than relaying
- * the refusal as an error after the click.
+ * 服务端拒绝没有自己的名字、没有模型 id、没有端点的行 —— 与旧卡片保持开启的是同样的三个 ——
+ * 所以 保存 在它们填上之前禁用，而不是在点击之后把拒绝当错误转发。
  */
 function formComplete(form: ModelDraft): boolean {
 	return form.name.trim().length > 0 && form.id.trim().length > 0 && form.baseUrl.trim().length > 0;
 }
 
 /**
- * The app-level settings panel.
+ * 应用级设置面板。
  *
- * It holds what lasts longer than one conversation: how the window draws itself, which models this
- * machine has imported, and the defaults a session that never chose opens on — the default model, the
- * bash timeouts, the global default tool set and approval map (which are the built-in default mode),
- * and the user's named modes. The tools and approvals a session itself runs on are not here: they
- * follow the conversation and are chosen in the composer's mode seat, which applies a preset through
- * the session's own `.json` snapshot, with no second panel to edit them by hand. What is left here is
- * visited rarely and changed deliberately, which is what a panel behind one button is for and a row of
- * always-visible controls is not.
+ * 它持有比一段对话更长久的东西：窗口如何绘制自己、这台机器导入了哪些模型、从未选择过的会话
+ * 开启时的默认 —— 默认模型、bash 超时、全局默认工具集与审批表（它们就是内置默认模式）、以及
+ * 用户命名的模式。会话自己运行的工具与审批不在这里：它们跟随对话、在 composer 的模式席位选择，
+ * 那里经会话自己的 `.json` 快照应用预设，没有第二个手动编辑它们的面板。留给这里的是很少被访问、
+ * 刻意才改动的东西，这正是藏在侧栏一个按钮后面的面板该有的样子，而不是一排永远可见的控件。
  *
- * The model list is edited one row at a time and saved one action at a time: an inline form's 保存
- * and a confirmed delete each send the list whole, because a half-saved list is the one state nobody
- * can reason about — a row deleted here and another added there have to land together. The appearance
- * controls are the opposite — they apply on the spot, since seeing the font size is how you choose it.
+ * 模型列表一次编辑一行、一次保存一个动作：内联表单的 保存 和确认后的删除各自整体发送列表，
+ * 因为半保存的列表是唯一谁也无法推理的状态 —— 这里删一行、那里加一行的两处变更必须一起落地。
+ * 外观控件相反 —— 立即生效，因为看到字号正是选择它的方式。
  */
 export class SettingsPanel {
 	readonly element: HTMLElement;
@@ -124,51 +117,45 @@ export class SettingsPanel {
 	private state: SettingsState = { models: [] };
 	private tab: Tab = "appearance";
 	/**
-	 * The rows as they were when the open interaction began, or undefined while the panel is showing
-	 * what the server holds.
+	 * 打开交互开始时的行，面板显示服务端持有的东西时为 undefined。
 	 *
-	 * Held rather than re-read per render, so a half-typed form and the rows it edits sit on the same
-	 * frozen list: a model arriving from the server mid-edit must not shift the row under the form.
-	 * One interaction is open at a time, and this is cleared when it ends — saved, confirmed, or
-	 * cancelled.
+	 * 持有而不是每次渲染重读，让半输入的表单和它编辑的行坐在同一份冻结的清单上：编辑中途从服务端
+	 * 到来的模型绝不能把表单下面的行挪走。一次只开一个交互，交互结束 —— 保存、确认或取消 —— 时
+	 * 清除。
 	 */
 	private frozen?: ModelDraft[];
-	/** Which row is open for editing: a row index, or the add form's blank one. */
+	/** 哪一行正打开编辑：行下标，或添加表单的空白行。 */
 	private editing?: number | "new";
-	/** The row with a delete confirmation standing under it. */
+	/** 删除确认正站在其下的那一行。 */
 	private confirming?: number;
-	/** The values typed into the open form, present exactly while a form is open. */
+	/** 打开的表单里输入的值，恰好表单开着时存在。 */
 	private form?: ModelDraft;
 	private saving = false;
 	private signature = "";
 	/**
-	 * The modes tab's own interaction state, kept beside the models' rather than shared with it:
-	 * the two lists are edited on the same one-interaction-at-a-time rule, but their rows have
-	 * different shapes and their commits go to different endpoints, so sharing the fields would
-	 * couple two save paths that must never move together.
+	 * 模式标签页自己的交互状态，与模型的并排而不是共享：两个列表按同一条一次一个交互的规则编辑，
+	 * 但它们的行形状不同、提交去向不同的端点，共享字段会把两条绝不能一起动的保存路径耦在一起。
 	 */
 	private modeFrozen?: ModeDraft[];
-	/** Which mode is open for editing: a row index, or the add form's blank one. */
+	/** 哪个模式正打开编辑：行下标，或添加表单的空白行。 */
 	private modeEditing?: number | "new";
-	/** The mode with a delete confirmation standing under it. */
+	/** 删除确认正站在其下的那个模式。 */
 	private modeConfirming?: number;
-	/** The values typed into the open mode form, present exactly while one is open. */
+	/** 打开的模式表单里输入的值，恰好开着时存在。 */
 	private modeForm?: ModeDraft;
 	/**
-	 * Whether the built-in default card is open for editing. It is a separate interaction from the
-	 * stored modes' rows because it has no list to freeze — its draft is the global defaults — but only
-	 * one of the two is open at a time.
+	 * 内置默认卡片是否打开编辑。它与存储模式的行是两个交互，因为它没有可冻结的清单 —— 它的
+	 * 草稿就是全局默认 —— 但两者同时只开一个。
 	 */
 	private defaultEditing = false;
-	/** The global defaults as the open default form is editing them, present exactly while it is open. */
+	/** 打开的默认表单正在编辑的全局默认，恰好开着时存在。 */
 	private defaultForm?: ModeDraft;
 
 	constructor(handlers: SettingsHandlers) {
 		this.handlers = handlers;
 
-		// The panel is pinned to the viewport rather than sized by its content (`.app-settings` in
-		// style.css), so switching sections never resizes it under the pointer. The title lives in
-		// the nav column, the close control alone stays in the content column's head.
+		// 面板钉在视口上而不是按内容定尺寸（style.css 的 `.app-settings`），切换区块不会让它在指针
+		// 下变大小。标题住在导航列，只有关闭控件留在内容列的头部。
 		this.element = element("div", "settings-overlay", undefined, { hidden: true });
 		const panel = element("div", "settings app-settings", undefined, { role: "dialog", "aria-label": "设置" });
 
@@ -201,7 +188,7 @@ export class SettingsPanel {
 		content.append(head, this.body, this.note);
 		panel.append(nav, content);
 
-		// Clicking the dimmed area behind the panel closes it; clicking inside must not.
+		// 点击面板身后的暗区关闭；点内部绝不。
 		this.element.addEventListener("click", (event) => {
 			if (event.target === this.element) this.handlers.onClose();
 		});
@@ -214,8 +201,8 @@ export class SettingsPanel {
 	}
 
 	/**
-	 * Open the panel, optionally straight onto one tab — the composer's 「去设置 › 模式」 names its
-	 * tab, because the click already said what the person is going there for.
+	 * 打开面板，可选直接落到某个标签页 —— composer 的「去设置 › 模式」指名它的标签，因为点击
+	 * 已经说了人要去那里做什么。
 	 */
 	show(tab?: Tab): void {
 		if (tab !== undefined) this.tab = tab;
@@ -233,13 +220,11 @@ export class SettingsPanel {
 	render(state: SettingsState = this.state): void {
 		this.state = state;
 
-		// Rebuilding the body would throw away a half-typed row, so it only happens when the thing the
-		// tab is showing actually moved. An open interaction freezes the body outright: the form is the
-		// one thing on screen that cannot be rebuilt from state, because its latest values live in the
-		// DOM and in the two draft fields, and a frame arriving mid-edit — a snapshot, a stream tick —
-		// must not steal the focus the typing is in. A stored mode freezes through `modeFrozen`, the
-		// model rows through `frozen`, the built-in default card through its own flag. The freeze ends
-		// when the interaction does, and the next render then compares signatures as usual.
+		// 重建 body 会丢掉半输入的行，所以只在标签正在显示的东西真的动了时发生。打开的交互把 body
+		// 整个冻结：表单是屏幕上唯一无法从状态重建的东西，因为它的最新值活在 DOM 和两个草稿字段
+		// 里，而编辑中途到达的帧 —— 快照、流的节拍 —— 绝不能抢走输入所在的焦点。存储的模式经
+		// `modeFrozen` 冻结，模型行走 `frozen`，内置默认卡片有自己的标志。冻结随交互结束，下一次
+		// 渲染再照常比较签名。
 		const signature = [
 			this.tab,
 			state.settings
@@ -266,17 +251,17 @@ export class SettingsPanel {
 		if (!stable) this.renderBody();
 	}
 
-	/** Report the outcome of a save under the body, where the button that caused it is. */
+	/** 在 body 下方报告一次保存的结果，引发它的按钮在那里。 */
 	reportNote(message: string, tone: "ok" | "error"): void {
 		this.note.textContent = message;
 		this.note.dataset.tone = tone;
 	}
 
 	/**
-	 * The rows as they stand, so a caller can hand them to the API without reading the DOM.
+	 * 当前的行，让调用者可以不读 DOM 就把它们交给 API。
 	 *
-	 * The frozen list while an interaction is open — the one the form was opened against — and the
-	 * server's list otherwise, copied so a caller may splice it without touching the state.
+	 * 交互开着时是冻结的清单 —— 表单是对着它打开的 —— 否则是服务端的清单，复制过，让调用者
+	 * splice 而不碰状态。
 	 */
 	get rows(): ModelDraft[] {
 		return this.frozen ?? this.state.models.map((model) => ({ ...model }));
@@ -285,8 +270,8 @@ export class SettingsPanel {
 	private renderNav(): void {
 		for (const { id, button } of this.navItems) {
 			button.classList.toggle("active", id === this.tab);
-			// A vertical nav of plain buttons: aria-current rather than aria-selected, which is only
-			// meaningful on a tablist role the list does not carry.
+			// 一列纯按钮的垂直导航：用 aria-current 而不是 aria-selected，后者只在列表不携带的
+			// tablist 角色上有意义。
 			if (id === this.tab) button.setAttribute("aria-current", "true");
 			else button.removeAttribute("aria-current");
 		}
@@ -334,9 +319,9 @@ export class SettingsPanel {
 
 		const sizeRow = element("div", "settings-field");
 		sizeRow.append(element("span", "settings-label", "字号"));
-		// The fallback is DEFAULT_APPEARANCE.fontSize in @my-agent/core/config.ts, restated here —
-		// that module runs on Node, and the client must not pull it into its bundle. The slider's
-		// 10–22 ends are the same kind of restatement (FONT_SIZE_RANGE), for the same reason.
+		// 兜底是 @my-agent/core/config.ts 的 DEFAULT_APPEARANCE.fontSize，在这里复述 —— 那个模块
+		// 跑在 Node 上，客户端绝不能把它拉进 bundle。滑块的 10–22 两端是同一种复述
+		// （FONT_SIZE_RANGE），理由相同。
 		const size = settings?.appearance.fontSize ?? 15;
 		const value = element("span", "settings-value", `${size}px`);
 		const slider = element("input", "slider", undefined, {
@@ -350,8 +335,8 @@ export class SettingsPanel {
 		slider.addEventListener("input", () => {
 			value.textContent = `${slider.value}px`;
 		});
-		// Committed on release rather than on every pixel of the drag: each step of the slider is a
-		// write to the settings file, and a drag would be a few dozen of them.
+		// 松手时提交而不是拖动的每个像素都提交：滑块的每一步都是对设置文件的一次写，一次拖动会是
+		// 几十次。
 		slider.addEventListener("change", () => this.handlers.onFontSize(Number(slider.value)));
 		const control = element("div", "settings-control");
 		control.append(slider, value);
@@ -381,8 +366,8 @@ export class SettingsPanel {
 
 		for (const [index, row] of rows.entries()) section.append(this.modelRow(row, index));
 
-		// The add form is the expanded row itself rather than a mode the button toggles, so the button
-		// stands down while it is open — there is nothing left for a second click to add.
+		// 添加表单就是展开的那一行，而不是按钮切换出的模式，所以它开着时按钮退下 —— 第二次点击
+		// 已经没有东西可加。
 		if (this.editing === "new" && this.form !== undefined) {
 			section.append(this.modelForm(this.form, () => this.closeInteraction(), () => void this.commitAdd()));
 		} else {
@@ -396,11 +381,10 @@ export class SettingsPanel {
 	}
 
 	/**
-	 * One row: the head that opens it for editing, the trash that asks once, and the form when open.
+	 * 一行：打开它编辑的头部、问一次的回收站，以及打开时的表单。
 	 *
-	 * The head is a button covering the row's middle — the name and the wire ref — and the trash rides
-	 * beside it, revealed on hover. They are siblings rather than head housing the trash, because a
-	 * button cannot hold another; the trash is positioned over the head's reserved right padding.
+	 * 头部是覆盖行中部的按钮 —— 名字和 wire ref —— 回收站骑在旁边、悬停时露出。它们是兄弟而不是
+	 * 头部包着回收站，因为按钮不能装按钮；回收站定位于头部预留的右侧内边距上。
 	 */
 	private modelRow(row: ModelDraft, index: number): HTMLElement {
 		const rowEl = element("div", "model-row");
@@ -426,11 +410,10 @@ export class SettingsPanel {
 	}
 
 	/**
-	 * The delete confirmation, standing in the row it would act on.
+	 * 删除确认，站在它将要作用的那一行里。
 	 *
-	 * One confirmation, then the delete: the bar asks in place — naming the row it is about to remove
-	 * — and both answers take it down, the destructive one by sending the shortened list. The buttons
-	 * sit in the prototype's order, the destructive one first.
+	 * 一次确认，然后删除：确认条就地发问 —— 指名它即将移除的行 —— 两个答案都把它收下，破坏性的
+	 * 那个以发送缩短后的列表收下。按钮按原型的顺序放，破坏性的在前。
 	 */
 	private confirmBar(row: ModelDraft, index: number): HTMLElement {
 		const bar = element("div", "model-confirm");
@@ -449,12 +432,11 @@ export class SettingsPanel {
 	}
 
 	/**
-	 * The inline form, shared by editing and adding.
+	 * 内联表单，编辑与添加共用。
 	 *
-	 * Typing writes `this.form` and never re-renders — a rebuild per keystroke would steal the focus
-	 * the typing is in — so the one piece of the form that reads it (保存's gate) is synced by hand.
-	 * An omitted API key keeps the stored one on the server, which is why the field is a prompt to
-	 * replace rather than a value on show.
+	 * 输入写 `this.form` 且从不重渲染 —— 每击键一次重建会抢走输入所在的焦点 —— 所以表单里唯一
+	 * 读它的部分（保存的门）由手工同步。省略的 API key 让服务端保留已存的那个，所以字段是替换
+	 * 的提示，而不是展示的值。
 	 */
 	private modelForm(draft: ModelDraft, onCancel: () => void, onSave: () => void): HTMLElement {
 		const form = element("div", "model-form");
@@ -506,8 +488,7 @@ export class SettingsPanel {
 		const input = element("input", "input", undefined, {
 			type: "password",
 			autocomplete: "off",
-			// The stored key is never sent to a browser, so this is a prompt to replace it rather than a
-			// field showing it.
+			// 已存的密钥从不发给浏览器，所以这是替换它的提示，不是展示它的字段。
 			placeholder: row.hasApiKey ? "•••••••• 已保存 — 输入即可替换" : "未设置",
 		});
 		input.addEventListener("input", () => update({ apiKey: input.value }));
@@ -535,16 +516,16 @@ export class SettingsPanel {
 		return wrapper;
 	}
 
-	// ------------------------------------------------------- model interactions
+	// ------------------------------------------------- 模型交互
 
-	/** Open one interaction — a row, the add form, or a delete ask — and close whatever stood. */
+	/** 打开一个交互 —— 一行、添加表单、或一次删除确认 —— 并关掉站着的那个。 */
 	private begin(next: { editing?: number | "new"; confirming?: number; form?: ModelDraft }): void {
 		this.editing = next.editing;
 		this.confirming = next.confirming;
 		this.form = next.form;
-		// Nothing open means nothing to freeze against: the next render may compare signatures and
-		// rebuild from what the server holds. Re-freezing while one stood keeps the list the open
-		// form was typed against, rather than moving it under the form mid-edit.
+		// 没有打开的东西就没有要对着冻结的：下一次渲染可以比较签名并从服务端持有的东西重建。
+		// 已有交互站着时重新冻结，保住表单输入时对着的那份清单，而不是在编辑中途把它挪到表单
+		// 底下。
 		this.frozen =
 			next.editing === undefined && next.confirming === undefined ? undefined : this.rows;
 		this.renderBody();
@@ -558,8 +539,8 @@ export class SettingsPanel {
 
 	private beginAdd(): void {
 		this.begin({ editing: "new", form: { ...BLANK_DRAFT } });
-		// The form opens at the list's end, below the fold when the list is long, so it walks itself
-		// into view — the same courtesy the prototype paid the click.
+		// 表单在列表末尾打开，列表长时在折叠处之下，所以它自己走进视野 —— 原型给那次点击的
+		// 同一份礼遇。
 		this.body.lastElementChild?.scrollIntoView({ block: "nearest" });
 	}
 
@@ -568,12 +549,12 @@ export class SettingsPanel {
 		this.begin({ confirming: index });
 	}
 
-	/** Take an open form or confirmation down without saving. */
+	/** 不保存地收下一个打开的表单或确认。 */
 	private closeInteraction(): void {
 		this.begin({});
 	}
 
-	/** End any open interaction outright, dropping both freezes with it. */
+	/** 直接结束任何打开的交互，连同两份冻结一起丢掉。 */
 	private clearInteraction(): void {
 		this.editing = undefined;
 		this.confirming = undefined;
@@ -583,7 +564,7 @@ export class SettingsPanel {
 		this.dropDefaultForm();
 	}
 
-	/** Drop a stored mode's open form without redrawing — the state half of closing it. */
+	/** 不重画地丢掉一个存储模式打开的表单 —— 关闭它的状态那一半。 */
 	private dropModeInteraction(): void {
 		this.modeEditing = undefined;
 		this.modeConfirming = undefined;
@@ -591,20 +572,18 @@ export class SettingsPanel {
 		this.modeFrozen = undefined;
 	}
 
-	/** Drop the built-in default card's open form without redrawing. */
+	/** 不重画地丢掉内置默认卡片打开的表单。 */
 	private dropDefaultForm(): void {
 		this.defaultEditing = false;
 		this.defaultForm = undefined;
 	}
 
 	/**
-	 * Send one action's list whole, and fold the answer in.
+	 * 把一个动作的清单整体发送，并折入答案。
 	 *
-	 * Every action — a row's 保存, a confirmed 删除, the add form's 保存 — resolves to the list it
-	 * wants stored, because the endpoint replaces the list whole: a row whose `apiKey` is omitted
-	 * keeps the stored one, so untouched rows round-trip with the keys this panel was never shown.
-	 * Success ends the interaction and drops the freeze, so the next render shows what the server
-	 * actually stored rather than what was typed.
+	 * 每个动作 —— 一行的 保存、一次确认的 删除、添加表单的 保存 —— 都落到它想要存储的清单，
+	 * 因为端点是整体替换：`apiKey` 省略的行保留已存的那个，所以没动过的行带着这个面板从未见过的
+	 * 密钥往返。成功结束交互并解除冻结，下一次渲染显示服务端实际存储的东西，而不是输入的东西。
 	 */
 	private async commit(rows: ModelInput[]): Promise<void> {
 		this.saving = true;
@@ -620,11 +599,9 @@ export class SettingsPanel {
 			this.saving = false;
 			this.renderBody();
 		}
-		// Reported after the rebuild rather than before it, because renderBody clears the note on its
-		// way in — reporting first would have the outcome wiped by the very redraw that made room
-		// for it. Success says nothing at all: the form closing and the row showing what the server
-		// stored is the confirmation, and a green "saved" line under every save is one more thing to
-		// read for a fact the window already shows.
+		// 在重建之后而不是之前上报，因为 renderBody 进门时会清掉 note —— 先上报，结果就会被那趟
+		// 恰好为它腾出地方的重绘抹掉。成功什么都不说：表单关闭、行显示服务端存的东西就是确认，
+		// 每次保存下面都来一条绿色的"已保存"，只是为窗口已经显示的事实多一件要读的东西。
 		if (outcome !== undefined) this.reportNote(outcome.message, outcome.tone);
 	}
 
@@ -645,16 +622,15 @@ export class SettingsPanel {
 		await this.commit(this.rows.filter((_row, at) => at !== index));
 	}
 
-	// ----------------------------------------------------------------------- modes
+	// ---------------------------------------------------------------- 模式
 
 	/**
-	 * The modes tab: the built-in default card and the user's modes beneath it.
+	 * 模式标签页：内置默认卡片，以及它下面的用户模式。
 	 *
-	 * The default card is the global defaults read live (ADR-0005) — the same two controls the
-	 * defaults tab used to carry, moved here because a mode *is* a tool set plus an approval set, and
-	 * two doors to one value would only drift apart. It reads like the user's modes: a one-line head
-	 * that opens an inline form, whose 保存 writes the global `tools` and `approval` rather than the
-	 * `modes` list. The user's modes get the same inline edit / confirmed delete the model rows have.
+	 * 默认卡片是全局默认的 live 读取（ADR-0005）—— 过去 defaults 标签页带的同样两个控件，搬到
+	 * 这里因为一个模式*就是*一个工具集加一个审批集，通往同一个值的两扇门只会漂移。它读起来像
+	 * 用户的模式：一行的头部打开内联表单，其 保存 写全局的 `tools` 和 `approval` 而不是 `modes`
+	 * 清单。用户的模式拥有与模型行相同的内联编辑 / 确认删除。
 	 */
 	private modesSection(): HTMLElement {
 		const section = element("section", "settings-section");
@@ -681,19 +657,17 @@ export class SettingsPanel {
 		return section;
 	}
 
-	/** The modes as they stand: the frozen list while an interaction is open, the server's otherwise. */
+	/** 现在的模式：交互开着时是冻结的清单，否则是服务端的。 */
 	private get modeRows(): ModeDraft[] {
 		return this.modeFrozen ?? (this.state.settings?.modes ?? []).map((mode) => ({ ...mode, approval: { ...mode.approval } }));
 	}
 
 	/**
-	 * The tools one mode's form offers, in the order the toggle rows draw.
+	 * 一个模式的表单提供的工具，按开关行绘制的顺序。
 	 *
-	 * The build's own list — which only a session's `allTools` can name, so without one the six
-	 * built-ins stand in — plus anything the mode already names that the build no longer has, so a
-	 * tool an upgrade dropped can still be unchecked rather than silently carried. The fallback list
-	 * is a display convenience only: the built-in default's form stands down without a session, so it
-	 * never writes the six over a set that may name more.
+	 * 本构建自己的清单 —— 只有会话的 `allTools` 能指名它，没有时六个内置顶上 —— 加上模式已经
+	 * 指名、构建不再有的任何东西，让升级删掉的工具仍然能被取消勾选，而不是被悄悄带着。兜底清单
+	 * 只是显示的便利：内置默认的表单没有会话就退下，所以绝不会把六个写在一个可能更多的集合上。
 	 */
 	private modeToolList(mode: ModeDraft): string[] {
 		const all = this.state.snapshot?.allTools;
@@ -703,21 +677,18 @@ export class SettingsPanel {
 	}
 
 	/**
-	 * The built-in default mode: never stored, always the global defaults.
+	 * 内置默认模式：从不存储，永远是全局默认。
 	 *
-	 * It opens the same inline form a stored mode does, with the two differences that follow from
-	 * being a live view rather than a row (ADR-0005): the name is a label rather than an input, and
-	 * 保存 writes the global `tools`/`approval` instead of the `modes` list. Collapsed it is the same
-	 * one-line row the user's modes are, so it reads as a peer rather than as an always-expanded panel.
+	 * 它打开与存储模式相同的内联表单，带着作为 live 视图而非行（ADR-0005）而生的两处不同：名字
+	 * 是标签而不是输入，保存 写全局的 `tools`/`approval` 而不是 `modes` 清单。折叠时它是与用户
+	 * 模式相同的一行，所以读起来是平级，而不是一个永远展开的面板。
 	 */
 	private defaultModeCard(): HTMLElement {
 		const settings = this.state.settings;
 		const allTools = this.state.snapshot?.allTools;
 		const storedTools = settings?.tools ?? allTools ?? [];
-		// The summary names the same tools the composer's default row does: when a session can name the
-		// build's list, a stored name an upgrade dropped is not a tool this build has, so it is not
-		// counted here either. Without a session there is no list to narrow against, and what the file
-		// holds is the only true answer.
+		// 摘要指名与 composer 默认行相同的工具：会话能指名构建清单时，升级删掉的存储名不是本构建
+		// 有的工具，这里也不计入。没有会话就没有可收窄的清单，文件里是什么就是唯一真实的答案。
 		const summaryTools =
 			allTools === undefined || allTools.length === 0 ? storedTools : storedTools.filter((name) => allTools.includes(name));
 		const card = element("div", "model-row mode-default");
@@ -741,7 +712,7 @@ export class SettingsPanel {
 		return card;
 	}
 
-	/** One user mode: the head that opens it, the trash that asks once, and the form when open. */
+	/** 一个用户模式：打开它的头部、问一次的回收站，以及打开时的表单。 */
 	private modeRow(mode: ModeDraft, index: number): HTMLElement {
 		const row = element("div", "model-row");
 		if (this.modeEditing === index) row.classList.add("editing");
@@ -765,7 +736,7 @@ export class SettingsPanel {
 		return row;
 	}
 
-	/** The delete confirmation for one mode, standing in the row it would act on. */
+	/** 一个模式的删除确认，站在它将要作用的那一行里。 */
 	private modeConfirmBar(mode: ModeDraft, index: number): HTMLElement {
 		const bar = element("div", "model-confirm");
 		bar.append(element("span", undefined, `删除模式「${mode.name}」？此操作不可撤销。`));
@@ -783,15 +754,13 @@ export class SettingsPanel {
 	}
 
 	/**
-	 * One mode's tool table: a toggle row per tool, the approval select riding beside it.
+	 * 一个模式的工具表：每个工具一行开关，审批下拉骑在旁边。
 	 *
-	 * It always edits a draft: the built-in default card's draft holds the global defaults and the
-	 * stored modes' forms hold their rows, and only 保存 turns either into a write. Only the tools the
-	 * approval map has keys for carry a select — a delegated call asks nobody by design — so the extra
-	 * tools a registry adds draw their toggle alone. An unchecked tool's select is disabled rather
-	 * than hidden: the choice it would hold still belongs to the mode. `standDown` is the built-in
-	 * default's form with no session: there is no build's own list to name, so the toggles stand down
-	 * rather than write the six built-ins over a set that may name more.
+	 * 它永远编辑草稿：内置默认卡片的草稿是全局默认，存储模式的表单是各自的行，只有 保存 把任何
+	 * 一个变成写。只有审批表有键的工具带下拉 —— 被委托的调用按设计不问任何人 —— 所以注册表
+	 * 多出来的工具只画开关。未勾选工具的下拉禁用而不是隐藏：它将持有的选择仍然属于这个模式。
+	 * `standDown` 是没有会话的内置默认表单：没有本构建自己的清单可指名，开关退下，而不是把六个
+	 * 内置写在一个可能更多的集合上。
 	 */
 	private modeToolTable(mode: ModeDraft, standDown = false): HTMLElement {
 		const table = element("div", "mode-tooltable");
@@ -832,10 +801,10 @@ export class SettingsPanel {
 	}
 
 	/**
-	 * The inline mode form, shared by editing, adding, and the built-in default card.
+	 * 内联模式表单，编辑、添加和内置默认卡片共用。
 	 *
-	 * A stored mode's name is an input, because the name is its identity. The built-in's name is a
-	 * label with the badge: it is the global defaults, so renaming it is not a thing that exists.
+	 * 存储模式的名字是输入，因为名字是它的身份。内置的名字是带徽章的标签：它是全局默认，给它
+	 * 改名不是一个存在的东西。
 	 */
 	private modeFormCard(
 		draft: ModeDraft,
@@ -884,9 +853,9 @@ export class SettingsPanel {
 		return form;
 	}
 
-	// ------------------------------------------------ mode interactions
+	// ------------------------------------------------ 模式交互
 
-	/** Open one mode interaction and close whatever stood, freezing the list it edits against. */
+	/** 打开一个模式交互并关掉站着的那个，冻结它编辑所对的清单。 */
 	private beginMode(next: { editing?: number | "new"; confirming?: number; form?: ModeDraft }): void {
 		this.dropDefaultForm();
 		this.modeEditing = next.editing;
@@ -918,12 +887,11 @@ export class SettingsPanel {
 	}
 
 	/**
-	 * Open the built-in default card's form, seeded from the global defaults as they stand.
+	 * 打开内置默认卡片的表单，以当前的全局默认播种。
 	 *
-	 * The draft is the card's own until 保存, so a toggle does not write the settings file on every
-	 * click; a stored mode's form is closed first, because one interaction is open at a time. The seed
-	 * keeps `settings.tools` as it is rather than narrowing it, so a tool an upgrade dropped still has
-	 * a row — checked — that can be turned off, and saving then drops it from the global set.
+	 * 草稿在 保存 之前是卡片自己的，所以每次点击不写一次设置文件；存储模式的表单先关，因为一次
+	 * 只开一个交互。播种保持 `settings.tools` 原样而不是收窄它，让升级删掉的工具仍然有一行
+	 * —— 勾着的 —— 可以关掉，保存时再从全局集合里去掉它。
 	 */
 	private beginDefaultEdit(): void {
 		if (this.defaultEditing) return;
@@ -939,26 +907,22 @@ export class SettingsPanel {
 		this.renderBody();
 	}
 
-	/** Take the open default form down without saving. */
+	/** 不保存地收下打开的默认表单。 */
 	private closeDefaultInteraction(): void {
 		this.dropDefaultForm();
 		this.renderBody();
 	}
 
 	/**
-	 * Save the default form: the global `tools` and `approval`, never the `modes` list.
+	 * 保存默认表单：全局的 `tools` 和 `approval`，绝不是 `modes` 清单。
 	 *
-	 * The tool set is written whole in the build's own order — the same contract every tool-set write
-	 * has — and narrowed to the tools this build knows, so a name an upgrade dropped is dropped here
-	 * too. Approvals move one key at a time through `onGlobalApproval`, and only the keys that moved:
-	 * a save that touched nothing but tools never rewrites the approval map. With no session there is
-	 * no build list to write against, so the save is a no-op — the form's own controls already stand
-	 * down.
+	 * 工具集以本构建自己的顺序整体写入 —— 每次工具集写入的同一契约 —— 并收窄到本构建认识的
+	 * 工具，升级删掉的名字在这里也被去掉。审批经 `onGlobalApproval` 一次一键移动，且只动动过的
+	 * 键：只碰了工具的保存绝不重写审批表。没有会话就没有可写的构建清单，保存是空操作 —— 表单
+	 * 自己的控件已经退下。
 	 *
-	 * The writes are awaited before the form closes. Each answer carries the whole settings object, so
-	 * the collapsed summary is drawn from the last one; closing first would flash a summary built from
-	 * the old values while a patch was still in flight. The button says 保存中… meanwhile, the same
-	 * wait the stored modes' save has.
+	 * 写入在表单关闭之前 await。每个答案携带整个设置对象，折叠的摘要从最后一个画；先关会让摘要
+	 * 从旧值闪现，而补丁还在路上。按钮 meanwhile 说 保存中…，与存储模式的保存同样的等待。
 	 */
 	private async commitDefault(): Promise<void> {
 		const draft = this.defaultForm;
@@ -989,7 +953,7 @@ export class SettingsPanel {
 		}
 	}
 
-	/** Send one mode action's list whole, and fold the answer in — the model commit's twin. */
+	/** 整体发送一个模式动作的清单，并折入答案 —— 模型提交的孪生。 */
 	private async commitModes(modes: ModeSettings[]): Promise<void> {
 		this.saving = true;
 		this.renderBody();
@@ -1008,11 +972,10 @@ export class SettingsPanel {
 	}
 
 	/**
-	 * The sentence refusing a draft's name, or undefined when it may join the list.
+	 * 拒绝一个草稿名字的那句话，或它可以加入清单时为 undefined。
 	 *
-	 * Empty and reserved names never reach the commit, and neither does a duplicate — the name is a
-	 * mode's identity, so the client refuses before the server ever sees the list. `skip` is the row
-	 * being edited, which owns its own name.
+	 * 空名和保留名到不了提交，重名也是 —— 名字是模式的身份，所以客户端在服务端看到清单之前就
+	 * 拒绝。`skip` 是被编辑的行，它拥有自己的名字。
 	 */
 	private nameErrorFor(name: string, rows: readonly ModeDraft[], skip?: number): string | undefined {
 		if (name.length === 0) return "模式要有自己的名字。";
@@ -1050,32 +1013,29 @@ export class SettingsPanel {
 		await this.commitModes(this.modeRows.filter((_mode, at) => at !== index));
 	}
 
-	// --------------------------------------------------------------------- defaults
+	// ---------------------------------------------------------------- 默认
 
 	/**
-	 * The defaults a session that never chose opens on.
+	 * 从未选择过的会话开启时的默认。
 	 *
-	 * The tool set and the approval map are not here any more: they are the built-in default mode now
-	 * (ADR-0005), and the modes tab is their one door. What stays is the half that is *not* a mode —
-	 * the row a new session starts on, and the bash timeouts.
+	 * 工具集和审批表不在这里了：它们现在是内置默认模式（ADR-0005），模式标签页是它们的唯一之门。
+	 * 留下的是*不是*模式的那一半 —— 新会话起始的行，和 bash 超时。
 	 */
 	private defaultsSection(): HTMLElement {
 		const section = element("section", "settings-section");
 
 		section.append(this.defaultModelSection());
 
-		// The bash timeouts belong to the settings files, not to the session on screen.
+		// bash 超时属于设置文件，不属于屏幕上的会话。
 		section.append(this.bashSection());
 		return section;
 	}
 
 	/**
-	 * The row a new session starts on.
+	 * 新会话起始的行。
 	 *
-	 * This is the half of the model choice that outlives one conversation, so it is a setting: the
-	 * composer moves the session on screen, while this decides where the next conversation begins. It
-	 * writes through the settings endpoint rather than the session's, because there may be no session
-	 * on screen at all when it is set.
+	 * 这是模型选择里活得比一段对话久的另一半，所以它是设置：composer 移动屏幕上的会话，这个决定
+	 * 下一段对话从哪开始。它经设置端点写而不是会话的，因为设置它时屏幕上可能根本没有会话。
 	 */
 	private defaultModelSection(): HTMLElement {
 		const current = this.state.settings?.model ?? "";
@@ -1084,8 +1044,8 @@ export class SettingsPanel {
 		for (const candidate of this.state.models) {
 			select.append(option(candidate.name, candidate.name));
 		}
-		// A default naming a row that is gone is a real state — the file is hand-editable — so it gets a
-		// row of its own rather than being shown as something else.
+		// 指名已不在的行的默认是真实状态 —— 文件可以手改 —— 所以它有自己的行，而不是被显示成
+		// 别的东西。
 		if (current.length > 0 && ![...select.options].some((entry) => entry.value === current)) {
 			select.append(option(current, `${current}（已丢失）`));
 		}
@@ -1096,7 +1056,7 @@ export class SettingsPanel {
 		return this.field("默认模型", select, "新建会话时用的模型；本会话用哪个在输入框下面选");
 	}
 
-	/** The two bash timeouts, in seconds. The settings hold milliseconds; a user holds seconds. */
+	/** 两个 bash 超时，以秒计。设置存毫秒；用户握的是秒。 */
 	private bashSection(): HTMLElement {
 		const group = element("div", "settings-field stack");
 		group.append(element("span", "settings-label", "Bash 命令超时"));
@@ -1115,7 +1075,7 @@ export class SettingsPanel {
 		return group;
 	}
 
-	/** A timeout in seconds over a milliseconds setting, committed on change like the model numbers. */
+	/** 以秒显示、按毫秒设置提交的超时，与模型数字一样在 change 时提交。 */
 	private secondsField(label: string, ms: number, hint: string, onCommit: (ms: number) => void): HTMLElement {
 		const input = element("input", "input", undefined, { type: "number", min: 1, value: Math.round(ms / 1000) });
 		input.addEventListener("change", () => {

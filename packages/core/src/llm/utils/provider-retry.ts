@@ -1,5 +1,5 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
-// from flagging this file, while every import into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 
@@ -22,7 +22,7 @@ function isProviderError(error: unknown): error is ProviderError {
 	);
 }
 
-/** Mirrors the pinned Anthropic SDK retry policy; review when the SDK is upgraded. */
+/** 镜像被钉住的 Anthropic SDK 重试策略；升级 SDK 时复核。 */
 function isRetryableProviderError(error: ProviderError): boolean {
 	const shouldRetry = error.headers?.get("x-should-retry");
 	if (shouldRetry === "true") return true;
@@ -98,12 +98,9 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Reproduce the retry behavior used by the Anthropic SDK while making
- * its backoff sleep interruptible. The built-in retry timer ignores the
- * request AbortSignal, so callers must invoke the SDK with `maxRetries: 0` and
- * wrap the request with this helper. Provider-requested delays above
- * `maxRetryDelayMs` fail immediately (60 seconds by default); set it to zero to
- * disable the limit.
+ * 复现 Anthropic SDK 的重试行为，同时让它的退避睡眠可中断。SDK 内置的重试计时器忽略请求的
+ * AbortSignal，所以调用方必须以 `maxRetries: 0` 调用 SDK、并用这个助手包装请求。provider 要求的
+ * 延迟超过 `maxRetryDelayMs` 时立即失败（默认 60 秒）；设为 0 表示关闭上限。
  */
 export async function retryProviderRequest<T>(
 	request: () => Promise<T>,
@@ -114,7 +111,7 @@ export async function retryProviderRequest<T>(
 
 	for (;;) {
 		try {
-			// Each retry is a fresh SDK request, so X-Stainless-Retry-Count remains zero.
+			// 每次重试都是一次全新的 SDK 请求，X-Stainless-Retry-Count 保持为零。
 			return await request();
 		} catch (error) {
 			if (options.signal?.aborted) throw createAbortError();

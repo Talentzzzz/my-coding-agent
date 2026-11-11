@@ -7,102 +7,81 @@ import {
 import type { HostedSession, SessionHub } from "./hub.ts";
 
 /**
- * Told a whole row, rather than which field of it moved.
+ * 被告知一整行，而不是其中哪个字段动了。
  *
- * A row is a stored identity plus three fields, so a diff would cost more to apply than to replace —
- * and a whole row makes each update idempotent, which is what lets a listener keep the last one it
- * received without caring whether any arrived in between.
+ * 一行是一个存储身份加三个字段，diff 的应用成本比整行替换还高——而且整行让每次更新幂等，这让监听者可以只留最后收到的那一行，而不必关心中间有没有漏掉几个。
  */
 export interface RowListener {
 	(row: SessionRow): void;
 }
 
-/** Told a row went away: the session behind it no longer exists, and the id is all there is to say. */
+/** 被告知一行消失了：它背后的会话已不存在，id 就是全部要说的事。 */
 export interface RowGoneListener {
 	(sessionId: string): void;
 }
 
 export interface SessionProjection {
 	/**
-	 * Every row, grouped by directory and ordered the way the sidebar draws them.
+	 * 每一行，按目录分组、按侧栏绘制的顺序排列。
 	 *
-	 * Seeded on the first call and served from memory after that: this process is the only writer of
-	 * these values, so a rescan would re-read every transcript to learn nothing.
+	 * 首次调用时播种，之后由内存供数：本进程是这些值的唯一写入者，重新扫描只会重读每份 transcript 而一无所获。
 	 */
 	groups(): Promise<DirectoryGroup[]>;
-	/** Every row, unordered, for a caller that draws its own groups. */
+	/** 每一行，无序，供自己分组的调用者。 */
 	rows(): Promise<SessionRow[]>;
-	/** One row by id, or `undefined` for a session this process has never heard of. */
+	/** 按 id 取一行，本进程从未听说过的会话返回 `undefined`。 */
 	row(sessionId: string): Promise<SessionRow | undefined>;
-	/** Be told a row changed. Returns the way to stop listening. */
+	/** 被告知一行变了。返回停止监听的方式。 */
 	onRow(listener: RowListener): () => void;
-	/** Be told a row went away — deleted, not closed. Returns the way to stop listening. */
+	/** 被告知一行消失了——删除，不是关闭。返回停止监听的方式。 */
 	onGone(listener: RowGoneListener): () => void;
 	/**
-	 * Re-read one row off disk and republish it.
+	 * 从磁盘重读一行并重新发布。
 	 *
-	 * This is the road a stored rename takes to the sidebar: the row's title lives in the file, the
-	 * live feeds carry no title of their own, so the row is read once and published whole. A session
-	 * that is running keeps its live fields — the scan says `running: false` the way every cold read
-	 * does, and overlaying them is what keeps a rename from idling a working row.
+	 * 这是存储型改名抵达侧栏的路：行的 title 住在文件里，活 feed 不携带自己的 title，所以行被读一次、整行发布。运行中的会话保留其活字段——扫描像所有冷读一样说 `running: false`，叠加它们正是让改名不至于把一行工作着的会话显示成空闲的东西。
 	 */
 	refresh(sessionId: string): Promise<void>;
-	/** Drop one row and stop following its session: the session behind it has been deleted. */
+	/** 丢掉一行并停止跟随其会话：背后的会话已被删除。 */
 	forget(sessionId: string): void;
-	/** Let go of everything this projection attached to the hub. */
+	/** 放开本 projection 挂到 hub 上的所有东西。 */
 	close(): void;
 }
 
 /**
- * What this process knows about every session on this machine, as rows.
+ * 本进程对这台机器上每个会话所知的信息，以行的形式。
  *
- * This is the store the sidebar reads, and the reason a row can say "running" at all. Today that fact
- * exists only inside a stream, so a session that ran a turn while the window was looking at a
- * different one left a sidebar row that never moved — not slowly, never, and not even a manual refresh
- * away. A projection that answers "what is each session doing" without asking whether anyone is
- * watching is what makes that row honest.
+ * 这是侧栏读取的存储，也是一行能说"运行中"的原因。今天这个事实只存在于流内，所以一个在窗口看着别的会话时跑了一轮的会话，会留下一行永不移动的侧栏——不是慢，是永不，连手动刷新都救不了。一个回答"每个会话在做什么"却不问有没有人在看的 projection，正是让这行诚实的东西。
  *
- * Two rules shape everything here. **This process is the only writer** — sessions are created and
- * appended by the one orchestrator the hub commands (ADR-0017) — so a directory scan's entire job is
- * noticing files that arrived from outside, which is why seeding happens once and re-scanning never
- * does. And **a row is replaced
- * whole**, so nothing downstream merges two sources or tracks which of them is newer.
+ * 两条规则塑造了这里的一切。**本进程是唯一的写入者**——会话由 hub 指挥的唯一 orchestrator 创建和追加（ADR-0017）——所以目录扫描的全部职责就是注意到从外部到来的文件，这就是播种只发生一次、重扫永远不发生的原因。还有**一行被整行替换**，于是下游没有东西合并两个来源、或追踪哪个更新。
  *
- * It watches the hub's host-level point rather than its subscription mirror, deliberately: that mirror
- * answers "who is watching", and a reader of it would find this projection watching every session it
- * knows about — which is exactly the state an abandonment timer waits to *not* see.
+ * 它观看 hub 的 host 级观察点而不是订阅镜像，刻意的：那个镜像回答"谁在看"，读它的读者会发现这个 projection 正在观看它认识的每个会话——恰恰是一个放弃定时器最不想看到的状态。
  */
 export function createSessionProjection(hub: SessionHub): SessionProjection {
-	/** The rows, by session id. */
+	/** 各行，按会话 id。 */
 	const rows = new Map<string, SessionRow>();
-	/** Whoever wants to hear a row change. */
+	/** 想听行变更的人。 */
 	const listeners = new Set<RowListener>();
-	/** Whoever wants to hear that a row went away. */
+	/** 想听行消失的人。 */
 	const goneListeners = new Set<RowGoneListener>();
-	/** The live sessions being followed, with the unsubscribers that let them go again. */
+	/** 正在被跟随的活会话，以及让它们能被放开的退订器。 */
 	const following = new Map<string, { host: HostedSession; off: () => void }>();
 	/**
-	 * Ids whose row is being read for the first time.
+	 * 正在首次读取其行的 id。
 	 *
-	 * A session created but never spoken in has no file, so no row and no scan accounts for it. Its
-	 * first message is what puts it on disk, and that message arrives as one of a burst of entries —
-	 * this keeps the burst to one read instead of one per entry.
+	 * 创建后从未开口的会话没有文件，所以没有行、也没有任何扫描为它记账。它的第一条消息才是把它写上盘的东西，而那条消息以一组 entry 突发的形式到达——这里把突发收敛为一次读取，而不是每个 entry 一次。
 	 */
 	const probing = new Set<string>();
 	/**
-	 * The scan, once.
+	 * 扫描，一次。
 	 *
-	 * A promise rather than a flag so two callers arriving together share one scan instead of starting
-	 * two, and so a scan that failed is not remembered as an empty store.
+	 * 用 promise 而不是标志，让同时到达的两个调用者共享一次扫描而不是启动两次，也让失败的扫描不会被记成空存储。
 	 */
 	let seeded: Promise<void> | undefined;
 
 	/**
-	 * Store one row and tell the listeners, if anything about it actually moved.
+	 * 存一行并通知监听者，前提是有东西真的动了。
 	 *
-	 * The comparison is the design, not an optimization: a session publishes changes for reasons that
-	 * have nothing to do with its row — a token arriving, a retry being scheduled — and re-sending an
-	 * identical row for each would turn one turn into a burst of no-ops for every listener.
+	 * 比较就是设计，不是优化：会话出于与行毫无关系的原因发布变更——一个 token 到达、一次重试被排程——为每次都重发一行一模一样的数据，会把一轮变成每个监听者眼前的一串空操作。
 	 */
 	const publish = (next: SessionRow): void => {
 		const current = rows.get(next.id);
@@ -112,10 +91,9 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	};
 
 	/**
-	 * A running session's row: whatever the store knows, with the two fields only a loop can say.
+	 * 运行中会话的行：存储所知的一切，加上只有 loop 才说得出的两个字段。
 	 *
-	 * The stored half has to exist before this can be called — a session nobody has a row for has no
-	 * stored half yet, which is what {@link probe} is for.
+	 * 调用它之前存储那一半必须已存在——没人有行可查的会话还没有存储的一半，那正是 {@link probe} 的用途。
 	 */
 	const liveRow = (sessionId: string, live: LiveFields): SessionRow | undefined => {
 		const stored = rows.get(sessionId);
@@ -123,17 +101,16 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 		return { ...stored, ...live };
 	};
 
-	/** Read those two fields off a running session. */
+	/** 从一个运行中的会话读出那两个字段。 */
 	const liveOf = (host: HostedSession): LiveFields => {
 		const snapshot = hub.agent.snapshot(host.id);
 		return { running: snapshot.submitting, pending: snapshot.pendingApprovals.length };
 	};
 
 	/**
-	 * Follow one live session, for as long as it is live.
+	 * 跟随一个活会话，活多久跟多久。
 	 *
-	 * Bound in the same synchronous block that the hub hands over the session, so there is no window
-	 * in which a change could land before anything was listening.
+	 * 在 hub 交出会话的同一个同步代码块里绑定，让变更不可能落进"没有任何人在听"的窗口。
 	 */
 	const follow = (sessionId: string, host: HostedSession): void => {
 		if (following.has(sessionId)) return;
@@ -156,29 +133,20 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	};
 
 	/**
-	 * Advance the two fields a single event can move.
+	 * 推进单个事件能移动的两个字段。
 	 *
-	 * A message landing pushes `modified` forward, and a branch moving can change which message the
-	 * title reads from. Nothing else an event carries has a row field of its own, and re-deriving the
-	 * title per event would be a walk of the whole transcript for every token of a reply.
+	 * 一条消息落地会把 `modified` 向前推，分支移动可能改变 title 从哪条消息读。事件携带的其他任何东西都没有属于自己的行字段，而按事件重新推导 title 等于为回复的每个 token 走一遍整份 transcript。
 	 */
 	const onEvent = (sessionId: string, event: AgentSessionEvent): void => {
 		const current = rows.get(sessionId);
 		if (current === undefined) {
-			// No row means this session was created and has only just been written to: the creation
-			// itself leaves nothing on disk. The first entry is therefore the moment the row can be
-			// read at all, and reading it here is what makes the session appear in the sidebar when it
-			// starts rather than when some later host change happens to re-probe it. Until then it is
-			// deliberately absent — an empty「新会话」row is not a conversation.
+			// 没有行意味着这个会话刚被创建、才刚被写入：创建本身不在盘上留下任何东西。所以第一个 entry 才是行可以被读出的时刻，在这里读正是让会话在启动时就出现在侧栏、而不是等到某个更晚的 host 变更碰巧重新探测的原因。在此之前它刻意缺席——一个空的「新会话」行不是一段对话。
 			if (event.type !== "entry_appended" || probing.has(sessionId)) return;
 			probing.add(sessionId);
 			void refresh(sessionId).finally(() => probing.delete(sessionId));
 			return;
 		}
-		// Both facts below ride the event rather than being read back: this runs once per appended
-		// message, and a transcript read here would parse the whole log to learn one stamp (ADR-0019).
-		// A branch move is the one case that still asks — it is a gesture, not a frame, and it can
-		// change which message the derived title reads from.
+		// 下面两个事实都随事件而来而不是回读：这里对每条追加的消息只跑一次，而在这里读 transcript 要解析整份日志只为一个时间戳（ADR-0019）。分支移动是仍要问的那一个情况——它是手势不是帧，且可能改变派生 title 从哪条消息读。
 
 		if (event.type === "branch_changed") {
 			publish({ ...current, title: hub.agent.titleOf(sessionId) });
@@ -188,32 +156,24 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 
 		const at = event.at;
 		if (at === undefined || at <= current.modified) return;
-		// The title only moves when a *user* message lands on the branch, since that is the only
-		// message a title is read from — an assistant reply cannot rename the conversation.
+		// title 只在*用户*消息落到分支上时移动，因为那是唯一读 title 的消息——assistant 的回复不能给对话改名。
 		const titled = event.role === "user" ? (event.title ?? current.title) : current.title;
 		publish({ ...current, modified: at, title: titled });
 	};
 
 	/**
-	 * Read one session's row off disk.
+	 * 从磁盘读出一个会话的行。
 	 *
-	 * Only for a session that no scan has accounted for: created or forked by this process, or dropped
-	 * onto disk by hand. The id has to be located first, which reads every file's headers, but only
-	 * the file that matched is parsed — the alternative, a listing, would parse every transcript to
-	 * learn about the one session that just appeared.
+	 * 只用于没有任何扫描为之记账的会话：本进程创建或 fork 的，或手工放到盘上的。id 必须先被定位，这会读每个文件的 header，但只有匹配的文件被解析——替代方案，一次列表，会解析每份 transcript 只为得知刚出现的那一个会话。
 	 *
-	 * A session nobody is running may not have a file yet at all, and says so by answering `undefined`;
-	 * the row then appears when the session first writes, which is also when the host opens.
+	 * 没人在运行的会话可能根本还没有文件，以应答 `undefined` 说明；行在会话首次写入时出现，那也正是 host 打开的时刻。
 	 */
 	const probe = (sessionId: string): Promise<SessionRow | undefined> => hub.agent.findSessionRowById(sessionId);
 
 	/**
-	 * Re-read one row and publish it, live fields included.
+	 * 重读一行并发布，活字段包括在内。
 	 *
-	 * The overlay is the same one {@link onHost} applies to a scanned row, and for the same reason:
-	 * the file's own row says idle, and a session mid-turn is nothing of the sort. A session the scan
-	 * cannot read — deleted between the rename and the re-read — leaves the stored row alone rather
-	 * than replacing it with nothing.
+	 * 叠加与 {@link onHost} 施加给扫描行的相同，理由也相同：文件自己的行说空闲，而一轮进行到一半的会话绝非如此。扫描读不出的会话——在改名与重读之间被删除——让存储的行保持原样，而不是用空替换它。
 	 */
 	const refresh = async (sessionId: string): Promise<void> => {
 		const scanned = await probe(sessionId);
@@ -223,12 +183,9 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	};
 
 	/**
-	 * Drop one row and stop following its session.
+	 * 丢掉一行并停止跟随其会话。
 	 *
-	 * Unbinding before the drop is what keeps the two facts in order: the feeds are gone before the
-	 * listeners hear the row is, so nobody reacts to a removal by publishing to a session that no
-	 * longer exists. A session this store never drew has no listeners to tell — "gone" is only news
-	 * to someone who had it.
+	 * 在丢弃之前解绑正是让两个事实保持先后顺序的东西：feed 在监听者听到行消失之前就已经没了，于是没人会因为一次移除而向一个已不存在的会话发布。本存储从未画出的会话没有要告知的监听者——"消失"只对曾经拥有它的人是消息。
 	 */
 	const forget = (sessionId: string): void => {
 		const entry = following.get(sessionId);
@@ -239,24 +196,13 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	};
 
 	/**
-	 * The hub said a session appeared, started, or went away.
+	 * hub 说一个会话出现了、开始了或消失了。
 	 *
-	 * Four cases, and what separates them is whether a host came with the news and whether a row
-	 * already exists. A host and a row is the ordinary case: follow it, nothing to build. A host and no
-	 * row is a session no scan has accounted for, so read its file and lay the live values over it. No
-	 * host and no row is a session that was created or forked and is not running — exactly the session
-	 * nobody is watching, and the one this store exists for. No host and a row is one whose host went
-	 * away: unbind, and settle the row's live fields from a cold read — the ledger, not the departed
-	 * host, has the last word on whether a question still stands.
+	 * 四种情况，区分它们的是消息是否带着 host、以及行是否已存在。有 host 有行是常态：跟随它，无需构建。有 host 无行是一个没有任何扫描记账的会话，读它的文件、把活值叠上去。无 host 无行是一个被创建或 fork 且未在运行的会话——恰恰是无人观看的那个，也是这个存储存在的意义。无 host 有行是一个 host 刚离开的：解绑，并从冷读落定行的活字段——台账，而不是已离场的 host，对问题是否仍然成立拥有最后一票。
 	 */
 	const onHost = (sessionId: string, host: HostedSession | undefined): void => {
 		if (host === undefined) {
-			// The host's death takes `running` with it, but not the question it was showing: under
-			// end-restart (ADR-0006 §5) a parked approval is the ledger's and outlives the host, so the
-			// row settles from a cold read rather than a hard zero — a zero here is the sidebar dot
-			// going out while the question stands. The read also keeps a finished unwatched run from
-			// leaving the row stuck on `running: true`: reap settles the run before it announces, so
-			// the read lands after the final publish it used to race.
+			// host 的死亡带走了 `running`，但没有带走它正在展示的问题：在 end-restart 下（ADR-0006 §5），停靠的审批属于台账、活得比 host 久，所以行从冷读落定而不是硬归零——这里一个零等于侧栏的圆点熄灭而问题仍悬着。这次读取也让一次已结束、无人观看的运行不至于把行卡在 `running: true`：reap 在宣布之前落定运行，所以读取落在它曾经竞速的那次最终发布之后。
 			const entry = following.get(sessionId);
 			const stored = rows.get(sessionId);
 			entry?.off();
@@ -264,14 +210,13 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 			if (stored !== undefined && (stored.running || stored.pending !== 0)) {
 				void hub.agent.snapshotOf(sessionId).then(
 					(snapshot) => {
-						// A host that came back mid-read owns the row through its feeds; a session
-						// deleted mid-read has no row left to settle — forget already took it.
+						// 读取中途回来的 host 通过自己的 feed 拥有行；读取中途被删的会话没有行可落定——forget 已经把它拿走了。
 						const current = rows.get(sessionId);
 						if (current === undefined || following.has(sessionId)) return;
 						publish({ ...current, running: snapshot.submitting, pending: snapshot.pendingApprovals.length });
 					},
 					() => {
-						// The session was deleted mid-read; the row is already gone with it.
+						// 会话在读取中途被删；行已随之而去。
 					},
 				);
 			}
@@ -283,9 +228,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 			return;
 		}
 
-		// Follow before probing. For a row that does not exist yet the two feeds recompute nothing —
-		// there is no stored half to overlay — and the probe reads the file afterwards, so a change
-		// arriving mid-read is covered by the snapshot taken once it lands rather than lost.
+		// 先跟随，后探测。对尚不存在行的会话，两条 feed 什么都算不出——没有存储的一半可叠——而探测在其后读文件，读取中途到达的变更由落定后的那份快照覆盖，而不是丢失。
 		follow(sessionId, host);
 		if (rows.has(sessionId)) return;
 
@@ -297,16 +240,13 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	};
 
 	/**
-	 * Fill the store from the files on disk, once.
+	 * 从盘上的文件把存储填满，一次。
 	 *
-	 * Afterwards, every session being run by this process is re-read from its live loop, so a scan can
-	 * never leave a running session's row claiming to be idle.
+	 * 之后，本进程正在运行的每个会话从其活 loop 重读，让扫描永远不可能把运行中会话的行写成空闲。
 	 */
 	const seed = async (): Promise<void> => {
 		for (const group of await hub.agent.listDirectories()) {
-			// Through `publish` rather than `rows.set`: a row may already be here from a probe, and a
-			// listing knows things a single file does not — a fork's parent, above all. Going around the
-			// comparison would leave that correction sitting in the store with nobody told.
+			// 经 `publish` 而不是 `rows.set`：一行可能已经因某次探测在这里了，而列表知道单份文件不知道的事——最重要的是 fork 的父会话。绕过比较会让那个修正默默躺在存储里无人知晓。
 			for (const row of group.sessions) publish(row);
 		}
 		for (const [sessionId, entry] of following) {
@@ -317,8 +257,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 
 	const ensureSeeded = async (): Promise<void> => {
 		seeded ??= seed().catch((error: unknown) => {
-			// Deliberately not cached: a scan that failed should be retried by the next caller rather
-			// than remembered as an empty store.
+			// 刻意不缓存：失败的扫描应该被下一个调用者重试，而不是被记成空存储。
 			seeded = undefined;
 			throw error;
 		});
@@ -330,9 +269,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	return {
 		async groups(): Promise<DirectoryGroup[]> {
 			await ensureSeeded();
-			// Grouped by the same core rule the facade's scan follows rather than a second copy of it: the
-			// sidebar draws one order, and a reader that ordered differently would disagree with the
-			// listing it came from.
+			// 按 facade 扫描遵循的同一核心规则分组，而不是复制一份：侧栏画一种顺序，以不同顺序排序的读者会与列表来源相矛盾。
 			return groupSessionsByDirectory([...rows.values()]);
 		},
 		async rows(): Promise<SessionRow[]> {
@@ -371,19 +308,16 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	};
 }
 
-/** The two row fields a running loop is the only source for. */
+/** 只有运行中的 loop 才是来源的那两个行字段。 */
 interface LiveFields {
 	running: boolean;
 	pending: number;
 }
 
 /**
- * Every field a row has, in the order they are declared.
+ * 一行拥有的每个字段，按声明的顺序。
  *
- * Read from the type rather than written out by hand twice, because a comparison that quietly forgets
- * a field would stop noticing rows that differ only in it — and the symptom would be a row that never
- * updates, which is precisely the bug this store exists to remove. The `satisfies` line is what makes
- * adding a field to `SessionRow` a compile error here rather than a silent omission.
+ * 从类型读取而不是手写两遍，因为悄悄漏掉一个字段的比较，会停止注意到只在该字段上不同的两行——症状是一行永不更新，而这恰恰是这个存储存在要消灭的 bug。`satisfies` 那一行让给 `SessionRow` 加字段在这里成为编译错误，而不是无声的遗漏。
  */
 const ROW_FIELDS = [
 	"id",
@@ -398,16 +332,15 @@ const ROW_FIELDS = [
 
 type RowField = (typeof ROW_FIELDS)[number];
 
-/** Compile-time proof that the list above covers `SessionRow` exactly. */
+/** 编译期证明：上面的列表恰好覆盖 `SessionRow`。 */
 type _EveryRowFieldIsListed = Exclude<keyof SessionRow, RowField> extends never ? true : never;
 const _everyRowFieldIsListed: _EveryRowFieldIsListed = true;
 void _everyRowFieldIsListed;
 
 /**
- * Whether two rows would draw the same, so an identical one need not be sent.
+ * 两行画出来是否相同，相同的不必重发。
  *
- * Compared field by field rather than by serialization: the wire form is a string, and building one to
- * throw it away would be both slower and a lie about what this checks.
+ * 逐字段比较而不是序列化：wire 形态是字符串，造一个只为扔掉既更慢、也是对本检查所做的事的谎言。
  */
 function sameRow(a: SessionRow, b: SessionRow): boolean {
 	return ROW_FIELDS.every((field) => a[field] === b[field]);

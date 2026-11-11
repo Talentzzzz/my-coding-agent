@@ -1,30 +1,25 @@
-// Boot smoke test: start the server the way the desktop shell does — in-process, on an assigned
-// port — and check what a shell depends on: the client is served, the API answers, the landing
-// session is the one the server says it is, and closing actually closes.
+// Boot smoke test：像桌面外壳那样启动服务器——进程内、分配到的端口——并检查外壳依赖的一切：
+// 客户端被服务、API 有应答、落地 session 就是服务器说的那个、关闭真的会关。
 //
 //   node scripts/smoke-boot.ts
 //
-// The last two sections are the shutdown evidence the resident transport needs (ticket 15, §4):
-// `close()` returning is necessary but not sufficient, because a listener that refuses new
-// connections is not a process that exited. So this script asserts both halves — `close()` returns
-// with the worst case in residence (a window's connection watching a run parked on an approval no
-// one will ever answer), and then the script **ends by itself**: the only `process.exit` in the file
-// sits behind an unref'd watchdog, which fires only if something leaked a handle and kept the event
-// loop alive. An explicit exit would mask exactly that leak, so there is none.
+// 最后两节是常驻 transport 需要的 shutdown 证据（ticket 15，§4）：`close()` 返回是必要而非充分
+// 条件，因为一个拒绝新连接的 listener 不等于一个已退出的进程。所以本脚本断言两半——`close()`
+// 在最坏情况在场时返回（一个窗口的连接正看着一个停在永远无人应答的审批上的 run），然后脚本
+// **自己收尾**：文件里唯一的 `process.exit` 藏在一个 unref 的 watchdog 后面，只有某处泄漏了
+// 句柄、把事件循环留在活着的状态时它才触发。显式 exit 恰好会掩盖那种泄漏，所以没有。
 //
-// The child-process half runs a real `main.ts` and terminates it with a resident connection open.
-// Its honest limit, written down: `main.ts`'s own shutdown handler ends with `process.exit(0)`, so
-// this proves the shell can put the server down — not that the event loop drains by itself. Only
-// the in-process half above proves that.
+// 子进程那一半跑真的 `main.ts`，并在一条常驻连接开着的情况下终止它。它的诚实边界写在这里：
+// `main.ts` 自己的 shutdown handler 以 `process.exit(0)` 结束，所以这只证明外壳能放下服务器
+// ——不证明事件循环会自己排干。只有上面的进程内那一半证明这个。
 //
-// The agent home is the script's own scratch directory, created before the first app module is
-// imported: `AGENT_HOME` is resolved once, at import time, from `MY_AGENT_HOME`, which is why every
-// app import below is dynamic. Booting against the machine's real home made this smoke read the
-// user's `models.json` — zero rows there put the landing session on the placeholder model, which
-// never sends anything, so the run below never reached its tool call and the approval never arrived
-// (ticket 10: red on 2026-10-16, green the same afternoon, code untouched in between). It also
-// wrote every run's session file into the real home's `sessions/`. Both leaks are gone: the model
-// list is this script's own one-row file, and the home is removed with the work directories at the end.
+// agent home 是脚本自己的临时目录，在第一个 app 模块被 import 之前创建：`AGENT_HOME` 在 import
+// 时从 `MY_AGENT_HOME` 一次性解析，这就是下面每个 app import 都是动态的原因。对着机器真实的
+// home 启动曾让这个 smoke 读用户的 `models.json`——那里零行会把落地 session 放到 placeholder
+// 模型上，那个模型从不发送任何东西，于是下面的 run 永远到不了它的工具调用、审批永远不出现
+// （ticket 10：2026-10-16 红，当天下午绿，期间代码未动）。它还会把每次 run 的 session 文件写进
+// 真实 home 的 `sessions/`。两处泄漏都已消除：模型列表是本脚本自己的单行文件，home 在最后与
+// 工作目录一起删除。
 import { mkdtemp, rm } from "node:fs/promises";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -36,8 +31,8 @@ import type { ChatTransport } from "@my-agent/core";
 import type { BootedServer } from "../packages/server/src/boot.ts";
 import type { WireClient } from "./wire/client.ts";
 
-// The scratch home, then the env it rides on, then — and only then — the app modules. The row needs
-// no key: the fake transport below never dials the endpoint a row names.
+// 先是临时 home，然后是它承载的环境变量，再——且仅在那之后——是 app 模块。这一行不需要 key：
+// 下面的 fake transport 从不拨打任何一行指名的端点。
 const agentHome = mkdtempSync(join(tmpdir(), "my-agent-boot-home-"));
 writeFileSync(
 	join(agentHome, "models.json"),
@@ -59,7 +54,7 @@ function check(label: string, condition: boolean, detail = ""): void {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Scratch trees are best-effort to remove: a leftover temp dir must not fail a smoke that passed. */
+/** 临时目录尽力删除：一个残留的 temp 目录不得让已经通过的 smoke 失败。 */
 function removeQuiet(dir: string): Promise<void> {
 	return rm(dir, { recursive: true, force: true }).catch(() => {});
 }
@@ -76,7 +71,7 @@ async function request(base: string, method: string, path: string, body?: unknow
 	return { status: response.status, payload: text.length === 0 ? undefined : (JSON.parse(text) as unknown) };
 }
 
-/** One free port, taken and released: `main.ts` refuses `--port 0`, so the child needs a real one. */
+/** 一个空闲端口，取到再放回：`main.ts` 拒绝 `--port 0`，所以子进程需要一个真端口。 */
 async function freePort(): Promise<number> {
 	const probe = createTcpServer();
 	await new Promise<void>((listen) => probe.listen(0, "127.0.0.1", listen));
@@ -85,20 +80,17 @@ async function freePort(): Promise<number> {
 	return port;
 }
 
-// The desktop shell boots against the machine's own home; this script boots against the scratch
-// home above, because what the shell needs from the boot path must not depend on what the machine
-// happens to have in it. The work directories are scratch directories too — nothing here writes a session
-// into the repo, or anywhere outside the two scratch trees. The scripted transport rides the boot
-// path itself: the worst case below needs a run in residence that nobody will ever answer, and a
-// provider key must not be the price of one. That worst case is a provider call that never answers —
-// under the end-restart approval semantics an approval no longer parks a run (ADR-0006 §5), so the
-// hang is what keeps a run on the stack for `close()` to cut short. The hang honours the abort
-// signal, which is the whole point: `close()` aborts first, and the aborted call is what lets it
-// return.
+// 桌面外壳对着机器自己的 home 启动；本脚本对着上面的临时 home 启动，因为外壳对 boot 路径的
+// 需求不得依赖机器碰巧有什么。工作目录也是临时目录——这里没有任何东西把 session 写进仓库或
+// 两棵临时树之外的任何地方。剧本化 transport 骑在 boot 路径本身上：下面的最坏情况需要一个
+// 在场的、无人应答的 run，而 provider key 不该是它的代价。那个最坏情况是一次永不应答的 provider
+// 调用——在 end-restart 审批语义下（ADR-0006 §5）审批不再让 run 停住，所以这个挂起才是把 run
+// 留在栈上供 `close()` 截断的东西。挂起尊重 abort signal，这正是要点：`close()` 先 abort，
+// 被 abort 的调用就是让它得以返回的东西。
 const workDir = await mkdtemp(join(tmpdir(), "my-agent-boot-"));
 const fake = createFakeTransport();
 fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" }))]);
-// The worst case's own prompt, and nothing else, hangs: every other section's calls pass through.
+// 最坏情况自己的 prompt，且仅它，会挂起：其他各节的调用都照常通过。
 const neverAnswers: ChatTransport = {
 	stream: (model, context, options) => {
 		if (!JSON.stringify(context.messages).includes("read the notes")) {
@@ -135,10 +127,9 @@ try {
 	const body = (await models.json()) as { models?: unknown[] };
 	console.log(`models ${models.status} count=${body.models?.length ?? 0}`);
 
-	// The landing is the server's decision, not the client's: startup selects nothing, so an
-	// unpinned boot answers `null` and the window stays on its welcome state, and `--session` (and
-	// MY_AGENT_SESSION) is the one road to a non-null answer — pinned further down. The session the
-	// sections below drive is the one an explicit creation returned.
+	// 落地是服务器的决定，不是客户端的：启动时不选任何东西，所以未 pin 的启动答 `null`、窗口
+	// 停在欢迎态，而 `--session`（与 MY_AGENT_SESSION）是通向非 null 回答的唯一道路——在下面
+	// pin 的那节。本节驱动的 session 是显式创建返回的那个。
 	const landing = await fetch(`${server.url}/api/sessions/current`);
 	const landingBody = (await landing.json()) as { sessionId: string | null };
 	const hubId = await server.hub.currentSessionId();
@@ -150,9 +141,8 @@ try {
 	const sessionId = ((created.payload ?? {}) as { sessionId?: string }).sessionId ?? "";
 	check("the landing follows the explicit creation", (await server.hub.currentSessionId()) === sessionId, sessionId);
 
-	// The modes surface (ADR-0005): the patch replaces the list whole, the snapshot carries it back,
-	// and a name colliding with the built-in default's — or with another row's — is refused, not made
-	// unique. Everything here rides the scratch home, so nothing leaks into the machine's settings.
+	// modes 面（ADR-0005）：patch 整表替换列表，snapshot 整份带回，与内置默认名——或与另一行
+	// ——撞名的请求被拒绝而不是被改得唯一。这里的一切都骑在临时 home 上，不会泄进机器的设置。
 	const saved = await request(server.url, "PATCH", "/api/settings", {
 		patch: { modes: [{ name: "smoke-readonly", tools: ["read", "glob", "grep"], approval: { bash: false } }] },
 	});
@@ -180,17 +170,15 @@ try {
 	check("a fresh working directory opens an empty session", baseline.messages.length === 0, String(baseline.messages.length));
 
 	// ---------------------------------------------------------------------------------------------
-	// The worst case for shutdown, assembled for real: a window's connection watching a run whose
-	// provider call nobody will ever answer. The scripted transport hangs on this one prompt; nothing
-	// anywhere will ever resolve it, so only the shutdown's own abort can.
+	// shutdown 的最坏情况，真实组装：一个窗口的连接正看着一个 provider 调用永远无人应答的 run。
+	// 剧本化 transport 对这一条 prompt 挂起；没有任何东西会解决它，只有 shutdown 自己的 abort 能。
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("shutdown with the worst case in residence\n");
 
-	// The bench holds a hold of its own across the prompt below, the way `smoke-mux` and
-	// `smoke-stream` do wherever a check needs the host to outlive a request. A session whose holds
-	// reach zero is reaped — which ends the lane watching it, by design (the hold decides how long a
-	// session lives, and a subscription takes none). Reaping that transient host under the lane would
-	// leave the worst case without its window, so the bench is the holder here.
+	// 测试台在下面的 prompt 期间持有自己的 hold，与 `smoke-mux`、`smoke-stream` 在需要 host 活得
+	// 比一次请求久的地方的做法一样。holds 归零的 session 会被 reap——这会按设计结束看着它的
+	// lane（hold 决定 session 活多久，而订阅一个也不占）。在 lane 之下 reap 这个临时 host 会
+	// 让最坏情况失去它的窗口，所以这里由测试台持 hold。
 	const bench = await server.hub.hold(sessionId);
 
 	const accepted = await request(server.url, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
@@ -209,10 +197,10 @@ try {
 	const started = Date.now();
 	await server.close();
 	check("close() returned with the worst case in residence", Date.now() - started < 5_000, `${Date.now() - started} ms`);
-	// The run nobody could answer was aborted on the way down: nothing is left waiting.
+	// 那个无人能应答的 run 在下落途中被 abort：没有东西留在等待里。
 	check("nothing is left running", server.hub.live.length === 0, server.hub.live.join(","));
 
-	// A closed listener must refuse connections, or a shell would leak a server every time it restarts.
+	// 关闭的 listener 必须拒绝连接，否则外壳每次重启都会泄漏一台服务器。
 	try {
 		await fetch(server.url);
 		check("the listener refuses connections after close", false, "still answering");
@@ -222,8 +210,8 @@ try {
 	await wire.close().catch(() => {});
 
 	// ---------------------------------------------------------------------------------------------
-	// The pin is the one road to a non-null landing: a boot with `--session` answers that id
-	// verbatim — whether anything lives there is the open's problem, not the landing's.
+	// pin 是通向非 null 落地的唯一道路：带 `--session` 的启动逐字回答那个 id——那里有没有活着的
+	// 东西是 open 的问题，不是落地的问题。
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a pinned boot lands on the pinned id\n");
 	const pinnedWorkDir = await mkdtemp(join(tmpdir(), "my-agent-boot-pin-"));
@@ -237,8 +225,8 @@ try {
 	}
 
 	// ---------------------------------------------------------------------------------------------
-	// The child-process half: a real `main.ts`, a resident connection held open against it, and a
-	// termination that must arrive. See the header for what this half does and does not prove.
+	// 子进程那一半：真的 `main.ts`、一条对它开着的常驻连接、一次必须到达的终止。这一半证明什么、
+	// 不证明什么，见文件头部。
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a real server process goes down with a connection attached\n");
 
@@ -251,14 +239,14 @@ try {
 			stdio: "ignore",
 			env: {
 				...process.env,
-				// Explicit, never inherited-by-luck: the child must read the same models the parent saw.
+				// 显式指定，从不靠运气继承：子进程必须读到与父进程相同的模型。
 				MY_AGENT_HOME: process.env.MY_AGENT_HOME ?? join(homedir(), ".my-agent"),
 			},
 		},
 	);
 	const childBase = `http://127.0.0.1:${port}`;
-	// Readiness is polled off /api/health, never parsed out of a child's stdout (its shutdown handler
-	// owns that stream, and stdio parsing is its own pile of trouble).
+	// 就绪与否从 /api/health 轮询，从不去解析子进程的 stdout（那条流归它的 shutdown handler
+	// 所有，而 stdio 解析本身就是一堆麻烦）。
 	let healthy = false;
 	{
 		const deadline = Date.now() + 15_000;
@@ -289,8 +277,8 @@ try {
 		const exited = new Promise<boolean>((resolve) => {
 			child.once("exit", () => resolve(true));
 		});
-		// On POSIX this rides into main.ts's own SIGTERM handler; on Windows the request terminates the
-		// child outright — either way the exit must arrive, which is the part a shell depends on.
+			// 在 POSIX 上这进 main.ts 自己的 SIGTERM handler；在 Windows 上这个请求直接终止子进程
+			// ——无论哪种，exit 都必须到达，这正是外壳依赖的部分。
 		child.kill("SIGTERM");
 		check("the child exited with a connection attached", await Promise.race([exited, sleep(5_000).then(() => false)]));
 		childSocket.close();
@@ -301,16 +289,14 @@ try {
 	await removeQuiet(agentHome);
 }
 
-// The natural-exit watchdog, last thing in the file: everything above has been torn down, so the
-// event loop should drain and the process should exit on its own — before this unref'd timer, which
-// does not hold the loop open, ever fires. If it fires, something leaked a handle: say so loudly and
-// fail, because a smoke that ends only because it was told to has proven nothing about shutdown.
+// 自然退出 watchdog，文件里最后一件事：上面的一切都已拆除，事件循环应当排空、进程应当自己
+// 退出——赶在这个不占用循环的 unref 定时器触发之前。它若触发，说明某处泄漏了句柄：大声说出来
+// 并失败，因为一个只因被告知才结束的 smoke 对 shutdown 什么也没证明。
 setTimeout(() => {
 	process.stdout.write("\nFAIL the process did not exit on its own — a handle leaked somewhere above\n");
-	// Say what is still holding the loop, so the next occurrence names its handle instead of only
-	// announcing that one exists. Types only — Node offers no portable handle identity here — but a
-	// leak that reports "TCPSocketWrap" is one that can be hunted; ticket 10's second half is still
-	// unreproduced, and this is the net it leaves behind for it.
+	// 说出还占着循环的是什么，让下次出现时能指名它的句柄，而不是只宣布存在一个。只是类型——
+	// Node 在这里没有可移植的句柄身份——但一个报 "TCPSocketWrap" 的泄漏是可以追捕的；ticket 10
+	// 的后半仍未复现，这是它留下的网。
 	const resources = [...new Set(process.getActiveResourcesInfo())].join(", ");
 	process.stdout.write(`still-active resources: ${resources}\n`);
 	process.exit(1);

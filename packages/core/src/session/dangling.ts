@@ -3,19 +3,16 @@ import { describeToolCall } from "../tools/index.ts";
 import type { SessionEntry } from "./session-manager.ts";
 
 /**
- * The tool calls the transcript is still waiting on, read out of the ledger rather than held in
- * memory (ADR-0006 §5): a call the view's assistant messages carry and no tool result in the same
- * view answers.
+ * transcript 还在等待的 tool call，从账本读出而不是在内存里持有（ADR-0006 §5）：视图的 assistant
+ * 消息里带着、而同一视图里没有 tool result 回答的 call。
  *
- * This is the derived state the approval flow runs on. Under the end-restart semantics an approval
- * that is waiting *is* a dangling call — the run has ended, the tool result has not landed, and the
- * answer arrives over REST to close it — so the banner, the endpoint's 409 check, and the deny
- * sweep all read this one derivation instead of keeping a second, memory-resident list in step
- * with the file. A cleared result is not a dangling call: the clear empties what the model is
- * shown, and the result message itself stays in the view to answer its call.
+ * 这是审批流程所依赖的派生态。在 end-restart 语义下，一条等待中的审批*就是*悬空的 call——run 已经
+ * 结束、tool result 还没落盘、回答经由 REST 到达来收尾——所以横幅、端点的 409 检查、deny 清扫读的
+ * 都是这个推导，而不是再养一份要和文件保持同步的内存驻留清单。被清空的 result 不算悬空 call：清空
+ * 只是把模型看到的内容掏空，result 消息本身留在视图里回答它的 call。
  *
- * The entries are the branch's context view — the same selection a request is built from — so a
- * call the model would re-send without a result is exactly a call this reports.
+ * 这些条目是分支的 context 视图——和构建请求用的是同一份选择——所以模型会不带 result 重发的 call，
+ * 正好就是这里报告的 call。
  */
 export function danglingApprovalsOf(entries: readonly SessionEntry[]): PendingApproval[] {
 	const calls: PendingApproval[] = [];

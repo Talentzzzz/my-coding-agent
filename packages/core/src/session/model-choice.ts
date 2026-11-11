@@ -3,21 +3,17 @@ import type { SettingManager } from "../setting-manager.ts";
 import type { Session, SessionManager } from "./session-manager.ts";
 
 /**
- * The row one session opens on and runs with, derived from the transcript and the settings.
+ * 一个 session 打开并运行所用的行，从 transcript 和设置推导。
  *
- * This is the one answer to "which model is this session on", and it is a *derivation* rather than a
- * value anybody keeps (ADR-0019). Before, the assembly resolved it once and seeded it onto the bag it
- * mounted; a bag that stayed in the table could carry that seed for the session's life. Now every
- * read replays a fresh bag and drops it, so a seed would be thrown away with the copy it sat in —
- * and the second read would answer "nothing was ever chosen". So the choice is recomputed where it
- * is asked for: what the transcript recorded, else what the settings' own default names, else the
- * built-in row. That is the same order the assembly uses, because it *is* the assembly's order,
- * moved here to be shared by the two things that need it.
+ * 这是「这个 session 在哪个模型上」的唯一答案，而且它是*推导*出来的，不是谁持有的值（ADR-0019）。
+ * 之前，装配环节只解析一次，把结果种到它挂载的袋上；留在表里的袋可能终身带着那颗种子。现在每次
+ * 读取都重放一个新袋然后丢掉，种子会连同它所在的副本一起被扔掉——第二次读取就会回答「从未选择过」。
+ * 所以这个选择在每次被问时重新计算：transcript 记录的，其次设置自己的默认值指名的，再其次内置行。
+ * 这和装配环节的顺序一致，因为它*就是*装配环节的顺序，只是搬到这里供需要它的两方共用。
  *
- * `chosen` is the second rung: the row a caller named when it opened the session — the test-only
- * override on `openAgent`, which nothing in the files can reproduce. It speaks only for a session
- * whose file says nothing yet, which is why it needs no clearing: the first choice that reaches the
- * transcript takes over from it without either side knowing the other exists.
+ * `chosen` 是第二级：调用方打开 session 时指名的行——`openAgent` 上仅测试用的覆盖，文件里没有
+ * 任何东西能复现它。它只对文件还没说话的 session 有效，所以不需要清除：第一个到达 transcript 的
+ * 选择会接管，双方不必知道对方存在。
  */
 export function modelChoiceOf(
 	sessions: SessionManager,
@@ -27,35 +23,31 @@ export function modelChoiceOf(
 ): ModelChoice {
 	const recorded = sessions.getRecordedSettings(session);
 	const rows = settings.modelCatalog();
-	// The recorded choice is a reference the way the settings file spells one — `<name>/<model-id>` —
-	// and it is the first rung: a session that has chosen answers from its own file, and everything
-	// below it only speaks for a session that has not chosen yet. The settings read is
-	// short-circuited rather than hoisted, so a session that recorded anything never pays for it.
+	// 记录的选择是设置文件拼写的那种引用——`<name>/<model-id>`——而且是第一级：已选择的 session
+	// 用自己的文件回答，它下面的一切只对还没选择的 session 有效。设置的读取做短路而不是提前提升，
+	// 记录过任何东西的 session 就不用为它付代价。
 	const recordedRef =
 		recorded.model === undefined ? undefined : `${recorded.model.name}/${recorded.model.modelId}`;
 	const ref = recordedRef ?? chosen?.name ?? settings.getSettings(session.sessionSetting.workDirAbsPath).model;
 	const row = selectModelRow(rows, ref);
-	// A machine with no rows at all still answers with a well-formed choice: the empty one, which
-	// every builder turns into the placeholder whose transport refuses to send. Nothing here throws.
+	// 一台没有任何行的机器仍然给出格式完好的选择：空的那个，所有构建方会把它变成传输层拒绝发送的
+	// placeholder。这里不抛任何异常。
 	if (row === undefined) return {};
 	const level = chosen?.thinkingLevel ?? recorded.thinkingLevel;
 	return { name: row.name, ...(level === undefined ? {} : { thinkingLevel: level }) };
 }
 
 /**
- * The row a reference names: what the caller asked for, else the built-in default, else the first.
+ * 引用所指名的行：调用方要求的，其次内置默认，再其次第一行。
  *
- * Two callers hand a *ref* rather than a name — `settings.model` as a repair script wrote it, and a
- * session's recorded model choice — and both spell it `<name>/<model-id>`. The name is what identifies
- * the row, so both spellings are resolved here instead of at each caller; before, a ref simply matched
- * nothing and the session quietly opened on somebody else's row.
+ * 两个调用方传入的是 *ref* 而不是名字——修复脚本写下的 `settings.model`，和 session 记录的模型
+ * 选择——两者都拼成 `<name>/<model-id>`。名字才是标识行的东西，所以两种拼写都在这里解析，而不是
+ * 在每个调用方各自解析；之前 ref 直接匹配不到任何行，session 会悄悄开在别人的行上。
  *
- * {@link DEFAULT_MODEL_NAME} is the third rung and is hardcoded rather than a guess at which vendor
- * the user has a key for: it is the model this app was built around, so a default naming a row that
- * has been deleted, or a settings file that names none, still opens on it. Only a machine without that
- * row falls through to `rows[0]`, and only a machine with no rows at all gets `undefined` — which the
- * caller answers with the placeholder rather than throwing, because a session has to be buildable for
- * the window to open far enough to say what is missing.
+ * {@link DEFAULT_MODEL_NAME} 是第三级，硬编码而不是猜用户有哪家的 key：它是这个应用围绕构建的
+ * 模型，所以默认值指名了一行已被删除的行、或设置文件什么都没指名时，session 仍然开在它上面。只有
+ * 机器上没有那一行才落到 `rows[0]`，只有一行都没有的机器才得到 `undefined`——调用方用 placeholder
+ * 回答而不是抛异常，因为 session 必须能构建出来，窗口才能打开到足以说出缺什么的地步。
  */
 export function selectModelRow(rows: readonly ModelConfig[], ref: string | undefined): ModelConfig | undefined {
 	const name = ref?.split("/")[0];

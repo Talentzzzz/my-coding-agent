@@ -6,19 +6,16 @@ export interface StatusState {
 }
 
 /**
- * The line under the composer.
+ * composer 下面的一行。
  *
- * It carries exactly three numbers, all of them about the tokens this session has spent: the session's
- * total, what share of its prompts the provider served from its own cache over the whole session, and
- * how full the model's context window is. All three are read at a glance and none is a control, which
- * is why they sit below the composer rather than in the header the conversation is read from.
+ * 它恰好携带三个数字，全是这个会话花掉的 token：会话总计、整个会话里 provider 由自己缓存服务的
+ * 提示占比、模型上下文窗口有多满。三个都是扫一眼就读的，且都不是控件，所以它们坐在 composer
+ * 下面而不是阅读对话的头部里。
  *
- * The three are drawn unconditionally. The line used to blank them whenever the server was not
- * answering, on the reasoning that a stale percentage is worse than no percentage — but a token count
- * is not a claim about the server, it is the last thing this window saw the session do, and clearing
- * it throws away a true fact to avoid showing a stale one. A dead channel is a different fact and it
- * is reported separately, by the sidebar's connection indicator, where it can be seen without the
- * window being asked to forget what it knows.
+ * 三个无条件绘制。过去服务端不应答时这一行会清空它们，理由是过时的百分比比没有更糟 —— 但
+ * token 计数不是关于服务端的声明，它是本窗口最后一次看到这个会话做的事，清掉它是为了不显示
+ * 过时的东西而丢掉一个真实的事实。死通道是另一个事实，由侧栏的连接指示器单独报告，那里不需要
+ * 窗口忘掉它所知道的。
  */
 export class StatusBar {
 	readonly element: HTMLElement;
@@ -35,9 +32,8 @@ export class StatusBar {
 		this.meterFill = element("span", "status-meter-fill");
 		const meter = element("span", "status-meter");
 		meter.append(this.meterFill);
-		// The context reading and its bar are one group, because the bar is about that figure and
-		// nothing else: it sits to the right of the number it measures. The other two readings take a
-		// seat each, so the line divides into three equal parts, left to right: total, cache, context.
+		// 上下文读数和它的条是一组，因为条只关于那个数字：它坐在自己度量的数字右侧。另外两个读数
+		// 各占一席，这一行从左到右分成三等份：总计、缓存、上下文。
 		const group = element("span", "status-group");
 		group.append(this.context, meter);
 		this.element.append(this.total, this.cache, group);
@@ -56,12 +52,10 @@ export class StatusBar {
 				: "no request has been made yet";
 
 		const hit = cacheHitRate(usage);
-		// The seat reads the **session's totals**, not one request. A per-request reading saws with
-		// the shape of each turn — every request that carries a big new block (a tool result, a file
-		// read) is mostly fresh by definition, so the figure swings while the conversation is in fact
-		// being cached perfectly well — and what a person watching the line wants to know is whether
-		// this conversation's caching works, which is exactly the question the lifetime ratio answers.
-		// The per-request numbers stay in the total seat's tooltip, where the bill lives.
+		// 这个席位读的是**会话的总计**，不是单次请求。按请求的读数会随每个回合的形状来回摆 ——
+		// 每个携带大块新内容（工具结果、文件读取）的请求按定义几乎全是新鲜 token，所以数字摆动，
+		// 而对话其实被缓存得很好 —— 看着这一行的人想知道的是这段对话的缓存是否正常工作，这正是
+		// 终身比率回答的问题。按请求的数字留在总计席位的 tooltip 里，账单在那里。
 		this.cache.textContent = hit === undefined ? "cache —" : `cache ${Math.round(hit * 100)}%`;
 		this.cache.title =
 			hit === undefined
@@ -83,29 +77,27 @@ export class StatusBar {
 }
 
 /**
- * Every token the session has spent, in and out.
+ * 会话进进出出花掉的每个 token。
  *
- * The prompt is counted once, whichever way the provider billed it: a token read from cache was spent
- * on the request just the same as a fresh one, and leaving it out would make the total disagree with
- * the bill.
+ * 提示只计一次，无论 provider 怎么计费：从缓存读出的 token 和新的一样花在了请求上，不计它会让
+ * 总计与账单对不上。
  */
 function totalTokens(usage: UsageTotals): number {
 	return usage.input + usage.cacheRead + usage.cacheWrite + usage.output;
 }
 
 /**
- * How much of the session's prompts the provider did not have to re-read.
+ * 会话的提示里 provider 不必重读的占比。
  *
- * Summed over every request the session has made, and against the whole prompt rather than against
- * the fresh tokens alone: "96% cached" should mean the requests were almost free, and a ratio that
- * could exceed 100% would not say that.
+ * 对会话的每个请求求和，且对整个提示而不是只对新鲜 token："96% 缓存"应该意味着请求几乎免费，
+ * 而一个可能超过 100% 的比率说不出这一点。
  */
 function cacheHitRate(usage: UsageTotals): number | undefined {
 	const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
 	return prompt > 0 ? usage.cacheRead / prompt : undefined;
 }
 
-/** The session's prompts, counted the way the provider bills them. */
+/** 会话的提示，按 provider 计费的方式计数。 */
 function promptTokens(usage: UsageTotals): number {
 	return usage.input + usage.cacheRead + usage.cacheWrite;
 }

@@ -6,97 +6,90 @@ import type { SessionRow, DirectoryGroup, DirectoryPaging } from "@my-agent/core
 
 export interface SidebarHandlers {
 	/**
-	 * Start a conversation.
+	 * 开始一段对话。
 	 *
-	 * `workDirAbsPath` is the directory the request was made *from*, and it is what makes the directory heading's
-	 * own 「新建会话」 land where the right click was: the top row's button asks for the picker's
-	 * directory (no argument), and the heading names its own. One door rather than two, because a
-	 * new session is the same act wherever it is asked for.
+	 * `workDirAbsPath` 是请求发出*自*的目录，正是它让目录标题自己的「新建会话」落在右键所在处：
+	 * 顶行的按钮要选择器的目录（无参数），标题指名自己的。一扇门而不是两扇，因为新会话无论在
+	 * 哪里被要求都是同一件事。
 	 */
 	onNewSession(workDirAbsPath?: string): void;
 	onSelectSession(sessionId: string): void;
 	onToggleCollapsed(): void;
 	onOpenSettings(): void;
-	/** The system folder picker, which is the only road a new directory enters the list by. */
+	/** 系统文件夹选择器，是新目录进入列表的唯一道路。 */
 	onAddDirectory(): void;
-	/** Copy the session this row names whole, and open the copy. */
+	/** 把这一行指名的会话整个复制，并打开副本。 */
 	onForkSession(sessionId: string): void;
-	/** Delete the session this row names, transcript and all. */
+	/** 删除这一行指名的会话，transcript 和一切。 */
 	onDeleteSession(sessionId: string): void;
 	/**
-	 * Give the session this row names a stored name of its own.
+	 * 给这一行指名的会话一个存储在服务端的名字。
 	 *
-	 * The row does not change here: the name is real storage on the server, and the row takes the new
-	 * one when the connection's `session_row` frame delivers it — the same road every other row fact
-	 * takes, and deliberately not a local edit this column would have to reconcile afterwards.
+	 * 行不在这里变：名字是服务端的真实存储，行等到连接的 `session_row` 帧送达新名时才变 ——
+	 * 所有其他行事实走的同一条路，刻意不是本地修改、之后还要这一列去协调。
 	 */
 	onRenameSession(sessionId: string, title: string): void;
-	/** The directory head was clicked: collapse it to its heading, or reopen it on its saved page. */
+	/** 目录标题被点击：折叠到标题，或以保存的页重新打开。 */
 	onToggleDirectory(workDirAbsPath: string): void;
-	/** The directory's 「展开其余」 was clicked: show one more page of its conversations. */
+	/** 目录的「展开其余」被点击：再显示一页它的对话。 */
 	onPageDirectory(workDirAbsPath: string): void;
-	/** The directory's 「收起」 was clicked: step the expansion back one page. */
+	/** 目录的「收起」被点击：展开退回一页。 */
 	onCollapseDirectory(workDirAbsPath: string): void;
 	/**
-	 * Give the directory this heading names a new label (票 06).
+	 * 给这一标题指名的目录一个新标签（票 06）。
 	 *
-	 * `workDirAbsPath` is the group the card was opened on and `name` is what the user typed. Nothing on disk is
-	 * named by either: the label is a view the settings remember, so the window's only job is to store
-	 * it and repaint the heading that wears it.
+	 * `workDirAbsPath` 是卡片打开其上的组，`name` 是用户输入的。两者都不指名磁盘上的任何东西：
+	 * 标签是设置记住的一个视图，所以窗口唯一的职责是存它、并重画戴着它的标题。
 	 */
 	onRenameDirectory(workDirAbsPath: string, name: string): void;
 	/**
-	 * Remove the directory this heading names from the list, touching nothing on disk.
+	 * 把这一标题指名的目录从列表移除，磁盘上什么都不碰。
 	 *
-	 * Named `delete` in the menu because that is what the user is doing from where they sit; the
-	 * handler's job — and the endpoint's name — is the narrower 「hide」.
+	 * 菜单里叫 `delete`，因为那正是用户从他所坐的位置在做的事；handler 的职责 —— 和端点的名字
+	 * —— 是更窄的「hide」。
 	 */
 	onDeleteDirectory(workDirAbsPath: string): void;
 }
 
 export interface SidebarState {
-	/** Every directory with stored sessions, most recently used first. */
+	/** 每个有存储会话的目录，最近使用在前。 */
 	directories: readonly DirectoryGroup[];
 	activeSessionId?: string;
 	collapsed: boolean;
 	/**
-	 * Per-directory paging state, keyed by the directory's path, as the appearance settings hold it.
+	 * 按目录路径分页的状态，appearance 设置持有的样子。
 	 *
-	 * Read-only here: the sidebar draws from it and reports the clicks, and the window — which owns
-	 * the settings write — answers with a new map. Holding it in the state rather than in the view
-	 * is what makes it survive a window: it rides appearance, and appearance rides the server's
-	 * settings files, not an origin-scoped `localStorage` the desktop shell's fresh port strands.
+	 * 这里只读：侧栏从它绘制、上报点击，而拥有设置写入的窗口以新映射作答。把它放在状态里而不是
+	 * 视图里，正是让它跨窗口存活的东西：它骑在 appearance 上，appearance 骑在服务端的设置文件上，
+	 * 而不是桌面外壳换端口就会搁浅的 origin 作用域 `localStorage`。
 	 */
 	paging: Record<string, DirectoryPaging>;
 	/**
-	 * The names the user gave directories, by path, as the settings hold them.
+	 * 用户给目录起的名字，按路径，设置持有的样子。
 	 *
-	 * A heading wears `directoryNames[workDirAbsPath]` when there is one and the folder's own name otherwise. The
-	 * entry is a *view*: the folder on disk is never renamed, so this is the whole of what a rename
-	 * changes — which is also why it rides the settings and not the group the server lists.
+	 * 有 `directoryNames[workDirAbsPath]` 时标题戴着它，否则戴文件夹自己的名字。条目是一个
+	 * *视图*：磁盘上的文件夹从不改名，所以这就是一次改名改变的全部 —— 也是它骑设置而不是骑
+	 * 服务端列出的组的原因。
 	 */
 	directoryNames?: Record<string, string>;
 	/**
-	 * Whether the resident channel is up.
+	 * 常驻通道是否可用。
 	 *
-	 * A window-level fact drawn here rather than on the status line, because it belongs to the window
-	 * and not to any one conversation. It lives in `SidebarState` rather than `ViewState` for the same
-	 * reason the rows do: the connection is not a session, so it has no business being something a
-	 * session's baseline can overwrite.
+	 * 一个画在这里而不是状态行上的窗口级事实，因为它属于窗口而不属于任何一段对话。住在
+	 * `SidebarState` 而不是 `ViewState` 的理由与行相同：连接不是会话，所以不该是会话的基线能
+	 * 覆盖的东西。
 	 */
 	channel: ChannelState;
 }
 
 /**
- * What the row's slot says, as the line the tooltip gains while it is lit.
+ * 行的席位在说什么，即 tooltip 点亮时多出来的那行。
  *
- * Only two of these are facts about the session, and both share the one amber dot: a session waiting
- * on the user is not more urgent than one working — it is the same fact seen from a different side,
- * and giving them two colours would ask the eye to learn a distinction the words already make. The
- * words survive in the tooltip, where a person who wants to know why the dot is lit can read them.
+ * 其中只有两个是关于会话的事实，且共享同一颗琥珀色圆点：等用户的会话不比工作中的更紧急 ——
+ * 同一个事实的两侧，给它们两种颜色是让眼睛去学文字已经作出的区分。文字留在 tooltip 里，想知道
+ * 圆点为什么亮的人可以在那里读。
  *
- * "已打开" needs no slot at all: it is the `aria-current` background itself, which is the row already
- * saying it is the one on screen.
+ * "已打开"不需要席位：它就是 `aria-current` 的背景本身，行已经在说自己就是屏幕上的那个。
  */
 function busyOf(row: SessionRow): string | undefined {
 	if (row.pending > 0) return row.pending > 1 ? `待审批 ${row.pending}` : "待审批";
@@ -105,43 +98,38 @@ function busyOf(row: SessionRow): string | undefined {
 }
 
 /**
- * The navigation column.
+ * 导航列。
  *
- * It owns everything about *which* conversation is on screen — the directory groups, the tree under
- * each, the new-session control, and the way into the settings — and nothing about the conversation
- * itself. That split is what keeps the right-hand column replaceable: the sidebar never reads a
- * transcript.
+ * 它拥有关于*哪个*对话在屏幕上的一切 —— 目录分组、每组下面的树、新建会话控件、进入设置的路
+ * —— 而对对话本身一无所知。正是这个拆分让右列可替换：侧栏从不读 transcript。
  *
- * The rows update in place. Rows now change while nothing is being clicked — a session finishing a
- * turn moves its own row, and a background session starting one flips an indicator — so rebuilding
- * the list would swap out the button between a pointer going down and coming up, and the click would
- * land on an element that no longer exists. Each row is therefore built once and then patched, and
- * reordering moves nodes rather than recreating them.
+ * 行原地更新。行现在在没人点击时也会变 —— 一个会话结束回合会动自己的行，后台会话开始回合会
+ * 翻指示器 —— 所以重建列表会在指针按下与抬起之间把按钮换掉，点击会落在一个已不存在的元素上。
+ * 因此每行构建一次然后补丁，重排移动节点而不是重建。
  */
 export class Sidebar {
 	readonly element: HTMLElement;
 	private readonly handlers: SidebarHandlers;
 	private readonly list: HTMLElement;
 	private readonly toggle: HTMLButtonElement;
-	/** The channel's three states, as the dot beside the settings entry. */
+	/** 通道的三种状态，作为设置条目旁边的圆点。 */
 	private readonly indicator: HTMLElement;
 	private readonly indicatorText: HTMLElement;
 	/**
-	 * The rows on screen, by session id.
+	 * 屏幕上的行，按会话 id。
 	 *
-	 * The map is what makes in-place patching possible: a row is looked up rather than built, so a
-	 * re-render with three changed fields and no changed order touches three text nodes and nothing
-	 * else. Rows that fell out of the listing are removed, and only then.
+	 * 正是这张映射让原地补丁成为可能：行被查找而不是构建，所以一次三个字段变化、顺序没变的
+	 * 重渲染只触碰三个文本节点。掉出列表的行被移除，且只在那里。
 	 */
 	private readonly drawn = new Map<string, DrawnNode>();
-	/** The `id` of the row the window is on, so `scrollIntoView` happens when it changes and not otherwise. */
+	/** 窗口所在行的 `id`，所以 `scrollIntoView` 只在它变化时发生。 */
 	private scrolledTo: string | undefined;
 	/**
-	 * The last state handed to {@link render}, so a control drawn inside the list can ask for a
-	 * redraw without the caller having threaded it back in. Only the paging row needs this.
+	 * 交给 {@link render} 的最后一个状态，让列表内画的控件能请求重画而无需调用者把它传回来。
+	 * 只有分页行需要这个。
 	 */
 	private lastState: SidebarState | undefined;
-	/** Whether the search row is on screen, and the text it is filtering by. */
+	/** 搜索行是否在屏幕上，以及它过滤的文本。 */
 	private searchOpen = false;
 	private filterText = "";
 	private readonly headRow: HTMLElement;
@@ -149,23 +137,21 @@ export class Sidebar {
 	private readonly searchInput: HTMLInputElement;
 	private readonly noMatch: HTMLElement;
 	/**
-	 * The rows of the last render, by session id.
+	 * 上一次渲染的行，按会话 id。
 	 *
-	 * The tree row is where a row's display title was computed, and the rename editor needs exactly
-	 * that: the clean name it edits is the label with the suffix left out, which only the tree knows.
-	 * Rebuilt on every render, so a rename always seeds from what is actually on screen.
+	 * 树行是行的显示标题被算出来的地方，重命名编辑器正需要它：它编辑的干净名字是去掉后缀的标签，
+	 * 只有树知道。每次渲染重建，所以重命名永远从屏幕上实际有的东西播种。
 	 */
 	private readonly rowsById = new Map<string, TreeRow>();
-	/** The rename editor in flight, if any. One at a time, like every other popup here. */
+	/** 进行中的重命名编辑器，若有。一次一个，与这里每个弹窗一样。 */
 	private editing: Editing | undefined;
 
 	constructor(handlers: SidebarHandlers) {
 		this.handlers = handlers;
 		this.element = element("aside", "sidebar");
 
-		// The top row is the drag strip and nothing else: the window is moved from here, so the row
-		// holds the two controls the column opens with and no brand — the column is the list, not a
-		// product, and a logo on it was one more piece of chrome competing with the conversations.
+		// 顶行是拖动条、也仅仅是拖动条：窗口从这里移动，所以这一行只放列开场用的两个控件、没有
+		// 品牌 —— 这一列是列表，不是产品，logo 只是又一件和对话抢注意力的 chrome。
 		const top = element("div", "sidebar-top");
 		const newSession = element("button", "new-session", undefined, { type: "button" });
 		newSession.append(icon("plus"), element("span", undefined, "新会话"));
@@ -175,16 +161,15 @@ export class Sidebar {
 
 		this.list = element("nav", "session-list", undefined, { "aria-label": "会话列表" });
 
-		// The heading row and its three controls, per the reference layout: a search that really
-		// filters the list, a view-options control that is look-only for now, and the road in for a
-		// directory this machine has never had a session in.
+		// 标题行和它的三个控件，按参考布局：一个真正过滤列表的搜索、一个暂时只有外观的视图选项，
+		// 以及这台机器从未有过会话的目录的入口。
 		this.headRow = element("div", "list-head");
 		this.headRow.append(element("div", "session-list-heading", "目录"));
 		const headActions = element("div", "list-head-actions");
 		headActions.append(
 			iconButton("search", "搜索会话", () => this.toggleSearch()),
-			// Look-only by decision: sorting stays `modified` descending, and the control is here so
-			// the row reads like the reference rather than so it can be used. Clicking says so.
+			// 刻意只看不改：排序保持 `modified` 降序，控件放在这里是让这一行读起来像参考布局，
+			// 而不是让它可用。点击说明这一点。
 			iconButton("sliders", "视图选项（暂未启用）", () => {}),
 			iconButton("folder-add", "添加目录", () => this.handlers.onAddDirectory()),
 		);
@@ -209,10 +194,9 @@ export class Sidebar {
 		this.noMatch = element("div", "session-list-empty", "没有匹配的会话");
 		this.noMatch.hidden = true;
 
-		// The one control in the corner the eye returns to: everything that is set once — the theme,
-		// the font size, the models — lives behind it rather than in the chrome around the transcript.
-		// The channel indicator shares the foot rather than the top row it used to share with the
-		// brand: it is a fact about the window, and the foot is where window-level things live.
+		// 眼睛不断回到的角落里的唯一控件：一切设定一次的东西 —— 主题、字号、模型 —— 都住在它
+		// 后面，而不是 transcript 周围的 chrome 里。通道指示器共享底部而不是过去与品牌共享的顶行：
+		// 它是关于窗口的事实，而底部正是窗口级事物住的地方。
 		const foot = element("div", "sidebar-foot");
 		const settings = element("button", "settings-entry", undefined, { type: "button", title: "设置" });
 		settings.append(icon("gear"), element("span", undefined, "设置"));
@@ -225,7 +209,7 @@ export class Sidebar {
 		this.element.append(top, this.list, foot);
 	}
 
-	/** Open or close the search row. Closing it clears the filter, because a closed filter filters nothing. */
+	/** 打开或关闭搜索行。关闭时清空过滤，因为关着的过滤器什么也不过滤。 */
 	private toggleSearch(): void {
 		this.searchOpen = !this.searchOpen;
 		this.searchRow.hidden = !this.searchOpen;
@@ -246,13 +230,11 @@ export class Sidebar {
 	}
 
 	/**
-	 * Draw the rows, moving what moved and patching what changed.
+	 * 画行，移动动过的、补丁变过的。
 	 *
-	 * There is no signature gate in front of this any more, and that is the point: the fields that
-	 * used to make a row change were not in the old signature at all, so a session that finished a
-	 * turn elsewhere in the machine could not change its own text no matter how often the list was
-	 * refreshed. The cheap comparison has been replaced by an accurate one — every row is patched,
-	 * and patching a row that did not change writes the same value.
+	 * 这前面不再有签名门，而这正是要点：过去让行变化的字段根本不在旧签名里，所以别的机器上一个
+	 * 结束了回合的会话，无论列表刷新多少次都变不了自己的文本。廉价的比较被换成准确的 —— 每行
+	 * 都补丁，补丁一行没变的行写的还是同一个值。
 	 */
 	private renderRows(state: SidebarState): void {
 		const wanted = new Set<string>();
@@ -269,8 +251,7 @@ export class Sidebar {
 		}
 		this.ensureHeading();
 
-		// A filter shows every match, in every group: the paging limit is about how much a scan can
-		// hold, and a list the user is actively narrowing is not a scan.
+		// 过滤显示每组里的每个匹配：分页上限限制的是一次扫描能装下多少，正在收窄的列表不是扫描。
 		let matches = 0;
 		for (const group of groups) {
 			const entry = pagingOf(state.paging, group.workDirAbsPath);
@@ -278,8 +259,8 @@ export class Sidebar {
 			const wrapper = this.groupFor(group.workDirAbsPath, entry, label);
 			const rows = rowsOf(group);
 			for (const row of rows) this.rowsById.set(row.session.id, row);
-			// Matched on the label a row *wears* rather than the title it stores: the fork's suffix is
-			// part of what a person reads, so "（1）" narrows to the fork and not to every sibling.
+			// 按行*戴着*的标签匹配，而不是它存储的标题：派生的后缀是人读到的东西的一部分，所以
+			// "（1）"收窄到那个派生，而不是它的每个兄弟。
 			const kept =
 				filter === ""
 					? rows
@@ -291,18 +272,16 @@ export class Sidebar {
 			const shown = open
 				? pagedRows(kept, state.activeSessionId, filter !== "" ? Infinity : entry.page)
 				: [];
-			// Hidden rather than removed: a group with no matches keeps its place in the DOM, so a
-			// filter clearing puts every group back exactly where it was instead of re-appending them
-			// in creation order.
+			// 隐藏而不是移除：没有匹配的组保住自己在 DOM 里的位置，清掉过滤时每组回到原位，而不是按
+			// 创建顺序重新追加。
 			wrapper.hidden = filter !== "" && kept.length === 0;
 
-			// The heading is the wrapper's first child, so the sequence of movable rows starts *after*
-			// it. Seeding `previous` with the heading is what keeps the first row below its title: with
-			// `undefined` the anchor would be the wrapper's first child, which is the heading itself,
-			// and the first row would be inserted above it.
+			// 标题是包裹的第一个子节点，所以可移动的行序列从它*之后*开始。用标题播种 `previous`
+			// 正是让第一行落在标题下面的机制：传 `undefined` 的话锚点是包裹的第一个子节点、也就是
+			// 标题本身，第一行会被插到它上面。
 			let previous: HTMLElement | undefined = wrapper.firstElementChild as HTMLElement | null ?? undefined;
-			// Appended in order and only moved when the place differs, so the browser does the minimum
-			// work per render and no node is ever destroyed and rebuilt while a pointer is on it.
+			// 按序追加、只在位置不同时移动，所以浏览器每次渲染做最少的活，没有节点会在指针停在它
+			// 上面时被销毁重建。
 			for (const row of shown) {
 				wanted.add(row.session.id);
 				const button = this.rowFor(row, state);
@@ -310,13 +289,10 @@ export class Sidebar {
 				previous = button;
 			}
 
-			// The paging row under the list, two buttons on one line: 「展开其余」 while rows are
-			// held back, and — beside it, once a page has been added — the 「收起」 that steps the
-			// expansion back one page. Neither appears where paging was never a thing, which is a
-			// directory with no more conversations than a page holds; a filtering list shows
-			// everything it matched, so it wears neither; and a collapsed directory wears neither
-			// either — the decision is 全部收起、只留表头, and a paging row under a heading would
-			// contradict the collapse it sits inside.
+			// 列表下面的分页行，一行两个按钮：「展开其余」在有行被扣住时；旁边 —— 加了一页之后
+			// —— 是把展开退回一页的「收起」。分页从来不是回事的地方两者都不出现，即对话不多于一页
+			// 的目录；过滤中的列表显示它匹配的一切，所以两样都不戴；折叠的目录也不戴 —— 决定是
+			// 全部收起、只留表头，标题下面的分页行会与它所在的折叠矛盾。
 			const paged = open && filter === "";
 			const hidden = paged ? rows.length - shown.length : 0;
 			const conversations = rows.filter((row) => row.depth === 0).length;
@@ -336,19 +312,17 @@ export class Sidebar {
 
 		this.noMatch.hidden = !(filter !== "" && matches === 0);
 
-		// Everything this column drew and no longer wants goes, headings included, and this is where a
-		// *stale* entry is the one that matters: a heading whose directory was renamed is no longer
-		// named by any key, and the only thing still holding its wrapper is this map. Nothing is walked
-		// backwards from the list, so a group without rows — the renamed one, whose rows are already
-		// under the new path — is not reachable from the DOM at all.
+		// 这一列画过、且不再需要的全部退场，标题包括，而这里正是*过期*条目成为关键的地方：被改名
+		// 目录的标题不再被任何键指名，唯一还握着它的包裹的就是这张映射。没有东西从列表往回走，
+		// 所以没有行的组 —— 被改名那个，它的行已经在新路径下面 —— 从 DOM 上根本够不到。
 		for (const [key, node] of [...this.drawn]) {
 			if (wanted.has(key)) continue;
 			node.button.remove();
 			this.drawn.delete(key);
 		}
 
-		// Only when the window moved to a different conversation. Doing it on every render would drag
-		// the list around under a background row's update, which is the one thing this design is for.
+		// 只有窗口移到了另一段对话时。每次渲染都做会把列表在后台行的更新下拖来拖去，而这正是这个
+		// 设计要防的那件事。
 		if (state.activeSessionId !== this.scrolledTo) {
 			this.scrolledTo = state.activeSessionId;
 			if (state.activeSessionId !== undefined) {
@@ -357,7 +331,7 @@ export class Sidebar {
 		}
 	}
 
-	/** Put a node after `previous`, doing nothing when it is already there. */
+	/** 把节点放到 `previous` 之后，已在那个位置时什么都不做。 */
 	private place(parent: HTMLElement, node: HTMLElement, previous: HTMLElement | undefined): void {
 		const wanted = previous === undefined ? parent.firstChild : previous.nextSibling;
 		if (node === wanted) return;
@@ -365,15 +339,13 @@ export class Sidebar {
 	}
 
 	private ensureHeading(): void {
-		// The heading row and the search row are the list's fixed prefix; a list that lost them — a
-		// `replaceChildren` during the empty phase, say — gets them back in the same order. The
-		// no-match note is the list's suffix, and only moves when it is not already last.
+		// 标题行和搜索行是列表的固定前缀；丢了它们的列表 —— 比如空阶段的 `replaceChildren` ——
+		// 以相同顺序取回。无匹配的提示是列表的后缀，只在不在末尾时移动。
 		if (!this.list.contains(this.headRow)) this.list.prepend(this.headRow, this.searchRow);
 		this.searchRow.hidden = !this.searchOpen;
-		// The empty phase leaves its note behind once the first group arrives: `replaceChildren` put
-		// it there, nothing claims it afterwards, and a list that started empty would wear 「暂无会话」
-		// above its sessions for as long as the window is open. `noMatch` shares the class and is the
-		// list's permanent suffix, so it is the one note this must not remove.
+		// 空阶段在第一组到达后留下它的提示：`replaceChildren` 把它放了进去，之后没有东西认领，
+		// 从空开始的列表会戴着「暂无会话」直到窗口关闭。`noMatch` 共享这个类、是列表的永久后缀，
+		// 所以它是这里绝不能移除的那个提示。
 		for (const note of [...this.list.children]) {
 			if (note !== this.noMatch && note.classList.contains("session-list-empty")) note.remove();
 		}
@@ -381,28 +353,24 @@ export class Sidebar {
 	}
 
 	/**
-	 * The heading for one directory, built once and then only labelled.
+	 * 一个目录的标题，构建一次之后只更新标签。
 	 *
-	 * The heading is a real button since the paging decision: clicking it is how a directory
-	 * collapses to its heading and opens again, so Enter and Space reach it like any other control,
-	 * and `[aria-expanded]` is the state a screen reader — and the stylesheet's chevron — read.
-	 * The state is patched like everything else on a drawn node: written only when it moved.
+	 * 分页决定之后标题成了真正的按钮：点击它是目录折叠到标题、再次打开的方式，所以 Enter 和
+	 * Space 像其他控件一样够得到它，`[aria-expanded]` 是屏幕阅读器 —— 和样式表的 chevron —— 读的
+	 * 状态。状态像画过的其他节点一样补丁：动了才写。
 	 *
-	 * `label` is what the user called this directory, already resolved from the settings by the
-	 * caller: a rename changes that string and nothing else, so the node is keyed by `workDirAbsPath` — which a
-	 * rename no longer moves — and only its text is patched.
+	 * `label` 是用户给这个目录起的名字，调用者已经从设置解析好：改名改变的只是这个字符串，所以
+	 * 节点以 `workDirAbsPath` 为键 —— 改名不再移动它 —— 只有文本被补丁。
 	 */
 	private groupFor(workDirAbsPath: string, entry: DirectoryPaging, label: string): HTMLElement {
 		const key = `head:${workDirAbsPath}`;
 		const existing = this.drawn.get(key);
 		if (existing !== undefined) {
-			// Both facts are written through the heading reference this entry was built with, so
-			// neither one needs a search.
+			// 两个事实都经这个条目构建时用的标题引用写入，谁都不需要搜索。
 			if (existing.head !== undefined) {
 				this.paintExpanded(existing.head, entry.collapsed);
 			}
-			// The label is patched for the same reason a row's title is: nothing rebuilds a heading,
-			// so the node that wore the old name has to be able to stop wearing it.
+			// 标签被补丁的理由与行的标题相同：没有任何东西会重建标题，戴着旧名的节点必须能摘下它。
 			if (existing.head !== undefined && existing.head.title !== workDirAbsPath) existing.head.title = workDirAbsPath;
 			if (existing.name !== undefined && existing.name.textContent !== label) {
 				existing.name.textContent = label;
@@ -415,8 +383,8 @@ export class Sidebar {
 			title: workDirAbsPath,
 			"aria-expanded": entry.collapsed ? "false" : "true",
 		});
-		// Both icons ride every head, and the hover — not the DOM — decides which shows: the folder is
-		// the content, the chevron the affordance, and the swap keeps one position for both meanings.
+		// 两个图标都在每个标题上，由悬停 —— 而不是 DOM —— 决定显示哪个：文件夹是内容，chevron 是
+		// 交互提示，交换让一个位置承载两个含义。
 		const folder = element("span", "directory-icon-folder");
 		folder.append(icon("folder"));
 		const chev = element("span", "directory-icon-chev");
@@ -424,9 +392,8 @@ export class Sidebar {
 		const name = element("span", "directory-name", label);
 		head.append(folder, chev, name);
 		head.addEventListener("click", () => this.handlers.onToggleDirectory(workDirAbsPath));
-		// The heading's whole menu lives here rather than on any resident control: a right click names
-		// the directory, and the menu it opens is the only place new-session-here, rename, and delete
-		// are offered from — the same road a session row's menu takes.
+		// 标题的全部菜单住在这里而不是任何常驻控件上：右键指名目录，打开的菜单是"在此新建会话、
+		// 重命名、删除"被提供的唯一地方 —— 会话行菜单走的同一条路。
 		head.addEventListener("contextmenu", (event) => {
 			event.preventDefault();
 			this.openDirectoryMenu(workDirAbsPath, label, event.clientX, event.clientY);
@@ -440,14 +407,13 @@ export class Sidebar {
 	}
 
 	/**
-	 * The one menu a directory heading has: new session here, rename, delete.
+	 * 一个目录标题拥有的唯一菜单：在此新建会话、重命名、删除。
 	 *
-	 * 新建会话 names the workDirAbsPath it was asked on, which is the whole point of the item — the top row's
-	 * button starts a session wherever the picker points, and this one starts it *here*.
+	 * 新建会话指名它被按下的 workDirAbsPath，这正是这项的全部意义 —— 顶行的按钮在选择器指向的
+	 * 任何地方开始会话，这一个在*这里*开始。
 	 *
-	 * 删除 carries the tooltip that says what it does not do. The menu word is the one the user is
-	 * looking for; the endpoint behind it and the sentence under it are both narrower, and a person
-	 * deleting a project from a sidebar deserves to know the folder is not going anywhere.
+	 * 删除带着说明它不做什么的 tooltip。菜单用词是用户正在找的那个；它背后的端点和它下面的句子
+	 * 都更窄，从侧栏删除一个项目的人有权知道文件夹哪儿也不会去。
 	 */
 	private openDirectoryMenu(workDirAbsPath: string, label: string, x: number, y: number): void {
 		openMenuAt(x, y, [
@@ -469,15 +435,13 @@ export class Sidebar {
 		]);
 	}
 	/**
-	 * Ask for the name this heading should wear, and report it beside the group it was asked on.
+	 * 问这个标题该戴什么名字，并在被问的组旁边上报。
 	 *
-	 * What is collected is a *label*, so nothing about it can be wrong in a way that costs anything:
-	 * the directory keeps its own name and no transcript is rewritten. A name that reads like a path
-	 * is still dropped — the heading sits in a list of real directory names, and one that looks like a
-	 * directory move can only misread. An empty box is the shared dialog's way of saying nothing was
-	 * asked, so taking a custom name back is the settings road's own answer
-	 * (`directoryNames[workDirAbsPath] = ""`), not this card's. A label the heading already wears is dropped
-	 * for the simpler reason: it is not a change.
+	 * 收集的是一个*标签*，所以它不可能错到付出代价的地步：目录保留自己的名字，没有任何 transcript
+	 * 被改写。读起来像路径的名字仍然被丢弃 —— 标题坐落在一个真实目录名的列表里，一个看起来像
+	 * 目录移动的名字只会被误读。空盒子是共享对话框表达"没被要求"的方式，所以收回自定义名是设置
+	 * 那条路的职责（`directoryNames[workDirAbsPath] = ""`），不是这张卡片的。标题已经戴着的标签
+	 * 被丢弃的理由更简单：那不是变更。
 	 */
 	private async renameDirectory(workDirAbsPath: string, label: string): Promise<void> {
 		const typed = await askForText({
@@ -507,16 +471,15 @@ export class Sidebar {
 		}
 
 		const button = element("button", "session-item", undefined, { type: "button" });
-		// One line, per the reference's row spec: the status slot, the title, and the age. The slot is
-		// the row's only room for a state — a second line under the title made every row taller to
-		// carry what a dot in a 16px gutter already says.
+		// 一行，按参考的行规格：状态席位、标题、时间。席位是行唯一的放状态的空间 —— 标题下的
+		// 第二行让每行都变高，去承载 16px 沟槽里一颗圆点已经说清楚的事。
 		const slot = element("span", "session-item-slot");
 		const title = element("span", "session-item-title");
 		const time = element("span", "session-item-time");
 		button.append(slot, title, time);
 		button.addEventListener("click", () => this.handlers.onSelectSession(row.session.id));
-		// The row's whole menu lives here rather than in any resident control: a right click names the
-		// row, and the menu it opens is the only place fork, rename, and delete are offered from.
+		// 行的全部菜单住这里而不是任何常驻控件上：右键指名行，打开的菜单是派生、重命名、删除被
+		// 提供的唯一地方。
 		button.addEventListener("contextmenu", (event) => {
 			event.preventDefault();
 			this.openSessionMenu(row.session.id, event.clientX, event.clientY);
@@ -529,12 +492,11 @@ export class Sidebar {
 	}
 
 	/**
-	 * The one menu a session row has: fork, rename, delete.
+	 * 一个会话行拥有的唯一菜单：派生、重命名、删除。
 	 *
-	 * Opened at the pointer, the way a `contextmenu` asks. The fork's tooltip is written to say what
-	 * the call actually does — the whole log is copied and the conversation continues from there —
-	 * because "从最后一条继续" would promise more than a fork does: a branched session's last
-	 * *recorded* position is not a "last turn", and the copy is of everything.
+	 * 在指针处打开，`contextmenu` 要求的方式。派生的 tooltip 写的是这次调用真正做的 —— 整份日志
+	 * 被复制、对话从那里继续 —— 因为"从最后一条继续"承诺得比派生多：分支会话最后*记录*的位置
+	 * 不是"最后一个回合"，而复制的是一切。
 	 */
 	private openSessionMenu(sessionId: string, x: number, y: number): void {
 		openMenuAt(x, y, [
@@ -557,16 +519,14 @@ export class Sidebar {
 	}
 
 	/**
-	 * Turn a row's title into an editor, in place.
+	 * 把一行的标题原地变成编辑器。
 	 *
-	 * The editor holds the *clean* name — the `（1）` a fork row wears is a fact about its birth, and
-	 * a person should not have to retype it — so the seed comes from the tree row's base. Enter
-	 * commits, Escape leaves the row as it was, and clicking anywhere else commits, because an
-	 * in-place editor that lost its audience has no argument for throwing the typing away.
+	 * 编辑器持有*干净*的名字 —— 派生行戴的 `（1）` 是它出身的事实，人不该被迫重新输入 —— 所以
+	 * 种子来自树行的 base。Enter 提交，Escape 保持行原样，点别处也提交，因为失去了听众的编辑器
+	 * 没有理由扔掉输入。
 	 *
-	 * Committing changes nothing on this row. The name is real storage on the server, and the row
-	 * wears the new one when the connection's `session_row` frame arrives — the same road every other
-	 * row fact takes, and deliberately not a local edit this column would have to reconcile.
+	 * 提交不在这一行上改变任何东西。名字是服务端的真实存储，行在连接的 `session_row` 帧到达时
+	 * 戴上新的 —— 所有其他行事实的同一条路，刻意不是本地修改、之后还要这一列去协调。
 	 */
 	private startRename(sessionId: string): void {
 		if (this.editing !== undefined) return;
@@ -589,8 +549,8 @@ export class Sidebar {
 			editing.settled = true;
 			this.editing = undefined;
 			const typed = input.value.trim();
-			// Sent only when it is a change: re-recording the name the row already wears is a request
-			// that stores what the server already holds.
+			// 只在是变更时发送：重新记录行已经戴着的名字，是一次把服务端已持有的东西再存一遍的
+			// 请求。
 			if (save && typed.length > 0 && typed !== original) this.handlers.onRenameSession(sessionId, typed);
 			input.replaceWith(title);
 		};
@@ -607,28 +567,25 @@ export class Sidebar {
 	}
 
 	/**
- * Put one row's current values into the row that is already on screen.
+ * 把一行当前值放进已在屏幕上的那行。
 	 *
-	 * Every branch writes only what differs, because this runs on every frame and the whole point of
-	 * patching in place is that a re-render costs nothing when nothing changed. Even writing a value
-	 * that is already there is skipped: assigning `textContent` unconditionally would replace the
-	 * text node on every heartbeat, which is exactly the churn this design exists to avoid.
+	 * 每个分支只写不同的东西，因为它每帧都跑，而原地补丁的全部意义就是没变时重渲染零成本。连
+	 * 写入已经存在的值都被跳过：无条件赋 `textContent` 会在每次心跳时替换文本节点，恰是这个设计
+	 * 要避免的抖动。
 	 */
 	private patchRow(parts: RowParts, button: HTMLElement, row: TreeRow, state: SidebarState): void {
 		const isActive = row.session.id === state.activeSessionId;
 
-		// The tooltip is composed only from what can change, and the creation date — the one piece
-		// that costs a real `toLocaleString` — is formatted once per stamp and kept. Recomposing the
-		// string every frame was cheap; calling `Intl` every frame for a date that never moves was
-		// not, and it ran per row, per frame, for every row on screen.
+		// tooltip 只由可能变化的东西构成，创建日期 —— 唯一要花一次真 `toLocaleString` 的部分 ——
+		// 每个时间戳格式化一次并保存。每帧重组字符串是廉价的；为从不变的日期每帧调 `Intl` 不是，
+		// 而且它按行、按帧、对屏幕上每行都在跑。
 		let created = parts.created;
 		if (created === undefined || created.at !== row.session.createdAt) {
 			created = { at: row.session.createdAt, text: formatDate(row.session.createdAt) };
 			parts.created = created;
 		}
-		// The parent is named by what it *wears* rather than by what it stores: a fork of a fork hangs
-		// its suffix on the parent's own, so the tooltip names the row a person actually sees above.
-		// The busy line rides the end of it: the dot is the glance, the words are for the look.
+		// 父级按它*戴着*的名字指名，而不是它存的：派生的派生把后缀挂在父级自己的上面，所以
+		// tooltip 指名的是人真正在上面的行看到的行。busy 行骑在末尾：圆点是扫一眼，文字是细看。
 		const busy = busyOf(row.session);
 		const tooltip =
 			(row.parentLabel === undefined
@@ -649,12 +606,11 @@ export class Sidebar {
 	}
 
 	/**
-	 * Repaint the relative times of every drawn row.
+	 * 重画每一行画过的相对时间。
 	 *
-	 * Called on every frame, heartbeat included, so a row does not sit on "刚刚" for an hour after the
-	 * conversation it names went quiet. It reuses the heartbeat rather than adding a clock of its own:
-	 * one timer is one thing that can be wrong, and when the channel is down this stops too — which is
-	 * the honest behaviour, since "how long ago" stops being knowable the moment frames do.
+	 * 每帧调用，心跳也是，所以一行不会在它指名的对话安静一小时后还停在"刚刚"。它复用心跳而不
+	 * 加自己的时钟：一只钟就是一件可能出错的东西，通道断开时它也停 —— 这是诚实的行为，因为
+	 * "多久之前"在帧停止的那一刻就不再可知。
 	 */
 	tick(): void {
 		for (const drawn of this.drawn.values()) {
@@ -665,11 +621,10 @@ export class Sidebar {
 	}
 
 	/**
-	 * Write the row's relative time, remembering the stamp it came from.
+	 * 写行的相对时间，记住它来自的时间戳。
 	 *
-	 * The stamp is kept so {@link tick} can recompute the text without being handed the rows again —
-	 * the heartbeat carries no session ids, and re-deriving a stamp from the text would mean parsing
-	 * "3小时" back into a date.
+	 * 时间戳被保存，让 {@link tick} 能在不再拿到行的情况下重新计算文本 —— 心跳不携带会话 id，
+	 * 从文本重新推导时间戳意味着把"3小时"解析回日期。
 	 */
 	private paintTime(parts: RowParts, modified: number): void {
 		const text = relativeTime(modified);
@@ -678,12 +633,11 @@ export class Sidebar {
 	}
 
 	/**
-	 * Light the slot's dot, or clear it.
+	 * 点亮席位的圆点，或清掉它。
 	 *
-	 * Cleared rather than left stale, because a row that stopped running while the list was scrolled
-	 * away would otherwise come back still claiming a run. The attribute — not a class — is the
-	 * switch, so the dot is one CSS rule away from both states and the element itself stays: it is
-	 * the row's, and rebuilding it per change is the churn this whole design exists to avoid.
+	 * 清除而不是留下旧状态，因为列表滚开时停止运行的行，回来时会还声称自己在运行。属性 —— 而不是
+	 * 类 —— 是开关，圆点离两种状态都只差一条 CSS 规则，元素本身保留：它是行的，逐变更重建它正是
+	 * 这个全部设计要避免的抖动。
 	 */
 	private paintSlot(parts: RowParts, busy: string | undefined): void {
 		if (parts.busy === busy) return;
@@ -693,15 +647,12 @@ export class Sidebar {
 	}
 
 	/**
-	 * The paging row under a directory's conversations: 「展开其余」 first, and — beside it, not
-	 * beneath it — 「收起」.
+	 * 一个目录对话下面的分页行：「展开其余」在前，以及 —— 并排、不在下面 —— 「收起」。
 	 *
-	 * One drawn node holding both buttons rather than two drawn nodes placed one after another,
-	 * because the list column lays its children out vertically: side by side is a row of their own.
-	 * Patched in place like every drawn node — a press that lands between pointer-down and up must
-	 * not fall on a button that was rebuilt under it — and which of the two is on screen is part of
-	 * the patch, not a rebuild: 展开 is on while rows are held back, 收起 is on once a page has
-	 * been added, and either one alone is an ordinary state of the row.
+	 * 一个画过的节点握着两个按钮，而不是两个画过的节点一前一后摆放，因为列表列把子节点竖排：
+	 * 并排是它们自己的一行。像每个画过的节点一样原地补丁 —— 落在 pointer-down 与 up 之间的按压
+	 * 绝不能落在被重建过的按钮上 —— 两者哪个在屏幕上是补丁的一部分而不是重建：展开在有行被扣住
+	 * 时在，收起在加了一页后在，任意单独一个都是行的普通状态。
 	 */
 	private pagingRowFor(workDirAbsPath: string): PagingRow {
 		const key = `paging:${workDirAbsPath}`;
@@ -719,7 +670,7 @@ export class Sidebar {
 		return paging;
 	}
 
-	/** Write one paging row's current state, and only what moved. */
+	/** 写一条分页行的当前状态，且只写动了的。 */
 	private paintPagingRow(paging: PagingRow, more: boolean, back: boolean, hidden: number): void {
 		paging.more.hidden = !more;
 		if (more) {
@@ -729,7 +680,7 @@ export class Sidebar {
 		paging.collapse.hidden = !back;
 	}
 
-	/** Drop one drawn node by key, wherever it happens to be. */
+	/** 按键丢掉一个画过的节点，无论它在哪。 */
 	private stale(key: string): void {
 		const entry = this.drawn.get(key);
 		if (entry === undefined) return;
@@ -738,11 +689,10 @@ export class Sidebar {
 	}
 
 	/**
-	 * The channel's state, as one dot and at most a few words.
+	 * 通道的状态，一颗圆点和至多几个字。
 	 *
-	 * No words when live. The indicator's job is to be the thing you notice is wrong, and text that
-	 * only appears when something is wrong is what makes it that — a label permanently reading
-	 * "已连接" would be one more piece of chrome competing with the conversation.
+	 * live 时没有字。指示器的职责是那个让人注意到"出问题了"的东西，只在出问题时才出现的文字
+	 * 正是让它成为那个的东西 —— 永久写着"已连接"的标签只是又一件和对话抢注意力的 chrome。
 	 */
 	private renderIndicator(channel: ChannelState): void {
 		this.indicator.dataset.state = channel;
@@ -754,97 +704,88 @@ export class Sidebar {
 }
 
 /**
- * One drawn node, plus what is remembered about it between renders.
+ * 一个画过的节点，加上渲染之间记住的关于它的东西。
  *
- * Three kinds of thing live in this map and only one of them is a session row — a directory heading
- * and the paging row are drawn the same way, kept for the same reason, and never rebuilt. `parts` and
- * `paging` are what separate them: `parts` is present exactly for the rows, `paging` exactly for the
- * paging row, which is why the patching code can reach through either without asking whether the
- * entry it was handed happens to be the other kind.
+ * 三种东西住在这张映射里，其中只有一种是会话行 —— 目录标题和分页行以同样的方式画出、为同样的
+ * 理由保存、且从不重建。`parts` 和 `paging` 是区分它们的东西：`parts` 恰好在行上，`paging` 恰好
+ * 在分页行上，所以补丁代码可以直达任何一个而不必问拿到的条目碰巧是不是另一种。
  */
 interface DrawnNode {
-	/** The button for a row, or the container for a group heading or the paging row. */
+	/** 行的按钮，或组标题、分页行的容器。 */
 	button: HTMLElement;
-	/** The row's own parts, and the values last written to them. Absent for the non-row entries. */
+	/** 行自己的部件，和最后写入它们的值。非行条目缺席。 */
 	parts?: RowParts;
-	/** The heading element inside `button`, for group entries. */
+	/** `button` 内部的标题元素，给组条目。 */
 	head?: HTMLElement;
-	/** The heading's label node, so a re-keyed group can be renamed without rebuilding the heading. */
+	/** 标题的标签节点，让换键的组无需重建标题就能改名。 */
 	name?: HTMLElement;
-	/** The paging row's two buttons, for paging entries. */
+	/** 分页行的两个按钮，给分页条目。 */
 	paging?: PagingRow;
 }
 
 /**
- * The two buttons a paging row holds, and the row that lays them side by side.
+ * 分页行握着的两个按钮，和把它们并排的那一行。
  *
- * A separate type from {@link DrawnNode} for the same reason {@link RowParts} is: which nodes exist
- * and what gets written into them are separate facts, and the paging row writes two buttons' presence
- * where a session row writes five fields' text.
+ * 与 {@link DrawnNode} 分开成独立类型的理由与 {@link RowParts} 相同：哪些节点存在、什么被写进
+ * 去是两个事实，分页行写的是两个按钮的存在，会话行写的是五个字段的文本。
  */
 interface PagingRow {
-	/** The flex row the two buttons sit in; the drawn node itself. */
+	/** 两个按钮所在的 flex 行；画过的节点本身。 */
 	row: HTMLElement;
-	/** 「展开其余 N 个会话」, on while rows are held back. */
+	/** 「展开其余 N 个会话」，有行被扣住时在。 */
 	more: HTMLButtonElement;
-	/** 「收起」, on once a page has been added; steps the expansion back one page. */
+	/** 「收起」，加了一页后在；把展开退回一页。 */
 	collapse: HTMLButtonElement;
 }
 
-/** One rename in flight: which row is being edited, and whether it has been settled already. */
+/** 一次进行中的重命名：哪一行在被编辑，以及它是否已被结算。 */
 interface Editing {
 	sessionId: string;
-	/** Set the first time Enter, Escape, or blur settles the edit, so the other two are no-ops. */
+	/** Enter、Escape 或 blur 第一次结算编辑时置位，于是另外两个成为无操作。 */
 	settled: boolean;
 }
 
 /**
- * The parts of one row that get written, and the values they currently hold.
+ * 一行的哪些部件被写、以及它们当前持有的值。
  *
- * A separate type from {@link DrawnNode} rather than more optional fields on it, because "which nodes
- * exist" and "what is written into a row" are separate facts: the first is about the list's shape and
- * the second about one session. Merged, every write had to ask whether the node it was handed was a
- * row at all.
+ * 与 {@link DrawnNode} 分开而不是给它加更多可选字段，因为"哪些节点存在"和"往一行里写什么"是
+ * 两个事实：前者关于列表的形状，后者关于一个会话。合并的话，每次写入都得先问拿到的到底是不是
+ * 一行。
  */
 interface RowParts {
 	slot: HTMLElement;
 	title: HTMLElement;
 	time: HTMLElement;
-	/** Last activity written into the time, kept so a tick can recompute the text without the rows. */
+	/** 写入时间里的最后活动，让 tick 在不拿到行的情况下重算文本。 */
 	modified?: number;
-	/** The busy line the tooltip currently names, so an unchanged one is neither recomposed nor rewritten. */
+	/** tooltip 当前指名的 busy 行，没变的既不重组也不重写。 */
 	busy?: string;
-	/** The tooltip string on screen, so an unchanged one is neither recomposed nor rewritten. */
+	/** 屏幕上的 tooltip 字符串，没变的既不重组也不重写。 */
 	tooltip?: string;
-	/** The creation stamp the tooltip's date was formatted from, so `toLocaleString` runs once per row. */
+	/** tooltip 日期格式化自的创建时间戳，`toLocaleString` 每行只跑一次。 */
 	created?: { at: number; text: string };
 }
 
 /**
- * One directory's paging state, or the untouched default: one page, open, nothing saved.
+ * 一个目录的分页状态，或未触碰的默认：一页、展开、没存过。
  *
- * The missing entry is the common case — a directory the user never paged or collapsed keeps no
- * record of it — so both the draw and the window's three handlers read through this rather than
- * indexing and defaulting at each site.
+ * 缺失的条目是常见情形 —— 用户从未翻页或折叠的目录不保留记录 —— 所以绘制和窗口的三个 handler
+ * 都经由这里读，而不是在每个调用点索引加默认。
  */
 export function pagingOf(paging: Record<string, DirectoryPaging>, workDirAbsPath: string): DirectoryPaging {
 	return paging[workDirAbsPath] ?? { collapsed: false, page: 1, savedPage: 1 };
 }
 
 /**
- * The rows a directory shows after `pageCount` pages of its conversations: the first
- * `pageCount * PAGE_SIZE` conversations, each with the forks that came from it, and always the one
- * the window is on.
+ * 一个目录 `pageCount` 页对话之后的行：前 `pageCount * PAGE_SIZE` 个对话，各带来自它的派生，
+ * 且永远包含窗口所在的那一个。
  *
- * The last part is why this is not a `slice`: a session that has been forked from is often older
- * than the first page's most recent, and the list still has to say where the conversation on screen
- * came from. A fork counts as part of the conversation it branched off rather than as a row of its
- * own, which is what keeps a heavily forked directory from crowding out the others — and which is
- * also why paging is counted in conversations here, the unit the limit actually caps, rather than
- * in rows the way the shape prototype demoed it.
+ * 最后一部分正是不是 `slice` 的原因：被派生过的会话往往比第一页最新的更旧，列表仍然要说屏幕上
+ * 的对话从哪来。派生算作它分出的对话的一部分而不是自己的一行，这让重度派生的目录不挤占其他
+ * 目录 —— 也是分页在这里按对话数（上限真正约束的单位）而不是按行数计的原因，后者是形状原型
+ * demo 的做法。
  *
- * `Infinity` is the page count a filtering draw passes: a list the user is actively narrowing shows
- * every match, in every group, and holds nothing back.
+ * `Infinity` 是过滤绘制传入的页数：正在收窄的列表显示每组的每个匹配，什么都不扣。
  */
 function pagedRows(rows: readonly TreeRow[], activeSessionId: string | undefined, pageCount: number): TreeRow[] {
 	const limit = pageCount * PAGE_SIZE;
@@ -862,50 +803,44 @@ function pagedRows(rows: readonly TreeRow[], activeSessionId: string | undefined
 }
 
 /**
- * One row of a directory's list: a session, and the name it is drawn under.
+ * 目录列表的一行：一个会话，和它画出来的名字。
  *
- * Named apart from the protocol's `SessionRow` on purpose, because the two are not the same thing and
- * the difference is easy to miss. A protocol row is a session plus three facts only a running process
- * knows (`running`, `pending`, `modified`); this one is a protocol row plus its place in the fork tree
- * and the display title that place earns it.
+ * 刻意与协议的 `SessionRow` 区分开，因为两者不是同一个东西，差别容易漏。协议行是会话加三个只有
+ * 运行中的进程才知道的事实（`running`、`pending`、`modified`）；这个是协议行加它在派生树里的
+ * 位置、以及那个位置挣来的显示标题。
  *
- * `label` is what the row wears and `base` is what a rename edits: they differ by exactly the row's
- * own `（N）`, which is drawn here rather than stored anywhere — the number is the row's own place
- * among its siblings under the same parent, by creation time. The base is the row's *own* stored
- * title the moment that title is a fact of its own — a rename makes it one — and the parent's label
- * while it is still the same string the parent carries, which is what stacks the suffixes: a fork of
- * a fork reads 标题（1）（1）, so no two rows of a family ever wear the same name.
+ * `label` 是行戴的，`base` 是重命名编辑的：两者恰好相差行自己的 `（N）`，那个数字在这里画而
+ * 不是存在任何地方 —— 它是行在同一父级下的兄弟中按创建时序排的位次。base 在行的存储标题成为
+ * 它自己的事实那一刻（一次改名让它成为）是行自己的存储标题，在它仍是父级携带的同一字符串时是
+ * 父级的 label，这正是堆叠后缀的机制：派生的派生读作 标题（1）（1），于是同一家族没有两行戴
+ * 同一个名字。
  */
 interface TreeRow {
 	session: SessionRow;
-	/** 0 for a session of its own, 1 for a fork of one, and one more per generation. Order still rides on it. */
+	/** 自己一个会话为 0，一个的派生为 1，每代再加一。顺序仍然骑在它上面。 */
 	depth: number;
-	/** The row's clean name: what a rename edits, and what the label is built from. */
+	/** 行的干净名字：重命名编辑的，标签由它构建。 */
 	base: string;
-	/** The full display title, suffix included. */
+	/** 完整显示标题，后缀含在内。 */
 	label: string;
-	/** The label of the session this one was forked from, for the row's own tooltip. */
+	/** 本会话派生自的那个会话的标签，给行自己的 tooltip。 */
 	parentLabel?: string;
 }
 
 /**
- * Lay a directory's sessions out as the tree they are, and name each row.
+ * 把一个目录的会话摆成它们本来的树，并为每行指名。
  *
- * A fork records its parent as a file path, the listing resolves that to an id, and this is where the
- * id becomes a row: roots sorted by when they were last active, each fork directly beneath the session
- * it came from so a fork's own forks stay under it rather than beside it, and siblings in creation
- * order — which is what the suffix's number counts.
+ * 派生以文件路径记录父级，列表把路径解析成 id，这里就是 id 变成行的地方：根按最近活跃排序，
+ * 每个派生直接坐在它来自的会话下面，让派生的派生留在它下面而不是旁边，兄弟按创建顺序 ——
+ * 正是后缀的数字所数的。
  *
- * The sort is done here rather than trusted from the listing, and that is the point. A row's position
- * is now a function of a field that moves while nobody is clicking, so the order has to be recomputed
- * from the rows on every render — inheriting it would mean the list silently disagrees with the rule
- * the moment the two sources diverged, which is precisely when the order is what a person is reading.
- * It costs one sort over a directory's roots.
+ * 排序在这里做而不是信任列表，这就是要点。行的位置现在是一个在无人点击时也会移动的字段的
+ * 函数，所以顺序必须每次渲染从行重新计算 —— 继承它意味着两个来源分歧的那一刻，列表悄悄违背
+ * 规则，而这恰是人正在读顺序的时候。它只花一次对目录根的排序。
  *
- * A fork whose parent is not in this list was already a root for every other purpose, and stays one
- * here — which is also what happens to a fork whose parent has been deleted: no parent, no suffix,
- * the name stands on its own. A file hand-edited into a cycle must not lose rows to a walk that never
- * returns, so anything the descent did not reach is placed at the top level rather than dropped.
+ * 父级不在这个列表里的派生，对其他一切目的早已是根，在这里也保持 —— 父级已被删除的派生同样
+ * 如此：没有父级、没有后缀、名字独立成立。被手工编辑成环的文件绝不能让行丢给一个永不返回的
+ * 遍历，所以下降没够到的任何东西都被放到顶层，而不是丢弃。
  */
 function rowsOf(group: DirectoryGroup): TreeRow[] {
 	const byId = new Map(group.sessions.map((session) => [session.id, session]));
@@ -923,8 +858,8 @@ function rowsOf(group: DirectoryGroup): TreeRow[] {
 		else siblings.push(session);
 	}
 
-	// The suffix counts a sibling's place by creation time, so the walk that lays the rows out reads
-	// the same order the count does: a fork row appears under its parent in the order it was born.
+	// 后缀按创建时间数兄弟的位次，所以摆行的遍历读的是与计数相同的顺序：派生行按出生顺序出现在
+	// 父级下面。
 	for (const siblings of children.values()) siblings.sort((a, b) => a.createdAt - b.createdAt);
 	roots.sort((a, b) => b.modified - a.modified);
 
@@ -934,11 +869,9 @@ function rowsOf(group: DirectoryGroup): TreeRow[] {
 		if (placed.has(session.id)) return;
 		placed.add(session.id);
 		const suffix = parent === undefined ? "" : `（${index}）`;
-		// The base is the row's own name the moment it becomes a fact of its own — a rename wrote one,
-		// so the stored title differs from its parent's — and the parent's label while it is still the
-		// same string the parent carries. Both halves matter: inheriting is what stacks the suffixes
-		// down an unrenamed family, and stopping the inheritance at the first different name is what
-		// lets a renamed row wear the name its server row actually carries.
+		// base 在行的名字成为它自己的事实那一刻 —— 一次改名写过一个 —— 是行自己的，在它仍是
+		// 父级携带的同一字符串时继承父级的 label。两半都重要：继承是后缀沿未改名家族堆叠下来的
+		// 机制，在第一个不同的名字处停止继承，才让改过名的行戴上它的服务端行实际携带的名字。
 		const inherited = parent !== undefined && session.title === parent.session.title;
 		const base = inherited ? parent.label : session.title;
 		const row: TreeRow = { session, depth, base, label: base + suffix };
@@ -955,36 +888,32 @@ function rowsOf(group: DirectoryGroup): TreeRow[] {
 }
 
 /**
- * How many conversations one page of a directory holds.
+ * 一个目录一页装多少对话。
  *
- * The page, not a collapsed cap: a directory shows this many conversations before 「展开其余」
- * offers one more page, and a directory with no more than this never wears a paging control at all.
- * Counted in conversations rather than rows, so a fork never costs another session its place. The
- * second status line makes each row taller, which is a density question rather than a correctness
- * one — the cap is about how much a scan can hold, and that has not changed.
+ * 是页，不是折叠上限：目录先显示这么多对话，「展开其余」再提供一页，不多于此的目录根本不戴
+ * 分页控件。按对话数而不是行数计，派生绝不花掉另一个会话的位置。第二条状态线让每行变高，那是
+ * 密度问题不是正确性问题 —— 上限关于一次扫描能装下多少，这一点没变。
  */
 const PAGE_SIZE = 5;
 
-/** The last segment of a path, which is what a person calls the project. */
+/** 路径的最后一段，正是人们称呼项目的方式。 */
 export function directoryName(workDirAbsPath: string): string {
 	const parts = workDirAbsPath.split(/[/\\]/).filter((part) => part.length > 0);
 	return parts.at(-1) ?? workDirAbsPath;
 }
 
 /**
- * A compact age for a list row.
+ * 列表行的紧凑时间。
  *
- * Deliberately coarse: the list is scanned, not read, and "3天" is what distinguishes entries at a
- * glance. Anything more precise is in the row's tooltip.
+ * 刻意粗略：列表是被扫描的，不是被读的，"3天"就是扫一眼能区分条目的东西。更精确的在行的
+ * tooltip 里。
  *
- * Read from `modified` rather than `createdAt`. Sorting by when a conversation was last active and
- * labelling it with when it was created is how a row ends up second in the list and reading "3天前" —
- * two facts about the same session disagreeing in plain sight.
+ * 从 `modified` 读而不是 `createdAt`。按对话最后活跃排序、却用创建时间标注，行会排在第二位却
+ * 读着"3天前" —— 关于同一会话的两个事实在光天化日下打架。
  *
- * The oldest branch is cached per stamp. Past a week the label is a month and a day — a fact about
- * the timestamp alone, with no "now" in it — but producing it costs `Intl`, and this runs per row,
- * per frame; a long list made that the sidebar's remaining per-frame cost after the tooltip's own
- * `toLocaleString` was taken off it. The cache holds one entry per old row and nothing else.
+ * 最老的分支按时间戳缓存。超过一周后标签是月和日 —— 只关于时间戳本身的事实，里面没有"现在"
+ * —— 但产出它要花 `Intl`，而这里按行、按帧跑；一段长列表曾让这成为侧栏在 tooltip 自己的
+ * `toLocaleString` 被拿走之后剩余的逐帧成本。缓存只按旧行各留一条，别无其他。
  */
 const dateLabels = new Map<number, string>();
 
@@ -1002,7 +931,7 @@ function relativeTime(timestamp: number): string {
 	return label;
 }
 
-/** The row's creation, for the tooltip. Only ever a date: the row itself carries the precise age. */
+/** 行的创建时间，供 tooltip。永远只是日期：行本身携带精确的时间。 */
 function formatDate(timestamp: number): string {
 	return new Date(timestamp).toLocaleString("zh-CN", {
 		year: "numeric",

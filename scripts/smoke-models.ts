@@ -1,10 +1,10 @@
-// Model smoke test: the user's imported models, the names that pick them out, and the placeholder that
-// stands in for none. Run with: node scripts/smoke-models.ts
+// Model smoke test：用户导入的模型、把它们挑出来的名字，以及在什么都没有时顶上的 placeholder。
+// 运行：node scripts/smoke-models.ts
 //
-// No provider key: everything here is the mapping from a row the user typed to the pi-ai model a
-// session runs (vendored under packages/core/src/llm), plus the one request this app never wants to make — the one
-// that has no model to make it with. One heading reaches the real transport with a key, and captures
-// the request before it leaves, so what it reads is the credential rather than a provider's answer.
+// 无需 provider key：这里的一切都是"用户键入的一行 → session 运行的 pi-ai 模型"的映射
+// （vendored 在 packages/core/src/llm 下），外加本应用最不想发出的那一个请求——没有模型可用的
+// 那个请求。有一个标题带 key 触达真实 transport，并在请求离开前把它截住，所以读到的是凭据而
+// 不是 provider 的回答。
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -79,8 +79,8 @@ try {
 		const model = createModel(rows[0]!);
 		check("the model's row is found by the name it carries", rows.find((userModel) => userModel.name === model.name)?.apiKey === "secret");
 		check("and a model with no row behind it has none", rows.find((userModel) => userModel.name === placeholderModel().name) === undefined);
-		// Renaming the row is exactly what breaks the link, which is the documented cost of a name being
-		// an identity: the model that was built from the old name no longer finds anything.
+		// 改行的名字正是破坏这条链路的动作，这是"名字即身份"被写下来的代价：从旧名字构建的模型
+		// 不再找得到任何东西。
 		rows[0]!.name = "renamed";
 		const stale = createModel(row({ name: "mine" }));
 		check("a renamed row stops answering to the old name", rows.find((userModel) => userModel.name === stale.name) === undefined);
@@ -113,9 +113,8 @@ try {
 
 	heading("a session reads the rows rather than a copy of them");
 	{
-		// The whole of "editing a model takes effect on the next request": there is no catalog to
-		// rebuild, because the manager re-reads the rows behind it each time and the model is
-		// re-derived from the row it finds.
+		// "编辑模型在下一个请求生效"的全部内容：没有要重建的 catalog，因为 manager 每次都重读它
+		// 身后的行，模型从找到的那一行重新推导。
 		const rows: ModelConfig[] = [];
 		check("an empty source resolves nothing", rows.find((userModel) => userModel.name === "added") === undefined);
 
@@ -133,10 +132,9 @@ try {
 
 	heading("the model's own key is what a caller without one authenticates with");
 	{
-		// A key rides on the model, so a call that names no key of its own still has one — the
-		// compaction summary is the call shaped like that, and it used to come back with "No API key"
-		// while the row it was summarizing had one all along. Nothing here opens a connection: the
-		// request is captured on its way out, which is also what says *which* key was on it.
+		// key 骑在模型上，所以一个没有自带 key 的调用仍然有一个——compaction 摘要正是这种形状的
+		// 调用，它曾带着 "No API key" 回来，而它正在总结的那一行明明有 key。这里什么都不开连接：
+		// 请求在出门的路上被截住，这也是能说出*哪个* key 在上面的原因。
 		const attempt = async (
 			model: ReturnType<typeof createModel>,
 			options: SimpleStreamOptions = {},
@@ -190,29 +188,29 @@ try {
 		const unnamed = coerceModelConfig({ id: "deepseek-chat", baseUrl: "http://x" });
 		check("a missing name falls back to the wire id", unnamed?.name === "deepseek-chat", String(unnamed?.name));
 
-		// A name is an identity, so a duplicate is not quietly made unique: the caller has to refuse the
-		// list, or every transcript referring to the first row would silently change meaning.
+		// 名字是身份，所以重名不会被悄悄改得唯一：调用方必须拒绝这份列表，否则每一份指名第一行
+		// 的 transcript 都会悄悄改变含义。
 		const duplicate = coerceModelConfig({ name: "m", id: "m", baseUrl: "http://x" });
 		check("a duplicate name is stored as it was typed, not suffixed", duplicate?.name === "m", String(duplicate?.name));
 
 		const reserved = coerceModelConfig({ name: "my-agent:unconfigured", id: "m", baseUrl: "http://x" });
 		check("the placeholder's name cannot be claimed", reserved === undefined, JSON.stringify(reserved));
 
-		// A file written before a name was the identity still holds the label the user chose. Reading it
-		// as the name is what keeps an upgrade from showing them a slug they never typed.
+		// 在名字成为身份之前写的文件仍持有用户选的 label。把它读成 name 正是让升级不至于给用户
+		// 看一个他们从未键入过的 slug 的原因。
 		const fromLabel = coerceModelConfig({ label: "Claude Opus 5", id: "claude-opus-5", baseUrl: "http://x" });
 		check("an older row's label becomes its name", fromLabel?.name === "Claude Opus 5", String(fromLabel?.name));
 		check("and the label does not survive as a field", !Object.hasOwn(fromLabel ?? {}, "label"));
 
-		// A file written before the config *was* the row spells the wire id `modelId`. Both are read,
-		// which is what makes the rename an upgrade rather than a list of endpoints the user has to
-		// retype — the same account `label` above settles, for the same reason.
+		// 在 config *就是*行本身之前写的文件把 wire id 拼作 `modelId`。两个拼写都被读，这正是让
+		// 改名成为一次升级、而不是一张用户必须重打的端点清单的原因——与上面的 `label` 同一个
+		// 理由、同一个账。
 		const fromModelId = coerceModelConfig({ modelId: "deepseek-chat", baseUrl: "http://x" });
 		check("an older row's modelId is read as its id", fromModelId?.id === "deepseek-chat", String(fromModelId?.id));
 		check("and the old spelling does not survive", !Object.hasOwn(fromModelId ?? {}, "modelId"));
 
-		// A row no longer says which transport to use — there is one — so a transport field that arrives
-		// from an older file is simply not part of a row, and the row is still accepted.
+		// 行不再说用哪个 transport——只有一个——所以从旧文件来的 transport 字段根本不是行的一部分，
+		// 行照常被收下。
 		const strayApi = coerceModelConfig({ id: "m", baseUrl: "http://x", api: "not-a-transport" });
 		check("a stray transport field is ignored", strayApi?.id === "m", String(strayApi?.id));
 		check("and never reaches the stored row", !Object.hasOwn(strayApi ?? {}, "api"));
@@ -222,10 +220,9 @@ try {
 		check("and so does a nonsense token limit", sized?.maxTokens === 8_192, String(sized?.maxTokens));
 	}
 
-	// A hand-typed row carries no capability metadata, so the wire id is what decides what its model
-	// accepts. Getting one of these wrong is a 400 from the API, not a cosmetic difference: a
-	// temperature a model refuses fails the whole request. Levels no longer come from here — every row
-	// is asked at the same four — so what this block can still check is the compat half.
+	// 手打的行不带任何能力元数据，所以决定它的模型接受什么的是 wire id。这些弄错一个是 API 的
+	// 400，不是外观差异：一个模型拒绝的 temperature 会让整个请求失败。等级不再来自这里——每行
+	// 都被问同样的四档——所以本块还能检查的是 compat 那一半。
 	heading("what a Claude model accepts is derived from its wire id");
 	{
 		const model = (id: string) => createModel(row({ id }));
@@ -249,15 +246,13 @@ try {
 		check("and asking for nothing is off", normalizeThinkingLevel(undefined) === "off", normalizeThinkingLevel(undefined));
 	}
 
-	// Thinking is one shape on every row: adaptive, with the strength on the request as an effort.
-	// There is no token budget to send and no beta header to ask for, and no table decides what a
-	// level is spelled as — it goes out as itself. These read the body on its way out, because that is
-	// what any of this is about — a provider key is not needed to see what would have been sent.
+	// Thinking 在每一行上是同一个形状：adaptive，强度作为 effort 放在请求上。没有要发的 token
+	// 预算、没有要请求的 beta header，也没有任何表决定一个等级拼作什么——它按自己原样出去。
+	// 这些在出门的路上读 body，因为那正是这一切所关乎的——看"本会发出什么"不需要 provider key。
 	heading("every row is asked the same way");
 	{
-		// The level is not an option: it rides on the model the request is made with, which is the same
-		// object that names the endpoint. So these build the model the way a session does — from the row
-		// and the level — and read the body on its way out.
+		// 等级不是 option：它骑在请求所用的模型上，与指名端点的是同一个对象。所以这里按 session
+		// 构建模型的方式构建它——从行与等级——然后在出门的路上读 body。
 		const sent = async (
 			row: ModelConfig,
 			level?: "low" | "high" | "max",
@@ -310,19 +305,19 @@ try {
 		const deepseekMax = (await sent(deepseek, "max")).body;
 		check("and max is sent as max", effortOf(deepseekMax) === "max", JSON.stringify(deepseekMax.output_config));
 
-		// A row no table knows is asked the same way, which is the point: the app has one shape, and a
-		// level that is its own spelling needs nothing said about it.
+		// 没有任何表认识的行被以同样的方式问，这正是要点：应用只有一个形状，一个拼写就是它自己
+		// 的等级不需要任何额外说明。
 		const unknownHigh = (await sent(unknown, "high")).body;
 		check("a row nothing here knows is asked in the same shape", switchOf(unknownHigh) === "adaptive", JSON.stringify(unknownHigh.thinking));
 		check("with the level as its own effort", effortOf(unknownHigh) === "high", JSON.stringify(unknownHigh.output_config));
 
-		// A model asked for no level at all is the same request as "off": nothing was asked for, so the
-		// switch goes off rather than a strength being guessed at.
+		// 一个什么等级都没被要求的模型与 "off" 是同一个请求：什么都没要求，所以开关被关掉，而
+		// 不是去猜一个强度。
 		const off = (await sent(claude)).body;
 		check("no level turns the switch off", switchOf(off) === "disabled", JSON.stringify(off.thinking));
 		check("and sends no effort at all", off.output_config === undefined, JSON.stringify(off.output_config));
 
-		// "off" is a level like the others, not the absence of one, so it says so on the wire.
+		// "off" 是和其他一样的等级，不是缺席，所以它在 wire 上这么说。
 		const explicitOff = (await sent(claude, undefined)).body;
 		check("an explicit off reads the same", JSON.stringify(explicitOff.thinking) === JSON.stringify(off.thinking));
 	}
@@ -348,14 +343,13 @@ try {
 		check("its presence is reported instead", options[0]?.hasApiKey === true);
 		check("a keyless row says so", listModelOptions([row({ apiKey: "" })])[0]?.hasApiKey === false);
 		check("and the row's name is what the client names it by", options[0]?.name === "mine", String(options[0]?.name));
-		// The transport is a fact about the build, so it is reported rather than chosen.
+		// transport 是构建的一个事实，所以它是被报告的，不是被选择的。
 		check("and the transport is the one this build speaks", options[0]?.api === "anthropic-messages", String(options[0]?.api));
 	}
 
-	// The stateless surface: a session holds the choice the client sent — the row's name and the level —
-	// and every model is built from it by looking the name up in the catalog. Nothing of the row is
-	// kept anywhere, so an edit to the file reaches the next build with nothing to refresh. These read
-	// the built model and the wire, so no provider key is needed here either.
+	// 无状态面：session 持有客户端发来的选择——行的名字与等级——每个模型都通过在 catalog 里查
+	// 这个名字来构建。行的任何东西都不被留在任何地方，所以对文件的一次编辑在没有任何要刷新的
+	// 东西的情况下到达下一次构建。这些读的是构建出的模型与 wire，所以这里同样不需要 provider key。
 	heading("a choice is looked up in the catalog, and every build reads it fresh");
 	{
 		const rows = [row()];
@@ -370,29 +364,28 @@ try {
 		check("the constants the row never names are the constructor's", model.api === "anthropic-messages" && JSON.stringify(model.input) === JSON.stringify(["text"]), `${model.api} / ${JSON.stringify(model.input)}`);
 		check("the choice itself gained nothing: it is a choice, not a copy of the row", JSON.stringify(choice) === '{"name":"mine","thinkingLevel":"high"}', JSON.stringify(choice));
 
-		// The whole of "editing a model takes effect on the next request" is now this: nothing was cached
-		// to invalidate, so the next build simply reads what the file says.
+		// "编辑模型在下一个请求生效"的全部内容如今就是这个：没有缓存可失效，下一次构建直接读
+		// 文件说的。
 		rows[0]!.apiKey = "corrected";
 		rows[0]!.contextWindow = 32_000;
 		const reread = modelFor(choice, rows);
 		check("a corrected key is on the next build, with nothing refreshed", reread.apiKey === "corrected", String(reread.apiKey));
 		check("and a resized window is too", reread.contextWindow === 32_000, String(reread.contextWindow));
 
-		// A build never inherits a field from an earlier one, because no state survives between them: a
-		// row with no compat override builds without one, and a row that has one brings it.
+		// 一次构建绝不从上一次继承字段，因为两者之间没有任何 state 存活：不带 compat override 的
+		// 行构建时不带，带着的行把它带来。
 		rows.push(row({ name: "plain", id: "deepseek-v4.1-flash" }));
 		check("a row without a compat override builds without one", modelFor({ name: "plain" }, rows).compat === undefined, JSON.stringify(modelFor({ name: "plain" }, rows).compat));
 		rows.push(row({ name: "claude", id: "claude-opus-4-7" }));
 		check("and a row with one brings it", modelFor({ name: "claude" }, rows).compat?.supportsTemperature === false, JSON.stringify(modelFor({ name: "claude" }, rows).compat));
 
-		// A level is normalized on the way into the model: a string the app has no name for lands on
-		// "off", and no level at all stays none, which the wire reads as "do not think".
+		// 等级在进入模型的路上被规范化：应用没有名字的字符串落在 "off"，什么等级都不给保持
+		// none，wire 把它读作"不要思考"。
 		check("a level nobody has builds as off", modelFor({ name: "mine", thinkingLevel: "turbo" }, rows).thinkingLevel === "off", String(modelFor({ name: "mine", thinkingLevel: "turbo" }, rows).thinkingLevel));
 		check("no level builds as none", modelFor({ name: "mine" }, rows).thinkingLevel === undefined, String(modelFor({ name: "mine" }, rows).thinkingLevel));
 
-		// A name no row answers does not throw. A session has to stay buildable — a snapshot, a usage
-		// meter, and a failure message all read it — so the placeholder's facts answer under the name
-		// that was asked for, and the transport is what refuses to send.
+		// 没有任何行应答的名字不抛异常。session 必须保持可构建——快照、用量计与失败消息都要读
+		// 它——所以 placeholder 的事实以被问到的那个名字作答，而 transport 才是拒绝发送的那个。
 		check("a name no row answers finds no row", rowFor({ name: "nope" }, rows) === undefined);
 		const missing = modelFor({ name: "nope" }, rows);
 		check("but still builds, keeping the name that was asked for", missing.name === "nope", String(missing.name));

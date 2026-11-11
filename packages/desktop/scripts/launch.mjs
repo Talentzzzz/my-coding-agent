@@ -1,9 +1,6 @@
-// Launch the desktop shell.
+// 启动桌面外壳。
 //
-// This exists for one reason: an unrelated `ELECTRON_RUN_AS_NODE` in the environment turns Electron
-// into plain Node, and the app then dies on `require("electron")` returning a path instead of the
-// API. Deleting that variable for the child is not something a package script can do portably, and
-// it is exactly the kind of environment difference that should not decide whether the app opens.
+// 它存在只有一个原因：环境里一个不相干的 `ELECTRON_RUN_AS_NODE` 会把 Electron 变成普通 Node，应用随即死于 `require("electron")` 返回路径而不是 API。为子进程删掉该变量不是 package script 能可移植做到的事，而这恰恰是不该决定应用能否打开的那类环境差异。
 //
 //   node scripts/launch.mjs [--dev] [--workDir <dir>]
 import { spawn } from "node:child_process";
@@ -15,7 +12,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(here, "..");
 
-/** Where Electron's own launcher lives, which is a shim that spawns the real binary. */
+/** Electron 自己的启动器所在，那是一个 spawn 真正二进制的垫片。 */
 function electronEntry() {
 	const require = createRequire(join(desktopRoot, "package.json"));
 	try {
@@ -29,11 +26,9 @@ function electronEntry() {
 }
 
 /**
- * The real executable.
+ * 真正的可执行文件。
  *
- * Electron's package entry exports the path to its binary after installation recorded it in
- * `path.txt`; the wrapper script in the package root would also work, but going straight to the
- * binary keeps one process between this launcher and the app.
+ * Electron 的 package entry 在安装时把二进制路径记入 `path.txt` 后导出它；包根的包装脚本也能用，但直取二进制让本启动器与应用之间只隔一个进程。
  */
 function electronBinary() {
 	const packageDir = dirname(electronEntry());

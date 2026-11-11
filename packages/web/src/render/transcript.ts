@@ -6,176 +6,166 @@ import { renderMarkdown, type MarkdownState } from "./markdown.ts";
 
 export interface TranscriptOptions {
 	/**
-	 * A user message was right-clicked: the store entry it stands for — when one has been named for
-	 * it yet — and the pointer, where a menu should open. The menu itself belongs to the caller; the
-	 * transcript only knows which message was under the pointer.
+	 * 一条用户消息被右键：它所代表的存储条目 —— 如果已经为它指名 —— 以及指针位置，菜单应在此
+	 * 打开。菜单本身属于调用者；transcript 只知道指针下是哪条消息。
 	 */
 	onUserContext(entryId: string | undefined, x: number, y: number): void;
 	/**
-	 * The fork button under a settled assistant answer was pressed.
+	 * 一条已结束的 assistant 回答下的派生按钮被按下。
 	 *
-	 * The entry is read from the turn at press time, not at build time: a message's entry id can
-	 * arrive a frame after the turn, and the footer is built once. What a press *does* — rewind the
-	 * session so the next prompt starts another way from this answer — is the caller's; the
-	 * transcript only knows which answer was under the pointer.
+	 * 条目在按下时读取，而不是构建时：消息的条目 id 可以比回合晚一帧到达，而底部是构建一次的。
+	 * 一次按压*做什么* —— 回退会话让下一个提示从这条回答开启另一条路 —— 是调用者的事；
+	 * transcript 只知道指针下是哪条回答。
 	 */
 	onBranch(entryId: string): void;
 }
 
 /**
- * How many items one slice of a deferred draw carries.
+ * 延迟绘制的一片携带多少个 item。
  *
- * A count rather than a time budget, measured against the harness: the price of a slice is the
- * Markdown parsing inside it, and 24 items is several milliseconds at the sizes a window really
- * sees while staying far under the block a whole conversation used to cost. One very long message
- * is a slice of its own, because a slice is never split — message text is Markdown, and half a
- * message is not a thing to parse.
+ * 是计数而不是时间预算，以 harness 度量：一片的代价是它里面的 Markdown 解析，24 个 item 在窗口
+ * 实际遇到的规模上是几毫秒，同时远低于整段对话过去造成的阻塞。一条超长的消息自成一片，因为一片
+ * 从不拆开 —— 消息文本是 Markdown，半条消息不是可解析的东西。
  */
 const BATCH_ITEMS = 24;
 
 /**
- * How long one frame's batch of deferred drawing may spend.
+ * 一帧的延迟绘制批次允许花费多久。
  *
- * The drain turns the generator, and this is when it stops: a batch that ran to a slice boundary
- * is already bounded, and this bounds the case where slices are cheap enough to run several.
+ * drain 转动生成器，这是它停下的时候：跑到切片边界的批次已经有界，这里限制的是切片便宜到能连
+ * 跑几片的那种情形。
  */
 const FRAME_BUDGET_MS = 4;
 
 /**
- * How close to the bottom counts as "following it", in pixels.
+ * 距底部多近算"跟随中"，像素。
  *
- * A margin rather than an exact end: a render can land a frame's worth of content between the scroll
- * event and the reading, and a reader who was at the bottom must not stop following over that.
+ * 是余量而不是精确的终点：一次渲染可能在滚动事件与读取之间落下一帧的量，原本在底部的读者不能
+ * 因此停止跟随。
  */
 const FOLLOW_DISTANCE_PX = 80;
 
 /**
- * One turn's reasoning row.
+ * 一个回合的推理行。
  *
- * The row shares the tool card's container and head — a `<details class="tool">`, the same chevron,
- * the same quiet line (01 ④) — with 「思考」 in the name seat. The row is created closed, and the
- * reader toggles it without the view having to remember anything. Only the head and the running
- * state are patched on a render; the body's Markdown is parsed only while the row is open, so a
- * collapsed long thought costs nothing to stream.
+ * 这一行与工具卡片共享容器和头部 —— 一个 `<details class="tool">`，同样的 chevron、同样安静的
+ * 一行（01 ④）—— 名字席位上是「思考」。行以关闭状态创建，读者自行展开，视图无需记住任何东西。
+ * 渲染时只补丁头部和运行状态；正文的 Markdown 只在行打开时解析，所以折叠着的长思考流式传输时
+ * 零成本。
  */
 interface ReasoningView {
 	details: HTMLDetailsElement;
-	/** The static head text, shown once the thought has stopped arriving. */
+	/** 静态头部文本，思考停止到达后显示。 */
 	preview: HTMLElement;
-	/** The live tail the head carries while the thought is still arriving. */
+	/** 思考仍在到达时头部携带的 live 尾部。 */
 	tail: HTMLElement;
 	body: HTMLElement;
 	markdown?: MarkdownState;
 	text: string;
-	/** The tail the head last carried, so a repaint can skip work it already did. */
+	/** 头部上次携带的尾部，让一次重绘能跳过已经做过的工作。 */
 	tailText: string;
-	/** The thought the static preview was last cut from, so the collapsed line is cut only on change. */
+	/** 静态预览上次裁自的思考内容，折叠行只在变化时才裁。 */
 	previewText: string;
 	running: boolean;
 }
 
-/** One chip of the agent footer: a small icon and the number under it. */
+/** agent 底部的一个 chip：小图标和它下面的数字。 */
 interface FootChip {
 	root: HTMLElement;
 	text: HTMLElement;
-	/** The text the chip last carried, so an unchanged patch writes nothing. */
+	/** chip 上次携带的文本，没变的补丁什么都不写。 */
 	shown?: string;
 }
 
-/** A user turn's meta row: the message's time and its copy control, under the bubble's right edge. */
+/** 用户回合的 meta 行：消息的时间和它的复制控件，气泡右缘之下。 */
 interface MetaView {
-	/** The time text, hidden until the message carries a stamp. */
+	/** 时间文本，消息带时间戳之前隐藏。 */
 	time: HTMLElement;
-	/** Whether the time was last drawn visible, so a row that agrees with it writes nothing. */
+	/** 时间上次是否画为可见，与之一致的行什么都不写。 */
 	shown: boolean;
 }
 
-/** An agent turn's footer: copy, then usage / time / elapsed — one quiet row under the answer. */
+/** agent 回合的底部：复制，然后用量 / 时间 / 用时 —— 回答之下安静的一行。 */
 interface FootView {
 	root: HTMLElement;
-	/** The fork control beside copy: the way into another branch from this answer. */
+	/** 复制旁边的派生控件：从这条回答进入另一条分支的路。 */
 	fork: HTMLButtonElement;
 	usage: FootChip;
 	time: FootChip;
 	elapsed: FootChip;
-	/** Whether the row was last drawn visible, so a frame that agrees with it writes nothing. */
+	/** 这一行上次是否画为可见，与之一致的帧什么都不写。 */
 	shown?: boolean;
-	/** Whether the fork was last drawn at all, and whether it was last refused. */
+	/** 派生按钮上次是否画过，以及上次是否被拒绝。 */
 	forkShown?: boolean;
 	forkRefused?: boolean;
 }
 
-/** The user message that opened the round an item sits in — the duration's start seat. */
+/** 开启一个 item 所在回合的用户消息 —— 用时计时的起点席位。 */
 interface RoundStart {
 	id: string;
 	at?: number;
 }
 
 /**
- * The facts a message needs that are not facts about itself.
+ * 一条消息需要的、但不是关于它自身的事实。
  *
- * Which assistant closes its round, and which user message opened that round, are answered by a walk
- * over the conversation. The walk is cheap once but not per token: a delta changes the text of the
- * last message and nothing about the shape above it, so these are rebuilt only when the item list's
- * shape moves (see {@link TranscriptView.draw}) and reused for every delta in between.
+ * 哪条 assistant 收尾自己的回合、哪个用户消息开启了那个回合，都要靠一次遍历来回答。遍历便宜但
+ * 不是逐 token 都便宜：一个 delta 只改最后一条消息的文本，对上面的形状什么都不改，所以这些只在
+ * item 列表的*形状*移动时重建（见 {@link TranscriptView.draw}），其间的每个 delta 复用。
  */
 interface RoundIndex {
-	/** The ids of the messages that close their round — the ones that draw a footer. */
+	/** 收尾各自回合的消息 id —— 画出底部的那几条。 */
 	last: ReadonlySet<string>;
-	/** For each of those, the user message that opened its round. */
+	/** 它们各自的回合由哪个用户消息开启。 */
 	users: ReadonlyMap<string, RoundStart>;
-	/** The last user message of the whole conversation, which is what the run timer ticks from. */
+	/** 整个对话最后一条用户消息，正是运行计时器跳动的起点。 */
 	user?: Extract<Item, { kind: "message" }>;
 	/**
-	 * The last assistant message of the whole conversation.
+	 * 整个对话的最后一条 assistant 消息。
 	 *
-	 * It is the one answer a fork button is *not* offered on: the leaf is where the conversation
-	 * already is, and "branch from here" on it is just carrying on. Once anything follows it, the
-	 * answer becomes forkable — which is exactly the pair the user asked for (图 2：最底部那条不给，
-	 * 倒数第二条开始给).
+	 * 它是唯一不提供派生按钮的回答：叶子就是对话所在之处，在它上面"从这里分支"只是继续。一旦有
+	 * 东西跟在它后面，它就变得可派生 —— 恰好是用户要的那一对（图 2：最底部那条不给，
+	 * 倒数第二条开始给）。
 	 */
 	lastAssistant?: string;
 }
 
-/** One rendered conversation entry, plus the little state needed to patch it in place. */
+/** 一条已渲染的对话条目，加上原地修补它所需的那点状态。 */
 interface Turn {
 	section: HTMLElement;
 	body: HTMLElement;
-	/** The parsed state of the body's Markdown, so a streaming message only re-parses its tail. */
+	/** 正文的 Markdown 解析状态，让流式消息只重新解析尾部。 */
 	markdown?: MarkdownState;
 	text: string;
-	/** Whether this message closes its round at the last draw — the footer's visibility, patched on change. */
+	/** 上次绘制时本消息是否收尾其回合 —— 底部的可见性，变化时补丁。 */
 	roundLast: boolean;
-	/** Whether the section wore the streaming caret at the last draw, so class writes happen on a flip. */
+	/** 上次绘制时 section 是否戴着流式光标，类写入只发生在翻转时。 */
 	streaming: boolean;
-	/** The reasoning row, once this turn's message has any. */
+	/** 推理行，本回合的消息有推理之后。 */
 	reasoning?: ReasoningView;
-	/** The user turn's meta row, once the turn is a user's. */
+	/** 用户回合的 meta 行，回合是用户的之后。 */
 	meta?: MetaView;
-	/** The agent turn's footer, once the turn is a non-notice assistant's. */
+	/** agent 回合的底部，回合是非注释 assistant 的之后。 */
 	foot?: FootView;
 	/**
-	 * The item this turn is currently drawn from.
+	 * 本回合当前绘制所依据的 item。
 	 *
-	 * Kept on the turn rather than closed over: a snapshot can replace every item, so the entry the
-	 * context menu acts on is whatever the last render said it was.
+	 * 保存在回合上而不是闭包里：快照可以替换所有 item，所以右键菜单作用的条目是最后一次渲染
+	 * 说的那个。
 	 */
 	item: Extract<Item, { kind: "message" }>;
 }
 
 /**
- * The conversation column.
+ * 对话列。
  *
- * Rendering is a reconcile against `items` rather than a rebuild, because the transcript is the hot
- * path: a `message_update` arrives many times a second and must cost work proportional to the delta,
- * not to the conversation so far. Items are immutable and the reducer rebuilds only the ones a frame
- * changed, so each draw walks the list once with one reference comparison per item and renders only
- * the ones that are new. Everything else — placement, the round walk, pruning — is keyed to the item
- * list's *shape*, which a token landing in the last message does not move.
+ * 渲染是对 `items` 的协调而不是重建，因为 transcript 是热路径：一条 `message_update` 每秒到达
+ * 多次，成本必须正比于 delta 而不是目前为止的对话。item 不可变，reducer 只重建帧改变的那些，
+ * 所以每次绘制走一遍列表、每个 item 一次引用比较、只渲染新的那些。其余 —— 摆放、回合遍历、
+ * 修剪 —— 都以 item 列表的*形状*为键，落在最后一条消息里的 token 动不了它。
  *
- * The view owns its scroll policy: it follows the bottom while the reader is already there, and stops
- * the moment they scroll away, so reading history is never yanked back by a token. Following is a
- * write, not a measurement, and the frame that changed nothing asks for nothing (see {@link pin}).
+ * 视图拥有自己的滚动策略：读者已在底部时跟随底部，一滚开就停，所以读历史绝不会被一个 token
+ * 拽回底部。跟随是写而不是测量，什么都没变的帧什么都不请求（见 {@link pin}）。
  */
 export class TranscriptView {
 	private readonly container: HTMLElement;
@@ -183,51 +173,47 @@ export class TranscriptView {
 	private readonly turns = new Map<string, Turn>();
 	private readonly tools = new Map<string, { section: HTMLElement; source: readonly ToolCard[]; cards: Map<string, { node: HTMLElement; shape: string }> }>();
 	/**
-	 * The draw of a whole snapshot, spread over frames.
+	 * 整个快照的绘制，摊到多个帧上。
 	 *
-	 * `render` stays the immediate path and this is the other one: the transcript arriving in a
-	 * snapshot is drawn in slices, while a frame that carries a delta must land whole — a delta is
-	 * what the reader is watching being written.
+	 * `render` 保持即时路径，这是另一条：快照带来的 transcript 按片绘制，而携带 delta 的帧必须
+	 * 整体落地 —— delta 正是读者正在看着被写出来的东西。
 	 */
 	private readonly drain = new Drain(FRAME_BUDGET_MS);
 	/**
-	 * The items the screen was last drawn from, by index.
+	 * 屏幕上一次绘制所依据的 item，按下标。
 	 *
-	 * This is the delta: an entry that is the same object as last time is a turn already on screen,
-	 * because items are immutable and only the ones a frame changed are rebuilt. A deferred draw
-	 * fills it a slice at a time, which is also how an immediate frame arriving mid-draw knows what is
-	 * still missing.
+	 * 这就是 delta：与上次相同的对象是已在屏幕上的回合，因为 item 不可变、只有帧改变的才会重建。
+	 * 延迟绘制一片一片填它，这也是立即帧在绘制中途到达时知道还缺什么的方式。
 	 */
 	private drawnItems: readonly (Item | undefined)[] = [];
 	/** The round facts of the last shape, reused while the shape holds (see {@link RoundIndex}). */
 	private rounds: RoundIndex = { last: new Set(), users: new Map() };
-	/** Whether the last complete draw was streaming — both the container class and the run's end. */
+	/** 上一次完整绘制是否在流式 —— 容器类和运行的结束都靠它。 */
 	private drawnStreaming = false;
 	private welcome?: HTMLElement;
 	private sticky = true;
-	/** The frame the scroll reading is deferred to, so a burst of events costs one reading. */
+	/** 滚动读取推迟到的那个帧，让一串事件只花一次读取。 */
 	private scrollRead?: number;
-	/** The ticking line while the loop streams, and the interval that moves it. */
+	/** 循环流式时那一行跳动的时间，和移动它的 interval。 */
 	private runtime?: HTMLElement;
 	private runtimeText?: HTMLElement;
-	/** The text the ticking line last carried, so a frame inside the same second writes nothing. */
+	/** 跳动行上次携带的文本，同一秒内的帧什么都不写。 */
 	private runtimeShown = "";
 	private runtimeTimer?: number;
 	/**
-	 * The round the timer ticks from: the last user message seen while streaming, carrying the stamp
-	 * the timer needs — the same seat a {@link RoundStart} names, narrowed to the case that has one.
+	 * 计时器跳动的回合：流式时看到的最后一条用户消息，带着计时器需要的时间戳 ——
+	 * {@link RoundStart} 指名的同一席位，收窄到有它的那种情形。
 	 */
 	private runtimeFrom?: { id: string; at: number };
-	/** Whether the previous draw was streaming — the flip back is the run's end. */
+	/** 上一次绘制是否在流式 —— 翻回去就是运行的结束。 */
 	private wasStreaming = false;
-	/** The durations a watched run took, keyed by the round's user message. */
+	/** 被观看运行花的时长，以回合的用户消息为键。 */
 	private readonly observed = new Map<string, { lastId: string; ms: number }>();
 
 	constructor(container: HTMLElement, options: TranscriptOptions) {
 		this.container = container;
 		this.options = options;
-		// The message menu is the caller's; this side only decides *which* message was under the
-		// pointer, and hands the caller the entry that message stands for.
+		// 消息菜单是调用者的；这一侧只决定指针下*是*哪条消息，把那条消息代表的条目交给调用者。
 		container.addEventListener("contextmenu", (event) => {
 			if (!(event.target instanceof Element)) return;
 			const turn = event.target.closest(".turn[data-role=\"user\"]");
@@ -237,20 +223,18 @@ export class TranscriptView {
 		});
 	}
 
-	/** Follow the bottom unless the reader has scrolled away from it. */
+	/** 除非读者已从底部滚开，否则跟随底部。 */
 	trackScroll(): void {
 		this.setSticky(this.sticky);
 		this.container.addEventListener("scroll", () => this.followFromScroll());
 	}
 
 	/**
-	 * Read the scroll position on the next frame, and decide whether to keep following.
+	 * 下一帧读滚动位置，并决定是否继续跟随。
 	 *
-	 * The reading is a layout read — `scrollHeight` forces the layout the frame that just grew the
-	 * answer left dirty — and {@link pin} is a layout write. Doing both in one turn of the event loop
-	 * is the forced reflow the reader sees as a stutter, so the read is moved to the frame, where it
-	 * also coalesces however many scroll events landed (a scroll is not a frame). Only the last
-	 * reading can decide anything anyway.
+	 * 读取是一次布局读 —— `scrollHeight` 会强制刚才长出答案的那个帧留下的脏布局 —— 而 {@link pin}
+	 * 是一次布局写。在事件循环的同一轮里做两件事，就是读者看到的强制重排卡顿，所以读取移到帧上，
+	 * 顺便合并落下的所有滚动事件（滚动不是帧）。反正只有最后一次读取能决定什么。
 	 */
 	private followFromScroll(): void {
 		if (this.scrollRead !== undefined) return;
@@ -262,12 +246,11 @@ export class TranscriptView {
 	}
 
 	/**
-	 * Set whether the view follows the bottom, and wear the class that makes following cheap.
+	 * 设置视图是否跟随底部，并戴上让跟随便宜的类。
 	 *
-	 * `overflow-anchor: none` while pinned is the browser's help: anchoring otherwise holds the
-	 * reader's place when content above the viewport changes, while a pinned view is appending below
-	 * it every frame — the two policies fight and the reader sees a jump. Once they scroll away,
-	 * anchoring is exactly right, so the class comes off with `sticky`.
+	 * 钉住时 `overflow-anchor: none` 是浏览器帮忙：锚定会在视口上方的内容变化时保住读者的位置，
+	 * 而钉住的视图每帧都在下方追加 —— 两种策略打架，读者看到跳动。滚开之后锚定恰好是它设计出来
+	 * 帮的忙，所以类随 `sticky` 摘下。
 	 */
 	private setSticky(sticky: boolean): void {
 		this.sticky = sticky;
@@ -275,12 +258,11 @@ export class TranscriptView {
 	}
 
 	/**
-	 * Draw `items`, whole, in this frame.
+	 * 本帧完整画出 `items`。
 	 *
-	 * The path for everything the window reacts to as it happens: a `message_update`, a tool event, a
-	 * snapshot small enough to draw in one go. A whole conversation drawn this way is what used to
-	 * freeze the window, so {@link renderDeferred} exists for it — and this method is where that
-	 * deferral ends: an outstanding draw is cancelled, and the pass below completes it.
+	 * 窗口对即时发生的事做出反应所走的路径：一条 `message_update`、一个工具事件、小到一次画完的
+	 * 快照。整段对话这样画正是过去冻结窗口的原因，所以 {@link renderDeferred} 为它而生 —— 而本
+	 * 方法是延迟的终点：未完成的绘制被取消，下面的趟完成它。
 	 */
 	render(items: readonly Item[], streaming: boolean): void {
 		this.drain.cancel();
@@ -288,41 +270,35 @@ export class TranscriptView {
 	}
 
 	/**
-	 * Draw a whole snapshot in bounded slices, the first one in this turn.
+	 * 按有界分片画整个快照，第一片在本轮就落。
 	 *
-	 * The batching is the point: `render` on a session with a long history is one block of Markdown
-	 * parsing and node building, and while it runs the browser does not repaint — not the transcript
-	 * arriving, not the notice saying it is arriving. Here the first slice lands with the click, the
-	 * frame is given back so the browser can paint it, and the rest follows one batch per frame.
+	 * 分批正是要点：对一份长历史的会话调用 `render`，是一整块 Markdown 解析和节点构建，期间浏览器
+	 * 不重绘 —— transcript 没到、说它要来的提示也没有。这里第一片随点击落地，帧被还回去让浏览器
+	 * 绘制它，其余每帧一批跟进。
 	 *
-	 * The first slice is deliberately a fixed count rather than "everything up to the fold": a slice
-	 * that ran to the end of a short conversation would behave exactly like the immediate path, and
-	 * the one case this method exists for is the long conversation, where a fixed count is the only
-	 * bound that means anything. Its cost is therefore the price of the first paint, and it is the
-	 * number the harness reports.
+	 * 第一片刻意是固定数量而不是"到折叠处为止"：跑完整段短对话的片与即时路径毫无区别，而本方法
+	 * 存在的理由恰恰是长对话，固定数量是唯一有意义的界。它的成本因此是首帧的价格，也是 harness
+	 * 报告的那个数字。
 	 */
 	renderDeferred(items: readonly Item[], streaming: boolean): void {
 		this.drain.cancel();
 		this.setSticky(true);
-		// A snapshot is a whole conversation arriving at once, so the delta table starts empty: a
-		// streaming frame landing between two slices must see the undrawn half as undrawn and finish
-		// that draw itself, which is the documented relationship between the two paths.
+		// 快照是一整段对话同时到达，所以 delta 表从空开始：落在两片之间的流式帧必须把未画的半截
+		// 看作未画并自己完成那次绘制，这是两条路径之间的成文关系。
 		this.drawnItems = [];
 		const rounds = roundIndex(items);
-		// Published here rather than left to the pass that closes the draw: by then every item is on
-		// screen and the shape reads as unchanged, so that pass skips the round walk — and a delta
-		// arriving afterwards trusts this index. An empty one would cost the answer its round: no
-		// footer when the run settles, and a ticking line with no start seat.
+		// 在这里发布而不是留给收尾绘制的那趟：到那时每个 item 都已上屏、形状读起来没有变化，那一趟
+		// 会跳过回合遍历 —— 而之后到达的 delta 信任这个索引。空索引会让答案丢掉它的回合：运行结算
+		// 时没有底部，跳动行没有起点席位。
 		this.rounds = rounds;
 		const wanted = idsOf(items);
-		// The walk starts here rather than at a `yield`: a generator that queued the first slice for
-		// the next frame would leave the pane showing the previous session's transcript for one whole
-		// frame after the click, which is the thing being fixed.
+		// 遍历从这里开始而不是从一个 `yield`：把第一片排到下一帧的生成器，会让窗格在点击后整整一帧
+		// 显示上一个会话的 transcript，这正是要修的东西。
 		this.batch(items, streaming, rounds, wanted, 0, Math.min(items.length, BATCH_ITEMS));
 		this.drain.start(() => this.producer(items, streaming, rounds, wanted));
 	}
 
-	/** The remaining slices of a deferred draw, one `yield` per frame. */
+	/** 延迟绘制的剩余分片，每个 `yield` 一帧。 */
 	private *producer(
 		items: readonly Item[],
 		streaming: boolean,
@@ -334,19 +310,17 @@ export class TranscriptView {
 			this.batch(items, streaming, rounds, wanted, index, Math.min(items.length, index + BATCH_ITEMS));
 			yield;
 		}
-		// Everything is on screen, so the last word goes to the same complete pass the immediate path
-		// runs — which is also what retires anything a newer snapshot dropped.
+		// 一切都已上屏，最后一句交给即时路径运行的同一个完整趟 —— 它也是退掉新快照丢弃的东西的
+		// 地方。
 		this.draw(items, streaming);
 	}
 
 	/**
-	 * One slice of a deferred draw: a contiguous run of `items`, in `items` order.
+	 * 延迟绘制的一片：`items` 中连续的一段，按 `items` 顺序。
 	 *
-	 * A slice never reconciles against only itself: the items before `from` are still on screen, and
-	 * `wanted` is the whole conversation, so a turn the new snapshot no longer carries is dropped by
-	 * the first slice rather than lingering until the last one. Placement only walks up to `to` for
-	 * the same reason — a slice is appended after what is already in order, and the complete pass at
-	 * the end of the draw is what handles the one case that is not, a summary that belongs at the head.
+	 * 一片从不只和自己协调：`from` 之前的 item 还在屏幕上，`wanted` 是整段对话，所以新快照不再
+	 * 携带的回合由第一片丢弃，而不是拖到最后一片。摆放同样只走到 `to`，理由相同 —— 一片只会在
+	 * 已有序的内容之后追加，绘制结束时那趟完整绘制才处理唯一的例外：属于头部的摘要。
 	 */
 	private batch(
 		items: readonly Item[],
@@ -372,21 +346,17 @@ export class TranscriptView {
 	}
 
 	/**
-	 * Draw everything this frame knows about, and leave the screen clean.
+	 * 画出本帧知道的一切，让屏幕保持干净。
 	 *
-	 * The immediate path and the pass that ends a deferred one are the same code, because they differ
-	 * only in how much of the work is already on screen. The delta loop is the whole cost model: items
-	 * are immutable and the reducer rebuilds only the ones a frame changed, so an index whose item is
-	 * the same object as last draw is a turn already on screen, and the loop skips it with one `===`.
-	 * A token landing in the streaming message therefore costs that one message's draw plus one
-	 * reference comparison per item — nothing above the tail is touched.
+	 * 即时路径与结束延迟绘制的那趟是同一份代码，因为它们只在已有多少工作在屏幕上的差别。delta
+	 * 循环就是全部的成本模型：item 不可变、reducer 只重建帧改变的那些，所以下标处与上次相同的
+	 * 对象是已在屏幕上的回合，循环以一次 `===` 跳过。落在流式消息里的 token 因此只花那一条消息的
+	 * 绘制加每个 item 一次引用比较 —— 尾部之上什么都不碰。
 	 *
-	 * Everything proportional to the list is keyed to its *shape* — its length and the identity of its
-	 * last item. Appending a message, folding in a note, a retry's note replacing an abandoned answer,
-	 * a compaction summary landing at the head: those move the shape, and only those pay for the round
-	 * walk, the prune and the placement pass. A reconnect that re-baselines the same conversation keeps
-	 * the shape — every item is a new object, so the delta loop redraws them all, but neither their
-	 * order nor the round facts above them moved.
+	 * 一切正比于列表的东西都以它的*形状*为键 —— 长度和最后一个 item 的身份。追加消息、折入注释、
+	 * 重试的注释替换被放弃的回答、压缩摘要落在头部：这些移动形状，也只有这些为回合遍历、修剪和
+	 * 摆放趟付费。重新基线化同一对话的重连保持形状 —— 每个 item 都是新对象，delta 循环全部重画，
+	 * 但它们的顺序和上面的回合事实都没动。
 	 */
 	private draw(items: readonly Item[], streaming: boolean): void {
 		const previous = this.drawnItems;
@@ -396,14 +366,12 @@ export class TranscriptView {
 		this.drawnItems = items;
 		if (structural) this.rounds = roundIndex(items);
 
-		// The prune runs against the whole conversation, not against the drawn slices: a deferred
-		// draw abandoned half way must not leave the previous session's turns behind for a slice to
-		// spare.
+		// 修剪对整段对话进行，而不是对已画的分片：中途放弃的延迟绘制绝不能把上一个会话的回合留给
+		// 分片来收拾。
 		if (structural) this.reconcile(idsOf(items));
 
 		this.setWelcome(items.length === 0 && !streaming);
-		// Before the delta loop, because the loop's footer patch is one of the readers of the
-		// observation recorded when the run ends.
+		// 在 delta 循环之前，因为循环的底部补丁是运行结束时记录的观察的读者之一。
 		this.setRuntime(streaming, this.rounds, items);
 		if (streaming !== wasStreaming) this.container.classList.toggle("streaming", streaming);
 
@@ -415,32 +383,28 @@ export class TranscriptView {
 			touched = true;
 		}
 
-		// The rows whose visibility is not a fact about their own item are re-read on the frames that
-		// can move them: a new assistant message takes the footer from the one before it, and the
-		// settled duration only lands when the run ends. Never per token.
+		// 可见性不是自身 item 的事实的行，在能移动它们的帧上重读：新的 assistant 消息会从前一条
+		// 手里拿走底部，结算的时长只在运行结束时落地。绝不逐 token。
 		if (structural || streaming !== wasStreaming) this.patchFeet();
 
-		// A new item does not always arrive at the end: a compaction summary is drawn at the head of
-		// the conversation, and a reconnect that re-baselines the session replays every item in its
-		// order. So once everything on screen has been drawn, the nodes are placed in `items` order —
-		// the same "append in order, move only what moved" pass the sidebar runs. Without it a summary
-		// that should sit at the top was appended last and read as the newest thing said.
+		// 新的 item 并不总在末尾到达：压缩摘要画在对话头部，重新基线化的重连按自己的顺序重放每个
+		// item。所以屏幕上的一切画完之后，节点按 `items` 顺序摆放 —— 与侧栏相同的"按序追加、只动
+		// 动过的"趟。没有它，应该坐在顶部的摘要被追加在最后，读起来像最新说的一句话。
 		if (structural) this.placeAll(items, items.length);
 		if (this.sticky && touched) this.pin();
 	}
 
-	/** Draw one item: a message's turn, or a tool group's cards. */
+	/** 画一个 item：消息的回合，或工具组的卡片。 */
 	private renderItem(item: Item, rounds: RoundIndex): void {
 		if (item.kind === "message") this.renderMessage(item, rounds);
 		else this.renderTools(item);
 	}
 
 	/**
-	 * Put the first `to` items' nodes in `items` order.
+	 * 把前 `to` 个 item 的节点按 `items` 顺序摆放。
 	 *
-	 * `to` is the whole conversation for a complete pass, and the end of the slice for one slice of a
-	 * deferred draw — a slice only ever appends after what is already in order, so walking up to its
-	 * own end is enough, and the complete pass is what settles the order for good.
+	 * 完整趟时 `to` 是整段对话，延迟绘制的一片时是片的末尾 —— 一片只会在已有序的内容之后追加，
+	// 所以走到自己的末尾就够，完整趟才是把顺序一锤定音的地方。
 	 */
 	private placeAll(items: readonly Item[], to: number): void {
 		let previous: HTMLElement | undefined;
@@ -453,7 +417,7 @@ export class TranscriptView {
 		}
 	}
 
-	/** Drop what the conversation no longer carries, from the tables and the DOM both. */
+	/** 丢掉对话不再携带的东西，从两张表和 DOM 两处。 */
 	private reconcile(wanted: ReadonlySet<string>): void {
 		for (const [id, turn] of [...this.turns]) {
 			if (wanted.has(id)) continue;
@@ -468,32 +432,30 @@ export class TranscriptView {
 	}
 
 	/**
-	 * Put the view at the bottom.
+	 * 把视图放到底部。
 	 *
-	 * A write, not a measurement: a `scrollTop` past the end is clamped by the browser to the range
-	 * it has, so following costs no `scrollHeight` read and forces no layout inside the frame that
-	 * just wrote the DOM. Reading `scrollHeight` here was one synchronous reflow per token, which is
-	 * exactly the kind of frame the reader sees as a stutter.
+	 * 是写不是测量：超过末尾的 `scrollTop` 会被浏览器夹到它有的范围内，所以跟随不花 `scrollHeight`
+	 * 的读、不在刚写了 DOM 的帧里强制布局。在这里读 `scrollHeight` 曾是每个 token 一次同步重排，
+	 * 恰是读者看作卡顿的那种帧。
 	 *
-	 * Nothing here decides *whether* to follow — that is `sticky`, set by the scroll listener and by a
-	 * turn arriving, and only the frame that actually changed the content calls this.
+	 * 这里任何东西都不决定*是否*跟随 —— 那是 `sticky`，由滚动监听和回合到达设置，只有真正改变了
+	 * 内容的帧才调用它。
 	 */
 	private pin(): void {
 		this.container.scrollTop = Number.MAX_SAFE_INTEGER;
 	}
 
 	/**
-	 * Run one batch of an outstanding deferred draw, and say whether more is left.
+	 * 跑一批未完成的延迟绘制，并回答是否还有剩余。
 	 *
-	 * The frame is the drain's to schedule, and this is the seam for a caller that has none: the
-	 * harness and the smoke drive the queue a batch at a time to price the first paint and the worst
-	 * slice. Production never calls it — a window's frames are the browser's to hand out.
+	 * 帧由 drain 调度，这是给没有帧的调用者的接缝：harness 和冒烟测试逐批驱动队列，为首帧和最差
+	 * 分片定价。生产环境从不调用 —— 窗口的帧由浏览器分发。
 	 */
 	stepPending(): boolean {
 		return this.drain.step();
 	}
 
-	/** Put a node after `previous`, doing nothing when it is already there. */
+	/** 把节点放到 `previous` 之后，已在那个位置时什么都不做。 */
 	private place(parent: HTMLElement, node: HTMLElement, previous: HTMLElement | undefined): void {
 		const wanted = previous === undefined ? parent.firstChild : previous.nextSibling;
 		if (node === wanted) return;
@@ -505,22 +467,20 @@ export class TranscriptView {
 		this.pin();
 	}
 
-	/** Whether the reader is at the bottom, which decides if a redraw should chase it. */
+	/** 读者是否在底部，它决定重画是否追下去。 */
 	following(): boolean {
 		return this.sticky;
 	}
 
 	/**
-	 * Draw or patch one message.
+	 * 画或补丁一条消息。
 	 *
-	 * The turn is looked up in this view's own table, which is exactly the question "is this id on
-	 * screen": a turn that has left it is a turn to build, whether because the conversation is new to
-	 * this view or because a deferred draw has not reached it yet. The table and the prune agree on
-	 * that answer because they are the same table.
+	 * 回合在本视图自己的表里查，那正是"这个 id 在屏幕上吗"的问题：离开表的回合是要构建的回合，
+	 * 无论因为对话对这个视图是新的，还是延迟绘制还没走到它。表和修剪对这个问题给出相同答案，
+	 * 因为它们是同一张表。
 	 *
-	 * Only items the frame actually changed are handed here — the delta loop in {@link draw} filters
-	 * them — so this side can spend its writes on what moved: the streaming caret, the entry id, the
-	 * meta row, the footer.
+	 * 只有帧真正改变过的 item 才被交到这里 —— {@link draw} 的 delta 循环过滤了它们 —— 所以这一侧
+	 * 可以把写入花在动了的东西上：流式光标、条目 id、meta 行、底部。
 	 */
 	private renderMessage(item: Extract<Item, { kind: "message" }>, rounds: RoundIndex): void {
 		const known = this.turns.get(item.id);
@@ -530,16 +490,15 @@ export class TranscriptView {
 			this.container.append(turn.section);
 			this.setSticky(true);
 		} else if (known.item === item) {
-			// A repeated slice of a deferred draw can hand over the very item already on screen; a
-			// complete pass over an unchanged snapshot does the same. Nothing to say, nothing to write.
+			// 延迟绘制的重复片可能交来屏幕上已有的同一个 item；对未变快照的完整趟同样如此。
+			// 没话可说，什么都不写。
 			return;
 		}
 		turn.item = item;
 		turn.roundLast = rounds.last.has(item.id);
-		// Whether *this* message is still arriving, which is what the stylesheet's streaming caret
-		// keys on: the caret belongs to the message being written, not to whatever turn happens to
-		// sit last while the run is in flight (16) — between an answer's end and the next one's
-		// first delta, the last turn is often the user's own bubble.
+		// *本*消息是否仍在到达，这正是样式表流式光标的键：光标属于正在写的那条消息，不属于运行
+		// 进行中碰巧排最后的任何回合（16）—— 一条回答的结束与下一条的首个 delta 之间，最后的回合
+		// 往往是用户自己的气泡。
 		if (turn.streaming !== item.streaming) {
 			turn.streaming = item.streaming;
 			turn.section.classList.toggle("streaming", item.streaming);
@@ -548,7 +507,7 @@ export class TranscriptView {
 		this.patchMeta(turn);
 		this.patchFoot(turn, turn.roundLast, rounds.users.get(item.id), rounds.lastAssistant === item.id);
 
-		// A notice is plain text and never streams, so it is written once and left alone.
+		// 注释是纯文本且从不流式，所以写一次就不管了。
 		if (item.notice) {
 			this.clearReasoning(turn);
 			if (turn.text !== item.text) {
@@ -558,8 +517,8 @@ export class TranscriptView {
 			return;
 		}
 
-		// Drawn before the body, and before the early return below: a message that is only thinking so
-		// far has no text to change, and its row still has to appear and to keep up as it streams.
+		// 在正文之前、也在下面的提前返回之前画：只有思考还没有文本的消息没有东西可改，但它的行
+		// 仍然要出现并跟上流式。
 		this.renderReasoning(turn, item);
 
 		if (item.text === turn.text) return;
@@ -568,12 +527,10 @@ export class TranscriptView {
 	}
 
 	/**
-	 * Draw or patch the reasoning row that precedes a message's text.
+	 * 画或补丁消息文本之前的推理行。
 	 *
-	 * A message with no reasoning has no row; a message that gains or loses one between renders gets
-	 * its row added or dropped here. The head carries the thought while collapsed — the end of it
-	 * while it is still arriving, frozen on its first line once it has stopped — and the running
-	 * state is the class that swaps one for the other.
+	 * 没有推理的消息没有行；渲染之间获得或失去推理的消息在这里加行或删行。折叠时头部携带思考
+	 * —— 到达中是它的结尾，停止后冻结在第一行 —— 运行状态就是两者互换的类。
 	 */
 	private renderReasoning(turn: Turn, item: Extract<Item, { kind: "message" }>): void {
 		const thinking = item.thinking;
@@ -594,17 +551,16 @@ export class TranscriptView {
 		}
 		if (thinking.running) patchTail(view, thinking.text);
 		else if (view.previewText !== thinking.text) {
-			// The preview is the first line of the whole thought, so cutting it walks the text. It is
-			// cut only when the thought moved, which for a settled row is never again.
+			// 预览是整段思考的第一行，裁它要走文本。只在思考移动时才裁，对已结算的行就是永远不再。
 			view.previewText = thinking.text;
 			const preview = firstLineOf(thinking.text);
 			if (view.preview.textContent !== preview) view.preview.textContent = preview;
 		}
-		// A collapsed row shows only the head, so its Markdown is left unparsed until it is opened.
+		// 折叠的行只显示头部，所以它的 Markdown 留到打开时才解析。
 		if (view.details.open) this.paintReasoning(turn);
 	}
 
-	/** Build a reasoning row, closed, and place it between the role line and the message body. */
+	/** 构建一条推理行，关闭状态，放在角色行与消息正文之间。 */
 	private createReasoning(turn: Turn): ReasoningView {
 		const details = element("details", "tool reasoning");
 		const summary = element("summary");
@@ -617,7 +573,7 @@ export class TranscriptView {
 		const body = element("div", "reasoning-body");
 		summary.append(chevron, element("span", "tool-name", "思考"), preview, marquee);
 		details.append(summary, body);
-		// The body is parsed on the way open, which is the first moment it is worth rendering.
+		// 正文在打开的路上解析，那是它值得渲染的第一时刻。
 		details.addEventListener("toggle", () => {
 			if (details.open) this.paintReasoning(turn);
 		});
@@ -634,7 +590,7 @@ export class TranscriptView {
 		};
 	}
 
-	/** Render the reasoning body's Markdown from the turn's current item. */
+	/** 从回合当前的 item 渲染推理正文的 Markdown。 */
 	private paintReasoning(turn: Turn): void {
 		const view = turn.reasoning;
 		const thinking = turn.item.thinking;
@@ -651,30 +607,27 @@ export class TranscriptView {
 	}
 
 	/**
-	 * One turn.
+	 * 一个回合。
 	 *
-	 * There is no role line and no per-turn marker — who is speaking is carried by the forms
-	 * themselves: a user message is a bubble against the right margin with a meta row under it
-	 * (time + copy, 06 ⑤), the agent's work runs the full width of the column, and the agent's
-	 * answer closes its round with a footer of its own (06 ⑥).
+	 * 没有角色行、没有逐回合的标记 —— 谁在说话由形式本身携带：用户消息是贴着右边距的气泡、下面
+	 * 带 meta 行（时间 + 复制，06 ⑤），agent 的工作占满列宽，agent 的回答以自己的底部收尾回合
+	 * （06 ⑥）。
 	 *
-	 * The rows are built here once and patched per frame, because the reconcile places one node per
-	 * item; anything inside the turn is free to appear and disappear without the transcript's
-	 * placement knowing.
+	 * 行在这里构建一次、逐帧补丁，因为协调给每个 item 摆放一个节点；回合内部的任何东西都可以
+	 * 自由出现消失，transcript 的摆放不需要知道。
 	 */
 	private createTurn(item: Extract<Item, { kind: "message" }>): Turn {
 		const section = element("section", `turn ${item.role}${item.notice ? " notice" : ""}`);
 		const body = element("div", "turn-body");
 		const turn: Turn = { section, body, text: "", roundLast: false, streaming: false, item };
 
-		// A user message is right-clickable: the menu's items are the caller's, and the entry it acts
-		// on is patched in per frame by {@link applyEntry}.
+		// 用户消息可以右键：菜单的项是调用者的，它作用的条目由 {@link applyEntry} 逐帧补上。
 		if (item.role === "user") {
 			section.dataset.role = "user";
 			const time = element("span", "turn-time");
 			time.hidden = true;
 			const meta = element("div", "turn-meta");
-			// The text is read at click time: the bubble can still be streaming when the row is built.
+			// 文本在点击时读取：行构建时气泡可能仍在流式。
 			meta.append(time, copyButton(() => turn.item.text));
 			section.append(body, meta);
 			turn.meta = { time, shown: false };
@@ -688,8 +641,8 @@ export class TranscriptView {
 				"aria-label": "从这条回答开始分支",
 			});
 			fork.append(icon("fork"));
-			// The entry is read at press time: an assistant message's id lands a frame after the turn
-			// is built, and the footer is the one node that lives across those frames.
+			// 条目在按下时读取：assistant 消息的 id 比回合的构建晚一帧落地，底部是唯一跨过这些帧
+			// 存活的节点。
 			fork.addEventListener("click", () => {
 				const entryId = turn.item.forkEntryId ?? undefined;
 				if (entryId !== undefined) this.options.onBranch(entryId);
@@ -706,11 +659,11 @@ export class TranscriptView {
 	}
 
 	/**
-	 * Keep a user turn's entry id current on its section.
+	 * 让用户回合 section 上的条目 id 保持最新。
 	 *
-	 * Everything here can arrive after the section was built: a user message is written to the store
-	 * before the loop echoes it, so its entry id lands a frame later. The id rides on the section's
-	 * dataset because the context menu reads it at right-click time, not at build time.
+	 * 这里的每一样都可能晚于 section 的构建到达：用户消息在循环回显它之前就写进存储，所以它的
+	 * 条目 id 晚一帧落地。id 挂在 section 的 dataset 上，因为右键菜单在右键时刻读它，而不是构建
+	 * 时刻。
 	 */
 	private applyEntry(turn: Turn): void {
 		if (turn.section.dataset.role !== "user") return;
@@ -723,7 +676,7 @@ export class TranscriptView {
 		}
 	}
 
-	/** Draw the user meta row's time; a message without a stamp shows none. */
+	/** 画用户 meta 行的时间；没有时间戳的消息不显示。 */
 	private patchMeta(turn: Turn): void {
 		const meta = turn.meta;
 		if (meta === undefined) return;
@@ -739,17 +692,15 @@ export class TranscriptView {
 	}
 
 	/**
-	 * Draw the agent footer, or hide it.
+	 * 画 agent 底部，或藏起它。
 	 *
-	 * The footer belongs to the answer that closed its round — the last assistant message before the
-	 * next user prompt — and only once that answer has stopped arriving: while it streams, the run's
-	 * own line under the transcript is the elapsed time's seat. A notice is not an answer, and a
-	 * message with no text has nothing to copy, so neither draws a footer.
+	 * 底部属于收尾回合的回答 —— 下一条用户提示之前的最后一条 assistant 消息 —— 且只在它停止到达
+	 * 之后：流式期间，transcript 下面运行自己的那一行才是用时读数的席位。注释不是回答，没有文本
+	 * 的消息没有东西可复制，所以两者都不画底部。
 	 *
-	 * The fork sits beside copy on every footer but the conversation's last answer: the leaf is where
-	 * the conversation already continues, so a branch from it would be the ordinary next prompt. It
-	 * is refused while a run is in flight for the same reason the user menu hides its own branch
-	 * item: moving the leaf under a run that is writing to it is the one thing a branch must wait out.
+	 * 派生按钮在除对话最后一条回答之外的每个底部都坐在复制旁边：叶子就是对话继续的地方，从它
+	 * 分支就是普通的下一条提示。运行进行中它被拒绝，理由与用户菜单藏起自己的分支项相同：移动
+	 * 正在被运行写入的叶子，是分支唯一要等过去的事。
 	 */
 	private patchFoot(turn: Turn, roundLast: boolean, roundUser: RoundStart | undefined, isLastAnswer: boolean): void {
 		const foot = turn.foot;
@@ -777,10 +728,9 @@ export class TranscriptView {
 		setChip(foot.usage, usage === undefined ? "" : `用量 ${shortTokens(usage)} tok`);
 		setChip(foot.time, item.timestamp === undefined ? "" : formatClockTime(item.timestamp));
 
-		// The round's duration. A run this window watched end is the authority — the answer's own
-		// stamp is its request's start, so the persisted stamps alone read only up to the final
-		// request, and the observed end is what makes the number the timer ticked into agree with
-		// the one the footer freezes. Without an observation, the stamps are the fallback.
+		// 回合的用时。本窗口看过结束的运行是权威 —— 回答自己的时间戳是它请求的起点，只有持久化的
+		// 时间戳就只能读到最后一次请求为止，而观察到的结束正是让计时器跳出来的数字与底部冻结的
+		// 数字一致的东西。没有观察时，时间戳是兜底。
 		let elapsedMs: number | undefined;
 		if (roundUser?.at !== undefined && item.timestamp !== undefined) {
 			const observed = this.observed.get(roundUser.id);
@@ -794,15 +744,14 @@ export class TranscriptView {
 	}
 
 	/**
-	 * Re-read the footers on the frames where the round facts can move.
+	 * 在回合事实可能移动的帧上重读底部。
 	 *
-	 * A footer's visibility is not a fact about its own item: a later assistant message opening in the
-	 * same round takes that seat from the answer before it, so the earlier turn has to be told even
-	 * though its own item is untouched. The same applies to the settled duration, which is recorded
-	 * only when the run ends — the answer's own stamp alone reads up to its final request.
+	 * 底部的可见性不是关于自己 item 的事实：同一回合里更晚打开的 assistant 消息会从之前的回答手里
+	 * 拿走那个席位，所以它自己的 item 未动的更早回合也必须被告知。结算的时长同理，它只在运行结束
+	 * 时记录 —— 回答自己的时间戳单独只能读到它的最后一次请求。
 	 *
-	 * Called on a shape change or a streaming flip, never per token; within it, a turn that lost the
-	 * round's last seat and gained nothing else costs one Set lookup and one comparison.
+	 * 在形状变化或流式翻转时调用，绝不逐 token；其内，丢了回合收尾席位、别的什么都没得的回合，
+	 * 花一次 Set 查找加一次比较。
 	 */
 	private patchFeet(): void {
 		for (const turn of this.turns.values()) {
@@ -810,8 +759,8 @@ export class TranscriptView {
 			const last = this.rounds.last.has(turn.item.id);
 			const moved = turn.roundLast !== last;
 			turn.roundLast = last;
-			// A turn that still closes its round is re-read as well: the settled duration lands on a
-			// frame that changes no item at all, and this is the only pass that can hand it over.
+			// 仍然收尾回合的回合也被重读：结算的时长落在一个什么都不改的帧上，这是唯一能交付它的
+			// 趟。
 			if (moved || last) {
 				this.patchFoot(turn, last, this.rounds.users.get(turn.item.id), this.rounds.lastAssistant === turn.item.id);
 			}
@@ -819,22 +768,18 @@ export class TranscriptView {
 	}
 
 	/**
-	 * The run's ticking line, and the moment a watched run ends.
+	 * 运行的跳动行，以及一次被观看运行的结束时刻。
 	 *
-	 * While the loop streams, one plain line under the last item reads `用时 mm:ss`, ticking from the
-	 * round's user message — the same seat the settled footer reads, so the timer and the number it
-	 * freezes into are one clock (06). The tick is a local interval writing one text node: no event
-	 * exists for "a second passed", and inventing one would put a display concern on the wire.
+	 * 循环流式时，最后一个 item 下面的一条朴素行显示 `用时 mm:ss`，从回合的用户消息起跳 —— 与
+	 * 结算底部读的是同一个席位，于是计时器和它冻结成的数字是同一只钟（06）。跳动是一个写一个
+	 * 文本节点的本地 interval：不存在"过了一秒"的事件，发明一个就是把显示关心放上 wire。
 	 *
-	 * The node is built once per run and only moved when it is not already the last thing in the
-	 * column: appending it every frame re-parented the line on every token, which is a DOM write the
-	 * reader never saw. The text is written only when the second it names moved, for the same reason.
+	 * 节点每次运行构建一次，只在它不是列里最后一个东西时移动：每帧都追加它会在每个 token 上重新
+	 * 挂载这一行，是读者从没见过的 DOM 写。文本只在它指名的秒变了时写，理由相同。
 	 *
-	 * When the streaming flips back, the elapsed is recorded against the round — the one observation
-	 * the footer cannot derive from the transcript, since the answer's own stamp is its request's
-	 * start. The recording is keyed to the round's user message and the answer's id both, so a stale
-	 * observation from a previous run of the same round — a branch taken again — reads as absent and
-	 * the stamps answer instead.
+	 * 流式翻回去时，用时被记到回合上 —— 这是底部无法从 transcript 推导的唯一观察，因为回答自己的
+	 * 时间戳是它请求的起点。记录同时以回合的用户消息和回答的 id 为键，所以同一回合上一次运行的
+	 * 过期观察 —— 分支被再次走过 —— 读作缺席，时间戳作答。
 	 */
 	private setRuntime(streaming: boolean, rounds: RoundIndex, items: readonly Item[]): void {
 		if (!streaming) {
@@ -868,13 +813,13 @@ export class TranscriptView {
 			this.runtimeShown = "";
 			this.runtimeTimer = window.setInterval(() => this.tickRuntime(), 1000);
 		}
-		// The line sits under whatever the conversation currently ends with, and the placement pass
-		// puts newly drawn items above it; only a line that is not already there is moved.
+		// 这一行坐在对话当前结束的东西之下，摆放趟把新画的 item 放到它上面；只有不在那个位置的
+		// 行才被移动。
 		if (this.container.lastChild !== this.runtime) this.container.append(this.runtime);
 		this.tickRuntime();
 	}
 
-	/** Write the ticking line from the round's start seat, and only when the second it names moved. */
+	/** 从回合的起点席位写跳动行，且只在它指名的秒变了时。 */
 	private tickRuntime(): void {
 		const from = this.runtimeFrom;
 		if (this.runtimeText === undefined || from === undefined) return;
@@ -885,20 +830,18 @@ export class TranscriptView {
 	}
 
 	/**
-	 * One tool group, with only the cards that changed rebuilt.
+	 * 一个工具组，只重建变化了的卡片。
 	 *
-	 * Cards of a group update as the tool runs — its output grows, then it settles — and a group can
-	 * hold many of them. A card's reshape key is its run state, output length, and whether it brought
-	 * a diff back; as long as the key holds, the card's node is left alone, which is what keeps a
-	 * single growing output from rebuilding the whole group (and the `<details>` the reader opened).
+	 * 组内的卡片随工具运行而更新 —— 输出增长、然后结算 —— 一组可以有很多张。卡片的 reshape 键是
+	 * 它的运行状态、输出长度、是否带回了 diff；键不变时卡片的节点就不动，这让一个正在增长的输出
+	 * 不会重建整个组（以及读者打开的那个 `<details>`）。
 	 */
 	private renderTools(item: Extract<Item, { kind: "tools" }>): void {
 		const { id, cards } = item;
 		let group = this.tools.get(id);
 		if (group !== undefined) {
-			// Same shortcut as the message path: the reducer rebuilds a group's item only when one of
-			// its cards changed, so the same array back means nothing here moved either. A long run
-			// with many finished groups then costs each of them one `===` per frame.
+			// 与消息路径同样的捷径：reducer 只在某张卡片变化时才重建组的 item，所以拿回同一个数组
+			// 就意味着这里什么都没动。一次有很多已完成组的长运行，每组每帧只花一次 `===`。
 			if (group.source === cards) return;
 		} else {
 			const section = element("section", "tool-group");
@@ -915,7 +858,7 @@ export class TranscriptView {
 			if (drawn === undefined) {
 				group.cards.set(card.toolCallId, { node: renderTool(card), shape });
 			} else if (drawn.shape !== shape) {
-				// The card's own content changed; its node is remade, and only its node.
+				// 卡片自己的内容变了；它的节点重做，且只重做它的节点。
 				drawn.node.remove();
 				drawn.node = renderTool(card);
 				drawn.shape = shape;
@@ -938,7 +881,7 @@ export class TranscriptView {
 		}
 	}
 
-	/** The first-run state: an empty conversation shows one question and nothing else. */
+	/** 首次运行的状态：空的对话显示一个问题，别无其他。 */
 	private setWelcome(visible: boolean): void {
 		if (!visible) {
 			this.welcome?.remove();
@@ -955,27 +898,25 @@ export class TranscriptView {
 }
 
 /**
- * A tool card's reshape key: run state, error state, output length, and whether it brought a diff.
+ * 工具卡片的 reshape 键：运行状态、错误状态、输出长度、是否带了 diff。
  *
- * Distinct keys mean the card's own drawing would differ, so its node is remade; the same key means
- * the node on screen still says the right thing and is left alone. The id is the map key, not here.
+ * 不同的键意味着卡片自己的绘制会不同，节点重做；相同的键意味着屏幕上的节点说的还是对的，不碰。
+ * id 是映射键，不在这里。
  */
 function shapeOf(card: ToolCard): string {
 	return `${card.waiting ? "w" : card.running ? "r" : "d"}:${card.isError ? "e" : "o"}:${card.output.length}:${card.diff ? "D" : "-"}`;
 }
 
 /**
- * The round facts of the conversation, in one forward walk.
+ * 对话的回合事实，一次前向遍历。
  *
- * A round runs from one user message to the next, and the footer belongs to the answer that closed
- * it — the last assistant message before the next prompt. Notices take no part: a fold or a failed
- * run is carried between rounds rather than spoken in one, and the seat stays with the last real
- * answer. The walk also remembers, for each closing answer, the user message that opened its round —
- * the elapsed time's start seat — and the conversation's last user message, which is the running
- * timer's.
+ * 一个回合从一条用户消息到下一条，底部属于收尾它的回答 —— 下一条提示之前的最后一条 assistant
+ * 消息。注释不参与：一次折叠或一次失败的运行是被携带在回合之间的，而不是在某个回合里说出来，
+ * 席位留给最后一条真实的回答。遍历还为每个收尾回答记住开启其回合的用户消息 —— 用时的起点席位
+ * —— 以及整个对话最后一条用户消息，那是运行计时器的。
  *
- * One pass, called when the item list's shape moves (see {@link TranscriptView.draw}); a delta in the
- * last message cannot change any of these facts.
+ * 一趟，在 item 列表的形状移动时调用（见 {@link TranscriptView.draw}）；最后一条消息里的 delta
+ * 改不了这些事实中的任何一个。
  */
 function roundIndex(items: readonly Item[]): RoundIndex {
 	const last = new Set<string>();
@@ -986,8 +927,7 @@ function roundIndex(items: readonly Item[]): RoundIndex {
 	let closingStart: RoundStart | undefined;
 	let lastAssistant: string | undefined;
 
-	// The round is committed when the next user message opens, and once more at the end: whichever
-	// assistant was seen last in it is the one that closed it.
+	// 回合在下一条用户消息开启时结算，最后再结一次：回合里最后看到的 assistant 是收尾它的那条。
 	const close = (): void => {
 		if (closing === undefined) return;
 		last.add(closing);
@@ -1019,7 +959,7 @@ function roundIndex(items: readonly Item[]): RoundIndex {
 	};
 }
 
-/** The ids `items` carries, for a prune that asks membership rather than position. */
+/** `items` 携带的 id，供按成员资格而不是位置发问的修剪。 */
 function idsOf(items: readonly Item[]): Set<string> {
 	const ids = new Set<string>();
 	for (const item of items) ids.add(item.id);
@@ -1027,19 +967,18 @@ function idsOf(items: readonly Item[]): Set<string> {
 }
 
 /**
- * Whether two item lists have the same shape, which is what the non-delta work is keyed to.
+ * 两个 item 列表是否形状相同，非 delta 的工作以它为键。
  *
- * Items are immutable, so "same shape" cannot mean "same references" — the streaming message's item
- * is a new object on every token. It means the list's length and the identity of its last item: an
- * append, a drop, a retry's note replacing an abandoned answer, or a whole new conversation moves
- * one of those, while a token landing in the message already at the end moves neither.
+ * item 不可变，所以"形状相同"不能是"引用相同" —— 流式消息的 item 每个 token 都是新对象。它指
+ * 列表的长度和最后一个 item 的身份：追加、丢弃、重试的注释替换被放弃的回答、整段新对话都会动
+ * 其中之一，而落在已经在末尾的消息里的 token 两个都不动。
  */
 function sameShape(previous: readonly (Item | undefined)[], next: readonly Item[]): boolean {
 	if (previous.length !== next.length) return false;
 	return shapeKey(previous.at(-1)) === shapeKey(next.at(-1));
 }
 
-/** The identity a shape comparison reads: an item's id, and the two flags the round walk keys on. */
+/** 形状比较读取的身份：item 的 id，加上回合遍历所依赖的两个标志。 */
 function shapeKey(item: Item | undefined): string {
 	if (item === undefined) return "";
 	if (item.kind !== "message") return item.id;
@@ -1047,11 +986,10 @@ function shapeKey(item: Item | undefined): string {
 }
 
 /**
- * The one copy control both meta rows use: an icon that answers with a check for a beat.
+ * 两个 meta 行共用的唯一复制控件：一个图标，回答时换成一拍的对勾。
  *
- * The text is read at click time through a getter, because the message it copies can still be
- * streaming when the row is built. One pending restore at a time — a rapid second click replaces
- * the beat rather than stacking timers under it.
+ * 文本在点击时经 getter 读取，因为它复制的那条消息在行构建时可能仍在流式。同一时刻只有一个挂起
+ * 的恢复 —— 快速的第二击替换那一拍，而不是在它下面堆叠计时器。
  */
 function copyButton(getText: () => string): HTMLButtonElement {
 	const button = element("button", "turn-copy", undefined, { type: "button", title: "复制", "aria-label": "复制" });
@@ -1080,7 +1018,7 @@ function copyButton(getText: () => string): HTMLButtonElement {
 	return button;
 }
 
-/** One footer chip: a small icon and the number under it, hidden until it has something to say. */
+/** 一个底部 chip：小图标和它下面的数字，有东西可说之前隐藏。 */
 function footChip(name: IconName): FootChip {
 	const root = element("span", "foot-chip");
 	root.hidden = true;
@@ -1089,7 +1027,7 @@ function footChip(name: IconName): FootChip {
 	return { root, text };
 }
 
-/** Write one chip's text, hiding it when the text is empty; an unchanged chip is left alone. */
+/** 写一个 chip 的文本，空文本时藏起；没变的 chip 不动。 */
 function setChip(chip: FootChip, text: string): void {
 	if (chip.shown === text) return;
 	chip.shown = text;
@@ -1097,19 +1035,19 @@ function setChip(chip: FootChip, text: string): void {
 	chip.text.textContent = text;
 }
 
-/** The clock face of a message's stamp: hours and minutes, the way the meta row reads them. */
+/** 消息时间戳的钟面：小时和分钟，meta 行读取的方式。 */
 function formatClockTime(timestamp: number): string {
 	const at = new Date(timestamp);
 	const part = (value: number): string => String(value).padStart(2, "0");
 	return `${part(at.getHours())}:${part(at.getMinutes())}`;
 }
 
-/** A chip's token count: whole below a thousand, one decimal of a thousand above. */
+/** chip 的 token 数：一千以下整数，以上一位小数。 */
 function shortTokens(total: number): string {
 	return total < 1000 ? String(total) : `${(total / 1000).toFixed(1)}K`;
 }
 
-/** The settled duration a footer reads: a tenth below ten seconds, the clock above. */
+/** 底部读取的结算时长：十秒以下带一位小数，以上用钟面。 */
 function formatElapsed(ms: number): string {
 	const seconds = ms / 1000;
 	if (seconds < 10) return `${seconds.toFixed(1)}s`;
@@ -1117,14 +1055,14 @@ function formatElapsed(ms: number): string {
 	return formatTick(ms);
 }
 
-/** The ticking line's clock face: minutes and seconds, zero-padded. */
+/** 跳动行的钟面：分和秒，补零。 */
 function formatTick(ms: number): string {
 	const total = Math.floor(ms / 1000);
 	const part = (value: number): string => String(value).padStart(2, "0");
 	return `${part(Math.floor(total / 60))}:${part(total % 60)}`;
 }
 
-/** The first non-empty line of a reasoning block, for the collapsed row's summary. */
+/** 推理块的第一行非空行，折叠行摘要的来源。 */
 function firstLineOf(text: string): string {
 	for (const line of text.split("\n")) {
 		const trimmed = line.trim();
@@ -1134,54 +1072,48 @@ function firstLineOf(text: string): string {
 }
 
 /**
- * How much of the streaming thought the head carries, in characters.
+ * 折叠行头部携带流式思考的多少，字符数。
  *
- * The head is one clipped line, so the only part of the thought with anything to say is its end. The
- * cap keeps the write bounded: a thought can be tens of thousands of characters, and the head re-reads
- * only its tail each frame rather than the whole of it.
+ * 头部是一行被截断的文本，所以思考里唯一有话可说的部分是它的结尾。上限让写入有界：思考可以长到
+ * 几万字符，头部每帧只重读它的尾部，而不是整个。
  */
 const TAIL_CHARS = 240;
 
 /**
- * Write the end of the streaming thought into the collapsed row's head.
+ * 把流式思考的结尾写进折叠行的头部。
  *
- * This started as a marquee — the track carried the whole text twice and looped it with a
- * `translateX(-50%)` animation. That cannot stay smooth while the text is still arriving: a
- * percentage translate moves by half of the track's **current** width, so every appended character
- * shifts the visible text by half of what it appended. Bucketing the writes made it worse rather than
- * better — the head then jumped once every two seconds, which is the "思考一卡一卡" the reader
- * reported. So the head shows the tail instead: the line grows at its right edge and the start is
- * clipped away by the mask, which is what a ticker looks like when nothing is scrolling it.
+ * 这曾经是一个 marquee —— 轨道携带全文两次，用 `translateX(-50%)` 动画循环。文本仍在到达时它
+ * 无法保持平滑：百分比平移按轨道**当前**宽度的一半移动，所以每追加一个字符，可见文本就被移动
+ * 它追加量的一半。分桶写入让情况更糟而不是更好 —— 头部变成每两秒跳一次，正是读者报告的
+ * "思考一卡一卡"。所以头部显示尾部：行在右缘生长，起点被遮罩裁掉，这就是没有被滚动的 ticker
+ * 该有的样子。
  */
 function patchTail(view: ReasoningView, text: string): void {
 	if (view.tailText === text) return;
 	view.tailText = text;
 	const tail = text.length > TAIL_CHARS ? text.slice(-TAIL_CHARS) : text;
-	// One line, whatever the thought did: the head is a line, and a newline in it would be a lost
-	// character in a `nowrap` strip.
+	// 无论思考做过什么都是一行：头部是一行，`nowrap` 条里的换行就是一个丢失的字符。
 	const line = tail.replace(/\s+/g, " ").trimStart();
 	if (view.tail.textContent !== line) view.tail.textContent = line;
 }
 
 /**
- * One tool card, read as a line: the name, then a short path, then nothing else.
+ * 一张工具卡片，读作一行：名字，然后一条短路径，再无其他。
  *
- * The call reads as `Read  README.md` — name first, a single recognizable argument after — and the
- * whole line is quietly coloured until hover, so a run of tool steps reads as one quiet block
- * (01 ④). The card has no box of its own; expanding is what reveals the content, an indented block
- * under the line. A call that changed a file shows the change itself instead of its text: the diff
- * carries the path and the counts that the tool's own text was there to state.
+ * 调用读作 `Read  README.md` —— 名字在前，后面一个认得出的参数 —— 整行在悬停前安静地着色，
+ * 所以一串工具步骤读作安静的一块（01 ④）。卡片没有自己的盒子；展开才揭示内容，行下一个缩进的
+ * 块。改了文件的调用显示变更本身而不是它的文本：diff 携带路径和计数，那正是工具自己的文本在那
+ * 里要说的事。
  *
- * A card whose arguments hold nothing recognizable shows its name alone — no placeholder is
- * invented for what the call did not carry.
+ * 参数里没有任何认得出的东西的卡片只显示名字 —— 不会为调用没带的东西发明占位符。
  */
 function renderTool(card: ToolCard): HTMLElement {
 	const details = element(
 		"details",
 		`tool${card.isError ? " error" : ""}${card.running ? " running" : ""}${card.waiting ? " waiting" : ""}`,
 	);
-	// A waiting card opens like a running one: the thing it says is the reason the run stopped, and a
-	// reader should not have to unfold the line to find where the answer went.
+	// 等待中的卡片像运行中的一样打开：它要说的话就是运行停下的理由，读者不该为了找到答案去哪了
+	// 而展开这一行。
 	if (card.isError || card.running || card.waiting) details.open = true;
 
 	const summary = element("summary");
@@ -1193,8 +1125,8 @@ function renderTool(card: ToolCard): HTMLElement {
 		element("span", "tool-path", previewOf(card.args) || (card.diff?.relPath ?? "")),
 	);
 	if (card.diff) summary.append(diffStat(card.diff));
-	// The line's right-end mark is the phase: pulsing while the call executes, steady while it waits
-	// for the answer that lets it run. Neither mark shares a line with a diffstat, for the same reason.
+	// 行右端的标记就是阶段：调用执行时脉冲，等待让它运行的答案时静止。两个标记都不与 diffstat
+	// 共享一行，理由相同。
 	if (card.running) summary.append(element("span", "tool-spin"));
 	if (card.waiting) summary.append(element("span", "tool-wait"));
 
@@ -1215,11 +1147,10 @@ function outputOf(card: ToolCard): HTMLElement {
 }
 
 /**
- * The one argument a tool card shows collapsed.
+ * 工具卡片折叠时显示的唯一参数。
  *
- * These are the tools whose call is recognizable from a single value, in the order that reads best:
- * a shell command, then a path, then a pattern. Anything else shows nothing rather than a JSON blob,
- * which would only be a worse version of what the expanded card already shows.
+ * 这些是仅凭一个值就能认出调用的工具，按最好读的顺序：shell 命令，然后路径，然后模式。其他的
+ * 什么都不显示，而不是显示一段 JSON —— 那只是展开后的卡片已经展示的内容的更差版本。
  */
 function previewOf(args: unknown): string {
 	if (args === undefined || args === null) return "";

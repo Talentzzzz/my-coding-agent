@@ -1,10 +1,8 @@
-// Modes UI smoke: drives the production settings panel's modes tab, the composer's mode seat, and
-// the mode menu against the minimal DOM, and checks the behaviours a screenshot cannot — that the
-// built-in default card opens the same inline form and saves the global defaults whole, that a user
-// mode's form commits the list whole, that the built-in's name is refused, and that a menu row's
-// detail line reaches the DOM. Nothing reaches the network, so no server and no provider key are
-// needed.
-// Run with: node scripts/smoke-modes.ts
+// Modes UI smoke：对着最小 DOM 驱动生产设置面板的 modes 页签、composer 的模式座位与模式菜单，
+// 检查截图检查不了的那些行为——内置默认卡展开同一套内联表单并整份保存全局默认，用户模式的
+// 表单整表提交清单，内置的名字被拒绝，菜单行带着摘要行到达 DOM。不触网，无需服务器和
+// provider key。
+// 运行：node scripts/smoke-modes.ts
 import { SettingsPanel, modeSummaryOf, type SettingsHandlers } from "../packages/web/src/render/settings.ts";
 import { Composer, type ComposerHandlers } from "../packages/web/src/composer.ts";
 import { openMenu } from "../packages/web/src/render/menu.ts";
@@ -18,7 +16,7 @@ function check(label: string, condition: boolean, detail = ""): void {
 	if (!condition) failures += 1;
 }
 
-/** Let a synchronously dispatched handler's promises settle before the next assertion reads. */
+/** 让同步派发的 handler 的 promise 在下一条断言读取之前落定。 */
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 function all(root: FakeNode, className: string): FakeNode[] {
@@ -78,7 +76,7 @@ function composerHandlers(over: Partial<ComposerHandlers> = {}): ComposerHandler
 	};
 }
 
-// ------------------------------------------------- 1. the tab draws the default card and the modes
+// ------------------------------------------------- 1. 页签画出默认卡与各模式
 
 process.stdout.write("\nmodes：模式页画出内置默认卡与用户模式\n");
 
@@ -86,8 +84,8 @@ process.stdout.write("\nmodes：模式页画出内置默认卡与用户模式\n"
 	installDom();
 	const panel = new SettingsPanel(handlers());
 	panel.render({
-		// The default tools include `bash`, so the card's summary has a question to count: the standard
-		// approval map marks write/edit/bash, and bash is the one the list carries.
+		// 默认工具包含 `bash`，所以卡片的摘要有一个问题可数：标准审批映射标记 write/edit/bash，
+		// 而 bash 正是列表携带的那个。
 		settings: settingsOf([{ name: "只读", tools: ["read", "glob", "grep"], approval: { bash: false, write: false, edit: false, read: false, glob: false, grep: false } }], ["read", "glob", "bash"]),
 		models: [],
 		snapshot: snapshotOf(),
@@ -102,15 +100,14 @@ process.stdout.write("\nmodes：模式页画出内置默认卡与用户模式\n"
 	check("默认卡的摘要来自全局默认值", summaries[0]?.textContent === "3 个工具 · 1 项询问", summaries[0]?.textContent);
 	check("用户模式的摘要整份算出", summaries[1]?.textContent === "3 个工具 · 0 项询问", summaries[1]?.textContent);
 
-	// Collapsed, the default card is the same one-line row a user mode is: the tools are behind the
-	// head, which is the door into the inline form.
+	// 收起时，默认卡就是用户模式那种单行卡片：工具藏在头部之后，头部正是进入内联表单的门。
 	const defaultTools = all(rows[0] as FakeNode, "mode-tool");
 	check("默认卡收起时只有一行摘要", defaultTools.length === 0, String(defaultTools.length));
 	const defaultHead = rows[0]!.children.find((child) => child.classList.contains("model-row-head"));
 	check("默认卡的头是门", defaultHead?.tag === "button", defaultHead?.tag);
 }
 
-// -------------------------------------- 2. the default card edits the globals on save
+// -------------------------------------- 2. 默认卡在保存时写全局默认
 
 process.stdout.write("\nmodes：默认卡展开同一套表单并写全局默认\n");
 
@@ -137,8 +134,7 @@ process.stdout.write("\nmodes：默认卡展开同一套表单并写全局默认
 	const form = all(panel.element as unknown as FakeNode, "model-form")[0];
 	check("点默认卡的头展开内联表单", form !== undefined);
 
-	// The name is the one field the built-in cannot edit: it is shown as a label with the badge, not
-	// as a text input.
+	// 名称是内置唯一不可编辑的字段：它显示为带徽标的 label，而不是文本输入框。
 	check("默认模式的名称不可编辑", form!.querySelector('input[type="text"]') === null);
 	const nameBadges = all(form!, "mode-badge");
 	check("表单里仍是「默认」+「内置」", nameBadges.length === 1 && nameBadges[0]!.textContent === "内置", nameBadges[0]?.textContent);
@@ -146,9 +142,8 @@ process.stdout.write("\nmodes：默认卡展开同一套表单并写全局默认
 	const toolRows = all(form!, "mode-tool");
 	check("展开后每工具一行", toolRows.length === ALL_TOOLS.length, String(toolRows.length));
 
-	// `bash` is the sixth row and starts checked (the standard default). The shim does not reproduce
-	// the browser's click-then-change order, so the toggle is set the way a click would leave it
-	// before the change event dispatches.
+	// `bash` 是第六行，初始勾着（标准默认）。shim 不复现浏览器"先 click 再 change"的顺序，所以
+	// 开关按 click 在 change 派发之前会留下的状态手工设置。
 	const bashRow = toolRows[5]!;
 	const bashBox = bashRow.querySelector("input")!;
 	check("bash 默认勾着", bashBox.getAttribute("aria-label") === "启用 bash" && bashBox.checked === true);
@@ -156,8 +151,8 @@ process.stdout.write("\nmodes：默认卡展开同一套表单并写全局默认
 	bashBox.dispatch("change");
 	check("表单里的修改不立刻写全局", toolsWrites.length === 0 && approvalWrites.length === 0, JSON.stringify([toolsWrites, approvalWrites]));
 
-	// The approval select rides the same row; moving it edits the draft too. Only the six keyed tools
-	// carry one, so the fourth select is `glob`.
+	// 审批下拉与工具同一行；移动它也是改草稿。只有六个有键的工具带下拉，所以第四个 select 是
+	// `glob`。
 	const select = all(form!, "mode-tool-approval")[3]!;
 	select.value = "ask";
 	select.dispatch("change");
@@ -170,9 +165,8 @@ process.stdout.write("\nmodes：默认卡展开同一套表单并写全局默认
 	check("保存只写变更过的审批", JSON.stringify(approvalWrites) === JSON.stringify([["glob", true]]), JSON.stringify(approvalWrites));
 	check("保存后表单收起", all(panel.element as unknown as FakeNode, "model-form").length === 0);
 
-	// Without a session the default form stands down, the way the old defaults section did: its
-	// toggles cannot name the build's own list, and writing the six built-ins over a set that may
-	// name more would be inventing one — the exact thing that path refuses to do.
+	// 没有 session 时默认表单退场，与旧 defaults 区块的做法一致：它的开关无法指名构建自带的
+	// 那份列表，把六个内置工具写到一个可能指名更多的集合上等于编造一份——正是这条路拒绝做的事。
 	const bareWrites: string[][] = [];
 	const bare = new SettingsPanel(
 		handlers({
@@ -195,7 +189,7 @@ process.stdout.write("\nmodes：默认卡展开同一套表单并写全局默认
 	check("无会话时默认卡不写编造的工具集", bareWrites.length === 0, JSON.stringify(bareWrites));
 }
 
-// ------------------------------------------------------- 3. a mode's form commits the list whole
+// ------------------------------------------------------- 3. 模式的表单整表提交清单
 
 process.stdout.write("\nmodes：用户模式整表保存\n");
 
@@ -207,7 +201,7 @@ process.stdout.write("\nmodes：用户模式整表保存\n");
 	panel.show("modes");
 
 	const rows = all(panel.element as unknown as FakeNode, "model-row");
-	// The head is the door: clicking it opens the form in place.
+	// 头部是门：点击它原地展开表单。
 	const head = rows[1]!.children.find((child) => child.classList.contains("model-row-head"))!;
 	head.dispatch("click");
 	let form = all(panel.element as unknown as FakeNode, "model-form")[0];
@@ -216,8 +210,8 @@ process.stdout.write("\nmodes：用户模式整表保存\n");
 	const name = form!.querySelector("input");
 	name!.value = "只读改的";
 	name!.dispatch("input");
-	// Turn `bash` on in the form; its approval select comes up with it, at 自动允许. The shim needs
-	// the click's end state set by hand before the change dispatches.
+	// 在表单里勾上 `bash`；它的审批下拉随之出现，停在 自动允许。shim 需要在 change 派发之前
+	// 手工设置 click 的终态。
 	const toolRows = all(form!, "mode-tool");
 	const bashRow = toolRows.find((row) => row.querySelector("input")!.getAttribute("aria-label") === "启用 bash")!;
 	const bashBox = bashRow.querySelector("input")!;
@@ -236,7 +230,7 @@ process.stdout.write("\nmodes：用户模式整表保存\n");
 	check("成功后表单收起", form === undefined);
 }
 
-// ----------------------------------------------- 4. the built-in's name and duplicates are refused
+// ----------------------------------------------- 4. 内置名与重名就地拒绝
 
 process.stdout.write("\nmodes：名字冲突就地拒绝\n");
 
@@ -251,7 +245,7 @@ process.stdout.write("\nmodes：名字冲突就地拒绝\n");
 	});
 	panel.show("modes");
 
-	// The add form is the expanded row itself; the blank draft's name goes into the input.
+	// 添加表单就是展开的那一行本身；空白草稿的名字进输入框。
 	const add = all(panel.element as unknown as FakeNode, "model-add")[0]!;
 	add.dispatch("click");
 	let form = all(panel.element as unknown as FakeNode, "model-form")[0];
@@ -267,14 +261,14 @@ process.stdout.write("\nmodes：名字冲突就地拒绝\n");
 	const note = all(panel.element as unknown as FakeNode, "settings-note")[0]!;
 	check("拒绝写在面板的注记里", note.textContent.includes("默认"), note.textContent);
 
-	// The client refuses a duplicate before the server ever sees the list, the same way.
+	// 客户端在服务器看到列表之前就以同样方式拒绝重名。
 	reserved!.value = "只读";
 	reserved!.dispatch("input");
 	save.dispatch("click");
 	await flush();
 	check("重名被拒绝", saves.length === 0, JSON.stringify(saves));
 
-	// An empty tools list is a choice, not a mistake: saving it goes through.
+	// 空工具列表是一次选择，不是失误：保存它照常通过。
 	reserved!.value = "全关";
 	reserved!.dispatch("input");
 	save.dispatch("click");
@@ -284,7 +278,7 @@ process.stdout.write("\nmodes：名字冲突就地拒绝\n");
 	check("保存后表单收起", form === undefined);
 }
 
-// ------------------------------------------------------------- 5. deleting asks once, then goes
+// ------------------------------------------------------------- 5. 删除先问一次
 
 process.stdout.write("\nmodes：删除先问一次\n");
 
@@ -306,12 +300,12 @@ process.stdout.write("\nmodes：删除先问一次\n");
 	await flush();
 	check("确认后清单少了一份", saves.length === 1 && saves[0]?.length === 0, JSON.stringify(saves));
 
-	// The default card has no trash: there is nothing to delete.
+	// 默认卡没有回收站：没有什么可删的。
 	const defaultTrash = byTitle(rows[0] as FakeNode, "删除这个模式");
 	check("默认卡没有删除", defaultTrash === undefined);
 }
 
-// --------------------------------------------------------------- 6. the seat and the menu rows
+// --------------------------------------------------------------- 6. 座位与菜单行
 
 process.stdout.write("\nmodes：输入框的模式座位与菜单\n");
 
@@ -330,7 +324,7 @@ process.stdout.write("\nmodes：输入框的模式座位与菜单\n");
 	composer.setModes("只读");
 	check("同名重画被门槛挡住", label.textContent === "只读" && all(composer.element as unknown as FakeNode, "composer-mode-label").length === 1);
 
-	// The menu hangs off the seat: one row per mode with its summary line, and a click applies.
+	// 菜单挂在座位上：每个模式一行、带它的摘要行，点击即应用。
 	const anchor = all(composer.element as unknown as FakeNode, "composer-mode")[0]!;
 	openMenu(anchor as unknown as HTMLElement, [
 		{ label: "默认", detail: "6 个工具 · 3 项询问", active: true, onSelect: () => picked.push("默认") },
@@ -345,7 +339,7 @@ process.stdout.write("\nmodes：输入框的模式座位与菜单\n");
 	check("选完菜单收起", all(document.body as unknown as FakeNode, "menu-item").length === 0);
 }
 
-// --------------------------------------------------------------------- 7. the summary helper
+// --------------------------------------------------------------------- 7. 摘要助手
 
 process.stdout.write("\nmodes：摘要一行算对\n");
 

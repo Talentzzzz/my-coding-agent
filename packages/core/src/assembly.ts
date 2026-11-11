@@ -12,253 +12,218 @@ import { followsGlobalOf, toolStateOf } from "./session/tool-config.ts";
 import { SettingManager } from "./setting-manager.ts";
 import { type ToolManager, createToolManager } from "./tools/index.ts";
 
-/** What a caller must supply to build a session. Everything else is discovered here. */
+/** 调用方构建一个会话必须提供的东西。其余都在这里查明。 */
 export interface OpenAgentOptions {
 	/**
-	 * The stateless session service the cold read replays against.
+	 * 冷读重放所依据的无状态会话服务。
 	 *
-	 * Only {@link readSessionSnapshot} reads this: the cold read names its bag by the session it is
-	 * handed, and a fresh manager behaves identically because the service holds no bag of its own
-	 * (ADR-0007 §2) — a caller's own instance only changes *which* store knowledge the walk uses.
-	 * An orchestrator does not take one: {@link openAgent} forwards the settings, tools, and
-	 * transport seams to the factory and leaves the ledger to the agent it builds, which owns its
-	 * own.
+	 * 只有 {@link readSessionSnapshot} 读它：冷读按被递入的会话点名自己的袋，新造的 manager 行为完全
+	 * 一致，因为服务不持有自己的袋（ADR-0007 §2）——调用方自己的实例只改变这次走读用的是*哪*一份
+	 * 存储知识。编排层不收它：{@link openAgent} 把 settings、tools 与 transport 接缝转发给工厂，把
+	 * 账本留给它构建的 agent，后者拥有自己的那一份。
 	 */
 	sessionManager?: SessionManager;
 	/**
-	 * The transcript this session will read and write, as the bag every call names.
+	 * 本会话将要读写的 transcript，即每次调用点名的那只袋。
 	 *
-	 * Built by the caller rather than here, because deciding *which* session to open — a new one, the
-	 * newest, one named by id — is the host's job, and a test opens an in-memory one instead.
+	 * 由调用方构建而不是在这里构建，因为决定打开*哪个*会话——新的、最新的、按 id 点名的——是宿主
+	 * 的差事，测试则改开内存里的。
 	 */
 	session: Session;
 	/**
-	 * The configuration every settings and model read goes through.
+	 * 每次设置与模型读取所经的配置门。
 	 *
-	 * Omitted means a fresh manager over the machine's own files — the same default a hub without
-	 * options would build. A host that reads under a non-default agent home — the hub — hands its own
-	 * in, because the fallback has no way to know that home; a test hands in an in-memory one so the
-	 * machine's files are never touched. The manager holds nothing: every read is a fresh read of the
-	 * files behind it, which is what makes an edit reach a session that never reopened.
+	 * 省略表示在机器自己的文件之上新造一只 manager——与不带 options 的 hub 会构建的默认相同。在非
+	 * 默认 agent home 之下读取的宿主——即 hub——递入自己的，因为回落者无从知道那个 home；测试递入
+	 * 内存版，让机器自己的文件永远不被碰。manager 什么都不持有：每次读取都是对其背后文件的一次
+	 * 新读，这正是让一次编辑抵达一个从未重开的会话的原因。
 	 */
 	settings?: SettingManager;
-	/** Overrides the stored default with a row's name. */
+	/** 用一行的名字覆盖存储的默认。 */
 	model?: string;
 	thinkingLevel?: string;
 	/**
-	 * The transport every request in this session goes over.
+	 * 本会话每个请求走的传输层。
 	 *
-	 * Omitted in the real process, where it means Anthropic Messages. A smoke passes a scripted
-	 * transport so the run can be driven with no provider key. Read by the orchestrator's
-	 * construction alone — assembly never sends anything, which is why it is absent from
-	 * {@link AssembleAgentStateOptions}.
+	 * 真实进程里省略，表示 Anthropic Messages。smoke 传脚本化的传输层，让运行可以在没有供应商密钥
+	 * 的情况下被驱动。只有编排层的构造读它——装配从不发送任何东西，这正是它不在
+	 * {@link AssembleAgentStateOptions} 里的原因。
 	 */
 	api?: ChatTransport;
 	/**
-	 * The tools this assembly resolves against.
+	 * 本次装配用来解析工具的表。
 	 *
-	 * Omitted means a table of this assembly's own, holding the six built-ins — what a smoke that
-	 * opens one session wants. A host hands its own in: the hub keeps one table for the process, so
-	 * a session it runs and one it merely reads a snapshot of answer the same tool names and hold the
-	 * same instances (ADR-0016). A test hands one in after registering a tool of its own.
+	 * 省略表示装配自己的一张表，装着六个内置——打开一个会话的 smoke 要的就是这个。宿主递入自己的：
+	 * hub 为进程保一张表，所以它运行的会话与它只读快照的会话应答同样的工具名、持有同样的实例
+	 * （ADR-0016）。测试在注册了自己的工具之后递入一张。
 	 */
 	tools?: ToolManager;
 }
 
 /**
- * What {@link Agent.assembleAgentStateBySession} needs: the transcript, and — for the composition
- * road a test takes — the row it should open on.
+ * {@link Agent.assembleAgentStateBySession} 需要什么：transcript，以及——走测试那条组合之路时
+ * ——该打开在哪一行。
  *
- * Deliberately narrower than {@link OpenAgentOptions}. The difference is the authority argument:
- * this door belongs to the orchestrator, so the services are *its own* — a caller cannot hand it a
- * second `SettingManager` or a table of its own, which is exactly the mismatch `adopt` allowed and
- * nothing checked. What remains here is the part the orchestrator cannot know: **which** transcript
- * (the host's decision, and the session manager's replay) — the transcript carries its own working
- * directory on `sessionSetting.workDirAbsPath`.
+ * 有意比 {@link OpenAgentOptions} 窄。差别是权威性：这扇门属于编排层，所以服务是*它自己的*
+ * ——调用方无法递给它第二只 `SettingManager` 或自己的工具表，这正是 `adopt` 曾允许而无人检查的
+ * 失配。留在这里的是编排层无法知道的那部分：**哪个** transcript（宿主的决定，session manager 的
+ * 重放）——transcript 在 `sessionSetting.workDirAbsPath` 上自带工作目录。
  *
- * The model fields are not a host's handle on the default. The host-facing verbs (`create`,
- * `hold`, `snapshotOf`) do not take one: a session's model is a settings fact, read fresh from
- * disk by the assembly below on every open. Only `openAgent` — the one-transcript composition a
- * smoke drives — passes one, so a scripted run can open on a row of its own without writing a
- * settings file.
+ * 模型字段不是宿主控制默认值的把手。面向宿主的动词（`create`、`hold`、`snapshotOf`）都不收它：
+ * 会话的模型是一个设置事实，下面的装配在每次打开时从磁盘现读。只有 `openAgent`——smoke 驱动的
+ * 单 transcript 组合——会传一个，让脚本化的运行可以在不写设置文件的情况下打开在自己的一行上。
  */
 export interface AssembleAgentStateOptions {
-	/** The transcript to assemble and put in the table; it carries its own working directory. */
+	/** 要装配并放进表里的 transcript；它自带工作目录。 */
 	session: Session;
-	/** Test-only override: the row this composition opens on, instead of the settings' default. */
+	/** 仅测试的覆盖：本次组合打开所在的那一行，取代设置的默认。 */
 	model?: string;
 	thinkingLevel?: string;
 }
 
 /**
- * What a session *is*, resolved but not yet activated: the working directory, the settings, the
- * model, and the tools it runs.
+ * 一个会话*是*什么，已解析但尚未激活：工作目录、设置、模型，以及它运行用的工具。
  *
- * No `Agent` exists at this point and no entry has been appended. Splitting this out of the
- * orchestrator's open — and living in this file rather than beside it — is what lets
- * {@link readSessionSnapshot} answer a transcript this process is not running from the same
- * decisions a live session would have been assembled with, rather than from a second
- * implementation that could disagree.
+ * 此刻没有 `Agent` 存在，也没有追加任何 entry。把它从编排层的打开里拆出来——并住在这个文件里
+ * 而不是旁边——正是让 {@link readSessionSnapshot} 能用与活跃会话装配时相同的决定来回答一份本进程
+ * 并未运行的 transcript 的原因，而不是用一个可能各执一词的第二实现。
  */
 interface Assembled {
-	/** The working directory, absolute. */
+	/** 工作目录，绝对路径。 */
 	workDirAbsPath: string;
-	/** The manager every settings and model read of this session goes through. */
+	/** 本会话每次设置与模型读取所经的 manager。 */
 	settings: SettingManager;
-	/** The session's model choice: the row's name and the level, and nothing the row itself owns. */
+	/** 会话的模型选择：行的名字与档位，不含行自身拥有的任何事实。 */
 	modelChoice: ModelChoice;
-	/** The rows this assembly read, so a caller that builds a model from the choice does not re-read. */
+	/** 本次装配读到的各行，让按选择构建模型的调用方不必重读。 */
 	rows: readonly ModelConfig[];
-	/** The tools this build knows: one table per process, read here only for its names. */
+	/** 本构建认识的工具：每进程一张表，这里只为读它的名字。 */
 	tools: ToolManager;
-	/** The session service, resolved once here so every consumer of one assembly shares it. */
+	/** 会话服务，在这里只解析一次，让一次装配的每个消费者共享它。 */
 	sessionManager: SessionManager;
 }
 
 /**
- * Resolve what one session is, without activating it.
+ * 解析一个会话是什么，而不激活它。
  *
- * Everything a session needs and nothing that runs: no `Agent` is constructed, no hook is installed,
- * and no entry is appended to the transcript. Both the orchestrator's open (through
- * {@link assembleSession}) and {@link readSessionSnapshot} go through here, which is the property
- * that matters — a session this process is not running is described by the same decisions, in the
- * same order, as the one it would have assembled.
+ * 会话需要的一切，与运行无关的东西一样没有：不构造 `Agent`，不安装 hook，不往 transcript 追加
+ * entry。编排层的打开（经 {@link assembleSession}）与 {@link readSessionSnapshot} 都经过这里，
+ * 这才是要紧的性质——本进程未运行的会话，由与它本该被装配时相同的决定、相同的顺序描述。
  *
- * The services are a required argument, not options with fallbacks: the open's are its
- * orchestrator's own by construction, and the cold read has no orchestrator to take them from and
- * resolves a fresh set below. This file imports nothing from `agent.ts`, and that is a hard rule
- * rather than a fact: `Agent.assembleAgentStateBySession` is its one caller on the activate side, so an import back would
- * close the cycle `agent.ts` → `assembly.ts` → `agent.ts`.
+ * 服务是必填实参，不是带回落的 options：打开的服务按构造即其编排层自己的，冷读没有编排层可取，
+ * 在下面解析一套新的。本文件不从 `agent.ts` 导入任何东西，这是硬规则而不只是事实：
+ * `Agent.assembleAgentStateBySession` 是它在激活侧唯一的调用者，反向导入会闭上
+ * `agent.ts` → `assembly.ts` → `agent.ts` 这个循环。
  */
 async function assemble(services: SessionServices, options: AssembleAgentStateOptions): Promise<Assembled> {
-	// The one place the workDirAbsPath becomes absolute, so every later read of the entry's `workDirAbsPath` — a tool's
-	// run context, the prompt, a snapshot — is the same value. The directory is the transcript's own:
-	// `createSession` seeds it resolved and a replay restores it, so there is no override here — the
-	// session decides where it lives, and no caller hands a second answer in.
+	// workDirAbsPath 变成绝对路径的唯一一处，让之后每次对该 entry `workDirAbsPath` 的读取——工具的
+	// run context、prompt、快照——都是同一个值。目录是 transcript 自己的：`createSession` 种下时已
+	// 解析、重放时恢复，所以这里没有覆盖——会话自己决定住在哪里，没有调用方递入第二个答案。
 	const workDirAbsPath = resolvePath(options.session.sessionSetting.workDirAbsPath);
-	// The project settings file lives under the working directory, so it is found from the same path:
-	// `<workDirAbsPath>/.my-agent/settings.json`, over the agent home's own file. Nothing is cached:
-	// every read is a fresh read of the files behind whichever manager the caller handed over.
+	// 项目设置文件住在工作目录之下，所以从同一路径找到：`<workDirAbsPath>/.my-agent/settings.json`，
+	// 叠在 agent home 自己的文件之上。什么都不缓存：每次读取都是对调用方递入的那只 manager 背后
+	// 文件的一次新读。
 	const { settings, sessionManager, tools } = services;
 	const rows = settings.modelCatalog();
-	// The choice is the client's own: the row's name and the level, and nothing the row owns. The
-	// facts behind it — endpoint, key, window, compat — are read from this catalog at the moment a
-	// model is built, by this assembly and by every request after, so an edit to the row reaches the
-	// next message without anything here being refreshed.
+	// 选择是客户端自己的：行的名字与档位，不含行拥有的任何事实。其背后的事实——端点、密钥、窗口、
+	// compat——在构造模型的时刻从这份目录现读，本次装配如此，之后的每个请求也如此，所以对行的
+	// 编辑抵达下一条消息时，这里没有任何东西需要刷新。
 	//
-	// It is derived rather than computed here (ADR-0019), because a session's every later read has to
-	// answer the same question from a bag it just replayed: `modelChoiceOf` is that one answer, and
-	// this call is it with the caller's override on top. A session with no row still opens, and
-	// `Agent` answers for it with the sentence that says what to add: `modelFor` builds the
-	// placeholder's facts under no name at all, and the transport is what refuses to send.
+	// 它是派生的而不是在这里计算的（ADR-0019），因为会话之后每次读取都得从刚重放的那只袋回答同一个
+	// 问题：`modelChoiceOf` 就是那个答案，本次调用是它加上调用方的覆盖。没有行的会话照样打开，
+	// `Agent` 用一句「该加什么」替它作答：`modelFor` 在完全无名的状态下构建占位模型的事实，拒绝
+	// 发送的是传输层。
 	const modelChoice: ModelChoice = modelChoiceOf(sessionManager, options.session, settings, {
 		...(options.model === undefined ? {} : { name: options.model }),
 		...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
 	});
-	// The table's content is behaviour and no directory, so one table serves every session. Nothing
-	// is chosen here either: the active set and the approvals derive from the ledger on every read,
-	// against the global default's live view.
+	// 表的内容是行为而不是目录，所以一张表服务所有会话。这里同样不做任何选择：活跃集与审批在每次
+	// 读取时从账本派生，以全局默认的实时视图作底。
 	return { workDirAbsPath, settings, modelChoice, rows, tools, sessionManager };
 }
 
 /**
- * Read one session's state without activating it.
+ * 不激活就读取一个会话的状态。
  *
- * The cold half of {@link openAgent}: it goes through the same {@link assemble}, so the working
- * directory, the model, the thinking levels, the tool set, and the approval map are what a live
- * session over this transcript would have had — and it stops there. No `Agent`, no loop, no hooks; the
- * fields a loop would have answered are supplied as the idle values they are, because there is no run
- * to report on.
+ * {@link openAgent} 的冷半：走同一个 {@link assemble}，所以工作目录、模型、思考档位、工具集与
+ * 审批映射，就是这份 transcript 上的活跃会话本该有的——而且到此为止。没有 `Agent`，没有循环，
+ * 没有 hooks；循环本该回答的字段以它们本来的空闲值给出，因为没有运行可供报告。
  *
- * Like assembly it appends nothing. Reading a transcript must not be an event in it, or opening a
- * session's history would be indistinguishable from using it.
+ * 与装配一样，它什么都不追加。读 transcript 不得成为 transcript 里的事件，否则打开一个会话的
+ * 历史就与使用它无从区分了。
  */
 export async function readSessionSnapshot(options: OpenAgentOptions): Promise<SessionSnapshot> {
-	// The cold read has no orchestrator to take services from, so the fallbacks `assemble` no longer
-	// carries are resolved here. A fresh service behaves identically: the manager holds nothing and
-	// the service owns no bag (ADR-0007 §2), so the only thing a caller's own instance changes is
-	// *which* files and store are read — what the hub hands its own for.
+	// 冷读没有编排层可取服务，`assemble` 不再携带的回落在这里解析。新造的服务行为完全一致：
+	// manager 什么都不持有、服务不拥有袋（ADR-0007 §2），所以调用方自己的实例改变的只是读*哪些*
+	// 文件与存储——hub 递入自己那份正是为此。
 	const services: SessionServices = {
 		sessionManager: options.sessionManager ?? new SessionManager(),
 		settings: options.settings ?? new SettingManager(),
 		tools: options.tools ?? createToolManager(),
 	};
 	const { workDirAbsPath, settings, modelChoice, rows, tools, sessionManager } = await assemble(services, options);
-	// The same derivation a live session runs — the ledger over the global default's live view — so a
-	// cold read answers the choice a live session opens on, without replaying it into anything.
+	// 与活跃会话运行的是同一套派生——账本叠在全局默认的实时视图上——所以冷读回答的是活跃会话打开
+	// 时所在的选择，而不把它重放进任何东西。
 	const toolState = toolStateOf(sessionManager, options.session, settings, tools.names());
 	return sessionSnapshot({
 		sessions: sessionManager,
 		session: options.session,
 		workDirAbsPath,
-		// The snapshot reads only the name, the level, and the window off the model; the request object
-		// is as throwaway here as it is in a request. Built from the rows this assembly already read, so
-		// a cold read costs the file once.
+		// 快照只从模型上读名字、档位与窗口；请求对象在这里与在一次请求里一样是即抛的。用本次装配已经
+		// 读过的行构建，所以一次冷读只花文件一次。
 		model: modelFor(modelChoice, rows),
-		// The same merge `Agent.getApprovals` performs: the directory's defaults with the session's own
-		// recorded choices over them. Neither half is optional, or the header's toggles would show a
-		// gate the live session does not have.
+		// 与 `Agent.getApprovals` 执行的是同一个合并：目录的默认，叠上会话自己记录的选择。两半都不可
+		// 省，否则头部的开关会显示一个活跃会话并没有的闸门。
 		approvals: { ...settings.getApprovals(workDirAbsPath), ...toolState.approvalOverride },
-		// Read off the table with the derived choice, so the toggles match a live session's exactly.
+		// 用派生的选择从表上读取，让开关与活跃会话的完全一致。
 		allTools: tools.names(),
 		activeTools: toolState.activeToolNames,
-		// Judged against this directory's own settings, the same way the live session's getter does it:
-		// a cold read and a live snapshot must agree here, or the panel would flip its "沿用全局" label
-		// the moment a session went from open to merely read.
+		// 对着这个目录自己的设置判断，与活跃会话的 getter 同法：冷读与活跃快照在这里必须一致，否则
+		// 会话一从打开变成仅读取，面板的「沿用全局」标签就会翻面。
 		...followsGlobalOf(sessionManager, options.session, settings, tools.names()),
 		submitting: false,
 		queued: [],
 		isRetrying: false,
 		retryAttempt: 0,
-		// Derived from the ledger exactly as the live session derives it: a call left dangling by a
-		// run that ended — the gate's, or a crash's — is a question the cold read shows too, because
-		// the answer that closes it arrives over REST to whichever process is running the session.
+		// 与活跃会话完全一样地从账本派生：一次已结束的运行——闸门的或崩溃的——留下的悬空调用，冷读
+		// 也显示它，因为关闭它的答案经 REST 抵达，送给碰巧在运行该会话的那个进程。
 		pendingApprovals: danglingApprovalsOf(sessionManager.buildContextEntries(options.session)),
 	});
 }
 
 /**
- * Assemble a session's state: the seed→fill lifecycle's seeding half (ADR-0006 §2).
+ * 装配一个会话的状态：seed→fill 生命周期的 seed 半（ADR-0006 §2）。
  *
- * What this produces is the **live half** — the queues, their modes, and the one transcript no replay
- * can produce (ADR-0019). The transcript it is handed is an *input*, not a member: a born bag is
- * dropped here, because `bag(id)` replays it again on demand, and an unborn one is kept on
- * `live.unwritten`, because nothing else can answer it until the first message creates the files.
- * The working directory stays on that bag (every later call replays it), and the settings are never
- * part of any state — they are read live through the {@link SettingManager} the orchestrator holds.
+ * 产出的是**live 半**——两条队列、它们的模式，以及唯一一份重放造不出来的 transcript（ADR-0019）。
+ * 递进来的 transcript 是*入参*，不是成员：出生的袋在这里被丢掉，因为 `bag(id)` 会按需再重放一次；
+ * 未出生的袋留在 `live.unwritten` 上，因为在第一条消息造出文件之前，没有别的什么能回答它。
+ * 工作目录留在那只袋上（之后每次调用都重放它），设置从来不是任何状态的一部分——它们经编排层持有
+ * 的 {@link SettingManager} 实时读取。
  *
- * The model choice is neither kept nor seeded: every read derives it (`session/model-choice.ts`),
- * which is the only shape that survives a bag being dropped. The one piece of the choice a
- * derivation cannot reproduce is a row the *caller* named, so that — and only that — lands on
- * `live.openedOn`.
+ * 模型选择既不保留也不播种：每次读取都派生它（`session/model-choice.ts`），这是袋被丢掉之后唯一
+ * 能幸存的形状。派生无法重现的选择只剩一件——*调用方*点名的那一行——所以只有它落在
+ * `live.openedOn` 上。
  *
- * The services are a required argument rather than options, which is what makes the narrow door's
- * guarantee structural: the only caller is {@link Agent.assembleAgentStateBySession}, which hands its
- * own three, and a caller cannot reach this function to assemble a state over a second
- * `SettingManager` — the mismatch `adopt` allowed and nothing checked has nowhere to happen. This
- * builds; it does not register. Registration is that same door's: it calls this, puts the result in
- * the table under first-come-wins, and hands back the state the table actually holds. Not exported
- * from the package for the same reason: an externally assembled state can enter no table, so a public
- * assembly would be surface with no reader.
+ * 服务是必填实参而不是 options，这让窄门的保证成为结构性的：唯一调用者是
+ * {@link Agent.assembleAgentStateBySession}，它递自己的三只，调用方无法够到这个函数去在第二只
+ * `SettingManager` 之上装配状态——`adopt` 曾允许而无人检查的失配，在此无处发生。这里只构建、
+ * 不注册。注册是同一扇门的事：它调用本函数，把结果按先到先得放进表里，交回表实际持有的那个状态。
+ * 不从包导出也是同一个理由：外部装配的状态进不了任何表，公开的装配就是一个没有读者的面。
  *
- * Records nothing: a session opened and never spoken to does not grow entries, and neither does one
- * opened on another model or level than the branch last used — a write happens when something is
- * actually chosen (`applyModelSelection`) or when the first request is built (`recordSelection`).
+ * 什么都不记录：打开后从未说话的会话不长 entry，打开在另一行或另一档的会话也不写——落笔发生在
+ * 真正做出选择时（`applyModelSelection`）或第一个请求被构建时（`recordSelection`）。
  */
 export async function assembleSession(services: SessionServices, options: AssembleAgentStateOptions): Promise<AgentState> {
 	const { workDirAbsPath, settings } = await assemble(services, options);
 	const session = options.session;
-	// First touch creates the state: the live half is empty — its queue modes are the settings' answer
-	// at this moment, read live through the manager; a config patch moves them on the queues in place
-	// afterwards — and the transcript is *not* part of it (ADR-0019). The one exception is a bag whose
-	// files do not exist yet: no replay can produce it, so it is the live half's own field until the
-	// first write puts it on disk.
+	// 首次触碰创建状态：live 半是空的——它的队列模式是设置此刻的答案，经 manager 实时读取；之后的
+	// config 补丁原地挪动队列上的模式——transcript *不是*它的一部分（ADR-0019）。唯一的例外是文件
+	// 还不存在的袋：重放造不出它，所以它是 live 半自己的字段，直到第一次写入把它落盘。
 	const live = createLive(settings.getSteeringMode(workDirAbsPath), settings.getFollowUpMode(workDirAbsPath));
 	if (!session.fileCreated) live.unwritten = session;
-	// The choice the assembly resolved is *derived* by every later read (`modelChoiceOf`), not seeded
-	// onto the bag: a seeded bag is a copy, and a copy is what a replay throws away. The one part of
-	// the answer no derivation can reproduce is an override the caller named — nothing writes it to
-	// the transcript — so that, and only that, is kept, on the live half it belongs to.
+	// 装配解析出的选择由之后每次读取*派生*（`modelChoiceOf`），不播种到袋上：播种的袋是一份副本，
+	// 而副本正是重放要丢掉的东西。派生无法重现的只有调用方点名的覆盖——没有任何东西把它写进
+	// transcript——所以保住的只有它，放在它所属的 live 半上。
 	if (options.model !== undefined || options.thinkingLevel !== undefined) {
 		live.openedOn = {
 			...(options.model === undefined ? {} : { name: options.model }),

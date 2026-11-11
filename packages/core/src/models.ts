@@ -15,75 +15,65 @@ import { anthropicCompatFor } from "./anthropic-models.ts";
 import { AGENT_HOME } from "./config.ts";
 import type { ModelOption } from "./protocol.ts";
 
-/** The class itself, so a caller that only wants "a model" does not reach into the transport package. */
+/** 类本身，让只想要「一个模型」的调用方不必伸手进传输层包。 */
 export { Model } from "./llm/index.ts";
 
-/** The shape a row is written down in, re-exported so a caller need not name the package it lives in. */
+/** 一行写下来时的形状，转发出去让调用方不必点名它所在的包。 */
 export type { ModelConfig } from "./llm/index.ts";
 
 /**
- * The models this installation runs, as configs a person wrote.
+ * 本安装所运行的模型，以人写下的 config 形式。
  *
- * There is no built-in catalog. pi-ai ships one, and it is deliberately not used: which endpoints
- * exist, what they cost, and how large their context is are all things the person paying the bill
- * knows better than a list compiled into a dependency. What pi-ai is still used for is everything
- * *after* the model is known — assembling the request, streaming the answer, retry classification,
- * thinking levels — which is the part worth not writing ourselves.
+ * 没有内置目录。pi-ai 自带一份，有意不用：哪些端点存在、各自多少钱、上下文多大，这些事付账单的人
+ * 比编译进依赖的清单更清楚。pi-ai 仍然被用的是模型确定*之后*的一切——组装请求、流式返回、重试
+ * 分类、思考档位——那才是值得不自己写的部分。
  *
- * Upstream pi-ai routed through a provider registry, where a provider owned a key and a base URL and a
- * set of models; that registry earned its keep when one host spoke several APIs with several credential
- * kinds, and this one does neither. A row already *is* "one endpoint, one key", so the registry held
- * one entry per row and its only content was a string the row already had. It is gone, and the key
- * travels from the row to the request directly.
+ * 上游 pi-ai 经一个 provider registry 路由：provider 拥有密钥、base URL 和一组模型；当一台宿主要用
+ * 几种凭据形态说几种 API 时，那个 registry 才有价值，而这里两者都不需要。一行*就是*「一个端点、
+ * 一把密钥」，所以 registry 只是每行一条、内容仅剩行里已有的一个字符串。它被删了，密钥直接从行
+ * 走到请求。
  *
- * A row *is* a {@link ModelConfig}, and this file no longer keeps a second shape for it. There used to
- * be two: `UserModel`, the sparse facts a person typed, and `ModelInit`, the complete field table a
- * request needs, with `modelInitFor()` translating between them. That translation was one-way, held no
- * state, and lived for one call stack — the sign that the split was not doing work. The fields that
- * differed are constants of this build: `api` can only be one string, `input` can only be text, and
- * `cost` is unmeasured. Constants belong as defaults where the model is built, not as a mapping in the
- * layer above. So there is one shape now, owned by the package that constructs models from it, and the
- * stored file already has that shape.
+ * 一行*就是*一个 {@link ModelConfig}，本文件不再为它保留第二种形状。曾经有两个：`UserModel`，人
+ * 敲下的稀疏事实；`ModelInit`，请求所需的完整字段表，中间靠 `modelInitFor()` 翻译。那段翻译是单向
+ * 的、不持状态、只活在一层调用栈里——这是拆分没有在干活的信号。有差异的字段是本构建的常量：
+ * `api` 只能是一个字符串，`input` 只能是文本，`cost` 未计量。常量该作为构造模型处的默认值存在，
+ * 而不是上一层的一张映射。所以现在只有一个形状，由用它构造模型的包拥有，存储文件已经是这个形状。
  *
- * Two things stayed here instead of moving into `Model`. Which compat flags and thinking levels a
- * given wire id takes, because `anthropic-models.ts` is knowledge about endpoints rather than about
- * the transport. And the rules about what may be stored at all — {@link coerceModelConfig} — because
- * a config that came from a window or a text editor is not yet a config this app will send.
+ * 两样东西留在这里而不是搬进 `Model`：一个 wire id 对应哪些 compat 标志与思考档位，因为
+ * `anthropic-models.ts` 是关于端点的知识而不是关于传输层的；以及「什么才允许被存下来」的规则
+ * （{@link coerceModelConfig}），因为来自窗口或文本编辑器的 config 还不是本应用愿意发送的 config。
  */
 
-/** The defaults a new row starts from, so the form never shows an empty numeric field. */
+/** 新行起步的默认值，让表单永远不出现空的数字字段。 */
 export const NEW_MODEL_DEFAULTS = {
 	contextWindow: 200_000,
 	maxTokens: 8_192,
 };
 
 /**
- * The row a session opens on when nothing more specific names one.
+ * 没有更具体的指名时，会话打开所在的那一行。
  *
- * Hardcoded on purpose. Assembly used to answer this with "whichever row the user wrote first", which
- * is a guess that only looks like an answer when the first row happens to be the one they want: a
- * `models.json` rewritten by a repair script or a smoke run silently moves the default, and a stored
- * preference naming a row that has since been deleted moves it again. Naming the model here instead
- * means every session that nothing overrules opens on `deepseek-flash`, whatever order the file is in.
+ * 有意硬编码。装配曾用「用户写的第一行」来回答这个问题，那是个只在第一行恰好是用户想要的那行时
+ * 才显得像答案的猜测：被修复脚本或 smoke 重写的 `models.json` 会悄悄挪动默认值，而存储的偏好指向
+ * 一行已被删除的模型时又会挪一次。在这里点名模型，意味着凡是没有被谁推翻的会话都打开在
+ * `deepseek-flash` 上，无论文件是什么顺序。
  *
- * This is the *default*, not an override: `settings.model` still names the row for new sessions, and
- * the composer still moves the session on screen. The same name is what the client plants when a
- * machine has no rows at all — see `DEFAULT_MODEL` in `packages/web/src/default-model.ts`, which
- * restates the literal because that module is bundled for the browser and this one runs on Node.
+ * 这是*默认*，不是覆盖：`settings.model` 仍为新会话指名，输入框仍能在窗口里挪动会话。机器一行都
+ * 没有时，客户端种下的也是这个名字——见 `packages/web/src/default-model.ts` 的 `DEFAULT_MODEL`，
+ * 那边重述一遍字面量，因为那个模块为浏览器打包，而这个跑在 Node 上。
  */
 export const DEFAULT_MODEL_NAME = "deepseek-flash";
 
-/** Where the rows live. One file, beside the settings and the sessions. */
+/** 模型行所在之处。一个文件，与设置、会话放在一起。 */
 export function modelsPath(agentDir: string = AGENT_HOME): string {
 	return join(agentDir, "models.json");
 }
 
 /**
- * The user's models, read from and written to one JSON file.
+ * 用户的模型，读写于一个 JSON 文件。
  *
- * Read on every {@link list} rather than cached, because the file is small and hand-editable: someone
- * who adds a row with an editor should not have to restart the app to see it, and a cache would make
- * that the surprising behaviour rather than the obvious one.
+ * 每次 {@link list} 都重读而不是缓存，因为文件又小又可手编：用编辑器加了一行的人不该为了看见它而
+ * 重启应用，缓存会把显然的行为变成令人惊讶的行为。
  */
 export class ModelConfigStore {
 	private readonly absFile: string;
@@ -96,7 +86,7 @@ export class ModelConfigStore {
 		return new ModelConfigStore(modelsPath(agentDir));
 	}
 
-	/** The stored configs, in the order they were written. A missing or unreadable file is no rows. */
+	/** 已存的 config，按写入顺序。文件缺失或读不了就是没有行。 */
 	list(): ModelConfig[] {
 		let text: string;
 		try {
@@ -124,7 +114,7 @@ export class ModelConfigStore {
 		return rows;
 	}
 
-	/** Replace every row. The whole-list write is what keeps the names and the file from drifting apart. */
+	/** 替换全部行。整表写入正是名字与文件不漂移的原因。 */
 	replace(models: readonly ModelConfig[]): void {
 		mkdirSync(dirname(this.absFile), { recursive: true });
 		writeFileSync(this.absFile, `${JSON.stringify({ models }, null, "\t")}\n`, "utf8");
@@ -132,22 +122,19 @@ export class ModelConfigStore {
 }
 
 /**
- * The placeholder's name, kept deliberately out of the way of any user row.
+ * 占位模型的名字，有意避开所有用户行。
  *
- * A name is the whole identity of a row now, so this is what stops a user's own row from being mistaken
- * for "nothing configured". {@link coerceModelConfig} refuses it outright, because the alternative — quietly
- * storing the row under a different name — would mean the settings panel showed a name the user did not
- * type.
+ * 名字如今是一行的全部身份，所以靠它拦住用户自己的行被误认成「未配置」。{@link coerceModelConfig}
+ * 直接拒绝它，因为另一种做法——悄悄换个名字存下来——意味着设置面板显示一个用户没敲过的名字。
  */
 const UNCONFIGURED_NAME = "my-agent:unconfigured";
 const UNCONFIGURED_MODEL_ID = "no-model";
 
 /**
- * The field table the placeholder answers with, and the one a choice with no name falls back on.
+ * 占位模型作答所用的字段表，也是无名选择回落到的那一份。
  *
- * The endpoint points nowhere on purpose: a request to it is never made, because the transport
- * answers for the placeholder before anything is sent. The window is a real one so a usage read has
- * something to measure against.
+ * 端点有意指向无处：对它的请求从不发出，因为传输层会在任何东西发出之前替占位模型作答。窗口是一
+ * 个真实数字，让 usage 读数有可对照的量。
  */
 const PLACEHOLDER_CONFIG: ModelConfig = {
 	id: UNCONFIGURED_MODEL_ID,
@@ -157,45 +144,39 @@ const PLACEHOLDER_CONFIG: ModelConfig = {
 	maxTokens: NEW_MODEL_DEFAULTS.maxTokens,
 };
 
-/** Whether a name is the placeholder's rather than a row the user could have entered. */
+/** 一个名字是否属于占位模型，而不是用户可能输入的某一行。 */
 function isReserved(name: string): boolean {
 	return name === UNCONFIGURED_NAME;
 }
 
 /**
- * Turn one incoming row into a stored one, or undefined when it cannot be.
+ * 把一行进来的数据变成可存储的一行，做不到时返回 undefined。
  *
- * A name is not made unique here: it *is* the row's identity, so silently suffixing a duplicate would
- * change what every transcript referring to it means. The caller decides what a collision is — the
- * settings panel refuses the whole list and says so — and this only refuses what cannot be stored at
- * all: a reserved name, a missing model id, or a missing base URL.
+ * 这里不给名字做唯一化：名字*就是*行的身份，悄悄给重复名加后缀会改变每份提及它的 transcript 的
+ * 含义。冲突如何裁决由调用方决定——设置面板拒绝整份列表并明说——这里只拒绝根本无法存储的：
+ * 保留名、缺 model id、缺 base URL。
  *
- * `label` is read as a name for a row written before a name was the identity, so an upgrade keeps the
- * names the user chose rather than the slugs they never saw. It costs the old refs, which were built
- * from those slugs: a session recorded against one of them comes up with no model and says to pick one.
- * That is the same account a rename or a deletion settles, and it is paid once rather than left as a
- * panel full of slugs forever.
+ * `label` 作为名字读取，服务于名字成为身份之前写下的行，升级时保住的是用户选过的名字，而不是
+ * 他们从未见过的 slug。代价是旧 ref——它们由那些 slug 构成：按旧 ref 记录的会话打开时没有模型，
+ * 并提示选一个。这与重命名或删除结的是同一笔账，一次付清，好过永远留一块满是 slug 的面板。
  */
 export function coerceModelConfig(input: unknown): ModelConfig | undefined {
 	if (!isRecord(input)) return undefined;
 
-	// `id` is the field's name now. `modelId` is what every file written before the config became the
-	// row spends it under, so both are read: an upgrade keeps the endpoints it already had instead of
-	// emptying a list of models the user entered by hand.
+	// `id` 是这个字段如今的名字。在 config 变成行之前写下的每个文件都把它记作 `modelId`，所以两个
+	// 都读：升级保住已有的端点，而不是清空用户手工录入的模型列表。
 	const id = stringOrUndefined(input.id) ?? stringOrUndefined(input.modelId);
 	if (id === undefined) return undefined;
 
-	// A config added before the user has thought about what to call it takes the wire id as its name,
-	// which is the same field they would have to fill in anyway.
+	// 用户还没想好叫什么时添加的 config，拿 wire id 当名字——反正那个字段他们横竖要填。
 	const name = stringOrUndefined(input.name) ?? stringOrUndefined(input.label) ?? id;
 	if (isReserved(name)) return undefined;
 
 	const baseUrl = stringOrUndefined(input.baseUrl);
 	if (baseUrl === undefined) return undefined;
 
-	// Only the fields a person can meaningfully name are copied. `api`, `input`, and `cost` are
-	// constants of this build, so they are not read back out of a file that could claim otherwise —
-	// the same reason a submitted config does not get to choose its own transport.
+	// 只复制人能有意义指名的字段。`api`、`input`、`cost` 是本构建的常量，不从可能另有所称的文件里
+	// 读回——与提交的 config 无权挑选自己的传输层是同一个道理。
 	return {
 		id,
 		name,
@@ -206,18 +187,17 @@ export function coerceModelConfig(input: unknown): ModelConfig | undefined {
 	};
 }
 
-// ---------------------------------------------------------------------------- one config as a model
+// ---------------------------------------------------------------------------- 一份 config 成为一个模型
 
 /**
- * The config with the facts its wire id implies filled in.
+ * 补上 wire id 所隐含事实之后的 config。
  *
- * `compat` is the one thing a person cannot know and should not be asked: it describes the endpoint
- * behind an id, and `anthropic-models.ts` is where that table lives.
+ * `compat` 是人不可能知道、也不该被问的那件事：它描述 id 背后的端点，那张表住在
+ * `anthropic-models.ts`。
  *
- * Nothing else is added here. The constants a config never names — `api`, `input`, `cost` — are
- * defaulted inside `Model`'s constructor, in the package that knows what they can be. This function is
- * the only translation left between "what a person wrote" and "what a request needs", and it exists
- * because app knowledge could not follow the constants into the transport.
+ * 这里不添加别的。config 从不指名的常量——`api`、`input`、`cost`——在 `Model` 的构造函数里补
+ * 默认值，那是知道它们可能是什么的包。这个函数是「人写了什么」与「请求需要什么」之间仅剩的翻译，
+ * 它存在的原因是应用层知识无法跟着常量走进传输层。
  */
 function withCapabilities(config: ModelConfig): ModelConfig {
 	const compat = config.compat ?? anthropicCompatFor(config.id);
@@ -225,17 +205,14 @@ function withCapabilities(config: ModelConfig): ModelConfig {
 }
 
 /**
- * One config as the model a request is made with.
+ * 一份 config，作为发起请求所用的模型。
  *
- * The level is the second half of the same idea: it rides on the model, so "which endpoint" and "how
- * hard" are one object a request is made with and there is nowhere else for a strength to come from.
- * It is normalized here, so a string this app has no name for lands on "off" rather than on a value
- * the endpoint rejects. Omitted leaves the model with no level at all, which the wire reads as "do
- * not think" — what a caller building a model for a job of its own wants.
+ * 档位是同一想法的另一半：它骑在模型上，「哪个端点」与「多用力」是发起请求的同一个对象，强度再
+ * 无别处可来。在这里规范化，应用叫不出名字的字符串落到 "off"，而不是落到端点会拒绝的值上。省略
+ * 则让模型完全没有档位，wire 读作「不思考」——这正是为自己的差事造模型的调用方想要的。
  *
- * `transport` is how this model will be sent. Left out, the model uses the package's one transport; a
- * session passes its own, which is where the retry policy and the "no row behind this model" answer
- * live.
+ * `transport` 是这个模型的发送方式。省略时用本包唯一的传输层；会话传入自己的，重试策略与「这个
+ * 模型背后没有行」的答案都住在那里。
  */
 export function createModel(config: ModelConfig, thinkingLevel?: string, transport?: ChatTransport): Model {
 	const model = new Model(withCapabilities(config), transport);
@@ -244,73 +221,66 @@ export function createModel(config: ModelConfig, thinkingLevel?: string, transpo
 }
 
 /**
- * The model a session runs on when the user has entered none.
+ * 用户一行都没输入时，会话运行所用的模型。
  *
- * A session still has to be built with *some* model, or the window cannot open far enough to tell
- * anyone what is missing: the failure has to arrive as a message in the transcript, where the fix can
- * be described, rather than as a server that refuses to serve a session. So this is a real model whose
- * row does not exist, and {@link unconfiguredStream} is what answers for it. Its name is the reserved
- * one, which is what {@link isUnconfigured} tests and what no stored row may claim.
+ * 会话横竖得用*某个*模型构建，否则窗口开不到能告诉别人缺了什么的地方：失败必须以 transcript 里
+ * 一条消息的形态抵达——在那里才能描述怎么修——而不是以一台拒绝服务会话的服务器的形态。所以这
+ * 是一个真实存在但其行不存在的模型，替它作答的是 {@link unconfiguredStream}。它的名字是那个保留名，
+ * {@link isUnconfigured} 测的就是它，任何存储行都不得占用。
  */
 export function placeholderModel(transport?: ChatTransport): Model {
 	return createModel(PLACEHOLDER_CONFIG, undefined, transport);
 }
 
-/** Whether a model is the placeholder rather than something the user entered. */
+/** 一个模型是否是占位模型，而不是用户输入的东西。 */
 export function isUnconfigured(model: { name: string }): boolean {
 	return model.name === UNCONFIGURED_NAME;
 }
 
-// ---------------------------------------------------------------------------- the stateless surface
+// ---------------------------------------------------------------------------- 无状态门面
 
 /**
- * What a session is on: the row's name, and how hard it is asked.
+ * 会话运行在什么之上：行的名字，以及被要求多用力。
  *
- * This is the whole of a session's model state, and deliberately nothing more. Everything a request
- * needs beyond it — the endpoint, the key, the window, the compat flags — belongs to the row the name
- * points at, and is read from the catalog at the moment a model is built ({@link modelFor}), never
- * copied in here. A copy is a second thing that has to be kept in step with an edit to the file; a
- * name is not.
+ * 这是会话模型状态的全部，有意别无其他。请求在此之外需要的一切——端点、密钥、窗口、compat 标志
+ * ——属于名字指向的那一行，在构造模型的时刻从目录现读（{@link modelFor}），从不复制进来。副本
+ * 是第二件要跟着文件编辑保持同步的东西；名字不是。
  *
- * The shape is the composer's own ({@link ModelSelection}) with the field named for what it is: the
- * wire calls it `model` because a window is picking a name off a list, while everything inside this
- * package calls a row by its name.
+ * 形状与输入框自己的（{@link ModelSelection}）相同，字段按其本相命名：wire 叫它 `model`，因为
+ * 窗口是在从列表里挑一个名字，而包内的一切都按名字称呼行。
  */
 export type ModelChoice = {
-	/** The row's name — the identity the panel shows and the transcript records. */
+	/** 行的名字——面板显示、transcript 记录的身份。 */
 	name?: string;
 	/**
-	 * The level as it arrived, verbatim. {@link modelFor} normalizes it, so a string the app has no
-	 * name for lands on "off" by the time it is asked at. Undefined means nothing was asked for, which
-	 * the wire reads as "do not think".
+	 * 档位按到达时的原样保存。{@link modelFor} 会规范化它，所以应用叫不出名字的字符串在被问到的
+	 * 时刻已落在 "off" 上。undefined 表示没有被要求过，wire 读作「不思考」。
 	 */
 	thinkingLevel?: string;
 };
 
-/** The row a choice names, or undefined when no row answers it. */
+/** 选择所点名的行，没有行应答时为 undefined。 */
 export function rowFor(choice: ModelChoice, catalog: readonly ModelConfig[]): ModelConfig | undefined {
 	return catalog.find((candidate) => candidate.name === choice.name);
 }
 
 /**
- * The model a choice names: looked up in the catalog, built fresh, used for one request, dropped.
+ * 一个选择所点名的模型：在目录里现查、现建、只用于一次请求、用完即丢。
  *
- * The lookup is by name — a row's name is its identity — and it happens here, once per construction,
- * instead of being laid into the choice beforehand. That is what makes a corrected key, a moved
- * endpoint, or a resized window reach the very next request with no invalidation step and nothing to
- * keep in step: there is no copy to go stale.
+ * 查找按名字——行的名字是它的身份——且在这里、每次构造时进行，而不是提前铺进选择里。这正是让
+ * 一把修正的密钥、一个挪走的端点、一个改过的窗口无需任何失效步骤、无需任何同步就抵达下一次请求
+ * 的原因：没有副本会变陈旧。
  *
- * A name no row answers does not throw. A session still has to be buildable — a snapshot, a usage
- * meter, and a failure message all need a well-formed model — so this answers with the placeholder's
- * facts under the name that was asked for, and the transport's own "no row behind this model" check
- * ({@link unconfiguredStream}) is what refuses to send anything. The level is normalized in `createModel`,
- * so a string this app has no name for lands on "off" rather than on a value the endpoint rejects.
+ * 没有行应答的名字不抛错。会话横竖要能构建——快照、usage 表、失败消息都需要一个良构的模型——
+ * 所以这里以占位模型的事实、按被要求的名字作答，而传输层自己的「这个模型背后没有行」检查
+ * （{@link unconfiguredStream}）才是拒绝发送的东西。档位在 `createModel` 里规范化，应用叫不出名字
+ * 的字符串落在 "off"，而不是端点会拒绝的值上。
  */
 export function modelFor(choice: ModelChoice, catalog: readonly ModelConfig[], transport?: ChatTransport): Model {
 	const row = rowFor(choice, catalog);
 	if (row !== undefined) return createModel(row, choice.thinkingLevel, transport);
-	// The chosen name is kept rather than replaced: a window looking at a session whose row was
-	// deleted should say which model it lost, not that it has none.
+	// 保留被选的名字而不是替换掉：窗口看着一个行被删掉的会话时，该说的是它失去了哪个模型，
+	// 而不是它没有模型。
 	const placeholder: ModelConfig =
 		choice.name === undefined ? PLACEHOLDER_CONFIG : { ...PLACEHOLDER_CONFIG, name: choice.name };
 	return createModel(placeholder, choice.thinkingLevel, transport);
@@ -326,11 +296,10 @@ const ZERO_USAGE: AssistantMessage["usage"] = {
 };
 
 /**
- * The answer that explains itself.
+ * 会自己解释的答案。
  *
- * Written by hand because there is no request to make: the whole point of a session with no row is to
- * fail with a sentence the user can act on, in the transcript where they are already looking. It is
- * shaped like any transport's stream, so the engine reads it the way it reads a real failure.
+ * 手写而成，因为没有请求可发：无行会话的全部意义，就是在用户正盯着看的 transcript 里，以一句
+ * 用户能照着行动的话失败。它的形状与任何传输层的流一致，引擎读它如同读一次真实的失败。
  */
 export function unconfiguredStream(model: Model<Api>): AssistantMessageEventStream {
 	const stream = createAssistantMessageEventStream();
@@ -344,8 +313,7 @@ export function unconfiguredStream(model: Model<Api>): AssistantMessageEventStre
 		errorMessage: "No model is configured yet. Open Settings and add one, then pick it for this session.",
 		timestamp: Date.now(),
 	};
-	// Pushed asynchronously so a caller that attaches to the stream before it ends — the engine does —
-	// sees the failure the same way it would see a transport's.
+	// 异步推送，让在流结束之前就挂上来的调用方——引擎正是——能像看到传输层的失败那样看到它。
 	queueMicrotask(() => {
 		stream.push({ type: "error", reason: "error", error: message });
 		stream.end();
@@ -353,9 +321,9 @@ export function unconfiguredStream(model: Model<Api>): AssistantMessageEventStre
 	return stream;
 }
 
-// ---------------------------------------------------------------------------- lookup
+// ---------------------------------------------------------------------------- 查找
 
-/** The rows, narrowed to what a client may see. The key itself never leaves the server. */
+/** 各行收窄成客户端可见的样子。密钥本身永不离开服务器。 */
 export function listModelOptions(models: readonly ModelConfig[]): ModelOption[] {
 	return models.map((config) => {
 		const built = createModel(config);
@@ -366,43 +334,40 @@ export function listModelOptions(models: readonly ModelConfig[]): ModelOption[] 
 			baseUrl: config.baseUrl,
 			contextWindow: config.contextWindow,
 			maxTokens: config.maxTokens,
-			// The levels travel with the row so a composer that moves the model has the list before the
-			// move reaches the server. It is the same four for every row; the field stays because the
-			// composer reads one shape whether the row is stored, planted or reported by a session.
+			// 档位随行一起走，让要挪模型的输入框在挪动抵达服务器之前就拿到列表。每一行都是同样四个；
+			// 字段保留是因为无论行是存储的、种下的还是会话报告的，输入框读的都是同一个形状。
 			thinkingLevels: [...getSupportedThinkingLevels()],
 			hasApiKey: (config.apiKey ?? "").length > 0,
 		};
 	});
 }
 
-/** Every thinking level a session can be in, lowest first. */
+/** 会话可能处于的每个思考档位，从低到高。 */
 export function thinkingLevelsFor(): string[] {
 	return [...getSupportedThinkingLevels()];
 }
 
 /**
- * Thinking levels a session can be in.
+ * 会话可能处于的思考档位。
  *
- * The scale is the transport's, re-exported so a caller in this package does not reach for
- * `./llm/index.ts` merely to spell a level — and re-exported rather than restated, because two
- * hand-written copies of four string literals is the drift this file just spent a type removing.
+ * 阶梯是传输层的，转发出去让包内调用方不必为了拼一个档位伸手去 `./llm/index.ts`——转发而不是
+ * 重述，因为四个字符串字面量手写两份，正是本文件刚用一个类型消灭的漂移。
  */
 export type ThinkingLevel = LlmThinkingLevel;
 
 /**
- * A requested level as one this app can record.
+ * 把被要求的档位变成本应用能记录的档位。
  *
- * The set is the same for every model — an effort is the one strength the wire carries — so this is a
- * name check, not a clamp: a string the app has no name for, and the caller that asked for nothing,
- * both land on "off". That is the honest answer for "nothing was asked", and it is the request that
- * says so on the wire.
+ * 集合对每个模型都一样——effort 是 wire 携带的唯一强度——所以这是名字检查，不是钳制：应用叫不出
+ * 名字的字符串，与什么都没要求的调用方，都落在 "off"。这是对「没有被要求」的诚实回答，并且在
+ * wire 上把这一点说出来的是请求本身。
  */
 export function normalizeThinkingLevel(level: string | undefined): ThinkingLevel {
 	const allowed = getSupportedThinkingLevels();
 	return allowed.includes(level as LlmThinkingLevel) ? (level as ThinkingLevel) : "off";
 }
 
-// ---------------------------------------------------------------------------- parsing
+// ---------------------------------------------------------------------------- 解析
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);

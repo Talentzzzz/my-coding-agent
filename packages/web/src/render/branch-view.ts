@@ -2,55 +2,48 @@ import { element } from "../dom.ts";
 import { findWay, type BranchTree, type BranchWay } from "../state.ts";
 
 /*
- * The branch page: **the line you are reading, drawn left to right, with the ways that left it hanging
- * below** — column = one more user message to the right, row = another way.
+ * 分支页：**正在读的线，从左往右画，离开它的路挂在下面** —— 列 = 右边多一条用户消息，行 = 另一条路。
  *
- * The line is the trunk and it is always drawn, even when nothing has forked: a conversation with no
- * branch points still has its questions, and "which question do I want to go back to" is the question
- * the page answers. A fork is a card below the card it left from, and the way being read keeps the top
- * row, so it reads end to end as one horizontal line.
+ * 线是主干且总是画出，即使什么都没派生过：没有分支点的对话仍然有它的问题，而"我想回到哪个问题"
+ * 正是这个页面回答的问题。一次派生是挂在它离开的卡片下面的卡片，被读的那条路保有顶行，于是它
+ * 从头到尾读作一条水平线。
  *
- * Interaction is the two-beat the prototype settled on: a click on a card only **selects** it, and the
- * button in the fixed header is what moves the session and returns to the conversation. A card on the
- * line lands on the answer its question produced (see {@link BranchWay.replyId}), a card that left the
- * line follows it to where its own work stopped — and the page itself carries no prose: the cards are
- * the whole of the explanation, so a tree that fits the window reads as just that. Nothing hangs over
- * them either: a card has no tooltip, because the tree is what the page is showing and a hover that
- * covered the row below it would be answering a question nobody asked.
+ * 交互是原型定下的两拍：点击卡片只是**选中**，固定头部的按钮才移动会话并回到对话。线上的卡片
+ * 落在其问题产出的回答上（见 {@link BranchWay.replyId}），离开线的卡片沿它走到自己工作停下的
+ * 地方 —— 页面本身不带任何说明文字：卡片就是全部的解释，装得下窗口的树读起来就只是那些卡片。
+ * 卡片上方也不挂任何东西：卡片没有 tooltip，因为树才是页面要展示的东西，遮住下一行的悬停是在
+ * 回答没人问过的问题。
  *
- * The canvas behaves like a map rather than a scroll box: the layer carries one `translate` and one
- * `scale`, the press moves the translate directly, and the wheel pans. It used to pan by writing
- * `scrollLeft` / `scrollTop` into an overflow box, whose scroll range was the graph's own size — so a
- * graph that fitted the window (which is what `enter` fits it to) had no range at all, and dragging did
- * nothing. Panning has no such precondition: a map can be dragged even when it is smaller than the
- * window.
+ * 画布表现得像地图而不是滚动盒：层只带一个 `translate` 和一个 `scale`，按住直接移动 translate，
+ * 滚轮平移。过去它靠往 overflow 盒里写 `scrollLeft` / `scrollTop` 来平移，滚动范围就是图自身的
+ * 大小 —— 于是装得下窗口的图（`enter` 正是把它装到窗口里的）完全没有范围，拖动什么都不做。
+ * 平移没有这种前提：比窗口小的地图照样能拖。
  */
 
-const NODE_W = 268; // A card's width.
-const STEP_X = 300; // How much further right the next message sits.
-const DOT_R = 4.5; // The dot on the line.
-const DOT_X = 12; // The dot's distance from its card's left edge.
-const PAD = 24; // Room kept around the graph when it is fitted.
+const NODE_W = 268; // 卡片宽度。
+const STEP_X = 300; // 下一条消息再向右多少。
+const DOT_R = 4.5; // 线上的圆点。
+const DOT_X = 12; // 圆点距其卡片左缘的距离。
+const PAD = 24; // 图被装下时四周保留的空隙。
 const ZOOM_MIN = 0.4;
 const ZOOM_MAX = 3;
-/** The short id a card and the header's entry both show: the entry id's first few characters. */
+/** 卡片和头部条目都显示的短 id：条目 id 的前几个字符。 */
 const SHORT_ID = 7;
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 export interface BranchViewOptions {
 	/**
-	 * Move the session onto a way and return to the conversation.
+	 * 把会话移到一条路上并回到对话。
 	 *
-	 * `entryId` is the entry the leaf lands on: for a card that left the line, the way's own entry
-	 * (the caller follows it to its tip); for a card on the line, the answer the question produced
-	 * when there is one, the question itself when there is not.
+	 * `entryId` 是叶子落地的条目：对离开线的卡片，是那条路自己的条目（调用者沿它走到尖端）；对
+	 * 线上的卡片，是问题产出的回答（若有），没有则是问题本身。
 	 */
 	onSwitch(entryId: string, landing: BranchWay["landing"]): void;
-	/** Return to the conversation without moving. */
+	/** 不移动、只回到对话。 */
 	onBack(): void;
 }
 
-/** One laid-out card: a way, placed in the grid. */
+/** 一张已布局的卡片：一条路，放在网格里。 */
 interface LaidNode {
 	way: BranchWay;
 	depth: number;
@@ -63,11 +56,11 @@ interface Layout {
 	height: number;
 }
 
-/** The branch page, and the fixed header's own row of branch tools. */
+/** 分支页，以及固定头部自己的分支工具行。 */
 export class BranchView {
-	/** The page itself: the pan-and-zoom viewport, with nothing above it. */
+	/** 页面本身：平移缩放视口，上面没有任何东西。 */
 	readonly element: HTMLElement;
-	/** The tools row that lives in the fixed header, under the title. */
+	/** 住在固定头部、标题之下的工具行。 */
 	readonly toolsBar: HTMLElement;
 
 	private readonly options: BranchViewOptions;
@@ -81,17 +74,17 @@ export class BranchView {
 
 	private tree: BranchTree | undefined;
 	private streaming = false;
-	/** Whether the page is the one on screen; painting waits for it, because fitting needs a size. */
+	/** 页面是否是屏幕上的那一个；绘制等它，因为装下需要尺寸。 */
 	private open = false;
 	private zoom = 1;
-	/** The layer's translation, in viewport pixels — the whole of the pan. */
+	/** 层的平移量，视口像素 —— 平移的全部。 */
 	private x = PAD;
 	private y = PAD;
-	/** The way the page has picked but not yet applied; starts on the way being read. */
+	/** 页面已选中但尚未应用的路；从正在读的那条开始。 */
 	private selected: string | undefined;
 	private laid: Layout | undefined;
 
-	/** Pan bookkeeping: where the press started, and the translation it started from. */
+	/** 平移簿记：按压开始的位置，以及它开始时的平移量。 */
 	private drag: { x: number; y: number; atX: number; atY: number } | undefined;
 	private dragged = false;
 
@@ -109,7 +102,7 @@ export class BranchView {
 		zoomGroup.append(this.zoomOut, this.zoomValue, this.zoomIn, this.zoomFit);
 		this.toolsBar = element("div", "branch-tools");
 		this.toolsBar.append(element("span", "header-spacer"), zoomGroup, this.back);
-		// The tools row belongs to the branch page; it shows when the page does, and not before.
+		// 工具行属于分支页；页面显示时它才显示，之前绝不。
 		this.toolsBar.hidden = true;
 
 		this.zoomOut.addEventListener("click", () => this.zoomAt(this.zoom / 1.2));
@@ -126,8 +119,7 @@ export class BranchView {
 			if (this.drag === undefined) return;
 			const dx = event.clientX - this.drag.x;
 			const dy = event.clientY - this.drag.y;
-			// Under 4px it is still a "press"; past it the press becomes a pan, with the pointer captured
-			// so the drag keeps tracking outside the viewport.
+			// 小于 4px 仍算"按压"；超过它按压变成平移，捕获指针让拖动在视口外也能持续跟踪。
 			if (!this.dragged && Math.abs(dx) + Math.abs(dy) < 4) return;
 			if (!this.dragged) {
 				this.dragged = true;
@@ -138,8 +130,8 @@ export class BranchView {
 			this.y = this.drag.atY + dy;
 			this.applyTransform();
 		});
-		// The release is where a press that never dragged becomes a click: the pointer decides, not a
-		// `click` event — otherwise a pan would end by selecting whatever card it stopped on.
+		// 松开是把从未拖动的按压变成点击的地方：由指针决定，而不是 `click` 事件 —— 否则一次平移会
+		// 以选中它停下的卡片收场。
 		window.addEventListener("pointerup", (event) => {
 			if (this.drag === undefined) return;
 			const wasDrag = this.dragged;
@@ -155,8 +147,8 @@ export class BranchView {
 			this.dragged = false;
 			this.viewport.classList.remove("panning");
 		});
-		// The wheel is the map's other hand: Ctrl / ⌘ zooms under the pointer, and a bare wheel — or a
-		// two-finger trackpad swipe — pans. Neither has a scroll range to run out of.
+		// 滚轮是地图的另一只手：Ctrl / ⌘ 在指针下缩放，裸滚轮 —— 或触控板双指滑动 —— 平移。
+		// 两者都没有可耗尽的滚动范围。
 		this.viewport.addEventListener(
 			"wheel",
 			(event) => {
@@ -171,7 +163,7 @@ export class BranchView {
 			},
 			{ passive: false },
 		);
-		// Two presses on one card: selection and application in one gesture — "就它了".
+		// 一张卡片上按两下：一个手势里完成选中和应用 —— "就它了"。
 		this.viewport.addEventListener("dblclick", (event) => {
 			if (!(event.target instanceof Element)) return;
 			const card = event.target.closest<HTMLButtonElement>(".gnode");
@@ -182,11 +174,10 @@ export class BranchView {
 	}
 
 	/**
-	 * Fold the newest branch shape in.
+	 * 折入最新的分支形状。
 	 *
-	 * Cheap when nothing moved: the tree only changes on a baseline, so an unchanged reference costs
-	 * one comparison. A tree that changed while the page was hidden is painted on entering, which is
-	 * also when fitting can measure the viewport.
+	 * 什么都不动时很便宜：树只在基线上变化，所以未变的引用只花一次比较。页面隐藏期间变化的树
+	 * 在进入时绘制，那也是唯一能测量视口的时刻。
 	 */
 	render(tree: BranchTree | undefined, streaming: boolean): void {
 		const changed = tree !== this.tree;
@@ -203,7 +194,7 @@ export class BranchView {
 		}
 	}
 
-	/** Show the page: paint the newest tree, fit it, and put the tools row in the header. */
+	/** 显示页面：画最新的树、装下它、把工具行放进头部。 */
 	enter(): void {
 		this.open = true;
 		this.toolsBar.hidden = false;
@@ -217,23 +208,22 @@ export class BranchView {
 	}
 
 	/**
-	 * Re-read the stylesheet's geometry and paint again, for a change the tree cannot report.
+	 * 重读样式表的几何并重画，应对树无法报告的变化。
 	 *
-	 * A card's height and its lane are tokens (`cardMetrics`), and the only thing that moves them is the
-	 * window's font-size setting — which is not a new tree, so `render`'s one comparison would skip the
-	 * paint and leave every card at the height it had before the slider moved. A page that is not open
-	 * needs nothing: `enter` paints on the way in.
+	 * 卡片的高度和所在的行是 token（`cardMetrics`），唯一移动它们的是窗口的字号设置 —— 那不是
+	 * 一棵新树，所以 `render` 的那一次比较会跳过绘制，让每张卡片保持滑块移动前的高度。未打开的
+	 * 页面什么都不需要：`enter` 会在进来时绘制。
 	 */
 	remeasure(): void {
 		if (this.open) this.paint();
 	}
 
-	// ------------------------------------------------------------------ painting
+	// ------------------------------------------------------------------ 绘制
 
 	private paint(): void {
 		const tree = this.tree;
 		if (tree === undefined) {
-			// No tree, no graph: the page waits empty for the first question to land.
+			// 没有树就没有图：页面空等第一个问题落地。
 			this.zoomLayer.replaceChildren();
 			this.laid = undefined;
 			this.paintTools();
@@ -266,18 +256,15 @@ export class BranchView {
 		for (const node of laid.nodes) {
 			const ax = dotX(node.depth) + DOT_R;
 			const ay = dotY(node.lane);
-			// Along the line: the next user message is one column right, on the same row.
+			// 沿线：下一条用户消息在同一行右侧一列。
 			if (node.way.next !== undefined && at.has(node.way.next.entryId)) {
 				drawEdge(`M${ax},${ay} H${dotX(node.depth + 1) - DOT_R}`, node.lane, true);
 			}
-			// Off the line: run along the trunk to the gap in front of the branch's own column, drop
-			// through the gap, and hook right into the card. The gap — between the parent column's
-			// cards, which end `NODE_W` in, and the branch column's, which start at the next step —
-			// is the one strip of x no card ever occupies below the trunk row, so the descent never
-			// slices behind a card the way it did dropping straight down from the dot. The fan counts
-			// down from the gap's right edge, so a later sibling always descends **left** of an
-			// earlier sibling's approach, and the two can never cross; past the gap's width the
-			// descents share the leftmost lane rather than leave it.
+			// 离线：沿主干跑到分支自己那一列之前的空隙，从空隙落下，再向右拐进卡片。空隙 —— 父列
+			// 的卡片在 `NODE_W` 处结束、分支列的卡片从下一步开始之间 —— 是主干行之下没有卡片会占据
+			// 的唯一一条 x 带，所以下降绝不会像过去从圆点垂直下落那样切在卡片背后。扇形从空隙右缘
+			// 往回数，所以更晚的兄弟总是从更早兄弟的进入路径**左侧**下降，两者永不相交；超出空隙
+			// 宽度时，下降共享最左的行而不是另开。
 			node.way.branches.forEach((branch, index) => {
 				const to = at.get(branch.entryId);
 				if (to === undefined) return;
@@ -321,8 +308,8 @@ export class BranchView {
 			card.style.top = `${dotY(node.lane) - metrics.node / 2}px`;
 			card.style.width = `${NODE_W}px`;
 			card.style.height = `${metrics.node}px`;
-			// No `title`: the card is the whole of what the page says about a way, and a hover that
-			// unfolded the message again would cover the tree — the one thing the page exists to show.
+			// 没有 `title`：卡片就是页面关于一条路要说的一切，悬停时把消息再展开一遍会盖住树 ——
+			// 而树正是页面存在的理由。
 			if (way.entryId === this.tree?.currentId) card.dataset.current = "";
 			if (way.entryId === this.selected) card.dataset.selected = "";
 			if (tree.line.has(way.entryId)) card.dataset.onPath = "";
@@ -343,11 +330,11 @@ export class BranchView {
 	}
 
 	/**
-	 * The way the page would move to if the exit button were pressed, or `undefined` when there is
-	 * nothing to move to — no tree, nothing selected, or the way being read is what is selected.
+	 * 如果按下出口按钮，页面将移到的那条路；没有树、没有选中、或选中的就是正在读的那条路时为
+	 * `undefined`。
 	 *
-	 * The button's label, its primary tint, its disabled state, and what a press does all turn on this
-	 * one fact, so it is derived once here rather than spelled again at each of them.
+	 * 按钮的标签、主色调、禁用状态和按下的行为都取决于这一个事实，所以它在这里推导一次，而不是
+	 * 在它们各自那里再写一遍。
 	 */
 	private movingWay(): BranchWay | undefined {
 		const tree = this.tree;
@@ -356,23 +343,22 @@ export class BranchView {
 		return findWay(tree, id);
 	}
 
-	/** The fixed header's row: the zoom fallbacks and the one way out. */
+	/** 固定头部的那一行：缩放兜底，和唯一的出路。 */
 	private paintTools(): void {
 		const moving = this.movingWay();
 		this.back.textContent =
 			moving === undefined ? "回到对话" : moving.landing === "here" ? "从这里继续" : "切到这一条并回到对话";
 		this.back.classList.toggle("primary", moving !== undefined);
-		// A run is writing to the tree the button would move, so the move waits for it to settle — but
-		// only the *move* waits. "回到对话" is the window changing which page it shows and is always
-		// allowed, and the button says which of the two it is refusing rather than looking pressable and
-		// doing nothing. Every paint rewrites this, so the end of the run is what turns it back on.
+		// 运行正在写按钮要移动的树，所以移动等它结束 —— 但只有*移动*等。「回到对话」是窗口更换
+		// 显示的页面，永远允许，按钮说出它拒绝的是两者中的哪个，而不是看起来能按却毫无反应。每次
+		// 绘制都重写它，所以运行的结束就是把它重新打开的东西。
 		this.back.disabled = moving !== undefined && this.streaming;
-		// Deliberately empty when the move is allowed rather than absent: a button that carries no
-		// `title` of its own would still show the last refusal's tooltip on hover.
+		// 允许移动时刻意为空而不是缺失：一个不携带自己 `title` 的按钮，悬停时仍会显示上一次拒绝的
+		// tooltip。
 		this.back.title = this.back.disabled ? "这一轮还在写，等它结束再切" : "";
 	}
 
-	// --------------------------------------------------------------- selection
+	// --------------------------------------------------------------- 选中
 
 	private select(id: string | undefined): void {
 		if (id === undefined || id === this.selected) return;
@@ -381,15 +367,13 @@ export class BranchView {
 	}
 
 	/**
-	 * The one way out of the page: apply what is selected, or just go back.
+	 * 离开页面的唯一出路：应用选中的，或者只是回去。
 	 *
-	 * The run check guards the **move** alone. Returning to the conversation is this window swapping
-	 * which page it shows, which no run can be in the middle of.
+	 * 运行检查只守**移动**。回到对话是本窗口更换显示的页面，没有运行能半途拦住这件事。
 	 *
-	 * A card on the line lands on the **answer** its question produced, not on the question itself —
-	 * the conversation comes back showing the question and what it said, and the next prompt forks
-	 * after the answer, where a new question belongs. A way with no answer yet, and a card that left
-	 * the line, land on their own entry.
+	 * 线上的卡片落在其问题产出的**回答**上，而不是问题本身 —— 对话回来时显示问题和它说的话，
+	 * 下一个提示在回答之后派生新分支，那正是新问题该在的地方。还没有回答的路，和离开线的卡片，
+	 * 落在自己的条目上。
 	 */
 	private applySelection(): void {
 		const moving = this.movingWay();
@@ -402,20 +386,19 @@ export class BranchView {
 		this.options.onSwitch(entryId, moving.landing);
 	}
 
-	// ------------------------------------------------------------------ the map
+	// ------------------------------------------------------------------ 地图
 
-	/** Write the layer's one transform — the whole of pan and zoom. */
+	/** 写层的唯一 transform —— 平移和缩放的全部。 */
 	private applyTransform(): void {
 		this.zoomLayer.style.transform = `translate(${this.x}px, ${this.y}px) scale(${this.zoom})`;
 		this.zoomValue.textContent = `${Math.round(this.zoom * 100)}%`;
 	}
 
 	/**
-	 * Zoom, keeping the point under the pointer (or the viewport's centre) pinned.
+	 * 缩放，保持指针下（或视口中心）的点钉在原处。
 	 *
-	 * The graph point under a viewport point is `(px - x) / zoom`; after the zoom it has to land on the
-	 * same pixel, so the translation is solved from it rather than nudged. There is no scroll box and no
-	 * content size to clamp against: a map does not need one.
+	 * 视口点下的图点是 `(px - x) / zoom`；缩放后它必须落在同一个像素上，所以平移量由它解出，而不是
+	 * 微调。没有滚动盒、没有可夹住的内容尺寸：地图不需要。
 	 */
 	private zoomAt(next: number, clientX?: number, clientY?: number): void {
 		if (this.laid === undefined) return;
@@ -430,7 +413,7 @@ export class BranchView {
 		this.applyTransform();
 	}
 
-	/** The scale that fits the whole graph, width and height both. */
+	/** 装下整张图的缩放比例，宽和高都装下。 */
 	private fitScale(): number {
 		const laid = this.laid;
 		if (laid === undefined) return 1;
@@ -439,7 +422,7 @@ export class BranchView {
 		return Math.min(byWidth, byHeight);
 	}
 
-	/** Entering the page and pressing "适应" both land here: the whole graph, centred, never above 100%. */
+	/** 进入页面和按"适应"都落到这里：整张图，居中，绝不超过 100%。 */
 	private homeZoom(): void {
 		const laid = this.laid;
 		if (laid === undefined) return;
@@ -450,28 +433,26 @@ export class BranchView {
 	}
 }
 
-// --------------------------------------------------------------------- layout
+	// --------------------------------------------------------------------- 布局
 
-/**
- * A card's height and the lane it sits in, as the stylesheet resolves them.
- *
- * Read per paint for the same reason the palette is: a paint is rare, and the font-size slider can
- * move both between one paint and the next.
- */
+	/**
+	 * 卡片的高度与它所在的行，按样式表解析出的值。
+	 *
+	 * 每次绘制读取，理由与调色板相同：绘制很少发生，而字号滑块能在两次绘制之间同时移动两者。
+	 */
 interface CardMetrics {
 	node: number;
 	lane: number;
 }
 
 /**
- * The graph's geometry, measured off a throwaway element rather than parsed off the tokens.
+ * 图的几何，从一次性元素量出，而不是从 token 解析。
  *
- * `--dsw-branch-node-h` is a `calc()` chain, and an **unregistered** custom property's computed value
- * is that token stream with the `calc()` left unevaluated — `getComputedStyle(root).getPropertyValue()`
- * hands back `"calc(calc(13px + calc(22px - 15px)) * 18 / 13) + ..."`, which `parseFloat` reads as
- * `NaN`. The probe carries the token as its height, so what comes back is the box the layout gives a
- * real card — it has to be attached to be measured at all, so it goes into the viewport and comes
- * straight back out. `.branch-metric` keeps it invisible and out of the flow while it is there.
+ * `--dsw-branch-node-h` 是一条 `calc()` 链，而**未注册**自定义属性的计算值就是留着 `calc()` 未求值
+ * 的 token 流 —— `getComputedStyle(root).getPropertyValue()` 返回
+ * `"calc(calc(13px + calc(22px - 15px)) * 18 / 13) + ..."`，`parseFloat` 读成 `NaN`。探针以该 token
+ * 作为自己的高度，返回的就是布局给真实卡片的盒子 —— 必须挂载才能测量，所以放进视口再立刻取出。
+ * 它在的期间由 `.branch-metric` 保持不可见、脱离文档流。
  */
 function cardMetrics(host: HTMLElement): CardMetrics {
 	const measure = (height: string): number => {
@@ -486,13 +467,11 @@ function cardMetrics(host: HTMLElement): CardMetrics {
 }
 
 /**
- * Place the cards: the line runs along row 0, one column per message, and each fork's alternatives
- * take the rows below the card they left.
+ * 放置卡片：线沿第 0 行走，每条消息一列，每次派生的备选项占据它离开的卡片下面的行。
  *
- * One rule only — **`next` keeps the row, `branches` open new ones** — which is what makes the way
- * being read a straight horizontal line with the others hanging off it. An alternative carries
- * branches of its own (a fork further down a way nobody is reading is still a fork), so the walk
- * recurses and those take rows below their own card, one column right of it like any other.
+ * 只有一条规则 —— **`next` 保有行，`branches` 开新行** —— 正是它让正在读的路成为一条水平直线、
+ * 其余挂在上面。备选项自己也带分支（没人读的路再往下的一次派生仍然是一次派生），所以遍历递归，
+ * 那些分支落在自己卡片下面的行上，与任何其他路一样向右一列。
  */
 function layout(tree: BranchTree, metrics: CardMetrics): Layout {
 	const nodes: LaidNode[] = [];
@@ -513,15 +492,14 @@ function layout(tree: BranchTree, metrics: CardMetrics): Layout {
 	};
 }
 
-/** The short id a card and the header's entry both show: the entry id's first few characters. */
+/** 卡片和头部条目都显示的短 id：条目 id 的前几个字符。 */
 export function shortId(entryId: string): string {
 	return entryId.slice(0, SHORT_ID);
 }
 
 /**
- * The lane palette, read off the tokens so both themes answer for themselves.
- * Read per paint rather than cached: a paint is rare, and a theme switch should not have to
- * negotiate with a cache.
+ * 行调色板，从 token 读出，让两种主题各自作答。
+ * 每次绘制读取而不是缓存：绘制很少发生，且主题切换不该与缓存谈判。
  */
 function laneColors(): string[] {
 	const styles = getComputedStyle(document.documentElement);

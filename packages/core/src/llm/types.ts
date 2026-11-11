@@ -1,7 +1,7 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
-// from flagging this file, while every import into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
-/** Opaque parent context for telemetry; telemetry is out of scope in this vendored build. */
+/** 遥测的不透明父 context；遥测不在本裁剪构建的范围之内。 */
 export type TelemetryContext = Record<string, unknown>;
 import type { BashSettings } from "../config.ts";
 import type { AnthropicOptions } from "./api/anthropic-messages.ts";
@@ -10,23 +10,21 @@ import type { AssistantMessageEventStream } from "./utils/event-stream.ts";
 export type { AssistantMessageEventStream } from "./utils/event-stream.ts";
 
 /**
- * The one chat transport this build speaks.
+ * 本构建说的唯一 chat 传输。
  *
- * Upstream pi-ai lists every API it can drive here. This copy drives Anthropic Messages and nothing
- * else, so the list is down to it — while `Api` still admits any string, because a model carries an
- * `api` field and the rest of the file's generics are written against that open shape.
+ * 上游 pi-ai 把它能驱动的每个 API 都列在这里。这份副本只驱动 Anthropic Messages，所以列表只剩下
+ * 它——而 `Api` 仍然接受任何字符串，因为模型带着一个 `api` 字段，本文件其余的泛型都是对着这个
+ * 开放形状写的。
  */
 export type KnownApi = "anthropic-messages";
 
 export type Api = KnownApi | (string & {});
 
 /**
- * The model types this build never drives.
+ * 本构建从不驱动的模型类型。
  *
- * Upstream pi-ai also carries image-generation and structured-classifier transports, and these three
- * pairs of names are the whole of what survives of them: the type-level spine that `ModelTypeMap`
- * below is written against. No implementation, option type, or result type is kept — the vendored
- * build speaks Anthropic Messages and nothing else.
+ * 上游 pi-ai 还携带图像生成和结构化分类器的传输，这三对名字是它们幸存的全部：下面 `ModelTypeMap`
+ * 所对着写的类型级骨架。没有实现、选项类型或结果类型被保留——本裁剪构建只说 Anthropic Messages。
  */
 export type KnownImageApi = "openrouter-images";
 export type ImageApi = KnownImageApi | (string & {});
@@ -35,29 +33,27 @@ export type ClassifierApi = KnownClassifierApi | (string & {});
 
 export type ToolChoice = "auto" | "none";
 /**
- * The strengths a request can be asked at.
+ * 一次请求可以要求的强度。
  *
- * Four, and the last three are the efforts this wire carries: a model asked at `high` thinks harder,
- * and nothing in the request says how many tokens that is worth. An endpoint that spells an effort
- * differently is not something the app models — a level is sent as its own name.
+ * 四档，后三档是这条 wire 携带的 effort：以 `high` 被请求的模型想得更用力，请求里没有任何东西说明
+ * 那值多少 token。用不同拼法表达 effort 的端点不是本应用建模的东西——level 按它自己的名字发送。
  *
- * `off` is one of the four rather than the absence of a level: it is what a caller that asked for
- * nothing means, and the request it produces says "do not think" rather than omitting the switch.
+ * `off` 是四档之一，而不是 level 的缺席：它是「什么都没要」的调用方的意思，它产生的请求说的是
+ * 「不要思考」，而不是省略这个开关。
  */
 export type ThinkingLevel = "off" | "low" | "high" | "max";
 
-// Base options all providers share
 export type CacheRetention = "none" | "short" | "long";
 
 /**
- * Best-effort prompt cache lifetime in seconds for each retention tier a request can ask for.
- * A missing tier means the lifetime is unknown; pi does not warm such caches.
+ * 一次请求可以为每档 retention 要求的尽力而为的 prompt cache 寿命（秒）。
+ * 缺失的档意味着寿命未知；pi 不会预热这样的缓存。
  */
 export type ModelPromptCache = Partial<Record<Exclude<CacheRetention, "none">, number>>;
 
 export type Transport = "sse" | "websocket" | "websocket-cached" | "auto";
 
-/** Provider-scoped environment overrides. Values take precedence over process.env. */
+/** provider 范围的环境变量覆盖。这些值优先于 process.env。 */
 export type ProviderEnv = Record<string, string>;
 export type ProviderHeaders = Record<string, string | null>;
 export type FetchFunction = typeof globalThis.fetch;
@@ -67,103 +63,97 @@ export interface ProviderResponse {
 	headers: Record<string, string>;
 }
 
-/** Authentication, HTTP transport, and lifecycle callbacks shared by provider requests. */
+/** provider 请求共享的认证、HTTP 传输和生命周期回调。 */
 export interface ProviderRequestOptions<TModel = Model<Api>> {
 	signal?: AbortSignal;
-	/** Explicit parent context for telemetry produced by this logical request. */
+	/** 本逻辑请求产生的遥测的显式父 context。 */
 	telemetryContext?: TelemetryContext;
 	apiKey?: string;
 	/**
-	 * Optional fetch implementation for provider HTTP requests.
-	 * Defaults to `globalThis.fetch`. Provider adapters that cannot inject a custom implementation may reject it.
-	 * This does not affect WebSocket transports.
+	 * provider HTTP 请求的可选 fetch 实现。
+	 * 默认为 `globalThis.fetch`。无法注入自定义实现的 provider 适配器可以拒绝它。
+	 * 这不影响 WebSocket 传输。
 	 */
 	fetch?: FetchFunction;
 	/**
-	 * Provider-scoped environment values. These take precedence over process.env for
-	 * provider configuration such as regional settings, endpoint placeholders, and
-	 * proxy variables.
+	 * provider 范围的环境变量值。对区域设置、端点占位符、代理变量等 provider 配置，
+	 * 这些值优先于 process.env。
 	 */
 	env?: ProviderEnv;
 	/**
-	 * Optional callback for inspecting or replacing provider payloads before sending.
-	 * Return undefined to keep the payload unchanged.
+	 * 发送前检查或替换 provider payload 的可选回调。
+	 * 返回 undefined 表示保持 payload 不变。
 	 */
 	onPayload?: (payload: unknown, model: TModel) => unknown | undefined | Promise<unknown | undefined>;
 	/**
-	 * Optional callback invoked after an HTTP response is received.
+	 * 收到 HTTP 响应后调用的可选回调。
 	 */
 	onResponse?: (response: ProviderResponse, model: TModel) => void | Promise<void>;
 	/**
-	 * Optional custom HTTP headers to include in API requests.
-	 * Merged with provider defaults; caller values override default headers.
-	 * On AWS Bedrock these are injected via a Smithy `build`-step middleware so
-	 * they are covered by SigV4 signing; reserved headers (`x-amz-*`,
-	 * `authorization`, `host`) are silently ignored to preserve SigV4 / bearer auth.
-	 * A null value suppresses a provider/API default header with the same name.
+	 * 要包含在 API 请求中的可选自定义 HTTP header。
+	 * 与 provider 默认值合并；调用方的值覆盖默认 header。
+	 * 在 AWS Bedrock 上，这些经 Smithy `build` 步骤的 middleware 注入，因此被 SigV4 签名覆盖；
+	 * 保留 header（`x-amz-*`、`authorization`、`host`）被静默忽略，以保全 SigV4 / bearer 认证。
+	 * null 值压制 provider/API 中同名的默认 header。
 	 */
 	headers?: ProviderHeaders;
 	/**
-	 * HTTP request timeout in milliseconds for providers/SDKs that support it.
-	 * For example, the Anthropic SDK client defaults to 10 minutes.
+	 * 支持它的 provider/SDK 的 HTTP 请求超时（毫秒）。
+	 * 例如 Anthropic SDK 客户端默认 10 分钟。
 	 */
 	timeoutMs?: number;
 	/**
-	 * Maximum retry attempts for providers/SDKs that support client-side retries.
-	 * For example, the Anthropic SDK client defaults to 2.
+	 * 支持客户端重试的 provider/SDK 的最大重试次数。
+	 * 例如 Anthropic SDK 客户端默认 2。
 	 */
 	maxRetries?: number;
 	/**
-	 * Maximum delay in milliseconds to wait for a retry when the server requests a long wait.
-	 * If the server's requested delay exceeds this value, the request fails immediately
-	 * with an error containing the requested delay, allowing higher-level retry logic
-	 * to handle it with user visibility.
-	 * Default: 60000 (60 seconds). Set to 0 to disable the cap.
+	 * 服务器要求长等待时，重试等待的最大延迟（毫秒）。
+	 * 服务器要求的延迟超过这个值时，请求立即失败，错误中带上被要求的延迟，让更高层的重试逻辑
+	 * 在用户可见的情况下处理。
+	 * 默认：60000（60 秒）。设为 0 表示关闭上限。
 	 */
 	maxRetryDelayMs?: number;
 }
 
 export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	/**
-	 * Optional callback invoked after an HTTP response is received and before
-	 * its body stream is consumed.
+	 * 收到 HTTP 响应之后、消费其 body 流之前调用的可选回调。
 	 */
 	onResponse?: (response: ProviderResponse, model: Model<Api>) => void | Promise<void>;
 	/**
-	 * Optional observer for each parsed provider stream event before Pi normalization.
-	 * Event data is adapter-owned and must be treated as read-only.
-	 * Adapter support is explicit; unsupported adapters do not invoke it.
+	 * 在 Pi 归一化之前观察每个已解析 provider 流事件的可选观察者。
+	 * 事件数据归适配器所有，必须当作只读。
+	 * 适配器支持是显式的；不支持的适配器不会调用它。
 	 */
 	onProviderStreamEvent?: (data: unknown, model: Model<Api>) => void | Promise<void>;
 	temperature?: number;
 	/**
-	 * Arbitrary sampling parameters merged into the request body as-is, after the named request
-	 * fields, so keys here override them. Lets a compatible server receive parameters pi does not
-	 * model, e.g. `top_p`, `top_k`, `min_p`, `repetition_penalty`. Merged over `Model.samplingParams`
-	 * per key. Adapters that do not model these parameters ignore it.
+	 * 原样合并进请求体的任意采样参数，合并在具名请求字段之后，所以这里的 key 盖过它们。让兼容的
+	 * 服务器收到 pi 没有建模的参数，例如 `top_p`、`top_k`、`min_p`、`repetition_penalty`。按 key
+	 * 合并到 `Model.samplingParams` 之上。不建模这些参数的适配器忽略它。
 	 */
 	samplingParams?: Record<string, unknown>;
 	maxTokens?: number;
 	/**
-	 * Preferred transport for providers that support multiple transports.
-	 * Providers that do not support this option ignore it.
+	 * 支持多种传输的 provider 的首选传输。
+	 * 不支持这个选项的 provider 忽略它。
 	 */
 	transport?: Transport;
 	/**
-	 * Prompt cache retention preference. Providers map this to their supported values.
-	 * Default: "short".
+	 * prompt cache 保留偏好。provider 把它映射到自己支持的值。
+	 * 默认："short"。
 	 */
 	cacheRetention?: CacheRetention;
 	/**
-	 * WebSocket connect timeout in milliseconds for providers that support
-	 * WebSocket transports. This covers the connection/open handshake only;
-	 * stream idleness after connection uses timeoutMs.
+	 * 支持 WebSocket 传输的 provider 的 WebSocket 连接超时（毫秒）。
+	 * 只覆盖连接/打开握手；连接建立之后的流空闲用 timeoutMs。
 	 */
 	websocketConnectTimeoutMs?: number;
 	/**
-	 * Optional metadata to include in API requests.
-	 * Providers extract the fields they understand and ignore the rest.
-	 * For example, Anthropic uses `user_id` for abuse tracking and rate limiting.
+	 * 要包含在 API 请求中的可选元数据。
+	 * provider 提取自己理解的字段、忽略其余。
+	 * 例如 Anthropic 用 `user_id` 做滥用追踪和限流。
 	 */
 	metadata?: Record<string, unknown>;
 }
@@ -171,51 +161,46 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 export type ProviderStreamOptions = StreamOptions & Record<string, unknown>;
 
 /**
- * Maps known APIs to their full provider-specific stream option types.
- * Type-only imports from API implementation modules are erased at emit, so
- * this is tree-shake safe. One entry, because one API implementation survives here.
+ * 把已知的 API 映射到它们完整的 provider 专属流选项类型。
+ * 从 API 实现模块的类型-only import 会在产出时擦除，所以这是 tree-shake 安全的。
+ * 只有一个条目，因为这里只活下来一个 API 实现。
  */
 export interface ApiOptionsMap {
 	"anthropic-messages": AnthropicOptions;
 }
 
 /**
- * Full stream options for an API. The known API resolves to its concrete option
- * type; custom API strings fall back to the generic shape.
+ * 一个 API 的完整流选项。已知 API 解析到它具体的选项类型；自定义 API 字符串回落到通用形状。
  */
 export type ApiStreamOptions<TApi extends Api> = TApi extends keyof ApiOptionsMap
 	? ApiOptionsMap[TApi]
 	: StreamOptions & Record<string, unknown>;
 
 /**
- * The uniform stream contract of an API implementation module: every module
- * under `src/api/` exports one `stream`. A host hands one of these to whatever
- * sends its requests. This is the untyped dispatch shape; per-API option typing
- * lives on the implementation module itself and reaches it through `ApiStreamOptions`.
+ * 一个 API 实现模块的统一流契约：`src/api/` 下的每个模块都导出一个 `stream`。host 把其中之一交给
+ * 发送请求的东西。这是无类型的分发形状；每个 API 的选项类型定义在实现模块自身上，经
+ * `ApiStreamOptions` 到达它。
  */
 export interface ChatTransport {
 	stream(model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream;
 }
 
-// Unified options passed to stream(). The thinking level is deliberately
-// not among them: it rides on the model, so one object says which endpoint answers and how hard it is
-// asked to think, and the wire has no second place to read a strength from.
+// 传给 stream() 的统一选项。thinking level 刻意不在其中：它搭在模型上，这样一个对象同时说明哪个
+// 端点回答、被要求多用力地想，wire 上没有第二个可以读取强度的地方。
 export interface SimpleStreamOptions extends StreamOptions {
-	/** Provider-neutral tool selection for simple requests. When omitted, adapters use provider-specific behavior. */
+	/** 简单请求的 provider 中立工具选择。省略时适配器按 provider 专属行为行事。 */
 	toolChoice?: ToolChoice;
 }
 
-// Generic StreamFunction with typed options.
+// 带类型化选项的通用 StreamFunction。
 //
-// Contract:
-// - Receives a normalized transcript: the system prompt and tools live in the
-//   leading system message, never on the context itself.
-// - Must return an AssistantMessageEventStream.
-// - A transport's stream() may throw synchronously when request auth is
-//   missing. Once a stream is returned, request/model/runtime failures should
-//   be encoded in that stream.
-// - Error termination must produce an AssistantMessage with stopReason
-//   "error" or "aborted" and errorMessage, emitted via the stream protocol.
+// 契约：
+// - 接收归一化的 transcript：system prompt 和工具住在开头的 system 消息里，从不在 context 本身上。
+// - 必须返回一个 AssistantMessageEventStream。
+// - 传输的 stream() 在请求缺认证时可以同步抛出。一旦流被返回，请求/模型/运行时失败应编码进
+//   那个流。
+// - 错误终止必须产生一个 stopReason 为 "error" 或 "aborted" 并带 errorMessage 的 AssistantMessage，
+//   经流协议发出。
 export type StreamFunction<TApi extends Api = Api, TOptions extends StreamOptions = StreamOptions> = (
 	model: Model<TApi>,
 	context: Context,
@@ -230,17 +215,16 @@ export interface TextContent {
 export interface ThinkingContent {
 	type: "thinking";
 	thinking: string;
-	thinkingSignature?: string; // Provider-specific opaque or serialized reasoning replay data
-	/** When true, the thinking content was redacted by safety filters. The opaque
-	 *  encrypted payload is stored in `thinkingSignature` so it can be passed back
-	 *  to the API for multi-turn continuity. */
+	thinkingSignature?: string; // provider 专属的不透明或序列化的推理回放数据
+	/** 为 true 时，thinking 内容被安全过滤器涂黑。不透明的
+	 *  加密 payload 存在 `thinkingSignature` 里，以便回传给 API 实现多轮连续性。 */
 	redacted?: boolean;
 }
 
 export interface ImageContent {
 	type: "image";
-	data: string; // base64 encoded image data
-	mimeType: string; // e.g., "image/jpeg", "image/png"
+	data: string; // base64 编码的图片数据
+	mimeType: string; // 例如 "image/jpeg"、"image/png"
 }
 
 export interface ToolCall {
@@ -248,7 +232,7 @@ export interface ToolCall {
 	id: string;
 	name: string;
 	arguments: JsonObject;
-	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
+	thoughtSignature?: string; // Google 专属：复用 thought context 的不透明签名
 }
 
 export interface Usage {
@@ -256,12 +240,12 @@ export interface Usage {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
-	/** Subset of `cacheWrite` written with 1h retention. Only Anthropic reports this split. */
+	/** `cacheWrite` 中以 1h 保留写入的部分。只有 Anthropic 报告这个拆分。 */
 	cacheWrite1h?: number;
 	/**
-	 * Reasoning/thinking tokens, when the provider reports them. This is a subset of
-	 * `output`: `output` already includes these tokens. Set to a number (possibly 0) by
-	 * providers that expose a reasoning breakdown; left undefined by providers that don't.
+	 * 推理/thinking token，当 provider 报告它们时。这是 `output` 的子集：
+	 * `output` 已经包含这些 token。暴露推理拆分的 provider 会设为数字（可能为 0）；
+	 * 不暴露的 provider 留为 undefined。
 	 */
 	reasoning?: number;
 	totalTokens: number;
@@ -311,7 +295,7 @@ type IsJsonCompatible<T> = IsAny<T> extends true
 									: false
 								: false;
 
-/** The JSON representation of a typed in-memory value. Optional object properties remain optional. */
+/** 一个类型化内存值的 JSON 表示。可选的对象属性仍为可选。 */
 export type JsonRepresentation<T> = IsAny<T> extends true
 	? JsonValue
 	: unknown extends T
@@ -325,23 +309,22 @@ export type JsonRepresentation<T> = IsAny<T> extends true
 					: never;
 
 /**
- * The system prompt, carried by the leading message of a request.
+ * system prompt，由请求的开头消息携带。
  *
- * One per request and always first: nothing in this build appends a system message to the
- * middle of a conversation, and a transport drops any it is handed. Tools are not part of it —
- * they travel on the request (`Context.tools`), not inside a message.
+ * 每个请求一条且始终在最前：本构建没有任何东西会把 system 消息追加到对话中间，传输会丢弃递给它的
+ * 任何多余 system 消息。工具不是它的一部分——工具走请求（`Context.tools`），不装在消息里。
  */
 export interface SystemMessage {
 	role: "system";
-	/** The prompt text. */
+	/** prompt 文本。 */
 	content: string | TextContent[];
-	timestamp: number; // Unix timestamp in milliseconds
+	timestamp: number; // Unix 时间戳，毫秒
 }
 
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
-	timestamp: number; // Unix timestamp in milliseconds
+	timestamp: number; // Unix 时间戳，毫秒
 }
 
 export interface AssistantMessage {
@@ -349,41 +332,41 @@ export interface AssistantMessage {
 	content: (TextContent | ThinkingContent | ToolCall)[];
 	api: Api;
 	model: string;
-	responseModel?: string; // Concrete model reported by the provider when different from the requested `model`
-	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
-	/** Pi thinking level the agent loop requested for this response. Absent outside the agent loop and for legacy responses. */
+	responseModel?: string; // provider 报告的具体模型，与请求的 `model` 不同时
+	responseId?: string; // 上游 API 暴露时的 provider 专属响应/消息标识
+	/** agent loop 为这条响应请求的 Pi thinking level。loop 之外和遗留响应时缺席。 */
 	thinkingLevel?: ThinkingLevel;
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
 	rawStopReason?: string;
 	/**
-	 * Provider indication of whether the model explicitly ended its turn.
-	 * Preserved for debugging and does not currently affect agent control flow.
+	 * provider 对模型是否显式结束了 turn 的说明。
+	 * 保留用于调试，目前不影响 agent 控制流。
 	 */
 	endTurn?: boolean;
-	timestamp: number; // Unix timestamp in milliseconds
+	timestamp: number; // Unix 时间戳，毫秒
 }
 
-/** A tool call that another tool made while it ran, for example from a codemode script. */
+/** 一个工具在运行期间发出的另一个 tool call，例如来自 codemode 脚本。 */
 export interface NestedToolCallRecord {
 	id: string;
 	name: string;
-	/** Omitted when over the size limits; `argumentsBytes` then gives their size. */
+	/** 超出大小限制时省略；`argumentsBytes` 随即给出其大小。 */
 	arguments?: JsonObject;
-	/** UTF-8 size of the arguments as JSON, set when `arguments` is omitted. */
+	/** 参数以 JSON 计的 UTF-8 大小，省略 `arguments` 时设置。 */
 	argumentsBytes?: number;
-	/** `unfinished`: the call was still running when the calling tool finished. */
+	/** `unfinished`：调用它的工具结束时这个 call 还在运行。 */
 	status: "ok" | "error" | "unfinished";
 	durationMs?: number;
-	/** Error text, truncated. */
+	/** 错误文本，已截断。 */
 	error?: string;
 }
 
-/** Bounded record of the nested calls a tool made. Results are not recorded. */
+/** 一个工具发出的嵌套 call 的有界记录。不记录 result。 */
 export interface NestedToolCalls {
 	calls: NestedToolCallRecord[];
-	/** False when calls were dropped, arguments omitted, or calls had not finished. */
+	/** 有 call 被丢弃、参数被省略或 call 未结束时为 false。 */
 	complete: boolean;
 }
 
@@ -392,14 +375,14 @@ export type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails>
 			role: "toolResult";
 			toolCallId: string;
 			toolName: string;
-			content: (TextContent | ImageContent)[]; // Supports text and images
+			content: (TextContent | ImageContent)[];
 			details?: JsonRepresentation<TDetails>;
-			/** Usage from the tool execution itself, if available. Not part of main LLM context accounting. */
+			/** 工具执行自身的 usage，若可用。不计入主 LLM context 账目。 */
 			usage?: Usage;
-			/** Calls this tool made to other tools. Kept for the session record; not sent to the model. */
+			/** 这个工具对其他工具发起的 call。为 session 记录保留；不发给模型。 */
 			nestedCalls?: NestedToolCalls;
 			isError: boolean;
-			timestamp: number; // Unix timestamp in milliseconds
+			timestamp: number; // Unix 时间戳，毫秒
 		}
 	: never;
 
@@ -408,10 +391,9 @@ export type Message = SystemMessage | UserMessage | AssistantMessage | ToolResul
 import type { Static, TSchema } from "typebox";
 
 /**
- * Optional provider-side constrained sampling config for a tool.
+ * 一个工具可选的 provider 侧受限采样配置。
  *
- * The `json_schema` value roughly maps to the concept of `strict` in APIs which is
- * implemented as json-schema constrained sampling by APIs.
+ * `json_schema` 值大致对应于 API 中 `strict` 的概念，后者由各 API 以 json-schema 受限采样实现。
  */
 export interface ConstrainedSamplingConfig {
 	type: "json_schema";
@@ -419,69 +401,64 @@ export interface ConstrainedSamplingConfig {
 }
 
 /**
- * How a run may execute the tool calls of one assistant message.
+ * 一个 run 可以怎样执行一条 assistant 消息的 tool call。
  *
- * - "sequential": each tool call is prepared, executed, and finalized before the next one starts.
- * - "parallel": tool calls are prepared sequentially, then allowed tools execute concurrently.
- *   `tool_execution_end` is emitted in tool completion order after each tool is finalized,
- *   while tool-result message artifacts are emitted later in assistant source order.
+ * - "sequential"：每个 tool call 先准备、执行、收尾，然后才开始下一个。
+ * - "parallel"：tool call 依次准备，然后允许的工具并发执行。每个工具收尾后按完成顺序发出
+ *   `tool_execution_end`，而 tool-result 消息的产物稍后按 assistant 源顺序发出。
  */
 export type ToolExecutionMode = "sequential" | "parallel";
 
 /**
- * The per-request values a tool acts with.
+ * 工具行动所用的 per-request 值。
  *
- * A tool is directory-free: what it acts on is a value that arrives with the call, not something the
- * instance closes over. {@link workDirAbsPath} is the base relative paths resolve against and where a
- * command starts; `bash` carries the timeouts read for the same request. Both leave with the call, so
- * one instance serves every session and every directory (ADR-0016).
+ * 工具不绑定目录：它作用于的东西是随调用到达的值，不是实例闭包的东西。{@link workDirAbsPath} 是
+ * 相对路径解析的基准、命令启动的地方；`bash` 带着为同一次请求读取的超时。两者都随调用离开，所以
+ * 一个实例服务所有 session 和所有目录（ADR-0016）。
  *
- * It lives here, beside {@link Tool}, because it is part of `execute`'s signature: a signature's type
- * does not get a second home, or the build would have one `Tool` with two sources. A transport never
- * reads it and never constructs one — it sees `execute` on the declaration it is handed and can never
- * call it, so this argument is one it cannot obtain. `tools/manager.ts` re-exports the name, so every
- * existing import path is unchanged.
+ * 它住在这里、在 {@link Tool} 旁边，因为它是 `execute` 签名的一部分：签名的类型不设第二个家，
+ * 否则构建会有一个 `Tool` 却有两个来源。传输从不读它、从不构造它——它在自己收到的声明上看见
+ * `execute`，却永远无法调用它，所以这个参数是它拿不到的。`tools/manager.ts` re-export 这个名字，
+ * 所有既有的 import 路径不变。
  */
 export interface ToolRunContext {
-	/** The directory relative paths resolve against, and where a command starts. No fence. */
+	/** 相对路径解析的基准目录，命令启动的地方。没有围栏。 */
 	workDirAbsPath: string;
-	/** The `bash` timeouts; the defaults when the caller names none. */
+	/** `bash` 的超时；调用方未指名时用默认值。 */
 	bash?: BashSettings;
 }
 
 /**
- * The one tool type.
+ * 唯一的工具类型。
  *
- * The declaration a transport reads — name, description, parameters, and the optional
- * constrained-sampling config — and the executable counterpart the engine calls — label, argument
- * shim, output schema, `execute`, replay policy, execution mode — are one shape, so a request and a
- * run cannot drift about what a tool is. A transport reads the declaration fields and never calls
- * `execute`; the engine calls `execute` and never reads a declaration from the wire.
+ * 传输读取的声明——name、description、parameters 和可选的受限采样配置——与引擎调用的可执行对应物
+ * ——label、参数垫片、输出 schema、`execute`、重放策略、执行模式——是同一个形状，所以一次请求和
+ * 一次 run 不可能在「工具是什么」上漂移。传输读声明字段、从不调用 `execute`；引擎调用 `execute`、
+ * 从不从 wire 读声明。
  */
 export interface Tool<TParameters extends TSchema = TSchema, TDetails = unknown> {
 	name: string;
 	description: string;
 	parameters: TParameters;
 	constrainedSampling?: false | ConstrainedSamplingConfig;
-	/** Human-readable label for UI display. */
+	/** 供 UI 展示的人类可读标签。 */
 	label: string;
 	/**
-	 * Optional compatibility shim for raw tool-call arguments before schema validation.
-	 * Must return an object that matches `TParameters`.
+	 * schema 校验之前对原始 tool call 参数的可选兼容垫片。
+	 * 必须返回一个匹配 `TParameters` 的对象。
 	 */
 	prepareArguments?: (args: unknown) => Static<TParameters>;
 	/**
-	 * JSON Schema of `structuredContent` in successful results. Tools that declare it should always
-	 * set `structuredContent`.
+	 * 成功 result 中 `structuredContent` 的 JSON Schema。声明了它的工具应当始终设置
+	 * `structuredContent`。
 	 */
 	outputSchema?: TSchema;
 	/**
-	 * Execute the tool call. Throw on failure, or return a result with `isError: true`; do not only
-	 * describe the failure in `content`.
+	 * 执行这个 tool call。失败时抛异常，或返回 `isError: true` 的 result；不要只在 `content` 里
+	 * 描述失败。
 	 *
-	 * `run` is required and third on purpose: made optional, or moved to the end, a caller that
-	 * forgot it would silently act in whatever directory the instance was built against — and the
-	 * instance is built against none. Every call site says which run it belongs to.
+	 * `run` 刻意必填且在第三位：一旦可选或挪到最后，忘了传它的调用方会无声地在实例构建时所对的
+	 * 目录里行动——而实例构建时不对应任何目录。每个调用点都说明自己属于哪次 run。
 	 */
 	execute: (
 		toolCallId: string,
@@ -490,78 +467,72 @@ export interface Tool<TParameters extends TSchema = TSchema, TDetails = unknown>
 		signal?: AbortSignal,
 		onUpdate?: ToolUpdateCallback<TDetails>,
 	) => Promise<ToolResult<TDetails>>;
-	/** Recovery policy for an effect whose durable intent exists but whose outcome is unknown. */
+	/** 持久意图已存在但结果未知的动作的重放策略。 */
 	replay?: "never" | "safe";
 	/**
-	 * Per-tool execution mode override.
-	 * - "sequential": this tool must execute one at a time with other tool calls.
-	 * - "parallel": this tool can execute concurrently with other tool calls.
+	 * 单工具的执行模式覆盖。
+	 * - "sequential"：本工具必须与其他 tool call 逐个执行。
+	 * - "parallel"：本工具可以与其他 tool call 并发执行。
 	 *
-	 * If omitted, the default execution mode applies.
+	 * 省略时适用默认执行模式。
 	 */
 	executionMode?: ToolExecutionMode;
 }
 
-/** Final or partial result produced by a tool. */
+/** 工具产出的最终或部分 result。 */
 export interface ToolResult<T = JsonValue | undefined> {
-	/** Text or image content returned to the model. */
+	/** 返回给模型的文本或图片内容。 */
 	content: (TextContent | ImageContent)[];
-	/** Arbitrary structured details for logs or UI rendering. */
+	/** 供日志或 UI 渲染使用的任意结构化细节。 */
 	details: T;
 	/**
-	 * Machine-readable result matching the tool's `outputSchema`, for programmatic callers. Not sent
-	 * to the model; `content` remains the model-facing result.
+	 * 匹配工具 `outputSchema` 的机器可读 result，供程序化调用方使用。不发给模型；
+	 * `content` 仍是面向模型的 result。
 	 */
 	structuredContent?: JsonValue;
-	/** Usage from the final tool execution itself, if available. Not used for main LLM context accounting. */
+	/** 最后一次工具执行自身的 usage，若可用。不用于主 LLM context 账目。 */
 	usage?: Usage;
 	/**
-	 * Report a failure without throwing. The model sees `content` as an error result, like a thrown
-	 * error, but `details` and `structuredContent` are kept for the UI and programmatic callers.
+	 * 不抛异常地报告失败。模型看到的 `content` 是一个错误 result，如同抛出的错误，但 `details` 和
+	 * `structuredContent` 为 UI 和程序化调用方保留。
 	 */
 	isError?: boolean;
 	/**
-	 * Hint that the agent should stop after the current tool batch.
-	 * Early termination only happens when every finalized tool result in the batch sets this to true.
+	 * 提示 agent 应在当前工具批次之后停止。
+	 * 只有批次中每个已收尾的 tool result 都设为 true 时才会提前终止。
 	 */
 	terminate?: boolean;
 }
 
 /**
- * Callback used by tools to stream partial execution updates.
+ * 工具用来流式发送部分执行更新的回调。
  *
- * The callback is scoped to the current `execute()` invocation. Calls made after
- * the tool promise settles are ignored.
+ * 回调的作用域是当前的 `execute()` 调用。工具 promise 落定之后的调用被忽略。
  */
 export type ToolUpdateCallback<T = unknown> = (partialResult: ToolResult<T>) => void;
 
 /**
- * The context one request is made with: the conversation messages, the system prompt as an explicit
- * leading message, and the tools the request carries. A transport reads the declaration fields of
- * each tool and calls nothing on them; the engine passes the same executable shapes.
+ * 一次请求所带的 context：对话消息、作为显式开头消息的 system prompt、以及请求携带的工具。
+ * 传输读取每个工具的声明字段、不在它们上面调用任何东西；引擎传递同样的可执行形状。
  */
 export interface Context {
 	messages: Message[];
 	system?: SystemMessage;
-	/** The tools this request carries. An empty array is legal; omitting the field is not. */
+	/** 本次请求携带的工具。空数组合法；省略字段不合法。 */
 	tools: Tool[];
 }
 
 /**
- * Event protocol for AssistantMessageEventStream.
+ * AssistantMessageEventStream 的事件协议。
  *
- * Successful streams emit `start` before partial updates and terminate with
- * `done`. A stream may terminate directly with `error` when request setup fails
- * before generation starts; after `start`, failures also terminate with `error`.
- * Direct `stream()` calls throw synchronously when request auth is missing.
- * Updates and `done` must never appear before `start`.
+ * 成功的流先发 `start` 再发部分更新，并以 `done` 终止。请求装配在生成开始之前失败时，流可以直接以
+ * `error` 终止；`start` 之后，失败同样以 `error` 终止。直接调用 `stream()` 在请求缺认证时同步抛出。
+ * 更新和 `done` 绝不出现在 `start` 之前。
  *
- * `partial` is the shared live response-so-far helper, not an event-time
- * snapshot. Text and thinking blocks are empty when their `*_start` event is
- * emitted and grow only through their corresponding `*_delta` events until the
- * authoritative `*_end`. Redacted thinking may be complete at start and emit no
- * deltas. Tool-call arguments at `toolcall_start` are provider-specific;
- * `toolcall_delta` carries subsequent JSON updates.
+ * `partial` 是共享的「目前为止的响应」活助手，不是事件时刻的快照。text 和 thinking block 在各自的
+ * `*_start` 事件发出时为空，只随对应的 `*_delta` 事件增长，直到权威的 `*_end`。被涂黑的 thinking
+ * 可能在开始时就完整，不发任何 delta。`toolcall_start` 时的 tool call 参数因 provider 而异；
+ * `toolcall_delta` 携带后续的 JSON 更新。
  */
 export type AssistantMessageEvent =
 	| { type: "start"; partial: AssistantMessage }
@@ -581,93 +552,89 @@ export type AssistantMessageEvent =
 	  }
 	| { type: "error"; reason: Extract<StopReason, "aborted" | "error">; error: AssistantMessage };
 
-/** Compatibility settings for Anthropic Messages-compatible APIs. */
+/** Anthropic Messages 兼容 API 的兼容性设置。 */
 export interface AnthropicMessagesCompat {
 	/**
-	 * Whether the provider accepts per-tool `eager_input_streaming`.
-	 * When false, the Anthropic provider omits `tools[].eager_input_streaming`
-	 * and sends the legacy `fine-grained-tool-streaming-2025-05-14` beta header
-	 * for tool-enabled requests.
-	 * Default: true.
+	 * provider 是否接受 per-tool 的 `eager_input_streaming`。
+	 * 为 false 时，Anthropic provider 省略 `tools[].eager_input_streaming`，对启用工具的请求发送
+	 * 旧版 `fine-grained-tool-streaming-2025-05-14` beta header。
+	 * 默认：true。
 	 */
 	supportsEagerToolInputStreaming?: boolean;
-	/** Whether the provider supports Anthropic long cache retention (`cache_control.ttl: "1h"`). Default: true. */
+	/** provider 是否支持 Anthropic 的长缓存保留（`cache_control.ttl: "1h"`）。默认：true。 */
 	supportsLongCacheRetention?: boolean;
 	/**
-	 * Whether the provider supports Anthropic-style `cache_control` markers on
-	 * tool definitions. When false, `cache_control` is omitted from tool params.
-	 * Some Anthropic-compatible providers (e.g., Fireworks) do not support this
-	 * field on tools and may reject or ignore it.
-	 * Default: true.
+	 * provider 是否支持工具定义上的 Anthropic 风格 `cache_control` 标记。为 false 时，
+	 * `cache_control` 从工具参数中省略。一些 Anthropic 兼容 provider（如 Fireworks）不支持工具上的
+	 * 这个字段，可能拒绝或忽略它。
+	 * 默认：true。
 	 */
 	supportsCacheControlOnTools?: boolean;
 	/**
-	 * Whether the model accepts the Anthropic `temperature` request field.
-	 * Claude Opus 4.7+ rejects non-default temperature values.
-	 * Default: true.
+	 * 模型是否接受 Anthropic 的 `temperature` 请求字段。
+	 * Claude Opus 4.7+ 拒绝非默认的 temperature 值。
+	 * 默认：true。
 	 */
 	supportsTemperature?: boolean;
-	/** Whether to replay empty thinking signatures as `signature: ""` instead of converting thinking to text. Default: false. */
+	/** 是否把空的 thinking 签名按 `signature: ""` 重放，而不是把 thinking 转成文本。默认：false。 */
 	allowEmptySignature?: boolean;
-	/** Whether the provider supports Anthropic strict tool schemas. Default: false; generated Anthropic models enable it explicitly. */
+	/** provider 是否支持 Anthropic 的严格工具 schema。默认：false；生成的 Anthropic 模型显式启用。 */
 	supportsStrictTools?: boolean;
 }
 
 export interface ModelCostRates {
-	input: number; // $/million tokens
-	output: number; // $/million tokens
-	cacheRead: number; // $/million tokens
-	cacheWrite: number; // $/million tokens
+	input: number; // 美元/百万 token
+	output: number; // 美元/百万 token
+	cacheRead: number; // 美元/百万 token
+	cacheWrite: number; // 美元/百万 token
 }
 
 export interface ModelCostTier extends ModelCostRates {
-	/** Use this tier for requests whose total input usage exceeds this token count. */
+	/** 总输入 usage 超过这个 token 数的请求使用本档。 */
 	inputTokensAbove: number;
 }
 
 export interface ModelCost extends ModelCostRates {
-	/** Request-wide pricing tiers. The highest matching input threshold applies to the full request. */
+	/** 请求级的定价档。最高的匹配输入阈值适用于整个请求。 */
 	tiers?: ModelCostTier[];
 }
 
 export interface ModelImageResizeOptions {
 	maxWidth?: number;
 	maxHeight?: number;
-	/** Maximum base64-encoded payload size in bytes. */
+	/** 最大 base64 编码 payload 大小（字节）。 */
 	maxBytes?: number;
 	jpegQuality?: number;
 }
 
 export interface ModelImageInputLimits {
-	/** Cache-safe resize profile applied before a new image enters conversation history. */
+	/** 新图片进入对话历史之前应用的缓存安全缩放配置。 */
 	resize?: ModelImageResizeOptions;
-	/** Maximum images accepted in one provider message. */
+	/** 一条 provider 消息接受的最大图片数。 */
 	maxPerMessage?: number;
-	/** Maximum images accepted across one provider request. */
+	/** 一次 provider 请求接受的最大图片数。 */
 	maxPerRequest?: number;
 }
 
 export interface ModelInputLimits {
-	/** Maximum serialized provider request size in bytes. */
+	/** 序列化后的 provider 请求最大大小（字节）。 */
 	maxRequestBytes?: number;
 	images?: ModelImageInputLimits;
 }
 
 /**
- * Chat model: usable with `stream()` and friends.
+ * Chat 模型：可与 `stream()` 等一起使用。
  *
- * Upstream declares this as an interface. Here it is a class (see `./model.ts`) so a model can send
- * a request instead of being handed to something else that does; the shape is the same, which is what
- * keeps every signature below written against it unchanged.
+ * 上游把它声明为 interface。这里是一个 class（见 `./model.ts`），让模型能自己发送请求而不是被递给
+ * 别的什么东西去发；形状相同，这正是下面每个签名对着它写而无需改动的原因。
  */
 import type { Model } from "./model.ts";
 
 /**
- * Image-generation model: usable with `generateImages()` only.
+ * 图像生成模型：只能与 `generateImages()` 一起使用。
  *
- * The catalog fields are spelled out rather than inherited from a shared base interface: this build
- * has neither an image nor a classifier transport, so these two shapes never meet `Model` anywhere,
- * and a common ancestor would be a type that existed only to be declared once.
+ * catalog 字段逐个写出而不是从一个共享的基 interface 继承：本构建既没有图像传输也没有分类器
+ * 传输，这两个形状在任何地方都不会遇到 `Model`，一个共同祖先将是只为声明一次而存在的类型。
  */
 export interface ImageModel<TApi extends ImageApi> {
 	type: "image";
@@ -675,28 +642,28 @@ export interface ImageModel<TApi extends ImageApi> {
 	name: string;
 	api: TApi;
 	baseUrl: string;
-	/** The key this model is reached with; carried here because there is no credential store. */
+	/** 到达这个模型用的 key；因为没有凭据 store，所以带在这里。 */
 	apiKey?: string;
 	input: ("text" | "image")[];
-	/** Provider input limits and cache-safe preprocessing metadata. */
+	/** provider 的输入限制和缓存安全的预处理元数据。 */
 	inputLimits?: ModelInputLimits;
 	cost: ModelCost;
 	headers?: Record<string, string>;
-	/** Output modalities. Always includes `"image"`; `"text"` means the model can also return text blocks. */
+	/** 输出模态。始终包含 `"image"`；`"text"` 表示模型也能返回文本 block。 */
 	output: ("text" | "image")[];
 }
 
-/** Structured classifier model: usable with `classify()` only. */
+/** 结构化分类器模型：只能与 `classify()` 一起使用。 */
 export interface ClassifierModel<TApi extends ClassifierApi> {
 	type: "classifier";
 	id: string;
 	name: string;
 	api: TApi;
 	baseUrl: string;
-	/** The key this model is reached with; carried here because there is no credential store. */
+	/** 到达这个模型用的 key；因为没有凭据 store，所以带在这里。 */
 	apiKey?: string;
 	input: ("text" | "image")[];
-	/** Provider input limits and cache-safe preprocessing metadata. */
+	/** provider 的输入限制和缓存安全的预处理元数据。 */
 	inputLimits?: ModelInputLimits;
 	cost: ModelCost;
 	headers?: Record<string, string>;
@@ -704,11 +671,10 @@ export interface ClassifierModel<TApi extends ClassifierApi> {
 }
 
 /**
- * Model shape for each model type.
+ * 每种模型类型的模型形状。
  *
- * The image and classifier entries name types with no implementation behind them here; they are kept
- * only so this map stays the shape upstream's per-type dispatch was written against. Nothing in this
- * build produces one.
+ * image 和 classifier 条目指名的类型在这里没有任何实现支撑；保留它们只是为了让这个 map 保持上游
+ * 按类型分发所对着写的形状。本构建没有任何东西产出其一。
  */
 export interface ModelTypeMap {
 	chat: Model<Api>;
@@ -716,8 +682,8 @@ export interface ModelTypeMap {
 	classifier: ClassifierModel<ClassifierApi>;
 }
 
-/** What a catalog entry is for. Decides which `Models` operation accepts it. */
+/** 一个 catalog 条目是干什么用的。决定哪个 `Models` 操作接受它。 */
 export type ModelType = keyof ModelTypeMap;
 
-/** Anything a catalog can list. */
+/** 任何 catalog 能列出的东西。 */
 export type AnyModel = ModelTypeMap[ModelType];

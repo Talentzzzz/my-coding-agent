@@ -1,5 +1,5 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
-// from flagging this file, while every import into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
 function abortReason(signal: AbortSignal): unknown {
 	if (signal.reason !== undefined) return signal.reason;
@@ -8,14 +8,13 @@ function abortReason(signal: AbortSignal): unknown {
 	return error;
 }
 
-/** Create an operation-local signal for public APIs whose signal is optional. */
+/** 为 signal 可选的公开 API 创建一个操作本地的 signal。 */
 export function operationSignal(signal?: AbortSignal): AbortSignal {
 	return signal ?? new AbortController().signal;
 }
 
 /**
- * Stop waiting for an operation when its signal aborts while continuing to
- * observe the abandoned promise so a later rejection is always handled.
+ * signal abort 时停止等待一个操作，同时继续观察被抛弃的 promise，让之后的 rejection 总是被处理。
  */
 export function raceWithAbortSignal<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
 	if (signal.aborted) {

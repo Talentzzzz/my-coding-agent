@@ -22,9 +22,9 @@ import { DEFAULT_THINKING_LEVEL, seedDefaultModel } from "./default-model.ts";
 import type { ConnectionItem, ModelOption, ServerMessage, SessionSnapshot, DirectoryPaging } from "@my-agent/core/protocol";
 
 /**
- * The one thing the desktop shell adds to the page: the OS's own folder picker. The app itself does
- * not browse the filesystem — "添加目录" hands the browsing to the system dialog — so a browser
- * without the shell has no picker, and the menu item says so rather than pretending.
+ * 桌面外壳给页面增加的唯一一件事：操作系统自己的文件夹选择器。应用本身不浏览文件系统 ——
+ * "添加目录"把浏览交给系统对话框 —— 所以没有外壳的浏览器没有选择器，菜单项如实说明，而不是
+ * 假装有。
  */
 declare global {
 	interface Window {
@@ -33,34 +33,30 @@ declare global {
 }
 
 /**
- * The built-in default mode's name, restated because its home (`@my-agent/core/config.ts`) runs on
- * Node and the client must not pull that into its bundle — the same restatement rule the settings
- * panel applies for the same reason.
+ * 内置默认模式的名字，在这里复述而不是导入：它的家（`@my-agent/core/config.ts`）跑在 Node 上，
+ * 客户端绝不能把它拉进 bundle —— 设置面板出于同样的理由应用同一条复述规则。
  */
 const DEFAULT_MODE_NAME = "默认";
 
-/** What a failed request should say. The status is part of it: 404 and 409 mean different things. */
+/** 一次失败的请求该说什么。状态码是它的一部分：404 和 409 意味着不同的事。 */
 function describe(error: unknown): string {
 	if (error instanceof ApiError) return error.message;
 	return error instanceof Error ? error.message : String(error);
 }
 
 /**
- * Whether this frame is the last word of the run a send is waiting on.
+ * 这个帧是否是某次 send 正在等待的运行的最后一句话。
  *
- * Two members carry the fact and each hides it in a different place, which is why this is a helper
- * rather than a pair of conditions at the call site: a run's last word is `submitting: false` on
- * whichever of the two happens to arrive, and the release of a send's reference must not depend on
- * which one that was.
+ * 两个成员携带这个事实，且各自把它藏在不同的地方，这就是为什么这是一个 helper 而不是调用点上的
+ * 两个条件：运行的最后一句话是二者中恰好到达的那个上的 `submitting: false`，而 send 引用的释放
+ * 绝不能取决于到达的是哪一个。
  *
- * `false` for every other member, because most of them say nothing about runs at all — and "says
- * nothing" must never be read as "settled", since releasing on it would drop the reference while the
- * run was still going.
+ * 其余成员一律 `false`，因为它们大多对运行什么都没说 —— 而"什么都没说"绝不能读成"已结算"，
+ * 否则运行还在进行时引用就被丢了。
  *
- * `submitting: true` is not an answer either, but it is the *question*: it is what marks this session
- * as one whose run this window has watched begin, and only a session marked that way can be reported
- * finished. The mark is why the answer cannot be read straight off the frame — see `runSeen` in
- * `main`, which is where the set lives and why.
+ * `submitting: true` 也不是答案，但它是*问题*：它标记这个会话是本窗口看过其运行开始的，只有被
+ * 这样标记的会话才能被报告为结束。这个标记就是答案不能直接从帧上读出的原因 —— 见 `main` 里的
+ * `runSeen`，集合住在那里，理由也在那里。
  */
 function runEnded(runSeen: Set<string>, sessionId: string, message: ServerMessage): boolean {
 	const submitting =
@@ -70,9 +66,8 @@ function runEnded(runSeen: Set<string>, sessionId: string, message: ServerMessag
 		runSeen.add(sessionId);
 		return false;
 	}
-	// `delete` answers "was this session marked", which is exactly the question: a session that was
-	// never seen running has not finished anything, and dropping a reference over it would end a send
-	// before its run began.
+	// `delete` 回答"这个会话被标记过没有"，这恰恰是问题：从未被看到运行过的会话什么都没结束过，
+	// 在它上面丢引用会让一次 send 在其运行开始之前就结束。
 	return runSeen.delete(sessionId);
 }
 
@@ -81,114 +76,99 @@ function main(): void {
 	if (!root) throw new Error("#app is missing from index.html");
 
 	let state: ViewState = initialState();
-	/** The session this window is streaming. Commands name it explicitly, so it is never inferred. */
+	/** 本窗口正在流式观看的会话。命令显式指名它，所以永远不靠推断。 */
 	let followed: string | undefined;
 	/**
-	 * The sessions whose send has been seen running.
+	 * 已被看到运行的那些会话。
 	 *
-	 * A send's reference lives exactly as long as the run it started, and this set is what makes the
-	 * end of that run recognizable. `retain` asks every time it is called now (ADR-0010), so taking the
-	 * `send` reference re-baselines the session — and that baseline is taken *before* the prompt has
-	 * been accepted, so it says `submitting: false` about a session whose run has not begun. Read as
-	 * the run's end, it would drop the reference in the same breath it was taken, and a reader who then
-	 * clicked another row would cancel the one stream the run's own failure would have been reported
-	 * on. The first `submitting: true` is what makes a later `false` an answer; a run that finished
-	 * while the channel was down still gets one, because the mark outlives the connection.
+	 * send 的引用活得与它开启的那轮运行一样长，这个集合就是让那轮运行的结束可被识别的东西。
+	 * `retain` 现在每次调用都要求（ADR-0010），所以取 send 引用会重新基线化会话 —— 而那个基线在
+	 * 提示被接受*之前*取得，于是它对一个运行尚未开始的会话说 `submitting: false`。把它读成运行的
+	 * 结束，就会在引用刚取到的一瞬间丢掉它，随后点了另一行的读者会取消那条本该承载运行自身失败
+	 * 报告的流。第一个 `submitting: true` 让后来的 `false` 成为答案；通道断开期间结束的运行仍然
+	 * 能拿到一个，因为标记比连接长寿。
 	 */
 	const runSeen = new Set<string>();
 	/**
-	 * The model's seat's own choice, before any message has carried it.
+	 * 模型席位自己的选择，在任何消息携带它之前。
 	 *
-	 * Both halves are the window's until a send hands them to the server, which is why they are here
-	 * and not read straight off the snapshot: a choice that no request was made with is not a state the
-	 * session is in, so nothing on the server would report it. A field is dropped as soon as the
-	 * snapshot agrees, which is how the seat stops being an override and goes back to following the
-	 * session.
+	 * 两半在 send 把它们交给服务端之前都是窗口的，这就是它们住在这里而不是直接从快照读的原因：
+	 * 没有随任何请求发出的选择不是会话所处的状态，服务端上没有任何东西会报告它。快照一同意，
+	 * 字段就被丢掉，这就是席位从覆盖变回跟随会话的方式。
 	 */
 	let chosen: { model?: string; thinkingLevel?: string } = {};
-	/** The directory this server runs over, which is where "新建会话" writes by default. */
+	/** 本服务端运行其上的目录，"新建会话"默认写在这里。 */
 	let absCurrentDirectory = "";
 	/**
-	 * The directory picker's own choice, held by the window and never by the server.
+	 * 目录选择器自己的选择，由窗口持有，服务端从不持有。
 	 *
-	 * Three controls read it and nothing else does: the composer chip that displays it, the new-session
-	 * button that creates into it, and the sidebar's shadowed heading that names it. Empty means "no
-	 * explicit choice", and the answer is then the active session's directory — so that heading can
-	 * never contradict the conversation on screen — or the server's root when there is no session.
-	 * Opening a session clears it, which is what keeps the choice a "next time" answer rather than a
-	 * state that quietly outlives the moment it was made in. It survives no restart and lands in no
-	 * file, by decision: a transient preference re-chosen at the moment it is needed is not worth a
-	 * store.
+	 * 三个控件读它，别无其他：显示它的 composer chip、向它新建的按钮、指名它的侧栏阴影标题。
+	 * 空表示"没有显式选择"，答案是活跃会话的目录 —— 于是那个标题永远不会与屏幕上的对话矛盾 ——
+	 * 没有会话时是服务端的根。打开会话会清除它，这让选择保持为"下一次"的答案，而不是一个悄悄
+	 * 超越其被做出那一刻的状态。它不跨重启存活、不落入任何文件，这是决定：一个在被需要时重新
+	 * 选择的一次性偏好，不值得一个存储。
 	 */
 	let absPickedDirectory = "";
 	let collapsed = false;
 	/**
-	 * The sidebar's per-directory paging state, keyed by the directory's path.
+	 * 侧栏按目录的分页状态，以目录路径为键。
 	 *
-	 * Seeded from the appearance settings when they arrive and written back through them on every
-	 * click — the decision 09 号 landed: the state follows appearance, not `localStorage`, which the
-	 * desktop shell's fresh port on every launch would strand. A directory the user never touched
-	 * keeps no entry, so the map stays empty until a collapse or a page turn happens.
+	 * appearance 设置到达时播种，每次点击经它们写回 —— 09 号的决定：状态跟随 appearance，不跟
+	 * `localStorage`，桌面外壳每次启动换端口会让后者搁浅。用户从未碰过的目录不保留条目，所以在
+	 * 一次折叠或翻页发生之前映射一直为空。
 	 */
 	let paging: Record<string, DirectoryPaging> = {};
 	/**
-	 * Whether the resident channel is up.
+	 * 常驻通道是否可用。
 	 *
-	 * A local rather than a field on `ViewState`, because it is a fact about the connection and not
-	 * about any session — which is the same reason the sidebar rows are kept out of the state. The
-	 * reducer never sees it, so a baseline cannot overwrite it, and what the window can send still
-	 * depends on `state.reachable` alone.
+	 * 是局部变量而不是 `ViewState` 的字段，因为它是关于连接的事实而不是关于任何会话的 —— 与侧栏
+	 * 行被挡在状态之外是同一个理由。reducer 永远看不到它，基线无法覆盖它，而窗口能否发送仍然只
+	 * 取决于 `state.reachable`。
 	 */
 	let channel: ChannelState = "connecting";
 	/**
-	 * Resolved the first time the channel reports itself live, and never again.
+	 * 通道第一次报告自己 live 时 resolve，之后再也不变。
 	 *
-	 * The page load is the one navigation that has nothing to click first, so it is the one place that
-	 * has to wait for the connection: a session is opened by an `open` frame now (ADR-0010), and there
-	 * is no frame to send on a channel that has not yet proved itself. Every later navigation is a
-	 * gesture, and a gesture on a channel that is not up is refused with a reason rather than parked
-	 * behind this promise — which is why it is resolved once and never replaced.
+	 * 页面加载是唯一没有东西可先点的导航，所以它是唯一必须等连接的地方：现在一个会话由 `open` 帧
+	 * 打开（ADR-0010），而在尚未证明自己的通道上没有帧可发。之后的每次导航都是一次手势，而手势
+	 * 在未就绪的通道上会得到一个带理由的拒绝，而不是被停在这个 promise 后面 —— 这就是它只 resolve
+	 * 一次、永不替换的原因。
 	 */
 	let channelProved: () => void = () => {};
 	const channelLive = new Promise<void>((resolve) => {
 		channelProved = resolve;
 	});
-	/** The sidebar's rows, written by the channel when it is up and by REST when it is not. */
+	/** 侧栏的行：通道可用时由它写，不可用时由 REST 写。 */
 	const rows = new SessionRows();
 
 	/**
-	 * Which navigation of a session the window is on, counted up at every click.
+	 * 窗口当前在一个会话的哪次导航上，每次点击递增。
 	 *
-	 * Opening a session is one `open` frame per click now, and the old double-source race is gone with
-	 * the REST read that used to be the other half of it (ADR-0010) — but the shape of the race is the
-	 * same: two clicks, two baselines, and one pane. The count is still what decides which answer to
-	 * keep: a baseline that is no longer the newest is dropped whole, because drawing it would put the
-	 * conversation the user has already moved off on screen. Nothing cancels the stream itself; the
-	 * click that superseded it has already let that reference go.
+	 * 打开会话现在每次点击一个 `open` 帧，旧的双来源竞态连同曾是另一半的 REST 读取一起消失了
+	 * （ADR-0010）—— 但竞态的形状不变：两次点击、两条基线、一个窗格。计数仍然是决定保留哪个答案
+	 * 的东西：不再是最新的一条基线被整体丢弃，因为绘制它会把用户已经离开的对话画上屏幕。流本身
+	 * 没有被取消；取代它的那次点击已经放开了那个引用。
 	 */
 	let openSeries = 0;
 	/**
-	 * The navigations still waiting for their baseline, by their series, so the loading notice leaves
-	 * with the last of them.
+	 * 仍在等待基线的导航，按各自的 series，让加载提示随最后一个一起离开。
 	 *
-	 * A set rather than a count, and the difference is visible: a superseded navigation settles
-	 * *after* the one that replaced it started, and a counter would have that late settlement add
-	 * nothing but take the notice down for a pane that is still waiting. Removing a navigation that is
-	 * not in the set is the no-op it should be — the newest one can always speak for the set it is in.
+	 * 是集合而不是计数，差别可见：被取代的导航在取代它的那个开始*之后*才落定，而计数器会让那次
+	 * 迟到的落定毫无贡献却把还在等待的窗格的提示摘掉。移除一个不在集合里的导航应该是无操作 ——
+	 * 最新的一句永远能代表它所在的集合。
 	 */
 	const openWaits = new Set<number>();
 	/**
-	 * The session the window last asked to open.
+	 * 窗口最后一次要求打开的会话。
 	 *
-	 * An id of its own rather than a read of {@link followed}, because the case it exists for is a
-	 * navigation that never landed: `followed` still names the conversation on screen, while the click
-	 * that failed to open something else is still holding a pane reference. The next navigation is
-	 * what lets that reference go (see `openSession`) — this is the one variable that remembers what
-	 * it would be, and there is at most one of them because every new gesture consults it.
+	 * 有自己的 id 而不是读 {@link followed}，因为它存在的那种情形是一次从未落地的导航：
+	 * `followed` 仍然指名屏幕上的对话，而那次没能打开别的东西的点击仍然握着一个窗格引用。下一次
+	 * 导航才是放开那个引用的时机（见 `openSession`）—— 这是唯一记得它是什么的变量，至多一个，
+	 * 因为每次新手势都会咨询它。
 	 */
 	let opening: string | undefined;
 
-	/** Put the loading notice up for one navigation, or take it down once nothing is being opened. */
+	/** 为一次导航挂上加载提示，或在没有东西正被打开时摘下它。 */
 	function showLoading(series: number, on: boolean): void {
 		if (on) openWaits.add(series);
 		else openWaits.delete(series);
@@ -196,48 +176,44 @@ function main(): void {
 	}
 
 	/**
-	 * What each piece of chrome was last drawn from.
+	 * 每块 chrome 上一次绘制所依据的东西。
 	 *
-	 * The transcript re-renders on every token, and everything around it used to redraw too — the
-	 * sidebar walked its rows, the status line rewrote its figures, the banner area rebuilt its
-	 * cards — all per frame, all for inputs the frame had not touched. Each gate below compares
-	 * against the last draw instead: a cheap reference or string comparison that skips a walk whose
-	 * inputs did not move. A frame that changes one of them still draws it, and the first draw
-	 * happens because every gate starts unset.
+	 * transcript 每个 token 都重渲染，而它周围的一切过去也跟着重画 —— 侧栏走它的行，状态行重写
+	 * 它的数字，横幅区重建它的卡片 —— 全部逐帧进行，全部针对的是帧没有碰过的输入。下面的每个门
+	 * 与上次绘制比较：一次廉价的引用或字符串比较，跳过输入没有动的遍历。改变了其中之一的帧仍然
+	 * 会绘制它，而首次绘制会发生，因为每个门的初始值都是未设。
 	 */
 	let sidebarDrawn: string | undefined;
 	let usageDrawn: ViewState["usage"] | undefined;
 	let headingDrawn: string | undefined;
 	let headingTipDrawn: string | undefined;
 	let subtitleDrawn: string | undefined;
-	/** The directory the chip's label was last drawn from, so an unchanged one is not rewritten. */
+	/** chip 的标签上一次绘制所依据的目录，没变的就不重写。 */
 	let chipDrawn: string | undefined;
-	/** The signature the branch entry was last drawn from; a baseline is what can move it. */
+	/** 分支条目上一次绘制所依据的签名；基线才是能移动它的东西。 */
 	let branchChipDrawn: string | undefined;
-	/** The approvals the takeover seat was last drawn from; a new array means something to answer. */
+	/** 接管席位上一次绘制所依据的审批；新数组意味着有东西要回答。 */
 	let approvalsDrawn: ViewState["approvals"] | undefined;
 	let noticesDrawn: ViewState["models"] | undefined;
 
-	// ---------------------------------------------------------------- the window band
+	// ---------------------------------------------------------------- 窗口带
 
 	/**
-	 * The top band: a window-level strip the page lays nothing out in.
+	 * 顶部带：一条页面不在其中布局任何东西的窗口级条。
 	 *
-	 * The shell's caption buttons are overlaid onto its right end, and that is its entire content —
-	 * which is what makes them harmless. Every control below starts at row 2, so nothing the user can
-	 * press ever sits under them. The fill and the drag region are the stylesheet's (`.titleband`);
-	 * outside the shell's caption the row collapses to 0px and this element is nothing at all.
+	 * 外壳的标题按钮覆盖在它的右端，而这就是它的全部内容 —— 这正是让它们无害的原因。下面的每个
+	 * 控件都从第 2 行开始，所以用户能按的东西永远不会位于按钮之下。填充与拖动区域是样式表的
+	 * （`.titleband`）；在外壳标题之外该行收缩为 0px，这个元素就什么都不是。
 	 */
 	const titleband = element("div", "titleband");
 
-	// ---------------------------------------------------------------- the column
+	// ---------------------------------------------------------------- 列
 
 	const conversation = element("section", "conversation");
 
 	/**
-	 * The fixed header: the session title on the left of its first row, the branch entry on its
-	 * right, and — on the branch page only — the tools row. It spans the whole conversation column
-	 * and never follows the reading column in, so resizing the prose never moves it.
+	 * 固定头部：第一行左侧是会话标题、右侧是分支条目，且 —— 仅在分支页 —— 有工具行。它横跨
+	 * 整个对话列，从不跟随阅读列内收，所以调整文字宽度从不移动它。
 	 */
 	const header = element("header", "header");
 	const headerRow = element("div", "header-row");
@@ -246,18 +222,16 @@ function main(): void {
 	const heading = element("h1", undefined, "新会话");
 	const subtitle = element("div", "header-subtitle", "");
 	title.append(heading, subtitle);
-	// Only the title lives here. The controls that follow the *session* — the model and its thinking
-	// level — are on the composer, one row below the thing they affect, because they move with the
-	// conversation rather than with the app. Everything that lasts across sessions is a setting, and
-	// settings live in the panel behind the one button in the sidebar.
+	// 这里只住标题。跟随*会话*的控件 —— 模型及其思考档位 —— 在一行之下的 composer 上，因为
+	// 它们随对话移动而不是随应用移动。跨会话存在的一切都是设置，设置住在侧栏那一个按钮后面的
+	// 面板里。
 
 	/**
-	 * The branch entry, the only door into the branch page.
+	 * 分支条目，进入分支页的唯一门。
 	 *
-	 * It names the way being read — `当前分支`, the short id cut from that way's entry, and the first
-	 * sentence said under it. With fewer than two ways there is no way to name, so the id and the
-	 * sentence stand empty and the chip reads the mark and the words alone: a single-way conversation
-	 * is the one that most needs the door, and the page it opens answers with the how-to.
+	 * 它指名正在读的那条路 —— `当前分支`、从那条路的条目裁出的短 id、以及它下面说的第一句话。
+	 * 路少于两条时没有可指名的，所以 id 和句子空着，chip 只显示标记和文字：单路对话恰恰是最需要
+	 * 这扇门的，而它打开的页面会给出使用说明。
 	 */
 	const branchChip = element("button", "branch-chip", undefined, { type: "button", title: "打开分支视图" });
 	const branchChipId = element("span", "branch-chip-id");
@@ -269,12 +243,11 @@ function main(): void {
 	header.append(headerRow);
 
 	/**
-	 * Which page the conversation column shows.
-	 *
-	 * Two, by the ticket's count: the conversation, and the branch tree that replaces it whole — not
-	 * an overlay and not a side panel. Recorded on the body so one CSS rule can retire the composer,
-	 * the status line, and the banners together, because the branch page has none of them.
-	 */
+	 * 对话列显示哪一页。
+ *
+ * 两个，按工单的计数：对话，以及整体替换它的分支树 —— 不是覆盖层也不是侧面板。记录在 body 上，
+ * 让一条 CSS 规则能同时撤下 composer、状态行和横幅，因为分支页没有它们中的任何一个。
+ */
 	let pane: "chat" | "branch" = "chat";
 	function setPane(next: "chat" | "branch"): void {
 		if (pane === next) return;
@@ -285,14 +258,12 @@ function main(): void {
 	}
 
 	/**
-	 * The branch page, and the fixed header's second row.
+	 * 分支页，以及固定头部的第二行。
 	 *
-	 * Switching is the two-beat the prototype settled on: a click on a node only selects, and the
-	 * button in the tools row is what moves the leaf and returns to the conversation — which is why
-	 * `onSwitch` flips the pane first and moves the session second: the person pressed "go back",
-	 * and the answer they chose rides along. The view has already resolved the entry the leaf lands
-	 * on: a card on the line names the answer its question produced, so the conversation comes back
-	 * showing the question and what it said, and the next prompt forks after the answer.
+	 * 切换是原型定下的两拍：点击节点只是选中，工具行里的按钮才移动叶子并回到对话 —— 所以
+	 * `onSwitch` 先翻页面再移动会话：人按的是"回去"，他们选中的答案跟着一起。视图已经解析了叶子
+	 * 落地的条目：线上的卡片指名其问题产出的回答，于是对话回来时显示问题和它说的话，下一个提示在
+	 * 回答之后派生新分支。
 	 */
 	const branchView = new BranchView({
 		onSwitch: (entryId, landing) => {
@@ -311,24 +282,20 @@ function main(): void {
 	transcript.trackScroll();
 
 	/**
-	 * The drag handle on the reading column's left edge.
+	 * 阅读列左缘的拖动把手。
 	 *
-	 * One handle, and it controls the prose's maximum width — the decision 04 took and this window
-	 * never carried. The column is centred, so pushing the handle right narrows the text on both
-	 * sides at once: the direction the prototype settled after the user said the first one was
-	 * backwards. The width it moves is `--dsw-content-width`, and it is computed rather than looked
-	 * up, because its default is a formula against the conversation column's own width: column minus
-	 * a gutter at each side, ceiling the column minus the tight gutter, floor and absolute cap the
-	 * tokens (`--dsw-content-min/cap`) the stylesheet declares. The formula lives here, citing those
-	 * tokens — the same split the sidebar's handle makes, and for the same reason.
+	 * 一个把手，控制文字的最大宽度 —— 04 号的决定，本窗口从未带过。列是居中的，所以把手向右推
+	 * 会两侧同时收窄文字：原型在用户说第一版方向反了之后定下的方向。它移动的宽度是
+	 * `--dsw-content-width`，是计算出来的而不是查出来的，因为它的默认值是针对对话列自身宽度的
+	 * 公式：列减去两侧各一个留白，上限是列减去最紧留白，下限和绝对上限是样式表声明的 token
+	 * （`--dsw-content-min/cap`）。公式住在这里，引用那些 token —— 与侧栏把手的拆分相同，理由
+	 * 相同。
 	 *
-	 * Persistence follows the sidebar handle's two rules, which the reference implementation's match:
-	 * the preference saved is the one the drag produced, a press that never moved commits nothing —
-	 * an empty click must not overwrite a wider preference with whatever the current layout clamped
-	 * the display to — and the stored number is clamped to the current layout on every read, so a
-	 * smaller window presses the display down without destroying the choice. The server clamps the
-	 * stored preference to the absolute range (`CONTENT_WIDTH_RANGE` in `@my-agent/core/config.ts`);
-	 * the layout-relative ends are the window's alone, since only it knows the column's width.
+	 * 持久化遵循侧栏把手的两条规则，与参考实现一致：保存的偏好是拖动产生的那一个，从未移动的按压
+	 * 什么都不提交 —— 一次空点击绝不能用当前布局截断出的显示值覆盖更宽的偏好 —— 且存储的数字在
+	 * 每次读取时按当前布局截断，让更小的窗口压低显示而不销毁选择。服务端把存储的偏好截到绝对范围
+	 * （`@my-agent/core/config.ts` 的 `CONTENT_WIDTH_RANGE`）；布局相关的两端是窗口独有的，因为
+	 * 只有它知道列的宽度。
 	 */
 	const contentResizer = element("div", "content-resizer", undefined, {
 		role: "separator",
@@ -336,14 +303,13 @@ function main(): void {
 		"aria-label": "调整正文宽度",
 		tabindex: "0",
 	});
-	/** The keys turn the width in steps; the handle itself moves at half this rate, 2px of prose per 1px of pointer. */
+	/** 方向键按步进转宽度；把手本身以一半的速率移动，指针 1px 对应文字 2px。 */
 	const CONTENT_RESIZE_STEP = 16;
 	/**
-	 * The formula's constants, read from the same tokens the stylesheet declares.
+	 * 公式的常量，从样式表声明的同一批 token 读回。
 	 *
-	 * Not imported from the config module — it runs on Node, and the client must not pull that into
-	 * its bundle — so the tokens are read back, and the literals here are only what a stylesheet that
-	 * failed to load falls back to.
+	 * 不从 config 模块导入 —— 它跑在 Node 上，客户端绝不能把它拉进 bundle —— 所以 token 被读回，
+	 * 这里的字面量只是样式表加载失败时的兜底。
 	 */
 	function contentTokens(): { min: number; cap: number; gutter: number; gutterTight: number } {
 		const styles = getComputedStyle(document.documentElement);
@@ -359,14 +325,12 @@ function main(): void {
 		};
 	}
 	/**
-	 * The width to draw for a preference, under this layout.
+	 * 一个偏好在本布局下对应的绘制宽度。
 	 *
-	 * `undefined` means the user never dragged: the default is the column minus the resting gutter at
-	 * each side, and manufacturing a stored number for it would turn "never chose" into "chose the
-	 * default" — the same rule the sidebar's width follows. The result is clamped either way: the
-	 * floor is absolute, the ceiling the tighter of the cap and the column minus the tight gutter,
-	 * and a column too narrow for the floor lets the ceiling win, because on a narrow window the
-	 * prose must fill what is left rather than leave a gap the floor demands.
+	 * `undefined` 表示用户从未拖过：默认是列减去两侧静止时的留白，为它制造一个存储值会把"从未
+	 * 选择"变成"选了默认" —— 与侧栏宽度同一条规则。无论如何结果都被截断：下限是绝对的，上限是
+	 * cap 与列减最紧留白中更紧的那个，而装不下下限的窄列让上限获胜，因为窄窗口上文字必须填满
+	 * 剩余空间，而不是留下下限要求的空隙。
 	 */
 	function contentWidthFor(preference: number | undefined): number {
 		const { min, cap, gutter, gutterTight } = contentTokens();
@@ -375,7 +339,7 @@ function main(): void {
 		const wanted = preference ?? column - gutter * 2;
 		return Math.min(max, Math.max(min, Math.round(wanted)));
 	}
-	/** The width last written to the variable, so a recompute that answers the same number is skipped. */
+	/** 上一次写入变量的宽度，所以算出同一个数的重算被跳过。 */
 	let contentApplied: number | undefined;
 	function applyContentWidth(preference: number | undefined): void {
 		const width = contentWidthFor(preference);
@@ -383,20 +347,18 @@ function main(): void {
 		contentApplied = width;
 		document.documentElement.style.setProperty("--dsw-content-width", `${width}px`);
 	}
-	/** The width on screen right now: what was last written, or what would be. */
+	/** 此刻屏幕上的宽度：上次写入的，或者将要写入的。 */
 	function contentWidthNow(): number {
 		return contentApplied ?? contentWidthFor(contentPref);
 	}
 	/**
-	 * The preference as the settings hold it, undefined while the user never dragged.
+	 * 设置持有的偏好，用户从未拖过时为 undefined。
 	 *
-	 * Written when a settings snapshot arrives, read by the observer below on every layout change,
-	 * and by the drag itself only as the starting point.
+	 * 设置快照到达时写入，下面的观察者在每次布局变化时读取，拖动本身只把它当起点。
 	 */
 	let contentPref: number | undefined;
-	// The default is a formula against the column's width, so anything that changes that width — the
-	// window's, or the sidebar's — re-asks the question. The observer is the one place that
-	// recomputation is scheduled from: a column resize is a resize, whichever handle caused it.
+	// 默认值是针对列宽的公式，所以任何改变那个宽度的东西 —— 窗口的、或侧栏的 —— 都会重新问这个
+	// 问题。观察者是唯一调度这次重算的地方：列 resize 就是 resize，无论哪个把手造成。
 	new ResizeObserver(() => applyContentWidth(contentPref)).observe(conversation);
 	let contentDrag: { x: number; width: number } | undefined;
 	contentResizer.addEventListener("pointerdown", (event) => {
@@ -407,8 +369,8 @@ function main(): void {
 	});
 	contentResizer.addEventListener("pointermove", (event) => {
 		if (contentDrag === undefined) return;
-		// The column is centred, so one pixel of handle moves two pixels of prose — the factor the
-		// prototype settled on, and what keeps the handle under the pointer as it drags.
+		// 列是居中的，所以把手一像素移动文字两像素 —— 原型定下的系数，也让拖动时把手保持在指针
+		// 之下。
 		applyContentWidth(contentDrag.width - (event.clientX - contentDrag.x) * 2);
 	});
 	const endContentDrag = (): void => {
@@ -416,8 +378,8 @@ function main(): void {
 		contentResizer.classList.remove("dragging");
 	};
 	contentResizer.addEventListener("pointerup", (event) => {
-		// Measured against where the drag began, so a click that never moved saves nothing — the same
-		// guard the sidebar's handle puts between an empty press and the stored preference.
+		// 以拖动开始处为基准测量，所以从未移动的点击什么都不保存 —— 与侧栏把手放在空按压与存储
+		// 偏好之间的同一道防线。
 		const moved = contentDrag !== undefined && event.clientX !== contentDrag.x;
 		endContentDrag();
 		if (moved) {
@@ -427,39 +389,33 @@ function main(): void {
 	});
 	contentResizer.addEventListener("pointercancel", () => endContentDrag());
 	contentResizer.addEventListener("keydown", (event) => {
-		// Right narrows, left widens — the same direction a drag follows.
+		// 右收窄，左放宽 —— 与拖动相同的方向。
 		const step = event.key === "ArrowRight" ? -CONTENT_RESIZE_STEP : event.key === "ArrowLeft" ? CONTENT_RESIZE_STEP : 0;
 		if (step === 0) return;
 		event.preventDefault();
-		// Stored is what the draw clamped to, the same thing a drag commits: a keypress against a
-		// clamp this layout already enforces must not file a wider preference that only takes effect
-		// after the window grows.
+		// 存储的是绘制截断到的值，与拖动提交的同一件事：对本布局已经执行的截断按键，绝不能存进一个
+		// 只有窗口变大后才生效的更宽偏好。
 		applyContentWidth(contentWidthNow() + step);
 		contentPref = contentApplied;
 		void saveSettings({ appearance: { contentWidth: contentPref } });
 	});
 
 	/**
-	 * The transcript's wrapper: the grid row that flexes, and the handle's positioning context.
+	 * transcript 的包裹层：会伸展的 grid 行，也是把手的定位上下文。
 	 *
-	 * The two live one layer apart on purpose — an absolutely positioned handle inside the scroll
-	 * container itself would scroll away with the content, while the handle belongs to the layout
-	 * the prose is read through, not to anything in it.
+	 * 两者刻意相隔一层 —— 绝对定位的把手若放在滚动容器内部，会随内容一起滚走，而把手属于文字被
+	 * 阅读所经的布局，不属于其中的任何东西。
 	 */
 	const transcriptBody = element("div", "transcript-body");
 	/**
-	 * The notice that a session is being opened, which is the window's only answer to "did my click
-	 * do anything".
+	 * 会话正在被打开的提示，是窗口对"我的点击做了什么"的唯一回答。
 	 *
-	 * Opening a session is one `open` and then one baseline, and until the baseline lands the previous
-	 * transcript is still on screen — the deliberate behaviour of a pane that swaps rather than
-	 * blanks, but indistinguishable from "the click was ignored" while the server has not answered. So
-	 * the wait gets a face: it appears over the pane the moment the navigation starts and leaves when
-	 * the snapshot's first slice has been drawn.
+	 * 打开会话是一次 `open` 加一条基线，在基线落地之前上一份 transcript 仍在屏幕上 —— 这是窗格
+	 * 替换而不是清空的刻意行为，但在服务端尚未应答时它与"点击被忽略"无法区分。所以等待有了一张
+	 * 脸：导航开始的一瞬它盖在窗格上，快照的第一片画完时离开。
 	 *
-	 * It sits in the wrapper rather than in the transcript because the transcript scrolls: a notice
-	 * inside the scroll container would scroll away with the conversation it is replacing. That is
-	 * the same one-layer-apart arrangement the reading column's handle makes.
+	 * 它坐在包裹层而不是 transcript 里，因为 transcript 会滚动：滚动容器里的提示会随它正在替换的
+	 * 对话一起滚走。与阅读列把手相同的一层之隔。
 	 */
 	const sessionLoading = element("div", "session-loading", undefined, { role: "status", "aria-live": "polite" });
 	const loadingRing = element("div", "loading-ring");
@@ -474,23 +430,22 @@ function main(): void {
 	const errorBar = element("div", "error-bar");
 	errorBar.hidden = true;
 	/**
-	 * The approval card's seat, which is the composer's own seat.
+	 * 审批卡片的席位，也就是 composer 自己的席位。
 	 *
-	 * A pending approval replaces the input box rather than hanging above it: the question is the only
-	 * thing the window can act on while it stands, and a card that took over the seat is the shape the
-	 * reference gives it — warning border, command, two answers — where a banner above an input that
-	 * is still taking text reads like decoration on something that is not listening anyway.
+	 * 一个待审批会替换输入框而不是悬在它上方：这个问题是窗口在它站着期间唯一能行动的东西，而
+	 * 占据席位的卡片是参考实现给出的形状 —— 警告边框、命令、两个答案 —— 挂在仍在接收输入的输入
+	 * 框上方的横幅，读起来像给一个根本没在听的东西贴的装饰。
 	 */
 	const approvalSeat = element("div", "approval-seat");
 	approvalSeat.hidden = true;
-	/** The composer head: the directory chip on the row above the input card, leftmost. */
+	/** composer 头部：输入卡片上方那行的目录 chip，最左。 */
 	const composerHead = element("div", "composer-head");
 	const composer = new Composer({
 		onSubmit: (text, behavior) => void prompt(text, behavior),
 		onAbort: () => void abort(),
 		onSelectModel: (name) => {
-			// Only the model moves. The level is the composer's, every model takes the same four, and a
-			// strength the user chose should not be silently reset by switching which endpoint answers.
+			// 只移动模型。档位是 composer 的，每个模型用同样的四档，用户选好的力度不该被切换应答
+			// 端点悄悄重置。
 			chosen = { ...chosen, model: name };
 			render();
 		},
@@ -498,10 +453,9 @@ function main(): void {
 			chosen = { ...chosen, thinkingLevel: level };
 			render();
 		},
-		// The mode menu's rows are built here, where the presets and the session's live state are: the
-		// built-in default first, then the stored modes, then the one road into editing them. It opens
-		// upward: the mode seat is on the bar at the window's bottom edge, where a menu hung underneath
-		// it would have nowhere to go.
+		// 模式菜单的行在这里构建，因为预设和会话的 live 状态都在这里：内置默认在前，然后是存储的
+		// 模式，然后是进入编辑的唯一入口。它向上打开：模式席位在窗口底边的输入条上，挂在下面的菜单
+		// 将无处安放。
 		onModes: (anchor) => {
 			const settings = state.settings;
 			const allTools = state.snapshot?.allTools ?? [];
@@ -533,30 +487,28 @@ function main(): void {
 	composerWrap.append(errorBar, approvalSeat, composerHead, composer.element);
 
 	/**
-	 * The directory chip, and the menu it opens.
+	 * 目录 chip，以及它打开的菜单。
 	 *
-	 * The chip is the picker's face: it shows where the *next* new session will land, and it lives on
-	 * the row above the input card, leftmost — the composer is where a session starts, so that is
-	 * where "where the next one starts" belongs (01 ⑦). The choice never rewrites the session on
-	 * screen, and the chip is placed by the input it sits over rather than by what the transcript
-	 * says, so it needs no phase to come and go with. Its menu lists the directories this machine
-	 * already knows plus the one road in for one it does not; the list is drawn from the sidebar's
-	 * own rows, so a directory that earned its place by having a session is the same list here.
+	 * chip 是选择器的脸：它显示*下一个*新会话将落在哪里，住在输入卡片上方那行的最左 —— composer
+	 * 是一段会话开始的地方，所以"下一个从哪开始"就属于这里（01 ⑦）。这个选择从不改写屏幕上的
+	 * 会话，chip 的位置由它覆盖的输入决定而不是由 transcript 说什么决定，所以它不需要随阶段来去。
+	 * 它的菜单列出本机已经认识的目录，加上一个不认识的目录的唯一入口；列表来自侧栏自己的行，所以
+	 * 靠拥有会话赢得席位的目录，与这里的是同一份。
 	 */
 	const directoryChip = element("button", "directory-chip", undefined, { type: "button", "aria-haspopup": "menu" });
 	const chipLabel = element("span", "directory-chip-label");
 	directoryChip.append(icon("folder"), chipLabel, icon("chevron"));
 	directoryChip.addEventListener("click", () => {
 		const groups = rows.groups();
-		// Nothing known yet: a one-row menu whose only row is the add action is a menu that pretends
-		// there was a choice, so the click goes straight to the picker, as the reference does.
+		// 还什么都不知道：一个只有"添加目录"一行的单行菜单，是在假装存在过选择，所以点击直接去
+		// 选择器，与参考实现一致。
 		if (groups.length === 0) {
 			void addDirectory();
 			return;
 		}
 		const absChosenDir = directoryForNewSession();
-		// Upward like the bar's three seats: the chip sits at the bottom of the window too, and a menu
-		// that fell below it would land on the input card it hangs over.
+		// 与输入条的三个席位一样向上打开：chip 也贴着窗口底部，落到下面的菜单会砸在它覆盖的输入
+		// 卡片上。
 		openMenu(
 			directoryChip,
 			[
@@ -583,17 +535,16 @@ function main(): void {
 
 	const statusBar = new StatusBar();
 
-	// The branch page sits where the transcript sits: one grid row that flexes, whichever of the two
-	// is on. Hiding is CSS's job (`body[data-pane]`), so the two pages trade places without any of
-	// the chrome around them re-flowing.
+	// 分支页坐在 transcript 坐的地方：同一行会伸展的 grid，两者轮流占。隐藏是 CSS 的工作
+	// （`body[data-pane]`），于是两个页面交换位置时周围的所有 chrome 都不重排。
 	conversation.append(header, transcriptBody, branchView.element, banners, composerWrap, statusBar.element);
 
-	// ------------------------------------------------------------------ sidebar
+	// ------------------------------------------------------------------ 侧栏
 
 	const sidebar = new Sidebar({
-		// The heading's own 「新建会话」 names the directory it was asked on; the top row names nothing
-		// and follows the picker. The choice is folded into `absPickedDirectory` *before* the create goes
-		// out, because `openSession` clears it — the picker has done its job once the session exists.
+		// 标题自己的「新建会话」指名它被按下的目录；顶行的按钮什么都不指名、跟随选择器。选择在
+		// create 发出*之前*就折进 `absPickedDirectory`，因为 `openSession` 会清除它 —— 会话一旦
+		// 存在，选择器就完成了使命。
 		onNewSession: (workDirAbsPath) => {
 			if (workDirAbsPath !== undefined) absPickedDirectory = workDirAbsPath;
 			void newSession(workDirAbsPath);
@@ -605,16 +556,15 @@ function main(): void {
 		},
 		onOpenSettings: () => openSettings(),
 		onAddDirectory: () => void addDirectory(),
-		// The row menu's fork copies a session whole — it acts on a session, not on a message, so this
-		// is the `entryId: null` fork rather than anything a message used to offer.
+		// 行菜单的派生复制整个会话 —— 它作用于会话而不是消息，所以这是 `entryId: null` 的 fork，
+		// 不是任何消息过去提供的那种。
 		onForkSession: (sessionId) => void forkSession(sessionId),
 		onDeleteSession: (sessionId) => void deleteSession(sessionId),
 		onRenameSession: (sessionId, title) => void renameSession(sessionId, title),
 		onToggleDirectory: (workDirAbsPath) => {
 			const entry = pagingOf(paging, workDirAbsPath);
-			// Expanding lands on the page the directory was read down to when it collapsed; collapsing
-			// saves the page it was on. The two paging buttons write the saved page too — they are
-			// where the reading happens — so the saved page is always the page on screen.
+			// 展开落在目录被折叠时读到的那一页；折叠保存它当时所在的页。两个翻页按钮也写保存页 ——
+			// 阅读发生在那里 —— 所以保存的页永远是屏幕上的页。
 			setPaging(
 				workDirAbsPath,
 				entry.collapsed
@@ -627,9 +577,8 @@ function main(): void {
 			setPaging(workDirAbsPath, { collapsed: false, page: entry.page + 1, savedPage: entry.page + 1 });
 		},
 		onCollapseDirectory: (workDirAbsPath) => {
-			// Step back the one page the last 「展开其余」 added — not a reset to the first, and the
-			// saved page moves with it: un-expanding is un-reading, so reopening a later
-			// heading-collapse lands on the page the user had actually read down to.
+			// 退回上一次「展开其余」添加的那一页 —— 不是重置到第一页，保存页也跟着退：收回展开就是
+			// 收回阅读，所以再次展开标题折叠时落在用户实际读到的页。
 			const entry = pagingOf(paging, workDirAbsPath);
 			const page = Math.max(1, entry.page - 1);
 			setPaging(workDirAbsPath, { collapsed: false, page, savedPage: page });
@@ -639,13 +588,11 @@ function main(): void {
 	});
 
 	/**
-	 * Fold one directory's paging state in, redraw, and persist it through appearance.
+	 * 折入一个目录的分页状态，重画，并经 appearance 持久化。
 	 *
-	 * The local map moves first so the redraw does not wait on a round trip; the map is then sent
-	 * whole, the way every appearance field is. The server's answer lands in `apply`, which re-seeds
-	 * this map from the saved settings — when the write failed, the report is the error bar and the
-	 * view keeps the click, which is the honest split: the screen is what the user did, the file is
-	 * what survived.
+	 * 本地映射先动，重画就不必等一次往返；映射随后整体发送，与每个 appearance 字段一样。服务端的
+	 * 答案落在 `apply`，由它从保存的设置重新播种这张映射 —— 写入失败时，错误条是报告，视图保留
+	 * 这次点击，这是诚实的拆分：屏幕是用户做的，文件是幸存的。
 	 */
 	function setPaging(workDirAbsPath: string, next: DirectoryPaging): void {
 		paging = { ...paging, [workDirAbsPath]: next };
@@ -654,17 +601,14 @@ function main(): void {
 	}
 
 	/**
-	 * The drag handle on the sidebar's right edge.
+	 * 侧栏右缘的拖动把手。
 	 *
-	 * A separator, not a button: the pointer grabs the sidebar's edge and drags it — right widens,
-	 * the direction the prototype settled — and the keyboard reaches the same clamp through the
-	 * arrow keys, which is why the element is focusable at all. The width it moves is
-	 * `--dsw-sidebar-width`, the one variable the grid's first column is drawn from.
+	 * 一个分隔符，不是按钮：指针抓住侧栏的边缘拖动 —— 向右变宽，原型定下的方向 —— 键盘经方向键
+	 * 到达同一个截断，这正是这个元素可聚焦的原因。它移动的宽度是 `--dsw-sidebar-width`，grid 第一
+	 * 列所依据的唯一变量。
 	 *
-	 * Persistence follows the reading handle's two rules: the preference saved is the one the drag
-	 * produced, clamped to the range the server also enforces, and a press that never moved commits
-	 * nothing — an empty click must not overwrite a stored width with whatever the current layout
-	 * had clamped it to.
+	 * 持久化遵循阅读把手的两条规则：保存的偏好是拖动产生的那一个，截到服务端也执行的范围；从未
+	 * 移动的按压什么都不提交 —— 一次空点击绝不能用当前布局截出的值覆盖存储的宽度。
 	 */
 	const sidebarResizer = element("div", "side-resizer", undefined, {
 		role: "separator",
@@ -672,15 +616,14 @@ function main(): void {
 		"aria-label": "调整侧栏宽度",
 		tabindex: "0",
 	});
-	/** The keys turn the width in steps, which is finer than a drag and needs a named number. */
+	/** 方向键按步进转宽度，比拖动精细，需要一个命名的数字。 */
 	const SIDEBAR_RESIZE_STEP = 8;
 	/**
-	 * The drag range, read from the same tokens the stylesheet declares (`--dsw-sidebar-min/max`).
+	 * 拖动范围，从样式表声明的同一批 token 读回（`--dsw-sidebar-min/max`）。
 	 *
-	 * The numbers' home is `tokens.css`, mirrored by `SIDEBAR_WIDTH_RANGE` in `@my-agent/core/config.ts`
-	 * where the server clamps a stored preference. They are not imported into the client — the config
-	 * module runs on Node, and the client must not pull that into its bundle — so the tokens are read
-	 * back instead, and the literals here are only what a stylesheet that failed to load falls back to.
+	 * 这些数字的家在 `tokens.css`，由 `@my-agent/core/config.ts` 的 `SIDEBAR_WIDTH_RANGE` 镜像，
+	 * 服务端在那里截断存储的偏好。它们不被导入客户端 —— config 模块跑在 Node 上，客户端绝不能
+	 * 把它拉进 bundle —— 所以 token 被读回，这里的字面量只是样式表加载失败时的兜底。
 	 */
 	function sidebarRange(): { min: number; max: number } {
 		const styles = getComputedStyle(document.documentElement);
@@ -690,7 +633,7 @@ function main(): void {
 		};
 		return { min: read("--dsw-sidebar-min", 208), max: read("--dsw-sidebar-max", 360) };
 	}
-	/** The width the variable currently carries, or the token's default before anything set it. */
+	/** 变量当前携带的宽度，任何东西设置它之前是 token 的默认值。 */
 	function sidebarWidthNow(): number {
 		const value = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--dsw-sidebar-width"));
 		return Number.isFinite(value) ? value : 232;
@@ -716,9 +659,8 @@ function main(): void {
 		sidebarResizer.classList.remove("dragging");
 	};
 	sidebarResizer.addEventListener("pointerup", (event) => {
-		// The drag that ends here is measured against where it began, so a click that never moved
-		// saves nothing: the stored preference keeps the value the user chose, not one the current
-		// layout's clamp would have whispered over it.
+		// 在这里结束的拖动以开始处为基准测量，所以从未移动的点击什么都不保存：存储的偏好保持用户
+		// 选定的值，而不是当前布局的截断会悄悄压上去的那个。
 		const moved = sidebarDrag !== undefined && event.clientX !== sidebarDrag.x;
 		endSidebarDrag();
 		if (moved) void saveSettings({ appearance: { sidebarWidth: sidebarWidthNow() } });
@@ -732,117 +674,99 @@ function main(): void {
 		void saveSettings({ appearance: { sidebarWidth: sidebarWidthNow() } });
 	});
 
-	// ----------------------------------------------------------------- settings
+	// ----------------------------------------------------------------- 设置
 
 	const settings = new SettingsPanel({
 		onClose: () => settings.hide(),
 		onTheme: (theme) => void saveSettings({ appearance: { theme } }),
 		onFontSize: (fontSize) => void saveSettings({ appearance: { fontSize } }),
 		onBashTimeouts: (bash) => void saveSettings({ bash }),
-		// The global default approval map: what a session that never chose opens on. Writing it here
-		// writes the settings files, and a session with recorded choices of its own keeps them.
+		// 全局默认审批表：从未选择过的会话以它开启。在这里写入就是写设置文件，而一个有自己的记录
+		// 选择的会话会保留它们。
 		onGlobalApproval: (tool, value) => saveSettings({ approval: { [tool]: value } }),
 		onSaveModels: async (rows) => {
 			const { models } = await api.updateModels(rows);
 			apply({ ...state, models });
 		},
-		// The modes list, whole — the endpoint replaces it, so a rename here and a delete there land
-		// together. The snapshot that comes back re-seeds every mode reader.
+		// 模式列表，整体 —— 端点是替换式的，所以这里改名、那里删除会一起落地。返回的快照重新播种
+		// 每个模式读取者。
 		onSaveModes: (modes) => saveSettings({ modes }),
-		// The default a *new* session opens on, so it writes the settings files. The model a live session
-		// is on is the composer's, and never goes through here.
+		// *新*会话开启时的默认，所以它写设置文件。live 会话用的模型是 composer 的，绝不经过这里。
 		onDefaultModel: (name) => void saveSettings({ model: name }),
 		onGlobalTools: (names) => saveSettings({ tools: names }),
 	});
 
-	// The handle sits between the two columns — it is the sidebar's right edge, which is the whole
-	// point — and the rail's CSS hides it, since a 52px rail is not a width anyone is choosing.
-	// The band goes first: as #app's first grid item it takes the window's top row, the one strip the
-	// caption's buttons are overlaid onto, and it stays empty by design — every touchable thing the
-	// page owns begins in row 2, so the buttons cannot cover anything.
+	// 把手坐在两列之间 —— 它就是侧栏的右缘，这正是全部要点 —— 而 rail 的 CSS 把它藏起来，因为
+	// 52px 的 rail 不是任何人会选择去拖的宽度。带排第一：作为 #app 的第一个 grid item，它占据
+	// 窗口的顶行，也就是标题按钮覆盖的那一条，它按设计保持空 —— 页面拥有的每个可触摸的东西都从
+	// 第 2 行开始，按钮因此盖不住任何东西。
 	root.append(titleband, sidebar.element, sidebarResizer, conversation, settings.element);
 
-	// ------------------------------------------------------------------- wiring
+	// ------------------------------------------------------------------- 接线
 
 	const api = new SessionApi();
 
 	/**
-	 * The one resident channel, and the window's whole view of the server's liveness.
+	 * 唯一的常驻通道，以及窗口对服务端存活状况的全部认知。
 	 *
-	 * Frames are routed here by `streamId` alone, which is the whole contract: `null` names the
-	 * connection and everything else names one session. Nothing below re-examines the payload's shape,
-	 * so a new member of either union is an addition to the protocol rather than a change to every
-	 * client that reads it.
+	 * 帧在这里只按 `streamId` 路由，这就是全部契约：`null` 指连接，其他一切都指一个会话。下面
+	 * 任何东西都不再检查载荷形状，所以任一 union 的新成员都是协议的一次添加，而不是对每个读它的
+	 * 客户端的修改。
 	 */
 	const mux = new MuxClient(
 		{
 			onChannel: (next) => {
 				channel = next;
-				// The page load's gate: until the channel has proved itself there is no `open` to send,
-				// so the one navigation that has no click behind it waits on this.
+				// 页面加载的门：通道证明自己之前没有 `open` 可发，所以唯一没有点击在先的导航等在这里。
 				if (next === "live") channelProved();
-				// Coming back up brings a fresh row table with it, and nothing here triggers a fetch:
-				// the channel's own baseline is the authority from that moment on.
+				// 通道恢复会带来新的行表，这里什么也不触发 fetch：从那一刻起通道自己的基线就是权威。
 				//
-				// Going down is the other half. The rows drawn are the last thing this window was told,
-				// and emptying them would hide the machine's state at the exact moment it stops updating —
-				// so they stay, and a REST listing is asked for instead. Without that, the sidebar would
-				// freeze for as long as the outage lasted, which is the one behaviour the row table
-				// exists to prevent.
+				// 掉线是另一半。画出的行是本窗口最后被告知的东西，清空它们会在停止更新的那一刻藏起
+				// 机器的状态 —— 所以行保留，改为请求一次 REST 列表。没有这个，侧栏会在故障持续的整段
+				// 时间里冻结，而这正是行表要防止的行为。
 				if (next === "down") void refreshLists().catch(report);
 				render();
 			},
 			onConnectionItem: (item) => onConnectionItem(item),
 			onStreamMessage: (sessionId, message) => {
-				// A send's reference lasts exactly as long as the run it started, and its end is the
-				// stream saying `submitting: false` — not the request being accepted and not the run
-				// beginning. `runEnded` is what tells those three apart, because a `retain` now asks for
-				// a baseline every time (ADR-0010) and the one taken with a prompt describes the session
-				// from *before* the run. Under the end-restart semantics (ADR-0006 §5) a run waiting on
-				// an approval *is* over — the run ended at the gate and the answer arrives over REST — so
-				// this releases the reference while the question stands; while the window stays on the
-				// conversation the pane's own reference keeps watching, and the answer's resumed run is
-				// reported on that.
+				// send 的引用活得与它开启的那轮运行一样长，它的结束是流说 `submitting: false` ——
+				// 不是请求被接受，也不是运行开始。`runEnded` 负责区分这三者，因为 `retain` 现在每次
+				// 都要求基线（ADR-0010），而随提示取的那条基线描述的是运行*之前*的会话。在
+				// end-restart 语义下（ADR-0006 §5），等待审批的运行*已经*结束 —— 运行在门处结束、
+				// 答案经 REST 到达 —— 所以问题仍然站着时这里就释放引用；窗口留在对话上时窗格自己的
+				// 引用继续观看，答案的恢复运行在它上面上报。
 				//
-				// Checked **before** the pane test below, and that ordering is load-bearing. Navigating
-				// away mid-run releases the pane's reference but not the send's — that is what the
-				// reference is for — so this session's frames keep arriving with nobody watching them,
-				// and the run's last `submitting: false` is exactly the frame that has to be read. Bailing
-				// out on the pane first would drop it, and the stream would then be held for the rest of
-				// the window's life and re-opened by every reconnect, for a run that had already finished.
+				// 在下面的窗格检查**之前**检查，这个顺序是承重的。运行中途导航离开会释放窗格引用但
+				// 不释放 send 的 —— 这正是引用存在的意义 —— 于是这个会话的帧在无人观看时继续到达，
+				// 而运行的最后一个 `submitting: false` 恰恰是必须被读到的帧。先按窗格退出就会丢掉它，
+				// 那条流会被持有到窗口生命结束，且每次重连都重开，为一次早已结束的运行。
 				if (runEnded(runSeen, sessionId, message)) releaseSend(sessionId);
 
-				// A frame for a session this window has moved away from. Not an error and not worth
-				// redrawing for: the pane's reference was released, so the server has no reason to send
-				// it, and if one arrives it is a frame that arrived before the release reached it.
+				// 属于本窗口已离开的会话的帧。不是错误，也不值得重画：窗格引用已被释放，服务端没有
+				// 理由再发，如果发来了，也是释放到达之前的帧。
 				if (followed !== sessionId) return;
-				// Coalesced: a run's deltas arrive far faster than the display refreshes, and painting
-				// each one is work no frame shows. The fold still happens here, per event; the draw is
-				// asked for once and runs against the last state the frame reached.
+				// 合并：一次运行的 delta 到达速度远快于显示刷新，逐个绘制是没有任何帧会展示的工作。
+				// 折叠仍在这里逐事件进行；绘制只被请求一次，对着帧到达的最后一个状态运行。
 				apply(reduce(state, message), { coalesce: true });
 			},
 			onStreamEnd: (sessionId) => {
-				// The send's reference has a third exit besides a settled status and a refused run: the
-				// server ending the stream. Released before the pane test below, for the same reason
-				// `onStreamError` releases before it draws anything — the reference belongs to the run,
-				// not to the pane, so a window that navigated away mid-run still holds it. Releasing
-				// unconditionally is safe: an id this connection does not hold is a no-op.
+				// send 的引用除了已结算的状态和被拒绝的运行，还有第三种出口：服务端结束流。在下面的
+				// 窗格检查之前释放，与 `onStreamError` 在绘制任何东西之前释放的理由相同 —— 引用属于
+				// 运行，不属于窗格，所以运行中途离开的窗口仍然持有它。无条件释放是安全的：这条连接
+				// 不持有的 id 是无操作。
 				releaseSend(sessionId);
 				if (followed !== sessionId) return;
 				apply(reduceEnd(state));
 			},
 			onStreamError: (sessionId, message) => {
-				// The notice goes to this window's error line rather than into whichever conversation
-				// the window happens to be showing: the person who has to act on it is looking at the
-				// window, not at a session id.
+				// 通知去本窗口的错误行，而不是去窗口碰巧在显示的那个对话：必须对它行动的人看的是
+				// 窗口，不是会话 id。
 				report(new Error(message));
-				// A run that could not start is reported here and never reports itself finished, so this
-				// is one of the exits a send's reference has. Without it a failed send would hold its
-				// stream open for the rest of the window's life — which nobody would notice, since it is
-				// usually a stream the pane wants anyway.
+				// 无法启动的运行在这里上报且永远不会自报结束，所以这是 send 引用的出口之一。没有它，
+				// 一次失败的 send 会把它的流持有到窗口生命结束 —— 没人会注意到，因为那通常是窗格
+				// 本来就想要的流。
 				//
-				// Only for a session's own stream. The empty id is the envelope-level failure, which is
-				// about the connection and names no session, so there is nothing here to release.
+				// 仅对会话自己的流。空 id 是信封级失败，关于连接、不指名任何会话，这里没有东西可释放。
 				if (sessionId !== "") releaseSend(sessionId);
 			},
 		},
@@ -850,13 +774,12 @@ function main(): void {
 	);
 
 	/**
-	 * Let go of a session's send reference, and of the mark that made its run recognizable.
+	 * 放开一个会话的 send 引用，以及让它的运行可被识别的那个标记。
 	 *
-	 * The two are one act: the mark exists only to answer for a reference that is still held, so a
-	 * release that left it behind would let the *next* send's baseline look like the end of a run it
-	 * never watched — dropping that reference immediately, which is the bug the mark is here to
-	 * prevent. Four exits lead here and all four mean "no run of ours is in flight": the run's own last
-	 * word, a refused run, an ended stream, and a prompt the server did not accept.
+	 * 两者是一个动作：标记的存在只为了回答一个仍然被持有的引用，留下它的释放会让*下一个* send 的
+	 * 基线看起来像一次它从未看过的运行的结束 —— 立刻丢掉那个引用，正是标记要防的 bug。四个出口
+	 * 到达这里，四个都意味着"我们的运行不在进行中"：运行自己的最后一句话、被拒绝的运行、结束的流，
+	 * 以及服务端没有接受的提示。
 	 */
 	function releaseSend(sessionId: string): void {
 		runSeen.delete(sessionId);
@@ -864,12 +787,11 @@ function main(): void {
 	}
 
 	/**
-	 * One connection-level payload: the row table, a changed row, or the heartbeat.
+	 * 一个连接级载荷：行表、一行变更，或心跳。
 	 *
-	 * The heartbeat is the one with no work of its own — `MuxClient` already consumed it to arm the
-	 * watchdog — and it is used here as the tick that keeps the sidebar's relative times honest. Riding
-	 * an existing frame rather than opening a second timer means there is one clock in the window, and
-	 * it stops when the channel does, which is the correct time for "how long ago" to stop updating.
+	 * 心跳是唯一没有自己工作的 —— `MuxClient` 已经消费它来武装看门狗 —— 它在这里被当作让侧栏
+	 * 相对时间保持诚实的节拍。骑在已有的帧上而不是开第二个定时器，意味着窗口里只有一只钟，且通道
+	 * 停止时它也停止，这正是"多久之前"停止更新的正确时机。
 	 */
 	function onConnectionItem(item: ConnectionItem): void {
 		if (item.type === "sessions") {
@@ -883,10 +805,9 @@ function main(): void {
 			return;
 		}
 		if (item.type === "session_gone") {
-			// The fold before the row removal, so the sidebar draws once with both facts in hand: the
-			// pane already elsewhere and the row already gone. The fold itself is the shared one —
-			// a session deleted by another window folds this window exactly the way a local delete
-			// does, because gone is gone whichever window said it.
+			// 在行移除之前折叠，侧栏就能带着两个事实各画一次：窗格已在别处、行已消失。折叠本身是
+			// 共享的那一个 —— 被别的窗口删除的会话，对本窗口的折叠与本地删除完全一样，因为无论谁说
+			// 的，没了就是没了。
 			foldFromDeleted(item.sessionId);
 			rows.remove(item.sessionId);
 			renderSidebar();
@@ -895,19 +816,16 @@ function main(): void {
 		sidebar.tick();
 	}
 
-	/** Repaint just the sidebar. Rows change on their own schedule, not the state's. */
+	/** 只重画侧栏。行按自己的节奏变化，不按状态的。 */
 	function renderSidebar(): void {
-		// The gate here is the whole per-frame story for this column: a streaming frame changes none
-		// of the inputs the sidebar reads — the row table's version, the followed session, and the
-		// window's own three facts — so it is skipped here rather than walked and patched inside.
-		// Rendering the sidebar on every token was the profile's H7, a flat per-frame tax that grew
-		// with the directory count; the rows bump `rows.version` when they actually change.
-		// The paging state is in the signature because it is one of the sidebar's inputs now: a
-		// collapse or a page turn changes nothing in the row table, so a signature without it would
-		// mean the click redraws nothing at all. Serialization is deterministic — the entries are
-		// built with one fixed field order — so the string is stable across equal maps.
-		// The names are in the signature for the same reason the paging map is: a rename moves nothing
-		// in the row table, so a signature that ignored the labels would mean the click repaints nothing.
+		// 这里的门就是这一列的逐帧故事：流式帧不改变侧栏读取的任何输入 —— 行表的版本、被跟随的
+		// 会话、窗口自己的三个事实 —— 所以它在这里被跳过，而不是在里面走一遍再打补丁。逐 token
+		// 渲染侧栏是性能剖析的 H7，一笔随目录数增长的固定逐帧税；行真的变化时会递增 `rows.version`。
+		// 分页状态在签名里，因为它现在是侧栏的输入之一：折叠或翻页不改变行表的任何东西，没有它的
+		// 签名意味着这次点击什么都不画。序列化是确定的 —— 条目以固定的字段顺序构建 —— 所以相同
+		// 映射的字符串稳定。
+		// 名字在签名里的理由与分页映射相同：改名不动行表的任何东西，忽略标签的签名意味着这次点击
+		// 什么都不重画。
 		const names = state.settings?.directoryNames;
 		const drawn = `${rows.version}|${followed ?? ""}|${absPickedDirectory}|${collapsed ? 1 : 0}|${channel}|${JSON.stringify(paging)}|${JSON.stringify(names ?? {})}`;
 		if (drawn === sidebarDrawn) return;
@@ -923,22 +841,20 @@ function main(): void {
 	}
 
 	/**
-	 * Where the next new session lands, and the one answer to the question the picker exists for.
+	 * 下一个新会话落在哪里，这是选择器为之存在的那个问题的唯一答案。
 	 *
-	 * The explicit choice wins, then the session on screen's directory, then the server's root — the
-	 * order the shadowed heading's promise needs, since that heading names this answer and must never
-	 * disagree with the conversation being read.
+	 * 显式选择优先，然后是屏幕上会话的目录，然后是服务端的根 —— 阴影标题的承诺所需的顺序，因为
+	 * 那个标题指名的就是这个答案，绝不能与正在阅读的对话矛盾。
 	 */
 	function directoryForNewSession(): string {
 		return absPickedDirectory || state.snapshot?.workDirAbsPath || absCurrentDirectory;
 	}
 
 	/**
-	 * The OS folder picker, which is the only road a new directory enters the list by.
+	 * 操作系统文件夹选择器，是新目录进入列表的唯一道路。
 	 *
-	 * The app never browses the filesystem itself: the system dialog does the browsing, and the path
-	 * it answers becomes the picker's choice and a session in the same breath — a directory earns its
-	 * place in the list by having a session, so adding one *is* starting one.
+	 * 应用从不自己浏览文件系统：系统对话框负责浏览，它回答的路径一瞬间成为选择器的选择和一个会话
+	 * —— 目录靠拥有会话赢得列表里的位置，所以添加一个*就是*开启一个。
 	 */
 	async function addDirectory(): Promise<void> {
 		if (window.desktop?.pickFolder === undefined) {
@@ -957,38 +873,36 @@ function main(): void {
 		await newSession(absPath);
 	}
 
-	/** Repaint the status line, and only when a new usage arrived to paint it with. */
+	/** 重画状态行，且只在有新的用量可画时。 */
 	function renderStatusBar(): void {
 		if (state.usage === usageDrawn) return;
 		usageDrawn = state.usage;
 		statusBar.render({ usage: state.usage });
 	}
 
-	/** How a fold reaches the screen: whole now, in bounded slices, or at most once per frame. */
+	/** 一次折叠如何到达屏幕：整体立即、有界分片、或至多每帧一次。 */
 	interface ApplyOptions {
-		/** Draw a whole snapshot in bounded slices — the cost of a session switch, not of a delta. */
+		/** 把整个快照按有界分片绘制 —— 那是切换会话的成本，不是 delta 的。 */
 		deferred?: boolean;
-		/** Land this draw on the next animation frame instead of in this one — a stream delta. */
+		/** 把这次绘制落到下一个动画帧而不是本帧 —— 一条流 delta。 */
 		coalesce?: boolean;
 	}
 
 	/**
-	 * The state the screen was last drawn from.
+	 * 屏幕上一次绘制所依据的状态。
 	 *
-	 * The gates below compare a state against this rather than against the state the previous fold
-	 * produced: several folds can land between two draws — that is the point of coalescing them — and
-	 * "did this change" is a question about what is on screen, not about what the last event was.
+	 * 下面的门把状态与这个比较，而不是与上一次折叠产出的状态比较：两次绘制之间可以落下多次折叠
+	 * —— 这正是合并它们的意义 —— 而"这个变了吗"是关于屏幕上的东西的问题，不是关于上一个事件
+	 * 的问题。
 	 */
 	let drawnState: ViewState = state;
 
 	/**
-	 * The coalesced delta draw: many stream frames, one paint.
+	 * 合并后的 delta 绘制：多条流帧，一次绘制。
 	 *
-	 * A provider sends tens of deltas between two display refreshes, and repainting the transcript for
-	 * each is work the reader never sees — the intermediate states are not on screen for a single
-	 * frame. The fold itself still runs per event (it is a cheap immutable update), so nothing about
-	 * the state is skipped; only the drawing is saved for the frame, which paints the last state the
-	 * run reached.
+	 * provider 在两次显示刷新之间送来几十个 delta，逐个重画 transcript 是读者永远看不到的工作
+	 * —— 中间状态没有在任何一帧里出现过。折叠本身仍逐事件运行（它是廉价的不可变更新），状态的
+	 * 任何东西都没被跳过；只有绘制被留给那一帧，绘制的是运行到达的最后一个状态。
 	 */
 	const deltaDraw = new OncePerFrame(() => {
 		const previous = drawnState;
@@ -997,16 +911,14 @@ function main(): void {
 	});
 
 	/**
-	 * Fold a new state in and draw what it changed.
+	 * 折入一个新状态，并绘制它改变的部分。
 	 *
-	 * The columns are redrawn independently because they change at very different rates: the transcript
-	 * on every token, the sidebar on a row change, the status bar on a settled turn. Testing for a
-	 * change here is what keeps a streaming answer from re-rendering the session list.
+	 * 各列独立重画，因为它们以极不同的速率变化：transcript 每个 token，侧栏每次行变更，状态栏
+	 * 每个结算的回合。在这里检测变化，正是让流式回答不重渲染会话列表的东西。
 	 *
-	 * `reachable` is the one field whose transitions matter to the composer rather than to a column,
-	 * so it is watched on its own: whether the window can send is a fact about the server, and reading
-	 * it off a change in `streaming` — which is how the old code got there — meant a failure between
-	 * sends left the input box enabled with nothing behind it.
+	 * `reachable` 是唯一一个变更对 composer 有意义而不是对某一列有意义的字段，所以它被单独看：
+	 * 窗口能否发送是关于服务端的事实，从 `streaming` 的变化里读它 —— 旧代码就是这么做的 ——
+	 * 意味着两次发送之间的一次失败会让输入框保持可用而背后一无所有。
 	 */
 	function apply(next: ViewState, options: ApplyOptions = {}): void {
 		state = next;
@@ -1014,31 +926,28 @@ function main(): void {
 			deltaDraw.schedule();
 			return;
 		}
-		// An immediate draw supersedes a queued one: it is about to paint this very state, and an armed
-		// frame would paint it a second time a refresh later.
+		// 一次立即绘制取代已排队的那个：它马上就要绘制这个状态，而已装填的帧会在一次刷新之后再
+		// 画它一遍。
 		deltaDraw.cancel();
 		const previous = drawnState;
 		drawnState = next;
 		drawState(next, previous, options);
 	}
 
-	/** Draw the parts of `next` — which callers have already made `state` — that differ from the last draw. */
+	/** 绘制 `next` 中与上一次绘制不同的部分 —— 调用者已经把它变成了 `state`。 */
 	function drawState(next: ViewState, previous: ViewState, options: ApplyOptions = {}): void {
-		// A new settings snapshot may carry a content-width preference, and the reading column is the
-		// one thing that draws from it. Same road the sidebar's width rides into `applyAppearance`,
-		// except this one is layout-relative and so is painted here, beside the column it measures.
+		// 新的设置快照可能携带阅读宽度偏好，而阅读列正是依据它绘制的那个。与侧栏宽度进入
+		// `applyAppearance` 的同一条路，只是这个是布局相关的，所以在这里绘制，紧挨着它所度量的列。
 		if (next.settings !== previous.settings) {
 			contentPref = next.settings?.appearance.contentWidth;
 			applyContentWidth(contentPref);
-			// The sidebar's paging state rides the same snapshot. Re-seeded rather than merged: the
-			// settings are the authority, and a directory whose entry the server dropped — a bad line
-			// in a hand-edited file — falls back to its default, not to this window's memory of it.
+			// 侧栏的分页状态骑在同一个快照上。重新播种而不是合并：设置是权威，服务端丢掉的目录条目
+			// —— 手工编辑文件里的一行坏数据 —— 回到它的默认，而不是这个窗口对它的记忆。
 			paging = next.settings?.appearance.directories ?? {};
 		}
 		if (next.items !== previous.items || next.streaming !== previous.streaming) {
-			// `deferred` is set by the one caller that hands over a whole conversation at once — the
-			// session switch — where the draw is the cost of the switch and must not hold the frame.
-			// Every other frame carries a delta the reader is watching arrive, and lands whole.
+			// `deferred` 由唯一一个一次交出整段对话的调用者设置 —— 会话切换 —— 那里的绘制是切换的
+			// 成本，绝不能占住帧。其他每个帧携带的都是读者正在看着到达的 delta，整体落地。
 			if (options.deferred) transcript.renderDeferred(next.items, next.streaming);
 			else transcript.render(next.items, next.streaming);
 		}
@@ -1050,18 +959,17 @@ function main(): void {
 			errorBar.hidden = next.error === undefined;
 			errorBar.textContent = next.error ?? "";
 		}
-		// Approvals are not drawn here: the gated `renderNotices()` at the end of `render()` is the
-		// one writer of the banner area, and it fires on exactly the frames this line used to fire on.
+		// 审批不在这里画：`render()` 末尾的门控 `renderNotices()` 是横幅区的唯一写入者，它在的帧
+		// 恰好是这一行过去触发的帧。
 		render();
 	}
 
 	/**
-	 * The model seat, as both the control and the next message see it.
+	 * 模型席位，既是控件视角也是下一条消息的视角。
 	 *
-	 * The window's own choice wins over the session's, because the session's is what the *last* request
-	 * used and the choice is what the *next* one will. The level list comes from the row being shown —
-	 * the levels are the model's, and the server sends each row its own — falling back to the session's
-	 * list when the name names a row that is gone.
+	 * 窗口自己的选择优先于会话的，因为会话的是*上一次*请求用的，而选择是*下一次*要用的。档位列表
+	 * 来自正在显示的行 —— 档位是模型的，服务端给每行发各自的 —— 名字指名的行已不在时回退到会话
+	 * 的列表。
 	 */
 	function selectionForSend(): ComposerSelection {
 		const snapshot = state.snapshot;
@@ -1072,17 +980,16 @@ function main(): void {
 		return { models: state.models, model, levels, level };
 	}
 
-	/** The imported row behind a name, or undefined for one that was deleted or never existed. */
+	/** 一个名字背后的已导入行；已删除或从未存在的返回 undefined。 */
 	function rowOf(name: string | undefined): ModelOption | undefined {
 		return name === undefined ? undefined : state.models.find((model) => model.name === name);
 	}
 
 	/**
-	 * Drop the parts of the seat the session has caught up with.
+	 * 丢掉席位中被会话追上的部分。
 	 *
-	 * A field is only an override while it disagrees with the server. Clearing it the moment they agree
-	 * is what makes a send hand the control back: the request that used the choice recorded it, the
-	 * snapshot says so, and the seat follows the session again instead of shadowing it forever.
+	 * 一个字段只有在与服务端不一致时才是覆盖。一致的那一刻就清除，正是让一次 send 把控制权交回来
+	 * 的机制：使用那个选择的请求记录了它，快照证实了它，席位重新跟随会话，而不是永远遮蔽它。
 	 */
 	function syncChosen(): void {
 		const snapshot = state.snapshot;
@@ -1093,7 +1000,7 @@ function main(): void {
 		}
 	}
 
-	/** Open the app-level settings panel, optionally straight onto one tab. */
+	/** 打开应用级设置面板，可选直接落到某个标签页。 */
 	function openSettings(tab?: "modes"): void {
 		settings.show(tab);
 		settings.render({
@@ -1104,14 +1011,13 @@ function main(): void {
 	}
 
 	/**
-	 * Which mode the session on screen is on, matched by value (ADR-0005).
+	 * 屏幕上的会话在哪个模式上，按值匹配（ADR-0005）。
 	 *
-	 * The session records what it runs on in its `.json` snapshot, not as a mode reference, so
-	 * the match is the snapshot's tools and approvals against each preset's — the built-in default
-	 * first, since it *is* the global defaults a following-global session holds. No session on screen
-	 * answers with the default, because that is what the next one opens on; a live session that
-	 * matches nothing — left behind by a mode since edited, or by a tool set an older build recorded —
-	 * answers undefined, which the seat draws as 「自定义」. Picking a mode is the one way back.
+	 * 会话在自己的 `.json` 快照里记录它运行在什么上，而不是模式引用，所以匹配是快照的工具与审批
+	 * 对每个预设的 —— 内置默认优先，因为它*就是*跟随全局的会话所持有的全局默认。屏幕上没有会话
+	 * 时回答默认，因为那是下一个开启的；一个什么都不匹配的 live 会话 —— 被后来编辑过的模式留下，
+	 * 或被旧构建记录的工具集留下 —— 回答 undefined，席位画成「自定义」。重新选择一个模式是唯一
+	 * 的回头路。
 	 */
 	function currentModeName(): string | undefined {
 		const snapshot = state.snapshot;
@@ -1127,9 +1033,8 @@ function main(): void {
 			return true;
 		};
 
-		// Both sides are narrowed to the tools this build knows before the comparison, the same
-		// narrowing an apply performs — otherwise a preset naming a tool an upgrade dropped could be
-		// applied correctly and still read back as 自定义.
+		// 比较之前，两侧都收窄到本构建认识的工具，与一次 apply 做的收窄相同 —— 否则指名了一个升级
+		// 删掉的工具的预设可以被正确应用，却仍然被读回成自定义。
 		const defaultTools = (settings.tools ?? snapshot.allTools).filter((name) => snapshot.allTools.includes(name));
 		if (sameTools(snapshot.activeTools, defaultTools) && sameApprovals(snapshot.approvals, settings.approval)) {
 			return DEFAULT_MODE_NAME;
@@ -1142,12 +1047,11 @@ function main(): void {
 	}
 
 	/**
-	 * Put the session this window is on onto a mode: its tool set and its approval map, whole.
+	 * 把本窗口所在的会话放到一个模式上：其工具集与审批表，整体生效。
 	 *
-	 * The two halves are the session's own two commands — `PUT /tools` and the approval `PATCH` —
-	 * and they land as one recorded choice in the session's `.json` snapshot. There is deliberately no mode
-	 * endpoint: a preset *is* those two values, and a second spelling of the same command would only
-	 * have to be kept in step with them.
+	 * 两半是会话自己的两条命令 —— `PUT /tools` 和审批 `PATCH` —— 它们作为一次记录的选择落进会话
+	 * 的 `.json` 快照。刻意没有模式端点：预设*就是*这两个值，同一命令的第二种拼法只会被迫与它们
+	 * 保持同步。
 	 */
 	function applyMode(name: string): void {
 		if (followed === undefined) {
@@ -1168,8 +1072,8 @@ function main(): void {
 			report(new Error(`没有叫「${name}」的模式，可能刚被删除。`));
 			return;
 		}
-		// Narrowed to the tools this build knows, so a preset naming one an upgrade dropped applies the
-		// rest instead of being refused whole — the same narrowing the session's recorded set gets.
+		// 收窄到本构建认识的工具，指名了升级删掉的工具的预设会应用其余，而不是被整体拒绝 —— 与
+		// 会话记录的集合得到的收窄相同。
 		const tools = preset.tools.filter((candidate) => snapshot.allTools.includes(candidate));
 		void api.setTools(followed, tools).catch(report);
 		void api.setConfig(followed, { approval: { ...preset.approval } }).catch(report);
@@ -1179,8 +1083,8 @@ function main(): void {
 		syncChosen();
 		const snapshot = state.snapshot;
 
-		// Each piece below draws itself only when one of its own inputs moved. A streaming frame
-		// changes none of them, so its cost ends at the transcript — the point of the gates above.
+		// 下面每一块只在自己的某个输入动了时才画。流式帧不改变它们中的任何一个，所以它的成本止于
+		// transcript —— 正是上面那些门的意义。
 		renderSidebar();
 
 		const headingText = snapshot?.title ?? "新会话";
@@ -1200,29 +1104,24 @@ function main(): void {
 			subtitle.textContent = subtitleText;
 		}
 
-		// The welcome state has no session to compose into: the composer, its head row, and the status
-		// line are session-bound controls, so they stand down until a session is followed. The error
-		// bar stays — a connection problem is not a session's fact.
+		// 欢迎状态没有可输入的会话：composer、它的头部行和状态行是会话绑定的控件，所以在跟随会话
+		// 之前退下。错误条保留 —— 连接问题不是会话的事实。
 		const welcome = followed === undefined;
 		composerHead.hidden = welcome;
 		composer.element.hidden = welcome;
 		statusBar.element.hidden = welcome;
 
-		// The branch entry follows the session's branch shape, which a baseline or a finished message
-		// can change, so the signature is the tree's identity and the three figures a label is cut
-		// from. "none" is the single-way shape — the chip stands with nothing to name — and any move
-		// between a tree and "none" changes the signature, so the label it carries is always redrawn
-		// with it.
+		// 分支条目跟随会话的分支形状，基线或一条结束的消息都可能改变它，所以签名是树的同一性加上
+		// 裁出标签的三个数字。"none" 是单路形状 —— chip 站着但无物可指名 —— 树与"none"之间的任何
+		// 移动都会改变签名，所以它携带的标签总是随之重画。
 		const tree = state.branchTree;
 		const branchSig =
 			tree === undefined ? "none" : `${tree.currentId ?? "-"}|${tree.points}|${tree.options}|${snapshot?.title ?? ""}`;
 		if (branchSig !== branchChipDrawn) {
 			branchChipDrawn = branchSig;
-			// Always visible: a conversation with one way is exactly the one that needs the door, and
-			// the page it opens answers with the how-to. The id and the label are another matter: a
-			// session with no fork has one branch, so "which one am I on" answers itself and the
-			// figures only say "the newest user message" — noise. They appear when a fork exists,
-			// which is when the question has an answer worth reading.
+			// 永远可见：只有一条路的对话恰恰是最需要这扇门的，而它打开的页面给出使用说明。id 和
+			// 标签是另一回事：没有派生的会话只有一条分支，"我在哪一条上"自问自答，数字只说"最新的
+			// 用户消息" —— 噪声。派生存在时它们才出现，那时问题才有值得读的答案。
 			if (tree !== undefined && tree.currentId !== undefined && tree.points > 0) {
 				branchChipId.textContent = shortId(tree.currentId);
 				branchChipLabel.textContent = findWay(tree, tree.currentId)?.label ?? "";
@@ -1232,12 +1131,12 @@ function main(): void {
 			}
 		}
 
-		// The branch page draws itself from the same tree, and gates on the same rarity: its render
-		// costs one comparison unless a baseline changed the tree or a run changed the lock.
+		// 分支页从同一棵树画自己，并在同样的稀有性上门控：除非基线改变了树或运行改变了锁，它的
+		// render 只花一次比较。
 		branchView.render(tree, state.streaming);
 
-		// The chip is the composer head's only tenant and is permanent there: the row above the input
-		// is where "where the next session lands" belongs, whatever the transcript above is doing.
+		// chip 是 composer 头部唯一的常驻者且永远在那里：输入上方的那行就是"下一个会话落在哪里"
+		// 属于的地方，无论上面的 transcript 在做什么。
 		const directory = directoryForNewSession();
 		if (chipDrawn !== directory) {
 			chipDrawn = directory;
@@ -1245,11 +1144,10 @@ function main(): void {
 			directoryChip.title = directory;
 		}
 
-		// What a send would carry is what the seat shows, so the seat is drawn from the same values
-		// `prompt` reads rather than from the snapshot alone. The two selects inside gate themselves
-		// on a signature, so this stays cheap per frame.
+		// 一次 send 会携带什么，席位就显示什么，所以席位从 `prompt` 读取的同一批值绘制，而不是只
+		// 从快照。里面的两个选择器在自己的签名上门控，所以每帧仍然便宜。
 		composer.setSelection(selectionForSend());
-		// The mode seat is the same kind of read: which preset the session's values equal, or none.
+		// 模式席位是同一种读取：会话的值等于哪个预设，或没有。
 		composer.setModes(currentModeName());
 
 		renderStatusBar();
@@ -1267,14 +1165,13 @@ function main(): void {
 	}
 
 	/**
-	 * The one thing worth interrupting an empty window with.
+	 * 唯一值得打断空窗口的东西。
 	 *
-	 * With no model imported there is nothing this app can do, and the failure would otherwise arrive
-	 * as an error message after the user had already typed a question and waited for it.
+	 * 没有导入任何模型时这个应用什么都做不了，否则那个失败会在用户已经输入了问题并等待之后，
+	 * 以错误消息的形式到达。
 	 *
-	 * The gate is the identity of the array it draws from. Rebuilding the banner area on a frame that
-	 * did not change it was the last unconditional per-frame write left in `render()` — cheap per
-	 * frame, but a rebuild is not nothing, and it ran whether or not any of this was on screen.
+	 * 门是它所绘制数组的同一性。在不曾改变它的帧上重建横幅区，是 `render()` 里最后一个无条件的
+	 * 逐帧写入 —— 每帧便宜，但重建不是零成本，而且不管屏幕上有没有它都在跑。
 	 */
 	function renderNotices(): void {
 		if (state.models === noticesDrawn) return;
@@ -1302,13 +1199,12 @@ function main(): void {
 	}
 
 	/**
-	 * The takeover seat: one card per approval the session is waiting on, in the composer's place.
+	 * 接管席位：会话正在等待的每个审批一张卡片，坐在 composer 的位置上。
 	 *
-	 * A pending approval is the only thing this window can act on while it stands — under the
-	 * end-restart semantics (ADR-0006 §5) the run has ended at the gate, and a prompt typed now would
-	 * start a run whose recovery pass would sweep the still-dangling call aside. Replacing the composer
-	 * is the honest rendering of that, and the card carries the two answers the protocol actually
-	 * takes; answering one starts the run that resumes the conversation.
+	 * 一个待审批是窗口在它站着期间唯一能行动的东西 —— 在 end-restart 语义下（ADR-0006 §5）运行
+	 * 已在门处结束，此刻输入的提示会开启一次运行，其恢复趟会把仍然悬空的调用扫到一边。替换
+	 * composer 是对这件事诚实的呈现，卡片携带协议实际接受的两个答案；回答其中一个就开始恢复对话
+	 * 的那次运行。
 	 */
 	function renderApprovals(): void {
 		if (state.approvals === approvalsDrawn) return;
@@ -1316,8 +1212,8 @@ function main(): void {
 		const pending = state.approvals;
 		approvalSeat.replaceChildren(...pending.map(approvalCard));
 		approvalSeat.hidden = pending.length === 0;
-		// The composer hides rather than disables: a visible-but-muted input box under an approval card
-		// invites typing that would be queued behind a question. Hidden, the card *is* the input.
+		// composer 隐藏而不是禁用：审批卡片下面一个可见但变灰的输入框，会招致排队在问题后面的
+		// 输入。隐藏了，卡片*就是*输入。
 		composer.element.hidden = pending.length > 0;
 	}
 
@@ -1338,7 +1234,7 @@ function main(): void {
 		deny.textContent = "拒绝";
 		const allow = element("button", "button primary", undefined, { type: "button" });
 		allow.textContent = "允许一次";
-		// One request per answer, against the session the prompt came from.
+		// 每个答案一次请求，发给提示所来自的那个会话。
 		deny.addEventListener("click", () => {
 			if (followed !== undefined) void api.approve(followed, approval.toolCallId, false).catch(report);
 		});
@@ -1352,23 +1248,21 @@ function main(): void {
 		return card;
 	}
 
-	// ---------------------------------------------------------------- commands
+	// ---------------------------------------------------------------- 命令
 
 	/**
-	 * Note that the server answered — a request, or a baseline a navigation was waiting for.
+	 * 记下服务端应答了 —— 一个请求，或导航等待的一条基线。
 	 *
-	 * This is the old `connected`, renamed to say what it measures, and its meaning is unchanged: an
-	 * answer from the server proves the server is there, whichever face of the API it came through.
-	 * What is new is that it no longer doubles as "the channel is up" — that is {@link channel}'s own
-	 * state machine, and the two disagree routinely, in both directions, without either being wrong. A
-	 * channel that is down while this is true is normal: the window can still send, and the request
-	 * answers for itself.
+	 * 这是过去的 `connected`，换了个说出它度量什么的名字，含义未变：服务端的答案证明服务端在那，
+	 * 无论它经由 API 的哪个面孔到达。新的是它不再兼任"通道可用" —— 那是 {@link channel} 自己的
+	 * 状态机，两者例行公事地不一致，双向都是，且谁都没有错。通道断开而它为真是正常的：窗口仍然
+	 * 能发送，请求自己会作答。
 	 */
 	function reachable(): void {
 		if (!state.reachable) apply({ ...state, reachable: true });
 	}
 
-	/** A request that failed, in the one case where it says something about reaching the server. */
+	/** 一次失败的请求，仅当它对能否到达服务器说了些什么。 */
 	function unreachable(error: unknown): void {
 		if (!(error instanceof TypeError)) {
 			report(error);
@@ -1378,52 +1272,37 @@ function main(): void {
 	}
 
 	/**
-	 * Point the window at a session, and start watching it.
+	 * 把窗口指向一个会话，并开始观看它。
 	 *
-	 * The one path every session change goes through — a click in the sidebar, a new session, a fork,
-	 * and the page load that lands on the session `GET /api/sessions/current` names. Opening it is one
-	 * act: `retain` sends `open`, and the baseline the server answers with is both the first thing
-	 * drawn and the anchor every later frame appends to (ADR-0010). There is no read beside it, and
-	 * therefore no second version of the same conversation arriving a moment later to replace the
-	 * first.
+	 * 所有会话变更都经过的唯一路径 —— 侧栏的一次点击、一次新建、一次派生，以及落在
+	 * `GET /api/sessions/current` 所指会话上的页面加载。打开它是一个动作：`retain` 发送 `open`，
+	 * 服务端应答的基线既是第一件被画的东西，也是之后每个帧追加的锚（ADR-0010）。它旁边没有读取，
+	 * 因此没有第二份同一对话稍后到达并替换第一份。
 	 *
-	 * What that costs is the *completion*. A request used to answer "arrived / failed / no such
-	 * session" by itself, and a frame does not; a navigation's failure semantics are a local clock over
-	 * the stream instead. `retain` returns the promise for exactly that — the baseline resolves it, an
-	 * `error` or `end` frame rejects it, and so does a local timeout — so the window keeps what the
-	 * read gave it: a failure is reported on the error line with the old conversation still on screen,
-	 * and a channel that is not up is a refusal rather than a wait that would blame a slow server
-	 * nobody asked.
+	 * 代价是*完成*。一个请求过去自己回答"到达了 / 失败了 / 没有这个会话"，帧不会；导航的失败语义
+	 * 改为流之上的本地时钟。`retain` 返回的 promise 恰恰为此 —— 基线 resolve 它，`error` 或 `end`
+	 * 帧拒绝它，本地超时也是 —— 所以窗口保留了读取曾给出的东西：失败报告在错误行上，旧对话仍在
+	 * 屏幕上；而未就绪的通道是一次拒绝，不是一场把慢归咎于没人问过的服务器的等待。
 	 *
-	 * Four things about the order are load-bearing, and each was a way the window used to stall or lose
-	 * its place:
+	 * 顺序中有四件事是承重的，每一个都是窗口过去停滞或丢失位置的一种方式：
 	 *
-	 * - The pane flips to the conversation before the wait, not after it. The wait is slow enough to
-	 *   work in, and a reader who has clicked a row, then gone to the branch page, must not have the
-	 *   pane pulled out from under the tree they are looking at when the baseline finally lands. A
-	 *   conversation opens to be read, and that is a decision about the click rather than about the
-	 *   answer — so a navigation that fails leaves the old conversation on screen instead of a blank
-	 *   pane.
-	 * - The wait is announced before it starts. It is the window's slowest, least predictable step —
-	 *   a whole conversation, built from the session on demand and then through `JSON.parse` — and the
-	 *   previous transcript stays up throughout, which is right for the pane and mute about the click.
-	 * - The snapshot is drawn deferred. It is the whole conversation in one frame, and every message in
-	 *   it is new, so the draw is proportional to the session: drawn whole it is the freeze, drawn in
-	 *   slices it is a first paint plus a handful of frames.
-	 * - The list refresh comes last and is not awaited. The window is *live* on this session from the
-	 *   moment its baseline is on screen — the reference was taken before the wait, so there is no gap
-	 *   between drawing and listening — and the sidebar's rows arrive on the channel anyway when it is
-	 *   up, and when it is not, the listing is a repair of a column that is already drawn, not
-	 *   something the pane's liveness may queue behind.
+	 * - 窗格在等待之前翻到对话，而不是之后。等待慢得足以在期间操作，点了行又去分支页的读者，
+	 *   绝不能在基线终于落地时被从正在看的树上拽走。打开对话是为了阅读，这是关于点击的决定而不是
+	 *   关于答案的 —— 所以失败的导航让旧对话留在屏幕上，而不是一块空白窗格。
+	 * - 等待在开始之前就被宣告。它是窗口最慢、最不可预测的一步 —— 一整段对话，按需从会话构建，
+	 *   还要过 `JSON.parse` —— 且旧 transcript 全程保留，这对窗格是对的，对点击是沉默的。
+	 * - 快照延迟绘制。它是一帧之内的整段对话，其中每条消息都是新的，所以绘制正比于会话：整体画
+	 *   就是冻结，分片画是首帧加几帧。
+	 * - 列表刷新最后来且不被 await。从基线上屏的那一刻起窗口对这个会话就是*活的* —— 引用在等待
+	 *   之前就取了，绘制与监听之间没有间隙 —— 侧栏的行在通道可用时反正会从通道到达；不可用时，
+	 *   列表是对已经画好的列的修复，不是窗格的活性可以排在后面等的东西。
 	 */
 	async function openSession(sessionId: string): Promise<void> {
-		// The last navigation's target, when it never became the pane: `followed` still names the
-		// conversation on screen, and this click's reference is nobody's. A failed navigation keeps its
-		// reference at the moment it fails — the baseline may still be in the server's write queue, and
-		// a `cancel` sent then would queue behind it and release nothing (ADR-0010) — so the release
-		// happens here, one gesture later, when the window has chosen to look at something else. A
-		// retry of the same session skips it, which is what makes the retry reuse the stream instead of
-		// asking for it again.
+		// 上一次导航的目标，如果它从未成为窗格：`followed` 仍然指名屏幕上的对话，而这次点击的引用
+		// 不属于任何人。失败的导航在失败那一刻保留它的引用 —— 基线可能仍在服务端的写队列里，此刻
+		// 发出的 `cancel` 会排在它后面、什么也释放不了（ADR-0010）—— 所以释放发生在这里，晚一次
+		// 手势，当窗口选择了看别的东西。同一会话的重试跳过它，这正是让重试复用流而不是再要一次的
+		// 机制。
 		if (opening !== undefined && opening !== followed && opening !== sessionId) mux.release(opening, "pane");
 		const series = (openSeries += 1);
 		opening = sessionId;
@@ -1435,71 +1314,60 @@ function main(): void {
 			snapshot = await mux.retain(sessionId, "pane", series);
 		} catch (error) {
 			showLoading(series, false);
-			// A superseded navigation's failure is not news about the pane: the user is looking at a
-			// session that opened fine, and a banner about the one they left — often the same server,
-			// often a stream raced by a newer click — would name a problem that is not on screen. The
-			// navigation that owns the pane owns the report too.
+			// 被取代导航的失败不是窗格的新闻：用户正在看一个打开成功的会话，关于他们离开的那个
+			// —— 常常是同一台服务器，常常是被更新的点击抢走的流 —— 的横幅，指名的是一个不在屏幕
+			// 上的问题。拥有窗格的导航同样拥有这份报告。
 			if (series !== openSeries) return;
 			unreachable(error);
 			return;
 		}
 		showLoading(series, false);
-		// A newer click moved the window while this baseline was on its way. It names a session the
-		// pane has already left, so it is dropped whole: no state, no draw, no report. The navigation
-		// that superseded it owns all three, and the reference this one took was let go by that click.
+		// 这条基线在路上时，更新的点击移动了窗口。它指名窗格已经离开的会话，所以被整体丢弃：
+		// 不改状态、不绘制、不上报。取代它的导航拥有全部三样，而这一次取的引用已被那次点击放开。
 		if (series !== openSeries) return;
 
 		reachable();
-		// The previous pane's reference goes now that the new one has landed, so this connection
-		// watches one session for the pane. Never for the session being opened: on a second click on
-		// the same row the reference is the same one, and releasing it would take the stream out from
-		// under the pane that is about to draw.
+		// 上一个窗格的引用现在放开，新的已落地，这条连接就为一个窗格观看一个会话。绝不为了正在
+		// 打开的会话：同一行第二次点击时引用是同一个，释放它会把流从即将绘制的窗格下面抽走。
 		if (followed !== undefined && followed !== snapshot.id) mux.release(followed, "pane");
 		followed = snapshot.id;
-		// A different conversation is a different seat: what was chosen for the one before it says
-		// nothing about this one, which opens on whatever its own branch recorded.
+		// 不同的对话是不同的席位：为前一个选择的，对这一个什么都说不出来，它以自己的分支记录的
+		// 东西开启。
 		chosen = {};
-		// The picker's explicit choice is about the session that was *about* to start, and that session
-		// has started — the one on screen now decides which directory the next session lands in, until
-		// the chip is used again.
+		// 选择器的显式选择属于*即将*开始的那个会话，那个会话已经开始 —— 现在屏幕上的这个决定
+		// 下一个会话落在哪个目录，直到 chip 再次被使用。
 		absPickedDirectory = "";
-		// The same rendering the branch command uses: a snapshot is a snapshot, whether it arrived as
-		// the answer to a navigation or as a re-baseline mid-stream.
+		// 与分支命令相同的渲染：快照就是快照，无论它是作为导航的答案到达，还是作为流中途的重新
+		// 基线化。
 		apply(reduce(state, { type: "baseline", session: snapshot }), { deferred: true });
 
-		// The listing is not awaited. It redraws the sidebar and nothing else, it is refused outright
-		// while the channel is live (the channel is the authority on rows then), and the frame it would
-		// have held up is the frame the reader is waiting on. A failure to get it is reported against
-		// the window rather than against the pane, so it cannot undo the switch either.
+		// 列表不被 await。它只重画侧栏，通道 live 时被直接拒绝（那时通道是行的权威），而它本会
+		// 拖住的帧正是读者正在等的帧。获取失败上报给窗口而不是窗格，所以它也撤销不了切换。
 		void refreshLists().catch(report);
 	}
 
-	/** Re-read the sidebar's rows over REST, but only while the channel is not the authority. */
+	/** 经 REST 重读侧栏的行，但只在通道不是权威时。 */
 	async function refreshLists(): Promise<void> {
 		const { directories } = await api.listDirectories();
 		reachable();
-		// Refused while the channel is live. Two writers for one table is the race this avoids: a
-		// listing computed from files would land after a `running: true` and put the row back to idle,
-		// and the window would show a session that is working as one that is not.
+		// 通道 live 时被拒绝。一张表两个写入者正是要避免的竞态：从文件算出的列表会落在一次
+		// `running: true` 之后，把行拉回空闲，窗口就会把正在工作的会话显示成没在工作。
 		if (!rows.loadFrom(directories, channel === "live")) return;
 		renderSidebar();
 	}
 
 	/**
-	 * The tail of the settings writes, so one file's patches land one at a time.
+	 * 设置写入的尾部，让一个文件的补丁一次落一个。
 	 *
-	 * A save that moves a tool set and the approvals that came with it is several patches, and every
-	 * answer carries the whole settings object: two in flight could apply the older answer last and
-	 * repaint the window with a snapshot that has already been superseded. Chaining the requests keeps
-	 * the answers — and the state they paint — in the order the user made them. Settings are one file,
-	 * so one writer at a time is the contract the files already assume.
+	 * 一次保存同时移动工具集和随之的审批是几个补丁，每个答案携带整个设置对象：两个同时进行，可能
+	 * 让较旧的答案最后应用，用早已被取代的快照重画窗口。把请求串起来，答案 —— 以及它们绘制的状态
+	 * —— 就按用户做出的顺序保持。设置是一个文件，一次一个写入者正是文件已经假设的契约。
 	 */
 	let settingsWrites: Promise<void> = Promise.resolve();
 
 	function saveSettings(patch: Parameters<SessionApi["updateSettings"]>[0]): Promise<void> {
-		// The catch sits at the chain's end rather than in `writeSettings`: one refused patch is
-		// reported once, the chain still resolves, and the next patch — about a different field — goes
-		// out instead of being cancelled by its predecessor's rejection.
+		// catch 放在链的末端而不是 `writeSettings` 里：一个被拒的补丁上报一次，链仍然 resolve，
+		// 下一个关于不同字段的补丁照常发出，而不是被前一个的 rejection 取消。
 		const write = settingsWrites.then(() => writeSettings(patch)).catch((error: unknown) => {
 			report(error);
 		});
@@ -1509,31 +1377,27 @@ function main(): void {
 
 	async function writeSettings(patch: Parameters<SessionApi["updateSettings"]>[0]): Promise<void> {
 		const { settings: saved } = await api.updateSettings(patch);
-		// Applied straight away rather than after a re-render: the font size and the theme are the
-		// two settings whose whole value is seeing them change. The branch page measures its cards
-		// off the type scale, so it is the one view that has to be told to measure again.
+		// 立即应用而不是等重渲染：字号和主题是两个其全部价值就在于看到它们变化的设置。分支页的
+		// 卡片以字阶度量，所以它是唯一必须被告知重新度量的视图。
 		applyAppearance(saved);
 		branchView.remeasure();
 		apply({ ...state, settings: saved });
 	}
 
 	/**
-	 * Send a message to the session this window is on.
+	 * 向本窗口所在的会话发送一条消息。
 	 *
-	 * The subscription is taken **before** the request goes out, and that ordering is the whole reason
-	 * the old "attach first, then post, and do not post if the attach failed" dance could be deleted.
-	 * A failure to start is reported by `announce`, which is not buffered and only reaches connections
-	 * already watching — so a message posted before the window was listening would lose its own error
-	 * with nothing on screen to show for it. Retaining first makes the destination impossible to miss.
+	 * 订阅在请求发出**之前**取得，这个顺序正是旧的那套"先挂载、再 post、挂载失败就不 post"的舞步
+	 * 能被删掉的全部理由。启动失败由 `announce` 报告，它不被缓冲、只到达已在观看的连接 —— 所以
+	 * 在窗口尚未监听时发出的消息会丢失自己的错误，屏幕上什么都没有。先 retain 让目的地不可能
+	 * 被错过。
 	 *
-	 * The `send` reference is separate from the pane's and lives exactly as long as the run it starts,
-	 * which is what lets the window navigate away from a conversation that is still answering: the
-	 * stream outlives the pane precisely while there is a run to report.
+	 * send 引用与窗格的分开，活得与它开启的那轮运行一样长，这正是让窗口能离开一段仍在回答的对话
+	 * 的机制：恰在有运行需要上报时，流活得比窗格久。
 	 */
 	async function prompt(text: string, behavior?: "steer" | "followUp"): Promise<void> {
-		// Held rather than read twice: taking the reference hands control back to the channel, and a
-		// click in the sidebar during that wait would otherwise post this message to the session the
-		// window moved *to* rather than the one the text was written for.
+		// 持有而不是读两次：取引用会把控制权交回通道，那次等待期间点一下侧栏，就会把这条消息发到
+		// 窗口移动*过去*的会话，而不是写下这段文字的会话。
 		const target = followed;
 		if (target === undefined) {
 			report(new Error("还没有挂上任何会话。"));
@@ -1541,8 +1405,8 @@ function main(): void {
 		}
 
 		mux.retain(target, "send");
-		// The seat's choice travels with the message and only with it: the server applies the selection
-		// as it accepts the prompt, so a choice is never a command that could be applied on its own.
+		// 席位的选择随消息走、且只随消息走：服务端在接受提示的同时应用选择，所以选择绝不是一条可以
+		// 单独施加的命令。
 		const selection = selectionForSend();
 		try {
 			await api.prompt(target, text, behavior, {
@@ -1551,8 +1415,8 @@ function main(): void {
 			});
 			reachable();
 		} catch (error) {
-			// Nothing is running, so the reference has no run to live for. Dropping it here rather
-			// than waiting for a settle that will never come is the release the old code did not have.
+			// 没有东西在运行，引用没有可为之活的运行。在这里丢掉它，而不是等一个永远不会到来的
+			// 结算，是旧代码没有的那次释放。
 			releaseSend(target);
 			composer.setDraft(text);
 			unreachable(error);
@@ -1570,12 +1434,11 @@ function main(): void {
 	}
 
 	/**
-	 * Start a conversation in the picker's directory, and point the window at it.
+	 * 在选择器的目录里开始一段对话，并把窗口指过去。
 	 *
-	 * The directory travels with the request (`workDirAbsPath`), which is the whole of the picker's contract: a
-	 * choice made for one creation is not a state the server keeps. The session it opens re-reads the
-	 * lists, which is how a first session in a brand-new directory earns its directory group a place
-	 * in the sidebar.
+	 * 目录随请求走（`workDirAbsPath`），这就是选择器的全部契约：为一次创建做出的选择不是服务端
+	 * 保存的状态。它打开的会话重读列表，全新目录里的第一个会话就是这样为它的目录组赢得侧栏一席
+	 * 之地的。
 	 */
 	async function newSession(workDirAbsPath?: string): Promise<void> {
 		try {
@@ -1588,40 +1451,36 @@ function main(): void {
 	}
 
 	/**
-	 * Give a directory a name the sidebar shows, and leave the disk alone.
+	 * 给目录一个侧栏显示的名字，磁盘不动。
 	 *
-	 * `name` is a label, not a path: nothing here builds a directory, and the answer carries the
-	 * settings because that is where the label lives. The rows are untouched — a directory is
-	 * identified by the directory its transcripts recorded — so the only thing this window owes the
-	 * change is a repaint, which a cleared `sidebarDrawn` forces past the gate below.
+	 * `name` 是标签，不是路径：这里什么都不构建，答案携带设置是因为标签住在那里。行不动 —— 目录
+	 * 由它的 transcript 记录的目录标识 —— 所以本窗口欠这次变更的只是一次重画，清掉的
+	 * `sidebarDrawn` 强制它越过下面的门。
 	 *
-	 * An empty name takes the custom one back and the heading falls to the folder's own name.
+	 * 空名字收回自定义名，标题落回文件夹自己的名字。
 	 */
 	async function renameDirectory(workDirAbsPath: string, name: string): Promise<void> {
 		try {
 			const answer = await api.renameDirectory(workDirAbsPath, name);
 			reachable();
 			apply({ ...state, settings: answer.settings });
-			// The settings snapshot moved but nothing in the gate's signature has to: the rows are the
-			// same rows, and a heading wearing a different label would otherwise keep its old text.
+			// 设置快照动了，但门的签名里没有任何必须跟着动的东西：行还是那些行，否则戴着新标签的
+			// 标题会保留旧文字。
 			sidebarDrawn = undefined;
 			renderSidebar();
 		} catch (error) {
-			// A path this machine has no sessions for, a body the server cannot read: the error bar is
-			// where those reasons are already shown.
+			// 这台机器没有会话的路径、服务端读不懂的 body：错误条正是那些原因已经显示的地方。
 			unreachable(error);
 		}
 	}
 
 	/**
-	 * Take a directory out of the sidebar, touching nothing on disk (票 06).
+	 * 把一个目录从侧栏拿掉，磁盘上什么都不碰（票 06）。
 	 *
-	 * Two roads, one per channel state, and the difference is not a detail: while the channel is live
-	 * the *server* removes the group by re-sending the overview — the row table's one writer is the
-	 * channel, and a REST listing is refused outright while it holds that pen (`rows.loadFrom` is that
-	 * refusal). While it is down there are no frames, so the listing the answer carries is the only
-	 * road, and it is applied here. What this window owes either of them is its settings snapshot: the
-	 * hidden list is what the next reload leaves the group out by.
+	 * 两条路，每个通道状态一条，差别不是细节：通道 live 时*服务端*靠重发概览移除组 —— 行表的
+	 * 唯一写入者是通道，它握着笔时 REST 列表被直接拒绝（`rows.loadFrom` 就是那个拒绝）。通道断开
+	 * 时没有帧，所以答案携带的列表是唯一的路，在这里应用。无论哪条，本窗口欠的都是它的设置快照：
+	 * 隐藏列表正是下一次重载把组排除在外的依据。
 	 */
 	async function deleteDirectory(workDirAbsPath: string): Promise<void> {
 		try {
@@ -1631,8 +1490,8 @@ function main(): void {
 			applyAppearance(answer.settings);
 			branchView.remeasure();
 			apply({ ...state, settings: answer.settings });
-			// The settings snapshot changed, but nothing in the signature the gate reads has to: a
-			// window with no rows for this group would otherwise draw the same string it drew before.
+			// 设置快照变了，但门读取的签名里没有任何必须变的：没有这个组任何行的窗口，否则会画出一
+			// 条和之前一模一样的字符串。
 			sidebarDrawn = undefined;
 			renderSidebar();
 		} catch (error) {
@@ -1641,11 +1500,10 @@ function main(): void {
 	}
 
 	/**
-	 * Copy a session whole into a new file, and open the copy.
+	 * 把一个会话整个复制进一个新文件，并打开副本。
 	 *
-	 * `entryId: null` is the whole-log fork: every entry and every leaf rides along, and the copy
-	 * continues from where the source stopped. The row menu acts on a session rather than on any one
-	 * message of it, which is why there is no entry in the call.
+	 * `entryId: null` 是整份日志的派生：每个条目、每片叶子都跟着走，副本从源停下的地方继续。行
+	 * 菜单作用于会话而不是它的某条消息，这就是调用里没有条目的原因。
 	 */
 	async function forkSession(sessionId: string): Promise<void> {
 		try {
@@ -1658,13 +1516,11 @@ function main(): void {
 	}
 
 	/**
-	 * Give a session a name of its own, stored server-side.
+	 * 给会话一个自己的名字，存储在服务端。
 	 *
-	 * The sidebar's row does not change here — the name comes back on the `session_row` frame, the
-	 * same road every other row fact takes. What this window does beyond the request is keep the
-	 * header honest when the renamed session is the one on screen: the header reads the snapshot's
-	 * title, and a snapshot does not refresh on a row frame, so the confirmed name is folded in once,
-	 * at the moment the server said it stuck.
+	 * 侧栏的行不在这里变 —— 名字随 `session_row` 帧回来，那是所有其他行事实的同一条路。本窗口在
+	 * 请求之外做的，是被改名的会话正是屏幕上那个时让头部保持诚实：头部读快照的 title，而快照不在
+	 * 行帧上刷新，所以确认的名字在服务端说它生效的那一刻被折入一次。
 	 */
 	async function renameSession(sessionId: string, title: string): Promise<void> {
 		try {
@@ -1679,20 +1535,19 @@ function main(): void {
 	}
 
 	/**
-	 * Delete a session whole, and leave it if this window was reading it.
+	 * 整个删除一个会话，如果本窗口正在读它就离开。
 	 *
-	 * The row leaves on the connection's `session_gone` frame, never by a local edit — one road per
-	 * fact, the same rule the fork follows. The fold itself is {@link foldFromDeleted}, shared with
-	 * that frame: whichever of the two lands first does the work, and the other finds the pane
-	 * already elsewhere.
+	 * 行随连接的 `session_gone` 帧离开，绝不靠本地修改 —— 每个事实一条路，与派生遵循的规则相同。
+	 * 折叠本身是 {@link foldFromDeleted}，与那个帧共享：两者谁先落地谁做事，另一个发现窗格已在
+	 * 别处。
 	 */
 	async function deleteSession(sessionId: string): Promise<void> {
 		try {
 			await api.deleteSession(sessionId);
 			reachable();
 		} catch (error) {
-			// A busy session — a run in flight, an approval waiting — is the server refusing with its
-			// reasons named; the error bar is where those reasons are already shown.
+			// 繁忙的会话 —— 运行进行中、审批等待中 —— 是服务端带着它的理由拒绝；错误条正是那些
+			// 理由已经显示的地方。
 			unreachable(error);
 			return;
 		}
@@ -1700,15 +1555,13 @@ function main(): void {
 	}
 
 	/**
-	 * Fold the pane away from a session that no longer exists.
+	 * 把窗格从一个不再存在的会话上折走。
 	 *
-	 * Two doors lead here carrying the same verdict: this window's own delete, and the connection's
-	 * `session_gone` frame for a session another window deleted. The transcript on screen is a view
-	 * of something that is gone either way, so the fold is the same one — models, settings, and
-	 * reachability kept, because those are the window's own facts and not the deleted session's.
-	 * Releasing the pane reference here, on the frame rather than only on the local delete, is what
-	 * keeps a reference held on a session the server has forgotten from turning the next reconnect
-	 * into a refused `open` — and the refusal into a banner for a race nobody chose.
+	 * 两扇门带着同一个判决到达这里：本窗口自己的删除，以及别的窗口删除了会话时连接的
+	 * `session_gone` 帧。屏幕上的 transcript 无论哪种都是对已经不存在的东西的视图，所以折叠是
+	 * 同一个 —— 模型、设置和可达性保留，因为那些是窗口自己的事实，不是被删会话的。在帧上、而不
+	 * 只在本地删除时释放窗格引用，正是让一个被服务端遗忘的会话上持有的引用，不把下一次重连变成
+	 * 一次被拒绝的 `open` —— 并把那次拒绝变成一场没人选择的竞态的横幅。
 	 */
 	function foldFromDeleted(sessionId: string): void {
 		if (followed !== sessionId) return;
@@ -1723,22 +1576,20 @@ function main(): void {
 	}
 
 	/**
-	 * Move this session onto another branch of its own tree.
+	 * 把这个会话移到它自己树上的另一个分支。
 	 *
-	 * `descend` chooses the landing: true follows an alternative to where it stopped, false rewinds
-	 * to the message itself so the next prompt starts a new way from there. The answer is applied
-	 * here *and* arrives on the channel: the server sends the same snapshot to every window on this
-	 * session, and applying the response as well is what keeps the window that clicked from waiting
-	 * a round trip to see its own move. Both are the same session state, so the second one to arrive
-	 * changes nothing.
+	 * `descend` 选择落点：true 沿一个备选项走到它停下的地方，false 回退到消息本身，下一个提示
+	 * 从那里开启新的路。答案在这里应用*并且*经通道到达：服务端把同一个快照发给这个会话上的每个
+	 * 窗口，把响应也应用，正是让点击的窗口不用等一个往返就看到自己的移动。两者是同一个会话状态，
+	 * 后到的那个什么都不会改变。
 	 */
 	async function branch(entryId: string, descend: boolean): Promise<void> {
 		if (followed === undefined) return;
 		try {
 			const { session } = await api.branchSession(followed, entryId, descend);
 			apply(reduce(state, { type: "baseline", session }));
-			// A rewind — the fork button's case — is half a gesture: the branch is only real once
-			// the next prompt is typed, so the composer takes the focus the press was aiming at.
+			// 一次回退 —— fork 按钮的情形 —— 只是半个手势：只有下一个提示输入后分支才是真的，
+			// 所以 composer 接过这次按压瞄准的焦点。
 			if (!descend) composer.focus();
 		} catch (error) {
 			report(error);
@@ -1746,13 +1597,12 @@ function main(): void {
 	}
 
 	/**
-	 * The user message's right-click menu.
+	 * 用户消息的右键菜单。
 	 *
-	 * `从此分支` rewinds to the message so the next prompt starts another way from it, which is why
-	 * it stays on the conversation page: the branch page has no composer to type that prompt into.
-	 * The door into the branch page itself is the header's chip alone — one entry, one place — so a
-	 * streaming run, which is moving the very tree a branch would grow from, simply leaves the menu
-	 * unopened rather than offering a look the chip already serves.
+	 * `从此分支` 回退到这条消息，让下一个提示从它开启另一条路，这正是它留在对话页的原因：分支页
+	 * 没有可以输入那个提示的 composer。进入分支页本身的门只有头部的 chip —— 一个入口、一个地方
+	 * —— 所以正在移动分支即将生长的那棵树的流式运行，干脆不打开菜单，而不是提供一个 chip 已经
+	 * 提供的看一眼。
 	 */
 	function openUserMenu(entryId: string | undefined, x: number, y: number): void {
 		const items: MenuItem[] = [];
@@ -1772,14 +1622,13 @@ function main(): void {
 		apply({ ...state, error: describe(error) });
 	}
 
-	// ---------------------------------------------------------------- listeners
+	// ---------------------------------------------------------------- 监听
 
 	/**
-	 * Whether the focus is somewhere keys mean something else.
+	 * 焦点是否在某处按键另有含义的地方。
 	 *
-	 * The takeover's Enter and Escape are for a person reading the card, not for a form: a button
-	 * already focused answers with its own key, and an input that is visible — the panels', the
-	 * search's — must not have its typing turned into an answer.
+	 * 接管的 Enter 和 Escape 是给正在读卡片的人的，不是给表单的：已经聚焦的按钮用自己的键回答，
+	 * 一个可见的输入框 —— 面板的、搜索的 —— 绝不能被把输入变成一次回答。
 	 */
 	function typingTarget(): boolean {
 		const target = document.activeElement;
@@ -1791,8 +1640,7 @@ function main(): void {
 
 	window.addEventListener("keydown", (event) => {
 		if (event.key === "Escape") {
-			// The menu closes itself in its own capture listener, which stops the event before it gets
-			// here; the panels go in the order they were likely opened in.
+			// 菜单在自己的捕获监听里关闭自己，事件到达这里之前就被拦下；面板按最可能的打开顺序关。
 			if (settings.open) {
 				settings.hide();
 				return;
@@ -1803,8 +1651,8 @@ function main(): void {
 			}
 		}
 		if (event.key === "Enter" && state.approvals.length > 0 && followed !== undefined && !typingTarget()) {
-			// Enter allows, Escape denies — the two answers the takeover card offers, from the keyboard
-			// it replaced the input box for.
+			// Enter 允许，Escape 拒绝 —— 接管卡片提供的两个答案，用的正是它为输入框让出的那副
+			// 键盘。
 			void api.approve(followed, state.approvals[0]!.toolCallId, true).catch(report);
 			return;
 		}
@@ -1819,22 +1667,20 @@ function main(): void {
 		}
 	});
 
-	// The desktop flags (`data-theme`, `data-platform`, `data-desktop-caption`) are set by the inline
-	// boot script in index.html, before the first paint. They are not repeated here: the caption has to
-	// reserve its space before the stylesheet renders, not after the module loads.
+	// 桌面标志（`data-theme`、`data-platform`、`data-desktop-caption`）由 index.html 的内联启动
+	// 脚本在首次绘制之前设置。这里不重复：标题栏必须在样式表渲染之前预留空间，而不是在模块加载
+	// 之后。
 
 	/**
-	 * The imported rows, planting the window's built-in default when nothing is imported yet.
+	 * 已导入的行，在什么都没导入时种下窗口的内置默认。
 	 *
-	 * This is the one place a message is ever written by the window without the user asking: a machine
-	 * with no model can do nothing at all, and a notice explaining that is a worse first screen than
-	 * the row that makes it untrue. The row is `DEFAULT_MODEL` — keyless, so it is a starting point and
-	 * not a credential — and it goes through the ordinary model endpoint, exactly as if the user had
-	 * typed it. After it lands, the settings marker records that this window made the offer, which is
-	 * what keeps a deleted row deleted on the next launch; see `default-model.ts`.
+	 * 这是窗口唯一一次未经用户请求就写入消息的地方：没有模型的机器什么都做不了，一个解释这件事
+	 * 的提示，不如让这件事变成不真的那一行。行是 `DEFAULT_MODEL` —— 无密钥，所以它是起点而不是
+	 * 凭据 —— 且走普通的模型端点，完全像用户亲手输入的一样。落地之后，设置标记记录本窗口做过
+	 * 这次提议，这正是让已删除的行在下次启动时保持已删除的机制；见 `default-model.ts`。
 	 *
-	 * A planting that fails is reported and the read's own answer — possibly empty — still lands: the
-	 * window opens, says what went wrong, and the settings panel is still the fix.
+	 * 失败的种下会被上报，而读取自己的答案 —— 可能为空 —— 仍然落地：窗口打开、说明哪里出错、
+	 * 设置面板仍然是修法。
 	 */
 	async function importedModels(): Promise<ModelOption[]> {
 		const { models } = await api.listModels();
@@ -1852,15 +1698,13 @@ function main(): void {
 		}
 	}
 
-	// Fill the panel and the list from the API, independently of the channel: a window whose channel
-	// never comes up can still show what the server has, and can still say what is missing. So the
-	// first connect happens here rather than at module load — the panel is worth having either way,
-	// and none of the reads below waits on the connection.
+	// 从 API 独立于通道填面板和列表：通道永远上不来的窗口仍然能显示服务端有什么，也能说出缺什么。
+	// 所以第一次连接在这里发生而不是模块加载时 —— 无论如何面板都值得有，且下面的读取没有一个在
+	// 等连接。
 	void (async () => {
-		// The channel goes up first, and this is the reverse of the order it used to go up in. The
-		// landing is a navigation now (ADR-0010): the session the page opens is opened by a frame, so a
-		// connection started after the reads would leave the landing waiting on a handshake nobody had
-		// begun. Starting here lets that handshake run under the reads instead of after them.
+		// 通道先起，这与它过去启动的顺序相反。落地现在是一次导航（ADR-0010）：页面打开的会话由
+		// 帧打开，所以读取之后才开始的连接，会让落地等一场根本没人开始的握手。在这里开始让那次
+		// 握手在读取之下运行，而不是在它们之后。
 		mux.start();
 		try {
 			const health = await api.health();
@@ -1889,26 +1733,21 @@ function main(): void {
 		} catch (error) {
 			report(error);
 		}
-		// Which session to land on is the server's decision — `--session` pins one, otherwise the
-		// answer is whatever it last created, or `null` for "nothing, stay on the welcome state" — so
-		// the page asks rather than picking from the list. That question still goes over REST: it is
-		// about the server's own memory of the last active session, and the channel is a push channel
-		// with no command face.
+		// 落在哪个会话是服务端的决定 —— `--session` 钉住一个，否则答案是它最后创建的，或 `null`
+		// 表示"没有，停在欢迎状态" —— 所以页面发问而不是从列表里挑。这个问题仍然走 REST：它问的是
+		// 服务端对最后活跃会话自己的记忆，而通道是一条没有命令面的推送通道。
 		//
-		// The open that follows waits for the channel to prove itself, because opening a session is an
-		// `open` frame and there is no read to fall back on. That wait is the one beat ADR-0010 books
-		// against the page load, and it is also the honest answer for a window whose server never comes
-		// up: the banner says so, instead of a conversation that would never update.
+		// 随后的打开等待通道证明自己，因为打开会话是 `open` 帧而没有读取可兜底。那次等待是
+		// ADR-0010 为页面加载记下的唯一一拍，对服务端永远上不来的窗口它也是诚实的答案：横幅这么说，
+		// 而不是一段永远不会更新的对话。
 		try {
 			const { sessionId } = await api.currentSession();
 			reachable();
 			await channelLive;
-			// Unless a click got there first. The landing is a default — the session the server
-			// remembers, for a window nobody has touched yet — and a person who has already clicked a
-			// row has said something newer than a default. Without this the answer would arrive a beat
-			// later, supersede the click that was already on screen, and pull the pane back to a
-			// conversation the reader had just left. `openSeries` is zero only while nothing has been
-			// opened at all, which is exactly the question being asked here.
+			// 除非一次点击先到了。落地是默认 —— 服务端记得的那个会话，给还没被碰过的窗口 —— 而已经
+			// 点过一行的人已经说了比默认更新的东西。没有这个，答案会晚一拍到达，取代已经在屏幕上的
+			// 那次点击，把窗格拽回读者刚刚离开的对话。`openSeries` 只有在什么都还没打开过时才是零，
+			// 那正是这里要问的问题。
 			if (sessionId !== null && openSeries === 0) await openSession(sessionId);
 		} catch (error) {
 			unreachable(error);

@@ -4,21 +4,17 @@ import type { Router } from "./http/routing.ts";
 import { isApiPath, serveStatic } from "./http/static.ts";
 
 export interface HttpOptions {
-	/** The API's routing table. A request no route claims falls through to the client. */
+	/** API 的路由表。没有路由认领的请求落到 client 上。 */
 	router: Router;
 	clientDir: string;
-	/** Use Vite in middleware mode so the client hot-reloads while the server stays up. */
+	/** 以 middleware 模式使用 Vite，让 client 在服务器不重启的情况下热更新。 */
 	useVite?: boolean;
 	/**
-	 * Take over a connection that asked to switch protocols.
+	 * 接管请求切换协议的连接。
 	 *
-	 * Once this listener exists Node has already handed the socket over and will not touch it again, so
-	 * the handler owns the socket completely: it must either take it or destroy it. Declining is not a
-	 * thing it can do — an unclaimed upgrade would stay open forever, and `close()` would then never call
-	 * back.
+	 * 一旦这个监听器存在，Node 已经把 socket 交出来且不会再碰它，所以 handler 完全拥有 socket：必须要么收下、要么销毁。"拒绝"不是它能做的事——一个无人认领的 upgrade 会永远开着，`close()` 也随之永远不会回调。
 	 *
-	 * The boolean is kept so a caller can report "handled" for a path it recognised but refused, which
-	 * is the same outcome as taking it.
+	 * 保留布尔值是为了让调用者可以对自己认识但拒绝的路径报告"已处理"，这与收下的结果相同。
 	 */
 	onUpgrade?: (request: IncomingMessage, socket: Duplex, head: Buffer) => boolean;
 }
@@ -26,22 +22,18 @@ export interface HttpOptions {
 export interface HttpServerHandle {
 	server: Server;
 	/**
-	 * Every socket that was upgraded away from HTTP, so shutdown can end them.
+	 * 所有从 HTTP 升级走的 socket，shutdown 时用它结束它们。
 	 *
-	 * Held here rather than by the mux because this is the one place that knows a socket stopped being
-	 * a response: once a connection is upgraded it is no longer in `server`'s accounting at all, and
-	 * `close()` would otherwise return while it was still open.
+	 * 由这里持有而不是 mux，因为这里是唯一知道 socket 不再是一个响应的地方：连接一旦升级就完全不在 `server` 的账上，否则 `close()` 会在它还开着的时候返回。
 	 */
 	readonly upgradeSockets: ReadonlySet<Duplex>;
 	close(): Promise<void>;
 }
 
 /**
- * One HTTP server for both halves of the app: the JSON API and the client.
+ * 一个 HTTP 服务器同时服务应用的两半：JSON API 和 client。
  *
- * There is no second *listener*. A command is a request and a session's events are frames on the one
- * resident connection the client opens, and everything the server knows how to do is reachable by
- * anything that can write HTTP — a browser, a script, `curl`.
+ * 没有第二个 *listener*。命令是一个请求，会话事件是 client 打开的那条常驻连接上的 frame，服务器会做的一切，任何能写 HTTP 的东西——浏览器、脚本、`curl`——都能到达。
  */
 export async function createServer(options: HttpOptions): Promise<HttpServerHandle> {
 	const vite = options.useVite === true ? await createViteMiddleware(options.clientDir) : undefined;
@@ -53,8 +45,7 @@ export async function createServer(options: HttpOptions): Promise<HttpServerHand
 		try {
 			if (await options.router.dispatch(request, response)) return;
 
-			// A routed API path that nothing claimed is a 404, not the client shell: handing a client
-			// HTML for a mistyped endpoint is worse than saying the endpoint does not exist.
+			// 被路由的 API 路径却无人认领是 404，不是 client 的壳：给一个拼错的端点返回客户端 HTML，比承认端点不存在更糟。
 			if (isApiPath(pathname)) {
 				response.writeHead(404, { "content-type": "application/json; charset=utf-8" });
 				response.end(JSON.stringify({ error: `No route for ${request.method ?? "GET"} ${pathname}` }));
@@ -62,9 +53,7 @@ export async function createServer(options: HttpOptions): Promise<HttpServerHand
 			}
 
 			if (vite) {
-				// Vite serves the client itself and calls `next` for what it does not handle, so the
-				// fallback is chained onto Vite's own call rather than run beside it: awaiting this
-				// settles once one of the two has actually finished the response.
+				// Vite 自己服务 client 并对自己不处理的请求调 `next`，所以 fallback 链在 Vite 自己的调用之后而不是与它并排：await 这个 Promise，两者之一真正完成响应时才会 settle。
 				await new Promise<void>((settle) => {
 					vite.middlewares(request, response, () => {
 						void serveStatic(options.clientDir, pathname, response).finally(settle);
@@ -86,19 +75,13 @@ export async function createServer(options: HttpOptions): Promise<HttpServerHand
 		void handler(request, response);
 	});
 
-	// Registered before `listen`, and only when something will use it: an `upgrade` listener takes the
-	// event away from Node's default handling, so registering an empty one would change behaviour for a
-	// server that has no use for it.
+	// 在 `listen` 之前注册，且仅在有人会用它时：`upgrade` 监听器会把事件从 Node 的默认处理中拿走，所以注册一个空的监听器会改变一个用不到它的服务器的行为。
 	if (options.onUpgrade !== undefined) {
 		server.on("upgrade", (request, socket, head) => {
 			if (options.onUpgrade?.(request, socket, head) === true) {
-				// Tracked from the moment the upgrade succeeds, because from that moment this socket is
-				// invisible to `server.close()` — see `close`.
+				// 从升级成功的那一刻起就追踪，因为从那一刻起这个 socket 对 `server.close()` 是不可见的——见 `close`。
 				upgradeSockets.add(socket);
-				// Only `close` and `error` forget it. A peer that half-closes has merely stopped sending:
-				// the socket is still very much open, and dropping it from the set on `end` would put it
-				// outside the sweep that `close()` depends on — reintroducing exactly the hang the set
-				// exists to prevent.
+				// 只有 `close` 和 `error` 会忘记它。半关闭的 peer 只是停止发送：socket 仍然开着，若在 `end` 时把它从集合里丢掉，它会脱离 `close()` 依赖的清扫——恰好重新引入这个集合要防的挂起。
 				const forget = (): void => {
 					upgradeSockets.delete(socket);
 				};
@@ -113,11 +96,7 @@ export async function createServer(options: HttpOptions): Promise<HttpServerHand
 		upgradeSockets,
 		close: async () => {
 			await vite?.close();
-			// An upgraded socket is not a response and not an idle connection: `server.close()` waits for
-			// responses, `closeAllConnections()` reaches idle keep-alive ones, and neither of them
-			// accounts for a socket that finished its handshake and became something else. Both were
-			// measured against this exact case and both let the process hang with a window still attached,
-			// so the set above is the only thing that closes them.
+			// 升级过的 socket 既不是响应也不是空闲连接：`server.close()` 等的是响应，`closeAllConnections()` 够得到空闲的 keep-alive 连接，两者都不管一个完成了握手并变成别的东西的 socket。两者都针对这个确切场景验证过，都让进程挂着不放、窗口还连着，所以上面这个集合是唯一能关闭它们的东西。
 			for (const socket of [...upgradeSockets]) socket.destroy();
 			upgradeSockets.clear();
 			await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
@@ -148,8 +127,7 @@ interface ViteModule {
 }
 
 /**
- * Load Vite lazily, by variable specifier, so a production start never needs it installed and so
- * `tsc` does not require Vite's types for the server build.
+ * 通过变量 specifier 惰性加载 Vite，让生产启动永远不需要安装它，也让 `tsc` 在构建 server 时不要求 Vite 的类型。
  */
 async function createViteMiddleware(clientDir: string): Promise<ViteMiddleware> {
 	const specifier = "vite";

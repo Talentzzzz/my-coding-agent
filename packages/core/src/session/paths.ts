@@ -3,64 +3,61 @@ import { isAbsolute, join, resolve as nodeResolve } from "node:path";
 import { AGENT_HOME } from "../config.ts";
 
 /**
- * Where sessions live:
+ * session 存放的位置：
  *
  * ```
  * <agent home>/sessions/<session id>.jsonl
  * <agent home>/sessions/<session id>.json
  * ```
  *
- * The store is flat, and the id **is** the address: `sessions/<id>.jsonl` is the only place a
- * session can be, so locating one is a stat rather than a walk of every directory. The project a
- * session belongs to is not in the path — it is in the snapshot's `workDir`, which is where a
- * listing reads it from anyway; a directory name that dashes a path into a folder name was readable
- * and not reversible, and it cost a full store scan per lookup.
+ * store 是扁平的，id **就是**地址：`sessions/<id>.jsonl` 是 session 唯一可能在的地方，定位一个
+ * session 是一次 stat 而不是遍历所有目录。session 属于哪个项目不在路径里——在快照的 `workDir`
+ * 里，列表反正也是从那里读的；把路径拆成文件夹名的目录命名方案可读但不可逆，而且每次查找都要全
+ * store 扫描。
  *
- * What the layout gives up is the chronological filename: a file manager now lists the store in id
- * order, which for a uuidv7 is creation order to the millisecond anyway.
+ * 这个布局放弃的是按时间命名的文件名：文件管理器现在按 id 序列出 store，而 uuidv7 的 id 序本来就是
+ * 毫秒级的创建顺序。
  */
 let sessionsRoot = join(AGENT_HOME, "sessions");
 
-/** The directory every session file lives in. */
+/** 所有 session 文件所在的目录。 */
 export function sessionsDir(): string {
 	return sessionsRoot;
 }
 
 /**
- * Point the store somewhere else, for a test or an embedder that must not touch the machine's own
- * sessions. Process-wide and read at call time, so it has to be set before any session work — the
- * default is the agent home's `sessions`, and production never calls this.
+ * 把 store 指到别处，给测试或不得触碰机器自身 session 的嵌入方用。进程级、调用时读取，所以必须在
+ * 任何 session 工作之前设置——默认是 agent home 的 `sessions`，生产环境从不调用。
  */
 export function setSessionsDir(absDir: string): void {
 	sessionsRoot = resolvePath(absDir);
 }
 
 /**
- * The `.jsonl` entry stream a session id names; `absDir` is its store, defaulting to this process's.
+ * 一个 session id 所指的 `.jsonl` 条目流；`absDir` 是它的 store，默认为本进程的。
  *
- * The only place the id→path rule lives: everything else in the store asks this instead of building
- * a name of its own.
+ * id→路径规则唯一的安放处：store 里其他所有地方都问这里，不自己拼名字。
  */
 export function sessionPath(sessionId: string, absDir: string = sessionsRoot): string {
 	return join(absDir, `${sessionId}.jsonl`);
 }
 
 /**
- * The `.json` snapshot's path for a session whose `.jsonl` is `absJsonlPath`.
+ * `.jsonl` 在 `absJsonlPath` 的 session 的 `.json` 快照路径。
  *
- * The two files share a stem: the snapshot is the identity half, the stream the transcript half,
- * and pairing them by stem is what makes a session one thing rather than two.
+ * 两个文件共享 stem：快照是身份那一半，流是 transcript 那一半，按 stem 配对才让 session 是一个
+ * 东西而不是两个。
  */
 export function sessionMetaPath(absJsonlPath: string): string {
 	return absJsonlPath.replace(/\.jsonl$/, ".json");
 }
 
-/** The `.jsonl` stream's path for a session whose `.json` is `absJsonPath` — the pairing's other half. */
+/** `.json` 在 `absJsonPath` 的 session 的 `.jsonl` 流路径——配对的另一半。 */
 export function sessionJsonlPath(absJsonPath: string): string {
 	return absJsonPath.replace(/\.json$/, ".jsonl");
 }
 
-/** Convert Git Bash, MSYS, Cygwin, and WSL drive paths to a form native Windows APIs accept. */
+/** 把 Git Bash、MSYS、Cygwin 和 WSL 的盘符路径转换成原生 Windows API 接受的形式。 */
 function normalizeWindowsShellPath(pathInput: string): string {
 	if (!pathInput.startsWith("/") || pathInput.startsWith("//") || pathInput.includes("\\")) return pathInput;
 	const match = pathInput.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i);
@@ -69,7 +66,7 @@ function normalizeWindowsShellPath(pathInput: string): string {
 	return `${match[1]!.toUpperCase()}:\\${suffix ?? ""}`;
 }
 
-/** Expand a leading `~` and normalize shell-style drive paths, without touching the rest. */
+/** 展开开头的 `~` 并规范化 shell 风格的盘符路径，其余不动。 */
 export function normalizePath(pathInput: string): string {
 	let normalized = pathInput;
 	if (process.platform === "win32") normalized = normalizeWindowsShellPath(normalized);

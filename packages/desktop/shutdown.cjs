@@ -1,80 +1,59 @@
 /**
- * Putting the server down before the process goes.
+ * 在进程离开之前把服务器放下来。
  *
- * It lives on its own, rather than inline in `main.cjs`, for the same reason `muxUpgrade()` and
- * `sessionListeners()` live in `boot.ts`: a smoke that rewrote these lines would be asserting its
- * own copy, and the ordering is the whole point of them. This file touches no Electron API — `app`
- * arrives as an argument — so a smoke can drive the real sequence with a fake.
+ * 它单独存在，而不是内联在 `main.cjs` 里，理由与 `muxUpgrade()` 和 `sessionListeners()` 住在 `boot.ts` 相同：重写这些代码行的 smoke 是在断言自己的拷贝，而这里的顺序就是它们的全部意义。本文件不触碰任何 Electron API——`app` 以参数到达——所以 smoke 可以用假件驱动真实序列。
  *
- * It is CommonJS because the shell is: Electron loads `main.cjs` before any toolchain runs.
+ * 用 CommonJS 是因为外壳就是：Electron 在任何工具链运行之前加载 `main.cjs`。
  */
 
 /**
- * How long the shell waits for the server to go down before leaving without it.
+ * 外壳在丢下服务器自行离开之前等待多久。
  *
- * The boot smoke (`scripts/smoke-boot.ts`) asserts that `close()` returns inside this budget with
- * the worst case in residence — a window's resident connection watching a run parked on an approval
- * nobody will ever answer — so a server still closing after it is not slow, it is stuck. An
- * application that cannot be closed is a worse outcome than one that skips its last write, and that
- * is the only reason the shell stops waiting.
+ * boot smoke（`scripts/smoke-boot.ts`）断言 `close()` 在最坏情况在场时——一个窗口的常驻连接正看着停在无人会回答的审批上的运行——于该预算内返回，所以超时后还在关闭的服务器不是慢，是卡死。一个关不掉的应用比一个跳过最后一次写入的应用更糟，这就是外壳停止等待的唯一理由。
  */
 const SHUTDOWN_BUDGET_MS = 5_000;
 
 /**
- * Own the server's lifetime at quit time.
+ * 在退出时刻接管服务器的生命周期。
  *
  * @param {object} options
- * @param {{ quit(): void, exit(code: number): void }} options.app The Electron application object:
- *   only these two calls are made on it, which is what keeps this file drivable outside Electron.
- * @param {number} [options.shutdownBudgetMs] Override for {@link SHUTDOWN_BUDGET_MS}, so a smoke can
- *   drive the give-up path in milliseconds instead of waiting it out.
- * @param {(line: string) => void} [options.log] Where the two failure lines go. Defaults to the
- *   console; a smoke collects them instead.
+ * @param {{ quit(): void, exit(code: number): void }} options.app Electron 应用对象：
+ *   只对它做这两个调用，这正是本文件能在 Electron 之外被驱动的原因。
+ * @param {number} [options.shutdownBudgetMs] 覆盖 {@link SHUTDOWN_BUDGET_MS}，让 smoke 用毫秒驱动
+ *   放弃路径，而不是等完真实预算。
+ * @param {(line: string) => void} [options.log] 两行失败日志的去处。默认 console；smoke 改为收集。
  */
 function createShutdown(options) {
 	const { app } = options;
 	const budgetMs = options.shutdownBudgetMs ?? SHUTDOWN_BUDGET_MS;
 	const log = options.log ?? ((line) => console.error(line));
 
-	/** The server this shell is serving, or `null` once it is on its way down. */
+	/** 本外壳正在服务的服务器，它开始下行后为 `null`。 */
 	let server = null;
-	/** Whether a shutdown is under way. */
+	/** 关闭是否正在进行。 */
 	let shuttingDown = false;
 	/**
-	 * Whether the quit standing in the handler right now is the one this module asked for.
+	 * 此刻停在 handler 里的 quit 是否是本模块自己请求的那一个。
 	 *
-	 * It is the only quit that may pass once a shutdown has begun — see {@link beforeQuit}.
+	 * 关闭开始之后，只有它被放行——见 {@link beforeQuit}。
 	 */
 	let ownQuit = false;
 
-	/** Attach the server the shell just booted. */
+	/** 挂上外壳刚启动好的服务器。 */
 	function serve(booted) {
 		server = booted;
 	}
 
 	/**
-	 * The shell's `before-quit` handler: hold the first quit back, put the server down, ask again.
+	 * 外壳的 `before-quit` handler：拦住第一次 quit，放下服务器，再请求一次。
 	 *
-	 * Electron's quit does not wait for a promise, so the order here is not a formality. Without the
-	 * `preventDefault` the process is torn down in the middle of `close()`, and under a resident
-	 * connection that is the ordinary case rather than a rare one: the window holds a socket for as
-	 * long as it is open, so there is always something to release and always a claim to settle.
+	 * Electron 的 quit 不等 promise，所以这里的顺序不是走过场。没有 `preventDefault`，进程会在 `close()` 中途被拆掉，而在常驻连接之下这是常态而不是罕见情形：窗口开着多久就 hold 多久的 socket，永远有要释放的东西、永远有要落定的主张。
 	 *
-	 * What the shell waits for is `close()`, never a response. The mux layer's own order is
-	 * connections first — a window's subscriptions are released while the sessions they were watching
-	 * are still there — then the sessions, then the listener; and the upgraded sockets go with the
-	 * listener, because neither `server.close()`'s accounting nor `closeAllConnections()` covers a
-	 * socket that stopped being a response when it switched protocols. So this waits on a promise
-	 * that returns rather than on a response that never ends.
+	 * 外壳等的是 `close()` 返回，而不是应答。mux 层自己的顺序是连接先行——窗口的订阅在它们正在观看的会话还在时释放——然后会话，然后监听器；升级的 socket 随监听器而去，因为 `server.close()` 的账目和 `closeAllConnections()` 都不覆盖一个在切换协议后就不再是响应的 socket。所以这里等的是一个会返回的 promise，而不是一个永不结束的应答。
 	 */
 	function beforeQuit(event) {
 		if (shuttingDown) {
-			// A shutdown is already under way, and every quit arriving now is somebody else's: the
-			// operating system asking a second time, or the user insisting before the server is down.
-			// It is held back for the same reason the first one was — letting it through is what tears
-			// the process down in the middle of `close()` — and "insisting" is already answered: the
-			// budget below bounds how long the wait can be. The one quit that must pass is this
-			// module's own, and it is the only one marked as such.
+			// 关闭已在进行，此刻到达的每个 quit 都是别人的：操作系统再问一遍，或用户在服务器放下之前坚持退出。拦住它的理由与拦住第一个相同——放行正是把进程在 `close()` 中途拆掉的原因——而"坚持"已经有了答案：下面的预算框住了等待能有多长。必须放行的唯一 quit 是本模块自己的，也只有它被这样标记。
 			if (!ownQuit) event.preventDefault();
 			return;
 		}
@@ -83,18 +62,15 @@ function createShutdown(options) {
 		shuttingDown = true;
 
 		const closing = server;
-		// Dropped before the await, and not just for the guard above: macOS reopens a window against
-		// `server.url` on `activate`, and a server on its way down must not be the one a new window is
-		// pointed at.
+		// 在 await 之前放下，不只是为了上面那个守卫：macOS 会在 `activate` 时对着 `server.url` 重开窗口，正在下行的服务器不得成为新窗口指向的东西。
 		server = null;
 
-		/** Whether the shell has given up waiting, which is also "there is nothing left to ask for". */
+		/** 外壳是否已放弃等待，这也意味着"再没有东西可要了"。 */
 		let gaveUp = false;
 		const budget = setTimeout(() => {
 			gaveUp = true;
 			log(`desktop: the server did not finish closing within ${budgetMs} ms; leaving anyway`);
-			// `exit` rather than `quit`: the quit sequence is what is stuck, so asking for it again
-			// would wait on the same thing. This one does not consult `before-quit`.
+			// 用 `exit` 而不是 `quit`：卡住的正是 quit 序列本身，再请求一遍只会等在同一件事上。这一个不会咨询 `before-quit`。
 			app.exit(0);
 		}, budgetMs);
 
@@ -105,12 +81,10 @@ function createShutdown(options) {
 			})
 			.finally(() => {
 				clearTimeout(budget);
-				// A server that finished closing on its way out of a shell that has already left: the
-				// budget sent the process away, and a quit asked for now would only talk to a corpse.
+				// 服务器在一个已经离场的外壳的退路上关闭完成：预算已把进程送走，此刻请求 quit 只是在和尸体说话。
 				if (gaveUp) return;
 				ownQuit = true;
-				// The quit that counts: `beforeQuit` lets this one through, so Electron closes the
-				// windows and terminates as it normally would.
+				// 算数的那次 quit：`beforeQuit` 放行这一个，Electron 于是照常关闭窗口并终止。
 				app.quit();
 			});
 	}
@@ -118,7 +92,7 @@ function createShutdown(options) {
 	return {
 		serve,
 		beforeQuit,
-		/** The server still being served, or `null` once a shutdown is under way. */
+		/** 仍在被服务的服务器，关闭开始后为 `null`。 */
 		get current() {
 			return server;
 		},

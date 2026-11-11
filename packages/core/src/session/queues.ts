@@ -3,10 +3,9 @@ import type { QueuedPrompt } from "../protocol.ts";
 import type { Message } from "../llm/index.ts";
 
 /**
- * A pending-message queue with a drain width.
+ * 带有取走宽度的待处理消息队列。
  *
- * The queue belongs to the session that accepts the messages; the engine reads it at its own
- * take points, directly, because both live in this process and no seam is needed between them.
+ * 队列属于接收消息的 session；引擎在自己的取走点直接读它，因为两者在同一个进程里，中间不需要缝。
  */
 export class PendingMessageQueue {
 	private messages: Message[] = [];
@@ -16,16 +15,16 @@ export class PendingMessageQueue {
 		this.mode = mode;
 	}
 
-	/** How many messages are waiting. The depth a composer shows is the follow-up queue's. */
+	/** 有多少消息在等。composer 展示的深度就是 follow-up 队列的。 */
 	get size(): number {
 		return this.messages.length;
 	}
 
 	/**
-	 * The waiting messages as the wire carries them: text and stamp, nothing else.
+	 * 等待中的消息按 wire 携带的形式：text 和时间戳，没有别的。
 	 *
-	 * This is the read surface a queue change publishes — `queue_update`, the `status` frame, and
-	 * the snapshot all carry it — so a window sees the queue itself rather than a count of it.
+	 * 这是队列变更发布的读取面——`queue_update`、`status` 帧和快照都带它——这样窗口看到的是队列
+	 * 本身，而不是它的一个计数。
 	 */
 	previews(): QueuedPrompt[] {
 		return this.messages.map((message) => ({ text: promptText(message), timestamp: message.timestamp }));
@@ -35,7 +34,7 @@ export class PendingMessageQueue {
 		this.messages.push(message);
 	}
 
-	/** Take the messages the current drain width selects, and leave the rest. */
+	/** 取走当前取走宽度选中的消息，其余留下。 */
 	drain(): Message[] {
 		const drained =
 			this.mode === "all" ? this.messages.slice() : this.messages.slice(0, 1);
@@ -48,7 +47,7 @@ export class PendingMessageQueue {
 	}
 }
 
-/** The text of a queued prompt, joined from its content blocks. */
+/** 排队 prompt 的文本，由 content blocks 拼接而来。 */
 function promptText(message: Message): string {
 	const content = message.content;
 	if (typeof content === "string") return content;

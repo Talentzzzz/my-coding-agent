@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { httpStatus } from "./errors.ts";
 
-/** Types the bundled client is made of. Anything else is served as bytes. */
+/** 打包 client 由这些类型构成。其余一律按字节返回。 */
 const MIME: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
 	".js": "text/javascript; charset=utf-8",
@@ -19,31 +19,28 @@ const MIME: Record<string, string> = {
 	".map": "application/json; charset=utf-8",
 };
 
-/** One JSON response. Every controller answer that is not an event stream goes through here. */
+/** 一个 JSON 响应。所有 controller 的非事件流应答都从这里走。 */
 export function sendJson(response: ServerResponse, status: number, body: unknown): void {
 	const text = JSON.stringify(body);
 	response.writeHead(status, {
 		"content-type": "application/json; charset=utf-8",
 		"content-length": Buffer.byteLength(text),
-		// The client is a single local user; a cached API answer is one more way to be confusingly stale.
+		// 客户端是单个本地用户；缓存的 API 应答只是多一种令人困惑的过期方式。
 		"cache-control": "no-store",
 	});
 	response.end(text);
 }
 
 /**
- * Serve the built client, falling back to `index.html` for anything that is not a file.
+ * 服务构建好的 client，对任何不是文件的东西回退到 `index.html`。
  *
- * The fallback is what makes a client-side route reloadable. It is deliberately the last resort: a
- * request that reached here already failed to match a route, so an unknown `/api/...` path becomes
- * the UI's HTML rather than a JSON 404. `isApiPath` is what keeps those two apart.
+ * 这个回退是客户端路由可以刷新的原因。它刻意是最后手段：到达这里的请求已经没匹配上任何路由，所以未知的 `/api/...` 路径会变成 UI 的 HTML 而不是 JSON 404。`isApiPath` 就是把两者分开的东西。
  */
 export async function serveStatic(clientDir: string, pathname: string, response: ServerResponse): Promise<void> {
 	const relPath = normalize(decodeURIComponent(pathname)).replace(/^([/\\])+/, "");
 	const absRoot = resolve(clientDir);
 	const absPath = resolve(absRoot, relPath);
-	// A separator, not just the prefix: without it a sibling directory named `<clientDir>-backup`
-	// would pass the check and be served.
+	// 要比的是分隔符，而不只是前缀：没有它，名为 `<clientDir>-backup` 的兄弟目录也能通过检查并被服务。
 	if (absPath !== absRoot && !absPath.startsWith(absRoot + sep)) {
 		const failure = httpStatus.notFound("Not found");
 		sendJson(response, failure.status, { error: failure.message });
@@ -67,7 +64,7 @@ export async function serveStatic(clientDir: string, pathname: string, response:
 	createReadStream(absFile).pipe(response);
 }
 
-/** Whether a path belongs to the API, so an unrouted one is a 404 instead of the client shell. */
+/** 路径是否属于 API，让未路由的 API 路径成为 404 而不是 client 壳。 */
 export function isApiPath(pathname: string): boolean {
 	return pathname === "/api" || pathname.startsWith("/api/");
 }

@@ -1,5 +1,5 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
-// from flagging this file, while every import into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
 import type { Tool } from "../types.ts";
 
@@ -12,7 +12,7 @@ interface JsonSchemaObject {
 
 class UnsupportedStrictJsonSchemaError extends Error {}
 
-/** Returns true when a provider's strict mode rejects this schema keyword with this value. */
+/** 当 provider 的 strict 模式以该值拒绝这个 schema 关键字时返回 true。 */
 export type UnsupportedStrictSchemaKeywordCheck = (key: string, value: unknown) => boolean;
 
 const UNSUPPORTED_STRICT_SCHEMA_KEYS = [
@@ -126,7 +126,7 @@ function makeJsonSchemaNodeStrict(schema: unknown, isUnsupportedKeyword?: Unsupp
 	schema.additionalProperties = false;
 }
 
-/** Convert a tool schema to the strict subset expected by provider constrained sampling. */
+/** 把工具 schema 转换成 provider 受限采样所要求的 strict 子集。 */
 export function makeStrictJsonSchema(
 	schema: Tool["parameters"],
 	isUnsupportedKeyword?: UnsupportedStrictSchemaKeywordCheck,
@@ -147,8 +147,8 @@ export function getJsonSchemaToolParameters(tool: Tool, strict: boolean | undefi
 }
 
 /**
- * Decide whether a JSON-schema tool is sent in strict mode. `isUnsupportedKeyword` lets a provider
- * reject extra keywords its strict mode does not accept, so "prefer" tools fall back to non-strict.
+ * 决定一个 JSON-schema 工具是否以 strict 模式发送。`isUnsupportedKeyword` 让 provider 拒绝其
+ * strict 模式不接受的多余关键字，于是 "prefer" 的工具回落到非 strict。
  */
 export function resolveJsonSchemaStrictSampling(
 	tool: Tool,

@@ -2,37 +2,34 @@ import type { Message, ToolResult } from "./llm/index.ts";
 import { truncate } from "./tools/truncate.ts";
 import { spillPathFor, spillText, spillView, writeSpillFile, SPILL_KEEP_CHARS } from "./context/spill.ts";
 
-/** How a tool result carries its content: text and image blocks, in order. */
+/** 工具结果如何携带内容：按顺序排列的文本与图片块。 */
 export type ToolResultContent = ToolResult<unknown>["content"];
 
-/** A handler's answer, or a promise of it: the approval gate cannot answer before the user does. */
+/** 处理器的答案，或它的 promise：审批闸门在用户作答之前无法作答。 */
 type MaybePromise<T> = T | Promise<T>;
 
 /**
- * The seams every run dispatches through.
+ * 每次运行都经过的接缝。
  *
- * A handler returns only the fields it decided, and a hook with no handlers changes nothing.
- * {@link Hooks.apply} runs the handlers in registration order, so a later one refines an earlier one's
- * answer rather than replacing the decision outright. Grow this map one entry per consumer; until
- * something calls a hook, adding one is a no-op.
+ * 处理器只返回它决定的部分，没有处理器的 hook 什么也不改变。{@link Hooks.apply} 按注册顺序运行
+ * 处理器，后注册的在前者的答案上精修，而不是整体推翻决定。每有一个消费者就往这张映射里加一条；
+ * 在有东西调用 hook 之前，加一条是空操作。
  *
- * Every event names the session its run belongs to. The surface itself is process-level configuration
- * (ADR-0007 §6): one `Hooks` serves every session this process runs, so a handler that had to be told
- * its session by a closure would be the per-session object this seam exists to remove. The id is what
- * it resolves the rest with — the working directory, the transcript, the approval map.
+ * 每个事件都点出其运行所属的会话。这个面本身是进程级配置（ADR-0007 §6）：一个 `Hooks` 服务本进程
+ * 跑的所有会话，所以需要靠闭包才知道自己会话的处理器，就成了这条接缝本来要消灭的 per-session
+ * 对象。处理器拿这个 id 现取其余一切——工作目录、transcript、审批映射。
  */
 export interface HookMap {
-	/** Rewrite what goes to the provider. Default: fresh system message + the store's messages. */
+	/** 改写给供应商的内容。默认：全新的 system 消息 + 账本的消息。 */
 	context: (event: { sessionId: string; messages: Message[]; systemPrompt: string }) => MaybePromise<
 		{ messages?: Message[]; systemPrompt?: string } | undefined
 	>;
-	/** Runs before a tool call. Default: the approval gate. */
+	/** 在工具调用之前运行。默认：审批闸门。 */
 	before_tool: (event: { sessionId: string; toolCallId: string; toolName: string; args: unknown }) => MaybePromise<
 		{ block?: { reason: string }; args?: unknown; terminate?: boolean; suspend?: boolean } | undefined
 	>;
 	/**
-	 * Runs on the result. Default: none — a rewrite is final, and the write boundary in `agent.ts`
-	 * is the backstop for a result nobody bounded.
+	 * 在结果上运行。默认：无——改写即定稿，`agent.ts` 里的写边界是没人约束过的结果的兜底。
 	 */
 	after_tool: (event: {
 		sessionId: string;
@@ -45,33 +42,31 @@ export interface HookMap {
 
 export type HookName = keyof HookMap;
 
-/** What a hook is handed: its event, already carrying the fields earlier handlers set. */
+/** hook 收到的东西：它的事件，已带上先前处理器设置的字段。 */
 export type HookEvent<TName extends HookName> = Parameters<HookMap[TName]>[0];
 
-/** What a hook answered: the fields its handlers set, or undefined when none did. */
+/** hook 的答案：其处理器设置的字段，无人设置时为 undefined。 */
 export type HookResult<TName extends HookName> = Awaited<ReturnType<HookMap[TName]>>;
 
 export interface Hooks {
-	/** Register a handler. It runs after the handlers already registered; the returned call removes it. */
+	/** 注册一个处理器。它排在已注册的处理器之后；返回的函数用于移除它。 */
 	on<TName extends HookName>(name: TName, handler: HookMap[TName]): () => void;
-	/** Run one hook's handlers in order and answer with what they decided together. */
+	/** 按顺序运行一个 hook 的处理器，以它们共同决定的结果作答。 */
 	apply<TName extends HookName>(name: TName, event: HookEvent<TName>): Promise<HookResult<TName>>;
 }
 
-/** A registered handler, erased to the one shape every hook shares. */
+/** 已注册的处理器，擦除成所有 hook 共享的唯一形状。 */
 type AnyHandler = (event: never) => MaybePromise<unknown>;
 
 /**
- * Build the hook surface a process dispatches through.
+ * 构建进程分发所经的 hook 面。
  *
- * Registration order is the only order there is: the default handlers installed first run first, and
- * a host that registers later sees their answer and can refine it. State is held per call and nowhere
- * else, so a handler registered while a run is in flight is simply seen by the next call.
+ * 注册顺序是唯一的顺序：先安装的默认处理器先运行，后注册的宿主看到它们的答案并可在其上精修。
+ * 状态按每次调用持有、别无他处，所以运行中途注册的处理器自然会被下一次调用看到。
  */
 export function createHooks(): Hooks {
-	// Keyed by name rather than one field per hook: a lookup by name cannot carry the name's own types
-	// through a `Map`, so the two edges that know the name — `on` and `apply` — cast, and nothing in
-	// between does.
+	// 按名字为键而不是每个 hook 一个字段：按名字查找无法把名字自带的类型穿过 `Map`，所以知道名字的
+	// 两个边缘——`on` 和 `apply`——做类型断言，中间的任何东西都不用。
 	const handlers = new Map<HookName, AnyHandler[]>();
 
 	const registry: Hooks = {
@@ -80,7 +75,7 @@ export function createHooks(): Hooks {
 			const registered = handlers.get(name) ?? [];
 			registered.push(entry);
 			handlers.set(name, registered);
-			// Splice rather than rebuild: the handlers that remain keep the order they were added in.
+			// 用 splice 而不是重建：留下的处理器保持它们加入时的顺序。
 			return () => {
 				const index = registered.indexOf(entry);
 				if (index !== -1) registered.splice(index, 1);
@@ -93,8 +88,8 @@ export function createHooks(): Hooks {
 				const answer = await handler(current as never);
 				if (answer === undefined) continue;
 				const fields = defined(answer as Record<string, unknown>);
-				// Later handlers win field by field and see the fields an earlier one set, which is what
-				// makes one hook able to refine another's answer instead of merely replacing it.
+				// 后来的处理器逐字段胜出，并能看到先前处理器设置的字段——这正是让一个 hook 能精修另一个的
+				// 答案而不是单纯取代它的原因。
 				decided = { ...decided, ...fields };
 				current = { ...current, ...fields };
 			}
@@ -105,7 +100,7 @@ export function createHooks(): Hooks {
 	return registry;
 }
 
-/** The fields a handler actually set: an omitted field is not an instruction to erase an earlier one. */
+/** 处理器真正设置的字段：省略一个字段不是抹掉先前设置的指令。 */
 function defined(patch: Record<string, unknown>): Record<string, unknown> {
 	const fields: Record<string, unknown> = {};
 	for (const [field, value] of Object.entries(patch)) if (value !== undefined) fields[field] = value;
@@ -113,25 +108,23 @@ function defined(patch: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
- * Session-level ceiling on one tool result, in UTF-8 bytes.
+ * 单个工具结果的会话级上限，以 UTF-8 字节计。
  *
- * Tools bound their own output (`tools/truncate.ts`, 60,000 characters), so a well-behaved tool never
- * reaches this. It is the floor under the spill (`context/spill.ts`), which archives a result over
- * 80,000 characters into the session's working directory instead of clipping it: when that archive
- * cannot be written, this is what still keeps one result from blowing the context. Deliberately far
- * above the per-tool budget, so a result a tool already bounded is never clipped a second time.
+ * 工具约束自己的输出（`tools/truncate.ts`，60,000 字符），所以守规矩的工具永远到不了这里。它是
+ * spill（`context/spill.ts`）之下的底线——spill 会把超过 80,000 字符的结果归档进会话的工作目录而
+ * 不是截断：当那份归档写不出来时，靠这个上限仍能保住上下文不被一个结果撑爆。有意远高于单工具
+ * 预算，所以工具已经约束过的结果不会被二次截断。
  */
 export const MAX_TOOL_RESULT_BYTES = 200_000;
 
-/** Room kept for the notice `truncate` writes, so a clip lands inside the budget and not just past it. */
+/** 为 `truncate` 写出的提示留出的空间，让截断落在预算之内而不是刚好超出。 */
 const NOTICE_RESERVE_BYTES = 64;
 
 /**
- * Bound one tool result to {@link MAX_TOOL_RESULT_BYTES}, or `undefined` when it already fits.
+ * 把一个工具结果约束到 {@link MAX_TOOL_RESULT_BYTES} 之内，已经放得下时返回 `undefined`。
  *
- * Text is clipped with the same `truncate` the tools use, so a model that is told its output was cut
- * reads the same sentence wherever the cut happened. Image blocks are passed through untouched: this
- * budget is about text, and there is nothing in a picture to clip.
+ * 文本用与工具相同的 `truncate` 截断，所以被告知输出被剪的模型无论在哪里被剪，读到的都是同一句话。
+ * 图片块原样通过：这份预算只关于文本，图片里没有可剪的东西。
  */
 export function boundToolContent(content: ToolResultContent): ToolResultContent | undefined {
 	if (contentBytes(content) <= MAX_TOOL_RESULT_BYTES) return undefined;
@@ -152,7 +145,7 @@ function contentBytes(content: ToolResultContent): number {
 	return bytes;
 }
 
-/** The longest slice of `text` whose UTF-8 form fits `maxBytes`, at this text's own density. */
+/** 按 `text` 自身的密度，UTF-8 形式能放进 `maxBytes` 的最长切片。 */
 function charsForBytes(text: string, maxBytes: number): number {
 	const bytes = Buffer.byteLength(text);
 	if (bytes <= maxBytes) return text.length;
@@ -160,18 +153,15 @@ function charsForBytes(text: string, maxBytes: number): number {
 }
 
 /**
- * Archive one tool result whole and answer with what an `after_tool` handler returns for it.
+ * 把一个工具结果整体归档，并以 `after_tool` 处理器返回的内容作答。
  *
- * The write-side rule the seam now carries is: **a rewrite is the final version** — the ledger keeps
- * exactly the content the handler returns, so bounding a result means the full text has to be
- * somewhere else first. This is that somewhere else, one call: it writes the result's text whole
- * under the working directory (`.my-agent/tool-results/`, the same path derivation the write
- * boundary's own backstop uses) and answers with the head-and-tail view that names the file, so a
- * model that needs the rest reads it back itself. A result the file could not take comes back
- * untouched rather than truncated-with-a-path-that-is-not-there — the write boundary still bounds it.
+ * 这条接缝现在承载的写侧规则是：**改写即定稿**——账本保存的正是处理器返回的内容，所以要约束一个
+ * 结果，全文必须先去别处。这里就是那个别处，一次调用完成：它把结果的文本整体写在工作目录之下
+ * （`.my-agent/tool-results/`，与写边界自身兜底相同的路径推导），并以点名该文件的头尾视图作答，
+ * 需要其余部分的模型自己去读回来。文件写不下的结果原样返回，而不是「截断+一个不存在的路径」
+ * ——写边界仍会约束它。
  *
- * The `workDirAbsPath` is the handler's to supply: the hook event names the session, and the handler
- * closes over the directory it is archiving into.
+ * `workDirAbsPath` 由处理器自己提供：hook 事件只点名会话，归档到哪个目录是处理器闭包里的事。
  *
  * ```ts
  * hooks.on("after_tool", (event) => archiveToolResult(event, workDirAbsPath));

@@ -85,76 +85,66 @@ import type {
 	ToolCallOutcome,
 } from "./types.ts";
 
-// The event surface is defined beside the fan-out that publishes it (`session/events.ts`) and
-// re-exported here, because `index.ts` has always answered for it from this module.
+// 事件面定义在发布它的 fanout 旁边（`session/events.ts`），在这里转发出去，因为 `index.ts` 一直
+// 都是从本模块为此作答的。
 export type { AgentSessionEvent, MessageDelta, SessionEventListener, SessionListener } from "./session/events.ts";
 
 /**
- * The services one orchestrator coordinates, already built by the caller.
+ * 一个编排层所协调的服务，由调用方先行构建。
  *
- * The session never loads settings, creates a working directory, reads AGENTS.md, or picks a model: every
- * method names a session by id and fetches what it needs, at the line that needs it, from the
- * service that owns it — the transcript from the session manager's cache, the live half from the
- * session's own state, the model from the ledger and the live rows. That is what makes the class
- * stateless (ADR-0007): there is no per-session field here beyond the state table itself, so a test
- * drives a session by opening it onto an orchestrator of its own (`openAgent`), and a host that owns
- * the services opens each transcript onto the one it keeps. The assembly itself lives in
- * `assembly.ts`, which is where the shape every session is described by is written down once.
+ * 会话从不加载设置、创建工作目录、读 AGENTS.md 或挑模型：每个方法按 id 点名会话，在需要它的那一
+ * 行、从拥有它的服务现取所需——transcript 来自 session manager 的缓存，live 半来自会话自己的状态，
+ * 模型来自账本与实时的行。这正是让这个类无状态的（ADR-0007）：除状态表本身外这里没有任何
+ * per-session 字段，所以测试把自己的编排层打开一个会话来驱动它（`openAgent`），拥有服务的宿主把
+ * 每份 transcript 打开到它保有的那一个上。装配本身住在 `assembly.ts`，那是把「每个会话由什么形状
+ * 描述」一次写下的地方。
  *
- * None of these fields is session *state*. The services this class coordinates — the ledger,
- * the configuration (settings and model rows together, one {@link SettingManager}), the tool
- * table, the seams, the prompt builder, and the transport — each hold their own pure-data
- * state (ADR-0006 §1–2); what used to be the `Agent`'s private session fields are gone: the
- * run-time transients are locals of the run (ADR-0006 §5), the approvals are derived from the
- * ledger, the stamps are derived from the file, and the assembly rides the state the open adopted
- * into the table this class holds (ADR-0011).
+ * 这些字段没有一个是会话*状态*。本类协调的服务——账本、配置（设置与模型行合起来，一只
+ * {@link SettingManager}）、工具表、接缝、prompt builder、传输层——各自持有自己的纯数据状态
+ * （ADR-0006 §1–2）；曾经是 `Agent` 私有会话字段的东西已不在：运行期瞬态是运行自己的局部变量
+ * （ADR-0006 §5），审批从账本派生，时间戳从文件派生，装配则骑在 open 收进本类所持那张表的状态上
+ * （ADR-0011）。
  */
 export interface AgentConfig {
 	/**
-	 * The stateless session service every transcript read and write goes through.
+	 * 每次 transcript 读写都要经过的无状态会话服务。
 	 *
-	 * A host that owns one — the hub, so every session of the process shares a single service and
-	 * its single store knowledge — hands its own in. The service holds no bag of its own: a held
-	 * session's bag is the one this class's table answers with, and a cold one is `open(id)`, a
-	 * replay the caller drops.
+	 * 拥有一份的宿主——hub，让进程的所有会话共享同一个服务及其唯一的存储知识——递入自己的。服务不
+	 * 持有自己的袋：被持有会话的袋是本类那张表应答的那只，冷会话的是 `open(id)`，一次由调用方丢弃的
+	 * 重放。
 	 */
 	sessionManager: SessionManager;
 	/**
-	 * The configuration every settings and model read goes through.
+	 * 每次设置与模型读取所经的配置门。
 	 *
-	 * Handed over rather than copied, because configuration is the thing most likely to change while a
-	 * session is open: the manager holds nothing, so every read is a fresh read of the files behind it
-	 * — a key corrected in the settings panel, a mode toggled, a row added with an editor — each is
-	 * the answer the next request gives. The per-request fill re-derives the session's model from the
-	 * catalog it finds here, so the key, the endpoint, the window, and the wire id are all as fresh as
-	 * the row is.
+	 * 递进来而不是复制，因为配置是会话打开期间最可能变动的东西：manager 什么都不持有，每次读取都是
+	 * 对其背后文件的一次新读——面板里修正的密钥、切换的模式、编辑器里加的行——每一件都是下一个请求
+	 * 给出的答案。按请求的填充从它在这里找到的目录重新派生会话的模型，所以密钥、端点、窗口、wire id
+	 * 都和行一样新鲜。
 	 */
 	settings: SettingManager;
 	/**
-	 * The tools this build knows, plus whatever a caller registered on it — a test's custom tool.
-	 * Structure only: the choice is not here.
+	 * 本构建认识的工具，加上调用方在它上面注册的任何东西——测试的自定义工具。
+	 * 只有结构：选择不在这里。
 	 *
-	 * The active set and the approval map are derived from the session's recorded choices — the
-	 * `.json` snapshot's current values — on every read (the global default's live view is the
-	 * fallback), so nothing mutates when the choice moves. The table holds behaviour and no
-	 * directory: a request declares the instances its names resolve to, and the per-request values
-	 * those instances act with arrive on `execute`'s `run` (ADR-0016).
+	 * 活跃集与审批映射从会话记录的选择——`.json` 快照的当前值——在每次读取时派生（全局默认的实时
+	 * 视图作底），所以选择变动时没有任何东西被改写。表装的是行为、不是目录：请求声明它的名字解析到
+	 * 的实例，那些实例执行所用的按请求值经 `execute` 的 `run` 抵达（ADR-0016）。
 	 */
 	tools: ToolManager;
 	/**
-	 * The seams every dispatch goes through: `context`, `before_tool` (the approval gate), `after_tool`.
+	 * 每次分发都经过的接缝：`context`、`before_tool`（审批闸门）、`after_tool`。
 	 *
-	 * The same instance the factory installs its defaults on, because a host that adds a handler
-	 * registers it after them and refines what they decided — see {@link Agent.hooks}.
+	 * 与工厂安装默认处理器的是同一个实例，因为加处理器的宿主注册在它们之后、精修它们的决定——见
+	 * {@link Agent.hooks}。
 	 */
 	hooks: Hooks;
 	/**
-	 * Builds the prompt for the tools the model may call, from the session's live settings.
+	 * 从会话的实时设置出发，为模型可以调用的工具构建 prompt。
 	 *
-	 * A function rather than a string because two things it names can change mid-session: the active
-	 * tool set, and which of those tools ask for approval. A captured prompt would offer the model
-	 * tools the run then refuses to run, or promise an approval the session no longer asks for. The
-	 * working directory and the project instructions arrive per request for the same reason.
+	 * 是函数而不是字符串，因为它点名的两样东西会在会话中途变化：活跃工具集，以及其中哪些工具要审批。
+	 * 一条被捕获的 prompt 会向模型提供运行随后拒绝执行的工具，或许诺一个会话已不再要求的审批。工作
+	 * 目录与项目指示按请求递交，出于同样的理由。
 	 */
 	systemPrompt: (
 		workDirAbsPath: string,
@@ -163,86 +153,75 @@ export interface AgentConfig {
 		approvals: Record<string, boolean>,
 	) => string;
 	/**
-	 * The transport every request this session makes goes over.
+	 * 本会话每个请求走的传输层。
 	 *
-	 * A model is what a request is made with and the transport is how it is sent, so each model is
-	 * constructed with the one it was assembled with, and every one re-derived from a row afterwards.
-	 * Resolved by the factory (`anthropicMessages`, the only one this app speaks) rather than
-	 * defaulted here, because the smokes hand in a scripted one.
+	 * 模型是发起请求用的东西，传输层是发送它的方式，所以每个模型都用装配它时的那条传输层构造，之后
+	 * 每一个都从行重新派生。由工厂解析（`anthropicMessages`，本应用唯一会说的一种）而不是在这里给
+	 * 默认值，因为 smoke 会递入脚本化的。
 	 */
 	api: ChatTransport;
 }
 /**
- * One orchestration service for every conversation this process runs.
+ * 本进程跑的每一段对话共有的编排服务。
  *
- * This is the orchestration layer of the stateless architecture (ADR-0006 §1): the four domains are
- * stateless singletons, and the cross-domain order — apply the composer's choice, resolve the
- * session by id, write the message, run the engine, then report what moved — lives here and nowhere
- * else, because it belongs to no single domain.
+ * 这是无状态架构的编排层（ADR-0006 §1）：四个域是无状态单例，而跨域的顺序——应用输入框的选择、
+ * 按 id 解析会话、写下消息、跑引擎、再报告动了什么——住在这里、别无他处，因为它不属于任何单个域。
  *
- * The engine is not a second object: ADR-0012 put it in a `LoopManager` and ADR-0013 took its
- * services away, which left an object with nothing of its own to be — so it is a method again
- * (ADR-0014). What the class holds beyond the session table is the engine's services, and a run
- * reads them off `this`: the ledger, the configuration, the tool table, the seams, the prompt
- * builder, and the transport. Everything else here is the session's own command surface — the
- * transcript reads, the approvals, the config moves, and the fan-out a command answers through.
+ * 引擎不是第二个对象：ADR-0012 把它放进 `LoopManager`，ADR-0013 拿走了它的服务，留下一个没有自己
+ * 东西可当的对象——所以它又是一个方法（ADR-0014）。这个类在会话表之外持有的就是引擎的服务，一次
+ * 运行从 `this` 上读它们：账本、配置、工具表、接缝、prompt builder、传输层。这里的其余一切都是
+ * 会话自己的命令面——transcript 读取、审批、配置挪动，以及命令作答所经的 fanout。
  *
- * The class holds no session state: a method names its session by id, resolves the ledger bag from
- * the session manager and the live half from the table, and rebuilds everything a command needs
- * from those two. A resumed session and a live session run the same chain, which is what makes them
- * indistinguishable.
+ * 这个类不持有会话状态：方法按 id 点名自己的会话，从 session manager 解析账本袋、从表解析 live 半，
+ * 并从这两者重建命令所需的一切。恢复的会话与活跃的会话跑同一条链，这正是它们无从区分的原因。
  */
 export class Agent {
 	/**
-	 * The stateless session service every transcript read and write goes through.
+	 * 每次 transcript 读写都要经过的无状态会话服务。
 	 *
-	 * Exposed for the test seams that reach past the facade — a smoke that seeds a transcript
-	 * directly, patches the write, or reads a held bag's recorded settings. A production caller has
-	 * no road here: the facade below forwards everything a host may ask, and there is no second copy
-	 * of the store's state to keep in step. The bag a call operates on is never held here — a held
-	 * session's is the table's, a cold one is `open(id)`'s, and the id is the caller's.
+	 * 公开给越过门面的测试接缝——直接种一份 transcript 的 smoke、改写落盘、或读取被持有袋上记录的
+	 * 设置。生产调用方没有路到这里：下面的门面转发宿主可能问的一切，且不存在要跟着保持同步的第二份
+	 * 存储状态副本。一次调用所操作的袋从不在这里持有——被持有会话的是表里的那只，冷会话的是
+	 * `open(id)` 的那只，而 id 是调用方的。
 	 */
 	readonly sessionManager: SessionManager;
 	/**
-	 * The configuration every settings and model read goes through.
+	 * 每次设置与模型读取所经的配置门。
 	 *
-	 * Hidden now that the facade reads exist: a host answers a settings command or lists the rows
-	 * through {@link Agent.modelCatalog}, {@link Agent.settings} and their neighbours, and no second
-	 * copy of either file is kept in step anywhere. See {@link AgentConfig.settings}.
+	 * 门面读取存在之后已被藏起：宿主回答设置命令或列出模型行走 {@link Agent.modelCatalog}、
+	 * {@link Agent.settings} 及其邻居，任何地方都没有第二份文件副本需要保持同步。见
+	 * {@link AgentConfig.settings}。
 	 */
 	private readonly settingsManager: SettingManager;
 	/**
-	 * The seams sessions dispatch through, including the defaults `openAgent` installed.
+	 * 会话分发所经的接缝，包括 `openAgent` 安装的默认处理器。
 	 *
-	 * Exposed so a host that already has a session can add behaviour to it: a handler registered here
-	 * runs after the defaults and refines what they answered.
+	 * 公开出来，让已经有会话的宿主能在其上加行为：在这里注册的处理器排在默认之后，精修它们的答案。
 	 */
 	readonly hooks: Hooks;
 
 	private readonly tools: ToolManager;
-	/** The prompt builder a request is built from; {@link Agent.prepareRequest} is what calls it. */
+	/** 请求据此构建的 prompt builder；调用它的是 {@link Agent.prepareRequest}。 */
 	private readonly systemPrompt: AgentConfig["systemPrompt"];
-	/** Where a request actually leaves: the transport, before the retry policy wraps it. */
+	/** 请求真正离开的地方：传输层，重试策略包上它之前的那个。 */
 	private readonly api: ChatTransport;
 	/**
-	 * The live halves of the sessions this process knows about, keyed by id (ADR-0019).
+	 * 本进程所知各会话的 live 半，按 id 为键（ADR-0019）。
 	 *
-	 * One bag per session, and it holds only what no file can answer: the subscribers, the queues, the
-	 * run in flight, and — until its first message gives it files — the transcript itself. The
-	 * durable half is **not** here: every operation that needs the transcript opens it (a run once at
-	 * its start, a command once for its length) and drops it, which is what makes a stale bag
-	 * impossible. States enter through {@link Agent.assembleAgentStateBySession} and leave through
-	 * {@link Agent.evict} / {@link Agent.remove}: one writer, one deleter, and no caller in between.
+	 * 一个会话一只袋，它只装文件回答不了的东西：订阅者、队列、在飞的运行，以及——在第一条消息给它
+	 * 文件之前——transcript 本身。持久的那一半**不**在这里：需要 transcript 的每个操作都现开它
+	 * （一次运行在其开头开一次，一条命令按其长度开一次）然后丢掉，这正是让陈旧的袋不可能存在的原因。
+	 * 状态经 {@link Agent.assembleAgentStateBySession} 进表、经 {@link Agent.evict} /
+	 * {@link Agent.remove} 出表：一个写者、一个删除者，中间没有别的调用者。
 	 */
 	private readonly sessions = new Map<string, AgentState>();
 
 	/**
-	 * How many holders each session has, keyed by id.
+	 * 每个会话的持有者数量，按 id 为键。
 	 *
-	 * Still a count, though no longer the count that keeps a transcript in memory — a transcript is
-	 * never kept. What it answers is who is *using* a session right now, which is what a delete and a
-	 * reap ask before they act: a hold says somebody is changing or running it, and that is the one
-	 * thing tearing a session down underneath must not do.
+	 * 仍然是一个计数，但不再是把 transcript 留在内存里的那个计数——transcript 从不留着。它回答的是
+	 * 此刻*谁在用*这个会话，这是删除与收割动手前要问的问题：一个 hold 意味着有人在改它或跑它，而在
+	 * 其脚下拆掉一个会话，正是绝不可以做的事。
 	 */
 	private readonly holds = new Map<string, number>();
 
@@ -253,36 +232,32 @@ export class Agent {
 		this.hooks = config.hooks;
 		this.systemPrompt = config.systemPrompt;
 		this.api = config.api;
-		// Nothing per session is built here: a state is assembled by `open` over these services, and an
-		// id is resolved at the top of each method against the table below. No run-scoped object is
-		// built here either: everything a run holds is its own local.
+		// 这里不构建任何 per-session 的东西：状态由 `open` 在这些服务之上装配，id 在每个方法的开头
+		// 对着下面的表现取。这里也不构建任何运行期对象：一次运行持有的一切都是它自己的局部变量。
 	}
 
 	/**
-	 * The three services a fan-out call and an assembly read through, gathered at the call site.
+	 * fanout 调用与装配读取所经的三个服务，在调用点现凑。
 	 *
-	 * Not a field: a held bag is the thing ADR-0007 deleted, and every one of these three is
-	 * already a field on this class — this is the shape `session/fanout.ts` and `assembleSession`
-	 * ask for, built where it is asked for.
+	 * 不是字段：被持有的袋正是 ADR-0007 删掉的东西，而这三个各自已是本类的字段——这就是
+	 * `session/fanout.ts` 与 `assembleSession` 要的形状，在要它的地方构建。
 	 */
 	private get services(): SessionServices {
 		return { sessionManager: this.sessionManager, settings: this.settingsManager, tools: this.tools };
 	}
 
-	// ---------------------------------------------------------------------------- resolution
+	// ---------------------------------------------------------------------------- 解析
 
 	/**
-	 * The session's transcript, as a bag the caller owns for the length of one operation.
+	 * 会话的 transcript，作为调用方在一次操作的长度内拥有的那只袋。
 	 *
-	 * This is the whole of "no cache" (ADR-0019): a born session is a replay, taken here and dropped
-	 * when the caller is done — so nothing this process holds can be stale, and a writer that reads
-	 * and writes in one synchronous block can never write a version someone else has moved past. The
-	 * one exception is a session whose files do not exist yet: no replay can produce it, so its bag
-	 * is the live half's field until its first message puts it on disk, and this is where that
-	 * transfer happens — a bag that has become born is dropped here, never carried on.
+	 * 这就是「不缓存」的全部（ADR-0019）：出生的会话是一次重放，在这里取、调用方用完即丢——本进程
+	 * 持有的东西因此不可能陈旧，而在一个同步块里先读后写的写者，绝不可能写出一个别人已经越过的版本。
+	 * 唯一的例外是文件还不存在的会话：重放造不出它，它的袋在第一条消息落盘之前就是 live 半的字段，
+	 * 而这次转移就发生在这里——已经出生的袋在这里被丢掉，绝不再往下带。
 	 *
-	 * Callers that open once and keep the bag for a run are the reason a run costs one replay rather
-	 * than one per operation: what they hold is a run-local, closed over by the run itself.
+	 * 开一次并为一次运行留住袋的调用方，正是一次运行只花一次重放而不是每操作一次的原因：它们持有的
+	 * 是一个运行局部变量，由运行自己闭包。
 	 */
 	private bag(id: string): Session {
 		const state = this.sessions.get(id);
@@ -291,13 +266,11 @@ export class Agent {
 	}
 
 	/**
-	 * The bag a session is still keeping because it has no file yet, or `undefined` once it has one.
+	 * 会话因还没有文件而仍留着的那只袋，一旦有了文件就是 `undefined`。
 	 *
-	 * The field is cleared here rather than at the write that births the file, because the birth is not
-	 * always the orchestrator's: a caller that appends to the bag itself (`sessionManager.appendMessage`
-	 * on an unwritten session) gives it files too, and every reader of this field must agree that the
-	 * bag stopped being the session's only copy at that moment. Reading it through one function is
-	 * what makes that one rule instead of five.
+	 * 字段在这里清除，而不是在生出文件的那次写入处，因为出生不总是编排层的：自己往袋上追加的调用方
+	 * （对未写会话调 `sessionManager.appendMessage`）也会给它文件，而这个字段的每个读者都必须认同：
+	 * 那一刻起袋就不再是会话唯一的副本。让它经过一个函数读取，正是让这是一条规则而不是五条的原因。
 	 */
 	private unwrittenOf(state: AgentState): Session | undefined {
 		const bag = state.live.unwritten;
@@ -308,21 +281,16 @@ export class Agent {
 	}
 
 	/**
-	 * Build one session's live half and put it in the table. The only way in, and the only door that
-	 * assembles — `assembleSession` plus the table: the assembly and the first-come-wins insertion
-	 * are one step, and the read-back below is why the two are not split.
+	 * 构建一个会话的 live 半并放进表里。唯一的入口，也是唯一装配的门——`assembleSession` 加上那张
+	 * 表：装配与先到先得的插入是一步，下面的读回正是这两者不该拆开的原因。
 	 *
-	 * The transcript is an *input* rather than a product now (ADR-0019): assembly resolves the
-	 * settings-derived halves of a session (the queue modes, and the model choice it seeds onto the
-	 * bag), and whether that bag is kept depends on one fact — whether it has files. A born bag is
-	 * dropped here, because a replay answers it again; an unwritten one is kept, because nothing else
-	 * can.
+	 * transcript 如今是*入参*而不是产物（ADR-0019）：装配解析会话由设置而来的那一半（队列模式，以及
+	 * 它播种到袋上的模型选择），那只袋留不留取决于一个事实——有没有文件。出生的袋在这里被丢掉，因为
+	 * 重放随时能再造它；未写的袋被留下，因为没有别的什么能。
 	 *
-	 * The services are this class's by construction, so "every state in the table was assembled over
-	 * this orchestrator's services" is a fact rather than a convention. First-come-wins: a state
-	 * already in the table is kept, never replaced, because the one it would replace holds the queues,
-	 * the subscribers, and the run in flight — and re-entering a held id is the ordinary idempotent
-	 * move, not an error.
+	 * 服务按构造即本类自己的，所以「表里的每个状态都是在该编排层的服务之上装配的」是一个事实而不是
+	 * 约定。先到先得：已在表里的状态被保留、绝不替换，因为它要替换的那个装着队列、订阅者与在飞的
+	 * 运行——而重新进入一个被持有的 id 是寻常的幂等动作，不是错误。
 	 */
 	private async assembleAgentStateBySession(options: AssembleAgentStateOptions): Promise<AgentState> {
 		const id = options.session.sessionId;
@@ -333,19 +301,18 @@ export class Agent {
 		return this.sessions.get(id) ?? state;
 	}
 
-	/** First-come-wins insertion. {@link Agent.assembleAgentStateBySession} is its only caller, which is what it is for. */
+	/** 先到先得的插入。{@link Agent.assembleAgentStateBySession} 是它唯一的调用者，这正是它的用途。 */
 	private insert(state: AgentState): void {
 		if (this.sessions.has(state.sessionId)) return;
 		this.sessions.set(state.sessionId, state);
 	}
 
 	/**
-	 * A live half for one session, empty.
+	 * 一个会话的空 live 半。
 	 *
-	 * The queue modes are scoped by the directory the transcript names, and they are read live through
-	 * the settings door, so a session is given a live half from one small assembly of its own — and
-	 * whichever road asked for it decides whether it is kept: {@link Agent.ensureState} files it under
-	 * the id, a read builds one and throws it away.
+	 * 队列模式按 transcript 点名的目录定作用域，且经设置门实时读取，所以给一个会话 live 半，来自它
+	 * 自己的一次小装配——要它的那条路自己决定留不留：{@link Agent.ensureState} 把它归档在 id 下，
+	 * 读取则造一个然后扔掉。
 	 */
 	private liveHalfOf(bag: Session): AgentState {
 		const workDirAbsPath = bag.sessionSetting.workDirAbsPath;
@@ -356,12 +323,11 @@ export class Agent {
 	}
 
 	/**
-	 * Give one session a live half, if it has none.
+	 * 给一个会话 live 半，如果它没有。
 	 *
-	 * The mechanical half the verbs share: a known id is left alone, a cold one gets an empty live half
-	 * — one replay, to learn the directory its queue modes are scoped by, and thrown away with the bag
-	 * it came from. An id that names nothing refuses inside the store's `open`
-	 * ({@link UnknownSessionError}), which the transport answers as a 404.
+	 * 各动词共享的机件部分：已知的 id 原样不动，冷的 id 得到一个空的 live 半——一次重放，为了得知
+	 * 它的队列模式按哪个目录定作用域，然后连同来时的袋一起扔掉。什么也不指名的 id 在 store 的
+	 * `open` 内拒绝（{@link UnknownSessionError}），传输层把它应答成 404。
 	 */
 	private ensureState(id: string): AgentState {
 		const held = this.sessions.get(id);
@@ -372,13 +338,11 @@ export class Agent {
 	}
 
 	/**
-	 * Drop one session's live half from the table, when nothing holds it.
+	 * 把一个会话的 live 半从表里丢掉，当没有东西持有它时。
 	 *
-	 * The eviction criteria (ADR-0011, issue 04): no run in flight, nothing parked at the approval
-	 * gate, and no unwritten bag — a session whose file is not born yet has nothing to rebuild from, so
-	 * dropping its live half would be deleting the id, and its life ends with the first message or the
-	 * process, never with a sweep. Refusing (returning `false`) is the answer to a caller that named a
-	 * session still held.
+	 * 驱逐判据（ADR-0011，issue 04）：没有在飞的运行、没有停在审批闸门的调用、没有未写的袋——文件
+	 * 尚未出生的会话没有任何东西可供重建，丢掉它的 live 半等于删掉这个 id，它的生命随第一条消息或
+	 * 进程结束，绝不随清扫结束。拒绝（返回 `false`）是给点名了一个仍被持有的会话的调用方的答案。
 	 */
 	evict(id: string): boolean {
 		const state = this.sessions.get(id);
@@ -389,11 +353,10 @@ export class Agent {
 	}
 
 	/**
-	 * The live half of the session `id` names, or the refusal that says this process never touched it.
+	 * id 所点名会话的 live 半，或说明本进程从未碰过它的拒绝。
 	 *
-	 * Every method that acts on a session resolves through this, and the transcript separately through
-	 * {@link Agent.bag} — the two questions are answered by two calls now, because they have two
-	 * different lifetimes.
+	 * 每个对会话动手的方法都经它解析，transcript 则另外经 {@link Agent.bag}——现在两个问题由两次
+	 * 调用回答，因为它们有两条不同的生命周期。
 	 */
 	private agentState(id: string): AgentState {
 		const state = this.sessions.get(id);
@@ -401,25 +364,23 @@ export class Agent {
 		return state;
 	}
 
-	// ---------------------------------------------------------------------------- the session facade
+	// ---------------------------------------------------------------------------- 会话门面
 	//
-	// The face a host operates sessions through: the lifecycle moves with the held and the cold road
-	// unified inside each method, the narrow state reads that replaced `agentState().session.*`, and
-	// the settings and model-catalog forwards. Every method here either names its session by id and
-	// fetches what it needs from `this`, or forwards one call to the service that owns it — none of
-	// them holds anything (ADR-0007).
+	// 宿主操作会话所经的脸面：生命周期随被持有与冷的两条路在每个方法内部统一、取代
+	// `agentState().session.*` 的窄状态读取，以及设置与模型目录的转发。这里的每个方法要么按 id 点名
+	// 自己的会话、从 `this` 现取所需，要么转发一次调用给拥有它的服务——它们谁都不持有任何东西
+	// （ADR-0007）。
 
 	/**
-	 * The session's current state, read from its transcript as it stands on disk.
+	 * 会话当前的状态，从它磁盘上现有的 transcript 读出。
 	 *
-	 * A read is a replay and nothing else (ADR-0019): the transcript is opened, the snapshot is taken
-	 * off it, and the bag is dropped. It registers no state and takes no hold — a caller that came to
-	 * look leaves nothing behind to look at, which is exactly the rule this read had before it briefly
-	 * became an assembly, and the reason a bare REST read costs one replay rather than one residence.
-	 * A session this process *is* running answers the same way plus whatever its live half adds, and
-	 * the two roads go through one function (`snapshotOf`), so they cannot drift.
+	 * 读取就是一次重放、仅此而已（ADR-0019）：transcript 被打开，快照从它上面取下，袋被丢弃。它不
+	 * 注册状态、不取 hold——来看一眼的调用方不留下任何可供再看的东西，这正是这条读取在短暂变成一次
+	 * 装配之前一直遵守的规则，也是一次裸 REST 读只花一次重放而不花一次驻留的原因。本进程*正在*运行
+	 * 的会话以同样的方式作答，外加它的 live 半补充的部分，两条路经过同一个函数（`snapshotOf`），
+	 * 所以它们不可能漂移。
 	 *
-	 * An id that names nothing refuses inside the store's `open` — that is the 404, unchanged.
+	 * 什么也不指名的 id 在 store 的 `open` 内拒绝——就是那个 404，原封未动。
 	 */
 	async snapshotOf(id: string): Promise<SessionSnapshot> {
 		const bag = this.bag(id);
@@ -428,27 +389,24 @@ export class Agent {
 	}
 
 	/**
-	 * Give the session a name of its own, stored as the title on its `.json` snapshot.
+	 * 给会话一个自己的名字，作为其 `.json` 快照上的 title 存储。
 	 *
-	 * One synchronous block — the replay, then the setter that persists — and it takes no hold: a
-	 * title is a fact about the session rather than about one way through it, and the engine never
-	 * reads titles. A rewrite of the snapshot mid-run lands without disturbing the turn, and because
-	 * every write is its own replay, the write cannot carry a value another writer has moved past.
-	 * An id that names nothing refuses inside the store's `open`, which is the 404 it always was.
+	 * 一个同步块——重放，然后是落盘的 setter——不取 hold：标题是关于会话的事实，不是关于其中某一条
+	 * 路的事实，引擎从不读标题。运行中途重写快照落地而不惊动正在进行的轮次，且因为每次写入都是自己的
+	 * 一次重放，这个写不可能带上另一个写者已经越过的值。什么也不指名的 id 在 store 的 `open` 内拒绝，
+	 * 一直就是那个 404。
 	 */
 	setTitle(id: string, title: string): void {
 		this.sessionManager.setTitle(this.bag(id), title);
 	}
 
 	/**
-	 * Copy a branch of one session into a new session beside its source, and name the new id.
+	 * 把一个会话的一个分支复制成源会话旁边的一个新会话，报出新 id。
 	 *
-	 * The source is located first and then only read: its file is untouched, its own leaf does not
-	 * move, and a session this process is running is forked from the file it is writing, so no hold is
-	 * disturbed and a live turn keeps whatever it was writing. Both new files are written
-	 * synchronously before this returns, so the id handed back is openable by the time the caller has
-	 * it. Nothing is registered: a fork nobody holds has no live half to keep, and its first touch is
-	 * what gives it one.
+	 * 先定位源，然后只读：它的文件不动，它自己的 leaf 不移，本进程正在运行的会话也从它正在写的文件
+	 * 上 fork，所以没有 hold 被打扰，活跃轮次保住它原本在写的东西。两个新文件在本函数返回之前同步
+	 * 写完，所以交回去的 id 在调用方拿到它时就可以打开。什么都不注册：没人持有的 fork 没有 live 半
+	 * 可留，它的第一次触碰会给自己一个。
 	 */
 	forkFrom(sourceId: string, entryId: string | null): string {
 		const source = this.sessions.get(sourceId);
@@ -460,17 +418,15 @@ export class Agent {
 	}
 
 	/**
-	 * Start a session in a directory and register its live half; the id is what comes back.
+	 * 在一个目录里启动会话并注册它的 live 半；报回的就是这个 id。
 	 *
-	 * Creation writes nothing: the file appears with the first message, so between this call and that
-	 * message the bag *is* the session's existence — the one transcript no replay can produce, and the
-	 * reason the live half has a field for it (ADR-0019). Creating is therefore one `await` on the
-	 * settings, the assembly's own read, and its one failure mode (a settings file that cannot be read)
-	 * is the same failure the following open would have hit, just earlier: the id is not handed out
-	 * past a creation that could not build it.
+	 * 创建不写任何东西：文件随第一条消息出现，所以在这个调用与那条消息之间，袋*就是*会话的存在
+	 * ——唯一一份重放造不出来的 transcript，也是 live 半有那个字段的原因（ADR-0019）。因此创建只是
+	 * 对设置的一次 `await`——装配自己的读取——而它唯一的失败模式（一个读不了的设置文件）与接下来
+	 * 那次打开会撞上的失败相同，只是更早：id 不会在创建失败时被递出去。
 	 *
-	 * No model is taken as an argument: which model a session opens on is a settings fact, read fresh
-	 * by every request, so a row corrected in the panel is the row this session runs on.
+	 * 不以参数收模型：会话打开在哪个模型上是一个设置事实，每个请求现读，所以面板里修正的行就是这个
+	 * 会话运行的行。
 	 */
 	async create(workDirAbsPath: string): Promise<string> {
 		const bag = createSession(workDirAbsPath);
@@ -479,18 +435,15 @@ export class Agent {
 	}
 
 	/**
-	 * Take one hold on a session: this caller is using it.
+	 * 对一个会话取一个 hold：这个调用方在用它。
 	 *
-	 * The facade's verb for "I need this session now". A changing request and a run each take one for
-	 * its own length and give it back with {@link Agent.release}; a subscription takes none, because
-	 * watching neither changes the session nor keeps a turn alive (ADR-0001). The live half is created
-	 * on the way, because a run and a queue need somewhere to be — and an id that neither the table nor
-	 * a file names refuses inside the store's `open` with {@link UnknownSessionError}, which the
-	 * transport answers as a 404.
+	 * 门面的动词「我现在需要这个会话」。一个变更请求与一次运行各按自己的长度取一个、用
+	 * {@link Agent.release} 还回；订阅不取，因为观看既不改会话也不让轮次活着（ADR-0001）。live 半
+	 * 顺路创建，因为运行和队列需要有个地方待——而表与文件都不指名的 id 在 store 的 `open` 内以
+	 * {@link UnknownSessionError} 拒绝，传输层把它应答成 404。
 	 *
-	 * What a caller never says is whether anything is in memory: that is this class's bookkeeping. The
-	 * count is per id, not per caller — two requests over one session are two holds, and the last one
-	 * back is what lets a reap take the live half.
+	 * 调用方永远不必说的是「有没有东西在内存里」：那是本类的簿记。计数按 id 而不按调用方——同一会话
+	 * 上的两个请求就是两个 hold，最后还回的那个才让收割可以取走 live 半。
 	 */
 	async hold(id: string): Promise<void> {
 		this.ensureState(id);
@@ -498,13 +451,11 @@ export class Agent {
 	}
 
 	/**
-	 * Give one hold back. What happens to the state next is the criteria's decision, not this
-	 * method's: {@link Agent.evict} is the caller that asks, and it refuses while a run is in
-	 * flight or an approval is parked.
+	 * 还回一个 hold。状态接下来怎样是判据的决定，不是本方法的：问的是 {@link Agent.evict} 这个
+	 * 调用者，它在运行在飞或审批停驻时拒绝。
 	 *
-	 * Lenient about an id nobody holds: a release is a caller undoing its own hold, and answering
-	 * "there was nothing to release" would turn a bookkeeping slip into an exception in the middle
-	 * of a teardown.
+	 * 对没人持有的 id 宽容：release 是调用方撤销自己的 hold，答一句「没有东西可还」会把一次簿记
+	 * 失误变成收尾中间的一场异常。
 	 */
 	release(id: string): void {
 		const held = this.holds.get(id) ?? 0;
@@ -513,30 +464,27 @@ export class Agent {
 	}
 
 	/**
-	 * How many holders a session has right now — the count a reap and a delete read before they
-	 * act, so neither closes or forgets a session somebody is still using.
+	 * 一个会话此刻有多少持有者——收割与删除动手前读的那个数，让谁都不会关掉或忘掉一个还有人正在用
+	 * 的会话。
 	 */
 	holdsOf(id: string): number {
 		return this.holds.get(id) ?? 0;
 	}
 
 	/**
-	 * Delete the session an id names: its files where they exist, and the state this process holds
-	 * for it. One operation, because "is there a file?" is not a caller's question.
+	 * 删除 id 点名的会话：它在磁盘上的文件（若有），以及本进程为它持有的状态。一个操作，因为
+	 * 「有没有文件？」不是调用方的问题。
 	 *
-	 * Three cases, decided here rather than by the caller: a session with files on disk — remove
-	 * them and forget the state; one created but never spoken in — no file was ever written, so
-	 * forgetting the state is the whole removal; an id nothing names — refuse with
-	 * {@link UnknownSessionError}, which the transport answers as a 404. Files first, then the state:
-	 * a failed unlink leaves the table able to answer for the same id again.
+	 * 三种情况，在这里裁决而不是交给调用方：磁盘上有文件的会话——移除文件、忘掉状态；创建了但从未
+	 * 说过话的——文件从未写下，忘掉状态就是全部删除；什么也不指名的 id——以 {@link
+	 * UnknownSessionError} 拒绝，传输层把它应答成 404。先文件、后状态：一次失败的 unlink 留下的是
+	 * 一张还能为同一 id 作答的表。
 	 *
-	 * No hold is taken and no run is stopped: the transport settles a session before it asks (a
-	 * delete of a busy one is a 409 there), and hosts, observers and holds are its bookkeeping, not
-	 * this class's.
+	 * 不取 hold、不停运行：传输层在请求之前先把会话安顿好（在那里，删除忙碌的会话是一个 409），
+	 * 宿主、观察者与 hold 都是它的簿记，不是本类的。
 	 *
-	 * This is the table's unconditional exit, beside {@link Agent.evict}'s conditional one: the user
-	 * has deleted the session, so no criteria apply — there is nothing left for the state to protect.
-	 * Anything queued or in flight dies with it, exactly as a process restart would have killed it.
+	 * 这是表的无条件出口，与 {@link Agent.evict} 的条件出口并列：用户已经删了这个会话，判据一概
+	 * 不适用——状态再没有什么可保护的了。排队与在飞的一切随它而去，正如进程重启会杀掉它们一样。
 	 */
 	async remove(id: string): Promise<void> {
 		const onDisk = SessionManager.findSessionFilePathById(id) !== undefined;
@@ -549,12 +497,11 @@ export class Agent {
 	}
 
 	/**
-	 * The file this session's transcript lives in, or `undefined` when it has none yet.
+	 * 本会话 transcript 所在的文件，还没有文件时为 `undefined`。
 	 *
-	 * A session created but never spoken in has no file, and this is where that is answered rather
-	 * than guessed: the unwritten bag names the path its birth will take, and a born session's path is
-	 * the store's own lookup. Pure data, no replay; forking finds its own source and never goes
-	 * through here.
+	 * 创建了但从未说过话的会话没有文件，这里就是回答这一点而不是猜测的地方：未写的袋点名它的出生
+	 * 将要走的路径，出生会话的路径由 store 自己的查找给出。纯数据，不重放；fork 自己找源，从不经过
+	 * 这里。
 	 */
 	fileAbsPathOf(id: string): string | undefined {
 		const state = this.sessions.get(id);
@@ -563,111 +510,105 @@ export class Agent {
 	}
 
 	/**
-	 * Whether the session has a run in flight, in the shape the wire reports (`submitting`).
-	 * Not known to this process is not submitting: a session nobody runs cannot be mid-turn.
+	 * 会话是否有在飞的运行，以 wire 报告的形状（`submitting`）。
+	 * 本进程不知道不等于在提交：没人运行的会话不可能正在轮次中间。
 	 */
 	isSubmitting(id: string): boolean {
 		return this.sessions.get(id)?.live.activeRun !== undefined;
 	}
 
 	/**
-	 * The title in force for the session: the recorded one, else the branch's first user message.
+	 * 会话现行的标题：记录的那个，否则是分支的首条 user 消息。
 	 *
-	 * Derived on every read from the transcript as it stands, so a rename and a first message are
-	 * answered the same way a snapshot is — the one rule a row and a header must not disagree on. One
-	 * replay, on a gesture (a rename, a branch move) rather than a frame: an appended message carries
-	 * its own title on `entry_appended` instead.
+	 * 每次读取都从 transcript 现状派生，所以重命名与第一条消息的作答方式与快照相同——这是行与头部
+	 * 唯一不许各执一词的规则。一次重放，发生在一个手势（重命名、挪分支）上而不是一帧上：追加的消息
+	 * 在 `entry_appended` 上自带标题。
 	 */
 	titleOf(id: string): string {
 		return this.sessionManager.getTitle(this.bag(id));
 	}
 
-	// ---------------------------------------------------------------------------- the settings facade
+	// ---------------------------------------------------------------------------- 设置门面
 	//
-	// The configuration forwards, one per call the host used to make on the manager directly. None of
-	// them holds anything: each is a fresh read or write of the files behind {@link Agent.settings},
-	// so a change is the next read's answer with nothing to invalidate.
+	// 配置转发，宿主曾直接在 manager 上做的每次调用对应一个。它们谁都不持有任何东西：每一个都是对
+	// {@link Agent.settings} 背后文件的一次新读或新写，所以一次变更就是下一次读取的答案，没有需要
+	// 失效的东西。
 
-	/** The models the user has entered, in the order they appear in the settings panel. */
+	/** 用户录入的模型，按设置面板里的顺序。 */
 	modelCatalog(): readonly ModelConfig[] {
 		return this.settingsManager.modelCatalog();
 	}
 
-	/** Replace every stored row. The whole-list write keeps the names and the file from drifting apart. */
+	/** 替换全部存储行。整表写入让名字与文件不漂移。 */
 	replaceModels(models: readonly ModelConfig[]): void {
 		this.settingsManager.replaceModels(models);
 	}
 
-	/** The directories the sidebar leaves out, by absolute path. Always a list, never `undefined`. */
+	/** 侧边栏搁置的目录，按绝对路径。永远是列表，从不是 `undefined`。 */
 	hiddenDirectories(workDirAbsPath: string): string[] {
 		return this.settingsManager.getHiddenDirectories(workDirAbsPath);
 	}
 
-	/** Apply a partial change to one directory's settings and write it back before returning. */
+	/** 对一个目录的设置应用部分变更，返回前写回。 */
 	applySettings(workDirAbsPath: string, patch: SettingsPatch): void {
 		this.settingsManager.applySettings(workDirAbsPath, patch);
 	}
 
-	/** Every setting in effect for one directory, merged and defaulted, as a copy. */
+	/** 一个目录当前生效的全部设置，合并并补默认后的副本。 */
 	settings(workDirAbsPath: string): Settings {
 		return this.settingsManager.getSettings(workDirAbsPath);
 	}
 
-	// ---------------------------------------------------------------------------- the store scans
+	// ---------------------------------------------------------------------------- 存储扫描
 	//
-	// The discovery reads, forwarded so a host reaches the store's listing only through this class.
-	// Each answers from the files on disk and holds nothing.
+	// 发现类读取，转发出去，让宿主只能经过本类够到 store 的列表。每个都从磁盘上的文件作答，不持有
+	// 任何东西。
 
-	/** Every session stored for `workDirAbsPath`, newest activity first. */
+	/** 为 `workDirAbsPath` 存储的每个会话，按最近活动排序。 */
 	listSessions(workDirAbsPath: string, sessionDirAbsPath?: string, signal?: AbortSignal): Promise<SessionInfo[]> {
 		return SessionManager.list(workDirAbsPath, sessionDirAbsPath, signal);
 	}
 
 	/**
-	 * Whether any stored session names `workDirAbsPath` as its own — the ask behind resurrecting a
-	 * working directory the filesystem has lost. A forward, like every other store-wide read here:
-	 * the store's contents are the manager's knowledge, named here so no caller reaches past this
-	 * facade for it.
+	 * 是否有任何已存会话把 `workDirAbsPath` 记为自己的——恢复一个文件系统已失去的工作目录时问的就是
+	 * 这个。与其他 store 级读取一样是一次转发：store 的内容是 manager 的知识，在这里点名，让没有
+	 * 调用方越过这门面去够它。
 	 */
 	hasSessionsFor(workDirAbsPath: string): boolean {
 		return SessionManager.hasSessionsFor(workDirAbsPath);
 	}
 
-	/** Every directory this machine has stored sessions for, each with its own list. */
+	/** 本机器为其存储过会话的每个目录，各带自己的列表。 */
 	listDirectories(signal?: AbortSignal): Promise<DirectorySessions[]> {
 		return SessionManager.listDirectories(signal);
 	}
 
-	/** The one row a session id names, from whichever directory holds it, or `undefined` for none. */
+	/** 会话 id 点名的唯一一行，来自持有它的那个目录，没有则为 `undefined`。 */
 	findSessionRowById(id: string, signal?: AbortSignal): Promise<SessionRow | undefined> {
 		return SessionManager.findSessionRowById(id, signal);
 	}
 
 	/**
-	 * The options one transcript is assembled under when this class opens it: the transcript alone,
-	 * because it carries its own working directory and the model it opens on is a settings fact the
-	 * assembly reads fresh. The services are this class's own by construction — that is the guarantee
-	 * the assembly door rests on, and why they are absent here.
+	 * 本类打开一份 transcript 时它被装配所依据的 options：只有 transcript，因为它自带工作目录，打开
+	 * 在哪一行上是装配现读的设置事实。服务按构造即本类自己的——这是装配门所依赖的保证，也是它们
+	 * 不在这里出现的原因。
 	 */
 	private openOptions(session: Session): AssembleAgentStateOptions {
 		return { session };
 	}
 
-	// ---------------------------------------------------------------------------- the read surface
+	// ---------------------------------------------------------------------------- 读取面
 
 	/**
-	 * The state of the session `id` names, built by the one constructor every read goes through.
+	 * id 所点名会话的状态，由每次读取都经过的那个唯一构造者构建。
 	 *
-	 * This is the whole read surface: every scalar a caller used to ask for by name — the row, the
-	 * level, the tool set, the depth, the retry state — is a field here, so there is one answer rather
-	 * than a getter per field to keep in step with it.
+	 * 这就是全部读取面：调用方曾按名字逐个去问的每个标量——行、档位、工具集、重试状态——都是这里的
+	 * 一个字段，所以只有一个答案，而不是一个需要跟着它保持同步的逐字段 getter。
 	 *
-	 * The construction is `snapshotOf` (`session/fanout.ts`), the same function the fan-out publishes
-	 * through, so a frame and a REST read cannot disagree: the five fields only a live session knows —
-	 * `submitting`, `queued`, `isRetrying`, `retryAttempt`, `pendingApprovals` — are read off the live
-	 * half, and an idle state answers them with the idle values it holds. This is the synchronous twin
-	 * of {@link Agent.snapshotOf}: it replays the transcript here and now, because its callers are
-	 * synchronous frame builders.
+	 * 构造者是 `snapshotOf`（`session/fanout.ts`），fanout 发布所经的同一个函数，所以一帧与一次 REST
+	 * 读不可能各执一词：只有活跃会话知道的那五个字段——`submitting`、`queued`、`isRetrying`、
+	 * `retryAttempt`、`pendingApprovals`——从 live 半上读，空闲状态则以它持有的空闲值作答。这是
+	 * {@link Agent.snapshotOf} 的同步孪生：它在此刻重放 transcript，因为它的调用方是同步的帧构建者。
 	 */
 	snapshot(id: string): SessionSnapshot {
 		const bag = this.bag(id);
@@ -675,66 +616,61 @@ export class Agent {
 	}
 
 	/**
-	 * The approval map in force: the directory's settings with this session's own choices over them.
+	 * 现行的审批映射：目录的设置，叠上本会话自己的选择。
 	 *
-	 * The single read point for the gate, the snapshot, and the prompt — all three answer the same
-	 * question, so none of them may reach past this to the settings alone. The session's own
-	 * half is the recorded choice, read off the `.json` snapshot beside the tool set it was written
-	 * beside. One replay, on a command rather than on a frame.
+	 * 闸门、快照与 prompt 的唯一读取点——三者回答同一个问题，所以谁都不许绕过它直奔设置。会话自己的
+	 * 一半是记录的选择，连同它被写下的那个工具集一起从 `.json` 快照上读。一次重放，发生在命令上而不
+	 * 是一帧上。
 	 */
 	getApprovals(id: string): Record<string, boolean> {
 		return approvalsOf(this.services, this.bag(id));
 	}
 
 	/**
-	 * Whether the transcript holds a tool call nobody has answered.
+	 * transcript 是否握着一个没人回答的工具调用。
 	 *
-	 * Only an idle session reports one. A call that dangles *during* a run is a result in the middle
-	 * of landing, not a question waiting for a person, and reporting it would flash a banner on every
-	 * tool batch; the calls that wait for an answer are the ones whose run has already ended.
+	 * 只有空闲的会话报告它。在运行*中途*悬空的调用是一个正在落地的结果，不是等人的问题，报告它会让
+	 * 每个工具批都闪一次横幅；等答案的调用是那些运行已经结束的。
 	 */
 	hasPendingApprovals(id: string): boolean {
 		if (this.sessions.get(id)?.live.activeRun !== undefined) return false;
 		return this.danglingApprovals(this.bag(id)).length > 0;
 	}
 
-	/** Subscribe to the session's state. The returned function unsubscribes. */
+	/** 订阅会话的状态。返回的函数用于退订。 */
 	onChange(id: string, listener: SessionListener): () => void {
 		const listeners = this.agentState(id).listeners;
 		listeners.add(listener);
 		return () => listeners.delete(listener);
 	}
 
-	/** Subscribe to the session's events. The returned function unsubscribes. */
+	/** 订阅会话的事件。返回的函数用于退订。 */
 	onEvent(id: string, listener: SessionEventListener): () => void {
 		const listeners = this.agentState(id).eventListeners;
 		listeners.add(listener);
 		return () => listeners.delete(listener);
 	}
 
-	// ---------------------------------------------------------------------------- the run lifecycle
+	// ---------------------------------------------------------------------------- 运行生命周期
 
 	/**
-	 * Append a user message and run the engine until the agent stops.
+	 * 追加一条用户消息，并运行引擎直到 agent 停下。
 	 *
-	 * `selection` is the composer's model and level, applied here and recorded by the request that
-	 * follows. Both come with the message rather than as a command of their own, so a choice that was
-	 * never sent with is nowhere.
+	 * `selection` 是输入框的模型与档位，在这里应用、由随后的请求记录。两者都随消息而来、而不是作为
+	 * 自己的命令，所以从未随消息发出的选择无处可留。
 	 *
-	 * While a run is streaming the message is queued instead of rejected: `steer` is injected at the
-	 * current turn's next drain point, `followUp` waits until the agent would otherwise stop. Either
-	 * way it is handed to the engine unwritten, and the drain that takes it is what the store records —
-	 * a drained message is one the conversation has reached, so the file gains it in the place the
-	 * model met it, behind the answer it interrupted. A message the run never drains is dropped with
-	 * the run (the fan-out's `dropQueued`): the send contract is fire-and-forget, and queued never
-	 * promised stored.
+	 * 运行正在流式时，消息被排队而不是被拒绝：`steer` 在当前轮次的下一个取走点注入，`followUp` 等
+	 * agent 本要停下的那一刻。无论哪种，消息都以未写的状态交给引擎，取走它的那次 drain 才是 store
+	 * 记录的——被取走的消息是这场对话已经抵达的，所以文件在模型遇见它的位置、在它打断的那个答案
+	 * 之后获得它。运行从未取走的消息随运行被丢弃（fanout 的 `dropQueued`）：发送契约是 fire-and-forget，
+	 * 排队从未许诺落盘。
 	 */
 	async prompt(id: string, text: string, options: { behavior?: PromptBehavior; selection?: ModelSelection } = {}): Promise<void> {
 		const trimmed = text.trim();
 		if (trimmed.length === 0) return;
 
-		// The composer's choice arrives with the message, so this is the only place either half is
-		// applied. A message that never reaches here — an empty one, a rejected send — moves nothing.
+		// 输入框的选择随消息抵达，所以这是两半各自唯一被应用的地方。一条到不了这里的消息——空的、
+		// 被拒发的——什么也不挪动。
 		if (options.selection !== undefined) this.applyModelSelection(id, options.selection);
 
 		const state = this.agentState(id);
@@ -759,33 +695,32 @@ export class Agent {
 	}
 
 	/**
-	 * Send a message into the running turn's next drain point.
+	 * 把一条消息送进正在运行的轮次的下一个取走点。
 	 *
-	 * The same session as {@link Agent.prompt} with `behavior: "steer"` — named on its own because it
-	 * is its own answer in the protocol's terms: a steered message is spent by the turn it interrupted.
-	 * On an idle session it is an ordinary prompt, because a message nobody is running cannot steer.
+	 * 与 {@link Agent.prompt} 带 `behavior: "steer"` 是同一个会话——单独点名是因为在协议的语汇里它是
+	 * 自己的答案：被 steer 的消息由它打断的那个轮次消费。对空闲会话它就是一次普通 prompt，因为没有
+	 * 人在跑的消息无从 steer。
 	 */
 	steer(id: string, text: string, options: { selection?: ModelSelection } = {}): Promise<void> {
 		return this.prompt(id, text, { ...options, behavior: "steer" });
 	}
 
 	/**
-	 * Queue a message for when the run ends.
+	 * 为运行结束后的时刻排队一条消息。
 	 *
-	 * The same session as {@link Agent.prompt} with `behavior: "followUp"`: the message waits until the
-	 * agent would otherwise stop, and the depth it adds is what the composer shows.
+	 * 与 {@link Agent.prompt} 带 `behavior: "followUp"` 是同一个会话：消息等到 agent 本要停下的那一刻，
+	 * 它增加的深度就是输入框显示的那个。
 	 */
 	followUp(id: string, text: string, options: { selection?: ModelSelection } = {}): Promise<void> {
 		return this.prompt(id, text, { ...options, behavior: "followUp" });
 	}
 
 	/**
-	 * Write the prompted message into the transcript, then run over it.
+	 * 把被提示的消息写进 transcript，然后在它之上运行。
 	 *
-	 * The bag this opens is the one the run carries: the transcript is read once here, gains the prompt
-	 * as its first write, and is handed to {@link Agent.run} so no turn of the run has to read it again
-	 * (ADR-0019). That is the whole of "one replay per run" — an ordinary prompt costs the same read an
-	 * open used to, and every later turn is a walk of a bag the run already owns.
+	 * 这里打开的袋就是运行携带的那只：transcript 在这里读一次，把 prompt 作为它的第一次写入，交给
+	 * {@link Agent.run}，让运行的任何一轮都不必再读它（ADR-0019）。这就是「一次运行一次重放」的全部
+	 * ——普通 prompt 花的读与 open 曾经花的相同，之后的每一轮都是在运行已拥有的那只袋上走。
 	 */
 	private async startPromptedRun(state: AgentState, trimmed: string): Promise<void> {
 		const bag = this.bag(state.sessionId);
@@ -800,51 +735,47 @@ export class Agent {
 	}
 
 	/**
-	 * Stop the session's current run and wait for it to settle.
+	 * 停下会话当前的运行，并等它安顿。
 	 *
-	 * Settling means the engine finished persisting the turn it was in the middle of, including tool
-	 * results. The abort lands on the run's controller — the one the run registered on the runtime —
-	 * and the run that ends writes what it was writing, so a stopped turn is a complete turn on disk.
-	 * Calls the transcript would otherwise show without a result are closed by
-	 * {@link Agent.denyAllApprovals}, so an abort never leaves a question the next request cannot ask.
+	 * 安顿的意思是：引擎完成它正在进行的那一轮的落盘，包括工具结果。abort 落在运行的控制器上——运行
+	 * 在运行时注册的那个——结束的运行把它在写的东西写完，所以被停下的轮次在磁盘上是一轮完整的轮次。
+	 * transcript 本会显示为没有结果的调用由 {@link Agent.denyAllApprovals} 关闭，所以 abort 不会留下
+	 * 下一个请求无法再问的问题。
 	 *
-	 * A retry that is only waiting out its backoff is cancelled by the same call: the abort signal is
-	 * the one `retryAssistantCall` sleeps on, so it returns an aborted message instead of sleeping to
-	 * the end. Nothing here has to know whether the run is live or in a backoff.
+	 * 只在等退避走完的重试也被同一次调用取消：abort signal 正是 `retryAssistantCall` 睡觉所等的那个，
+	 * 所以它返回一条 aborted 消息而不是睡到底。这里不必知道运行是活的还是在退避中。
 	 */
 	async abort(id: string): Promise<void> {
 		const state = this.agentState(id);
-		// Read once: the run clears its own registration as it settles, and the promise is what waits
-		// for that settlement.
+		// 只读一次：运行在安顿时自己清掉自己的注册，而这个 promise 正是等待那次安顿的东西。
 		const active = state.live.activeRun;
 		active?.abortController.abort();
 		await (active?.promise ?? Promise.resolve());
-		// The run drops its own slot in its `finally`, a microtask after the idle promise resolves;
-		// wait for that too, so the sweep below sees the idle session it is defined on.
+		// 运行在自己的 `finally` 里——空闲 promise resolve 之后的那个微任务——丢掉自己的槽位；也要等
+		// 那个，好让下面的清扫看到的是它定义所在的那个空闲会话。
 		while (state.live.activeRun !== undefined) await Promise.resolve();
 		this.denyAllApprovals(id, "The run was aborted.");
-		// The same end a finished run publishes, and for the same reason: an abort is how a run that
-		// nobody asked to stop otherwise reports that it has. See {@link Agent.prompt}.
+		// 与一次正常结束的运行发布的是同一个结束、出于同样的理由：abort 正是一次没人要求停下的运行
+		// 报告自己已停的方式。见 {@link Agent.prompt}。
 		publishState(state, this.bag(id), this.services);
 	}
 
-	// ---------------------------------------------------------------------------- config moves
+	// ---------------------------------------------------------------------------- 配置挪动
 
 	/**
-	 * Move the conversation onto another branch of its own tree.
+	 * 把对话挪到自己这棵树的另一条分支上。
 	 *
-	 * The store has always been a tree — an entry may have any number of children — and this is the one
-	 * way a window moves through it. The leaf lands on the newest tip of `entryId`'s subtree, so
-	 * choosing an alternative brings the whole of it back into view at the point it stopped, and the
-	 * next prompt continues from there. Nothing is deleted: the branch that was left keeps its entries,
-	 * still reachable by id, and a fork from any of them still copies what it always would.
+	 * store 从来就是一棵树——一条 entry 可以有任意多个孩子——而这是窗口在其中移动的唯一方式。leaf
+	 * 落在 `entryId` 子树最新的尖端上，所以选择一个备选，会把它的整体带回它停下的那个点上，下一条
+	 * prompt 从那里继续。什么都不删除：被离开的分支保有自己的 entry，仍可按 id 触达，从它们中的
+	 * 任何一个 fork 仍复制它本来会复制的东西。
 	 *
-	 * `descend: false` is the other half of the same gesture — rewinding to a message itself, so the
-	 * next prompt starts a *new* alternative at it instead of continuing one. Switching between
-	 * alternatives that already exist and rewinding to make another are one operation with two ends.
+	 * `descend: false` 是同一手势的另一半——退回到某条消息本身，让下一条 prompt 在它那里开出一条
+	 * *新的*备选，而不是延续已有的一条。在已存在的备选之间切换与退回以造一条新的，是一个操作的
+	 * 两个端。
 	 *
-	 * Refused while a run is in flight, because the run appends to the leaf: a move under it would
-	 * file the rest of that turn under a branch the turn was not answering.
+	 * 运行在飞时拒绝，因为运行向 leaf 追加：在它之下挪动，会把那一轮剩下的部分归入一个那一轮并没有
+	 * 在回答的分支。
 	 */
 	branchTo(id: string, entryId: string, descend = true): string {
 		const state = this.agentState(id);
@@ -853,20 +784,18 @@ export class Agent {
 		const bag = this.bag(id);
 		const leafId = descend ? this.sessionManager.getBranchTip(bag, entryId) : entryId;
 		this.sessionManager.branch(bag, leafId);
-		// No config report rides the move: the model, the level, and the tool choices are the
-		// session's own values now (the `.json` snapshot), so a leaf move changes none of them —
-		// unlike the days when they were replayed off the branch's entries.
+		// 挪动不搭任何配置报告：模型、档位与工具选择如今是会话自己的值（`.json` 快照），挪 leaf 不改
+		// 它们中的任何一个——不像它们还从分支的 entry 上重放的那些日子。
 		emitEvent(state, { type: "branch_changed", leafId });
 		publishState(state, this.bag(id), this.services);
 		return leafId;
 	}
 
 	/**
-	 * Narrow the tools the model may call. An unknown name throws and leaves the session as it was.
+	 * 收窄模型可以调用的工具。未知的名字抛错，会话保持原样。
 	 *
-	 * The change is recorded on the session's `.json` snapshot and takes effect on the next request:
-	 * the fill chain derives the choice from the ledger with every request, so the model is told about
-	 * the narrowed set when the next prompt is built.
+	 * 变更记录在会话的 `.json` 快照上、在下一个请求上生效：填充链随每个请求从账本派生选择，所以
+	 * 模型在下一条 prompt 构建时被告知收窄后的集合。
 	 */
 	setActiveTools(id: string, names: string[]): void {
 		const state = this.agentState(id);
@@ -885,29 +814,25 @@ export class Agent {
 	}
 
 	/**
-	 * Point this session at another row, another level, or both.
+	 * 把本会话指向另一行、另一档，或两者。
 	 *
-	 * A choice is a value the session holds, so it goes onto the `.json` snapshot here — and, since
-	 * ADR-0019, *immediately*: with no bag kept between calls there is nowhere for an unrecorded
-	 * choice to live, so the write happens on the gesture rather than at the next request. What that
-	 * gives up is "a choice nobody sent with is not in the file"; what it keeps is the invariant that
-	 * matters — a snapshot read after this call answers with the new model and level, whether or not a
-	 * request ever follows.
+	 * 选择是会话持有的一个值，所以在这里落到 `.json` 快照上——而且自 ADR-0019 起*立即*：调用之间
+	 * 不留袋，未记录的选择无处可活，所以写入发生在手势上而不是下一个请求上。放弃的是「没人随消息
+	 * 发出的选择不在文件里」；保住的是要紧的那条不变量：本次调用之后读快照，得到的就是新的模型与
+	 * 档位，无论之后是否真的有请求。
 	 *
-	 * A level the chosen model has no room for is refused rather than clamped, because the caller is a
-	 * composer that offered the levels of the model it is moving to; "off" is the exception and is
-	 * always accepted, since it means "as quiet as this model gets".
+	 * 所选模型没有容身的档位被拒绝而不是被钳制，因为调用方是输入框、它提供的就是它要挪去的那行的
+	 * 档位；"off" 是例外，总是接受，因为它表示「这个模型最安静的样子」。
 	 */
 	applyModelSelection(id: string, selection: ModelSelection): void {
 		const state = this.agentState(id);
-		// Nothing named is nothing to do, which is how a caller sends an ordinary message.
+		// 什么都没点名就没有事可做，这正是调用方发普通消息的方式。
 		if (selection.model === undefined && selection.thinkingLevel === undefined) return;
 
 		const bag = this.bag(id);
 		const setting = bag.sessionSetting;
-		// The choice in force, not just the recorded one: a session nobody has chosen a model for still
-		// has one — the settings' default, derived here exactly as every read derives it (ADR-0019) —
-		// and a gesture that names only a level has to name that row to be recordable at all.
+		// 现行的选择，不只是记录的那个：没人选过模型的会话也有一条——设置的默认，派生方式与每次读取
+		// 完全一样（ADR-0019）——而只点名档位的手势必须连带指名那一行才记录得下来。
 		const inForce = modelChoiceOf(this.sessionManager, bag, this.settingsManager, state.live.openedOn);
 		const previousName = setting.model?.name ?? inForce.name;
 		const previousLevel = normalizeThinkingLevel(setting.model?.thinkingLevel ?? inForce.thinkingLevel);
@@ -916,23 +841,20 @@ export class Agent {
 		const userModel = this.settingsManager.modelCatalog().find((userModel) => userModel.name === name);
 		if (userModel === undefined) throw new Error(`Unknown model: ${name}`);
 
-		// The choice is the client's selection, written as it arrived onto the session's own setting:
-		// the row's name, the wire id the row answers to right now, and the level the caller named or
-		// the one already in force. The wire id travels with the write because this *is* the write
-		// (ADR-0019): the bag that carries it is dropped the moment this returns, and the disk format
-		// holds a row only when both of its names are present — a write without the id would leave the
-		// file with no model at all, and the next replay would answer "nothing was ever chosen".
+		// 选择是客户端的选择，按到达时的原样写到会话自己的 setting 上：行的名字、该行此刻应答的
+		// wire id，以及调用方点名的档位或已在生效的那个。wire id 随写入一起走，因为这*就是*那次写入
+		// （ADR-0019）：载着它的袋在本函数返回的那一刻就被丢掉，而磁盘格式只在两个名字都在场时才记
+		// 一行——不带 id 的写入会让文件里根本没有模型，下一次重放会答「从未选择过」。
 		const renamed = previousName !== userModel.name;
 		setting.model = {
-			// A rename drops the wire id along with the name it belonged to; the row's own id takes
-			// its place below either way.
+			// 换名时连它所属的 wire id 一起丢掉；该行自己的 id 无论如何都会在下面补上位置。
 			...(renamed ? {} : setting.model),
 			name: userModel.name,
 			modelId: userModel.id,
 			thinkingLevel: selection.thinkingLevel ?? normalizeThinkingLevel(setting.model?.thinkingLevel),
 		};
-		// The snapshot is rewritten whole from the bag, which is why one call is the whole write: what
-		// the setter above left on the bag is exactly what the file must afterwards hold.
+		// 快照从袋上整体重写，这就是为什么一次调用就是完整的写入：上面那个 setter 留在袋上的，正是
+		// 文件此后必须持有的东西。
 		this.sessionManager.flushMeta(bag);
 
 		publishState(state, bag, this.services);
@@ -945,16 +867,14 @@ export class Agent {
 	}
 
 	/**
-	 * Update settings and persist them. Approval changes take effect on the next tool call.
+	 * 更新设置并落盘。审批变更在下一个工具调用上生效。
 	 *
-	 * The two halves of a patch live in different places. Approval is session-scoped: it merges into
-	 * this session's own choices and is recorded on its `.json` snapshot, so another session over
-	 * this directory is untouched. The rest goes to the settings through the {@link SettingManager},
-	 * which owns the files — and onto the runtime's queues, which read the mode at each drain.
+	 * 补丁的两半住在不同的地方。审批是会话级的：它合并进本会话自己的选择、记录在它的 `.json` 快照
+	 * 上，所以同一目录上的另一个会话不受影响。其余经 {@link SettingManager} 交给设置——它拥有那些
+	 * 文件——并落到运行时的队列上，队列在每次取走时读模式。
 	 *
-	 * The model and the thinking level are not part of a patch at all. They are chosen in the composer
-	 * and arrive with the message they belong to ({@link ModelSelection}), so there is nothing here to
-	 * apply: a config change that no request followed is not a config change.
+	 * 模型与思考档位完全不属于补丁。它们在输入框里选、随属于它们的消息抵达（{@link ModelSelection}），
+	 * 所以这里没有可应用的：没有请求跟上的配置变更就不是配置变更。
 	 */
 	applyConfig(id: string, patch: ConfigPatch): void {
 		const state = this.agentState(id);
@@ -962,15 +882,13 @@ export class Agent {
 		const workDirAbsPath = bag.sessionSetting.workDirAbsPath;
 		const previousApprovals = approvalsOf(this.services, bag);
 		if (patch.approval !== undefined) {
-			// The snapshot records the whole map in force — the settings with this session's choice over
-			// them — which is the shape every read of the ledger answers from.
+			// 快照记录生效中的整张映射——设置叠上本会话的选择——这正是账本每次读取作答的形状。
 			const approvals = { ...previousApprovals, ...patch.approval };
 			const activeToolNames = toolStateOf(this.sessionManager, bag, this.settingsManager, this.tools.names()).activeToolNames;
 			this.sessionManager.setToolConfig(bag, activeToolNames, approvals);
 		}
-		// The rest of the patch goes to the settings through the manager, which owns the write: the
-		// change lands on the files, and every later read — this session's and any other session over
-		// the directory — answers from them.
+		// 补丁的其余部分经 manager 交给设置，写入归它所有：变更落在文件上，之后的每次读取——本会话
+		// 的与该目录上任何其他会话的——都从它们作答。
 		this.settingsManager.applySettings(workDirAbsPath, patch.approval === undefined ? patch : { ...patch, approval: undefined });
 		state.live.steeringQueue.mode = this.settingsManager.getSteeringMode(workDirAbsPath);
 		state.live.followUpQueue.mode = this.settingsManager.getFollowUpMode(workDirAbsPath);
@@ -981,28 +899,25 @@ export class Agent {
 		});
 	}
 
-	// ---------------------------------------------------------------------------- approvals
+	// ---------------------------------------------------------------------------- 审批
 
 	/**
-	 * The tool calls the transcript is still waiting on, as the approval flow sees them.
+	 * transcript 仍在等的工具调用，以审批流看到的形状。
 	 *
-	 * Derived from the ledger, never held (ADR-0006 §5): an approval that is waiting *is* a dangling
-	 * call in the view, and the answer arrives over REST to close it. See
-	 * {@link Agent.hasPendingApprovals} for why a run in flight reports none.
+	 * 从账本派生、从不持有（ADR-0006 §5）：一个正在等的审批*就是*视图里的悬空调用，答案经 REST 抵达
+	 * 关闭它。运行在飞时为何一个都不报，见 {@link Agent.hasPendingApprovals}。
 	 */
 	private danglingApprovals(session: Session): PendingApproval[] {
 		return danglingApprovalsOf(this.sessionManager.buildContextEntries(session));
 	}
 
 	/**
-	 * Whether this id names a tool call nobody has answered. Read-only.
+	 * 这个 id 是否点着一个没人回答的工具调用。只读。
 	 *
-	 * The approvals endpoint checks this before answering, because the check has to happen without
-	 * answering: an answer starts the recovery run that closes the call, and the frame that reports
-	 * the settlement is built from the change that lands when it does — recording the answer first is
-	 * what keeps that frame from reading as a denial by whatever reads the answer back. An unknown id
-	 * is the endpoint's 409, not a silent no-op: a button that answers nothing and says so to no one
-	 * is worse than an error the client can show.
+	 * 审批端点在回答之前检查它，因为检查必须在不回答的前提下发生：一个答案会启动关闭该调用的恢复
+	 * 运行，而报告落定的帧正是从它落地时的变更构建的——先记录答案，正是让那一帧不被读回答案的人读成
+	 * 一次 deny 的原因。未知 id 是端点的 409，不是无声的空操作：一个什么都不回答也不吭声的按钮，
+	 * 比一个客户端能显示的错误更糟。
 	 */
 	hasPendingApproval(id: string, toolCallId: string): boolean {
 		if (this.sessions.get(id)?.live.activeRun !== undefined) return false;
@@ -1010,27 +925,22 @@ export class Agent {
 	}
 
 	/**
-	 * Answer one unanswered tool call, and resume the run that asked for it.
+	 * 回答一个未答的工具调用，并恢复提出它的那次运行。
 	 *
-	 * The answering half of the end-restart chain (ADR-0006 §5): the run that asked is over, the call
-	 * dangles in the ledger, and the answer starts the run that closes it. The engine's recovery pass
-	 * pairs the answer with the call by id — a grant re-runs the call through the gate and the tool
-	 * itself, a denial closes it with the sentence a press of "deny" writes — and the run continues
-	 * from there, so the model sees the call resolved and carries on in the same run. A grant also
-	 * records the session's approval choice for that tool — the tool stops asking — on the session's
-	 * `.json` snapshot, the same move a config patch makes: the recovery pass re-runs the call
-	 * through the gate, and the gate lets through only a tool the map no longer gates.
+	 * 结束重启链的应答半（ADR-0006 §5）：提出调用的运行已经结束，调用在账本里悬空，答案启动关闭它
+	 * 的那次运行。引擎的恢复遍按 id 把答案与调用配对——grant 让调用穿过闸门与工具本身重跑，deny 用
+	 * 「按下 deny」写下的那句话关闭它——运行从那里继续，所以模型看到调用已解决并在同一次运行里继续。
+	 * grant 还会把该工具的审批选择——该工具不再问——记到会话的 `.json` 快照上，与配置补丁是同一个
+	 * 动作：恢复遍让调用重新过闸门，而闸门只放行映射不再闸住的工具。
 	 *
-	 * An id nothing is waiting on is ignored: the caller checked first, and answered it. A dangling
-	 * call the answer does not name is closed by the recovery pass as an orphan — which is what keeps
-	 * the resumed request provider-legal when a crash left several calls behind.
+	 * 没有任何东西在等的 id 被忽略：调用方先检查过、又回答了它。答案没有点名的悬空调用由恢复遍作为
+	 * 孤儿关闭——这正是崩溃留下多个调用时，恢复后的请求仍对供应商合法的原因。
 	 */
 	async respondApproval(id: string, toolCallId: string, approved: boolean): Promise<void> {
 		const state = this.agentState(id);
 		if (state.live.activeRun !== undefined) return;
-		// One replay serves the whole call: the answer is looked up in it, and — when the answer is a
-		// grant — the choice it records is written through the same bag, before the run that closes the
-		// call starts on it.
+		// 一次重放服务整个调用：答案在它里面查——而答案是 grant 时，它记录的选择也经同一只袋写下，
+		// 赶在关闭该调用的那一次运行在这只袋上开始之前。
 		const bag = this.bag(id);
 		const call = this.danglingApprovals(bag).find((candidate) => candidate.toolCallId === toolCallId);
 		if (call === undefined) return;
@@ -1038,31 +948,29 @@ export class Agent {
 			? { approved: true }
 			: { approved: false, reason: `The user denied permission to run ${call.toolName}.` };
 		if (approved) {
-			// The grant is the session's own choice for this tool, recorded as the whole map in force
-			// with the tool turned off — the same move a config patch makes.
+			// grant 是会话对该工具自己的选择，以生效中的整张映射、把该工具翻成关的方式记录——与配置
+			// 补丁是同一个动作。
 			const approvals = { ...approvalsOf(this.services, bag), [call.toolName]: false };
 			const activeToolNames = toolStateOf(this.sessionManager, bag, this.settingsManager, this.tools.names()).activeToolNames;
 			this.sessionManager.setToolConfig(bag, activeToolNames, approvals);
 		}
-		// Said before the run starts: the choice is the session's own and lands now, while the call
-		// itself stays dangling until the run's recovery pass closes it.
+		// 在运行开始之前说出：选择是会话自己的、现在就落，而调用本身保持悬空，直到运行的恢复遍关闭它。
 		publishState(state, bag, this.services);
 		await this.run(state, { answers: { [toolCallId]: answer } }, bag);
 	}
 
 	/**
-	 * Close every unanswered tool call with the reason nothing answered.
+	 * 用「无人回答」的理由关闭每一个未答的工具调用。
 	 *
-	 * The reason rides the answer into the transcript: each closed call's tool result says what
-	 * actually happened — the run was aborted, no window answered — rather than the same sentence a
-	 * press of "deny" writes, which would record an abandonment as a choice.
+	 * 理由随答案进入 transcript：每个被关闭调用的工具结果说的是实际发生了什么——运行被中止、没有
+	 * 窗口回答——而不是「按下 deny」写下的同一句话，那会把一次弃置记录成一个选择。
 	 *
-	 * Only an idle session closes anything: a call that dangles mid-run is a result the engine itself is
-	 * about to write, and closing it here would write the answer twice.
+	 * 只有空闲的会话关闭任何东西：运行中途悬空的调用是引擎自己正要写的结果，在这里关闭会把答案写
+	 * 两遍。
 	 *
-	 * The queues go with it. A suspended run keeps them because the recovery run it is waiting for is
-	 * what drains them; this is the notice that no recovery run is coming, so nothing would ever take
-	 * what was accepted — and a depth nobody will lower is a session `settle` waits on forever.
+	 * 队列随之清空。被挂起的运行保有自己的队列，因为它等的那次恢复运行正是会取走它们的；本函数就是
+	 * 「不会有恢复运行了」的通告，所以被接受的东西将永远无人取走——一个没人会降低的深度，是会话在
+	 * `settle` 上永远等不完的原因。
 	 */
 	denyAllApprovals(id: string, reason: string): void {
 		const state = this.agentState(id);
@@ -1071,17 +979,16 @@ export class Agent {
 		const dangling = this.danglingApprovals(bag);
 		if (dangling.length === 0) return;
 		for (const call of dangling) this.appendDanglingResult(state, bag, call, { approved: false, reason });
-		// The abandonment sweep is where a parked session's reading ends: no recovery run is coming,
-		// so the suspended flag has nothing left to say — and left standing it would keep the state's
-		// own eviction refused forever (the criteria read this flag).
+		// 弃置清扫是一个停驻会话的阅读终点：不会再有恢复运行，suspended 标志再没有可说的——而它若
+		// 一直立着，会让状态自己的驱逐永远被拒（判据读这个标志）。
 		state.live.suspended = false;
-		// The snapshot's display cache follows the flag: no run is coming to sweep it here.
+		// 快照的显示缓存跟随标志：这里没有运行来清扫它。
 		this.sessionManager.setSuspended(bag, false);
 		if (dropQueued(state)) emitQueueUpdate(state);
 		publishState(state, bag, this.services);
 	}
 
-	/** Write the result that closes one dangling call, and announce the entry like any other message. */
+	/** 写下关闭一个悬空调用的结果，并像其他消息一样通告该 entry。 */
 	private appendDanglingResult(
 		state: AgentState,
 		bag: Session,
@@ -1104,69 +1011,60 @@ export class Agent {
 	}
 
 	/**
-	 * Whether a tool that settings mark as requiring approval still needs the user's answer.
+	 * 被设置标记为需要审批的工具是否仍需要用户的答案。
 	 *
-	 * The gate's decision, not its wording: what comes back is only whether the call may run now.
-	 * Under the end-restart semantics a call that needs the answer does not get a block or a result —
-	 * the `before_tool` gate turns this answer into the suspend that ends the run with the call
-	 * dangling in the ledger, and the answer arrives over REST to start the recovery run that closes
-	 * it. A tool the map does not gate runs without asking.
+	 * 这是闸门的裁决，不是它的措辞：返回的只是这个调用此刻可否运行。在结束重启语义下，需要答案的
+	 * 调用既得不到 block 也得不到结果——`before_tool` 闸门把这个答案变成结束运行、让调用在账本里
+	 * 悬空的 suspend，答案经 REST 抵达、启动关闭它的恢复运行。映射不闸的工具不经询问直接运行。
 	 */
 	async authorize(id: string, name: string, _toolCallId: string, _args: unknown): Promise<boolean> {
 		return approvalsOf(this.services, this.bag(id))[name] === true;
 	}
 
-	// ---------------------------------------------------------------------------- waiting and closing
+	// ---------------------------------------------------------------------------- 等待与收尾
 
 	/**
-	 * Wait for the current run to finish and for its writes to reach the file system, without stopping
-	 * anything. A run that is already idle returns immediately.
+	 * 等当前运行结束、它的写入落盘，而不停下任何东西。已空闲的运行立即返回。
 	 *
-	 * A queued message is part of the run that accepted it, so the run is drained to the end: the queue
-	 * can still be non-empty when one turn settles, which is exactly the case a caller waiting for "the
-	 * transcript is complete" must not resolve on. {@link Agent.close} stops the run first, which is
-	 * what makes it terminate.
+	 * 排队消息是接受它的那次运行的一部分，所以运行被取到尽头：一轮安顿时队列仍可能非空，而这正是
+	 * 等「transcript 已完整」的调用方绝不能在其上 resolve 的情况。{@link Agent.close} 先停运行，
+	 * 这正是它能终止的原因。
 	 *
-	 * A run the gate ended is settled, not awaited: its queue is kept for the recovery run, and
-	 * `stillBusy` reads a dangling call as "a question, not work" — the same reading {@link
-	 * Agent.close} makes when it leaves a parkable call unanswered for a person. Without that, a
-	 * parked session would look busy to every caller that settles one — the hub's reap above all.
+	 * 被闸门结束的运行视为已安顿、不被等待：它的队列留给恢复运行，`stillBusy` 把悬空调用读作
+	 * 「一个问题，不是工作」——与 {@link Agent.close} 把可停驻的调用留给人的读法相同。没有这条，一
+	 * 个停驻的会话在安顿它的每个调用方眼里都像是忙的——首当其冲的是上面 hub 的收割。
 	 *
-	 * A pending retry is part of the run too, so it is waited for rather than resolved past: the
-	 * retry runs inside the stream the engine is awaiting, which keeps the agent non-idle for the whole
-	 * backoff, and the condition is here so that stays true if that ever changes.
+	 * 待处理的重试同样是运行的一部分，所以等它而不是绕过它：重试在引擎正 await 的那条流里跑，这
+	 * 让 agent 在整个退避期间都非空闲，条件放在这里，正是为了那件事万一变化时这一点仍然成立。
 	 */
 	async settle(id: string): Promise<void> {
 		const state = this.agentState(id);
-		// Read through a closure: the run slot is reassigned across the awaits below, and a narrow
-		// taken before them would tell the checker the slot is always empty here.
+		// 经闭包读取：运行槽位在下面的 await 之间被重新赋值，在它们之前取的窄化会让检查器断定
+		// 这个槽位在此处永远为空。
 		const stillBusy = (): boolean =>
 			(state.live.followUpQueue.size > 0 && this.danglingApprovals(this.bag(id)).length === 0) ||
 			state.live.retrying === true;
 		for (;;) {
 			await (state.live.activeRun?.promise ?? Promise.resolve());
-			// The run drops its own slot a microtask after the idle promise resolves; wait for that too,
-			// so a caller that settles sees the idle session — and the dangling calls the run ended
-			// with — rather than one still finishing its writes. The same bounded wait `abort` makes.
+			// 运行在空闲 promise resolve 之后一个微任务才丢掉自己的槽位；也要等那个，让安顿的调用方
+			// 看到的是空闲的会话——以及运行结束时悬空的调用——而不是一个还在写完尾巴的。与 `abort`
+			// 的有界等待相同。
 			while (state.live.activeRun !== undefined) await Promise.resolve();
 			if (!stillBusy()) return;
 		}
 	}
 
 	/**
-	 * Stop the run, if any, and wait for the session to go quiet.
+	 * 停下运行（若有），并等会话安静下来。
 	 *
-	 * A call left dangling stays a question: the transcript is the only state (ADR-0006 §5), so the
-	 * reopen derives it from the ledger and shows it again, and the answer that arrives then starts
-	 * the run that closes it. Closing does not answer for the user — the denials an exit used to
-	 * write recorded an abandonment as a choice, and the reopen that inherited them inherited a lie.
-	 * {@link Agent.abort} is the deliberate stop, and the denial is its answer; a process shutdown
-	 * and a reap that has already denied both land here.
+	 * 悬着的调用仍是一个问题：transcript 是唯一的状态（ADR-0006 §5），重开时从账本派生并再次显示它，
+	 * 那时抵达的答案启动关闭它的运行。close 不替用户作答——退出时曾写下的 deny 把弃置记录成选择，
+	 * 继承它们的重开继承的是一句谎话。{@link Agent.abort} 是有意的停止，deny 是它的答案；进程关闭
+	 * 与已经 deny 过的收割都会落到这里。
 	 *
-	 * An id the table does not hold has nothing to stop and nothing to wait for, so close answers
-	 * immediately for one — the caller never branches on membership first. This is what absorbs the
-	 * "is a close still owed" re-check an eviction edge used to force: the edge may drop the state
-	 * between the question and the close, and a close that races it is simply a close of nothing.
+	 * 表不持有的 id 无运行可停、无事可等，所以对它立即返回——调用方从不先分支判断成员资格。这正是
+	 * 吸收「是否还欠一次 close」复查的原因：某个驱逐边缘曾在问题与 close 之间把状态丢掉，而与它赛跑
+	 * 的 close 不过是对着空无的 close。
 	 */
 	async close(id: string): Promise<void> {
 		const state = this.sessions.get(id);
@@ -1176,11 +1074,10 @@ export class Agent {
 	}
 
 	/**
-	 * Run the compaction ladder against a session named by id.
+	 * 对按 id 点名的会话跑压缩阶梯。
 	 *
-	 * The fill chain calls the same three steps on every request, inside the loop; this public shape
-	 * lets a caller drive them against a session it names — the smoke that exercises the pruning
-	 * ladder does exactly that.
+	 * 填充链在每个请求里、循环内部跑同样三步；这个公开形状让调用方可以对着自己点名的会话驱动它们
+	 * ——演练修剪阶梯的 smoke 正是这么做的。
 	 */
 	maybeCompact(
 		id: string,
@@ -1199,9 +1096,9 @@ export class Agent {
 		return this.compactFor(state, bag, entries, now, signal, model);
 	}
 
-	// ---------------------------------------------------------------------------- the config report
+	// ---------------------------------------------------------------------------- 配置报告
 
-	/** Report a config change with only the fields that moved; silence when none did. */
+	/** 只带变动字段地报告一次配置变更；一个都没动时保持沉默。 */
 	private emitConfigChanged(
 		state: AgentState,
 		changes: {
@@ -1222,34 +1119,26 @@ export class Agent {
 		emitEvent(state, { type: "config_changed", ...changes });
 	}
 
-	// ---------------------------------------------------------------------------- the engine
+	// ---------------------------------------------------------------------------- 引擎
 	//
-	// Everything below runs one conversation turn by turn: the entry and its exit (`run`), the
-	// per-request fill chain, the compaction ladder, the retry pump under the transport, the two
-	// tool-call gates, and the sink every event is persisted and fanned out through. It is a member
-	// again rather than an object of its own (ADR-0014): the object that held it held nothing else,
-	// and a run's services are this class's services.
+	// 下面的一切逐轮运行一段对话：入口与出口（`run`）、按请求的填充链、压缩阶梯、传输层之下的重试
+	// 泵、两个工具调用闸门，以及每个事件都落盘并扇出的那个 sink。它重新是一个成员而不是自己的对象
+	// （ADR-0014）：曾经持有它的那个对象除此之外一无所有，而一次运行的服务就是本类的服务。
 
 	/**
-	 * Run the engine once, over everything the transcript already holds.
+	 * 在 transcript 已有的一切之上，把引擎跑一次。
 	 *
-	 * A run starts one of two ways. A prompted run hands over the message that started it, which the
-	 * store already holds — the engine's own echo of it must not be recorded twice. A resumed run hands
-	 * over the approval answers instead: the engine's recovery pass pairs them with the calls the last
-	 * run left dangling and continues from there, so no message is written and none is echoed.
+	 * 运行有两种起点。被提示的运行递入启动它的那条消息——store 已持有它，引擎自己的回显绝不能被记录
+	 * 两遍。恢复的运行递入审批答案：引擎的恢复遍把它们与上一次运行留下的悬空调用配对并从那里继续，
+	 * 所以不写消息、也不回显。
 	 *
-	 * This is where the run lives, and it is the whole reason the class holds no run state: the
-	 * transport, the retry scope, the event handler, and the engine's own take points are all built
-	 * with the run, closed over its locals, and dropped when the run settles. What crosses the stack
-	 * is exactly what the state names — the queues, the active run, the subscribers — and the live
-	 * half itself, which is how a reader outside the run sees its transients: the run writes its
-	 * partial message, its model, and its retry state onto `state.live` as it goes. The zeroing is
-	 * the run's first act, so it never inherits what a previous run left; the `finally` retires only
-	 * the model, so an idle session answers from the catalog again — the other readings stay as the
-	 * run left them, which is how a session parked at the gate reads as parked until the recovery
-	 * run or the abandonment sweep says otherwise. The session the run serves is
-	 * resolved once, at the top, and every closure below threads the same locals: no request
-	 * re-resolves its way to a different bag.
+	 * 运行就活在这里，这正是本类不持有运行状态的全部理由：传输层、重试作用域、事件处理器、引擎自己
+	 * 的取走点，全部与运行一起构建、闭包在它的局部变量里、运行安顿时丢弃。跨过栈的恰是状态点名的
+	 * 东西——队列、在飞运行、订阅者——以及 live 半本身，运行外的读者正是这样看到它的瞬态：运行边走
+	 * 边把 partial、模型与重试状态写到 `state.live` 上。清零是运行的第一个动作，所以它绝不继承上一
+	 * 次运行留下的东西；`finally` 只退掉模型，空闲会话重新从目录作答——其余读数保持运行结束时的
+	 * 样子，停驻在闸门的会话正是这样被读成停驻，直到恢复运行或弃置清扫另作主张。运行所服务的会话
+	 * 在开头解析一次，下面的每个闭包都穿同样的局部变量：没有哪个请求重新解析出另一只袋。
 	 */
 	private async run(
 		state: AgentState,
@@ -1257,89 +1146,74 @@ export class Agent {
 		transcript: Session,
 	): Promise<void> {
 		const live = state.live;
-		// The run's readings start at zero, in one place: a run neither inherits the previous run's
-		// model nor answers for its leftover partial or retry state. The suspended flag is the one
-		// with a life between runs — a recovery run starts while it is still set from the run before
-		// it, which is why the reset is here rather than in the `finally`.
+		// 运行的读数在同一个地方从零开始：一次运行既不继承上一次运行的模型，也不替它的遗留 partial
+		// 或重试状态作答。suspended 是唯一有跨运行生命的标志——一次恢复运行在它还被上一次运行置着的
+		// 时候就开始了，这正是重置放在这里而不是 `finally` 里的原因。
 		live.partial = undefined;
 		live.model = undefined;
 		live.suspended = false;
 		live.retrying = false;
 		live.retryAttempt = 0;
 
-		// The run's send policy rides on every request object this run's models are built with. The
-		// engine is never told about it: it asks for a stream from whatever model it holds, and the
-		// model answers through this — so retries, and the "no row behind this model" answer, happen
-		// below everything that could report them.
+		// 运行的发送策略骑在这一运行每个模型构造时所用的请求对象上。引擎从不知晓它：它向自己持有的
+		// 模型要一条流，模型经它应答——所以重试、以及「这个模型背后没有行」的答案，发生在一切可能
+		// 报告它们的东西之下。
 		const transport: ChatTransport = {
 			stream: (model, context, options) => {
 				const outer = createAssistantMessageEventStream();
-				// Deliberately not awaited: the run owns the stream's lifetime, and a failure that
-				// cannot be retried comes back as an error event on it rather than as a rejection out
-				// of the stream function (which the engine's contract forbids anyway).
+				// 有意不 await：运行拥有流的生命周期，无法重试的失败作为流上的 error 事件回来，而不是
+				// 作为流函数的 rejection（引擎的契约本来就禁止它）。
 				void this.pumpAttempts(state, transcript, outer, model as Model, context, options);
 				return outer;
 			},
 		};
 
 		try {
-			// The transcript and the tools are built per run — the engine keeps no state of its own —
-			// and both are rebuilt for the request that actually goes out by the fill chain anyway.
-			// The engine's take points read this session's own queues, so nothing is wired in.
+			// transcript 与工具按运行构建——引擎不保有自己的状态——而且实际发出的那个请求反正会被
+			// 填充链重建两者。引擎的取走点读的是本会话自己的队列，所以不需要任何接线。
 			await this.runEngine(state, transport, start, transcript);
 		} finally {
-			// A message accepted in the last moment of the run — after the engine had already decided to
-			// stop looking for one — is on a queue nothing will drain, so it is dropped here rather than
-			// carried into a later run. The ordinary end path has already emptied both lists by this
-			// point, which is what makes this a no-op for a run that ended the way it should.
+			// 在运行的最后一刻被接受的消息——引擎已经决定不再找了之后——躺在一条无人会取走的队列上，
+			// 所以在这里丢弃，而不是带进之后的某次运行。寻常的结束路径到这一步已经清空两条列表，这
+			// 正是它对一次正常结束的运行成为空操作的原因。
 			//
-			// A suspended run is the exception: its queues are what the recovery run drains, and the
-			// message someone typed while this run was streaming is theirs, not this run's to bin.
-			// A drop that took something is a queue change the window has not heard yet, so it is the
-			// one end path that publishes here; a parked run keeps its queue and says nothing.
+			// 被挂起的运行是例外：它的队列是恢复运行要取走的，这次运行流式期间有人打的字是他们的，
+			// 不是这次运行该扔的。一次有东西被丢的 drop 是窗口尚未听说的队列变更，所以它是唯一在
+			// 这里发布的结束路径；停驻的运行留住队列、一言不发。
 			if (!live.suspended && dropQueued(state)) emitQueueUpdate(state);
-			// The model comes down with the run: an idle session answers from the catalog again, which
-			// is what makes "in flight, read the run; idle, read the choice" a state rather than a
-			// leak. The other readings are left as the run ended them — a suspended run's flag is
-			// what says the session is parked, and it is the recovery run's or the abandonment
-			// sweep's to clear, not the end path's.
+			// 模型随运行一起下来：空闲会话重新从目录作答，这正是「在飞读运行、空闲读选择」成为一种
+			// 状态而不是一次泄漏的原因。其余读数保持运行结束时的样子——被挂起运行的标志说的是会话
+			// 在停驻，清掉它是恢复运行或弃置清扫的事，不是结束路径的。
 			live.model = undefined;
-			// The snapshot's display cache follows the flag the run ended on: a suspended run writes
-			// true, every other end writes false. This one sweep covers every flip — the recovery
-			// run's end clears the marker, not the answer that started the run.
+			// 快照的显示缓存跟随运行结束时的标志：被挂起的运行写 true，其余每种结束写 false。这一下
+			// 清扫覆盖每一次翻转——清掉标记的是恢复运行的结束，而不是启动它的那个答案。
 			this.sessionManager.setSuspended(transcript, live.suspended);
-			// The run is not over until the engine's `runEngine` resolves — after every awaited listener for
-			// `agent_end` and the engine's own `finally`. So this is the first moment nothing is in
-			// flight, and without publishing here nothing ever reports it.
+			// 引擎的 `runEngine` resolve 之前运行不算结束——要等每个 await 了 `agent_end` 的监听者与
+			// 引擎自己的 `finally`。所以这是第一个无物在飞的时刻，不在这里发布就永远没人报告它。
 			//
-			// In a `finally` rather than after the `await`, because the two ends of a run reach this point
-			// by different roads: a run that ends normally falls through, but a run whose own failure
-			// handling rejected — the persistence that reports the failure is the persistence that broke —
-			// arrives here as a rejection, and a publish placed after the `await` would be skipped by
-			// exactly the run that most needs the frame. Every end path a run has goes through this one
-			// block; the error frame that may precede it is announced by the caller that learns of the
-			// rejection, not by the session.
+			// 放在 `finally` 里而不是 `await` 之后，因为运行的两种结束走的是两条路：正常结束的运行
+			// 直接落到这里，而自己的失败处理 reject 了——报告失败的那个落盘恰恰就是坏掉的那个——
+			// 的运行以 rejection 的形态抵达这里，放在 `await` 之后的发布会恰好被最需要那一帧的运行
+			// 跳过。运行有的每种结束路径都经过这一个块；可能先到的错误帧由得知 rejection 的调用方
+			// 通告，不是由会话。
 			publishState(state, transcript, this.services);
 		}
 	}
 
 	/**
-	 * The engine: one entry and one exit, over the context as it stands.
+	 * 引擎：一个入口、一个出口，对着现状的 context。
 	 *
-	 * The body is what `packages/loop` used to run, then what `Agent` ran as a method of its own
-	 * (ADR-0008), and now a method of the object that owns the run (ADR-0012). Its seams are this
-	 * object's: the run registers itself on the session's live half (`live.activeRun`, where an abort
-	 * from any layer lands), every event goes through {@link Agent.dispatchEvent} — which
-	 * persists it and fans it out — the per-turn fill is {@link Agent.prepareRequest}, and both
-	 * take points drain this session's own queues. Nothing here
-	 * outlives the stack, which is why the model the run is on is a local rather than a field: it is
-	 * the one thing a request may replace, and a member would hand it to a second session's run. What
-	 * crosses the stack is the live half's own slot, for the snapshot that reads it mid-delta.
+	 * 这段身体曾是 `packages/loop` 跑的东西，后来是 `Agent` 以自己方法跑的东西（ADR-0008），现在是
+	 * 拥有这次运行的对象的方法（ADR-0012）。它的接缝是这个对象的：运行把自己注册到会话的 live 半上
+	 * （`live.activeRun`，任何层的 abort 都落在那里），每个事件经 {@link Agent.dispatchEvent}——它
+	 * 落盘并扇出——每轮的填充是 {@link Agent.prepareRequest}，两个取走点排空的都是本会话自己的队列。
+	 * 这里没有任何东西活得比栈久，这正是运行所用的模型是局部变量而不是字段的原因：它是请求唯一可能
+	 * 换掉的东西，一个成员会把它递给第二个会话的运行。跨过栈的是 live 半自己的槽位，供中途读 delta
+	 * 的快照用。
 	 *
-	 * A run either starts on a prompt — which enters the transcript at the first drain point, exactly
-	 * where a steered message enters on a later turn — or resumes: it opens on the transcript as it
-	 * stands, and its first act is the recovery pass over the calls a previous run left dangling.
-	 * Returns the messages the run produced.
+	 * 运行要么从一条 prompt 起步——它进入 transcript 的第一个取走点，正是后来的 steer 消息在更晚
+	 * 轮次进入的位置——要么是恢复：它对着现状的 transcript 打开，第一个动作是对上一次运行留下的
+	 * 悬空调用做恢复遍。返回运行产出的消息。
 	 */
 	private async runEngine(
 		state: AgentState,
@@ -1348,9 +1222,8 @@ export class Agent {
 		session: Session,
 	): Promise<Message[]> {
 		const { sessionManager, settingsManager, tools } = this;
-		// This run's values — the directory and the bash timeouts — collected once and carried by every
-		// call the run makes: they are per-request facts that now travel as a value rather than being
-		// closed over by a tool instance (ADR-0016).
+		// 这次运行的值——目录与 bash 超时——收集一次、由运行发出的每次调用携带：它们是按请求的事实，
+		// 如今作为一个值旅行，而不是被某个工具实例闭包（ADR-0016）。
 		const run: ToolRunContext = this.runContext(session);
 		const live = state.live;
 		if (live.activeRun !== undefined) {
@@ -1367,10 +1240,9 @@ export class Agent {
 		live.activeRun = { promise, resolve: settle, abortController };
 		const signal = abortController.signal;
 
-	// The model the run is on. Seeded from the choice as it stands; `prepareRequest` answers with
-	// the one each request is actually sent with, so a synthesized failure still names a real model
-	// even when the run dies before its first request. The slot on the live half is what a snapshot
-	// outside this stack reads instead of going back to the catalog.
+	// 运行所在的那一行。以现状的选择播种；`prepareRequest` 用每个请求真正发送的那一行作答，所以
+	// 即使运行死在第一个请求之前，合成的失败仍点着一个真实的模型。live 半上的槽位，是栈外快照读取
+	// 它的方式，而不是回头去目录。
 	const choice = modelChoiceOf(sessionManager, session, settingsManager, live.openedOn);
 	let model: Model = modelFor(choice, settingsManager.modelCatalog(), transport);
 		live.model = model;
@@ -1379,10 +1251,9 @@ export class Agent {
 
 		try {
 			const newMessages: Message[] = [];
-			// This run's tool list — the names the session has active, as one membership test. It is
-			// the stack-local the whole chain judges a call against (04 §2.4): the table answers "does
-			// this name exist", this answers "may this session call it now", and a set that is
-			// re-derived per request is swapped in at the request boundary below.
+			// 这次运行的工具名单——会话处于活跃状态的名字，作为一份成员判断。它是整条链判断调用所依据
+			// 的栈局部（04 §2.4）：表回答「这个名字存不存在」，这个回答「本会话现在可不可以调它」，而
+			// 按请求重新派生的集合在下面的请求边界换入。
 			let activeNames: ReadonlySet<string> = new Set(toolStateOf(sessionManager, session, settingsManager, tools.names()).activeToolNames);
 			let currentContext: Context = {
 				messages: [...sessionManager.buildSessionContext(session).messages],
@@ -1391,10 +1262,9 @@ export class Agent {
 
 			await emit({ type: "agent_start" });
 
-			// Recovery pass (ADR-0006 §5): a call in the context that no tool result answers would make
-			// the first request illegal, so every run closes what it finds before its first turn — a
-			// grant re-runs the call, a denial and an orphan get synthesized results. A suspend here
-			// (the grant this run resumed on did not clear the gate) ends the run before any request.
+			// 恢复遍（ADR-0006 §5）：context 里没有工具结果回答的调用会让第一个请求非法，所以每次运行
+			// 都在自己的第一轮之前关闭它找到的东西——grant 重跑该调用，deny 与孤儿得到合成的结果。
+			// 这里若 suspend（本次运行据以恢复的 grant 没有真正过闸门）则在任何请求之前结束运行。
 			let suspendedAtEntry = false;
 			const dangling = danglingToolCallsOf(currentContext.messages);
 			if (dangling.length > 0) {
@@ -1416,31 +1286,30 @@ export class Agent {
 				suspendedAtEntry = recovered.suspended === true;
 			}
 			if (suspendedAtEntry) {
-				// The recovery pass re-ran the granted call and the gate refused it again, so this run
-				// ends the same way the last one did — and keeps the queues for the same reason.
+				// 恢复遍重跑了被 grant 的调用而闸门再次拒绝，所以这次运行以与上一次相同的方式结束
+				// ——并为相同的理由留住队列。
 				live.suspended = true;
 				await emit({ type: "agent_end", messages: newMessages });
 				return newMessages;
 			}
 
-			// The run's prompt occupies the first drain point: every turn — the first one included — is
-			// `turn_start`, then a drain, then a request. A resumed run has no prompt; its recovered
-			// results are already in the context. Steering is polled at the end of each turn, so the
-			// earliest a steered message surfaces is after the first response.
+			// 运行的 prompt 占据第一个取走点：每一轮——包括第一轮——都是 `turn_start`，然后一次
+			// drain，然后一个请求。恢复的运行没有 prompt；它恢复出的结果已在 context 里。steer 在每轮
+			// 结尾轮询，所以 steer 消息最早也是在第一个响应之后浮现。
 			let pendingMessages: Message[] = start.prompt === undefined ? [] : [start.prompt];
 
-			// Outer loop: continues when queued follow-up messages arrive after the agent would stop.
-			while (true) {
-				let hasMoreToolCalls = true;
-				// Set when the gate suspends a batch: the run ends at that turn, before the take points.
-				let suspended = false;
+				// 外层循环：agent 本要停下之后又来了排队的 follow-up 消息时继续。
+				while (true) {
+					let hasMoreToolCalls = true;
+					// 闸门挂起一个批时置位：运行在那一轮结束，在取走点之前。
+					let suspended = false;
 
-				// Inner loop: process tool calls and steering messages.
+					// 内层循环：处理工具调用与 steer 消息。
 				while (hasMoreToolCalls || pendingMessages.length > 0) {
 					await emit({ type: "turn_start" });
 
-					// Process queued messages before the next assistant response. The run's own prompts drain
-					// here on the first turn, exactly where a steered message drains on a later one.
+					// 下一个 assistant 响应之前处理排队的消息。运行自己的 prompt 在第一轮在这里排空，
+					// 正是 steer 消息在更晚轮次排空的位置。
 					for (const message of pendingMessages) {
 						await emit({ type: "message_start", message });
 						await emit({ type: "message_end", message });
@@ -1449,35 +1318,28 @@ export class Agent {
 					}
 					pendingMessages = [];
 
-					// The per-request fill chain (ADR-0006 §2): adopt the live row, record the selection,
-					// replay the ledger into a view, compact it if it is over the window, build the prompt
-					// from the live tool and approval answers, and hand the request back — built here, used
-					// once, dropped.
+					// 按请求的填充链（ADR-0006 §2）：收养实时的行，记录选择，把账本重放成视图，超窗则
+					// 压缩，用实时的工具与审批答案构建 prompt，交回请求——在这里构建、用一次、丢弃。
 					const requestUpdate = await this.prepareRequest(transport, currentContext, signal, state, session);
 					if (requestUpdate) {
 						currentContext = requestUpdate.context ?? currentContext;
 						model = requestUpdate.model ?? model;
-						// The list the request was built for replaces last turn's, so the calls this
-						// answer carries are judged against the set the model was just told about. The
-						// optional form is the rest of the update's: a field that is not there leaves
-						// what the run already had. Both are read after `prepareRequest` — a set the
-						// user moved between two turns takes effect on the next answer, never on a call
-						// already in flight.
+						// 这次请求为之构建的名单替换上一轮的，所以这条答案携带的调用按模型刚被告知的集合
+						// 判断。可选的形式是 update 其余部分的：不在场的字段留下运行已有的东西。两者都在
+						// `prepareRequest` 之后读取——用户在两轮之间挪动的集合在下一个答案上生效，绝不
+						// 作用于已经在飞的调用。
 						activeNames = requestUpdate.activeNames ?? activeNames;
-						// The model this request goes out with is the one a snapshot taken during it
-						// should report, and the one the meter measures the answer against.
+						// 这个请求发出时所用的模型，正是运行期间拍下的快照该报告的、表计用来量答案的。
 						live.model = model;
 					}
 
-					// A run can be cut short while its request is being built — an abort from `close()`,
-					// a stop from the window — and `prepareRequest` has awaits of its own (a compaction
-					// summary, the project instructions read off disk). A request issued after that point
-					// would go out on a dead signal: nothing it returns could be used, and a transport is
-					// free to answer an already-aborted call however it likes. Ending here is the same
-					// ending an abort mid-stream gets, arrived at one step earlier.
+					// 请求构建期间运行可能被砍短——来自 `close()` 的 abort、来自窗口的 stop——而
+					// `prepareRequest` 有自己的 await（一次压缩摘要、从盘上读的项目指示）。在那之后发出的
+					// 请求会走上一条已死的 signal：它返回的任何东西都用不上，而传输层对已中止的调用如何
+					// 应答全凭它高兴。在这里结束，与流中途被 abort 的结束相同，只是早到一步。
 					if (signal?.aborted === true) throw signal.reason ?? new Error("The run was aborted");
 
-					// Stream assistant response.
+					// 流式读取 assistant 响应。
 					const message = await streamAssistantResponse(currentContext, model, signal, emit);
 					newMessages.push(message);
 
@@ -1492,9 +1354,8 @@ export class Agent {
 					const toolResults: ToolResultMessage[] = [];
 					hasMoreToolCalls = false;
 					if (toolCalls.length > 0) {
-						// A "length" stop means the output was cut off by the token limit, so every tool call
-						// in the message may carry truncated arguments. Fail them all instead of executing
-						// potentially borked calls.
+						// "length" 停止意味着输出被 token 上限截断，消息里的每个工具调用都可能带着被截断
+						// 的参数。全部判失败，而不是执行可能已损坏的调用。
 						const executedToolBatch =
 							message.stopReason === "length"
 								? await failToolCallsFromTruncatedMessage(toolCalls, emit)
@@ -1512,23 +1373,21 @@ export class Agent {
 
 					await emit({ type: "turn_end", message, toolResults });
 
-					// A suspended batch ends the run here: the take points are skipped, so nothing new is
-					// taken into a run the gate has already stopped — what was accepted waits on the queues
-					// and the caller's end-of-run sweep writes it, and the answer to the suspended call
-					// arrives from outside any run to start the next one.
+					// 被挂起的批在此结束运行：取走点被跳过，所以没有任何新东西被取进闸门已经停下的运行
+					// ——被接受的等在队列上、由调用方的运行末尾清扫写出，而对挂起调用的答案从任何运行
+					// 之外抵达、启动下一次运行。
 					if (suspended) break;
 
 					pendingMessages = await this.drainTranscribed(live.steeringQueue, state, session);
 				}
 
-				// A suspend ends the follow-up side of the run with it: the queued messages were never
-				// taken, and the run that would answer them is over.
+				// 挂起连同运行的 follow-up 侧一起结束：排队的消息从未被取走，会回答它们的运行已经结束。
 				if (suspended) break;
 
-				// The run would stop here. Take whatever the follow-up queue holds.
+				// 运行本要在这里停下。取走 follow-up 队列里的一切。
 				const followUpMessages = await this.drainTranscribed(live.followUpQueue, state, session);
 				if (followUpMessages.length > 0) {
-					// Set as pending so the inner loop processes them.
+					// 置为 pending，让内层循环处理它们。
 					pendingMessages = followUpMessages;
 					emitQueueUpdate(state);
 					continue;
@@ -1540,9 +1399,8 @@ export class Agent {
 			await emit({ type: "agent_end", messages: newMessages });
 			return newMessages;
 		} catch (error) {
-			// A throw outside the engine's own error encoding — a bug in the engine, or persistence that
-			// escaped its own handling — still surfaces as a complete event stream so subscribers see a
-			// terminal state.
+			// 引擎自身错误编码之外的一次抛出——引擎里的 bug，或逃出了自己处理的落盘——仍以完整的
+			// 事件流浮现，让订阅者看到终态。
 			await this.handleRunFailure(emit, model, error, signal.aborted);
 			return [];
 		} finally {
@@ -1551,12 +1409,11 @@ export class Agent {
 	}
 
 	/**
-	 * The two tool-call gates, as this run's own pair.
+	 * 两个工具调用闸门，作为这一次运行自己的那对。
 	 *
-	 * The batch helpers are file-level and hold no session, so the run hands them the seams it needs:
-	 * the session's `before_tool` gate and its `after_tool` one. An `after_tool` rewrite is final —
-	 * the message is written with exactly the content the hooks left — so neither gate closes over the
-	 * run's transients any more; the session id is all either one reads through.
+	 * 批处理 helper 是文件级的、不持有会话，所以运行把自己需要的接缝递给它们：会话的 `before_tool`
+	 * 闸门与它的 `after_tool`。`after_tool` 的改写是定稿——消息带着 hooks 留下的内容原样写下——所以
+	 * 两个闸门都不再闭包运行的瞬态；它们各自只读 session id。
 	 */
 	private toolCallHooks(state: Session): ToolCallHooks {
 		const sessionId = state.sessionId;
@@ -1569,11 +1426,10 @@ export class Agent {
 	}
 
 	/**
-	 * Write the failure a run died of as a message, and close the run's event stream with it.
+	 * 把一次运行死于其上的失败写成消息，并用它关闭运行的事件流。
 	 *
-	 * The message is synthesized rather than reported: a run that threw has no assistant message to
-	 * point at, and a subscriber that only ever sees `agent_end` would have no account of why nothing
-	 * came back. The model named is the one the last request was made with.
+	 * 消息是合成的而不是被报告的：抛出的运行没有 assistant 消息可指，而只见过 `agent_end` 的订阅者
+	 * 将无从得知为什么什么都没回来。点名的模型是最后一个请求所用的那个。
 	 */
 	private async handleRunFailure(
 		emit: AgentEventSink,
@@ -1597,21 +1453,19 @@ export class Agent {
 		await emit({ type: "agent_end", messages: [failureMessage] });
 	}
 
-	/** Settle the run: fire the promise idle-waiters sleep on, then give the slot up. */
+	/** 安顿运行：唤醒空闲等待者睡在其上的 promise，然后交出槽位。 */
 	private finishRun(state: AgentState): void {
 		state.live.activeRun?.resolve();
 		state.live.activeRun = undefined;
 	}
 
 	/**
-	 * The per-request fill chain, from the ledger to the request object.
+	 * 从账本到请求对象的按请求填充链。
 	 *
-	 * In order: the model is re-derived from the live row (an edit takes effect without reopening
-	 * anything), the selection this request is made with is recorded — exactly one entry per move, so
-	 * a choice that was never sent with is not in the file — the ledger is replayed into the view, the
-	 * view is compacted if it is over this model's window, the prompt is built from the live tool and
-	 * approval answers, and the whole thing is returned as the one request object this turn sends.
-	 * Nothing here outlives the request.
+	 * 顺序：模型从实时的行重新派生（一次编辑无需重开任何东西即生效），记录本次请求所用的选择——每次
+	 * 挪动恰好一条 entry，所以从未随消息发出的选择不在文件里——账本被重放成视图，视图超出本模型的
+	 * 窗口则压缩，prompt 由实时的工具与审批答案构建，整体作为本轮发送的唯一请求对象返回。这里没有
+	 * 任何东西活得比请求久。
 	 */
 	private async prepareRequest(
 		transport: ChatTransport,
@@ -1621,24 +1475,18 @@ export class Agent {
 		session: Session,
 	): Promise<AgentRequestUpdate> {
 		const { sessionManager, settingsManager, tools, hooks, systemPrompt } = this;
-		// The model this request is made with, built from the live row before anything else reads it,
-		// because the compaction decision below is measured against its context window and a threshold
-		// taken from a window the row had a moment ago would compact the wrong transcript. This is the
-		// whole of "an edit takes effect without reopening anything": the endpoint, the wire id, the
-		// window, and the key are read here, from the catalog, and never captured when the session was
-		// assembled. A row that is gone — deleted, or renamed under a session that was using it —
-		// leaves the choice as it is, and `unconfiguredStream` is what answers for that.
+		// 本次请求所用的模型，在任何东西读它之前从实时行构建，因为下面的压缩决策是按它的上下文窗口
+		// 计量的，而从片刻之前的窗口取的阈值会压缩错 transcript。这正是「一次编辑无需重开任何东西即
+		// 生效」的全部：端点、wire id、窗口、密钥在这里、从目录读，从不在会话装配时捕获。消失的行
+		// ——被删的，或在正被使用时改名的——让选择保持原样，替它作答的是 `unconfiguredStream`。
 		const catalog = settingsManager.modelCatalog();
 		const choice = modelChoiceOf(sessionManager, session, settingsManager, state.live.openedOn);
 		const model = modelFor(choice, catalog, transport);
-		// The choice this request is made with reaches the transcript here, at the moment a request
-		// is built from it — a session that never spoke is recorded by the first request it serves.
-		// It runs before the compaction decision below, which measures the prompt against this
-		// model's window.
+		// 本次请求所用的选择在这里、在由它构建请求的时刻抵达 transcript——从未说过话的会话由它服务的
+		// 第一个请求记录。它跑在下面的压缩决策之前，后者按本模型的窗口计量 prompt。
 		this.recordSelection(session, catalog, choice);
-		// One pass decides both what the request carries and whether it has to be summarized: the
-		// trigger, the clearing of stale tool results, and the summary all read the same entries, so the
-		// decision and the request cannot disagree about how large the prompt is.
+		// 一趟决定请求携带什么、以及是否必须摘要：触发器、过期工具结果的清理、摘要读的都是同一批
+		// entry，所以决策与请求不可能对 prompt 有多大各执一词。
 		const entries = await this.compactFor(
 			state,
 			session,
@@ -1647,19 +1495,16 @@ export class Agent {
 			signal,
 			model,
 		);
-		// The prompt is rebuilt here, not remembered: `applyConfig` can move the approval set and
-		// `setActiveTools` the tool set, and the model must be told about both on the next request.
-		// Both are derived from the ledger at this moment, so a choice that just landed is what the
-		// prompt describes.
+		// prompt 在这里重建、不被记住：`applyConfig` 能挪审批集、`setActiveTools` 能挪工具集，而模型
+		// 必须在下一个请求上被告知两者。两者都在此刻从账本派生，所以刚落下的选择就是 prompt 描述的
+		// 东西。
 		const toolState = toolStateOf(sessionManager, session, settingsManager, tools.names());
-		// The names this request is made for, in the one shape the chain after it judges a call with:
-		// the prompt and the declarations below read the same derivation, and the engine replaces its
-		// own copy with this one, so what the model was offered and what it may run cannot drift.
+		// 本次请求为之点名的名字，链上后续环节判断调用所用的唯一形状：prompt 与下面的声明读的是同一份
+		// 派生，引擎用它换掉自己的副本，所以模型被提供了什么与它可以运行什么不可能漂移。
 		const activeNames: ReadonlySet<string> = new Set(toolState.activeToolNames);
-		// The project instructions are read here, per request, rather than taken from the state: an
-		// edit to a file on disk is meant to reach the very next request, the same way an edit to a
-		// model row does, and the walk is a handful of stats. What it costs is a prompt that can change
-		// between two requests of one run — the tool set already can, for the same reason.
+		// 项目指示在这里、按请求读取，而不是从状态上取：磁盘文件的一次编辑应当抵达下一个请求，与
+		// 模型行的一次编辑相同，而这段走读只是几次 stat。它的代价是一段 prompt 可能在同一次运行的
+		// 两个请求之间变化——工具集出于同样的理由已经如此。
 		const agentsMd = await loadAgentsMd(session.sessionSetting.workDirAbsPath);
 		const prompt = systemPrompt(
 			session.sessionSetting.workDirAbsPath,
@@ -1667,44 +1512,39 @@ export class Agent {
 			toolState.activeToolNames,
 			approvalsOf(this.services, session),
 		);
-		// The tool results the request carries are read replay-side (`buildContextEntries` applied the
-		// ledger's own view records), so there is no per-request pass over them: a tool result in the
-		// ledger is already the version the model is served.
+		// 请求携带的工具结果按重放侧读取（`buildContextEntries` 已应用账本自己的视图记录），所以没有
+		// 按请求对它们的另一次遍历：账本里的工具结果已经是喂给模型的那个版本。
 		const injected = { sessionId: session.sessionId, messages: messagesOf(entries), systemPrompt: prompt };
 		const rewritten = await hooks.apply("context", injected);
-		// The leading system message is replaced rather than appended to, and every other system
-		// message is dropped: the prompt is rebuilt whole on this request, so a second one would
-		// describe a state that is already gone. A hook that wants to change the prompt returns
-		// `systemPrompt`; one that pushes a system message into `messages` loses it here.
+		// 开头的 system 消息被替换而不是追加，其余 system 消息被丢弃：prompt 在本次请求上整体重建，
+		// 第二条会描述一个已经不存在状态。想改 prompt 的 hook 返回 `systemPrompt`；往 `messages` 里
+		// push system 消息的 hook 会在这里失去它。
 		const system = createSystemMessage(rewritten?.systemPrompt ?? injected.systemPrompt);
-		// A compaction checkpoint is already the user turn it stands for — `sessionEntryToContextMessages`
-		// wraps the summary in tags — so the transcript goes to the provider as it is.
+		// 压缩检查点已经是它所代表的那个 user 轮次——`sessionEntryToContextMessages` 把摘要包进标签
+		// ——所以 transcript 原样交给供应商。
 		const conversation = pairLateToolResults((rewritten?.messages ?? injected.messages).filter((message) => message.role !== "system"));
 		return {
-			// Built above, from the row this request is made with: run-local, used for the one
-			// request, dropped.
+			// 在上面构建，来自本次请求所用的行：运行局部、用一次、丢弃。
 			model,
-			// The list the declarations below were cut from: the engine swaps its own copy for it, so
-			// the calls this answer issues are judged against the set the model was just offered.
+			// 下面那些声明是从它裁出的名单：引擎用它换掉自己的副本，所以这条答案发出的调用按模型刚被
+			// 提供的集合判断。
 			activeNames,
 			context: {
 				...context,
 				messages: system === undefined ? conversation : [system, ...conversation],
-				// The live set, taken from the one table by the choice derived above: the array is new per
-				// request, its elements are the table's own instances. The engine declares it on the
-				// request (`toToolDeclaration`) rather than reading it out of the transcript, so a tool
-				// switched on mid-session reaches the model on the next request and the two cannot drift.
+				// 实时的集合，从唯一那张表按上面派生的选择取出：数组每次请求新建，元素是表自己的实例。
+				// 引擎把声明放在请求上（`toToolDeclaration`）而不是从 transcript 里读，所以会话中途
+				// 开启的工具在下一次请求上抵达模型，两者不可能漂移。
 				tools: this.declaredTools(tools, activeNames),
 			},
 		};
 	}
 
 	/**
-	 * The tools one request declares: the names this request derived, looked up in the one table.
+	 * 一次请求声明的工具：本次请求派生的名字，到唯一那张表上查找。
 	 *
-	 * The array is rebuilt per request — a session can narrow or widen its set between two of them —
-	 * while its elements are the table's own instances, so two requests of one session, or two
-	 * sessions, hold the same objects (ADR-0016).
+	 * 数组按请求重建——会话可以在两次请求之间收窄或放宽集合——而元素是表自己的实例，所以同一会话的
+	 * 两次请求、或两个会话，持有相同的对象（ADR-0016）。
 	 */
 	private declaredTools(manager: ToolManager, names: Iterable<string>): Tool<any>[] {
 		const declared: Tool<any>[] = [];
@@ -1716,35 +1556,30 @@ export class Agent {
 	}
 
 	/**
-	 * The value objects this run's tools are called with: the working directory, read off the
-	 * session's own setting, and the bash timeouts, read off the settings the same way. Collected
-	 * once per run and carried by every call it makes — nothing here outlives the run that reads it.
+	 * 这次运行的工具被调用时所用的值对象：从会话自己的 setting 上读的工作目录，以同样方式从设置上读
+	 * 的 bash 超时。每次运行收集一次、由它发出的每次调用携带——这里没有任何东西活得比读它的那次
+	 * 运行久。
 	 */
 	private runContext(session: Session): ToolRunContext {
 		const workDirAbsPath = session.sessionSetting.workDirAbsPath;
 		return {
 			workDirAbsPath,
-			// Read live, like every other settings read: a timeout the user moved reaches the next
-			// run's calls without anything being reopened.
+			// 实时读取，与其他每次设置读取一样：用户挪过的超时抵达下一次运行的调用，无需重开任何东西。
 			bash: this.settingsManager.getBashSettings(workDirAbsPath),
 		};
 	}
 
 	/**
-	 * Write what this request is being made with into the session, once per move.
+	 * 把本次请求所用的东西写进会话，每次挪动一次。
 	 *
-	 * The model the request is built with is already the choice in force — the composer wrote it onto
-	 * the snapshot when it moved it (ADR-0019), so this only fills in what a gesture cannot know: the
-	 * wire id the row currently answers to, and the level normalized. It is therefore usually a
-	 * no-op, and when it is not, the write goes through a **fresh** bag rather than the run's: the
-	 * snapshot is rewritten whole, and a copy opened at the run's start would carry a choice someone
-	 * may have moved since. The two fields are set explicitly, so nothing else in the snapshot is
-	 * touched either way.
+	 * 请求所用的模型已经是生效中的选择——输入框挪动时已把它写上快照（ADR-0019）——所以这里只补手势
+	 * 无从得知的部分：该行此刻应答的 wire id，与规范化后的档位。因此它通常是一次空操作，而非空时，
+	 * 写入经过**全新的**袋而不是运行的那只：快照被整体重写，而在运行开始时打开的副本可能带着某个
+	 * 其后被人挪过的选择。两个字段都显式设置，所以快照里的其他东西无论哪种情况都不被触碰。
 	 *
-	 * The baseline it compares against is the file's, not a bag's — `recordedOnDisk` reads the
-	 * snapshot, so a run of turns on one selection costs one read and no write. A choice no row
-	 * answers records no row: there is no wire id to write, and the request it belongs to is about to
-	 * be refused by the transport rather than sent.
+	 * 它对比的基线是文件的、不是袋的——`recordedOnDisk` 读的是快照，所以同一选择上的多轮运行只花
+	 * 一次读、零次写。没有行应答的选择不记录行：没有 wire id 可写，而它所属的请求即将被传输层拒绝
+	 * 而非发送。
 	 */
 	private recordSelection(session: Session, catalog: readonly ModelConfig[], choice: ModelChoice): void {
 		const { sessionManager } = this;
@@ -1764,25 +1599,21 @@ export class Agent {
 	}
 
 	/**
-	 * Run one provider call through the retry policy, pumping it into the stream the engine reads.
+	 * 让一次供应商调用走一遍重试策略，把它泵进引擎读取的那条流。
 	 *
-	 * Retries live on the transport, below the engine, because an error response is a hard exit: the
-	 * engine emits `turn_end` and `agent_end` the moment a stream ends in `stopReason: "error"` and
-	 * returns, so there is no later turn in which a failed assistant message could be rewritten. Below
-	 * the engine the failed attempt is never a message at all: the transcript gains exactly one
-	 * assistant message, the store keeps none of the failures, and the next request has no leftover
-	 * error to explain.
+	 * 重试住在传输层、引擎之下，因为错误应答是一条硬出口：流以 `stopReason: "error"` 结束的那一刻
+	 * 引擎就发出 `turn_end` 与 `agent_end` 并返回，不存在一个更晚的轮次可供改写失败的 assistant
+	 * 消息。在引擎之下，失败的尝试根本不是消息：transcript 恰好获得一条 assistant 消息，store 不留
+	 * 任何失败，下一个请求没有需要解释的遗留错误。
 	 *
-	 * `retryAssistantCall` owns the classification, the backoff, and abort normalization — an abort
-	 * during the sleep comes back as an aborted message — so nothing here counts attempts or sleeps. It
-	 * wants `() => Promise<AssistantMessage>`, so each attempt is drained here and its events are
-	 * forwarded as they arrive; only the terminal event is decided after the attempt, because that is
-	 * what says whether this attempt is the one the engine gets to keep.
+	 * `retryAssistantCall` 拥有分类、退避与 abort 规范化——睡梦中被中止会变成 aborted 消息——所以
+	 * 这里既不数次数也不睡觉。它要 `() => Promise<AssistantMessage>`，所以每次尝试在这里被抽干、
+	 * 它的事件随到随转发；只有终局事件在尝试之后裁决，因为决定这次尝试是不是引擎能保住的那一次的，
+	 * 正是它。
 	 *
-	 * The engine must see exactly one `start`: on a retry the failed attempt already put a partial
-	 * message in its context, and a second `start` would append a second assistant message instead of
-	 * replacing the abandoned one. So `start` is forwarded once per request and the retried attempt's
-	 * deltas overwrite that same slot in place.
+	 * 引擎必须只见到一次 `start`：重试时失败的尝试已经往它的 context 放了一条 partial 消息，第二个
+	 * `start` 会追加第二条 assistant 消息而不是替换被弃的那条。所以每个请求 `start` 只转发一次，
+	 * 重试尝试的 delta 原地覆写同一个槽位。
 	 */
 	private async pumpAttempts(
 		state: AgentState,
@@ -1796,8 +1627,7 @@ export class Agent {
 		const live = state.live;
 		let started = false;
 		const produce = async (): Promise<AssistantMessage> => {
-			// A session with no row has nothing to send with, so it answers with the sentence that says
-			// what to do instead of a request to a placeholder endpoint.
+			// 没有行的会话没有可发送的东西，所以它以一句「该做什么」作答，而不是向占位端点发请求。
 			const inner =
 				settingsManager.modelCatalog().find((userModel) => userModel.name === model.name) === undefined
 					? unconfiguredStream(model)
@@ -1812,17 +1642,15 @@ export class Agent {
 			}
 			const message = await inner.result();
 			if (message.stopReason === "error" && isContextOverflow(message, model.contextWindow)) {
-				// Context overflow is compaction's problem, never transient: stop the retry loop before
-				// it can classify this as something worth trying again.
+				// 上下文溢出是压缩的问题、绝非瞬时的：在重试循环把它归类成值得再试的东西之前就拦住它。
 				throw new ContextOverflow(message);
 			}
 			return message;
 		};
 
-		// One read for the whole pump: the policy the retry loop enforces and the `maxAttempts` the
-		// `retry_start` event reports are the same answer, taken at the call site rather than stored —
-		// a settings edit mid-backoff lands with the next request, not this one. The counting matches
-		// `retryAssistantCall`'s own: retries, not calls.
+		// 整个泵读一次：重试循环执行的策略与 `retry_start` 事件报告的 `maxAttempts` 是同一个答案，在
+		// 调用点取而不是存起来——退避中途的设置编辑随下一个请求落地，而不是这一次。计数方式与
+		// `retryAssistantCall` 自己的一致：数重试，不数调用。
 		const retrySettings = settingsManager.getRetrySettings(session.sessionSetting.workDirAbsPath);
 		const maxAttempts = retrySettings.enabled ? retrySettings.maxRetries : 0;
 		let final: AssistantMessage;
@@ -1834,23 +1662,21 @@ export class Agent {
 				this.retryCallbacks(state, session, maxAttempts),
 			);
 		} catch (error) {
-			// A stream function that throws breaks the engine's contract, so it ends up as an error
-			// message here rather than as a rejected promise nobody is left to catch.
+			// 抛异常的流函数破坏了引擎的契约，所以在这里落成一条错误消息，而不是一个没人接的 rejected
+			// promise。
 			final = error instanceof ContextOverflow ? error.message : failureMessage(model, error);
 		}
-		// A retry the policy never announced an end for — the run was cut short above — still has to
-		// close, or `isRetrying` would outlive the run.
+		// 策略从未宣布结束的重试——运行在上方被砍短——仍要收口，否则 `isRetrying` 会活得比运行久。
 		if (live.retrying) this.endRetry(state, session, false, live.retryAttempt, final.errorMessage);
 		pushTerminal(outer, final);
 		outer.end();
 	}
 
 	/**
-	 * The three notifications `retryAssistantCall` makes, mapped one-to-one onto session events.
+	 * `retryAssistantCall` 发出的三个通知，一一映射到会话事件。
 	 *
-	 * `maxAttempts` arrives from the pump — the one read of the policy this run's retries answer to —
-	 * because the callback the policy makes for `retry_start` carries no policy of its own, and
-	 * nothing here stores the answer between events.
+	 * `maxAttempts` 由泵递入——这次运行的重试所依据的对策略的唯一一次读取——因为策略为 `retry_start`
+	 * 调用的回调不自带策略，这里也不在事件之间存那个答案。
 	 */
 	private retryCallbacks(state: AgentState, session: Session, maxAttempts: number): RetryCallbacks {
 		const live = state.live;
@@ -1880,7 +1706,7 @@ export class Agent {
 		};
 	}
 
-	/** Leave the retrying state and say how the retry ended. */
+	/** 退出重试状态，说明重试是如何结束的。 */
 	private endRetry(
 		state: AgentState,
 		session: Session,
@@ -1894,34 +1720,30 @@ export class Agent {
 		publishState(state, session, this.services);
 	}
 
-	// ---------------------------------------------------------------------------- compaction
+	// ---------------------------------------------------------------------------- 压缩
 
+	// ---------------------------------------------------------------------------- 压缩
 
 	/**
-	 * Shrink the context before the next request, and answer with the entries that request should carry.
+	 * 在下一个请求之前收缩上下文，以该请求应携带的 entry 作答。
 	 *
-	 * Three steps, cheapest first. The trigger is this session's own model's window minus a fixed reserve,
-	 * so the same transcript compacts under a small-window model and does not under a large one. When it
-	 * fires, the recorded arguments of the heavy tools are shortened first — the bodies a `write` or an
-	 * `edit` carried live in the files they changed, so dropping them from the view costs nothing and no
-	 * request. Then results that can be fetched again are cleared if the provider has probably forgotten
-	 * the cache — an hour without a request means the prompt is being paid for in full, and what a tool
-	 * can reproduce is the next cheapest thing to lose. Only if that is still not enough is the
-	 * transcript folded into a summary, which costs a request; nothing is kept verbatim but the turn in
-	 * flight.
+	 * 三步，最便宜的先行。触发器是本会话自己模型的窗口减去一个固定储备，所以同一份 transcript 在小
+	 * 窗口模型下压缩、在大窗口模型下不压。触发后，重型工具被记录的参数先被截短——`write` 或 `edit`
+	 * 携带的正文已经活在它们改过的文件里，把它们从视图里丢掉不花任何东西、也不花任何请求。然后，若
+	 * 供应商大概已忘记缓存，把可重取的结果清空——一小时没有请求，意味着 prompt 正在被全额付费，而
+	 * 工具能复现的东西是仅次于最便宜的损失。只有这样仍不够，才把 transcript 折成摘要，那要花一次
+	 * 请求；除进行中的那一轮外什么都不逐字保留。
 	 *
-	 * Both steps before the summary are *recorded*, not held in memory: `appendTrimToolCallArgs` and
-	 * `appendClearToolResults` name the entries, and the store's own view applies them from then on.
-	 * So a resumed process, the next request in the run, and the window all read one transcript
-	 * instead of each re-deciding.
+	 * 摘要之前的两步都是*被记录的*，不留在内存里：`appendTrimToolCallArgs` 与 `appendClearToolResults`
+	 * 点名那些 entry，store 自己的视图从此施加它们。于是恢复的进程、运行中的下一个请求、窗口读到的
+	 * 都是同一份 transcript，而不是各判各的。
 	 *
-	 * A summary that cannot be produced leaves the transcript exactly as it was and is reported rather
-	 * than thrown: compaction is an optimization, and failing the turn over it would replace a clear
-	 * context-overflow error with a mysterious crash inside the request path.
+	 * 造不出的摘要让 transcript 原封不动、以报告而非抛出收场：压缩是一项优化，为它失败一轮，会把
+	 * 一个清晰的上下文溢出错误换掉成请求路径内部的一场莫名崩溃。
 	 *
-	 * Returns the entries to send: the ones it was given when no step changed anything, the store's view
-	 * after whichever step was enough, and that view again once a checkpoint was written. The counts are
-	 * reported by the `tool_call_args_trimmed`, `tool_results_cleared`, and `compaction` events, not by this answer.
+	 * 返回要发送的 entry：没有任何一步改变东西时是原样进来的那些，走完足够的一步后是 store 的视图，
+	 * 写过检查点后仍是那个视图。计数由 `tool_call_args_trimmed`、`tool_results_cleared` 与
+	 * `compaction` 事件报告，不由这个答案报告。
 	 */
 	private async compactFor(
 		state: AgentState,
@@ -1941,13 +1763,11 @@ export class Agent {
 		const cleared = this.clearStaleToolResults(state, session, trimmed, now);
 		if (!shouldCompact(messagesOf(cleared), threshold)) return cleared;
 
-		// The one completion compaction makes: the same model the turn is on, with the summary
-		// instructions. It is the caller's model — the one this request is built from — so the summary
-		// carries the same key, endpoint, and window as the conversation it summarizes rather than
-		// reaching for a second configuration.
+		// 压缩唯一完成的一件事：与那一轮相同的模型，带着摘要指令。它是调用方的模型——本次请求构建所
+		// 用的那一个——所以摘要携带与它所概括的对话相同的密钥、端点与窗口，而不是另起一份配置。
 		const summarize: Summarize = async (request) => {
-			// The same absence a turn meets: a session with no row answers with the sentence that says what
-			// to add, rather than sending a summary request to a placeholder endpoint.
+			// 与一轮会碰到的同一个缺席：没有行的会话以一句「该加什么」作答，而不是向占位端点发摘要
+			// 请求。
 			if (settingsManager.modelCatalog().find((userModel) => userModel.name === model.name) === undefined) {
 				return unconfiguredStream(model).result();
 			}
@@ -1956,11 +1776,11 @@ export class Agent {
 			];
 			return model
 				.stream({ messages, system: createSystemMessage(request.systemPrompt), tools: [] }, {
-					// The row's key, said here rather than only carried on the model: this is the one call
-					// that does not travel through the engine, and the engine is what copies the key into options.
+					// 行的密钥，在这里说出而不是只由模型携带：这是唯一不经引擎的一次调用，而把密钥抄进
+					// options 的正是引擎。
 					apiKey: model.apiKey,
 					maxTokens: request.maxTokens,
-					// A one-off summary is never sent again, so paying to cache it would buy nothing.
+					// 一次性的摘要不会再发第二次，为它付缓存的费用买不到任何东西。
 					cacheRetention: "none",
 					...(request.signal === undefined ? {} : { signal: request.signal }),
 				})
@@ -1971,9 +1791,8 @@ export class Agent {
 		try {
 			outcome = await compactTranscript(cleared, model, summarize, signal);
 		} catch (error) {
-			// An abort is not a compaction failure: the run is ending, and the transcript simply keeps the
-			// history it already had. Anything else is worth saying out loud, because the next request may
-			// then be the one that overflows.
+			// abort 不是压缩失败：运行正在结束，transcript 简单地保留它已有的历史。其余的值得大声说
+			// 出来，因为下一个请求可能就是溢出的那一个。
 			if (signal?.aborted !== true) {
 				emitEvent(state, {
 					type: "compaction_failed",
@@ -1991,8 +1810,8 @@ export class Agent {
 			outcome.tokensBefore,
 			outcome.usage,
 		);
-		// Published after the transcript moved, so a listener that reacts reads back the same numbers:
-		// `summarized` is what this pass folded in, `contextTokens` is what the provider will now be sent.
+		// 在 transcript 移动之后发布，让作出反应的监听者读回相同的数字：`summarized` 是这一趟折进去
+		// 的东西，`contextTokens` 是供应商接下来将收到的东西。
 		const compacted = sessionManager.buildContextEntries(session);
 		emitEvent(state, {
 			type: "compaction",
@@ -2006,14 +1825,12 @@ export class Agent {
 	}
 
 	/**
-	 * Shorten the recorded arguments of the heavy tools, and record it.
+	 * 截短重型工具被记录的参数，并记录这件事。
 	 *
-	 * This is the cheapest step compaction has: no request, and no clock to wait out — the bodies a
-	 * `write` or an `edit` carried are already in the files they changed, so the view loses nothing the
-	 * the files they changed, so the view loses nothing the machine does not hold. It is also the
-	 * reason this runs before the clear rather than beside it:
-	 * the clear needs an expired cache to be worth its cache invalidation, and this does not, because
-	 * when the transcript is over the trigger the next request is in trouble whatever the cache says.
+	 * 这是压缩里最便宜的一步：不发请求、不用等时钟——`write` 或 `edit` 携带的正文已经落在它们改过的
+	 * 文件里，视图丢掉它们不会失去机器不持有的任何东西。这也是它跑在清理之前、而不是与它并列的原因
+	 * ：清理要有过期的缓存才值得它的缓存失效，而这不需要——当 transcript 超过触发线时，无论缓存
+	 * 怎么说，下一个请求都已在麻烦之中。
 	 */
 	private trimRecordedArgs(
 		state: AgentState,
@@ -2037,11 +1854,10 @@ export class Agent {
 	}
 
 	/**
-	 * Clear what can be fetched again, and record it, when the provider has probably dropped the cache.
+	 * 当供应商大概已丢弃缓存时，清掉可重取的东西，并记录这件事。
 	 *
-	 * A warm cache is the reason not to do this: rewriting the middle of a prompt the provider has
-	 * already read costs more than the tokens it saves, which is why the summary — one deliberate
-	 * invalidation that shrinks the transcript for good — is the answer for a warm transcript.
+	 * 温热的缓存正是不这么做的理由：重写供应商已经读过的 prompt 中段，代价超过它省下的 token——
+	 * 这正是摘要（一次有意为之、把 transcript 永久缩小的失效）成为温热 transcript 的答案的原因。
 	 */
 	private clearStaleToolResults(
 		state: AgentState,
@@ -2067,19 +1883,17 @@ export class Agent {
 		return view;
 	}
 
-	// ---------------------------------------------------------------------------- the run's event half
+	// ---------------------------------------------------------------------------- 运行的事件半
 
 	/**
-	 * Run the `before_tool` hooks.
+	 * 运行 `before_tool` hooks。
 	 *
-	 * The engine's seam can block a call, suspend one, or let it through, so those are the decisions
-	 * that reach it: an `args` refinement goes as far as the handlers registered after this one. A
-	 * suspend comes from the approval gate, and it is the whole end-restart move (ADR-0006 §5): the
-	 * engine ends the run at that call without writing a result, the call dangles in the ledger, and
-	 * the answer that arrives over REST starts the recovery run that closes it.
+	 * 引擎的这条接缝可以阻止一个调用、挂起一个、或放行，所以能到达它的就是这些裁决：`args` 的精修
+	 * 会走到注册在这之后的处理器。suspend 来自审批闸门，它是完整的结束重启动作（ADR-0006 §5）：引擎
+	 * 在那个调用处结束运行、不写结果，调用在账本里悬空，经 REST 抵达的答案启动关闭它的恢复运行。
 	 *
-	 * The gate's own answer is the effective approval map, which the default handler reads through
-	 * `authorize` — the same merge the snapshot and the prompt describe, so the three cannot disagree.
+	 * 闸门自己的答案是生效中的审批映射，默认处理器经 `authorize` 读它——与快照和 prompt 描述的是同
+	 * 一个合并，所以三者不可能各执一词。
 	 */
 	private async beforeTool(
 		sessionId: string,
@@ -2098,13 +1912,11 @@ export class Agent {
 	}
 
 	/**
-	 * Run the `after_tool` hooks. Their answer is final.
+	 * 运行 `after_tool` hooks。它们的答案是定稿。
 	 *
-	 * The engine builds the transcript message from what this returns, and the message is written with
-	 * exactly that content: a rewrite is a decision about the one version of the result that will ever
-	 * exist, made the moment the result does. A hook that means to bound a result archives the full
-	 * text itself (`archiveToolResult`, `context/spill.ts`) and puts the path in what it returns; the
-	 * write boundary's backstop below still catches a result nobody bounded.
+	 * 引擎以它返回的东西构建 transcript 消息，消息带着恰是那个内容写下：改写是对这个结果唯一会存在
+	 * 的版本的一次裁决，在结果诞生的那一刻作出。想约束结果的 hook 自己归档全文（`archiveToolResult`、
+	 * `context/spill.ts`）并把路径放进它返回的东西；下面写边界的兜底仍会接住没人约束过的结果。
 	 */
 	private async afterTool(
 		sessionId: string,
@@ -2125,12 +1937,11 @@ export class Agent {
 	}
 
 	/**
-	 * Drain one queue, writing each message to the transcript the moment it is taken.
+	 * 排空一条队列，把每条消息在取走的那一刻写进 transcript。
 	 *
-	 * The write rides the drain rather than the engine's echo of it: taking a message off the queue is
-	 * the moment the run takes responsibility for it, so the ledger gains it there and the gap where
-	 * a message was neither queued nor stored never opens. The echo never persists user messages, so
-	 * nothing has to mark these as already written.
+	 * 写搭在 drain 上、而不是搭在引擎的回显上：把消息从队列上拿下来，正是运行对它担起责任的时刻，
+	 * 所以账本在那里获得它，「既不在队列里也不在存储里」的缝隙永远不会打开。回显从不落盘 user 消息，
+	 * 所以没有什么需要被标记为已写。
 	 */
 	private drainTranscribed(queue: PendingMessageQueue, state: AgentState, session: Session): Message[] {
 		const messages = queue.drain();
@@ -2141,19 +1952,17 @@ export class Agent {
 	}
 
 	/**
-	 * The engine's sink: persist what the run reports, and pass it on.
+	 * 引擎的 sink：落盘运行报告的东西，并把它传下去。
 	 *
-	 * This is the one listener a run has — the engine awaits it, which is what makes a run settle only
-	 * after its writes landed — and the run's transients are this handler's closure rather than
-	 * anything on the session. It is the successor of the `Loop.subscribe` callback the engine used to
-	 * be handed, and it is why the engine needs no listener registry of its own.
+	 * 这是运行唯一的监听者——引擎 await 它，这正是运行只在写入落地之后才算安顿的原因——运行的瞬态
+	 * 是这个处理器的闭包，而不是会话上的任何东西。它是引擎曾被递入的 `Loop.subscribe` 回调的继任者，
+	 * 也是引擎不需要自己的监听者注册表的原因。
 	 */
 	private async dispatchEvent(state: AgentState, session: Session, event: AgentEvent): Promise<void> {
 		const live = state.live;
 		if (event.type === "message_update") {
-			// The hot path: one event per provider delta. Keep the running message for a baseline that
-			// has to hand a mid-run attach the text it missed, and publish only what moved since the
-			// last frame. Nothing is written here — the message is persisted when it ends.
+			// 热路径：每个供应商 delta 一个事件。留住运行中的消息，供必须把错过的文本交给中途挂上来的
+			// 用户的 baseline 使用；只发布自上一帧以来动了的部分。这里什么都不写——消息结束时才落盘。
 			live.partial = event.message;
 			const delta = messageDeltaOf(event);
 			if (delta !== undefined) emitEvent(state, { type: "message_update", delta });
@@ -2161,23 +1970,20 @@ export class Agent {
 		}
 		if (event.type === "message_end" || event.type === "agent_end") live.partial = undefined;
 		if (event.type === "message_end") {
-			// The echo never persists a user message: every one of them reached the engine already
-			// written — the prompt before the run started, a queued message at the drain. Everything
-			// else the engine announces has no other writer and is written here as it stands —
-			// the content is final by the time it lands (the write boundary is the last rewrite).
+			// 回显从不落盘 user 消息：每一条到达引擎时都已经写好——运行开始前的 prompt，取走时的排队
+			// 消息。引擎通告的其余东西没有别的写者，在这里按现状写下——落到这里时内容已是定稿（写边界
+			// 是最后一次改写）。
 			if (event.message.role !== "user") {
 				appendMessageEntry(state, session, this.sessionManager, event.message);
 			}
 		}
 		if (event.type === "agent_end" && !live.suspended) {
-			// A message still queued is one the run never reached — an abort, a failure, a prompt that
-			// arrived in the moment the engine stopped looking. Nothing will drain it, and the send
-			// contract is fire-and-forget: it goes with the run, and the queues empty so the depth
-			// falls to zero, which is what `settle()` waits on. See `dropQueued`.
+			// 仍在队列里的消息是运行从未抵达的——一次 abort、一场失败、一条恰在引擎停止寻找的时刻到达
+			// 的 prompt。没有人会取走它，而发送契约是 fire-and-forget：它随运行而去，队列清空、深度
+			// 归零，这正是 `settle()` 所等的。见 `dropQueued`。
 			//
-			// A run the gate ended is the one exception, and it is checked here rather than only in
-			// `run`'s `finally` because this fires first: the recovery run drains what this one
-			// leaves behind, so the depth stays up and the window keeps showing it.
+			// 被闸门结束的运行是唯一的例外，在这里检查而不只在 `run` 的 `finally` 里，因为这里先触发：
+			// 恢复运行会取走这一次留下的东西，所以深度保持不降、窗口继续显示它。
 			if (dropQueued(state)) emitQueueUpdate(state);
 		}
 		emitEvent(state, event);
@@ -2188,10 +1994,10 @@ export class Agent {
 }
 
 /**
- * The approval keys whose value differs, or undefined when none do.
+ * 取值有差异的审批键，没有差异时为 undefined。
  *
- * `config_changed` carries only what moved, so an `applyConfig` that re-sends the current settings —
- * which is what a reconnect or an unchanged form does — must not claim anything changed.
+ * `config_changed` 只携带动过的东西，所以一次重发当前设置的 `applyConfig`——重连或未改动的表单正是
+ * 这样做的——不得声称任何东西变了。
  */
 function changedApprovals(
 	before: Record<string, boolean>,
@@ -2207,34 +2013,30 @@ function changedApprovals(
 	return moved ? changed : undefined;
 }
 
-// ---------------------------------------------------------------------------- the engine's machinery
+// ---------------------------------------------------------------------------- 引擎机件
 //
-// Everything below is stateless: a turn's stream, a tool batch, the recovery pass, and the shapes
-// they pass between themselves. It runs outside any instance and takes the two tool-call gates as
-// the run's own `ToolCallHooks`, which is why it is a set of functions rather than more methods.
-// The recovery machine is exported because it is a contract a smoke drives directly (ADR-0006 §5);
-// the rest is private to this file.
+// 下面的一切都是无状态的：一轮的流、一个工具批、恢复遍，以及它们之间传递的形状。它在任何实例之外
+// 运行，把两个工具调用闸门当作运行自己的 `ToolCallHooks`，这正是它是一组函数而不是更多方法的原因。
+// 恢复机件被导出，因为它是 smoke 直接驱动的契约（ADR-0006 §5）；其余为本文件私有。
 
-/** Where one run's events go. Awaited, so a run settles only after what it emitted has been handled. */
+/** 一次运行的事件去向。被 await，所以运行只在它发出的东西被处理完之后才安顿。 */
 type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
 type ExecutedToolCallBatch = {
 	messages: ToolResultMessage[];
 	terminate: boolean;
 	/**
-	 * The gate suspended the batch: the call it stopped on and every call after it have no result,
-	 * and the run ends without another request — the answer the gate waits for comes from outside
-	 * any run, and the host resumes the calls through a recovery run.
+	 * 闸门挂起了这个批：它停下的那个调用与其后的每个调用都没有结果，运行不再发请求就结束——闸门
+	 * 等的答案从任何运行之外抵达，宿主经一次恢复运行续上这些调用。
 	 */
 	suspended?: boolean;
 };
 
 /**
- * A call that passed the gate and the schema: what to run, with which arguments.
+ * 一个过了闸门与 schema 的调用：跑什么、用哪些参数。
  *
- * It names the tool and carries the arguments; it does not carry the tool object. Execution resolves
- * the name against the table again, so what runs is the table's instance rather than a reference
- * taken earlier (the table is append-only, so the two are the same object — `ToolManager.execute`).
+ * 它点名工具并携带参数；不携带工具对象。执行时再对表解析一次名字，所以跑的是表的实例而不是早先
+ * 取到的引用（表是只增的，两者本就是同一对象——`ToolManager.execute`）。
  */
 type PreparedToolCall = {
 	kind: "prepared";
@@ -2262,14 +2064,12 @@ type ToolUpdateSink = (partialResult: ToolResult<unknown>) => Promise<void> | vo
 type FinalizedToolCallEntry = ToolCallOutcome | (() => Promise<ToolCallOutcome>);
 
 /**
- * Stream one assistant response from the model, into the transcript and out through the sink.
+ * 从模型流式读取一条 assistant 响应，进 transcript、出 sink。
  *
- * The model carries its own transport — the run's retry-wrapping one — so this asks the model it was
- * handed and the request is authed with exactly the key that model carries. Tools reach the request
- * as a parameter, not as a message, so the set this request offers is declared here:
- * `toToolDeclaration` keeps the name, description, and schema and drops the rest. The system prompt
- * stays where the caller put it — a leading system message — and the transport reads it from there
- * when the request carries no explicit `system`.
+ * 模型自带传输层——运行那个包着重试的——所以这里问的是被递入的模型，请求以该模型携带的密钥认证。
+ * 工具作为参数、而不是作为消息抵达请求，所以这次请求提供的集合在这里声明：`toToolDeclaration`
+ * 保留名字、描述与 schema，丢掉其余。system prompt 留在调用方放它的地方——开头的 system 消息——
+ * 请求不带显式 `system` 时传输层从那里读。
  */
 async function streamAssistantResponse(
 	context: Context,
@@ -2286,10 +2086,9 @@ async function streamAssistantResponse(
 		apiKey: model.apiKey,
 		signal,
 	});
-	// Record the requested level, whichever stream function answered. It is read off the model the
-	// request was made with, so the transcript cannot report a strength the wire never carried.
-	// A thunk, not a value: the stream only has a final message once it is drained, and both exits
-	// below ask for it after the loop has seen the terminal event.
+	// 记录被要求的档位，无论哪个流函数作了答。从请求所用的模型上读，所以 transcript 不会报告一个
+	// wire 从未携带过的强度。是 thunk 而不是值：流被抽干之后才有最终消息，下面两个出口都在循环见过
+	// 终局事件之后要它。
 	const settled = async () =>
 		Object.assign(await response.result(), { thinkingLevel: model.thinkingLevel ?? "off" });
 
@@ -2354,11 +2153,10 @@ async function streamAssistantResponse(
 }
 
 /**
- * Fail all tool calls from an assistant message that was truncated by the output token limit.
+ * 判一条被输出 token 上限截断的 assistant 消息里所有工具调用失败。
  *
- * Streamed tool-call arguments are finalized with a best-effort JSON salvage parser, so a truncated
- * message can yield tool calls whose arguments parse and validate but are silently incomplete. None of
- * them are safe to execute; report each as an error so the model can re-issue them.
+ * 流式工具调用参数由尽力而为的 JSON 抢救解析器定稿，所以被截断的消息可能给出参数能解析、能过校验、
+ * 但暗中不完整的工具调用。它们没有一个可以安全执行；逐个报错，让模型重新发出。
  */
 async function failToolCallsFromTruncatedMessage(
 	toolCalls: ToolCall[],
@@ -2387,32 +2185,30 @@ async function failToolCallsFromTruncatedMessage(
 	return { messages, terminate: false };
 }
 
-/** One tool call the transcript still waits on: the call block, and the message that issued it. */
+/** transcript 仍在等的一个工具调用：调用块，与发出它的那条消息。 */
 export type DanglingToolCall = {
 	toolCall: ToolCall;
 	assistantMessage: AssistantMessage;
 };
 
 /**
- * The instance a run may call by this name, if it may call it at all.
+ * 一个运行可凭这个名字调用的实例，前提是它真的可以调用。
  *
- * The one place the two questions are asked, and in this order: the run's list says whether this
- * session may use the name now, and only then does the table hand back an instance. The table holds
- * every tool (ADR-0016), so asking it alone would resolve a name the session has switched off — the
- * list is what keeps a switched-off tool from being run. `undefined` is the answer both callers treat
- * as "not a call this run makes": one closes it with the error an unknown name has always got, the
- * other leaves its mode out of the batch's scheduling decision.
+ * 这是唯一同时问出两个问题的地方，且按这个顺序：运行的名单先说本会话现在是否可用这个名字，然后
+ * 表才交回实例。表装着全部工具（ADR-0016），只问它会解析出一个会话已关掉的名字——名单正是拦住
+ * 已关工具被运行的原因。`undefined` 是两个调用方都当作「不是本次运行会做的调用」的答案：一个以
+ * 未知名字一贯得到的那条错误关闭它，另一个让它的模式不参与批的调度决策。
  */
 function activeTool(manager: ToolManager, activeNames: ReadonlySet<string>, name: string): Tool<any> | undefined {
 	return activeNames.has(name) ? manager.get(name) : undefined;
 }
 
 /**
- * The tool calls in a context that no tool-result message answers, in transcript order.
+ * context 里没有工具结果消息回答的工具调用，按 transcript 顺序。
  *
- * A call dangles when its run ended before the result landed — a crash, or the end-restart approval
- * gate, which leaves the call it stopped on unanswered on purpose. Either way a provider request that
- * carries it is illegal, which is why every run closes what it finds before its first request.
+ * 调用悬空，是它的运行在结果落地之前就结束——一场崩溃，或结束重启的审批闸门，它有意让自己停下的
+ * 调用无人回答。无论哪种，携带它的供应商请求都是非法的，这正是每次运行都在第一个请求之前关闭它
+ * 找到的东西的原因。
  */
 export function danglingToolCallsOf(messages: Message[]): DanglingToolCall[] {
 	const calls: DanglingToolCall[] = [];
@@ -2432,25 +2228,20 @@ export function danglingToolCallsOf(messages: Message[]): DanglingToolCall[] {
 }
 
 /**
- * Close the dangling calls a run was entered with, before its first request.
+ * 在第一个请求之前，关闭运行带着进来的悬空调用。
  *
- * The recovery machine of the end-restart architecture (ADR-0006 §5): an answer closes the call with
- * itself — a grant re-runs the call through the same steps a live batch uses (gate, validation,
- * execution, `afterToolCall`), so the resumed call is indistinguishable from one the model just
- * issued; a denial synthesizes the result its reason names. A call no answer names is closed with a
- * synthesized error result while `enablePendingToolRecovery` allows it. Every closed call emits the
- * events its counterpart in a live batch would, so the window and the store learn of it the same way
- * as any other tool result.
+ * 结束重启架构的恢复机件（ADR-0006 §5）：答案用它自己关闭调用——grant 让调用走与活跃批相同的步骤
+ * 重跑（闸门、校验、执行、`afterToolCall`），所以恢复的调用与模型刚发出的无从区分；deny 合成它的
+ * reason 点名的结果。没有答案点名的调用，在 `enablePendingToolRecovery` 允许时以合成的错误结果
+ * 关闭。每个被关闭的调用发出活跃批中的对应者会发出的事件，所以窗口与 store 获知它的方式与其他
+ * 工具结果一样。
  *
- * A gate that suspends again mid-recovery — the grant this run resumed on did not actually clear it —
- * stops the recovery where it stands: the remaining calls stay dangling and the caller ends the run
- * without a request, exactly as a live batch's suspend does.
+ * 恢复中途再次挂起的闸门——本次运行据以恢复的 grant 并未真正过闸——让恢复原地停下：其余调用保持
+ * 悬空、调用方不发请求结束运行，恰如活跃批的 suspend。
  *
- * Exported because it is the one part of the engine a host can drive without a run: the smoke that
- * pins this contract calls it with a transcript, a set of answers, and the table the calls run
- * against — no orchestrator, no run of its own. The resume is a run of its own, so the table, the
- * run's active names, and the run values arrive the way they do everywhere else on this chain: as
- * arguments, not through the context.
+ * 导出，因为它是引擎里宿主可以不用一次运行就驱动的唯一部分：钉住这份契约的 smoke 用一份 transcript、
+ * 一组答案、与调用所依据的表调用它——没有编排层、没有自己的运行。恢复本身是一次运行，所以表、
+ * 运行的活跃名单与运行值像这条链上处处一样以实参抵达：不经过 context。
  */
 export async function recoverPendingToolCalls(
 	currentContext: Context,
@@ -2499,8 +2290,7 @@ export async function recoverPendingToolCalls(
 			messages.push(toolResultMessage);
 			continue;
 		}
-		// Toggle off is the host taking the calls into its own hands: they go to the provider
-		// unanswered, and nothing is synthesized for them here.
+		// 关掉开关是宿主亲自接管这些调用：它们原样发给供应商，这里不为它们合成任何东西。
 		if (answer === undefined && !enabled) continue;
 		const text =
 			answer !== undefined
@@ -2511,7 +2301,7 @@ export async function recoverPendingToolCalls(
 	return { messages, terminate: true };
 }
 
-/** Close one unanswered call with a synthesized error result, carrying the events of a live batch. */
+/** 用合成的错误结果关闭一个未答调用，带上活跃批会带的事件。 */
 async function synthesizeToolResult(
 	toolCall: ToolCall,
 	text: string,
@@ -2535,14 +2325,13 @@ async function synthesizeToolResult(
 }
 
 /**
- * Execute the tool calls one assistant message issued: sequential when any of them says so, parallel
- * otherwise. Both paths prepare the calls in source order and write their results as messages.
+ * 执行一条 assistant 消息发出的工具调用：其中任何一个如此说时就串行，否则并行。两条路径都按源顺序
+ * 准备调用、把结果写成消息。
  *
- * The mode is read off the table rather than off what the request declared: a call's behaviour is a
- * property of the tool, and the table is where the tool lives. It is read only for the calls this run
- * may make — a name the session has switched off is answered with an error before it starts, so
- * letting its mode decide would schedule the batch around a call that never runs (a disabled `bash`
- * turning a read batch sequential is the case that made this a judgement and not a lookup).
+ * 模式从表上读、而不是从请求声明的东西上读：一个调用的行为是工具的属性，而表是工具住的地方。只为
+ * 本次运行可调用的调用读它——会话已关掉的名字在开始之前就以错误作答，否则让它的模式参与调度，会
+ * 让整批围绕一个永不运行的调用安排（一个被禁用的 `bash` 把读批变成串行，正是让它成为一个判断而非
+ * 一次查找的案例）。
  */
 async function executeToolCalls(
 	currentContext: Context,
@@ -2579,9 +2368,8 @@ async function executeToolCallsSequential(
 	const messages: ToolResultMessage[] = [];
 
 	for (const toolCall of toolCalls) {
-		// Prepared before it is announced: a suspended call is announced never — the gate ended the
-		// run at it, no result is written, and the events stay silent so the window shows no card for
-		// a call that never ran. The call and everything after it in the batch stay unanswered.
+		// 在被通告之前准备：被挂起的调用从不被通告——闸门在它那里结束了运行，不写结果，事件保持
+		// 沉默，窗口不会为一个从未运行的调用显示卡片。该调用与批中它之后的一切保持未答。
 		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, manager, activeNames, signal);
 		if (preparation.kind === "suspended") {
 			return { messages, terminate: true, suspended: true };
@@ -2650,9 +2438,8 @@ async function executeToolCallsParallel(
 	let suspended = false;
 
 	for (const toolCall of toolCalls) {
-		// Prepared before it is announced, as in the sequential path: a suspended call gets no events
-		// and no result, and the calls after it are not prepared either. The calls already queued
-		// above run to completion — they were underway when the gate answered.
+		// 与串行路径一样在被通告之前准备：被挂起的调用得不到事件也得不到结果，其后的调用也不再准备。
+		// 上面已排队的调用跑完自己——闸门作答时它们已在途中。
 		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, manager, activeNames, signal);
 		if (preparation.kind === "suspended") {
 			suspended = true;
@@ -2748,14 +2535,12 @@ function prepareToolCallArguments(tool: Tool<any>, toolCall: ToolCall): ToolCall
 }
 
 /**
- * Resolve one call's tool and take it through the steps that precede execution.
+ * 解析一个调用的工具，带它走完执行之前的各步。
  *
- * The instance comes from {@link activeTool}, which asks the run's list before the table: a name the
- * session has switched off resolves to nothing here and is refused with the sentence an unknown name
- * always got — the one place that produces it, before the gate, because a call nobody can run is not a
- * call to ask permission for. `prepareArguments` and the schema validation then read the fields of the
- * resolved instance, so the shim the model's arguments are shaped by and the code that runs them are
- * the same object.
+ * 实例来自 {@link activeTool}，先问运行的名单再问表：会话已关掉的名字在这里解析成空、以未知名字
+ * 一贯得到的那句话拒绝——产生它的唯一地方在闸门之前，因为没人能运行的调用不是该去请求许可的调用。
+ * `prepareArguments` 与 schema 校验随后读已解析实例的字段，所以模型参数被它塑形的 shim 与运行它们
+ * 的代码是同一个对象。
  */
 async function prepareToolCall(
 	currentContext: Context,
@@ -2795,9 +2580,8 @@ async function prepareToolCall(
 					isError: true,
 				};
 			}
-			// The gate ended the run at this call: no result is written for it here — the caller sees
-			// `suspended` on the batch and ends the run, and a recovery run closes the call from the
-			// answer that arrives later. `block` alongside it would write a result, so suspend wins.
+			// 闸门在这个调用处结束了运行：这里不为它写结果——调用方在批上看到 `suspended`、结束运行，
+			// 恢复运行以稍后抵达的答案关闭调用。与它并存的 `block` 会写结果，所以 suspend 胜出。
 			if (beforeResult?.suspend === true) {
 				return { kind: "suspended" };
 			}
@@ -2845,31 +2629,29 @@ function emitToolExecutionUpdate(toolCall: ToolCall, emit: AgentEventSink): Tool
 		});
 }
 
-/** Options for {@link runToolCall}. */
+/** {@link runToolCall} 的 options。 */
 interface RunToolCallOptions extends ToolCallHooks {
-	/** The table the nested call resolves and runs against. */
+	/** 嵌套调用解析与执行所依据的表。 */
 	manager: ToolManager;
-	/** The names the run this call belongs to may use; a nested call outside them is refused. */
+	/** 本调用所属的运行可用的名字；名单之外的嵌套调用被拒绝。 */
 	activeNames: ReadonlySet<string>;
-	/** This call's run values: the directory it acts in and the bash timeouts it runs under. */
+	/** 本调用自己的运行值：它施展的目录与它运行在下的 bash 超时。 */
 	run: ToolRunContext;
-	/** Passed to the hooks as the message that issued the call. */
+	/** 作为发出该调用的消息递给 hooks。 */
 	assistantMessage: AssistantMessage;
-	/** Passed to the hooks as the current agent context. */
+	/** 作为当前 agent context 递给 hooks。 */
 	context: Context;
 	signal?: AbortSignal;
 	onUpdate?: ToolUpdateSink;
 }
 
 /**
- * Run one tool call through the same steps as a model-issued call: argument preparation, schema
- * validation, `beforeToolCall`, execution, and `afterToolCall`. Emits no events and adds no
- * messages. Tools that call other tools use this so the hooks (for example permission checks)
- * apply to those calls too.
+ * 让一个工具调用走与模型发出的调用相同的步骤：参数准备、schema 校验、`beforeToolCall`、执行、
+ * `afterToolCall`。不发事件、不加消息。会调用其他工具的工具用它，让 hooks（例如权限检查）也作用于
+ * 那些调用。
  *
- * Never rejects for tool failures: unknown tools, validation errors, blocked calls, and thrown
- * errors come back as `isError: true`. Nothing in this build calls it yet — a tool that wants to
- * nest another call would — so it stays internal to this file rather than exported.
+ * 工具失败从不 reject：未知工具、校验错误、被阻止的调用、抛出的错误都以 `isError: true` 返回。
+ * 本构建尚无任何东西调用它——想嵌套另一个调用的工具会——所以它留在本文件内部而不导出。
  */
 async function runToolCall(toolCall: ToolCall, options: RunToolCallOptions): Promise<ToolCallOutcome> {
 	const { assistantMessage, context, signal } = options;
@@ -2877,8 +2659,8 @@ async function runToolCall(toolCall: ToolCall, options: RunToolCallOptions): Pro
 	if (preparation.kind === "immediate") {
 		return { toolCall, result: preparation.result, isError: preparation.isError };
 	}
-	// A nested call has no batch to suspend and no run of its own to end, so the suspend comes back
-	// as the error result it is: the tool did not run, and the caller sees why.
+	// 嵌套调用没有批可挂起、也没有自己的运行可结束，所以 suspend 以它本来的错误结果回来：工具没有
+	// 运行，调用方看得到原因。
 	if (preparation.kind === "suspended") {
 		return {
 			toolCall,
@@ -2897,13 +2679,12 @@ async function runToolCall(toolCall: ToolCall, options: RunToolCallOptions): Pro
 }
 
 /**
- * Run a call that passed the gate, through the table.
+ * 运行一个过了闸门的调用，经表执行。
  *
- * The name is resolved here rather than carried in `prepared`, so the only `Tool.execute` call in
- * production code is the table's own (`ToolManager.execute`, ADR-0016): what the engine owns is the
- * orchestration around one call — the update sink, the abort signal, and turning a throw into the
- * error result the model reads. An unknown name at this point is a bug upstream (the gate resolves
- * first) and lands in the same catch, as an error result.
+ * 名字在这里解析、不随 `prepared` 携带，所以生产代码里唯一的 `Tool.execute` 调用就是表自己的
+ * （`ToolManager.execute`，ADR-0016）：引擎拥有的是围绕一次调用的编排——update sink、abort signal、
+ * 以及把一次抛出变成模型可读的错误结果。此时仍未知的名字是上游的 bug（闸门先解析），落在同一个
+ * catch 里、同样以错误结果收场。
  */
 async function executePreparedToolCall(
 	prepared: PreparedToolCall,
@@ -2967,7 +2748,7 @@ async function finalizeExecutedToolCall(
 				signal,
 			);
 			if (afterResult) {
-				// Structured content not replaced along with the content may no longer match it.
+				// 结构化内容没有随 content 一起被替换，可能已与它不再匹配。
 				const structuredContent =
 					afterResult.structuredContent ?? (afterResult.content ? undefined : result.structuredContent);
 				result = {
@@ -3016,12 +2797,10 @@ function createToolResultMessage(finalized: ToolCallOutcome): ToolResultMessage 
 		role: "toolResult",
 		toolCallId: finalized.toolCall.id,
 		toolName: finalized.toolCall.name,
-		// Untyped tools can return results without content; normalize so the null never enters session
-		// history or provider payloads.
+		// 无类型工具可以返回没有 content 的结果；规范化，让 null 从不进入会话历史或供应商载荷。
 		content: finalized.result.content ?? [],
-		// A tool's details are arbitrary JSON the ledger stores verbatim, so the one narrowing this
-		// file makes is here: the transcript's message shape says `JsonValue`, and the tool's own
-		// `details` is untyped by design.
+		// 工具的 details 是账本逐字存储的任意 JSON，所以本文件做的唯一收窄在这里：transcript 的消息
+		// 形状说 `JsonValue`，而工具自己的 `details` 有意无类型。
 		details: finalized.result.details as JsonValue | undefined,
 		usage: finalized.result.usage,
 		isError: finalized.isError,
@@ -3035,12 +2814,10 @@ async function emitToolResultMessage(toolResultMessage: ToolResultMessage, emit:
 }
 
 /**
- * What one run is started with: the message that opened it, or the answers a resume closes its
- * dangling calls with.
+ * 一次运行的起点：打开它的那条消息，或恢复用来关闭悬空调用的答案。
  *
- * The two are alternatives rather than fields that may both be set: a prompted run has nothing to
- * recover but what a crash left behind, and a resumed run has no new message — its first act is the
- * recovery pass over the calls the run before it left unanswered.
+ * 两者是备选、不是可同时设置的字段：被提示的运行除了崩溃留下的之外没有可恢复的，恢复的运行没有
+ * 新消息——它的第一个动作就是对上一次运行留下的未答调用做恢复遍。
  */
 export type RunStart =
 	| { prompt: Message; answers?: undefined }
@@ -3048,11 +2825,10 @@ export type RunStart =
 
 
 /**
- * Thrown out of an attempt that failed with a context overflow, so the retry policy never sees it.
+ * 从一次上下文溢出的尝试中抛出，让重试策略永远见不到它。
  *
- * `retryAssistantCall` classifies what `produce` returns, so the only way to keep an overflow out of
- * the retry budget is to not return it: the pump catches this and ends the run with the same error
- * message, exactly as it would for a failure the classifier rejects.
+ * `retryAssistantCall` 分类的是 `produce` 返回的东西，所以把溢出挡在重试预算之外的唯一办法就是不
+ * 返回它：泵接住这个、以同样的错误消息结束运行，恰如它对待被分类器拒绝的失败那样。
  */
 class ContextOverflow {
 	readonly message: AssistantMessage;
@@ -3062,7 +2838,7 @@ class ContextOverflow {
 	}
 }
 
-/** A zero `Usage`, for a message no provider produced. */
+/** 全零 `Usage`，给一条不是任何供应商产出的消息。 */
 const NO_USAGE: Usage = {
 	input: 0,
 	output: 0,
@@ -3072,7 +2848,7 @@ const NO_USAGE: Usage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-/** A stream function that threw, in the shape the engine ends a run on. */
+/** 一次抛了异常的流函数，以引擎结束运行的那个形状。 */
 function failureMessage(model: Model, error: unknown): AssistantMessage {
 	return {
 		role: "assistant",
@@ -3087,18 +2863,16 @@ function failureMessage(model: Model, error: unknown): AssistantMessage {
 }
 
 /**
- * End the session's stream the way a provider would.
+ * 以供应商会有的方式结束会话的流。
  *
- * The engine's terminal branch is driven by this event, and `AssistantMessageEventStream.result()`
- * answers with exactly the message it carries, so the event is rebuilt from the message the retry
- * policy settled on rather than copied from the attempt that produced it — an attempt that was
- * retried had its own terminal event discarded.
+ * 引擎的终局分支由这个事件驱动，而 `AssistantMessageEventStream.result()` 答的正是它携带的那条
+ * 消息，所以这个事件从重试策略敲定的那条消息重建，而不是从产出它的那次尝试复制——被重试过的尝试
+ * 自己的终局事件早已被丢弃。
  */
 function pushTerminal(outer: AssistantMessageEventStream, message: AssistantMessage): void {
 	const { stopReason } = message;
 	if (stopReason === "error" || stopReason === "aborted" || stopReason === "pending") {
-		// `pending` means the stream ended without a terminal event at all; report it as the failure
-		// it is rather than as a completed turn.
+		// `pending` 意味着流根本没有终局事件就结束了；按它本来的失败报告，而不是当作一轮完成。
 		outer.push({ type: "error", reason: stopReason === "pending" ? "error" : stopReason, error: message });
 		return;
 	}
@@ -3106,23 +2880,20 @@ function pushTerminal(outer: AssistantMessageEventStream, message: AssistantMess
 }
 
 /**
- * Move each late tool result back beside the call it answers.
+ * 把每条迟到的工具结果挪回它所回答的调用旁边。
  *
- * The ledger is append-only, so a result can stand behind messages its call never saw: a prompt the
- * orchestrator wrote before the run's recovery pass closed the call, a message the run flushed at its
- * end after the gate had already left the call dangling. On disk that order is the honest one — the
- * prompt really did come before the answer — but a provider request that carries it is not legal: the
- * wire wants every tool result in the user turn that follows its own assistant message, and a call
- * answered two turns later reads as a call never answered.
+ * 账本只增不改，所以一个结果可能站在它的调用从未见过的消息之后：一次编排层在运行的恢复遍关闭调用
+ * 之前写下的 prompt，或闸门已让调用悬空之后运行在末尾 flush 的一条消息。在磁盘上那个顺序是诚实的
+ * ——prompt 确实先于答案——但携带它的供应商请求并不合法：wire 要求每个工具结果待在紧随其自身
+ * assistant 消息的 user 轮次里，两轮之后才被回答的调用读起来就像从未被回答。
  *
- * The repair is the request's, never the file's: a result is late when its call was issued, left
- * unanswered across a non-result message, and answered afterwards; each late result is hoisted to
- * directly after the assistant message that carries its call, in the order the calls were made.
- * Everything else stays exactly where the ledger put it.
+ * 修补是请求的、绝不是文件的：结果迟到，当它的调用被发出、隔着一条非结果消息未获回答、事后才被
+ * 回答；每条迟到结果被提升到携带其调用的 assistant 消息之后，按调用发出的顺序。其余一切留在账本
+ * 放它的地方。
  */
 function pairLateToolResults(messages: readonly Message[]): Message[] {
-	// Which results are late: a call still open when a non-result message arrives is answered too
-	// late by whatever comes after, because the wire has already moved on.
+	// 哪些结果迟到：一条非结果消息到达时仍开着的调用，被其后任何东西回答都太晚，因为 wire 已经
+	// 往前走了。
 	const lateIds = new Set<string>();
 	{
 		const open = new Set<string>();
@@ -3140,7 +2911,7 @@ function pairLateToolResults(messages: readonly Message[]): Message[] {
 	}
 	if (lateIds.size === 0) return messages as Message[];
 
-	// The late results, grouped by call id and kept in the order the ledger gave them.
+	// 迟到的结果，按调用 id 分组，保持账本给出的顺序。
 	const late = new Map<string, Message[]>();
 	for (const message of messages) {
 		if (message.role === "toolResult" && lateIds.has(message.toolCallId)) {
@@ -3166,10 +2937,10 @@ function pairLateToolResults(messages: readonly Message[]): Message[] {
 }
 
 /**
- * The messages one selection of entries stands for — the same projection the store hands a request.
+ * 一份 entry 选集所代表的那些消息——store 递给请求的同一个投影。
  *
- * It is the only way the trigger measures a prompt, so `maybeCompact` can compare the transcript as
- * stored with the transcript after a clear without building the request twice.
+ * 触发器量 prompt 的唯一途径，所以 `maybeCompact` 得以比较存储中的 transcript 与清理后的 transcript
+ * 而不必构建两次请求。
  */
 function messagesOf(entries: readonly SessionEntry[]): Message[] {
 	return entries.flatMap((entry) => sessionEntryToContextMessages(entry));

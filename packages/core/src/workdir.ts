@@ -1,20 +1,17 @@
 import { isAbsolute, normalize, relative, resolve, sep } from "node:path";
 
 /**
- * How a tool path is read against the session's working directory.
+ * 工具路径如何对照会话的工作目录来解读。
  *
- * There is no fence here. A relative path is resolved against the working directory; an absolute one
- * is taken as it stands, wherever on the machine it points. That is the whole job: the directory
- * decides what a bare path means and where a command starts, and nothing about what the agent is
- * allowed to touch. A model asked to change one file on the machine next to the project has to be
- * able to say so.
+ * 这里没有围栏。相对路径按工作目录解析；绝对路径原样接受，指向机器上的任何位置都行。这就是全部
+ * 职责：目录只决定一个裸路径是什么意思、命令从哪里开始，不管束 agent 能碰什么。模型被要求改项目
+ * 旁边一台机器上的某个文件时，它必须能说得出来。
  */
 
 /**
- * Resolve a tool-supplied path: absolute stays absolute, relative joins the working directory.
+ * 解析工具提供的路径：绝对路径保持原样，相对路径并入工作目录。
  *
- * An empty path and an embedded NUL are refused because neither names a file — every other shape is
- * the caller's business, including `..` that walks out of the directory.
+ * 空路径和内嵌 NUL 被拒绝，因为两者都不指名任何文件——其余形状都交给调用方，包括走出目录的 `..`。
  */
 export function resolveToolPath(workDirAbsPath: string, pathInput: string): string {
 	if (pathInput.length === 0) throw new Error("Path must not be empty");
@@ -23,12 +20,11 @@ export function resolveToolPath(workDirAbsPath: string, pathInput: string): stri
 }
 
 /**
- * How a path is shown to the model and the window.
+ * 路径如何展示给模型和窗口。
  *
- * Inside the working directory it reads as a relative path, because that is the name the model can
- * hand back to a tool and the name a reader compares against their project. Outside it, the absolute
- * path is the only honest answer: a `../../..` chain is shorter to compute and worse to read, and it
- * would imply the directory is still the frame of reference.
+ * 工作目录之内显示为相对路径，因为那是模型能交还给工具的名字，也是读者对照自己项目时用的名字。
+ * 目录之外，绝对路径是唯一诚实的答案：`../../..` 链算起来更短、读起来更差，而且它会暗示目录仍是
+ * 参照系。
  */
 export function displayToolPath(workDirAbsPath: string, absPath: string): string {
 	const relPath = relative(workDirAbsPath, absPath);
@@ -37,7 +33,7 @@ export function displayToolPath(workDirAbsPath: string, absPath: string): string
 	return toSlashes(relPath);
 }
 
-/** Forward slashes, so a path reads the same in a message on every platform. */
+/** 统一用正斜杠，让路径在消息里于所有平台上读起来一致。 */
 function toSlashes(path: string): string {
 	return path.split(sep).join("/");
 }

@@ -1,5 +1,5 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
-// from flagging this file, while every import into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
 import { parse as partialParse } from "partial-json";
 
@@ -28,9 +28,9 @@ function escapeControlCharacter(char: string): string {
 }
 
 /**
- * Repairs malformed JSON string literals by:
- * - escaping raw control characters inside strings
- * - doubling backslashes before invalid escape characters
+ * 修复格式错误的 JSON 字符串字面量：
+ * - 转义字符串内部的裸控制字符
+ * - 把无效转义字符前的反斜杠翻倍
  */
 export function repairJson(json: string): string {
 	let repaired = "";
@@ -98,11 +98,11 @@ export function parseJsonWithRepair<T>(json: string): T {
 }
 
 /**
- * Attempts to parse potentially incomplete JSON during streaming.
- * Always returns a valid object, even if the JSON is incomplete.
+ * 尝试解析流式期间可能不完整的 JSON。
+ * 即使 JSON 不完整也总是返回有效对象。
  *
- * @param partialJson The partial JSON string from streaming
- * @returns Parsed object or empty object if parsing fails
+ * @param partialJson 流式传来的不完整 JSON 字符串
+ * @returns 解析出的对象，解析失败时为空对象
  */
 export function parseStreamingJson<T = Record<string, unknown>>(partialJson: string | undefined): T {
 	if (!partialJson || partialJson.trim() === "") {

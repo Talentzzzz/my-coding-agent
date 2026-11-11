@@ -1,13 +1,11 @@
-// Wire-surface smoke test: the one home for assertions about the mux protocol itself — the envelope,
-// the lane a frame rides, connection-level payloads, uplink tolerance, and the two acceptance edges a
-// multiplexed connection exists for. REST commands are smoke-api.ts's subject; nothing here repeats
-// them. No provider key is needed — the model is the scripted transport.
+// Wire-surface smoke test：关于 mux 协议本身的断言的唯一家——信封、帧骑的车道、连接级载荷、
+// 上行容错，以及一条复用连接存在的两条验收边界。REST 命令是 smoke-api.ts 的主题；这里不重复。
+// 无需 provider key——模型就是剧本化 transport。
 //
 //   node scripts/smoke-mux.ts
 //
-// The rig is multi-session on purpose (every other wire-side script is single-session): a connection
-// holding two conversations at once is the product shape this transport was reopened for, and it is
-// the only place that can be asserted without a browser.
+// 装置有意做成多 session（其他 wire 侧脚本都是单 session）：一条连接同时持有两个对话正是这套
+// transport 为之重开的产品形状，而这里是唯一能不用浏览器就断言它的地方。
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,12 +42,12 @@ async function request(base: string, method: string, path: string, body?: unknow
 	return { status: response.status, payload: text.length === 0 ? undefined : (JSON.parse(text) as unknown) };
 }
 
-/** Accept a prompt, which is answered before the run has done anything. */
+/** 收下一次 prompt，run 还没做什么它就被应答了。 */
 async function prompt(base: string, sessionId: string, text: string): Promise<number> {
 	return (await request(base, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/messages`, { text })).status;
 }
 
-/** The parts of a snapshot these checks read. */
+/** 这些检查会读的快照部分。 */
 interface ReadSession {
 	id: string;
 	leafId: string | null;
@@ -64,7 +62,7 @@ async function readSession(base: string, sessionId: string): Promise<ReadSession
 	return (read.payload as { session?: ReadSession } | undefined)?.session;
 }
 
-/** Wait for a run to settle, polling the read path — a branch cannot move under a run in flight. */
+/** 等 run 落定，轮询读取路径——在途的 run 底下分支不能动。 */
 async function settleRun(base: string, sessionId: string, ms = 15_000): Promise<boolean> {
 	const deadline = Date.now() + ms;
 	for (;;) {
@@ -75,18 +73,18 @@ async function settleRun(base: string, sessionId: string, ms = 15_000): Promise<
 	}
 }
 
-/** The row these checks read off the connection-level stream. */
+/** 这些检查从连接级流上读的那一行。 */
 function rowOf(envelope: unknown): SessionRow | undefined {
 	const item = (envelope as { item?: { type?: string; session?: SessionRow } }).item;
 	return item?.type === "session_row" ? item.session : undefined;
 }
 
-/** How many baselines one lane has carried: a stream can carry more than the one it opened with. */
+/** 一条车道带过多少份 baseline：一条流可以携带不止它打开时的那一份。 */
 function baselinesOn(wire: WireClient, sessionId: string): number {
 	return wire.items(sessionId).filter((message) => message.type === "baseline").length;
 }
 
-/** The newest baseline on one lane — the state the client is being pointed at last. */
+/** 一条车道上最新的 baseline——客户端被最后指到的那个状态。 */
 function lastBaselineOn(wire: WireClient, sessionId: string): { session: SessionSnapshot } | undefined {
 	return wire.items(sessionId).filter((message) => message.type === "baseline").at(-1) as { session: SessionSnapshot } | undefined;
 }
@@ -109,7 +107,7 @@ interface Rig {
 	close(): Promise<void>;
 }
 
-/** Slow enough that a run is observably in flight; fast enough that the smoke stays sub-minute. */
+/** 慢到 run 可观察地在途；快到 smoke 保持在一分钟内。 */
 const TOKENS_PER_SECOND = 400;
 
 async function openRig(): Promise<Rig> {
@@ -157,8 +155,8 @@ try {
 	check("so did a heartbeat", heartbeat !== undefined);
 	const everyMs = (heartbeat?.item as { everyMs?: number } | undefined)?.everyMs;
 	check("the heartbeat names its own interval", typeof everyMs === "number" && everyMs > 0, String(everyMs));
-	// Both arrive; which came first is deliberately not asserted (ticket 07: the baseline may precede
-	// the heartbeat), and neither kind of frame may ride a session's streamId.
+	// 两者都到达；谁先谁后被有意不断言（ticket 07：baseline 可能先于 heartbeat），且两种帧都
+	// 不得骑在 session 的 streamId 上。
 	check(
 		"neither of them rode a session's stream",
 		wire.frames
@@ -177,19 +175,17 @@ try {
 	check("the first frame on the stream is the session's baseline", lane.id === laneId);
 	check("and an idle session says so", lane.submitting === false, String(lane.submitting));
 
-	// A second `open` asks for the same thing the first one asked for — this session's state now, then
-	// everything after it — so it is answered with one more baseline on the stream that already exists,
-	// and the subscription underneath is left alone (ADR-0010 decision 1). This is the frame a pane
-	// needs after going away while something else still held the session: no `cancel` was sent, so a
-	// re-sent baseline is the only answer the trip back can have.
+	// 第二次 `open` 要求的是与第一次相同的东西——这个 session 现在的状态，及其后的一切——所以
+	// 它的应答是已存在流上再多一份 baseline，底下的订阅原样不动（ADR-0010 决定 1）。这正是窗格
+	// 在别的东西仍持有 session 时离开再回来需要的那帧：没有发过 `cancel`，所以重发的 baseline
+	// 是回程唯一可能得到的应答。
 	//
-	// Polled rather than sampled after a fixed sleep: the baseline is read off the session's file, and
-	// the frame is what is being waited for, not a duration.
+	// 轮询而非固定 sleep 后采样：baseline 从 session 的文件上读，被等待的是帧，不是一段时长。
 	const beforeDuplicate = baselinesOn(wire, laneId);
 	wire.send({ type: "open", sessionId: laneId });
 	check("the duplicate open was answered with another baseline", await until(() => baselinesOn(wire, laneId) > beforeDuplicate, 5_000), JSON.stringify(wire.endOf(laneId)));
-	// The stream it already had is untouched: no error, no end, and still the same subscription — the
-	// check below proves it by using the lane again.
+	// 它已有的流原样未动：没有 error、没有 end、订阅还是同一个——下面的检查通过再次使用这条
+	// 车道来证明这一点。
 	check(
 		"and the stream it already had is untouched",
 		wire.endOf(laneId).errors.length === 0 && !wire.endOf(laneId).ended,
@@ -204,8 +200,7 @@ try {
 	wire.send({ type: "open", sessionId: "does-not-exist" });
 	check("the unknown open was answered with an error", await until(() => wire.endOf("does-not-exist").errors.length > 0, 5_000), JSON.stringify(wire.endOf("does-not-exist")));
 	check("and an end", await until(() => wire.endOf("does-not-exist").ended, 5_000), JSON.stringify(wire.endOf("does-not-exist")));
-	// The connection itself is untouched: a mistake on one lane must not cost the others. The next
-	// check proves the channel is alive by using it again.
+	// 连接本身未被触碰：一条车道上的失误不得殃及其他。下一个检查通过再次使用通道来证明它活着。
 
 	// ---------------------------------------------------------------------------------------------
 	// 4. Uplink tolerance: nonsense frames are dropped, not fatal.
@@ -215,9 +210,8 @@ try {
 	wire.send({ type: "teleport", sessionId: laneId });
 	wire.send({ note: "not even a frame" });
 	wire.sendRaw("this is not JSON at all");
-	// Proof of life comes from the one payload only a working connection produces on its own: the
-	// heartbeat keeps its interval, and three of them mean three round trips of the timer survived
-	// the nonsense.
+	// 活着的证据来自唯一一种只有正常工作的连接才会自己产生的载荷：心跳保持它的间隔，三次心跳
+	// 意味着定时器的三轮往返熬过了那些胡话。
 	const heartbeatsBefore = wire.connection().filter((envelope) => envelope.item?.type === "heartbeat").length;
 	await sleep(600);
 	const heartbeatsAfter = wire.connection().filter((envelope) => envelope.item?.type === "heartbeat").length;
@@ -238,12 +232,11 @@ try {
 	const running = await wire.waitFor(laneId, (message) => message.type === "status" && (message as { submitting?: boolean }).submitting === true, 10_000);
 	check("the run announced itself on its own lane", running !== undefined);
 
-	// The re-attach half of the same edge, and the case a duplicate `open` exists for: something else
-	// still holds this session (here the run), the pane went away and came back, so a second `open`
-	// lands on a subscription that is still live. The baseline it answers with is the session's state
-	// *now* — `partial` included — so the window draws the sentence so far instead of waiting for a
-	// delta to start painting. Waiting for the first delta is what makes `partial` exist: it is the
-	// running message, so a re-attach before the answer began would honestly carry none.
+	// 同一边界的重新接上一半，也是重复 `open` 存在的理由：别的东西（这里是 run）仍持有这个
+	// session，窗格离开又回来，于是第二次 `open` 落在一个仍活着的订阅上。它应答的 baseline 是
+	// session *现在*的状态——`partial` 包括在内——所以窗口画出到目前为止那句话，而不是等一个
+	// delta 开始画。等第一个 delta 正是 `partial` 存在的原因：它是那条运行中的消息，在回答开始
+	// 之前重接上的话它诚实地一行都没有。
 	await until(
 		() =>
 			wire
@@ -258,18 +251,18 @@ try {
 	check("a duplicate open mid-run is answered with a baseline too", await until(() => baselinesOn(wire, laneId) > baselinesBeforeReattach, 5_000), JSON.stringify(wire.endOf(laneId)));
 	const reattached = lastBaselineOn(wire, laneId);
 	check("and that baseline is the live state, partial answer included", reattached?.session.partial !== undefined, JSON.stringify(reattached?.session.partial));
-	// Frame order, the property the whole thing rests on: the baseline arrives *inside* the stream and
-	// the deltas keep appending to it — not a second stream, not an end, nothing replayed twice.
+	// 帧序，整件事赖以成立的性质：baseline 到达*流内部*，delta 继续向它追加——不是第二条流，
+	// 不是 end，没有东西被重放两次。
 	check("the deltas kept coming after it", await until(() => laneEvents() > eventsBeforeReattach, 10_000), `${eventsBeforeReattach} events before`);
 
-	// While the run streams, the idle lane must stay quiet and the heartbeats keep coming.
+	// run 流式期间，空闲的车道必须保持安静、心跳继续到来。
 	await sleep(300);
 	const heartbeatsDuring = wire.connection().filter((envelope) => envelope.item?.type === "heartbeat").length;
 	check("heartbeats kept arriving during the run", heartbeatsDuring > 0, String(heartbeatsDuring));
 	const idleLaneFrames = wire.items(otherId).filter((message) => message.type === "event");
 	check("the idle lane received no event of the other session's run", idleLaneFrames.length === 0, String(idleLaneFrames.length));
 
-	// Every event frame the run produced sat on the running session's lane — and on no other.
+	// run 产出的每一帧事件都坐在运行中 session 自己的车道上——且不在其他任何一条上。
 	const eventLanes = new Set(
 		wire.frames.filter((frame) => "item" in frame && (frame.item as { type: string }).type === "event").map((frame) => frame.streamId),
 	);
@@ -287,15 +280,14 @@ try {
 	process.stdout.write("a lane dropped and reattached converges on now\n");
 
 	wire.cancel(laneId);
-	// The change happens with nothing watching the lane: a prompt from another window, on a session
-	// this connection just stopped listening to.
+	// 变化发生在没有任何东西看着这条车道的时候：来自另一个窗口的 prompt，发在这个连接刚刚
+	// 停止监听的 session 上。
 	rig.transport.setResponses([fakeAssistantMessage("second answer")]);
 	check("the prompt was accepted", (await prompt(rig.url, laneId, "another run, unseen")) === 202);
 	check("that run settled", await settleRun(rig.url, laneId));
-	// The run's own hold was the last one, so the host closes as soon as it settles. Waiting for the
-	// reap to finish makes the re-open below an honest cold open: a subscription that races the reap
-	// can bind to a host that is about to be torn out from under it, and the assertion would be about
-	// that timing instead of about convergence.
+	// run 自己的 hold 是最后一个，所以它一落定 host 就关闭。等 reap 完成让下面的 re-open 成为
+	// 一次诚实的冷开：与 reap 赛跑的订阅可能绑到一个马上要被从脚底下抽走的 host 上，断言就会
+	// 变成关于那个时机的，而不是关于收敛的。
 	check("the session was reaped once nothing held it", await until(() => !rig.hub.live.includes(laneId), 10_000), rig.hub.live.join(","));
 
 	const baselinesBefore = baselinesOn(wire, laneId);
@@ -319,11 +311,10 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a changed tree is everyone's business: it arrives as a baseline\n");
 
-	// Two runs give the first user message a continuation, which is what makes it a branch point.
-	// The bench hold keeps the host alive across both runs and the move: the moment its holds hit
-	// zero the host is reaped and the lane would be ended under it ("the watched session went away"),
-	// which is the lifecycle working as designed — the hold decides how long the session lives, and
-	// the test bench is the holder here.
+	// 两次 run 给第一条用户消息一个续接，这正是让它成为分支点的动作。测试台的 hold 在两次 run
+	// 与移动期间保住 host：holds 归零的那一刻 host 就被 reap、车道会在它下面被结束（"被监视的
+	// session 走了"），那是生命周期按设计工作——hold 决定 session 活多久，这里的持有者正是
+	// 测试台。
 	const bench = await rig.hub.hold(laneId);
 	rig.transport.setResponses([fakeAssistantMessage("one"), fakeAssistantMessage("two")]);
 	check("the first prompt was accepted", (await prompt(rig.url, laneId, "branch here")) === 202);
@@ -339,8 +330,8 @@ try {
 		const moved = await request(rig.url, "POST", `/api/sessions/${encodeURIComponent(laneId)}/branch`, { entryId: branchEntry, descend: false });
 		check("the branch move was accepted", moved.status === 200, String(moved.status));
 
-		// Wait for the count to grow, then read the newest one: `waitFor` matches from the beginning,
-		// and this lane already carries baselines from the sections above.
+		// 等计数增长，然后读最新的那份：`waitFor` 从头匹配，而这条车道已经带着上面各节的
+		// baseline。
 		const grew = await until(() => baselinesOn(wire, laneId) > baselinesAt, 5_000);
 		const changed = lastBaselineOn(wire, laneId);
 		check(
@@ -351,8 +342,7 @@ try {
 		check("and the move is inside it", changed?.session.leafId === branchEntry, JSON.stringify(changed?.session.leafId));
 	}
 
-	// The bench hold goes back: the reap that follows ends the lane, and that is the expected order
-	// of events, not a failure of the lane.
+	// 测试台的 hold 归还：随后的 reap 结束车道，这是预期的事件次序，不是车道的失败。
 	rig.hub.release(bench);
 	check("the lane ends when the host it watched goes away", await until(() => wire.endOf(laneId).ended, 10_000), JSON.stringify(wire.endOf(laneId)));
 
@@ -368,26 +358,24 @@ try {
 			.connection()
 			.map(rowOf)
 			.filter((row): row is SessionRow => row?.id === unwatchedId);
-	// A session with nothing said in it has no file, and so no row: the first message is what puts
-	// both down. There is therefore no "before" stamp to compare against here — the run is what
-	// creates the row, and the two checks below say exactly that.
+	// 什么都没说过的 session 没有文件，因此也没有行：第一条消息是把两者放下的动作。所以这里
+	// 没有"之前"的时间戳可比较——run 正是创建这一行的动作，下面两个检查说的正是这件事。
 	const modifiedBefore = rowsForSession()[0]?.modified;
 
 	rig.transport.setResponses([fakeAssistantMessage("unwatched run ".repeat(20))]);
 	check("the prompt was accepted", (await prompt(rig.url, unwatchedId, "run without a viewer")) === 202);
-	// The running:true row is the anchor: "finished" below means a row that arrived *after* it, not
-	// just any row that says false — the pre-run row says false too, and this rig's scripted answer
-	// carries a timestamp older than the prompt, so its entry never advances `modified` and the two
-	// rows share a stamp. Arrival order is the only honest "after" here.
+	// running:true 的行是锚点：下面的"结束"指的是在它*之后*到达的行，不是随便哪行说 false 的
+	// ——run 前的那行也说 false，而且这个装置的剧本化回答带着比 prompt 更老的时间戳，它的条目
+	// 永远不推进 `modified`，两行共享同一个戳。到达顺序是这里唯一诚实的"之后"。
 	check("the run announced itself on its row", await until(() => rowsForSession().some((row) => row.running === true), 5_000), JSON.stringify(rowsForSession()));
 	const runningIndex = rowsForSession().findIndex((row) => row.running === true);
 	check("it settled", await settleRun(rig.url, unwatchedId));
-	// `submitting` turns false in the loop before the session publishes that fact, so the row that
-	// says `running: false` can land a tick after the read path already answers.
+	// 循环里 `submitting` 先变 false，session 才发布这个事实，所以说着 `running: false` 的行可能
+	// 比读路径已经开始作答晚一拍落地。
 	await until(() => rowsForSession().some((row, index) => index > runningIndex && row.running === false), 5_000);
 
-	// The row went up and came back down, and the file's last message moved it forward — all of it
-	// observed on the connection-level seat, with no logical stream open for that session.
+	// 行升上去又降回来，文件的最后一条消息把它向前推——全程都在连接级座位上观察，那个 session
+	// 没有打开任何逻辑流。
 	const allRows = rowsForSession();
 	const finishedIndex = allRows.findIndex((row, index) => index > runningIndex && row.running === false);
 	const settledRow = allRows[allRows.length - 1];
@@ -410,24 +398,22 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a wait holds the state against eviction until it is answered\n");
 
-	// The shape the send reference guards: a run whose hold was released at acceptance, a result
-	// already published to the stream, and a client that has not said it is done reading yet. The
-	// reap's tail reaches its eviction and must find the wait standing — the state stays, and the
-	// wait's release is the edge that finishes the job.
+	// send 引用守护的那个形状：一次 hold 在收下时就被释放的 run、一份已经发布到流上的结果，
+	// 以及一个还没说完自己读完了的客户端。reap 的尾部到达它的驱逐时必须发现 wait 还站着
+	// ——state 留下，wait 的释放才是收尾的那条边。
 	const waited = await request(rig.url, "POST", "/api/sessions");
 	const waitedId = (waited.payload as { sessionId: string }).sessionId;
-	// Reported twice on purpose: the reconnect's replay can re-report a wait it still holds, and one
-	// entry must cover both reports — the single `unwait` below would otherwise leave a leak behind.
+	// 有意报告两次：重连的重放可能重复报告一个它仍持有的 wait，一个条目必须覆盖两份报告
+	// ——否则下面唯一一次 `unwait` 会留下一处泄漏。
 	wire.send({ type: "wait", sessionId: waitedId });
 	wire.send({ type: "wait", sessionId: waitedId });
 	rig.transport.setResponses([fakeAssistantMessage("waited run ".repeat(20))]);
 	check("the prompt was accepted", (await prompt(rig.url, waitedId, "run under a wait")) === 202);
 	check("it settled", await settleRun(rig.url, waitedId));
 	check("the host was reaped", await until(() => !rig.hub.live.includes(waitedId), 10_000), rig.hub.live.join(","));
-	// Point-in-time, read after the reap has finished: the tail's eviction attempt ran gated on the
-	// wait, and the wait was standing, so the state is still here. The table has no reader on the
-	// facade — it is the orchestrator's own business — so the smoke reads the map itself, the same
-	// road the other smokes take to `assembleAgentStateBySession`.
+	// 时间点读取，在 reap 完成之后：尾部的驱逐尝试在 wait 门控下运行了，而 wait 站着，所以
+	// state 还在这里。门面上没有人读这张表——那是 orchestrator 自己的事——所以 smoke 自己读
+	// 这个 map，与其他 smoke 到 `assembleAgentStateBySession` 走的是同一条路。
 	const table = rig.hub.agent as unknown as { sessions: Map<string, unknown> };
 	check("but the wait kept the state in the table", table.sessions.has(waitedId), String(table.sessions.has(waitedId)));
 
@@ -435,10 +421,9 @@ try {
 	wire.send({ type: "unwait", sessionId: waitedId });
 	check("releasing the wait evicted it", await until(() => !table.sessions.has(waitedId), 5_000), String(table.sessions.has(waitedId)));
 
-	// A wait reported by a connection that then dies is given up with the connection — a waiter that
-	// will never be answered must not hold a state forever. This one rides no subscription at all,
-	// which is also the wait's independence from the subscription table: it is reported before any
-	// `open` beside it and survives the stream's end.
+	// 一条随后死去的连接报告的 wait 随连接一起被放弃——一个永远不会被应答的 waiter 不得永远
+	// 占着一个 state。这个 wait 完全不骑任何订阅，这也是 wait 独立于订阅表的证明：它在旁边任何
+	// `open` 之前被报告，且活过流的 end。
 	const dying = await connect(`${rig.url.replace("http", "ws")}/mux`);
 	const mortal = await request(rig.url, "POST", "/api/sessions");
 	const mortalId = (mortal.payload as { sessionId: string }).sessionId;
@@ -451,10 +436,9 @@ try {
 	await dying.close().catch(() => {});
 	check("the connection's death released its wait", await until(() => !table.sessions.has(mortalId), 5_000), String(table.sessions.has(mortalId)));
 
-	// Tolerance, the same kind sections 3 and 4 granted the other frames: a wait for a session this
-	// server does not know is recorded (it costs one table row and one `unwait`), not refused — and
-	// the connection lives on. The frames are processed in arrival order, so a heartbeat that
-	// arrives after them is the deterministic mark that both were handled before the absence check.
+	// 容忍，与第 3、4 节给其他帧的同一种：对这个服务器不认识的 session 的 wait 被记录（代价是
+	// 一行表和一次 `unwait`），而不是被拒绝——连接继续活着。帧按到达顺序处理，所以它们之后
+	// 到达的一次心跳就是"两者都在缺席检查之前被处理"的确定性标记。
 	wire.send({ type: "wait", sessionId: "does-not-exist-yet" });
 	wire.send({ type: "unwait", sessionId: "does-not-exist-yet" });
 	const heartbeatsBeforeTolerance = wire.connection().filter((envelope) => envelope.item?.type === "heartbeat").length;
@@ -483,7 +467,7 @@ try {
 	try {
 		await rig.close();
 	} catch {
-		// The rig may already be closed by the shutdown check above.
+		// 装置可能已被上面的 shutdown 检查关掉。
 	}
 } finally {
 	process.stdout.write(failures === 0 ? "\nmux ok\n" : `\n${failures} failure(s)\n`);

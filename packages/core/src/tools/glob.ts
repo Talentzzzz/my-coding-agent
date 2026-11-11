@@ -8,7 +8,7 @@ import { textResult, throwIfAborted } from "./types.ts";
 
 const MAX_RESULTS = 500;
 
-/** Directories that are never interesting and are expensive to walk. */
+/** 永远不值得看、又很贵遍历的目录。 */
 export const DEFAULT_EXCLUDES = [
 	"**/node_modules/**",
 	"**/.git/**",

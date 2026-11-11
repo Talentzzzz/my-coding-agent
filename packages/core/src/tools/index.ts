@@ -9,7 +9,7 @@ export {
 	ToolManager,
 } from "./manager.ts";
 
-/** Short human-readable summary of a tool call, for the approval prompt and the transcript. */
+/** tool call 的简短人类可读摘要，供审批 prompt 和 transcript 用。 */
 export function describeToolCall(name: string, args: unknown): string {
 	const record = isRecord(args) ? args : {};
 	switch (name) {

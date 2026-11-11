@@ -1,12 +1,11 @@
-// Vendored from @earendil-works/pi-ai (0.99.2). @ts-nocheck keeps the repo root's stricter config
-// from flagging this file, while every import into packages/core stays fully checked.
+// 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
+// packages/core 的每次 import 仍然被完整检查。
 // @ts-nocheck
 import type { AssistantMessage, AssistantMessageEvent, TextContent, ThinkingContent, ToolCall } from "../types.ts";
 import { parseStreamingJson } from "./json-parse.ts";
 
 /**
- * Compact, replayable assistant-message progress. Terminal settlement is
- * intentionally excluded and must be persisted separately.
+ * 紧凑、可重放的 assistant 消息进度。终态的落定刻意排除在外，必须单独持久化。
  */
 export type AssistantMessageFrame =
 	| { type: "start"; partial: AssistantMessage }
@@ -129,9 +128,8 @@ function isJsonPrefix(snapshot: unknown, current: unknown): boolean {
 }
 
 /**
- * Encodes one assistant stream. `partial` remains a shared live accumulator;
- * the encoder uses per-block offsets to avoid replaying deltas already visible
- * when an older queued event is consumed.
+ * 编码一条 assistant 流。`partial` 仍是共享的活累加器；编码器用每个 block 各自的偏移量，避免在
+ * 消费较早排队的旧事件时重放已经可见的 delta。
  */
 export class AssistantMessageFrameEncoder {
 	private started = false;
@@ -242,9 +240,8 @@ export class AssistantMessageFrameEncoder {
 				state.catchupJson += event.delta;
 				const argumentsValue = parseStreamingJson<ToolCall["arguments"]>(state.catchupJson);
 				if (serializedArguments(argumentsValue) !== state.snapshotArguments) {
-					// Legacy grammar calls include the initial input in toolcall_start, but their
-					// JSON delta stream still begins at an empty input. Its parsed arguments can
-					// therefore extend, rather than exactly reproduce, the start snapshot.
+					// 旧语法的 tool call 在 toolcall_start 里带上初始 input，但其 JSON delta 流仍从空
+					// input 开始。所以它解析出的参数可能是 start 快照的延伸，而不是完全复现它。
 					const snapshotArguments = parseStreamingJson<ToolCall["arguments"]>(state.snapshotArguments);
 					if (!isJsonPrefix(snapshotArguments, argumentsValue)) return undefined;
 				}
@@ -361,8 +358,7 @@ function activeBlock(
 }
 
 /**
- * Replay compact frames without mutating them. Returns `undefined` when the
- * iterable contains no start frame.
+ * 重放紧凑帧而不改动它们。可迭代对象里没有 start 帧时返回 `undefined`。
  */
 export function reduceAssistantMessageFrames(frames: Iterable<AssistantMessageFrame>): AssistantMessage | undefined {
 	let message: AssistantMessage | undefined;

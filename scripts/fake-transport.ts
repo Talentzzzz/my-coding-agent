@@ -1,12 +1,12 @@
-// The scripted transport the smokes drive: a `ChatTransport` that answers from a queue instead of the
-// network, so streaming, queueing, steering, retries, and compaction are testable with no provider
-// key. Run with any smoke: `node scripts/smoke-session.ts`.
+// smoke 驱动的剧本化 transport：一个从队列里作答而不是从网络作答的 `ChatTransport`，因此流式、
+// 队列、steering、重试与 compaction 都能在没有 provider key 的前提下测到。各 smoke 使用：
+// `node scripts/smoke-session.ts`。
 //
-// It lives here rather than in the vendored transport under `packages/core/src/llm` because it is
-// this app's test double and nothing else's.
-// pi-ai ships a faux provider, but it was built on the provider registry this app no longer has — it
-// registered itself into a `Models` collection, which is exactly the indirection that was removed.
-// What is left to fake is one transport, so the double is one object with two methods.
+// 它住在 scripts/ 而不是 `packages/core/src/llm` 下那份 vendored transport 里，因为它是本应用
+// 的测试替身，不是别人的。
+// pi-ai 自带一个 faux provider，但它建立在本应用已不再有的 provider registry 之上——它把自己
+// 注册进一个 `Models` 集合，而那正是被移除的那层间接。剩下要 fake 的是一台 transport，所以
+// 这个替身就是一个带两个方法的对象。
 import {
 	createAssistantMessageEventStream,
 	getSystemMessageText,
@@ -58,10 +58,10 @@ function normalizeContent(content: string | FakeContentBlock | FakeContentBlock[
 }
 
 /**
- * One scripted answer.
+ * 一份剧本化的回答。
  *
- * The `api` and `model` written here are placeholders: every answer is re-stamped with the request
- * model's own, so a scripted step never has to know which row it is answering for.
+ * 这里写的 `api` 与 `model` 是占位符：每份回答都会被重新盖上请求所用模型自己的戳，剧本步骤
+ * 无须知道自己在替哪一行作答。
  */
 export function fakeAssistantMessage(
 	content: string | FakeContentBlock | FakeContentBlock[],
@@ -88,14 +88,13 @@ export function fakeAssistantMessage(
 
 export interface FakeState {
 	callCount: number;
-	/** The key each request carried, in call order, read off the model the request was made with. */
+	/** 每个请求携带的 key，按调用顺序，从请求所用模型上读取。 */
 	apiKeys: (string | undefined)[];
 	/**
-	 * The thinking level each request carried, in call order, read off the same model.
+	 * 每个请求携带的 thinking 等级，按调用顺序，从同一模型上读取。
 	 *
-	 * `"off"` stands for a model that named no level at all, which is the same request: nothing was
-	 * asked for. The level rides on the model rather than in the options, so this is the only place a
-	 * check can see what a request would have been asked at.
+	 * `"off"` 代表一个根本没指名等级的模型，两者是同一个请求：什么都没要求。等级骑在模型上
+	 * 而不是 options 里，所以这是检查能看到"一个请求本来会被要求在什么等级上"的唯一地方。
 	 */
 	thinkingLevels: ThinkingLevel[];
 }
@@ -110,14 +109,14 @@ export type FakeResponseFactory = (
 export type FakeResponseStep = AssistantMessage | FakeResponseFactory;
 
 export interface FakeTransportOptions {
-	/** Delay each chunk to simulate a slow answer; unset means "as fast as the microtask queue". */
+	/** 延迟每个 chunk 以模拟慢回答；不设即"microtask 队列能跑多快就多快"。 */
 	tokensPerSecond?: number;
-	/** Chunk sizes deltas are split into, so streaming is visible rather than one big push. */
+	/** delta 被切成的 chunk 大小，让流式可见而不是一大口推出来。 */
 	tokenSize?: { min?: number; max?: number };
 }
 
 export interface FakeTransport {
-	/** Hand this to `openAgent({ api })`. */
+	/** 交给 `openAgent({ api })`。 */
 	api: ChatTransport;
 	state: FakeState;
 	setResponses(responses: FakeResponseStep[]): void;
@@ -133,10 +132,9 @@ function randomId(prefix: string): string {
 	return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
 }
 
-// Scripted answers all read this module's clock, so two messages built in the same millisecond
-// would carry one stamp — the window folds transcript items by `role:timestamp`, and a shared
-// stamp makes it fold one message over the other (16; 07 hit this while shooting screenshots).
-// The stamp is the double's own sequence, then: monotonic, like the session's `nextStamp`.
+// 剧本化的回答都读本模块自己的时钟，同一毫秒内构建的两条消息会带同一个戳——窗口按
+// `role:timestamp` 折叠 transcript 条目，共享的戳会让它把一条消息折进另一条（16；07 拍截图时
+// 撞上过）。所以这个戳是替身自己的序列：单调递增，就像 session 的 `nextStamp`。
 let lastStamp = 0;
 
 function nextStamp(): number {
@@ -179,10 +177,10 @@ function serializeContext(context: Context): string {
 }
 
 /**
- * Fill in a token count for the answer.
+ * 为回答填一个 token 数。
  *
- * Cache reads and writes stay zero: this double answers from a queue rather than a provider, and it
- * has no prompt-cache identity to key a simulation by.
+ * 缓存读与缓存写保持为零：这个替身从队列作答而不是从 provider 作答，没有 prompt-cache 身份
+ * 可以用来模拟。
  */
 function withUsageEstimate(message: AssistantMessage, context: Context): AssistantMessage {
 	const input = estimateTokens(serializeContext(context));
@@ -213,7 +211,7 @@ function splitStringByTokenSize(text: string, minTokenSize: number, maxTokenSize
 	return chunks.length > 0 ? chunks : [""];
 }
 
-/** Re-stamp a scripted answer as the answer to *this* request, whichever row asked. */
+/** 把一份剧本化回答重新盖成*这个*请求的回答的戳，无论哪一行问的。 */
 function cloneMessage(message: AssistantMessage, model: Model<string>): AssistantMessage {
 	const cloned = structuredClone(message);
 	return {
@@ -248,7 +246,7 @@ function scheduleChunk(chunk: string, tokensPerSecond: number | undefined): Prom
 	return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
-/** Play one answer out as the delta events a real transport sends, honouring `signal` throughout. */
+/** 把一份回答按真实 transport 发送的 delta 事件播完，全程尊重 `signal`。 */
 async function streamWithDeltas(
 	stream: AssistantMessageEventStream,
 	message: AssistantMessage,
@@ -275,8 +273,8 @@ async function streamWithDeltas(
 			return;
 		}
 
-		// The index is this loop's own counter over `message.content`, so the entry is there; saying so
-		// once keeps every narrowing below from having to re-prove it.
+		// 这个下标是本循环对 `message.content` 自己的计数器，条目一定在；说一次，下面的每次
+		// narrowing 都不必重新证明。
 		const block = message.content[index];
 		if (block === undefined) continue;
 
@@ -344,10 +342,10 @@ async function streamWithDeltas(
 }
 
 /**
- * A transport that answers from a queue.
+ * 一个从队列里作答的 transport。
  *
- * Every call shifts one step. An empty queue is an error message rather than a hang, so a smoke that
- * runs out of scripted answers fails at the assertion that needed one instead of at the watchdog.
+ * 每次调用 shift 一步。空队列是一个错误消息而不是挂起，这样耗尽剧本回答的 smoke 会在需要答案的
+ * 那条断言上失败，而不是在 watchdog 上失败。
  */
 export function createFakeTransport(options: FakeTransportOptions = {}): FakeTransport {
 	const minTokenSize = Math.max(
@@ -373,9 +371,8 @@ export function createFakeTransport(options: FakeTransportOptions = {}): FakeTra
 		const outer = createAssistantMessageEventStream();
 		const step = pendingResponses.shift();
 		state.callCount++;
-		// Recorded here rather than asserted at the call site: the key and the thinking level ride on the
-		// model a host built for this request, so this is the one place a check can see what a request
-		// would actually have sent.
+		// 在这里记录而不是在调用点断言：key 与 thinking 等级骑在 host 为本次请求构建的模型上，
+		// 所以这是检查能看到"一个请求实际会发送什么"的唯一地方。
 		state.apiKeys.push(requestModel.apiKey);
 		state.thinkingLevels.push(requestModel.thinkingLevel ?? "off");
 
