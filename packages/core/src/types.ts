@@ -1,5 +1,5 @@
 // 引擎的契约：一次运行发布什么，以及运行侧 hook 以什么形状作答。这些类型曾住在 `packages/loop`；
-// 引擎现在住在 `agent.ts`，而它跨过该文件边界递出的形状——给 hooks、给会话自己的订阅者——就住
+// 引擎住在 `loop-manager.ts`（ADR-0022），而它跨过该文件边界递出的形状——给 hooks、给会话自己的订阅者——就住
 // 这里，归拢成一个模块。工具与工具结果是 `Tool` 与 `ToolResult`，定义在传输层旁边的 `llm/types.ts`，
 // 由请求与运行共用。wire 类型是 `protocol.ts` 的事，留在那里；`QueueMode` 是共享的，
 // `protocol.ts` 转发本模块这份定义，而不是再声明一份。

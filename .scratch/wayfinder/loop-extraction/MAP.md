@@ -59,6 +59,17 @@ ADR-0014 决定 1 的 18 个私有方法 + 文件级机械）从 `Agent` 抽回 
   （票 004 改 re-export 源）。0014「没有被取代的」整节继承。`docs/adr/README.md` 加 0022 行、
   0014 / 0008 / 0012 / 0013 头部加指针，取代者均不回退。实况文档本票不同步，留票 004。
 
+- [按 ADR-0022 落地](tickets/004-landing.md)（closed 2026-11-12）：`loop-manager.ts`（1940 行）落成——
+  决定 1 清单的 17 个方法 + 文件级机械整体迁入，零字段、零构造参数，方法体一字不改（机械改动只有
+  `this.六件` → loopOptions 解构、`this.bag` → `bagOf`、`this.services` → `servicesOf` 现凑）；
+  压缩入口 `compact` 复用袋字段 + `CompactOptions`，模型计算四行搬进 loop。`agent.ts` 收缩到 1172 行
+  （会话表、读面、命令、审批账本、投影 + 事件契约），三入口组袋调 loop。**偏差**：`dispatchEvent`
+  按决定 4 的白名单答辩留在编排层（`loopOptions.emit` 的实现侧），迁入 loop 的是 17 个方法——记进
+  ADR 后果节。「尚未决定」第 1 件择定：`index.ts` re-export 源直指 `./loop-manager.ts`；
+  第 2 件已定：行数账补进 ADR（2947 → 1172 + 1940，run 一族 ≈2020）。`npm run check` 全绿；
+  smoke 与基线同色（`smoke-tools` / `smoke-desktop-observability` 在干净 HEAD 上同样红，stash 验证）。
+  `AGENTS.md` / `docs/architecture.md` / `README.md` 实况同步完成。
+
 ## Not yet specified
 
 - ~~`loopOptions` 的字段清单与回调的确切接口签名~~——票 002 钉死字段，票 003 的 ADR 判据节
@@ -68,10 +79,8 @@ ADR-0014 决定 1 的 18 个私有方法 + 文件级机械）从 `Agent` 抽回 
   ADR「尚未决定」）。
 - ~~`session/fanout.ts` 的分工是否随搬迁微调~~——ADR-0022 决定 7：不微调，参数形状不动；
   retry 事件绕过 dispatchEvent 直调 fanout 的现状也不动。
-- 落地后 `agent.ts` 的行数账，以及「the engine」小节标注随文件迁移后的形态（票 004 补进
-  ADR-0022「后果」节）；静态守卫由票 005 补进同一节或票 resolution。
-- `AGENTS.md` engine 词条、`docs/architecture.md` 的 the engine 小节、根 `README.md` 指着 0014
-  的那一句：票 004 落地时一并改指 0022（票 003 有意不动，理由见 ADR「后果」）。
+- ~~落地后 `agent.ts` 的行数账，以及「the engine」小节标注随文件迁移后的形态~~——票 004 已补进
+  ADR-0022「后果」节；实况文档（AGENTS.md / architecture.md / README.md）随票 004 改指 0022。
 
 ## Out of scope
 

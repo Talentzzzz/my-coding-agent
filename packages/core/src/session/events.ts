@@ -1,8 +1,8 @@
 // 单个 session 发布的事件，以及单个 delta 的形状。
 //
 // fanout 独立成模块（`fanout.ts`）时它们搬到了这里：引擎和命令面都会发布，谁都不独占这个 union。
-// `agent.ts` re-export 对外的四个，所以没有任何调用方的 import 需要变——而引擎又回到了 `Agent`
-// 里面（ADR-0014），两侧重新成为同一个对象，文件边界依然成立。
+// `agent.ts` re-export 对外的四个，所以没有任何调用方的 import 需要变——而引擎住在 `loop-manager.ts`
+// （ADR-0022），sink 的实现仍回到编排层，文件边界依然成立。
 import type { AgentEvent } from "../types.ts";
 import type { Message } from "../llm/index.ts";
 import type { QueuedPrompt, SessionSnapshot } from "../protocol.ts";

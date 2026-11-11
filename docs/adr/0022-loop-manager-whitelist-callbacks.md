@@ -92,14 +92,14 @@ interface LoopOptions {
 - **`maybeCompact` 退回转发。** 0014 决定 4 省掉的那一层回来了；换来的是 `Agent` 不再摸 `settingsManager`（票 002 的缺口裁决）。
 - **`index.ts` 一行改动。** 恢复机器两个函数的 re-export 源改指 `./loop-manager.ts`（或由 `agent.ts` 原样转出）；包对外的名字不变，但漏改就断 `smoke-approval-recovery`。
 - **实况文档要等落地才同步。** `AGENTS.md` 的 engine 词条、`docs/architecture.md` 的 `// the engine` 小节、根 `README.md` 里指着 0014 的那一句，今天描述的是代码的实际形状；本票只接受决定、不动这三处实况（票 004 落地时一并改指 0022）。在这段窗口里，ADR 与架构文档对「引擎住哪」的说法不同是**有意的**：一个记决定，一个记实况。
-- **行数账与守卫待补。** 落地前的基线是 `agent.ts` 2947 行、run 一族 ≈1805 行（61%，票 001 盘点）；落地后的前后行数账由票 004 补进本节，`check` 里那条静态守卫由票 005 补进本节（若届时本 ADR 已关，改写票 resolution 与 map 的 Decisions so far）。三件未定 / 未确认项单列于*尚未决定*。
+- **行数账已补、守卫待补。** 落地前的基线是 `agent.ts` 2947 行、run 一族 ≈1805 行（61%，票 001 盘点）；落地后（票 004）：`agent.ts` 1172 行，`loop-manager.ts` 1940 行——run 一族 = `loop-manager.ts` 全部 + 编排层留住的 emit 实现（`dispatchEvent`，白名单回调的实现侧）与三处入口的组袋 ≈80 行，合计 ≈2020 行，占两文件合计 3112 行的 ≈65%。一个值得记下的偏差：决定 1 的 18 方法清单里有 `dispatchEvent`，落地时它按决定 4 的白名单答辩留在编排层——「落盘、清队列、投影的组合政策」与命令面的发布是同一契约的两半，分居两文件就是答辩要防的漂移面——所以迁入 `loop-manager.ts` 的是 17 个方法 + 文件级机械，`dispatchEvent` 的**宿主**是编排层、`loopOptions.emit` 是它的出口。`check` 里那条静态守卫由票 005 补进本节（若届时本 ADR 已关，改写票 resolution 与 map 的 Decisions so far）。
 
 ## 尚未决定
 
-按 `docs/adr/README.md` 的写法，以下三件在本 ADR 接受时未定 / 未确认，单独列在这里；**上面每一条决定都不依赖它们**：取代关系、白名单判据、`loopOptions` 形状、出口决定、「没有被取代的」清单在这三件未定项的任意取值下逐字相同。
+按 `docs/adr/README.md` 的写法，以下三件在本 ADR 接受时未定 / 未确认，单独列在这里；**上面每一条决定都不依赖它们**：取代关系、白名单判据、`loopOptions` 形状、出口决定、「没有被取代的」清单在这三件未定项的任意取值下逐字相同。*（票 004 落地后，第 1、2 件已定，答案写进了各自条目与「后果」；第 3 件仍归票 005。）*
 
-1. **恢复机器两个函数的 re-export 源路径**：`index.ts` 改指 `./loop-manager.ts`，还是 `agent.ts` 原样转出（决定 6）。两条只差一行、包对外名字相同，由票 004 按搬迁后的实际 import 图择一。
-2. **落地后的前后行数账**：`agent.ts` 与 `loop-manager.ts` 各多少行、run 一族占比多少，由票 004 补进「后果」。落地前基线已确认（2947 行 / ≈1805 行 / 61%）。
+1. **恢复机器两个函数的 re-export 源路径**：~~`index.ts` 改指 `./loop-manager.ts`，还是 `agent.ts` 原样转出（决定 6）~~——**已定（票 004）**：`index.ts` 的 re-export 源直指 `./loop-manager.ts`，不再经过 `agent.ts` 转手；包对外的名字一字不变，`smoke-approval-recovery` 原样通过。
+2. **落地后的前后行数账**：~~由票 004 补进「后果」~~——**已定（票 004）**：见「后果」的行数账 bullet（2947 → `agent.ts` 1172 + `loop-manager.ts` 1940，run 一族 ≈2020 行）。
 3. **静态守卫的确切形态**：票 005 仿 `check-server-facade` 加的那条 `npm run check` 检查，扫哪些路径、禁哪些 import，尚未决定；不变式本身（loop 不 import `agent.ts`）已由决定 5 定死。
 
 ## 不可逆性与代价
