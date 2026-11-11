@@ -259,6 +259,8 @@ export interface SessionInfo {
 	title: string;
 	firstMessage: string;
 	allMessagesText: string;
+	/** The snapshot's parked-approval marker, absent meaning false — a display cache, not a ledger read. */
+	suspended: boolean;
 }
 
 /**
@@ -817,10 +819,10 @@ function getMessageActivityTime(entry: MessageEntry): number | undefined {
  * One session, summarized for a picker: who it is, when it moved, and enough text to search it.
  *
  * The scan is split the way the format is: identity fields — id, workDir, parent, created, a
- * recorded title — come from the `.json` snapshot, and the message statistics come from a line pass
- * over the `.jsonl`, which is the only half that has to be parsed entry by entry. The scan's caller
- * ({@link settleSessionFiles}) has already paired the files and pruned the unopenable, so a meta in
- * hand here means a session this build can open.
+ * recorded title, the suspended marker — come from the `.json` snapshot, and the message statistics
+ * come from a line pass over the `.jsonl`, which is the only half that has to be parsed entry by
+ * entry. The scan's caller ({@link settleSessionFiles}) has already paired the files and pruned the
+ * unopenable, so a meta in hand here means a session this build can open.
  *
  * `modified` prefers the last message's own stamp over the meta's, because a session that is being
  * appended to right now has a birthtime that says nothing about its age.
@@ -896,6 +898,7 @@ async function buildSessionInfo(
 			title: meta.title ?? titleOfBranch(parentOf, userTextOf, leafId),
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText: allMessages.join(" "),
+			suspended: meta.suspended === true,
 		};
 	} catch {
 		signal?.throwIfAborted();
@@ -2323,18 +2326,19 @@ export function toSessionRef(info: SessionInfo): SessionRef {
 /**
  * One row of the sidebar, for a session nothing is running.
  *
- * A file can say where a session was last active and what it is called; it cannot say whether this
- * process is running it, because that fact was never written down. So the two live fields are
- * structurally `false` and `0` here — not a guess, and not "unknown": a session with no host is not
- * running and has no approval waiting, and a caller that wants the live values overlays them from the
- * snapshot rather than reading them off the disk.
+ * `running` is structurally false: whether this process is running a session was never written down.
+ * `pending` is a cache of a ledger fact — the snapshot's `suspended` marker, set when a run parks at
+ * an approval gate — because under end-restart (ADR-0006 §5) the question outlives the host, and the
+ * scan reads snapshots only. The marker carries no count, so a marked row says 1; the exact number
+ * is derived from the ledger once the session is opened, and a caller with a host overlays the live
+ * values from the in-process snapshot rather than reading them off the disk.
  */
 function toSessionRow(info: SessionInfo): SessionRow {
 	return {
 		...toSessionRef(info),
 		modified: info.modified.getTime(),
 		running: false,
-		pending: 0,
+		pending: info.suspended ? 1 : 0,
 	};
 }
 

@@ -1,6 +1,6 @@
 # 02：扫描读侧——行从标记派生 pending
 
-Status: ready-for-agent
+Status: resolved
 Blocked by: 01
 
 设计见 `../spec.md`（读取点、附带闭合）。
@@ -24,3 +24,19 @@ Blocked by: 01
 - 无字段旧快照：行 pending 0。
 - host 在世时 live overlay 仍以账本派生为准（进程内修复不回退）。
 - `npm run check` 绿；smoke-projection、smoke-sessions 绿。
+
+## Comments
+
+- 2026-11-11：实现完成。`SessionInfo.suspended` 由 `buildSessionInfo` 一处填充
+  （扫描与 probe 共用这一个建 info 处），`toSessionRow` 派生 `pending: info.suspended ? 1 : 0`；
+  两处注释（`toSessionRow`、`protocol.ts` 的 `SessionRow`）同步收账。projection 与 web 零改动。
+- 验收证据：`verify-02.ts`（本目录，19 项断言全绿）——冷 seed（无 host）parked 行
+  pending 1 / running false、无字段旧快照 pending 0、host 在世与 reap 后 live overlay 均账本派生、
+  陈旧标记不上 live 行、rename 后 parked 无 host 行仍 pending 1（附带闭合，未改 refresh 代码）。
+  `npm run check` 绿；smoke-projection、smoke-sessions、smoke-approval-endpoint 绿；
+  smoke-mux 首跑一次 Ping 超时假失败、复跑两次全绿（与票 03 记的负载假超时同族）；
+  smoke-approval §1–4 绿，§5 仍是票 03 要修的既有 rig 红（子进程「未知的会话」）。
+- grep 证实快照标记的读取仍只在翻译两点、setter、fork 拷贝，加本票的 display 一路
+  （`buildSessionInfo` → `toSessionRow`）；控制流不读。
+- code-review 双轴：Standards 无硬违规（三条判断项已修：注释 snapshot 歧义、
+  verify 脚本命名与重复扫描）；Spec 全符合、无越界。

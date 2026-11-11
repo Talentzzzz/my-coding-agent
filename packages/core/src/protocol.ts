@@ -36,11 +36,13 @@ export interface SessionRef {
 }
 
 /**
- * One sidebar row: the stored identity plus the activity facts only a running process knows.
+ * One sidebar row: the stored identity plus the activity facts a listing adds.
  *
  * The last three fields are what separates this from {@link SessionRef}. `modified` was already
- * computed by the store for ordering and simply never sent; `running` and `pending` have no stored
- * form at all, because they are facts about *this* process's loop rather than about the transcript.
+ * computed by the store for ordering and simply never sent. `running` has no stored form at all —
+ * it is a fact about *this* process's loop, never about the transcript. `pending` is a ledger fact
+ * with a stored cache: the snapshot's `suspended` marker lights a cold row as 1 (the count is not
+ * stored), and a process with the session open overlays the exact count derived from the ledger.
  *
  * A field earns its place here only when it stays true with nothing subscribed to any content: a row
  * that freezes the moment nobody is watching is the exact failure this type exists to prevent. Token
