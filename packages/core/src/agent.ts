@@ -1075,6 +1075,8 @@ export class Agent {
 		// so the suspended flag has nothing left to say — and left standing it would keep the state's
 		// own eviction refused forever (the criteria read this flag).
 		state.live.suspended = false;
+		// The snapshot's display cache follows the flag: no run is coming to sweep it here.
+		this.sessionManager.setSuspended(bag, false);
 		if (dropQueued(state)) emitQueueUpdate(state);
 		publishState(state, bag, this.services);
 	}
@@ -1302,6 +1304,10 @@ export class Agent {
 			// what says the session is parked, and it is the recovery run's or the abandonment
 			// sweep's to clear, not the end path's.
 			live.model = undefined;
+			// The snapshot's display cache follows the flag the run ended on: a suspended run writes
+			// true, every other end writes false. This one sweep covers every flip — the recovery
+			// run's end clears the marker, not the answer that started the run.
+			this.sessionManager.setSuspended(transcript, live.suspended);
 			// The run is not over until the engine's `runEngine` resolves — after every awaited listener for
 			// `agent_end` and the engine's own `finally`. So this is the first moment nothing is in
 			// flight, and without publishing here nothing ever reports it.

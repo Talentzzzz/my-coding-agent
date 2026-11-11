@@ -57,7 +57,8 @@ export const CURRENT_SESSION_VERSION = 5;
  * current choices, the ones v≤4 recorded as last-wins entries (`rename`, `model_change`,
  * `thinking_level_change`, `tool_config`): only the value in force is kept, so the history those
  * entries carried is gone by design — it was never read. A field absent means "never chosen", which
- * is what lets a reader tell a session that chose `off` from one that never chose.
+ * is what lets a reader tell a session that chose `off` from one that never chose. The one field
+ * that is not a choice is `suspended`: a rebuildable display cache, absent meaning false.
  *
  * Every change rewrites the whole file (temp + rename), because it is a snapshot, not a log — the
  * JSONL beside it is the log, and the two are paired by stem: a session exists exactly when both
@@ -95,6 +96,15 @@ export interface SessionMeta {
 	activeTools?: string[];
 	/** The complete approval map as of the last change, keyed like the settings file's `approval`. */
 	approval?: Record<string, boolean>;
+	/**
+	 * Whether the session is parked at an approval gate; written only when true, absent means false.
+	 *
+	 * A display cache for the listing's cold start: the scan reads snapshots only, and pairing tool
+	 * calls with results would cost a full replay of every ledger. The ledger stays the authority —
+	 * this field is rebuildable from it at any time, and no control flow reads it. An older snapshot
+	 * without the field reads as false, so the version does not move and nothing migrates.
+	 */
+	suspended?: true;
 }
 
 export interface SessionEntryBase {
@@ -1037,8 +1047,9 @@ function previewOfMessage(message: Message): string {
  * This is a memory grouping only — the `.json` on disk keeps its flat shape ({@link SessionMeta}),
  * and the fill path / {@link metaOf} are the only two translation points between the two. The
  * thinking level lives inside `model` rather than beside it: a session's level and its row are one
- * choice the input box sends together, so memory holds them as one object. Every field but the
- * working directory is absent until chosen, exactly as the disk fields are.
+ * choice the input box sends together, so memory holds them as one object. Every choice field is
+ * absent until chosen, exactly as the disk fields are; `suspended` is the one exception — a derived
+ * fact rather than a choice, always present.
  */
 export interface SessionSetting {
 	/** The working directory the session was opened on, absolute. */
@@ -1063,6 +1074,14 @@ export interface SessionSetting {
 	activeTools?: string[];
 	/** The complete approval map as of the last change, keyed like the settings file's `approval`. */
 	approval?: Record<string, boolean>;
+	/**
+	 * Whether the session is parked at an approval gate — a rebuildable display cache, not a user
+	 * choice: the ledger's dangling calls are the authority, and this only saves the listing's cold
+	 * scan a full replay. It lives here because the disk↔memory translation has exactly two points,
+	 * and one derived field does not earn a third. Always present in memory (false unless parked);
+	 * only true reaches the disk. No control flow reads it.
+	 */
+	suspended: boolean;
 }
 
 /**
@@ -1123,7 +1142,8 @@ export interface Session {
  * The one direction of the disk↔memory translation that reads a file: the thinking level folds
  * into `model`, everything else moves under its new name unchanged. Absent means absent — a
  * session that never chose keeps every field off the object, so "never chose" and "chose the
- * default" stay distinguishable.
+ * default" stay distinguishable. The `suspended` cache is the one field always present: absent on
+ * disk reads as false.
  */
 function sessionSettingOf(meta: SessionMeta): SessionSetting {
 	return {
@@ -1135,6 +1155,7 @@ function sessionSettingOf(meta: SessionMeta): SessionSetting {
 			: { model: { ...meta.model, ...(meta.thinkingLevel === undefined ? {} : { thinkingLevel: meta.thinkingLevel }) } }),
 		...(meta.activeTools === undefined ? {} : { activeTools: meta.activeTools }),
 		...(meta.approval === undefined ? {} : { approval: meta.approval }),
+		suspended: meta.suspended === true,
 	};
 }
 
@@ -1178,6 +1199,7 @@ function metaOf(s: Session): SessionMeta {
 		...recordedModelOf(setting.model),
 		...(setting.activeTools === undefined ? {} : { activeTools: setting.activeTools }),
 		...(setting.approval === undefined ? {} : { approval: setting.approval }),
+		...(setting.suspended ? { suspended: true } : {}),
 	};
 }
 
@@ -1208,7 +1230,7 @@ export function createSession(
 		sessionDirAbsPath: absDir,
 		persist: true,
 		fileCreated: false,
-		sessionSetting: { workDirAbsPath: resolvePath(workDirInput) },
+		sessionSetting: { workDirAbsPath: resolvePath(workDirInput), suspended: false },
 		jsonlEntries: [],
 		sessionEntryMapById: new Map(),
 		leafId: null,
@@ -1225,7 +1247,7 @@ export function inMemorySession(workDirInput: string = process.cwd(), parentSess
 		sessionDirAbsPath: null,
 		persist: false,
 		fileCreated: false,
-		sessionSetting: { workDirAbsPath: resolvePath(workDirInput) },
+		sessionSetting: { workDirAbsPath: resolvePath(workDirInput), suspended: false },
 		jsonlEntries: [],
 		sessionEntryMapById: new Map(),
 		leafId: null,
@@ -1302,6 +1324,7 @@ export function newSession(s: Session, parentSessionFile?: string): string | und
 	s.sessionSetting = {
 		workDirAbsPath: s.sessionSetting.workDirAbsPath,
 		...(parentSessionFile === undefined ? {} : { parentSessionId: resolvePath(parentSessionFile) }),
+		suspended: false,
 	};
 	s.jsonlEntries = [];
 	s.sessionEntryMapById.clear();
@@ -1608,6 +1631,22 @@ export class SessionManager {
 			}
 			setting.activeTools = [...activeTools];
 			setting.approval = { ...approval };
+			return true;
+		});
+	}
+
+	/**
+	 * Record whether the session is parked at an approval gate, as the snapshot's display cache.
+	 *
+	 * Not a choice and not an entry: the ledger's dangling calls are the authority, and this field
+	 * only saves the listing's cold scan a full replay. The run's end sweep and the abandonment
+	 * sweep write it — an answer never does, because the call stays dangling until the recovery run
+	 * closes it. Only a flip pays a rewrite, and only true reaches the disk ({@link metaOf}).
+	 */
+	setSuspended(s: Session, suspended: boolean): void {
+		recordMeta(s, (setting) => {
+			if (setting.suspended === suspended) return false;
+			setting.suspended = suspended;
 			return true;
 		});
 	}
@@ -2043,7 +2082,8 @@ export class SessionManager {
 	 * `entryId` is the entry the branch ends at, or null for the whole log. The new snapshot points at
 	 * the source's entry stream as `parentSession`, and the copied entries keep the ids and parent
 	 * links the source wrote, which is what makes a fork traceable back to where it came from. The
-	 * snapshot's current choices travel whole — title, model, level, tool config — because those are
+	 * snapshot's current values travel whole — title, model, level, tool config, and the suspended
+	 * marker, because a fork of a parked session copies the dangling calls too — since those are
 	 * the session's own values now, not entries a branch replay could restore. The working directory
 	 * is the source header's own: the fork is written where its source lives, and the caller is not
 	 * asked to replay the file to learn where that is.
@@ -2095,6 +2135,7 @@ export class SessionManager {
 			...(sourceMeta.thinkingLevel === undefined ? {} : { thinkingLevel: sourceMeta.thinkingLevel }),
 			...(sourceMeta.activeTools === undefined ? {} : { activeTools: sourceMeta.activeTools }),
 			...(sourceMeta.approval === undefined ? {} : { approval: sourceMeta.approval }),
+			...(sourceMeta.suspended === undefined ? {} : { suspended: sourceMeta.suspended }),
 		};
 		writeFileSync(absNewSessionFile, branch.map((entry) => `${JSON.stringify(entry)}\n`).join(""), { flag: "wx" });
 		writeFileSync(sessionMetaPath(absNewSessionFile), `${JSON.stringify(meta, null, "\t")}\n`, { flag: "wx" });

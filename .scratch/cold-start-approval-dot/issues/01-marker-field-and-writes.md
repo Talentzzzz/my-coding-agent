@@ -1,6 +1,6 @@
 # 01：标记字段与写入点
 
-Status: ready-for-agent
+Status: resolved
 Blocked by: （无）
 
 设计见 `../spec.md`（形状、写入点、不变式）。本票只做 core 的字段与写侧。
@@ -29,3 +29,18 @@ Blocked by: （无）
 - 重复同值写入不产生快照重写（recordMeta no-op）。
 - `npm run check` 绿；smoke-approval 第 1–4 节、smoke-sessions 绿。
 - 控制流（hasPendingApproval / respondApproval / recoverPendingToolCalls）不读新字段。
+
+## Comments
+
+- 2026-11-11：实现完成。内存侧取 `suspended: boolean`（必填，构造点初始化 false），
+  fill 路径的合并点是 `sessionSettingOf`（`fillSession` 调它），不是 `fillSession` 本体；
+  `forkFrom` 是 meta→meta 直拷，第六值加在它的 meta 字面量里，不算第三个翻译点。
+- 验收证据：`verify-01.ts`（本目录，22 项断言全绿）——park/回答+恢复/abort/fork/旧快照/no-op
+  重写全覆盖；`npm run check` 绿；smoke-approval §1–4、smoke-sessions、smoke-approval-endpoint、
+  smoke-approval-recovery、smoke-approval-queue、smoke-session、smoke-projection、smoke-mux 绿。
+  grep 证实新字段的读取只在两个翻译点、setter、fork 拷贝四处。
+- 两处**既有**红，与本票无关（已用 stash 在 HEAD 上复现同样崩溃）：
+  smoke-approval §5 的 rig（子进程找不到会话，票 03 修）；smoke-tools `exercisePruning`
+  的 `idle-session` fixture 写在工作目录而 flat store 按 sessions 目录查 id
+  （`UnknownSessionError`，smoke-tools.ts:1007）——建议另开票修 fixture。
+- code-review 双轴：Standards 无硬违规（一条省略式评论已修）；Spec 全符合、无越界。
