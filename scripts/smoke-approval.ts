@@ -15,8 +15,9 @@
 //   3. one id, two sessions — an answer reaches only the session it was given on (ticket 19);
 //   4. a parked approval — it outlives its host: the reap closes the host once the last hold lets
 //      go, and the question survives unanswered and undenied until someone answers it or the process
-//      ends (issue 04);
-//   5. a restart — a second process seeds no pending approval, and the transcript keeps the call.
+//      ends (issue 04); the snapshot's suspended marker follows the question through its endings;
+//   5. a restart — the cold overview lights the parked row from the snapshot marker, and the
+//      transcript keeps the call answerable.
 //
 // Two things pinned by `docs/notes.md` §一 and §二 are load-bearing here. The first section's
 // `new SessionHub({ workDirAbsPath: root })` names the hub's one directory option: that section
@@ -24,8 +25,8 @@
 // may hold a session open through a *subscription*:
 // a subscription takes no hold, so wherever a check needs the host to outlive a request it takes a
 // hold of its own (the bench hold), exactly as `smoke-stream` and `smoke-mux` do.
-import { mkdtemp, rm } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer as createTcpServer } from "node:net";
 import { spawn } from "node:child_process";
@@ -41,7 +42,7 @@ import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-
 import { mountSession } from "./mount-session.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
 import type { PendingApproval, SessionRow } from "@my-agent/core/protocol";
-import { type Agent, type ModelConfig, type Session, setSessionsDir, SettingManager } from "@my-agent/core";
+import { type Agent, type ModelConfig, type Session, SessionManager, sessionMetaPath, setSessionsDir, SettingManager, type SessionMeta } from "@my-agent/core";
 
 let failures = 0;
 
@@ -103,6 +104,13 @@ async function waitParked(base: string, sessionId: string, ms = 15_000): Promise
 		if (Date.now() > end) return read;
 		await sleep(50);
 	}
+}
+
+/** The `.json` snapshot a session id names, read straight off the store — the marker's disk half. */
+async function readMeta(id: string): Promise<SessionMeta> {
+	const jsonl = SessionManager.findSessionFilePathById(id);
+	if (jsonl === undefined) throw new Error(`no session file for ${id}`);
+	return JSON.parse(await readFile(sessionMetaPath(jsonl), "utf8")) as SessionMeta;
 }
 
 // The row every rig's session runs on. Each hub below is given a scratch agent home of its own and
@@ -437,9 +445,11 @@ try {
 // at the gate refuses eviction, and with it the queues a recovery run must drain — so the question
 // survives as the ledger's, to be answered on a later hold or carried to the next process. The
 // sidebar row is part of that survival: the projection settles it from the ledger when the host
-// goes, so the dot stays lit while the question stands. The rigs take their holds through the hub
-// itself, so the reap under test is the real one — the sections above mount a session by hand and
-// keep a bench hold on it.
+// goes, so the dot stays lit while the question stands. The snapshot's `suspended` marker is the
+// disk half of the same survival: the park writes it, an answer's recovery run and an abort's
+// abandonment sweep clear it, and a fork carries it to a session no host has opened. The rigs take
+// their holds through the hub itself, so the reap under test is the real one — the sections above
+// mount a session by hand and keep a bench hold on it.
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\na parked approval outlives its host, unanswered and undenied\n");
@@ -453,6 +463,8 @@ try {
 		const { wire, viewer } = await driveToApproval(patient);
 		const parked = patient.host;
 		check("the run parked at the approval", patient.session.hasPendingApprovals(parked.id));
+		const parkedMeta = await readMeta(parked.id);
+		check("and the snapshot carries the suspended marker", parkedMeta.suspended === true, JSON.stringify(parkedMeta));
 
 		// The viewer switches away, and its hold is the *only* thing keeping the session open — a
 		// subscription takes none. So this release is what starts the reap, and it does not wait for
@@ -521,6 +533,12 @@ try {
 		check(
 			"and the recovery run it started finished",
 			await until(async () => ((await readSession(patient.url, parked.id))?.submitting ?? true) === false, 8_000),
+		);
+		const recoveredMeta = await readMeta(parked.id);
+		check(
+			"the marker is gone once the recovery run closed the call",
+			recoveredMeta.suspended === undefined,
+			JSON.stringify(recoveredMeta),
 		);
 		check(
 			"the row goes quiet on the wire once the answer lands",
@@ -613,19 +631,85 @@ try {
 	} finally {
 		await lookedThenLeft.close();
 	}
+
+	// The marker's third ending: an abort is the abandonment sweep, and it clears the marker without
+	// a run — no recovery is coming, so the snapshot must stop saying the question stands.
+	const aborted = await openRig();
+	try {
+		const { wire, viewer } = await driveToApproval(aborted);
+		const parked = aborted.host;
+		check("the run parked at the approval", aborted.session.hasPendingApprovals(parked.id));
+		check("the snapshot carries the suspended marker", (await readMeta(parked.id)).suspended === true);
+
+		const stopped = await request(aborted.url, "POST", `/api/sessions/${parked.id}/abort`);
+		check("the abort was accepted", stopped.status === 200, String(stopped.status));
+		const sweptMeta = await readMeta(parked.id);
+		check(
+			"the abandonment sweep cleared the marker without a run",
+			sweptMeta.suspended === undefined,
+			JSON.stringify(sweptMeta),
+		);
+		await wire.close().catch(() => {});
+		aborted.hub.release(viewer);
+	} finally {
+		await aborted.close();
+	}
+
+	// A fork of a parked session is parked itself: the ledger's dangling call is copied whole, so the
+	// marker travels with it — and the fork's row lights up with no host ever opening it.
+	const forked = await openRig();
+	try {
+		const { wire, viewer } = await driveToApproval(forked);
+		const parked = forked.host;
+		check("the run parked at the approval", forked.session.hasPendingApprovals(parked.id));
+
+		// Attached before the fork, so the row's first publish is heard rather than raced. The
+		// overview is the registration proof: it is sent once the mux owns the connection, so a
+		// publish after it cannot miss this connection.
+		const sidebar = await connect(muxUrl(forked.url));
+		await sidebar.waitForConnection((envelope) => envelope.item?.type === "sessions", 8_000);
+		const created = await request(forked.url, "POST", `/api/sessions/${parked.id}/forks`, { entryId: null });
+		const forkId = ((created.payload ?? {}) as { sessionId?: string }).sessionId ?? "";
+		check("the fork was created", created.status === 201 && forkId.length > 0, String(created.status));
+		if (forkId.length === 0) throw new Error("the fork was not created, so the rest of this rig cannot run");
+		const forkMeta = await readMeta(forkId);
+		check("the fork's snapshot carries the marker", forkMeta.suspended === true, JSON.stringify(forkMeta));
+		const forkRowFrame = await sidebar.waitForConnection(
+			(envelope) => envelope.item?.type === "session_row" && (envelope.item.session as SessionRow).id === forkId,
+			8_000,
+		);
+		const forkRow = forkRowFrame?.item?.session as SessionRow | undefined;
+		check(
+			"the fork's row lights up with no host",
+			forkRow?.pending === 1 && forkRow?.running === false,
+			JSON.stringify(forkRow),
+		);
+		await sidebar.close().catch(() => {});
+		await wire.close().catch(() => {});
+		forked.hub.release(viewer);
+	} finally {
+		await forked.close();
+	}
 } finally {
 	clearTimeout(parkedWatchdog);
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 5. A restart seeds no pending approval.
+// 5. A restart: the cold overview lights the parked row, and the question survives answerable.
 //
 // The property this pins under the end-restart architecture (ADR-0006 §5): the transcript is the
 // only state, so the waiting call survives the restart *as a question* — the new process derives it
-// from the ledger the way the old one did, and the banner it shows is still answerable. What must
-// NOT survive is a memory-resident promise: nothing here is "an entry remembers it", and the child
-// is a real `main.ts` over the same agent home and the same working directory, so it can only see what the
-// first one left on disk. (The answer itself is not exercised: the child speaks to real providers.)
+// from the ledger the way the old one did, and the banner it shows is still answerable. The sidebar
+// does not pay that derivation on startup: the snapshot's `suspended` marker lights the row in the
+// cold overview, before anything opens the session. What must NOT survive is a memory-resident
+// promise: nothing here is "an entry remembers it", and the child is a real `main.ts` over the same
+// agent home and the same working directory, so it can only see what the first one left on disk.
+// (The answer itself is not exercised: the child speaks to real providers.)
+//
+// The rig's one subtlety is the store: `setSessionsDir` is an in-process override, while the child
+// only knows `MY_AGENT_HOME/sessions`. Both roads must name the same files, so this section owns a
+// scratch home of its own — the parent points the override at its `sessions`, the child's env points
+// at the home. The switch is safe because the sections above are done with the store they shared.
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\nan approval survives a restart as the question it still is\n");
@@ -633,12 +717,17 @@ process.stdout.write("\nan approval survives a restart as the question it still 
 const restartWatchdog = deadline("the restart checks", 90_000);
 
 const restartRoot = await mkdtemp(join(tmpdir(), "my-agent-approval-restart-"));
+const restartHome = await mkdtemp(join(tmpdir(), "my-agent-approval-restart-home-"));
+setSessionsDir(join(restartHome, "sessions"));
+// One home for both processes: the rows the parent's prompt resolves are the rows the child reads.
+const restartSeeder = new SettingManager({ home: restartHome, modelsHome: restartHome });
+restartSeeder.replaceModels(rows);
 const restartFake = createFakeTransport();
 restartFake.setResponses([
 	fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 	fakeAssistantMessage("done"),
 ]);
-const first = await bootServer({ workDirAbsPath: restartRoot, port: 0, api: restartFake.api });
+const first = await bootServer({ workDirAbsPath: restartRoot, port: 0, api: restartFake.api, settingsHome: restartHome });
 let restartSessionId = "";
 try {
 	// Startup selects nothing now, so the session this half drives is the one an explicit creation
@@ -669,7 +758,7 @@ const child = spawn(
 		env: {
 			...process.env,
 			// Explicit, never inherited-by-luck: the child must read the same sessions the parent wrote.
-			MY_AGENT_HOME: process.env.MY_AGENT_HOME ?? join(homedir(), ".my-agent"),
+			MY_AGENT_HOME: restartHome,
 		},
 	},
 );
@@ -693,6 +782,24 @@ try {
 	check("the second process answered /api/health", healthy);
 
 	if (healthy) {
+		// The cold read comes first, on a connection that opens nothing: the overview is the seed's
+		// own answer, and the parked row must light up from the snapshot's marker — no host, no
+		// replay, no ledger pairing. This is the sidebar's first glance after a restart.
+		const sidebar = await connect(muxUrl(childBase));
+		const overview = await sidebar.waitForConnection((envelope) => envelope.item?.type === "sessions", 8_000);
+		const coldRow = ((overview?.item?.sessions ?? []) as SessionRow[]).find((row) => row.id === restartSessionId);
+		check(
+			"the cold overview lights the parked session's row",
+			(coldRow?.pending ?? 0) >= 1,
+			JSON.stringify(coldRow),
+		);
+		check(
+			"and the row is not running: no run survived the restart",
+			coldRow?.running === false,
+			JSON.stringify(coldRow),
+		);
+		await sidebar.close().catch(() => {});
+
 		const wire = await connect(muxUrl(childBase));
 		const baseline = await wire.open(restartSessionId);
 		check(
@@ -715,7 +822,7 @@ try {
 	await Promise.race([exited, sleep(5_000)]);
 	clearTimeout(restartWatchdog);
 	await rm(restartRoot, { recursive: true, force: true });
-	await rm(storeRoot, { recursive: true, force: true }).catch(() => {});
+	await rm(restartHome, { recursive: true, force: true });
 }
 
 process.stdout.write(failures === 0 ? "\napproval ok\n" : `\n${failures} FAILED\n`);

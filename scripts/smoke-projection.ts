@@ -1,13 +1,15 @@
 // Projection smoke test: proves the sidebar row store answers "what is every session doing" without
-// anyone watching, that a row only moves when something about it changed, and that the new envelope
+// anyone watching, that a row only moves when something about it changed, that a parked session's
+// cold row lights up from the snapshot marker (no host, no replay), and that the new envelope
 // types describe the frames a multiplexed connection carries.
 // Nothing here reaches a model, so no provider key is needed.
 // Run with: node scripts/smoke-projection.ts
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	SessionManager,
+	sessionMetaPath,
 	setSessionsDir,
 	type Agent,
 	type ClientFrame,
@@ -16,11 +18,12 @@ import {
 	type ServerMessage,
 	type SessionRow,
 	type Session,
+	type SessionMeta,
 	type ModelConfig,
 } from "@my-agent/core";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import { createSessionProjection } from "../packages/server/src/projection.ts";
-import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
+import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-projection-"));
 const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-projection--store-"));
@@ -298,6 +301,58 @@ try {
 	check("and the row says idle", await until(() => seen.some((row) => row.id === afterStop && row.running === false)), JSON.stringify(seen.filter((row) => row.id === afterStop)));
 	stopObserving();
 	check("and the observer let go", !hub.isWatched(afterStop));
+
+	process.stdout.write("a parked session's cold row lights up from the snapshot marker\n");
+	// Two sessions driven to the gate and then let go: the store holds parked questions with no host
+	// anywhere, which is the state a restart seeds from. The gate is each session's own choice, so
+	// the machine's settings stay out of it.
+	const park = async (promptText: string): Promise<string> => {
+		const id = await hub.newSession();
+		const host = await hub.hold(id);
+		hub.agent.applyConfig(id, { approval: { read: true } });
+		fake.setResponses([
+			fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
+			fakeAssistantMessage("done"),
+		]);
+		await hub.agent.prompt(id, promptText);
+		const parked = hub.agent.hasPendingApprovals(id);
+		hub.release(host);
+		await until(() => !hub.live.includes(id));
+		if (!parked) throw new Error("the session did not park, so the marker checks cannot run");
+		return id;
+	};
+	const parkedId = await park("read the notes");
+	const strippedId = await park("read the notes too");
+	const metaPathOf = (id: string): string => {
+		const jsonl = SessionManager.findSessionFilePathById(id);
+		if (jsonl === undefined) throw new Error(`no session file for ${id}`);
+		return sessionMetaPath(jsonl);
+	};
+	// The compatibility case: a snapshot without the field — an old file, or a marker stripped by
+	// hand — reads as pending 0 even though the ledger still holds the dangling call.
+	const strippedMeta = JSON.parse(await readFile(metaPathOf(strippedId), "utf8")) as SessionMeta;
+	check("precondition: the second parked snapshot carries the marker", strippedMeta.suspended === true, JSON.stringify(strippedMeta));
+	delete strippedMeta.suspended;
+	await writeFile(metaPathOf(strippedId), `${JSON.stringify(strippedMeta, null, "\t")}\n`, "utf8");
+
+	// A brand-new projection over the same hub: its seed is the cold read a restart pays, and no
+	// host stands anywhere — the parked row's pending can only come from the snapshot's marker.
+	const cold = createSessionProjection(hub);
+	const coldRows = await cold.rows();
+	const coldParked = coldRows.find((row) => row.id === parkedId);
+	check("the parked session's cold row is pending 1", coldParked?.pending === 1, JSON.stringify(coldParked));
+	check("and not running: no host survived to claim it", coldParked?.running === false, JSON.stringify(coldParked));
+	const coldStripped = coldRows.find((row) => row.id === strippedId);
+	check("a snapshot without the field reads as pending 0", coldStripped?.pending === 0, JSON.stringify(coldStripped));
+
+	// The rename closure: a parked session with no host is renamed, and the refresh republishes the
+	// probe row — the marker must survive the re-read, or the dot goes out on a rename.
+	await hub.rename(parkedId, "parked and renamed");
+	await cold.refresh(parkedId);
+	const renamed = await cold.row(parkedId);
+	check("the rename reached the cold row", renamed?.title === "parked and renamed", JSON.stringify(renamed));
+	check("and the dot stayed lit", renamed?.pending === 1, JSON.stringify(renamed));
+	cold.close();
 
 	process.stdout.write("the envelope types describe a multiplexed connection\n");
 	const item: ServerMessage = { type: "status", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2, contextWindow: 100 }, submitting: true, queued: [], isRetrying: false, retryAttempt: 0 };
