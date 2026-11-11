@@ -7,6 +7,9 @@
 取代者：[0015](0015-llm-folded-into-core.md)（部分，2026-11-06——决定 6 里 `AgentContext` 的命名与
 「类型并进 `core/src/types.ts`」中的工具/上下文那一半，以及*被取代的是什么*一节里「`packages/llm`
 仍在 `packages/llm` 里、仍然 vendored、也没有被并入任何人」这句现状陈述；llm 已被并入 `core`）
+取代者：[0022](0022-loop-manager-whitelist-callbacks.md)（部分，2026-11-11——0012 取代、0014 复活过的
+决定 1/2 再次被取代：引擎重回 `loop-manager.ts`、不再是 `Agent` 的方法；本文「没有信息的对象」那句
+判词继续作 0022 的试金石，决定 3–9 与其余结论不动）
 
 设计过程见 `.scratch/loop-into-agent/`（形状在 2026-11-02 的设计对话与 01/02 号票敲定，
 本 ADR 只记合拢后的决定）。

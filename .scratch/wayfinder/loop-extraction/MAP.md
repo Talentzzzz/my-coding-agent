@@ -50,14 +50,28 @@ ADR-0014 决定 1 的 18 个私有方法 + 文件级机械）从 `Agent` 抽回 
   票面「模型/abort/闸门/transport/thinkingLevel 必有」被盘点推翻——全是运行局部量。定下的词落进
   根目录新建的 `CONTEXT.md`。
 
+- [起草并接受 ADR-0022](tickets/003-adr-0022.md)（closed 2026-11-11）：四问四拍板（全取推荐答案），
+  正文落 `docs/adr/0022-loop-manager-whitelist-callbacks.md`。取代 0014 全部决定 + 部分取代 0008
+  （决定 1/2 再次作废），复活 0012 的文件分区（不含六字段构造注入）与 0013 的零字段/参数化结论；
+  正面回答 0014 判据三层（价值是文件地址不是持有、跨边界的是白名单不是六个字段、0008 批评的是
+  转发形状不是分区）。判据节写全白名单逐项答辩与 11 字段 `loopOptions`（回调**平铺**）。出口决定：
+  `index.ts` **不恢复** `LoopManager` / `LoopManagerConfig` 导出，恢复机器两函数仍从包入口导出
+  （票 004 改 re-export 源）。0014「没有被取代的」整节继承。`docs/adr/README.md` 加 0022 行、
+  0014 / 0008 / 0012 / 0013 头部加指针，取代者均不回退。实况文档本票不同步，留票 004。
+
 ## Not yet specified
 
-- ~~`loopOptions` 的字段清单与回调的确切接口签名~~——票 002 已钉死（见 Decisions 第二条）；
-  剩下的签名细节（回调嵌在 loopOptions 的平铺还是嵌套袋）归 ADR 起草时顺手定。
-- `index.ts` 要不要恢复 `LoopManager` 出口（0014 撤过）；server 包大概率不需要看见它
-  （ADR-0017 的消费边界）——等 ADR 起草时定。
-- `session/fanout.ts` 的分工是否随搬迁微调。
-- 落地后 `agent.ts` 的行数账，以及「the engine」小节标注随文件迁移后的形态。
+- ~~`loopOptions` 的字段清单与回调的确切接口签名~~——票 002 钉死字段，票 003 的 ADR 判据节
+  钉死完整 TS 接口与**平铺**（不套 `callbacks` 子袋）。
+- ~~`index.ts` 要不要恢复 `LoopManager` 出口~~——ADR-0022「出口决定」：不恢复；`LoopManagerConfig`
+  在零字段形状里不存在。包入口的恢复机器两函数出口保持，源路径由票 004 定（两条等价做法列在
+  ADR「尚未决定」）。
+- ~~`session/fanout.ts` 的分工是否随搬迁微调~~——ADR-0022 决定 7：不微调，参数形状不动；
+  retry 事件绕过 dispatchEvent 直调 fanout 的现状也不动。
+- 落地后 `agent.ts` 的行数账，以及「the engine」小节标注随文件迁移后的形态（票 004 补进
+  ADR-0022「后果」节）；静态守卫由票 005 补进同一节或票 resolution。
+- `AGENTS.md` engine 词条、`docs/architecture.md` 的 the engine 小节、根 `README.md` 指着 0014
+  的那一句：票 004 落地时一并改指 0022（票 003 有意不动，理由见 ADR「后果」）。
 
 ## Out of scope
 
