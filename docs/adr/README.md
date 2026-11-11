@@ -32,7 +32,7 @@
 | [0018](0018-claim-renamed-to-hold.md) | `claim` 改名为 `hold`——同一个引用计数，一个说得准的名字 | 已接受，已落地（2026-11-10，全仓机械改名，`check` 绿、相关 smoke 全 PASS，零行为变化），部分取代 0001 的「不要重命名 `claim`」 |
 | [0019](0019-table-holds-live-half-only.md) | 表只装 live 半——transcript 每次操作现读，`AgentState` 不再有 `session` | 已接受，已落地（2026-11-10，`check` 绿、smoke 与改动前逐条同色），整体取代 0011 |
 | [0020](0020-flat-session-store.md) | store 改平——`sessions/<id>.{json,jsonl}`，id 就是地址；旧布局惰性迁移，`Agent` 不再记路径 | 已接受，已落地（2026-11-10，`check` 绿；smoke 做了机械改写、未全量执行，见 ADR 文末），部分取代 0009 的「每工作目录一个 store 目录」 |
-| [0020](0020-flat-session-store.md) | store 改平——`sessions/<id>.{json,jsonl}`，id 就是地址；旧布局惰性迁移，`Agent.paths` 删除 | 已接受，已落地（2026-11-10，`tsc` 绿、smoke 机械改写未跑），取代 0009 的「每工作目录一个 store 目录」布局条款 |
+| [0021](0021-snapshot-suspended-marker.md) | 快照加 `suspended` 标记——冷启动审批点是纯显示缓存，账本仍是唯一事实 | 已接受，已落地（2026-11-11，cold-start-approval-dot 01–04 号票，`check` 绿、相关 smoke 单独跑全绿），0006 后果一节「可从磁盘重建的缓存」口子的实例，不取代任何决定 |
 
 ## 门槛
 

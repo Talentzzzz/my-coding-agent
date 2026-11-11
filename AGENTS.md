@@ -59,7 +59,9 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   抛错）。「这一轮能调哪些、哪些要问」仍是**一次选择**，纯数据 `ToolState` 从账本派生、每次读取现算：
   **Map 持全部实例、活跃名单不进 Map**，判活的是引擎手里那个 `ReadonlySet<string>`。没有插件注册表。
 - **session（会话）** —— 两个文件（ADR-0009）：`.json` 快照（身份 + title/model/thinkingLevel/工具/审批
-  的当前值，变更即整体原子重写）配同 stem 的只追加 JSONL 日志（六种 kind，账本、唯一事实），由
+  的当前值，变更即整体原子重写；另有一个 `suspended` 标记——停在审批闸门的**纯显示缓存**，仅 true
+  落盘、缺省即 false，账本为准、控制流不读，[ADR-0021](docs/adr/0021-snapshot-suspended-marker.md)）
+  配同 stem 的只追加 JSONL 日志（六种 kind，账本、唯一事实），由
   无状态的 `SessionManager` 拥有——打开时 `fillSession` 合并两份重放出纯数据状态，host 在手时它是
   这两个文件唯一的写者（ADR-0006）；文件随第一条消息**同时**出生（`.json` 是 commit marker），没说过话的
   会话不落盘、不进侧边栏；标题是快照的 `title` 字段，没写过就从分支首条 user 消息派生；配对残缺
@@ -112,7 +114,8 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   运行且不写结果，tool call 在账本里悬空（有 tool_use 无 tool_result，派生态）；答案经
   `POST /api/sessions/{id}/approvals/{toolCallId}` 到达后启动恢复运行，由引擎的恢复机器按
   toolCallId 配对续跑——grant 重跑该调用、deny 合成结果，无答案的孤儿合成错误结果收尾。
-  哪些工具会问是**按会话**的，记在快照的 `approval` 字段里。
+  哪些工具会问是**按会话**的，记在快照的 `approval` 字段里。**问题比进程活得久**：重启后悬空 call
+  仍可回答，侧边栏的琥珀点由快照的 `suspended` 显示标记点亮（ADR-0021）；标记不参与批/拒/恢复的判断。
 - **tool set（工具集合）** —— 活跃工具和审批映射是**一个**决定，一起写在会话 `.json` 快照的
   `activeTools` 与 `approval` 两个字段里；它是状态，绝不是对话。
 - **mode（模式）** —— 全局设置里一个命名的预设：工具集合 + 每工具审批映射，整份存进 settings 的
@@ -121,7 +124,7 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   `PUT /tools` + 审批 `PATCH` 两个命令的组合，写的是快照的既有字段——没有新模式端点，也没有新
   entry kind；输入框的座位是从快照与模式表**按值匹配**出来的（ADR-0005）。
 - **fork（派生子会话）** —— `forkFrom()` 写出**一对**新文件，把源的 `.jsonl` 路径记为 `parentSession`，
-  链和 id 原样复制，title/model/level/工具/审批五个当前值随拷。
+  链和 id 原样复制，title/model/level/工具/审批五个当前值与 `suspended` 标记随拷（ADR-0021）。
 - **branch（分支）** —— 同一个会话里的另一条路径，而 fork 是另一对文件；`branch(entryId)` 移动 leaf，
   `getBranchPoints()` 报告分支点——**整份日志**的，不是活跃链的，所以树不随 leaf 的位置变形（每个点
   带一个 `anchor`，指窗口该把它的卡片挂在谁下面）。
