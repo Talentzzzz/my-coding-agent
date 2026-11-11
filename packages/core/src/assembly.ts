@@ -1,15 +1,11 @@
 import { resolve as resolvePath } from "node:path";
 import type { ChatTransport } from "./llm/index.ts";
-import {
-	DEFAULT_MODEL_NAME,
-	type ModelChoice,
-	type ModelConfig,
-	modelFor,
-} from "./models.ts";
+import { type ModelChoice, type ModelConfig, modelFor } from "./models.ts";
 import type { SessionSnapshot } from "./protocol.ts";
 import { createAgentState, type AgentState, createLive } from "./session/agent-state.ts";
 import { danglingApprovalsOf } from "./session/dangling.ts";
 import { type SessionServices } from "./session/fanout.ts";
+import { modelChoiceOf } from "./session/model-choice.ts";
 import { type Session, SessionManager } from "./session/session-manager.ts";
 import { sessionSnapshot } from "./session/snapshot.ts";
 import { followsGlobalOf, toolStateOf } from "./session/tool-config.ts";
@@ -81,7 +77,7 @@ export interface OpenAgentOptions {
  * directory on `sessionSetting.workDirAbsPath`.
  *
  * The model fields are not a host's handle on the default. The host-facing verbs (`create`,
- * `ensure`, `snapshotOf`) do not take one: a session's model is a settings fact, read fresh from
+ * `hold`, `snapshotOf`) do not take one: a session's model is a settings fact, read fresh from
  * disk by the assembly below on every open. Only `openAgent` — the one-transcript composition a
  * smoke drives — passes one, so a scripted run can open on a row of its own without writing a
  * settings file.
@@ -144,25 +140,21 @@ async function assemble(services: SessionServices, options: AssembleAgentStateOp
 	// `<workDirAbsPath>/.my-agent/settings.json`, over the agent home's own file. Nothing is cached:
 	// every read is a fresh read of the files behind whichever manager the caller handed over.
 	const { settings, sessionManager, tools } = services;
-	const merged = settings.getSettings(workDirAbsPath);
-	const recorded = sessionManager.getRecordedSettings(options.session);
 	const rows = settings.modelCatalog();
-	const row = selectModel(rows, options.model ?? recordedRefOf(recorded.model) ?? merged.model);
-	// A session with no row still runs, and `Agent` answers for it with the sentence that says what to
-	// add: `modelFor` builds the placeholder's facts under no name at all, and the transport is what
-	// refuses to send.
-	//
-	// The level is settled here and handed over *with* the name, so a session is never on one row and
-	// asked at a level that belongs to another. It comes from the caller or from what the session
-	// recorded on its snapshot; a session that has neither opens at "off", which is the request that
-	// asks for nothing.
-	const level = row === undefined ? undefined : options.thinkingLevel ?? recorded.thinkingLevel;
 	// The choice is the client's own: the row's name and the level, and nothing the row owns. The
 	// facts behind it — endpoint, key, window, compat — are read from this catalog at the moment a
 	// model is built, by this assembly and by every request after, so an edit to the row reaches the
 	// next message without anything here being refreshed.
-	const modelChoice: ModelChoice =
-		row === undefined ? {} : { name: row.name, ...(level === undefined ? {} : { thinkingLevel: level }) };
+	//
+	// It is derived rather than computed here (ADR-0019), because a session's every later read has to
+	// answer the same question from a bag it just replayed: `modelChoiceOf` is that one answer, and
+	// this call is it with the caller's override on top. A session with no row still opens, and
+	// `Agent` answers for it with the sentence that says what to add: `modelFor` builds the
+	// placeholder's facts under no name at all, and the transport is what refuses to send.
+	const modelChoice: ModelChoice = modelChoiceOf(sessionManager, options.session, settings, {
+		...(options.model === undefined ? {} : { name: options.model }),
+		...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
+	});
 	// The table's content is behaviour and no directory, so one table serves every session. Nothing
 	// is chosen here either: the active set and the approvals derive from the ledger on every read,
 	// against the global default's live view.
@@ -228,80 +220,50 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 /**
  * Assemble a session's state: the seed→fill lifecycle's seeding half (ADR-0006 §2).
  *
- * The working directory, the model choice in force, and the live half are resolved once here and
- * land in the {@link AgentState} — the assembly product *is* the state (ADR-0011) — so every later
- * call, which names the session by id, reads them back instead of re-resolving them. The settings are
- * deliberately *not* part of the state: they are read live through the {@link SettingManager} the
- * orchestrator holds, so a settings edit reaches every session over the directory with nothing to
- * refresh. The model choice is seeded onto the session's own setting field, in memory: the choice in
- * force before the first request is the assembly's answer, and the request made with the choice is
- * what records it on disk (`Agent.recordSelection`), so a choice nobody sent with stays out of the
- * file.
+ * What this produces is the **live half** — the queues, their modes, and the one transcript no replay
+ * can produce (ADR-0019). The transcript it is handed is an *input*, not a member: a born bag is
+ * dropped here, because `bag(id)` replays it again on demand, and an unborn one is kept on
+ * `live.unwritten`, because nothing else can answer it until the first message creates the files.
+ * The working directory stays on that bag (every later call replays it), and the settings are never
+ * part of any state — they are read live through the {@link SettingManager} the orchestrator holds.
+ *
+ * The model choice is neither kept nor seeded: every read derives it (`session/model-choice.ts`),
+ * which is the only shape that survives a bag being dropped. The one piece of the choice a
+ * derivation cannot reproduce is a row the *caller* named, so that — and only that — lands on
+ * `live.openedOn`.
  *
  * The services are a required argument rather than options, which is what makes the narrow door's
- * guarantee structural: the only caller is {@link Agent.assembleInto}, which hands its own three, and a
- * caller cannot reach this function to assemble a state over a second `SettingManager` — the
- * mismatch `adopt` allowed and nothing checked has nowhere to happen. This builds; it does not
- * register. Registration is `Agent.assembleAgentStateBySession`'s: that door calls this, puts the result in the table under
- * first-come-wins, and hands back the state the table actually holds. Not exported from the package
- * for the same reason: an externally assembled state can enter no table, so a public assembly would
- * be surface with no reader.
+ * guarantee structural: the only caller is {@link Agent.assembleAgentStateBySession}, which hands its
+ * own three, and a caller cannot reach this function to assemble a state over a second
+ * `SettingManager` — the mismatch `adopt` allowed and nothing checked has nowhere to happen. This
+ * builds; it does not register. Registration is that same door's: it calls this, puts the result in
+ * the table under first-come-wins, and hands back the state the table actually holds. Not exported
+ * from the package for the same reason: an externally assembled state can enter no table, so a public
+ * assembly would be surface with no reader.
  *
- * Records nothing else: a session opened and never spoken to does not grow entries, and neither does
- * one opened on another model or level than the branch last used — both reach the transcript in
- * `recordSelection`, at the moment the first request is built from them.
+ * Records nothing: a session opened and never spoken to does not grow entries, and neither does one
+ * opened on another model or level than the branch last used — a write happens when something is
+ * actually chosen (`applyModelSelection`) or when the first request is built (`recordSelection`).
  */
 export async function assembleSession(services: SessionServices, options: AssembleAgentStateOptions): Promise<AgentState> {
-	const { workDirAbsPath, settings, modelChoice } = await assemble(services, options);
+	const { workDirAbsPath, settings } = await assemble(services, options);
 	const session = options.session;
-	// The choice in force before the first request (issue 03 §7): the assembly's answer, merged onto
-	// the session's own setting field in memory. The write is deliberately not a recorded one — the
-	// disk write belongs to the request that is made with the choice, so a choice nobody sent with
-	// stays out of the file. A rename drops the recorded wire id along with the name it belonged to.
-	if (modelChoice.name !== undefined || modelChoice.thinkingLevel !== undefined) {
-		const previous = session.sessionSetting.model;
-		const renamed = modelChoice.name !== undefined && previous?.name !== modelChoice.name;
-		session.sessionSetting.model = {
-			...(renamed ? {} : previous),
-			...(modelChoice.name === undefined ? {} : { name: modelChoice.name }),
-			...(modelChoice.thinkingLevel === undefined ? {} : { thinkingLevel: modelChoice.thinkingLevel }),
+	// First touch creates the state: the live half is empty — its queue modes are the settings' answer
+	// at this moment, read live through the manager; a config patch moves them on the queues in place
+	// afterwards — and the transcript is *not* part of it (ADR-0019). The one exception is a bag whose
+	// files do not exist yet: no replay can produce it, so it is the live half's own field until the
+	// first write puts it on disk.
+	const live = createLive(settings.getSteeringMode(workDirAbsPath), settings.getFollowUpMode(workDirAbsPath));
+	if (!session.fileCreated) live.unwritten = session;
+	// The choice the assembly resolved is *derived* by every later read (`modelChoiceOf`), not seeded
+	// onto the bag: a seeded bag is a copy, and a copy is what a replay throws away. The one part of
+	// the answer no derivation can reproduce is an override the caller named — nothing writes it to
+	// the transcript — so that, and only that, is kept, on the live half it belongs to.
+	if (options.model !== undefined || options.thinkingLevel !== undefined) {
+		live.openedOn = {
+			...(options.model === undefined ? {} : { name: options.model }),
+			...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
 		};
 	}
-	// First touch creates the state: the durable half is the caller's transcript bag as it stands, and
-	// the live half is empty — its queue modes are the settings' answer at this moment, read live
-	// through the manager; a config patch moves them on the queues in place afterwards.
-	const state = createAgentState(
-		session,
-		createLive(settings.getSteeringMode(workDirAbsPath), settings.getFollowUpMode(workDirAbsPath)),
-	);
-	return state;
-}
-
-/** The ref the session's recorded model choice names: the row name and the wire id it named. */
-function recordedRefOf(model: { name: string; modelId: string } | undefined): string | undefined {
-	return model === undefined ? undefined : `${model.name}/${model.modelId}`;
-}
-
-/**
- * The row this session opens on: what the caller named, else the built-in default, else the first row.
- *
- * Two callers hand a *ref* rather than a name — `settings.model` as a repair script wrote it, and a
- * session's recorded model choice — and both spell it `<name>/<model-id>`. The name is what identifies
- * the row, so both spellings are resolved here instead of at each caller; before, a ref simply matched
- * nothing and the session quietly opened on somebody else's row.
- *
- * {@link DEFAULT_MODEL_NAME} is the third rung and is hardcoded rather than a guess at which vendor
- * the user has a key for: it is the model this app was built around, so a default naming a row that
- * has been deleted, or a settings file that names none, still opens on it. Only a machine without that
- * row falls through to `rows[0]`, and only a machine with no rows at all gets `undefined` — which the
- * caller answers with the placeholder rather than throwing, because a session has to be buildable for
- * the window to open far enough to say what is missing.
- */
-function selectModel(rows: readonly ModelConfig[], ref: string | undefined): ModelConfig | undefined {
-	const name = ref?.split("/")[0];
-	if (name !== undefined) {
-		const named = rows.find((row) => row.name === name);
-		if (named) return named;
-	}
-	return rows.find((row) => row.name === DEFAULT_MODEL_NAME) ?? rows[0];
+	return createAgentState(session.sessionId, live);
 }

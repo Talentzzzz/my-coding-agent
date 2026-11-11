@@ -37,14 +37,16 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   守卫。
 - **engine（引擎）** —— `Agent.run`（私有）：一次运行的入口与出口，与 `runEngine`、`prepareRequest`、
   `dispatchEvent`、压缩阶梯、重试泵、两个闸门一起是 `Agent` 的方法（ADR-0014）。它读的每一处接缝要么是
-  这次运行的局部变量（模型、abort controller、事件 sink、闸门），要么是 `this` 上的服务，所以运行期
-  没有一处瞬态被谁持有。它曾是一个独立对象（ADR-0012、0013），被删是因为那个对象不持有任何东西——
+  这次运行的局部变量（模型、abort controller、事件 sink、闸门，以及**这次运行自己重放出的那只袋**），
+  要么是 `this` 上的服务，所以运行期没有一处瞬态被谁持有。那只袋是 ADR-0019 的「一次运行读一次盘」：
+  开跑时 `bag(id)` 一次，之后每一轮、每次压缩、每次落盘都写它。它曾是一个独立对象（ADR-0012、0013），被删是因为那个对象不持有任何东西——
   一个空的 `this` 对 1900 行方法没有帮助。「循环」只是那些轮次的日常说法。它经 `ToolManager` 取实例、
   经它的执行入口调用（[ADR-0016](docs/adr/0016-tool-manager-instance-table.md)），发给模型的是带
   `tools` 的 `Context`——同一个 `Tool` 的两半都经它手，而传输层只读另一半（ADR-0015）。
 - **fanout（扇出）** —— `session/fanout.ts`：`emitEvent`、`publishState`、`appendMessageEntry`、
   `dropQueued`、`emitQueueUpdate`、`nextStamp`、`snapshotOf`、`approvalsOf`，参数是
-  `(state, SessionServices)`。编排层与运行对象都发事件、都写账本，所以这些无状态件谁的成员都不是；
+  `(state, session, SessionServices)`——那只袋是**调用方自己开的**，函数不持有、不缓存（ADR-0019）。
+  编排层与运行对象都发事件、都写账本，所以这些无状态件谁的成员都不是；
   写边界 `finalizeToolResult` 也住这里。
 - **tool（工具）** —— `Tool`（`llm/types.ts`）：声明（`name` / `description` / `parameters` /
   `constrainedSampling`）与执行（`label` / `prepareArguments` / `outputSchema` / `execute` / `replay` /
@@ -61,7 +63,9 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   无状态的 `SessionManager` 拥有——打开时 `fillSession` 合并两份重放出纯数据状态，host 在手时它是
   这两个文件唯一的写者（ADR-0006）；文件随第一条消息**同时**出生（`.json` 是 commit marker），没说过话的
   会话不落盘、不进侧边栏；标题是快照的 `title` 字段，没写过就从分支首条 user 消息派生；配对残缺
-  或版本不对的会话直接删、不迁移。
+  或版本不对的会话直接删、不迁移。**这两个文件就是 transcript 本身**：进程里没有一份副本，每次操作
+  现开一只袋、用完就丢（`Agent.bag(id)`，ADR-0019）——唯一的例外是文件还没出生的那只袋，它在
+  `live.unwritten` 上，因为那时它是唯一的一份。
 - **settings（设置）** —— `SettingManager` 是设置与模型行**唯一**的门（ADR-0011 修订节）：无状态门面、
   不做任何缓存，每个方法现读全局与目录两份 `settings.json`，变更写回**已经提供该字段**的那一份；一次写入
   对一切会话的下一次读取即生效，没有需要失效的副本。会话的模型行走同一只门（`modelCatalog()` /
@@ -84,8 +88,10 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   不是省略一个字段。四档对每个模型都一样，所以档位是**客户端**的事：输入框随消息带来它，行上没有
   默认档，服务端只负责把收到的档位放上模型。
 - **model selection（模型选择）** —— 输入框的 `{ model, thinkingLevel }`，随消息发送（`ModelSelection`），
-  不是一次配置变更；`recordSelection` 在 `prepareRequest` 顶部才改写快照的 `model` / `thinkingLevel`
-  字段，没说过话的会话因此不落盘。
+  不是一次配置变更；`applyModelSelection` 在收到的当下就把它写到快照的 `model` / `thinkingLevel`
+  字段（含行当前的 wire id——磁盘格式两半都在才落一行），没说过话的会话因此不落盘。
+  「这个会话在哪个模型上」是**派生**的：`modelChoiceOf`（`session/model-choice.ts`）按
+  「文件记录的选择 → 打开时指定的行 → 设置里的默认行」现算，不再有谁把它种在袋上（ADR-0019）。
 - **transport（传输层）** —— 命令面是 REST：一条常驻 WebSocket mux（`/mux`）承载事件与连接级载荷，
   命令一个字不改地留在 REST。`createRoutes()` 是整张 API 表，`Router` 是唯一解释 URL 的地方，命令
   在被施加时作答——mux 的上行帧**不走 URL**，所以"加一个端点"这条形状管不到 `open` / `cancel`。
@@ -96,8 +102,12 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   只管一次请求的流式，与这里说的命令面不是一回事（ADR-0015）。
 - **hold（持有）** —— 持有者对活跃会话的握持：只有改变会话的请求与在飞的运行各在其长度内一个；读
   transcript 不拿 hold，**订阅也不拿**——一张订阅表回答"这条连接订了什么"，与 hold 回答"这个请求
-  必须跑在活跃会话上"永不互相换算（ADR-0001）。名字在 ADR-0018 之前叫 `claim`，语义一字未动；
-  `hub.hold(id)` 计数、`hub.release(host)` 归还。
+  必须跑在活跃会话上"永不互相换算（ADR-0001）。名字在 ADR-0018 之前叫 `claim`，语义一字未动。
+  计数在编排层（`Agent.hold(id)` / `Agent.release(id)`，读法是 `holdsOf(id)`）：hold 现在只是"谁在用
+  这个会话"，不再是"表里那份 transcript 靠谁活着"——transcript 不在表里（ADR-0019），驻留只关乎队列、
+  订阅与在飞的运行。hub 的 `hold` / `release(host)` 只是每次连接进出各转手一次。
+  它是公开面上唯一的"我要用它"动词——`ensure` 已降为类私有（`ensureState`）：它只保证这个 id 有一份
+  live 半，因为"这个 id 在不在内存里"不是调用方的问题。
 - **approval（审批）** —— 结束重启（ADR-0006 §5）：`before_tool` 对要问的调用返回 suspend，结束本轮
   运行且不写结果，tool call 在账本里悬空（有 tool_use 无 tool_result，派生态）；答案经
   `POST /api/sessions/{id}/approvals/{toolCallId}` 到达后启动恢复运行，由引擎的恢复机器按
@@ -130,9 +140,11 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   `AssembleAgentStateOptions`（原名 `OpenSessionOptions`；只有 transcript 袋子与模型档位，
   工作目录是袋子自己的 `sessionSetting.workDirAbsPath`，没有覆盖参数），按会话先、设置后的链
   （`fillSession` → 设置现读 → `createLive`）装配出一份
-  `AgentState`——装配产物**就是**状态（ADR-0011），只装配、不激活；唯一调用者是 `Agent.assembleInto`
+  `AgentState`——装配产物**就是**状态（ADR-0011），只装配、不激活。**装配的产物是 live 半，不是
+  transcript**（ADR-0019）：袋只是入参，它要么被丢掉（有文件，重放随时能再造），要么存进
+  `live.unwritten`（还没文件，谁也再造不出来）；唯一调用者是 `Agent.assembleAgentStateBySession`
   （原名 `open`，`adopt` 已删，装配并进门里，服务由此只能是编排层自己的，不再是包的公开面），而
-  `assembleInto` 本身已收成类私有：公开面的 open 形状动词只剩 `ensure` / `create`（跑）与
+  这扇门本身已收成类私有：公开面上剩 `create`（造）、`hold` / `release`（用它）与
   `snapshotOf` / `readSessionSnapshot`（读），何时装配、递哪只袋子进表不再是外界的动词。
   `createSessionAgent()` 是另一半：
   收 `{ settingsHome?, modelsHome?, api? }`（外加 test-only 的 `settings` / `tools` 两缝）并**自己造三只
@@ -140,15 +152,17 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   **编排层**，进程只需要一份（hub 构造时建它，递的只是 homes 与 api；打开的模型默认不进公开面——
   它是设置里的事实，装配每次从磁盘现读），测试与
   只跑一个会话的调用者用 `openAgent() == create + open` 自组一份。`Agent` 按 id 键控
-  持有各会话的状态——公开方法收 id、从状态现取：durable 半是 `state.session`（账本重放出的袋子），
-  live 半是 `state.live`；状态对象不出 core，server 侧读的是窄读一族（`titleOf` / `timestampOf`
-  一类，纯数据）。它只决定 transcript
+  持有各会话的 **live 半**——公开方法收 id，transcript 现开一只袋（`bag(id)`），live 半从表里现取：
+  `state.live` 是两条队列、在飞运行、partial、重试位、挂起位与 `unwritten`；状态对象不出 core，server
+  侧读的是窄读一族（`titleOf` / `fileAbsPathOf` / `isSubmitting` 一类，纯数据）。它只决定 transcript
   **命名**哪一行（`modelFor()` 每次请求按选择现查目录，不缓存行的事实）。
-- **AgentState（会话状态）** —— 一个会话的全部状态是一件东西（ADR-0011）：`state.session`（账本重放出的
-  durable 半）、两个订阅集合，与 `state.live`（`Live`：两条
-  队列、在飞运行、partial、重试与挂起位——「进行中且磁盘上没有」的东西）。由 `Agent` 按 id 键控持有，
-  装配经 `Agent.assembleInto` 进表、`evict` / `drop` 是唯一出口，进程重启即清空；类型不出 core，server 侧只见
-  纯数据窄读（ADR-0017）。
+- **AgentState（会话状态）** —— 一个会话的 **live 半**是一件东西（ADR-0019，形状承自 ADR-0011）：
+  `{ sessionId, listeners, eventListeners, live }`。没有 `session`：transcript 是两个文件，每次操作
+  重放一次（一次运行读一次、带着走；一条命令读一次、用完就丢）。`live` 里除两条队列、在飞运行、
+  partial、重试与挂起位之外还有两样：`unwritten`（唯一的内存 transcript——文件还没出生的那只袋）与
+  `openedOn`（打开时调用方指定的那一行模型，唯一无处可派生的值）。由 `Agent` 按 id 键控持有，
+  装配经 `Agent.assembleAgentStateBySession` 进表、`evict` / `remove` 是唯一出口，进程重启即清空；
+  类型不出 core，server 侧只见纯数据窄读（ADR-0017）。
 - **workDirAbsPath（当前工作目录）** —— 一个会话的相对路径基准与命令起点，**按会话**，从会话自己快照的
   setting 字段取（`session.sessionSetting.workDirAbsPath`，绝对）。它**不是围栏**：绝对路径原样接受，`..` 也能走出去，工具
   可以碰这台机器上的任何文件——目录只决定一个裸路径是什么意思。

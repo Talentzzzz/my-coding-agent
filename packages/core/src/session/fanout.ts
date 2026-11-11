@@ -8,6 +8,7 @@ import type { ToolManager } from "../tools/index.ts";
 import type { AgentState } from "./agent-state.ts";
 import { danglingApprovalsOf } from "./dangling.ts";
 import type { AgentSessionEvent } from "./events.ts";
+import { modelChoiceOf } from "./model-choice.ts";
 import type { Session, SessionManager } from "./session-manager.ts";
 import { sessionSnapshot } from "./snapshot.ts";
 import { followsGlobalOf, toolStateOf } from "./tool-config.ts";
@@ -61,26 +62,28 @@ export function nextStamp(sessions: SessionManager, session: Session): number {
 }
 
 /**
- * The state of one held session, read out of its transcript and what its run is doing.
+ * The state of one session, read out of the transcript the caller opened and what its run is doing.
  *
  * The populated half of `sessionSnapshot`: everything a cold reader has to be told, this reads off
  * the live half — the run's model, the partial message, the two queues, the retry state — and
- * everything else it derives from the ledger. Both the orchestrator's `snapshot` and the fan-out's
- * publish answer through here, so a window frame and a REST read cannot disagree.
+ * everything else it derives from the transcript it is handed. Both the orchestrator's `snapshot`
+ * and the fan-out's publish answer through here, so a window frame and a REST read cannot disagree.
+ *
+ * The bag is an argument rather than a field of the state (ADR-0019): a run carries the one it
+ * opened at its start, a command the one it opened for its length, and neither is kept anywhere
+ * between calls.
  */
-export function snapshotOf(state: AgentState, services: SessionServices): SessionSnapshot {
-	const session = state.session;
+export function snapshotOf(state: AgentState, session: Session, services: SessionServices): SessionSnapshot {
 	const live = state.live;
 	return sessionSnapshot({
 		sessions: services.sessionManager,
 		session,
 		workDirAbsPath: session.sessionSetting.workDirAbsPath,
 		// The run's own model is the one its request went out with, so the meter measures the window
-		// the answer was actually asked against. An idle session has no run to ask, and builds it
-		// from the catalog — one small file read, on a command rather than on a delta. The choice
-		// read here is the one in force: the assembly seeds it onto the session before the first
-		// message, and a request records it (issue 03 §7).
-		model: live.model ?? modelFor(session.sessionSetting.model ?? {}, services.settings.modelCatalog()),
+		// the answer was actually asked against. An idle session has no run to ask, so the choice is
+		// derived from the bag and the settings here — the same derivation every other reader uses
+		// (`modelChoiceOf`, ADR-0019), which is why there is no seeded copy to go stale.
+		model: live.model ?? modelFor(modelChoiceOf(services.sessionManager, session, services.settings, live.openedOn), services.settings.modelCatalog()),
 		approvals: approvalsOf(services, session),
 		allTools: services.tools.names(),
 		activeTools: toolStateOf(services.sessionManager, session, services.settings, services.tools.names()).activeToolNames,
@@ -120,7 +123,7 @@ export function emitQueueUpdate(state: AgentState): void {
  * `entry_appended` sees the whole transcript, not just the engine's half of it. It is also the write
  * boundary: the version of a tool result the ledger keeps is decided here, once.
  */
-export function appendMessageEntry(state: AgentState, sessions: SessionManager, message: Message): void {
+export function appendMessageEntry(state: AgentState, session: Session, sessions: SessionManager, message: Message): void {
 	// A message appended where something already followed is a *second* alternative at that message
 	// rather than a continuation of its tip — which is what rewinding and asking again is. The tree
 	// gained a branch point there, so the windows are told where the leaf is, exactly as a move does:
@@ -128,12 +131,26 @@ export function appendMessageEntry(state: AgentState, sessions: SessionManager, 
 	// The count is the raw child count, so a `leaf` entry — the record a branch move writes — counts
 	// too. The cost is one
 	// extra full-snapshot frame that shows no extra branch point, which is harmless.
-	const parent = state.session.leafId;
-	const continued = parent !== null && sessions.getChildren(state.session, parent).length > 0;
+	const parent = session.leafId;
+	const continued = parent !== null && sessions.getChildren(session, parent).length > 0;
 
-	const entryId = sessions.appendMessage(state.session, finalizeToolResult(state, message));
+	const entryId = sessions.appendMessage(session, finalizeToolResult(session, message));
+	// The files exist from here on, so the bag stops being the session's only copy: the live half
+	// drops it and every later read is a replay (ADR-0019).
+	if (session.fileCreated) state.live.unwritten = undefined;
 	if (continued) emitEvent(state, { type: "branch_changed", leafId: entryId });
-	emitEvent(state, { type: "entry_appended", entryId, kind: "message" });
+	emitEvent(state, {
+		type: "entry_appended",
+		entryId,
+		kind: "message",
+		// The three facts a reader used to ask the transcript for, carried by the event instead: a
+		// sidebar row folds them in without a replay per appended message.
+		at: typeof message.timestamp === "number" ? message.timestamp : Date.now(),
+		role: message.role,
+		// Only a user message can name a conversation, so only it carries the title the row would
+		// show — the walk behind `getTitle` is not worth paying on every reply.
+		...(message.role === "user" ? { title: sessions.getTitle(session) } : {}),
+	});
 }
 
 /**
@@ -160,9 +177,9 @@ export function dropQueued(state: AgentState): boolean {
 	return dropped;
 }
 
-/** Tell every listener what the session looks like now. */
-export function publishState(state: AgentState, services: SessionServices): void {
-	const snapshot = snapshotOf(state, services);
+/** Tell every listener what the session looks like now, read from the transcript the caller holds. */
+export function publishState(state: AgentState, session: Session, services: SessionServices): void {
+	const snapshot = snapshotOf(state, session, services);
 	for (const listener of state.listeners) listener(snapshot);
 }
 
@@ -181,11 +198,11 @@ export function publishState(state: AgentState, services: SessionServices): void
  * ledger as it is: the content on disk is the content the model is served, on this process and on
  * every later one.
  */
-function finalizeToolResult(state: AgentState, message: Message): Message {
+function finalizeToolResult(session: Session, message: Message): Message {
 	if (message.role !== "toolResult") return message;
 	const spilled = spillOversizedToolResult(
-		state.session.sessionSetting.workDirAbsPath,
-		state.session.sessionId,
+		session.sessionSetting.workDirAbsPath,
+		session.sessionId,
 		message.toolName,
 		message.toolCallId,
 		message.content,

@@ -38,12 +38,13 @@ import {
 	trimmableToolArgEntryIds,
 	fillTools,
 	openAgent,
-	sessionDir,
+	setSessionsDir,
 	SettingManager,
 	type Tool,
 	type FileDiff,
 	type Message,
 	type ModelConfig,
+	type Session,
 	type SessionEntry,
 	compactionSummaryOf,
 } from "@my-agent/core";
@@ -52,6 +53,8 @@ import {
 const store = new SessionManager();
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-tools-"));
+const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-tools--store-"));
+setSessionsDir(storeRoot);
 // One table for the whole script: the six built-ins are instances now, and a fresh table per lookup
 // would be a different six every time (ADR-0016).
 const manager = createToolManager();
@@ -301,7 +304,7 @@ try {
 } finally {
 	// Sessions live under the agent home, keyed by the working directory path, so removing the temporary
 	// directory is not enough: without this every run leaves an orphan store behind.
-	await rm(sessionDir(root), { recursive: true, force: true });
+	await rm(storeRoot, { recursive: true, force: true });
 	await rm(root, { recursive: true, force: true });
 }
 
@@ -489,9 +492,9 @@ function exerciseBranchLabelPreview(): void {
 async function exerciseFileFormat(): Promise<void> {
 	const id = "01a0a0a0-a0a0-70a0-a0a0-a0a0a0a0a0a0";
 	const createdAt = new Date().toISOString();
-	const dir = sessionDir(root);
+	const dir = storeRoot;
 	await mkdir(dir, { recursive: true });
-	const path = sessionPath(dir, id, createdAt);
+	const path = sessionPath(id, dir);
 	const lines = [
 		JSON.stringify({ type: "message", id: "aaaa0001", parentId: null, timestamp: createdAt, message: { role: "user", content: [{ type: "text", text: "written elsewhere" }], timestamp: 5 } }),
 		JSON.stringify({ type: "message", id: "aaaa0002", parentId: "aaaa0001", timestamp: createdAt, message: { role: "assistant", content: [{ type: "text", text: "answered elsewhere" }], timestamp: 6 } }),
@@ -533,8 +536,8 @@ async function exerciseFileFormat(): Promise<void> {
 	check("and the same leaf", reopened.leafId === appended, String(reopened.leafId));
 	check("and the recorded title", store.getTitle(reopened) === "a name of its own", store.getTitle(reopened));
 
-	check("sessions live under the agent home", dir.startsWith(sessionsDir()), dir);
-	check("in a store named after the directory", dir.endsWith("--") && dir.includes("my-agent-tools-"), dir);
+	check("sessions live under the store this process was pointed at", dir.startsWith(sessionsDir()), dir);
+	check("and the id names the file directly", dir === sessionsDir(), dir);
 }
 
 /**
@@ -668,15 +671,19 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		JSON.stringify(settings.getApprovals(root)),
 	);
 	check("and the session reflects it", session.snapshot(id).approvals.bash === true, JSON.stringify(session.snapshot(id).approvals));
+	// Read back from the file rather than from the bag this exercise opened: the write lands through a
+	// replay the orchestrator took and dropped (ADR-0019), so the copy handed to `openAgent` is the one
+	// thing that cannot show it.
+	const onDisk = (): Session => fillSession(session.fileAbsPathOf(id) ?? "");
 	check(
 		"recording the choice on the snapshot",
-		store.getRecordedToolConfig(state).approval?.bash === true,
-		JSON.stringify(store.getRecordedToolConfig(state)),
+		store.getRecordedToolConfig(onDisk()).approval?.bash === true,
+		JSON.stringify(store.getRecordedToolConfig(onDisk())),
 	);
 	check(
 		"beside the tool set in force",
-		JSON.stringify(store.getRecordedToolConfig(state).activeTools) === JSON.stringify(session.snapshot(id).activeTools),
-		JSON.stringify(store.getRecordedToolConfig(state).activeTools),
+		JSON.stringify(store.getRecordedToolConfig(onDisk()).activeTools) === JSON.stringify(session.snapshot(id).activeTools),
+		JSON.stringify(store.getRecordedToolConfig(onDisk()).activeTools),
 	);
 
 	// Both calls must resolve without an active run, and must not disturb the transcript.
@@ -993,6 +1000,11 @@ async function exercisePruning(): Promise<void> {
 	});
 
 	check("the trigger fired before the clear", estimateTokens(project(store.buildContextEntries(store2))) > 500);
+	// A transcript that never recorded a model is still *on* one: the choice is derived (the file's,
+	// else the settings' default) rather than seeded onto a bag, and this session's bag is a replay
+	// nobody keeps (ADR-0019). The trigger below is measured off that row's window, so a placeholder
+	// here would silently disable compaction.
+	check("a session that never chose a model reads the settings' default", session.snapshot(store2.sessionId).model === "smoke", session.snapshot(store2.sessionId).model);
 	const kept = await session.maybeCompact(store2.sessionId, store.buildContextEntries(store2), now);
 	const keptText = text(kept);
 	check("the clear alone left it under the trigger", estimateTokens(project(kept)) <= 500, String(estimateTokens(project(kept))));
@@ -1001,13 +1013,22 @@ async function exercisePruning(): Promise<void> {
 	check("the clear was announced and nothing was summarized", announced.join() === "tool_results_cleared", JSON.stringify(announced));
 	check(
 		"and one record now says what it cleared",
-		store.getEntries(store2).filter((entry) => entry.type === "clear_tool_result").length === 1,
-		JSON.stringify(store.getEntries(store2).map((entry) => entry.type)),
+		// Read back from the file, not from the bag this exercise opened: the clear is recorded by a
+		// replay the orchestrator took and dropped (ADR-0019), so the copy opened here is the one thing
+		// that cannot see it.
+		store.getEntries(fillSession(fixture)).filter((entry) => entry.type === "clear_tool_result").length === 1,
+		JSON.stringify(store.getEntries(fillSession(fixture)).map((entry) => entry.type)),
 	);
 
 	// A second pass has nothing left to clear and the trigger no longer fires, so nothing is written.
-	await session.maybeCompact(store2.sessionId, store.buildContextEntries(store2), now);
-	check("a second pass writes no second record", store.getEntries(store2).filter((entry) => entry.type === "clear_tool_result").length === 1);
+	// It is handed the file's own view, the one the next request is built from: a record the first pass
+	// wrote is only visible to a replay, so the copy this exercise opened would look un-cleared and buy
+	// a second record for work already done.
+	await session.maybeCompact(store2.sessionId, store.buildContextEntries(fillSession(fixture)), now);
+	check(
+		"a second pass writes no second record",
+		store.getEntries(fillSession(fixture)).filter((entry) => entry.type === "clear_tool_result").length === 1,
+	);
 	await session.close(store2.sessionId);
 
 	// The point of recording it: a process that reads the file again sees the cleared view without

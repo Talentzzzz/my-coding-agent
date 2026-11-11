@@ -330,10 +330,12 @@ export class MuxConnection {
 		const subscription: Subscription = { pending: new Map(), backlog: [], teardown: [] };
 		this.subscriptions.set(sessionId, subscription);
 
-		// Watching is not holding it open, and it takes no hold: a window looking at an idle conversation must
-		// not be the reason an `Agent` stays assembled. `observe` is keyed by id and re-binds itself if
-		// this process later starts running the session, which is what lets "watch it, then send it a
-		// message" work.
+		// Watching takes no hold, and that is still the whole point: the count belongs to callers that
+		// change or run a session, and a window looking at one is neither. Nor does it keep any state
+		// alive — a read replays and drops (ADR-0019), so the frames below are built from that answer
+		// and from the events of a run nobody here owns. `observe` is keyed by id and re-binds itself
+		// if this process later starts running the session, which is what lets "watch it, then send it
+		// a message" work.
 		//
 		// `live` distinguishes "stopped running while I was watching" from "was never running", which is
 		// the same distinction `bind` relies on: only the first ends the stream.
@@ -386,9 +388,11 @@ export class MuxConnection {
 	 * watch — the read is the same either way, and re-arming the backlog is what makes the second
 	 * one land behind the state it describes rather than on top of frames that already ran past it.
 	 *
-	 * Reading a transcript is not running a session, so this never assembles anything and never takes a hold
-	 * anything. It is the answer to "watch an idle conversation", which is the case the old
-	 * run-scoped stream refused to serve at all.
+	 * A read assembles nothing (ADR-0019): the orchestrator's `snapshotOf` opens a bag, answers from
+	 * it, and drops it, so a watched-but-idle session costs one replay and leaves nothing behind — no
+	 * state to keep alive, nothing for this subscription to hold open. It takes no hold either,
+	 * because nobody here is changing or running anything. It is the answer to "watch an idle
+	 * conversation", which is the case the old run-scoped stream refused to serve at all.
 	 *
 	 * Everything produced while the read is in flight waits in the subscription's backlog. That is the
 	 * whole reason the backlog exists: without it, a run that started during the read would put frames
@@ -450,7 +454,7 @@ export class MuxConnection {
 			// A leaf that moved changes the whole transcript, so what goes out for it is the session's
 			// current state rather than a difference: the event says the tree moved, this says where to.
 			if (event.type === "branch_changed") this.pushBaseline(sessionId, subscription);
-			if (event.type === "entry_appended") this.pushEntry(sessionId, subscription, event.entryId);
+			if (event.type === "entry_appended") this.pushEntry(sessionId, subscription, event.entryId, event.at);
 		});
 
 		const onChange = feeds.onChange((snapshot) => {
@@ -547,13 +551,17 @@ export class MuxConnection {
 		void this.readColdBaseline(sessionId, subscription);
 	}
 
-	/** The entry an `entry_appended` names, paired with the timestamp a transcript orders by. */
-	private pushEntry(sessionId: string, subscription: Subscription, entryId: string): void {
-		const timestamp = this.hub.timestampOf(sessionId, entryId);
+	/**
+	 * The entry an `entry_appended` names, paired with the timestamp a transcript orders by.
+	 *
+	 * The stamp rides the event rather than being read back here: this runs once per appended message,
+	 * and a transcript read would parse the whole log for one number (ADR-0019).
+	 */
+	private pushEntry(sessionId: string, subscription: Subscription, entryId: string, at: number | undefined): void {
 		this.push(sessionId, subscription, {
 			type: "entry",
 			entryId,
-			...(typeof timestamp === "number" ? { messageTimestamp: timestamp } : {}),
+			...(typeof at === "number" ? { messageTimestamp: at } : {}),
 		});
 	}
 

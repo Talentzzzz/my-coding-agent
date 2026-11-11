@@ -42,11 +42,15 @@ manager。
 1. **`Agent` 公开面三类方法，server 及以下只调它们。** 对账（票 01）把 hub、controllers、
    projection 摸 Manager / 状态袋的每个调用点列全，逐一落到三类：
    - **会话生命周期**，held/cold 两路在编排层内部统一、调用点不再写分支：
-     `snapshotOf(id)`（held 走表、cold 走 open + `readSessionSnapshot`）、`ensure(id)`（held
+     `snapshotOf(id)`（held 走表、cold 走 open + `readSessionSnapshot`）、`hold(id)`（held
      走表、disk 走 replay + open，hub 不再写 `has` 分支）、`setTitle(id, title)`、
      `forkFrom(sourceId, entryId)`（源路径解析在门面内部，`HostedSession` 不再为它持目录）、
      `create(workDirAbsPath)`。
      后续收口（2026-11-09）：`has(id)` 收成 class-private——表成员资格是编排层的内部事实。
+     再收口（2026-11-10）：`ensure(id)` 换成一对 `hold(id)` / `release(id)`——hold 计数搬进编排层
+     （它是那张表的驻留期，不是连接的兴趣），`ensure` 降为类私有 `materialize`；hub 的 `hold` /
+     `release(host)` 只是把每次连接进出转手一次，"我要用它"成为开形状动词，而"这个 id 在不在内存里"
+     不再是调用方的问句。
      再收口（2026-11-10）：`exists(id)` / `isOnDisk(id)` / `removeFromDisk(id)` 三个判据从
      公开面删除，换成一次删操作 `remove(id)`——「有没有文件、表里有没有」是删除内部的事，
      没有文件（创建未发言）就只忘状态，文件名不响就以 `UnknownSessionError` 拒绝。同一轮把
@@ -61,7 +65,7 @@ manager。
      `hiddenDirectories(workDir)`、`applySettings(workDir, patch)`、`settings(workDir)`；
      扫描类静态方法同签名转发（`listSessions` / `listDirectories` /
      `findSessionRowById`），不留自由函数例外清单。
-   - **（修订）打开的模型默认不收实参。** `create` / `ensure` / `snapshotOf` 只收目录或 id；
+   - **（修订）打开的模型默认不收实参。** `create` / `hold` / `snapshotOf` 只收目录或 id；
      模型与档位由装配在每次打开时从设置现读（全局与目录两份 `settings.json`），boot 的
      `--model` / `--thinking` 随之删除。模型默认是设置的事实，宿主不必也不该在每次打开时
      重说一遍；`create` 里那次 `await` 就是这次现读。
@@ -72,11 +76,17 @@ manager。
    `evict` / `drop`——[0011](0011-agent-holds-session-state.md) 的形态不动。
    后续收口（票 08 之后）：这扇门本身收成类 private 并更名 `assembleInto`（装配并进表）——
    外界只需要**读**
-   （`snapshotOf` / `readSessionSnapshot`）与**跑**（`ensure` / `create`）两个动词，何时装配、
+   （`snapshotOf` / `readSessionSnapshot`）、**造**（`create`）与**用**（`hold` / `release`）
+   三种动词，何时装配、
    递哪只 transcript 袋子进表不再是公开面上的事；唯一越过这条 private 的是 `openAgent`
    与 hub 级冒烟的 `mount-session.ts`，各经一处有类型的 cast 过门（`AssembleAgentStateOptions`
    类型随之不再出 core；`workDirAbsPath` 覆盖参数同期删除——工作目录是 transcript 袋子自己的
    `sessionSetting.workDirAbsPath`，所有调用点传的本就是同一个值，冷读路径从未用过覆盖）。
+   再收口（2026-11-10，[0019](0019-table-holds-live-half-only.md)）：这两个内部名字跟着新形状换了——
+   装配门 `assembleInto` → `assembleAgentStateBySession`（装配产物只剩 live 半，`ensure` 那一半
+   继承的名字不再准确），`materialize` → `ensureState`。**公开面一个方法都没变**：`create` /
+   `hold` / `release` / `snapshotOf` / `readSessionSnapshot` / `setTitle` / `forkFrom` / `remove`
+   仍是本 ADR 决定 1 的那张表。
 3. **构造吸收。** `createSessionAgent({ settingsHome?, modelsHome?, api?, settings?,
    tools? })` 自己造三只 Manager（`settings` / `tools` 是 test-only 缝：内存设置门、自注册
    的工具表；生产面递 homes 与 api），然后走原有的 `AgentConfig` 构造器——一条构造路，
@@ -94,7 +104,7 @@ manager。
    包源码；scripts/ 的冒烟按票 02 的裁定保留 Manager 访问。名单加名字 = 加一行。
 5. **冷路径契约落在各自方法的文档上。** `setTitle`（一冷写一次同步块、不拿 claim）、
    `snapshotOf`（不留痕：无 host、无 run、无 claim、不追加任何 entry）、`remove`（文件先删、
-   再忘状态；不拿 claim、不碰 hosts/observers——那是 hub 的账）、`ensure` 的 disk 半（无写窗口可保护——replay 与
+   再忘状态；不拿 hold、不碰 hosts/observers——那是 hub 的账）、`hold` 的 disk 半（无写窗口可保护——replay 与
    assembly 都不写盘，进表本身就是它的目的）。两个性质（写窗口、不留痕）是 per-method
    的，分开放才不会在某一侧腐化；hub 侧只留一行「为什么敢直接调」。
 6. **两处顺延的收口**（票 05 连带标记、票 07 落定）：全仓零消费者的 `workDirOf` 删除（对

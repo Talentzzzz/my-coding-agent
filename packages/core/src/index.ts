@@ -158,10 +158,10 @@ export {
 export {
 	normalizePath,
 	resolvePath,
-	sessionDir,
 	sessionMetaPath,
 	sessionPath,
 	sessionsDir,
+	setSessionsDir,
 } from "./session/paths.ts";
 export {
 	BRANCH_LABEL_MAX,

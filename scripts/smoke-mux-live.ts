@@ -13,11 +13,14 @@ import { MuxClient, browserSocket, type MuxHandlers } from "../packages/web/src/
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
 import type { ConnectionItem, ServerMessage } from "@my-agent/core/protocol";
-import { sessionDir, type ModelConfig } from "@my-agent/core";
+import { setSessionsDir, type ModelConfig } from "@my-agent/core";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-mux-live-"));
 /** A scratch agent home, so the settings this smoke writes are not the machine's own. */
 const home = await mkdtemp(join(tmpdir(), "my-agent-mux-live-home-"));
+/** A scratch store, so the sessions this smoke writes are not the machine's own. */
+const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-mux-live-store-"));
+setSessionsDir(storeRoot);
 let failures = 0;
 
 function check(label: string, condition: boolean, detail = ""): void {
@@ -263,11 +266,10 @@ try {
 	check("关掉之后不再有状态变化", channels.at(-1) !== undefined);
 } finally {
 	await server.close();
-	// Both the working directory and the store directory keyed by it: a session that is created and never
-	// cleaned leaves an orphan directory in the real agent home on every run.
+	// The working directory and the scratch store: a session that is created and never cleaned
+	// would otherwise land in the real agent home on every run.
 	await rm(root, { recursive: true, force: true });
-	await rm(sessionDir(root), { recursive: true, force: true });
-	await rm(sessionDir(join(root, "aside")), { recursive: true, force: true });
+	await rm(storeRoot, { recursive: true, force: true });
 	await rm(home, { recursive: true, force: true });
 }
 

@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	SessionManager,
-	sessionDir,
+	setSessionsDir,
 	type Agent,
 	type ClientFrame,
 	type ConnectionItem,
@@ -23,6 +23,8 @@ import { createSessionProjection } from "../packages/server/src/projection.ts";
 import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-projection-"));
+const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-projection--store-"));
+setSessionsDir(storeRoot);
 let failures = 0;
 
 function check(label: string, condition: boolean, detail = ""): void {
@@ -48,9 +50,9 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
  * assertions in the other smokes do: through the table the orchestrator holds.
  */
 function heldBagOf(agent: Agent, id: string): Session {
-	const bag = (agent as unknown as { sessions: Map<string, { session: Session }> }).sessions.get(id)?.session;
-	if (bag === undefined) throw new Error(`no held state for ${id}`);
-	return bag;
+	// A transcript is a file, not a field (ADR-0019): the surgery below needs a bag, so it opens its
+	// own replay and the write it makes is a write to the log like any other.
+	return agent.sessionManager.open(id);
 }
 
 /** Settle the microtask queue plus one macrotask, so a resolved probe has landed. */
@@ -284,7 +286,7 @@ try {
 	});
 	check("watching it did not assemble anything", !hub.live.includes(afterStop), hub.live.join(","));
 	const observedHost = await hub.hold(afterStop);
-	check("and it was attached when the host opened", observedHost.holds === 1, `holds=${observedHost.holds}`);
+	check("and it was attached when the host opened", hub.agent.holdsOf(afterStop) === 1, `holds=${hub.agent.holdsOf(afterStop)}`);
 	fake.setResponses([fakeAssistantMessage("seen")]);
 	await hub.agent.prompt(afterStop, "does the observer hear this");
 	check("the observer saw the run's events", events > 0, `${events} events`);
@@ -328,7 +330,7 @@ try {
 } finally {
 	// Sessions live under the agent home, keyed by the working directory path, so removing the temporary
 	// directory is not enough: without this every run leaves an orphan directory behind.
-	await rm(sessionDir(root), { recursive: true, force: true });
+	await rm(storeRoot, { recursive: true, force: true });
 	await rm(root, { recursive: true, force: true });
 }
 

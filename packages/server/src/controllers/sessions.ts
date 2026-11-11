@@ -499,7 +499,7 @@ export class SessionController {
 			try {
 				// A directory this machine already stores sessions for is put back when it is gone:
 				// the user renamed the folder behind us, and the group they see is still that path.
-				await workDirAbsPathForCreate(absRoot);
+				await workDirAbsPathForCreate(this.hub.agent, absRoot);
 			} catch (error) {
 				throw httpStatus.badRequest(messageOf(error));
 			}

@@ -1,4 +1,5 @@
 import type { Message, Model } from "../llm/index.ts";
+import type { ModelChoice } from "../models.ts";
 import type { QueueMode } from "../protocol.ts";
 import type { SessionListener, SessionEventListener } from "../agent.ts";
 import type { Session } from "./session-manager.ts";
@@ -21,24 +22,22 @@ export interface ActiveRun {
 }
 
 /**
- * One session this process holds, as a single bag: the durable half, its subscribers, and the live
- * half (ADR-0011).
+ * One session this process knows about, as a single bag: its subscribers and its live half.
  *
- * The registry entry this replaces carried the live half and the assembly side by side; the state
- * carries them as one object because the two halves answer one id. The durable half is the session's
- * own bag — the ledger's replayed state, not a copy. The settings are deliberately *not* here: they
- * are read live through the {@link SettingManager} the orchestrator holds, so a settings edit reaches
- * every session over the directory without anything being reopened or refreshed. A process restart
- * drops the whole state on purpose: the durable half replays from the files, the live half is the
- * part that was nowhere on disk.
+ * The durable half is deliberately **not** here (ADR-0019). A session's transcript is a file, and
+ * every operation that needs it opens it and drops it: a run opens one at its start and carries it
+ * for its length, a command opens one for the length of the call. What is left is exactly what no
+ * file can answer — who is watching, what is queued, what is running, what has not been written
+ * yet. A process restart drops the whole state on purpose: the transcript replays from the files,
+ * and the live half is the part that was nowhere on disk.
  */
 export interface AgentState {
+	/** Which session this state belongs to; the key it is filed under, carried so a call need not repeat it. */
+	readonly sessionId: string;
 	/** Subscribers to the session's state, attached through the session's `onChange`. */
 	readonly listeners: Set<SessionListener>;
 	/** Subscribers to the session's events, attached through the session's `onEvent`. */
 	readonly eventListeners: Set<SessionEventListener>;
-	/** The session's durable half: the bag the ledger replays into and every session read answers from. */
-	readonly session: Session;
 	/** The session's live half: what is in progress and nowhere on disk. */
 	readonly live: Live;
 }
@@ -54,6 +53,11 @@ export interface AgentState {
  * flight, the bag when idle.
  * `retrying` / `retryAttempt` are the retry policy's public face; `suspended` marks a run parked at
  * the approval gate.
+ *
+ * `unwritten` is the one transcript that is here rather than on disk, and it is here because there
+ * is nothing to read: a session earns its files with its first message (ADR-0009), so between
+ * `create` and that message the bag *is* the session's only copy. It is not a cache — no replay can
+ * produce it — and it leaves the moment the files exist, after which every read is a replay again.
  *
  * A process restart drops all of it on purpose: queued messages are lost, subscribers re-attach,
  * and the session file is not — which is what makes the drop survivable.
@@ -75,6 +79,23 @@ export interface Live {
 	retryAttempt: number;
 	/** True while the run in flight is parked at the approval gate. */
 	suspended: boolean;
+	/**
+	 * The row this session was opened on, when the caller named one — the test-only override.
+	 *
+	 * Not a copy of anything on disk: every other reading of "which model is this session on" is
+	 * derived from the file and the settings at the moment it is asked for (`modelChoiceOf`, ADR-0019).
+	 * This is the one answer no file can give back, because nothing wrote it there — a session opened
+	 * on a row of the caller's choosing carries that choice for as long as the open does, and the
+	 * first choice that reaches the transcript outranks it. A production open names nothing, so it is
+	 * absent there.
+	 */
+	openedOn?: ModelChoice;
+	/**
+	 * The bag of a session whose transcript is not on disk yet — created and never spoken in, or a
+	 * session this build never writes at all (`inMemorySession`). Dropped at the first write that
+	 * gives the session its files; every read after that is `open(id)`.
+	 */
+	unwritten?: Session;
 }
 
 /**
@@ -96,19 +117,19 @@ export function createLive(steeringMode: QueueMode, followUpMode: QueueMode): Li
 }
 
 /**
- * Assemble one session's state from its two already-resolved halves.
+ * Assemble one session's state from its live half.
  *
- * The build chain this sits at the end of is `fillSession` → `createLive`, and the order is not
- * free: the session names the model and thinking level it runs on, so it is filled first. The
+ * The state is the live half and the subscriber sets, and nothing else: the transcript is a file the
+ * caller opens where it needs it (ADR-0019), so there is no third thing to gather here. The
  * subscriber sets start empty — attaching is the session's own business — and the live half arrives
- * built, because its queue modes are the settings' answer and this call only gathers what the chain
+ * built, because its queue modes are the settings' answer and this call only takes what the chain
  * produced.
  */
-export function createAgentState(session: Session, live: Live): AgentState {
+export function createAgentState(sessionId: string, live: Live): AgentState {
 	return {
+		sessionId,
 		listeners: new Set(),
 		eventListeners: new Set(),
-		session,
 		live,
 	};
 }

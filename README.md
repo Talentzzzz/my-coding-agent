@@ -175,7 +175,7 @@ const settings = inMemorySettingManager({ approval: { read: true } }, rows);
 const api: ChatTransport = fake.api;
 ```
 
-每次供应商调用一个响应、按顺序，所以一次运行可以按需流式、调工具、失败或卡住。在一个临时目录上、用 `openAgent({ workDirAbsPath, session, settings, api? })` 构建会话——`session` 由 `createSession(root)` 交出，`settings` 是一只内存 manager（设置与模型行共用的门，`inMemorySettingManager(settings, rows)`），就像 `scripts/smoke-tools.ts` 那样，并抄走它的**两个坑**：`finally` 必须**同时**删除临时目录和 `sessionDir(root)`，否则每次运行都会留下一个孤儿 store；以及除非这个测试就是在测持久化，否则别用缺省的文件版 manager。
+每次供应商调用一个响应、按顺序，所以一次运行可以按需流式、调工具、失败或卡住。在一个临时目录上、用 `openAgent({ workDirAbsPath, session, settings, api? })` 构建会话——`session` 由 `createSession(root)` 交出，`settings` 是一只内存 manager（设置与模型行共用的门，`inMemorySettingManager(settings, rows)`），就像 `scripts/smoke-tools.ts` 那样，并抄走它的**两个坑**：先 `setSessionsDir(storeRoot)` 把会话 store 指到一个临时目录、`finally` 里把临时目录和 store 一起删掉，否则每次运行都会把会话文件写进本机真正的 store；以及除非这个测试就是在测持久化，否则别用缺省的文件版 manager。
 
 看一眼真窗口里客户端到底构建了什么（而不是只看一张图），跑 `packages/desktop/scripts/inspect-app`：它进程内启动服务器、加载真客户端，dump 出侧栏、标题、状态行与设置面板的文本，并演练一次会话切换。`--screenshot` 那条路截不到它——见上面的说明。
 

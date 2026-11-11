@@ -5,6 +5,7 @@
 // caller's import changed — and the engine is back inside `Agent` (ADR-0014), which is why the
 // two sides are again one object and the file boundary still holds.
 import type { AgentEvent } from "../types.ts";
+import type { Message } from "../llm/index.ts";
 import type { QueuedPrompt, SessionSnapshot } from "../protocol.ts";
 import type { SessionEntry } from "./session-manager.ts";
 
@@ -96,7 +97,29 @@ export type AgentSessionEvent =
 			/** The estimated prompt size the next request will carry. */
 			contextTokens: number;
 	  }
-	| { type: "entry_appended"; entryId: string; kind: SessionEntry["type"] }
+	| {
+			type: "entry_appended";
+			entryId: string;
+			kind: SessionEntry["type"];
+			/**
+			 * When the message was written, in the order a transcript sorts by: the message's own
+			 * stamp, with the entry's timestamp as the fallback.
+			 *
+			 * Carried on the event rather than left to be read back because the readers of it — a
+			 * sidebar row ordering by activity, the frame that pairs an entry with its time — run once
+			 * per appended message, and asking the transcript for one stamp would replay it (ADR-0019).
+			 * Absent for an entry that carries no message.
+			 */
+			at?: number;
+			/** The message's role, for a reader that only re-derives something for one of them. */
+			role?: Message["role"];
+			/**
+			 * The title in force after this append, and only when the appended message is a user one:
+			 * that is the only message a derived title is read from, so it is the only append that can
+			 * rename the conversation.
+			 */
+			title?: string;
+	  }
 	| {
 			type: "branch_changed";
 			/**

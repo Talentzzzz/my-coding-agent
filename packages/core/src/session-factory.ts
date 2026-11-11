@@ -134,8 +134,8 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 		...(options.api === undefined ? {} : { api: options.api }),
 	});
 	// The state enters the orchestrator's table here, through the same door the hub uses — which is
-	// class-private now (`assembleAgentStateBySession`): the open-shaped verbs a caller spells are
-	// `ensure` and `create`, and TypeScript has no way to say "core-internal", so the one sanctioned
+	// class-private now (`assembleAgentStateBySession`): the verbs a caller spells are `hold` /
+	// `release` and `create`, and TypeScript has no way to say "core-internal", so the one sanctioned
 	// composition road reaches the door the way a smoke reaches any other private half. The cast is
 	// the seam, and this file is its only production-side reader.
 	const door = agent as unknown as { assembleAgentStateBySession(options: AssembleAgentStateOptions): Promise<unknown> };

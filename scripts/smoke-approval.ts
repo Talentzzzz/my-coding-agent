@@ -40,8 +40,8 @@ import { createServer } from "../packages/server/src/http.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import { mountSession } from "./mount-session.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
-import type { PendingApproval } from "@my-agent/core/protocol";
-import { type Agent, type ModelConfig, type Session, sessionDir, SettingManager } from "@my-agent/core";
+import type { PendingApproval, SessionRow } from "@my-agent/core/protocol";
+import { type Agent, type ModelConfig, type Session, setSessionsDir, SettingManager } from "@my-agent/core";
 
 let failures = 0;
 
@@ -145,6 +145,8 @@ process.stdout.write("\na run parked at the gate is announced on the wire and an
 const roundTripWatchdog = deadline("the approval round trip", 60_000);
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-"));
+const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-approval--store-"));
+setSessionsDir(storeRoot);
 const fake = createFakeTransport();
 // One response per call: a tool call, then the text that ends the run. Both are assistant messages —
 // `fakeToolCall` is a content block, not a response on its own.
@@ -258,7 +260,7 @@ try {
 	await roundTrip.close();
 	await rm(settingsHome, { recursive: true, force: true });
 	await rm(root, { recursive: true, force: true });
-	await rm(sessionDir(root), { recursive: true, force: true }).catch(() => {});
+	await rm(storeRoot, { recursive: true, force: true }).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -434,8 +436,10 @@ try {
 // reap closes the host once the last hold lets go, the orchestrator's state stays — a run parked
 // at the gate refuses eviction, and with it the queues a recovery run must drain — so the question
 // survives as the ledger's, to be answered on a later hold or carried to the next process. The
-// rigs take their holds through the hub itself, so the reap under test is the real one — the
-// sections above mount a session by hand and keep a bench hold on it.
+// sidebar row is part of that survival: the projection settles it from the ledger when the host
+// goes, so the dot stays lit while the question stands. The rigs take their holds through the hub
+// itself, so the reap under test is the real one — the sections above mount a session by hand and
+// keep a bench hold on it.
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\na parked approval outlives its host, unanswered and undenied\n");
@@ -460,6 +464,18 @@ try {
 			await until(() => !patient.hub.live.includes(parked.id), 8_000),
 			patient.hub.live.join(","),
 		);
+		// The sidebar's own road: a fresh connection's overview is the projection's current truth.
+		// The question outlives the host, so the row must still carry it — a hard zero at the reap
+		// is the dot going out while the question stands. The connection stays open to hear the row
+		// go quiet once the answer lands.
+		const sidebar = await connect(muxUrl(patient.url));
+		const overview = await sidebar.waitForConnection((envelope) => envelope.item?.type === "sessions", 8_000);
+		const parkedRow = ((overview?.item?.sessions ?? []) as SessionRow[]).find((row) => row.id === parked.id);
+		check(
+			"the sidebar row still reports the question after the reap",
+			parkedRow?.pending === 1 && parkedRow?.running === false,
+			JSON.stringify(parkedRow),
+		);
 		check("the approval is still pending, undenied", patient.session.hasPendingApprovals(parked.id), "it was denied");
 		check(
 			"and no denial reached the lane",
@@ -467,13 +483,19 @@ try {
 			JSON.stringify(wire.items(patient.sessionId).map((message) => message.type)),
 		);
 
-		// The person came back: a new host, but the same state — the one the table kept. Identity is the
-		// orchestrator's private business, so the assertion probes the table the way the other smokes
-		// do; the facade answers in pure data and never hands the bag out.
+		// The person came back: a new host, but the same live half — the one the table kept. Identity
+		// is the orchestrator's private business, so the assertion probes the table the way the other
+		// smokes do; the facade answers in pure data and never hands a bag out. What survives a reap is
+		// the half that is nowhere on disk (ADR-0019): the queues, the parked flag, the subscribers.
+		// The transcript is deliberately not part of it, so there is no stale bag for a returning host
+		// to inherit — it reopens the file like any other reader.
+		const entryOf = (): { live: unknown; session?: unknown } | undefined =>
+			(patient.hub.agent as unknown as { sessions: Map<string, { live: unknown; session?: unknown }> }).sessions.get(parked.id);
+		const liveHalf = entryOf()?.live;
 		const again = await patient.hub.hold(parked.id);
 		check("a new host opens over the retained state", again !== parked && again.id === parked.id, `${again.id} vs ${parked.id}`);
-		const heldBag = (patient.hub.agent as unknown as { sessions: Map<string, { session: Session }> }).sessions.get(parked.id)?.session;
-		check("the state the table holds is the one the session was mounted with", heldBag === patient.bag);
+		check("whose live half is the same object the parked run left", liveHalf !== undefined && entryOf()?.live === liveHalf);
+		check("and whose transcript is a file rather than a table entry", entryOf()?.session === undefined);
 
 		const returned = await wire.open(patient.sessionId);
 		check(
@@ -500,6 +522,16 @@ try {
 			"and the recovery run it started finished",
 			await until(async () => ((await readSession(patient.url, parked.id))?.submitting ?? true) === false, 8_000),
 		);
+		check(
+			"the row goes quiet on the wire once the answer lands",
+			(await sidebar.waitForConnection((envelope) => {
+				if (envelope.item?.type !== "session_row") return false;
+				const row = envelope.item.session as SessionRow;
+				return row.id === parked.id && row.pending === 0;
+			}, 8_000)) !== undefined,
+			JSON.stringify(sidebar.connection().map((envelope) => envelope.item?.type)),
+		);
+		await sidebar.close().catch(() => {});
 
 		await wire.close().catch(() => {});
 		patient.hub.release(again);
@@ -536,6 +568,15 @@ try {
 			await until(async () => ((await readSession(abandoned.url, parked.id))?.pendingApprovals.length ?? 0) === 1, 8_000),
 			"the question is not showing",
 		);
+		const sidebar = await connect(muxUrl(abandoned.url));
+		const overview = await sidebar.waitForConnection((envelope) => envelope.item?.type === "sessions", 8_000);
+		const parkedRow = ((overview?.item?.sessions ?? []) as SessionRow[]).find((row) => row.id === parked.id);
+		check(
+			"and the row keeps reporting a question nobody came back to",
+			parkedRow?.pending === 1,
+			JSON.stringify(parkedRow),
+		);
+		await sidebar.close().catch(() => {});
 		await wire.close().catch(() => {});
 	} finally {
 		await abandoned.close();
@@ -674,7 +715,7 @@ try {
 	await Promise.race([exited, sleep(5_000)]);
 	clearTimeout(restartWatchdog);
 	await rm(restartRoot, { recursive: true, force: true });
-	await rm(sessionDir(restartRoot), { recursive: true, force: true }).catch(() => {});
+	await rm(storeRoot, { recursive: true, force: true }).catch(() => {});
 }
 
 process.stdout.write(failures === 0 ? "\napproval ok\n" : `\n${failures} FAILED\n`);
@@ -755,12 +796,15 @@ async function openRig(): Promise<Rig> {
 		settingsHome,
 		modelsHome: settingsHome,
 	});
+	// The graph first, the mount second: the projection hears hosts from the moment it exists, the
+	// way the real process wires it at boot — a mount announced before the projection is built is a
+	// host it never follows, and the row would never wear the live fields.
+	const graph = await serve(hub);
 	const { id: sessionId, host, state } = await mountSession(hub, {
 		root,
 		model: modelName,
 	});
 
-	const graph = await serve(hub);
 	return {
 		root,
 		hub,
@@ -773,7 +817,7 @@ async function openRig(): Promise<Rig> {
 			await graph.close();
 			await rm(settingsHome, { recursive: true, force: true });
 			await rm(root, { recursive: true, force: true });
-			await rm(sessionDir(root), { recursive: true, force: true }).catch(() => {});
+			await rm(storeRoot, { recursive: true, force: true }).catch(() => {});
 		},
 	};
 }
@@ -839,7 +883,7 @@ async function openCrossRig(): Promise<CrossRig> {
 			await graph.close();
 			await rm(settingsHome, { recursive: true, force: true });
 			await rm(root, { recursive: true, force: true });
-			await rm(sessionDir(root), { recursive: true, force: true }).catch(() => {});
+			await rm(storeRoot, { recursive: true, force: true }).catch(() => {});
 		},
 	};
 }

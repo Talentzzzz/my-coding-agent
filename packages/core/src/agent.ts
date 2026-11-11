@@ -1,9 +1,4 @@
-import {
-	assembleSession,
-	readSessionSnapshot,
-	type OpenAgentOptions,
-	type AssembleAgentStateOptions,
-} from "./assembly.ts";
+import { assembleSession, type AssembleAgentStateOptions } from "./assembly.ts";
 import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
@@ -38,6 +33,7 @@ import { trimmableToolArgEntryIds } from "./context/trim-tool-call-args.ts";
 import type { Hooks } from "./hooks.ts";
 import {
 	type Model,
+	type ModelChoice,
 	type ModelConfig,
 	modelFor,
 	normalizeThinkingLevel,
@@ -47,8 +43,9 @@ import {
 } from "./models.ts";
 import type { ConfigPatch, ModelSelection, PendingApproval, PromptBehavior, SessionRow, SessionSnapshot } from "./protocol.ts";
 import type { AgentState } from "./session/agent-state.ts";
+import { createAgentState, createLive } from "./session/agent-state.ts";
 import { danglingApprovalsOf } from "./session/dangling.ts";
-import { type AgentSessionEvent, messageDeltaOf, type SessionEventListener, type SessionListener } from "./session/events.ts";
+import { messageDeltaOf, type SessionEventListener, type SessionListener } from "./session/events.ts";
 import {
 	appendMessageEntry,
 	approvalsOf,
@@ -61,6 +58,7 @@ import {
 	snapshotOf,
 } from "./session/fanout.ts";
 import type { PendingMessageQueue } from "./session/queues.ts";
+import { modelChoiceOf } from "./session/model-choice.ts";
 import {
 	createSession,
 	type DirectorySessions,
@@ -75,7 +73,7 @@ import { UnknownSessionError } from "./session/unknown-session.ts";
 import type { SettingsPatch } from "./setting-manager.ts";
 import type { SettingManager } from "./setting-manager.ts";
 import type { Settings } from "./config.ts";
-import type { ToolManager, ToolRunContext, ToolState } from "./tools/index.ts";
+import type { ToolManager, ToolRunContext } from "./tools/index.ts";
 import type {
 	AfterToolCallResult,
 	AgentEvent,
@@ -227,14 +225,26 @@ export class Agent {
 	/** Where a request actually leaves: the transport, before the retry policy wraps it. */
 	private readonly api: ChatTransport;
 	/**
-	 * The states of the sessions this process runs, keyed by id (ADR-0011).
+	 * The live halves of the sessions this process knows about, keyed by id (ADR-0019).
 	 *
-	 * One bag per session — the durable half, the settings the open resolved, the live half, the
-	 * subscribers — and the only thing this class holds between calls. States enter through
-	 * {@link Agent.assembleAgentStateBySession}, which assembles them over this class's own services first, and leave through
+	 * One bag per session, and it holds only what no file can answer: the subscribers, the queues, the
+	 * run in flight, and — until its first message gives it files — the transcript itself. The
+	 * durable half is **not** here: every operation that needs the transcript opens it (a run once at
+	 * its start, a command once for its length) and drops it, which is what makes a stale bag
+	 * impossible. States enter through {@link Agent.assembleAgentStateBySession} and leave through
 	 * {@link Agent.evict} / {@link Agent.remove}: one writer, one deleter, and no caller in between.
 	 */
 	private readonly sessions = new Map<string, AgentState>();
+
+	/**
+	 * How many holders each session has, keyed by id.
+	 *
+	 * Still a count, though no longer the count that keeps a transcript in memory — a transcript is
+	 * never kept. What it answers is who is *using* a session right now, which is what a delete and a
+	 * reap ask before they act: a hold says somebody is changing or running it, and that is the one
+	 * thing tearing a session down underneath must not do.
+	 */
+	private readonly holds = new Map<string, number>();
 
 	constructor(config: AgentConfig) {
 		this.sessionManager = config.sessionManager;
@@ -262,40 +272,62 @@ export class Agent {
 	// ---------------------------------------------------------------------------- resolution
 
 	/**
-	 * Build one session's state and put it in the table. The only way in, and the only door that
+	 * The session's transcript, as a bag the caller owns for the length of one operation.
+	 *
+	 * This is the whole of "no cache" (ADR-0019): a born session is a replay, taken here and dropped
+	 * when the caller is done — so nothing this process holds can be stale, and a writer that reads
+	 * and writes in one synchronous block can never write a version someone else has moved past. The
+	 * one exception is a session whose files do not exist yet: no replay can produce it, so its bag
+	 * is the live half's field until its first message puts it on disk, and this is where that
+	 * transfer happens — a bag that has become born is dropped here, never carried on.
+	 *
+	 * Callers that open once and keep the bag for a run are the reason a run costs one replay rather
+	 * than one per operation: what they hold is a run-local, closed over by the run itself.
+	 */
+	private bag(id: string): Session {
+		const state = this.sessions.get(id);
+		const unwritten = state === undefined ? undefined : this.unwrittenOf(state);
+		return unwritten ?? this.sessionManager.open(id);
+	}
+
+	/**
+	 * The bag a session is still keeping because it has no file yet, or `undefined` once it has one.
+	 *
+	 * The field is cleared here rather than at the write that births the file, because the birth is not
+	 * always the orchestrator's: a caller that appends to the bag itself (`sessionManager.appendMessage`
+	 * on an unwritten session) gives it files too, and every reader of this field must agree that the
+	 * bag stopped being the session's only copy at that moment. Reading it through one function is
+	 * what makes that one rule instead of five.
+	 */
+	private unwrittenOf(state: AgentState): Session | undefined {
+		const bag = state.live.unwritten;
+		if (bag === undefined) return undefined;
+		if (!bag.fileCreated) return bag;
+		state.live.unwritten = undefined;
+		return undefined;
+	}
+
+	/**
+	 * Build one session's live half and put it in the table. The only way in, and the only door that
 	 * assembles — `assembleSession` plus the table: the assembly and the first-come-wins insertion
 	 * are one step, and the read-back below is why the two are not split.
 	 *
-	 * The two halves are one call on purpose. Assembly needs the transcript the caller chose — *which*
-	 * session to open is a host's question, not this class's — while everything else it reads (the
-	 * settings, the model rows, the tool table) belongs to this orchestrator. Handing an assembled
-	 * state in (`adopt`, as this used to) left that join to the caller and nothing checked it: a second
-	 * `SettingManager` reached exactly the state assembled through the first, and `openAgent` built
-	 * one. Here the services are this class's by construction, so the mismatch has nowhere to happen —
-	 * "every state in the table was assembled over this orchestrator's services" is a fact rather than
-	 * a convention.
+	 * The transcript is an *input* rather than a product now (ADR-0019): assembly resolves the
+	 * settings-derived halves of a session (the queue modes, and the model choice it seeds onto the
+	 * bag), and whether that bag is kept depends on one fact — whether it has files. A born bag is
+	 * dropped here, because a replay answers it again; an unwritten one is kept, because nothing else
+	 * can.
 	 *
-	 * First-come-wins: a state already in the table is kept, never replaced, because the one it would
-	 * replace holds the queues, the subscribers, and the run in flight (ADR-0007 §4) — and re-entering
-	 * a held id is the ordinary idempotent move, not an error. The return value is therefore the state
-	 * the table holds, not the one just built: under a concurrent assembly the loser is dropped, and
-	 * a caller must run on the winner (its queues are the ones a run drains), so that read-back is
-	 * this method's rather than every caller's. A held id does not even assemble — the transcript
-	 * offered may be a different replay of the same file, and seeding a choice onto it would move
-	 * nothing anyone reads.
-	 *
-	 * The method is class-private on purpose: the outside world needs only two verbs, **read**
-	 * (`snapshotOf` / `readSessionSnapshot`) and **run** (`ensure` / `create`), and both leave the
-	 * choice of *when* an id is assembled, and over *which* bag, inside the class where the table
-	 * lives. The one sanctioned bypass is `openAgent` in `session-factory.ts`, the composition road
-	 * this class's own docs name as the second way in.
+	 * The services are this class's by construction, so "every state in the table was assembled over
+	 * this orchestrator's services" is a fact rather than a convention. First-come-wins: a state
+	 * already in the table is kept, never replaced, because the one it would replace holds the queues,
+	 * the subscribers, and the run in flight — and re-entering a held id is the ordinary idempotent
+	 * move, not an error.
 	 */
 	private async assembleAgentStateBySession(options: AssembleAgentStateOptions): Promise<AgentState> {
 		const id = options.session.sessionId;
 		const held = this.sessions.get(id);
 		if (held !== undefined) return held;
-		// The services argument is where the door's guarantee lives: it is this getter, so what the
-		// state assembles over cannot be anything but this orchestrator's own.
 		const state = await assembleSession(this.services, options);
 		this.insert(state);
 		return this.sessions.get(id) ?? state;
@@ -303,52 +335,65 @@ export class Agent {
 
 	/** First-come-wins insertion. {@link Agent.assembleAgentStateBySession} is its only caller, which is what it is for. */
 	private insert(state: AgentState): void {
-		if (this.sessions.has(state.session.sessionId)) return;
-		this.sessions.set(state.session.sessionId, state);
+		if (this.sessions.has(state.sessionId)) return;
+		this.sessions.set(state.sessionId, state);
 	}
 
 	/**
-	 * Drop one session's state from the table, when nothing holds it.
+	 * A live half for one session, empty.
+	 *
+	 * The queue modes are scoped by the directory the transcript names, and they are read live through
+	 * the settings door, so a session is given a live half from one small assembly of its own — and
+	 * whichever road asked for it decides whether it is kept: {@link Agent.ensureState} files it under
+	 * the id, a read builds one and throws it away.
+	 */
+	private liveHalfOf(bag: Session): AgentState {
+		const workDirAbsPath = bag.sessionSetting.workDirAbsPath;
+		return createAgentState(
+			bag.sessionId,
+			createLive(this.settingsManager.getSteeringMode(workDirAbsPath), this.settingsManager.getFollowUpMode(workDirAbsPath)),
+		);
+	}
+
+	/**
+	 * Give one session a live half, if it has none.
+	 *
+	 * The mechanical half the verbs share: a known id is left alone, a cold one gets an empty live half
+	 * — one replay, to learn the directory its queue modes are scoped by, and thrown away with the bag
+	 * it came from. An id that names nothing refuses inside the store's `open`
+	 * ({@link UnknownSessionError}), which the transport answers as a 404.
+	 */
+	private ensureState(id: string): AgentState {
+		const held = this.sessions.get(id);
+		if (held !== undefined) return held;
+		const state = this.liveHalfOf(this.bag(id));
+		this.sessions.set(id, state);
+		return state;
+	}
+
+	/**
+	 * Drop one session's live half from the table, when nothing holds it.
 	 *
 	 * The eviction criteria (ADR-0011, issue 04): no run in flight, nothing parked at the approval
-	 * gate, and a durable half actually on disk — a session whose file is not born yet has no
-	 * half to rebuild from, so dropping its state would be deleting the id, and its life ends
-	 * with the first message or the process, never with a sweep. Refusing (returning `false`) is
-	 * the answer to a caller that named a session still held.
+	 * gate, and no unwritten bag — a session whose file is not born yet has nothing to rebuild from, so
+	 * dropping its live half would be deleting the id, and its life ends with the first message or the
+	 * process, never with a sweep. Refusing (returning `false`) is the answer to a caller that named a
+	 * session still held.
 	 */
 	evict(id: string): boolean {
 		const state = this.sessions.get(id);
 		if (state === undefined) return false;
 		if (state.live.activeRun !== undefined || state.live.suspended) return false;
-		if (state.session.fileCreated !== true) return false;
+		if (this.unwrittenOf(state) !== undefined) return false;
 		return this.sessions.delete(id);
 	}
 
 	/**
-	 * Whether the table holds a state for `id` — whether this process is holding the session.
+	 * The live half of the session `id` names, or the refusal that says this process never touched it.
 	 *
-	 * The table's own membership read, class-internal: a held session is written through its own
-	 * bag, a cold one is a replay of its file, and the two roads must be chosen before either is
-	 * walked — the methods here ask this before they pick one. Answering nothing about observers or
-	 * holds — those are other questions with other answers — it is only the table's membership. It
-	 * stays class-private: "is this held" is not a fact the facade reports, and a caller that needs
-	 * "does this id name anything" gets its answer from the command it was about to run
-	 * ({@link Agent.remove} and the cold reads refuse with {@link UnknownSessionError}).
-	 */
-	private has(id: string): boolean {
-		return this.sessions.has(id);
-	}
-
-	/**
-	 * The state the session `id` names — the durable half, the settings, the live half, the
-	 * subscribers — or the refusal that says this process is not holding it.
-	 *
-	 * The class's own read of the table: every method here names its session by id and resolves
-	 * through this, and no caller outside the class reaches it — the facade below answers the
-	 * questions a host used to ask through the state object (the file path, the title, a message's
-	 * stamp), in pure data, and the smokes that still want the bag probe the table the way they probe
-	 * any private shape. A missing one is a wrong road rather than a state to invent — `has` is how a
-	 * caller asks first — and only {@link Agent.assembleAgentStateBySession} puts a state here.
+	 * Every method that acts on a session resolves through this, and the transcript separately through
+	 * {@link Agent.bag} — the two questions are answered by two calls now, because they have two
+	 * different lifetimes.
 	 */
 	private agentState(id: string): AgentState {
 		const state = this.sessions.get(id);
@@ -365,101 +410,114 @@ export class Agent {
 	// them holds anything (ADR-0007).
 
 	/**
-	 * The session's current state: the bag this process holds when it holds the session, the log when
-	 * it does not.
+	 * The session's current state, read from its transcript as it stands on disk.
 	 *
-	 * Reading a transcript is not running a session, and this is where that stops being a slogan: the
-	 * cold road builds the same snapshot an open would have produced — through the same assembly, so
-	 * the model the open hands over and the derived tool and approval answers agree with the live road — without a
-	 * host, without a run, and without a hold. It deliberately touches no subscriber table and no
-	 * host: the whole point is that a read leaves no trace, so opening a session's history cannot
-	 * keep it alive, evict it, or cost what running it costs.
+	 * A read is a replay and nothing else (ADR-0019): the transcript is opened, the snapshot is taken
+	 * off it, and the bag is dropped. It registers no state and takes no hold — a caller that came to
+	 * look leaves nothing behind to look at, which is exactly the rule this read had before it briefly
+	 * became an assembly, and the reason a bare REST read costs one replay rather than one residence.
+	 * A session this process *is* running answers the same way plus whatever its live half adds, and
+	 * the two roads go through one function (`snapshotOf`), so they cannot drift.
 	 *
 	 * An id that names nothing refuses inside the store's `open` — that is the 404, unchanged.
 	 */
 	async snapshotOf(id: string): Promise<SessionSnapshot> {
+		const bag = this.bag(id);
 		const held = this.sessions.get(id);
-		if (held !== undefined) return snapshotOf(held, this.services);
-		return readSessionSnapshot(this.coldOptions(this.sessionManager.open(id)));
+		return snapshotOf(held ?? this.liveHalfOf(bag), bag, this.services);
 	}
 
 	/**
 	 * Give the session a name of its own, stored as the title on its `.json` snapshot.
 	 *
-	 * A held session writes through its own bag — the snapshot is written whole, so a fresh replay
-	 * would revert whatever its turns just recorded onto the file. A cold one fills a throwaway, and
-	 * a cold write is one synchronous block (`open`, then the setter that persists), which is the
-	 * whole of its safety — it takes no hold either way: a title is a fact about the session rather
-	 * than about one way through it, the engine never reads titles, and a rewrite of the snapshot
-	 * mid-run lands without disturbing the turn. An id that names nothing refuses inside the store's
-	 * `open`, which is the 404 it always was.
+	 * One synchronous block — the replay, then the setter that persists — and it takes no hold: a
+	 * title is a fact about the session rather than about one way through it, and the engine never
+	 * reads titles. A rewrite of the snapshot mid-run lands without disturbing the turn, and because
+	 * every write is its own replay, the write cannot carry a value another writer has moved past.
+	 * An id that names nothing refuses inside the store's `open`, which is the 404 it always was.
 	 */
 	setTitle(id: string, title: string): void {
-		const bag = this.bagForColdWrite(id);
-		this.sessionManager.setTitle(bag, title);
+		this.sessionManager.setTitle(this.bag(id), title);
 	}
 
 	/**
 	 * Copy a branch of one session into a new session beside its source, and name the new id.
 	 *
-	 * The source is located first — a held session's file is the bag its turns write through, a cold
-	 * one is found by scanning the stores — and then only read: its file is untouched, its own leaf
-	 * does not move, and a session this process is running is forked from the file it is writing, so
-	 * no hold is disturbed and a live turn keeps whatever it was writing. Both new files are written
+	 * The source is located first and then only read: its file is untouched, its own leaf does not
+	 * move, and a session this process is running is forked from the file it is writing, so no hold is
+	 * disturbed and a live turn keeps whatever it was writing. Both new files are written
 	 * synchronously before this returns, so the id handed back is openable by the time the caller has
-	 * it. Nothing is adopted: a fork nobody holds has no live half to keep, and its first touch
-	 * is what assembles it.
+	 * it. Nothing is registered: a fork nobody holds has no live half to keep, and its first touch is
+	 * what gives it one.
 	 */
 	forkFrom(sourceId: string, entryId: string | null): string {
-		const held = this.sessions.get(sourceId);
+		const source = this.sessions.get(sourceId);
 		const absSourcePath =
-			held !== undefined ? held.session.sessionFileAbsPath : SessionManager.findSessionFilePathById(sourceId);
+			(source === undefined ? undefined : this.unwrittenOf(source)?.sessionFileAbsPath) ??
+			SessionManager.findSessionFilePathById(sourceId);
 		if (absSourcePath === undefined) throw new Error(`Unknown session: ${sourceId}`);
 		return this.sessionManager.forkFrom(absSourcePath, entryId).sessionId;
 	}
 
 	/**
-	 * Start a session in a directory and put its state in the table; the id is what comes back.
+	 * Start a session in a directory and register its live half; the id is what comes back.
 	 *
-	 * Creation writes nothing: the file appears with the first message, and until then the table is
-	 * the whole of the session's existence. Creating is therefore opening, one `await` on the settings
-	 * and the model rows — the assembly's own read — and its one failure mode (a settings file that
-	 * cannot be read) is the same failure the following open would have hit, just earlier: the id is
-	 * not handed out past a creation that could not build it. The id is the one the table actually
-	 * holds, read back rather than assumed, so a caller under a concurrent open runs on the winner.
+	 * Creation writes nothing: the file appears with the first message, so between this call and that
+	 * message the bag *is* the session's existence — the one transcript no replay can produce, and the
+	 * reason the live half has a field for it (ADR-0019). Creating is therefore one `await` on the
+	 * settings, the assembly's own read, and its one failure mode (a settings file that cannot be read)
+	 * is the same failure the following open would have hit, just earlier: the id is not handed out
+	 * past a creation that could not build it.
 	 *
-	 * No model is taken as an argument: which model a session opens on is a settings fact, and the
-	 * assembly reads the global and per-directory files fresh on every open — so a row corrected in
-	 * the panel is the row this session opens on, with nothing here to invalidate.
+	 * No model is taken as an argument: which model a session opens on is a settings fact, read fresh
+	 * by every request, so a row corrected in the panel is the row this session runs on.
 	 */
 	async create(workDirAbsPath: string): Promise<string> {
 		const bag = createSession(workDirAbsPath);
 		const state = await this.assembleAgentStateBySession(this.openOptions(bag));
-		return state.session.sessionId;
+		return state.sessionId;
 	}
 
 	/**
-	 * Make sure the session `id` names is held: held short-circuits, disk-backed adopts, and an id
-	 * nothing names refuses.
+	 * Take one hold on a session: this caller is using it.
 	 *
-	 * The one way a session named by id enters or stays in the table — the held and the cold road
-	 * unified inside the method, the way {@link Agent.snapshotOf} unifies its own, so a caller never
-	 * branches on `has`: a held id returns as it is (the table's state is the one its queues, its
-	 * subscribers, and any run in flight hang on, and re-adopting must not move it), a disk-backed
-	 * one is replayed, assembled, and first-come-wins into the table, and the read-back that gives
-	 * the id is the same read `open` makes — under a concurrent open the caller runs on the winner.
-	 * An id neither the table nor a file names refuses inside the store's `open` — the 404,
-	 * unchanged.
+	 * The facade's verb for "I need this session now". A changing request and a run each take one for
+	 * its own length and give it back with {@link Agent.release}; a subscription takes none, because
+	 * watching neither changes the session nor keeps a turn alive (ADR-0001). The live half is created
+	 * on the way, because a run and a queue need somewhere to be — and an id that neither the table nor
+	 * a file names refuses inside the store's `open` with {@link UnknownSessionError}, which the
+	 * transport answers as a 404.
 	 *
-	 * The cold half has no write window to protect and no trace to leave on disk: a replay reads its
-	 * file and the assembly appends nothing, so adopting touches no file at all — the one thing it
-	 * changes is the table, and entering the table is the whole point.
+	 * What a caller never says is whether anything is in memory: that is this class's bookkeeping. The
+	 * count is per id, not per caller — two requests over one session are two holds, and the last one
+	 * back is what lets a reap take the live half.
 	 */
-	async ensure(id: string): Promise<string> {
-		if (this.has(id)) return id;
-		const bag = this.sessionManager.open(id);
-		const state = await this.assembleAgentStateBySession(this.openOptions(bag));
-		return state.session.sessionId;
+	async hold(id: string): Promise<void> {
+		this.ensureState(id);
+		this.holds.set(id, (this.holds.get(id) ?? 0) + 1);
+	}
+
+	/**
+	 * Give one hold back. What happens to the state next is the criteria's decision, not this
+	 * method's: {@link Agent.evict} is the caller that asks, and it refuses while a run is in
+	 * flight or an approval is parked.
+	 *
+	 * Lenient about an id nobody holds: a release is a caller undoing its own hold, and answering
+	 * "there was nothing to release" would turn a bookkeeping slip into an exception in the middle
+	 * of a teardown.
+	 */
+	release(id: string): void {
+		const held = this.holds.get(id) ?? 0;
+		if (held <= 1) this.holds.delete(id);
+		else this.holds.set(id, held - 1);
+	}
+
+	/**
+	 * How many holders a session has right now — the count a reap and a delete read before they
+	 * act, so neither closes or forgets a session somebody is still using.
+	 */
+	holdsOf(id: string): number {
+		return this.holds.get(id) ?? 0;
 	}
 
 	/**
@@ -491,62 +549,37 @@ export class Agent {
 	}
 
 	/**
-	 * The file the held session's transcript lives in, or `undefined` when this process is not holding
-	 * it. A session created but never spoken in has none, and a reader that wants the bytes back — a
-	 * smoke reloading what a turn wrote, say — names the file by this path. Pure data: a read of the
-	 * bag's own field, and nothing else; forking finds its own source and never goes through here.
+	 * The file this session's transcript lives in, or `undefined` when it has none yet.
+	 *
+	 * A session created but never spoken in has no file, and this is where that is answered rather
+	 * than guessed: the unwritten bag names the path its birth will take, and a born session's path is
+	 * the store's own lookup. Pure data, no replay; forking finds its own source and never goes
+	 * through here.
 	 */
 	fileAbsPathOf(id: string): string | undefined {
-		return this.sessions.get(id)?.session.sessionFileAbsPath;
+		const state = this.sessions.get(id);
+		const unwritten = state === undefined ? undefined : this.unwrittenOf(state);
+		return unwritten?.sessionFileAbsPath ?? SessionManager.findSessionFilePathById(id);
 	}
 
 	/**
-	 * Whether the held session has a run in flight, in the shape the wire reports (`submitting`).
-	 * Not held is not submitting: a session nobody runs cannot be mid-turn.
+	 * Whether the session has a run in flight, in the shape the wire reports (`submitting`).
+	 * Not known to this process is not submitting: a session nobody runs cannot be mid-turn.
 	 */
 	isSubmitting(id: string): boolean {
 		return this.sessions.get(id)?.live.activeRun !== undefined;
 	}
 
 	/**
-	 * The title in force for the held session: the recorded one, else the branch's first user message.
+	 * The title in force for the session: the recorded one, else the branch's first user message.
 	 *
-	 * Derived on every read from the bag the session writes through, so a rename and a first message
-	 * are answered the same way a snapshot is — the one rule a row and a header must not disagree on.
+	 * Derived on every read from the transcript as it stands, so a rename and a first message are
+	 * answered the same way a snapshot is — the one rule a row and a header must not disagree on. One
+	 * replay, on a gesture (a rename, a branch move) rather than a frame: an appended message carries
+	 * its own title on `entry_appended` instead.
 	 */
 	titleOf(id: string): string {
-		return this.sessionManager.getTitle(this.agentState(id).session);
-	}
-
-	/**
-	 * When the message entry an id names was written, for a held transcript that orders by message
-	 * time: the message's own stamp first, the entry's own timestamp as the fallback, and `undefined`
-	 * for an entry that is gone or carries no message. The same order the disk scan prefers, so a row
-	 * pushed forward by a live event and a row read off disk afterwards agree on where "last active" is.
-	 */
-	timestampOf(id: string, entryId: string): number | undefined {
-		return this.messageStampOf(id, entryId)?.at;
-	}
-
-	/**
-	 * The role of the message entry an id names, or `undefined` when it is gone or carries no message.
-	 *
-	 * The half of a landing message a timestamp cannot say: a listener that only re-derives something
-	 * for a user message — the title is the one — needs the role to keep from walking the transcript
-	 * for every assistant reply.
-	 */
-	messageRoleOf(id: string, entryId: string): Message["role"] | undefined {
-		return this.messageStampOf(id, entryId)?.role;
-	}
-
-	/** The two fields one message entry answers with, read once for both narrow reads above. */
-	private messageStampOf(id: string, entryId: string): { at: number | undefined; role: Message["role"] } | undefined {
-		const entry = this.agentState(id).session.sessionEntryMapById.get(entryId);
-		if (entry?.type !== "message") return undefined;
-		const stamp = entry.message.timestamp;
-		if (typeof stamp === "number") return { at: stamp, role: entry.message.role };
-		const parsed = new Date(entry.timestamp).getTime();
-		return { at: Number.isNaN(parsed) ? undefined : parsed, role: entry.message.role };
+		return this.sessionManager.getTitle(this.bag(id));
 	}
 
 	// ---------------------------------------------------------------------------- the settings facade
@@ -590,6 +623,16 @@ export class Agent {
 		return SessionManager.list(workDirAbsPath, sessionDirAbsPath, signal);
 	}
 
+	/**
+	 * Whether any stored session names `workDirAbsPath` as its own — the ask behind resurrecting a
+	 * working directory the filesystem has lost. A forward, like every other store-wide read here:
+	 * the store's contents are the manager's knowledge, named here so no caller reaches past this
+	 * facade for it.
+	 */
+	hasSessionsFor(workDirAbsPath: string): boolean {
+		return SessionManager.hasSessionsFor(workDirAbsPath);
+	}
+
 	/** Every directory this machine has stored sessions for, each with its own list. */
 	listDirectories(signal?: AbortSignal): Promise<DirectorySessions[]> {
 		return SessionManager.listDirectories(signal);
@@ -610,38 +653,10 @@ export class Agent {
 		return { session };
 	}
 
-	/**
-	 * The options one transcript is described by when this class reads it cold: the assembly's own
-	 * managers and transport, so a snapshot taken without assembling is indistinguishable from a
-	 * snapshot taken after. The cold read sends nothing, so the transport rides along only to keep
-	 * the one builder honest — a session that changes when you open it is the bug this closes.
-	 */
-	private coldOptions(session: Session): OpenAgentOptions {
-		return {
-			session,
-			sessionManager: this.sessionManager,
-			settings: this.settingsManager,
-			tools: this.tools,
-			api: this.api,
-		};
-	}
-
-	/**
-	 * The bag one cold write goes through: the held session's own, else a fresh replay.
-	 *
-	 * Safety is not this helper's, it is the caller's discipline, stated on each writer: a cold write
-	 * is one synchronous block (the replay, then the setter that persists) and takes no hold, and it
-	 * only ever serves a session nothing holds — the moment a state is in the table, the held road is
-	 * the one taken, so the two windows never overlap.
-	 */
-	private bagForColdWrite(id: string): Session {
-		return this.sessions.get(id)?.session ?? this.sessionManager.open(id);
-	}
-
 	// ---------------------------------------------------------------------------- the read surface
 
 	/**
-	 * The state of the session `id` names, built by the one function that also serves a cold reader.
+	 * The state of the session `id` names, built by the one constructor every read goes through.
 	 *
 	 * This is the whole read surface: every scalar a caller used to ask for by name — the row, the
 	 * level, the tool set, the depth, the retry state — is a field here, so there is one answer rather
@@ -650,10 +665,13 @@ export class Agent {
 	 * The construction is `snapshotOf` (`session/fanout.ts`), the same function the fan-out publishes
 	 * through, so a frame and a REST read cannot disagree: the five fields only a live session knows —
 	 * `submitting`, `queued`, `isRetrying`, `retryAttempt`, `pendingApprovals` — are read off the live
-	 * half there, and a cold reader supplies them from the files alone.
+	 * half, and an idle state answers them with the idle values it holds. This is the synchronous twin
+	 * of {@link Agent.snapshotOf}: it replays the transcript here and now, because its callers are
+	 * synchronous frame builders.
 	 */
 	snapshot(id: string): SessionSnapshot {
-		return snapshotOf(this.agentState(id), this.services);
+		const bag = this.bag(id);
+		return snapshotOf(this.sessions.get(id) ?? this.liveHalfOf(bag), bag, this.services);
 	}
 
 	/**
@@ -662,10 +680,10 @@ export class Agent {
 	 * The single read point for the gate, the snapshot, and the prompt — all three answer the same
 	 * question, so none of them may reach past this to the settings alone. The session's own
 	 * half is the recorded choice, read off the `.json` snapshot beside the tool set it was written
-	 * beside.
+	 * beside. One replay, on a command rather than on a frame.
 	 */
 	getApprovals(id: string): Record<string, boolean> {
-		return approvalsOf(this.services, this.agentState(id).session);
+		return approvalsOf(this.services, this.bag(id));
 	}
 
 	/**
@@ -676,8 +694,8 @@ export class Agent {
 	 * tool batch; the calls that wait for an answer are the ones whose run has already ended.
 	 */
 	hasPendingApprovals(id: string): boolean {
-		const state = this.agentState(id);
-		return state.live.activeRun === undefined && this.danglingApprovals(state.session).length > 0;
+		if (this.sessions.get(id)?.live.activeRun !== undefined) return false;
+		return this.danglingApprovals(this.bag(id)).length > 0;
 	}
 
 	/** Subscribe to the session's state. The returned function unsubscribes. */
@@ -721,10 +739,11 @@ export class Agent {
 
 		const state = this.agentState(id);
 		if (state.live.activeRun !== undefined) {
+			const bag = this.bag(id);
 			const message: Message = {
 				role: "user",
 				content: [{ type: "text", text: trimmed }],
-				timestamp: nextStamp(this.sessionManager, state.session),
+				timestamp: nextStamp(this.sessionManager, bag),
 			};
 			const queue = options.behavior ?? "followUp";
 			if (queue === "steer") state.live.steeringQueue.enqueue(message);
@@ -732,7 +751,7 @@ export class Agent {
 				state.live.followUpQueue.enqueue(message);
 				emitQueueUpdate(state);
 			}
-			publishState(state, this.services);
+			publishState(state, bag, this.services);
 			return;
 		}
 
@@ -760,16 +779,24 @@ export class Agent {
 		return this.prompt(id, text, { ...options, behavior: "followUp" });
 	}
 
-	/** Write the prompted message into the transcript, then run over it. */
+	/**
+	 * Write the prompted message into the transcript, then run over it.
+	 *
+	 * The bag this opens is the one the run carries: the transcript is read once here, gains the prompt
+	 * as its first write, and is handed to {@link Agent.run} so no turn of the run has to read it again
+	 * (ADR-0019). That is the whole of "one replay per run" — an ordinary prompt costs the same read an
+	 * open used to, and every later turn is a walk of a bag the run already owns.
+	 */
 	private async startPromptedRun(state: AgentState, trimmed: string): Promise<void> {
+		const bag = this.bag(state.sessionId);
 		const message: Message = {
 			role: "user",
 			content: [{ type: "text", text: trimmed }],
-			timestamp: nextStamp(this.sessionManager, state.session),
+			timestamp: nextStamp(this.sessionManager, bag),
 		};
-		appendMessageEntry(state, this.sessionManager, message);
-		publishState(state, this.services);
-		await this.run(state, { prompt: message });
+		appendMessageEntry(state, bag, this.sessionManager, message);
+		publishState(state, bag, this.services);
+		await this.run(state, { prompt: message }, bag);
 	}
 
 	/**
@@ -798,7 +825,7 @@ export class Agent {
 		this.denyAllApprovals(id, "The run was aborted.");
 		// The same end a finished run publishes, and for the same reason: an abort is how a run that
 		// nobody asked to stop otherwise reports that it has. See {@link Agent.prompt}.
-		publishState(state, this.services);
+		publishState(state, this.bag(id), this.services);
 	}
 
 	// ---------------------------------------------------------------------------- config moves
@@ -823,13 +850,14 @@ export class Agent {
 		const state = this.agentState(id);
 		if (state.live.activeRun !== undefined) throw new Error("A run is in flight: the branch cannot move under it");
 
-		const leafId = descend ? this.sessionManager.getBranchTip(state.session, entryId) : entryId;
-		this.sessionManager.branch(state.session, leafId);
+		const bag = this.bag(id);
+		const leafId = descend ? this.sessionManager.getBranchTip(bag, entryId) : entryId;
+		this.sessionManager.branch(bag, leafId);
 		// No config report rides the move: the model, the level, and the tool choices are the
 		// session's own values now (the `.json` snapshot), so a leaf move changes none of them —
 		// unlike the days when they were replayed off the branch's entries.
 		emitEvent(state, { type: "branch_changed", leafId });
-		publishState(state, this.services);
+		publishState(state, this.bag(id), this.services);
 		return leafId;
 	}
 
@@ -842,7 +870,8 @@ export class Agent {
 	 */
 	setActiveTools(id: string, names: string[]): void {
 		const state = this.agentState(id);
-		const previous = toolStateOf(this.sessionManager, state.session, this.settingsManager, this.tools.names()).activeToolNames;
+		const bag = this.bag(id);
+		const previous = toolStateOf(this.sessionManager, bag, this.settingsManager, this.tools.names()).activeToolNames;
 		const known = new Set(this.tools.names());
 		const unknown = names.filter((name) => !known.has(name));
 		if (unknown.length > 0) {
@@ -850,20 +879,20 @@ export class Agent {
 		}
 		if (names.length === previous.length && names.every((name, index) => name === previous[index])) return;
 
-		this.sessionManager.setToolConfig(state.session, [...names], approvalsOf(this.services, state.session));
-		publishState(state, this.services);
+		this.sessionManager.setToolConfig(bag, [...names], approvalsOf(this.services, bag));
+		publishState(state, this.bag(id), this.services);
 		this.emitConfigChanged(state, { tools: [...names] });
 	}
 
 	/**
 	 * Point this session at another row, another level, or both.
 	 *
-	 * There is no entry here and no settings write: a choice is not something that happened until a
-	 * request is made with it, so it lands on the session's own setting field — in memory, where the
-	 * snapshot and the next request read it — and reaches the transcript in
-	 * {@link Agent.prepareRequest}, the fill chain, at the moment the request it belongs to is built. What a caller
-	 * gets back immediately is the change itself — the snapshot, the level, and the next request are
-	 * all about the new model, whether or not that request is ever sent.
+	 * A choice is a value the session holds, so it goes onto the `.json` snapshot here — and, since
+	 * ADR-0019, *immediately*: with no bag kept between calls there is nowhere for an unrecorded
+	 * choice to live, so the write happens on the gesture rather than at the next request. What that
+	 * gives up is "a choice nobody sent with is not in the file"; what it keeps is the invariant that
+	 * matters — a snapshot read after this call answers with the new model and level, whether or not a
+	 * request ever follows.
 	 *
 	 * A level the chosen model has no room for is refused rather than clamped, because the caller is a
 	 * composer that offered the levels of the model it is moving to; "off" is the exception and is
@@ -871,32 +900,42 @@ export class Agent {
 	 */
 	applyModelSelection(id: string, selection: ModelSelection): void {
 		const state = this.agentState(id);
-		const setting = state.session.sessionSetting;
-		const previousName = setting.model?.name;
-		const previousLevel = normalizeThinkingLevel(setting.model?.thinkingLevel);
 		// Nothing named is nothing to do, which is how a caller sends an ordinary message.
 		if (selection.model === undefined && selection.thinkingLevel === undefined) return;
+
+		const bag = this.bag(id);
+		const setting = bag.sessionSetting;
+		// The choice in force, not just the recorded one: a session nobody has chosen a model for still
+		// has one — the settings' default, derived here exactly as every read derives it (ADR-0019) —
+		// and a gesture that names only a level has to name that row to be recordable at all.
+		const inForce = modelChoiceOf(this.sessionManager, bag, this.settingsManager, state.live.openedOn);
+		const previousName = setting.model?.name ?? inForce.name;
+		const previousLevel = normalizeThinkingLevel(setting.model?.thinkingLevel ?? inForce.thinkingLevel);
 
 		const name = selection.model ?? previousName;
 		const userModel = this.settingsManager.modelCatalog().find((userModel) => userModel.name === name);
 		if (userModel === undefined) throw new Error(`Unknown model: ${name}`);
 
 		// The choice is the client's selection, written as it arrived onto the session's own setting:
-		// the row's name, and the level the caller named or the one already in force. Nothing of the
-		// row follows it — the wire id is what the request made with the choice records
-		// (`recordSelection`), and a snapshot taken before the next request already reads the row the
-		// name picks out, because every build looks the name up in the catalog, so an edit to that row
-		// wins without anything here being refreshed. The write is in memory only: until a request is
-		// made with the choice, the file keeps the choice it was last made with.
+		// the row's name, the wire id the row answers to right now, and the level the caller named or
+		// the one already in force. The wire id travels with the write because this *is* the write
+		// (ADR-0019): the bag that carries it is dropped the moment this returns, and the disk format
+		// holds a row only when both of its names are present — a write without the id would leave the
+		// file with no model at all, and the next replay would answer "nothing was ever chosen".
 		const renamed = previousName !== userModel.name;
 		setting.model = {
-			// A rename drops the wire id along with the name it belonged to.
+			// A rename drops the wire id along with the name it belonged to; the row's own id takes
+			// its place below either way.
 			...(renamed ? {} : setting.model),
 			name: userModel.name,
+			modelId: userModel.id,
 			thinkingLevel: selection.thinkingLevel ?? normalizeThinkingLevel(setting.model?.thinkingLevel),
 		};
+		// The snapshot is rewritten whole from the bag, which is why one call is the whole write: what
+		// the setter above left on the bag is exactly what the file must afterwards hold.
+		this.sessionManager.flushMeta(bag);
 
-		publishState(state, this.services);
+		publishState(state, bag, this.services);
 		this.emitConfigChanged(state, {
 			...(setting.model.name === previousName ? {} : { model: userModel.name }),
 			...(normalizeThinkingLevel(setting.model.thinkingLevel) === previousLevel
@@ -919,14 +958,15 @@ export class Agent {
 	 */
 	applyConfig(id: string, patch: ConfigPatch): void {
 		const state = this.agentState(id);
-		const workDirAbsPath = state.session.sessionSetting.workDirAbsPath;
-		const previousApprovals = approvalsOf(this.services, state.session);
+		const bag = this.bag(id);
+		const workDirAbsPath = bag.sessionSetting.workDirAbsPath;
+		const previousApprovals = approvalsOf(this.services, bag);
 		if (patch.approval !== undefined) {
 			// The snapshot records the whole map in force — the settings with this session's choice over
 			// them — which is the shape every read of the ledger answers from.
 			const approvals = { ...previousApprovals, ...patch.approval };
-			const activeToolNames = toolStateOf(this.sessionManager, state.session, this.settingsManager, this.tools.names()).activeToolNames;
-			this.sessionManager.setToolConfig(state.session, activeToolNames, approvals);
+			const activeToolNames = toolStateOf(this.sessionManager, bag, this.settingsManager, this.tools.names()).activeToolNames;
+			this.sessionManager.setToolConfig(bag, activeToolNames, approvals);
 		}
 		// The rest of the patch goes to the settings through the manager, which owns the write: the
 		// change lands on the files, and every later read — this session's and any other session over
@@ -934,9 +974,10 @@ export class Agent {
 		this.settingsManager.applySettings(workDirAbsPath, patch.approval === undefined ? patch : { ...patch, approval: undefined });
 		state.live.steeringQueue.mode = this.settingsManager.getSteeringMode(workDirAbsPath);
 		state.live.followUpQueue.mode = this.settingsManager.getFollowUpMode(workDirAbsPath);
-		publishState(state, this.services);
+		const after = this.bag(id);
+		publishState(state, after, this.services);
 		this.emitConfigChanged(state, {
-			approvals: changedApprovals(previousApprovals, approvalsOf(this.services, state.session)),
+			approvals: changedApprovals(previousApprovals, approvalsOf(this.services, after)),
 		});
 	}
 
@@ -964,11 +1005,8 @@ export class Agent {
 	 * is worse than an error the client can show.
 	 */
 	hasPendingApproval(id: string, toolCallId: string): boolean {
-		const state = this.agentState(id);
-		return (
-			state.live.activeRun === undefined &&
-			this.danglingApprovals(state.session).some((call) => call.toolCallId === toolCallId)
-		);
+		if (this.sessions.get(id)?.live.activeRun !== undefined) return false;
+		return this.danglingApprovals(this.bag(id)).some((call) => call.toolCallId === toolCallId);
 	}
 
 	/**
@@ -990,7 +1028,11 @@ export class Agent {
 	async respondApproval(id: string, toolCallId: string, approved: boolean): Promise<void> {
 		const state = this.agentState(id);
 		if (state.live.activeRun !== undefined) return;
-		const call = this.danglingApprovals(state.session).find((candidate) => candidate.toolCallId === toolCallId);
+		// One replay serves the whole call: the answer is looked up in it, and — when the answer is a
+		// grant — the choice it records is written through the same bag, before the run that closes the
+		// call starts on it.
+		const bag = this.bag(id);
+		const call = this.danglingApprovals(bag).find((candidate) => candidate.toolCallId === toolCallId);
 		if (call === undefined) return;
 		const answer: ToolCallAnswer = approved
 			? { approved: true }
@@ -998,14 +1040,14 @@ export class Agent {
 		if (approved) {
 			// The grant is the session's own choice for this tool, recorded as the whole map in force
 			// with the tool turned off — the same move a config patch makes.
-			const approvals = { ...approvalsOf(this.services, state.session), [call.toolName]: false };
-			const activeToolNames = toolStateOf(this.sessionManager, state.session, this.settingsManager, this.tools.names()).activeToolNames;
-			this.sessionManager.setToolConfig(state.session, activeToolNames, approvals);
+			const approvals = { ...approvalsOf(this.services, bag), [call.toolName]: false };
+			const activeToolNames = toolStateOf(this.sessionManager, bag, this.settingsManager, this.tools.names()).activeToolNames;
+			this.sessionManager.setToolConfig(bag, activeToolNames, approvals);
 		}
 		// Said before the run starts: the choice is the session's own and lands now, while the call
 		// itself stays dangling until the run's recovery pass closes it.
-		publishState(state, this.services);
-		await this.run(state, { answers: { [toolCallId]: answer } });
+		publishState(state, bag, this.services);
+		await this.run(state, { answers: { [toolCallId]: answer } }, bag);
 	}
 
 	/**
@@ -1025,20 +1067,22 @@ export class Agent {
 	denyAllApprovals(id: string, reason: string): void {
 		const state = this.agentState(id);
 		if (state.live.activeRun !== undefined) return;
-		const dangling = this.danglingApprovals(state.session);
+		const bag = this.bag(id);
+		const dangling = this.danglingApprovals(bag);
 		if (dangling.length === 0) return;
-		for (const call of dangling) this.appendDanglingResult(state, call, { approved: false, reason });
+		for (const call of dangling) this.appendDanglingResult(state, bag, call, { approved: false, reason });
 		// The abandonment sweep is where a parked session's reading ends: no recovery run is coming,
 		// so the suspended flag has nothing left to say — and left standing it would keep the state's
 		// own eviction refused forever (the criteria read this flag).
 		state.live.suspended = false;
 		if (dropQueued(state)) emitQueueUpdate(state);
-		publishState(state, this.services);
+		publishState(state, bag, this.services);
 	}
 
 	/** Write the result that closes one dangling call, and announce the entry like any other message. */
 	private appendDanglingResult(
 		state: AgentState,
+		bag: Session,
 		call: PendingApproval,
 		answer: { approved: boolean; reason?: string },
 	): void {
@@ -1054,7 +1098,7 @@ export class Agent {
 			isError: !answer.approved,
 			timestamp: Date.now(),
 		};
-		appendMessageEntry(state, this.sessionManager, message);
+		appendMessageEntry(state, bag, this.sessionManager, message);
 	}
 
 	/**
@@ -1067,8 +1111,7 @@ export class Agent {
 	 * it. A tool the map does not gate runs without asking.
 	 */
 	async authorize(id: string, name: string, _toolCallId: string, _args: unknown): Promise<boolean> {
-		const state = this.agentState(id);
-		return approvalsOf(this.services, state.session)[name] === true;
+		return approvalsOf(this.services, this.bag(id))[name] === true;
 	}
 
 	// ---------------------------------------------------------------------------- waiting and closing
@@ -1096,7 +1139,7 @@ export class Agent {
 		// Read through a closure: the run slot is reassigned across the awaits below, and a narrow
 		// taken before them would tell the checker the slot is always empty here.
 		const stillBusy = (): boolean =>
-			(state.live.followUpQueue.size > 0 && this.danglingApprovals(state.session).length === 0) ||
+			(state.live.followUpQueue.size > 0 && this.danglingApprovals(this.bag(id)).length === 0) ||
 			state.live.retrying === true;
 		for (;;) {
 			await (state.live.activeRun?.promise ?? Promise.resolve());
@@ -1145,8 +1188,13 @@ export class Agent {
 		transport?: ChatTransport,
 	): Promise<readonly SessionEntry[]> {
 		const state = this.agentState(id);
-		const model = modelFor(state.session.sessionSetting.model ?? {}, this.settingsManager.modelCatalog(), transport);
-		return this.compactFor(state, entries, now, signal, model);
+		const bag = this.bag(id);
+		const model = modelFor(
+			modelChoiceOf(this.sessionManager, bag, this.settingsManager, state.live.openedOn),
+			this.settingsManager.modelCatalog(),
+			transport,
+		);
+		return this.compactFor(state, bag, entries, now, signal, model);
 	}
 
 	// ---------------------------------------------------------------------------- the config report
@@ -1204,6 +1252,7 @@ export class Agent {
 	private async run(
 		state: AgentState,
 		start: RunStart,
+		transcript: Session,
 	): Promise<void> {
 		const live = state.live;
 		// The run's readings start at zero, in one place: a run neither inherits the previous run's
@@ -1226,7 +1275,7 @@ export class Agent {
 				// Deliberately not awaited: the run owns the stream's lifetime, and a failure that
 				// cannot be retried comes back as an error event on it rather than as a rejection out
 				// of the stream function (which the engine's contract forbids anyway).
-				void this.pumpAttempts(state, outer, model as Model, context, options);
+				void this.pumpAttempts(state, transcript, outer, model as Model, context, options);
 				return outer;
 			},
 		};
@@ -1235,7 +1284,7 @@ export class Agent {
 			// The transcript and the tools are built per run — the engine keeps no state of its own —
 			// and both are rebuilt for the request that actually goes out by the fill chain anyway.
 			// The engine's take points read this session's own queues, so nothing is wired in.
-			await this.runEngine(state, transport, start);
+			await this.runEngine(state, transport, start, transcript);
 		} finally {
 			// A message accepted in the last moment of the run — after the engine had already decided to
 			// stop looking for one — is on a queue nothing will drain, so it is dropped here rather than
@@ -1264,7 +1313,7 @@ export class Agent {
 			// exactly the run that most needs the frame. Every end path a run has goes through this one
 			// block; the error frame that may precede it is announced by the caller that learns of the
 			// rejection, not by the session.
-			publishState(state, this.services);
+			publishState(state, transcript, this.services);
 		}
 	}
 
@@ -1290,13 +1339,13 @@ export class Agent {
 		state: AgentState,
 		transport: ChatTransport,
 		start: RunStart,
+		session: Session,
 	): Promise<Message[]> {
 		const { sessionManager, settingsManager, tools } = this;
 		// This run's values — the directory and the bash timeouts — collected once and carried by every
 		// call the run makes: they are per-request facts that now travel as a value rather than being
 		// closed over by a tool instance (ADR-0016).
-		const run: ToolRunContext = this.runContext(state);
-		const session = state.session;
+		const run: ToolRunContext = this.runContext(session);
 		const live = state.live;
 		if (live.activeRun !== undefined) {
 			throw new Error(
@@ -1312,14 +1361,15 @@ export class Agent {
 		live.activeRun = { promise, resolve: settle, abortController };
 		const signal = abortController.signal;
 
-		// The model the run is on. Seeded from the choice as it stands; `prepareRequest` answers with
-		// the one each request is actually sent with, so a synthesized failure still names a real model
-		// even when the run dies before its first request. The slot on the live half is what a snapshot
-		// outside this stack reads instead of going back to the catalog.
-		let model: Model = modelFor(session.sessionSetting.model ?? {}, settingsManager.modelCatalog(), transport);
+	// The model the run is on. Seeded from the choice as it stands; `prepareRequest` answers with
+	// the one each request is actually sent with, so a synthesized failure still names a real model
+	// even when the run dies before its first request. The slot on the live half is what a snapshot
+	// outside this stack reads instead of going back to the catalog.
+	const choice = modelChoiceOf(sessionManager, session, settingsManager, live.openedOn);
+	let model: Model = modelFor(choice, settingsManager.modelCatalog(), transport);
 		live.model = model;
 		const hooks = this.toolCallHooks(session);
-		const emit: AgentEventSink = (event) => this.dispatchEvent(state, event);
+		const emit: AgentEventSink = (event) => this.dispatchEvent(state, session, event);
 
 		try {
 			const newMessages: Message[] = [];
@@ -1397,7 +1447,7 @@ export class Agent {
 					// replay the ledger into a view, compact it if it is over the window, build the prompt
 					// from the live tool and approval answers, and hand the request back — built here, used
 					// once, dropped.
-					const requestUpdate = await this.prepareRequest(transport, currentContext, signal, state);
+					const requestUpdate = await this.prepareRequest(transport, currentContext, signal, state, session);
 					if (requestUpdate) {
 						currentContext = requestUpdate.context ?? currentContext;
 						model = requestUpdate.model ?? model;
@@ -1462,7 +1512,7 @@ export class Agent {
 					// arrives from outside any run to start the next one.
 					if (suspended) break;
 
-					pendingMessages = await this.drainTranscribed(live.steeringQueue, state);
+					pendingMessages = await this.drainTranscribed(live.steeringQueue, state, session);
 				}
 
 				// A suspend ends the follow-up side of the run with it: the queued messages were never
@@ -1470,7 +1520,7 @@ export class Agent {
 				if (suspended) break;
 
 				// The run would stop here. Take whatever the follow-up queue holds.
-				const followUpMessages = await this.drainTranscribed(live.followUpQueue, state);
+				const followUpMessages = await this.drainTranscribed(live.followUpQueue, state, session);
 				if (followUpMessages.length > 0) {
 					// Set as pending so the inner loop processes them.
 					pendingMessages = followUpMessages;
@@ -1562,9 +1612,9 @@ export class Agent {
 		context: Context,
 		signal: AbortSignal | undefined,
 		state: AgentState,
+		session: Session,
 	): Promise<AgentRequestUpdate> {
 		const { sessionManager, settingsManager, tools, hooks, systemPrompt } = this;
-		const session = state.session;
 		// The model this request is made with, built from the live row before anything else reads it,
 		// because the compaction decision below is measured against its context window and a threshold
 		// taken from a window the row had a moment ago would compact the wrong transcript. This is the
@@ -1573,17 +1623,19 @@ export class Agent {
 		// assembled. A row that is gone — deleted, or renamed under a session that was using it —
 		// leaves the choice as it is, and `unconfiguredStream` is what answers for that.
 		const catalog = settingsManager.modelCatalog();
-		const model = modelFor(session.sessionSetting.model ?? {}, catalog, transport);
+		const choice = modelChoiceOf(sessionManager, session, settingsManager, state.live.openedOn);
+		const model = modelFor(choice, catalog, transport);
 		// The choice this request is made with reaches the transcript here, at the moment a request
-		// is built from it — so a model or a level the user moved and never sent with is not in the
-		// file at all. It runs before the compaction decision below, which measures the prompt
-		// against this model's window.
-		this.recordSelection(session, catalog);
+		// is built from it — a session that never spoke is recorded by the first request it serves.
+		// It runs before the compaction decision below, which measures the prompt against this
+		// model's window.
+		this.recordSelection(session, catalog, choice);
 		// One pass decides both what the request carries and whether it has to be summarized: the
 		// trigger, the clearing of stale tool results, and the summary all read the same entries, so the
 		// decision and the request cannot disagree about how large the prompt is.
 		const entries = await this.compactFor(
 			state,
+			session,
 			sessionManager.buildContextEntries(session),
 			Date.now(),
 			signal,
@@ -1662,8 +1714,8 @@ export class Agent {
 	 * session's own setting, and the bash timeouts, read off the settings the same way. Collected
 	 * once per run and carried by every call it makes — nothing here outlives the run that reads it.
 	 */
-	private runContext(state: AgentState): ToolRunContext {
-		const workDirAbsPath = state.session.sessionSetting.workDirAbsPath;
+	private runContext(session: Session): ToolRunContext {
+		const workDirAbsPath = session.sessionSetting.workDirAbsPath;
 		return {
 			workDirAbsPath,
 			// Read live, like every other settings read: a timeout the user moved reaches the next
@@ -1675,38 +1727,34 @@ export class Agent {
 	/**
 	 * Write what this request is being made with into the session, once per move.
 	 *
-	 * The model and the level are recorded here rather than where the user chose them, because these
-	 * are the transcript's account of what answered a turn: a row the user picked and never
-	 * sent with answered nothing, and a level that was never asked at was never in force. The write
-	 * baseline is the snapshot on disk, read fresh — not the bag, which already carries the choice in
-	 * force (`applyModelSelection` and the assembly seed put it there, issue 03 §7), so comparing
-	 * against the bag would be self-comparison and a level-only move would never reach the file. A
-	 * run of turns on one selection still costs one write: when the disk already says what is in
-	 * force, nothing is written.
+	 * The model the request is built with is already the choice in force — the composer wrote it onto
+	 * the snapshot when it moved it (ADR-0019), so this only fills in what a gesture cannot know: the
+	 * wire id the row currently answers to, and the level normalized. It is therefore usually a
+	 * no-op, and when it is not, the write goes through a **fresh** bag rather than the run's: the
+	 * snapshot is rewritten whole, and a copy opened at the run's start would carry a choice someone
+	 * may have moved since. The two fields are set explicitly, so nothing else in the snapshot is
+	 * touched either way.
 	 *
-	 * The catalog is the caller's, so this and the model the request is built with read the file once
-	 * between them. A choice no row answers records no row — there is no wire id to write, and the
-	 * request it belongs to is about to be refused by the transport rather than sent; its level, if
-	 * it has one, still records. This is the one place a choice reaches the disk: `applyModelSelection`
-	 * and the assembly seed only move the in-memory field (issue 03 §7), and the request made with the
-	 * choice is what commits it. The setters run first to keep the bag the whole truth (the wire id
-	 * only lands here), then the flush carries whatever the bag holds to the snapshot — the setters'
-	 * own gates compare against the bag, so a level already in the bag passes them silently.
+	 * The baseline it compares against is the file's, not a bag's — `recordedOnDisk` reads the
+	 * snapshot, so a run of turns on one selection costs one read and no write. A choice no row
+	 * answers records no row: there is no wire id to write, and the request it belongs to is about to
+	 * be refused by the transport rather than sent.
 	 */
-	private recordSelection(session: Session, catalog: readonly ModelConfig[]): void {
+	private recordSelection(session: Session, catalog: readonly ModelConfig[], choice: ModelChoice): void {
 		const { sessionManager } = this;
 		const recorded = sessionManager.recordedOnDisk(session);
-		const row = rowFor(session.sessionSetting.model ?? {}, catalog);
-		const level = normalizeThinkingLevel(session.sessionSetting.model?.thinkingLevel) as ThinkingLevel;
+		const row = rowFor(choice, catalog);
+		const level = normalizeThinkingLevel(choice.thinkingLevel) as ThinkingLevel;
 		if (
 			level === recorded.thinkingLevel &&
 			(row === undefined || (row.name === recorded.model?.name && row.id === recorded.model?.modelId))
 		) {
 			return;
 		}
-		if (row !== undefined) sessionManager.setModel(session, row.name, row.id);
-		sessionManager.setThinkingLevel(session, level);
-		sessionManager.flushMeta(session);
+		const bag = this.bag(session.sessionId);
+		if (row !== undefined) sessionManager.setModel(bag, row.name, row.id);
+		sessionManager.setThinkingLevel(bag, level);
+		sessionManager.flushMeta(bag);
 	}
 
 	/**
@@ -1732,6 +1780,7 @@ export class Agent {
 	 */
 	private async pumpAttempts(
 		state: AgentState,
+		session: Session,
 		outer: AssistantMessageEventStream,
 		model: Model,
 		context: Context,
@@ -1768,7 +1817,7 @@ export class Agent {
 		// `retry_start` event reports are the same answer, taken at the call site rather than stored —
 		// a settings edit mid-backoff lands with the next request, not this one. The counting matches
 		// `retryAssistantCall`'s own: retries, not calls.
-		const retrySettings = settingsManager.getRetrySettings(state.session.sessionSetting.workDirAbsPath);
+		const retrySettings = settingsManager.getRetrySettings(session.sessionSetting.workDirAbsPath);
 		const maxAttempts = retrySettings.enabled ? retrySettings.maxRetries : 0;
 		let final: AssistantMessage;
 		try {
@@ -1776,7 +1825,7 @@ export class Agent {
 				produce,
 				retrySettings,
 				options?.signal,
-				this.retryCallbacks(state, maxAttempts),
+				this.retryCallbacks(state, session, maxAttempts),
 			);
 		} catch (error) {
 			// A stream function that throws breaks the engine's contract, so it ends up as an error
@@ -1785,7 +1834,7 @@ export class Agent {
 		}
 		// A retry the policy never announced an end for — the run was cut short above — still has to
 		// close, or `isRetrying` would outlive the run.
-		if (live.retrying) this.endRetry(state, false, live.retryAttempt, final.errorMessage);
+		if (live.retrying) this.endRetry(state, session, false, live.retryAttempt, final.errorMessage);
 		pushTerminal(outer, final);
 		outer.end();
 	}
@@ -1797,7 +1846,7 @@ export class Agent {
 	 * because the callback the policy makes for `retry_start` carries no policy of its own, and
 	 * nothing here stores the answer between events.
 	 */
-	private retryCallbacks(state: AgentState, maxAttempts: number): RetryCallbacks {
+	private retryCallbacks(state: AgentState, session: Session, maxAttempts: number): RetryCallbacks {
 		const live = state.live;
 		return {
 			onRetryScheduled: (attempt, scheduledMax, delayMs, errorMessage) => {
@@ -1810,7 +1859,7 @@ export class Agent {
 					delayMs,
 					errorMessage,
 				});
-				publishState(state, this.services);
+				publishState(state, session, this.services);
 			},
 			onRetryAttemptStart: () => {
 				emitEvent(state, {
@@ -1818,16 +1867,17 @@ export class Agent {
 					attempt: live.retryAttempt,
 					maxAttempts,
 				});
-				publishState(state, this.services);
+				publishState(state, session, this.services);
 			},
 			onRetryFinished: (success, attempt, finalError) =>
-				this.endRetry(state, success, attempt, finalError),
+				this.endRetry(state, session, success, attempt, finalError),
 		};
 	}
 
 	/** Leave the retrying state and say how the retry ended. */
 	private endRetry(
 		state: AgentState,
+		session: Session,
 		success: boolean,
 		attempt: number,
 		finalError?: string,
@@ -1835,7 +1885,7 @@ export class Agent {
 		state.live.retrying = false;
 		state.live.retryAttempt = 0;
 		emitEvent(state, { type: "retry_end", success, attempt, finalError });
-		publishState(state, this.services);
+		publishState(state, session, this.services);
 	}
 
 	// ---------------------------------------------------------------------------- compaction
@@ -1869,6 +1919,7 @@ export class Agent {
 	 */
 	private async compactFor(
 		state: AgentState,
+		session: Session,
 		entries: readonly SessionEntry[],
 		now: number,
 		signal: AbortSignal | undefined,
@@ -1878,10 +1929,10 @@ export class Agent {
 		const threshold = compactionThresholdFor(model.contextWindow);
 		if (!shouldCompact(messagesOf(entries), threshold)) return entries;
 
-		const trimmed = this.trimRecordedArgs(state, entries);
+		const trimmed = this.trimRecordedArgs(state, session, entries);
 		if (!shouldCompact(messagesOf(trimmed), threshold)) return trimmed;
 
-		const cleared = this.clearStaleToolResults(state, trimmed, now);
+		const cleared = this.clearStaleToolResults(state, session, trimmed, now);
 		if (!shouldCompact(messagesOf(cleared), threshold)) return cleared;
 
 		// The one completion compaction makes: the same model the turn is on, with the summary
@@ -1928,7 +1979,7 @@ export class Agent {
 		if (!outcome) return cleared;
 
 		sessionManager.appendCompaction(
-			state.session,
+			session,
 			outcome.summary,
 			outcome.firstKeptEntryId,
 			outcome.tokensBefore,
@@ -1936,7 +1987,7 @@ export class Agent {
 		);
 		// Published after the transcript moved, so a listener that reacts reads back the same numbers:
 		// `summarized` is what this pass folded in, `contextTokens` is what the provider will now be sent.
-		const compacted = sessionManager.buildContextEntries(state.session);
+		const compacted = sessionManager.buildContextEntries(session);
 		emitEvent(state, {
 			type: "compaction",
 			summary: outcome.summary,
@@ -1960,6 +2011,7 @@ export class Agent {
 	 */
 	private trimRecordedArgs(
 		state: AgentState,
+		session: Session,
 		entries: readonly SessionEntry[],
 	): readonly SessionEntry[] {
 		const { sessionManager } = this;
@@ -1967,8 +2019,8 @@ export class Agent {
 		if (trimmed.length === 0) return entries;
 
 		const tokensBefore = estimateTokens(messagesOf(entries));
-		sessionManager.appendTrimToolCallArgs(state.session, trimmed, tokensBefore);
-		const view = sessionManager.buildContextEntries(state.session);
+		sessionManager.appendTrimToolCallArgs(session, trimmed, tokensBefore);
+		const view = sessionManager.buildContextEntries(session);
 		emitEvent(state, {
 			type: "tool_call_args_trimmed",
 			trimmed: trimmed.length,
@@ -1987,6 +2039,7 @@ export class Agent {
 	 */
 	private clearStaleToolResults(
 		state: AgentState,
+		session: Session,
 		entries: readonly SessionEntry[],
 		now: number,
 	): readonly SessionEntry[] {
@@ -1997,8 +2050,8 @@ export class Agent {
 		if (cleared.length === 0) return entries;
 
 		const tokensBefore = estimateTokens(messagesOf(entries));
-		sessionManager.appendClearToolResults(state.session, cleared, tokensBefore);
-		const view = sessionManager.buildContextEntries(state.session);
+		sessionManager.appendClearToolResults(session, cleared, tokensBefore);
+		const view = sessionManager.buildContextEntries(session);
 		emitEvent(state, {
 			type: "tool_results_cleared",
 			cleared: cleared.length,
@@ -2073,10 +2126,10 @@ export class Agent {
 	 * a message was neither queued nor stored never opens. The echo never persists user messages, so
 	 * nothing has to mark these as already written.
 	 */
-	private drainTranscribed(queue: PendingMessageQueue, state: AgentState): Message[] {
+	private drainTranscribed(queue: PendingMessageQueue, state: AgentState, session: Session): Message[] {
 		const messages = queue.drain();
 		for (const message of messages) {
-			appendMessageEntry(state, this.sessionManager, message);
+			appendMessageEntry(state, session, this.sessionManager, message);
 		}
 		return messages;
 	}
@@ -2089,7 +2142,7 @@ export class Agent {
 	 * anything on the session. It is the successor of the `Loop.subscribe` callback the engine used to
 	 * be handed, and it is why the engine needs no listener registry of its own.
 	 */
-	private async dispatchEvent(state: AgentState, event: AgentEvent): Promise<void> {
+	private async dispatchEvent(state: AgentState, session: Session, event: AgentEvent): Promise<void> {
 		const live = state.live;
 		if (event.type === "message_update") {
 			// The hot path: one event per provider delta. Keep the running message for a baseline that
@@ -2107,7 +2160,7 @@ export class Agent {
 			// else the engine announces has no other writer and is written here as it stands —
 			// the content is final by the time it lands (the write boundary is the last rewrite).
 			if (event.message.role !== "user") {
-				appendMessageEntry(state, this.sessionManager, event.message);
+				appendMessageEntry(state, session, this.sessionManager, event.message);
 			}
 		}
 		if (event.type === "agent_end" && !live.suspended) {
@@ -2123,9 +2176,10 @@ export class Agent {
 		}
 		emitEvent(state, event);
 		if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_end") {
-			publishState(state, this.services);
+			publishState(state, session, this.services);
 		}
-	}}
+	}
+}
 
 /**
  * The approval keys whose value differs, or undefined when none do.

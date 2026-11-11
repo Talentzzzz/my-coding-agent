@@ -1,8 +1,11 @@
 // Stream lifecycle smoke test, in the shape the resident transport gave it: the hold decides how
-// long a session lives, and a subscription decides nothing. A lane watching an idle session takes no
-// hold and ends nothing; a run ending does not end the lane — the host going away does, and the host
-// goes away when the last hold lets go. The failure section pins where a run that fails under a
-// watcher — and one that fails with nobody watching — is heard.
+// long a session *runs*, and the subscription decides how long its state *lives*. A lane watching an
+// idle session takes no hold and ends nothing, and the read that opens it registers nothing either —
+// the table holds what is running, so a watched-but-idle session is a file and a lane, no more
+// (ADR-0019). A run ending does not end the lane: the host going away does, and the host goes away
+// when the last hold lets go — and the state the run put there leaves with the reap. The failure
+// section pins where a run that fails under a watcher — and one that fails with nobody watching — is
+// heard.
 //
 //   node scripts/smoke-stream.ts
 //
@@ -151,6 +154,16 @@ function sabotagePersistence(hub: SessionHub): () => void {
 const rig = await openRig();
 const wire = await connect(`${rig.url.replace("http", "ws")}/mux`);
 
+/**
+ * Whether the orchestrator's table holds this session right now.
+ *
+ * Not the synchronous snapshot: that reads the file, so it answers for every born session whether or
+ * not anything is running, and a read registers no state at all (ADR-0019). The table is the only
+ * instrument, so it is read directly — through the private map, the way the other smokes reach a half
+ * the facade does not hand out.
+ */
+const inTable = (id: string): boolean => (rig.hub.agent as unknown as { sessions: Map<string, unknown> }).sessions.has(id);
+
 // The hold counter is the load-bearing instrument of this smoke (docs/notes.md §二 bug 4: to verify
 // "x takes no hold", count `hub.hold` calls — never read `hub.live`, which a released hold vanishes
 // from within a tick).
@@ -188,6 +201,11 @@ try {
 	check("an unknown session is a 404", missing.status === 404, String(missing.status));
 	check("and neither read held anything", holds === 0, `holds=${holds}`);
 
+	// A read passes through the hub's own eviction funnel (`hub.snapshotOf` asks once, so a state
+	// nobody watches does not linger). What must survive it is the session creation left here: it has
+	// no file yet, so its state *is* the session, and dropping it would be deleting the id (ADR-0019).
+	check("the state creation left behind survived the read", inTable(idleId));
+
 	// ---------------------------------------------------------------------------------------------
 	// 2. A run ending does not end the lane; the hold's release does.
 	// ---------------------------------------------------------------------------------------------
@@ -215,6 +233,9 @@ try {
 	rig.hub.release(bench);
 	check("the session was reaped once the last hold let go", await until(() => !rig.hub.live.includes(idleId), 10_000), rig.hub.live.join(","));
 	check("and the lane ended with the host it watched", await until(() => wire.endOf(idleId).ended, 5_000), JSON.stringify(wire.endOf(idleId)));
+	// The run is what put the state in the table; the reap is what takes it out, once nothing runs and
+	// nobody watches. What is left afterwards is the file, which is the whole of "the session".
+	check("and the state went with the last reader", await until(() => !inTable(idleId), 5_000));
 
 	// ---------------------------------------------------------------------------------------------
 	// 3. Attaching to a run already in flight: the baseline says so, and the lane lives through it.

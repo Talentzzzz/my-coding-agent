@@ -19,10 +19,12 @@ import { createRoutes } from "../packages/server/src/controllers/routes.ts";
 import { Router } from "../packages/server/src/http/routing.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import { mountSession } from "./mount-session.ts";
-import { type ModelConfig, sessionDir, SettingManager } from "@my-agent/core";
+import { type ModelConfig, setSessionsDir, SettingManager } from "@my-agent/core";
 
 const PORT = 8094;
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-"));
+const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint--store-"));
+setSessionsDir(storeRoot);
 let failures = 0;
 
 function check(label: string, ok: boolean, detail = ""): void {
@@ -173,7 +175,7 @@ try {
 	await handle.close();
 	await rm(settingsHome, { recursive: true, force: true });
 	await rm(root, { recursive: true, force: true });
-	await rm(sessionDir(root), { recursive: true, force: true }).catch(() => {});
+	await rm(storeRoot, { recursive: true, force: true }).catch(() => {});
 }
 
 process.stdout.write(failures === 0 ? "\napproval endpoint ok\n" : `\n${failures} FAILED\n`);

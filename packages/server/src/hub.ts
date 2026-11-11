@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
@@ -8,7 +7,6 @@ import {
 	createSessionAgent,
 	type ModelConfig,
 	resolvePath,
-	sessionDir,
 	type SessionSnapshot,
 } from "@my-agent/core";
 
@@ -91,14 +89,11 @@ export type SessionObserver = (feeds: SessionFeeds | undefined) => void;
 export class HostedSession {
 	readonly id: string;
 	/**
-	 * Callers currently holding this session open.
+	 * Set while the hub is deciding whether a session nobody holds can be closed.
 	 *
-	 * A request that changes the session or starts a run takes one for its own length and gives it
-	 * back; a subscription takes none. That is the counting rule the whole reap rests on, and nothing
-	 * else may start counting here.
+	 * The hold count itself is the orchestrator's (ADR-0011: the table's residency, not a
+	 * connection's interest) — this object only carries the ids the hub routes feeds for.
 	 */
-	holds = 0;
-	/** Set while the hub is deciding whether a session nobody holds can be closed. */
 	reaping = false;
 
 	constructor(sessionId: string) {
@@ -125,8 +120,9 @@ export type HostListener = (sessionId: string, host: HostedSession | undefined) 
  * to it independently. The file is still the durable copy; this table is who is holding a session open.
  *
  * The loop itself is not per session: one orchestrator serves every id (ADR-0017). What is per
- * session is the hold count — a transport-layer fact about who is using it right now — and the state
- * the orchestrator's table holds the live half in. Everything else here is a singleton.
+ * session is the hold — a transport-layer fact about who is using it right now, counted by the
+ * orchestrator because it is what keeps that session's state in its table — and the state the
+ * orchestrator's table holds the live half in. Everything else here is a singleton.
  */
 export class SessionHub {
 	/**
@@ -261,25 +257,26 @@ export class SessionHub {
 	}
 
 	/**
-	 * The session's current state: the bag this process holds when it holds the session, the log when
-	 * it does not.
+	 * The session's current state, read from its files, plus this hub's one eviction pass.
 	 *
-	 * Reading a transcript is not running a session, and this is where that stops being a slogan: the
-	 * cold path builds the same snapshot an open would have produced, without a host, without a loop,
-	 * and without a hold. It deliberately does not read or write `hosts`, `opening`, or `closing`,
-	 * and never calls `hold`: the whole point is that a read leaves no trace, so opening a session's
-	 * history cannot keep it alive, evict it, or cost what running it costs.
+	 * Reading assembles nothing (ADR-0019): the orchestrator's `snapshotOf` opens a bag, answers from
+	 * it, and drops it, so the table is exactly as it was before the read. What the read is still good
+	 * for is a chance to look at the table: it is one of the moments somebody is paying attention to
+	 * this id, so the eviction ask rides here rather than in the orchestrator — "is anyone reading" is
+	 * this hub's own table (`observers` / `waiting`), and the orchestrator would have to be told about
+	 * subscriptions to answer it. What it does know is whether a run is in flight, an approval is
+	 * parked, or a bag is not on disk yet, and `evict` re-checks those itself.
 	 *
-	 * Anything this process holds answers from the bag, live or not: a hosted session must not be
-	 * read from a file that lags its turn in flight, and one created but not spoken in has no file at
-	 * all — the table is where its transcript lives. Only a session this process does not hold is
-	 * read cold, and the cold road is the facade's: one replay, no registration, the bag dropped there.
+	 * A host standing is a different matter and is left alone: reap is what ends a hosted session,
+	 * and it waits on the run behind it — a read must not be the thing that settles somebody's turn.
 	 */
 	async snapshotOf(id: string): Promise<SessionSnapshot> {
-		// The held and the cold road are one method on the orchestrator now, and the model the read
-		// shows is the settings default the assembly reads fresh — the same one an open would have
-		// used. The read leaves no trace either way: no hold, no hosts, nothing appended.
-		return this.agent.snapshotOf(id);
+		const snapshot = await this.agent.snapshotOf(id);
+		// Not while a host is standing (that is reap's road, and reap waits on the run), and not
+		// while an open is mid-flight: its hold is taken inside `open` a tick before the host lands
+		// in the table, and this pass running in that gap would drop the state out from under it.
+		if (!this.hosts.has(id) && !this.opening.has(id) && !this.closing.has(id)) this.tryEvict(id);
+		return snapshot;
 	}
 
 	/**
@@ -298,25 +295,6 @@ export class SessionHub {
 		const host = this.hosts.get(id);
 		if (host === undefined) throw new Error(`Session is not running: ${id}`);
 		return this.agent.snapshot(host.id);
-	}
-
-	/**
-	 * When the entry behind an id was written, for a transcript that orders by message time.
-	 *
-	 * Also synchronous, and for the same reason as {@link snapshotNow}: the frame that pairs an entry
-	 * with its timestamp is produced from inside an event callback, where there is nothing to await.
-	 *
-	 * `undefined` for an entry that is gone or is not a message — the caller sends the frame without a
-	 * timestamp, which is what the client already handles for an entry that carries no message.
-	 */
-	timestampOf(id: string, entryId: string): number | undefined {
-		const host = this.hosts.get(id);
-		if (host === undefined) return undefined;
-		// The held read only: this runs per frame, and a replay would parse the whole transcript for
-		// one timestamp — besides lagging the turn the file has not caught up with. The rule inside
-		// (message stamp first, entry timestamp as the fallback) is the facade's, so a frame and the
-		// projection's row cannot disagree about where "last active" is.
-		return this.agent.timestampOf(id, entryId);
 	}
 
 	/**
@@ -359,7 +337,9 @@ export class SessionHub {
 		const started = this.open(id);
 		this.opening.set(id, started);
 		try {
-			return this.count(await started);
+			// The opener's hold was taken inside `open`, before the feeds were wired; counting it
+			// here as well would make the first caller two holders.
+			return await started;
 		} finally {
 			this.opening.delete(id);
 		}
@@ -376,8 +356,8 @@ export class SessionHub {
 	 * JSONL file remains, and the next connection to ask for this id gets an equivalent session.
 	 */
 	release(host: HostedSession): void {
-		host.holds -= 1;
-		if (host.holds > 0 || host.reaping) return;
+		this.agent.release(host.id);
+		if (this.agent.holdsOf(host.id) > 0 || host.reaping) return;
 		void this.reap(host);
 	}
 
@@ -388,8 +368,12 @@ export class SessionHub {
 	 * for that id appears, so "look at an idle session, then send it a message" keeps working: the
 	 * moment the message assembles a host, the same observer is attached to it.
 	 *
-	 * Attaching is not holding it open. An observer on an idle session neither keeps it assembled
-	 * nor costs what running it costs — a read leaves no trace, and so does a watch.
+	 * Attaching is not holding it open, and it does not assemble anything either (ADR-0019): the
+	 * baseline a watch is owed is one replay of the files. What the entry still buys is the eviction
+	 * judgment — a state that exists *for some other reason* (a run, a queue, a bag not yet on disk)
+	 * is not torn down while somebody can see it, and this set is the hub's own half of that
+	 * question. It is also what keeps a session with no file yet alive, since there the state is the
+	 * session.
 	 */
 	observe(sessionId: string, observer: SessionObserver): () => void {
 		const watching = this.observers.get(sessionId) ?? new Set<SessionObserver>();
@@ -508,7 +492,7 @@ export class SessionHub {
 	 * tools' default rather than the process's, so no known-directory check belongs here.
 	 */
 	async newSession(workDirAbsPath?: string): Promise<string> {
-		const absRoot = await workDirAbsPathForCreate(workDirAbsPath ?? this.workDirAbsPath);
+		const absRoot = await workDirAbsPathForCreate(this.agent, workDirAbsPath ?? this.workDirAbsPath);
 		const id = await this.agent.create(absRoot);
 		this.current = Promise.resolve(id);
 		this.announceHost(id, undefined);
@@ -584,10 +568,11 @@ export class SessionHub {
 	async remove(sessionId: string): Promise<void> {
 		// The data half is the orchestrator's: whether a file exists, and the state in its table, are
 		// one call (`Agent.remove`) and this method never asks which of the two it is deleting. What
-		// stays here is the hub's own bookkeeping — holds, hosts, observers, and the `closing` slot.
+		// stays here is the hub's own bookkeeping — hosts, observers, and the `closing` slot; the
+		// holds are the orchestrator's, and it is asked whether any are still standing.
 		const hosted = this.hosts.get(sessionId);
 		if (hosted !== undefined) {
-			if (hosted.holds > 0 || this.opening.has(sessionId) || this.agent.isSubmitting(sessionId) || this.agent.hasPendingApprovals(sessionId)) {
+			if (this.agent.holdsOf(sessionId) > 0 || this.opening.has(sessionId) || this.agent.isSubmitting(sessionId) || this.agent.hasPendingApprovals(sessionId)) {
 				throw new Error("这个会话还有运行中的轮次或没答完的审批，等它停下来再删。");
 			}
 			const closing = (async () => {
@@ -646,8 +631,8 @@ export class SessionHub {
 	}
 
 	/** Count one holder in, the way `release` counts it out. */
-	private count(host: HostedSession): HostedSession {
-		host.holds += 1;
+	private async count(host: HostedSession): Promise<HostedSession> {
+		await this.agent.hold(host.id);
 		return host;
 	}
 
@@ -658,15 +643,12 @@ export class SessionHub {
 	 * the sidebar offers every directory on the machine: a session opened from another group must have
 	 * its tools resolve where it was written, and its approvals come from that directory's settings.
 	 *
-	 * The state this assembles is the whole of the per-session setup: the orchestrator is the process's
-	 * own ({@link agent}) and needs nothing told to it, because every call it will serve names the id
-	 * the state is keyed by.
+	 * The hold this takes is the first one: it is what brings the session's state into the
+	 * orchestrator's table, which the feeds below are then wired against. The hub never asks whether
+	 * the state was already there — {@link Agent.hold} answers for both roads (ADR-0011).
 	 */
 	private async open(id: string): Promise<HostedSession> {
-		// The held and the disk road are one call on the orchestrator: a session created a moment ago
-		// has no file to find and one already held must not be re-assembled, and `ensure` branches on
-		// both inside — the hub never asks how the table is organized.
-		await this.agent.ensure(id);
+		await this.agent.hold(id);
 		const host = new HostedSession(id);
 		this.hosts.set(id, host);
 		// Observers first, then the listeners: a subscriber told "a host opened" and reaching for the
@@ -708,7 +690,7 @@ export class SessionHub {
 			// whichever hold reopens the session. No window answers and no process reaps it: the
 			// question hangs until the next run's recovery machine closes it or the process exits.
 			await this.agent.settle(host.id);
-			if (host.holds > 0) return;
+			if (this.agent.holdsOf(host.id) > 0) return;
 
 			if (this.hosts.get(host.id) === host) this.hosts.delete(host.id);
 			// Tell the observers before the listeners: a subscriber dropping its half-finished work needs
@@ -779,12 +761,12 @@ export async function workDirAbsPathOrThrow(workDirInput: string): Promise<strin
  * there. A path this machine has no sessions for still refuses: a typo in the picker must not become
  * a folder nobody asked for.
  */
-export async function workDirAbsPathForCreate(workDirInput: string): Promise<string> {
+export async function workDirAbsPathForCreate(agent: Agent, workDirInput: string): Promise<string> {
 	const absRoot = resolve(workDirInput);
 	try {
 		return await workDirAbsPathOrThrow(absRoot);
 	} catch (error) {
-		if (!existsSync(sessionDir(absRoot))) throw error;
+		if (!agent.hasSessionsFor(absRoot)) throw error;
 		await mkdir(absRoot, { recursive: true });
 		return absRoot;
 	}

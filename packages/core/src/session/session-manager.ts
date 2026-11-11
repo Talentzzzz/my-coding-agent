@@ -9,6 +9,7 @@ import {
 	readdirSync,
 	readFileSync,
 	readSync,
+	rmdirSync,
 	renameSync,
 	rmSync,
 	type Stats,
@@ -16,6 +17,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { readdir, rm, stat } from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
@@ -26,7 +28,7 @@ import { trimToolCallArgs } from "../context/trim-tool-call-args.ts";
 import { clearToolResult } from "../context/clear-tool-results.ts";
 import type { SessionRef, SessionRow } from "../protocol.ts";
 import { COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, compactionSummaryOf } from "./messages.ts";
-import { normalizePath, resolvePath, sessionDir, sessionJsonlPath, sessionMetaPath, sessionPath, sessionsDir } from "./paths.ts";
+import { normalizePath, resolvePath, sessionJsonlPath, sessionMetaPath, sessionPath, sessionsDir } from "./paths.ts";
 import { UnknownSessionError } from "./unknown-session.ts";
 
 /**
@@ -694,26 +696,83 @@ function settleSessionFiles(absDir: string): { absJson: string; absJsonl: string
 	return settled;
 }
 
-/** The newest session in `absDir`, preferring one whose meta names that directory `workDirAbsPath` when it is given. */
-function findMostRecentSession(absDir: string, workDirAbsPath?: string): string | null {
-	const workDirAbsPathResolved = workDirAbsPath ? resolvePath(workDirAbsPath) : undefined;
-	try {
-		const candidates = settleSessionFiles(absDir)
-			.map(({ absJsonl }) => ({ absPath: absJsonl, mtime: statSync(absJsonl).mtimeMs }))
-			.sort((a, b) => b.mtime - a.mtime);
+/**
+ * The legacy layout an older build wrote, still found on machines that ran it:
+ * `<sessionsDir>/--<dashed workDir>--/<ISO stamp>_<id>.jsonl`. The flat store cannot read it — the
+ * id is buried in the file name behind a stamp — so the first touch of the store moves every pair it
+ * names into the flat root and forgets the folders.
+ *
+ * Nothing is deleted: a pair this build cannot read, or whose target id is already taken by a born
+ * session, stays exactly where it is, and a folder goes only when nothing is left in it. The move
+ * happens once per process, lazily, at the first lookup or listing that would otherwise miss the
+ * legacy pairs — and after it, `findSessionFilePathById` is a stat.
+ */
+let storeMigrated = false;
 
-		for (const { absPath } of candidates) {
-			const meta = readMetaForDiscovery(absPath);
-			if (meta === null) continue;
-			if (workDirAbsPathResolved !== undefined && !sessionWorkDirMatches(meta.workDir, workDirAbsPathResolved)) continue;
-			// A session on disk holds a message by construction: both files are born with the first
-			// one (persistEntry), so nothing here can be a creation nobody spoke in.
-			return absPath;
-		}
-		return null;
+function ensureStoreMigrated(): void {
+	if (storeMigrated) return;
+	storeMigrated = true;
+	migrateLegacyStore();
+}
+
+function migrateLegacyStore(): void {
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(sessionsDir(), { withFileTypes: true });
 	} catch {
-		return null;
+		return; // No sessions directory is the normal first run.
 	}
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		const absDir = join(sessionsDir(), entry.name);
+		if (!migrateLegacyDirectory(absDir)) continue;
+		try {
+			rmdirSync(absDir);
+		} catch {
+			// An empty folder that would not go is harmless, and not worth failing the boot over.
+		}
+	}
+}
+
+/** Move every complete pair in `absDir` to the flat store; true when nothing of a pair is left there. */
+function migrateLegacyDirectory(absDir: string): boolean {
+	let names: string[];
+	try {
+		names = readdirSync(absDir);
+	} catch {
+		return false;
+	}
+	let empty = true;
+	for (const name of names) {
+		if (!name.endsWith(".json")) continue; // each pair is found by its snapshot, the identity half
+		const absJson = join(absDir, name);
+		const absJsonl = sessionJsonlPath(absJson);
+		if (!existsSync(absJsonl)) continue;
+		let id: string;
+		try {
+			id = readMetaFile(absJson).id;
+		} catch {
+			empty = false; // unreadable: the store scan prunes it, this move leaves it alone
+			continue;
+		}
+		const target = sessionPath(id);
+		if (existsSync(sessionMetaPath(target))) {
+			empty = false; // a born session already owns this id: the old pair stays where it is
+			continue;
+		}
+		try {
+			// Stream first, snapshot last: between the two renames the target holds an unpaired
+			// stream, which every reader reads as "no such session" — never as a half-born session.
+			// A stream stranded there by an interrupted earlier pass is this same id's own log, so
+			// clearing it before the rename cannot cost another session anything.
+			rmSync(target, { force: true });
+			renameSync(absJsonl, target);
+			renameSync(absJson, sessionMetaPath(target));
+		} catch {
+			empty = false;
+		}
+	}
+	return empty;
 }
 
 function isMessageWithContent(message: Message): boolean {
@@ -1033,11 +1092,14 @@ export interface SessionSetting {
  */
 export interface Session {
 	sessionId: string;
-	/** The ISO stamp the session was created at; the file name leads with the same moment. */
+	/** The ISO stamp the session was created at; the snapshot carries it, the file name does not. */
 	timestamp: string;
 	/** The `.jsonl` entry stream's path, absolute; the `.json` snapshot lives at the same stem. */
 	sessionFileAbsPath?: string;
-	/** The session directory, absolute; null for a session that is never written. */
+	/**
+	 * The store this session writes into, absolute — the directory `<id>.jsonl` and `<id>.json` live
+	 * in. Null for a session that is never written.
+	 */
 	sessionDirAbsPath: string | null;
 	persist: boolean;
 	/**
@@ -1120,26 +1182,25 @@ function metaOf(s: Session): SessionMeta {
 }
 
 /**
- * A state for a new session under `sessionDirInput` (default: the directory's own store), ready
- * for the first append.
+ * A state for a new session, ready for the first append.
  *
- * The session *directory* may be created here, but no file is: the files appear with the first entry
+ * The store directory may be created here, but no file is: the files appear with the first entry
  * worth keeping — the gate in {@link persistEntry} (`hasConversation`) — so a session nobody has
  * spoken in leaves no transcript on disk and no row in the sidebar. That is the whole point of
  * building the state rather than writing a snapshot: the store is a record of conversations, and a
  * conversation with no message in it is not one yet.
  *
- * The cost is the id's addressability until that first message: {@link findSessionFilePathById} scans
- * the stores, so an id with no file cannot be found there. A caller that hands the id out and has
- * to answer for it later therefore holds the state (or the `SessionManager` shell around it) for the
- * length of that window — `SessionHub` holds it for the length of that window.
+ * The cost is the id's addressability until that first message: {@link findSessionFilePathById} asks
+ * the store for a pair, and an id with no pair yet cannot be found there. A caller that hands the id
+ * out and has to answer for it later therefore holds the state (or the `SessionManager` shell around
+ * it) for the length of that window — `SessionHub` holds it for the length of that window.
  */
 export function createSession(
 	workDirInput: string,
-	sessionDirInput?: string,
+	storeDirInput?: string,
 	parentSessionFileInput?: string,
 ): Session {
-	const absDir = sessionDirInput ? normalizePath(sessionDirInput) : sessionDir(workDirInput);
+	const absDir = storeDirInput ? normalizePath(storeDirInput) : sessionsDir();
 	if (!existsSync(absDir)) mkdirSync(absDir, { recursive: true });
 	const s: Session = {
 		sessionId: "",
@@ -1248,7 +1309,7 @@ export function newSession(s: Session, parentSessionFile?: string): string | und
 	s.fileCreated = false;
 
 	const dir = s.sessionDirAbsPath;
-	if (s.persist && dir !== null) s.sessionFileAbsPath = sessionPath(dir, s.sessionId, s.timestamp);
+	if (s.persist && dir !== null) s.sessionFileAbsPath = sessionPath(s.sessionId, dir);
 	return s.sessionFileAbsPath;
 }
 
@@ -1997,7 +2058,7 @@ export class SessionManager {
 	forkFrom(
 		sourcePathInput: string,
 		entryId: string | null,
-		sessionDirInput?: string,
+		storeDirInput?: string,
 	): { sessionId: string; sessionFileAbsPath: string } {
 		const absSourcePath = resolvePath(sourcePathInput);
 		const absSourceJsonl = absSourcePath.endsWith(".json") ? sessionJsonlPath(absSourcePath) : absSourcePath;
@@ -2015,12 +2076,14 @@ export class SessionManager {
 		// The header is the workDir's one authority: it named the source's tools' frame, and the fork
 		// lives in the same conversation, so it keeps the same frame.
 		const absTargetWorkDir = resolvePath(sourceMeta.workDir);
-		const absDir = sessionDirInput ? normalizePath(sessionDirInput) : sessionDir(absTargetWorkDir);
+		// The store is flat, so the fork lands beside every other session; which project it belongs to
+		// travels in the snapshot it copies, not in the directory it sits in.
+		const absDir = storeDirInput ? normalizePath(storeDirInput) : sessionsDir();
 		if (!existsSync(absDir)) mkdirSync(absDir, { recursive: true });
 
 		const newSessionId = createSessionId();
 		const timestamp = new Date().toISOString();
-		const absNewSessionFile = sessionPath(absDir, newSessionId, timestamp);
+		const absNewSessionFile = sessionPath(newSessionId, absDir);
 		const meta: SessionMeta = {
 			version: CURRENT_SESSION_VERSION,
 			id: newSessionId,
@@ -2039,13 +2102,19 @@ export class SessionManager {
 		return { sessionId: newSessionId, sessionFileAbsPath: absNewSessionFile };
 	}
 
-	/** Every session stored for `workDir`, newest activity first. */
-	static async list(workDirInput: string, sessionDirInput?: string, signal?: AbortSignal): Promise<SessionInfo[]> {
-		const absDir = sessionDirInput ? normalizePath(sessionDirInput) : sessionDir(workDirInput);
-		const filterWorkDir = sessionDirInput !== undefined && absDir !== sessionDir(workDirInput);
+	/**
+	 * Every session stored for `workDir`, newest activity first.
+	 *
+	 * The store holds every project's sessions, so the directory is a filter rather than a location:
+	 * each candidate's own snapshot says which directory it belongs to, and that is the value
+	 * compared — not the folder it happens to sit in, which no longer names a project.
+	 */
+	static async list(workDirInput: string, storeDirInput?: string, signal?: AbortSignal): Promise<SessionInfo[]> {
+		ensureStoreMigrated();
+		const absDir = storeDirInput ? normalizePath(storeDirInput) : sessionsDir();
 		const workDirAbsPath = resolvePath(workDirInput);
-		const sessions = (await listSessionsFromDir(absDir, signal)).filter(
-			(session) => !filterWorkDir || sessionWorkDirMatches(session.workDirAbsPath, workDirAbsPath),
+		const sessions = (await listSessionsFromDir(absDir, signal)).filter((session) =>
+			sessionWorkDirMatches(session.workDirAbsPath, workDirAbsPath),
 		);
 		return sortSessionInfos(sessions);
 	}
@@ -2053,39 +2122,53 @@ export class SessionManager {
 	/**
 	 * Every directory this machine has stored sessions for, each with its own list.
 	 *
-	 * The sidebar groups by directory, and one process is only ever started in one of them, so the
-	 * grouping has to come from the store rather than from the server's own root. The workDir is read from
-	 * a session header instead of being decoded back out of the directory name: the name dashes the
-	 * separators out of a path, which is readable but not reversible.
+	 * The sidebar groups by directory, and the store no longer lays that grouping out — one flat
+	 * directory holds every project's sessions — so the grouping is derived here, from each session's
+	 * own snapshot: the `workDir` a session was started in is what its group is keyed by, and two
+	 * sessions of one project need never sit beside each other to land in one group.
 	 *
-	 * Directories come back most recently active first, and the empty ones — a store left behind by
-	 * a session whose file was deleted — are dropped rather than shown as headless groups.
+	 * Groups come back most recently active first, and a session whose header names no directory is
+	 * dropped rather than shown as a headless group.
 	 */
 	static async listDirectories(signal?: AbortSignal): Promise<DirectorySessions[]> {
-		let absDirs: string[];
-		try {
-			absDirs = readdirSync(sessionsDir(), { withFileTypes: true })
-				.filter((entry) => entry.isDirectory())
-				.map((entry) => join(sessionsDir(), entry.name));
-		} catch {
-			// No sessions directory is the normal first run.
-			return [];
+		ensureStoreMigrated();
+		const sessions = (await listSessionsFromDir(sessionsDir(), signal)).filter(
+			(session) => session.workDirAbsPath !== "",
+		);
+
+		const byWorkDir = new Map<string, SessionInfo[]>();
+		for (const session of sessions) {
+			const workDirAbsPath = resolvePath(session.workDirAbsPath);
+			const group = byWorkDir.get(workDirAbsPath) ?? [];
+			group.push(session);
+			byWorkDir.set(workDirAbsPath, group);
 		}
 
 		const groups: DirectorySessions[] = [];
-		for (const absDir of absDirs) {
-			const absNewest = findMostRecentSession(absDir);
-			if (absNewest === null) continue;
-			const meta = readMetaForDiscovery(absNewest);
-			const workDirAbsPath = meta?.workDir;
-			if (workDirAbsPath === undefined || workDirAbsPath === "") continue;
-
-			const sessions = (await SessionManager.list(workDirAbsPath, absDir, signal)).map(toSessionRow);
-			if (sessions.length === 0) continue;
-			groups.push({ workDirAbsPath, sessions });
+		for (const [workDirAbsPath, group] of byWorkDir) {
+			const rows = sortSessionInfos(group).map(toSessionRow);
+			if (rows.length === 0) continue;
+			groups.push({ workDirAbsPath, sessions: rows });
 		}
 
 		return groups.sort((a, b) => newestAt(b) - newestAt(a));
+	}
+
+	/**
+	 * Whether any stored session names `workDirAbsPath` as its own — "this project has sessions".
+	 *
+	 * The create path asks before it resurrects a working directory the filesystem has lost: a
+	 * project the store knows is put back empty, a typo is refused. One scan, and it answers from
+	 * the snapshots rather than from any folder name, because the store no longer keeps one.
+	 */
+	static hasSessionsFor(workDirAbsPath: string): boolean {
+		ensureStoreMigrated();
+		const absWorkDir = resolvePath(workDirAbsPath);
+		try {
+			return settleSessionFiles(sessionsDir()).some((pair) => sessionWorkDirMatches(pair.meta.workDir, absWorkDir));
+		} catch {
+			return false;
+		}
 	}
 
 	/**
@@ -2117,40 +2200,18 @@ export class SessionManager {
 	}
 
 	/**
-	 * The path of the entry stream a session id names, searching every directory store on this
-	 * machine.
+	 * The path of the entry stream a session id names — a stat, not a search.
 	 *
-	 * A session opened from the sidebar may live in a directory this process was not started in, and
-	 * its snapshot — not the server's root — is what says which directory its tools resolve inside.
-	 * The search is snapshot reads only: every candidate `.json` is opened and closed whole, so a
-	 * miss costs one cheap read per session rather than one transcript parse per session.
+	 * The store is flat and the id is the address (`<id>.jsonl`), so this is one existence check: the
+	 * `.json` snapshot beside the stream is the birth's commit marker, and it is the half whose
+	 * presence says a pair exists at all. A name whose snapshot is gone answers `undefined`, which
+	 * every caller reads as "no such session"; a snapshot whose stream is gone is a birth that died
+	 * partway, and {@link fillSession} prunes it when it is asked to open the pair.
 	 */
 	static findSessionFilePathById(id: string): string | undefined {
-		let entries: string[];
-		try {
-			entries = readdirSync(sessionsDir(), { withFileTypes: true })
-				.filter((entry) => entry.isDirectory())
-				.map((entry) => join(sessionsDir(), entry.name));
-		} catch {
-			return undefined;
-		}
-
-		for (const absDir of entries) {
-			try {
-				for (const file of readdirSync(absDir)) {
-					if (!file.endsWith(".json")) continue;
-					const absJson = join(absDir, file);
-					const meta = readMetaForDiscovery(absJson);
-					// A `.json` is only ever written beside its `.jsonl` — the snapshot is the birth's
-					// commit marker — so an id match here can answer with the stream path directly.
-					if (meta?.id === id) return sessionJsonlPath(absJson);
-				}
-			} catch {
-				// One unreadable directory must not hide a session stored in another.
-				continue;
-			}
-		}
-		return undefined;
+		ensureStoreMigrated();
+		const absJsonl = sessionPath(id);
+		return existsSync(sessionMetaPath(absJsonl)) ? absJsonl : undefined;
 	}
 
 	/**

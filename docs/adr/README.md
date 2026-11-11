@@ -30,6 +30,9 @@
 | [0016](0016-tool-manager-instance-table.md) | 工具回到一张常驻实例表——`ToolManager` 持有全部 `Tool`，引擎经它执行 | 已接受，已落地（2026-11-06，07–09 号票；2026-11-07 由 11 号票全量验收：`check` 与 `build:web` 绿、smoke 与改动前逐条同色零新红），部分取代 0006 / 0007 / 0011 / 0015 |
 | [0017](0017-agent-facade.md) | server 只认 `Agent` 公开面——Manager 的消费者收进 core，构造由 `createSessionAgent()` 吸收 | 已接受，已落地（2026-11-07，hub-agent-facade 01–07 号票，`check` 含新守卫 `check-server-facade` 与 `build:web` 绿、smoke 与基线逐条同色零新红），部分取代 0007 / 0016 |
 | [0018](0018-claim-renamed-to-hold.md) | `claim` 改名为 `hold`——同一个引用计数，一个说得准的名字 | 已接受，已落地（2026-11-10，全仓机械改名，`check` 绿、相关 smoke 全 PASS，零行为变化），部分取代 0001 的「不要重命名 `claim`」 |
+| [0019](0019-table-holds-live-half-only.md) | 表只装 live 半——transcript 每次操作现读，`AgentState` 不再有 `session` | 已接受，已落地（2026-11-10，`check` 绿、smoke 与改动前逐条同色），整体取代 0011 |
+| [0020](0020-flat-session-store.md) | store 改平——`sessions/<id>.{json,jsonl}`，id 就是地址；旧布局惰性迁移，`Agent` 不再记路径 | 已接受，已落地（2026-11-10，`check` 绿；smoke 做了机械改写、未全量执行，见 ADR 文末），部分取代 0009 的「每工作目录一个 store 目录」 |
+| [0020](0020-flat-session-store.md) | store 改平——`sessions/<id>.{json,jsonl}`，id 就是地址；旧布局惰性迁移，`Agent.paths` 删除 | 已接受，已落地（2026-11-10，`tsc` 绿、smoke 机械改写未跑），取代 0009 的「每工作目录一个 store 目录」布局条款 |
 
 ## 门槛
 

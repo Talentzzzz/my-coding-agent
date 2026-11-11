@@ -175,9 +175,10 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 			void refresh(sessionId).finally(() => probing.delete(sessionId));
 			return;
 		}
-		// Both narrow reads below are the orchestrator's facade over the bag this session writes
-		// through — this session is followed, so the table holds it, and a replay here would parse
-		// the whole transcript per token and lag the turn.
+		// Both facts below ride the event rather than being read back: this runs once per appended
+		// message, and a transcript read here would parse the whole log to learn one stamp (ADR-0019).
+		// A branch move is the one case that still asks — it is a gesture, not a frame, and it can
+		// change which message the derived title reads from.
 
 		if (event.type === "branch_changed") {
 			publish({ ...current, title: hub.agent.titleOf(sessionId) });
@@ -185,12 +186,11 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 		}
 		if (event.type !== "entry_appended" || event.kind !== "message") return;
 
-		const at = hub.agent.timestampOf(sessionId, event.entryId);
+		const at = event.at;
 		if (at === undefined || at <= current.modified) return;
 		// The title only moves when a *user* message lands on the branch, since that is the only
 		// message a title is read from — an assistant reply cannot rename the conversation.
-		const titled =
-			hub.agent.messageRoleOf(sessionId, event.entryId) === "user" ? hub.agent.titleOf(sessionId) : current.title;
+		const titled = event.role === "user" ? (event.title ?? current.title) : current.title;
 		publish({ ...current, modified: at, title: titled });
 	};
 
@@ -245,23 +245,35 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	 * already exists. A host and a row is the ordinary case: follow it, nothing to build. A host and no
 	 * row is a session no scan has accounted for, so read its file and lay the live values over it. No
 	 * host and no row is a session that was created or forked and is not running — exactly the session
-	 * nobody is watching, and the one this store exists for. No host and a row is one that stopped
-	 * running: unbind, and leave the row as it stands, because it already says `running: false` — that
-	 * snapshot was published before the last hold was let go.
+	 * nobody is watching, and the one this store exists for. No host and a row is one whose host went
+	 * away: unbind, and settle the row's live fields from a cold read — the ledger, not the departed
+	 * host, has the last word on whether a question still stands.
 	 */
 	const onHost = (sessionId: string, host: HostedSession | undefined): void => {
 		if (host === undefined) {
-			// The row's live fields came from the host that just went away, so they go with it: a session
-			// whose host closed is not running and has nothing pending, whatever its last in-flight
-			// publish said. Settling the row here is what keeps a finished unwatched run from leaving a
-			// sidebar row stuck on `running: true` — the run's own final publish races the reap that
-			// closes this host, and losing that race used to be losing the row's way back to false.
+			// The host's death takes `running` with it, but not the question it was showing: under
+			// end-restart (ADR-0006 §5) a parked approval is the ledger's and outlives the host, so the
+			// row settles from a cold read rather than a hard zero — a zero here is the sidebar dot
+			// going out while the question stands. The read also keeps a finished unwatched run from
+			// leaving the row stuck on `running: true`: reap settles the run before it announces, so
+			// the read lands after the final publish it used to race.
 			const entry = following.get(sessionId);
 			const stored = rows.get(sessionId);
 			entry?.off();
 			following.delete(sessionId);
 			if (stored !== undefined && (stored.running || stored.pending !== 0)) {
-				publish({ ...stored, running: false, pending: 0 });
+				void hub.agent.snapshotOf(sessionId).then(
+					(snapshot) => {
+						// A host that came back mid-read owns the row through its feeds; a session
+						// deleted mid-read has no row left to settle — forget already took it.
+						const current = rows.get(sessionId);
+						if (current === undefined || following.has(sessionId)) return;
+						publish({ ...current, running: snapshot.submitting, pending: snapshot.pendingApprovals.length });
+					},
+					() => {
+						// The session was deleted mid-read; the row is already gone with it.
+					},
+				);
 			}
 			if (!rows.has(sessionId)) {
 				void probe(sessionId).then((scanned) => {

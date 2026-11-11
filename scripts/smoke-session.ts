@@ -27,7 +27,7 @@ import {
 	type SettingManager,
 	type ToolManager,
 	type ModelConfig,
-	sessionDir,
+	setSessionsDir,
 	type AssistantMessage,
 	type ChatTransport,
 	type Context,
@@ -41,6 +41,8 @@ const store = new SessionManager();
 // node_modules so scripts resolve it the same way `packages/core` does.
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-session-"));
+const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-session--store-"));
+setSessionsDir(storeRoot);
 let failures = 0;
 
 // A hung step must fail loudly rather than leave the script running: every exercise prints a heading,
@@ -228,7 +230,11 @@ function sidOf(session: Agent): string {
 }
 
 function bagOf(session: Agent): Session {
-	return opened.get(session)!.state;
+	const state = opened.get(session)!.state;
+	// A session that has spoken is a file, not this object (ADR-0019): the orchestrator replays it per
+	// operation, so a test that wants to look at what it wrote has to replay too. Before the birth the
+	// bag below *is* the session — there is nothing on disk to reopen.
+	return state.fileCreated ? session.sessionManager.open(state.sessionId) : state;
 }
 
 function settingsOf(session: Agent): SettingManager {
@@ -2423,7 +2429,7 @@ async function exerciseLeafDurability(): Promise<void> {
 	clearTimeout(watchdog);
 	// Both the working directory and the agent home's directory for it, or every run leaves one behind.
 	await rm(root, { recursive: true, force: true });
-	await rm(sessionDir(root), { recursive: true, force: true });
+	await rm(storeRoot, { recursive: true, force: true });
 }
 
 process.stdout.write(failures === 0 ? "\nsession ok\n" : `\n${failures} session checks failed\n`);

@@ -36,10 +36,12 @@ import {
 	type Session,
 	type ModelConfig,
 	type ModelSelection,
-	sessionDir,
+	setSessionsDir,
 } from "@my-agent/core";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-recovery-"));
+const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-approval-recovery--store-"));
+setSessionsDir(storeRoot);
 let failures = 0;
 
 function check(label: string, ok: boolean, detail = ""): void {
@@ -456,4 +458,4 @@ process.exitCode = failures === 0 ? 0 : 1;
 
 clearTimeout(watchdog);
 await rm(root, { recursive: true, force: true });
-await rm(sessionDir(root), { recursive: true, force: true }).catch(() => {});
+await rm(storeRoot, { recursive: true, force: true }).catch(() => {});

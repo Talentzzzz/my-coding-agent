@@ -22,7 +22,7 @@ import {
 	SessionManager,
 	inMemorySettingManager,
 	SettingManager,
-	sessionDir,
+	setSessionsDir,
 	type SessionSnapshot,
 	type Session,
 } from "@my-agent/core";
@@ -31,6 +31,8 @@ import {
 const store = new SessionManager();
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-sessions-"));
+const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-sessions-store-"));
+setSessionsDir(storeRoot);
 let failures = 0;
 
 function check(label: string, condition: boolean, detail = ""): void {
@@ -142,15 +144,19 @@ function entryOf(agent: Agent, id: string): AgentState | undefined {
 }
 
 /**
- * The bag behind a hosted session: the one the orchestrator's table holds and its turns write
- * through. The facade answers in pure data by id, so the seeding appends below — the one test-only
- * write that still needs the bag itself — reach it through the same private-table probe as the
- * identity assertions.
+ * The bag behind a session, for the seeding appends below — the one test-only write that still needs
+ * the bag itself.
+ *
+ * There is no held bag to borrow any more (ADR-0019): every operation replays the file, so a test
+ * that wants to write one has to open its own, and the write it makes is a write to the file like any
+ * other. `unwritten` is checked first for the same reason the orchestrator checks it: a session that
+ * has not spoken yet has no file to reopen.
  */
 function bagOf(hub: SessionHub, id: string): Session {
-	const bag = entryOf(hub.agent, id)?.session;
-	if (bag === undefined) throw new Error(`no held state for ${id}`);
-	return bag;
+	const state = entryOf(hub.agent, id);
+	const unwritten = state?.live.unwritten;
+	if (unwritten !== undefined && !unwritten.fileCreated) return unwritten;
+	return hubSessions(hub).open(id);
 }
 
 /** Poll until `ready` holds, and report whether it did, so no test guesses at a reap's timing. */
@@ -176,7 +182,7 @@ try {
 	const first = await hub.hold(landing);
 	const second = await hub.hold(landing);
 	check("two connections with no id share one entry", entryOf(hub.agent, first.id) === entryOf(hub.agent, second.id));
-	check("both holds are counted", first.holds === 2, `holds=${first.holds}`);
+	check("both holds are counted", hub.agent.holdsOf(first.id) === 2, `holds=${hub.agent.holdsOf(first.id)}`);
 	check("the hub runs it once", hub.live.length === 1, hub.live.join(","));
 
 	process.stdout.write("holding by id\n");
@@ -184,12 +190,12 @@ try {
 	const runningEntry = entryOf(hub.agent, first.id);
 	const again = await hub.hold(first.id);
 	check("returns the entry already running", entryOf(hub.agent, again.id) === runningEntry);
-	check("holds add up", first.holds === 3, `holds=${first.holds}`);
+	check("holds add up", hub.agent.holdsOf(first.id) === 3, `holds=${hub.agent.holdsOf(first.id)}`);
 
 	process.stdout.write("a hold outlives the connections that dropped it\n");
 	hub.release(again);
 	hub.release(second);
-	check("still running with one hold left", first.holds === 1 && hub.live.includes(first.id));
+	check("still running with one hold left", hub.agent.holdsOf(first.id) === 1 && hub.live.includes(first.id));
 	await new Promise((resolve) => setTimeout(resolve, 50));
 	check("a held session is never forgotten", hub.live.includes(first.id));
 
@@ -253,7 +259,7 @@ try {
 	check("and it reports the file it came from", hubSessions(hub).getMeta(bagOf(hub, forkedId))?.parentSession === parentFile);
 
 	process.stdout.write("forking without an entry copies the whole log\n");
-	const whole = fillSession(new SessionManager().forkFrom(parentFile, null, sessionDir(root)).sessionFileAbsPath);
+	const whole = fillSession(new SessionManager().forkFrom(parentFile, null).sessionFileAbsPath);
 	check("every entry came with it", ids(store.getEntries(whole)) === ids(hubSessions(hub).getEntries(bagOf(hub, parentId))));
 	check("and the transcript matches", messagesOf(whole).length === messagesOf(bagOf(hub, parentId)).length);
 	check("its leaf is the source's leaf", whole.leafId === bagOf(hub, parentId).leafId);
@@ -265,7 +271,7 @@ try {
 	const secondFork = openFile(await hub.fork(parentId, entryOne));
 	check("the source keeps its own leaf", bagOf(hub, parentId).leafId === leafBefore);
 	check("its file is byte-identical afterwards", (await readFile(parentFile, "utf8")) === before);
-	check("the hold on it survived", parent.holds === 1 && hub.live.includes(parentId), `holds=${parent.holds}`);
+	check("the hold on it survived", hub.agent.holdsOf(parentId) === 1 && hub.live.includes(parentId), `holds=${hub.agent.holdsOf(parentId)}`);
 
 	process.stdout.write("a fork and its parent run side by side\n");
 	check("both are live", hub.live.includes(parentId) && hub.live.includes(forkedId));
@@ -403,8 +409,8 @@ try {
 		);
 		check(
 			"no temp file survived the rewrite",
-			readdirSync(sessionDir(root)).every((name) => !name.endsWith(".tmp")),
-			JSON.stringify(readdirSync(sessionDir(root))),
+			readdirSync(storeRoot).every((name) => !name.endsWith(".tmp")),
+			JSON.stringify(readdirSync(storeRoot)),
 		);
 
 		// A choice is a *change*: recording what the snapshot already says must not rewrite it, or
@@ -504,7 +510,9 @@ try {
 			check("a branch move leaves the recorded set in force", live.snapshot(sessionId).activeTools.join(",") === "bash,read", live.snapshot(sessionId).activeTools.join(","));
 
 			live.setActiveTools(sessionId, ["grep"]);
-			const recold = await readSessionSnapshot(options);
+			// The cold read takes a bag, and the one the assembly handed over stopped being current
+			// the moment the session was born: a cold read of a spoken session is a replay (ADR-0019).
+			const recold = await readSessionSnapshot({ ...options, session: fillSession(state.sessionFileAbsPath ?? "") });
 			check(
 				"the cold read answers the judgement exactly as the live snapshot does",
 				recold.toolsFollowGlobal === live.snapshot(sessionId).toolsFollowGlobal &&
@@ -515,7 +523,6 @@ try {
 			await live.close(sessionId);
 		}
 	} finally {
-		await rm(sessionDir(settingsRoot), { recursive: true, force: true });
 		await rm(settingsRoot, { recursive: true, force: true });
 	}
 
@@ -659,7 +666,6 @@ try {
 			const bodylessRead = await get(`${http.url}/api/sessions/${String(bodyless.payload.sessionId ?? "")}`);
 			check("and it runs where the server does", resolve(bodylessRead.session?.workDirAbsPath ?? "") === resolve(root), bodylessRead.session?.workDirAbsPath);
 		} finally {
-			await rm(sessionDir(elsewhere), { recursive: true, force: true });
 			await rm(elsewhere, { recursive: true, force: true });
 		}
 
@@ -775,7 +781,6 @@ try {
 				check("and the folder exists again", existsSync(before));
 				void elsewhere;
 			} finally {
-				for (const dir of [before, other]) await rm(sessionDir(dir), { recursive: true, force: true });
 				for (const dir of [before, other]) await rm(dir, { recursive: true, force: true });
 				await rm(host, { recursive: true, force: true });
 				await http.close();
@@ -879,7 +884,6 @@ try {
 			}
 			check("open refuses an id with no file behind it", refused);
 		} finally {
-			await rm(sessionDir(statelessRoot), { recursive: true, force: true });
 			await rm(statelessRoot, { recursive: true, force: true });
 		}
 	}
@@ -894,10 +898,10 @@ try {
 	{
 		const agent = createSessionAgent({ settings: new SettingManager({ models: [] }) });
 		const session = createSession(tmpdir());
-		// The door is class-private (`ensure` / `create` are the open-shaped verbs a caller spells);
+		// The door is class-private (`hold` / `create` are the verbs a caller spells);
 		// this block exercises the table itself — unborn bag, first-come-wins, membership — so it
 		// reaches in the same way `entryOf` does, the cast the one road across.
-		const door = agent as unknown as { assembleAgentStateBySession(options: { session: Session }): Promise<AgentState>; has(id: string): boolean };
+		const door = agent as unknown as { assembleAgentStateBySession(options: { session: Session }): Promise<AgentState> };
 		const state = await door.assembleAgentStateBySession({ session });
 		check("open is the one way in, and the id answers it", entryOf(agent, session.sessionId) === state);
 		check("re-opening an id keeps the state already there", (await door.assembleAgentStateBySession({ session })) === state);
@@ -905,7 +909,7 @@ try {
 		// No file behind it, so forgetting the state is the whole removal — and only that half, which
 		// is why the second attempt refuses as an id nothing names.
 		await agent.remove(session.sessionId);
-		check("an id no longer in the table answers nothing", !door.has(session.sessionId));
+		check("an id no longer in the table answers nothing", entryOf(agent, session.sessionId) === undefined);
 		check("removing it again refuses", (await agent.remove(session.sessionId).then(() => "removed", () => "refused")) === "refused");
 	}
 
@@ -917,8 +921,7 @@ try {
 	{
 		const legacyRoot = await mkdtemp(join(tmpdir(), "my-agent-legacy-"));
 		try {
-			const dir = sessionDir(legacyRoot);
-			await mkdir(dir, { recursive: true });
+			const dir = storeRoot;
 			const stamp = new Date().toISOString();
 			const entries = [
 				JSON.stringify({ type: "message", id: "lg-u1", parentId: null, timestamp: stamp, message: { role: "user", content: [{ type: "text", text: "a v4 conversation" }] } }),
@@ -957,7 +960,6 @@ try {
 			check("opening an unpaired stream throws", refused);
 			check("and the open deleted it", !existsSync(`${aloneStem}.jsonl`));
 		} finally {
-			await rm(sessionDir(legacyRoot), { recursive: true, force: true });
 			await rm(legacyRoot, { recursive: true, force: true });
 		}
 	}
@@ -966,9 +968,9 @@ try {
 	await hub.close();
 	check("nothing is left running", hub.live.length === 0);
 } finally {
-	// Sessions live under the agent home, keyed by the working directory path, so removing the temporary
-	// directory is not enough: without this every run leaves an orphan directory behind.
-	await rm(sessionDir(root), { recursive: true, force: true });
+	// The store was pointed at a scratch directory, so removing it takes every session this run
+	// wrote with it.
+	await rm(storeRoot, { recursive: true, force: true });
 	await rm(root, { recursive: true, force: true });
 }
 

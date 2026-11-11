@@ -42,7 +42,7 @@
 
 如果你需要的概念还不在术语表里，那是一个信号：要么你在发明项目不使用的语言（重新考虑），要么这是一个真实的空缺（记下来交给 `/domain-modeling`）。
 
-本仓库当前的术语索引是 `AGENTS.md` 的 `## 术语` 章节——**service**、**engine**、**tool**、**session**、**settings**、**model**、**thinking level**、**model selection**、**transport**、**claim**、**approval**、**tool set**、**mode**、**fork**、**branch**、**compaction**、**hook**、**retry**、**queue**、**assembly**、**AgentState**、**workDirAbsPath**、**directory**、**event**——每个词在那一节有一句话，定义与理由在 `docs/architecture.md` 和 `README.md` 里。在 `CONTEXT.md` 取代它们之前，把那些当作术语表。
+本仓库当前的术语索引是 `AGENTS.md` 的 `## 术语` 章节——**service**、**engine**、**tool**、**session**、**settings**、**model**、**thinking level**、**model selection**、**transport**、**hold**、**approval**、**tool set**、**mode**、**fork**、**branch**、**compaction**、**hook**、**retry**、**queue**、**assembly**、**AgentState**、**workDirAbsPath**、**directory**、**event**——每个词在那一节有一句话，定义与理由在 `docs/architecture.md` 和 `README.md` 里。在 `CONTEXT.md` 取代它们之前，把那些当作术语表。
 
 ## 标出 ADR 冲突
 
