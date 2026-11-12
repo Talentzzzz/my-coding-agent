@@ -31,8 +31,8 @@ export interface CompactionEntry extends SessionEntryBase {
 /**
  * 本构建从视图中清出的 tool result 的记录。
  *
- * result 留在文件里——这个格式从不重写一行——所以记录只指名它们，由 {@link buildContextEntries}
- * 应用。形状与压缩相同：一条改变更早条目含义而不改变其本身的条目，这让文件保持完整记录、transcript
+ * result 留在文件里——这个格式从不重写一行——所以记录只指名它们，由 `buildContextEntries`
+ * （session-manager.ts）应用。形状与压缩相同：一条改变更早条目含义而不改变其本身的条目，这让文件保持完整记录、transcript
  * 保持它的一个视图。
  */
 export interface ClearToolResultEntry extends SessionEntryBase {
@@ -47,7 +47,7 @@ export interface ClearToolResultEntry extends SessionEntryBase {
  * 本构建在视图中截短 tool call 参数的记录。
  *
  * 与 clear 相同的决策形状：参数在文件里保持完整——这个格式从不重写一行——记录指名其记录参数被
- * 截短的消息条目，由 {@link buildContextEntries} 应用。`write` 或 `edit` 携带的重正文活在它们改的
+ * 截短的消息条目，由 `buildContextEntries`（session-manager.ts）应用。`write` 或 `edit` 携带的重正文活在它们改的
  * 文件里；视图只保留足以说明写了什么、写到哪的部分。
  */
 export interface TrimToolCallArgEntry extends SessionEntryBase {
@@ -59,7 +59,8 @@ export interface TrimToolCallArgEntry extends SessionEntryBase {
 }
 
 /**
- * 对话移动位置的记录：{@link SessionManager.branch} 或 {@link SessionManager.resetLeaf} 把叶子留在
+ * 对话移动位置的记录：`SessionManager.branch` 或 `SessionManager.resetLeaf`（都在 session-manager.ts）
+ * 把叶子留在
  * 哪里，位置真的移动时才写入。
  *
  * 追加本身就推进叶子、不需要记录——文件最后一条就是位置——所以这个条目是唯一的例外，它让一次
@@ -108,7 +109,7 @@ export type SessionEntry =
 /**
  * 一份 transcript 的全部条目，按各自的 id 建键。
  *
- * 条目只带 `parentId`，所以沿树的每次上溯——{@link buildSessionPath}、分支预览、调用方指名的
+ * 条目只带 `parentId`，所以沿树的每次上溯——`buildSessionPath`（session-manager.ts）、分支预览、调用方指名的
  * id——都是按 id 查找。这个 map 就是那次查找，也是 `generateId` 无冲突的原因。迭代顺序即文件
  * 顺序：按序重放 JSONL 填充，再按同样顺序追加，所以「最后一行胜出」不需要排序。
  */
@@ -117,7 +118,7 @@ export type SessionEntryMapById = Map<string, SessionEntry>;
 /**
  * 一个 session 自己的选择，从盘上快照的扁平字段重新组合。
  *
- * 这只是内存中的组合——盘上的 `.json` 保持扁平形状（{@link SessionMeta}），fill 路径和 {@link metaOf}
+ * 这只是内存中的组合——盘上的 `.json` 保持扁平形状（`SessionMeta`，session-manager.ts），fill 路径和 `metaOf`
  * 是两者之间仅有的两个翻译点。thinking level 住在 `model` 里面而不是旁边：session 的 level 和它的行
  * 是输入框一起发送的一个选择，所以内存把它们作为一个对象持有。每个选择字段在选定之前缺席，与盘上
  * 字段一致；`suspended` 是唯一的例外——是推导出的事实而不是选择，始终存在。
@@ -162,13 +163,13 @@ export interface SessionSetting {
  *
  * 这些字段是两个文件重放进去的内容。身份是袋自己的——id、创建时间戳、两个文件路径——
  * {@link SessionSetting} 持有 `.json` 快照的当前选择，在内存里重新组合：盘上文件保持扁平，fill 路径
- * 和 {@link metaOf} 是仅有的翻译点。`jsonlEntries` 是 `.jsonl` 条目流：每条条目带自己的 id 和
+ * 和 `metaOf`（session-manager.ts）是仅有的翻译点。`jsonlEntries` 是 `.jsonl` 条目流：每条条目带自己的 id 和
  * parent 的 id，所以这条流读起来是一棵树，`leafId` 就是对话此刻所在的位置。追加产生叶子的孩子；
- * {@link branch} 把叶子移到更早的条目——并把移动记录为一条 {@link LeafEntry}，新读者由此恢复——
+ * `branch`（session-manager.ts）把叶子移到更早的条目——并把移动记录为一条 {@link LeafEntry}，新读者由此恢复——
  * 于是一段新的工作从那里继续，不碰已写入的东西。条目流一旦有了条目就从不重写，这让本构建不理解的
  * 条目种类或字段原样穿过；只有快照会被整体重写，且只在它持有的值发生变化时。
  *
- * 用 {@link buildSessionContext} 获取应发给 provider 的消息：它沿分支从根走到叶，并折入最新的压缩。
+ * 用 `buildSessionContext`（session-manager.ts）获取应发给 provider 的消息：它沿分支从根走到叶，并折入最新的压缩。
  */
 export interface Session {
 	sessionId: string;
@@ -186,7 +187,7 @@ export interface Session {
 	 * 本 session 的文件已存在且持有最后一次写入时的日志后为 true。
 	 *
 	 * 它决定下一次写入如何发生：false 表示还没写过任何东西，所以第一条值得保留的条目一次性创建
-	 * 两个文件——条目流和 meta 快照；true 表示条目追加、meta 变更重写快照。见 {@link persistEntry}。
+	 * 两个文件——条目流和 meta 快照；true 表示条目追加、meta 变更重写快照。见 `persistEntry`（session-manager.ts）。
 	 */
 	fileCreated: boolean;
 	/** session 自己的选择，即盘上快照扁平字段在内存中的重组。 */
