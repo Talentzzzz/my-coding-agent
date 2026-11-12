@@ -33,7 +33,8 @@
 | [0019](0019-table-holds-live-half-only.md) | 表只装 live 半——transcript 每次操作现读，`AgentState` 不再有 `session` | 已接受，已落地（2026-11-10，`check` 绿、smoke 与改动前逐条同色），整体取代 0011 |
 | [0020](0020-flat-session-store.md) | store 改平——`sessions/<id>.{json,jsonl}`，id 就是地址；旧布局惰性迁移，`Agent` 不再记路径 | 已接受，已落地（2026-11-10，`check` 绿；smoke 做了机械改写、未全量执行，见 ADR 文末），部分取代 0009 的「每工作目录一个 store 目录」 |
 | [0021](0021-snapshot-suspended-marker.md) | 快照加 `suspended` 标记——冷启动审批点是纯显示缓存，账本仍是唯一事实 | 已接受，已落地（2026-11-11，cold-start-approval-dot 01–04 号票，`check` 绿、相关 smoke 单独跑全绿），0006 后果一节「可从磁盘重建的缓存」口子的实例，不取代任何决定 |
-| [0022](0022-loop-manager-whitelist-callbacks.md) | 把一次运行搬回 `LoopManager`——零字段对象、白名单回调、单个 `loopOptions` | 已接受（2026-11-11，wayfinder 票 003 与用户逐项答辩后拍板；代码落地归票 004、静态守卫归票 005），整体取代 0014（含它复活的 0008 决定 1/2），复活 0012 的文件分区与 0013 的零字段 / 参数化结论 |
+| [0022](0022-loop-manager-whitelist-callbacks.md) | 把一次运行搬回 `LoopManager`——零字段对象、白名单回调、单个 `loopOptions` | 已接受（2026-11-11，wayfinder 票 003 与用户逐项答辩后拍板；代码落地归票 004、静态守卫归票 005），整体取代 0014（含它复活的 0008 决定 1/2），复活 0012 的文件分区与 0013 的零字段 / 参数化结论；**已部分被 [0023](0023-loop-manager-functions-only.md) 取代**（2026-11-12） |
+| [0023](0023-loop-manager-functions-only.md) | `LoopManager` 只认函数——六件依赖回调化，loop 层零 Manager 可见性 | 已接受（2026-11-12，wayfinder 票 003；落地归票 004、守卫升级归票 005），部分取代 0022（六件依赖进袋与决定 7 的组装点一半） |
 
 ## 门槛
 

@@ -4,7 +4,7 @@
 （对象已删；决定 2 的后半句曾先由 [0013](0013-loop-services-are-arguments.md) 削去）
 取代：[0008](0008-loop-merged-into-agent.md) 的决定 1、决定 2，以及它「后果」一节里
 「`agent.ts` 从 2043 行长到 2956 行……没有第二个文件可以指」那一条
-复活其结论者：[0022](0022-loop-manager-whitelist-callbacks.md)（部分，2026-11-11——文件分区与「一次运行的全部住 `loop-manager.ts`」重新生效；**不**复活本文决定 2 的自带六件依赖、决定 4 的构造注入 / `LoopManagerConfig`、决定 7 的 `index.ts` 两个出口。本文状态与「已由 0014 取代」的取代者指针不变，按编号规则只增不改）
+复活其结论者：[0022](0022-loop-manager-whitelist-callbacks.md)（部分，2026-11-11——文件分区与「一次运行的全部住 `loop-manager.ts`」重新生效；**不**复活本文决定 2 的自带六件依赖、决定 4 的构造注入 / `LoopManagerConfig`、决定 7 的 `index.ts` 两个出口。本文状态与「已由 0014 取代」的取代者指针不变，按编号规则只增不改）；延续与收紧见 [0023](0023-loop-manager-functions-only.md)（2026-11-12——文件分区经 0022 延续；本文决定 2 的「自带六件依赖」连以袋字段复活的形态也被终结：loop 只认函数，服务对象不再越过边界）
 
 设计过程见 `.scratch/loop-manager/`。
 

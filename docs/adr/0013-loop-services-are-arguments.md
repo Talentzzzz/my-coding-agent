@@ -5,7 +5,7 @@
 取代：[0012](0012-loop-manager-object.md) 的决定 2（「它不回头问 `Agent`」里「自带六件依赖」那一半）
 与决定 4 的构造注入部分；[`.scratch/loop-manager/issues/01-injection.md`](../../.scratch/loop-manager/issues/01-injection.md)
 里「`api` 与 `systemPrompt` 归 `LoopManagerConfig`」的归属
-复活其结论者：[0022](0022-loop-manager-whitelist-callbacks.md)（部分，2026-11-11——零字段、无构造参数、六件服务与并发安全结论重新生效；形状换成单只 `loopOptions`，不复活 `LoopServices` 名字与十二签名。本文状态与「同日被 0014 取代」不变，按编号规则只增不改）
+复活其结论者：[0022](0022-loop-manager-whitelist-callbacks.md)（部分，2026-11-11——零字段、无构造参数、六件服务与并发安全结论重新生效；形状换成单只 `loopOptions`，不复活 `LoopServices` 名字与十二签名。本文状态与「同日被 0014 取代」不变，按编号规则只增不改）；收窄见 [0023](0023-loop-manager-functions-only.md)（2026-11-12——零字段与并发结论继续；「六件服务以对象随调用递进」的形状被收窄为 19 动词回调面：loop 只认函数，服务对象不再越过边界）
 
 ## 背景
 

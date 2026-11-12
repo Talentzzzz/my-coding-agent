@@ -1,9 +1,9 @@
 # 0022：把一次运行搬回 `LoopManager`——零字段对象、白名单回调、单个 `loopOptions`
 
-日期：2026-11-11 · 状态：已接受（wayfinder 票 003 与用户逐项答辩后拍板；落地归票 004 / 005，见 `.scratch/wayfinder/loop-extraction/`）
+日期：2026-11-11 · 状态：已接受（wayfinder 票 003 与用户逐项答辩后拍板；落地归票 004 / 005，见 `.scratch/wayfinder/loop-extraction/`）；**已部分被 [0023](0023-loop-manager-functions-only.md) 取代（2026-11-12）**——「六件依赖进袋」与决定 7 的组装点一半作废，文件分区、零字段、单袋形状与守卫纪律延续（逐条见 0023「被取代的是什么」）
 取代：[0014](0014-loop-manager-removed.md) 的**全部决定**——作为裁决与理由（决定 1–5 与「后果」一节里零层间接等三条收益的判词）；其中决定 3 / 5 留下的装配形状由本 ADR 在 0017 的理由下**重新确认**，不是 0014 继续有效（逐条见*被取代的是什么*）。亦部分取代 [0008](0008-loop-merged-into-agent.md)——0014 复活的决定 1/2 再次作废；0008 的其余决定与那句「没有信息的对象」判词不动，后者仍是本 ADR 的试金石
 复活：[0012](0012-loop-manager-object.md) 的**文件分区**——决定 1（一次运行的全部是 `LoopManager` 的方法、住 `loop-manager.ts`）、决定 2 的判据（值层面不 import `agent.ts`，由票 005 机器化），以及决定 3/5/6/7 里 0014 自己承认「内容仍然有效」的那几件（共享 fanout 住 `session/fanout.ts`、`Agent` 留会话不是运行、`abort` / `settle` / `close` 不搬、事件类型住 `session/events.ts`、恢复机器保持导出）；**不复活**决定 2 的「自带六件依赖」、决定 4 的构造注入与 `LoopManagerConfig`、决定 7 新增的 `index.ts` 两个出口。[0013](0013-loop-services-are-arguments.md) 的**零字段与参数化**结论同样回来（六件服务随调用递进），但形状是单只 `loopOptions`，不复活 `LoopServices` 的名字与十二签名。复活的是结论，**不是 ADR 状态**：0012 / 0013 仍标「已由 0014 取代」，取代者指针不回退（编号规则只增不改）
-取代者：无
+取代者：[0023](0023-loop-manager-functions-only.md)（**部分**，2026-11-12——`LoopOptions` 上的六件依赖改为 19 动词回调面、`bagOf` 收编进 `recordSelection`、`servicesOf` 组装点消除；判据从「白名单两条」推到「loop 层零 Manager 可见性」。本文决定 1/2 的对象与零字段、决定 3 的组袋入口、决定 5 的守卫方向、决定 6 的出口、决定 7 的 fanout 文件分工继续有效；决定 4 的两条清单、决定 2 的「六件组装进袋」半句、决定 7 的「调用点现建」半句、判据节的 11 字段形状作废。按编号规则正文不改，标注于此）
 
 设计过程见 `.scratch/wayfinder/loop-extraction/`（票 001 盘点、票 002 答辩、票 003 起草与接受）；定下的词见 [CONTEXT.md](../../CONTEXT.md)。
 
