@@ -52,8 +52,8 @@ import {
 	type Session,
 	type SessionEntry,
 	sessionEntryToContextMessages,
-} from "./session/session-manager.ts";
-import type { ToolRunContext } from "./tools/index.ts";
+} from "./session/ledger.ts";
+import type { ToolRunContext } from "./llm/types.ts";
 
 /**
  * 一次运行的全部机械（ADR-0022 文件分区不动，边界由 ADR-0023 收紧）：引擎、按请求的填充链、压缩

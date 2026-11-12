@@ -200,7 +200,7 @@ export interface LoopOptions {
 换来的：
 
 - **loop 层零 Manager 可见性。** 三只 Manager 与 hooks 对 loop 完全不可见；「越过边界的全部」在一个类型上一次性可见——没有一个字段能问出动词清单之外的问题。001 盘点的触点全部有着落：四件 Manager 的 85 个改走动词，`api` / `systemPrompt` 两个保留项确认原样——散在方法体里的越界从此不存在。
-- **依赖方向双向可检查。** 0022 的守卫只查「不 import `agent.ts`」；票 005 升级后连「不 import Manager / hooks 模块」也是机器事实。85 处触点若是回潮，任何一处都要先把一个 Manager 塞回袋——类型与守卫同时报错。
+- **依赖方向双向可检查。** 0022 的守卫只查「不 import `agent.ts`」；票 005 升级后连「不 import Manager / hooks 模块」也是机器事实。85 处触点若是回潮，任何一处都要先把一个 Manager 塞回袋——类型与守卫同时报错。落地口径（票 005，并定掉尚未决定 1）：**按模块说明符禁**，静态 / side-effect / `export … from` / 动态 `import()` 同正则命中、注释先剥掉，禁令五类——`agent.ts` / `session-manager.ts` / `setting-manager.ts` / `tools/` / `hooks.ts`；按模块禁会误伤与 `SessionManager` 同模块的值类型，所以值类型先安新家：`Session` / `SessionEntry` / `SessionSetting` / `sessionEntryToContextMessages` 迁至 `session/ledger.ts`（`session-manager.ts` 从它 import 供自用并向外转出口，旧消费者零改动），`ToolRunContext` 从 `llm/types.ts` 直取（不再经 `tools/index.ts` 的再出口）。
 - **白名单答辩覆盖 100% 触点。** 0022 的答辩管 2 条、其余 23 个成员只有「0013 已验证」的整体豁免；本 ADR 的答辩管袋上每一个成员。后来的人不必再猜「哪些曾经是候选」——候选就是袋上的 25 个成员，答案就在判据节。
 - **一条更硬的不变量。** 工具调用只能解析到本请求声明过的工具（`declared` 按名查）——「模型被告知什么与它可以运行什么」从两条派生并成一条。
 - **`CompactOptions` 即依赖清单。** Pick 链上没有 Manager 字段，压缩阶梯要什么一眼可见。
@@ -220,7 +220,7 @@ export interface LoopOptions {
 
 按 `docs/adr/README.md` 的写法，以下两件在本 ADR 接受时未定，单独列在这里；**上面每一条决定都不依赖它们**——取代关系、回调面定稿、出口口径在这两件的任意取值下逐字相同。唯一的耦合是票 005 守卫的**模块清单口径**：禁令本身（决定 7）已定，扫哪些模块、按模块还是按类型标识符命中是它的自由度。
 
-1. **类型驻地口径**：`Session` / `SessionEntry` 现与 `SessionManager` 同模块（`session-manager.ts`），`ToolRunContext` / `ToolUpdateCallback` 现经 `tools/index.ts`——「禁 Manager 模块」的守卫若按模块禁，这两个值类型的 import 面会误伤；口径是先给值类型安新家，还是按 Manager 类型标识符禁。归票 005，与落地（票 004）一并定。
+1. **类型驻地口径**：`Session` / `SessionEntry` 现与 `SessionManager` 同模块（`session-manager.ts`），`ToolRunContext` / `ToolUpdateCallback` 现经 `tools/index.ts`——「禁 Manager 模块」的守卫若按模块禁，这两个值类型的 import 面会误伤；口径是先给值类型安新家，还是按 Manager 类型标识符禁。归票 005，与落地（票 004）一并定。**已由票 005 定：按模块禁，值类型先安新家（`session/ledger.ts`），落地实况见「后果」的「依赖方向双向可检查」条。**
 2. **落地后的行数账与偏差**：由票 004 补进「后果」。
 
 ## 不可逆性与代价
