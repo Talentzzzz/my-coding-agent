@@ -17,19 +17,22 @@ _Avoid_: orchestrator、编排器
 _Avoid_: Loop、引擎对象、run manager
 
 **loopOptions**：
-一次运行调用的唯一参数袋：`state` / `bag` / `start` 三件每次调用的值、六件服务依赖
-（sessionManager、settings、tools、hooks、systemPrompt、api）、以及白名单回调。
+一次运行调用的唯一参数袋：`state` / `bag` / `start` 三件每次调用的值、传输 `api` 与 prompt builder
+`systemPrompt` 两件既有形状、以及回调面（19 动词 + `emit` sink）。
 它是一次调用的参数表，不是被持有的聚合袋（ADR-0013 已验证参数化不违反 ADR-0007）。
 _Avoid_: LoopServices、LoopManagerConfig、services
 
-**回调白名单**：
+**回调白名单**（别名：回调面）：
 loop 经 Agent 传入的函数的封闭清单，每一项都答得出「为什么必须绕回编排层」（ADR-0008 的试金石）。
-定有两项：`bagOf(id)`——开一只全新的袋（会话表私有、`live.unwritten` 只活在表上）；
-`emit(state, session, event)`——事件 sink（落盘、清队列、投影的组合政策是编排层与窗口契约的
-另一半，命令面的发布是同一契约的另一半边）。
-_Avoid_: hooks（hooks 是六件依赖之一，不是白名单）、subscribe、onEvent
+定稿为 **19 动词 + `emit`**：读（`contextMessages` / `contextEntries` / `modelCatalog` / `modelChoice` /
+`activeTools` / `approvals` / `bashSettings` / `retrySettings`）、写（`recordSelection` / `setSuspended` /
+`appendMessage` / `appendCompaction` / `appendTrimToolCallArgs` / `appendClearToolResults`）、
+执行（`executeTool`）、接缝（`rewriteContext` / `decideBeforeTool` / `decideAfterTool`）、窗口（`publish`）。
+三只 Manager 与 hooks 对 loop 完全不可见；`bagOf` 已随 `recordSelection` 收编退出——开袋是编排层的
+事，loop 不再自开袋。
+_Avoid_: hooks（hooks 是编排层侧的服务，它的三个消费者已拆成接缝三动词）、subscribe、onEvent
 
 **run bag（运行袋）**：
-一次运行开跑时重放一次盘得到的 transcript，整条运行只带这一只；中途落选择另开的全新袋
-经白名单 `bagOf` 取，不走第二条开袋路径（ADR-0019）。
+一次运行开跑时重放一次盘得到的 transcript，整条运行只带这一只；落选择的写经回调 `recordSelection`
+进行——需要另开全新袋时由编排层在自己的会话表上开，loop 不再有第二条开袋路径（ADR-0019）。
 _Avoid_: transcript 缓存、session 副本
