@@ -16,6 +16,7 @@ import {
 	type ToolCall,
 	type ToolResult,
 	type ToolResultMessage,
+	type ToolUpdateCallback,
 	type Usage,
 	validateToolArguments,
 } from "./llm/index.ts";
@@ -29,83 +30,107 @@ import {
 } from "./context/compaction.ts";
 import { clearableToolResultIds, isCacheProbablyExpired } from "./context/clear-tool-results.ts";
 import { trimmableToolArgEntryIds } from "./context/trim-tool-call-args.ts";
-import type { Hooks } from "./hooks.ts";
+import type { BashSettings, RetrySettings } from "./config.ts";
 import {
 	type Model,
 	type ModelChoice,
 	type ModelConfig,
 	modelFor,
-	normalizeThinkingLevel,
-	rowFor,
-	type ThinkingLevel,
 	unconfiguredStream,
 } from "./models.ts";
 import type {
-	AfterToolCallResult,
 	AgentEvent,
 	AgentRequestUpdate,
-	BeforeToolCallResult,
 	RunRecoveryOptions,
 	ToolCallAnswer,
-	ToolCallHooks,
 	ToolCallOutcome,
 } from "./types.ts";
 import type { AgentState } from "./session/agent-state.ts";
-import {
-	appendMessageEntry,
-	approvalsOf,
-	dropQueued,
-	emitEvent,
-	emitQueueUpdate,
-	publishState,
-	type SessionServices,
-} from "./session/fanout.ts";
-import { modelChoiceOf } from "./session/model-choice.ts";
+import { dropQueued, emitEvent, emitQueueUpdate } from "./session/fanout.ts";
 import type { PendingMessageQueue } from "./session/queues.ts";
 import {
 	type Session,
 	type SessionEntry,
-	type SessionManager,
 	sessionEntryToContextMessages,
 } from "./session/session-manager.ts";
-import { toolStateOf } from "./session/tool-config.ts";
-import type { SettingManager } from "./setting-manager.ts";
-import type { ToolManager, ToolRunContext } from "./tools/index.ts";
+import type { ToolRunContext } from "./tools/index.ts";
 
 /**
- * 一次运行的全部机械（ADR-0022）：引擎、按请求的填充链、压缩阶梯、重试泵、两个工具调用闸门，以及
- * 收尾。这是这批代码的第四次搬家——0008 并入 `Agent`、0012 立对象、0013 削空、0014 删除——这一次
- * 它回成对象，买的不是持有：{@link LoopManager} 零字段、零构造参数，两个会话的运行可以同时跑在
- * 同一个实例上。买的是文件地址：读一次运行只看这一个文件。
+ * 一次运行的全部机械（ADR-0022 文件分区不动，边界由 ADR-0023 收紧）：引擎、按请求的填充链、压缩
+ * 阶梯、重试泵、两个工具调用闸门，以及收尾。这是这批代码的第五次搬家——0008 并入 `Agent`、0012
+ * 立对象、0013 削空、0014 删除、0022 回成对象——这一次动的不是对象，是边界：{@link LoopManager}
+ * 仍零字段、零构造参数，两个会话的运行可以同时跑在同一个实例上；变的是「loop 认识谁」。
  *
- * 依赖方向是单向的（ADR-0022 决定 5）：本文件对编排层的认识只有 {@link LoopOptions} 里的两条白名单
- * 回调（`bagOf` 开袋、`emit` 事件 sink），绝不 import `agent.ts`；其余六件服务依赖随袋递进，
- * `session/fanout.ts` 的文件级函数无条件直用。
+ * 依赖方向是单向的（ADR-0022 决定 5 延续）：本文件对编排层的认识只有 {@link LoopOptions} 里
+ * 递进来的东西——而 ADR-0023 把这条推到极致，袋上**每一个成员**都得是值或函数：三只 Manager 与
+ * hooks 对 loop 完全不可见，loop 需要的每样东西都以函数到达（回调面 19 动词 + `emit` 一条 sink），
+ * 谁提供、从哪来，是 `Agent` 的事。本文件绝不 import `agent.ts`；`session/fanout.ts` 只用
+ * `state` 参数的文件级函数（`emitEvent` / `emitQueueUpdate` / `dropQueued`）。
  */
 
+/** 工具结果如何携带内容：按顺序排列的文本与图片块。与 hooks.ts 的同名别名同一行定义。 */
+type ToolResultContent = ToolResult<unknown>["content"];
+
+/** 一次请求的工具面：活跃名单与同一派生查表所得的声明数组，一个回调、一次派生（ADR-0023）。 */
+export interface ActiveTools {
+	/** 本次请求活跃的名字：整条链成员判断的唯一依据。 */
+	names: readonly string[];
+	/** 同一派生按名字查表的声明数组：元素是表自己的实例（ADR-0016）。 */
+	declared: readonly Tool<any>[];
+}
+
+/** hooks 三动词的事件与答案：结构定义在本文件，与 HookMap 的同步点在 agent.ts 的接线处。 */
+export interface ContextInjection {
+	sessionId: string;
+	messages: Message[];
+	systemPrompt: string;
+}
+export interface ContextRewrite {
+	messages?: Message[];
+	systemPrompt?: string;
+}
+export interface BeforeToolEvent {
+	sessionId: string;
+	toolCallId: string;
+	toolName: string;
+	args: unknown;
+}
+export interface BeforeToolDecision {
+	block?: { reason: string };
+	args?: unknown;
+	terminate?: boolean;
+	suspend?: boolean;
+}
+export interface AfterToolEvent {
+	sessionId: string;
+	toolCallId: string;
+	toolName: string;
+	content: ToolResultContent;
+	isError: boolean;
+}
+export interface AfterToolDecision {
+	content?: ToolResultContent;
+}
+
 /**
- * 一次运行调用的唯一参数袋：三件每次调用的值、六件服务依赖、两条白名单回调，平铺在一只袋上——
- * 越过边界的全部在这个类型上一次性可见。
+ * 一次运行调用的唯一参数袋：三件每次调用的值、两件既有形状（api / systemPrompt）、白名单 sink
+ * （emit）与回调面（19 动词）。越过边界的全部在这个类型上一次性可见，三只 Manager 与 hooks 对
+ * loop 完全不可见（ADR-0023）。
  *
  * 它是一次调用的参数表，不是被持有的聚合袋：在调用点现凑、用完就丢（ADR-0013 已验证参数化不违反
  * ADR-0007）。运行局部的东西不进袋——模型、abort controller、两个闸门、重试包装的 transport、
- * thinkingLevel 全是运行自己的局部变量（ADR-0022 判据节）。
+ * thinkingLevel 全是运行自己的局部变量（ADR-0022 判据节逐字继承）。
  */
 export interface LoopOptions {
+	// —— 三件每次调用的值（保留项）——
 	/** 这次运行写瞬态的对象：两条队列、在飞运行、partial、重试与挂起位（ADR-0019 的 live 半）。 */
 	state: AgentState;
 	/** 运行袋：开跑时重放一次盘得到的 transcript，整条运行只带这一只（ADR-0019）。 */
 	bag: Session;
 	/** 运行起点：打开它的那条消息，或恢复用来关闭悬空调用的答案（见 {@link RunStart}）。 */
 	start: RunStart;
-	/** 每次 transcript 读写都要经过的无状态会话服务。 */
-	sessionManager: SessionManager;
-	/** 每次设置与模型读取所经的配置门。 */
-	settings: SettingManager;
-	/** 本构建认识的工具；活跃名单不在这里——它由填充链每次请求派生（`toolStateOf`）。 */
-	tools: ToolManager;
-	/** 每次分发都经过的接缝：`context`、`before_tool`（审批闸门）、`after_tool`。 */
-	hooks: Hooks;
+
+	// —— 既有形状（保留项）——
 	/**
 	 * 从会话的实时设置出发，为模型可以调用的工具构建 prompt。
 	 *
@@ -120,24 +145,91 @@ export interface LoopOptions {
 	/** 每个请求真正离开的地方：传输层，重试策略包上它之前的那个。 */
 	api: ChatTransport;
 	/**
-	 * 白名单 1（ADR-0022 决定 4）：开一只全新的袋。会话表是编排层私有的、不注入，`live.unwritten`
-	 * 只活在表上——落选择另开的袋必须走这个唯一入口，loop 自己开袋就是第二条副本路径。
-	 */
-	bagOf: (id: string) => Session;
-	/**
-	 * 白名单 2（ADR-0022 决定 4）：事件 sink。落盘、清队列、投影的组合政策是编排层与窗口契约的
-	 * 另一半，实现住在编排层（`Agent.dispatchEvent`）——与命令面的发布是同一契约的两边，分居两文件
-	 * 就会漂移。`runEngine` 内照旧包成 sink 闭包。
+	 * 白名单 sink（ADR-0022 决定 4 延续，白名单只剩这一条）：事件去向。落盘、清队列、投影的组合
+	 * 政策是编排层与窗口契约的另一半，实现住在编排层（`Agent.dispatchEvent`）——与命令面的发布是
+	 * 同一契约的两边，分居两文件就会漂移。`runEngine` 内照旧包成 sink 闭包。
 	 */
 	emit: (state: AgentState, session: Session, event: AgentEvent) => Promise<void> | void;
+
+	// —— 回调面 · 读（8）——
+	/** 运行打开时对着的那份消息（`buildSessionContext` 的 messages 半）。 */
+	contextMessages: (session: Session) => readonly Message[];
+	/** 账本重放出的 entry 视图：填充链与压缩阶梯共用的答案。 */
+	contextEntries: (session: Session) => readonly SessionEntry[];
+	/** 本构建认识的模型行。 */
+	modelCatalog: () => readonly ModelConfig[];
+	/** 这个会话现在在哪个模型上（`chosen` = 运行局部的 `live.openedOn`）。 */
+	modelChoice: (session: Session, chosen?: ModelChoice) => ModelChoice;
+	/** 本次请求活跃的工具名单与同一派生的声明数组。 */
+	activeTools: (session: Session) => ActiveTools;
+	/** 生效中的审批映射：闸门默认处理器、快照与 prompt 三者共同的唯一读取点。 */
+	approvals: (session: Session) => Record<string, boolean>;
+	/** bash 工具允许一条命令运行多久（实时读）。 */
+	bashSettings: (workDirAbsPath: string) => BashSettings;
+	/** 供应商调用的重试策略（实时读）。 */
+	retrySettings: (workDirAbsPath: string) => RetrySettings;
+
+	// —— 回调面 · 写（6）——
+	/** 把本次请求所用的选择写进会话：对比盘上基线，需要时在 Agent 的表上开新袋补写。 */
+	recordSelection: (session: Session, catalog: readonly ModelConfig[], choice: ModelChoice) => void;
+	/** 快照显示缓存的挂起标志翻转。 */
+	setSuspended: (session: Session, suspended: boolean) => void;
+	/** 追加一条消息条目并宣布（fanout 组装点：清 `live.unwritten`、发 `entry_appended`）。 */
+	appendMessage: (state: AgentState, session: Session, message: Message) => void;
+	/** 账本追加：压缩摘要。 */
+	appendCompaction: (
+		session: Session,
+		summary: string,
+		firstKeptEntryId: string | null,
+		tokensBefore: number,
+		usage?: Usage,
+	) => string;
+	/** 账本追加：截短重型工具被记录的参数。 */
+	appendTrimToolCallArgs: (session: Session, trimmedEntryIds: readonly string[], tokensBefore: number) => string;
+	/** 账本追加：清掉缓存大概已过期的工具结果。 */
+	appendClearToolResults: (session: Session, clearedEntryIds: readonly string[], tokensBefore: number) => string;
+
+	// —— 回调面 · 执行（1）——
+	/** 运行一次工具调用：查工具并转发（`ToolManager.execute` 的动词化，ADR-0016 不动）。 */
+	executeTool: (
+		name: string,
+		toolCallId: string,
+		params: unknown,
+		run: ToolRunContext,
+		signal?: AbortSignal,
+		onUpdate?: ToolUpdateCallback<any>,
+	) => Promise<ToolResult<any>>;
+
+	// —— 回调面 · 接缝（3，hooks 三动词）——
+	/** 改写给供应商的内容。 */
+	rewriteContext: (injected: ContextInjection) => Promise<ContextRewrite>;
+	/** 在工具调用之前裁决：阻止、精修参数、终止或挂起（审批闸门）。 */
+	decideBeforeTool: (event: BeforeToolEvent) => Promise<BeforeToolDecision>;
+	/** 在工具结果上裁决：改写即定稿。 */
+	decideAfterTool: (event: AfterToolEvent) => Promise<AfterToolDecision>;
+
+	// —— 回调面 · 窗口（1）——
+	/** 全量快照广播（fanout 组装点，`publishState` 的动词化）。 */
+	publish: (state: AgentState, session: Session) => void;
 }
 
 /**
- * 压缩入口的参数：复用 {@link LoopOptions} 的四件字段（`start` 不适用），另带压缩自己的调用值。
- * 模型由入口内部从袋上的两件服务现算——编排层的 `maybeCompact` 只递这些，不再摸设置门
- * （ADR-0022 决定 3）。
+ * 压缩入口的参数：复用 {@link LoopOptions} 的八件字段（`start` 与执行链、hooks 三动词不适用），
+ * 另带压缩自己的调用值。Pick 链本身就是压缩阶梯的依赖清单（ADR-0023）——不取整袋：压缩不需要
+ * 执行链与 hooks，编排层的 `maybeCompact` 只递这些。
  */
-export interface CompactOptions extends Pick<LoopOptions, "state" | "bag" | "sessionManager" | "settings"> {
+export interface CompactOptions
+	extends Pick<
+		LoopOptions,
+		| "state"
+		| "bag"
+		| "modelCatalog"
+		| "modelChoice"
+		| "contextEntries"
+		| "appendCompaction"
+		| "appendTrimToolCallArgs"
+		| "appendClearToolResults"
+	> {
 	/** 要发送的 entry 选集，与填充链每次请求拿到的是同一种答案。 */
 	entries: readonly SessionEntry[];
 	/** 「现在」，过期缓存与时钟判断所用的时刻。 */
@@ -146,15 +238,11 @@ export interface CompactOptions extends Pick<LoopOptions, "state" | "bag" | "ses
 	transport?: ChatTransport;
 }
 
-/**
- * fanout 调用与审批读取所经的三个服务，在调用点从袋上现凑。
- *
- * 不是字段：被持有的袋正是 ADR-0007 删掉的东西，而这三件各自已在袋上——这是 `session/fanout.ts`
- * 要的形状，在要它的地方构建。
- */
-function servicesOf(loopOptions: LoopOptions): SessionServices {
-	return { sessionManager: loopOptions.sessionManager, settings: loopOptions.settings, tools: loopOptions.tools };
-}
+/** 压缩阶梯要的回调面：{@link CompactOptions} 的 Pick 链去掉两件调用值后剩下的那一份。 */
+type CompactCallbacks = Pick<
+	LoopOptions,
+	"modelCatalog" | "contextEntries" | "appendCompaction" | "appendTrimToolCallArgs" | "appendClearToolResults"
+>;
 
 /**
  * 一次运行的全部：入口与出口（{@link LoopManager.run}）、按请求的填充链、压缩阶梯、传输层之下的
@@ -223,7 +311,7 @@ export class LoopManager {
 			live.model = undefined;
 			// 快照的显示缓存跟随运行结束时的标志：被挂起的运行写 true，其余每种结束写 false。这一下
 			// 清扫覆盖每一次翻转——清掉标记的是恢复运行的结束，而不是启动它的那个答案。
-			loopOptions.sessionManager.setSuspended(transcript, live.suspended);
+			loopOptions.setSuspended(transcript, live.suspended);
 			// 引擎的 `runEngine` resolve 之前运行不算结束——要等每个 await 了 `agent_end` 的监听者与
 			// 引擎自己的 `finally`。所以这是第一个无物在飞的时刻，不在这里发布就永远没人报告它。
 			//
@@ -232,7 +320,7 @@ export class LoopManager {
 			// 的运行以 rejection 的形态抵达这里，放在 `await` 之后的发布会恰好被最需要那一帧的运行
 			// 跳过。运行有的每种结束路径都经过这一个块；可能先到的错误帧由得知 rejection 的调用方
 			// 通告，不是由会话。
-			publishState(state, transcript, servicesOf(loopOptions));
+			loopOptions.publish(state, transcript);
 		}
 	}
 
@@ -253,10 +341,9 @@ export class LoopManager {
 	 */
 	private async runEngine(loopOptions: LoopOptions, transport: ChatTransport): Promise<Message[]> {
 		const { state, start, bag: session } = loopOptions;
-		const { sessionManager, settings: settingsManager, tools } = loopOptions;
 		// 这次运行的值——目录与 bash 超时——收集一次、由运行发出的每次调用携带：它们是按请求的事实，
 		// 如今作为一个值旅行，而不是被某个工具实例闭包（ADR-0016）。
-		const run: ToolRunContext = this.runContext(settingsManager, session);
+		const run: ToolRunContext = this.runContext(loopOptions, session);
 		const live = state.live;
 		if (live.activeRun !== undefined) {
 			throw new Error(
@@ -275,21 +362,32 @@ export class LoopManager {
 		// 运行所在的那一行。以现状的选择播种；`prepareRequest` 用每个请求真正发送的那一行作答，所以
 		// 即使运行死在第一个请求之前，合成的失败仍点着一个真实的模型。live 半上的槽位，是栈外快照读取
 		// 它的方式，而不是回头去目录。
-		const choice = modelChoiceOf(sessionManager, session, settingsManager, live.openedOn);
-		let model: Model = modelFor(choice, settingsManager.modelCatalog(), transport);
+		const choice = loopOptions.modelChoice(session, live.openedOn);
+		let model: Model = modelFor(choice, loopOptions.modelCatalog(), transport);
 		live.model = model;
-		const hooks = this.toolCallHooks(loopOptions.hooks, session);
 		const emit: AgentEventSink = (event) => loopOptions.emit(state, session, event);
 
 		try {
 			const newMessages: Message[] = [];
-			// 这次运行的工具名单——会话处于活跃状态的名字，作为一份成员判断。它是整条链判断调用所依据
-			// 的栈局部（04 §2.4）：表回答「这个名字存不存在」，这个回答「本会话现在可不可以调它」，而
-			// 按请求重新派生的集合在下面的请求边界换入。
-			let activeNames: ReadonlySet<string> = new Set(toolStateOf(sessionManager, session, settingsManager, tools.names()).activeToolNames);
+			// 这次运行的工具面——活跃名单与同一派生的声明数组，一次回调、一次派生（ADR-0023）。声明
+			// 数组是整条链解析调用所依据的栈局部：解析只对着本请求声明过的工具（「模型被告知什么与它
+			// 可以运行什么」从同一个对象作答），按请求重新派生的数组在下面的请求边界换入。
+			let declared: readonly Tool<any>[] = loopOptions.activeTools(session).declared;
+			// 一次运行的工具链：两个闸门、解析与执行，全部是编排层递进来的回调（ADR-0023）。批处理
+			// 机件是文件级的、不持有会话，所以运行把自己需要的接缝递给它们。声明数组随每次请求的
+			// 答案在下面换入。
+			let chain: ToolChain = {
+				sessionId: session.sessionId,
+				declared,
+				executeTool: loopOptions.executeTool,
+				decideBeforeTool: loopOptions.decideBeforeTool,
+				decideAfterTool: loopOptions.decideAfterTool,
+			};
 			let currentContext: Context = {
-				messages: [...sessionManager.buildSessionContext(session).messages],
-				tools: this.declaredTools(tools, activeNames),
+				messages: [...loopOptions.contextMessages(session)],
+				// 声明数组的副本：context 携带的是传输层声明用的实例，元素同一（ADR-0016），数组本身
+				// 每次请求新建。
+				tools: [...declared],
 			};
 
 			await emit({ type: "agent_start" });
@@ -301,12 +399,9 @@ export class LoopManager {
 			const dangling = danglingToolCallsOf(currentContext.messages);
 			if (dangling.length > 0) {
 				const recovered = await recoverPendingToolCalls(
-					currentContext,
 					dangling,
 					{ answers: start.answers },
-					hooks,
-					tools,
-					activeNames,
+					chain,
 					run,
 					signal,
 					emit,
@@ -356,11 +451,11 @@ export class LoopManager {
 					if (requestUpdate) {
 						currentContext = requestUpdate.context ?? currentContext;
 						model = requestUpdate.model ?? model;
-						// 这次请求为之构建的名单替换上一轮的，所以这条答案携带的调用按模型刚被告知的集合
+						// 本次请求声明过的数组替换上一轮的，所以这条答案携带的调用按模型刚被告知的集合
 						// 判断。可选的形式是 update 其余部分的：不在场的字段留下运行已有的东西。两者都在
 						// `prepareRequest` 之后读取——用户在两轮之间挪动的集合在下一个答案上生效，绝不
 						// 作用于已经在飞的调用。
-						activeNames = requestUpdate.activeNames ?? activeNames;
+						chain = { ...chain, declared: currentContext.tools };
 						// 这个请求发出时所用的模型，正是运行期间拍下的快照该报告的、表计用来量答案的。
 						live.model = model;
 					}
@@ -391,7 +486,7 @@ export class LoopManager {
 						const executedToolBatch =
 							message.stopReason === "length"
 								? await failToolCallsFromTruncatedMessage(toolCalls, emit)
-								: await executeToolCalls(currentContext, message, hooks, tools, activeNames, run, signal, emit);
+								: await executeToolCalls(message, chain, run, signal, emit);
 						toolResults.push(...executedToolBatch.messages);
 						hasMoreToolCalls = !executedToolBatch.terminate;
 						suspended = executedToolBatch.suspended === true;
@@ -410,14 +505,14 @@ export class LoopManager {
 					// 之外抵达、启动下一次运行。
 					if (suspended) break;
 
-					pendingMessages = await this.drainTranscribed(sessionManager, live.steeringQueue, state, session);
+					pendingMessages = await this.drainTranscribed(loopOptions, live.steeringQueue, state, session);
 				}
 
 				// 挂起连同运行的 follow-up 侧一起结束：排队的消息从未被取走，会回答它们的运行已经结束。
 				if (suspended) break;
 
 				// 运行本要在这里停下。取走 follow-up 队列里的一切。
-				const followUpMessages = await this.drainTranscribed(sessionManager, live.followUpQueue, state, session);
+				const followUpMessages = await this.drainTranscribed(loopOptions, live.followUpQueue, state, session);
 				if (followUpMessages.length > 0) {
 					// 置为 pending，让内层循环处理它们。
 					pendingMessages = followUpMessages;
@@ -438,23 +533,6 @@ export class LoopManager {
 		} finally {
 			this.finishRun(state);
 		}
-	}
-
-	/**
-	 * 两个工具调用闸门，作为这一次运行自己的那对。
-	 *
-	 * 批处理 helper 是文件级的、不持有会话，所以运行把自己需要的接缝递给它们：会话的 `before_tool`
-	 * 闸门与它的 `after_tool`。`after_tool` 的改写是定稿——消息带着 hooks 留下的内容原样写下——所以
-	 * 两个闸门都不再闭包运行的瞬态；它们各自只读 session id。
-	 */
-	private toolCallHooks(hooks: Hooks, state: Session): ToolCallHooks {
-		const sessionId = state.sessionId;
-		return {
-			beforeToolCall: async ({ toolCall, args }) =>
-				this.beforeTool(hooks, sessionId, toolCall.id, toolCall.name, args),
-			afterToolCall: async ({ toolCall, result, isError }) =>
-				this.afterTool(hooks, sessionId, toolCall.id, toolCall.name, result, isError),
-		};
 	}
 
 	/**
@@ -507,24 +585,23 @@ export class LoopManager {
 		state: AgentState,
 		session: Session,
 	): Promise<AgentRequestUpdate> {
-		const { sessionManager, settings: settingsManager, tools, hooks, systemPrompt } = loopOptions;
 		// 本次请求所用的模型，在任何东西读它之前从实时行构建，因为下面的压缩决策是按它的上下文窗口
 		// 计量的，而从片刻之前的窗口取的阈值会压缩错 transcript。这正是「一次编辑无需重开任何东西即
 		// 生效」的全部：端点、wire id、窗口、密钥在这里、从目录读，从不在会话装配时捕获。消失的行
 		// ——被删的，或在正被使用时改名的——让选择保持原样，替它作答的是 `unconfiguredStream`。
-		const catalog = settingsManager.modelCatalog();
-		const choice = modelChoiceOf(sessionManager, session, settingsManager, state.live.openedOn);
+		const catalog = loopOptions.modelCatalog();
+		const choice = loopOptions.modelChoice(session, state.live.openedOn);
 		const model = modelFor(choice, catalog, transport);
 		// 本次请求所用的选择在这里、在由它构建请求的时刻抵达 transcript——从未说过话的会话由它服务的
 		// 第一个请求记录。它跑在下面的压缩决策之前，后者按本模型的窗口计量 prompt。
-		this.recordSelection(loopOptions, session, catalog, choice);
+		loopOptions.recordSelection(session, catalog, choice);
 		// 一趟决定请求携带什么、以及是否必须摘要：触发器、过期工具结果的清理、摘要读的都是同一批
 		// entry，所以决策与请求不可能对 prompt 有多大各执一词。
 		const entries = await this.compactFor(
 			loopOptions,
 			state,
 			session,
-			sessionManager.buildContextEntries(session),
+			loopOptions.contextEntries(session),
 			Date.now(),
 			signal,
 			model,
@@ -532,24 +609,21 @@ export class LoopManager {
 		// prompt 在这里重建、不被记住：`applyConfig` 能挪审批集、`setActiveTools` 能挪工具集，而模型
 		// 必须在下一个请求上被告知两者。两者都在此刻从账本派生，所以刚落下的选择就是 prompt 描述的
 		// 东西。
-		const toolState = toolStateOf(sessionManager, session, settingsManager, tools.names());
-		// 本次请求为之点名的名字，链上后续环节判断调用所用的唯一形状：prompt 与下面的声明读的是同一份
-		// 派生，引擎用它换掉自己的副本，所以模型被提供了什么与它可以运行什么不可能漂移。
-		const activeNames: ReadonlySet<string> = new Set(toolState.activeToolNames);
+		const toolFace = loopOptions.activeTools(session);
 		// 项目指示在这里、按请求读取，而不是从状态上取：磁盘文件的一次编辑应当抵达下一个请求，与
 		// 模型行的一次编辑相同，而这段走读只是几次 stat。它的代价是一段 prompt 可能在同一次运行的
 		// 两个请求之间变化——工具集出于同样的理由已经如此。
 		const agentsMd = await loadAgentsMd(session.sessionSetting.workDirAbsPath);
-		const prompt = systemPrompt(
+		const prompt = loopOptions.systemPrompt(
 			session.sessionSetting.workDirAbsPath,
 			agentsMd,
-			toolState.activeToolNames,
-			approvalsOf(servicesOf(loopOptions), session),
+			toolFace.names,
+			loopOptions.approvals(session),
 		);
-		// 请求携带的工具结果按重放侧读取（`buildContextEntries` 已应用账本自己的视图记录），所以没有
+		// 请求携带的工具结果按重放侧读取（`contextEntries` 已应用账本自己的视图记录），所以没有
 		// 按请求对它们的另一次遍历：账本里的工具结果已经是喂给模型的那个版本。
 		const injected = { sessionId: session.sessionId, messages: messagesOf(entries), systemPrompt: prompt };
-		const rewritten = await hooks.apply("context", injected);
+		const rewritten = await loopOptions.rewriteContext(injected);
 		// 开头的 system 消息被替换而不是追加，其余 system 消息被丢弃：prompt 在本次请求上整体重建，
 		// 第二条会描述一个已经不存在状态。想改 prompt 的 hook 返回 `systemPrompt`；往 `messages` 里
 		// push system 消息的 hook 会在这里失去它。
@@ -560,33 +634,15 @@ export class LoopManager {
 		return {
 			// 在上面构建，来自本次请求所用的行：运行局部、用一次、丢弃。
 			model,
-			// 下面那些声明是从它裁出的名单：引擎用它换掉自己的副本，所以这条答案发出的调用按模型刚被
-			// 提供的集合判断。
-			activeNames,
 			context: {
 				...context,
 				messages: system === undefined ? conversation : [system, ...conversation],
-				// 实时的集合，从唯一那张表按上面派生的选择取出：数组每次请求新建，元素是表自己的实例。
-				// 引擎把声明放在请求上（`toToolDeclaration`）而不是从 transcript 里读，所以会话中途
-				// 开启的工具在下一次请求上抵达模型，两者不可能漂移。
-				tools: this.declaredTools(tools, activeNames),
+				// 本次请求声明的工具数组，元素是表自己的实例（ADR-0016）。引擎把声明放在请求上
+				// （`toToolDeclaration`）而不是从 transcript 里读，所以会话中途开启的工具在下一次请求
+				// 上抵达模型；执行链对着同一个数组按名解析，两者不可能漂移。
+				tools: [...toolFace.declared],
 			},
 		};
-	}
-
-	/**
-	 * 一次请求声明的工具：本次请求派生的名字，到唯一那张表上查找。
-	 *
-	 * 数组按请求重建——会话可以在两次请求之间收窄或放宽集合——而元素是表自己的实例，所以同一会话的
-	 * 两次请求、或两个会话，持有相同的对象（ADR-0016）。
-	 */
-	private declaredTools(manager: ToolManager, names: Iterable<string>): Tool<any>[] {
-		const declared: Tool<any>[] = [];
-		for (const name of names) {
-			const tool = manager.get(name);
-			if (tool !== undefined) declared.push(tool);
-		}
-		return declared;
 	}
 
 	/**
@@ -594,42 +650,13 @@ export class LoopManager {
 	 * 的 bash 超时。每次运行收集一次、由它发出的每次调用携带——这里没有任何东西活得比读它的那次
 	 * 运行久。
 	 */
-	private runContext(settingsManager: SettingManager, session: Session): ToolRunContext {
+	private runContext(loopOptions: LoopOptions, session: Session): ToolRunContext {
 		const workDirAbsPath = session.sessionSetting.workDirAbsPath;
 		return {
 			workDirAbsPath,
 			// 实时读取，与其他每次设置读取一样：用户挪过的超时抵达下一次运行的调用，无需重开任何东西。
-			bash: settingsManager.getBashSettings(workDirAbsPath),
+			bash: loopOptions.bashSettings(workDirAbsPath),
 		};
-	}
-
-	/**
-	 * 把本次请求所用的东西写进会话，每次挪动一次。
-	 *
-	 * 请求所用的模型已经是生效中的选择——输入框挪动时已把它写上快照（ADR-0019）——所以这里只补手势
-	 * 无从得知的部分：该行此刻应答的 wire id，与规范化后的档位。因此它通常是一次空操作，而非空时，
-	 * 写入经过**全新的**袋而不是运行的那只：快照被整体重写，而在运行开始时打开的副本可能带着某个
-	 * 其后被人挪过的选择。两个字段都显式设置，所以快照里的其他东西无论哪种情况都不被触碰。
-	 *
-	 * 它对比的基线是文件的、不是袋的——`recordedOnDisk` 读的是快照，所以同一选择上的多轮运行只花
-	 * 一次读、零次写。没有行应答的选择不记录行：没有 wire id 可写，而它所属的请求即将被传输层拒绝
-	 * 而非发送。
-	 */
-	private recordSelection(loopOptions: LoopOptions, session: Session, catalog: readonly ModelConfig[], choice: ModelChoice): void {
-		const { sessionManager } = loopOptions;
-		const recorded = sessionManager.recordedOnDisk(session);
-		const row = rowFor(choice, catalog);
-		const level = normalizeThinkingLevel(choice.thinkingLevel) as ThinkingLevel;
-		if (
-			level === recorded.thinkingLevel &&
-			(row === undefined || (row.name === recorded.model?.name && row.id === recorded.model?.modelId))
-		) {
-			return;
-		}
-		const bag = loopOptions.bagOf(session.sessionId);
-		if (row !== undefined) sessionManager.setModel(bag, row.name, row.id);
-		sessionManager.setThinkingLevel(bag, level);
-		sessionManager.flushMeta(bag);
 	}
 
 	/**
@@ -658,13 +685,13 @@ export class LoopManager {
 		context: Context,
 		options: SimpleStreamOptions | undefined,
 	): Promise<void> {
-		const { settings: settingsManager, api } = loopOptions;
+		const { api } = loopOptions;
 		const live = state.live;
 		let started = false;
 		const produce = async (): Promise<AssistantMessage> => {
 			// 没有行的会话没有可发送的东西，所以它以一句「该做什么」作答，而不是向占位端点发请求。
 			const inner =
-				settingsManager.modelCatalog().find((userModel) => userModel.name === model.name) === undefined
+				loopOptions.modelCatalog().find((userModel) => userModel.name === model.name) === undefined
 					? unconfiguredStream(model)
 					: await api.stream(model, context, options);
 			for await (const event of inner) {
@@ -686,7 +713,7 @@ export class LoopManager {
 		// 整个泵读一次：重试循环执行的策略与 `retry_start` 事件报告的 `maxAttempts` 是同一个答案，在
 		// 调用点取而不是存起来——退避中途的设置编辑随下一个请求落地，而不是这一次。计数方式与
 		// `retryAssistantCall` 自己的一致：数重试，不数调用。
-		const retrySettings = settingsManager.getRetrySettings(session.sessionSetting.workDirAbsPath);
+		const retrySettings = loopOptions.retrySettings(session.sessionSetting.workDirAbsPath);
 		const maxAttempts = retrySettings.enabled ? retrySettings.maxRetries : 0;
 		let final: AssistantMessage;
 		try {
@@ -726,7 +753,7 @@ export class LoopManager {
 					delayMs,
 					errorMessage,
 				});
-				publishState(state, session, servicesOf(loopOptions));
+				loopOptions.publish(state, session);
 			},
 			onRetryAttemptStart: () => {
 				emitEvent(state, {
@@ -734,7 +761,7 @@ export class LoopManager {
 					attempt: live.retryAttempt,
 					maxAttempts,
 				});
-				publishState(state, session, servicesOf(loopOptions));
+				loopOptions.publish(state, session);
 			},
 			onRetryFinished: (success, attempt, finalError) =>
 				this.endRetry(loopOptions, state, session, success, attempt, finalError),
@@ -753,7 +780,7 @@ export class LoopManager {
 		state.live.retrying = false;
 		state.live.retryAttempt = 0;
 		emitEvent(state, { type: "retry_end", success, attempt, finalError });
-		publishState(state, session, servicesOf(loopOptions));
+		loopOptions.publish(state, session);
 	}
 
 	// ---------------------------------------------------------------------------- 压缩
@@ -780,7 +807,7 @@ export class LoopManager {
 	 * `compaction` 事件报告，不由这个答案报告。
 	 */
 	private async compactFor(
-		loopOptions: Pick<LoopOptions, "sessionManager" | "settings">,
+		loopOptions: CompactCallbacks,
 		state: AgentState,
 		session: Session,
 		entries: readonly SessionEntry[],
@@ -788,14 +815,13 @@ export class LoopManager {
 		signal: AbortSignal | undefined,
 		model: Model,
 	): Promise<readonly SessionEntry[]> {
-		const { sessionManager, settings: settingsManager } = loopOptions;
 		const threshold = compactionThresholdFor(model.contextWindow);
 		if (!shouldCompact(messagesOf(entries), threshold)) return entries;
 
-		const trimmed = this.trimRecordedArgs(sessionManager, state, session, entries);
+		const trimmed = this.trimRecordedArgs(loopOptions, state, session, entries);
 		if (!shouldCompact(messagesOf(trimmed), threshold)) return trimmed;
 
-		const cleared = this.clearStaleToolResults(sessionManager, state, session, trimmed, now);
+		const cleared = this.clearStaleToolResults(loopOptions, state, session, trimmed, now);
 		if (!shouldCompact(messagesOf(cleared), threshold)) return cleared;
 
 		// 压缩唯一完成的一件事：与那一轮相同的模型，带着摘要指令。它是调用方的模型——本次请求构建所
@@ -803,7 +829,7 @@ export class LoopManager {
 		const summarize: Summarize = async (request) => {
 			// 与一轮会碰到的同一个缺席：没有行的会话以一句「该加什么」作答，而不是向占位端点发摘要
 			// 请求。
-			if (settingsManager.modelCatalog().find((userModel) => userModel.name === model.name) === undefined) {
+			if (loopOptions.modelCatalog().find((userModel) => userModel.name === model.name) === undefined) {
 				return unconfiguredStream(model).result();
 			}
 			const messages: Message[] = [
@@ -838,7 +864,7 @@ export class LoopManager {
 		}
 		if (!outcome) return cleared;
 
-		sessionManager.appendCompaction(
+		loopOptions.appendCompaction(
 			session,
 			outcome.summary,
 			outcome.firstKeptEntryId,
@@ -847,7 +873,7 @@ export class LoopManager {
 		);
 		// 在 transcript 移动之后发布，让作出反应的监听者读回相同的数字：`summarized` 是这一趟折进去
 		// 的东西，`contextTokens` 是供应商接下来将收到的东西。
-		const compacted = sessionManager.buildContextEntries(session);
+		const compacted = loopOptions.contextEntries(session);
 		emitEvent(state, {
 			type: "compaction",
 			summary: outcome.summary,
@@ -868,7 +894,7 @@ export class LoopManager {
 	 * 怎么说，下一个请求都已在麻烦之中。
 	 */
 	private trimRecordedArgs(
-		sessionManager: SessionManager,
+		loopOptions: CompactCallbacks,
 		state: AgentState,
 		session: Session,
 		entries: readonly SessionEntry[],
@@ -877,8 +903,8 @@ export class LoopManager {
 		if (trimmed.length === 0) return entries;
 
 		const tokensBefore = estimateTokens(messagesOf(entries));
-		sessionManager.appendTrimToolCallArgs(session, trimmed, tokensBefore);
-		const view = sessionManager.buildContextEntries(session);
+		loopOptions.appendTrimToolCallArgs(session, trimmed, tokensBefore);
+		const view = loopOptions.contextEntries(session);
 		emitEvent(state, {
 			type: "tool_call_args_trimmed",
 			trimmed: trimmed.length,
@@ -895,7 +921,7 @@ export class LoopManager {
 	 * 这正是摘要（一次有意为之、把 transcript 永久缩小的失效）成为温热 transcript 的答案的原因。
 	 */
 	private clearStaleToolResults(
-		sessionManager: SessionManager,
+		loopOptions: CompactCallbacks,
 		state: AgentState,
 		session: Session,
 		entries: readonly SessionEntry[],
@@ -907,8 +933,8 @@ export class LoopManager {
 		if (cleared.length === 0) return entries;
 
 		const tokensBefore = estimateTokens(messagesOf(entries));
-		sessionManager.appendClearToolResults(session, cleared, tokensBefore);
-		const view = sessionManager.buildContextEntries(session);
+		loopOptions.appendClearToolResults(session, cleared, tokensBefore);
+		const view = loopOptions.contextEntries(session);
 		emitEvent(state, {
 			type: "tool_results_cleared",
 			cleared: cleared.length,
@@ -922,73 +948,20 @@ export class LoopManager {
 	 * 对袋点名的会话跑压缩阶梯——编排层 `maybeCompact` 的转交入口。
 	 *
 	 * 填充链在每个请求里、循环内部跑同样三步；这个公开形状让编排层可以对着自己点名的会话驱动它们，
-	 * 演练修剪阶梯的 smoke 正是这么做的。模型在这里现算（ADR-0022 决定 3）：从袋上的两件服务按会话
-	 * 现行的选择派生，编排层不再为它摸设置门。
+	 * 演练修剪阶梯的 smoke 正是这么做的。模型在这里现算：从袋上的 `modelChoice` / `modelCatalog`
+	 * 两个回调按会话现行的选择派生，编排层只递 {@link CompactOptions} 的 Pick 链（ADR-0023）。
 	 */
 	async compact(loopOptions: CompactOptions): Promise<readonly SessionEntry[]> {
-		const { state, bag, sessionManager, settings } = loopOptions;
+		const { state, bag, transport } = loopOptions;
 		const model = modelFor(
-			modelChoiceOf(sessionManager, bag, settings, state.live.openedOn),
-			settings.modelCatalog(),
-			loopOptions.transport,
+			loopOptions.modelChoice(bag, state.live.openedOn),
+			loopOptions.modelCatalog(),
+			transport,
 		);
 		return this.compactFor(loopOptions, state, bag, loopOptions.entries, loopOptions.now, loopOptions.signal, model);
 	}
 
 	// ---------------------------------------------------------------------------- 运行的事件半
-
-	/**
-	 * 运行 `before_tool` hooks。
-	 *
-	 * 引擎的这条接缝可以阻止一个调用、挂起一个、或放行，所以能到达它的就是这些裁决：`args` 的精修
-	 * 会走到注册在这之后的处理器。suspend 来自审批闸门，它是完整的结束重启动作（ADR-0006 §5）：引擎
-	 * 在那个调用处结束运行、不写结果，调用在账本里悬空，经 REST 抵达的答案启动关闭它的恢复运行。
-	 *
-	 * 闸门自己的答案是生效中的审批映射，默认处理器经 `authorize` 读它——与快照和 prompt 描述的是同
-	 * 一个合并，所以三者不可能各执一词。
-	 */
-	private async beforeTool(
-		hooks: Hooks,
-		sessionId: string,
-		toolCallId: string,
-		toolName: string,
-		args: unknown,
-	): Promise<BeforeToolCallResult | undefined> {
-		const decided = await hooks.apply("before_tool", { sessionId, toolCallId, toolName, args });
-		if (decided?.suspend === true) return { suspend: true };
-		if (decided?.block === undefined) return undefined;
-		return {
-			block: true,
-			reason: decided.block.reason,
-			...(decided.terminate === true ? { terminate: true } : {}),
-		};
-	}
-
-	/**
-	 * 运行 `after_tool` hooks。它们的答案是定稿。
-	 *
-	 * 引擎以它返回的东西构建 transcript 消息，消息带着恰是那个内容写下：改写是对这个结果唯一会存在
-	 * 的版本的一次裁决，在结果诞生的那一刻作出。想约束结果的 hook 自己归档全文（`archiveToolResult`、
-	 * `context/spill.ts`）并把路径放进它返回的东西；下面写边界的兜底仍会接住没人约束过的结果。
-	 */
-	private async afterTool(
-		hooks: Hooks,
-		sessionId: string,
-		toolCallId: string,
-		toolName: string,
-		result: ToolResult<unknown>,
-		isError: boolean,
-	): Promise<AfterToolCallResult | undefined> {
-		const decided = await hooks.apply("after_tool", {
-			sessionId,
-			toolCallId,
-			toolName,
-			content: result.content,
-			isError,
-		});
-		if (decided?.content === undefined) return undefined;
-		return { content: decided.content };
-	}
 
 	/**
 	 * 排空一条队列，把每条消息在取走的那一刻写进 transcript。
@@ -997,10 +970,10 @@ export class LoopManager {
 	 * 所以账本在那里获得它，「既不在队列里也不在存储里」的缝隙永远不会打开。回显从不落盘 user 消息，
 	 * 所以没有什么需要被标记为已写。
 	 */
-	private drainTranscribed(sessionManager: SessionManager, queue: PendingMessageQueue, state: AgentState, session: Session): Message[] {
+	private drainTranscribed(loopOptions: LoopOptions, queue: PendingMessageQueue, state: AgentState, session: Session): Message[] {
 		const messages = queue.drain();
 		for (const message of messages) {
-			appendMessageEntry(state, session, sessionManager, message);
+			loopOptions.appendMessage(state, session, message);
 		}
 		return messages;
 	}
@@ -1009,11 +982,31 @@ export class LoopManager {
 // ---------------------------------------------------------------------------- 引擎机件
 //
 // 下面的一切都是无状态的：一轮的流、一个工具批、恢复遍，以及它们之间传递的形状。它在任何实例之外
-// 运行，把两个工具调用闸门当作运行自己的 `ToolCallHooks`，这正是它是一组函数而不是更多方法的原因。
-// 恢复机件被导出，因为它是 smoke 直接驱动的契约（ADR-0006 §5）；其余为本文件私有。
+// 运行，把两个工具调用闸门当作运行自己的那对回调（{@link ToolChain}），这正是它是一组函数而不是
+// 更多方法的原因。恢复机件被导出，因为它是 smoke 直接驱动的契约（ADR-0006 §5）；其余为本文件私有。
 
 /** 一次运行的事件去向。被 await，所以运行只在它发出的东西被处理完之后才安顿。 */
 type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
+
+/**
+ * 一次运行的工具链：两个闸门、解析与执行，全部是编排层递进来的回调（ADR-0023）。
+ *
+ * 批处理机件是文件级的、不持有会话，所以运行把自己需要的接缝递给它们——与这条链上处处一样以实参
+ * 抵达，不经过 context。解析只对着 `declared` 按名查：调用只能落到本请求声明过的工具上（ADR-0016
+ * 的表不动，消掉的只是 loop 对表的可见性）。
+ */
+export interface ToolChain {
+	/** 运行所在会话的 id：闸门事件点名它。 */
+	sessionId: string;
+	/** 本次请求声明过的工具：解析所依据的声明数组，元素是表自己的实例。 */
+	declared: readonly Tool<any>[];
+	/** 运行一次工具调用：`ToolManager.execute` 的动词化。 */
+	executeTool: LoopOptions["executeTool"];
+	/** 工具调用之前的裁决。 */
+	decideBeforeTool: LoopOptions["decideBeforeTool"];
+	/** 工具结果上的裁决。 */
+	decideAfterTool: LoopOptions["decideAfterTool"];
+}
 
 type ExecutedToolCallBatch = {
 	messages: ToolResultMessage[];
@@ -1028,8 +1021,9 @@ type ExecutedToolCallBatch = {
 /**
  * 一个过了闸门与 schema 的调用：跑什么、用哪些参数。
  *
- * 它点名工具并携带参数；不携带工具对象。执行时再对表解析一次名字，所以跑的是表的实例而不是早先
- * 取到的引用（表是只增的，两者本就是同一对象——`ToolManager.execute`）。
+ * 它点名工具并携带参数；不携带工具对象。执行时名字经 {@link ToolChain.executeTool} 到表上再解析
+ * 一次，所以跑的是表的实例而不是早先取到的引用（表是只增的，两者本就是同一对象——`ToolManager`
+ * 自己的 `execute`，ADR-0016）。
  */
 type PreparedToolCall = {
 	kind: "prepared";
@@ -1185,15 +1179,15 @@ export type DanglingToolCall = {
 };
 
 /**
- * 一个运行可凭这个名字调用的实例，前提是它真的可以调用。
+ * 一个运行可凭这个名字调用的实例，前提是本请求声明过它。
  *
- * 这是唯一同时问出两个问题的地方，且按这个顺序：运行的名单先说本会话现在是否可用这个名字，然后
- * 表才交回实例。表装着全部工具（ADR-0016），只问它会解析出一个会话已关掉的名字——名单正是拦住
- * 已关工具被运行的原因。`undefined` 是两个调用方都当作「不是本次运行会做的调用」的答案：一个以
- * 未知名字一贯得到的那条错误关闭它，另一个让它的模式不参与批的调度决策。
+ * 解析只对着 {@link ToolChain.declared} 按名查——「模型被告知什么与它可以运行什么」的不变量更硬：
+ * 调用只能解析到本请求声明过的工具。声明的元素是表自己的实例（ADR-0016），所以这里拿到的与
+ * `ToolManager.execute` 内部解析到的是同一个对象。`undefined` 是两个调用方都当作「不是本次运行会
+ * 做的调用」的答案：一个以未知名字一贯得到的那条错误关闭它，另一个让它的模式不参与批的调度决策。
  */
-function activeTool(manager: ToolManager, activeNames: ReadonlySet<string>, name: string): Tool<any> | undefined {
-	return activeNames.has(name) ? manager.get(name) : undefined;
+function declaredToolOf(declared: readonly Tool<any>[], name: string): Tool<any> | undefined {
+	return declared.find((tool) => tool.name === name);
 }
 
 /**
@@ -1232,17 +1226,14 @@ export function danglingToolCallsOf(messages: Message[]): DanglingToolCall[] {
  * 恢复中途再次挂起的闸门——本次运行据以恢复的 grant 并未真正过闸——让恢复原地停下：其余调用保持
  * 悬空、调用方不发请求结束运行，恰如活跃批的 suspend。
  *
- * 导出，因为它是引擎里宿主可以不用一次运行就驱动的唯一部分：钉住这份契约的 smoke 用一份 transcript、
- * 一组答案、与调用所依据的表调用它——没有编排层、没有自己的运行。恢复本身是一次运行，所以表、
- * 运行的活跃名单与运行值像这条链上处处一样以实参抵达：不经过 context。
+ * 导出，因为它是引擎里宿主可以不用一次运行就驱动的唯一部分：钉住这份契约的 smoke 用一组悬空调用、
+ * 一组答案、与一次运行的工具链调用它——没有编排层、没有自己的运行。恢复本身是一次运行，所以闸门、
+ * 解析与执行像这条链上处处一样以 {@link ToolChain} 抵达：不经过 context。
  */
 export async function recoverPendingToolCalls(
-	currentContext: Context,
 	dangling: DanglingToolCall[],
 	recovery: RunRecoveryOptions | undefined,
-	hooks: ToolCallHooks,
-	manager: ToolManager,
-	activeNames: ReadonlySet<string>,
+	chain: ToolChain,
 	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
@@ -1251,10 +1242,10 @@ export async function recoverPendingToolCalls(
 	const enabled = recovery?.enablePendingToolRecovery !== false;
 	const messages: ToolResultMessage[] = [];
 
-	for (const { toolCall, assistantMessage } of dangling) {
+	for (const { toolCall } of dangling) {
 		const answer = answers[toolCall.id];
 		if (answer !== undefined && answer.approved) {
-			const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, manager, activeNames, signal);
+			const preparation = await prepareToolCall(chain, toolCall, signal);
 			if (preparation.kind === "suspended") {
 				return { messages, terminate: true, suspended: true };
 			}
@@ -1270,12 +1261,12 @@ export async function recoverPendingToolCalls(
 			} else {
 				const executed = await executePreparedToolCall(
 					preparation,
-					manager,
+					chain,
 					run,
 					signal,
 					emitToolExecutionUpdate(toolCall, emit),
 				);
-				finalized = await finalizeExecutedToolCall(currentContext, assistantMessage, preparation, executed, hooks, signal);
+				finalized = await finalizeExecutedToolCall(preparation, executed, chain);
 			}
 			await emitToolExecutionEnd(finalized, emit);
 			const toolResultMessage = createToolResultMessage(finalized);
@@ -1321,38 +1312,32 @@ async function synthesizeToolResult(
  * 执行一条 assistant 消息发出的工具调用：其中任何一个如此说时就串行，否则并行。两条路径都按源顺序
  * 准备调用、把结果写成消息。
  *
- * 模式从表上读、而不是从请求声明的东西上读：一个调用的行为是工具的属性，而表是工具住的地方。只为
- * 本次运行可调用的调用读它——会话已关掉的名字在开始之前就以错误作答，否则让它的模式参与调度，会
- * 让整批围绕一个永不运行的调用安排（一个被禁用的 `bash` 把读批变成串行，正是让它成为一个判断而非
- * 一次查找的案例）。
+ * 模式从声明的实例上读：一个调用的行为是工具的属性，而实例是本请求声明过的东西（ADR-0023 的解析
+ * 不变量）。只为本次运行可调用的调用读它——会话已关掉的名字在开始之前就以错误作答，否则让它的模式
+ * 参与调度，会让整批围绕一个永不运行的调用安排（一个被禁用的 `bash` 把读批变成串行，正是让它成为
+ * 一个判断而非一次查找的案例）。
  */
 async function executeToolCalls(
-	currentContext: Context,
 	assistantMessage: AssistantMessage,
-	hooks: ToolCallHooks,
-	manager: ToolManager,
-	activeNames: ReadonlySet<string>,
+	chain: ToolChain,
 	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content.filter((block): block is ToolCall => block.type === "toolCall");
 	const hasSequentialToolCall = toolCalls.some(
-		(tc) => activeTool(manager, activeNames, tc.name)?.executionMode === "sequential",
+		(tc) => declaredToolOf(chain.declared, tc.name)?.executionMode === "sequential",
 	);
 	if (hasSequentialToolCall) {
-		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, hooks, manager, activeNames, run, signal, emit);
+		return executeToolCallsSequential(assistantMessage, toolCalls, chain, run, signal, emit);
 	}
-	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, hooks, manager, activeNames, run, signal, emit);
+	return executeToolCallsParallel(assistantMessage, toolCalls, chain, run, signal, emit);
 }
 
 async function executeToolCallsSequential(
-	currentContext: Context,
 	assistantMessage: AssistantMessage,
 	toolCalls: ToolCall[],
-	hooks: ToolCallHooks,
-	manager: ToolManager,
-	activeNames: ReadonlySet<string>,
+	chain: ToolChain,
 	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
@@ -1363,7 +1348,7 @@ async function executeToolCallsSequential(
 	for (const toolCall of toolCalls) {
 		// 在被通告之前准备：被挂起的调用从不被通告——闸门在它那里结束了运行，不写结果，事件保持
 		// 沉默，窗口不会为一个从未运行的调用显示卡片。该调用与批中它之后的一切保持未答。
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, manager, activeNames, signal);
+		const preparation = await prepareToolCall(chain, toolCall, signal);
 		if (preparation.kind === "suspended") {
 			return { messages, terminate: true, suspended: true };
 		}
@@ -1384,19 +1369,12 @@ async function executeToolCallsSequential(
 		} else {
 			const executed = await executePreparedToolCall(
 				preparation,
-				manager,
+				chain,
 				run,
 				signal,
 				emitToolExecutionUpdate(toolCall, emit),
 			);
-			finalized = await finalizeExecutedToolCall(
-				currentContext,
-				assistantMessage,
-				preparation,
-				executed,
-				hooks,
-				signal,
-			);
+			finalized = await finalizeExecutedToolCall(preparation, executed, chain);
 		}
 
 		await emitToolExecutionEnd(finalized, emit);
@@ -1417,12 +1395,9 @@ async function executeToolCallsSequential(
 }
 
 async function executeToolCallsParallel(
-	currentContext: Context,
 	assistantMessage: AssistantMessage,
 	toolCalls: ToolCall[],
-	hooks: ToolCallHooks,
-	manager: ToolManager,
-	activeNames: ReadonlySet<string>,
+	chain: ToolChain,
 	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
@@ -1433,7 +1408,7 @@ async function executeToolCallsParallel(
 	for (const toolCall of toolCalls) {
 		// 与串行路径一样在被通告之前准备：被挂起的调用得不到事件也得不到结果，其后的调用也不再准备。
 		// 上面已排队的调用跑完自己——闸门作答时它们已在途中。
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, hooks, manager, activeNames, signal);
+		const preparation = await prepareToolCall(chain, toolCall, signal);
 		if (preparation.kind === "suspended") {
 			suspended = true;
 			break;
@@ -1471,19 +1446,12 @@ async function executeToolCallsParallel(
 			}
 			const executed = await executePreparedToolCall(
 				preparation,
-				manager,
+				chain,
 				run,
 				signal,
 				emitToolExecutionUpdate(toolCall, emit),
 			);
-			const finalized = await finalizeExecutedToolCall(
-				currentContext,
-				assistantMessage,
-				preparation,
-				executed,
-				hooks,
-				signal,
-			);
+			const finalized = await finalizeExecutedToolCall(preparation, executed, chain);
 			await emitToolExecutionEnd(finalized, emit);
 			return finalized;
 		});
@@ -1530,21 +1498,21 @@ function prepareToolCallArguments(tool: Tool<any>, toolCall: ToolCall): ToolCall
 /**
  * 解析一个调用的工具，带它走完执行之前的各步。
  *
- * 实例来自 {@link activeTool}，先问运行的名单再问表：会话已关掉的名字在这里解析成空、以未知名字
- * 一贯得到的那句话拒绝——产生它的唯一地方在闸门之前，因为没人能运行的调用不是该去请求许可的调用。
- * `prepareArguments` 与 schema 校验随后读已解析实例的字段，所以模型参数被它塑形的 shim 与运行它们
- * 的代码是同一个对象。
+ * 实例来自 {@link declaredToolOf}，先按名查本请求的声明数组：会话已关掉或本请求未声明的名字在这里
+ * 解析成空、以未知名字一贯得到的那句话拒绝——产生它的唯一地方在闸门之前，因为没人能运行的调用不是
+ * 该去请求许可的调用。`prepareArguments` 与 schema 校验随后读已解析实例的字段，所以模型参数被它
+ * 塑形的 shim 与运行它们的代码是同一个对象。
+ *
+ * `before_tool` 闸门是运行自己的那条回调（ADR-0023）：suspend 在这个调用处结束运行——这里不为它
+ * 写结果，调用方在批上看到 `suspended`、结束运行，恢复运行以稍后抵达的答案关闭调用；与它并存的
+ * `block` 会写结果，所以 suspend 胜出。裁决归一化（闸门答案 → 引擎的机械）就住在这里。
  */
 async function prepareToolCall(
-	currentContext: Context,
-	assistantMessage: AssistantMessage,
+	chain: ToolChain,
 	toolCall: ToolCall,
-	hooks: ToolCallHooks,
-	manager: ToolManager,
-	activeNames: ReadonlySet<string>,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome | SuspendedToolCall> {
-	const tool = activeTool(manager, activeNames, toolCall.name);
+	const tool = declaredToolOf(chain.declared, toolCall.name);
 	if (!tool) {
 		return {
 			kind: "immediate",
@@ -1556,39 +1524,34 @@ async function prepareToolCall(
 	try {
 		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
 		const validatedArgs = validateToolArguments(tool, preparedToolCall);
-		if (hooks.beforeToolCall) {
-			const beforeResult = await hooks.beforeToolCall(
-				{
-					assistantMessage,
-					toolCall,
-					args: validatedArgs,
-					context: currentContext,
-				},
-				signal,
-			);
-			if (signal?.aborted) {
-				return {
-					kind: "immediate",
-					result: createErrorToolResult("Operation aborted"),
-					isError: true,
-				};
+		const decided = await chain.decideBeforeTool({
+			sessionId: chain.sessionId,
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			args: validatedArgs,
+		});
+		if (signal?.aborted) {
+			return {
+				kind: "immediate",
+				result: createErrorToolResult("Operation aborted"),
+				isError: true,
+			};
+		}
+		// 闸门在这个调用处结束了运行：这里不为它写结果——调用方在批上看到 `suspended`、结束运行，
+		// 恢复运行以稍后抵达的答案关闭调用。与它并存的 `block` 会写结果，所以 suspend 胜出。
+		if (decided?.suspend === true) {
+			return { kind: "suspended" };
+		}
+		if (decided?.block !== undefined) {
+			const result = createErrorToolResult(decided.block.reason || "Tool execution was blocked");
+			if (decided.terminate === true) {
+				result.terminate = true;
 			}
-			// 闸门在这个调用处结束了运行：这里不为它写结果——调用方在批上看到 `suspended`、结束运行，
-			// 恢复运行以稍后抵达的答案关闭调用。与它并存的 `block` 会写结果，所以 suspend 胜出。
-			if (beforeResult?.suspend === true) {
-				return { kind: "suspended" };
-			}
-			if (beforeResult?.block) {
-				const result = createErrorToolResult(beforeResult.reason || "Tool execution was blocked");
-				if (beforeResult.terminate === true) {
-					result.terminate = true;
-				}
-				return {
-					kind: "immediate",
-					result,
-					isError: true,
-				};
-			}
+			return {
+				kind: "immediate",
+				result,
+				isError: true,
+			};
 		}
 		if (signal?.aborted) {
 			return {
@@ -1623,32 +1586,26 @@ function emitToolExecutionUpdate(toolCall: ToolCall, emit: AgentEventSink): Tool
 }
 
 /** {@link runToolCall} 的 options。 */
-interface RunToolCallOptions extends ToolCallHooks {
-	/** 嵌套调用解析与执行所依据的表。 */
-	manager: ToolManager;
-	/** 本调用所属的运行可用的名字；名单之外的嵌套调用被拒绝。 */
-	activeNames: ReadonlySet<string>;
+interface RunToolCallOptions {
+	/** 一次运行的工具链：闸门、解析与执行（ADR-0023）。 */
+	chain: ToolChain;
 	/** 本调用自己的运行值：它施展的目录与它运行在下的 bash 超时。 */
 	run: ToolRunContext;
-	/** 作为发出该调用的消息递给 hooks。 */
-	assistantMessage: AssistantMessage;
-	/** 作为当前 agent context 递给 hooks。 */
-	context: Context;
 	signal?: AbortSignal;
 	onUpdate?: ToolUpdateSink;
 }
 
 /**
- * 让一个工具调用走与模型发出的调用相同的步骤：参数准备、schema 校验、`beforeToolCall`、执行、
- * `afterToolCall`。不发事件、不加消息。会调用其他工具的工具用它，让 hooks（例如权限检查）也作用于
+ * 让一个工具调用走与模型发出的调用相同的步骤：参数准备、schema 校验、`before_tool` 闸门、执行、
+ * `after_tool` 闸门。不发事件、不加消息。会调用其他工具的工具用它，让闸门（例如权限检查）也作用于
  * 那些调用。
  *
  * 工具失败从不 reject：未知工具、校验错误、被阻止的调用、抛出的错误都以 `isError: true` 返回。
  * 本构建尚无任何东西调用它——想嵌套另一个调用的工具会——所以它留在本文件内部而不导出。
  */
 async function runToolCall(toolCall: ToolCall, options: RunToolCallOptions): Promise<ToolCallOutcome> {
-	const { assistantMessage, context, signal } = options;
-	const preparation = await prepareToolCall(context, assistantMessage, toolCall, options, options.manager, options.activeNames, signal);
+	const { chain, run, signal } = options;
+	const preparation = await prepareToolCall(chain, toolCall, signal);
 	if (preparation.kind === "immediate") {
 		return { toolCall, result: preparation.result, isError: preparation.isError };
 	}
@@ -1663,16 +1620,16 @@ async function runToolCall(toolCall: ToolCall, options: RunToolCallOptions): Pro
 	}
 	const executed = await executePreparedToolCall(
 		preparation,
-		options.manager,
-		options.run,
+		chain,
+		run,
 		signal,
 		options.onUpdate ?? (() => {}),
 	);
-	return finalizeExecutedToolCall(context, assistantMessage, preparation, executed, options, signal);
+	return finalizeExecutedToolCall(preparation, executed, chain);
 }
 
 /**
- * 运行一个过了闸门的调用，经表执行。
+ * 运行一个过了闸门的调用，经 {@link ToolChain.executeTool} 执行。
  *
  * 名字在这里解析、不随 `prepared` 携带，所以生产代码里唯一的 `Tool.execute` 调用就是表自己的
  * （`ToolManager.execute`，ADR-0016）：引擎拥有的是围绕一次调用的编排——update sink、abort signal、
@@ -1681,7 +1638,7 @@ async function runToolCall(toolCall: ToolCall, options: RunToolCallOptions): Pro
  */
 async function executePreparedToolCall(
 	prepared: PreparedToolCall,
-	manager: ToolManager,
+	chain: ToolChain,
 	run: ToolRunContext,
 	signal: AbortSignal | undefined,
 	onUpdate: ToolUpdateSink,
@@ -1690,7 +1647,7 @@ async function executePreparedToolCall(
 	let acceptingUpdates = true;
 
 	try {
-		const result = await manager.execute(
+		const result = await chain.executeTool(
 			prepared.toolCall.name,
 			prepared.toolCall.id,
 			prepared.args,
@@ -1716,49 +1673,38 @@ async function executePreparedToolCall(
 	}
 }
 
+/**
+ * `after_tool` 闸门之后一次工具调用的定稿。闸门的改写即定稿（ADR-0023）：消息带着恰是那个内容
+ * 写下——改写是对这个结果唯一会存在的版本的一次裁决，在结果诞生的那一刻作出。
+ *
+ * 闸门的答案是回调、不是包装方法，所以这里只剩它真正能改的那一件事：content。想约束结果的 hook
+ * 自己归档全文（`archiveToolResult`、`context/spill.ts`）并把路径放进它返回的东西；写边界的兜底
+ * （fanout 的 `finalizeToolResult`）仍会接住没人约束过的结果。
+ */
 async function finalizeExecutedToolCall(
-	currentContext: Context,
-	assistantMessage: AssistantMessage,
 	prepared: PreparedToolCall,
 	executed: ExecutedToolCallOutcome,
-	hooks: ToolCallHooks,
-	signal: AbortSignal | undefined,
+	chain: ToolChain,
 ): Promise<ToolCallOutcome> {
 	let result = executed.result;
 	let isError = executed.isError;
 
-	if (hooks.afterToolCall) {
-		try {
-			const afterResult = await hooks.afterToolCall(
-				{
-					assistantMessage,
-					toolCall: prepared.toolCall,
-					args: prepared.args,
-					result,
-					isError,
-					context: currentContext,
-				},
-				signal,
-			);
-			if (afterResult) {
-				// 结构化内容没有随 content 一起被替换，可能已与它不再匹配。
-				const structuredContent =
-					afterResult.structuredContent ?? (afterResult.content ? undefined : result.structuredContent);
-				result = {
-					...result,
-					content: afterResult.content ?? result.content,
-					details: afterResult.details ?? result.details,
-					usage: afterResult.usage ?? result.usage,
-					terminate: afterResult.terminate ?? result.terminate,
-				};
-				if (structuredContent === undefined) delete result.structuredContent;
-				else result.structuredContent = structuredContent;
-				isError = afterResult.isError ?? isError;
-			}
-		} catch (error) {
-			result = createErrorToolResult(error instanceof Error ? error.message : String(error));
-			isError = true;
+	try {
+		const decided = await chain.decideAfterTool({
+			sessionId: chain.sessionId,
+			toolCallId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			content: result.content,
+			isError,
+		});
+		if (decided?.content !== undefined) {
+			// 结构化内容没有随 content 一起被替换，可能已与它不再匹配。
+			result = { ...result, content: decided.content };
+			delete result.structuredContent;
 		}
+	} catch (error) {
+		result = createErrorToolResult(error instanceof Error ? error.message : String(error));
+		isError = true;
 	}
 
 	return {

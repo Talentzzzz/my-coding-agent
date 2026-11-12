@@ -16,7 +16,7 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 
 ## 各 package 的职责
 
-**core** 是无头的：工作目录、导入的模型、工具、会话管理器、系统提示词、审批闸门，对 HTTP 和 DOM 一无所知。它是 **ADR-0007 的无属性服务**——账本、模型行、工具三个域平级互不依赖，`Agent` 是编排层、只做跨域编排（工具域里唯一持有实例的那个服务是 `ToolManager` 的一张常驻表，[ADR-0016](adr/0016-tool-manager-instance-table.md)）；一个会话在内存里只有**一件东西** `AgentState`：`{ sessionId, listeners, eventListeners, live }`——`live` 是两条队列、在飞运行、partial、重试与挂起位、还没落盘的袋、打开时指定的行，由 `Agent` 按 id 键控持有；transcript 不在里面，它就是那两个文件，每次操作现读（[ADR-0019](adr/0019-table-holds-live-half-only.md)）。账本、设置与模型行、工具表三只服务由 `createSessionAgent()` 在构造时造出、只被编排层消费，公开面在命令与引擎之外另有会话生命周期、纯数据窄读与设置/模型目录三类方法（[ADR-0017](adr/0017-agent-facade.md)）。它发出 `AgentSessionEvent` 值 —— `types.ts` 的 `AgentEvent`，加上它自己的成员：队列深度、压缩、entry 落地、配置变更、重试。运行引擎住在 `loop-manager.ts` 的零字段 `LoopManager`（[ADR-0022](adr/0022-loop-manager-whitelist-callbacks.md)）：引擎、每轮填充链、压缩、重试泵、两个工具闸门都是它的方法，`Agent` 在三个运行入口为每次调用组一只 `loopOptions`（三件每次调用的值 + 六件服务 + 两条白名单回调）递给它，一次运行只走一条链 `Agent.prompt → startPromptedRun → LoopManager.run → runEngine → prepareRequest → emit`；白名单只有两条——`bagOf` 开袋（会话表私有）与 `emit` 事件 sink（落盘、清队列、投影的组合政策是编排层与窗口契约的另一半，实现 `dispatchEvent` 留在编排层）；事件与投影走 `session/fanout.ts` 的文件级函数。模型那一侧的传输层也在这份源码树里（`llm/`，[ADR-0015](adr/0015-llm-folded-into-core.md)），但它是 core 的一个目录而不是一个包：core 对 HTTP 与 DOM 一无所知，`llm/` 对会话与账本一无所知。
+**core** 是无头的：工作目录、导入的模型、工具、会话管理器、系统提示词、审批闸门，对 HTTP 和 DOM 一无所知。它是 **ADR-0007 的无属性服务**——账本、模型行、工具三个域平级互不依赖，`Agent` 是编排层、只做跨域编排（工具域里唯一持有实例的那个服务是 `ToolManager` 的一张常驻表，[ADR-0016](adr/0016-tool-manager-instance-table.md)）；一个会话在内存里只有**一件东西** `AgentState`：`{ sessionId, listeners, eventListeners, live }`——`live` 是两条队列、在飞运行、partial、重试与挂起位、还没落盘的袋、打开时指定的行，由 `Agent` 按 id 键控持有；transcript 不在里面，它就是那两个文件，每次操作现读（[ADR-0019](adr/0019-table-holds-live-half-only.md)）。账本、设置与模型行、工具表三只服务由 `createSessionAgent()` 在构造时造出、只被编排层消费，公开面在命令与引擎之外另有会话生命周期、纯数据窄读与设置/模型目录三类方法（[ADR-0017](adr/0017-agent-facade.md)）。它发出 `AgentSessionEvent` 值 —— `types.ts` 的 `AgentEvent`，加上它自己的成员：队列深度、压缩、entry 落地、配置变更、重试。运行引擎住在 `loop-manager.ts` 的零字段 `LoopManager`（[ADR-0022](adr/0022-loop-manager-whitelist-callbacks.md)）：引擎、每轮填充链、压缩、重试泵、两个工具闸门都是它的方法，`Agent` 在三个运行入口为每次调用组一只 `loopOptions`（[ADR-0023](adr/0023-loop-manager-functions-only.md)：三件每次调用的值 + 两件既有形状 + **回调面 19 动词**）递给它，一次运行只走一条链 `Agent.prompt → startPromptedRun → LoopManager.run → runEngine → prepareRequest → emit`；袋上唯一的 sink 是 `emit` 事件出口（落盘、清队列、投影的组合政策是编排层与窗口契约的另一半，实现 `dispatchEvent` 留在编排层）——账本、settings、tools、hooks 对 loop 完全不可见，loop 需要的每样东西都以编排层实现的回调到达；事件与投影走 `session/fanout.ts` 的文件级函数。模型那一侧的传输层也在这份源码树里（`llm/`，[ADR-0015](adr/0015-llm-folded-into-core.md)），但它是 core 的一个目录而不是一个包：core 对 HTTP 与 DOM 一无所知，`llm/` 对会话与账本一无所知。
 
 **server** 拥有传输层和活跃会话：`SessionHub` 持有**一个**编排层 `Agent`，此外什么都没有——账本、设置与模型行、工具表三只服务由 `createSessionAgent()` 在编排层构造时造出、只被编排层消费，hub 只认编排层的公开面（[ADR-0017](adr/0017-agent-facade.md)；`npm run check` 里的 `check-server-facade` 守卫让「server 不知道 Manager」成为机器检查的不变量）；会话状态的那张表也由编排层自己持有：每 id 一份 `AgentState` 的 live 半（两条队列、在飞运行、订阅集合、还没落盘的袋），进程里唯一的跨栈内存会话态，宿主收摊时由 `Agent.evict` / `Agent.remove` 删除（[ADR-0019](adr/0019-table-holds-live-half-only.md)）。除此之外 hub 只按 id 记 hold（谁能用这个会话），那本是传输层的事（[ADR-0001](adr/0001-transport-websocket-mux.md)）；`Router` 把请求变成对某个控制器的一次调用，每个控制器在它做事期间持有 hold；`mux.ts` 的连接层持有一张订阅表（连接 × 会话），**订阅不拿 hold**；`projection.ts` 把"每个会话在做什么"聚成侧边栏的行。模型是**每次请求**都从 `models.json` 读，而不是缓存成一份目录；会话在每次请求前从它命名的那一行重新推导自己的模型，所以设置面板的一次编辑——密钥、端点、窗口、wire id——能抵达**每一个已经打开的会话**。
 
@@ -27,7 +27,7 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 | 认证、流式、wire | core（`llm/`） | `llm/api/anthropic-messages.ts` —— 那份裁剪副本里留下的唯一一个 API 实现，导出为 `anthropicMessages` 传输层（[ADR-0015](adr/0015-llm-folded-into-core.md)；它与工具声明的关系见*工具契约*） |
 | 导入的模型 | 我们 | `core/src/models.ts`：用户手打的那些行，每行由**手写的一个名字**命名——这个名字既是该行的身份也是它的标签，因为 transcript、配置补丁、选择器三处必须指同一行——每一行都直接变成发请求时用的模型；旧行的 `label` 被读作它的 `name`，这保住了用户选定的名字，代价是一次性的：用旧 slug 构建的引用会失效。上游的 `builtinModels()`、它的每供应商工厂、以及在其中路由的 `Models`/`Provider` 注册表，是被**刻意删除**的 |
 | 每模型能力 | 我们 | `core/src/anthropic-models.ts`：某个 Claude 模型接受什么，从它的 wire id 推导——因为手打的一行没有别的东西可以作键 |
-| 运行引擎、steering、事件 | 我们 | `loop-manager.ts` 的 `LoopManager.run`、工具调用、流事件——引擎是零字段对象，编排层组 `loopOptions` 调它（[ADR-0022](adr/0022-loop-manager-whitelist-callbacks.md)） |
+| 运行引擎、steering、事件 | 我们 | `loop-manager.ts` 的 `LoopManager.run`、工具调用、流事件——引擎是零字段对象，编排层组 `loopOptions`（回调面）调它（[ADR-0022](adr/0022-loop-manager-whitelist-callbacks.md)、[ADR-0023](adr/0023-loop-manager-functions-only.md)） |
 | 工具 | 我们 | 基于 `node:fs` / `node:child_process` 的六个文件工具 |
 | 会话持久化 | 我们 | `SessionManager`：`.json` 快照（会话是什么）+ 同 stem 的只追加 JSONL 日志（说过什么），配对残缺即删（[ADR-0009](adr/0009-session-two-file-format.md)） |
 | 提示词、压缩、视图收缩 | 我们 | `context/system-prompt.ts`、`trim-tool-call-args.ts`、`spill.ts`、`clear-tool-results.ts`、`compaction.ts` |
@@ -47,7 +47,7 @@ my-coding-agent/
 ├── scripts/          # install-deps.ts（此处 npm 的替代品）、check-tokens.ts，以及各个 smoke 脚本
 └── packages/
     ├── core/src/     # @my-agent/core - 无头 agent：agent.ts（编排层：会话表、命令、审批、投影与事件契约）、
-    │                 #   loop-manager.ts（零字段 LoopManager：引擎、填充链、压缩、重试、闸门，ADR-0022）、
+    │                 #   loop-manager.ts（零字段 LoopManager：引擎、填充链、压缩、重试、闸门，ADR-0022/0023）、
     │                 #   session-factory.ts（装配）、
     │                 #   types.ts（引擎与 hook 的契约，转发合并后的 Context/Tool 名字）、
     │                 #   hooks.ts（三个接缝）、models.ts、setting-manager.ts、workdir.ts、
@@ -107,7 +107,7 @@ level 本身骑在模型上（`Model.thinkingLevel`，由 `createModel(config, l
 
 ## 循环（`LoopManager.run`），端到端
 
-这一段里的「循环」就是 `LoopManager.run`——引擎是零字段的 `LoopManager`（[ADR-0022](adr/0022-loop-manager-whitelist-callbacks.md)；它曾短暂被删，[ADR-0012](adr/0012-loop-manager-object.md) 立起、[ADR-0013](adr/0013-loop-services-are-arguments.md) 削空、[ADR-0014](adr/0014-loop-manager-removed.md) 删除，0022 把对象请回来：买的不是持有，是文件分区）：账本、settings、tools、hooks、prompt builder、transport 由编排层在调用点装进 `loopOptions` 递给它，越过边界的只有两条白名单回调（`bagOf` 开袋、`emit` 事件 sink），所以下面每一步里「循环做的事」都是 `loop-manager.ts` 里的代码。
+这一段里的「循环」就是 `LoopManager.run`——引擎是零字段的 `LoopManager`（[ADR-0022](adr/0022-loop-manager-whitelist-callbacks.md)；它曾短暂被删，[ADR-0012](adr/0012-loop-manager-object.md) 立起、[ADR-0013](adr/0013-loop-services-are-arguments.md) 削空、[ADR-0014](adr/0014-loop-manager-removed.md) 删除，0022 把对象请回来：买的不是持有，是文件分区。边界由 [ADR-0023](adr/0023-loop-manager-functions-only.md) 再收紧一格）：账本、settings、tools、hooks、prompt builder、transport 由编排层持有，但递给 `loopOptions` 的不是它们——是编排层实现的**回调面**（读 8、写 6、执行 1、接缝 3、窗口 1，加 sink `emit`），所以 loop 层对三只 Manager 与 hooks 的认识为零，下面每一步里「循环做的事」都是 `loop-manager.ts` 里的代码。
 
 1. 输入框发送 `POST /api/sessions/{id}/messages`，带 `{ text, behavior?, model?, thinkingLevel? }`。
 2. `SessionController.prompt` 认领会话，在它上面调用 `prompt`，并回答 `202`。
@@ -211,7 +211,7 @@ type AgentSessionEvent =
 
 `Settings.retry` 就是这个策略逐字段的翻版：`enabled`（默认 `true`）、`maxRetries`（`3`）、`baseDelayMs`（`2000`）、`maxAgentDelayMs`（`60000`）。第 `k` 次尝试等待 `min(baseDelayMs * 2^(k-1), maxAgentDelayMs)`；`maxRetries` 数的是**重试**而不是调用，而 `0` 是一个设置值，不是一个缺失值。
 
-**接缝在模型的 transport 上，在引擎之下。** 另一个候选是引擎在两轮之间留的钩子 `prepareNextTurn`，它行不通：错误响应是一次硬退出，引擎发出 `turn_end` 和 `agent_end` 就返回了，**根本走不到下一轮**。该钩子在 vendored 循环里从未被装配过，随合并一起删除；引擎如今是 `LoopManager.run`（[ADR-0022](adr/0022-loop-manager-whitelist-callbacks.md)），而它不再收到一个 `streamFn`：`run` 给这次运行包一层 transport，策略装在那一层里，所以它既拦得住引擎的每一次请求，也拦得住压缩摘要那次不经过引擎的请求。`pumpAttempts` 包裹每一次尝试，把它的 `AssistantMessageEventStream` 排进会话自己的流，并让 `retryAssistantCall` 来分类：
+**接缝在模型的 transport 上，在引擎之下。** 另一个候选是引擎在两轮之间留的钩子 `prepareNextTurn`，它行不通：错误响应是一次硬退出，引擎发出 `turn_end` 和 `agent_end` 就返回了，**根本走不到下一轮**。该钩子在 vendored 循环里从未被装配过，随合并一起删除；引擎如今是 `LoopManager.run`（[ADR-0022](adr/0022-loop-manager-whitelist-callbacks.md)、[ADR-0023](adr/0023-loop-manager-functions-only.md)），而它不再收到一个 `streamFn`：`run` 给这次运行包一层 transport，策略装在那一层里，所以它既拦得住引擎的每一次请求，也拦得住压缩摘要那次不经过引擎的请求。`pumpAttempts` 包裹每一次尝试，把它的 `AssistantMessageEventStream` 排进会话自己的流，并让 `retryAssistantCall` 来分类：
 
 - 成功尝试的事件原样通过；
 - 将被重试的尝试，除了它的**终态事件**之外全部通过——所以循环从不记录它，而被重试的尝试的增量会**原地覆盖**同一个 assistant 槽位。循环必须看到每次请求**恰好一个** `start`，否则它会追加第二条 assistant 消息，而不是替换那条被放弃的；

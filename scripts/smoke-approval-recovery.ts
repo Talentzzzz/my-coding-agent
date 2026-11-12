@@ -33,6 +33,8 @@ import {
 	type Session,
 	type ModelConfig,
 	type ModelSelection,
+	type ToolRunContext,
+	type ToolUpdateCallback,
 	setSessionsDir,
 } from "@my-agent/core";
 
@@ -264,10 +266,11 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 	};
 	const manager = createToolManager();
 	manager.register(readTool);
-	// 一次 run 会激活的名字：这里只有那个 fixture，它也正是整张表——链条问的两个问题（"这次
-	// run 可以调它吗"、"这个名字存在吗"）被有意分开应答，所以本练习供给自己的答案而不是推导
-	// 一个。
-	const activeNames = new Set(["read_fixture"]);
+	// 一次 run 会声明的工具面：这里只有那个 fixture，它也正是整张表——链条问的两个问题（"这次
+	// run 可以调它吗"、"这个名字存在吗"）如今是同一个问题：解析对着本请求声明过的数组按名查
+	// （ADR-0023），调用只能落到声明过的名字上。所以每个用例供给自己的声明面，而不是一张表加
+	// 一份名单。
+	const declared = [readTool];
 
 	/** 一次趟发出了什么，让"沉默"是一条断言而不是一个未观察的主张。 */
 	const events: AgentEvent[] = [];
@@ -275,23 +278,37 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 		events.push(event);
 	};
 
+	/** 执行经本练习自建的表转发：`Tool.execute` 的生产唯一入口仍是表自己（ADR-0016）。 */
+	const executeTool = (
+		name: string,
+		toolCallId: string,
+		params: unknown,
+		run: ToolRunContext,
+		signal: AbortSignal | undefined,
+		onUpdate: ToolUpdateCallback<any> | undefined,
+	) => manager.execute(name, toolCallId, params, run, signal, onUpdate);
+
+	/** 放行一切的门：与旧的"递入空 hooks 对象"同一语义。 */
+	const passGates = {
+		decideBeforeTool: async () => ({}),
+		decideAfterTool: async () => ({}),
+	};
+
 	/** 调用抵达门的次数，让"在门之前被拒"可观察。 */
 	let gatesAsked = 0;
 	/** 应答"挂起"、并统计自己被问过几次的门。 */
 	const suspendingGate = {
-		beforeToolCall: async () => {
+		decideBeforeTool: async () => {
 			gatesAsked += 1;
 			return { suspend: true };
 		},
+		decideAfterTool: async () => ({}),
 	};
 
 	const off = await recoverPendingToolCalls(
-		{ messages: [dangling], tools: [] },
 		danglingToolCallsOf([dangling]),
 		{ enablePendingToolRecovery: false },
-		{},
-		manager,
-		activeNames,
+		{ sessionId: "recovery-smoke", declared, executeTool, ...passGates },
 		{ workDirAbsPath: process.cwd() },
 		undefined,
 		emitted,
@@ -308,12 +325,9 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 	);
 
 	const on = await recoverPendingToolCalls(
-		{ messages: [dangling], tools: [] },
 		danglingToolCallsOf([dangling]),
 		undefined,
-		{},
-		manager,
-		activeNames,
+		{ sessionId: "recovery-smoke", declared, executeTool, ...passGates },
 		{ workDirAbsPath: process.cwd() },
 		undefined,
 		emitted,
@@ -325,16 +339,13 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 	);
 
 	// 一个门没有真正放行的 grant：恢复趟把调用重新穿过门，而再次挂起的门让恢复就地停下——
-	// 不写任何结果，run 在自己的请求之前结束，与活批次被挂起时一模一样。工具必须存在于表里，
-	// 门才可能被问到；context 什么都不声明，这正是要点——声明是 transport 读的东西，不是调用
-	// 解析所对着的东西。
+	// 不写任何结果，run 在自己的请求之前结束，与活批次被挂起时一模一样。门能被问到的唯一前提
+	// 是调用先解析到了实例：fixture 在声明面上，所以拦截它的是门，而不是"未知工具"——那条
+	// 错误在任何门运行之前就应答了。
 	const resuspended = await recoverPendingToolCalls(
-		{ messages: [dangling], tools: [] },
 		danglingToolCallsOf([dangling]),
 		{ answers: { call_x: { approved: true } } },
-		suspendingGate,
-		manager,
-		activeNames,
+		{ sessionId: "recovery-smoke", declared, executeTool, ...suspendingGate },
 		{ workDirAbsPath: process.cwd() },
 		undefined,
 		emitted,
@@ -350,16 +361,13 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 	/** 这个用例留下的计数：下面那趟以它为基准测差值。 */
 	const gatesAfterResuspend = gatesAsked;
 
-	// 一个这次 run 无权使用的名字的 grant：同一张表、同一份 transcript，只有列表不同——调用被
-	// 以未知名字得到的那句话关闭，fixture 自己的代码从未被进入。这正是表回答不了的那一半：
-	// 它持有工具（上面的用例抵达了它的门），而拒绝 run 的是 run 的列表。
+	// 一个这次 run 未曾声明的名字的 grant：同一次工具链，只有声明面不同——调用被以未知名字得到的
+	// 那句话关闭，fixture 自己的代码从未被进入。这正是声明面回答的那一半：门（与表）持有工具，
+	// 而拒绝 run 的是本请求声明过什么。
 	const outside = await recoverPendingToolCalls(
-		{ messages: [dangling], tools: [] },
 		danglingToolCallsOf([dangling]),
 		{ answers: { call_x: { approved: true } } },
-		suspendingGate,
-		manager,
-		new Set<string>(),
+		{ sessionId: "recovery-smoke", declared: [], executeTool, ...suspendingGate },
 		{ workDirAbsPath: process.cwd() },
 		undefined,
 		emitted,

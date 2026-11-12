@@ -1,7 +1,7 @@
 # my-coding-agent
 
 一个在你本机、自己的桌面窗口里运行的编码 agent。pi 的一段代码作为裁剪副本收进本仓库：`packages/core/src/llm/`（来自
-[`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层——只取本项目真正调用的部分，而且它已经不是一个独立的包，并进了 core（[ADR-0015](docs/adr/0015-llm-folded-into-core.md)）。运行引擎是我们的代码：它原先是 pi 循环的副本，先并入 core（[ADR-0008](docs/adr/0008-loop-merged-into-agent.md)），如今是 `packages/core/src/loop-manager.ts` 里零字段的 `LoopManager`（[ADR-0022](docs/adr/0022-loop-manager-whitelist-callbacks.md)），不再跟踪上游。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳也都是我们自己的。
+[`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层——只取本项目真正调用的部分，而且它已经不是一个独立的包，并进了 core（[ADR-0015](docs/adr/0015-llm-folded-into-core.md)）。运行引擎是我们的代码：它原先是 pi 循环的副本，先并入 core（[ADR-0008](docs/adr/0008-loop-merged-into-agent.md)），如今是 `packages/core/src/loop-manager.ts` 里零字段的 `LoopManager`（[ADR-0022](docs/adr/0022-loop-manager-whitelist-callbacks.md)、[ADR-0023](docs/adr/0023-loop-manager-functions-only.md)），不再跟踪上游。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳也都是我们自己的。
 
 agent 跑在一个 Node 进程里，而不是渲染进程里：它持有你的 API 密钥，而它的本职就是读写文件。窗口是一个客户端——它用 REST 发送 prompt，并从一条常驻 WebSocket 通道上读取 agent 的输出，这也是为什么每一条命令同样能用 `curl` 或脚本发。[docs/architecture.md](docs/architecture.md) 是设计文档：请求流程、API 表、会话格式，以及每一块为什么在那个位置。
 

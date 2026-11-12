@@ -1,6 +1,6 @@
 # 0023：`LoopManager` 只认函数——六件依赖回调化，loop 层零 Manager 可见性
 
-日期：2026-11-12 · 状态：已接受（wayfinder 票 003，两轮 grilling 与用户拍板；落地归票 004、守卫升级归票 005，见 `.scratch/wayfinder/loop-zero-manager/`）
+日期：2026-11-12 · 状态：已接受（wayfinder 票 003，两轮 grilling 与用户拍板；落地归票 004、守卫升级归票 005，见 `.scratch/wayfinder/loop-zero-manager/`）；已落地（票 004，同日，偏差见「后果」末条）
 取代：[0022](0022-loop-manager-whitelist-callbacks.md) 的**「六件依赖进袋」**——`LoopOptions` 上的 `sessionManager` / `settings` / `tools` / `hooks` 四件 Manager 字段（决定 2「`Agent` 仍是六件服务的持有者」里**递给 loop 的那一半**；判据节 `loopOptions` 完整形状的四个 Manager 槽位；「后果」里「一只 11 字段的参数袋」的四件 Manager 槽位——六件里剩下的 `api` / `systemPrompt` 本就是函数形状，原样保留）——以及决定 7 里「fanout 参数 `(state, session, SessionServices)` **在调用点现建**」的**组装点一半**（`servicesOf` 组装点消除，`publishState` / `approvalsOf` 包成 Agent 传入的回调；fanout 文件与其参数形状不动）。0022 的其余裁决由本 ADR **延续并收紧，不是推翻**：文件分区、零字段对象、单袋形状、静态守卫、出口口径全部不动——变的是边界的定义：白名单从「两条绕回回调」改成「19 动词 + `emit` 一条 sink」，原则一字未动，纪律推到极致
 取代者：无
 
@@ -211,7 +211,10 @@ export interface LoopOptions {
 - **`Agent` 侧长出一只大闭包。** 19 动词 + `emit` 的实现全部住在 `loopOptions()` 的闭包里（对照表见票 002 §4，落地归票 004）；`servicesOf` 与 `toolCallHooks` 消失，换来的是接线处的规模。`agent.ts` 不再收缩而是横长——这是买「loop 零 Manager 可见性」的价格，付在编排层。
 - **人工判据这条照旧背上。** 守卫升级后仍查不出「这条动词该不该存在」——第三条动词可以在不改守卫的情况下被塞进袋。封闭清单 + 重开本 ADR 是自觉，不是类型。
 - **实况文档窗口期照旧。** `AGENTS.md` 的 engine 词条、`docs/architecture.md`、根 `README.md` 今天描述的是 0022 落地后的形状（六件依赖在袋上）；票 004 落地时改指 0023。窗口期内 ADR 与实况不同是**有意的**：一个记决定，一个记实况。
-- **行数账与落地偏差归票 004 补。** 本 ADR 接受时代码仍在 0022 形状上（`agent.ts` 1172 行、`loop-manager.ts` 1940 行、`LoopOptions` 11 字段含四件 Manager）；本次是机械改写（`this.xxx` → `loopOptions.xxx` → 回调调用），预期行数位移很小，落地后如实记账。
+- **行数账与落地偏差（票 004 记账）**：本 ADR 接受时代码仍在 0022 形状上（`agent.ts` 1172 行、`loop-manager.ts` 1940 行、`LoopOptions` 11 字段含四件 Manager）。落地后：`agent.ts` 1172 → 1251（+79——回调面的实现住进编排层，这正是「Agent 侧长出一只大闭包」的账）、`loop-manager.ts` 1940 → 1886（−54——`servicesOf` / `toolCallHooks` / `recordSelection` / `declaredTools` / 两个闸门包装方法离场，25 字段的袋与注释进场）、`types.ts` 202 → 99（hooks 机件的五个类型与 `AgentRequestUpdate.activeNames` 离场）。机械改写的预期（行数位移很小）在 loop 侧成立、在编排层反向成立。落地偏差三处，均为形状级、语义只搬不改：
+  1. **机件签名多退了两个参数**：`currentContext` 与 `assistantMessage` 曾只为把 hooks 的 context 载荷递进闸门；闸门改成显式回调后，事件形状（判据节）不携带它们，两个参数随载荷一起从批处理机件与恢复机器的签名上退场——`recoverPendingToolCalls` 由此少一个首参（`danglingToolCallsOf` 的消费移到调用方），smoke 同步。
+  2. **`AgentRequestUpdate.activeNames` 消失**：执行链的解析改对请求携带的声明数组（`context.tools`）按名查，名单与声明从两条派生并成同一个对象——「模型被告知什么与它可以运行什么」的不变量由 `prepareRequest` 的返回结构直接承载，引擎不再另持一份集合。
+  3. **回调面实现住在 `Agent.loopCallbacks()`**：`loopOptions()` 与 `maybeCompact()` 两处组袋摊开同一组实现（`CompactOptions` 的 Pick 链与运行袋共享），避免六条压缩回调在两处各写一份转发；hooks 三动词的 `apply` 门面在无处理器时以 undefined 作答，接线处归一成空决定（`?? {}`），袋上三动词的类型保持判据节的逐字形状。
 
 ## 尚未决定
 

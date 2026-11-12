@@ -36,15 +36,19 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   面——这条归 [ADR-0017](docs/adr/0017-agent-facade.md)，由 `npm run check` 的 `check-server-facade`
   守卫。
 - **engine（引擎）** —— `LoopManager.run`（`loop-manager.ts`，零字段）：一次运行的入口与出口，与
-  `runEngine`、`prepareRequest`、压缩阶梯、重试泵、两个闸门一起是它的方法（ADR-0022）。它读的每一处接缝
-  要么是这次运行的局部变量（模型、abort controller、事件 sink、闸门，以及**这次运行自己重放出的那只袋**），
-  要么是 `loopOptions` 上的服务或两条白名单回调，所以运行期没有一处瞬态被谁持有。那只袋是 ADR-0019 的
-  「一次运行读一次盘」：编排层开跑时 `bag(id)` 一次装进袋，之后每一轮、每次压缩、每次落盘都写它。它曾是
-  一个独立对象（ADR-0012、0013），0014 以「不持有任何东西」为由删掉，0022 把对象请回来——买的不是持有，
-  是文件分区：读 loop 只看一个文件，越过边界的只有 `bagOf` 与 `emit` 两条（emit 的实现 `dispatchEvent`
-  留在编排层，是窗口契约的另一半）。「循环」只是那些轮次的日常说法。它经 `ToolManager` 取实例、
-  经它的执行入口调用（[ADR-0016](docs/adr/0016-tool-manager-instance-table.md)），发给模型的是带
-  `tools` 的 `Context`——同一个 `Tool` 的两半都经它手，而传输层只读另一半（ADR-0015）。
+  `runEngine`、`prepareRequest`、压缩阶梯、重试泵、两个闸门一起是它的方法（ADR-0022 分区、ADR-0023
+  收边界）。它读的每一处接缝要么是这次运行的局部变量（模型、abort controller、事件 sink，以及
+  **这次运行自己重放出的那只袋**），要么是 `loopOptions` 上的一个成员——而袋上除三件值（`state` /
+  `bag` / `start`）、两件既有形状（`api` / `systemPrompt`）与 sink `emit` 外**全是回调**：回调面
+  19 动词由编排层实现、内部自己摸 Manager / fanout，三只 Manager 与 hooks 对 loop 完全不可见
+  （ADR-0023）。运行期没有一处瞬态被谁持有。那只袋是 ADR-0019 的「一次运行读一次盘」：编排层开跑时
+  `bag(id)` 一次装进袋，之后每一轮、每次压缩、每次落盘都写它；开袋路径只剩 `recordSelection`
+  回调内部那一处，loop 没有任何自开袋动词。它曾是一个独立对象（ADR-0012、0013），0014 以
+  「不持有任何东西」为由删掉，0022 把对象请回来——买的不是持有，是文件分区：读 loop 只看一个
+  文件。工具调用经 `executeTool` 回调执行（实现转发 `ToolManager.execute`，
+  [ADR-0016](docs/adr/0016-tool-manager-instance-table.md)），解析只对着本请求声明过的数组按名查
+  ——「模型被告知什么与它可以运行什么」从同一个对象作答；发给模型的是带 `tools` 的 `Context`
+  ——同一个 `Tool` 的两半都经它手，而传输层只读另一半（ADR-0015）。「循环」只是那些轮次的日常说法。
 - **fanout（扇出）** —— `session/fanout.ts`：`emitEvent`、`publishState`、`appendMessageEntry`、
   `dropQueued`、`emitQueueUpdate`、`nextStamp`、`snapshotOf`、`approvalsOf`，参数是
   `(state, session, SessionServices)`——那只袋是**调用方自己开的**，函数不持有、不缓存（ADR-0019）。

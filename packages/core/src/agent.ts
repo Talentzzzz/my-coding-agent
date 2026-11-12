@@ -1,8 +1,8 @@
 import { assembleSession, type AssembleAgentStateOptions } from "./assembly.ts";
-import { type ChatTransport, type Message } from "./llm/index.ts";
+import { type ChatTransport, type Message, type Tool } from "./llm/index.ts";
 import { type AgentsMdFile } from "./context/agents-md.ts";
 import type { Hooks } from "./hooks.ts";
-import { normalizeThinkingLevel, type ModelConfig } from "./models.ts";
+import { normalizeThinkingLevel, rowFor, type ModelConfig, type ThinkingLevel } from "./models.ts";
 import type { ConfigPatch, ModelSelection, PendingApproval, PromptBehavior, SessionRow, SessionSnapshot } from "./protocol.ts";
 import type { AgentState } from "./session/agent-state.ts";
 import { createAgentState, createLive } from "./session/agent-state.ts";
@@ -35,7 +35,7 @@ import type { SettingManager } from "./setting-manager.ts";
 import type { Settings } from "./config.ts";
 import type { ToolManager } from "./tools/index.ts";
 import { type AgentEvent, type ToolCallAnswer } from "./types.ts";
-import { LoopManager, type LoopOptions, type RunStart } from "./loop-manager.ts";
+import { LoopManager, type CompactOptions, type LoopOptions, type RunStart } from "./loop-manager.ts";
 
 // 事件面定义在发布它的 fanout 旁边（`session/events.ts`），在这里转发出去，因为 `index.ts` 一直
 // 都是从本模块为此作答的。
@@ -119,10 +119,12 @@ export interface AgentConfig {
  * 这是无状态架构的编排层（ADR-0006 §1）：四个域是无状态单例，而跨域的顺序——应用输入框的选择、
  * 按 id 解析会话、写下消息、跑引擎、再报告动了什么——住在这里、别无他处，因为它不属于任何单个域。
  *
- * 一次运行的机械是 {@link LoopManager}（ADR-0022）：零字段的对象，本类是它在本进程的唯一消费者。
- * 三个运行入口为每次调用现凑一只 {@link LoopOptions}——三件每次调用的值、六件本类持有的服务（账本、
- * 配置、工具表、接缝、prompt builder、传输层）、两条白名单回调（`bagOf` 开袋、`emit` 事件 sink）。
- * 这里的其余一切都是会话自己的命令面——transcript 读取、审批、配置挪动，以及命令作答所经的 fanout。
+ * 一次运行的机械是 {@link LoopManager}（ADR-0022 文件分区不动，边界由 ADR-0023 收紧）：零字段的
+ * 对象，本类是它在本进程的唯一消费者。三个运行入口为每次调用现凑一只 {@link LoopOptions}——三件
+ * 每次调用的值（`state` / `bag` / `start`）、两件既有形状（prompt builder、传输层）、一条白名单
+ * sink（`emit`）与回调面 19 动词：本类仍是六件服务的持有者，但「递给 loop 的那一半」全部改成了
+ * 自己实现的回调——三只 Manager 与 hooks 对 loop 完全不可见。这里的其余一切都是会话自己的命令面
+ * ——transcript 读取、审批、配置挪动，以及命令作答所经的 fanout。
  *
  * 这个类不持有会话状态：方法按 id 点名自己的会话，从 session manager 解析账本袋、从表解析 live 半，
  * 并从这两者重建命令所需的一切。恢复的会话与活跃的会话跑同一条链，这正是它们无从区分的原因。
@@ -673,24 +675,101 @@ export class Agent {
 	}
 
 	/**
-	 * 一次运行的参数袋，在调用点现凑（ADR-0022）：`state` / `bag` / `start` 三件每次调用的值、六件
-	 * 本类的服务、两条白名单回调——`bagOf` 是开袋的唯一入口（会话表是本类私有的），`emit` 是事件
-	 * sink（落盘、清队列、投影的组合政策，实现见 {@link Agent.dispatchEvent}）。它是一次调用的参数表，
-	 * 用完就丢，不是被持有的聚合袋（ADR-0007）。
+	 * 一次运行的回调面（ADR-0023）：19 动词 + `emit` 的全部实现，住在本类——loop 需要的每样东西
+	 * 都以函数到达，谁提供、从哪来是这里的事，实现内部自己摸 Manager / fanout / 派生函数。
+	 *
+	 * 每条都是一个语义操作（读 8、写 6、执行 1、接缝 3、窗口 1，加 sink），不是逐点镜像。它们不是
+	 * 方法：没有任何一个持有会话——会话按实参点名，服务从 `this` 现取（ADR-0007），与命令面用同一
+	 * 份推导（`approvalsOf` / `toolStateOf` / `modelChoiceOf`），所以回调与命令不可能各执一词。
+	 *
+	 * 单独一个方法而不内联在 {@link Agent.loopOptions} 里，是因为压缩入口（{@link Agent.maybeCompact}）
+	 * 组 {@link CompactOptions} 时摊开的是同一条 Pick 链——两处组袋共享同一组实现，不养两份转发。
+	 */
+	private loopCallbacks(): Omit<LoopOptions, "state" | "bag" | "start" | "api" | "systemPrompt"> {
+		return {
+			emit: (runState, session, event) => this.dispatchEvent(runState, session, event),
+
+			contextMessages: (session) => this.sessionManager.buildSessionContext(session).messages,
+			contextEntries: (session) => this.sessionManager.buildContextEntries(session),
+			modelCatalog: () => this.settingsManager.modelCatalog(),
+			modelChoice: (session, chosen) => modelChoiceOf(this.sessionManager, session, this.settingsManager, chosen),
+			activeTools: (session) => {
+				const names = toolStateOf(this.sessionManager, session, this.settingsManager, this.tools.names()).activeToolNames;
+				// 声明数组与名单是同一次派生的两半：按名字到唯一的表上取，元素是表自己的实例
+				// （ADR-0016）。表只增，所以同一名字在两次请求间解析到同一实例。
+				const declared: Tool<any>[] = [];
+				for (const name of names) {
+					const tool = this.tools.get(name);
+					if (tool !== undefined) declared.push(tool);
+				}
+				return { names, declared };
+			},
+			approvals: (session) => approvalsOf(this.services, session),
+			bashSettings: (workDirAbsPath) => this.settingsManager.getBashSettings(workDirAbsPath),
+			retrySettings: (workDirAbsPath) => this.settingsManager.getRetrySettings(workDirAbsPath),
+
+			recordSelection: (session, catalog, choice) => {
+				// 请求所用的模型已经是生效中的选择——输入框挪动时已把它写上快照（ADR-0019）——所以这里
+				// 只补手势无从得知的部分：该行此刻应答的 wire id，与规范化后的档位。因此它通常是一次
+				// 空操作，而非空时，写入经过**全新的**袋而不是运行的那只：快照被整体重写，而在运行开始
+				// 时打开的副本可能带着某个其后被人挪过的选择。两个字段都显式设置，所以快照里的其他东西
+				// 无论哪种情况都不被触碰。
+				//
+				// 它对比的基线是文件的、不是袋的——`recordedOnDisk` 读的是快照，所以同一选择上的多轮
+				// 运行只花一次读、零次写。没有行应答的选择不记录行：没有 wire id 可写，而它所属的请求
+				// 即将被传输层拒绝而非发送。开袋走 {@link Agent.bag}——会话表是本类私有的，这正是
+				// `bagOf` 从白名单上退下、收编进这个语义操作的原因（ADR-0023）。
+				const recorded = this.sessionManager.recordedOnDisk(session);
+				const row = rowFor(choice, catalog);
+				const level = normalizeThinkingLevel(choice.thinkingLevel) as ThinkingLevel;
+				if (
+					level === recorded.thinkingLevel &&
+					(row === undefined || (row.name === recorded.model?.name && row.id === recorded.model?.modelId))
+				) {
+					return;
+				}
+				const bag = this.bag(session.sessionId);
+				if (row !== undefined) this.sessionManager.setModel(bag, row.name, row.id);
+				this.sessionManager.setThinkingLevel(bag, level);
+				this.sessionManager.flushMeta(bag);
+			},
+			setSuspended: (session, suspended) => this.sessionManager.setSuspended(session, suspended),
+			appendMessage: (state, session, message) => appendMessageEntry(state, session, this.sessionManager, message),
+			appendCompaction: (session, summary, firstKeptEntryId, tokensBefore, usage) =>
+				this.sessionManager.appendCompaction(session, summary, firstKeptEntryId, tokensBefore, usage),
+			appendTrimToolCallArgs: (session, trimmedEntryIds, tokensBefore) =>
+				this.sessionManager.appendTrimToolCallArgs(session, trimmedEntryIds, tokensBefore),
+			appendClearToolResults: (session, clearedEntryIds, tokensBefore) =>
+				this.sessionManager.appendClearToolResults(session, clearedEntryIds, tokensBefore),
+
+			executeTool: (name, toolCallId, params, run, signal, onUpdate) =>
+				this.tools.execute(name, toolCallId, params, run, signal, onUpdate),
+
+			// hooks 三动词：`Hooks` 服务与 `apply` 门面留在本类原样，每条就是一次 apply 的转发。
+			// 无处理器时 apply 以 undefined 作答，归一成空决定——结构同步点在这三行的形状上，
+			// 形状不合编译即失败（ADR-0023）。
+			rewriteContext: async (injected) => (await this.hooks.apply("context", injected)) ?? {},
+			decideBeforeTool: async (event) => (await this.hooks.apply("before_tool", event)) ?? {},
+			decideAfterTool: async (event) => (await this.hooks.apply("after_tool", event)) ?? {},
+
+			publish: (state, session) => publishState(state, session, this.services),
+		};
+	}
+
+	/**
+	 * 一次运行的参数袋，在调用点现凑（ADR-0023）：`state` / `bag` / `start` 三件每次调用的值、两件
+	 * 既有形状（prompt builder、传输层）与 {@link Agent.loopCallbacks} 的回调面。它是一次调用的参数
+	 * 表，用完就丢，不是被持有的聚合袋（ADR-0007）；三只 Manager 与 hooks 不在袋上——loop 层对它们
+	 * 的认识为零。
 	 */
 	private loopOptions(state: AgentState, bag: Session, start: RunStart): LoopOptions {
 		return {
 			state,
 			bag,
 			start,
-			sessionManager: this.sessionManager,
-			settings: this.settingsManager,
-			tools: this.tools,
-			hooks: this.hooks,
 			systemPrompt: this.systemPrompt,
 			api: this.api,
-			bagOf: (id) => this.bag(id),
-			emit: (runState, session, event) => this.dispatchEvent(runState, session, event),
+			...this.loopCallbacks(),
 		};
 	}
 
@@ -1056,8 +1135,9 @@ export class Agent {
 	 * 对按 id 点名的会话跑压缩阶梯。
 	 *
 	 * 填充链在每个请求里、循环内部跑同样三步；这个公开形状让调用方可以对着自己点名的会话驱动它们
-	 * ——演练修剪阶梯的 smoke 正是这么做的。模型由 loop 现算（ADR-0022 决定 3）：本方法只递会话与
-	 * 压缩自己的调用值，不再摸设置门。
+	 * ——演练修剪阶梯的 smoke 正是这么做的。模型由 loop 现算：本方法只递会话与压缩自己的调用值，
+	 * 连同 {@link Agent.loopCallbacks} 摊开的 Pick 链（{@link CompactOptions} 本身就是压缩阶梯的
+	 * 依赖清单，ADR-0023）。
 	 */
 	maybeCompact(
 		id: string,
@@ -1075,8 +1155,7 @@ export class Agent {
 			now,
 			signal,
 			transport,
-			sessionManager: this.sessionManager,
-			settings: this.settingsManager,
+			...this.loopCallbacks(),
 		});
 	}
 
@@ -1105,7 +1184,7 @@ export class Agent {
 
 	// ---------------------------------------------------------------------------- 事件契约
 	//
-	// 运行报告的每件事在这里落盘并扇出——这是白名单回调 `emit` 的实现侧（ADR-0022 决定 4），loop 经
+	// 运行报告的每件事在这里落盘并扇出——这是白名单 sink `emit` 的实现侧（ADR-0023），loop 经
 	// loopOptions 拿到它。其余一次运行的机械住在 `loop-manager.ts`，由上面的运行入口组袋调用。
 
 	/**

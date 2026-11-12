@@ -1,21 +1,17 @@
-// 引擎的契约：一次运行发布什么，以及运行侧 hook 以什么形状作答。这些类型曾住在 `packages/loop`；
-// 引擎住在 `loop-manager.ts`（ADR-0022），而它跨过该文件边界递出的形状——给 hooks、给会话自己的订阅者——就住
-// 这里，归拢成一个模块。工具与工具结果是 `Tool` 与 `ToolResult`，定义在传输层旁边的 `llm/types.ts`，
-// 由请求与运行共用。wire 类型是 `protocol.ts` 的事，留在那里；`QueueMode` 是共享的，
-// `protocol.ts` 转发本模块这份定义，而不是再声明一份。
+// 引擎的契约：一次运行发布什么，以及恢复遍以什么形状作答。这些类型曾住在 `packages/loop`；
+// 引擎住在 `loop-manager.ts`（ADR-0022），而它跨过该文件边界递出的形状——给会话自己的订阅者——就住
+// 这里，归拢成一个模块。hooks 三动词的事件与答案自 ADR-0023 起结构定义在 `loop-manager.ts`（与
+// HookMap 的同步点在 agent.ts 的接线处）；工具与工具结果是 `Tool` 与 `ToolResult`，定义在传输层旁边
+// 的 `llm/types.ts`，由请求与运行共用。wire 类型是 `protocol.ts` 的事，留在那里；`QueueMode` 是共享
+// 的，`protocol.ts` 转发本模块这份定义，而不是再声明一份。
 import type {
-	AssistantMessage,
 	AssistantMessageEvent,
 	Context,
-	ImageContent,
-	JsonValue,
 	Message,
 	Model,
-	TextContent,
 	ToolCall,
 	ToolResult,
 	ToolResultMessage,
-	Usage,
 } from "./llm/index.ts";
 
 // 本模块曾以 `Agent` 前缀定义的那些名字，转发出去让它继续为此作答：定义住在传输层旁边的
@@ -29,31 +25,6 @@ export type { Context, Tool, ToolExecutionMode, ToolResult, ToolUpdateCallback }
  * - "one-at-a-time"：只取走并注入最旧的一条，其余留在队列里等之后的取走点。
  */
 export type QueueMode = "all" | "one-at-a-time";
-
-/**
- * `beforeToolCall` 返回的结果。
- *
- * 返回 `{ block: true }` 会阻止工具执行，运行改为发出一个错误工具结果；`reason` 成为该错误结果里
- * 显示的文本，省略时使用默认的阻止消息。
- */
-export interface BeforeToolCallResult {
-	block?: boolean;
-	reason?: string;
-	/**
-	 * 提示 agent 在此调用被阻止时于当前工具批结束后停止。只有批中每个定稿的工具结果都设为 true，
-	 * 提前终止才会发生。
-	 */
-	terminate?: boolean;
-	/**
-	 * 在此调用处结束运行且不为它写结果：调用在 transcript 里保持悬空，宿主稍后把答案交给恢复运行
-	 * （`RunRecoveryOptions`）来续上。批中其余调用随之悬空，运行不再发供应商请求就结束，此调用也不
-	 * 发任何 `tool_execution_*` 事件。
-	 *
-	 * 这是结束重启式审批闸门的答案（ADR-0006 §5）：等人不是一次运行能做到的事，所以运行结束、答案
-	 * 从运行之外抵达。`block` 与 `suspend` 互斥——同时设置两者按 suspend 处理。
-	 */
-	suspend?: boolean;
-}
 
 /**
  * 一个被恢复的工具调用续跑时所用的答案。
@@ -86,91 +57,17 @@ export interface RunRecoveryOptions {
 }
 
 /**
- * `afterToolCall` 返回的部分覆盖。
- *
- * 合并语义逐字段：
- * - `content`：提供时整体替换工具结果的 content 数组
- * - `details`：提供时整体替换工具结果的 details
- * - `isError`：提供时替换工具结果的错误标记
- * - `usage`：提供时替换工具结果的 usage
- * - `terminate`：提供时替换提前终止提示
- * - `structuredContent`：提供时替换结构化内容。提供 `content` 而不提供它时，结构化内容被丢弃，
- *   因为它可能已与 content 不再匹配；要保留就随 `content` 一起返回。
- *
- * 其余省略的字段保留原执行结果中的值。
- * `content`、`details`、`usage` 没有深合并。
- */
-export interface AfterToolCallResult {
-	content?: (TextContent | ImageContent)[];
-	details?: unknown;
-	structuredContent?: JsonValue;
-	isError?: boolean;
-	/** 最终那次工具执行自身的 usage（若有）。不计入主 LLM 上下文核算。 */
-	usage?: Usage;
-	/**
-	 * 提示 agent 在当前工具批结束后停止。只有批中每个定稿的工具结果都设为 true，提前终止才会发生。
-	 */
-	terminate?: boolean;
-}
-
-/** 传给 `beforeToolCall` 的上下文。 */
-export interface BeforeToolCallContext {
-	/** 请求该工具调用的 assistant 消息。 */
-	assistantMessage: AssistantMessage;
-	/** `assistantMessage.content` 里原始的 tool call 块。 */
-	toolCall: ToolCall;
-	/** 按目标工具 schema 校验过的参数。 */
-	args: unknown;
-	/** 准备此工具调用时的当前 agent 上下文。 */
-	context: Context;
-}
-
-/** 传给 `afterToolCall` 的上下文。 */
-export interface AfterToolCallContext {
-	/** 请求该工具调用的 assistant 消息。 */
-	assistantMessage: AssistantMessage;
-	/** `assistantMessage.content` 里原始的 tool call 块。 */
-	toolCall: ToolCall;
-	/** 按目标工具 schema 校验过的参数。 */
-	args: unknown;
-	/** 尚未应用任何 `afterToolCall` 覆盖的已执行结果。 */
-	result: ToolResult<unknown>;
-	/** 该已执行结果当前是否按错误处理。 */
-	isError: boolean;
-	/** 定稿此工具调用时的当前 agent 上下文。 */
-	context: Context;
-}
-
-/**
- * 一次运行经过的两个工具调用接缝，以引擎的视角。
- *
- * 运行按次安装它们——会话的 hooks 需要这一次运行自己的瞬态——并把这对交给文件级的批处理机件；
- * 这是引擎仍以参数收取而非从编排层读取的唯一东西：那些 helper 在任何实例之外运行。
- */
-export interface ToolCallHooks {
-	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
-	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
-}
-
-/**
  * 正在构建的供应商请求的替换性运行时状态。
  *
- * `Agent.prepareRequest` 的答案：下一个请求所用的 context 与 model，从那一刻的账本重建而来，
- * 而不是从上一轮带来。
+ * `prepareRequest` 的答案：下一个请求所用的 context 与 model，从那一刻的账本重建而来，而不是从
+ * 上一轮带来。声明的工具数组骑在 context 上（元素是表自己的实例，ADR-0016），执行链对着它按名
+ * 解析——「模型被告知什么与它可以运行什么」从同一个对象作答（ADR-0023）。
  */
 export interface AgentRequestUpdate {
 	/** 下一个供应商请求用的 context。 */
 	context?: Context;
 	/** 下一个供应商请求用的 model，带着它被要求的思考档位。 */
 	model?: Model;
-	/**
-	 * 本次请求为之构建的工具——派生时会话处于活跃状态的名字，作为引擎带着跨过这次请求的一份成员
-	 * 判断。
-	 *
-	 * 不是 `Context` 的一部分：context 携带的是传输层声明用的实例，这是执行链判断调用所依据的名单，
-	 * 且随 update 的其余部分一并替换，让两次请求之间变动的集合把名单一起带走。
-	 */
-	activeNames?: ReadonlySet<string>;
 }
 
 /** hooks 运行完毕后一次工具调用的最终结果。 */
