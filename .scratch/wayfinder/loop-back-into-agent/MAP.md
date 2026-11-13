@@ -51,6 +51,13 @@ tracker: local-markdown（票在 tickets/ 下，blocking 用正文 Blocked-by: �
 - [立 ADR-0024 并收账](tickets/003-adr.md)（closed 2026-11-13）：`docs/adr/0024-loop-is-orchestration.md`
   已接受（判据一句话 + 三问正面回答 + 六条决定，130 行）；0008/0012/0013/0014/0022/0023 各加一
   clause 指针，`docs/adr/README.md` 追加 0024 行并改 0022/0023/0014 三个尾句。实况文档同步归票 006。
+- [落地：把 loop 并回 Agent](tickets/004-landing.md)（closed 2026-11-14）：`loop-manager.ts`（1886 行）
+  删除，14 个成员成为 `Agent` 私有方法、机件接到 `agent.ts` 末尾（恢复机器仍导出，`index.ts` 改指
+  `./agent.ts`）；终态实测 2928 行（类 1795 + 机件段约 915）。
+- [收尾验证](tickets/005-verify.md)（closed 2026-11-14）：五节全过——check 四条全绿、残留 grep 零命中、
+  形状四件事全过（CRLF 无损）；smoke 与基线同色，两个基线红（`smoke-tools` /
+  `smoke-desktop-observability`）经 detach 到 `c667b9f` 取证逐字同处同错；行数记账写回票 004 与
+  ADR-0024 后果。剩余：票 006（实况文档）。
 
 ## Not yet specified
 

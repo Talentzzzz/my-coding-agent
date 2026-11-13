@@ -1,6 +1,7 @@
 ---
-status: open
-assignee:
+status: closed
+closed: 2026-11-14
+assignee: workbuddy
 Blocked-by: 004
 ---
 
@@ -58,3 +59,23 @@ grep -rn "LoopManager\|loop-manager\|loopOptions\|LoopOptions\|CompactOptions\|C
 
 把实测行数（`wc -l packages/core/src/agent.ts`）与任何落地偏差写回票 004 与 ADR-0024 的「后果」。
 偏差指形状级的东西（签名多退/少退一个参数、注释改了论证），不是语义——语义这次一字不改。
+
+## Comments
+
+### 2026-11-14 · workbuddy（验证实况，五节全过，票关闭）
+
+- **§一**：`npm run check` 全绿，恰好四条（core tsc / web tsc / check-tokens / check-server-facade），
+  `check-loop-boundary` 随文件消失。
+- **§二**：直接受影响的四个——session / approval-recovery / approval 全绿，smoke-tools 红在与基线
+  同一处（`exercisePruning` 的 `UnknownSessionError: idle-session`）。其余按 README 清单全跑：
+  sessions / models / default-model / approval-endpoint / projection / mux / mux-client / mux-live /
+  liveness / backpressure / boot / sidebar / settings / modes / transcript / frame / branch /
+  model-form / desktop-close / api 全绿；smoke-desktop-observability 红在 `observability.cjs:207`
+  的 `ReferenceError: bootWithinBudget is not defined`。两个基线红都取了证：detach 到工作前提交
+  `c667b9f` 现跑，逐字同处同错——同色，未变绿。
+- **§三**：残留 grep 零命中（EXIT=1）。
+- **§四**：`this.loop` / `private readonly loop` 零命中；`loop-manager.ts` 不存在；行尾 CRLF
+  2928/2928 无损，diff +1809/−132（净 +1677 = 2928−1251）。
+- **§五**：实测 2928 行写回票 004 与 ADR-0024；顺带修正 ADR 后果里的行数——`Agent` 类终态实测
+  1795 行（204–1998），票 001 §F 的「约 2450」与其自己的 2820 总数对不上，已按终态改写。
+  形状级偏差：无新增。

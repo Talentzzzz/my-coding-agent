@@ -123,3 +123,15 @@ export { danglingToolCallsOf, recoverPendingToolCalls } from "./agent.ts";
   boot / mux / backpressure / liveness 全绿；**smoke-tools 与基线同色**（干净 HEAD 同一处在
   `exercisePruning` 抛 `UnknownSessionError: idle-session`）。
 - 落地脚本跑完即删，未入库。
+
+### 2026-11-14 · 票 005 §五记账（终态验证实测）
+
+- `wc -l` = **2928**（与上节一致）；`Agent` 类 204–1998 ≈ **1795 行**，文件末尾机件段约 915 行。
+  上节与票 001 §F 引的「Agent 类约 2450」对不上它自己的 2820 总数（2820 − 文件头 ≈ 200 − 机件 ≈ 900
+  ≈ 1720），ADR-0024 后果已按终态实测改写。
+- 形状级偏差：**无新增**。§一 check 四条全绿（`check-loop-boundary` 确认随文件消失）；§三 残留 grep
+  零命中；§四 四件事全过（CRLF 2928/2928 无损，diff +1809/−132，净 +1677 = 2928−1251）。
+- smoke 复核：session / approval-recovery / approval 全绿；smoke-tools 与基线**同色**——干净 HEAD
+  `c667b9f` 上逐字同处同错（`exercisePruning` 的 `UnknownSessionError: idle-session`，:1007）。
+  其余清单全绿，唯 smoke-desktop-observability 与基线同色（`observability.cjs:207` 的
+  `ReferenceError: bootWithinBudget is not defined`，基线由 `c667b9f` worktree/detach 现场取证）。
