@@ -1,6 +1,7 @@
 ---
-status: open
-assignee:
+status: closed
+closed: 2026-11-14
+assignee: workbuddy
 Blocked-by: 001, 002, 003
 ---
 
@@ -106,3 +107,19 @@ export { danglingToolCallsOf, recoverPendingToolCalls } from "./agent.ts";
 
 `npx tsc -p tsconfig.json` 零错误，且 `agent.ts` 的 diff 里没有一处 `loopOptions` / `LoopManager` /
 `loop-manager.ts` 的残留引用（注释里的也要清——票 005 的 grep 会查）。
+
+## Comments
+
+### 2026-11-14 · workbuddy（落地实况，供票 005 §五记账）
+
+- 实测 `wc -l packages/core/src/agent.ts` = **2928 行**（评审修掉一处重复的 RunStart docblock 后定稿；预算约 2820，偏差 +108：八个新方法的
+  docblock 比回调面注释更完整、机件一节新写了引言与 `ToolChain` 三别名；语义零变化）。
+- 一处计划内偏差：机件段（1010–1886）**内含 `RunStart` 的定义**，按票 002 让它住 `AgentConfig`
+  之后后成了重复声明——机件段里那份剔除（`DanglingToolCall` 等仍原样在机件段）。
+- `npm run check` 全绿（四条，`check-loop-boundary` 随文件消失）；残留 grep（票 005 §三口径）
+  对 `packages` + `scripts` 的 `*.ts`/`*.json` **零命中**（types.ts / events.ts / ledger.ts 三个
+  头注释里指名 `loop-manager.ts` 的实况句一并改掉）。
+- smoke：approval-recovery / approval / session / sessions / models / default-model / projection /
+  boot / mux / backpressure / liveness 全绿；**smoke-tools 与基线同色**（干净 HEAD 同一处在
+  `exercisePruning` 抛 `UnknownSessionError: idle-session`）。
+- 落地脚本跑完即删，未入库。

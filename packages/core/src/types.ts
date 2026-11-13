@@ -1,7 +1,6 @@
-// 引擎的契约：一次运行发布什么，以及恢复遍以什么形状作答。这些类型曾住在 `packages/loop`；
-// 引擎住在 `loop-manager.ts`（ADR-0022），而它跨过该文件边界递出的形状——给会话自己的订阅者——就住
-// 这里，归拢成一个模块。hooks 三动词的事件与答案自 ADR-0023 起结构定义在 `loop-manager.ts`（与
-// HookMap 的同步点在 agent.ts 的接线处）；工具与工具结果是 `Tool` 与 `ToolResult`，定义在传输层旁边
+// 引擎的契约：一次运行发布什么，以及恢复遍以什么形状作答。这些类型曾住在 `packages/loop`；引擎随
+// ADR-0024 并回编排层，而运行递给会话自己的订阅者的形状就住这里，归拢成一个模块。hooks 三动词的
+// 事件与答案就用 `HookMap` 的派生类型；工具与工具结果是 `Tool` 与 `ToolResult`，定义在传输层旁边
 // 的 `llm/types.ts`，由请求与运行共用。wire 类型是 `protocol.ts` 的事，留在那里；`QueueMode` 是共享
 // 的，`protocol.ts` 转发本模块这份定义，而不是再声明一份。
 import type {

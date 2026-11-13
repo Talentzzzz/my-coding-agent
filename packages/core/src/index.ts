@@ -1,6 +1,6 @@
 export { Agent, type AgentConfig, type AgentSessionEvent, type SessionEventListener, type SessionListener } from "./agent.ts";
-// 恢复机器住在 `loop-manager.ts`（ADR-0022）；re-export 源直指它，包对外的名字不变。
-export { danglingToolCallsOf, recoverPendingToolCalls } from "./loop-manager.ts";
+// 恢复机器随 ADR-0024 住进 `agent.ts`；re-export 源直指它，包对外的名字不变。
+export { danglingToolCallsOf, recoverPendingToolCalls } from "./agent.ts";
 export type { AgentEvent } from "./types.ts";
 export type { Message } from "./llm/index.ts";
 // core 之外的调用方仍会直接点名的传输层出口：server 持有 `ChatTransport`，

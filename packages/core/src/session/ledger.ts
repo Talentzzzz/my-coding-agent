@@ -1,8 +1,7 @@
-// 账本条目类型与会话纯数据状态的值类型之家（ADR-0023 尚未决定 1 由票 005 定口径）：守卫对
-// loop-manager.ts 按模块说明符禁 Manager（ADR-0023 决定 7），而 `Session` / `SessionEntry` 曾与
-// `SessionManager` 同模块（session-manager.ts）——按模块禁会误伤值类型的 import 面，所以值类型
-// 先安新家到这里。Manager 与文件机件仍住在 session-manager.ts（它从这里 import 并转出口，旧
-// 消费者零改动）；本文件不 import 任何 Manager 模块。
+// 账本条目类型与会话纯数据状态的值类型之家：`Session` / `SessionEntry` 曾与 `SessionManager`
+// 同模块（session-manager.ts），ADR-0023 时期先安新家到这里，ADR-0024 之后留在此处——Manager 与
+// 文件机件仍住在 session-manager.ts（它从这里 import 并转出口，旧消费者零改动）；本文件不 import
+// 任何 Manager 模块。
 import type { Message, Usage } from "../llm/index.ts";
 import { COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX } from "./messages.ts";
 
