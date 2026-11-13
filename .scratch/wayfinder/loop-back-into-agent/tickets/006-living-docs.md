@@ -1,5 +1,6 @@
 ---
-status: open
+status: closed
+closed: 2026-11-14
 assignee: workbuddy
 Blocked-by: 003, 004
 ---
@@ -77,3 +78,24 @@ grep -rn "LoopManager\|loop-manager\|loopOptions\|回调白名单" --include=*.m
 
 判据：剩下的命中**全部**在历史追记或 ADR 指针里（即同一句里带 `ADR-0024` 或写成「曾是」）。
 实况叙述里一条都不许留。
+
+## Comments
+
+### 2026-11-14 · workbuddy（五份实况文档同步完成，票关闭）
+
+- **AGENTS.md**：布局行把引擎并进 `agent.ts` 括号、`loop-manager.ts` 整段删掉；engine 词条整条重写
+  （`Agent.run` 与 `runEngine` / `prepareRequest` / 压缩阶梯 / 重试泵 / 两个闸门同为私有方法，接缝是
+  局部变量与 `this`，`RunInput` 三件值，无回调面/白名单/守卫），保留了 executeTool 不变量，14 行 →
+  10 行；retry 词条改 `Agent.run`。
+- **CONTEXT.md**：Agent 词条去掉「白名单回调的回答方」；LoopManager / loopOptions / 回调白名单三条
+  整删；run bag 改「落选择的写经 `Agent.recordSelection`」；新增 RunInput 词条（`_Avoid_` 按票据写）。
+- **README.md**：开头一句话交代五次往返（0008 → 0012→0014 → 0022→0023 → 0024）；能力清单改
+  `Agent.run`；check 清单未提 `check-loop-boundary`，无需改。
+- **docs/architecture.md**：core 段（引擎是私有方法 + 三个入口各递三件值 + 链改写 +
+  「运行与命令面读同一批服务」）、责任表行、llm 段末尾、目录树并 `agent.ts` 行、循环小节标题与
+  首段（历史压成「0008–0023 之间往返过五次」，回调面段删）、executeToolCalls 段、请求流程两行并
+  一行、压缩行——八处按票落位；另有**一处票外命中**：retry 接缝段的「引擎如今是
+  `LoopManager.run`（0022、0023）」是实况叙述，判据 grep 兜住，改为「`Agent` 的私有方法 `run`（0024）」。
+- **docs/notes.md**：第 35 行「部分取代」追记末尾补「2026-11-13 再补」一句，原文不动。
+- **判据 grep**：剩三处命中全在许可类——README 的 ADR 指针 URL、notes.md 的历史追记、
+  CONTEXT.md 新词条的 `_Avoid_` 表；实况叙述零残留。

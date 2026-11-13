@@ -13,7 +13,7 @@
 ## 布局
 
 ```
-packages/core      无头 agent：agent.ts（编排：会话表、命令、审批、投影与事件契约）、loop-manager.ts（零字段 LoopManager：一次运行的引擎 + 填充链 + 压缩 + 重试 + 闸门）、session/（账本、状态、fanout、事件）、types.ts（引擎契约，转发合并后的 Context/Tool 名字）、llm/（裁剪自 pi-ai 的传输层：api/、model.ts、models.ts、types.ts（Context 与 Tool 住这里）、utils/；@ts-nocheck）、模型、工具、系统提示词、上下文。没有 HTTP 传输层
+packages/core      无头 agent：agent.ts（编排：会话表、命令、审批、投影与事件契约，以及一次运行的引擎 + 填充链 + 压缩 + 重试 + 闸门）、session/（账本、状态、fanout、事件）、types.ts（引擎契约，转发合并后的 Context/Tool 名字）、llm/（裁剪自 pi-ai 的传输层：api/、model.ts、models.ts、types.ts（Context 与 Tool 住这里）、utils/；@ts-nocheck）、模型、工具、系统提示词、上下文。没有 HTTP 传输层
 packages/server   node:http、REST 命令 + 一条常驻 WebSocket mux、活跃会话；boot.ts 是整个服务器，main.ts 只解析启动参数
 packages/desktop  Electron 外壳：进程内启动服务器，让一个窗口指向它
 packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的逻辑流
@@ -35,17 +35,13 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   构造由 `createSessionAgent()` 吸收、在本进程的唯一消费者是 `Agent` 编排，server 包只认编排层的公开
   面——这条归 [ADR-0017](docs/adr/0017-agent-facade.md)，由 `npm run check` 的 `check-server-facade`
   守卫。
-- **engine（引擎）** —— `LoopManager.run`（`loop-manager.ts`，零字段）：一次运行的入口与出口，与
-  `runEngine`、`prepareRequest`、压缩阶梯、重试泵、两个闸门一起是它的方法（ADR-0022 分区、ADR-0023
-  收边界）。它读的每一处接缝要么是这次运行的局部变量（模型、abort controller、事件 sink，以及
-  **这次运行自己重放出的那只袋**），要么是 `loopOptions` 上的一个成员——而袋上除三件值（`state` /
-  `bag` / `start`）、两件既有形状（`api` / `systemPrompt`）与 sink `emit` 外**全是回调**：回调面
-  19 动词由编排层实现、内部自己摸 Manager / fanout，三只 Manager 与 hooks 对 loop 完全不可见
-  （ADR-0023）。运行期没有一处瞬态被谁持有。那只袋是 ADR-0019 的「一次运行读一次盘」：编排层开跑时
-  `bag(id)` 一次装进袋，之后每一轮、每次压缩、每次落盘都写它；开袋路径只剩 `recordSelection`
-  回调内部那一处，loop 没有任何自开袋动词。它曾是一个独立对象（ADR-0012、0013），0014 以
-  「不持有任何东西」为由删掉，0022 把对象请回来——买的不是持有，是文件分区：读 loop 只看一个
-  文件。工具调用经 `executeTool` 回调执行（实现转发 `ToolManager.execute`，
+- **engine（引擎）** —— `Agent.run`：一次运行的入口与出口，与 `runEngine`、`prepareRequest`、压缩
+  阶梯、重试泵、两个闸门一起是 `Agent` 的私有方法（ADR-0024：loop 就是编排，没有回调面、没有
+  白名单、没有守卫）。它读的每一处接缝要么是这次运行的局部变量（模型、abort controller、事件 sink，
+  以及**这次运行自己重放出的那只袋**），要么是 `this`——三只 Manager、hooks、transport、prompt
+  builder 都在编排层自己身上。`RunInput` 只有三件值（`state` / `bag` / `start`）；那只袋是
+  ADR-0019 的「一次运行读一次盘」，开跑时 `bag(id)` 一次装进、运行全程写它。工具调用经
+  `executeTool` 执行（转发 `ToolManager.execute`，
   [ADR-0016](docs/adr/0016-tool-manager-instance-table.md)），解析只对着本请求声明过的数组按名查
   ——「模型被告知什么与它可以运行什么」从同一个对象作答；发给模型的是带 `tools` 的 `Context`
   ——同一个 `Tool` 的两半都经它手，而传输层只读另一半（ADR-0015）。「循环」只是那些轮次的日常说法。
@@ -141,7 +137,7 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   账本存的就是返回的那个版本；要截断先用 `archiveToolResult()` 归档全文，没约束的超大结果由写边界
   兜底归档到 `.my-agent/tool-results/`）。一个 `Hooks` 服务本进程跑的所有会话，所以每个事件
   都带 `sessionId`，处理器拿它现取目录与被闸的工具映射；默认值由 `createSessionAgent()` 构造时装。
-- **retry（重试）** —— 一次瞬时的供应商失败在引擎**之下**重试：`LoopManager.run` 给这次运行包一层 transport，
+- **retry（重试）** —— 一次瞬时的供应商失败在引擎**之下**重试：`Agent.run` 给这次运行包一层 transport，
   策略就装在里面，引擎只是对模型 `stream`；失败的尝试从不被记录。
 - **queue（队列）** —— 一次运行正在流式时被接受的消息：`steer` 在下一个取走点注入，`followUp` 等这一
   轮结束。

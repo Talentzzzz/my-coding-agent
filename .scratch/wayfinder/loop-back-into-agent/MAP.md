@@ -58,6 +58,12 @@ tracker: local-markdown（票在 tickets/ 下，blocking 用正文 Blocked-by: �
   形状四件事全过（CRLF 无损）；smoke 与基线同色，两个基线红（`smoke-tools` /
   `smoke-desktop-observability`）经 detach 到 `c667b9f` 取证逐字同处同错；行数记账写回票 004 与
   ADR-0024 后果。剩余：票 006（实况文档）。
+- [实况文档同步](tickets/006-living-docs.md)（closed 2026-11-14）：五份全改——AGENTS.md（布局行并
+  `agent.ts`、engine 词条重写为 `Agent.run` 私有方法、retry 词条）、CONTEXT.md（删 LoopManager /
+  loopOptions / 回调白名单三条，run bag 改经 `Agent.recordSelection`，新增 RunInput）、README.md
+  （开头一句话交代五次往返，能力清单 `Agent.run`）、architecture.md（八处按票落位，retry 接缝段
+  一处票外实况命中由判据 grep 兜住）、notes.md（追记补一句）；判据 grep 剩余命中全在历史追记、
+  ADR 指针与 `_Avoid_` 表，实况零残留。六张票全部关闭，本图收尾。
 
 ## Not yet specified
 
