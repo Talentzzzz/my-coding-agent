@@ -5,6 +5,7 @@
 [0013](0013-loop-services-are-arguments.md) 的全部决定（零字段、`LoopServices` 参数、取值器）
 复活：[0008](0008-loop-merged-into-agent.md) 的决定 1 与决定 2——引擎是 `Agent` 的方法，住在 `agent.ts`
 取代者：[0022](0022-loop-manager-whitelist-callbacks.md)（**整体**，2026-11-11——零字段 `LoopManager` 作为文件分区回来，但六件服务进单只 `loopOptions`、跨边界的只有两条白名单回调；本文决定 1–5、上面这条复活条款、以及「后果」里零层间接等三条收益判词全部作废。本文「没有被取代的」整节由 0022 继承。按编号规则正文不改，标注于此）
+取代者：[0024](0024-loop-is-orchestration.md)（2026-11-13 二次生效：引擎再次是 `Agent` 的方法；本文「后果」里的行数代价原样回来）
 
 ## 背景
 

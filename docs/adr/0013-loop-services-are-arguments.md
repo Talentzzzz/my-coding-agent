@@ -1,7 +1,8 @@
 # 0013：`LoopManager` 不持有任何服务——运行需要什么，由调用方在参数里交给它
 
 日期：2026-11-04 · 状态：已接受并落地，**同日即被 [0014](0014-loop-manager-removed.md) 取代**
-（0014 删掉了它描述的那个对象，`LoopServices` 也随之消失）
+（0014 删掉了它描述的那个对象，`LoopServices` 也随之消失）；终止者：[0024](0024-loop-is-orchestration.md)
+（2026-11-13 后无对象可谈——对象与参数面一并删除）
 取代：[0012](0012-loop-manager-object.md) 的决定 2（「它不回头问 `Agent`」里「自带六件依赖」那一半）
 与决定 4 的构造注入部分；[`.scratch/loop-manager/issues/01-injection.md`](../../.scratch/loop-manager/issues/01-injection.md)
 里「`api` 与 `systemPrompt` 归 `LoopManagerConfig`」的归属

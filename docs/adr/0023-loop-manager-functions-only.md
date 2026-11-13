@@ -2,7 +2,7 @@
 
 日期：2026-11-12 · 状态：已接受（wayfinder 票 003，两轮 grilling 与用户拍板；落地归票 004、守卫升级归票 005，见 `.scratch/wayfinder/loop-zero-manager/`）；已落地（票 004，同日，偏差见「后果」末条）
 取代：[0022](0022-loop-manager-whitelist-callbacks.md) 的**「六件依赖进袋」**——`LoopOptions` 上的 `sessionManager` / `settings` / `tools` / `hooks` 四件 Manager 字段（决定 2「`Agent` 仍是六件服务的持有者」里**递给 loop 的那一半**；判据节 `loopOptions` 完整形状的四个 Manager 槽位；「后果」里「一只 11 字段的参数袋」的四件 Manager 槽位——六件里剩下的 `api` / `systemPrompt` 本就是函数形状，原样保留）——以及决定 7 里「fanout 参数 `(state, session, SessionServices)` **在调用点现建**」的**组装点一半**（`servicesOf` 组装点消除，`publishState` / `approvalsOf` 包成 Agent 传入的回调；fanout 文件与其参数形状不动）。0022 的其余裁决由本 ADR **延续并收紧，不是推翻**：文件分区、零字段对象、单袋形状、静态守卫、出口口径全部不动——变的是边界的定义：白名单从「两条绕回回调」改成「19 动词 + `emit` 一条 sink」，原则一字未动，纪律推到极致
-取代者：无
+取代者：[0024](0024-loop-is-orchestration.md)（**整体**，2026-11-13——判据成立但买不到东西；19 动词作为契约作废，8 个留成私有方法；「后果」里的守卫与闭包两笔账随之结清）
 
 设计过程见 `.scratch/wayfinder/loop-zero-manager/`（票 001 全量触点盘点、票 002 回调面定稿、票 003 起草与接受）；定下的词见 [CONTEXT.md](../../CONTEXT.md)。
 

@@ -25,7 +25,7 @@
 | [0011](0011-agent-holds-session-state.md) | 会话状态搬进 Agent——一张 `Map<id, AgentState>` 合一四层登记结构，两个 Manager 不再持有任何缓存 | 已接受，已落地（2026-11-04，agent-state 01–14 号票，见 `.scratch/agent-state/`） |
 | [0012](0012-loop-manager-object.md) | 一次运行成为一个对象——`LoopManager` 自带六件依赖、由 `AgentConfig.loop` 构造注入 | 已接受（2026-11-04），后被 [0013](0013-loop-services-are-arguments.md) 削去依赖、被 [0014](0014-loop-manager-removed.md) 整体取代（对象已删） |
 | [0013](0013-loop-services-are-arguments.md) | `LoopManager` 不持有任何服务——运行要用的六件随调用以 `LoopServices` 递进去，类零字段 | 已接受（2026-11-04），同日被 [0014](0014-loop-manager-removed.md) 取代（对象已删，参数形状随之消失） |
-| [0014](0014-loop-manager-removed.md) | 删掉 `LoopManager`——引擎回到 `Agent` 的方法，六项服务重新是它的字段 | 已接受，已落地（2026-11-04，跑绿 `check` 与除 `smoke-api` 外的 smoke 全套），取代 0012 与 0013 全部决定，复活 0008 的决定 1/2；**已整体被 [0022](0022-loop-manager-whitelist-callbacks.md) 取代**（2026-11-11） |
+| [0014](0014-loop-manager-removed.md) | 删掉 `LoopManager`——引擎回到 `Agent` 的方法，六项服务重新是它的字段 | 已接受，已落地（2026-11-04，跑绿 `check` 与除 `smoke-api` 外的 smoke 全套），取代 0012 与 0013 全部决定，复活 0008 的决定 1/2；**已整体被 [0022](0022-loop-manager-whitelist-callbacks.md) 取代**（2026-11-11）；0022/0023 又已被 [0024](0024-loop-is-orchestration.md) 取代 |
 | [0015](0015-llm-folded-into-core.md) | 把 `packages/llm` 折叠进 core——全树只剩一个 `Context` 与一个 `Tool` | 已接受，已落地（2026-11-06，01–04 号票，`check` 与 `build:web` 绿、smoke 与改动前逐条同色零新红，零行为变化），取代 0008 决定 6 的 `AgentContext` 命名与「形状也住 `types.ts`」那一半，及其「llm 没有被并入任何人」的现状陈述 |
 | [0016](0016-tool-manager-instance-table.md) | 工具回到一张常驻实例表——`ToolManager` 持有全部 `Tool`，引擎经它执行 | 已接受，已落地（2026-11-06，07–09 号票；2026-11-07 由 11 号票全量验收：`check` 与 `build:web` 绿、smoke 与改动前逐条同色零新红），部分取代 0006 / 0007 / 0011 / 0015 |
 | [0017](0017-agent-facade.md) | server 只认 `Agent` 公开面——Manager 的消费者收进 core，构造由 `createSessionAgent()` 吸收 | 已接受，已落地（2026-11-07，hub-agent-facade 01–07 号票，`check` 含新守卫 `check-server-facade` 与 `build:web` 绿、smoke 与基线逐条同色零新红），部分取代 0007 / 0016 |
@@ -33,8 +33,9 @@
 | [0019](0019-table-holds-live-half-only.md) | 表只装 live 半——transcript 每次操作现读，`AgentState` 不再有 `session` | 已接受，已落地（2026-11-10，`check` 绿、smoke 与改动前逐条同色），整体取代 0011 |
 | [0020](0020-flat-session-store.md) | store 改平——`sessions/<id>.{json,jsonl}`，id 就是地址；旧布局惰性迁移，`Agent` 不再记路径 | 已接受，已落地（2026-11-10，`check` 绿；smoke 做了机械改写、未全量执行，见 ADR 文末），部分取代 0009 的「每工作目录一个 store 目录」 |
 | [0021](0021-snapshot-suspended-marker.md) | 快照加 `suspended` 标记——冷启动审批点是纯显示缓存，账本仍是唯一事实 | 已接受，已落地（2026-11-11，cold-start-approval-dot 01–04 号票，`check` 绿、相关 smoke 单独跑全绿），0006 后果一节「可从磁盘重建的缓存」口子的实例，不取代任何决定 |
-| [0022](0022-loop-manager-whitelist-callbacks.md) | 把一次运行搬回 `LoopManager`——零字段对象、白名单回调、单个 `loopOptions` | 已接受（2026-11-11，wayfinder 票 003 与用户逐项答辩后拍板；代码落地归票 004、静态守卫归票 005），整体取代 0014（含它复活的 0008 决定 1/2），复活 0012 的文件分区与 0013 的零字段 / 参数化结论；**已部分被 [0023](0023-loop-manager-functions-only.md) 取代**（2026-11-12） |
-| [0023](0023-loop-manager-functions-only.md) | `LoopManager` 只认函数——六件依赖回调化，loop 层零 Manager 可见性 | 已接受（2026-11-12，wayfinder 票 003；落地归票 004、守卫升级归票 005），部分取代 0022（六件依赖进袋与决定 7 的组装点一半） |
+| [0022](0022-loop-manager-whitelist-callbacks.md) | 把一次运行搬回 `LoopManager`——零字段对象、白名单回调、单个 `loopOptions` | 已接受（2026-11-11，wayfinder 票 003 与用户逐项答辩后拍板；代码落地归票 004、静态守卫归票 005），整体取代 0014（含它复活的 0008 决定 1/2），复活 0012 的文件分区与 0013 的零字段 / 参数化结论；**已部分被 [0023](0023-loop-manager-functions-only.md) 取代**（2026-11-12），**已被 [0024](0024-loop-is-orchestration.md) 整体取代**（2026-11-13） |
+| [0023](0023-loop-manager-functions-only.md) | `LoopManager` 只认函数——六件依赖回调化，loop 层零 Manager 可见性 | 已接受（2026-11-12，wayfinder 票 003；落地归票 004、守卫升级归票 005），部分取代 0022（六件依赖进袋与决定 7 的组装点一半）；**已被 [0024](0024-loop-is-orchestration.md) 整体取代**（2026-11-13） |
+| [0024](0024-loop-is-orchestration.md) | loop 就是编排——删掉 `LoopManager`，一次运行回到 `Agent` | 已接受（2026-11-13，wayfinder 票 003），待落地（落地归票 004、验证归票 005，见 `.scratch/wayfinder/loop-back-into-agent/`）；取代 [0022](0022-loop-manager-whitelist-callbacks.md) 与 [0023](0023-loop-manager-functions-only.md) 全部决定，终止 0008–0023 的引擎归属往返 |
 
 ## 门槛
 
