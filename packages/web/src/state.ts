@@ -678,8 +678,8 @@ function applySessionEvent(viewState: ViewState, event: AgentSessionEvent): View
 			const snapshot = { ...viewState.snapshot };
 			if (event.model !== undefined) snapshot.model = event.model;
 			if (event.thinkingLevel !== undefined) snapshot.thinkingLevel = event.thinkingLevel;
-			if (event.approvals !== undefined) snapshot.approvals = { ...snapshot.approvals, ...event.approvals };
-			if (event.tools !== undefined) snapshot.activeTools = event.tools;
+			// 模式座位的变更显式携带：`null` 是「回到默认」，键缺席才是「没动」。
+			if ("mode" in event) snapshot.mode = event.mode ?? undefined;
 			return { ...viewState, snapshot };
 		}
 		case "entry_appended":

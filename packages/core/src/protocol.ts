@@ -237,22 +237,10 @@ export interface SessionSnapshot {
 	thinkingLevel: string;
 	/** 该模型接受的思考档位，含 "off"。 */
 	thinkingLevels: string[];
-	/** 当前需要审批的工具，按工具名为键。 */
-	approvals: Record<string, boolean>;
+	/** 会话所在的模式名，窗口直接显示的座位；undefined 即内置「默认」（跟随全局默认，或指针悬空）。 */
+	mode?: string;
 	/** 会话注册的每个工具，按注册顺序，供头部的工具开关使用。 */
 	allTools: string[];
-	/** 模型此刻可以调用的工具。 */
-	activeTools: string[];
-	/**
-	 * 会话记录的工具集是否等于当前的全局默认。
-	 *
-	 * 两张映射乘在同一份记录选择上，但用户可能只动过其中一个，所以两半各自判断。完全没有记录选择
-	 * 的会话为 true：从未选择过的会话*就*在全局默认上。相等是对全局值*此刻*的判断——被重置过、又
-	 * 被之后的默认变更甩在后面的会话报 false，那才是诚实的答案。
-	 */
-	toolsFollowGlobal: boolean;
-	/** 同一判断在审批映射那一半的答案。 */
-	approvalsFollowGlobal: boolean;
 	messages: Message[];
 	/**
 	 * `messages` 里每条消息背后的 entry id，顺序一致。
@@ -294,13 +282,21 @@ export interface SessionSnapshot {
 }
 
 /**
- * 不带消息地对会话所持之物做的变更：审批映射与两个队列模式。
+ * 不带消息地对会话所持之物做的变更：模式指针、会话的审批增量与两个队列模式。
  *
  * 模型与思考档位有意缺席。两者都在输入框里选择、都随属于它们的消息抵达（{@link ModelSelection}），
  * 因为记录一个没有请求真正用过它的选择，等于在会话记录里放一条从未生效的决定。
  */
 export type ConfigPatch = {
-	/** 变动过的审批条目，按工具名为键；省略的键保持现行值。 */
+	/**
+	 * 会话要指向的模式：settings `modes` 表里的一个名字；`null` 即指回内置「默认」（指针缺席）。
+	 * 省略的键保持现行值。指向不存在的预设会被拒绝——说出来，而不是按默认悄悄跑。
+	 */
+	mode?: string | null;
+	/**
+	 * 会话自己的审批增量，按工具名为键：会话在个别工具上的明确决定（grant 的「不再问」、补丁写下
+	 * 的键），叠在模式解析出的审批基线之上；省略的键保持现行值。
+	 */
 	approval?: Record<string, boolean>;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;

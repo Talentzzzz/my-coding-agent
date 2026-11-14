@@ -127,9 +127,8 @@ export type AgentSessionEvent =
 			type: "config_changed";
 			model?: string;
 			thinkingLevel?: string;
-			approvals?: Record<string, boolean>;
-			/** `setActiveTools` 移动了激活工具时的工具名列表。 */
-			tools?: string[];
+			/** 会话所在的模式座位变了：新座位的名字；`null` 即内置「默认」。 */
+			mode?: string | null;
 	  }
 	/**
 	 * 一次被归类为可重试的 provider 瞬时失败，处于退避睡眠之前。

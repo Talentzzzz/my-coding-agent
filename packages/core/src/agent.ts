@@ -60,7 +60,7 @@ import {
 	sessionEntryToContextMessages,
 } from "./session/session-manager.ts";
 import type { PendingMessageQueue } from "./session/queues.ts";
-import { followsGlobalOf, toolStateOf } from "./session/tool-config.ts";
+import { modeSeatOf, toolStateOf } from "./session/tool-config.ts";
 import { sessionSnapshot } from "./session/snapshot.ts";
 import { UnknownSessionError } from "./session/unknown-session.ts";
 import type { SettingsPatch } from "./setting-manager.ts";
@@ -305,12 +305,10 @@ export class Agent {
 			// run 可问，所以在这里从袋和设置推导——和所有其他读者用的推导相同（`modelChoiceOf`，
 			// ADR-0013），这也是没有一份会过期的种子副本的原因。
 			model: live.model ?? modelFor(modelChoiceOf(this.sessionManager, session, this.settingsManager, live.openedOn), this.settingsManager.modelCatalog()),
-			approvals: this.approvalsOf(session),
+			// 座位就是快照的字段：记录的指针解析成功时是那个名字，缺席或悬空读作默认（ADR-0018）。
+			// 与冷读共用 `modeSeatOf`，所以窗口帧与 REST 读取不可能互相矛盾。
+			mode: modeSeatOf(this.sessionManager, session, this.settingsManager),
 			allTools: this.tools.names(),
-			activeTools: toolStateOf(this.sessionManager, session, this.settingsManager, this.tools.names()).activeToolNames,
-			// 按这个目录自己的设置来判断，和冷读判断的方式相同，这样面板的「沿用全局」标签在两条路径
-			// 上就不会自相矛盾。
-			...followsGlobalOf(this.sessionManager, session, this.settingsManager, this.tools.names()),
 			...(live.partial === undefined ? {} : { partial: live.partial }),
 			submitting: live.activeRun !== undefined,
 			queued: live.followUpQueue.previews(),
@@ -428,30 +426,16 @@ export class Agent {
 	 * 这就是「不缓存」的全部（ADR-0013）：出生的会话是一次重放，在这里取、调用方用完即丢——本进程
 	 * 持有的东西因此不可能陈旧，而在一个同步块里先读后写的写者，绝不可能写出一个别人已经越过的版本。
 	 * 唯一的例外是文件还不存在的会话：重放造不出它，它的袋在第一条消息落盘之前就是 live 半的字段，
-	 * 而这次转移就发生在这里——已经出生的袋在这里被丢掉，绝不再往下带。
+	 * 而这次转移就发生在这里——已经出生的袋在这里被越过，之后读到的都是重放。
 	 *
 	 * 开一次并为一次运行留住袋的调用方，正是一次运行只花一次重放而不是每操作一次的原因：它们持有的
 	 * 是一个运行局部变量，由运行自己闭包。
 	 */
 	private getSessionBySessionId(sessionId: string): Session {
 		const agentState = this.agentStateMap.get(sessionId);
-		const unwrittenSession = agentState === undefined ? undefined : this.unwrittenOf(agentState);
-		return unwrittenSession ?? this.sessionManager.open(sessionId);
-	}
-
-	/**
-	 * 会话因还没有文件而仍留着的那只袋，一旦有了文件就是 `undefined`。
-	 *
-	 * 字段在这里清除，而不是在生出文件的那次写入处，因为出生不总是编排层的：自己往袋上追加的调用方
-	 * （对未写会话调 `sessionManager.appendMessage`）也会给它文件，而这个字段的每个读者都必须认同：
-	 * 那一刻起袋就不再是会话唯一的副本。让它经过一个函数读取，正是让这是一条规则而不是五条的原因。
-	 */
-	private unwrittenOf(agentState: AgentState): Session | undefined {
-		const session = agentState.live.unwrittenSession;
-		if (session === undefined) return undefined;
-		if (!session.fileCreated) return session;
-		agentState.live.unwrittenSession = undefined;
-		return undefined;
+		const unwritten = agentState?.live.unwrittenSession;
+		if (unwritten !== undefined && !unwritten.fileCreated) return unwritten;
+		return this.sessionManager.open(sessionId);
 	}
 
 	/**
@@ -522,7 +506,8 @@ export class Agent {
 		const agentState = this.agentStateMap.get(id);
 		if (agentState === undefined) return false;
 		if (agentState.live.activeRun !== undefined || agentState.live.suspended) return false;
-		if (this.unwrittenOf(agentState) !== undefined) return false;
+		const unwritten = agentState.live.unwrittenSession;
+		if (unwritten !== undefined && !unwritten.fileCreated) return false;
 		return this.agentStateMap.delete(id);
 	}
 
@@ -584,10 +569,9 @@ export class Agent {
 	 */
 	forkFrom(sourceId: string, entryId: string | null): string {
 		const sourceAgentState = this.agentStateMap.get(sourceId);
+		const unwritten = sourceAgentState?.live.unwrittenSession;
 		const absSourcePath =
-			(sourceAgentState === undefined
-				? undefined
-				: this.unwrittenOf(sourceAgentState)?.sessionFileAbsPath) ??
+			(unwritten !== undefined && !unwritten.fileCreated ? unwritten.sessionFileAbsPath : undefined) ??
 			SessionManager.findSessionFilePathById(sourceId);
 		if (absSourcePath === undefined) throw new Error(`Unknown session: ${sourceId}`);
 		return this.sessionManager.forkFrom(absSourcePath, entryId).sessionId;
@@ -681,8 +665,10 @@ export class Agent {
 	 */
 	fileAbsPathOf(id: string): string | undefined {
 		const agentState = this.agentStateMap.get(id);
-		const unwrittenSession = agentState === undefined ? undefined : this.unwrittenOf(agentState);
-		return unwrittenSession?.sessionFileAbsPath ?? SessionManager.findSessionFilePathById(id);
+		const unwritten = agentState?.live.unwrittenSession;
+		const unbornPath =
+			unwritten !== undefined && !unwritten.fileCreated ? unwritten.sessionFileAbsPath : undefined;
+		return unbornPath ?? SessionManager.findSessionFilePathById(id);
 	}
 
 	/**
@@ -1779,28 +1765,6 @@ export class Agent {
 	}
 
 	/**
-	 * 收窄模型可以调用的工具。未知的名字抛错，会话保持原样。
-	 *
-	 * 变更记录在会话的 `.json` 快照上、在下一个请求上生效：填充链随每个请求从账本派生选择，所以
-	 * 模型在下一条 prompt 构建时被告知收窄后的集合。
-	 */
-	setActiveTools(id: string, names: string[]): void {
-		const agentState = this.agentState(id);
-		const session = this.getSessionBySessionId(id);
-		const previous = toolStateOf(this.sessionManager, session, this.settingsManager, this.tools.names()).activeToolNames;
-		const known = new Set(this.tools.names());
-		const unknown = names.filter((name) => !known.has(name));
-		if (unknown.length > 0) {
-			throw new Error(`Unknown tool${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
-		}
-		if (names.length === previous.length && names.every((name, index) => name === previous[index])) return;
-
-		this.sessionManager.setToolConfig(session, [...names], this.approvalsOf(session));
-		this.publishState(agentState, this.getSessionBySessionId(id));
-		this.emitConfigChanged(agentState, { tools: [...names] });
-	}
-
-	/**
 	 * 把本会话指向另一行、另一档，或两者。
 	 *
 	 * 选择是会话持有的一个值，所以在这里落到 `.json` 快照上——而且自 ADR-0013 起*立即*：调用之间
@@ -1856,9 +1820,11 @@ export class Agent {
 	/**
 	 * 更新设置并落盘。审批变更在下一个工具调用上生效。
 	 *
-	 * 补丁的两半住在不同的地方。审批是会话级的：它合并进本会话自己的选择、记录在它的 `.json` 快照
-	 * 上，所以同一目录上的另一个会话不受影响。其余经 {@link SettingManager} 交给设置——它拥有那些
-	 * 文件——并落到运行时的队列上，队列在每次取走时读模式。
+	 * 补丁住在三个地方。模式指针是会话级的：写的是名字（或 `null`——指回全局默认），激活集与审批
+	 * 基线随它活态解析，所以名字必须存在于该目录的 `modes` 表里，否则抛错（ADR-0018）。审批是
+	 * 会话级的增量：它合并进本会话自己的选择、记录在它的 `.json` 快照上，所以同一目录上的另一个
+	 * 会话不受影响。其余经 {@link SettingManager} 交给设置——它拥有那些文件——并落到运行时的队列
+	 * 上，队列在每次取走时读模式。
 	 *
 	 * 模型与思考档位完全不属于补丁。它们在输入框里选、随属于它们的消息抵达（{@link ModelSelection}），
 	 * 所以这里没有可应用的：没有请求跟上的配置变更就不是配置变更。
@@ -1867,22 +1833,40 @@ export class Agent {
 		const agentState = this.agentState(id);
 		const session = this.getSessionBySessionId(id);
 		const workDirAbsPath = session.sessionSetting.workDirAbsPath;
-		const previousApprovals = this.approvalsOf(session);
+		const seatBefore = modeSeatOf(this.sessionManager, session, this.settingsManager);
+		if (patch.mode !== undefined) {
+			// `null` 是「回到默认」的手势：指针缺席就是默认模式的落盘形态。字符串必须是一个存在的
+			// 预设——指向没人定义过的模式的补丁被说出来，而不是按全局默认悄悄跑。
+			const mode = patch.mode === null ? undefined : patch.mode;
+			if (mode !== undefined) {
+				const modes = this.settingsManager.getSettings(workDirAbsPath).modes ?? [];
+				if (!modes.some((preset) => preset.name === mode)) {
+					throw new Error(`Unknown mode: ${mode}`);
+				}
+			}
+			this.sessionManager.setMode(session, mode);
+		}
 		if (patch.approval !== undefined) {
-			// 快照记录生效中的整张映射——设置叠上本会话的选择——这正是账本每次读取作答的形状。
-			const approvals = { ...previousApprovals, ...patch.approval };
-			const activeToolNames = toolStateOf(this.sessionManager, session, this.settingsManager, this.tools.names()).activeToolNames;
-			this.sessionManager.setToolConfig(session, activeToolNames, approvals);
+			// 会话自己的增量：补丁合并进已记录的键。工具没被闸时写 `true`、被闸时写 `false` 都合法
+			// ——增量表达会话在这一工具上的明确决定，其余键继续跟随模式与全局默认。
+			const recorded = this.sessionManager.getRecordedToolConfig(session);
+			this.sessionManager.setApprovalOverride(session, { ...(recorded.approval ?? {}), ...patch.approval });
 		}
 		// 补丁的其余部分经 manager 交给设置，写入归它所有：变更落在文件上，之后的每次读取——本会话
-		// 的与该目录上任何其他会话的——都从它们作答。
-		this.settingsManager.applySettings(workDirAbsPath, patch.approval === undefined ? patch : { ...patch, approval: undefined });
+		// 的与该目录上任何其他会话的——都从它们作答。模式指针与审批增量是会话自己的，不带过去。
+		this.settingsManager.applySettings(workDirAbsPath, {
+			...(patch.steeringMode === undefined ? {} : { steeringMode: patch.steeringMode }),
+			...(patch.followUpMode === undefined ? {} : { followUpMode: patch.followUpMode }),
+		});
 		agentState.live.steeringQueue.mode = this.settingsManager.getSteeringMode(workDirAbsPath);
 		agentState.live.followUpQueue.mode = this.settingsManager.getFollowUpMode(workDirAbsPath);
 		const after = this.getSessionBySessionId(id);
 		this.publishState(agentState, after);
+		// 座位没动就不报告——重发现行值的补丁不得声称任何东西变了。`null` 显式携带「回到默认」，
+		// 因为 JSON 丢掉 undefined。
+		const seatAfter = modeSeatOf(this.sessionManager, after, this.settingsManager);
 		this.emitConfigChanged(agentState, {
-			approvals: changedApprovals(previousApprovals, this.approvalsOf(after)),
+			...(patch.mode === undefined || seatAfter === seatBefore ? {} : { mode: seatAfter ?? null }),
 		});
 	}
 
@@ -1917,8 +1901,8 @@ export class Agent {
 	 * 结束重启链的应答半（ADR-0005 §5）：提出调用的运行已经结束，调用在账本里悬空，答案启动关闭它
 	 * 的那次运行。引擎的恢复遍按 id 把答案与调用配对——grant 让调用穿过闸门与工具本身重跑，deny 用
 	 * 「按下 deny」写下的那句话关闭它——运行从那里继续，所以模型看到调用已解决并在同一次运行里继续。
-	 * grant 还会把该工具的审批选择——该工具不再问——记到会话的 `.json` 快照上，与配置补丁是同一个
-	 * 动作：恢复遍让调用重新过闸门，而闸门只放行映射不再闸住的工具。
+	 * grant 还会把「该工具不再问」作为一条审批增量记到会话的 `.json` 快照上（ADR-0018）：恢复遍让
+	 * 调用重新过闸门，而闸门只放行映射不再闸住的工具。
 	 *
 	 * 没有任何东西在等的 id 被忽略：调用方先检查过、又回答了它。答案没有点名的悬空调用由恢复遍作为
 	 * 孤儿关闭——这正是崩溃留下多个调用时，恢复后的请求仍对供应商合法的原因。
@@ -1935,11 +1919,10 @@ export class Agent {
 			? { approved: true }
 			: { approved: false, reason: `The user denied permission to run ${call.toolName}.` };
 		if (approved) {
-			// grant 是会话对该工具自己的选择，以生效中的整张映射、把该工具翻成关的方式记录——与配置
-			// 补丁是同一个动作。
-			const approvals = { ...this.approvalsOf(session), [call.toolName]: false };
-			const activeToolNames = toolStateOf(this.sessionManager, session, this.settingsManager, this.tools.names()).activeToolNames;
-			this.sessionManager.setToolConfig(session, activeToolNames, approvals);
+			// grant 是会话对该工具自己的选择：以一条审批增量、把该工具翻成不再问的方式记录（ADR-0018）
+			// ——增量叠在模式解析出的审批基线上，会话之外什么也不动。
+			const recorded = this.sessionManager.getRecordedToolConfig(session);
+			this.sessionManager.setApprovalOverride(session, { ...(recorded.approval ?? {}), [call.toolName]: false });
 		}
 		// 在运行开始之前说出：选择是会话自己的、现在就落，而调用本身保持悬空，直到运行的恢复遍关闭它。
 		this.publishState(agentState, session);
@@ -2085,15 +2068,14 @@ export class Agent {
 		changes: {
 			model?: string;
 			thinkingLevel?: string;
-			approvals?: Record<string, boolean>;
-			tools?: string[];
+			/** 新座位的名字；`null` 是「回到默认」——JSON 丢掉 undefined，所以默认必须显式携带。 */
+			mode?: string | null;
 		},
 	): void {
 		if (
 			changes.model === undefined &&
 			changes.thinkingLevel === undefined &&
-			changes.approvals === undefined &&
-			changes.tools === undefined
+			changes.mode === undefined
 		) {
 			return;
 		}
@@ -2147,26 +2129,6 @@ export class Agent {
 			this.publishState(agentState, session);
 		}
 	}
-}
-
-/**
- * 取值有差异的审批键，没有差异时为 undefined。
- *
- * `config_changed` 只携带动过的东西，所以一次重发当前设置的 `applyConfig`——重连或未改动的表单正是
- * 这样做的——不得声称任何东西变了。
- */
-function changedApprovals(
-	before: Record<string, boolean>,
-	after: Record<string, boolean>,
-): Record<string, boolean> | undefined {
-	const changed: Record<string, boolean> = {};
-	let moved = false;
-	for (const [key, value] of Object.entries(after)) {
-		if (before[key] === value) continue;
-		changed[key] = value;
-		moved = true;
-	}
-	return moved ? changed : undefined;
 }
 
 // ---------------------------------------------------------------------------- 引擎机件

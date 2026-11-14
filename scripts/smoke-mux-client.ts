@@ -107,16 +107,6 @@ function heartbeat(everyMs = 100): string {
 	return JSON.stringify({ streamId: null, item: { type: "heartbeat", everyMs } });
 }
 
-/** The approval map every snapshot has to carry, all six keys, none of them on. */
-const NO_APPROVALS: Record<string, boolean> = {
-	read: false,
-	write: false,
-	edit: false,
-	glob: false,
-	grep: false,
-	bash: false,
-};
-
 /** A snapshot with nothing in it but the fields a caller has to set, for building frames and folds. */
 function snapshot(sessionId: string, submitting = false): SessionSnapshot {
 	return {
@@ -127,11 +117,7 @@ function snapshot(sessionId: string, submitting = false): SessionSnapshot {
 		model: "m/1",
 		thinkingLevel: "off",
 		thinkingLevels: ["off"],
-		approvals: { ...NO_APPROVALS },
 		allTools: [],
-		activeTools: [],
-		toolsFollowGlobal: true,
-		approvalsFollowGlobal: true,
 		messages: [],
 		messageEntryIds: [],
 		branchPoints: [],

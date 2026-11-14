@@ -2,6 +2,9 @@ import { element, icon } from "./dom.ts";
 import { openMenu } from "./render/menu.ts";
 import type { ModelOption, PromptBehavior, QueuedPrompt } from "@my-agent/core/protocol";
 
+// 与 main.ts / render/settings.ts 各自重复的同一个内置名——core 跑在 Node 上，客户端不打包它。
+const DEFAULT_MODE_NAME = "默认";
+
 export interface ComposerHandlers {
 	onSubmit(text: string, behavior: PromptBehavior): void;
 	onAbort(): void;
@@ -262,12 +265,12 @@ export class Composer {
 	/**
 	 * 绘制模式席位的标签。
 	 *
-	 * 名字是按钮唯一持有的东西：存在哪些预设、预设里有什么，属于每次打开时重建的菜单。一个不匹配
-	 * 的会话 —— 其工具与审批没有哪个模式指名，通常是模式被编辑后留下的 —— 显示「自定义」，而不是
-	 * 假装它还停留在已经离开的预设上。
+	 * 名字是按钮唯一持有的东西：存在哪些预设、预设里有什么，属于每次打开时重建的菜单。座位随快照
+	 * 携带（ADR-0018），undefined 读作内置「默认」——指针缺席或悬空的会话就*是*在默认上运行，
+	 * 不存在第四种座位。
 	 */
 	setModes(current: string | undefined): void {
-		const label = current ?? "自定义";
+		const label = current ?? DEFAULT_MODE_NAME;
 		if (label === this.modeSignature) return;
 		this.modeSignature = label;
 		this.modeLabel.textContent = label;

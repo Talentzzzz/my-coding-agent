@@ -68,13 +68,15 @@ export {
  * session 是两个文件，5 是第一个这样声明的版本：4 把所有东西放在一个 JSONL 里、header 是第一行，
  * 5 把它拆开——`<id>.json` 装 session *是什么*（header 字段加上 title、model、thinking level、
  * tool config 的当前值，每次变更整体重写），`<id>.jsonl` 装*说过什么*（不可变的条目流，仅此而已）。
- * 这里只产出 5，本构建认识的条目种类即 {@link SessionEntry} 里的那些。
+ * 6 把 tool config 从两份值映射换成模式指针：`activeTools`/`approval` 让位给 `mode`（指向
+ * settings `modes` 的名字，缺席即跟随全局默认）加一个会话自己的审批增量 `approval`
+ * （ADR-0018）。这里只产出 6，本构建认识的条目种类即 {@link SessionEntry} 里的那些。
  *
- * 刻意不做迁移。文件读不出 v5 配对的 session 会被*删除*，而不是拒绝后留在原地：格式归本构建所有，
- * v≤4 的文件在没有本代码已不再具备的 header 重放的情况下无法收养，留着它会让每次列表都为一个永远
+ * 刻意不做迁移。文件读不出 v6 配对的 session 会被*删除*，而不是拒绝后留在原地：格式归本构建所有，
+ * v≤5 的文件在没有本代码已不再具备的 header 重放的情况下无法收养，留着它会让每次列表都为一个永远
  * 无法再打开的 session 付代价。删除点在列表扫描和 {@link fillSession}——见 {@link settleSessionFiles}。
  */
-export const CURRENT_SESSION_VERSION = 5;
+export const CURRENT_SESSION_VERSION = 6;
 
 /**
  * session 的 `.json` 那一半：session *是什么*，作为一个原子重写的快照。
@@ -113,9 +115,19 @@ export interface SessionMeta {
 	model?: { name: string; modelId: string };
 	/** session 最后一次请求的 thinking level；缺席即「从未选择」。 */
 	thinkingLevel?: string;
-	/** 最近一次变更时的完整激活工具集，按注册顺序。 */
-	activeTools?: string[];
-	/** 最近一次变更时的完整审批表，key 与设置文件的 `approval` 一致。 */
+	/**
+	 * 会话所在的模式：settings `modes` 表里的一个名字，会话的工具与审批随它活态解析（ADR-0018）。
+	 * 缺席即「跟随全局默认」——「默认」模式的指针形态就是缺席。指针指向的名字消失（改名/删除）时
+	 * 读作全局默认，指针本身保留：模式再出生时重新挂上。
+	 */
+	mode?: string;
+	/**
+	 * 会话自己的审批增量，叠在模式解析出的审批表之上。
+	 *
+	 * 不是完整映射：只有会话自己做出的选择——grant 把不再问的工具翻成 `false`、审批补丁写下的
+	 * 键——才落这里。模式改了内容、全局默认变了，都不动它：增量表达的是会话在这一工具上的明确
+	 * 决定（ADR-0018）。
+	 */
 	approval?: Record<string, boolean>;
 	/**
 	 * session 是否停在审批闸门处；只在 true 时写入，缺席即 false。
@@ -893,7 +905,7 @@ function sessionSettingOf(meta: SessionMeta): SessionSetting {
 		...(meta.model === undefined && meta.thinkingLevel === undefined
 			? {}
 			: { model: { ...meta.model, ...(meta.thinkingLevel === undefined ? {} : { thinkingLevel: meta.thinkingLevel }) } }),
-		...(meta.activeTools === undefined ? {} : { activeTools: meta.activeTools }),
+		...(meta.mode === undefined ? {} : { mode: meta.mode }),
 		...(meta.approval === undefined ? {} : { approval: meta.approval }),
 		suspended: meta.suspended === true,
 	};
@@ -935,7 +947,7 @@ function metaOf(session: Session): SessionMeta {
 		...(setting.parentSessionId === undefined ? {} : { parentSession: setting.parentSessionId }),
 		...(setting.title === undefined ? {} : { title: setting.title }),
 		...recordedModelOf(setting.model),
-		...(setting.activeTools === undefined ? {} : { activeTools: setting.activeTools }),
+		...(setting.mode === undefined ? {} : { mode: setting.mode }),
 		...(setting.approval === undefined ? {} : { approval: setting.approval }),
 		...(setting.suspended ? { suspended: true } : {}),
 	};
@@ -1165,11 +1177,6 @@ function recordMeta(session: Session, change: (setting: SessionSetting) => boole
 	if (session.persist && session.fileCreated) writeMetaFile(session);
 }
 
-/** 两个工具名列表的集合相等：记录的集合是一个选择，不是一个顺序。 */
-function sameToolSet(left: readonly string[], right: readonly string[]): boolean {
-	return left.length === right.length && left.every((name) => right.includes(name));
-}
-
 /** 两个审批表的字段相等，遍及任一侧指名的所有 key。 */
 function metasApprovalEqual(left: Record<string, boolean>, right: Record<string, boolean>): boolean {
 	const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
@@ -1327,22 +1334,34 @@ export class SessionManager {
 	}
 
 	/**
-	 * 记录 session 的工具选择：激活集和审批表，都整体记录。
+	 * 把 session 指到一个模式上，或指回全局默认。
 	 *
-	 * 是快照不是增量，因为读者拿走的是生效值——与模型和 level 遵循的契约相同。两张表总是同时存在，
-	 * 所以为工具变更做的一次调用会把审批集一起带上，反过来也一样。
+	 * 指针是会话持有的一个选择，与模型选择遵循同一契约：写的是名字，值在每次读取时活态解析
+	 * （ADR-0018）。`undefined` 即「跟随全局默认」——「默认」模式的落盘形态就是缺席，所以「从未
+	 * 选择」和「选了默认」在盘上不可区分，这正是两者语义相同的诚实写法。
 	 */
-	setToolConfig(session: Session, activeTools: string[], approval: Record<string, boolean>): void {
+	setMode(session: Session, mode: string | undefined): void {
+		recordMeta(session, (setting) => {
+			if (setting.mode === mode) return false;
+			setting.mode = mode;
+			return true;
+		});
+	}
+
+	/**
+	 * 记录 session 自己的审批增量，叠在模式解析出的审批表之上。
+	 *
+	 * 增量不是完整映射：grant 与审批补丁把各自动过的键合并进来，其余工具继续跟随模式与全局默认。
+	 * 空表也按选择记录——它表达「会话撤销了自己的全部增量」，与「从未选择」在语义上无别。
+	 */
+	setApprovalOverride(session: Session, approval: Record<string, boolean>): void {
 		recordMeta(session, (setting) => {
 			if (
-				setting.activeTools !== undefined &&
-				sameToolSet(setting.activeTools, activeTools) &&
 				setting.approval !== undefined &&
 				metasApprovalEqual(setting.approval, approval)
 			) {
 				return false;
 			}
-			setting.activeTools = [...activeTools];
 			setting.approval = { ...approval };
 			return true;
 		});
@@ -1657,14 +1676,14 @@ export class SessionManager {
 	}
 
 	/**
-	 * 本 session 最后记录的工具选择，从未选择时各自为 undefined。
+	 * 本 session 最后记录的工具选择：模式指针与会话自己的审批增量，各自缺席即「从未选择」。
 	 *
 	 * undefined 是有意义的，而且正是这个方法要保住的东西：从未选择的 session 以默认值打开，选过的
 	 * session 完全按用户留下的样子重开。快照是完整的答案，所以这里读的是 session 而不是分支——这也
 	 * 是两文件拆分改变的地方：移动叶子不再切换这些值，因为它们是 session 的，不是分支的。
 	 */
-	getRecordedToolConfig(session: Session): { activeTools?: string[]; approval?: Record<string, boolean> } {
-		return { activeTools: session.sessionSetting.activeTools, approval: session.sessionSetting.approval };
+	getRecordedToolConfig(session: Session): { mode?: string; approval?: Record<string, boolean> } {
+		return { mode: session.sessionSetting.mode, approval: session.sessionSetting.approval };
 	}
 
 	/**
@@ -1810,7 +1829,7 @@ export class SessionManager {
 			...(sourceMeta.title === undefined ? {} : { title: sourceMeta.title }),
 			...(sourceMeta.model === undefined ? {} : { model: sourceMeta.model }),
 			...(sourceMeta.thinkingLevel === undefined ? {} : { thinkingLevel: sourceMeta.thinkingLevel }),
-			...(sourceMeta.activeTools === undefined ? {} : { activeTools: sourceMeta.activeTools }),
+			...(sourceMeta.mode === undefined ? {} : { mode: sourceMeta.mode }),
 			...(sourceMeta.approval === undefined ? {} : { approval: sourceMeta.approval }),
 			...(sourceMeta.suspended === undefined ? {} : { suspended: sourceMeta.suspended }),
 		};

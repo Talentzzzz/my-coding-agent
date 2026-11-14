@@ -571,7 +571,7 @@ export class SessionController {
 	}
 
 	/**
-	 * 修改哪些工具要审批，以及队列模式。
+	 * 修改会话的模式指针、审批增量与队列模式。
 	 *
 	 * 是 patch，所以字段相互独立：客户端只发变动了的，被拒的值不碰会话的其他设置。
 	 *
@@ -588,29 +588,7 @@ export class SessionController {
 			try {
 				session.applyConfig(sessionId, fields);
 			} catch (error) {
-				// 会话不能接受的一个审批键或队列模式：请求被理解并被拒绝，是冲突而不是坏请求。
-				throw httpStatus.conflict(messageOf(error));
-			}
-			return { session: session.snapshot(sessionId) };
-		});
-	}
-
-	/**
-	 * 整体替换激活的工具集。
-	 *
-	 * 替换而不是 patch 是会话自己的契约：未知的名字会抛出并让集合分毫未动，所以客户端永远不会落进一个半应用的集合。
-	 */
-	async updateTools(sessionId: string, body: Record<string, unknown>): Promise<{ session: SessionSnapshot }> {
-		const names = body.names;
-		if (!Array.isArray(names) || names.some((name) => typeof name !== "string")) {
-			throw httpStatus.badRequest("`names` must be an array of tool names");
-		}
-		const active = names as string[];
-
-		return this.holding(sessionId, (session) => {
-			try {
-				session.setActiveTools(sessionId, active);
-			} catch (error) {
+				// 会话不能接受的一个模式名、审批键或队列模式：请求被理解并被拒绝，是冲突而不是坏请求。
 				throw httpStatus.conflict(messageOf(error));
 			}
 			return { session: session.snapshot(sessionId) };

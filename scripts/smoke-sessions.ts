@@ -23,6 +23,7 @@ import {
 	inMemorySettingManager,
 	SettingManager,
 	setSessionsDir,
+	toolStateOf,
 	type SessionSnapshot,
 	type Session,
 } from "@my-agent/core";
@@ -393,7 +394,8 @@ try {
 		hubSessions(hub).setTitle(bagOf(hub, metaId), "重写的名字");
 		hubSessions(hub).setModel(bagOf(hub, metaId), "row-a", "model-a");
 		hubSessions(hub).setThinkingLevel(bagOf(hub, metaId), "high");
-		hubSessions(hub).setToolConfig(bagOf(hub, metaId), ["read"], { bash: true });
+		hubSessions(hub).setMode(bagOf(hub, metaId), "reader");
+		hubSessions(hub).setApprovalOverride(bagOf(hub, metaId), { bash: true });
 		check("the stream is byte-identical after the choices", (await readFile(jsonlPath, "utf8")) === logBefore);
 		const stored = JSON.parse(await readFile(jsonPath, "utf8")) as Record<string, unknown>;
 		check(
@@ -401,7 +403,7 @@ try {
 			stored.title === "重写的名字" &&
 				JSON.stringify(stored.model) === JSON.stringify({ name: "row-a", modelId: "model-a" }) &&
 				stored.thinkingLevel === "high" &&
-				JSON.stringify(stored.activeTools) === JSON.stringify(["read"]) &&
+				stored.mode === "reader" &&
 				JSON.stringify(stored.approval) === JSON.stringify({ bash: true }) &&
 				stored.version === CURRENT_SESSION_VERSION &&
 				stored.id === metaId,
@@ -419,7 +421,8 @@ try {
 		const quiet = statSync(jsonPath).mtimeMs;
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		hubSessions(hub).setTitle(bagOf(hub, metaId), "重写的名字");
-		hubSessions(hub).setToolConfig(bagOf(hub, metaId), ["read"], { bash: true });
+		hubSessions(hub).setMode(bagOf(hub, metaId), "reader");
+		hubSessions(hub).setApprovalOverride(bagOf(hub, metaId), { bash: true });
 		check("an unchanged value does not rewrite the snapshot", statSync(jsonPath).mtimeMs === quiet, `${statSync(jsonPath).mtimeMs} vs ${quiet}`);
 
 		// The restore seam: a reopen is fillSession, and the recorded answers come back whole — the
@@ -435,12 +438,13 @@ try {
 		);
 		check(
 			"and the tool choices",
-			JSON.stringify(store.getRecordedToolConfig(restored)) === JSON.stringify({ activeTools: ["read"], approval: { bash: true } }),
+			JSON.stringify(store.getRecordedToolConfig(restored)) === JSON.stringify({ mode: "reader", approval: { bash: true } }),
 			JSON.stringify(store.getRecordedToolConfig(restored)),
 		);
 
 		// A fork is a new pair of files, and the source's current values travel whole: title, model,
-		// level, tool config — the session's own facts now, not entries a branch replay could restore.
+		// level, mode pointer, approval delta — the session's own facts now, not entries a branch
+		// replay could restore.
 		const carryId = await hub.fork(metaId, null);
 		const carryFile = openFile(carryId);
 		const carryJson = snapshotPathOf(carryFile.sessionFileAbsPath!);
@@ -452,7 +456,7 @@ try {
 				carryMeta?.model?.name === "row-a" &&
 				carryMeta?.model?.modelId === "model-a" &&
 				carryMeta?.thinkingLevel === "high" &&
-				carryMeta?.activeTools?.join(",") === "read" &&
+				carryMeta?.mode === "reader" &&
 				carryMeta?.approval?.bash === true,
 			JSON.stringify(carryMeta),
 		);
@@ -468,56 +472,73 @@ try {
 	check("and nothing entered the registry", !hub.live.includes("0123456789abcdef"));
 
 	process.stdout.write("the settings files name the tools a session that never chose opens on\n");
-	// The global default tool set is a settings field, so the seam is assembly itself: a session with
-	// no recorded choice opens on the configured set, and one that chose keeps its own. Everything
-	// here runs on an in-memory settings manager, so no file outside the temporary
-	// working directory is ever touched.
+	// The global default tool set is a settings field, and the mode pointer is the session's own
+	// choice, so the seam is assembly itself: a session with no recorded pointer opens on the
+	// configured set through the default mode, and one that points at a preset keeps its own. A
+	// preset's tools are read live, so the snapshot's seat and the resolved set are checked where
+	// they live. Everything here runs on an in-memory settings manager, so no file outside the
+	// temporary working directory is ever touched.
 	const settingsRoot = await mkdtemp(join(tmpdir(), "my-agent-settings-"));
 	try {
-		const settings = inMemorySettingManager({ tools: ["read", "bash"] }, []);
+		const settings = inMemorySettingManager(
+			{ tools: ["read", "bash"], modes: [{ name: "reader", tools: ["read"], approval: {} }] },
+			[],
+		);
 		const session = createSession(settingsRoot);
 		const sessionId = session.sessionId;
 		const options = {
 			session,
 			settings,
 		};
+		const known = ["read", "write", "edit", "glob", "grep", "bash"];
+		// 活会话的袋在第一条消息后作废：有文件就读，还没有就返回出生时的那只（它仍是 live 半上唯一
+		// 的一份，ADR-0013）。
+		const replayed = (): Session => {
+			const path = SessionManager.findSessionFilePathById(sessionId);
+			return path === undefined ? session : fillSession(path);
+		};
+		const resolvedOf = (): string[] => toolStateOf(store, replayed(), settings, known).activeToolNames;
 
 		const cold = await readSessionSnapshot(options);
-		check("a session with no entry opens on the settings' tool set", cold.activeTools.join(",") === "read,bash", cold.activeTools.join(","));
-		check("and reports both halves as following global", cold.toolsFollowGlobal && cold.approvalsFollowGlobal);
+		check("a session with no entry reports the default seat", cold.mode === undefined, cold.mode);
 
 		const live = await openAgent(options);
 		try {
 			// The one message the branch test below can rewind to with nothing recorded after it.
 			const firstEntry = store.appendMessage(session, userMessage("before any choice"));
 
-			live.setActiveTools(sessionId, ["read"]);
-			check("a recorded choice wins over the default", live.snapshot(sessionId).activeTools.join(",") === "read", live.snapshot(sessionId).activeTools.join(","));
-			check("and stops reporting the tools as global", live.snapshot(sessionId).toolsFollowGlobal === false);
-			check("while the untouched approval half still follows global", live.snapshot(sessionId).approvalsFollowGlobal === true);
+			check(
+				"the default view resolves the configured set",
+				JSON.stringify(resolvedOf()) === JSON.stringify(["read", "bash"]),
+				JSON.stringify(resolvedOf()),
+			);
+
+			live.applyConfig(sessionId, { mode: "reader" });
+			check("a recorded pointer wins over the default", live.snapshot(sessionId).mode === "reader", live.snapshot(sessionId).mode);
+			check("and the resolved set is the preset's", JSON.stringify(resolvedOf()) === JSON.stringify(["read"]), JSON.stringify(resolvedOf()));
 
 			live.applyConfig(sessionId, { approval: { bash: false } });
-			check("a recorded approval stops its half too", live.snapshot(sessionId).approvalsFollowGlobal === false);
+			check("an approval delta records beside the pointer", JSON.stringify(store.getRecordedToolConfig(replayed()).approval) === JSON.stringify({ bash: false }), JSON.stringify(store.getRecordedToolConfig(replayed()).approval));
 
-			// The reset *holds* the global values, so the judgement has to be field
-			// equality and not "a choice exists" — the trap the panel's label would fall into otherwise.
-			live.setActiveTools(sessionId, ["bash", "read"]);
-			check("re-recording the global set reads as following global again", live.snapshot(sessionId).toolsFollowGlobal === true);
+			// The pointer is the seat, not a value: `null` is the「回到默认」gesture, and the recorded
+			// delta survives the return — the session's own choice is not the mode's to erase.
+			live.applyConfig(sessionId, { mode: null });
+			check("returning to the default clears the pointer", live.snapshot(sessionId).mode === undefined, String(live.snapshot(sessionId).mode));
+			check("and the delta survives the return", store.getRecordedToolConfig(replayed()).approval?.bash === false, JSON.stringify(store.getRecordedToolConfig(replayed()).approval));
 
 			// A branch move changes the leaf and nothing else: the recorded choices are the session's
-			// own now, so the set it recorded stays in force.
+			// own now, so the pointer it recorded stays in force.
 			live.branchTo(sessionId, firstEntry, false);
-			check("a branch move leaves the recorded set in force", live.snapshot(sessionId).activeTools.join(",") === "bash,read", live.snapshot(sessionId).activeTools.join(","));
+			check("a branch move leaves the recorded pointer in force", live.snapshot(sessionId).mode === undefined, String(live.snapshot(sessionId).mode));
 
-			live.setActiveTools(sessionId, ["grep"]);
+			live.applyConfig(sessionId, { mode: "reader" });
 			// The cold read takes a bag, and the one the assembly handed over stopped being current
 			// the moment the session was born: a cold read of a spoken session is a replay (ADR-0013).
 			const recold = await readSessionSnapshot({ ...options, session: fillSession(session.sessionFileAbsPath ?? "") });
 			check(
-				"the cold read answers the judgement exactly as the live snapshot does",
-				recold.toolsFollowGlobal === live.snapshot(sessionId).toolsFollowGlobal &&
-					recold.approvalsFollowGlobal === live.snapshot(sessionId).approvalsFollowGlobal,
-				`${recold.toolsFollowGlobal}/${recold.approvalsFollowGlobal} vs ${live.snapshot(sessionId).toolsFollowGlobal}/${live.snapshot(sessionId).approvalsFollowGlobal}`,
+				"the cold read answers the seat exactly as the live snapshot does",
+				recold.mode === live.snapshot(sessionId).mode,
+				`${recold.mode} vs ${live.snapshot(sessionId).mode}`,
 			);
 		} finally {
 			await live.close(sessionId);
@@ -590,11 +611,8 @@ try {
 			"model",
 			"thinkingLevel",
 			"thinkingLevels",
+			"mode",
 			"allTools",
-			"activeTools",
-			"toolsFollowGlobal",
-			"approvalsFollowGlobal",
-			"approvals",
 			"usage",
 		] as const satisfies readonly (keyof SessionSnapshot)[];
 		const mismatched = fromLog.filter(

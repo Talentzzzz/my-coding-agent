@@ -210,6 +210,15 @@ function settings(overrides: Partial<Settings> = {}): Settings {
 	} as Settings;
 }
 
+/**
+ * The approval map the mode fixtures carry: nothing gated.
+ *
+ * A mode's map is normalized over the settings defaults (`modesOr`), so an empty literal would
+ * inherit the factory gates (write/edit/bash) — these presets narrow tools, and the exercises that
+ * check the approval clause need the map to say exactly what they mean.
+ */
+const NO_GATES: Record<string, boolean> = { read: false, write: false, edit: false, glob: false, grep: false, bash: false };
+
 /** What one run is driven through: which rows a session reads, and which transport it sends over. */
 interface RunOptions {
 	models?: readonly ModelConfig[];
@@ -824,30 +833,35 @@ async function exerciseConfigChanged(): Promise<void> {
 	// A second row gives the source a second model, so a model change is observable at all. Both are
 	// answered by the same scripted transport: nothing here sends a request.
 	const twoRows: ModelConfig[] = [ROW, { ...ROW, name: "faux2" }];
-	const agent = await openSession({}, { models: twoRows }, "faux/faux-1");
+	const agent = await openSession({ modes: [{ name: "reader", tools: ["read"], approval: { bash: true } }] }, { models: twoRows }, "faux/faux-1");
 
 	const seen: Extract<AgentSessionEvent, { type: "config_changed" }>[] = [];
 	agent.onEvent(sidOf(agent), (event) => {
 		if (event.type === "config_changed") seen.push(event);
 	});
 
-	agent.applyConfig(sidOf(agent), { approval: { bash: true } });
-	check("one config_changed for the approval", seen.length === 1, JSON.stringify(seen));
+	agent.applyConfig(sidOf(agent), { mode: "reader" });
+	check("one config_changed for the mode", seen.length === 1, JSON.stringify(seen));
 	check(
-		"carrying only the approval that changed",
-		JSON.stringify(seen[0]) === JSON.stringify({ type: "config_changed", approvals: { bash: true } }),
+		"carrying the new seat alone",
+		JSON.stringify(seen[0]) === JSON.stringify({ type: "config_changed", mode: "reader" }),
 		JSON.stringify(seen[0]),
 	);
 
-	agent.applyConfig(sidOf(agent), { approval: { bash: true } });
-	check("re-applying the same value says nothing", seen.length === 1, JSON.stringify(seen));
+	agent.applyConfig(sidOf(agent), { mode: "reader" });
+	check("re-applying the same mode says nothing", seen.length === 1, JSON.stringify(seen));
 	agent.applyConfig(sidOf(agent), {});
 	check("an empty patch says nothing", seen.length === 1, JSON.stringify(seen));
 
+	// The approval delta is a session-side write and carries no event: the effective map is re-derived
+	// at every read from the pointer and the delta together, so no client patches it incrementally.
 	agent.applyConfig(sidOf(agent), { approval: { bash: false, read: true } });
+	check("an approval delta says nothing", seen.length === 1, JSON.stringify(seen));
+
+	agent.applyConfig(sidOf(agent), { mode: null });
 	check(
-		"only the two approvals that moved are reported",
-		seen.length === 2 && JSON.stringify(Object.entries(seen[1]?.approvals ?? {}).sort()) === JSON.stringify([["bash", false], ["read", true]]),
+		"returning to the default carries the explicit null",
+		seen.length === 2 && JSON.stringify(seen[1]) === JSON.stringify({ type: "config_changed", mode: null }),
 		JSON.stringify(seen[1]),
 	);
 
@@ -1105,10 +1119,14 @@ async function exerciseApprovalPrompt(): Promise<void> {
 	check("and that message still leads the request", sent[1]?.roles[0] === "system", JSON.stringify(sent[1]?.roles));
 	check(
 		"carrying the tool declarations as well",
-		JSON.stringify(sent[1]?.tools) === JSON.stringify(agent.snapshot(sidOf(agent)).activeTools),
+		JSON.stringify(sent[1]?.tools) === JSON.stringify(["read", "write", "edit", "glob", "grep", "bash"]),
 		JSON.stringify(sent[1]?.tools),
 	);
-	check("the approval is in the snapshot too", agent.snapshot(sidOf(agent)).approvals.bash === true, JSON.stringify(agent.snapshot(sidOf(agent)).approvals));
+	check(
+		"the approval is the session's own delta on the snapshot",
+		JSON.stringify(agent.sessionManager.getRecordedToolConfig(bagOf(agent)).approval) === JSON.stringify({ bash: true }),
+		JSON.stringify(agent.sessionManager.getRecordedToolConfig(bagOf(agent)).approval),
+	);
 
 	await agent.close(sidOf(agent));
 }
@@ -1220,14 +1238,14 @@ async function exerciseToolChangeResend(): Promise<void> {
 	process.stdout.write("tool change resend\n");
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [fakeAssistantMessage("first answer"), fakeAssistantMessage("second answer")]);
-	const agent = await openSession();
+	const narrowed = ["read", "edit", "glob", "grep", "bash"];
+	const agent = await openSession({ modes: [{ name: "narrow", tools: narrowed, approval: NO_GATES }] });
 
 	await within("the first run", 10_000, agent.prompt(sidOf(agent), "which tools do you have"));
 	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	const dropped = "bash";
-	const narrowed = agent.snapshot(sidOf(agent)).activeTools.filter((name) => name !== dropped);
-	agent.setActiveTools(sidOf(agent), narrowed);
+	agent.applyConfig(sidOf(agent), { mode: "narrow" });
 	await within("the second run", 10_000, agent.prompt(sidOf(agent), "and now"));
 	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
@@ -1324,11 +1342,11 @@ async function exerciseToolManager(): Promise<void> {
 		fakeAssistantMessage(fakeToolCall("probe", {})),
 		fakeAssistantMessage("second done"),
 	]);
-	const agent = await openSession({}, {}, undefined, manager);
+	const agent = await openSession({ modes: [{ name: "probe-only", tools: ["read", "probe"], approval: NO_GATES }] }, {}, undefined, manager);
 	await within("the run", 10_000, agent.prompt(sidOf(agent), "probe once"));
 	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 	// A narrowing between the two requests: `read` and `probe` stay, `noop` and the rest go.
-	agent.setActiveTools(sidOf(agent), ["read", "probe"]);
+	agent.applyConfig(sidOf(agent), { mode: "probe-only" });
 	await within("the run", 10_000, agent.prompt(sidOf(agent), "probe once more"));
 	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
@@ -1353,7 +1371,8 @@ async function exerciseToolManager(): Promise<void> {
 }
 
 /**
- * Deactivating a tool takes it out of the snapshot, the prompt, and the declarations the model gets.
+ * A mode without a tool leaves it out of the resolved active set, the prompt, and the declarations
+ * the model gets.
  *
  * The prompt is read back from the provider request rather than from the registry: a prompt that still
  * named `write` would advertise a tool the loop then refuses to run.
@@ -1362,11 +1381,12 @@ async function exerciseActiveTools(): Promise<void> {
 	process.stdout.write("active tools\n");
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [fakeAssistantMessage("first answer"), fakeAssistantMessage("second answer")]);
-	const agent = await openSession();
+	const narrowed = ["read", "edit", "glob", "grep", "bash"];
+	const agent = await openSession({ modes: [{ name: "narrow", tools: narrowed, approval: NO_GATES }] });
 
-	const changes: string[][] = [];
+	const seats: (string | null)[] = [];
 	agent.onEvent(sidOf(agent), (event) => {
-		if (event.type === "config_changed" && event.tools !== undefined) changes.push(event.tools);
+		if (event.type === "config_changed" && event.mode !== undefined) seats.push(event.mode);
 	});
 
 	await within("the run", 10_000, agent.prompt(sidOf(agent), "what can you do"));
@@ -1375,12 +1395,10 @@ async function exerciseActiveTools(): Promise<void> {
 	check("and the model was offered write", availableTools(sent[0]?.prompt ?? "").includes("write"), JSON.stringify(availableTools(sent[0]?.prompt ?? "")));
 	check("which the request also declared", sent[0]?.tools.includes("write") === true, JSON.stringify(sent[0]?.tools));
 
-	const narrowed = ["read", "edit", "glob", "grep", "bash"];
-	agent.setActiveTools(sidOf(agent), narrowed);
-	check("snapshot.activeTools loses write", JSON.stringify(agent.snapshot(sidOf(agent)).activeTools) === JSON.stringify(narrowed), JSON.stringify(agent.snapshot(sidOf(agent)).activeTools));
-	check("get activeTools() loses write", JSON.stringify(agent.snapshot(sidOf(agent)).activeTools) === JSON.stringify(narrowed), JSON.stringify(agent.snapshot(sidOf(agent)).activeTools));
+	agent.applyConfig(sidOf(agent), { mode: "narrow" });
+	check("snapshot.mode names the applied mode", agent.snapshot(sidOf(agent)).mode === "narrow", agent.snapshot(sidOf(agent)).mode);
 	check("allTools still reports every registered tool", agent.snapshot(sidOf(agent)).allTools.length === 6, JSON.stringify(agent.snapshot(sidOf(agent)).allTools));
-	check("the change is announced, so a client needs no new snapshot", JSON.stringify(changes) === JSON.stringify([narrowed]), JSON.stringify(changes));
+	check("the change is announced, so a client needs no new snapshot", JSON.stringify(seats) === JSON.stringify(["narrow"]), JSON.stringify(seats));
 
 	await within("the run", 10_000, agent.prompt(sidOf(agent), "and now"));
 	await within("settle()", 10_000, agent.settle(sidOf(agent)));
@@ -1403,8 +1421,8 @@ async function exerciseActiveTools(): Promise<void> {
  */
 async function exerciseDeactivatedToolCall(): Promise<void> {
 	process.stdout.write("deactivated tool call\n");
-	const agent = await openSession();
-	agent.setActiveTools(sidOf(agent), ["read", "edit", "glob", "grep", "bash"]);
+	const agent = await openSession({ modes: [{ name: "no-write", tools: ["read", "edit", "glob", "grep", "bash"], approval: NO_GATES }] });
+	agent.applyConfig(sidOf(agent), { mode: "no-write" });
 
 	const ends: { toolName: string; isError: boolean; text: string }[] = [];
 	agent.onEvent(sidOf(agent), (event) => {
@@ -1430,7 +1448,7 @@ async function exerciseDeactivatedToolCall(): Promise<void> {
 	// The refusal is the list's, not the table's: the same call, the same table, the tool switched
 	// back on — and it writes. A refusal that came from `get` finding nothing could not be undone
 	// without a restart.
-	agent.setActiveTools(sidOf(agent), ["read", "write", "edit", "glob", "grep", "bash"]);
+	agent.applyConfig(sidOf(agent), { mode: null });
 	recordRequests([], [fakeAssistantMessage(fakeToolCall("write", { path: "allowed.txt", content: "yes" })), fakeAssistantMessage("written")]);
 	await within("the run", 10_000, agent.prompt(sidOf(agent), "write allowed.txt"));
 	await within("settle()", 10_000, agent.settle(sidOf(agent)));
@@ -1452,11 +1470,11 @@ async function exerciseDeactivatedToolCall(): Promise<void> {
  * run before the first result lands, a sequential one announces each call as it reaches it. Both
  * calls are scripted into one answer, `bash` first-class and refused.
  */
-async function exerciseDeactivatedToolBatch(): Promise<void> {
+	async function exerciseDeactivatedToolBatch(): Promise<void> {
 	process.stdout.write("deactivated tool in a batch\n");
 	await writeFile(join(root, "batch.txt"), "batch\n");
-	const agent = await openSession();
-	agent.setActiveTools(sidOf(agent), ["read", "glob", "grep", "edit"]);
+	const agent = await openSession({ modes: [{ name: "no-bash", tools: ["read", "glob", "grep", "edit"], approval: NO_GATES }] });
+	agent.applyConfig(sidOf(agent), { mode: "no-bash" });
 
 	const log: string[] = [];
 	/** What the `bash` call ended with, so "refused" is read off its result and not off its name. */
@@ -1491,23 +1509,23 @@ async function exerciseDeactivatedToolBatch(): Promise<void> {
 	await agent.close(sidOf(agent));
 }
 
-/** An unknown name is refused before anything moves, so the session keeps the set it had. */
+/** An unknown mode name is refused before anything moves, so the session keeps the pointer it had. */
 async function exerciseUnknownTool(): Promise<void> {
 	process.stdout.write("unknown tool\n");
-	const agent = await openSession();
-	const before = JSON.stringify(agent.snapshot(sidOf(agent)).activeTools);
+	const agent = await openSession({ modes: [{ name: "reader", tools: ["read"], approval: NO_GATES }] });
+	const before = JSON.stringify(agent.sessionManager.getRecordedToolConfig(bagOf(agent)));
 
 	const seen: AgentSessionEvent[] = [];
 	agent.onEvent(sidOf(agent), (event) => seen.push(event));
 
 	let threw = false;
 	try {
-		agent.setActiveTools(sidOf(agent), ["read", "nope"]);
+		agent.applyConfig(sidOf(agent), { mode: "no-such-mode" });
 	} catch {
 		threw = true;
 	}
-	check("setActiveTools throws on an unknown name", threw);
-	check("the session keeps its previous active set", JSON.stringify(agent.snapshot(sidOf(agent)).activeTools) === before, `${before} -> ${JSON.stringify(agent.snapshot(sidOf(agent)).activeTools)}`);
+	check("applyConfig throws on an unknown mode name", threw);
+	check("the session keeps its previous pointer", JSON.stringify(agent.sessionManager.getRecordedToolConfig(bagOf(agent))) === before, `${before} -> ${JSON.stringify(agent.sessionManager.getRecordedToolConfig(bagOf(agent)))}`);
 	check("and no change was announced", seen.every((event) => event.type !== "config_changed"), JSON.stringify(seen.map(labelOf)));
 
 	fake.setResponses([fakeAssistantMessage("still here")]);
@@ -1519,15 +1537,15 @@ async function exerciseUnknownTool(): Promise<void> {
 	await agent.close(sidOf(agent));
 }
 
-/** No active tools is a conversation without tools, not a broken session. */
+/** A mode whose list is empty is a conversation without tools, not a broken session. */
 async function exerciseEmptyToolSet(): Promise<void> {
 	process.stdout.write("empty tool set\n");
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [fakeAssistantMessage("a conversation it is")]);
-	const agent = await openSession();
+	const agent = await openSession({ modes: [{ name: "silent", tools: [], approval: NO_GATES }] });
 
-	agent.setActiveTools(sidOf(agent), []);
-	check("an empty active set is allowed", JSON.stringify(agent.snapshot(sidOf(agent)).activeTools) === "[]", JSON.stringify(agent.snapshot(sidOf(agent)).activeTools));
+	agent.applyConfig(sidOf(agent), { mode: "silent" });
+	check("an empty active set is allowed", agent.snapshot(sidOf(agent)).mode === "silent", agent.snapshot(sidOf(agent)).mode);
 	check("with nothing active and everything still registered", agent.snapshot(sidOf(agent)).allTools.length === 6, JSON.stringify(agent.snapshot(sidOf(agent)).allTools));
 
 	const run = await within("the run", 10_000, agent.prompt(sidOf(agent), "hello without tools"));
@@ -2279,7 +2297,7 @@ async function exerciseBranching(): Promise<void> {
  */
 async function exerciseBranchToolConfig(): Promise<void> {
 	process.stdout.write("tool config is the session's, not a branch's\n");
-	const agent = await openSession();
+	const agent = await openSession({ modes: [{ name: "narrow", tools: ["read", "edit", "glob", "grep"], approval: NO_GATES }] });
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [
 		fakeAssistantMessage("first answer"),
@@ -2295,11 +2313,10 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	agent.onEvent(sidOf(agent), (event) => events.push(event));
 
 	// --- The session narrows and gates `bash` ---------------------------------------------------
-	const narrowed = agent.snapshot(sidOf(agent)).activeTools.filter((name) => name !== "bash");
-	agent.setActiveTools(sidOf(agent), narrowed);
+	agent.applyConfig(sidOf(agent), { mode: "narrow" });
 	agent.applyConfig(sidOf(agent), { approval: { bash: true } });
-	check("the narrow set is in force", agent.snapshot(sidOf(agent)).activeTools.includes("bash") === false, JSON.stringify(agent.snapshot(sidOf(agent)).activeTools));
-	check("with the approval the session chose", agent.snapshot(sidOf(agent)).approvals.bash === true, JSON.stringify(agent.snapshot(sidOf(agent)).approvals));
+	check("the narrow mode is in force", agent.snapshot(sidOf(agent)).mode === "narrow", agent.snapshot(sidOf(agent)).mode);
+	check("with the approval the session chose", agent.getApprovals(sidOf(agent)).bash === true, JSON.stringify(agent.getApprovals(sidOf(agent))));
 	check("which is the map the gate reads", agent.getApprovals(sidOf(agent)).bash === true, JSON.stringify(agent.getApprovals(sidOf(agent))));
 	check("leaving the settings file alone", settingsOf(agent).getApprovals(root).bash === false, JSON.stringify(settingsOf(agent).getApprovals(root)));
 
@@ -2307,7 +2324,7 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	const before = events.length;
 	agent.branchTo(sidOf(agent), firstId, false);
 	check("the move lands before both turns", textsOf(agent).join(",") === "config branch question one", textsOf(agent).join(","));
-	check("and the choices stay what the session chose", agent.snapshot(sidOf(agent)).activeTools.includes("bash") === false && agent.snapshot(sidOf(agent)).approvals.bash === true, JSON.stringify(agent.snapshot(sidOf(agent)).activeTools));
+	check("and the choices stay what the session chose", agent.snapshot(sidOf(agent)).mode === "narrow" && agent.getApprovals(sidOf(agent)).bash === true, agent.snapshot(sidOf(agent)).mode ?? "");
 	check("the gate reads the same map on the new branch", agent.getApprovals(sidOf(agent)).bash === true, JSON.stringify(agent.getApprovals(sidOf(agent))));
 	check(
 		"and no config_changed rides the move",
@@ -2336,8 +2353,8 @@ async function exerciseBranchToolConfig(): Promise<void> {
 
 	// --- The choice is on the snapshot, so the reopen answers with it ----------------------------
 	const reopened = fillSession(bagOf(agent).sessionFileAbsPath ?? "");
-	check("the reopen restores the session's tool set", store.getRecordedToolConfig(reopened).activeTools?.includes("bash") === false, JSON.stringify(store.getRecordedToolConfig(reopened).activeTools));
-	check("and its approval with it", store.getRecordedToolConfig(reopened).approval?.bash === true, JSON.stringify(store.getRecordedToolConfig(reopened).approval));
+	check("the reopen restores the session's mode pointer", store.getRecordedToolConfig(reopened).mode === "narrow", store.getRecordedToolConfig(reopened).mode);
+	check("and its approval delta with it", store.getRecordedToolConfig(reopened).approval?.bash === true, JSON.stringify(store.getRecordedToolConfig(reopened).approval));
 }
 
 /**

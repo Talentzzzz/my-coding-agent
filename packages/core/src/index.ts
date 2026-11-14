@@ -198,7 +198,7 @@ export {
 } from "./session/session-manager.ts";
 export { UnknownSessionError } from "./session/unknown-session.ts";
 export { createAgentState, createLive, type ActiveRun, type AgentState, type Live } from "./session/agent-state.ts";
-export { globalDefaultToolState, toolStateOf } from "./session/tool-config.ts";
+export { modeSeatOf, toolStateOf } from "./session/tool-config.ts";
 export {
 	inMemorySettingManager,
 	SettingManager,

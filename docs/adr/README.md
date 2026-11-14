@@ -29,6 +29,7 @@
 | [0015](0015-snapshot-suspended-marker.md) | 快照加 `suspended` 标记——冷启动审批点是纯显示缓存，账本仍是唯一事实 | 已接受，已落地（2026-11-11，cold-start-approval-dot 01–04 号票，`check` 绿、相关 smoke 单独跑全绿），0005 后果一节「可从磁盘重建的缓存」口子的实例，不取代任何决定 |
 | [0016](0016-loop-is-orchestration.md) | loop 就是编排——删掉 `LoopManager`，一次运行回到 `Agent` | 已接受（2026-11-13，wayfinder 票 003），已落地（落地归票 004、验证归票 005、文档同步归票 006，见 `.scratch/wayfinder/loop-back-into-agent/`）；取代此前「独立运行对象 + 白名单回调」的全部安排，终止引擎归属的六次往返 |
 | [0017](0017-fanout-folded-into-agent.md) | fanout 并入编排——删掉 `session/fanout.ts` 与 `SessionServices` 参数袋 | 已接受，已落地（2026-11-14，`check` 绿、smoke-sessions / smoke-api / smoke-mux 过、smoke-tools 与基线 c667b9f 逐字同色）；取代 0012 / 0016「没有被取代的」中保护 fanout 参数袋的两条 |
+| [0018](0018-session-holds-mode-pointer.md) | 会话存模式指针——工具配置从「值的快照」改成「名字 + 审批增量」，`PUT /tools` 删除 | 已接受，已落地（2026-11-15，`check` 绿、README 清单 smoke 全跑——smoke-tools / smoke-api / smoke-desktop-observability 与基线同色）；取代 0004 的决定 3（施加模式 = 两条命令写值、座位按值匹配），盘上格式升至 v6，旧会话按约删除 |
 
 ## 门槛
 

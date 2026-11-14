@@ -140,9 +140,15 @@ export interface SessionSetting {
 	 * model，输出到盘上时再拆回两个字段。
 	 */
 	model?: { name?: string; modelId?: string; thinkingLevel?: string };
-	/** 最近一次变更时的完整激活工具集，按注册顺序。 */
-	activeTools?: string[];
-	/** 最近一次变更时的完整审批表，key 与设置文件的 `approval` 一致。 */
+	/**
+	 * 会话所在的模式：settings `modes` 表里的一个名字，工具与审批随它活态解析；缺席即跟随全局默认
+	 * （ADR-0018）。
+	 */
+	mode?: string;
+	/**
+	 * 会话自己的审批增量，叠在模式解析出的审批表之上——只有会话明确动过的键（grant、审批补丁）
+	 * 才落这里。
+	 */
 	approval?: Record<string, boolean>;
 	/**
 	 * session 是否停在审批闸门处——可重建的展示缓存，不是用户选择：账本的悬空 call 才是权威，这个

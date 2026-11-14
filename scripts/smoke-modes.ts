@@ -318,8 +318,9 @@ process.stdout.write("\nmodes：输入框的模式座位与菜单\n");
 	composer.setModes("默认");
 	const label = all(composer.element as unknown as FakeNode, "composer-mode-label")[0]!;
 	check("座位标着当前模式", label.textContent === "默认", label.textContent);
+	// 指针缺席或悬空的会话读作 undefined，而 undefined *就是*默认——不存在第四种座位（ADR-0018）。
 	composer.setModes(undefined);
-	check("没有命中的会话显示自定义", label.textContent === "自定义", label.textContent);
+	check("座位缺席读作默认", label.textContent === "默认", label.textContent);
 	composer.setModes("只读");
 	composer.setModes("只读");
 	check("同名重画被门槛挡住", label.textContent === "只读" && all(composer.element as unknown as FakeNode, "composer-mode-label").length === 1);

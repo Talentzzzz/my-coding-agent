@@ -91,7 +91,6 @@ function printHelp(): void {
 			"  GET    /api/sessions/{id}                   PATCH  /api/sessions/{id}",
 			"  POST   /api/sessions/{id}/messages          { text, behavior? }",
 			"  POST   /api/sessions/{id}/abort",
-			"  PUT    /api/sessions/{id}/tools             { names }",
 			"  POST   /api/sessions/{id}/approvals/{toolCallId}   { approved }",
 			"  POST   /api/sessions/{id}/forks             { entryId }",
 			"  POST   /api/sessions/{id}/branch            { entryId, descend? }",

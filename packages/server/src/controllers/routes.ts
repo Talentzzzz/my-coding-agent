@@ -14,8 +14,9 @@ import type { SessionController, SystemController } from "./sessions.ts";
  *
  * - `GET` 读取，从不改变会话。
  * - `POST /api/sessions` 创建一个；子资源上的 `POST` 是一个生效即返回的命令。命令用 `POST` 而不是 `PATCH`，因为它们不是编辑：同一 prompt 发两次就是两个 prompt，而 `abort` 发两次仍然是一次停止。`POST /api/sessions/:id/title` 同形——一次被接受的改名，一份快照被重写。
- * - `PATCH` 改配置的一部分。
- * - `PUT` 整体替换当前工具集，这正是会话自身的契约。
+ * - `PATCH` 改配置的一部分：模式指针、会话的审批增量、队列模式。
+ * - `PUT` 整体替换一张表：模型清单（`/api/models`）。会话不再有 PUT——工具配置只经模式指针变更
+ *   （ADR-0018）。
  * - `DELETE` 永久移除资源。它只存在一次，在会话本身上，因为会话是这里唯一一个"移除本身是目的"而不是"对别的东西产生影响"的对象。
  */
 export interface Controllers {
@@ -125,13 +126,6 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 			params: { id: stringParam },
 			handle: async (params, request, response) =>
 				sendJson(response, 200, await controllers.sessions.updateConfig(params.id, await readObjectBody(request))),
-		}),
-		route({
-			method: "PUT",
-			path: "/api/sessions/:id/tools",
-			params: { id: stringParam },
-			handle: async (params, request, response) =>
-				sendJson(response, 200, await controllers.sessions.updateTools(params.id, await readObjectBody(request))),
 		}),
 		route({
 			method: "POST",

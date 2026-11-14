@@ -87,11 +87,6 @@ export class SessionApi {
 		await this.send("PATCH", `/api/sessions/${encodeURIComponent(sessionId)}`, { patch });
 	}
 
-	/** 替换活跃工具集；会话拒绝它不认识的名字且什么都不改。 */
-	async setTools(sessionId: string, names: string[]): Promise<void> {
-		await this.send("PUT", `/api/sessions/${encodeURIComponent(sessionId)}/tools`, { names });
-	}
-
 	async approve(sessionId: string, toolCallId: string, approved: boolean): Promise<void> {
 		await this.post(
 			`/api/sessions/${encodeURIComponent(sessionId)}/approvals/${encodeURIComponent(toolCallId)}`,

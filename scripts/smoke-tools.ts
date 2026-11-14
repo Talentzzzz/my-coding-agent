@@ -670,7 +670,7 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		settings.getApprovals(root).bash === false,
 		JSON.stringify(settings.getApprovals(root)),
 	);
-	check("and the session reflects it", agent.snapshot(id).approvals.bash === true, JSON.stringify(agent.snapshot(id).approvals));
+	check("and the session reflects it", agent.getApprovals(id).bash === true, JSON.stringify(agent.getApprovals(id)));
 	// Read back from the file rather than from the bag this exercise opened: the write lands through a
 	// replay the orchestrator took and dropped (ADR-0013), so the copy handed to `openAgent` is the one
 	// thing that cannot show it.
@@ -681,9 +681,9 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		JSON.stringify(store.getRecordedToolConfig(onDisk())),
 	);
 	check(
-		"beside the tool set in force",
-		JSON.stringify(store.getRecordedToolConfig(onDisk()).activeTools) === JSON.stringify(agent.snapshot(id).activeTools),
-		JSON.stringify(store.getRecordedToolConfig(onDisk()).activeTools),
+		"as a delta beside an absent mode pointer",
+		store.getRecordedToolConfig(onDisk()).mode === undefined,
+		store.getRecordedToolConfig(onDisk()).mode,
 	);
 
 	// Both calls must resolve without an active run, and must not disturb the session record.
@@ -719,7 +719,7 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		session: reloaded,
 		settings,
 	});
-	check("reopening restores the approval the session chose", reopened.snapshot(reloaded.sessionId).approvals.bash === true, JSON.stringify(reopened.snapshot(reloaded.sessionId).approvals));
+	check("reopening restores the approval the session chose", reopened.getApprovals(reloaded.sessionId).bash === true, JSON.stringify(reopened.getApprovals(reloaded.sessionId)));
 	const otherState = createSession(root);
 	const other = await openAgent({
 		session: otherState,
@@ -727,8 +727,8 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	});
 	check(
 		"while another session over the directory keeps the defaults",
-		other.snapshot(otherState.sessionId).approvals.bash === false,
-		JSON.stringify(other.snapshot(otherState.sessionId).approvals),
+		other.getApprovals(otherState.sessionId).bash === false,
+		JSON.stringify(other.getApprovals(otherState.sessionId)),
 	);
 }
 

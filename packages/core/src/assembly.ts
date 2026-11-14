@@ -7,7 +7,7 @@ import { danglingApprovalsOf } from "./session/dangling.ts";
 import { modelChoiceOf } from "./session/model-choice.ts";
 import { type Session, SessionManager } from "./session/session-manager.ts";
 import { sessionSnapshot } from "./session/snapshot.ts";
-import { followsGlobalOf, toolStateOf } from "./session/tool-config.ts";
+import { modeSeatOf } from "./session/tool-config.ts";
 import { SettingManager } from "./setting-manager.ts";
 import { type ToolManager, createToolManager } from "./tools/index.ts";
 
@@ -158,9 +158,6 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 	const settings = options.settings ?? new SettingManager();
 	const tools = options.tools ?? createToolManager();
 	const { workDirAbsPath, modelChoice, rows } = await assemble(sessionManager, settings, tools, options);
-	// 与活跃会话运行的是同一套派生——账本叠在全局默认的实时视图上——所以冷读回答的是活跃会话打开
-	// 时所在的选择，而不把它重放进任何东西。
-	const toolState = toolStateOf(sessionManager, options.session, settings, tools.names());
 	return sessionSnapshot({
 		sessionManager,
 		session: options.session,
@@ -168,15 +165,11 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 		// 快照只从模型上读名字、档位与窗口；请求对象在这里与在一次请求里一样是即抛的。用本次装配已经
 		// 读过的行构建，所以一次冷读只花文件一次。
 		model: modelFor(modelChoice, rows),
-		// 与 `Agent.getApprovals` 执行的是同一个合并：目录的默认，叠上会话自己记录的选择。两半都不可
-		// 省，否则头部的开关会显示一个活跃会话并没有的闸门。
-		approvals: { ...settings.getApprovals(workDirAbsPath), ...toolState.approvalOverride },
+		// 与活跃会话运行的是同一套派生（`modeSeatOf`）：冷读与活跃快照在这里必须一致，否则会话一从
+		// 打开变成仅读取，座位就会翻面。
+		mode: modeSeatOf(sessionManager, options.session, settings),
 		// 用派生的选择从表上读取，让开关与活跃会话的完全一致。
 		allTools: tools.names(),
-		activeTools: toolState.activeToolNames,
-		// 对着这个目录自己的设置判断，与活跃会话的 getter 同法：冷读与活跃快照在这里必须一致，否则
-		// 会话一从打开变成仅读取，面板的「沿用全局」标签就会翻面。
-		...followsGlobalOf(sessionManager, options.session, settings, tools.names()),
 		submitting: false,
 		queued: [],
 		isRetrying: false,

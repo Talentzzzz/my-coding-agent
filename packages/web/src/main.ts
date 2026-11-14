@@ -1011,47 +1011,24 @@ function main(): void {
 	}
 
 	/**
-	 * 屏幕上的会话在哪个模式上，按值匹配（ADR-0005）。
+	 * 屏幕上的会话在哪个模式上。
 	 *
-	 * 会话在自己的 `.json` 快照里记录它运行在什么上，而不是模式引用，所以匹配是快照的工具与审批
-	 * 对每个预设的 —— 内置默认优先，因为它*就是*跟随全局的会话所持有的全局默认。屏幕上没有会话
-	 * 时回答默认，因为那是下一个开启的；一个什么都不匹配的 live 会话 —— 被后来编辑过的模式留下，
-	 * 或被旧构建记录的工具集留下 —— 回答 undefined，席位画成「自定义」。重新选择一个模式是唯一
-	 * 的回头路。
+	 * 会话记录的是模式指针（ADR-0018），快照的 `mode` 字段就是座位 —— 名字在而解析成功时是那个
+	 * 名字，指针缺席或悬空时 undefined，画成内置「默认」。屏幕上没有会话时回答默认，因为那是下一个
+	 * 开启的。
 	 */
 	function currentModeName(): string | undefined {
 		const snapshot = viewState.snapshot;
-		const settings = viewState.settings;
-		if (snapshot === undefined || settings === undefined) return DEFAULT_MODE_NAME;
-
-		const sameTools = (a: readonly string[], b: readonly string[]): boolean =>
-			a.length === b.length && a.every((name) => b.includes(name));
-		const sameApprovals = (a: Record<string, boolean>, b: Record<string, boolean>): boolean => {
-			for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
-				if (a[key] !== b[key]) return false;
-			}
-			return true;
-		};
-
-		// 比较之前，两侧都收窄到本构建认识的工具，与一次 apply 做的收窄相同 —— 否则指名了一个升级
-		// 删掉的工具的预设可以被正确应用，却仍然被读回成自定义。
-		const defaultTools = (settings.tools ?? snapshot.allTools).filter((name) => snapshot.allTools.includes(name));
-		if (sameTools(snapshot.activeTools, defaultTools) && sameApprovals(snapshot.approvals, settings.approval)) {
-			return DEFAULT_MODE_NAME;
-		}
-		return settings.modes?.find(
-			(mode) =>
-				sameTools(mode.tools.filter((name) => snapshot.allTools.includes(name)), snapshot.activeTools) &&
-				sameApprovals(mode.approval, snapshot.approvals),
-		)?.name;
+		if (snapshot === undefined) return DEFAULT_MODE_NAME;
+		return snapshot.mode ?? DEFAULT_MODE_NAME;
 	}
 
 	/**
-	 * 把本窗口所在的会话放到一个模式上：其工具集与审批表，整体生效。
+	 * 把本窗口所在的会话放到一个模式上。
 	 *
-	 * 两半是会话自己的两条命令 —— `PUT /tools` 和审批 `PATCH` —— 它们作为一次记录的选择落进会话
-	 * 的 `.json` 快照。刻意没有模式端点：预设*就是*这两个值，同一命令的第二种拼法只会被迫与它们
-	 * 保持同步。
+	 * 一条命令（ADR-0018）：补丁带 `mode` 名字，会话从此活态跟随那个预设 —— 模式改了内容，会话跟
+	 * 着变。「默认」写 `null`，指针缺席就是它的落盘形态；指名一个刚被删除的模式会被服务器拒绝并
+	 * 在这里报出来。
 	 */
 	function applyMode(name: string): void {
 		if (followed === undefined) {
@@ -1059,24 +1036,11 @@ function main(): void {
 			return;
 		}
 		const settings = viewState.settings;
-		const snapshot = viewState.snapshot;
-		if (settings === undefined || snapshot === undefined) {
-			report(new Error("设置还没有读到，稍后再试。"));
-			return;
-		}
-		const preset =
-			name === DEFAULT_MODE_NAME
-				? { tools: settings.tools ?? snapshot.allTools, approval: { ...settings.approval } }
-				: settings.modes?.find((mode) => mode.name === name);
-		if (preset === undefined) {
+		if (name !== DEFAULT_MODE_NAME && settings?.modes?.some((mode) => mode.name === name) !== true) {
 			report(new Error(`没有叫「${name}」的模式，可能刚被删除。`));
 			return;
 		}
-		// 收窄到本构建认识的工具，指名了升级删掉的工具的预设会应用其余，而不是被整体拒绝 —— 与
-		// 会话记录的集合得到的收窄相同。
-		const tools = preset.tools.filter((candidate) => snapshot.allTools.includes(candidate));
-		void api.setTools(followed, tools).catch(report);
-		void api.setConfig(followed, { approval: { ...preset.approval } }).catch(report);
+		void api.setConfig(followed, { mode: name === DEFAULT_MODE_NAME ? null : name }).catch(report);
 	}
 
 	function render(): void {

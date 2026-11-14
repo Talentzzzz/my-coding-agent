@@ -29,12 +29,10 @@ export interface SnapshotInput {
 	workDirAbsPath: string;
 	/** 已解析：`createModel(row, level)` 或 `placeholderModel()`。 */
 	model: Model<Api>;
-	approvals: Record<string, boolean>;
+	/** 会话所在的模式座位；undefined 即内置「默认」。 */
+	mode?: string;
 	allTools: string[];
-	activeTools: string[];
 	/** 已由调用方按其持有的设置判断过；见 `SessionSnapshot`。 */
-	toolsFollowGlobal: boolean;
-	approvalsFollowGlobal: boolean;
 	submitting: boolean;
 	queued: QueuedPrompt[];
 	isRetrying: boolean;
@@ -73,11 +71,8 @@ export function sessionSnapshot(snapshotInput: SnapshotInput): SessionSnapshot {
 		model: snapshotInput.model.name,
 		thinkingLevel: snapshotInput.model.thinkingLevel ?? "off",
 		thinkingLevels: thinkingLevelsFor(),
-		approvals: snapshotInput.approvals,
+		...(snapshotInput.mode === undefined ? {} : { mode: snapshotInput.mode }),
 		allTools: snapshotInput.allTools,
-		activeTools: snapshotInput.activeTools,
-		toolsFollowGlobal: snapshotInput.toolsFollowGlobal,
-		approvalsFollowGlobal: snapshotInput.approvalsFollowGlobal,
 		messages,
 		messageEntryIds: sessionManager.getContextMessageEntryIds(session),
 		branchPoints: sessionManager.getBranchPoints(session),
