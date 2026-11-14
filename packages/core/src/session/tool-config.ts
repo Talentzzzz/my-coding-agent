@@ -22,7 +22,7 @@ export function defaultToolNames(settings: SettingManager, workDirAbsPath: strin
 /**
  * 全局默认模式的活视图，以 {@link ToolState} 形式。
  *
- * 内置的默认模式从不落盘（ADR-0005），所以这是它替代存在的方式：设置文件自己的工具集——没指名就
+ * 内置的默认模式从不落盘（ADR-0004），所以这是它替代存在的方式：设置文件自己的工具集——没指名就
  * 是全集——加上它们的审批，像具名模式一样经 {@link fillTools} 填充。审批为 undefined 意味着「session
  * 从未选择」，所以视图保持活态：设置变更就是这个模式的变更。
  */
@@ -53,13 +53,13 @@ export function globalDefaultToolState(
  * 携带；没有记录时回落值作数，对全局默认而言就是「跟随设置」，保持活态。
  */
 export function toolStateOf(
-	sessions: SessionManager,
-	state: Session,
+	sessionManager: SessionManager,
+	session: Session,
 	settings: SettingManager,
 	known: readonly string[],
 ): ToolState {
-	const recorded = sessions.getRecordedToolConfig(state);
-	const workDirAbsPath = state.sessionSetting.workDirAbsPath;
+	const recorded = sessionManager.getRecordedToolConfig(session);
+	const workDirAbsPath = session.sessionSetting.workDirAbsPath;
 	const fallback = globalDefaultToolState(settings, workDirAbsPath, known);
 	const names = narrowToKnown(recorded.activeTools ?? fallback.activeToolNames, known);
 	return {
@@ -107,15 +107,15 @@ function toolConfigFollowsGlobal(
  * 是 session 记录的选择，它已不再分支相对：两文件拆分让它成了 session 级的值。）
  */
 export function followsGlobalOf(
-	sessions: SessionManager,
-	state: Session,
+	sessionManager: SessionManager,
+	session: Session,
 	settings: SettingManager,
 	known: readonly string[],
 ): { toolsFollowGlobal: boolean; approvalsFollowGlobal: boolean } {
 	const follows = toolConfigFollowsGlobal(
-		sessions.getRecordedToolConfig(state),
-		defaultToolNames(settings, state.sessionSetting.workDirAbsPath, known),
-		settings.getApprovals(state.sessionSetting.workDirAbsPath),
+		sessionManager.getRecordedToolConfig(session),
+		defaultToolNames(settings, session.sessionSetting.workDirAbsPath, known),
+		settings.getApprovals(session.sessionSetting.workDirAbsPath),
 	);
 	return { toolsFollowGlobal: follows.tools, approvalsFollowGlobal: follows.approvals };
 }

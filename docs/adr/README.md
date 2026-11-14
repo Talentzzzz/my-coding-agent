@@ -13,29 +13,22 @@
 | 编号 | 决定 | 状态 |
 |---|---|---|
 | [0001](0001-transport-websocket-mux.md) | 传输改为一条常驻的 WebSocket mux | 已接受（2026-10-12），取代 `notes.md` 第一节的若干条 |
-| [0002](0002-session-rename-entry.md) | 会话标题改为「可写」——一条 `rename` entry，header 不动 | 已接受（11 号拍板，14 号落地）；存储机制由 [0009](0009-session-two-file-format.md) 部分取代（`title` 进快照字段） |
-| [0003](0003-queued-writes-at-drain.md) | 排队消息在取走点落盘——store 的顺序就是循环回放的顺序 | 已接受（2026-10-15，20 号拍板并落地），取代「运行中接受的 prompt 立刻持久化」 |
-| [0004](0004-shell-sandbox-switches-removed.md) | 外壳不再自带 `no-sandbox` 与 GPU 开关——那是给一台已经变了的机器打的补丁 | 已接受（2026-10-16，03 号落地），取代一段**从未提交过**的工作区补丁 |
-| [0005](0005-modes-are-a-tool-config-choice.md) | 模式是一次工具集与审批集的选择，不是一个新状态层 | 已接受（2026-10-17，03 号拍板并落地） |
-| [0006](0006-stateless-session-architecture.md) | 会话架构改为无状态服务与每请求重放，审批改为结束重启 | 已接受（2026-10-31，已落地，见 `.scratch/stateless-agent/`）；「薄壳门面」条款由 0007 重开 |
-| [0007](0007-services-drop-instance-state.md) | 五个单例服务不持有实例状态——聚合袋拆除，「薄壳门面」条款重开 | 已接受（2026-11-01，已落地——08 号票跑绿 check 与 smoke 全套并总校文档，见 `.scratch/pure-services/`） |
-| [0008](0008-loop-merged-into-agent.md) | 删掉 `Loop` 对象与 `packages/loop`——引擎并入 `agent.ts`，放弃与上游的逐文件对照 | 已接受（2026-11-02，已落地——03 号票合并并删包，见 `.scratch/loop-into-agent/`），取代 0001「`packages/loop` 一行都不改」那一半；决定 1/2 由 [0012](0012-loop-manager-object.md) 取代、0014 复活、[0022](0022-loop-manager-whitelist-callbacks.md) 再次取代 |
-| [0009](0009-session-two-file-format.md) | 会话是两个文件——`.json` 快照管「是什么」，`.jsonl` 日志管「说过什么」；打不开的配对直接删 | 已接受（2026-11-03，已落地——session-split 02 号拍板并落地，06 号票入档，见 `.scratch/session-split/`），取代 v≤4 的单文件格式与 0002 的 rename entry 机制 |
-| [0010](0010-open-session-over-mux.md) | 会话的打开与切换只走 mux 基线——`retain` 即导航，REST 读从前端导航路径退场 | 已接受（2026-11-03 用户拍板，已落地——01–04 号票跑绿 check、build:web 与 smoke 全套，见 `.scratch/mux-only-open/`） |
-| [0011](0011-agent-holds-session-state.md) | 会话状态搬进 Agent——一张 `Map<id, AgentState>` 合一四层登记结构，两个 Manager 不再持有任何缓存 | 已接受，已落地（2026-11-04，agent-state 01–14 号票，见 `.scratch/agent-state/`） |
-| [0012](0012-loop-manager-object.md) | 一次运行成为一个对象——`LoopManager` 自带六件依赖、由 `AgentConfig.loop` 构造注入 | 已接受（2026-11-04），后被 [0013](0013-loop-services-are-arguments.md) 削去依赖、被 [0014](0014-loop-manager-removed.md) 整体取代（对象已删） |
-| [0013](0013-loop-services-are-arguments.md) | `LoopManager` 不持有任何服务——运行要用的六件随调用以 `LoopServices` 递进去，类零字段 | 已接受（2026-11-04），同日被 [0014](0014-loop-manager-removed.md) 取代（对象已删，参数形状随之消失） |
-| [0014](0014-loop-manager-removed.md) | 删掉 `LoopManager`——引擎回到 `Agent` 的方法，六项服务重新是它的字段 | 已接受，已落地（2026-11-04，跑绿 `check` 与除 `smoke-api` 外的 smoke 全套），取代 0012 与 0013 全部决定，复活 0008 的决定 1/2；**已整体被 [0022](0022-loop-manager-whitelist-callbacks.md) 取代**（2026-11-11）；0022/0023 又已被 [0024](0024-loop-is-orchestration.md) 取代 |
-| [0015](0015-llm-folded-into-core.md) | 把 `packages/llm` 折叠进 core——全树只剩一个 `Context` 与一个 `Tool` | 已接受，已落地（2026-11-06，01–04 号票，`check` 与 `build:web` 绿、smoke 与改动前逐条同色零新红，零行为变化），取代 0008 决定 6 的 `AgentContext` 命名与「形状也住 `types.ts`」那一半，及其「llm 没有被并入任何人」的现状陈述 |
-| [0016](0016-tool-manager-instance-table.md) | 工具回到一张常驻实例表——`ToolManager` 持有全部 `Tool`，引擎经它执行 | 已接受，已落地（2026-11-06，07–09 号票；2026-11-07 由 11 号票全量验收：`check` 与 `build:web` 绿、smoke 与改动前逐条同色零新红），部分取代 0006 / 0007 / 0011 / 0015 |
-| [0017](0017-agent-facade.md) | server 只认 `Agent` 公开面——Manager 的消费者收进 core，构造由 `createSessionAgent()` 吸收 | 已接受，已落地（2026-11-07，hub-agent-facade 01–07 号票，`check` 含新守卫 `check-server-facade` 与 `build:web` 绿、smoke 与基线逐条同色零新红），部分取代 0007 / 0016 |
-| [0018](0018-claim-renamed-to-hold.md) | `claim` 改名为 `hold`——同一个引用计数，一个说得准的名字 | 已接受，已落地（2026-11-10，全仓机械改名，`check` 绿、相关 smoke 全 PASS，零行为变化），部分取代 0001 的「不要重命名 `claim`」 |
-| [0019](0019-table-holds-live-half-only.md) | 表只装 live 半——transcript 每次操作现读，`AgentState` 不再有 `session` | 已接受，已落地（2026-11-10，`check` 绿、smoke 与改动前逐条同色），整体取代 0011 |
-| [0020](0020-flat-session-store.md) | store 改平——`sessions/<id>.{json,jsonl}`，id 就是地址；旧布局惰性迁移，`Agent` 不再记路径 | 已接受，已落地（2026-11-10，`check` 绿；smoke 做了机械改写、未全量执行，见 ADR 文末），部分取代 0009 的「每工作目录一个 store 目录」 |
-| [0021](0021-snapshot-suspended-marker.md) | 快照加 `suspended` 标记——冷启动审批点是纯显示缓存，账本仍是唯一事实 | 已接受，已落地（2026-11-11，cold-start-approval-dot 01–04 号票，`check` 绿、相关 smoke 单独跑全绿），0006 后果一节「可从磁盘重建的缓存」口子的实例，不取代任何决定 |
-| [0022](0022-loop-manager-whitelist-callbacks.md) | 把一次运行搬回 `LoopManager`——零字段对象、白名单回调、单个 `loopOptions` | 已接受（2026-11-11，wayfinder 票 003 与用户逐项答辩后拍板；代码落地归票 004、静态守卫归票 005），整体取代 0014（含它复活的 0008 决定 1/2），复活 0012 的文件分区与 0013 的零字段 / 参数化结论；**已部分被 [0023](0023-loop-manager-functions-only.md) 取代**（2026-11-12），**已被 [0024](0024-loop-is-orchestration.md) 整体取代**（2026-11-13） |
-| [0023](0023-loop-manager-functions-only.md) | `LoopManager` 只认函数——六件依赖回调化，loop 层零 Manager 可见性 | 已接受（2026-11-12，wayfinder 票 003；落地归票 004、守卫升级归票 005），部分取代 0022（六件依赖进袋与决定 7 的组装点一半）；**已被 [0024](0024-loop-is-orchestration.md) 整体取代**（2026-11-13） |
-| [0024](0024-loop-is-orchestration.md) | loop 就是编排——删掉 `LoopManager`，一次运行回到 `Agent` | 已接受（2026-11-13，wayfinder 票 003），待落地（落地归票 004、验证归票 005，见 `.scratch/wayfinder/loop-back-into-agent/`）；取代 [0022](0022-loop-manager-whitelist-callbacks.md) 与 [0023](0023-loop-manager-functions-only.md) 全部决定，终止 0008–0023 的引擎归属往返 |
+| [0002](0002-queued-writes-at-drain.md) | 排队消息在取走点落盘——store 的顺序就是循环回放的顺序 | 已接受（2026-10-15，20 号拍板并落地），取代「运行中接受的 prompt 立刻持久化」 |
+| [0003](0003-shell-sandbox-switches-removed.md) | 外壳不再自带 `no-sandbox` 与 GPU 开关——那是给一台已经变了的机器打的补丁 | 已接受（2026-10-16，03 号落地），取代一段**从未提交过**的工作区补丁 |
+| [0004](0004-modes-are-a-tool-config-choice.md) | 模式是一次工具集与审批集的选择，不是一个新状态层 | 已接受（2026-10-17，03 号拍板并落地） |
+| [0005](0005-stateless-session-architecture.md) | 会话架构改为无状态服务与每请求重放，审批改为结束重启 | 已接受（2026-10-31，已落地，见 `.scratch/stateless-agent/`）；「薄壳门面」条款由 0006 重开 |
+| [0006](0006-services-drop-instance-state.md) | 五个单例服务不持有实例状态——聚合袋拆除，「薄壳门面」条款重开 | 已接受（2026-11-01，已落地——08 号票跑绿 check 与 smoke 全套并总校文档，见 `.scratch/pure-services/`） |
+| [0007](0007-loop-merged-into-agent.md) | 删掉 `Loop` 对象与 `packages/loop`——引擎并入 `agent.ts`，放弃与上游的逐文件对照 | 已接受（2026-11-02，已落地——03 号票合并并删包，见 `.scratch/loop-into-agent/`），取代 0001「`packages/loop` 一行都不改」那一半；决定 1/2 曾经历一轮「搬进独立对象又搬回」的往返，由 [0016](0016-loop-is-orchestration.md) 终止并恢复原状 |
+| [0008](0008-session-two-file-format.md) | 会话是两个文件——`.json` 快照管「是什么」，`.jsonl` 日志管「说过什么」；打不开的配对直接删 | 已接受（2026-11-03，已落地——session-split 02 号拍板并落地，06 号票入档，见 `.scratch/session-split/`），取代 v≤4 的单文件格式与更早的「rename 是一条 entry」机制 |
+| [0009](0009-open-session-over-mux.md) | 会话的打开与切换只走 mux 基线——`retain` 即导航，REST 读从前端导航路径退场 | 已接受（2026-11-03 用户拍板，已落地——01–04 号票跑绿 check、build:web 与 smoke 全套，见 `.scratch/mux-only-open/`） |
+| [0010](0010-llm-folded-into-core.md) | 把 `packages/llm` 折叠进 core——全树只剩一个 `Context` 与一个 `Tool` | 已接受，已落地（2026-11-06，01–04 号票，`check` 与 `build:web` 绿、smoke 与改动前逐条同色零新红，零行为变化），取代 0007 决定 6 的 `AgentContext` 命名与「形状也住 `types.ts`」那一半，及其「llm 没有被并入任何人」的现状陈述 |
+| [0011](0011-tool-manager-instance-table.md) | 工具回到一张常驻实例表——`ToolManager` 持有全部 `Tool`，引擎经它执行 | 已接受，已落地（2026-11-06，07–09 号票；2026-11-07 由 11 号票全量验收：`check` 与 `build:web` 绿、smoke 与改动前逐条同色零新红），部分取代 0005 / 0006 / 0010 |
+| [0012](0012-agent-facade.md) | server 只认 `Agent` 公开面——Manager 的消费者收进 core，构造由 `createSessionAgent()` 吸收 | 已接受，已落地（2026-11-07，hub-agent-facade 01–07 号票，`check` 含新守卫 `check-server-facade` 与 `build:web` 绿、smoke 与基线逐条同色零新红），部分取代 0006 / 0011 |
+| [0013](0013-table-holds-live-half-only.md) | 表只装 live 半——会话每次操作现读，`AgentState` 不再有 `session` | 已接受，已落地（2026-11-10，`check` 绿、smoke 与改动前逐条同色），整体取代此前「表内嵌会话记录」的形态 |
+| [0014](0014-flat-session-store.md) | store 改平——`sessions/<id>.{json,jsonl}`，id 就是地址；旧布局惰性迁移，`Agent` 不再记路径 | 已接受，已落地（2026-11-10，`check` 绿；smoke 做了机械改写、未全量执行，见 ADR 文末），部分取代 0008 的「每工作目录一个 store 目录」 |
+| [0015](0015-snapshot-suspended-marker.md) | 快照加 `suspended` 标记——冷启动审批点是纯显示缓存，账本仍是唯一事实 | 已接受，已落地（2026-11-11，cold-start-approval-dot 01–04 号票，`check` 绿、相关 smoke 单独跑全绿），0005 后果一节「可从磁盘重建的缓存」口子的实例，不取代任何决定 |
+| [0016](0016-loop-is-orchestration.md) | loop 就是编排——删掉 `LoopManager`，一次运行回到 `Agent` | 已接受（2026-11-13，wayfinder 票 003），已落地（落地归票 004、验证归票 005、文档同步归票 006，见 `.scratch/wayfinder/loop-back-into-agent/`）；取代此前「独立运行对象 + 白名单回调」的全部安排，终止引擎归属的六次往返 |
+| [0017](0017-fanout-folded-into-agent.md) | fanout 并入编排——删掉 `session/fanout.ts` 与 `SessionServices` 参数袋 | 已接受，已落地（2026-11-14，`check` 绿、smoke-sessions / smoke-api / smoke-mux 过、smoke-tools 与基线 c667b9f 逐字同色）；取代 0012 / 0016「没有被取代的」中保护 fanout 参数袋的两条 |
 
 ## 门槛
 
@@ -51,6 +44,7 @@
 
 - **只增不改。** 四位数左补零（`0001`）。
 - **改写一条已接受的 ADR 时不改原文**：新开一条，被取代的那条留在原处，把它的 `取代者` 一行指向新的，并让新 ADR 的 `取代` 一行指向它。
+- **压缩（2026-11-14 修订）**：被整体取代、且其理由已被取代者逐条收编的 ADR，可整条删除；引用处改指取代者或就地内联，删除不留墓碑。删除后清单**重新连续编号**（重编只改编号、文件名与清单行，不改正文的决定与日期），编号不留空洞——这是对「只增不改」的唯一例外。
 - 文件名是 `<编号>-<kebab-case 的短名>.md`；标题是 `<编号>：<一句话的决定>`。
 
 ## 写法

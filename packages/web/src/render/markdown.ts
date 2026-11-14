@@ -253,18 +253,18 @@ export interface MarkdownState {
 /**
  * 把 `text` 渲染进 `container`，只触碰变化的部分。
  *
- * `state` 是上一次调用的 {@link MarkdownState}，返回值是下次要传回去的那个。文本只是增长时，
+ * `markdownState` 是上一次调用的 {@link MarkdownState}，返回值是下次要传回去的那个。文本只是增长时，
  * 落定的块被保留、只解析尾部；其他一切都是完整解析。
  *
  * 尾部是仍在写的块，只要类型不变就原地修补而不是替换：长回答常常就是一个段落，逐 token 替换
  * 会让浏览器重建整棵子树、重新排版列、丢掉其中的选中。每种"原地"的含义见 {@link patchBlock}；
  * 类型变了或文本是被替换而非续写的尾部，按老办法重做。
  */
-export function renderMarkdown(container: HTMLElement, text: string, state?: MarkdownState): MarkdownState {
-	const previous = state?.blocks ?? [];
+export function renderMarkdown(container: HTMLElement, text: string, markdownState?: MarkdownState): MarkdownState {
+	const previous = markdownState?.blocks ?? [];
 	// 增长是流式消息唯一的形态；更短或被改写的文本是替换（与 delta 不一致的 `message_end`、
 	// 从新快照画出的回合）。
-	const continued = state !== undefined && text.length >= state.text.length && text.startsWith(state.text);
+	const continued = markdownState !== undefined && text.length >= markdownState.text.length && text.startsWith(markdownState.text);
 	let blocks: Block[];
 	let tailOffset: number;
 
@@ -272,13 +272,13 @@ export function renderMarkdown(container: HTMLElement, text: string, state?: Mar
 		// 文本只是增长：保留旧尾部之前的全部，从它开始的地方重新解析。切片的前
 		// `state.tailOffset` 个字符与旧文本共享，所以尾部的第一行就是还开着的那个块 —— 更早的
 		// 什么都没被触碰。
-		const kept = Math.max(0, state.blocks.length - 1);
-		const tailLines = text.slice(state.tailOffset).split("\n");
+		const kept = Math.max(0, markdownState.blocks.length - 1);
+		const tailLines = text.slice(markdownState.tailOffset).split("\n");
 		const tail = parseFrom(tailLines, 0);
 		// 尾部的块可能比被替换的那个更少、相等或更多 —— 新文本用空行拆开的段落变成两个 —— 下面的
 		// DOM 补丁处理这三种。
-		blocks = [...state.blocks.slice(0, kept), ...tail.blocks];
-		tailOffset = state.tailOffset + offsetOfLine(tailLines, tail.lastStart);
+		blocks = [...markdownState.blocks.slice(0, kept), ...tail.blocks];
+		tailOffset = markdownState.tailOffset + offsetOfLine(tailLines, tail.lastStart);
 	} else {
 		const lines = text.split("\n");
 		const parsed = parseFrom(lines, 0);

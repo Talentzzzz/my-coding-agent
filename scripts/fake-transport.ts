@@ -102,7 +102,7 @@ export interface FakeState {
 export type FakeResponseFactory = (
 	context: Context,
 	options: SimpleStreamOptions | undefined,
-	state: FakeState,
+	fakeState: FakeState,
 	model: Model<string>,
 ) => AssistantMessage | Promise<AssistantMessage>;
 
@@ -118,7 +118,7 @@ export interface FakeTransportOptions {
 export interface FakeTransport {
 	/** 交给 `openAgent({ api })`。 */
 	api: ChatTransport;
-	state: FakeState;
+	fakeState: FakeState;
 	setResponses(responses: FakeResponseStep[]): void;
 	appendResponses(responses: FakeResponseStep[]): void;
 	getPendingResponseCount(): number;
@@ -133,7 +133,7 @@ function randomId(prefix: string): string {
 }
 
 // 剧本化的回答都读本模块自己的时钟，同一毫秒内构建的两条消息会带同一个戳——窗口按
-// `role:timestamp` 折叠 transcript 条目，共享的戳会让它把一条消息折进另一条（16；07 拍截图时
+// `role:timestamp` 折叠会话条目，共享的戳会让它把一条消息折进另一条（16；07 拍截图时
 // 撞上过）。所以这个戳是替身自己的序列：单调递增，就像 session 的 `nextStamp`。
 let lastStamp = 0;
 
@@ -354,7 +354,7 @@ export function createFakeTransport(options: FakeTransportOptions = {}): FakeTra
 	);
 	const maxTokenSize = Math.max(minTokenSize, options.tokenSize?.max ?? DEFAULT_MAX_TOKEN_SIZE);
 	const tokensPerSecond = options.tokensPerSecond;
-	const state: FakeState = { callCount: 0, apiKeys: [], thinkingLevels: [] };
+	const fakeState: FakeState = { callCount: 0, apiKeys: [], thinkingLevels: [] };
 	let pendingResponses: FakeResponseStep[] = [];
 
 	const resolveResponse = async (
@@ -363,18 +363,18 @@ export function createFakeTransport(options: FakeTransportOptions = {}): FakeTra
 		streamOptions: SimpleStreamOptions | undefined,
 		requestModel: Model<string>,
 	): Promise<AssistantMessage> => {
-		const resolved = typeof step === "function" ? await step(context, streamOptions, state, requestModel) : step;
+		const resolved = typeof step === "function" ? await step(context, streamOptions, fakeState, requestModel) : step;
 		return withUsageEstimate(cloneMessage(resolved, requestModel), context);
 	};
 
 	const stream = (requestModel: Model<string>, context: Context, streamOptions?: SimpleStreamOptions) => {
 		const outer = createAssistantMessageEventStream();
 		const step = pendingResponses.shift();
-		state.callCount++;
+		fakeState.callCount++;
 		// 在这里记录而不是在调用点断言：key 与 thinking 等级骑在 host 为本次请求构建的模型上，
 		// 所以这是检查能看到"一个请求实际会发送什么"的唯一地方。
-		state.apiKeys.push(requestModel.apiKey);
-		state.thinkingLevels.push(requestModel.thinkingLevel ?? "off");
+		fakeState.apiKeys.push(requestModel.apiKey);
+		fakeState.thinkingLevels.push(requestModel.thinkingLevel ?? "off");
 
 		queueMicrotask(async () => {
 			try {
@@ -403,7 +403,7 @@ export function createFakeTransport(options: FakeTransportOptions = {}): FakeTra
 		api: {
 			stream: (model, context, streamOptions) => stream(model, context, streamOptions),
 		},
-		state,
+		fakeState,
 		setResponses(responses: FakeResponseStep[]) {
 			pendingResponses = [...responses];
 		},

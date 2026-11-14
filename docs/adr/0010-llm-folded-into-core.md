@@ -1,12 +1,12 @@
-# 0015：把 `packages/llm` 折叠进 core——全树只剩一个 `Context` 与一个 `Tool`
+# 0010：把 `packages/llm` 折叠进 core——全树只剩一个 `Context` 与一个 `Tool`
 
 日期：2026-11-06 · 状态：已接受，**已落地**（01–04 号票；`check` 与 `build:web` 绿，smoke 逐条与改动前的
 树对照零新红——`smoke-api` 要一只在跑的服务器，`smoke-liveness` 的时序断言在本机改动前后同为红，见
 [04 号票](../../.scratch/context-tool-unification/issues/04-final-acceptance.md)；零行为变化）
-取代：[0008](0008-loop-merged-into-agent.md)（部分——决定 6 里 `LoopContext` → `AgentContext` 的命名，
+取代：[0007](0007-loop-merged-into-agent.md)（部分——决定 6 里 `LoopContext` → `AgentContext` 的命名，
 以及「工具与上下文的形状也住在 `core/src/types.ts`」那一半；还有其*被取代的是什么*一节里
 「`packages/llm` 仍原样适用……也**没有**被并入任何人」这句现状陈述）
-取代者：[0016](0016-tool-manager-instance-table.md)（部分，2026-11-06——*后果* 里「一次请求只有一个
+取代者：[0011](0011-tool-manager-instance-table.md)（部分，2026-11-06——*后果* 里「一次请求只有一个
 `Context` 穿过边界」那条中「`prepareRequest` 建它（`tools` 就是活跃的可执行集合）、引擎用它」这句
 现状陈述；决定 2/3/7 全部成立）
 
@@ -21,7 +21,7 @@ package.json 与 tsconfig、根 tsconfig 里两条 `@my-agent/llm` 路径别名�
 
 它当初值得一个包，理由和 `packages/loop` 一样（[ADR-0001](0001-transport-websocket-mux.md) 把两者一起
 写成「一行都不改」）：**vendored 副本的价值在于能对着上游 diff**。这条理由在
-[0008](0008-loop-merged-into-agent.md) 决定 9 那里被放弃了一半（loop 那一半），2026-11-03 用户拍板把
+[0007](0007-loop-merged-into-agent.md) 决定 9 那里被放弃了一半（loop 那一半），2026-11-03 用户拍板把
 另一半也解除——上游对照放弃之后，这份代码由本仓库自己维护。于是它剩下的身份只是「一份我们维护的
 代码」，包边界从此只买到一个**独立的编译设置**，别的什么都不买。而那个设置本身也不是护栏：文件已经被
 裁到只剩本项目真正调用的部分，`@ts-nocheck` 又把它们逐条豁免了。
@@ -59,7 +59,7 @@ package.json 与 tsconfig、根 tsconfig 里两条 `@my-agent/llm` 路径别名�
    删除，调用点改用 `ToolCall`。`AgentEvent`、`AgentState` 等不与 llm 撞名的会话层词留在原处，不动。
    一个例外：`ToolCallOutcome`（`{ toolCall, result, isError }`，钩子跑完之后的定稿）**留在
    `types.ts`**，而绘图会话当时的名单把它列进了 `llm/types.ts`。落地时它只有 `Agent` 一个读者，
-   搬进传输契约会与下面那条保留下来的分界（0008 决定 6：引擎契约住 `types.ts`）打架；04 号票复核
+   搬进传输契约会与下面那条保留下来的分界（0007 决定 6：引擎契约住 `types.ts`）打架；04 号票复核
    确认这个位置成立，所以记在这里而不是改代码。
 5. **`@my-agent/llm` 全仓清零**：core 顶层 `index.ts` 补一段传输面出口（`anthropicMessages`、`Model`、
    `createAssistantMessageEventStream`、`ChatTransport` 等），server（`boot.ts` / `hub.ts`）与当时导入
@@ -78,7 +78,7 @@ package.json 与 tsconfig、根 tsconfig 里两条 `@my-agent/llm` 路径别名�
 - **一次请求只有一个 `Context` 穿过边界。** `prepareRequest` 建它（`tools` 就是活跃的可执行集合）、
   引擎用它、`streamAssistantResponse` 削薄它的 `tools`、传输层读它——没有第二种形状要在中途换算。
 
-  **（2026-11-06 Superseded，[0016](0016-tool-manager-instance-table.md)：仅「`tools` 就是活跃的可执行
+  **（2026-11-06 Superseded，[0011](0011-tool-manager-instance-table.md)：仅「`tools` 就是活跃的可执行
   集合、引擎用它」这句现状陈述——`tools` 今天是声明载体（元素是工具表里的实例、按本轮名单取子集），
   引擎执行经 `ToolManager`。一次请求一个 `Context` 的形状不变。）**
 - **依赖图少一层。** core 的依赖表里不再有 workspace 内部包；server 与 script 的 import 回到唯一的
@@ -110,21 +110,21 @@ package.json 与 tsconfig、根 tsconfig 里两条 `@my-agent/llm` 路径别名�
 - **没有上下文会让人困惑。** 后来的人会在 core 的源码树里撞见一份「pi-ai 的裁剪副本」：一个 vendored
   传输层住在我们自己的包里，头顶上还写着「Vendored from」。第一反应必然是「为什么不独立成包」。
   这份 ADR 就是那个「为什么」。
-- **是真实取舍。** 放弃的是「同一份代码的两个编译设置」和「一个能与上游对齐的目录」（后者在 0008 就
+- **是真实取舍。** 放弃的是「同一份代码的两个编译设置」和「一个能与上游对齐的目录」（后者在 0007 就
   已经放弃，这里只是把它的余账结掉）；换来的是「一棵树里一个概念一个类型」。前者本来就在漏——裁过的
   文件加逐文件 nocheck，那个独立设置没拦住过任何东西；后者是每天都在付的账。
 
 ## 被取代的是什么
 
-- **0008 决定 6 的两处。** 那一条把 `LoopContext` 改名 `AgentContext`（理由是「与 `AgentEvent` /
+- **0007 决定 6 的两处。** 那一条把 `LoopContext` 改名 `AgentContext`（理由是「与 `AgentEvent` /
   `AgentTool` 同族」），并把类型并进 `core/src/types.ts` 一个模块。现在撞名的类型不存在了，`Context`
   与 `Tool` 住在 `llm/types.ts`，`types.ts` 只转发名字；`AgentEvent` / `AgentState` 留着，但它们属于
   会话层，不再是「一族」里的另一半。**决定 6 的另一半仍然成立**：引擎自己的契约（`AgentEvent`、闸门与
   恢复的答案形状、`QueueMode`）仍住 `types.ts`，wire 类型仍不进那里。
-- **0008 *被取代的是什么* 一节里的现状陈述**：「`packages/llm` 仍原样适用……仍在 `packages/llm` 里、
+- **0007 *被取代的是什么* 一节里的现状陈述**：「`packages/llm` 仍原样适用……仍在 `packages/llm` 里、
   仍然 vendored、也**没有**被并入任何人」。它的前半段（llm 半条禁令已于 2026-11-03 失效）已经写下，
   这一句现在也不再成立：它被并入了 `core`。**上游对照放弃是因，折叠是果**——只有当这份副本不必再保持
-  「与上游逐文件同形」时，它才有资格住进我们的目录、用我们的类型；0008 放弃对照，正是这次折叠的
+  「与上游逐文件同形」时，它才有资格住进我们的目录、用我们的类型；0007 放弃对照，正是这次折叠的
   许可条件。
 - **架构里「运行时依赖是两个包：`@my-agent/llm`、`typebox`」这句话**：core 的依赖表不再有 workspace
   内部包，第三方是 `@anthropic-ai/sdk`、`partial-json`、`typebox`。
@@ -136,9 +136,9 @@ package.json 与 tsconfig、根 tsconfig 里两条 `@my-agent/llm` 路径别名�
 - **零行为。** wire 协议、事件流、工具语义一个字不动；`npm run check`、smoke 全套、`build:web` 是每张票的
   验收线，合并前后**逐条同色**（28 条里 26 条两边同为绿；`smoke-api` 要一只在跑的服务器才绿，
   `smoke-liveness` 的时序断言在本机改动前后同为红——两条都与本 ADR 无关，见 04 号票）。
-- **`@ts-nocheck`**：留下。0008 决定 7 是「去掉它」，这一次是「不动它」——搬目录不等于转正，把 27 个
+- **`@ts-nocheck`**：留下。0007 决定 7 是「去掉它」，这一次是「不动它」——搬目录不等于转正，把 27 个
   文件过一遍严格配置是另一笔工作。
-- **0008 决定 6 的分界**：类型不进 `protocol.ts`。wire 是客户端看得见的东西，引擎交给工具与 hook 的
+- **0007 决定 6 的分界**：类型不进 `protocol.ts`。wire 是客户端看得见的东西，引擎交给工具与 hook 的
   形状不是；合并后的 `Context` / `Tool` 住在传输层自己的 `llm/types.ts`，core 顶层只转发名字。
 - **`Tool` 的字段与语义**：`executionMode`、`replay`、`outputSchema`、`prepareArguments`、`details`、
   `structuredContent` 原样，执行模式仍是每个工具上的字段而不是注册表状态。

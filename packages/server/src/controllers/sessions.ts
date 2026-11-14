@@ -78,7 +78,7 @@ export interface SessionListener {
 /**
  * 模型、目录组和存储的设置。
  *
- * 三者都是 orchestrator 拥有之物的只读视图——hub 转发给它的 facade、自己不拥有任何一项（ADR-0017）——而且三者都曾是 socket 推送的帧。改走 HTTP 后由客户端来要，这才让一个没有会话的页面刷新仍然能填满侧栏、设置面板和模型列表。
+ * 三者都是 orchestrator 拥有之物的只读视图——hub 转发给它的 facade、自己不拥有任何一项（ADR-0012）——而且三者都曾是 socket 推送的帧。改走 HTTP 后由客户端来要，这才让一个没有会话的页面刷新仍然能填满侧栏、设置面板和模型列表。
  */
 export class SystemController {
 	private readonly hub: SessionHub;
@@ -109,7 +109,7 @@ export class SystemController {
 	 *
 	 * 到达时没有 `apiKey` 的行保留其名字下已存储的那一个。这让面板能往返一个从未被告知 key 的模型：客户端把它看得见的每个字段原样回传，它看不见的 key 在往返中完好无损。
 	 *
-	 * 两行认领同一个名字被直接拒绝，而不是变得唯一。名字在这里是一行的身份——transcript 记录它、config patch 指名它——悄悄加后缀意味着用户看到的行不是其会话在找的行。面板指出撞名的是哪个名字，什么都不写。
+	 * 两行认领同一个名字被直接拒绝，而不是变得唯一。名字在这里是一行的身份——会话记录记录它、config patch 指名它——悄悄加后缀意味着用户看到的行不是其会话在找的行。面板指出撞名的是哪个名字，什么都不写。
 	 */
 	updateModels(body: Record<string, unknown>): { models: ModelOption[] } {
 		const input = body.models;
@@ -148,7 +148,7 @@ export class SystemController {
 	/**
 	 * 给目录一个本窗口显示时替代文件夹名的名字。
 	 *
-	 * 一个视图决定，且刻意是本应用提供的唯一一种改名：目录由其 transcript 记录的目录本身标识，所以"重命名那个目录"会是一次*移动*。它得重写每个 header，用户在我们背后重命名文件夹的那一刻就会坏掉，而且会把一个破坏性操作藏在一个看起来像标签的菜单项后面。用户在这里输入的东西只进 settings、别无去处；文件夹保留文件系统给它的名字，每个会话保留其 header 持有的 `workDirAbsPath`。
+	 * 一个视图决定，且刻意是本应用提供的唯一一种改名：目录由其会话记录记录的目录本身标识，所以"重命名那个目录"会是一次*移动*。它得重写每个 header，用户在我们背后重命名文件夹的那一刻就会坏掉，而且会把一个破坏性操作藏在一个看起来像标签的菜单项后面。用户在这里输入的东西只进 settings、别无去处；文件夹保留文件系统给它的名字，每个会话保留其 header 持有的 `workDirAbsPath`。
 	 *
 	 * 空名字收回自定义名字，标题重新戴上文件夹自己的名字。
 	 */
@@ -174,7 +174,7 @@ export class SystemController {
 	/**
 	 * 把目录从列表移除，磁盘上什么都不碰。
 	 *
-	 * 存储的列表整份发送，与客户端自己的 `hidden` 列表读取方式一致，字段走普通的 settings 之路——所以「删除」是一个视图决定，重载后依然成立，transcript 与其命名的目录都没有被移动。
+	 * 存储的列表整份发送，与客户端自己的 `hidden` 列表读取方式一致，字段走普通的 settings 之路——所以「删除」是一个视图决定，重载后依然成立，会话记录与其命名的目录都没有被移动。
 	 *
 	 * 有两件事是告知而不是返回的，因为它们是第二个窗口没有在问的事实：列表本身随应答一起回去了，而其他每个窗口会以一份新 overview 听到同样的消息——见 {@link SessionListener.onDirectoryListingChanged}。重新加回目录是在其中创建一个新会话，那是 {@link SessionController.create} 那一半。
 	 */
@@ -209,7 +209,7 @@ export class SystemController {
 	/**
 	 * 修改默认模型、主题、字号、审批集、bash 超时，或用户的模式。
 	 *
-	 * 比 {@link SessionController.updateConfig} 更窄，刻意的：这些是窗口自身运行所依赖的默认值，在任何会话存在之前就要读取，所以不能住在会话上。这里的 `approval` 因此是**目录默认值**——从未选择过的会话打开时的基准——不是运行中会话自己的应答，后者作为 config patch 走那个会话。`model` 是*新*会话起步的行；活会话所在的模型是 composer 的，随消息到达服务器而不是走这里。`tools` 是全局默认激活集，整份发送，与会话级端点自己的契约相同——而会话记录的选择仍然压过它，所以这里任何东西都到不了已经选过的会话。`modes` 是预设列表整份发送（ADR-0005）：把它应用到会话上是那个会话自己的两条命令，不是这个 patch。
+	 * 比 {@link SessionController.updateConfig} 更窄，刻意的：这些是窗口自身运行所依赖的默认值，在任何会话存在之前就要读取，所以不能住在会话上。这里的 `approval` 因此是**目录默认值**——从未选择过的会话打开时的基准——不是运行中会话自己的应答，后者作为 config patch 走那个会话。`model` 是*新*会话起步的行；活会话所在的模型是 composer 的，随消息到达服务器而不是走这里。`tools` 是全局默认激活集，整份发送，与会话级端点自己的契约相同——而会话记录的选择仍然压过它，所以这里任何东西都到不了已经选过的会话。`modes` 是预设列表整份发送（ADR-0004）：把它应用到会话上是那个会话自己的两条命令，不是这个 patch。
 	 */
 	updateSettings(body: Record<string, unknown>): { settings: SettingsSnapshot } {
 		const patch = body.patch ?? body;
@@ -229,7 +229,7 @@ export class SystemController {
 		}
 
 		if (fields.modes !== undefined) {
-			// 列表整份发送——与导入模型相同的契约，理由也相同：面板编辑的是一份列表，半应用的列表是唯一谁都无法推理的状态。名字是一个模式的身份（ADR-0005），所以空名和撞名——与内置默认或其他行——都被拒绝而不是变得唯一。
+			// 列表整份发送——与导入模型相同的契约，理由也相同：面板编辑的是一份列表，半应用的列表是唯一谁都无法推理的状态。名字是一个模式的身份（ADR-0004），所以空名和撞名——与内置默认或其他行——都被拒绝而不是变得唯一。
 			if (!Array.isArray(fields.modes)) throw httpStatus.badRequest("`modes` 必须是模式对象数组");
 			const modes: ModeSettings[] = [];
 			for (const entry of fields.modes) {
@@ -392,7 +392,7 @@ export class SessionController {
 	/**
 	 * 本进程正在运行、或可以打开的会话的当前状态。
 	 *
-	 * 本 controller 上唯一*不*经过 {@link holding} 的读取：读 transcript 不得拼装会话、hold 它、或淘汰它，所以向 hub 要快照而不是活对象。这里其他每个方法都在变更、或必须对着正在运行的会话执行，那些都保留自己的 hold。
+	 * 本 controller 上唯一*不*经过 {@link holding} 的读取：读会话记录不得拼装会话、hold 它、或淘汰它，所以向 hub 要快照而不是活对象。这里其他每个方法都在变更、或必须对着正在运行的会话执行，那些都保留自己的 hold。
 	 *
 	 * 存在性也不在这里检查：读取指名会话，orchestrator 在无人应答时以 {@link UnknownSessionError} 拒绝——transport 把它变成与旧预检查相同的 404。
 	 */
@@ -403,7 +403,7 @@ export class SessionController {
 	/**
 	 * 开始一个会话，并让它成为下一个未指名流的落点。
 	 *
-	 * 返回 id 而不是被 hold 的会话，让挂上恰好发生在一个地方：客户端接下来发送的 mux `open` 帧。创建会话会写它的 JSONL header，所以创建后从未打开的会话仍可按 id 找到——也仍可订阅，因为订阅读的是 transcript 而不是运行它。
+	 * 返回 id 而不是被 hold 的会话，让挂上恰好发生在一个地方：客户端接下来发送的 mux `open` 帧。创建会话会写它的 JSONL header，所以创建后从未打开的会话仍可按 id 找到——也仍可订阅，因为订阅读的是会话记录而不是运行它。
 	 *
 	 * body 里的 `workDirAbsPath` 决定会话落在哪，列表为那个目录作答：刚把选择器指向新地方的窗口，应当可以相信自己看到的会话就是创建进去的那些。未定义保持服务器自己的 root，这正是无 body 的 `POST` 一直的含义。
 	 */
@@ -430,7 +430,7 @@ export class SessionController {
 	/**
 	 * 在一个被放到一边的目录里创建的新会话把它领回列表。
 	 *
-	 * 与 `SystemController.hideDirectory` 成对，是对「删除」这个单向门的回答：transcript 和目录从未被碰过，它还在那里可用——而回到它那里正是用户想要它重新出现在列表上的表示。写入 hub 可见性规则经 facade 读取的 settings 状态，下一次列表与下一帧 overview 因此已经一致。
+	 * 与 `SystemController.hideDirectory` 成对，是对「删除」这个单向门的回答：会话记录和目录从未被碰过，它还在那里可用——而回到它那里正是用户想要它重新出现在列表上的表示。写入 hub 可见性规则经 facade 读取的 settings 状态，下一次列表与下一帧 overview 因此已经一致。
 	 */
 	private restoreDirectory(workDirAbsPath: string): void {
 		const hidden = this.hub.agent.hiddenDirectories(this.hub.workDirAbsPath);
@@ -472,7 +472,7 @@ export class SessionController {
 	}
 
 	/**
-	 * 删除会话：transcript、文件，以及本进程知道的关于它的每一行。
+	 * 删除会话：会话记录、文件，以及本进程知道的关于它的每一行。
 	 *
 	 * 忙碌的会话是冲突而不是坏请求——请求被理解了，横在它与删除之间的是一次要等的运行或一个要答的审批，这正是 409 存在要指名的情形。listeners 在文件消失*之后*才听到，于是告知窗口的那一帧永远不会先于它所报告的事实。
 	 */
@@ -491,7 +491,7 @@ export class SessionController {
 	/**
 	 * 把会话移到它自己的树上的另一个分支。
 	 *
-	 * 是命令不是编辑：日志不被重写，只有叶子移动，发两次就是同一移动两次。它以会话的新状态应答，因为整份 transcript 变了，而发问的客户端正是看着它的那个。本会话上的*其他*每条流由 transport 从会话自己的 `branch_changed` 发送同一份快照——否则展示旧链的第二个窗口会把下一条 prompt 发到一个它并没有展示的分支上。
+	 * 是命令不是编辑：日志不被重写，只有叶子移动，发两次就是同一移动两次。它以会话的新状态应答，因为整份会话记录变了，而发问的客户端正是看着它的那个。本会话上的*其他*每条流由 transport 从会话自己的 `branch_changed` 发送同一份快照——否则展示旧链的第二个窗口会把下一条 prompt 发到一个它并没有展示的分支上。
 	 *
 	 * entry id 来自请求 body 而不是 query，理由与 fork 相同：它就是命令*本身*。`descend` 在同一个手势的两端之间选择——落在替代分支的最新 tip 上，这是在分支之间切换的含义——或落在 entry 本身，让下一条 prompt 在那里开启一个新的替代分支。
 	 */
@@ -523,7 +523,7 @@ export class SessionController {
 	 *
 	 * `behavior` 决定运行中发来的 prompt 怎么办——`steer` 在运行中那一轮的下一个 drain 点注入，`followUp` 等这一轮结束。
 	 *
-	 * `model` 和 `thinkingLevel` 是 composer 自己的选择，它们随消息到达而不是作为独立的配置变更，因为两者在被用来发出一个请求之前都不为真：选模型不是 transcript 碰巧遭遇的事，而没有请求以其发出的档位从未生效过。它们与其余字段一起验证，坏的在持久化之前就被拒绝，被拒的选择让会话分毫未动。
+	 * `model` 和 `thinkingLevel` 是 composer 自己的选择，它们随消息到达而不是作为独立的配置变更，因为两者在被用来发出一个请求之前都不为真：选模型不是会话记录碰巧遭遇的事，而没有请求以其发出的档位从未生效过。它们与其余字段一起验证，坏的在持久化之前就被拒绝，被拒的选择让会话分毫未动。
 	 */
 	async prompt(sessionId: string, body: Record<string, unknown>): Promise<{ accepted: true }> {
 		const text = body.text;
@@ -652,7 +652,7 @@ export class SessionController {
 	 *
 	 * hold 由 hub 计数；执行命令的 orchestrator 是进程自己的，每次调用都指名它作用的会话，所以请求需要 hub 的只是 hold、再无其他。在一次读写期间拿住、用完立刻交还，让生命周期只有一条规则：有人 hold 时会话开着，最后一个 hold 放开就关。
 	 *
-	 * 不存在的会话是 404，而 hold 正是说这件事的：`hold` 打开 transcript，什么都不指名的 id 在那里以 {@link UnknownSessionError} 拒绝，transport 负责映射。hub 抛的其他东西——解析不了的 transcript 文件、拼装不了的会话——是本服务器自己的问题，对它说"not found"会让调用者去找一个其实完全正确的 id 里的拼写错误。
+	 * 不存在的会话是 404，而 hold 正是说这件事的：`hold` 打开会话记录，什么都不指名的 id 在那里以 {@link UnknownSessionError} 拒绝，transport 负责映射。hub 抛的其他东西——解析不了的会话记录文件、拼装不了的会话——是本服务器自己的问题，对它说"not found"会让调用者去找一个其实完全正确的 id 里的拼写错误。
 	 */
 	private async holding<T>(sessionId: string, use: (agent: Agent) => T | Promise<T>): Promise<T> {
 		const host = await this.hub.hold(sessionId);

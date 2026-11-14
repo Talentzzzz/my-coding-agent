@@ -21,7 +21,7 @@ export interface PanelSettingsPatch {
 	/** 全局默认活跃工具集，像会话级端点自己的那样整体发送。 */
 	tools?: string[];
 	/**
-	 * 用户的模式，像 `tools` 一样整体发送（ADR-0005）：面板编辑的是一个列表，半应用状态的列表
+	 * 用户的模式，像 `tools` 一样整体发送（ADR-0004）：面板编辑的是一个列表，半应用状态的列表
 	 * 是谁也无法推理的唯一状态。
 	 */
 	modes?: ModeSettings[];
@@ -57,7 +57,7 @@ export interface PanelSettingsPatch {
  * 而不是让一个代替另一个。
  *
  * 一个读取被刻意省略：`GET /api/sessions/{id}` 仍为脚本和诊断而存在，但窗口不再用它打开会话。
- * 它用一个 `open` 帧打开会话并绘制应答的基线（ADR-0010），于是屏幕上只有一份基线，而不是一次
+ * 它用一个 `open` 帧打开会话并绘制应答的基线（ADR-0009），于是屏幕上只有一份基线，而不是一次
  * 读取的副本与通道的赛跑。
  */
 export class SessionApi {
@@ -128,7 +128,7 @@ export class SessionApi {
 	}
 
 	/**
-	 * 整个删除会话 —— transcript、文件、一切。
+	 * 整个删除会话 —— 会话记录、文件、一切。
 	 *
 	 * 这个答案说明服务端做了；侧栏画的行随连接的 `session_gone` 帧离开，而不是随这里返回的任何
 	 * 东西，所以列表永远不会通过两条路得知一次删除。

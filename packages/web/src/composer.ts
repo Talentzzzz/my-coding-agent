@@ -35,8 +35,8 @@ export interface ComposerSelection {
  * 下一段对话开始的地方）、以及名字所指的行已不在。只有最后一种说出了丢了什么。
  */
 function modelLabel(selection: ComposerSelection): string {
-	const row = selection.models.find((model) => model.name === selection.model);
-	if (row !== undefined) return row.name;
+	const modelOption = selection.models.find((model) => model.name === selection.model);
+	if (modelOption !== undefined) return modelOption.name;
 	if (selection.models.length === 0) return "未配置模型";
 	if (selection.model.length === 0) return "选择模型";
 	return `${selection.model}（已丢失）`;

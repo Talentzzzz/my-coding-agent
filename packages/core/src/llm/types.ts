@@ -195,7 +195,7 @@ export interface SimpleStreamOptions extends StreamOptions {
 // 带类型化选项的通用 StreamFunction。
 //
 // 契约：
-// - 接收归一化的 transcript：system prompt 和工具住在开头的 system 消息里，从不在 context 本身上。
+// - 接收归一化的会话记录：system prompt 和工具住在开头的 system 消息里，从不在 context 本身上。
 // - 必须返回一个 AssistantMessageEventStream。
 // - 传输的 stream() 在请求缺认证时可以同步抛出。一旦流被返回，请求/模型/运行时失败应编码进
 //   那个流。
@@ -414,7 +414,7 @@ export type ToolExecutionMode = "sequential" | "parallel";
  *
  * 工具不绑定目录：它作用于的东西是随调用到达的值，不是实例闭包的东西。{@link workDirAbsPath} 是
  * 相对路径解析的基准、命令启动的地方；`bash` 带着为同一次请求读取的超时。两者都随调用离开，所以
- * 一个实例服务所有 session 和所有目录（ADR-0016）。
+ * 一个实例服务所有 session 和所有目录（ADR-0011）。
  *
  * 它住在这里、在 {@link Tool} 旁边，因为它是 `execute` 签名的一部分：签名的类型不设第二个家，
  * 否则构建会有一个 `Tool` 却有两个来源。传输从不读它、从不构造它——它在自己收到的声明上看见

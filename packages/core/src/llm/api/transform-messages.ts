@@ -62,7 +62,7 @@ function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model
 }
 
 /**
- * 让一份存储的 transcript 可以经 `anthropic-messages` 重放。
+ * 让一份存储的会话记录可以经 `anthropic-messages` 重放。
  *
  * session 文件是 append-only 日志，所以它带着两样 wire 会拒绝的东西：以 `error`/`aborted` 结束的
  * assistant turn，以及没有任何东西回答的 tool call。两者在这里都属正常——run 在 call 和 result

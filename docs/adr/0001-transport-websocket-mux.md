@@ -2,7 +2,7 @@
 
 - 状态：**已接受**（用户 2026-10-12 拍板重开，见 `.scratch/client-server-refactor/issues/12-recording-reopened-decisions.md`）
 - 取代或失效：`docs/notes.md` 第一节的「传输形态不变」整节（含"不用 WebSocket"与"不做多路复用"两条）、D0、D2、D3（取代），以及「`claim` 保留原义」里"每条事件流一个 claim"那半句（失效）（逐条对照见下文*被取代的是什么*）
-- 取代者：[0008](0008-loop-merged-into-agent.md)（部分，2026-11-02——仅「`packages/llm` 与 `packages/loop` 一行都不改」中 loop 的那一半：该包已删除、引擎并入 `agent.ts`）；**以及 2026-11-03 用户拍板解除 llm 的那一半**——上游对照放弃后 vendored 不再是任何约束，`packages/llm` 由本仓库自己维护（当场标注于文内两处，未另开 ADR）；[0018](0018-claim-renamed-to-hold.md)（部分，2026-11-10——`claim` 改名为 `hold`，本文正文保留当时用词，语义与 wire 一字未动）。这份 ADR 本身若被推翻，**不要**悄悄改它——新开一条 ADR，并按*不可逆性与代价*一节说明反转的代价
+- 取代者：[0007](0007-loop-merged-into-agent.md)（部分，2026-11-02——仅「`packages/llm` 与 `packages/loop` 一行都不改」中 loop 的那一半：该包已删除、引擎并入 `agent.ts`）；**以及 2026-11-03 用户拍板解除 llm 的那一半**——上游对照放弃后 vendored 不再是任何约束，`packages/llm` 由本仓库自己维护（当场标注于文内两处，未另开 ADR）；以及 2026-11-10 的全仓改名——`claim` 改名为 `hold`（部分：本文正文保留当时用词，语义与 wire 一字未动）。这份 ADR 本身若被推翻，**不要**悄悄改它——新开一条 ADR，并按*不可逆性与代价*一节说明反转的代价
 
 ## 为什么会有这份 ADR
 
@@ -40,7 +40,7 @@
 
 它所记决定的唯一可判定边界。**四条照抄 `.scratch/client-server-refactor/map.md` 的 Destination**（它另有一条限定：只读审计里"当前代码结构上做不到的 10 件事"的第 4 条——**流上承载命令**——已被排除，命令面继续走 REST 资源式）。抄在这里是因为它们是这份 ADR 的判据，但**权威副本在 map**：
 
-1. 一个标签页能同时订阅 N 个会话，各自的 transcript 逐条更新。
+1. 一个标签页能同时订阅 N 个会话，各自的会话逐条更新。
 2. 一条逻辑流被丢弃后重新挂上，收敛到"现在长什么样"。
 3. 发送不再依赖"先 attach 再 POST"——无人观看时的失败不会丢失。
 4. 客户端能在**不发请求**的情况下发现连接已死。
@@ -61,7 +61,7 @@
 | D3「发送路径无法挂上流时报告失败且不发送」 | **取代**。它唯一的理由是 `announce` 不缓冲、瞬时失败只在已挂上的流上可见；订阅先于 POST 建立之后，那个理由不存在了。 |
 | 「不做序列号、游标、重放缓冲或缺口修复」 | **保留**。收敛继续靠基线 + 快照替换。 |
 | 「`claim` 保留原义」 | **保留**，"每条事件流一个 claim"那半句**失效**。订阅与 claim 是两个不同的问题，不重命名 `claim` / `HostedSession` / `SessionHub`。 |
-| 「`packages/llm` 与 `packages/loop` 一行都不改」「测试一次运行不需要供应商密钥」「不要顺手修好 `smoke-approval.ts` 前半段那个怪异」 | ~~**保留**~~。前一条**已被整体取代**：loop 半由 [0008](0008-loop-merged-into-agent.md) 取代（2026-11-02），llm 半于 2026-11-03 随 vendored 概念删除而失效；后两条保留，其中第三条已于 2026-11-03 落地为 `workDirAbsPath` 后在 `docs/notes.md` 标注失效。 |
+| 「`packages/llm` 与 `packages/loop` 一行都不改」「测试一次运行不需要供应商密钥」「不要顺手修好 `smoke-approval.ts` 前半段那个怪异」 | ~~**保留**~~。前一条**已被整体取代**：loop 半由 [0007](0007-loop-merged-into-agent.md) 取代（2026-11-02），llm 半于 2026-11-03 随 vendored 概念删除而失效；后两条保留，其中第三条已于 2026-11-03 落地为 `workDirAbsPath` 后在 `docs/notes.md` 标注失效。 |
 
 **两个容易读错的地方，在这里一次答清。**
 

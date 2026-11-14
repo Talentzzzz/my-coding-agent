@@ -92,7 +92,7 @@ export interface MuxOptions {
 
 export interface MuxHandlers {
 	/** 通道变了。窗口唯一的窗口级状态机经由这里上报。 */
-	onChannel(state: ChannelState): void;
+	onChannel(channelState: ChannelState): void;
 	/** 不属于任何会话的载荷：行表、一行变更，或心跳。 */
 	onConnectionItem(item: ConnectionItem): void;
 	/**
@@ -151,7 +151,7 @@ const WATCHDOG_MULTIPLIER = 3;
  * 一次导航可以为它的基线等待多久。
  *
  * 限制的是*窗口*，不是服务端：`open` 已被接受、基线已被承诺，这是窗口停止假装它还在路上的
- * 时刻。它真正的尺寸依据是写队列后面的等待（基线是一整份 transcript，会排在繁忙会话正在流式
+ * 时刻。它真正的尺寸依据是写队列后面的等待（基线是一整份会话记录，会排在繁忙会话正在流式
  * 输出的内容之后），而不是构建基线的成本 —— 那个成本实测对 3000 条消息 / 1.9 MiB 的快照只有几
  * 毫秒，所以三秒大约是它的三个数量级的余量，真正的支配项是"一个人会盯着一块还没变化的窗格多久"。
  * 把它收紧到实测成本附近，就会把一条只是繁忙的连接报告成坏连接，这正是这个数字要避免的失败。
@@ -172,7 +172,7 @@ interface Subscription {
  * 某会话下一条基线将要应答的那些导航。
  *
  * "窗口要求查看这个会话" —— 调用者 await 的那个 promise —— 是本地完成，刻意不是协议完成：
- * wire 上没有为它新增帧类型（ADR-0010）。应答 `open` 的基线与流为自己锚定的帧是同一个，所以
+ * wire 上没有为它新增帧类型（ADR-0009）。应答 `open` 的基线与流为自己锚定的帧是同一个，所以
  * 每个会话一条记录就是全部的记账；除了会话 id 之外没有别的要匹配。
  *
  * 多个请求可以同时等在它上面。点同一行两次是两个请求一条流，答案无论如何是同一个快照 —— 所以
@@ -331,7 +331,7 @@ export class MuxClient {
 	 * 按来源、按会话幂等，所以调用者可以说"确保有东西在看这个"而不必跟踪是否已经在看。引用计数
 	 * 决定何时发出 `cancel`，它保持不变：同一会话的第二个原因仍然只是添加一个来源，绝不是第二条流。
 	 *
-	 * 每次调用还*要求* —— `open` 是幂等原语（ADR-0010），已打开的流会以新基线作答，于是回到一个
+	 * 每次调用还*要求* —— `open` 是幂等原语（ADR-0009），已打开的流会以新基线作答，于是回到一个
 	 * send 仍持有着的会话的窗格，看到的是"它现在长什么样"，而不是过去那种沉默。这是过去跳过那个
 	 * 帧的唯一地方；表的其他部分什么都没变。
 	 *
@@ -803,10 +803,10 @@ export class MuxClient {
 		}
 	}
 
-	private setChannel(state: ChannelState): void {
-		if (this.channelState === state) return;
-		this.channelState = state;
-		this.handlers.onChannel(state);
+	private setChannel(channelState: ChannelState): void {
+		if (this.channelState === channelState) return;
+		this.channelState = channelState;
+		this.handlers.onChannel(channelState);
 	}
 
 	private clearTimers(): void {

@@ -14,7 +14,7 @@ import type { SessionEntry } from "../session/session-manager.ts";
 export const REFETCHABLE_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "glob", "bash", "edit", "write"]);
 
 /**
- * transcript 保持不动多久之后，认定 provider 的缓存已失效。
+ * 会话记录保持不动多久之后，认定 provider 的缓存已失效。
  *
  * 被缓存的 prompt 是 provider 一个字都不用重读的。缓存一旦失效，每条此后没人看过的 result 都要全额
  * 付账才能占据窗口，这正是让丢弃它们成为压缩能做的最便宜的事的原因——它连请求都不用发。
@@ -35,7 +35,7 @@ export function clearedToolResultText(toolName: string): string {
 }
 
 /**
- * provider 是否很可能已经丢弃了这个 transcript 的缓存。
+ * provider 是否很可能已经丢弃了这个会话记录的缓存。
  *
  * 计时用的是最新的 assistant 消息——最后一次 provider 调用——而不是最新的条目：用户刚输入的消息
  * 只有几秒新，它对之前的 prompt 是否仍被缓存什么也说明不了，从它算起这个判定永远不会触发。
@@ -55,7 +55,7 @@ export function isCacheProbablyExpired(entries: readonly SessionEntry[], now: nu
  *
  * 已经带着通知的 result 不再是候选，这使第二次清空成为 no-op，而不是又一条指名同样条目的记录。
  *
- * 答案是条目 id 而不是重写后的 transcript，因为清空是被记录的，不是在这里应用的：调用方写记录，
+ * 答案是条目 id 而不是重写后的会话记录，因为清空是被记录的，不是在这里应用的：调用方写记录，
  * `buildContextEntries` 清空它指名的内容，恢复的进程由此读到同一个视图，不必重新决定任何事。
  */
 export function clearableToolResultIds(entries: readonly SessionEntry[]): string[] {

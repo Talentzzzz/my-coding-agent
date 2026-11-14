@@ -1,4 +1,4 @@
-# ADR-0020：store 改平——id 就是会话文件的地址
+# ADR-0014：store 改平——id 就是会话文件的地址
 
 日期：2026-11-10。已落地（本次改动直接提交，未跑全量 smoke——见文末）。
 
@@ -9,8 +9,8 @@
    `sessionPath(id)` 是 id → 路径这条规则的唯一住址。
 2. `SessionManager.findSessionFilePathById(id)` 因此从「递归遍历整个 store、按文件名后缀匹配」
    变成**一次存在性检查**：`.json` 快照仍是出生的 commit marker，它在，配对就在。
-3. `Agent` 不再持有 `paths: Map<id, path>`，`pathOf` 整个删除：`bag(id)` 现在就是一句
-   `sessionManager.open(id)`。定位会话是 store 的格式知识（0007 的分界线），编排层此前复制了
+3. `Agent` 不再持有 `paths: Map<id, path>`，`pathOf` 整个删除：`getSessionBySessionId(id)` 现在就是一句
+   `sessionManager.open(id)`。定位会话是 store 的格式知识（0006 的分界线），编排层此前复制了
    它，还替它付失效的账——`remove` 手动删表项、每次命中一次 `existsSync` 兜底、表无界增长。
 4. 侧边栏的目录分组改为**从每个会话快照的 `workDir` 派生**（`listDirectories` 一遍扫描按
    `workDir` 分组），不再依赖目录名——那个把路径的分隔符换成短横的目录名本来就不可逆，
@@ -26,8 +26,8 @@
 ## 理由
 
 旧布局的两个事实——「哪个工作目录的目录」「哪个时间戳前缀」——都不在 id 里，所以按 id 定位
-必然是一次 O(全店文件数) 的遍历；而 ADR-0019 之后 transcript 不驻留内存，这个遍历落在**每次
-操作**上。`Agent.paths` 是为它打的补丁，但补丁放错了家：它只服务 `bag()` 一个调用点，却让
+必然是一次 O(全店文件数) 的遍历；而 ADR-0013 之后会话不驻留内存，这个遍历落在**每次
+操作**上。`Agent.paths` 是为它打的补丁，但补丁放错了家：它只服务 `getSessionBySessionId()` 一个调用点，却让
 编排层持有了 store 的格式知识，`forkFrom` 与 `fileAbsPathOf` 各自绕开它直接问
 `findSessionFilePathById`——一张没有统一任何东西的表。
 
@@ -37,10 +37,10 @@
 
 ## 与其他 ADR 的关系
 
-- 取代 0009 中「每个工作目录一个 store 目录」的布局条款；两个文件、stem 配对、
+- 取代 0008 中「每个工作目录一个 store 目录」的布局条款；两个文件、stem 配对、
   `.json` 是 commit marker、打不开的配对直接删——这些全部不变。
-- 0019「transcript 每次操作现读」不变；本条移除的是它前面那次全店遍历。
-- 0007 的分界线是本条的准绳：按 id 键控、可从磁盘重建、藏在自己内部的缓存是 Manager 的
+- 0013「会话每次操作现读」不变；本条移除的是它前面那次全店遍历。
+- 0006 的分界线是本条的准绳：按 id 键控、可从磁盘重建、藏在自己内部的缓存是 Manager 的
   合法形态——而「id 就是地址」让这条缓存根本不需要存在。
 
 ## 落地与验证

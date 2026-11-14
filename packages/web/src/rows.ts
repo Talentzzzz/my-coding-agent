@@ -13,7 +13,7 @@ import type { SessionRow, DirectoryGroup } from "@my-agent/core/protocol";
  * 到达之前发起的列表可能在之后落地，把行拉回 `false`，窗口就会把一个正在工作的会话显示成空闲。
  */
 export class SessionRows {
-	private readonly rows = new Map<string, SessionRow>();
+	private readonly sessionRowMap = new Map<string, SessionRow>();
 
 	/**
 	 * 每次变更都会递增，由窗口的渲染门读取。
@@ -30,8 +30,8 @@ export class SessionRows {
 	 * 用替换而不是合并，这样已被删除会话的行会自行消失 —— 不需要携带墓碑，也不需要定义删除帧。
 	 */
 	replaceAll(rows: readonly SessionRow[]): void {
-		this.rows.clear();
-		for (const row of rows) this.rows.set(row.id, row);
+		this.sessionRowMap.clear();
+		for (const sessionRow of rows) this.sessionRowMap.set(sessionRow.id, sessionRow);
 		this.version += 1;
 	}
 
@@ -41,8 +41,8 @@ export class SessionRows {
 	 * 服务端发送整行，因为行很小而整行是幂等的 —— 同一行到达两次或乱序到达，得到的都是同一张表。
 	 * 逐字段合并将是这里唯一可能产生"一半新一半旧"的行的做法。
 	 */
-	put(row: SessionRow): void {
-		this.rows.set(row.id, row);
+	put(sessionRow: SessionRow): void {
+		this.sessionRowMap.set(sessionRow.id, sessionRow);
 		this.version += 1;
 	}
 
@@ -53,7 +53,7 @@ export class SessionRows {
 	 * 仍然要动，因为行消失是渲染门必须看到的变化。
 	 */
 	remove(sessionId: string): void {
-		if (!this.rows.delete(sessionId)) return;
+		if (!this.sessionRowMap.delete(sessionId)) return;
 		this.version += 1;
 	}
 
@@ -66,9 +66,9 @@ export class SessionRows {
 	 */
 	loadFrom(groups: readonly DirectoryGroup[], channelIsLive: boolean): boolean {
 		if (channelIsLive) return false;
-		this.rows.clear();
+		this.sessionRowMap.clear();
 		for (const group of groups) {
-			for (const row of group.sessions) this.rows.set(row.id, row);
+			for (const sessionRow of group.sessions) this.sessionRowMap.set(sessionRow.id, sessionRow);
 		}
 		this.version += 1;
 		return true;
@@ -76,12 +76,12 @@ export class SessionRows {
 
 	/** 一行；对没有任何窗口被告知过的会话返回 `undefined`。 */
 	get(sessionId: string): SessionRow | undefined {
-		return this.rows.get(sessionId);
+		return this.sessionRowMap.get(sessionId);
 	}
 
 	/** 所有行，最新活动在前 —— 侧栏绘制的顺序。 */
 	list(): SessionRow[] {
-		return [...this.rows.values()].sort((a, b) => b.modified - a.modified);
+		return [...this.sessionRowMap.values()].sort((a, b) => b.modified - a.modified);
 	}
 
 	/**
@@ -92,13 +92,13 @@ export class SessionRows {
 	 * 行移动时就会分歧。
 	 */
 	groups(): DirectoryGroup[] {
-		const byWorkDir = new Map<string, SessionRow[]>();
-		for (const row of this.list()) {
-			const group = byWorkDir.get(row.workDirAbsPath);
-			if (group === undefined) byWorkDir.set(row.workDirAbsPath, [row]);
-			else group.push(row);
+		const sessionRowMapByWorkDir = new Map<string, SessionRow[]>();
+		for (const sessionRow of this.list()) {
+			const group = sessionRowMapByWorkDir.get(sessionRow.workDirAbsPath);
+			if (group === undefined) sessionRowMapByWorkDir.set(sessionRow.workDirAbsPath, [sessionRow]);
+			else group.push(sessionRow);
 		}
-		return [...byWorkDir.entries()]
+		return [...sessionRowMapByWorkDir.entries()]
 			.map(([workDirAbsPath, sessions]) => ({ workDirAbsPath, sessions }))
 			.sort((a, b) => newest(b.sessions) - newest(a.sessions));
 	}
@@ -106,5 +106,5 @@ export class SessionRows {
 
 /** 一组最近的活动，正是组与组之间排序的依据。 */
 function newest(rows: readonly SessionRow[]): number {
-	return rows.reduce((latest, row) => Math.max(latest, row.modified), 0);
+	return rows.reduce((latest, sessionRow) => Math.max(latest, sessionRow.modified), 0);
 }

@@ -210,8 +210,8 @@ check("an unanswered call is settled, not spinning", cutCard?.running === false,
 // assistant 消息（07 撞上的那次冲突）不得把第一条回答推到 user 气泡的另一侧。
 
 /** 按 wire 送达的方式折叠一个 session 事件。 */
-function fold(state: ViewState, event: unknown): ViewState {
-	return reduce(state, { type: "event", event } as ServerMessage);
+function fold(viewState: ViewState, event: unknown): ViewState {
+	return reduce(viewState, { type: "event", event } as ServerMessage);
 }
 
 function userEcho(timestamp: number, text: string) {
@@ -292,23 +292,23 @@ process.stdout.write("a delta stream appends to one item, and a mid-run baseline
 {
 	// 普通的一次 run：先 reasoning 再回答，一次一个 delta。没有任何帧携带整条消息，屏幕上的
 	// 每个字符都是被追加到其时间戳指名的条目上才到达那里的。
-	let state = reduce(initialState(), { type: "baseline", session: snapshotWith([], { submitting: true }) });
-	state = fold(state, assistantStart(20_000));
-	state = fold(state, { type: "message_update", delta: { timestamp: 20_000, kind: "thinking", contentIndex: 0, text: "先想" } });
-	state = fold(state, { type: "message_update", delta: { timestamp: 20_000, kind: "thinking", contentIndex: 0, text: "一下" } });
-	const thinking = state.items.at(-1);
+	let viewState = reduce(initialState(), { type: "baseline", session: snapshotWith([], { submitting: true }) });
+	viewState = fold(viewState, assistantStart(20_000));
+	viewState = fold(viewState, { type: "message_update", delta: { timestamp: 20_000, kind: "thinking", contentIndex: 0, text: "先想" } });
+	viewState = fold(viewState, { type: "message_update", delta: { timestamp: 20_000, kind: "thinking", contentIndex: 0, text: "一下" } });
+	const thinking = viewState.items.at(-1);
 	check("thinking deltas append into one block", thinking?.kind === "message" && thinking.thinking?.text === "先想一下", JSON.stringify(thinking));
 	check("and the row still says it is thinking", thinking?.kind === "message" && thinking.thinking?.running === true);
-	check("the item was opened by the first delta", state.items.length === 1 && state.items[0]?.kind === "message");
+	check("the item was opened by the first delta", viewState.items.length === 1 && viewState.items[0]?.kind === "message");
 
-	state = fold(state, { type: "message_update", delta: { timestamp: 20_000, kind: "text", contentIndex: 1, text: "第一" } });
-	state = fold(state, { type: "message_update", delta: { timestamp: 20_000, kind: "text", contentIndex: 1, text: "答" } });
-	const answer = state.items.at(-1);
+	viewState = fold(viewState, { type: "message_update", delta: { timestamp: 20_000, kind: "text", contentIndex: 1, text: "第一" } });
+	viewState = fold(viewState, { type: "message_update", delta: { timestamp: 20_000, kind: "text", contentIndex: 1, text: "答" } });
+	const answer = viewState.items.at(-1);
 	check("text deltas append into one answer", answer?.kind === "message" && answer.text === "第一答", JSON.stringify(answer));
 	check("the first answer character stops the thinking row", answer?.kind === "message" && answer.thinking?.running === false);
 
-	state = fold(state, assistantEnd(20_000, "第一答"));
-	const settled = state.items.at(-1);
+	viewState = fold(viewState, assistantEnd(20_000, "第一答"));
+	const settled = viewState.items.at(-1);
 	check("the end still replaces the item with the whole message", settled?.kind === "message" && settled.text === "第一答" && settled.streaming === false);
 }
 {
@@ -319,11 +319,11 @@ process.stdout.write("a delta stream appends to one item, and a mid-run baseline
 		content: [{ type: "text", text: "已经写了一半" }],
 		timestamp: 30_000,
 	} as unknown as SessionSnapshot["partial"];
-	const state = reduce(initialState(), { type: "baseline", session: snapshotWith([], { submitting: true, partial }) });
-	const item = state.items.at(-1);
+	const viewState = reduce(initialState(), { type: "baseline", session: snapshotWith([], { submitting: true, partial }) });
+	const item = viewState.items.at(-1);
 	check("the mid-run baseline draws the text already sent", item?.kind === "message" && item.text === "已经写了一半", JSON.stringify(item));
 	check("and draws it as still streaming", item?.kind === "message" && item.streaming === true);
-	const continued = fold(state, { type: "message_update", delta: { timestamp: 30_000, kind: "text", contentIndex: 0, text: "，后半句" } });
+	const continued = fold(viewState, { type: "message_update", delta: { timestamp: 30_000, kind: "text", contentIndex: 0, text: "，后半句" } });
 	const grown = continued.items.at(-1);
 	check("the deltas after it continue the same item", grown?.kind === "message" && grown.text === "已经写了一半，后半句");
 }

@@ -176,7 +176,7 @@ try {
 	check("and an idle session says so", lane.submitting === false, String(lane.submitting));
 
 	// 第二次 `open` 要求的是与第一次相同的东西——这个 session 现在的状态，及其后的一切——所以
-	// 它的应答是已存在流上再多一份 baseline，底下的订阅原样不动（ADR-0010 决定 1）。这正是窗格
+	// 它的应答是已存在流上再多一份 baseline，底下的订阅原样不动（ADR-0009 决定 1）。这正是窗格
 	// 在别的东西仍持有 session 时离开再回来需要的那帧：没有发过 `cancel`，所以重发的 baseline
 	// 是回程唯一可能得到的应答。
 	//
@@ -414,12 +414,12 @@ try {
 	// 时间点读取，在 reap 完成之后：尾部的驱逐尝试在 wait 门控下运行了，而 wait 站着，所以
 	// state 还在这里。门面上没有人读这张表——那是 orchestrator 自己的事——所以 smoke 自己读
 	// 这个 map，与其他 smoke 到 `assembleAgentStateBySession` 走的是同一条路。
-	const table = rig.hub.agent as unknown as { sessions: Map<string, unknown> };
-	check("but the wait kept the state in the table", table.sessions.has(waitedId), String(table.sessions.has(waitedId)));
+	const table = rig.hub.agent as unknown as { agentStateMap: Map<string, unknown> };
+	check("but the wait kept the state in the table", table.agentStateMap.has(waitedId), String(table.agentStateMap.has(waitedId)));
 
 	wire.send({ type: "unwait", sessionId: waitedId });
 	wire.send({ type: "unwait", sessionId: waitedId });
-	check("releasing the wait evicted it", await until(() => !table.sessions.has(waitedId), 5_000), String(table.sessions.has(waitedId)));
+	check("releasing the wait evicted it", await until(() => !table.agentStateMap.has(waitedId), 5_000), String(table.agentStateMap.has(waitedId)));
 
 	// 一条随后死去的连接报告的 wait 随连接一起被放弃——一个永远不会被应答的 waiter 不得永远
 	// 占着一个 state。这个 wait 完全不骑任何订阅，这也是 wait 独立于订阅表的证明：它在旁边任何
@@ -432,9 +432,9 @@ try {
 	check("the prompt was accepted", (await prompt(rig.url, mortalId, "run under a dying connection's wait")) === 202);
 	check("it settled", await settleRun(rig.url, mortalId));
 	check("the host was reaped under the dying connection's wait", await until(() => !rig.hub.live.includes(mortalId), 10_000), rig.hub.live.join(","));
-	check("and that wait held the state too", table.sessions.has(mortalId), String(table.sessions.has(mortalId)));
+	check("and that wait held the state too", table.agentStateMap.has(mortalId), String(table.agentStateMap.has(mortalId)));
 	await dying.close().catch(() => {});
-	check("the connection's death released its wait", await until(() => !table.sessions.has(mortalId), 5_000), String(table.sessions.has(mortalId)));
+	check("the connection's death released its wait", await until(() => !table.agentStateMap.has(mortalId), 5_000), String(table.agentStateMap.has(mortalId)));
 
 	// 容忍，与第 3、4 节给其他帧的同一种：对这个服务器不认识的 session 的 wait 被记录（代价是
 	// 一行表和一次 `unwait`），而不是被拒绝——连接继续活着。帧按到达顺序处理，所以它们之后

@@ -427,9 +427,9 @@ process.stdout.write("\nsidebar：fork 的行跟普通行一模一样\n");
 	// One root, one fork of it. The fork keeps its tree place — right beneath the session it came
 	// from — but draws no indent, no mark, and no depth of any kind: the name, suffix included, is
 	// the whole difference.
-	const source = row("s", 300, { createdAt: 100 });
+	const sourceRow = row("s", 300, { createdAt: 100 });
 	const forked = row("f", 200, { createdAt: 200, parentId: "s", title: "会话 s" });
-	sidebar.render(state([source, forked]));
+	sidebar.render(state([sourceRow, forked]));
 
 	const order = titlesOf(sidebar).map((t) => t.title);
 	check("fork 的行紧跟源行，名字带着（1）", order.join(",") === "会话 s,会话 s（1）", JSON.stringify(order));
@@ -447,12 +447,12 @@ process.stdout.write("\nsidebar：（1）由渲染拼出来\n");
 	// Three forks of one source, born out of order; the number is the sibling's own place under the
 	// same parent by creation time, and nothing anywhere stores it. A fork of a fork hangs its suffix
 	// on the parent's *display* title, so the numbers stack: 标题（2）（1）, not 标题（1）again.
-	const source = row("s", 500, { createdAt: 100 });
+	const sourceRow = row("s", 500, { createdAt: 100 });
 	const one = row("f1", 400, { createdAt: 300, parentId: "s", title: "会话 s" });
 	const two = row("f2", 300, { createdAt: 200, parentId: "s", title: "会话 s" });
 	const three = row("f3", 200, { createdAt: 400, parentId: "s", title: "会话 s" });
 	const grand = row("g", 100, { createdAt: 500, parentId: "f1", title: "会话 s" });
-	sidebar.render(state([source, one, two, three, grand]));
+	sidebar.render(state([sourceRow, one, two, three, grand]));
 
 	const titles = titlesOf(sidebar).map((t) => t.title);
 	check("三个兄弟按创建时间拿到 1、2、3", titles.includes("会话 s（1）") && titles.includes("会话 s（2）") && titles.includes("会话 s（3）"), JSON.stringify(titles));
@@ -471,11 +471,11 @@ process.stdout.write("\nsidebar：新会话出现在列表里\n");
 	// which is exactly what the connection's `session_row` frame delivers. The row has to appear
 	// beneath its source with its suffix on, and nothing already on screen may be rebuilt to make
 	// room: the client never inserts a row of its own.
-	const source = row("s", 300, { createdAt: 100 });
-	sidebar.render(state([source]));
+	const sourceRow = row("s", 300, { createdAt: 100 });
+	sidebar.render(state([sourceRow]));
 	const sourceNode = all(sidebar, "session-item")[0]?.node;
 
-	sidebar.render(state([source, row("f", 200, { createdAt: 200, parentId: "s", title: "会话 s" })]));
+	sidebar.render(state([sourceRow, row("f", 200, { createdAt: 200, parentId: "s", title: "会话 s" })]));
 	const after = titlesOf(sidebar);
 	check("fork 出现了", after.length === 2, JSON.stringify(after.map((t) => t.title)));
 	check("带着（1），紧跟源行", after.map((t) => t.title).join(",") === "会话 s,会话 s（1）", JSON.stringify(after.map((t) => t.title)));
@@ -535,9 +535,9 @@ process.stdout.write("\nsidebar：就地改名\n");
 	// clean name — the fork's own suffix is a fact about its birth, not something to retype — and
 	// committing changes nothing on this row, because the name is real storage on the server and the
 	// row wears the new one only when its row frame arrives.
-	const source = row("s", 300, { createdAt: 100 });
+	const sourceRow = row("s", 300, { createdAt: 100 });
 	const forked = row("f", 200, { createdAt: 200, parentId: "s", title: "会话 s" });
-	sidebar.render(state([source, forked]));
+	sidebar.render(state([sourceRow, forked]));
 
 	const forkRow = all(sidebar, "session-item")[1]?.node;
 	forkRow?.dispatch("contextmenu", { clientX: 10, clientY: 10, preventDefault() {} });
@@ -560,7 +560,7 @@ process.stdout.write("\nsidebar：就地改名\n");
 
 	// The server stored it; the row frame is how the list finds out. The suffix comes back on its
 	// own — it was never part of what the user typed, and the tree still knows the row's place.
-	sidebar.render(state([source, row("f", 200, { createdAt: 200, parentId: "s", title: "新名字" })]));
+	sidebar.render(state([sourceRow, row("f", 200, { createdAt: 200, parentId: "s", title: "新名字" })]));
 	check("行帧到了，名字换上、后缀自己拼回", titlesOf(sidebar).map((t) => t.title).join(",") === "会话 s,新名字（1）", JSON.stringify(titlesOf(sidebar).map((t) => t.title)));
 
 	// Escape sends nothing at all — the typed text included.

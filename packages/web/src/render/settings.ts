@@ -114,7 +114,7 @@ export class SettingsPanel {
 	private readonly navItems: { id: Tab; button: HTMLButtonElement }[] = [];
 	private readonly note: HTMLElement;
 
-	private state: SettingsState = { models: [] };
+	private settingsState: SettingsState = { models: [] };
 	private tab: Tab = "appearance";
 	/**
 	 * 打开交互开始时的行，面板显示服务端持有的东西时为 undefined。
@@ -217,8 +217,8 @@ export class SettingsPanel {
 		this.element.hidden = true;
 	}
 
-	render(state: SettingsState = this.state): void {
-		this.state = state;
+	render(settingsState: SettingsState = this.settingsState): void {
+		this.settingsState = settingsState;
 
 		// 重建 body 会丢掉半输入的行，所以只在标签正在显示的东西真的动了时发生。打开的交互把 body
 		// 整个冻结：表单是屏幕上唯一无法从状态重建的东西，因为它的最新值活在 DOM 和两个草稿字段
@@ -227,21 +227,21 @@ export class SettingsPanel {
 		// 渲染再照常比较签名。
 		const signature = [
 			this.tab,
-			state.settings
+			settingsState.settings
 				? [
-						state.settings.appearance.theme,
-						state.settings.appearance.fontSize,
-						state.settings.bash.defaultTimeoutMs,
-						state.settings.bash.maxTimeoutMs,
-						state.settings.tools?.join(",") ?? "",
-						Object.entries(state.settings.approval).join(","),
-						(state.settings.modes ?? [])
+						settingsState.settings.appearance.theme,
+						settingsState.settings.appearance.fontSize,
+						settingsState.settings.bash.defaultTimeoutMs,
+						settingsState.settings.bash.maxTimeoutMs,
+						settingsState.settings.tools?.join(",") ?? "",
+						Object.entries(settingsState.settings.approval).join(","),
+						(settingsState.settings.modes ?? [])
 							.map((mode) => `${mode.name}:${mode.tools.join(",")}:${Object.entries(mode.approval).join(",")}`)
 							.join(";"),
 					].join("/")
 				: "",
-			state.models.map((model) => `${model.name}:${model.id}:${model.hasApiKey}`).join(","),
-			state.snapshot?.allTools.join(",") ?? "",
+			settingsState.models.map((model) => `${model.name}:${model.id}:${model.hasApiKey}`).join(","),
+			settingsState.snapshot?.allTools.join(",") ?? "",
 		].join("|");
 
 		const stable =
@@ -264,7 +264,7 @@ export class SettingsPanel {
 	 * splice 而不碰状态。
 	 */
 	get rows(): ModelDraft[] {
-		return this.frozen ?? this.state.models.map((model) => ({ ...model }));
+		return this.frozen ?? this.settingsState.models.map((model) => ({ ...model }));
 	}
 
 	private renderNav(): void {
@@ -297,7 +297,7 @@ export class SettingsPanel {
 	// ------------------------------------------------------------------ appearance
 
 	private appearanceSection(): HTMLElement {
-		const settings = this.state.settings;
+		const settings = this.settingsState.settings;
 		const section = element("section", "settings-section");
 
 		const themeRow = element("div", "settings-field");
@@ -386,15 +386,15 @@ export class SettingsPanel {
 	 * 头部是覆盖行中部的按钮 —— 名字和 wire ref —— 回收站骑在旁边、悬停时露出。它们是兄弟而不是
 	 * 头部包着回收站，因为按钮不能装按钮；回收站定位于头部预留的右侧内边距上。
 	 */
-	private modelRow(row: ModelDraft, index: number): HTMLElement {
+	private modelRow(modelDraft: ModelDraft, index: number): HTMLElement {
 		const rowEl = element("div", "model-row");
 		if (this.editing === index) rowEl.classList.add("editing");
 		if (this.confirming === index) rowEl.classList.add("confirming");
 
 		const head = element("button", "model-row-head", undefined, { type: "button" });
 		head.append(
-			element("span", "model-label", row.name.length > 0 ? row.name : "新模型"),
-			element("span", "model-ref", row.id.length > 0 ? `${row.name || "未命名"}/${row.id}` : "未配置"),
+			element("span", "model-label", modelDraft.name.length > 0 ? modelDraft.name : "新模型"),
+			element("span", "model-ref", modelDraft.id.length > 0 ? `${modelDraft.name || "未命名"}/${modelDraft.id}` : "未配置"),
 		);
 		head.addEventListener("click", () => this.beginEdit(index));
 		rowEl.append(head);
@@ -404,7 +404,7 @@ export class SettingsPanel {
 		if (this.editing === index && this.form !== undefined) {
 			rowEl.append(this.modelForm(this.form, () => this.closeInteraction(), () => void this.commitRow(index)));
 		}
-		if (this.confirming === index) rowEl.append(this.confirmBar(row, index));
+		if (this.confirming === index) rowEl.append(this.confirmBar(modelDraft, index));
 
 		return rowEl;
 	}
@@ -415,9 +415,9 @@ export class SettingsPanel {
 	 * 一次确认，然后删除：确认条就地发问 —— 指名它即将移除的行 —— 两个答案都把它收下，破坏性的
 	 * 那个以发送缩短后的列表收下。按钮按原型的顺序放，破坏性的在前。
 	 */
-	private confirmBar(row: ModelDraft, index: number): HTMLElement {
+	private confirmBar(modelDraft: ModelDraft, index: number): HTMLElement {
 		const bar = element("div", "model-confirm");
-		bar.append(element("span", undefined, `删除 ${row.name.length > 0 ? row.name : "未命名"}？此操作不可撤销。`));
+		bar.append(element("span", undefined, `删除 ${modelDraft.name.length > 0 ? modelDraft.name : "未命名"}？此操作不可撤销。`));
 		bar.append(element("span", "model-confirm-spacer"));
 		const remove = element("button", "button danger", undefined, { type: "button" });
 		remove.textContent = "删除";
@@ -484,12 +484,12 @@ export class SettingsPanel {
 		return form;
 	}
 
-	private keyField(row: ModelDraft, update: (patch: Partial<ModelDraft>) => void): HTMLElement {
+	private keyField(modelDraft: ModelDraft, update: (patch: Partial<ModelDraft>) => void): HTMLElement {
 		const input = element("input", "input", undefined, {
 			type: "password",
 			autocomplete: "off",
 			// 已存的密钥从不发给浏览器，所以这是替换它的提示，不是展示它的字段。
-			placeholder: row.hasApiKey ? "•••••••• 已保存 — 输入即可替换" : "未设置",
+			placeholder: modelDraft.hasApiKey ? "•••••••• 已保存 — 输入即可替换" : "未设置",
 		});
 		input.addEventListener("input", () => update({ apiKey: input.value }));
 		return this.field("API KEY", input, "保存在本机，不会回传给浏览器；这是唯一的鉴权方式");
@@ -659,7 +659,7 @@ export class SettingsPanel {
 
 	/** 现在的模式：交互开着时是冻结的清单，否则是服务端的。 */
 	private get modeRows(): ModeDraft[] {
-		return this.modeFrozen ?? (this.state.settings?.modes ?? []).map((mode) => ({ ...mode, approval: { ...mode.approval } }));
+		return this.modeFrozen ?? (this.settingsState.settings?.modes ?? []).map((mode) => ({ ...mode, approval: { ...mode.approval } }));
 	}
 
 	/**
@@ -670,7 +670,7 @@ export class SettingsPanel {
 	 * 只是显示的便利：内置默认的表单没有会话就退下，所以绝不会把六个写在一个可能更多的集合上。
 	 */
 	private modeToolList(mode: ModeDraft): string[] {
-		const all = this.state.snapshot?.allTools;
+		const all = this.settingsState.snapshot?.allTools;
 		const base = all !== undefined && all.length > 0 ? [...all] : [...APPROVAL_TOOLS];
 		for (const name of mode.tools) if (!base.includes(name)) base.push(name);
 		return base;
@@ -684,8 +684,8 @@ export class SettingsPanel {
 	 * 模式相同的一行，所以读起来是平级，而不是一个永远展开的面板。
 	 */
 	private defaultModeCard(): HTMLElement {
-		const settings = this.state.settings;
-		const allTools = this.state.snapshot?.allTools;
+		const settings = this.settingsState.settings;
+		const allTools = this.settingsState.snapshot?.allTools;
 		const storedTools = settings?.tools ?? allTools ?? [];
 		// 摘要指名与 composer 默认行相同的工具：会话能指名构建清单时，升级删掉的存储名不是本构建
 		// 有的工具，这里也不计入。没有会话就没有可收窄的清单，文件里是什么就是唯一真实的答案。
@@ -837,7 +837,7 @@ export class SettingsPanel {
 			form.append(nameField);
 		}
 
-		const standDown = options.builtIn === true && (this.state.snapshot?.allTools.length ?? 0) === 0;
+		const standDown = options.builtIn === true && (this.settingsState.snapshot?.allTools.length ?? 0) === 0;
 		form.append(this.modeToolTable(draft, standDown));
 
 		const actions = element("div", "model-actions");
@@ -895,8 +895,8 @@ export class SettingsPanel {
 	 */
 	private beginDefaultEdit(): void {
 		if (this.defaultEditing) return;
-		const settings = this.state.settings;
-		const allTools = this.state.snapshot?.allTools ?? [];
+		const settings = this.settingsState.settings;
+		const allTools = this.settingsState.snapshot?.allTools ?? [];
 		this.dropModeInteraction();
 		this.defaultEditing = true;
 		this.defaultForm = {
@@ -926,11 +926,11 @@ export class SettingsPanel {
 	 */
 	private async commitDefault(): Promise<void> {
 		const draft = this.defaultForm;
-		const grounded = this.state.snapshot?.allTools;
+		const grounded = this.settingsState.snapshot?.allTools;
 		if (draft === undefined || grounded === undefined || grounded.length === 0) return;
 
 		const nextTools = grounded.filter((name) => draft.tools.includes(name));
-		const currentTools = this.state.settings?.tools ?? grounded;
+		const currentTools = this.settingsState.settings?.tools ?? grounded;
 		const unchanged =
 			currentTools.length === nextTools.length && nextTools.every((name) => currentTools.includes(name));
 
@@ -938,7 +938,7 @@ export class SettingsPanel {
 		if (!unchanged) writes.push(this.handlers.onGlobalTools(nextTools));
 		for (const name of APPROVAL_TOOLS) {
 			const asked = draft.approval[name] === true;
-			if ((this.state.settings?.approval[name] === true) !== asked) writes.push(this.handlers.onGlobalApproval(name, asked));
+			if ((this.settingsState.settings?.approval[name] === true) !== asked) writes.push(this.handlers.onGlobalApproval(name, asked));
 		}
 
 		this.saving = true;
@@ -1038,10 +1038,10 @@ export class SettingsPanel {
 	 * 下一段对话从哪开始。它经设置端点写而不是会话的，因为设置它时屏幕上可能根本没有会话。
 	 */
 	private defaultModelSection(): HTMLElement {
-		const current = this.state.settings?.model ?? "";
+		const current = this.settingsState.settings?.model ?? "";
 		const select = element("select", "input");
 		select.append(option("", "第一个导入的模型"));
-		for (const candidate of this.state.models) {
+		for (const candidate of this.settingsState.models) {
 			select.append(option(candidate.name, candidate.name));
 		}
 		// 指名已不在的行的默认是真实状态 —— 文件可以手改 —— 所以它有自己的行，而不是被显示成
@@ -1063,7 +1063,7 @@ export class SettingsPanel {
 		group.append(
 			element("span", "model-hint", "对所有会话生效。命令超过时限会被终止；默认 120 秒，上限 3600 秒。"),
 		);
-		const bash = this.state.settings?.bash;
+		const bash = this.settingsState.settings?.bash;
 		if (bash) {
 			group.append(this.secondsField("默认超时（秒）", bash.defaultTimeoutMs, "模型没有指定时限的命令跑多久", (ms) =>
 				this.handlers.onBashTimeouts({ defaultTimeoutMs: ms }),

@@ -7,7 +7,7 @@ import { renderMarkdown, type MarkdownState } from "./markdown.ts";
 export interface TranscriptOptions {
 	/**
 	 * 一条用户消息被右键：它所代表的存储条目 —— 如果已经为它指名 —— 以及指针位置，菜单应在此
-	 * 打开。菜单本身属于调用者；transcript 只知道指针下是哪条消息。
+	 * 打开。菜单本身属于调用者；会话记录只知道指针下是哪条消息。
 	 */
 	onUserContext(entryId: string | undefined, x: number, y: number): void;
 	/**
@@ -15,7 +15,7 @@ export interface TranscriptOptions {
 	 *
 	 * 条目在按下时读取，而不是构建时：消息的条目 id 可以比回合晚一帧到达，而底部是构建一次的。
 	 * 一次按压*做什么* —— 回退会话让下一个提示从这条回答开启另一条路 —— 是调用者的事；
-	 * transcript 只知道指针下是哪条回答。
+	 * 会话记录只知道指针下是哪条回答。
 	 */
 	onBranch(entryId: string): void;
 }
@@ -159,7 +159,7 @@ interface Turn {
 /**
  * 对话列。
  *
- * 渲染是对 `items` 的协调而不是重建，因为 transcript 是热路径：一条 `message_update` 每秒到达
+ * 渲染是对 `items` 的协调而不是重建，因为会话记录是热路径：一条 `message_update` 每秒到达
  * 多次，成本必须正比于 delta 而不是目前为止的对话。item 不可变，reducer 只重建帧改变的那些，
  * 所以每次绘制走一遍列表、每个 item 一次引用比较、只渲染新的那些。其余 —— 摆放、回合遍历、
  * 修剪 —— 都以 item 列表的*形状*为键，落在最后一条消息里的 token 动不了它。
@@ -170,12 +170,12 @@ interface Turn {
 export class TranscriptView {
 	private readonly container: HTMLElement;
 	private readonly options: TranscriptOptions;
-	private readonly turns = new Map<string, Turn>();
+	private readonly turnMap = new Map<string, Turn>();
 	private readonly tools = new Map<string, { section: HTMLElement; source: readonly ToolCard[]; cards: Map<string, { node: HTMLElement; shape: string }> }>();
 	/**
 	 * 整个快照的绘制，摊到多个帧上。
 	 *
-	 * `render` 保持即时路径，这是另一条：快照带来的 transcript 按片绘制，而携带 delta 的帧必须
+	 * `render` 保持即时路径，这是另一条：快照带来的会话记录按片绘制，而携带 delta 的帧必须
 	 * 整体落地 —— delta 正是读者正在看着被写出来的东西。
 	 */
 	private readonly drain = new Drain(FRAME_BUDGET_MS);
@@ -273,7 +273,7 @@ export class TranscriptView {
 	 * 按有界分片画整个快照，第一片在本轮就落。
 	 *
 	 * 分批正是要点：对一份长历史的会话调用 `render`，是一整块 Markdown 解析和节点构建，期间浏览器
-	 * 不重绘 —— transcript 没到、说它要来的提示也没有。这里第一片随点击落地，帧被还回去让浏览器
+	 * 不重绘 —— 会话记录没到、说它要来的提示也没有。这里第一片随点击落地，帧被还回去让浏览器
 	 * 绘制它，其余每帧一批跟进。
 	 *
 	 * 第一片刻意是固定数量而不是"到折叠处为止"：跑完整段短对话的片与即时路径毫无区别，而本方法
@@ -293,7 +293,7 @@ export class TranscriptView {
 		this.rounds = rounds;
 		const wanted = idsOf(items);
 		// 遍历从这里开始而不是从一个 `yield`：把第一片排到下一帧的生成器，会让窗格在点击后整整一帧
-		// 显示上一个会话的 transcript，这正是要修的东西。
+		// 显示上一个会话的会话记录，这正是要修的东西。
 		this.batch(items, streaming, rounds, wanted, 0, Math.min(items.length, BATCH_ITEMS));
 		this.drain.start(() => this.producer(items, streaming, rounds, wanted));
 	}
@@ -410,7 +410,7 @@ export class TranscriptView {
 		let previous: HTMLElement | undefined;
 		for (let index = 0; index < to; index += 1) {
 			const item = items[index]!;
-			const node = item.kind === "message" ? this.turns.get(item.id)?.section : this.tools.get(item.id)?.section;
+			const node = item.kind === "message" ? this.turnMap.get(item.id)?.section : this.tools.get(item.id)?.section;
 			if (node === undefined) continue;
 			this.place(this.container, node, previous);
 			previous = node;
@@ -419,9 +419,9 @@ export class TranscriptView {
 
 	/** 丢掉对话不再携带的东西，从两张表和 DOM 两处。 */
 	private reconcile(wanted: ReadonlySet<string>): void {
-		for (const [id, turn] of [...this.turns]) {
+		for (const [id, turn] of [...this.turnMap]) {
 			if (wanted.has(id)) continue;
-			this.turns.delete(id);
+			this.turnMap.delete(id);
 			turn.section.remove();
 		}
 		for (const [id, group] of [...this.tools]) {
@@ -483,10 +483,10 @@ export class TranscriptView {
 	 * 可以把写入花在动了的东西上：流式光标、条目 id、meta 行、底部。
 	 */
 	private renderMessage(item: Extract<Item, { kind: "message" }>, rounds: RoundIndex): void {
-		const known = this.turns.get(item.id);
+		const known = this.turnMap.get(item.id);
 		const turn = known ?? this.createTurn(item);
 		if (known === undefined) {
-			this.turns.set(item.id, turn);
+			this.turnMap.set(item.id, turn);
 			this.container.append(turn.section);
 			this.setSticky(true);
 		} else if (known.item === item) {
@@ -614,7 +614,7 @@ export class TranscriptView {
 	 * （06 ⑥）。
 	 *
 	 * 行在这里构建一次、逐帧补丁，因为协调给每个 item 摆放一个节点；回合内部的任何东西都可以
-	 * 自由出现消失，transcript 的摆放不需要知道。
+		 * 自由出现消失，会话记录的摆放不需要知道。
 	 */
 	private createTurn(item: Extract<Item, { kind: "message" }>): Turn {
 		const section = element("section", `turn ${item.role}${item.notice ? " notice" : ""}`);
@@ -695,7 +695,7 @@ export class TranscriptView {
 	 * 画 agent 底部，或藏起它。
 	 *
 	 * 底部属于收尾回合的回答 —— 下一条用户提示之前的最后一条 assistant 消息 —— 且只在它停止到达
-	 * 之后：流式期间，transcript 下面运行自己的那一行才是用时读数的席位。注释不是回答，没有文本
+	 * 之后：流式期间，会话记录下面运行自己的那一行才是用时读数的席位。注释不是回答，没有文本
 	 * 的消息没有东西可复制，所以两者都不画底部。
 	 *
 	 * 派生按钮在除对话最后一条回答之外的每个底部都坐在复制旁边：叶子就是对话继续的地方，从它
@@ -754,7 +754,7 @@ export class TranscriptView {
 	 * 花一次 Set 查找加一次比较。
 	 */
 	private patchFeet(): void {
-		for (const turn of this.turns.values()) {
+		for (const turn of this.turnMap.values()) {
 			if (turn.foot === undefined) continue;
 			const last = this.rounds.last.has(turn.item.id);
 			const moved = turn.roundLast !== last;
@@ -777,7 +777,7 @@ export class TranscriptView {
 	 * 节点每次运行构建一次，只在它不是列里最后一个东西时移动：每帧都追加它会在每个 token 上重新
 	 * 挂载这一行，是读者从没见过的 DOM 写。文本只在它指名的秒变了时写，理由相同。
 	 *
-	 * 流式翻回去时，用时被记到回合上 —— 这是底部无法从 transcript 推导的唯一观察，因为回答自己的
+	 * 流式翻回去时，用时被记到回合上 —— 这是底部无法从会话记录推导的唯一观察，因为回答自己的
 	 * 时间戳是它请求的起点。记录同时以回合的用户消息和回答的 id 为键，所以同一回合上一次运行的
 	 * 过期观察 —— 分支被再次走过 —— 读作缺席，时间戳作答。
 	 */

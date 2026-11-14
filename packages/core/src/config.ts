@@ -124,7 +124,7 @@ export const DEFAULT_BASH_SETTINGS: BashSettings = { defaultTimeoutMs: 120_000, 
  * 内置默认模式的名字，设置从不存储它。
  *
  * 默认模式*就是*全局默认——默认工具集与默认审批映射，实时读取——所以它没有自己的一行需要与它们
- * 保持同步（ADR-0005）。这个名字是保留名：一个存储模式若占用它，会遮住输入框必须永远能找到的那
+ * 保持同步（ADR-0004）。这个名字是保留名：一个存储模式若占用它，会遮住输入框必须永远能找到的那
  * 个答案。
  */
 export const DEFAULT_MODE_NAME = "默认";
@@ -146,7 +146,7 @@ export interface ModeSettings {
 
 export interface Settings {
 	/**
-	 * 新会话打开在哪一行：`name`，或 transcript 记录的 `<name>/<model-id>` ref。
+	 * 新会话打开在哪一行：`name`，或会话记录记录的 `<name>/<model-id>` ref。
 	 *
 	 * 两种写法都接受，因为设置面板写第一种，修复脚本写第二种。undefined 不是「没有模型」：装配会
 	 * 回落到 `DEFAULT_MODEL_NAME`（`packages/core/src/models.ts`），只有连那一行都没有的机器才打开
@@ -171,7 +171,7 @@ export interface Settings {
 	tools?: string[];
 	/**
 	 * 用户的模式，整体存放，按选择器列出的顺序。缺失表示没有：内置默认模式从不存储，所以旧文件
-	 * 已经是一份合法的 modes 文件（ADR-0005）。
+	 * 已经是一份合法的 modes 文件（ADR-0004）。
 	 */
 	modes?: ModeSettings[];
 	/** 主题与字号，即窗口绘制自己的方式。 */
@@ -181,7 +181,7 @@ export interface Settings {
 	/**
 	 * 侧边栏不列出的目录，按绝对路径。
 	 *
-	 * 这份列表只是*视图*决定，别无其他：目录标题上的「删除」把分组从列表移走，让每份 transcript 原地
+	 * 这份列表只是*视图*决定，别无其他：目录标题上的「删除」把分组从列表移走，让每份会话记录原地
 	 * 不动，所以一个目录可以被搁置而不碰磁盘上的任何东西。这正是它作为存储设置而非删除操作存在的
 	 * 全部理由——会话仍可按 id 打开，取消隐藏就是清空这份列表。
 	 *
@@ -192,7 +192,7 @@ export interface Settings {
 	 * 侧边栏为目录显示的名字，按绝对路径。
 	 *
 	 * 与 `hiddenDirectories` 完全同类、且出于同样理由的视图决定：磁盘上的文件夹保留文件系统给它起的
-	 * 名字，每份 transcript 保留其头部记录的 `workDirAbsPath`。所以在这里重命名目录不会让任何会话
+	 * 名字，每份会话记录保留其头部记录的 `workDirAbsPath`。所以在这里重命名目录不会让任何会话
 	 * 找不到，也不会碰 agent 自己设置之外的任何东西。
 	 *
 	 * 空字符串是收回一个名字的方式——分组落回文件夹自己的名字——因为按键合并的记录无法用「省略」

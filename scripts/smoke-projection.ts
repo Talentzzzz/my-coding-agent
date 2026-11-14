@@ -47,12 +47,12 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
 /**
  * session 被持有的 bag，从 orchestrator 自己的私有表里探出来。
  *
- * 门面按 id 以纯数据作答——state 对象不是它的可给之物——所以本 smoke 对 transcript 进行的
+ * 门面按 id 以纯数据作答——state 对象不是它的可给之物——所以本 smoke 对会话进行的
  * 唯一一处测试专用手术（leaf 重置）要与其他 smoke 的身份断言一样，经由 orchestrator 持有的
  * 那张表到达 bag。
  */
 function heldBagOf(agent: Agent, id: string): Session {
-	// transcript 是文件，不是字段（ADR-0019）：下面的手术需要一个 bag，于是它打开自己的 replay，
+	// 会话是文件，不是字段（ADR-0013）：下面的手术需要一个 bag，于是它打开自己的 replay，
 	// 它做的写入也像任何其他写入一样是一次对 log 的写。
 	return agent.sessionManager.open(id);
 }
@@ -94,7 +94,7 @@ try {
 	const stopListening = projection.onRow((row) => seen.push(row));
 
 	// store 与本机其他每次运行共享，所以本 smoke 从不假设自己是唯一存在的 session——它只问
-	// 自己创建的那些。在 seed→fill 生命周期下，无人开口的 session 没有文件（ADR-0006 §3），
+	// 自己创建的那些。在 seed→fill 生命周期下，无人开口的 session 没有文件（ADR-0005 §3），
 	// 没有文件就没有行：侧栏列出的是对话，不是意图。
 	/** 断言一个 session 没有行，detail 是找到的那一行（总是 undefined）。 */
 	const checkAbsent = async (label: string, id: string): Promise<void> => {
@@ -186,7 +186,7 @@ try {
 		(moved?.modified ?? 0) > (landed?.modified ?? 0),
 		`${moved?.modified} vs ${landed?.modified}`,
 	);
-	// 标题指名分支的第一条用户消息（ADR-0002），所以第二个回合移动行的活跃度而不重命名对话。
+	// 标题指名分支的第一条用户消息（ADR-0008），所以第二个回合移动行的活跃度而不重命名对话。
 	check("a later message does not rename the row", moved?.title === "now the row has something to say", moved?.title);
 
 	const settled = seen.length;

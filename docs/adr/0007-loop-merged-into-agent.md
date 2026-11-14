@@ -1,17 +1,15 @@
-# 0008：删掉 `Loop` 对象与 `packages/loop`——引擎并入 `agent.ts`，放弃与上游的逐文件对照
+# 0007：删掉 `Loop` 对象与 `packages/loop`——引擎并入 `agent.ts`，放弃与上游的逐文件对照
 
-日期：2026-11-02 · 状态：已接受（loop-into-agent 01/02 号票拍板，03 号票落地）；决定 1、2 已由
-[0012](0012-loop-manager-object.md) 取代（2026-11-04）
+日期：2026-11-02 · 状态：已接受（loop-into-agent 01/02 号票拍板，03 号票落地）；决定 1、2 在
+2026-11-04 至 2026-11-13 间经历过一轮「引擎搬进独立对象又搬回编排」的往返，终由 [0016](0016-loop-is-orchestration.md)
+终止并恢复原状（见末条取代者）
 取代：[0001](0001-transport-websocket-mux.md)（部分——仅其「`packages/llm` 与 `packages/loop`
 一行都不改」中 loop 的那一半，逐条对照见*被取代的是什么*）
-取代者：[0015](0015-llm-folded-into-core.md)（部分，2026-11-06——决定 6 里 `AgentContext` 的命名与
+取代者：[0010](0010-llm-folded-into-core.md)（部分，2026-11-06——决定 6 里 `AgentContext` 的命名与
 「类型并进 `core/src/types.ts`」中的工具/上下文那一半，以及*被取代的是什么*一节里「`packages/llm`
 仍在 `packages/llm` 里、仍然 vendored、也没有被并入任何人」这句现状陈述；llm 已被并入 `core`）
-取代者：[0022](0022-loop-manager-whitelist-callbacks.md)（部分，2026-11-11——0012 取代、0014 复活过的
-决定 1/2 再次被取代：引擎重回 `loop-manager.ts`、不再是 `Agent` 的方法；本文「没有信息的对象」那句
-判词继续作 0022 的试金石，决定 3–9 与其余结论不动）
-取代者：[0024](0024-loop-is-orchestration.md)（部分，2026-11-13——决定 1/2 于 2026-11-13 由 0024 再次
-复活：引擎再次是 `Agent` 的方法；0012→0014→0022→0023 那条「引擎住哪」的往返链由 0024 终止）
+取代者：[0016](0016-loop-is-orchestration.md)（部分，2026-11-13——上句往返的终点：决定 1/2 恢复原状，
+引擎再次是 `Agent` 的方法；决定 3–9 与其余结论不动）
 
 设计过程见 `.scratch/loop-into-agent/`（形状在 2026-11-02 的设计对话与 01/02 号票敲定，
 本 ADR 只记合拢后的决定）。
@@ -29,8 +27,8 @@
 
 到合并之前，这条收益已经被消耗掉了大半：
 
-- **副本早就不是原样。** [ADR-0006](0006-stateless-session-architecture.md) 的决定 3 让循环
-  只认识传入的 context、不再持有 transcript 与状态袋；票 13 把 `SessionRuntime` 落进会话，
+- **副本早就不是原样。** [ADR-0005](0005-stateless-session-architecture.md) 的决定 3 让循环
+  只认识传入的 context、不再持有会话与状态袋；票 13 把 `SessionRuntime` 落进会话，
   票 15 把恢复机器（悬空扫描、答案配对、孤儿合成）搬进循环。合并前 `loop.ts` 相对初版
   +242/−22 行、共 1173 行。对着上游 diff 得到的是「上游改动」与「我们改动」的叠加，读一次
   要先把两层拆开。
@@ -79,7 +77,7 @@
    仍挂在上面，只是引擎直接对模型 `stream`，不再有人递一个 `streamFn` 进来。唯一跨两边的
    是 `QueueMode`：定义只留一份（在 `types.ts`），`protocol.ts` 改为 re-export。
 7. **去掉 `@ts-nocheck`，整份代码过根 tsconfig**（含 `noUncheckedIndexedAccess`）。
-8. **有两样东西没有搬进成员，按 [ADR-0006](0006-stateless-session-architecture.md) 的
+8. **有两样东西没有搬进成员，按 [ADR-0005](0005-stateless-session-architecture.md) 的
    「运行期瞬态全部降为局部变量」裁定**（01 号票把它们列进了成员清单，落地时改掉，记在这里
    以免后人以为是漏做）：`runModel` 是 `runEngine` 里一个 `let model`——它是 per-run 的量，
    而 `Agent` 是跨会话单例，一个字段会把 A 会话当前请求的模型交给 B 会话并发的 run；
@@ -143,13 +141,13 @@
 - **ADR-0001 的其余全部**：REST 命令面 + 常驻 WebSocket mux、有界写侧、`claim` 与订阅分离，
   以及不引入 plugin / MCP 机制。（原列于此的「`packages/llm` 一行都不改」已于 2026-11-03
   失效，见上文*被取代的是什么*的后续标注。）
-- **[ADR-0003](0003-queued-writes-at-drain.md) 的取走点落盘**：排队消息仍在取走点写进账本——
+- **[ADR-0002](0002-queued-writes-at-drain.md) 的取走点落盘**：排队消息仍在取走点写进账本——
   搬的只是取走点的位置（从 `getSteeringMessages` / `getFollowUpMessages` 钩子变成
   `drainTranscribed` 直读会话队列），语义不变。
-- **[ADR-0006](0006-stateless-session-architecture.md) §5 的结束重启审批**：恢复机器本身一字
+- **[ADR-0005](0005-stateless-session-architecture.md) §5 的结束重启审批**：恢复机器本身一字
   不改——grant 重跑、deny 合成、孤儿收尾、无答案的悬空调用按错误收场。变的是它唯一的测试
   驱动方式：smoke 不再 `new Loop` 然后读事件，直接拿返回的批次与发出去的帧断言。
-- **[ADR-0007](0007-services-drop-instance-state.md) 的五单例无属性化**：`runEngine` 从
-  `entry` 与 `state` 现取，没有往 `Agent` 上新增会话级实例字段；它的瞬态仍是 run 的局部变量。
+- **[ADR-0006](0006-services-drop-instance-state.md) 的五单例无属性化**：`runEngine` 从
+  `entry` 与 `agentState` 现取，没有往 `Agent` 上新增会话级实例字段；它的瞬态仍是 run 的局部变量。
 - **retry 装在模型的 transport 上**（不在引擎里）；**compaction 的「文件永远保留全文、每步裁剪
   是一条 entry」**；**subagent 是一对工具、无注册表无嵌套**；**客户端对供应商 SDK 一无所知**。

@@ -86,8 +86,8 @@ export function createSessionAgent(options: CreateSessionAgentOptions = {}): Age
 /**
  * 每个编排层分发所经的默认处理器。
  *
- * `before_tool` 就是审批闸门。transcript 还在等什么、以及回答它的 UI，这些簿记归会话所有；这个
- * hook 只把一个未获回答的审批翻译成结束运行的 suspend（ADR-0006 §5）：调用在账本里悬空、没有
+ * `before_tool` 就是审批闸门。会话记录还在等什么、以及回答它的 UI，这些簿记归会话所有；这个
+ * hook 只把一个未获回答的审批翻译成结束运行的 suspend（ADR-0005 §5）：调用在账本里悬空、没有
  * 结果——横幅正是从它派生的——答案经 REST 抵达，启动把它配对并续跑的恢复运行。
  *
  * 没有默认的 `after_tool`：那里的改写是定稿——账本保存的正是 hooks 返回的内容——所以这条接缝
@@ -106,10 +106,10 @@ function installDefaultHooks(hooks: Hooks, session: Agent): void {
  * 打开一个会话，交回一个属于它自己的编排层。
  *
  * 调用方不与其他任何东西共享编排层时想要的组合方式：驱动脚本化传输层的 smoke，或手工打开一个
- * 目录的测试。跑很多会话的进程改为只构建一次编排层，并把每份 transcript 打开到它上面——见 hub
+ * 目录的测试。跑很多会话的进程改为只构建一次编排层，并把每份会话记录打开到它上面——见 hub
  * ——保持诚实正是这个东西存在的理由：打开会话与恢复会话是同一个动作，无论走两条路中的哪一条。
  *
- * options 有意是一组测试接缝：settings 与 tools 接缝直通工厂，transcript 与模型 options 交给
+ * options 有意是一组测试接缝：settings 与 tools 接缝直通工厂，会话记录与模型 options 交给
  * `assembleAgentStateBySession`，这里不构建任何编排层不留住的 Manager。
  */
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {

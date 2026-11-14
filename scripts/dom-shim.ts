@@ -7,7 +7,7 @@
  * （见 `.scratch/window-repair/issues/04-jank-harness.md`）。补齐一份、两边共用，是让这件事不再发生的
  * 唯一办法。
  *
- * 覆盖面按**今天的产品代码**算：`transcript.ts` / `sidebar.ts` / `statusbar.ts` / `settings.ts` /
+ * 覆盖面按**今天的产品代码**算：`session-view.ts` / `sidebar.ts` / `statusbar.ts` / `settings.ts` /
  * `composer.ts` / `menu.ts` / `markdown.ts` / `diff.ts` / `dom.ts` /
  * `branch-view.ts` / `main.ts` 里出现过的每一个 DOM 成员都实现了。缺哪一个，下面 `installDom()` 的
  * **严格模式**会当场指名道姓地抛出来，而不是静默地 `undefined` 然后几十行之后才崩。
@@ -87,7 +87,7 @@ class FakeNode {
 	/** 每个节点一个独有的 id，与真 DOM 一样。 */
 	readonly id: string;
 	private static counter = 0;
-	/** 真 DOM 的 `open`（`<details>`）；`transcript.ts` 用它决定正文要不要解析。 */
+	/** 真 DOM 的 `open`（`<details>`）；`session-view.ts` 用它决定正文要不要解析。 */
 	open = false;
 	checked = false;
 	disabled = false;
@@ -450,7 +450,7 @@ class FakeNode {
 	dispatch(type: string, event?: unknown): void {
 		for (const handler of [...(this.listeners.get(type) ?? [])]) handler(event);
 	}
-	/** 这个类型上登记了几个处理器——`transcript.trackScroll()` 之类只登记不触发的调用靠它被发现。 */
+	/** 这个类型上登记了几个处理器——`sessionView.trackScroll()` 之类只登记不触发的调用靠它被发现。 */
 	listenerCount(type?: string): number {
 		if (type === undefined) return this._listeners;
 		return this.listeners.get(type)?.length ?? 0;
@@ -505,7 +505,7 @@ function matches(node: FakeNode, selector: string): boolean {
 	const attributes = [...trimmed.matchAll(/\[([a-zA-Z-]+)(?:=["']([^"']*)["'])?\]/g)];
 	const classes = [...trimmed.matchAll(/\.([a-zA-Z0-9_-]+)/g)].map((match) => match[1]!);
 	const tag = /^[a-zA-Z][a-zA-Z0-9-]*/.exec(trimmed)?.[0];
-	// 后代/子选择器不是这套 shim 的活：`transcript` 的 `.turn[data-role="user"]` 是唯一一次
+	// 后代/子选择器不是这套 shim 的活：`session-view` 的 `.turn[data-role="user"]` 是唯一一次
 	// 跨层查询，而它上面每层都被 `closest` 往上走了。真遇到不认识的选择器就当场说。
 	if (/[\s>+~]/.test(trimmed.replace(/\[[^\]]*\]/g, ""))) {
 		throw new Error(`dom-shim：querySelector 不支持组合选择器 ${selector}`);
@@ -543,7 +543,7 @@ function guard(node: FakeNode): FakeNode {
  * `document` 的形状。
  *
  * 它得有个名字：`installDom()` 返回的 `document` 是 `unknown` 时，每个量具的第一行都要自己写一次
- * 断言转换——`smoke-transcript.ts` 就是这么在 `npm run check` 之外活了很久的。这里的每个成员都返回
+ * 断言转换——`smoke-session-view.ts` 就是这么在 `npm run check` 之外活了很久的。这里的每个成员都返回
  * `FakeNode`，量具因此可以直接 `.children` / `.textContent`，不必再穿一层类型。
  */
 export interface FakeDocument {
@@ -657,7 +657,7 @@ export class FakeHTMLElement extends FakeElement {}
 /**
  * 装上一整套最小 DOM。
  *
- * `Element` / `HTMLElement` 是**空类**：`transcript.ts:76` 与 `branch-view.ts:146` 的
+ * `Element` / `HTMLElement` 是**空类**：`session-view.ts` 与 `branch-view.ts` 里的
  * `event.target instanceof Element` 在量具里应当为假——量具直接调用控制器方法，不走事件的
  * `target`——但真代码里那些判断必须有个类可比，缺了它会 `ReferenceError`。量具要造一个**真的会
  * 被当成卡片**的事件目标时，用下面导出的这两个类包一层。
@@ -727,7 +727,7 @@ export function installDom(options: InstallOptions = {}): DomShim {
 	/**
 	 * 排队的动画帧回调，按挂号顺序。
 	 *
-	 * 生产代码里唯一用它的是 `drain.ts`——一帧一小批地把整棵 transcript 画出来。shim 不自己跑它，
+	 * 生产代码里唯一用它的是 `drain.ts`——一帧一小批地把整棵会话画出来。shim 不自己跑它，
 	 * 因为"一帧"在量具里是调用方说了算；缺了这一层，`requestAnimationFrame` 收下回调就扔，量具会
 	 * 静默地只画出第一批，而那正是量具曾经废掉一次的形状。
 	 */
@@ -759,7 +759,7 @@ export function installDom(options: InstallOptions = {}): DomShim {
 		innerHeight: options.viewport?.height ?? 800,
 		setTimeout: () => 0,
 		clearTimeout: () => {},
-		// The transcript's ticking line starts an interval while a run streams and clears it when the
+		// The session view's ticking line starts an interval while a run streams and clears it when the
 		// run ends. A harness never wants a real clock — the frame queue is what it drives — so the
 		// handle is inert and clearing it is a no-op, the same shape as the two lines above.
 		setInterval: () => 0,

@@ -54,7 +54,7 @@ import { transformMessages } from "./transform-messages.ts";
  * 本次请求的 prompt-cache 寿命。
  *
  * pi-ai 在这里读一个环境变量做向后兼容。本构建不这样做：cache retention 只由调用方决定
- * （transcript 把它钉死），所以请求之外的任何东西都不能决定它。
+ * （会话记录把它钉死），所以请求之外的任何东西都不能决定它。
  */
 function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
 	return cacheRetention ?? "short";
@@ -786,7 +786,7 @@ function buildParams(
 
 	const toolCacheControl = compat.supportsCacheControlOnTools ? cacheControl : undefined;
 	// 每次请求都携带完整的当前工具列表，所以 session 中途开启的工具在下一次请求就到达模型，
-	// 不需要在 transcript 里记录任何东西。
+	// 不需要在会话记录里记录任何东西。
 	const tools = context.tools;
 	if (tools.length > 0) {
 		params.tools = convertTools(
@@ -804,7 +804,7 @@ function buildParams(
 	if (level === "off") {
 		params.thinking = { type: "disabled" };
 	} else {
-		// 默认 "summarized"，让自身默认 "omitted" 的模型也返回 transcript 能展示的思考。
+		// 默认 "summarized"，让自身默认 "omitted" 的模型也返回会话记录能展示的思考。
 		const display: AnthropicThinkingDisplay = options?.thinkingDisplay ?? "summarized";
 		params.thinking = { type: "adaptive", display };
 		params.output_config = { effort: level };
@@ -842,7 +842,7 @@ function convertToolResult(msg: ToolResultMessage): ContentBlockParam {
 	};
 }
 
-/** 把一份 transcript 转换为 Anthropic 的 wire 消息。 */
+/** 把一份会话记录转换为 Anthropic 的 wire 消息。 */
 function convertMessages(
 	transformedMessages: Message[],
 	cacheControl?: CacheControlEphemeral,
@@ -972,10 +972,10 @@ function convertMessages(
 		}
 	}
 
-	// Anthropic 要求 user 和 assistant 消息严格交替，但 transcript 可以装着相邻的 user turn：在
+	// Anthropic 要求 user 和 assistant 消息严格交替，但会话记录可以装着相邻的 user turn：在
 	// 一个取走点排空的多条 steering 消息，或一个 tool-result turn 后面跟着 steering 文本。把每一段
 	// 连续的 user 消息折成一条——content block 数组直接拼接，这正是带多个 block 的一个 user turn
-	// 的样子。transcript 存储保持消息各自独立；这个折叠只存在于 wire 格式上。
+	// 的样子。会话记录存储保持消息各自独立；这个折叠只存在于 wire 格式上。
 	const mergedParams = mergeAdjacentUserMessages(params);
 
 	// 给最后一条 user 消息加 cache_control，缓存对话历史。

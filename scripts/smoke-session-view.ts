@@ -1,20 +1,20 @@
-// Transcript smoke：对着共享 DOM shim 驱动生产用的 `TranscriptView`，检查 transcript 的两条
+// Session view smoke：对着共享 DOM shim 驱动生产用的 `SessionView`，检查会话视图的两条
 // 绘制路径赖以存活的性质——把快照摊到多帧上画出与整块画出相同的东西、画的过程中每帧不重建任何
 // 东西、绘制中途到来的帧以新为准而不是被旧的覆盖、流式 delta 只碰尾部（它自己的条目，而不碰
 // 它上面的轮次记账）、以及真相取决于轮或 run 的行——脚注——在移动它们的帧上被重读，即使没有任何
 // 条目变化。
 //
-// 这个文件存在的原因：在它出现之前，**`scripts/` 里没有任何东西驱动过 `TranscriptView`**，deferred
+// 这个文件存在的原因：在它出现之前，**`scripts/` 里没有任何东西驱动过 `SessionView`**，deferred
 // 路径上线时没有回归覆盖——而它所针对的 bug（流式帧对着一份半画好的集合做剪枝，于是每个回合
 // 每帧都被重建：2000 帧、4 GB 堆）从构造上就对 `npm run check` 不可见。下游的一切都把
-// `transcript.render` 读作"立即路径"；这里是唯一把两条路径并排运行的地方。
+// `session-view.render` 读作"立即路径"；这里是唯一把两条路径并排运行的地方。
 //
 // 流式检查由卡顿 ticket（03）加入：旧路径每个 token 走遍每一条目、为每一个写一条脚注和一条
 // meta 行，一项 O(对话长度) 的税，本 smoke 现在通过数 shim 看到的属性写入与节点移动给它定价。
 //
 // 不触网，无需服务器和 provider key。
-// 运行：node scripts/smoke-transcript.ts
-import { TranscriptView } from "../packages/web/src/render/transcript.ts";
+// 运行：node scripts/smoke-session-view.ts
+import { SessionView } from "../packages/web/src/render/session-view.ts";
 import { renderMarkdown } from "../packages/web/src/render/markdown.ts";
 import type { Item } from "../packages/web/src/state.ts";
 import { installDom, resetWork, work, type FakeNode } from "./dom-shim.ts";
@@ -34,15 +34,15 @@ function check(label: string, condition: boolean, detail = ""): void {
  *
  * `shim.frames()` 是让本文件成为可能的全部原因：生产代码用 `requestAnimationFrame` 排程，
  * shim 把那些回调排队而不运行，`frames()` 跑掉排好的那一批。没有它，deferred 绘制永远不会
-// 前进，下面的断言就会对着一份从未画出的 transcript 通过。
+// 前进，下面的断言就会对着一份从未画出的会话视图通过。
  */
 const shim = installDom();
 
-/** 形状与 `main.ts` 建的那个一样的 transcript 宿主，外加它的视图。 */
-function makeTranscript(onBranch: (entryId: string) => void = () => {}): { host: FakeNode; view: TranscriptView } {
+/** 形状与 `main.ts` 建的那个一样的会话视图宿主，外加它的视图。 */
+function makeSessionView(onBranch: (entryId: string) => void = () => {}): { host: FakeNode; view: SessionView } {
 	const host = shim.document.createElement("main") as unknown as FakeNode;
-	host.className = "transcript";
-	const view = new TranscriptView(host as unknown as HTMLElement, { onUserContext: () => {}, onBranch });
+	host.className = "session-view";
+	const view = new SessionView(host as unknown as HTMLElement, { onUserContext: () => {}, onBranch });
 	view.trackScroll();
 	return { host, view };
 }
@@ -73,7 +73,7 @@ function footOf(turn: FakeNode): FakeNode | undefined {
 	return nodesOfClass(turn, "turn-foot")[0];
 }
 
-/** transcript 的文本，按截图会读的方式：屏幕上的一切，深度优先。 */
+/** 会话视图的文本，按截图会读的方式：屏幕上的一切，深度优先。 */
 function textOf(host: FakeNode): string {
 	let text = "";
 	const walk = (node: FakeNode): void => {
@@ -119,17 +119,17 @@ function conversation(count: number): Item[] {
 
 // ---------------------------------------------------------- 1. 两条路径画出同一个东西
 
-process.stdout.write("\ntranscript：分批画与整块画结果是同一个\n");
+process.stdout.write("\nsession-view：分批画与整块画结果是同一个\n");
 
 {
 	const items = conversation(200);
 
-	const immediate = makeTranscript();
+	const immediate = makeSessionView();
 	resetWork();
 	immediate.view.render(items, false);
 	const immediateNodes = work.nodes;
 
-	const deferred = makeTranscript();
+	const deferred = makeSessionView();
 	resetWork();
 	deferred.view.renderDeferred(items, false);
 
@@ -160,11 +160,11 @@ process.stdout.write("\ntranscript：分批画与整块画结果是同一个\n")
 
 // -------------------------------------------------- 2. 绘制不随帧让树增长
 
-process.stdout.write("\ntranscript：连跑多帧，宿主的孩子数不增长\n");
+process.stdout.write("\nsession-view：连跑多帧，宿主的孩子数不增长\n");
 
 {
 	const items = conversation(200);
-	const { host, view } = makeTranscript();
+	const { host, view } = makeSessionView();
 	view.renderDeferred(items, false);
 
 	// OOM 就出在这里：一个流式帧对着 deferred 路径的半画好集合剪枝视图的表，于是每个轮次都像
@@ -183,7 +183,7 @@ process.stdout.write("\ntranscript：连跑多帧，宿主的孩子数不增长\
 
 	// 以及会话*在移动*时的同一件事：delta 在帧与帧之间到达，这正是崩溃的形状——一个流式帧落在
 	// 半画好的 deferred 帧上，取消绘制再重新进入 40 次。树不得随这些帧的数目增长。
-	const streaming = makeTranscript();
+	const streaming = makeSessionView();
 	const growth: number[] = [];
 	for (let frame = 0; frame < 40; frame += 1) {
 		streaming.view.renderDeferred(items, false);
@@ -198,11 +198,11 @@ process.stdout.write("\ntranscript：连跑多帧，宿主的孩子数不增长\
 
 // -------------------------------------- 3. 绘制中途到来的帧以新为准
 
-process.stdout.write("\ntranscript：画到一半来了新的帧，以新的为准\n");
+process.stdout.write("\nsession-view：画到一半来了新的帧，以新的为准\n");
 
 {
 	const items = conversation(200);
-	const { host, view } = makeTranscript();
+	const { host, view } = makeSessionView();
 	view.renderDeferred(items, false);
 	// 有意先不跑帧。一帧能画几片是预算的事，不是本文件的：在这些尺寸下，一台快的机器能在第一帧
 	// 里画完整份会话，所以"画了一帧后还剩一半"这类断言会在这里通过、在慢机器上失败。不依赖机器
@@ -223,11 +223,11 @@ process.stdout.write("\ntranscript：画到一半来了新的帧，以新的为�
 
 // ----------------------------------------------- 4. 流式一帧只碰尾部
 
-process.stdout.write("\ntranscript：流式一帧只碰尾部\n");
+process.stdout.write("\nsession-view：流式一帧只碰尾部\n");
 
 {
 	const items = conversation(200);
-	const { host, view } = makeTranscript();
+	const { host, view } = makeSessionView();
 	view.render(items, true);
 
 	const runtime = nodesOfClass(host, "runtime");
@@ -273,7 +273,7 @@ process.stdout.write("\ntranscript：流式一帧只碰尾部\n");
 
 // ------------------------------------------- 5. 脚注跟着轮与运行走，不跟着 token 走
 
-process.stdout.write("\ntranscript：脚注跟着轮与运行走，不跟着 token 走\n");
+process.stdout.write("\nsession-view：脚注跟着轮与运行走，不跟着 token 走\n");
 
 {
 	/** One message item with the two fields a footer reads. */
@@ -295,7 +295,7 @@ process.stdout.write("\ntranscript：脚注跟着轮与运行走，不跟着 tok
 	const second = said("a2", "assistant", at + 5_000, "第二段回答", true);
 	const settledSecond = { ...second, streaming: false };
 
-	const { host, view } = makeTranscript();
+	const { host, view } = makeSessionView();
 	view.render([question, first], false);
 	const firstTurn = turnsOf(host)[1]!;
 	check("一轮的答案带着脚注", footOf(firstTurn)?.hidden === false);
@@ -327,7 +327,7 @@ process.stdout.write("\ntranscript：脚注跟着轮与运行走，不跟着 tok
 	// behind, not a fresh walk. A deferred draw that forgot to publish it left the answer without a
 	// round, so the footer never appeared and the ticking line had no start seat.
 	{
-		const { host: resumedHost, view: resumed } = makeTranscript();
+		const { host: resumedHost, view: resumed } = makeSessionView();
 		resumed.renderDeferred([question, second], true);
 		const grown = { ...second, text: `${second.text}，还在写` };
 		resumed.render([question, grown], true);
@@ -340,7 +340,7 @@ process.stdout.write("\ntranscript：脚注跟着轮与运行走，不跟着 tok
 
 // ---------------------------------------------- 6. the fork sits beside copy, everywhere but the leaf
 
-process.stdout.write("\ntranscript：分支按钮在最后一条回答之外都出现\n");
+process.stdout.write("\nsession-view：分支按钮在最后一条回答之外都出现\n");
 
 {
 	/** One message item with the fields a footer and the fork read. */
@@ -375,7 +375,7 @@ process.stdout.write("\ntranscript：分支按钮在最后一条回答之外都�
 	const secondLive = { ...second, streaming: true };
 
 	let picked = "";
-	const { host, view } = makeTranscript((entryId) => {
+	const { host, view } = makeSessionView((entryId) => {
 		picked = entryId;
 	});
 
@@ -407,7 +407,7 @@ process.stdout.write("\ntranscript：分支按钮在最后一条回答之外都�
 
 // ------------------------------------------- 7. the streaming tail is patched, not rebuilt
 
-process.stdout.write("\ntranscript：流式尾块只补不删\n");
+process.stdout.write("\nsession-view：流式尾块只补不删\n");
 
 {
 	const hostOf = (): { root: FakeNode; body: HTMLElement } => {
@@ -514,10 +514,10 @@ process.stdout.write("\ntranscript：流式尾块只补不删\n");
 
 // ------------------------------------ 8. scroll readings are deferred, pinned is a class
 
-process.stdout.write("\ntranscript：滚动读数分帧、贴底是一个类\n");
+process.stdout.write("\nsession-view：滚动读数分帧、贴底是一个类\n");
 
 {
-	const { host, view } = makeTranscript();
+	const { host, view } = makeSessionView();
 	host.scrollHeight = 1_000;
 	host.clientHeight = 100;
 	host.scrollTop = 900;
@@ -550,5 +550,5 @@ process.stdout.write("\ntranscript：滚动读数分帧、贴底是一个类\n")
 	check("一串滚动事件按最后一个位置读", view.following(), host.className);
 }
 
-process.stdout.write(failures === 0 ? "\ntranscript ok\n" : `\n${failures} 项失败\n`);
+process.stdout.write(failures === 0 ? "\nsession-view ok\n" : `\n${failures} 项失败\n`);
 process.exitCode = failures === 0 ? 0 : 1;

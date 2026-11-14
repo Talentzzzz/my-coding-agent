@@ -25,7 +25,7 @@ export interface ToolCard {
 	isError: boolean;
 	running: boolean;
 	/**
-	 * 该调用挂在台账里等待审批答复（ADR-0006 §5）。
+	 * 该调用挂在台账里等待审批答复（ADR-0005 §5）。
 	 *
 	 * 在 end-restart 语义下，被门控的调用等待期间既不运行也不产出结果：运行在门处结束，答案经
 	 * REST 到达，恢复的运行来关闭它 —— 允许则重跑它（其 `tool_execution_start` 会清掉这个状态），
@@ -422,11 +422,11 @@ export function applyAppearance(settings: SettingsSnapshot): void {
  * item 以消息时间戳为键，agent 为每条消息赋一次并在每个 `message_update` 里重复，所以流式更新
  * 落在它们所属的 item 上。
  */
-export function reduce(state: ViewState, message: ServerMessage): ViewState {
+export function reduce(viewState: ViewState, message: ServerMessage): ViewState {
 	switch (message.type) {
 		case "baseline":
 			return {
-				...state,
+				...viewState,
 				snapshot: message.session,
 				items: itemsFromSnapshot(message.session),
 				// 分支形状随同一个帧走：快照是唯一能改变点的东西，所以折叠在这里跑，也在每条消息结束
@@ -445,25 +445,25 @@ export function reduce(state: ViewState, message: ServerMessage): ViewState {
 				// `error` 跨基线存活。它是一次失败操作的记录，唯一应该抹掉它的是下一次操作成功 ——
 				// 一次成功的重连不是用户的操作之一。在这里清除它，意味着一个在通道断开期间失败的
 				// 会话，在通道恢复的那一刻悄悄原谅了自己，这恰恰是这个通知要让它可见的失败。
-				error: state.error,
+				error: viewState.error,
 			};
 		case "entry": {
-			const drained = drainEntries(state.items, [{ entryId: message.entryId, messageTimestamp: message.messageTimestamp }]);
+			const drained = drainEntries(viewState.items, [{ entryId: message.entryId, messageTimestamp: message.messageTimestamp }]);
 			return {
-				...state,
+				...viewState,
 				items: drained.items,
-				pendingEntries: [...state.pendingEntries, ...drained.pending].slice(-PENDING_ENTRIES),
+				pendingEntries: [...viewState.pendingEntries, ...drained.pending].slice(-PENDING_ENTRIES),
 			};
 		}
 		case "status":
 			return {
-				...state,
+				...viewState,
 				usage: message.usage,
 				streaming: message.submitting,
 				queued: message.queued,
-				snapshot: state.snapshot
+				snapshot: viewState.snapshot
 					? {
-							...state.snapshot,
+							...viewState.snapshot,
 							submitting: message.submitting,
 							queued: message.queued,
 							isRetrying: message.isRetrying,
@@ -472,18 +472,18 @@ export function reduce(state: ViewState, message: ServerMessage): ViewState {
 					: undefined,
 			};
 		case "error":
-			return { ...state, error: message.message };
+			return { ...viewState, error: message.message };
 		case "approval_request": {
 			// 等待中的调用在这里拿到自己的卡片，而不是来自 `tool_execution_start`：循环从不宣告一个
-			// 挂起的调用，所以这个帧是窗口对它的首次知晓 —— 在 end-restart 语义下（ADR-0006 §5），
-			// 这也是 transcript 唯一的线索，说明运行结束*在*这个调用处而不是它周围。
+			// 挂起的调用，所以这个帧是窗口对它的首次知晓 —— 在 end-restart 语义下（ADR-0005 §5），
+			// 这也是会话记录唯一的线索，说明运行结束*在*这个调用处而不是它周围。
 			return {
-				...state,
+				...viewState,
 				approvals: [
-					...state.approvals.filter((approval) => approval.toolCallId !== message.request.toolCallId),
+					...viewState.approvals.filter((approval) => approval.toolCallId !== message.request.toolCallId),
 					message.request,
 				],
-				items: upsertTool(state.items, message.request.toolCallId, {
+				items: upsertTool(viewState.items, message.request.toolCallId, {
 					toolCallId: message.request.toolCallId,
 					toolName: message.request.toolName,
 					args: message.request.args,
@@ -501,14 +501,14 @@ export function reduce(state: ViewState, message: ServerMessage): ViewState {
 			// 会让卡片无所等待地等下去，所以 settled 帧本身就是让它停止等待的东西，以答案写入的
 			// 错误名义。合成结束事件到达时会整体覆盖它。
 			const items = message.approved
-				? state.items
-				: patchCard(state.items, message.toolCallId, { running: false, waiting: false, isError: true });
-			return { ...state, approvals: state.approvals.filter((approval) => approval.toolCallId !== message.toolCallId), items };
+				? viewState.items
+				: patchCard(viewState.items, message.toolCallId, { running: false, waiting: false, isError: true });
+			return { ...viewState, approvals: viewState.approvals.filter((approval) => approval.toolCallId !== message.toolCallId), items };
 		}
 		case "event":
-			return applySessionEvent(state, message.event);
+			return applySessionEvent(viewState, message.event);
 		default:
-			return state;
+			return viewState;
 	}
 }
 
@@ -522,7 +522,7 @@ export function reduce(state: ViewState, message: ServerMessage): ViewState {
  *
  * `approvals` 被清空。基线播种它，逐审批的帧维护它，而 `end` 之后这条流不会再有基线来重新播种
  * —— 留下的横幅是一张它的答案永远无法经这条流上报回去的卡片。在 end-restart 语义下
- * （ADR-0006 §5）等待中的答案住在台账而不是这个状态里，所以清空没有丢掉任何真实的东西：每条
+ * （ADR-0005 §5）等待中的答案住在台账而不是这个状态里，所以清空没有丢掉任何真实的东西：每条
  * 终结被观看流的路径都已经送达了它的结算帧（被收割的会话在关闭前拒绝；被删除的会话不可能还
  * 持有审批），而回来的页面会重新订阅并从它的基线读出仍未回答的问题。这是唯一清空列表的地方，
  * 它在这里而不是基线分支，因为基线分支对仍然打开的流已经是正确的答案。
@@ -530,11 +530,11 @@ export function reduce(state: ViewState, message: ServerMessage): ViewState {
  * `streaming` 停止，因为一次运行不可能活得比上报它的流更久。旧代码在自己的流结束 handler 里
  * 设置它，重写时会丢掉；把它折叠在这里，状态就有一个知道 end 意味着什么的地方。
  *
- * `items` 保留。transcript 属于会话，不属于承载它的流 —— 清空它会因为连接消失而丢掉窗口画过的
+ * `items` 保留。会话记录属于会话，不属于承载它的流 —— 清空它会因为连接消失而丢掉窗口画过的
  * 一切。
  */
-export function reduceEnd(state: ViewState): ViewState {
-	return { ...state, approvals: [], streaming: false };
+export function reduceEnd(viewState: ViewState): ViewState {
+	return { ...viewState, approvals: [], streaming: false };
 }
 
 /**
@@ -544,35 +544,35 @@ export function reduceEnd(state: ViewState): ViewState {
  * `entry_appended` 被刻意吞掉：transcript 从消息构建，浏览器还无法渲染的存储条目绝不能作为一条
  * 消息出现。
  */
-function applySessionEvent(state: ViewState, event: AgentSessionEvent): ViewState {
+function applySessionEvent(viewState: ViewState, event: AgentSessionEvent): ViewState {
 	switch (event.type) {
 		case "agent_start":
-			return { ...state, streaming: true, error: undefined };
+			return { ...viewState, streaming: true, error: undefined };
 		case "agent_end":
-			return { ...state, streaming: false };
+			return { ...viewState, streaming: false };
 		case "message_start":
 		case "message_end": {
-			const items = upsertMessage(state.items, event.message, event.type === "message_end");
+			const items = upsertMessage(viewState.items, event.message, event.type === "message_end");
 			// 用户条目在循环回显它之前先被指名，所以它的 id 在这里等待 item。
-			const drained = drainEntries(items, state.pendingEntries);
-			const next: ViewState = { ...state, items: drained.items, pendingEntries: drained.pending };
+			const drained = drainEntries(items, viewState.pendingEntries);
+			const next: ViewState = { ...viewState, items: drained.items, pendingEntries: drained.pending };
 			// 分支线随 transcript 生长：一条结束的消息要么开启新的路（用户消息），要么回答最后一条
 			// （assistant 消息），而普通追加不携带基线。点不可能移动过 —— 只有基线或叶子移动会改变
 			// 它们 —— 所以快照自己的点在这里仍是真相。没有这次重建，页面和头部的条目会冻结在上一次
 			// 基线携带的形状上。
-			if (event.type === "message_end" && state.snapshot !== undefined) {
-				next.branchTree = branchTreeFromItems(drained.items, state.snapshot.branchPoints);
+			if (event.type === "message_end" && viewState.snapshot !== undefined) {
+				next.branchTree = branchTreeFromItems(drained.items, viewState.snapshot.branchPoints);
 			}
 			return next;
 		}
 		case "message_update":
 			// 是 delta，不是消息：它指名的 item 按到达的字符增长，这里任何东西都不会重读答案去找
 			// 移动了什么。
-			return { ...state, items: appendDelta(state.items, event.delta) };
+			return { ...viewState, items: appendDelta(viewState.items, event.delta) };
 		case "tool_execution_start":
 			// `waiting: false` 是恢复的运行自己的提示（ADR-0006 §5）：允许重新发出当初被回答的那个
 			// 调用，一直在等待的卡片回到执行中。
-			return { ...state, items: upsertTool(state.items, event.toolCallId, {
+			return { ...viewState, items: upsertTool(viewState.items, event.toolCallId, {
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
 				args: event.args,
@@ -582,7 +582,7 @@ function applySessionEvent(state: ViewState, event: AgentSessionEvent): ViewStat
 				waiting: false,
 			}) };
 		case "tool_execution_update":
-			return { ...state, items: upsertTool(state.items, event.toolCallId, {
+			return { ...viewState, items: upsertTool(viewState.items, event.toolCallId, {
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
 				args: event.args,
@@ -594,7 +594,7 @@ function applySessionEvent(state: ViewState, event: AgentSessionEvent): ViewStat
 		case "tool_execution_end":
 			// 循环的结束事件指名调用及其结果，但没有发起调用时的参数，所以参数留在开始事件放置它们
 			// 的地方：卡片继续指名它运行了什么。
-			return { ...state, items: upsertTool(state.items, event.toolCallId, {
+			return { ...viewState, items: upsertTool(viewState.items, event.toolCallId, {
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
 				output: contentToText(event.result),
@@ -605,33 +605,33 @@ function applySessionEvent(state: ViewState, event: AgentSessionEvent): ViewStat
 			}) };
 		case "turn_end": {
 			const usage = assistantUsage(event.message);
-			return usage ? { ...state, usage: addUsage(state.usage, usage, state.usage.contextWindow) } : state;
+			return usage ? { ...viewState, usage: addUsage(viewState.usage, usage, viewState.usage.contextWindow) } : viewState;
 		}
 		case "queue_update":
 			return {
-				...state,
+				...viewState,
 				queued: event.queued,
-				snapshot: state.snapshot ? { ...state.snapshot, queued: event.queued } : undefined,
+				snapshot: viewState.snapshot ? { ...viewState.snapshot, queued: event.queued } : undefined,
 			};
 		case "compaction":
 			// 摘要是 transcript 对被折叠内容的记录，所以这条注释携带摘要而不是计数：读者能看到
 			// agent 还知道什么。
 			return {
-				...state,
+				...viewState,
 				items: appendNote(
-					state.items,
+					viewState.items,
 					`[上下文已压缩：${event.summarized} 条消息被总结，压缩前约 ${event.tokensBefore} tokens，当前上下文约 ${event.contextTokens} tokens。]\n\n${event.summary}`,
 				),
 			};
 		case "compaction_failed":
-			return { ...state, items: appendNote(state.items, `[压缩失败：${event.message}]`) };
+			return { ...viewState, items: appendNote(viewState.items, `[压缩失败：${event.message}]`) };
 		case "tool_results_cleared":
 			// 被清理的结果在 transcript 里自带通知，所以这一行只需要说清去了多少、价值几何 ——
 			// 消息本身已经显示了变化。
 			return {
-				...state,
+				...viewState,
 				items: appendNote(
-					state.items,
+					viewState.items,
 					`[已清理 ${event.cleared} 条过期工具结果：清理前约 ${event.tokensBefore} tokens，当前上下文约 ${event.contextTokens} tokens。]`,
 				),
 			};
@@ -639,53 +639,53 @@ function applySessionEvent(state: ViewState, event: AgentSessionEvent): ViewStat
 			// 被缩短的调用在 transcript 里自带 "... [truncated] ..." 标记，所以这一行只需要说清去了
 			// 多少、价值几何。
 			return {
-				...state,
+				...viewState,
 				items: appendNote(
-					state.items,
+					viewState.items,
 					`[已缩短 ${event.trimmed} 次工具调用的记录参数：缩短前约 ${event.tokensBefore} tokens，当前上下文约 ${event.contextTokens} tokens。]`,
 				),
 			};
 		case "retry_scheduled":
 			return {
-				...state,
+				...viewState,
 				// 被放弃尝试的部分 item 随它而去：重试会在服务端原位替换那条消息，一个答案两条 item
 				// 是折叠绝不能做的事。
 				items: appendNote(
-					dropStreamingAssistant(state.items),
+					dropStreamingAssistant(viewState.items),
 					retryingLine(event.attempt, event.maxAttempts, event.delayMs, event.errorMessage),
 				),
 				retry: { attempt: event.attempt, maxAttempts: event.maxAttempts, delayMs: event.delayMs },
-				snapshot: state.snapshot
-					? { ...state.snapshot, isRetrying: true, retryAttempt: event.attempt }
+				snapshot: viewState.snapshot
+					? { ...viewState.snapshot, isRetrying: true, retryAttempt: event.attempt }
 					: undefined,
 			};
 		case "retry_start":
 			// 退避已结束，重试的调用正在进行，所以这一行失去倒计时但保留到循环结束。
 			return {
-				...state,
+				...viewState,
 				retry: { attempt: event.attempt, maxAttempts: event.maxAttempts, delayMs: 0 },
 			};
 		case "retry_end":
 			return {
-				...state,
+				...viewState,
 				retry: undefined,
-				snapshot: state.snapshot ? { ...state.snapshot, isRetrying: false, retryAttempt: 0 } : undefined,
+				snapshot: viewState.snapshot ? { ...viewState.snapshot, isRetrying: false, retryAttempt: 0 } : undefined,
 			};
 		case "config_changed": {
 			// 配置变更不会随发新的快照，所以头部的副本就地修补。
 			// `thinkingLevels` 保持会话上次上报的值；下一个 `session` 帧会修正它。
-			if (!state.snapshot) return state;
-			const snapshot = { ...state.snapshot };
+			if (!viewState.snapshot) return viewState;
+			const snapshot = { ...viewState.snapshot };
 			if (event.model !== undefined) snapshot.model = event.model;
 			if (event.thinkingLevel !== undefined) snapshot.thinkingLevel = event.thinkingLevel;
 			if (event.approvals !== undefined) snapshot.approvals = { ...snapshot.approvals, ...event.approvals };
 			if (event.tools !== undefined) snapshot.activeTools = event.tools;
-			return { ...state, snapshot };
+			return { ...viewState, snapshot };
 		}
 		case "entry_appended":
-			return state;
+			return viewState;
 		default:
-			return state;
+			return viewState;
 	}
 }
 
@@ -725,12 +725,12 @@ function itemsFromSnapshot(snapshot: SessionSnapshot): Item[] {
 		items = upsertMessage(items, snapshot.partial, false, undefined, phase);
 	}
 	// 不在提交中的快照不可能有调用正在执行，所以它留下的未答卡片是一份被截断的记录 —— 结果写入
-	// 之前就分出的分支 —— 而不是一条活的。定论它们让重新打开的 transcript 不在历史上空转；提交中
+	// 之前就分出的分支 —— 而不是一条活的。定论它们让重新打开的会话记录不在历史上空转；提交中
 	// 的快照跳过这一步，因为它 live 的 `tool_execution_end` 还会到来并自行修补卡片。
 	//
-	// 快照指名为等待审批的调用（ADR-0006 §5）是例外：end-restart 语义下悬空的调用不是被截断的
+	// 快照指名为等待审批的调用（ADR-0005 §5）是例外：end-restart 语义下悬空的调用不是被截断的
 	// 记录，而是一个仍然站着的问题 —— 运行在门处结束，答案尚未到达。这些卡片在扫尾之后被标记为
-	// 等待，所以重新打开的 transcript 显示的是暂停，而不是一张没有输出的已完成卡片。
+	// 等待，所以重新打开的会话记录显示的是暂停，而不是一张没有输出的已完成卡片。
 	if (!snapshot.submitting) items = settleCards(items);
 	for (const approval of snapshot.pendingApprovals) {
 		items = patchCard(items, approval.toolCallId, { running: false, waiting: true });

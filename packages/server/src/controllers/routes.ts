@@ -73,7 +73,7 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 		}),
 		route({
 			method: "POST",
-			// 只是从列表里移除，别的什么都不动：transcript 及其命名的目录原地保留。URL 里用 `hide` 而不是 `delete` 正是为了说明这一点，因为这里的 DELETE 会承诺一件本命令刻意不做的事。
+			// 只是从列表里移除，别的什么都不动：会话记录及其命名的目录原地保留。URL 里用 `hide` 而不是 `delete` 正是为了说明这一点，因为这里的 DELETE 会承诺一件本命令刻意不做的事。
 			path: "/api/directories/hide",
 			params: {},
 			handle: async (_params, request, response) =>

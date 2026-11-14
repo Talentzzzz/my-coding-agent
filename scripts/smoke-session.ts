@@ -169,13 +169,13 @@ function windowedRows(contextWindow: number): ModelConfig[] {
  * a test that released the gate on that signal could release it before the call arrived, and the call
  * would then wait for a release that already happened.
  */
-async function whenStreaming(session: Agent, gate: Gate, ms = 5_000): Promise<void> {
+async function whenStreaming(agent: Agent, gate: Gate, ms = 5_000): Promise<void> {
 	const started = Date.now();
 	while (Date.now() - started < ms) {
-		if (session.snapshot(sidOf(session)).submitting && gate.held >= 1) return;
+		if (agent.snapshot(sidOf(agent)).submitting && gate.held >= 1) return;
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
-	check("a run reached the provider", false, `streaming=${session.snapshot(sidOf(session)).submitting} held=${gate.held} after ${ms} ms`);
+	check("a run reached the provider", false, `streaming=${agent.snapshot(sidOf(agent)).submitting} held=${gate.held} after ${ms} ms`);
 }
 
 /** Poll until `ready` holds, so a check reads a state the loop reaches asynchronously. */
@@ -217,32 +217,32 @@ interface RunOptions {
 }
 
 /**
- * The bag and id each opened session runs on, kept beside the session object the checks hold.
+ * The bag and id each opened session runs on, kept beside the agent the checks hold.
  *
- * The session's methods name it by id now — the orchestrator holds no session state — so the
+ * The agent's methods name it by id now — the orchestrator holds no session state — so the
  * opening helpers record what they created here and every check reads the pair back through
  * {@link sidOf} and {@link bagOf}.
  */
-const opened = new WeakMap<Agent, { id: string; state: Session; settings: SettingManager }>();
+const opened = new WeakMap<Agent, { id: string; session: Session; settings: SettingManager }>();
 
-function sidOf(session: Agent): string {
-	return opened.get(session)!.id;
+function sidOf(agent: Agent): string {
+	return opened.get(agent)!.id;
 }
 
-function bagOf(session: Agent): Session {
-	const state = opened.get(session)!.state;
-	// A session that has spoken is a file, not this object (ADR-0019): the orchestrator replays it per
+function bagOf(agent: Agent): Session {
+	const session = opened.get(agent)!.session;
+	// A session that has spoken is a file, not this object (ADR-0013): the orchestrator replays it per
 	// operation, so a test that wants to look at what it wrote has to replay too. Before the birth the
-	// bag below *is* the session — there is nothing on disk to reopen.
-	return state.fileCreated ? session.sessionManager.open(state.sessionId) : state;
+	// session below *is* the session — there is nothing on disk to reopen.
+	return session.fileCreated ? agent.sessionManager.open(session.sessionId) : session;
 }
 
-function settingsOf(session: Agent): SettingManager {
-	return opened.get(session)!.settings;
+function settingsOf(agent: Agent): SettingManager {
+	return opened.get(agent)!.settings;
 }
 
 /**
- * One session over its own transcript, with settings that live in memory.
+ * One session over its own session record, with settings that live in memory.
  *
  * `inMemorySettingManager` is the seam that keeps these runs off the developer's
  * `~/.my-agent/settings.json`: it has the same shape as the file-backed manager, so a config change
@@ -254,46 +254,46 @@ async function openSession(
 	model?: string,
 	tools?: ToolManager,
 ): Promise<Agent> {
-	const state = createSession(root);
+	const session = createSession(root);
 	const sessionSettings = inMemorySettingManager(settings(overrides), run.models ?? rows);
-	const session = await openAgent({
-		session: state,
+	const agent = await openAgent({
+		session,
 		api: run.api ?? fake.api,
 		model,
 		settings: sessionSettings,
 		tools,
 	});
-	opened.set(session, { id: state.sessionId, state, settings: sessionSettings });
-	return session;
+	opened.set(agent, { id: session.sessionId, session, settings: sessionSettings });
+	return agent;
 }
 
-function textsOf(session: Agent): string[] {
-	return session.snapshot(sidOf(session)).messages.filter((message) => message.role === "user").map((message) => textOf(message));
+function textsOf(agent: Agent): string[] {
+	return agent.snapshot(sidOf(agent)).messages.filter((message) => message.role === "user").map((message) => textOf(message));
 }
 
 /** Every entry in the log, header aside, including branches the session is no longer on. */
-function entriesOf(session: Agent): SessionEntry[] {
-	return session.sessionManager.getEntries(bagOf(session));
+function entriesOf(agent: Agent): SessionEntry[] {
+	return agent.sessionManager.getEntries(bagOf(agent));
 }
 
 /**
  * Every message ever written, not just the ones still in context.
  *
  * A compaction removes messages from the model's view, never from the file, so "the store kept it" is
- * always a question about this list rather than about the transcript.
+ * always a question about this list rather than about the session record.
  */
-function allMessages(session: Agent): Message[] {
-	return entriesOf(session).flatMap((entry) => (entry.type === "message" ? [entry.message] : []));
+function allMessages(agent: Agent): Message[] {
+	return entriesOf(agent).flatMap((entry) => (entry.type === "message" ? [entry.message] : []));
 }
 
 /** Each stored message as "role:text", in store order — the shape most ordering assertions compare. */
-function orderOf(session: Agent): string[] {
-	return allMessages(session).map((message) => `${message.role}:${textOf(message)}`);
+function orderOf(agent: Agent): string[] {
+	return allMessages(agent).map((message) => `${message.role}:${textOf(message)}`);
 }
 
 /** Ids of the message entries whose text matches, in log order. */
-function entryIdsFor(session: Agent, text: string): string[] {
-	return entriesOf(session)
+function entryIdsFor(agent: Agent, text: string): string[] {
+	return entriesOf(agent)
 		.filter((entry) => entry.type === "message" && textOf(entry.message) === text)
 		.map((entry) => entry.id);
 }
@@ -332,7 +332,7 @@ interface SentRequest {
 /**
  * Script the next provider calls and record what each request carried.
  *
- * The response factory is handed the transcript the provider was sent, and that is the only place the
+ * The response factory is handed the conversation the provider was sent, and that is the only place the
  * prompt the model received can be read back: `snapshot` reports the conversation, not the prompt. The
  * same is true of a tool result a hook rewrote: only the request says what the model was shown.
  */
@@ -373,9 +373,9 @@ function approvalTools(prompt: string): string {
 	return prompt.match(/ask the user for approval before running: ([^.]*)\./)?.[1] ?? "";
 }
 
-/** The text of the transcript's tool results, oldest first. */
-function toolResultTexts(session: Agent): string[] {
-	return allMessages(session)
+/** The text of the session record's tool results, oldest first. */
+function toolResultTexts(agent: Agent): string[] {
+	return allMessages(agent)
 		.filter((message) => message.role === "toolResult")
 		.map((message) => textOf(message));
 }
@@ -383,7 +383,7 @@ function toolResultTexts(session: Agent): string[] {
 /**
  * A follow-up sent mid-run is accepted, queued, and drained when the turn ends.
  *
- * The transcript must hold both user messages exactly once, and in the order the loop took them: the
+ * The session must hold both user messages exactly once, and in the order the loop took them: the
  * queued message is written when the loop drains it — behind the answer it interrupted — rather than
  * when it was accepted.
  */
@@ -391,41 +391,41 @@ async function exerciseFollowUp(): Promise<void> {
 	process.stdout.write("followUp\n");
 	fake.setResponses([fakeAssistantMessage("first answer"), fakeAssistantMessage("second answer")]);
 	const { api: gatedApi, gate } = gatedTransport();
-	const session = await openSession({}, { api: gatedApi });
+	const agent = await openSession({}, { api: gatedApi });
 	// Counted from here rather than asserted absolutely: the queue is shared by every exercise, so
 	// what this check is about is the calls this run made.
-	const base = fake.state.callCount;
+	const base = fake.fakeState.callCount;
 
 	const echoed: string[] = [];
-	session.onEvent(sidOf(session), (event) => {
+	agent.onEvent(sidOf(agent), (event) => {
 		if (event.type === "message_end" && event.message.role === "user") echoed.push(textOf(event.message));
 	});
 
-	const running = session.prompt(sidOf(session), "first question");
-	await whenStreaming(session, gate);
-	check("the first run is streaming", session.snapshot(sidOf(session)).submitting === true);
+	const running = agent.prompt(sidOf(agent), "first question");
+	await whenStreaming(agent, gate);
+	check("the first run is streaming", agent.snapshot(sidOf(agent)).submitting === true);
 	check("the provider call is held open", gate.held === 1, String(gate.held));
-	check("nothing is queued yet", session.snapshot(sidOf(session)).queued.length === 0, String(session.snapshot(sidOf(session)).queued.length));
+	check("nothing is queued yet", agent.snapshot(sidOf(agent)).queued.length === 0, String(agent.snapshot(sidOf(agent)).queued.length));
 
-	const queued = await within("followUp prompt", 5_000, session.prompt(sidOf(session), "second question", { behavior: "followUp" }));
+	const queued = await within("followUp prompt", 5_000, agent.prompt(sidOf(agent), "second question", { behavior: "followUp" }));
 	check("followUp resolves mid-run instead of throwing", queued.ok);
-	check("snapshot.queued is 1 before the turn ends", session.snapshot(sidOf(session)).queued.length === 1, String(session.snapshot(sidOf(session)).queued.length));
+	check("snapshot.queued is 1 before the turn ends", agent.snapshot(sidOf(agent)).queued.length === 1, String(agent.snapshot(sidOf(agent)).queued.length));
 
 	gate.release();
 	await within("the run", 10_000, running);
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
-	const users = textsOf(session);
-	check("the transcript holds both user messages", users.length === 2, JSON.stringify(users));
+	const users = textsOf(agent);
+	check("the session holds both user messages", users.length === 2, JSON.stringify(users));
 	check("the first exactly once", users.filter((text) => text === "first question").length === 1, JSON.stringify(users));
 	check("the second exactly once", users.filter((text) => text === "second question").length === 1, JSON.stringify(users));
 	// The drain wrote the queued message the moment it took it — nothing wrote it at acceptance — so
 	// "once" here means the drain's write landed, not that a duplicate was deduplicated away.
 	check("the drain point injected the queued message", echoed.includes("second question"), JSON.stringify(echoed));
-	check("two provider calls were made", fake.state.callCount - base === 2, String(fake.state.callCount - base));
-	check("nothing is queued after settling", session.snapshot(sidOf(session)).queued.length === 0, String(session.snapshot(sidOf(session)).queued.length));
+	check("two provider calls were made", fake.fakeState.callCount - base === 2, String(fake.fakeState.callCount - base));
+	check("nothing is queued after settling", agent.snapshot(sidOf(agent)).queued.length === 0, String(agent.snapshot(sidOf(agent)).queued.length));
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
@@ -446,13 +446,13 @@ async function exerciseSteerVersusFollowUp(): Promise<void> {
 	for (const scenario of scenarios) {
 		fake.setResponses([fakeAssistantMessage("first answer"), fakeAssistantMessage("second answer")]);
 		const { api: gatedApi, gate } = gatedTransport();
-		const session = await openSession({}, { api: gatedApi });
+		const agent = await openSession({}, { api: gatedApi });
 
-		const running = session.prompt(sidOf(session), "question one");
-		await whenStreaming(session, gate);
-		await session.prompt(sidOf(session), "queued now", { behavior: scenario.behavior });
+		const running = agent.prompt(sidOf(agent), "question one");
+		await whenStreaming(agent, gate);
+		await agent.prompt(sidOf(agent), "queued now", { behavior: scenario.behavior });
 
-		const duringStreaming = entryIdsFor(session, "queued now");
+		const duringStreaming = entryIdsFor(agent, "queued now");
 		check(
 			`${scenario.behavior} is not written while the run is streaming`,
 			duringStreaming.length === 0,
@@ -460,26 +460,26 @@ async function exerciseSteerVersusFollowUp(): Promise<void> {
 		);
 		check(
 			scenario.counted ? "and the queue counts it" : "and the queue does not count it",
-			session.snapshot(sidOf(session)).queued.length === (scenario.counted ? 1 : 0),
-			String(session.snapshot(sidOf(session)).queued.length),
+			agent.snapshot(sidOf(agent)).queued.length === (scenario.counted ? 1 : 0),
+			String(agent.snapshot(sidOf(agent)).queued.length),
 		);
 
 		gate.release();
 		await within("the run", 10_000, running);
-		await within("settle()", 10_000, session.settle(sidOf(session)));
+		await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
-		const after = entryIdsFor(session, "queued now");
+		const after = entryIdsFor(agent, "queued now");
 		check(`${scenario.behavior} is in the store exactly once`, after.length === 1, JSON.stringify(after));
 		// The order is the reason the write waits for the drain: the store's order is the order the loop
 		// replayed, which is what the next request is built from and what a baseline replays.
-		const order = orderOf(session);
+		const order = orderOf(agent);
 		check(
 			`${scenario.behavior} is filed behind the answer it interrupted`,
 			JSON.stringify(order) ===
 				JSON.stringify(["user:question one", "assistant:first answer", "user:queued now", "assistant:second answer"]),
 			JSON.stringify(order),
 		);
-		await session.close(sidOf(session));
+		await agent.close(sidOf(agent));
 	}
 }
 
@@ -496,22 +496,22 @@ async function exerciseAcceptedOrder(): Promise<void> {
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [fakeAssistantMessage("first answer"), fakeAssistantMessage("second answer")]);
 	const { api: gatedApi, gate } = gatedTransport();
-	const session = await openSession({}, { api: gatedApi });
+	const agent = await openSession({}, { api: gatedApi });
 
-	const running = session.prompt(sidOf(session), "question one");
-	await whenStreaming(session, gate);
-	await session.prompt(sidOf(session), "asked while it was answering", { behavior: "followUp" });
+	const running = agent.prompt(sidOf(agent), "question one");
+	await whenStreaming(agent, gate);
+	await agent.prompt(sidOf(agent), "asked while it was answering", { behavior: "followUp" });
 	check(
 		"nothing is written at acceptance",
-		entryIdsFor(session, "asked while it was answering").length === 0,
-		JSON.stringify(entryIdsFor(session, "asked while it was answering")),
+		entryIdsFor(agent, "asked while it was answering").length === 0,
+		JSON.stringify(entryIdsFor(agent, "asked while it was answering")),
 	);
 
 	gate.release();
 	await within("the run", 10_000, running);
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
-	const order = orderOf(session);
+	const order = orderOf(agent);
 	check(
 		"the store reads the way the loop replayed it",
 		JSON.stringify(order) ===
@@ -535,7 +535,7 @@ async function exerciseAcceptedOrder(): Promise<void> {
 		JSON.stringify(sent[1]?.texts),
 	);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
@@ -550,65 +550,65 @@ async function exerciseAbortDropsUnconsumed(): Promise<void> {
 	process.stdout.write("abort drops the unconsumed queue\n");
 	fake.setResponses([fakeAssistantMessage("an answer that never lands")]);
 	const { api: gatedApi, gate } = gatedTransport();
-	const session = await openSession({}, { api: gatedApi });
+	const agent = await openSession({}, { api: gatedApi });
 
-	const running = session.prompt(sidOf(session), "question before the abort");
-	await whenStreaming(session, gate);
-	await session.prompt(sidOf(session), "typed while it was answering", { behavior: "followUp" });
-	check("the run is streaming with one message queued", session.snapshot(sidOf(session)).submitting && session.snapshot(sidOf(session)).queued.length === 1, String(session.snapshot(sidOf(session)).queued.length));
+	const running = agent.prompt(sidOf(agent), "question before the abort");
+	await whenStreaming(agent, gate);
+	await agent.prompt(sidOf(agent), "typed while it was answering", { behavior: "followUp" });
+	check("the run is streaming with one message queued", agent.snapshot(sidOf(agent)).submitting && agent.snapshot(sidOf(agent)).queued.length === 1, String(agent.snapshot(sidOf(agent)).queued.length));
 
-	const aborting = session.abort(sidOf(session));
+	const aborting = agent.abort(sidOf(agent));
 	// The held call has to answer before the aborted run can end; the abort's own signal is what turns
 	// that answer into the end.
 	gate.release();
 	await within("the run", 10_000, running);
 	await within("abort()", 10_000, aborting);
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
-	const order = orderOf(session);
+	const order = orderOf(agent);
 	check("the message the run never drained is not in the store", !order.includes("user:typed while it was answering"), JSON.stringify(order));
-	check("and the queue is empty, which is what settle() waits on", session.snapshot(sidOf(session)).queued.length === 0, String(session.snapshot(sidOf(session)).queued.length));
+	check("and the queue is empty, which is what settle() waits on", agent.snapshot(sidOf(agent)).queued.length === 0, String(agent.snapshot(sidOf(agent)).queued.length));
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /** `followUpMode: "one-at-a-time"` drains one queued message per turn, not the whole queue. */
 async function exerciseQueueMode(): Promise<void> {
 	process.stdout.write("one-at-a-time\n");
-	const base = fake.state.callCount;
+	const base = fake.fakeState.callCount;
 	fake.setResponses([fakeAssistantMessage("answer one"), fakeAssistantMessage("answer two"), fakeAssistantMessage("answer three")]);
 	const { api: gatedApi, gate } = gatedTransport(2);
-	const session = await openSession({ followUpMode: "one-at-a-time" }, { api: gatedApi });
+	const agent = await openSession({ followUpMode: "one-at-a-time" }, { api: gatedApi });
 
-	const running = session.prompt(sidOf(session), "turn one");
-	await whenStreaming(session, gate);
-	await session.prompt(sidOf(session), "turn two", { behavior: "followUp" });
-	await session.prompt(sidOf(session), "turn three", { behavior: "followUp" });
-	check("two messages are queued", session.snapshot(sidOf(session)).queued.length === 2, String(session.snapshot(sidOf(session)).queued.length));
+	const running = agent.prompt(sidOf(agent), "turn one");
+	await whenStreaming(agent, gate);
+	await agent.prompt(sidOf(agent), "turn two", { behavior: "followUp" });
+	await agent.prompt(sidOf(agent), "turn three", { behavior: "followUp" });
+	check("two messages are queued", agent.snapshot(sidOf(agent)).queued.length === 2, String(agent.snapshot(sidOf(agent)).queued.length));
 
 	// Release the first turn. The loop then starts exactly one queued turn and stops inside that
 	// request, which is the hold that makes the drain count observable.
 	gate.release();
 	await gateHeld(gate);
-	check("exactly one queued message was drained", session.snapshot(sidOf(session)).queued.length === 1, String(session.snapshot(sidOf(session)).queued.length));
+	check("exactly one queued message was drained", agent.snapshot(sidOf(agent)).queued.length === 1, String(agent.snapshot(sidOf(agent)).queued.length));
 	check("and the loop has started its second request", gate.calls === 2, String(gate.calls));
-	// The drained message is in the transcript, the waiting one is still only on a queue — the depth is
-	// what reports it, and since the write waits for the drain the transcript shows it too.
-	const soFar = orderOf(session);
+	// The drained message is in the session, the waiting one is still only on a queue — the depth is
+	// what reports it, and since the write waits for the drain the session shows it too.
+	const soFar = orderOf(agent);
 	check(
-		"the transcript holds the drained message and not the waiting one",
+		"the session holds the drained message and not the waiting one",
 		JSON.stringify(soFar) === JSON.stringify(["user:turn one", "assistant:answer one", "user:turn two"]),
 		JSON.stringify(soFar),
 	);
 
 	gate.release();
 	await within("the run", 10_000, running);
-	await within("settle()", 10_000, session.settle(sidOf(session)));
-	check("the rest drained once the run ended", session.snapshot(sidOf(session)).queued.length === 0, String(session.snapshot(sidOf(session)).queued.length));
-	check("all three user messages are present", textsOf(session).length === 3, JSON.stringify(textsOf(session)));
-	check("three provider calls were made", fake.state.callCount - base === 3, `${fake.state.callCount - base}`);
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
+	check("the rest drained once the run ended", agent.snapshot(sidOf(agent)).queued.length === 0, String(agent.snapshot(sidOf(agent)).queued.length));
+	check("all three user messages are present", textsOf(agent).length === 3, JSON.stringify(textsOf(agent)));
+	check("three provider calls were made", fake.fakeState.callCount - base === 3, `${fake.fakeState.callCount - base}`);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /** Wait until the gate has held the call it was waiting for and the provider has actually been asked. */
@@ -626,29 +626,29 @@ async function exerciseLiveStates(): Promise<void> {
 	process.stdout.write("live states\n");
 	fake.setResponses([fakeAssistantMessage("only answer"), fakeAssistantMessage("queued answer")]);
 	const { api: gatedApi, gate } = gatedTransport();
-	const session = await openSession({}, { api: gatedApi });
+	const agent = await openSession({}, { api: gatedApi });
 
 	const queuedSeen: number[] = [];
 	const streamingSeen: boolean[] = [];
-	session.onEvent(sidOf(session), () => {
-		queuedSeen.push(session.snapshot(sidOf(session)).queued.length);
-		streamingSeen.push(session.snapshot(sidOf(session)).submitting);
+	agent.onEvent(sidOf(agent), () => {
+		queuedSeen.push(agent.snapshot(sidOf(agent)).queued.length);
+		streamingSeen.push(agent.snapshot(sidOf(agent)).submitting);
 	});
 
-	const running = session.prompt(sidOf(session), "live question");
-	await whenStreaming(session, gate);
-	await session.prompt(sidOf(session), "live follow-up", { behavior: "followUp" });
-	check("the snapshot reports the queue while the run is live", session.snapshot(sidOf(session)).queued.length === 1, String(session.snapshot(sidOf(session)).queued.length));
+	const running = agent.prompt(sidOf(agent), "live question");
+	await whenStreaming(agent, gate);
+	await agent.prompt(sidOf(agent), "live follow-up", { behavior: "followUp" });
+	check("the snapshot reports the queue while the run is live", agent.snapshot(sidOf(agent)).queued.length === 1, String(agent.snapshot(sidOf(agent)).queued.length));
 
 	gate.release();
 	await within("the run", 10_000, running);
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	check("a listener saw the streaming window", streamingSeen.includes(true), JSON.stringify(streamingSeen));
 	check("and the queued count went from 0 to 1 to 0", queuedSeen.includes(0) && queuedSeen.includes(1), JSON.stringify(queuedSeen));
-	check("the transcript kept both messages", textsOf(session).length === 2, JSON.stringify(textsOf(session)));
+	check("the session kept both messages", textsOf(agent).length === 2, JSON.stringify(textsOf(agent)));
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /** A short name for an event, for the failure details when an order assertion breaks. */
@@ -671,20 +671,20 @@ async function exerciseEventStream(): Promise<void> {
 	process.stdout.write("session events\n");
 	fake.setResponses([fakeAssistantMessage("first answer"), fakeAssistantMessage("second answer")]);
 	const { api: gatedApi, gate } = gatedTransport();
-	const session = await openSession({}, { api: gatedApi });
+	const agent = await openSession({}, { api: gatedApi });
 
 	const seen: AgentSessionEvent[] = [];
-	session.onEvent(sidOf(session), (event) => seen.push(event));
+	agent.onEvent(sidOf(agent), (event) => seen.push(event));
 
-	const running = session.prompt(sidOf(session), "event question one");
-	await whenStreaming(session, gate);
-	await session.prompt(sidOf(session), "event question two", { behavior: "followUp" });
+	const running = agent.prompt(sidOf(agent), "event question one");
+	await whenStreaming(agent, gate);
+	await agent.prompt(sidOf(agent), "event question two", { behavior: "followUp" });
 
 	gate.release();
 	await within("the run", 10_000, running);
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
-	const persisted = entriesOf(session).filter((entry) => entry.type === "message").map((entry) => entry.id);
+	const persisted = entriesOf(agent).filter((entry) => entry.type === "message").map((entry) => entry.id);
 	// Only the message entries: the meta values the request wrote go to the `.json` snapshot, not to
 	// the entry stream, so there is nothing else to announce.
 	const appended = seen.flatMap((event) =>
@@ -709,7 +709,7 @@ async function exerciseEventStream(): Promise<void> {
 	check("the loop's own message_start reaches the same listener", asked > 0, trace);
 	check("and so does its message_end", answered > asked, trace);
 
-	const queuedEntry = entryIdsFor(session, "event question two")[0];
+	const queuedEntry = entryIdsFor(agent, "event question two")[0];
 	const written = seen.findIndex((event) => event.type === "entry_appended" && event.entryId === queuedEntry);
 	const queuedUpdate = seen.findIndex((event) => event.type === "queue_update" && event.queued.length === 1);
 	const drainedStart = seen.findIndex(
@@ -730,7 +730,7 @@ async function exerciseEventStream(): Promise<void> {
 	);
 	check("and the queue returns to empty once drained", seen.some((event) => event.type === "queue_update" && event.queued.length === 0), trace);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
@@ -738,12 +738,12 @@ async function exerciseEventStream(): Promise<void> {
  *
  * The summary is one extra provider call, so the scripted responses carry it in the order the requests
  * happen: answer, answer, summary, then the answer to the prompt whose request triggered the
- * compaction. What the assertions are really about is the transcript: the summarized messages leave the
+ * compaction. What the assertions are really about is the session record: the summarized messages leave the
  * model's view, the summary takes their place, and the file keeps everything.
  */
 async function exerciseCompactionEvent(): Promise<void> {
 	process.stdout.write("compaction event\n");
-	const base = fake.state.callCount;
+	const base = fake.fakeState.callCount;
 	const summary = "SUMMARY: the user asked two questions and both were answered.";
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [
@@ -753,14 +753,14 @@ async function exerciseCompactionEvent(): Promise<void> {
 		fakeAssistantMessage("answer three"),
 	]);
 	// A 33,035-token window is the smallest one whose reserve is still the full 33k, which puts the
-	// trigger at 35 estimated tokens: between the transcript the second question produces (~27) and the
+	// trigger at 35 estimated tokens: between the conversation the second question produces (~27) and the
 	// one the third produces (~41), so exactly one compaction happens, on the third request. Nothing is
 	// kept verbatim, so the cut lands on the newest turn start —the question just asked —and the two
 	// completed exchanges are what it folds in.
-	const session = await openSession({}, { models: windowedRows(33_035) });
+	const agent = await openSession({}, { models: windowedRows(33_035) });
 
 	const announced: Extract<AgentSessionEvent, { type: "compaction" }>[] = [];
-	session.onEvent(sidOf(session), (event) => {
+	agent.onEvent(sidOf(agent), (event) => {
 		if (event.type === "compaction") announced.push(event);
 	});
 
@@ -770,10 +770,10 @@ async function exerciseCompactionEvent(): Promise<void> {
 		"question three with enough words to estimate tokens",
 	];
 	for (const text of questions) {
-		const run = await within("a run", 10_000, session.prompt(sidOf(session), text));
+		const run = await within("a run", 10_000, agent.prompt(sidOf(agent), text));
 		check(`"${text.slice(0, 12)}..." completes`, run.ok);
 	}
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	check("exactly one compaction was announced", announced.length === 1, JSON.stringify(announced.length));
 	const event = announced[0];
@@ -782,13 +782,13 @@ async function exerciseCompactionEvent(): Promise<void> {
 	// start and the two completed exchanges are what the summary stands for.
 	check("with the messages it stands for", event?.summarized === 4, JSON.stringify(event?.summarized));
 	check("and a live estimate of what is still in context", (event?.contextTokens ?? 0) > 0, JSON.stringify(event?.contextTokens));
-	check("four provider calls were made: three answers and one summary", fake.state.callCount - base === 4, String(fake.state.callCount - base));
+	check("four provider calls were made: three answers and one summary", fake.fakeState.callCount - base === 4, String(fake.fakeState.callCount - base));
 	// The summary is a request like any other, so it authenticates like one: the key rides on the model
 	// the summary is made with, which is what makes compaction work on a session whose row has a key and
 	// whose key the loop is not there to copy in — this call never travels through the loop.
 	check("and the summary carried the row's key", sent[2]?.apiKey === ROW.apiKey, String(sent[2]?.apiKey));
 
-	// The transcript the provider was sent for the third question is where compaction shows: the two
+	// The conversation the provider was sent for the third question is where compaction shows: the two
 	// summarized exchanges are gone, and the summary is there in their place.
 	const last = sent[3];
 	check(
@@ -809,13 +809,13 @@ async function exerciseCompactionEvent(): Promise<void> {
 
 	// The file is the record of everything: the summarized messages are still entries, and the
 	// compaction is one entry of its own naming where the model picks up again.
-	const entryTypes = entriesOf(session).map((entry) => entry.type);
-	check("the transcript still holds every message", allMessages(session).length === 6, JSON.stringify(allMessages(session).length));
+	const entryTypes = entriesOf(agent).map((entry) => entry.type);
+	check("the session still holds every message", allMessages(agent).length === 6, JSON.stringify(allMessages(agent).length));
 	check("and one compaction entry", entryTypes.filter((type) => type === "compaction").length === 1, JSON.stringify(entryTypes));
-	const kept = entriesOf(session).find((entry) => entry.type === "message" && textOf(entry.message) === questions[2]);
+	const kept = entriesOf(agent).find((entry) => entry.type === "message" && textOf(entry.message) === questions[2]);
 	check("whose first kept entry is the surviving turn", event?.firstKeptEntryId === kept?.id, `${event?.firstKeptEntryId} vs ${kept?.id}`);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /** `applyConfig` says what moved and nothing else: unchanged fields stay out of the event. */
@@ -824,14 +824,14 @@ async function exerciseConfigChanged(): Promise<void> {
 	// A second row gives the source a second model, so a model change is observable at all. Both are
 	// answered by the same scripted transport: nothing here sends a request.
 	const twoRows: ModelConfig[] = [ROW, { ...ROW, name: "faux2" }];
-	const session = await openSession({}, { models: twoRows }, "faux/faux-1");
+	const agent = await openSession({}, { models: twoRows }, "faux/faux-1");
 
 	const seen: Extract<AgentSessionEvent, { type: "config_changed" }>[] = [];
-	session.onEvent(sidOf(session), (event) => {
+	agent.onEvent(sidOf(agent), (event) => {
 		if (event.type === "config_changed") seen.push(event);
 	});
 
-	session.applyConfig(sidOf(session), { approval: { bash: true } });
+	agent.applyConfig(sidOf(agent), { approval: { bash: true } });
 	check("one config_changed for the approval", seen.length === 1, JSON.stringify(seen));
 	check(
 		"carrying only the approval that changed",
@@ -839,12 +839,12 @@ async function exerciseConfigChanged(): Promise<void> {
 		JSON.stringify(seen[0]),
 	);
 
-	session.applyConfig(sidOf(session), { approval: { bash: true } });
+	agent.applyConfig(sidOf(agent), { approval: { bash: true } });
 	check("re-applying the same value says nothing", seen.length === 1, JSON.stringify(seen));
-	session.applyConfig(sidOf(session), {});
+	agent.applyConfig(sidOf(agent), {});
 	check("an empty patch says nothing", seen.length === 1, JSON.stringify(seen));
 
-	session.applyConfig(sidOf(session), { approval: { bash: false, read: true } });
+	agent.applyConfig(sidOf(agent), { approval: { bash: false, read: true } });
 	check(
 		"only the two approvals that moved are reported",
 		seen.length === 2 && JSON.stringify(Object.entries(seen[1]?.approvals ?? {}).sort()) === JSON.stringify([["bash", false], ["read", true]]),
@@ -852,17 +852,17 @@ async function exerciseConfigChanged(): Promise<void> {
 	);
 
 	// The composer's choice, which is not a config patch: it moves the session and nothing else.
-	session.applyModelSelection(sidOf(session), { model: "faux2" });
+	agent.applyModelSelection(sidOf(agent), { model: "faux2" });
 	check(
 		"a model change carries the model alone",
 		seen.length === 3 && JSON.stringify(seen[2]) === JSON.stringify({ type: "config_changed", model: "faux2" }),
 		JSON.stringify(seen[2]),
 	);
-	session.applyModelSelection(sidOf(session), { model: "faux2" });
+	agent.applyModelSelection(sidOf(agent), { model: "faux2" });
 	check("re-selecting the current model says nothing", seen.length === 3, JSON.stringify(seen));
 
-	check("every row offers the same four levels", JSON.stringify(session.snapshot(sidOf(session)).thinkingLevels) === JSON.stringify(["off", "low", "high", "max"]), JSON.stringify(session.snapshot(sidOf(session)).thinkingLevels));
-	session.applyModelSelection(sidOf(session), { thinkingLevel: "off" });
+	check("every row offers the same four levels", JSON.stringify(agent.snapshot(sidOf(agent)).thinkingLevels) === JSON.stringify(["off", "low", "high", "max"]), JSON.stringify(agent.snapshot(sidOf(agent)).thinkingLevels));
+	agent.applyModelSelection(sidOf(agent), { thinkingLevel: "off" });
 	check("so re-applying it says nothing", seen.length === 3, JSON.stringify(seen));
 
 	// The whole point of choosing on the composer: a choice no request was made with is not something
@@ -871,11 +871,11 @@ async function exerciseConfigChanged(): Promise<void> {
 	// its files are not born and a premature write has nowhere to land.
 	check(
 		"and none of it is written down before a request uses it",
-		bagOf(session).fileCreated === false,
-		JSON.stringify(session.sessionManager.getRecordedSettings(bagOf(session))),
+		bagOf(agent).fileCreated === false,
+		JSON.stringify(agent.sessionManager.getRecordedSettings(bagOf(agent))),
 	);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
@@ -892,27 +892,27 @@ async function exerciseBeforeToolHook(): Promise<void> {
 		fakeAssistantMessage(fakeToolCall("read", { path: "never-read.txt" })),
 		fakeAssistantMessage("understood"),
 	]);
-	const session = await openSession();
+	const agent = await openSession();
 
-	session.hooks.on("before_tool", (event) => {
+	agent.hooks.on("before_tool", (event) => {
 		seen.push({ toolCallId: event.toolCallId, toolName: event.toolName, args: event.args });
 		return { block: { reason: "the smoke test refused this call" } };
 	});
 
-	await within("the run", 10_000, session.prompt(sidOf(session), "read never-read.txt"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "read never-read.txt"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	check("the handler saw the scripted call", seen.length === 1 && seen[0]?.toolName === "read", JSON.stringify(seen));
 	check("with the call's own id", (seen[0]?.toolCallId ?? "").length > 0, JSON.stringify(seen));
 	check("and its validated arguments", JSON.stringify(seen[0]?.args).includes("never-read.txt"), JSON.stringify(seen[0]?.args));
 
-	const errored = allMessages(session).find(
+	const errored = allMessages(agent).find(
 		(message) => message.role === "toolResult" && textOf(message).includes("the smoke test refused this call"),
 	);
 	check(
 		"the block is an errored tool result",
 		errored !== undefined && (errored as { isError?: boolean }).isError === true,
-		JSON.stringify(allMessages(session).map((message) => [message.role, textOf(message).slice(0, 30)])),
+		JSON.stringify(allMessages(agent).map((message) => [message.role, textOf(message).slice(0, 30)])),
 	);
 	check(
 		"which the next request carries, so the model can see it",
@@ -922,15 +922,15 @@ async function exerciseBeforeToolHook(): Promise<void> {
 	check("and the tool never ran", (sent[1]?.texts ?? []).every((text) => !text.includes("File not found")), JSON.stringify(sent[1]?.texts));
 	check(
 		"the run carried on to an answer",
-		session.snapshot(sidOf(session)).messages.some((message) => message.role === "assistant" && textOf(message) === "understood"),
+		agent.snapshot(sidOf(agent)).messages.some((message) => message.role === "assistant" && textOf(message) === "understood"),
 	);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
  * A test `after_tool` handler rewrites what the model is shown — and that rewrite is final: the
- * transcript keeps exactly what the hook returned, because the ledger no longer stores a second
+ * session keeps exactly what the hook returned, because the ledger no longer stores a second
  * version. The write is the decision.
  */
 async function exerciseAfterToolHook(): Promise<void> {
@@ -942,30 +942,30 @@ async function exerciseAfterToolHook(): Promise<void> {
 		fakeAssistantMessage("read it"),
 		fakeAssistantMessage("still replaced"),
 	]);
-	const session = await openSession();
+	const agent = await openSession();
 
-	session.hooks.on("after_tool", (event) =>
+	agent.hooks.on("after_tool", (event) =>
 		event.toolName === "read" ? { content: [{ type: "text", text: "REPLACED BY THE TEST HOOK" }] } : undefined,
 	);
 
-	await within("the first run", 10_000, session.prompt(sidOf(session), "read hook.txt"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
-	await within("the second run", 10_000, session.prompt(sidOf(session), "and what did it say"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the first run", 10_000, agent.prompt(sidOf(agent), "read hook.txt"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
+	await within("the second run", 10_000, agent.prompt(sidOf(agent), "and what did it say"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	const first = sent[1]?.texts ?? [];
 	check("the request after the call carries what the hook put there", first.some((text) => text.includes("REPLACED BY THE TEST HOOK")), JSON.stringify(first));
 	check("and not what the tool returned", first.every((text) => !text.includes("the tool's own words")), JSON.stringify(first));
 	check("a later request still carries it", (sent[2]?.texts ?? []).some((text) => text.includes("REPLACED BY THE TEST HOOK")), JSON.stringify(sent[2]?.texts));
 	check(
-		"and the transcript keeps the rewrite, not the tool's output",
-		toolResultTexts(session).some((text) => text.includes("REPLACED BY THE TEST HOOK")) &&
-			toolResultTexts(session).every((text) => !text.includes("the tool's own words")),
-		JSON.stringify(toolResultTexts(session)),
+		"and the session keeps the rewrite, not the tool's output",
+		toolResultTexts(agent).some((text) => text.includes("REPLACED BY THE TEST HOOK")) &&
+			toolResultTexts(agent).every((text) => !text.includes("the tool's own words")),
+		JSON.stringify(toolResultTexts(agent)),
 	);
 
-	const sessionFile = session.fileAbsPathOf(sidOf(session));
-	await session.close(sidOf(session));
+	const sessionFile = agent.fileAbsPathOf(sidOf(agent));
+	await agent.close(sidOf(agent));
 
 	process.stdout.write("after_tool hook — the rewrite survives the file\n");
 	const reopenedFile = fillSession(sessionFile!);
@@ -983,11 +983,11 @@ async function exerciseAfterToolHook(): Promise<void> {
 			JSON.stringify(["clear_tool_result", "compaction", "leaf", "message", "trim_tool_call_arg", "usage"].filter((kind) => kinds.has(kind))),
 		JSON.stringify([...kinds]),
 	);
-	const transcriptTexts = JSON.stringify(store.buildSessionContext(reopenedFile).messages);
+	const sessionTexts = JSON.stringify(store.buildSessionContext(reopenedFile).messages);
 	check(
-		"the transcript a window reads is the rewrite",
-		transcriptTexts.includes("REPLACED BY THE TEST HOOK") && !transcriptTexts.includes("the tool's own words"),
-		transcriptTexts.slice(0, 200),
+		"the session a window reads is the rewrite",
+		sessionTexts.includes("REPLACED BY THE TEST HOOK") && !sessionTexts.includes("the tool's own words"),
+		sessionTexts.slice(0, 200),
 	);
 
 	const sentReplay: SentRequest[] = [];
@@ -998,7 +998,7 @@ async function exerciseAfterToolHook(): Promise<void> {
 		api: fake.api,
 		settings: replayedSettings,
 	});
-	opened.set(replayed, { id: reopenedFile.sessionId, state: reopenedFile, settings: replayedSettings });
+	opened.set(replayed, { id: reopenedFile.sessionId, session: reopenedFile, settings: replayedSettings });
 	try {
 		await within("the reopened run", 10_000, replayed.prompt(sidOf(replayed), "one more time"));
 		await within("settle()", 10_000, replayed.settle(sidOf(replayed)));
@@ -1042,10 +1042,10 @@ async function exerciseOutputBackstop(): Promise<void> {
 		fakeAssistantMessage("clipped"),
 		fakeAssistantMessage("again"),
 	]);
-	const session = await openSession({}, {}, undefined, manager);
+	const agent = await openSession({}, {}, undefined, manager);
 
-	await within("the run", 10_000, session.prompt(sidOf(session), "run the unbounded tool"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "run the unbounded tool"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	const shown = (sent[1]?.texts ?? []).find((text) => text.includes("HEAD-")) ?? "";
 	check("so the request the model received is inside the budget", Buffer.byteLength(shown) <= MAX_TOOL_RESULT_BYTES, `${Buffer.byteLength(shown)} bytes`);
@@ -1053,18 +1053,18 @@ async function exerciseOutputBackstop(): Promise<void> {
 	check("and it is shorter than what the tool returned", shown.length < huge.length, `${shown.length} of ${huge.length}`);
 	check(
 		"the ledger keeps the bounded version, not the tool's whole output",
-		toolResultTexts(session).some((text) => text.includes("characters omitted")) &&
-			toolResultTexts(session).every((text) => text.length < huge.length),
-		JSON.stringify(toolResultTexts(session).map((text) => text.length)),
+		toolResultTexts(agent).some((text) => text.includes("characters omitted")) &&
+			toolResultTexts(agent).every((text) => text.length < huge.length),
+		JSON.stringify(toolResultTexts(agent).map((text) => text.length)),
 	);
 	check(
 		"the stored result is not an error",
-		allMessages(session).every((message) => (message as { isError?: boolean }).isError !== true),
-		JSON.stringify(allMessages(session).map((message) => message.role)),
+		allMessages(agent).every((message) => (message as { isError?: boolean }).isError !== true),
+		JSON.stringify(allMessages(agent).map((message) => message.role)),
 	);
 
 	// The archive is the full text, under the working directory the session ran in.
-	const archiveDir = join(root, ".my-agent", "tool-results", sidOf(session));
+	const archiveDir = join(root, ".my-agent", "tool-results", sidOf(agent));
 	const archived = (await readdir(archiveDir)).find((name) => name.endsWith(".txt"));
 	check("the full output was archived", archived !== undefined, archiveDir);
 	const archivedText = archived === undefined ? "" : await readFile(join(archiveDir, archived), "utf8");
@@ -1074,7 +1074,7 @@ async function exerciseOutputBackstop(): Promise<void> {
 		`${archivedText.length} of ${huge.length}`,
 	);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
@@ -1087,15 +1087,15 @@ async function exerciseApprovalPrompt(): Promise<void> {
 	process.stdout.write("approval prompt\n");
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [fakeAssistantMessage("first answer"), fakeAssistantMessage("second answer")]);
-	const session = await openSession();
+	const agent = await openSession();
 
-	await within("the first run", 10_000, session.prompt(sidOf(session), "what needs approval"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the first run", 10_000, agent.prompt(sidOf(agent), "what needs approval"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 	check("no tool asks for approval yet", approvalTools(sent[0]?.prompt ?? "") === "", JSON.stringify(approvalTools(sent[0]?.prompt ?? "")));
 
-	session.applyConfig(sidOf(session), { approval: { bash: true } });
-	await within("the second run", 10_000, session.prompt(sidOf(session), "and now"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	agent.applyConfig(sidOf(agent), { approval: { bash: true } });
+	await within("the second run", 10_000, agent.prompt(sidOf(agent), "and now"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	check(
 		"the next request's leading system message names bash",
@@ -1105,19 +1105,19 @@ async function exerciseApprovalPrompt(): Promise<void> {
 	check("and that message still leads the request", sent[1]?.roles[0] === "system", JSON.stringify(sent[1]?.roles));
 	check(
 		"carrying the tool declarations as well",
-		JSON.stringify(sent[1]?.tools) === JSON.stringify(session.snapshot(sidOf(session)).activeTools),
+		JSON.stringify(sent[1]?.tools) === JSON.stringify(agent.snapshot(sidOf(agent)).activeTools),
 		JSON.stringify(sent[1]?.tools),
 	);
-	check("the approval is in the snapshot too", session.snapshot(sidOf(session)).approvals.bash === true, JSON.stringify(session.snapshot(sidOf(session)).approvals));
+	check("the approval is in the snapshot too", agent.snapshot(sidOf(agent)).approvals.bash === true, JSON.stringify(agent.snapshot(sidOf(agent)).approvals));
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
  * The approval gate suspends the run, and the answer starts the run that closes the call.
  *
- * Under the end-restart semantics (ADR-0006 §5) the gate does not park the run in memory and does
- * not write a result: the run ends with the call dangling in the transcript — that dangling call is
+ * Under the end-restart semantics (ADR-0005 §5) the gate does not park the run in memory and does
+	 * not write a result: the run ends with the call dangling in the session — that dangling call is
  * what the banner is derived from — and the answer arrives over REST to start the recovery run,
  * whose first act is to pair the answer with the call and continue. A denial closes the call with
  * the sentence a pressed deny writes; a grant re-runs the call through the gate and the tool itself.
@@ -1139,7 +1139,7 @@ async function exerciseApprovalDenial(): Promise<void> {
 
 	const gatedResults = toolResultTexts(gated);
 	check(
-		"the suspended call has no result in the transcript",
+		"the suspended call has no result in the session",
 		gatedResults.every((text) => !text.includes("needs approval") && !text.includes("denied permission")),
 		JSON.stringify(gatedResults),
 	);
@@ -1176,13 +1176,13 @@ async function exerciseApprovalDenial(): Promise<void> {
 	await within("settle() after the grant", 10_000, granted.settle(sidOf(granted)));
 
 	check("a grant is recorded as the session's own approval choice", granted.getApprovals(sidOf(granted)).read === false);
-	check("the granted call ran and its result is in the transcript", toolResultTexts(granted).some((text) => text.includes("notes.txt")), JSON.stringify(toolResultTexts(granted)));
+	check("the granted call ran and its result is in the session", toolResultTexts(granted).some((text) => text.includes("notes.txt")), JSON.stringify(toolResultTexts(granted)));
 	check("the answered call is no longer waiting", !granted.hasPendingApproval(sidOf(granted), grantedId));
 	check("and the model carried on after the granted call", granted.snapshot(sidOf(granted)).messages.some((message) => message.role === "assistant" && textOf(message) === "done"));
 
 	await granted.close(sidOf(granted));
 
-	// A call that dangles the way a crash leaves one: the tool_use is in the transcript, the result is
+	// A call that dangles the way a crash leaves one: the tool_use is in the session, the result is
 	// not, and the ledger is where the waiting shows. An abandonment keeps its own reason.
 	const abandoned = await openSession();
 	abandoned.sessionManager.appendMessage(bagOf(abandoned), fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })));
@@ -1220,16 +1220,16 @@ async function exerciseToolChangeResend(): Promise<void> {
 	process.stdout.write("tool change resend\n");
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [fakeAssistantMessage("first answer"), fakeAssistantMessage("second answer")]);
-	const session = await openSession();
+	const agent = await openSession();
 
-	await within("the first run", 10_000, session.prompt(sidOf(session), "which tools do you have"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the first run", 10_000, agent.prompt(sidOf(agent), "which tools do you have"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	const dropped = "bash";
-	const narrowed = session.snapshot(sidOf(session)).activeTools.filter((name) => name !== dropped);
-	session.setActiveTools(sidOf(session), narrowed);
-	await within("the second run", 10_000, session.prompt(sidOf(session), "and now"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	const narrowed = agent.snapshot(sidOf(agent)).activeTools.filter((name) => name !== dropped);
+	agent.setActiveTools(sidOf(agent), narrowed);
+	await within("the second run", 10_000, agent.prompt(sidOf(agent), "and now"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	check("the first request declared the tool", sent[0]?.tools.includes(dropped) === true, JSON.stringify(sent[0]?.tools));
 	check(
@@ -1244,11 +1244,11 @@ async function exerciseToolChangeResend(): Promise<void> {
 	);
 	check(
 		"and no system message was recorded for the change",
-		session.snapshot(sidOf(session)).messages.every((message) => message.role !== "system"),
-		JSON.stringify(session.snapshot(sidOf(session)).messages.map((message) => message.role)),
+		agent.snapshot(sidOf(agent)).messages.every((message) => message.role !== "system"),
+		JSON.stringify(agent.snapshot(sidOf(agent)).messages.map((message) => message.role)),
 	);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
@@ -1258,7 +1258,7 @@ async function exerciseToolChangeResend(): Promise<void> {
  * `executionMode` is checked here because it is the reason the table holds no such choice: it is a
  * field on each instance, so narrowing the active set cannot change how a tool runs. What the table
  * does hold is the instances themselves, so `get(name)` answers the same object every time — and the
- * request declares that same object, which is the identity half of ADR-0016. The array is still
+ * request declares that same object, which is the identity half of ADR-0011. The array is still
  * rebuilt per request; only the elements are invariant.
  */
 async function exerciseToolManager(): Promise<void> {
@@ -1298,9 +1298,9 @@ async function exerciseToolManager(): Promise<void> {
 	}
 	check("and so is one that would overwrite a built-in", collision === "Tool already registered: read", collision);
 
-	// The identity ADR-0016 promises is measured per request, and the wire alone cannot show it: a
+	// The identity ADR-0011 promises is measured per request, and the wire alone cannot show it: a
 	// request carries declarations (`toToolDeclaration` replaces each tool with its four declared
-	// fields, and ADR-0015 §2.5 keeps that), so the transport sees names and schemas, never the
+	// fields, and ADR-0010 §2.5 keeps that), so the transport sees names and schemas, never the
 	// instance. What it can show is that the request built a new list. The instance itself is read
 	// where this request's `Context.tools` element is dereferenced — a probe registered on the same
 	// table records `this` from inside its own `execute`.
@@ -1324,13 +1324,13 @@ async function exerciseToolManager(): Promise<void> {
 		fakeAssistantMessage(fakeToolCall("probe", {})),
 		fakeAssistantMessage("second done"),
 	]);
-	const session = await openSession({}, {}, undefined, manager);
-	await within("the run", 10_000, session.prompt(sidOf(session), "probe once"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	const agent = await openSession({}, {}, undefined, manager);
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "probe once"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 	// A narrowing between the two requests: `read` and `probe` stay, `noop` and the rest go.
-	session.setActiveTools(sidOf(session), ["read", "probe"]);
-	await within("the run", 10_000, session.prompt(sidOf(session), "probe once more"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	agent.setActiveTools(sidOf(agent), ["read", "probe"]);
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "probe once more"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	check("the request ran the table's own instance", ran[0] === manager.get("probe"));
 	check("and the next request ran that same one", ran[0] === ran[1]);
@@ -1348,7 +1348,7 @@ async function exerciseToolManager(): Promise<void> {
 	await within("settle()", 10_000, secondSession.settle(sidOf(secondSession)));
 	check("another session ran that same instance too", ran[2] === manager.get("probe"));
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 	await secondSession.close(sidOf(secondSession));
 }
 
@@ -1362,34 +1362,34 @@ async function exerciseActiveTools(): Promise<void> {
 	process.stdout.write("active tools\n");
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [fakeAssistantMessage("first answer"), fakeAssistantMessage("second answer")]);
-	const session = await openSession();
+	const agent = await openSession();
 
 	const changes: string[][] = [];
-	session.onEvent(sidOf(session), (event) => {
+	agent.onEvent(sidOf(agent), (event) => {
 		if (event.type === "config_changed" && event.tools !== undefined) changes.push(event.tools);
 	});
 
-	await within("the run", 10_000, session.prompt(sidOf(session), "what can you do"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
-	check("the registry reports the built-ins", JSON.stringify(session.snapshot(sidOf(session)).allTools) === JSON.stringify(["read", "write", "edit", "glob", "grep", "bash"]), JSON.stringify(session.snapshot(sidOf(session)).allTools));
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "what can you do"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
+	check("the registry reports the built-ins", JSON.stringify(agent.snapshot(sidOf(agent)).allTools) === JSON.stringify(["read", "write", "edit", "glob", "grep", "bash"]), JSON.stringify(agent.snapshot(sidOf(agent)).allTools));
 	check("and the model was offered write", availableTools(sent[0]?.prompt ?? "").includes("write"), JSON.stringify(availableTools(sent[0]?.prompt ?? "")));
 	check("which the request also declared", sent[0]?.tools.includes("write") === true, JSON.stringify(sent[0]?.tools));
 
 	const narrowed = ["read", "edit", "glob", "grep", "bash"];
-	session.setActiveTools(sidOf(session), narrowed);
-	check("snapshot.activeTools loses write", JSON.stringify(session.snapshot(sidOf(session)).activeTools) === JSON.stringify(narrowed), JSON.stringify(session.snapshot(sidOf(session)).activeTools));
-	check("get activeTools() loses write", JSON.stringify(session.snapshot(sidOf(session)).activeTools) === JSON.stringify(narrowed), JSON.stringify(session.snapshot(sidOf(session)).activeTools));
-	check("allTools still reports every registered tool", session.snapshot(sidOf(session)).allTools.length === 6, JSON.stringify(session.snapshot(sidOf(session)).allTools));
+	agent.setActiveTools(sidOf(agent), narrowed);
+	check("snapshot.activeTools loses write", JSON.stringify(agent.snapshot(sidOf(agent)).activeTools) === JSON.stringify(narrowed), JSON.stringify(agent.snapshot(sidOf(agent)).activeTools));
+	check("get activeTools() loses write", JSON.stringify(agent.snapshot(sidOf(agent)).activeTools) === JSON.stringify(narrowed), JSON.stringify(agent.snapshot(sidOf(agent)).activeTools));
+	check("allTools still reports every registered tool", agent.snapshot(sidOf(agent)).allTools.length === 6, JSON.stringify(agent.snapshot(sidOf(agent)).allTools));
 	check("the change is announced, so a client needs no new snapshot", JSON.stringify(changes) === JSON.stringify([narrowed]), JSON.stringify(changes));
 
-	await within("the run", 10_000, session.prompt(sidOf(session), "and now"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "and now"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 	check("the next prompt no longer offers write", availableTools(sent[1]?.prompt ?? "").includes("write") === false, JSON.stringify(availableTools(sent[1]?.prompt ?? "")));
 	check("while keeping the other tools", availableTools(sent[1]?.prompt ?? "").includes("read") && availableTools(sent[1]?.prompt ?? "").includes("bash"), JSON.stringify(availableTools(sent[1]?.prompt ?? "")));
 	check("and the request declares the narrower set", JSON.stringify(sent[1]?.tools) === JSON.stringify(narrowed), JSON.stringify(sent[1]?.tools));
-	check("both asks are in the transcript", textsOf(session).length === 2, JSON.stringify(textsOf(session)));
+	check("both asks are in the session", textsOf(agent).length === 2, JSON.stringify(textsOf(agent)));
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
@@ -1398,46 +1398,46 @@ async function exerciseActiveTools(): Promise<void> {
  * Deactivating a tool takes it out of the snapshot, the prompt, and the declarations the model gets
  * — that half is asserted by `exerciseActiveTools`, and the narrowing below is the other half of it:
  * a model that asks anyway names a tool this request no longer offers. The table still holds it
- * (ADR-0016), so "the name exists" and "this run may call it" are two answers, and the run's own
+ * (ADR-0011), so "the name exists" and "this run may call it" are two answers, and the run's own
  * list is the one that refuses: the same name runs again, unchanged, once it is switched back on.
  */
 async function exerciseDeactivatedToolCall(): Promise<void> {
 	process.stdout.write("deactivated tool call\n");
-	const session = await openSession();
-	session.setActiveTools(sidOf(session), ["read", "edit", "glob", "grep", "bash"]);
+	const agent = await openSession();
+	agent.setActiveTools(sidOf(agent), ["read", "edit", "glob", "grep", "bash"]);
 
 	const ends: { toolName: string; isError: boolean; text: string }[] = [];
-	session.onEvent(sidOf(session), (event) => {
+	agent.onEvent(sidOf(agent), (event) => {
 		if (event.type === "tool_execution_end") {
 			ends.push({ toolName: event.toolName, isError: event.isError, text: textOf({ content: event.result?.content } as Message) });
 		}
 	});
 
 	recordRequests([], [fakeAssistantMessage(fakeToolCall("write", { path: "blocked.txt", content: "nope" })), fakeAssistantMessage("done")]);
-	await within("the run", 10_000, session.prompt(sidOf(session), "write blocked.txt"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "write blocked.txt"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	check("the deactivated call ran and failed", ends.length === 1 && ends[0]?.toolName === "write" && ends[0]?.isError === true, JSON.stringify(ends));
 	check("with a not-found error rather than a result", ends[0]?.text.includes("not found") === true, JSON.stringify(ends[0]?.text));
 	check("the tool did not touch the directory", (await access(join(root, "blocked.txt")).then(() => true, () => false)) === false);
 	check(
-		"the transcript records it as an errored tool result",
-		allMessages(session).some((message) => (message as { role?: string; isError?: boolean }).role === "toolResult" && (message as { isError?: boolean }).isError === true),
-		JSON.stringify(allMessages(session).map((message) => message.role)),
+		"the session records it as an errored tool result",
+		allMessages(agent).some((message) => (message as { role?: string; isError?: boolean }).role === "toolResult" && (message as { isError?: boolean }).isError === true),
+		JSON.stringify(allMessages(agent).map((message) => message.role)),
 	);
-	check("the run carried on to an answer", session.snapshot(sidOf(session)).messages.some((message) => message.role === "assistant" && textOf(message) === "done"));
+	check("the run carried on to an answer", agent.snapshot(sidOf(agent)).messages.some((message) => message.role === "assistant" && textOf(message) === "done"));
 
 	// The refusal is the list's, not the table's: the same call, the same table, the tool switched
 	// back on — and it writes. A refusal that came from `get` finding nothing could not be undone
 	// without a restart.
-	session.setActiveTools(sidOf(session), ["read", "write", "edit", "glob", "grep", "bash"]);
+	agent.setActiveTools(sidOf(agent), ["read", "write", "edit", "glob", "grep", "bash"]);
 	recordRequests([], [fakeAssistantMessage(fakeToolCall("write", { path: "allowed.txt", content: "yes" })), fakeAssistantMessage("written")]);
-	await within("the run", 10_000, session.prompt(sidOf(session), "write allowed.txt"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "write allowed.txt"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 	check("switched back on, the same call runs", ends[1]?.toolName === "write" && ends[1]?.isError === false, JSON.stringify(ends[1]));
 	check("and reaches the directory", (await access(join(root, "allowed.txt")).then(() => true, () => false)) === true);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
@@ -1455,13 +1455,13 @@ async function exerciseDeactivatedToolCall(): Promise<void> {
 async function exerciseDeactivatedToolBatch(): Promise<void> {
 	process.stdout.write("deactivated tool in a batch\n");
 	await writeFile(join(root, "batch.txt"), "batch\n");
-	const session = await openSession();
-	session.setActiveTools(sidOf(session), ["read", "glob", "grep", "edit"]);
+	const agent = await openSession();
+	agent.setActiveTools(sidOf(agent), ["read", "glob", "grep", "edit"]);
 
 	const log: string[] = [];
 	/** What the `bash` call ended with, so "refused" is read off its result and not off its name. */
 	const bashEnd: { isError: boolean; text: string }[] = [];
-	session.onEvent(sidOf(session), (event) => {
+	agent.onEvent(sidOf(agent), (event) => {
 		if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
 			log.push(`${event.type === "tool_execution_start" ? "start" : "end"}:${event.toolName}`);
 		}
@@ -1474,8 +1474,8 @@ async function exerciseDeactivatedToolBatch(): Promise<void> {
 		fakeAssistantMessage([fakeToolCall("read", { path: "batch.txt" }), fakeToolCall("bash", { command: "echo hi" })]),
 		fakeAssistantMessage("done"),
 	]);
-	await within("the run", 10_000, session.prompt(sidOf(session), "read the file and run echo"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "read the file and run echo"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	check(
 		"both calls were announced before either result landed",
@@ -1488,35 +1488,35 @@ async function exerciseDeactivatedToolBatch(): Promise<void> {
 		JSON.stringify(bashEnd),
 	);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /** An unknown name is refused before anything moves, so the session keeps the set it had. */
 async function exerciseUnknownTool(): Promise<void> {
 	process.stdout.write("unknown tool\n");
-	const session = await openSession();
-	const before = JSON.stringify(session.snapshot(sidOf(session)).activeTools);
+	const agent = await openSession();
+	const before = JSON.stringify(agent.snapshot(sidOf(agent)).activeTools);
 
 	const seen: AgentSessionEvent[] = [];
-	session.onEvent(sidOf(session), (event) => seen.push(event));
+	agent.onEvent(sidOf(agent), (event) => seen.push(event));
 
 	let threw = false;
 	try {
-		session.setActiveTools(sidOf(session), ["read", "nope"]);
+		agent.setActiveTools(sidOf(agent), ["read", "nope"]);
 	} catch {
 		threw = true;
 	}
 	check("setActiveTools throws on an unknown name", threw);
-	check("the session keeps its previous active set", JSON.stringify(session.snapshot(sidOf(session)).activeTools) === before, `${before} -> ${JSON.stringify(session.snapshot(sidOf(session)).activeTools)}`);
+	check("the session keeps its previous active set", JSON.stringify(agent.snapshot(sidOf(agent)).activeTools) === before, `${before} -> ${JSON.stringify(agent.snapshot(sidOf(agent)).activeTools)}`);
 	check("and no change was announced", seen.every((event) => event.type !== "config_changed"), JSON.stringify(seen.map(labelOf)));
 
 	fake.setResponses([fakeAssistantMessage("still here")]);
-	const run = await within("the run", 10_000, session.prompt(sidOf(session), "still working?"));
+	const run = await within("the run", 10_000, agent.prompt(sidOf(agent), "still working?"));
 	check("the session still runs after the refusal", run.ok);
-	await within("settle()", 10_000, session.settle(sidOf(session)));
-	check("and answers", session.snapshot(sidOf(session)).messages.some((message) => message.role === "assistant" && textOf(message) === "still here"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
+	check("and answers", agent.snapshot(sidOf(agent)).messages.some((message) => message.role === "assistant" && textOf(message) === "still here"));
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /** No active tools is a conversation without tools, not a broken session. */
@@ -1524,22 +1524,22 @@ async function exerciseEmptyToolSet(): Promise<void> {
 	process.stdout.write("empty tool set\n");
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [fakeAssistantMessage("a conversation it is")]);
-	const session = await openSession();
+	const agent = await openSession();
 
-	session.setActiveTools(sidOf(session), []);
-	check("an empty active set is allowed", JSON.stringify(session.snapshot(sidOf(session)).activeTools) === "[]", JSON.stringify(session.snapshot(sidOf(session)).activeTools));
-	check("with nothing active and everything still registered", session.snapshot(sidOf(session)).allTools.length === 6, JSON.stringify(session.snapshot(sidOf(session)).allTools));
+	agent.setActiveTools(sidOf(agent), []);
+	check("an empty active set is allowed", JSON.stringify(agent.snapshot(sidOf(agent)).activeTools) === "[]", JSON.stringify(agent.snapshot(sidOf(agent)).activeTools));
+	check("with nothing active and everything still registered", agent.snapshot(sidOf(agent)).allTools.length === 6, JSON.stringify(agent.snapshot(sidOf(agent)).allTools));
 
-	const run = await within("the run", 10_000, session.prompt(sidOf(session), "hello without tools"));
+	const run = await within("the run", 10_000, agent.prompt(sidOf(agent), "hello without tools"));
 	check("a session with no tools still holds a conversation", run.ok);
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	check("the model was told there are none", availableTools(sent[0]?.prompt ?? "") === "none.", JSON.stringify(availableTools(sent[0]?.prompt ?? "")));
 	check("and was offered no declarations at all", JSON.stringify(sent[0]?.tools) === "[]", JSON.stringify(sent[0]?.tools));
-	check("the question is in the transcript", textsOf(session).includes("hello without tools"), JSON.stringify(textsOf(session)));
-	check("and so is the answer", session.snapshot(sidOf(session)).messages.some((message) => message.role === "assistant" && textOf(message) === "a conversation it is"));
+	check("the question is in the session", textsOf(agent).includes("hello without tools"), JSON.stringify(textsOf(agent)));
+	check("and so is the answer", agent.snapshot(sidOf(agent)).messages.some((message) => message.role === "assistant" && textOf(message) === "a conversation it is"));
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /** One failed provider call, in the shape the scripted transport streams: an error with no content. */
@@ -1561,13 +1561,13 @@ interface RetryTrace {
 /**
  * Two retryable failures and then a success: one turn, three calls, one assistant message.
  *
- * The failed attempts must be invisible everywhere the conversation is read: the transcript, the
- * transcript the model is sent next, and the user's own text, which `prompt` persisted before the
+ * The failed attempts must be invisible everywhere the conversation is read: the session record, the
+ * context the model is sent next, and the user's own text, which `prompt` persisted before the
  * first attempt and which no retry may write again.
  */
 async function exerciseRetry(): Promise<void> {
 	process.stdout.write("retry\n");
-	const base = fake.state.callCount;
+	const base = fake.fakeState.callCount;
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [
 		failedAttempt("503 service unavailable"),
@@ -1575,11 +1575,11 @@ async function exerciseRetry(): Promise<void> {
 		fakeAssistantMessage("recovered"),
 		fakeAssistantMessage("second answer"),
 	]);
-	const session = await openSession();
+	const agent = await openSession();
 
 	const trace: RetryTrace[] = [];
 	const live: { retrying: boolean; attempt: number }[] = [];
-	session.onEvent(sidOf(session), (event) => {
+	agent.onEvent(sidOf(agent), (event) => {
 		if (event.type === "retry_scheduled") {
 			trace.push({
 				type: event.type,
@@ -1588,7 +1588,7 @@ async function exerciseRetry(): Promise<void> {
 				delayMs: event.delayMs,
 				errorMessage: event.errorMessage,
 			});
-			live.push({ retrying: session.snapshot(sidOf(session)).isRetrying, attempt: session.snapshot(sidOf(session)).retryAttempt });
+			live.push({ retrying: agent.snapshot(sidOf(agent)).isRetrying, attempt: agent.snapshot(sidOf(agent)).retryAttempt });
 			return;
 		}
 		if (event.type === "retry_start") {
@@ -1600,8 +1600,8 @@ async function exerciseRetry(): Promise<void> {
 		}
 	});
 
-	await within("the run", 10_000, session.prompt(sidOf(session), "retry question"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "retry question"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	check(
 		"each failure is announced, waited out, and closed once",
@@ -1627,33 +1627,33 @@ async function exerciseRetry(): Promise<void> {
 		JSON.stringify(live),
 	);
 
-	check("three provider calls answered one question", fake.state.callCount - base === 3, String(fake.state.callCount - base));
+	check("three provider calls answered one question", fake.fakeState.callCount - base === 3, String(fake.fakeState.callCount - base));
 	check(
-		"the transcript holds one user turn",
-		JSON.stringify(textsOf(session)) === JSON.stringify(["retry question"]),
-		JSON.stringify(textsOf(session)),
+		"the session holds one user turn",
+		JSON.stringify(textsOf(agent)) === JSON.stringify(["retry question"]),
+		JSON.stringify(textsOf(agent)),
 	);
-	const assistants = session.snapshot(sidOf(session)).messages.filter((message) => message.role === "assistant");
+	const assistants = agent.snapshot(sidOf(agent)).messages.filter((message) => message.role === "assistant");
 	check(
 		"and one assistant message, the answer that came back",
 		assistants.length === 1 && textOf(assistants[0]!) === "recovered",
 		JSON.stringify(assistants.map(textOf)),
 	);
 	check(
-		"no failed attempt reached the transcript",
-		allMessages(session).every(
+		"no failed attempt reached the session",
+		allMessages(agent).every(
 			(message) => !textOf(message).includes("503") && !textOf(message).includes("overloaded"),
 		),
-		JSON.stringify(allMessages(session).map((message) => [message.role, textOf(message)])),
+		JSON.stringify(allMessages(agent).map((message) => [message.role, textOf(message)])),
 	);
 	check(
 		"and nothing is retrying once it answered",
-		session.snapshot(sidOf(session)).isRetrying === false && session.snapshot(sidOf(session)).retryAttempt === 0 && session.snapshot(sidOf(session)).isRetrying === false,
-		`retrying=${session.snapshot(sidOf(session)).isRetrying} attempt=${session.snapshot(sidOf(session)).retryAttempt}`,
+		agent.snapshot(sidOf(agent)).isRetrying === false && agent.snapshot(sidOf(agent)).retryAttempt === 0 && agent.snapshot(sidOf(agent)).isRetrying === false,
+		`retrying=${agent.snapshot(sidOf(agent)).isRetrying} attempt=${agent.snapshot(sidOf(agent)).retryAttempt}`,
 	);
 
-	await within("the second run", 10_000, session.prompt(sidOf(session), "second question"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the second run", 10_000, agent.prompt(sidOf(agent), "second question"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	const next = sent[3];
 	check(
@@ -1672,7 +1672,7 @@ async function exerciseRetry(): Promise<void> {
 		JSON.stringify(next?.roles),
 	);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
@@ -1683,52 +1683,52 @@ async function exerciseRetry(): Promise<void> {
  */
 async function exerciseNonRetryableError(): Promise<void> {
 	process.stdout.write("non-retryable error\n");
-	const base = fake.state.callCount;
+	const base = fake.fakeState.callCount;
 	fake.setResponses([failedAttempt("insufficient_quota: billing hard limit reached")]);
-	const session = await openSession();
+	const agent = await openSession();
 
 	const trace: string[] = [];
-	session.onEvent(sidOf(session), (event) => {
+	agent.onEvent(sidOf(agent), (event) => {
 		if (event.type.startsWith("retry_")) trace.push(event.type);
 	});
 
-	await within("the run", 10_000, session.prompt(sidOf(session), "quota question"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "quota question"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
-	check("the provider was asked once", fake.state.callCount - base === 1, String(fake.state.callCount - base));
+	check("the provider was asked once", fake.fakeState.callCount - base === 1, String(fake.fakeState.callCount - base));
 	check("nothing was retried", trace.length === 0, JSON.stringify(trace));
 	check(
 		"the error is what the run ends on",
-		session.snapshot(sidOf(session)).messages.some(
+		agent.snapshot(sidOf(agent)).messages.some(
 			(message) =>
 				message.role === "assistant" &&
 				`${(message as { errorMessage?: string }).errorMessage ?? ""}`.includes("insufficient_quota"),
 		),
-		JSON.stringify(session.snapshot(sidOf(session)).messages.map((message) => [message.role, textOf(message)])),
+		JSON.stringify(agent.snapshot(sidOf(agent)).messages.map((message) => [message.role, textOf(message)])),
 	);
 	check(
 		"and nothing claims to be retrying",
-		session.snapshot(sidOf(session)).isRetrying === false && session.snapshot(sidOf(session)).retryAttempt === 0,
-		`retrying=${session.snapshot(sidOf(session)).isRetrying} attempt=${session.snapshot(sidOf(session)).retryAttempt}`,
+		agent.snapshot(sidOf(agent)).isRetrying === false && agent.snapshot(sidOf(agent)).retryAttempt === 0,
+		`retrying=${agent.snapshot(sidOf(agent)).isRetrying} attempt=${agent.snapshot(sidOf(agent)).retryAttempt}`,
 	);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
-/** The budget runs out: the last error is the transcript's, and the session stops retrying. */
+/** The budget runs out: the last error is the session record's, and the session stops retrying. */
 async function exerciseRetryExhaustion(): Promise<void> {
 	process.stdout.write("retry exhausted\n");
-	const base = fake.state.callCount;
+	const base = fake.fakeState.callCount;
 	fake.setResponses([
 		failedAttempt("503 first"),
 		failedAttempt("503 second"),
 		failedAttempt("503 third"),
 		fakeAssistantMessage("never reached"),
 	]);
-	const session = await openSession({ retry: retryPolicy({ maxRetries: 2 }) });
+	const agent = await openSession({ retry: retryPolicy({ maxRetries: 2 }) });
 
 	const trace: RetryTrace[] = [];
-	session.onEvent(sidOf(session), (event) => {
+	agent.onEvent(sidOf(agent), (event) => {
 		if (event.type === "retry_scheduled") {
 			trace.push({ type: event.type, attempt: event.attempt, maxAttempts: event.maxAttempts });
 		}
@@ -1737,10 +1737,10 @@ async function exerciseRetryExhaustion(): Promise<void> {
 		}
 	});
 
-	await within("the run", 10_000, session.prompt(sidOf(session), "doomed question"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "doomed question"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
-	check("the budget is the first call plus maxRetries", fake.state.callCount - base === 3, String(fake.state.callCount - base));
+	check("the budget is the first call plus maxRetries", fake.fakeState.callCount - base === 3, String(fake.fakeState.callCount - base));
 	check(
 		"two retries were scheduled and closed",
 		JSON.stringify(trace) ===
@@ -1752,22 +1752,22 @@ async function exerciseRetryExhaustion(): Promise<void> {
 		JSON.stringify(trace),
 	);
 	check(
-		"the last error is the one the transcript shows",
-		session.snapshot(sidOf(session)).messages.some(
+		"the last error is the one the session shows",
+		agent.snapshot(sidOf(agent)).messages.some(
 			(message) => message.role === "assistant" && (message as { errorMessage?: string }).errorMessage === "503 third",
 		),
-		JSON.stringify(session.snapshot(sidOf(session)).messages.map((message) => [message.role, textOf(message)])),
+		JSON.stringify(agent.snapshot(sidOf(agent)).messages.map((message) => [message.role, textOf(message)])),
 	);
 	check(
 		"and the session stopped retrying",
-		session.snapshot(sidOf(session)).isRetrying === false &&
-			session.snapshot(sidOf(session)).retryAttempt === 0 &&
-			session.snapshot(sidOf(session)).isRetrying === false &&
-			session.snapshot(sidOf(session)).retryAttempt === 0,
-		`retrying=${session.snapshot(sidOf(session)).isRetrying} attempt=${session.snapshot(sidOf(session)).retryAttempt}`,
+		agent.snapshot(sidOf(agent)).isRetrying === false &&
+			agent.snapshot(sidOf(agent)).retryAttempt === 0 &&
+			agent.snapshot(sidOf(agent)).isRetrying === false &&
+			agent.snapshot(sidOf(agent)).retryAttempt === 0,
+		`retrying=${agent.snapshot(sidOf(agent)).isRetrying} attempt=${agent.snapshot(sidOf(agent)).retryAttempt}`,
 	);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
@@ -1779,84 +1779,84 @@ async function exerciseRetryExhaustion(): Promise<void> {
  */
 async function exerciseRetryAbort(): Promise<void> {
 	process.stdout.write("retry abort\n");
-	const base = fake.state.callCount;
+	const base = fake.fakeState.callCount;
 	fake.setResponses([failedAttempt("503 while aborted"), fakeAssistantMessage("never reached")]);
 	// A backoff long enough to be cancelled inside it, and short enough to fail fast if it is not.
-	const session = await openSession({ retry: retryPolicy({ baseDelayMs: 1_000 }) });
+	const agent = await openSession({ retry: retryPolicy({ baseDelayMs: 1_000 }) });
 
 	const scheduled = new Promise<void>((resolve) => {
-		session.onEvent(sidOf(session), (event) => {
+		agent.onEvent(sidOf(agent), (event) => {
 			if (event.type === "retry_scheduled") resolve();
 		});
 	});
 
-	const running = session.prompt(sidOf(session), "abort question");
+	const running = agent.prompt(sidOf(agent), "abort question");
 	await within("the backoff", 5_000, scheduled);
 	check(
 		"the retry is pending, not the provider",
-		session.snapshot(sidOf(session)).isRetrying === true && session.snapshot(sidOf(session)).retryAttempt === 1,
-		String(session.snapshot(sidOf(session)).retryAttempt),
+		agent.snapshot(sidOf(agent)).isRetrying === true && agent.snapshot(sidOf(agent)).retryAttempt === 1,
+		String(agent.snapshot(sidOf(agent)).retryAttempt),
 	);
 
-	const aborted = await within("abort()", 5_000, session.abort(sidOf(session)));
+	const aborted = await within("abort()", 5_000, agent.abort(sidOf(agent)));
 	check("abort() returns", aborted.ok);
-	const settled = await within("settle()", 2_000, session.settle(sidOf(session)));
+	const settled = await within("settle()", 2_000, agent.settle(sidOf(agent)));
 	check("settle() resolves instead of waiting out the backoff", settled.ok);
-	check("the retry is over", session.snapshot(sidOf(session)).isRetrying === false && session.snapshot(sidOf(session)).retryAttempt === 0, `retrying=${session.snapshot(sidOf(session)).isRetrying}`);
-	check("the provider was asked once", fake.state.callCount - base === 1, String(fake.state.callCount - base));
+	check("the retry is over", agent.snapshot(sidOf(agent)).isRetrying === false && agent.snapshot(sidOf(agent)).retryAttempt === 0, `retrying=${agent.snapshot(sidOf(agent)).isRetrying}`);
+	check("the provider was asked once", fake.fakeState.callCount - base === 1, String(fake.fakeState.callCount - base));
 	check(
 		"the partial turn is on disk",
-		entryIdsFor(session, "abort question").length === 1,
-		JSON.stringify(entriesOf(session).map((entry) => entry.type)),
+		entryIdsFor(agent, "abort question").length === 1,
+		JSON.stringify(entriesOf(agent).map((entry) => entry.type)),
 	);
 
 	await within("the run", 5_000, running);
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /** `retry.enabled: false` is the behaviour before retries existed, failure for failure. */
 async function exerciseRetryDisabled(): Promise<void> {
 	process.stdout.write("retry disabled\n");
-	const base = fake.state.callCount;
+	const base = fake.fakeState.callCount;
 	fake.setResponses([failedAttempt("503 no retries for me"), fakeAssistantMessage("plain answer")]);
-	const session = await openSession({ retry: retryPolicy({ enabled: false }) });
+	const agent = await openSession({ retry: retryPolicy({ enabled: false }) });
 
 	const trace: string[] = [];
-	session.onEvent(sidOf(session), (event) => {
+	agent.onEvent(sidOf(agent), (event) => {
 		if (event.type.startsWith("retry_")) trace.push(event.type);
 	});
 
-	await within("the failed run", 10_000, session.prompt(sidOf(session), "no retry question"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the failed run", 10_000, agent.prompt(sidOf(agent), "no retry question"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
-	check("one call, as before", fake.state.callCount - base === 1, String(fake.state.callCount - base));
+	check("one call, as before", fake.fakeState.callCount - base === 1, String(fake.fakeState.callCount - base));
 	check("no retry was announced", trace.length === 0, JSON.stringify(trace));
 	check(
 		"the error ends the run, as before",
-		session.snapshot(sidOf(session)).messages.some(
+		agent.snapshot(sidOf(agent)).messages.some(
 			(message) =>
 				message.role === "assistant" &&
 				(message as { errorMessage?: string }).errorMessage === "503 no retries for me",
 		),
-		JSON.stringify(session.snapshot(sidOf(session)).messages.map((message) => [message.role, textOf(message)])),
+		JSON.stringify(agent.snapshot(sidOf(agent)).messages.map((message) => [message.role, textOf(message)])),
 	);
 
 	fake.setResponses([fakeAssistantMessage("plain answer")]);
-	await within("the healthy run", 10_000, session.prompt(sidOf(session), "and now normally"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the healthy run", 10_000, agent.prompt(sidOf(agent), "and now normally"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	check(
 		"a healthy call still streams through untouched",
-		session.snapshot(sidOf(session)).messages.some((message) => message.role === "assistant" && textOf(message) === "plain answer"),
-		JSON.stringify(session.snapshot(sidOf(session)).messages.map((message) => [message.role, textOf(message)])),
+		agent.snapshot(sidOf(agent)).messages.some((message) => message.role === "assistant" && textOf(message) === "plain answer"),
+		JSON.stringify(agent.snapshot(sidOf(agent)).messages.map((message) => [message.role, textOf(message)])),
 	);
 	check(
 		"and the snapshot never claims to be retrying",
-		session.snapshot(sidOf(session)).isRetrying === false && session.snapshot(sidOf(session)).retryAttempt === 0,
-		`retrying=${session.snapshot(sidOf(session)).isRetrying}`,
+		agent.snapshot(sidOf(agent)).isRetrying === false && agent.snapshot(sidOf(agent)).retryAttempt === 0,
+		`retrying=${agent.snapshot(sidOf(agent)).isRetrying}`,
 	);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
@@ -1869,43 +1869,43 @@ async function exerciseRetryDisabled(): Promise<void> {
  */
 async function exerciseContextOverflow(): Promise<void> {
 	process.stdout.write("context overflow is not transient\n");
-	const base = fake.state.callCount;
+	const base = fake.fakeState.callCount;
 	fake.setResponses([
 		failedAttempt("503 prompt is too long: 250000 tokens > 200000 maximum"),
 		fakeAssistantMessage("never reached"),
 	]);
-	const session = await openSession();
+	const agent = await openSession();
 
 	const trace: string[] = [];
-	session.onEvent(sidOf(session), (event) => {
+	agent.onEvent(sidOf(agent), (event) => {
 		if (event.type.startsWith("retry_")) trace.push(event.type);
 	});
 
-	await within("the run", 10_000, session.prompt(sidOf(session), "overflow question"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "overflow question"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
-	check("an overflow is asked once", fake.state.callCount - base === 1, String(fake.state.callCount - base));
+	check("an overflow is asked once", fake.fakeState.callCount - base === 1, String(fake.fakeState.callCount - base));
 	check("no retry was scheduled for it", trace.length === 0, JSON.stringify(trace));
 	check(
 		"and the overflow is what the run ends on",
-		session.snapshot(sidOf(session)).messages.some(
+		agent.snapshot(sidOf(agent)).messages.some(
 			(message) =>
 				message.role === "assistant" &&
 				`${(message as { errorMessage?: string }).errorMessage ?? ""}`.includes("prompt is too long"),
 		),
-		JSON.stringify(session.snapshot(sidOf(session)).messages.map((message) => [message.role, textOf(message)])),
+		JSON.stringify(agent.snapshot(sidOf(agent)).messages.map((message) => [message.role, textOf(message)])),
 	);
 	check(
 		"with nothing left retrying",
-		session.snapshot(sidOf(session)).isRetrying === false && session.snapshot(sidOf(session)).retryAttempt === 0,
-		`retrying=${session.snapshot(sidOf(session)).isRetrying}`,
+		agent.snapshot(sidOf(agent)).isRetrying === false && agent.snapshot(sidOf(agent)).retryAttempt === 0,
+		`retrying=${agent.snapshot(sidOf(agent)).isRetrying}`,
 	);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
- * A summarization that fails leaves the transcript exactly as it was and says so.
+ * A summarization that fails leaves the session exactly as it was and says so.
  *
  * This is the case that matters most about summary-based compaction: the summary is what replaces the
  * history, so a partial or failed one must never become the checkpoint. The third request is where the
@@ -1920,10 +1920,10 @@ async function exerciseCompactionFailure(): Promise<void> {
 		failedAttempt("summarization blew up"),
 		fakeAssistantMessage("answer three"),
 	]);
-	const session = await openSession({}, { models: windowedRows(33_035) });
+	const agent = await openSession({}, { models: windowedRows(33_035) });
 
 	const announced: string[] = [];
-	session.onEvent(sidOf(session), (event) => {
+	agent.onEvent(sidOf(agent), (event) => {
 		if (event.type === "compaction" || event.type === "compaction_failed") announced.push(event.type);
 	});
 
@@ -1933,16 +1933,16 @@ async function exerciseCompactionFailure(): Promise<void> {
 		"question three with enough words to estimate tokens",
 	];
 	for (const text of questions) {
-		const run = await within("a run", 10_000, session.prompt(sidOf(session), text));
+		const run = await within("a run", 10_000, agent.prompt(sidOf(agent), text));
 		check(`"${text.slice(0, 12)}..." completes`, run.ok);
 	}
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	check("the failure is announced and no compaction is", JSON.stringify(announced) === JSON.stringify(["compaction_failed"]), JSON.stringify(announced));
 	check(
 		"nothing was written as a checkpoint",
-		entriesOf(session).every((entry) => entry.type !== "compaction"),
-		JSON.stringify(entriesOf(session).map((entry) => entry.type)),
+		entriesOf(agent).every((entry) => entry.type !== "compaction"),
+		JSON.stringify(entriesOf(agent).map((entry) => entry.type)),
 	);
 	check(
 		"so the next request still carries what it would have replaced",
@@ -1950,9 +1950,9 @@ async function exerciseCompactionFailure(): Promise<void> {
 			(sent[3]?.texts ?? []).some((text) => text.includes("answer one")),
 		JSON.stringify(sent[3]?.texts),
 	);
-	check("and the run carried on to an answer", session.snapshot(sidOf(session)).messages.some((message) => message.role === "assistant" && textOf(message) === "answer three"));
+	check("and the run carried on to an answer", agent.snapshot(sidOf(agent)).messages.some((message) => message.role === "assistant" && textOf(message) === "answer three"));
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
@@ -1982,24 +1982,24 @@ async function exerciseModelFromRow(): Promise<void> {
 
 	const keyedRows: ModelConfig[] = [{ ...ROW, name: "keyed", apiKey: "first-key", baseUrl: "http://127.0.0.1:1/v1" }];
 	fake.setResponses([fakeAssistantMessage("answered")]);
-	const session = await openSession({}, { models: keyedRows, api: recording });
-	await within("the run", 10_000, session.prompt(sidOf(session), "hello"));
+	const agent = await openSession({}, { models: keyedRows, api: recording });
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "hello"));
 	check("the model carries the row's key", sent[0]?.key === "first-key", String(sent[0]?.key));
 	check(
 		"and the transport is handed the same key",
 		sent[0]?.alsoInOptions === "first-key",
 		String(sent[0]?.alsoInOptions),
 	);
-	check("the model names the row it came from", session.snapshot(sidOf(session)).model === "keyed", session.snapshot(sidOf(session)).model);
+	check("the model names the row it came from", agent.snapshot(sidOf(agent)).model === "keyed", agent.snapshot(sidOf(agent)).model);
 
 	// No catalog is rebuilt and no session reopened: the row is read again before the next request, so
 	// every field of it is as fresh as the file was — not just the key.
-	const recordedOf = (): string => JSON.stringify(session.sessionManager.getRecordedSettings(bagOf(session)).model);
+	const recordedOf = (): string => JSON.stringify(agent.sessionManager.getRecordedSettings(bagOf(agent)).model);
 	const recordedBefore = recordedOf();
 	keyedRows[0]!.apiKey = "corrected-key";
 	keyedRows[0]!.baseUrl = "http://127.0.0.1:2/v1";
 	fake.setResponses([fakeAssistantMessage("answered again")]);
-	await within("the second run", 10_000, session.prompt(sidOf(session), "again"));
+	await within("the second run", 10_000, agent.prompt(sidOf(agent), "again"));
 	check("a corrected key is used by the next message", sent[1]?.key === "corrected-key", String(sent[1]?.key));
 	check("and so is a moved endpoint", sent[1]?.baseUrl === "http://127.0.0.1:2/v1", String(sent[1]?.baseUrl));
 	// Neither of those is part of what the session claims about the model, so neither may rewrite the
@@ -2009,15 +2009,15 @@ async function exerciseModelFromRow(): Promise<void> {
 	// A wire id that moves is a different model answering, and the session says so.
 	keyedRows[0]!.id = "faux-2";
 	fake.setResponses([fakeAssistantMessage("answered a third time")]);
-	await within("the third run", 10_000, session.prompt(sidOf(session), "and again"));
+	await within("the third run", 10_000, agent.prompt(sidOf(agent), "and again"));
 	check("a renamed wire id reaches the request", sent[2]?.id === "faux-2", String(sent[2]?.id));
-	check("and the session stays on the row it came from", session.snapshot(sidOf(session)).model === "keyed", session.snapshot(sidOf(session)).model);
+	check("and the session stays on the row it came from", agent.snapshot(sidOf(agent)).model === "keyed", agent.snapshot(sidOf(agent)).model);
 	check("and records the id it now answers to", recordedOf() === JSON.stringify({ name: "keyed", modelId: "faux-2" }), recordedOf());
 	fake.setResponses([fakeAssistantMessage("answered a fourth time")]);
-	await within("the fourth run", 10_000, session.prompt(sidOf(session), "once more"));
+	await within("the fourth run", 10_000, agent.prompt(sidOf(agent), "once more"));
 	check("while a request on the same id records nothing new", recordedOf() === JSON.stringify({ name: "keyed", modelId: "faux-2" }), recordedOf());
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
@@ -2036,40 +2036,40 @@ async function exerciseModelSelection(): Promise<void> {
 	const thinkerRows: ModelConfig[] = [{ ...ROW, name: "thinker", id: "claude-sonnet-4-5" }];
 	const scripted = createFakeTransport();
 	scripted.setResponses([fakeAssistantMessage("first")]);
-	const session = await openSession({}, { models: thinkerRows, api: scripted.api });
+	const agent = await openSession({}, { models: thinkerRows, api: scripted.api });
 
-	check("a session opens at off, because nothing has been asked for", session.snapshot(sidOf(session)).thinkingLevel === "off", session.snapshot(sidOf(session)).thinkingLevel);
+	check("a session opens at off, because nothing has been asked for", agent.snapshot(sidOf(agent)).thinkingLevel === "off", agent.snapshot(sidOf(agent)).thinkingLevel);
 	check(
 		"and offers every level the app has",
-		JSON.stringify(session.snapshot(sidOf(session)).thinkingLevels) === JSON.stringify(["off", "low", "high", "max"]),
-		JSON.stringify(session.snapshot(sidOf(session)).thinkingLevels),
+		JSON.stringify(agent.snapshot(sidOf(agent)).thinkingLevels) === JSON.stringify(["off", "low", "high", "max"]),
+		JSON.stringify(agent.snapshot(sidOf(agent)).thinkingLevels),
 	);
 
-	const levelsOf = (): string | undefined => session.sessionManager.getRecordedSettings(bagOf(session)).thinkingLevel;
-	session.applyModelSelection(sidOf(session), { thinkingLevel: "high" });
-	check("choosing a level moves the session", session.snapshot(sidOf(session)).thinkingLevel === "high", session.snapshot(sidOf(session)).thinkingLevel);
+	const levelsOf = (): string | undefined => agent.sessionManager.getRecordedSettings(bagOf(agent)).thinkingLevel;
+	agent.applyModelSelection(sidOf(agent), { thinkingLevel: "high" });
+	check("choosing a level moves the session", agent.snapshot(sidOf(agent)).thinkingLevel === "high", agent.snapshot(sidOf(agent)).thinkingLevel);
 	// The choice in force lives in memory now (issue 03 §7), so "records nothing" reads the disk: the
 	// session has not spoken yet, so its files are not born and a premature write has nowhere to land.
-	check("and records nothing until a request uses it", bagOf(session).fileCreated === false, String(bagOf(session).fileCreated));
+	check("and records nothing until a request uses it", bagOf(agent).fileCreated === false, String(bagOf(agent).fileCreated));
 
-	await within("the run", 10_000, session.prompt(sidOf(session), "hello", { selection: { thinkingLevel: "high" } }));
-	check("the request is asked at that level", scripted.state.thinkingLevels.at(-1) === "high", String(scripted.state.thinkingLevels.at(-1)));
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "hello", { selection: { thinkingLevel: "high" } }));
+	check("the request is asked at that level", scripted.fakeState.thinkingLevels.at(-1) === "high", String(scripted.fakeState.thinkingLevels.at(-1)));
 	check("and the session records it once", levelsOf() === "high", String(levelsOf()));
 
 	scripted.setResponses([fakeAssistantMessage("second")]);
-	await within("the second run", 10_000, session.prompt(sidOf(session), "again"));
+	await within("the second run", 10_000, agent.prompt(sidOf(agent), "again"));
 	check("a later turn on the same level records nothing new", levelsOf() === "high", String(levelsOf()));
-	check("while still being asked at it", scripted.state.thinkingLevels.at(-1) === "high", String(scripted.state.thinkingLevels.at(-1)));
+	check("while still being asked at it", scripted.fakeState.thinkingLevels.at(-1) === "high", String(scripted.fakeState.thinkingLevels.at(-1)));
 
 	// Every row takes the same four, so there is nothing left for the session to refuse: `max` is a
 	// level like the rest, and the only string that is not one is a name the app has never had.
-	session.applyModelSelection(sidOf(session), { thinkingLevel: "max" });
-	check("a level the row used to lack is accepted now", session.snapshot(sidOf(session)).thinkingLevel === "max", session.snapshot(sidOf(session)).thinkingLevel);
+	agent.applyModelSelection(sidOf(agent), { thinkingLevel: "max" });
+	check("a level the row used to lack is accepted now", agent.snapshot(sidOf(agent)).thinkingLevel === "max", agent.snapshot(sidOf(agent)).thinkingLevel);
 
-	session.applyModelSelection(sidOf(session), { thinkingLevel: "turbo" });
-	check("a level nobody has lands on off", session.snapshot(sidOf(session)).thinkingLevel === "off", session.snapshot(sidOf(session)).thinkingLevel);
+	agent.applyModelSelection(sidOf(agent), { thinkingLevel: "turbo" });
+	check("a level nobody has lands on off", agent.snapshot(sidOf(agent)).thinkingLevel === "off", agent.snapshot(sidOf(agent)).thinkingLevel);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 try {
@@ -2114,16 +2114,16 @@ async function exerciseFileDiffReport(): Promise<void> {
 		fakeAssistantMessage(fakeToolCall("edit", { path: "report.txt", old_string: "two", new_string: "three" })),
 		fakeAssistantMessage("done"),
 	]);
-	const session = await openSession();
+	const agent = await openSession();
 
 	const reports: { toolName: string; diff?: FileDiff }[] = [];
-	session.onEvent(sidOf(session), (event) => {
+	agent.onEvent(sidOf(agent), (event) => {
 		if (event.type !== "tool_execution_end") return;
 		reports.push({ toolName: event.toolName, diff: (event.result?.details as { diff?: FileDiff } | undefined)?.diff });
 	});
 
-	await within("the run", 10_000, session.prompt(sidOf(session), "write report.txt and then edit it"));
-	await within("settle()", 10_000, session.settle(sidOf(session)));
+	await within("the run", 10_000, agent.prompt(sidOf(agent), "write report.txt and then edit it"));
+	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
 	const written = reports.find((report) => report.toolName === "write")?.diff;
 	check("a new file's report arrives with the tool result", written?.created === true && written.added === 2, JSON.stringify(written));
@@ -2142,13 +2142,13 @@ async function exerciseFileDiffReport(): Promise<void> {
 		JSON.stringify(edited?.lines),
 	);
 	check(
-		"while the transcript keeps the tool's text beside the report",
-		toolResultTexts(session).some((text) => text.includes("Created report.txt")) &&
-			JSON.stringify(allMessages(session)).includes('"created":true'),
-		JSON.stringify(toolResultTexts(session)),
+		"while the session keeps the tool's text beside the report",
+		toolResultTexts(agent).some((text) => text.includes("Created report.txt")) &&
+			JSON.stringify(allMessages(agent)).includes('"created":true'),
+		JSON.stringify(toolResultTexts(agent)),
 	);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 /**
@@ -2161,7 +2161,7 @@ async function exerciseFileDiffReport(): Promise<void> {
  */
 async function exerciseBranching(): Promise<void> {
 	process.stdout.write("branching inside a session\n");
-	const session = await openSession();
+	const agent = await openSession();
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [
 		fakeAssistantMessage("answer one"),
@@ -2170,30 +2170,30 @@ async function exerciseBranching(): Promise<void> {
 		fakeAssistantMessage("fourth answer"),
 	]);
 
-	await within("the first turn", 15_000, session.prompt(sidOf(session), "question one"));
-	const firstId = entryIdsFor(session, "question one")[0] ?? "";
-	await within("the second turn", 15_000, session.prompt(sidOf(session), "question two"));
+	await within("the first turn", 15_000, agent.prompt(sidOf(agent), "question one"));
+	const firstId = entryIdsFor(agent, "question one")[0] ?? "";
+	await within("the second turn", 15_000, agent.prompt(sidOf(agent), "question two"));
 	check(
 		"a message the conversation carried on from one way is not a branch point",
-		session.snapshot(sidOf(session)).branchPoints.length === 0,
-		JSON.stringify(session.snapshot(sidOf(session)).branchPoints),
+		agent.snapshot(sidOf(agent)).branchPoints.length === 0,
+		JSON.stringify(agent.snapshot(sidOf(agent)).branchPoints),
 	);
 
 	const events: AgentSessionEvent[] = [];
-	session.onEvent(sidOf(session), (event) => events.push(event));
+	agent.onEvent(sidOf(agent), (event) => events.push(event));
 
 	// --- Rewinding to a message and asking again is what makes a second alternative ---------------
-	const landed = session.branchTo(sidOf(session), firstId, false);
+	const landed = agent.branchTo(sidOf(agent), firstId, false);
 	check("rewinding lands on the entry itself", landed === firstId, `${landed} vs ${firstId}`);
-	check("and the transcript is the chain through it", textsOf(session).join(",") === "question one", textsOf(session).join(","));
-	check("while the abandoned turn stays in the store", allMessages(session).some((message) => textOf(message) === "question two"));
+	check("and the session is the chain through it", textsOf(agent).join(",") === "question one", textsOf(agent).join(","));
+	check("while the abandoned turn stays in the store", allMessages(agent).some((message) => textOf(message) === "question two"));
 	check(
 		"the move is announced with the leaf it landed on",
 		events.some((event) => event.type === "branch_changed" && event.leafId === firstId),
 		JSON.stringify(events.map((event) => event.type)),
 	);
 
-	await within("the third turn", 15_000, session.prompt(sidOf(session), "question three"));
+	await within("the third turn", 15_000, agent.prompt(sidOf(agent), "question three"));
 	const asked = (sent[2]?.texts ?? []).join("|");
 	check("the next request carries the rewound branch", asked.includes("question three") && asked.includes("question one"), JSON.stringify(sent[2]?.texts));
 	check("and none of the tail that was left behind", asked.includes("question two") === false && asked.includes("second answer") === false, JSON.stringify(sent[2]?.texts));
@@ -2203,7 +2203,7 @@ async function exerciseBranching(): Promise<void> {
 		JSON.stringify(events.filter((event) => event.type === "branch_changed")),
 	);
 
-	const points = session.snapshot(sidOf(session)).branchPoints;
+	const points = agent.snapshot(sidOf(agent)).branchPoints;
 	check("the first message is now a branch point", points.length === 1 && points[0]?.entryId === firstId, JSON.stringify(points));
 	check("with both of its continuations", points[0]?.options.length === 2, JSON.stringify(points[0]?.options));
 	check(
@@ -2219,30 +2219,30 @@ async function exerciseBranching(): Promise<void> {
 
 	// --- Choosing the other alternative lands on where *it* stopped ------------------------------
 	const alternative = points[0]?.options[0]?.entryId ?? "";
-	session.branchTo(sidOf(session), alternative, true);
+	agent.branchTo(sidOf(agent), alternative, true);
 	check(
 		"choosing an alternative restores its own tip",
-		textsOf(session).join(",") === "question one,question two",
-		textsOf(session).join(","),
+		textsOf(agent).join(",") === "question one,question two",
+		textsOf(agent).join(","),
 	);
-	await within("the fourth turn", 15_000, session.prompt(sidOf(session), "question four"));
+	await within("the fourth turn", 15_000, agent.prompt(sidOf(agent), "question four"));
 	const resumed = (sent[3]?.texts ?? []).join("|");
 	check("and the request continues on that branch", resumed.includes("question four") && resumed.includes("second answer"), JSON.stringify(sent[3]?.texts));
 	check("without the alternative that was left", resumed.includes("question three") === false && resumed.includes("third answer") === false, JSON.stringify(sent[3]?.texts));
 	check(
 		"both alternatives are still one branch point",
-		session.snapshot(sidOf(session)).branchPoints.length === 1 && session.snapshot(sidOf(session)).branchPoints[0]?.options.length === 2,
-		JSON.stringify(session.snapshot(sidOf(session)).branchPoints),
+		agent.snapshot(sidOf(agent)).branchPoints.length === 1 && agent.snapshot(sidOf(agent)).branchPoints[0]?.options.length === 2,
+		JSON.stringify(agent.snapshot(sidOf(agent)).branchPoints),
 	);
 	check(
 		"nothing was deleted on the way",
 		["question three", "third answer", "question four", "fourth answer"].every((text) =>
-			allMessages(session).some((message) => textOf(message) === text),
+			allMessages(agent).some((message) => textOf(message) === text),
 		),
-		JSON.stringify(allMessages(session).map(textOf)),
+		JSON.stringify(allMessages(agent).map(textOf)),
 	);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 
 	// --- A move while a run is in flight would file the turn under the wrong branch ---------------
 	const { api: gatedApi, gate } = gatedTransport(1);
@@ -2279,7 +2279,7 @@ async function exerciseBranching(): Promise<void> {
  */
 async function exerciseBranchToolConfig(): Promise<void> {
 	process.stdout.write("tool config is the session's, not a branch's\n");
-	const session = await openSession();
+	const agent = await openSession();
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [
 		fakeAssistantMessage("first answer"),
@@ -2287,28 +2287,28 @@ async function exerciseBranchToolConfig(): Promise<void> {
 		fakeAssistantMessage("third answer"),
 	]);
 
-	await within("the first turn", 15_000, session.prompt(sidOf(session), "config branch question one"));
-	const firstId = entryIdsFor(session, "config branch question one")[0] ?? "";
-	await within("the second turn", 15_000, session.prompt(sidOf(session), "config branch question two"));
+	await within("the first turn", 15_000, agent.prompt(sidOf(agent), "config branch question one"));
+	const firstId = entryIdsFor(agent, "config branch question one")[0] ?? "";
+	await within("the second turn", 15_000, agent.prompt(sidOf(agent), "config branch question two"));
 
 	const events: AgentSessionEvent[] = [];
-	session.onEvent(sidOf(session), (event) => events.push(event));
+	agent.onEvent(sidOf(agent), (event) => events.push(event));
 
 	// --- The session narrows and gates `bash` ---------------------------------------------------
-	const narrowed = session.snapshot(sidOf(session)).activeTools.filter((name) => name !== "bash");
-	session.setActiveTools(sidOf(session), narrowed);
-	session.applyConfig(sidOf(session), { approval: { bash: true } });
-	check("the narrow set is in force", session.snapshot(sidOf(session)).activeTools.includes("bash") === false, JSON.stringify(session.snapshot(sidOf(session)).activeTools));
-	check("with the approval the session chose", session.snapshot(sidOf(session)).approvals.bash === true, JSON.stringify(session.snapshot(sidOf(session)).approvals));
-	check("which is the map the gate reads", session.getApprovals(sidOf(session)).bash === true, JSON.stringify(session.getApprovals(sidOf(session))));
-	check("leaving the settings file alone", settingsOf(session).getApprovals(root).bash === false, JSON.stringify(settingsOf(session).getApprovals(root)));
+	const narrowed = agent.snapshot(sidOf(agent)).activeTools.filter((name) => name !== "bash");
+	agent.setActiveTools(sidOf(agent), narrowed);
+	agent.applyConfig(sidOf(agent), { approval: { bash: true } });
+	check("the narrow set is in force", agent.snapshot(sidOf(agent)).activeTools.includes("bash") === false, JSON.stringify(agent.snapshot(sidOf(agent)).activeTools));
+	check("with the approval the session chose", agent.snapshot(sidOf(agent)).approvals.bash === true, JSON.stringify(agent.snapshot(sidOf(agent)).approvals));
+	check("which is the map the gate reads", agent.getApprovals(sidOf(agent)).bash === true, JSON.stringify(agent.getApprovals(sidOf(agent))));
+	check("leaving the settings file alone", settingsOf(agent).getApprovals(root).bash === false, JSON.stringify(settingsOf(agent).getApprovals(root)));
 
 	// --- Moving the leaf changes the branch, not the choices ------------------------------------
 	const before = events.length;
-	session.branchTo(sidOf(session), firstId, false);
-	check("the move lands before both turns", textsOf(session).join(",") === "config branch question one", textsOf(session).join(","));
-	check("and the choices stay what the session chose", session.snapshot(sidOf(session)).activeTools.includes("bash") === false && session.snapshot(sidOf(session)).approvals.bash === true, JSON.stringify(session.snapshot(sidOf(session)).activeTools));
-	check("the gate reads the same map on the new branch", session.getApprovals(sidOf(session)).bash === true, JSON.stringify(session.getApprovals(sidOf(session))));
+	agent.branchTo(sidOf(agent), firstId, false);
+	check("the move lands before both turns", textsOf(agent).join(",") === "config branch question one", textsOf(agent).join(","));
+	check("and the choices stay what the session chose", agent.snapshot(sidOf(agent)).activeTools.includes("bash") === false && agent.snapshot(sidOf(agent)).approvals.bash === true, JSON.stringify(agent.snapshot(sidOf(agent)).activeTools));
+	check("the gate reads the same map on the new branch", agent.getApprovals(sidOf(agent)).bash === true, JSON.stringify(agent.getApprovals(sidOf(agent))));
 	check(
 		"and no config_changed rides the move",
 		events.slice(before).every((event) => event.type !== "config_changed"),
@@ -2316,7 +2316,7 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	);
 
 	// The request on the rewound branch is narrowed with the same session-level choice.
-	await within("the third turn", 15_000, session.prompt(sidOf(session), "config branch question three"));
+	await within("the third turn", 15_000, agent.prompt(sidOf(agent), "config branch question three"));
 	const asked = sent[2];
 	check(
 		"the next request is narrowed with it",
@@ -2332,10 +2332,10 @@ async function exerciseBranchToolConfig(): Promise<void> {
 		asked?.prompt,
 	);
 
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 
 	// --- The choice is on the snapshot, so the reopen answers with it ----------------------------
-	const reopened = fillSession(bagOf(session).sessionFileAbsPath ?? "");
+	const reopened = fillSession(bagOf(agent).sessionFileAbsPath ?? "");
 	check("the reopen restores the session's tool set", store.getRecordedToolConfig(reopened).activeTools?.includes("bash") === false, JSON.stringify(store.getRecordedToolConfig(reopened).activeTools));
 	check("and its approval with it", store.getRecordedToolConfig(reopened).approval?.bash === true, JSON.stringify(store.getRecordedToolConfig(reopened).approval));
 }
@@ -2351,24 +2351,24 @@ async function exerciseBranchToolConfig(): Promise<void> {
  */
 async function exerciseLeafDurability(): Promise<void> {
 	process.stdout.write("leaf durability\n");
-	const session = await openSession();
+	const agent = await openSession();
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [fakeAssistantMessage("answer one"), fakeAssistantMessage("answer two")]);
 
-	await within("the first turn", 15_000, session.prompt(sidOf(session), "durable question one"));
-	await within("the second turn", 15_000, session.prompt(sidOf(session), "durable question two"));
-	const firstId = entryIdsFor(session, "durable question one")[0] ?? "";
+	await within("the first turn", 15_000, agent.prompt(sidOf(agent), "durable question one"));
+	await within("the second turn", 15_000, agent.prompt(sidOf(agent), "durable question two"));
+	const firstId = entryIdsFor(agent, "durable question one")[0] ?? "";
 
 	// --- A real move writes one record; a no-op move writes none ---------------------------------
-	const entriesBefore = entriesOf(session).length;
-	session.branchTo(sidOf(session), firstId, false);
-	check("a real move writes exactly one entry", entriesOf(session).length === entriesBefore + 1, String(entriesOf(session).length - entriesBefore));
-	check("and that entry is a leaf record", entriesOf(session).at(-1)?.type === "leaf", String(entriesOf(session).at(-1)?.type));
-	session.branchTo(sidOf(session), firstId, false);
-	check("moving to the position already held writes nothing", entriesOf(session).length === entriesBefore + 1, String(entriesOf(session).length - entriesBefore));
+	const entriesBefore = entriesOf(agent).length;
+	agent.branchTo(sidOf(agent), firstId, false);
+	check("a real move writes exactly one entry", entriesOf(agent).length === entriesBefore + 1, String(entriesOf(agent).length - entriesBefore));
+	check("and that entry is a leaf record", entriesOf(agent).at(-1)?.type === "leaf", String(entriesOf(agent).at(-1)?.type));
+	agent.branchTo(sidOf(agent), firstId, false);
+	check("moving to the position already held writes nothing", entriesOf(agent).length === entriesBefore + 1, String(entriesOf(agent).length - entriesBefore));
 
-	const file = bagOf(session).sessionFileAbsPath ?? "";
-	await session.close(sidOf(session));
+	const file = bagOf(agent).sessionFileAbsPath ?? "";
+	await agent.close(sidOf(agent));
 
 	// --- The move is where the file says it is, not where the file ends --------------------------
 	const reopened = fillSession(file);

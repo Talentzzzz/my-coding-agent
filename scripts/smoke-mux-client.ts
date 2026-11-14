@@ -410,7 +410,7 @@ function row(id: string, modified: number, running = false, pending = 0): Sessio
 process.stdout.write("\nreducer：end 与 baseline 的边界\n");
 
 {
-	// An `end` clears the banner and stops the spinner, and keeps the transcript. A banner left up
+	// An `end` clears the banner and stops the spinner, and keeps the session. A banner left up
 	// after its stream is over is a button whose request goes nowhere.
 	const running: ViewState = {
 		...initialState(),
@@ -421,7 +421,7 @@ process.stdout.write("\nreducer：end 与 baseline 的边界\n");
 	const ended = reduceEnd(running);
 	check("end 清空待回答的审批", ended.approvals.length === 0, JSON.stringify(ended.approvals));
 	check("end 停掉转圈", ended.streaming === false);
-	check("end 保留 transcript", ended.items.length === 1);
+	check("end 保留会话记录", ended.items.length === 1);
 
 	// An error is the record of a failed operation, and only a successful operation erases it. A
 	// reconnect that worked is not one of the user's operations — and a baseline arriving after a
@@ -429,7 +429,7 @@ process.stdout.write("\nreducer：end 与 baseline 的边界\n");
 	const failed: ViewState = { ...initialState(), error: "跑不起来" };
 	const rebased = reduce(failed, { type: "baseline", session: snapshot("s1") });
 	check("baseline 不清掉 error", rebased.error === "跑不起来", `got ${String(rebased.error)}`);
-	check("baseline 换掉 transcript", rebased.snapshot?.id === "s1", JSON.stringify(rebased.snapshot?.id));
+	check("baseline 换掉会话记录", rebased.snapshot?.id === "s1", JSON.stringify(rebased.snapshot?.id));
 
 	// The retry countdown is not rebuilt from a baseline, and not carried over either: the seconds
 	// left only ever came from the frame that scheduled the backoff, so there is nothing to rebuild
@@ -484,7 +484,7 @@ async function flushed(): Promise<void> {
 	const landed = opened();
 	check("基线 settle 导航并交回快照", landed.state === "resolved" && landed.value.id === "s1", JSON.stringify(landed));
 
-	// A pane coming back to a session a send still holds: the retain asks again (ADR-0010), and that
+	// A pane coming back to a session a send still holds: the retain asks again (ADR-0009), and that
 	// second baseline is what completes the second navigation.
 	const again = watch(client.retain("s1", "pane", 2));
 	check("已订阅的会话再导航仍发 open", uplink(sockets.all[0]!).filter((f) => f.type === "open" && f.sessionId === "s1").length === 2, JSON.stringify(uplink(sockets.all[0]!)));
@@ -624,7 +624,7 @@ process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那�
 
 	// The window's half of the rule, restated here because nothing in this suite drives the window
 	// itself: a click is a number, and only the newest number may draw (main.ts keeps it as
-	// `openSeries`). The client has no opinion about it — ADR-0010's first behaviour row puts that
+	// `openSeries`). The client has no opinion about it — ADR-0009's first behaviour row puts that
 	// verdict in the caller — so what this block checks *about this layer* is that every baseline is
 	// handed over and none is turned into an error.
 	let series = 0;
@@ -652,7 +652,7 @@ process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那�
 		uplink(sockets.all[0]!).filter((f) => f.type === "open" && f.sessionId === sessionId).length;
 
 	// A second `open` on a session somebody else already holds is not refused — it is answered with a
-	// fresh baseline (ADR-0010, decision 1). That is the whole point of the idempotent primitive: the
+	// fresh baseline (ADR-0009, decision 1). That is the whole point of the idempotent primitive: the
 	// pane coming back to a running session is shown the half sentence instead of silence.
 	const first = navigate("s1");
 	check("第一次导航发出 open", opensOn("s1") === 1, JSON.stringify(uplink(sockets.all[0]!)));

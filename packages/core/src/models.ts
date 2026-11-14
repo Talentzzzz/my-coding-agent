@@ -152,7 +152,7 @@ function isReserved(name: string): boolean {
 /**
  * 把一行进来的数据变成可存储的一行，做不到时返回 undefined。
  *
- * 这里不给名字做唯一化：名字*就是*行的身份，悄悄给重复名加后缀会改变每份提及它的 transcript 的
+ * 这里不给名字做唯一化：名字*就是*行的身份，悄悄给重复名加后缀会改变每份提及它的会话记录的
  * 含义。冲突如何裁决由调用方决定——设置面板拒绝整份列表并明说——这里只拒绝根本无法存储的：
  * 保留名、缺 model id、缺 base URL。
  *
@@ -223,7 +223,7 @@ export function createModel(config: ModelConfig, thinkingLevel?: string, transpo
 /**
  * 用户一行都没输入时，会话运行所用的模型。
  *
- * 会话横竖得用*某个*模型构建，否则窗口开不到能告诉别人缺了什么的地方：失败必须以 transcript 里
+ * 会话横竖得用*某个*模型构建，否则窗口开不到能告诉别人缺了什么的地方：失败必须以会话记录里
  * 一条消息的形态抵达——在那里才能描述怎么修——而不是以一台拒绝服务会话的服务器的形态。所以这
  * 是一个真实存在但其行不存在的模型，替它作答的是 {@link unconfiguredStream}。它的名字是那个保留名，
  * {@link isUnconfigured} 测的就是它，任何存储行都不得占用。
@@ -250,7 +250,7 @@ export function isUnconfigured(model: { name: string }): boolean {
  * 窗口是在从列表里挑一个名字，而包内的一切都按名字称呼行。
  */
 export type ModelChoice = {
-	/** 行的名字——面板显示、transcript 记录的身份。 */
+	/** 行的名字——面板显示、会话记录记录的身份。 */
 	name?: string;
 	/**
 	 * 档位按到达时的原样保存。{@link modelFor} 会规范化它，所以应用叫不出名字的字符串在被问到的
@@ -298,7 +298,7 @@ const ZERO_USAGE: AssistantMessage["usage"] = {
 /**
  * 会自己解释的答案。
  *
- * 手写而成，因为没有请求可发：无行会话的全部意义，就是在用户正盯着看的 transcript 里，以一句
+ * 手写而成，因为没有请求可发：无行会话的全部意义，就是在用户正盯着看的会话记录里，以一句
  * 用户能照着行动的话失败。它的形状与任何传输层的流一致，引擎读它如同读一次真实的失败。
  */
 export function unconfiguredStream(model: Model<Api>): AssistantMessageEventStream {

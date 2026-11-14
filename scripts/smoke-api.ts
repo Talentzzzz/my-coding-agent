@@ -154,7 +154,7 @@ async function handleItem(id: string, item: { type: string; [key: string]: unkno
 
 		// composer 的模型与等级骑在这个请求体上，而不是各自做一次配置变更，所以一个畸形的
 		// 选择必须在这里——消息持久化之前——被拒绝。一个多出一条从未运行过的消息的 session
-		// 会是一份"没有发生过的事情"的 transcript。
+		// 会是一份"没有发生过的事情"的会话记录。
 		const refused = await request("POST", `/api/sessions/${encodeURIComponent(session.id)}/messages`, {
 			text: "this must not be stored",
 			thinkingLevel: 5,
@@ -257,7 +257,7 @@ async function main(): Promise<void> {
 	pass(`models ${models.status} (${(models.payload as { models?: unknown[] }).models?.length ?? 0})`);
 
 	// 一行的名字就是它的身份，所以列表端点是唯一能在撞名抵达磁盘之前抓住它的地方：两行同名会让
-	// 每一份指名该名字的 transcript 变得含混。这个名字被刻意取得不会与运行本脚本的人导入的任何
+		// 每一份指名该名字的会话变得含混。这个名字被刻意取得不会与运行本脚本的人导入的任何
 	// 东西相撞。结尾的检查把它找到的放回去，因为这是这里唯一会持久化的请求。
 	const existing = (models.payload as { models?: unknown[] }).models ?? [];
 	const probe = `smoke-api-${Date.now()}`;

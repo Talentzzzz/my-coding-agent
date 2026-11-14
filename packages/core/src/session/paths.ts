@@ -45,7 +45,7 @@ export function sessionPath(sessionId: string, absDir: string = sessionsRoot): s
 /**
  * `.jsonl` 在 `absJsonlPath` 的 session 的 `.json` 快照路径。
  *
- * 两个文件共享 stem：快照是身份那一半，流是 transcript 那一半，按 stem 配对才让 session 是一个
+ * 两个文件共享 stem：快照是身份那一半，流是会话记录那一半，按 stem 配对才让 session 是一个
  * 东西而不是两个。
  */
 export function sessionMetaPath(absJsonlPath: string): string {

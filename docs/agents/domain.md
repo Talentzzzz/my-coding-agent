@@ -48,7 +48,7 @@
 
 如果你的产出与某条已有 ADR 矛盾，明确把它摆出来，而不是静默覆盖：
 
-> _与 ADR-0007（event-sourced orders）矛盾，但值得重开，因为……_
+> _与 ADR-0006（event-sourced orders）矛盾，但值得重开，因为……_
 
 本仓库从 2026-10-12 起有 ADR（`docs/adr/`，到 2026-11-01 为止七条；清单与门槛见 [`docs/adr/README.md`](../adr/README.md)）。所以这条规则有两半：与某条 ADR 矛盾时**引用它的编号**摆出来；与 `docs/architecture.md` 里写下的某个设计决定矛盾、而那个决定还没有 ADR 时，同样明确说出来，而不是悄悄改掉它。
 

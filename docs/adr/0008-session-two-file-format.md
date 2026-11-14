@@ -1,7 +1,7 @@
-# 0009：会话是两个文件——`.json` 快照管「是什么」，`.jsonl` 日志管「说过什么」
+# 0008：会话是两个文件——`.json` 快照管「是什么」，`.jsonl` 日志管「说过什么」
 
 - 状态：**已接受**（[session-split 02 号](../../.scratch/session-split/issues/02-session-manager.md)拍板并落地，[06 号](../../.scratch/session-split/issues/06-docs-adr.md)入档）
-- 取代或失效：取代 v≤4 的单文件格式（header 是第一行的 JSONL）；取代 [ADR-0002](0002-session-rename-entry.md) 的「rename 是一条 entry」存储机制——「标题可写」这个决定本身保留，只是存储位置变了
+- 取代或失效：取代 v≤4 的单文件格式（header 是第一行的 JSONL）；取代更早的「标题是一条 `rename` entry」存储机制——「标题可写」这个决定本身保留，只是存储位置变了
 - 取代者：尚无。这份 ADR 本身若被推翻，**不要**悄悄改它——新开一条 ADR，并说明反转的代价
 
 ## 为什么会有这份 ADR
@@ -47,7 +47,7 @@ session-split 的 01 号票把全仓 entry kind 触点列完之后，02 号拍�
 | 原事实 | 本次 |
 |---|---|
 | v≤4：一个会话是一个 JSONL，header 是第一行 | **取代**。身份与当前值进 `.json` 快照，entry 流进 `.jsonl`，`CURRENT_SESSION_VERSION = 5`。 |
-| [ADR-0002](0002-session-rename-entry.md)：标题是一条 `rename` entry，文件序最后一条赢 | **机制被取代**：标题是快照里的 `title` 字段，最后一次写入就是值，不再有重放。**决定本身保留**：标题可写、派生只作兜底、`（N）` 后缀仍是派生事实。 |
+| v≤4 的「标题是一条 `rename` entry，文件序最后一条赢」 | **机制被取代**：标题是快照里的 `title` 字段，最后一次写入就是值，不再有重放。**决定本身保留**：标题可写、派生只作兜底、`（N）` 后缀仍是派生事实。 |
 | `model_change` / `thinking_level_change` / `tool_config` 状态 entry | **取代**。快照的 `model`、`thinkingLevel`、`activeTools`、`approval` 四个字段；配置历史不复存在。 |
 | 「未知 entry kind 原样带过」的文件内前向兼容 | **保留**，但范围缩小到 `.jsonl` 内部；**跨版本**兼容改为「整对删除」。`prune` / `argtrim` 的归一化层随 v≤4 文件一起消失。 |
 | 「这种格式从不重写一行」 | **对 `.jsonl` 保留**；快照是那个有意的例外——它每次变更都整写。 |
@@ -55,8 +55,8 @@ session-split 的 01 号票把全仓 entry kind 触点列完之后，02 号拍�
 ## 没有被取代的
 
 - 追加式日志本身、entry 的父链接与树、`leaf` entry 的形状、压缩的「视图改写」形状（clear / trim / 检查点）、`usage` 的按文件记账——全在 `.jsonl` 里原样活着。
-- [ADR-0006](0006-stateless-session-architecture.md) 的骨架：`fillSession` 是磁盘到状态的唯一入口、host 在手时是文件的唯一写者、「没人说过话的会话不落盘」的延迟创建纪律。
-- [ADR-0005](0005-modes-are-a-tool-config-choice.md)：施加一个模式仍是 `PUT /tools` 与审批 `PATCH` 两个既有命令的组合——只是落点从 entry 变成了快照字段。
+- [ADR-0005](0005-stateless-session-architecture.md) 的骨架：`fillSession` 是磁盘到状态的唯一入口、host 在手时是文件的唯一写者、「没人说过话的会话不落盘」的延迟创建纪律。
+- [ADR-0004](0004-modes-are-a-tool-config-choice.md)：施加一个模式仍是 `PUT /tools` 与审批 `PATCH` 两个既有命令的组合——只是落点从 entry 变成了快照字段。
 
 ## 代价与后果
 

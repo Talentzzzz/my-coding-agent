@@ -1,5 +1,6 @@
 // 账本条目类型与会话纯数据状态的值类型之家：`Session` / `SessionEntry` 曾与 `SessionManager`
-// 同模块（session-manager.ts），ADR-0023 时期先安新家到这里，ADR-0024 之后留在此处——Manager 与
+// 同模块（session-manager.ts），loop 仍是独立 Manager 的时期先安新家到这里，引擎并回编排
+// （ADR-0016）之后留在此处——Manager 与
 // 文件机件仍住在 session-manager.ts（它从这里 import 并转出口，旧消费者零改动）；本文件不 import
 // 任何 Manager 模块。
 import type { Message, Usage } from "../llm/index.ts";
@@ -31,7 +32,7 @@ export interface CompactionEntry extends SessionEntryBase {
  * 本构建从视图中清出的 tool result 的记录。
  *
  * result 留在文件里——这个格式从不重写一行——所以记录只指名它们，由 `buildContextEntries`
- * （session-manager.ts）应用。形状与压缩相同：一条改变更早条目含义而不改变其本身的条目，这让文件保持完整记录、transcript
+ * （session-manager.ts）应用。形状与压缩相同：一条改变更早条目含义而不改变其本身的条目，这让文件保持完整记录、会话记录
  * 保持它的一个视图。
  */
 export interface ClearToolResultEntry extends SessionEntryBase {
@@ -63,7 +64,7 @@ export interface TrimToolCallArgEntry extends SessionEntryBase {
  * 哪里，位置真的移动时才写入。
  *
  * 追加本身就推进叶子、不需要记录——文件最后一条就是位置——所以这个条目是唯一的例外，它让一次
- * 移动活得比创建它的进程更久。和每条状态条目一样，它不是 transcript：它不产生任何消息，新读者
+ * 移动活得比创建它的进程更久。和每条状态条目一样，它不是会话记录：它不产生任何消息，新读者
  * 重放它来把叶子放回对话去过的位置。
  */
 export interface LeafEntry extends SessionEntryBase {
@@ -73,9 +74,9 @@ export interface LeafEntry extends SessionEntryBase {
 }
 
 /**
- * 不拥有消息条目的模型开销记录：本 transcript 里引擎从未挂到 assistant 消息上的 usage。
+ * 不拥有消息条目的模型开销记录：本会话记录里引擎从未挂到 assistant 消息上的 usage。
  *
- * 这个种类存在的意义，是让没有自己消息的开销有地方落脚——transcript 属于另一个文件的 run、为压缩
+ * 这个种类存在的意义，是让没有自己消息的开销有地方落脚——会话记录属于另一个文件的 run、为压缩
  * 写的摘要——`operation` 按读者会问的方式指名这笔开销。usage 条目是钱，不是对话：它不产生任何消息，
  * 并且按文件顺序跨所有分支计数，因为在被放弃的树路径上烧掉的 token 同样烧掉了。未知的 `operation`
  * 按普通 usage 读取而不是拒绝——与文件对未知种类的前向兼容规则相同。
@@ -94,7 +95,7 @@ export interface UsageEntry extends SessionEntryBase {
  *
  * session 曾记录的其余一切——名字、模型和 thinking level、工具选择——都是*当前值*，放在这条流
  * 旁边的 `.json` 快照里；遗留的 `tool_result_view` 种类整体废除，因为本构建不再写它，v≤4 文件被
- * 删除而不是重放。剩下的恰好是 transcript 无法原地重写的种类：对话本身、两条视图收缩记录、
+ * 删除而不是重放。剩下的恰好是会话记录无法原地重写的种类：对话本身、两条视图收缩记录、
  * 检查点、叶子位置、无归属的开销。
  */
 export type SessionEntry =
@@ -106,7 +107,7 @@ export type SessionEntry =
 	| UsageEntry;
 
 /**
- * 一份 transcript 的全部条目，按各自的 id 建键。
+ * 一份会话记录的全部条目，按各自的 id 建键。
  *
  * 条目只带 `parentId`，所以沿树的每次上溯——`buildSessionPath`（session-manager.ts）、分支预览、调用方指名的
  * id——都是按 id 查找。这个 map 就是那次查找，也是 `generateId` 无冲突的原因。迭代顺序即文件
@@ -200,7 +201,7 @@ export interface Session {
  * 把一条被选中的条目投影成模型看到的消息。
  *
  * 压缩条目代表它替换掉的一切：只有摘要，投影成它所代表的 user turn，并包上 `compactionSummaryOf`
- * 认得的标签——发给 provider 的是 user 消息，所以 transcript 用这个形状携带摘要。其他条目种类都是
+ * 认得的标签——发给 provider 的是 user 消息，所以会话记录用这个形状携带摘要。其他条目种类都是
  * 状态而非对话，不贡献任何东西。system prompt 不在其中：它每次请求都从设置和活的工具集重建，所以
  * 没有条目需要携带它。
  */

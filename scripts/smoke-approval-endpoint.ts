@@ -73,7 +73,7 @@ const { id: sessionId } = await mountSession(hub, {
 	root,
 	model: modelName,
 });
-const session = hub.agent;
+const agent = hub.agent;
 
 // 手工组装 controller 的全部意义就在这个 spy 上：mux 的应答表正是经由这个监听器喂进来的，
 // 所以"被拒绝的尝试哪儿也没到"就在这里断言。
@@ -123,16 +123,16 @@ try {
 	const accepted = await request("POST", `/api/sessions/${sessionId}/messages`, { text: "read the notes" });
 	check("the prompt was accepted", accepted.status === 202, `status ${accepted.status}`);
 
-	const pending = await until(() => session.snapshot(sessionId).pendingApprovals.length === 1);
-	check("the run parked at the approval", pending, JSON.stringify(session.snapshot(sessionId).pendingApprovals));
-	const toolCallId = session.snapshot(sessionId).pendingApprovals[0]?.toolCallId ?? "";
+	const pending = await until(() => agent.snapshot(sessionId).pendingApprovals.length === 1);
+	check("the run parked at the approval", pending, JSON.stringify(agent.snapshot(sessionId).pendingApprovals));
+	const toolCallId = agent.snapshot(sessionId).pendingApprovals[0]?.toolCallId ?? "";
 
 	// 拒绝那一半：没有任何东西在等的 id 是冲突，无论应答监听器还是 session 都听不到这次尝试。
 	const unknown = await request("POST", `/api/sessions/${sessionId}/approvals/no-such-call`, { approved: true });
 	check("an unknown toolCallId is a conflict", unknown.status === 409, `status ${unknown.status} ${JSON.stringify(unknown.payload)}`);
 	check("the refusal says what was refused", JSON.stringify(unknown.payload).includes("not a pending approval"), JSON.stringify(unknown.payload));
 	check("a refused answer was recorded nowhere", remembered.length === 0, JSON.stringify(remembered));
-	check("the run is still parked", session.snapshot(sessionId).pendingApprovals.length === 1, JSON.stringify(session.snapshot(sessionId).pendingApprovals));
+	check("the run is still parked", agent.snapshot(sessionId).pendingApprovals.length === 1, JSON.stringify(agent.snapshot(sessionId).pendingApprovals));
 
 	const denied = await request("POST", `/api/sessions/${sessionId}/approvals/no-such-call`, { approved: false });
 	check("the refusal does not depend on the answer's direction", denied.status === 409, `status ${denied.status}`);
@@ -151,11 +151,11 @@ try {
 
 	check(
 		"the run finished after the answer",
-		await until(() => !session.snapshot(sessionId).submitting, 8_000),
-		String(session.snapshot(sessionId).submitting),
+		await until(() => !agent.snapshot(sessionId).submitting, 8_000),
+		String(agent.snapshot(sessionId).submitting),
 	);
-	check("the tool ran", JSON.stringify(session.snapshot(sessionId).messages).includes("notes.txt"), "");
-	check("and the closing answer is there", session.snapshot(sessionId).messages.some((message) => JSON.stringify(message).includes("done")), "");
+	check("the tool ran", JSON.stringify(agent.snapshot(sessionId).messages).includes("notes.txt"), "");
+	check("and the closing answer is there", agent.snapshot(sessionId).messages.some((message) => JSON.stringify(message).includes("done")), "");
 
 	// 应答过一次之后就不再是可应答的：同样的请求现在也冲突。
 	const twice = await request("POST", `/api/sessions/${sessionId}/approvals/${encodeURIComponent(toolCallId)}`, {

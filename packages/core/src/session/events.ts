@@ -1,7 +1,7 @@
 // 单个 session 发布的事件，以及单个 delta 的形状。
 //
 // fanout 独立成模块（`fanout.ts`）时它们搬到了这里：引擎和命令面都会发布，谁都不独占这个 union。
-// `agent.ts` re-export 对外的四个，所以没有任何调用方的 import 需要变——引擎随 ADR-0024 并回编排
+// `agent.ts` re-export 对外的四个，所以没有任何调用方的 import 需要变——引擎随 ADR-0016 并回编排
 // 层，sink 的实现仍在那里。
 import type { AgentEvent } from "../types.ts";
 import type { Message } from "../llm/index.ts";
@@ -20,7 +20,7 @@ export type SessionListener = (snapshot: SessionSnapshot) => void;
  * `message_start` 和 `message_end` 上传递，run 中途接上的窗口还会在 baseline 的 `partial` 里再
  * 拿到一次。
  *
- * 消息用 `timestamp` 而不是条目 id 标识：消息结束之前条目还不存在，而时间戳本来就是 transcript
+ * 消息用 `timestamp` 而不是条目 id 标识：消息结束之前条目还不存在，而时间戳本来就是会话记录
  * 给条目建 key 的字段。
  */
 export interface MessageDelta {
@@ -59,13 +59,13 @@ export type AgentSessionEvent =
 			contextTokens: number;
 	  }
 	/**
-	 * 一次尝试了压缩但没能产出摘要的压缩；transcript 未变。
+	 * 一次尝试了压缩但没能产出摘要的压缩；会话记录未变。
 	 */
 	| { type: "compaction_failed"; message: string }
 	| {
 			type: "tool_results_cleared";
 			/**
-			 * tool result 被清出了 transcript，并记录为一条 `clear_tool_result` 条目。
+			 * tool result 被清出了会话记录，并记录为一条 `clear_tool_result` 条目。
 			 *
 			 * 单独报告是因为它别处不可见：条目指名的消息在文件里原位不动，只对比消息的读者会看到
 			 * 通知凭空出现、没有任何解释。
@@ -97,11 +97,11 @@ export type AgentSessionEvent =
 			entryId: string;
 			kind: SessionEntry["type"];
 			/**
-			 * 消息写入的时间，按 transcript 排序的次序：消息自己的时间戳，回退用条目的时间戳。
+			 * 消息写入的时间，按会话记录排序的次序：消息自己的时间戳，回退用条目的时间戳。
 			 *
 			 * 放在事件上而不是让读者回头读，是因为它的读者——按活跃度排序的侧栏行、把条目和
-			 * 时间配对的 frame——每追加一条消息都要跑一次，向 transcript 问一次时间戳就要重放
-			 * 一次（ADR-0019）。不带消息的条目没有这个字段。
+			 * 时间配对的 frame——每追加一条消息都要跑一次，向会话记录问一次时间戳就要重放
+			 * 一次（ADR-0013）。不带消息的条目没有这个字段。
 			 */
 			at?: number;
 			/** 消息的 role，供只对某一种 role 重新推导什么的读者用。 */

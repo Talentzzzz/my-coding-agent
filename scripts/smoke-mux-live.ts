@@ -94,7 +94,7 @@ try {
 	check("驱动会话已创建", created.status === 201, String(created.status));
 	const { sessionId } = await created.json() as { sessionId: string };
 
-	// 无人开口的 session 没有文件、因此也没有行（ADR-0006 §3）——侧栏列出的是对话，不是意图。
+	// 无人开口的 session 没有文件、因此也没有行（ADR-0005 §3）——侧栏列出的是对话，不是意图。
 	// 一轮热身正是把这个 session 放进下面每个检查都要读的行存储的动作。
 	transport.setResponses([fakeAssistantMessage("warm-up answer")]);
 	check("开场 prompt 被接受", (await postPrompt(server.url, sessionId, "开场")) === 202);
@@ -245,7 +245,7 @@ try {
 	check("行表里不再有这个目录的任何一行", rowTable().list().every((row) => row.workDirAbsPath !== aside), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
 	check("REST 列表与概览说的是同一件事", !(await restDirectories()).includes(aside), JSON.stringify(await restDirectories()));
 
-	// 收回来：transcript 与文件夹从未被动过，所以在那个目录里新建一次 session 就是用户说想让它
+	// 收回来：会话文件与文件夹从未被动过，所以在那个目录里新建一次 session 就是用户说想让它
 	// 再出现在列表里。
 	const beforeBack = overviews();
 	const reborn = await postSession(aside);

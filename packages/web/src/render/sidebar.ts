@@ -20,7 +20,7 @@ export interface SidebarHandlers {
 	onAddDirectory(): void;
 	/** 把这一行指名的会话整个复制，并打开副本。 */
 	onForkSession(sessionId: string): void;
-	/** 删除这一行指名的会话，transcript 和一切。 */
+	/** 删除这一行指名的会话，会话记录和一切。 */
 	onDeleteSession(sessionId: string): void;
 	/**
 	 * 给这一行指名的会话一个存储在服务端的名字。
@@ -91,9 +91,9 @@ export interface SidebarState {
  *
  * "已打开"不需要席位：它就是 `aria-current` 的背景本身，行已经在说自己就是屏幕上的那个。
  */
-function busyOf(row: SessionRow): string | undefined {
-	if (row.pending > 0) return row.pending > 1 ? `待审批 ${row.pending}` : "待审批";
-	if (row.running) return "运行中";
+function busyOf(sessionRow: SessionRow): string | undefined {
+	if (sessionRow.pending > 0) return sessionRow.pending > 1 ? `待审批 ${sessionRow.pending}` : "待审批";
+	if (sessionRow.running) return "运行中";
 	return undefined;
 }
 
@@ -101,7 +101,7 @@ function busyOf(row: SessionRow): string | undefined {
  * 导航列。
  *
  * 它拥有关于*哪个*对话在屏幕上的一切 —— 目录分组、每组下面的树、新建会话控件、进入设置的路
- * —— 而对对话本身一无所知。正是这个拆分让右列可替换：侧栏从不读 transcript。
+ * —— 而对对话本身一无所知。正是这个拆分让右列可替换：侧栏从不读会话记录。
  *
  * 行原地更新。行现在在没人点击时也会变 —— 一个会话结束回合会动自己的行，后台会话开始回合会
  * 翻指示器 —— 所以重建列表会在指针按下与抬起之间把按钮换掉，点击会落在一个已不存在的元素上。
@@ -121,14 +121,14 @@ export class Sidebar {
 	 * 正是这张映射让原地补丁成为可能：行被查找而不是构建，所以一次三个字段变化、顺序没变的
 	 * 重渲染只触碰三个文本节点。掉出列表的行被移除，且只在那里。
 	 */
-	private readonly drawn = new Map<string, DrawnNode>();
+	private readonly drawnNodeMap = new Map<string, DrawnNode>();
 	/** 窗口所在行的 `id`，所以 `scrollIntoView` 只在它变化时发生。 */
 	private scrolledTo: string | undefined;
 	/**
 	 * 交给 {@link render} 的最后一个状态，让列表内画的控件能请求重画而无需调用者把它传回来。
 	 * 只有分页行需要这个。
 	 */
-	private lastState: SidebarState | undefined;
+	private lastSidebarState: SidebarState | undefined;
 	/** 搜索行是否在屏幕上，以及它过滤的文本。 */
 	private searchOpen = false;
 	private filterText = "";
@@ -142,7 +142,7 @@ export class Sidebar {
 	 * 树行是行的显示标题被算出来的地方，重命名编辑器正需要它：它编辑的干净名字是去掉后缀的标签，
 	 * 只有树知道。每次渲染重建，所以重命名永远从屏幕上实际有的东西播种。
 	 */
-	private readonly rowsById = new Map<string, TreeRow>();
+	private readonly treeRowMapById = new Map<string, TreeRow>();
 	/** 进行中的重命名编辑器，若有。一次一个，与这里每个弹窗一样。 */
 	private editing: Editing | undefined;
 
@@ -183,7 +183,7 @@ export class Sidebar {
 		});
 		this.searchInput.addEventListener("input", () => {
 			this.filterText = this.searchInput.value;
-			if (this.lastState !== undefined) this.renderRows(this.lastState);
+			if (this.lastSidebarState !== undefined) this.renderRows(this.lastSidebarState);
 		});
 		this.searchInput.addEventListener("keydown", (event) => {
 			if (event.key === "Escape") this.toggleSearch();
@@ -195,7 +195,7 @@ export class Sidebar {
 		this.noMatch.hidden = true;
 
 		// 眼睛不断回到的角落里的唯一控件：一切设定一次的东西 —— 主题、字号、模型 —— 都住在它
-		// 后面，而不是 transcript 周围的 chrome 里。通道指示器共享底部而不是过去与品牌共享的顶行：
+		// 后面，而不是会话记录周围的 chrome 里。通道指示器共享底部而不是过去与品牌共享的顶行：
 		// 它是关于窗口的事实，而底部正是窗口级事物住的地方。
 		const foot = element("div", "sidebar-foot");
 		const settings = element("button", "settings-entry", undefined, { type: "button", title: "设置" });
@@ -215,18 +215,18 @@ export class Sidebar {
 		this.searchRow.hidden = !this.searchOpen;
 		this.searchInput.value = "";
 		this.filterText = "";
-		if (this.lastState !== undefined) this.renderRows(this.lastState);
+		if (this.lastSidebarState !== undefined) this.renderRows(this.lastSidebarState);
 		if (this.searchOpen) this.searchInput.focus();
 	}
 
-	render(state: SidebarState): void {
-		this.lastState = state;
-		this.renderRows(state);
+	render(sidebarState: SidebarState): void {
+		this.lastSidebarState = sidebarState;
+		this.renderRows(sidebarState);
 
 		const root = document.getElementById("app");
-		if (root) root.dataset.sidebar = state.collapsed ? "rail" : "full";
-		this.toggle.title = state.collapsed ? "展开侧边栏" : "收起侧边栏";
-		this.renderIndicator(state.channel);
+		if (root) root.dataset.sidebar = sidebarState.collapsed ? "rail" : "full";
+		this.toggle.title = sidebarState.collapsed ? "展开侧边栏" : "收起侧边栏";
+		this.renderIndicator(sidebarState.channel);
 	}
 
 	/**
@@ -236,14 +236,14 @@ export class Sidebar {
 	 * 结束了回合的会话，无论列表刷新多少次都变不了自己的文本。廉价的比较被换成准确的 —— 每行
 	 * 都补丁，补丁一行没变的行写的还是同一个值。
 	 */
-	private renderRows(state: SidebarState): void {
+	private renderRows(sidebarState: SidebarState): void {
 		const wanted = new Set<string>();
-		const groups = state.directories;
+		const groups = sidebarState.directories;
 		const filter = this.filterText.trim().toLowerCase();
-		this.rowsById.clear();
+		this.treeRowMapById.clear();
 
 		if (groups.length === 0) {
-			this.drawn.clear();
+			this.drawnNodeMap.clear();
 			this.list.replaceChildren(this.headRow, this.searchRow, element("div", "session-list-empty", "暂无会话"));
 			this.searchRow.hidden = !this.searchOpen;
 			this.scrolledTo = undefined;
@@ -254,11 +254,11 @@ export class Sidebar {
 		// 过滤显示每组里的每个匹配：分页上限限制的是一次扫描能装下多少，正在收窄的列表不是扫描。
 		let matches = 0;
 		for (const group of groups) {
-			const entry = pagingOf(state.paging, group.workDirAbsPath);
-			const label = state.directoryNames?.[group.workDirAbsPath] ?? directoryName(group.workDirAbsPath);
+			const entry = pagingOf(sidebarState.paging, group.workDirAbsPath);
+			const label = sidebarState.directoryNames?.[group.workDirAbsPath] ?? directoryName(group.workDirAbsPath);
 			const wrapper = this.groupFor(group.workDirAbsPath, entry, label);
 			const rows = rowsOf(group);
-			for (const row of rows) this.rowsById.set(row.session.id, row);
+			for (const row of rows) this.treeRowMapById.set(row.session.id, row);
 			// 按行*戴着*的标签匹配，而不是它存储的标题：派生的后缀是人读到的东西的一部分，所以
 			// "（1）"收窄到那个派生，而不是它的每个兄弟。
 			const kept =
@@ -270,7 +270,7 @@ export class Sidebar {
 			matches += kept.length;
 			const open = filter !== "" || !entry.collapsed;
 			const shown = open
-				? pagedRows(kept, state.activeSessionId, filter !== "" ? Infinity : entry.page)
+				? pagedRows(kept, sidebarState.activeSessionId, filter !== "" ? Infinity : entry.page)
 				: [];
 			// 隐藏而不是移除：没有匹配的组保住自己在 DOM 里的位置，清掉过滤时每组回到原位，而不是按
 			// 创建顺序重新追加。
@@ -284,7 +284,7 @@ export class Sidebar {
 			// 上面时被销毁重建。
 			for (const row of shown) {
 				wanted.add(row.session.id);
-				const button = this.rowFor(row, state);
+				const button = this.rowFor(row, sidebarState);
 				this.place(wrapper, button, previous);
 				previous = button;
 			}
@@ -315,17 +315,17 @@ export class Sidebar {
 		// 这一列画过、且不再需要的全部退场，标题包括，而这里正是*过期*条目成为关键的地方：被改名
 		// 目录的标题不再被任何键指名，唯一还握着它的包裹的就是这张映射。没有东西从列表往回走，
 		// 所以没有行的组 —— 被改名那个，它的行已经在新路径下面 —— 从 DOM 上根本够不到。
-		for (const [key, node] of [...this.drawn]) {
+		for (const [key, node] of [...this.drawnNodeMap]) {
 			if (wanted.has(key)) continue;
 			node.button.remove();
-			this.drawn.delete(key);
+			this.drawnNodeMap.delete(key);
 		}
 
 		// 只有窗口移到了另一段对话时。每次渲染都做会把列表在后台行的更新下拖来拖去，而这正是这个
 		// 设计要防的那件事。
-		if (state.activeSessionId !== this.scrolledTo) {
-			this.scrolledTo = state.activeSessionId;
-			if (state.activeSessionId !== undefined) {
+		if (sidebarState.activeSessionId !== this.scrolledTo) {
+			this.scrolledTo = sidebarState.activeSessionId;
+			if (sidebarState.activeSessionId !== undefined) {
 				this.list.querySelector<HTMLElement>('[aria-current="true"]')?.scrollIntoView({ block: "nearest" });
 			}
 		}
@@ -364,7 +364,7 @@ export class Sidebar {
 	 */
 	private groupFor(workDirAbsPath: string, entry: DirectoryPaging, label: string): HTMLElement {
 		const key = `head:${workDirAbsPath}`;
-		const existing = this.drawn.get(key);
+		const existing = this.drawnNodeMap.get(key);
 		if (existing !== undefined) {
 			// 两个事实都经这个条目构建时用的标题引用写入，谁都不需要搜索。
 			if (existing.head !== undefined) {
@@ -402,7 +402,7 @@ export class Sidebar {
 		const wrapper = element("div", "directory");
 		wrapper.append(head);
 		this.list.append(wrapper);
-		this.drawn.set(key, { button: wrapper, head, name });
+		this.drawnNodeMap.set(key, { button: wrapper, head, name });
 		return wrapper;
 	}
 
@@ -437,7 +437,7 @@ export class Sidebar {
 	/**
 	 * 问这个标题该戴什么名字，并在被问的组旁边上报。
 	 *
-	 * 收集的是一个*标签*，所以它不可能错到付出代价的地步：目录保留自己的名字，没有任何 transcript
+	 * 收集的是一个*标签*，所以它不可能错到付出代价的地步：目录保留自己的名字，没有任何会话记录
 	 * 被改写。读起来像路径的名字仍然被丢弃 —— 标题坐落在一个真实目录名的列表里，一个看起来像
 	 * 目录移动的名字只会被误读。空盒子是共享对话框表达"没被要求"的方式，所以收回自定义名是设置
 	 * 那条路的职责（`directoryNames[workDirAbsPath] = ""`），不是这张卡片的。标题已经戴着的标签
@@ -463,10 +463,10 @@ export class Sidebar {
 		if (head.getAttribute("aria-expanded") !== wanted) head.setAttribute("aria-expanded", wanted);
 	}
 
-	private rowFor(row: TreeRow, state: SidebarState): HTMLElement {
-		const existing = this.drawn.get(row.session.id);
+	private rowFor(treeRow: TreeRow, sidebarState: SidebarState): HTMLElement {
+		const existing = this.drawnNodeMap.get(treeRow.session.id);
 		if (existing !== undefined && existing.parts !== undefined) {
-			this.patchRow(existing.parts, existing.button, row, state);
+			this.patchRow(existing.parts, existing.button, treeRow, sidebarState);
 			return existing.button;
 		}
 
@@ -477,17 +477,17 @@ export class Sidebar {
 		const title = element("span", "session-item-title");
 		const time = element("span", "session-item-time");
 		button.append(slot, title, time);
-		button.addEventListener("click", () => this.handlers.onSelectSession(row.session.id));
+		button.addEventListener("click", () => this.handlers.onSelectSession(treeRow.session.id));
 		// 行的全部菜单住这里而不是任何常驻控件上：右键指名行，打开的菜单是派生、重命名、删除被
 		// 提供的唯一地方。
 		button.addEventListener("contextmenu", (event) => {
 			event.preventDefault();
-			this.openSessionMenu(row.session.id, event.clientX, event.clientY);
+			this.openSessionMenu(treeRow.session.id, event.clientX, event.clientY);
 		});
 
 		const parts: RowParts = { slot, title, time };
-		this.drawn.set(row.session.id, { button, parts });
-		this.patchRow(parts, button, row, state);
+		this.drawnNodeMap.set(treeRow.session.id, { button, parts });
+		this.patchRow(parts, button, treeRow, sidebarState);
 		return button;
 	}
 
@@ -530,12 +530,12 @@ export class Sidebar {
 	 */
 	private startRename(sessionId: string): void {
 		if (this.editing !== undefined) return;
-		const drawn = this.drawn.get(sessionId);
-		const row = this.rowsById.get(sessionId);
-		if (drawn?.parts === undefined || row === undefined) return;
+		const drawn = this.drawnNodeMap.get(sessionId);
+		const treeRow = this.treeRowMapById.get(sessionId);
+		if (drawn?.parts === undefined || treeRow === undefined) return;
 
 		const input = element("input", "rename-input", undefined, { type: "text", "aria-label": "会话名称" });
-		const original = row.base;
+		const original = treeRow.base;
 		input.value = original;
 		const title = drawn.parts.title;
 		title.replaceWith(input);
@@ -573,32 +573,32 @@ export class Sidebar {
 	 * 写入已经存在的值都被跳过：无条件赋 `textContent` 会在每次心跳时替换文本节点，恰是这个设计
 	 * 要避免的抖动。
 	 */
-	private patchRow(parts: RowParts, button: HTMLElement, row: TreeRow, state: SidebarState): void {
-		const isActive = row.session.id === state.activeSessionId;
+	private patchRow(parts: RowParts, button: HTMLElement, treeRow: TreeRow, sidebarState: SidebarState): void {
+		const isActive = treeRow.session.id === sidebarState.activeSessionId;
 
 		// tooltip 只由可能变化的东西构成，创建日期 —— 唯一要花一次真 `toLocaleString` 的部分 ——
 		// 每个时间戳格式化一次并保存。每帧重组字符串是廉价的；为从不变的日期每帧调 `Intl` 不是，
 		// 而且它按行、按帧、对屏幕上每行都在跑。
 		let created = parts.created;
-		if (created === undefined || created.at !== row.session.createdAt) {
-			created = { at: row.session.createdAt, text: formatDate(row.session.createdAt) };
+		if (created === undefined || created.at !== treeRow.session.createdAt) {
+			created = { at: treeRow.session.createdAt, text: formatDate(treeRow.session.createdAt) };
 			parts.created = created;
 		}
 		// 父级按它*戴着*的名字指名，而不是它存的：派生的派生把后缀挂在父级自己的上面，所以
 		// tooltip 指名的是人真正在上面的行看到的行。busy 行骑在末尾：圆点是扫一眼，文字是细看。
-		const busy = busyOf(row.session);
+		const busy = busyOf(treeRow.session);
 		const tooltip =
-			(row.parentLabel === undefined
-				? `${row.label}\n${row.session.workDirAbsPath}\n创建于 ${created.text}`
-				: `${row.label}\n${row.session.workDirAbsPath}\n派生自 ${row.parentLabel}\n创建于 ${created.text}`) +
+			(treeRow.parentLabel === undefined
+				? `${treeRow.label}\n${treeRow.session.workDirAbsPath}\n创建于 ${created.text}`
+				: `${treeRow.label}\n${treeRow.session.workDirAbsPath}\n派生自 ${treeRow.parentLabel}\n创建于 ${created.text}`) +
 			(busy === undefined ? "" : `\n${busy}`);
 		if (parts.tooltip !== tooltip) {
 			parts.tooltip = tooltip;
 			button.title = tooltip;
 		}
 
-		if (parts.title.textContent !== row.label) parts.title.textContent = row.label;
-		this.paintTime(parts, row.session.modified);
+		if (parts.title.textContent !== treeRow.label) parts.title.textContent = treeRow.label;
+		this.paintTime(parts, treeRow.session.modified);
 		this.paintSlot(parts, busy);
 
 		if (isActive) button.setAttribute("aria-current", "true");
@@ -613,7 +613,7 @@ export class Sidebar {
 	 * "多久之前"在帧停止的那一刻就不再可知。
 	 */
 	tick(): void {
-		for (const drawn of this.drawn.values()) {
+		for (const drawn of this.drawnNodeMap.values()) {
 			const parts = drawn.parts;
 			if (parts?.modified === undefined) continue;
 			this.paintTime(parts, parts.modified);
@@ -656,7 +656,7 @@ export class Sidebar {
 	 */
 	private pagingRowFor(workDirAbsPath: string): PagingRow {
 		const key = `paging:${workDirAbsPath}`;
-		const existing = this.drawn.get(key);
+		const existing = this.drawnNodeMap.get(key);
 		if (existing?.paging !== undefined) return existing.paging;
 
 		const more = element("button", "session-more", undefined, { type: "button" });
@@ -666,7 +666,7 @@ export class Sidebar {
 		const row = element("div", "session-paging");
 		row.append(more, collapse);
 		const paging: PagingRow = { row, more, collapse };
-		this.drawn.set(key, { button: row, paging });
+		this.drawnNodeMap.set(key, { button: row, paging });
 		return paging;
 	}
 
@@ -682,10 +682,10 @@ export class Sidebar {
 
 	/** 按键丢掉一个画过的节点，无论它在哪。 */
 	private stale(key: string): void {
-		const entry = this.drawn.get(key);
+		const entry = this.drawnNodeMap.get(key);
 		if (entry === undefined) return;
 		entry.button.remove();
-		this.drawn.delete(key);
+		this.drawnNodeMap.delete(key);
 	}
 
 	/**
@@ -874,11 +874,11 @@ function rowsOf(group: DirectoryGroup): TreeRow[] {
 		// 机制，在第一个不同的名字处停止继承，才让改过名的行戴上它的服务端行实际携带的名字。
 		const inherited = parent !== undefined && session.title === parent.session.title;
 		const base = inherited ? parent.label : session.title;
-		const row: TreeRow = { session, depth, base, label: base + suffix };
-		if (parent !== undefined) row.parentLabel = parent.label;
-		rows.push(row);
+		const treeRow: TreeRow = { session, depth, base, label: base + suffix };
+		if (parent !== undefined) treeRow.parentLabel = parent.label;
+		rows.push(treeRow);
 		for (const [position, child] of (children.get(session.id) ?? []).entries()) {
-			place(child, depth + 1, row, position + 1);
+			place(child, depth + 1, treeRow, position + 1);
 		}
 	};
 

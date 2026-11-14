@@ -3,7 +3,7 @@ import { describeToolCall } from "../tools/index.ts";
 import type { SessionEntry } from "./session-manager.ts";
 
 /**
- * transcript 还在等待的 tool call，从账本读出而不是在内存里持有（ADR-0006 §5）：视图的 assistant
+ * 会话记录还在等待的 tool call，从账本读出而不是在内存里持有（ADR-0005 §5）：视图的 assistant
  * 消息里带着、而同一视图里没有 tool result 回答的 call。
  *
  * 这是审批流程所依赖的派生态。在 end-restart 语义下，一条等待中的审批*就是*悬空的 call——run 已经

@@ -3,7 +3,7 @@
 //
 //   1. 被 suspend 的 run 保留自己的队列——消息仍然计数在册，`settle` 照常返回（停在门口的
 //      session 是一个问题，不是活儿），grant 启动的恢复 run 会在它的取用点把队列排干，消息
-//      因此在工具结果之后而非之前到达 transcript；
+//      因此在工具结果之后而非之前到达会话记录；
 //   2. 遗弃清扫把它丢掉——不会有恢复 run，没有任何东西会取用它，一个没人降低的深度会让
 //      session 的 `settle` 永远等下去。这正是 hub 的 reap 与 `abort` 走的路径。
 //
@@ -62,13 +62,13 @@ function textOf(message: Message): string {
 	return message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 }
 
-/** transcript 的平面列表形式，让排序断言可以是一次下标比较。 */
-function messagesOf(session: Agent): Message[] {
-	return session.snapshot(sidOf(session)).messages;
+/** 会话记录的平面列表形式，让排序断言可以是一次下标比较。 */
+function messagesOf(agent: Agent): Message[] {
+	return agent.snapshot(sidOf(agent)).messages;
 }
 
-function indexOfText(session: Agent, role: Message["role"], text: string): number {
-	return messagesOf(session).findIndex((message) => message.role === role && textOf(message).includes(text));
+function indexOfText(agent: Agent, role: Message["role"], text: string): number {
+	return messagesOf(agent).findIndex((message) => message.role === role && textOf(message).includes(text));
 }
 
 /**
@@ -114,22 +114,22 @@ function gatedApi(holds: number[]): { api: ChatTransport; release(index: number)
 	};
 }
 
-const opened = new WeakMap<Agent, { id: string; state: Session }>();
+const opened = new WeakMap<Agent, { id: string; session: Session }>();
 
-function sidOf(session: Agent): string {
-	return opened.get(session)!.id;
+function sidOf(agent: Agent): string {
+	return opened.get(agent)!.id;
 }
 
 async function openSession(overrides: { approval?: Record<string, boolean>; api?: ChatTransport } = {}): Promise<Agent> {
-	const state = createSession(root);
-	const session = await openAgent({
-		session: state,
+	const session = createSession(root);
+	const agent = await openAgent({
+		session,
 		api: overrides.api ?? fake.api,
 		model: modelName,
 		settings: inMemorySettingManager({ approval: overrides.approval ?? {} }, rows),
 	});
-	opened.set(session, { id: state.sessionId, state });
-	return session;
+	opened.set(agent, { id: session.sessionId, session });
+	return agent;
 }
 
 /** 轮询到被持住的调用就是手里那次为止，"run 中"因此是事实而不是猜测。 */
@@ -147,7 +147,7 @@ process.stdout.write("\na message queued before the gate survives the park and i
 {
 	// 持住第 1 个请求：prompt 自己的那个。下面的一切都发生在该请求在途期间。
 	const gate = gatedApi([1]);
-	const session = await openSession({ approval: { read: true }, api: gate.api });
+	const agent = await openSession({ approval: { read: true }, api: gate.api });
 	fake.setResponses([
 		fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 		fakeAssistantMessage("after the grant"),
@@ -156,47 +156,47 @@ process.stdout.write("\na message queued before the gate survives the park and i
 
 	// 不 await：prompt 的 promise 在 run 结束时落定，而 run 必须在途，第二条 prompt 才会入队
 	// 而不是自己开一个 run。
-	void session.prompt(sidOf(session), "read the notes", { selection });
+	void agent.prompt(sidOf(agent), "read the notes", { selection });
 	await untilHeld(gate, 1);
 
-	await session.prompt(sidOf(session), "and also this", { selection });
-	check("the second message was queued, not turned into a run", session.snapshot(sidOf(session)).queued.length === 1, String(session.snapshot(sidOf(session)).queued.length));
+	await agent.prompt(sidOf(agent), "and also this", { selection });
+	check("the second message was queued, not turned into a run", agent.snapshot(sidOf(agent)).queued.length === 1, String(agent.snapshot(sidOf(agent)).queued.length));
 
 	// 放行被持住的请求：模型要那个被门住的工具，run 停在那里。
 	gate.release(1);
-	await session.settle(sidOf(session));
+	await agent.settle(sidOf(agent));
 
-	check("the gate ended the run with the call dangling", session.hasPendingApprovals(sidOf(session)), JSON.stringify(session.snapshot(sidOf(session)).pendingApprovals));
+	check("the gate ended the run with the call dangling", agent.hasPendingApprovals(sidOf(agent)), JSON.stringify(agent.snapshot(sidOf(agent)).pendingApprovals));
 	check(
 		"the queued message is still counted while the approval waits",
-		session.snapshot(sidOf(session)).queued.length === 1,
-		`queued=${session.snapshot(sidOf(session)).queued.length}`,
+		agent.snapshot(sidOf(agent)).queued.length === 1,
+		`queued=${agent.snapshot(sidOf(agent)).queued.length}`,
 	);
 	check(
-		"and it was not written to the transcript behind the run's back",
-		indexOfText(session, "user", "and also this") === -1,
-		JSON.stringify(messagesOf(session).map((message) => `${message.role}:${textOf(message).slice(0, 20)}`)),
+		"and it was not written to the session behind the run's back",
+		indexOfText(agent, "user", "and also this") === -1,
+		JSON.stringify(messagesOf(agent).map((message) => `${message.role}:${textOf(message).slice(0, 20)}`)),
 	);
 
-	await session.respondApproval(sidOf(session), session.snapshot(sidOf(session)).pendingApprovals[0]?.toolCallId ?? "", true);
-	await session.settle(sidOf(session));
+	await agent.respondApproval(sidOf(agent), agent.snapshot(sidOf(agent)).pendingApprovals[0]?.toolCallId ?? "", true);
+	await agent.settle(sidOf(agent));
 
 	check(
 		"the recovery run drained it and the model answered it",
-		indexOfText(session, "assistant", "answered the queued message") !== -1,
-		JSON.stringify(messagesOf(session).map((message) => `${message.role}:${textOf(message).slice(0, 20)}`)),
+		indexOfText(agent, "assistant", "answered the queued message") !== -1,
+		JSON.stringify(messagesOf(agent).map((message) => `${message.role}:${textOf(message).slice(0, 20)}`)),
 	);
 	check(
-		"it reached the transcript once",
-		messagesOf(session).filter((message) => message.role === "user" && textOf(message) === "and also this").length === 1,
+		"it reached the session once",
+		messagesOf(agent).filter((message) => message.role === "user" && textOf(message) === "and also this").length === 1,
 	);
 	check(
 		"and it landed after the tool result, which is the only place a provider accepts it",
-		indexOfText(session, "toolResult", "notes.txt") < indexOfText(session, "user", "and also this"),
-		`result=${indexOfText(session, "toolResult", "notes.txt")} user=${indexOfText(session, "user", "and also this")}`,
+		indexOfText(agent, "toolResult", "notes.txt") < indexOfText(agent, "user", "and also this"),
+		`result=${indexOfText(agent, "toolResult", "notes.txt")} user=${indexOfText(agent, "user", "and also this")}`,
 	);
-	check("the queue is empty once it was taken", session.snapshot(sidOf(session)).queued.length === 0);
-	await session.close(sidOf(session));
+	check("the queue is empty once it was taken", agent.snapshot(sidOf(agent)).queued.length === 0);
+	await agent.close(sidOf(agent));
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -210,38 +210,38 @@ process.stdout.write("\nan abandoned approval drops what was queued, and settle 
 
 {
 	const gate = gatedApi([1]);
-	const session = await openSession({ approval: { read: true }, api: gate.api });
+	const agent = await openSession({ approval: { read: true }, api: gate.api });
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("never reached")]);
 
-	void session.prompt(sidOf(session), "read the notes", { selection });
+	void agent.prompt(sidOf(agent), "read the notes", { selection });
 	await untilHeld(gate, 1);
-	await session.prompt(sidOf(session), "and also this", { selection });
+	await agent.prompt(sidOf(agent), "and also this", { selection });
 	gate.release(1);
-	await session.settle(sidOf(session));
-	check("the run parked with a message queued behind it", session.snapshot(sidOf(session)).queued.length === 1, String(session.snapshot(sidOf(session)).queued.length));
+	await agent.settle(sidOf(agent));
+	check("the run parked with a message queued behind it", agent.snapshot(sidOf(agent)).queued.length === 1, String(agent.snapshot(sidOf(agent)).queued.length));
 
 	// 清扫，按一次退出或 reap 执行它的方式。`abort` 是刻意的停止，它进入同一函数的路径正是
 	// 这里钉住的。
-	await session.abort(sidOf(session));
-	await session.settle(sidOf(session));
+	await agent.abort(sidOf(agent));
+	await agent.settle(sidOf(agent));
 
-	check("the unanswered call was closed with the sweep's sentence", !session.hasPendingApprovals(sidOf(session)));
-	check("the queued message went with the run nobody resumed", session.snapshot(sidOf(session)).queued.length === 0, String(session.snapshot(sidOf(session)).queued.length));
+	check("the unanswered call was closed with the sweep's sentence", !agent.hasPendingApprovals(sidOf(agent)));
+	check("the queued message went with the run nobody resumed", agent.snapshot(sidOf(agent)).queued.length === 0, String(agent.snapshot(sidOf(agent)).queued.length));
 	check(
 		"and nothing was written for it",
-		indexOfText(session, "user", "and also this") === -1,
-		JSON.stringify(messagesOf(session).map((message) => `${message.role}:${textOf(message).slice(0, 20)}`)),
+		indexOfText(agent, "user", "and also this") === -1,
+		JSON.stringify(messagesOf(agent).map((message) => `${message.role}:${textOf(message).slice(0, 20)}`)),
 	);
 	// session 仍然可用：丢掉队列不得把它楔死。
 	fake.setResponses([fakeAssistantMessage("still works")]);
-	await session.prompt(sidOf(session), "carry on", { selection });
-	await session.settle(sidOf(session));
+	await agent.prompt(sidOf(agent), "carry on", { selection });
+	await agent.settle(sidOf(agent));
 	check(
 		"the session still runs after the sweep",
-		indexOfText(session, "assistant", "still works") !== -1,
-		JSON.stringify(messagesOf(session).map((message) => `${message.role}:${textOf(message).slice(0, 20)}`)),
+		indexOfText(agent, "assistant", "still works") !== -1,
+		JSON.stringify(messagesOf(agent).map((message) => `${message.role}:${textOf(message).slice(0, 20)}`)),
 	);
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 process.stdout.write(failures === 0 ? "\napproval queue ok\n" : `\n${failures} FAILED\n`);

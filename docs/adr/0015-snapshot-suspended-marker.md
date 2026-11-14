@@ -1,24 +1,24 @@
-# 0021：快照的 suspended 标记——冷启动审批点是纯显示缓存
+# 0015：快照的 suspended 标记——冷启动审批点是纯显示缓存
 
 日期：2026-11-11 · 状态：已接受，**已落地**（cold-start-approval-dot 01–03 号票：`check` 绿，smoke-approval（含 §5 跨进程重启）、smoke-projection、smoke-sessions、smoke-mux、smoke-approval-endpoint 单独跑全绿；04 号票文档收账）
-取代：无——这是 [0006](0006-stateless-session-architecture.md) 后果一节「可从磁盘重建的缓存」升级口子的一个实例；0006 §5、[0009](0009-session-two-file-format.md)、[0019](0019-table-holds-live-half-only.md) 的决定均不变
+取代：无——这是 [0005](0005-stateless-session-architecture.md) 后果一节「可从磁盘重建的缓存」升级口子的一个实例；0005 §5、[0008](0008-session-two-file-format.md)、[0013](0013-table-holds-live-half-only.md) 的决定均不变
 取代者：无
 
 设计过程见 `.scratch/cold-start-approval-dot/`（spec 是决定与崩溃窗口的明细，本 ADR 记合拢后的结论）。
 
 ## 背景
 
-结束重启语义（0006 §5）下，等待审批的那次运行已经结束，tool call 在账本里悬空（有 tool_use 无 tool_result）。**问题的寿命比运行长、比 host 长、也比进程长**：进程关停不对悬空 call 落 deny，重启后点开那个会话，装配从账本派生 `pendingApprovals`（`danglingApprovalsOf(buildContextEntries(...))`），审批卡片照常显示、可批可拒。
+结束重启语义（0005 §5）下，等待审批的那次运行已经结束，tool call 在账本里悬空（有 tool_use 无 tool_result）。**问题的寿命比运行长、比 host 长、也比进程长**：进程关停不对悬空 call 落 deny，重启后点开那个会话，装配从账本派生 `pendingApprovals`（`danglingApprovalsOf(buildContextEntries(...))`），审批卡片照常显示、可批可拒。
 
 但侧边栏的琥珀点在冷启动后不亮。启动扫描读每个会话的 `.json` 快照拿身份与当前值，对 `.jsonl` 只逐行过一遍做统计（消息数、标题兜底、搜索文本、modified）；「有没有悬空 call」是打开会话那次重放的派生物——在分支的上下文视图上配对 tool_use/tool_result——扫描刻意不付这个成本。于是 `toSessionRow` 把行的 `pending` 硬编码为 0，注释里还写明了一个假设：「没有 host 的会话没有在等的审批」。这个假设是内存挂起时代的遗留：那时待审批是进程里的 Promise，进程死了问题跟着死；结束重启之后问题活在账本里，这句话不再成立。结果是用户重启软件后，列表里看不出哪个会话在等他批——提醒丢在列表这一层，要逐个点开才找得回来。
 
-同族缺陷分两层。**进程内那一层已修**（commit fef7347，与 0019/0020 同批入库）：`projection.ts` 的 `onHost(undefined)` 不再硬清零 `running` / `pending`，改读 `hub.agent.snapshotOf(id)` 用账本派生值 settle 行——host 收摊时问题不跟着死，带「读取途中宿主回来 / 会话被删」的竞态守卫。本 ADR 只解决**冷启动那一层**：进程整个重启，表是空的，没有 host，也没有人点开过任何会话。
+同族缺陷分两层。**进程内那一层已修**（commit fef7347，与 0013/0014 同批入库）：`projection.ts` 的 `onHost(undefined)` 不再硬清零 `running` / `pending`，改读 `hub.agent.snapshotOf(id)` 用账本派生值 settle 行——host 收摊时问题不跟着死，带「读取途中宿主回来 / 会话被删」的竞态守卫。本 ADR 只解决**冷启动那一层**：进程整个重启，表是空的，没有 host，也没有人点开过任何会话。
 
 ## 决定
 
 在 `.json` 快照里加一个 **`suspended` 标记**：停在审批闸门时写 true，问题关闭时清掉。启动扫描本来就读快照，据此点亮行。标记是**纯显示缓存**：
 
-1. **账本仍是唯一事实。** 标记随时可从 JSONL 重放重新算出——它是 0006 后果一节留的口子（「可从磁盘重建的缓存」）的实例。那个口子原说的是把缓存加回内存；这个实例更省：缓存住在**盘上**的快照里，内存里没有任何常驻副本——袋每次现开、用完就丢（0019），标记随重放进出袋，没有一个失效点要付。
+1. **账本仍是唯一事实。** 标记随时可从 JSONL 重放重新算出——它是 0005 后果一节留的口子（「可从磁盘重建的缓存」）的实例。那个口子原说的是把缓存加回内存；这个实例更省：缓存住在**盘上**的快照里，内存里没有任何常驻副本——袋每次现开、用完就丢（0013），标记随重放进出袋，没有一个失效点要付。
 2. **任何控制流都不读它。** `hasPendingApproval`、`respondApproval`、恢复机器、驱逐判据一律从账本派生或读 `live.suspended`，现状不变。注意区分两个名字相近的东西：`live.suspended` 是 live 半上的运行事实（这次运行停在闸门上结束，队列保留与 `evict` 判据读它），快照标记是它在盘上的显示影子。标记只服务列表那一瞥；点开 session 后以派生值为准。
 3. **一瞥不该付全文重放的账。** 侧边栏要回答的只是「哪些会话在等批」，精确数量是点开后的派生事实——为此一个布尔字段就够了。
 
@@ -26,14 +26,14 @@
 
 - **磁盘**：`SessionMeta` 加可选字段 `suspended?: true`。**只在 true 时写**，缺省即 false——旧快照无字段读作 false，**版本不动（仍是 5）、不迁移**。`readMetaFile` 的校验只查身份字段与版本，多一个字段天然兼容。
 - **内存**：`SessionSetting` 加 `suspended: boolean`，恒在（未停泊即 false）。这里有语义张力：SessionSetting 其余字段是用户选择，这个是派生运行事实。放这里是因为磁盘↔内存翻译**只有两个点**——`sessionSettingOf` 合并进、`metaOf` 拆分出——不为一个字段开第三个翻译点。字段注释写明它是可重建缓存、不是选择。
-- **写边界**：新增 `SessionManager.setSuspended(bag, suspended)`，形态照 `setToolConfig`，走 `recordMeta` → `writeMetaFile`（temp + rename 原子整体重写）；change 返回 false 即空操作——**只有翻转才付一次重写**。而因为每只袋都是现重放的新袋（0019），任何一次无关的快照重写携带的都是盘上当前值，标记不会被一只旧袋拖回过去。
+- **写边界**：新增 `SessionManager.setSuspended(session, suspended)`，形态照 `setToolConfig`，走 `recordMeta` → `writeMetaFile`（temp + rename 原子整体重写）；change 返回 false 即空操作——**只有翻转才付一次重写**。而因为每只袋都是现重放的新袋（0013），任何一次无关的快照重写携带的都是盘上当前值，标记不会被一只旧袋拖回过去。
 
 ### 三个写入点
 
 全在编排层 / Manager，全走既有原子重写：
 
-1. **运行收尾清扫**（`Agent.run` 的 `finally`）：`setSuspended(bag, live.suspended)`。这一处覆盖所有翻转：suspend 结束的运行写 true；恢复运行 / 普通运行结束写 false。标记跟随运行结束时的旗标。
-2. **`denyAllApprovals`**（放弃清扫）：`setSuspended(bag, false)`。这是没有运行的收尾——宽限走完或 abort 关闭会话时，不会再有恢复运行来清扫，所以在这里清。
+1. **运行收尾清扫**（`Agent.run` 的 `finally`）：`setSuspended(session, live.suspended)`。这一处覆盖所有翻转：suspend 结束的运行写 true；恢复运行 / 普通运行结束写 false。标记跟随运行结束时的旗标。
+2. **`denyAllApprovals`**（放弃清扫）：`setSuspended(session, false)`。这是没有运行的收尾——宽限走完或 abort 关闭会话时，不会再有恢复运行来清扫，所以在这里清。
 3. **`forkFrom`**：复制当前值的那一处（title/model/level/工具/审批五值随拷）加上第六值，**无条件随拷**。fork 复制的是含 `entryId` 的那条分支（null 才是整份日志）：整份 fork 必然带着源的悬空 call，同样停在闸门上；分支 fork 若不含悬空 call，会继承一个误报点——与崩溃窗口同族，点开即正确，fork 的第一次运行收尾纠正。
 
 **`respondApproval` 不是写入点。** 回答到达时 call 仍悬空——问题要到恢复运行关闭 call 才算关闭，标记由那次恢复运行的收尾清扫清掉。在回答时写 false 会造出一个「问题还在、点已灭」的窗口。grant 写审批映射（`setToolConfig`，这个工具不再问）与标记是两条路，各写各的。
@@ -80,6 +80,6 @@
 
 ## 与其他 ADR 的关系
 
-- **0006 §5**（结束重启）是本决定的前提：问题比运行与进程活得长，冷启动的行才需要一个答案。其后果一节的「可从磁盘重建的缓存」口子是标记的正当性来源——这是那个口子的第一个实例，设计承诺（缓存必须可从磁盘重建）不变。
-- **0009**（两文件格式）：快照管「是什么」，标记是派生运行事实而不是选择——这是对快照语义的一次刻意拉伸，记在 `SessionMeta` 的字段注释里。版本不动，配对与删除规则不动。
-- **0019**（表只装 live 半）：标记不新增任何驻留状态——它随重放进出袋，翻译点仍是两个。0019 的「没有人持有副本」恰好保证了标记不会在无关重写中被旧袋拖回过去。
+- **0005 §5**（结束重启）是本决定的前提：问题比运行与进程活得长，冷启动的行才需要一个答案。其后果一节的「可从磁盘重建的缓存」口子是标记的正当性来源——这是那个口子的第一个实例，设计承诺（缓存必须可从磁盘重建）不变。
+- **0008**（两文件格式）：快照管「是什么」，标记是派生运行事实而不是选择——这是对快照语义的一次刻意拉伸，记在 `SessionMeta` 的字段注释里。版本不动，配对与删除规则不动。
+- **0013**（表只装 live 半）：标记不新增任何驻留状态——它随重放进出袋，翻译点仍是两个。0013 的「没有人持有副本」恰好保证了标记不会在无关重写中被旧袋拖回过去。

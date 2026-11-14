@@ -84,7 +84,7 @@ async function freePort(): Promise<number> {
 // 需求不得依赖机器碰巧有什么。工作目录也是临时目录——这里没有任何东西把 session 写进仓库或
 // 两棵临时树之外的任何地方。剧本化 transport 骑在 boot 路径本身上：下面的最坏情况需要一个
 // 在场的、无人应答的 run，而 provider key 不该是它的代价。那个最坏情况是一次永不应答的 provider
-// 调用——在 end-restart 审批语义下（ADR-0006 §5）审批不再让 run 停住，所以这个挂起才是把 run
+// 调用——在 end-restart 审批语义下（ADR-0005 §5）审批不再让 run 停住，所以这个挂起才是把 run
 // 留在栈上供 `close()` 截断的东西。挂起尊重 abort signal，这正是要点：`close()` 先 abort，
 // 被 abort 的调用就是让它得以返回的东西。
 const workDir = await mkdtemp(join(tmpdir(), "my-agent-boot-"));
@@ -141,7 +141,7 @@ try {
 	const sessionId = ((created.payload ?? {}) as { sessionId?: string }).sessionId ?? "";
 	check("the landing follows the explicit creation", (await server.hub.currentSessionId()) === sessionId, sessionId);
 
-	// modes 面（ADR-0005）：patch 整表替换列表，snapshot 整份带回，与内置默认名——或与另一行
+	// modes 面（ADR-0004）：patch 整表替换列表，snapshot 整份带回，与内置默认名——或与另一行
 	// ——撞名的请求被拒绝而不是被改得唯一。这里的一切都骑在临时 home 上，不会泄进机器的设置。
 	const saved = await request(server.url, "PATCH", "/api/settings", {
 		patch: { modes: [{ name: "smoke-readonly", tools: ["read", "glob", "grep"], approval: { bash: false } }] },

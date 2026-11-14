@@ -242,7 +242,7 @@ export class MuxConnection {
 	/**
 	 * 开始观看一个会话，或把本连接已持有的观看刷新到最新。
 	 *
-	 * `open` 的意思是"这个会话现在的状态，然后之后的一切"，且是幂等的（ADR-0010 决定 1）。本连接*已经在看*的会话因此不算错：应答是在已有的流上再发一份 baseline，底下的订阅原样保留——同样的 feed、同样的审批、同一条流。这才让"窗格在别处仍持有会话时消失、又回来了"能工作：引用计数意味着没有发过 `cancel`，回来这一程唯一能应答它的就是重发的 baseline。
+	 * `open` 的意思是"这个会话现在的状态，然后之后的一切"，且是幂等的（ADR-0009 决定 1）。本连接*已经在看*的会话因此不算错：应答是在已有的流上再发一份 baseline，底下的订阅原样保留——同样的 feed、同样的审批、同一条流。这才让"窗格在别处仍持有会话时消失、又回来了"能工作：引用计数意味着没有发过 `cancel`，回来这一程唯一能应答它的就是重发的 baseline。
 	 *
 	 * 不存在的会话仍然是客户端的错，但应答写在它相关的流上——一个带归因的 `error` 帧，然后一个 `end`，让失败的尝试不至于继续看起来像一条只是安静的流——而连接本身无论哪种情况都不受影响。
 	 */
@@ -256,7 +256,7 @@ export class MuxConnection {
 		const subscription: Subscription = { pending: new Map(), backlog: [], teardown: [] };
 		this.subscriptions.set(sessionId, subscription);
 
-		// 观看不占 hold，这一点始终是全部关键：计数属于改变或运行会话的调用者，而看着它的窗口两者都不是。它也不让任何状态保持存活——读取是重放后即弃（ADR-0019），所以下面的帧由那次应答和一次不属于这里任何人的运行的事件构成。`observe` 按 id 键控，若本进程之后开始运行该会话会自动重绑，这正是"先看着它，再给它发消息"能工作的原因。
+		// 观看不占 hold，这一点始终是全部关键：计数属于改变或运行会话的调用者，而看着它的窗口两者都不是。它也不让任何状态保持存活——读取是重放后即弃（ADR-0013），所以下面的帧由那次应答和一次不属于这里任何人的运行的事件构成。`observe` 按 id 键控，若本进程之后开始运行该会话会自动重绑，这正是"先看着它，再给它发消息"能工作的原因。
 		//
 		// `live` 区分"我看着看着它停了"和"它从来就没在跑"，与 `bind` 依赖的是同一个区分：只有前者结束流。
 		let live = false;
@@ -279,7 +279,7 @@ export class MuxConnection {
 			this.subscriptions.delete(sessionId);
 		});
 
-		// 已在运行：上面的 `observe` 同步回调了，baseline 已经发出。冷的：从磁盘读 transcript，这是唯一无法绕开 `await` 的地方——而 backlog 正是让这个 await 打不开缝隙的东西。
+		// 已在运行：上面的 `observe` 同步回调了，baseline 已经发出。冷的：从磁盘读会话记录，这是唯一无法绕开 `await` 的地方——而 backlog 正是让这个 await 打不开缝隙的东西。
 		if (subscription.backlog !== null) void this.readColdBaseline(sessionId, subscription);
 	}
 
@@ -300,9 +300,9 @@ export class MuxConnection {
 	 *
 	 * 冷订阅上的第一个，以及之后每个 {@link pushBaseline} 欠下一个空闲观看的——两种情况的读取相同，重新布防 backlog 正是让第二个落在它所描述的状态之后，而不是落在已经跑过去的帧顶上。
 	 *
-	 * 读取不拼装任何东西（ADR-0019）：orchestrator 的 `snapshotOf` 打开一个 bag、从中应答、然后丢弃，所以一个被观看但空闲的会话只花一次重放、什么都不留下——没有要养活的状态，没有这个订阅要撑开的开口。它同样不占 hold，因为这里没有任何人在改变或运行什么。它就是"观看一个空闲会话"的答案——旧有的按运行划分的流根本拒绝服务的那个场景。
+	 * 读取不拼装任何东西（ADR-0013）：orchestrator 的 `snapshotOf` 打开一只袋、从中应答、然后丢弃，所以一个被观看但空闲的会话只花一次重放、什么都不留下——没有要养活的状态，没有这个订阅要撑开的开口。它同样不占 hold，因为这里没有任何人在改变或运行什么。它就是"观看一个空闲会话"的答案——旧有的按运行划分的流根本拒绝服务的那个场景。
 	 *
-	 * 读取进行期间产生的一切都在订阅的 backlog 里等。这就是 backlog 存在的全部理由：没有它，读取期间开始的运行会把帧放在*描述它们的状态之前*，客户端会渲染出一条往回跳的 transcript。
+	 * 读取进行期间产生的一切都在订阅的 backlog 里等。这就是 backlog 存在的全部理由：没有它，读取期间开始的运行会把帧放在*描述它们的状态之前*，客户端会渲染出一条往回跳的会话记录。
 	 */
 	private async readColdBaseline(sessionId: string, subscription: Subscription): Promise<void> {
 		let snapshot: SessionSnapshot;
@@ -344,7 +344,7 @@ export class MuxConnection {
 	private bind(sessionId: string, subscription: Subscription, feeds: SessionFeeds): void {
 		const onEvent = feeds.onEvent((event) => {
 			this.push(sessionId, subscription, { type: "event", event });
-			// 叶子移动改变整条 transcript，所以为它发出的是会话的当前状态而不是差异：事件说树动了，这帧说动到了哪里。
+			// 叶子移动改变整条会话记录，所以为它发出的是会话的当前状态而不是差异：事件说树动了，这帧说动到了哪里。
 			if (event.type === "branch_changed") this.pushBaseline(sessionId, subscription);
 			if (event.type === "entry_appended") this.pushEntry(sessionId, subscription, event.entryId, event.at);
 		});
@@ -369,7 +369,7 @@ export class MuxConnection {
 	/**
 	 * 把一帧放到本订阅的流上，baseline 还没发出时先扣住。
 	 *
-	 * backlog 是对设计里唯一可能出现的缝隙的回答：*冷*会话的 transcript 必须从磁盘读，那是异步的，读取期间可能有东西被发布。扣到 baseline 发出、再按序冲刷，让保证与同步场景完全一致——客户端先看到状态，然后看到其后的每个变更，按发生顺序。
+	 * backlog 是对设计里唯一可能出现的缝隙的回答：*冷*会话的会话记录必须从磁盘读，那是异步的，读取期间可能有东西被发布。扣到 baseline 发出、再按序冲刷，让保证与同步场景完全一致——客户端先看到状态，然后看到其后的每个变更，按发生顺序。
 	 */
 	private push(sessionId: string, subscription: Subscription, item: ServerMessageItem): void {
 		const frame: ServerFrame = { streamId: sessionId, item };
@@ -383,7 +383,7 @@ export class MuxConnection {
 	/**
 	 * 先发出 baseline，然后是堆积在它后面的一切。
 	 *
-	 * 每个 baseline 调一次——第一次由两次读取中先完成的那个调，之后每个欠了新 baseline 的 {@link pushBaseline} 各调一次——且永远按产生顺序冲刷，客户端不可能看到 transcript 往回跳。
+	 * 每个 baseline 调一次——第一次由两次读取中先完成的那个调，之后每个欠了新 baseline 的 {@link pushBaseline} 各调一次——且永远按产生顺序冲刷，客户端不可能看到会话记录往回跳。
 	 */
 	private writeBaseline(sessionId: string, subscription: Subscription, snapshot: SessionSnapshot): void {
 		if (subscription.backlog === null) return;
@@ -424,9 +424,9 @@ export class MuxConnection {
 	}
 
 	/**
-	 * `entry_appended` 所指的 entry，附上 transcript 用于排序的时间戳。
+	 * `entry_appended` 所指的 entry，附上会话记录用于排序的时间戳。
 	 *
-	 * 时间戳随事件而来而不是在这里回读：这里对每条追加的消息只跑一次，而回读 transcript 要解析整份日志只为一个数字（ADR-0019）。
+	 * 时间戳随事件而来而不是在这里回读：这里对每条追加的消息只跑一次，而回读会话记录要解析整份日志只为一个数字（ADR-0013）。
 	 */
 	private pushEntry(sessionId: string, subscription: Subscription, entryId: string, at: number | undefined): void {
 		this.push(sessionId, subscription, {
@@ -489,7 +489,7 @@ export class MuxConnection {
 	 *
 	 * entry 在帧*之前*移除，因为 `end` 之后本连接对那个会话必须再无话可说——这就是这帧的全部含义，在它之后还看到任何东西的客户端将无法分辨那属于哪条流。
 	 *
-	 * 每个调用者结束的都是一条无话可说的流。第二个 `open` 曾经是唯一的例外，现在不是了：重复 `open` 的应答是在已有流上发一份 baseline（ADR-0010 决定 1），所以没有任何路径会为一个底层健康的订阅报告失败。
+	 * 每个调用者结束的都是一条无话可说的流。第二个 `open` 曾经是唯一的例外，现在不是了：重复 `open` 的应答是在已有流上发一份 baseline（ADR-0009 决定 1），所以没有任何路径会为一个底层健康的订阅报告失败。
 	 */
 	private endStream(sessionId: string): void {
 		const subscription = this.subscriptions.get(sessionId);
@@ -509,8 +509,8 @@ export class MuxConnection {
 	}
 
 	/** 一行变了。整行发出，因为行很小、而整行替换是幂等的。 */
-	sendRow(row: SessionRow): void {
-		this.send({ streamId: null, item: { type: "session_row", session: row } });
+	sendRow(sessionRow: SessionRow): void {
+		this.send({ streamId: null, item: { type: "session_row", session: sessionRow } });
 	}
 
 	/** 一行消失了。id 就是全部 payload：丢弃它是客户端唯一能做的事。 */
@@ -759,9 +759,9 @@ export class MuxServer {
 		// overview 是一条从不被 open、从不被 cancel 的连接层流，所以它由唯一知道一行变了的地方供数，而不是由某张订阅表。
 		//
 		// 退订器被保留而不是丢弃：projection 比任何一个 mux 服务器活得久，遗落的监听器会在 `close()` 之后把整个对象图——连同它持有的每条连接——都吊着不放。真实进程里 projection 先关闭、本来就会清掉监听器，这正是这个 bug 在那里不会现形的原因。
-		this.stopRows = projection.onRow((row) => {
-			if (!this.listed(row)) return;
-			for (const connection of this.connections) connection.sendRow(row);
+		this.stopRows = projection.onRow((sessionRow) => {
+			if (!this.listed(sessionRow)) return;
+			for (const connection of this.connections) connection.sendRow(sessionRow);
 		});
 		// 移除与行占同一个连接层的席位，理由相同：它说的是机器的列表，不是任何一条流。像 `stopRows` 一样保留——projection 比本服务器活得久，遗落的监听器会吊住整个对象图。
 		this.stopGone = projection.onGone((sessionId) => {
@@ -832,13 +832,13 @@ export class MuxServer {
 	 *
 	 * 规则是 hub 的（{@link SessionHub.listsDirectory}），过滤在这里施加，施加在一行到达窗口的两个点上：连接打开时的 overview，以及其后每一个变了的行。只过滤 overview，会让一个用户放到一边的目录在其某个会话一变的瞬间自己回来——自己回来的组比从未离开的更糟。
 	 */
-	private listed(row: SessionRow): boolean {
-		return this.hub.listsDirectory(row.workDirAbsPath);
+	private listed(sessionRow: SessionRow): boolean {
+		return this.hub.listsDirectory(sessionRow.workDirAbsPath);
 	}
 
 	/** 本连接的开场 overview：本进程列出的每一行，各一次。 */
 	private overview(): Promise<SessionRow[]> {
-		return this.projection.rows().then((rows) => rows.filter((row) => this.listed(row)));
+		return this.projection.rows().then((rows) => rows.filter((sessionRow) => this.listed(sessionRow)));
 	}
 
 	/**

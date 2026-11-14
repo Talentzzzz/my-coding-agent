@@ -1,7 +1,7 @@
 // Stream lifecycle smoke test，常驻 transport 给它的形状：hold 决定一个 session *运行*多久，
 // 订阅决定它的 state *存活*多久。一条看着 idle session 的车道不取 hold、也不结束任何东西，
 // 打开它的读也不登记任何东西——表持有的是正在运行的东西，所以一个被看着但 idle 的 session
-// 是一份文件加一条车道，仅此而已（ADR-0019）。一次 run 结束不结束车道：host 消失才结束，而
+// 是一份文件加一条车道，仅此而已（ADR-0013）。一次 run 结束不结束车道：host 消失才结束，而
 // host 在最后一个 hold 松手时消失——run 放在那里的 state 随 reap 一起离开。失败那一节钉住
 // 一个在 watcher 之下失败的 run——和一个无人看着失败的 run——分别在哪些地方被听到。
 //
@@ -126,7 +126,7 @@ async function openRig(): Promise<Rig> {
 /**
  * 让每次 assistant 消息的持久化都失败，补丁装着多久就失败多久。
  *
- * 这是 ticket 08 为机械失败形状指名的接缝：坏掉的是 transcript 本身，所以关于失败的任何东西
+	 * 这是 ticket 08 为机械失败形状指名的接缝：坏掉的是会话记录本身，所以关于失败的任何东西
  * 都写不进失败通常去的地方。用户消息仍然落地——`prompt` 在循环开始之前写它——所以补丁放它
  * 通过。
  *
@@ -154,10 +154,11 @@ const wire = await connect(`${rig.url.replace("http", "ws")}/mux`);
  * orchestrator 的表此刻是否持有这个 session。
  *
  * 不是同步快照：那个读文件，所以无论是否有东西在运行它都对每个诞生过的 session 作答，而一次
- * 读根本不登记 state（ADR-0019）。表是唯一的仪表，所以直接读它——穿过私有 map，与其他 smoke
+ * 读根本不登记 state（ADR-0013）。表是唯一的仪表，所以直接读它——穿过私有 map，与其他 smoke
  * 到达门面不外发的半区的方式相同。
  */
-const inTable = (id: string): boolean => (rig.hub.agent as unknown as { sessions: Map<string, unknown> }).sessions.has(id);
+const inTable = (id: string): boolean =>
+	(rig.hub.agent as unknown as { agentStateMap: Map<string, unknown> }).agentStateMap.has(id);
 
 // hold 计数器是本 smoke 承重的仪表（docs/notes.md §二 bug 4：要验证"x 不取 hold"，数
 // `hub.hold` 调用——绝不读 `hub.live`，一个被释放的 hold 在一拍之内就从那里消失）。
@@ -197,7 +198,7 @@ try {
 
 	// 一次读要经过 hub 自己的驱逐漏斗（`hub.snapshotOf` 问一次，所以无人看着的 state 不逗留）。
 	// 必须熬过它的是 session 创建在这里留下的东西：它还没有文件，所以它的 state *就是* session，
-	// 丢掉它等于删掉这个 id（ADR-0019）。
+	// 丢掉它等于删掉这个 id（ADR-0013）。
 	check("the state creation left behind survived the read", inTable(idleId));
 
 	// ---------------------------------------------------------------------------------------------
@@ -278,7 +279,7 @@ try {
 	console.error = realError;
 
 	check("and the server logged what no frame could carry", logged.length > 0, JSON.stringify(logged));
-	check("the transcript is exactly what the failure let survive", ((await request(rig.url, "GET", `/api/sessions/${encodeURIComponent(watchedId)}`)).payload as { session: { messages: unknown[] } }).session.messages.length === 1);
+	check("the session is exactly what the failure let survive", ((await request(rig.url, "GET", `/api/sessions/${encodeURIComponent(watchedId)}`)).payload as { session: { messages: unknown[] } }).session.messages.length === 1);
 	// 补丁在下一节运行之前摘掉：它落在的是 hub 自己的服务上。
 	restoreWatched();
 

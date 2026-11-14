@@ -12,7 +12,7 @@ import type { HostedSession, SessionHub } from "./hub.ts";
  * 一行是一个存储身份加三个字段，diff 的应用成本比整行替换还高——而且整行让每次更新幂等，这让监听者可以只留最后收到的那一行，而不必关心中间有没有漏掉几个。
  */
 export interface RowListener {
-	(row: SessionRow): void;
+	(sessionRow: SessionRow): void;
 }
 
 /** 被告知一行消失了：它背后的会话已不存在，id 就是全部要说的事。 */
@@ -24,7 +24,7 @@ export interface SessionProjection {
 	/**
 	 * 每一行，按目录分组、按侧栏绘制的顺序排列。
 	 *
-	 * 首次调用时播种，之后由内存供数：本进程是这些值的唯一写入者，重新扫描只会重读每份 transcript 而一无所获。
+	 * 首次调用时播种，之后由内存供数：本进程是这些值的唯一写入者，重新扫描只会重读每份会话记录而一无所获。
 	 */
 	groups(): Promise<DirectoryGroup[]>;
 	/** 每一行，无序，供自己分组的调用者。 */
@@ -52,7 +52,7 @@ export interface SessionProjection {
  *
  * 这是侧栏读取的存储，也是一行能说"运行中"的原因。今天这个事实只存在于流内，所以一个在窗口看着别的会话时跑了一轮的会话，会留下一行永不移动的侧栏——不是慢，是永不，连手动刷新都救不了。一个回答"每个会话在做什么"却不问有没有人在看的 projection，正是让这行诚实的东西。
  *
- * 两条规则塑造了这里的一切。**本进程是唯一的写入者**——会话由 hub 指挥的唯一 orchestrator 创建和追加（ADR-0017）——所以目录扫描的全部职责就是注意到从外部到来的文件，这就是播种只发生一次、重扫永远不发生的原因。还有**一行被整行替换**，于是下游没有东西合并两个来源、或追踪哪个更新。
+	 * 两条规则塑造了这里的一切。**本进程是唯一的写入者**——会话由 hub 指挥的唯一 orchestrator 创建和追加（ADR-0012）——所以目录扫描的全部职责就是注意到从外部到来的文件，这就是播种只发生一次、重扫永远不发生的原因。还有**一行被整行替换**，于是下游没有东西合并两个来源、或追踪哪个更新。
  *
  * 它观看 hub 的 host 级观察点而不是订阅镜像，刻意的：那个镜像回答"谁在看"，读它的读者会发现这个 projection 正在观看它认识的每个会话——恰恰是一个放弃定时器最不想看到的状态。
  */
@@ -135,7 +135,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	/**
 	 * 推进单个事件能移动的两个字段。
 	 *
-	 * 一条消息落地会把 `modified` 向前推，分支移动可能改变 title 从哪条消息读。事件携带的其他任何东西都没有属于自己的行字段，而按事件重新推导 title 等于为回复的每个 token 走一遍整份 transcript。
+	 * 一条消息落地会把 `modified` 向前推，分支移动可能改变 title 从哪条消息读。事件携带的其他任何东西都没有属于自己的行字段，而按事件重新推导 title 等于为回复的每个 token 走一遍整份会话记录。
 	 */
 	const onEvent = (sessionId: string, event: AgentSessionEvent): void => {
 		const current = rows.get(sessionId);
@@ -146,7 +146,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 			void refresh(sessionId).finally(() => probing.delete(sessionId));
 			return;
 		}
-		// 下面两个事实都随事件而来而不是回读：这里对每条追加的消息只跑一次，而在这里读 transcript 要解析整份日志只为一个时间戳（ADR-0019）。分支移动是仍要问的那一个情况——它是手势不是帧，且可能改变派生 title 从哪条消息读。
+		// 下面两个事实都随事件而来而不是回读：这里对每条追加的消息只跑一次，而在这里读会话记录要解析整份日志只为一个时间戳（ADR-0013）。分支移动是仍要问的那一个情况——它是手势不是帧，且可能改变派生 title 从哪条消息读。
 
 		if (event.type === "branch_changed") {
 			publish({ ...current, title: hub.agent.titleOf(sessionId) });
@@ -164,7 +164,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	/**
 	 * 从磁盘读出一个会话的行。
 	 *
-	 * 只用于没有任何扫描为之记账的会话：本进程创建或 fork 的，或手工放到盘上的。id 必须先被定位，这会读每个文件的 header，但只有匹配的文件被解析——替代方案，一次列表，会解析每份 transcript 只为得知刚出现的那一个会话。
+	 * 只用于没有任何扫描为之记账的会话：本进程创建或 fork 的，或手工放到盘上的。id 必须先被定位，这会读每个文件的 header，但只有匹配的文件被解析——替代方案，一次列表，会解析每份会话记录只为得知刚出现的那一个会话。
 	 *
 	 * 没人在运行的会话可能根本还没有文件，以应答 `undefined` 说明；行在会话首次写入时出现，那也正是 host 打开的时刻。
 	 */
@@ -202,7 +202,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	 */
 	const onHost = (sessionId: string, host: HostedSession | undefined): void => {
 		if (host === undefined) {
-			// host 的死亡带走了 `running`，但没有带走它正在展示的问题：在 end-restart 下（ADR-0006 §5），停靠的审批属于台账、活得比 host 久，所以行从冷读落定而不是硬归零——这里一个零等于侧栏的圆点熄灭而问题仍悬着。这次读取也让一次已结束、无人观看的运行不至于把行卡在 `running: true`：reap 在宣布之前落定运行，所以读取落在它曾经竞速的那次最终发布之后。
+			// host 的死亡带走了 `running`，但没有带走它正在展示的问题：在 end-restart 下（ADR-0005 §5），停靠的审批属于台账、活得比 host 久，所以行从冷读落定而不是硬归零——这里一个零等于侧栏的圆点熄灭而问题仍悬着。这次读取也让一次已结束、无人观看的运行不至于把行卡在 `running: true`：reap 在宣布之前落定运行，所以读取落在它曾经竞速的那次最终发布之后。
 			const entry = following.get(sessionId);
 			const stored = rows.get(sessionId);
 			entry?.off();
@@ -247,7 +247,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	const seed = async (): Promise<void> => {
 		for (const group of await hub.agent.listDirectories()) {
 			// 经 `publish` 而不是 `rows.set`：一行可能已经因某次探测在这里了，而列表知道单份文件不知道的事——最重要的是 fork 的父会话。绕过比较会让那个修正默默躺在存储里无人知晓。
-			for (const row of group.sessions) publish(row);
+			for (const sessionRow of group.sessions) publish(sessionRow);
 		}
 		for (const [sessionId, entry] of following) {
 			const next = liveRow(sessionId, liveOf(entry.host));

@@ -39,10 +39,10 @@ export class StatusBar {
 		this.element.append(this.total, this.cache, group);
 	}
 
-	render(state: StatusState): void {
+	render(statusState: StatusState): void {
 		this.element.dataset.state = "up";
 
-		const usage = state.usage;
+		const usage = statusState.usage;
 		const total = totalTokens(usage);
 		this.total.textContent = total > 0 ? `total ${formatTokens(total)}` : "total —";
 		this.total.title =

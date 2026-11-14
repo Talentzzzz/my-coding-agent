@@ -75,7 +75,7 @@ function main(): void {
 	const root = document.querySelector<HTMLElement>("#app");
 	if (!root) throw new Error("#app is missing from index.html");
 
-	let state: ViewState = initialState();
+	let viewState: ViewState = initialState();
 	/** 本窗口正在流式观看的会话。命令显式指名它，所以永远不靠推断。 */
 	let followed: string | undefined;
 	/**
@@ -123,7 +123,7 @@ function main(): void {
 	 *
 	 * 是局部变量而不是 `ViewState` 的字段，因为它是关于连接的事实而不是关于任何会话的 —— 与侧栏
 	 * 行被挡在状态之外是同一个理由。reducer 永远看不到它，基线无法覆盖它，而窗口能否发送仍然只
-	 * 取决于 `state.reachable`。
+	 * 取决于 `viewState.reachable`。
 	 */
 	let channel: ChannelState = "connecting";
 	/**
@@ -457,8 +457,8 @@ function main(): void {
 		// 模式，然后是进入编辑的唯一入口。它向上打开：模式席位在窗口底边的输入条上，挂在下面的菜单
 		// 将无处安放。
 		onModes: (anchor) => {
-			const settings = state.settings;
-			const allTools = state.snapshot?.allTools ?? [];
+			const settings = viewState.settings;
+			const allTools = viewState.snapshot?.allTools ?? [];
 			const defaultTools = settings?.tools === undefined ? allTools : settings.tools.filter((name) => allTools.includes(name));
 			const current = currentModeName();
 			openMenu(
@@ -514,7 +514,7 @@ function main(): void {
 			[
 				...groups.map((group) => ({
 					icon: "folder" as const,
-					label: state.settings?.directoryNames?.[group.workDirAbsPath] ?? directoryName(group.workDirAbsPath),
+					label: viewState.settings?.directoryNames?.[group.workDirAbsPath] ?? directoryName(group.workDirAbsPath),
 					title: group.workDirAbsPath,
 					active: group.workDirAbsPath === absChosenDir,
 					onSelect: () => {
@@ -686,7 +686,7 @@ function main(): void {
 		onGlobalApproval: (tool, value) => saveSettings({ approval: { [tool]: value } }),
 		onSaveModels: async (rows) => {
 			const { models } = await api.updateModels(rows);
-			apply({ ...state, models });
+			apply({ ...viewState, models });
 		},
 		// 模式列表，整体 —— 端点是替换式的，所以这里改名、那里删除会一起落地。返回的快照重新播种
 		// 每个模式读取者。
@@ -747,7 +747,7 @@ function main(): void {
 				if (followed !== sessionId) return;
 				// 合并：一次运行的 delta 到达速度远快于显示刷新，逐个绘制是没有任何帧会展示的工作。
 				// 折叠仍在这里逐事件进行；绘制只被请求一次，对着帧到达的最后一个状态运行。
-				apply(reduce(state, message), { coalesce: true });
+				apply(reduce(viewState, message), { coalesce: true });
 			},
 			onStreamEnd: (sessionId) => {
 				// send 的引用除了已结算的状态和被拒绝的运行，还有第三种出口：服务端结束流。在下面的
@@ -756,7 +756,7 @@ function main(): void {
 				// 不持有的 id 是无操作。
 				releaseSend(sessionId);
 				if (followed !== sessionId) return;
-				apply(reduceEnd(state));
+				apply(reduceEnd(viewState));
 			},
 			onStreamError: (sessionId, message) => {
 				// 通知去本窗口的错误行，而不是去窗口碰巧在显示的那个对话：必须对它行动的人看的是
@@ -826,7 +826,7 @@ function main(): void {
 		// 映射的字符串稳定。
 		// 名字在签名里的理由与分页映射相同：改名不动行表的任何东西，忽略标签的签名意味着这次点击
 		// 什么都不重画。
-		const names = state.settings?.directoryNames;
+		const names = viewState.settings?.directoryNames;
 		const drawn = `${rows.version}|${followed ?? ""}|${absPickedDirectory}|${collapsed ? 1 : 0}|${channel}|${JSON.stringify(paging)}|${JSON.stringify(names ?? {})}`;
 		if (drawn === sidebarDrawn) return;
 		sidebarDrawn = drawn;
@@ -847,7 +847,7 @@ function main(): void {
 	 * 那个标题指名的就是这个答案，绝不能与正在阅读的对话矛盾。
 	 */
 	function directoryForNewSession(): string {
-		return absPickedDirectory || state.snapshot?.workDirAbsPath || absCurrentDirectory;
+		return absPickedDirectory || viewState.snapshot?.workDirAbsPath || absCurrentDirectory;
 	}
 
 	/**
@@ -875,9 +875,9 @@ function main(): void {
 
 	/** 重画状态行，且只在有新的用量可画时。 */
 	function renderStatusBar(): void {
-		if (state.usage === usageDrawn) return;
-		usageDrawn = state.usage;
-		statusBar.render({ usage: state.usage });
+		if (viewState.usage === usageDrawn) return;
+		usageDrawn = viewState.usage;
+		statusBar.render({ usage: viewState.usage });
 	}
 
 	/** 一次折叠如何到达屏幕：整体立即、有界分片、或至多每帧一次。 */
@@ -895,7 +895,7 @@ function main(): void {
 	 * —— 这正是合并它们的意义 —— 而"这个变了吗"是关于屏幕上的东西的问题，不是关于上一个事件
 	 * 的问题。
 	 */
-	let drawnState: ViewState = state;
+	let drawnState: ViewState = viewState;
 
 	/**
 	 * 合并后的 delta 绘制：多条流帧，一次绘制。
@@ -906,8 +906,8 @@ function main(): void {
 	 */
 	const deltaDraw = new OncePerFrame(() => {
 		const previous = drawnState;
-		drawnState = state;
-		drawState(state, previous);
+		drawnState = viewState;
+		drawState(viewState, previous);
 	});
 
 	/**
@@ -921,7 +921,7 @@ function main(): void {
 	 * 意味着两次发送之间的一次失败会让输入框保持可用而背后一无所有。
 	 */
 	function apply(next: ViewState, options: ApplyOptions = {}): void {
-		state = next;
+		viewState = next;
 		if (options.coalesce === true) {
 			deltaDraw.schedule();
 			return;
@@ -934,7 +934,7 @@ function main(): void {
 		drawState(next, previous, options);
 	}
 
-	/** 绘制 `next` 中与上一次绘制不同的部分 —— 调用者已经把它变成了 `state`。 */
+	/** 绘制 `next` 中与上一次绘制不同的部分 —— 调用者已经把它变成了 `viewState`。 */
 	function drawState(next: ViewState, previous: ViewState, options: ApplyOptions = {}): void {
 		// 新的设置快照可能携带阅读宽度偏好，而阅读列正是依据它绘制的那个。与侧栏宽度进入
 		// `applyAppearance` 的同一条路，只是这个是布局相关的，所以在这里绘制，紧挨着它所度量的列。
@@ -972,17 +972,17 @@ function main(): void {
 	 * 的列表。
 	 */
 	function selectionForSend(): ComposerSelection {
-		const snapshot = state.snapshot;
+		const snapshot = viewState.snapshot;
 		const model = chosen.model ?? snapshot?.model ?? "";
-		const row = rowOf(model);
-		const levels = row?.thinkingLevels ?? snapshot?.thinkingLevels ?? [];
+		const modelOption = rowOf(model);
+		const levels = modelOption?.thinkingLevels ?? snapshot?.thinkingLevels ?? [];
 		const level = chosen.thinkingLevel ?? snapshot?.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
-		return { models: state.models, model, levels, level };
+		return { models: viewState.models, model, levels, level };
 	}
 
 	/** 一个名字背后的已导入行；已删除或从未存在的返回 undefined。 */
 	function rowOf(name: string | undefined): ModelOption | undefined {
-		return name === undefined ? undefined : state.models.find((model) => model.name === name);
+		return name === undefined ? undefined : viewState.models.find((model) => model.name === name);
 	}
 
 	/**
@@ -992,7 +992,7 @@ function main(): void {
 	 * 的机制：使用那个选择的请求记录了它，快照证实了它，席位重新跟随会话，而不是永远遮蔽它。
 	 */
 	function syncChosen(): void {
-		const snapshot = state.snapshot;
+		const snapshot = viewState.snapshot;
 		if (snapshot === undefined) return;
 		if (chosen.model !== undefined && chosen.model === snapshot.model) delete chosen.model;
 		if (chosen.thinkingLevel !== undefined && chosen.thinkingLevel === snapshot.thinkingLevel) {
@@ -1004,9 +1004,9 @@ function main(): void {
 	function openSettings(tab?: "modes"): void {
 		settings.show(tab);
 		settings.render({
-			models: state.models,
-			...(state.settings ? { settings: state.settings } : {}),
-			...(state.snapshot ? { snapshot: state.snapshot } : {}),
+			models: viewState.models,
+			...(viewState.settings ? { settings: viewState.settings } : {}),
+			...(viewState.snapshot ? { snapshot: viewState.snapshot } : {}),
 		});
 	}
 
@@ -1020,8 +1020,8 @@ function main(): void {
 	 * 的回头路。
 	 */
 	function currentModeName(): string | undefined {
-		const snapshot = state.snapshot;
-		const settings = state.settings;
+		const snapshot = viewState.snapshot;
+		const settings = viewState.settings;
 		if (snapshot === undefined || settings === undefined) return DEFAULT_MODE_NAME;
 
 		const sameTools = (a: readonly string[], b: readonly string[]): boolean =>
@@ -1058,8 +1058,8 @@ function main(): void {
 			report(new Error("还没有挂上任何会话。"));
 			return;
 		}
-		const settings = state.settings;
-		const snapshot = state.snapshot;
+		const settings = viewState.settings;
+		const snapshot = viewState.snapshot;
 		if (settings === undefined || snapshot === undefined) {
 			report(new Error("设置还没有读到，稍后再试。"));
 			return;
@@ -1081,7 +1081,7 @@ function main(): void {
 
 	function render(): void {
 		syncChosen();
-		const snapshot = state.snapshot;
+		const snapshot = viewState.snapshot;
 
 		// 下面每一块只在自己的某个输入动了时才画。流式帧不改变它们中的任何一个，所以它的成本止于
 		// transcript —— 正是上面那些门的意义。
@@ -1098,7 +1098,7 @@ function main(): void {
 			heading.title = headingTip;
 		}
 		const subtitleText =
-			snapshot?.workDirAbsPath ?? (followed !== undefined ? followed : state.reachable ? "未选择会话" : "连接中…");
+			snapshot?.workDirAbsPath ?? (followed !== undefined ? followed : viewState.reachable ? "未选择会话" : "连接中…");
 		if (subtitleText !== subtitleDrawn) {
 			subtitleDrawn = subtitleText;
 			subtitle.textContent = subtitleText;
@@ -1114,7 +1114,7 @@ function main(): void {
 		// 分支条目跟随会话的分支形状，基线或一条结束的消息都可能改变它，所以签名是树的同一性加上
 		// 裁出标签的三个数字。"none" 是单路形状 —— chip 站着但无物可指名 —— 树与"none"之间的任何
 		// 移动都会改变签名，所以它携带的标签总是随之重画。
-		const tree = state.branchTree;
+		const tree = viewState.branchTree;
 		const branchSig =
 			tree === undefined ? "none" : `${tree.currentId ?? "-"}|${tree.points}|${tree.options}|${snapshot?.title ?? ""}`;
 		if (branchSig !== branchChipDrawn) {
@@ -1133,7 +1133,7 @@ function main(): void {
 
 		// 分支页从同一棵树画自己，并在同样的稀有性上门控：除非基线改变了树或运行改变了锁，它的
 		// render 只花一次比较。
-		branchView.render(tree, state.streaming);
+		branchView.render(tree, viewState.streaming);
 
 		// chip 是 composer 头部唯一的常驻者且永远在那里：输入上方的那行就是"下一个会话落在哪里"
 		// 属于的地方，无论上面的 transcript 在做什么。
@@ -1155,8 +1155,8 @@ function main(): void {
 
 		if (settings.open) {
 			settings.render({
-				models: state.models,
-				...(state.settings ? { settings: state.settings } : {}),
+				models: viewState.models,
+				...(viewState.settings ? { settings: viewState.settings } : {}),
 				...(snapshot ? { snapshot } : {}),
 			});
 		}
@@ -1174,10 +1174,10 @@ function main(): void {
 	 * 逐帧写入 —— 每帧便宜，但重建不是零成本，而且不管屏幕上有没有它都在跑。
 	 */
 	function renderNotices(): void {
-		if (state.models === noticesDrawn) return;
-		noticesDrawn = state.models;
+		if (viewState.models === noticesDrawn) return;
+		noticesDrawn = viewState.models;
 
-		if (state.models.length > 0) {
+		if (viewState.models.length > 0) {
 			banners.replaceChildren();
 			return;
 		}
@@ -1207,9 +1207,9 @@ function main(): void {
 	 * 的那次运行。
 	 */
 	function renderApprovals(): void {
-		if (state.approvals === approvalsDrawn) return;
-		approvalsDrawn = state.approvals;
-		const pending = state.approvals;
+		if (viewState.approvals === approvalsDrawn) return;
+		approvalsDrawn = viewState.approvals;
+		const pending = viewState.approvals;
 		approvalSeat.replaceChildren(...pending.map(approvalCard));
 		approvalSeat.hidden = pending.length === 0;
 		// composer 隐藏而不是禁用：审批卡片下面一个可见但变灰的输入框，会招致排队在问题后面的
@@ -1259,7 +1259,7 @@ function main(): void {
 	 * 能发送，请求自己会作答。
 	 */
 	function reachable(): void {
-		if (!state.reachable) apply({ ...state, reachable: true });
+		if (!viewState.reachable) apply({ ...viewState, reachable: true });
 	}
 
 	/** 一次失败的请求，仅当它对能否到达服务器说了些什么。 */
@@ -1268,7 +1268,7 @@ function main(): void {
 			report(error);
 			return;
 		}
-		apply({ ...state, reachable: false, error: "无法连接到服务端。" });
+		apply({ ...viewState, reachable: false, error: "无法连接到服务端。" });
 	}
 
 	/**
@@ -1339,7 +1339,7 @@ function main(): void {
 		absPickedDirectory = "";
 		// 与分支命令相同的渲染：快照就是快照，无论它是作为导航的答案到达，还是作为流中途的重新
 		// 基线化。
-		apply(reduce(state, { type: "baseline", session: snapshot }), { deferred: true });
+		apply(reduce(viewState, { type: "baseline", session: snapshot }), { deferred: true });
 
 		// 列表不被 await。它只重画侧栏，通道 live 时被直接拒绝（那时通道是行的权威），而它本会
 		// 拖住的帧正是读者正在等的帧。获取失败上报给窗口而不是窗格，所以它也撤销不了切换。
@@ -1381,7 +1381,7 @@ function main(): void {
 		// 卡片以字阶度量，所以它是唯一必须被告知重新度量的视图。
 		applyAppearance(saved);
 		branchView.remeasure();
-		apply({ ...state, settings: saved });
+		apply({ ...viewState, settings: saved });
 	}
 
 	/**
@@ -1463,7 +1463,7 @@ function main(): void {
 		try {
 			const answer = await api.renameDirectory(workDirAbsPath, name);
 			reachable();
-			apply({ ...state, settings: answer.settings });
+			apply({ ...viewState, settings: answer.settings });
 			// 设置快照动了，但门的签名里没有任何必须跟着动的东西：行还是那些行，否则戴着新标签的
 			// 标题会保留旧文字。
 			sidebarDrawn = undefined;
@@ -1489,7 +1489,7 @@ function main(): void {
 			rows.loadFrom(answer.directories, channel === "live");
 			applyAppearance(answer.settings);
 			branchView.remeasure();
-			apply({ ...state, settings: answer.settings });
+			apply({ ...viewState, settings: answer.settings });
 			// 设置快照变了，但门读取的签名里没有任何必须变的：没有这个组任何行的窗口，否则会画出一
 			// 条和之前一模一样的字符串。
 			sidebarDrawn = undefined;
@@ -1526,8 +1526,8 @@ function main(): void {
 		try {
 			const { title: stored } = await api.renameSession(sessionId, title);
 			reachable();
-			if (followed === sessionId && state.snapshot !== undefined) {
-				apply({ ...state, snapshot: { ...state.snapshot, title: stored } });
+			if (followed === sessionId && viewState.snapshot !== undefined) {
+				apply({ ...viewState, snapshot: { ...viewState.snapshot, title: stored } });
 			}
 		} catch (error) {
 			unreachable(error);
@@ -1569,9 +1569,9 @@ function main(): void {
 		followed = undefined;
 		apply({
 			...initialState(),
-			reachable: state.reachable,
-			models: state.models,
-			...(state.settings === undefined ? {} : { settings: state.settings }),
+			reachable: viewState.reachable,
+			models: viewState.models,
+			...(viewState.settings === undefined ? {} : { settings: viewState.settings }),
 		});
 	}
 
@@ -1587,7 +1587,7 @@ function main(): void {
 		if (followed === undefined) return;
 		try {
 			const { session } = await api.branchSession(followed, entryId, descend);
-			apply(reduce(state, { type: "baseline", session }));
+			apply(reduce(viewState, { type: "baseline", session }));
 			// 一次回退 —— fork 按钮的情形 —— 只是半个手势：只有下一个提示输入后分支才是真的，
 			// 所以 composer 接过这次按压瞄准的焦点。
 			if (!descend) composer.focus();
@@ -1606,7 +1606,7 @@ function main(): void {
 	 */
 	function openUserMenu(entryId: string | undefined, x: number, y: number): void {
 		const items: MenuItem[] = [];
-		if (entryId !== undefined && !state.streaming) {
+		if (entryId !== undefined && !viewState.streaming) {
 			items.push({
 				label: "从此分支",
 				icon: "fork",
@@ -1619,7 +1619,7 @@ function main(): void {
 	}
 
 	function report(error: unknown): void {
-		apply({ ...state, error: describe(error) });
+		apply({ ...viewState, error: describe(error) });
 	}
 
 	// ---------------------------------------------------------------- 监听
@@ -1645,15 +1645,15 @@ function main(): void {
 				settings.hide();
 				return;
 			}
-			if (state.approvals.length > 0 && followed !== undefined && !typingTarget()) {
-				void api.approve(followed, state.approvals[0]!.toolCallId, false).catch(report);
+			if (viewState.approvals.length > 0 && followed !== undefined && !typingTarget()) {
+				void api.approve(followed, viewState.approvals[0]!.toolCallId, false).catch(report);
 				return;
 			}
 		}
-		if (event.key === "Enter" && state.approvals.length > 0 && followed !== undefined && !typingTarget()) {
+		if (event.key === "Enter" && viewState.approvals.length > 0 && followed !== undefined && !typingTarget()) {
 			// Enter 允许，Escape 拒绝 —— 接管卡片提供的两个答案，用的正是它为输入框让出的那副
 			// 键盘。
-			void api.approve(followed, state.approvals[0]!.toolCallId, true).catch(report);
+			void api.approve(followed, viewState.approvals[0]!.toolCallId, true).catch(report);
 			return;
 		}
 		if (event.key === "n" && (event.ctrlKey || event.metaKey)) {
@@ -1687,7 +1687,7 @@ function main(): void {
 		try {
 			const planted = await seedDefaultModel({
 				models,
-				seeded: state.settings?.defaultModelSeeded === true,
+				seeded: viewState.settings?.defaultModelSeeded === true,
 				save: async (rows) => (await api.updateModels(rows)).models,
 				markSeeded: () => saveSettings({ defaultModelSeeded: true }),
 			});
@@ -1717,14 +1717,14 @@ function main(): void {
 			const { settings: stored } = await api.getSettings();
 			applyAppearance(stored);
 			reachable();
-			apply({ ...state, settings: stored });
+			apply({ ...viewState, settings: stored });
 		} catch (error) {
 			report(error);
 		}
 		try {
 			const models = await importedModels();
 			reachable();
-			apply({ ...state, models });
+			apply({ ...viewState, models });
 		} catch (error) {
 			report(error);
 		}

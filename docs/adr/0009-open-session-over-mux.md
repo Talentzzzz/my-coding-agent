@@ -1,4 +1,4 @@
-# 0010：会话的打开与切换只走 mux 基线
+# 0009：会话的打开与切换只走 mux 基线
 
 - 状态：**已接受**（2026-11-03 用户拍板，已落地——01–04 号票跑绿 check、build:web 与 smoke 全套，见 `.scratch/mux-only-open/`）
 - 取代或失效：`packages/web/src/main.ts` `openSession()` 的"REST 读先画、channel baseline 幂等替换"双源结构（取代）；`packages/server/src/mux.ts` `open()` 对重复订阅的拒绝行为（取代，改为重发基线）；`packages/web/src/client.ts` `retain()` "已订阅则只记账不发帧"的分支（取代，retain 恒发 `open`）

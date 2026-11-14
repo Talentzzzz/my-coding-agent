@@ -24,7 +24,7 @@
 
 ### `claim` 保留原义 —— **保留，但有一条失效**（现名 `hold`，2026-11-10）
 
-`claim` 只用于"这个请求必须跑在活跃会话上"。它不再是"记录是否存在"的答案，也不再（第二阶段之后）决定审批能否被回答。~~**不要重命名** `claim`、`HostedSession`、`SessionHub`。~~ **（2026-11-10，[ADR-0018](adr/0018-claim-renamed-to-hold.md)）**：`claim` 已改名为 `hold`（语义一字未动，wire 不动），`HostedSession` / `SessionHub` 两个名字不动——本条其余部分与下面那句"原样有效"仍成立。
+`claim` 只用于"这个请求必须跑在活跃会话上"。它不再是"记录是否存在"的答案，也不再（第二阶段之后）决定审批能否被回答。~~**不要重命名** `claim`、`HostedSession`、`SessionHub`。~~ **（2026-11-10）**：`claim` 已改名为 `hold`（语义一字未动，wire 不动），`HostedSession` / `SessionHub` 两个名字不动——本条其余部分与下面那句"原样有效"仍成立。
 
 **部分失效**：~~"每条事件流一个 claim"~~ 这一句**失效**——claim 本身原样活着，新版 claim 的持有者只有两类（会改变会话的请求，以及**在飞的运行**）。上面那句"`claim` 只用于……"与重命名禁令原样有效；订阅不拿 claim 也是在这条之上定的。
 
@@ -32,9 +32,9 @@
 
 `packages/llm` 是 vendored 代码；这些改动属于 core + server 范围。不引入 plugin / MCP 机制。
 
-~~`packages/llm` 与 `packages/loop` 一行都不改~~ **部分取代**（2026-11-02，[ADR-0008](adr/0008-loop-merged-into-agent.md)）：`packages/loop` 已删除，引擎并入 core 的 `agent.ts`，不再跟踪上游。（2026-11-04 补：引擎随后成为 `loop-manager.ts` 的 `LoopManager`，[ADR-0012](adr/0012-loop-manager-object.md)——`packages/loop` 与「不跟踪上游」两条未变，变的只是引擎住在哪个对象里。）（2026-11-13 再补：引擎随 0024 并回 Agent，loop-manager.ts 已删除。）~~`packages/llm` 仍然一行都不改~~ **失效**（2026-11-03，用户拍板）：ADR-0008 放弃上游对照之后，"vendored" 已不再是任何约束——`packages/llm` 就是本仓库自己维护的裁剪子集，禁令随之撤销；「不引入 plugin / MCP 机制」原样有效。
+~~`packages/llm` 与 `packages/loop` 一行都不改~~ **部分取代**（2026-11-02，[ADR-0007](adr/0007-loop-merged-into-agent.md)）：`packages/loop` 已删除，引擎并入 core 的 `agent.ts`，不再跟踪上游。（2026-11-04 补：引擎随后一度搬进独立对象 `LoopManager`——`packages/loop` 与「不跟踪上游」两条未变，变的只是引擎住在哪个对象里。2026-11-13 再补：引擎随 [ADR-0016](adr/0016-loop-is-orchestration.md) 并回 Agent，loop-manager.ts 已删除。）~~`packages/llm` 仍然一行都不改~~ **失效**（2026-11-03，用户拍板）：ADR-0007 放弃上游对照之后，"vendored" 已不再是任何约束——`packages/llm` 就是本仓库自己维护的裁剪子集，禁令随之撤销；「不引入 plugin / MCP 机制」原样有效。
 
-（2026-11-06 补：撤销禁令之后，那个包本身也退场了——`packages/llm` 整棵目录并进 `packages/core/src/llm/`，全树只剩一个 `Context` 与一个 `Tool`，[ADR-0015](adr/0015-llm-folded-into-core.md)。本节原文按本文件第一节的规矩保留，不再逐句改写。）
+（2026-11-06 补：撤销禁令之后，那个包本身也退场了——`packages/llm` 整棵目录并进 `packages/core/src/llm/`，全树只剩一个 `Context` 与一个 `Tool`，[ADR-0010](adr/0010-llm-folded-into-core.md)。本节原文按本文件第一节的规矩保留，不再逐句改写。）
 
 ### 测试一次运行不需要供应商密钥 —— **保留**
 
@@ -51,9 +51,9 @@
 | D0 | 是否采纳"流随运行存活" | ~~**采纳。**~~ **取代**：流改随**订阅者**存活——D0 当时明知并接受的那项代价（看不到别处启动的运行），正是 ADR-0001 换来的那项收益 |
 | D1 | `GET /api/sessions/current` 是否停止创建会话 | **继续创建（保留）。** `resolveCurrentId()` 在无历史时仍回落到 `SessionManager.create(this.absCwd)`，`SystemController.current()` 的 `sessionId` 保持必填 |
 | D2 | 空闲流如何结束，才能让浏览器不重连 | ~~**合用一个终帧 `{ type: "stream_end" }`。**~~ **取代**：终帧改叫 `end`、不带原因，判据是"这条逻辑流上有没有过 `baseline`" |
-| D3 | 发送路径无法挂上流时，还要不要发送 | ~~**报告失败且不发送。**~~ **取代**：订阅改在 POST 之前建立，失败改按形状落到 transcript 或 `item.error` |
+| D3 | 发送路径无法挂上流时，还要不要发送 | ~~**报告失败且不发送。**~~ **取代**：订阅改在 POST 之前建立，失败改按形状落到会话记录或 `item.error` |
 
-**D1 的一个已知后果（已消解）**：`GET /api/sessions/current` 在空目录仍然会创建一条会话（`resolveCurrentId()` 回落到 `SessionManager.create(this.absCwd)`；客户端每页只调一次），但那条会话不再落盘——`create()` 不写盘，两份文件随第一条消息同时出现（`.json` 是 commit marker，[ADR-0009](adr/0009-session-two-file-format.md)）。于是"读形状的请求带写副作用"这件事今天不再成立：读一份空历史只换来进程内的一份 manager，盘上没有任何文件。
+**D1 的一个已知后果（已消解）**：`GET /api/sessions/current` 在空目录仍然会创建一条会话（`resolveCurrentId()` 回落到 `SessionManager.create(this.absCwd)`；客户端每页只调一次），但那条会话不再落盘——`create()` 不写盘，两份文件随第一条消息同时出现（`.json` 是 commit marker，[ADR-0008](adr/0008-session-two-file-format.md)）。于是"读形状的请求带写副作用"这件事今天不再成立：读一份空历史只换来进程内的一份 manager，盘上没有任何文件。
 
 **本节只记"哪些结论作废"，不记理由。** 理由在 [ADR-0001](adr/0001-transport-websocket-mux.md) 或它引的票里；另外，上面那句"对浏览器而言两种结束是同一个事实"是 `EventSource` 时代的事实，随传输切换一并退场。
 
@@ -93,7 +93,7 @@
 
 `Agent.branchTo()` 移动的是 leaf，而 leaf **曾经只在内存里**：它不是 entry，存储层不记录它，重新加载会从文件最后一条 entry 恢复。在本阶段之前，窗口的流是常驻订阅，所以一个"回退分支然后再输入"的窗口在两个请求之间一直持有会话——以及那次移动。传输切换之后，运行结束就结束它的订阅，最后一个 claim 随之消失，会话被回收——**在这段窗口期内做出的分支移动会被静默丢弃**，下一个 prompt 会从文件末尾继续，而不是从你选的那个分支点。当时 `scripts/smoke-api.ts` 的绕法是"为移动之后的那次运行 attach 一条流"，那个绕法本身就是这个洞的形状。
 
-**2026-10-13 闭洞**：leaf 落盘为一条状态 entry（kind `leaf`，`leafId: string | null`），由 `branch()` / `resetLeaf()` 在位置**真的移动**时写出（`recordSelection` 同款守卫：移动到当前所在之处不写），`buildIndex()` 重放它——文件序是最后的裁判。一次移动从此活过回收与进程退出：冷读的快照报出移动后的 leafId，重开的进程从记录的位置继续。老文件不补写（读路径不得为补一条记录而开始写），`CURRENT_SESSION_VERSION` 保持 3（**当时如此**；现版本 5 的判定落在 `.json` 快照上，见 [ADR-0009](adr/0009-session-two-file-format.md)）；`leaf` entry 是状态不是 transcript，不进消息、不发 `entry_appended`，`protocol.ts` 一个字节不改。
+**2026-10-13 闭洞**：leaf 落盘为一条状态 entry（kind `leaf`，`leafId: string | null`），由 `branch()` / `resetLeaf()` 在位置**真的移动**时写出（`recordSelection` 同款守卫：移动到当前所在之处不写），`buildIndex()` 重放它——文件序是最后的裁判。一次移动从此活过回收与进程退出：冷读的快照报出移动后的 leafId，重开的进程从记录的位置继续。老文件不补写（读路径不得为补一条记录而开始写），`CURRENT_SESSION_VERSION` 保持 3（**当时如此**；现版本 5 的判定落在 `.json` 快照上，见 [ADR-0008](adr/0008-session-two-file-format.md)）；`leaf` entry 是状态不是会话记录，不进消息、不发 `entry_appended`，`protocol.ts` 一个字节不改。
 
 为什么是 entry 而不是 header 字段或 sidecar、票 09 那条"有未落盘 leaf 的会话不回收"守卫为什么**永不落地**（它从未存在于源码，且其判据在 leaf entry 落地后不可定义）——理由与逐项取舍见 `.scratch/client-server-refactor/issues/18-leaf-durability.md` 的 Answer；落地票是 `.scratch/mux-landing/issues/06-leaf-durability.md`。`smoke-api.ts` 的树段已落成它的最终形式：移动之后不 attach 任何东西，等会话被回收，一条冷读报出移动后的 leafId，下一条 prompt 仍从它继续。
 

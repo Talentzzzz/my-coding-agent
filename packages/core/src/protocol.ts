@@ -38,7 +38,7 @@ export interface SessionRef {
  * 侧边栏的一行：存储的身份，加上列表化时补充的活动事实。
  *
  * 最后三个字段是它与 {@link SessionRef} 的分界。`modified` 本就由存储为排序算好，只是从不发送。
- * `running` 完全没有存储形态——它是*本*进程循环的事实，从来不是 transcript 的。`pending` 是带存储
+ * `running` 完全没有存储形态——它是*本*进程循环的事实，从来不是会话记录的。`pending` 是带存储
  * 缓存的账本事实：快照的 `suspended` 标记把冷行点亮成 1（计数不存储），开着该会话的进程用从账本
  * 派生的精确计数覆盖它。
  *
@@ -72,7 +72,7 @@ export interface DirectoryGroup {
  * API 密钥有意缺席——客户端可以添加或替换一把，但永远不会被回发一把，所以密钥无法经由仅仅渲染
  * 列表的页面泄露。表单显示的是 `hasApiKey`，让「存了密钥」与「这一行没有密钥」保持可区分。
  *
- * `name` 是行的身份，所以既是面板显示的，也是客户端指名这一行时回发的。`api` 是为 transcript 而
+ * `name` 是行的身份，所以既是面板显示的，也是客户端指名这一行时回发的。`api` 是为会话记录而
  * 报告的，且永远是同一个值：本应用只说一种传输层，所以它是关于构建的事实，不是表单编辑的字段。
  */
 export interface ModelOption {
@@ -109,11 +109,11 @@ export type ModelInput = Partial<
  * 哪个模型回答一条消息，以及被要求多用力地思考。
  *
  * 它随消息一起走，而不是作为会话自己的命令，因为两半在被请求真正使用之前都不为真：从未被用过的
- * 选择不是发生过的事，所以它不是 transcript 的条目，也不是配置变更。缺失的字段让那一半保持会话
+ * 选择不是发生过的事，所以它不是会话记录的条目，也不是配置变更。缺失的字段让那一半保持会话
  * 已有的样子。
  */
 export interface ModelSelection {
-	/** 行的名字——设置面板显示、transcript 记录的身份。 */
+	/** 行的名字——设置面板显示、会话记录记录的身份。 */
 	model?: string;
 	thinkingLevel?: string;
 }
@@ -126,7 +126,7 @@ export interface SettingsSnapshot {
 	/**
 	 * 用户的模式，整体存放，按选择器列出的顺序；缺失表示没有定义过。
 	 *
-	 * 内置默认模式有意不在其中：它是实时读取的全局默认（ADR-0005），客户端用 `tools` 与 `approval`
+	 * 内置默认模式有意不在其中：它是实时读取的全局默认（ADR-0004），客户端用 `tools` 与 `approval`
 	 * 拼出它，而不是期望有一行。
 	 */
 	modes?: ModeSettings[];
@@ -198,7 +198,7 @@ export interface DiffLine {
  * `write` 而言，这就是「点一下文件名」与「把内容再付一遍钱」的差别。
  *
  * 它搭引擎自己的 `tool_execution_end` 事件走，wire 无需为它加成员，而引擎记录的是整个结果
- * ——transcript 便把这份报告存在工具文本旁边。任何供应商都看不到它：请求携带工具结果时只携带
+ * ——会话记录便把这份报告存在工具文本旁边。任何供应商都看不到它：请求携带工具结果时只携带
  * content。
  */
 export interface FileDiff {
@@ -257,7 +257,7 @@ export interface SessionSnapshot {
 	/**
 	 * `messages` 里每条消息背后的 entry id，顺序一致。
 	 *
-	 * 没有亲眼看着消息写下的 transcript 仍需要指名 fork 从哪条 entry 开始，所以会话从自己的 session
+	 * 没有亲眼看着消息写下的会话记录仍需要指名 fork 从哪条 entry 开始，所以会话从自己的 session
 	 * manager 填这一栏。压缩摘要没有属于自己的消息条目。
 	 */
 	messageEntryIds: (string | null)[];
@@ -279,7 +279,7 @@ export interface SessionSnapshot {
 	 *
 	 * 只有活跃会话能回答它——存储在消息结束时才得到它——它的存在是为了让运行中途挂上来的窗口不
 	 * 必等一句自己从未见过开头的句子：baseline 画这些字符，随后的 delta 接着追加。已落定的
-	 * transcript 与一切冷读都缺失。
+	 * 会话记录与一切冷读都缺失。
 	 */
 	partial?: Message;
 	submitting: boolean;
@@ -297,7 +297,7 @@ export interface SessionSnapshot {
  * 不带消息地对会话所持之物做的变更：审批映射与两个队列模式。
  *
  * 模型与思考档位有意缺席。两者都在输入框里选择、都随属于它们的消息抵达（{@link ModelSelection}），
- * 因为记录一个没有请求真正用过它的选择，等于在 transcript 里放一条从未生效的决定。
+ * 因为记录一个没有请求真正用过它的选择，等于在会话记录里放一条从未生效的决定。
  */
 export type ConfigPatch = {
 	/** 变动过的审批条目，按工具名为键；省略的键保持现行值。 */
@@ -338,7 +338,7 @@ export type ServerMessage =
 	/**
 	 * 会话刚写下的一条消息背后的 entry。
 	 *
-	 * `entry_appended` 只点名 entry，不点名它装的消息，而 transcript 需要这对配对，才能在一条从未
+	 * `entry_appended` 只点名 entry，不点名它装的消息，而会话记录需要这对配对，才能在一条从未
 	 * 出现在快照里的消息上提供「从这里 fork」。它与事件并排发送、不是取代它，所以忽略这一帧的客户端
 	 * 行为与从前完全一样。
 	 */

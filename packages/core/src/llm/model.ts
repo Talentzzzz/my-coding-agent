@@ -40,7 +40,7 @@ const ZERO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 
 export interface ModelConfig<TApi extends Api = Api> {
 	/** 端点认识这个模型的 wire id。 */
 	id: string;
-	/** 这一行的身份兼标签：transcript 记录的、配置补丁指名的东西。 */
+	/** 这一行的身份兼标签：会话记录记录的、配置补丁指名的东西。 */
 	name: string;
 	baseUrl: string;
 	apiKey?: string;

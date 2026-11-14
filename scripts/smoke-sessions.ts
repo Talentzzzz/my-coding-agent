@@ -72,7 +72,7 @@ function get(url: string): Promise<ReadAnswer> {
 	});
 }
 
-/** A user message the transcript accepts; nothing here goes near a model. */
+/** A user message the session accepts; nothing here goes near a model. */
 function userMessage(text: string): Message {
 	return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
 }
@@ -105,9 +105,9 @@ function ids(entries: readonly { id: string }[]): string {
 	return entries.map((entry) => entry.id).join(",");
 }
 
-/** The messages of a state's current branch, which is what a provider would be sent. */
-function messagesOf(state: Session): Message[] {
-	return store.buildSessionContext(state).messages;
+/** The messages of a session's current branch, which is what a provider would be sent. */
+function messagesOf(session: Session): Message[] {
+	return store.buildSessionContext(session).messages;
 }
 
 /** Replay the stored file for a session id, the way a later process would. */
@@ -124,7 +124,7 @@ function snapshotPathOf(jsonlPath: string): string {
 
 /**
  * The hub's own session service: the one whose open the hub's cold paths go through. The tests
- * append directly to the transcript rather than speaking to a provider, which is what the id-keyed
+ * append directly to the session rather than speaking to a provider, which is what the id-keyed
  * `Agent` no longer exposes.
  */
 function hubSessions(hub: SessionHub): SessionManager {
@@ -140,22 +140,22 @@ function hubSessions(hub: SessionHub): SessionManager {
  * probe wants `undefined` rather than a throw, and the state object is not the facade's to give.
  */
 function entryOf(agent: Agent, id: string): AgentState | undefined {
-	return (agent as unknown as { sessions: Map<string, AgentState> }).sessions.get(id);
+	return (agent as unknown as { agentStateMap: Map<string, AgentState> }).agentStateMap.get(id);
 }
 
 /**
  * The bag behind a session, for the seeding appends below — the one test-only write that still needs
  * the bag itself.
  *
- * There is no held bag to borrow any more (ADR-0019): every operation replays the file, so a test
+ * There is no held bag to borrow any more (ADR-0013): every operation replays the file, so a test
  * that wants to write one has to open its own, and the write it makes is a write to the file like any
- * other. `unwritten` is checked first for the same reason the orchestrator checks it: a session that
+ * other. `unwrittenSession` is checked first for the same reason the orchestrator checks it: a session that
  * has not spoken yet has no file to reopen.
  */
 function bagOf(hub: SessionHub, id: string): Session {
-	const state = entryOf(hub.agent, id);
-	const unwritten = state?.live.unwritten;
-	if (unwritten !== undefined && !unwritten.fileCreated) return unwritten;
+	const agentState = entryOf(hub.agent, id);
+	const unwrittenSession = agentState?.live.unwrittenSession;
+	if (unwrittenSession !== undefined && !unwrittenSession.fileCreated) return unwrittenSession;
 	return hubSessions(hub).open(id);
 }
 
@@ -209,7 +209,7 @@ try {
 	const reopened = await hub.hold(first.id);
 	check("reopening builds a different registry entry", entryOf(hub.agent, reopened.id) !== reapedEntry);
 	check(
-		"and it still carries the transcript",
+		"and it still carries the session",
 		JSON.stringify(hub.agent.snapshot(reopened.id).messages).includes("survives the reap"),
 	);
 	await hub.close();
@@ -261,7 +261,7 @@ try {
 	process.stdout.write("forking without an entry copies the whole log\n");
 	const whole = fillSession(new SessionManager().forkFrom(parentFile, null).sessionFileAbsPath);
 	check("every entry came with it", ids(store.getEntries(whole)) === ids(hubSessions(hub).getEntries(bagOf(hub, parentId))));
-	check("and the transcript matches", messagesOf(whole).length === messagesOf(bagOf(hub, parentId)).length);
+	check("and the session matches", messagesOf(whole).length === messagesOf(bagOf(hub, parentId)).length);
 	check("its leaf is the source's leaf", whole.leafId === bagOf(hub, parentId).leafId);
 	check("it points back at the source too", store.getMeta(whole)?.parentSession === parentFile);
 
@@ -279,14 +279,14 @@ try {
 	const forkLeaf = bagOf(hub, forkedId).leafId;
 	hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("only the parent"));
 	check(
-		"appending to the parent leaves the fork's transcript alone",
+		"appending to the parent leaves the fork's session alone",
 		JSON.stringify(messagesOf(bagOf(hub, forkedId))) === forkBefore,
 	);
 	check("and the fork's leaf did not move", bagOf(hub, forkedId).leafId === forkLeaf);
 	const parentBefore = JSON.stringify(messagesOf(bagOf(hub, parentId)));
 	hubSessions(hub).appendMessage(bagOf(hub, forkedId), userMessage("only the fork"));
 	check(
-		"appending to the fork leaves the parent's transcript alone",
+		"appending to the fork leaves the parent's session alone",
 		JSON.stringify(messagesOf(bagOf(hub, parentId))) === parentBefore,
 	);
 
@@ -475,10 +475,10 @@ try {
 	const settingsRoot = await mkdtemp(join(tmpdir(), "my-agent-settings-"));
 	try {
 		const settings = inMemorySettingManager({ tools: ["read", "bash"] }, []);
-		const state = createSession(settingsRoot);
-		const sessionId = state.sessionId;
+		const session = createSession(settingsRoot);
+		const sessionId = session.sessionId;
 		const options = {
-			session: state,
+			session,
 			settings,
 		};
 
@@ -489,7 +489,7 @@ try {
 		const live = await openAgent(options);
 		try {
 			// The one message the branch test below can rewind to with nothing recorded after it.
-			const firstEntry = store.appendMessage(state, userMessage("before any choice"));
+			const firstEntry = store.appendMessage(session, userMessage("before any choice"));
 
 			live.setActiveTools(sessionId, ["read"]);
 			check("a recorded choice wins over the default", live.snapshot(sessionId).activeTools.join(",") === "read", live.snapshot(sessionId).activeTools.join(","));
@@ -511,8 +511,8 @@ try {
 
 			live.setActiveTools(sessionId, ["grep"]);
 			// The cold read takes a bag, and the one the assembly handed over stopped being current
-			// the moment the session was born: a cold read of a spoken session is a replay (ADR-0019).
-			const recold = await readSessionSnapshot({ ...options, session: fillSession(state.sessionFileAbsPath ?? "") });
+			// the moment the session was born: a cold read of a spoken session is a replay (ADR-0013).
+			const recold = await readSessionSnapshot({ ...options, session: fillSession(session.sessionFileAbsPath ?? "") });
 			check(
 				"the cold read answers the judgement exactly as the live snapshot does",
 				recold.toolsFollowGlobal === live.snapshot(sessionId).toolsFollowGlobal &&
@@ -528,7 +528,7 @@ try {
 
 	process.stdout.write("reading a session does not assemble one\n");
 	// Phase 1 in one section: a read answers from the JSONL log, leaves the registry exactly as it was,
-	// and agrees field-for-field with what holding the same transcript reports — because both build
+	// and agrees field-for-field with what holding the same session reports — because both build
 	// their snapshot from the same parts.
 	const http = await bootServer({ workDirAbsPath: root, port: 0 });
 	try {
@@ -553,8 +553,8 @@ try {
 
 		const firstRead = await get(`${http.url}/api/sessions/${readId}`);
 		check("GET /api/sessions/{id} answers 200", firstRead.status === 200, `status=${firstRead.status}`);
-		check("the cold transcript is not empty", (firstRead.session?.messages.length ?? 0) === 2, `${firstRead.session?.messages.length} messages`);
-		// This is the whole phase in one line: reading a transcript never takes a hold on it.
+		check("the cold session is not empty", (firstRead.session?.messages.length ?? 0) === 2, `${firstRead.session?.messages.length} messages`);
+		// This is the whole phase in one line: reading a session never takes a hold on it.
 		check("and the read never held the session", holds === 0, `holds=${holds}`);
 		check("so nothing is running it", !http.hub.live.includes(readId), http.hub.live.join(","));
 		// The read is also the window's decision about whether to attach a stream: a snapshot that
@@ -574,14 +574,14 @@ try {
 		check("and an unknown id is never held either", holds === 0, `holds=${holds}`);
 
 		// What the cold read must agree with. Claiming it here is the deliberate hold, and the only
-		// one this section makes: everything the transcript can answer has to come out the same.
+		// one this section makes: everything the session file can answer has to come out the same.
 		const live = await http.hub.hold(readId);
 		check("a hold is what runs it", holds === 1 && live.id === readId, `holds=${holds}`);
 		const liveSnapshot = http.hub.agent.snapshot(live.id);
 		http.hub.release(live);
 
-		// Everything a transcript can answer must be identical; only what a loop answers may differ.
-		const fromTranscript = [
+		// Everything the session file can answer must be identical; only what a loop answers may differ.
+		const fromLog = [
 			"messages",
 			"messageEntryIds",
 			"branchPoints",
@@ -597,7 +597,7 @@ try {
 			"approvals",
 			"usage",
 		] as const satisfies readonly (keyof SessionSnapshot)[];
-		const mismatched = fromTranscript.filter(
+		const mismatched = fromLog.filter(
 			(field) => JSON.stringify(firstRead.session?.[field]) !== JSON.stringify(liveSnapshot[field]),
 		);
 		check("the cold read matches the live session field for field", mismatched.length === 0, mismatched.join(","));
@@ -735,7 +735,7 @@ try {
 				check("the folder is exactly where it was", existsSync(before));
 				const kept = await get(`${http.url}/api/sessions/${id}`);
 				check("the session still names its own directory", resolve(kept.session?.workDirAbsPath ?? "") === resolve(before), kept.session?.workDirAbsPath);
-				check("and its transcript is still under that key", (await SessionManager.list(before)).some((session) => session.id === id));
+				check("and its session is still under that key", (await SessionManager.list(before)).some((session) => session.id === id));
 				check("the listing draws the path, not the label", (await listed()).includes(resolve(before)));
 
 				const cleared = await call("POST", `${http.url}/api/directories/rename`, { workDirAbsPath: before, name: "  " });
@@ -751,14 +751,14 @@ try {
 				);
 				check("the next listing leaves it out too", !(await listed()).includes(resolve(before)));
 				check("but the folder is exactly where it was", existsSync(before));
-				check("and the transcript is untouched", (await SessionManager.list(before)).some((session) => session.id === id));
+				check("and the session is untouched", (await SessionManager.list(before)).some((session) => session.id === id));
 				check("the other directory is still listed", (await listed()).includes(resolve(other)));
 
 				const restored = await call("PATCH", `${http.url}/api/settings`, { patch: { hiddenDirectories: [] } });
 				check("an empty hidden list is stored as a choice (200)", restored.status === 200, `status=${restored.status}`);
 				check("and the group comes back", (await listed()).includes(resolve(before)));
 
-				// 删除 is not a one-way door, and this is the door: the transcripts and the folder were
+				// 删除 is not a one-way door, and this is the door: the sessions and the folder were
 				// never touched, so a new session in that directory is the user saying they want it listed
 				// again. Nothing else in the window can un-hide one, which is why the road has to exist.
 				const hiddenAgain = await call("POST", `${http.url}/api/directories/hide`, { workDirAbsPath: before });
@@ -771,7 +771,7 @@ try {
 					(((await call("GET", `${http.url}/api/settings`)).payload.settings as { hiddenDirectories?: string[] })?.hiddenDirectories ?? []);
 				check("and the stored list no longer names it", !storedHidden.some((path) => resolve(path) === resolve(before)), JSON.stringify(storedHidden));
 
-				// A user can rename a folder behind this process's back. The transcripts stay in the store,
+				// A user can rename a folder behind this process's back. The sessions stay in the store,
 				// so the group is still listed — and a new session there puts the directory back instead of
 				// failing on a path nothing on screen says is gone.
 				await rm(before, { recursive: true, force: true });
@@ -849,7 +849,7 @@ try {
 				`${replayed.leafId} vs ${s.leafId}`,
 			);
 			check(
-				"and rebuilds the same transcript",
+				"and rebuilds the same session",
 				JSON.stringify(store.buildSessionContext(replayed).messages) === JSON.stringify(store.buildSessionContext(s).messages),
 			);
 			check("and the same title", store.getTitle(replayed) === store.getTitle(s));
@@ -869,10 +869,10 @@ try {
 				"the service and the stateless form agree",
 				JSON.stringify(store.buildSessionContext(cold).messages) === JSON.stringify(store.buildSessionContext(replayed).messages),
 			);
-			store.appendMessage(cold, userMessage("written through the cold bag"));
+			store.appendMessage(cold, userMessage("written through the cold session"));
 			const throughCold = fillSession(s.sessionFileAbsPath!);
 			check(
-				"a write through the cold bag reaches the file",
+				"a write through the cold session reaches the file",
 				throughCold.leafId === cold.leafId &&
 					JSON.stringify(store.buildSessionContext(throughCold).messages) === JSON.stringify(store.buildSessionContext(cold).messages),
 			);
@@ -889,7 +889,7 @@ try {
 	}
 
 	process.stdout.write("the orchestrator's table keys the live half by id\n");
-	// ADR-0011: the table on the orchestrator holds exactly what cannot be rebuilt from disk — the
+	// ADR-0013: the table on the orchestrator holds exactly what cannot be rebuilt from disk — the
 	// queues, the run in flight, the subscriber sets. `open` is its one way in, and it assembles
 	// first-come: a state already there is kept, never replaced, because the one it would replace
 	// holds the live half. The exits are two and deliberately different: `evict` refuses unless the
@@ -902,9 +902,9 @@ try {
 		// this block exercises the table itself — unborn bag, first-come-wins, membership — so it
 		// reaches in the same way `entryOf` does, the cast the one road across.
 		const door = agent as unknown as { assembleAgentStateBySession(options: { session: Session }): Promise<AgentState> };
-		const state = await door.assembleAgentStateBySession({ session });
-		check("open is the one way in, and the id answers it", entryOf(agent, session.sessionId) === state);
-		check("re-opening an id keeps the state already there", (await door.assembleAgentStateBySession({ session })) === state);
+		const agentState = await door.assembleAgentStateBySession({ session });
+		check("open is the one way in, and the id answers it", entryOf(agent, session.sessionId) === agentState);
+		check("re-opening an id keeps the state already there", (await door.assembleAgentStateBySession({ session })) === agentState);
 		check("an unborn session refuses to be evicted", agent.evict(session.sessionId) === false);
 		// No file behind it, so forgetting the state is the whole removal — and only that half, which
 		// is why the second attempt refuses as an id nothing names.

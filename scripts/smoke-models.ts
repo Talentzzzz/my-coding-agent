@@ -189,7 +189,7 @@ try {
 		check("a missing name falls back to the wire id", unnamed?.name === "deepseek-chat", String(unnamed?.name));
 
 		// 名字是身份，所以重名不会被悄悄改得唯一：调用方必须拒绝这份列表，否则每一份指名第一行
-		// 的 transcript 都会悄悄改变含义。
+		// 的会话都会悄悄改变含义。
 		const duplicate = coerceModelConfig({ name: "m", id: "m", baseUrl: "http://x" });
 		check("a duplicate name is stored as it was typed, not suffixed", duplicate?.name === "m", String(duplicate?.name));
 

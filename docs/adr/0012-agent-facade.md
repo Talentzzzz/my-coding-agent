@@ -1,15 +1,15 @@
-# 0017：server 只认 `Agent` 公开面——Manager 的消费者收进 core，构造由 `createSessionAgent()` 吸收
+# 0012：server 只认 `Agent` 公开面——Manager 的消费者收进 core，构造由 `createSessionAgent()` 吸收
 
 日期：2026-11-07 · 状态：已接受，**已落地**（hub-agent-facade 01–07 号票，见
 `.scratch/hub-agent-facade/`；`npm run check`（tsc ×2 + tokens + 本 ADR 落地的机械守卫
 `scripts/check-server-facade.ts`）与 `npm run build:web` 绿，八条验收 smoke 与改动前基线逐条
 同色、零新红——`smoke-approval` 两侧都带同一条预存在的偶发闪失（wire 层非 JSON 下行，票 04
 已在未改基线上复现），另十四条 hub 相关 smoke 全 PASS）
-取代：[0007](0007-services-drop-instance-state.md)（部分，2026-11-07——决定 6 的**消费面**
+取代：[0006](0006-services-drop-instance-state.md)（部分，2026-11-07——决定 6 的**消费面**
 叙述：hooks、transport、systemPrompt 留在构造注入上这一半一字不动；被取代的是「这组进程级
 东西由 hub 装配、在它手里协调」的旧叙述——三只 Manager 的构造收进 `createSessionAgent()`，
 它们在本进程的唯一消费者是 core 的编排层，hub 从协调者退为只认公开面的调用者）、
-[0016](0016-tool-manager-instance-table.md)（部分，2026-11-07——决定 7 的「hub 冷热两条路
+[0011](0011-tool-manager-instance-table.md)（部分，2026-11-07——决定 7 的「hub 冷热两条路
 共用**自己那只**」那一半：工具表仍全进程只装配一只，但它住编排层手里，hub 不再持任何表）
 
 设计过程见 `.scratch/hub-agent-facade/`（map + 01–08 号票；01–03 号票是裁决、04–07 号票是
@@ -17,9 +17,10 @@
 
 ## 背景
 
-本 ADR 之前的形状，要从三份 ADR 合起来读：[0007](0007-services-drop-instance-state.md) 定了
-五个无属性单例（编排层 + 四只服务），[0011](0011-agent-holds-session-state.md) 把会话状态表
-收进编排层，[0016](0016-tool-manager-instance-table.md) 给工具域立了一张常驻实例表。落出来
+本 ADR 之前的形状，要从三份 ADR 合起来读：[0006](0006-services-drop-instance-state.md) 定了
+五个无属性单例（编排层 + 四只服务），会话状态表收进编排层（现由
+[0013](0013-table-holds-live-half-only.md) 表述），[0011](0011-tool-manager-instance-table.md)
+给工具域立了一张常驻实例表。落出来
 的装配是：`SessionHub` 持有三样服务字段（`sessions: SessionManager`、`settings:
 SettingManager`、`tools: ToolManager`）外加一个编排层，三只 Manager 由 hub 造、作为
 `AgentConfig` 递进编排层；「要自己的设置」的冒烟经 `HubOptions.settings` 注入一只内存
@@ -73,16 +74,17 @@ manager。
    server 可见的面消失（禁名单见决定 4）；server 需要的一切都从窄读拿纯数据。一个会话的
    状态进表仍走装配（`assembleSession` 的唯一调用者仍是编排层的装配门 `Agent.assembleInto`，
    原名 `Agent.open`，见下方后续收口），出表仍只有
-   `evict` / `drop`——[0011](0011-agent-holds-session-state.md) 的形态不动。
+   `evict` / `drop`——会话状态表的形态不动（现由 [0013](0013-table-holds-live-half-only.md)
+   表述）。
    后续收口（票 08 之后）：这扇门本身收成类 private 并更名 `assembleInto`（装配并进表）——
    外界只需要**读**
    （`snapshotOf` / `readSessionSnapshot`）、**造**（`create`）与**用**（`hold` / `release`）
    三种动词，何时装配、
-   递哪只 transcript 袋子进表不再是公开面上的事；唯一越过这条 private 的是 `openAgent`
+   递哪只会话袋子进表不再是公开面上的事；唯一越过这条 private 的是 `openAgent`
    与 hub 级冒烟的 `mount-session.ts`，各经一处有类型的 cast 过门（`AssembleAgentStateOptions`
-   类型随之不再出 core；`workDirAbsPath` 覆盖参数同期删除——工作目录是 transcript 袋子自己的
+   类型随之不再出 core；`workDirAbsPath` 覆盖参数同期删除——工作目录是会话袋子自己的
    `sessionSetting.workDirAbsPath`，所有调用点传的本就是同一个值，冷读路径从未用过覆盖）。
-   再收口（2026-11-10，[0019](0019-table-holds-live-half-only.md)）：这两个内部名字跟着新形状换了——
+   再收口（2026-11-10，[0013](0013-table-holds-live-half-only.md)）：这两个内部名字跟着新形状换了——
    装配门 `assembleInto` → `assembleAgentStateBySession`（装配产物只剩 live 半，`ensure` 那一半
    继承的名字不再准确），`materialize` → `ensureState`。**公开面一个方法都没变**：`create` /
    `hold` / `release` / `snapshotOf` / `readSessionSnapshot` / `setTitle` / `forkFrom` / `remove`
@@ -155,7 +157,7 @@ manager。
 
 - **难逆转。** 回去要把十九个门面方法拆掉、hub 的 held/cold 分支逐条写回、三只 Manager
   的构造从工厂挪回 `HubOptions`、守卫脚本删除、四个冒烟的播种方式再改一次——不止一处。
-- **没有上下文会让人困惑。** 0007 写「五个单例可构造注入」，0016 写「hub 冷热两条路共用
+- **没有上下文会让人困惑。** 0006 写「五个单例可构造注入」，0011 写「hub 冷热两条路共用
   自己那只」表——两份 ADR 都还立在原处，而代码里 hub 既不注入也不持有任何 Manager，连
   构造编排层的那一行都是工厂包办的。第一反应必然是「构造注入哪去了」。这份 ADR 就是那个
   「注入还在构造器上，只是递东西的手从 hub 换成了工厂」。
@@ -167,18 +169,18 @@ manager。
 
 逐条对照：
 
-- **[0007](0007-services-drop-instance-state.md) 决定 6 的消费面。** 原文的主体——hooks、
+- **[0006](0006-services-drop-instance-state.md) 决定 6 的消费面。** 原文的主体——hooks、
   transport（含 retry 策略）、systemPrompt 构建函数是进程生命周期内不可变的配置，留在
-  构造函数上——**一字不动**；工具域那一半已由 0016 处理。被取代的是围绕它的旧叙述：这组
+  构造函数上——**一字不动**；工具域那一半已由 0011 处理。被取代的是围绕它的旧叙述：这组
   进程级东西「由 hub 装配、在 hub 手里协调」。今天的装配是 `createSessionAgent()` 造好三只
   Manager（含 transport 的默认解析与 hooks 默认值的安装）再走构造器，编排层是它们在本
-  进程的唯一消费者，hub 贡献给构造的只有 homes、api 与模型选项。0007 头部的取代者指针与
+  进程的唯一消费者，hub 贡献给构造的只有 homes、api 与模型选项。0006 头部的取代者指针与
   决定 6 的就地标注都指向本 ADR。
-- **[0016](0016-tool-manager-instance-table.md) 决定 7 的「hub 持表」那一半。** 原文
+- **[0011](0011-tool-manager-instance-table.md) 决定 7 的「hub 持表」那一半。** 原文
   「进程里只装配一只（hub 冷热两条路共用自己那只，`openAgent` 转交 `assemble` 造的那只）」
   ——「只装配一只」原样成立（表的单写者、只增键、四法公开面全部不动），不成立的是
   「hub 自己那只」：表现在由工厂造、住编排层手里，hub 的冷热两条路（读快照、跑会话）经
-  同一个编排层到达同一只表。0016 头部加取代者指针，决定 7 就地标注。
+  同一个编排层到达同一只表。0011 头部加取代者指针，决定 7 就地标注。
 - **server 侧的旧调用形态**（`hub.settings.*`、`agentState().session`、held/cold 分支）：
   全部改道，已无残留——这不是取代一条 ADR 决定，而是清掉从未被任何 ADR 承认过的实际
   越界。
@@ -190,19 +192,21 @@ manager。
 - **[0001](0001-transport-websocket-mux.md) 的整条 wire 与 hub 的传输层事实。** claims、
   observers、waiting、reaping、`HostedSession`、`opening` / `closing` 全留在 hub——「谁在
   持有这个会话」是传输层的问题，编排层不回答它。REST 命令面与 mux 帧一字不改。
-- **[0011](0011-agent-holds-session-state.md) 的会话状态表。** `Map<id, AgentState>`、
+- **会话状态表（[0013](0013-table-holds-live-half-only.md)）。** `Map<id, AgentState>`、
   装配经 `Agent.assembleInto` 进表、`evict` / `drop` 出表、进程重启即清空——本 ADR 只把这张表的
   读取面收成纯数据窄读，表的形态与出入口不动。
-- **[0016](0016-tool-manager-instance-table.md) 的实例表形态。** 一张常驻 `Map<name, Tool>`、
+- **[0011](0011-tool-manager-instance-table.md) 的实例表形态。** 一张常驻 `Map<name, Tool>`、
   四法公开面、引擎经它执行、单写者只增键——变的只是消费入口（编排层经它转发，hub 不再
   经手），表的每一条不变式原样。
-- **[0007](0007-services-drop-instance-state.md) 决定 1/2 的会话域形态。** `SessionManager`
+- **[0006](0006-services-drop-instance-state.md) 决定 1/2 的会话域形态。** `SessionManager`
   与 `SettingManager` 仍是无属性服务：每样数据在用到它的那一行现取、不养聚合袋、可构造
   注入——本 ADR 改的是**谁**构造与**谁**消费它们，不是它们的内部形态。
-- **fanout 的 `SessionServices` 参数袋。** `session/fanout.ts` 的文件级函数仍收
-  `(state, SessionServices)`——那是编排层把 `this` 上的服务递给无状态函数的参数形状，与
-  「server 不知 Manager」正交；退役的是构造缝上的 `SessionAgentServices`，两者不是同一个
-  类型。
+- ~~**fanout 的 `SessionServices` 参数袋。**~~（2026-11-14 由
+  [0017](0017-fanout-folded-into-agent.md) 取代：fanout 的读者只剩编排层一个，文件级函数并入
+  `Agent` 成为私有方法，参数袋随共享的消失一并退役。）`session/fanout.ts` 曾以
+  `(state, SessionServices)` 为参数形状——那是编排层把 `this` 上的服务递给无状态函数的形状，
+  与「server 不知 Manager」正交；退役的构造缝 `SessionAgentServices` 与它不是同一个
+  类型，这条正交性不受 0017 影响。
 - **`OpenAgentOptions` 与 `openAgent()`。** 形状不动（本就是测试缝集合），唯一变化是
   `OpenAgentOptions.sessionManager` 字段成为死缝——工厂不再收 ledger，字段文档已注明它只服务于
   冷读；`Agent.sessionManager` 公开字段是另一回事，保持公开为冒烟的缝（口径见决定 6）。

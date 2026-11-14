@@ -1,5 +1,5 @@
 // 本构建的工具侧：一张它认识的每个工具的表，以及一个 session 可以调用其中哪些的纯数据选择
-// （ADR-0016）。
+// （ADR-0011）。
 //
 // 表是常驻的，选择不是。表里放的是纯行为——六个与目录无关的实例，加上测试注册的任何东西——所以
 // 持有它们的代价是进程生命周期的常量，而不是一个 session 的状态。调用所需、且会随请求变化的一切
@@ -17,7 +17,7 @@ import { createWriteTool } from "./write.ts";
 /**
  * 工具行动所用的 per-request 值，从 wire 类型 re-export。
  *
- * 它是 `execute` 的第三个参数，所以它的家在 `Tool` 旁边（ADR-0015 §2）：这个 re-export 让所有既有
+ * 它是 `execute` 的第三个参数，所以它的家在 `Tool` 旁边（ADR-0010 §2）：这个 re-export 让所有既有
  * 的 import 路径——`tools/index.ts`、`agent.ts`、smoke 测试——继续指向同一个名字。
  */
 export type { ToolRunContext };
@@ -36,7 +36,7 @@ export interface ToolState {
 	approvalOverride?: Record<string, boolean>;
 }
 
-/** 内置默认模式的名字，由设置配置持有（ADR-0005）。 */
+/** 内置默认模式的名字，由设置配置持有（ADR-0004）。 */
 export { DEFAULT_MODE_NAME };
 
 /**

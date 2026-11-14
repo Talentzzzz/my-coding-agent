@@ -1,7 +1,7 @@
 # my-coding-agent
 
 一个在你本机、自己的桌面窗口里运行的编码 agent。pi 的一段代码作为裁剪副本收进本仓库：`packages/core/src/llm/`（来自
-[`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层——只取本项目真正调用的部分，而且它已经不是一个独立的包，并进了 core（[ADR-0015](docs/adr/0015-llm-folded-into-core.md)）。运行引擎是我们的代码：它原先是 pi 循环的副本，如今是 `packages/core/src/agent.ts` 里 `Agent` 的私有方法（先并入 core，[ADR-0008](docs/adr/0008-loop-merged-into-agent.md)；抽成对象又删掉，[ADR-0012](docs/adr/0012-loop-manager-object.md)→[0014](docs/adr/0014-loop-manager-removed.md)；回来又出去，[ADR-0022](docs/adr/0022-loop-manager-whitelist-callbacks.md)→[0023](docs/adr/0023-loop-manager-functions-only.md)；最终并回编排层，[ADR-0024](docs/adr/0024-loop-is-orchestration.md)），不再跟踪上游。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳也都是我们自己的。
+[`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层——只取本项目真正调用的部分，而且它已经不是一个独立的包，并进了 core（[ADR-0010](docs/adr/0010-llm-folded-into-core.md)）。运行引擎是我们的代码：它原先是 pi 循环的副本，如今是 `packages/core/src/agent.ts` 里 `Agent` 的私有方法（先并入 core，[ADR-0007](docs/adr/0007-loop-merged-into-agent.md)；几经往返后由 [ADR-0016](docs/adr/0016-loop-is-orchestration.md) 定为编排层的私有方法），不再跟踪上游。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳也都是我们自己的。
 
 agent 跑在一个 Node 进程里，而不是渲染进程里：它持有你的 API 密钥，而它的本职就是读写文件。窗口是一个客户端——它用 REST 发送 prompt，并从一条常驻 WebSocket 通道上读取 agent 的输出，这也是为什么每一条命令同样能用 `curl` 或脚本发。[docs/architecture.md](docs/architecture.md) 是设计文档：请求流程、API 表、会话格式，以及每一块为什么在那个位置。
 
@@ -112,8 +112,8 @@ UI 里做出的变更会回到**已经提供那个键**的文件，所以一个�
 }
 ```
 
-- `name` 是你对这一行的称呼，它既是该行的**身份**也是它的**标签**：transcript 记录它、配置补丁命名它、选择器显示它，所以只有一个名字，而不是一个可能与背后身份漂移开的显示名。`modelId` 是向端点请求的东西。一个会话的模型读作 `<name>/<modelId>`。名字在你手上是唯一的——`PUT /api/models` 对重复项报 `400` 而不是悄悄加后缀，因为加了后缀的名字会改变**每一条**命名它的 transcript 的含义——而你还没命名的一行会取它的 `modelId`。
-- `baseUrl` 是请求去往的地方，走 Anthropic Messages——本应用唯一会说的传输层，所以一行就是"URL + 密钥背后的一个 Claude 模型"，没有传输层可挑。代理、中转或网关是同一个字段填上它自己的地址；表单预填 Anthropic 自己的端点作为起始值，而 `apiKey` 是请求唯一的认证方式。也没有供应商字段：一行**就是**一个端点，你给它的名字就是配置补丁和 transcript 所携带的东西。
+- `name` 是你对这一行的称呼，它既是该行的**身份**也是它的**标签**：会话记录它、配置补丁命名它、选择器显示它，所以只有一个名字，而不是一个可能与背后身份漂移开的显示名。`modelId` 是向端点请求的东西。一个会话的模型读作 `<name>/<modelId>`。名字在你手上是唯一的——`PUT /api/models` 对重复项报 `400` 而不是悄悄加后缀，因为加了后缀的名字会改变**每一条**命名它的会话的含义——而你还没命名的一行会取它的 `modelId`。
+- `baseUrl` 是请求去往的地方，走 Anthropic Messages——本应用唯一会说的传输层，所以一行就是"URL + 密钥背后的一个 Claude 模型"，没有传输层可挑。代理、中转或网关是同一个字段填上它自己的地址；表单预填 Anthropic 自己的端点作为起始值，而 `apiKey` 是请求唯一的认证方式。也没有供应商字段：一行**就是**一个端点，你给它的名字就是配置补丁和会话所携带的东西。
 - 这一行不再声明自己是否思考。每个模型都能被要求思考，四档——`off`、`low`、`high`、`max`——对每一行都一样，请求里的形状也只有一个：自适应思考，强度作为 effort，**从不发送 token 预算**。`off` 是显式关掉思考，而不是省掉字段。档位由输入框决定并随消息发送，所以它不在这个文件里。
 - `contextWindow` 不是装饰：它驱动上下文计量表和压缩何时运行，所以一个错误的值就是一个关于"何时该摘要"的错误决定。
 - 密钥以**明文**存在这个文件里、在你机器上，并且永远不会被发回浏览器：`GET /api/models` 把它替换成 `hasApiKey`。一行在**每次请求**时都被重新读取，所以对其中任何字段的编辑——密钥、端点、wire id、窗口——就是下一条消息所用的东西，没有任何东西需要重新打开。
@@ -124,9 +124,9 @@ UI 里做出的变更会回到**已经提供那个键**的文件，所以一个�
 
 **一行都没有时应用照样能打开**：种不下那行起点（或你把它删了）之后，会话跑在一个占位模型上，它唯一的职责就是以一句提示你去添加一个模型的话失败，而它的名字 `my-agent:unconfigured` 是**保留**的——任何行都不得占用它，因为名字就是一行身份的全部。
 
-一段对话用哪个模型，是在输入框上选的、就在消息框旁边，连同它的 thinking level：两者是**一个座位**，因为 level 属于模型，而移到另一行会落在那一行自己的默认值上。关于这个座位的一切在**带着它发出消息之前**都不会抵达服务器——一个被人指向过、却从未用它发出过消息的模型什么也没回答，所以它不在 transcript 里——而这个选择由使用它的那次请求记录。
+一段对话用哪个模型，是在输入框上选的、就在消息框旁边，连同它的 thinking level：两者是**一个座位**，因为 level 属于模型，而移到另一行会落在那一行自己的默认值上。关于这个座位的一切在**带着它发出消息之前**都不会抵达服务器——一个被人指向过、却从未用它发出过消息的模型什么也没回答，所以它不在会话里——而这个选择由使用它的那次请求记录。
 
-旧的 `models.json` 按它写下的样子被读取：一行的 `label` 成为它的 `name`，所以升级保住的是**你选的名字**，而不是你从没见过的 slug。用那些 slug 构建的引用**不能存活**——`settings.json` 里存储的默认值、以及会话记录过的任何模型——所以一个记录过此类模型的会话打开时没有模型，transcript 提示去挑一个，和删除一行产生的句子一样。这正是"一个字符串兼两职"的刻意代价：对于那些用过某一行的会话，**改名和删除它是一件事**；换来的，是模型清单永远不会显示一个没人打过的 slug。
+旧的 `models.json` 按它写下的样子被读取：一行的 `label` 成为它的 `name`，所以升级保住的是**你选的名字**，而不是你从没见过的 slug。用那些 slug 构建的引用**不能存活**——`settings.json` 里存储的默认值、以及会话记录过的任何模型——所以一个记录过此类模型的会话打开时没有模型，会话里提示去挑一个，和删除一行产生的句子一样。这正是"一个字符串兼两职"的刻意代价：对于那些用过某一行的会话，**改名和删除它是一件事**；换来的，是模型清单永远不会显示一个没人打过的 slug。
 
 ## 验证一次构建
 
@@ -146,7 +146,7 @@ node scripts/smoke-backpressure.ts # 写侧停滞策略：注入假 socket，队
 node scripts/smoke-sidebar.ts   # 侧边栏原地改行、按 modified 重排、分页与表头收起；不需要密钥
 node scripts/smoke-settings.ts  # 设置真实落盘再重读：收展状态跟着 appearance 序列化恢复；不需要密钥
 node scripts/smoke-modes.ts    # 设置面板的模式页、输入框的模式座位与菜单；不需要密钥
-node scripts/smoke-transcript.ts # 转录的分批绘制与流式代价：两条路画出同一个、流式一帧只碰尾部、脚注跟着轮与运行走、中途来的帧说了算；不需要密钥
+node scripts/smoke-session-view.ts # 会话视图的分批绘制与流式代价：两条路画出同一个、流式一帧只碰尾部、脚注跟着轮与运行走、中途来的帧说了算；不需要密钥
 node scripts/smoke-frame.ts    # 一帧只画一次：多次请求合并成一帧、回调里再排的是下一帧、取消的帧不跑；不需要密钥
 node scripts/smoke-branch.ts   # 分支页：一条线上一张卡（任意长的消息都是同一固定高度、单行截断、没有悬停提示）、走法挂在下面一行、走法自己的岔照样画、画布能拖能缩、两个出口两种落地；不需要密钥
 node scripts/smoke-session.ts  # 流式、排队、重试、压缩、委派；不需要密钥

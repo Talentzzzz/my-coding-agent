@@ -3,25 +3,25 @@ import type { SettingManager } from "../setting-manager.ts";
 import type { Session, SessionManager } from "./session-manager.ts";
 
 /**
- * 一个 session 打开并运行所用的行，从 transcript 和设置推导。
+ * 一个 session 打开并运行所用的行，从会话记录和设置推导。
  *
- * 这是「这个 session 在哪个模型上」的唯一答案，而且它是*推导*出来的，不是谁持有的值（ADR-0019）。
+ * 这是「这个 session 在哪个模型上」的唯一答案，而且它是*推导*出来的，不是谁持有的值（ADR-0013）。
  * 之前，装配环节只解析一次，把结果种到它挂载的袋上；留在表里的袋可能终身带着那颗种子。现在每次
  * 读取都重放一个新袋然后丢掉，种子会连同它所在的副本一起被扔掉——第二次读取就会回答「从未选择过」。
- * 所以这个选择在每次被问时重新计算：transcript 记录的，其次设置自己的默认值指名的，再其次内置行。
+ * 所以这个选择在每次被问时重新计算：会话记录记录的，其次设置自己的默认值指名的，再其次内置行。
  * 这和装配环节的顺序一致，因为它*就是*装配环节的顺序，只是搬到这里供需要它的两方共用。
  *
  * `chosen` 是第二级：调用方打开 session 时指名的行——`openAgent` 上仅测试用的覆盖，文件里没有
- * 任何东西能复现它。它只对文件还没说话的 session 有效，所以不需要清除：第一个到达 transcript 的
+ * 任何东西能复现它。它只对文件还没说话的 session 有效，所以不需要清除：第一个到达会话记录的
  * 选择会接管，双方不必知道对方存在。
  */
 export function modelChoiceOf(
-	sessions: SessionManager,
+	sessionManager: SessionManager,
 	session: Session,
 	settings: SettingManager,
 	chosen?: ModelChoice,
 ): ModelChoice {
-	const recorded = sessions.getRecordedSettings(session);
+	const recorded = sessionManager.getRecordedSettings(session);
 	const rows = settings.modelCatalog();
 	// 记录的选择是设置文件拼写的那种引用——`<name>/<model-id>`——而且是第一级：已选择的 session
 	// 用自己的文件回答，它下面的一切只对还没选择的 session 有效。设置的读取做短路而不是提前提升，

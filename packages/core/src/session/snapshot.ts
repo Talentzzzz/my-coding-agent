@@ -20,10 +20,10 @@ import type { SessionEntry, SessionManager, Session } from "./session-manager.ts
  */
 export interface SnapshotInput {
 	/**
-	 * transcript 自身读取所经的服务——只有袋级的，所以快照仍然不读文件、不写任何东西。
+	 * 会话记录自身读取所经的服务——只有袋级的，所以快照仍然不读文件、不写任何东西。
 	 */
-	sessions: SessionManager;
-	/** transcript 自己的状态：下面每次读取的来源袋。 */
+	sessionManager: SessionManager;
+	/** 会话记录自己的状态：下面每次读取的来源袋。 */
 	session: Session;
 	/** session 运行所在的工作目录，绝对路径。 */
 	workDirAbsPath: string;
@@ -50,46 +50,46 @@ export interface SnapshotInput {
 }
 
 /**
- * 一个 session 的状态，从它的 transcript 和递进来的值读出。
+ * 一个 session 的状态，从它的会话记录和递进来的值读出。
  *
  * 纯函数，这正是意义所在：它不构建 `Agent`、不读文件系统、不触碰任何循环。活的 session 从自己循环
- * 正在做的事回答，而本进程*没有*在跑的 session 仅凭 session 文件回答——读一份 transcript 不像跑
+ * 正在做的事回答，而本进程*没有*在跑的 session 仅凭 session 文件回答——读一份会话记录不像跑
  * 一份那么贵，而且读取不会在 hub 里留下痕迹。
  *
  * 冷读者无法知道的五个字段——`submitting`、`queued`、`isRetrying`、`retryAttempt`、
  * `pendingApprovals`——是输入而不是发现，这正是两种回答可比的原因：它们恰好只在这五处不同。
  */
-export function sessionSnapshot(input: SnapshotInput): SessionSnapshot {
-	const sessions = input.sessions;
-	const state = input.session;
+export function sessionSnapshot(snapshotInput: SnapshotInput): SessionSnapshot {
+	const sessionManager = snapshotInput.sessionManager;
+	const session = snapshotInput.session;
 	// `.json` 快照：身份和当前选择，已在袋里。
-	const meta = sessions.getMeta(state);
-	const messages = sessions.buildSessionContext(state).messages;
+	const meta = sessionManager.getMeta(session);
+	const messages = sessionManager.buildSessionContext(session).messages;
 	return {
-		id: state.sessionId,
-		workDirAbsPath: input.workDirAbsPath,
+		id: session.sessionId,
+		workDirAbsPath: snapshotInput.workDirAbsPath,
 		createdAt: new Date(meta.timestamp).getTime(),
-		title: sessions.getTitle(state),
-		model: input.model.name,
-		thinkingLevel: input.model.thinkingLevel ?? "off",
+		title: sessionManager.getTitle(session),
+		model: snapshotInput.model.name,
+		thinkingLevel: snapshotInput.model.thinkingLevel ?? "off",
 		thinkingLevels: thinkingLevelsFor(),
-		approvals: input.approvals,
-		allTools: input.allTools,
-		activeTools: input.activeTools,
-		toolsFollowGlobal: input.toolsFollowGlobal,
-		approvalsFollowGlobal: input.approvalsFollowGlobal,
+		approvals: snapshotInput.approvals,
+		allTools: snapshotInput.allTools,
+		activeTools: snapshotInput.activeTools,
+		toolsFollowGlobal: snapshotInput.toolsFollowGlobal,
+		approvalsFollowGlobal: snapshotInput.approvalsFollowGlobal,
 		messages,
-		messageEntryIds: sessions.getContextMessageEntryIds(state),
-		branchPoints: sessions.getBranchPoints(state),
-		leafId: state.leafId,
-		...(input.partial === undefined ? {} : { partial: input.partial }),
+		messageEntryIds: sessionManager.getContextMessageEntryIds(session),
+		branchPoints: sessionManager.getBranchPoints(session),
+		leafId: session.leafId,
+		...(snapshotInput.partial === undefined ? {} : { partial: snapshotInput.partial }),
 		...(meta.parentSession === undefined ? {} : { parentSession: meta.parentSession }),
-		submitting: input.submitting,
-		queued: input.queued,
-		isRetrying: input.isRetrying,
-		retryAttempt: input.retryAttempt,
-		usage: sessionUsage(sessions, state, input.model.contextWindow),
-		pendingApprovals: input.pendingApprovals,
+		submitting: snapshotInput.submitting,
+		queued: snapshotInput.queued,
+		isRetrying: snapshotInput.isRetrying,
+		retryAttempt: snapshotInput.retryAttempt,
+		usage: sessionUsage(sessionManager, session, snapshotInput.model.contextWindow),
+		pendingApprovals: snapshotInput.pendingApprovals,
 	};
 }
 
@@ -105,20 +105,20 @@ export function entryUsage(entry: SessionEntry): Usage | undefined {
 }
 
 /**
- * 整个 transcript 的 usage 合计，按文件顺序。
+ * 整个会话记录的 usage 合计，按文件顺序。
  *
  * 求和遍历文件里的每一条条目，而不是活跃分支的消息，这是对「总数意味着什么」的决定：在叶子早已离开
  * 的那趟树上烧掉的 token 同样是花掉的，压缩的摘要调用的 token 也是——记在它的条目上，但没有 assistant
  * 消息携带它。唯一保持分支相对的字段是 `contextTokens`，因为它根本不是求和：它是窗口此刻多满，这是
  * 叶子所在分支的属性，与别的无关。
  */
-export function sessionUsage(sessions: SessionManager, session: Session, contextWindow: number): UsageTotals {
+export function sessionUsage(sessionManager: SessionManager, session: Session, contextWindow: number): UsageTotals {
 	let totals: UsageTotals = { ...EMPTY_USAGE, contextWindow };
-	for (const entry of sessions.getEntries(session)) {
+	for (const entry of sessionManager.getEntries(session)) {
 		const usage = entryUsage(entry);
 		if (usage) totals = addUsage(totals, usage, contextWindow);
 	}
-	return { ...totals, contextTokens: branchContextTokens(sessions.buildSessionContext(session).messages) };
+	return { ...totals, contextTokens: branchContextTokens(sessionManager.buildSessionContext(session).messages) };
 }
 
 /** 分支最后一条携带 usage 的 assistant 消息报告的 context 占用。 */

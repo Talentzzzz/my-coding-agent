@@ -217,7 +217,7 @@ export interface BranchPoint {
  *
  * 页面是一列**问题**，不是 fork 的清单：人认得出的「可以回到的地方」是他问过的东西。所以它从整个
  * 条目树折叠，而不是活跃链——一条路径被抛下的问题仍是问题，恰好就是回退把线上其余部分移出
- * transcript 后读者要找的那张卡片。
+ * 会话记录后读者要找的那张卡片。
  *
  * `parentId` 是它**上方**最近的 user 消息，不是条目自己的 parent：两个问题之间的条目是一轮的工作，
  * 卡片挂在上一个打开该轮的问题上。
@@ -302,7 +302,7 @@ function buildSessionPath(sessionEntryMapById: SessionEntryMapById, leafId?: str
 }
 
 /**
- * 这个 session 当前所在的模型和 thinking level：`.json` 快照的当前值，模型以 transcript 的最后一条
+ * 这个 session 当前所在的模型和 thinking level：`.json` 快照的当前值，模型以会话记录的最后一条
  * assistant 消息作弱回落。
  *
  * 快照是第一句话——它是 session 自己的选择存放的地方——消息回落只对模型保留，因为即使从未记录过
@@ -925,12 +925,12 @@ function recordedModelOf(
  * 读者。身份字段来自袋自己：版本号始终是本构建的（读取侧拒绝其他一切），创建时间戳在袋上传递，
  * 因为文件名无法把它无损地还回来。
  */
-function metaOf(s: Session): SessionMeta {
-	const setting = s.sessionSetting;
+function metaOf(session: Session): SessionMeta {
+	const setting = session.sessionSetting;
 	return {
 		version: CURRENT_SESSION_VERSION,
-		id: s.sessionId,
-		timestamp: s.timestamp,
+		id: session.sessionId,
+		timestamp: session.timestamp,
 		workDir: setting.workDirAbsPath,
 		...(setting.parentSessionId === undefined ? {} : { parentSession: setting.parentSessionId }),
 		...(setting.title === undefined ? {} : { title: setting.title }),
@@ -946,7 +946,7 @@ function metaOf(s: Session): SessionMeta {
  *
  * store 目录可以在这里创建，但不会创建任何文件：文件随第一条值得保留的条目出现——
  * {@link persistEntry} 里的闸门（`hasConversation`）——所以没人说过的 session 不在盘上留下
- * transcript，也不在侧栏留下一行。这就是构建状态而不写快照的全部意义：store 是对话的记录，没有
+ * 会话记录，也不在侧栏留下一行。这就是构建状态而不写快照的全部意义：store 是对话的记录，没有
  * 消息的对话还不是对话。
  *
  * 代价是在那条首条消息之前 id 无法按址找到：{@link findSessionFilePathById} 向 store 要一个配对，
@@ -960,7 +960,7 @@ export function createSession(
 ): Session {
 	const absDir = storeDirInput ? normalizePath(storeDirInput) : sessionsDir();
 	if (!existsSync(absDir)) mkdirSync(absDir, { recursive: true });
-	const s: Session = {
+	const session: Session = {
 		sessionId: "",
 		timestamp: "",
 		sessionDirAbsPath: absDir,
@@ -971,13 +971,13 @@ export function createSession(
 		sessionEntryMapById: new Map(),
 		leafId: null,
 	};
-	newSession(s, parentSessionFileInput);
-	return s;
+	newSession(session, parentSessionFileInput);
+	return session;
 }
 
 /** 从不落盘的 session 的状态。 */
 export function inMemorySession(workDirInput: string = process.cwd(), parentSessionFileInput?: string): Session {
-	const s: Session = {
+	const session: Session = {
 		sessionId: "",
 		timestamp: "",
 		sessionDirAbsPath: null,
@@ -988,8 +988,8 @@ export function inMemorySession(workDirInput: string = process.cwd(), parentSess
 		sessionEntryMapById: new Map(),
 		leafId: null,
 	};
-	newSession(s, parentSessionFileInput);
-	return s;
+	newSession(session, parentSessionFileInput);
+	return session;
 }
 
 /**
@@ -1024,7 +1024,7 @@ export function fillSession(absFilePath: string): Session {
 		pruneSessionFiles(absJson, absJsonl);
 		throw new Error(`Session file is not a valid ${APP_NAME} session: ${absJsonl}`);
 	}
-	const s: Session = {
+	const session: Session = {
 		sessionId: meta.id,
 		timestamp: meta.timestamp,
 		sessionFileAbsPath: absJsonl,
@@ -1036,12 +1036,12 @@ export function fillSession(absFilePath: string): Session {
 		sessionEntryMapById: new Map(),
 		leafId: null,
 	};
-	buildIndex(s);
-	return s;
+	buildIndex(session);
+	return session;
 }
 
 /**
- * 在 `s` 里开始一个全新的 session，丢弃它原来持有的一切。返回文件路径。
+ * 在 `session` 里开始一个全新的 session，丢弃它原来持有的一切。返回文件路径。
  *
  * `parentSessionFile` 是本 session 从之而来的 session 的绝对路径——fork 的源——它作为
  * `parentSession` 落到快照上。undefined 表示根 session。相对路径在这里按进程的 cwd 解析，这也是
@@ -1049,45 +1049,45 @@ export function fillSession(absFilePath: string): Session {
  *
  * 上面两个构造函数是它仅有的调用方：袋在这里诞生，之后的每次写入都走服务的 append 和 record 方法。
  */
-export function newSession(s: Session, parentSessionFile?: string): string | undefined {
-	s.sessionId = createSessionId();
-	s.timestamp = new Date().toISOString();
-	s.sessionSetting = {
-		workDirAbsPath: s.sessionSetting.workDirAbsPath,
+export function newSession(session: Session, parentSessionFile?: string): string | undefined {
+	session.sessionId = createSessionId();
+	session.timestamp = new Date().toISOString();
+	session.sessionSetting = {
+		workDirAbsPath: session.sessionSetting.workDirAbsPath,
 		...(parentSessionFile === undefined ? {} : { parentSessionId: resolvePath(parentSessionFile) }),
 		suspended: false,
 	};
-	s.jsonlEntries = [];
-	s.sessionEntryMapById.clear();
-	s.leafId = null;
-	s.fileCreated = false;
+	session.jsonlEntries = [];
+	session.sessionEntryMapById.clear();
+	session.leafId = null;
+	session.fileCreated = false;
 
-	const dir = s.sessionDirAbsPath;
-	if (s.persist && dir !== null) s.sessionFileAbsPath = sessionPath(s.sessionId, dir);
-	return s.sessionFileAbsPath;
+	const dir = session.sessionDirAbsPath;
+	if (session.persist && dir !== null) session.sessionFileAbsPath = sessionPath(session.sessionId, dir);
+	return session.sessionFileAbsPath;
 }
 
-/** 按 id 索引 `s` 的条目并落位叶子，按文件顺序。 */
-function buildIndex(s: Session): void {
-	s.sessionEntryMapById.clear();
-	s.leafId = null;
-	for (const entry of s.jsonlEntries) {
-		s.sessionEntryMapById.set(entry.id, entry);
+/** 按 id 索引 `session` 的条目并落位叶子，按文件顺序。 */
+function buildIndex(session: Session): void {
+	session.sessionEntryMapById.clear();
+	session.leafId = null;
+	for (const entry of session.jsonlEntries) {
+		session.sessionEntryMapById.set(entry.id, entry);
 		if (entry.type === "leaf") {
 			// 记录指名对话去了哪；其他每个种类靠被追加这件事*就是*对话去了哪。文件顺序是最后一句话，
 			// 所以任何种类的更晚条目推翻更早记录所说的话。记录的 null 是一个自己的位置——「第一条
 			// 之前」——只有文件不持有的目标（只有手改文件能做到这一点）才回落到记录自己的树位置，
 			// 与 `buildSessionPath` 给未知 id 的回答是同一族。
-			s.leafId = entry.leafId === null || s.sessionEntryMapById.has(entry.leafId) ? entry.leafId : (entry.parentId ?? null);
+			session.leafId = entry.leafId === null || session.sessionEntryMapById.has(entry.leafId) ? entry.leafId : (entry.parentId ?? null);
 		} else {
-			s.leafId = entry.id;
+			session.leafId = entry.id;
 		}
 	}
 }
 
 /** session 一旦持有一条 user 或 assistant 消息即为 true，这就是它值得保留的条件。 */
-function hasConversation(s: Session): boolean {
-	return s.jsonlEntries.some(
+function hasConversation(session: Session): boolean {
+	return session.jsonlEntries.some(
 		(entry) => entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant"),
 	);
 }
@@ -1099,14 +1099,14 @@ function hasConversation(s: Session): boolean {
  * 的东西：temp 被写入、关闭、一步移入位置，所以每个读者要么看到旧快照要么看到新快照，绝不会看到
  * 撕裂的。rename 发生在同一目录内，所以在本代码运行的文件系统上是原子的。
  */
-function writeMetaFile(s: Session): void {
-	const absJsonl = s.sessionFileAbsPath;
+function writeMetaFile(session: Session): void {
+	const absJsonl = session.sessionFileAbsPath;
 	if (absJsonl === undefined) return;
 	const absJson = sessionMetaPath(absJsonl);
 	const absTemp = `${absJson}.${process.pid}.tmp`;
 	const fd = openSync(absTemp, "wx");
 	try {
-		writeFileSync(fd, `${JSON.stringify(metaOf(s), null, "\t")}\n`);
+		writeFileSync(fd, `${JSON.stringify(metaOf(session), null, "\t")}\n`);
 	} finally {
 		closeSync(fd);
 	}
@@ -1121,35 +1121,35 @@ function writeMetaFile(s: Session): void {
  * 快照——因为此前盘上没有任何东西接收它们；快照**最后**写，半途夭折的诞生就会留下未配对的半边，
  * 由 store 扫描清除而不是保留。从那以后（`fileCreated`）每条条目自行追加，每次 meta 变更重写快照。
  */
-export function persistEntry(s: Session, entry: SessionEntry): void {
-	if (!s.persist || !s.sessionFileAbsPath) return;
+export function persistEntry(session: Session, entry: SessionEntry): void {
+	if (!session.persist || !session.sessionFileAbsPath) return;
 
-	if (!s.fileCreated) {
-		if (!hasConversation(s)) return;
-		const fd = openSync(s.sessionFileAbsPath, "wx");
+	if (!session.fileCreated) {
+		if (!hasConversation(session)) return;
+		const fd = openSync(session.sessionFileAbsPath, "wx");
 		try {
-			for (const existing of s.jsonlEntries) writeFileSync(fd, `${JSON.stringify(existing)}\n`);
+			for (const existing of session.jsonlEntries) writeFileSync(fd, `${JSON.stringify(existing)}\n`);
 		} catch (error) {
 			// 没能落盘的流什么也不留下；下一次有闸门的写入从同一份内存日志重试诞生。
 			closeSync(fd);
-			rmSync(s.sessionFileAbsPath, { force: true });
+			rmSync(session.sessionFileAbsPath, { force: true });
 			throw error;
 		}
 		closeSync(fd);
-		writeMetaFile(s);
-		s.fileCreated = true;
+		writeMetaFile(session);
+		session.fileCreated = true;
 		return;
 	}
 
-	appendFileSync(s.sessionFileAbsPath, `${JSON.stringify(entry)}\n`);
+	appendFileSync(session.sessionFileAbsPath, `${JSON.stringify(entry)}\n`);
 }
 
 /** 把 `entry` 加进日志成为新叶子，内存和盘上同时进行。 */
-function appendEntry(s: Session, entry: SessionEntry): void {
-	s.jsonlEntries.push(entry);
-	s.sessionEntryMapById.set(entry.id, entry);
-	s.leafId = entry.id;
-	persistEntry(s, entry);
+function appendEntry(session: Session, entry: SessionEntry): void {
+	session.jsonlEntries.push(entry);
+	session.sessionEntryMapById.set(entry.id, entry);
+	session.leafId = entry.id;
+	persistEntry(session, entry);
 }
 
 /**
@@ -1160,9 +1160,9 @@ function appendEntry(s: Session, entry: SessionEntry): void {
  * 首条消息之前做出的选择得以存活，又不破坏「没有对话就没有文件」的规则。`change` 对 no-op 返回
  * false，这让一串相同的写入不必每次都付一次重写。
  */
-function recordMeta(s: Session, change: (setting: SessionSetting) => boolean): void {
-	if (!change(s.sessionSetting)) return;
-	if (s.persist && s.fileCreated) writeMetaFile(s);
+function recordMeta(session: Session, change: (setting: SessionSetting) => boolean): void {
+	if (!change(session.sessionSetting)) return;
+	if (session.persist && session.fileCreated) writeMetaFile(session);
 }
 
 /** 两个工具名列表的集合相等：记录的集合是一个选择，不是一个顺序。 */
@@ -1184,9 +1184,9 @@ function metasApprovalEqual(left: Record<string, boolean>, right: Record<string,
 // =========================================================================
 
 /** 每条条目的孩子，按文件顺序，一遍扫完日志建好。 */
-function childrenIndex(s: Session): Map<string, SessionEntry[]> {
+function childrenIndex(session: Session): Map<string, SessionEntry[]> {
 	const index = new Map<string, SessionEntry[]>();
-	for (const entry of s.sessionEntryMapById.values()) {
+	for (const entry of session.sessionEntryMapById.values()) {
 		if (entry.parentId === null) continue;
 		const siblings = index.get(entry.parentId);
 		if (siblings === undefined) index.set(entry.parentId, [entry]);
@@ -1201,7 +1201,7 @@ function childrenIndex(s: Session): Map<string, SessionEntry[]> {
  * 按条目记忆化，无论多少分支点询问，一次调用只描述整份日志一遍。
  */
 function subtreeDescription(
-	s: Session,
+	session: Session,
 	entryId: string,
 	children: Map<string, SessionEntry[]>,
 	memo: Map<string, SubtreeDescription>,
@@ -1211,9 +1211,9 @@ function subtreeDescription(
 	// 下降前先放入种子：这是被手改成环的文件绕回来时找到的东西，于是遍历在此结束而不是空转。
 	memo.set(entryId, { tip: entryId, message: false, label: "" });
 
-	const entry = s.sessionEntryMapById.get(entryId);
+	const entry = session.sessionEntryMapById.get(entryId);
 	const descents = (children.get(entryId) ?? []).map((child) =>
-		subtreeDescription(s, child.id, children, memo),
+		subtreeDescription(session, child.id, children, memo),
 	);
 	const own = entry?.type === "message" ? previewOfMessage(entry.message) : undefined;
 	let label = own ?? "";
@@ -1241,24 +1241,24 @@ function subtreeDescription(
  * 调用方随后自己设置 {@link Session.leafId}：一次追加会推进叶子，而这次不能——记录在树里的位置和
  * 它报告的位置是两个事实，各有各的字段。
  */
-function appendLeafRecord(s: Session, leafId: string | null): void {
+function appendLeafRecord(session: Session, leafId: string | null): void {
 	const entry: LeafEntry = {
 		type: "leaf",
-		id: generateId(s.sessionEntryMapById),
-		parentId: s.leafId,
+		id: generateId(session.sessionEntryMapById),
+		parentId: session.leafId,
 		timestamp: new Date().toISOString(),
 		leafId,
 	};
-	s.jsonlEntries.push(entry);
-	s.sessionEntryMapById.set(entry.id, entry);
-	persistEntry(s, entry);
+	session.jsonlEntries.push(entry);
+	session.sessionEntryMapById.set(entry.id, entry);
+	persistEntry(session, entry);
 }
 
 /**
  * session 服务：账本的操作，以及操作之下的文件 I/O。
  *
  * 每个 per-session 方法都以 {@link Session} 为第一参数、在这里完成工作——没有第二层同名文件级函数
- * 供转发，所以读这个文件的调用方读到的就是实现。这个类不持有任何 per-session 状态（ADR-0007 §2）
+ * 供转发，所以读这个文件的调用方读到的就是实现。这个类不持有任何 per-session 状态（ADR-0006 §2）
  * 也没有缓存：袋归填充或构建它的人所有，orchestrator 的表（`Agent`）是唯一在调用之间持有运行中
  * session 的袋的地方。
  *
@@ -1273,15 +1273,15 @@ export class SessionManager {
 	 * 这里刻意不接受压缩摘要：它必须是顶层条目，{@link SessionManager.buildContextEntries} 才能找到
 	 * 它，这正是 {@link appendCompaction} 存在的原因。
 	 */
-	appendMessage(s: Session, message: Message): string {
+	appendMessage(session: Session, message: Message): string {
 		const entry: MessageEntry = {
 			type: "message",
-			id: generateId(s.sessionEntryMapById),
-			parentId: s.leafId,
+			id: generateId(session.sessionEntryMapById),
+			parentId: session.leafId,
 			timestamp: new Date().toISOString(),
 			message,
 		};
-		appendEntry(s, entry);
+		appendEntry(session, entry);
 		return entry.id;
 	}
 
@@ -1292,8 +1292,8 @@ export class SessionManager {
 	 * 文件还没诞生的 session 把变更留在内存里；{@link persistEntry} 在诞生时写快照，所以选择得以
 	 * 存活，又不破坏「没有对话就没有文件」的规则。
 	 */
-	setThinkingLevel(s: Session, thinkingLevel: string): void {
-		recordMeta(s, (setting) => {
+	setThinkingLevel(session: Session, thinkingLevel: string): void {
+		recordMeta(session, (setting) => {
 			if (setting.model?.thinkingLevel === thinkingLevel) return false;
 			setting.model = { ...(setting.model ?? {}), thinkingLevel };
 			return true;
@@ -1307,8 +1307,8 @@ export class SessionManager {
 	 * 不是条目：选择是*当前值*，快照只持有生效的东西。重命名刻意不归这里管：重命名是同一个模型换了
 	 * 个名字，由旧名构建的 ref 已经有了着落。
 	 */
-	setModel(s: Session, name: string, modelId: string): void {
-		recordMeta(s, (setting) => {
+	setModel(session: Session, name: string, modelId: string): void {
+		recordMeta(session, (setting) => {
 			if (setting.model?.name === name && setting.model.modelId === modelId) return false;
 			setting.model = { ...(setting.model ?? {}), name, modelId };
 			return true;
@@ -1322,8 +1322,8 @@ export class SessionManager {
 	 * 通过闸门：盘上持有的是 session 最后一次落盘的选择，袋里生效的可以与它不同。这是逃生口：整个
 	 * 袋在一次原子重写里进快照。文件还没诞生的 session 保持袋原样；诞生写入会整体带上它。
 	 */
-	flushMeta(s: Session): void {
-		if (s.persist && s.fileCreated) writeMetaFile(s);
+	flushMeta(session: Session): void {
+		if (session.persist && session.fileCreated) writeMetaFile(session);
 	}
 
 	/**
@@ -1332,8 +1332,8 @@ export class SessionManager {
 	 * 是快照不是增量，因为读者拿走的是生效值——与模型和 level 遵循的契约相同。两张表总是同时存在，
 	 * 所以为工具变更做的一次调用会把审批集一起带上，反过来也一样。
 	 */
-	setToolConfig(s: Session, activeTools: string[], approval: Record<string, boolean>): void {
-		recordMeta(s, (setting) => {
+	setToolConfig(session: Session, activeTools: string[], approval: Record<string, boolean>): void {
+		recordMeta(session, (setting) => {
 			if (
 				setting.activeTools !== undefined &&
 				sameToolSet(setting.activeTools, activeTools) &&
@@ -1355,8 +1355,8 @@ export class SessionManager {
 	 * run 的结束清扫和放弃清扫写它——回答从不写，因为 call 在恢复 run 收尾它之前一直悬空。只有翻转
 	 * 才付一次重写，且只有 true 才会到盘上（{@link metaOf}）。
 	 */
-	setSuspended(s: Session, suspended: boolean): void {
-		recordMeta(s, (setting) => {
+	setSuspended(session: Session, suspended: boolean): void {
+		recordMeta(session, (setting) => {
 			if (setting.suspended === suspended) return false;
 			setting.suspended = suspended;
 			return true;
@@ -1367,11 +1367,11 @@ export class SessionManager {
 	 * 记录会话自己的名字，盖过派生的那个。
 	 *
 	 * 标题预期已被截短——接收用户输入的端点在到达这里之前先过 {@link shortenTitle}，所以落进快照的
-	 * 就是一行会显示的。不是条目：名字是关于 session 的事实，不是关于某一条路径的事实（ADR-0002
+	 * 就是一行会显示的。不是条目：名字是关于 session 的事实，不是关于某一条路径的事实（ADR-0008
 	 * 从文件顺序论证出的读法），快照直接陈述它。
 	 */
-	setTitle(s: Session, title: string): void {
-		recordMeta(s, (setting) => {
+	setTitle(session: Session, title: string): void {
+		recordMeta(session, (setting) => {
 			if (setting.title === title) return false;
 			setting.title = title;
 			return true;
@@ -1381,21 +1381,21 @@ export class SessionManager {
 	/**
 	 * 记录不拥有消息条目的模型开销，归因于 `model` 上的 `operation`。
 	 *
-	 * 整笔开销装在一条条目里、由写入方求和——一次委托在自己的 transcript 上跑很多请求，这个文件要
+	 * 整笔开销装在一条条目里、由写入方求和——一次委托在自己的会话记录上跑很多请求，这个文件要
 	 * 的是总数，不是收据清单。零 usage 的记录由调用方自行跳过：一条条目值一行，什么都没花的开销
 	 * 不值得占一行。
 	 */
-	appendUsage(s: Session, operation: string, model: string, usage: Usage): string {
+	appendUsage(session: Session, operation: string, model: string, usage: Usage): string {
 		const entry: UsageEntry = {
 			type: "usage",
-			id: generateId(s.sessionEntryMapById),
-			parentId: s.leafId,
+			id: generateId(session.sessionEntryMapById),
+			parentId: session.leafId,
 			timestamp: new Date().toISOString(),
 			operation,
 			model,
 			usage,
 		};
-		appendEntry(s, entry);
+		appendEntry(session, entry);
 		return entry.id;
 	}
 
@@ -1406,25 +1406,25 @@ export class SessionManager {
 	 * 条目指向自己。
 	 */
 	appendCompaction(
-		s: Session,
+		session: Session,
 		summary: string,
 		firstKeptEntryId: string | null,
 		tokensBefore: number,
 		usage?: Usage,
 	): string {
 		const timestamp = new Date().toISOString();
-		const id = generateId(s.sessionEntryMapById);
+		const id = generateId(session.sessionEntryMapById);
 		const entry: CompactionEntry = {
 			type: "compaction",
 			id,
-			parentId: s.leafId,
+			parentId: session.leafId,
 			timestamp,
 			summary,
 			firstKeptEntryId: firstKeptEntryId ?? id,
 			tokensBefore,
 			...(usage === undefined ? {} : { usage }),
 		};
-		appendEntry(s, entry);
+		appendEntry(session, entry);
 		return entry.id;
 	}
 
@@ -1434,16 +1434,16 @@ export class SessionManager {
 	 * 与压缩不同，这里没有要扣下的东西——result 之所以被清空，正是因为 run 能重新产出它们——所以
 	 * 记录只有 id 和这次清空值多少。
 	 */
-	appendClearToolResults(s: Session, clearedEntryIds: readonly string[], tokensBefore: number): string {
+	appendClearToolResults(session: Session, clearedEntryIds: readonly string[], tokensBefore: number): string {
 		const entry: ClearToolResultEntry = {
 			type: "clear_tool_result",
-			id: generateId(s.sessionEntryMapById),
-			parentId: s.leafId,
+			id: generateId(session.sessionEntryMapById),
+			parentId: session.leafId,
 			timestamp: new Date().toISOString(),
 			clearedEntryIds: [...clearedEntryIds],
 			tokensBefore,
 		};
-		appendEntry(s, entry);
+		appendEntry(session, entry);
 		return entry.id;
 	}
 
@@ -1453,23 +1453,23 @@ export class SessionManager {
 	 * 与清空一样，没有要扣下的东西——指名的参数属于 result 已在分支上的 call——所以记录只有 id 和
 	 * 这次截短值多少。
 	 */
-	appendTrimToolCallArgs(s: Session, trimmedEntryIds: readonly string[], tokensBefore: number): string {
+	appendTrimToolCallArgs(session: Session, trimmedEntryIds: readonly string[], tokensBefore: number): string {
 		const entry: TrimToolCallArgEntry = {
 			type: "trim_tool_call_arg",
-			id: generateId(s.sessionEntryMapById),
-			parentId: s.leafId,
+			id: generateId(session.sessionEntryMapById),
+			parentId: session.leafId,
 			timestamp: new Date().toISOString(),
 			trimmedEntryIds: [...trimmedEntryIds],
 			tokensBefore,
 		};
-		appendEntry(s, entry);
+		appendEntry(session, entry);
 		return entry.id;
 	}
 
 	/** `parentId` 之后的每条条目，按文件顺序。 */
-	getChildren(s: Session, parentId: string): SessionEntry[] {
+	getChildren(session: Session, parentId: string): SessionEntry[] {
 		const children: SessionEntry[] = [];
-		for (const entry of s.sessionEntryMapById.values()) {
+		for (const entry of session.sessionEntryMapById.values()) {
 			if (entry.parentId === parentId) children.push(entry);
 		}
 		return children;
@@ -1490,19 +1490,19 @@ export class SessionManager {
 	 * 文件顺序也是客户端折叠各点的顺序：一个点的 `anchor` 是它自己的某个祖先，条目从不在其 parent
 	 * 之前写入，所以一个点挂靠的卡片在点到达时总是已经放好了。
 	 */
-	getBranchPoints(s: Session): BranchPoint[] {
-		const chain = this.getBranch(s);
+	getBranchPoints(session: Session): BranchPoint[] {
+		const chain = this.getBranch(session);
 		const onChain = new Set(chain.map((entry) => entry.id));
-		const children = childrenIndex(s);
+		const children = childrenIndex(session);
 		const memo = new Map<string, SubtreeDescription>();
 
 		// 第一遍：哪些条目被以不止一种方式延续，以及每种延续的总和。还什么都不放——anchor 要等所有
 		// 点都已知才可知，因为卡片要么是线上的一条 user 消息，要么是更早点的选项。
 		const forks: { entry: SessionEntry; options: BranchOption[] }[] = [];
-		for (const entry of s.sessionEntryMapById.values()) {
+		for (const entry of session.sessionEntryMapById.values()) {
 			const options: BranchOption[] = [];
 			for (const child of children.get(entry.id) ?? []) {
-				const described = subtreeDescription(s, child.id, children, memo);
+				const described = subtreeDescription(session, child.id, children, memo);
 				if (!described.message) continue;
 				options.push({
 					entryId: child.id,
@@ -1524,10 +1524,10 @@ export class SessionManager {
 
 		/** `entryId` 及其上方最近的卡片，没有任何东西能承载它时为 undefined。 */
 		const anchorOf = (entryId: string): string | undefined => {
-			let current: SessionEntry | undefined = s.sessionEntryMapById.get(entryId);
+			let current: SessionEntry | undefined = session.sessionEntryMapById.get(entryId);
 			while (current !== undefined) {
 				if (isCard(current)) return current.id;
-				current = current.parentId === null ? undefined : s.sessionEntryMapById.get(current.parentId);
+				current = current.parentId === null ? undefined : session.sessionEntryMapById.get(current.parentId);
 			}
 			return undefined;
 		};
@@ -1540,7 +1540,7 @@ export class SessionManager {
 			// 出于与 `subtreeDescription` 播种 memo 相同的理由在下降前播种：被手改成环的文件必须结束
 			// 遍历而不是空转。
 			prompts.set(entryId, "");
-			const entry = s.sessionEntryMapById.get(entryId);
+			const entry = session.sessionEntryMapById.get(entryId);
 			let prompt = "";
 			if (entry !== undefined) {
 				const own = entry.type === "message" ? previewOfMessage(entry.message) : "";
@@ -1570,9 +1570,9 @@ export class SessionManager {
 	 * 下降每一步跟随最后写入的孩子，遍及所有条目种类，因为一条最后条目是压缩或模型变更的分支也在
 	 * 那里停了。
 	 */
-	getBranchTip(s: Session, entryId: string): string {
-		if (!s.sessionEntryMapById.has(entryId)) throw new Error(`Entry ${entryId} not found`);
-		return subtreeDescription(s, entryId, childrenIndex(s), new Map()).tip;
+	getBranchTip(session: Session, entryId: string): string {
+		if (!session.sessionEntryMapById.has(entryId)) throw new Error(`Entry ${entryId} not found`);
+		return subtreeDescription(session, entryId, childrenIndex(session), new Map()).tip;
 	}
 
 	/**
@@ -1581,13 +1581,13 @@ export class SessionManager {
 	 * 这是原始分支；{@link SessionManager.buildContextEntries} 是应用了压缩的同一条遍历，provider
 	 * 请求由它构建。
 	 */
-	getBranch(s: Session, fromId?: string): SessionEntry[] {
+	getBranch(session: Session, fromId?: string): SessionEntry[] {
 		const path: SessionEntry[] = [];
-		const startId = fromId ?? s.leafId;
-		let current = startId ? s.sessionEntryMapById.get(startId) : undefined;
+		const startId = fromId ?? session.leafId;
+		let current = startId ? session.sessionEntryMapById.get(startId) : undefined;
 		while (current) {
 			path.push(current);
-			current = current.parentId ? s.sessionEntryMapById.get(current.parentId) : undefined;
+			current = current.parentId ? session.sessionEntryMapById.get(current.parentId) : undefined;
 		}
 		path.reverse();
 		return path;
@@ -1601,11 +1601,11 @@ export class SessionManager {
 	 * `clear_tool_result` 条目指名正文被清空的 tool result，`trim_tool_call_arg` 条目指名记录参数被
 	 * 截短的 assistant 消息。恰好落在保留范围内的更早压缩也一并保留；贡献摘要的是最新的那个。
 	 *
-	 * 三个决定都只在这里应用，请求、快照和恢复的进程才共享同一份 transcript：文件保留每一行，每个
+	 * 三个决定都只在这里应用，请求、快照和恢复的进程才共享同一份会话记录：文件保留每一行，每个
 	 * 读者从它推导出同一个视图。
 	 */
-	buildContextEntries(s: Session): SessionEntry[] {
-		return contextEntriesFromPath(buildSessionPath(s.sessionEntryMapById, s.leafId));
+	buildContextEntries(session: Session): SessionEntry[] {
+		return contextEntriesFromPath(buildSessionPath(session.sessionEntryMapById, session.leafId));
 	}
 
 	/**
@@ -1614,9 +1614,9 @@ export class SessionManager {
 	 * 这是把存储变成请求的唯一方法，也是恢复的 session 与活的 session 不会漂移的原因：两者都经过
 	 * 这里。路径只走一遍，由设置读取和视图共享，所以两个都要只付一次遍历而不是两次。
 	 */
-	buildSessionContext(s: Session): SessionContext {
-		const chain = buildSessionPath(s.sessionEntryMapById, s.leafId);
-		const { thinkingLevel, model } = getSessionContextSettings(s.sessionSetting, chain);
+	buildSessionContext(session: Session): SessionContext {
+		const chain = buildSessionPath(session.sessionEntryMapById, session.leafId);
+		const { thinkingLevel, model } = getSessionContextSettings(session.sessionSetting, chain);
 		const messages = contextEntriesFromPath(chain).flatMap(sessionEntryToContextMessages);
 		return { messages, thinkingLevel, model };
 	}
@@ -1628,9 +1628,9 @@ export class SessionManager {
 	 * 自己比自己，永远看不出差异。每次调用现读而不是缓存，所以基线就是文件自己的。文件还没诞生的
 	 * session 没有快照可读，以空记录回答——诞生写入会整体带上袋。
 	 */
-	recordedOnDisk(s: Session): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
-		if (!s.fileCreated || s.sessionFileAbsPath === undefined) return {};
-		return recordedModelOf(sessionSettingOf(readMetaFile(sessionMetaPath(s.sessionFileAbsPath))).model);
+	recordedOnDisk(session: Session): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
+		if (!session.fileCreated || session.sessionFileAbsPath === undefined) return {};
+		return recordedModelOf(sessionSettingOf(readMetaFile(sessionMetaPath(session.sessionFileAbsPath))).model);
 	}
 
 	/**
@@ -1638,16 +1638,16 @@ export class SessionManager {
 	 *
 	 * {@link SessionManager.buildSessionContext} 用这些值连同运行所需的默认值回答。这个方法服务于
 	 * 必须区分「session 选了 off」和「session 从未选择」的调用方——装配环节，它决定存储值能否盖过
-	 * 设置文件。快照是第一句话，transcript 是回落：模型回落到分支的最后一条 assistant 消息，它只可能
+	 * 设置文件。快照是第一句话，会话记录是回落：模型回落到分支的最后一条 assistant 消息，它只可能
 	 * 指名用户没给过名字的行。
 	 */
-	getRecordedSettings(s: Session): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
+	getRecordedSettings(session: Session): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
 		const recorded: { model?: { name: string; modelId: string }; thinkingLevel?: string } =
-			recordedModelOf(s.sessionSetting.model);
+			recordedModelOf(session.sessionSetting.model);
 		if (recorded.model === undefined) {
 			// 只是回落，而且是弱回落：消息记录的是回答它的 wire id，不是行的身份，所以这只可能指名
 			// 用户没给过名字的行。见 {@link getSessionContextSettings}。
-			for (const entry of this.getBranch(s)) {
+			for (const entry of this.getBranch(session)) {
 				if (entry.type === "message" && entry.message.role === "assistant") {
 					recorded.model = { name: entry.message.model, modelId: entry.message.model };
 				}
@@ -1663,19 +1663,19 @@ export class SessionManager {
 	 * session 完全按用户留下的样子重开。快照是完整的答案，所以这里读的是 session 而不是分支——这也
 	 * 是两文件拆分改变的地方：移动叶子不再切换这些值，因为它们是 session 的，不是分支的。
 	 */
-	getRecordedToolConfig(s: Session): { activeTools?: string[]; approval?: Record<string, boolean> } {
-		return { activeTools: s.sessionSetting.activeTools, approval: s.sessionSetting.approval };
+	getRecordedToolConfig(session: Session): { activeTools?: string[]; approval?: Record<string, boolean> } {
+		return { activeTools: session.sessionSetting.activeTools, approval: session.sessionSetting.approval };
 	}
 
 	/**
 	 * {@link SessionManager.buildSessionContext} 的消息列表里每条消息背后的条目 id，顺序一致。
 	 *
-	 * 压缩检查点产出的消息不属于任何消息条目，那些读作 null。这就是 transcript 能对一条它从未看着
+	 * 压缩检查点产出的消息不属于任何消息条目，那些读作 null。这就是会话记录能对一条它从未看着
 	 * 写下的消息提供「从这里 fork」的方式。
 	 */
-	getContextMessageEntryIds(s: Session): (string | null)[] {
+	getContextMessageEntryIds(session: Session): (string | null)[] {
 		const ids: (string | null)[] = [];
-		for (const entry of this.buildContextEntries(s)) {
+		for (const entry of this.buildContextEntries(session)) {
 			const produced = sessionEntryToContextMessages(entry).length;
 			for (let index = 0; index < produced; index++) ids.push(entry.type === "message" ? entry.id : null);
 		}
@@ -1686,26 +1686,26 @@ export class SessionManager {
 	 * `.json` 快照的扁平形状，从 session 的重组 setting 重建：身份和当前选择。构建出的 session 上
 	 * 始终存在。
 	 */
-	getMeta(s: Session): SessionMeta {
-		return metaOf(s);
+	getMeta(session: Session): SessionMeta {
+		return metaOf(session);
 	}
 
 	/** 文件顺序中的每一条条目。要加更多用 `append*` 方法。 */
-	getEntries(s: Session): SessionEntry[] {
-		return s.jsonlEntries;
+	getEntries(session: Session): SessionEntry[] {
+		return session.jsonlEntries;
 	}
 
 	/**
 	 * 会话自己的名字：有记录的标题就用它，否则用分支的第一条 user 消息，否则占位符。
 	 *
 	 * 记录的标题来自快照，那个安放是刻意的：左列每个 session 画一行，不按路径画，所以人给会话起的
-	 * 名字不会因为叶子移动就不再是他的——这正是 ADR-0002 论证的读法，现在由格式直接陈述，而不是从
+	 * 名字不会因为叶子移动就不再是他的——这正是 ADR-0008 论证的读法，现在由格式直接陈述，而不是从
 	 * 文件顺序重建。下面的分支遍历保持原样——它是回落，把最旧的一个 turn 压缩掉也仍然不能重命名
 	 * 会话。
 	 */
-	getTitle(s: Session): string {
-		if (s.sessionSetting.title !== undefined) return s.sessionSetting.title;
-		return deriveTitle(this.getBranch(s).flatMap(sessionEntryToContextMessages));
+	getTitle(session: Session): string {
+		if (session.sessionSetting.title !== undefined) return session.sessionSetting.title;
+		return deriveTitle(this.getBranch(session).flatMap(sessionEntryToContextMessages));
 	}
 
 	/**
@@ -1719,18 +1719,18 @@ export class SessionManager {
 	 * 对话去了哪。移动到已持有的位置什么都不写，与 meta setter 对自己的写入施加的守卫相同：一串
 	 * no-op 移动不花任何文件。
 	 */
-	branch(s: Session, branchFromId: string): void {
-		if (!s.sessionEntryMapById.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
-		if (s.leafId === branchFromId) return;
-		appendLeafRecord(s, branchFromId);
-		s.leafId = branchFromId;
+	branch(session: Session, branchFromId: string): void {
+		if (!session.sessionEntryMapById.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
+		if (session.leafId === branchFromId) return;
+		appendLeafRecord(session, branchFromId);
+		session.leafId = branchFromId;
 	}
 
 	/** 把叶子移到第一条之前，下一次追加就成为新的根。 */
-	resetLeaf(s: Session): void {
-		if (s.leafId === null) return;
-		appendLeafRecord(s, null);
-		s.leafId = null;
+	resetLeaf(session: Session): void {
+		if (session.leafId === null) return;
+		appendLeafRecord(session, null);
+		session.leafId = null;
 	}
 
 	/**
@@ -1891,7 +1891,7 @@ export class SessionManager {
 	 *
 	 * 列表为所有 session 一次性回答同一个问题，在恰好只有一个 session 变化时是错误的代价——刚创建
 	 * 的、刚 fork 的、或 store 手工捡回来的一个。所以这里定位那一个 session 并只解析它：一个 session
-	 * 出现的代价是一次解析，而不是对整台机器的一次扫描。定位那一半是快照读取，不是 transcript 读取；
+	 * 出现的代价是一次解析，而不是对整台机器的一次扫描。定位那一半是快照读取，不是会话记录读取；
 	 * 只有匹配到的 session 才解析 `.jsonl`。
 	 */
 	static async findSessionRowById(id: string, signal?: AbortSignal): Promise<SessionRow | undefined> {
@@ -1929,7 +1929,7 @@ export class SessionManager {
 	 * 删除一个 id 指名的 session，来自持有它的任何目录。
 	 *
 	 * 一个 session，不是一个目录：一个目录的 session 共享一个 store，比一个 session 的两个文件更宽的
-	 * 任何东西都是另一段对话的 transcript。对未知 id 抛异常而不是回答「早已不在」，把两种失败分开
+	 * 任何东西都是另一段对话的会话记录。对未知 id 抛异常而不是回答「早已不在」，把两种失败分开
 	 * ——调用方决定第二次删除意味着什么，hub 把它变成客户端能展示的状态码。
 	 *
 	 * 纯文件 I/O：为这个 id 持有活袋的表是谁的就是谁的，决定 session 已消失的调用方自己忘掉那一半
@@ -1992,7 +1992,7 @@ export function toSessionRef(info: SessionInfo): SessionRef {
  * 侧栏的一行，对应一个没有东西在跑的 session。
  *
  * `running` 在结构上就是 false：本进程是否在跑一个 session 从未被写下来。`pending` 是账本事实的
- * 缓存——快照的 `suspended` 标记，run 停在审批闸门处时置位——因为在 end-restart（ADR-0006 §5）下
+ * 缓存——快照的 `suspended` 标记，run 停在审批闸门处时置位——因为在 end-restart（ADR-0005 §5）下
  * 这个问题活得比 host 长，而扫描只读快照。标记不带计数，所以被标记的行报 1；确切数字在 session
  * 打开后从账本推导，持有 host 的调用方从进程内快照覆盖活值，而不是从盘上读。
  */
@@ -2008,7 +2008,7 @@ function toSessionRow(info: SessionInfo): SessionRow {
 /**
  * 会话的名字：第一条带文本的 user 消息，为选择器截短。
  *
- * 从 transcript 派生而不是存储，所以它跟随仍在被写入的 session，且首条消息变化时不需要迁移。
+ * 从会话记录派生而不是存储，所以它跟随仍在被写入的 session，且首条消息变化时不需要迁移。
  */
 export function deriveTitle(messages: readonly Message[]): string {
 	for (const message of messages) {

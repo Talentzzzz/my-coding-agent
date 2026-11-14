@@ -1,4 +1,4 @@
-// session 面上的恢复机器（ADR-0006 §5，ticket 15）：审批门让 run 以调用悬在 ledger 里的状态
+// session 面上的恢复机器（ADR-0005 §5，ticket 15）：审批门让 run 以调用悬在 ledger 里的状态
 // 结束，那个调用之后会遇到什么，正是本文件钉住的契约——
 //
 //   1. grant 即恢复：应答启动一次 run，其恢复趟把调用重新穿过门与工具本身，run 在同一个回合
@@ -73,9 +73,9 @@ function textOf(message: Message): string {
 	return message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 }
 
-/** session transcript 里的每一个工具结果，从旧到新。 */
-function toolResultTexts(session: Agent): string[] {
-	return session.snapshot(sidOf(session)).messages.filter((message) => message.role === "toolResult").map((message) => textOf(message));
+/** 会话记录里的每一个工具结果，从旧到新。 */
+function toolResultTexts(agent: Agent): string[] {
+	return agent.snapshot(sidOf(agent)).messages.filter((message) => message.role === "toolResult").map((message) => textOf(message));
 }
 
 /** 一次请求的 prompt 侧视图：被发给 provider 的角色，按序。 */
@@ -129,31 +129,31 @@ function gatedApi(holds: number[]): { api: ChatTransport; release(index: number)
 }
 
 /**
- * 每个打开的 session 运行时所用的 id，保存在各检查持有的 session 对象旁边。
+ * 每个打开的 session 运行时所用的 id，保存在各检查持有的 agent 旁边。
  *
- * session 的方法现在按 id 指名它——orchestrator 不持有任何 session 状态——所以打开助手在这里
+ * agent 的方法现在按 id 指名它——orchestrator 不持有任何 session 状态——所以打开助手在这里
  * 记录它创建的东西，每个检查经由 {@link sidOf} 读回。
  */
-const opened = new WeakMap<Agent, { id: string; state: Session }>();
+const opened = new WeakMap<Agent, { id: string; session: Session }>();
 
-function bagOf(session: Agent): Session {
-	return opened.get(session)!.state;
+function bagOf(agent: Agent): Session {
+	return opened.get(agent)!.session;
 }
 
-function sidOf(session: Agent): string {
-	return opened.get(session)!.id;
+function sidOf(agent: Agent): string {
+	return opened.get(agent)!.id;
 }
 
 async function openSession(overrides: { approval?: Record<string, boolean>; api?: ChatTransport } = {}): Promise<Agent> {
-	const state = createSession(root);
-	const session = await openAgent({
-		session: state,
+	const session = createSession(root);
+	const agent = await openAgent({
+		session,
 		api: overrides.api ?? fake.api,
 		model: modelName,
 		settings: inMemorySettingManager({ approval: overrides.approval ?? {} }, rows),
 	});
-	opened.set(session, { id: state.sessionId, state });
-	return session;
+	opened.set(agent, { id: session.sessionId, session });
+	return agent;
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -163,44 +163,44 @@ async function openSession(overrides: { approval?: Record<string, boolean>; api?
 process.stdout.write("\na grant resumes the run and re-runs the call; a denial closes it with its reason\n");
 
 {
-	const session = await openSession({ approval: { read: true } });
+	const agent = await openSession({ approval: { read: true } });
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("after the grant")]);
-	await session.prompt(sidOf(session), "read the notes", { selection });
-	await session.settle(sidOf(session));
-	check("the gate ended the run with the call dangling", session.hasPendingApprovals(sidOf(session)), JSON.stringify(session.snapshot(sidOf(session)).pendingApprovals));
-	const callId = session.snapshot(sidOf(session)).pendingApprovals[0]?.toolCallId ?? "";
-	check("the dangling call has no result yet", toolResultTexts(session).length === 0, JSON.stringify(toolResultTexts(session)));
+	await agent.prompt(sidOf(agent), "read the notes", { selection });
+	await agent.settle(sidOf(agent));
+	check("the gate ended the run with the call dangling", agent.hasPendingApprovals(sidOf(agent)), JSON.stringify(agent.snapshot(sidOf(agent)).pendingApprovals));
+	const callId = agent.snapshot(sidOf(agent)).pendingApprovals[0]?.toolCallId ?? "";
+	check("the dangling call has no result yet", toolResultTexts(agent).length === 0, JSON.stringify(toolResultTexts(agent)));
 
-	await session.respondApproval(sidOf(session), callId, true);
-	await session.settle(sidOf(session));
-	const grantResults = toolResultTexts(session);
+	await agent.respondApproval(sidOf(agent), callId, true);
+	await agent.settle(sidOf(agent));
+	const grantResults = toolResultTexts(agent);
 	check("the recovery pass re-ran the call through the tool", grantResults.some((text) => text.includes("notes.txt")), JSON.stringify(grantResults));
-	check("the granted call is no longer waiting", !session.hasPendingApproval(sidOf(session), callId));
-	check("a grant records the session's own approval choice", session.getApprovals(sidOf(session)).read === false);
+	check("the granted call is no longer waiting", !agent.hasPendingApproval(sidOf(agent), callId));
+	check("a grant records the session's own approval choice", agent.getApprovals(sidOf(agent)).read === false);
 	check(
 		"and the model carried on in the same run",
-		session.snapshot(sidOf(session)).messages.some((message) => message.role === "assistant" && textOf(message) === "after the grant"),
+		agent.snapshot(sidOf(agent)).messages.some((message) => message.role === "assistant" && textOf(message) === "after the grant"),
 	);
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 {
-	const session = await openSession({ approval: { read: true } });
+	const agent = await openSession({ approval: { read: true } });
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("after the denial")]);
-	await session.prompt(sidOf(session), "read the notes", { selection });
-	await session.settle(sidOf(session));
-	const callId = session.snapshot(sidOf(session)).pendingApprovals[0]?.toolCallId ?? "";
+	await agent.prompt(sidOf(agent), "read the notes", { selection });
+	await agent.settle(sidOf(agent));
+	const callId = agent.snapshot(sidOf(agent)).pendingApprovals[0]?.toolCallId ?? "";
 
-	await session.respondApproval(sidOf(session), callId, false);
-	await session.settle(sidOf(session));
-	const denialResults = toolResultTexts(session);
+	await agent.respondApproval(sidOf(agent), callId, false);
+	await agent.settle(sidOf(agent));
+	const denialResults = toolResultTexts(agent);
 	check("the recovery pass closed the call with the deny's sentence", denialResults.some((text) => text.includes("The user denied permission to run read.")), JSON.stringify(denialResults));
-	check("the denied call is no longer waiting", !session.hasPendingApproval(sidOf(session), callId));
+	check("the denied call is no longer waiting", !agent.hasPendingApproval(sidOf(agent), callId));
 	check(
 		"and the model answered the denial",
-		session.snapshot(sidOf(session)).messages.some((message) => message.role === "assistant" && textOf(message) === "after the denial"),
+		agent.snapshot(sidOf(agent)).messages.some((message) => message.role === "assistant" && textOf(message) === "after the denial"),
 	);
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -210,12 +210,12 @@ process.stdout.write("\na grant resumes the run and re-runs the call; a denial c
 process.stdout.write("\ndangling calls no answer names are closed before the first request\n");
 
 {
-	const session = await openSession();
-	// 崩溃形状：transcript 里两条调用，身后都没有结果——按一个死于批次中途的进程留下它们的
+	const agent = await openSession();
+	// 崩溃形状：会话记录里两条调用，身后都没有结果——按一个死于批次中途的进程留下它们的
 	// 方式追加。
-	session.sessionManager.appendMessage(bagOf(session), fakeAssistantMessage(fakeToolCall("read", { path: "a.txt" }, { id: "call_a" })));
-	session.sessionManager.appendMessage(bagOf(session), fakeAssistantMessage(fakeToolCall("read", { path: "b.txt" }, { id: "call_b" })));
-	check("both dangling calls are derived from the ledger", session.snapshot(sidOf(session)).pendingApprovals.length === 2, JSON.stringify(session.snapshot(sidOf(session)).pendingApprovals));
+	agent.sessionManager.appendMessage(bagOf(agent), fakeAssistantMessage(fakeToolCall("read", { path: "a.txt" }, { id: "call_a" })));
+	agent.sessionManager.appendMessage(bagOf(agent), fakeAssistantMessage(fakeToolCall("read", { path: "b.txt" }, { id: "call_b" })));
+	check("both dangling calls are derived from the ledger", agent.snapshot(sidOf(agent)).pendingApprovals.length === 2, JSON.stringify(agent.snapshot(sidOf(agent)).pendingApprovals));
 
 	const prompts: { roles: string[] }[] = [];
 	fake.setResponses([
@@ -224,22 +224,22 @@ process.stdout.write("\ndangling calls no answer names are closed before the fir
 			return fakeAssistantMessage("carried on");
 		},
 	]);
-	await session.prompt(sidOf(session), "continue", { selection });
-	await session.settle(sidOf(session));
+	await agent.prompt(sidOf(agent), "continue", { selection });
+	await agent.settle(sidOf(agent));
 
-	const orphanResults = toolResultTexts(session);
+	const orphanResults = toolResultTexts(agent);
 	check(
 		"both orphans were closed with the sentence that says what happened",
 		orphanResults.filter((text) => text.includes("was left unanswered")).length === 2,
 		JSON.stringify(orphanResults),
 	);
-	check("the sweep cleared the waiting", !session.hasPendingApprovals(sidOf(session)));
+	check("the sweep cleared the waiting", !agent.hasPendingApprovals(sidOf(agent)));
 	check(
 		"and the first request was provider-legal: each result beside its own call, the prompt after them",
 		JSON.stringify(prompts[0]?.roles) === JSON.stringify(["system", "assistant", "toolResult", "assistant", "toolResult", "user"]),
 		JSON.stringify(prompts[0]?.roles),
 	);
-	await session.close(sidOf(session));
+	await agent.close(sidOf(agent));
 }
 
 // 开关：把清扫关掉的 host 自己拥有那些未获应答的调用。在恢复机器自己的面上驱动——每个 run
@@ -268,7 +268,7 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 	manager.register(readTool);
 	// 一次 run 会声明的工具面：这里只有那个 fixture，它也正是整张表——链条问的两个问题（"这次
 	// run 可以调它吗"、"这个名字存在吗"）如今是同一个问题：解析对着本请求声明过的数组按名查
-	// （ADR-0023），调用只能落到声明过的名字上。所以每个用例供给自己的声明面，而不是一张表加
+	// （ADR-0016），调用只能落到声明过的名字上。所以每个用例供给自己的声明面，而不是一张表加
 	// 一份名单。
 	const declared = [readTool];
 
@@ -278,7 +278,7 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 		events.push(event);
 	};
 
-	/** 执行经本练习自建的表转发：`Tool.execute` 的生产唯一入口仍是表自己（ADR-0016）。 */
+	/** 执行经本练习自建的表转发：`Tool.execute` 的生产唯一入口仍是表自己（ADR-0011）。 */
 	const executeTool = (
 		name: string,
 		toolCallId: string,
@@ -393,36 +393,36 @@ process.stdout.write("\naborting a recovery run leaves the recovered call with i
 {
 	// 持住恢复 run 的请求——第二次调用，在被提示的 run 自己那次之后。
 	const gate = gatedApi([2]);
-	const session = await openSession({ approval: { read: true }, api: gate.api });
+	const agent = await openSession({ approval: { read: true }, api: gate.api });
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("after the grant")]);
-	await session.prompt(sidOf(session), "read the notes", { selection });
-	await session.settle(sidOf(session));
-	const callId = session.snapshot(sidOf(session)).pendingApprovals[0]?.toolCallId ?? "";
+	await agent.prompt(sidOf(agent), "read the notes", { selection });
+	await agent.settle(sidOf(agent));
+	const callId = agent.snapshot(sidOf(agent)).pendingApprovals[0]?.toolCallId ?? "";
 	check("the run parked at the gate", callId.length > 0);
 
 	// grant 启动恢复 run；被持住的 provider 调用正是 abort 落下的地方。
-	void session.respondApproval(sidOf(session), callId, true);
+	void agent.respondApproval(sidOf(agent), callId, true);
 	const started = Date.now();
 	while (!gate.held(2) && Date.now() - started < 5_000) await new Promise((resolve) => setTimeout(resolve, 10));
 	check("the recovery run reached its request", gate.held(2));
 
-	await session.abort(sidOf(session));
-	await session.settle(sidOf(session));
-	check("the abort settled the recovery run", !session.snapshot(sidOf(session)).submitting);
-	const results = toolResultTexts(session);
+	await agent.abort(sidOf(agent));
+	await agent.settle(sidOf(agent));
+	check("the abort settled the recovery run", !agent.snapshot(sidOf(agent)).submitting);
+	const results = toolResultTexts(agent);
 	check("the recovered call kept its own result", results.some((text) => text.includes("notes.txt")), JSON.stringify(results));
 	check(
 		"and no denial rode the abort: the gate's sentences are nowhere",
 		results.every((text) => !text.includes("denied permission") && !text.includes("The run was aborted")),
 		JSON.stringify(results),
 	);
-	check("the aborted session has nothing waiting", !session.hasPendingApprovals(sidOf(session)));
-	await session.close(sidOf(session));
+	check("the aborted session has nothing waiting", !agent.hasPendingApprovals(sidOf(agent)));
+	await agent.close(sidOf(agent));
 }
 
 // ---------------------------------------------------------------------------------------------------
 // 5. 信箱也是恢复 run 的：被 steer 的消息在取用点被排干并应答，与从 prompt 开始的 run 完全
-// 一致（0003 未变）。
+// 一致（0002 未变）。
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\na message steered into a recovery run is taken at the take point\n");
@@ -430,26 +430,26 @@ process.stdout.write("\na message steered into a recovery run is taken at the ta
 {
 	// 持住恢复 run 的请求——第二次调用，在被提示的 run 自己那次之后。
 	const gate = gatedApi([2]);
-	const session = await openSession({ approval: { read: true }, api: gate.api });
+	const agent = await openSession({ approval: { read: true }, api: gate.api });
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("answered both")]);
-	await session.prompt(sidOf(session), "read the notes", { selection });
-	await session.settle(sidOf(session));
-	const callId = session.snapshot(sidOf(session)).pendingApprovals[0]?.toolCallId ?? "";
+	await agent.prompt(sidOf(agent), "read the notes", { selection });
+	await agent.settle(sidOf(agent));
+	const callId = agent.snapshot(sidOf(agent)).pendingApprovals[0]?.toolCallId ?? "";
 
-	void session.respondApproval(sidOf(session), callId, true);
+	void agent.respondApproval(sidOf(agent), callId, true);
 	const started = Date.now();
 	while (!gate.held(2) && Date.now() - started < 5_000) await new Promise((resolve) => setTimeout(resolve, 10));
 	// steer 在恢复中途被收下——run 正在流式，所以它入队而不是自己开 prompt。
-	await session.steer(sidOf(session), "and also this", { selection });
+	await agent.steer(sidOf(agent), "and also this", { selection });
 
 	gate.release(2);
-	await session.settle(sidOf(session));
+	await agent.settle(sidOf(agent));
 	check(
 		"the recovery run drained the mailbox and answered it",
-		session.snapshot(sidOf(session)).messages.some((message) => message.role === "assistant" && textOf(message) === "answered both"),
+		agent.snapshot(sidOf(agent)).messages.some((message) => message.role === "assistant" && textOf(message) === "answered both"),
 	);
-	check("and the steered message is in the transcript once", session.snapshot(sidOf(session)).messages.filter((message) => message.role === "user" && textOf(message) === "and also this").length === 1);
-	await session.close(sidOf(session));
+	check("and the steered message is in the session once", agent.snapshot(sidOf(agent)).messages.filter((message) => message.role === "user" && textOf(message) === "and also this").length === 1);
+	await agent.close(sidOf(agent));
 }
 
 process.stdout.write(failures === 0 ? "\napproval recovery ok\n" : `\n${failures} FAILED\n`);

@@ -1,8 +1,8 @@
-# 0006：会话架构改为无状态服务与每请求重放，审批改为结束重启
+# 0005：会话架构改为无状态服务与每请求重放，审批改为结束重启
 
 日期：2026-10-31 · 状态：已接受（stateless-agent 01–06 号票拍板，08–16 号票落地）
-取代者：[0007](0007-services-drop-instance-state.md)（部分，2026-11-01——仅重开落地序列中票 08/09/16 的「薄壳门面」条款，其余决定不变）
-取代者：[0016](0016-tool-manager-instance-table.md)（部分，2026-11-06——决定 1 里 `ToolManager` 那一项，以及决定 3 的 B 路线里「工具不驻留内存」那一半；账本一域与其余决定不变）
+取代者：[0006](0006-services-drop-instance-state.md)（部分，2026-11-01——仅重开落地序列中票 08/09/16 的「薄壳门面」条款，其余决定不变）
+取代者：[0011](0011-tool-manager-instance-table.md)（部分，2026-11-06——决定 1 里 `ToolManager` 那一项，以及决定 3 的 B 路线里「工具不驻留内存」那一半；账本一域与其余决定不变）
 
 设计过程见 `.scratch/stateless-agent/`（票 01–06 是各决定的明细，本 ADR 只记合拢后的结论）。
 
@@ -28,7 +28,7 @@ leafId);`SettingsManager` 按工作区实例化;工具审批用 `pendingApproval
    平级互不依赖;`Agent` 做编排(跨域顺序与跨域不变式的唯一居所)。hub 只懂
    协议,不做编排。形式上无字段类与函数模块等价。
 
-   **（2026-11-06 Superseded，[0016](0016-tool-manager-instance-table.md)：`ToolManager` 那一项——
+   **（2026-11-06 Superseded，[0011](0011-tool-manager-instance-table.md)：`ToolManager` 那一项——
    本构建的工具服务持一张常驻实例表；其余四项不变。）**
 2. **状态全部是纯数据接口**(零方法、零对象句柄),方法首参收状态。种子→补齐
    (seed→fill)生命周期:前端只传名字(sessionId / modeName /
@@ -44,7 +44,7 @@ leafId);`SettingsManager` 按工作区实例化;工具审批用 `pendingApproval
    打破 pending 会话流程（`create()` 后文件尚不存在），换来的只是单写者
    规则已经保证的东西。
 
-   **（2026-11-06 Superseded，[0016](0016-tool-manager-instance-table.md)：仅「工具不驻留内存」那一半
+   **（2026-11-06 Superseded，[0011](0011-tool-manager-instance-table.md)：仅「工具不驻留内存」那一半
    ——工具对象已驻留；「每请求的派生物现建现传、不进任何袋」与账本一域（单写者、fill-at-open、冷读
    同链）的原判不变。）**
 4. **`SessionRuntime` 是唯一的跨栈内存态**:`{ steeringQueue, followUpQueue,
@@ -54,7 +54,7 @@ leafId);`SettingsManager` 按工作区实例化;工具审批用 `pendingApproval
    （有 tool_use 无 tool_result）；答案经 REST 到达后由 loop 的恢复机器按
    toolCallId 配对、合成工具结果、续跑；孤儿悬空 call 合成错误结果收尾。
    内存挂起（`pendingApprovals` 的 Promise 机制）删除。进程关停不对悬空
-   call 落 deny——transcript 是唯一状态，重启继承的该是一个仍可回答的问题，
+   call 落 deny——会话记录是唯一状态，重启继承的该是一个仍可回答的问题，
    而不是一次没人做出的拒绝；abort 则等运行沉降后照落 deny 收尾。
 6. **`shown` 半边落成 entry**(`tool_result_view`):hook 改写的工具结果
    双份视图从账本补齐,不再驻留内存。
@@ -98,9 +98,9 @@ leafId);`SettingsManager` 按工作区实例化;工具审批用 `pendingApproval
 
 - [ADR-0001](0001-transport-websocket-mux.md):REST 命令面 + 常驻 WebSocket
   mux、有界写侧、claim 与订阅分离——全部保持。
-- [ADR-0003](0003-queued-writes-at-drain.md):排队消息在取走点落盘——信箱里
+- [ADR-0002](0002-queued-writes-at-drain.md):排队消息在取走点落盘——信箱里
   没消费的消息本来就不落盘,语义不冲突。
-- [ADR-0005](0005-modes-are-a-tool-config-choice.md):模式是工具集与审批集的
+- [ADR-0004](0004-modes-are-a-tool-config-choice.md):模式是工具集与审批集的
   选择、座位按值匹配——`modeName` 只是补齐种子,实际配置仍以 `tool_config`
   entry 为准。
 - compaction 的「文件永远保留全文、每步裁剪是一条 entry」;retry 装在模型的

@@ -1,4 +1,4 @@
-# 0004：外壳不再自带 `no-sandbox` 与 GPU 开关——那是给一台已经变了的机器打的补丁
+# 0003：外壳不再自带 `no-sandbox` 与 GPU 开关——那是给一台已经变了的机器打的补丁
 
 - 状态：**已接受**（2026-10-16，[03 号](../../.scratch/window-repair/issues/03-land-the-switches.md)落地；结论与证据由 [02 号](../../.scratch/window-repair/issues/02-minimal-switch-set.md)产出，收在 [`.scratch/window-repair/research/minimal-switch-set.md`](../../.scratch/window-repair/research/minimal-switch-set.md)）
 - 取代或失效：`main.cjs` 里一段**从未提交过**的工作区补丁——`app.disableHardwareAcceleration()` 加三条 `appendSwitch`（`no-sandbox` / `in-process-gpu` / `disable-gpu-shader-disk-cache`），外面裹着一段"这台机器"的注释。它不在任何提交里（`git log -S no-sandbox -- packages/desktop/main.cjs` 为空），所以这次删除**不产生 diff**——本 ADR 与 `.scratch/window-repair/` 是它唯一的记录

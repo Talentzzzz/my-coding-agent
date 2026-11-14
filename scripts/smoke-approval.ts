@@ -17,7 +17,7 @@
 //      go, and the question survives unanswered and undenied until someone answers it or the process
 //      ends (issue 04); the snapshot's suspended marker follows the question through its endings;
 //   5. a restart — the cold overview lights the parked row from the snapshot marker, and the
-//      transcript keeps the call answerable.
+//      session keeps the call answerable.
 //
 // Two things pinned by `docs/notes.md` §一 and §二 are load-bearing here. The first section's
 // `new SessionHub({ workDirAbsPath: root })` names the hub's one directory option: that section
@@ -176,7 +176,7 @@ const { id: sessionId } = await mountSession(hub, {
 	root,
 	model: modelName,
 });
-const session = hub.agent;
+const agent = hub.agent;
 
 const roundTrip = await serve(hub);
 try {
@@ -257,9 +257,9 @@ try {
 		(await wire.waitFor(sessionId, (message) => message.type === "status" && message.submitting === false, 10_000)) !== undefined,
 		JSON.stringify(wire.items(sessionId).map((message) => message.type)),
 	);
-	const transcript = await readSession(roundTrip.url, sessionId);
-	check("the tool ran and its result is in the transcript", JSON.stringify(transcript?.messages ?? []).includes("notes.txt"));
-	check("the model's closing answer is in the transcript", JSON.stringify(transcript?.messages ?? []).includes("done"));
+	const sessionView = await readSession(roundTrip.url, sessionId);
+	check("the tool ran and its result is in the session", JSON.stringify(sessionView?.messages ?? []).includes("notes.txt"));
+	check("the model's closing answer is in the session", JSON.stringify(sessionView?.messages ?? []).includes("done"));
 
 	await wire.close();
 	hub.release(bench);
@@ -462,7 +462,7 @@ try {
 	try {
 		const { wire, viewer } = await driveToApproval(patient);
 		const parked = patient.host;
-		check("the run parked at the approval", patient.session.hasPendingApprovals(parked.id));
+		check("the run parked at the approval", patient.agent.hasPendingApprovals(parked.id));
 		const parkedMeta = await readMeta(parked.id);
 		check("and the snapshot carries the suspended marker", parkedMeta.suspended === true, JSON.stringify(parkedMeta));
 
@@ -488,7 +488,7 @@ try {
 			parkedRow?.pending === 1 && parkedRow?.running === false,
 			JSON.stringify(parkedRow),
 		);
-		check("the approval is still pending, undenied", patient.session.hasPendingApprovals(parked.id), "it was denied");
+		check("the approval is still pending, undenied", patient.agent.hasPendingApprovals(parked.id), "it was denied");
 		check(
 			"and no denial reached the lane",
 			wire.items(patient.sessionId).every((message) => message.type !== "approval_settled"),
@@ -498,16 +498,16 @@ try {
 		// The person came back: a new host, but the same live half — the one the table kept. Identity
 		// is the orchestrator's private business, so the assertion probes the table the way the other
 		// smokes do; the facade answers in pure data and never hands a bag out. What survives a reap is
-		// the half that is nowhere on disk (ADR-0019): the queues, the parked flag, the subscribers.
-		// The transcript is deliberately not part of it, so there is no stale bag for a returning host
+		// the half that is nowhere on disk (ADR-0013): the queues, the parked flag, the subscribers.
+		// The session is deliberately not part of it, so there is no stale bag for a returning host
 		// to inherit — it reopens the file like any other reader.
 		const entryOf = (): { live: unknown; session?: unknown } | undefined =>
-			(patient.hub.agent as unknown as { sessions: Map<string, { live: unknown; session?: unknown }> }).sessions.get(parked.id);
+			(patient.hub.agent as unknown as { agentStateMap: Map<string, { live: unknown; session?: unknown }> }).agentStateMap.get(parked.id);
 		const liveHalf = entryOf()?.live;
 		const again = await patient.hub.hold(parked.id);
 		check("a new host opens over the retained state", again !== parked && again.id === parked.id, `${again.id} vs ${parked.id}`);
 		check("whose live half is the same object the parked run left", liveHalf !== undefined && entryOf()?.live === liveHalf);
-		check("and whose transcript is a file rather than a table entry", entryOf()?.session === undefined);
+		check("and whose session is a file rather than a table entry", entryOf()?.session === undefined);
 
 		const returned = await wire.open(patient.sessionId);
 		check(
@@ -569,7 +569,7 @@ try {
 	try {
 		const { wire, viewer } = await driveToApproval(abandoned);
 		const parked = abandoned.host;
-		check("the run parked at the approval", abandoned.session.hasPendingApprovals(parked.id));
+		check("the run parked at the approval", abandoned.agent.hasPendingApprovals(parked.id));
 
 		wire.cancel(abandoned.sessionId);
 		abandoned.hub.release(viewer);
@@ -606,7 +606,7 @@ try {
 	try {
 		const { wire, viewer } = await driveToApproval(lookedThenLeft);
 		const parked = lookedThenLeft.host;
-		check("the run parked at the approval", lookedThenLeft.session.hasPendingApprovals(parked.id));
+		check("the run parked at the approval", lookedThenLeft.agent.hasPendingApprovals(parked.id));
 
 		wire.cancel(lookedThenLeft.sessionId);
 		lookedThenLeft.hub.release(viewer);
@@ -618,7 +618,7 @@ try {
 
 		const back = await lookedThenLeft.hub.hold(parked.id);
 		check("the returning viewer gets the session back", back.id === parked.id, `${back.id} vs ${parked.id}`);
-		check("and the approval is still unanswered", lookedThenLeft.session.hasPendingApprovals(parked.id));
+		check("and the approval is still unanswered", lookedThenLeft.agent.hasPendingApprovals(parked.id));
 
 		// ...and now they leave without answering. The session must be reapable again.
 		lookedThenLeft.hub.release(back);
@@ -638,7 +638,7 @@ try {
 	try {
 		const { wire, viewer } = await driveToApproval(aborted);
 		const parked = aborted.host;
-		check("the run parked at the approval", aborted.session.hasPendingApprovals(parked.id));
+		check("the run parked at the approval", aborted.agent.hasPendingApprovals(parked.id));
 		check("the snapshot carries the suspended marker", (await readMeta(parked.id)).suspended === true);
 
 		const stopped = await request(aborted.url, "POST", `/api/sessions/${parked.id}/abort`);
@@ -661,7 +661,7 @@ try {
 	try {
 		const { wire, viewer } = await driveToApproval(forked);
 		const parked = forked.host;
-		check("the run parked at the approval", forked.session.hasPendingApprovals(parked.id));
+		check("the run parked at the approval", forked.agent.hasPendingApprovals(parked.id));
 
 		// Attached before the fork, so the row's first publish is heard rather than raced. The
 		// overview is the registration proof: it is sent once the mux owns the connection, so a
@@ -697,7 +697,7 @@ try {
 // ---------------------------------------------------------------------------------------------------
 // 5. A restart: the cold overview lights the parked row, and the question survives answerable.
 //
-// The property this pins under the end-restart architecture (ADR-0006 §5): the transcript is the
+// The property this pins under the end-restart architecture (ADR-0005 §5): the session file is the
 // only state, so the waiting call survives the restart *as a question* — the new process derives it
 // from the ledger the way the old one did, and the banner it shows is still answerable. The sidebar
 // does not pay that derivation on startup: the snapshot's `suspended` marker lights the row in the
@@ -808,7 +808,7 @@ try {
 			JSON.stringify(baseline.pendingApprovals),
 		);
 		check(
-			"and the transcript still holds the call that was parked",
+			"and the session still holds the call that was parked",
 			JSON.stringify(baseline.messages).includes("notes.txt"),
 			String(JSON.stringify(baseline.messages).length),
 		);
@@ -867,13 +867,13 @@ async function serve(hub: SessionHub): Promise<Graph> {
 interface Rig {
 	root: string;
 	hub: SessionHub;
-	session: Agent;
+	agent: Agent;
 	/** The id the host is keyed by — what every id-keyed call below names. */
 	sessionId: string;
 	/** The mounted host, as the hub holds it: the object the reap decides about. */
 	host: HostedSession;
-	/** The transcript bag the mount created — the one the orchestrator's table should hold. */
-	bag: Session;
+	/** The session the mount created — the one the orchestrator's table should hold. */
+	session: Session;
 	url: string;
 	close(): Promise<void>;
 }
@@ -907,7 +907,7 @@ async function openRig(): Promise<Rig> {
 	// way the real process wires it at boot — a mount announced before the projection is built is a
 	// host it never follows, and the row would never wear the live fields.
 	const graph = await serve(hub);
-	const { id: sessionId, host, state } = await mountSession(hub, {
+	const { id: sessionId, host, session } = await mountSession(hub, {
 		root,
 		model: modelName,
 	});
@@ -915,10 +915,10 @@ async function openRig(): Promise<Rig> {
 	return {
 		root,
 		hub,
-		session: hub.agent,
+		agent: hub.agent,
 		sessionId,
 		host,
-		bag: state,
+		session,
 		url: graph.url,
 		close: async () => {
 			await graph.close();

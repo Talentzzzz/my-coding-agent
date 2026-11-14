@@ -43,7 +43,7 @@ export interface CompactionResult {
 	usage?: Usage;
 }
 
-/** transcript 大到下一次请求有溢出窗口的风险时为 true。 */
+/** 会话记录大到下一次请求有溢出窗口的风险时为 true。 */
 export function shouldCompact(messages: readonly Message[], threshold: number): boolean {
 	if (threshold <= 0) return false;
 	return estimateTokens(messages) > threshold;
@@ -122,7 +122,7 @@ export interface SummarizeRequest {
 export type Summarize = (request: SummarizeRequest) => Promise<AssistantMessage>;
 
 /**
- * 压缩 transcript：摘要一切已结束的内容，报告要保留的 turn。
+ * 压缩会话记录：摘要一切已结束的内容，报告要保留的 turn。
  *
  * 摘要由 session 正在用的同一个模型生成，所以代价是一次请求。这里什么都不写：调用方把结果交给
  * `SessionManager.appendCompaction`，这让盘上的条目成为所发生之事的唯一记录。
@@ -149,7 +149,7 @@ export async function compact(
 		throw new Error("Summarization attempted to call a tool");
 	}
 
-	// 空摘要比不压缩更糟：条目会丢掉它所代表的历史、换回一个空，所以 run 留在它已有的 transcript
+	// 空摘要比不压缩更糟：条目会丢掉它所代表的历史、换回一个空，所以 run 留在它已有的会话记录
 	// 上。
 	const summary = contentText(response.content);
 	if (summary.trim().length === 0) throw new Error("Summarization returned an empty summary");
@@ -280,7 +280,7 @@ const TOOL_RESULT_MAX_CHARS = 2_000;
 /**
  * 把对话写成文本交给摘要器。
  *
- * 消息刻意是文本而不是活的 transcript：模型必须摘要它被展示的东西，而不是回答它。tool result 被
+ * 消息刻意是文本而不是活的会话记录：模型必须摘要它被展示的东西，而不是回答它。tool result 被
  * 截短，因为摘要需要的不是它们的完整正文。
  */
 function serializeConversation(messages: readonly Message[]): string {

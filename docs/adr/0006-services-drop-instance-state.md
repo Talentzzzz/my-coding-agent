@@ -1,15 +1,16 @@
-# 0007：五个单例服务不持有实例状态——聚合袋拆除，「薄壳门面」条款重开
+# 0006：五个单例服务不持有实例状态——聚合袋拆除，「薄壳门面」条款重开
 
 日期：2026-11-01 · 状态：已接受（pure-services 01 号票拍板，02–08 号票落地）
-取代：[0006](0006-stateless-session-architecture.md)（部分——仅其落地序列中票
+取代：[0005](0005-stateless-session-architecture.md)（部分——仅其落地序列中票
 08/09/16 有意保留的「薄壳门面」条款，其余决定不变）
-取代者：[0011](0011-agent-holds-session-state.md)（部分，2026-11-04——决定 3 的
-Manager 键控缓存与决定 4 的活登记处归属及「只装进行中且磁盘上没有」判据；其余
+取代者：[0013](0013-table-holds-live-half-only.md)（部分，2026-11-04 起经会话状态表一线演变、
+2026-11-10 定型——决定 3 的 Manager 键控缓存整条删除，冷读改为每次 fill 一份、用完即弃；
+决定 4 的活登记处改为 `Agent` 的 `Map<id, AgentState>`、只装 live 半。其余
 决定不变）
-取代者：[0016](0016-tool-manager-instance-table.md)（部分，2026-11-06——决定 1、
+取代者：[0011](0011-tool-manager-instance-table.md)（部分，2026-11-06——决定 1、
 决定 2 的「无状态服务」那半、决定 6 的「不可变」前提，三处都只在**工具域**不再
 成立；会话域的同一批决定不变）
-取代者：[0017](0017-agent-facade.md)（部分，2026-11-07——决定 6 的**消费面**：进程级
+取代者：[0012](0012-agent-facade.md)（部分，2026-11-07——决定 6 的**消费面**：进程级
 构造注入本身不变，被取代的是「这组进程级东西由 hub 装配、在 hub 手里协调」的旧
 叙述——三只 Manager 的构造收进 `createSessionAgent()`、唯一消费者是 core 的编排层，
 hub 只认编排层公开面；其余决定不变）
@@ -19,7 +20,7 @@ ADR 只记合拢后的契约）。
 
 ## 背景
 
-ADR-0006 把会话架构改为无状态服务与每请求重放，但其落地（票 08/09/16）有意
+ADR-0005 把会话架构改为无状态服务与每请求重放，但其落地（票 08/09/16）有意
 留下两处壳：`SessionManager` 与 `SettingsManager` 收成「一行委托的薄壳门面」，
 私有状态袋（`private s` 一类的 per-session 字段）原样住在类里，调用方零改动、
 留给后续票迁移；`Agent` 也仍持有 `AgentConfig` 混合袋、订阅集合与运行槽等
@@ -29,10 +30,10 @@ ADR-0006 把会话架构改为无状态服务与每请求重放，但其落地�
 族、调用方后迁，避免一次改动横跨 core 与 server 的全部调用点；私有字段让
 TypeScript 的 `private` 继续守账本不变式。
 
-重开的动因：与 0006 拆掉的有状态类同构的问题换了规模回来。**聚合袋**（一个
+重开的动因：与 0005 拆掉的有状态类同构的问题换了规模回来。**聚合袋**（一个
 大对象被各 Manager 互相「补充」）让字段的生命周期与属主脱钩——谁都可以往里
 塞，没有人对它的失效负责；门面的私有字段则把「这个方法摸了哪些状态」重新藏
-进 `this`，签名上看不见，正是 0006 背景一节批评过的形态。
+进 `this`，签名上看不见，正是 0005 背景一节批评过的形态。
 
 ## 决定
 
@@ -43,39 +44,39 @@ TypeScript 的 `private` 继续守账本不变式。
    下一步。内部辅助方法收显式参数，不收 id、不收袋。没有聚合类型，Manager
    之间从不互相「补充」一个共享对象。
 
-   **（2026-11-06 Superseded，[0016](0016-tool-manager-instance-table.md)：仅工具域那一项——`ToolManager`
+   **（2026-11-06 Superseded，[0011](0011-tool-manager-instance-table.md)：仅工具域那一项——`ToolManager`
    持一张常驻实例表；「不养聚合袋」这半原样有效。）**
 2. **类壳保留**。Manager 是 Spring 式无状态服务：构造只收服务依赖，可构造
    注入；可测性靠传内存袋单测。被拆除的只是 `private s` 一类的 per-session
    实例字段——类不是被删除的函数命名空间。
 
-   **（2026-11-06 Superseded，[0016](0016-tool-manager-instance-table.md)：仅工具域的「无状态」这半
+   **（2026-11-06 Superseded，[0011](0011-tool-manager-instance-table.md)：仅工具域的「无状态」这半
    ——`ToolManager` 的状态就是那张表；「类壳保留、构造注入、可测性靠传内存袋单测」原样有效。）**
 3. **Manager 内部键控缓存**。fill-at-open、按 id / 工作区键控、随时可从磁盘
-   重建、**藏在自己内部、不被传递**——承接 0006 §3 的缓存规则与前作票 16 的
+   重建、**藏在自己内部、不被传递**——承接 0005 §3 的缓存规则与前作票 16 的
    裁决（每请求全文重放被否决）。缓存不离开属主正是它与聚合袋的分界：袋子
    会被传来传去，缓存不会。
-   **（2026-11-04 Superseded，[0011](0011-agent-holds-session-state.md) 决定 5：两个 Manager 的键控缓存
-   整条删除，冷读改为 `open(id)` 每次 fill 一份、用完即弃。）**
+   **（2026-11-04 Superseded：会话域两个 Manager 的键控缓存
+   整条删除，冷读改为每次 fill 一份、用完即弃——live 半的存放见 [0013](0013-table-holds-live-half-only.md)。）**
 4. **活的一半例外**。队列、activeRun、订阅集合不能从磁盘现建，居一个按 id
    键控的**窄**登记处，只装「进行中且磁盘上没有」的东西。登记处的归属与命名
    在 03 号票定（候选 `OpenSession`），本 ADR 留指针；`SessionRuntime` 的既有
    窄定义不动——登记处**装着**它，不替换它。不变量不变：进程重启丢弃全部
    条目，重开即重建。
-   **（2026-11-04 Superseded，[0011](0011-agent-holds-session-state.md) 决定 4：登记处搬进 `Agent` 的
-   `Map<id, AgentState>`，判据重写为「装丢了就没了的那一份」——盘上有文件与 `fileCreated === false`
-   的会话都进表。）**
+   **（2026-11-04 Superseded：登记处搬进 `Agent` 的
+   `Map<id, AgentState>`，判据重写为「装丢了就没了的那一份」；现行为「表只装 live 半」，
+   见 [0013](0013-table-holds-live-half-only.md)。）**
 5. **modelState 消失**。模型选择随消息到达（`ModelSelection`），没带就从账本
    派生 + `fillModel` 现算——不再有驻留内存的 per-session 模型状态。
 6. **进程级不可变配置留作构造注入**。hooks、transport（含 retry 策略）、
    systemPrompt 构建函数不是会话状态，是进程生命周期内不可变的配置，留在
    构造函数上，不参与本 ADR 的拆除。
 
-   **（2026-11-06 Superseded，[0016](0016-tool-manager-instance-table.md)：仅工具域的「不可变」前提
+   **（2026-11-06 Superseded，[0011](0011-tool-manager-instance-table.md)：仅工具域的「不可变」前提
    ——工具表也留在构造注入上，但它可单调增长（`register()` 只增键）；hooks / transport / systemPrompt
    三件本身一字不动。）**
 
-   **（2026-11-07 Superseded，[0017](0017-agent-facade.md)：仅消费面——这组进程级配置仍留在
+   **（2026-11-07 Superseded，[0012](0012-agent-facade.md)：仅消费面——这组进程级配置仍留在
    构造注入上，但由 `createSessionAgent()` 造好三只 Manager 再递进编排层，编排层是它们在本进程的
    唯一消费者；「hub 装配并协调这组服务」的旧叙述不再成立，hub 只认编排层公开面。）**
 
@@ -83,7 +84,7 @@ TypeScript 的 `private` 继续守账本不变式。
 
 换来的：
 
-- 状态边界重新回到签名上：每个方法摸了哪些数据在参数表可见——0006 对有状态
+- 状态边界重新回到签名上：每个方法摸了哪些数据在参数表可见——0005 对有状态
   类的批评一致地延伸到实例属性。
 - 字段生命周期与属主绑定：缓存失效只由属主 Manager 决定，没有第二个写入者。
 - 五个单例全部可构造注入，逻辑可用内存袋单测，不需要先起一个真实会话。
@@ -102,9 +103,9 @@ TypeScript 的 `private` 继续守账本不变式。
 
 ## 被取代的是什么
 
-- 票 08/09/16 的「薄壳门面」裁决（0006 落地序列的组成部分，非 0006 原文）：
+- 票 08/09/16 的「薄壳门面」裁决（0005 落地序列的组成部分，非 0005 原文）：
   `SessionManager` / `SettingsManager` 保留私有状态袋、一行委托的类形态——
-  本 ADR 重开这一条；类壳保留，per-session 实例字段全部拆除。0006 的其余
+  本 ADR 重开这一条；类壳保留，per-session 实例字段全部拆除。0005 的其余
   决定（五单例星形依赖、种子→补齐、fill-at-open 可重建缓存、结束重启审批、
   `tool_result_view`）不变，其中缓存规则被本 ADR 第 3 条承接。
 - `Agent` 仍持有的 `AgentConfig` 混合袋与实例属性（订阅集合、运行槽）：
@@ -115,14 +116,14 @@ TypeScript 的 `private` 继续守账本不变式。
 
 明确不动、读者不该跟着本 ADR 一起重开的：
 
-- [0006](0006-stateless-session-architecture.md) 的其余全部：五单例星形依赖、
+- [0005](0005-stateless-session-architecture.md) 的其余全部：五单例星形依赖、
   状态是纯数据接口、种子→补齐生命周期、账本 fill-at-open 唯一写者、
   `SessionRuntime` 窄定义、结束重启审批。
 - [0001](0001-transport-websocket-mux.md)：REST 命令面 + 常驻 WebSocket mux、
   有界写侧、claim 与订阅分离——本 effort 的适配不碰 wire。
-- [0003](0003-queued-writes-at-drain.md)：排队消息在取走点落盘——队列只是
+- [0002](0002-queued-writes-at-drain.md)：排队消息在取走点落盘——队列只是
   搬进活登记处，语义不变。
-- [0005](0005-modes-are-a-tool-config-choice.md)：模式是工具集与审批集的选择、
+- [0004](0004-modes-are-a-tool-config-choice.md)：模式是工具集与审批集的选择、
   座位按值匹配——`modeName` 仍只是补齐种子。
 - compaction「文件永远保留全文、每步裁剪是一条 entry」；retry 装在模型的
   transport 上；subagent 是一对工具、无注册表无嵌套；密钥只在
