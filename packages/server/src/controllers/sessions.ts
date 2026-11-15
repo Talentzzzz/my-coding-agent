@@ -15,9 +15,9 @@ import {
 	resolvePath,
 	type SessionRef,
 	type SessionSnapshot,
-	type Settings,
+	type GlobalSettings,
 	type SettingsPatch,
-	type SettingsSnapshot,
+	type GlobalSettingsSnapshot,
 	toSessionRef,
 	type ModelConfig,
 	type DirectoryGroup,
@@ -34,7 +34,7 @@ export async function listSessions(agent: Agent, workDirAbsPath: string): Promis
 }
 
 /** 设置面板读取的东西：它可以编辑的值，和它只读展示的值。 */
-function settingsOf(settings: Settings): SettingsSnapshot {
+function settingsOf(settings: GlobalSettings): GlobalSettingsSnapshot {
 	const hidden = settings.hiddenDirectories ?? [];
 	const names: Record<string, string> = {};
 	for (const [dir, name] of Object.entries(settings.directoryNames ?? {})) {
@@ -102,6 +102,11 @@ export class SystemController {
 		return listModelOptions(this.hub.userModels);
 	}
 
+	/** 本构建注册的每个工具名（ADR-0020）：编排层上的窄读，进程活着就不过期。 */
+	toolNames(): string[] {
+		return this.hub.agent.toolNames();
+	}
+
 	/**
 	 * 替换导入的模型。
 	 *
@@ -152,7 +157,7 @@ export class SystemController {
 	 *
 	 * 空名字收回自定义名字，标题重新戴上文件夹自己的名字。
 	 */
-	async renameDirectory(body: Record<string, unknown>): Promise<{ workDirAbsPath: string; name: string; settings: SettingsSnapshot }> {
+	async renameDirectory(body: Record<string, unknown>): Promise<{ workDirAbsPath: string; name: string; settings: GlobalSettingsSnapshot }> {
 		const workDirAbsPath = body.workDirAbsPath;
 		const name = body.name;
 		if (typeof workDirAbsPath !== "string" || workDirAbsPath.trim().length === 0) {
@@ -167,8 +172,8 @@ export class SystemController {
 			throw httpStatus.notFound(`Unknown directory: ${absSource}`);
 		}
 
-		this.hub.agent.applySettings(this.hub.workDirAbsPath, { directoryNames: { [absSource]: name.trim() } });
-		return { workDirAbsPath: absSource, name: name.trim(), settings: settingsOf(this.hub.agent.settings(this.hub.workDirAbsPath)) };
+		this.hub.agent.applySettings({ directoryNames: { [absSource]: name.trim() } });
+		return { workDirAbsPath: absSource, name: name.trim(), settings: settingsOf(this.hub.agent.settings()) };
 	}
 
 	/**
@@ -178,15 +183,15 @@ export class SystemController {
 	 *
 	 * 有两件事是告知而不是返回的，因为它们是第二个窗口没有在问的事实：列表本身随应答一起回去了，而其他每个窗口会以一份新 overview 听到同样的消息——见 {@link SessionListener.onDirectoryListingChanged}。重新加回目录是在其中创建一个新会话，那是 {@link SessionController.create} 那一半。
 	 */
-	hideDirectory(body: Record<string, unknown>): Promise<{ settings: SettingsSnapshot; directories: DirectoryGroup[] }> {
+	hideDirectory(body: Record<string, unknown>): Promise<{ settings: GlobalSettingsSnapshot; directories: DirectoryGroup[] }> {
 		const workDirAbsPath = body.workDirAbsPath;
 		if (typeof workDirAbsPath !== "string" || workDirAbsPath.trim().length === 0) {
 			throw httpStatus.badRequest("`workDirAbsPath` must be a directory path");
 		}
 
-		const hidden = this.hub.agent.hiddenDirectories(this.hub.workDirAbsPath);
+		const hidden = this.hub.agent.hiddenDirectories();
 		if (!hidden.some((path) => samePath(path, workDirAbsPath))) {
-			this.hub.agent.applySettings(this.hub.workDirAbsPath, { hiddenDirectories: [...hidden, resolve(workDirAbsPath)] });
+			this.hub.agent.applySettings({ hiddenDirectories: [...hidden, resolve(workDirAbsPath)] });
 			this.listeners.onDirectoryListingChanged?.();
 		}
 
@@ -195,15 +200,15 @@ export class SystemController {
 	}
 
 	/** 可见的列表，按 hub 的规则过滤后的样子。 */
-	private async listing(): Promise<{ settings: SettingsSnapshot; directories: DirectoryGroup[] }> {
+	private async listing(): Promise<{ settings: GlobalSettingsSnapshot; directories: DirectoryGroup[] }> {
 		return {
-			settings: settingsOf(this.hub.agent.settings(this.hub.workDirAbsPath)),
+			settings: settingsOf(this.hub.agent.settings()),
 			directories: (await this.hub.agent.listDirectories()).filter((group) => this.hub.listsDirectory(group.workDirAbsPath)),
 		};
 	}
 
-	settings(): { settings: SettingsSnapshot } {
-		return { settings: settingsOf(this.hub.agent.settings(this.hub.workDirAbsPath)) };
+	settings(): { settings: GlobalSettingsSnapshot } {
+		return { settings: settingsOf(this.hub.agent.settings()) };
 	}
 
 	/**
@@ -211,7 +216,7 @@ export class SystemController {
 	 *
 	 * 比 {@link SessionController.updateConfig} 更窄，刻意的：这些是窗口自身运行所依赖的默认值，在任何会话存在之前就要读取，所以不能住在会话上。这里的 `approval` 因此是**目录默认值**——从未选择过的会话打开时的基准——不是运行中会话自己的应答，后者作为 config patch 走那个会话。`model` 是*新*会话起步的行；活会话所在的模型是 composer 的，随消息到达服务器而不是走这里。`tools` 是全局默认激活集，整份发送，与会话级端点自己的契约相同——而会话记录的选择仍然压过它，所以这里任何东西都到不了已经选过的会话。`modes` 是预设列表整份发送（ADR-0004）：把它应用到会话上是那个会话自己的两条命令，不是这个 patch。
 	 */
-	updateSettings(body: Record<string, unknown>): { settings: SettingsSnapshot } {
+	updateSettings(body: Record<string, unknown>): { settings: GlobalSettingsSnapshot } {
 		const patch = body.patch ?? body;
 		if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
 			throw httpStatus.badRequest("`patch` must be a JSON object");
@@ -356,8 +361,8 @@ export class SystemController {
 			next.bash = bash;
 		}
 
-		this.hub.agent.applySettings(workDirAbsPath, next);
-		return { settings: settingsOf(this.hub.agent.settings(workDirAbsPath)) };
+		this.hub.agent.applySettings(next);
+		return { settings: settingsOf(this.hub.agent.settings()) };
 	}
 
 	async sessions(): Promise<{ sessions: SessionRef[] }> {
@@ -401,18 +406,46 @@ export class SessionController {
 	}
 
 	/**
-	 * 开始一个会话，并让它成为下一个未指名流的落点。
+	 * 出生证明：让一个会话与它的第一条消息在同一个请求里原子出生（ADR-0021）。
 	 *
-	 * 返回 id 而不是被 hold 的会话，让挂上恰好发生在一个地方：客户端接下来发送的 mux `open` 帧。创建会话会写它的 JSONL header，所以创建后从未打开的会话仍可按 id 找到——也仍可订阅，因为订阅读的是会话记录而不是运行它。
+	 * 返回 id 而不是被 hold 的会话，让挂上恰好发生在一个地方：客户端接下来发送的 mux `open` 帧。id
+	 * 由服务端铸（客户端不指名，避免路径注入与碰撞），两个文件在这一个请求里同时落盘——服务端在第
+	 * 一条消息之前完全无状态，不存在「创建了但没说过话」的中间态。
 	 *
-	 * body 里的 `workDirAbsPath` 决定会话落在哪，列表为那个目录作答：刚把选择器指向新地方的窗口，应当可以相信自己看到的会话就是创建进去的那些。未定义保持服务器自己的 root，这正是无 body 的 `POST` 一直的含义。
+	 * body 里的 `text` 必填：它就是第一条消息，没有它的出生不成其为出生。`workDirAbsPath` 决定会话
+	 * 落在哪，列表为那个目录作答：刚把选择器指向新地方的窗口，应当可以相信自己看到的会话就是创建进
+	 * 去的那些。未定义保持服务器自己的 root。`mode` / `model` / `thinkingLevel` 是随第一条消息出发的
+	 * 选择——模式指针与模型行在出生写入之前落到快照上，未知名字是 409，对齐既有会话上的同类变更；
+	 * `behavior` 随消息携带，出生时不可能有在飞的运行，它只是协议上的随行者。
 	 */
-	async create(body: Record<string, unknown> = {}): Promise<{ sessionId: string; sessions: SessionRef[] }> {
+	async birth(body: Record<string, unknown> = {}): Promise<{ sessionId: string; sessions: SessionRef[] }> {
+		const text = body.text;
+		if (typeof text !== "string" || text.trim().length === 0) {
+			throw httpStatus.badRequest("`text` must be a non-empty string");
+		}
 		const workDirAbsPath = body.workDirAbsPath;
 		if (workDirAbsPath !== undefined && typeof workDirAbsPath !== "string") {
 			throw httpStatus.badRequest("`workDirAbsPath` must be a string");
 		}
-		// 在这里解析，让列表指名的目录与 hub 验证并写入的目录是同一个，无论请求以什么写法到达。检查也在这里跑，因为"坏路径是请求的错"是一个 status 决定，而 status 决定在这里做；hub 重复它，让任何内部调用者都无法绕过检查写入会话。
+		const behavior = body.behavior;
+		if (behavior !== undefined && behavior !== "steer" && behavior !== "followUp") {
+			throw httpStatus.badRequest('`behavior` must be "steer" or "followUp"');
+		}
+		const mode = body.mode;
+		if (mode !== undefined && typeof mode !== "string") {
+			throw httpStatus.badRequest("`mode` must be a string");
+		}
+		const model = body.model;
+		if (model !== undefined && typeof model !== "string") {
+			throw httpStatus.badRequest("`model` must be a string");
+		}
+		const thinkingLevel = body.thinkingLevel;
+		if (thinkingLevel !== undefined && typeof thinkingLevel !== "string") {
+			throw httpStatus.badRequest("`thinkingLevel` must be a string");
+		}
+		// 在这里解析，让列表指名的目录与 hub 验证并写入的目录是同一个，无论请求以什么写法到达。检查
+		// 也在这里跑，因为"坏路径是请求的错"是一个 status 决定，而 status 决定在这里做；hub 重复它，
+		// 让任何内部调用者都无法绕过检查写入会话。
 		const absRoot = typeof workDirAbsPath === "string" && workDirAbsPath.length > 0 ? resolve(workDirAbsPath) : undefined;
 		if (absRoot !== undefined) {
 			try {
@@ -422,7 +455,21 @@ export class SessionController {
 				throw httpStatus.badRequest(messageOf(error));
 			}
 		}
-		const sessionId = await this.hub.newSession(absRoot);
+		let sessionId: string;
+		try {
+			sessionId = await this.hub.birth({
+				text,
+				...(absRoot === undefined ? {} : { workDirAbsPath: absRoot }),
+				...(behavior === undefined ? {} : { behavior }),
+				...(mode === undefined ? {} : { mode }),
+				...(model === undefined ? {} : { model }),
+				...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+			});
+		} catch (error) {
+			// 出生请求自己被会话拒绝——未知模式、未知模型——与既有会话上的同类变更一样是冲突：请求
+			// 被理解了，会话不接受这个值。
+			throw httpStatus.conflict(messageOf(error));
+		}
 		this.restoreDirectory(absRoot ?? this.hub.workDirAbsPath);
 		return { sessionId, sessions: await listSessions(this.hub.agent, absRoot ?? this.hub.workDirAbsPath) };
 	}
@@ -433,10 +480,10 @@ export class SessionController {
 	 * 与 `SystemController.hideDirectory` 成对，是对「删除」这个单向门的回答：会话记录和目录从未被碰过，它还在那里可用——而回到它那里正是用户想要它重新出现在列表上的表示。写入 hub 可见性规则经 facade 读取的 settings 状态，下一次列表与下一帧 overview 因此已经一致。
 	 */
 	private restoreDirectory(workDirAbsPath: string): void {
-		const hidden = this.hub.agent.hiddenDirectories(this.hub.workDirAbsPath);
+		const hidden = this.hub.agent.hiddenDirectories();
 		const kept = hidden.filter((path) => !samePath(path, workDirAbsPath));
 		if (kept.length === hidden.length) return;
-		this.hub.agent.applySettings(this.hub.workDirAbsPath, { hiddenDirectories: kept });
+		this.hub.agent.applySettings({ hiddenDirectories: kept });
 		this.listeners.onDirectoryListingChanged?.();
 	}
 
@@ -548,7 +595,7 @@ export class SessionController {
 				...(model === undefined ? {} : { model }),
 				...(thinkingLevel === undefined ? {} : { thinkingLevel }),
 			};
-			// `prompt()` 在第一个 await 之前持久化消息并把运行标记为 streaming，所以这条应答返回时消息已在盘上、`submitting` 已为真。
+			// `prompt()` 在第一个 await 之前持久化消息并把运行标记为 streaming，所以这条应答返回时消息已在盘上、`running` 已为真。
 			void session
 				.prompt(sessionId, text, { ...(behavior === undefined ? {} : { behavior }), selection })
 				.catch((error: unknown) => {

@@ -337,6 +337,22 @@ body {
 }
 
 /*
+ * 草稿行：还没发过第一条消息的会话。
+ *
+ * 它是窗口自己的意图，不是一段对话 —— 服务端对它一无所知，行里也没有任何运行状态可报 —— 所以
+ * 它戴上列表里最退后的标签色，让真实的对话赢走注意力。转正（第一条消息让会话诞生）时属性被摘下，
+ * 行回到普通的样子。
+ */
+.session-item[data-draft="true"] {
+	color: var(--dsw-label-caption);
+	font-style: italic;
+}
+
+.session-item[data-draft="true"]:hover {
+	color: var(--dsw-label-secondary);
+}
+
+/*
  * 状态席位：行里唯一的放状态的空间，左缘一个 16px 的沟槽。
  *
  * 运行中与等待审批共享同一颗琥珀色圆点 —— 同一事实的两侧 —— 空闲的行留一个空席位，于是一目录

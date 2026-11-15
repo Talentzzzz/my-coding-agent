@@ -35,10 +35,10 @@ import { spillOversizedToolResult } from "./context/spill.ts";
 import { trimmableToolArgEntryIds } from "./context/trim-tool-call-args.ts";
 import { boundToolContent, type HookEvent, type HookResult, type Hooks } from "./hooks.ts";
 import {
+	createModel,
 	type Model,
 	type ModelChoice,
 	type ModelConfig,
-	modelFor,
 	normalizeThinkingLevel,
 	rowFor,
 	type ThinkingLevel,
@@ -48,8 +48,7 @@ import type { ConfigPatch, ModelSelection, PendingApproval, PromptBehavior, Sess
 import type { AgentState } from "./session/agent-state.ts";
 import { createAgentState, createLive } from "./session/agent-state.ts";
 import { danglingApprovalsOf } from "./session/dangling.ts";
-import { messageDeltaOf, type AgentSessionEvent, type SessionEventListener, type SessionListener } from "./session/events.ts";
-import { modelChoiceOf } from "./session/model-choice.ts";
+import { messageDeltaOf, type AgentSessionEvent, type SessionSink } from "./session/events.ts";
 import {
 	createSession,
 	type DirectorySessions,
@@ -60,18 +59,18 @@ import {
 	sessionEntryToContextMessages,
 } from "./session/session-manager.ts";
 import type { PendingMessageQueue } from "./session/queues.ts";
-import { modeSeatOf, toolStateOf } from "./session/tool-config.ts";
 import { sessionSnapshot } from "./session/snapshot.ts";
+import { resolveSettings, type Settings } from "./settings.ts";
 import { UnknownSessionError } from "./session/unknown-session.ts";
 import type { SettingsPatch } from "./setting-manager.ts";
 import type { SettingManager } from "./setting-manager.ts";
-import type { Settings } from "./config.ts";
+import type { GlobalSettings } from "./config.ts";
 import type { ToolManager } from "./tools/index.ts";
 import { type AgentEvent, type AgentRequestUpdate, type RunRecoveryOptions, type ToolCallAnswer, type ToolCallOutcome } from "./types.ts";
 
 // 事件面定义在发布它的 fanout 旁边（`session/events.ts`），在这里转发出去，因为 `index.ts` 一直
 // 都是从本模块为此作答的。
-export type { AgentSessionEvent, MessageDelta, SessionEventListener, SessionListener } from "./session/events.ts";
+export type { AgentSessionEvent, MessageDelta, SessionEventListener, SessionListener, SessionSink } from "./session/events.ts";
 
 /**
  * 一个编排层所协调的服务，由调用方先行构建。
@@ -144,6 +143,15 @@ export interface AgentConfig {
 	 * 默认值，因为 smoke 会递入脚本化的。
 	 */
 	api: ChatTransport;
+	/**
+	 * 本编排层发布的每个事件与快照离开 core 的唯一出口。
+	 *
+	 * 分发曾是每只 {@link AgentState} 上的两张匿名回调表，如今归宿主所有：per-session 的订阅者
+	 * 表住在构造编排层的那个进程半（hub 的 feedMap），core 在 emit 点直调 sink——同步、按序、
+	 * 命令与运行从同一条路流出，no-gap 契约不变。没人递 sink 时工厂给 no-op，语义与空表遍历零次
+	 * 相同：没人听就什么也不发生。
+	 */
+	sink: SessionSink;
 }
 /**
  * 一次运行的起点：打开它的那条消息，或恢复用来关闭悬空调用的答案。
@@ -222,14 +230,17 @@ export class Agent {
 	private readonly systemPrompt: AgentConfig["systemPrompt"];
 	/** 请求真正离开的地方：传输层，重试策略包上它之前的那个。 */
 	private readonly api: ChatTransport;
+	/** 事件与快照离开编排层的地方：构造注入的 sink，fanout 在 emit 点直调它。 */
+	private readonly sink: SessionSink;
 	/**
 	 * 本进程所知各会话的 live 半，按 id 为键（ADR-0013）。
 	 *
-	 * 一个会话一只袋，它只装文件回答不了的东西：订阅者、队列、在飞的运行，以及——在第一条消息给它
-	 * 文件之前——会话记录 本身。持久的那一半**不**在这里：需要 会话记录 的每个操作都现开它
-	 * （一次运行在其开头开一次，一条命令按其长度开一次）然后丢掉，这正是让陈旧的袋不可能存在的原因。
-	 * 状态经 {@link Agent.assembleAgentStateBySession} 进表、经 {@link Agent.evict} /
-	 * {@link Agent.remove} 出表：一个写者、一个删除者，中间没有别的调用者。
+	 * 一个会话一只袋，它只装文件回答不了的东西：队列与在飞的运行。持久的那一半**不**在这里：需要
+	 * 会话记录 的每个操作都现开它（一次运行在其开头开一次，一条命令按其长度开一次）然后丢掉，这正是
+	 * 让陈旧的袋不可能存在的原因。状态经 {@link Agent.assembleAgentStateBySession} 进表——袋唯一
+	 * 的出生地，只属于运行的起点（外界不创建）；经 {@link Agent.tryRemoveAgentStateBySessionId} /
+	 * {@link Agent.deleteSessionBySessionId} 与运行自己的结束路径出表：一个写者、三个删除者，中间
+	 * 没有别的调用者。
 	 */
 	private readonly agentStateMap = new Map<string, AgentState>();
 
@@ -249,6 +260,7 @@ export class Agent {
 		this.hooks = config.hooks;
 		this.systemPrompt = config.systemPrompt;
 		this.api = config.api;
+		this.sink = config.sink;
 		// 这里不构建任何 per-session 的东西：状态由 `open` 在这些服务之上装配，id 在每个方法的开头
 		// 对着下面的表现取。这里也不构建任何运行期对象：一次运行持有的一切都是它自己的局部变量。
 	}
@@ -256,16 +268,28 @@ export class Agent {
 	// ---------------------------------------------------------------------------- 投影与发布
 
 	/**
-	 * 当前生效的审批表：目录的设置，加上这个 session 自己的选择叠在其上。
+	 * global 与 session 两半组合出的有效视图（`resolveSettings`，ADR-0019）。
+	 *
+	 * 输入在这里现取——设置门的一次新读、目录的一次现查、表上现读的工具名——产物是一次调用的值，
+	 * 调用方用完即丢：审批、工具集、座位与模型行都从这一份作答，谁都不许绕开它单独去读设置。
+	 */
+	private resolvedSettings(session: Session): Settings {
+		return resolveSettings(
+			session,
+			this.settingsManager.getSettings(),
+			this.settingsManager.modelCatalog(),
+			this.tools.names(),
+		);
+	}
+
+	/**
+	 * 当前生效的审批表：两半组合出的那份映射。
 	 *
 	 * 闸门、快照、prompt 三者共同的唯一读取点——三者回答同一个问题，所以谁都不许绕开它单独去读设置。
-	 * session 自己的那一半是记录在案的选择，从工具集旁边的 `.json` 快照读出。
+	 * session 自己的增量已经叠在其中（`resolveSettings`）。
 	 */
 	private approvalsOf(session: Session): Record<string, boolean> {
-		return {
-			...this.settingsManager.getApprovals(session.sessionSetting.workDirAbsPath),
-			...toolStateOf(this.sessionManager, session, this.settingsManager, this.tools.names()).approvalOverride,
-		};
+		return this.resolvedSettings(session).approval;
 	}
 
 	/**
@@ -297,20 +321,21 @@ export class Agent {
 	 */
 	private projectionOf(agentState: AgentState, session: Session): SessionSnapshot {
 		const live = agentState.live;
+		// 两半组合出的有效视图，本次投影用完即丢。与冷读、请求构建共用同一个组合（`resolveSettings`），
+		// 所以窗口帧、REST 读取与下一条请求不可能各执一词。
+		const resolved = this.resolvedSettings(session);
 		return sessionSnapshot({
 			sessionManager: this.sessionManager,
 			session,
-			workDirAbsPath: session.sessionSetting.workDirAbsPath,
+			workDirAbsPath: session.settings.workDirAbsPath,
 			// run 自己的模型就是请求发出时用的那个，计量测的是答案真正针对的窗口。空闲的 session 没有
-			// run 可问，所以在这里从袋和设置推导——和所有其他读者用的推导相同（`modelChoiceOf`，
-			// ADR-0013），这也是没有一份会过期的种子副本的原因。
-			model: live.model ?? modelFor(modelChoiceOf(this.sessionManager, session, this.settingsManager, live.openedOn), this.settingsManager.modelCatalog()),
+			// run 可问，所以在这里从组合出的行现建——和所有其他读者用的组合相同（ADR-0013），这也是
+			// 没有一份会过期的种子副本的原因。
+			model: live.model ?? createModel(resolved.model.config, resolved.model.thinkingLevel),
 			// 座位就是快照的字段：记录的指针解析成功时是那个名字，缺席或悬空读作默认（ADR-0018）。
-			// 与冷读共用 `modeSeatOf`，所以窗口帧与 REST 读取不可能互相矛盾。
-			mode: modeSeatOf(this.sessionManager, session, this.settingsManager),
-			allTools: this.tools.names(),
+			mode: resolved.mode,
 			...(live.partial === undefined ? {} : { partial: live.partial }),
-			submitting: live.activeRun !== undefined,
+			running: live.activeRun !== undefined,
 			queued: live.followUpQueue.previews(),
 			isRetrying: live.retrying,
 			retryAttempt: live.retryAttempt,
@@ -318,9 +343,15 @@ export class Agent {
 		});
 	}
 
-	/** 把一个事件 fanout 出去。session 发布事件的唯一地点。 */
+	/**
+	 * 把一个事件 fanout 出去。session 发布事件的唯一地点。
+	 *
+	 * 分发表曾在这只袋上，如今在宿主的 feedMap 里（ADR-0013 的 sink clause）：签名仍是
+	 * `(agentState, event)`——fanout 族读的是这只袋，只是不再从它身上读订阅者，而是把 id 交给
+	 * 构造注入的 sink。emit 点直调，宿主在同一拍上分发，命令与运行的事件仍从同一条路按序流出。
+	 */
 	private emitEvent(agentState: AgentState, event: AgentSessionEvent): void {
-		for (const listener of agentState.eventListeners) listener(event);
+		this.sink.onEvent(agentState.sessionId, event);
 	}
 
 	/**
@@ -350,9 +381,6 @@ export class Agent {
 		const continued = parent !== null && this.sessionManager.getChildren(session, parent).length > 0;
 
 		const entryId = this.sessionManager.appendMessage(session, this.finalizeToolResult(session, message));
-		// 文件从这里开始存在，袋不再是 session 唯一的副本：活的那一半丢掉它，之后的每次读取都是重放
-		// （ADR-0013）。
-		if (session.fileCreated) agentState.live.unwrittenSession = undefined;
 		if (continued) this.emitEvent(agentState, { type: "branch_changed", leafId: entryId });
 		this.emitEvent(agentState, {
 			type: "entry_appended",
@@ -387,10 +415,10 @@ export class Agent {
 		return dropped;
 	}
 
-	/** 告诉所有 listener 现在这个 session 长什么样，从调用方持有的袋读出。 */
+	/** 告诉 sink 现在这个 session 长什么样，从调用方持有的袋读出。 */
 	private publishState(agentState: AgentState, session: Session): void {
 		const snapshot = this.projectionOf(agentState, session);
-		for (const listener of agentState.listeners) listener(snapshot);
+		this.sink.onState(agentState.sessionId, snapshot);
 	}
 
 	/**
@@ -408,7 +436,7 @@ export class Agent {
 	private finalizeToolResult(session: Session, message: Message): Message {
 		if (message.role !== "toolResult") return message;
 		const spilled = spillOversizedToolResult(
-			session.sessionSetting.workDirAbsPath,
+			session.settings.workDirAbsPath,
 			session.sessionId,
 			message.toolName,
 			message.toolCallId,
@@ -425,16 +453,11 @@ export class Agent {
 	 *
 	 * 这就是「不缓存」的全部（ADR-0013）：出生的会话是一次重放，在这里取、调用方用完即丢——本进程
 	 * 持有的东西因此不可能陈旧，而在一个同步块里先读后写的写者，绝不可能写出一个别人已经越过的版本。
-	 * 唯一的例外是文件还不存在的会话：重放造不出它，它的袋在第一条消息落盘之前就是 live 半的字段，
-	 * 而这次转移就发生在这里——已经出生的袋在这里被越过，之后读到的都是重放。
 	 *
 	 * 开一次并为一次运行留住袋的调用方，正是一次运行只花一次重放而不是每操作一次的原因：它们持有的
 	 * 是一个运行局部变量，由运行自己闭包。
 	 */
 	private getSessionBySessionId(sessionId: string): Session {
-		const agentState = this.agentStateMap.get(sessionId);
-		const unwritten = agentState?.live.unwrittenSession;
-		if (unwritten !== undefined && !unwritten.fileCreated) return unwritten;
 		return this.sessionManager.open(sessionId);
 	}
 
@@ -442,9 +465,8 @@ export class Agent {
 	 * 构建一个会话的 live 半并放进表里。唯一的入口，也是唯一装配的门——`assembleSession` 加上那张
 	 * 表：装配与先到先得的插入是一步，下面的读回正是这两者不该拆开的原因。
 	 *
-	 * 会话记录 如今是*入参*而不是产物（ADR-0013）：装配解析会话由设置而来的那一半（队列模式，以及
-	 * 它播种到袋上的模型选择），那只袋留不留取决于一个事实——有没有文件。出生的袋在这里被丢掉，因为
-	 * 重放随时能再造它；未写的袋被留下，因为没有别的什么能。
+	 * 会话记录 是*入参*而不是产物（ADR-0013）：装配解析会话由设置而来的那一半（队列模式），出生的
+	 * 袋在这里被丢掉，因为重放随时能再造它。
 	 *
 	 * 服务按构造即本类自己的，所以「表里的每个状态都是在该编排层的服务之上装配的」是一个事实而不是
 	 * 约定。先到先得：已在表里的状态被保留、绝不替换，因为它要替换的那个装着队列、订阅者与在飞的
@@ -469,58 +491,26 @@ export class Agent {
 	 * 一个会话的空 live 半。
 	 *
 	 * 队列模式按 会话记录 点名的目录定作用域，且经设置门实时读取，所以给一个会话 live 半，来自它
-	 * 自己的一次小装配——要它的那条路自己决定留不留：{@link Agent.ensureState} 把它归档在 id 下，
-	 * 读取则造一个然后扔掉。
+	 * 自己的一次小装配。它从不进表——表里的袋只由运行的装配出生（外界不创建）——只读的命令用它
+	 * 应答投影与分发，用完即弃。
 	 */
 	private liveHalfOf(session: Session): AgentState {
-		const workDirAbsPath = session.sessionSetting.workDirAbsPath;
-		return createAgentState(
-			session.sessionId,
-			createLive(this.settingsManager.getSteeringMode(workDirAbsPath), this.settingsManager.getFollowUpMode(workDirAbsPath)),
-		);
-	}
-
-	/**
-	 * 给一个会话 live 半，如果它没有。
-	 *
-	 * 各动词共享的机件部分：已知的 id 原样不动，冷的 id 得到一个空的 live 半——一次重放，为了得知
-	 * 它的队列模式按哪个目录定作用域，然后连同来时的袋一起扔掉。什么也不指名的 id 在 store 的
-	 * `open` 内拒绝（{@link UnknownSessionError}），传输层把它应答成 404。
-	 */
-	private ensureState(id: string): AgentState {
-		const heldAgentState = this.agentStateMap.get(id);
-		if (heldAgentState !== undefined) return heldAgentState;
-		const agentState = this.liveHalfOf(this.getSessionBySessionId(id));
-		this.agentStateMap.set(id, agentState);
-		return agentState;
+		// 队列模式是 global 侧此刻的答案，经设置门实时读取（ADR-0019）。
+		const global = this.settingsManager.getSettings();
+		return createAgentState(session.sessionId, createLive(global.steeringMode, global.followUpMode));
 	}
 
 	/**
 	 * 把一个会话的 live 半从表里丢掉，当没有东西持有它时。
 	 *
-	 * 驱逐判据（ADR-0013，issue 04）：没有在飞的运行、没有停在审批闸门的调用、没有未写的袋——文件
-	 * 尚未出生的会话没有任何东西可供重建，丢掉它的 live 半等于删掉这个 id，它的生命随第一条消息或
-	 * 进程结束，绝不随清扫结束。拒绝（返回 `false`）是给点名了一个仍被持有的会话的调用方的答案。
+	 * 驱逐判据（ADR-0013，被 ADR-0021 修订为三类）：没有在飞的运行、没有停在审批闸门的调用。拒绝
+	 * （返回 `false`）是给点名了一个仍被持有的会话的调用方的答案。
 	 */
-	evict(id: string): boolean {
+	tryRemoveAgentStateBySessionId(id: string): boolean {
 		const agentState = this.agentStateMap.get(id);
 		if (agentState === undefined) return false;
 		if (agentState.live.activeRun !== undefined || agentState.live.suspended) return false;
-		const unwritten = agentState.live.unwrittenSession;
-		if (unwritten !== undefined && !unwritten.fileCreated) return false;
 		return this.agentStateMap.delete(id);
-	}
-
-	/**
-	 * id 所点名会话的 live 半，或说明本进程从未碰过它的拒绝。
-	 *
-	 * 每个对会话动手的方法都经它解析，会话记录 则另外经 {@link Agent.getSessionBySessionId}——现在两个问题由两次
-	 * 调用回答，因为它们有两条不同的生命周期。
-	 */
-	private agentState(id: string): AgentState {
-		const agentState = this.agentStateMap.get(id);
-		if (agentState === undefined) throw new UnknownSessionError(id);
-		return agentState;
 	}
 
 	// ---------------------------------------------------------------------------- 会话门面
@@ -568,29 +558,61 @@ export class Agent {
 	 * 可留，它的第一次触碰会给自己一个。
 	 */
 	forkFrom(sourceId: string, entryId: string | null): string {
-		const sourceAgentState = this.agentStateMap.get(sourceId);
-		const unwritten = sourceAgentState?.live.unwrittenSession;
-		const absSourcePath =
-			(unwritten !== undefined && !unwritten.fileCreated ? unwritten.sessionFileAbsPath : undefined) ??
-			SessionManager.findSessionFilePathById(sourceId);
+		const absSourcePath = SessionManager.findSessionFilePathById(sourceId);
 		if (absSourcePath === undefined) throw new Error(`Unknown session: ${sourceId}`);
 		return this.sessionManager.forkFrom(absSourcePath, entryId).sessionId;
 	}
 
 	/**
-	 * 在一个目录里启动会话并注册它的 live 半；报回的就是这个 id。
+	 * 让一个会话与它的第一条消息在同一个请求里原子出生，并启动这次运行（ADR-0021）。
 	 *
-	 * 创建不写任何东西：文件随第一条消息出现，所以在这个调用与那条消息之间，袋*就是*会话的存在
-	 * ——唯一一份重放造不出来的 会话记录，也是 live 半有那个字段的原因（ADR-0013）。因此创建只是
-	 * 对设置的一次 `await`——装配自己的读取——而它唯一的失败模式（一个读不了的设置文件）与接下来
-	 * 那次打开会撞上的失败相同，只是更早：id 不会在创建失败时被递出去。
+	 * 服务端在第一条消息之前完全无状态：id、两个文件、模式指针、模型选择都在这一次调用里诞生。顺序
+	 * 是承重的——`createSession` 铸 id → 对**本地袋**直接经 session manager 的 setter 落模式与选择
+	 * → 装配进表 → 追加第一条消息（此刻文件出生，快照序列化带着 mode/selection）→ 引擎开跑。每一步
+	 * 都在使用下一步产出之物，而落盘只发生在 append 这一步：失败发生在它之前时，盘上什么都没有。
 	 *
-	 * 不以参数收模型：会话打开在哪个模型上是一个设置事实，每个请求现读，所以面板里修正的行就是这个
-	 * 会话运行的行。
+	 * append 或写盘抛错时把刚进表的状态删掉再 rethrow——失败的出生不向外递 id，表里也不留一只指向
+	 * 半个会话的袋。运行自身的失败走引擎自己的失败处理（合成错误消息），不在这里。
 	 */
-	async create(workDirAbsPath: string): Promise<string> {
+	async createAndPrompt(
+		workDirAbsPath: string,
+		text: string,
+		options: { behavior?: PromptBehavior; mode?: string; selection?: ModelSelection } = {},
+	): Promise<string> {
+		const trimmed = text.trim();
+		if (trimmed.length === 0) throw new Error("`text` must be a non-empty string");
+
 		const session = createSession(workDirAbsPath);
-		const agentState = await this.assembleAgentStateBySession(this.openOptions(session));
+		// 出生请求里的选择在本类唯一的写法里落到会话记录上：模式指针直接校验落定（未知名字在这里抛出
+		// ——调用方把它应答成 409），模型选择走与 `applyModelSelection` 同一条袋级规则。
+		if (options.mode !== undefined) {
+			const modes = this.settingsManager.getSettings().modes ?? [];
+			if (!modes.some((preset) => preset.name === options.mode)) {
+				throw new Error(`Unknown mode: ${options.mode}`);
+			}
+			this.sessionManager.setMode(session, options.mode);
+		}
+		if (options.selection !== undefined) {
+			const changes = this.writeModelSelection(session, options.selection);
+			// 出生没有既成状态可报告：有变更也只落盘，不发事件帧——此刻还没有任何订阅者。
+			void changes;
+		}
+		const agentState = await this.assembleAgentStateBySession({ session });
+		try {
+			const message: Message = {
+				role: "user",
+				content: [{ type: "text", text: trimmed }],
+				timestamp: this.nextStamp(session),
+			};
+			// 会话的出生写入：这条追加让 `.json` 快照与 `.jsonl` 账本同时落盘，快照带着上面写下的
+			// 选择。袋就是本地这只——此刻它还无法按 id 重放（文件在这一行之前不存在）。
+			this.appendMessageEntry(agentState, session, message);
+			this.publishState(agentState, session);
+			await this.run({ agentState, session, start: { prompt: message } });
+		} catch (error) {
+			this.agentStateMap.delete(session.sessionId);
+			throw error;
+		}
 		return agentState.sessionId;
 	}
 
@@ -598,20 +620,20 @@ export class Agent {
 	 * 对一个会话取一个 hold：这个调用方在用它。
 	 *
 	 * 门面的动词「我现在需要这个会话」。一个变更请求与一次运行各按自己的长度取一个、用
-	 * {@link Agent.release} 还回；订阅不取，因为观看既不改会话也不让轮次活着（ADR-0001）。live 半
-	 * 顺路创建，因为运行和队列需要有个地方待——而表与文件都不指名的 id 在 store 的 `open` 内以
-	 * {@link UnknownSessionError} 拒绝，传输层把它应答成 404。
+	 * {@link Agent.release} 还回；订阅不取，因为观看既不改会话也不让轮次活着（ADR-0001）。hold
+	 * 不创建任何东西——袋只由运行的装配进表（外界不创建），这里只校验 id：表与文件都不指名的 id
+	 * 在 store 的 `open` 内以 {@link UnknownSessionError} 拒绝，传输层把它应答成 404。
 	 *
 	 * 调用方永远不必说的是「有没有东西在内存里」：那是本类的簿记。计数按 id 而不按调用方——同一会话
 	 * 上的两个请求就是两个 hold，最后还回的那个才让收割可以取走 live 半。
 	 */
 	async hold(id: string): Promise<void> {
-		this.ensureState(id);
+		this.getSessionBySessionId(id);
 		this.holds.set(id, (this.holds.get(id) ?? 0) + 1);
 	}
 
 	/**
-	 * 还回一个 hold。状态接下来怎样是判据的决定，不是本方法的：问的是 {@link Agent.evict} 这个
+	 * 还回一个 hold。状态接下来怎样是判据的决定，不是本方法的：问的是 {@link Agent.tryRemoveAgentStateBySessionId} 这个
 	 * 调用者，它在运行在飞或审批停驻时拒绝。
 	 *
 	 * 对没人持有的 id 宽容：release 是调用方撤销自己的 hold，答一句「没有东西可还」会把一次簿记
@@ -635,18 +657,18 @@ export class Agent {
 	 * 删除 id 点名的会话：它在磁盘上的文件（若有），以及本进程为它持有的状态。一个操作，因为
 	 * 「有没有文件？」不是调用方的问题。
 	 *
-	 * 三种情况，在这里裁决而不是交给调用方：磁盘上有文件的会话——移除文件、忘掉状态；创建了但从未
-	 * 说过话的——文件从未写下，忘掉状态就是全部删除；什么也不指名的 id——以 {@link
+	 * 两种情况，在这里裁决而不是交给调用方：磁盘上有文件的会话——移除文件、忘掉状态；什么也不指名
+	 * 的 id——以 {@link
 	 * UnknownSessionError} 拒绝，传输层把它应答成 404。先文件、后状态：一次失败的 unlink 留下的是
 	 * 一张还能为同一 id 作答的表。
 	 *
 	 * 不取 hold、不停运行：传输层在请求之前先把会话安顿好（在那里，删除忙碌的会话是一个 409），
 	 * 宿主、观察者与 hold 都是它的簿记，不是本类的。
 	 *
-	 * 这是表的无条件出口，与 {@link Agent.evict} 的条件出口并列：用户已经删了这个会话，判据一概
+	 * 这是表的无条件出口，与 {@link Agent.tryRemoveAgentStateBySessionId} 的条件出口并列：用户已经删了这个会话，判据一概
 	 * 不适用——状态再没有什么可保护的了。排队与在飞的一切随它而去，正如进程重启会杀掉它们一样。
 	 */
-	async remove(id: string): Promise<void> {
+	async deleteSessionBySessionId(id: string): Promise<void> {
 		const onDisk = SessionManager.findSessionFilePathById(id) !== undefined;
 		if (!onDisk) {
 			if (this.agentStateMap.delete(id)) return;
@@ -659,23 +681,18 @@ export class Agent {
 	/**
 	 * 本会话 会话记录 所在的文件，还没有文件时为 `undefined`。
 	 *
-	 * 创建了但从未说过话的会话没有文件，这里就是回答这一点而不是猜测的地方：未写的袋点名它的出生
-	 * 将要走的路径，出生会话的路径由 store 自己的查找给出。纯数据，不重放；fork 自己找源，从不经过
-	 * 这里。
+	 * 会话随第一条消息出生（ADR-0021），所以盘上没有文件的 id 就是本进程不知道的 id——这里的回答
+	 * 只是 store 自己的查找。纯数据，不重放；fork 自己找源，从不经过这里。
 	 */
 	fileAbsPathOf(id: string): string | undefined {
-		const agentState = this.agentStateMap.get(id);
-		const unwritten = agentState?.live.unwrittenSession;
-		const unbornPath =
-			unwritten !== undefined && !unwritten.fileCreated ? unwritten.sessionFileAbsPath : undefined;
-		return unbornPath ?? SessionManager.findSessionFilePathById(id);
+		return SessionManager.findSessionFilePathById(id);
 	}
 
 	/**
-	 * 会话是否有在飞的运行，以 wire 报告的形状（`submitting`）。
-	 * 本进程不知道不等于在提交：没人运行的会话不可能正在轮次中间。
+	 * 会话是否有在飞的运行——loop 正在跑，以 wire 报告的形状（`running`）。
+	 * 本进程不知道不等于不在跑：没人运行的会话不可能正在轮次中间。
 	 */
-	isSubmitting(id: string): boolean {
+	isRunning(id: string): boolean {
 		return this.agentStateMap.get(id)?.live.activeRun !== undefined;
 	}
 
@@ -688,6 +705,16 @@ export class Agent {
 	 */
 	titleOf(id: string): string {
 		return this.sessionManager.getTitle(this.getSessionBySessionId(id));
+	}
+
+	/**
+	 * 本构建注册的每个工具名，按注册顺序。
+	 *
+	 * 这不是会话状态——它对每个会话都一样、进程活着就不过期——所以不在快照的合同里（ADR-0020）；
+	 * 窗口从 `GET /api/tools` 启动时取一次。窄读，纯数据，与 `titleOf` 同类。
+	 */
+	toolNames(): string[] {
+		return this.tools.names();
 	}
 
 	// ---------------------------------------------------------------------------- 设置门面
@@ -707,18 +734,18 @@ export class Agent {
 	}
 
 	/** 侧边栏搁置的目录，按绝对路径。永远是列表，从不是 `undefined`。 */
-	hiddenDirectories(workDirAbsPath: string): string[] {
-		return this.settingsManager.getHiddenDirectories(workDirAbsPath);
+	hiddenDirectories(): string[] {
+		return this.settingsManager.getSettings().hiddenDirectories ?? [];
 	}
 
-	/** 对一个目录的设置应用部分变更，返回前写回。 */
-	applySettings(workDirAbsPath: string, patch: SettingsPatch): void {
-		this.settingsManager.applySettings(workDirAbsPath, patch);
+	/** 对设置应用部分变更，返回前写回 global 侧唯一的文件。 */
+	applySettings(patch: SettingsPatch): void {
+		this.settingsManager.applySettings(patch);
 	}
 
-	/** 一个目录当前生效的全部设置，合并并补默认后的副本。 */
-	settings(workDirAbsPath: string): Settings {
-		return this.settingsManager.getSettings(workDirAbsPath);
+	/** 当前生效的全部设置，global 侧合并并补默认后的副本。 */
+	settings(): GlobalSettings {
+		return this.settingsManager.getSettings();
 	}
 
 	// ---------------------------------------------------------------------------- 存储扫描
@@ -750,15 +777,6 @@ export class Agent {
 		return SessionManager.findSessionRowById(id, signal);
 	}
 
-	/**
-	 * 本类打开一份 会话记录 时它被装配所依据的 options：只有 会话记录，因为它自带工作目录，打开
-	 * 在哪一行上是装配现读的设置事实。服务按构造即本类自己的——这是装配门所依赖的保证，也是它们
-	 * 不在这里出现的原因。
-	 */
-	private openOptions(session: Session): AssembleAgentStateOptions {
-		return { session };
-	}
-
 	// ---------------------------------------------------------------------------- 读取面
 
 	/**
@@ -768,7 +786,7 @@ export class Agent {
 	 * 一个字段，所以只有一个答案，而不是一个需要跟着它保持同步的逐字段 getter。
 	 *
 	 * 构造者是 `projectionOf`，发布所经的同一个函数，所以一帧与一次 REST
-	 * 读不可能各执一词：只有活跃会话知道的那五个字段——`submitting`、`queued`、`isRetrying`、
+	 * 读不可能各执一词：只有活跃会话知道的那五个字段——`running`、`queued`、`isRetrying`、
 	 * `retryAttempt`、`pendingApprovals`——从 live 半上读，空闲状态则以它持有的空闲值作答。这是
 	 * {@link Agent.snapshotOf} 的同步孪生：它在此刻重放 会话记录，因为它的调用方是同步的帧构建者。
 	 */
@@ -799,20 +817,6 @@ export class Agent {
 		return this.danglingApprovals(this.getSessionBySessionId(id)).length > 0;
 	}
 
-	/** 订阅会话的状态。返回的函数用于退订。 */
-	onChange(id: string, listener: SessionListener): () => void {
-		const listeners = this.agentState(id).listeners;
-		listeners.add(listener);
-		return () => listeners.delete(listener);
-	}
-
-	/** 订阅会话的事件。返回的函数用于退订。 */
-	onEvent(id: string, listener: SessionEventListener): () => void {
-		const listeners = this.agentState(id).eventListeners;
-		listeners.add(listener);
-		return () => listeners.delete(listener);
-	}
-
 	// ---------------------------------------------------------------------------- 运行生命周期
 
 	/**
@@ -835,25 +839,39 @@ export class Agent {
 		// 被拒发的——什么也不挪动。
 		if (options.selection !== undefined) this.applyModelSelection(id, options.selection);
 
-		const agentState = this.agentState(id);
-		if (agentState.live.activeRun !== undefined) {
-			const session = this.getSessionBySessionId(id);
-			const message: Message = {
-				role: "user",
-				content: [{ type: "text", text: trimmed }],
-				timestamp: this.nextStamp(session),
-			};
-			const queue = options.behavior ?? "followUp";
-			if (queue === "steer") agentState.live.steeringQueue.enqueue(message);
-			else {
-				agentState.live.followUpQueue.enqueue(message);
-				this.emitQueueUpdate(agentState);
-			}
-			this.publishState(agentState, session);
+		// 在飞的运行读表即可见——外界不创建，表上没有袋或袋上没有运行，起点就由运行自己装配。
+		const agentState = this.agentStateMap.get(id);
+		if (agentState !== undefined && agentState.live.activeRun !== undefined) {
+			this.enqueuePrompt(agentState, this.getSessionBySessionId(id), trimmed, options.behavior);
 			return;
 		}
 
-		await this.startPromptedRun(agentState, trimmed);
+		await this.startPromptedRun(id, trimmed, options.behavior);
+	}
+
+	/**
+	 * 把一条到不了运行起点的消息排上袋上的队列：`steer` 在当前轮次的下一个取走点注入，`followUp` 等
+	 * agent 本要停下的那一刻。发送契约是 fire-and-forget——排队从未许诺落盘，运行没取走的消息随
+	 * 运行一起丢（fanout 的 `dropQueued`）。
+	 */
+	private enqueuePrompt(
+		agentState: AgentState,
+		session: Session,
+		trimmed: string,
+		behavior: PromptBehavior | undefined,
+	): void {
+		const message: Message = {
+			role: "user",
+			content: [{ type: "text", text: trimmed }],
+			timestamp: this.nextStamp(session),
+		};
+		const queue = behavior ?? "followUp";
+		if (queue === "steer") agentState.live.steeringQueue.enqueue(message);
+		else {
+			agentState.live.followUpQueue.enqueue(message);
+			this.emitQueueUpdate(agentState);
+		}
+		this.publishState(agentState, session);
 	}
 
 	/**
@@ -880,12 +898,33 @@ export class Agent {
 	/**
 	 * 把被提示的消息写进 会话记录，然后在它之上运行。
 	 *
-	 * 这里打开的袋就是运行携带的那只：会话记录 在这里读一次，把 prompt 作为它的第一次写入，交给
-	 * {@link Agent.run}，让运行的任何一轮都不必再读它（ADR-0013）。这就是「一次运行一次重放」的全部
-	 * ——普通 prompt 花的读与 open 曾经花的相同，之后的每一轮都是在运行已拥有的那只袋上走。
+	 * 袋在这里出生：装配是表里袋唯一的出生地，而它只属于运行的起点——会话记录 在这里读一次，把
+	 * prompt 作为它的第一次写入，交给 {@link Agent.run}，让运行的任何一轮都不必再读它（ADR-0013）。
+	 * 这就是「一次运行一次重放」的全部——普通 prompt 花的读与 open 曾经花的相同，之后的每一轮都是
+	 * 在运行已拥有的那只袋上走。
+	 *
+	 * 袋在这里出生，且出生与注册在同一条同步链上：空 live 半的装配是同步的（队列模式从设置门现读），
+	 * 会话记录由 {@link Agent.getSessionBySessionId} 打开，从这里到 runEngine 的注册之间没有
+	 * await——传输层的 202 契约（应答返回时消息已落盘、running 已为真）与宿主的寿命（命令的 hold
+	 * 释放时运行已在飞，收割等它而不是拆它）都由这条同步链保证。完整的一次装配留给出生请求：
+	 * createAndPrompt await 的是整个运行，没有这样的窗口。
 	 */
-	private async startPromptedRun(agentState: AgentState, trimmed: string): Promise<void> {
-		const session = this.getSessionBySessionId(agentState.sessionId);
+	private async startPromptedRun(id: string, trimmed: string, behavior: PromptBehavior | undefined): Promise<void> {
+		const session = this.getSessionBySessionId(id);
+		const held = this.agentStateMap.get(id);
+		const agentState = held ?? this.liveHalfOf(session);
+		if (held === undefined) this.agentStateMap.set(id, agentState);
+		if (agentState.live.activeRun !== undefined) {
+			// 停驻的袋 activeRun 为空，照常起步；只有真的在飞才改走排队。
+			if (agentState.live.suspended) return this.startPromptedRunOn(agentState, session, trimmed);
+			this.enqueuePrompt(agentState, session, trimmed, behavior);
+			return;
+		}
+		return this.startPromptedRunOn(agentState, session, trimmed);
+	}
+
+	/** 被提示的运行的共同尾巴：写消息、发布、把引擎跑起来。 */
+	private async startPromptedRunOn(agentState: AgentState, session: Session, trimmed: string): Promise<void> {
 		const message: Message = {
 			role: "user",
 			content: [{ type: "text", text: trimmed }],
@@ -972,6 +1011,16 @@ export class Agent {
 			// 跳过。运行有的每种结束路径都经过这一个块；可能先到的错误帧由得知 rejection 的调用方
 			// 通告，不是由会话。
 			this.publishState(agentState, session);
+			// 空闲且没有后继的袋随运行一起出表。live 半是可重建的缓存（ADR-0013）：队列已排空、
+			// 运行已安顿、partial 与重试读数在下一个 `run` 开头清零，下一次运行装配一只新的，
+			// 什么都不丢。两类袋留住：停驻在审批闸门的——它的队列与悬空调用等恢复运行来排空；
+			// 已经有后继运行在同一只袋上登记的——finishRun 在引擎自己的 finally 里交出槽位，
+			// 所以这里看到的 activeRun 必是后继的，它的结束路径会带走这只袋。删除不需要身份
+			// 复查：袋只由运行的装配进表（外界不创建），而运行在飞时出表的路（淘汰、删除会话）
+			// 都被拒绝或被传输层挡下——表里这只 id 下只可能是本运行自己的袋。
+			if (!live.suspended && live.activeRun === undefined) {
+				this.agentStateMap.delete(agentState.sessionId);
+			}
 		}
 	}
 
@@ -1010,20 +1059,20 @@ export class Agent {
 		live.activeRun = { promise, resolve: settle, abortController };
 		const signal = abortController.signal;
 
-		// 运行所在的那一行。以现状的选择播种；`prepareRequest` 用每个请求真正发送的那一行作答，所以
+		// 运行所在的那一行。以现状的组合播种；`prepareRequest` 用每个请求真正发送的那一行作答，所以
 		// 即使运行死在第一个请求之前，合成的失败仍点着一个真实的模型。live 半上的槽位，是栈外快照读取
 		// 它的方式，而不是回头去目录。
-		const choice = this.modelChoice(session, live.openedOn);
-		let model: Model = modelFor(choice, this.modelCatalog(), transport);
+		const resolved = this.resolvedSettings(session);
+		let model: Model = createModel(resolved.model.config, resolved.model.thinkingLevel, transport);
 		live.model = model;
 		const emit: AgentEventSink = (event) => this.dispatchEvent(agentState, session, event);
 
 		try {
 			const newMessages: Message[] = [];
-			// 这次运行的工具面——活跃名单与同一派生的声明数组，一次回调、一次派生（ADR-0016）。声明
+			// 这次运行的工具面——活跃名单与同一组合的声明数组，一次回调、一次派生（ADR-0016）。声明
 			// 数组是整条链解析调用所依据的栈局部：解析只对着本请求声明过的工具（「模型被告知什么与它
-			// 可以运行什么」从同一个对象作答），按请求重新派生的数组在下面的请求边界换入。
-			let declared: readonly Tool<any>[] = this.activeTools(session).declared;
+			// 可以运行什么」从同一个对象作答），按请求重新组合的数组在下面的请求边界换入。
+			let declared: readonly Tool<any>[] = this.activeToolsOf(resolved).declared;
 			// 一次运行的工具链：两个闸门、解析与执行，全部以箭头递进——批处理机件是文件级的、不
 			// 持有会话，所以运行把自己需要的接缝递给它们。声明数组随每次请求的答案在下面换入。
 			let chain: ToolChain = {
@@ -1227,14 +1276,9 @@ export class Agent {
 		return this.sessionManager.buildContextEntries(session);
 	}
 
-	/** 这个会话现在在哪个模型上（`chosen` = 运行局部的 `live.openedOn`）；四参数派生（ADR-0013）。 */
-	private modelChoice(session: Session, chosen?: ModelChoice): ModelChoice {
-		return modelChoiceOf(this.sessionManager, session, this.settingsManager, chosen);
-	}
-
-	/** 本次请求活跃的工具名单与同一派生查表所得的声明数组，一次派生（ADR-0011）。 */
-	private activeTools(session: Session): ActiveTools {
-		const names = toolStateOf(this.sessionManager, session, this.settingsManager, this.tools.names()).activeToolNames;
+	/** 本次请求活跃的工具名单与同一份组合查表所得的声明数组，一次派生（ADR-0011）。 */
+	private activeToolsOf(resolved: Settings): ActiveTools {
+		const names = resolved.tools;
 		// 声明数组与名单是同一次派生的两半：按名字到唯一的表上取，元素是表自己的实例
 		// （ADR-0011）。表只增，所以同一名字在两次请求间解析到同一实例。
 		const declared: Tool<any>[] = [];
@@ -1319,16 +1363,18 @@ export class Agent {
 		agentState: AgentState,
 		session: Session,
 	): Promise<AgentRequestUpdate> {
-		// 本次请求所用的模型，在任何东西读它之前从实时行构建，因为下面的压缩决策是按它的上下文窗口
+		// 本次请求所用的两半组合，在任何东西读它之前现算，因为下面的压缩决策是按模型的上下文窗口
 		// 计量的，而从片刻之前的窗口取的阈值会压缩错 会话记录。这正是「一次编辑无需重开任何东西即
 		// 生效」的全部：端点、wire id、窗口、密钥在这里、从目录读，从不在会话装配时捕获。消失的行
 		// ——被删的，或在正被使用时改名的——让选择保持原样，替它作答的是 `unconfiguredStream`。
-		const catalog = this.modelCatalog();
-		const choice = this.modelChoice(session, agentState.live.openedOn);
-		const model = modelFor(choice, catalog, transport);
-		// 本次请求所用的选择在这里、在由它构建请求的时刻抵达 会话记录——从未说过话的会话由它服务的
-		// 第一个请求记录。它跑在下面的压缩决策之前，后者按本模型的窗口计量 prompt。
-		this.recordSelection(session, catalog, choice);
+		const resolved = this.resolvedSettings(session);
+		const model = createModel(resolved.model.config, resolved.model.thinkingLevel, transport);
+		// 本次请求所用的选择在这里、在由它构建请求的时刻抵达 会话记录——出生即第一条消息的会话由
+		// 这次请求记录。它跑在下面的压缩决策之前，后者按本模型的窗口计量 prompt。
+		this.recordSelection(session, this.modelCatalog(), {
+			name: resolved.model.config.name,
+			...(resolved.model.thinkingLevel === undefined ? {} : { thinkingLevel: resolved.model.thinkingLevel }),
+		});
 		// 一趟决定请求携带什么、以及是否必须摘要：触发器、过期工具结果的清理、摘要读的都是同一批
 		// entry，所以决策与请求不可能对 prompt 有多大各执一词。
 		const entries = await this.compactFor(
@@ -1339,19 +1385,18 @@ export class Agent {
 			signal,
 			model,
 		);
-		// prompt 在这里重建、不被记住：`applyConfig` 能挪审批集、`setActiveTools` 能挪工具集，而模型
-		// 必须在下一个请求上被告知两者。两者都在此刻从账本派生，所以刚落下的选择就是 prompt 描述的
-		// 东西。
-		const toolFace = this.activeTools(session);
+		// prompt 在这里重建、不被记住：`applyConfig` 能挪审批集、模式能挪工具集，而模型必须在下一个
+		// 请求上被告知两者。两者都在此刻从同一份组合读取，所以刚落下的选择就是 prompt 描述的东西。
+		const toolFace = this.activeToolsOf(resolved);
 		// 项目指示在这里、按请求读取，而不是从状态上取：磁盘文件的一次编辑应当抵达下一个请求，与
 		// 模型行的一次编辑相同，而这段走读只是几次 stat。它的代价是一段 prompt 可能在同一次运行的
 		// 两个请求之间变化——工具集出于同样的理由已经如此。
-		const agentsMd = await loadAgentsMd(session.sessionSetting.workDirAbsPath);
+		const agentsMd = await loadAgentsMd(session.settings.workDirAbsPath);
 		const prompt = this.systemPrompt(
-			session.sessionSetting.workDirAbsPath,
+			session.settings.workDirAbsPath,
 			agentsMd,
 			toolFace.names,
-			this.approvalsOf(session),
+			resolved.approval,
 		);
 		// 请求携带的工具结果按重放侧读取（`contextEntries` 已应用账本自己的视图记录），所以没有
 		// 按请求对它们的另一次遍历：账本里的工具结果已经是喂给模型的那个版本。
@@ -1384,11 +1429,10 @@ export class Agent {
 	 * 运行久。
 	 */
 	private runContext(session: Session): ToolRunContext {
-		const workDirAbsPath = session.sessionSetting.workDirAbsPath;
 		return {
-			workDirAbsPath,
+			workDirAbsPath: session.settings.workDirAbsPath,
 			// 实时读取，与其他每次设置读取一样：用户挪过的超时抵达下一次运行的调用，无需重开任何东西。
-			bash: this.settingsManager.getBashSettings(workDirAbsPath),
+			bash: this.settingsManager.getSettings().bash,
 		};
 	}
 
@@ -1445,7 +1489,7 @@ export class Agent {
 		// 整个泵读一次：重试循环执行的策略与 `retry_start` 事件报告的 `maxAttempts` 是同一个答案，在
 		// 调用点取而不是存起来——退避中途的设置编辑随下一个请求落地，而不是这一次。计数方式与
 		// `retryAssistantCall` 自己的一致：数重试，不数调用。
-		const retrySettings = this.settingsManager.getRetrySettings(session.sessionSetting.workDirAbsPath);
+		const retrySettings = this.settingsManager.getSettings().retry;
 		const maxAttempts = retrySettings.enabled ? retrySettings.maxRetries : 0;
 		let final: AssistantMessage;
 		try {
@@ -1686,7 +1730,8 @@ export class Agent {
 		signal?: AbortSignal,
 		transport?: ChatTransport,
 	): Promise<readonly SessionEntry[]> {
-		const model = modelFor(this.modelChoice(session, agentState.live.openedOn), this.modelCatalog(), transport);
+		const resolved = this.resolvedSettings(session);
+		const model = createModel(resolved.model.config, resolved.model.thinkingLevel, transport);
 		return this.compactFor(agentState, session, entries, now, signal, model);
 	}
 
@@ -1719,7 +1764,11 @@ export class Agent {
 	 * 所以它返回一条 aborted 消息而不是睡到底。这里不必知道运行是活的还是在退避中。
 	 */
 	async abort(id: string): Promise<void> {
-		const agentState = this.agentState(id);
+		// 表不持有的 id 无运行可停——跑完即散的袋正是这样离开的——立即返回。悬空调用不可能被
+		// 落下：停驻的袋自己留住（不清），非停驻的结束路径为被砍的调用合成结果，账本里没有
+		// 无人认领的悬空。
+		const agentState = this.agentStateMap.get(id);
+		if (agentState === undefined) return;
 		// 只读一次：运行在安顿时自己清掉自己的注册，而这个 promise 正是等待那次安顿的东西。
 		const active = agentState.live.activeRun;
 		active?.abortController.abort();
@@ -1751,10 +1800,13 @@ export class Agent {
 	 * 在回答的分支。
 	 */
 	branchTo(id: string, entryId: string, descend = true): string {
-		const agentState = this.agentState(id);
-		if (agentState.live.activeRun !== undefined) throw new Error("A run is in flight: the branch cannot move under it");
+		if (this.agentStateMap.get(id)?.live.activeRun !== undefined) {
+			throw new Error("A run is in flight: the branch cannot move under it");
+		}
 
 		const session = this.getSessionBySessionId(id);
+		// 分发只需要 id，投影读活的那一半——在飞已被上面拒绝，表内袋与表外弃置袋在此同形。
+		const agentState = this.agentStateMap.get(id) ?? this.liveHalfOf(session);
 		const leafId = descend ? this.sessionManager.getBranchTip(session, entryId) : entryId;
 		this.sessionManager.branch(session, leafId);
 		// 挪动不搭任何配置报告：模型、档位与工具选择如今是会话自己的值（`.json` 快照），挪 leaf 不改
@@ -1776,17 +1828,35 @@ export class Agent {
 	 * 档位；"off" 是例外，总是接受，因为它表示「这个模型最安静的样子」。
 	 */
 	applyModelSelection(id: string, selection: ModelSelection): void {
-		const agentState = this.agentState(id);
 		// 什么都没点名就没有事可做，这正是调用方发普通消息的方式。
 		if (selection.model === undefined && selection.thinkingLevel === undefined) return;
 
 		const session = this.getSessionBySessionId(id);
-		const setting = session.sessionSetting;
-		// 现行的选择，不只是记录的那个：没人选过模型的会话也有一条——设置的默认，派生方式与每次读取
-		// 完全一样（ADR-0013）——而只点名档位的手势必须连带指名那一行才记录得下来。
-		const inForce = modelChoiceOf(this.sessionManager, session, this.settingsManager, agentState.live.openedOn);
-		const previousName = setting.model?.name ?? inForce.name;
-		const previousLevel = normalizeThinkingLevel(setting.model?.thinkingLevel ?? inForce.thinkingLevel);
+		const agentState = this.agentStateMap.get(id) ?? this.liveHalfOf(session);
+		const changes = this.writeModelSelection(session, selection);
+		this.publishState(agentState, session);
+		this.emitConfigChanged(agentState, changes);
+	}
+
+	/**
+	 * 把一条模型选择落到一只会话袋上：对比现行值，需要时改写袋并整体重写快照。
+	 *
+	 * {@link Agent.applyModelSelection} 与 {@link Agent.createAndPrompt} 共用的核心——两处以同一套
+	 * 规则记录选择，规则不复制。这里的写入只有袋与文件：快照从袋上整体重写（`flushMeta`），事件帧
+	 * 与状态发布留给调用方——出生时的选择没有可报告的听众。
+	 *
+	 * 现行的选择不只是记录的那个：没人选过模型的会话也有一条——设置的默认，组合方式与每次读取完全
+	 * 一样（ADR-0013）——而只点名档位的手势必须连带指名那一行才记录得下来。所选模型没有容身的档位
+	 * 被拒绝而不是被钳制，因为调用方是输入框、它提供的就是它要挪去的那行的档位；"off" 是例外，总是
+	 * 接受，因为它表示「这个模型最安静的样子」。
+	 *
+	 * 返回只带变动字段的变更集：换名的行、挪动的档位，一个都没动时是空表——调用方据此保持沉默。
+	 */
+	private writeModelSelection(session: Session, selection: ModelSelection): { model?: string; thinkingLevel?: string } {
+		const setting = session.settings;
+		const inForce = this.resolvedSettings(session);
+		const previousName = setting.model?.name ?? inForce.model.config.name;
+		const previousLevel = normalizeThinkingLevel(setting.model?.thinkingLevel ?? inForce.model.thinkingLevel);
 
 		const name = selection.model ?? previousName;
 		const userModel = this.settingsManager.modelCatalog().find((userModel) => userModel.name === name);
@@ -1808,13 +1878,12 @@ export class Agent {
 		// 文件此后必须持有的东西。
 		this.sessionManager.flushMeta(session);
 
-		this.publishState(agentState, session);
-		this.emitConfigChanged(agentState, {
+		return {
 			...(setting.model.name === previousName ? {} : { model: userModel.name }),
 			...(normalizeThinkingLevel(setting.model.thinkingLevel) === previousLevel
 				? {}
 				: { thinkingLevel: setting.model.thinkingLevel }),
-		});
+		};
 	}
 
 	/**
@@ -1830,16 +1899,15 @@ export class Agent {
 	 * 所以这里没有可应用的：没有请求跟上的配置变更就不是配置变更。
 	 */
 	applyConfig(id: string, patch: ConfigPatch): void {
-		const agentState = this.agentState(id);
 		const session = this.getSessionBySessionId(id);
-		const workDirAbsPath = session.sessionSetting.workDirAbsPath;
-		const seatBefore = modeSeatOf(this.sessionManager, session, this.settingsManager);
+		const held = this.agentStateMap.get(id);
+		const seatBefore = this.resolvedSettings(session).mode;
 		if (patch.mode !== undefined) {
 			// `null` 是「回到默认」的手势：指针缺席就是默认模式的落盘形态。字符串必须是一个存在的
 			// 预设——指向没人定义过的模式的补丁被说出来，而不是按全局默认悄悄跑。
 			const mode = patch.mode === null ? undefined : patch.mode;
 			if (mode !== undefined) {
-				const modes = this.settingsManager.getSettings(workDirAbsPath).modes ?? [];
+				const modes = this.settingsManager.getSettings().modes ?? [];
 				if (!modes.some((preset) => preset.name === mode)) {
 					throw new Error(`Unknown mode: ${mode}`);
 				}
@@ -1852,19 +1920,25 @@ export class Agent {
 			const recorded = this.sessionManager.getRecordedToolConfig(session);
 			this.sessionManager.setApprovalOverride(session, { ...(recorded.approval ?? {}), ...patch.approval });
 		}
-		// 补丁的其余部分经 manager 交给设置，写入归它所有：变更落在文件上，之后的每次读取——本会话
-		// 的与该目录上任何其他会话的——都从它们作答。模式指针与审批增量是会话自己的，不带过去。
-		this.settingsManager.applySettings(workDirAbsPath, {
+		// 补丁的其余部分经 manager 交给设置，写入归它所有：变更落在 global 侧唯一的文件上，之后的每次
+		// 读取——本会话的与任何其他会话的——都从它们作答。模式指针与审批增量是会话自己的，不带过去。
+		this.settingsManager.applySettings({
 			...(patch.steeringMode === undefined ? {} : { steeringMode: patch.steeringMode }),
 			...(patch.followUpMode === undefined ? {} : { followUpMode: patch.followUpMode }),
 		});
-		agentState.live.steeringQueue.mode = this.settingsManager.getSteeringMode(workDirAbsPath);
-		agentState.live.followUpQueue.mode = this.settingsManager.getFollowUpMode(workDirAbsPath);
+		const global = this.settingsManager.getSettings();
+		// 队列在袋上活着：有袋才就地换模式；表上没有袋的会话什么都不用挪——下一次运行装配时，
+		// 队列带着此刻的模式出生。
+		if (held !== undefined) {
+			held.live.steeringQueue.mode = global.steeringMode;
+			held.live.followUpQueue.mode = global.followUpMode;
+		}
 		const after = this.getSessionBySessionId(id);
+		const agentState = held ?? this.liveHalfOf(after);
 		this.publishState(agentState, after);
 		// 座位没动就不报告——重发现行值的补丁不得声称任何东西变了。`null` 显式携带「回到默认」，
 		// 因为 JSON 丢掉 undefined。
-		const seatAfter = modeSeatOf(this.sessionManager, after, this.settingsManager);
+		const seatAfter = this.resolvedSettings(after).mode;
 		this.emitConfigChanged(agentState, {
 			...(patch.mode === undefined || seatAfter === seatBefore ? {} : { mode: seatAfter ?? null }),
 		});
@@ -1908,11 +1982,13 @@ export class Agent {
 	 * 孤儿关闭——这正是崩溃留下多个调用时，恢复后的请求仍对供应商合法的原因。
 	 */
 	async respondApproval(id: string, toolCallId: string, approved: boolean): Promise<void> {
-		const agentState = this.agentState(id);
+		const session = this.getSessionBySessionId(id);
+		// 停驻的袋通常已在表上；进程重启之后它不在——恢复运行在这里装配自己的袋（外界不创建）。
+		// 装配让出的窗口里若已有运行在飞，本答案保持沉默，与下面的在飞分支同一个答案。
+		const agentState = await this.assembleAgentStateBySession({ session });
 		if (agentState.live.activeRun !== undefined) return;
 		// 一次重放服务整个调用：答案在它里面查——而答案是 grant 时，它记录的选择也经同一只袋写下，
 		// 赶在关闭该调用的那一次运行在这只袋上开始之前。
-		const session = this.getSessionBySessionId(id);
 		const call = this.danglingApprovals(session).find((candidate) => candidate.toolCallId === toolCallId);
 		if (call === undefined) return;
 		const answer: ToolCallAnswer = approved
@@ -1943,7 +2019,10 @@ export class Agent {
 	 * `settle` 上永远等不完的原因。
 	 */
 	denyAllApprovals(id: string, reason: string): void {
-		const agentState = this.agentState(id);
+		// 表不持有的 id 无袋可写——abort 等待运行安顿的窗口里，跑完的袋可能已经出表——而那种
+		// 结束路径为被砍的调用合成过结果，没有悬空可 deny。立即返回。
+		const agentState = this.agentStateMap.get(id);
+		if (agentState === undefined) return;
 		if (agentState.live.activeRun !== undefined) return;
 		const session = this.getSessionBySessionId(id);
 		const dangling = this.danglingApprovals(session);
@@ -2008,19 +2087,31 @@ export class Agent {
 	 * 让 agent 在整个退避期间都非空闲，条件放在这里，正是为了那件事万一变化时这一点仍然成立。
 	 */
 	async settle(id: string): Promise<void> {
-		const agentState = this.agentState(id);
+		// 表不持有的 id 无运行可等——跑完即散的袋正是这样离开的——立即返回，与 {@link Agent.close}
+		// 对空无的读法相同。
+		const agentState = this.agentStateMap.get(id);
+		if (agentState === undefined) return;
 		// 经闭包读取：运行槽位在下面的 await 之间被重新赋值，在它们之前取的窄化会让检查器断定
 		// 这个槽位在此处永远为空。
 		const stillBusy = (): boolean =>
 			(agentState.live.followUpQueue.size > 0 && this.danglingApprovals(this.getSessionBySessionId(id)).length === 0) ||
 			agentState.live.retrying === true;
 		for (;;) {
-			await (agentState.live.activeRun?.promise ?? Promise.resolve());
-			// 运行在空闲 promise resolve 之后一个微任务才丢掉自己的槽位；也要等那个，让安顿的调用方
-			// 看到的是空闲的会话——以及运行结束时悬空的调用——而不是一个还在写完尾巴的。与 `abort`
-			// 的有界等待相同。
-			while (agentState.live.activeRun !== undefined) await Promise.resolve();
+			// 每一轮先读一次槽位：有运行就等它自己的 promise——被动的、不占任何循环的等待。运行
+			// 需要宏任务推进它的 I/O，任何微任务自旋都会饿死它，所以这里绝不做 `while` 自旋：
+			// 落定与清槽在 finishRun 里是同一拍（resolve 之后同步置空），await 的延续看见的必是
+			// 清空之后的表。
+			const run = agentState.live.activeRun;
+			if (run !== undefined) {
+				await run.promise;
+				await Promise.resolve();
+				continue;
+			}
 			if (!stillBusy()) return;
+			// 无运行但队列/重试仍忙：等下一个运行来取。让出一个宏任务轮而不是微任务——恢复
+			// 运行在装配（盘上的 I/O）与注册之间存在真实的窗口，微任务自旋会把那条路饿死：
+			// 自旋者与被等者互相等死，谁都不再前进。
+			await new Promise((resolve) => setImmediate(resolve));
 		}
 	}
 
@@ -2057,7 +2148,9 @@ export class Agent {
 		signal?: AbortSignal,
 		transport?: ChatTransport,
 	): Promise<readonly SessionEntry[]> {
-		return this.compact(this.agentState(id), this.getSessionBySessionId(id), entries, now, signal, transport);
+		const session = this.getSessionBySessionId(id);
+		// 压缩只经袋分发事件（id）——表内袋与表外弃置袋在此同形，外界不创建。
+		return this.compact(this.agentStateMap.get(id) ?? this.liveHalfOf(session), session, entries, now, signal, transport);
 	}
 
 	// ---------------------------------------------------------------------------- 配置报告

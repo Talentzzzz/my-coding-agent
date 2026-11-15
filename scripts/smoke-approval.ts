@@ -87,7 +87,7 @@ function muxUrl(base: string): string {
 interface ReadSession {
 	messages: unknown[];
 	pendingApprovals: PendingApproval[];
-	submitting: boolean;
+	running: boolean;
 }
 
 async function readSession(base: string, sessionId: string): Promise<ReadSession | undefined> {
@@ -139,7 +139,7 @@ process.stdout.write(`model ${modelName} via the scripted transport\n`);
 async function seedApprovalGate(root: string, modelRows: readonly ModelConfig[]): Promise<string> {
 	const home = await mkdtemp(join(tmpdir(), "my-agent-approval-home-"));
 	const seeder = new SettingManager({ home, modelsHome: home });
-	seeder.applySettings(root, { approval: { read: true } });
+	seeder.applySettings({ approval: { read: true } });
 	seeder.replaceModels(modelRows);
 	return home;
 }
@@ -174,7 +174,6 @@ const hub = new SessionHub({
 // Mounted the way `SessionHub.open()` mounts one, so every request below holds through the real hub.
 const { id: sessionId } = await mountSession(hub, {
 	root,
-	model: modelName,
 });
 const agent = hub.agent;
 
@@ -188,7 +187,7 @@ try {
 
 	const baseline = await wire.open(sessionId);
 	check("the lane opened on the session's baseline", baseline.id === sessionId, `baseline=${baseline.id}`);
-	check("and the session starts idle", baseline.submitting === false, String(baseline.submitting));
+	check("and the session starts idle", baseline.running === false, String(baseline.running));
 
 	check("the prompt was accepted", (await prompt(roundTrip.url, sessionId, "read the notes")) === 202);
 
@@ -254,7 +253,7 @@ try {
 	// The run continues, so the answer really did reach the waiting tool call.
 	check(
 		"the run finished after the answer",
-		(await wire.waitFor(sessionId, (message) => message.type === "status" && message.submitting === false, 10_000)) !== undefined,
+		(await wire.waitFor(sessionId, (message) => message.type === "status" && message.running === false, 10_000)) !== undefined,
 		JSON.stringify(wire.items(sessionId).map((message) => message.type)),
 	);
 	const sessionView = await readSession(roundTrip.url, sessionId);
@@ -381,7 +380,7 @@ try {
 		"two sessions on one hub are both watchable",
 		firstBaseline.id === first.id && secondBaseline.id === second.id,
 	);
-	check("and both started idle", !firstBaseline.submitting && !secondBaseline.submitting);
+	check("and both started idle", !firstBaseline.running && !secondBaseline.running);
 
 	for (const parked of cross.sessions) {
 		const accepted = await prompt(cross.url, parked.id, "read the notes");
@@ -442,7 +441,7 @@ try {
 // The phase this covers: a hold answers "is anyone running or changing this", which is not the
 // question "will anyone answer". There is no grace and no abandonment denial (issue 04 §4): the
 // reap closes the host once the last hold lets go, the orchestrator's state stays — a run parked
-// at the gate refuses eviction, and with it the queues a recovery run must drain — so the question
+// at the gate refuses removal, and with it the queues a recovery run must drain — so the question
 // survives as the ledger's, to be answered on a later hold or carried to the next process. The
 // sidebar row is part of that survival: the projection settles it from the ledger when the host
 // goes, so the dot stays lit while the question stands. The snapshot's `suspended` marker is the
@@ -468,7 +467,7 @@ try {
 
 		// The viewer switches away, and its hold is the *only* thing keeping the session open — a
 		// subscription takes none. So this release is what starts the reap, and it does not wait for
-		// an answer: the host closes, the parked state refuses eviction, and the question stays.
+		// an answer: the host closes, the parked state refuses removal, and the question stays.
 		wire.cancel(patient.sessionId);
 		patient.hub.release(viewer);
 		check(
@@ -532,7 +531,7 @@ try {
 		);
 		check(
 			"and the recovery run it started finished",
-			await until(async () => ((await readSession(patient.url, parked.id))?.submitting ?? true) === false, 8_000),
+			await until(async () => ((await readSession(patient.url, parked.id))?.running ?? true) === false, 8_000),
 		);
 		const recoveredMeta = await readMeta(parked.id);
 		check(
@@ -723,16 +722,14 @@ setSessionsDir(join(restartHome, "sessions"));
 const restartSeeder = new SettingManager({ home: restartHome, modelsHome: restartHome });
 restartSeeder.replaceModels(rows);
 const restartFake = createFakeTransport();
-restartFake.setResponses([
-	fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
-	fakeAssistantMessage("done"),
-]);
 const first = await bootServer({ workDirAbsPath: restartRoot, port: 0, api: restartFake.api, settingsHome: restartHome });
 let restartSessionId = "";
 try {
 	// Startup selects nothing now, so the session this half drives is the one an explicit creation
 	// returned — the landing answer is the pin's business, not this smoke's.
-	const created = await request(first.url, "POST", "/api/sessions", undefined);
+	// Birth 即第一条消息（ADR-0021），这次 birth run 自己落定（剧本队列为空 → 一条瞬时错误消息，
+	// 不耗剧本）；工具调用的剧本因此在 birth 之后、prompt 之前才上队。
+	const created = await request(first.url, "POST", "/api/sessions", { text: "the restart conversation" });
 	restartSessionId = ((created.payload ?? {}) as { sessionId?: string }).sessionId ?? "";
 	check("the restart session was created", created.status === 201 && restartSessionId.length > 0, String(created.status));
 
@@ -740,6 +737,10 @@ try {
 		approval: { read: true },
 	});
 	check("the read tool was put behind the gate", turned.status === 200, String(turned.status));
+	restartFake.setResponses([
+		fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
+		fakeAssistantMessage("done"),
+	]);
 	check("the prompt was accepted", (await prompt(first.url, restartSessionId, "read the notes")) === 202);
 	const parked = await waitParked(first.url, restartSessionId);
 	check("the run parked at the approval", (parked?.pendingApprovals.length ?? 0) === 1, JSON.stringify(parked?.pendingApprovals));
@@ -909,7 +910,6 @@ async function openRig(): Promise<Rig> {
 	const graph = await serve(hub);
 	const { id: sessionId, host, session } = await mountSession(hub, {
 		root,
-		model: modelName,
 	});
 
 	return {
@@ -976,8 +976,7 @@ async function openCrossRig(): Promise<CrossRig> {
 	for (let index = 0; index < 2; index += 1) {
 		const { id } = await mountSession(hub, {
 			root,
-			model: modelName,
-		});
+			});
 		sessions.push({ id, agent: hub.agent });
 	}
 

@@ -6,7 +6,7 @@
 // 运行：node scripts/smoke-model-form.ts
 import { SettingsPanel, type SettingsHandlers } from "../packages/web/src/render/settings.ts";
 import { installDom, type FakeNode } from "./dom-shim.ts";
-import type { SettingsSnapshot } from "@my-agent/core/protocol";
+import type { GlobalSettingsSnapshot } from "@my-agent/core/protocol";
 
 let failures = 0;
 
@@ -25,7 +25,7 @@ function all(root: FakeNode, className: string): FakeNode[] {
 	return found;
 }
 
-function settingsOf(): SettingsSnapshot {
+function settingsOf(): GlobalSettingsSnapshot {
 	return {
 		appearance: { theme: "dark", fontSize: 15 },
 		approval: { read: false, write: true, edit: true, glob: false, grep: false, bash: true },
@@ -62,7 +62,7 @@ process.stdout.write("\nmodel-form：新建表单的六个标签逐字一致\n")
 {
 	installDom();
 	const panel = new SettingsPanel(handlers());
-	panel.render({ settings: settingsOf(), models: [] });
+	panel.render({ settings: settingsOf(), models: [], toolNames: [] });
 	panel.show("models");
 
 	// 添加表单就是展开的那一行本身：按钮把它原地展开。

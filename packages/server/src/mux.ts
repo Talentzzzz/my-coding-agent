@@ -440,7 +440,7 @@ export class MuxConnection {
 		this.push(sessionId, subscription, {
 			type: "status",
 			usage: snapshot.usage,
-			submitting: snapshot.submitting,
+			running: snapshot.running,
 			queued: snapshot.queued,
 			isRetrying: snapshot.isRetrying,
 			retryAttempt: snapshot.retryAttempt,

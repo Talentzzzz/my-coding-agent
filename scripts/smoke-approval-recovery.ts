@@ -144,13 +144,22 @@ function sidOf(agent: Agent): string {
 	return opened.get(agent)!.id;
 }
 
+/** ADR-0021：出生消息。openSession 先落它，之后的 prompt / snapshot 才有文件可开。 */
+const BIRTH_TEXT = "the smoke's birth message";
+
 async function openSession(overrides: { approval?: Record<string, boolean>; api?: ChatTransport } = {}): Promise<Agent> {
 	const session = createSession(root);
 	const agent = await openAgent({
 		session,
 		api: overrides.api ?? fake.api,
-		model: modelName,
 		settings: inMemorySettingManager({ approval: overrides.approval ?? {} }, rows),
+	});
+	// 会话随第一条消息出生（ADR-0021），而编排层按 id 现开文件：这里直接对袋追加一条 user
+	// 消息让文件落地——不跑引擎、不耗剧本。模型选择随每条 prompt 的 selection 抵达，与生产一致。
+	agent.sessionManager.appendMessage(session, {
+		role: "user",
+		content: [{ type: "text", text: BIRTH_TEXT }],
+		timestamp: 1,
 	});
 	opened.set(agent, { id: session.sessionId, session });
 	return agent;
@@ -236,7 +245,8 @@ process.stdout.write("\ndangling calls no answer names are closed before the fir
 	check("the sweep cleared the waiting", !agent.hasPendingApprovals(sidOf(agent)));
 	check(
 		"and the first request was provider-legal: each result beside its own call, the prompt after them",
-		JSON.stringify(prompts[0]?.roles) === JSON.stringify(["system", "assistant", "toolResult", "assistant", "toolResult", "user"]),
+		// 出生消息（ADR-0021）是上下文里的第一条 user 消息，排在 system 之后。
+		JSON.stringify(prompts[0]?.roles) === JSON.stringify(["system", "user", "assistant", "toolResult", "assistant", "toolResult", "user"]),
 		JSON.stringify(prompts[0]?.roles),
 	);
 	await agent.close(sidOf(agent));
@@ -408,7 +418,7 @@ process.stdout.write("\naborting a recovery run leaves the recovered call with i
 
 	await agent.abort(sidOf(agent));
 	await agent.settle(sidOf(agent));
-	check("the abort settled the recovery run", !agent.snapshot(sidOf(agent)).submitting);
+	check("the abort settled the recovery run", !agent.snapshot(sidOf(agent)).running);
 	const results = toolResultTexts(agent);
 	check("the recovered call kept its own result", results.some((text) => text.includes("notes.txt")), JSON.stringify(results));
 	check(

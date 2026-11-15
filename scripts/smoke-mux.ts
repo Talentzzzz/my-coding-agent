@@ -51,7 +51,7 @@ async function prompt(base: string, sessionId: string, text: string): Promise<nu
 interface ReadSession {
 	id: string;
 	leafId: string | null;
-	submitting: boolean;
+	running: boolean;
 	messages: unknown[];
 	messageEntryIds: (string | null)[];
 	branchPoints: { entryId: string }[];
@@ -67,7 +67,7 @@ async function settleRun(base: string, sessionId: string, ms = 15_000): Promise<
 	const deadline = Date.now() + ms;
 	for (;;) {
 		const session = await readSession(base, sessionId);
-		if (session?.submitting === false) return true;
+		if (session?.running === false) return true;
 		if (Date.now() > deadline) return false;
 		await sleep(50);
 	}
@@ -169,11 +169,11 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("one session, one lane, one baseline\n");
 
-	const created = await request(rig.url, "POST", "/api/sessions");
+	const created = await request(rig.url, "POST", "/api/sessions", { text: "the lane conversation" });
 	const laneId = (created.payload as { sessionId: string }).sessionId;
 	const lane = await wire.open(laneId);
 	check("the first frame on the stream is the session's baseline", lane.id === laneId);
-	check("and an idle session says so", lane.submitting === false, String(lane.submitting));
+	check("and an idle session says so", lane.running === false, String(lane.running));
 
 	// 第二次 `open` 要求的是与第一次相同的东西——这个 session 现在的状态，及其后的一切——所以
 	// 它的应答是已存在流上再多一份 baseline，底下的订阅原样不动（ADR-0009 决定 1）。这正是窗格
@@ -222,14 +222,14 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("one connection subscribes to two sessions at once\n");
 
-	const second = await request(rig.url, "POST", "/api/sessions");
+	const second = await request(rig.url, "POST", "/api/sessions", { text: "the other conversation" });
 	const otherId = (second.payload as { sessionId: string }).sessionId;
 	const other = await wire.open(otherId);
 	check("the second stream opened with its own baseline", other.id === otherId && otherId !== laneId);
 
 	rig.transport.setResponses([fakeAssistantMessage("a".repeat(2000))]);
 	check("the prompt was accepted", (await prompt(rig.url, laneId, "say something long")) === 202);
-	const running = await wire.waitFor(laneId, (message) => message.type === "status" && (message as { submitting?: boolean }).submitting === true, 10_000);
+	const running = await wire.waitFor(laneId, (message) => message.type === "status" && (message as { running?: boolean }).running === true, 10_000);
 	check("the run announced itself on its own lane", running !== undefined);
 
 	// 同一边界的重新接上一半，也是重复 `open` 存在的理由：别的东西（这里是 run）仍持有这个
@@ -351,15 +351,16 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a run nobody watches still moves its sidebar row\n");
 
-	const unwatched = await request(rig.url, "POST", "/api/sessions");
+	const unwatched = await request(rig.url, "POST", "/api/sessions", { text: "the unwatched conversation" });
 	const unwatchedId = (unwatched.payload as { sessionId: string }).sessionId;
 	const rowsForSession = (): SessionRow[] =>
 		wire
 			.connection()
 			.map(rowOf)
 			.filter((row): row is SessionRow => row?.id === unwatchedId);
-	// 什么都没说过的 session 没有文件，因此也没有行：第一条消息是把两者放下的动作。所以这里
-	// 没有"之前"的时间戳可比较——run 正是创建这一行的动作，下面两个检查说的正是这件事。
+	// birth 即第一条消息（ADR-0021）：行随出生即到，连连接级座位上都看得到它——不需要任何
+	// 逻辑流。等那一行落地，下面的 run 才有"之前"的时间戳可比。
+	check("the born session had a row at once", await until(() => (rowsForSession()[0]?.modified ?? 0) > 0, 5_000), JSON.stringify(rowsForSession()));
 	const modifiedBefore = rowsForSession()[0]?.modified;
 
 	rig.transport.setResponses([fakeAssistantMessage("unwatched run ".repeat(20))]);
@@ -370,7 +371,7 @@ try {
 	check("the run announced itself on its row", await until(() => rowsForSession().some((row) => row.running === true), 5_000), JSON.stringify(rowsForSession()));
 	const runningIndex = rowsForSession().findIndex((row) => row.running === true);
 	check("it settled", await settleRun(rig.url, unwatchedId));
-	// 循环里 `submitting` 先变 false，session 才发布这个事实，所以说着 `running: false` 的行可能
+	// 循环里 `running` 先变 false，session 才发布这个事实，所以说着 `running: false` 的行可能
 	// 比读路径已经开始作答晚一拍落地。
 	await until(() => rowsForSession().some((row, index) => index > runningIndex && row.running === false), 5_000);
 
@@ -382,26 +383,26 @@ try {
 	check("the row reported the run while it was in flight", runningIndex >= 0, JSON.stringify(allRows.map((row) => row.running)));
 	check("and reported it finished afterwards", finishedIndex > runningIndex, JSON.stringify(allRows));
 	check(
-		"a session with nothing said in it had no sidebar row",
-		modifiedBefore === undefined,
+		"birth itself put the row on the connection seat",
+		typeof modifiedBefore === "number" && modifiedBefore > 0,
 		`before=${modifiedBefore}`,
 	);
 	check(
-		"and the run stamped the row it created",
+		"and the run stamped the row again",
 		settledRow !== undefined && settledRow.modified > 0,
 		`before=${modifiedBefore} after=${settledRow?.modified}`,
 	);
 
 	// ---------------------------------------------------------------------------------------------
-	// 9. The wait: a send reference's signal holds the state against eviction until it is answered
+	// 9. The wait: a send reference's signal holds the state against removal until it is answered
 	//    (issue 13).
 	// ---------------------------------------------------------------------------------------------
-	process.stdout.write("a wait holds the state against eviction until it is answered\n");
+	process.stdout.write("a wait holds the state against removal until it is answered\n");
 
 	// send 引用守护的那个形状：一次 hold 在收下时就被释放的 run、一份已经发布到流上的结果，
 	// 以及一个还没说完自己读完了的客户端。reap 的尾部到达它的驱逐时必须发现 wait 还站着
 	// ——state 留下，wait 的释放才是收尾的那条边。
-	const waited = await request(rig.url, "POST", "/api/sessions");
+	const waited = await request(rig.url, "POST", "/api/sessions", { text: "the waited conversation" });
 	const waitedId = (waited.payload as { sessionId: string }).sessionId;
 	// 有意报告两次：重连的重放可能重复报告一个它仍持有的 wait，一个条目必须覆盖两份报告
 	// ——否则下面唯一一次 `unwait` 会留下一处泄漏。
@@ -411,30 +412,30 @@ try {
 	check("the prompt was accepted", (await prompt(rig.url, waitedId, "run under a wait")) === 202);
 	check("it settled", await settleRun(rig.url, waitedId));
 	check("the host was reaped", await until(() => !rig.hub.live.includes(waitedId), 10_000), rig.hub.live.join(","));
-	// 时间点读取，在 reap 完成之后：尾部的驱逐尝试在 wait 门控下运行了，而 wait 站着，所以
-	// state 还在这里。门面上没有人读这张表——那是 orchestrator 自己的事——所以 smoke 自己读
-	// 这个 map，与其他 smoke 到 `assembleAgentStateBySession` 走的是同一条路。
+	// 时间点读取，在 reap 完成之后：运行自己的结束路径已经把 live 半带出表（跑完即散，ADR-0013
+	// 的缓存语义——下一次动手现装一只）。wait 守的不再是 live 半，而是 host 的拆除与结果投递的
+	// 窗口。门面上没有人读这张表——那是 orchestrator 自己的事——所以 smoke 自己读这个 map。
 	const table = rig.hub.agent as unknown as { agentStateMap: Map<string, unknown> };
-	check("but the wait kept the state in the table", table.agentStateMap.has(waitedId), String(table.agentStateMap.has(waitedId)));
+	check("the run's own end swept the state; the wait keeps the host, not the live half", !table.agentStateMap.has(waitedId), String(table.agentStateMap.has(waitedId)));
 
 	wire.send({ type: "unwait", sessionId: waitedId });
 	wire.send({ type: "unwait", sessionId: waitedId });
-	check("releasing the wait evicted it", await until(() => !table.agentStateMap.has(waitedId), 5_000), String(table.agentStateMap.has(waitedId)));
+	check("and the release finds it already gone", await until(() => !table.agentStateMap.has(waitedId), 5_000), String(table.agentStateMap.has(waitedId)));
 
 	// 一条随后死去的连接报告的 wait 随连接一起被放弃——一个永远不会被应答的 waiter 不得永远
 	// 占着一个 state。这个 wait 完全不骑任何订阅，这也是 wait 独立于订阅表的证明：它在旁边任何
 	// `open` 之前被报告，且活过流的 end。
 	const dying = await connect(`${rig.url.replace("http", "ws")}/mux`);
-	const mortal = await request(rig.url, "POST", "/api/sessions");
+	const mortal = await request(rig.url, "POST", "/api/sessions", { text: "the mortal conversation" });
 	const mortalId = (mortal.payload as { sessionId: string }).sessionId;
 	dying.send({ type: "wait", sessionId: mortalId });
 	rig.transport.setResponses([fakeAssistantMessage("mortal run ".repeat(20))]);
 	check("the prompt was accepted", (await prompt(rig.url, mortalId, "run under a dying connection's wait")) === 202);
 	check("it settled", await settleRun(rig.url, mortalId));
 	check("the host was reaped under the dying connection's wait", await until(() => !rig.hub.live.includes(mortalId), 10_000), rig.hub.live.join(","));
-	check("and that wait held the state too", table.agentStateMap.has(mortalId), String(table.agentStateMap.has(mortalId)));
+	check("and the run's own end swept that state too", !table.agentStateMap.has(mortalId), String(table.agentStateMap.has(mortalId)));
 	await dying.close().catch(() => {});
-	check("the connection's death released its wait", await until(() => !table.agentStateMap.has(mortalId), 5_000), String(table.agentStateMap.has(mortalId)));
+	check("and the connection's death finds it already gone", await until(() => !table.agentStateMap.has(mortalId), 5_000), String(table.agentStateMap.has(mortalId)));
 
 	// 容忍，与第 3、4 节给其他帧的同一种：对这个服务器不认识的 session 的 wait 被记录（代价是
 	// 一行表和一次 `unwait`），而不是被拒绝——连接继续活着。帧按到达顺序处理，所以它们之后

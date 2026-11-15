@@ -59,7 +59,7 @@ manager。
      映射 404，于是 controllers 的五处 `if (!hub.has(...)) throw notFound` 与 mux 的 open
      前置检查一并消失——检查由被调命令自己说。`evict` / `drop` 维持公开——它们是出表动词，
      逐出边缘逻辑留在 hub（见「没有被取代的」），需要它们。
-   - **窄状态读**，全部 held-only、返回**纯数据**：`fileAbsPathOf(id)`、`isSubmitting(id)`、
+   - **窄状态读**，全部 held-only、返回**纯数据**：`fileAbsPathOf(id)`、`isRunning(id)`、
      `titleOf(id)`、`timestampOf(id, entryId)`（消息时间戳优先、entry 时间戳兜底，hub 的帧
      与 projection 的行因此不可能对「最后活跃」各执一词）、`messageRoleOf(id, entryId)`。
    - **设置与模型目录**，无状态转发：`modelCatalog()`、`replaceModels(models)`、

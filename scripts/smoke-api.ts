@@ -25,7 +25,7 @@ let failed = false;
 const timer = setTimeout(() => {
 	fail("timed out waiting for the run to settle");
 	process.exit(1);
-}, 150_000);
+}, 300_000);
 
 function fail(message: string): void {
 	failed = true;
@@ -110,8 +110,8 @@ async function settleRun(id: string, ms = 30_000): Promise<boolean> {
 	const deadline = Date.now() + ms;
 	for (;;) {
 		const read = await request("GET", `/api/sessions/${encodeURIComponent(id)}`);
-		const session = (read.payload as { session?: { submitting?: boolean } }).session;
-		if (session?.submitting === false) return true;
+		const session = (read.payload as { session?: { running?: boolean } }).session;
+		if (session?.running === false) return true;
 		if (Date.now() > deadline) return false;
 		await sleep(100);
 	}
@@ -120,7 +120,7 @@ async function settleRun(id: string, ms = 30_000): Promise<boolean> {
 /** 这些检查会读的快照部分。 */
 interface TreeSession {
 	leafId: string | null;
-	submitting: boolean;
+	running: boolean;
 	messageEntryIds: (string | null)[];
 	branchPoints: { entryId: string; anchor: string; options: { entryId: string; label: string; role: string; active: boolean }[] }[];
 }
@@ -132,12 +132,12 @@ async function handleItem(id: string, item: { type: string; [key: string]: unkno
 			id: string;
 			workDirAbsPath: string;
 			model: string;
-			thinkingLevels: string[];
+			thinkingLevel: string;
 			approvals: Record<string, boolean>;
 			messages: unknown[];
 		};
 		pass(
-			`\nbaseline ${session.id}\n  workDirAbsPath=${session.workDirAbsPath}\n  model=${session.model}\n  thinking=${session.thinkingLevels.join(",")}\n  approvals=${JSON.stringify(session.approvals)}\n  messages=${session.messages.length}`,
+			`\nbaseline ${session.id}\n  workDirAbsPath=${session.workDirAbsPath}\n  model=${session.model}\n  thinking=${session.thinkingLevel}\n  approvals=${JSON.stringify(session.approvals)}\n  messages=${session.messages.length}`,
 		);
 
 		// 第二条流正是要点：服务器指名了一个 session，本脚本像标签页那样经 mux 挂到它上面。
@@ -199,9 +199,10 @@ async function handleItem(id: string, item: { type: string; [key: string]: unkno
 		if (stopped.status !== 200) fail(`abort answered ${stopped.status}, expected 200`);
 		else pass("abort accepted (200)");
 
-		// 现在像标签页那样换 session：要一个替代，然后读它的流。
+		// 现在像标签页那样换 session：要一个替代，然后读它的流。birth 即第一条消息（ADR-0021），
+		// 请求体带着它——这次 birth 自己的那轮 run 在 201 应答之前就已落定。
 		pass("requesting a replacement session");
-		const replacement = await request("POST", "/api/sessions");
+		const replacement = await request("POST", "/api/sessions", { text: "the replacement conversation" });
 		if (replacement.status !== 201) {
 			fail(`new session answered ${replacement.status}, expected 201`);
 			return true;
@@ -256,6 +257,14 @@ async function main(): Promise<void> {
 	const models = await request("GET", "/api/models");
 	pass(`models ${models.status} (${(models.payload as { models?: unknown[] }).models?.length ?? 0})`);
 
+	// 本构建注册的工具名，进程级事实（ADR-0020）：端点作答注册表的顺序，六个内置全在。
+	const tools = await request("GET", "/api/tools");
+	const toolNames = (tools.payload as { tools?: unknown[] }).tools ?? [];
+	if (tools.status !== 200) fail(`tool names answered ${tools.status}, expected 200`);
+	else if (JSON.stringify(toolNames) !== JSON.stringify(["read", "write", "edit", "glob", "grep", "bash"]))
+		fail(`tool names are ${JSON.stringify(toolNames)}, expected the six built-ins`);
+	else pass("tools reports the built-in registry in registration order");
+
 	// 一行的名字就是它的身份，所以列表端点是唯一能在撞名抵达磁盘之前抓住它的地方：两行同名会让
 		// 每一份指名该名字的会话变得含混。这个名字被刻意取得不会与运行本脚本的人导入的任何
 	// 东西相撞。结尾的检查把它找到的放回去，因为这是这里唯一会持久化的请求。
@@ -282,7 +291,15 @@ async function main(): Promise<void> {
 	if (unknownDefault.status !== 409) fail(`an unknown default model answered ${unknownDefault.status}, expected 409`);
 	else pass("a default model that names no row is refused (409)");
 
-	const first = await request("POST", "/api/sessions");
+	// birth 即第一条消息（ADR-0021）：body 必带 `text`，缺失即 400——空 body 与缺 text 各一条。
+	const bodyless = await request("POST", "/api/sessions");
+	if (bodyless.status !== 400) fail(`a bodyless birth answered ${bodyless.status}, expected 400`);
+	else pass("a bodyless birth is refused (400)");
+	const textless = await request("POST", "/api/sessions", { workDirAbsPath: base });
+	if (textless.status !== 400) fail(`a birth with no text answered ${textless.status}, expected 400`);
+	else pass("a birth with no text is refused (400)");
+
+	const first = await request("POST", "/api/sessions", { text: "the first conversation" });
 	if (first.status !== 201) throw new Error(`could not create a session: ${first.status}`);
 	pass(`created ${(first.payload as { sessionId: string }).sessionId}`);
 
@@ -292,8 +309,9 @@ async function main(): Promise<void> {
 
 	// HTTP 上的树，任何时刻都没有东西挂在上头。移动在发生的那一刻就被 store 记录，所以它活过
 	// run 之后的 reap——不需要任何流握着 session 的手，而下面的 run 顺带充当了"发送不依赖先
-	// 挂上"这条验收边：它的帧无处可去，却照样被记录。
-	const tree = await request("POST", "/api/sessions");
+	// 挂上"这条验收边：它的帧无处可去，却照样被记录。birth 的 body 带着自己的第一条消息
+	// （ADR-0021），这次 birth run 也照样落定。
+	const tree = await request("POST", "/api/sessions", { text: "the conversation to branch" });
 	const treeId = (tree.payload as { sessionId: string }).sessionId;
 
 	// prompt 在它的 run 失败之前就被持久化，而失败也确实记录了一条 assistant 消息，所以这里要

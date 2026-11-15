@@ -3,13 +3,12 @@ import { dirname } from "node:path";
 import {
 	AGENT_HOME,
 	mergeSettings,
-	projectSettingsPath,
 	settingsPath,
 	type AppearanceSettings,
 	type BashSettings,
+	type GlobalSettings,
 	type ModeSettings,
 	type RetrySettings,
-	type Settings,
 } from "./config.ts";
 import { type ModelConfig, ModelConfigStore } from "./models.ts";
 import type { QueueMode } from "./protocol.ts";
@@ -17,14 +16,17 @@ import type { QueueMode } from "./protocol.ts";
 /**
  * 每一次配置读写都要走的那一扇门。
  *
- * 两份设置文件（agent home 的与工作目录自己的）和一份模型文件在这里、且只在这里读取：这个类把
- * 曾经一族文件级函数的东西变成点名工作目录、在需要它的那一行现取答案的方法。什么都不缓存：每个
- * 方法都从其背后的存储构建一份新状态，所以手编文件、另一会话的写入、或修正的模型密钥，就是下一
- * 次调用给出的答案，没有需要失效的东西。
+ * global 侧唯一的一份设置文件（`<agent home>/settings.json`，ADR-0019）和一份模型文件在这里、且只在
+ * 这里读取。什么都不缓存：每个方法都从其背后的存储构建一份新状态，所以手编文件、另一会话的写入、
+ * 或修正的模型密钥，就是下一次调用给出的答案，没有需要失效的东西。
  *
  * manager 是注入的而不是被找到的：hub 在自己的 agent home 之上构造一只，递给编排层与每次装配；
  * smoke 或测试在自己的存储之上构造（{@link SettingManagerOptions.storage}、
  * {@link inMemorySettingManager}），机器自己的文件永远不被碰。
+ *
+ * 公开面只有四个方法：读（`getSettings`，整份 {@link GlobalSettings}）、写（`applySettings`）、
+ * 模型行的读与换。会话侧的选择不住在这里——它们在会话 `.json` 快照的设置半上，组合发生在
+ * `resolveSettings`（`packages/core/src/settings.ts`）。
  */
 export class SettingManager {
 	private readonly home: string;
@@ -42,118 +44,25 @@ export class SettingManager {
 		this.modelStore = options.models === undefined ? ModelConfigStore.create(options.modelsHome ?? this.home) : undefined;
 	}
 
-	// ---------------------------------------------------------------------------- 读取面
-
 	/**
-	 * 每个设置方法共用的唯一读取：工作目录背后的两份文件，合并成一份新状态。
+	 * 当前生效的全部设置，合并并补默认后的副本：改它不动任何东西。
 	 *
-	 * 调用之间什么都不保留——状态是文件截至本次调用的快照，{@link SettingManager.applySettings} 让
-	 * 它写入的文件与状态保持同步。所以同一目录上的两个会话经相同的文件读取，而不是经可能漂移的袋，
-	 * 这正是让一次设置编辑抵达一个从未重开的会话的原因。
+	 * 调用之间什么都不保留——状态是文件截至本次调用的快照。同一进程里的所有会话经相同的文件读取，
+	 * 而不是经可能漂移的袋，这正是让一次设置编辑抵达一个从未重开的会话的原因。
 	 */
-	private stateOf(workDirAbsPath: string): SettingsState {
-		const storage =
-			this.storage ?? new FileSettingsStorage(settingsPath(this.home), projectSettingsPath(workDirAbsPath));
-		return settingsStateFromStorage(storage);
-	}
-
-	/** 当前生效的全部设置，合并并补默认后的副本：改它不动任何东西。 */
-	getSettings(workDirAbsPath: string): Settings {
-		return structuredClone(this.stateOf(workDirAbsPath).settings);
-	}
-
-	/** 配置的默认模型，即行的名字，没有任何层指名时为 undefined。 */
-	getModel(workDirAbsPath: string): string | undefined {
-		return this.stateOf(workDirAbsPath).settings.model;
+	getSettings(): GlobalSettings {
+		return structuredClone(this.stateOf().settings);
 	}
 
 	/**
-	 * 全局默认活跃工具集，undefined 表示注册表的全集。
+	 * 应用一次部分变更，返回前写盘。
 	 *
-	 * undefined 自成一个答案而不是空列表，因为「没有字段」与「什么都不活跃」必须保持可区分：前者是
-	 * 旧文件的行为，后者是一个什么都调不了的会话。
+	 * 只有被点名的字段移动、嵌套的做合并，所以改一个工具审批的补丁不碰文件里其他工具的条目。写入只
+	 * 落在文件上、别无他处——没有需要更新的袋，因为没有读者持有袋：这里任何方法的下一次读取都看得到
+	 * 变更，每个会话也一样。
 	 */
-	getTools(workDirAbsPath: string): string[] | undefined {
-		const tools = this.stateOf(workDirAbsPath).settings.tools;
-		return tools === undefined ? undefined : [...tools];
-	}
-
-	/** 主题与字号，即窗口该怎样绘制自己。 */
-	getAppearance(workDirAbsPath: string): AppearanceSettings {
-		return { ...this.stateOf(workDirAbsPath).settings.appearance };
-	}
-
-	/**
-	 * 侧边栏搁置的目录，按绝对路径。
-	 *
-	 * 永远是列表，从不是 undefined：每个读者问的都是「这个藏了吗」，从未写过该字段的文件，答案与
-	 * 空列表相同。
-	 */
-	getHiddenDirectories(workDirAbsPath: string): string[] {
-		return [...(this.stateOf(workDirAbsPath).settings.hiddenDirectories ?? [])];
-	}
-
-	/**
-	 * 侧边栏替代文件夹名显示的名字，按绝对路径。
-	 *
-	 * 空条目在这里被丢弃，而不是在每个读取者处：清空的名字以空字符串存储，键的缺失就表示「用文件夹
-	 * 自己的名字」。
-	 */
-	getDirectoryNames(workDirAbsPath: string): Record<string, string> {
-		const names: Record<string, string> = {};
-		for (const [dir, name] of Object.entries(this.stateOf(workDirAbsPath).settings.directoryNames ?? {})) {
-			if (name.trim().length > 0) names[dir] = name;
-		}
-		return names;
-	}
-
-	/** 运行前必须在 UI 里获得批准的工具，按工具名为键。 */
-	getApprovals(workDirAbsPath: string): Record<string, boolean> {
-		return { ...this.stateOf(workDirAbsPath).settings.approval };
-	}
-
-	/**
-	 * 该目录的文件是否闸住这个工具。
-	 *
-	 * 文件是会话打开时的默认，所以这里回答的是尚未选择的会话：会话自己的答案是
-	 * `Agent.getApprovals()`，即这张映射叠上会话记录的选择。审批闸门读的是那一个，从不读这个。
-	 */
-	isApprovalRequired(workDirAbsPath: string, tool: string): boolean {
-		return this.stateOf(workDirAbsPath).settings.approval[tool] === true;
-	}
-
-	getSteeringMode(workDirAbsPath: string): QueueMode {
-		return this.stateOf(workDirAbsPath).settings.steeringMode;
-	}
-
-	getFollowUpMode(workDirAbsPath: string): QueueMode {
-		return this.stateOf(workDirAbsPath).settings.followUpMode;
-	}
-
-	/** 重试策略，逐字段对应 `retryAssistantCall` 接受的形状。 */
-	getRetrySettings(workDirAbsPath: string): RetrySettings {
-		return { ...this.stateOf(workDirAbsPath).settings.retry };
-	}
-
-	/** `bash` 工具允许一条命令运行多久。 */
-	getBashSettings(workDirAbsPath: string): BashSettings {
-		return { ...this.stateOf(workDirAbsPath).settings.bash };
-	}
-
-	// ---------------------------------------------------------------------------- 写入面
-
-	/**
-	 * 对一个目录的设置应用部分变更，返回前写盘。
-	 *
-	 * 每个字段去往已经写有它的那份文件，让开关落在用户正看着的那个值的来处：指名过 `approval` 任何
-	 * 部分的项目文件继续拥有审批集，而从未有层指名过的设置去往全局文件。`scope` 可强制指定目标。
-	 * 只有被点名的字段移动、嵌套的做合并，所以改一个工具审批的补丁不碰文件里其他工具的条目。
-	 *
-	 * 写入只落在文件上、别无他处——没有需要更新的袋，因为没有读者持有袋：这里任何方法的下一次读取
-	 * 都看得到变更，该目录上的每个会话也一样。
-	 */
-	applySettings(workDirAbsPath: string, patch: SettingsPatch, scope?: SettingsScope): void {
-		applyPatch(this.stateOf(workDirAbsPath), patch, scope);
+	applySettings(patch: SettingsPatch): void {
+		applyPatch(this.stateOf(), patch);
 	}
 
 	// ---------------------------------------------------------------------------- 模型行
@@ -176,6 +85,16 @@ export class SettingManager {
 		}
 		this.modelStore!.replace(models);
 	}
+
+	/**
+	 * 设置方法共用的唯一读取：背后的文件读进一份新状态。
+	 *
+	 * 状态是一次调用的值，不是常驻视图——现建它，任何地方都不把它持有过本次调用。
+	 */
+	private stateOf(): SettingsState {
+		const storage = this.storage ?? new FileSettingsStorage(settingsPath(this.home));
+		return settingsStateFromStorage(storage);
+	}
 }
 
 /** 调用方可提供什么，把 {@link SettingManager} 指到机器自己的文件之外。 */
@@ -194,7 +113,7 @@ export interface SettingManagerOptions {
 	 */
 	modelsHome?: string;
 	/**
-	 * 整体取代两份设置文件的存储后端。
+	 * 整体取代设置文件的存储后端。
 	 *
 	 * 注入进来，让 manager 永远不挑选自己碰的文件：测试拿内存版，把设置放在别处——数据库、每用户
 	 * 存储、沙箱——的宿主换一个对象即可，无需改 manager。与 `models` 一起设置时，manager 一个文件
@@ -208,35 +127,22 @@ export interface SettingManagerOptions {
 /**
  * 建在从未落笔的设置与模型行之上的 {@link SettingManager}。
  *
- * 调用方递入的一切都算作全局层的文件与全部目录，所以之后的写入保存在内存里，读回来的行为与真的
- * 一样——只是缺了文件。
+ * 调用方递入的一切都算作 global 侧的文件与全部目录，所以之后的写入保存在内存里，读回来的行为与
+ * 真的一样——只是缺了文件。
  */
 export function inMemorySettingManager(
-	settings: Partial<Settings> = {},
+	settings: Partial<GlobalSettings> = {},
 	models?: readonly ModelConfig[],
 ): SettingManager {
 	const storage = new InMemorySettingsStorage();
-	storage.write("global", `${JSON.stringify(settings, null, "\t")}\n`);
+	storage.write(`${JSON.stringify(settings, null, "\t")}\n`);
 	return new SettingManager({ storage, models });
 }
-
-/**
- * 会话的设置所来自的两份文件。
- *
- * `global` 是这台机器自己在 agent home 之下的文件。`project` 是工作目录的
- * `.my-agent/settings.json`，仓库可以提交它，让 checkout 带上自己的审批与限额。project 逐字段
- * 胜出、嵌套对象做合并——指名了 `approval.write` 的项目保住全局的 `approval.bash` 在旁——所以
- * 两层被读成一个设置对象，而不是在两者之间做选择。
- */
-export type SettingsScope = "global" | "project";
-
-/** 一份文件的内容：它实际携带的键，未知的也算。 */
-type SettingsLayer = Record<string, unknown>;
 
 /** 设置的部分变更，形状与浏览器发来的 config 补丁一致。 */
 export interface SettingsPatch {
 	model?: string;
-	/** 窗口的「已种下内置默认」标记；见 `Settings.defaultModelSeeded`。 */
+	/** 窗口的「已种下内置默认」标记；见 `GlobalSettings.defaultModelSeeded`。 */
 	defaultModelSeeded?: boolean;
 	/** 全局默认活跃工具集。整份列表，如同会话上的工具集。 */
 	tools?: string[];
@@ -268,31 +174,31 @@ export interface SettingsPatch {
 }
 
 /**
- * 一个作用域的设置在哪里读写。
+ * 设置文件在哪里读写。
  *
- * 注入进来，让 manager 永远不挑选自己碰的文件：真实现为工作目录读写全局与项目路径，测试拿内存
- * 版。把设置放在别处——数据库、每用户存储、沙箱——的宿主换一个对象即可，无需改 manager。
+ * 注入进来，让 manager 永远不挑选自己碰的文件：真实现读写 `<agent home>/settings.json`，测试拿
+ * 内存版。把设置放在别处——数据库、每用户存储、沙箱——的宿主换一个对象即可，无需改 manager。
  */
 export interface SettingsStorage {
-	/** 该作用域当前的文本，那里还没有东西时为 undefined。 */
-	read(scope: SettingsScope): string | undefined;
-	/** 替换该作用域的文本，目录不存在时创建它。 */
-	write(scope: SettingsScope, content: string): void;
-	/** 作用域背后的文件，用于错误消息。 */
-	path(scope: SettingsScope): string;
+	/** 当前的文本，那里还没有东西时为 undefined。 */
+	read(): string | undefined;
+	/** 替换文本，目录不存在时创建它。 */
+	write(content: string): void;
+	/** 背后的文件，用于错误消息。 */
+	path(): string;
 }
 
-/** 两份真实文件：`<agent home>/settings.json` 与 `<working directory>/.my-agent/settings.json`。 */
+/** 真实文件：`<agent home>/settings.json`。 */
 class FileSettingsStorage implements SettingsStorage {
-	private readonly absPaths: Record<SettingsScope, string>;
+	private readonly absPath: string;
 
-	constructor(globalPath: string, projectPath: string) {
-		this.absPaths = { global: globalPath, project: projectPath };
+	constructor(absPath: string) {
+		this.absPath = absPath;
 	}
 
-	read(scope: SettingsScope): string | undefined {
+	read(): string | undefined {
 		try {
-			return readFileSync(this.absPaths[scope], "utf8");
+			return readFileSync(this.absPath, "utf8");
 		} catch (error) {
 			// 文件缺失是正常的首次运行。其余任何情况——权限、挡在路上的目录——都是真实的失败，不得以
 			// 「未配置设置」的形态抵达调用方。
@@ -301,122 +207,97 @@ class FileSettingsStorage implements SettingsStorage {
 		}
 	}
 
-	write(scope: SettingsScope, content: string): void {
-		const absPath = this.absPaths[scope];
-		mkdirSync(dirname(absPath), { recursive: true });
-		writeFileSync(absPath, content, "utf8");
+	write(content: string): void {
+		mkdirSync(dirname(this.absPath), { recursive: true });
+		writeFileSync(this.absPath, content, "utf8");
 	}
 
-	path(scope: SettingsScope): string {
-		return this.absPaths[scope];
+	path(): string {
+		return this.absPath;
 	}
 }
 
 /** 没有文件在背后的设置，给测试或内嵌宿主用。 */
 class InMemorySettingsStorage implements SettingsStorage {
-	private readonly contents: Record<SettingsScope, string | undefined> = { global: undefined, project: undefined };
+	private content: string | undefined;
 
-	read(scope: SettingsScope): string | undefined {
-		return this.contents[scope];
+	read(): string | undefined {
+		return this.content;
 	}
 
-	write(scope: SettingsScope, content: string): void {
-		this.contents[scope] = content;
+	write(content: string): void {
+		this.content = content;
 	}
 
-	path(scope: SettingsScope): string {
-		return `<in-memory ${scope} settings>`;
+	path(): string {
+		return "<in-memory settings>";
 	}
 }
 
 /**
- * 一个工作目录设置的纯数据状态：manager 的读写所操作的东西，仅此而已。
+ * 设置的纯数据状态：manager 的读写所操作的东西，仅此而已。
  *
- * 合并视图以 {@link Settings} 形态保存——每个字段都填了默认——而每一层按文件写下的原样保存，
+ * 合并视图以 {@link GlobalSettings} 形态保存——每个字段都填了默认——而文件按写下的原样保存，
  * 未知键也保留。这个分野正是写入安全的原因：只有补丁点名的字段移动，文件的其余部分——无论是否
  * 手编——原样写回。
- *
- * 状态是一次调用的值，不是常驻视图：{@link SettingManager.stateOf} 现建它，任何地方都不把它持有
- * 过本次调用。
  */
 interface SettingsState {
 	storage: SettingsStorage;
-	layers: Record<SettingsScope, SettingsLayer>;
-	/** 每份文件指名的字段，让变更可以写到值已经住着的地方。 */
-	declared: Record<SettingsScope, Set<string>>;
-	settings: Settings;
+	/** 文件的内容，按它写下的原样。 */
+	layer: SettingsLayer;
+	settings: GlobalSettings;
 }
 
+/** 一份文件的内容：它实际携带的键，未知的也算。 */
+type SettingsLayer = Record<string, unknown>;
+
 /**
- * 把 `storage` 背后的两份文件读进一份新的 {@link SettingsState}：把存储后端变成设置操作所操作状态
- * 的唯一入口。
+ * 把 `storage` 背后的文件读进一份新的 {@link SettingsState}：把存储后端变成设置操作所操作状态的
+ * 唯一入口。
  *
  * 本构建无法解析的文件被拒绝，从不被覆盖。
  */
 function settingsStateFromStorage(storage: SettingsStorage): SettingsState {
-	const layers: Record<SettingsScope, SettingsLayer> = {
-		global: readLayer(storage, "global"),
-		project: readLayer(storage, "project"),
-	};
-	return {
-		storage,
-		layers,
-		declared: {
-			global: new Set(Object.keys(layers.global)),
-			project: new Set(Object.keys(layers.project)),
-		},
-		settings: mergeSettings(mergeLayers(layers.global, layers.project)),
-	};
+	const layer = readLayer(storage);
+	return { storage, layer, settings: mergeSettings(layer) };
 }
 
 /**
  * 应用一次部分变更，返回前写盘。
  *
- * 每个字段去往已经写有它的那份文件，让开关落在用户正看着的那个值的来处。变更抵达状态背后的文件、
- * 仅此而已——状态本身被调用方丢弃，文件才是之后每次读取重读的东西。
+ * 变更抵达状态背后的文件、仅此而已——状态本身被调用方丢弃，文件才是之后每次读取重读的东西。
  */
-function applyPatch(s: SettingsState, patch: SettingsPatch, scope?: SettingsScope): void {
+function applyPatch(s: SettingsState, patch: SettingsPatch): void {
 	const fields = Object.entries(patch)
 		.filter(([, value]) => value !== undefined)
 		.map(([field]) => field);
 	if (fields.length === 0) return;
 
-	const changes: Record<SettingsScope, SettingsLayer> = { global: {}, project: {} };
+	const changes: SettingsLayer = {};
 	for (const field of fields) {
-		const target = scope ?? scopeOf(s, field);
-		const layer = s.layers[target];
-		const inherited = layer[field];
+		const inherited = s.layer[field];
 		const value = (patch as Record<string, unknown>)[field];
-		layer[field] = isRecord(inherited) && isRecord(value) ? mergeLayers(inherited, value) : value;
-		s.declared[target].add(field);
-		changes[target][field] = layer[field];
+		s.layer[field] = isRecord(inherited) && isRecord(value) ? mergeLayers(inherited, value) : value;
+		changes[field] = s.layer[field];
 	}
-
-	for (const target of ["global", "project"] as const) {
-		if (Object.keys(changes[target]).length > 0) persist(s, target, changes[target]);
-	}
+	persist(s, changes);
 }
 
 /**
- * 把一个作用域变更的字段写到该文件此刻持有的内容之上，然后把结果当作本状态里该层的副本。
+ * 把变更的字段写到文件此刻持有的内容之上，然后把结果当作本状态里的副本。
  *
  * 写前重读，正是让对同一文件的手编不被这里一次无关的变更回滚的原因：一次模型切换不得弄丢用户在
  * 进程运行期间敲进去的键。
  */
-function persist(s: SettingsState, scope: SettingsScope, changes: SettingsLayer): void {
-	const merged = mergeLayers(readLayer(s.storage, scope), changes);
-	s.storage.write(scope, `${JSON.stringify(merged, null, "\t")}\n`);
-	s.layers[scope] = merged;
+function persist(s: SettingsState, changes: SettingsLayer): void {
+	const merged = mergeLayers(readLayer(s.storage), changes);
+	s.storage.write(`${JSON.stringify(merged, null, "\t")}\n`);
+	s.layer = merged;
 }
 
-/** 拥有某字段的那份文件，让变更不会去往一个会被覆盖掉值的地方。 */
-function scopeOf(s: SettingsState, field: string): SettingsScope {
-	return s.declared.project.has(field) ? "project" : "global";
-}
-
-/** 一份文件的设置，按它写下的原样。不在的文件是一个空层。 */
-function readLayer(storage: SettingsStorage, scope: SettingsScope): SettingsLayer {
-	const content = storage.read(scope);
+/** 文件的设置，按它写下的原样。不在的文件是一个空层。 */
+function readLayer(storage: SettingsStorage): SettingsLayer {
+	const content = storage.read();
 	if (content === undefined) return {};
 
 	// trim 顺带去掉 UTF-8 BOM——Windows 编辑器会写它，而 `JSON.parse` 拒绝它。
@@ -427,13 +308,13 @@ function readLayer(storage: SettingsStorage, scope: SettingsScope): SettingsLaye
 	try {
 		parsed = JSON.parse(text);
 	} catch (error) {
-		throw new Error(`${storage.path(scope)} is not valid JSON: ${(error as Error).message}`);
+		throw new Error(`${storage.path()} is not valid JSON: ${(error as Error).message}`);
 	}
-	if (!isRecord(parsed)) throw new Error(`${storage.path(scope)} must hold a JSON object`);
+	if (!isRecord(parsed)) throw new Error(`${storage.path()} must hold a JSON object`);
 	return parsed;
 }
 
-/** project 逐键、逐嵌套对象地胜过 global。 */
+/** 补丁的嵌套对象逐键合并进已有的值，其余字段整体替换。 */
 function mergeLayers(base: SettingsLayer, overrides: SettingsLayer): SettingsLayer {
 	const merged: SettingsLayer = { ...base };
 	for (const [key, value] of Object.entries(overrides)) {

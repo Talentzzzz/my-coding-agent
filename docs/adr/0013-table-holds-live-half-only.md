@@ -3,7 +3,7 @@
 日期：2026-11-10 · 状态：已接受，**已落地**（`check` 绿，smoke 与改动前逐条同色；`smoke-liveness` 的三条红是改动前就有的，见「后果」）
 
 取代：此前「`AgentState` 内嵌一整条会话、表既装 live 半也装账本副本」的安排（**整体**，2026-11-10——内嵌会话记录的四元组、「活会话永不走冷路」的纪律、「两个 Manager 不再有缓存」所依赖的「袋在表里」论据，以及 2026-11-10 那条「读即装配、驻留由读者撑着」的修订，全部作废；表、先到先得的进表规则、驱逐判据的形状、删除权随表这些**形状**保留，判据的第三条从「durable 一半在盘上」改成「没有未落盘的袋」。被取代的原文逐条见文末*被取代的是什么*）
-取代者：无
+取代者：[0021](0021-lazy-session-identity.md)（2026-11-15：第三条判据「没有未落盘的袋」与 `live.unwrittenSession` / `live.openedOn` 随「会话随第一条消息原子出生」一起删除——表里不再有任何重放造不出来的东西；驻留理由减为「运行在途 / 审批停驻」，其余形状不变）
 
 ## 背景
 
@@ -19,14 +19,14 @@
 
 ## 决定
 
-1. **表只装 live 半。** `AgentState = { sessionId, listeners, eventListeners, live }`——订阅集合、live 半（两条队列、在飞运行、partial、运行中的模型、重试与挂起位），以及下面第 3 条那唯一一份驻留内存的会话记录。`session` 这个成员不存在了；`Agent.snapshot` / `snapshotOf` / 一切写操作都**现开一只袋**：`getSessionBySessionId(id)` 重放文件，调用方用完就丢。于是「旧的副本」这件事在结构上不可能发生——没有人持有副本。
+1. **表只装 live 半。** `AgentState = { sessionId, listeners, eventListeners, live }`——订阅集合、live 半（两条队列、在飞运行、partial、运行中的模型、重试与挂起位），以及下面第 3 条那唯一一份驻留内存的会话记录。`session` 这个成员不存在了；`Agent.snapshot` / `snapshotOf` / 一切写操作都**现开一只袋**：`getSessionBySessionId(id)` 重放文件，调用方用完就丢。于是「旧的副本」这件事在结构上不可能发生——没有人持有副本。（订阅集合那一半已由下方〔2026-11-15 修订〕搬走，形状现为 `{ sessionId, live }`。）
 2. **一次运行读一次盘，run-local 袋。** `run(id)` 在开跑时 `getSessionBySessionId(id)` 一次，把袋交给 `runEngine` 一路带着：`prepareRequest`、压缩阶梯、`dispatchEvent`、`recordSelection`、恢复机器读的都是这一只。一条命令（`setTitle` / `applyModelSelection` / `setActiveTools` / `applyConfig` / `maybeCompact` / `authorize` / `prompt`）各开一次、用完就丢。**不做**运行中间的窄状态帧改造：run 手里有袋，`publishState` 不必重放。
-3. **`live.unwrittenSession` 是唯一驻留内存的会话记录**，因为它不是缓存：会话随第一条消息才落盘（[0008](0008-session-two-file-format.md)），在 `create` 与那条消息之间，袋**就是**这个会话唯一的一份。读者读它时各按袋上的 `fileCreated` 现判生死：没落盘直接用这只袋，落盘了就越过它去重放；编排层自己的写入边界（`appendMessageEntry`）在文件出生的那一刻把它从 live 半上摘掉。`inMemorySession` 那种永不落盘的袋同理。
-4. **模型选择不再是「种在袋上的值」。** 此前的装配把「这个会话开在哪个模型上」写进袋的 `sessionSetting.model`（内存、不落盘），袋留在表里，于是每个读者都能读到它。袋不再留下，种下的值也随之消失——所以这次把「这个会话在哪个模型上」改成**派生**：`session/model-choice.ts` 的 `modelChoiceOf(sessionManager, session, settings, chosen?)`，顺序是**文件记录的选择 → 打开时调用方指定的行 → 设置里的默认行**。前两档是每次都现算的，第三档读一次 `settings.json`。唯一无处可派生的是「打开时调用方指定了哪一行」（`openAgent` 的 test-only 缝），它记在 `live.openedOn` 上——live 半的正当内容，因为没有任何文件写过它。
+3. **`live.unwrittenSession` 是唯一驻留内存的会话记录**（已随 [0021](0021-lazy-session-identity.md) 删除），因为它不是缓存：会话随第一条消息才落盘（[0008](0008-session-two-file-format.md)），在 `create` 与那条消息之间，袋**就是**这个会话唯一的一份。读者读它时各按袋上的 `fileCreated` 现判生死：没落盘直接用这只袋，落盘了就越过它去重放；编排层自己的写入边界（`appendMessageEntry`）在文件出生的那一刻把它从 live 半上摘掉。`inMemorySession` 那种永不落盘的袋同理。
+4. **模型选择不再是「种在袋上的值」。** 此前的装配把「这个会话开在哪个模型上」写进袋的 `sessionSetting.model`（内存、不落盘），袋留在表里，于是每个读者都能读到它。袋不再留下，种下的值也随之消失——所以这次把「这个会话在哪个模型上」改成**派生**：`session/model-choice.ts` 的 `modelChoiceOf(sessionManager, session, settings, chosen?)`，顺序是**文件记录的选择 → 打开时调用方指定的行 → 设置里的默认行**。前两档是每次都现算的，第三档读一次 `settings.json`。唯一无处可派生的是「打开时调用方指定了哪一行」（`openAgent` 的 test-only 缝），它记在 `live.openedOn` 上（已随 [0021](0021-lazy-session-identity.md) 删除）——live 半的正当内容，因为没有任何文件写过它。
 5. **`applyModelSelection` 即写盘，而且写全。** 界面上的选择到达时就落到 `.json` 快照（旧形态留给「用到它的那次请求」）。这次多了一条不显眼但必要的细节：**wire id 必须一起写**。磁盘格式只在 `name` 与 `modelId` 都在时才落一行（`recordedModelOf`），只写名字的 `flushMeta` 会写出一份「没有模型」的快照——下一个进程读回来就是「从没选过」。
 6. **事件自带时间戳、角色与标题，投影不回读账本。** `entry_appended` 带上 `at` / `role`（user 消息还带 `title`），`server/src/projection.ts` 与 `mux.ts` 用它折侧边栏的行与窗格的 stamp，不再为每条追加的消息回调 `sessionManager` 问「这条什么时候、是什么」。此前那三次回读是「账本在内存里」的副产品；账本不再是内存里的一件东西，回读就得每次重放——所以三个事实改由事件携带。
 7. **id → 文件路径是一张小索引，不是缓存。** `open(id)` 原先是解析每一个 `.json` 找 id；改成按文件名匹配（`<stamp>_<id>.jsonl` / `<id>.jsonl`）后仍是一次 `readdirSync(recursive)`，在 450 个目录上是 177 ms，而它现在是每操作一次的热路径。所以 `Agent.paths` 记 id→路径：挂载时来自那只袋自己的 `sessionFileAbsPath`（会话可以不在本机 store 里——冒烟就把一份 fixture 递进来），第一次找不到时走一次全量扫描再记下。**路径背后的东西（会话、快照、leaf）仍然每次都现读**：这张索引回答的只有「文件在哪」，一个路径失效就回落到一次扫描。（本条由 [0014](0014-flat-session-store.md) 取代：store 改平后 id 就是地址，这张索引连同它的存在理由一起消失。）
-8. **进表与出表的判据换了第三条。** 进表仍是先到先得（`assembleAgentStateBySession` 唯一入口）；`evict` 仍拒在飞运行与挂起的审批，第三条从「durable 一半在盘上」换成「没有未落盘的袋」——语义相同，对象不同：以前问「有没有文件」，现在问 `live.unwrittenSession` 是不是空的（文件可能在第一次读之后才出生）。
+8. **进表与出表的判据换了第三条。**（第三条已随 [0021](0021-lazy-session-identity.md) 删除）进表仍是先到先得（`assembleAgentStateBySession` 唯一入口）；`evict` 仍拒在飞运行与挂起的审批，第三条从「durable 一半在盘上」换成「没有未落盘的袋」——语义相同，对象不同：以前问「有没有文件」，现在问 `live.unwrittenSession` 是不是空的（文件可能在第一次读之后才出生）。
 
 ## 后果
 
@@ -42,7 +42,7 @@
 - **每次操作一次重放**。命令面（改标题、切模型、切工具、`authorize`、`maybeCompact`）各自读一次盘；一次运行读一次。这是用户点名的核心诉求（「一次 run 只读一次盘」），代价是命令延迟从「内存里改一个字段」变成「毫秒级重放 + 一次原子写」。
 - **长会话的手感**。重放是 O(N)：一条 entry 一万条的会话，`authorize` 每次一调就是一万行的解析。这条现在没有缓解手段（没有增量索引、没有 leaf 指针的旁路），是明知的欠账。
 - **「装配」不再是唯一一次解析**。模型、工具集、审批这类「装配时算一次」的值，现在要么每次现算（模型：`modelChoiceOf`），要么本来就每次现算（工具集与审批）。装配仍在（队列模式、`live` 的出生），但它只造 live 半。
-- **测试里的旧袋一律是陈旧副本**。`openAgent({ session })` 交进去的那只袋在出生后就不再被任何人写——四条冒烟的红全是这一个模式（断言读回自己交进去的袋，而不是重放文件）。这条现在写进了 `scripts/` 的习惯里：探针要么重放，要么读 `live.unwrittenSession`。
+- **测试里的旧袋一律是陈旧副本**。`openAgent({ session })` 交进去的那只袋在出生后就不再被任何人写——四条冒烟的红全是这一个模式（断言读回自己交进去的袋，而不是重放文件）。这条现在写进了 `scripts/` 的习惯里：探针要么重放，要么读 `live.unwrittenSession`（此读法已随 [0021](0021-lazy-session-identity.md) 消失——探针一律重放）。
 - **`smoke-liveness` 的三条红不是这次带来的**：在改动前的 HEAD 上逐条同色（`the watched session's baseline arrived 0` 等），已单独记账。
 
 ## 不可逆性与代价
@@ -64,6 +64,25 @@
 - **表属于编排层**、私有、不注入（「不注入一张表」的判据保持；0011 的工具域例外是另一张表——`ToolManager` 的实例表在 Manager 手里，这张 live 半表在编排层手里）。
 - **先到先得**：一个 id 已在表里就返回表里那份，不覆盖——覆盖会换掉队列、订阅集合与在飞的运行。
 - **驱逐是边沿试、全量查**，删除权随表（这套形状自「一张表」起不变），hub 侧的观察与等待仍是它自己的两条判据。
-- **未落盘的会话永不驱逐**（驱逐判据的第三条，判据换了名字：`live.unwrittenSession` 非空）。
+- **未落盘的会话永不驱逐**（驱逐判据的第三条，判据换了名字：`live.unwrittenSession` 非空；本条已随 [0021](0021-lazy-session-identity.md) 取代——判据回到两条）。
 - **hold 的语义**（[0001](0001-transport-websocket-mux.md)；`hold` 原名 `claim`，一次全仓改名，语义与 wire 一字未动）：改变会话的请求与在飞的运行各一个，读与订阅都不拿。
 - **模型仍是每次请求从 `models.json` 现读的行**（[0012](0012-agent-facade.md)）：这次只换了「选哪一行」的求法，没动「行的事实怎么来」。
+
+## 2026-11-15 修订：订阅出口改为构造注入的 SessionSink
+
+决定 1 里的两张订阅集合（`listeners` / `eventListeners`）从袋上搬走了——这是本 ADR 内嵌副本裁决的
+自然延伸：订阅者既不是「进行中且磁盘上没有」的运行期状态（它不随会话而活，随**订阅者**而活），
+也不是任何一次运行要读写的东西，它骑在袋上的唯一作用是给 fanout 一个遍历对象。
+
+- **`AgentState = { sessionId, live }`**。编排层在构造时收到唯一一个 `SessionSink`
+  （`session/events.ts`，`{ onEvent(sessionId, event), onState(sessionId, snapshot) }`），fanout 的
+  `emitEvent` / `publishState` 在 emit 点直调它、按 sessionId 点名替哪只袋说话。签名不动
+  （仍是 `(agentState, event)`，[0017](0017-fanout-folded-into-agent.md) 的形状保持），只是不再读表。
+- **per-session 分发表归宿主（hub）所有。** hub 在构造编排层时递入自己的 sink 实现，按 sessionId
+  查自己的 `feedMap` 同步遍历分发；`SessionFeeds` / `SessionObserver` 形状不变（mux 零改动），
+  `feeds(sessionId)` 注册进 feedMap、交回成对的退订——清理靠 mux teardown 与 projection unfollow
+  这些既有退订，宿主的来去不触碰表。
+- **不变量逐条保持。** emit 时同步按序分发（命令与运行的事件从同一张表流出，no-gap 契约）；
+  attach 原子性（mux bind + `snapshotNow` baseline 仍在同一同步块）；没人递 sink 时工厂给 no-op，
+  语义与空表遍历零次相同。`Agent.onChange` / `Agent.onEvent` 这两个公开订阅方法随表一起退场——
+  订阅从来是宿主的事，[0012](0012-agent-facade.md) 的门面上不再有它。

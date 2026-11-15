@@ -67,18 +67,22 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   落盘、缺省即 false，账本为准、控制流不读，[ADR-0015](docs/adr/0015-snapshot-suspended-marker.md)）
   配同 stem 的只追加 JSONL 日志（六种 kind，账本、唯一事实），由
   无状态的 `SessionManager` 拥有——打开时 `fillSession` 合并两份重放出纯数据状态，host 在手时它是
-  这两个文件唯一的写者（ADR-0005）；文件随第一条消息**同时**出生（`.json` 是 commit marker），没说过话的
-  会话不落盘、不进侧边栏；标题是快照的 `title` 字段，没写过就从分支首条 user 消息派生；配对残缺
+  这两个文件唯一的写者（ADR-0005）；**会话随第一条消息出生**（[ADR-0021](docs/adr/0021-lazy-session-identity.md)，
+  `.json` 是 commit marker），没有第一条消息的会话不存在、不进侧边栏；标题是快照的 `title` 字段，没写过就从分支首条 user 消息派生；配对残缺
   或版本不对的会话直接删、不迁移。**这两个文件就是会话本身**：进程里没有一份副本，每次操作
-  现开一只袋、用完就丢（`Agent.getSessionBySessionId(id)`，ADR-0013）——唯一的例外是文件还没出生的那只袋，它在
-  `live.unwrittenSession` 上，因为那时它是唯一的一份。
-- **settings（设置）** —— `SettingManager` 是设置与模型行**唯一**的门：无状态门面、
-  不做任何缓存，每个方法现读全局与目录两份 `settings.json`，变更写回**已经提供该字段**的那一份；一次写入
-  对一切会话的下一次读取即生效，没有需要失效的副本。会话的模型行走同一只门（`modelCatalog()` /
-  `replaceModels()`）。窗口里「设置」这个词**分两级**：**会话级**（工具集合与审批，会话 `.json`
-  快照里记的是模式指针 `mode` 与会话自己的审批增量 `approval`，工具与审批基线随指针活态解析，
-  缺席即沿用全局默认；窗口里没有手动编辑入口，改动它只有「选一个模式」这一条路）与**应用级**（外观、模型清单、默认模型、bash 超时，以及全局默认的
-  工具集与审批）。
+  现开一只袋、用完就丢（`Agent.getSessionBySessionId(id)`，ADR-0013）。
+- **settings（设置）** —— 分三个类型名，各管一层（[ADR-0019](docs/adr/0019-settings-two-layers.md)）：
+  **`GlobalSettings`** 是 global 侧唯一一份 `<agent home>/settings.json` 补默认后的视图——`modes` 表
+  （模式 → 工具集 + 审批基线）、默认模型、外观、bash、重试与队列模式都在这里；**`SessionSettings`**
+  是会话 `.json` 快照的设置半（`Session` 上的 `settings` 字段），只持有**选择**：模式指针 `mode`、
+  审批增量 `approval`、模型 `{ name, modelId, thinkingLevel }`——不持有工具集、不持有完整模型行；
+  **`Settings`**（`core/src/settings.ts`）是两半**每次读取现算**的组合（`resolveSettings`）——活跃
+  工具集、有效审批、模式座位与从目录现查的完整模型行，闸门、prompt、请求构建与快照从这同一份作答，
+  产物只活在调用栈上、从不进任何袋。`SettingManager` 是设置与模型行**唯一**的门：无状态门面、不做
+  任何缓存，公开面四法（`getSettings()` / `applySettings(patch)` / `modelCatalog()` /
+  `replaceModels()`），一次写入对一切会话的下一次读取即生效，没有需要失效的副本。窗口里「设置」
+  这个词**分两级**：**会话级**（改动它只有「选一个模式」这一条路）与**应用级**（外观、模型清单、
+  默认模型、bash 超时，以及全局默认的工具集与审批）。
 - **model（模型）** —— `models.json` 里的一行**就是**一个 `ModelConfig`：一个端点、一个密钥、以及模型
   自己的事实（`id` 是接口认识的名字，`name` 既是身份也是标签）。`llm/model.ts` 的 `Model` 类把它变成发
   请求用的对象（`apiKey`、`thinkingLevel` 都骑在这个对象上），`stream(context, options)` 收一个
@@ -86,7 +90,7 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   才补上的 `api`、`input`、`cost` 是本构建的**常量**而不是配置项，所以磁盘上的行里没有它们。core 的
   `coerceModelConfig` 是"什么才允许被存下来"的唯一守门人；`createModel(config, level, transport?)` 是
   "一行 → 一个模型"，`modelFor(choice, catalog, transport?)` 是"一个**选择** → 一个模型"——按 `name` 现查
-  目录，查不到就用占位行的事实、保留用户选的名字。所以会话只存**选择**（`ModelChoice` 的 `name` 与
+  目录（`rowOrPlaceholder`），查不到就用占位行的事实、保留用户选的名字。所以会话只存**选择**（`ModelChoice` 的 `name` 与
   `thinkingLevel` 两个字段），行的事实从不复制进任何袋子：每次构造都重新读文件，改密钥/挪端点下一次
   请求就生效，没有需要失效的副本。
 - **thinking level（思考等级）** —— `off`、`low`、`high`、`max`：一次请求被要求的强度，骑在
@@ -95,9 +99,12 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   默认档，服务端只负责把收到的档位放上模型。
 - **model selection（模型选择）** —— 输入框的 `{ model, thinkingLevel }`，随消息发送（`ModelSelection`），
   不是一次配置变更；`applyModelSelection` 在收到的当下就把它写到快照的 `model` / `thinkingLevel`
-  字段（含行当前的 wire id——磁盘格式两半都在才落一行），没说过话的会话因此不落盘。
-  「这个会话在哪个模型上」是**派生**的：`modelChoiceOf`（`session/model-choice.ts`）按
-  「文件记录的选择 → 打开时指定的行 → 设置里的默认行」现算，不再有谁把它种在袋上（ADR-0013）。
+  字段（含行当前的 wire id——磁盘格式两半都在才落一行）。出生请求（`POST /api/sessions`，
+  ADR-0021）可随 body 带同一对——`createAndPrompt` 在第一条消息落盘之前经同一套袋级规则
+  （`writeModelSelection`）把它写上快照。
+  「这个会话在哪个模型上」是**派生**的：`resolveSettings` 的模型半按
+  「文件记录的选择 → 设置里的默认行」现算并给出完整行，不再有谁把它种在袋上
+  （ADR-0013、[ADR-0019](docs/adr/0019-settings-two-layers.md)）。
 - **transport（传输层）** —— 命令面是 REST：一条常驻 WebSocket mux（`/mux`）承载事件与连接级载荷，
   命令一个字不改地留在 REST。`createRoutes()` 是整张 API 表，`Router` 是唯一解释 URL 的地方，命令
   在被施加时作答——mux 的上行帧**不走 URL**，所以"加一个端点"这条形状管不到 `open` / `cancel`。
@@ -147,34 +154,38 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   轮结束。
 - **assembly（装配）** —— `assembleSession(sessionManager, settings, tools, options)` 收**必填**
   的三只 manager（显式实参，ADR-0017）+ 窄的
-  `AssembleAgentStateOptions`（原名 `OpenSessionOptions`；只有会话袋子与模型档位，
-  工作目录是袋子自己的 `sessionSetting.workDirAbsPath`，没有覆盖参数），按会话先、设置后的链
+  `AssembleAgentStateOptions`（原名 `OpenSessionOptions`；只有会话袋子，
+  工作目录是袋子自己的 `settings.workDirAbsPath`，没有覆盖参数），按会话先、设置后的链
   （`fillSession` → 设置现读 → `createLive`）装配出一份
   `AgentState`——装配产物**就是**状态（ADR-0013），只装配、不激活。**装配的产物是 live 半，不是
-  会话记录**（ADR-0013）：袋只是入参，它要么被丢掉（有文件，重放随时能再造），要么存进
-  `live.unwrittenSession`（还没文件，谁也再造不出来）；唯一调用者是 `Agent.assembleAgentStateBySession`
+  会话记录**（ADR-0013）：袋只是入参，出生的袋被丢掉——重放随时能再造它；唯一调用者是 `Agent.assembleAgentStateBySession`
   （原名 `open`，`adopt` 已删，装配并进门里，服务由此只能是编排层自己的，不再是包的公开面），而
-  这扇门本身已收成类私有：公开面上剩 `create`（造）、`hold` / `release`（用它）与
+  这扇门本身已收成类私有：公开面上剩 `createAndPrompt`（造，[ADR-0021](docs/adr/0021-lazy-session-identity.md)）、
+  `hold` / `release`（用它）与
   `snapshotOf` / `readSessionSnapshot`（读），何时装配、递哪只袋子进表不再是外界的动词。
   `createSessionAgent()` 是另一半：
   收 `{ settingsHome?, modelsHome?, api? }`（外加 test-only 的 `settings` / `tools` 两缝）并**自己造三只
   Manager**——Manager 不再是调用者的决定（[ADR-0012](docs/adr/0012-agent-facade.md)）——组成一个
   **编排层**，进程只需要一份（hub 构造时建它，递的只是 homes 与 api；打开的模型默认不进公开面——
   它是设置里的事实，装配每次从磁盘现读），测试与
-  只跑一个会话的调用者用 `openAgent() == create + open` 自组一份。`Agent` 按 id 键控
+  只跑一个会话的调用者用 `openAgent()` 自组一份。`Agent` 按 id 键控
   持有各会话的 **live 半**——公开方法收 id，会话现开一只袋（`getSessionBySessionId(id)`），live 半从表里现取：
-  `agentState.live` 是两条队列、在飞运行、partial、重试位、挂起位与 `unwrittenSession`；状态对象不出 core，server
-  侧读的是窄读一族（`titleOf` / `fileAbsPathOf` / `isSubmitting` 一类，纯数据）。它只决定会话
+  `agentState.live` 是两条队列、在飞运行、partial、重试位与挂起位；状态对象不出 core，server
+  侧读的是窄读一族（`titleOf` / `fileAbsPathOf` / `isRunning` 一类，纯数据）。它只决定会话
   **命名**哪一行（`modelFor()` 每次请求按选择现查目录，不缓存行的事实）。
 - **AgentState（会话状态）** —— 一个会话的 **live 半**是一件东西（ADR-0013）：
-  `{ sessionId, listeners, eventListeners, live }`。没有 `session`：会话是两个文件，每次操作
-  重放一次（一次运行读一次、带着走；一条命令读一次、用完就丢）。`live` 里除两条队列、在飞运行、
-  partial、重试与挂起位之外还有两样：`unwrittenSession`（唯一的内存会话记录——文件还没出生的那只袋）与
-  `openedOn`（打开时调用方指定的那一行模型，唯一无处可派生的值）。由 `Agent` 按 id 键控持有，
-  装配经 `Agent.assembleAgentStateBySession` 进表、`evict` / `remove` 是唯一出口，进程重启即清空；
+  `{ sessionId, live }`。没有 `session`：会话是两个文件，每次操作
+  重放一次（一次运行读一次、带着走；一条命令读一次、用完就丢）。订阅者也不在袋上：编排层构造时
+  注入唯一一个 `SessionSink`（`onEvent` / `onState` 两个回调），fanout 在 emit 点直调、按 sessionId
+  点名，per-session 的分发表归宿主所有——hub 用自己的 sink 实现它、以 `feedMap` 应答
+  `SessionFeeds`（形状不变，mux 零改动）。`live` 里只有两条队列、在飞运行、
+  partial、重试位与挂起位——运行期瞬态，盘上没有的东西（ADR-0021 删掉了曾住在这里的
+  未落盘袋与打开行）。由 `Agent` 按 id 键控持有，
+  装配经 `Agent.assembleAgentStateBySession` 进表、`tryRemoveAgentStateBySessionId` /
+  `deleteSessionBySessionId` 是唯一出口（原名 `evict` / `remove`，2026-11-15 改名），进程重启即清空；
   类型不出 core，server 侧只见纯数据窄读（ADR-0012）。
 - **workDirAbsPath（当前工作目录）** —— 一个会话的相对路径基准与命令起点，**按会话**，从会话自己快照的
-  setting 字段取（`session.sessionSetting.workDirAbsPath`，绝对）。它**不是围栏**：绝对路径原样接受，`..` 也能走出去，工具
+  设置半取（`session.settings.workDirAbsPath`，绝对）。它**不是围栏**：绝对路径原样接受，`..` 也能走出去，工具
   可以碰这台机器上的任何文件——目录只决定一个裸路径是什么意思。
 - **directory（目录）** —— 侧边栏的分组：在同一目录里开过的会话归在一组。它只是列表的组织方式，
   没有边界含义；组名可改、可「删除」（只从列表移除，磁盘不动），都是存在设置里的视图决定。

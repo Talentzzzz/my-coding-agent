@@ -67,12 +67,12 @@ ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/ node packages/
 
 ## 设置
 
-设置来自两个文件，按字段合并、目录那份赢：
+设置来自**一个**文件（[ADR-0019](docs/adr/0019-settings-two-layers.md)；曾经的项目级
+`<workDir>/.my-agent/settings.json` 层已删除，磁盘上的旧文件被忽略）：
 
 - `~/.my-agent/settings.json` —— 你在本机上的那份。
-- `<workDirAbsPath>/.my-agent/settings.json` —— 那个目录自己的那份，仓库可以提交它。
 
-两个文件接受同一套键：
+它接受这套键：
 
 ```json
 {
@@ -87,7 +87,7 @@ ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/ node packages/
 
 `bash` 是一条 shell 命令可以跑多久：`defaultTimeoutMs` 在该调用自己没有指定 `timeout_ms` 时生效，`maxTimeoutMs` 是任何调用的**上限**——要求更久的命令会被压到它，而这个压顶会在工具结果里说明。构建跑得久的项目，就把上限调高。
 
-UI 里做出的变更会回到**已经提供那个键**的文件，所以一个钉住了 `approval.bash` 的项目继续拥有它，其他一切则落到你 home 里的那份。`SettingsManager`（`packages/core/src/setting-manager.ts`）读写两者；它是**无属性服务**，进程里只有一份（hub 构造时建它），一处目录的设置在装配时解析一次、随登记处条目交给那个会话——所以同一个目录上的两个会话读到的永远是同一个对象，而会话自己什么都不持有。
+UI 里做出的变更回到这份文件。`SettingManager`（`packages/core/src/setting-manager.ts`）是它唯一的读写者；它是**无属性服务**，进程里只有一份（hub 构造时建它），每次读取都是文件的一次新读——所以一次变更对每个会话的下一次读取即生效，而会话自己什么都不持有。会话此刻的有效配置（活跃工具集、有效审批、完整模型行）是 `resolveSettings` 把这份文件与该会话快照上的选择**每次现算**出来的组合，从不驻留（[ADR-0019](docs/adr/0019-settings-two-layers.md)）。
 
 `appearance` 是一项设置而不是浏览器存储，这是有意的：桌面外壳每次启动都会挑一个新端口，而 `localStorage` 是按 origin 隔离的，所以存在那里的偏好会在窗口重新打开的那一刻被忘掉。`fontSize` 是整窗字号的基准，量程 10–22、默认 15（服务端会把它夹回这个区间）：滑杆改的是基准，标题、侧栏、代码、状态行等各档从它按各自的步差派生，整窗一起动。
 

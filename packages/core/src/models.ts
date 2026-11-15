@@ -265,25 +265,30 @@ export function rowFor(choice: ModelChoice, catalog: readonly ModelConfig[]): Mo
 }
 
 /**
+ * 选择点名的行，没有行应答时以占位行的事实、按被选的名字作答。
+ *
+ * 从 `modelFor` 的查找半抽出，供组合的设置（`settings.ts` 的 `resolveSettings`）与它共用：没有行
+ * 应答的名字不抛错——会话横竖要能构建，快照、usage 表、失败消息都需要一个良构的模型——占位行
+ * 替它作答，而传输层自己的「这个模型背后没有行」检查（{@link unconfiguredStream}）才是拒绝发送的
+ * 东西。保留被选的名字而不是替换掉：窗口看着一个行被删掉的会话时，该说的是它失去了哪个模型，
+ * 而不是它没有模型。
+ */
+export function rowOrPlaceholder(choice: ModelChoice, catalog: readonly ModelConfig[]): ModelConfig {
+	const row = rowFor(choice, catalog);
+	if (row !== undefined) return row;
+	return choice.name === undefined ? { ...PLACEHOLDER_CONFIG } : { ...PLACEHOLDER_CONFIG, name: choice.name };
+}
+
+/**
  * 一个选择所点名的模型：在目录里现查、现建、只用于一次请求、用完即丢。
  *
  * 查找按名字——行的名字是它的身份——且在这里、每次构造时进行，而不是提前铺进选择里。这正是让
  * 一把修正的密钥、一个挪走的端点、一个改过的窗口无需任何失效步骤、无需任何同步就抵达下一次请求
- * 的原因：没有副本会变陈旧。
- *
- * 没有行应答的名字不抛错。会话横竖要能构建——快照、usage 表、失败消息都需要一个良构的模型——
- * 所以这里以占位模型的事实、按被要求的名字作答，而传输层自己的「这个模型背后没有行」检查
- * （{@link unconfiguredStream}）才是拒绝发送的东西。档位在 `createModel` 里规范化，应用叫不出名字
- * 的字符串落在 "off"，而不是端点会拒绝的值上。
+ * 的原因：没有副本会变陈旧。档位在 `createModel` 里规范化，应用叫不出名字的字符串落在 "off"，
+ * 而不是端点会拒绝的值上。
  */
 export function modelFor(choice: ModelChoice, catalog: readonly ModelConfig[], transport?: ChatTransport): Model {
-	const row = rowFor(choice, catalog);
-	if (row !== undefined) return createModel(row, choice.thinkingLevel, transport);
-	// 保留被选的名字而不是替换掉：窗口看着一个行被删掉的会话时，该说的是它失去了哪个模型，
-	// 而不是它没有模型。
-	const placeholder: ModelConfig =
-		choice.name === undefined ? PLACEHOLDER_CONFIG : { ...PLACEHOLDER_CONFIG, name: choice.name };
-	return createModel(placeholder, choice.thinkingLevel, transport);
+	return createModel(rowOrPlaceholder(choice, catalog), choice.thinkingLevel, transport);
 }
 
 const ZERO_USAGE: AssistantMessage["usage"] = {
@@ -340,11 +345,6 @@ export function listModelOptions(models: readonly ModelConfig[]): ModelOption[] 
 			hasApiKey: (config.apiKey ?? "").length > 0,
 		};
 	});
-}
-
-/** 会话可能处于的每个思考档位，从低到高。 */
-export function thinkingLevelsFor(): string[] {
-	return [...getSupportedThinkingLevels()];
 }
 
 /**

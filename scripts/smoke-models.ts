@@ -19,7 +19,6 @@ import {
 	normalizeThinkingLevel,
 	placeholderModel,
 	rowFor,
-	thinkingLevelsFor,
 	unconfiguredStream,
 	ModelConfigStore,
 	type ModelChoice,
@@ -229,11 +228,6 @@ try {
 
 		const plain = model("claude-sonnet-4-5");
 		check("a 4.5 model needs no overrides", plain.compat === undefined, JSON.stringify(plain.compat));
-		check(
-			"and offers every level the app has",
-			JSON.stringify(thinkingLevelsFor()) === JSON.stringify(["off", "low", "high", "max"]),
-			JSON.stringify(thinkingLevelsFor()),
-		);
 
 		const newer = model("claude-opus-4-7");
 		check("4.7 rejects a temperature", newer.compat?.supportsTemperature === false, JSON.stringify(newer.compat));

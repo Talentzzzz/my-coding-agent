@@ -55,6 +55,14 @@ export interface SidebarState {
 	/** 每个有存储会话的目录，最近使用在前。 */
 	directories: readonly DirectoryGroup[];
 	activeSessionId?: string;
+	/**
+	 * 本窗口的草稿会话，按本地 id；缺失表示没有草稿。
+	 *
+	 * 草稿是只存在于这个窗口里、还没发过第一条消息的会话：它的行由调用方直接混进 `directories`，
+	 * 这里携带的是"哪些 id 是草稿"—— 行的样式（未发送的灰显）与菜单（只有丢弃，没有派生/重命名）
+	 * 由它分岔。服务端对草稿一无所知，所以行事实的另一条路（`session_row` 帧）永远轮不到它。
+	 */
+	drafts?: ReadonlySet<string>;
 	collapsed: boolean;
 	/**
 	 * 按目录路径分页的状态，appearance 设置持有的样子。
@@ -255,7 +263,10 @@ export class Sidebar {
 		let matches = 0;
 		for (const group of groups) {
 			const entry = pagingOf(sidebarState.paging, group.workDirAbsPath);
-			const label = sidebarState.directoryNames?.[group.workDirAbsPath] ?? directoryName(group.workDirAbsPath);
+			// 空键是草稿的假组（「未选择目录」）：它不是磁盘路径，没有文件夹名可取，标签自己说出来。
+			const label =
+				sidebarState.directoryNames?.[group.workDirAbsPath] ??
+				(group.workDirAbsPath.length === 0 ? "未选择目录" : directoryName(group.workDirAbsPath));
 			const wrapper = this.groupFor(group.workDirAbsPath, entry, label);
 			const rows = rowsOf(group);
 			for (const row of rows) this.treeRowMapById.set(row.session.id, row);
@@ -416,6 +427,14 @@ export class Sidebar {
 	 * 都更窄，从侧栏删除一个项目的人有权知道文件夹哪儿也不会去。
 	 */
 	private openDirectoryMenu(workDirAbsPath: string, label: string, x: number, y: number): void {
+		// 空键是草稿的假组（「未选择目录」）：它不是磁盘路径，没有「在这里新建」「重命名」「删除」
+		// 可言 —— 它唯一的出口是把打开的草稿在目录芯片上安个目录。菜单因此只留草稿自己的话。
+		if (workDirAbsPath.length === 0) {
+			openMenuAt(x, y, [
+				{ label: "先在输入条上方的目录芯片里选一个目录", title: "无目录草稿在目录选定之前不能开始对话" },
+			]);
+			return;
+		}
 		openMenuAt(x, y, [
 			{
 				icon: "plus",
@@ -497,8 +516,23 @@ export class Sidebar {
 	 * 在指针处打开，`contextmenu` 要求的方式。派生的 tooltip 写的是这次调用真正做的 —— 整份日志
 	 * 被复制、对话从那里继续 —— 因为"从最后一条继续"承诺得比派生多：分支会话最后*记录*的位置
 	 * 不是"最后一个回合"，而复制的是一切。
+	 *
+	 * 草稿行是另一张菜单：服务端对它一无所知，所以派生与重命名（两个都走服务端）没有可指的对象，
+	 * 只有"丢弃"—— 一个本地的、不可撤销的移除。
 	 */
 	private openSessionMenu(sessionId: string, x: number, y: number): void {
+		if (this.lastSidebarState?.drafts?.has(sessionId) === true) {
+			openMenuAt(x, y, [
+				{
+					icon: "trash",
+					label: "丢弃草稿",
+					danger: true,
+					title: "从侧栏移除这条还没发过消息的草稿",
+					onSelect: () => this.handlers.onDeleteSession(sessionId),
+				},
+			]);
+			return;
+		}
 		openMenuAt(x, y, [
 			{
 				icon: "fork",
@@ -575,6 +609,7 @@ export class Sidebar {
 	 */
 	private patchRow(parts: RowParts, button: HTMLElement, treeRow: TreeRow, sidebarState: SidebarState): void {
 		const isActive = treeRow.session.id === sidebarState.activeSessionId;
+		const isDraft = sidebarState.drafts?.has(treeRow.session.id) === true;
 
 		// tooltip 只由可能变化的东西构成，创建日期 —— 唯一要花一次真 `toLocaleString` 的部分 ——
 		// 每个时间戳格式化一次并保存。每帧重组字符串是廉价的；为从不变的日期每帧调 `Intl` 不是，
@@ -584,14 +619,18 @@ export class Sidebar {
 			created = { at: treeRow.session.createdAt, text: formatDate(treeRow.session.createdAt) };
 			parts.created = created;
 		}
+		// 草稿的 tooltip 是它自己的话：还没有任何记录可谈，目录与"未发送"就是全部。busy 对它
+		// 永远缺席 —— 没说过的会话不可能在运行。
 		// 父级按它*戴着*的名字指名，而不是它存的：派生的派生把后缀挂在父级自己的上面，所以
 		// tooltip 指名的是人真正在上面的行看到的行。busy 行骑在末尾：圆点是扫一眼，文字是细看。
 		const busy = busyOf(treeRow.session);
-		const tooltip =
-			(treeRow.parentLabel === undefined
-				? `${treeRow.label}\n${treeRow.session.workDirAbsPath}\n创建于 ${created.text}`
-				: `${treeRow.label}\n${treeRow.session.workDirAbsPath}\n派生自 ${treeRow.parentLabel}\n创建于 ${created.text}`) +
-			(busy === undefined ? "" : `\n${busy}`);
+		const draftDirectory = treeRow.session.workDirAbsPath.length === 0 ? "未选择目录" : treeRow.session.workDirAbsPath;
+		const tooltip = isDraft
+			? `${treeRow.label}\n${draftDirectory}\n未发送 —— 发出第一条消息时才创建`
+			: (treeRow.parentLabel === undefined
+					? `${treeRow.label}\n${treeRow.session.workDirAbsPath}\n创建于 ${created.text}`
+					: `${treeRow.label}\n${treeRow.session.workDirAbsPath}\n派生自 ${treeRow.parentLabel}\n创建于 ${created.text}`) +
+				(busy === undefined ? "" : `\n${busy}`);
 		if (parts.tooltip !== tooltip) {
 			parts.tooltip = tooltip;
 			button.title = tooltip;
@@ -600,6 +639,11 @@ export class Sidebar {
 		if (parts.title.textContent !== treeRow.label) parts.title.textContent = treeRow.label;
 		this.paintTime(parts, treeRow.session.modified);
 		this.paintSlot(parts, busy);
+
+		// 草稿的灰显是属性开关，与其他一切一样原地补丁：行从草稿转正（create 完成、真实行到达）
+		// 时摘下标记，CSS 规则接手其余。
+		if (isDraft) button.dataset.draft = "true";
+		else delete button.dataset.draft;
 
 		if (isActive) button.setAttribute("aria-current", "true");
 		else button.removeAttribute("aria-current");

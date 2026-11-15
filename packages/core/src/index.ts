@@ -1,4 +1,4 @@
-export { Agent, type AgentConfig, type AgentSessionEvent, type SessionEventListener, type SessionListener } from "./agent.ts";
+export { Agent, type AgentConfig, type AgentSessionEvent, type SessionEventListener, type SessionListener, type SessionSink } from "./agent.ts";
 // 恢复机器随 ADR-0016 住进 `agent.ts`；re-export 源直指它，包对外的名字不变。
 export { danglingToolCallsOf, recoverPendingToolCalls } from "./agent.ts";
 export type { AgentEvent } from "./types.ts";
@@ -34,19 +34,17 @@ export {
 	clampSidebarWidth,
 	DEFAULT_APPEARANCE,
 	DEFAULT_MODE_NAME,
-	DEFAULT_SETTINGS,
+	DEFAULT_GLOBAL_SETTINGS,
 	CONTENT_WIDTH_RANGE,
 	FONT_SIZE_RANGE,
 	mergeSettings,
-	PROJECT_DIR_NAME,
-	projectSettingsPath,
 	SIDEBAR_WIDTH_RANGE,
 	settingsPath,
 	type AppearanceSettings,
 	type DirectoryPaging,
+	type GlobalSettings,
 	type ModeSettings,
 	type RetrySettings,
-	type Settings,
 } from "./config.ts";
 export { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
 export {
@@ -109,7 +107,6 @@ export {
 	Model,
 	ModelConfigStore,
 	placeholderModel,
-	thinkingLevelsFor,
 	unconfiguredStream,
 	type ModelChoice,
 	type ModelConfig,
@@ -145,7 +142,7 @@ export {
 	type SessionRef,
 	type SessionRow,
 	type SessionSnapshot,
-	type SettingsSnapshot,
+	type GlobalSettingsSnapshot,
 	type StreamFailure,
 	type StreamFrame,
 	type StreamId,
@@ -190,7 +187,7 @@ export {
 	type SessionMeta,
 	type SessionInfo,
 	type Session,
-	type SessionSetting,
+	type SessionSettings,
 	type MessageEntry,
 	type LeafEntry,
 	type UsageEntry,
@@ -198,13 +195,19 @@ export {
 } from "./session/session-manager.ts";
 export { UnknownSessionError } from "./session/unknown-session.ts";
 export { createAgentState, createLive, type ActiveRun, type AgentState, type Live } from "./session/agent-state.ts";
-export { modeSeatOf, toolStateOf } from "./session/tool-config.ts";
+export { recordedSelectionOf } from "./session/session-manager.ts";
+export {
+	approvalToolsOf,
+	defaultToolNames,
+	resolveSettings,
+	selectModelRow,
+	type Settings,
+} from "./settings.ts";
 export {
 	inMemorySettingManager,
 	SettingManager,
 	type SettingManagerOptions,
 	type SettingsPatch,
-	type SettingsScope,
 	type SettingsStorage,
 } from "./setting-manager.ts";
 export {

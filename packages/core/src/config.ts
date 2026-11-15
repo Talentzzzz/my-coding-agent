@@ -9,15 +9,6 @@ export const AGENT_HOME = resolve(process.env.MY_AGENT_HOME ?? join(homedir(), "
 export const APP_NAME = "my-agent";
 
 /**
- * 会话存放自己设置的目录，名字与 agent home 的并列。
- *
- * 仓库可以提交 `<workDirAbsPath>/.my-agent/settings.json`；`SettingManager` 会把它合并到 agent home
- * 的文件之上，所以一份 checkout 能带上自己的审批与限额，而不碰机器级的设置。在项目作用域设置过
- * 东西之前，没有任何写入会触及这个目录。
- */
-export const PROJECT_DIR_NAME = ".my-agent";
-
-/**
  * 供应商调用失败时的重试策略。
  *
  * 逐字段对应 pi-ai 的 `RetryPolicy`，对象无需转换即可交给 `retryAssistantCall`：`maxRetries` 数的是
@@ -144,7 +135,14 @@ export interface ModeSettings {
 	approval: Record<string, boolean>;
 }
 
-export interface Settings {
+/**
+ * global 侧：`<AGENT_HOME>/settings.json` 补默认后的视图（ADR-0019）。
+ *
+ * 它持有的是**默认值**与**命名预设**——`modes` 表（模式 → 工具集 + 审批基线）、默认模型、外观、
+ * bash、重试——而一个会话自己的选择住在它 `.json` 快照的设置半（`SessionSettings`）上。两者在每次
+ * 读取时组合成 `Settings`（`packages/core/src/settings.ts`），组合是派生值，这一侧从不被任何袋持有。
+ */
+export interface GlobalSettings {
 	/**
 	 * 新会话打开在哪一行：`name`，或会话记录记录的 `<name>/<model-id>` ref。
 	 *
@@ -209,7 +207,7 @@ export interface Settings {
 	bash: BashSettings;
 }
 
-export const DEFAULT_SETTINGS: Settings = {
+export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
 	approval: { read: false, write: true, edit: true, glob: false, grep: false, bash: true },
 	appearance: { ...DEFAULT_APPEARANCE },
 	steeringMode: "one-at-a-time",
@@ -218,31 +216,26 @@ export const DEFAULT_SETTINGS: Settings = {
 	bash: { ...DEFAULT_BASH_SETTINGS },
 };
 
-/** 机器级的设置文件。`agentDir` 可配置，让测试能指到无害的地方。 */
+/** 机器级的设置文件，global 侧唯一的一份。`agentDir` 可配置，让测试能指到无害的地方。 */
 export function settingsPath(agentDir: string = AGENT_HOME): string {
 	return join(agentDir, "settings.json");
-}
-
-/** 工作目录可以提交的设置文件。是否写入由设置操作自行决定。 */
-export function projectSettingsPath(workDirAbsPath: string): string {
-	return join(resolve(workDirAbsPath), PROJECT_DIR_NAME, "settings.json");
 }
 
 /**
  * 把一份部分设置对象合并到默认值之上。未知的键被忽略。
  *
- * 这里只做值的规范化；读写文件是 `SettingManager` 的职责（它的读取纳入一个目录的两层，
- * `applySettings` 把变更写回），这正是同一套规范化能同时服务单层、双层与内存中变更的原因。
+ * 这里只做值的规范化；读写文件是 `SettingManager` 的职责（它读写的只有 global 侧这一份文件，
+ * `applySettings` 把变更写回），这正是同一套规范化能同时服务文件与内存中变更的原因。
  */
-export function mergeSettings(input: unknown): Settings {
+export function mergeSettings(input: unknown): GlobalSettings {
 	const record = isRecord(input) ? input : {};
 	const approval = isRecord(record.approval) ? record.approval : {};
 
-	const merged: Settings = {
-		approval: { ...DEFAULT_SETTINGS.approval },
+	const merged: GlobalSettings = {
+		approval: { ...DEFAULT_GLOBAL_SETTINGS.approval },
 		appearance: appearanceOr(record.appearance),
-		steeringMode: queueModeOr(record.steeringMode, DEFAULT_SETTINGS.steeringMode),
-		followUpMode: queueModeOr(record.followUpMode, DEFAULT_SETTINGS.followUpMode),
+		steeringMode: queueModeOr(record.steeringMode, DEFAULT_GLOBAL_SETTINGS.steeringMode),
+		followUpMode: queueModeOr(record.followUpMode, DEFAULT_GLOBAL_SETTINGS.followUpMode),
 		retry: retryOr(record.retry),
 		bash: bashOr(record.bash),
 	};
@@ -251,7 +244,7 @@ export function mergeSettings(input: unknown): Settings {
 	if (model !== undefined) merged.model = model;
 
 	// 两种取值都原样保留：`false` 是手编文件要求重新种回内置行的写法，在这里把它变成缺失会让这个
-	// 请求无法表达。与其他字段一样按层合并，所以项目文件的 `false` 覆盖 home 文件的 `true`。
+	// 请求无法表达。
 	if (typeof record.defaultModelSeeded === "boolean") merged.defaultModelSeeded = record.defaultModelSeeded;
 
 	const tools = stringListOrUndefined(record.tools);
@@ -289,10 +282,10 @@ function numberOr(value: unknown, fallback: number): number {
 function retryOr(value: unknown): RetrySettings {
 	const record = isRecord(value) ? value : {};
 	return {
-		enabled: typeof record.enabled === "boolean" ? record.enabled : DEFAULT_SETTINGS.retry.enabled,
-		maxRetries: countOr(record.maxRetries, DEFAULT_SETTINGS.retry.maxRetries),
-		baseDelayMs: numberOr(record.baseDelayMs, DEFAULT_SETTINGS.retry.baseDelayMs),
-		maxAgentDelayMs: numberOr(record.maxAgentDelayMs, DEFAULT_SETTINGS.retry.maxAgentDelayMs),
+		enabled: typeof record.enabled === "boolean" ? record.enabled : DEFAULT_GLOBAL_SETTINGS.retry.enabled,
+		maxRetries: countOr(record.maxRetries, DEFAULT_GLOBAL_SETTINGS.retry.maxRetries),
+		baseDelayMs: numberOr(record.baseDelayMs, DEFAULT_GLOBAL_SETTINGS.retry.baseDelayMs),
+		maxAgentDelayMs: numberOr(record.maxAgentDelayMs, DEFAULT_GLOBAL_SETTINGS.retry.maxAgentDelayMs),
 	};
 }
 
@@ -446,7 +439,7 @@ function modesOr(value: unknown): ModeSettings[] | undefined {
 		const tools = stringListOrUndefined(entry.tools);
 		if (tools === undefined) continue;
 		const approvalRecord = isRecord(entry.approval) ? entry.approval : {};
-		const approval = { ...DEFAULT_SETTINGS.approval };
+		const approval = { ...DEFAULT_GLOBAL_SETTINGS.approval };
 		for (const [key, value] of Object.entries(approvalRecord)) {
 			if (typeof value === "boolean") approval[key] = value;
 		}

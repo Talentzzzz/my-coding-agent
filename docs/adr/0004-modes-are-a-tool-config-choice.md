@@ -33,7 +33,7 @@ ui-revamp 03 号票要在这个之上加「模式」：一个命名的工具集�
 背上的：
 
 - **会话不记录"它在哪个模式上"**。窗口是从快照的 `(activeTools, approvals)` 与当前模式表**按值匹配**出来的：值相等即命中。模式被改名或改内容后，旧会话的匹配会失配（显示为未命中），这与其余按名字作身份的东西（模型行）同款代价。
-- 模式里的工具名是**当时**的构建给的：一个名字后来被构建丢弃的模式，施加时由窗口按 `allTools` 收窄（与 `applyRecordedToolConfig` 收窄记录集是同一条规则）。
+- 模式里的工具名是**当时**的构建给的：一个名字后来被构建丢弃的模式，施加时由窗口按本构建的名字清单收窄（启动时从 `GET /api/tools` 取，[ADR-0020](adr/0020-tool-names-endpoint.md)；与 `applyRecordedToolConfig` 收窄记录集是同一条规则）。
 - `modes` 的形状进了 settings 文件与 wire（`SettingsSnapshot`），改动它要同时动 core、server、web——它是一个加法字段，回退容易。
 
 ## 不可逆性与代价

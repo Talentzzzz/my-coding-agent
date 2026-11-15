@@ -85,7 +85,7 @@ const answers: ApprovalAnswers = {
 function payloadFrame(text: string): ServerFrame {
 	return {
 		streamId: "s",
-		item: { type: "status", usage: ZERO_USAGE, submitting: false, queued: [], isRetrying: false, retryAttempt: 0, pad: text },
+		item: { type: "status", usage: ZERO_USAGE, running: false, queued: [], isRetrying: false, retryAttempt: 0, pad: text },
 	} as unknown as ServerFrame;
 }
 

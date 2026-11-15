@@ -20,11 +20,9 @@ import {
 	diffText,
 	estimateTokens,
 	fillSession,
-	inMemorySession,
 	fileDiff,
 	isCacheProbablyExpired,
 	prepareCompaction,
-	PROJECT_DIR_NAME,
 	resolvePath,
 	sessionEntryToContextMessages,
 	SessionManager,
@@ -332,7 +330,8 @@ async function exerciseSessionManager(): Promise<void> {
 	check("stamped with an ISO time", typeof header?.timestamp === "string" && !Number.isNaN(Date.parse(header.timestamp)), header?.timestamp);
 	check("naming the directory it belongs to", header?.workDir === resolvePath(root), header?.workDir);
 	check("and no parent for a root session", header?.parentSession === undefined, String(header?.parentSession));
-	check("the file leads with the creation stamp", (session.sessionFileAbsPath ?? "").endsWith(`_${session.sessionId}.jsonl`), String(session.sessionFileAbsPath));
+	// 扁平 store（id 就是地址）：文件名就是 `<id>.jsonl`，没有别的前缀可依。
+	check("the file leads with the creation stamp", (session.sessionFileAbsPath ?? "").endsWith(`${session.sessionId}.jsonl`), String(session.sessionFileAbsPath));
 	check("derives a title from the first user message", store.getTitle(session) === "first question", store.getTitle(session));
 	check("the first entry has no parent", store.getEntries(session)[0]?.parentId === null, String(store.getEntries(session)[0]?.parentId));
 	check("each entry chains to the previous one", store.getEntries(session)[1]?.parentId === firstEntryId, String(store.getEntries(session)[1]?.parentId));
@@ -541,19 +540,15 @@ async function exerciseFileFormat(): Promise<void> {
 }
 
 /**
- * Settings come from two files and go back to the one that owns the field.
+ * Settings come from the one global file and go back to it (ADR-0019).
  *
- * The properties worth pinning are the two that are easy to get wrong: a project file must override
- * only the fields it names (a project that gates `write` must not un-gate `bash`), and a write must not
- * carry the rest of the in-memory view into the file, or a hand edit made while the process was running
- * is reverted by the next toggle.
+ * The property worth pinning is the one that is easy to get wrong: a write must not carry the rest of
+ * the in-memory view into the file, or a hand edit made while the process was running is reverted by
+ * the next toggle — and only the field a patch names moves, nested entries merge in place.
  */
 async function exerciseSettings(): Promise<void> {
 	const agentDir = join(root, "settings-agent-home");
-	const projectDir = join(root, "settings-project");
 	const globalFile = join(agentDir, "settings.json");
-	const projectFile = join(projectDir, PROJECT_DIR_NAME, "settings.json");
-	await mkdir(join(projectDir, PROJECT_DIR_NAME), { recursive: true });
 	await mkdir(agentDir, { recursive: true });
 	await writeFile(
 		globalFile,
@@ -562,26 +557,23 @@ async function exerciseSettings(): Promise<void> {
 		JSON.stringify({ model: "faux/faux-1", approval: { bash: false }, keepRecentTokens: 5_000, customKey: "kept" }),
 		"utf8",
 	);
-	await writeFile(projectFile, JSON.stringify({ approval: { write: false } }), "utf8");
 
 	const settingManager = new SettingManager({ home: agentDir });
-	check("reads the agent home's file", settingManager.getModel(projectDir) === "faux/faux-1", String(settingManager.getModel(projectDir)));
-	check("the project file overrides the field it names", settingManager.getApprovals(projectDir).write === false, JSON.stringify(settingManager.getApprovals(projectDir)));
-	check("and the global value beside it survives", settingManager.getApprovals(projectDir).bash === false, JSON.stringify(settingManager.getApprovals(projectDir)));
-	check("while an unnamed field keeps its default", settingManager.getApprovals(projectDir).edit === true, JSON.stringify(settingManager.getApprovals(projectDir)));
+	check("reads the agent home's file", settingManager.getSettings().model === "faux/faux-1", String(settingManager.getSettings().model));
+	check("a field the file names keeps its value", settingManager.getSettings().approval.bash === false, JSON.stringify(settingManager.getSettings().approval));
+	check("while an unnamed field keeps its default", settingManager.getSettings().approval.edit === true, JSON.stringify(settingManager.getSettings().approval));
 
-	// `approval` is the project file's to own, so this change belongs there and only this tool's key
-	// may move: writing the whole merged map would pin all six tools in the repository's file.
-	settingManager.applySettings(projectDir, { approval: { read: true } });
-	const project = JSON.parse(await readFile(projectFile, "utf8")) as { approval?: Record<string, boolean> };
-	check("an approval is written to the file that owns it", project.approval?.read === true, JSON.stringify(project));
-	check("keeping the other entries that file had", project.approval?.write === false, JSON.stringify(project));
-	check("and adding no key it never named", project.approval?.bash === undefined, JSON.stringify(project));
-	check("the change is in effect", settingManager.isApprovalRequired(projectDir, "read") === true);
-	check("with the other layer still supplying its own value", settingManager.isApprovalRequired(projectDir, "bash") === false);
+	// `approval` is named by the file, so only the key this patch names may move: writing the whole
+	// merged map would pin all six tools in the file.
+	settingManager.applySettings({ approval: { read: true } });
+	const onDisk = JSON.parse(await readFile(globalFile, "utf8")) as { approval?: Record<string, boolean> };
+	check("only the named key is written", onDisk.approval?.read === true, JSON.stringify(onDisk));
+	check("keeping the other entries the file had", onDisk.approval?.bash === false, JSON.stringify(onDisk));
+	check("and adding no key it never named", onDisk.approval?.write === undefined, JSON.stringify(onDisk));
+	check("the change is in effect", settingManager.getSettings().approval.read === true);
 
-	// No file names the queue mode, so it is a new setting and goes to the agent home's file.
-	settingManager.applySettings(projectDir, { steeringMode: "all" });
+	// No file names the queue mode, so it is a new setting and joins the same file.
+	settingManager.applySettings({ steeringMode: "all" });
 	const global = JSON.parse(await readFile(globalFile, "utf8")) as Record<string, unknown>;
 	check("a setting no file names goes to the global file", global.steeringMode === "all", JSON.stringify(global));
 	check(
@@ -589,26 +581,26 @@ async function exerciseSettings(): Promise<void> {
 		global.customKey === "kept" && global.model === "faux/faux-1" && global.keepRecentTokens === 5_000,
 		JSON.stringify(global),
 	);
-	check("and the mode is in effect", settingManager.getSteeringMode(projectDir) === "all", settingManager.getSteeringMode(projectDir));
+	check("and the mode is in effect", settingManager.getSettings().steeringMode === "all", settingManager.getSettings().steeringMode);
 
-	settingManager.applySettings(projectDir, { bash: { maxTimeoutMs: 1_800_000 } });
-	check("the bash ceiling moves with the patch", settingManager.getBashSettings(projectDir).maxTimeoutMs === 1_800_000, JSON.stringify(settingManager.getBashSettings(projectDir)));
-	check("leaving the default timeout beside it", settingManager.getBashSettings(projectDir).defaultTimeoutMs === 120_000, JSON.stringify(settingManager.getBashSettings(projectDir)));
+	settingManager.applySettings({ bash: { maxTimeoutMs: 1_800_000 } });
+	check("the bash ceiling moves with the patch", settingManager.getSettings().bash.maxTimeoutMs === 1_800_000, JSON.stringify(settingManager.getSettings().bash));
+	check("leaving the default timeout beside it", settingManager.getSettings().bash.defaultTimeoutMs === 120_000, JSON.stringify(settingManager.getSettings().bash));
 	const lowered = inMemorySettingManager({ bash: { defaultTimeoutMs: 9_000_000, maxTimeoutMs: 600_000 } });
-	check("a default above the ceiling is pulled down to it", lowered.getBashSettings(projectDir).defaultTimeoutMs === 600_000, JSON.stringify(lowered.getBashSettings(projectDir)));
+	check("a default above the ceiling is pulled down to it", lowered.getSettings().bash.defaultTimeoutMs === 600_000, JSON.stringify(lowered.getSettings().bash));
 
 	// An edit made outside this process must survive the next write.
 	await writeFile(globalFile, JSON.stringify({ ...global, model: "hand/edited" }), "utf8");
-	settingManager.applySettings(projectDir, { followUpMode: "all" });
+	settingManager.applySettings({ followUpMode: "all" });
 	const rewritten = JSON.parse(await readFile(globalFile, "utf8")) as Record<string, unknown>;
 	check("a hand edit is not reverted by the next write", rewritten.model === "hand/edited", JSON.stringify(rewritten));
 	check("which still lands its own change", rewritten.followUpMode === "all", JSON.stringify(rewritten));
 
 	// A settings file that cannot be parsed is an error, not a silent fall back to the defaults.
-	await writeFile(projectFile, "{ not json", "utf8");
+	await writeFile(globalFile, "{ not json", "utf8");
 	let failure = "";
 	try {
-		settingManager.getSettings(projectDir);
+		settingManager.getSettings();
 	} catch (error) {
 		failure = (error as Error).message;
 	}
@@ -651,24 +643,24 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	const id = state.sessionId;
 
 	check("opens with the stored session record", agent.snapshot(id).messages.length === 1, String(agent.snapshot(id).messages.length));
-	check("is idle before any prompt", agent.snapshot(id).submitting === false);
+	check("is idle before any prompt", agent.snapshot(id).running === false);
 
 	agent.applyConfig(id, { approval: { bash: true } });
 	// The session reads and writes the manager it was given — through the files (or the in-memory
 	// storage) behind it, not a copy: a config patch beyond the approval half is routed to the
 	// settings and read back by the next call, which is what the write-through below proves. The
 	// value is put back, because the exercises that follow read through the same manager.
-	const modeBefore = settings.getSteeringMode(root);
+	const modeBefore = settings.getSettings().steeringMode;
 	agent.applyConfig(id, { steeringMode: "all" });
-	check("the session reads and writes the settings it was given", settings.getSteeringMode(root) === "all", settings.getSteeringMode(root));
+	check("the session reads and writes the settings it was given", settings.getSettings().steeringMode === "all", settings.getSettings().steeringMode);
 	agent.applyConfig(id, { steeringMode: modeBefore });
 	// An approval chosen in a session is that session's own: it lives on the session's `.json`
 	// snapshot, and the settings file — which every other session over this directory reads
 	// — is left exactly as it was.
 	check(
 		"applyConfig leaves the settings file alone",
-		settings.getApprovals(root).bash === false,
-		JSON.stringify(settings.getApprovals(root)),
+		settings.getSettings().approval.bash === false,
+		JSON.stringify(settings.getSettings().approval),
 	);
 	check("and the session reflects it", agent.getApprovals(id).bash === true, JSON.stringify(agent.getApprovals(id)));
 	// Read back from the file rather than from the bag this exercise opened: the write lands through a
@@ -721,6 +713,8 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	});
 	check("reopening restores the approval the session chose", reopened.getApprovals(reloaded.sessionId).bash === true, JSON.stringify(reopened.getApprovals(reloaded.sessionId)));
 	const otherState = createSession(root);
+	// ADR-0021：会话随第一条消息出生，编排层的读取按 id 现开文件——先落一条首消息再打开。
+	store.appendMessage(otherState, { role: "user", content: [{ type: "text", text: "another session's first words" }], timestamp: 1 });
 	const other = await openAgent({
 		session: otherState,
 		settings,
@@ -786,7 +780,8 @@ function exerciseFillTools(): void {
 }
 
 function exerciseCompaction(): void {
-	const session = inMemorySession(root);
+	// ADR-0021 后不再用内存会话：追加循环本身就会让文件随第一条消息出生，其余操作与从前相同。
+	const session = createSession(root);
 	for (let index = 0; index < 10; index += 1) {
 		store.appendMessage(session, { role: "user", content: [{ type: "text", text: `question ${index} ${"x".repeat(50)}` }], timestamp: index * 2 + 1 });
 		store.appendMessage(session, {
@@ -890,11 +885,14 @@ function project(entries: readonly SessionEntry[]): Message[] {
  * written by hand: whether a clear happens is a decision about the clock, and only a file can hold
  * yesterday's time. Writing it also lets the test read the session back the way a new process would.
  */
-async function writeIdleSession(dir: string, entries: readonly SessionEntry[], at: number): Promise<string> {
-	const file = join(dir, "idle-session.jsonl");
+async function writeIdleSession(storeDir: string, workDir: string, entries: readonly SessionEntry[], at: number): Promise<string> {
+	// ADR-0021 之后编排层按 id 现开文件，而 id→路径的唯一规则是扁平 store 里的 `<id>.jsonl`
+	// ——手写的 fixture 因此必须写进 store 本身，`open(id)` 才找得到它；工作目录仍由快照的
+	// `workDir` 指名，与存放位置无关。
+	const file = join(storeDir, "idle-session.jsonl");
 	await writeFile(
 		sessionMetaPath(file),
-		`${JSON.stringify({ version: CURRENT_SESSION_VERSION, id: "idle-session", timestamp: new Date(at).toISOString(), workDir: resolvePath(dir) }, null, "\t")}\n`,
+		`${JSON.stringify({ version: CURRENT_SESSION_VERSION, id: "idle-session", timestamp: new Date(at).toISOString(), workDir: resolvePath(workDir) }, null, "\t")}\n`,
 		"utf8",
 	);
 	const lines: string[] = [];
@@ -936,7 +934,7 @@ async function exercisePruning(): Promise<void> {
 
 	// The entries are appended with today's stamps, so the store is rewound to the idle conversation the
 	// clock test is about: this is the only way to hand a session a record that sat for two hours.
-	const fixture = await writeIdleSession(root, store.getEntries(session), longAgo);
+	const fixture = await writeIdleSession(storeRoot, root, store.getEntries(session), longAgo);
 	const store2 = fillSession(fixture);
 	const entries = store.getEntries(store2);
 
@@ -987,16 +985,21 @@ async function exercisePruning(): Promise<void> {
 		contextWindow: 33_500,
 		maxTokens: 8_192,
 	};
+	const announced: string[] = [];
 	const agent = await openAgent({
 		session: store2,
 		settings: inMemorySettingManager(
 			{ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } },
 			[configured],
 		),
-	});
-	const announced: string[] = [];
-	agent.onEvent(store2.sessionId, (event) => {
-		if (event.type === "compaction" || event.type === "compaction_failed" || event.type === "tool_results_cleared") announced.push(event.type);
+		// Dispatch leaves core through the sink handed in at construction (ADR-0013): the removed
+		// `Agent.onEvent` becomes the subscription this sink answers directly.
+		sink: {
+			onEvent: (_sessionId, event) => {
+				if (event.type === "compaction" || event.type === "compaction_failed" || event.type === "tool_results_cleared") announced.push(event.type);
+			},
+			onState() {},
+		},
 	});
 
 	check("the trigger fired before the clear", estimateTokens(project(store.buildContextEntries(store2))) > 500);

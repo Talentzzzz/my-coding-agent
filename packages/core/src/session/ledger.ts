@@ -123,7 +123,7 @@ export type SessionEntryMapById = Map<string, SessionEntry>;
  * 是输入框一起发送的一个选择，所以内存把它们作为一个对象持有。每个选择字段在选定之前缺席，与盘上
  * 字段一致；`suspended` 是唯一的例外——是推导出的事实而不是选择，始终存在。
  */
-export interface SessionSetting {
+export interface SessionSettings {
 	/** session 打开时所在的工作目录，绝对路径。 */
 	workDirAbsPath: string;
 	/**
@@ -168,7 +168,7 @@ export interface SessionSetting {
  * 并对它调用任何操作。
  *
  * 这些字段是两个文件重放进去的内容。身份是袋自己的——id、创建时间戳、两个文件路径——
- * {@link SessionSetting} 持有 `.json` 快照的当前选择，在内存里重新组合：盘上文件保持扁平，fill 路径
+ * {@link SessionSettings} 持有 `.json` 快照的当前选择，在内存里重新组合：盘上文件保持扁平，fill 路径
  * 和 `metaOf`（session-manager.ts）是仅有的翻译点。`jsonlEntries` 是 `.jsonl` 条目流：每条条目带自己的 id 和
  * parent 的 id，所以这条流读起来是一棵树，`leafId` 就是对话此刻所在的位置。追加产生叶子的孩子；
  * `branch`（session-manager.ts）把叶子移到更早的条目——并把移动记录为一条 {@link LeafEntry}，新读者由此恢复——
@@ -197,7 +197,7 @@ export interface Session {
 	 */
 	fileCreated: boolean;
 	/** session 自己的选择，即盘上快照扁平字段在内存中的重组。 */
-	sessionSetting: SessionSetting;
+	settings: SessionSettings;
 	jsonlEntries: SessionEntry[];
 	sessionEntryMapById: SessionEntryMapById;
 	leafId: string | null;

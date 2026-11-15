@@ -8,7 +8,6 @@ import {
 	type SessionSnapshot,
 	type UsageTotals,
 } from "../protocol.ts";
-import { thinkingLevelsFor } from "../models.ts";
 import type { SessionEntry, SessionManager, Session } from "./session-manager.ts";
 
 /**
@@ -31,9 +30,8 @@ export interface SnapshotInput {
 	model: Model<Api>;
 	/** 会话所在的模式座位；undefined 即内置「默认」。 */
 	mode?: string;
-	allTools: string[];
 	/** 已由调用方按其持有的设置判断过；见 `SessionSnapshot`。 */
-	submitting: boolean;
+	running: boolean;
 	queued: QueuedPrompt[];
 	isRetrying: boolean;
 	retryAttempt: number;
@@ -54,7 +52,7 @@ export interface SnapshotInput {
  * 正在做的事回答，而本进程*没有*在跑的 session 仅凭 session 文件回答——读一份会话记录不像跑
  * 一份那么贵，而且读取不会在 hub 里留下痕迹。
  *
- * 冷读者无法知道的五个字段——`submitting`、`queued`、`isRetrying`、`retryAttempt`、
+ * 冷读者无法知道的五个字段——`running`、`queued`、`isRetrying`、`retryAttempt`、
  * `pendingApprovals`——是输入而不是发现，这正是两种回答可比的原因：它们恰好只在这五处不同。
  */
 export function sessionSnapshot(snapshotInput: SnapshotInput): SessionSnapshot {
@@ -70,16 +68,14 @@ export function sessionSnapshot(snapshotInput: SnapshotInput): SessionSnapshot {
 		title: sessionManager.getTitle(session),
 		model: snapshotInput.model.name,
 		thinkingLevel: snapshotInput.model.thinkingLevel ?? "off",
-		thinkingLevels: thinkingLevelsFor(),
 		...(snapshotInput.mode === undefined ? {} : { mode: snapshotInput.mode }),
-		allTools: snapshotInput.allTools,
 		messages,
 		messageEntryIds: sessionManager.getContextMessageEntryIds(session),
 		branchPoints: sessionManager.getBranchPoints(session),
 		leafId: session.leafId,
 		...(snapshotInput.partial === undefined ? {} : { partial: snapshotInput.partial }),
 		...(meta.parentSession === undefined ? {} : { parentSession: meta.parentSession }),
-		submitting: snapshotInput.submitting,
+		running: snapshotInput.running,
 		queued: snapshotInput.queued,
 		isRetrying: snapshotInput.isRetrying,
 		retryAttempt: snapshotInput.retryAttempt,

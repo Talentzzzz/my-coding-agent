@@ -104,7 +104,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	/** 从一个运行中的会话读出那两个字段。 */
 	const liveOf = (host: HostedSession): LiveFields => {
 		const snapshot = hub.agent.snapshot(host.id);
-		return { running: snapshot.submitting, pending: snapshot.pendingApprovals.length };
+		return { running: snapshot.running, pending: snapshot.pendingApprovals.length };
 	};
 
 	/**
@@ -115,10 +115,13 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	const follow = (sessionId: string, host: HostedSession): void => {
 		if (following.has(sessionId)) return;
 
-		const offEvent = hub.agent.onEvent(sessionId, (event) => onEvent(sessionId, event));
-		const offChange = hub.agent.onChange(sessionId, (snapshot) => {
+		// 订阅走 hub 自己的 feed 面：分发表是 hub 的（sink 从编排层把事件带进 feedMap），编排层的
+		// 袋上不再挂着订阅者。
+		const feeds = hub.feeds(sessionId);
+		const offEvent = feeds.onEvent((event) => onEvent(sessionId, event));
+		const offChange = feeds.onChange((snapshot) => {
 			const next = liveRow(sessionId, {
-				running: snapshot.submitting,
+				running: snapshot.running,
 				pending: snapshot.pendingApprovals.length,
 			});
 			if (next !== undefined) publish(next);
@@ -213,7 +216,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 						// 读取中途回来的 host 通过自己的 feed 拥有行；读取中途被删的会话没有行可落定——forget 已经把它拿走了。
 						const current = rows.get(sessionId);
 						if (current === undefined || following.has(sessionId)) return;
-						publish({ ...current, running: snapshot.submitting, pending: snapshot.pendingApprovals.length });
+						publish({ ...current, running: snapshot.running, pending: snapshot.pendingApprovals.length });
 					},
 					() => {
 						// 会话在读取中途被删；行已随之而去。

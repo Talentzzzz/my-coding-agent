@@ -64,7 +64,7 @@ async function waitAgentEnd(wire: WireClient, sessionId: string, ms = 15_000): P
 /** 等说 run 结束了的那个 status 帧，无论它走了哪条路到达那里。 */
 async function waitSettled(wire: WireClient, sessionId: string, ms = 15_000): Promise<boolean> {
 	return until(
-		() => wire.items(sessionId).some((message) => message.type === "status" && (message as { submitting?: boolean }).submitting === false),
+		() => wire.items(sessionId).some((message) => message.type === "status" && (message as { running?: boolean }).running === false),
 		ms,
 	);
 }
@@ -177,11 +177,11 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a lane on an idle session holds nothing and ends nothing\n");
 
-	const created = await request(rig.url, "POST", "/api/sessions");
+	const created = await request(rig.url, "POST", "/api/sessions", { text: "the idle conversation" });
 	const idleId = (created.payload as { sessionId: string }).sessionId;
 	const idle = await wire.open(idleId);
 	check("the lane opened with the snapshot", idle.id === idleId);
-	check("and an idle session says so", idle.submitting === false, String(idle.submitting));
+	check("and an idle session says so", idle.running === false, String(idle.running));
 	check("subscribing took no hold", holds === 0, `holds=${holds}`);
 
 	await sleep(QUIET_MS);
@@ -197,9 +197,9 @@ try {
 	check("and neither read held anything", holds === 0, `holds=${holds}`);
 
 	// 一次读要经过 hub 自己的驱逐漏斗（`hub.snapshotOf` 问一次，所以无人看着的 state 不逗留）。
-	// 必须熬过它的是 session 创建在这里留下的东西：它还没有文件，所以它的 state *就是* session，
-	// 丢掉它等于删掉这个 id（ADR-0013）。
-	check("the state creation left behind survived the read", inTable(idleId));
+	// 而出生运行自己的结束路径已经把 live 半带出表——跑完即散（ADR-0013 的缓存语义），冷读
+	// 现装一只用完即弃的袋来作答，不登记。丢掉它不是删除：文件已在（ADR-0021）。
+	check("the run's own end swept the state; the cold read leaves it swept", !inTable(idleId));
 
 	// ---------------------------------------------------------------------------------------------
 	// 2. run 结束不结束车道；hold 的释放才结束。
@@ -243,7 +243,7 @@ try {
 	check("the run started", await until(() => rig.hub.live.includes(idleId), 5_000), rig.hub.live.join(","));
 
 	const midflight = await wire.open(idleId);
-	check("the mid-run baseline reports the run", midflight.submitting === true, String(midflight.submitting));
+	check("the mid-run baseline reports the run", midflight.running === true, String(midflight.running));
 	// wire 客户端上的 `ended` 是"曾经终过"，而 idleId 的车道在上面那节已经终过一次，所以这里的
 	// 断言数的是这次 open 之后的 end 次数，而不是读那个布尔。
 	const endsAtOpen = wire.endOf(idleId).ends;
@@ -259,7 +259,7 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a run that fails under a watcher is heard in three places\n");
 
-	const watched = await request(rig.url, "POST", "/api/sessions");
+	const watched = await request(rig.url, "POST", "/api/sessions", { text: "the watched conversation" });
 	const watchedId = (watched.payload as { sessionId: string }).sessionId;
 	const watchedBench = await rig.hub.hold(watchedId);
 	const restoreWatched = sabotagePersistence(rig.hub);
@@ -279,7 +279,9 @@ try {
 	console.error = realError;
 
 	check("and the server logged what no frame could carry", logged.length > 0, JSON.stringify(logged));
-	check("the session is exactly what the failure let survive", ((await request(rig.url, "GET", `/api/sessions/${encodeURIComponent(watchedId)}`)).payload as { session: { messages: unknown[] } }).session.messages.length === 1);
+	// birth 的往来（ADR-0021：user + 出错即答的 assistant）早已落盘，这次失败只丢它自己的
+	// assistant 消息——留下的是出生的两条加上这次 prompt 的 user 消息。
+	check("the session is exactly what the failure let survive", ((await request(rig.url, "GET", `/api/sessions/${encodeURIComponent(watchedId)}`)).payload as { session: { messages: unknown[] } }).session.messages.length === 3);
 	// 补丁在下一节运行之前摘掉：它落在的是 hub 自己的服务上。
 	restoreWatched();
 
@@ -292,7 +294,7 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a run that fails with nobody watching is heard only in the log\n");
 
-	const unwatched = await request(rig.url, "POST", "/api/sessions");
+	const unwatched = await request(rig.url, "POST", "/api/sessions", { text: "the unwatched conversation" });
 	const unwatchedId = (unwatched.payload as { sessionId: string }).sessionId;
 	const unwatchedBench = await rig.hub.hold(unwatchedId);
 	const restoreUnwatched = sabotagePersistence(rig.hub);
@@ -312,13 +314,13 @@ try {
 		rig.hub.live.includes(unwatchedId),
 		rig.hub.live.join(","),
 	);
-	// run 的结束不需要任何 lane 就可观察：循环结束后读路径答 `submitting: false`。只有那时才
+	// run 的结束不需要任何 lane 就可观察：循环结束后读路径答 `running: false`。只有那时才
 	// 关闭日志捕获——更早恢复会让失败跑出它要监视的窗口。（手写的轮询，因为 `until` 收的是
 	// 同步谓词，async 谓词会被读成永远为真。）
 	const settleDeadline = Date.now() + 10_000;
 	for (;;) {
 		const read = await request(rig.url, "GET", `/api/sessions/${encodeURIComponent(unwatchedId)}`);
-		if (((read.payload as { session?: { submitting?: boolean } }).session?.submitting ?? true) === false) break;
+		if (((read.payload as { session?: { running?: boolean } }).session?.running ?? true) === false) break;
 		if (Date.now() > settleDeadline) break;
 		await sleep(50);
 	}
@@ -352,7 +354,7 @@ try {
 			.filter((event): event is { type: "message_update"; delta: { kind: string; text: string } } => event?.type === "message_update");
 
 	const deltaAnswer = "x".repeat(2_400);
-	const deltaSession = await request(rig.url, "POST", "/api/sessions");
+	const deltaSession = await request(rig.url, "POST", "/api/sessions", { text: "the delta conversation" });
 	const deltaId = (deltaSession.payload as { sessionId: string }).sessionId;
 	const deltaBench = await rig.hub.hold(deltaId);
 	const deltaLane = await wire.open(deltaId);

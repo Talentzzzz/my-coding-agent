@@ -147,6 +147,22 @@ export type AgentSessionEvent =
 export type SessionEventListener = (event: AgentSessionEvent) => void;
 
 /**
+ * 编排层向宿主交付事件与快照的一对回调。
+ *
+ * 分发曾是每只 AgentState 上的两张匿名回调表（`listeners` / `eventListeners`），如今归宿主所有：
+ * per-session 的订阅者表住在构造编排层的那个进程半（hub 的 feedMap），core 在构造时收到唯一一个
+ * sink，在 emit 点直调——同步、按序、命令与运行从同一条路流出。形状刻意按 sessionId 键控而不是
+ * 按袋：sink 只有一个，而它服务的会话有很多，每次调用点名自己是替哪一只袋说的——宿主按这个 id
+ * 查自己的分发表。
+ */
+export interface SessionSink {
+	/** 一个 session 发布的每个事件，按发生顺序。 */
+	onEvent(sessionId: string, event: AgentSessionEvent): void;
+	/** 一个 session 发布的新快照：每次有东西替它发布了状态。 */
+	onState(sessionId: string, snapshot: SessionSnapshot): void;
+}
+
+/**
  * 引擎一条 `message_update` 值得的 delta，对不带字符的帧返回 `undefined`。
  *
  * start/end 帧和 tool call 的 delta 都被丢弃：block 边界不需要自己的帧——一个 block 的第一个

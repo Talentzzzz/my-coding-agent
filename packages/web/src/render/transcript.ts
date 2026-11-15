@@ -191,6 +191,8 @@ export class TranscriptView {
 	/** 上一次完整绘制是否在流式 —— 容器类和运行的结束都靠它。 */
 	private drawnStreaming = false;
 	private welcome?: HTMLElement;
+	/** 空态问题的当前文本；undefined 是默认的那个（「想做点什么?」）。 */
+	private welcomeText: string | undefined;
 	private sticky = true;
 	/** 滚动读取推迟到的那个帧，让一串事件只花一次读取。 */
 	private scrollRead?: number;
@@ -891,9 +893,23 @@ export class TranscriptView {
 		if (this.welcome) return;
 
 		const welcome = element("div", "welcome");
-		welcome.append(element("h2", undefined, "想做点什么?"));
+		welcome.append(element("h2", undefined, this.welcomeText ?? "想做点什么?"));
 		this.welcome = welcome;
 		this.container.append(welcome);
+	}
+
+	/**
+	 * 空态的问题文本；undefined 恢复默认的那个。
+	 *
+	 * 无目录草稿不能开始对话，窗口把问题换成先选目录的指引 —— 文本由窗口按会话状态给出，视图只
+	 * 负责显示：下一次 `setWelcome` 画出的问题就是它，已经在屏上的就地改写。
+	 */
+	setWelcomeText(text: string | undefined): void {
+		if (this.welcomeText === text) return;
+		this.welcomeText = text;
+		if (this.welcome === undefined) return;
+		const heading = this.welcome.querySelector("h2");
+		if (heading !== null) heading.textContent = text ?? "想做点什么?";
 	}
 }
 

@@ -19,7 +19,15 @@ import { openMenu, openMenuAt, type MenuItem } from "./render/menu.ts";
 import { StatusBar } from "./render/statusbar.ts";
 import { element, icon } from "./dom.ts";
 import { DEFAULT_THINKING_LEVEL, seedDefaultModel } from "./default-model.ts";
-import type { ConnectionItem, ModelOption, ServerMessage, SessionSnapshot, DirectoryPaging } from "@my-agent/core/protocol";
+import type {
+	ConnectionItem,
+	DirectoryGroup,
+	ModelOption,
+	ServerMessage,
+	SessionSnapshot,
+	SessionRow,
+	DirectoryPaging,
+} from "@my-agent/core/protocol";
 
 /**
  * 桌面外壳给页面增加的唯一一件事：操作系统自己的文件夹选择器。应用本身不浏览文件系统 ——
@@ -38,6 +46,27 @@ declare global {
  */
 const DEFAULT_MODE_NAME = "默认";
 
+/**
+ * 客户端草稿会话：新建了但还没说第一句话的会话。
+ *
+ * 一个只存在于本窗口内存里的意图 —— id 是本地造的，服务端对它一无所知。目录可以缺席：顶部
+ * 「新建会话」产出的草稿没有目录，输入框禁用、侧栏没有它的组，直到目录芯片选定 —— 选定即写入，
+ * 草稿行随之归组；侧栏每组标题的「新建会话」与「添加目录」仍带目录出生，直接可用。攒下的会话级
+ * 选择（模式）也住在这里：它们随第一条消息一起在出生请求里落地，模型与档位同样随出生 body 出发。
+ *
+ * 草稿的一生以出生请求结束：发第一条消息让服务端把会话与消息原子生出，本地行由真实行取代。刷新
+ * 页面丢掉一切 —— 「只在客户端存在」的含义正包括它不比窗口活得久。
+ */
+interface DraftSession {
+	id: string;
+	/** 会话将落地的目录；undefined 表示还没选 —— 输入框在选定之前禁用。 */
+	workDirAbsPath?: string;
+	/** 草稿上选的模式指针；缺省就是内置「默认」，与快照的 `mode` 字段同一语义。 */
+	mode?: string | null;
+	/** 草稿创建的本地时刻，供侧栏行的时间字段。 */
+	createdAt: number;
+}
+
 /** 一次失败的请求该说什么。状态码是它的一部分：404 和 409 意味着不同的事。 */
 function describe(error: unknown): string {
 	if (error instanceof ApiError) return error.message;
@@ -48,21 +77,21 @@ function describe(error: unknown): string {
  * 这个帧是否是某次 send 正在等待的运行的最后一句话。
  *
  * 两个成员携带这个事实，且各自把它藏在不同的地方，这就是为什么这是一个 helper 而不是调用点上的
- * 两个条件：运行的最后一句话是二者中恰好到达的那个上的 `submitting: false`，而 send 引用的释放
+ * 两个条件：运行的最后一句话是二者中恰好到达的那个上的 `running: false`，而 send 引用的释放
  * 绝不能取决于到达的是哪一个。
  *
  * 其余成员一律 `false`，因为它们大多对运行什么都没说 —— 而"什么都没说"绝不能读成"已结算"，
  * 否则运行还在进行时引用就被丢了。
  *
- * `submitting: true` 也不是答案，但它是*问题*：它标记这个会话是本窗口看过其运行开始的，只有被
+ * `running: true` 也不是答案，但它是*问题*：它标记这个会话是本窗口看过其运行开始的，只有被
  * 这样标记的会话才能被报告为结束。这个标记就是答案不能直接从帧上读出的原因 —— 见 `main` 里的
  * `runSeen`，集合住在那里，理由也在那里。
  */
 function runEnded(runSeen: Set<string>, sessionId: string, message: ServerMessage): boolean {
-	const submitting =
-		message.type === "status" ? message.submitting : message.type === "baseline" ? message.session.submitting : undefined;
-	if (submitting === undefined) return false;
-	if (submitting) {
+	const running =
+		message.type === "status" ? message.running : message.type === "baseline" ? message.session.running : undefined;
+	if (running === undefined) return false;
+	if (running) {
 		runSeen.add(sessionId);
 		return false;
 	}
@@ -81,12 +110,12 @@ function main(): void {
 	/**
 	 * 已被看到运行的那些会话。
 	 *
-	 * send 的引用活得与它开启的那轮运行一样长，这个集合就是让那轮运行的结束可被识别的东西。
-	 * `retain` 现在每次调用都要求（ADR-0010），所以取 send 引用会重新基线化会话 —— 而那个基线在
-	 * 提示被接受*之前*取得，于是它对一个运行尚未开始的会话说 `submitting: false`。把它读成运行的
-	 * 结束，就会在引用刚取到的一瞬间丢掉它，随后点了另一行的读者会取消那条本该承载运行自身失败
-	 * 报告的流。第一个 `submitting: true` 让后来的 `false` 成为答案；通道断开期间结束的运行仍然
-	 * 能拿到一个，因为标记比连接长寿。
+		 * send 的引用活得与它开启的那轮运行一样长，这个集合就是让那轮运行的结束可被识别的东西。
+		 * `retain` 现在每次调用都要求（ADR-0010），所以取 send 引用会重新基线化会话 —— 而那个基线在
+		 * 提示被接受*之前*取得，于是它对一个运行尚未开始的会话说 `running: false`。把它读成运行的
+		 * 结束，就会在引用刚取到的一瞬间丢掉它，随后点了另一行的读者会取消那条本该承载运行自身失败
+		 * 报告的流。第一个 `running: true` 让后来的 `false` 成为答案；通道断开期间结束的运行仍然
+		 * 能拿到一个，因为标记比连接长寿。
 	 */
 	const runSeen = new Set<string>();
 	/**
@@ -97,18 +126,27 @@ function main(): void {
 	 * 字段就被丢掉，这就是席位从覆盖变回跟随会话的方式。
 	 */
 	let chosen: { model?: string; thinkingLevel?: string } = {};
-	/** 本服务端运行其上的目录，"新建会话"默认写在这里。 */
+	/** 本服务端运行其上的目录；新会话不再回落到它（ADR-0021），仅作记录保留。 */
 	let absCurrentDirectory = "";
 	/**
 	 * 目录选择器自己的选择，由窗口持有，服务端从不持有。
 	 *
 	 * 三个控件读它，别无其他：显示它的 composer chip、向它新建的按钮、指名它的侧栏阴影标题。
 	 * 空表示"没有显式选择"，答案是活跃会话的目录 —— 于是那个标题永远不会与屏幕上的对话矛盾 ——
-	 * 没有会话时是服务端的根。打开会话会清除它，这让选择保持为"下一次"的答案，而不是一个悄悄
-	 * 超越其被做出那一刻的状态。它不跨重启存活、不落入任何文件，这是决定：一个在被需要时重新
-	 * 选择的一次性偏好，不值得一个存储。
+	 * 没有会话时答案就是「未选择」，不再回落到服务端的根。打开会话会清除它，这让选择保持为
+	 * "下一次"的答案，而不是一个悄悄超越其被做出那一刻的状态。它不跨重启存活、不落入任何文件，
+	 * 这是决定：一个在被需要时重新选择的一次性偏好，不值得一个存储。
 	 */
 	let absPickedDirectory = "";
+	/**
+	 * 本窗口的全部草稿与屏幕上打开的那个。
+	 *
+	 * `draftRowMap` 是侧栏画草稿行的来源（连接层的 `SessionRows` 只知道服务端上报的行，草稿是
+	 * 窗口自己的事实，不进那张表）；`draft` 是当前打开的，与 `followed` 互斥 —— 一个指向真实会话
+	 * 的流，一个指向还不存在的会话。
+	 */
+	const draftRowMap = new Map<string, DraftSession>();
+	let draft: DraftSession | undefined;
 	let collapsed = false;
 	/**
 	 * 侧栏按目录的分页状态，以目录路径为键。
@@ -458,7 +496,8 @@ function main(): void {
 		// 将无处安放。
 		onModes: (anchor) => {
 			const settings = viewState.settings;
-			const allTools = viewState.snapshot?.allTools ?? [];
+			// 名字清单是启动时取一次的本构建事实（ADR-0020），不随会话走；缺席只在拉取应答前的一瞬。
+			const allTools = viewState.toolNames ?? [];
 			const defaultTools = settings?.tools === undefined ? allTools : settings.tools.filter((name) => allTools.includes(name));
 			const current = currentModeName();
 			openMenu(
@@ -519,6 +558,9 @@ function main(): void {
 					active: group.workDirAbsPath === absChosenDir,
 					onSelect: () => {
 						absPickedDirectory = group.workDirAbsPath;
+						// 打开的草稿随选择落地：写入即归组，输入框随之解禁 —— 这是无目录草稿唯一的
+						// 解禁之路。
+						if (followed === undefined && draft !== undefined) draft.workDirAbsPath = group.workDirAbsPath;
 						render();
 					},
 				})),
@@ -549,7 +591,7 @@ function main(): void {
 			if (workDirAbsPath !== undefined) absPickedDirectory = workDirAbsPath;
 			void newSession(workDirAbsPath);
 		},
-		onSelectSession: (sessionId) => void openSession(sessionId),
+		onSelectSession: (sessionId) => void (draftRowMap.has(sessionId) ? openDraft(sessionId) : openSession(sessionId)),
 		onToggleCollapsed: () => {
 			collapsed = !collapsed;
 			render();
@@ -729,7 +771,7 @@ function main(): void {
 			},
 			onConnectionItem: (item) => onConnectionItem(item),
 			onStreamMessage: (sessionId, message) => {
-				// send 的引用活得与它开启的那轮运行一样长，它的结束是流说 `submitting: false` ——
+				// send 的引用活得与它开启的那轮运行一样长，它的结束是流说 `running: false` ——
 				// 不是请求被接受，也不是运行开始。`runEnded` 负责区分这三者，因为 `retain` 现在每次
 				// 都要求基线（ADR-0010），而随提示取的那条基线描述的是运行*之前*的会话。在
 				// end-restart 语义下（ADR-0006 §5），等待审批的运行*已经*结束 —— 运行在门处结束、
@@ -738,7 +780,7 @@ function main(): void {
 				//
 				// 在下面的窗格检查**之前**检查，这个顺序是承重的。运行中途导航离开会释放窗格引用但
 				// 不释放 send 的 —— 这正是引用存在的意义 —— 于是这个会话的帧在无人观看时继续到达，
-				// 而运行的最后一个 `submitting: false` 恰恰是必须被读到的帧。先按窗格退出就会丢掉它，
+				// 而运行的最后一个 `running: false` 恰恰是必须被读到的帧。先按窗格退出就会丢掉它，
 				// 那条流会被持有到窗口生命结束，且每次重连都重开，为一次早已结束的运行。
 				if (runEnded(runSeen, sessionId, message)) releaseSend(sessionId);
 
@@ -827,27 +869,67 @@ function main(): void {
 		// 名字在签名里的理由与分页映射相同：改名不动行表的任何东西，忽略标签的签名意味着这次点击
 		// 什么都不重画。
 		const names = viewState.settings?.directoryNames;
-		const drawn = `${rows.version}|${followed ?? ""}|${absPickedDirectory}|${collapsed ? 1 : 0}|${channel}|${JSON.stringify(paging)}|${JSON.stringify(names ?? {})}`;
+		const drawn = `${rows.version}|${followed ?? ""}|${draft?.id ?? ""}|${draft?.workDirAbsPath ?? ""}|${draftRowMap.size}|${absPickedDirectory}|${collapsed ? 1 : 0}|${channel}|${JSON.stringify(paging)}|${JSON.stringify(names ?? {})}`;
 		if (drawn === sidebarDrawn) return;
 		sidebarDrawn = drawn;
+		const activeSessionId = followed ?? draft?.id;
 		sidebar.render({
-			directories: rows.groups(),
-			...(followed === undefined ? {} : { activeSessionId: followed }),
+			directories: directoriesWithDrafts(),
+			...(activeSessionId === undefined ? {} : { activeSessionId }),
 			collapsed,
 			paging,
 			...(names === undefined ? {} : { directoryNames: names }),
+			...(draftRowMap.size === 0 ? {} : { drafts: new Set(draftRowMap.keys()) }),
 			channel,
 		});
 	}
 
 	/**
+	 * 侧栏的分组：服务端的行，叠上草稿行。
+	 *
+	 * 草稿是窗口自己的事实，不进连接层的行表 —— 它插进自己目录的组（目录在草稿创建时就解析好了，
+	 * 所以组一定指得出），目录还没有组时草稿为它开一个。组的排序沿用最新活动在前的规则，所以一个
+	 * 刚写下的草稿排在本目录的最前、它的目录排到列表的最上。
+	 */
+	function directoriesWithDrafts(): DirectoryGroup[] {
+		const groups = [...rows.groups()];
+		for (const draftSession of draftRowMap.values()) {
+			const row: SessionRow = {
+				id: draftSession.id,
+				workDirAbsPath: draftSession.workDirAbsPath ?? "",
+				createdAt: draftSession.createdAt,
+				title: "新会话",
+				modified: draftSession.createdAt,
+				running: false,
+				pending: 0,
+			};
+			// 没有目录的草稿没有组可进：它落进一个空键的假组（「未选择目录」），目录芯片一选定就
+			// 随新键归组。真实目录组永远以服务端的路径为键，空键只会由这里产生。
+			const groupKey = draftSession.workDirAbsPath ?? "";
+			const group = groups.find((candidate) => candidate.workDirAbsPath === groupKey);
+			if (group === undefined) groups.push({ workDirAbsPath: groupKey, sessions: [row] });
+			else group.sessions.push(row);
+		}
+		if (draftRowMap.size === 0) return groups;
+		return groups.sort((a, b) => newestGroupActivity(b) - newestGroupActivity(a));
+	}
+
+	/** 一组里最新的活动，组的排序依据，与行表自己的规则一致。 */
+	function newestGroupActivity(group: DirectoryGroup): number {
+		return group.sessions.reduce((latest, row) => Math.max(latest, row.modified), 0);
+	}
+
+	/**
 	 * 下一个新会话落在哪里，这是选择器为之存在的那个问题的唯一答案。
 	 *
-	 * 显式选择优先，然后是屏幕上会话的目录，然后是服务端的根 —— 阴影标题的承诺所需的顺序，因为
-	 * 那个标题指名的就是这个答案，绝不能与正在阅读的对话矛盾。
+	 * 显式选择优先，然后是屏幕上会话的目录 —— 阴影标题的承诺所需的顺序，因为那个标题指名的就是
+	 * 这个答案，绝不能与正在阅读的对话矛盾。根目录回落刻意删去（ADR-0021）：没有答案时答案是
+	 * 「未选择」，由 chip 的标签、副标题与空态说出来，而不是悄悄把会话种在服务器根。
 	 */
-	function directoryForNewSession(): string {
-		return absPickedDirectory || viewState.snapshot?.workDirAbsPath || absCurrentDirectory;
+	function directoryForNewSession(): string | undefined {
+		// 草稿打开时，chip 描写的是草稿自己的落点：无目录草稿没有答案。
+		if (followed === undefined && draft !== undefined) return draft.workDirAbsPath;
+		return absPickedDirectory || viewState.snapshot?.workDirAbsPath || undefined;
 	}
 
 	/**
@@ -951,7 +1033,7 @@ function main(): void {
 			if (options.deferred) transcript.renderDeferred(next.items, next.streaming);
 			else transcript.render(next.items, next.streaming);
 		}
-		if (next.reachable !== previous.reachable) composer.setDisabled(!next.reachable);
+		if (next.reachable !== previous.reachable) composer.setDisabled(composerDisabled());
 		if (next.streaming !== previous.streaming) composer.setStreaming(next.streaming);
 		if (next.queued !== previous.queued) composer.setQueue(next.queued);
 		if (next.usage !== previous.usage) renderStatusBar();
@@ -965,17 +1047,29 @@ function main(): void {
 	}
 
 	/**
+	 * 输入框此刻可否输入：连接活着，且打开的草稿已选定目录（ADR-0021）。
+	 *
+	 * 无目录草稿没有可出发的落点 —— 它的输入框禁用，目录芯片选定即解禁。真实会话与带目录的草稿
+	 * 只看连接。
+	 */
+	function composerDisabled(): boolean {
+		return !viewState.reachable || (followed === undefined && draft !== undefined && draft.workDirAbsPath === undefined);
+	}
+
+	/**
 	 * 模型席位，既是控件视角也是下一条消息的视角。
 	 *
 	 * 窗口自己的选择优先于会话的，因为会话的是*上一次*请求用的，而选择是*下一次*要用的。档位列表
-	 * 来自正在显示的行 —— 档位是模型的，服务端给每行发各自的 —— 名字指名的行已不在时回退到会话
-	 * 的列表。
+	 * 来自正在显示的行 —— 档位是模型的，服务端给每行发各自的 —— 名字指名的行不在目录里时没有
+	 * 列表可读，空列表让档位按钮隐藏，直到清单送达或行被找到。
 	 */
 	function selectionForSend(): ComposerSelection {
 		const snapshot = viewState.snapshot;
-		const model = chosen.model ?? snapshot?.model ?? "";
+		// 草稿没有快照可跟随，兜底是设置里的默认模型 —— 与服务端对会话的解析链同一条：
+		// 记录的选择 > 设置的默认 > 内置默认行，草稿只差最后一跳的落地时机。
+		const model = chosen.model ?? snapshot?.model ?? viewState.settings?.model ?? "";
 		const modelOption = rowOf(model);
-		const levels = modelOption?.thinkingLevels ?? snapshot?.thinkingLevels ?? [];
+		const levels = modelOption?.thinkingLevels ?? [];
 		const level = chosen.thinkingLevel ?? snapshot?.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
 		return { models: viewState.models, model, levels, level };
 	}
@@ -1005,6 +1099,7 @@ function main(): void {
 		settings.show(tab);
 		settings.render({
 			models: viewState.models,
+			toolNames: viewState.toolNames ?? [],
 			...(viewState.settings ? { settings: viewState.settings } : {}),
 			...(viewState.snapshot ? { snapshot: viewState.snapshot } : {}),
 		});
@@ -1018,6 +1113,10 @@ function main(): void {
 	 * 开启的。
 	 */
 	function currentModeName(): string | undefined {
+		// 草稿的座位在草稿身上：攒下的指针就是屏幕上的答案，缺席画成内置「默认」。
+		if (followed === undefined && draft !== undefined) {
+			return draft.mode === undefined || draft.mode === null ? DEFAULT_MODE_NAME : draft.mode;
+		}
 		const snapshot = viewState.snapshot;
 		if (snapshot === undefined) return DEFAULT_MODE_NAME;
 		return snapshot.mode ?? DEFAULT_MODE_NAME;
@@ -1031,13 +1130,19 @@ function main(): void {
 	 * 在这里报出来。
 	 */
 	function applyMode(name: string): void {
-		if (followed === undefined) {
-			report(new Error("还没有挂上任何会话。"));
-			return;
-		}
 		const settings = viewState.settings;
 		if (name !== DEFAULT_MODE_NAME && settings?.modes?.some((mode) => mode.name === name) !== true) {
 			report(new Error(`没有叫「${name}」的模式，可能刚被删除。`));
+			return;
+		}
+		// 草稿的模式落在草稿上，随第一条消息一起落地 —— 服务端对它还一无所知，没有命令可发。
+		if (followed === undefined && draft !== undefined) {
+			draft.mode = name === DEFAULT_MODE_NAME ? null : name;
+			render();
+			return;
+		}
+		if (followed === undefined) {
+			report(new Error("还没有挂上任何会话。"));
 			return;
 		}
 		void api.setConfig(followed, { mode: name === DEFAULT_MODE_NAME ? null : name }).catch(report);
@@ -1062,18 +1167,35 @@ function main(): void {
 			heading.title = headingTip;
 		}
 		const subtitleText =
-			snapshot?.workDirAbsPath ?? (followed !== undefined ? followed : viewState.reachable ? "未选择会话" : "连接中…");
+			snapshot?.workDirAbsPath ??
+			(draft !== undefined
+				? draft.workDirAbsPath ?? "未选择目录"
+				: followed !== undefined
+					? followed
+					: viewState.reachable
+						? "未选择会话"
+						: "连接中…");
 		if (subtitleText !== subtitleDrawn) {
 			subtitleDrawn = subtitleText;
 			subtitle.textContent = subtitleText;
 		}
 
 		// 欢迎状态没有可输入的会话：composer、它的头部行和状态行是会话绑定的控件，所以在跟随会话
-		// 之前退下。错误条保留 —— 连接问题不是会话的事实。
-		const welcome = followed === undefined;
+		// 之前退下。错误条保留 —— 连接问题不是会话的事实。草稿是一段还没出生的对话：状态行退下
+		// —— token 计数只对运行有意义，而草稿不可能在运行；输入框可否用由 composerDisabled 裁决
+		// —— 无目录草稿在目录芯片选定之前禁用（ADR-0021）。
+		const welcome = followed === undefined && draft === undefined;
 		composerHead.hidden = welcome;
 		composer.element.hidden = welcome;
-		statusBar.element.hidden = welcome;
+		statusBar.element.hidden = welcome || draft !== undefined;
+		composer.setDisabled(composerDisabled());
+
+		// 空态的问题跟着草稿的状态走：无目录草稿不能开始对话，问题换成先选目录的指引。
+		transcript.setWelcomeText(
+			followed === undefined && draft !== undefined && draft.workDirAbsPath === undefined
+				? "先在下方选一个目录，再开始对话。"
+				: undefined,
+		);
 
 		// 分支条目跟随会话的分支形状，基线或一条结束的消息都可能改变它，所以签名是树的同一性加上
 		// 裁出标签的三个数字。"none" 是单路形状 —— chip 站着但无物可指名 —— 树与"none"之间的任何
@@ -1100,12 +1222,14 @@ function main(): void {
 		branchView.render(tree, viewState.streaming);
 
 		// chip 是 composer 头部唯一的常驻者且永远在那里：输入上方的那行就是"下一个会话落在哪里"
-		// 属于的地方，无论上面的 transcript 在做什么。
+		// 属于的地方，无论上面的 transcript 在做什么。无目录草稿让这个问题没有答案 —— 标签把话说
+		// 出来，而不是显示一个空名字。
 		const directory = directoryForNewSession();
-		if (chipDrawn !== directory) {
-			chipDrawn = directory;
-			chipLabel.textContent = directoryName(directory);
-			directoryChip.title = directory;
+		const chipSig = directory ?? "";
+		if (chipDrawn !== chipSig) {
+			chipDrawn = chipSig;
+			chipLabel.textContent = directory === undefined ? "选择目录" : directoryName(directory);
+			directoryChip.title = directory ?? "未选择目录 —— 先在这里选一个，才能开始对话";
 		}
 
 		// 一次 send 会携带什么，席位就显示什么，所以席位从 `prompt` 读取的同一批值绘制，而不是只
@@ -1120,6 +1244,7 @@ function main(): void {
 		if (settings.open) {
 			settings.render({
 				models: viewState.models,
+				toolNames: viewState.toolNames ?? [],
 				...(viewState.settings ? { settings: viewState.settings } : {}),
 				...(snapshot ? { snapshot } : {}),
 			});
@@ -1294,6 +1419,9 @@ function main(): void {
 		// 上一个窗格的引用现在放开，新的已落地，这条连接就为一个窗格观看一个会话。绝不为了正在
 		// 打开的会话：同一行第二次点击时引用是同一个，释放它会把流从即将绘制的窗格下面抽走。
 		if (followed !== undefined && followed !== snapshot.id) mux.release(followed, "pane");
+		// 离开的那个若是草稿，它的席位一并交出：屏幕上即将出现的会话是真实的，`draft` 的互斥半
+		// 从这里开始成立。
+		if (draft?.id !== snapshot.id) draft = undefined;
 		followed = snapshot.id;
 		// 不同的对话是不同的席位：为前一个选择的，对这一个什么都说不出来，它以自己的分支记录的
 		// 东西开启。
@@ -1360,6 +1488,47 @@ function main(): void {
 	 * 的机制：恰在有运行需要上报时，流活得比窗格久。
 	 */
 	async function prompt(text: string, behavior?: "steer" | "followUp"): Promise<void> {
+		// 草稿的诞生：第一条消息就是出生证明（ADR-0021）。create→PATCH mode→open→POST message 四步
+		// 折叠为一步 —— POST /api/sessions 带 text、目录、草稿攒下的模式与席位选择，会话、两个文件、
+		// 模式指针与模型选择在同一个请求里原子出生；之后它就是一个普通会话。诞生失败时草稿原样保留：
+		// 服务端上什么都没有，重试就是从头再来。
+		if (followed === undefined && draft !== undefined) {
+			const source = draft;
+			if (source.workDirAbsPath === undefined) {
+				report(new Error("先在下方选一个目录，再开始对话。"));
+				return;
+			}
+			const selection = selectionForSend();
+			let createdId: string;
+			try {
+				const created = await api.createSession({
+					text,
+					workDirAbsPath: source.workDirAbsPath,
+					...(behavior === undefined ? {} : { behavior }),
+					...(source.mode !== undefined && source.mode !== null ? { mode: source.mode } : {}),
+					model: selection.model,
+					thinkingLevel: selection.level,
+				});
+				reachable();
+				createdId = created.sessionId;
+			} catch (error) {
+				unreachable(error);
+				composer.setDraft(text);
+				return;
+			}
+			// 草稿就此完成使命：行让位给服务端推送的真实行。`chosen` 穿过 openSession 的重置活下去
+			// —— 它是用户为这段对话做的选择，诞生不改变它。
+			draftRowMap.delete(source.id);
+			draft = undefined;
+			const savedChosen = chosen;
+			await openSession(createdId);
+			if (followed !== createdId) {
+				// 打开被一次更新的导航取代：这条消息失去了目的地，文字回到输入框。
+				composer.setDraft(text);
+				return;
+			}
+			chosen = savedChosen;
+		}
 		// 持有而不是读两次：取引用会把控制权交回通道，那次等待期间点一下侧栏，就会把这条消息发到
 		// 窗口移动*过去*的会话，而不是写下这段文字的会话。
 		const target = followed;
@@ -1400,18 +1569,53 @@ function main(): void {
 	/**
 	 * 在选择器的目录里开始一段对话，并把窗口指过去。
 	 *
-	 * 目录随请求走（`workDirAbsPath`），这就是选择器的全部契约：为一次创建做出的选择不是服务端
-	 * 保存的状态。它打开的会话重读列表，全新目录里的第一个会话就是这样为它的目录组赢得侧栏一席
-	 * 之地的。
+	 * 开的是草稿：目录在此刻解析（显式指名 > 屏幕会话的目录），没有答案时草稿无目录出生 —— 输入框
+	 * 禁用，直到目录芯片选定（ADR-0021）。会话随第一条消息才诞生（发消息时的出生请求显式带这个目
+	 * 录）。全新目录里的第一个会话就是这样为它的目录组赢得侧栏一席之地的 —— 草稿行先住进那个组，
+	 * 诞生后由真实行接替。
 	 */
-	async function newSession(workDirAbsPath?: string): Promise<void> {
-		try {
-			const created = await api.createSession(workDirAbsPath ?? (directoryForNewSession() || undefined));
-			reachable();
-			await openSession(created.sessionId);
-		} catch (error) {
-			unreachable(error);
+	function newSession(workDirAbsPath?: string): void {
+		// 草稿不触碰服务端：id 是本地的，目录此刻解析好 —— 显式指名的优先，然后是选择器的答案，
+		// 再没有别的回落。服务端根不再兜底：没有答案的草稿就是没有目录。
+		const draftSession: DraftSession = {
+			id: crypto.randomUUID(),
+			workDirAbsPath: workDirAbsPath ?? directoryForNewSession(),
+			createdAt: Date.now(),
+		};
+		draftRowMap.set(draftSession.id, draftSession);
+		openDraft(draftSession.id);
+	}
+
+	/**
+	 * 打开一个草稿：不订阅、不等待基线 —— 服务端对它一无所知，屏幕上是一段空对话和可用的输入框。
+	 *
+	 * 簿记与 {@link openSession} 对齐（导航序号、上一个未落地目标的引用），mux 的部分被整个拿掉：
+	 * 没有流可取引用。从真实会话切过来的时刻窗格引用被放开 —— 草稿观看的不是任何会话。
+	 */
+	function openDraft(sessionId: string): void {
+		const target = draftRowMap.get(sessionId);
+		if (target === undefined) return;
+		if (opening !== undefined && opening !== followed && opening !== sessionId) mux.release(opening, "pane");
+		const series = (openSeries += 1);
+		opening = sessionId;
+		setPane("chat");
+		// 上一次导航可能还亮着加载提示 —— 草稿的打开是即时的，它的等待到这一刻就结束了。
+		showLoading(series, false);
+		if (followed !== undefined) {
+			mux.release(followed, "pane");
+			followed = undefined;
 		}
+		draft = target;
+		chosen = {};
+		absPickedDirectory = "";
+		// 视图折回空态：上一个会话的快照、分支树与用量都是别的对话的事实，草稿一段也没有。保留
+		// 窗口自己的三样 —— 可达性、模型清单、设置 —— 与删除后的折叠共享同一条规则。
+		apply({
+			...initialState(),
+			reachable: viewState.reachable,
+			models: viewState.models,
+			...(viewState.settings === undefined ? {} : { settings: viewState.settings }),
+		});
 	}
 
 	/**
@@ -1506,6 +1710,22 @@ function main(): void {
 	 * 别处。
 	 */
 	async function deleteSession(sessionId: string): Promise<void> {
+		// 草稿的删除是本地的：服务端对它一无所知，没有请求可发，也没有帧会来。屏幕上开着它时折回
+		// 欢迎态 —— 与真实会话被删时的折叠同一个形状，只是没有引用要释放。
+		if (draftRowMap.has(sessionId)) {
+			draftRowMap.delete(sessionId);
+			if (draft?.id === sessionId) {
+				draft = undefined;
+				apply({
+					...initialState(),
+					reachable: viewState.reachable,
+					models: viewState.models,
+					...(viewState.settings === undefined ? {} : { settings: viewState.settings }),
+				});
+			}
+			render();
+			return;
+		}
 		try {
 			await api.deleteSession(sessionId);
 			reachable();
@@ -1682,6 +1902,13 @@ function main(): void {
 			applyAppearance(stored);
 			reachable();
 			apply({ ...viewState, settings: stored });
+		} catch (error) {
+			report(error);
+		}
+		try {
+			const { tools } = await api.toolNames();
+			reachable();
+			apply({ ...viewState, toolNames: tools });
 		} catch (error) {
 			report(error);
 		}

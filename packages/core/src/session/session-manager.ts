@@ -40,7 +40,7 @@ import {
 	type SessionEntry,
 	type SessionEntryBase,
 	type SessionEntryMapById,
-	type SessionSetting,
+	type SessionSettings,
 	type TrimToolCallArgEntry,
 	type UsageEntry,
 } from "./ledger.ts";
@@ -57,7 +57,7 @@ export {
 	type SessionEntry,
 	type SessionEntryBase,
 	type SessionEntryMapById,
-	type SessionSetting,
+	type SessionSettings,
 	type TrimToolCallArgEntry,
 	type UsageEntry,
 } from "./ledger.ts";
@@ -90,7 +90,7 @@ export const CURRENT_SESSION_VERSION = 6;
  * 每次变更都整体重写文件（temp + rename），因为它是快照不是日志——旁边的 JSONL 才是日志，两者按
  * stem 配对：两个文件都在，session 才存在。
  *
- * 这是**磁盘**形状。内存中 session 把选择字段重组为 {@link SessionSetting}——thinking level 折进
+ * 这是**磁盘**形状。内存中 session 把选择字段重组为 {@link SessionSettings}——thinking level 折进
  * `model`——两者之间的翻译只存在于两处：fill 路径在进入时合并，{@link metaOf} 在输出时拆开。盘上
  * 再无其他变化：版本号不动，旧 session 照旧读取。
  */
@@ -323,7 +323,7 @@ function buildSessionPath(sessionEntryMapById: SessionEntryMapById, leafId?: str
  * 它们。
  */
 function getSessionContextSettings(
-	setting: SessionSetting,
+	setting: SessionSettings,
 	chain: SessionEntry[],
 ): Pick<SessionContext, "thinkingLevel" | "model"> {
 	const merged = setting.model;
@@ -897,7 +897,7 @@ function previewOfMessage(message: Message): string {
  * 缺席——从未选择的 session 不在对象上放任何字段，于是「从未选择」和「选了默认」保持可区分。
  * `suspended` 缓存是唯一始终存在的字段：盘上缺席按 false 读。
  */
-function sessionSettingOf(meta: SessionMeta): SessionSetting {
+function sessionSettingOf(meta: SessionMeta): SessionSettings {
 	return {
 		workDirAbsPath: meta.workDir,
 		...(meta.parentSession === undefined ? {} : { parentSessionId: meta.parentSession }),
@@ -912,6 +912,29 @@ function sessionSettingOf(meta: SessionMeta): SessionSetting {
 }
 
 /**
+ * session 记录的选择：模型与 thinking level，各自缺席即「从未选择」。
+ *
+ * {@link SessionManager.buildSessionContext} 用这些值连同运行所需的默认值回答。这个函数服务于
+ * 必须区分「session 选了 off」和「session 从未选择」的调用方——组合的设置（`settings.ts` 的
+ * `resolveSettings`）与下面的读取——装配环节，它决定存储值能否盖过设置文件。快照是第一句话，
+ * 会话记录是回落：模型回落到分支的最后一条 assistant 消息，它只可能指名用户没给过名字的行。
+ * 只是回落，而且是弱回落：消息记录的是回答它的 wire id，不是行的身份。
+ */
+export function recordedSelectionOf(
+	session: Session,
+): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
+	const recorded = recordedModelOf(session.settings.model);
+	if (recorded.model === undefined) {
+		for (const entry of buildSessionPath(session.sessionEntryMapById, session.leafId)) {
+			if (entry.type === "message" && entry.message.role === "assistant") {
+				recorded.model = { name: entry.message.model, modelId: entry.message.model };
+			}
+		}
+	}
+	return recorded;
+}
+
+/**
  * 把合并的模型选择拆回盘上快照的两个扁平字段。
  *
  * 只有两处名字都在时才写行——只带 thinking level 的 model 对象是一个没记行的 level，盘上把它单作
@@ -919,7 +942,7 @@ function sessionSettingOf(meta: SessionMeta): SessionSetting {
  * 拆分是无损的。
  */
 function recordedModelOf(
-	model: SessionSetting["model"],
+	model: SessionSettings["model"],
 ): Pick<SessionMeta, "model" | "thinkingLevel"> {
 	if (model === undefined) return {};
 	const { name, modelId, thinkingLevel } = model;
@@ -930,7 +953,7 @@ function recordedModelOf(
 }
 
 /**
- * 一个 session 的内存状态写出的盘上快照：从重组的 {@link SessionSetting} 重建扁平的
+ * 一个 session 的内存状态写出的盘上快照：从重组的 {@link SessionSettings} 重建扁平的
  * {@link SessionMeta}。
  *
  * 盘↔内存翻译中写文件的那个方向——{@link writeMetaFile} 序列化它，`getMeta` 把同样的形状交给
@@ -938,7 +961,7 @@ function recordedModelOf(
  * 因为文件名无法把它无损地还回来。
  */
 function metaOf(session: Session): SessionMeta {
-	const setting = session.sessionSetting;
+	const setting = session.settings;
 	return {
 		version: CURRENT_SESSION_VERSION,
 		id: session.sessionId,
@@ -978,7 +1001,7 @@ export function createSession(
 		sessionDirAbsPath: absDir,
 		persist: true,
 		fileCreated: false,
-		sessionSetting: { workDirAbsPath: resolvePath(workDirInput), suspended: false },
+		settings: { workDirAbsPath: resolvePath(workDirInput), suspended: false },
 		jsonlEntries: [],
 		sessionEntryMapById: new Map(),
 		leafId: null,
@@ -995,7 +1018,7 @@ export function inMemorySession(workDirInput: string = process.cwd(), parentSess
 		sessionDirAbsPath: null,
 		persist: false,
 		fileCreated: false,
-		sessionSetting: { workDirAbsPath: resolvePath(workDirInput), suspended: false },
+		settings: { workDirAbsPath: resolvePath(workDirInput), suspended: false },
 		jsonlEntries: [],
 		sessionEntryMapById: new Map(),
 		leafId: null,
@@ -1043,7 +1066,7 @@ export function fillSession(absFilePath: string): Session {
 		sessionDirAbsPath: dirname(absJsonl),
 		persist: true,
 		fileCreated: true,
-		sessionSetting: sessionSettingOf(meta),
+		settings: sessionSettingOf(meta),
 		jsonlEntries: entries,
 		sessionEntryMapById: new Map(),
 		leafId: null,
@@ -1064,8 +1087,8 @@ export function fillSession(absFilePath: string): Session {
 export function newSession(session: Session, parentSessionFile?: string): string | undefined {
 	session.sessionId = createSessionId();
 	session.timestamp = new Date().toISOString();
-	session.sessionSetting = {
-		workDirAbsPath: session.sessionSetting.workDirAbsPath,
+	session.settings = {
+		workDirAbsPath: session.settings.workDirAbsPath,
 		...(parentSessionFile === undefined ? {} : { parentSessionId: resolvePath(parentSessionFile) }),
 		suspended: false,
 	};
@@ -1172,8 +1195,8 @@ function appendEntry(session: Session, entry: SessionEntry): void {
  * 首条消息之前做出的选择得以存活，又不破坏「没有对话就没有文件」的规则。`change` 对 no-op 返回
  * false，这让一串相同的写入不必每次都付一次重写。
  */
-function recordMeta(session: Session, change: (setting: SessionSetting) => boolean): void {
-	if (!change(session.sessionSetting)) return;
+function recordMeta(session: Session, change: (setting: SessionSettings) => boolean): void {
+	if (!change(session.settings)) return;
 	if (session.persist && session.fileCreated) writeMetaFile(session);
 }
 
@@ -1635,7 +1658,7 @@ export class SessionManager {
 	 */
 	buildSessionContext(session: Session): SessionContext {
 		const chain = buildSessionPath(session.sessionEntryMapById, session.leafId);
-		const { thinkingLevel, model } = getSessionContextSettings(session.sessionSetting, chain);
+		const { thinkingLevel, model } = getSessionContextSettings(session.settings, chain);
 		const messages = contextEntriesFromPath(chain).flatMap(sessionEntryToContextMessages);
 		return { messages, thinkingLevel, model };
 	}
@@ -1655,24 +1678,10 @@ export class SessionManager {
 	/**
 	 * 这个 session 当前所在的模型和 thinking level，从未选择时各自为 undefined。
 	 *
-	 * {@link SessionManager.buildSessionContext} 用这些值连同运行所需的默认值回答。这个方法服务于
-	 * 必须区分「session 选了 off」和「session 从未选择」的调用方——装配环节，它决定存储值能否盖过
-	 * 设置文件。快照是第一句话，会话记录是回落：模型回落到分支的最后一条 assistant 消息，它只可能
-	 * 指名用户没给过名字的行。
+	 * 与每次读取共享同一个答案（{@link recordedSelectionOf}）：文件级函数是它，这里只是点名转发。
 	 */
 	getRecordedSettings(session: Session): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
-		const recorded: { model?: { name: string; modelId: string }; thinkingLevel?: string } =
-			recordedModelOf(session.sessionSetting.model);
-		if (recorded.model === undefined) {
-			// 只是回落，而且是弱回落：消息记录的是回答它的 wire id，不是行的身份，所以这只可能指名
-			// 用户没给过名字的行。见 {@link getSessionContextSettings}。
-			for (const entry of this.getBranch(session)) {
-				if (entry.type === "message" && entry.message.role === "assistant") {
-					recorded.model = { name: entry.message.model, modelId: entry.message.model };
-				}
-			}
-		}
-		return recorded;
+		return recordedSelectionOf(session);
 	}
 
 	/**
@@ -1683,7 +1692,7 @@ export class SessionManager {
 	 * 是两文件拆分改变的地方：移动叶子不再切换这些值，因为它们是 session 的，不是分支的。
 	 */
 	getRecordedToolConfig(session: Session): { mode?: string; approval?: Record<string, boolean> } {
-		return { mode: session.sessionSetting.mode, approval: session.sessionSetting.approval };
+		return { mode: session.settings.mode, approval: session.settings.approval };
 	}
 
 	/**
@@ -1723,7 +1732,7 @@ export class SessionManager {
 	 * 会话。
 	 */
 	getTitle(session: Session): string {
-		if (session.sessionSetting.title !== undefined) return session.sessionSetting.title;
+		if (session.settings.title !== undefined) return session.settings.title;
 		return deriveTitle(this.getBranch(session).flatMap(sessionEntryToContextMessages));
 	}
 
@@ -1952,7 +1961,7 @@ export class SessionManager {
 	 * ——调用方决定第二次删除意味着什么，hub 把它变成客户端能展示的状态码。
 	 *
 	 * 纯文件 I/O：为这个 id 持有活袋的表是谁的就是谁的，决定 session 已消失的调用方自己忘掉那一半
-	 * （`Agent.remove`）。
+	 * （`Agent.deleteSessionBySessionId`）。
 	 */
 	async remove(id: string): Promise<void> {
 		const absPath = SessionManager.findSessionFilePathById(id);

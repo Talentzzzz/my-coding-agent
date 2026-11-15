@@ -84,8 +84,11 @@ const agent = hub.agent;
 hub.setModelConfigs([ROW]);
 
 try {
-	process.stdout.write("a session that exists before anything asks stays out of the store until it speaks\n");
-	const first = await hub.newSession();
+	process.stdout.write("birth is what puts the session in the store\n");
+	// ADR-0021：会话随第一条消息出生，所以「先创建、后开口」的两段式没有了——birth 落地的瞬间
+	// 文件就在，行的冷读立刻答得出它，组也随之而来。store 与本机其他每次运行共享，所以本 smoke
+	// 从不假设自己是唯一存在的 session——它只问自己创建的那些。
+	const first = await hub.birth({ text: "the conversation starts here" });
 	hub.release(await hub.hold(first));
 	const projection = createSessionProjection(hub);
 
@@ -93,34 +96,17 @@ try {
 	const seen: SessionRow[] = [];
 	const stopListening = projection.onRow((row) => seen.push(row));
 
-	// store 与本机其他每次运行共享，所以本 smoke 从不假设自己是唯一存在的 session——它只问
-	// 自己创建的那些。在 seed→fill 生命周期下，无人开口的 session 没有文件（ADR-0005 §3），
-	// 没有文件就没有行：侧栏列出的是对话，不是意图。
-	/** 断言一个 session 没有行，detail 是找到的那一行（总是 undefined）。 */
-	const checkAbsent = async (label: string, id: string): Promise<void> => {
-		const row = await projection.row(id);
-		check(label, row === undefined, String(row));
-	};
-	const seeded = await projection.row(first);
-	check("an unspoken session has no row", seeded === undefined, String(seeded));
-	const groupsBefore = await projection.groups();
-	check(
-		"and no group names its directory yet",
-		groupsBefore.every((group) => group.workDirAbsPath !== root),
-		JSON.stringify(groupsBefore.map((group) => group.workDirAbsPath)),
-	);
-
-	process.stdout.write("the first message is what puts the session in the store\n");
-	const spokenHost = await hub.hold(first);
-	fake.setResponses([fakeAssistantMessage("a first answer")]);
-	await hub.agent.prompt(first, "the conversation starts here");
-	check("the row arrived with the run", await until(() => seen.some((row) => row.id === first)));
-	hub.release(spokenHost);
 	const spokenRow = await projection.row(first);
-	check("a spoken session has a row", spokenRow !== undefined, String(spokenRow));
+	check("a born session has a row", spokenRow !== undefined, String(spokenRow));
 	check("with the working directory as its workDirAbsPath", spokenRow?.workDirAbsPath === root, spokenRow?.workDirAbsPath);
 	check("a row carries modified, not only createdAt", typeof spokenRow?.modified === "number" && spokenRow.modified > 0, String(spokenRow?.modified));
 	check("and the title is the message the branch starts with", spokenRow?.title === "the conversation starts here", spokenRow?.title);
+	const groupsAtBirth = await projection.groups();
+	check(
+		"and a group names its directory at once",
+		groupsAtBirth.some((group) => group.workDirAbsPath === root),
+		JSON.stringify(groupsAtBirth.map((group) => group.workDirAbsPath)),
+	);
 
 	process.stdout.write("one scan, however many callers\n");
 	// 在计数发布之前让上面 hold 的 reap 落地：它会报告它失去的 session，那会构建这个 projection
@@ -146,36 +132,32 @@ try {
 		`${groups.reduce((total, group) => total + group.sessions.length, 0)} vs ${rows.length}`,
 	);
 
-	process.stdout.write("a session created with nobody watching stays out of the store\n");
-	const second = await hub.newSession();
+	process.stdout.write("a birth with nobody watching still lands in the store\n");
+	// birth 是第一条消息（ADR-0021），所以不存在「无人开口的 session」了：行随出生即到，
+	// 无论有没有人在看——这正是 store 的「不需要任何人在看」承诺在出生一侧的样子。
+	const second = await hub.birth({ text: "now the row has something to say" });
+	check("a birth reaches a row without a host", await until(() => seen.some((row) => row.id === second)), JSON.stringify(seen.map((row) => row.id)));
 	await settle();
-	await checkAbsent("a created session reaches no row without a host", second);
-
-	process.stdout.write("an idle host on an unspoken session builds no row either\n");
 	const host = await hub.hold(second);
 	await settle();
-	await checkAbsent("an idle host leaves the store alone", second);
-	check("and published nothing", !seen.some((row) => row.id === second), JSON.stringify(seen.map((row) => row.id)));
 
 	process.stdout.write("a run moves the row even though nothing is watching it\n");
 	// store 的全部意义：一个 session 运行，它的行在没有任何订阅者的地方说着这件事。之前只有
-	// *内容*流会携带这件事，而这里没有订阅者。第一条消息写文件，所以这次 run 也是这一行的
-	// 诞生——行随 run 进入 store，而这次之后的 run 移动的才是一行已存在的东西。
-	const beforeRun = seen.length;
+	// *内容*流会携带这件事，而这里没有订阅者。行已在出生时进了 store（ADR-0021），所以这次
+	// run 移动的是一行已存在的东西——在途时 `running`，落定时以 idle 重新发布。
 	fake.setResponses([fakeAssistantMessage("answered")]);
-	const run = hub.agent.prompt(host.id, "now the row has something to say");
-	check("the row arrived during the run", await until(() => seen.some((row) => row.id === second)));
+	const run = hub.agent.prompt(host.id, "the row is watching itself now");
+	check("the row said running while the run was in flight", await until(() => seen.some((row) => row.id === second && row.running === true)));
 	await run;
 	const landed = await projection.row(second);
 	check("and the run ended idle", landed?.running === false && landed.pending === 0, JSON.stringify(landed));
 	check("the title is read from the branch, not the file", landed?.title === "now the row has something to say", landed?.title);
 
-	// 行已在 store 里，下一次 run 就是 store 的重头戏：在途时 `running`，落定时以 idle 重新发布，
-	// 全程没有任何订阅者。
+	// 再来一次，这次盯住发布计数：一次 run 至少移动两次行。
 	const beforeSecondRun = seen.length;
 	fake.setResponses([fakeAssistantMessage("answered again")]);
-	const secondRun = hub.agent.prompt(host.id, "the row is watching itself now");
-	check("the row said running while the run was in flight", await until(() => seen.some((row) => row.id === second && row.running === true)));
+	const secondRun = hub.agent.prompt(host.id, "the row is watching itself again");
+	check("the row said running again while the run was in flight", await until(() => seen.some((row) => row.id === second && row.running === true)));
 	await secondRun;
 	check("and the second run ended", (await projection.row(second))?.running === false, JSON.stringify(await projection.row(second)));
 	check("the row moved more than once for one run", seen.length > beforeSecondRun + 1, `${seen.length - beforeSecondRun} updates`);
@@ -238,10 +220,10 @@ try {
 	check("the row is still there after its host", (await projection.row(first)) !== undefined);
 
 	process.stdout.write("a fork knows its parent without a listing beside it\n");
-	const source = await hub.newSession();
+	// 出生消息就是 fork 挂点（ADR-0021）：birth 落地时账本里已有第一条 user entry，
+	// 从它的 leaf fork 即可，无需再说什么。
+	const source = await hub.birth({ text: "the conversation being forked" });
 	const sourceHost = await hub.hold(source);
-	fake.setResponses([fakeAssistantMessage("to fork from")]);
-	await hub.agent.prompt(source, "the conversation being forked");
 	await settle();
 	const forked = await hub.fork(source, agent.snapshot(source).leafId);
 	await until(() => seen.some((row) => row.id === forked));
@@ -259,15 +241,15 @@ try {
 	process.stdout.write("the hub tells a process-level listener about sessions nobody watches\n");
 	const heard: string[] = [];
 	const stopHosting = hub.onHostChange((sessionId, hostSeen) => heard.push(`${sessionId}:${hostSeen === undefined ? "none" : "host"}`));
-	const third = await hub.newSession();
-	check("a created session is reported with no host", heard.includes(`${third}:none`), heard.join(" "));
+	const third = await hub.birth({ text: "a third conversation" });
+	check("a born session is reported with no host", heard.includes(`${third}:none`), heard.join(" "));
 	const thirdHost = await hub.hold(third);
 	check("and again with one", heard.includes(`${third}:host`), heard.join(" "));
 	hub.release(thirdHost);
 	await until(() => heard.filter((entry) => entry === `${third}:none`).length === 2);
 	check("and once more when it is reaped", heard.filter((entry) => entry === `${third}:none`).length === 2, heard.join(" "));
 	stopHosting();
-	const afterStop = await hub.newSession();
+	const afterStop = await hub.birth({ text: "an unobserved birth" });
 	await settle();
 	check("a listener that stopped hearing stops hearing", !heard.includes(`${afterStop}:none`), heard.join(" "));
 
@@ -298,7 +280,7 @@ try {
 	// 两个被驱动到门口然后放开的 session：store 在任何地方都没有 host 的情况下持有停在门口的
 	// 问题，这正是重启时 seed 的来源。门是每个 session 自己的选择，机器的设置与此无关。
 	const park = async (promptText: string): Promise<string> => {
-		const id = await hub.newSession();
+		const id = await hub.birth({ text: promptText });
 		const host = await hub.hold(id);
 		hub.agent.applyConfig(id, { approval: { read: true } });
 		fake.setResponses([
@@ -346,7 +328,7 @@ try {
 	cold.close();
 
 	process.stdout.write("the envelope types describe a multiplexed connection\n");
-	const item: ServerMessage = { type: "status", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2, contextWindow: 100 }, submitting: true, queued: [], isRetrying: false, retryAttempt: 0 };
+	const item: ServerMessage = { type: "status", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2, contextWindow: 100 }, running: true, queued: [], isRetrying: false, retryAttempt: 0 };
 	const onAStream: ServerFrame = { streamId: "session-a", item };
 	const heartbeat: ConnectionItem = { type: "heartbeat", everyMs: 5_000 };
 	const onTheConnection: ServerFrame = { streamId: null, item: heartbeat };

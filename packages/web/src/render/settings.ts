@@ -5,7 +5,7 @@ import {
 	type ModeSettings,
 	type ModelInput,
 	type ModelOption,
-	type SettingsSnapshot,
+	type GlobalSettingsSnapshot,
 	type SessionSnapshot,
 } from "@my-agent/core/protocol";
 
@@ -53,13 +53,17 @@ export interface SettingsHandlers {
 }
 
 export interface SettingsState {
-	settings?: SettingsSnapshot;
+	settings?: GlobalSettingsSnapshot;
 	models: readonly ModelOption[];
 	/**
-	 * 屏幕上的会话，若有。它的 `allTools` 是本构建的工具名清单，全局默认工具集需要名字可提供，
-	 * 所以没有会话时内置默认模式的表单退下，而不是凭空编一份清单。
+	 * 屏幕上的会话，若有。会话级的选择（模式座位、审批增量）从这里读。
 	 */
 	snapshot?: SessionSnapshot;
+	/**
+	 * 本构建注册的工具名清单（ADR-0020），启动时从 `GET /api/tools` 取一次。名字清单是进程级
+	 * 事实、不随会话走，所以不再经过快照；清单还没取到的一瞬是空表，六个内置顶上。
+	 */
+	toolNames: readonly string[];
 }
 
 type Tab = "appearance" | "models" | "modes" | "defaults";
@@ -114,7 +118,7 @@ export class SettingsPanel {
 	private readonly navItems: { id: Tab; button: HTMLButtonElement }[] = [];
 	private readonly note: HTMLElement;
 
-	private settingsState: SettingsState = { models: [] };
+	private settingsState: SettingsState = { models: [], toolNames: [] };
 	private tab: Tab = "appearance";
 	/**
 	 * 打开交互开始时的行，面板显示服务端持有的东西时为 undefined。
@@ -241,7 +245,7 @@ export class SettingsPanel {
 					].join("/")
 				: "",
 			settingsState.models.map((model) => `${model.name}:${model.id}:${model.hasApiKey}`).join(","),
-			settingsState.snapshot?.allTools.join(",") ?? "",
+			settingsState.toolNames.join(","),
 		].join("|");
 
 		const stable =
@@ -665,13 +669,14 @@ export class SettingsPanel {
 	/**
 	 * 一个模式的表单提供的工具，按开关行绘制的顺序。
 	 *
-	 * 本构建自己的清单 —— 只有会话的 `allTools` 能指名它，没有时六个内置顶上 —— 加上模式已经
-	 * 指名、构建不再有的任何东西，让升级删掉的工具仍然能被取消勾选，而不是被悄悄带着。兜底清单
-	 * 只是显示的便利：内置默认的表单没有会话就退下，所以绝不会把六个写在一个可能更多的集合上。
+	 * 本构建自己的清单（启动时从 `GET /api/tools` 取，ADR-0020）——还没取到的一瞬六个内置顶上
+	 * ——加上模式已经指名、构建不再有的任何东西，让升级删掉的工具仍然能被取消勾选，而不是被
+	 * 悄悄带着。兜底清单只是显示的便利：清单缺失只发生在启动的一瞬，不会把六个写在一个可能
+	 * 更多的集合上。
 	 */
 	private modeToolList(mode: ModeDraft): string[] {
-		const all = this.settingsState.snapshot?.allTools;
-		const base = all !== undefined && all.length > 0 ? [...all] : [...APPROVAL_TOOLS];
+		const all = this.settingsState.toolNames;
+		const base = all.length > 0 ? [...all] : [...APPROVAL_TOOLS];
 		for (const name of mode.tools) if (!base.includes(name)) base.push(name);
 		return base;
 	}
@@ -685,12 +690,11 @@ export class SettingsPanel {
 	 */
 	private defaultModeCard(): HTMLElement {
 		const settings = this.settingsState.settings;
-		const allTools = this.settingsState.snapshot?.allTools;
-		const storedTools = settings?.tools ?? allTools ?? [];
-		// 摘要指名与 composer 默认行相同的工具：会话能指名构建清单时，升级删掉的存储名不是本构建
-		// 有的工具，这里也不计入。没有会话就没有可收窄的清单，文件里是什么就是唯一真实的答案。
-		const summaryTools =
-			allTools === undefined || allTools.length === 0 ? storedTools : storedTools.filter((name) => allTools.includes(name));
+		const allTools = this.settingsState.toolNames;
+		const storedTools = settings?.tools ?? allTools;
+		// 摘要指名与 composer 默认行相同的工具：构建清单在手上时，升级删掉的存储名不是本构建
+		// 有的工具，这里也不计入。清单还没取到的一瞬，文件里是什么就是唯一真实的答案。
+		const summaryTools = allTools.length === 0 ? storedTools : storedTools.filter((name) => allTools.includes(name));
 		const card = element("div", "model-row mode-default");
 		if (this.defaultEditing) card.classList.add("editing");
 
@@ -759,21 +763,15 @@ export class SettingsPanel {
 	 * 它永远编辑草稿：内置默认卡片的草稿是全局默认，存储模式的表单是各自的行，只有 保存 把任何
 	 * 一个变成写。只有审批表有键的工具带下拉 —— 被委托的调用按设计不问任何人 —— 所以注册表
 	 * 多出来的工具只画开关。未勾选工具的下拉禁用而不是隐藏：它将持有的选择仍然属于这个模式。
-	 * `standDown` 是没有会话的内置默认表单：没有本构建自己的清单可指名，开关退下，而不是把六个
-	 * 内置写在一个可能更多的集合上。
 	 */
-	private modeToolTable(mode: ModeDraft, standDown = false): HTMLElement {
+	private modeToolTable(mode: ModeDraft): HTMLElement {
 		const table = element("div", "mode-tooltable");
-		if (standDown) {
-			table.append(element("span", "model-hint", "还没有挂上任何会话，暂时列不出本构建的工具名；挂上会话后再改默认集。"));
-		}
 
 		const active = new Set(mode.tools);
 		for (const name of this.modeToolList(mode)) {
 			const row = element("div", "mode-tool");
 			const box = element("input", undefined, undefined, { type: "checkbox", "aria-label": `启用 ${name}` });
 			box.checked = active.has(name);
-			box.disabled = standDown;
 			box.addEventListener("change", () => {
 				const tools = new Set(mode.tools);
 				if (box.checked) tools.add(name);
@@ -786,9 +784,9 @@ export class SettingsPanel {
 			const select = element("select", "input mode-tool-approval");
 			select.append(option("allow", "自动允许"), option("ask", "每次询问"));
 			select.value = mode.approval[name] === true ? "ask" : "allow";
-			select.disabled = standDown || !box.checked;
+			select.disabled = !box.checked;
 			box.addEventListener("change", () => {
-				select.disabled = standDown || !box.checked;
+				select.disabled = !box.checked;
 			});
 			select.addEventListener("change", () => {
 				mode.approval[name] = select.value === "ask";
@@ -837,8 +835,7 @@ export class SettingsPanel {
 			form.append(nameField);
 		}
 
-		const standDown = options.builtIn === true && (this.settingsState.snapshot?.allTools.length ?? 0) === 0;
-		form.append(this.modeToolTable(draft, standDown));
+		form.append(this.modeToolTable(draft));
 
 		const actions = element("div", "model-actions");
 		const cancel = element("button", "button", undefined, { type: "button" });
@@ -846,7 +843,7 @@ export class SettingsPanel {
 		cancel.addEventListener("click", onCancel);
 		const save = element("button", "button primary", undefined, { type: "button" });
 		save.textContent = this.saving ? "保存中…" : "保存";
-		save.disabled = this.saving || standDown;
+		save.disabled = this.saving;
 		save.addEventListener("click", onSave);
 		actions.append(cancel, save);
 		form.append(actions);
@@ -896,7 +893,7 @@ export class SettingsPanel {
 	private beginDefaultEdit(): void {
 		if (this.defaultEditing) return;
 		const settings = this.settingsState.settings;
-		const allTools = this.settingsState.snapshot?.allTools ?? [];
+		const allTools = this.settingsState.toolNames;
 		this.dropModeInteraction();
 		this.defaultEditing = true;
 		this.defaultForm = {
@@ -918,16 +915,15 @@ export class SettingsPanel {
 	 *
 	 * 工具集以本构建自己的顺序整体写入 —— 每次工具集写入的同一契约 —— 并收窄到本构建认识的
 	 * 工具，升级删掉的名字在这里也被去掉。审批经 `onGlobalApproval` 一次一键移动，且只动动过的
-	 * 键：只碰了工具的保存绝不重写审批表。没有会话就没有可写的构建清单，保存是空操作 —— 表单
-	 * 自己的控件已经退下。
+	 * 键：只碰了工具的保存绝不重写审批表。名字清单还没取到（启动拉取未应答）时保存是空操作。
 	 *
 	 * 写入在表单关闭之前 await。每个答案携带整个设置对象，折叠的摘要从最后一个画；先关会让摘要
 	 * 从旧值闪现，而补丁还在路上。按钮 meanwhile 说 保存中…，与存储模式的保存同样的等待。
 	 */
 	private async commitDefault(): Promise<void> {
 		const draft = this.defaultForm;
-		const grounded = this.settingsState.snapshot?.allTools;
-		if (draft === undefined || grounded === undefined || grounded.length === 0) return;
+		const grounded = this.settingsState.toolNames;
+		if (draft === undefined || grounded.length === 0) return;
 
 		const nextTools = grounded.filter((name) => draft.tools.includes(name));
 		const currentTools = this.settingsState.settings?.tools ?? grounded;

@@ -136,7 +136,7 @@ try {
 	console.log(`current ${landing.status} sessionId=${landingBody.sessionId} hub=${hubId}`);
 	check("startup selects nothing", landingBody.sessionId === null && hubId === null, `sessionId=${landingBody.sessionId}`);
 
-	const created = await request(server.url, "POST", "/api/sessions", undefined);
+	const created = await request(server.url, "POST", "/api/sessions", { text: "the boot conversation" });
 	check("the creation landed", created.status === 201, String(created.status));
 	const sessionId = ((created.payload ?? {}) as { sessionId?: string }).sessionId ?? "";
 	check("the landing follows the explicit creation", (await server.hub.currentSessionId()) === sessionId, sessionId);
@@ -167,7 +167,9 @@ try {
 	const wire: WireClient = await connect(`${server.url.replace("http", "ws")}/mux`);
 	const baseline = await wire.open(sessionId);
 	check("the lane serves the landing session", baseline.id === sessionId, `baseline=${baseline.id} landing=${sessionId}`);
-	check("a fresh working directory opens an empty session", baseline.messages.length === 0, String(baseline.messages.length));
+	// birth 即第一条消息（ADR-0021）：快照不再为空，它带着出生那次往返写下的一切——
+	// 出生消息、模型的回答、以及这个剧本下工具调用与其结果。
+	check("a fresh session opens with its birth exchange", baseline.messages.length > 0, String(baseline.messages.length));
 
 	// ---------------------------------------------------------------------------------------------
 	// shutdown 的最坏情况，真实组装：一个窗口的连接正看着一个 provider 调用永远无人应答的 run。
@@ -188,7 +190,7 @@ try {
 	check(
 		"the run is in residence, waiting on a provider that never answers",
 		await until(
-			() => wire.items(sessionId).some((message) => message.type === "status" && (message as { submitting?: boolean }).submitting === true),
+			() => wire.items(sessionId).some((message) => message.type === "status" && (message as { running?: boolean }).running === true),
 			10_000,
 		),
 		JSON.stringify(wire.items(sessionId).map((message) => message.type)),

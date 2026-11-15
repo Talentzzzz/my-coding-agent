@@ -7,7 +7,7 @@ import type {
 	ModelSelection,
 	PromptBehavior,
 	SessionSnapshot,
-	SettingsSnapshot,
+	GlobalSettingsSnapshot,
 	DirectoryGroup,
 	DirectoryPaging,
 } from "@my-agent/core/protocol";
@@ -95,16 +95,25 @@ export class SessionApi {
 	}
 
 	/**
-	 * 开始一段对话。
+	 * 出生证明：会话与它的第一条消息在同一个请求里诞生（ADR-0021）。
 	 *
-	 * `workDirAbsPath` 是新会话落地的目录：目录选择器自己的选择，随请求做出，绝不是服务端的
-	 * "当前目录"。undefined 是服务端的根，无 body 的 create 一直就是这个意思。
+	 * `text` 必填 —— 没有第一条消息的会话不存在。`workDirAbsPath` 是新会话落地的目录：目录选择器
+	 * 自己的选择，随请求做出，绝不是服务端的"当前目录"。undefined 是服务端的根。`mode` / `model` /
+	 * `thinkingLevel` 是随这条消息出发的选择 —— 模式指针与模型行在出生写入之前落到快照上；
+	 * `behavior` 随消息携带，出生时不可能有在飞的运行。
 	 *
 	 * 答案指名新会话，让窗口把自己指过去。随之而来的列表被刻意不暴露：侧栏的行同一时刻只有一个
 	 * 写入者，通道可用时那个写入者是通道 —— 见 {@link sessionId}。
 	 */
-	async createSession(workDirAbsPath?: string): Promise<{ sessionId: string }> {
-		return this.sessionId("POST", "/api/sessions", workDirAbsPath === undefined ? undefined : { workDirAbsPath });
+	async createSession(input: {
+		text: string;
+		workDirAbsPath?: string;
+		behavior?: PromptBehavior;
+		mode?: string;
+		model?: string;
+		thinkingLevel?: string;
+	}): Promise<{ sessionId: string }> {
+		return this.sessionId("POST", "/api/sessions", input);
 	}
 
 	/** 在某个条目处分出会话分支，条目为 null 时复制整份日志。 */
@@ -181,7 +190,7 @@ export class SessionApi {
 	 * 答案携带设置快照，因为标签住在那里：窗口应用它并重画标题，没有行移动，所以没有会与之分歧的
 	 * `session_row` 帧在路上。
 	 */
-	async renameDirectory(workDirAbsPath: string, name: string): Promise<{ workDirAbsPath: string; name: string; settings: SettingsSnapshot }> {
+	async renameDirectory(workDirAbsPath: string, name: string): Promise<{ workDirAbsPath: string; name: string; settings: GlobalSettingsSnapshot }> {
 		return this.send("POST", "/api/directories/rename", { workDirAbsPath, name });
 	}
 
@@ -192,7 +201,7 @@ export class SessionApi {
 	 * 所以端点以侧栏现在应该画什么作答 —— 客户端应用它而不是自己猜，猜会是服务端拥有的列表的
 	 * 第二个写入者。
 	 */
-	async hideDirectory(workDirAbsPath: string): Promise<{ settings: SettingsSnapshot; directories: DirectoryGroup[] }> {
+	async hideDirectory(workDirAbsPath: string): Promise<{ settings: GlobalSettingsSnapshot; directories: DirectoryGroup[] }> {
 		return this.send("POST", "/api/directories/hide", { workDirAbsPath });
 	}
 
@@ -210,11 +219,16 @@ export class SessionApi {
 		return this.send("PUT", "/api/models", { models });
 	}
 
-	async getSettings(): Promise<{ settings: SettingsSnapshot }> {
+	async getSettings(): Promise<{ settings: GlobalSettingsSnapshot }> {
 		return this.send("GET", "/api/settings", undefined);
 	}
 
-	async updateSettings(patch: PanelSettingsPatch): Promise<{ settings: SettingsSnapshot }> {
+	/** 本构建注册的工具名清单（ADR-0020）：进程活着就不过期，启动时取一次。 */
+	async toolNames(): Promise<{ tools: string[] }> {
+		return this.send("GET", "/api/tools", undefined);
+	}
+
+	async updateSettings(patch: PanelSettingsPatch): Promise<{ settings: GlobalSettingsSnapshot }> {
 		return this.send("PATCH", "/api/settings", { patch });
 	}
 

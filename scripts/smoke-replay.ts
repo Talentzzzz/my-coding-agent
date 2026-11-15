@@ -36,13 +36,11 @@ function snapshotWith(
 		title: "重放",
 		model: "faux",
 		thinkingLevel: "off",
-		thinkingLevels: ["off"],
-		allTools: ["read", "write", "edit", "glob", "grep", "bash"],
 		messages: messages as SessionSnapshot["messages"],
 		messageEntryIds: messages.map((_, index) => `entry-${index}`),
 		branchPoints: [],
 		leafId: `entry-${messages.length - 1}`,
-		submitting: false,
+		running: false,
 		queued: [],
 		isRetrying: false,
 		retryAttempt: 0,
@@ -182,7 +180,7 @@ const live = reopen(
 			timestamp: 31_000,
 		},
 	],
-	{ submitting: true },
+	{ running: true },
 );
 const liveCard = toolGroups(live)[0]?.cards[0];
 check("a call without a result yet stays running", liveCard?.running === true, String(liveCard?.running));
@@ -288,7 +286,7 @@ process.stdout.write("a delta stream appends to one item, and a mid-run baseline
 {
 	// 普通的一次 run：先 reasoning 再回答，一次一个 delta。没有任何帧携带整条消息，屏幕上的
 	// 每个字符都是被追加到其时间戳指名的条目上才到达那里的。
-	let viewState = reduce(initialState(), { type: "baseline", session: snapshotWith([], { submitting: true }) });
+	let viewState = reduce(initialState(), { type: "baseline", session: snapshotWith([], { running: true }) });
 	viewState = fold(viewState, assistantStart(20_000));
 	viewState = fold(viewState, { type: "message_update", delta: { timestamp: 20_000, kind: "thinking", contentIndex: 0, text: "先想" } });
 	viewState = fold(viewState, { type: "message_update", delta: { timestamp: 20_000, kind: "thinking", contentIndex: 0, text: "一下" } });
@@ -315,7 +313,7 @@ process.stdout.write("a delta stream appends to one item, and a mid-run baseline
 		content: [{ type: "text", text: "已经写了一半" }],
 		timestamp: 30_000,
 	} as unknown as SessionSnapshot["partial"];
-	const viewState = reduce(initialState(), { type: "baseline", session: snapshotWith([], { submitting: true, partial }) });
+	const viewState = reduce(initialState(), { type: "baseline", session: snapshotWith([], { running: true, partial }) });
 	const item = viewState.items.at(-1);
 	check("the mid-run baseline draws the text already sent", item?.kind === "message" && item.text === "已经写了一半", JSON.stringify(item));
 	check("and draws it as still streaming", item?.kind === "message" && item.streaming === true);

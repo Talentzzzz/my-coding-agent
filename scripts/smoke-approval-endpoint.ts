@@ -45,7 +45,6 @@ const rows: ModelConfig[] = [
 		maxTokens: 8_192,
 	},
 ];
-const modelName = "anthropic";
 
 // 剧本化 transport 顶替模型：一个停在门口的工具调用，然后是应答到达后结束 run 的文本。
 // hub 的唯一 orchestrator 建立在它之上，这台服务器跑的每个 session 都经由它发送。
@@ -58,7 +57,7 @@ fake.setResponses([
 // 门后。映射与模型行先种到临时 home 文件里，任何东西都不会落到机器自己的设置或模型文件上。
 const settingsHome = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-home-"));
 const seeder = new SettingManager({ home: settingsHome, modelsHome: settingsHome });
-seeder.applySettings(root, { approval: { read: true } });
+seeder.applySettings({ approval: { read: true } });
 seeder.replaceModels(rows);
 const hub = new SessionHub({
 	workDirAbsPath: root,
@@ -71,7 +70,6 @@ const hub = new SessionHub({
 // 对象——所以 controller 经由真正的 hub 持有。
 const { id: sessionId } = await mountSession(hub, {
 	root,
-	model: modelName,
 });
 const agent = hub.agent;
 
@@ -151,8 +149,8 @@ try {
 
 	check(
 		"the run finished after the answer",
-		await until(() => !agent.snapshot(sessionId).submitting, 8_000),
-		String(agent.snapshot(sessionId).submitting),
+		await until(() => !agent.snapshot(sessionId).running, 8_000),
+		String(agent.snapshot(sessionId).running),
 	);
 	check("the tool ran", JSON.stringify(agent.snapshot(sessionId).messages).includes("notes.txt"), "");
 	check("and the closing answer is there", agent.snapshot(sessionId).messages.some((message) => JSON.stringify(message).includes("done")), "");

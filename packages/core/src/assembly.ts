@@ -1,13 +1,13 @@
 import { resolve as resolvePath } from "node:path";
 import type { ChatTransport } from "./llm/index.ts";
-import { type ModelChoice, type ModelConfig, modelFor } from "./models.ts";
+import type { SessionSink } from "./agent.ts";
+import { createModel } from "./models.ts";
 import type { SessionSnapshot } from "./protocol.ts";
 import { createAgentState, type AgentState, createLive } from "./session/agent-state.ts";
 import { danglingApprovalsOf } from "./session/dangling.ts";
-import { modelChoiceOf } from "./session/model-choice.ts";
 import { type Session, SessionManager } from "./session/session-manager.ts";
 import { sessionSnapshot } from "./session/snapshot.ts";
-import { modeSeatOf } from "./session/tool-config.ts";
+import { resolveSettings, type Settings } from "./settings.ts";
 import { SettingManager } from "./setting-manager.ts";
 import { type ToolManager, createToolManager } from "./tools/index.ts";
 
@@ -38,9 +38,6 @@ export interface OpenAgentOptions {
 	 * 新读，这正是让一次编辑抵达一个从未重开的会话的原因。
 	 */
 	settings?: SettingManager;
-	/** 用一行的名字覆盖存储的默认。 */
-	model?: string;
-	thinkingLevel?: string;
 	/**
 	 * 本会话每个请求走的传输层。
 	 *
@@ -49,35 +46,39 @@ export interface OpenAgentOptions {
 	 * {@link AssembleAgentStateOptions} 里的原因。
 	 */
 	api?: ChatTransport;
-	/**
-	 * 本次装配用来解析工具的表。
-	 *
-	 * 省略表示装配自己的一张表，装着六个内置——打开一个会话的 smoke 要的就是这个。宿主递入自己的：
-	 * hub 为进程保一张表，所以它运行的会话与它只读快照的会话应答同样的工具名、持有同样的实例
-	 * （ADR-0011）。测试在注册了自己的工具之后递入一张。
-	 */
-	tools?: ToolManager;
-}
+		/**
+		 * 本次装配用来解析工具的表。
+		 *
+		 * 省略表示装配自己的一张表，装着六个内置——打开一个会话的 smoke 要的就是这个。宿主递入自己的：
+		 * hub 为进程保一张表，所以它运行的会话与它只读快照的会话应答同样的工具名、持有同样的实例
+		 * （ADR-0011）。测试在注册了自己的工具之后递入一张。
+		 */
+		tools?: ToolManager;
+		/**
+		 * 事件与快照离开编排层的出口，透传给工厂。
+		 *
+		 * 只有订阅了自己打开的会话的调用方——驱动它的 smoke——需要它：hub 经 {@link CreateSessionAgentOptions.sink}
+		 * 递入自己的实现，这里只是让它能走与 `openAgent` 相同的组合之路。省略即 no-op，没人听就
+		 * 什么也不发生。
+		 */
+		sink?: SessionSink;
+	}
 
 /**
- * {@link Agent.assembleAgentStateBySession} 需要什么：会话记录，以及——走测试那条组合之路时
- * ——该打开在哪一行。
+ * {@link Agent.assembleAgentStateBySession} 需要什么：会话记录，仅此而已。
  *
  * 有意比 {@link OpenAgentOptions} 窄。差别是权威性：这扇门属于编排层，所以服务是*它自己的*
  * ——调用方无法递给它第二只 `SettingManager` 或自己的工具表，这正是 `adopt` 曾允许而无人检查的
  * 失配。留在这里的是编排层无法知道的那部分：**哪个** 会话记录（宿主的决定，session manager 的
- * 重放）——会话记录 在 `sessionSetting.workDirAbsPath` 上自带工作目录。
+ * 重放）——会话记录 在 `settings.workDirAbsPath` 上自带工作目录。
  *
- * 模型字段不是宿主控制默认值的把手。面向宿主的动词（`create`、`hold`、`snapshotOf`）都不收它：
- * 会话的模型是一个设置事实，下面的装配在每次打开时从磁盘现读。只有 `openAgent`——smoke 驱动的
- * 单 会话记录 组合——会传一个，让脚本化的运行可以在不写设置文件的情况下打开在自己的一行上。
+ * 模型字段不是宿主控制默认值的把手。面向宿主的动词（`createAndPrompt`、`hold`、`snapshotOf`）
+ * 都不收它：会话的模型是一个设置事实，装配在每次打开时从磁盘现读；出生时的选择由
+ * `createAndPrompt` 在装配之前落到会话记录自己的快照上。
  */
 export interface AssembleAgentStateOptions {
 	/** 要装配并放进表里的 会话记录；它自带工作目录。 */
 	session: Session;
-	/** 仅测试的覆盖：本次组合打开所在的那一行，取代设置的默认。 */
-	model?: string;
-	thinkingLevel?: string;
 }
 
 /**
@@ -92,10 +93,8 @@ interface Assembled {
 	workDirAbsPath: string;
 	/** 本会话每次设置与模型读取所经的 manager。 */
 	settings: SettingManager;
-	/** 会话的模型选择：行的名字与档位，不含行自身拥有的任何事实。 */
-	modelChoice: ModelChoice;
-	/** 本次装配读到的各行，让按选择构建模型的调用方不必重读。 */
-	rows: readonly ModelConfig[];
+	/** 两半组合出的有效视图：活跃工具集、有效审批、模式座位与完整模型行（ADR-0019）。 */
+	resolved: Settings;
 	/** 本构建认识的工具：每进程一张表，这里只为读它的名字。 */
 	tools: ToolManager;
 	/** 会话服务，在这里只解析一次，让一次装配的每个消费者共享它。 */
@@ -118,26 +117,15 @@ async function assemble(sessionManager: SessionManager, settings: SettingManager
 	// workDirAbsPath 变成绝对路径的唯一一处，让之后每次对该 entry `workDirAbsPath` 的读取——工具的
 	// run context、prompt、快照——都是同一个值。目录是 会话记录 自己的：`createSession` 种下时已
 	// 解析、重放时恢复，所以这里没有覆盖——会话自己决定住在哪里，没有调用方递入第二个答案。
-	const workDirAbsPath = resolvePath(options.session.sessionSetting.workDirAbsPath);
-	// 项目设置文件住在工作目录之下，所以从同一路径找到：`<workDirAbsPath>/.my-agent/settings.json`，
-	// 叠在 agent home 自己的文件之上。什么都不缓存：每次读取都是对调用方递入的那只 manager 背后
-	// 文件的一次新读。
-	const rows = settings.modelCatalog();
-	// 选择是客户端自己的：行的名字与档位，不含行拥有的任何事实。其背后的事实——端点、密钥、窗口、
-	// compat——在构造模型的时刻从这份目录现读，本次装配如此，之后的每个请求也如此，所以对行的
-	// 编辑抵达下一条消息时，这里没有任何东西需要刷新。
-	//
-	// 它是派生的而不是在这里计算的（ADR-0013），因为会话之后每次读取都得从刚重放的那只袋回答同一个
-	// 问题：`modelChoiceOf` 就是那个答案，本次调用是它加上调用方的覆盖。没有行的会话照样打开，
-	// `Agent` 用一句「该加什么」替它作答：`modelFor` 在完全无名的状态下构建占位模型的事实，拒绝
-	// 发送的是传输层。
-	const modelChoice: ModelChoice = modelChoiceOf(sessionManager, options.session, settings, {
-		...(options.model === undefined ? {} : { name: options.model }),
-		...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
-	});
-	// 表的内容是行为而不是目录，所以一张表服务所有会话。这里同样不做任何选择：活跃集与审批在每次
-	// 读取时从账本派生，以全局默认的实时视图作底。
-	return { workDirAbsPath, settings, modelChoice, rows, tools, sessionManager };
+	const workDirAbsPath = resolvePath(options.session.settings.workDirAbsPath);
+	// 两半组合出的有效视图（ADR-0019）：global 侧与目录的各行在这里各现读一次，会话侧的选择来自
+	// 袋自己。它是派生的而不是被存下的（ADR-0013），因为会话之后每次读取都得从刚重放的那只袋回答
+	// 同一个问题。没有行的会话照样打开，`Agent` 用一句「该加什么」替它作答：占位行在完全无名的状态
+	// 下承担事实，拒绝发送的是传输层。
+	const resolved = resolveSettings(options.session, settings.getSettings(), settings.modelCatalog(), tools.names());
+	// 表的内容是行为而不是目录，所以一张表服务所有会话。这里同样不做任何选择：活跃集与审批已经
+	// 组合在 `resolved` 里，之后的每次读取都重算一次。
+	return { workDirAbsPath, settings, resolved, tools, sessionManager };
 }
 
 /**
@@ -157,20 +145,18 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 	const sessionManager = options.sessionManager ?? new SessionManager();
 	const settings = options.settings ?? new SettingManager();
 	const tools = options.tools ?? createToolManager();
-	const { workDirAbsPath, modelChoice, rows } = await assemble(sessionManager, settings, tools, options);
+	const { workDirAbsPath, resolved } = await assemble(sessionManager, settings, tools, options);
 	return sessionSnapshot({
 		sessionManager,
 		session: options.session,
 		workDirAbsPath,
-		// 快照只从模型上读名字、档位与窗口；请求对象在这里与在一次请求里一样是即抛的。用本次装配已经
-		// 读过的行构建，所以一次冷读只花文件一次。
-		model: modelFor(modelChoice, rows),
-		// 与活跃会话运行的是同一套派生（`modeSeatOf`）：冷读与活跃快照在这里必须一致，否则会话一从
-		// 打开变成仅读取，座位就会翻面。
-		mode: modeSeatOf(sessionManager, options.session, settings),
-		// 用派生的选择从表上读取，让开关与活跃会话的完全一致。
-		allTools: tools.names(),
-		submitting: false,
+		// 快照只从模型上读名字、档位与窗口；请求对象在这里与在一次请求里一样是即抛的。用本次装配
+		// 组合出的行现建，所以一次冷读只花文件一次。
+		model: createModel(resolved.model.config, resolved.model.thinkingLevel),
+		// 与活跃会话运行的是同一套组合（`resolveSettings`）：冷读与活跃快照在这里必须一致，否则
+		// 会话一从打开变成仅读取，座位就会翻面。
+		mode: resolved.mode,
+		running: false,
 		queued: [],
 		isRetrying: false,
 		retryAttempt: 0,
@@ -183,15 +169,13 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 /**
  * 装配一个会话的状态：seed→fill 生命周期的 seed 半（ADR-0005 §2）。
  *
- * 产出的是**live 半**——两条队列、它们的模式，以及唯一一份重放造不出来的 会话记录（ADR-0013）。
- * 递进来的 会话记录 是*入参*，不是成员：出生的袋在这里被丢掉，因为 `bag(id)` 会按需再重放一次；
- * 未出生的袋留在 `live.unwrittenSession` 上，因为在第一条消息造出文件之前，没有别的什么能回答它。
- * 工作目录留在那只袋上（之后每次调用都重放它），设置从来不是任何状态的一部分——它们经编排层持有
- * 的 {@link SettingManager} 实时读取。
+ * 产出的是**live 半**——两条队列、它们的模式，仅此而已（ADR-0013）。递进来的 会话记录 是*入参*，
+ * 不是成员：出生的袋在这里被丢掉，因为 `bag(id)` 会按需再重放一次——会话记录以文件为唯一形态，
+ * 重放随时能再造它。工作目录留在那只袋上（之后每次调用都重放它），设置从来不是任何状态的一部分
+ * ——它们经编排层持有的 {@link SettingManager} 实时读取。
  *
  * 模型选择既不保留也不播种：每次读取都派生它（`session/model-choice.ts`），这是袋被丢掉之后唯一
- * 能幸存的形状。派生无法重现的选择只剩一件——*调用方*点名的那一行——所以只有它落在
- * `live.openedOn` 上。
+ * 能幸存的形状。
  *
  * 服务是必填实参而不是 options，这让窄门的保证成为结构性的：唯一调用者是
  * {@link Agent.assembleAgentStateBySession}，它递自己的三只，调用方无法够到这个函数去在第二只
@@ -206,18 +190,8 @@ export async function assembleSession(sessionManager: SessionManager, settings: 
 	const { workDirAbsPath } = await assemble(sessionManager, settings, tools, options);
 	const session = options.session;
 	// 首次触碰创建状态：live 半是空的——它的队列模式是设置此刻的答案，经 manager 实时读取；之后的
-	// config 补丁原地挪动队列上的模式——会话记录 *不是*它的一部分（ADR-0013）。唯一的例外是文件
-	// 还不存在的袋：重放造不出它，所以它是 live 半自己的字段，直到第一次写入把它落盘。
-	const live = createLive(settings.getSteeringMode(workDirAbsPath), settings.getFollowUpMode(workDirAbsPath));
-	if (!session.fileCreated) live.unwrittenSession = session;
-	// 装配解析出的选择由之后每次读取*派生*（`modelChoiceOf`），不播种到袋上：播种的袋是一份副本，
-	// 而副本正是重放要丢掉的东西。派生无法重现的只有调用方点名的覆盖——没有任何东西把它写进
-	// 会话记录——所以保住的只有它，放在它所属的 live 半上。
-	if (options.model !== undefined || options.thinkingLevel !== undefined) {
-		live.openedOn = {
-			...(options.model === undefined ? {} : { name: options.model }),
-			...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
-		};
-	}
+	// config 补丁原地挪动队列上的模式——会话记录 *不是*它的一部分（ADR-0013）。
+	const global = settings.getSettings();
+	const live = createLive(global.steeringMode, global.followUpMode);
 	return createAgentState(session.sessionId, live);
 }

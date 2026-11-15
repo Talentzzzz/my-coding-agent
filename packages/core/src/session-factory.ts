@@ -1,10 +1,10 @@
 import { anthropicMessages, type ChatTransport } from "./llm/index.ts";
-import { Agent } from "./agent.ts";
+import { Agent, type SessionSink } from "./agent.ts";
 import type { AssembleAgentStateOptions, OpenAgentOptions } from "./assembly.ts";
 import { buildSystemPrompt } from "./context/system-prompt.ts";
 import { createHooks, type Hooks } from "./hooks.ts";
 import { SessionManager } from "./session/session-manager.ts";
-import { approvalToolsOf } from "./session/tool-config.ts";
+import { approvalToolsOf } from "./settings.ts";
 import { SettingManager } from "./setting-manager.ts";
 import { type ToolManager, createToolManager } from "./tools/index.ts";
 
@@ -39,7 +39,20 @@ export interface CreateSessionAgentOptions {
 	settings?: SettingManager;
 	/** 仅测试的接缝：调用方自己的工具表，取代六个内置工具。 */
 	tools?: ToolManager;
+	/**
+	 * 事件与快照离开编排层的出口。缺省是 no-op。
+	 *
+	 * 生产宿主（hub）递入自己的实现并以此实现订阅；没有订阅者的调用方——`openAgent` 的 smoke——
+	 * 省略它，no-op 精确保持「没人听就什么也不发生」的语义。
+	 */
+	sink?: SessionSink;
 }
+
+/** 没有订阅者的编排层的分发：什么都不做，让「没人听」不需要任何表存在。 */
+const noOpSink: SessionSink = {
+	onEvent(): void {},
+	onState(): void {},
+};
 
 /**
  * 构建编排层：一个对象配它自己的几只 Manager，装好它分发所经的接缝。
@@ -64,6 +77,9 @@ export function createSessionAgent(options: CreateSessionAgentOptions = {}): Age
 		// 进程唯一的装配处：传输层在这里解析而不是在编排层内部给默认值，让一次运行能离开进程的每条
 		// 路都由一个文件决定。
 		api: options.api ?? anthropicMessages,
+		// 分发的唯一出口：宿主的实现在它的分发表上应答，no-op 缺省就是空表遍历零次的语义——没人
+		// 听就什么也不发生。
+		sink: options.sink ?? noOpSink,
 		// 活跃集或审批集一变就重建，让 prompt 无法许诺会话已不再拥有的工具或审批。工作目录与项目指示
 		// 按请求递交、出于与不被捕获同样的理由：一个 builder 服务该编排层跑的所有会话，这两个事实属于
 		// 会话，不属于 builder。
@@ -117,11 +133,12 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 		...(options.settings === undefined ? {} : { settings: options.settings }),
 		...(options.tools === undefined ? {} : { tools: options.tools }),
 		...(options.api === undefined ? {} : { api: options.api }),
+		...(options.sink === undefined ? {} : { sink: options.sink }),
 	});
 	// 状态在这里进入编排层的表，走的是 hub 用的同一扇门——它如今是类私有的
-	// （`assembleAgentStateBySession`）：调用方拼得出的动词是 `hold` / `release` 与 `create`，而
-	// TypeScript 没法说「core 内部」，所以这条唯一获批的组合之路像 smoke 够其他私有半一样够到这扇
-	// 门。这个断言就是接缝，本文件是它在生产侧唯一的读者。
+	// （`assembleAgentStateBySession`）：调用方拼得出的动词是 `hold` / `release` 与
+	// `createAndPrompt`，而 TypeScript 没法说「core 内部」，所以这条唯一获批的组合之路像 smoke 够
+	// 其他私有半一样够到这扇门。这个断言就是接缝，本文件是它在生产侧唯一的读者。
 	const door = agent as unknown as { assembleAgentStateBySession(options: AssembleAgentStateOptions): Promise<unknown> };
 	await door.assembleAgentStateBySession(options);
 	return agent;

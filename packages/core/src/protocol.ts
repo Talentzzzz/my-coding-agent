@@ -119,7 +119,7 @@ export interface ModelSelection {
 }
 
 /** 设置面板读与写的东西。 */
-export interface SettingsSnapshot {
+export interface GlobalSettingsSnapshot {
 	appearance: AppearanceSettings;
 	/** 全局默认活跃工具集；缺失表示本构建认识的所有工具。 */
 	tools?: string[];
@@ -235,12 +235,8 @@ export interface SessionSnapshot {
 	/** 会话所在行的名字。 */
 	model: string;
 	thinkingLevel: string;
-	/** 该模型接受的思考档位，含 "off"。 */
-	thinkingLevels: string[];
 	/** 会话所在的模式名，窗口直接显示的座位；undefined 即内置「默认」（跟随全局默认，或指针悬空）。 */
 	mode?: string;
-	/** 会话注册的每个工具，按注册顺序，供头部的工具开关使用。 */
-	allTools: string[];
 	messages: Message[];
 	/**
 	 * `messages` 里每条消息背后的 entry id，顺序一致。
@@ -270,7 +266,8 @@ export interface SessionSnapshot {
 	 * 会话记录与一切冷读都缺失。
 	 */
 	partial?: Message;
-	submitting: boolean;
+	/** 有在飞的运行——loop 正在跑；活半作答，冷读恒 false（文件只记录已完成的事）。 */
+	running: boolean;
 	/** 运行中途被接受、尚未被取走的用户消息，按窗口绘制它们的样子。 */
 	queued: QueuedPrompt[];
 	/** 瞬时供应商失败正在等退避走完时为 true。 */
@@ -341,7 +338,7 @@ export type ServerMessage =
 	| { type: "entry"; entryId: string; messageTimestamp?: number }
 	| { type: "approval_request"; request: PendingApproval }
 	| { type: "approval_settled"; toolCallId: string; approved: boolean }
-	| { type: "status"; usage: UsageTotals; submitting: boolean; queued: QueuedPrompt[]; isRetrying: boolean; retryAttempt: number }
+	| { type: "status"; usage: UsageTotals; running: boolean; queued: QueuedPrompt[]; isRetrying: boolean; retryAttempt: number }
 	/**
 	 * 某件事在任何请求够不到的地方失败了。
 	 *

@@ -1,8 +1,5 @@
 import type { Message, Model } from "../llm/index.ts";
-import type { ModelChoice } from "../models.ts";
 import type { QueueMode } from "../protocol.ts";
-import type { SessionListener, SessionEventListener } from "../agent.ts";
-import type { Session } from "./session-manager.ts";
 import { PendingMessageQueue } from "./queues.ts";
 
 /**
@@ -21,20 +18,17 @@ export interface ActiveRun {
 }
 
 /**
- * 本进程已知的一个 session，装在一个袋里：订阅者加上活的那一半。
+ * 本进程已知的一个 session，装在一个袋里：活的那一半。
  *
  * 持久的那一半刻意不在这里（ADR-0013）：session 的会话记录是一对文件，每个需要它的操作都
  * 现开现放——run 在开头开一个并持有到结束，命令开一个只持有一个调用的长度。剩下的正是文件回答
- * 不了的——谁在看、排了什么队、在跑什么、还没落盘的是什么。进程重启刻意丢弃全部状态：会话记录
- * 从文件重放，活的那一半本来就是盘上没有的部分。
+ * 不了的——排了什么队、在跑什么、还没落盘的是什么。订阅者也不在这里：分发经构造注入的
+ * {@link SessionSink} 离开编排层，per-session 的分发表归宿主（hub）所有。进程重启刻意丢弃全部
+ * 状态：会话记录从文件重放，活的那一半本来就是盘上没有的部分。
  */
 export interface AgentState {
 	/** 这个状态属于哪个 session；即它的 key，随身携带免得调用方重复传。 */
 	readonly sessionId: string;
-	/** session 状态的订阅者，通过 session 的 `onChange` 挂上来。 */
-	readonly listeners: Set<SessionListener>;
-	/** session 事件的订阅者，通过 session 的 `onEvent` 挂上来。 */
-	readonly eventListeners: Set<SessionEventListener>;
 	/** session 活的那一半：进行中的、盘上没有的。 */
 	readonly live: Live;
 }
@@ -47,10 +41,6 @@ export interface AgentState {
  * 这些字符；`model` 是 run 的流式来源，run 中途的快照要从 run 回答而不是重新查一遍——run 在飞时
  * 用 Live，空闲时用袋。`retrying` / `retryAttempt` 是重试策略对外的一面；`suspended` 标记 run
  * 停在审批闸门处。
- *
- * `unwrittenSession` 是唯一一份在这里而不是盘上的会话记录，它在是因为没东西可读：session 的第一条
- * 消息才换来它的文件（ADR-0008），所以在 `create` 和那条消息之间，这个袋*就是* session 唯一的
- * 副本。它不是缓存——重放产生不了它——文件一存在它就消失，之后每次读取都又是重放。
  *
  * 进程重启刻意丢弃全部：排队的消息丢了，订阅者重新挂，session 文件不会丢——这正是丢弃可承受的原因。
  */
@@ -71,20 +61,6 @@ export interface Live {
 	retryAttempt: number;
 	/** 在飞的 run 停在审批闸门处时为 true。 */
 	suspended: boolean;
-	/**
-	 * 调用方指名时打开这个 session 所用的行——仅测试用的覆盖。
-	 *
-	 * 不是盘上任何东西的副本：「这个 session 在哪个模型上」的其他每种读法都是从文件加当时的设置
-	 * 推导的（`modelChoiceOf`，ADR-0013）。这是唯一一个文件还不回来的答案，因为没东西把它写进
-	 * 文件——以调用方选定的行打开的 session，在打开期间一直带着这个选择，而第一个到达会话记录
-	 * 的选择盖过它。生产环境的打开什么都不指名，所以这里没有值。
-	 */
-	openedOn?: ModelChoice;
-	/**
-	 * 会话记录还没落盘的 session 的袋——创建了但从没说过话的，或者本构建根本不写的
-	 * （`inMemorySession`）。第一次写、给 session 换来文件时就丢弃；之后的每次读取都是 `open(id)`。
-	 */
-	unwrittenSession?: Session;
 }
 
 /**
@@ -107,15 +83,13 @@ export function createLive(steeringMode: QueueMode, followUpMode: QueueMode): Li
 /**
  * 从活的那一半拼装一个 session 的状态。
  *
- * 状态就是活的那一半加订阅者集合，仅此而已：会话记录是调用方按需打开的文件（ADR-0013），没有
- * 第三样东西要在这里收集。订阅者集合初始为空——挂上去是 session 自己的事——活的那一半是造好才传
- * 进来的，因为它的队列模式是设置的答案，这里只接收链条产出的结果。
+ * 状态就是活的那一半，仅此而已：会话记录是调用方按需打开的文件（ADR-0013），没有第三样东西要
+ * 在这里收集。分发不经过这张袋——编排层把事件交给构造注入的 sink，订阅者挂在宿主的分发表上。
+ * 活的那一半是造好才传进来的，因为它的队列模式是设置的答案，这里只接收链条产出的结果。
  */
 export function createAgentState(sessionId: string, live: Live): AgentState {
 	return {
 		sessionId,
-		listeners: new Set(),
-		eventListeners: new Set(),
 		live,
 	};
 }

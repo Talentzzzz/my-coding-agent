@@ -13,7 +13,7 @@ import {
 	type QueuedPrompt,
 	type ServerMessage,
 	type SessionSnapshot,
-	type SettingsSnapshot,
+	type GlobalSettingsSnapshot,
 	type UsageTotals,
 } from "@my-agent/core/protocol";
 
@@ -377,7 +377,9 @@ export interface ViewState {
 	/** 用户导入的模型，供设置面板和会话的模型选择器使用。 */
 	models: ModelOption[];
 	/** 主题、字号和审批集。服务端应答过一次之前缺席。 */
-	settings?: SettingsSnapshot;
+	settings?: GlobalSettingsSnapshot;
+	/** 本构建注册的工具名清单（ADR-0020），启动时从 `GET /api/tools` 取一次。拉取应答之前缺席。 */
+	toolNames?: string[];
 	error?: string;
 }
 
@@ -405,7 +407,7 @@ export function initialState(): ViewState {
  * 这里的总是可绘制的。设置从未携带过宽度时是移除变量，而不是制造一个默认值 —— 样式表自己的值
  * 就是默认，"从未拖过"必须与"拖到了默认值"保持可区分。
  */
-export function applyAppearance(settings: SettingsSnapshot): void {
+export function applyAppearance(settings: GlobalSettingsSnapshot): void {
 	const root = document.documentElement;
 	const theme = settings.appearance.theme;
 	root.dataset.theme =
@@ -434,7 +436,7 @@ export function reduce(viewState: ViewState, message: ServerMessage): ViewState 
 				branchTree: buildBranchTree(message.session),
 				// 快照携带它所显示的一切的 id，所以没有东西留在外面。
 				pendingEntries: [],
-				streaming: message.session.submitting,
+				streaming: message.session.running,
 				usage: message.session.usage,
 				approvals: message.session.pendingApprovals,
 				queued: message.session.queued,
@@ -459,12 +461,12 @@ export function reduce(viewState: ViewState, message: ServerMessage): ViewState 
 			return {
 				...viewState,
 				usage: message.usage,
-				streaming: message.submitting,
+				streaming: message.running,
 				queued: message.queued,
 				snapshot: viewState.snapshot
 					? {
 							...viewState.snapshot,
-							submitting: message.submitting,
+							running: message.running,
 							queued: message.queued,
 							isRetrying: message.isRetrying,
 							retryAttempt: message.retryAttempt,
@@ -673,7 +675,6 @@ function applySessionEvent(viewState: ViewState, event: AgentSessionEvent): View
 			};
 		case "config_changed": {
 			// 配置变更不会随发新的快照，所以头部的副本就地修补。
-			// `thinkingLevels` 保持会话上次上报的值；下一个 `session` 帧会修正它。
 			if (!viewState.snapshot) return viewState;
 			const snapshot = { ...viewState.snapshot };
 			if (event.model !== undefined) snapshot.model = event.model;
@@ -731,7 +732,7 @@ function itemsFromSnapshot(snapshot: SessionSnapshot): Item[] {
 	// 快照指名为等待审批的调用（ADR-0005 §5）是例外：end-restart 语义下悬空的调用不是被截断的
 	// 记录，而是一个仍然站着的问题 —— 运行在门处结束，答案尚未到达。这些卡片在扫尾之后被标记为
 	// 等待，所以重新打开的会话记录显示的是暂停，而不是一张没有输出的已完成卡片。
-	if (!snapshot.submitting) items = settleCards(items);
+	if (!snapshot.running) items = settleCards(items);
 	for (const approval of snapshot.pendingApprovals) {
 		items = patchCard(items, approval.toolCallId, { running: false, waiting: true });
 	}

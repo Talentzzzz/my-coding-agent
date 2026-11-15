@@ -108,7 +108,7 @@ function heartbeat(everyMs = 100): string {
 }
 
 /** A snapshot with nothing in it but the fields a caller has to set, for building frames and folds. */
-function snapshot(sessionId: string, submitting = false): SessionSnapshot {
+function snapshot(sessionId: string, running = false): SessionSnapshot {
 	return {
 		id: sessionId,
 		workDirAbsPath: "/tmp",
@@ -116,13 +116,11 @@ function snapshot(sessionId: string, submitting = false): SessionSnapshot {
 		title: sessionId,
 		model: "m/1",
 		thinkingLevel: "off",
-		thinkingLevels: ["off"],
-		allTools: [],
 		messages: [],
 		messageEntryIds: [],
 		branchPoints: [],
 		leafId: null,
-		submitting,
+		running,
 		queued: [],
 		isRetrying: false,
 		retryAttempt: 0,
@@ -132,8 +130,8 @@ function snapshot(sessionId: string, submitting = false): SessionSnapshot {
 }
 
 /** The opening frame a real server sends before anything else. */
-function baseline(sessionId: string, submitting = false): string {
-	return JSON.stringify({ streamId: sessionId, item: { type: "baseline", session: snapshot(sessionId, submitting) } });
+function baseline(sessionId: string, running = false): string {
+	return JSON.stringify({ streamId: sessionId, item: { type: "baseline", session: snapshot(sessionId, running) } });
 }
 
 /** Build a client wired to a fake clock and fake sockets, plus the recorder it writes into. */
@@ -658,12 +656,12 @@ process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那�
 	const reopened = back();
 	check(
 		"重复 open 的基线 settle 这次导航，而不是被拒绝",
-		reopened.state === "resolved" && reopened.value.submitting === true,
+		reopened.state === "resolved" && reopened.value.running === true,
 		JSON.stringify(reopened),
 	);
 	check("这份基线照常交给窗口（它是一次重画，不是一条错误）", saw.messages.filter((m) => m === "s1/baseline").length === 2, JSON.stringify(saw.messages));
 	check("也没有谁把重复 open 说成失败", saw.errors.length === 0 && reported.length === 0, JSON.stringify([saw.errors, reported]));
-	check("画的是刚到的这份（运行中的会话带 submitting）", drawn.snapshot?.id === "s1" && drawn.snapshot.submitting === true, JSON.stringify(drawn.snapshot?.submitting));
+	check("画的是刚到的这份（运行中的会话带 running）", drawn.snapshot?.id === "s1" && drawn.snapshot.running === true, JSON.stringify(drawn.snapshot?.running));
 
 	// Two rows clicked in a row: each click asks for its own session, and the two baselines can come
 	// back in the other order — the late one belongs to a click the pane has already left.

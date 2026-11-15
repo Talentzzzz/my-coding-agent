@@ -49,9 +49,9 @@ async function postPrompt(base: string, sessionId: string, text: string): Promis
 }
 
 /** session 自己的快照是否说有一次 run 在途。 */
-async function submitting(base: string, sessionId: string): Promise<boolean> {
+async function running(base: string, sessionId: string): Promise<boolean> {
 	const response = await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}`);
-	return ((await response.json()) as { session: { submitting: boolean } }).session.submitting;
+	return ((await response.json()) as { session: { running: boolean } }).session.running;
 }
 
 /**
@@ -61,8 +61,8 @@ async function submitting(base: string, sessionId: string): Promise<boolean> {
  * 它正是下面 `onStreamMessage` 镜像的那个释放信号。
  */
 function settled(message: ServerMessage): boolean {
-	if (message.type === "status") return !message.submitting;
-	if (message.type === "baseline") return !message.session.submitting;
+	if (message.type === "status") return !message.running;
+	if (message.type === "baseline") return !message.session.running;
 	return false;
 }
 
@@ -98,7 +98,7 @@ try {
 	// 一轮热身正是把这个 session 放进下面每个检查都要读的行存储的动作。
 	transport.setResponses([fakeAssistantMessage("warm-up answer")]);
 	check("开场 prompt 被接受", (await postPrompt(server.url, sessionId, "开场")) === 202);
-	check("开场 run 落定了", await until(async () => (await submitting(server.url, sessionId)) === false));
+	check("开场 run 落定了", await until(async () => (await running(server.url, sessionId)) === false));
 
 	const channels: string[] = [];
 	const items: ConnectionItem[] = [];

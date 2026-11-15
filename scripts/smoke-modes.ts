@@ -7,7 +7,7 @@ import { SettingsPanel, modeSummaryOf, type SettingsHandlers } from "../packages
 import { Composer, type ComposerHandlers } from "../packages/web/src/composer.ts";
 import { openMenu } from "../packages/web/src/render/menu.ts";
 import { installDom, type FakeNode } from "./dom-shim.ts";
-import type { ModeSettings, SettingsSnapshot, SessionSnapshot } from "@my-agent/core/protocol";
+import type { ModeSettings, GlobalSettingsSnapshot } from "@my-agent/core/protocol";
 
 let failures = 0;
 
@@ -35,18 +35,14 @@ function byTitle(root: FakeNode, title: string): FakeNode | undefined {
 
 const ALL_TOOLS = ["read", "write", "edit", "glob", "grep", "bash"];
 
-function settingsOf(modes: ModeSettings[] | undefined, tools?: string[]): SettingsSnapshot {
+function settingsOf(modes: ModeSettings[] | undefined, tools?: string[]): GlobalSettingsSnapshot {
 	return {
 		appearance: { theme: "dark", fontSize: 15 },
 		approval: { read: false, write: true, edit: true, glob: false, grep: false, bash: true },
 		bash: { defaultTimeoutMs: 120_000, maxTimeoutMs: 3_600_000 },
 		...(tools === undefined ? {} : { tools }),
 		...(modes === undefined ? {} : { modes }),
-	} as SettingsSnapshot;
-}
-
-function snapshotOf(): SessionSnapshot {
-	return { allTools: ALL_TOOLS } as unknown as SessionSnapshot;
+	} as GlobalSettingsSnapshot;
 }
 
 function handlers(over: Partial<SettingsHandlers> = {}): SettingsHandlers {
@@ -88,7 +84,7 @@ process.stdout.write("\nmodes：模式页画出内置默认卡与用户模式\n"
 		// 而 bash 正是列表携带的那个。
 		settings: settingsOf([{ name: "只读", tools: ["read", "glob", "grep"], approval: { bash: false, write: false, edit: false, read: false, glob: false, grep: false } }], ["read", "glob", "bash"]),
 		models: [],
-		snapshot: snapshotOf(),
+		toolNames: ALL_TOOLS,
 	});
 	panel.show("modes");
 
@@ -125,7 +121,7 @@ process.stdout.write("\nmodes：默认卡展开同一套表单并写全局默认
 			},
 		}),
 	);
-	panel.render({ settings: settingsOf(undefined), models: [], snapshot: snapshotOf() });
+	panel.render({ settings: settingsOf(undefined), models: [], toolNames: ALL_TOOLS });
 	panel.show("modes");
 
 	const rows = all(panel.element as unknown as FakeNode, "model-row");
@@ -165,8 +161,9 @@ process.stdout.write("\nmodes：默认卡展开同一套表单并写全局默认
 	check("保存只写变更过的审批", JSON.stringify(approvalWrites) === JSON.stringify([["glob", true]]), JSON.stringify(approvalWrites));
 	check("保存后表单收起", all(panel.element as unknown as FakeNode, "model-form").length === 0);
 
-	// 没有 session 时默认表单退场，与旧 defaults 区块的做法一致：它的开关无法指名构建自带的
-	// 那份列表，把六个内置工具写到一个可能指名更多的集合上等于编造一份——正是这条路拒绝做的事。
+	// 名单还没取到（启动拉取未应答）时，表单以六个内置兜底显示，但保存是空操作：把兜底的六个
+	// 写进一个可能更多的集合等于编造一份——这条防线现在住在 commitDefault 的空名单守卫上
+	// （ADR-0020），而不是退场的控件上。
 	const bareWrites: string[][] = [];
 	const bare = new SettingsPanel(
 		handlers({
@@ -175,18 +172,18 @@ process.stdout.write("\nmodes：默认卡展开同一套表单并写全局默认
 			},
 		}),
 	);
-	bare.render({ settings: settingsOf(undefined), models: [] });
+	bare.render({ settings: settingsOf(undefined), models: [], toolNames: [] });
 	bare.show("modes");
 	const bareRows = all(bare.element as unknown as FakeNode, "model-row");
 	const bareHead = bareRows[0]!.children.find((child) => child.classList.contains("model-row-head"))!;
 	bareHead.dispatch("click");
 	const bareForm = all(bare.element as unknown as FakeNode, "model-form")[0]!;
-	const bareBox = all(bareForm, "mode-tool")[5]!.querySelector("input")!;
-	check("无会话时默认表单的开关退场", bareBox.disabled === true, String(bareBox.disabled));
+	check("名单未取到时表单以六个内置兜底", all(bareForm, "mode-tool").length === ALL_TOOLS.length, String(all(bareForm, "mode-tool").length));
 	const bareSave = all(bareForm, "button").find((button) => button.textContent === "保存")!;
-	check("无会话时保存退场", bareSave.disabled === true, String(bareSave.disabled));
+	check("名单未取到时保存仍然开着", bareSave.disabled === false, String(bareSave.disabled));
 	bareSave.dispatch("click");
-	check("无会话时默认卡不写编造的工具集", bareWrites.length === 0, JSON.stringify(bareWrites));
+	await flush();
+	check("但空名单守卫让保存成为空操作", bareWrites.length === 0, JSON.stringify(bareWrites));
 }
 
 // ------------------------------------------------------- 3. 模式的表单整表提交清单
@@ -197,7 +194,7 @@ process.stdout.write("\nmodes：用户模式整表保存\n");
 	installDom();
 	const saves: ModeSettings[][] = [];
 	const panel = new SettingsPanel(handlers({ onSaveModes: async (modes) => saves.push(modes) }));
-	panel.render({ settings: settingsOf([{ name: "只读", tools: ["read"], approval: { bash: false, write: false, edit: false, read: false, glob: false, grep: false } }]), models: [], snapshot: snapshotOf() });
+	panel.render({ settings: settingsOf([{ name: "只读", tools: ["read"], approval: { bash: false, write: false, edit: false, read: false, glob: false, grep: false } }]), models: [], toolNames: ALL_TOOLS });
 	panel.show("modes");
 
 	const rows = all(panel.element as unknown as FakeNode, "model-row");
@@ -241,7 +238,7 @@ process.stdout.write("\nmodes：名字冲突就地拒绝\n");
 	panel.render({
 		settings: settingsOf([{ name: "只读", tools: ["read"], approval: { bash: false, write: false, edit: false, read: false, glob: false, grep: false } }]),
 		models: [],
-		snapshot: snapshotOf(),
+		toolNames: ALL_TOOLS,
 	});
 	panel.show("modes");
 
@@ -286,7 +283,7 @@ process.stdout.write("\nmodes：删除先问一次\n");
 	installDom();
 	const saves: ModeSettings[][] = [];
 	const panel = new SettingsPanel(handlers({ onSaveModes: async (modes) => saves.push(modes) }));
-	panel.render({ settings: settingsOf([{ name: "只读", tools: ["read"], approval: { bash: false, write: false, edit: false, read: false, glob: false, grep: false } }]), models: [], snapshot: snapshotOf() });
+	panel.render({ settings: settingsOf([{ name: "只读", tools: ["read"], approval: { bash: false, write: false, edit: false, read: false, glob: false, grep: false } }]), models: [], toolNames: ALL_TOOLS });
 	panel.show("modes");
 
 	const rows = all(panel.element as unknown as FakeNode, "model-row");

@@ -17,11 +17,13 @@ import {
 	narrowToKnown,
 	type Agent,
 	type AgentSessionEvent,
+	type SessionEventListener,
+	type SessionSink,
 	type Tool,
 	type FileDiff,
 	type Message,
 	type MessageEntry,
-	type Settings,
+	type GlobalSettings,
 	type SessionEntry,
 	type Session,
 	type SettingManager,
@@ -165,17 +167,17 @@ function windowedRows(contextWindow: number): ModelConfig[] {
 /**
  * Wait until a run has actually reached the provider, or record a failure.
  *
- * Waiting for `submitting` alone is not enough: the snapshot reports it before `prepareRequest` runs, so
+ * Waiting for `running` alone is not enough: the snapshot reports it before `prepareRequest` runs, so
  * a test that released the gate on that signal could release it before the call arrived, and the call
  * would then wait for a release that already happened.
  */
 async function whenStreaming(agent: Agent, gate: Gate, ms = 5_000): Promise<void> {
 	const started = Date.now();
 	while (Date.now() - started < ms) {
-		if (agent.snapshot(sidOf(agent)).submitting && gate.held >= 1) return;
+		if (agent.snapshot(sidOf(agent)).running && gate.held >= 1) return;
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
-	check("a run reached the provider", false, `streaming=${agent.snapshot(sidOf(agent)).submitting} held=${gate.held} after ${ms} ms`);
+	check("a run reached the provider", false, `streaming=${agent.snapshot(sidOf(agent)).running} held=${gate.held} after ${ms} ms`);
 }
 
 /** Poll until `ready` holds, so a check reads a state the loop reaches asynchronously. */
@@ -194,11 +196,11 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
  * The backoff is 10 ms because these are assertions about *whether* an attempt is retried, not about
  * how long the package sleeps; the policy's own arithmetic is the dependency's to test.
  */
-function retryPolicy(overrides: Partial<Settings["retry"]> = {}): Settings["retry"] {
+function retryPolicy(overrides: Partial<GlobalSettings["retry"]> = {}): GlobalSettings["retry"] {
 	return { enabled: true, maxRetries: 3, baseDelayMs: 10, maxAgentDelayMs: 60_000, ...overrides };
 }
 
-function settings(overrides: Partial<Settings> = {}): Settings {
+function settings(overrides: Partial<GlobalSettings> = {}): GlobalSettings {
 	// The cast is the spread talking, not the data: every key here is present, and spreading a
 	// Partial over it only makes the checker doubt the optionals it could not see.
 	return {
@@ -207,7 +209,7 @@ function settings(overrides: Partial<Settings> = {}): Settings {
 		followUpMode: "one-at-a-time",
 		retry: retryPolicy(),
 		...overrides,
-	} as Settings;
+	} as GlobalSettings;
 }
 
 /**
@@ -226,28 +228,78 @@ interface RunOptions {
 }
 
 /**
+ * ADR-0021：会话随第一条消息出生，而编排层的每个动词（prompt、applyConfig、snapshot……）都按 id
+ * 现开文件——文件不存在的 id 一律拒绝。所以 `openSession` 在装配之前先落一条出生消息，让每个
+ * 练习拿到的是一个已经出生的会话；这条消息不跑引擎、不耗剧本，读取 helper
+ * （{@link entriesOf} / {@link textsOf}）把它滤掉，各练习的消息断言因此保持原义。
+ */
+const BIRTH_TEXT = "the smoke's birth message";
+
+function userMessage(text: string): Message {
+	return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
+}
+
+/**
  * The bag and id each opened session runs on, kept beside the agent the checks hold.
  *
  * The agent's methods name it by id now — the orchestrator holds no session state — so the
  * opening helpers record what they created here and every check reads the pair back through
  * {@link sidOf} and {@link bagOf}.
  */
-const opened = new WeakMap<Agent, { id: string; session: Session; settings: SettingManager }>();
+const opened = new WeakMap<Agent, { id: string; session: Session; settings: SettingManager; birthEntryId: string }>();
 
 function sidOf(agent: Agent): string {
 	return opened.get(agent)!.id;
 }
 
 function bagOf(agent: Agent): Session {
-	const session = opened.get(agent)!.session;
-	// A session that has spoken is a file, not this object (ADR-0013): the orchestrator replays it per
-	// operation, so a test that wants to look at what it wrote has to replay too. Before the birth the
-	// session below *is* the session — there is nothing on disk to reopen.
-	return session.fileCreated ? agent.sessionManager.open(session.sessionId) : session;
+	// A session is a file, not a field (ADR-0013 and ADR-0021): every session this smoke opens was
+	// born in `openSession`, so the orchestrator replays it per operation and a check that wants to
+	// look at what it wrote replays too — there is no unborn bag to fall back on.
+	return agent.sessionManager.open(opened.get(agent)!.id);
 }
 
 function settingsOf(agent: Agent): SettingManager {
 	return opened.get(agent)!.settings;
+}
+
+/**
+ * A capture sink with the subscribe/unsubscribe semantics the session used to expose itself.
+ *
+ * The orchestrator no longer keeps subscriber sets on its bags (ADR-0013's sink clause): dispatch
+ * leaves core through the single sink handed in at construction. The smoke is its own subscriber, so
+ * the sink records every published event and re-dispatches to whoever subscribed through
+ * {@link onSessionEvent} — the shim the exercises below use instead of the removed `Agent.onEvent`.
+ */
+function captureSink(): {
+	sink: SessionSink;
+	onEvent(sessionId: string, listener: SessionEventListener): () => void;
+} {
+	const listeners = new Map<string, Set<SessionEventListener>>();
+	const recorded: AgentSessionEvent[] = [];
+	return {
+		sink: {
+			onEvent(sessionId, event) {
+				recorded.push(event);
+				for (const listener of listeners.get(sessionId) ?? []) listener(event);
+			},
+			onState() {},
+		},
+		onEvent(sessionId, listener) {
+			const set = listeners.get(sessionId) ?? new Set<SessionEventListener>();
+			listeners.set(sessionId, set);
+			set.add(listener);
+			return () => set.delete(listener);
+		},
+	};
+}
+
+/** The capture sink each opened session's agent was built with, keyed by that agent. */
+const taps = new WeakMap<Agent, ReturnType<typeof captureSink>>();
+
+/** Subscribe to the session's events through the capture sink its agent was built with. */
+function onSessionEvent(agent: Agent, listener: SessionEventListener): () => void {
+	return taps.get(agent)!.onEvent(sidOf(agent), listener);
 }
 
 /**
@@ -258,31 +310,40 @@ function settingsOf(agent: Agent): SettingManager {
  * here is written and read back exactly as it would be for real —just nowhere.
  */
 async function openSession(
-	overrides: Partial<Settings> = {},
+	overrides: Partial<GlobalSettings> = {},
 	run: RunOptions = {},
-	model?: string,
 	tools?: ToolManager,
 ): Promise<Agent> {
 	const session = createSession(root);
+	// 出生（ADR-0021）：一条 user 消息落盘，文件与快照同时诞生。经本脚本自己的 store 追加——
+	// 文件是共享状态，编排层随后按 id 重放的就是它。不跑引擎、不耗剧本回答。
+	const birthEntryId = store.appendMessage(session, userMessage(BIRTH_TEXT));
 	const sessionSettings = inMemorySettingManager(settings(overrides), run.models ?? rows);
+	const tap = captureSink();
 	const agent = await openAgent({
 		session,
 		api: run.api ?? fake.api,
-		model,
 		settings: sessionSettings,
 		tools,
+		sink: tap.sink,
 	});
-	opened.set(agent, { id: session.sessionId, session, settings: sessionSettings });
+	opened.set(agent, { id: session.sessionId, session, settings: sessionSettings, birthEntryId });
+	taps.set(agent, tap);
 	return agent;
 }
 
 function textsOf(agent: Agent): string[] {
-	return agent.snapshot(sidOf(agent)).messages.filter((message) => message.role === "user").map((message) => textOf(message));
+	return agent.snapshot(sidOf(agent)).messages
+		.filter((message) => message.role === "user" && textOf(message) !== BIRTH_TEXT)
+		.map((message) => textOf(message));
 }
 
 /** Every entry in the log, header aside, including branches the session is no longer on. */
 function entriesOf(agent: Agent): SessionEntry[] {
-	return agent.sessionManager.getEntries(bagOf(agent));
+	// The birth message is filtered out: the exercises below speak of the messages *they* sent, and
+	// the one `openSession` wrote to make the session exist is not theirs.
+	const birth = opened.get(agent)!.birthEntryId;
+	return agent.sessionManager.getEntries(bagOf(agent)).filter((entry) => entry.id !== birth);
 }
 
 /**
@@ -406,13 +467,13 @@ async function exerciseFollowUp(): Promise<void> {
 	const base = fake.fakeState.callCount;
 
 	const echoed: string[] = [];
-	agent.onEvent(sidOf(agent), (event) => {
+	onSessionEvent(agent, (event) => {
 		if (event.type === "message_end" && event.message.role === "user") echoed.push(textOf(event.message));
 	});
 
 	const running = agent.prompt(sidOf(agent), "first question");
 	await whenStreaming(agent, gate);
-	check("the first run is streaming", agent.snapshot(sidOf(agent)).submitting === true);
+	check("the first run is streaming", agent.snapshot(sidOf(agent)).running === true);
 	check("the provider call is held open", gate.held === 1, String(gate.held));
 	check("nothing is queued yet", agent.snapshot(sidOf(agent)).queued.length === 0, String(agent.snapshot(sidOf(agent)).queued.length));
 
@@ -529,17 +590,17 @@ async function exerciseAcceptedOrder(): Promise<void> {
 	);
 	check(
 		"the first request carried the question alone",
-		JSON.stringify(sent[0]?.texts.slice(1)) === JSON.stringify(["question one"]),
+		JSON.stringify(sent[0]?.texts.slice(2)) === JSON.stringify(["question one"]),
 		JSON.stringify(sent[0]?.texts),
 	);
 	check(
 		"the request the follow-up opened carried it behind that answer",
-		JSON.stringify(sent[1]?.roles.slice(1)) === JSON.stringify(["user", "assistant", "user"]),
+		JSON.stringify(sent[1]?.roles.slice(2)) === JSON.stringify(["user", "assistant", "user"]),
 		JSON.stringify(sent[1]?.roles),
 	);
 	check(
 		"with the texts in the same order",
-		JSON.stringify(sent[1]?.texts.slice(1)) ===
+		JSON.stringify(sent[1]?.texts.slice(2)) ===
 			JSON.stringify(["question one", "first answer", "asked while it was answering"]),
 		JSON.stringify(sent[1]?.texts),
 	);
@@ -564,7 +625,7 @@ async function exerciseAbortDropsUnconsumed(): Promise<void> {
 	const running = agent.prompt(sidOf(agent), "question before the abort");
 	await whenStreaming(agent, gate);
 	await agent.prompt(sidOf(agent), "typed while it was answering", { behavior: "followUp" });
-	check("the run is streaming with one message queued", agent.snapshot(sidOf(agent)).submitting && agent.snapshot(sidOf(agent)).queued.length === 1, String(agent.snapshot(sidOf(agent)).queued.length));
+	check("the run is streaming with one message queued", agent.snapshot(sidOf(agent)).running && agent.snapshot(sidOf(agent)).queued.length === 1, String(agent.snapshot(sidOf(agent)).queued.length));
 
 	const aborting = agent.abort(sidOf(agent));
 	// The held call has to answer before the aborted run can end; the abort's own signal is what turns
@@ -639,9 +700,9 @@ async function exerciseLiveStates(): Promise<void> {
 
 	const queuedSeen: number[] = [];
 	const streamingSeen: boolean[] = [];
-	agent.onEvent(sidOf(agent), () => {
+	onSessionEvent(agent, () => {
 		queuedSeen.push(agent.snapshot(sidOf(agent)).queued.length);
-		streamingSeen.push(agent.snapshot(sidOf(agent)).submitting);
+		streamingSeen.push(agent.snapshot(sidOf(agent)).running);
 	});
 
 	const running = agent.prompt(sidOf(agent), "live question");
@@ -683,7 +744,7 @@ async function exerciseEventStream(): Promise<void> {
 	const agent = await openSession({}, { api: gatedApi });
 
 	const seen: AgentSessionEvent[] = [];
-	agent.onEvent(sidOf(agent), (event) => seen.push(event));
+	onSessionEvent(agent, (event) => seen.push(event));
 
 	const running = agent.prompt(sidOf(agent), "event question one");
 	await whenStreaming(agent, gate);
@@ -769,7 +830,7 @@ async function exerciseCompactionEvent(): Promise<void> {
 	const agent = await openSession({}, { models: windowedRows(33_035) });
 
 	const announced: Extract<AgentSessionEvent, { type: "compaction" }>[] = [];
-	agent.onEvent(sidOf(agent), (event) => {
+	onSessionEvent(agent, (event) => {
 		if (event.type === "compaction") announced.push(event);
 	});
 
@@ -788,8 +849,9 @@ async function exerciseCompactionEvent(): Promise<void> {
 	const event = announced[0];
 	check("carrying the summary the model produced", event?.summary === summary, JSON.stringify(event?.summary));
 	// The third prompt is already written when its request is prepared, so the cut lands on that turn
-	// start and the two completed exchanges are what the summary stands for.
-	check("with the messages it stands for", event?.summarized === 4, JSON.stringify(event?.summarized));
+	// start and the two completed exchanges are what the summary stands for — plus the birth message
+	// `openSession` gave the session (ADR-0021), which is part of the history being folded.
+	check("with the messages it stands for", event?.summarized === 5, JSON.stringify(event?.summarized));
 	check("and a live estimate of what is still in context", (event?.contextTokens ?? 0) > 0, JSON.stringify(event?.contextTokens));
 	check("four provider calls were made: three answers and one summary", fake.fakeState.callCount - base === 4, String(fake.fakeState.callCount - base));
 	// The summary is a request like any other, so it authenticates like one: the key rides on the model
@@ -833,10 +895,12 @@ async function exerciseConfigChanged(): Promise<void> {
 	// A second row gives the source a second model, so a model change is observable at all. Both are
 	// answered by the same scripted transport: nothing here sends a request.
 	const twoRows: ModelConfig[] = [ROW, { ...ROW, name: "faux2" }];
-	const agent = await openSession({ modes: [{ name: "reader", tools: ["read"], approval: { bash: true } }] }, { models: twoRows }, "faux/faux-1");
+	// The in-force model is the fallback answer (the first row), so moving to the second row is a
+	// change the composer's event can name.
+	const agent = await openSession({ modes: [{ name: "reader", tools: ["read"], approval: { bash: true } }] }, { models: twoRows });
 
 	const seen: Extract<AgentSessionEvent, { type: "config_changed" }>[] = [];
-	agent.onEvent(sidOf(agent), (event) => {
+	onSessionEvent(agent, (event) => {
 		if (event.type === "config_changed") seen.push(event);
 	});
 
@@ -875,19 +939,8 @@ async function exerciseConfigChanged(): Promise<void> {
 	agent.applyModelSelection(sidOf(agent), { model: "faux2" });
 	check("re-selecting the current model says nothing", seen.length === 3, JSON.stringify(seen));
 
-	check("every row offers the same four levels", JSON.stringify(agent.snapshot(sidOf(agent)).thinkingLevels) === JSON.stringify(["off", "low", "high", "max"]), JSON.stringify(agent.snapshot(sidOf(agent)).thinkingLevels));
 	agent.applyModelSelection(sidOf(agent), { thinkingLevel: "off" });
 	check("so re-applying it says nothing", seen.length === 3, JSON.stringify(seen));
-
-	// The whole point of choosing on the composer: a choice no request was made with is not something
-	// that happened, so nothing about it reaches the disk. The choice in force lives in memory now
-	// (issue 03 §7), so the disk is what the assertion reads — and this session has not spoken, so
-	// its files are not born and a premature write has nowhere to land.
-	check(
-		"and none of it is written down before a request uses it",
-		bagOf(agent).fileCreated === false,
-		JSON.stringify(agent.sessionManager.getRecordedSettings(bagOf(agent))),
-	);
 
 	await agent.close(sidOf(agent));
 }
@@ -1012,7 +1065,9 @@ async function exerciseAfterToolHook(): Promise<void> {
 		api: fake.api,
 		settings: replayedSettings,
 	});
-	opened.set(replayed, { id: reopenedFile.sessionId, session: reopenedFile, settings: replayedSettings });
+	// 这个会话的文件由上面的练习亲手写就，没有经 `openSession` 的出生消息——没有可滤的出生条目，
+	// 空串让它原样通过。
+	opened.set(replayed, { id: reopenedFile.sessionId, session: reopenedFile, settings: replayedSettings, birthEntryId: "" });
 	try {
 		await within("the reopened run", 10_000, replayed.prompt(sidOf(replayed), "one more time"));
 		await within("settle()", 10_000, replayed.settle(sidOf(replayed)));
@@ -1056,7 +1111,7 @@ async function exerciseOutputBackstop(): Promise<void> {
 		fakeAssistantMessage("clipped"),
 		fakeAssistantMessage("again"),
 	]);
-	const agent = await openSession({}, {}, undefined, manager);
+	const agent = await openSession({}, {}, manager);
 
 	await within("the run", 10_000, agent.prompt(sidOf(agent), "run the unbounded tool"));
 	await within("settle()", 10_000, agent.settle(sidOf(agent)));
@@ -1342,7 +1397,7 @@ async function exerciseToolManager(): Promise<void> {
 		fakeAssistantMessage(fakeToolCall("probe", {})),
 		fakeAssistantMessage("second done"),
 	]);
-	const agent = await openSession({ modes: [{ name: "probe-only", tools: ["read", "probe"], approval: NO_GATES }] }, {}, undefined, manager);
+	const agent = await openSession({ modes: [{ name: "probe-only", tools: ["read", "probe"], approval: NO_GATES }] }, {}, manager);
 	await within("the run", 10_000, agent.prompt(sidOf(agent), "probe once"));
 	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 	// A narrowing between the two requests: `read` and `probe` stay, `noop` and the rest go.
@@ -1361,7 +1416,7 @@ async function exerciseToolManager(): Promise<void> {
 
 	const other: SentRequest[] = [];
 	recordRequests(other, [fakeAssistantMessage(fakeToolCall("probe", {})), fakeAssistantMessage("third done")]);
-	const secondSession = await openSession({}, {}, undefined, manager);
+	const secondSession = await openSession({}, {}, manager);
 	await within("the run", 10_000, secondSession.prompt(sidOf(secondSession), "probe from elsewhere"));
 	await within("settle()", 10_000, secondSession.settle(sidOf(secondSession)));
 	check("another session ran that same instance too", ran[2] === manager.get("probe"));
@@ -1385,19 +1440,19 @@ async function exerciseActiveTools(): Promise<void> {
 	const agent = await openSession({ modes: [{ name: "narrow", tools: narrowed, approval: NO_GATES }] });
 
 	const seats: (string | null)[] = [];
-	agent.onEvent(sidOf(agent), (event) => {
+	onSessionEvent(agent, (event) => {
 		if (event.type === "config_changed" && event.mode !== undefined) seats.push(event.mode);
 	});
 
 	await within("the run", 10_000, agent.prompt(sidOf(agent), "what can you do"));
 	await within("settle()", 10_000, agent.settle(sidOf(agent)));
-	check("the registry reports the built-ins", JSON.stringify(agent.snapshot(sidOf(agent)).allTools) === JSON.stringify(["read", "write", "edit", "glob", "grep", "bash"]), JSON.stringify(agent.snapshot(sidOf(agent)).allTools));
+	check("the registry reports the built-ins", JSON.stringify(agent.toolNames()) === JSON.stringify(["read", "write", "edit", "glob", "grep", "bash"]), JSON.stringify(agent.toolNames()));
 	check("and the model was offered write", availableTools(sent[0]?.prompt ?? "").includes("write"), JSON.stringify(availableTools(sent[0]?.prompt ?? "")));
 	check("which the request also declared", sent[0]?.tools.includes("write") === true, JSON.stringify(sent[0]?.tools));
 
 	agent.applyConfig(sidOf(agent), { mode: "narrow" });
 	check("snapshot.mode names the applied mode", agent.snapshot(sidOf(agent)).mode === "narrow", agent.snapshot(sidOf(agent)).mode);
-	check("allTools still reports every registered tool", agent.snapshot(sidOf(agent)).allTools.length === 6, JSON.stringify(agent.snapshot(sidOf(agent)).allTools));
+	check("toolNames still reports every registered tool", agent.toolNames().length === 6, JSON.stringify(agent.toolNames()));
 	check("the change is announced, so a client needs no new snapshot", JSON.stringify(seats) === JSON.stringify(["narrow"]), JSON.stringify(seats));
 
 	await within("the run", 10_000, agent.prompt(sidOf(agent), "and now"));
@@ -1425,7 +1480,7 @@ async function exerciseDeactivatedToolCall(): Promise<void> {
 	agent.applyConfig(sidOf(agent), { mode: "no-write" });
 
 	const ends: { toolName: string; isError: boolean; text: string }[] = [];
-	agent.onEvent(sidOf(agent), (event) => {
+	onSessionEvent(agent, (event) => {
 		if (event.type === "tool_execution_end") {
 			ends.push({ toolName: event.toolName, isError: event.isError, text: textOf({ content: event.result?.content } as Message) });
 		}
@@ -1479,7 +1534,7 @@ async function exerciseDeactivatedToolCall(): Promise<void> {
 	const log: string[] = [];
 	/** What the `bash` call ended with, so "refused" is read off its result and not off its name. */
 	const bashEnd: { isError: boolean; text: string }[] = [];
-	agent.onEvent(sidOf(agent), (event) => {
+	onSessionEvent(agent, (event) => {
 		if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
 			log.push(`${event.type === "tool_execution_start" ? "start" : "end"}:${event.toolName}`);
 		}
@@ -1516,7 +1571,7 @@ async function exerciseUnknownTool(): Promise<void> {
 	const before = JSON.stringify(agent.sessionManager.getRecordedToolConfig(bagOf(agent)));
 
 	const seen: AgentSessionEvent[] = [];
-	agent.onEvent(sidOf(agent), (event) => seen.push(event));
+	onSessionEvent(agent, (event) => seen.push(event));
 
 	let threw = false;
 	try {
@@ -1546,7 +1601,7 @@ async function exerciseEmptyToolSet(): Promise<void> {
 
 	agent.applyConfig(sidOf(agent), { mode: "silent" });
 	check("an empty active set is allowed", agent.snapshot(sidOf(agent)).mode === "silent", agent.snapshot(sidOf(agent)).mode);
-	check("with nothing active and everything still registered", agent.snapshot(sidOf(agent)).allTools.length === 6, JSON.stringify(agent.snapshot(sidOf(agent)).allTools));
+	check("with nothing active and everything still registered", agent.toolNames().length === 6, JSON.stringify(agent.toolNames()));
 
 	const run = await within("the run", 10_000, agent.prompt(sidOf(agent), "hello without tools"));
 	check("a session with no tools still holds a conversation", run.ok);
@@ -1597,7 +1652,7 @@ async function exerciseRetry(): Promise<void> {
 
 	const trace: RetryTrace[] = [];
 	const live: { retrying: boolean; attempt: number }[] = [];
-	agent.onEvent(sidOf(agent), (event) => {
+	onSessionEvent(agent, (event) => {
 		if (event.type === "retry_scheduled") {
 			trace.push({
 				type: event.type,
@@ -1706,7 +1761,7 @@ async function exerciseNonRetryableError(): Promise<void> {
 	const agent = await openSession();
 
 	const trace: string[] = [];
-	agent.onEvent(sidOf(agent), (event) => {
+	onSessionEvent(agent, (event) => {
 		if (event.type.startsWith("retry_")) trace.push(event.type);
 	});
 
@@ -1746,7 +1801,7 @@ async function exerciseRetryExhaustion(): Promise<void> {
 	const agent = await openSession({ retry: retryPolicy({ maxRetries: 2 }) });
 
 	const trace: RetryTrace[] = [];
-	agent.onEvent(sidOf(agent), (event) => {
+	onSessionEvent(agent, (event) => {
 		if (event.type === "retry_scheduled") {
 			trace.push({ type: event.type, attempt: event.attempt, maxAttempts: event.maxAttempts });
 		}
@@ -1803,7 +1858,7 @@ async function exerciseRetryAbort(): Promise<void> {
 	const agent = await openSession({ retry: retryPolicy({ baseDelayMs: 1_000 }) });
 
 	const scheduled = new Promise<void>((resolve) => {
-		agent.onEvent(sidOf(agent), (event) => {
+		onSessionEvent(agent, (event) => {
 			if (event.type === "retry_scheduled") resolve();
 		});
 	});
@@ -1840,7 +1895,7 @@ async function exerciseRetryDisabled(): Promise<void> {
 	const agent = await openSession({ retry: retryPolicy({ enabled: false }) });
 
 	const trace: string[] = [];
-	agent.onEvent(sidOf(agent), (event) => {
+	onSessionEvent(agent, (event) => {
 		if (event.type.startsWith("retry_")) trace.push(event.type);
 	});
 
@@ -1895,7 +1950,7 @@ async function exerciseContextOverflow(): Promise<void> {
 	const agent = await openSession();
 
 	const trace: string[] = [];
-	agent.onEvent(sidOf(agent), (event) => {
+	onSessionEvent(agent, (event) => {
 		if (event.type.startsWith("retry_")) trace.push(event.type);
 	});
 
@@ -1941,7 +1996,7 @@ async function exerciseCompactionFailure(): Promise<void> {
 	const agent = await openSession({}, { models: windowedRows(33_035) });
 
 	const announced: string[] = [];
-	agent.onEvent(sidOf(agent), (event) => {
+	onSessionEvent(agent, (event) => {
 		if (event.type === "compaction" || event.type === "compaction_failed") announced.push(event.type);
 	});
 
@@ -2039,12 +2094,12 @@ async function exerciseModelFromRow(): Promise<void> {
 }
 
 /**
- * The composer's model and level travel with the message, and reach the file only when a request uses
- * them.
+ * The composer's model and level travel with the message, and are recorded when the gesture lands.
  *
  * Both halves are one selection, and neither is a config change of its own: the session's account of
- * what answered a turn is built from what a request actually carried, so a choice no request was made
- * with must not be recorded — and a session opened and never spoken to must write no files at all.
+ * what answered a turn is built from what a request actually carried, and the session's own record
+ * holds the choice from the moment it is made (ADR-0021: every session this smoke opens is born, so
+ * the write has a snapshot to land on).
  */
 async function exerciseModelSelection(): Promise<void> {
 	process.stdout.write("the composer's choice travels with the message\n");
@@ -2057,18 +2112,10 @@ async function exerciseModelSelection(): Promise<void> {
 	const agent = await openSession({}, { models: thinkerRows, api: scripted.api });
 
 	check("a session opens at off, because nothing has been asked for", agent.snapshot(sidOf(agent)).thinkingLevel === "off", agent.snapshot(sidOf(agent)).thinkingLevel);
-	check(
-		"and offers every level the app has",
-		JSON.stringify(agent.snapshot(sidOf(agent)).thinkingLevels) === JSON.stringify(["off", "low", "high", "max"]),
-		JSON.stringify(agent.snapshot(sidOf(agent)).thinkingLevels),
-	);
 
 	const levelsOf = (): string | undefined => agent.sessionManager.getRecordedSettings(bagOf(agent)).thinkingLevel;
 	agent.applyModelSelection(sidOf(agent), { thinkingLevel: "high" });
 	check("choosing a level moves the session", agent.snapshot(sidOf(agent)).thinkingLevel === "high", agent.snapshot(sidOf(agent)).thinkingLevel);
-	// The choice in force lives in memory now (issue 03 §7), so "records nothing" reads the disk: the
-	// session has not spoken yet, so its files are not born and a premature write has nowhere to land.
-	check("and records nothing until a request uses it", bagOf(agent).fileCreated === false, String(bagOf(agent).fileCreated));
 
 	await within("the run", 10_000, agent.prompt(sidOf(agent), "hello", { selection: { thinkingLevel: "high" } }));
 	check("the request is asked at that level", scripted.fakeState.thinkingLevels.at(-1) === "high", String(scripted.fakeState.thinkingLevels.at(-1)));
@@ -2135,7 +2182,7 @@ async function exerciseFileDiffReport(): Promise<void> {
 	const agent = await openSession();
 
 	const reports: { toolName: string; diff?: FileDiff }[] = [];
-	agent.onEvent(sidOf(agent), (event) => {
+	onSessionEvent(agent, (event) => {
 		if (event.type !== "tool_execution_end") return;
 		reports.push({ toolName: event.toolName, diff: (event.result?.details as { diff?: FileDiff } | undefined)?.diff });
 	});
@@ -2198,7 +2245,7 @@ async function exerciseBranching(): Promise<void> {
 	);
 
 	const events: AgentSessionEvent[] = [];
-	agent.onEvent(sidOf(agent), (event) => events.push(event));
+	onSessionEvent(agent, (event) => events.push(event));
 
 	// --- Rewinding to a message and asking again is what makes a second alternative ---------------
 	const landed = agent.branchTo(sidOf(agent), firstId, false);
@@ -2310,7 +2357,7 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	await within("the second turn", 15_000, agent.prompt(sidOf(agent), "config branch question two"));
 
 	const events: AgentSessionEvent[] = [];
-	agent.onEvent(sidOf(agent), (event) => events.push(event));
+	onSessionEvent(agent, (event) => events.push(event));
 
 	// --- The session narrows and gates `bash` ---------------------------------------------------
 	agent.applyConfig(sidOf(agent), { mode: "narrow" });
@@ -2318,7 +2365,7 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	check("the narrow mode is in force", agent.snapshot(sidOf(agent)).mode === "narrow", agent.snapshot(sidOf(agent)).mode);
 	check("with the approval the session chose", agent.getApprovals(sidOf(agent)).bash === true, JSON.stringify(agent.getApprovals(sidOf(agent))));
 	check("which is the map the gate reads", agent.getApprovals(sidOf(agent)).bash === true, JSON.stringify(agent.getApprovals(sidOf(agent))));
-	check("leaving the settings file alone", settingsOf(agent).getApprovals(root).bash === false, JSON.stringify(settingsOf(agent).getApprovals(root)));
+	check("leaving the settings file alone", settingsOf(agent).getSettings().approval.bash === false, JSON.stringify(settingsOf(agent).getSettings().approval));
 
 	// --- Moving the leaf changes the branch, not the choices ------------------------------------
 	const before = events.length;
@@ -2392,7 +2439,8 @@ async function exerciseLeafDurability(): Promise<void> {
 	check("the move survived close", reopened.leafId === firstId, `${reopened.leafId} vs ${firstId}`);
 	check(
 		"and the reopened context is the branch through it, the record reaching no message",
-		JSON.stringify(store.buildSessionContext(reopened).messages.map(textOf)) === JSON.stringify(["durable question one"]),
+		JSON.stringify(store.buildSessionContext(reopened).messages.map(textOf).filter((text) => text !== BIRTH_TEXT)) ===
+			JSON.stringify(["durable question one"]),
 		JSON.stringify(store.buildSessionContext(reopened).messages.map(textOf)),
 	);
 

@@ -103,13 +103,3 @@ export async function readJsonBody(request: IncomingMessage): Promise<unknown> {
 export async function readObjectBody(request: IncomingMessage): Promise<Record<string, unknown>> {
 	return parseObject(await readBodyText(request));
 }
-
-/**
- * JSON body 作为对象的形式，里面什么都没有时为 `{}`。
- *
- * 服务于唯一一个 body 不指名必填字段的端点：空的 `POST /api/sessions` 一直以来都能创建会话，可能随之而来的 `workDirAbsPath` 不该把它变成一个需要 body 的请求。大小和形状的检查与 {@link readObjectBody} 完全一致——只有"空"被应答而不是被拒绝。
- */
-export async function optionalObjectBody(request: IncomingMessage): Promise<Record<string, unknown>> {
-	const text = await readBodyText(request);
-	return text.length === 0 ? {} : parseObject(text);
-}

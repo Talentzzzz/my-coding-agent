@@ -23,7 +23,7 @@ import {
 	inMemorySettingManager,
 	SettingManager,
 	setSessionsDir,
-	toolStateOf,
+	resolveSettings,
 	type SessionSnapshot,
 	type Session,
 } from "@my-agent/core";
@@ -148,16 +148,20 @@ function entryOf(agent: Agent, id: string): AgentState | undefined {
  * The bag behind a session, for the seeding appends below — the one test-only write that still needs
  * the bag itself.
  *
- * There is no held bag to borrow any more (ADR-0013): every operation replays the file, so a test
- * that wants to write one has to open its own, and the write it makes is a write to the file like any
- * other. `unwrittenSession` is checked first for the same reason the orchestrator checks it: a session that
- * has not spoken yet has no file to reopen.
+ * There is no held bag to borrow any more (ADR-0013), and no unborn bag to fall back on either
+ * (ADR-0021: a session exists only once it has spoken, so an id this script holds always has a file):
+ * every operation replays the file, so a test that wants to write one opens its own, and the write it
+ * makes is a write to the file like any other.
  */
 function bagOf(hub: SessionHub, id: string): Session {
-	const agentState = entryOf(hub.agent, id);
-	const unwrittenSession = agentState?.live.unwrittenSession;
-	if (unwrittenSession !== undefined && !unwrittenSession.fileCreated) return unwrittenSession;
 	return hubSessions(hub).open(id);
+}
+
+/** The id of a session's first user entry — the birth message's entry under ADR-0021. */
+function birthEntryId(bag: Session): string {
+	const entry = store.getEntries(bag).find((candidate) => candidate.type === "message" && candidate.message.role === "user");
+	if (entry === undefined) throw new Error("no user entry in the ledger");
+	return entry.id;
 }
 
 /** Poll until `ready` holds, and report whether it did, so no test guesses at a reap's timing. */
@@ -179,7 +183,7 @@ try {
 	// question and not the hold's. Startup selects nothing — the landing answer is `null` until an
 	// explicit creation happens, and the session below is held by the id that creation returned.
 	check("nothing is selected before anything is created", (await hub.currentSessionId()) === null);
-	const landing = await hub.newSession();
+	const landing = await hub.birth({ text: "出生的第一条消息" });
 	const first = await hub.hold(landing);
 	const second = await hub.hold(landing);
 	check("two connections with no id share one entry", entryOf(hub.agent, first.id) === entryOf(hub.agent, second.id));
@@ -216,15 +220,18 @@ try {
 	await hub.close();
 
 	process.stdout.write("new_session moves the landing spot\n");
-	const created = await hub.newSession();
+	const created = await hub.birth({ text: "出生即落点" });
 	const landed = await hub.hold(created);
 	check("the landing follows the newest session", (await hub.currentSessionId()) === created && landed.id === created, `${landed.id} vs ${created}`);
 
 	process.stdout.write("a fork is the branch up to one entry\n");
-	const parentId = await hub.newSession();
+	// Birth is the first message (ADR-0021), so the parent is born with its fork point on the ledger:
+	// the birth message's own entry is the one the fork below hangs from, and everything after it is
+	// seeded the ordinary way.
+	const parentId = await hub.birth({ text: "first" });
 	const parent = await hub.hold(parentId);
 	const parentFile = hub.agent.fileAbsPathOf(parent.id) ?? "";
-	const entryOne = hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("first"));
+	const entryOne = birthEntryId(bagOf(hub, parentId));
 	hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("second"));
 
 	const forkedId = await hub.fork(parentId, entryOne);
@@ -350,9 +357,8 @@ try {
 	// The rename is the title on the session's `.json` snapshot, read back by every path
 	// that names a session — the live manager, the scan, and the fork that copies the whole log.
 	{
-		const renamedId = await hub.newSession();
+		const renamedId = await hub.birth({ text: "改名的会话" });
 		const host = await hub.hold(renamedId);
-		hubSessions(hub).appendMessage(bagOf(hub, renamedId), userMessage("改名的会话"));
 		await hub.rename(renamedId, "新名字");
 		check("a live session reports the stored name", hub.agent.snapshot(host.id).title === "新名字", hub.agent.snapshot(host.id).title);
 
@@ -383,9 +389,8 @@ try {
 	// pin is its observable half: the log untouched, no half-written temp left behind, and a choice
 	// that changes nothing leaving the file exactly as it was.
 	{
-		const metaId = await hub.newSession();
+		const metaId = await hub.birth({ text: "重写的会话" });
 		const host = await hub.hold(metaId);
-		hubSessions(hub).appendMessage(bagOf(hub, metaId), userMessage("重写的会话"));
 		const jsonlPath = bagOf(hub, metaId).sessionFileAbsPath!;
 		const jsonPath = snapshotPathOf(jsonlPath);
 		const logBefore = await readFile(jsonlPath, "utf8");
@@ -497,7 +502,7 @@ try {
 			const path = SessionManager.findSessionFilePathById(sessionId);
 			return path === undefined ? session : fillSession(path);
 		};
-		const resolvedOf = (): string[] => toolStateOf(store, replayed(), settings, known).activeToolNames;
+		const resolvedOf = (): string[] => resolveSettings(replayed(), settings.getSettings(), [], known).tools;
 
 		const cold = await readSessionSnapshot(options);
 		check("a session with no entry reports the default seat", cold.mode === undefined, cold.mode);
@@ -553,9 +558,8 @@ try {
 	// their snapshot from the same parts.
 	const http = await bootServer({ workDirAbsPath: root, port: 0 });
 	try {
-		const readId = await http.hub.newSession();
+		const readId = await http.hub.birth({ text: "read me" });
 		const opened = await http.hub.hold(readId);
-		hubSessions(http.hub).appendMessage(bagOf(http.hub, readId), userMessage("read me"));
 		hubSessions(http.hub).appendMessage(bagOf(http.hub, readId), userMessage("and me"));
 		http.hub.release(opened);
 		check("the session is idle before the read", await until(() => !http.hub.live.includes(readId)), http.hub.live.join(","));
@@ -574,14 +578,16 @@ try {
 
 		const firstRead = await get(`${http.url}/api/sessions/${readId}`);
 		check("GET /api/sessions/{id} answers 200", firstRead.status === 200, `status=${firstRead.status}`);
-		check("the cold session is not empty", (firstRead.session?.messages.length ?? 0) === 2, `${firstRead.session?.messages.length} messages`);
+		// Birth writes two entries (the user message and the failed run's error message), and the append
+	// above adds the third — each birth is +2 against the ledger under ADR-0021.
+	check("the cold session is not empty", (firstRead.session?.messages.length ?? 0) === 3, `${firstRead.session?.messages.length} messages`);
 		// This is the whole phase in one line: reading a session never takes a hold on it.
 		check("and the read never held the session", holds === 0, `holds=${holds}`);
 		check("so nothing is running it", !http.hub.live.includes(readId), http.hub.live.join(","));
 		// The read is also the window's decision about whether to attach a stream: a snapshot that
-		// reports `submitting: false` is one the window renders without opening one, which is why the
+		// reports `running: false` is one the window renders without opening one, which is why the
 		// hold count above is the whole evidence — an attach would have held through the hub.
-		check("and it reports the session as idle", firstRead.session?.submitting === false, String(firstRead.session?.submitting));
+		check("and it reports the session as idle", firstRead.session?.running === false, String(firstRead.session?.running));
 
 		const secondRead = await get(`${http.url}/api/sessions/${readId}`);
 		check(
@@ -610,9 +616,7 @@ try {
 			"title",
 			"model",
 			"thinkingLevel",
-			"thinkingLevels",
 			"mode",
-			"allTools",
 			"usage",
 		] as const satisfies readonly (keyof SessionSnapshot)[];
 		const mismatched = fromLog.filter(
@@ -621,7 +625,7 @@ try {
 		check("the cold read matches the live session field for field", mismatched.length === 0, mismatched.join(","));
 
 		const onlyALoopAnswers = new Set<keyof SessionSnapshot>([
-			"submitting",
+			"running",
 			"queued",
 			"isRetrying",
 			"retryAttempt",
@@ -642,7 +646,7 @@ try {
 		// never worked in is refused by nothing more than "exists and is a directory".
 		const elsewhere = await mkdtemp(join(tmpdir(), "my-agent-elsewhere-"));
 		try {
-			const created = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: elsewhere });
+			const created = await call("POST", `${http.url}/api/sessions`, { text: "出生在别处", workDirAbsPath: elsewhere });
 			check("a new directory is accepted (201)", created.status === 201, `status=${created.status}`);
 			const landed = String(created.payload.sessionId ?? "");
 			const landedRead = await get(`${http.url}/api/sessions/${landed}`);
@@ -651,38 +655,34 @@ try {
 				resolve(landedRead.session?.workDirAbsPath ?? "") === resolve(elsewhere),
 				`${landedRead.session?.workDirAbsPath}`,
 			);
-			// A session writes nothing until its first message, so a listing taken at creation cannot
-			// name it — and that is the rule rather than a race: the sidebar lists conversations, and a
-			// conversation nobody has said anything in is not one. Speaking once is what puts it there.
+			// Birth is the first message (ADR-0021), so the answer's listing names the session it just
+			// created: a conversation exists the moment it is born, and the sidebar draws it at once.
 			check(
-				"the answer's listing does not name a session with nothing said in it",
-				!(created.payload.sessions as { id: string }[]).some((session) => session.id === landed),
+				"the answer's listing names the session it just born",
+				(created.payload.sessions as { id: string }[]).some((session) => session.id === landed),
 			);
-			const spoke = await http.hub.hold(landed);
-			hubSessions(http.hub).appendMessage(bagOf(http.hub, landed), userMessage("a first message"));
-			http.hub.release(spoke);
 			const groups = ((await call("GET", `${http.url}/api/directories`)).payload.directories as {
 				workDirAbsPath: string;
 				sessions: { id: string }[];
 			}[]) ?? [];
 			const group = groups.find((candidate) => resolve(candidate.workDirAbsPath) === resolve(elsewhere));
 			check(
-				"and lists it under that directory once it has a message",
+				"and lists it under that directory at birth",
 				(group?.sessions ?? []).some((session) => session.id === landed),
 				JSON.stringify(group?.sessions),
 			);
 
 			await writeFile(join(elsewhere, "a-file"), "not a directory\n");
-			const missing = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: join(elsewhere, "no-such-dir") });
+			const missing = await call("POST", `${http.url}/api/sessions`, { text: "x", workDirAbsPath: join(elsewhere, "no-such-dir") });
 			check("a directory that does not exist is refused (400)", missing.status === 400, `status=${missing.status}`);
-			const notDir = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: join(elsewhere, "a-file") });
+			const notDir = await call("POST", `${http.url}/api/sessions`, { text: "x", workDirAbsPath: join(elsewhere, "a-file") });
 			check("a path that is not a directory is refused (400)", notDir.status === 400, `status=${notDir.status}`);
-			const wrongType = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: 42 });
+			const wrongType = await call("POST", `${http.url}/api/sessions`, { text: "x", workDirAbsPath: 42 });
 			check("a non-string workDirAbsPath is refused (400)", wrongType.status === 400, `status=${wrongType.status}`);
 			const bodyless = await call("POST", `${http.url}/api/sessions`);
-			check("an empty POST still creates (201)", bodyless.status === 201, `status=${bodyless.status}`);
-			const bodylessRead = await get(`${http.url}/api/sessions/${String(bodyless.payload.sessionId ?? "")}`);
-			check("and it runs where the server does", resolve(bodylessRead.session?.workDirAbsPath ?? "") === resolve(root), bodylessRead.session?.workDirAbsPath);
+			check("an empty POST is refused (400)", bodyless.status === 400, `status=${bodyless.status}`);
+			const textless = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: elsewhere });
+			check("a POST with no text is refused (400)", textless.status === 400, `status=${textless.status}`);
 		} finally {
 			await rm(elsewhere, { recursive: true, force: true });
 		}
@@ -714,19 +714,12 @@ try {
 			try {
 				for (const dir of [before, other]) await mkdir(dir, { recursive: true });
 
-				const created = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: before });
-				const id = String(created.payload.sessionId ?? "");
-				const elsewhere = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: other });
-				// A directory earns its group by holding a conversation, and a session has no file until
-				// its first message — so each of these says one thing before the sidebar can draw it.
-				const speak = async (sessionId: string, text: string): Promise<void> => {
-					const host = await http.hub.hold(sessionId);
-					hubSessions(http.hub).appendMessage(bagOf(http.hub, sessionId), userMessage(text));
-					http.hub.release(host);
-				};
-				await speak(id, "before");
-				await speak(String(elsewhere.payload.sessionId ?? ""), "other");
-				check("two new directories are listed as two groups", (await listed()).includes(resolve(before)) && (await listed()).includes(resolve(other)));
+			const created = await call("POST", `${http.url}/api/sessions`, { text: "before", workDirAbsPath: before });
+			const id = String(created.payload.sessionId ?? "");
+			const elsewhere = await call("POST", `${http.url}/api/sessions`, { text: "other", workDirAbsPath: other });
+			// Birth is the first message (ADR-0021): each of these arrives with its conversation already
+			// spoken, which is what earns the directory its group in the sidebar.
+			check("two new directories are listed as two groups", (await listed()).includes(resolve(before)) && (await listed()).includes(resolve(other)));
 
 				const malformed = await call("POST", `${http.url}/api/directories/hide`, { workDirAbsPath: 42 });
 				check("hiding with a non-string path is refused (400)", malformed.status === 400, `status=${malformed.status}`);
@@ -782,7 +775,7 @@ try {
 				const hiddenAgain = await call("POST", `${http.url}/api/directories/hide`, { workDirAbsPath: before });
 				check("hiding it a second time is accepted (200)", hiddenAgain.status === 200, `status=${hiddenAgain.status}`);
 				check("and it leaves the listing again", !(await listed()).includes(resolve(before)));
-				const reborn = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: before });
+				const reborn = await call("POST", `${http.url}/api/sessions`, { text: "领回来", workDirAbsPath: before });
 				check("a new session in it is accepted (201)", reborn.status === 201, `status=${reborn.status}`);
 				check("a new session in a put-aside directory lists it again", (await listed()).includes(resolve(before)));
 				const storedHidden =
@@ -794,7 +787,7 @@ try {
 				// failing on a path nothing on screen says is gone.
 				await rm(before, { recursive: true, force: true });
 				check("the directory itself is gone", !existsSync(before));
-				const putBack = await call("POST", `${http.url}/api/sessions`, { workDirAbsPath: before });
+				const putBack = await call("POST", `${http.url}/api/sessions`, { text: "放回来", workDirAbsPath: before });
 				check("a new session puts the directory back (201)", putBack.status === 201, `status=${putBack.status}`);
 				check("and the folder exists again", existsSync(before));
 				void elsewhere;
@@ -811,9 +804,8 @@ try {
 		// entry and answers 201, a blank one is refused before anything is written, and a delete takes
 		// the file with it — refusing first while a hold is still held.
 		{
-			const victim = await http.hub.newSession();
+			const victim = await http.hub.birth({ text: "要删的会话" });
 			const host = await http.hub.hold(victim);
-			hubSessions(http.hub).appendMessage(bagOf(http.hub, victim), userMessage("要删的会话"));
 			http.hub.release(host);
 			check("the victim goes idle", await until(() => !http.hub.live.includes(victim)), http.hub.live.join(","));
 
@@ -910,25 +902,30 @@ try {
 	// ADR-0013: the table on the orchestrator holds exactly what cannot be rebuilt from disk — the
 	// queues, the run in flight, the subscriber sets. `open` is its one way in, and it assembles
 	// first-come: a state already there is kept, never replaced, because the one it would replace
-	// holds the live half. The exits are two and deliberately different: `evict` refuses unless the
-	// criteria hold, and `remove` does not ask. There is no clear — the table lives and dies with the
-	// orchestrator itself.
+	// holds the live half. The exits are two and deliberately different: `tryRemoveAgentStateBySessionId`
+	// refuses unless the criteria hold, and `deleteSessionBySessionId` does not ask. There is no clear —
+	// the table lives and dies with the orchestrator itself.
 	{
 		const agent = createSessionAgent({ settings: new SettingManager({ models: [] }) });
 		const session = createSession(tmpdir());
-		// The door is class-private (`hold` / `create` are the verbs a caller spells);
-		// this block exercises the table itself — unborn bag, first-come-wins, membership — so it
+		// The door is class-private (`hold` / `createAndPrompt` are the verbs a caller spells);
+		// this block exercises the table itself — first-come-wins, membership, the two exits — so it
 		// reaches in the same way `entryOf` does, the cast the one road across.
 		const door = agent as unknown as { assembleAgentStateBySession(options: { session: Session }): Promise<AgentState> };
 		const agentState = await door.assembleAgentStateBySession({ session });
 		check("open is the one way in, and the id answers it", entryOf(agent, session.sessionId) === agentState);
 		check("re-opening an id keeps the state already there", (await door.assembleAgentStateBySession({ session })) === agentState);
-		check("an unborn session refuses to be evicted", agent.evict(session.sessionId) === false);
+		// An idle state is evictable even with no file behind it (ADR-0021 removed the unborn
+		// refusal): nothing in flight, nothing parked at the approval gate — the criteria are all
+		// that answer, and they all say go.
+		check("an idle state with no file behind it is evictable", agent.tryRemoveAgentStateBySessionId(session.sessionId) === true);
+		// The eviction above took the one state there was; give the deletes one to forget again.
+		await door.assembleAgentStateBySession({ session });
 		// No file behind it, so forgetting the state is the whole removal — and only that half, which
 		// is why the second attempt refuses as an id nothing names.
-		await agent.remove(session.sessionId);
+		await agent.deleteSessionBySessionId(session.sessionId);
 		check("an id no longer in the table answers nothing", entryOf(agent, session.sessionId) === undefined);
-		check("removing it again refuses", (await agent.remove(session.sessionId).then(() => "removed", () => "refused")) === "refused");
+		check("deleting it again refuses", (await agent.deleteSessionBySessionId(session.sessionId).then(() => "deleted", () => "refused")) === "refused");
 	}
 
 	process.stdout.write("a pair this build cannot open is deleted, not kept\n");
