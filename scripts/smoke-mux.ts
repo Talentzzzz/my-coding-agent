@@ -285,10 +285,13 @@ try {
 	rig.transport.setResponses([fakeAssistantMessage("second answer")]);
 	check("the prompt was accepted", (await prompt(rig.url, laneId, "another run, unseen")) === 202);
 	check("that run settled", await settleRun(rig.url, laneId));
-	// run 自己的 hold 是最后一个，所以它一落定 host 就关闭。等 reap 完成让下面的 re-open 成为
-	// 一次诚实的冷开：与 reap 赛跑的订阅可能绑到一个马上要被从脚底下抽走的 host 上，断言就会
-	// 变成关于那个时机的，而不是关于收敛的。
-	check("the session was reaped once nothing held it", await until(() => !rig.hub.live.includes(laneId), 10_000), rig.hub.live.join(","));
+	// run 自己的结束路径在落定的一拍把活半带出表（跑完即散，ADR-0013）。等它散掉，让下面的
+	// re-open 成为一次诚实的冷读：活半在场时的 baseline 读的是袋里的在飞状态。
+	check(
+		"the settled run's state is gone, so the re-open is an honest cold one",
+		await until(() => !rig.hub.isLive(laneId), 10_000),
+		String(rig.hub.isLive(laneId)),
+	);
 
 	const baselinesBefore = baselinesOn(wire, laneId);
 	const reopened = await wire.open(laneId);
@@ -311,11 +314,9 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a changed tree is everyone's business: it arrives as a baseline\n");
 
-	// 两次 run 给第一条用户消息一个续接，这正是让它成为分支点的动作。测试台的 hold 在两次 run
-	// 与移动期间保住 host：holds 归零的那一刻 host 就被 reap、车道会在它下面被结束（"被监视的
-	// session 走了"），那是生命周期按设计工作——hold 决定 session 活多久，这里的持有者正是
-	// 测试台。
-	const bench = await rig.hub.hold(laneId);
+	// 两次 run 给第一条用户消息一个续接，这正是让它成为分支点的动作。测试台在两次 run 与移动
+	// 期间持有 hold：删除守卫要求所有改变者放手，测试台先把意图写在表上。
+	await rig.hub.hold(laneId);
 	rig.transport.setResponses([fakeAssistantMessage("one"), fakeAssistantMessage("two")]);
 	check("the first prompt was accepted", (await prompt(rig.url, laneId, "branch here")) === 202);
 	check("it settled", await settleRun(rig.url, laneId));
@@ -342,9 +343,11 @@ try {
 		check("and the move is inside it", changed?.session.leafId === branchEntry, JSON.stringify(changed?.session.leafId));
 	}
 
-	// 测试台的 hold 归还：随后的 reap 结束车道，这是预期的事件次序，不是车道的失败。
-	rig.hub.release(bench);
-	check("the lane ends when the host it watched goes away", await until(() => wire.endOf(laneId).ended, 10_000), JSON.stringify(wire.endOf(laneId)));
+	// 测试台的 hold 归还。观看不占 hold：这条车道在没有任何 hold 的情况下继续活着，这是新契约
+	// 值得写下的那一半。
+	rig.hub.release(laneId);
+	check("the last hold lets go", await until(() => rig.hub.holdsOf(laneId) === 0, 5_000), String(rig.hub.holdsOf(laneId)));
+	check("and the lane stays subscribed: watching is not holding", !wire.endOf(laneId).ended, JSON.stringify(wire.endOf(laneId)));
 
 	// ---------------------------------------------------------------------------------------------
 	// 8. Acceptance edge 3 (the overview half): a run with no subscriber still moves its row.
@@ -394,64 +397,7 @@ try {
 	);
 
 	// ---------------------------------------------------------------------------------------------
-	// 9. The wait: a send reference's signal holds the state against removal until it is answered
-	//    (issue 13).
-	// ---------------------------------------------------------------------------------------------
-	process.stdout.write("a wait holds the state against removal until it is answered\n");
-
-	// send 引用守护的那个形状：一次 hold 在收下时就被释放的 run、一份已经发布到流上的结果，
-	// 以及一个还没说完自己读完了的客户端。reap 的尾部到达它的驱逐时必须发现 wait 还站着
-	// ——state 留下，wait 的释放才是收尾的那条边。
-	const waited = await request(rig.url, "POST", "/api/sessions", { text: "the waited conversation" });
-	const waitedId = (waited.payload as { sessionId: string }).sessionId;
-	// 有意报告两次：重连的重放可能重复报告一个它仍持有的 wait，一个条目必须覆盖两份报告
-	// ——否则下面唯一一次 `unwait` 会留下一处泄漏。
-	wire.send({ type: "wait", sessionId: waitedId });
-	wire.send({ type: "wait", sessionId: waitedId });
-	rig.transport.setResponses([fakeAssistantMessage("waited run ".repeat(20))]);
-	check("the prompt was accepted", (await prompt(rig.url, waitedId, "run under a wait")) === 202);
-	check("it settled", await settleRun(rig.url, waitedId));
-	check("the host was reaped", await until(() => !rig.hub.live.includes(waitedId), 10_000), rig.hub.live.join(","));
-	// 时间点读取，在 reap 完成之后：运行自己的结束路径已经把 live 半带出表（跑完即散，ADR-0013
-	// 的缓存语义——下一次动手现装一只）。wait 守的不再是 live 半，而是 host 的拆除与结果投递的
-	// 窗口。门面上没有人读这张表——那是 orchestrator 自己的事——所以 smoke 自己读这个 map。
-	const table = rig.hub.agent as unknown as { agentStateMap: Map<string, unknown> };
-	check("the run's own end swept the state; the wait keeps the host, not the live half", !table.agentStateMap.has(waitedId), String(table.agentStateMap.has(waitedId)));
-
-	wire.send({ type: "unwait", sessionId: waitedId });
-	wire.send({ type: "unwait", sessionId: waitedId });
-	check("and the release finds it already gone", await until(() => !table.agentStateMap.has(waitedId), 5_000), String(table.agentStateMap.has(waitedId)));
-
-	// 一条随后死去的连接报告的 wait 随连接一起被放弃——一个永远不会被应答的 waiter 不得永远
-	// 占着一个 state。这个 wait 完全不骑任何订阅，这也是 wait 独立于订阅表的证明：它在旁边任何
-	// `open` 之前被报告，且活过流的 end。
-	const dying = await connect(`${rig.url.replace("http", "ws")}/mux`);
-	const mortal = await request(rig.url, "POST", "/api/sessions", { text: "the mortal conversation" });
-	const mortalId = (mortal.payload as { sessionId: string }).sessionId;
-	dying.send({ type: "wait", sessionId: mortalId });
-	rig.transport.setResponses([fakeAssistantMessage("mortal run ".repeat(20))]);
-	check("the prompt was accepted", (await prompt(rig.url, mortalId, "run under a dying connection's wait")) === 202);
-	check("it settled", await settleRun(rig.url, mortalId));
-	check("the host was reaped under the dying connection's wait", await until(() => !rig.hub.live.includes(mortalId), 10_000), rig.hub.live.join(","));
-	check("and the run's own end swept that state too", !table.agentStateMap.has(mortalId), String(table.agentStateMap.has(mortalId)));
-	await dying.close().catch(() => {});
-	check("and the connection's death finds it already gone", await until(() => !table.agentStateMap.has(mortalId), 5_000), String(table.agentStateMap.has(mortalId)));
-
-	// 容忍，与第 3、4 节给其他帧的同一种：对这个服务器不认识的 session 的 wait 被记录（代价是
-	// 一行表和一次 `unwait`），而不是被拒绝——连接继续活着。帧按到达顺序处理，所以它们之后
-	// 到达的一次心跳就是"两者都在缺席检查之前被处理"的确定性标记。
-	wire.send({ type: "wait", sessionId: "does-not-exist-yet" });
-	wire.send({ type: "unwait", sessionId: "does-not-exist-yet" });
-	const heartbeatsBeforeTolerance = wire.connection().filter((envelope) => envelope.item?.type === "heartbeat").length;
-	check("the tolerance wait was followed by more traffic", await until(() => wire.connection().filter((envelope) => envelope.item?.type === "heartbeat").length > heartbeatsBeforeTolerance, 5_000));
-	check(
-		"waits for unknown sessions are tolerated",
-		wire.endOf("does-not-exist-yet").errors.length === 0 && !wire.endOf("does-not-exist-yet").ended,
-		JSON.stringify(wire.endOf("does-not-exist-yet")),
-	);
-
-	// ---------------------------------------------------------------------------------------------
-	// 10. Shutdown: the server lets go of its connections, and the rig closes.
+	// 9. Shutdown: the server lets go of its connections, and the rig closes.
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("shutdown takes the connections with it\n");
 

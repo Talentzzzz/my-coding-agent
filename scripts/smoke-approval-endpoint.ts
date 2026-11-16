@@ -112,10 +112,10 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
 	return ready();
 }
 
-// 测试台在下面这些检查期间持有一个 hold。一个结束于无人持有的 session 的 run 会被收割、其
-// idle 状态被驱逐，快照读取就会与驱逐赛跑——持有 hold 正是在这些读取运行期间把状态留在手里的
-// 办法。
-const bench = await hub.hold(sessionId);
+// 测试台在下面这些检查期间持有一个 hold。快照读取与编排层内部的装配/散袋没有真正的竞态——
+// 袋的读取面（`agent.snapshot`）对冷会话同样作答——持有 hold 纯粹是让这些检查的意图（有人
+// 在用这个会话）写在测试台上的方式。
+await hub.hold(sessionId);
 
 try {
 	const accepted = await request("POST", `/api/sessions/${sessionId}/messages`, { text: "read the notes" });
@@ -163,7 +163,7 @@ try {
 	check("and the settled answer was not recorded twice", remembered.length === 1, JSON.stringify(remembered));
 } finally {
 	clearTimeout(watchdog);
-	hub.release(bench);
+	hub.release(sessionId);
 	await hub.close();
 	await handle.close();
 	await rm(settingsHome, { recursive: true, force: true });

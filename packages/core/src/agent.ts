@@ -238,20 +238,10 @@ export class Agent {
 	 * 一个会话一只袋，它只装文件回答不了的东西：队列与在飞的运行。持久的那一半**不**在这里：需要
 	 * 会话记录 的每个操作都现开它（一次运行在其开头开一次，一条命令按其长度开一次）然后丢掉，这正是
 	 * 让陈旧的袋不可能存在的原因。状态经 {@link Agent.assembleAgentStateBySession} 进表——袋唯一
-	 * 的出生地，只属于运行的起点（外界不创建）；经 {@link Agent.tryRemoveAgentStateBySessionId} /
-	 * {@link Agent.deleteSessionBySessionId} 与运行自己的结束路径出表：一个写者、三个删除者，中间
-	 * 没有别的调用者。
+	 * 的出生地，只属于运行的起点（外界不创建）；由运行自己的结束路径与
+	 * {@link Agent.deleteSessionBySessionId} 出表：一个写者、两个删除者，中间没有别的调用者。
 	 */
 	private readonly agentStateMap = new Map<string, AgentState>();
-
-	/**
-	 * 每个会话的持有者数量，按 id 为键。
-	 *
-	 * 仍然是一个计数，但不再是把 会话记录 留在内存里的那个计数——会话记录 从不留着。它回答的是
-	 * 此刻*谁在用*这个会话，这是删除与收割动手前要问的问题：一个 hold 意味着有人在改它或跑它，而在
-	 * 其脚下拆掉一个会话，正是绝不可以做的事。
-	 */
-	private readonly holds = new Map<string, number>();
 
 	constructor(config: AgentConfig) {
 		this.sessionManager = config.sessionManager;
@@ -500,19 +490,6 @@ export class Agent {
 		return createAgentState(session.sessionId, createLive(global.steeringMode, global.followUpMode));
 	}
 
-	/**
-	 * 把一个会话的 live 半从表里丢掉，当没有东西持有它时。
-	 *
-	 * 驱逐判据（ADR-0013，被 ADR-0021 修订为三类）：没有在飞的运行、没有停在审批闸门的调用。拒绝
-	 * （返回 `false`）是给点名了一个仍被持有的会话的调用方的答案。
-	 */
-	tryRemoveAgentStateBySessionId(id: string): boolean {
-		const agentState = this.agentStateMap.get(id);
-		if (agentState === undefined) return false;
-		if (agentState.live.activeRun !== undefined || agentState.live.suspended) return false;
-		return this.agentStateMap.delete(id);
-	}
-
 	// ---------------------------------------------------------------------------- 会话门面
 	//
 	// 宿主操作会话所经的脸面：生命周期随被持有与冷的两条路在每个方法内部统一、取代
@@ -617,43 +594,6 @@ export class Agent {
 	}
 
 	/**
-	 * 对一个会话取一个 hold：这个调用方在用它。
-	 *
-	 * 门面的动词「我现在需要这个会话」。一个变更请求与一次运行各按自己的长度取一个、用
-	 * {@link Agent.release} 还回；订阅不取，因为观看既不改会话也不让轮次活着（ADR-0001）。hold
-	 * 不创建任何东西——袋只由运行的装配进表（外界不创建），这里只校验 id：表与文件都不指名的 id
-	 * 在 store 的 `open` 内以 {@link UnknownSessionError} 拒绝，传输层把它应答成 404。
-	 *
-	 * 调用方永远不必说的是「有没有东西在内存里」：那是本类的簿记。计数按 id 而不按调用方——同一会话
-	 * 上的两个请求就是两个 hold，最后还回的那个才让收割可以取走 live 半。
-	 */
-	async hold(id: string): Promise<void> {
-		this.getSessionBySessionId(id);
-		this.holds.set(id, (this.holds.get(id) ?? 0) + 1);
-	}
-
-	/**
-	 * 还回一个 hold。状态接下来怎样是判据的决定，不是本方法的：问的是 {@link Agent.tryRemoveAgentStateBySessionId} 这个
-	 * 调用者，它在运行在飞或审批停驻时拒绝。
-	 *
-	 * 对没人持有的 id 宽容：release 是调用方撤销自己的 hold，答一句「没有东西可还」会把一次簿记
-	 * 失误变成收尾中间的一场异常。
-	 */
-	release(id: string): void {
-		const held = this.holds.get(id) ?? 0;
-		if (held <= 1) this.holds.delete(id);
-		else this.holds.set(id, held - 1);
-	}
-
-	/**
-	 * 一个会话此刻有多少持有者——收割与删除动手前读的那个数，让谁都不会关掉或忘掉一个还有人正在用
-	 * 的会话。
-	 */
-	holdsOf(id: string): number {
-		return this.holds.get(id) ?? 0;
-	}
-
-	/**
 	 * 删除 id 点名的会话：它在磁盘上的文件（若有），以及本进程为它持有的状态。一个操作，因为
 	 * 「有没有文件？」不是调用方的问题。
 	 *
@@ -665,8 +605,9 @@ export class Agent {
 	 * 不取 hold、不停运行：传输层在请求之前先把会话安顿好（在那里，删除忙碌的会话是一个 409），
 	 * 宿主、观察者与 hold 都是它的簿记，不是本类的。
 	 *
-	 * 这是表的无条件出口，与 {@link Agent.tryRemoveAgentStateBySessionId} 的条件出口并列：用户已经删了这个会话，判据一概
-	 * 不适用——状态再没有什么可保护的了。排队与在飞的一切随它而去，正如进程重启会杀掉它们一样。
+	 * 这是表唯一的无条件出口，唯一的另一个删除者是运行自己的结束路径（空闲袋随运行出表）：用户已经
+	 * 删了这个会话，判据一概不适用——状态再没有什么可保护的了。排队与在飞的一切随它而去，正如进程
+	 * 重启会杀掉它们一样。
 	 */
 	async deleteSessionBySessionId(id: string): Promise<void> {
 		const onDisk = SessionManager.findSessionFilePathById(id) !== undefined;
@@ -694,6 +635,18 @@ export class Agent {
 	 */
 	isRunning(id: string): boolean {
 		return this.agentStateMap.get(id)?.live.activeRun !== undefined;
+	}
+
+	/**
+	 * 编排层的表里此刻为这个 id 持有活半吗。
+	 *
+	 * 与 {@link Agent.isRunning} 的差别是驻留的其余两种形状：排队的后续与停在审批闸门上的袋——
+	 * 两者都不是运行，但它们让表为这个 id 保留着活的一半。反过来，账本上悬着调用的冷会话在这里
+	 * 是 false：那个事实从盘上随时可重放，不为它驻留任何东西——所以它是"进程知道这个会话的
+	 * 什么"与"盘上随时可重放的什么"之间的那条线，基线来源与行叠加都以它为准。
+	 */
+	hasLiveHalf(id: string): boolean {
+		return this.agentStateMap.has(id);
 	}
 
 	/**
@@ -1780,6 +1733,12 @@ export class Agent {
 		// 与一次正常结束的运行发布的是同一个结束、出于同样的理由：abort 正是一次没人要求停下的运行
 		// 报告自己已停的方式。见 {@link Agent.prompt}。
 		this.publishState(agentState, this.getSessionBySessionId(id));
+		// 空闲的袋随 abort 出表——与运行的结束路径同一规则（ADR-0013）：上面的弃置清扫已经把队列
+		// 排空、标志清掉，留在表上的一个空活半没有下一个主人。中途被砍的运行在自己的结束路径里
+		// 已经散过，这里的删除只服务停驻在闸门上的那一只。
+		if (!agentState.live.suspended && agentState.live.activeRun === undefined) {
+			this.agentStateMap.delete(id);
+		}
 	}
 
 	// ---------------------------------------------------------------------------- 配置挪动
@@ -2132,6 +2091,17 @@ export class Agent {
 		if (agentState === undefined) return;
 		agentState.live.activeRun?.abortController.abort();
 		await this.settle(id);
+	}
+
+	/**
+	 * 停掉每一只在飞的运行并落定每个会话。
+	 *
+	 * 关机动作的复数形式：运行比发起它的请求活得久（prompt 以 202 应答、hold 当场交还），所以进程
+	 * 退出时是谁在跑，只有本表知道——按 id 点名的 {@link Agent.close} 需要调用方自己枚举，而枚举
+	 * 恰恰是调用方没有的东西。对空表立即返回。
+	 */
+	async closeAll(): Promise<void> {
+		await Promise.all([...this.agentStateMap.keys()].map((id) => this.close(id)));
 	}
 
 	/**

@@ -423,19 +423,17 @@ export type ServerFrame =
 	| ({ streamId: null } & ConnectionFrame);
 
 /**
- * 客户端可以发送什么。四个动作，没有信封——帧就是协议。
+ * 客户端可以发送什么。两个动作，没有信封——帧就是协议。
  *
- * 命令留在 REST。`open` / `cancel` 是订阅的两个词；`wait` / `unwait` 携带订阅有意不携带的那一个
- * 事实（ADR-0001：watching 不让任何东西活着）——这条连接仍在等该会话某次运行的结果，也就是发送
- * 参考里的服务端信号（issue 13）。它不取 hold：不让会话保持运行，只要求驱逐判断等到等待者被应答
- * 之后再做。带着未知 `type` 到达的帧被丢弃并记录日志，而不是关掉连接：四个动作没有一个能被滥用
- * 成什么，而把一个走错门的帧变成一页死掉的白屏，代价高于一行日志。
+ * 命令留在 REST。`open` / `cancel` 是订阅的两个词，各自回答"这条连接订了什么"与"不再订"——
+ * 曾经的 `wait` / `unwait`（send 引用的服务端信号）已由 [ADR-0022](../../../docs/adr/0022-drop-send-reference.md)
+ * 撤销：单用户产品里，删除守卫三道（holds / isRunning / hasPendingApprovals）就够，send 引用防的
+ * 那个断网窗口本就不受保护。带着未知 `type` 到达的帧被丢弃并记录日志，而不是关掉连接：两个动作
+ * 没有一个能被滥用成什么，而把一个走错门的帧变成一页死掉的白屏，代价高于一行日志。
  */
 export type ClientFrame =
 	| { type: "open"; sessionId: string; window?: unknown }
-	| { type: "cancel"; sessionId: string }
-	| { type: "wait"; sessionId: string }
-	| { type: "unwait"; sessionId: string };
+	| { type: "cancel"; sessionId: string };
 
 export const EMPTY_USAGE: UsageTotals = {
 	input: 0,

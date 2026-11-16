@@ -1,20 +1,20 @@
-// Stream lifecycle smoke test，常驻 transport 给它的形状：hold 决定一个 session *运行*多久，
-// 订阅决定它的 state *存活*多久。一条看着 idle session 的车道不取 hold、也不结束任何东西，
-// 打开它的读也不登记任何东西——表持有的是正在运行的东西，所以一个被看着但 idle 的 session
-// 是一份文件加一条车道，仅此而已（ADR-0013）。一次 run 结束不结束车道：host 消失才结束，而
-// host 在最后一个 hold 松手时消失——run 放在那里的 state 随 reap 一起离开。失败那一节钉住
-// 一个在 watcher 之下失败的 run——和一个无人看着失败的 run——分别在哪些地方被听到。
+// Stream lifecycle smoke test，常驻 transport 给它的形状：观看决定一个 session 的哪些帧流到窗口，
+// hold 记下谁在改变它，运行自己决定 state 存活多久。一条看着 idle session 的车道不取 hold、也不
+// 结束任何东西，打开它的读也不登记任何东西——表持有的是正在运行的东西，所以一个被看着但 idle
+// 的 session 是一份文件加一条车道，仅此而已（ADR-0013）。一次 run 结束不结束车道：什么都不结束
+// 它——观看不是持有，失败与结束都只影响编排层的表。失败那一节钉住一个在 watcher 之下失败的
+// run——和一个无人看着失败的 run——分别在哪些地方被听到。
 //
 //   node scripts/smoke-stream.ts
 //
-// 无需 provider key：模型就是剧本化 transport。测试台在需要 host 活得比 run 久的地方经真正的
+// 无需 provider key：模型就是剧本化 transport。测试台在需要会话被"使用着"的地方经真正的
 // hub 取自己的 hold——那是测试台的 hold，不是订阅的，这正是被测的区分。
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { muxUpgrade, sessionListeners } from "../packages/server/src/boot.ts";
 import { createMuxServer } from "../packages/server/src/mux.ts";
-import { SessionHub, type HostedSession } from "../packages/server/src/hub.ts";
+import { SessionHub } from "../packages/server/src/hub.ts";
 import { createSessionProjection } from "../packages/server/src/projection.ts";
 import { SessionController, SystemController } from "../packages/server/src/controllers/sessions.ts";
 import { createRoutes } from "../packages/server/src/controllers/routes.ts";
@@ -161,11 +161,11 @@ const inTable = (id: string): boolean =>
 	(rig.hub.agent as unknown as { agentStateMap: Map<string, unknown> }).agentStateMap.has(id);
 
 // hold 计数器是本 smoke 承重的仪表（docs/notes.md §二 bug 4：要验证"x 不取 hold"，数
-// `hub.hold` 调用——绝不读 `hub.live`，一个被释放的 hold 在一拍之内就从那里消失）。
+// `hub.hold` 调用）。
 let holds = 0;
 {
 	const realHold = rig.hub.hold.bind(rig.hub);
-	(rig.hub as unknown as { hold: (id?: string) => Promise<HostedSession> }).hold = async (id?: string) => {
+	(rig.hub as unknown as { hold: (id?: string) => Promise<void> }).hold = async (id?: string) => {
 		holds += 1;
 		return realHold(id);
 	};
@@ -186,7 +186,7 @@ try {
 
 	await sleep(QUIET_MS);
 	check("the lane is still there — nothing ended it", !wire.endOf(idleId).ended, JSON.stringify(wire.endOf(idleId)));
-	check("and nothing is hosting the session", !rig.hub.live.includes(idleId), rig.hub.live.join(","));
+	check("and nothing keeps a live half for the session", !rig.hub.isLive(idleId), String(rig.hub.isLive(idleId)));
 
 	// 读也不是 hold——窗口的冷路径。不存在的 session 是 404，它的读不持有任何东西，因为它根本
 	// 走不到那一步。
@@ -196,19 +196,18 @@ try {
 	check("an unknown session is a 404", missing.status === 404, String(missing.status));
 	check("and neither read held anything", holds === 0, `holds=${holds}`);
 
-	// 一次读要经过 hub 自己的驱逐漏斗（`hub.snapshotOf` 问一次，所以无人看着的 state 不逗留）。
-	// 而出生运行自己的结束路径已经把 live 半带出表——跑完即散（ADR-0013 的缓存语义），冷读
-	// 现装一只用完即弃的袋来作答，不登记。丢掉它不是删除：文件已在（ADR-0021）。
+	// 读不登记任何东西（ADR-0013）：出生运行自己的结束路径已经把 live 半带出表——跑完即散，冷读
+	// 现装一只用完即弃的袋来作答。丢掉它不是删除：文件已在（ADR-0021）。
 	check("the run's own end swept the state; the cold read leaves it swept", !inTable(idleId));
 
 	// ---------------------------------------------------------------------------------------------
-	// 2. run 结束不结束车道；hold 的释放才结束。
+	// 2. run 结束不结束车道；观看长存，与 hold 无关。
 	// ---------------------------------------------------------------------------------------------
-	process.stdout.write("a run ends, the lane stays, the hold decides the rest\n");
+	process.stdout.write("a run ends, the lane stays, watching outlives everything\n");
 
-	// 测试台在想要 host 活着的那段时间里取一个 hold——与窗口的 send 引用玩的同一只手，经 hub
-	// 取，这样被测的 reap 才是真的。
-	const bench = await rig.hub.hold(idleId);
+	// 测试台在想要会话被"使用着"的那段时间里取一个 hold——与窗口的 send 引用玩的同一只手，经 hub
+	// 取。观看不占 hold：车道在有没有 hold 的情况下表现完全一致，这正是本节要断言的。
+	await rig.hub.hold(idleId);
 	rig.transport.setResponses([fakeAssistantMessage("a".repeat(500))]);
 	check("the prompt was accepted", (await prompt(rig.url, idleId, "say something long")) === 202);
 	check("the run's own end reached the lane", await waitAgentEnd(wire, idleId));
@@ -216,31 +215,30 @@ try {
 
 	await sleep(QUIET_MS);
 	check("no end arrived after the run — nothing about the run ends a lane", !wire.endOf(idleId).ended, JSON.stringify(wire.endOf(idleId)));
-	check("the host is still there, held by the bench", rig.hub.live.includes(idleId), rig.hub.live.join(","));
+	check("the hold is still counted", rig.hub.holdsOf(idleId) === 1, `holds=${rig.hub.holdsOf(idleId)}`);
 
 	// 车道仍然可用：同一个订阅承载下一次 run。
 	rig.transport.setResponses([fakeAssistantMessage("b".repeat(500))]);
 	check("the second prompt was accepted", (await prompt(rig.url, idleId, "and again")) === 202);
 	check("and its frames reached the same lane", await waitAgentEnd(wire, idleId));
 
-	// 现在 hold 归还，事件的次序正是要点：host 消失，车道随之结束，因为它看着的 session 走了
-	// ——不是因为有什么直接结束了它。
-	rig.hub.release(bench);
-	check("the session was reaped once the last hold let go", await until(() => !rig.hub.live.includes(idleId), 10_000), rig.hub.live.join(","));
-	check("and the lane ended with the host it watched", await until(() => wire.endOf(idleId).ended, 5_000), JSON.stringify(wire.endOf(idleId)));
-	// run 是把 state 放进表的动作；reap 是把它拿出来的动作，一旦没有东西运行、没人看着。之后
-	// 留下的是文件，那是"这个 session"的全部。
-	check("and the state went with the last reader", await until(() => !inTable(idleId), 5_000));
+	// 现在 hold 归还：车道不为它所动——观看从来不是持有，会话的活一半由运行自己带进带出。
+	rig.hub.release(idleId);
+	check("the last hold lets go", await until(() => rig.hub.holdsOf(idleId) === 0, 5_000), String(rig.hub.holdsOf(idleId)));
+	check("and the lane went nowhere: watching is not holding", !wire.endOf(idleId).ended, JSON.stringify(wire.endOf(idleId)));
+	// run 是把 state 放进表的动作，运行的结束是把它拿出来的动作；留下的是文件，那是"这个 session"的全部。
+	// 散袋发生在运行的 finally 里，agent_end 的监听者可能抢在它前面——轮询，不猜时机。
+	check("and the state went with the run's own end", await until(() => !inTable(idleId), 5_000));
 
 	// ---------------------------------------------------------------------------------------------
 	// 3. 挂到已经在途的 run 上：baseline 说着这件事，车道活过它。
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a lane that opens on a run already in flight\n");
 
-	const again = await rig.hub.hold(idleId);
+	await rig.hub.hold(idleId);
 	rig.transport.setResponses([fakeAssistantMessage("c".repeat(600))]);
 	check("the prompt was accepted", (await prompt(rig.url, idleId, "one more long answer")) === 202);
-	check("the run started", await until(() => rig.hub.live.includes(idleId), 5_000), rig.hub.live.join(","));
+	check("the run started", await until(() => rig.hub.isLive(idleId), 5_000), String(rig.hub.isLive(idleId)));
 
 	const midflight = await wire.open(idleId);
 	check("the mid-run baseline reports the run", midflight.running === true, String(midflight.running));
@@ -250,18 +248,18 @@ try {
 	await sleep(QUIET_MS);
 	check("and nothing ends the lane while the run goes on", wire.endOf(idleId).ends === endsAtOpen, JSON.stringify(wire.endOf(idleId)));
 	check("the run ended on the lane", await waitAgentEnd(wire, idleId));
-	check("and the lane outlived it, hold still held", wire.endOf(idleId).ends === endsAtOpen, JSON.stringify(wire.endOf(idleId)));
-	rig.hub.release(again);
-	check("released, the host went, the lane went with it", await until(() => wire.endOf(idleId).ends === endsAtOpen + 1, 5_000), JSON.stringify(wire.endOf(idleId)));
+	check("and the lane outlived it", wire.endOf(idleId).ends === endsAtOpen, JSON.stringify(wire.endOf(idleId)));
+	rig.hub.release(idleId);
+	check("released, the lane went nowhere", await until(() => wire.endOf(idleId).ends === endsAtOpen, 5_000), JSON.stringify(wire.endOf(idleId)));
 
 	// ---------------------------------------------------------------------------------------------
-	// 4. 一个在 watcher 之下失败的 run：error 帧、settled 帧、日志、reap。
+	// 4. 一个在 watcher 之下失败的 run：error 帧、settled 帧、日志。
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a run that fails under a watcher is heard in three places\n");
 
 	const watched = await request(rig.url, "POST", "/api/sessions", { text: "the watched conversation" });
 	const watchedId = (watched.payload as { sessionId: string }).sessionId;
-	const watchedBench = await rig.hub.hold(watchedId);
+	await rig.hub.hold(watchedId);
 	const restoreWatched = sabotagePersistence(rig.hub);
 	const watchedLane = await wire.open(watchedId);
 	check("the lane opened on the session about to fail", watchedLane.id === watchedId);
@@ -285,9 +283,9 @@ try {
 	// 补丁在下一节运行之前摘掉：它落在的是 hub 自己的服务上。
 	restoreWatched();
 
-	// 测试台的 hold 仍保着 host；松手就 reap 这个 session。无泄漏。
-	rig.hub.release(watchedBench);
-	check("the session was reaped once the hold let go", await until(() => !rig.hub.live.includes(watchedId), 10_000), rig.hub.live.join(","));
+	// 失败的运行自己散袋：没有停驻的审批，就没有留下活半的理由。
+	rig.hub.release(watchedId);
+	check("nothing stays live after the failed run", !rig.hub.isLive(watchedId), String(rig.hub.isLive(watchedId)));
 
 	// ---------------------------------------------------------------------------------------------
 	// 5. 同样的失败、无人看着：日志是它唯一仍可听见的地方。
@@ -296,7 +294,7 @@ try {
 
 	const unwatched = await request(rig.url, "POST", "/api/sessions", { text: "the unwatched conversation" });
 	const unwatchedId = (unwatched.payload as { sessionId: string }).sessionId;
-	const unwatchedBench = await rig.hub.hold(unwatchedId);
+	await rig.hub.hold(unwatchedId);
 	const restoreUnwatched = sabotagePersistence(rig.hub);
 
 	const loggedAlone: string[] = [];
@@ -307,12 +305,12 @@ try {
 	check("the prompt was accepted", (await prompt(rig.url, unwatchedId, "this run fails alone")) === 202);
 	// 验收边界 3 的服务端那一半：任何地方都没有 lane 开在这个 session 上，所以让它活着的是 run
 	// 而不是别的。测试台的 hold 有意先归还——被持着的话，回答这个问题的就是 hold 而不是 run，
-	// 这正是本节的交接要作出的断言。随后的 reap 除了 run 自己没有别的可等，所以 session 仍在。
-	rig.hub.release(unwatchedBench);
+	// 这正是本节的交接要作出的断言。运行自己散袋，session 无需任何收摊。
+	rig.hub.release(unwatchedId);
 	check(
-		"a run nobody watches still holds its own session open",
-		rig.hub.live.includes(unwatchedId),
-		rig.hub.live.join(","),
+		"a run nobody watches still keeps its own live half",
+		rig.hub.isLive(unwatchedId),
+		String(rig.hub.isLive(unwatchedId)),
 	);
 	// run 的结束不需要任何 lane 就可观察：循环结束后读路径答 `running: false`。只有那时才
 	// 关闭日志捕获——更早恢复会让失败跑出它要监视的窗口。（手写的轮询，因为 `until` 收的是
@@ -328,7 +326,7 @@ try {
 	restoreUnwatched();
 
 	check("no lane existed to announce on, and the log line went out anyway", loggedAlone.length > 0, JSON.stringify(loggedAlone));
-	check("and nothing leaked: the session was reaped", await until(() => !rig.hub.live.includes(unwatchedId), 10_000), rig.hub.live.join(","));
+	check("and nothing leaked: the failed run's own end swept the state", await until(() => !rig.hub.isLive(unwatchedId), 10_000), String(rig.hub.isLive(unwatchedId)));
 
 	// ---------------------------------------------------------------------------------------------
 	// 6. 流式回答以 delta 过 wire，run 中打开的车道被交予剩余部分。
@@ -356,7 +354,7 @@ try {
 	const deltaAnswer = "x".repeat(2_400);
 	const deltaSession = await request(rig.url, "POST", "/api/sessions", { text: "the delta conversation" });
 	const deltaId = (deltaSession.payload as { sessionId: string }).sessionId;
-	const deltaBench = await rig.hub.hold(deltaId);
+	await rig.hub.hold(deltaId);
 	const deltaLane = await wire.open(deltaId);
 	check("the lane opened on the new session", deltaLane.id === deltaId);
 
@@ -396,8 +394,8 @@ try {
 	check("baseline plus the rest is the whole answer", lateText === deltaAnswer, `${lateText.length}/${deltaAnswer.length}`);
 
 	await late.close();
-	rig.hub.release(deltaBench);
-	check("the delta session was reaped", await until(() => !rig.hub.live.includes(deltaId), 10_000), rig.hub.live.join(","));
+	rig.hub.release(deltaId);
+	check("the delta session's state was swept by its own end", await until(() => !rig.hub.isLive(deltaId), 10_000), String(rig.hub.isLive(deltaId)));
 
 	// ---------------------------------------------------------------------------------------------
 	// 7. shutdown 什么都不等。
@@ -406,12 +404,12 @@ try {
 
 	rig.transport.setResponses([fakeAssistantMessage("d".repeat(600))]);
 	check("the prompt was accepted", (await prompt(rig.url, idleId, "a run for shutdown to stop")) === 202);
-	check("the run started", await until(() => rig.hub.live.includes(idleId), 5_000), rig.hub.live.join(","));
+	check("the run started", await until(() => rig.hub.isLive(idleId), 5_000), String(rig.hub.isLive(idleId)));
 
 	const started = Date.now();
 	await rig.close();
 	check("closing with a run in flight and a lane attached returns", Date.now() - started < 5_000, `${Date.now() - started} ms`);
-	check("and no session is left running", rig.hub.live.length === 0, rig.hub.live.join(","));
+	check("and no session is left running", !rig.hub.isLive(idleId), String(rig.hub.isLive(idleId)));
 } catch (error) {
 	failures += 1;
 	process.stdout.write(`\nFAIL ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);

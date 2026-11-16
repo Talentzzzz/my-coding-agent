@@ -177,11 +177,9 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("shutdown with the worst case in residence\n");
 
-	// 测试台在下面的 prompt 期间持有自己的 hold，与 `smoke-mux`、`smoke-stream` 在需要 host 活得
-	// 比一次请求久的地方的做法一样。holds 归零的 session 会被 reap——这会按设计结束看着它的
-	// lane（hold 决定 session 活多久，而订阅一个也不占）。在 lane 之下 reap 这个临时 host 会
-	// 让最坏情况失去它的窗口，所以这里由测试台持 hold。
-	const bench = await server.hub.hold(sessionId);
+	// 测试台在下面的 prompt 期间持有自己的 hold，与 `smoke-mux`、`smoke-stream` 在需要会话比一次
+	// 请求久的地方的做法一致：删除守卫要求所有改变者放手，测试台先把意图写在表上。
+	await server.hub.hold(sessionId);
 
 	const accepted = await request(server.url, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
 		text: "read the notes",
@@ -200,7 +198,7 @@ try {
 	await server.close();
 	check("close() returned with the worst case in residence", Date.now() - started < 5_000, `${Date.now() - started} ms`);
 	// 那个无人能应答的 run 在下落途中被 abort：没有东西留在等待里。
-	check("nothing is left running", server.hub.live.length === 0, server.hub.live.join(","));
+	check("nothing is left running", !server.hub.isLive(sessionId), String(server.hub.isLive(sessionId)));
 
 	// 关闭的 listener 必须拒绝连接，否则外壳每次重启都会泄漏一台服务器。
 	try {

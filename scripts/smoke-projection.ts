@@ -1,5 +1,5 @@
 // Projection smoke test：证明侧栏行存储无需任何人在看就能回答"每个 session 正在做什么"，
-// 一行只有在关于它的东西变化时才移动，停在门口的 session 的冷行从快照标记上点亮（没有 host、
+// 一行只有在关于它的东西变化时才移动，停在门口的 session 的冷行从快照标记上点亮（没有袋、
 // 没有 replay），以及新的信封类型描述了一条复用连接携带的帧。
 // 这里不接触任何模型，无需 provider key。
 // 运行：node scripts/smoke-projection.ts
@@ -89,7 +89,6 @@ try {
 	// 文件就在，行的冷读立刻答得出它，组也随之而来。store 与本机其他每次运行共享，所以本 smoke
 	// 从不假设自己是唯一存在的 session——它只问自己创建的那些。
 	const first = await hub.birth({ text: "the conversation starts here" });
-	hub.release(await hub.hold(first));
 	const projection = createSessionProjection(hub);
 
 	// 从此以后每一处行变化，按监听器看到的样子。
@@ -109,8 +108,6 @@ try {
 	);
 
 	process.stdout.write("one scan, however many callers\n");
-	// 在计数发布之前让上面 hold 的 reap 落地：它会报告它失去的 session，那会构建这个 projection
-	// 还没见过的行，那是一次真实的行出现而不是一次行的移动。
 	await settle();
 	const quiet = seen.length;
 	await settle();
@@ -132,21 +129,19 @@ try {
 		`${groups.reduce((total, group) => total + group.sessions.length, 0)} vs ${rows.length}`,
 	);
 
-	process.stdout.write("a birth with nobody watching still lands in the store\n");
-	// birth 是第一条消息（ADR-0021），所以不存在「无人开口的 session」了：行随出生即到，
-	// 无论有没有人在看——这正是 store 的「不需要任何人在看」承诺在出生一侧的样子。
+	process.stdout.write("a birth reaches the store through the creation signal\n");
+	// birth 是第一条消息（ADR-0021）。生产中 controller 的 listener 把出生告诉 projection；本 smoke
+	// 没有接 controller，所以由它自己扮演那一拍：refresh 探测文件、发布行、开始跟随。
 	const second = await hub.birth({ text: "now the row has something to say" });
-	check("a birth reaches a row without a host", await until(() => seen.some((row) => row.id === second)), JSON.stringify(seen.map((row) => row.id)));
-	await settle();
-	const host = await hub.hold(second);
-	await settle();
+	await projection.refresh(second);
+	check("a birth reaches a row through the creation signal", await until(() => seen.some((row) => row.id === second)), JSON.stringify(seen.map((row) => row.id)));
 
 	process.stdout.write("a run moves the row even though nothing is watching it\n");
 	// store 的全部意义：一个 session 运行，它的行在没有任何订阅者的地方说着这件事。之前只有
 	// *内容*流会携带这件事，而这里没有订阅者。行已在出生时进了 store（ADR-0021），所以这次
 	// run 移动的是一行已存在的东西——在途时 `running`，落定时以 idle 重新发布。
 	fake.setResponses([fakeAssistantMessage("answered")]);
-	const run = hub.agent.prompt(host.id, "the row is watching itself now");
+	const run = hub.agent.prompt(second, "the row is watching itself now");
 	check("the row said running while the run was in flight", await until(() => seen.some((row) => row.id === second && row.running === true)));
 	await run;
 	const landed = await projection.row(second);
@@ -156,7 +151,7 @@ try {
 	// 再来一次，这次盯住发布计数：一次 run 至少移动两次行。
 	const beforeSecondRun = seen.length;
 	fake.setResponses([fakeAssistantMessage("answered again")]);
-	const secondRun = hub.agent.prompt(host.id, "the row is watching itself again");
+	const secondRun = hub.agent.prompt(second, "the row is watching itself again");
 	check("the row said running again while the run was in flight", await until(() => seen.some((row) => row.id === second && row.running === true)));
 	await secondRun;
 	check("and the second run ended", (await projection.row(second))?.running === false, JSON.stringify(await projection.row(second)));
@@ -175,9 +170,7 @@ try {
 	await settle();
 	check("an idle session publishes nothing on its own", seen.length === settled, `${seen.length - settled} extra`);
 
-	process.stdout.write("the row survives its host being reaped\n");
-	hub.release(host);
-	check("the host went away", await until(() => !hub.live.includes(second)));
+	process.stdout.write("the row outlives the run\n");
 	const reaped = await projection.row(second);
 	check("its row is still there", reaped !== undefined && reaped.id === second, String(reaped?.id));
 	check("and says idle rather than claiming to run", reaped?.running === false, JSON.stringify(reaped));
@@ -188,7 +181,6 @@ try {
 	// 这里行必须做的是携带分支给它的标题，直到分支移动。
 	const beforeBranch = await projection.row(first);
 	check("the row kept the title its branch gave it", beforeBranch?.title === "the conversation starts here", beforeBranch?.title);
-	const branchHost = await hub.hold(first);
 	fake.setResponses([fakeAssistantMessage("one"), fakeAssistantMessage("two")]);
 	await hub.agent.prompt(first, "first turn");
 	await settle();
@@ -215,17 +207,15 @@ try {
 		(await SessionManager.findSessionRowById(first))?.title === reopened?.title,
 		`${(await SessionManager.findSessionRowById(first))?.title} vs ${reopened?.title}`,
 	);
-	hub.release(branchHost);
-	await until(() => !hub.live.includes(first));
-	check("the row is still there after its host", (await projection.row(first)) !== undefined);
+	check("the row is still there after the runs", (await projection.row(first)) !== undefined);
 
 	process.stdout.write("a fork knows its parent without a listing beside it\n");
 	// 出生消息就是 fork 挂点（ADR-0021）：birth 落地时账本里已有第一条 user entry，
 	// 从它的 leaf fork 即可，无需再说什么。
 	const source = await hub.birth({ text: "the conversation being forked" });
-	const sourceHost = await hub.hold(source);
 	await settle();
 	const forked = await hub.fork(source, agent.snapshot(source).leafId);
+	await projection.refresh(forked);
 	await until(() => seen.some((row) => row.id === forked));
 	const forkRow = await projection.row(forked);
 	check("the fork reaches the store on its own", forkRow !== undefined, forked);
@@ -235,63 +225,43 @@ try {
 		`${forkRow?.parentId} vs ${source}`,
 	);
 	check("while the session it came from names nobody", (await projection.row(source))?.parentId === undefined, (await projection.row(source))?.parentId);
-	hub.release(sourceHost);
-	await until(() => !hub.live.includes(source));
 
-	process.stdout.write("the hub tells a process-level listener about sessions nobody watches\n");
-	const heard: string[] = [];
-	const stopHosting = hub.onHostChange((sessionId, hostSeen) => heard.push(`${sessionId}:${hostSeen === undefined ? "none" : "host"}`));
-	const third = await hub.birth({ text: "a third conversation" });
-	check("a born session is reported with no host", heard.includes(`${third}:none`), heard.join(" "));
-	const thirdHost = await hub.hold(third);
-	check("and again with one", heard.includes(`${third}:host`), heard.join(" "));
-	hub.release(thirdHost);
-	await until(() => heard.filter((entry) => entry === `${third}:none`).length === 2);
-	check("and once more when it is reaped", heard.filter((entry) => entry === `${third}:none`).length === 2, heard.join(" "));
-	stopHosting();
+	process.stdout.write("watching a session is not the same as holding it\n");
 	const afterStop = await hub.birth({ text: "an unobserved birth" });
-	await settle();
-	check("a listener that stopped hearing stops hearing", !heard.includes(`${afterStop}:none`), heard.join(" "));
-
-	process.stdout.write("observing a session is not the same as holding it\n");
+	await projection.refresh(afterStop);
 	let events = 0;
-	// 在 session 运行之前被告知它，所以一个 host 打开的瞬间 observer 就已挂上。
-	const stopObserving = hub.observe(afterStop, (feeds) => {
+	// 在 session 运行之前注册观看：feed 在注册的同一拍交出，之后随运行自流入，无需任何重绑。
+	const stopWatching = hub.watch(afterStop, (feeds) => {
 		if (feeds === undefined) return;
 		feeds.onEvent(() => {
 			events += 1;
 		});
 	});
-	check("watching it did not assemble anything", !hub.live.includes(afterStop), hub.live.join(","));
-	const observedHost = await hub.hold(afterStop);
-	check("and it was attached when the host opened", hub.agent.holdsOf(afterStop) === 1, `holds=${hub.agent.holdsOf(afterStop)}`);
+	check("watching it did not assemble anything", !hub.isLive(afterStop), String(hub.isLive(afterStop)));
+	await hub.hold(afterStop);
+	check("and the hold is counted", hub.holdsOf(afterStop) === 1, `holds=${hub.holdsOf(afterStop)}`);
 	fake.setResponses([fakeAssistantMessage("seen")]);
-	await hub.agent.prompt(afterStop, "does the observer hear this");
-	check("the observer saw the run's events", events > 0, `${events} events`);
-	hub.release(observedHost);
-	await until(() => !hub.live.includes(afterStop));
-	check("the host was reaped while observed", !hub.live.includes(afterStop));
-	// 行的诞生发布与 idle 重新发布都是异步读；等 idle 那次，而不是猜测 reap 返回时哪次已落地。
+	await hub.agent.prompt(afterStop, "does the watcher hear this");
+	check("the watcher heard the run's events without any rebinding", events > 0, `${events} events`);
+	hub.release(afterStop);
+	check("nothing stays live after release", !hub.isLive(afterStop), String(hub.isLive(afterStop)));
+	// 行的诞生发布与 idle 重新发布都是异步读；等 idle 那次，而不是猜测运行结束时哪次已落地。
 	check("and the row says idle", await until(() => seen.some((row) => row.id === afterStop && row.running === false)), JSON.stringify(seen.filter((row) => row.id === afterStop)));
-	stopObserving();
-	check("and the observer let go", !hub.isWatched(afterStop));
+	stopWatching();
+	check("and the watcher let go", !hub.isWatched(afterStop));
 
 	process.stdout.write("a parked session's cold row lights up from the snapshot marker\n");
-	// 两个被驱动到门口然后放开的 session：store 在任何地方都没有 host 的情况下持有停在门口的
-	// 问题，这正是重启时 seed 的来源。门是每个 session 自己的选择，机器的设置与此无关。
+	// 两个被驱动到门口然后停下的 session：袋停驻审批时就住在编排层的表里，问题悬在原地——这正是
+	// end-restart 语义下会话留在门口的样子。门是每个 session 自己的选择，机器的设置与此无关。
 	const park = async (promptText: string): Promise<string> => {
 		const id = await hub.birth({ text: promptText });
-		const host = await hub.hold(id);
 		hub.agent.applyConfig(id, { approval: { read: true } });
 		fake.setResponses([
 			fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 			fakeAssistantMessage("done"),
 		]);
 		await hub.agent.prompt(id, promptText);
-		const parked = hub.agent.hasPendingApprovals(id);
-		hub.release(host);
-		await until(() => !hub.live.includes(id));
-		if (!parked) throw new Error("the session did not park, so the marker checks cannot run");
+		if (!hub.agent.hasPendingApprovals(id)) throw new Error("the session did not park, so the marker checks cannot run");
 		return id;
 	};
 	const parkedId = await park("read the notes");
@@ -308,9 +278,10 @@ try {
 	delete strippedMeta.suspended;
 	await writeFile(metaPathOf(strippedId), `${JSON.stringify(strippedMeta, null, "\t")}\n`, "utf8");
 
-	// 建在同一个 hub 上的全新 projection：它的 seed 就是重启时付出的那次冷读，而且到处都没有
-	// host——停在门口的行的 pending 只能来自快照的标记。
-	const cold = createSessionProjection(hub);
+	// 一个全新的 hub + projection：编排层的表随 hub 而空——这正是重启的样子——停在门口的行的
+	// pending 只能来自快照的标记。
+	const coldHub = new SessionHub({ workDirAbsPath: root, api: fake.api, modelsHome: join(root, "agent-home") });
+	const cold = createSessionProjection(coldHub);
 	const coldRows = await cold.rows();
 	const coldParked = coldRows.find((row) => row.id === parkedId);
 	check("the parked session's cold row is pending 1", coldParked?.pending === 1, JSON.stringify(coldParked));
@@ -353,8 +324,10 @@ try {
 
 	stopListening();
 	projection.close();
+	cold.close();
+	await coldHub.close();
 	await hub.close();
-	check("nothing is left running", hub.live.length === 0, hub.live.join(","));
+	check("nothing is left running", [first, second, parkedId, strippedId].every((id) => !agent.isRunning(id)));
 } finally {
 	// session 住在 agent home 之下、按工作目录路径作键，所以只删临时目录不够：没有这一步，
 	// 每次运行都会留下一个孤儿目录。

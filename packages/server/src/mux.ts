@@ -128,7 +128,7 @@ interface Subscription {
 	/**
 	 * 所有要撤销的东西，按设置的顺序。
 	 *
-	 * 用列表而不是单个可重赋值的函数，原因在于这些事发生的顺序：对已在运行的会话，`observe` *同步*回调，所以 feed 在这个订阅还没创建完之前就已挂上。一个每步包裹前一步的函数会被下一次赋值覆盖掉工作——而丢掉的恰好是 feed 监听器那半，正是让一个已结束的连接保持存活、还在为客户端已取消的订阅写帧的那半。
+	 * 用列表而不是单个可重赋值的函数，原因在于这些事发生的顺序：`watch` 注册的同一拍就*同步*回调，所以 feed 在这个订阅还没创建完之前就已挂上。一个每步包裹前一步的函数会被下一次赋值覆盖掉工作——而丢掉的恰好是 feed 监听器那半，正是让一个已结束的连接保持存活、还在为客户端已取消的订阅写帧的那半。
 	 */
 	teardown: (() => void)[];
 }
@@ -141,12 +141,6 @@ interface Subscription {
 export class MuxConnection {
 	/** 本连接正在观看的会话，按会话 id。每个会话一条流，绝无两条。 */
 	private readonly subscriptions = new Map<string, Subscription>();
-	/**
-	 * 本连接仍在等待结果的运行，按会话 id——每个 `wait` frame 买来的那个 hub 停止器，留着让匹配的 `unwait`（或本连接的消亡）调用。
-	 *
-	 * 刻意放在订阅表之外。wait 不是 watch：它可以在旁边的 `open` 被处理之前上报，它能在 `end` 之后存活（客户端在*读到*运行的最后一句话时释放它，而不是在流被拆除时），也完全不参与 baseline/backlog 机制。每个会话一个——客户端对每个会话最多持有一个 send 引用——且幂等，因为重连的 replay 会重新上报它仍持有的 wait（issue 13）。
-	 */
-	private readonly waits = new Map<string, () => void>();
 	/**
 	 * 未能写入的帧，最旧的在前。
 	 *
@@ -218,25 +212,7 @@ export class MuxConnection {
 			return;
 		}
 		if (frame.type === "open") this.open(frame.sessionId);
-		else if (frame.type === "cancel") this.cancel(frame.sessionId);
-		else if (frame.type === "wait") this.startWaiting(frame.sessionId);
-		else this.stopWaiting(frame.sessionId);
-	}
-
-	/**
-	 * 记录本连接正在等一个会话上某次运行的结果。
-	 *
-	 * `wait` frame 的全部意义，就是对 hub 的一次调用：读这个判断的地方在 hub（{@link SessionHub.awaitResult}），本层只负责传达——与 `cancel` 传达一个观看者的离开、而不对会话做任何决定是同一种分工。幂等：对已在等待的会话再发一个 `wait` 是重连的 replay，一个 entry 覆盖它。
-	 */
-	private startWaiting(sessionId: string): void {
-		if (this.waits.has(sessionId)) return;
-		this.waits.set(sessionId, this.hub.awaitResult(sessionId));
-	}
-
-	/** 释放一个 wait：客户端应答了运行结果，或正在放弃等待。 */
-	private stopWaiting(sessionId: string): void {
-		this.waits.get(sessionId)?.();
-		this.waits.delete(sessionId);
+		else this.cancel(frame.sessionId);
 	}
 
 	/**
@@ -256,12 +232,11 @@ export class MuxConnection {
 		const subscription: Subscription = { pending: new Map(), backlog: [], teardown: [] };
 		this.subscriptions.set(sessionId, subscription);
 
-		// 观看不占 hold，这一点始终是全部关键：计数属于改变或运行会话的调用者，而看着它的窗口两者都不是。它也不让任何状态保持存活——读取是重放后即弃（ADR-0013），所以下面的帧由那次应答和一次不属于这里任何人的运行的事件构成。`observe` 按 id 键控，若本进程之后开始运行该会话会自动重绑，这正是"先看着它，再给它发消息"能工作的原因。
-		//
-		// `live` 区分"我看着看着它停了"和"它从来就没在跑"，与 `bind` 依赖的是同一个区分：只有前者结束流。
+		// 观看不占 hold，这一点始终是全部关键：计数属于改变或运行会话的调用者，而看着它的窗口两者都不是。注册的同一拍就交出 feed——分发按 id 进行，对冷会话同样成立——所以该会话开始运行的那一刻，事件自然流入，无需任何重绑。
 		let live = false;
-		const stopWatching = this.hub.observe(sessionId, (feeds) => {
+		const stopWatching = this.hub.watch(sessionId, (feeds) => {
 			if (feeds === undefined) {
+				// undefined 只在会话被删除（或进程收摊）时到达；观看中的流以 end 作别。
 				if (live) this.endStream(sessionId);
 				return;
 			}
@@ -269,7 +244,7 @@ export class MuxConnection {
 			this.bind(sessionId, subscription, feeds);
 		});
 
-		// 刻意在 `observe` 调用之后注册，且追加而不是赋值：`bind` 可能已经追加了 feed 的退订器，这一步不能挤掉它们。见 `Subscription.teardown`。
+		// 刻意在 `watch` 调用之后注册，且追加而不是赋值：`bind` 可能已经追加了 feed 的退订器，这一步不能挤掉它们。见 `Subscription.teardown`。
 		subscription.teardown.push(() => {
 			stopWatching();
 			// 这个订阅还在展示的任何东西，这里都不会再有人上报了：一个只等已消失读者的应答，是一个没有理由留着的应答。
@@ -279,8 +254,10 @@ export class MuxConnection {
 			this.subscriptions.delete(sessionId);
 		});
 
-		// 已在运行：上面的 `observe` 同步回调了，baseline 已经发出。冷的：从磁盘读会话记录，这是唯一无法绕开 `await` 的地方——而 backlog 正是让这个 await 打不开缝隙的东西。
-		if (subscription.backlog !== null) void this.readColdBaseline(sessionId, subscription);
+		// 活半在：同一同步块内写 baseline——bag 里的在飞状态，包括正在写出的 partial，no-gap 由构造成立。
+		// 冷半：从磁盘异步重放，backlog 正是让这个 await 打不开缝隙的东西。
+		if (this.hub.isLive(sessionId)) this.writeBaseline(sessionId, subscription, this.hub.snapshotNow(sessionId));
+		else void this.readColdBaseline(sessionId, subscription);
 	}
 
 	/**
@@ -337,9 +314,8 @@ export class MuxConnection {
 	/**
 	 * 把订阅绑到一个活会话的 feed 上。
 	 *
-	 * 本进程正在运行的会话同步应答，于是 attach、读取、baseline 整个是一段没有 `await` 的同步代码块。no-gap 保证就是围绕这个场景构建的，{@link readColdBaseline} 的冷路径是为它买单的例外。
-	 *
-	 * 一个冷订阅还在读文件时会话*开始*运行的情况也会落在这里，此时 baseline 不会重发：订阅恰好有一个，哪次读取先完成就归谁。
+	 * `watch` 注册的同一拍同步回调，于是 attach、读取、baseline 整个是一段没有 `await` 的同步代码
+	 * 块。no-gap 保证就是围绕这个场景构建的，{@link readColdBaseline} 的冷路径是为它买单的例外。
 	 */
 	private bind(sessionId: string, subscription: Subscription, feeds: SessionFeeds): void {
 		const onEvent = feeds.onEvent((event) => {
@@ -355,15 +331,11 @@ export class MuxConnection {
 			this.pushApprovalChanges(sessionId, subscription, snapshot);
 		});
 
-		// 永远追加，从不赋值——见 `Subscription.teardown`。活路径上这里落在 `open` 注册自己那步*之前*，这正是 teardown 列表要逆序遍历的原因。
+		// 永远追加，从不赋值——见 `Subscription.teardown`。
 		subscription.teardown.push(() => {
 			onEvent();
 			onChange();
 		});
-
-		// 已有 baseline 意味着冷读赢下了竞速；本订阅保留刚拿到的 feed，把那一帧让给已在途中的读取。
-		if (subscription.backlog === null) return;
-		this.writeBaseline(sessionId, subscription, this.hub.snapshotNow(sessionId));
 	}
 
 	/**
@@ -412,7 +384,7 @@ export class MuxConnection {
 	 * 空闲会话下没有同步状态可读，应答走冷 baseline 的唯一路径：重新布防 backlog，让 {@link readColdBaseline} 去产出。这保住了本帧继承的承诺——先状态、后其后的一切——而不是与增量赛跑，也让文件里只留一份 baseline 拼装而不是两份。
 	 */
 	private pushBaseline(sessionId: string, subscription: Subscription): void {
-		if (this.hub.live.includes(sessionId)) {
+		if (this.hub.isLive(sessionId)) {
 			// 像其他任何帧一样走 `push`：一份欠着未写的 baseline 是这一帧必须落在其后的东西，否则客户端最后看到的会是较旧的状态。
 			this.push(sessionId, subscription, { type: "baseline", session: this.hub.snapshotNow(sessionId) });
 			return;
@@ -562,15 +534,14 @@ export class MuxConnection {
 	/**
 	 * 放弃所有订阅并停止。
 	 *
-	 * 订阅先行，让它们的 feed 在任何东西试图关闭它们正在观看的会话之前释放；waits 跟上。这个顺序是便利而不是承重事实——淘汰漏斗在每条边上都重新检查全部条件，哪种顺序都会被后到的那次补上——但先清观看者、再触发 waits 的边，能让那条边省掉一次本要花掉、下一轮还要再来的尝试（issue 13）。被丢弃的连接是一个永远不会被应答的客户端，所以它持有的每个 wait 都在这里放弃：与订阅表已经给 `cancel`、刷新、断线的同一种等价处理。
+	 * 订阅先行，让它们的 feed 在任何东西试图关闭它们正在观看的会话之前释放。被丢弃的连接是一个
+	 * 永远不会被应答的客户端，它持有的每个订阅都在这里放弃：与 `cancel`、刷新、断线同一种等价处理。
 	 */
 	close(): void {
 		if (this.closed) return;
 		this.closed = true;
 		for (const subscription of [...this.subscriptions.values()]) this.teardown(subscription);
 		this.subscriptions.clear();
-		for (const stop of this.waits.values()) stop();
-		this.waits.clear();
 		this.queue.length = 0;
 		this.queuedBytes = 0;
 		// 停滞的簿记一并清掉，让关闭后接受检视的连接报告一个已了结的状态，而不是一副还在等一个永远不会排空的 socket 的样子。

@@ -11,6 +11,7 @@ import {
 	type SessionEventListener,
 	type SessionListener,
 	type SessionSnapshot,
+	UnknownSessionError,
 } from "@my-agent/core";
 
 export interface HubOptions {
@@ -39,12 +40,12 @@ export interface HubOptions {
 }
 
 /**
- * 一个会话自己的两条 feed，按运行中的会话持有的原样交出。
+ * 一个会话自己的两条 feed，按订阅者的需要交出。
  *
- * 给的是原始物而不是成品帧：审批差异是按订阅者划分的状态，每个订阅者从这些 feed 自建帧。每次订阅返回停止的方式，这让订阅者能在宿主消失时放下这一对。
+ * 给的是原始物而不是成品帧：审批差异是按订阅者划分的状态，每个订阅者从这些 feed 自建帧。每次订阅返回停止的方式，这让订阅者能在会话消失时放下这一对。
  *
  * 这两条 feed 背后的分发表是 hub 自己的 feedMap：core 的编排层不再在每只袋上养订阅者集合，它把
- * 事件交给构造时注入的 sink，而 sink 就住在本 hub 里、按 sessionId 查这张表。宿主消失不拆表——
+ * 事件交给构造时注入的 sink，而 sink 就住在本 hub 里、按 sessionId 查这张表。会话的删除不拆表——
  * 订阅者放下 feed 时各自的退订函数清理自己的条目。
  */
 export interface SessionFeeds {
@@ -55,48 +56,21 @@ export interface SessionFeeds {
 }
 
 /**
- * 按 id 观看某个会话的东西，被告知何时有活会话可看、何时没有。
+ * 按 id 观看某个会话的东西。
  *
- * 本进程运行该会话时以 feed 调用，停止时以 `undefined` 调用——包括只在被观看的会话，它会在什么都没挂上的情况下收到第二次调用。只被告知自己已打开的会话的订阅者，恰恰会对最重要的情况失明：看着一个空闲会话、然后在消息到来时它开始运行。绑定到 id 而不是 `Agent`，正是让它能存活的东西。
+ * 注册的同一拍就以 feed 调用——恒有 feed，因为分发按 id 进行，对从未运行过的冷会话同样成立；之后
+ * 的事件随运行自流入。`undefined` 只在一个时刻到达：会话被删除（或进程收摊），观看随之结束。绑定
+ * 到 id 而不是任何活对象，正是让它能存活的东西：观看从不拼装、从不持有任何东西。
  */
-export type SessionObserver = (feeds: SessionFeeds | undefined) => void;
+export type SessionWatcher = (feeds: SessionFeeds | undefined) => void;
 
 /**
- * 本进程保持打开的一个会话，加上它身上有多少个 hold。
+ * 本进程的会话枢纽。
  *
- * 计数是 hold 得以工作的原因：一个离开的请求不能停掉另一个请求正在观看的一轮，而最后一个离开的也不能让会话永远运行下去。
- *
- * 上面没有别的东西。会话本身是进程唯一的 orchestrator（ADR-0012）——一个方法指名 id、取回它需要的一切——它的活的一半是该 orchestrator 表中为该 id 持有的状态（ADR-0013）。剩下的就是这两者都答不了的那一个问题：此刻是谁把这个会话 hold 着。那是一个 transport 层的问题（ADR-0001），所以它的计数住在 transport 层，而不是住在一个它永远不会去读的 core 状态上。
- *
- * host 还是"会话被 hold 吗"与"会话在运行吗"这两个问题之间的差距：orchestrator 的表从 id 存在的那一刻起就能回答第一个，而 host 只在 hold 打开了会话期间存在——所以 `hosts` 永远是表的子集，表只在它所属的 host 消失后才会被清。
- */
-export class HostedSession {
-	readonly id: string;
-	/**
-	 * hub 正在决定一个无人 hold 的会话能否关闭时置位。
-	 *
-	 * hold 计数本身是 orchestrator 的（ADR-0013：表中的驻留，不是某个连接的兴趣）——这个对象只携带 hub 为之路由 feed 的 id。
-	 */
-	reaping = false;
-
-	constructor(sessionId: string) {
-		this.id = sessionId;
-	}
-}
-
-/**
- * 本进程获得或失去一个会话时被告知：创建、fork、打开、关闭。
- *
- * 与 {@link SessionHub.observe} 是不同的问题，两者刻意分开。这个回答"本进程知道哪些"，所以它触发时完全可以没有任何连接；`observe` 回答"此刻谁在看这个会话"，是淘汰边读取的那面镜子。想要前者却订阅了后者的读者，会发现自己在无人观看的会话上永远不会被调用——而这恰恰是它存在要去注意的情况。
- */
-export type HostListener = (sessionId: string, host: HostedSession | undefined) => void;
-
-/**
- * 本进程拥有的会话，按会话 id 键控。
- *
- * 每个会话 id 一个 agent loop，无论多少浏览器在看它。这就是全部要点：按流决定曾意味着同一会话的两个 tab 在同一份 JSONL 文件上建了两个 loop、各自独立追加。文件仍然是持久副本；这张表记录的是谁把会话 hold 着。
- *
- * loop 本身不是按会话的：一个 orchestrator 服务所有 id（ADR-0012）。按会话的是 hold——一个关于"此刻谁在使用它"的 transport 层事实，由 orchestrator 计数，因为它正是让该会话状态留在表里的东西——以及 orchestrator 表中持有活的那一半的状态。这里其余的一切都是单例。
+ * 会话本身是磁盘上的两个文件（ADR-0008），进程里没有副本：编排层（ADR-0012）按 id 服务所有会话，
+ * 袋由运行自己装配、空闲自散（ADR-0013）。本 hub 记的只有传输层自己的簿记——谁在改变会话
+ * （`holds`）、谁在观看（`watchers`）、事件按 id 从哪张表流出（`feedMap`）——以及删除与命令之间
+ * 的串行化（`closing` 槽位）。
  */
 export class SessionHub {
 	/**
@@ -112,43 +86,46 @@ export class SessionHub {
 	get workDirAbsPath(): string {
 		return this.absRoot;
 	}
+	/** 一个会话此刻有多少持有者——删除动手前要问的那个数。 */
+	holdsOf(sessionId: string): number {
+		return this.holds.get(sessionId) ?? 0;
+	}
+	/** 此刻被 hold 着的全部会话 id，供健康端点与诊断。 */
+	heldSessionIds(): readonly string[] {
+		return [...this.holds.keys()];
+	}
 	private readonly options: HubOptions;
-	private readonly hostedSessionMap = new Map<string, HostedSession>();
 	/**
-	 * 本进程运行的每个会话都要经过的唯一 orchestrator，也是进程各 manager 的唯一消费者（ADR-0012）：设置之门、模型行、工具表、会话存储都住在它的 facade 后面，所以这里拼装的一个会话、一次模型行的编辑、一次设置的写入，到达的都是它读取的同一批对象。只构建一次，因为它不持有会话：一个方法指名 id、从自己表中的状态解析所需——持久的一半、设置、活的一半（ADR-0013）。会话状态在其 id 存在的那一刻进入那张表——创建时拼装并收养，磁盘上的一个在其首次打开时被收养——并通过 orchestrator 自己的 `tryRemoveAgentStateBySessionId` / `deleteSessionBySessionId` 离开，因为表只有一个删除者。
+	 * 每个会话的持有者数量，按 id——"此刻谁在改变这个会话"的签到表（ADR-0001）。
+	 *
+	 * 计数是 hold 得以工作的原因：一个离开的请求不能停掉另一个请求正在做的事，而删除必须等所有
+	 * 改变者放手。core 从不读它——这是 transport 层自己的簿记，不住在编排层的状态上。
+	 */
+	private readonly holds = new Map<string, number>();
+	/**
+	 * 本进程运行的每个会话都要经过的唯一 orchestrator，也是进程各 manager 的唯一消费者（ADR-0012）：设置之门、模型行、工具表、会话存储都住在它的 facade 后面，所以这里拼装的一个会话、一次模型行的编辑、一次设置的写入，到达的都是它读取的同一批对象。它不持有会话：一个方法指名 id、从自己表中的状态解析所需——持久的一半、设置、活的一半（ADR-0013）。
 	 *
 	 * 它通过 facade 而不是副本读模型行，这正是设置面板里改对的 key，就是已打开会话下一条消息发送的 key 的原因。
 	 */
 	readonly agent: Agent;
-	/** 进行中的打开，让两个调用者无法在同一个 id 上建两个会话。 */
-	private readonly opening = new Map<string, Promise<HostedSession>>();
-	/** 进行中的关闭，让新调用者无法打开一个还在被写的文件。 */
+	/** 进行中的删除，让新调用者无法打开一个正在被删的文件。 */
 	private readonly closing = new Map<string, Promise<void>>();
 	/**
 	 * 谁在观看每个会话，按 id——订阅的来去都要穿过的那面镜子。
 	 *
-	 * 永远不是计数，也永远不是让会话保持存活的理由：观看一个会话不让它运行，运行它也不意味着有人在看。只有两件事读这张表，没有别的——路由，以及一个会话的最后一个观看者离开时触发的淘汰边（issue 04 §3）。
+	 * 永远不是计数，也永远不是让会话保持存活的理由：观看一个会话不让它运行，运行它也不意味着有人在看。
 	 */
-	private readonly observers = new Map<string, Set<SessionObserver>>();
+	private readonly watchers = new Map<string, Set<SessionWatcher>>();
 	/**
 	 * 每个会话的分发表，按 id——编排层不再在袋上养订阅者集合后的那两张表的新家。
 	 *
 	 * core 的编排层把事件与快照交给构造时注入的 sink（ADR-0013），sink 在这里按 sessionId 查表、
 	 * 同步遍历分发：emit 点直调，命令与运行的事件从这一张表按序流出，no-gap 契约与原来骑在袋上时
-	 * 相同。条目在第一次订阅时出生、在最后一个退订函数清理时消失，宿主的来去不触碰它——mux 的
-	 * teardown 与 projection 的 unfollow 本来就在宿主消失时被调用，清理靠这些既有退订。
+	 * 相同。条目在第一次订阅时出生、在最后一个退订函数清理时消失。
 	 */
 	private readonly feedMap = new Map<string, { eventListeners: Set<SessionEventListener>; listeners: Set<SessionListener> }>();
 	/**
-	 * 谁仍在等每个会话上一次运行的结果，按 id——send 引用的服务器侧信号（issue 13），由 mux 的 `wait` / `unwait` frame 上报。
-	 *
-	 * 形状上是订阅的孪生，含义上是它的反面：观看是开放的（窗格在窗口看着期间一直在），等待是有界的（一个 send 的寿命恰好等于它发起的那次运行，客户端在运行的最后一句话到达时释放它）。与 `observers` 一样，它永远不是计数、也永远不是让会话保持*运行*的理由——它不占 hold，一个失去全部 hold 的 host 会在 waits 还挂着的情况下照常 reap。它唯一的读者是淘汰判断：标准拒绝一个仍有人在等的会话，因为运行结束与客户端释放之间的淘汰，恰恰是 send 引用存在要防的那种无声撕裂。客户端那份"运行已结束"的认知落后服务器一帧——这张表就是为这个差异买单的地方，而不是把它辩解掉的地方。
-	 */
-	private readonly waiting = new Map<string, Set<() => void>>();
-	/** 进程级监听者，被告知本进程获得或失去的每个会话。 */
-	private readonly hostListeners = new Set<HostListener>();
-	/**
-	 * 未指名落点的应答依据（{@link currentSessionId}）：最后一个被显式创建的会话，或还没有——`undefined` 是欢迎态在服务器侧的那一半。这里没有任何东西创建会话；唯一的写入者是显式创建（`newSession`、fork），历史是侧栏的事：恢复它是点某一行，不是服务器去猜。
+	 * 未指名落点的应答依据（{@link currentSessionId}）：最后一个被显式创建的会话，或还没有——`undefined` 是欢迎态在服务器侧的那一半。这里没有任何东西创建会话；唯一的写入者是显式创建（`birth`、fork），历史是侧栏的事：恢复它是点某一行，不是服务器去猜。
 	 */
 	private current?: Promise<string>;
 
@@ -181,7 +158,7 @@ export class SessionHub {
 	/**
 	 * 替换存储的模型。
 	 *
-	 * 事后不需要任何对齐：会话在每次请求时通过 {@link settings} 读 catalog 并从所指的行重新推导模型，所以下一条消息用的已经是新的行——面板里改对的 key 就是那条消息发送的 key，endpoint、窗口、wire id 同理，包括来自一直开着的窗口的消息。
+	 * 事后不需要任何对齐：会话在每次请求时读 catalog 并从所指的行重新推导模型，所以下一条消息用的已经是新的行——面板里改对的 key 就是那条消息发送的 key，endpoint、窗口、wire id 同理，包括来自一直开着的窗口的消息。
 	 */
 	setModelConfigs(models: readonly ModelConfig[]): void {
 		this.agent.replaceModels(models);
@@ -199,36 +176,37 @@ export class SessionHub {
 		return !this.agent.hiddenDirectories().some((path) => samePath(path, workDirAbsPath));
 	}
 
-	/** 本进程此刻正在运行的会话 id。 */
-	get live(): readonly string[] {
-		return [...this.hostedSessionMap.keys()];
+	/**
+	 * 会话此刻有活半吗：编排层的表中为它持有的那一半——在飞的运行、排队的后续、停在审批上的袋。
+	 *
+	 * 判活的答案归编排层（ADR-0012），hub 不养一份自己的副本。刻意不是 `isRunning || hasPendingApprovals`：
+	 * 后者是账本事实，冷会话的账本里悬着调用它也为真——而基线来源与行叠加要问的都是"进程持有
+	 * 的什么"，不是"盘上可重放的什么"。基线的两个来源站在它两侧：活半在的会话以同步读取作答
+	 * （袋里的在飞状态，包括正在写出的 partial），不在的从磁盘重放。
+	 */
+	isLive(sessionId: string): boolean {
+		return this.agent.hasLiveHalf(sessionId);
 	}
 
 	/**
-	 * 会话的当前状态，从它的文件读取，外加本 hub 的一次淘汰巡查。
+	 * 会话的当前状态，从它的文件读取。
 	 *
-	 * 读取不拼装任何东西（ADR-0013）：orchestrator 的 `snapshotOf` 打开一只袋、从中应答、然后丢弃，表与读取前完全相同。读取仍然值得做的，是给了我们一个看表的机会：这是有人正在关注这个 id 的时刻之一，所以淘汰的询问搭在这里而不是 orchestrator 里——"有没有人在读"是本 hub 自己的表（`observers` / `waiting`），orchestrator 要回答它就得被告知订阅的存在。它知道的是运行是否在途、审批是否停靠，而 `tryRemoveAgentStateBySessionId` 会自己复查那些。
-	 *
-	 * host 站着是另一回事，不予处理：reap 才是结束一个被托管会话的路，而 reap 在等它身后的运行——一次读取不得成为替某人的一轮做决定的东西。
+	 * 读取不拼装任何东西（ADR-0013）：orchestrator 的 `snapshotOf` 打开一只袋、从中应答、然后丢弃。它在活半在的会话上读袋、在冷会话上重放，两条路经过同一个函数，所以不可能漂移。
 	 */
 	async snapshotOf(id: string): Promise<SessionSnapshot> {
-		const snapshot = await this.agent.snapshotOf(id);
-		// host 站着时不动（那是 reap 的路，而 reap 在等运行），open 进行到一半时也不动：它的 hold 在 `open` 里、host 落表前一拍就被拿走，这一次巡查若在间隙里跑就会把它底下的状态抽走。
-		if (!this.hostedSessionMap.has(id) && !this.opening.has(id) && !this.closing.has(id)) this.tryRemoveAgentStateBySessionId(id);
-		return snapshot;
+		return this.agent.snapshotOf(id);
 	}
 
 	/**
-	 * 会话的当前状态，同步读取，供已经持有一个活 host 的调用者。
+	 * 会话的当前状态，同步读取，供活半在场的调用者。
 	 *
 	 * {@link snapshotOf} 的同步孪生，它存在的原因是 mux 的一条保证：订阅的 baseline 必须在挂上 feed 的同一个同步代码块里写出，否则两者之间发布的变更会先于它所描述的状态到达客户端。那个窗口里的一个 `await` 不只是慢——它是整个恢复故事赖以立足的那条保证上的一个洞。
 	 *
-	 * 所以这里拒绝而不是猜测：走到这里意味着调用者相信会话是活的，如果它不是，那个相信就是值得听一耳朵的 bug，而不是值得编造一个快照的情况。
+	 * 所以这里拒绝而不是猜测：走到这里意味着调用者相信活半在场，如果它不在，那个相信就是值得听一耳朵的 bug，而不是值得编造一个快照的情况。
 	 */
 	snapshotNow(id: string): SessionSnapshot {
-		const host = this.hostedSessionMap.get(id);
-		if (host === undefined) throw new Error(`Session is not running: ${id}`);
-		return this.agent.snapshot(host.id);
+		if (!this.isLive(id)) throw new Error(`Session is not live: ${id}`);
+		return this.agent.snapshot(id);
 	}
 
 	/**
@@ -243,133 +221,61 @@ export class SessionHub {
 	}
 
 	/**
-	 * 为一条连接 hold 一个会话，本进程尚未运行它时先打开。
+	 * 为一个改变会话的调用 hold 它，验证 id 对着磁盘上的会话记录。
 	 *
-	 * 每条出口路径要么返回已在 map 中的会话，要么等待同一个 id 上正在打开或关闭的那个，所以两个 loop 永远不会落进同一份会话记录。
+	 * hold 不拼装任何东西：袋由运行自己装配（ADR-0013），这里发生的只有两件事——id 的存在性校验
+	 * （无所指名的 id 以 {@link UnknownSessionError} 拒绝，传输层把它应答成 404）与计数落进签到表。
+	 * 删除进行到一半的会话让 hold 等待：等过 `closing` 的 hold 在文件消失之后才恢复，于是发现
+	 * 没有文件，而不是打开一个正在被删的文件。
 	 */
-	async hold(sessionId: string): Promise<HostedSession> {
-		const id = sessionId;
-
-		const existing = this.hostedSessionMap.get(id);
-		if (existing) return this.count(existing);
-
-		const closing = this.closing.get(id);
+	async hold(sessionId: string): Promise<void> {
+		const closing = this.closing.get(sessionId);
 		if (closing) await closing;
-
-		const reopened = this.hostedSessionMap.get(id);
-		if (reopened) return this.count(reopened);
-
-		const opening = this.opening.get(id);
-		if (opening) return this.count(await opening);
-
-		const started = this.open(id);
-		this.opening.set(id, started);
-		try {
-			// 打开者自己的 hold 在 `open` 里、feed 接线之前就拿走了；这里再计一次会让第一个调用者变成两个持有者。
-			return await started;
-		} finally {
-			this.opening.delete(id);
-		}
+		if (this.agent.fileAbsPathOf(sessionId) === undefined) throw new UnknownSessionError(sessionId);
+		this.holds.set(sessionId, this.holdsOf(sessionId) + 1);
 	}
 
 	/**
-	 * 放弃一条连接的 hold。
+	 * 放弃一个调用的 hold。
 	 *
-	 * 刻意既不 abort 也不 close：在途的一轮继续跑、继续持久化，所以刷新、关 tab、切换会话都不能截断会话记录。最后一个 hold 放开后，会话在其运行落定之后关闭；orchestrator 的状态在 reap 的尾部按它自己的标准走——停靠的审批、仍在等运行结果的调用者（issue 13）让它留下，空闲的会话让它离开。JSONL 文件保留，下一个来问这个 id 的连接得到一个等价的会话。
+	 * 刻意仅此而已：运行在飞时它自己活着、自己持久化、自己散袋（ADR-0013），没有任何东西需要在这里
+	 * 被拆掉。对没人持有的 id 宽容：release 是调用方撤销自己的 hold，答一句「没有东西可还」会把一次
+	 * 簿记失误变成一场异常。
 	 */
-	release(host: HostedSession): void {
-		this.agent.release(host.id);
-		if (this.agent.holdsOf(host.id) > 0 || host.reaping) return;
-		void this.reap(host);
+	release(sessionId: string): void {
+		const remaining = Math.max(0, this.holdsOf(sessionId) - 1);
+		if (remaining === 0) this.holds.delete(sessionId);
+		else this.holds.set(sessionId, remaining);
 	}
 
 	/**
-	 * 观看一个会话的事件和状态，无论本进程是否已在运行它。
+	 * 观看一个会话的事件和状态。
 	 *
-	 * 返回停止观看的方式。观察按 id 键控，该 id 的 host 一出现就重绑，所以"看着一个空闲会话，然后给它发条消息"一直有效：消息拼装出 host 的那一刻，同一个观察者就被挂上去。
-	 *
-	 * 挂上不是把它 hold 开，它也不拼装任何东西（ADR-0013）：一个观看欠下的 baseline 就是一次文件重放。这个 entry 买到的仍是淘汰判断——因*别的原因*而存在的状态（一次运行、一个队列）不会在有人的视线里被拆除，而这个集合就是 hub 在这个问题上自己的一半。
+	 * 返回停止观看的方式。注册的同一拍就以 feed 调用——观看从不拼装任何东西（ADR-0013），冷会话
+	 * 的订阅者拿到的是同一张分发表的入口，它跟随的会话开始运行的那一刻，事件自然流入。观看不占
+	 * hold，它买到的只有两样：feed 的到，以及会话被删时的告别。
 	 */
-	observe(sessionId: string, observer: SessionObserver): () => void {
-		const watching = this.observers.get(sessionId) ?? new Set<SessionObserver>();
-		if (!this.observers.has(sessionId)) this.observers.set(sessionId, watching);
-		watching.add(observer);
-
-		const host = this.hostedSessionMap.get(sessionId);
-		observer(host === undefined ? undefined : this.feedsOf(host));
-
+	watch(sessionId: string, watcher: SessionWatcher): () => void {
+		const watching = this.watchers.get(sessionId) ?? new Set<SessionWatcher>();
+		if (!this.watchers.has(sessionId)) this.watchers.set(sessionId, watching);
+		watching.add(watcher);
+		watcher(this.feeds(sessionId));
 		return () => {
-			watching.delete(observer);
-			if (watching.size === 0) {
-				this.observers.delete(sessionId);
-				// 最后一个观看者离开是淘汰的一条边（issue 04 §3）：一个障碍刚倒下，所以标准获得它们的一次尝试——经由 `tryRemoveAgentStateBySessionId` 漏斗，它复查整个集合而不是只看触发的那条边。
-				this.tryRemoveAgentStateBySessionId(sessionId);
-			}
+			watching.delete(watcher);
+			if (watching.size === 0) this.watchers.delete(sessionId);
 		};
 	}
 
-	/**
-	 * 记录本调用者在等一个会话上某次运行的结果，直到它喊停。
-	 *
-	 * send 引用的服务器侧一半（issue 13）。它不占 hold——hold 说有人在*改变*会话，而 wait 只说答案还有地方可落——它也不让任何东西继续运行：hold 尽失的 host 在 waits 还挂着时照常 reap，因为等待者应得的结果在运行结束时已经发布到流上了。wait 买到的是那次发布与客户端自己释放之间的窗口：那里拒绝淘汰，所以窗口内回来的窗格发现会话仍被 hold 着，而不是在自己的手势中途被磁盘悄悄重建。
-	 *
-	 * 键控和形状与 {@link observe} 有意相同——每个等待的调用者一个 entry，返回值是停止的方式——mux 因此可以对应答的每个 `wait` frame 持有一个，让连接拆除时释放它们的方式与释放订阅一致。按调用者幂等：重连的 replay 重新上报 wait，报两次也是一个 entry。
-	 */
-	awaitResult(sessionId: string): () => void {
-		const waiting = this.waiting.get(sessionId) ?? new Set<() => void>();
-		if (!this.waiting.has(sessionId)) this.waiting.set(sessionId, waiting);
-		const stop = (): void => {
-			waiting.delete(stop);
-			if (waiting.size === 0) {
-				this.waiting.delete(sessionId);
-				// 最后一个等待者被应答是淘汰的一条边（issue 04 §3，wait 由 13 加入）：又一个障碍倒下，服务观看者离开的同一个漏斗也服务这一条。
-				this.tryRemoveAgentStateBySessionId(sessionId);
-			}
-		};
-		waiting.add(stop);
-		return stop;
-	}
-
-	/**
-	 * 一次淘汰尝试：每条边都经过的漏斗，hub 侧标准被完整复查的唯一地方。
-	 *
-	 * 边是一个障碍倒下——最后一个观看者离开、最后一个等待者被应答——而规则（issue 04 §3）是：倒下触发一次尝试，其中*每一个*条件都被重新读取，而不只是动了的那个：状态变化与删除点是异步的，期间可能又有障碍立起。`observers` 和 `waiting` 在这里读取，因为它们是判断中 hub 自己的那一半；orchestrator 在 `tryRemoveAgentStateBySessionId` 里复查它的两个（运行在途、审批停靠）并拒绝有损的那部分。host 仍站着意味着有人仍在 hold 会话——删除不能被直接请求（表只在 host 消失后才清），所以走 host 自己的出路，即 reap：它落定、关闭，最后走到同一个判断上，此刻 waits 已在其中。
-	 */
-	private tryRemoveAgentStateBySessionId(sessionId: string): void {
-		if (this.observers.has(sessionId)) return;
-		if (this.waiting.has(sessionId)) return;
-		const hostedSession = this.hostedSessionMap.get(sessionId);
-		if (hostedSession === undefined) this.agent.tryRemoveAgentStateBySessionId(sessionId);
-		else if (!hostedSession.reaping) void this.reap(hostedSession);
-	}
-
-	/**
-	 * 此刻是否有任何人在观看一个会话。
-	 *
-	 * 这是一个"空不空"的问题，而不是计数，并且刻意不是计数：唯一的读者是想知道会话何时不再被观看的淘汰边，给它一个数字会诱使它推理"有多少"——那正是把集合变成本 hub 不该有的第二个计数器的替换。
-	 */
+	/** 此刻是否有任何人在观看一个会话——"空不空"的问题，刻意不是计数。 */
 	isWatched(sessionId: string): boolean {
-		return (this.observers.get(sessionId)?.size ?? 0) > 0;
-	}
-
-	/**
-	 * 被告知本进程获得或失去的每个会话。
-	 *
-	 * 对创建或 fork 的会话触发（没有 host，因为还没有在运行）、对其 host 打开的会话触发、对其 host 关闭的会话触发。返回停止监听的方式。
-	 *
-	 * 之所以是与 {@link observe} 分开的接缝：想要"我知道的每个会话"的调用者不得同时成为订阅者，否则一个无人观看的会话根本不会被上报。
-	 */
-	onHostChange(listener: HostListener): () => void {
-		this.hostListeners.add(listener);
-		return () => {
-			this.hostListeners.delete(listener);
-		};
+		return (this.watchers.get(sessionId)?.size ?? 0) > 0;
 	}
 
 	/**
 	 * 让一个会话与它的第一条消息原子出生，并让它成为下一个未指名连接的落点（ADR-0021）。
 	 *
-	 * 返回 id 而不是被 hold 的会话，让 hold 恰好发生在一个地方：调用者通过 {@link hold} 挂上，那是唯一拿 hold 的东西。
+	 * 返回 id 而不是被 hold 的会话，让 hold 恰好发生在一个地方：改变会话的调用者通过 {@link hold}
+	 * 挂上。出生的运行自己装配自己的袋；行事实（侧栏）经由 controller 的 listener 到达 projection。
 	 *
 	 * `workDirAbsPath` 决定会话落在哪。未定义就是服务器自己的 root；路径只要存在且是目录就接受，没有更多条件——在一个没人工作过的目录里创建第一个会话，正是新目录进入已知列表的唯一正道，而 header 的 workDir 是工具的默认值而不是进程的，所以这里不属于做已知目录检查的地方。
 	 *
@@ -399,24 +305,22 @@ export class SessionHub {
 			...(selection === undefined ? {} : { selection }),
 		});
 		this.current = Promise.resolve(id);
-		this.announceHost(id, undefined);
 		return id;
 	}
 
 	/**
 	 * 在一个 entry 处分支一个会话，返回新会话的 id。
 	 *
-	 * 与 {@link birth} 相同，返回 id 而不是被 hold 的会话：调用者通过 {@link hold} 挂上，注册与 hold 计数因此留在一个地方。fork 属于这里而不属于 `Connection`，因为新会话必须活得比请求它的连接更久——与其他每个会话的理由相同。
+	 * 与 {@link birth} 相同，返回 id 而不是被 hold 的会话：改变会话的调用者通过 {@link hold} 挂上。
+	 * 源会话只被读。它的文件不被触碰，它自己的 `leafId` 不动，正在运行的会话从它正在写的文件 fork，
+	 * 所以任何 hold 都不被打扰，在途的一轮继续写它正在写的。
 	 *
-	 * 源会话只被读。它的文件不被触碰，它自己的 `leafId` 不动，本进程正在运行的会话从它正在写的文件 fork，所以任何 hold 都不被打扰，在途的一轮继续写它正在写的。
-	 *
-	 * 注册表在这里也没有收获：无人 hold 的 fork 没有要养活的活的一半——没有队列排空过、没有运行在途——所以它的第一次触碰就是它的第一个 hold，那正是通过 {@link open} 拼装其状态的东西。orchestrator 的表也没有收获：facade 的 `forkFrom` 写两个文件、不收养任何东西（ADR-0012）。状态离开那张表只有 orchestrator 自己的 close 和 tryRemoveAgentStateBySessionId 两条路，从不经由本 hub 的手。
+	 * 注册表在这里也没有收获：无人 hold 的 fork 没有要养活的活一半——没有队列排空过、没有运行在途——所以它的第一次触碰就是它的第一个 hold。orchestrator 的表也没有收获：facade 的 `forkFrom` 写两个文件、不收养任何东西（ADR-0012）。状态离开那张表只有运行自己的结束路径和 orchestrator 自己的删除动词，从不经由本 hub 的手。
 	 */
 	async fork(sessionId: string, entryId: string | null): Promise<string> {
-		// 源会话只被定位和读取——被 hold 的袋自己的文件，或 facade 的磁盘扫描——两条路都是一次 facade 调用。fork 的两侧就是一次源路径读取和一对写入，而文件是每个 entry 都已落上去的权威。
+		// 源会话只被定位和读取——facade 的磁盘扫描。fork 的两侧就是一次源路径读取和一对写入，而文件是每个 entry 都已落上去的权威。
 		const id = this.agent.forkFrom(sessionId, entryId);
 		this.current = Promise.resolve(id);
-		this.announceHost(id, undefined);
 		return id;
 	}
 
@@ -442,37 +346,30 @@ export class SessionHub {
 	/**
 	 * 删除一个会话：会话记录、文件，以及本进程中关于它的每一丝痕迹。
 	 *
-	 * 有工作在途的会话拒绝而不是在其底下删除——正在写文件的运行、等人回答的审批、还 hold 着的请求、进行到一半的 open——controller 把这个拒绝变成 409。空闲会话按被 reap 的方式关闭（通知 observers、宣布 listeners、`settle` 先于 `close`），`closing` 槽位横跨整个移除持有，删除中途到来的 hold 会等待、然后发现没有文件，而不是打开一个即将消失的文件。
+	 * 有工作在途的会话拒绝而不是在其底下删除——被 hold 着的、运行中的、停在审批上的——controller
+	 * 把这个拒绝变成 409。空闲会话删除时先向观看者告别（`undefined` 让 mux 对观看中的流发 end），
+	 * `closing` 槽位横跨整个移除持有：删除中途到来的 hold 会等待、然后发现没有文件，而不是打开一个
+	 * 正在消失的文件。
+	 *
+	 * 守卫刻意只有三道（ADR-0022）：send 引用的第四道（waiting）已撤销——本产品是单用户，发消息
+	 * 的人与点删除的人是同一个，空闲即删是「最后一个动作赢」的语义；在途 send 的答案随删除作废，
+	 * 是用户的明确意图，不需要守卫代为保守。
 	 *
 	 * 未指名的落点被重置：它指名的东西没了，下一次询问针对剩下的重新解析，而不是用一个已不存在的会话作答。
 	 */
 	async remove(sessionId: string): Promise<void> {
-		// 数据的一半是 orchestrator 的：文件是否存在、表中的状态，是一次调用（`Agent.deleteSessionBySessionId`），本方法从不问自己在删除两者中的哪一个。留在这里的是 hub 自己的簿记——hosts、observers 和 `closing` 槽位；hold 是 orchestrator 的，问它是否还有站着的即可。
-		const hosted = this.hostedSessionMap.get(sessionId);
-		if (hosted !== undefined) {
-			if (this.agent.holdsOf(sessionId) > 0 || this.opening.has(sessionId) || this.agent.isRunning(sessionId) || this.agent.hasPendingApprovals(sessionId)) {
-				throw new Error("这个会话还有运行中的轮次或没答完的审批，等它停下来再删。");
-			}
-			const closing = (async () => {
-				await this.agent.settle(sessionId);
-				if (this.hostedSessionMap.get(sessionId) === hosted) this.hostedSessionMap.delete(sessionId);
-				// 与 reap 相同的顺序：observers 先失去 feed，listeners 后听到失去的消息，订阅者永远不会伸手去够一个已经不在的会话。
-				for (const observer of this.observers.get(sessionId) ?? []) observer(undefined);
-				this.announceHost(sessionId, undefined);
-				// 刚被通知的 observers 可能当场拆掉自己的订阅，最后一个退出的触发淘汰边——它找不到 host、先把状态丢掉。表已不持有的 id 上，close 立即应答。
-				await this.agent.close(sessionId);
-				// 文件与被 hold 的状态一起消失，在同一个槽位内：等过 `closing` 的 hold 只在文件消失之后才恢复，于是发现没有文件，而不是在删除中途重开一个。
-				await this.agent.deleteSessionBySessionId(sessionId);
-			})();
-			this.closing.set(sessionId, closing);
-			try {
-				await closing;
-			} finally {
-				this.closing.delete(sessionId);
-			}
-		} else {
-			// 没有 host：本进程没有任何东西在运行它，orchestrator 的一次删除就是全部移除。什么都不指名的 id 在那里拒绝，那个拒绝就是 404。
+		if (this.holdsOf(sessionId) > 0 || this.agent.isRunning(sessionId) || this.agent.hasPendingApprovals(sessionId)) {
+			throw new Error("这个会话还有运行中的轮次或没答完的审批，等它停下来再删。");
+		}
+		const closing = (async () => {
+			for (const watcher of this.watchers.get(sessionId) ?? []) watcher(undefined);
 			await this.agent.deleteSessionBySessionId(sessionId);
+		})();
+		this.closing.set(sessionId, closing);
+		try {
+			await closing;
+		} finally {
+			this.closing.delete(sessionId);
 		}
 		this.current = undefined;
 	}
@@ -480,43 +377,15 @@ export class SessionHub {
 	/**
 	 * 进程退出前停止每次运行并落定每个会话。
 	 *
-	 * `close()` 停掉运行本身，这就是本方法的边界——一个长工具不能拖住 shutdown。等待中的调用原样保留：会话记录是唯一的状态，所以重启继承的仍是一个可回答的问题，而不是一个没人做过的拒绝。
+	 * 谁在跑只有编排层的表知道（运行比发起它的请求活得久，202 的 hold 当场交还），所以停止是
+	 * orchestrator 自己的复数动词（`closeAll`）；观看者在此刻收到告别，表与簿记随之清空。
 	 */
 	async close(): Promise<void> {
-		const hosts = [...this.hostedSessionMap.values()];
-		await Promise.all(hosts.map((host) => this.agent.close(host.id)));
-		// hosts 在 observers 被通知之前离开 map。以此为终的订阅触发淘汰边，而边必须找不到 host——否则它会对一个已在关闭中的 hub 发起自己的 reap。
-		for (const host of hosts) if (this.hostedSessionMap.get(host.id) === host) this.hostedSessionMap.delete(host.id);
-		for (const host of hosts) {
-			for (const observer of this.observers.get(host.id) ?? []) observer(undefined);
-			this.announceHost(host.id, undefined);
-		}
-		this.hostedSessionMap.clear();
-		// orchestrator 的状态表不在这里清扫：它住在 orchestrator 身上，关闭 hub 的进程把 orchestrator 一起带走。对活着的 hub 清表，等于第二个写者越过拥有那些状态的 orchestrator 伸手。
-	}
-
-	/** 把一个持有者计进来，与 `release` 把它计出去的方式对应。 */
-	private async count(host: HostedSession): Promise<HostedSession> {
-		await this.agent.hold(host.id);
-		return host;
-	}
-
-	/**
-	 * 打开一个本进程尚未运行的会话文件。
-	 *
-	 * 工作目录来自会话记录自己的 header 而不是服务器的 root，因为侧栏提供机器上的每个目录：从另一个组打开的会话，其工具必须解析到它被写下之处，其审批来自那个目录的设置。
-	 *
-	 * 这里拿的 hold 是第一个：它只计数与校验 id——袋由运行自己装配（外界不创建），下面的 feed 接线针对 host 而不是袋。hub 从不问状态是否已在——{@link Agent.hold} 对两条路一并作答（ADR-0013）。
-	 */
-	private async open(id: string): Promise<HostedSession> {
-		await this.agent.hold(id);
-		const host = new HostedSession(id);
-		this.hostedSessionMap.set(id, host);
-		// 先 observers，后 listeners：被告知"host 开了"并伸手去够会话的订阅者，必须发现它已经交出。
-		const feeds = this.feedsOf(host);
-		for (const observer of this.observers.get(id) ?? []) observer(feeds);
-		this.announceHost(id, host);
-		return host;
+		await this.agent.closeAll();
+		for (const watchers of this.watchers.values()) for (const watcher of watchers) watcher(undefined);
+		this.watchers.clear();
+		this.feedMap.clear();
+		this.holds.clear();
 	}
 
 	/**
@@ -547,49 +416,6 @@ export class SessionHub {
 			},
 		};
 	}
-
-	/**
-	 * 一个活 host 自己的两条 feed，包装成订阅者可以握住的一对。
-	 *
-	 * orchestrator 是发布事件的唯一者，所以 hub 的触达到此为止——订阅者从这两条 feed 构建什么，是它自己的事。绑定由订阅者自己撤销，因为两条 feed 各自交回自己的退路。
-	 */
-	private feedsOf(host: HostedSession): SessionFeeds {
-		return this.feeds(host.id);
-	}
-
-	/** 告诉进程级监听者：一个会话出现了、开始了或消失了。 */
-	private announceHost(sessionId: string, host: HostedSession | undefined): void {
-		for (const listener of this.hostListeners) listener(sessionId, host);
-	}
-
-	private async reap(host: HostedSession): Promise<void> {
-		host.reaping = true;
-		try {
-			// 中途被释放的运行继续跑、继续持久化，所以这里的 settle 就是让一轮在任何东西被拆掉之前完成的东西。在 end-restart 语义下（ADR-0005 §5），停在审批闸门的一轮已经结束——settle 在那里等的不是运行——而它留下的问题不归这次 reap 回答：host 关闭、orchestrator 的状态留下（停靠的审批拒绝淘汰，随之留下恢复运行必须排空的队列），答案经 REST 到达任何一个重新打开会话的 hold。没有窗口应答它，也没有进程 reap 它：问题悬着，直到下一次运行的恢复机制关闭它，或进程退出。
-			await this.agent.settle(host.id);
-			if (this.agent.holdsOf(host.id) > 0) return;
-
-			if (this.hostedSessionMap.get(host.id) === host) this.hostedSessionMap.delete(host.id);
-			// 先告知 observers 再告知 listeners：放下自己半成品工作的订阅者需要 feed 先消失，而对失去做出反应的 listener 是两者中更晚的那个。
-			for (const observer of this.observers.get(host.id) ?? []) observer(undefined);
-			this.announceHost(host.id, undefined);
-			// 刚被通知的 observers 可能当场拆掉自己的订阅，最后一个退出的触发淘汰边——它此刻找不到 host 挡路、可能已经把状态丢掉。表已不持有的 id 上，close 立即应答，所以尾部跑的无论边做了什么：先到的那条边做了本该由这里做的同一件事，只是更早。
-			{
-				const closing = this.agent.close(host.id);
-				this.closing.set(host.id, closing);
-				try {
-					await closing;
-				} finally {
-					this.closing.delete(host.id);
-				}
-				// host 没了，它的活的一半随之而去：排队或运行中的任何东西随会话而死，这与一次进程重启会做的相同，只是一次一个 host。这个删除点把判断中 hub 自己的几半完整读一遍，而不是争论它的前置条件（issue 04 §3）：持有者在上面的 settle 闸门处已被应答，观看者在这里读取，即便上面的通知已经清空了他们——读这个动作本身就是让规则成立的东西——wait 是 hub 的第四个标准（issue 13）：仍在等运行结果的调用者让状态留在表里，最后一个等待者被应答时，其释放正是淘汰它的那条边。对边已经丢掉的状态，tryRemoveAgentStateBySessionId 应答 `false`，所以删除不需要自己的成员判断分支。
-				if (!this.observers.has(host.id) && !this.waiting.has(host.id)) this.agent.tryRemoveAgentStateBySessionId(host.id);
-			}
-		} finally {
-			host.reaping = false;
-		}
-	}
-
 }
 
 /**
@@ -597,7 +423,7 @@ export class SessionHub {
  *
  * 检查刻意只有"存在且是目录"。更窄的任何东西——已知目录列表之类——都会封死在进程从未工作过的目录里创建第一个会话的唯一正道，而那恰恰是新目录挣得自己在侧栏中的位置的方式。
  *
- * 导出是因为拒绝应得的 status 由 controller 决定，不是 hub 的：controller 自己跑这个检查，坏路径可以被答成 400；`newSession` 再跑一遍，让任何内部调用者都无法绕过检查写入会话。
+ * 导出是因为拒绝应得的 status 由 controller 决定，不是 hub 的：controller 自己跑这个检查，坏路径可以被答成 400；`birth` 再跑一遍，让任何内部调用者都无法绕过检查写入会话。
  */
 export async function workDirAbsPathOrThrow(workDirInput: string): Promise<string> {
 	const absRoot = resolve(workDirInput);

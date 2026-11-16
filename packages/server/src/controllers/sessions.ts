@@ -62,6 +62,10 @@ export interface SessionListener {
 	onRunFailure?(sessionId: string, message: string): void;
 	onApproval?(sessionId: string, toolCallId: string, approved: boolean): void;
 	/**
+	 * 一个会话出生或 fork 落地：projection 重读它，让侧栏的行在会话存在的那一拍出现。
+	 */
+	onCreated?(sessionId: string): void;
+	/**
 	 * 一次存储型改名落地，行的 title 在文件被再读一次之前是过期的。projection 重读该行，普通的 `session_row` 帧把新名字带给每个窗口——与其他任何行变更同一条路，客户端不必为侧栏学第二种消息形状。
 	 */
 	onRenamed?(sessionId: string): void;
@@ -94,8 +98,8 @@ export class SystemController {
 		this.listeners = listeners;
 	}
 
-	health(): { ok: boolean; workDirAbsPath: string; live: readonly string[] } {
-		return { ok: true, workDirAbsPath: this.hub.workDirAbsPath, live: this.hub.live };
+	health(): { ok: boolean; workDirAbsPath: string; held: readonly string[] } {
+		return { ok: true, workDirAbsPath: this.hub.workDirAbsPath, held: this.hub.heldSessionIds() };
 	}
 
 	models(): ModelOption[] {
@@ -471,6 +475,7 @@ export class SessionController {
 			throw httpStatus.conflict(messageOf(error));
 		}
 		this.restoreDirectory(absRoot ?? this.hub.workDirAbsPath);
+		this.listeners.onCreated?.(sessionId);
 		return { sessionId, sessions: await listSessions(this.hub.agent, absRoot ?? this.hub.workDirAbsPath) };
 	}
 
@@ -498,6 +503,7 @@ export class SessionController {
 			throw httpStatus.badRequest("`entryId` must be a string or null");
 		}
 		const sessionId = await this.hub.fork(sourceId, typeof entryId === "string" ? entryId : null);
+		this.listeners.onCreated?.(sessionId);
 		return { sessionId, sessions: await listSessions(this.hub.agent, this.hub.workDirAbsPath) };
 	}
 
@@ -680,11 +686,11 @@ export class SessionController {
 	 * 不存在的会话是 404，而 hold 正是说这件事的：`hold` 打开会话记录，什么都不指名的 id 在那里以 {@link UnknownSessionError} 拒绝，transport 负责映射。hub 抛的其他东西——解析不了的会话记录文件、拼装不了的会话——是本服务器自己的问题，对它说"not found"会让调用者去找一个其实完全正确的 id 里的拼写错误。
 	 */
 	private async holding<T>(sessionId: string, use: (agent: Agent) => T | Promise<T>): Promise<T> {
-		const host = await this.hub.hold(sessionId);
+		await this.hub.hold(sessionId);
 		try {
 			return await use(this.hub.agent);
 		} finally {
-			this.hub.release(host);
+			this.hub.release(sessionId);
 		}
 	}
 

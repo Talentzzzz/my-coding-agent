@@ -136,8 +136,8 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 		...(options.sink === undefined ? {} : { sink: options.sink }),
 	});
 	// 状态在这里进入编排层的表，走的是 hub 用的同一扇门——它如今是类私有的
-	// （`assembleAgentStateBySession`）：调用方拼得出的动词是 `hold` / `release` 与
-	// `createAndPrompt`，而 TypeScript 没法说「core 内部」，所以这条唯一获批的组合之路像 smoke 够
+	// （`assembleAgentStateBySession`）：调用方拼得出的动词是 `createAndPrompt` 与删除动词
+	// （hold / release 已随计数上移 hub，不再是 core 的动词），而 TypeScript 没法说「core 内部」，所以这条唯一获批的组合之路像 smoke 够
 	// 其他私有半一样够到这扇门。这个断言就是接缝，本文件是它在生产侧唯一的读者。
 	const door = agent as unknown as { assembleAgentStateBySession(options: AssembleAgentStateOptions): Promise<unknown> };
 	await door.assembleAgentStateBySession(options);

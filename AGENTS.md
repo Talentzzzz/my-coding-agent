@@ -116,11 +116,12 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 - **hold（持有）** —— 持有者对活跃会话的握持：只有改变会话的请求与在飞的运行各在其长度内一个；读
   会话不拿 hold，**订阅也不拿**——一张订阅表回答"这条连接订了什么"，与 hold 回答"这个请求
   必须跑在活跃会话上"永不互相换算（ADR-0001）。名字原名 `claim`（2026-11-10 全仓改名），语义一字未动。
-  计数在编排层（`Agent.hold(id)` / `Agent.release(id)`，读法是 `holdsOf(id)`）：hold 现在只是"谁在用
-  这个会话"，不再是"表里那份会话记录靠谁活着"——会话记录不在表里（ADR-0013），驻留只关乎队列、
-  订阅与在飞的运行。hub 的 `hold` / `release(host)` 只是每次连接进出各转手一次。
-  它是公开面上唯一的"我要用它"动词——`ensure` 已降为类私有（`ensureState`）：它只保证这个 id 有一份
-  live 半，因为"这个 id 在不在内存里"不是调用方的问题。
+  计数在 hub（`SessionHub.holds`，读法是 `holdsOf(id)`，2026-11-16 从编排层上移）：hold 只回答
+  "此刻谁在用这个会话"——删除（remove）动手前要问的问题；它不再是"表里那份会话记录
+  靠谁活着"——袋随运行生灭，驻留不归它管。hold 只计数、不拼装、无生命周期：`hold(id)` 校验 id
+  对磁盘加计数落表，`release(id)` 计数减一，仅此而已——没有收摊（reap），"开着"这个概念不存在了。
+  core 的 `Agent` 不再有 hold / release 动词；hub 的
+  `hold` / `release` 是全部通道，`open` 里以 `fileAbsPathOf` 校验 id（无所指名 → `UnknownSessionError` → 404）。
 - **approval（审批）** —— 结束重启（ADR-0005 §5）：`before_tool` 对要问的调用返回 suspend，结束本轮
   运行且不写结果，tool call 在账本里悬空（有 tool_use 无 tool_result，派生态）；答案经
   `POST /api/sessions/{id}/approvals/{toolCallId}` 到达后启动恢复运行，由引擎的恢复机器按
@@ -161,8 +162,7 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   会话记录**（ADR-0013）：袋只是入参，出生的袋被丢掉——重放随时能再造它；唯一调用者是 `Agent.assembleAgentStateBySession`
   （原名 `open`，`adopt` 已删，装配并进门里，服务由此只能是编排层自己的，不再是包的公开面），而
   这扇门本身已收成类私有：公开面上剩 `createAndPrompt`（造，[ADR-0021](docs/adr/0021-lazy-session-identity.md)）、
-  `hold` / `release`（用它）与
-  `snapshotOf` / `readSessionSnapshot`（读），何时装配、递哪只袋子进表不再是外界的动词。
+  `snapshotOf` / `readSessionSnapshot`（读）与删除动词（出表），何时装配、递哪只袋子进表不再是外界的动词。
   `createSessionAgent()` 是另一半：
   收 `{ settingsHome?, modelsHome?, api? }`（外加 test-only 的 `settings` / `tools` 两缝）并**自己造三只
   Manager**——Manager 不再是调用者的决定（[ADR-0012](docs/adr/0012-agent-facade.md)）——组成一个
@@ -181,8 +181,8 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   `SessionFeeds`（形状不变，mux 零改动）。`live` 里只有两条队列、在飞运行、
   partial、重试位与挂起位——运行期瞬态，盘上没有的东西（ADR-0021 删掉了曾住在这里的
   未落盘袋与打开行）。由 `Agent` 按 id 键控持有，
-  装配经 `Agent.assembleAgentStateBySession` 进表、`tryRemoveAgentStateBySessionId` /
-  `deleteSessionBySessionId` 是唯一出口（原名 `evict` / `remove`，2026-11-15 改名），进程重启即清空；
+  装配经 `Agent.assembleAgentStateBySession` 进表、由运行自己的结束路径与
+  `deleteSessionBySessionId` 出表（原名 `evict` / `remove`，2026-11-15 改名），进程重启即清空；
   类型不出 core，server 侧只见纯数据窄读（ADR-0012）。
 - **workDirAbsPath（当前工作目录）** —— 一个会话的相对路径基准与命令起点，**按会话**，从会话自己快照的
   设置半取（`session.settings.workDirAbsPath`，绝对）。它**不是围栏**：绝对路径原样接受，`..` 也能走出去，工具

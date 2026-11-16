@@ -62,7 +62,7 @@ export interface BootedServer {
 	/**
 	 * 本进程对每个会话所知的信息，以侧栏行的形式。
 	 *
-	 * 在这里构建而不是在 hub 内部，因为它是 hub 两个观察点的*读取者*，不是会话生命周期的一部分：想要这些行的调用者来这里要，而 hold、reap 或宿主关闭都不依赖它问过。
+	 * 在这里构建而不是在 hub 内部，因为它是 hub 两个观察点的*读取者*，不是会话生命周期的一部分：想要这些行的调用者来这里要，hold 或会话删除都不依赖它问过。
 	 */
 	projection: SessionProjection;
 	/** 常驻连接层：每个升级的 socket 一个。 */
@@ -231,15 +231,25 @@ export function muxUpgrade(
  *
  * projection 与 mux 并肩，因为 rename 和 delete 首先是*行*事实，其次才是 frame 事实：projection 的存储先更新，各自发出的 frame 走的是普通的发布之路——rename 是重新读出的一行，delete 是一个消失的 id。
  */
-export function sessionListeners(mux: MuxServer, projection: SessionProjection): SessionListener {
+export function sessionListeners(mux: MuxServer, projection?: SessionProjection): SessionListener {
 	return {
 		onRunFailure: (sessionId, message) => {
 			console.error(`会话 ${sessionId} 的运行失败：${message}`);
 			mux.announce(sessionId, message);
 		},
 		onApproval: (sessionId, toolCallId, approved) => mux.rememberApproval(sessionId, toolCallId, approved),
-		onRenamed: (sessionId) => void projection.refresh(sessionId),
-		onRemoved: (sessionId) => projection.forget(sessionId),
+		onCreated: (sessionId) => {
+			if (projection === undefined) return;
+			void projection.refresh(sessionId);
+		},
+		onRenamed: (sessionId) => {
+			if (projection === undefined) return;
+			void projection.refresh(sessionId);
+		},
+		onRemoved: (sessionId) => {
+			if (projection === undefined) return;
+			projection.forget(sessionId);
+		},
 		// 一个目录组进入或离开列表——被放到一边，或被新会话领回——动的是列表本身而不是任何一行，所以应答它的 frame 是每条连接打开时就收到的 overview。发给所有连接：发问的窗口已经在自己的响应里拿到了答案，而没发问的窗口才是这条消息的服务对象。
 		onDirectoryListingChanged: () => void mux.broadcastSessions(),
 	};

@@ -365,11 +365,6 @@ export class MuxClient {
 		} else {
 			this.subscriptions.set(sessionId, { sources: new Set([source]), status: "subscribed" });
 		}
-		// send 引用在每次 retain 时都上报自身，而不是只在来源新加入时：上报在服务端是幂等的（每个
-		// 连接和会话一条），而"这个引用是新的"是表无法诚实作出的区分 —— 服务端已结束的流可能在
-		// `end` 帧与其释放之间的一瞬留下来源的副本，那一瞬里的第二次 send 是真正新的等待，不是重复
-		// 的（issue 13）。此刻通道带不走的帧会被 `write` 丢弃，重放会把意图拾回来。
-		this.reportWait(sessionId, source, "wait");
 
 		// 通道不是 live 时不发送：无处可发，而且 live 迁移本来就会重放每个条目 —— 记录意图刚才
 		// 就是全部的工作。无论如何都要求了导航的，会被拒绝而不是等待一条这条连接从未请求过的基线，
@@ -385,9 +380,7 @@ export class MuxClient {
 	 * 放弃观看一个会话的一个原因。
 	 *
 	 * 最后离开的人发送 `cancel` 并删除条目，这同时也是释放窗口持有的那个会话的副本 —— 没有第二处
-	 * 要清理，所以"没人在看它"和"我们没为它持有任何东西"按构造就是同一个事件。send 的释放在此
-	 * 之前携带自己的 `unwait`，无论它是不是最后离开的：等待的寿命与 send 引用完全一致，与条目
-	 * 无关（issue 13）。
+	 * 要清理，所以"没人在看它"和"我们没为它持有任何东西"按构造就是同一个事件。
 	 */
 	release(sessionId: string, source: SubscriptionSource): void {
 		const subscription = this.subscriptions.get(sessionId);
@@ -395,11 +388,6 @@ export class MuxClient {
 		// 布尔返回值是旧代码缺的那道防线：从未持有的来源绝不能被释放，否则下面的最后引用逻辑会在
 		// 一次调用并未真正改变的集合上触发。
 		if (!subscription.sources.delete(source)) return;
-		// 等待是 send 引用自己的帧，在它生命两端各上报一次，与流无关：被仍指着会话的窗格（或一个
-		// `ended` 标记）留下的条目，仍然欠服务端它的 `unwait`，因为等待保护的是那轮运行的结果，
-		// 不是流（issue 13）。此刻通道带不走的帧会被 `write` 丢弃 —— 且这种丢弃在两个方向上都安全，
-		// 因为服务端从未听说过的等待会随从未上报它的连接一起死掉。
-		this.reportWait(sessionId, source, "unwait");
 		if (subscription.sources.size > 0) return;
 
 		this.subscriptions.delete(sessionId);
@@ -759,11 +747,6 @@ export class MuxClient {
 			if (subscription.status === "ended" || subscription.sources.size === 0) continue;
 			subscription.status = "subscribed";
 			this.writeOpen(sessionId);
-			// 等待随同一次重放走：持有它的连接已死，而在掉线中幸存的 send 引用仍在新的连接上等它
-			// 那轮运行的结果（issue 13）。上面的 `ended` 跳过不需要自己的等待附注 —— end handler
-			// 在标记流结束的同一拍里释放了 send 引用，所以 `ended` 条目已经没有 `send` 来源可供
-			// 这个检查发现。
-			if (subscription.sources.has("send")) this.write({ type: "wait", sessionId });
 		}
 	}
 
@@ -773,25 +756,13 @@ export class MuxClient {
 	}
 
 	/**
-	 * 上报 send 引用在服务端的信号，在它生命的开始或结束。
-	 *
-	 * 两个方向各一帧，且只针对 `send` 来源：窗格的需求是无期限的观看，对结果什么都没说，而 send
-	 * 的需求以它开启的那轮运行为界 —— 这恰恰是服务端无法从帧里自行推导的事实（issue 13）。
-	 */
-	private reportWait(sessionId: string, source: SubscriptionSource, frame: "wait" | "unwait"): void {
-		if (source !== "send") return;
-		this.write({ type: frame, sessionId });
-	}
-
-	/**
 	 * 发送一个上行帧，或因为无通道而丢弃它。
 	 *
-	 * 丢弃而不是排队是刻意的。四个帧都是订阅表已经持有的关于*意图*的陈述 —— 被丢弃的 `open` 或
-	 * `wait` 会由下一次 `live` 从需要它的条目重发，被丢弃的 `cancel` 或 `unwait` 指的是这条连接
-	 * 已经不再持有（或从未持有，所以服务端没有听到过要撤销的 `wait`）的会话。队列将是表的第二份
-	 * 副本，而重连唯一绝不能错的，就是它认为自己正在看什么。
+	 * 丢弃而不是排队是刻意的。两个帧都是订阅表已经持有的关于*意图*的陈述 —— 被丢弃的 `open` 会由
+	 * 下一次 `live` 从需要它的条目重发，被丢弃的 `cancel` 指的是这条连接已经不再持有（或从未持有）
+	 * 的会话。队列将是表的第二份副本，而重连唯一绝不能错的，就是它认为自己正在看什么。
 	 */
-	private write(frame: { type: "open" | "cancel" | "wait" | "unwait"; sessionId: string }): void {
+	private write(frame: { type: "open" | "cancel"; sessionId: string }): void {
 		const socket = this.socket;
 		if (socket === undefined || this.channelState !== "live") return;
 		try {

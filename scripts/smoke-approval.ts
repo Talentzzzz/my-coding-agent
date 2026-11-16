@@ -32,8 +32,8 @@ import { createServer as createTcpServer } from "node:net";
 import { spawn } from "node:child_process";
 import { bootServer, muxUpgrade, sessionListeners } from "../packages/server/src/boot.ts";
 import { createMuxServer, type MuxServer } from "../packages/server/src/mux.ts";
-import { HostedSession, SessionHub } from "../packages/server/src/hub.ts";
-import { createSessionProjection } from "../packages/server/src/projection.ts";
+import { SessionHub } from "../packages/server/src/hub.ts";
+import { createSessionProjection, type SessionProjection } from "../packages/server/src/projection.ts";
 import { SessionController, SystemController } from "../packages/server/src/controllers/sessions.ts";
 import { createRoutes } from "../packages/server/src/controllers/routes.ts";
 import { Router } from "../packages/server/src/http/routing.ts";
@@ -179,10 +179,9 @@ const agent = hub.agent;
 
 const roundTrip = await serve(hub);
 try {
-	// The bench holds a hold for the length of these checks. A subscription takes none — that is the
-	// model — so without it the reap that follows the run's own hold would end the lane in the middle
-	// of the assertions below.
-	const bench = await hub.hold(sessionId);
+	// The bench holds a hold for the length of these checks — the test rig's own hold, distinct from
+	// any subscription (a subscription takes none; that is the model).
+	await hub.hold(sessionId);
 	const wire = await connect(muxUrl(roundTrip.url));
 
 	const baseline = await wire.open(sessionId);
@@ -261,7 +260,7 @@ try {
 	check("the model's closing answer is in the session", JSON.stringify(sessionView?.messages ?? []).includes("done"));
 
 	await wire.close();
-	hub.release(bench);
+	hub.release(sessionId);
 } finally {
 	clearTimeout(roundTripWatchdog);
 	await roundTrip.close();
@@ -286,7 +285,7 @@ const sharedWatchdog = deadline("the shared-answer checks", 60_000);
 
 const shared = await openRig();
 try {
-	const bench = await shared.hub.hold(shared.sessionId);
+	await shared.hub.hold(shared.sessionId);
 	// Every window is attached before anything runs, so the request is a difference frame on each of
 	// them rather than part of a baseline — which is the path under test.
 	const windows: WireClient[] = [];
@@ -342,7 +341,7 @@ try {
 	);
 
 	await Promise.all(windows.map((window) => window.close().catch(() => {})));
-	shared.hub.release(bench);
+	shared.hub.release(shared.sessionId);
 } finally {
 	clearTimeout(sharedWatchdog);
 	await shared.close();
@@ -368,8 +367,8 @@ try {
 	const [firstSession, secondSession] = cross.sessions;
 	const first = firstSession!;
 	const second = secondSession!;
-	const firstBench = await cross.hub.hold(first.id);
-	const secondBench = await cross.hub.hold(second.id);
+	await cross.hub.hold(first.id);
+	await cross.hub.hold(second.id);
 	const firstWire = await connect(muxUrl(cross.url));
 	const secondWire = await connect(muxUrl(cross.url));
 	const [firstBaseline, secondBaseline] = await Promise.all([
@@ -428,27 +427,25 @@ try {
 	);
 
 	await Promise.all([firstWire.close().catch(() => {}), secondWire.close().catch(() => {})]);
-	cross.hub.release(firstBench);
-	cross.hub.release(secondBench);
+	cross.hub.release(first.id);
+	cross.hub.release(second.id);
 } finally {
 	clearTimeout(crossWatchdog);
 	await cross.close();
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 4. A parked approval outlives the host that was showing it.
+// 4. A parked approval outlives everyone who was showing it.
 //
 // The phase this covers: a hold answers "is anyone running or changing this", which is not the
-// question "will anyone answer". There is no grace and no abandonment denial (issue 04 §4): the
-// reap closes the host once the last hold lets go, the orchestrator's state stays — a run parked
-// at the gate refuses removal, and with it the queues a recovery run must drain — so the question
-// survives as the ledger's, to be answered on a later hold or carried to the next process. The
-// sidebar row is part of that survival: the projection settles it from the ledger when the host
-// goes, so the dot stays lit while the question stands. The snapshot's `suspended` marker is the
-// disk half of the same survival: the park writes it, an answer's recovery run and an abort's
-// abandonment sweep clear it, and a fork carries it to a session no host has opened. The rigs take
-// their holds through the hub itself, so the reap under test is the real one — the sections above
-// mount a session by hand and keep a bench hold on it.
+// question "will anyone answer". The parked bag refuses removal, and with it the queues a recovery
+// run must drain — so the question survives as the ledger's, to be answered on a later hold or
+// carried to the next process. The sidebar row is part of that survival: the projection keeps the
+// row lit from the bag while it stands. The snapshot's `suspended` marker is the disk half of the
+// same survival: the park writes it, an answer's recovery run and an abort's abandonment sweep
+// clear it, and a fork carries it to a session nobody has opened. The rigs take their holds through
+// the hub itself, so the holds under test are the real ones — the sections above mount a session by
+// hand and keep a bench hold on it.
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\na parked approval outlives its host, unanswered and undenied\n");
@@ -456,57 +453,56 @@ process.stdout.write("\na parked approval outlives its host, unanswered and unde
 const parkedWatchdog = deadline("the parked-approval checks", 90_000);
 
 try {
-	// Released while parked: the host closes, and the question waits for whoever comes back.
+	// Released while parked: the hold goes, and the question waits for whoever comes back.
 	const patient = await openRig();
 	try {
-		const { wire, viewer } = await driveToApproval(patient);
-		const parked = patient.host;
-		check("the run parked at the approval", patient.agent.hasPendingApprovals(parked.id));
-		const parkedMeta = await readMeta(parked.id);
+		const { wire } = await driveToApproval(patient);
+		const parked = patient.sessionId;
+		check("the run parked at the approval", patient.agent.hasPendingApprovals(parked));
+		const parkedMeta = await readMeta(parked);
 		check("and the snapshot carries the suspended marker", parkedMeta.suspended === true, JSON.stringify(parkedMeta));
 
-		// The viewer switches away, and its hold is the *only* thing keeping the session open — a
-		// subscription takes none. So this release is what starts the reap, and it does not wait for
-		// an answer: the host closes, the parked state refuses removal, and the question stays.
+		// The viewer switches away, and its hold is the *only* thing marking the session as in use —
+		// a subscription takes none. So this release is what empties the holds table, and it does not
+		// wait for an answer: the parked state refuses removal, and the question stays.
 		wire.cancel(patient.sessionId);
-		patient.hub.release(viewer);
+		patient.hub.release(patient.sessionId);
 		check(
-			"the host was reaped while the question stood",
-			await until(() => !patient.hub.live.includes(parked.id), 8_000),
-			patient.hub.live.join(","),
+			"the hold went away while the question stood",
+			await until(() => patient.hub.holdsOf(parked) === 0, 8_000),
+			String(patient.hub.holdsOf(parked)),
 		);
+		check("and the state stayed: the parked bag refuses removal", patient.hub.isLive(parked), String(patient.hub.isLive(parked)));
 		// The sidebar's own road: a fresh connection's overview is the projection's current truth.
 		// The question outlives the host, so the row must still carry it — a hard zero at the reap
 		// is the dot going out while the question stands. The connection stays open to hear the row
 		// go quiet once the answer lands.
 		const sidebar = await connect(muxUrl(patient.url));
 		const overview = await sidebar.waitForConnection((envelope) => envelope.item?.type === "sessions", 8_000);
-		const parkedRow = ((overview?.item?.sessions ?? []) as SessionRow[]).find((row) => row.id === parked.id);
+		const parkedRow = ((overview?.item?.sessions ?? []) as SessionRow[]).find((row) => row.id === parked);
 		check(
-			"the sidebar row still reports the question after the reap",
+			"the sidebar row still reports the question with nobody holding it",
 			parkedRow?.pending === 1 && parkedRow?.running === false,
 			JSON.stringify(parkedRow),
 		);
-		check("the approval is still pending, undenied", patient.agent.hasPendingApprovals(parked.id), "it was denied");
+		check("the approval is still pending, undenied", patient.agent.hasPendingApprovals(parked), "it was denied");
 		check(
 			"and no denial reached the lane",
 			wire.items(patient.sessionId).every((message) => message.type !== "approval_settled"),
 			JSON.stringify(wire.items(patient.sessionId).map((message) => message.type)),
 		);
 
-		// The person came back: a new host, but the same live half — the one the table kept. Identity
-		// is the orchestrator's private business, so the assertion probes the table the way the other
-		// smokes do; the facade answers in pure data and never hands a bag out. What survives a reap is
-		// the half that is nowhere on disk (ADR-0013): the queues, the parked flag, the subscribers.
-		// The session is deliberately not part of it, so there is no stale bag for a returning host
-		// to inherit — it reopens the file like any other reader.
+		// The person came back: a hold over the same live half — the one the table kept, because the
+		// parked bag refuses eviction. Identity is the orchestrator's private business, so the
+		// assertion probes the table the way the other smokes do; the facade answers in pure data and
+		// never hands a bag out. What the hold finds is the half the parked run left: the queues, the
+		// parked flag, exactly what a recovery run must drain.
 		const entryOf = (): { live: unknown; session?: unknown } | undefined =>
-			(patient.hub.agent as unknown as { agentStateMap: Map<string, { live: unknown; session?: unknown }> }).agentStateMap.get(parked.id);
+			(patient.hub.agent as unknown as { agentStateMap: Map<string, { live: unknown; session?: unknown }> }).agentStateMap.get(parked);
 		const liveHalf = entryOf()?.live;
-		const again = await patient.hub.hold(parked.id);
-		check("a new host opens over the retained state", again !== parked && again.id === parked.id, `${again.id} vs ${parked.id}`);
+		await patient.hub.hold(parked);
+		check("a returning hold finds the state still in the table", entryOf() !== undefined && patient.hub.isLive(parked), String(patient.hub.isLive(parked)));
 		check("whose live half is the same object the parked run left", liveHalf !== undefined && entryOf()?.live === liveHalf);
-		check("and whose session is a file rather than a table entry", entryOf()?.session === undefined);
 
 		const returned = await wire.open(patient.sessionId);
 		check(
@@ -519,7 +515,7 @@ try {
 		const answered = await request(
 			patient.url,
 			"POST",
-			`/api/sessions/${parked.id}/approvals/${encodeURIComponent(toolCallId)}`,
+			`/api/sessions/${parked}/approvals/${encodeURIComponent(toolCallId)}`,
 			{ approved: true },
 		);
 		check("the answer was accepted", answered.status === 200, `status ${answered.status}`);
@@ -531,9 +527,9 @@ try {
 		);
 		check(
 			"and the recovery run it started finished",
-			await until(async () => ((await readSession(patient.url, parked.id))?.running ?? true) === false, 8_000),
+			await until(async () => ((await readSession(patient.url, parked))?.running ?? true) === false, 8_000),
 		);
-		const recoveredMeta = await readMeta(parked.id);
+		const recoveredMeta = await readMeta(parked);
 		check(
 			"the marker is gone once the recovery run closed the call",
 			recoveredMeta.suspended === undefined,
@@ -544,18 +540,18 @@ try {
 			(await sidebar.waitForConnection((envelope) => {
 				if (envelope.item?.type !== "session_row") return false;
 				const row = envelope.item.session as SessionRow;
-				return row.id === parked.id && row.pending === 0;
+				return row.id === parked && row.pending === 0;
 			}, 8_000)) !== undefined,
 			JSON.stringify(sidebar.connection().map((envelope) => envelope.item?.type)),
 		);
 		await sidebar.close().catch(() => {});
 
 		await wire.close().catch(() => {});
-		patient.hub.release(again);
+		patient.hub.release(patient.sessionId);
 		check(
-			"the session is closed once the run is over and nobody holds it",
-			await until(() => !patient.hub.live.includes(parked.id), 8_000),
-			patient.hub.live.join(","),
+			"the state dispersed once the recovery run finished",
+			await until(() => !patient.hub.isLive(parked), 8_000),
+			String(patient.hub.isLive(parked)),
 		);
 	} finally {
 		await patient.close();
@@ -566,28 +562,29 @@ try {
 	// the cost the grace's deletion was taken for (issue 04 §4), stated here rather than hidden.
 	const abandoned = await openRig();
 	try {
-		const { wire, viewer } = await driveToApproval(abandoned);
-		const parked = abandoned.host;
-		check("the run parked at the approval", abandoned.agent.hasPendingApprovals(parked.id));
+		const { wire } = await driveToApproval(abandoned);
+		const parked = abandoned.sessionId;
+		check("the run parked at the approval", abandoned.agent.hasPendingApprovals(parked));
 
 		wire.cancel(abandoned.sessionId);
-		abandoned.hub.release(viewer);
+		abandoned.hub.release(abandoned.sessionId);
 		check(
-			"the host was reaped once the hold let go",
-			await until(() => !abandoned.hub.live.includes(parked.id), 8_000),
-			abandoned.hub.live.join(","),
+			"the hold let go of a question nobody answered",
+			await until(() => abandoned.hub.holdsOf(parked) === 0, 8_000),
+			String(abandoned.hub.holdsOf(parked)),
 		);
+		check("and the state stayed parked", abandoned.hub.isLive(parked), String(abandoned.hub.isLive(parked)));
 		// Read the way a returning window would — over REST, through the same snapshot the lane's
 		// baseline is built from: the question is derived from the ledger, so this is also what the
 		// next process would be shown.
 		check(
 			"an approval nobody came back to is never denied",
-			await until(async () => ((await readSession(abandoned.url, parked.id))?.pendingApprovals.length ?? 0) === 1, 8_000),
+			await until(async () => ((await readSession(abandoned.url, parked))?.pendingApprovals.length ?? 0) === 1, 8_000),
 			"the question is not showing",
 		);
 		const sidebar = await connect(muxUrl(abandoned.url));
 		const overview = await sidebar.waitForConnection((envelope) => envelope.item?.type === "sessions", 8_000);
-		const parkedRow = ((overview?.item?.sessions ?? []) as SessionRow[]).find((row) => row.id === parked.id);
+		const parkedRow = ((overview?.item?.sessions ?? []) as SessionRow[]).find((row) => row.id === parked);
 		check(
 			"and the row keeps reporting a question nobody came back to",
 			parkedRow?.pending === 1,
@@ -599,32 +596,32 @@ try {
 		await abandoned.close();
 	}
 
-	// Look, leave, come back, leave again: the open/close cycle must not wedge the session, and the
-	// host must be reapable every time.
+	// Look, leave, come back, leave again: the hold/release cycle must not wedge the session, and
+	// the parked state must survive every round of it.
 	const lookedThenLeft = await openRig();
 	try {
-		const { wire, viewer } = await driveToApproval(lookedThenLeft);
-		const parked = lookedThenLeft.host;
-		check("the run parked at the approval", lookedThenLeft.agent.hasPendingApprovals(parked.id));
+		const { wire } = await driveToApproval(lookedThenLeft);
+		const parked = lookedThenLeft.sessionId;
+		check("the run parked at the approval", lookedThenLeft.agent.hasPendingApprovals(parked));
 
 		wire.cancel(lookedThenLeft.sessionId);
-		lookedThenLeft.hub.release(viewer);
+		lookedThenLeft.hub.release(parked);
 		check(
-			"the first leaving reaps the host",
-			await until(() => !lookedThenLeft.hub.live.includes(parked.id), 8_000),
-			lookedThenLeft.hub.live.join(","),
+			"the first leaving empties the holds table",
+			await until(() => lookedThenLeft.hub.holdsOf(parked) === 0, 8_000),
+			String(lookedThenLeft.hub.holdsOf(parked)),
 		);
+		check("and the parked state stayed", lookedThenLeft.hub.isLive(parked), String(lookedThenLeft.hub.isLive(parked)));
 
-		const back = await lookedThenLeft.hub.hold(parked.id);
-		check("the returning viewer gets the session back", back.id === parked.id, `${back.id} vs ${parked.id}`);
-		check("and the approval is still unanswered", lookedThenLeft.agent.hasPendingApprovals(parked.id));
+		await lookedThenLeft.hub.hold(parked);
+		check("and the approval is still unanswered", lookedThenLeft.agent.hasPendingApprovals(parked));
 
-		// ...and now they leave without answering. The session must be reapable again.
-		lookedThenLeft.hub.release(back);
+		// ...and now they leave without answering. The state must be parked again, untouched.
+		lookedThenLeft.hub.release(parked);
 		check(
-			"leaving without answering parks it again, reapable as ever",
-			await until(() => !lookedThenLeft.hub.live.includes(parked.id), 8_000),
-			lookedThenLeft.hub.live.join(","),
+			"leaving without answering parks it again, as open as ever",
+			await until(() => lookedThenLeft.hub.holdsOf(parked) === 0 && lookedThenLeft.hub.isLive(parked), 8_000),
+			`holds=${lookedThenLeft.hub.holdsOf(parked)} live=${lookedThenLeft.hub.isLive(parked)}`,
 		);
 		await wire.close().catch(() => {});
 	} finally {
@@ -635,39 +632,40 @@ try {
 	// a run — no recovery is coming, so the snapshot must stop saying the question stands.
 	const aborted = await openRig();
 	try {
-		const { wire, viewer } = await driveToApproval(aborted);
-		const parked = aborted.host;
-		check("the run parked at the approval", aborted.agent.hasPendingApprovals(parked.id));
-		check("the snapshot carries the suspended marker", (await readMeta(parked.id)).suspended === true);
+		const { wire } = await driveToApproval(aborted);
+		const parked = aborted.sessionId;
+		check("the run parked at the approval", aborted.agent.hasPendingApprovals(parked));
+		check("the snapshot carries the suspended marker", (await readMeta(parked)).suspended === true);
 
-		const stopped = await request(aborted.url, "POST", `/api/sessions/${parked.id}/abort`);
+		const stopped = await request(aborted.url, "POST", `/api/sessions/${parked}/abort`);
 		check("the abort was accepted", stopped.status === 200, String(stopped.status));
-		const sweptMeta = await readMeta(parked.id);
+		const sweptMeta = await readMeta(parked);
 		check(
 			"the abandonment sweep cleared the marker without a run",
 			sweptMeta.suspended === undefined,
 			JSON.stringify(sweptMeta),
 		);
+		check("and it swept the state with it", await until(() => !aborted.hub.isLive(parked), 8_000), String(aborted.hub.isLive(parked)));
 		await wire.close().catch(() => {});
-		aborted.hub.release(viewer);
+		aborted.hub.release(aborted.sessionId);
 	} finally {
 		await aborted.close();
 	}
 
 	// A fork of a parked session is parked itself: the ledger's dangling call is copied whole, so the
-	// marker travels with it — and the fork's row lights up with no host ever opening it.
+	// marker travels with it — and the fork's row lights up with no hold ever opening it.
 	const forked = await openRig();
 	try {
-		const { wire, viewer } = await driveToApproval(forked);
-		const parked = forked.host;
-		check("the run parked at the approval", forked.agent.hasPendingApprovals(parked.id));
+		const { wire } = await driveToApproval(forked);
+		const parked = forked.sessionId;
+		check("the run parked at the approval", forked.agent.hasPendingApprovals(parked));
 
 		// Attached before the fork, so the row's first publish is heard rather than raced. The
 		// overview is the registration proof: it is sent once the mux owns the connection, so a
 		// publish after it cannot miss this connection.
 		const sidebar = await connect(muxUrl(forked.url));
 		await sidebar.waitForConnection((envelope) => envelope.item?.type === "sessions", 8_000);
-		const created = await request(forked.url, "POST", `/api/sessions/${parked.id}/forks`, { entryId: null });
+		const created = await request(forked.url, "POST", `/api/sessions/${parked}/forks`, { entryId: null });
 		const forkId = ((created.payload ?? {}) as { sessionId?: string }).sessionId ?? "";
 		check("the fork was created", created.status === 201 && forkId.length > 0, String(created.status));
 		if (forkId.length === 0) throw new Error("the fork was not created, so the rest of this rig cannot run");
@@ -679,13 +677,13 @@ try {
 		);
 		const forkRow = forkRowFrame?.item?.session as SessionRow | undefined;
 		check(
-			"the fork's row lights up with no host",
+			"the fork's row lights up with no hold ever opening it",
 			forkRow?.pending === 1 && forkRow?.running === false,
 			JSON.stringify(forkRow),
 		);
 		await sidebar.close().catch(() => {});
 		await wire.close().catch(() => {});
-		forked.hub.release(viewer);
+		forked.hub.release(forked.sessionId);
 	} finally {
 		await forked.close();
 	}
@@ -837,6 +835,7 @@ process.exitCode = failures === 0 ? 0 : 1;
 interface Graph {
 	url: string;
 	mux: MuxServer;
+	projection: SessionProjection;
 	close(): Promise<void>;
 }
 
@@ -856,6 +855,7 @@ async function serve(hub: SessionHub): Promise<Graph> {
 	return {
 		url,
 		mux,
+		projection,
 		close: async () => {
 			projection.close();
 			mux.close();
@@ -869,10 +869,8 @@ interface Rig {
 	root: string;
 	hub: SessionHub;
 	agent: Agent;
-	/** The id the host is keyed by — what every id-keyed call below names. */
+	/** The id the mount created — what every id-keyed call below names. */
 	sessionId: string;
-	/** The mounted host, as the hub holds it: the object the reap decides about. */
-	host: HostedSession;
 	/** The session the mount created — the one the orchestrator's table should hold. */
 	session: Session;
 	url: string;
@@ -884,7 +882,7 @@ interface Rig {
  * mux in front of it.
  *
  * Only the transport is a stand-in. The session is mounted the way `SessionHub.open()` mounts one, so
- * that every hold below — the viewer's and the reap it drives — is a real hold through the hub.
+ * that every hold below — the viewer's and the ones the parked-approval sections drive — is a real hold through the hub.
  */
 async function openRig(): Promise<Rig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-approval-"));
@@ -904,20 +902,21 @@ async function openRig(): Promise<Rig> {
 		settingsHome,
 		modelsHome: settingsHome,
 	});
-	// The graph first, the mount second: the projection hears hosts from the moment it exists, the
-	// way the real process wires it at boot — a mount announced before the projection is built is a
-	// host it never follows, and the row would never wear the live fields.
+	// The graph first, the mount second: the projection learns the mounted session the way the real
+	// process learns a birth — through the refresh the controller's listener would drive. A mount
+	// the projection never hears about is a row it never follows, and the row would never wear the
+	// live fields.
 	const graph = await serve(hub);
-	const { id: sessionId, host, session } = await mountSession(hub, {
+	const { id: sessionId, session } = await mountSession(hub, {
 		root,
 	});
+	await graph.projection.refresh(sessionId);
 
 	return {
 		root,
 		hub,
 		agent: hub.agent,
 		sessionId,
-		host,
 		session,
 		url: graph.url,
 		close: async () => {
@@ -996,11 +995,11 @@ async function openCrossRig(): Promise<CrossRig> {
 
 /**
  * Attach a viewer, start a run, and bring it to the approval gate — the state every parked-approval
- * check begins from. The viewer's own hold is what keeps the host open across the run: a
+ * check begins from. The viewer's own hold marks the session as in use across the run: a
  * subscription takes none.
  */
-async function driveToApproval(rig: Rig): Promise<{ wire: WireClient; viewer: HostedSession }> {
-	const viewer = await rig.hub.hold(rig.sessionId);
+async function driveToApproval(rig: Rig): Promise<{ wire: WireClient }> {
+	await rig.hub.hold(rig.sessionId);
 	const wire = await connect(muxUrl(rig.url));
 	await wire.open(rig.sessionId);
 
@@ -1009,7 +1008,7 @@ async function driveToApproval(rig: Rig): Promise<{ wire: WireClient; viewer: Ho
 	}
 	const asked = await wire.waitFor(rig.sessionId, (message) => message.type === "approval_request", 10_000);
 	if (asked?.type !== "approval_request") throw new Error("the run never asked for approval");
-	return { wire, viewer };
+	return { wire };
 }
 
 /** The id of the approval one lane is showing. */

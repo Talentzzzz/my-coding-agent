@@ -4,6 +4,10 @@ Type: task
 Status: resolved
 Blocked by: 04, 12
 
+> **2026-11-17 撤销注**：本票结论的 send 引用一半（`wait` / `unwait` 帧与 hub 的 `waiting` 表）已由
+> [ADR-0022](../../../docs/adr/0022-drop-send-reference.md) 整体取代——waiting 的保护范围被逐段证伪，
+> 单用户产品里删除守卫三道就够。其余内容（先通知再删表的顺序、订阅表清行的记账）不动。
+
 ## Question
 
 mux 的订阅表是「连接 × 会话」（ADR-0001：**订阅不拿 claim**，也不让会话保持打开）。驱逐一旦发生，被清掉的

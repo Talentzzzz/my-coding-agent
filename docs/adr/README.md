@@ -31,6 +31,7 @@
 | [0017](0017-fanout-folded-into-agent.md) | fanout 并入编排——删掉 `session/fanout.ts` 与 `SessionServices` 参数袋 | 已接受，已落地（2026-11-14，`check` 绿、smoke-sessions / smoke-api / smoke-mux 过、smoke-tools 与基线 c667b9f 逐字同色）；取代 0012 / 0016「没有被取代的」中保护 fanout 参数袋的两条 |
 | [0018](0018-session-holds-mode-pointer.md) | 会话存模式指针——工具配置从「值的快照」改成「名字 + 审批增量」，`PUT /tools` 删除 | 已接受，已落地（2026-11-15，`check` 绿、README 清单 smoke 全跑——smoke-tools / smoke-api / smoke-desktop-observability 与基线同色）；取代 0004 的决定 3（施加模式 = 两条命令写值、座位按值匹配），盘上格式升至 v6，旧会话按约删除 |
 | [0019](0019-settings-two-layers.md) | 设置三层——`GlobalSettings` / `SessionSettings` / 每次现算的 `Settings`；删掉项目级 settings.json | 已接受，已落地（2026-11-15，`check` 绿、smoke-settings / smoke-session / smoke-sessions / smoke-mux / smoke-models 等全绿——smoke-boot / smoke-api / smoke-approval 与 smoke-tools 的一个断言为环境既有失败，与改动前同色）；`tool-config.ts` 与 `model-choice.ts` 退场，解析语义收进 `resolveSettings` 一处 |
+| [0022](0022-drop-send-reference.md) | send 引用撤销——mux 的 `wait` / `unwait` 帧与 hub 的 `waiting` 表删除，删除守卫从四道减为三道 | 已接受，已落地（2026-11-17，`check` 绿、smoke-mux / smoke-mux-client / smoke-sessions / smoke-projection / smoke-session 等全绿；smoke-boot / smoke-mux-live / smoke-liveness 的失败为本机 Node 22.14 与 ADR-0021 落地前的既有漂移，与改动前同色）；部分取代 0001「订阅与 hold 永不互相换算」论证里多客户端裁判的那一半，整体取代 issue 13 的结论 |
 
 ## 门槛
 

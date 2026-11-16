@@ -2,7 +2,7 @@
 
 - 状态：**已接受**（用户 2026-10-12 拍板重开，见 `.scratch/client-server-refactor/issues/12-recording-reopened-decisions.md`）
 - 取代或失效：`docs/notes.md` 第一节的「传输形态不变」整节（含"不用 WebSocket"与"不做多路复用"两条）、D0、D2、D3（取代），以及「`claim` 保留原义」里"每条事件流一个 claim"那半句（失效）（逐条对照见下文*被取代的是什么*）
-- 取代者：[0007](0007-loop-merged-into-agent.md)（部分，2026-11-02——仅「`packages/llm` 与 `packages/loop` 一行都不改」中 loop 的那一半：该包已删除、引擎并入 `agent.ts`）；**以及 2026-11-03 用户拍板解除 llm 的那一半**——上游对照放弃后 vendored 不再是任何约束，`packages/llm` 由本仓库自己维护（当场标注于文内两处，未另开 ADR）；以及 2026-11-10 的全仓改名——`claim` 改名为 `hold`（部分：本文正文保留当时用词，语义与 wire 一字未动）。这份 ADR 本身若被推翻，**不要**悄悄改它——新开一条 ADR，并按*不可逆性与代价*一节说明反转的代价
+- 取代者：[0007](0007-loop-merged-into-agent.md)（部分，2026-11-02——仅「`packages/llm` 与 `packages/loop` 一行都不改」中 loop 的那一半：该包已删除、引擎并入 `agent.ts`）；**以及 2026-11-03 用户拍板解除 llm 的那一半**——上游对照放弃后 vendored 不再是任何约束，`packages/llm` 由本仓库自己维护（当场标注于文内两处，未另开 ADR）；以及 2026-11-10 的全仓改名——`claim` 改名为 `hold`（部分：本文正文保留当时用词，语义与 wire 一字未动）；以及 [0022](0022-drop-send-reference.md)（部分，2026-11-17——本文「两个永不互相换算」的论证默认多客户端互不知情的那一半随 send 引用撤销而失效：订阅仍不拿 hold，分离本身活着）。这份 ADR 本身若被推翻，**不要**悄悄改它——新开一条 ADR，并按*不可逆性与代价*一节说明反转的代价
 
 ## 为什么会有这份 ADR
 

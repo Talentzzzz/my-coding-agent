@@ -72,7 +72,7 @@ export interface OpenAgentOptions {
  * 失配。留在这里的是编排层无法知道的那部分：**哪个** 会话记录（宿主的决定，session manager 的
  * 重放）——会话记录 在 `settings.workDirAbsPath` 上自带工作目录。
  *
- * 模型字段不是宿主控制默认值的把手。面向宿主的动词（`createAndPrompt`、`hold`、`snapshotOf`）
+ * 模型字段不是宿主控制默认值的把手。面向宿主的动词（`createAndPrompt`、`snapshotOf`）
  * 都不收它：会话的模型是一个设置事实，装配在每次打开时从磁盘现读；出生时的选择由
  * `createAndPrompt` 在装配之前落到会话记录自己的快照上。
  */

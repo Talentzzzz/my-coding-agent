@@ -184,53 +184,48 @@ try {
 	// explicit creation happens, and the session below is held by the id that creation returned.
 	check("nothing is selected before anything is created", (await hub.currentSessionId()) === null);
 	const landing = await hub.birth({ text: "出生的第一条消息" });
-	const first = await hub.hold(landing);
-	const second = await hub.hold(landing);
-	check("two connections with no id share one entry", entryOf(hub.agent, first.id) === entryOf(hub.agent, second.id));
-	check("both holds are counted", hub.agent.holdsOf(first.id) === 2, `holds=${hub.agent.holdsOf(first.id)}`);
-	check("the hub runs it once", hub.live.length === 1, hub.live.join(","));
+	await hub.hold(landing);
+	await hub.hold(landing);
+	check("two holds on one id count together", hub.holdsOf(landing) === 2, `holds=${hub.holdsOf(landing)}`);
+	// 一个 hold 不拼装任何东西（ADR-0013）：袋由运行自己装配，计数只是簿记。
+	check("and a hold assembles nothing", !hub.isLive(landing), String(hub.isLive(landing)));
 
 	process.stdout.write("holding by id\n");
-	// The entry a hold opened: the one thing a second hold must not build a second of.
-	const runningEntry = entryOf(hub.agent, first.id);
-	const again = await hub.hold(first.id);
-	check("returns the entry already running", entryOf(hub.agent, again.id) === runningEntry);
-	check("holds add up", hub.agent.holdsOf(first.id) === 3, `holds=${hub.agent.holdsOf(first.id)}`);
+	const again = await hub.hold(landing);
+	check("holds add up", hub.holdsOf(landing) === 3, `holds=${hub.holdsOf(landing)}`);
+	void again;
 
 	process.stdout.write("a hold outlives the connections that dropped it\n");
-	hub.release(again);
-	hub.release(second);
-	check("still running with one hold left", hub.agent.holdsOf(first.id) === 1 && hub.live.includes(first.id));
+	hub.release(landing);
+	hub.release(landing);
+	check("still counted with one hold left", hub.holdsOf(landing) === 1, `holds=${hub.holdsOf(landing)}`);
 	await new Promise((resolve) => setTimeout(resolve, 50));
-	check("a held session is never forgotten", hub.live.includes(first.id));
+	check("a held session is never forgotten", hub.holdsOf(landing) === 1);
 
-	process.stdout.write("the last release forgets an idle session\n");
-	const reapedEntry = entryOf(hub.agent, first.id);
-	hubSessions(hub).appendMessage(bagOf(hub, first.id), userMessage("survives the reap"));
-	hub.release(first);
-	check("the session is closed and dropped", await until(() => !hub.live.includes(first.id)));
+	process.stdout.write("the last release lets the file be the whole session\n");
+	hubSessions(hub).appendMessage(bagOf(hub, landing), userMessage("survives the reap"));
+	hub.release(landing);
+	check("the hold is spent", hub.holdsOf(landing) === 0, `holds=${hub.holdsOf(landing)}`);
+	check("and nothing was ever assembled for it", !hub.isLive(landing), String(hub.isLive(landing)));
 
 	process.stdout.write("the JSONL file is what survives\n");
-	const reopened = await hub.hold(first.id);
-	check("reopening builds a different registry entry", entryOf(hub.agent, reopened.id) !== reapedEntry);
+	await hub.hold(landing);
 	check(
 		"and it still carries the session",
-		JSON.stringify(hub.agent.snapshot(reopened.id).messages).includes("survives the reap"),
+		JSON.stringify(hub.agent.snapshot(landing).messages).includes("survives the reap"),
 	);
 	await hub.close();
 
 	process.stdout.write("new_session moves the landing spot\n");
 	const created = await hub.birth({ text: "出生即落点" });
-	const landed = await hub.hold(created);
-	check("the landing follows the newest session", (await hub.currentSessionId()) === created && landed.id === created, `${landed.id} vs ${created}`);
+	check("the landing follows the newest session", (await hub.currentSessionId()) === created, `${await hub.currentSessionId()} vs ${created}`);
 
 	process.stdout.write("a fork is the branch up to one entry\n");
 	// Birth is the first message (ADR-0021), so the parent is born with its fork point on the ledger:
 	// the birth message's own entry is the one the fork below hangs from, and everything after it is
 	// seeded the ordinary way.
 	const parentId = await hub.birth({ text: "first" });
-	const parent = await hub.hold(parentId);
-	const parentFile = hub.agent.fileAbsPathOf(parent.id) ?? "";
+	const parentFile = hub.agent.fileAbsPathOf(parentId) ?? "";
 	const entryOne = birthEntryId(bagOf(hub, parentId));
 	hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("second"));
 
@@ -262,8 +257,6 @@ try {
 		`children=${hubSessions(hub).getChildren(bagOf(hub, parentId), entryOne).length}`,
 	);
 
-	const forked = await hub.hold(forkedId);
-	check("the fork runs as a session of its own", entryOf(hub.agent, forked.id) !== entryOf(hub.agent, parent.id));
 	check("and it reports the file it came from", hubSessions(hub).getMeta(bagOf(hub, forkedId))?.parentSession === parentFile);
 
 	process.stdout.write("forking without an entry copies the whole log\n");
@@ -279,10 +272,9 @@ try {
 	const secondFork = openFile(await hub.fork(parentId, entryOne));
 	check("the source keeps its own leaf", bagOf(hub, parentId).leafId === leafBefore);
 	check("its file is byte-identical afterwards", (await readFile(parentFile, "utf8")) === before);
-	check("the hold on it survived", hub.agent.holdsOf(parentId) === 1 && hub.live.includes(parentId), `holds=${hub.agent.holdsOf(parentId)}`);
+	check("nothing was assembled by any of the forks", !hub.isLive(parentId), String(hub.isLive(parentId)));
 
 	process.stdout.write("a fork and its parent run side by side\n");
-	check("both are live", hub.live.includes(parentId) && hub.live.includes(forkedId));
 	const forkBefore = JSON.stringify(messagesOf(bagOf(hub, forkedId)));
 	const forkLeaf = bagOf(hub, forkedId).leafId;
 	hubSessions(hub).appendMessage(bagOf(hub, parentId), userMessage("only the parent"));
@@ -301,26 +293,19 @@ try {
 	process.stdout.write("reopening a fork reports where it came from\n");
 	const leafAtClose = bagOf(hub, forkedId).leafId;
 	const messagesAtClose = messagesOf(bagOf(hub, forkedId)).length;
-	hub.release(forked);
-	check("the fork is closed and dropped", await until(() => !hub.live.includes(forkedId)));
-	const forkEntry = entryOf(hub.agent, forked.id);
 	const reread = openFile(forkedId);
 	check("reopening reports its parent session", store.getMeta(reread)?.parentSession === parentFile);
 	check("and the same leaf", reread.leafId === leafAtClose, `${reread.leafId} vs ${leafAtClose}`);
 	// Counted before the release: the drop takes the bag with it, so what the file kept is compared
 	// against what the session had when it was still held.
 	check("with the messages it had", messagesOf(reread).length === messagesAtClose, `${messagesOf(reread).length} vs ${messagesAtClose}`);
-	const reopenedFork = await hub.hold(forkedId);
-	check("a held reopen builds a different registry entry", entryOf(hub.agent, reopenedFork.id) !== forkEntry);
 	check("and still reports the session it came from", hubSessions(hub).getMeta(bagOf(hub, forkedId))?.parentSession === parentFile);
 
 	process.stdout.write("forking a session nobody is watching\n");
-	hub.release(reopenedFork);
-	await until(() => !hub.live.includes(forkedId));
 	const onDisk = openFile(forkedId);
 	const cold = await hub.fork(forkedId, onDisk.leafId);
 	check("an on-disk session forks too", cold !== forkedId && cold !== parentId, cold);
-	check("it is not running until someone holds it", !hub.live.includes(cold));
+	check("it is not running until someone holds it", !hub.isLive(cold), String(hub.isLive(cold)));
 	const coldFile = openFile(cold);
 	check("its branch ends where it was told to", coldFile.leafId === onDisk.leafId);
 	check("and it points at the session it came from", store.getMeta(coldFile)?.parentSession === SessionManager.findSessionFilePathById(forkedId));
@@ -358,16 +343,12 @@ try {
 	// that names a session — the live manager, the scan, and the fork that copies the whole log.
 	{
 		const renamedId = await hub.birth({ text: "改名的会话" });
-		const host = await hub.hold(renamedId);
 		await hub.rename(renamedId, "新名字");
-		check("a live session reports the stored name", hub.agent.snapshot(host.id).title === "新名字", hub.agent.snapshot(host.id).title);
+		check("a live session reports the stored name", hub.agent.snapshot(renamedId).title === "新名字", hub.agent.snapshot(renamedId).title);
 
-		hub.release(host);
-		check("the renamed session closes", await until(() => !hub.live.includes(renamedId)));
 		const rescanned = await SessionManager.findSessionRowById(renamedId);
 		check("the file's row carries the stored name", rescanned?.title === "新名字", rescanned?.title);
-		const reopened = await hub.hold(renamedId);
-		check("a reopen reports it too", hub.agent.snapshot(reopened.id).title === "新名字", hub.agent.snapshot(reopened.id).title);
+		check("a reopen reports it too", hub.agent.snapshot(renamedId).title === "新名字", hub.agent.snapshot(renamedId).title);
 
 		const renameFork = await hub.fork(renamedId, null);
 		const forkRow = await SessionManager.findSessionRowById(renameFork);
@@ -379,7 +360,6 @@ try {
 				(await SessionManager.findSessionRowById(renameFork))?.title === "另一条",
 			`${(await SessionManager.findSessionRowById(renamedId))?.title} / ${(await SessionManager.findSessionRowById(renameFork))?.title}`,
 		);
-		await hub.release(reopened);
 	}
 
 	process.stdout.write("a meta change rewrites the snapshot whole\n");
@@ -390,7 +370,6 @@ try {
 	// that changes nothing leaving the file exactly as it was.
 	{
 		const metaId = await hub.birth({ text: "重写的会话" });
-		const host = await hub.hold(metaId);
 		const jsonlPath = bagOf(hub, metaId).sessionFileAbsPath!;
 		const jsonPath = snapshotPathOf(jsonlPath);
 		const logBefore = await readFile(jsonlPath, "utf8");
@@ -432,8 +411,6 @@ try {
 
 		// The restore seam: a reopen is fillSession, and the recorded answers come back whole — the
 		// same parts the snapshot path a window reads is built from.
-		hub.release(host);
-		check("the session goes idle", await until(() => !hub.live.includes(metaId)));
 		const restored = fillSession(jsonlPath);
 		check(
 			"a reopen restores the model and level",
@@ -474,7 +451,7 @@ try {
 		(error: unknown) => error,
 	);
 	check("holding an unknown id rejects", missing instanceof Error, String(missing));
-	check("and nothing entered the registry", !hub.live.includes("0123456789abcdef"));
+	check("and nothing entered the registry", !hub.isLive("0123456789abcdef"), String(hub.isLive("0123456789abcdef")));
 
 	process.stdout.write("the settings files name the tools a session that never chose opens on\n");
 	// The global default tool set is a settings field, and the mode pointer is the session's own
@@ -559,10 +536,10 @@ try {
 	const http = await bootServer({ workDirAbsPath: root, port: 0 });
 	try {
 		const readId = await http.hub.birth({ text: "read me" });
-		const opened = await http.hub.hold(readId);
+		await http.hub.hold(readId);
 		hubSessions(http.hub).appendMessage(bagOf(http.hub, readId), userMessage("and me"));
-		http.hub.release(opened);
-		check("the session is idle before the read", await until(() => !http.hub.live.includes(readId)), http.hub.live.join(","));
+		http.hub.release(readId);
+		check("the session is idle before the read", !http.hub.isLive(readId), String(http.hub.isLive(readId)));
 
 		// The phase's contract as a counter, because the registry cannot show it on its own: a hold
 		// that is given straight back is reaped out of `live` within a tick — before a client can even
@@ -583,7 +560,7 @@ try {
 	check("the cold session is not empty", (firstRead.session?.messages.length ?? 0) === 3, `${firstRead.session?.messages.length} messages`);
 		// This is the whole phase in one line: reading a session never takes a hold on it.
 		check("and the read never held the session", holds === 0, `holds=${holds}`);
-		check("so nothing is running it", !http.hub.live.includes(readId), http.hub.live.join(","));
+		check("so nothing is running it", !http.hub.isLive(readId), String(http.hub.isLive(readId)));
 		// The read is also the window's decision about whether to attach a stream: a snapshot that
 		// reports `running: false` is one the window renders without opening one, which is why the
 		// hold count above is the whole evidence — an attach would have held through the hub.
@@ -602,10 +579,10 @@ try {
 
 		// What the cold read must agree with. Claiming it here is the deliberate hold, and the only
 		// one this section makes: everything the session file can answer has to come out the same.
-		const live = await http.hub.hold(readId);
-		check("a hold is what runs it", holds === 1 && live.id === readId, `holds=${holds}`);
-		const liveSnapshot = http.hub.agent.snapshot(live.id);
-		http.hub.release(live);
+		await http.hub.hold(readId);
+		check("a hold is what runs it", holds === 1, `holds=${holds}`);
+		const liveSnapshot = http.hub.agent.snapshot(readId);
+		http.hub.release(readId);
 
 		// Everything the session file can answer must be identical; only what a loop answers may differ.
 		const fromLog = [
@@ -805,10 +782,6 @@ try {
 		// the file with it — refusing first while a hold is still held.
 		{
 			const victim = await http.hub.birth({ text: "要删的会话" });
-			const host = await http.hub.hold(victim);
-			http.hub.release(host);
-			check("the victim goes idle", await until(() => !http.hub.live.includes(victim)), http.hub.live.join(","));
-
 			const blank = await call("POST", `${http.url}/api/sessions/${victim}/title`, { title: "   " });
 			check("a blank name is refused (400)", blank.status === 400, `status=${blank.status}`);
 			const wrongType = await call("POST", `${http.url}/api/sessions/${victim}/title`, { title: 42 });
@@ -822,8 +795,8 @@ try {
 			const busy = await http.hub.hold(victim);
 			const refused = await call("DELETE", `${http.url}/api/sessions/${victim}`);
 			check("deleting a held session is refused (409)", refused.status === 409, `status=${refused.status}`);
-			http.hub.release(busy);
-			check("the hold lets go", await until(() => !http.hub.live.includes(victim)));
+			http.hub.release(victim);
+			check("the hold lets go", await until(() => http.hub.holdsOf(victim) === 0, 5_000), String(http.hub.holdsOf(victim)));
 
 			const removed = await call("DELETE", `${http.url}/api/sessions/${victim}`);
 			check("an idle session is deleted (200)", removed.status === 200, `status=${removed.status}`);
@@ -902,25 +875,19 @@ try {
 	// ADR-0013: the table on the orchestrator holds exactly what cannot be rebuilt from disk — the
 	// queues, the run in flight, the subscriber sets. `open` is its one way in, and it assembles
 	// first-come: a state already there is kept, never replaced, because the one it would replace
-	// holds the live half. The exits are two and deliberately different: `tryRemoveAgentStateBySessionId`
-	// refuses unless the criteria hold, and `deleteSessionBySessionId` does not ask. There is no clear —
-	// the table lives and dies with the orchestrator itself.
+	// holds the live half. The exits are two and deliberately different: the run's own end path
+	// (idle states die with the run that carried them) and `deleteSessionBySessionId`, which does
+	// not ask. There is no clear — the table lives and dies with the orchestrator itself.
 	{
 		const agent = createSessionAgent({ settings: new SettingManager({ models: [] }) });
 		const session = createSession(tmpdir());
 		// The door is class-private (`hold` / `createAndPrompt` are the verbs a caller spells);
-		// this block exercises the table itself — first-come-wins, membership, the two exits — so it
+		// this block exercises the table itself — first-come-wins, membership, the delete exit — so it
 		// reaches in the same way `entryOf` does, the cast the one road across.
 		const door = agent as unknown as { assembleAgentStateBySession(options: { session: Session }): Promise<AgentState> };
 		const agentState = await door.assembleAgentStateBySession({ session });
 		check("open is the one way in, and the id answers it", entryOf(agent, session.sessionId) === agentState);
 		check("re-opening an id keeps the state already there", (await door.assembleAgentStateBySession({ session })) === agentState);
-		// An idle state is evictable even with no file behind it (ADR-0021 removed the unborn
-		// refusal): nothing in flight, nothing parked at the approval gate — the criteria are all
-		// that answer, and they all say go.
-		check("an idle state with no file behind it is evictable", agent.tryRemoveAgentStateBySessionId(session.sessionId) === true);
-		// The eviction above took the one state there was; give the deletes one to forget again.
-		await door.assembleAgentStateBySession({ session });
 		// No file behind it, so forgetting the state is the whole removal — and only that half, which
 		// is why the second attempt refuses as an id nothing names.
 		await agent.deleteSessionBySessionId(session.sessionId);
@@ -981,7 +948,7 @@ try {
 
 	process.stdout.write("shutdown settles everything\n");
 	await hub.close();
-	check("nothing is left running", hub.live.length === 0);
+	check("nothing is left running", !hub.isLive(landing) && !hub.isLive(created), "a live half survived shutdown");
 } finally {
 	// The store was pointed at a scratch directory, so removing it takes every session this run
 	// wrote with it.

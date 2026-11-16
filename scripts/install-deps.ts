@@ -16,7 +16,7 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const registry = "https://registry.npmjs.org";
+const registry = process.env.NPM_REGISTRY ?? "https://registry.npmjs.org";
 const cache = join(root, ".npm-tarball-cache");
 
 const workspaces = ["packages/core", "packages/server", "packages/web", "packages/desktop", "."];
@@ -250,10 +250,16 @@ async function extract(tarball: string, target: string): Promise<void> {
 		await rm(target, { recursive: true, force: true });
 		await mkdir(target, { recursive: true });
 		try {
-			await run("tar", ["-xzf", tarball, "-C", target, "--strip-components", "1"], {
-				maxBuffer: 32 * 1024 * 1024,
-				windowsHide: true,
-			});
+			// --force-local + 正斜杠：Git Bash 的 GNU tar 把 `Z:\` 的盘符冒号当远程主机、把反斜杠当转义符，
+			// 两个旗标一起让它按本地正斜杠路径读；Windows 的 bsdtar 两种写法都认。
+			await run(
+				"tar",
+				["-xzf", tarball.replaceAll("\\", "/"), "-C", target.replaceAll("\\", "/"), "--strip-components", "1", "--force-local"],
+				{
+					maxBuffer: 32 * 1024 * 1024,
+					windowsHide: true,
+				},
+			);
 			if (existsSync(join(target, "package.json"))) return;
 		} catch (error) {
 			if (attempt === 1) throw error;

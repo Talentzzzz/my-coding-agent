@@ -4,7 +4,7 @@ import {
 	type SessionRow,
 	type DirectoryGroup,
 } from "@my-agent/core";
-import type { HostedSession, SessionHub } from "./hub.ts";
+import type { SessionHub } from "./hub.ts";
 
 /**
  * 被告知一整行，而不是其中哪个字段动了。
@@ -54,7 +54,7 @@ export interface SessionProjection {
  *
 	 * 两条规则塑造了这里的一切。**本进程是唯一的写入者**——会话由 hub 指挥的唯一 orchestrator 创建和追加（ADR-0012）——所以目录扫描的全部职责就是注意到从外部到来的文件，这就是播种只发生一次、重扫永远不发生的原因。还有**一行被整行替换**，于是下游没有东西合并两个来源、或追踪哪个更新。
  *
- * 它观看 hub 的 host 级观察点而不是订阅镜像，刻意的：那个镜像回答"谁在看"，读它的读者会发现这个 projection 正在观看它认识的每个会话——恰恰是一个放弃定时器最不想看到的状态。
+ * 它跟随自己创建的每一行而不是订阅镜像，刻意的：跟随挂在行的生命周期上——行出现即绑、行删除即解——而行的发现走两条路，播种与 controller 的 listener（出生、fork、删除），没有一个需要向 hub 报告任何关于"谁在看"的事实。
  */
 export function createSessionProjection(hub: SessionHub): SessionProjection {
 	/** 各行，按会话 id。 */
@@ -63,8 +63,8 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	const listeners = new Set<RowListener>();
 	/** 想听行消失的人。 */
 	const goneListeners = new Set<RowGoneListener>();
-	/** 正在被跟随的活会话，以及让它们能被放开的退订器。 */
-	const following = new Map<string, { host: HostedSession; off: () => void }>();
+	/** 正在被跟随的会话，以及让它们能被放开的退订器。 */
+	const following = new Map<string, { off: () => void }>();
 	/**
 	 * 正在首次读取其行的 id。
 	 *
@@ -88,6 +88,8 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 		if (current !== undefined && sameRow(current, next)) return;
 		rows.set(next.id, next);
 		for (const listener of listeners) listener(next);
+		// 行的首次出现是跟随的开始：从这一拍起，这个会话的每次状态变更都落进行里。
+		if (current === undefined) follow(next.id);
 	};
 
 	/**
@@ -101,39 +103,42 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 		return { ...stored, ...live };
 	};
 
-	/** 从一个运行中的会话读出那两个字段。 */
-	const liveOf = (host: HostedSession): LiveFields => {
-		const snapshot = hub.agent.snapshot(host.id);
-		return { running: snapshot.running, pending: snapshot.pendingApprovals.length };
-	};
+/** 从一个会话读出那两个字段；活半不在的会话没有可叠的——返回 `undefined`，存储行自己就是答案。 */
+const liveOf = (sessionId: string): LiveFields | undefined => {
+	if (!hub.isLive(sessionId)) return undefined;
+	const snapshot = hub.snapshotNow(sessionId);
+	return { running: snapshot.running, pending: snapshot.pendingApprovals.length };
+};
 
-	/**
-	 * 跟随一个活会话，活多久跟多久。
-	 *
-	 * 在 hub 交出会话的同一个同步代码块里绑定，让变更不可能落进"没有任何人在听"的窗口。
-	 */
-	const follow = (sessionId: string, host: HostedSession): void => {
-		if (following.has(sessionId)) return;
+/**
+ * 跟随一个会话的 feed，行存在多久跟多久。
+ *
+ * 在行首次存入的同一拍绑定，让变更不可能落进"没有任何人在听"的窗口。订阅走 hub 自己的 feed 面：
+ * 分发表是 hub 的（sink 从编排层把事件带进 feedMap），编排层的袋上不再挂着订阅者。
+ */
+const follow = (sessionId: string): void => {
+	if (following.has(sessionId)) return;
 
-		// 订阅走 hub 自己的 feed 面：分发表是 hub 的（sink 从编排层把事件带进 feedMap），编排层的
-		// 袋上不再挂着订阅者。
-		const feeds = hub.feeds(sessionId);
-		const offEvent = feeds.onEvent((event) => onEvent(sessionId, event));
-		const offChange = feeds.onChange((snapshot) => {
-			const next = liveRow(sessionId, {
-				running: snapshot.running,
-				pending: snapshot.pendingApprovals.length,
-			});
-			if (next !== undefined) publish(next);
+	const feeds = hub.feeds(sessionId);
+	const offEvent = feeds.onEvent((event) => onEvent(sessionId, event));
+	const offChange = feeds.onChange((snapshot) => {
+		const next = liveRow(sessionId, {
+			running: snapshot.running,
+			pending: snapshot.pendingApprovals.length,
 		});
-		following.set(sessionId, { host, off: () => {
-			offEvent();
-			offChange();
-		} });
-
-		const next = liveRow(sessionId, liveOf(host));
 		if (next !== undefined) publish(next);
-	};
+	});
+	following.set(sessionId, { off: () => {
+		offEvent();
+		offChange();
+	} });
+
+	const live = liveOf(sessionId);
+	if (live !== undefined) {
+		const next = liveRow(sessionId, live);
+		if (next !== undefined) publish(next);
+	}
+};
 
 	/**
 	 * 推进单个事件能移动的两个字段。
@@ -176,14 +181,14 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	/**
 	 * 重读一行并发布，活字段包括在内。
 	 *
-	 * 叠加与 {@link onHost} 施加给扫描行的相同，理由也相同：文件自己的行说空闲，而一轮进行到一半的会话绝非如此。扫描读不出的会话——在改名与重读之间被删除——让存储的行保持原样，而不是用空替换它。
+	 * 叠加与 {@link follow} 施加给扫描行的相同，理由也相同：文件自己的行说空闲，而一轮进行到一半的会话绝非如此。扫描读不出的会话——在改名与重读之间被删除——让存储的行保持原样，而不是用空替换它。
 	 */
-	const refresh = async (sessionId: string): Promise<void> => {
-		const scanned = await probe(sessionId);
-		if (scanned === undefined) return;
-		const entry = following.get(sessionId);
-		publish(entry === undefined ? scanned : { ...scanned, ...liveOf(entry.host) });
-	};
+const refresh = async (sessionId: string): Promise<void> => {
+	const scanned = await probe(sessionId);
+	if (scanned === undefined) return;
+	const live = liveOf(sessionId);
+	publish(live === undefined ? scanned : { ...scanned, ...live });
+};
 
 	/**
 	 * 丢掉一行并停止跟随其会话。
@@ -199,50 +204,6 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	};
 
 	/**
-	 * hub 说一个会话出现了、开始了或消失了。
-	 *
-	 * 四种情况，区分它们的是消息是否带着 host、以及行是否已存在。有 host 有行是常态：跟随它，无需构建。有 host 无行是一个没有任何扫描记账的会话，读它的文件、把活值叠上去。无 host 无行是一个被创建或 fork 且未在运行的会话——恰恰是无人观看的那个，也是这个存储存在的意义。无 host 有行是一个 host 刚离开的：解绑，并从冷读落定行的活字段——台账，而不是已离场的 host，对问题是否仍然成立拥有最后一票。
-	 */
-	const onHost = (sessionId: string, host: HostedSession | undefined): void => {
-		if (host === undefined) {
-			// host 的死亡带走了 `running`，但没有带走它正在展示的问题：在 end-restart 下（ADR-0005 §5），停靠的审批属于台账、活得比 host 久，所以行从冷读落定而不是硬归零——这里一个零等于侧栏的圆点熄灭而问题仍悬着。这次读取也让一次已结束、无人观看的运行不至于把行卡在 `running: true`：reap 在宣布之前落定运行，所以读取落在它曾经竞速的那次最终发布之后。
-			const entry = following.get(sessionId);
-			const stored = rows.get(sessionId);
-			entry?.off();
-			following.delete(sessionId);
-			if (stored !== undefined && (stored.running || stored.pending !== 0)) {
-				void hub.agent.snapshotOf(sessionId).then(
-					(snapshot) => {
-						// 读取中途回来的 host 通过自己的 feed 拥有行；读取中途被删的会话没有行可落定——forget 已经把它拿走了。
-						const current = rows.get(sessionId);
-						if (current === undefined || following.has(sessionId)) return;
-						publish({ ...current, running: snapshot.running, pending: snapshot.pendingApprovals.length });
-					},
-					() => {
-						// 会话在读取中途被删；行已随之而去。
-					},
-				);
-			}
-			if (!rows.has(sessionId)) {
-				void probe(sessionId).then((scanned) => {
-					if (scanned !== undefined) publish(scanned);
-				});
-			}
-			return;
-		}
-
-		// 先跟随，后探测。对尚不存在行的会话，两条 feed 什么都算不出——没有存储的一半可叠——而探测在其后读文件，读取中途到达的变更由落定后的那份快照覆盖，而不是丢失。
-		follow(sessionId, host);
-		if (rows.has(sessionId)) return;
-
-		void probe(sessionId).then((scanned) => {
-			if (scanned === undefined) return;
-			const entry = following.get(sessionId);
-			publish(entry === undefined ? scanned : { ...scanned, ...liveOf(entry.host) });
-		});
-	};
-
-	/**
 	 * 从盘上的文件把存储填满，一次。
 	 *
 	 * 之后，本进程正在运行的每个会话从其活 loop 重读，让扫描永远不可能把运行中会话的行写成空闲。
@@ -252,8 +213,10 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 			// 经 `publish` 而不是 `rows.set`：一行可能已经因某次探测在这里了，而列表知道单份文件不知道的事——最重要的是 fork 的父会话。绕过比较会让那个修正默默躺在存储里无人知晓。
 			for (const sessionRow of group.sessions) publish(sessionRow);
 		}
-		for (const [sessionId, entry] of following) {
-			const next = liveRow(sessionId, liveOf(entry.host));
+		for (const sessionId of following.keys()) {
+			const live = liveOf(sessionId);
+			if (live === undefined) continue;
+			const next = liveRow(sessionId, live);
 			if (next !== undefined) publish(next);
 		}
 	};
@@ -266,8 +229,6 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 		});
 		await seeded;
 	};
-
-	const stopHosting = hub.onHostChange(onHost);
 
 	return {
 		async groups(): Promise<DirectoryGroup[]> {
@@ -302,7 +263,6 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 			forget(sessionId);
 		},
 		close(): void {
-			stopHosting();
 			for (const entry of following.values()) entry.off();
 			following.clear();
 			listeners.clear();

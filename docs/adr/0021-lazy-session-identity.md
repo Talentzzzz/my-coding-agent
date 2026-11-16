@@ -76,3 +76,20 @@ create → PATCH mode → open → POST message 四步才能把一段对话开�
 一起消失——会话记录以文件为唯一形态，表里不再有任何重放造不出来的东西；驱逐判据就是那两个。
 `tryRemoveAgentStateBySessionId` 因此少一个条件，`deleteSessionBySessionId` 的「文件从未写下」分支
 不再可由编排层驱动出来。
+
+## 2026-11-16 后续：条件出口整个移除
+
+hub 侧的淘汰巡逻（读取巡查与两条边对 core 的转发、reap 尾部的清理）已删除，随之
+`tryRemoveAgentStateBySessionId` 在生产代码中不再有调用者，方法本身也从 `Agent` 移除。袋的出表
+只剩两条路：**运行自己的结束路径**（空闲袋随运行出表，agent 的 `runEngine` finally）与
+`deleteSessionBySessionId`（用户点名的无条件删除）。表上的驻留不再有"判据复查"这一半——停驻审批
+的袋由恢复运行收尾，收摊（hub 的 reap）与删除（hub 的 remove）动的是 host 记录与磁盘文件，
+从不伸手进 core 的表。
+
+## 2026-11-16 后续（二）：hold 计数上移 hub
+
+袋随运行生灭之后，`Agent` 身上的 `holds` 计数失去了编排层职责——它的三个读者（`release` /
+`remove` / `reap` 的时机判断）全在 hub，core 从不读它。计数搬进 `SessionHub.holds`，`Agent` 的
+`hold` / `release` / `holdsOf` 动词退役；`hub.open` 以 `fileAbsPathOf` 校验 id（无所指名 →
+`UnknownSessionError` → 404）。hold 的 wire 语义一字未动（ADR-0001），动的只是记账的住址——
+这正是 ADR-0001 本来的立场：使用计数是 transport 层的事。

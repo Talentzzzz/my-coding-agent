@@ -167,12 +167,12 @@ export class SessionApi {
 	}
 
 	/**
-	 * 这个服务端根在何处，以及它当前在跑什么。
+	 * 这个服务端根在何处，以及它此刻握着哪些会话。
 	 *
-	 * 整个响应都有类型，`live` 包括在内，即使这个客户端只读 `workDirAbsPath`。声明一个更窄的形状
-	 * 会让本文件描述的不是那个端点 —— 下一个想要 `live` 的读者会发现一个坚称它不存在的类型。
+	 * 整个响应都有类型，`held` 包括在内，即使这个客户端只读 `workDirAbsPath`。声明一个更窄的形状
+	 * 会让本文件描述的不是那个端点 —— 下一个想要 `held` 的读者会发现一个坚称它不存在的类型。
 	 */
-	async health(): Promise<{ ok: boolean; workDirAbsPath: string; live: string[] }> {
+	async health(): Promise<{ ok: boolean; workDirAbsPath: string; held: string[] }> {
 		return this.send("GET", "/api/health", undefined);
 	}
 
