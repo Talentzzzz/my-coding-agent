@@ -329,21 +329,6 @@ export class SessionHub {
 		);
 	}
 
-	/**
-	 * 过渡面：裸注册的观看，唯一遗留调用方是 mux（票 03 把它迁到 {@link subscribe} 后删除）。
-	 *
-	 * 它不再是一份独立的注册逻辑，只是 subscribe 的退化壳——sink 收下 baseline 与错误然后丢弃，
-	 * 分岔（活冷判定、快照读取）已归 hub 内部完成。mux 自己还做的 `isLive` 分岔与冷读是它的帧序
-	 * 本域（backlog 布防与冲刷），票 03 迁移时一并拆掉；在那之前，mux 的代码原样、本仓库的公开
-	 * 订阅面只有 subscribe 一条正道。
-	 */
-	watch(sessionId: string, watcher: SessionWatcher): () => void {
-		return this.subscribe(sessionId, watcher, {
-			onBaseline: () => {},
-			onError: () => {},
-		});
-	}
-
 	/** 此刻是否有任何人在观看一个会话——"空不空"的问题，刻意不是计数。 */
 	isWatched(sessionId: string): boolean {
 		return (this.watchers.get(sessionId)?.size ?? 0) > 0;

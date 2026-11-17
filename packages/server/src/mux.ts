@@ -128,7 +128,7 @@ interface Subscription {
 	/**
 	 * 所有要撤销的东西，按设置的顺序。
 	 *
-	 * 用列表而不是单个可重赋值的函数，原因在于这些事发生的顺序：`watch` 注册的同一拍就*同步*回调，所以 feed 在这个订阅还没创建完之前就已挂上。一个每步包裹前一步的函数会被下一次赋值覆盖掉工作——而丢掉的恰好是 feed 监听器那半，正是让一个已结束的连接保持存活、还在为客户端已取消的订阅写帧的那半。
+	 * 用列表而不是单个可重赋值的函数，原因在于这些事发生的顺序：`subscribe` 注册的同一拍就*同步*回调，所以 feed 在这个订阅还没创建完之前就已挂上。一个每步包裹前一步的函数会被下一次赋值覆盖掉工作——而丢掉的恰好是 feed 监听器那半，正是让一个已结束的连接保持存活、还在为客户端已取消的订阅写帧的那半。
 	 */
 	teardown: (() => void)[];
 }
@@ -201,7 +201,7 @@ export class MuxConnection {
 	/**
 	 * 处理一个上行帧。
 	 *
-	 * `open` 是有趣的一个，它的全部意义在于订阅和 baseline 是一个原子动作：entry 被创建、feed 被挂上、baseline 被写出，常规路径中间没有 `await`。这才让"baseline 与增量之间没有缝隙"由构造成立而非靠论证成立——不存在这样一个时刻：读取会话状态与开始监听之间恰好插进一个变更。
+	 * `open` 是有趣的一个：订阅与活半 baseline 在 hub 的同一个同步块里完成——entry 被创建、feed 被挂上、快照被交回、baseline 被写出，中间没有 `await`。冷半的读盘也在 hub 内完成，只是异步，跨过的那段时间由本订阅的 backlog 扣住。这才让"baseline 与增量之间没有缝隙"由构造成立而非靠论证成立——不存在这样一个时刻：读取会话状态与开始监听之间恰好插进一个变更。
 	 */
 	handle(text: string): void {
 		if (this.closed) return;
@@ -234,17 +234,35 @@ export class MuxConnection {
 
 		// 观看不占 hold，这一点始终是全部关键：计数属于改变或运行会话的调用者，而看着它的窗口两者都不是。注册的同一拍就交出 feed——分发按 id 进行，对冷会话同样成立——所以该会话开始运行的那一刻，事件自然流入，无需任何重绑。
 		let live = false;
-		const stopWatching = this.hub.watch(sessionId, (feeds) => {
-			if (feeds === undefined) {
-				// undefined 只在会话被删除（或进程收摊）时到达；观看中的流以 end 作别。
-				if (live) this.endStream(sessionId);
-				return;
-			}
-			live = true;
-			this.bind(sessionId, subscription, feeds);
-		});
 
-		// 刻意在 `watch` 调用之后注册，且追加而不是赋值：`bind` 可能已经追加了 feed 的退订器，这一步不能挤掉它们。见 `Subscription.teardown`。
+		// no-gap 的两半在这里合缝。hub 保证「注册与快照原子」：`subscribe` 在返回前的同一个同步块里
+		// 注册 watcher、判定活冷、交付活半的 baseline（机制与论证见 hub.ts 的 `subscribe`）；mux
+		// 保证「baseline 帧先于本订阅 backlog 里的任何帧写出」——`subscribe` 返回前 `onBaseline` 已
+		// 同步回调，回调里同步 `send`，而不是先攒着等一拍，所以任何 emit 只能落在下一个事件循环
+		// 拍，那时 baseline 早已排在前面。两半之间的缝是：hub 只交结果（快照或原始 error），帧序
+		// 与失败措辞由这里决定；冷半的读盘在 hub 内异步，跨过的那段由 backlog 扣住。
+		const stopWatching = this.hub.subscribe(
+			sessionId,
+			(feeds) => {
+				if (feeds === undefined) {
+					// undefined 只在会话被删除（或进程收摊）时到达；观看中的流以 end 作别。
+					if (live) this.endStream(sessionId);
+					return;
+				}
+				live = true;
+				this.bind(sessionId, subscription, feeds);
+			},
+			{
+				onBaseline: (snapshot) => {
+					// 冷半的读盘可能跨过 cancel、第二个 open 或断线；活半的这一拍订阅一定还在表里。守卫与 baseline 的帧序一样是这一层的本域。
+					if (this.closed || this.subscriptions.get(sessionId) !== subscription) return;
+					this.writeBaseline(sessionId, subscription, snapshot);
+				},
+				onError: (error) => this.failBaseline(sessionId, subscription, error),
+			},
+		);
+
+		// 刻意在 `subscribe` 调用之后注册，且追加而不是赋值：`bind` 可能已经追加了 feed 的退订器，这一步不能挤掉它们。见 `Subscription.teardown`。
 		subscription.teardown.push(() => {
 			stopWatching();
 			// 这个订阅还在展示的任何东西，这里都不会再有人上报了：一个只等已消失读者的应答，是一个没有理由留着的应答。
@@ -253,11 +271,6 @@ export class MuxConnection {
 			subscription.backlog = null;
 			this.subscriptions.delete(sessionId);
 		});
-
-		// 活半在：同一同步块内写 baseline——bag 里的在飞状态，包括正在写出的 partial，no-gap 由构造成立。
-		// 冷半：从磁盘异步重放，backlog 正是让这个 await 打不开缝隙的东西。
-		if (this.hub.isLive(sessionId)) this.writeBaseline(sessionId, subscription, this.hub.snapshotNow(sessionId));
-		else void this.readColdBaseline(sessionId, subscription);
 	}
 
 	/**
@@ -273,33 +286,6 @@ export class MuxConnection {
 	}
 
 	/**
-	 * 本进程未在运行的会话的 baseline。
-	 *
-	 * 冷订阅上的第一个，以及之后每个 {@link pushBaseline} 欠下一个空闲观看的——两种情况的读取相同，重新布防 backlog 正是让第二个落在它所描述的状态之后，而不是落在已经跑过去的帧顶上。
-	 *
-	 * 读取不拼装任何东西（ADR-0013）：orchestrator 的 `snapshotOf` 打开一只袋、从中应答、然后丢弃，所以一个被观看但空闲的会话只花一次重放、什么都不留下——没有要养活的状态，没有这个订阅要撑开的开口。它同样不占 hold，因为这里没有任何人在改变或运行什么。它就是"观看一个空闲会话"的答案——旧有的按运行划分的流根本拒绝服务的那个场景。
-	 *
-	 * 读取进行期间产生的一切都在订阅的 backlog 里等。这就是 backlog 存在的全部理由：没有它，读取期间开始的运行会把帧放在*描述它们的状态之前*，客户端会渲染出一条往回跳的会话记录。
-	 */
-	private async readColdBaseline(sessionId: string, subscription: Subscription): Promise<void> {
-		let snapshot: SessionSnapshot;
-		try {
-			snapshot = await this.hub.snapshotOf(sessionId);
-		} catch (error) {
-			// 一次失败的 `open`，与其他任何失败一样应答：先带归因的 error，再是让尝试不至于继续看起来像一条安静流的 end。这里最常见的情形是 id 什么都不指——已经没有预检查了，读取本身就是发现它的地方——而它自己那句话比一个读取失败更清楚。
-			if (!this.closed && this.subscriptions.get(sessionId) === subscription) {
-				const message = error instanceof UnknownSessionError ? `未知的会话：${sessionId}` : `读不出这个会话的记录：${describe(error)}`;
-				this.failStream(sessionId, message);
-			}
-			return;
-		}
-		// 读取期间可能落进一个 `cancel`，连接也可能已经结束。无论哪种，这份 baseline 都无处可去，硬写上去就是把一帧放到一条已经结束的流上。
-		if (this.closed || this.subscriptions.get(sessionId) !== subscription) return;
-		if (subscription.backlog === null) return;
-		this.writeBaseline(sessionId, subscription, snapshot);
-	}
-
-	/**
 	 * 停止观看一个会话。
 	 *
 	 * 丢弃订阅的唯一含义是"这条连接上不再有这个会话的帧"——不是"停止运行"，不是"关闭会话"，不是"释放任何东西"。hold 通道已随簿记迁入 SessionManager 而退场（ADR-0023），会话的改变归 Manager 的文件闸，订阅与它毫无换算；从这个窗口发起的运行照常跑完，窗口才能在会话仍在应答时离开——而删除也不再因有人在看而止步：否决式删除先停运行、闸内删文件。
@@ -312,10 +298,9 @@ export class MuxConnection {
 	}
 
 	/**
-	 * 把订阅绑到一个活会话的 feed 上。
+	 * 把订阅绑到一个会话的 feed 上。
 	 *
-	 * `watch` 注册的同一拍同步回调，于是 attach、读取、baseline 整个是一段没有 `await` 的同步代码
-	 * 块。no-gap 保证就是围绕这个场景构建的，{@link readColdBaseline} 的冷路径是为它买单的例外。
+	 * `subscribe` 注册的同一拍同步回调，于是 attach 与活半的 baseline 落在同一段没有 `await` 的同步代码块里。no-gap 保证就是围绕这个场景构建的；冷半的读盘在 hub 内异步，{@link push} 的 backlog 是为它买单的东西。
 	 */
 	private bind(sessionId: string, subscription: Subscription, feeds: SessionFeeds): void {
 		const onEvent = feeds.onEvent((event) => {
@@ -355,7 +340,7 @@ export class MuxConnection {
 	/**
 	 * 先发出 baseline，然后是堆积在它后面的一切。
 	 *
-	 * 每个 baseline 调一次——第一次由两次读取中先完成的那个调，之后每个欠了新 baseline 的 {@link pushBaseline} 各调一次——且永远按产生顺序冲刷，客户端不可能看到会话记录往回跳。
+	 * 每个 baseline 调一次：订阅的第一份由 `open` 的 sink 调，之后每次重发由 {@link pushBaseline} 的 sink 调——两者收到的都是 hub 在活冷分岔之后交回的结果，这一层不再知道它读的是袋还是盘。永远按产生顺序冲刷，客户端不可能看到会话记录往回跳。
 	 */
 	private writeBaseline(sessionId: string, subscription: Subscription, snapshot: SessionSnapshot): void {
 		if (subscription.backlog === null) return;
@@ -379,20 +364,20 @@ export class MuxConnection {
 	/**
 	 * 重发整个状态：这是对分支移动、以及对本连接已持有的观看上第二个 `open` 的应答。
 	 *
-	 * 活会话下这是同步的，快照就是会话自己的——所以运行中途的第二个 `open` 带走的是正在写入的 `partial` 应答，而不是文件里上一次落定的状态，其后的帧追加在它之上。
+	 * 重发不能重新订阅——那会多挂一条 feed——所以走 hub 的 `rebaseline`：活冷分岔在那里完成，活半同步交回袋里的在飞状态（运行中途的第二个 `open` 因此带走正在写出的 `partial`，而不是盘上上一次落定的状态），冷半读盘后异步交回。
 	 *
-	 * 空闲会话下没有同步状态可读，应答走冷 baseline 的唯一路径：重新布防 backlog，让 {@link readColdBaseline} 去产出。这保住了本帧继承的承诺——先状态、后其后的一切——而不是与增量赛跑，也让文件里只留一份 baseline 拼装而不是两份。
+	 * 这里剩下的是帧序的本域。布防 backlog 让读盘期间到达的帧排在 baseline 之后：活半在同一同步块里布防又冲刷，等于没扣；冷半扣到读盘返回。已经欠着一份时不再要——那份 baseline 还在路上，再要一份只会让客户端多收一次同一状态，冷半还会多读一次盘。
 	 */
 	private pushBaseline(sessionId: string, subscription: Subscription): void {
-		if (this.hub.isLive(sessionId)) {
-			// 像其他任何帧一样走 `push`：一份欠着未写的 baseline 是这一帧必须落在其后的东西，否则客户端最后看到的会是较旧的状态。
-			this.push(sessionId, subscription, { type: "baseline", session: this.hub.snapshotNow(sessionId) });
-			return;
-		}
-		// 已经欠了一份、正在路上；再把 backlog 重新布防一次会让读取者产出两份。
 		if (subscription.backlog !== null) return;
 		subscription.backlog = [];
-		void this.readColdBaseline(sessionId, subscription);
+		this.hub.rebaseline(sessionId, {
+			onBaseline: (snapshot) => {
+				if (this.closed || this.subscriptions.get(sessionId) !== subscription) return;
+				this.writeBaseline(sessionId, subscription, snapshot);
+			},
+			onError: (error) => this.failBaseline(sessionId, subscription, error),
+		});
 	}
 
 	/**
@@ -444,6 +429,19 @@ export class MuxConnection {
 
 		subscription.pending.clear();
 		for (const [toolCallId, approval] of current) subscription.pending.set(toolCallId, approval);
+	}
+
+	/**
+	 * 一次 baseline 交付失败的应答：先带归因的 error，再是让尝试不至于继续看起来像一条安静流的 end。
+	 *
+	 * 归因措辞留在这一层——hub 只交原始 error，它不知道帧上的话怎么说。这里最常见的情形是 id 什么都不指，它自己那句话比一个读取失败更清楚。
+	 *
+	 * 守卫与 baseline 的帧序一样是本层本域：冷读盘在途时可能落进一个 cancel、第二个 open 或断线，那份失败就无处可去——往一条已经结束、或已经换了订阅的流上写 error 是更糟的谎。
+	 */
+	private failBaseline(sessionId: string, subscription: Subscription, error: unknown): void {
+		if (this.closed || this.subscriptions.get(sessionId) !== subscription) return;
+		const message = error instanceof UnknownSessionError ? `未知的会话：${sessionId}` : `读不出这个会话的记录：${describe(error)}`;
+		this.failStream(sessionId, message);
 	}
 
 	/**
@@ -627,7 +625,7 @@ function sizeOf(frame: ServerFrame): number {
 /**
  * 出了什么问题，用客户端能展示的话说。
  *
- * 只有 `Error` 一种情况值得关心：`snapshotOf` 对找不到的会话以它拒绝，消息本来就是为此写的。其余都是 bug，按 bug 命名而不是插值——帧不是把堆栈递给浏览器的地方。
+ * 只有 `Error` 一种情况值得关心：读取失败带着它自己的消息，那本来就是一句能对客户端说出口的话。其余都是 bug，按 bug 命名而不是插值——帧不是把堆栈递给浏览器的地方。
  */
 function describe(error: unknown): string {
 	return error instanceof Error ? error.message : "未知的错误";
