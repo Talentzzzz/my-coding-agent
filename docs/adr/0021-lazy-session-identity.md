@@ -92,4 +92,6 @@ hub 侧的淘汰巡逻（读取巡查与两条边对 core 的转发、reap 尾�
 `remove` / `reap` 的时机判断）全在 hub，core 从不读它。计数搬进 `SessionHub.holds`，`Agent` 的
 `hold` / `release` / `holdsOf` 动词退役；`hub.open` 以 `fileAbsPathOf` 校验 id（无所指名 →
 `UnknownSessionError` → 404）。hold 的 wire 语义一字未动（ADR-0001），动的只是记账的住址——
-这正是 ADR-0001 本来的立场：使用计数是 transport 层的事。
+这正是 ADR-0001 本来的立场：使用计数是 transport 层的事。（这一棒在 2026-11-17 又动了第二次、
+也是最后一次：计数表迁入 `SessionManager`、按会话文件对键控，hub 的 hold / release / holdsOf /
+heldSessionIds / closing 全数退场——见 [0023](0023-holds-into-session-manager-veto-delete.md)。）
