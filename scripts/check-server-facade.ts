@@ -35,7 +35,9 @@ const bannedMembers: [RegExp, string][] = [
 	[/\.release\s*\(/, ".release("],
 	[/\.holdsOf\s*\(/, ".holdsOf("],
 	[/\.heldSessionIds\s*\(/, ".heldSessionIds("],
-	[/\.holds\b(?!\s*\()/, ".holds"],
+	// `.holds` 无豁免（ADR-0023：server 包里该名字零出现，出现即违例）——不排除调用形式，
+	// 让任何拼写的成员访问都失败。
+	[/\.holds\b/, ".holds"],
 ];
 
 async function sources(dir: string): Promise<string[]> {

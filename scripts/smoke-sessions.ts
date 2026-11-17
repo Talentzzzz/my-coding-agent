@@ -24,13 +24,14 @@ import {
 	UnknownSessionError,
 	inMemorySettingManager,
 	SettingManager,
+	setRemoveGate,
 	setSessionsDir,
 	resolveSettings,
 	type SessionSnapshot,
 	type Session,
 } from "@my-agent/core";
-// 仅测试的接缝住在它保护的方法旁边（仿 `setSessionsDir` 的先例）；直呼源文件，不经包的公开面。
-import { setRemoveGate } from "../packages/core/src/session/session-manager.ts";
+// 接缝经包的公开面取（仿 setSessionsDir）：源路径的相对 import 在 Windows 上解析出大小写不同的
+// 盘符 URL（file:///z:/ vs 包的 file:///Z:/），会造出第二个模块实例、缝挂不到 remove 读的那张表上。
 
 /** The ledger's operations are the service's methods, so a script holds one to call them on. */
 const store = new SessionManager();
@@ -987,7 +988,10 @@ try {
 		}
 
 		// 删除与在途写入撞车（票 04，User Story 4）：删除前就已开好的袋在删除途中到达的写入，一律读作
-		// 「没有这个会话」；放行后删除完成——无孤儿文件，扫描也清不出任何诈尸的行。
+		// 「没有这个会话」；删除**完成之后**对同一只陈旧袋的写入也必须如此——`closing` 已随闸条目
+		// 退场，撞不到闸，没有提交标记复核的话 appendMessage 会经 appendFileSync 把 `.jsonl` 造回来、
+		// setTitle 会把 `.json` 造回去，被删的会话无声诈尸成半个会话。放行后删除完成——无孤儿文件，
+		// 扫描也清不出任何诈尸的行。
 		{
 			const collideSession = createSession(root);
 			store.appendMessage(collideSession, userMessage("撞车的会话"));
@@ -1025,6 +1029,22 @@ try {
 				setRemoveGate(undefined);
 			}
 			check("the deletion finished once the gate let go", SessionManager.findSessionFilePathById(collideId) === undefined);
+			// 复活守卫（主发现）：闸条目退场后撞不到 closing，写入被标记复核挡住——两个写法各验一次，
+			// 因为它们复活的是不同的半边（appendFileSync 造流，meta 重写造快照）。
+			let lateAppendRefusal: unknown;
+			try {
+				store.appendMessage(stale, userMessage("删除完成后的写入"));
+			} catch (error) {
+				lateAppendRefusal = error;
+			}
+			check("an append on the stale bag after the deletion completed is refused too", lateAppendRefusal instanceof UnknownSessionError, String(lateAppendRefusal));
+			let lateTitleRefusal: unknown;
+			try {
+				store.setTitle(stale, "删除完成后的名字");
+			} catch (error) {
+				lateTitleRefusal = error;
+			}
+			check("and so is a meta setter on the same stale bag afterwards", lateTitleRefusal instanceof UnknownSessionError, String(lateTitleRefusal));
 			check(
 				"no orphan file survived the collision",
 				readdirSync(storeRoot).every((name) => !name.startsWith(collideId)),

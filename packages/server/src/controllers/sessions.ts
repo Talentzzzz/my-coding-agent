@@ -563,7 +563,9 @@ export class SessionController {
 			throw httpStatus.conflict(messageOf(error));
 		}
 		return { session: agent.snapshot(sessionId) };
-	}	/**
+	}
+
+	/**
 	 * 接受一条 prompt。
 	 *
 	 * 202 而不是 200，在消息持久化后立即应答：`session.prompt()` 在*运行*结束时 resolve，那是几分钟之后，在这里 await 它会把请求吊住整整一轮，还让 status code 变成谎言。改为启动并观察这次运行，只有启动失败被上报——存在性 404 从本应答出去，其余写在会话自己的流上，因为到那时已经没有响应可以上报了。
@@ -599,17 +601,25 @@ export class SessionController {
 		// 它的 promise 在运行结束时才 resolve——在飞的运行不能在这里等。但无所指的 id 在 prompt
 		// 起步的同步链里就被 open 拒绝（startPromptedRun → getSessionBySessionId），这个立即的失败
 		// 要让本应答以 404 出去：拒绝的到达隔着一跳内部的 await，一个宏任务轮（setImmediate，让出
-		// 全部微任务）足以让它浮出。其余一切——排队、运行本身的失败——走流（onRunFailure），
+		// 全部微任务）足以让它浮出。宏任务轮之后才到的存在性拒绝——与删除撞车时，拒绝可能晚于这一
+		// 拍才浮出——已没有应答可浮入，沿失败运行的同一通道上报（onRunFailure），不能存进
+		// `startFailure` 就无声丢失。其余一切——排队、运行本身的失败——走流（onRunFailure），
 		// 因为 202 早已应答，这是 202 语义的另一半。
 		let startFailure: unknown;
+		// 宏任务轮过去（404 已应答或应答已成功返回）之后，存在性拒绝不再有浮出的路，改走上报通道。
+		let floated = false;
 		agent
 			.prompt(sessionId, text, { ...(behavior === undefined ? {} : { behavior }), selection })
 			.catch((error: unknown) => {
-				if (error instanceof UnknownSessionError) startFailure ??= error;
+				if (error instanceof UnknownSessionError && !floated) startFailure ??= error;
 				else this.onRunFailure(sessionId, messageOf(error));
 			});
 		await new Promise<void>((done) => setImmediate(done));
-		if (startFailure !== undefined) throw startFailure;
+		if (startFailure !== undefined) {
+			floated = true;
+			throw startFailure;
+		}
+		floated = true;
 		return { accepted: true };
 	}
 

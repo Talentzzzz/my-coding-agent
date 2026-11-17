@@ -186,6 +186,13 @@ export interface ActiveTools {
 }
 
 /**
+ * 删除否决序①「复查到稳定」的轮数上限（ADR-0023）：收尾窗口里可能有新起步的恢复运行，每轮之间
+ * 让出一个宏任务轮；到界仍不稳也继续往下走——否决式，删除赢。界限落在这里而不是只写进 JSDoc：
+ * 一个只活在文档里的数字，改代码的人看不见。
+ */
+const DELETE_SETTLE_MAX_ROUNDS = 10;
+
+/**
  * 本进程跑的每一段对话共有的编排服务。
  *
  * 这是无状态架构的编排层（ADR-0005 §1）：四个域是无状态单例，而跨域的顺序——应用输入框的选择、
@@ -625,7 +632,7 @@ export class Agent {
 		}
 		// ① 中止 + 等收尾 + 复查到稳定（有界）。每轮 abort 自身就在等运行安顿，这里不会自旋；复查
 		//   覆盖收尾窗口里新起步的运行，上限到界即放弃等待——删除赢。
-		for (let round = 0; round < 10 && this.isRunning(id); round += 1) {
+		for (let round = 0; round < DELETE_SETTLE_MAX_ROUNDS && this.isRunning(id); round += 1) {
 			await this.abort(id);
 			await new Promise((resolve) => setImmediate(resolve));
 		}

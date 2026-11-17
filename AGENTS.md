@@ -121,7 +121,8 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   （resolvePath + win32 大小写折叠），锁的单位与它保护的文件对（同 stem 的 `.json` + `.jsonl`）
   重合，id 只是进闸前的一次地址解析。名字原名 `claim`（2026-11-10 全仓改名），语义一字未动；
   计数 2026-11-16 从编排层上移 hub、2026-11-17 迁入 SessionManager 并换文件键。Manager 触碰文件对
-  的公开方法（meta setter、append 族、`open`、`forkFrom` 的写目标半）各自进出闸——同步块瞬时，
+  的公开方法（meta setter、append 族、写 leaf 记录的 `branch` / `resetLeaf`、`open`、`forkFrom`
+  的写目标半）各自进出闸——同步块瞬时，
   其意义是与 `closing` 闸的相遇点：撞上一次进行中的删除即以 `UnknownSessionError` 拒绝，读作
   「没有这个会话」；`remove` 是唯一跨 await 的持有者、闸罩它全程。**server 与编排层不感知**：
   `Agent` 门面零 hold / release 动词，controller 的 holding() 括号已删，读与订阅不拿 hold

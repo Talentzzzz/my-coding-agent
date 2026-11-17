@@ -23,7 +23,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bootServer } from "../packages/server/src/boot.ts";
-import { createAssistantMessageEventStream, setSessionsDir, type ChatTransport } from "@my-agent/core";
+import { createAssistantMessageEventStream, setRemoveGate, setSessionsDir, type ChatTransport } from "@my-agent/core";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 
 const target = new URL(process.env.MY_AGENT_URL ?? "http://127.0.0.1:8080");
@@ -510,6 +510,54 @@ async function gatedDeletes(): Promise<void> {
 				await rm(home, { recursive: true, force: true });
 			}
 		}
+
+		// —— 删除进行中到达的 mutating 命令 → 404（闸内拒绝）——————————————————————————
+		// spec Testing Decisions 的 HTTP 表面用例：Manager 级冒烟只罩闸内窗口，这里把同一拒绝抬到
+		// REST 面上。服务器在进程内运行，core 的 setRemoveGate 接缝可达：钉住 rm 的两步之间，此时
+		// 提交标记（`.json`）已走，一切查 meta 的新写入方——包括这条 PATCH 路径上的 open——都读到
+		// 「没有这个会话」。不靠 sleep：gate 挂起、轮询到进闸、放行、删除完成，各拍都是事实。
+		{
+			const home = await mkdtemp(join(tmpdir(), "my-agent-api-home-"));
+			const http = await bootServer({ workDirAbsPath: workDir, port: 0, settingsHome: home });
+			try {
+				const born = await localCall("POST", `${http.url}/api/sessions`, { text: "删除闸内的会话" });
+				const id = String(born.payload.sessionId ?? "");
+				if (born.status !== 201 || id === "") fail(`the in-gate birth answered ${born.status}, expected 201 with an id`);
+				else {
+					check("the in-gate birth run settles on its own", await waitFor(async () => (await readSession(http.url, id)).running === false), "the birth run never settled");
+
+					let entered = false;
+					let release!: () => void;
+					const held = new Promise<void>((done) => {
+						release = done;
+					});
+					setRemoveGate(async () => {
+						entered = true;
+						await held;
+					});
+					const removed = await localCall("DELETE", `${http.url}/api/sessions/${encodeURIComponent(id)}`);
+					try {
+						check("the delete is accepted while the rm window is pinned (202)", removed.status === 202, `status=${removed.status}`);
+						check("the removal reaches the gate between the two rm steps", await waitFor(() => entered), "the removal never reached the gate");
+
+						const patched = await localCall("PATCH", `${http.url}/api/sessions/${encodeURIComponent(id)}`, { patch: { mode: null } });
+						check("a mutating command during the closing window is a 404 (in-gate refusal)", patched.status === 404, `status=${patched.status}`);
+					} finally {
+						release();
+						setRemoveGate(undefined);
+					}
+					check("the deletion completes once the gate lets go", await waitFor(async () => (await readSession(http.url, id)).status === 404), "the deleted session is still readable");
+					check(
+						"and no file of the session survived on disk",
+						await waitFor(() => readdirSync(storeRoot).every((name) => !name.startsWith(id))),
+						JSON.stringify(readdirSync(storeRoot)),
+					);
+				}
+			} finally {
+				await http.close();
+				await rm(home, { recursive: true, force: true });
+			}
+		}
 	} finally {
 		await rm(storeRoot, { recursive: true, force: true });
 		await rm(workDir, { recursive: true, force: true });
@@ -701,6 +749,19 @@ async function main(): Promise<void> {
 			const goneRead = await request("GET", `/api/sessions/${encodeURIComponent(forkedId)}`);
 			if (goneRead.status !== 404) fail(`the deleted session answered ${goneRead.status}, expected 404`);
 			else pass("and the deleted session is a 404 ever after");
+			// 否决序分离在后台跑完，第二次删除之前等删除真正完成：列表不再指名这个 id 意味着一次扫描
+			// 已扫过、盘上再无配对——紧随 202 的那个 404 可能只是闸内拒绝（文件还在），等不得这里。
+			// 轮询可观察条件而不是 sleep 赌调度（spec Testing Decisions）。
+			const dropped = await (async () => {
+				const deadline = Date.now() + 15_000;
+				for (;;) {
+					const rows = await request("GET", "/api/sessions");
+					if (!((rows.payload as { sessions?: { id: string }[] }).sessions ?? []).some((session) => session.id === forkedId)) return true;
+					if (Date.now() > deadline) return false;
+					await sleep(10);
+				}
+			})();
+			check("the deletion completes: the listing no longer names the session", dropped);
 			const again = await request("DELETE", `/api/sessions/${encodeURIComponent(forkedId)}`);
 			if (again.status !== 404) fail(`a second delete answered ${again.status}, expected 404`);
 			else pass("a second delete is a 404, not a silent no-op");

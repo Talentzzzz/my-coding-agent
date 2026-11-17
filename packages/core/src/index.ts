@@ -173,6 +173,7 @@ export {
 	newSession,
 	persistEntry,
 	sessionEntryToContextMessages,
+	setRemoveGate,
 	shortenTitle,
 	toSessionRef,
 	type CompactionEntry,
