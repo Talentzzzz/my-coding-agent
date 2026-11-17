@@ -28,10 +28,12 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   拿到的只是局部变量；不传、不养任何聚合袋。类壳保留（可构造注入），方法体就写在类里、没有一层同名的
   文件级函数可转发，拆掉的只是 per-session 实例字段；
   Manager 内部按 id / 目录键控的缓存随时可从磁盘重建、且藏在自己内部不被传递——这正是它与聚合袋的
-  分界。**工具域有一个例外**：`ToolManager` 持一张常驻实例表
-  （[ADR-0011](docs/adr/0011-tool-manager-instance-table.md)），是这条形态里唯一持有实例的服务；
-  `SessionManager` / `SettingManager` 与 `Agent` 编排仍是原来的形态：每样数据在用到它的那一行现取、
-  不养聚合袋，这条不变。理由与边界只在那条 ADR，这里不复述。**消费边界是另一条**：三只 Manager 的
+  分界。**常驻表有两个例外**：`ToolManager` 持一张常驻实例表
+  （[ADR-0011](docs/adr/0011-tool-manager-instance-table.md)）；`SessionManager` 持一张按会话文件对
+  键控的持有簿记表（易失：重启即空、不落盘、不需重建，
+  [ADR-0023](docs/adr/0023-holds-into-session-manager-veto-delete.md)）。两者之外，`SettingManager`
+  与 `Agent` 编排仍是原来的形态：每样数据在用到它的那一行现取、
+  不养聚合袋，这条不变。理由与边界只在那两条 ADR，这里不复述。**消费边界是另一条**：三只 Manager 的
   构造由 `createSessionAgent()` 吸收、在本进程的唯一消费者是 `Agent` 编排，server 包只认编排层的公开
   面——这条归 [ADR-0012](docs/adr/0012-agent-facade.md)，由 `npm run check` 的 `check-server-facade`
   守卫。
@@ -113,15 +115,18 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   是一个 `Writable`，所以写侧必须有界**：`write()` 返回 `false` 之后停写，帧进有界队列（4 MiB /
   10 秒），超限用 `1013` 关掉整条连接。模型那一侧另有一个同名的 `ChatTransport`（`llm/types.ts`），
   只管一次请求的流式，与这里说的命令面不是一回事（ADR-0010）。
-- **hold（持有）** —— 持有者对活跃会话的握持：只有改变会话的请求与在飞的运行各在其长度内一个；读
-  会话不拿 hold，**订阅也不拿**——一张订阅表回答"这条连接订了什么"，与 hold 回答"这个请求
-  必须跑在活跃会话上"永不互相换算（ADR-0001）。名字原名 `claim`（2026-11-10 全仓改名），语义一字未动。
-  计数在 hub（`SessionHub.holds`，读法是 `holdsOf(id)`，2026-11-16 从编排层上移）：hold 只回答
-  "此刻谁在用这个会话"——删除（remove）动手前要问的问题；它不再是"表里那份会话记录
-  靠谁活着"——袋随运行生灭，驻留不归它管。hold 只计数、不拼装、无生命周期：`hold(id)` 校验 id
-  对磁盘加计数落表，`release(id)` 计数减一，仅此而已——没有收摊（reap），"开着"这个概念不存在了。
-  core 的 `Agent` 不再有 hold / release 动词；hub 的
-  `hold` / `release` 是全部通道，`open` 里以 `fileAbsPathOf` 校验 id（无所指名 → `UnknownSessionError` → 404）。
+- **hold（持有）** —— SessionManager 的**文件级**簿记
+  （[ADR-0023](docs/adr/0023-holds-into-session-manager-veto-delete.md)）："此刻谁在改变这个会话
+  文件对"的签到表——`Map<fileKey, { holds, closing? }>`，键是 `.jsonl` 绝对路径的规范文件键
+  （resolvePath + win32 大小写折叠），锁的单位与它保护的文件对（同 stem 的 `.json` + `.jsonl`）
+  重合，id 只是进闸前的一次地址解析。名字原名 `claim`（2026-11-10 全仓改名），语义一字未动；
+  计数 2026-11-16 从编排层上移 hub、2026-11-17 迁入 SessionManager 并换文件键。Manager 触碰文件对
+  的公开方法（meta setter、append 族、写 leaf 记录的 `branch` / `resetLeaf`、`open`、`forkFrom`
+  的写目标半）各自进出闸——同步块瞬时，
+  其意义是与 `closing` 闸的相遇点：撞上一次进行中的删除即以 `UnknownSessionError` 拒绝，读作
+  「没有这个会话」；`remove` 是唯一跨 await 的持有者、闸罩它全程。**server 与编排层不感知**：
+  `Agent` 门面零 hold / release 动词，controller 的 holding() 括号已删，读与订阅不拿 hold
+  （ADR-0001）。计数语义原样：纯计数、宽容释放、归零删条目。
 - **approval（审批）** —— 结束重启（ADR-0005 §5）：`before_tool` 对要问的调用返回 suspend，结束本轮
   运行且不写结果，tool call 在账本里悬空（有 tool_use 无 tool_result，派生态）；答案经
   `POST /api/sessions/{id}/approvals/{toolCallId}` 到达后启动恢复运行，由引擎的恢复机器按
@@ -233,7 +238,8 @@ UTF-8 文件的行连起来、把每一个非 ASCII 字符换成 `?`。
 - 第一版不做委派（子代理）、插件和 MCP：不要以「先加一对工具」的方式把它们塞回来。要加，先改这条规则
   和对应的架构文档，再动代码。
 - 加一个端点 = 控制器上一个方法 + `createRoutes()` 里一条记录：`Router` 之外没有东西解释 URL，
-  `SessionHub.hold()` 之外没有东西持有一个会话。**mux 的上行帧不是端点**——`open` / `cancel` 不走
+  会话文件对的闸只归 `SessionManager` 自己进出，server 与编排层一概不感知
+  （[ADR-0023](docs/adr/0023-holds-into-session-manager-veto-delete.md)）。**mux 的上行帧不是端点**——`open` / `cancel` 不走
   URL，所以这条形状管不到它们，加一个帧类型也不违反它。
 - 改完代码跑 `npm run check` 和对应的 smoke（都不需要供应商密钥）：core 用 `scripts/smoke-tools.ts`，
   模型用 `smoke-models.ts`，会话注册表用 `smoke-sessions.ts`，HTTP 表面用 `smoke-api.ts`，wire 表面用

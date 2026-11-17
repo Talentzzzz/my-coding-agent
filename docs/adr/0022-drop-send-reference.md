@@ -2,6 +2,7 @@
 
 - 状态：**已接受**（2026-11-16 讨论定案，2026-11-17 落地，见 `.scratch/drop-send-reference/`）
 - 取代：[0001](0001-transport-websocket-mux.md) 里 send 引用所依赖的半句——「订阅与 hold 是两个永不互相换算的问题」的论证默认**多客户端互不知情**（issue 13），那一半随之失效；以及 [0013](0013-table-holds-live-half-only.md) 时代沿袭下来的「waiting 是 hub 侧第四样簿记」的现状陈述（architecture.md §谁拥有一个会话）
+- 取代者：[0023](0023-holds-into-session-manager-veto-delete.md)（部分，2026-11-17——「守卫刻意只有三道」被取代：守卫变成动作（中止 → 有界复查 → 闸内 rm → 出表），409 退场、删除端点 202；本文*没有被取代的*一节为 holds 留住 hub 的两条理由——目的保留、实现更换（跨 await 的保护改为「先停运行 + 闸内拒绝」，`closing` 串行化原样活着，闸的主人换成存储层）。本文的产品语义「最后一个动作赢」由此才真正完成）
 
 ## 为什么会有这份 ADR
 

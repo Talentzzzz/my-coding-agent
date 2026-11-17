@@ -109,6 +109,10 @@ manager。
    再忘状态；不拿 hold、不碰 hosts/observers——那是 hub 的账）、`hold` 的 disk 半（无写窗口可保护——replay 与
    assembly 都不写盘，进表本身就是它的目的）。两个性质（写窗口、不留痕）是 per-method
    的，分开放才不会在某一侧腐化；hub 侧只留一行「为什么敢直接调」。
+
+   **（2026-11-17 Superseded，[0023](0023-holds-into-session-manager-veto-delete.md)：仅第 5 条里
+   `remove` 与 `hold` 的两处文件半描述——删除改否决式、rm 先 `.json` 后 `.jsonl` 且在 Manager
+   自己的文件闸内，hub 的 hold / release 通道退场；各方法的冷路径契约本身仍成立。）**
 6. **两处顺延的收口**（票 05 连带标记、票 07 落定）：全仓零消费者的 `workDirOf` 删除（对
    票 01 窄读清单的偏离，授权在票 05「去留随票 07」）；`fileAbsPathOf` 留——断言改写给了
    它三个冒烟消费者。`sessionManager` 字段保持公开但改缝口径：`getEntries` /

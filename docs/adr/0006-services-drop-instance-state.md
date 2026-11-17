@@ -14,6 +14,10 @@
 构造注入本身不变，被取代的是「这组进程级东西由 hub 装配、在 hub 手里协调」的旧
 叙述——三只 Manager 的构造收进 `createSessionAgent()`、唯一消费者是 core 的编排层，
 hub 只认编排层公开面；其余决定不变）
+取代者：[0023](0023-holds-into-session-manager-veto-delete.md)（部分，2026-11-17——`SessionManager`
+持一张按会话文件对键控的持有簿记表（易失：重启即空、不落盘、不需重建），决定 1/2 的
+「无状态服务」半在会话域的持有簿记上不再成立，与 [0011](0011-tool-manager-instance-table.md)
+的工具域例外同类；无属性门面的其余一切不变）
 
 设计过程见 `.scratch/pure-services/`（形状在 2026-11-01 的设计对话敲定，本
 ADR 只记合拢后的契约）。

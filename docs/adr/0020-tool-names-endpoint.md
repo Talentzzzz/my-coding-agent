@@ -15,8 +15,9 @@
 ## 决定
 
 1. **`SessionSnapshot` 不再携带工具名清单**（`SnapshotInput` 同步删字段）。快照回到纯会话状态。
-2. **编排层开一个窄读**：`Agent.toolNames(): string[]` → `this.tools.names()`，与 `titleOf` /
-   `holdsOf` 同类——ADR-0012 的「窄状态读…返回纯数据」。server 不许碰 `ToolManager`（ADR-0012），
+2. **编排层开一个窄读**：`Agent.toolNames(): string[]` → `this.tools.names()`，与 `titleOf`
+   同类的窄状态读——ADR-0012 的「窄状态读…返回纯数据」（决定时的同类 `holdsOf` 已随
+   [0023](0023-holds-into-session-manager-veto-delete.md) 退场，本条的窄读本身不动）。server 不许碰 `ToolManager`（ADR-0012），
    所以通往注册表的路只有这条。
 3. **一条 REST 端点作答**：`GET /api/tools` → `{ tools: [...] }`，`SystemController.toolNames()`
    转手编排层。落在「加一个端点 = 控制器上一个方法 + `createRoutes()` 一条记录」的既定形状里。

@@ -7,8 +7,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { request } from "node:http";
-import type { Message } from "@my-agent/core";
+import { createAssistantMessageEventStream, type ChatTransport, type Message, type ModelConfig } from "@my-agent/core";
 import { bootServer } from "../packages/server/src/boot.ts";
+import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import {
 	CURRENT_SESSION_VERSION,
@@ -20,13 +21,17 @@ import {
 	openAgent,
 	readSessionSnapshot,
 	SessionManager,
+	UnknownSessionError,
 	inMemorySettingManager,
 	SettingManager,
+	setRemoveGate,
 	setSessionsDir,
 	resolveSettings,
 	type SessionSnapshot,
 	type Session,
 } from "@my-agent/core";
+// 接缝经包的公开面取（仿 setSessionsDir）：源路径的相对 import 在 Windows 上解析出大小写不同的
+// 盘符 URL（file:///z:/ vs 包的 file:///Z:/），会造出第二个模块实例、缝挂不到 remove 读的那张表上。
 
 /** The ledger's operations are the service's methods, so a script holds one to call them on. */
 const store = new SessionManager();
@@ -174,6 +179,67 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
 	return ready();
 }
 
+/** 供模型解析用的最小行：脚本化 transport 作答， baseUrl 永不被打到。 */
+const vetoRows: ModelConfig[] = [
+	{
+		name: "anthropic",
+		baseUrl: "http://127.0.0.1:1/v1",
+		apiKey: "unused-by-the-scripted-transport",
+		id: "claude-sonnet-4-5",
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+	},
+];
+
+/**
+ * 把第一次供应商请求钉在流式半空的可控 gate（仿 smoke-approval-queue 的 gatedApi）：删除动手时
+ * 「运行还在飞」因此是事实而不是猜测。abort 信号也放行——真正的 transport 尊重自己的 signal；
+ * 被放行后剧本照常流完，被停下的轮次在磁盘上是一轮完整的轮次。
+ */
+function vetoGate(): { api: ChatTransport; held(): boolean; sawAbort(): boolean; release(): void } {
+	const fake = createFakeTransport();
+	fake.setResponses([fakeAssistantMessage("被删除打断前的最后一条回答")]);
+	const inner = fake.api.stream.bind(fake.api);
+	let held = false;
+	let aborted = false;
+	let release!: () => void;
+	const released = new Promise<void>((done) => {
+		release = done;
+	});
+	const api: ChatTransport = {
+		stream: (model, context, options) => {
+			const outer = createAssistantMessageEventStream();
+			void (async () => {
+				held = true;
+				await Promise.race([
+					released,
+					new Promise<void>((resolve) => {
+						options?.signal?.addEventListener(
+							"abort",
+							() => {
+								aborted = true;
+								resolve();
+							},
+							{ once: true },
+						);
+					}),
+				]);
+				const answer = inner(model, context, options);
+				for await (const event of answer) outer.push(event);
+				outer.end(await answer.result());
+			})();
+			return outer;
+		},
+	};
+	return {
+		api,
+		held: () => held,
+		sawAbort: () => aborted,
+		// 供排错用：从外面强制放行，正常路径里只有 abort 信号会到。
+		release,
+	};
+}
+
 const hub = new SessionHub({ workDirAbsPath: root });
 
 try {
@@ -184,32 +250,15 @@ try {
 	// explicit creation happens, and the session below is held by the id that creation returned.
 	check("nothing is selected before anything is created", (await hub.currentSessionId()) === null);
 	const landing = await hub.birth({ text: "出生的第一条消息" });
-	await hub.hold(landing);
-	await hub.hold(landing);
-	check("two holds on one id count together", hub.holdsOf(landing) === 2, `holds=${hub.holdsOf(landing)}`);
-	// 一个 hold 不拼装任何东西（ADR-0013）：袋由运行自己装配，计数只是簿记。
-	check("and a hold assembles nothing", !hub.isLive(landing), String(hub.isLive(landing)));
+	// hold 簿记已迁入 SessionManager（票 03）：hub 上不再有计数表可断言，外部行为是出生自己留下
+	// 的状态——失败的出生运行散了自己的袋，文件已在盘上，没有多出来的活半。
+	check("the birth leaves the session idle", !hub.isLive(landing), String(hub.isLive(landing)));
 
-	process.stdout.write("holding by id\n");
-	const again = await hub.hold(landing);
-	check("holds add up", hub.holdsOf(landing) === 3, `holds=${hub.holdsOf(landing)}`);
-	void again;
-
-	process.stdout.write("a hold outlives the connections that dropped it\n");
-	hub.release(landing);
-	hub.release(landing);
-	check("still counted with one hold left", hub.holdsOf(landing) === 1, `holds=${hub.holdsOf(landing)}`);
-	await new Promise((resolve) => setTimeout(resolve, 50));
-	check("a held session is never forgotten", hub.holdsOf(landing) === 1);
-
-	process.stdout.write("the last release lets the file be the whole session\n");
+	process.stdout.write("the file is the whole session\n");
 	hubSessions(hub).appendMessage(bagOf(hub, landing), userMessage("survives the reap"));
-	hub.release(landing);
-	check("the hold is spent", hub.holdsOf(landing) === 0, `holds=${hub.holdsOf(landing)}`);
 	check("and nothing was ever assembled for it", !hub.isLive(landing), String(hub.isLive(landing)));
 
 	process.stdout.write("the JSONL file is what survives\n");
-	await hub.hold(landing);
 	check(
 		"and it still carries the session",
 		JSON.stringify(hub.agent.snapshot(landing).messages).includes("survives the reap"),
@@ -446,11 +495,9 @@ try {
 	}
 
 	process.stdout.write("an unknown id fails instead of quietly starting one\n");
-	const missing = await hub.hold("0123456789abcdef").then(
-		() => undefined,
-		(error: unknown) => error,
-	);
-	check("holding an unknown id rejects", missing instanceof Error, String(missing));
+	// hold 的存在性校验随簿记退场（票 03）：id 是否有所指现在是 Manager 的地址解析。facade 的
+	// 窄读对无所指的 id 回答「没有」——不拼装、不出生。
+	check("an unknown id resolves to no file", hub.agent.fileAbsPathOf("0123456789abcdef") === undefined);
 	check("and nothing entered the registry", !hub.isLive("0123456789abcdef"), String(hub.isLive("0123456789abcdef")));
 
 	process.stdout.write("the settings files name the tools a session that never chose opens on\n");
@@ -531,39 +578,22 @@ try {
 
 	process.stdout.write("reading a session does not assemble one\n");
 	// Phase 1 in one section: a read answers from the JSONL log, leaves the registry exactly as it was,
-	// and agrees field-for-field with what holding the same session reports — because both build
+	// and agrees field-for-field with what the facade answers directly — because both build
 	// their snapshot from the same parts.
 	const http = await bootServer({ workDirAbsPath: root, port: 0 });
 	try {
 		const readId = await http.hub.birth({ text: "read me" });
-		await http.hub.hold(readId);
 		hubSessions(http.hub).appendMessage(bagOf(http.hub, readId), userMessage("and me"));
-		http.hub.release(readId);
 		check("the session is idle before the read", !http.hub.isLive(readId), String(http.hub.isLive(readId)));
-
-		// The phase's contract as a counter, because the registry cannot show it on its own: a hold
-		// that is given straight back is reaped out of `live` within a tick — before a client can even
-		// read the response — so the map is back where it started either way. Counting the entry point
-		// is what actually catches a read that assembles; the `live` checks below are the state the
-		// caller is promised, and they hold whatever the read did.
-		let holds = 0;
-		const hold = http.hub.hold.bind(http.hub);
-		http.hub.hold = async (sessionId: string) => {
-			holds += 1;
-			return hold(sessionId);
-		};
 
 		const firstRead = await get(`${http.url}/api/sessions/${readId}`);
 		check("GET /api/sessions/{id} answers 200", firstRead.status === 200, `status=${firstRead.status}`);
 		// Birth writes two entries (the user message and the failed run's error message), and the append
 	// above adds the third — each birth is +2 against the ledger under ADR-0021.
 	check("the cold session is not empty", (firstRead.session?.messages.length ?? 0) === 3, `${firstRead.session?.messages.length} messages`);
-		// This is the whole phase in one line: reading a session never takes a hold on it.
-		check("and the read never held the session", holds === 0, `holds=${holds}`);
-		check("so nothing is running it", !http.hub.isLive(readId), String(http.hub.isLive(readId)));
-		// The read is also the window's decision about whether to attach a stream: a snapshot that
-		// reports `running: false` is one the window renders without opening one, which is why the
-		// hold count above is the whole evidence — an attach would have held through the hub.
+		// This is the whole phase: a read never runs the session — the read is also the window's
+		// decision about whether to attach a stream, and a snapshot that reports `running: false` is
+		// one the window renders without opening one.
 		check("and it reports the session as idle", firstRead.session?.running === false, String(firstRead.session?.running));
 
 		const secondRead = await get(`${http.url}/api/sessions/${readId}`);
@@ -571,18 +601,13 @@ try {
 			"reading it twice gives the same answer",
 			JSON.stringify(secondRead.session) === JSON.stringify(firstRead.session),
 		);
-		check("and still nothing was held", holds === 0, `holds=${holds}`);
 
 		const unknownRead = await get(`${http.url}/api/sessions/0123456789abcdef`);
 		check("an unknown id is still 404", unknownRead.status === 404, `status=${unknownRead.status}`);
-		check("and an unknown id is never held either", holds === 0, `holds=${holds}`);
 
-		// What the cold read must agree with. Claiming it here is the deliberate hold, and the only
-		// one this section makes: everything the session file can answer has to come out the same.
-		await http.hub.hold(readId);
-		check("a hold is what runs it", holds === 1, `holds=${holds}`);
+		// What the cold read must agree with. The facade's own snapshot is the comparison point:
+		// everything the session file can answer has to come out the same.
 		const liveSnapshot = http.hub.agent.snapshot(readId);
-		http.hub.release(readId);
 
 		// Everything the session file can answer must be identical; only what a loop answers may differ.
 		const fromLog = [
@@ -779,7 +804,7 @@ try {
 		process.stdout.write("a rename stores a name and a delete removes the session\n");
 		// The two row-menu actions the window offers, over the real route table: a rename lands as one
 		// entry and answers 201, a blank one is refused before anything is written, and a delete takes
-		// the file with it — refusing first while a hold is still held.
+		// the file with it — answered 202 and accepted no matter who was using the session, veto-style.
 		{
 			const victim = await http.hub.birth({ text: "要删的会话" });
 			const blank = await call("POST", `${http.url}/api/sessions/${victim}/title`, { title: "   " });
@@ -792,14 +817,10 @@ try {
 			const reread = await get(`${http.url}/api/sessions/${victim}`);
 			check("and the snapshot reports it", reread.session?.title === "新名字", reread.session?.title);
 
-			const busy = await http.hub.hold(victim);
-			const refused = await call("DELETE", `${http.url}/api/sessions/${victim}`);
-			check("deleting a held session is refused (409)", refused.status === 409, `status=${refused.status}`);
-			http.hub.release(victim);
-			check("the hold lets go", await until(() => http.hub.holdsOf(victim) === 0, 5_000), String(http.hub.holdsOf(victim)));
-
+			// 否决式（票 03）：删除不再被「有人在用」拒绝——409 退场。空闲删除即 202，应答先到；
+			// 读是 404；第二次删除也是 404；文件真消失。
 			const removed = await call("DELETE", `${http.url}/api/sessions/${victim}`);
-			check("an idle session is deleted (200)", removed.status === 200, `status=${removed.status}`);
+			check("an idle session is deleted (202)", removed.status === 202, `status=${removed.status}`);
 			check("the answer says what happened", removed.payload.removed === true, JSON.stringify(removed.payload));
 			const gone = await get(`${http.url}/api/sessions/${victim}`);
 			check("and then it is a 404", gone.status === 404, `status=${gone.status}`);
@@ -871,6 +892,208 @@ try {
 		}
 	}
 
+	process.stdout.write("the manager holds the file pairs it touches\n");
+	// holds 迁入 SessionManager（票 01）：触碰文件对的公开方法在自己的长度内持闸，remove 是唯一跨
+	// await 的持有者。断言全部走外部可观察面——开出来的袋、盘上的文件——不偷看 Manager 内部的计数
+	// 表。会话直接经 bare service（store）驱动，文件落在 storeRoot，不起 HTTP。
+	{
+		const gateSession = createSession(root);
+		store.appendMessage(gateSession, userMessage("born under the gate"));
+		const gateId = gateSession.sessionId;
+
+		// 两次进闸解析出同一个文件键：两次 open 给出同一条 `.jsonl` 路径，经其中一只袋写入，从另
+		// 一次重放里读得回来——同一条目，就是同一把钥匙。
+		const first = store.open(gateId);
+		const second = store.open(gateId);
+		check(
+			"two opens answer the same file",
+			first.sessionFileAbsPath !== undefined && first.sessionFileAbsPath === second.sessionFileAbsPath,
+			`${first.sessionFileAbsPath} vs ${second.sessionFileAbsPath}`,
+		);
+		store.appendMessage(second, userMessage("written through the second open"));
+		const reread = store.open(gateId);
+		check(
+			"and a write through one open reaches what both name",
+			JSON.stringify(store.getEntries(reread)).includes("written through the second open"),
+		);
+
+		// 无所指 id 在进闸之前就被拒绝：id → 文件的解析发生在闸前，解析不出就没有可保护的东西。
+		let openRefusal: unknown;
+		try {
+			store.open("0123456789abcdef");
+		} catch (error) {
+			openRefusal = error;
+		}
+		check("open refuses an unknown id with UnknownSessionError", openRefusal instanceof UnknownSessionError, String(openRefusal));
+		const removeRefusal = await store.remove("0123456789abcdef").then(() => "removed" as const, (error: unknown) => error);
+		check("and so does remove, before the gate", removeRefusal instanceof UnknownSessionError, String(removeRefusal));
+
+		// 删除闸内的写被拒：remove 在两步 rm 之间的可控 gate 里挂起，此刻对该会话的 meta setter、
+		// append 与冷 open 全部读作「没有这个会话」；放行后删除完成，盘上无任何残留文件。
+		{
+			const victim = store.open(gateId);
+			let entered = false;
+			let release!: () => void;
+			const held = new Promise<void>((done) => {
+				release = done;
+			});
+			setRemoveGate(async () => {
+				entered = true;
+				await held;
+			});
+			const removing = store.remove(gateId);
+			try {
+				check("the removal reaches the gate between the two rm steps", await until(() => entered));
+				// 中间态的形状（票 04）：rm 刻意先删 `.json`（诞生的提交标记）后删 `.jsonl`（流），所以
+				// 闸中此刻看到的正是半途夭折的诞生——提交标记已走、流还在，对一切查 meta 的读者读作
+				// 「没有这个会话」。
+				const midJsonl = victim.sessionFileAbsPath!;
+				check(
+					"the commit marker goes first, the stream waits in the middle",
+					!existsSync(snapshotPathOf(midJsonl)) && existsSync(midJsonl),
+				);
+				check("and the id reads as missing mid-removal", SessionManager.findSessionFilePathById(gateId) === undefined);
+				let titleRefusal: unknown;
+				try {
+					store.setTitle(victim, "闸内的名字");
+				} catch (error) {
+					titleRefusal = error;
+				}
+				check("a meta setter inside the gate reads as missing", titleRefusal instanceof UnknownSessionError, String(titleRefusal));
+				let appendRefusal: unknown;
+				try {
+					store.appendMessage(victim, userMessage("too late"));
+				} catch (error) {
+					appendRefusal = error;
+				}
+				check("an append inside the gate reads as missing too", appendRefusal instanceof UnknownSessionError, String(appendRefusal));
+				let coldRefusal: unknown;
+				try {
+					store.open(gateId);
+				} catch (error) {
+					coldRefusal = error;
+				}
+				check("and a cold open during the removal is refused, not half-read", coldRefusal instanceof UnknownSessionError, String(coldRefusal));
+			} finally {
+				release();
+				await removing;
+				setRemoveGate(undefined);
+			}
+			check("the removal finished once the gate let go", SessionManager.findSessionFilePathById(gateId) === undefined);
+			check(
+				"and no file of the session survived",
+				readdirSync(storeRoot).every((name) => !name.startsWith(gateId)),
+				JSON.stringify(readdirSync(storeRoot)),
+			);
+		}
+
+		// 删除与在途写入撞车（票 04，User Story 4）：删除前就已开好的袋在删除途中到达的写入，一律读作
+		// 「没有这个会话」；删除**完成之后**对同一只陈旧袋的写入也必须如此——`closing` 已随闸条目
+		// 退场，撞不到闸，没有提交标记复核的话 appendMessage 会经 appendFileSync 把 `.jsonl` 造回来、
+		// setTitle 会把 `.json` 造回去，被删的会话无声诈尸成半个会话。放行后删除完成——无孤儿文件，
+		// 扫描也清不出任何诈尸的行。
+		{
+			const collideSession = createSession(root);
+			store.appendMessage(collideSession, userMessage("撞车的会话"));
+			const collideId = collideSession.sessionId;
+			const stale = store.open(collideId);
+			let entered = false;
+			let release!: () => void;
+			const held = new Promise<void>((done) => {
+				release = done;
+			});
+			setRemoveGate(async () => {
+				entered = true;
+				await held;
+			});
+			const removing = store.remove(collideId);
+			try {
+				check("the colliding removal reaches the gate", await until(() => entered));
+				let appendRefusal: unknown;
+				try {
+					store.appendMessage(stale, userMessage("删除之后才到的写入"));
+				} catch (error) {
+					appendRefusal = error;
+				}
+				check("an append from a bag opened before the deletion is refused", appendRefusal instanceof UnknownSessionError, String(appendRefusal));
+				let titleRefusal: unknown;
+				try {
+					store.setTitle(stale, "删除之后才到的名字");
+				} catch (error) {
+					titleRefusal = error;
+				}
+				check("and so is a meta setter from the same stale bag", titleRefusal instanceof UnknownSessionError, String(titleRefusal));
+			} finally {
+				release();
+				await removing;
+				setRemoveGate(undefined);
+			}
+			check("the deletion finished once the gate let go", SessionManager.findSessionFilePathById(collideId) === undefined);
+			// 复活守卫（主发现）：闸条目退场后撞不到 closing，写入被标记复核挡住——两个写法各验一次，
+			// 因为它们复活的是不同的半边（appendFileSync 造流，meta 重写造快照）。
+			let lateAppendRefusal: unknown;
+			try {
+				store.appendMessage(stale, userMessage("删除完成后的写入"));
+			} catch (error) {
+				lateAppendRefusal = error;
+			}
+			check("an append on the stale bag after the deletion completed is refused too", lateAppendRefusal instanceof UnknownSessionError, String(lateAppendRefusal));
+			let lateTitleRefusal: unknown;
+			try {
+				store.setTitle(stale, "删除完成后的名字");
+			} catch (error) {
+				lateTitleRefusal = error;
+			}
+			check("and so is a meta setter on the same stale bag afterwards", lateTitleRefusal instanceof UnknownSessionError, String(lateTitleRefusal));
+			check(
+				"no orphan file survived the collision",
+				readdirSync(storeRoot).every((name) => !name.startsWith(collideId)),
+				JSON.stringify(readdirSync(storeRoot)),
+			);
+			check(
+				"and no scan resurrects the deleted session",
+				!(await SessionManager.list(root)).some((info) => info.id === collideId),
+			);
+		}
+
+		// 半途夭折的诞生由扫描自愈（票 04）：先提交标记后流是刻意的 rm 顺序——rm 的两步之间到达的
+		// 读者看到的正是未配对的流。这里手写这个状态（与闸中删除产出的形状一致，参照上面 v4 遗物的
+		// 写法），看列表扫描把它清掉，而不是给中间态发明新的原子性。
+		{
+			const halfBornStem = join(storeRoot, "2026-01-01T00-00-04-000Z_halfborn");
+			await writeFile(
+				`${halfBornStem}.jsonl`,
+				`${JSON.stringify({ type: "message", id: "hb-u1", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: [{ type: "text", text: "a half-born conversation" }] } })}\n`,
+				"utf8",
+			);
+			check("the half-born pair looks exactly like the mid-removal state", existsSync(`${halfBornStem}.jsonl`) && !existsSync(`${halfBornStem}.json`));
+			const listed = await SessionManager.list(root);
+			check("the scan lists none of it", !listed.some((info) => info.id === "halfborn"), JSON.stringify(listed.map((info) => info.id)));
+			check("and the scan swept the half-born stream", !existsSync(`${halfBornStem}.jsonl`));
+		}
+
+		// 宽容释放不随搬家消失：同一 id 先以未诞生的袋多次在闸外做选择（表上无条目、无进出），再以
+		// 诞生袋连续多轮进/出闸，交错之后一切照常——没有泄漏的计数让任何一步失败。
+		{
+			const lenient = createSession(root);
+			store.setTitle(lenient, "闸外的名字");
+			store.setModel(lenient, "row-a", "model-a");
+			check("an unborn bag takes choices with no file to protect", !existsSync(lenient.sessionFileAbsPath!));
+			store.appendMessage(lenient, userMessage("the birth"));
+			const lenientId = lenient.sessionId;
+			for (let cycle = 0; cycle < 3; cycle++) {
+				store.appendMessage(store.open(lenientId), userMessage(`cycle ${cycle}`));
+			}
+			const settled = store.open(lenientId);
+			check(
+				"choices made outside the gate survive the birth",
+				store.getTitle(settled) === "闸外的名字" && store.getMeta(settled).model?.name === "row-a",
+				JSON.stringify(store.getMeta(settled)),
+			);
+			check("and every gate cycle landed in the one file", store.getEntries(settled).length === 4, String(store.getEntries(settled).length));
+		}
+	}
+
 	process.stdout.write("the orchestrator's table keys the live half by id\n");
 	// ADR-0013: the table on the orchestrator holds exactly what cannot be rebuilt from disk — the
 	// queues, the run in flight, the subscriber sets. `open` is its one way in, and it assembles
@@ -893,6 +1116,47 @@ try {
 		await agent.deleteSessionBySessionId(session.sessionId);
 		check("an id no longer in the table answers nothing", entryOf(agent, session.sessionId) === undefined);
 		check("deleting it again refuses", (await agent.deleteSessionBySessionId(session.sessionId).then(() => "deleted", () => "refused")) === "refused");
+	}
+
+	process.stdout.write("a delete vetoes a run in flight\n");
+	// 票 02 的否决式：删除不再要求调用方先把会话安顿好——运行在飞则删除自己中止它、等引擎收尾，
+	// 然后在文件闸内删掉文件对、出表。core 级断言（不经 HTTP）：可控 gate 把一次运行钉在流式
+	// 半空，直接调 deleteSessionBySessionId，看删除赢。
+	{
+		const gate = vetoGate();
+		const session = createSession(root);
+		// 会话随第一条消息出生（ADR-0021）：对袋直接追加让文件落地，不跑引擎、不耗剧本。
+		store.appendMessage(session, userMessage("删除动手时还在跑的会话"));
+		const id = session.sessionId;
+		const agent = await openAgent({
+			session,
+			api: gate.api,
+			settings: inMemorySettingManager({}, vetoRows),
+		});
+
+		const running = agent.prompt(id, "删除动手时我还在流式", { selection: { model: "anthropic" } });
+		check("the run reaches the transport gate", await until(() => gate.held()));
+		check("and the file pair exists while it streams", SessionManager.findSessionFilePathById(id) !== undefined);
+
+		const removed = await agent.deleteSessionBySessionId(id).then(
+			() => true,
+			(error: unknown) => {
+				void gate.release();
+				void running.catch(() => undefined);
+				return String(error);
+			},
+		);
+		check("the delete of a running session succeeds (the veto wins)", removed === true, String(removed));
+		check("the run received the abort", gate.sawAbort());
+		check("the aborted run has settled", await until(() => !agent.isRunning(id)));
+		void running.catch(() => undefined);
+		check("the table no longer holds the live half", entryOf(agent, id) === undefined);
+		check("the file pair is gone", SessionManager.findSessionFilePathById(id) === undefined);
+		check(
+			"and no file of the session survived on disk",
+			readdirSync(storeRoot).every((name) => !name.startsWith(id)),
+			JSON.stringify(readdirSync(storeRoot)),
+		);
 	}
 
 	process.stdout.write("a pair this build cannot open is deleted, not kept\n");

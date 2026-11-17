@@ -837,6 +837,18 @@ function absPathKey(absPath: string): string {
 	return process.platform === "win32" ? absResolved.toLowerCase() : absResolved;
 }
 
+/**
+ * 仅测试的接缝（仿 `setSessionsDir` 的先例）：挂在 {@link SessionManager.remove} 的两步 rm 之间，
+ * 让冒烟测试能把删除钉在中间态上——闸内的写被拒、闸放行后盘上无残留，这些只有一次可控的删除才能
+ * 观察得到。生产代码永远不设置它。
+ */
+let removeGate: (() => Promise<void>) | undefined;
+
+/** 设置或清除 {@link removeGate}；传 `undefined` 即清除。 */
+export function setRemoveGate(gate: (() => Promise<void>) | undefined): void {
+	removeGate = gate;
+}
+
 async function listSessionsFromDir(absDir: string, signal?: AbortSignal): Promise<SessionInfo[]> {
 	signal?.throwIfAborted();
 	if (!existsSync(absDir)) return [];
@@ -1290,7 +1302,8 @@ function appendLeafRecord(session: Session, leafId: string | null): void {
  * 每个 per-session 方法都以 {@link Session} 为第一参数、在这里完成工作——没有第二层同名文件级函数
  * 供转发，所以读这个文件的调用方读到的就是实现。这个类不持有任何 per-session 状态（ADR-0006 §2）
  * 也没有缓存：袋归填充或构建它的人所有，orchestrator 的表（`Agent`）是唯一在调用之间持有运行中
- * session 的袋的地方。
+ * session 的袋的地方。唯一的例外是 {@link SessionManager.holds}——对无属性服务形态的一次有意识的
+ * 修订，理由记在那张表的注释里。
  *
  * 这个类拥有的是 store 的格式知识：id 如何变成文件路径
  * （{@link SessionManager.findSessionFilePathById}），文件如何变成袋（{@link fillSession}，连同它的
@@ -1298,21 +1311,100 @@ function appendLeafRecord(session: Session, leafId: string | null): void {
  */
 export class SessionManager {
 	/**
+	 * 此刻谁在改变哪个会话文件对：按**文件键**键控的持有计数表。触碰一对文件的公开方法（meta
+	 * setter、append 族、写 leaf 记录的两个、`open`、`forkFrom` 的写目标半）在自己的长度内持闸，
+	 * `remove` 是唯一跨 await 的持有者、闸罩它全程——持有者从 server 的 hold/release 括号收编为
+	 * Manager 自己，编排层与传输层都不感知。
+	 *
+	 * 键是会话文件对的规范文件键：以 `.jsonl` 绝对路径经 {@link absPathKey}（resolvePath + win32
+	 * 大小写折叠）折叠。id → 文件的解析只在进闸前做一次，此后簿记的领域里没有 id——锁的单位与它
+	 * 保护的东西（同一 stem 的 `.json` + `.jsonl`）重合。进闸时发现 `closing` 在场（一次删除正跨着
+	 * await），以 `UnknownSessionError` 拒绝——读作「没有这个会话」，与「等过 closing 再发现文件
+	 * 没了」是同一答案、同一错误种类，只是不再等待。同步方法的进出是瞬时的：单线程进程里同步块
+	 * 不可被打断，它的意义不是互斥等待，而是与 `closing` 闸的相遇点。热读（袋在手）从不进闸；
+	 * `open` 是冷路径唯一的入口，做 I/O 且可能 prune，所以进闸——「读不拿锁」罩的是持有袋的
+	 * 读取，不是冷路径的打开动作。
+	 *
+	 * 这是对 ADR-0006 无属性服务形态的一次**有意识的修订**：这张表是易失簿记——重启即空、不落盘、
+	 * 不可重建也不需重建——与 `ToolManager` 的常驻实例表（ADR-0011）同类；无状态门面的其他一切
+	 * 不变。它同时也是**存储原语缺失税**：文件系统没有「存在才写」的原子原语（实证：
+	 * `.scratch/fs-race-test/test.mjs`），「两个写入方不同时碰一对文件」只能靠一张进程内的计数表
+	 * 补出来。换成事务型存储的那天——方法变事务、调用方一字不动——这张表该跟着消失，不是搬进新
+	 * 存储。
+	 */
+	private readonly holds = new Map<string, { holds: number; closing?: Promise<void> }>();
+
+	/**
+	 * 进闸：文件键计数 +1；闸正被一次删除占着时，以「没有这个会话」拒绝。返回它立起的条目，让
+	 * 唯一跨 await 的持有者（`remove`）在同一拍挂上 `closing`，而不必回头再查一次表。
+	 */
+	private enterHold(fileKey: string, sessionId: string): { holds: number; closing?: Promise<void> } {
+		const entry = this.holds.get(fileKey);
+		if (entry?.closing !== undefined) throw new UnknownSessionError(sessionId);
+		const fresh = { holds: (entry?.holds ?? 0) + 1 };
+		this.holds.set(fileKey, fresh);
+		return fresh;
+	}
+
+	/** 出闸：宽容释放（无人持有的文件键无事发生）、归零删条目——hub 旧 `release()` 的语义原样。 */
+	private leaveHold(fileKey: string): void {
+		const entry = this.holds.get(fileKey);
+		if (entry === undefined) return;
+		const remaining = Math.max(0, entry.holds - 1);
+		if (remaining === 0) this.holds.delete(fileKey);
+		else this.holds.set(fileKey, { holds: remaining });
+	}
+
+	/**
+	 * 袋式写路径共用的闸括号：进闸、动作、出闸在同一个同步块里完成。公开方法持闸、内部互调不重复
+	 * 计账——锁只有这一个进出层（{@link holdingFileKey}），嵌套不存在。
+	 *
+	 * 已诞生的袋（fileCreated）在进闸前先复核提交标记仍在——**复活守卫**：删除完成后陈旧袋进闸时
+	 * 已撞不到 `closing`，闸条目随 `remove` 的 finally 整条退场；没有这道复核，它的 appendMessage
+	 * 会经 {@link persistEntry} 的 appendFileSync 把 `.jsonl` 造回来、meta setter 会把 `.json` 造
+	 * 回去，被删的会话无声诈尸成半个会话（spec User Story 4：「最后一个动作赢」）。标记不在即以
+	 * {@link UnknownSessionError} 拒绝，读作「没有这个会话」——与闸内拒绝同一答案、同一错误种类。
+	 * 尚未诞生的袋没有文件可保护也不可复活（它的变更留在内存里，由 {@link persistEntry} 的诞生写入
+	 * 整体带上盘），不进闸、不复核。
+	 */
+	private holding<T>(session: Session, action: () => T): T {
+		const absJsonl = session.fileCreated ? session.sessionFileAbsPath : undefined;
+		if (absJsonl === undefined) return action();
+		if (!existsSync(sessionMetaPath(absJsonl))) throw new UnknownSessionError(session.sessionId);
+		return this.holdingFileKey(absPathKey(absJsonl), session.sessionId, action);
+	}
+
+	/**
+	 * 以文件键进门的同一层闸括号：袋式方法经 {@link holding}（它补上袋 → 文件键的解析与复活守卫），
+	 * 不经袋的进闸——`open` 的冷路径、`forkFrom` 的写目标半——直接指名文件键。`remove` 是唯一的
+	 * 例外：它跨 await，以自己的路径持有、立 `closing`、finally 整条退场。
+	 */
+	private holdingFileKey<T>(fileKey: string, sessionId: string, action: () => T): T {
+		this.enterHold(fileKey, sessionId);
+		try {
+			return action();
+		} finally {
+			this.leaveHold(fileKey);
+		}
+	}
+	/**
 	 * 追加一条消息作为叶子的孩子并推进叶子。返回新条目的 id。
 	 *
 	 * 这里刻意不接受压缩摘要：它必须是顶层条目，{@link SessionManager.buildContextEntries} 才能找到
 	 * 它，这正是 {@link appendCompaction} 存在的原因。
 	 */
 	appendMessage(session: Session, message: Message): string {
-		const entry: MessageEntry = {
-			type: "message",
-			id: generateId(session.sessionEntryMapById),
-			parentId: session.leafId,
-			timestamp: new Date().toISOString(),
-			message,
-		};
-		appendEntry(session, entry);
-		return entry.id;
+		return this.holding(session, () => {
+			const entry: MessageEntry = {
+				type: "message",
+				id: generateId(session.sessionEntryMapById),
+				parentId: session.leafId,
+				timestamp: new Date().toISOString(),
+				message,
+			};
+			appendEntry(session, entry);
+			return entry.id;
+		});
 	}
 
 	/**
@@ -1323,10 +1415,12 @@ export class SessionManager {
 	 * 存活，又不破坏「没有对话就没有文件」的规则。
 	 */
 	setThinkingLevel(session: Session, thinkingLevel: string): void {
-		recordMeta(session, (setting) => {
-			if (setting.model?.thinkingLevel === thinkingLevel) return false;
-			setting.model = { ...(setting.model ?? {}), thinkingLevel };
-			return true;
+		this.holding(session, () => {
+			recordMeta(session, (setting) => {
+				if (setting.model?.thinkingLevel === thinkingLevel) return false;
+				setting.model = { ...(setting.model ?? {}), thinkingLevel };
+				return true;
+			});
 		});
 	}
 
@@ -1338,10 +1432,12 @@ export class SessionManager {
 	 * 个名字，由旧名构建的 ref 已经有了着落。
 	 */
 	setModel(session: Session, name: string, modelId: string): void {
-		recordMeta(session, (setting) => {
-			if (setting.model?.name === name && setting.model.modelId === modelId) return false;
-			setting.model = { ...(setting.model ?? {}), name, modelId };
-			return true;
+		this.holding(session, () => {
+			recordMeta(session, (setting) => {
+				if (setting.model?.name === name && setting.model.modelId === modelId) return false;
+				setting.model = { ...(setting.model ?? {}), name, modelId };
+				return true;
+			});
 		});
 	}
 
@@ -1353,7 +1449,9 @@ export class SessionManager {
 	 * 袋在一次原子重写里进快照。文件还没诞生的 session 保持袋原样；诞生写入会整体带上它。
 	 */
 	flushMeta(session: Session): void {
-		if (session.persist && session.fileCreated) writeMetaFile(session);
+		this.holding(session, () => {
+			if (session.persist && session.fileCreated) writeMetaFile(session);
+		});
 	}
 
 	/**
@@ -1364,10 +1462,12 @@ export class SessionManager {
 	 * 选择」和「选了默认」在盘上不可区分，这正是两者语义相同的诚实写法。
 	 */
 	setMode(session: Session, mode: string | undefined): void {
-		recordMeta(session, (setting) => {
-			if (setting.mode === mode) return false;
-			setting.mode = mode;
-			return true;
+		this.holding(session, () => {
+			recordMeta(session, (setting) => {
+				if (setting.mode === mode) return false;
+				setting.mode = mode;
+				return true;
+			});
 		});
 	}
 
@@ -1378,15 +1478,17 @@ export class SessionManager {
 	 * 空表也按选择记录——它表达「会话撤销了自己的全部增量」，与「从未选择」在语义上无别。
 	 */
 	setApprovalOverride(session: Session, approval: Record<string, boolean>): void {
-		recordMeta(session, (setting) => {
-			if (
-				setting.approval !== undefined &&
-				metasApprovalEqual(setting.approval, approval)
-			) {
-				return false;
-			}
-			setting.approval = { ...approval };
-			return true;
+		this.holding(session, () => {
+			recordMeta(session, (setting) => {
+				if (
+					setting.approval !== undefined &&
+					metasApprovalEqual(setting.approval, approval)
+				) {
+					return false;
+				}
+				setting.approval = { ...approval };
+				return true;
+			});
 		});
 	}
 
@@ -1398,10 +1500,12 @@ export class SessionManager {
 	 * 才付一次重写，且只有 true 才会到盘上（{@link metaOf}）。
 	 */
 	setSuspended(session: Session, suspended: boolean): void {
-		recordMeta(session, (setting) => {
-			if (setting.suspended === suspended) return false;
-			setting.suspended = suspended;
-			return true;
+		this.holding(session, () => {
+			recordMeta(session, (setting) => {
+				if (setting.suspended === suspended) return false;
+				setting.suspended = suspended;
+				return true;
+			});
 		});
 	}
 
@@ -1413,10 +1517,12 @@ export class SessionManager {
 	 * 从文件顺序论证出的读法），快照直接陈述它。
 	 */
 	setTitle(session: Session, title: string): void {
-		recordMeta(session, (setting) => {
-			if (setting.title === title) return false;
-			setting.title = title;
-			return true;
+		this.holding(session, () => {
+			recordMeta(session, (setting) => {
+				if (setting.title === title) return false;
+				setting.title = title;
+				return true;
+			});
 		});
 	}
 
@@ -1428,17 +1534,19 @@ export class SessionManager {
 	 * 不值得占一行。
 	 */
 	appendUsage(session: Session, operation: string, model: string, usage: Usage): string {
-		const entry: UsageEntry = {
-			type: "usage",
-			id: generateId(session.sessionEntryMapById),
-			parentId: session.leafId,
-			timestamp: new Date().toISOString(),
-			operation,
-			model,
-			usage,
-		};
-		appendEntry(session, entry);
-		return entry.id;
+		return this.holding(session, () => {
+			const entry: UsageEntry = {
+				type: "usage",
+				id: generateId(session.sessionEntryMapById),
+				parentId: session.leafId,
+				timestamp: new Date().toISOString(),
+				operation,
+				model,
+				usage,
+			};
+			appendEntry(session, entry);
+			return entry.id;
+		});
 	}
 
 	/**
@@ -1454,20 +1562,22 @@ export class SessionManager {
 		tokensBefore: number,
 		usage?: Usage,
 	): string {
-		const timestamp = new Date().toISOString();
-		const id = generateId(session.sessionEntryMapById);
-		const entry: CompactionEntry = {
-			type: "compaction",
-			id,
-			parentId: session.leafId,
-			timestamp,
-			summary,
-			firstKeptEntryId: firstKeptEntryId ?? id,
-			tokensBefore,
-			...(usage === undefined ? {} : { usage }),
-		};
-		appendEntry(session, entry);
-		return entry.id;
+		return this.holding(session, () => {
+			const timestamp = new Date().toISOString();
+			const id = generateId(session.sessionEntryMapById);
+			const entry: CompactionEntry = {
+				type: "compaction",
+				id,
+				parentId: session.leafId,
+				timestamp,
+				summary,
+				firstKeptEntryId: firstKeptEntryId ?? id,
+				tokensBefore,
+				...(usage === undefined ? {} : { usage }),
+			};
+			appendEntry(session, entry);
+			return entry.id;
+		});
 	}
 
 	/**
@@ -1477,16 +1587,18 @@ export class SessionManager {
 	 * 记录只有 id 和这次清空值多少。
 	 */
 	appendClearToolResults(session: Session, clearedEntryIds: readonly string[], tokensBefore: number): string {
-		const entry: ClearToolResultEntry = {
-			type: "clear_tool_result",
-			id: generateId(session.sessionEntryMapById),
-			parentId: session.leafId,
-			timestamp: new Date().toISOString(),
-			clearedEntryIds: [...clearedEntryIds],
-			tokensBefore,
-		};
-		appendEntry(session, entry);
-		return entry.id;
+		return this.holding(session, () => {
+			const entry: ClearToolResultEntry = {
+				type: "clear_tool_result",
+				id: generateId(session.sessionEntryMapById),
+				parentId: session.leafId,
+				timestamp: new Date().toISOString(),
+				clearedEntryIds: [...clearedEntryIds],
+				tokensBefore,
+			};
+			appendEntry(session, entry);
+			return entry.id;
+		});
 	}
 
 	/**
@@ -1496,16 +1608,18 @@ export class SessionManager {
 	 * 这次截短值多少。
 	 */
 	appendTrimToolCallArgs(session: Session, trimmedEntryIds: readonly string[], tokensBefore: number): string {
-		const entry: TrimToolCallArgEntry = {
-			type: "trim_tool_call_arg",
-			id: generateId(session.sessionEntryMapById),
-			parentId: session.leafId,
-			timestamp: new Date().toISOString(),
-			trimmedEntryIds: [...trimmedEntryIds],
-			tokensBefore,
-		};
-		appendEntry(session, entry);
-		return entry.id;
+		return this.holding(session, () => {
+			const entry: TrimToolCallArgEntry = {
+				type: "trim_tool_call_arg",
+				id: generateId(session.sessionEntryMapById),
+				parentId: session.leafId,
+				timestamp: new Date().toISOString(),
+				trimmedEntryIds: [...trimmedEntryIds],
+				tokensBefore,
+			};
+			appendEntry(session, entry);
+			return entry.id;
+		});
 	}
 
 	/** `parentId` 之后的每条条目，按文件顺序。 */
@@ -1748,17 +1862,21 @@ export class SessionManager {
 	 * no-op 移动不花任何文件。
 	 */
 	branch(session: Session, branchFromId: string): void {
-		if (!session.sessionEntryMapById.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
-		if (session.leafId === branchFromId) return;
-		appendLeafRecord(session, branchFromId);
-		session.leafId = branchFromId;
+		this.holding(session, () => {
+			if (!session.sessionEntryMapById.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
+			if (session.leafId === branchFromId) return;
+			appendLeafRecord(session, branchFromId);
+			session.leafId = branchFromId;
+		});
 	}
 
 	/** 把叶子移到第一条之前，下一次追加就成为新的根。 */
 	resetLeaf(session: Session): void {
-		if (session.leafId === null) return;
-		appendLeafRecord(session, null);
-		session.leafId = null;
+		this.holding(session, () => {
+			if (session.leafId === null) return;
+			appendLeafRecord(session, null);
+			session.leafId = null;
+		});
 	}
 
 	/**
@@ -1771,15 +1889,14 @@ export class SessionManager {
 	 * 却打不开的配对由 {@link fillSession} 自己清除，所以这是一次可能会删除文件的读取。
 	 *
 	 * 冷写入是两步不是三步——先这里拿袋，再一个 setter，setter 自己写文件（`setTitle` 记录 meta，
-	 * 记录即持久化）。没有第三个要记住的 persist 动词，也没有要冲刷的脏状态。这里的安全性不是 hold
-	 * 的工作：session 被 hold 时，它唯一的写入方是 orchestrator 持有的袋；不被 hold 时，一次冷写入
-	 * 是一个其他写入方进不来的同步块——两个窗口从不重叠，因为冷路径只服务没有任何东西 hold 的
-	 * session。
+	 * 记录即持久化）。没有第三个要记住的 persist 动词，也没有要冲刷的脏状态。冷路径也过文件闸：
+	 * id → 文件的解析本身就是进闸前的一次地址解析，进闸是一次与 `closing` 的相遇——打开撞上一个
+	 * 正在进行的删除，以「没有这个会话」拒绝，而不是读到一个半途被删的文件对。
 	 */
 	open(id: string): Session {
 		const absPath = SessionManager.findSessionFilePathById(id);
 		if (absPath === undefined) throw new UnknownSessionError(id);
-		return fillSession(absPath);
+		return this.holdingFileKey(absPathKey(absPath), id, () => fillSession(absPath));
 	}
 
 	// =========================================================================
@@ -1795,7 +1912,8 @@ export class SessionManager {
 	 * 悬空 call——因为那些现在是 session 自己的值，不是分支重放能恢复的条目。工作目录取源 header
 	 * 自己的：fork 写在它的源住的地方，也不要求调用方重放文件去了解那里是哪。
 	 *
-	 * 源只被读取：fork 是新的一对文件，它来源的 session 从不被重写。fork 不填充任何东西也不注册
+	 * 源只被读取：fork 是新的一对文件，它来源的 session 从不被重写——对源的读不进闸，「读不拿锁」
+	 * 的边界原样；闸罩的是写目标半，新文件对在自己的长度内持闸。fork 不填充任何东西也不注册
 	 * 任何东西——文件就是它返回的全部，新 session 的第一个袋来自它的第一次 {@link open}，后者读取
 	 * 刚写下的配对。两个文件都在返回前同步写完，快照最后写（`wx`，诞生的提交标记），所以这里递出去
 	 * 的 id 在调用方拿到时已经可以打开。
@@ -1842,8 +1960,11 @@ export class SessionManager {
 			...(sourceMeta.approval === undefined ? {} : { approval: sourceMeta.approval }),
 			...(sourceMeta.suspended === undefined ? {} : { suspended: sourceMeta.suspended }),
 		};
-		writeFileSync(absNewSessionFile, branch.map((entry) => `${JSON.stringify(entry)}\n`).join(""), { flag: "wx" });
-		writeFileSync(sessionMetaPath(absNewSessionFile), `${JSON.stringify(meta, null, "\t")}\n`, { flag: "wx" });
+		// 只罩写目标半：两个文件同步写完才放闸，源半全程在闸外。
+		this.holdingFileKey(absPathKey(absNewSessionFile), newSessionId, () => {
+			writeFileSync(absNewSessionFile, branch.map((entry) => `${JSON.stringify(entry)}\n`).join(""), { flag: "wx" });
+			writeFileSync(sessionMetaPath(absNewSessionFile), `${JSON.stringify(meta, null, "\t")}\n`, { flag: "wx" });
+		});
 
 		return { sessionId: newSessionId, sessionFileAbsPath: absNewSessionFile };
 	}
@@ -1962,12 +2083,38 @@ export class SessionManager {
 	 *
 	 * 纯文件 I/O：为这个 id 持有活袋的表是谁的就是谁的，决定 session 已消失的调用方自己忘掉那一半
 	 * （`Agent.deleteSessionBySessionId`）。
+	 *
+	 * remove 是唯一跨 await 的持有者，闸罩它全程：进闸后立刻立起 `closing`，rm 的 await 窗口里一切
+	 * 进闸尝试撞上它、以「没有这个会话」拒绝；finally 的出闸整条删掉条目——窗口里的计数只含 remove
+	 * 自己，其他进闸已被 `closing` 挡在门外。
+	 *
+	 * 两步 rm 的顺序是刻意的：**先删 `.json`（诞生的提交标记），后删 `.jsonl`（流）**。`.json` 先走，
+	 * 两步 rm 之间到达的一切新写入方（prompt 前置校验、grant、冷路径）都查 meta、都读到「不存在」
+	 * ——中间态读作半途夭折的诞生，由既有扫描（`settleSessionFiles` / `fillSession` 的 prune）自愈，
+	 * 而不是发明新的原子性（文件系统没有「存在才写」的原子原语，实证：
+	 * `.scratch/fs-race-test/test.mjs`）。反过来的顺序会留下一个 meta 还在、流却没了的中间态，读作
+	 * 「会话在但记录残缺」，每个读者都要另作解释。
+	 *
+	 * 两步 rm 都带 `force`：扫描自愈（`fillSession` 的 prune、`settleSessionFiles`）可能在 rm 的
+	 * await 窗口里读到「meta 已走」的中间态、抢先清掉另一半——文件已被删掉就是删除已经达成，
+	 * 是「早已不在」的成功而不是病态；反过来，rm 因文件损毁以外的原因失败才值得上报。
 	 */
 	async remove(id: string): Promise<void> {
 		const absPath = SessionManager.findSessionFilePathById(id);
 		if (absPath === undefined) throw new UnknownSessionError(id);
-		await rm(absPath);
-		await rm(sessionMetaPath(absPath));
+		const fileKey = absPathKey(absPath);
+		const entry = this.enterHold(fileKey, id);
+		const closing = (async () => {
+			await rm(sessionMetaPath(absPath), { force: true });
+			if (removeGate !== undefined) await removeGate();
+			await rm(absPath, { force: true });
+		})();
+		entry.closing = closing;
+		try {
+			await closing;
+		} finally {
+			this.holds.delete(fileKey);
+		}
 	}
 
 }

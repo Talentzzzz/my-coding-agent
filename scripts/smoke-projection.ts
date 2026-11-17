@@ -226,7 +226,7 @@ try {
 	);
 	check("while the session it came from names nobody", (await projection.row(source))?.parentId === undefined, (await projection.row(source))?.parentId);
 
-	process.stdout.write("watching a session is not the same as holding it\n");
+	process.stdout.write("watching a session is not the same as running it\n");
 	const afterStop = await hub.birth({ text: "an unobserved birth" });
 	await projection.refresh(afterStop);
 	let events = 0;
@@ -238,13 +238,10 @@ try {
 		});
 	});
 	check("watching it did not assemble anything", !hub.isLive(afterStop), String(hub.isLive(afterStop)));
-	await hub.hold(afterStop);
-	check("and the hold is counted", hub.holdsOf(afterStop) === 1, `holds=${hub.holdsOf(afterStop)}`);
 	fake.setResponses([fakeAssistantMessage("seen")]);
 	await hub.agent.prompt(afterStop, "does the watcher hear this");
 	check("the watcher heard the run's events without any rebinding", events > 0, `${events} events`);
-	hub.release(afterStop);
-	check("nothing stays live after release", !hub.isLive(afterStop), String(hub.isLive(afterStop)));
+	check("nothing stays live after the run", !hub.isLive(afterStop), String(hub.isLive(afterStop)));
 	// 行的诞生发布与 idle 重新发布都是异步读；等 idle 那次，而不是猜测运行结束时哪次已落地。
 	check("and the row says idle", await until(() => seen.some((row) => row.id === afterStop && row.running === false)), JSON.stringify(seen.filter((row) => row.id === afterStop)));
 	stopWatching();
@@ -261,7 +258,7 @@ try {
 			fakeAssistantMessage("done"),
 		]);
 		await hub.agent.prompt(id, promptText);
-		if (!hub.agent.hasPendingApprovals(id)) throw new Error("the session did not park, so the marker checks cannot run");
+		if (hub.agent.snapshot(id).pendingApprovals.length === 0) throw new Error("the session did not park, so the marker checks cannot run");
 		return id;
 	};
 	const parkedId = await park("read the notes");
