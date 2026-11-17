@@ -1321,7 +1321,9 @@ export class SessionManager {
 	 * 保护的东西（同一 stem 的 `.json` + `.jsonl`）重合。进闸时发现 `closing` 在场（一次删除正跨着
 	 * await），以 `UnknownSessionError` 拒绝——读作「没有这个会话」，与「等过 closing 再发现文件
 	 * 没了」是同一答案、同一错误种类，只是不再等待。同步方法的进出是瞬时的：单线程进程里同步块
-	 * 不可被打断，它的意义不是互斥等待，而是与 `closing` 闸的相遇点。
+	 * 不可被打断，它的意义不是互斥等待，而是与 `closing` 闸的相遇点。热读（袋在手）从不进闸；
+	 * `open` 是冷路径唯一的入口，做 I/O 且可能 prune，所以进闸——「读不拿锁」罩的是持有袋的
+	 * 读取，不是冷路径的打开动作。
 	 *
 	 * 这是对 ADR-0006 无属性服务形态的一次**有意识的修订**：这张表是易失簿记——重启即空、不落盘、
 	 * 不可重建也不需重建——与 `ToolManager` 的常驻实例表（ADR-0011）同类；无状态门面的其他一切
@@ -1333,19 +1335,15 @@ export class SessionManager {
 	private readonly holds = new Map<string, { holds: number; closing?: Promise<void> }>();
 
 	/**
-	 * 袋的文件键：fileCreated 之外无文件可保护——尚未诞生的袋不进闸（它的变更留在内存里，由
-	 * {@link persistEntry} 的诞生写入整体带上盘），回答 `undefined`。
+	 * 进闸：文件键计数 +1；闸正被一次删除占着时，以「没有这个会话」拒绝。返回它立起的条目，让
+	 * 唯一跨 await 的持有者（`remove`）在同一拍挂上 `closing`，而不必回头再查一次表。
 	 */
-	private fileKeyOf(session: Session): string | undefined {
-		if (!session.fileCreated || session.sessionFileAbsPath === undefined) return undefined;
-		return absPathKey(session.sessionFileAbsPath);
-	}
-
-	/** 进闸：文件键计数 +1；闸正被一次删除占着时，以「没有这个会话」拒绝。 */
-	private enterHold(fileKey: string, sessionId: string): void {
+	private enterHold(fileKey: string, sessionId: string): { holds: number; closing?: Promise<void> } {
 		const entry = this.holds.get(fileKey);
 		if (entry?.closing !== undefined) throw new UnknownSessionError(sessionId);
-		this.holds.set(fileKey, { holds: (entry?.holds ?? 0) + 1 });
+		const fresh = { holds: (entry?.holds ?? 0) + 1 };
+		this.holds.set(fileKey, fresh);
+		return fresh;
 	}
 
 	/** 出闸：宽容释放（无人持有的文件键无事发生）、归零删条目——hub 旧 `release()` 的语义原样。 */
@@ -1358,13 +1356,31 @@ export class SessionManager {
 	}
 
 	/**
-	 * 同步写路径共用的闸括号：进闸、动作、出闸在同一个同步块里完成。公开方法持闸、内部互调不重复
-	 * 计账——新形态里锁只有这一个进出层，嵌套不存在。
+	 * 袋式写路径共用的闸括号：进闸、动作、出闸在同一个同步块里完成。公开方法持闸、内部互调不重复
+	 * 计账——锁只有这一个进出层（{@link holdingFileKey}），嵌套不存在。
+	 *
+	 * 已诞生的袋（fileCreated）在进闸前先复核提交标记仍在——**复活守卫**：删除完成后陈旧袋进闸时
+	 * 已撞不到 `closing`，闸条目随 `remove` 的 finally 整条退场；没有这道复核，它的 appendMessage
+	 * 会经 {@link persistEntry} 的 appendFileSync 把 `.jsonl` 造回来、meta setter 会把 `.json` 造
+	 * 回去，被删的会话无声诈尸成半个会话（spec User Story 4：「最后一个动作赢」）。标记不在即以
+	 * {@link UnknownSessionError} 拒绝，读作「没有这个会话」——与闸内拒绝同一答案、同一错误种类。
+	 * 尚未诞生的袋没有文件可保护也不可复活（它的变更留在内存里，由 {@link persistEntry} 的诞生写入
+	 * 整体带上盘），不进闸、不复核。
 	 */
 	private holding<T>(session: Session, action: () => T): T {
-		const fileKey = this.fileKeyOf(session);
-		if (fileKey === undefined) return action();
-		this.enterHold(fileKey, session.sessionId);
+		const absJsonl = session.fileCreated ? session.sessionFileAbsPath : undefined;
+		if (absJsonl === undefined) return action();
+		if (!existsSync(sessionMetaPath(absJsonl))) throw new UnknownSessionError(session.sessionId);
+		return this.holdingFileKey(absPathKey(absJsonl), session.sessionId, action);
+	}
+
+	/**
+	 * 以文件键进门的同一层闸括号：袋式方法经 {@link holding}（它补上袋 → 文件键的解析与复活守卫），
+	 * 不经袋的进闸——`open` 的冷路径、`forkFrom` 的写目标半——直接指名文件键。`remove` 是唯一的
+	 * 例外：它跨 await，以自己的路径持有、立 `closing`、finally 整条退场。
+	 */
+	private holdingFileKey<T>(fileKey: string, sessionId: string, action: () => T): T {
+		this.enterHold(fileKey, sessionId);
 		try {
 			return action();
 		} finally {
@@ -1880,13 +1896,7 @@ export class SessionManager {
 	open(id: string): Session {
 		const absPath = SessionManager.findSessionFilePathById(id);
 		if (absPath === undefined) throw new UnknownSessionError(id);
-		const fileKey = absPathKey(absPath);
-		this.enterHold(fileKey, id);
-		try {
-			return fillSession(absPath);
-		} finally {
-			this.leaveHold(fileKey);
-		}
+		return this.holdingFileKey(absPathKey(absPath), id, () => fillSession(absPath));
 	}
 
 	// =========================================================================
@@ -1951,14 +1961,10 @@ export class SessionManager {
 			...(sourceMeta.suspended === undefined ? {} : { suspended: sourceMeta.suspended }),
 		};
 		// 只罩写目标半：两个文件同步写完才放闸，源半全程在闸外。
-		const fileKey = absPathKey(absNewSessionFile);
-		this.enterHold(fileKey, newSessionId);
-		try {
+		this.holdingFileKey(absPathKey(absNewSessionFile), newSessionId, () => {
 			writeFileSync(absNewSessionFile, branch.map((entry) => `${JSON.stringify(entry)}\n`).join(""), { flag: "wx" });
 			writeFileSync(sessionMetaPath(absNewSessionFile), `${JSON.stringify(meta, null, "\t")}\n`, { flag: "wx" });
-		} finally {
-			this.leaveHold(fileKey);
-		}
+		});
 
 		return { sessionId: newSessionId, sessionFileAbsPath: absNewSessionFile };
 	}
@@ -2093,13 +2099,13 @@ export class SessionManager {
 		const absPath = SessionManager.findSessionFilePathById(id);
 		if (absPath === undefined) throw new UnknownSessionError(id);
 		const fileKey = absPathKey(absPath);
-		this.enterHold(fileKey, id);
+		const entry = this.enterHold(fileKey, id);
 		const closing = (async () => {
 			await rm(sessionMetaPath(absPath));
 			if (removeGate !== undefined) await removeGate();
 			await rm(absPath);
 		})();
-		this.holds.get(fileKey)!.closing = closing;
+		entry.closing = closing;
 		try {
 			await closing;
 		} finally {
