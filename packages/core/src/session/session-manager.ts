@@ -2080,7 +2080,14 @@ export class SessionManager {
 	 *
 	 * remove 是唯一跨 await 的持有者，闸罩它全程：进闸后立刻立起 `closing`，rm 的 await 窗口里一切
 	 * 进闸尝试撞上它、以「没有这个会话」拒绝；finally 的出闸整条删掉条目——窗口里的计数只含 remove
-	 * 自己，其他进闸已被 `closing` 挡在门外。两步 rm 的现有顺序原样保留。
+	 * 自己，其他进闸已被 `closing` 挡在门外。
+	 *
+	 * 两步 rm 的顺序是刻意的：**先删 `.json`（诞生的提交标记），后删 `.jsonl`（流）**。`.json` 先走，
+	 * 两步 rm 之间到达的一切新写入方（prompt 前置校验、grant、冷路径）都查 meta、都读到「不存在」
+	 * ——中间态读作半途夭折的诞生，由既有扫描（`settleSessionFiles` / `fillSession` 的 prune）自愈，
+	 * 而不是发明新的原子性（文件系统没有「存在才写」的原子原语，实证：
+	 * `.scratch/fs-race-test/test.mjs`）。反过来的顺序会留下一个 meta 还在、流却没了的中间态，读作
+	 * 「会话在但记录残缺」，每个读者都要另作解释。
 	 */
 	async remove(id: string): Promise<void> {
 		const absPath = SessionManager.findSessionFilePathById(id);
@@ -2088,9 +2095,9 @@ export class SessionManager {
 		const fileKey = absPathKey(absPath);
 		this.enterHold(fileKey, id);
 		const closing = (async () => {
-			await rm(absPath);
-			if (removeGate !== undefined) await removeGate();
 			await rm(sessionMetaPath(absPath));
+			if (removeGate !== undefined) await removeGate();
+			await rm(absPath);
 		})();
 		this.holds.get(fileKey)!.closing = closing;
 		try {

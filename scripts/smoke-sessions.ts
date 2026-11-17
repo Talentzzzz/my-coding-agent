@@ -7,8 +7,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { request } from "node:http";
-import type { Message } from "@my-agent/core";
+import { createAssistantMessageEventStream, type ChatTransport, type Message, type ModelConfig } from "@my-agent/core";
 import { bootServer } from "../packages/server/src/boot.ts";
+import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import {
 	CURRENT_SESSION_VERSION,
@@ -175,6 +176,67 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
 	return ready();
+}
+
+/** 供模型解析用的最小行：脚本化 transport 作答， baseUrl 永不被打到。 */
+const vetoRows: ModelConfig[] = [
+	{
+		name: "anthropic",
+		baseUrl: "http://127.0.0.1:1/v1",
+		apiKey: "unused-by-the-scripted-transport",
+		id: "claude-sonnet-4-5",
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+	},
+];
+
+/**
+ * 把第一次供应商请求钉在流式半空的可控 gate（仿 smoke-approval-queue 的 gatedApi）：删除动手时
+ * 「运行还在飞」因此是事实而不是猜测。abort 信号也放行——真正的 transport 尊重自己的 signal；
+ * 被放行后剧本照常流完，被停下的轮次在磁盘上是一轮完整的轮次。
+ */
+function vetoGate(): { api: ChatTransport; held(): boolean; sawAbort(): boolean; release(): void } {
+	const fake = createFakeTransport();
+	fake.setResponses([fakeAssistantMessage("被删除打断前的最后一条回答")]);
+	const inner = fake.api.stream.bind(fake.api);
+	let held = false;
+	let aborted = false;
+	let release!: () => void;
+	const released = new Promise<void>((done) => {
+		release = done;
+	});
+	const api: ChatTransport = {
+		stream: (model, context, options) => {
+			const outer = createAssistantMessageEventStream();
+			void (async () => {
+				held = true;
+				await Promise.race([
+					released,
+					new Promise<void>((resolve) => {
+						options?.signal?.addEventListener(
+							"abort",
+							() => {
+								aborted = true;
+								resolve();
+							},
+							{ once: true },
+						);
+					}),
+				]);
+				const answer = inner(model, context, options);
+				for await (const event of answer) outer.push(event);
+				outer.end(await answer.result());
+			})();
+			return outer;
+		},
+	};
+	return {
+		api,
+		held: () => held,
+		sawAbort: () => aborted,
+		// 供排错用：从外面强制放行，正常路径里只有 abort 信号会到。
+		release,
+	};
 }
 
 const hub = new SessionHub({ workDirAbsPath: root });
@@ -1004,6 +1066,47 @@ try {
 		await agent.deleteSessionBySessionId(session.sessionId);
 		check("an id no longer in the table answers nothing", entryOf(agent, session.sessionId) === undefined);
 		check("deleting it again refuses", (await agent.deleteSessionBySessionId(session.sessionId).then(() => "deleted", () => "refused")) === "refused");
+	}
+
+	process.stdout.write("a delete vetoes a run in flight\n");
+	// 票 02 的否决式：删除不再要求调用方先把会话安顿好——运行在飞则删除自己中止它、等引擎收尾，
+	// 然后在文件闸内删掉文件对、出表。core 级断言（不经 HTTP）：可控 gate 把一次运行钉在流式
+	// 半空，直接调 deleteSessionBySessionId，看删除赢。
+	{
+		const gate = vetoGate();
+		const session = createSession(root);
+		// 会话随第一条消息出生（ADR-0021）：对袋直接追加让文件落地，不跑引擎、不耗剧本。
+		store.appendMessage(session, userMessage("删除动手时还在跑的会话"));
+		const id = session.sessionId;
+		const agent = await openAgent({
+			session,
+			api: gate.api,
+			settings: inMemorySettingManager({}, vetoRows),
+		});
+
+		const running = agent.prompt(id, "删除动手时我还在流式", { selection: { model: "anthropic" } });
+		check("the run reaches the transport gate", await until(() => gate.held()));
+		check("and the file pair exists while it streams", SessionManager.findSessionFilePathById(id) !== undefined);
+
+		const removed = await agent.deleteSessionBySessionId(id).then(
+			() => true,
+			(error: unknown) => {
+				void gate.release();
+				void running.catch(() => undefined);
+				return String(error);
+			},
+		);
+		check("the delete of a running session succeeds (the veto wins)", removed === true, String(removed));
+		check("the run received the abort", gate.sawAbort());
+		check("the aborted run has settled", await until(() => !agent.isRunning(id)));
+		void running.catch(() => undefined);
+		check("the table no longer holds the live half", entryOf(agent, id) === undefined);
+		check("the file pair is gone", SessionManager.findSessionFilePathById(id) === undefined);
+		check(
+			"and no file of the session survived on disk",
+			readdirSync(storeRoot).every((name) => !name.startsWith(id)),
+			JSON.stringify(readdirSync(storeRoot)),
+		);
 	}
 
 	process.stdout.write("a pair this build cannot open is deleted, not kept\n");
