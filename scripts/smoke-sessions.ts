@@ -943,6 +943,15 @@ try {
 			const removing = store.remove(gateId);
 			try {
 				check("the removal reaches the gate between the two rm steps", await until(() => entered));
+				// 中间态的形状（票 04）：rm 刻意先删 `.json`（诞生的提交标记）后删 `.jsonl`（流），所以
+				// 闸中此刻看到的正是半途夭折的诞生——提交标记已走、流还在，对一切查 meta 的读者读作
+				// 「没有这个会话」。
+				const midJsonl = victim.sessionFileAbsPath!;
+				check(
+					"the commit marker goes first, the stream waits in the middle",
+					!existsSync(snapshotPathOf(midJsonl)) && existsSync(midJsonl),
+				);
+				check("and the id reads as missing mid-removal", SessionManager.findSessionFilePathById(gateId) === undefined);
 				let titleRefusal: unknown;
 				try {
 					store.setTitle(victim, "闸内的名字");
@@ -975,6 +984,72 @@ try {
 				readdirSync(storeRoot).every((name) => !name.startsWith(gateId)),
 				JSON.stringify(readdirSync(storeRoot)),
 			);
+		}
+
+		// 删除与在途写入撞车（票 04，User Story 4）：删除前就已开好的袋在删除途中到达的写入，一律读作
+		// 「没有这个会话」；放行后删除完成——无孤儿文件，扫描也清不出任何诈尸的行。
+		{
+			const collideSession = createSession(root);
+			store.appendMessage(collideSession, userMessage("撞车的会话"));
+			const collideId = collideSession.sessionId;
+			const stale = store.open(collideId);
+			let entered = false;
+			let release!: () => void;
+			const held = new Promise<void>((done) => {
+				release = done;
+			});
+			setRemoveGate(async () => {
+				entered = true;
+				await held;
+			});
+			const removing = store.remove(collideId);
+			try {
+				check("the colliding removal reaches the gate", await until(() => entered));
+				let appendRefusal: unknown;
+				try {
+					store.appendMessage(stale, userMessage("删除之后才到的写入"));
+				} catch (error) {
+					appendRefusal = error;
+				}
+				check("an append from a bag opened before the deletion is refused", appendRefusal instanceof UnknownSessionError, String(appendRefusal));
+				let titleRefusal: unknown;
+				try {
+					store.setTitle(stale, "删除之后才到的名字");
+				} catch (error) {
+					titleRefusal = error;
+				}
+				check("and so is a meta setter from the same stale bag", titleRefusal instanceof UnknownSessionError, String(titleRefusal));
+			} finally {
+				release();
+				await removing;
+				setRemoveGate(undefined);
+			}
+			check("the deletion finished once the gate let go", SessionManager.findSessionFilePathById(collideId) === undefined);
+			check(
+				"no orphan file survived the collision",
+				readdirSync(storeRoot).every((name) => !name.startsWith(collideId)),
+				JSON.stringify(readdirSync(storeRoot)),
+			);
+			check(
+				"and no scan resurrects the deleted session",
+				!(await SessionManager.list(root)).some((info) => info.id === collideId),
+			);
+		}
+
+		// 半途夭折的诞生由扫描自愈（票 04）：先提交标记后流是刻意的 rm 顺序——rm 的两步之间到达的
+		// 读者看到的正是未配对的流。这里手写这个状态（与闸中删除产出的形状一致，参照上面 v4 遗物的
+		// 写法），看列表扫描把它清掉，而不是给中间态发明新的原子性。
+		{
+			const halfBornStem = join(storeRoot, "2026-01-01T00-00-04-000Z_halfborn");
+			await writeFile(
+				`${halfBornStem}.jsonl`,
+				`${JSON.stringify({ type: "message", id: "hb-u1", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: [{ type: "text", text: "a half-born conversation" }] } })}\n`,
+				"utf8",
+			);
+			check("the half-born pair looks exactly like the mid-removal state", existsSync(`${halfBornStem}.jsonl`) && !existsSync(`${halfBornStem}.json`));
+			const listed = await SessionManager.list(root);
+			check("the scan lists none of it", !listed.some((info) => info.id === "halfborn"), JSON.stringify(listed.map((info) => info.id)));
+			check("and the scan swept the half-born stream", !existsSync(`${halfBornStem}.jsonl`));
 		}
 
 		// 宽容释放不随搬家消失：同一 id 先以未诞生的袋多次在闸外做选择（表上无条目、无进出），再以

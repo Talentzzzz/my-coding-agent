@@ -445,7 +445,7 @@ try {
 	try {
 		const { wire } = await driveToApproval(patient);
 		const parked = patient.sessionId;
-		check("the run parked at the approval", patient.agent.hasPendingApprovals(parked));
+		check("the run parked at the approval", patient.agent.snapshot(parked).pendingApprovals.length > 0);
 		const parkedMeta = await readMeta(parked);
 		check("and the snapshot carries the suspended marker", parkedMeta.suspended === true, JSON.stringify(parkedMeta));
 
@@ -465,7 +465,7 @@ try {
 			parkedRow?.pending === 1 && parkedRow?.running === false,
 			JSON.stringify(parkedRow),
 		);
-		check("the approval is still pending, undenied", patient.agent.hasPendingApprovals(parked), "it was denied");
+		check("the approval is still pending, undenied", patient.agent.snapshot(parked).pendingApprovals.length > 0, "it was denied");
 		check(
 			"and no denial reached the lane",
 			wire.items(patient.sessionId).every((message) => message.type !== "approval_settled"),
@@ -541,7 +541,7 @@ try {
 	try {
 		const { wire } = await driveToApproval(abandoned);
 		const parked = abandoned.sessionId;
-		check("the run parked at the approval", abandoned.agent.hasPendingApprovals(parked));
+		check("the run parked at the approval", abandoned.agent.snapshot(parked).pendingApprovals.length > 0);
 
 		wire.cancel(abandoned.sessionId);
 		check("and the state stayed parked", abandoned.hub.isLive(parked), String(abandoned.hub.isLive(parked)));
@@ -573,7 +573,7 @@ try {
 	try {
 		const { wire } = await driveToApproval(aborted);
 		const parked = aborted.sessionId;
-		check("the run parked at the approval", aborted.agent.hasPendingApprovals(parked));
+		check("the run parked at the approval", aborted.agent.snapshot(parked).pendingApprovals.length > 0);
 		check("the snapshot carries the suspended marker", (await readMeta(parked)).suspended === true);
 
 		const stopped = await request(aborted.url, "POST", `/api/sessions/${parked}/abort`);
@@ -596,7 +596,7 @@ try {
 	try {
 		const { wire } = await driveToApproval(forked);
 		const parked = forked.sessionId;
-		check("the run parked at the approval", forked.agent.hasPendingApprovals(parked));
+		check("the run parked at the approval", forked.agent.snapshot(parked).pendingApprovals.length > 0);
 
 		// Attached before the fork, so the row's first publish is heard rather than raced. The
 		// overview is the registration proof: it is sent once the mux owns the connection, so a

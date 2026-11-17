@@ -775,17 +775,6 @@ export class Agent {
 		return this.approvalsOf(this.getSessionBySessionId(id));
 	}
 
-	/**
-	 * 会话记录 是否握着一个没人回答的工具调用。
-	 *
-	 * 只有空闲的会话报告它。在运行*中途*悬空的调用是一个正在落地的结果，不是等人的问题，报告它会让
-	 * 每个工具批都闪一次横幅；等答案的调用是那些运行已经结束的。
-	 */
-	hasPendingApprovals(id: string): boolean {
-		if (this.agentStateMap.get(id)?.live.activeRun !== undefined) return false;
-		return this.danglingApprovals(this.getSessionBySessionId(id)).length > 0;
-	}
-
 	// ---------------------------------------------------------------------------- 运行生命周期
 
 	/**
@@ -1933,7 +1922,8 @@ export class Agent {
 	 * 会话记录 仍在等的工具调用，以审批流看到的形状。
 	 *
 	 * 从账本派生、从不持有（ADR-0005 §5）：一个正在等的审批*就是*视图里的悬空调用，答案经 REST 抵达
-	 * 关闭它。运行在飞时为何一个都不报，见 {@link Agent.hasPendingApprovals}。
+	 * 关闭它。运行在飞时一个都不报——在飞的调用是一个正在落地的结果，不是等人的问题；等答案的调用
+	 * 是那些运行已经结束的。
 	 */
 	private danglingApprovals(session: Session): PendingApproval[] {
 		return danglingApprovalsOf(this.sessionManager.buildContextEntries(session));

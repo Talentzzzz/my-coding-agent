@@ -175,7 +175,7 @@ process.stdout.write("\na message queued before the gate survives the park and i
 	gate.release(1);
 	await agent.settle(sidOf(agent));
 
-	check("the gate ended the run with the call dangling", agent.hasPendingApprovals(sidOf(agent)), JSON.stringify(agent.snapshot(sidOf(agent)).pendingApprovals));
+	check("the gate ended the run with the call dangling", agent.snapshot(sidOf(agent)).pendingApprovals.length > 0, JSON.stringify(agent.snapshot(sidOf(agent)).pendingApprovals));
 	check(
 		"the queued message is still counted while the approval waits",
 		agent.snapshot(sidOf(agent)).queued.length === 1,
@@ -234,7 +234,7 @@ process.stdout.write("\nan abandoned approval drops what was queued, and settle 
 	await agent.abort(sidOf(agent));
 	await agent.settle(sidOf(agent));
 
-	check("the unanswered call was closed with the sweep's sentence", !agent.hasPendingApprovals(sidOf(agent)));
+	check("the unanswered call was closed with the sweep's sentence", agent.snapshot(sidOf(agent)).pendingApprovals.length === 0);
 	check("the queued message went with the run nobody resumed", agent.snapshot(sidOf(agent)).queued.length === 0, String(agent.snapshot(sidOf(agent)).queued.length));
 	check(
 		"and nothing was written for it",
