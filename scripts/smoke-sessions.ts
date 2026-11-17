@@ -20,6 +20,7 @@ import {
 	openAgent,
 	readSessionSnapshot,
 	SessionManager,
+	UnknownSessionError,
 	inMemorySettingManager,
 	SettingManager,
 	setSessionsDir,
@@ -27,6 +28,8 @@ import {
 	type SessionSnapshot,
 	type Session,
 } from "@my-agent/core";
+// 仅测试的接缝住在它保护的方法旁边（仿 `setSessionsDir` 的先例）；直呼源文件，不经包的公开面。
+import { setRemoveGate } from "../packages/core/src/session/session-manager.ts";
 
 /** The ledger's operations are the service's methods, so a script holds one to call them on. */
 const store = new SessionManager();
@@ -868,6 +871,114 @@ try {
 			check("open refuses an id with no file behind it", refused);
 		} finally {
 			await rm(statelessRoot, { recursive: true, force: true });
+		}
+	}
+
+	process.stdout.write("the manager holds the file pairs it touches\n");
+	// holds 迁入 SessionManager（票 01）：触碰文件对的公开方法在自己的长度内持闸，remove 是唯一跨
+	// await 的持有者。断言全部走外部可观察面——开出来的袋、盘上的文件——不偷看 Manager 内部的计数
+	// 表。会话直接经 bare service（store）驱动，文件落在 storeRoot，不起 HTTP。
+	{
+		const gateSession = createSession(root);
+		store.appendMessage(gateSession, userMessage("born under the gate"));
+		const gateId = gateSession.sessionId;
+
+		// 两次进闸解析出同一个文件键：两次 open 给出同一条 `.jsonl` 路径，经其中一只袋写入，从另
+		// 一次重放里读得回来——同一条目，就是同一把钥匙。
+		const first = store.open(gateId);
+		const second = store.open(gateId);
+		check(
+			"two opens answer the same file",
+			first.sessionFileAbsPath !== undefined && first.sessionFileAbsPath === second.sessionFileAbsPath,
+			`${first.sessionFileAbsPath} vs ${second.sessionFileAbsPath}`,
+		);
+		store.appendMessage(second, userMessage("written through the second open"));
+		const reread = store.open(gateId);
+		check(
+			"and a write through one open reaches what both name",
+			JSON.stringify(store.getEntries(reread)).includes("written through the second open"),
+		);
+
+		// 无所指 id 在进闸之前就被拒绝：id → 文件的解析发生在闸前，解析不出就没有可保护的东西。
+		let openRefusal: unknown;
+		try {
+			store.open("0123456789abcdef");
+		} catch (error) {
+			openRefusal = error;
+		}
+		check("open refuses an unknown id with UnknownSessionError", openRefusal instanceof UnknownSessionError, String(openRefusal));
+		const removeRefusal = await store.remove("0123456789abcdef").then(() => "removed" as const, (error: unknown) => error);
+		check("and so does remove, before the gate", removeRefusal instanceof UnknownSessionError, String(removeRefusal));
+
+		// 删除闸内的写被拒：remove 在两步 rm 之间的可控 gate 里挂起，此刻对该会话的 meta setter、
+		// append 与冷 open 全部读作「没有这个会话」；放行后删除完成，盘上无任何残留文件。
+		{
+			const victim = store.open(gateId);
+			let entered = false;
+			let release!: () => void;
+			const held = new Promise<void>((done) => {
+				release = done;
+			});
+			setRemoveGate(async () => {
+				entered = true;
+				await held;
+			});
+			const removing = store.remove(gateId);
+			try {
+				check("the removal reaches the gate between the two rm steps", await until(() => entered));
+				let titleRefusal: unknown;
+				try {
+					store.setTitle(victim, "闸内的名字");
+				} catch (error) {
+					titleRefusal = error;
+				}
+				check("a meta setter inside the gate reads as missing", titleRefusal instanceof UnknownSessionError, String(titleRefusal));
+				let appendRefusal: unknown;
+				try {
+					store.appendMessage(victim, userMessage("too late"));
+				} catch (error) {
+					appendRefusal = error;
+				}
+				check("an append inside the gate reads as missing too", appendRefusal instanceof UnknownSessionError, String(appendRefusal));
+				let coldRefusal: unknown;
+				try {
+					store.open(gateId);
+				} catch (error) {
+					coldRefusal = error;
+				}
+				check("and a cold open during the removal is refused, not half-read", coldRefusal instanceof UnknownSessionError, String(coldRefusal));
+			} finally {
+				release();
+				await removing;
+				setRemoveGate(undefined);
+			}
+			check("the removal finished once the gate let go", SessionManager.findSessionFilePathById(gateId) === undefined);
+			check(
+				"and no file of the session survived",
+				readdirSync(storeRoot).every((name) => !name.startsWith(gateId)),
+				JSON.stringify(readdirSync(storeRoot)),
+			);
+		}
+
+		// 宽容释放不随搬家消失：同一 id 先以未诞生的袋多次在闸外做选择（表上无条目、无进出），再以
+		// 诞生袋连续多轮进/出闸，交错之后一切照常——没有泄漏的计数让任何一步失败。
+		{
+			const lenient = createSession(root);
+			store.setTitle(lenient, "闸外的名字");
+			store.setModel(lenient, "row-a", "model-a");
+			check("an unborn bag takes choices with no file to protect", !existsSync(lenient.sessionFileAbsPath!));
+			store.appendMessage(lenient, userMessage("the birth"));
+			const lenientId = lenient.sessionId;
+			for (let cycle = 0; cycle < 3; cycle++) {
+				store.appendMessage(store.open(lenientId), userMessage(`cycle ${cycle}`));
+			}
+			const settled = store.open(lenientId);
+			check(
+				"choices made outside the gate survive the birth",
+				store.getTitle(settled) === "闸外的名字" && store.getMeta(settled).model?.name === "row-a",
+				JSON.stringify(store.getMeta(settled)),
+			);
+			check("and every gate cycle landed in the one file", store.getEntries(settled).length === 4, String(store.getEntries(settled).length));
 		}
 	}
 
