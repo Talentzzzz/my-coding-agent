@@ -101,7 +101,7 @@ async function inFlight(target: SessionHub): Promise<{ id: string; release: () =
 }
 
 try {
-	process.stdout.write("live half: registration and snapshot are one atomic block\n");
+	process.stdout.write("活半：注册与快照是同一个原子块\n");
 	// 活半的会话有一个停在 transport 门口的运行。subscribe 必须在返回的同一拍交出 feeds，并在
 	// 返回之前同步交出袋里的在飞快照——中间没有 await，所以没有事件落得进缝隙。
 	const live = await inFlight(hub);
@@ -144,7 +144,7 @@ try {
 		liveOrder.join("|"),
 	);
 
-	process.stdout.write("rebaseline live: the same block at a second delivery time\n");
+	process.stdout.write("重发活半：第二个交付时机，同一个同步块\n");
 	// 重发不重新订阅：同一个 sink 契约，但 watcher 集合一个不多一个不少，而且交回的仍是袋里的
 	// 在飞状态——盘上那次落定说不了 running 为真。
 	const watchedBefore = hub.isWatched(live.id);
@@ -182,7 +182,7 @@ try {
 	stopLive();
 	check("and letting go is visible to isWatched", !hub.isWatched(live.id));
 
-	process.stdout.write("cold half: one asynchronous baseline, and the caller holds the gap\n");
+	process.stdout.write("冷半：一份异步 baseline，缝隙由调用方扣住\n");
 	// 冷会话只存在于盘上：本 hub 跑过它，于是对第二个 hub 的编排层表而言它是冷的。它的事件流在
 	// 注册的同一拍就通了，而 baseline 要读盘——读取期间发布的事件经调用方扣帧，读完了才按序冲刷。
 	const coldId = await born(hub, "a conversation only the store has seen");
@@ -252,7 +252,7 @@ try {
 	check("letting go of a cold subscription is visible to isWatched", !coldHub.isWatched(coldId));
 	check("the run that raced the read lands", await until(() => !coldHub.isLive(coldId)));
 
-	process.stdout.write("rebaseline cold: exactly once, and no watcher is left behind\n");
+	process.stdout.write("重发冷半：恰好一次，不留观看者\n");
 	const watchedBeforeResend = coldHub.isWatched(coldId);
 	let coldResendBaselines = 0;
 	let coldResendErrors = 0;
@@ -275,7 +275,7 @@ try {
 	check("and never twice, with no error", coldResendBaselines === 1 && coldResendErrors === 0, `${coldResendBaselines} baselines, ${coldResendErrors} errors`);
 	check("still no watcher afterwards: a resend does not register", !coldHub.isWatched(coldId));
 
-	process.stdout.write("failure: exactly one onError, and no baseline on any sink\n");
+	process.stdout.write("失败：onError 恰一次，任何 sink 都收不到 baseline\n");
 	// 不存在的 id：冷读取以 UnknownSessionError 拒绝，sink 收到恰好一次 onError 与零次 baseline。
 	const unknownId = "no-such-session-0000";
 	let unknownFeedsCalls = 0;
@@ -301,6 +301,25 @@ try {
 	check("onError names the id as unknown", unknownErrors[0] instanceof UnknownSessionError, String(unknownErrors[0]));
 	check("and onBaseline is never called", unknownBaselines === 0, `${unknownBaselines} baselines`);
 	check("the watcher hears nothing after the failure", unknownFeedsCalls === 1, `${unknownFeedsCalls} calls`);
+
+	// 重发也走同一个活冷分岔：不存在的 id 在重发路径上同样只答一次错误、零次 baseline。
+	let unknownResendBaselines = 0;
+	let unknownResendErrors = 0;
+	coldHub.rebaseline(unknownId, {
+		onBaseline: () => {
+			unknownResendBaselines += 1;
+		},
+		onError: () => {
+			unknownResendErrors += 1;
+		},
+	});
+	check("重发不存在的 id：onError 恰一次", await until(() => unknownResendErrors === 1), `${unknownResendErrors} errors`);
+	await settle();
+	check(
+		"重发不存在的 id：onBaseline 零次",
+		unknownResendErrors === 1 && unknownResendBaselines === 0,
+		`${unknownResendErrors} errors, ${unknownResendBaselines} baselines`,
+	);
 
 	// 一个读得进却读不完的配对：手写残缺快照，与 smoke-sessions 里 v4 遗物的构造同一风格。
 	const brokenId = "2026-01-01T00-00-00-000Z_broken";
@@ -333,7 +352,7 @@ try {
 	check("and never a baseline", brokenBaselines === 0, `${brokenBaselines} baselines`);
 	check("the watcher hears nothing after the read failure", brokenFeedsCalls === 1, `${brokenFeedsCalls} calls`);
 
-	process.stdout.write("remove and close: the goodbye, and letting go is terminal\n");
+	process.stdout.write("删除与收摊：一句告别，以及退订即终结\n");
 	// 退订幂等：第二次调用不抛，也不动同一个 id 上的另一个观看者。
 	const quiet = await inFlight(hub);
 	let quietEvents = 0;
@@ -365,6 +384,30 @@ try {
 	quiet.release();
 	await quiet.run;
 	await until(() => !hub.isLive(quiet.id));
+
+	// 退订的幂等只对「这一次订阅」负责：同一 id 上先订阅 A、退订 A、再订阅 B，然后再调一次 A 的
+	// 退订函数，不得把 B 的映射一并清掉——认的是 A 拿到的那只集合，不是这个 id。
+	const reopenedId = await born(hub, "a conversation whose first subscription let go for good");
+	let reopenedBaselines = 0;
+	const stopFirstOnId = hub.subscribe(reopenedId, () => {}, { onBaseline: () => (reopenedBaselines += 1), onError: () => {} });
+	check("首个订阅交出了 baseline", await until(() => reopenedBaselines === 1), `${reopenedBaselines} baselines`);
+	stopFirstOnId();
+	check("首次退订后 id 离开观看表", !hub.isWatched(reopenedId));
+	let reopenedGoodbye = 0;
+	let reopenedAgainBaselines = 0;
+	const stopReopened = hub.subscribe(
+		reopenedId,
+		(feeds) => {
+			if (feeds === undefined) reopenedGoodbye += 1;
+		},
+		{ onBaseline: () => (reopenedAgainBaselines += 1), onError: () => {} },
+	);
+	check("后来的订阅重新占住 id", await until(() => reopenedAgainBaselines === 1), `${reopenedAgainBaselines} baselines`);
+	stopFirstOnId();
+	check("旧退订函数再调一次是宽容的，且后来的订阅仍在表里", hub.isWatched(reopenedId), String(hub.isWatched(reopenedId)));
+	hub.remove(reopenedId);
+	check("旧退订不夺走后来者的告别", reopenedGoodbye === 1, `${reopenedGoodbye} goodbyes`);
+	stopReopened();
 
 	// 删除：观看者收到 `undefined` 作为告别，这是 mux 发 endStream 的那一拍。
 	const removedId = await born(hub, "a conversation about to be removed");
