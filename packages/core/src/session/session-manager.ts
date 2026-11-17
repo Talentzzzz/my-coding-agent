@@ -2094,6 +2094,10 @@ export class SessionManager {
 	 * 而不是发明新的原子性（文件系统没有「存在才写」的原子原语，实证：
 	 * `.scratch/fs-race-test/test.mjs`）。反过来的顺序会留下一个 meta 还在、流却没了的中间态，读作
 	 * 「会话在但记录残缺」，每个读者都要另作解释。
+	 *
+	 * 两步 rm 都带 `force`：扫描自愈（`fillSession` 的 prune、`settleSessionFiles`）可能在 rm 的
+	 * await 窗口里读到「meta 已走」的中间态、抢先清掉另一半——文件已被删掉就是删除已经达成，
+	 * 是「早已不在」的成功而不是病态；反过来，rm 因文件损毁以外的原因失败才值得上报。
 	 */
 	async remove(id: string): Promise<void> {
 		const absPath = SessionManager.findSessionFilePathById(id);
@@ -2101,9 +2105,9 @@ export class SessionManager {
 		const fileKey = absPathKey(absPath);
 		const entry = this.enterHold(fileKey, id);
 		const closing = (async () => {
-			await rm(sessionMetaPath(absPath));
+			await rm(sessionMetaPath(absPath), { force: true });
 			if (removeGate !== undefined) await removeGate();
-			await rm(absPath);
+			await rm(absPath, { force: true });
 		})();
 		entry.closing = closing;
 		try {
