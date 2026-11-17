@@ -230,13 +230,22 @@ try {
 	const afterStop = await hub.birth({ text: "an unobserved birth" });
 	await projection.refresh(afterStop);
 	let events = 0;
-	// 在 session 运行之前注册观看：feed 在注册的同一拍交出，之后随运行自流入，无需任何重绑。
-	const stopWatching = hub.watch(afterStop, (feeds) => {
-		if (feeds === undefined) return;
-		feeds.onEvent(() => {
-			events += 1;
-		});
-	});
+	// 在 session 运行之前订阅：watcher 在注册的同一拍交出 feed，之后随运行自流入，无需任何重绑。
+	// 装配走 hub 的新公开订阅原语 subscribe（裸注册的 watch 已退役为 mux 的过渡壳）——这个 smoke
+	// 不关心 baseline，sink 只收下然后丢弃；它观看的只是事件流与「观看不拼装任何东西」本身。
+	const stopWatching = hub.subscribe(
+		afterStop,
+		(feeds) => {
+			if (feeds === undefined) return;
+			feeds.onEvent(() => {
+				events += 1;
+			});
+		},
+		{
+			onBaseline: () => {},
+			onError: () => {},
+		},
+	);
 	check("watching it did not assemble anything", !hub.isLive(afterStop), String(hub.isLive(afterStop)));
 	fake.setResponses([fakeAssistantMessage("seen")]);
 	await hub.agent.prompt(afterStop, "does the watcher hear this");
