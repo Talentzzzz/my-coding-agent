@@ -802,6 +802,8 @@ export class Agent {
 	 */
 	async prompt(id: string, text: string, options: { behavior?: PromptBehavior; selection?: ModelSelection } = {}): Promise<void> {
 		const trimmed = text.trim();
+		// 已知边界（票 03 检查点）：空文本的短路在 open 之前——空文本 + 未知 id 在这里静默返回而不
+		// 是 404。空文本本就不改写任何东西，故不为此加预检查。
 		if (trimmed.length === 0) return;
 
 		// 输入框的选择随消息抵达，所以这是两半各自唯一被应用的地方。一条到不了这里的消息——空的、
@@ -1733,11 +1735,17 @@ export class Agent {
 	 * 所以它返回一条 aborted 消息而不是睡到底。这里不必知道运行是活的还是在退避中。
 	 */
 	async abort(id: string): Promise<void> {
-		// 表不持有的 id 无运行可停——跑完即散的袋正是这样离开的——立即返回。悬空调用不可能被
-		// 落下：停驻的袋自己留住（不清），非停驻的结束路径为被砍的调用合成结果，账本里没有
-		// 无人认领的悬空。
+		// 表不持有的 id 无运行可停——跑完即散的袋正是这样离开的——无事可做。但「无事可做」只覆盖
+		// 盘上有文件的会话（悬空的 abort 是正常情形，空闲即无事可停）；盘上也没有文件的 id 才是
+		// 真正的无所指，以 UnknownSessionError 拒绝（实现检查点，票 03：hold 括号退场后，每个
+		// mutating 命令的存在性 404 沿自己的路径提供）。core 的删除序先解析文件、只对在飞的运行
+		// 调用这里，不经这条拒绝；停驻的袋自己留住（不清），非停驻的结束路径为被砍的调用合成结果，
+		// 账本里没有无人认领的悬空。
 		const agentState = this.agentStateMap.get(id);
-		if (agentState === undefined) return;
+		if (agentState === undefined) {
+			if (SessionManager.findSessionFilePathById(id) === undefined) throw new UnknownSessionError(id);
+			return;
+		}
 		// 只读一次：运行在安顿时自己清掉自己的注册，而这个 promise 正是等待那次安顿的东西。
 		const active = agentState.live.activeRun;
 		active?.abortController.abort();

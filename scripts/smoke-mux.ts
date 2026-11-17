@@ -314,9 +314,7 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a changed tree is everyone's business: it arrives as a baseline\n");
 
-	// 两次 run 给第一条用户消息一个续接，这正是让它成为分支点的动作。测试台在两次 run 与移动
-	// 期间持有 hold：删除守卫要求所有改变者放手，测试台先把意图写在表上。
-	await rig.hub.hold(laneId);
+	// 两次 run 给第一条用户消息一个续接，这正是让它成为分支点的动作。
 	rig.transport.setResponses([fakeAssistantMessage("one"), fakeAssistantMessage("two")]);
 	check("the first prompt was accepted", (await prompt(rig.url, laneId, "branch here")) === 202);
 	check("it settled", await settleRun(rig.url, laneId));
@@ -343,10 +341,8 @@ try {
 		check("and the move is inside it", changed?.session.leafId === branchEntry, JSON.stringify(changed?.session.leafId));
 	}
 
-	// 测试台的 hold 归还。观看不占 hold：这条车道在没有任何 hold 的情况下继续活着，这是新契约
-	// 值得写下的那一半。
-	rig.hub.release(laneId);
-	check("the last hold lets go", await until(() => rig.hub.holdsOf(laneId) === 0, 5_000), String(rig.hub.holdsOf(laneId)));
+	// 这条车道在会话没有被谁「使用着」的情况下继续活着——观看从来不是簿记，这是新契约值得写下
+	// 的那一半。
 	check("and the lane stays subscribed: watching is not holding", !wire.endOf(laneId).ended, JSON.stringify(wire.endOf(laneId)));
 
 	// ---------------------------------------------------------------------------------------------

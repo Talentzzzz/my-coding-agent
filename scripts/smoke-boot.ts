@@ -177,10 +177,6 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("shutdown with the worst case in residence\n");
 
-	// 测试台在下面的 prompt 期间持有自己的 hold，与 `smoke-mux`、`smoke-stream` 在需要会话比一次
-	// 请求久的地方的做法一致：删除守卫要求所有改变者放手，测试台先把意图写在表上。
-	await server.hub.hold(sessionId);
-
 	const accepted = await request(server.url, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
 		text: "read the notes",
 	});

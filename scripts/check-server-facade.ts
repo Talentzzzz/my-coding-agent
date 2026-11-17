@@ -25,11 +25,17 @@ const bannedImports = [
 
 // server 包不得拼写的成员访问。`.settings` 被禁，但方法调用形式 `.settings(` 例外——那是
 // controller 方法自己的名字；`.tools` 完全不在列表上：名为 `tools` 的纯数据字段到处都是，
-// 且 import 禁令已经把 `ToolManager` 挡住了。
+// 且 import 禁令已经把 `ToolManager` 挡住了。hold / release / holds 通道同样全数被禁
+// （ADR-0023：持有簿记迁入 SessionManager，传输层零感知）——写成成员访问形式避免误伤普通词。
 const bannedMembers: [RegExp, string][] = [
 	[/\.agentState\s*\(/, ".agentState("],
 	[/\.sessionManager\b/, ".sessionManager"],
 	[/\.settings\b(?!\s*\()/, ".settings"],
+	[/\.hold\s*\(/, ".hold("],
+	[/\.release\s*\(/, ".release("],
+	[/\.holdsOf\s*\(/, ".holdsOf("],
+	[/\.heldSessionIds\s*\(/, ".heldSessionIds("],
+	[/\.holds\b(?!\s*\()/, ".holds"],
 ];
 
 async function sources(dir: string): Promise<string[]> {
