@@ -136,3 +136,15 @@
 ## 七、一处刻意留下的不一致（客户端）
 
 `packages/web/src/api.ts` 的 `exists()` 与 `read()` 都曾定义却无调用者。`read()` 在第一阶段后有了调用者；`exists()` 在 404 探测被移除后失去意义。若它确实没人用，删掉它——但**不要在第一阶段的 `read` 路径落地之前删**。
+
+---
+
+## 八、为什么「订阅原语上移 hub」没有新 ADR
+
+按 [`adr/README.md`](adr/README.md) 的三条门槛逐条自查，三条没有同时成立：
+
+1. **难以逆转？** 不够格。公开面只换了订阅动词——`watch` 退场，`subscribe` / `rebaseline` 上桌——帧协议、wire 格式、REST 表与客户端一个字未动；要退回去，把活冷分岔写回 `open` 路径、删掉这两个动词即可，改动面就是 hub 与 mux 两个文件，没有盘上格式或数据迁移。
+2. **没有上下文会让人困惑？** 不够格。读代码的人会问"为什么分岔不留在 mux"，但答案在实况里而不在历史里：分层判据（离开 HTTP/WS 还成立的问题归 hub）与两半保证的各半归属，是 [`architecture.md`](architecture.md) *谁拥有一个会话*与 *wire* 两节的内容，不需要靠一条 ADR 才解得开。
+3. **是一次真实取舍的结果？** 不够格。搬什么、不搬什么（backlog、teardown、失败措辞留给 mux）已在 `.scratch/hub-subscribe-baseline/spec.md` 逐条记录；被放弃的选项——继续让 mux 自己守住「注册后同拍写 baseline」的约定——没有留下需要未来读者绕开的坑，因为 smoke 已改测 hub 缝上的机制。
+
+结论：不写新 ADR，实况写进 `architecture.md` 的对应两节。与 [ADR-0013](adr/0013-table-holds-live-half-only.md) 的关系是**延伸而非矛盾**：那条定的是 per-session 的簿记归宿主，这次只是把「baseline 的读法」也归给宿主——`watchers` / `feedMap` 的形状与归属（[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)）原样不动。

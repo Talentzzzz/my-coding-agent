@@ -111,9 +111,12 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   命令一个字不改地留在 REST。`createRoutes()` 是整张 API 表，`Router` 是唯一解释 URL 的地方，命令
   在被施加时作答——mux 的上行帧**不走 URL**，所以"加一个端点"这条形状管不到 `open` / `cancel`。
   默认端口 8080。abort 是 REST 命令不帧化、不引入 ack/requestId，mux 上行 `cancel` 只用于取消订阅
-  （[ADR-0001](docs/adr/0001-transport-websocket-mux.md)、`.scratch/mux-landing/`）。**一条常驻连接
-  是一个 `Writable`，所以写侧必须有界**：`write()` 返回 `false` 之后停写，帧进有界队列（4 MiB /
-  10 秒），超限用 `1013` 关掉整条连接。模型那一侧另有一个同名的 `ChatTransport`（`llm/types.ts`），
+  （[ADR-0001](docs/adr/0001-transport-websocket-mux.md)、`.scratch/mux-landing/`）。**mux 与 hub 的
+  边界是一份两半保证**：`open` 走 hub 的 `subscribe`（注册、活冷分岔与 baseline 交付在 hub 内部
+  一体完成），重发走 `rebaseline`；mux 只剩帧序（baseline 先于本订阅 backlog 的任何帧）与失败的
+  措辞。**一条常驻连接是一个 `Writable`，所以写侧必须有界**：`write()` 返回 `false` 之后停写，
+  帧进有界队列（4 MiB / 10 秒），超限用 `1013` 关掉整条连接。
+  模型那一侧另有一个同名的 `ChatTransport`（`llm/types.ts`），
   只管一次请求的流式，与这里说的命令面不是一回事（ADR-0010）。
 - **hold（持有）** —— SessionManager 的**文件级**簿记
   （[ADR-0023](docs/adr/0023-holds-into-session-manager-veto-delete.md)）："此刻谁在改变这个会话
@@ -183,7 +186,8 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   重放一次（一次运行读一次、带着走；一条命令读一次、用完就丢）。订阅者也不在袋上：编排层构造时
   注入唯一一个 `SessionSink`（`onEvent` / `onState` 两个回调），fanout 在 emit 点直调、按 sessionId
   点名，per-session 的分发表归宿主所有——hub 用自己的 sink 实现它、以 `feedMap` 应答
-  `SessionFeeds`（形状不变，mux 零改动）。`live` 里只有两条队列、在飞运行、
+  `SessionFeeds`（形状不变；mux 经 `subscribe` / `rebaseline` 取用，活冷分岔已不在它那一层）。
+  `live` 里只有两条队列、在飞运行、
   partial、重试位与挂起位——运行期瞬态，盘上没有的东西（ADR-0021 删掉了曾住在这里的
   未落盘袋与打开行）。由 `Agent` 按 id 键控持有，
   装配经 `Agent.assembleAgentStateBySession` 进表、由运行自己的结束路径与
