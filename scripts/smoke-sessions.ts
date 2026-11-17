@@ -246,8 +246,8 @@ try {
 	process.stdout.write("one session per id\n");
 	// The id is asked for first and then held by name, which is the only shape production has: a
 	// request never omits the id, so "which session is current" is `GET /api/sessions/current`'s
-	// question and not the hold's. Startup selects nothing — the landing answer is `null` until an
-	// explicit creation happens, and the session below is held by the id that creation returned.
+	// question and not the hold's. Startup selects nothing — and the landing answer stays `null`
+	// no matter what gets created, since an unnamed connection never lands on any session.
 	check("nothing is selected before anything is created", (await hub.currentSessionId()) === null);
 	const landing = await hub.birth({ text: "出生的第一条消息" });
 	// hold 簿记已迁入 SessionManager（票 03）：hub 上不再有计数表可断言，外部行为是出生自己留下
@@ -265,9 +265,9 @@ try {
 	);
 	await hub.close();
 
-	process.stdout.write("new_session moves the landing spot\n");
-	const created = await hub.birth({ text: "出生即落点" });
-	check("the landing follows the newest session", (await hub.currentSessionId()) === created, `${await hub.currentSessionId()} vs ${created}`);
+	process.stdout.write("creation never moves the landing spot\n");
+	const created = await hub.birth({ text: "出生不改落点" });
+	check("the landing stays null after the newest session", (await hub.currentSessionId()) === null);
 
 	process.stdout.write("a fork is the branch up to one entry\n");
 	// Birth is the first message (ADR-0021), so the parent is born with its fork point on the ledger:

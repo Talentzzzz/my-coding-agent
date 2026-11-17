@@ -139,7 +139,8 @@ try {
 	const created = await request(server.url, "POST", "/api/sessions", { text: "the boot conversation" });
 	check("the creation landed", created.status === 201, String(created.status));
 	const sessionId = ((created.payload ?? {}) as { sessionId?: string }).sessionId ?? "";
-	check("the landing follows the explicit creation", (await server.hub.currentSessionId()) === sessionId, sessionId);
+	// 创建改变不了落点：未指名的连接永远不落在任何会话上，显式创建只把 id 交还给请求者自己。
+	check("the landing stays null after an explicit creation", (await server.hub.currentSessionId()) === null);
 
 	// modes 面（ADR-0004）：patch 整表替换列表，snapshot 整份带回，与内置默认名——或与另一行
 	// ——撞名的请求被拒绝而不是被改得唯一。这里的一切都骑在临时 home 上，不会泄进机器的设置。

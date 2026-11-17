@@ -69,7 +69,7 @@ export type SessionWatcher = (feeds: SessionFeeds | undefined) => void;
  *
  * 会话本身是磁盘上的两个文件（ADR-0008），进程里没有副本：编排层（ADR-0012）按 id 服务所有会话，
  * 袋由运行自己装配、空闲自散（ADR-0013）。本 hub 记的只有传输层自己的簿记——谁在观看
- * （`watchers`）、事件按 id 从哪张表流出（`feedMap`）——以及未指名的落点（`current`）。改变会话
+ * （`watchers`）、事件按 id 从哪张表流出（`feedMap`）。改变会话
  * 的并发保护住在 SessionManager 自己的文件闸里，传输层一概不感知（ADR-0023）。
  */
 export class SessionHub {
@@ -107,10 +107,6 @@ export class SessionHub {
 	 * 相同。条目在第一次订阅时出生、在最后一个退订函数清理时消失。
 	 */
 	private readonly feedMap = new Map<string, { eventListeners: Set<SessionEventListener>; listeners: Set<SessionListener> }>();
-	/**
-	 * 未指名落点的应答依据（{@link currentSessionId}）：最后一个被显式创建的会话，或还没有——`undefined` 是欢迎态在服务器侧的那一半。这里没有任何东西创建会话；唯一的写入者是显式创建（`birth`、fork），历史是侧栏的事：恢复它是点某一行，不是服务器去猜。
-	 */
-	private current?: Promise<string>;
 
 	constructor(options: HubOptions) {
 		this.options = options;
@@ -195,12 +191,12 @@ export class SessionHub {
 	/**
 	 * 连接未指名时落到的 id，`null` 表示"没有可落的"。
 	 *
-	 * 客户端问它而不是自作主张，因为策略属于服务器：`--session` 固定一个，否则答案是本进程最后创建的或被指示指向的——或 `null`，窗口停留在欢迎态、什么都不选。这里没有任何东西创建会话：启动什么都不选，而自选"最新文件"的客户端会悄悄无视固定值，显示一个与服务器正在服务的不同的会话。
+	 * 规则只有一条：`--session` 显式钉住一个，否则永远是 `null`——窗口停在欢迎态、什么都不选。
+	 * 服务器不去记"最后创建的会话"来填这个答案：恢复历史是用户在侧栏点某一行的行为，不是服务器
+	 * 去猜；而自选"最新会话"的答案会悄悄无视钉住值的意义，把一个没人要求的对话拽到新窗口面前。
 	 */
 	currentSessionId(): Promise<string | null> {
-		if (this.options.sessionId !== undefined) return Promise.resolve(this.options.sessionId);
-		if (this.current === undefined) return Promise.resolve(null);
-		return this.current;
+		return Promise.resolve(this.options.sessionId ?? null);
 	}
 
 	/**
@@ -227,7 +223,7 @@ export class SessionHub {
 	}
 
 	/**
-	 * 让一个会话与它的第一条消息原子出生，并让它成为下一个未指名连接的落点（ADR-0021）。
+	 * 让一个会话与它的第一条消息原子出生（ADR-0021）。
 	 *
 	 * 返回 id 而不是任何会话对象：会话是两个文件，进程里没有副本（ADR-0013），出生的运行自己装配
 	 * 自己的袋；行事实（侧栏）经由 controller 的 listener 到达 projection。
@@ -259,7 +255,6 @@ export class SessionHub {
 			...(input.mode === undefined ? {} : { mode: input.mode }),
 			...(selection === undefined ? {} : { selection }),
 		});
-		this.current = Promise.resolve(id);
 		return id;
 	}
 
@@ -277,7 +272,6 @@ export class SessionHub {
 	async fork(sessionId: string, entryId: string | null): Promise<string> {
 		// 源会话只被定位和读取——facade 的磁盘扫描。fork 的两侧就是一次源路径读取和一对写入，而文件是每个 entry 都已落上去的权威。
 		const id = this.agent.forkFrom(sessionId, entryId);
-		this.current = Promise.resolve(id);
 		return id;
 	}
 
@@ -299,7 +293,6 @@ export class SessionHub {
 	 */
 	setRoot(workDirAbsPath: string): void {
 		this.absRoot = workDirAbsPath;
-		this.current = undefined;
 	}
 
 	/**
@@ -311,7 +304,7 @@ export class SessionHub {
 	 * {@link UnknownSessionError} 拒绝（→ 404，与「第二次删除是 404」一致——删除进行中或完成后
 	 * 文件已消失），这是删除端点同步做的唯一检查。
 	 *
-	 * 校验之后向观看者告别（`undefined` 让 mux 对观看中的流发 end）、重置未指名的落点，然后
+	 * 校验之后向观看者告别（`undefined` 让 mux 对观看中的流发 end），然后
 	 * **不 await** 删除：否决序分离在后台跑完，202 应答先到（spec Testing Decisions：运行中删除
 	 * → 应答先于收尾）。分离的 promise 上挂错误日志——删除的失败只剩真正的病态（文件已损、id
 	 * 非法），沿用仓库的中文诊断日志约定。
@@ -319,7 +312,6 @@ export class SessionHub {
 	remove(sessionId: string): void {
 		if (this.agent.fileAbsPathOf(sessionId) === undefined) throw new UnknownSessionError(sessionId);
 		for (const watcher of this.watchers.get(sessionId) ?? []) watcher(undefined);
-		this.current = undefined;
 		void this.agent.deleteSessionBySessionId(sessionId).catch((error: unknown) => {
 			console.error(`会话 ${sessionId} 的删除失败：${error instanceof Error ? error.message : String(error)}`);
 		});

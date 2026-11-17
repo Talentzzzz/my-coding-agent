@@ -376,7 +376,7 @@ export class SystemController {
 	/**
 	 * 没有自己的 id 的客户端应当打开的会话——`null` 表示"没有，停在欢迎态"——以及画在旁边的列表。
 	 *
-	 * 两者一起返回，因为客户端启动时总是同时要两者，而向服务器要 id 正是让 `--session` 在 UI 中可观察的东西：客户端跟随服务器的应答，而不是从存储文件里猜。没有固定值时，答案是本进程最后创建的，或 `null`——启动什么都不选，这里也没有任何东西创建会话以供选择。
+	 * 两者一起返回，因为客户端启动时总是同时要两者，而向服务器要 id 正是让 `--session` 在 UI 中可观察的东西：客户端跟随服务器的应答，而不是从存储文件里猜。答案只有两种：钉住的那个，或 `null`——未指名的连接永远不落在任何会话上，启动不选中任何东西，这里也没有任何东西创建会话以供选择。
 	 */
 	async current(): Promise<{ sessionId: string | null; sessions: SessionRef[] }> {
 		const [sessionId, sessions] = await Promise.all([this.hub.currentSessionId(), listSessions(this.hub.agent, this.hub.workDirAbsPath)]);
