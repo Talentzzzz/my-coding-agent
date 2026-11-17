@@ -176,7 +176,7 @@ process.stdout.write("\na grant resumes the run and re-runs the call; a denial c
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("after the grant")]);
 	await agent.prompt(sidOf(agent), "read the notes", { selection });
 	await agent.settle(sidOf(agent));
-	check("the gate ended the run with the call dangling", agent.hasPendingApprovals(sidOf(agent)), JSON.stringify(agent.snapshot(sidOf(agent)).pendingApprovals));
+	check("the gate ended the run with the call dangling", agent.snapshot(sidOf(agent)).pendingApprovals.length > 0, JSON.stringify(agent.snapshot(sidOf(agent)).pendingApprovals));
 	const callId = agent.snapshot(sidOf(agent)).pendingApprovals[0]?.toolCallId ?? "";
 	check("the dangling call has no result yet", toolResultTexts(agent).length === 0, JSON.stringify(toolResultTexts(agent)));
 
@@ -242,7 +242,7 @@ process.stdout.write("\ndangling calls no answer names are closed before the fir
 		orphanResults.filter((text) => text.includes("was left unanswered")).length === 2,
 		JSON.stringify(orphanResults),
 	);
-	check("the sweep cleared the waiting", !agent.hasPendingApprovals(sidOf(agent)));
+	check("the sweep cleared the waiting", agent.snapshot(sidOf(agent)).pendingApprovals.length === 0);
 	check(
 		"and the first request was provider-legal: each result beside its own call, the prompt after them",
 		// 出生消息（ADR-0021）是上下文里的第一条 user 消息，排在 system 之后。
@@ -426,7 +426,7 @@ process.stdout.write("\naborting a recovery run leaves the recovered call with i
 		results.every((text) => !text.includes("denied permission") && !text.includes("The run was aborted")),
 		JSON.stringify(results),
 	);
-	check("the aborted session has nothing waiting", !agent.hasPendingApprovals(sidOf(agent)));
+	check("the aborted session has nothing waiting", agent.snapshot(sidOf(agent)).pendingApprovals.length === 0);
 	await agent.close(sidOf(agent));
 }
 

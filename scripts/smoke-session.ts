@@ -1206,7 +1206,7 @@ async function exerciseApprovalDenial(): Promise<void> {
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("done")]);
 	const ended = await within("the run to the gate", 10_000, gated.prompt(sidOf(gated), "read the notes"));
 	check("the run ended at the gate rather than parking", ended.ok);
-	check("and the waiting call is derived from the ledger", gated.hasPendingApprovals(sidOf(gated)));
+	check("and the waiting call is derived from the ledger", gated.snapshot(sidOf(gated)).pendingApprovals.length > 0);
 	check("the snapshot names exactly the call the gate stopped on", gated.snapshot(sidOf(gated)).pendingApprovals.length === 1, JSON.stringify(gated.snapshot(sidOf(gated)).pendingApprovals));
 	await within("settle()", 10_000, gated.settle(sidOf(gated)));
 
@@ -1259,7 +1259,7 @@ async function exerciseApprovalDenial(): Promise<void> {
 	// not, and the ledger is where the waiting shows. An abandonment keeps its own reason.
 	const abandoned = await openSession();
 	abandoned.sessionManager.appendMessage(bagOf(abandoned), fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })));
-	check("the dangling call is derived from the ledger", abandoned.hasPendingApprovals(sidOf(abandoned)));
+	check("the dangling call is derived from the ledger", abandoned.snapshot(sidOf(abandoned)).pendingApprovals.length > 0);
 	const waiting = abandoned.snapshot(sidOf(abandoned)).pendingApprovals[0]?.toolCallId ?? "";
 	check("the predicate names the waiting call", abandoned.hasPendingApproval(sidOf(abandoned), waiting), waiting);
 	check("an id nothing waits on is not pending", !abandoned.hasPendingApproval(sidOf(abandoned), "no-such-call"));

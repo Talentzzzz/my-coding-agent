@@ -13,6 +13,19 @@
 // 有一个检查会写模型列表并放回去，所以若介意一次穿过 `models.json` 的往返，请让服务器以
 // MY_AGENT_HOME 指向临时目录运行：
 //   $env:MY_AGENT_HOME = "$env:TEMP\my-agent-smoke"; npm run start
+//
+// 上面的部分连外部进程。需要确定性时序的删除用例（票 04）由脚本自己在进程内起真服务器
+// （仿 smoke-sessions 的 bootServer 模式）：api 接缝递入可控 gate，把一次运行钉在流式半空，
+// 「删除的 202 应答先于运行收尾」由此成为可断言的事实而不是对调度器的赌注。
+import { request as httpRequest } from "node:http";
+import { readdirSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { bootServer } from "../packages/server/src/boot.ts";
+import { createAssistantMessageEventStream, setSessionsDir, type ChatTransport } from "@my-agent/core";
+import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
+
 const target = new URL(process.env.MY_AGENT_URL ?? "http://127.0.0.1:8080");
 const base = target.origin;
 
@@ -34,6 +47,12 @@ function fail(message: string): void {
 
 function pass(message: string): void {
 	process.stdout.write(`${message}\n`);
+}
+
+/** 带条件的 pass/fail，与 smoke-sessions 的 `check` 同一形状：成立即一行 ok，不成立记一次失败。 */
+function check(label: string, condition: boolean, detail = ""): void {
+	if (condition) pass(label);
+	else fail(`${label}${detail === "" ? "" : ` ${detail}`}`);
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -115,6 +134,115 @@ async function settleRun(id: string, ms = 30_000): Promise<boolean> {
 		if (Date.now() > deadline) return false;
 		await sleep(100);
 	}
+}
+
+// --- 进程内服务器的那一组 ---------------------------------------------------------------------------------
+
+/**
+ * 一次对进程内服务器的请求。
+ *
+ * 写在 `node:http` 上并带 `agent: false` 而不是 `fetch`，与 smoke-sessions 的 `call` 同一个理由：
+ * 池化的 keep-alive 插座活得比 `close()` 久，结尾的显式 `process.exit` 会在半路拆掉通知。
+ */
+function localCall(method: string, url: string, body?: unknown): Promise<{ status: number; payload: Record<string, unknown> }> {
+	return new Promise((resolvePromise, reject) => {
+		const headers: Record<string, string> = { accept: "application/json" };
+		if (body !== undefined) headers["content-type"] = "application/json";
+		const call_ = httpRequest(url, { agent: false, method, headers }, (response) => {
+			let text = "";
+			response.setEncoding("utf8");
+			response.on("data", (chunk: string) => {
+				text += chunk;
+			});
+			response.on("end", () => {
+				resolvePromise({
+					status: response.statusCode ?? 0,
+					payload: text.length === 0 ? {} : (JSON.parse(text) as Record<string, unknown>),
+				});
+			});
+		});
+		call_.on("error", reject);
+		call_.end(body === undefined ? undefined : JSON.stringify(body));
+	});
+}
+
+/** 轮询到 `ready` 成立为止，有界——与 smoke-sessions 的 `until` 同一条不赌调度的规则。 */
+async function waitFor(ready: () => boolean | Promise<boolean>, ms = 15_000): Promise<boolean> {
+	const deadline = Date.now() + ms;
+	for (;;) {
+		if (await ready()) return true;
+		if (Date.now() > deadline) return false;
+		await sleep(10);
+	}
+}
+
+/** 一台进程内服务器对指名会话的回答里本脚本要看的部分。 */
+interface GatedRead {
+	status: number;
+	running?: boolean;
+	pendingApprovals?: { toolCallId: string }[];
+}
+
+async function readSession(base: string, id: string): Promise<GatedRead> {
+	const read = await localCall("GET", `${base}/api/sessions/${encodeURIComponent(id)}`);
+	const session = read.payload.session as GatedRead | undefined;
+	return { status: read.status, running: session?.running, pendingApprovals: session?.pendingApprovals };
+}
+
+/**
+ * 把供应商请求钉在流式半空的可控 gate（仿 smoke-sessions 的 vetoGate）。`arm` 之后到达的请求被
+ * 持住直到显式放行；abort 只被记录、不放宽——真正的 transport 尊重自己的 signal，但供应商察觉
+ * 取消有一段真实延迟，gate 把这段延迟拉成确定性的。删除的 202 应答因此在 gate 仍持着运行时到达，
+ * 「应答先于收尾」是事实而不是猜测。
+ */
+function holdGate(): {
+	api: ChatTransport;
+	arm(): void;
+	held(): boolean;
+	sawAbort(): boolean;
+	release(): void;
+} {
+	const fake = createFakeTransport();
+	fake.setResponses([fakeAssistantMessage("出生那轮的普通回答"), fakeAssistantMessage("被删除打断前的最后一条回答")]);
+	const inner = fake.api.stream.bind(fake.api);
+	let armed = false;
+	let holding = false;
+	let aborted = false;
+	let release!: () => void;
+	const released = new Promise<void>((done) => {
+		release = done;
+	});
+	const api: ChatTransport = {
+		stream: (model, context, options) => {
+			const outer = createAssistantMessageEventStream();
+			options?.signal?.addEventListener(
+				"abort",
+				() => {
+					aborted = true;
+				},
+				{ once: true },
+			);
+			void (async () => {
+				if (armed) {
+					holding = true;
+					await released;
+				}
+				const answer = inner(model, context, options);
+				for await (const event of answer) outer.push(event);
+				outer.end(await answer.result());
+			})();
+			return outer;
+		},
+	};
+	return {
+		api,
+		arm: () => {
+			armed = true;
+		},
+		held: () => holding,
+		sawAbort: () => aborted,
+		release,
+	};
 }
 
 /** 这些检查会读的快照部分。 */
@@ -241,6 +369,153 @@ async function watch(watching: string): Promise<void> {
 	}
 }
 
+/**
+ * 给临时 agent home 种一行模型。
+ *
+ * 空目录的会话以占位行作答——引擎对无行会话**不发起请求**（手写的解释性答案，models.ts 的
+ * `ZERO_USAGE`）——gate 就永远等不到运行。一行指向必然拒绝连接的 baseUrl 的行让运行真的走到
+ * transport；脚本的 transport 从队列作答，那根 URL 永远不被打到。
+ */
+async function seedModelRow(home: string): Promise<void> {
+	await writeFile(
+		join(home, "models.json"),
+		JSON.stringify({
+			models: [
+				{
+					name: "scripted",
+					baseUrl: "http://127.0.0.1:1/v1",
+					apiKey: "unused-by-the-scripted-transport",
+					id: "scripted-model",
+					contextWindow: 200_000,
+					maxTokens: 8_192,
+				},
+			],
+		}),
+		"utf8",
+	);
+}
+
+/**
+ * 时序敏感的删除用例（票 04）：进程内起真服务器，删除的否决式语义在可控 gate 下逐条断言。
+ *
+ * 会话注册表被 `setSessionsDir` 指进临时目录（进程级 store，仿 smoke-sessions），所以盘上残留的
+ * 检查读的就是这个目录；agent home 也指向临时目录，写设置命令碰不到机器自己的文件。
+ */
+async function gatedDeletes(): Promise<void> {
+	const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-api-store-"));
+	const workDir = await mkdtemp(join(tmpdir(), "my-agent-api-work-"));
+	setSessionsDir(storeRoot);
+	try {
+		// —— 运行中删除 → 202 应答先到 ——————————————————————————————————————————————
+		// 否决式（spec User Story 1、6）：删除不再要求先把运行安顿好——它自己中止运行、等收尾，
+		// 然后在文件闸内删掉文件对。gate 把运行钉在流式半空且不因 abort 放宽，所以 202 应答到达时
+		// 运行必然仍未收尾——这条时序断言由构造保证，不由调度赏赐。
+		{
+			const gate = holdGate();
+			const home = await mkdtemp(join(tmpdir(), "my-agent-api-home-"));
+			await seedModelRow(home);
+			const http = await bootServer({ workDirAbsPath: workDir, port: 0, settingsHome: home, api: gate.api });
+			try {
+				const born = await localCall("POST", `${http.url}/api/sessions`, { text: "出生的那条消息" });
+				const id = String(born.payload.sessionId ?? "");
+				if (born.status !== 201 || id === "") fail(`the gated birth answered ${born.status}, expected 201 with an id`);
+				else {
+					pass("the gated birth is created (201)");
+					check("the birth run settles on its own", await waitFor(async () => (await readSession(http.url, id)).running === false), "the birth run never settled");
+					gate.arm();
+					const asked = await localCall("POST", `${http.url}/api/sessions/${encodeURIComponent(id)}/messages`, { text: "删除动手时我还在流式" });
+					if (asked.status !== 202) fail(`the prompt to the doomed session answered ${asked.status}, expected 202`);
+					check("the run reaches the transport gate", await waitFor(() => gate.held()), "the run never reached the gate");
+
+					const removed = await localCall("DELETE", `${http.url}/api/sessions/${encodeURIComponent(id)}`);
+					if (removed.status !== 202) fail(`the delete of a running session answered ${removed.status}, expected 202`);
+					else pass("the delete of a running session is accepted before the run settles (202)");
+					check("and the transport still holds the run when the answer lands", gate.held(), "the run settled before the answer");
+					check("the veto reached the run as an abort", gate.sawAbort());
+					const midRead = await readSession(http.url, id);
+					check("and the session still reports a run in flight at that moment", midRead.running === true, String(midRead.running));
+
+					gate.release();
+					check("the deletion completes once the run settles", await waitFor(async () => (await readSession(http.url, id)).status === 404), "the deleted session is still readable");
+					// 404 的应答只承诺提交标记已走；流的 rm 紧随其后，所以先等盘上无残留、再扫列表——
+					// 让列表的扫描永远看不到 rm 的两步之间的中间态。
+					check(
+						"and no file of the session survived on disk",
+						await waitFor(() => readdirSync(storeRoot).every((name) => !name.startsWith(id))),
+						JSON.stringify(readdirSync(storeRoot)),
+					);
+					const rows = await localCall("GET", `${http.url}/api/sessions`);
+					check(
+						"the listing carries no zombie row",
+						!((rows.payload.sessions as { id: string }[] | undefined) ?? []).some((session) => session.id === id),
+					);
+					const again = await localCall("DELETE", `${http.url}/api/sessions/${encodeURIComponent(id)}`);
+					check("a second delete is a 404", again.status === 404, `status=${again.status}`);
+					const late = await localCall("POST", `${http.url}/api/sessions/${encodeURIComponent(id)}/messages`, { text: "给一条已删会话的消息" });
+					check("and a mutating command after the deletion is a 404", late.status === 404, `status=${late.status}`);
+				}
+			} finally {
+				await http.close();
+				await rm(home, { recursive: true, force: true });
+			}
+		}
+
+		// —— 停在审批闸门（suspended）的会话删除 → 成功 ——————————————————————————————
+		// 悬空审批不再是守卫（spec User Story 2）：放弃的会话不会因为没人答审批而挂在侧边栏，
+		// 悬空的调用随文件一起死——「最后一个动作赢」。停泊在 HTTP 上的可观察形态：run 已结束、
+		// 快照的 pendingApprovals 列着没人答的调用。
+		{
+			const fake = createFakeTransport();
+			fake.setResponses([fakeAssistantMessage("出生那轮的普通回答"), fakeAssistantMessage(fakeToolCall("bash", { command: "echo parked" }))]);
+			const home = await mkdtemp(join(tmpdir(), "my-agent-api-home-"));
+			await seedModelRow(home);
+			const http = await bootServer({ workDirAbsPath: workDir, port: 0, settingsHome: home, api: fake.api });
+			try {
+				const quieted = await localCall("PATCH", `${http.url}/api/settings`, { patch: { approval: { bash: true } } });
+				if (quieted.status !== 200) fail(`patching the approval baseline answered ${quieted.status}, expected 200`);
+				else pass("the approval baseline now asks before bash");
+
+				const born = await localCall("POST", `${http.url}/api/sessions`, { text: "出生即停泊的会话" });
+				const parkedId = String(born.payload.sessionId ?? "");
+				if (born.status !== 201 || parkedId === "") fail(`the parked birth answered ${born.status}, expected 201 with an id`);
+				else {
+					check("the birth run settles on its own", await waitFor(async () => (await readSession(http.url, parkedId)).running === false), "the birth run never settled");
+					const asked = await localCall("POST", `${http.url}/api/sessions/${encodeURIComponent(parkedId)}/messages`, { text: "跑一次 bash" });
+					if (asked.status !== 202) fail(`the prompt to the doomed session answered ${asked.status}, expected 202`);
+					check(
+						"the run parks at the approval gate",
+						await waitFor(async () => {
+							const read = await readSession(http.url, parkedId);
+							return read.running === false && read.pendingApprovals?.length === 1;
+						}),
+						"the run never parked at the gate",
+					);
+
+					const removed = await localCall("DELETE", `${http.url}/api/sessions/${encodeURIComponent(parkedId)}`);
+					if (removed.status !== 202) fail(`the delete of a parked session answered ${removed.status}, expected 202`);
+					else pass("the delete of a session parked at the approval gate is accepted (202)");
+					check("and the parked session is really deleted", await waitFor(async () => (await readSession(http.url, parkedId)).status === 404), "the parked session is still readable");
+					const again = await localCall("DELETE", `${http.url}/api/sessions/${encodeURIComponent(parkedId)}`);
+					check("a second delete is a 404 too", again.status === 404, `status=${again.status}`);
+					const late = await localCall("POST", `${http.url}/api/sessions/${encodeURIComponent(parkedId)}/messages`, { text: "太迟的消息" });
+					check("a mutating command after the deletion is a 404 as well", late.status === 404, `status=${late.status}`);
+					check(
+						"and no file of the parked session survived on disk",
+						await waitFor(() => readdirSync(storeRoot).every((name) => !name.startsWith(parkedId))),
+						JSON.stringify(readdirSync(storeRoot)),
+					);
+				}
+			} finally {
+				await http.close();
+				await rm(home, { recursive: true, force: true });
+			}
+		}
+	} finally {
+		await rm(storeRoot, { recursive: true, force: true });
+		await rm(workDir, { recursive: true, force: true });
+	}
+}
+
 async function main(): Promise<void> {
 	pass(`target ${base}`);
 	try {
@@ -253,6 +528,10 @@ async function main(): Promise<void> {
 
 	const health = await request("GET", "/api/health");
 	pass(`health ${health.status} ${JSON.stringify(health.payload)}`);
+	// holds 迁入 SessionManager（ADR-0023）后，server 对「谁被持有」不再有诚实的来源——health 的
+	// `held` 字段退场，报告一个借不来数字的形状比少一个字段更糟。
+	if (health.payload !== undefined && "held" in (health.payload as Record<string, unknown>)) fail("health still reports a held field, but holds left the transport");
+	else pass("health no longer reports holds (no held field)");
 
 	const models = await request("GET", "/api/models");
 	pass(`models ${models.status} (${(models.payload as { models?: unknown[] }).models?.length ?? 0})`);
@@ -439,6 +718,10 @@ async function main(): Promise<void> {
 	}
 
 	ws.close();
+
+	// 外部流程之后是进程内的一组：确定性时序的删除用例，不依赖 MY_AGENT_URL 的那台服务器。
+	await gatedDeletes();
+
 	clearTimeout(timer);
 	pass(`\n${failed ? "FAILED" : "api ok"}`);
 	process.exit(failed ? 1 : 0);

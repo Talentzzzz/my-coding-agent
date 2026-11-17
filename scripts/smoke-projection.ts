@@ -258,7 +258,7 @@ try {
 			fakeAssistantMessage("done"),
 		]);
 		await hub.agent.prompt(id, promptText);
-		if (!hub.agent.hasPendingApprovals(id)) throw new Error("the session did not park, so the marker checks cannot run");
+		if (hub.agent.snapshot(id).pendingApprovals.length === 0) throw new Error("the session did not park, so the marker checks cannot run");
 		return id;
 	};
 	const parkedId = await park("read the notes");
