@@ -12,13 +12,13 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 
 命令用 `POST`，事件走一条**常驻的 WebSocket**（`/mux`），因为两个方向的性子不同：命令是每个用户动作一条，要的是状态码；事件是每秒多条、跨会话、要的是有序且无缺口。一条连接的生命周期是**连接**而不是某一次运行：它随标签页存活、跨多次运行、跨会话切换，其上的逻辑流身份是 `streamId`（就是会话 id）。值得点名的后果是 `abort` —— 它继续留在 REST 上（`POST /api/sessions/{id}/abort`），不是 mux 上的一帧，所以卡住的标签页、一个脚本、另一个标签页，都能停掉同一次运行；而"取消订阅"与"中止运行"是两回事，mux 上行的 `cancel` 帧只用来关掉一条逻辑流，从不中止运行（[ADR-0001](adr/0001-transport-websocket-mux.md)）。
 
-另一个后果是"命令的承诺在哪里结束"。`Agent.prompt()` 在**运行**结束时才 resolve，所以一个 await 它的控制器会把请求和它的 hold 一起攥上几分钟，然后在 `202` 所宣告的那件事结束时报 `202`。控制器的做法是启动运行然后立即返回；由订阅的流报告它——**包括启动前就失败的运行**，因为到那时已经没有响应可供失败了。
+另一个后果是"命令的承诺在哪里结束"。`Agent.prompt()` 在**运行**结束时才 resolve，所以一个 await 它的控制器会把请求和它启动的那轮运行一起攥上几分钟，然后在 `202` 所宣告的那件事结束时报 `202`。控制器的做法是启动运行然后立即返回；由订阅的流报告它——**包括启动前就失败的运行**，因为到那时已经没有响应可供失败了。
 
 ## 各 package 的职责
 
-**core** 是无头的：工作目录、导入的模型、工具、会话管理器、系统提示词、审批闸门，对 HTTP 和 DOM 一无所知。它是 **ADR-0006 的无属性服务**——账本、模型行、工具三个域平级互不依赖，`Agent` 是编排层、只做跨域编排（工具域里唯一持有实例的那个服务是 `ToolManager` 的一张常驻表，[ADR-0011](adr/0011-tool-manager-instance-table.md)）；一个会话在内存里只有**一件东西** `AgentState`：`{ sessionId, listeners, eventListeners, live }`——`live` 是两条队列、在飞运行、partial、重试与挂起位、还没落盘的袋、打开时指定的行，由 `Agent` 按 id 键控持有；会话记录不在里面，它就是那两个文件，每次操作现读（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。账本、设置与模型行、工具表三只服务由 `createSessionAgent()` 在构造时造出、只被编排层消费，公开面在命令与引擎之外另有会话生命周期、纯数据窄读与设置/模型目录三类方法（[ADR-0012](adr/0012-agent-facade.md)）。它发出 `AgentSessionEvent` 值 —— `types.ts` 的 `AgentEvent`，加上它自己的成员：队列深度、压缩、entry 落地、配置变更、重试。运行引擎是 `Agent` 的私有方法（[ADR-0016](adr/0016-loop-is-orchestration.md)）：一次运行的引擎、每轮填充链、压缩、重试泵、两个工具闸门都写在编排层里，三个运行入口各自把三件值（`RunInput`：`agentState` / `session` / `start`）递给 `Agent.run`，一次运行只走一条链 `Agent.prompt → startPromptedRun → run → runEngine → prepareRequest → emit`（`emit` 是唯一的事件出口：落盘、清队列、投影的组合政策是编排层与窗口契约的另一半，实现 `dispatchEvent` 留在编排层）；运行与命令面读同一批服务；事件与投影走 `Agent` 的私有发布方法（[ADR-0017](adr/0017-fanout-folded-into-agent.md)）。模型那一侧的传输层也在这份源码树里（`llm/`，[ADR-0010](adr/0010-llm-folded-into-core.md)），但它是 core 的一个目录而不是一个包：core 对 HTTP 与 DOM 一无所知，`llm/` 对会话与账本一无所知。
+**core** 是无头的：工作目录、导入的模型、工具、会话管理器、系统提示词、审批闸门，对 HTTP 和 DOM 一无所知。它是 **ADR-0006 的无属性服务**——账本、模型行、工具三个域平级互不依赖，`Agent` 是编排层、只做跨域编排（持常驻表的两处例外：`ToolManager` 的一张实例表，[ADR-0011](adr/0011-tool-manager-instance-table.md)；`SessionManager` 的一张文件持有簿记——按文件对键控、易失，[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)）；一个会话在内存里只有**一件东西** `AgentState`：`{ sessionId, listeners, eventListeners, live }`——`live` 是两条队列、在飞运行、partial、重试与挂起位、还没落盘的袋、打开时指定的行，由 `Agent` 按 id 键控持有；会话记录不在里面，它就是那两个文件，每次操作现读（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。账本、设置与模型行、工具表三只服务由 `createSessionAgent()` 在构造时造出、只被编排层消费，公开面在命令与引擎之外另有会话生命周期、纯数据窄读与设置/模型目录三类方法（[ADR-0012](adr/0012-agent-facade.md)）。它发出 `AgentSessionEvent` 值 —— `types.ts` 的 `AgentEvent`，加上它自己的成员：队列深度、压缩、entry 落地、配置变更、重试。运行引擎是 `Agent` 的私有方法（[ADR-0016](adr/0016-loop-is-orchestration.md)）：一次运行的引擎、每轮填充链、压缩、重试泵、两个工具闸门都写在编排层里，三个运行入口各自把三件值（`RunInput`：`agentState` / `session` / `start`）递给 `Agent.run`，一次运行只走一条链 `Agent.prompt → startPromptedRun → run → runEngine → prepareRequest → emit`（`emit` 是唯一的事件出口：落盘、清队列、投影的组合政策是编排层与窗口契约的另一半，实现 `dispatchEvent` 留在编排层）；运行与命令面读同一批服务；事件与投影走 `Agent` 的私有发布方法（[ADR-0017](adr/0017-fanout-folded-into-agent.md)）。模型那一侧的传输层也在这份源码树里（`llm/`，[ADR-0010](adr/0010-llm-folded-into-core.md)），但它是 core 的一个目录而不是一个包：core 对 HTTP 与 DOM 一无所知，`llm/` 对会话与账本一无所知。
 
-**server** 拥有传输层和活跃会话：`SessionHub` 持有**一个**编排层 `Agent`，此外什么都没有——账本、设置与模型行、工具表三只服务由 `createSessionAgent()` 在编排层构造时造出、只被编排层消费，hub 只认编排层的公开面（[ADR-0012](adr/0012-agent-facade.md)；`npm run check` 里的 `check-server-facade` 守卫让「server 不知道 Manager」成为机器检查的不变量）；会话状态的那张表也由编排层自己持有：每 id 一份 `AgentState` 的 live 半（两条队列、在飞运行、订阅集合、还没落盘的袋），进程里唯一的跨栈内存会话态，由运行自己的结束路径与 `Agent.deleteSessionBySessionId` 删除（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。除此之外 hub 只按 id 记 hold（谁能用这个会话），那本是传输层的事（[ADR-0001](adr/0001-transport-websocket-mux.md)）；`Router` 把请求变成对某个控制器的一次调用，每个控制器在它做事期间持有 hold；`mux.ts` 的连接层持有一张订阅表（连接 × 会话），**订阅不拿 hold**；`projection.ts` 把"每个会话在做什么"聚成侧边栏的行。模型是**每次请求**都从 `models.json` 读，而不是缓存成一份目录；会话在每次请求前从它命名的那一行重新推导自己的模型，所以设置面板的一次编辑——密钥、端点、窗口、wire id——能抵达**每一个已经打开的会话**。
+**server** 拥有传输层和活跃会话：`SessionHub` 持有**一个**编排层 `Agent`，此外什么都没有——账本、设置与模型行、工具表三只服务由 `createSessionAgent()` 在编排层构造时造出、只被编排层消费，hub 只认编排层的公开面（[ADR-0012](adr/0012-agent-facade.md)；`npm run check` 里的 `check-server-facade` 守卫让「server 不知道 Manager」成为机器检查的不变量）；会话状态的那张表也由编排层自己持有：每 id 一份 `AgentState` 的 live 半（两条队列、在飞运行、订阅集合、还没落盘的袋），进程里唯一的跨栈内存会话态，由运行自己的结束路径与 `Agent.deleteSessionBySessionId` 删除（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。除此之外 hub 只记传输层自己的簿记：谁在观看（`watchers`）、事件与快照按 id 从哪张表流出（`feedMap`）、未指名的落点（`current`）——改变会话的并发保护不住在这里，它住在 `SessionManager` 自己的文件闸里，传输层一概不感知（[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)）；`Router` 把请求变成对某个控制器的一次调用；`mux.ts` 的连接层持有一张订阅表（连接 × 会话），**订阅不占闸**；`projection.ts` 把"每个会话在做什么"聚成侧边栏的行。模型是**每次请求**都从 `models.json` 读，而不是缓存成一份目录；会话在每次请求前从它命名的那一行重新推导自己的模型，所以设置面板的一次编辑——密钥、端点、窗口、wire id——能抵达**每一个已经打开的会话**。
 
 **web** 拥有呈现：协议消息进，视图模型，DOM 出。它持有一条常驻连接（`client.ts` 的 `MuxClient`），把每条逻辑流的帧喂给对应的一栏，把连接级载荷喂给侧边栏的行表。它永远看不到供应商 SDK、会话文件、或服务器没发过来的任何路径。
 
@@ -58,7 +58,7 @@ my-coding-agent/
     ├── server/src/   # @my-agent/server - 传输层：boot.ts、main.ts、http.ts、http/（routing.ts 是
     │                 #   唯一读 URL 的地方，websocket.ts 是手写的 RFC6455，client-frame.ts 解析上行帧）、
     │                 #   mux.ts（常驻连接、订阅表、写侧有界队列）、projection.ts（侧边栏行）、
-    │                 #   controllers/（routes.ts 是 API 表）、hub.ts（一个编排层 + 一张 hold 表）
+    │                 #   controllers/（routes.ts 是 API 表）、hub.ts（一个编排层 + 传输层自己的簿记）
     ├── desktop/      # @my-agent/desktop - Electron 外壳：main.cjs、preload.cjs、scripts/launch.mjs、
     │                 #   scripts/inspect.cjs
     └── web/src/      # @my-agent/web - 窗口客户端：main.ts、api.ts、client.ts（MuxClient）、
@@ -68,7 +68,7 @@ my-coding-agent/
 
 ## 装配与设置
 
-`Agent` 只用被交给它的东西，别的什么也不用：构造只收**服务**——会话管理器、配置（`SettingManager`，设置与模型行共用的无状态门面）、工具表（`ToolManager`）、传输层、hook 表面与提示词构建器——它的每个公开方法都以会话 id 打头，每样数据在用到它的那一行向属主现取：**live 的一半**是 `agentState.live`（两条队列、在飞运行、partial、重试与挂起位），订阅集合是两个 listener 集合——一份状态是一件东西（[ADR-0013](adr/0013-table-holds-live-half-only.md) 的形状）；**durable 的一半不在这份状态里**：会话就是那两个文件，每次操作现开一只袋、用完就丢（一次运行读一次、带着走；一条命令读一次），所以进程里不存在一份会漂的副本（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。这六个构造字段由 `createSessionAgent()` 现造后递进（见下），递东西的手不是 hub。状态经 `Agent.assembleAgentStateBySession`（类私有，装配并进表）进表、由运行自己的结束路径与 `Agent.deleteSessionBySessionId` 出表——公开面上剩 `createAndPrompt`（造，[ADR-0021](adr/0021-lazy-session-identity.md)）、`hold` / `release`（用它）与 `snapshotOf` / `readSessionSnapshot`（读），何时装配、递哪只会话袋子进表不是调用方的动词（[ADR-0012](adr/0012-agent-facade.md) 决定 2）；工作目录从会话自己的快照设置半读（`session.settings.workDirAbsPath`，`SessionSettings`），"这个会话在哪个模型上"是每次现算的组合（`resolveSettings` 的模型半：文件记录的选择 → 设置里的默认行，见*输入框的模型座位*）。它不读设置文件、不构建工具、也不挑模型（项目指令 `AGENTS.md` 是每次请求现读的提示词输入，本身不进状态），所以打开一个会话和恢复一个会话是同一条链（装配出 live 半、经那扇私有的门进表，[ADR-0005](adr/0005-stateless-session-architecture.md) §2；会话由 `fillSession` 每次现读，见*SessionManager 是真相之源*）。
+`Agent` 只用被交给它的东西，别的什么也不用：构造只收**服务**——会话管理器、配置（`SettingManager`，设置与模型行共用的无状态门面）、工具表（`ToolManager`）、传输层、hook 表面与提示词构建器——它的每个公开方法都以会话 id 打头，每样数据在用到它的那一行向属主现取：**live 的一半**是 `agentState.live`（两条队列、在飞运行、partial、重试与挂起位），订阅集合是两个 listener 集合——一份状态是一件东西（[ADR-0013](adr/0013-table-holds-live-half-only.md) 的形状）；**durable 的一半不在这份状态里**：会话就是那两个文件，每次操作现开一只袋、用完就丢（一次运行读一次、带着走；一条命令读一次），所以进程里不存在一份会漂的副本（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。这六个构造字段由 `createSessionAgent()` 现造后递进（见下），递东西的手不是 hub。状态经 `Agent.assembleAgentStateBySession`（类私有，装配并进表）进表、由运行自己的结束路径与 `Agent.deleteSessionBySessionId` 出表——公开面上剩 `createAndPrompt`（造，[ADR-0021](adr/0021-lazy-session-identity.md)）、`snapshotOf` / `readSessionSnapshot`（读）与删除动词（出表），何时装配、递哪只会话袋子进表不是调用方的动词（[ADR-0012](adr/0012-agent-facade.md) 决定 2）；工作目录从会话自己的快照设置半读（`session.settings.workDirAbsPath`，`SessionSettings`），"这个会话在哪个模型上"是每次现算的组合（`resolveSettings` 的模型半：文件记录的选择 → 设置里的默认行，见*输入框的模型座位*）。它不读设置文件、不构建工具、也不挑模型（项目指令 `AGENTS.md` 是每次请求现读的提示词输入，本身不进状态），所以打开一个会话和恢复一个会话是同一条链（装配出 live 半、经那扇私有的门进表，[ADR-0005](adr/0005-stateless-session-architecture.md) §2；会话由 `fillSession` 每次现读，见*SessionManager 是真相之源*）。
 
 构造只收服务这件事有一条直接的后果：**一个进程只需要一个编排层**。hub 在构造时以一行 `createSessionAgent({ homes, api })` 建它一次，此后每个会话都经它、以 id 调用（[ADR-0012](adr/0012-agent-facade.md)：hooks、transport、提示词构建函数是进程级不可变配置，不是会话状态；工具表是同一类构造注入的进程级东西，只是它可增键，[ADR-0011](adr/0011-tool-manager-instance-table.md)）；而"想独占一个会话"的调用者——一个 smoke、或只跑一个会话的调用方——自己组一个，两条路走的是同一对函数：
 
@@ -80,7 +80,7 @@ createSessionAgent({ settingsHome?, modelsHome?, api?, settings?, tools? })     
 openAgent(options) == createSessionAgent(…) + agent.assembleAgentStateBySession(options)   # 一次性的那对，给测试与子会话
 ```
 
-`openAgent()` / `createSessionAgent()`（`core/src/session-factory.ts`）与 `assembleSession()`（`core/src/assembly.ts`）负责向外伸手。三只 Manager 不再是调用者的决定（[ADR-0012](adr/0012-agent-facade.md)）：工厂照 homes 现造它们，两个 test-only 缝（`settings` / `tools`）除外。"要打开**哪一个**会话"仍是宿主的问题，但答案现在是打给编排层公开面的一个方法：hub 用 `birth` / `hold` 回答它，测试在 `openAgent` 的 `session` 上递一只内存里的会话袋。要自己的设置的冒烟在临时 homes 上播种（一只一次性 `SettingManager` 写、编排层读同一份文件），完全不碰 `~/.my-agent/settings.json`。模型及其 level 在任何地方都遵循同一套优先级：文件记录的选择 → 设置里的默认行 → `off`（没人要求过，就不要求）；这套顺序只有一个实现，就是 `resolveSettings`（[ADR-0019](adr/0019-settings-two-layers.md)）的模型半。
+`openAgent()` / `createSessionAgent()`（`core/src/session-factory.ts`）与 `assembleSession()`（`core/src/assembly.ts`）负责向外伸手。三只 Manager 不再是调用者的决定（[ADR-0012](adr/0012-agent-facade.md)）：工厂照 homes 现造它们，两个 test-only 缝（`settings` / `tools`）除外。"要打开**哪一个**会话"仍是宿主的问题，但答案现在是打给编排层公开面的一个方法：hub 用 `birth` 回答它，测试在 `openAgent` 的 `session` 上递一只内存里的会话袋。要自己的设置的冒烟在临时 homes 上播种（一只一次性 `SettingManager` 写、编排层读同一份文件），完全不碰 `~/.my-agent/settings.json`。模型及其 level 在任何地方都遵循同一套优先级：文件记录的选择 → 设置里的默认行 → `off`（没人要求过，就不要求）；这套顺序只有一个实现，就是 `resolveSettings`（[ADR-0019](adr/0019-settings-two-layers.md)）的模型半。
 
 设置与模型行共用一只 `SettingManager`（`core/src/setting-manager.ts`），它是磁盘的**唯一**入口：无状态门面、没有任何缓存，每个方法现读 global 侧唯一的一份 `settings.json`（`<agent home>/settings.json`），公开面只有四法：`getSettings()` / `applySettings(patch)` / `modelCatalog()` / `replaceModels()`（[ADR-0019](adr/0019-settings-two-layers.md)）。设置有两层类型：`GlobalSettings` 是 global 侧补默认后的视图（`modes` 表、默认模型、外观、bash、重试都在这里）；`Settings`（`core/src/settings.ts`）是它与会话快照的设置半（`SessionSettings`：模式指针、审批增量、模型选择）在**每次读取时现算**的组合——活跃工具集、有效审批、模式座位与完整模型行，闸门、prompt、请求构建与快照从这同一份作答，产物用完即丢，从不进任何袋。编排层读它、控制器经编排层公开面读它（[ADR-0012](adr/0012-agent-facade.md)）——一个进程一扇门，要自己的设置的冒烟在临时 homes 上播种（见上）。`applyConfig` 搬运会话自己的东西——两条队列的模式（队列住在 `agentState.live` 里，循环只在取走点拉取）——而把值经 manager 写回文件。模型和 thinking level 根本不在补丁里：两者都属于某一次对话，也都随使用它们的消息一起到达（见*输入框的模型座位*）。
 
@@ -218,7 +218,7 @@ type AgentSessionEvent =
 
 ## SessionManager 是真相之源
 
-`Agent` 自己不保留会话记录，`SessionManager`（`core/src/session/session-manager.ts`）也不保留——它是会话 config 里的**一个无状态对象**，不是会话记得去写的一个文件，也不是一份缓存：它只提供"读这两个文件、往这两个文件追加"的那些动词（`fillSession` / `appendMessage` / `buildContextEntries` / `setTitle` / `flushMeta` …），每次调用都作用在调用方递进来的那只袋上（[ADR-0006](adr/0006-services-drop-instance-state.md)、[ADR-0013](adr/0013-table-holds-live-half-only.md)）。所以"发给供应商的"、"恢复的进程看到的"、"磁盘上的"是同一件东西，而不是三件需要保持同步的东西——中间没有第二份可以漂的副本；唯一的缓存是快照里的 `suspended` 显示标记：它住在盘上而不在内存里，随时可从账本重放重建，只服务侧边栏的冷启动那一瞥，任何控制流不读它（[ADR-0015](adr/0015-snapshot-suspended-marker.md)）。账本的形状是 ADR-0005 的：`SessionState`（袋）是纯数据，`fillSession` 是磁盘到状态的**唯一**入口——打开一个会话、读一份快照、进程重启后重开，走的都是它，而这三种情形读到的都是**新的一份**；hold 在手时那次运行仍是这两个文件**唯一的写者**（hold 保证），追加与快照重写都即时落盘。
+`Agent` 自己不保留会话记录，`SessionManager`（`core/src/session/session-manager.ts`）也不保留——它是**一个无状态门面**（[ADR-0006](adr/0006-services-drop-instance-state.md)；唯一的例外是一张按会话文件对键控的持有簿记表——文件闸的计数，易失、不是缓存、不持有会话，[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)），不是会话记得去写的一个文件，也不是一份缓存：它只提供"读这两个文件、往这两个文件追加"的那些动词（`fillSession` / `appendMessage` / `buildContextEntries` / `setTitle` / `flushMeta` …），每次调用都作用在调用方递进来的那只袋上（[ADR-0006](adr/0006-services-drop-instance-state.md)、[ADR-0013](adr/0013-table-holds-live-half-only.md)）。所以"发给供应商的"、"恢复的进程看到的"、"磁盘上的"是同一件东西，而不是三件需要保持同步的东西——中间没有第二份可以漂的副本；唯一的缓存是快照里的 `suspended` 显示标记：它住在盘上而不在内存里，随时可从账本重放重建，只服务侧边栏的冷启动那一瞥，任何控制流不读它（[ADR-0015](adr/0015-snapshot-suspended-marker.md)）。账本的形状是 ADR-0005 的：`SessionState`（袋）是纯数据，`fillSession` 是磁盘到状态的**唯一**入口——打开一个会话、读一份快照、进程重启后重开，走的都是它，而这三种情形读到的都是**新的一份**；经 Manager 落盘的每次写入都在文件闸内，运行在飞的写入由删除否决序的第一步（中止 + 等收尾）覆盖——两半相加是全部写入方（[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)），追加与快照重写都即时落盘。
 
 在磁盘上，一个会话是**两个**文件，位于 `<agent home>/sessions/<id>.{json,jsonl}`，按 stem 配对（[ADR-0008](adr/0008-session-two-file-format.md)、[ADR-0014](adr/0014-flat-session-store.md)）。store 是**平的**，id **就是**地址：定位一个会话是一次存在性检查，不是一次全店遍历；它属于哪个项目记在快照的 `workDir` 字段里，侧边栏的分组从这里来，而不是从目录名来。**`.json` 是快照**：`SessionMeta` 的五个身份字段（`version`、`id`、`timestamp`、`workDir`、`parentSession`）加五个当前值（`title`、`model`、`thinkingLevel`、`activeTools`、`approval`——缺席意味着「从未选择」，这是区分「选了 off」和「没选过」的东西），另有一个不是选择的字段 `suspended`：停在审批闸门的显示缓存，仅 true 落盘、缺省即 false，版本不动、不迁移（[ADR-0015](adr/0015-snapshot-suspended-marker.md)）。每次变更整体原子重写（temp + rename），`CURRENT_SESSION_VERSION = 5` 的判定落在这份文件上。**`.jsonl` 是日志**：不可变的 entry 流，每一行是一条 entry，携带 `id`、`parentId`、`timestamp` 和一种 kind。父链接是让这个文件成为一棵树的东西；`leafId` 是对话当前所在之处，而移动它就是窗口在这棵树上行走的方式——见*会话树*。存在六种 kind：
 
@@ -263,32 +263,36 @@ type AgentSessionEvent =
 
 ## 谁拥有一个会话
 
-`SessionHub`（`server/src/hub.ts`）持有一个编排层，此外什么都没有：编排层是本进程唯一的一份，方法一律以会话 id 调用；账本、配置（`SettingManager`）、工具表（`ToolManager`，[ADR-0011](adr/0011-tool-manager-instance-table.md)）三只服务由 `createSessionAgent()` 造、只被编排层消费，hub 只认编排层的公开面（[ADR-0012](adr/0012-agent-facade.md)；模型行走同一只门，见*装配与设置*）；会话状态的那张表在编排层手里——每 id 一份 `AgentState` 的 live 半（订阅集合、两条队列、在飞运行、还没落盘的袋），进程重启即从零重建（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。除此之外 hub 只记传输层自己的簿记：谁在观看（`watchers`）、事件与快照按 id 从哪张表流出（`feedMap`，编排层经构造注入的 sink 查这张表分发）、删除与命令之间的串行化（`closing` 槽位）。hold 的**计数**也在这张表上（`SessionHub.holds`，读法是 `holdsOf`）——它是"此刻谁在改变这个会话"的签到表，不是任何会话的驻留期：`hold(id)` 只做两件事，校验 id 对着磁盘上的会话记录（无所指名即 `UnknownSessionError`、传输层把它应答成 404）与计数落表；`release(id)` 只把计数减一。**hold 不拼装任何东西**——袋由运行自己装配、空闲自散（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。**订阅不拥有会话**：一条逻辑流是 mux 订阅表里的一行（连接 × 会话），它不拿 hold、也不让会话跑起来。持有一个 hold 的是**会改变会话的请求**，在它自己的长度内一个；审批的恢复运行也走同一条 `hold()`。所以一个会话可以在没人在看的情况下运行，而一个开着却闲置的窗口连一份状态都不必替它留着——它要的每一帧都来自一次读或一次运行。
+`SessionHub`（`server/src/hub.ts`）持有一个编排层，此外什么都没有：编排层是本进程唯一的一份，方法一律以会话 id 调用；账本、配置（`SettingManager`）、工具表（`ToolManager`，[ADR-0011](adr/0011-tool-manager-instance-table.md)）三只服务由 `createSessionAgent()` 造、只被编排层消费，hub 只认编排层的公开面（[ADR-0012](adr/0012-agent-facade.md)；模型行走同一只门，见*装配与设置*）；会话状态的那张表在编排层手里——每 id 一份 `AgentState` 的 live 半（两条队列、在飞运行），进程重启即从零重建（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。除此之外 hub 只记传输层自己的簿记：谁在观看（`watchers`）、事件与快照按 id 从哪张表流出（`feedMap`，编排层经构造注入的 sink 查这张表分发）、未指名的落点（`current`）。改变会话的并发保护不住在这里——它住在 `SessionManager` 自己的**文件闸**里（[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)）：一张按会话文件对键控的持有计数表（键是 `.jsonl` 的规范文件键，锁的单位与它保护的 `.json` + `.jsonl` 重合），Manager 触碰文件对的公开方法各自进出闸，`remove` 是唯一跨 await 的持有者、闸罩它全程；撞上闸内的一次删除即以 `UnknownSessionError` 拒绝——读作「没有这个会话」。**闸不拼装任何东西**——袋由运行自己装配、空闲自散（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。**订阅不拥有会话**：一条逻辑流是 mux 订阅表里的一行（连接 × 会话），它不占闸、也不让会话跑起来。所以一个会话可以在没人在看的情况下运行，而一个开着却闲置的窗口连一份状态都不必替它留着——它要的每一帧都来自一次读或一次运行。
 
-读会话不算在内，而且**读不装配任何东西、也不留下任何东西**（[ADR-0013](adr/0013-table-holds-live-half-only.md)）：`SessionController.read()` 不拿 hold，hub 的 `snapshotOf()` 转发编排层同名公开面，后者现开一只袋、从两个文件重放、回答、丢掉——表里的成员资格既不增加也不减少。没有驱逐边，也没有哪次读取替谁收尾：袋的离开是它自己的事——运行自己的结束路径散袋、`abort` 的弃置清扫末尾自己散、停驻在审批闸门上的袋拒绝散。**窗口打开一个会话也不走这条路**：打开与切换都是一次订阅，`open` 帧以一份基线作答（[ADR-0009](adr/0009-open-session-over-mux.md)），导航路径上没有一次读取；`read()` 是命令面的读一半，脚本与诊断用它。页面加载是唯一的例外，而且是"开哪一个"的例外：先问一次 `GET /api/sessions/current`，再由同一帧 `open` 把它打开（见*API*一节）。订阅也一样：`SessionHub.watch(sessionId, watcher)` 注册的**同一拍**就以 feed 调用——分发按 id 走 `feedMap`，对从未运行过的冷会话同样成立——它不拼装、不持有任何东西，观看不拿 hold、也不让会话跑；它买到的只有两样，feed 的到，以及会话被删除时的一句告别（`undefined`）。
+读会话不算在内，而且**读不装配任何东西、也不留下任何东西**（[ADR-0013](adr/0013-table-holds-live-half-only.md)）：`SessionController.read()` 不占闸，hub 的 `snapshotOf()` 转发编排层同名公开面，后者现开一只袋、从两个文件重放、回答、丢掉——表里的成员资格既不增加也不减少。没有驱逐边，也没有哪次读取替谁收尾：袋的离开是它自己的事——运行自己的结束路径散袋、`abort` 的弃置清扫末尾自己散、停驻在审批闸门上的袋拒绝散。**窗口打开一个会话也不走这条路**：打开与切换都是一次订阅，`open` 帧以一份基线作答（[ADR-0009](adr/0009-open-session-over-mux.md)），导航路径上没有一次读取；`read()` 是命令面的读一半，脚本与诊断用它。页面加载是唯一的例外，而且是"开哪一个"的例外：先问一次 `GET /api/sessions/current`，再由同一帧 `open` 把它打开（见*API*一节）。订阅也一样：`SessionHub.watch(sessionId, watcher)` 注册的**同一拍**就以 feed 调用——分发按 id 走 `feedMap`，对从未运行过的冷会话同样成立——它不拼装、不持有任何东西，观看不占闸、也不让会话跑；它买到的只有两样，feed 的到，以及会话被删除时的一句告别（`undefined`）。
 
 ```
-一条常驻连接 ─┐ 订阅表（连接 × 会话，不拿 hold）
-一次请求      ─┼─ hold ─> holds 计数（SessionHub，纯计数：校验 id + 签到，不拼装任何东西）
-在飞的运行    ─┘                └ id -> AgentState（live 半：队列、在飞运行、unwritten）(Agent)
+一条常驻连接 ─┐ 订阅表（连接 × 会话，不占闸）
+一次请求      ─┼─ 经 Manager 的写入 ─> 文件闸（SessionManager 自己的：按文件对键控的
+运行在飞      ─┘                        持有计数 + closing；同步进出瞬时，remove 唯一跨 await）
+                                 └ id -> AgentState（live 半：队列、在飞运行）(Agent)
                                  └ 一个 Agent 服务全部 id   (core)
                                  └ 会话每次操作现读两个文件（ADR-0013）
 ```
 
-每个 id 一份所有权就是全部要点：**把所有权按连接而不是按会话来决策**，就意味着同一个会话上的两个标签页各自往同一对文件上跑、各自独立地追加，而没有一处能回答"这个会话现在是谁在跑"。（编排层本身已经是全进程一份，所以这条代价今天不再表现为两个 `Agent` 对象，而是表现为两条运行争一份会话——结论没变，形状变轻了。）`hold` 是唯一数 hold 的东西——改变会话的请求与在飞的运行都经过它——而订阅故意绕开它："这个请求必须跑在活跃会话上"（hold 回答的）与"这条连接要不要这个会话的内容"（订阅回答的）是两个永不互相换算的问题（[ADR-0001](adr/0001-transport-websocket-mux.md)；该论证里默认多客户端互不知情的那一半已由 [ADR-0022](adr/0022-drop-send-reference.md) 撤销，分离本身仍成立）。一个标签页落在哪个会话上由它记住的 id 决定，所以重载恢复的是它当时在看的那段对话，而不是 hub 会默认到的那个。
+（图里的两半写入方各归各的覆盖：闸罩「经 Manager 的写入」，运行在飞的一轮由删除否决序的第一步——中止 + 等收尾——覆盖，两半相加恰好是全部写入方（[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)）。）
+
+每个 id 一份所有权就是全部要点：**把所有权按连接而不是按会话来决策**，就意味着同一个会话上的两个标签页各自往同一对文件上跑、各自独立地追加，而没有一处能回答"这个会话现在是谁在跑"。（编排层本身已经是全进程一份，所以这条代价今天不再表现为两个 `Agent` 对象，而是表现为两条运行争一份会话——结论没变，形状变轻了。）文件闸是唯一数进闸的东西——经 Manager 改变会话的每个方法都经过它——而订阅故意绕开它："谁在改变这个会话文件对"（闸回答的）与"这条连接要不要这个会话的内容"（订阅回答的）是两个永不互相换算的问题（[ADR-0001](adr/0001-transport-websocket-mux.md)；该论证里默认多客户端互不知情的那一半已由 [ADR-0022](adr/0022-drop-send-reference.md) 撤销，分离本身仍成立）。一个标签页落在哪个会话上由它记住的 id 决定，所以重载恢复的是它当时在看的那段对话，而不是 hub 会默认到的那个。
 
 一条逻辑流结束（客户端 `cancel`）只是停止转发：它**刻意不**中止——正在飞的运行继续跑、继续持久化，所以刷新页面、关掉标签页、或切换会话都不可能截断一份会话记录。观看不需要任何重绑：分发按 id 走 `feedMap`，冷会话与活会话的订阅者拿的是同一张表的入口，观看中的会话开始运行的那一刻事件自然流入。`undefined`（一帧 `end`）只在一个时刻到达：会话被删除（或进程收摊）——"从来没在跑"与"看着的会话停了"都不是它的时刻。
 
-释放是即时的，但**仅此而已**：最后一个 hold 消失只是把计数减到零——没有收摊（reap），没有宽限，没有随之而来的任何生命周期机器。**"开着"这个概念不存在了**：袋随运行生灭——运行自己的结束路径散袋、`abort` 的弃置清扫末尾自己散、停驻在审批闸门上的袋拒绝散——磁盘上的两个文件才是唯一事实。一个停在审批上的会话因此可以停驻任意久：袋就在表上，答案经审批端点到达后启动恢复运行，恢复运行的结束路径把袋还回去。真正没人来接的问题由两条路关闭：`abort` 末尾的 `denyAllApprovals` 把悬空调用合成错误结果收尾（"The run was aborted."）；进程收摊走 `hub.close()` → `Agent.closeAll()`——运行比发起它的请求活得久（202 语义），只有编排层的表知道谁在跑：
+出闸是即时的，但**仅此而已**：最后一个持有者离开只是把计数减到零、条目删除——没有收摊（reap），没有宽限，没有随之而来的任何生命周期机器。**"开着"这个概念不存在了**：袋随运行生灭——运行自己的结束路径散袋、`abort` 的弃置清扫末尾自己散、停驻在审批闸门上的袋拒绝散——磁盘上的两个文件才是唯一事实。一个停在审批上的会话因此可以停驻任意久：袋就在表上，答案经审批端点到达后启动恢复运行，恢复运行的结束路径把袋还回去。真正没人来接的问题由两条路关闭：`abort` 末尾的 `denyAllApprovals` 把悬空调用合成错误结果收尾（"The run was aborted."）；进程收摊走 `hub.close()` → `Agent.closeAll()`——运行比发起它的请求活得久（202 语义），只有编排层的表知道谁在跑：
 
 ```
-release  -> 计数减一，仅此而已（袋的去留与它无关）
+出闸     -> 计数减一、归零删条目，仅此而已（袋的去留与它无关）
 停驻的袋 -> 自己留在表上；回答 -> 恢复运行 -> 它的结束路径散袋
 孤儿     -> abort 的 denyAllApprovals 合成结果；关机由 closeAll 落定
-删除     -> holds / isRunning / hasPendingApprovals 三道守卫，409
+删除     -> 否决式三步（ADR-0023）：中止在飞运行并等收尾（有界复查）
+            -> 闸内 rm（先 .json 提交标记、后 .jsonl 流） -> 出表；202 应答先到
 ```
 
-删除的串行化在 `closing` 槽位上：删除中途到来的 hold 会等待、然后在文件消失之后恢复，发现没有文件，而不是打开一个正在消失的文件。遗忘是安全的，因为磁盘上的两个文件才是持久副本。由此有三个后果：持久化不依赖传输层监听者，所以没人看的一轮也照样落盘；一个无视自己中止信号的工具会让它的会话常驻，所以 `bash` 遵守它，未来任何长跑工具也必须遵守；关闭会先结束每条连接（`MuxServer.close()` 让它们放弃订阅），正是这一点让 `SessionHub.close()` 得以完成。
+删除不再以「有人在用」为由失败——409 退场，删除的失败只剩真正的病态（文件已损、id 非法）。删除的串行化在文件闸的 `closing` 上（[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)）：删除在闸内立起它，rm 的 await 窗口里一切进闸尝试撞上它、以 `UnknownSessionError` 拒绝——读作「没有这个会话」，而不是等待后在文件消失之处打开。遗忘是安全的，因为磁盘上的两个文件才是持久副本。由此有三个后果：持久化不依赖传输层监听者，所以没人看的一轮也照样落盘；一个无视自己中止信号的工具会让它的会话常驻，所以 `bash` 遵守它，未来任何长跑工具也必须遵守；关闭会先结束每条连接（`MuxServer.close()` 让它们放弃订阅），正是这一点让 `SessionHub.close()` 得以完成。
 
 **谁限制写？** 一条常驻连接就是一个 `Writable`，而对端不读时"继续写"的官方后果是无界缓冲，直到进程被自己的内存压垮。所以写侧**必须有界**：`write()` 返回 `false` 之后停写，后续帧进一个有界队列（4 MiB / 10 秒），超限用 `1013`（"try again later"）关掉**整条连接**。这是隔离性付的账——一条连接卡住不会拖住 agent 循环，代价是恢复要靠客户端重连 + 逐条重放订阅 + 一份新基线。这个上限（10 秒）刻意低于客户端的读超时（15 秒），好让"通道卡住"以服务端的 close 收场，而不是等客户端把 watchdog 耗完。
 
@@ -342,7 +346,7 @@ SessionManager.forkFrom(sourcePathInput, entryId, storeDirInput?)   # 写出一�
 
 | 方法 | 路径 | 请求体 | 回答 |
 |---|---|---|---|
-| `GET` | `/api/health` | — | `{ ok, absWorkDir, live }`——`live` 是本进程正在运行的会话 id |
+| `GET` | `/api/health` | — | `{ ok, workDirAbsPath }` |
 | `GET` | `/api/models` | — | `{ models: ModelOption[] }` |
 | `PUT` | `/api/models` | `{ models: ModelInput[] }` | `{ models: ModelOption[] }` |
 | `GET` | `/api/settings` | — | `{ settings: SettingsSnapshot }` |
@@ -360,6 +364,7 @@ SessionManager.forkFrom(sourcePathInput, entryId, storeDirInput?)   # 写出一�
 | `PUT` | `/api/sessions/{id}/tools` | `{ names: string[] }` | `{ session }` |
 | `POST` | `/api/sessions/{id}/approvals/{toolCallId}` | `{ approved }` | `{ toolCallId, approved }` |
 | `POST` | `/api/sessions/{id}/forks` | `{ entryId: string \| null }` | `201 { sessionId, sessions }` |
+| `DELETE` | `/api/sessions/{id}` | — | `202 { removed: true }`——否决式删除（[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)）：存在性校验同步通过后应答先到，中止与收尾在后台跑完；无所指的 id 是 404，第二次删除也是 404 |
 | `POST` | `/api/sessions/{id}/branch` | `{ entryId: string, descend?: boolean }` | `{ session }` |
 
 这里没有一行是会话事件的端点——唯一的流式通道是 `/mux`（不在 `/api` 之下，因为它不是一个 REST 资源）；`abort` 也留在 REST 上，不帧化。`/api/directories` 的行是这个进程知道的每一行，而**无人在看时一个会话的行也照样更新**（它由 `projection.ts` 喂，不由某条恰好开着的流喂）；通道不可用时，客户端把 `GET /api/directories` 当作侧边栏行表的 REST 兜底。**被搁置的目录是这里唯一的例外，而它只有一条规则**（`SessionHub.listsDirectory`）：REST 列表与通道概览都按它过滤，所以两条路永远说同一件事——只过滤概览会让一个被删掉的分组在它某个会话下次变动时自己长回来。搁置或取回不改变任何一行，所以它由**重发一份概览**（`broadcastSessions()`）通知，而不是靠 `session_row`。
@@ -418,7 +423,7 @@ type ClientFrame =
   | { type: "cancel"; sessionId: string };
 ```
 
-`open` 订阅一条会话，**重复也照发**（见上：答案是再一份基线）——`cancel` 取消订阅（关一条逻辑流，同 DSH 的 `cancel`；**中止运行只叫 `abort`、只在 REST 上**，两个词不混用）。两条都是**连接上的状态**，不是会话上的：同一会话在一条连接上至多一条逻辑流，所以会话 id 就是全部地址，没有单独的订阅句柄要同步。抵达一条未知 `type` 的上行帧会被丢弃并记一行日志，而不是关掉连接。曾经的第三种话——`wait` / `unwait`（send 引用的服务端信号）——已由 [ADR-0022](adr/0022-drop-send-reference.md) 撤销：单用户产品里删除守卫三道就够，删除语义是「最后一个动作赢」。
+`open` 订阅一条会话，**重复也照发**（见上：答案是再一份基线）——`cancel` 取消订阅（关一条逻辑流，同 DSH 的 `cancel`；**中止运行只叫 `abort`、只在 REST 上**，两个词不混用）。两条都是**连接上的状态**，不是会话上的：同一会话在一条连接上至多一条逻辑流，所以会话 id 就是全部地址，没有单独的订阅句柄要同步。抵达一条未知 `type` 的上行帧会被丢弃并记一行日志，而不是关掉连接。曾经的第三种话——`wait` / `unwait`（send 引用的服务端信号）——已由 [ADR-0022](adr/0022-drop-send-reference.md) 撤销：单用户产品里删除不需要守卫替用户裁决，删除语义是「最后一个动作赢」（残留的那几道守卫随后也被 [ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md) 的否决式取代——守卫变成动作）。
 
 一个会话 id 可以被多于一条连接订阅，并被任意多个请求读取。hub 为它运行**一个** agent 循环，并把它的事件转发给每一条订阅它的逻辑流，所以 `event` 和 `status` 是**按订阅者**的，尽管它们背后的会话是共享的。这条流是单向的：命令从不是它上面的一帧。扩展任一侧的规则：如果浏览器需要知道某件事，它进一条消息或一个端点；如果只有服务器端需要，它就留在 core。本构建注册的工具名清单是**进程级事实**而不是会话状态，所以不在快照的合同里（[ADR-0020](adr/0020-tool-names-endpoint.md)）：`GET /api/tools` 作答它，窗口启动时取一次。
 
@@ -432,8 +437,8 @@ type ClientFrame =
 窗口输入框
   -> POST /api/sessions/{id}/messages          一次 fetch，回答 202
   -> server/http/routing.ts                    路由表匹配 method + path
-  -> server/controllers/sessions.ts            控制器：hold、调用、释放
-  -> server/hub.ts                             hold 表 + 编排层（本进程唯一的一份，只认它的公开面）
+  -> server/controllers/sessions.ts            控制器：认领、调用、应答
+  -> server/hub.ts                             传输层簿记 + 编排层（本进程唯一的一份，只认它的公开面）
   -> core/agent.ts                             Agent.prompt → startPromptedRun → run：流、工具调用、before_tool / after_tool
   -> core/llm/model.ts, llm/api/*              Model.stream：把 Context（含工具声明）拼成请求体，流式读回
   -> core/hooks.ts                             context、审批闸门、工具输出兜底
@@ -469,7 +474,7 @@ type ClientFrame =
 | 原计划 | 实际构建 | 原因 |
 |---|---|---|
 | 一条 WebSocket 同时承载命令和事件 | 命令走 REST，事件走一条常驻 WebSocket mux；`channel.ts` 长成 `mux.ts` | 浏览器发的一切都是带状态码的请求，服务器发的一切都是单向的；命令面留在 REST 不动，而事件合流到一条常驻连接上（[ADR-0001](adr/0001-transport-websocket-mux.md)） |
-| `channel.ts` 拥有会话 | `hub.ts`，hold 由改变会话的请求与在飞的运行持有（**订阅不拿**） | 同一个会话 id 上的两条连接会构建两个 agent 循环、跑在同一对文件上并各自独立追加 |
+| `channel.ts` 拥有会话 | `hub.ts` 一个编排层 + 传输层簿记；并发保护住在 `SessionManager` 的文件闸（[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)，**订阅不占闸**） | 同一个会话 id 上的两条连接会构建两个 agent 循环、跑在同一对文件上并各自独立追加 |
 | 每个会话读一次 `settings.json`，用一个 `SettingsStore` 去写 | 每个目录一个管理器，两层 | 一个目录上的两个会话持有同一个文件的两个版本，最后写的人赢 |
 | pi-ai 内置的模型目录 | `<agent home>/models.json`，前面没有注册表 | 存在哪些端点、它们的上下文多大，是**用户的事实**；一行本来就**是**一个端点加一个密钥，所以"每行一个 provider"持有的只是行自己已经有的一个字符串——而那个字符串现在就是该行的 `name`，它既是选择器显示的标签，也是会话记录的身份 |
 | 每行一个传输层 | 每一行都走 Anthropic Messages，每模型能力从 wire id 推导 | 本应用只说一种 API，所以传输层选择会是一个没人能采取行动的选择；某个 Claude 模型接受什么仍然必须按模型来，而 wire id 是手打的一行所携带的唯一事实 |
