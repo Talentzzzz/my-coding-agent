@@ -595,19 +595,27 @@ export class Agent {
 
 	/**
 	 * 删除 id 点名的会话：它在磁盘上的文件（若有），以及本进程为它持有的状态。一个操作，因为
-	 * 「有没有文件？」不是调用方的问题。
+	 * 「有没有文件？」「有没有在跑？」都不是调用方的问题——删除自己安顿一切。
 	 *
-	 * 两种情况，在这里裁决而不是交给调用方：磁盘上有文件的会话——移除文件、忘掉状态；什么也不指名
-	 * 的 id——以 {@link
-	 * UnknownSessionError} 拒绝，传输层把它应答成 404。先文件、后状态：一次失败的 unlink 留下的是
-	 * 一张还能为同一 id 作答的表。
+	 * 删除是否决式，不再以「有人在用」为由失败：三道守卫换成三步动作。
 	 *
-	 * 不取 hold、不停运行：传输层在请求之前先把会话安顿好（在那里，删除忙碌的会话是一个 409），
-	 * 宿主、观察者与 hold 都是它的簿记，不是本类的。
+	 * ① 运行在飞则中止并等引擎收尾，然后**复查到稳定（有界）**。复用的 {@link Agent.abort} 自带
+	 *    等待——运行把正在写的落完、被砍的调用由 denyAllApprovals 合成结果（这些写入发生在第 ②
+	 *    步的 rm 之前，顺序正确）——但一次 abort 不够：收尾窗口里可能有新启动的运行起步（
+	 *    {@link Agent.respondApproval} 的 grant、被接受过的 prompt），所以循环复查 `isRunning`
+	 *    直到连续看到空闲。循环有界：到界仍不稳也继续往下走——否决式，删除赢。每一轮之间让出一个
+	 *    宏任务轮（{@link Agent.settle} 的同一教训：恢复运行在装配与注册之间存在真实的窗口，微任务
+	 *    自旋会把那条路饿死）。复用 abort 的其余附带行为都无害：deny 的合成结果本就该在 rm 之前
+	 *    落账；停驻的袋不出表没有关系，第 ③ 步无条件出表。
+	 * ② {@link SessionManager.remove}：文件闸罩全程，先删 `.json` 提交标记、后删 `.jsonl` 流。
+	 * ③ 出表（无条件）：用户已经删了这个会话，判据一概不适用——状态再没有什么可保护的了。排队与
+	 *    在飞的一切随它而去，正如进程重启会杀掉它们一样。
 	 *
-	 * 这是表唯一的无条件出口，唯一的另一个删除者是运行自己的结束路径（空闲袋随运行出表）：用户已经
-	 * 删了这个会话，判据一概不适用——状态再没有什么可保护的了。排队与在飞的一切随它而去，正如进程
-	 * 重启会杀掉它们一样。
+	 * 两种情况，在这里裁决而不是交给调用方：磁盘上有文件的会话走上面的序；什么也不指名的 id——
+	 * 内存态是它仅有的一切，只出表，表上也无所指时以 {@link UnknownSessionError} 拒绝，传输层把
+	 * 它应答成 404。
+	 *
+	 * 这是表唯一的无条件出口，唯一的另一个删除者是运行自己的结束路径（空闲袋随运行出表）。
 	 */
 	async deleteSessionBySessionId(id: string): Promise<void> {
 		const onDisk = SessionManager.findSessionFilePathById(id) !== undefined;
@@ -615,7 +623,15 @@ export class Agent {
 			if (this.agentStateMap.delete(id)) return;
 			throw new UnknownSessionError(id);
 		}
+		// ① 中止 + 等收尾 + 复查到稳定（有界）。每轮 abort 自身就在等运行安顿，这里不会自旋；复查
+		//   覆盖收尾窗口里新起步的运行，上限到界即放弃等待——删除赢。
+		for (let round = 0; round < 10 && this.isRunning(id); round += 1) {
+			await this.abort(id);
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+		// ② 闸内删文件对。
 		await this.sessionManager.remove(id);
+		// ③ 出表。
 		this.agentStateMap.delete(id);
 	}
 
