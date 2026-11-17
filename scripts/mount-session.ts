@@ -28,8 +28,8 @@ export interface MountedSession {
 /**
  * 把一个 session 种入编排层的表并让它出生。
  *
- * session 处于 idle——这里不取 hold，正如 `hub.birth()` 只返回 id 而不持有它——需要持有的
- * 调用方应向 `hub.hold()` 请求。
+ * session 处于 idle——正如 `hub.birth()` 只返回 id 而不持有它，需要会话被运行着的调用方
+ * 以自己的运行把它带进表。
  */
 export async function mountSession(hub: SessionHub, options: MountOptions): Promise<MountedSession> {
 	const session = createSession(options.root);

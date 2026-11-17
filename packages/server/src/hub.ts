@@ -68,9 +68,9 @@ export type SessionWatcher = (feeds: SessionFeeds | undefined) => void;
  * 本进程的会话枢纽。
  *
  * 会话本身是磁盘上的两个文件（ADR-0008），进程里没有副本：编排层（ADR-0012）按 id 服务所有会话，
- * 袋由运行自己装配、空闲自散（ADR-0013）。本 hub 记的只有传输层自己的簿记——谁在改变会话
- * （`holds`）、谁在观看（`watchers`）、事件按 id 从哪张表流出（`feedMap`）——以及删除与命令之间
- * 的串行化（`closing` 槽位）。
+ * 袋由运行自己装配、空闲自散（ADR-0013）。本 hub 记的只有传输层自己的簿记——谁在观看
+ * （`watchers`）、事件按 id 从哪张表流出（`feedMap`）——以及未指名的落点（`current`）。改变会话
+ * 的并发保护住在 SessionManager 自己的文件闸里，传输层一概不感知（ADR-0023）。
  */
 export class SessionHub {
 	/**
@@ -86,30 +86,13 @@ export class SessionHub {
 	get workDirAbsPath(): string {
 		return this.absRoot;
 	}
-	/** 一个会话此刻有多少持有者——删除动手前要问的那个数。 */
-	holdsOf(sessionId: string): number {
-		return this.holds.get(sessionId) ?? 0;
-	}
-	/** 此刻被 hold 着的全部会话 id，供健康端点与诊断。 */
-	heldSessionIds(): readonly string[] {
-		return [...this.holds.keys()];
-	}
 	private readonly options: HubOptions;
-	/**
-	 * 每个会话的持有者数量，按 id——"此刻谁在改变这个会话"的签到表（ADR-0001）。
-	 *
-	 * 计数是 hold 得以工作的原因：一个离开的请求不能停掉另一个请求正在做的事，而删除必须等所有
-	 * 改变者放手。core 从不读它——这是 transport 层自己的簿记，不住在编排层的状态上。
-	 */
-	private readonly holds = new Map<string, number>();
 	/**
 	 * 本进程运行的每个会话都要经过的唯一 orchestrator，也是进程各 manager 的唯一消费者（ADR-0012）：设置之门、模型行、工具表、会话存储都住在它的 facade 后面，所以这里拼装的一个会话、一次模型行的编辑、一次设置的写入，到达的都是它读取的同一批对象。它不持有会话：一个方法指名 id、从自己表中的状态解析所需——持久的一半、设置、活的一半（ADR-0013）。
 	 *
 	 * 它通过 facade 而不是副本读模型行，这正是设置面板里改对的 key，就是已打开会话下一条消息发送的 key 的原因。
 	 */
 	readonly agent: Agent;
-	/** 进行中的删除，让新调用者无法打开一个正在被删的文件。 */
-	private readonly closing = new Map<string, Promise<void>>();
 	/**
 	 * 谁在观看每个会话，按 id——订阅的来去都要穿过的那面镜子。
 	 *
@@ -221,39 +204,11 @@ export class SessionHub {
 	}
 
 	/**
-	 * 为一个改变会话的调用 hold 它，验证 id 对着磁盘上的会话记录。
-	 *
-	 * hold 不拼装任何东西：袋由运行自己装配（ADR-0013），这里发生的只有两件事——id 的存在性校验
-	 * （无所指名的 id 以 {@link UnknownSessionError} 拒绝，传输层把它应答成 404）与计数落进签到表。
-	 * 删除进行到一半的会话让 hold 等待：等过 `closing` 的 hold 在文件消失之后才恢复，于是发现
-	 * 没有文件，而不是打开一个正在被删的文件。
-	 */
-	async hold(sessionId: string): Promise<void> {
-		const closing = this.closing.get(sessionId);
-		if (closing) await closing;
-		if (this.agent.fileAbsPathOf(sessionId) === undefined) throw new UnknownSessionError(sessionId);
-		this.holds.set(sessionId, this.holdsOf(sessionId) + 1);
-	}
-
-	/**
-	 * 放弃一个调用的 hold。
-	 *
-	 * 刻意仅此而已：运行在飞时它自己活着、自己持久化、自己散袋（ADR-0013），没有任何东西需要在这里
-	 * 被拆掉。对没人持有的 id 宽容：release 是调用方撤销自己的 hold，答一句「没有东西可还」会把一次
-	 * 簿记失误变成一场异常。
-	 */
-	release(sessionId: string): void {
-		const remaining = Math.max(0, this.holdsOf(sessionId) - 1);
-		if (remaining === 0) this.holds.delete(sessionId);
-		else this.holds.set(sessionId, remaining);
-	}
-
-	/**
 	 * 观看一个会话的事件和状态。
 	 *
 	 * 返回停止观看的方式。注册的同一拍就以 feed 调用——观看从不拼装任何东西（ADR-0013），冷会话
-	 * 的订阅者拿到的是同一张分发表的入口，它跟随的会话开始运行的那一刻，事件自然流入。观看不占
-	 * hold，它买到的只有两样：feed 的到，以及会话被删时的告别。
+	 * 的订阅者拿到的是同一张分发表的入口，它跟随的会话开始运行的那一刻，事件自然流入。观看买到的
+	 * 只有两样：feed 的到，以及会话被删时的告别。
 	 */
 	watch(sessionId: string, watcher: SessionWatcher): () => void {
 		const watching = this.watchers.get(sessionId) ?? new Set<SessionWatcher>();
@@ -274,8 +229,8 @@ export class SessionHub {
 	/**
 	 * 让一个会话与它的第一条消息原子出生，并让它成为下一个未指名连接的落点（ADR-0021）。
 	 *
-	 * 返回 id 而不是被 hold 的会话，让 hold 恰好发生在一个地方：改变会话的调用者通过 {@link hold}
-	 * 挂上。出生的运行自己装配自己的袋；行事实（侧栏）经由 controller 的 listener 到达 projection。
+	 * 返回 id 而不是任何会话对象：会话是两个文件，进程里没有副本（ADR-0013），出生的运行自己装配
+	 * 自己的袋；行事实（侧栏）经由 controller 的 listener 到达 projection。
 	 *
 	 * `workDirAbsPath` 决定会话落在哪。未定义就是服务器自己的 root；路径只要存在且是目录就接受，没有更多条件——在一个没人工作过的目录里创建第一个会话，正是新目录进入已知列表的唯一正道，而 header 的 workDir 是工具的默认值而不是进程的，所以这里不属于做已知目录检查的地方。
 	 *
@@ -311,11 +266,13 @@ export class SessionHub {
 	/**
 	 * 在一个 entry 处分支一个会话，返回新会话的 id。
 	 *
-	 * 与 {@link birth} 相同，返回 id 而不是被 hold 的会话：改变会话的调用者通过 {@link hold} 挂上。
 	 * 源会话只被读。它的文件不被触碰，它自己的 `leafId` 不动，正在运行的会话从它正在写的文件 fork，
-	 * 所以任何 hold 都不被打扰，在途的一轮继续写它正在写的。
+	 * 所以在途的一轮继续写它正在写的。
 	 *
-	 * 注册表在这里也没有收获：无人 hold 的 fork 没有要养活的活一半——没有队列排空过、没有运行在途——所以它的第一次触碰就是它的第一个 hold。orchestrator 的表也没有收获：facade 的 `forkFrom` 写两个文件、不收养任何东西（ADR-0012）。状态离开那张表只有运行自己的结束路径和 orchestrator 自己的删除动词，从不经由本 hub 的手。
+	 * 注册表在这里也没有收获：fork 没有要养活的活一半——没有队列排空过、没有运行在途——它的第一次
+	 * 触碰就是它的第一次装配。orchestrator 的表也没有收获：facade 的 `forkFrom` 写两个文件、不收养
+	 * 任何东西（ADR-0012）。状态离开那张表只有运行自己的结束路径和 orchestrator 自己的删除动词，
+	 * 从不经由本 hub 的手。
 	 */
 	async fork(sessionId: string, entryId: string | null): Promise<string> {
 		// 源会话只被定位和读取——facade 的磁盘扫描。fork 的两侧就是一次源路径读取和一对写入，而文件是每个 entry 都已落上去的权威。
@@ -327,7 +284,9 @@ export class SessionHub {
 	/**
 	 * 给会话一个自己的名字，存为其 `.json` 快照上的 title。
 	 *
-	 * 被 hold 的路和冷的路是一次 facade 调用，安全性论证随它一起：被 hold 的会话通过自己的袋写，冷的写入是一个同步代码块，两者都不占 hold——title 是关于会话的事实而不是关于某条路径的事实，引擎从不读 title，运行中途重写快照落地时不会打扰那一轮。什么都不指名的 id 在 facade 内拒绝，那始终就是那个 404。
+	 * 冷的写入是一次 facade 调用：title 是关于会话的事实而不是关于某条路径的事实，引擎从不读
+	 * title，运行中途重写快照落地时不会打扰那一轮。什么都不指名的 id 在 facade 内拒绝，那始终就
+	 * 是那个 404。
 	 *
 	 * title 到达时已经缩短；写进文件的就是一行会显示的东西。
 	 */
@@ -346,46 +305,37 @@ export class SessionHub {
 	/**
 	 * 删除一个会话：会话记录、文件，以及本进程中关于它的每一丝痕迹。
 	 *
-	 * 有工作在途的会话拒绝而不是在其底下删除——被 hold 着的、运行中的、停在审批上的——controller
-	 * 把这个拒绝变成 409。空闲会话删除时先向观看者告别（`undefined` 让 mux 对观看中的流发 end），
-	 * `closing` 槽位横跨整个移除持有：删除中途到来的 hold 会等待、然后发现没有文件，而不是打开一个
-	 * 正在消失的文件。
+	 * 删除是否决式（ADR-0023），不再以「有人在用」为由失败——core 的
+	 * {@link Agent.deleteSessionBySessionId} 自己安顿一切：中止在飞的运行、等引擎收尾、文件闸内
+	 * rm、出表。这里同步做的只有存在性校验：`fileAbsPathOf` 无所指的 id 以
+	 * {@link UnknownSessionError} 拒绝（→ 404，与「第二次删除是 404」一致——删除进行中或完成后
+	 * 文件已消失），这是删除端点同步做的唯一检查。
 	 *
-	 * 守卫刻意只有三道（ADR-0022）：send 引用的第四道（waiting）已撤销——本产品是单用户，发消息
-	 * 的人与点删除的人是同一个，空闲即删是「最后一个动作赢」的语义；在途 send 的答案随删除作废，
-	 * 是用户的明确意图，不需要守卫代为保守。
-	 *
-	 * 未指名的落点被重置：它指名的东西没了，下一次询问针对剩下的重新解析，而不是用一个已不存在的会话作答。
+	 * 校验之后向观看者告别（`undefined` 让 mux 对观看中的流发 end）、重置未指名的落点，然后
+	 * **不 await** 删除：否决序分离在后台跑完，202 应答先到（spec Testing Decisions：运行中删除
+	 * → 应答先于收尾）。分离的 promise 上挂错误日志——删除的失败只剩真正的病态（文件已损、id
+	 * 非法），沿用仓库的中文诊断日志约定。
 	 */
-	async remove(sessionId: string): Promise<void> {
-		if (this.holdsOf(sessionId) > 0 || this.agent.isRunning(sessionId) || this.agent.hasPendingApprovals(sessionId)) {
-			throw new Error("这个会话还有运行中的轮次或没答完的审批，等它停下来再删。");
-		}
-		const closing = (async () => {
-			for (const watcher of this.watchers.get(sessionId) ?? []) watcher(undefined);
-			await this.agent.deleteSessionBySessionId(sessionId);
-		})();
-		this.closing.set(sessionId, closing);
-		try {
-			await closing;
-		} finally {
-			this.closing.delete(sessionId);
-		}
+	remove(sessionId: string): void {
+		if (this.agent.fileAbsPathOf(sessionId) === undefined) throw new UnknownSessionError(sessionId);
+		for (const watcher of this.watchers.get(sessionId) ?? []) watcher(undefined);
 		this.current = undefined;
+		void this.agent.deleteSessionBySessionId(sessionId).catch((error: unknown) => {
+			console.error(`会话 ${sessionId} 的删除失败：${error instanceof Error ? error.message : String(error)}`);
+		});
 	}
 
 	/**
 	 * 进程退出前停止每次运行并落定每个会话。
 	 *
-	 * 谁在跑只有编排层的表知道（运行比发起它的请求活得久，202 的 hold 当场交还），所以停止是
-	 * orchestrator 自己的复数动词（`closeAll`）；观看者在此刻收到告别，表与簿记随之清空。
+	 * 谁在跑只有编排层的表知道（运行比发起它的请求活得久，202 应答早已返回），所以停止是
+	 * orchestrator 自己的复数动词（`closeAll`）；观看者在此刻收到告别，分发表随之清空。
 	 */
 	async close(): Promise<void> {
 		await this.agent.closeAll();
 		for (const watchers of this.watchers.values()) for (const watcher of watchers) watcher(undefined);
 		this.watchers.clear();
 		this.feedMap.clear();
-		this.holds.clear();
 	}
 
 	/**

@@ -249,32 +249,15 @@ try {
 	// explicit creation happens, and the session below is held by the id that creation returned.
 	check("nothing is selected before anything is created", (await hub.currentSessionId()) === null);
 	const landing = await hub.birth({ text: "出生的第一条消息" });
-	await hub.hold(landing);
-	await hub.hold(landing);
-	check("two holds on one id count together", hub.holdsOf(landing) === 2, `holds=${hub.holdsOf(landing)}`);
-	// 一个 hold 不拼装任何东西（ADR-0013）：袋由运行自己装配，计数只是簿记。
-	check("and a hold assembles nothing", !hub.isLive(landing), String(hub.isLive(landing)));
+	// hold 簿记已迁入 SessionManager（票 03）：hub 上不再有计数表可断言，外部行为是出生自己留下
+	// 的状态——失败的出生运行散了自己的袋，文件已在盘上，没有多出来的活半。
+	check("the birth leaves the session idle", !hub.isLive(landing), String(hub.isLive(landing)));
 
-	process.stdout.write("holding by id\n");
-	const again = await hub.hold(landing);
-	check("holds add up", hub.holdsOf(landing) === 3, `holds=${hub.holdsOf(landing)}`);
-	void again;
-
-	process.stdout.write("a hold outlives the connections that dropped it\n");
-	hub.release(landing);
-	hub.release(landing);
-	check("still counted with one hold left", hub.holdsOf(landing) === 1, `holds=${hub.holdsOf(landing)}`);
-	await new Promise((resolve) => setTimeout(resolve, 50));
-	check("a held session is never forgotten", hub.holdsOf(landing) === 1);
-
-	process.stdout.write("the last release lets the file be the whole session\n");
+	process.stdout.write("the file is the whole session\n");
 	hubSessions(hub).appendMessage(bagOf(hub, landing), userMessage("survives the reap"));
-	hub.release(landing);
-	check("the hold is spent", hub.holdsOf(landing) === 0, `holds=${hub.holdsOf(landing)}`);
 	check("and nothing was ever assembled for it", !hub.isLive(landing), String(hub.isLive(landing)));
 
 	process.stdout.write("the JSONL file is what survives\n");
-	await hub.hold(landing);
 	check(
 		"and it still carries the session",
 		JSON.stringify(hub.agent.snapshot(landing).messages).includes("survives the reap"),
@@ -511,11 +494,9 @@ try {
 	}
 
 	process.stdout.write("an unknown id fails instead of quietly starting one\n");
-	const missing = await hub.hold("0123456789abcdef").then(
-		() => undefined,
-		(error: unknown) => error,
-	);
-	check("holding an unknown id rejects", missing instanceof Error, String(missing));
+	// hold 的存在性校验随簿记退场（票 03）：id 是否有所指现在是 Manager 的地址解析。facade 的
+	// 窄读对无所指的 id 回答「没有」——不拼装、不出生。
+	check("an unknown id resolves to no file", hub.agent.fileAbsPathOf("0123456789abcdef") === undefined);
 	check("and nothing entered the registry", !hub.isLive("0123456789abcdef"), String(hub.isLive("0123456789abcdef")));
 
 	process.stdout.write("the settings files name the tools a session that never chose opens on\n");
@@ -596,39 +577,22 @@ try {
 
 	process.stdout.write("reading a session does not assemble one\n");
 	// Phase 1 in one section: a read answers from the JSONL log, leaves the registry exactly as it was,
-	// and agrees field-for-field with what holding the same session reports — because both build
+	// and agrees field-for-field with what the facade answers directly — because both build
 	// their snapshot from the same parts.
 	const http = await bootServer({ workDirAbsPath: root, port: 0 });
 	try {
 		const readId = await http.hub.birth({ text: "read me" });
-		await http.hub.hold(readId);
 		hubSessions(http.hub).appendMessage(bagOf(http.hub, readId), userMessage("and me"));
-		http.hub.release(readId);
 		check("the session is idle before the read", !http.hub.isLive(readId), String(http.hub.isLive(readId)));
-
-		// The phase's contract as a counter, because the registry cannot show it on its own: a hold
-		// that is given straight back is reaped out of `live` within a tick — before a client can even
-		// read the response — so the map is back where it started either way. Counting the entry point
-		// is what actually catches a read that assembles; the `live` checks below are the state the
-		// caller is promised, and they hold whatever the read did.
-		let holds = 0;
-		const hold = http.hub.hold.bind(http.hub);
-		http.hub.hold = async (sessionId: string) => {
-			holds += 1;
-			return hold(sessionId);
-		};
 
 		const firstRead = await get(`${http.url}/api/sessions/${readId}`);
 		check("GET /api/sessions/{id} answers 200", firstRead.status === 200, `status=${firstRead.status}`);
 		// Birth writes two entries (the user message and the failed run's error message), and the append
 	// above adds the third — each birth is +2 against the ledger under ADR-0021.
 	check("the cold session is not empty", (firstRead.session?.messages.length ?? 0) === 3, `${firstRead.session?.messages.length} messages`);
-		// This is the whole phase in one line: reading a session never takes a hold on it.
-		check("and the read never held the session", holds === 0, `holds=${holds}`);
-		check("so nothing is running it", !http.hub.isLive(readId), String(http.hub.isLive(readId)));
-		// The read is also the window's decision about whether to attach a stream: a snapshot that
-		// reports `running: false` is one the window renders without opening one, which is why the
-		// hold count above is the whole evidence — an attach would have held through the hub.
+		// This is the whole phase: a read never runs the session — the read is also the window's
+		// decision about whether to attach a stream, and a snapshot that reports `running: false` is
+		// one the window renders without opening one.
 		check("and it reports the session as idle", firstRead.session?.running === false, String(firstRead.session?.running));
 
 		const secondRead = await get(`${http.url}/api/sessions/${readId}`);
@@ -636,18 +600,13 @@ try {
 			"reading it twice gives the same answer",
 			JSON.stringify(secondRead.session) === JSON.stringify(firstRead.session),
 		);
-		check("and still nothing was held", holds === 0, `holds=${holds}`);
 
 		const unknownRead = await get(`${http.url}/api/sessions/0123456789abcdef`);
 		check("an unknown id is still 404", unknownRead.status === 404, `status=${unknownRead.status}`);
-		check("and an unknown id is never held either", holds === 0, `holds=${holds}`);
 
-		// What the cold read must agree with. Claiming it here is the deliberate hold, and the only
-		// one this section makes: everything the session file can answer has to come out the same.
-		await http.hub.hold(readId);
-		check("a hold is what runs it", holds === 1, `holds=${holds}`);
+		// What the cold read must agree with. The facade's own snapshot is the comparison point:
+		// everything the session file can answer has to come out the same.
 		const liveSnapshot = http.hub.agent.snapshot(readId);
-		http.hub.release(readId);
 
 		// Everything the session file can answer must be identical; only what a loop answers may differ.
 		const fromLog = [
@@ -844,7 +803,7 @@ try {
 		process.stdout.write("a rename stores a name and a delete removes the session\n");
 		// The two row-menu actions the window offers, over the real route table: a rename lands as one
 		// entry and answers 201, a blank one is refused before anything is written, and a delete takes
-		// the file with it — refusing first while a hold is still held.
+		// the file with it — answered 202 and accepted no matter who was using the session, veto-style.
 		{
 			const victim = await http.hub.birth({ text: "要删的会话" });
 			const blank = await call("POST", `${http.url}/api/sessions/${victim}/title`, { title: "   " });
@@ -857,14 +816,10 @@ try {
 			const reread = await get(`${http.url}/api/sessions/${victim}`);
 			check("and the snapshot reports it", reread.session?.title === "新名字", reread.session?.title);
 
-			const busy = await http.hub.hold(victim);
-			const refused = await call("DELETE", `${http.url}/api/sessions/${victim}`);
-			check("deleting a held session is refused (409)", refused.status === 409, `status=${refused.status}`);
-			http.hub.release(victim);
-			check("the hold lets go", await until(() => http.hub.holdsOf(victim) === 0, 5_000), String(http.hub.holdsOf(victim)));
-
+			// 否决式（票 03）：删除不再被「有人在用」拒绝——409 退场。空闲删除即 202，应答先到；
+			// 读是 404；第二次删除也是 404；文件真消失。
 			const removed = await call("DELETE", `${http.url}/api/sessions/${victim}`);
-			check("an idle session is deleted (200)", removed.status === 200, `status=${removed.status}`);
+			check("an idle session is deleted (202)", removed.status === 202, `status=${removed.status}`);
 			check("the answer says what happened", removed.payload.removed === true, JSON.stringify(removed.payload));
 			const gone = await get(`${http.url}/api/sessions/${victim}`);
 			check("and then it is a 404", gone.status === 404, `status=${gone.status}`);

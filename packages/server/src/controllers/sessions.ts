@@ -98,8 +98,8 @@ export class SystemController {
 		this.listeners = listeners;
 	}
 
-	health(): { ok: boolean; workDirAbsPath: string; held: readonly string[] } {
-		return { ok: true, workDirAbsPath: this.hub.workDirAbsPath, held: this.hub.heldSessionIds() };
+	health(): { ok: boolean; workDirAbsPath: string } {
+		return { ok: true, workDirAbsPath: this.hub.workDirAbsPath };
 	}
 
 	models(): ModelOption[] {
@@ -387,7 +387,7 @@ export class SystemController {
 /**
  * 关于一个会话的一切：读它、改它的配置，以及那些曾是对 socket 消息的一个 `switch` 的各分支的命令。
  *
- * 每个方法都是对 orchestrator 的一次薄调用，处在它从 hub 拿到的 hold 之下。只有两个决定住在这里：一个失败作为什么 status，以及命令在会话接受后立即返回——运行本身在事件流上报告，永远不在这个响应上。
+ * 每个方法都是对 orchestrator 的一次薄调用。只有两个决定住在这里：一个失败作为什么 status，以及命令在会话接受后立即返回——运行本身在事件流上报告，永远不在这个响应上。
  */
 export class SessionController {
 	private readonly hub: SessionHub;
@@ -401,9 +401,7 @@ export class SessionController {
 	/**
 	 * 本进程正在运行、或可以打开的会话的当前状态。
 	 *
-	 * 本 controller 上唯一*不*经过 {@link holding} 的读取：读会话记录不得拼装会话、hold 它、或淘汰它，所以向 hub 要快照而不是活对象。这里其他每个方法都在变更、或必须对着正在运行的会话执行，那些都保留自己的 hold。
-	 *
-	 * 存在性也不在这里检查：读取指名会话，orchestrator 在无人应答时以 {@link UnknownSessionError} 拒绝——transport 把它变成与旧预检查相同的 404。
+	 * 本 controller 上唯一*不*改变会话的读取：读会话记录不得拼装会话或淘汰它，所以向 hub 要快照而不是活对象。存在性也不在这里检查：读取指名会话，orchestrator 在无人应答时以 {@link UnknownSessionError} 拒绝——transport 把它变成与命令路径相同的 404。
 	 */
 	async read(sessionId: string): Promise<{ session: SessionSnapshot }> {
 		return { session: await this.hub.snapshotOf(sessionId) };
@@ -412,7 +410,7 @@ export class SessionController {
 	/**
 	 * 出生证明：让一个会话与它的第一条消息在同一个请求里原子出生（ADR-0021）。
 	 *
-	 * 返回 id 而不是被 hold 的会话，让挂上恰好发生在一个地方：客户端接下来发送的 mux `open` 帧。id
+	 * 返回 id 而不是任何会话对象：会话是两个文件，进程里没有副本（ADR-0013）。客户端接下来发送的 mux `open` 帧。id
 	 * 由服务端铸（客户端不指名，避免路径注入与碰撞），两个文件在这一个请求里同时落盘——服务端在第
 	 * 一条消息之前完全无状态，不存在「创建了但没说过话」的中间态。
 	 *
@@ -512,7 +510,7 @@ export class SessionController {
 	 *
 	 * 派生 title 遵循的缩短规则在这里、在任何东西被写入之前应用——用户的输入在像派生 title 一样被折叠和裁剪之前还不是 title，这样改名的行与派生的行在宽度和形状上无从区分。空名字被拒绝而不是存储：存一个空 title 会悄悄恢复派生 title，那正是*不改名*已经在做的事。没有清除改名；把名字改回去是另一次改名。
 	 *
-	 * 不占 hold，运行在途也不构成障碍：title 是关于会话的事实而不是关于某条路径的事实，loop 读取的任何东西都不依赖它。
+	 * 运行在途也不构成障碍：title 是关于会话的事实而不是关于某条路径的事实，loop 读取的任何东西都不依赖它。
 	 */
 	async rename(sessionId: string, body: Record<string, unknown>): Promise<{ sessionId: string; title: string }> {
 		const title = body.title;
@@ -527,16 +525,13 @@ export class SessionController {
 	/**
 	 * 删除会话：会话记录、文件，以及本进程知道的关于它的每一行。
 	 *
-	 * 忙碌的会话是冲突而不是坏请求——请求被理解了，横在它与删除之间的是一次要等的运行或一个要答的审批，这正是 409 存在要指名的情形。listeners 在文件消失*之后*才听到，于是告知窗口的那一帧永远不会先于它所报告的事实。
+	 * 删除改否决式（ADR-0023）后不再有「还在忙」的冲突——hub 的 remove 只同步做存在性校验
+	 * （无所指的 id 以 {@link UnknownSessionError} 拒绝，transport 把它变成 404），真正的删除分离
+	 * 在后台跑完。listeners 在 202 应答的同一拍就听到：删除可能仍在进行，但侧边栏的状态此刻就该与
+	 * 用户的意图一致（spec User Story 3），而不是等一个用户已经不关心的收尾。
 	 */
 	async remove(sessionId: string): Promise<{ removed: true }> {
-		try {
-			await this.hub.remove(sessionId);
-		} catch (error) {
-			// 不存在的会话是命令本身以 404 拒绝的那一个；hub 在这条路上抛的其他一切都属于"还在忙"，那是冲突。
-			if (error instanceof UnknownSessionError) throw error;
-			throw httpStatus.conflict(messageOf(error));
-		}
+		this.hub.remove(sessionId);
 		this.listeners.onRemoved?.(sessionId);
 		return { removed: true };
 	}
@@ -558,21 +553,20 @@ export class SessionController {
 			throw httpStatus.badRequest("`descend` must be a boolean");
 		}
 
-		return this.holding(sessionId, (session) => {
-			try {
-				session.branchTo(sessionId, entryId, descend ?? true);
-			} catch (error) {
-				// 运行在途，或本会话不持有的一个 entry：被理解并被拒绝，是冲突而不是坏请求。
-				throw httpStatus.conflict(messageOf(error));
-			}
-			return { session: session.snapshot(sessionId) };
-		});
-	}
-
-	/**
+		const agent = this.hub.agent;
+		try {
+			agent.branchTo(sessionId, entryId, descend ?? true);
+		} catch (error) {
+			// 未知 id 的存在性 404 沿命令自己的路径来（getSessionBySessionId → open），不属于冲突；
+			// 其余被拒绝的 branchTo——运行在途，或本会话不持有的一个 entry——是冲突而不是坏请求。
+			if (error instanceof UnknownSessionError) throw error;
+			throw httpStatus.conflict(messageOf(error));
+		}
+		return { session: agent.snapshot(sessionId) };
+	}	/**
 	 * 接受一条 prompt。
 	 *
-	 * 202 而不是 200，在消息持久化后立即应答：`session.prompt()` 在*运行*结束时 resolve，那是几分钟之后，在这里 await 它会把请求——连同它的 hold——吊住整整一轮，还让 status code 变成谎言。改为启动并观察这次运行，只有启动失败被上报，且写在会话自己的流上，因为到那时已经没有响应可以上报了。
+	 * 202 而不是 200，在消息持久化后立即应答：`session.prompt()` 在*运行*结束时 resolve，那是几分钟之后，在这里 await 它会把请求吊住整整一轮，还让 status code 变成谎言。改为启动并观察这次运行，只有启动失败被上报——存在性 404 从本应答出去，其余写在会话自己的流上，因为到那时已经没有响应可以上报了。
 	 *
 	 * `behavior` 决定运行中发来的 prompt 怎么办——`steer` 在运行中那一轮的下一个 drain 点注入，`followUp` 等这一轮结束。
 	 *
@@ -596,31 +590,40 @@ export class SessionController {
 			throw httpStatus.badRequest("`thinkingLevel` must be a string");
 		}
 
-		return this.holding(sessionId, (session) => {
-			const selection: ModelSelection = {
-				...(model === undefined ? {} : { model }),
-				...(thinkingLevel === undefined ? {} : { thinkingLevel }),
-			};
-			// `prompt()` 在第一个 await 之前持久化消息并把运行标记为 streaming，所以这条应答返回时消息已在盘上、`running` 已为真。
-			void session
-				.prompt(sessionId, text, { ...(behavior === undefined ? {} : { behavior }), selection })
-				.catch((error: unknown) => {
-					this.onRunFailure(sessionId, messageOf(error));
-				});
-			return { accepted: true };
-		});
+		const agent = this.hub.agent;
+		const selection: ModelSelection = {
+			...(model === undefined ? {} : { model }),
+			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+		};
+		// `prompt()` 在第一个 await 之前持久化消息并把运行标记为 streaming，所以这条应答返回时消息已在盘上、`running` 已为真。
+		// 它的 promise 在运行结束时才 resolve——在飞的运行不能在这里等。但无所指的 id 在 prompt
+		// 起步的同步链里就被 open 拒绝（startPromptedRun → getSessionBySessionId），这个立即的失败
+		// 要让本应答以 404 出去：拒绝的到达隔着一跳内部的 await，一个宏任务轮（setImmediate，让出
+		// 全部微任务）足以让它浮出。其余一切——排队、运行本身的失败——走流（onRunFailure），
+		// 因为 202 早已应答，这是 202 语义的另一半。
+		let startFailure: unknown;
+		agent
+			.prompt(sessionId, text, { ...(behavior === undefined ? {} : { behavior }), selection })
+			.catch((error: unknown) => {
+				if (error instanceof UnknownSessionError) startFailure ??= error;
+				else this.onRunFailure(sessionId, messageOf(error));
+			});
+		await new Promise<void>((done) => setImmediate(done));
+		if (startFailure !== undefined) throw startFailure;
+		return { accepted: true };
 	}
 
 	/**
 	 * 停止在途的运行。
 	 *
 	 * 这就是命令是 HTTP 请求而不是事件流上的一帧的原因：停止不属于流，任何持有会话 id 的调用者都能做——另一个 tab、一个脚本、一个 `curl`——流卡住的客户端仍然有出路。
+	 *
+	 * 无所指的 id 以 {@link UnknownSessionError} 拒绝（`Agent.abort` 自票 03 起对表外 id 抛出）——
+	 * 停止一个不存在的东西是一个 404，不再是一次静默的 no-op。
 	 */
 	async abort(sessionId: string): Promise<{ stopped: true }> {
-		return this.holding(sessionId, async (session) => {
-			await session.abort(sessionId);
-			return { stopped: true };
-		});
+		await this.hub.agent.abort(sessionId);
+		return { stopped: true };
 	}
 
 	/**
@@ -637,15 +640,16 @@ export class SessionController {
 		}
 		const fields = patch as ConfigPatch;
 
-		return this.holding(sessionId, (session) => {
-			try {
-				session.applyConfig(sessionId, fields);
-			} catch (error) {
-				// 会话不能接受的一个模式名、审批键或队列模式：请求被理解并被拒绝，是冲突而不是坏请求。
-				throw httpStatus.conflict(messageOf(error));
-			}
-			return { session: session.snapshot(sessionId) };
-		});
+		const agent = this.hub.agent;
+		try {
+			agent.applyConfig(sessionId, fields);
+		} catch (error) {
+			// 未知 id 的存在性 404 沿命令自己的路径来（getSessionBySessionId → open），不属于冲突；
+			// 会话不能接受的一个模式名、审批键或队列模式：请求被理解并被拒绝，是冲突而不是坏请求。
+			if (error instanceof UnknownSessionError) throw error;
+			throw httpStatus.conflict(messageOf(error));
+		}
+		return { session: agent.snapshot(sessionId) };
 	}
 
 	/**
@@ -665,36 +669,23 @@ export class SessionController {
 		const approved = body.approved;
 		if (typeof approved !== "boolean") throw httpStatus.badRequest("`approved` must be a boolean");
 
-		return this.holding(sessionId, (session) => {
-			// 在任何东西被记录之前拒绝：本会话没有在等的一个 id 得到 409，answers 表和会话都不会听到这个尝试。
-			if (!session.hasPendingApproval(sessionId, toolCallId)) {
-				throw httpStatus.conflict(`${toolCallId} is not a pending approval`);
-			}
-			this.listeners.onApproval?.(sessionId, toolCallId, approved);
-			void session.respondApproval(sessionId, toolCallId, approved).catch((error: unknown) => {
-				this.onRunFailure(sessionId, messageOf(error));
-			});
-			return { toolCallId, approved };
+		const agent = this.hub.agent;
+		// 在任何东西被记录之前拒绝：本会话没有在等的一个 id 得到 409，answers 表和会话都不会听到这个尝试。
+		// 无所指的 id 沿 hasPendingApproval 自己的路径（getSessionBySessionId → open）抛
+		// {@link UnknownSessionError}，transport 把它变成 404。
+		if (!agent.hasPendingApproval(sessionId, toolCallId)) {
+			throw httpStatus.conflict(`${toolCallId} is not a pending approval`);
+		}
+		this.listeners.onApproval?.(sessionId, toolCallId, approved);
+		void agent.respondApproval(sessionId, toolCallId, approved).catch((error: unknown) => {
+			this.onRunFailure(sessionId, messageOf(error));
 		});
+		return { toolCallId, approved };
 	}
 
 	/**
-	 * 对一个会话执行操作，同时拿住让它保持打开的那个 hold。
-	 *
-	 * hold 由 hub 计数；执行命令的 orchestrator 是进程自己的，每次调用都指名它作用的会话，所以请求需要 hub 的只是 hold、再无其他。在一次读写期间拿住、用完立刻交还，让生命周期只有一条规则：有人 hold 时会话开着，最后一个 hold 放开就关。
-	 *
-	 * 不存在的会话是 404，而 hold 正是说这件事的：`hold` 打开会话记录，什么都不指名的 id 在那里以 {@link UnknownSessionError} 拒绝，transport 负责映射。hub 抛的其他东西——解析不了的会话记录文件、拼装不了的会话——是本服务器自己的问题，对它说"not found"会让调用者去找一个其实完全正确的 id 里的拼写错误。
+	 * 一次连启动都失败的运行，在流上说出，因为它的请求早已应答完毕。
 	 */
-	private async holding<T>(sessionId: string, use: (agent: Agent) => T | Promise<T>): Promise<T> {
-		await this.hub.hold(sessionId);
-		try {
-			return await use(this.hub.agent);
-		} finally {
-			this.hub.release(sessionId);
-		}
-	}
-
-	/** 一次连启动都失败的运行，在流上说出，因为它的请求早已应答完毕。 */
 	private onRunFailure(sessionId: string, message: string): void {
 		this.listeners.onRunFailure?.(sessionId, message);
 	}

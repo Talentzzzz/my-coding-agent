@@ -163,10 +163,13 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 				sendJson(response, 201, await controllers.sessions.rename(params.id, await readObjectBody(request))),
 		}),
 		route({
+			// 202 而不是 200：删除改否决式（ADR-0023）后不再被「有人在用」拒绝——存在性校验同步通过
+			// 即应答，真正的删除（中止运行、等收尾、闸内 rm）分离在后台跑完。此后这个 id 永远是 404，
+			// 第二次删除也是。
 			method: "DELETE",
 			path: "/api/sessions/:id",
 			params: { id: stringParam },
-			handle: async (params, _request, response) => sendJson(response, 200, await controllers.sessions.remove(params.id)),
+			handle: async (params, _request, response) => sendJson(response, 202, await controllers.sessions.remove(params.id)),
 		}),
 		route({
 			method: "POST",

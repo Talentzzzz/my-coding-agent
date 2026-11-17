@@ -406,7 +406,8 @@ async function main(): Promise<void> {
 			else pass("the listing gives a fork its parent by id, which is what the tree is drawn from");
 
 			// 改名与删除，走行菜单用的同一张面。改名创建一个条目——201——并以它存储的名字作答；
-			// 空名在文件听说之前就被拒绝。删除答 200，此后 session 永远是 404。
+			// 空名在文件听说之前就被拒绝。删除改否决式（票 03）：202 应答先到，真正的删除分离在
+			// 后台跑完，此后 session 永远是 404——读是、第二次删除也是。
 			const named = await request("POST", `/api/sessions/${encodeURIComponent(treeId)}/title`, { title: "改过的名字" });
 			if (named.status !== 201) fail(`a rename answered ${named.status}, expected 201`);
 			else if ((named.payload as { title?: string }).title !== "改过的名字") fail(`a rename answered ${JSON.stringify(named.payload)}`);
@@ -416,8 +417,8 @@ async function main(): Promise<void> {
 			else pass("a blank name is refused (400)");
 
 			const removed = await request("DELETE", `/api/sessions/${encodeURIComponent(forkedId)}`);
-			if (removed.status !== 200) fail(`a delete answered ${removed.status}, expected 200`);
-			else pass("a delete is accepted (200)");
+			if (removed.status !== 202) fail(`a delete answered ${removed.status}, expected 202`);
+			else pass("a delete is accepted (202)");
 			const goneRead = await request("GET", `/api/sessions/${encodeURIComponent(forkedId)}`);
 			if (goneRead.status !== 404) fail(`the deleted session answered ${goneRead.status}, expected 404`);
 			else pass("and the deleted session is a 404 ever after");

@@ -112,11 +112,6 @@ async function until(ready: () => boolean, ms = 5_000): Promise<boolean> {
 	return ready();
 }
 
-// 测试台在下面这些检查期间持有一个 hold。快照读取与编排层内部的装配/散袋没有真正的竞态——
-// 袋的读取面（`agent.snapshot`）对冷会话同样作答——持有 hold 纯粹是让这些检查的意图（有人
-// 在用这个会话）写在测试台上的方式。
-await hub.hold(sessionId);
-
 try {
 	const accepted = await request("POST", `/api/sessions/${sessionId}/messages`, { text: "read the notes" });
 	check("the prompt was accepted", accepted.status === 202, `status ${accepted.status}`);
@@ -163,7 +158,6 @@ try {
 	check("and the settled answer was not recorded twice", remembered.length === 1, JSON.stringify(remembered));
 } finally {
 	clearTimeout(watchdog);
-	hub.release(sessionId);
 	await hub.close();
 	await handle.close();
 	await rm(settingsHome, { recursive: true, force: true });
