@@ -451,6 +451,9 @@ export class SessionHub {
 	 * ——sink 把编排层的事件带到 feedMap，这个方法把订阅者放进 feedMap。形状与原来的公开面一致，
 	 * 所以 mux 与 projection 的订阅代码一个字不改。退订函数在最后一个订阅者离开时清掉自己的条目，
 	 * 让表里只留真正有人在听的会话。
+	 *
+	 * 清条目认的是**这一次拿到的那只 feed**，不是这个 id——与 `subscribe` 的退订同一条理由：迟到的
+	 * 退订不得替同 id 上后来的订阅清掉它，否则那些订阅者再也听不到事件。
 	 */
 	feeds(sessionId: string): SessionFeeds {
 		const feed = this.feedMap.get(sessionId) ?? { eventListeners: new Set<SessionEventListener>(), listeners: new Set<SessionListener>() };
@@ -460,14 +463,14 @@ export class SessionHub {
 				feed.eventListeners.add(listener);
 				return () => {
 					feed.eventListeners.delete(listener);
-					if (feed.eventListeners.size === 0 && feed.listeners.size === 0) this.feedMap.delete(sessionId);
+					if (feed.eventListeners.size === 0 && feed.listeners.size === 0 && this.feedMap.get(sessionId) === feed) this.feedMap.delete(sessionId);
 				};
 			},
 			onChange: (listener) => {
 				feed.listeners.add(listener);
 				return () => {
 					feed.listeners.delete(listener);
-					if (feed.eventListeners.size === 0 && feed.listeners.size === 0) this.feedMap.delete(sessionId);
+					if (feed.eventListeners.size === 0 && feed.listeners.size === 0 && this.feedMap.get(sessionId) === feed) this.feedMap.delete(sessionId);
 				};
 			},
 		};
