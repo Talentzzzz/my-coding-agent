@@ -14,6 +14,7 @@
 		"packages/server/src/**/*.ts",
 		"scripts/cdp.ts",
 		"scripts/smoke-projection.ts",
+		"scripts/smoke-subscribe.ts",
 		"scripts/fake-transport.ts",
 		"scripts/mount-session.ts",
 		"scripts/smoke-default-model.ts",
