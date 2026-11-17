@@ -238,7 +238,7 @@ export class SessionHub {
 	 *   的前提由构造成立。
 	 * - **恰好一次**：由 {@link deliverBaseline} 的 `delivered` 与退订的 `cancelled` 两个标志保证——两条回调互斥、各至多一次；
 	 *   冷读盘返回时若订阅已退订，交付随之终结（终结即交付不再发生；退订函数宽容、幂等，与
-	 *   退订 feed 的语义相同，最后一个退订清理该会话的条目）。
+	 *   退订 feed 的语义相同，最后一个退订只清理这一次订阅所在的那只集合）。
 	 * - **`watcher(undefined)`**：只在会话删除（`remove`）或进程收摊（`close`）时到达，与观看的
 	 *   告别语义一字不差——两者的遍历覆盖这里注册的 watcher。
 	 *
@@ -265,7 +265,9 @@ export class SessionHub {
 		return () => {
 			cancelled = true;
 			watching.delete(watcher);
-			if (watching.size === 0) this.watchers.delete(sessionId);
+			// 认的是这一次订阅拿到的那只 Set，不是这个 id：同 id 上后来的订阅可能已经换了新
+			// 的集合，迟到的退订不得替它清掉条目，否则后来的观看者再也收不到告别。
+			if (this.watchers.get(sessionId) === watching && watching.size === 0) this.watchers.delete(sessionId);
 		};
 	}
 
@@ -300,11 +302,11 @@ export class SessionHub {
 	 * 拍内由构造成立；冷半与失败共享 `delivered`，任何 sink 都收不到两次交付、也收不到一条
 	 * baseline 加一条 error。
 	 *
-	 * `cancelled` 是退订的闸：subscribe 的退订函数把它置真，让冷读盘在飞的那段窗口终结交付；
-	 * rebaseline 不注册也不退订，没有闸可拉。活半的交付在本方法返回之前已经完成，退订只可能
+	 * `cancelled` 是退订的闸（可选）：subscribe 的退订函数把它置真，让冷读盘在飞的那段窗口终结
+	 * 交付；rebaseline 不注册也不退订，不传闸。活半的交付在本方法返回之前已经完成，退订只可能
 	 * 发生在后一拍，所以闸实际拦到的只有冷半。
 	 */
-	private deliverBaseline(sessionId: string, sink: SubscriptionSink, cancelled: () => boolean = () => false): void {
+	private deliverBaseline(sessionId: string, sink: SubscriptionSink, cancelled?: () => boolean): void {
 		let delivered = false;
 
 		if (this.isLive(sessionId)) {
@@ -317,12 +319,12 @@ export class SessionHub {
 		// 冷半：读盘归 hub。失败与成功共享同一组守门标志，恰好一次由构造成立。
 		void this.agent.snapshotOf(sessionId).then(
 			(snapshot) => {
-				if (delivered || cancelled()) return;
+				if (delivered || cancelled?.()) return;
 				delivered = true;
 				sink.onBaseline(snapshot);
 			},
 			(error) => {
-				if (delivered || cancelled()) return;
+				if (delivered || cancelled?.()) return;
 				delivered = true;
 				sink.onError(error);
 			},
@@ -449,6 +451,9 @@ export class SessionHub {
 	 * ——sink 把编排层的事件带到 feedMap，这个方法把订阅者放进 feedMap。形状与原来的公开面一致，
 	 * 所以 mux 与 projection 的订阅代码一个字不改。退订函数在最后一个订阅者离开时清掉自己的条目，
 	 * 让表里只留真正有人在听的会话。
+	 *
+	 * 清条目认的是**这一次拿到的那只 feed**，不是这个 id——与 `subscribe` 的退订同一条理由：迟到的
+	 * 退订不得替同 id 上后来的订阅清掉它，否则那些订阅者再也听不到事件。
 	 */
 	feeds(sessionId: string): SessionFeeds {
 		const feed = this.feedMap.get(sessionId) ?? { eventListeners: new Set<SessionEventListener>(), listeners: new Set<SessionListener>() };
@@ -458,14 +463,14 @@ export class SessionHub {
 				feed.eventListeners.add(listener);
 				return () => {
 					feed.eventListeners.delete(listener);
-					if (feed.eventListeners.size === 0 && feed.listeners.size === 0) this.feedMap.delete(sessionId);
+					if (feed.eventListeners.size === 0 && feed.listeners.size === 0 && this.feedMap.get(sessionId) === feed) this.feedMap.delete(sessionId);
 				};
 			},
 			onChange: (listener) => {
 				feed.listeners.add(listener);
 				return () => {
 					feed.listeners.delete(listener);
-					if (feed.eventListeners.size === 0 && feed.listeners.size === 0) this.feedMap.delete(sessionId);
+					if (feed.eventListeners.size === 0 && feed.listeners.size === 0 && this.feedMap.get(sessionId) === feed) this.feedMap.delete(sessionId);
 				};
 			},
 		};

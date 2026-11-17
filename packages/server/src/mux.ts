@@ -8,7 +8,7 @@ import type {
 } from "@my-agent/core/protocol";
 import { UnknownSessionError } from "@my-agent/core";
 import { parseClientFrame } from "./http/client-frame.ts";
-import type { SessionFeeds, SessionHub } from "./hub.ts";
+import type { SessionFeeds, SessionHub, SubscriptionSink } from "./hub.ts";
 import type { SessionProjection } from "./projection.ts";
 
 /**
@@ -252,14 +252,7 @@ export class MuxConnection {
 				live = true;
 				this.bind(sessionId, subscription, feeds);
 			},
-			{
-				onBaseline: (snapshot) => {
-					// 冷半的读盘可能跨过 cancel、第二个 open 或断线；活半的这一拍订阅一定还在表里。守卫与 baseline 的帧序一样是这一层的本域。
-					if (this.closed || this.subscriptions.get(sessionId) !== subscription) return;
-					this.writeBaseline(sessionId, subscription, snapshot);
-				},
-				onError: (error) => this.failBaseline(sessionId, subscription, error),
-			},
+			this.baselineSink(sessionId, subscription),
 		);
 
 		// 刻意在 `subscribe` 调用之后注册，且追加而不是赋值：`bind` 可能已经追加了 feed 的退订器，这一步不能挤掉它们。见 `Subscription.teardown`。
@@ -340,7 +333,8 @@ export class MuxConnection {
 	/**
 	 * 先发出 baseline，然后是堆积在它后面的一切。
 	 *
-	 * 每个 baseline 调一次：订阅的第一份由 `open` 的 sink 调，之后每次重发由 {@link pushBaseline} 的 sink 调——两者收到的都是 hub 在活冷分岔之后交回的结果，这一层不再知道它读的是袋还是盘。永远按产生顺序冲刷，客户端不可能看到会话记录往回跳。
+	 * 每个 baseline 调一次：首次交付与重发都经 {@link baselineSink} 把 hub 交回的结果送进这里——
+	 * 这一层不再知道它读的是袋还是盘。永远按产生顺序冲刷，客户端不可能看到会话记录往回跳。
 	 */
 	private writeBaseline(sessionId: string, subscription: Subscription, snapshot: SessionSnapshot): void {
 		if (subscription.backlog === null) return;
@@ -366,18 +360,36 @@ export class MuxConnection {
 	 *
 	 * 重发不能重新订阅——那会多挂一条 feed——所以走 hub 的 `rebaseline`：活冷分岔在那里完成，活半同步交回袋里的在飞状态（运行中途的第二个 `open` 因此带走正在写出的 `partial`，而不是盘上上一次落定的状态），冷半读盘后异步交回。
 	 *
-	 * 这里剩下的是帧序的本域。布防 backlog 让读盘期间到达的帧排在 baseline 之后：活半在同一同步块里布防又冲刷，等于没扣；冷半扣到读盘返回。已经欠着一份时不再要——那份 baseline 还在路上，再要一份只会让客户端多收一次同一状态，冷半还会多读一次盘。
+	 * 这里剩下的是帧序的本域。布防 backlog 让读盘期间到达的帧排在 baseline 之后：活半在同一同步块里布防又冲刷，等于没扣；冷半扣到读盘返回。已经欠着一份时不再要——那份 baseline 还在路上，再要一份只会让客户端多收一次同一状态，冷半还会多读一次盘；活半的同步交付同样受这条去重覆盖。
+	 *
+	 * 行为说明：重发经 {@link writeBaseline}，所以「正在展示哪些审批」的读者计数按新 baseline 的
+	 * 集合移动，而不是再数一遍——与 {@link pushApprovalChanges} 的差值移动同一条规则。
 	 */
 	private pushBaseline(sessionId: string, subscription: Subscription): void {
 		if (subscription.backlog !== null) return;
 		subscription.backlog = [];
-		this.hub.rebaseline(sessionId, {
+		this.hub.rebaseline(sessionId, this.baselineSink(sessionId, subscription));
+	}
+
+	/**
+	 * 一份 baseline 的着陆点：守卫，然后写出或报告失败。
+	 *
+	 * 首次交付与重发共用这一份，因为它们服从同一条规则：这份 baseline 还有人要吗。冷读盘在途
+	 * 时可能落进 cancel、第二个 open 或断线，往一条已经结束、或已经换了订阅的流上写帧是更糟
+	 * 的谎。守卫只写这一处；失败措辞仍归 {@link failBaseline}。
+	 */
+	private baselineSink(sessionId: string, subscription: Subscription): SubscriptionSink {
+		const wanted = (): boolean => !this.closed && this.subscriptions.get(sessionId) === subscription;
+		return {
 			onBaseline: (snapshot) => {
-				if (this.closed || this.subscriptions.get(sessionId) !== subscription) return;
+				if (!wanted()) return;
 				this.writeBaseline(sessionId, subscription, snapshot);
 			},
-			onError: (error) => this.failBaseline(sessionId, subscription, error),
-		});
+			onError: (error) => {
+				if (!wanted()) return;
+				this.failBaseline(sessionId, error);
+			},
+		};
 	}
 
 	/**
@@ -436,10 +448,9 @@ export class MuxConnection {
 	 *
 	 * 归因措辞留在这一层——hub 只交原始 error，它不知道帧上的话怎么说。这里最常见的情形是 id 什么都不指，它自己那句话比一个读取失败更清楚。
 	 *
-	 * 守卫与 baseline 的帧序一样是本层本域：冷读盘在途时可能落进一个 cancel、第二个 open 或断线，那份失败就无处可去——往一条已经结束、或已经换了订阅的流上写 error 是更糟的谎。
+	 * 「这份 baseline 还有人要吗」的守卫不在这里，它与成功那条共用 {@link baselineSink} 给出的同一处判断。
 	 */
-	private failBaseline(sessionId: string, subscription: Subscription, error: unknown): void {
-		if (this.closed || this.subscriptions.get(sessionId) !== subscription) return;
+	private failBaseline(sessionId: string, error: unknown): void {
 		const message = error instanceof UnknownSessionError ? `未知的会话：${sessionId}` : `读不出这个会话的记录：${describe(error)}`;
 		this.failStream(sessionId, message);
 	}

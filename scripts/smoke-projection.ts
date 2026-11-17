@@ -231,8 +231,8 @@ try {
 	await projection.refresh(afterStop);
 	let events = 0;
 	// 在 session 运行之前订阅：watcher 在注册的同一拍交出 feed，之后随运行自流入，无需任何重绑。
-	// 装配走 hub 的新公开订阅原语 subscribe（裸注册的 watch 已退役为 mux 的过渡壳）——这个 smoke
-	// 不关心 baseline，sink 只收下然后丢弃；它观看的只是事件流与「观看不拼装任何东西」本身。
+	// 装配走 hub 的公开订阅原语 subscribe（旧的 watch 已从公开面退场）——这个 smoke 不关心
+	// baseline，sink 只收下然后丢弃；它观看的只是事件流与「观看不拼装任何东西」本身。
 	const stopWatching = hub.subscribe(
 		afterStop,
 		(feeds) => {
