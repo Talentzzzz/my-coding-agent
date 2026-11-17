@@ -346,8 +346,17 @@ try {
 		{ onBaseline: () => {}, onError: () => {} },
 	);
 	stopFirst();
-	stopFirst();
-	check("unsubscribing twice neither throws nor disturbs the other watcher", hub.isWatched(quiet.id), String(hub.isWatched(quiet.id)));
+	let secondLetGoThrew = false;
+	try {
+		stopFirst();
+	} catch {
+		secondLetGoThrew = true;
+	}
+	check(
+		"unsubscribing twice neither throws nor disturbs the other watcher",
+		!secondLetGoThrew && hub.isWatched(quiet.id),
+		`threw=${secondLetGoThrew}, watched=${hub.isWatched(quiet.id)}`,
+	);
 	void hub.agent.prompt(quiet.id, "still heard by the second watcher");
 	check("and the other watcher still hears the feed", await until(() => quietEvents > 0), `${quietEvents} events`);
 	stopSecond();
