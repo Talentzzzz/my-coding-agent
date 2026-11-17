@@ -1,7 +1,7 @@
 # 04 - 测试：spec Testing Decisions 全量落地 + hasPendingApprovals 退场
 
 Type: task
-Status: open
+Status: resolved
 Blocked-by: 03
 
 ## 背景与指针

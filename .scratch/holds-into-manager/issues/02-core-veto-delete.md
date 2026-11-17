@@ -1,7 +1,7 @@
 # 02 - core：删除改否决式（中止 → 等收尾 → 闸内 rm → 出表）
 
 Type: task
-Status: open
+Status: resolved
 Blocked-by: 01
 
 ## 背景与指针

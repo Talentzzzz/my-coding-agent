@@ -1,7 +1,7 @@
 # 03 - server：传输层簿记退场 + 删除端点 202 + 实现检查点 + check 收紧
 
 Type: task
-Status: open
+Status: resolved
 Blocked-by: 02
 
 ## 背景与指针

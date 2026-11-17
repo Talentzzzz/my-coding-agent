@@ -1,7 +1,7 @@
 # 05 - 文档：ADR-0023 + AGENTS.md 术语 + architecture.md
 
 Type: task
-Status: open
+Status: resolved
 Blocked-by: 03
 
 ## 背景与指针

@@ -1,7 +1,7 @@
 # 01 - core：holds 迁入 SessionManager（文件级簿记 + 方法内化持有）
 
 Type: task
-Status: open
+Status: resolved
 Blocked-by: （无——这是图的根）
 
 ## 背景与指针
