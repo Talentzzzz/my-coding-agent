@@ -73,6 +73,7 @@ export function createMuxServer(factory: SessionStreamFactory, options: MuxOptio
 ```
 
 - `accept(sink)` 的**签名不变**：内部 `const wire = new Wire(sink, resolveWireOptions(this.options))`，`const stream = this.factory(wire)`，登记 `{ wire, stream }`，然后 `await stream.start()`（**必须 await**：现状 `accept` 返回前 overview 已经写出，`muxUpgrade` 的 waiting 缓冲区依赖这一点——在 `accept` 返回之前到达的上行帧必须晚于 overview 才被 replay），最后 `sink.ping()`。
+- **wire 自己关掉一条连接时，订阅必须当场摘掉**（票 02 的遗留，`## Comments` 记着）：今天 `Wire` 因停滞期限或 ping 容忍度耗尽而自关，`MuxConnection` 的 `closed` 标志与订阅 teardown 要等到下一次 `pingAll` / `heartbeatAll` 撞见 `isClosed` 才发生，这中间 session stream 还在为一个不再有读者的连接翻译帧（帧被 wire 丢弃，所以不可观察，但 spec User Story 6「关掉窗口后后端立刻停止为它造帧」正是这句话）。本票给 `Wire` 一个**关闭回调**（构造选项或 `onClose(listener)`，一个就够），mux 在造 wire 时挂上"从集合里忘记这条连接并 `stream.dispose()`"，让自关与外部 `close()` 走同一条收尾路径。`forget(connection)` 保持幂等。
 - `handle(connection, text)` → `connection.stream.handle(text)`；`forget` → `stream.dispose()` + 出集合。
 - 两个定时器：`tick()`/`notePong()` 走 wire，`heartbeatAll()` 走 `wire.heartbeat()`。
 - `close()`：`shuttingDown = true`、清定时器、对每条 `stream.dispose()`、清集合。**不再有** `stopRows`/`stopGone`。
