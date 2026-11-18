@@ -7,19 +7,10 @@ import {
 import type { SessionHub } from "./hub.ts";
 
 /**
- * 被告知一整行，而不是其中哪个字段动了。
+ * 本进程对这台机器上每个会话所知的信息，以行的形式。
  *
- * 一行是一个存储身份加三个字段，diff 的应用成本比整行替换还高——而且整行让每次更新幂等，这让监听者可以只留最后收到的那一行，而不必关心中间有没有漏掉几个。
+ * 读取面与刷新面；行的变化不走这里——那条路是 hub 的扇出（{@link SessionHub.publishRows}）。
  */
-export interface RowListener {
-	(sessionRow: SessionRow): void;
-}
-
-/** 被告知一行消失了：它背后的会话已不存在，id 就是全部要说的事。 */
-export interface RowGoneListener {
-	(sessionId: string): void;
-}
-
 export interface SessionProjection {
 	/**
 	 * 每一行，按目录分组、按侧栏绘制的顺序排列。
@@ -31,10 +22,6 @@ export interface SessionProjection {
 	rows(): Promise<SessionRow[]>;
 	/** 按 id 取一行，本进程从未听说过的会话返回 `undefined`。 */
 	row(sessionId: string): Promise<SessionRow | undefined>;
-	/** 被告知一行变了。返回停止监听的方式。 */
-	onRow(listener: RowListener): () => void;
-	/** 被告知一行消失了——删除，不是关闭。返回停止监听的方式。 */
-	onGone(listener: RowGoneListener): () => void;
 	/**
 	 * 从磁盘重读一行并重新发布。
 	 *
@@ -55,14 +42,12 @@ export interface SessionProjection {
 	 * 两条规则塑造了这里的一切。**本进程是唯一的写入者**——会话由 hub 指挥的唯一 orchestrator 创建和追加（ADR-0012）——所以目录扫描的全部职责就是注意到从外部到来的文件，这就是播种只发生一次、重扫永远不发生的原因。还有**一行被整行替换**，于是下游没有东西合并两个来源、或追踪哪个更新。
  *
  * 它跟随自己创建的每一行而不是订阅镜像，刻意的：跟随挂在行的生命周期上——行出现即绑、行删除即解——而行的发现走两条路，播种与 controller 的 listener（出生、fork、删除），没有一个需要向 hub 报告任何关于"谁在看"的事实。
+ *
+ * 行变化的唯一出口是 hub（{@link SessionHub.publishRows} / {@link SessionHub.publishGone}）：它不再认识 mux，也不知道有几个窗口。依赖方向因此是 `projection → hub`。
  */
 export function createSessionProjection(hub: SessionHub): SessionProjection {
 	/** 各行，按会话 id。 */
 	const rows = new Map<string, SessionRow>();
-	/** 想听行变更的人。 */
-	const listeners = new Set<RowListener>();
-	/** 想听行消失的人。 */
-	const goneListeners = new Set<RowGoneListener>();
 	/** 正在被跟随的会话，以及让它们能被放开的退订器。 */
 	const following = new Map<string, { off: () => void }>();
 	/**
@@ -79,7 +64,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 	let seeded: Promise<void> | undefined;
 
 	/**
-	 * 存一行并通知监听者，前提是有东西真的动了。
+	 * 存一行并让 hub 扇出，前提是有东西真的动了。
 	 *
 	 * 比较就是设计，不是优化：会话出于与行毫无关系的原因发布变更——一个 token 到达、一次重试被排程——为每次都重发一行一模一样的数据，会把一轮变成每个监听者眼前的一串空操作。
 	 */
@@ -87,7 +72,7 @@ export function createSessionProjection(hub: SessionHub): SessionProjection {
 		const current = rows.get(next.id);
 		if (current !== undefined && sameRow(current, next)) return;
 		rows.set(next.id, next);
-		for (const listener of listeners) listener(next);
+		hub.publishRows(next);
 		// 行的首次出现是跟随的开始：从这一拍起，这个会话的每次状态变更都落进行里。
 		if (current === undefined) follow(next.id);
 	};
@@ -111,27 +96,28 @@ const liveOf = (sessionId: string): LiveFields | undefined => {
 };
 
 /**
- * 跟随一个会话的 feed，行存在多久跟多久。
+ * 跟随一个会话的订阅元素，行存在多久跟多久。
  *
- * 在行首次存入的同一拍绑定，让变更不可能落进"没有任何人在听"的窗口。订阅走 hub 自己的 feed 面：
- * 分发表是 hub 的（sink 从编排层把事件带进 feedMap），编排层的袋上不再挂着订阅者。
+ * 在行首次存入的同一拍绑定，让变更不可能落进"没有任何人在听"的窗口。订阅走 hub 自己的订阅面：
+ * 一张按会话的表，编排层的事件与快照从那个 sink 流出。
+ *
+ * 刻意不声明 `baseline`：投影的行来自磁盘扫描，不需要 hub 为每一行读一次盘（spec User Story 16）。
+ * 初始状态在订阅之后由下面的 `liveOf` 自己叠加。
  */
 const follow = (sessionId: string): void => {
 	if (following.has(sessionId)) return;
 
-	const feeds = hub.feeds(sessionId);
-	const offEvent = feeds.onEvent((event) => onEvent(sessionId, event));
-	const offChange = feeds.onChange((snapshot) => {
-		const next = liveRow(sessionId, {
-			running: snapshot.running,
-			pending: snapshot.pendingApprovals.length,
-		});
-		if (next !== undefined) publish(next);
+	const stop = hub.subscribe(sessionId, {
+		event: (event) => onEvent(sessionId, event),
+		state: (snapshot) => {
+			const next = liveRow(sessionId, {
+				running: snapshot.running,
+				pending: snapshot.pendingApprovals.length,
+			});
+			if (next !== undefined) publish(next);
+		},
 	});
-	following.set(sessionId, { off: () => {
-		offEvent();
-		offChange();
-	} });
+	following.set(sessionId, { off: stop });
 
 	const live = liveOf(sessionId);
 	if (live !== undefined) {
@@ -200,7 +186,7 @@ const refresh = async (sessionId: string): Promise<void> => {
 		entry?.off();
 		following.delete(sessionId);
 		if (!rows.delete(sessionId)) return;
-		for (const listener of goneListeners) listener(sessionId);
+		hub.publishGone(sessionId);
 	};
 
 	/**
@@ -244,18 +230,6 @@ const refresh = async (sessionId: string): Promise<void> => {
 			await ensureSeeded();
 			return rows.get(sessionId);
 		},
-		onRow(listener: RowListener): () => void {
-			listeners.add(listener);
-			return () => {
-				listeners.delete(listener);
-			};
-		},
-		onGone(listener: RowGoneListener): () => void {
-			goneListeners.add(listener);
-			return () => {
-				goneListeners.delete(listener);
-			};
-		},
 		refresh(sessionId: string): Promise<void> {
 			return refresh(sessionId);
 		},
@@ -265,8 +239,6 @@ const refresh = async (sessionId: string): Promise<void> => {
 		close(): void {
 			for (const entry of following.values()) entry.off();
 			following.clear();
-			listeners.clear();
-			goneListeners.clear();
 		},
 	};
 }

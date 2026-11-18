@@ -147,7 +147,7 @@ export interface AgentConfig {
 	 * 本编排层发布的每个事件与快照离开 core 的唯一出口。
 	 *
 	 * 分发曾是每只 {@link AgentState} 上的两张匿名回调表，如今归宿主所有：per-session 的订阅者
-	 * 表住在构造编排层的那个进程半（hub 的 feedMap），core 在 emit 点直调 sink——同步、按序、
+	 * 表住在构造编排层的那个进程半（hub 的按会话订阅表），core 在 emit 点直调 sink——同步、按序、
 	 * 命令与运行从同一条路流出，no-gap 契约不变。没人递 sink 时工厂给 no-op，语义与空表遍历零次
 	 * 相同：没人听就什么也不发生。
 	 */
@@ -343,7 +343,7 @@ export class Agent {
 	/**
 	 * 把一个事件 fanout 出去。session 发布事件的唯一地点。
 	 *
-	 * 分发表曾在这只袋上，如今在宿主的 feedMap 里（ADR-0013 的 sink clause）：签名仍是
+	 * 分发表曾在这只袋上，如今在宿主的按会话订阅表里（ADR-0013 的 sink clause）：签名仍是
 	 * `(agentState, event)`——fanout 族读的是这只袋，只是不再从它身上读订阅者，而是把 id 交给
 	 * 构造注入的 sink。emit 点直调，宿主在同一拍上分发，命令与运行的事件仍从同一条路按序流出。
 	 */

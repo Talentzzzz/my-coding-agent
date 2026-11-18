@@ -14,6 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { muxUpgrade, sessionListeners } from "../packages/server/src/boot.ts";
 import { createMuxServer } from "../packages/server/src/mux.ts";
+import { createSessionStream } from "../packages/server/src/stream.ts";
+import { createApprovalAnswers } from "../packages/server/src/approvals.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import { createSessionProjection } from "../packages/server/src/projection.ts";
 import { SessionController, SystemController } from "../packages/server/src/controllers/sessions.ts";
@@ -100,11 +102,12 @@ async function openRig(): Promise<Rig> {
 	hub.setModelConfigs(rows);
 
 	const projection = createSessionProjection(hub);
-	const mux = createMuxServer(hub, projection, { heartbeatIntervalMs: 150 });
+	const answers = createApprovalAnswers();
+	const mux = createMuxServer((wire) => createSessionStream(wire, { hub, projection, answers }), { heartbeatIntervalMs: 150 });
 	const router = new Router(
 		createRoutes({
 			system: new SystemController(hub),
-		sessions: new SessionController(hub, sessionListeners(mux)),
+		sessions: new SessionController(hub, sessionListeners({ hub, answers })),
 		}),
 	);
 	const handle = await createServer({ router, clientDir: "packages/web/dist", onUpgrade: muxUpgrade(mux) });

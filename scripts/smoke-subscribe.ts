@@ -1,23 +1,27 @@
-// hub 级订阅 smoke：把 no-gap 的守约检查直接架在 SessionHub 的公开面上——不接 WebSocket、
-// 不接 mux，只构造 hub 加一剧本化 transport。它证明的是机制本身：注册与快照原子、baseline
-// 恰好一次、冷半的异步与调用方扣帧、失败恰一次、删除与收摊的告别、重发不注册。
-// 这里不接触任何模型，无需 provider key。
+// 订阅的帧面 smoke：把「一个窗口连上来之后收到了什么帧」当成唯一判据——帧的类型、顺序、次数。
+// 它不读 hub 的任何内部表（没有按会话的订阅表、没有全局通道），所以这套断言在订阅
+// 实现被拆成 wire 与 session stream 前后应当一字不改地通过。
+//
+// 断言与装配分离：造 hub / projection / mux、造假 FrameSink、把上行帧喂进连接，全部收在
+// openRig() 里；openRig 返回的 View 只提供「开、关、取消、看帧」这几个驱动动作，断言区不出现
+// 任何构造调用。后续拆分只允许改 openRig。
+//
+// 这里不接触任何模型，无需 provider key：会话跑在剧本化 transport 上。
 // 运行：node scripts/smoke-subscribe.ts
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-	setSessionsDir,
-	UnknownSessionError,
-	type ModelConfig,
-	type SessionSnapshot,
-} from "@my-agent/core";
-import { SessionHub, type SessionFeeds } from "../packages/server/src/hub.ts";
-import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
+import { setSessionsDir, type ModelConfig, type ServerFrame } from "@my-agent/core";
+import { SessionHub } from "../packages/server/src/hub.ts";
+import { createMuxServer, type MuxConnection } from "../packages/server/src/mux.ts";
+import { createSessionProjection } from "../packages/server/src/projection.ts";
+import { createSessionStream } from "../packages/server/src/stream.ts";
+import { createApprovalAnswers } from "../packages/server/src/approvals.ts";
+import { SessionController } from "../packages/server/src/controllers/sessions.ts";
+import { sessionListeners } from "../packages/server/src/boot.ts";
+import type { FrameSink } from "../packages/server/src/wire.ts";
+import { createFakeTransport, fakeAssistantMessage, fakeToolCall, type FakeTransport } from "./fake-transport.ts";
 
-const root = await mkdtemp(join(tmpdir(), "my-agent-subscribe-"));
-const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-subscribe--store-"));
-setSessionsDir(storeRoot);
 let failures = 0;
 
 function check(label: string, condition: boolean, detail = ""): void {
@@ -40,12 +44,7 @@ async function settle(): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
-/**
- * 本 smoke 的每个会话都运行在这一行上。
- *
- * hub 从用户键入的 store 读行，剧本化 transport 应答它——这正是无需 provider key 就能驱动一个
- * 活会话的原因。
- */
+/** 本 smoke 的每个会话都运行在这一行上——剧本化 transport 应答它，所以活得起来。 */
 const ROW: ModelConfig = {
 	name: "faux",
 	baseUrl: "http://127.0.0.1:1/v1",
@@ -55,430 +54,396 @@ const ROW: ModelConfig = {
 	maxTokens: 16_384,
 };
 
-const fake = createFakeTransport();
-/** 本 smoke 开过的每个 hub，收尾时一并收摊。 */
-const hubs: SessionHub[] = [];
-function newHub(): SessionHub {
-	const hub = new SessionHub({ workDirAbsPath: root, api: fake.api, modelsHome: join(root, "agent-home") });
-	hub.setModelConfigs([ROW]);
-	hubs.push(hub);
-	return hub;
+/** 一条连接的驱动面：只有上行动作与「收到了哪些帧」。 */
+interface View {
+	/** 这条连接上某条流（`null` 是连接级座位）收到的帧，按到达顺序。 */
+	frames(streamId: string | null): ServerFrame[];
+	/** 这条连接收到的全部帧，按到达顺序、不分流——删除顺序要读两条流之间的先后。 */
+	sequence(): ServerFrame[];
+	/** 上行 `{type:"open"}`。 */
+	open(sessionId: string): void;
+	/** 上行 `{type:"cancel"}`。 */
+	cancel(sessionId: string): void;
+	/** 断线：这条连接不再被服务器持有。 */
+	closeConnection(): void;
+	/** 假 sink 上累计收到的帧数，事后比较用。 */
+	frameCount(): number;
 }
-/** 每个在飞运行的放行口：收尾时先放行再收摊，否则 closeAll 等一个永不落地的 transport。 */
-const releases: (() => void)[] = [];
 
-const hub = newHub();
-/** 第二个 hub：它的编排层表里空无一物，所以对它而言每个会话都是冷的——冷半的家。 */
-const coldHub = newHub();
+/** 装置给出的驱动面——断言区只碰这些，不碰任何构造。 */
+interface Rig {
+	/** 造会话、跑一轮、读快照用；不用来断言。 */
+	hub: SessionHub;
+	/** 剧本化 transport：给下一轮排回答。 */
+	transport: FakeTransport;
+	/** 生一个会话，并做生产里 controller 那一拍：让 projection 重读它的行。 */
+	birth(input: { text: string; workDirAbsPath?: string }): Promise<string>;
+	/** 建一条新连接并等它收到开场帧。 */
+	connect(): Promise<View>;
+	/** 目录被放到一边：设置 patch，再走列表变更的广播路径。 */
+	hideDirectory(path: string): Promise<void>;
+	/** 目录被领回列表：与隐藏同一条路径。 */
+	showDirectory(): Promise<void>;
+	/**
+	 * 删除一个会话，走生产链：`hub.remove` 让订阅者告别（流 end），controller 的 `onRemoved`
+	 * 随后让 projection 丢掉这一行（`session_gone`）。
+	 */
+	deleteSession(sessionId: string): Promise<void>;
+	/** 作答一个审批：记下答案（供 settled 帧）并恢复运行。 */
+	approve(sessionId: string, toolCallId: string, approved: boolean): void;
+	close(): Promise<void>;
+}
 
-/** 让会话出生并等它的第一轮落地——落地之后活半散场，会话在任何 hub 里都是冷的。 */
-async function born(target: SessionHub, text: string): Promise<string> {
-	fake.setResponses([fakeAssistantMessage(`answered: ${text}`)]);
-	const id = await target.birth({ text });
-	if (!(await until(() => !target.isLive(id)))) throw new Error(`the birth run of ${id} never settled`);
+/**
+ * 本 smoke 的唯一装配处。
+ *
+ * 后续四张票会替换这里的内部件（wire、session stream、hub 的合表、projection 的推法），而外面
+ * 每一行断言都必须原样通过——所以任何「怎么做」都锁在这个函数里。
+ */
+async function openRig(): Promise<Rig> {
+	const root = await mkdtemp(join(tmpdir(), "my-agent-subscribe-"));
+	const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-subscribe--store-"));
+	setSessionsDir(storeRoot);
+
+	const transport = createFakeTransport();
+	const hub = new SessionHub({ workDirAbsPath: root, api: transport.api, modelsHome: join(root, "agent-home") });
+	hub.setModelConfigs([ROW]);
+	const projection = createSessionProjection(hub);
+	const answers = createApprovalAnswers();
+	const mux = createMuxServer((wire) => createSessionStream(wire, { hub, projection, answers }), {});
+	// 与 boot.ts 同一套接线：controller 的删除经 sessionListeners 落到 projection 的行上。
+	const sessions = new SessionController(hub, sessionListeners({ hub, answers }, projection));
+
+	return {
+		hub,
+		transport,
+		async birth(input): Promise<string> {
+			const id = await hub.birth(input);
+			// 生产中这由 controller 的 onCreated 触发；没有它，出生之后的会话永远进不了行表。
+			await projection.refresh(id);
+			return id;
+		},
+		async connect(): Promise<View> {
+			const frames: ServerFrame[] = [];
+			let closed = false;
+			const sink: FrameSink = {
+				send(frame) {
+					frames.push(frame);
+					// 恒为 true：本 smoke 不演练写侧背压，帧总是被收下。
+					return true;
+				},
+				ping() {},
+				close() {
+					closed = true;
+				},
+				terminate() {
+					closed = true;
+				},
+				get isClosed() {
+					return closed;
+				},
+			};
+			const connection: MuxConnection = await mux.accept(sink);
+			return {
+				frames: (streamId) => frames.filter((frame) => frame.streamId === streamId),
+				sequence: () => [...frames],
+				open: (sessionId) => mux.handle(connection, JSON.stringify({ type: "open", sessionId })),
+				cancel: (sessionId) => mux.handle(connection, JSON.stringify({ type: "cancel", sessionId })),
+				closeConnection: () => mux.forget(connection),
+				frameCount: () => frames.length,
+			};
+		},
+		async hideDirectory(path: string): Promise<void> {
+			hub.agent.applySettings({ hiddenDirectories: [path] });
+			hub.publishResync();
+		},
+		async showDirectory(): Promise<void> {
+			hub.agent.applySettings({ hiddenDirectories: [] });
+			hub.publishResync();
+		},
+		async deleteSession(sessionId: string): Promise<void> {
+			await sessions.remove(sessionId);
+		},
+		approve(sessionId, toolCallId, approved) {
+			// 与审批端点同一顺序：先记答案（settled 帧读它），再恢复运行（它会让待审批集合变空）。
+			answers.remember(sessionId, toolCallId, approved);
+			void hub.agent.respondApproval(sessionId, toolCallId, approved);
+		},
+		async close(): Promise<void> {
+			mux.close();
+			projection.close();
+			await hub.close();
+			await rm(storeRoot, { recursive: true, force: true });
+			await rm(root, { recursive: true, force: true });
+		},
+	};
+}
+
+const rig = await openRig();
+/** 收尾时先放行每个可能还在门口等着的运行，再做各自的清场。 */
+const releases: (() => void | Promise<void>)[] = [];
+
+/** 让会话出生并等它的第一轮落地——落地之后活半散场，会话在任何连接眼里都是冷的。 */
+async function born(text: string, workDirAbsPath?: string): Promise<string> {
+	rig.transport.setResponses([fakeAssistantMessage(`answered: ${text}`)]);
+	const id = await rig.birth({ text, ...(workDirAbsPath === undefined ? {} : { workDirAbsPath }) });
+	await until(() => !rig.hub.isLive(id));
 	return id;
 }
 
-/** 让会话有一个停在 transport 门口的活半：剧本的下一步等着被放行，所以 running 一直为真。 */
-async function inFlight(target: SessionHub): Promise<{ id: string; release: () => void; run: Promise<void> }> {
-	const id = await born(target, "born before the in-flight turn");
+try {
+	process.stdout.write("开场：先心跳，再 overview\n");
+	// 客户端把先到的心跳当作「这条连接活着」，所以顺序是契约而不是巧合。
+	const view = await rig.connect();
+	const opening = view.frames(null).map((frame) => ("item" in frame ? frame.item.type : "?"));
+	check("开场第一帧是应用心跳，第二帧是 overview", opening[0] === "heartbeat" && opening[1] === "sessions", opening.join("|"));
+
+	process.stdout.write("活半：open 之后第一帧就是 baseline，且是在飞状态\n");
+	// 一个停在 transport 门口的会话：剧本的下一步等放行，所以 running 一直为真。
+	const inFlightId = await born("一个停在门口的会话");
 	let release!: () => void;
 	const gate = new Promise<void>((resolve) => {
 		release = resolve;
 	});
-	fake.setResponses([
+	rig.transport.setResponses([
 		async () => {
 			await gate;
-			return fakeAssistantMessage("the answer lands after the subscription");
+			return fakeAssistantMessage("放行之后的回答");
 		},
 	]);
-	const run = target.agent.prompt(id, "the in-flight turn");
-	if (!(await until(() => target.isLive(id) && target.agent.snapshot(id).running))) {
-		throw new Error("the run never reached the transport");
-	}
+	const run = rig.hub.agent.prompt(inFlightId, "门口的下一轮");
+	void run;
 	releases.push(release);
-	return { id, release, run };
-}
-
-try {
-	process.stdout.write("活半：注册与快照是同一个原子块\n");
-	// 活半的会话有一个停在 transport 门口的运行。subscribe 必须在返回的同一拍交出 feeds，并在
-	// 返回之前同步交出袋里的在飞快照——中间没有 await，所以没有事件落得进缝隙。
-	const live = await inFlight(hub);
-	const liveOrder: string[] = [];
-	let liveFeeds: SessionFeeds | undefined;
-	let liveFeedsCalls = 0;
-	let liveBaselines = 0;
-	let liveSnapshot: SessionSnapshot | undefined;
-	const stopLive = hub.subscribe(
-		live.id,
-		(feeds) => {
-			liveFeedsCalls += 1;
-			liveFeeds = feeds;
-			if (feeds === undefined) return;
-			feeds.onEvent((event) => liveOrder.push(`event:${event.type}`));
-		},
-		{
-			onBaseline: (snapshot) => {
-				liveBaselines += 1;
-				liveSnapshot = snapshot;
-				liveOrder.push("baseline");
-			},
-			onError: () => liveOrder.push("error"),
-		},
-	);
-	check("the watcher was already called with feeds when subscribe returned", liveFeedsCalls === 1 && liveFeeds !== undefined, `${liveFeedsCalls} calls`);
-	check("onBaseline arrived before subscribe returned", liveBaselines === 1, `${liveBaselines} baselines`);
+	await until(() => rig.hub.isLive(inFlightId) && rig.hub.agent.snapshot(inFlightId).running);
+	view.open(inFlightId);
+	// 活半的订阅与快照在同一个同步块里，open 返回时帧已经在 sink 上。
+	const liveFirst = view.frames(inFlightId)[0];
 	check(
-		"and the baseline is the run in flight, not the last landed state",
-		liveSnapshot?.id === live.id && liveSnapshot.running === true,
-		JSON.stringify({ id: liveSnapshot?.id, running: liveSnapshot?.running }),
+		"第一个流帧是 baseline，且带着袋里的在飞状态",
+		liveFirst !== undefined && "item" in liveFirst && liveFirst.item.type === "baseline" && liveFirst.item.session.running === true,
+		JSON.stringify(liveFirst),
 	);
-	check("registration is what isWatched reports", hub.isWatched(live.id));
 
-	// 注册后立刻同步发布一个事件：subscribe 已返回，baseline 已在手，所以它只能排在 baseline 之后。
-	void hub.agent.prompt(live.id, "queued in the same beat as the subscription returned");
+	process.stdout.write("冷半：baseline 异步到达、恰好一次，期间的事件排在它之后\n");
+	// 冷会话只存在于盘上：baseline 要读盘，读的这段时间里发布的事件不得抢到它前面。
+	const coldId = await born("一个只活在盘上的会话");
+	view.open(coldId);
+	check("冷会话的 open 返回时还没有 baseline（读盘是异步的）", view.frames(coldId).length === 0, `${view.frames(coldId).length} frames`);
+	rig.transport.setResponses([fakeAssistantMessage("读盘期间落地的回答")]);
+	await rig.hub.agent.prompt(coldId, "读盘期间发出的消息");
+	check("冷半的 baseline 恰好一份", await until(() => view.frames(coldId).filter((frame) => "item" in frame && frame.item.type === "baseline").length === 1), JSON.stringify(view.frames(coldId)));
+	const coldFrames = view.frames(coldId);
+	const coldFirst = coldFrames[0];
+	const coldEvents = coldFrames.filter((frame) => "item" in frame && frame.item.type === "event");
 	check(
-		"an event published right after the return reaches the feed behind the baseline",
-		liveOrder.join("|") === "baseline|event:queue_update",
-		liveOrder.join("|"),
+		"第一帧是 baseline，期间发布的事件全部排在它之后",
+		coldFirst !== undefined && "item" in coldFirst && coldFirst.item.type === "baseline" && coldEvents.length > 0 && coldFrames.indexOf(coldEvents[0] as ServerFrame) > 0,
+		coldFrames.map((frame) => ("item" in frame ? frame.item.type : "?")).join("|"),
 	);
-
-	process.stdout.write("重发活半：第二个交付时机，同一个同步块\n");
-	// 重发不重新订阅：同一个 sink 契约，但 watcher 集合一个不多一个不少，而且交回的仍是袋里的
-	// 在飞状态——盘上那次落定说不了 running 为真。
-	const watchedBefore = hub.isWatched(live.id);
-	let resendBaselines = 0;
-	let resendSnapshot: SessionSnapshot | undefined;
-	let resendErrors = 0;
-	hub.rebaseline(live.id, {
-		onBaseline: (snapshot) => {
-			resendBaselines += 1;
-			resendSnapshot = snapshot;
-		},
-		onError: () => {
-			resendErrors += 1;
-		},
-	});
-	check("rebaseline hands a live baseline before it returns", resendBaselines === 1, `${resendBaselines} baselines`);
-	check(
-		"and it is the bag's in-flight state",
-		resendSnapshot?.id === live.id && resendSnapshot.running === true && resendErrors === 0,
-		JSON.stringify({ id: resendSnapshot?.id, running: resendSnapshot?.running, errors: resendErrors }),
-	);
-	const diskView = await coldHub.snapshotOf(live.id);
-	check(
-		"while a disk read of the same session says no run is in flight",
-		diskView.running === false && diskView.partial === undefined,
-		JSON.stringify({ running: diskView.running, partial: diskView.partial }),
-	);
-	check("rebaseline registers nothing: the watcher set is unchanged", hub.isWatched(live.id) === watchedBefore);
-
-	// 放行在飞的那一轮，以及注册后排队的那一条；两者都落地后会话回到冷态。
-	fake.appendResponses([fakeAssistantMessage("the queued turn landed")]);
-	live.release();
-	await live.run;
-	check("the in-flight run lands", await until(() => !hub.isLive(live.id)));
-	stopLive();
-	check("and letting go is visible to isWatched", !hub.isWatched(live.id));
-
-	process.stdout.write("冷半：一份异步 baseline，缝隙由调用方扣住\n");
-	// 冷会话只存在于盘上：本 hub 跑过它，于是对第二个 hub 的编排层表而言它是冷的。它的事件流在
-	// 注册的同一拍就通了，而 baseline 要读盘——读取期间发布的事件经调用方扣帧，读完了才按序冲刷。
-	const coldId = await born(hub, "a conversation only the store has seen");
-	const coldOrder: string[] = [];
-	const heldDuringRead: string[] = [];
-	let coldDelivered = false;
-	let coldBaselines = 0;
-	let coldErrors = 0;
-	let coldFeedsCalls = 0;
-	let coldEventsSeen = 0;
-	let coldSnapshot: SessionSnapshot | undefined;
-	const stopCold = coldHub.subscribe(
-		coldId,
-		(feeds) => {
-			coldFeedsCalls += 1;
-			if (feeds === undefined) return;
-			feeds.onEvent((event) => {
-				coldEventsSeen += 1;
-				const label = `event:${event.type}`;
-				// 调用方的职责：baseline 之前到的帧先扣在手里，baseline 到了再按序冲刷。
-				if (coldDelivered) coldOrder.push(label);
-				else heldDuringRead.push(label);
-			});
-		},
-		{
-			onBaseline: (snapshot) => {
-				coldBaselines += 1;
-				coldSnapshot = snapshot;
-				coldDelivered = true;
-				coldOrder.push("baseline");
-				for (const label of heldDuringRead) coldOrder.push(label);
-			},
-			onError: () => {
-				coldErrors += 1;
-			},
-		},
-	);
-	check("the watcher is called with feeds for a cold session too", coldFeedsCalls === 1, `${coldFeedsCalls} calls`);
-	check("and nothing is delivered yet when subscribe returns: the read is asynchronous", coldBaselines === 0, `${coldBaselines} baselines`);
-	// 读盘在飞的那一拍发布一条消息：它的 entry_appended 是同步发出去的，必然早于冷读返回。
-	fake.setResponses([fakeAssistantMessage("published while the read was in flight")]);
-	const coldRun = coldHub.agent.prompt(coldId, "published while the read was in flight");
-	check("an event really landed while the read was in flight", await until(() => heldDuringRead.length > 0), `${heldDuringRead.length} held`);
-	await coldRun;
-	check("onBaseline arrives exactly once", await until(() => coldBaselines === 1), `${coldBaselines} baselines`);
 	await settle();
-	check("and never a second time", coldBaselines === 1, `${coldBaselines} baselines`);
-	check("the caller's backlog is flushed behind the baseline", coldOrder[0] === "baseline", coldOrder.join("|"));
-	check(
-		"with the held events in arrival order after it",
-		coldOrder.slice(1, 1 + heldDuringRead.length).join("|") === heldDuringRead.join("|"),
-		`${coldOrder.join("|")} vs ${heldDuringRead.join("|")}`,
-	);
-	check(
-		"and nothing was dropped or written twice by the flush",
-		coldOrder.length === 1 + coldEventsSeen,
-		`${coldOrder.length} written vs ${coldEventsSeen} seen`,
-	);
-	// baseline 读的是发布之前的状态：那条消息只经事件到达，正是「先状态、后变更」的样子。
-	check(
-		"the baseline predates the message published while it was being read",
-		coldSnapshot !== undefined && !JSON.stringify(coldSnapshot.messages).includes("published while the read was in flight"),
-		JSON.stringify(coldSnapshot?.messages.at(-1)),
-	);
-	check("and no error rode along", coldErrors === 0, `${coldErrors} errors`);
-	stopCold();
-	check("letting go of a cold subscription is visible to isWatched", !coldHub.isWatched(coldId));
-	check("the run that raced the read lands", await until(() => !coldHub.isLive(coldId)));
+	check("等够时间也没有第二份 baseline", view.frames(coldId).filter((frame) => "item" in frame && frame.item.type === "baseline").length === 1, JSON.stringify(view.frames(coldId)));
 
-	process.stdout.write("重发冷半：恰好一次，不留观看者\n");
-	const watchedBeforeResend = coldHub.isWatched(coldId);
-	let coldResendBaselines = 0;
-	let coldResendErrors = 0;
-	coldHub.rebaseline(coldId, {
-		onBaseline: () => {
-			coldResendBaselines += 1;
-		},
-		onError: () => {
-			coldResendErrors += 1;
-		},
-	});
-	check("a cold rebaseline is asynchronous", coldResendBaselines === 0, `${coldResendBaselines} baselines`);
+	process.stdout.write("重复 open：再送一份 baseline，不报错、不结束，原流继续可用\n");
+	const baselinesBeforeDuplicate = view.frames(coldId).filter((frame) => "item" in frame && frame.item.type === "baseline").length;
+	const eventsBeforeDuplicate = view.frames(coldId).filter((frame) => "item" in frame && frame.item.type === "event").length;
+	view.open(coldId);
 	check(
-		"and leaves the watcher set exactly as it was",
-		coldHub.isWatched(coldId) === watchedBeforeResend && watchedBeforeResend === false,
-		String(coldHub.isWatched(coldId)),
+		"第二次 open 在同一流上再给一份 baseline",
+		await until(() => view.frames(coldId).filter((frame) => "item" in frame && frame.item.type === "baseline").length === baselinesBeforeDuplicate + 1),
+		JSON.stringify(view.frames(coldId)),
 	);
-	check("it delivers exactly once", await until(() => coldResendBaselines === 1), `${coldResendBaselines} baselines`);
-	await settle();
-	check("and never twice, with no error", coldResendBaselines === 1 && coldResendErrors === 0, `${coldResendBaselines} baselines, ${coldResendErrors} errors`);
-	check("still no watcher afterwards: a resend does not register", !coldHub.isWatched(coldId));
+	const duplicateFrames = view.frames(coldId);
+	check(
+		"没有 error、没有 end",
+		duplicateFrames.every((frame) => !("error" in frame) && !("end" in frame)),
+		JSON.stringify(duplicateFrames),
+	);
+	rig.transport.setResponses([fakeAssistantMessage("重复 open 之后仍然照常到达")]);
+	await rig.hub.agent.prompt(coldId, "重复 open 之后再发一条");
+	check(
+		"原有的流继续可用：其后的事件照常到达",
+		await until(() => view.frames(coldId).filter((frame) => "item" in frame && frame.item.type === "event").length > eventsBeforeDuplicate),
+		JSON.stringify(view.frames(coldId)),
+	);
 
-	process.stdout.write("失败：onError 恰一次，任何 sink 都收不到 baseline\n");
-	// 不存在的 id：冷读取以 UnknownSessionError 拒绝，sink 收到恰好一次 onError 与零次 baseline。
+	process.stdout.write("未知会话：先 error 再 end，连接本身不受影响\n");
 	const unknownId = "no-such-session-0000";
-	let unknownFeedsCalls = 0;
-	let unknownBaselines = 0;
-	const unknownErrors: unknown[] = [];
-	coldHub.subscribe(
-		unknownId,
-		() => {
-			unknownFeedsCalls += 1;
-		},
-		{
-			onBaseline: () => {
-				unknownBaselines += 1;
-			},
-			onError: (error) => {
-				unknownErrors.push(error);
-			},
-		},
-	);
-	check("the watcher is still handed feeds for an id nothing names", unknownFeedsCalls === 1, `${unknownFeedsCalls} calls`);
-	check("an unknown id answers onError exactly once", await until(() => unknownErrors.length === 1), `${unknownErrors.length} errors`);
-	await settle();
-	check("onError names the id as unknown", unknownErrors[0] instanceof UnknownSessionError, String(unknownErrors[0]));
-	check("and onBaseline is never called", unknownBaselines === 0, `${unknownBaselines} baselines`);
-	check("the watcher hears nothing after the failure", unknownFeedsCalls === 1, `${unknownFeedsCalls} calls`);
-
-	// 重发也走同一个活冷分岔：不存在的 id 在重发路径上同样只答一次错误、零次 baseline。
-	let unknownResendBaselines = 0;
-	let unknownResendErrors = 0;
-	coldHub.rebaseline(unknownId, {
-		onBaseline: () => {
-			unknownResendBaselines += 1;
-		},
-		onError: () => {
-			unknownResendErrors += 1;
-		},
-	});
-	check("重发不存在的 id：onError 恰一次", await until(() => unknownResendErrors === 1), `${unknownResendErrors} errors`);
-	await settle();
+	view.open(unknownId);
+	check("未知会话等到 error 与 end", await until(() => {
+		const frames = view.frames(unknownId);
+		return frames.some((frame) => "error" in frame) && frames.some((frame) => "end" in frame);
+	}), JSON.stringify(view.frames(unknownId)));
+	const unknownFrames = view.frames(unknownId);
+	const errorAt = unknownFrames.findIndex((frame) => "error" in frame);
+	const endAt = unknownFrames.findIndex((frame) => "end" in frame);
+	const unknownError = unknownFrames[errorAt];
 	check(
-		"重发不存在的 id：onBaseline 零次",
-		unknownResendErrors === 1 && unknownResendBaselines === 0,
-		`${unknownResendErrors} errors, ${unknownResendBaselines} baselines`,
+		"error 带 message，且排在 end 之前",
+		errorAt >= 0 && endAt > errorAt && unknownError !== undefined && "error" in unknownError && (unknownError.error?.message ?? "").length > 0,
+		JSON.stringify(unknownFrames),
 	);
-
-	// 一个读得进却读不完的配对：手写残缺快照，与 smoke-sessions 里 v4 遗物的构造同一风格。
-	const brokenId = "2026-01-01T00-00-00-000Z_broken";
-	await writeFile(
-		join(storeRoot, `${brokenId}.jsonl`),
-		`${JSON.stringify({ type: "message", id: "br-u1", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: [{ type: "text", text: "a conversation with a broken snapshot" }] } })}\n`,
-		"utf8",
-	);
-	await writeFile(join(storeRoot, `${brokenId}.json`), "{ this is not a snapshot\n", "utf8");
-	let brokenFeedsCalls = 0;
-	let brokenBaselines = 0;
-	const brokenErrors: unknown[] = [];
-	coldHub.subscribe(
-		brokenId,
-		() => {
-			brokenFeedsCalls += 1;
-		},
-		{
-			onBaseline: () => {
-				brokenBaselines += 1;
-			},
-			onError: (error) => {
-				brokenErrors.push(error);
-			},
-		},
-	);
-	check("a pair that cannot be read answers onError exactly once", await until(() => brokenErrors.length === 1), `${brokenErrors.length} errors`);
-	await settle();
-	check("the read failure is not a missing id", (brokenErrors[0] instanceof UnknownSessionError) === false, String(brokenErrors[0]));
-	check("and never a baseline", brokenBaselines === 0, `${brokenBaselines} baselines`);
-	check("the watcher hears nothing after the read failure", brokenFeedsCalls === 1, `${brokenFeedsCalls} calls`);
-
-	process.stdout.write("删除与收摊：一句告别，以及退订即终结\n");
-	// 退订幂等：第二次调用不抛，也不动同一个 id 上的另一个观看者。
-	const quiet = await inFlight(hub);
-	let quietEvents = 0;
-	const stopFirst = hub.subscribe(quiet.id, () => {}, { onBaseline: () => {}, onError: () => {} });
-	const stopSecond = hub.subscribe(
-		quiet.id,
-		(feeds) => {
-			if (feeds !== undefined) feeds.onEvent(() => (quietEvents += 1));
-		},
-		{ onBaseline: () => {}, onError: () => {} },
-	);
-	stopFirst();
-	let secondLetGoThrew = false;
-	try {
-		stopFirst();
-	} catch {
-		secondLetGoThrew = true;
-	}
+	// 连接还活着：紧接着在同一连接上开另一个会话，它照常作答。
+	const afterUnknownId = await born("未知会话之后仍然能开的会话");
+	view.open(afterUnknownId);
 	check(
-		"unsubscribing twice neither throws nor disturbs the other watcher",
-		!secondLetGoThrew && hub.isWatched(quiet.id),
-		`threw=${secondLetGoThrew}, watched=${hub.isWatched(quiet.id)}`,
+		"随后还能正常 open 另一个会话",
+		await until(() => view.frames(afterUnknownId).some((frame) => "item" in frame && frame.item.type === "baseline")),
+		JSON.stringify(view.frames(afterUnknownId)),
 	);
-	void hub.agent.prompt(quiet.id, "still heard by the second watcher");
-	check("and the other watcher still hears the feed", await until(() => quietEvents > 0), `${quietEvents} events`);
-	stopSecond();
-	check("the last let-go clears the id", !hub.isWatched(quiet.id));
-	fake.appendResponses([fakeAssistantMessage("the second watcher's turn landed")]);
-	quiet.release();
-	await quiet.run;
-	await until(() => !hub.isLive(quiet.id));
 
-	// 退订的幂等只对「这一次订阅」负责：同一 id 上先订阅 A、退订 A、再订阅 B，然后再调一次 A 的
-	// 退订函数，不得把 B 的映射一并清掉——认的是 A 拿到的那只集合，不是这个 id。
-	const reopenedId = await born(hub, "a conversation whose first subscription let go for good");
-	let reopenedBaselines = 0;
-	const stopFirstOnId = hub.subscribe(reopenedId, () => {}, { onBaseline: () => (reopenedBaselines += 1), onError: () => {} });
-	check("首个订阅交出了 baseline", await until(() => reopenedBaselines === 1), `${reopenedBaselines} baselines`);
-	stopFirstOnId();
-	check("首次退订后 id 离开观看表", !hub.isWatched(reopenedId));
-	let reopenedGoodbye = 0;
-	let reopenedAgainBaselines = 0;
-	const stopReopened = hub.subscribe(
-		reopenedId,
-		(feeds) => {
-			if (feeds === undefined) reopenedGoodbye += 1;
-		},
-		{ onBaseline: () => (reopenedAgainBaselines += 1), onError: () => {} },
-	);
-	check("后来的订阅重新占住 id", await until(() => reopenedAgainBaselines === 1), `${reopenedAgainBaselines} baselines`);
-	stopFirstOnId();
-	check("旧退订函数再调一次是宽容的，且后来的订阅仍在表里", hub.isWatched(reopenedId), String(hub.isWatched(reopenedId)));
-	hub.remove(reopenedId);
-	check("旧退订不夺走后来者的告别", reopenedGoodbye === 1, `${reopenedGoodbye} goodbyes`);
-	stopReopened();
-
-	// 删除：观看者收到 `undefined` 作为告别，这是 mux 发 endStream 的那一拍。
-	const removedId = await born(hub, "a conversation about to be removed");
-	let removedGoodbye = 0;
-	let removedBaselines = 0;
-	const stopRemoved = hub.subscribe(
-		removedId,
-		(feeds) => {
-			if (feeds === undefined) removedGoodbye += 1;
-		},
-		{ onBaseline: () => (removedBaselines += 1), onError: () => {} },
-	);
-	check("the removal test starts from a delivered cold baseline", await until(() => removedBaselines === 1), `${removedBaselines} baselines`);
-	hub.remove(removedId);
-	check("removing a watched session says goodbye with undefined", removedGoodbye === 1, `${removedGoodbye} goodbyes`);
-	stopRemoved();
-
-	// 冷读盘进行中退订：读完之后没有任何交付（成功与失败两条都拦得住）。
-	const cancelledId = await born(hub, "a conversation whose read is cancelled");
-	let cancelledBaselines = 0;
-	let cancelledErrors = 0;
-	const stopCancelled = coldHub.subscribe(cancelledId, () => {}, {
-		onBaseline: () => (cancelledBaselines += 1),
-		onError: () => (cancelledErrors += 1),
-	});
-	stopCancelled();
+	process.stdout.write("删除：观看中的流先 end，之后该流再无帧\n");
+	const removedId = await born("一个即将被删除的会话");
+	view.open(removedId);
+	await until(() => view.frames(removedId).some((frame) => "item" in frame && frame.item.type === "baseline"));
+	await rig.deleteSession(removedId);
+	check("删除让该流收到 end", await until(() => view.frames(removedId).some((frame) => "end" in frame)), JSON.stringify(view.frames(removedId)));
+	const removedFrames = view.frames(removedId);
+	const removedEnd = removedFrames.findIndex((frame) => "end" in frame);
+	check("end 是这条流上的最后一帧", removedEnd === removedFrames.length - 1, removedFrames.map((frame) => ("item" in frame ? frame.item.type : "?")).join("|"));
 	await settle();
-	check("unsubscribing during a cold read ends the delivery", cancelledBaselines === 0 && cancelledErrors === 0, `${cancelledBaselines} baselines, ${cancelledErrors} errors`);
+	check("此后不再有任何该 streamId 的帧", view.frames(removedId).length === removedEnd + 1, `${view.frames(removedId).length} vs ${removedEnd + 1}`);
 
-	const brokenTwiceId = "2026-01-01T00-00-01-000Z_broken-again";
-	await writeFile(join(storeRoot, `${brokenTwiceId}.jsonl`), `${JSON.stringify({ type: "message", id: "b2-u1", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: [{ type: "text", text: "another broken pair" }] } })}\n`, "utf8");
-	await writeFile(join(storeRoot, `${brokenTwiceId}.json`), "[]\n", "utf8");
-	let brokenTwiceErrors = 0;
-	let brokenTwiceBaselines = 0;
-	const stopBrokenTwice = coldHub.subscribe(brokenTwiceId, () => {}, {
-		onBaseline: () => (brokenTwiceBaselines += 1),
-		onError: () => (brokenTwiceErrors += 1),
-	});
-	stopBrokenTwice();
-	await settle();
-	check("and so does the failure of a read cancelled in flight", brokenTwiceErrors === 0 && brokenTwiceBaselines === 0, `${brokenTwiceErrors} errors, ${brokenTwiceBaselines} baselines`);
+	process.stdout.write("删除顺序：流先 end、行后 session_gone\n");
+	// 生产链在同一次调用里走完两拍：hub.remove 同步让订阅者告别（流 end），controller 的 onRemoved
+	// 随后才让行消失。先后因此从帧的到达顺序读：end 必须先于 session_gone——反过来就是窗口先丢掉行、
+	// 再收到一条来自已不存在会话的帧。
+	const orderedId = await born("一条用来验证删除顺序的会话");
+	const viewG = await rig.connect();
+	viewG.open(orderedId);
+	await until(() => viewG.frames(orderedId).some((frame) => "item" in frame && frame.item.type === "baseline"));
+	const goneFramesOf = (target: View): ServerFrame[] =>
+		target.frames(null).filter((frame) => "item" in frame && frame.item.type === "session_gone" && frame.item.sessionId === orderedId);
+	await rig.deleteSession(orderedId);
+	const orderedFrames = viewG.sequence();
+	const orderEndAt = orderedFrames.findIndex((frame) => frame.streamId === orderedId && "end" in frame);
+	const orderGoneAt = orderedFrames.findIndex((frame) => "item" in frame && frame.item.type === "session_gone" && frame.item.sessionId === orderedId);
+	check("该流先 end，随后的 session_gone 才到", orderEndAt >= 0 && orderGoneAt > orderEndAt, JSON.stringify({ endAt: orderEndAt, goneAt: orderGoneAt }));
+	check("行随后以 session_gone 消失", await until(() => goneFramesOf(viewG).length === 1), JSON.stringify(viewG.frames(null)));
 
-	// 收摊：进程退出前的告别与删除同形，并且观看表随之清空。
-	const closedId = await born(hub, "a conversation that outlives nothing");
-	let closedGoodbye = 0;
-	let closedBaselines = 0;
-	hub.subscribe(
-		closedId,
-		(feeds) => {
-			if (feeds === undefined) closedGoodbye += 1;
-		},
-		{ onBaseline: () => (closedBaselines += 1), onError: () => {} },
+	process.stdout.write("分支移动：同一流上再送一份指向新叶子的 baseline\n");
+	const branchId = await born("一条会被挪分支的会话");
+	view.open(branchId);
+	await until(() => view.frames(branchId).some((frame) => "item" in frame && frame.item.type === "baseline"));
+	const branchSnapshot = await rig.hub.snapshotOf(branchId);
+	const branchEntryId = branchSnapshot.messageEntryIds.find((id): id is string => typeof id === "string");
+	check("前置：会话里有一个 entry 可以挪到", branchEntryId !== undefined, JSON.stringify(branchSnapshot.messageEntryIds));
+	const branchBaselinesBefore = view.frames(branchId).filter((frame) => "item" in frame && frame.item.type === "baseline").length;
+	const newLeaf = rig.hub.agent.branchTo(branchId, branchEntryId as string, false);
+	check(
+		"branch 之后该流再收到一份 baseline，内容是新叶子所指向的状态",
+		await until(() => {
+			const baselines = view.frames(branchId).filter((frame) => "item" in frame && frame.item.type === "baseline");
+			const last = baselines.at(-1);
+			return baselines.length === branchBaselinesBefore + 1 && last !== undefined && "item" in last && last.item.type === "baseline" && last.item.session.leafId === newLeaf;
+		}),
+		JSON.stringify(view.frames(branchId)),
 	);
-	check("the closing test starts from a delivered cold baseline", await until(() => closedBaselines === 1), `${closedBaselines} baselines`);
-	await hub.close();
-	check("closing the hub says goodbye to every watcher", closedGoodbye === 1, `${closedGoodbye} goodbyes`);
-	check("and the watcher table is empty afterwards", !hub.isWatched(closedId));
+
+	process.stdout.write("审批横幅：两个窗口都收到 request 与同一份 settled，别的会话收不到\n");
+	// 先订阅、再让会话停在审批上——横幅是「订阅自己看到的差量」，所以读者必须在它出现之前就在。
+	const approvalId = await born("一个会停在审批上的会话");
+	const viewA = await rig.connect();
+	const viewB = await rig.connect();
+	viewA.open(approvalId);
+	viewB.open(approvalId);
+	await until(() => viewA.frames(approvalId).some((frame) => "item" in frame && frame.item.type === "baseline"));
+	await until(() => viewB.frames(approvalId).some((frame) => "item" in frame && frame.item.type === "baseline"));
+	const otherId = await born("另一个无关的会话");
+	const viewC = await rig.connect();
+	viewC.open(otherId);
+	await until(() => viewC.frames(otherId).some((frame) => "item" in frame && frame.item.type === "baseline"));
+
+	rig.hub.agent.applyConfig(approvalId, { approval: { read: true } });
+	rig.transport.setResponses([
+		fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
+		fakeAssistantMessage("审批之后完成"),
+	]);
+	await rig.hub.agent.prompt(approvalId, "读一下 notes.txt");
+
+	const approvalFrames = (target: View): ServerFrame[] =>
+		target.frames(approvalId).filter((frame) => "item" in frame && (frame.item.type === "approval_request" || frame.item.type === "approval_settled"));
+	check("两个窗口都收到 approval_request", await until(() => approvalFrames(viewA).some((frame) => "item" in frame && frame.item.type === "approval_request") && approvalFrames(viewB).some((frame) => "item" in frame && frame.item.type === "approval_request")), JSON.stringify({ a: approvalFrames(viewA), b: approvalFrames(viewB) }));
+	const requestFrame = approvalFrames(viewA).find((frame) => "item" in frame && frame.item.type === "approval_request");
+	const toolCallId = requestFrame !== undefined && "item" in requestFrame && requestFrame.item.type === "approval_request" ? requestFrame.item.request.toolCallId : "";
+	rig.approve(approvalId, toolCallId, true);
+	check(
+		"作答之后两边都收到 approval_settled 且 approved: true",
+		await until(() => {
+			const settled = (target: View): boolean =>
+				approvalFrames(target).some(
+					(frame) => "item" in frame && frame.item.type === "approval_settled" && frame.item.toolCallId === toolCallId && frame.item.approved === true,
+				);
+			return settled(viewA) && settled(viewB);
+		}),
+		JSON.stringify({ a: approvalFrames(viewA), b: approvalFrames(viewB) }),
+	);
+	check(
+		"另一个会话的窗口收不到任何审批帧",
+		viewC.frames(otherId).every((frame) => !("item" in frame) || (frame.item.type !== "approval_request" && frame.item.type !== "approval_settled")),
+		JSON.stringify(viewC.frames(otherId)),
+	);
+	// 恢复的那一轮跑完后会话离开活半，收尾时不会留下一个还在写文件的袋。
+	await until(() => !rig.hub.isLive(approvalId));
+
+	process.stdout.write("断线：此后跑一轮、再删除，假 sink 上不再出现新帧\n");
+	const goneId = await born("一条断线之后还在跑的会话");
+	const viewD = await rig.connect();
+	viewD.open(goneId);
+	await until(() => viewD.frames(goneId).some((frame) => "item" in frame && frame.item.type === "baseline"));
+	const framesAtDisconnect = viewD.frameCount();
+	viewD.closeConnection();
+	rig.transport.setResponses([fakeAssistantMessage("断线之后仍然跑完的一轮")]);
+	await rig.hub.agent.prompt(goneId, "断线之后再发一条");
+	await rig.deleteSession(goneId);
+	await settle();
+	check("断线之后不再造帧", viewD.frameCount() === framesAtDisconnect, `${framesAtDisconnect} -> ${viewD.frameCount()}`);
+
+	process.stdout.write("隐藏目录：新连接的 overview 不含它，会话变了也收不到它的行\n");
+	// 一个独立的工作目录：放它到一边，规则由 hub 的设置回答，过滤发生在连接这一侧。
+	const hiddenDir = await mkdtemp(join(tmpdir(), "my-agent-subscribe--hidden-"));
+	releases.push(() => rm(hiddenDir, { recursive: true, force: true }));
+	const hiddenId = await born("一个住在被放到一边的目录里的会话", hiddenDir);
+	await rig.hideDirectory(hiddenDir);
+	const viewE = await rig.connect();
+	const overviewRows = (): ServerFrame[] => viewE.frames(null).filter((frame) => "item" in frame && frame.item.type === "sessions");
+	const latestOverview = overviewRows().at(-1);
+	check(
+		"新连接的 overview 不含被隐藏目录的行",
+		latestOverview !== undefined && "item" in latestOverview && latestOverview.item.type === "sessions" && latestOverview.item.sessions.every((row) => row.id !== hiddenId),
+		JSON.stringify(latestOverview),
+	);
+	// 同时推动一个可见会话与隐藏会话：可见的那行到达，证明行的管道本身在跑；隐藏的那行不得到达。
+	const visibleId = await born("一个住在可见目录里的会话");
+	viewE.open(visibleId);
+	rig.transport.setResponses([fakeAssistantMessage("可见会话的一轮")]);
+	const visibleRun = rig.hub.agent.prompt(visibleId, "让可见会话跑一轮");
+	rig.transport.appendResponses([fakeAssistantMessage("隐藏会话的一轮")]);
+	const hiddenRun = rig.hub.agent.prompt(hiddenId, "让隐藏会话也跑一轮");
+	await Promise.all([visibleRun, hiddenRun]);
+	const rowsOf = (id: string): ServerFrame[] => viewE.frames(null).filter((frame) => "item" in frame && frame.item.type === "session_row" && frame.item.session.id === id);
+	check("可见会话的行照常到达", await until(() => rowsOf(visibleId).length > 0), JSON.stringify(viewE.frames(null)));
+	await settle();
+	check("被隐藏目录里的会话变更收不到它的 session_row", rowsOf(hiddenId).length === 0, JSON.stringify(rowsOf(hiddenId)));
+
+	process.stdout.write("整表重发：目录进出列表时，每条连接收到一整份新的 sessions 帧\n");
+	const viewF = await rig.connect();
+	const sessionsCount = (target: View): number => target.frames(null).filter((frame) => "item" in frame && frame.item.type === "sessions").length;
+	const sessionsBefore = { e: sessionsCount(viewE), f: sessionsCount(viewF) };
+	await rig.showDirectory();
+	check(
+		"两条连接都各收到一整份新的 sessions 帧",
+		await until(() => sessionsCount(viewE) === sessionsBefore.e + 1 && sessionsCount(viewF) === sessionsBefore.f + 1),
+		JSON.stringify({ e: sessionsCount(viewE), f: sessionsCount(viewF) }),
+	);
+	const restored = viewE.frames(null).filter((frame) => "item" in frame && frame.item.type === "sessions").at(-1);
+	check(
+		"它是既有的 sessions 形状，且重新含上被领回的目录的行",
+		restored !== undefined && "item" in restored && restored.item.type === "sessions" && restored.item.sessions.some((row) => row.id === hiddenId),
+		JSON.stringify(restored),
+	);
 } finally {
-	// 放行每个可能还在门口等着的运行，再收摊：否则 closeAll 会等一个永不落地的 transport。
-	for (const release of releases) release();
-	for (const open of hubs) {
-		try {
-			await open.close();
-		} catch {
-			// 收尾不掩盖正文里的失败。
-		}
-	}
-	// session 住在 agent home 之下、按工作目录路径作键，所以只删临时目录不够：没有这一步，
-	// 每次运行都会留下一个孤儿目录。
-	await rm(storeRoot, { recursive: true, force: true });
-	await rm(root, { recursive: true, force: true });
+	for (const release of releases) await release();
+	await rig.close();
 }
 
 process.stdout.write(failures === 0 ? "\nsubscribe ok\n" : `\n${failures} failure(s)\n`);

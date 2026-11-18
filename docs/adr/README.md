@@ -33,6 +33,7 @@
 | [0019](0019-settings-two-layers.md) | 设置三层——`GlobalSettings` / `SessionSettings` / 每次现算的 `Settings`；删掉项目级 settings.json | 已接受，已落地（2026-11-15，`check` 绿、smoke-settings / smoke-session / smoke-sessions / smoke-mux / smoke-models 等全绿——smoke-boot / smoke-api / smoke-approval 与 smoke-tools 的一个断言为环境既有失败，与改动前同色）；`tool-config.ts` 与 `model-choice.ts` 退场，解析语义收进 `resolveSettings` 一处 |
 | [0022](0022-drop-send-reference.md) | send 引用撤销——mux 的 `wait` / `unwait` 帧与 hub 的 `waiting` 表删除，删除守卫从四道减为三道 | 已接受，已落地（2026-11-17，`check` 绿、smoke-mux / smoke-mux-client / smoke-sessions / smoke-projection / smoke-session 等全绿；smoke-boot / smoke-mux-live / smoke-liveness 的失败为本机 Node 22.14 与 ADR-0021 落地前的既有漂移，与改动前同色）；部分取代 0001「订阅与 hold 永不互相换算」论证里多客户端裁判的那一半，整体取代 issue 13 的结论 |
 | [0023](0023-holds-into-session-manager-veto-delete.md) | holds 迁入 SessionManager——按会话文件对键控的文件闸，删除改否决式（停掉再删） | 已接受，已落地（2026-11-17，holds-into-manager 01–03 号票——core 的闸、编排层否决序、server 簿记退场与 202、check 收紧；04 号票补否决式冒烟、05 号票同步文档，见 `.scratch/holds-into-manager/`）；修订 0001 的 hold 住址与持有者（「core 无 hold/release 动词」保持成立）与 0006 的无属性服务（第二个常驻表例外），取代 0022 的「守卫刻意只有三道」 |
+| [0024](0024-mux-only-frames.md) | mux 只认帧——传输劈成 `wire` 与会话流 `session stream`，hub 收敛成一张订阅表加一个全局通道 | 已接受，已落地（2026-11-18，wire-stream-split 01–05 号票——黑盒 smoke、拆 `wire`、拆 `session stream`、hub 合表、projection 改推 hub、文档同步，见 `.scratch/wire-stream-split/`）；修订 0001 的 no-gap 住所（帧序半从 mux 搬到 session stream）与 0013 的分发面，取代 `AGENTS.md` 里按 id 分发订阅面的说法 |
 
 ## 门槛
 

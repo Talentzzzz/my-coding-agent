@@ -91,9 +91,9 @@ try {
 	const first = await hub.birth({ text: "the conversation starts here" });
 	const projection = createSessionProjection(hub);
 
-	// 从此以后每一处行变化，按监听器看到的样子。
+	// 从此以后每一处行变化，按监听器看到的样子——行的唯一出口是 hub 的全局通道。
 	const seen: SessionRow[] = [];
-	const stopListening = projection.onRow((row) => seen.push(row));
+	const stopListening = hub.subscribeGlobal({ rows: (row) => seen.push(row) });
 
 	const spokenRow = await projection.row(first);
 	check("a born session has a row", spokenRow !== undefined, String(spokenRow));
@@ -230,22 +230,14 @@ try {
 	const afterStop = await hub.birth({ text: "an unobserved birth" });
 	await projection.refresh(afterStop);
 	let events = 0;
-	// 在 session 运行之前订阅：watcher 在注册的同一拍交出 feed，之后随运行自流入，无需任何重绑。
-	// 装配走 hub 的公开订阅原语 subscribe（旧的 watch 已从公开面退场）——这个 smoke 不关心
-	// baseline，sink 只收下然后丢弃；它观看的只是事件流与「观看不拼装任何东西」本身。
-	const stopWatching = hub.subscribe(
-		afterStop,
-		(feeds) => {
-			if (feeds === undefined) return;
-			feeds.onEvent(() => {
-				events += 1;
-			});
+	// 在 session 运行之前订阅：订阅元素在注册的同一拍就在表里，之后随运行自流入，无需任何重绑。
+	// 装配走 hub 的公开订阅原语 subscribe——这个 smoke 不关心 baseline，所以不声明它；它观看的
+	// 只是事件流与「观看不拼装任何东西」本身。
+	const stopWatching = hub.subscribe(afterStop, {
+		event: () => {
+			events += 1;
 		},
-		{
-			onBaseline: () => {},
-			onError: () => {},
-		},
-	);
+	});
 	check("watching it did not assemble anything", !hub.isLive(afterStop), String(hub.isLive(afterStop)));
 	fake.setResponses([fakeAssistantMessage("seen")]);
 	await hub.agent.prompt(afterStop, "does the watcher hear this");
@@ -254,7 +246,7 @@ try {
 	// 行的诞生发布与 idle 重新发布都是异步读；等 idle 那次，而不是猜测运行结束时哪次已落地。
 	check("and the row says idle", await until(() => seen.some((row) => row.id === afterStop && row.running === false)), JSON.stringify(seen.filter((row) => row.id === afterStop)));
 	stopWatching();
-	check("and the watcher let go", !hub.isWatched(afterStop));
+	// 退订的可观察面在 scripts/smoke-subscribe.ts 的帧断言里：这里不再问观看表是否清空。
 
 	process.stdout.write("a parked session's cold row lights up from the snapshot marker\n");
 	// 两个被驱动到门口然后停下的 session：袋停驻审批时就住在编排层的表里，问题悬在原地——这正是

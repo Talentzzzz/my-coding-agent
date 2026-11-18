@@ -32,6 +32,8 @@ import { createServer as createTcpServer } from "node:net";
 import { spawn } from "node:child_process";
 import { bootServer, muxUpgrade, sessionListeners } from "../packages/server/src/boot.ts";
 import { createMuxServer, type MuxServer } from "../packages/server/src/mux.ts";
+import { createSessionStream } from "../packages/server/src/stream.ts";
+import { createApprovalAnswers } from "../packages/server/src/approvals.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import { createSessionProjection, type SessionProjection } from "../packages/server/src/projection.ts";
 import { SessionController, SystemController } from "../packages/server/src/controllers/sessions.ts";
@@ -778,8 +780,9 @@ interface Graph {
 
 async function serve(hub: SessionHub): Promise<Graph> {
 	const projection = createSessionProjection(hub);
-	const mux = createMuxServer(hub, projection, { heartbeatIntervalMs: 150 });
-	const listeners = sessionListeners(mux, projection);
+	const answers = createApprovalAnswers();
+	const mux = createMuxServer((wire) => createSessionStream(wire, { hub, projection, answers }), { heartbeatIntervalMs: 150 });
+	const listeners = sessionListeners({ hub, answers }, projection);
 	const router = new Router(
 		createRoutes({
 			system: new SystemController(hub, listeners),

@@ -362,7 +362,7 @@ export type StreamId = string;
  * 失败。
  */
 export interface StreamFailure {
-	/** 给人读的——如今是 `announce(sessionId, message)` 携带的唯一一个字符串。 */
+	/** 给人读的——如今是 `publishFailure(sessionId, message)` 携带的唯一一个字符串。 */
 	message: string;
 }
 
