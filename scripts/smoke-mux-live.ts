@@ -89,15 +89,17 @@ const server = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbea
 server.hub.setModelConfigs(modelRows);
 
 try {
-	// 启动时现在不选任何东西，所以本 smoke 驱动的 session 是显式创建返回的那个。
-	const created = await fetch(`${server.url}/api/sessions`, { method: "POST", headers: { "content-type": "application/json" } });
+	// 启动时现在不选任何东西，所以本 smoke 驱动的 session 是显式创建返回的那个。出生请求自带第一条
+	// 消息（ADR-0021：会话随第一条消息存在，`.json` 就是 commit marker），所以这一次请求同时完成了
+	// 把 session 放进下面每个检查都要读的行存储的动作——不再有一条热身 prompt。
+	transport.setResponses([fakeAssistantMessage("warm-up answer")]);
+	const created = await fetch(`${server.url}/api/sessions`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ text: "开场" }),
+	});
 	check("驱动会话已创建", created.status === 201, String(created.status));
 	const { sessionId } = await created.json() as { sessionId: string };
-
-	// 无人开口的 session 没有文件、因此也没有行（ADR-0005 §3）——侧栏列出的是对话，不是意图。
-	// 一轮热身正是把这个 session 放进下面每个检查都要读的行存储的动作。
-	transport.setResponses([fakeAssistantMessage("warm-up answer")]);
-	check("开场 prompt 被接受", (await postPrompt(server.url, sessionId, "开场")) === 202);
 	check("开场 run 落定了", await until(async () => (await running(server.url, sessionId)) === false));
 
 	const channels: string[] = [];
@@ -174,21 +176,24 @@ try {
 	check("并且那条流被结束", await until(() => ended.includes("不存在的会话")), JSON.stringify(ended));
 
 	// ---------------------------------------------------------------------------------------------
-	// 报告的 bug：一次 run 结束，server reap 掉承载它的 host 并结束这条流，而窗格从未离开这个
-	// session。第二次 prompt 必须再次到达这条连接。
+	// 报告的 bug：一次 run 结束后承载它的 host 消失，而窗格从未离开这个 session——第二次 prompt
+	// 必须再次到达这条连接。那条 run 结束后的 reaping 已随 ADR-0021 删除（活半随运行落定即出表，
+	// 没有收摊巡逻），所以 `end` 只留给删除与收摊：窗格还在看，这条流就不该被判终，下一轮的内容
+	// 照旧落在它上面。这两件事一起是本节要钉住的东西。
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("run 结束后，同一会话的下一次 prompt 必须重新收到帧\n");
 
 	const framesFor = (): number => messages.filter((m) => m.sessionId === sessionId).length;
 
-	// Run 1：窗口拿走窗格的引用和一次 send 的引用，发帖，看着回答，承载它的 host 消失后 server
-	// 结束这条流。窗格全程指着这个 session——这正是旧客户端出不来状态。
+	// Run 1：窗口拿走窗格的引用和一次 send 的引用，发帖，看着回答；回答落定，承载它的那一轮
+	// 随之散掉。
 	transport.setResponses([fakeAssistantMessage("first answer")]);
 	const beforeFirst = framesFor();
 	client.retain(sessionId, "send");
 	check("第一条 prompt 被接受", (await postPrompt(server.url, sessionId, "第一条")) === 202);
 	check("第一条 prompt 的帧到达了", await until(() => framesFor() > beforeFirst, 10_000), JSON.stringify(messages.slice(beforeFirst)));
-	check("run 结束后服务端把这条流判终", await until(() => ended.includes(sessionId), 10_000), JSON.stringify(ended));
+	check("这一轮落定了", await until(async () => (await running(server.url, sessionId)) === false, 10_000));
+	check("窗格还在看，所以这条流没有被判终", !ended.includes(sessionId), JSON.stringify(ended));
 
 	// Run 2：同一个 session、新的一次 send 引用、窗格仍然持有它。窗口没有任何变化，所以帧必须
 	// 与第一次分毫不差地到达。
@@ -217,20 +222,21 @@ try {
 		return store;
 	};
 	const overviews = (): number => items.filter((item) => item.type === "sessions").length;
-	const postSession = (workDirAbsPath: string): Promise<Response> =>
+	const postSession = (workDirAbsPath: string, text: string): Promise<Response> =>
 		fetch(`${server.url}/api/sessions`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ workDirAbsPath }),
+			body: JSON.stringify({ workDirAbsPath, text }),
 		});
 	const restDirectories = async (): Promise<string[]> =>
 		((await (await fetch(`${server.url}/api/directories`)).json()) as { directories: { workDirAbsPath: string }[] }).directories.map((group) => group.workDirAbsPath);
 
-	const first = (await (await postSession(aside)).json()) as { sessionId: string };
-	// 与上面热身遵循的同一条生命周期规则：无人开口的 session 没有文件，目录也不存在——一条
-	// prompt 是让两张表都知道它的动作。
+	// 与上面热身遵循同一条生命周期规则：出生请求带着第一条消息，所以一次请求就让两张表都知道这个
+	// 目录——目录组的出现与那一行是同一件事。
 	transport.setResponses([fakeAssistantMessage("aside answer")]);
-	check("新目录里的开场 prompt 被接受", (await postPrompt(server.url, first.sessionId, "让目录落盘")) === 202);
+	const firstResponse = await postSession(aside, "让目录落盘");
+	check("新目录里的开场 prompt 被接受 (201)", firstResponse.status === 201, `status=${firstResponse.status}`);
+	const first = (await firstResponse.json()) as { sessionId: string };
 	check("新目录的行到达了概览", await until(() => rowTable().get(first.sessionId) !== undefined), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
 	check("它也被 REST 列表列着", (await restDirectories()).includes(aside), JSON.stringify(await restDirectories()));
 
@@ -248,7 +254,8 @@ try {
 	// 收回来：会话文件与文件夹从未被动过，所以在那个目录里新建一次 session 就是用户说想让它
 	// 再出现在列表里。
 	const beforeBack = overviews();
-	const reborn = await postSession(aside);
+	transport.setResponses([fakeAssistantMessage("back answer")]);
+	const reborn = await postSession(aside, "回到这个目录");
 	check("在搁置的目录里新建会话被接受 (201)", reborn.status === 201, `status=${reborn.status}`);
 	check("服务端又重发了一份概览", await until(() => overviews() > beforeBack), `overviews=${overviews()}`);
 	check("那个目录回到了行表里", rowTable().list().some((row) => row.workDirAbsPath === aside), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
