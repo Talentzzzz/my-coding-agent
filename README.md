@@ -138,7 +138,7 @@ node scripts/smoke-desktop-observability.ts # 外壳的失败面：子进程与�
 node scripts/smoke-tools.ts    # 工具、会话存储、压缩，不需要供应商密钥
 node scripts/smoke-sessions.ts # 会话注册表，不需要供应商密钥
 node scripts/smoke-projection.ts # 概况投影与协议信封，不需要供应商密钥
-node scripts/smoke-subscribe.ts # hub 订阅：注册与快照原子、冷读与重发恰一次、删除与收摊的告别；不需要密钥
+node scripts/smoke-subscribe.ts # 订阅的帧面：baseline 与增量、恰好一次的失败、end 的次序、断线后不再造帧；不需要密钥
 node scripts/smoke-mux-client.ts # 客户端通道：退避、判活、按引用重放、end 与基线；不需要密钥
 node scripts/smoke-mux-live.ts  # 真服务器 + 真 WebSocket 跑生产的 MuxClient；不需要密钥
 node scripts/smoke-mux.ts       # wire 表面：信封、分道、上行容错、连接级载荷；不需要密钥

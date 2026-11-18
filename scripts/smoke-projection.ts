@@ -254,7 +254,7 @@ try {
 	// 行的诞生发布与 idle 重新发布都是异步读；等 idle 那次，而不是猜测运行结束时哪次已落地。
 	check("and the row says idle", await until(() => seen.some((row) => row.id === afterStop && row.running === false)), JSON.stringify(seen.filter((row) => row.id === afterStop)));
 	stopWatching();
-	check("and the watcher let go", !hub.isWatched(afterStop));
+	// 退订的可观察面在 scripts/smoke-subscribe.ts 的帧断言里：这里不再问观看表是否清空。
 
 	process.stdout.write("a parked session's cold row lights up from the snapshot marker\n");
 	// 两个被驱动到门口然后停下的 session：袋停驻审批时就住在编排层的表里，问题悬在原地——这正是
