@@ -140,6 +140,8 @@ export class Wire {
 	/** 上一次 Pong 到达以来发出的 ping 数。 */
 	private missedPongs = 0;
 	private closed = false;
+	/** 本层关闭时通知的那一步，没有登记时为 `undefined`。 */
+	private closeListener: (() => void) | undefined;
 
 	private readonly sink: FrameSink;
 	private readonly options: ResolvedWireOptions;
@@ -198,6 +200,21 @@ export class Wire {
 		this.missedPongs = 0;
 	}
 
+	/** 本层日志的去处。帧层的诊断行与停滞日志共用一个出口，一条连接的日志因此只有一处可被接管。 */
+	log(line: string): void {
+		this.options.log(line);
+	}
+
+	/**
+	 * 登记"本层关闭时"要做的那一步。
+	 *
+	 * 一个就够：mux 用它把连接从集合里忘记并放下它的订阅，于是自关（停滞期限、ping 容忍度耗尽）
+	 * 与外部 `close()` 走同一条收尾路径，而不是等下一次存活探测撞见 `isClosed`。
+	 */
+	onClose(listener: () => void): void {
+		this.closeListener = listener;
+	}
+
 	/** 有多少个 ping 未被应答。 */
 	get missed(): number {
 		return this.missedPongs;
@@ -225,6 +242,8 @@ export class Wire {
 		this.stalled = false;
 		this.stalledSince = 0;
 		this.clearStallTimer();
+		// 通知放在状态落定之后：收尾的那一步看到的是已经关好的连接，不会再回到这里。
+		this.closeListener?.();
 	}
 
 	/**

@@ -91,9 +91,9 @@ try {
 	const first = await hub.birth({ text: "the conversation starts here" });
 	const projection = createSessionProjection(hub);
 
-	// 从此以后每一处行变化，按监听器看到的样子。
+	// 从此以后每一处行变化，按监听器看到的样子——行的唯一出口是 hub 的全局通道。
 	const seen: SessionRow[] = [];
-	const stopListening = projection.onRow((row) => seen.push(row));
+	const stopListening = hub.subscribeGlobal({ rows: (row) => seen.push(row) });
 
 	const spokenRow = await projection.row(first);
 	check("a born session has a row", spokenRow !== undefined, String(spokenRow));
