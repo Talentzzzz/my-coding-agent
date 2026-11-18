@@ -77,6 +77,12 @@ interface Rig {
 	hideDirectory(path: string): Promise<void>;
 	/** 目录被领回列表：与隐藏同一条路径。 */
 	showDirectory(): Promise<void>;
+	/**
+	 * 删除的第二拍：controller 的 `onRemoved` 让 projection 丢掉这一行，连接因此收到 `session_gone`。
+	 *
+	 * 第一拍是 `hub.remove`（订阅者的 `gone()` 让流先 end）；两拍分开，删除顺序才可观察。
+	 */
+	forgetRow(sessionId: string): void;
 	/** 作答一个审批：记下答案（供 settled 帧）并恢复运行。 */
 	approve(sessionId: string, toolCallId: string, approved: boolean): void;
 	close(): Promise<void>;
@@ -144,6 +150,10 @@ async function openRig(): Promise<Rig> {
 		async showDirectory(): Promise<void> {
 			hub.agent.applySettings({ hiddenDirectories: [] });
 			await mux.broadcastSessions();
+		},
+		forgetRow(sessionId: string): void {
+			// 生产中这是 controller 的 `onRemoved`：hub 已告别，这里才轮到行消失。
+			projection.forget(sessionId);
 		},
 		approve(sessionId, toolCallId, approved) {
 			// 与审批端点同一顺序：先记答案（settled 帧读它），再恢复运行（它会让待审批集合变空）。
@@ -283,6 +293,24 @@ try {
 	check("end 是这条流上的最后一帧", removedEnd === removedFrames.length - 1, removedFrames.map((frame) => ("item" in frame ? frame.item.type : "?")).join("|"));
 	await settle();
 	check("此后不再有任何该 streamId 的帧", view.frames(removedId).length === removedEnd + 1, `${view.frames(removedId).length} vs ${removedEnd + 1}`);
+
+	process.stdout.write("删除顺序：流先 end、行后 session_gone\n");
+	// 删除是两拍：hub.remove 同步让订阅者告别（流 end），controller 的 onRemoved 之后才让行消失。
+	// 两拍之间行必须还在、流必须已经结束——反过来就是窗口先丢掉行、再收到一条来自已不存在会话的帧。
+	const orderedId = await born("一条用来验证删除顺序的会话");
+	const viewG = await rig.connect();
+	viewG.open(orderedId);
+	await until(() => viewG.frames(orderedId).some((frame) => "item" in frame && frame.item.type === "baseline"));
+	const goneFramesOf = (target: View): ServerFrame[] =>
+		target.frames(null).filter((frame) => "item" in frame && frame.item.type === "session_gone" && frame.item.sessionId === orderedId);
+	rig.hub.remove(orderedId);
+	check(
+		"hub 告别的那一拍流已经 end，而 session_gone 还没来",
+		viewG.frames(orderedId).some((frame) => "end" in frame) && goneFramesOf(viewG).length === 0,
+		JSON.stringify({ stream: viewG.frames(orderedId), lane: viewG.frames(null) }),
+	);
+	rig.forgetRow(orderedId);
+	check("行随后以 session_gone 消失", await until(() => goneFramesOf(viewG).length === 1), JSON.stringify(viewG.frames(null)));
 
 	process.stdout.write("分支移动：同一流上再送一份指向新叶子的 baseline\n");
 	const branchId = await born("一条会被挪分支的会话");

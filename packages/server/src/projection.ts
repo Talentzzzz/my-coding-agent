@@ -111,27 +111,28 @@ const liveOf = (sessionId: string): LiveFields | undefined => {
 };
 
 /**
- * 跟随一个会话的 feed，行存在多久跟多久。
+ * 跟随一个会话的订阅元素，行存在多久跟多久。
  *
- * 在行首次存入的同一拍绑定，让变更不可能落进"没有任何人在听"的窗口。订阅走 hub 自己的 feed 面：
- * 分发表是 hub 的（sink 从编排层把事件带进 feedMap），编排层的袋上不再挂着订阅者。
+ * 在行首次存入的同一拍绑定，让变更不可能落进"没有任何人在听"的窗口。订阅走 hub 自己的订阅面：
+ * 一张按会话的表，编排层的事件与快照从那个 sink 流出。
+ *
+ * 刻意不声明 `baseline`：投影的行来自磁盘扫描，不需要 hub 为每一行读一次盘（spec User Story 16）。
+ * 初始状态在订阅之后由下面的 `liveOf` 自己叠加。
  */
 const follow = (sessionId: string): void => {
 	if (following.has(sessionId)) return;
 
-	const feeds = hub.feeds(sessionId);
-	const offEvent = feeds.onEvent((event) => onEvent(sessionId, event));
-	const offChange = feeds.onChange((snapshot) => {
-		const next = liveRow(sessionId, {
-			running: snapshot.running,
-			pending: snapshot.pendingApprovals.length,
-		});
-		if (next !== undefined) publish(next);
+	const stop = hub.subscribe(sessionId, {
+		event: (event) => onEvent(sessionId, event),
+		state: (snapshot) => {
+			const next = liveRow(sessionId, {
+				running: snapshot.running,
+				pending: snapshot.pendingApprovals.length,
+			});
+			if (next !== undefined) publish(next);
+		},
 	});
-	following.set(sessionId, { off: () => {
-		offEvent();
-		offChange();
-	} });
+	following.set(sessionId, { off: stop });
 
 	const live = liveOf(sessionId);
 	if (live !== undefined) {

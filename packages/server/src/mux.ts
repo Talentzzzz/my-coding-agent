@@ -8,7 +8,7 @@ import type {
 } from "@my-agent/core/protocol";
 import { UnknownSessionError } from "@my-agent/core";
 import { parseClientFrame } from "./http/client-frame.ts";
-import type { SessionFeeds, SessionHub, SubscriptionSink } from "./hub.ts";
+import type { SessionHub, SubscriptionSink } from "./hub.ts";
 import type { SessionProjection } from "./projection.ts";
 import {
 	CLOSE_GOING_AWAY,
@@ -46,7 +46,7 @@ interface Subscription {
 	/**
 	 * 所有要撤销的东西，按设置的顺序。
 	 *
-	 * 用列表而不是单个可重赋值的函数，原因在于这些事发生的顺序：`subscribe` 注册的同一拍就*同步*回调，所以 feed 在这个订阅还没创建完之前就已挂上。一个每步包裹前一步的函数会被下一次赋值覆盖掉工作——而丢掉的恰好是 feed 监听器那半，正是让一个已结束的连接保持存活、还在为客户端已取消的订阅写帧的那半。
+	 * 用列表而不是单个可重赋值的函数，原因在于这些事发生的顺序：`subscribe` 注册的同一拍就*同步*回调，所以订阅元素在这个订阅还没创建完之前就已挂上。一个每步包裹前一步的函数会被下一次赋值覆盖掉工作——而丢掉的恰好是订阅元素那半，正是让一个已结束的连接保持存活、还在为客户端已取消的订阅写帧的那半。
 	 */
 	teardown: (() => void)[];
 }
@@ -86,7 +86,7 @@ export class MuxConnection {
 	/**
 	 * 处理一个上行帧。
 	 *
-	 * `open` 是有趣的一个：订阅与活半 baseline 在 hub 的同一个同步块里完成——entry 被创建、feed 被挂上、快照被交回、baseline 被写出，中间没有 `await`。冷半的读盘也在 hub 内完成，只是异步，跨过的那段时间由本订阅的 backlog 扣住。这才让"baseline 与增量之间没有缝隙"由构造成立而非靠论证成立——不存在这样一个时刻：读取会话状态与开始监听之间恰好插进一个变更。
+	 * `open` 是有趣的一个：订阅与活半 baseline 在 hub 的同一个同步块里完成——entry 被创建、订阅元素被挂上、快照被交回、baseline 被写出，中间没有 `await`。冷半的读盘也在 hub 内完成，只是异步，跨过的那段时间由本订阅的 backlog 扣住。这才让"baseline 与增量之间没有缝隙"由构造成立而非靠论证成立——不存在这样一个时刻：读取会话状态与开始监听之间恰好插进一个变更。
 	 */
 	handle(text: string): void {
 		if (this.closed) return;
@@ -103,7 +103,7 @@ export class MuxConnection {
 	/**
 	 * 开始观看一个会话，或把本连接已持有的观看刷新到最新。
 	 *
-	 * `open` 的意思是"这个会话现在的状态，然后之后的一切"，且是幂等的（ADR-0009 决定 1）。本连接*已经在看*的会话因此不算错：应答是在已有的流上再发一份 baseline，底下的订阅原样保留——同样的 feed、同样的审批、同一条流。这才让"窗格在别处仍持有会话时消失、又回来了"能工作：引用计数意味着没有发过 `cancel`，回来这一程唯一能应答它的就是重发的 baseline。
+	 * `open` 的意思是"这个会话现在的状态，然后之后的一切"，且是幂等的（ADR-0009 决定 1）。本连接*已经在看*的会话因此不算错：应答是在已有的流上再发一份 baseline，底下的订阅原样保留——同样的订阅元素、同样的审批、同一条流。这才让"窗格在别处仍持有会话时消失、又回来了"能工作：引用计数意味着没有发过 `cancel`，回来这一程唯一能应答它的就是重发的 baseline。
 	 *
 	 * 不存在的会话仍然是客户端的错，但应答写在它相关的流上——一个带归因的 `error` 帧，然后一个 `end`，让失败的尝试不至于继续看起来像一条只是安静的流——而连接本身无论哪种情况都不受影响。
 	 */
@@ -117,30 +117,33 @@ export class MuxConnection {
 		const subscription: Subscription = { pending: new Map(), backlog: [], teardown: [] };
 		this.subscriptions.set(sessionId, subscription);
 
-		// 观看不占 hold，这一点始终是全部关键：计数属于改变或运行会话的调用者，而看着它的窗口两者都不是。注册的同一拍就交出 feed——分发按 id 进行，对冷会话同样成立——所以该会话开始运行的那一刻，事件自然流入，无需任何重绑。
-		let live = false;
+		// 观看不占 hold，这一点始终是全部关键：计数属于改变或运行会话的调用者，而看着它的窗口两者都不是。注册的同一拍订阅元素就已在表里——分发按 id 进行，对冷会话同样成立——所以该会话开始运行的那一刻，事件自然流入，无需任何重绑。
 
 		// no-gap 的两半在这里合缝。hub 保证「注册与快照原子」：`subscribe` 在返回前的同一个同步块里
-		// 注册 watcher、判定活冷、交付活半的 baseline（机制与论证见 hub.ts 的 `subscribe`）；mux
-		// 保证「baseline 帧先于本订阅 backlog 里的任何帧写出」——`subscribe` 返回前 `onBaseline` 已
+		// 挂上订阅元素、判定活冷、交付活半的 baseline（机制与论证见 hub.ts 的 `subscribe`）；mux
+		// 保证「baseline 帧先于本订阅 backlog 里的任何帧写出」——`subscribe` 返回前 `baseline` 已
 		// 同步回调，回调里同步 `send`，而不是先攒着等一拍，所以任何 emit 只能落在下一个事件循环
 		// 拍，那时 baseline 早已排在前面。两半之间的缝是：hub 只交结果（快照或原始 error），帧序
 		// 与失败措辞由这里决定；冷半的读盘在 hub 内异步，跨过的那段由 backlog 扣住。
-		const stopWatching = this.hub.subscribe(
-			sessionId,
-			(feeds) => {
-				if (feeds === undefined) {
-					// undefined 只在会话被删除（或进程收摊）时到达；观看中的流以 end 作别。
-					if (live) this.endStream(sessionId);
-					return;
-				}
-				live = true;
-				this.bind(sessionId, subscription, feeds);
+		const stopWatching = this.hub.subscribe(sessionId, {
+			baseline: (snapshot) => this.writeBaseline(sessionId, subscription, snapshot),
+			baselineFailed: (error) => this.failBaseline(sessionId, error),
+			event: (event) => {
+				this.push(sessionId, subscription, { type: "event", event });
+				// 叶子移动改变整条会话记录，所以为它发出的是会话的当前状态而不是差异：事件说树动了，这帧说动到了哪里。
+				if (event.type === "branch_changed") this.pushBaseline(sessionId, subscription);
+				if (event.type === "entry_appended") this.pushEntry(sessionId, subscription, event.entryId, event.at);
 			},
-			this.baselineSink(sessionId, subscription),
-		);
+			state: (snapshot) => {
+				this.pushStatus(sessionId, subscription, snapshot);
+				// 待审批和其他变更一样以 change 发布，所以窗口就是在这里学会显示横幅的。baseline 只负责播种已经在等的那些。
+				this.pushApprovalChanges(sessionId, subscription, snapshot);
+			},
+			// 只在会话被删除（或进程收摊）时到达；观看中的流以 end 作别。
+			gone: () => this.endStream(sessionId),
+		});
 
-		// 刻意在 `subscribe` 调用之后注册，且追加而不是赋值：`bind` 可能已经追加了 feed 的退订器，这一步不能挤掉它们。见 `Subscription.teardown`。
+		// 刻意在 `subscribe` 调用之后注册，且追加而不是赋值：`subscribe` 返回前的同步回调可能已经写过帧，这一步不能把它挤掉。见 `Subscription.teardown`。
 		subscription.teardown.push(() => {
 			stopWatching();
 			// 这个订阅还在展示的任何东西，这里都不会再有人上报了：一个只等已消失读者的应答，是一个没有理由留着的应答。
@@ -154,7 +157,7 @@ export class MuxConnection {
 	/**
 	 * 撤销一个订阅：它注册的每一步，后进先出。
 	 *
-	 * 逆序是因为这些步骤是一个栈——feed 是在观看注册之后挂上的，所以它们也是更晚放下的东西。
+	 * 逆序是因为这些步骤是一个栈——订阅是在观看注册之后挂上的，所以它也是更晚放下的东西。
 	 */
 	private teardown(subscription: Subscription): void {
 		for (let index = subscription.teardown.length - 1; index >= 0; index -= 1) {
@@ -173,32 +176,6 @@ export class MuxConnection {
 	private cancel(sessionId: string): void {
 		const subscription = this.subscriptions.get(sessionId);
 		if (subscription !== undefined) this.teardown(subscription);
-	}
-
-	/**
-	 * 把订阅绑到一个会话的 feed 上。
-	 *
-	 * `subscribe` 注册的同一拍同步回调，于是 attach 与活半的 baseline 落在同一段没有 `await` 的同步代码块里。no-gap 保证就是围绕这个场景构建的；冷半的读盘在 hub 内异步，{@link push} 的 backlog 是为它买单的东西。
-	 */
-	private bind(sessionId: string, subscription: Subscription, feeds: SessionFeeds): void {
-		const onEvent = feeds.onEvent((event) => {
-			this.push(sessionId, subscription, { type: "event", event });
-			// 叶子移动改变整条会话记录，所以为它发出的是会话的当前状态而不是差异：事件说树动了，这帧说动到了哪里。
-			if (event.type === "branch_changed") this.pushBaseline(sessionId, subscription);
-			if (event.type === "entry_appended") this.pushEntry(sessionId, subscription, event.entryId, event.at);
-		});
-
-		const onChange = feeds.onChange((snapshot) => {
-			this.pushStatus(sessionId, subscription, snapshot);
-			// 待审批和其他变更一样以 change 发布，所以窗口就是在这里学会显示横幅的。baseline 只负责播种已经在等的那些。
-			this.pushApprovalChanges(sessionId, subscription, snapshot);
-		});
-
-		// 永远追加，从不赋值——见 `Subscription.teardown`。
-		subscription.teardown.push(() => {
-			onEvent();
-			onChange();
-		});
 	}
 
 	/**
@@ -243,7 +220,7 @@ export class MuxConnection {
 	/**
 	 * 重发整个状态：这是对分支移动、以及对本连接已持有的观看上第二个 `open` 的应答。
 	 *
-	 * 重发不能重新订阅——那会多挂一条 feed——所以走 hub 的 `rebaseline`：活冷分岔在那里完成，活半同步交回袋里的在飞状态（运行中途的第二个 `open` 因此带走正在写出的 `partial`，而不是盘上上一次落定的状态），冷半读盘后异步交回。
+	 * 重发不能重新订阅——那会多注册一个订阅元素——所以走 hub 的 `snapshotFor`：活冷分岔在那里完成，活半同步交回袋里的在飞状态（运行中途的第二个 `open` 因此带走正在写出的 `partial`，而不是盘上上一次落定的状态），冷半读盘后异步交回。
 	 *
 	 * 这里剩下的是帧序的本域。布防 backlog 让读盘期间到达的帧排在 baseline 之后：活半在同一同步块里布防又冲刷，等于没扣；冷半扣到读盘返回。已经欠着一份时不再要——那份 baseline 还在路上，再要一份只会让客户端多收一次同一状态，冷半还会多读一次盘；活半的同步交付同样受这条去重覆盖。
 	 *
@@ -253,7 +230,7 @@ export class MuxConnection {
 	private pushBaseline(sessionId: string, subscription: Subscription): void {
 		if (subscription.backlog !== null) return;
 		subscription.backlog = [];
-		this.hub.rebaseline(sessionId, this.baselineSink(sessionId, subscription));
+		this.hub.snapshotFor(sessionId, this.baselineSink(sessionId, subscription));
 	}
 
 	/**
@@ -416,7 +393,7 @@ export class MuxConnection {
 	/**
 	 * 放弃所有订阅并停止。
 	 *
-	 * 订阅先行，让它们的 feed 在任何东西试图关闭它们正在观看的会话之前释放。被丢弃的连接是一个
+	 * 订阅先行，让它们在任何东西试图关闭它们正在观看的会话之前从 hub 退订。被丢弃的连接是一个
 	 * 永远不会被应答的客户端，它持有的每个订阅都在这里放弃：与 `cancel`、刷新、断线同一种等价处理。
 	 */
 	close(): void {
