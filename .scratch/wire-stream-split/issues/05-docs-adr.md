@@ -33,6 +33,8 @@ Blocked-by: 04
   3. 全局订阅除 `rows` / `gone` 外还要 `resync`（`publishResync` 无载荷，总得有个收件方法）。
   4. `createMuxServer(factory, options)` 收工厂，而 `accept(sink)` 的签名保持不变（内部造 `Wire` 再交工厂）——这样测试装置与 `muxUpgrade` 都不用动。
   5. 票 04 把"会话流传出"与"行的广播改由 hub 扇出"放进同一张票：只做前者，侧栏会在一张票的时间里坏掉。
+  6. `Wire` 多了 `onClose(listener)` 与 `log(line)`：前者让"wire 自关"与"外部 close"走同一条收尾路径（订阅当场摘掉，不等下一轮定时器），后者承接从 mux 搬来的"丢弃看不懂的上行帧"那一行诊断。
+  7. `SessionProjection` 瘦身：`onRow` / `onGone` 与两个监听器集合退场（`scripts/smoke-projection.ts` 改用 `hub.subscribeGlobal({ rows })`）；`MuxConnection` 只剩 `wire` + `stream` 两个字段。
 - **被取代/修订的既有结论**：`ADR-0001` 里"mux 与 hub 的边界是一份两半保证"的那一段——两半仍成立，但住所换了（hub 半不变，帧序半从 mux 搬到 session stream）；`AGENTS.md` 里 `SessionFeeds` 的说法整体退场。**不**取代 ADR-0001 的传输形态决定。
 
 ### 2. `docs/adr/README.md`
