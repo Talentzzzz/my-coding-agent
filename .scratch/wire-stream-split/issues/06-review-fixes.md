@@ -1,7 +1,7 @@
 # 06 - 审查修复：注释里的旧主人、死代码、`FrameSink` 的转发口、删除顺序的触发链
 
 Type: task
-Status: in-progress
+Status: done
 Blocked-by: 05
 
 ## 背景与指针

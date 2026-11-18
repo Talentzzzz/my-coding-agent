@@ -1,7 +1,7 @@
 # 04 - 拆出 `session stream`：会话语义离开 mux，侧栏广播改由 hub 扇出
 
 Type: task
-Status: ready-for-agent
+Status: done
 Blocked-by: 03
 
 ## 背景与指针
@@ -107,3 +107,7 @@ export function createMuxServer(factory: SessionStreamFactory, options: MuxOptio
 - `scripts/smoke-projection.ts` 也用了 `projection.onRow`（ticket 写的"唯一消费者是 mux 的两条监听器"不成立）：改为 `hub.subscribeGlobal({ rows })`，断言未动。
 - 既有 flake（不在本票范围，未修）：`smoke-sessions` 的「a second delete is a 404 too」会在两次 DELETE 之间输给后台删除而得 202。在 `ac64f6c`（本票之前）上同样复现 2/5 次，与本票无关。
 - 本票范围内未发现需要另开票的事。
+
+## Comments（收尾补记）
+
+- `smoke-sessions.ts` 的「a second delete is a 404 too」是**既有 flake**：第二次 `DELETE` 有时在后台删除落地之前到达而得 202。已在 `master`（`6efbb9d`）上复现（6 次里 1 次红、1 次超时），与本 spec 无关，未修。

@@ -1,7 +1,7 @@
 # 05 - 文档：ADR-0024 + AGENTS.md 术语 + architecture.md 两节
 
 Type: task
-Status: ready-for-agent
+Status: done
 Blocked-by: 04
 
 ## 背景与指针

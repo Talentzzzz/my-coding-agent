@@ -1,7 +1,7 @@
 # 03 - hub 合表：一张 `Map<sessionId, Set<订阅>>` + 一个全局通道，删掉 `watchers` / `feedMap`
 
 Type: task
-Status: ready-for-agent
+Status: done
 Blocked-by: 02
 
 ## 背景与指针

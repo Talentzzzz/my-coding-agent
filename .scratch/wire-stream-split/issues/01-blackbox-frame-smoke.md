@@ -1,7 +1,7 @@
 # 01 - 黑盒帧 smoke：把「观众收到什么帧」写成安全网，在未改动的生产代码上跑绿
 
 Type: task
-Status: ready-for-agent
+Status: done
 Blocked-by: （无——这是图的根）
 
 ## 背景与指针

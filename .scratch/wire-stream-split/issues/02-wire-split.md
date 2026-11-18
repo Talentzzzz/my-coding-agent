@@ -1,7 +1,7 @@
 # 02 - 拆出 `wire`：帧、字节、队列、停滞、ping、心跳全部搬进 `wire.ts`
 
 Type: task
-Status: ready-for-agent
+Status: done
 Blocked-by: 01
 
 ## 背景与指针
