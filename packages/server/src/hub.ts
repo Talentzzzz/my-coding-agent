@@ -45,7 +45,7 @@ export interface HubOptions {
  * 状态与告别，侧栏只要事件与状态，两者同住一个 Set。没有实现的成员就是没有兴趣：没有 `baseline`
  * 就不读盘、不交初始状态。
  */
-export interface 订阅 {
+export interface SessionSubscription {
 	event?(event: AgentSessionEvent): void;
 	state?(snapshot: SessionSnapshot): void;
 	/** 声明它 = 要初始状态。没有这个方法就不读盘、不交 baseline。 */
@@ -59,7 +59,7 @@ export interface 订阅 {
 }
 
 /** 这台机器上的列表：无键，所以不是按会话的订阅。 */
-export interface 全局订阅 {
+export interface GlobalSubscription {
 	rows?(row: SessionRow): void;
 	gone?(sessionId: string): void;
 	/** 整表变了（目录进出列表）——没有载荷，客户端要的是一整份新的列表。 */
@@ -115,13 +115,13 @@ export class SessionHub {
 	 * 永远不是计数，也永远不是让会话保持存活的理由：观看一个会话不让它运行，运行它也不意味着
 	 * 有人在看。条目在第一次订阅时出生、在最后一个退订函数清理时消失。
 	 */
-	private readonly subscribers = new Map<string, Set<订阅>>();
+	private readonly subscribers = new Map<string, Set<SessionSubscription>>();
 	/**
 	 * 这台机器上的列表的订阅者：无键，因为列表没有会话 id。
 	 *
 	 * 它只转发载荷，不看内容——隐藏目录之类的规则归订阅方，hub 不认识行。
 	 */
-	private readonly globalSubscribers = new Set<全局订阅>();
+	private readonly globalSubscribers = new Set<GlobalSubscription>();
 
 	constructor(options: HubOptions) {
 		this.options = options;
@@ -252,8 +252,8 @@ export class SessionHub {
 	 * 重发路径不重新订阅，用 {@link snapshotFor}：同一个分岔的另一个交付时机，交付契约与这里
 	 * 相同，两半保证的论证共用上面这一份，那边引用而不复述。
 	 */
-	subscribe(sessionId: string, sub: 订阅): () => void {
-		const subs = this.subscribers.get(sessionId) ?? new Set<订阅>();
+	subscribe(sessionId: string, sub: SessionSubscription): () => void {
+		const subs = this.subscribers.get(sessionId) ?? new Set<SessionSubscription>();
 		if (!this.subscribers.has(sessionId)) this.subscribers.set(sessionId, subs);
 		subs.add(sub);
 
@@ -345,7 +345,7 @@ export class SessionHub {
 	 *
 	 * 返回宽容且幂等的退订——它只把这一次登记的元素从通道里去掉，重复调用没有第二次后果。
 	 */
-	subscribeGlobal(sub: 全局订阅): () => void {
+	subscribeGlobal(sub: GlobalSubscription): () => void {
 		this.globalSubscribers.add(sub);
 		return () => {
 			this.globalSubscribers.delete(sub);

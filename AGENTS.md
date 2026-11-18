@@ -115,8 +115,8 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   落点各在一侧**：`open` 走 hub 的 `subscribe`（注册、活冷分岔与 baseline 交付在 hub 内部一体完成），
   重发走 `snapshotFor`；帧序（baseline 先于本订阅 backlog 的任何帧）与失败的措辞归 `session stream`
   那一层，mux 只剩帧与 socket 存活（[ADR-0024](docs/adr/0024-mux-only-frames.md)，分层表在那一份
-  里）。hub 自己只剩两个容器：一张按会话的订阅表（`Map<sessionId, Set<订阅>>`，窗口与侧栏同住一个
-  Set）与一个全局通道（`Set<全局订阅>`，这台机器上的列表——行与整表重发都从这里扇出）；原先按 id
+  里）。hub 自己只剩两个容器：一张按会话的订阅表（`Map<sessionId, Set<SessionSubscription>>`，窗口与侧栏同住一个
+  Set）与一个全局通道（`Set<GlobalSubscription>`，这台机器上的列表——行与整表重发都从这里扇出）；原先按 id
   分的两张表已合成前面那一张。**一条常驻连接是一个 `Writable`，所以写侧必须有界**（归 `wire`）：
   `write()` 返回 `false` 之后停写，帧进有界队列（4 MiB / 10 秒），超限用 `1013` 关掉整条连接。
   模型那一侧另有一个同名的 `ChatTransport`（`llm/types.ts`），
@@ -197,7 +197,7 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   重放一次（一次运行读一次、带着走；一条命令读一次、用完就丢）。订阅者也不在袋上：编排层构造时
   注入唯一一个 `SessionSink`（`onEvent` / `onState` 两个回调），fanout 在 emit 点直调、按 sessionId
   点名；per-session 的分发归宿主——hub 收到回调后查那张按会话的订阅表，把事件与状态交给实现了
-  对应可选方法的 `订阅` 元素（见 `transport` 与 `session stream` 两条）。
+  对应可选方法的 `SessionSubscription` 元素（见 `transport` 与 `session stream` 两条）。
   `live` 里只有两条队列、在飞运行、
   partial、重试位与挂起位——运行期瞬态，盘上没有的东西（ADR-0021 删掉了曾住在这里的
   未落盘袋与打开行）。由 `Agent` 按 id 键控持有，

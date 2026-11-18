@@ -29,11 +29,13 @@
    `projection`、审批答案表。它订阅 hub、装配 overview（过滤隐藏目录）、把事件与快照翻译成帧、
    持有 baseline 前的扣帧队列与本连接的审批读者计数、决定失败的措辞；所有帧经 `wire.send` 写出，
    看不见队列、背压、`1013` 与字节数。`start` / `handle` / `dispose` 是它在一条连接上的全部动词。
-3. **`hub` 收敛成一个通道化的 broker。** 一张按会话的订阅表 `Map<sessionId, Set<订阅>>`、一个
-   全局通道 `Set<全局订阅>`。`订阅` 用实现了哪几个可选方法表达兴趣——`event` / `state` /
-   `baseline` / `baselineFailed` / `gone` / `failure`；`全局订阅` 是 `rows` / `gone` / `resync`。
+3. **`hub` 收敛成一个通道化的 broker。** 一张按会话的订阅表 `Map<sessionId, Set<SessionSubscription>>`、一个
+   全局通道 `Set<GlobalSubscription>`。`SessionSubscription` 用实现了哪几个可选方法表达兴趣——`event` / `state` /
+   `baseline` / `baselineFailed` / `gone` / `failure`；`GlobalSubscription` 是 `rows` / `gone` / `resync`。
    公开面是 `subscribe` / `snapshotFor` / `subscribeGlobal` / `publishRows` / `publishGone` /
    `publishResync` / `publishFailure`。它不看行的内容，不数连接。
+   两个元素类型落地取名 `SessionSubscription` / `GlobalSubscription`——spec 的示意里写作 `订阅` /
+   `全局订阅`，而本仓库的标识符一律英文，中文只出现在注释与用户可见文案里。
 4. **`mux` 只剩接线与存活探测。** 保留 socket 升级、`accept(sink)`、连接集合、两个定时器、
    关停；连接集合不再参与任何分发。构造收一个工厂 `(wire) => SessionStream`，所以它不 import
    hub / projection / 审批里的任何一个类型。`MuxConnection` 只有 `wire` 与 `stream` 两个字段。
@@ -85,7 +87,7 @@
 
 实施中实际发生的八条，逐条记下来：
 
-1. **`订阅` 有六个可选方法，不是四个。** spec 列了 `event` / `state` / `baseline` / `gone`；
+1. **`SessionSubscription` 有六个可选方法，不是四个。** spec 列了 `event` / `state` / `baseline` / `gone`；
    实况还要 `baselineFailed`——baseline 的失败半，要初始状态的人必然也要它的失败，
    `SubscriptionSink` 的那两口拆不掉——与 `failure`——一次运行在会话流上说的那句失败，原
    mux 向会话流宣布运行失败那个方法的收件人。spec 漏了这两个名字。
@@ -108,7 +110,7 @@
    （`scripts/smoke-projection.ts` 改用 `hub.subscribeGlobal({ rows })` 观察）；
    `MuxConnection` 不再有连接自己的订阅表，只剩 `wire` + `stream`。
 8. **`hub.subscribeGlobal(sub)` 是公开面清单之外的成员。** spec 只给了「一个全局通道
-   `Set<全局订阅>`」，没给登记它的动词；它是那个通道的唯一入口，不登记就收不到 `rows`
+   `Set<GlobalSubscription>`」，没给登记它的动词；它是那个通道的唯一入口，不登记就收不到 `rows`
    （`gone` 同样经它）。
 
 ## 被取代的是什么
@@ -121,7 +123,7 @@
 | 原结论 | 本次 |
 |---|---|
 | [0001](0001-transport-websocket-mux.md) 的「基线与增量之间没有缺口」：建条目、取基线、挂监听、发基线在同一个任务里 | **修订住所，结论原样**。机制半仍是 hub 的 `subscribe`（注册、活冷分岔、baseline 交付在同一个同步块）；帧序半从 mux 搬到 `session stream`（baseline 先于本订阅 backlog 的任何帧）。 |
-| `AGENTS.md` 的 `SessionFeeds` 与「hub 以 `feedMap` 应答」 | **取代**。一张按会话的订阅表加一个全局通道；`订阅` 用可选方法表达兴趣，窗口与侧栏同住一个 `Set`。 |
+| `AGENTS.md` 的 `SessionFeeds` 与「hub 以 `feedMap` 应答」 | **取代**。一张按会话的订阅表加一个全局通道；`SessionSubscription` 用可选方法表达兴趣，窗口与侧栏同住一个 `Set`。 |
 | [0013](0013-table-holds-live-half-only.md) 落地一节「hub 查自己的 `feedMap` 同步遍历分发；`SessionFeeds` / `SessionObserver` 形状不变」 | **修订**。那描述的是 0013 当时的按 id 分发面；两张表已合成一张，形状由本 ADR 定。0013 的「表只装 live 半」本身不动。 |
 | spec 里 hub 公开面的那张清单 | **补齐**。多出 `publishFailure` 与全局订阅的 `resync`（偏离 2、3）。 |
 
@@ -169,7 +171,7 @@
 - 代码：`packages/server/src/wire.ts`（`Wire`、`FrameSink`、预算与两个定时器）、
   `stream.ts`（`createSessionStream`、扣帧队列、审批读者计数、隐藏目录过滤、失败措辞）、
   `mux.ts`（`SessionStreamFactory`、`MuxConnection` 两字段、连接集合只做存活与关停）、
-  `hub.ts`（`订阅` / `全局订阅`、一张表加一个通道、`publishFailure` / `publishResync`）、
+  `hub.ts`（`SessionSubscription` / `GlobalSubscription`、一张表加一个通道、`publishFailure` / `publishResync`）、
   `projection.ts`（行只推 hub）、`boot.ts`（答案表一份、工厂注入）、`approvals.ts`（整张表在
   业务侧）。
 - smoke：`smoke-projection.ts` 改用 `hub.subscribeGlobal({ rows })` 观察行；其余 wire 表面
