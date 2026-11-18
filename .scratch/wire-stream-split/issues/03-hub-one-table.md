@@ -100,3 +100,8 @@ const stop = hub.subscribe(sessionId, {
 - 新契约的两条 smoke 断言若尚未被票 01 覆盖，补在票 01 的装置上（不新建文件）：**删除时流先 `end`、行后 `session_gone`**（spec 风险节点名的一条）。
 
 ## Comments
+
+- **删除顺序断言已补**：`scripts/smoke-subscribe.ts` 原「删除」区只断言流 `end` 是最后一帧，没有 `session_gone`（该装置直接 `hub.remove`，不走 controller 的 `onRemoved`）。新增「删除顺序：流先 end、行后 session_gone」一节，分两拍驱动：`hub.remove`（断言流已 `end` 且 `session_gone` 尚未到达）→ `rig.forgetRow`（controller 的 `onRemoved`，断言随后到 `session_gone`）。为此给 `Rig` 加了一个 `forgetRow` 驱动方法（内部就是 `projection.forget`）；`openRig()` 的 hub/projection/mux 构造与既有断言一字未改。
+- **`smoke-projection.ts` 随公开形状迁移**：它原先用旧的 `hub.subscribe(id, watcher, sink)` 三元组看事件（且不关心 baseline）。改为订阅元素，只声明 `event`。这是测试装置对公开面的跟随，不涉及本票三条生产文件之外的行为。
+- **`publishFailure` 本票没有消费方**：`boot.ts` 仍走 `mux.announce`，而 `boot.ts` 本票不动。按 ticket 公开面清单已加入 hub；等 session stream 那票让 `mux.announce` 退场时再接 `onRunFailure`。ADR-0024 的记一笔属于文档票，本票未动 docs。
+- **残留 grep**：三条生产文件内 `SessionFeeds` / `SessionWatcher` / `feeds()` / `isWatched` / `watchers` / `feedMap` / `rebaseline` 零引用。全仓仅剩 `packages/core/src/agent.ts`、`packages/core/src/session/events.ts` 的既有注释，以及 `scripts/smoke-subscribe.ts` 头部说明「本 smoke 不读 isWatched/watchers/feedMap」的文案——前者不在本票范围，后者是票 01 的装置说明，均未改动。
