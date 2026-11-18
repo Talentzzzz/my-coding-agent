@@ -9,9 +9,6 @@ import {
 } from "./wire.ts";
 import type { SessionStream } from "./stream.ts";
 
-// `FrameSink` 仍然从这里导出，因为消费方（smoke 的装配区）只认识这个模块；它的家在 wire。
-export type { FrameSink } from "./wire.ts";
-
 /**
  * 从一只写帧的手造出一条连接的业务侧。
  *

@@ -83,7 +83,7 @@
 
 ## 与 spec 的偏离
 
-实施中实际发生的七条，逐条记下来：
+实施中实际发生的八条，逐条记下来：
 
 1. **`订阅` 有六个可选方法，不是四个。** spec 列了 `event` / `state` / `baseline` / `gone`；
    实况还要 `baselineFailed`——baseline 的失败半，要初始状态的人必然也要它的失败，
@@ -107,6 +107,9 @@
    `onGone` 与两个监听器集合退场，行只经 `hub.publishRows` / `publishGone` 出门
    （`scripts/smoke-projection.ts` 改用 `hub.subscribeGlobal({ rows })` 观察）；
    `MuxConnection` 不再有连接自己的订阅表，只剩 `wire` + `stream`。
+8. **`hub.subscribeGlobal(sub)` 是公开面清单之外的成员。** spec 只给了「一个全局通道
+   `Set<全局订阅>`」，没给登记它的动词；它是那个通道的唯一入口，不登记就收不到 `rows`
+   （`gone` 同样经它）。
 
 ## 被取代的是什么
 

@@ -54,7 +54,7 @@ export interface 订阅 {
 	baselineFailed?(error: unknown): void;
 	/** 会话被删除 / 进程收摊。 */
 	gone?(): void;
-	/** 一次运行在会话自己的流上说的那句失败（原 `MuxServer.announce` 的收件人）。 */
+	/** 一次运行在会话自己的流上说的那句失败（`publishFailure` 的收件人）。 */
 	failure?(message: string): void;
 }
 
@@ -370,8 +370,7 @@ export class SessionHub {
 	/**
 	 * 一次运行在会话自己的流上说的那句失败，交给该会话的订阅者。
 	 *
-	 * 这是原 `MuxServer.announce` 的收件人：hub 不判断谁在看、不碰措辞，只把消息转给这条会话上
-	 * 声明了 `failure` 的订阅元素。
+	 * hub 不判断谁在看、不碰措辞，只把消息转给这条会话上声明了 `failure` 的订阅元素。
 	 */
 	publishFailure(sessionId: string, message: string): void {
 		for (const sub of this.subscribers.get(sessionId) ?? []) sub.failure?.(message);
@@ -459,18 +458,19 @@ export class SessionHub {
 	 * {@link UnknownSessionError} 拒绝（→ 404，与「第二次删除是 404」一致——删除进行中或完成后
 	 * 文件已消失），这是删除端点同步做的唯一检查。
 	 *
-	 * 校验之后向订阅者告别（`gone()` 让 mux 对观看中的流发 end），然后
+	 * 校验之后向订阅者告别（`gone()` 交给每个订阅元素自己收尾；`SessionStream` 在其中结束
+	 * 自己观看的那条流），然后
 	 * **不 await** 删除：否决序分离在后台跑完，202 应答先到（spec Testing Decisions：运行中删除
 	 * → 应答先于收尾）。分离的 promise 上挂错误日志——删除的失败只剩真正的病态（文件已损、id
 	 * 非法），沿用仓库的中文诊断日志约定。
 	 *
 	 * 删除顺序是不变量：**流先 `end`、行后 `session_gone`**。这里的 `gone()` 是流的那一半——
-	 * mux 在其中结束流；行的那一半发生在 controller 的 `onRemoved` → projection `forget` →
+	 * `SessionStream` 在其中结束流；行的那一半发生在 controller 的 `onRemoved` → projection `forget` →
 	 * `publishGone` 之后，所以窗口不会先丢掉行、再收到一条来自已不存在会话的帧。
 	 */
 	remove(sessionId: string): void {
 		if (this.agent.fileAbsPathOf(sessionId) === undefined) throw new UnknownSessionError(sessionId);
-		// 快照一份再遍历：`gone()` 里的 mux 会退订，边遍历边删同一个 Set 会漏掉后面的订阅者。
+		// 快照一份再遍历：`gone()` 里的 `SessionStream` 会退订，边遍历边删同一个 Set 会漏掉后面的订阅者。
 		for (const sub of [...(this.subscribers.get(sessionId) ?? [])]) sub.gone?.();
 		void this.agent.deleteSessionBySessionId(sessionId).catch((error: unknown) => {
 			console.error(`会话 ${sessionId} 的删除失败：${error instanceof Error ? error.message : String(error)}`);

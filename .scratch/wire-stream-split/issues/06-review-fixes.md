@@ -34,3 +34,16 @@ code review 在集成分支 `wire-stream-split` 上跑了两轴（Standards / Sp
 - grep 自查：`grep -rn "feedMap\|isWatched\|SessionFeeds\|rebaseline\|MuxServer.announce" packages/ scripts/` → 零命中（注释也算）。
 
 ## Comments
+
+- 第 8 条：`SessionController` 的删除动词实际叫 `remove`（ticket 写的是 `delete`）。Rig 的驱动面
+  仍按票叫 `deleteSession(id)`，内部 `await sessions.remove(id)`；签名是 `(sessionId) => Promise<{removed:true}>`。
+- 第 8 条反向验证已做：把 `sessionListeners` 的 `onRemoved` 里 `projection.forget(sessionId)` 注释掉后，
+  `smoke-subscribe` 变红——`FAIL 该流先 end，随后的 session_gone 才到 {"endAt":3,"goneAt":-1}`
+  与 `FAIL 行随后以 session_gone 消失`，共 2 failure；随后改回，未提交那次改动。
+- 第 8 条的一处判断：生产链把删除的两拍并进一次同步调用（`hub.remove` → `onRemoved` → `forget` →
+  `publishGone`），原先「hub 告别那一拍 end 已到、而 `session_gone` 还没来」的中间态不再可观察。
+  该处判据改为在同一连接的帧到达序列上断言 `end` 先于 `session_gone`，那句标签随之改写；判据本身
+  （流先 end、行后 gone）不变，其余删除断言文字未动。不这样改就无法既走生产链又保留中间态断言。
+- 第 2 条的 grep 自查连带清掉了 `hub.ts` 两处 `publishFailure` 注释、`stream.ts` 的 `failure` 注释与
+  `smoke-subscribe.ts` 头部注释里的旧名字（均只改注释）。第 4 条里 `smoke-backpressure.ts` 的
+  `FrameSink` 本来就从 `wire.ts` 导入，无需改动。

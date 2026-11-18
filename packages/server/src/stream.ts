@@ -346,9 +346,10 @@ export function createSessionStream(
 			},
 			// 只在会话被删除（或进程收摊）时到达；观看中的流以 end 作别。
 			gone: () => endStream(sessionId),
-			// 一次运行在会话自己的流上说的那句失败（原 `MuxServer.announce`）：只发给观看中的流，没有读者就没有帧。
+			// 一次运行在会话自己的流上说的那句失败（`publishFailure`）：只发给观看中的流，没有读者就没有帧。
 			failure: (message) => {
-				if (!subscriptions.has(sessionId)) return;
+				// 不需要再查 `subscriptions`：hub 只把 `failure` 交给这个会话的订阅者，而本回调正是
+				// 订阅元素自己被调用的那一拍——元素在表里才会被调到，退订与 `subscriptions.delete` 同时发生。
 				send({ streamId: sessionId, item: { type: "error", message } });
 			},
 		});

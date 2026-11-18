@@ -15,7 +15,6 @@
 //
 // 这里不触碰任何 session 或模型，无需 provider key。
 // 运行：node scripts/smoke-backpressure.ts
-import type { ApprovalAnswers } from "../packages/server/src/approvals.ts";
 import { Wire, resolveWireOptions, type FrameSink, type ResolvedWireOptions } from "../packages/server/src/wire.ts";
 import { until } from "./wire/client.ts";
 import type { ServerFrame } from "@my-agent/core";
@@ -69,14 +68,6 @@ function scriptedSink(): FrameSink & {
 	};
 	return sink;
 }
-
-/** 应答表是没有任何 backpressure 路径会读的进程级状态；stub 在这里是诚实的。 */
-const answers: ApprovalAnswers = {
-	remember(): void {},
-	wasApproved: () => false,
-	show(): void {},
-	hide(): void {},
-};
 
 /** 带着调用方指定尺寸载荷的流帧，字节预算因此可以精确瞄准。 */
 function payloadFrame(text: string): ServerFrame {
