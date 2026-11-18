@@ -65,6 +65,20 @@ export interface SessionFeeds {
 export type SessionWatcher = (feeds: SessionFeeds | undefined) => void;
 
 /**
+ * subscribe 交付 baseline 的两口：拿到状态，或者拿到失败。
+ *
+ * 刻意只有两个成员：订阅方对「baseline 从哪来」没有发言权——活半还是冷半是 hub 内部的决策，
+ * sink 只收结果。错误归因的措辞（用户可读的帧文案）不归 hub，hub 交的是原始 error 对象；
+ * 措辞是帧层的本域。
+ */
+export interface SubscriptionSink {
+	/** baseline，恰好一次：活半同步到达，冷半在盘上重放完成后异步到达。 */
+	onBaseline(snapshot: SessionSnapshot): void;
+	/** 冷读取失败（含未知会话），恰好一次；活半不存在失败。此后不再有任何交付。 */
+	onError(error: unknown): void;
+}
+
+/**
  * 本进程的会话枢纽。
  *
  * 会话本身是磁盘上的两个文件（ADR-0008），进程里没有副本：编排层（ADR-0012）按 id 服务所有会话，
@@ -179,9 +193,14 @@ export class SessionHub {
 	/**
 	 * 会话的当前状态，同步读取，供活半在场的调用者。
 	 *
-	 * {@link snapshotOf} 的同步孪生，它存在的原因是 mux 的一条保证：订阅的 baseline 必须在挂上 feed 的同一个同步代码块里写出，否则两者之间发布的变更会先于它所描述的状态到达客户端。那个窗口里的一个 `await` 不只是慢——它是整个恢复故事赖以立足的那条保证上的一个洞。
+	 * {@link snapshotOf} 的同步孪生，它存在的原因是 {@link subscribe} 活半的内部依据：baseline 的
+	 * 活半来源必须是袋里的在飞状态（包括正在写出的 partial），而快照的活半来源只有同步读取——
+	 * 在注册与交付之间的同步块里问一次，no-gap 由构造成立。projection 的读法也站在这里：它只在
+	 * 活半在场时读袋，两条路（活半同步、冷半重放）都归 {@link snapshotOf} 与本方法，所以不可能
+	 * 漂移。
 	 *
-	 * 所以这里拒绝而不是猜测：走到这里意味着调用者相信活半在场，如果它不在，那个相信就是值得听一耳朵的 bug，而不是值得编造一个快照的情况。
+	 * 所以这里拒绝而不是猜测：走到这里意味着调用者相信活半在场，如果它不在，那个相信就是值得听
+	 * 一耳朵的 bug，而不是值得编造一个快照的情况。
 	 */
 	snapshotNow(id: string): SessionSnapshot {
 		if (!this.isLive(id)) throw new Error(`Session is not live: ${id}`);
@@ -200,21 +219,116 @@ export class SessionHub {
 	}
 
 	/**
-	 * 观看一个会话的事件和状态。
+	 * 订阅一个会话：注册观看、判定活冷、交付 baseline，一体在 hub 内完成。
 	 *
-	 * 返回停止观看的方式。注册的同一拍就以 feed 调用——观看从不拼装任何东西（ADR-0013），冷会话
-	 * 的订阅者拿到的是同一张分发表的入口，它跟随的会话开始运行的那一刻，事件自然流入。观看买到的
-	 * 只有两样：feed 的到，以及会话被删时的告别。
+	 * 这是 no-gap 契约的机制半的家。返回前 sink 已经拿到 baseline（活半）或知道它在路上（冷半），
+	 * 调用方没有任何分岔要自己做——「活半还是冷半、baseline 从哪读」是会话状态的决策，它住在这里
+	 * 而不住在任何帧层调用方手里；想违反 no-gap 都没有违反的写法。
+	 *
+	 * 契约逐条：
+	 *
+	 * - **活半**：`watcher(feeds)` 在注册的同一拍同步回调（恒交，冷会话同样成立——分发按 id 进行），
+	 *   然后在**本方法返回之前的同一同步块内** `snapshotNow` 并同步回调 `sink.onBaseline`。注册与
+	 *   快照之间没有任何 `await`、没有任何事件循环拍，所以注册后、快照前不可能有事件落入缝隙。
+	 * - **冷半**：`await this.agent.snapshotOf(sessionId)` 读盘重放，完成后**异步**回调
+	 *   `onBaseline` **恰好一次**。读盘归 hub：baseline 的读法是会话状态的决策，调用方只收结果。
+	 * - **失败**：冷读盘失败（含未知会话的 `UnknownSessionError`）→ `sink.onError(error)` **恰好
+	 *   一次**，此后 `watcher` 之外不再有任何交付。hub 交的是原始 error 对象——错误归因的措辞
+	 *   （用户可读的帧文案）不归这里。活半不存在失败：快照与判定在同一同步块内，`snapshotNow`
+	 *   的前提由构造成立。
+	 * - **恰好一次**：由 {@link deliverBaseline} 的 `delivered` 与退订的 `cancelled` 两个标志保证——两条回调互斥、各至多一次；
+	 *   冷读盘返回时若订阅已退订，交付随之终结（终结即交付不再发生；退订函数宽容、幂等，与
+	 *   退订 feed 的语义相同，最后一个退订只清理这一次订阅所在的那只集合）。
+	 * - **`watcher(undefined)`**：只在会话删除（`remove`）或进程收摊（`close`）时到达，与观看的
+	 *   告别语义一字不差——两者的遍历覆盖这里注册的 watcher。
+	 *
+	 * **两半保证的 hub 半**：no-gap 契约一分为二。hub 保证「注册与快照原子」——上面的同步块是
+	 * 机制；顺序论证的依据是 JS 单线程加上这个块里没有 `await`：subscribe 返回时活半的 baseline
+	 * 已经交付完毕，此后任何 emit（编排层 sink 的直调）只能发生在下一个事件循环拍，所以订阅方
+	 * 先看到状态、再看到其后的每个变更，按发生顺序。另一半（调用方保证 baseline 先于它自己缓存
+	 * 的任何帧写出）归订阅方的帧序注释——两半之间的缝就是本方法的返回拍。
+	 *
+	 * 重发路径不重新订阅，用 {@link rebaseline}：同一个分岔的另一个交付时机，交付契约与这里
+	 * 相同，两半保证的论证共用上面这一份，那边引用而不复述。
 	 */
-	watch(sessionId: string, watcher: SessionWatcher): () => void {
+	subscribe(sessionId: string, watcher: SessionWatcher, sink: SubscriptionSink): () => void {
 		const watching = this.watchers.get(sessionId) ?? new Set<SessionWatcher>();
 		if (!this.watchers.has(sessionId)) this.watchers.set(sessionId, watching);
 		watching.add(watcher);
 		watcher(this.feeds(sessionId));
+
+		// 恰好一次的守门住在 deliverBaseline 内；这里的 `cancelled` 只是退订给冷半的闸——
+		// 活半的交付在同一同步块内完成，退订只可能发生在本方法返回之后，拦不到它。
+		let cancelled = false;
+		this.deliverBaseline(sessionId, sink, () => cancelled);
+
 		return () => {
+			cancelled = true;
 			watching.delete(watcher);
-			if (watching.size === 0) this.watchers.delete(sessionId);
+			// 认的是这一次订阅拿到的那只 Set，不是这个 id：同 id 上后来的订阅可能已经换了新
+			// 的集合，迟到的退订不得替它清掉条目，否则后来的观看者再也收不到告别。
+			if (this.watchers.get(sessionId) === watching && watching.size === 0) this.watchers.delete(sessionId);
 		};
+	}
+
+	/**
+	 * 给已经持有的订阅重发一份 baseline：回答「这个会话此刻是什么状态」，不回答「之后的变化归谁」。
+	 *
+	 * 重发路径（对已订阅流的第二个 open、`branch_changed` 触发）需要一份当前状态，但它不能走
+	 * {@link subscribe}——那会重复注册 watcher、多挂一条 feed；它也不能自己读盘——读法归 hub。
+	 * 所以这是同一个活冷分岔的第二个交付时机，分岔仍只发生在 {@link deliverBaseline} 一处。
+	 *
+	 * 交付契约与 {@link subscribe} 的 baseline 半逐条相同，两半保证的论证见那里的「hub 半」——
+	 * 这里只列形状：
+	 *
+	 * - **活半**：`snapshotNow` 在**本方法返回之前的同一同步块内**同步回调 `sink.onBaseline`，
+	 *   交回的是袋里的在飞状态（包括正在写出的 partial），不是盘上上一次落定的状态。
+	 * - **冷半**：`await this.agent.snapshotOf(sessionId)` 读盘，完成后**异步**回调 `onBaseline`
+	 *   **恰好一次**。
+	 * - **失败**：`sink.onError(error)` **恰好一次**，交的是原始 error 对象；措辞（用户可读的帧
+	 *   文案）留帧层。同一 sink 上不会既 onBaseline 又 onError。
+	 * - **无注册、无退订**：本方法不碰 `watchers` / `feeds`，因此不返回退订函数。调用方对「这份
+	 *   baseline 还有人要吗」的守卫（订阅身份、连接已关、backlog 状态）是它自己的帧序本域，不搬。
+	 */
+	rebaseline(sessionId: string, sink: SubscriptionSink): void {
+		this.deliverBaseline(sessionId, sink);
+	}
+
+	/**
+	 * 两个订阅动词共用的那一处活冷分岔：活半同步交付、冷半读盘后异步交付、失败 onError。
+	 *
+	 * {@link subscribe} 与 {@link rebaseline} 交出的是同一个分岔（活冷判定只有这一处），所以
+	 * 判定、读取与交付的守门也只写这一份：活半与快照之间没有 await，`snapshotNow` 的前提在同一
+	 * 拍内由构造成立；冷半与失败共享 `delivered`，任何 sink 都收不到两次交付、也收不到一条
+	 * baseline 加一条 error。
+	 *
+	 * `cancelled` 是退订的闸（可选）：subscribe 的退订函数把它置真，让冷读盘在飞的那段窗口终结
+	 * 交付；rebaseline 不注册也不退订，不传闸。活半的交付在本方法返回之前已经完成，退订只可能
+	 * 发生在后一拍，所以闸实际拦到的只有冷半。
+	 */
+	private deliverBaseline(sessionId: string, sink: SubscriptionSink, cancelled?: () => boolean): void {
+		let delivered = false;
+
+		if (this.isLive(sessionId)) {
+			// 活半：判定与快照之间没有 await，`snapshotNow` 的前提在同一拍内由构造成立。
+			delivered = true;
+			sink.onBaseline(this.snapshotNow(sessionId));
+			return;
+		}
+
+		// 冷半：读盘归 hub。失败与成功共享同一组守门标志，恰好一次由构造成立。
+		void this.agent.snapshotOf(sessionId).then(
+			(snapshot) => {
+				if (delivered || cancelled?.()) return;
+				delivered = true;
+				sink.onBaseline(snapshot);
+			},
+			(error) => {
+				if (delivered || cancelled?.()) return;
+				delivered = true;
+				sink.onError(error);
+			},
+		);
 	}
 
 	/** 此刻是否有任何人在观看一个会话——"空不空"的问题，刻意不是计数。 */
@@ -337,6 +451,9 @@ export class SessionHub {
 	 * ——sink 把编排层的事件带到 feedMap，这个方法把订阅者放进 feedMap。形状与原来的公开面一致，
 	 * 所以 mux 与 projection 的订阅代码一个字不改。退订函数在最后一个订阅者离开时清掉自己的条目，
 	 * 让表里只留真正有人在听的会话。
+	 *
+	 * 清条目认的是**这一次拿到的那只 feed**，不是这个 id——与 `subscribe` 的退订同一条理由：迟到的
+	 * 退订不得替同 id 上后来的订阅清掉它，否则那些订阅者再也听不到事件。
 	 */
 	feeds(sessionId: string): SessionFeeds {
 		const feed = this.feedMap.get(sessionId) ?? { eventListeners: new Set<SessionEventListener>(), listeners: new Set<SessionListener>() };
@@ -346,14 +463,14 @@ export class SessionHub {
 				feed.eventListeners.add(listener);
 				return () => {
 					feed.eventListeners.delete(listener);
-					if (feed.eventListeners.size === 0 && feed.listeners.size === 0) this.feedMap.delete(sessionId);
+					if (feed.eventListeners.size === 0 && feed.listeners.size === 0 && this.feedMap.get(sessionId) === feed) this.feedMap.delete(sessionId);
 				};
 			},
 			onChange: (listener) => {
 				feed.listeners.add(listener);
 				return () => {
 					feed.listeners.delete(listener);
-					if (feed.eventListeners.size === 0 && feed.listeners.size === 0) this.feedMap.delete(sessionId);
+					if (feed.eventListeners.size === 0 && feed.listeners.size === 0 && this.feedMap.get(sessionId) === feed) this.feedMap.delete(sessionId);
 				};
 			},
 		};
