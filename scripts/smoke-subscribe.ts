@@ -1,5 +1,5 @@
 // 订阅的帧面 smoke：把「一个窗口连上来之后收到了什么帧」当成唯一判据——帧的类型、顺序、次数。
-// 它不读 hub 的任何内部表（没有 isWatched、没有 watchers、没有 feedMap），所以这套断言在订阅
+// 它不读 hub 的任何内部表（没有按会话的订阅表、没有全局通道），所以这套断言在订阅
 // 实现被拆成 wire 与 session stream 前后应当一字不改地通过。
 //
 // 断言与装配分离：造 hub / projection / mux、造假 FrameSink、把上行帧喂进连接，全部收在
@@ -13,10 +13,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setSessionsDir, type ModelConfig, type ServerFrame } from "@my-agent/core";
 import { SessionHub } from "../packages/server/src/hub.ts";
-import { createMuxServer, type FrameSink, type MuxConnection } from "../packages/server/src/mux.ts";
+import { createMuxServer, type MuxConnection } from "../packages/server/src/mux.ts";
 import { createSessionProjection } from "../packages/server/src/projection.ts";
 import { createSessionStream } from "../packages/server/src/stream.ts";
 import { createApprovalAnswers } from "../packages/server/src/approvals.ts";
+import { SessionController } from "../packages/server/src/controllers/sessions.ts";
+import { sessionListeners } from "../packages/server/src/boot.ts";
+import type { FrameSink } from "../packages/server/src/wire.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall, type FakeTransport } from "./fake-transport.ts";
 
 let failures = 0;
@@ -55,6 +58,8 @@ const ROW: ModelConfig = {
 interface View {
 	/** 这条连接上某条流（`null` 是连接级座位）收到的帧，按到达顺序。 */
 	frames(streamId: string | null): ServerFrame[];
+	/** 这条连接收到的全部帧，按到达顺序、不分流——删除顺序要读两条流之间的先后。 */
+	sequence(): ServerFrame[];
 	/** 上行 `{type:"open"}`。 */
 	open(sessionId: string): void;
 	/** 上行 `{type:"cancel"}`。 */
@@ -80,11 +85,10 @@ interface Rig {
 	/** 目录被领回列表：与隐藏同一条路径。 */
 	showDirectory(): Promise<void>;
 	/**
-	 * 删除的第二拍：controller 的 `onRemoved` 让 projection 丢掉这一行，连接因此收到 `session_gone`。
-	 *
-	 * 第一拍是 `hub.remove`（订阅者的 `gone()` 让流先 end）；两拍分开，删除顺序才可观察。
+	 * 删除一个会话，走生产链：`hub.remove` 让订阅者告别（流 end），controller 的 `onRemoved`
+	 * 随后让 projection 丢掉这一行（`session_gone`）。
 	 */
-	forgetRow(sessionId: string): void;
+	deleteSession(sessionId: string): Promise<void>;
 	/** 作答一个审批：记下答案（供 settled 帧）并恢复运行。 */
 	approve(sessionId: string, toolCallId: string, approved: boolean): void;
 	close(): Promise<void>;
@@ -107,6 +111,8 @@ async function openRig(): Promise<Rig> {
 	const projection = createSessionProjection(hub);
 	const answers = createApprovalAnswers();
 	const mux = createMuxServer((wire) => createSessionStream(wire, { hub, projection, answers }), {});
+	// 与 boot.ts 同一套接线：controller 的删除经 sessionListeners 落到 projection 的行上。
+	const sessions = new SessionController(hub, sessionListeners({ hub, answers }, projection));
 
 	return {
 		hub,
@@ -140,6 +146,7 @@ async function openRig(): Promise<Rig> {
 			const connection: MuxConnection = await mux.accept(sink);
 			return {
 				frames: (streamId) => frames.filter((frame) => frame.streamId === streamId),
+				sequence: () => [...frames],
 				open: (sessionId) => mux.handle(connection, JSON.stringify({ type: "open", sessionId })),
 				cancel: (sessionId) => mux.handle(connection, JSON.stringify({ type: "cancel", sessionId })),
 				closeConnection: () => mux.forget(connection),
@@ -154,9 +161,8 @@ async function openRig(): Promise<Rig> {
 			hub.agent.applySettings({ hiddenDirectories: [] });
 			hub.publishResync();
 		},
-		forgetRow(sessionId: string): void {
-			// 生产中这是 controller 的 `onRemoved`：hub 已告别，这里才轮到行消失。
-			projection.forget(sessionId);
+		async deleteSession(sessionId: string): Promise<void> {
+			await sessions.remove(sessionId);
 		},
 		approve(sessionId, toolCallId, approved) {
 			// 与审批端点同一顺序：先记答案（settled 帧读它），再恢复运行（它会让待审批集合变空）。
@@ -289,7 +295,7 @@ try {
 	const removedId = await born("一个即将被删除的会话");
 	view.open(removedId);
 	await until(() => view.frames(removedId).some((frame) => "item" in frame && frame.item.type === "baseline"));
-	rig.hub.remove(removedId);
+	await rig.deleteSession(removedId);
 	check("删除让该流收到 end", await until(() => view.frames(removedId).some((frame) => "end" in frame)), JSON.stringify(view.frames(removedId)));
 	const removedFrames = view.frames(removedId);
 	const removedEnd = removedFrames.findIndex((frame) => "end" in frame);
@@ -298,21 +304,20 @@ try {
 	check("此后不再有任何该 streamId 的帧", view.frames(removedId).length === removedEnd + 1, `${view.frames(removedId).length} vs ${removedEnd + 1}`);
 
 	process.stdout.write("删除顺序：流先 end、行后 session_gone\n");
-	// 删除是两拍：hub.remove 同步让订阅者告别（流 end），controller 的 onRemoved 之后才让行消失。
-	// 两拍之间行必须还在、流必须已经结束——反过来就是窗口先丢掉行、再收到一条来自已不存在会话的帧。
+	// 生产链在同一次调用里走完两拍：hub.remove 同步让订阅者告别（流 end），controller 的 onRemoved
+	// 随后才让行消失。先后因此从帧的到达顺序读：end 必须先于 session_gone——反过来就是窗口先丢掉行、
+	// 再收到一条来自已不存在会话的帧。
 	const orderedId = await born("一条用来验证删除顺序的会话");
 	const viewG = await rig.connect();
 	viewG.open(orderedId);
 	await until(() => viewG.frames(orderedId).some((frame) => "item" in frame && frame.item.type === "baseline"));
 	const goneFramesOf = (target: View): ServerFrame[] =>
 		target.frames(null).filter((frame) => "item" in frame && frame.item.type === "session_gone" && frame.item.sessionId === orderedId);
-	rig.hub.remove(orderedId);
-	check(
-		"hub 告别的那一拍流已经 end，而 session_gone 还没来",
-		viewG.frames(orderedId).some((frame) => "end" in frame) && goneFramesOf(viewG).length === 0,
-		JSON.stringify({ stream: viewG.frames(orderedId), lane: viewG.frames(null) }),
-	);
-	rig.forgetRow(orderedId);
+	await rig.deleteSession(orderedId);
+	const orderedFrames = viewG.sequence();
+	const orderEndAt = orderedFrames.findIndex((frame) => frame.streamId === orderedId && "end" in frame);
+	const orderGoneAt = orderedFrames.findIndex((frame) => "item" in frame && frame.item.type === "session_gone" && frame.item.sessionId === orderedId);
+	check("该流先 end，随后的 session_gone 才到", orderEndAt >= 0 && orderGoneAt > orderEndAt, JSON.stringify({ endAt: orderEndAt, goneAt: orderGoneAt }));
 	check("行随后以 session_gone 消失", await until(() => goneFramesOf(viewG).length === 1), JSON.stringify(viewG.frames(null)));
 
 	process.stdout.write("分支移动：同一流上再送一份指向新叶子的 baseline\n");
@@ -389,7 +394,7 @@ try {
 	viewD.closeConnection();
 	rig.transport.setResponses([fakeAssistantMessage("断线之后仍然跑完的一轮")]);
 	await rig.hub.agent.prompt(goneId, "断线之后再发一条");
-	await rig.hub.remove(goneId);
+	await rig.deleteSession(goneId);
 	await settle();
 	check("断线之后不再造帧", viewD.frameCount() === framesAtDisconnect, `${framesAtDisconnect} -> ${viewD.frameCount()}`);
 

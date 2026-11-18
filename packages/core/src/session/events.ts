@@ -150,7 +150,7 @@ export type SessionEventListener = (event: AgentSessionEvent) => void;
  * 编排层向宿主交付事件与快照的一对回调。
  *
  * 分发曾是每只 AgentState 上的两张匿名回调表（`listeners` / `eventListeners`），如今归宿主所有：
- * per-session 的订阅者表住在构造编排层的那个进程半（hub 的 feedMap），core 在构造时收到唯一一个
+ * per-session 的订阅者表住在构造编排层的那个进程半（hub 的按会话订阅表），core 在构造时收到唯一一个
  * sink，在 emit 点直调——同步、按序、命令与运行从同一条路流出。形状刻意按 sessionId 键控而不是
  * 按袋：sink 只有一个，而它服务的会话有很多，每次调用点名自己是替哪一只袋说的——宿主按这个 id
  * 查自己的分发表。
