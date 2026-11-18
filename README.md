@@ -161,6 +161,10 @@ npm run start &                # API smoke 测试需要一个正在跑的服务�
 MY_AGENT_URL=http://127.0.0.1:8080 node scripts/smoke-api.ts
 ```
 
+那条 API smoke 是唯一**不自带服务器**的一条：它对着已经在跑的那台说话，所以它会写 `models.json`
+与它出生的会话——想让它别碰机器自己的 agent home，就先把那台服务器的 `MY_AGENT_HOME` 指向临时
+目录（脚本头部记着同一件事）。
+
 要在没有任何供应商密钥的情况下测试一个会话，用 `scripts/fake-transport.ts` 里的脚本化传输层驱动它：
 
 ```ts
