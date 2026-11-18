@@ -5,7 +5,8 @@ import { SessionController, SystemController, type SessionListener } from "./con
 import { createRoutes } from "./controllers/routes.ts";
 import { Router } from "./http/routing.ts";
 import { createSessionProjection, type SessionProjection } from "./projection.ts";
-import { createMuxServer, type FrameSink, type MuxConnection, type MuxOptions, type MuxServer } from "./mux.ts";
+import { createMuxServer, type MuxConnection, type MuxServer } from "./mux.ts";
+import type { FrameSink, WireOptions } from "./wire.ts";
 import { WebSocketConnection } from "./http/websocket.ts";
 import type { IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -48,7 +49,7 @@ export interface BootOptions {
 	 *
 	 * 用透传而不是逐字段的枚举：连接层拥有这些值的含义，在这里复述等于多一个要保持诚实的地方。生产中没有任何东西设置它。
 	 */
-	mux?: MuxOptions;
+	mux?: WireOptions;
 	/** 用 Vite 服务 client 而不是构建产物，用于热更新。 */
 	vite?: boolean;
 }

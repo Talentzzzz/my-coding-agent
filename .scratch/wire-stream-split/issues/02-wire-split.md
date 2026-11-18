@@ -68,3 +68,6 @@ class Wire {
 - 自查：`grep -n "sessionId\|baseline\|Approval" packages/server/src/wire.ts` 只应命中注释。
 
 ## Comments
+
+- 实施记录：`Wire` 的关闭只有帧侧一半（丢弃队列、清停滞簿记与定时器）。`tick` 超出容忍度和停滞期限这两条路径自关 wire 之后，订阅的 `teardown` 要等 mux 下一次 `pingAll` / `heartbeatAll` 读到 `isClosed` 才经由 `forget` → `close()` 完成；在此期间 wire 已丢弃一切写入，且生产路径上 `sink.close` / `terminate` 已使 socket 不再交付上行帧，故帧面上不可观察。若后续票希望恢复「同步摘订阅」，需要给 wire 加一个关闭回调（不在本票，未做）。
+- `scripts/smoke-backpressure.ts` 里的 `ApprovalAnswers` stub（连同它的导入）在改用 `Wire` 后已无消费点；按本票要求原样留给票 04 搬走，未删除。

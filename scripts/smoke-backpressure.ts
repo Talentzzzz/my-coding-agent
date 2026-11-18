@@ -15,11 +15,8 @@
 //
 // 这里不触碰任何 session 或模型，无需 provider key。
 // 运行：node scripts/smoke-backpressure.ts
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { SessionHub } from "../packages/server/src/hub.ts";
-import { MuxConnection, type ApprovalAnswers, type FrameSink, type ResolvedMuxOptions } from "../packages/server/src/mux.ts";
+import type { ApprovalAnswers } from "../packages/server/src/mux.ts";
+import { Wire, resolveWireOptions, type FrameSink, type ResolvedWireOptions } from "../packages/server/src/wire.ts";
 import { until } from "./wire/client.ts";
 import type { ServerFrame } from "@my-agent/core";
 
@@ -101,20 +98,9 @@ function nameOf(frame: ServerFrame): string {
 	return (frame as { item?: { pad?: string } }).item?.pad ?? "?";
 }
 
-function options(overrides: Partial<ResolvedMuxOptions>): ResolvedMuxOptions {
-	return {
-		pingIntervalMs: 60_000,
-		maxMissedPongs: 2,
-		heartbeatIntervalMs: 60_000,
-		stallBudgetBytes: 4 * 1024 * 1024,
-		stallDeadlineMs: 10_000,
-		log: () => {},
-		...overrides,
-	};
+function options(overrides: Partial<ResolvedWireOptions>): ResolvedWireOptions {
+	return resolveWireOptions({ log: () => {}, ...overrides });
 }
-
-const root = await mkdtemp(join(tmpdir(), "my-agent-backpressure-"));
-const hub = new SessionHub({ workDirAbsPath: root });
 
 try {
 	process.stdout.write("the moment write() says no, nothing jumps the queue\n");
@@ -125,17 +111,17 @@ try {
 	{
 		const sink = scriptedSink();
 		sink.mode = "stall";
-		const connection = new MuxConnection(sink, hub, options({ stallDeadlineMs: 60_000 }), answers);
+		const wire = new Wire(sink, options({ stallDeadlineMs: 60_000 }));
 
 		const first = payloadFrame("first");
 		const second = payloadFrame("second");
 		const third = payloadFrame("third");
-		connection.send(first);
+		wire.send(first);
 		check("the refused frame was still handed over — it sits in the socket's buffer", JSON.stringify(sink.handed.map(nameOf)) === JSON.stringify(["first"]), JSON.stringify(sink.handed.map(nameOf)));
-		check("and it counts as stalled from that moment", connection.queuedByteLength === 0);
+		check("and it counts as stalled from that moment", wire.queuedByteLength === 0);
 
-		connection.send(second);
-		connection.send(third);
+		wire.send(second);
+		wire.send(third);
 		// 泵每次 send 跑一次：第一次发现队列为空，第二次重试 `second` 并停在拒绝处。头之后的
 		// 什么都没被碰——这正是整个策略。
 		check(
@@ -146,12 +132,12 @@ try {
 		const expected = sizeOf(second) + sizeOf(third);
 		check(
 			"and both frames are in the queue, in bytes the policy itself counts",
-			connection.queuedByteLength === expected,
-			`queued=${connection.queuedByteLength} expected=${expected}`,
+			wire.queuedByteLength === expected,
+			`queued=${wire.queuedByteLength} expected=${expected}`,
 		);
 		check("nothing was accepted while stalled", sink.accepted.length === 0);
 		check("nothing was closed yet", sink.closes.length === 0 && sink.terminates === 0);
-		connection.close();
+		wire.close();
 	}
 
 	// -------------------------------------------------------------------
@@ -161,19 +147,17 @@ try {
 		const sink = scriptedSink();
 		sink.mode = "stall";
 		const lines: string[] = [];
-		const connection = new MuxConnection(
+		const wire = new Wire(
 			sink,
-			hub,
 			options({ stallBudgetBytes: 300, stallDeadlineMs: 60_000, log: (line) => lines.push(line) }),
-			answers,
 		);
 
-		connection.send(payloadFrame("x".repeat(100)));
+		wire.send(payloadFrame("x".repeat(100)));
 		// 两帧各约 150 字节，第二帧就越过了 300 字节预算。策略当场作答而不是等截止时间：预算
 		// 正是一个坏 peer 不许花掉的东西。
-		connection.send(payloadFrame("y".repeat(100)));
+		wire.send(payloadFrame("y".repeat(100)));
 		check("crossing the budget closes the connection at once", sink.closes.length === 1, JSON.stringify(sink.closes));
-		check("the whole connection is done, not half of it", connection.isClosed);
+		check("the whole connection is done, not half of it", wire.isClosed);
 		check("a log line went out with it", lines.length >= 1, JSON.stringify(lines));
 	}
 
@@ -185,15 +169,13 @@ try {
 		sink.mode = "stall";
 		const lines: string[] = [];
 		const deadlineMs = 200;
-		const connection = new MuxConnection(
+		const wire = new Wire(
 			sink,
-			hub,
 			options({ stallDeadlineMs: deadlineMs, log: (line) => lines.push(line) }),
-			answers,
 		);
 
 		const started = Date.now();
-		connection.send(payloadFrame("stalled"));
+		wire.send(payloadFrame("stalled"));
 		let closedAt = -1;
 		const closed = await until(() => {
 			if (sink.closes.length > 0) {
@@ -224,26 +206,26 @@ try {
 		// 第一帧落进 socket 自己的缓冲（`false` 的含义就是这个），它身后的一切入队，下一次写
 		// 尝试在写自己的帧之前先排干队列里已有的东西。
 		sink.mode = "stall";
-		const connection = new MuxConnection(sink, hub, options({ stallDeadlineMs: 60_000 }), answers);
+		const wire = new Wire(sink, options({ stallDeadlineMs: 60_000 }));
 
 		const first = payloadFrame("first");
 		const second = payloadFrame("second");
 		const third = payloadFrame("third");
 		const fourth = payloadFrame("fourth");
-		connection.send(first);
-		connection.send(second);
-		connection.send(third);
+		wire.send(first);
+		wire.send(second);
+		wire.send(third);
 
 		sink.mode = "accept";
-		connection.send(fourth);
+		wire.send(fourth);
 		check(
 			"the peer took the backlog in order, then the new frame — no holes",
 			JSON.stringify(sink.accepted.map(nameOf)) === JSON.stringify(["second", "third", "fourth"]),
 			JSON.stringify(sink.accepted.map(nameOf)),
 		);
-		check("and the queue is empty afterwards", connection.queuedByteLength === 0, `queued=${connection.queuedByteLength}`);
+		check("and the queue is empty afterwards", wire.queuedByteLength === 0, `queued=${wire.queuedByteLength}`);
 		check("no close followed a recovery", sink.closes.length === 0 && sink.terminates === 0);
-		connection.close();
+		wire.close();
 	}
 
 	// -------------------------------------------------------------------
@@ -252,13 +234,13 @@ try {
 	{
 		const sink = scriptedSink();
 		sink.mode = "stall";
-		const connection = new MuxConnection(sink, hub, options({ stallDeadlineMs: 60_000 }), answers);
+		const wire = new Wire(sink, options({ stallDeadlineMs: 60_000 }));
 
 		const [first, second, third, fourth, fifth] = ["a", "b", "c", "d", "e"].map(payloadFrame);
-		connection.send(first!); // 落进 socket 缓冲；停滞从这里开始
-		connection.send(second!);
-		connection.send(third!);
-		connection.send(fourth!);
+		wire.send(first!); // 落进 socket 缓冲；停滞从这里开始
+		wire.send(second!);
+		wire.send(third!);
+		wire.send(fourth!);
 
 		// 恰好收下一帧，然后再次拒绝：泵写下 `b` 并停在 `c` 上，触发 drain 的那一帧重新回到拒绝
 		// 所保住的那些之后的队尾。
@@ -274,7 +256,7 @@ try {
 			sink.accepted.push(frame);
 			return true;
 		};
-		connection.send(fifth!);
+		wire.send(fifth!);
 
 		check(
 			"the pump wrote one frame and stopped at the second refusal",
@@ -283,17 +265,16 @@ try {
 		);
 		check(
 			"and the queue holds exactly what the refusal left behind, in order",
-			connection.queuedByteLength === sizeOf(third!) + sizeOf(fourth!) + sizeOf(fifth!),
-			`queued=${connection.queuedByteLength}`,
+			wire.queuedByteLength === sizeOf(third!) + sizeOf(fourth!) + sizeOf(fifth!),
+			`queued=${wire.queuedByteLength}`,
 		);
 		check("the connection is still open, waiting rather than giving up", sink.closes.length === 0 && sink.terminates === 0);
-		connection.close();
+		wire.close();
 	}
 
 	// smoke 从不读 RSS：队列自己的字节计数器才是策略所约束的数字，而 Node 进程里的 RSS 断言
 	// 测量的垃圾收集器与策略一样多。
 } finally {
-	await rm(root, { recursive: true, force: true });
 	process.stdout.write(failures === 0 ? "\nbackpressure ok\n" : `\n${failures} failure(s)\n`);
 	process.exitCode = failures === 0 ? 0 : 1;
 }
