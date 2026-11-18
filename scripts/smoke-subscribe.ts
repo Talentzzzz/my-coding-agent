@@ -15,6 +15,8 @@ import { setSessionsDir, type ModelConfig, type ServerFrame } from "@my-agent/co
 import { SessionHub } from "../packages/server/src/hub.ts";
 import { createMuxServer, type FrameSink, type MuxConnection } from "../packages/server/src/mux.ts";
 import { createSessionProjection } from "../packages/server/src/projection.ts";
+import { createSessionStream } from "../packages/server/src/stream.ts";
+import { createApprovalAnswers } from "../packages/server/src/approvals.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall, type FakeTransport } from "./fake-transport.ts";
 
 let failures = 0;
@@ -103,7 +105,8 @@ async function openRig(): Promise<Rig> {
 	const hub = new SessionHub({ workDirAbsPath: root, api: transport.api, modelsHome: join(root, "agent-home") });
 	hub.setModelConfigs([ROW]);
 	const projection = createSessionProjection(hub);
-	const mux = createMuxServer(hub, projection, {});
+	const answers = createApprovalAnswers();
+	const mux = createMuxServer((wire) => createSessionStream(wire, { hub, projection, answers }), {});
 
 	return {
 		hub,
@@ -145,11 +148,11 @@ async function openRig(): Promise<Rig> {
 		},
 		async hideDirectory(path: string): Promise<void> {
 			hub.agent.applySettings({ hiddenDirectories: [path] });
-			await mux.broadcastSessions();
+			hub.publishResync();
 		},
 		async showDirectory(): Promise<void> {
 			hub.agent.applySettings({ hiddenDirectories: [] });
-			await mux.broadcastSessions();
+			hub.publishResync();
 		},
 		forgetRow(sessionId: string): void {
 			// 生产中这是 controller 的 `onRemoved`：hub 已告别，这里才轮到行消失。
@@ -157,7 +160,7 @@ async function openRig(): Promise<Rig> {
 		},
 		approve(sessionId, toolCallId, approved) {
 			// 与审批端点同一顺序：先记答案（settled 帧读它），再恢复运行（它会让待审批集合变空）。
-			mux.rememberApproval(sessionId, toolCallId, approved);
+			answers.remember(sessionId, toolCallId, approved);
 			void hub.agent.respondApproval(sessionId, toolCallId, approved);
 		},
 		async close(): Promise<void> {

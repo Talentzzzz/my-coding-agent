@@ -101,3 +101,9 @@ export function createMuxServer(factory: SessionStreamFactory, options: MuxOptio
 - 机械自查写进 PR/提交信息：`grep -n "sessionId\|baseline\|Approval\|Projection" packages/server/src/mux.ts` 只命中注释；`grep -n "from \"./mux.ts\"" packages/server/src/**/*.ts` 只剩 boot 与 http 层。
 
 ## Comments
+
+- 第 1 步的过渡：`approvals.ts` 建好后，`mux.ts` 曾临时从它 import `ApprovalAnswers` 以保持每步可编译；第 3 步删掉 `answers` 字段时这条 import 一并移除，终态 mux 不认识这个类型。
+- `Wire` 除关闭回调 `onClose(listener)` 外多了一个 `log(line)`：`handle` 里"丢弃一帧看不懂的上行帧"的诊断行原本走 mux 的 `options.log`，搬到 stream 后需要一个出口，仍保持一条连接只有一个日志去处。
+- `scripts/smoke-projection.ts` 也用了 `projection.onRow`（ticket 写的"唯一消费者是 mux 的两条监听器"不成立）：改为 `hub.subscribeGlobal({ rows })`，断言未动。
+- 既有 flake（不在本票范围，未修）：`smoke-sessions` 的「a second delete is a 404 too」会在两次 DELETE 之间输给后台删除而得 202。在 `ac64f6c`（本票之前）上同样复现 2/5 次，与本票无关。
+- 本票范围内未发现需要另开票的事。

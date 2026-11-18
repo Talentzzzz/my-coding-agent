@@ -15,7 +15,7 @@
 //
 // 这里不触碰任何 session 或模型，无需 provider key。
 // 运行：node scripts/smoke-backpressure.ts
-import type { ApprovalAnswers } from "../packages/server/src/mux.ts";
+import type { ApprovalAnswers } from "../packages/server/src/approvals.ts";
 import { Wire, resolveWireOptions, type FrameSink, type ResolvedWireOptions } from "../packages/server/src/wire.ts";
 import { until } from "./wire/client.ts";
 import type { ServerFrame } from "@my-agent/core";

@@ -6,6 +6,8 @@ import { createRoutes } from "./controllers/routes.ts";
 import { Router } from "./http/routing.ts";
 import { createSessionProjection, type SessionProjection } from "./projection.ts";
 import { createMuxServer, type MuxConnection, type MuxServer } from "./mux.ts";
+import { createSessionStream } from "./stream.ts";
+import { createApprovalAnswers, type ApprovalAnswers } from "./approvals.ts";
 import type { FrameSink, WireOptions } from "./wire.ts";
 import { WebSocketConnection } from "./http/websocket.ts";
 import type { IncomingMessage } from "node:http";
@@ -98,11 +100,17 @@ export async function bootServer(options: BootOptions): Promise<BootedServer> {
 
 	// mux 持有连接，projection 针对 hub 构建而不是接入 hub：projection 观察哪些会话存在、它们在做什么，而这两者都不允许让会话保持存活或催促它关闭。
 	//
-	// 顺序之所以重要，仅仅因为 mux 需要 projection——它在每条连接上的第一帧就是 overview，所以必须能在任何窗口开口之前回答"有哪些会话"。
+	// 顺序之所以重要，仅仅因为每条连接的第一帧就是 overview，所以 projection 必须能在任何窗口开口之前回答"有哪些会话"。
 	const projection = createSessionProjection(hub);
-	const mux = createMuxServer(hub, projection, options.mux ?? {});
+	/**
+	 * 审批的答案，整个进程一张表而不是每连接一张。
+	 *
+	 * 原因是一个没有作答的窗口：上报审批答案的帧是*作答*那个订阅自己的差量，所以观看同一审批的第二个窗口必须被告知它被如何应答。若每个连接各存一张表，第二个窗口会查不到记录而报一个拒绝——跨会话 bug 在上一层复现。表与流一起住在业务侧（spec `### 审批答案表`），mux 对它一无所知，它只是工厂函数里闭包捕获的东西。
+	 */
+	const answers = createApprovalAnswers();
+	const mux = createMuxServer((wire) => createSessionStream(wire, { hub, projection, answers }), options.mux ?? {});
 	// 两个 controller 共用一组 listener，且在两者之前构建：目录改名由 system controller 接收，落在 projection 上——与会话 controller 的 rename 和 delete 走的是同一块。
-	const listeners = sessionListeners(mux, projection);
+	const listeners = sessionListeners({ hub, answers }, projection);
 	const router = new Router(
 		createRoutes({
 			system: new SystemController(hub, listeners),
@@ -230,15 +238,19 @@ export function muxUpgrade(
  *
  * 从 `bootServer` 里提出来，理由与 {@link muxUpgrade} 相同：这段 wiring 不是 boot 期的秘密，自建对象图的 smoke 恰恰需要它。微妙的半截是那行日志——一次运行的失败会在观看该会话的连接上宣布，而空的订阅表意味着这个 frame 根本没有读者，所以日志是"没有人在看的失败"仍然可闻的唯一地方。复制这些日志行的 smoke 是在断言自己的拷贝；经由这里接线，它能证明的事情是：删掉这个 `console.error` 它就会变红。
  *
- * projection 与 mux 并肩，因为 rename 和 delete 首先是*行*事实，其次才是 frame 事实：projection 的存储先更新，各自发出的 frame 走的是普通的发布之路——rename 是重新读出的一行，delete 是一个消失的 id。
+ * `hub` 与 `answers` 是两个收件人，projection 并肩：run 失败的措辞与审批答案都只经 hub / 答案表扇出，而 rename 和 delete 首先是*行*事实，其次才是 frame 事实——projection 的存储先更新，各自发出的 frame 走的是普通的发布之路。
  */
-export function sessionListeners(mux: MuxServer, projection?: SessionProjection): SessionListener {
+export function sessionListeners(
+	deps: { hub: SessionHub; answers: ApprovalAnswers },
+	projection?: SessionProjection,
+): SessionListener {
+	const { hub, answers } = deps;
 	return {
 		onRunFailure: (sessionId, message) => {
 			console.error(`会话 ${sessionId} 的运行失败：${message}`);
-			mux.announce(sessionId, message);
+			hub.publishFailure(sessionId, message);
 		},
-		onApproval: (sessionId, toolCallId, approved) => mux.rememberApproval(sessionId, toolCallId, approved),
+		onApproval: (sessionId, toolCallId, approved) => answers.remember(sessionId, toolCallId, approved),
 		onCreated: (sessionId) => {
 			if (projection === undefined) return;
 			void projection.refresh(sessionId);
@@ -252,7 +264,7 @@ export function sessionListeners(mux: MuxServer, projection?: SessionProjection)
 			projection.forget(sessionId);
 		},
 		// 一个目录组进入或离开列表——被放到一边，或被新会话领回——动的是列表本身而不是任何一行，所以应答它的 frame 是每条连接打开时就收到的 overview。发给所有连接：发问的窗口已经在自己的响应里拿到了答案，而没发问的窗口才是这条消息的服务对象。
-		onDirectoryListingChanged: () => void mux.broadcastSessions(),
+		onDirectoryListingChanged: () => hub.publishResync(),
 	};
 }
 
