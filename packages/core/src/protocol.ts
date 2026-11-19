@@ -56,6 +56,15 @@ export interface SessionRow extends SessionRef {
 }
 
 /**
+ * 一行的增量：id 加上随事件而来的那几个字段，其余缺席的字段读作"没动"。
+ *
+ * 服务端不为行养存储（ADR-0027），所以一次推送只携带事件自己说得出的字段——`entry_appended`
+ * 带 `modified`（与 user 消息的 `title`）、快照带 `running` 与 `pending`；完整行仍然存在，出现在
+ * 存储型改名、出生与 fork 的探测上。客户端逐字段合并，缺席的字段保持自己手里那一份。
+ */
+export type SessionRowPatch = { id: string } & Partial<Omit<SessionRow, "id">>;
+
+/**
  * 一个目录的已存会话，用于侧边栏的分组。
  *
  * 分组来自存储而不是服务器自己的根：一个进程在一个目录里启动，但这台机器跑过的每个目录的会话都
@@ -337,7 +346,7 @@ export type ServerMessage =
 	 */
 	| { type: "entry"; entryId: string; messageTimestamp?: number }
 	| { type: "approval_request"; request: PendingApproval }
-	| { type: "approval_settled"; toolCallId: string; approved: boolean }
+	| { type: "approval_settled"; toolCallId: string }
 	| { type: "status"; usage: UsageTotals; running: boolean; queued: QueuedPrompt[]; isRetrying: boolean; retryAttempt: number }
 	/**
 	 * 某件事在任何请求够不到的地方失败了。
@@ -377,8 +386,12 @@ export type ConnectionItem =
 	| { type: "heartbeat"; everyMs: number }
 	/** 本进程认识的每一行，每条连接一次。是替换，不是追加。 */
 	| { type: "sessions"; sessions: SessionRow[] }
-	/** 一行变了。发整行，行很小，幂等胜过 diff。 */
-	| { type: "session_row"; session: SessionRow }
+	/**
+	 * 一行变了。通常是一份增量——事件自带什么就带什么，客户端逐字段合并；完整行出现在出生、fork
+	 * 与存储型改名上，那是服务端唯一读盘的时刻。缺席的字段读作"没动"，所以同一行到达两次或乱序
+	 * 到达，得到的都是同一张表——幂等性与整行版本相同，只是字的数量更少。
+	 */
+	| { type: "session_row"; session: SessionRowPatch }
 	/**
 	 * 一行消失了：它背后的会话被删除。id 就是全部载荷，因为丢弃是客户端对它唯一能做的事——已经
 	 * 没有状态可供描述了。

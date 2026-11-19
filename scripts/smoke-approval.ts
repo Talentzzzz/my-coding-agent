@@ -32,10 +32,7 @@ import { createServer as createTcpServer } from "node:net";
 import { spawn } from "node:child_process";
 import { bootServer, muxUpgrade, sessionListeners } from "../packages/server/src/boot.ts";
 import { createMuxServer, type MuxServer } from "../packages/server/src/mux.ts";
-import { createSessionStream } from "../packages/server/src/stream.ts";
-import { createApprovalAnswers } from "../packages/server/src/approvals.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
-import { createSessionProjection, type SessionProjection } from "../packages/server/src/projection.ts";
 import { SessionController, SystemController } from "../packages/server/src/controllers/sessions.ts";
 import { createRoutes } from "../packages/server/src/controllers/routes.ts";
 import { Router } from "../packages/server/src/http/routing.ts";
@@ -140,9 +137,9 @@ process.stdout.write(`model ${modelName} via the scripted transport\n`);
  */
 async function seedApprovalGate(root: string, modelRows: readonly ModelConfig[]): Promise<string> {
 	const home = await mkdtemp(join(tmpdir(), "my-agent-approval-home-"));
-	const seeder = new SettingManager({ home, modelsHome: home });
-	seeder.applySettings({ approval: { read: true } });
-	seeder.replaceModels(modelRows);
+	const settingManager = new SettingManager({ home, modelsHome: home });
+	settingManager.applySettings({ approval: { read: true } });
+	settingManager.replaceModels(modelRows);
 	return home;
 }
 
@@ -167,19 +164,19 @@ fake.setResponses([
 // The hub's one orchestrator sends through the scripted transport, so every session it serves does;
 // its gate is the map `seedApprovalGate` put on the temp home's files.
 const settingsHome = await seedApprovalGate(root, rows);
-const hub = new SessionHub({
+const sessionHub = new SessionHub({
 	workDirAbsPath: root,
-	api: fake.api,
+	chatTransport: fake.chatTransport,
 	settingsHome,
 	modelsHome: settingsHome,
 });
 // Mounted the way the smoke rigs mount one, so every request below goes through the real hub.
-const { id: sessionId } = await mountSession(hub, {
+const { id: sessionId } = await mountSession(sessionHub, {
 	root,
 });
-const agent = hub.agent;
+const agent = sessionHub.agent;
 
-const roundTrip = await serve(hub);
+const roundTrip = await serve(sessionHub);
 try {
 	const wire = await connect(muxUrl(roundTrip.url));
 
@@ -243,9 +240,22 @@ try {
 	);
 	const settlements = wire.items(sessionId).filter((message) => message.type === "approval_settled");
 	check(
-		"and exactly one answer reached it: the one that was given",
-		settlements.length === 1 && settlements[0]?.approved === true,
+		"and exactly one settlement reached it: the frame no longer carries the verdict — the run's own events do",
+		settlements.length === 1 && settlements[0]?.type === "approval_settled",
 		JSON.stringify(settlements),
+	);
+	// The verdict is not a flag on the frame or the event — it is the result's own text: a grant lets
+	// the tool run (whatever its outcome, it is the tool's own result), a denial says so in words.
+	check(
+		"the outcome reached the lane as the granted call's own execution end",
+		wire.items(sessionId).some(
+			(message) =>
+				message.type === "event" &&
+				message.event.type === "tool_execution_end" &&
+				message.event.toolCallId === request0.toolCallId &&
+				!resultTextOf(message).includes("denied permission"),
+		),
+		JSON.stringify(wire.items(sessionId).filter((message) => message.type === "event").map((message) => (message as { event: { type: string } }).event.type)),
 	);
 
 	// The run continues, so the answer really did reach the waiting tool call.
@@ -270,11 +280,10 @@ try {
 // ---------------------------------------------------------------------------------------------------
 // 2. One answer, every window showing the question.
 //
-// The defect this pins: how an approval was answered used to be read out of one registry-wide set and
-// deleted as it was read, so the first stream to run its difference reported the grant and every other
-// one reported a denial — an answer that changed with the number of windows, and a plain lie in all
-// but one of them. A subscription is a *connection × session* pair, so three windows are three
-// connections; one connection carries one lane per session, not three.
+// The property this pins: an answer reaches every window on the session, not just the one that gave
+// it. A subscription is a *connection × session* pair, so three windows are three connections; one
+// connection carries one lane per session, not three. The settled frame tells each lane the question
+// left the ledger; the outcome rides the run's own events, which every subscriber hears.
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\nevery window on a session hears how an approval was answered\n");
@@ -331,10 +340,21 @@ try {
 		reported.every((frame) => frame !== undefined),
 		JSON.stringify(reported.map((frame) => frame?.type ?? "none")),
 	);
+	// The verdict is not on the settled frame; it rides the run's own execution events, which every
+	// subscriber hears. That is the replacement for the old per-connection answer tables: one fact,
+	// one announcer, every reader.
 	check(
-		"and every window was told the same answer: the one that was given",
-		reported.every((frame) => frame?.approved === true),
-		JSON.stringify(reported),
+		"and every window saw the granted call run to its own execution end — not a denial",
+		windows.every((window) =>
+			window.items(shared.sessionId).some(
+				(message) =>
+					message.type === "event" &&
+					message.event.type === "tool_execution_end" &&
+					message.event.toolCallId === toolCallId &&
+					!resultTextOf(message).includes("denied permission"),
+			),
+		),
+		JSON.stringify(windows.map((window) => window.items(shared.sessionId).filter((message) => message.type === "event").map((message) => (message as { event: { type: string } }).event.type))),
 	);
 
 	await Promise.all(windows.map((window) => window.close().catch(() => {})));
@@ -344,14 +364,14 @@ try {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 3. One id, two sessions: an answer belongs to the session it was given on.
+// 3. One id, two sessions: an outcome belongs to the session it belongs to.
 //
-// The defect this pins: the answers table was keyed by toolCallId alone, so two sessions whose
-// providers happened to number their calls the same way — several Anthropic-compatible endpoints do
-// (`call_0`, `call_1`) — shared one entry, and the second session's identical approval leaving any
-// other way read the first session's answer as its own. The mux's table is keyed by session first; the
-// scripted transports are told to hand both sessions the same id, which is the case the wire's random
-// `toolu_…` ids only make improbable.
+// The case this pins: two sessions whose providers happen to number their calls the same way —
+// several Anthropic-compatible endpoints do (`call_0`, `call_1`) — must never hear each other's
+// outcomes. Frames are keyed to each session's own lane, and the outcome rides that session's own
+// execution events, so one session's grant is structurally unable to arrive on the other's window.
+// The scripted transports are told to hand both sessions the same id, which is the case the wire's
+// random `toolu_…` ids only make improbable.
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\nan answer reaches only the session it was given on\n");
@@ -392,8 +412,9 @@ try {
 	}
 
 	// The first session's answer is a grant; the second session's identical id leaves by a different
-	// road — an abort denies it — and the frame that takes its banner down is built from that denial,
-	// never from the first session's grant.
+	// road — an abort denies it — and each lane tells its own ending: the grant's tool execution on
+	// one, the abandonment sweep's denial on the other. The banner-taking-down frame is identical on
+	// both; the outcomes are what must not cross.
 	const granted = await request(
 		cross.url,
 		"POST",
@@ -410,14 +431,26 @@ try {
 		secondWire.waitFor(second.id, (message) => message.type === "approval_settled", 10_000),
 	]);
 
-	const reported = [firstWire, secondWire].map((wire, index) =>
-		wire.items(cross.sessions[index]?.id ?? "").find((message) => message.type === "approval_settled"),
+	// The verdict is not on the settled frame — each session's lane tells its own story through the
+	// execution events of whatever closed the call: the grant ran the tool; the abort's abandonment
+	// sweep wrote the denial. Same id, two lanes, two different endings, each on its own side.
+	const eventsOf = (wire: WireClient, sessionId: string) =>
+		wire.items(sessionId).filter((message): message is Extract<typeof message, { type: "event" }> => message.type === "event");
+	const firstEnd = eventsOf(firstWire, first.id).find(
+		(message) => message.event.type === "tool_execution_end" && message.event.toolCallId === firstId,
 	);
-	check("the answered session was told its own grant", reported[0]?.approved === true, JSON.stringify(reported));
+	const secondEnd = eventsOf(secondWire, second.id).find(
+		(message) => message.event.type === "tool_execution_end" && message.event.toolCallId === secondId,
+	);
 	check(
-		"the aborted session was told a denial, not the other session's grant",
-		reported[1]?.approved === false,
-		JSON.stringify(reported),
+		"the granted session's lane heard its own call run — the tool's own result, not a denial",
+		firstEnd?.event.type === "tool_execution_end" && !resultTextOf(firstEnd).includes("denied permission"),
+		JSON.stringify(firstEnd),
+	);
+	check(
+		"the aborted session's lane heard its own abandonment, not the other session's grant",
+		secondEnd?.event.type === "tool_execution_end" && resultTextOf(secondEnd).includes("aborted"),
+		JSON.stringify(secondEnd),
 	);
 
 	await Promise.all([firstWire.close().catch(() => {}), secondWire.close().catch(() => {})]);
@@ -431,7 +464,7 @@ try {
 //
 // The phase this covers: a parked bag stays in the orchestrator's table, and with it the queues a
 // recovery run must drain — so the question survives as the ledger's, to be answered later or
-// carried to the next process. The sidebar row is part of that survival: the projection keeps the
+// carried to the next process. The sidebar row is part of that survival: the hub keeps the
 // row lit from the bag while it stands. The snapshot's `suspended` marker is the disk half of the
 // same survival: the park writes it, an answer's recovery run and an abort's abandonment sweep
 // clear it, and a fork carries it to a session nobody has opened.
@@ -454,8 +487,8 @@ try {
 		// The viewer switches away. Nothing marks the session as "in use" any more — the parked state
 		// stays on its own, and the question stays.
 		wire.cancel(patient.sessionId);
-		check("and the state stayed: the parked bag refuses removal", patient.hub.isLive(parked), String(patient.hub.isLive(parked)));
-		// The sidebar's own road: a fresh connection's overview is the projection's current truth.
+		check("and the state stayed: the parked bag refuses removal", patient.sessionHub.isLive(parked), String(patient.sessionHub.isLive(parked)));
+		// The sidebar's own road: a fresh connection's overview is the hub's current truth.
 		// The question outlives the host, so the row must still carry it — a hard zero at the reap
 		// is the dot going out while the question stands. The connection stays open to hear the row
 		// go quiet once the answer lands.
@@ -479,9 +512,9 @@ try {
 		// business, so the assertion probes the table the way the other smokes do; the facade answers
 		// in pure data and never hands a bag out.
 		const entryOf = (): { live: unknown; session?: unknown } | undefined =>
-			(patient.hub.agent as unknown as { agentStateMap: Map<string, { live: unknown; session?: unknown }> }).agentStateMap.get(parked);
+			(patient.sessionHub.agent as unknown as { agentStateMap: Map<string, { live: unknown; session?: unknown }> }).agentStateMap.get(parked);
 		const liveHalf = entryOf()?.live;
-		check("the state is still in the table for the returning window", entryOf() !== undefined && patient.hub.isLive(parked), String(patient.hub.isLive(parked)));
+		check("the state is still in the table for the returning window", entryOf() !== undefined && patient.sessionHub.isLive(parked), String(patient.sessionHub.isLive(parked)));
 		check("whose live half is the same object the parked run left", liveHalf !== undefined && entryOf()?.live === liveHalf);
 
 		const returned = await wire.open(patient.sessionId);
@@ -501,9 +534,23 @@ try {
 		check("the answer was accepted", answered.status === 200, `status ${answered.status}`);
 
 		check(
-			"the approval was settled as granted",
-			await until(() => wire.items(patient.sessionId).some((message) => message.type === "approval_settled" && message.approved === true), 8_000),
+			"the approval was settled",
+			await until(() => wire.items(patient.sessionId).some((message) => message.type === "approval_settled"), 8_000),
 			JSON.stringify(wire.items(patient.sessionId).filter((message) => message.type === "approval_settled")),
+		);
+		check(
+			"and the grant reached the lane as the call's own execution end — the tool's result, not a denial",
+			await until(
+				() =>
+					wire.items(patient.sessionId).some(
+						(message) =>
+							message.type === "event" &&
+							message.event.type === "tool_execution_end" &&
+							!resultTextOf(message).includes("denied permission"),
+					),
+				8_000,
+			),
+			JSON.stringify(wire.items(patient.sessionId).filter((message) => message.type === "event").map((message) => (message as { event: { type: string } }).event.type)),
 		);
 		check(
 			"and the recovery run it started finished",
@@ -529,8 +576,8 @@ try {
 		await wire.close().catch(() => {});
 		check(
 			"the state dispersed once the recovery run finished",
-			await until(() => !patient.hub.isLive(parked), 8_000),
-			String(patient.hub.isLive(parked)),
+			await until(() => !patient.sessionHub.isLive(parked), 8_000),
+			String(patient.sessionHub.isLive(parked)),
 		);
 	} finally {
 		await patient.close();
@@ -546,7 +593,7 @@ try {
 		check("the run parked at the approval", abandoned.agent.snapshot(parked).pendingApprovals.length > 0);
 
 		wire.cancel(abandoned.sessionId);
-		check("and the state stayed parked", abandoned.hub.isLive(parked), String(abandoned.hub.isLive(parked)));
+		check("and the state stayed parked", abandoned.sessionHub.isLive(parked), String(abandoned.sessionHub.isLive(parked)));
 		// Read the way a returning window would — over REST, through the same snapshot the lane's
 		// baseline is built from: the question is derived from the ledger, so this is also what the
 		// next process would be shown.
@@ -586,7 +633,7 @@ try {
 			sweptMeta.suspended === undefined,
 			JSON.stringify(sweptMeta),
 		);
-		check("and it swept the state with it", await until(() => !aborted.hub.isLive(parked), 8_000), String(aborted.hub.isLive(parked)));
+		check("and it swept the state with it", await until(() => !aborted.sessionHub.isLive(parked), 8_000), String(aborted.sessionHub.isLive(parked)));
 		await wire.close().catch(() => {});
 	} finally {
 		await aborted.close();
@@ -656,10 +703,10 @@ const restartRoot = await mkdtemp(join(tmpdir(), "my-agent-approval-restart-"));
 const restartHome = await mkdtemp(join(tmpdir(), "my-agent-approval-restart-home-"));
 setSessionsDir(join(restartHome, "sessions"));
 // One home for both processes: the rows the parent's prompt resolves are the rows the child reads.
-const restartSeeder = new SettingManager({ home: restartHome, modelsHome: restartHome });
-restartSeeder.replaceModels(rows);
+const settingManager = new SettingManager({ home: restartHome, modelsHome: restartHome });
+settingManager.replaceModels(rows);
 const restartFake = createFakeTransport();
-const first = await bootServer({ workDirAbsPath: restartRoot, port: 0, api: restartFake.api, settingsHome: restartHome });
+const first = await bootServer({ workDirAbsPath: restartRoot, port: 0, chatTransport: restartFake.chatTransport, settingsHome: restartHome });
 let restartSessionId = "";
 try {
 	// Startup selects nothing now, so the session this half drives is the one an explicit creation
@@ -773,41 +820,38 @@ process.exitCode = failures === 0 ? 0 : 1;
 /** One server over a hub: the real routes and the mux in front of them, the way `bootServer` wires it. */
 interface Graph {
 	url: string;
-	mux: MuxServer;
-	projection: SessionProjection;
+	muxServer: MuxServer;
+	sessionHub: SessionHub;
 	close(): Promise<void>;
 }
 
-async function serve(hub: SessionHub): Promise<Graph> {
-	const projection = createSessionProjection(hub);
-	const answers = createApprovalAnswers();
-	const mux = createMuxServer((wire) => createSessionStream(wire, { hub, projection, answers }), { heartbeatIntervalMs: 150 });
-	const listeners = sessionListeners({ hub, answers }, projection);
+async function serve(sessionHub: SessionHub): Promise<Graph> {
+	const muxServer = createMuxServer({ sessionHub }, { heartbeatIntervalMs: 150 });
+	const listeners = sessionListeners({ sessionHub });
 	const router = new Router(
 		createRoutes({
-			system: new SystemController(hub, listeners),
-			sessions: new SessionController(hub, listeners),
+			systemController: new SystemController(sessionHub, listeners),
+			sessionController: new SessionController(sessionHub, listeners),
 		}),
 	);
-	const handle = await createServer({ router, clientDir: "packages/web/dist", onUpgrade: muxUpgrade(mux) });
-	await new Promise<void>((listen) => handle.server.listen(0, "127.0.0.1", listen));
-	const url = `http://127.0.0.1:${(handle.server.address() as { port: number }).port}`;
+	const httpServerHandle = await createServer({ router, clientDir: "packages/web/dist", onUpgrade: muxUpgrade(muxServer) });
+	await new Promise<void>((listen) => httpServerHandle.server.listen(0, "127.0.0.1", listen));
+	const url = `http://127.0.0.1:${(httpServerHandle.server.address() as { port: number }).port}`;
 	return {
 		url,
-		mux,
-		projection,
+		muxServer,
+		sessionHub,
 		close: async () => {
-			projection.close();
-			mux.close();
-			await hub.close();
-			await handle.close();
+			muxServer.close();
+			await sessionHub.close();
+			await httpServerHandle.close();
 		},
 	};
 }
 
 interface Rig {
 	root: string;
-	hub: SessionHub;
+	sessionHub: SessionHub;
 	agent: Agent;
 	/** The id the mount created — what every id-keyed call below names. */
 	sessionId: string;
@@ -836,26 +880,26 @@ async function openRig(): Promise<Rig> {
 	// approval map and the rows are seeded onto temp-home files first — the machine's own settings
 	// stay out of it.
 	const settingsHome = await seedApprovalGate(root, rows);
-	const hub = new SessionHub({
+	const sessionHub = new SessionHub({
 		workDirAbsPath: root,
-		api: transport.api,
+		chatTransport: transport.chatTransport,
 		settingsHome,
 		modelsHome: settingsHome,
 	});
-	// The graph first, the mount second: the projection learns the mounted session the way the real
+	// The graph first, the mount second: the hub learns the mounted session the way the real
 	// process learns a birth — through the refresh the controller's listener would drive. A mount
-	// the projection never hears about is a row it never follows, and the row would never wear the
+	// the hub never hears about is a row it never follows, and the row would never wear the
 	// live fields.
-	const graph = await serve(hub);
-	const { id: sessionId, session } = await mountSession(hub, {
+	const graph = await serve(sessionHub);
+	const { id: sessionId, session } = await mountSession(sessionHub, {
 		root,
 	});
-	await graph.projection.refresh(sessionId);
+	await graph.sessionHub.refreshRow(sessionId);
 
 	return {
 		root,
-		hub,
-		agent: hub.agent,
+		sessionHub,
+		agent: sessionHub.agent,
 		sessionId,
 		session,
 		url: graph.url,
@@ -875,7 +919,7 @@ interface Mounted {
 }
 
 interface CrossRig {
-	hub: SessionHub;
+	sessionHub: SessionHub;
 	/** Two sessions, each parked on the same scripted toolCallId once prompted. */
 	sessions: Mounted[];
 	url: string;
@@ -905,23 +949,23 @@ async function openCrossRig(): Promise<CrossRig> {
 	// The gate both sessions park on is a settings read the orchestrator makes per request, so the
 	// approval map and the rows are seeded onto temp-home files first, the same way openRig's are.
 	const settingsHome = await seedApprovalGate(root, rows);
-	const hub = new SessionHub({
+	const sessionHub = new SessionHub({
 		workDirAbsPath: root,
-		api: transport.api,
+		chatTransport: transport.chatTransport,
 		settingsHome,
 		modelsHome: settingsHome,
 	});
 	const sessions: Mounted[] = [];
 	for (let index = 0; index < 2; index += 1) {
-		const { id } = await mountSession(hub, {
+		const { id } = await mountSession(sessionHub, {
 			root,
 			});
-		sessions.push({ id, agent: hub.agent });
+		sessions.push({ id, agent: sessionHub.agent });
 	}
 
-	const graph = await serve(hub);
+	const graph = await serve(sessionHub);
 	return {
-		hub,
+		sessionHub,
 		sessions,
 		url: graph.url,
 		close: async () => {
@@ -953,6 +997,19 @@ async function driveToApproval(rig: Rig): Promise<{ wire: WireClient }> {
 function pendingId(wire: WireClient, sessionId: string): string {
 	const asked = wire.items(sessionId).find((message) => message.type === "approval_request");
 	return asked?.type === "approval_request" ? asked.request.toolCallId : "";
+}
+
+/**
+ * The text a tool execution end event closed its call with — the verdict's only home now.
+ *
+ * The answer is not a flag anywhere on the wire: a grant's end event carries whatever the tool
+ * itself produced, and a denial carries the sentence the close wrote. Distinguishing them reads
+ * the words, which is exactly what the window does.
+ */
+function resultTextOf(message: { type: "event" } & { event: { type: string; result?: unknown } }): string {
+	if (message.event.type !== "tool_execution_end") return "";
+	const content = (message.event.result as { content?: { text?: string }[] } | undefined)?.content ?? [];
+	return content.map((block) => block.text ?? "").join("");
 }
 
 /** One free port, taken and released: `main.ts` refuses `--port 0`, so the child needs a real one. */

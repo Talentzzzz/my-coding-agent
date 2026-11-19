@@ -56,36 +56,33 @@ fake.setResponses([
 // 审批门是 orchestrator 每个请求都会读一次的设置：这台 hub 服务的每个 session 里 `read` 都在
 // 门后。映射与模型行先种到临时 home 文件里，任何东西都不会落到机器自己的设置或模型文件上。
 const settingsHome = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-home-"));
-const seeder = new SettingManager({ home: settingsHome, modelsHome: settingsHome });
-seeder.applySettings({ approval: { read: true } });
-seeder.replaceModels(rows);
-const hub = new SessionHub({
+const settingManager = new SettingManager({ home: settingsHome, modelsHome: settingsHome });
+settingManager.applySettings({ approval: { read: true } });
+settingManager.replaceModels(rows);
+const sessionHub = new SessionHub({
 	workDirAbsPath: root,
-	api: fake.api,
+	chatTransport: fake.chatTransport,
 	settingsHome,
 	modelsHome: settingsHome,
 });
 
 // 按 `SessionHub.open()` 挂载 session 的方式来挂——停在门口的入口就是下面这些检查要驱动的
 // 对象——所以 controller 经由真正的 hub 持有。
-const { id: sessionId } = await mountSession(hub, {
+const { id: sessionId } = await mountSession(sessionHub, {
 	root,
 });
-const agent = hub.agent;
+const agent = sessionHub.agent;
 
-// 手工组装 controller 的全部意义就在这个 spy 上：mux 的应答表正是经由这个监听器喂进来的，
-// 所以"被拒绝的尝试哪儿也没到"就在这里断言。
-const remembered: { sessionId: string; toolCallId: string; approved: boolean }[] = [];
+// 手工组装 controller：这段 smoke 断言的是端点契约本身——冲突、收下、run 继续——
+// 经由与本服务器相同的构造路径接线。
 const router = new Router(
 	createRoutes({
-		system: new SystemController(hub),
-		sessions: new SessionController(hub, {
-			onApproval: (sessionId, toolCallId, approved) => remembered.push({ sessionId, toolCallId, approved }),
-		}),
+		systemController: new SystemController(sessionHub),
+		sessionController: new SessionController(sessionHub, {}),
 	}),
 );
-const handle = await createServer({ router, clientDir: "packages/web/dist" });
-await new Promise<void>((listen) => handle.server.listen(PORT, "127.0.0.1", listen));
+const httpServerHandle = await createServer({ router, clientDir: "packages/web/dist" });
+await new Promise<void>((listen) => httpServerHandle.server.listen(PORT, "127.0.0.1", listen));
 
 const base = `http://127.0.0.1:${PORT}`;
 
@@ -120,27 +117,20 @@ try {
 	check("the run parked at the approval", pending, JSON.stringify(agent.snapshot(sessionId).pendingApprovals));
 	const toolCallId = agent.snapshot(sessionId).pendingApprovals[0]?.toolCallId ?? "";
 
-	// 拒绝那一半：没有任何东西在等的 id 是冲突，无论应答监听器还是 session 都听不到这次尝试。
+	// 拒绝那一半：没有任何东西在等的 id 是冲突，session 听不到这次尝试。
 	const unknown = await request("POST", `/api/sessions/${sessionId}/approvals/no-such-call`, { approved: true });
 	check("an unknown toolCallId is a conflict", unknown.status === 409, `status ${unknown.status} ${JSON.stringify(unknown.payload)}`);
 	check("the refusal says what was refused", JSON.stringify(unknown.payload).includes("not a pending approval"), JSON.stringify(unknown.payload));
-	check("a refused answer was recorded nowhere", remembered.length === 0, JSON.stringify(remembered));
 	check("the run is still parked", agent.snapshot(sessionId).pendingApprovals.length === 1, JSON.stringify(agent.snapshot(sessionId).pendingApprovals));
 
 	const denied = await request("POST", `/api/sessions/${sessionId}/approvals/no-such-call`, { approved: false });
 	check("the refusal does not depend on the answer's direction", denied.status === 409, `status ${denied.status}`);
 
-	// 应答那一半：真 id 被收下，带着 session 自己的身份到达监听器，也到达 session——run 继续
-	// 走到它的回答。
+	// 应答那一半：真 id 被收下，run 继续走到它的回答。
 	const answered = await request("POST", `/api/sessions/${sessionId}/approvals/${encodeURIComponent(toolCallId)}`, {
 		approved: true,
 	});
 	check("the real answer was accepted", answered.status === 200, `status ${answered.status} ${JSON.stringify(answered.payload)}`);
-	check(
-		"and it reached the listener exactly once, with the session it was given on",
-		remembered.length === 1 && remembered[0]?.sessionId === sessionId && remembered[0]?.toolCallId === toolCallId && remembered[0]?.approved === true,
-		JSON.stringify(remembered),
-	);
 
 	check(
 		"the run finished after the answer",
@@ -155,11 +145,10 @@ try {
 		approved: true,
 	});
 	check("an already-settled id is a conflict too", twice.status === 409, `status ${twice.status} ${JSON.stringify(twice.payload)}`);
-	check("and the settled answer was not recorded twice", remembered.length === 1, JSON.stringify(remembered));
 } finally {
 	clearTimeout(watchdog);
-	await hub.close();
-	await handle.close();
+	await sessionHub.close();
+	await httpServerHandle.close();
 	await rm(settingsHome, { recursive: true, force: true });
 	await rm(root, { recursive: true, force: true });
 	await rm(storeRoot, { recursive: true, force: true }).catch(() => {});

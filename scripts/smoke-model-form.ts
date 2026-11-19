@@ -61,14 +61,14 @@ process.stdout.write("\nmodel-form：新建表单的六个标签逐字一致\n")
 
 {
 	installDom();
-	const panel = new SettingsPanel(handlers());
-	panel.render({ settings: settingsOf(), models: [], toolNames: [] });
-	panel.show("models");
+	const settingsPanel = new SettingsPanel(handlers());
+	settingsPanel.render({ settings: settingsOf(), models: [], toolNames: [] });
+	settingsPanel.show("models");
 
 	// 添加表单就是展开的那一行本身：按钮把它原地展开。
-	const add = all(panel.element as unknown as FakeNode, "model-add")[0]!;
+	const add = all(settingsPanel.element as unknown as FakeNode, "model-add")[0]!;
 	add.dispatch("click");
-	const form = all(panel.element as unknown as FakeNode, "model-form")[0];
+	const form = all(settingsPanel.element as unknown as FakeNode, "model-form")[0];
 	check("「＋ 添加模型」展开一张表单", form !== undefined);
 
 	const labels = fieldLabels(form!);
@@ -85,8 +85,8 @@ process.stdout.write("\nmodel-form：新建表单的六个标签逐字一致\n")
 	check("表单里没有复选框", form!.querySelector('input[type="checkbox"]') === null);
 	check(
 		"表单里没有下拉",
-		all(form!, "input").filter((node) => node.tag === "select").length === 0,
-		String(all(form!, "input").filter((node) => node.tag === "select").length),
+		all(form!, "input").filter((fakeNode) => fakeNode.tag === "select").length === 0,
+		String(all(form!, "input").filter((fakeNode) => fakeNode.tag === "select").length),
 	);
 
 	// 旧标签不得在表单里残留：每次改名都是替换一个字符串，漏掉一处就成了同一字段有两个名字。
@@ -96,7 +96,7 @@ process.stdout.write("\nmodel-form：新建表单的六个标签逐字一致\n")
 	}
 
 	// 每个字段都要说明自己用来做什么。
-	const hints = all(form!, "model-hint").map((node) => node.textContent);
+	const hints = all(form!, "model-hint").map((fakeNode) => fakeNode.textContent);
 	check("每个字段都带一句提示", hints.length === 6, JSON.stringify(hints));
 }
 

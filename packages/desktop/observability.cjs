@@ -131,17 +131,17 @@ function createObservability(options) {
 					`<pre style="white-space:pre-wrap;color:#f25a5a">${escape(parts.message)}${escape(parts.detail.slice(0, 4000))}</pre>`,
 			);
 		try {
-			const window = createWindow();
-			if (window.webContents && typeof window.webContents.once === "function") {
-				window.webContents.once("did-finish-load", () => {
-					if (!window.isDestroyed()) window.show();
+			const browserWindow = createWindow();
+			if (browserWindow.webContents && typeof browserWindow.webContents.once === "function") {
+				browserWindow.webContents.once("did-finish-load", () => {
+					if (!browserWindow.isDestroyed()) browserWindow.show();
 				});
 			}
-			void window.loadURL(page).catch((error) => {
+			void browserWindow.loadURL(page).catch((error) => {
 				log(`desktop: the failure page did not draw — ${error instanceof Error ? error.message : String(error)}`);
 				showNativeDialog(parts);
 			});
-			return window;
+			return browserWindow;
 		} catch (error) {
 			log(
 				`desktop: no window could be opened for the report — ${error instanceof Error ? error.stack ?? error.message : String(error)}`,
@@ -201,6 +201,52 @@ function createObservability(options) {
 
 		process.on("unhandledRejection", (reason) => {
 			report("外壳有一个没人处理的 promise 拒绝", reason instanceof Error ? reason : String(reason));
+		});
+	}
+
+	/**
+	 * 在预算内把服务器带回来；带不回来就让失败可见，然后交还 `null`。
+	 *
+	 * 三条出口，各有一次自己的报告：预算内成功是寻常路径——没有行、没有窗口，服务器原样回来；
+	 * boot 拒绝是已经知道的失败——一行原因加上一个说着同样的话的窗口；挂起则由看门狗在预算到点
+	 * 时代言，`null` 交还给外壳而 boot 自己还挂着的那个 promise 不被放弃——它后来无论落在哪一头，
+	 * 都有一行日志把这件事说出来（成功说出 url，失败说出原因），因为报告已经画出去的那一次启动
+	 * 不该无声无息地结束。
+	 *
+	 * @param {string} workDirAbsPath 交给 {@link boot} 的工作目录。
+	 * @returns {Promise<{ url: string } | null>} 预算内的服务器，或预算耗尽／启动失败时的 `null`。
+	 */
+	function bootWithinBudget(workDirAbsPath) {
+		return new Promise((resolve) => {
+			let settled = false;
+			const watchdog = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				log(`desktop: the server did not come up within its ${budgetMs} ms budget`);
+				report("agent 服务没有启动起来", new Error(`the server did not come up within ${budgetMs} ms`));
+				resolve(null);
+			}, budgetMs);
+			boot(workDirAbsPath).then(
+				(booted) => {
+					if (settled) {
+						log(`desktop: the server came up late, on ${booted.url}`);
+						return;
+					}
+					settled = true;
+					clearTimeout(watchdog);
+					resolve(booted);
+				},
+				(error) => {
+					if (settled) {
+						log(`desktop: the late server boot failed too — ${error instanceof Error ? error.message : String(error)}`);
+						return;
+					}
+					settled = true;
+					clearTimeout(watchdog);
+					report("agent 服务没有启动起来", error);
+					resolve(null);
+				},
+			);
 		});
 	}
 

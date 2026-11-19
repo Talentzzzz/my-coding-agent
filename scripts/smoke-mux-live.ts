@@ -84,9 +84,9 @@ const transport = createFakeTransport({ tokensPerSecond: 400 });
 /** 一秒：快到让 smoke 不冗长，慢到 Windows 的调度噪声饿不死客户端的 watchdog（它的容忍是
  * 这个间隔的三次）。 */
 const heartbeatEveryMs = 1_000;
-const server = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: heartbeatEveryMs }, api: transport.api, settingsHome: home });
+const server = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: heartbeatEveryMs }, chatTransport: transport.chatTransport, settingsHome: home });
 // 启动后、任何 prompt 之前交给 hub：下面那一节 run 需要一个可供运行的模型。
-server.hub.setModelConfigs(modelRows);
+server.sessionHub.setModelConfigs(modelRows);
 
 try {
 	// 启动时现在不选任何东西，所以本 smoke 驱动的 session 是显式创建返回的那个。出生请求自带第一条
@@ -108,7 +108,7 @@ try {
 	const ended: string[] = [];
 	const errors: string[] = [];
 
-	const client: MuxClient = new MuxClient(
+	const muxClient: MuxClient = new MuxClient(
 		{
 			onChannel: (state) => channels.push(state),
 			onConnectionItem: (item) => items.push(item),
@@ -116,23 +116,23 @@ try {
 			// 说 run 已落定的 status 就是它的出口之一。没有这个，下面的复现就不是用户撞到的那个。
 			onStreamMessage: (id, message: ServerMessage) => {
 				messages.push({ sessionId: id, type: message.type });
-				if (settled(message)) client.release(id, "send");
+				if (settled(message)) muxClient.release(id, "send");
 			},
 			onStreamEnd: (id) => {
 				ended.push(id);
-				client.release(id, "send");
+				muxClient.release(id, "send");
 			},
 			onStreamError: (id, message) => {
 				errors.push(`${id}:${message}`);
-				if (id !== "") client.release(id, "send");
+				if (id !== "") muxClient.release(id, "send");
 			},
 		} satisfies MuxHandlers,
 		{ url: server.url.replace("http", "ws") + "/mux", socket: browserSocket(server.url.replace("http", "ws") + "/mux") },
 	);
-	client.start();
+	muxClient.start();
 
 	// 通道自己的第一帧是心跳，所以这才是真的"已连接且确认无恙"。
-	check("收到第一帧心跳即 live", await until(() => client.channel === "live"), `got ${client.channel}`);
+	check("收到第一帧心跳即 live", await until(() => muxClient.channel === "live"), `got ${muxClient.channel}`);
 	check("心跳带服务端自己的间隔", items.some((i) => i.type === "heartbeat" && i.everyMs === heartbeatEveryMs), JSON.stringify(items));
 
 	// 行表不订阅任何东西就到达连接座位——概览存在的全部理由正是一行在没人看着时不得冻结。
@@ -143,7 +143,7 @@ try {
 
 	// 订阅是一次 `open`，应答是那条流上的一份 baseline——设计要求的原子对，中间不存在
 	// "已订阅但还没 baseline"的状态。
-	client.retain(sessionId, "pane");
+	muxClient.retain(sessionId, "pane");
 	check("open 之后拿到基线", await until(() => messages.some((m) => m.sessionId === sessionId && m.type === "baseline")), JSON.stringify(messages));
 	check("这条流不再报错", errors.filter((e) => e.startsWith(sessionId)).length === 0, JSON.stringify(errors));
 
@@ -159,19 +159,19 @@ try {
 
 	// 取消按设计是沉默的：客户端要求停止接收，所以一个回执会是它刚刚说过不要的那条流上的一帧。
 	// 要紧的是条目随之而去、客户端不再把这条流当作被监视——而不是有什么回来。
-	client.release(sessionId, "pane");
+	muxClient.release(sessionId, "pane");
 	await new Promise((resolve) => setTimeout(resolve, 200));
-	check("cancel 之后不再持有这个会话", !client.isRetained(sessionId) && !client.isWatching(sessionId));
+	check("cancel 之后不再持有这个会话", !muxClient.isRetained(sessionId) && !muxClient.isWatching(sessionId));
 	check("cancel 不要求任何回执", !ended.includes(sessionId), JSON.stringify(ended));
 
 	// 引用消失后的重新订阅是一次新的手势，会拿到一份新基线。
-	client.retain(sessionId, "pane");
+	muxClient.retain(sessionId, "pane");
 	const before = messages.filter((m) => m.sessionId === sessionId && m.type === "baseline").length;
 	check("重新订阅又拿到一份基线", await until(() => messages.filter((m) => m.sessionId === sessionId && m.type === "baseline").length > before), JSON.stringify(messages));
 
 	// 一个什么都不是的 session id 在帧上被应答，而不是用状态码，因为通道不再有按订阅的应答。
 	const beforeErrors = errors.length;
-	client.retain("不存在的会话", "pane");
+	muxClient.retain("不存在的会话", "pane");
 	check("订阅不存在的会话在帧上被拒绝", await until(() => errors.length > beforeErrors), JSON.stringify(errors));
 	check("并且那条流被结束", await until(() => ended.includes("不存在的会话")), JSON.stringify(ended));
 
@@ -189,7 +189,7 @@ try {
 	// 随之散掉。
 	transport.setResponses([fakeAssistantMessage("first answer")]);
 	const beforeFirst = framesFor();
-	client.retain(sessionId, "send");
+	muxClient.retain(sessionId, "send");
 	check("第一条 prompt 被接受", (await postPrompt(server.url, sessionId, "第一条")) === 202);
 	check("第一条 prompt 的帧到达了", await until(() => framesFor() > beforeFirst, 10_000), JSON.stringify(messages.slice(beforeFirst)));
 	check("这一轮落定了", await until(async () => (await running(server.url, sessionId)) === false, 10_000));
@@ -199,7 +199,7 @@ try {
 	// 与第一次分毫不差地到达。
 	const beforeSecond = framesFor();
 	transport.setResponses([fakeAssistantMessage("second answer")]);
-	client.retain(sessionId, "send");
+	muxClient.retain(sessionId, "send");
 	check("第二条 prompt 被接受", (await postPrompt(server.url, sessionId, "第二条")) === 202);
 	check("第二条 prompt 也必须再次收到帧", await until(() => framesFor() > beforeSecond, 10_000), JSON.stringify(messages.slice(beforeSecond)));
 
@@ -261,7 +261,7 @@ try {
 	check("那个目录回到了行表里", rowTable().list().some((row) => row.workDirAbsPath === aside), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
 	check("REST 列表也把它列回来了", (await restDirectories()).includes(aside), JSON.stringify(await restDirectories()));
 
-	client.close();
+	muxClient.close();
 	check("关掉之后不再有状态变化", channels.at(-1) !== undefined);
 } finally {
 	await server.close();

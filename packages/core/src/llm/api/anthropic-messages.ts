@@ -439,7 +439,7 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 		...buildBaseOptions(model, context, options, apiKey),
 		toolChoice: options?.toolChoice,
 	};
-	const stream = new AssistantMessageEventStream();
+	const assistantMessageEventStream = new AssistantMessageEventStream();
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -460,7 +460,7 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 		};
 
 		try {
-			const client = createClient(model, apiKey, request.headers, request.fetch);
+			const anthropic = createClient(model, apiKey, request.headers, request.fetch);
 			let params = buildParams(model, context, request);
 			const nextParams = await request.onPayload?.(params, model);
 			if (nextParams !== undefined) {
@@ -472,7 +472,7 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 				maxRetries: 0,
 			};
 			const response = await retryProviderRequest(
-				() => client.beta.messages.create(params, requestOptions).asResponse(),
+				() => anthropic.beta.messages.create(params, requestOptions).asResponse(),
 				{
 					maxRetries: request.maxRetries,
 					maxRetryDelayMs: request.maxRetryDelayMs,
@@ -480,7 +480,7 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 				},
 			);
 			await request.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			stream.push({ type: "start", partial: output });
+			assistantMessageEventStream.push({ type: "start", partial: output });
 
 			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
 			const blocks = output.content as Block[];
@@ -509,7 +509,7 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 							index: event.index,
 						};
 						output.content.push(block);
-						stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
+						assistantMessageEventStream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "thinking") {
 						const block: Block = {
 							type: "thinking",
@@ -518,7 +518,7 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 							index: event.index,
 						};
 						output.content.push(block);
-						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
+						assistantMessageEventStream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "redacted_thinking") {
 						const block: Block = {
 							type: "thinking",
@@ -528,7 +528,7 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 							index: event.index,
 						};
 						output.content.push(block);
-						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
+						assistantMessageEventStream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "tool_use") {
 						const block: Block = {
 							type: "toolCall",
@@ -539,7 +539,7 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 							index: event.index,
 						};
 						output.content.push(block);
-						stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
+						assistantMessageEventStream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
 					}
 				} else if (event.type === "content_block_delta") {
 					if (event.delta.type === "text_delta") {
@@ -547,7 +547,7 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 						const block = blocks[index];
 						if (block && block.type === "text") {
 							block.text += event.delta.text;
-							stream.push({
+							assistantMessageEventStream.push({
 								type: "text_delta",
 								contentIndex: index,
 								delta: event.delta.text,
@@ -559,7 +559,7 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 						const block = blocks[index];
 						if (block && block.type === "thinking") {
 							block.thinking += event.delta.thinking;
-							stream.push({
+							assistantMessageEventStream.push({
 								type: "thinking_delta",
 								contentIndex: index,
 								delta: event.delta.thinking,
@@ -572,7 +572,7 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 						if (block && block.type === "toolCall") {
 							block.partialJson += event.delta.partial_json;
 							block.arguments = parseStreamingJson(block.partialJson);
-							stream.push({
+							assistantMessageEventStream.push({
 								type: "toolcall_delta",
 								contentIndex: index,
 								delta: event.delta.partial_json,
@@ -593,14 +593,14 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 					if (block) {
 						delete (block as any).index;
 						if (block.type === "text") {
-							stream.push({
+							assistantMessageEventStream.push({
 								type: "text_end",
 								contentIndex: index,
 								content: block.text,
 								partial: output,
 							});
 						} else if (block.type === "thinking") {
-							stream.push({
+							assistantMessageEventStream.push({
 								type: "thinking_end",
 								contentIndex: index,
 								content: block.thinking,
@@ -610,7 +610,7 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 							block.arguments = parseStreamingJson(block.partialJson);
 							// 原地收尾并剥掉暂存缓冲，让重放只携带已解析的参数。
 							delete (block as { partialJson?: string }).partialJson;
-							stream.push({
+							assistantMessageEventStream.push({
 								type: "toolcall_end",
 								contentIndex: index,
 								toolCall: block,
@@ -673,8 +673,8 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 				throw new Error(output.errorMessage || "An unknown error occurred");
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			assistantMessageEventStream.push({ type: "done", reason: output.stopReason, message: output });
+			assistantMessageEventStream.end();
 		} catch (error) {
 			for (const block of output.content) {
 				delete (block as { index?: number }).index;
@@ -683,12 +683,12 @@ export const stream: StreamFunction<"anthropic-messages", SimpleStreamOptions> =
 			}
 			output.stopReason = request.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			assistantMessageEventStream.push({ type: "error", reason: output.stopReason, error: output });
+			assistantMessageEventStream.end();
 		}
 	})();
 
-	return stream;
+	return assistantMessageEventStream;
 };
 
 function createClient(
@@ -705,7 +705,7 @@ function createClient(
 		model.headers,
 		optionsHeaders,
 	);
-	const client = new Anthropic({
+	const anthropic = new Anthropic({
 		apiKey: apiKey ?? null,
 		authToken: null,
 		baseURL: model.baseUrl,
@@ -714,7 +714,7 @@ function createClient(
 		defaultHeaders,
 	});
 
-	return client;
+	return anthropic;
 }
 
 function getBetaFeatures(

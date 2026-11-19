@@ -138,7 +138,7 @@ function baseline(sessionId: string, running = false): string {
 function harness(
 	overrides: Partial<MuxOptions> = {},
 ): {
-	client: MuxClient;
+	muxClient: MuxClient;
 	clock: ReturnType<typeof fakeClock>;
 	sockets: ReturnType<typeof fakeSockets>;
 	saw: Recorder;
@@ -149,7 +149,7 @@ function harness(
 
 	// Jitter pinned to its floor, so a backoff is exactly half its ceiling and the waits below are
 	// readable numbers rather than ranges.
-	const client = new MuxClient(
+	const muxClient = new MuxClient(
 		{
 			onChannel: (state) => saw.channels.push(state),
 			onConnectionItem: (item) => saw.items.push(item.type),
@@ -168,7 +168,7 @@ function harness(
 			...overrides,
 		},
 	);
-	return { client, clock, sockets, saw };
+	return { muxClient, clock, sockets, saw };
 }
 
 /** The uplink frames a socket received, as typed objects. */
@@ -186,30 +186,30 @@ function opens(socket: FakeSocket): { type: string; sessionId: string }[] {
 process.stdout.write("\nmux client: 就绪与判活\n");
 
 {
-	const { client, clock, sockets, saw } = harness();
-	client.start();
+	const { muxClient, clock, sockets, saw } = harness();
+	muxClient.start();
 
 	// A socket that opened is not a channel yet: the ready deadline is what is running, and calling
 	// it live here is exactly the mistake that makes a black-holed connection look healthy.
-	check("刚建连时不是 live", client.channel === "connecting", `got ${client.channel}`);
+	check("刚建连时不是 live", muxClient.channel === "connecting", `got ${muxClient.channel}`);
 	check("第一帧到达才是 live", (() => {
 		sockets.latest()?.deliver(heartbeat());
-		return client.channel === "live";
-	})(), `got ${client.channel}`);
+		return muxClient.channel === "live";
+	})(), `got ${muxClient.channel}`);
 	check("心跳也交给窗口（相对时间的 tick）", saw.items.includes("heartbeat"), JSON.stringify(saw.items));
 
 	// Three heartbeat intervals of quiet is the tolerance, because the tolerance is derived from what
 	// the server said rather than from a number written separately on this side.
 	check("容忍度按 everyMs 的三倍推", (() => {
 		clock.tick(299);
-		return client.channel === "live";
-	})(), `became ${client.channel} early`);
+		return muxClient.channel === "live";
+	})(), `became ${muxClient.channel} early`);
 	check("超过容忍度即判死", (() => {
 		clock.tick(2);
-		return client.channel === "down";
-	})(), `got ${client.channel}`);
+		return muxClient.channel === "down";
+	})(), `got ${muxClient.channel}`);
 	check("判死后用客户端自己的 close code", sockets.all[0]?.closes.at(-1)?.code === 4000, JSON.stringify(sockets.all[0]?.closes));
-	client.close();
+	muxClient.close();
 }
 
 // ------------------------------------------------------------- 2. ready deadline
@@ -217,21 +217,21 @@ process.stdout.write("\nmux client: 就绪与判活\n");
 process.stdout.write("\nmux client: 一次尝试的硬截止\n");
 
 {
-	const { client, clock, sockets, saw } = harness();
-	client.start();
+	const { muxClient, clock, sockets, saw } = harness();
+	muxClient.start();
 	// A socket that opens and never delivers. The handshake completes in this state perfectly well,
 	// which is why "open" cannot be what proves a connection.
 	sockets.latest()?.deliver("");
-	check("没有帧就不算 live", client.channel === "connecting");
+	check("没有帧就不算 live", muxClient.channel === "connecting");
 
 	// One millisecond short of the deadline: still trying, still one socket.
 	clock.tick(499);
-	check("就绪截止未到时不放弃", sockets.all.length === 1 && client.channel === "connecting", `built ${sockets.all.length}, ${client.channel}`);
+	check("就绪截止未到时不放弃", sockets.all.length === 1 && muxClient.channel === "connecting", `built ${sockets.all.length}, ${muxClient.channel}`);
 
 	// The deadline fires and this attempt is abandoned. The backoff is 50% of its ceiling, so the
 	// first wait is half of 500ms rather than 500ms itself — reading "500" as the wait is off by two.
 	clock.tick(1);
-	check("就绪超时后进入退避", client.channel === "down", `got ${client.channel}`);
+	check("就绪超时后进入退避", muxClient.channel === "down", `got ${muxClient.channel}`);
 	check("放弃后不再往这条 socket 上写", sockets.all[0]?.sent.length === 0, JSON.stringify(sockets.all[0]?.sent));
 
 	clock.tick(249);
@@ -239,7 +239,7 @@ process.stdout.write("\nmux client: 一次尝试的硬截止\n");
 	clock.tick(1);
 	check("退避满后重试", sockets.all.length === 2, `built ${sockets.all.length}`);
 	check("重试期间窗口看到的是 connecting", saw.channels.at(-1) === "connecting", JSON.stringify(saw.channels));
-	client.close();
+	muxClient.close();
 }
 
 // ------------------------------------------------------- 3. replay by reference
@@ -247,30 +247,30 @@ process.stdout.write("\nmux client: 一次尝试的硬截止\n");
 process.stdout.write("\nmux client: 重连后按引用重放\n");
 
 {
-	const { client, clock, sockets } = harness();
-	client.start();
+	const { muxClient, clock, sockets } = harness();
+	muxClient.start();
 	sockets.latest()?.deliver(heartbeat());
 
-	client.retain("s1", "pane");
-	client.retain("s2", "pane");
+	muxClient.retain("s1", "pane");
+	muxClient.retain("s2", "pane");
 	// Two reasons for the same session: one entry between them, both surviving a reconnect — and the
 	// second one still *asks*. `open` is an idempotent primitive now, so re-asking is how a pane
 	// coming back to a session a send is still holding gets a fresh baseline instead of silence.
-	client.retain("s2", "send");
+	muxClient.retain("s2", "send");
 	check("每次 retain 都发 open，重复订阅也发", opens(sockets.all[0]!).length === 3, JSON.stringify(uplink(sockets.all[0]!)));
 	check("同一会话的第二个理由再发一次 open", opens(sockets.all[0]!).filter((f) => f.sessionId === "s2").length === 2, JSON.stringify(uplink(sockets.all[0]!)));
 
 	// The drop. Everything the window still wants has to come back, and it comes back by reference —
 	// not because anything here remembered which sessions were open.
 	sockets.latest()?.drop();
-	check("掉线时频道变 down", client.channel === "down");
+	check("掉线时频道变 down", muxClient.channel === "down");
 	clock.tick(250);
 	sockets.latest()?.deliver(heartbeat());
 
 	const replayed = uplink(sockets.all[1]!);
 	check("重连后逐条重放 open", opens(sockets.all[1]!).length === 2, JSON.stringify(replayed));
 	check("重放的是窗口仍持有的会话", new Set(opens(sockets.all[1]!).map((f) => f.sessionId)).size === 2, JSON.stringify(replayed));
-	client.close();
+	muxClient.close();
 }
 
 // ------------------------------------------------------------ 4. ended is final
@@ -278,15 +278,15 @@ process.stdout.write("\nmux client: 重连后按引用重放\n");
 process.stdout.write("\nmux client: end 之后不再重开\n");
 
 {
-	const { client, clock, sockets, saw } = harness();
-	client.start();
+	const { muxClient, clock, sockets, saw } = harness();
+	muxClient.start();
 	sockets.latest()?.deliver(heartbeat());
-	client.retain("gone", "pane");
-	client.retain("alive", "pane");
+	muxClient.retain("gone", "pane");
+	muxClient.retain("alive", "pane");
 
 	sockets.latest()?.deliver(JSON.stringify({ streamId: "gone", end: true }));
 	check("end 通知到窗口", saw.ended.includes("gone"), JSON.stringify(saw.ended));
-	check("判终的流不再算被订阅", !client.isWatching("gone"));
+	check("判终的流不再算被订阅", !muxClient.isWatching("gone"));
 
 	sockets.latest()?.drop();
 	clock.tick(250);
@@ -297,11 +297,11 @@ process.stdout.write("\nmux client: end 之后不再重开\n");
 
 	// Pointing the pane away and back is a new gesture, so the terminal mark goes with the last
 	// reference and the stream comes back — once, not twice: nothing here is re-sending on reconnect.
-	client.release("gone", "pane");
-	client.retain("gone", "pane");
+	muxClient.release("gone", "pane");
+	muxClient.retain("gone", "pane");
 	const backAgain = uplink(sockets.all[1]!).filter((f) => f.sessionId === "gone");
 	check("重新指过去会再次订阅一次", backAgain.length === 1 && backAgain[0]?.type === "open", JSON.stringify(backAgain));
-	client.close();
+	muxClient.close();
 }
 
 // ------------------------------------------------------ 5. references drop out
@@ -309,19 +309,19 @@ process.stdout.write("\nmux client: end 之后不再重开\n");
 process.stdout.write("\nmux client: 引用归零\n");
 
 {
-	const { client, sockets } = harness();
-	client.start();
+	const { muxClient, sockets } = harness();
+	muxClient.start();
 	sockets.latest()?.deliver(heartbeat());
 
-	client.retain("s", "pane");
-	client.retain("s", "send");
-	client.release("s", "pane");
+	muxClient.retain("s", "pane");
+	muxClient.retain("s", "send");
+	muxClient.release("s", "pane");
 	check("还有理由时不发 cancel", !uplink(sockets.all[0]!).some((f) => f.type === "cancel"), JSON.stringify(uplink(sockets.all[0]!)));
 
-	client.release("s", "send");
+	muxClient.release("s", "send");
 	check("最后一个理由消失才发 cancel", uplink(sockets.all[0]!).some((f) => f.type === "cancel" && f.sessionId === "s"), JSON.stringify(uplink(sockets.all[0]!)));
-	check("之后不再持有这个会话", !client.isRetained("s"));
-	client.close();
+	check("之后不再持有这个会话", !muxClient.isRetained("s"));
+	muxClient.close();
 }
 
 // ------------------------------------------------------------ 6. envelope shapes
@@ -329,8 +329,8 @@ process.stdout.write("\nmux client: 引用归零\n");
 process.stdout.write("\nmux client: 按 streamId 分派\n");
 
 {
-	const { client, sockets, saw } = harness();
-	client.start();
+	const { muxClient, sockets, saw } = harness();
+	muxClient.start();
 	const socket = sockets.all[0];
 
 	socket?.deliver(heartbeat());
@@ -341,10 +341,10 @@ process.stdout.write("\nmux client: 按 streamId 分派\n");
 	socket?.deliver(JSON.stringify({ streamId: 42 }));
 
 	check("会话帧与连接帧各走各的路由", saw.messages.includes("s1/baseline") && saw.items.includes("heartbeat"), JSON.stringify(saw.messages));
-	check("读不懂的帧被丢掉而连接照旧活着", client.channel === "live", `got ${client.channel}`);
+	check("读不懂的帧被丢掉而连接照旧活着", muxClient.channel === "live", `got ${muxClient.channel}`);
 	check("会话级错误带上会话 id", saw.errors.includes("s1:跑不起来"), JSON.stringify(saw.errors));
 	check("连接级错误不带会话 id", saw.errors.includes("-:服务端内部错误"), JSON.stringify(saw.errors));
-	client.close();
+	muxClient.close();
 }
 
 // --------------------------------------------------------------- 7. row store
@@ -356,26 +356,26 @@ function row(id: string, modified: number, running = false, pending = 0): Sessio
 }
 
 {
-	const rows = new SessionRows();
-	rows.replaceAll([row("a", 100), row("b", 300)]);
+	const sessionRows = new SessionRows();
+	sessionRows.replaceAll([row("a", 100), row("b", 300)]);
 
 	// Newest activity first, and groups ordered by their own newest row — the same rule the server's
-	// projection applies, so a live channel and a REST fallback draw the same list.
-	const groups = rows.groups();
+	// hub's row store applies, so a live channel and a REST fallback draw the same list.
+	const groups = sessionRows.groups();
 	check("组内按 modified 降序", groups[0]?.sessions.map((r) => r.id).join(",") === "b,a", JSON.stringify(groups[0]?.sessions.map((r) => r.id)));
-	check("整行替换", rows.get("a")?.modified === 100);
+	check("整行替换", sessionRows.get("a")?.modified === 100);
 
-	rows.put({ ...row("a", 100), running: true });
-	check("增量替换整行", rows.get("a")?.running === true);
+	sessionRows.put({ ...row("a", 100), running: true });
+	check("增量替换整行", sessionRows.get("a")?.running === true);
 
 	// The rule that removes the race: while the channel owns the rows, a listing is refused outright
 	// rather than merged, so a file-derived snapshot can never put a working session back to idle.
-	const taken = rows.loadFrom([{ workDirAbsPath: "/w", sessions: [row("a", 100, false)] }], true);
-	check("通道 live 时 REST 列表被拒收", taken === false && rows.get("a")?.running === true, `taken=${taken}`);
+	const taken = sessionRows.loadFrom([{ workDirAbsPath: "/w", sessions: [row("a", 100, false)] }], true);
+	check("通道 live 时 REST 列表被拒收", taken === false && sessionRows.get("a")?.running === true, `taken=${taken}`);
 
-	rows.loadFrom([{ workDirAbsPath: "/w", sessions: [row("a", 100, false)] }], false);
-	check("通道不在时 REST 兜底", rows.get("a")?.running === false);
-	check("兜底也是整表替换（删掉的行会消失）", rows.get("b") === undefined, JSON.stringify([...rows.list()].map((r) => r.id)));
+	sessionRows.loadFrom([{ workDirAbsPath: "/w", sessions: [row("a", 100, false)] }], false);
+	check("通道不在时 REST 兜底", sessionRows.get("a")?.running === false);
+	check("兜底也是整表替换（删掉的行会消失）", sessionRows.get("b") === undefined, JSON.stringify([...sessionRows.list()].map((r) => r.id)));
 }
 
 // ------------------------------------------------------------------- 8. reducer
@@ -441,14 +441,14 @@ async function flushed(): Promise<void> {
 }
 
 {
-	const { client, sockets } = harness();
-	client.start();
+	const { muxClient, sockets } = harness();
+	muxClient.start();
 	sockets.latest()?.deliver(heartbeat());
 
 	// A navigation is a `retain` that names a series, and what it waits for is the baseline the server
 	// sends for that `open` — the same frame the stream anchors itself on, so no second one is asked
 	// for and nothing new appears on the wire.
-	const opened = watch(client.retain("s1", "pane", 1));
+	const opened = watch(muxClient.retain("s1", "pane", 1));
 	check("导航的 retain 发出 open", uplink(sockets.all[0]!).some((f) => f.type === "open" && f.sessionId === "s1"), JSON.stringify(uplink(sockets.all[0]!)));
 	check("基线之前导航未完成", opened().state === "pending", JSON.stringify(opened()));
 
@@ -459,7 +459,7 @@ async function flushed(): Promise<void> {
 
 	// A pane coming back to a session a send still holds: the retain asks again (ADR-0009), and that
 	// second baseline is what completes the second navigation.
-	const again = watch(client.retain("s1", "pane", 2));
+	const again = watch(muxClient.retain("s1", "pane", 2));
 	check("已订阅的会话再导航仍发 open", uplink(sockets.all[0]!).filter((f) => f.type === "open" && f.sessionId === "s1").length === 2, JSON.stringify(uplink(sockets.all[0]!)));
 	sockets.latest()?.deliver(baseline("s1"));
 	await flushed();
@@ -467,68 +467,68 @@ async function flushed(): Promise<void> {
 
 	// A send's reference asks for nothing to be completed, so there is no promise to leak — but it
 	// still asks for the stream, which is what keeps the run's frames coming.
-	check("send 的 retain 不索取完成", client.retain("s2", "send") === undefined);
+	check("send 的 retain 不索取完成", muxClient.retain("s2", "send") === undefined);
 	check("send 的 retain 也发 open", uplink(sockets.all[0]!).some((f) => f.type === "open" && f.sessionId === "s2"), JSON.stringify(uplink(sockets.all[0]!)));
-	client.close();
+	muxClient.close();
 }
 
 {
-	const { client, sockets } = harness();
-	client.start();
+	const { muxClient, sockets } = harness();
+	muxClient.start();
 	sockets.latest()?.deliver(heartbeat());
 
 	// One stream answers both asks, so a second navigation to the same session joins the wait rather
 	// than ending the first: the same snapshot answers both, and which click draws is the caller's own
 	// series to compare — this layer does not adjudicate that.
-	const first = watch(client.retain("s1", "pane", 1));
-	const second = watch(client.retain("s1", "pane", 2));
+	const first = watch(muxClient.retain("s1", "pane", 1));
+	const second = watch(muxClient.retain("s1", "pane", 2));
 	await flushed();
 	check("同一会话的第二次导航加入等待，不判第一次失败", first().state === "pending" && second().state === "pending", JSON.stringify([first(), second()]));
 
 	sockets.latest()?.deliver(baseline("s1"));
 	await flushed();
 	check("一份基线答清两次等待", first().state === "resolved" && second().state === "resolved", JSON.stringify([first(), second()]));
-	client.close();
+	muxClient.close();
 }
 
 {
-	const { client, sockets, saw } = harness();
-	client.start();
+	const { muxClient, sockets, saw } = harness();
+	muxClient.start();
 	sockets.latest()?.deliver(heartbeat());
 
 	// A refused stream is an answer, not a baseline that is still coming: the window hears it at once
 	// instead of waiting out its own timeout for a frame the server has decided not to send.
-	const opened = watch(client.retain("nope", "pane", 3));
+	const opened = watch(muxClient.retain("nope", "pane", 3));
 	sockets.latest()?.deliver(JSON.stringify({ streamId: "nope", error: { message: "未知的会话。" } }));
 	await flushed();
 	const refused = opened();
 	check("error 帧让导航失败", refused.state === "rejected" && refused.error === "未知的会话。", JSON.stringify(refused));
 	check("窗口照原样收到这条错误", saw.errors.includes("nope:未知的会话。"), JSON.stringify(saw.errors));
-	check("失败不撤订阅（重试由用户发起）", client.isRetained("nope") && client.isWatching("nope"));
-	client.close();
+	check("失败不撤订阅（重试由用户发起）", muxClient.isRetained("nope") && muxClient.isWatching("nope"));
+	muxClient.close();
 }
 
 {
-	const { client, sockets } = harness();
-	client.start();
+	const { muxClient, sockets } = harness();
+	muxClient.start();
 	sockets.latest()?.deliver(heartbeat());
 
 	// An ended stream will never carry a baseline, so the navigation is answered now.
-	const opened = watch(client.retain("gone", "pane", 4));
+	const opened = watch(muxClient.retain("gone", "pane", 4));
 	sockets.latest()?.deliver(JSON.stringify({ streamId: "gone", end: true }));
 	await flushed();
 	check("end 帧让导航失败", opened().state === "rejected", JSON.stringify(opened()));
-	client.close();
+	muxClient.close();
 }
 
 {
 	// A short timeout, so the deadline can be crossed on the fake clock; the heartbeat names a long
 	// interval so the watchdog is not what fires during this block.
-	const { client, clock, sockets } = harness({ openTimeoutMs: 120 });
-	client.start();
+	const { muxClient, clock, sockets } = harness({ openTimeoutMs: 120 });
+	muxClient.start();
 	sockets.latest()?.deliver(heartbeat(60_000));
 
-	const opened = watch(client.retain("slow", "pane", 5));
+	const opened = watch(muxClient.retain("slow", "pane", 5));
 	clock.tick(119);
 	await flushed();
 	check("超时之前仍在等", opened().state === "pending", JSON.stringify(opened()));
@@ -537,15 +537,15 @@ async function flushed(): Promise<void> {
 	check("本地超时让导航失败", opened().state === "rejected", JSON.stringify(opened()));
 	// The subscription stays: the baseline may still be queued, and a `cancel` would queue behind it.
 	// Letting go would release the stream, not the backlog.
-	check("超时不撤订阅、不发 cancel", client.isRetained("slow") && !uplink(sockets.all[0]!).some((f) => f.type === "cancel"), JSON.stringify(uplink(sockets.all[0]!)));
-	client.close();
+	check("超时不撤订阅、不发 cancel", muxClient.isRetained("slow") && !uplink(sockets.all[0]!).some((f) => f.type === "cancel"), JSON.stringify(uplink(sockets.all[0]!)));
+	muxClient.close();
 }
 
 {
-	const { client, clock, sockets } = harness();
-	client.start();
+	const { muxClient, clock, sockets } = harness();
+	muxClient.start();
 	sockets.latest()?.deliver(heartbeat());
-	const opened = watch(client.retain("s1", "pane", 6));
+	const opened = watch(muxClient.retain("s1", "pane", 6));
 
 	// Dropping the connection is not an answer about the session, so the navigation keeps waiting.
 	sockets.latest()?.drop();
@@ -557,31 +557,31 @@ async function flushed(): Promise<void> {
 	sockets.latest()?.deliver(baseline("s1"));
 	await flushed();
 	check("重放带来的基线完成导航", opened().state === "resolved", JSON.stringify(opened()));
-	client.close();
+	muxClient.close();
 }
 
 {
 	// The page load's own case: the pane is retained before the channel has proved itself. There is no
 	// frame to send, so a navigation is refused now rather than timing out later about a server nobody
 	// asked — while the intent stays recorded for the first live transition to replay.
-	const { client, sockets } = harness();
-	client.start();
-	const opened = watch(client.retain("early", "pane", 7));
+	const { muxClient, sockets } = harness();
+	muxClient.start();
+	const opened = watch(muxClient.retain("early", "pane", 7));
 	await flushed();
 	check("通道未 live 时导航立即失败", opened().state === "rejected", JSON.stringify(opened()));
 	check("这条 retain 没有发出任何帧", (sockets.all[0]?.sent.length ?? 0) === 0, JSON.stringify(sockets.all[0]?.sent));
-	check("意图仍记着，留给重放", client.isRetained("early"));
-	client.close();
+	check("意图仍记着，留给重放", muxClient.isRetained("early"));
+	muxClient.close();
 }
 
 {
-	const { client, sockets } = harness();
-	client.start();
+	const { muxClient, sockets } = harness();
+	muxClient.start();
 	sockets.latest()?.deliver(heartbeat());
-	const opened = watch(client.retain("s1", "pane", 8));
+	const opened = watch(muxClient.retain("s1", "pane", 8));
 	// A window going away has nobody left to answer, so nothing is left waiting on a baseline this
 	// connection will never receive.
-	client.close();
+	muxClient.close();
 	await flushed();
 	check("关掉通道让在等的导航失败", opened().state === "rejected", JSON.stringify(opened()));
 }
@@ -591,8 +591,8 @@ async function flushed(): Promise<void> {
 process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那份不画\n");
 
 {
-	const { client, sockets, saw } = harness();
-	client.start();
+	const { muxClient, sockets, saw } = harness();
+	muxClient.start();
 	sockets.latest()?.deliver(heartbeat());
 
 	// The window's half of the rule, restated here because nothing in this suite drives the window
@@ -605,7 +605,7 @@ process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那�
 	let drawn: ViewState = initialState();
 	const navigate = (sessionId: string): (() => Outcome<SessionSnapshot>) => {
 		const mine = (series += 1);
-		const promise = client.retain(sessionId, "pane", mine);
+		const promise = muxClient.retain(sessionId, "pane", mine);
 		const landed = watch(promise);
 		void promise.then(
 			(snapshot) => {
@@ -636,7 +636,7 @@ process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那�
 	// Someone else's reason still holds the stream (a send that outlived a run), and the pane points
 	// back at it. Every retain asks, so the send's own reference added an `open` too — what matters
 	// here is that navigating back asks *again* rather than trusting the entry it finds.
-	client.retain("s1", "send");
+	muxClient.retain("s1", "send");
 	const beforeComingBack = opensOn("s1");
 	const back = navigate("s1");
 	check("已订阅的会话再打开仍发 open", opensOn("s1") === beforeComingBack + 1, JSON.stringify(uplink(sockets.all[0]!)));
@@ -673,10 +673,10 @@ process.stdout.write("\n两份基线：重复 open 再送一份，迟到的那�
 	check("也不报错（被作废的那次没有变成错误条）", saw.errors.length === 0 && reported.length === 0, JSON.stringify([saw.errors, reported]));
 	check(
 		"两条订阅都还在，也没有谁替它们发过 cancel",
-		client.isRetained("a") && client.isRetained("b") && !uplink(sockets.all[0]!).some((f) => f.type === "cancel"),
+		muxClient.isRetained("a") && muxClient.isRetained("b") && !uplink(sockets.all[0]!).some((f) => f.type === "cancel"),
 		JSON.stringify(uplink(sockets.all[0]!)),
 	);
-	client.close();
+	muxClient.close();
 }
 
 process.stdout.write(failures === 0 ? "\nmux client ok\n" : `\n${failures} 项失败\n`);

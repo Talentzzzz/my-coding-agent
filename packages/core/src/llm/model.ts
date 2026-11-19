@@ -126,10 +126,10 @@ export class Model<TApi extends Api = Api> {
 	 * 可设置而不是固定，因为装配 session 的 host 会安装自己的——重试策略和「这个模型背后没有行」的
 	 * 回答都属于传输的周围，它们是 host 的，不是这个包的。其他一切把它当只读。
 	 */
-	transport: ChatTransport;
+	chatTransport: ChatTransport;
 
-	constructor(config: ModelConfig<TApi>, transport: ChatTransport = anthropicMessages) {
-		this.transport = transport;
+	constructor(config: ModelConfig<TApi>, chatTransport: ChatTransport = anthropicMessages) {
+		this.chatTransport = chatTransport;
 		// 逐字段写出，因为这些是 tsc 必须能看见的赋值：这里的声明不带 `!`，所以这个清单里缺一个
 		// 字段就是编译错误。
 		const f = fieldsFrom(config);
@@ -154,9 +154,9 @@ export class Model<TApi extends Api = Api> {
 	 * 经这个模型自己的传输发送一次请求。
 	 *
 	 * 签名就是传输自己的，减去模型：模型已经在这里了。想要重试策略或脚本化答案的调用方替换
-	 * {@link Model.transport} 而不是包装这个方法，所以请求离开这个对象的方式恰好只有一种。
+	 * {@link Model.chatTransport} 而不是包装这个方法，所以请求离开这个对象的方式恰好只有一种。
 	 */
 	stream(context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
-		return this.transport.stream(this, context, options);
+		return this.chatTransport.stream(this, context, options);
 	}
 }

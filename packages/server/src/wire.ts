@@ -143,11 +143,11 @@ export class Wire {
 	/** 本层关闭时通知的那一步，没有登记时为 `undefined`。 */
 	private closeListener: (() => void) | undefined;
 
-	private readonly sink: FrameSink;
+	private readonly frameSink: FrameSink;
 	private readonly options: ResolvedWireOptions;
 
-	constructor(sink: FrameSink, options: ResolvedWireOptions) {
-		this.sink = sink;
+	constructor(frameSink: FrameSink, options: ResolvedWireOptions) {
+		this.frameSink = frameSink;
 		this.options = options;
 	}
 
@@ -167,7 +167,7 @@ export class Wire {
 			this.enqueue(frame);
 			return;
 		}
-		if (this.sink.send(frame)) return;
+		if (this.frameSink.send(frame)) return;
 
 		// `false` 意味着这帧已被收进 socket 自己的缓冲、排队在*那里*，所以绝不能重写，否则会送达两次。从这一刻起连接算作停滞，这帧之后的一切都要等。
 		this.markStalled();
@@ -187,12 +187,12 @@ export class Wire {
 		if (this.closed) return;
 		if (this.missedPongs >= this.options.maxMissedPongs) {
 			this.options.log("mux: 客户端连续未回应 Ping，关闭连接");
-			this.sink.terminate();
+			this.frameSink.terminate();
 			this.close();
 			return;
 		}
 		this.missedPongs += 1;
-		this.sink.ping();
+		this.frameSink.ping();
 	}
 
 	/** 一个 Pong 到达：peer 活着，计数清零重来。 */
@@ -277,7 +277,7 @@ export class Wire {
 		let wrote = false;
 		while (this.queue.length > 0 && !this.closed) {
 			const frame = this.queue[0] as ServerFrame;
-			if (!this.sink.send(frame)) return;
+			if (!this.frameSink.send(frame)) return;
 			this.queuedBytes -= sizeOf(frame);
 			this.queue.shift();
 			wrote = true;
@@ -297,7 +297,7 @@ export class Wire {
 		const waited = Date.now() - this.stalledSince;
 		const backlog = Math.round(this.queuedBytes / 1024);
 		this.options.log(`mux: 停滞 ${waited} ms，积压 ${backlog} KB，关闭连接（1013）：订阅端停止读取`);
-		this.sink.close(CLOSE_TRY_AGAIN_LATER, REASON_STOPPED_READING);
+		this.frameSink.close(CLOSE_TRY_AGAIN_LATER, REASON_STOPPED_READING);
 		this.close();
 	}
 

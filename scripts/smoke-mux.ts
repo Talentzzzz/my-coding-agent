@@ -11,10 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { muxUpgrade, sessionListeners } from "../packages/server/src/boot.ts";
 import { createMuxServer } from "../packages/server/src/mux.ts";
-import { createSessionStream } from "../packages/server/src/stream.ts";
-import { createApprovalAnswers } from "../packages/server/src/approvals.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
-import { createSessionProjection } from "../packages/server/src/projection.ts";
 import { SessionController, SystemController } from "../packages/server/src/controllers/sessions.ts";
 import { createRoutes } from "../packages/server/src/controllers/routes.ts";
 import { Router } from "../packages/server/src/http/routing.ts";
@@ -104,7 +101,7 @@ const rows: ModelConfig[] = [
 
 interface Rig {
 	url: string;
-	hub: SessionHub;
+	sessionHub: SessionHub;
 	transport: FakeTransport;
 	close(): Promise<void>;
 }
@@ -115,29 +112,27 @@ const TOKENS_PER_SECOND = 400;
 async function openRig(): Promise<Rig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-mux-"));
 	const transport = createFakeTransport({ tokensPerSecond: TOKENS_PER_SECOND });
-	const hub = new SessionHub({ workDirAbsPath: root, api: transport.api });
-	hub.setModelConfigs(rows);
+	const sessionHub = new SessionHub({ workDirAbsPath: root, chatTransport: transport.chatTransport });
+	sessionHub.setModelConfigs(rows);
 
-	const projection = createSessionProjection(hub);
-	const answers = createApprovalAnswers();
-	const mux = createMuxServer((wire) => createSessionStream(wire, { hub, projection, answers }), { heartbeatIntervalMs: 150 });
+	const muxServer = createMuxServer({ sessionHub }, { heartbeatIntervalMs: 150 });
 	const router = new Router(
 		createRoutes({
-			system: new SystemController(hub),
-			sessions: new SessionController(hub, sessionListeners({ hub, answers }, projection)),
+			systemController: new SystemController(sessionHub),
+			sessionController: new SessionController(sessionHub, sessionListeners({ sessionHub })),
 		}),
 	);
-	const handle = await createServer({ router, clientDir: "packages/web/dist", onUpgrade: muxUpgrade(mux) });
-	await new Promise<void>((listen) => handle.server.listen(0, "127.0.0.1", listen));
-	const url = `http://127.0.0.1:${(handle.server.address() as { port: number }).port}`;
+	const httpServerHandle = await createServer({ router, clientDir: "packages/web/dist", onUpgrade: muxUpgrade(muxServer) });
+	await new Promise<void>((listen) => httpServerHandle.server.listen(0, "127.0.0.1", listen));
+	const url = `http://127.0.0.1:${(httpServerHandle.server.address() as { port: number }).port}`;
 
 	return {
 		url,
-		hub,
+		sessionHub,
 		transport,
 		close: async () => {
-			await hub.close();
-			await handle.close();
+			await sessionHub.close();
+			await httpServerHandle.close();
 			await rm(root, { recursive: true, force: true });
 		},
 	};
@@ -292,8 +287,8 @@ try {
 	// re-open 成为一次诚实的冷读：活半在场时的 baseline 读的是袋里的在飞状态。
 	check(
 		"the settled run's state is gone, so the re-open is an honest cold one",
-		await until(() => !rig.hub.isLive(laneId), 10_000),
-		String(rig.hub.isLive(laneId)),
+		await until(() => !rig.sessionHub.isLive(laneId), 10_000),
+		String(rig.sessionHub.isLive(laneId)),
 	);
 
 	const baselinesBefore = baselinesOn(wire, laneId);
@@ -381,7 +376,6 @@ try {
 	// 没有打开任何逻辑流。
 	const allRows = rowsForSession();
 	const finishedIndex = allRows.findIndex((row, index) => index > runningIndex && row.running === false);
-	const settledRow = allRows[allRows.length - 1];
 	check("the row reported the run while it was in flight", runningIndex >= 0, JSON.stringify(allRows.map((row) => row.running)));
 	check("and reported it finished afterwards", finishedIndex > runningIndex, JSON.stringify(allRows));
 	check(
@@ -391,8 +385,9 @@ try {
 	);
 	check(
 		"and the run stamped the row again",
-		settledRow !== undefined && settledRow.modified > 0,
-		`before=${modifiedBefore} after=${settledRow?.modified}`,
+		allRows.some((row) => typeof row.modified === "number" && row.modified > (modifiedBefore ?? 0)),
+		// 增量帧各自只带事件自带的字段（ADR-0027）：modified 随消息落地的增量到达，不在最后一帧。
+		`before=${modifiedBefore} stamps=${JSON.stringify(allRows.map((row) => row.modified))}`,
 	);
 
 	// ---------------------------------------------------------------------------------------------

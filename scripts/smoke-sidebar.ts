@@ -189,10 +189,10 @@ function rowsByName(sidebar: Sidebar): Map<string, { state: string | null; toolt
  * Membership rather than equality, the way `classList.contains` reads a class: a heading wears
  * `directory-head` and, when it is the current directory, one more class beside it.
  */
-function all(sidebar: Sidebar, className: string): { node: FakeNode; detached: boolean; created: number }[] {
-	const found: { node: FakeNode; detached: boolean; created: number }[] = [];
+function all(sidebar: Sidebar, className: string): { fakeNode: FakeNode; detached: boolean; created: number }[] {
+	const found: { fakeNode: FakeNode; detached: boolean; created: number }[] = [];
 	const walk = (node: FakeNode): void => {
-		if (node.classList.contains(className)) found.push({ node, detached: node.detached, created: node.created });
+		if (node.classList.contains(className)) found.push({ fakeNode: node, detached: node.detached, created: node.created });
 		for (const child of node.children) walk(child);
 	};
 	walk(root(sidebar));
@@ -301,16 +301,16 @@ process.stdout.write("\nsidebar：连接指示器\n");
 	sidebar.render(state([row("a", 1)], { channel: "connecting" }));
 	// The indicator lives in the foot now, beside the settings entry — the row it used to share with
 	// the brand is gone, and the foot is where window-level things live.
-	const indicator = all(sidebar, "channel-indicator")[0]?.node;
-	check("连接中：点在那一行上", indicator !== undefined && indicator.dataset.state === "connecting", JSON.stringify(indicator?.dataset.state));
-	check("连接中有文案", (indicator?.children[1]?.textContent ?? "") === "连接中…", JSON.stringify(indicator?.children[1]?.textContent));
+	const fakeNode = all(sidebar, "channel-indicator")[0]?.fakeNode;
+	check("连接中：点在那一行上", fakeNode !== undefined && fakeNode.dataset.state === "connecting", JSON.stringify(fakeNode?.dataset.state));
+	check("连接中有文案", (fakeNode?.children[1]?.textContent ?? "") === "连接中…", JSON.stringify(fakeNode?.children[1]?.textContent));
 
 	sidebar.render(state([row("a", 1)], { channel: "live" }));
-	check("live：同一个点", indicator !== undefined && indicator.dataset.state === "live", JSON.stringify(indicator?.dataset.state));
-	check("live 时没有文案", (indicator?.children[1]?.textContent ?? "") === "", JSON.stringify(indicator?.children[1]?.textContent));
+	check("live：同一个点", fakeNode !== undefined && fakeNode.dataset.state === "live", JSON.stringify(fakeNode?.dataset.state));
+	check("live 时没有文案", (fakeNode?.children[1]?.textContent ?? "") === "", JSON.stringify(fakeNode?.children[1]?.textContent));
 
 	sidebar.render(state([row("a", 1)], { channel: "down" }));
-	check("down 说它在重试", (indicator?.children[1]?.textContent ?? "").includes("重连"), JSON.stringify(indicator?.children[1]?.textContent));
+	check("down 说它在重试", (fakeNode?.children[1]?.textContent ?? "").includes("重连"), JSON.stringify(fakeNode?.children[1]?.textContent));
 }
 
 // ------------------------------------------- 5. a heading sits above its rows
@@ -337,7 +337,7 @@ process.stdout.write("\nsidebar：分组标题在会话行之上\n");
 	// testing the sort. What this looks at instead is the group's own child sequence: the heading is
 	// its first child, and no row is allowed above it. Before the fix the first row was inserted
 	// before the heading, so the list read "会话 a, 会话 b, 📁one".
-	const groups = all(sidebar, "directory").map((entry) => entry.node.children.map((child) => child.className));
+	const groups = all(sidebar, "directory").map((entry) => entry.fakeNode.children.map((fakeNode) => fakeNode.className));
 	check("两个分组都在", groups.length === 2, JSON.stringify(groups));
 	for (const order of groups) {
 		// The heading may carry the current-directory class beside its own, so the check is that the
@@ -370,12 +370,12 @@ process.stdout.write("\nsidebar：行会消失\n");
 	// a row. It has to go when the first directory arrives — otherwise every session of every group is
 	// drawn under a sentence saying there are none, which is what the window used to show.
 	sidebar.render(state([], { directories: [] }));
-	const phase = all(sidebar, "session-list-empty").map((entry) => entry.node.textContent);
+	const phase = all(sidebar, "session-list-empty").map((entry) => entry.fakeNode.textContent);
 	check("还没有目录时说暂无会话", phase.includes("暂无会话"), JSON.stringify(phase));
 	sidebar.render(state([row("a", 300)]));
 	const leftOver = all(sidebar, "session-list-empty")
 		.filter((entry) => !entry.detached)
-		.map((entry) => entry.node.textContent);
+		.map((entry) => entry.fakeNode.textContent);
 	check("目录一到，「暂无会话」就撤掉", !leftOver.includes("暂无会话"), JSON.stringify(leftOver));
 	check("撤掉之后行还在", titlesOf(sidebar).length === 1, JSON.stringify(titlesOf(sidebar).map((t) => t.title)));
 }
@@ -391,11 +391,11 @@ process.stdout.write("\nsidebar：搜索真的过滤\n");
 
 	// Opened by its own button, the way a click opens it; the shim records handlers, so dispatching
 	// one is dispatching the click.
-	const searchButton = all(sidebar, "icon-button").find((entry) => entry.node.getAttribute("title") === "搜索会话");
+	const searchButton = all(sidebar, "icon-button").find((entry) => entry.fakeNode.getAttribute("title") === "搜索会话");
 	check("搜索按钮在标题行上", searchButton !== undefined);
-	searchButton?.node.dispatch("click");
+	searchButton?.fakeNode.dispatch("click");
 
-	const input = all(sidebar, "search-input")[0]?.node;
+	const input = all(sidebar, "search-input")[0]?.fakeNode;
 	check("搜索行打开了输入框", input !== undefined);
 	if (input !== undefined) {
 		input.value = "alpha";
@@ -405,7 +405,7 @@ process.stdout.write("\nsidebar：搜索真的过滤\n");
 
 		input.value = "没有这一条";
 		input.dispatch("input");
-		const note = all(sidebar, "session-list-empty")[0]?.node;
+		const note = all(sidebar, "session-list-empty")[0]?.fakeNode;
 		check("没有匹配时说没有匹配", note !== undefined && note.textContent === "没有匹配的会话", JSON.stringify(note?.textContent));
 
 		input.value = "";
@@ -433,7 +433,7 @@ process.stdout.write("\nsidebar：fork 的行跟普通行一模一样\n");
 
 	const order = titlesOf(sidebar).map((t) => t.title);
 	check("fork 的行紧跟源行，名字带着（1）", order.join(",") === "会话 s,会话 s（1）", JSON.stringify(order));
-	check("没有任何行带着缩进深度", all(sidebar, "session-item").every((entry) => entry.node.getAttribute("data-depth") === null));
+	check("没有任何行带着缩进深度", all(sidebar, "session-item").every((entry) => entry.fakeNode.getAttribute("data-depth") === null));
 	check("没有任何 fork 标记", all(sidebar, "session-fork-mark").length === 0, JSON.stringify(all(sidebar, "session-fork-mark").length));
 }
 
@@ -473,7 +473,7 @@ process.stdout.write("\nsidebar：新会话出现在列表里\n");
 	// room: the client never inserts a row of its own.
 	const sourceRow = row("s", 300, { createdAt: 100 });
 	sidebar.render(state([sourceRow]));
-	const sourceNode = all(sidebar, "session-item")[0]?.node;
+	const fakeNode = all(sidebar, "session-item")[0]?.fakeNode;
 
 	sidebar.render(state([sourceRow, row("f", 200, { createdAt: 200, parentId: "s", title: "会话 s" })]));
 	const after = titlesOf(sidebar);
@@ -481,7 +481,7 @@ process.stdout.write("\nsidebar：新会话出现在列表里\n");
 	check("带着（1），紧跟源行", after.map((t) => t.title).join(",") === "会话 s,会话 s（1）", JSON.stringify(after.map((t) => t.title)));
 	check(
 		"原来的行没有为它重建",
-		all(sidebar, "session-item").some((entry) => entry.node === sourceNode && entry.created === 1 && !entry.detached),
+		all(sidebar, "session-item").some((entry) => entry.fakeNode === fakeNode && entry.created === 1 && !entry.detached),
 	);
 }
 
@@ -500,25 +500,25 @@ process.stdout.write("\nsidebar：右键菜单\n");
 	);
 
 	sidebar.render(state([row("a", 300), row("b", 200)]));
-	const target = all(sidebar, "session-item")[0]?.node;
+	const target = all(sidebar, "session-item")[0]?.fakeNode;
 	check("行在列表里", target !== undefined);
 	target?.dispatch("contextmenu", { clientX: 40, clientY: 60, preventDefault() {} });
 
-	const menu = bodyChildren().find((child) => child.className === "menu");
+	const menu = bodyChildren().find((fakeNode) => fakeNode.className === "menu");
 	check("菜单打开了", menu !== undefined);
 	const labels = (menu?.children ?? [])
-		.filter((child) => child.className === "menu-item")
-		.map((child) => child.querySelector(".menu-label")?.textContent ?? "");
+		.filter((fakeNode) => fakeNode.className === "menu-item")
+		.map((fakeNode) => fakeNode.querySelector(".menu-label")?.textContent ?? "");
 	check("三项都在：派生新会话、重命名、删除", labels.join("|") === "派生新会话|重命名|删除", JSON.stringify(labels));
 
-	const forkItem = (menu?.children ?? []).find((child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === "派生新会话");
+	const forkItem = (menu?.children ?? []).find((fakeNode) => fakeNode.className === "menu-item" && fakeNode.querySelector(".menu-label")?.textContent === "派生新会话");
 	forkItem?.dispatch("click");
 	check("派生拿到的是这一行的会话 id", forked.join(",") === "a", JSON.stringify(forked));
-	check("选完菜单收起了", bodyChildren().every((child) => child.className !== "menu"));
+	check("选完菜单收起了", bodyChildren().every((fakeNode) => fakeNode.className !== "menu"));
 
 	target?.dispatch("contextmenu", { clientX: 40, clientY: 60, preventDefault() {} });
-	const reopened = bodyChildren().find((child) => child.className === "menu");
-	const deleteItem = (reopened?.children ?? []).find((child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === "删除");
+	const reopened = bodyChildren().find((fakeNode) => fakeNode.className === "menu");
+	const deleteItem = (reopened?.children ?? []).find((fakeNode) => fakeNode.className === "menu-item" && fakeNode.querySelector(".menu-label")?.textContent === "删除");
 	deleteItem?.dispatch("click");
 	check("删除拿到的是同一行的会话 id", deleted.join(",") === "a", JSON.stringify(deleted));
 }
@@ -539,13 +539,13 @@ process.stdout.write("\nsidebar：就地改名\n");
 	const forked = row("f", 200, { createdAt: 200, parentId: "s", title: "会话 s" });
 	sidebar.render(state([sourceRow, forked]));
 
-	const forkRow = all(sidebar, "session-item")[1]?.node;
+	const forkRow = all(sidebar, "session-item")[1]?.fakeNode;
 	forkRow?.dispatch("contextmenu", { clientX: 10, clientY: 10, preventDefault() {} });
-	const menu = bodyChildren().find((child) => child.className === "menu");
-	const renameItem = (menu?.children ?? []).find((child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === "重命名");
+	const menu = bodyChildren().find((fakeNode) => fakeNode.className === "menu");
+	const renameItem = (menu?.children ?? []).find((fakeNode) => fakeNode.className === "menu-item" && fakeNode.querySelector(".menu-label")?.textContent === "重命名");
 	renameItem?.dispatch("click");
 
-	const input = all(sidebar, "rename-input")[0]?.node;
+	const input = all(sidebar, "rename-input")[0]?.fakeNode;
 	check("编辑框出现在行里", input !== undefined);
 	check("编辑的是去掉后缀的名字", input?.value === "会话 s", String(input?.value));
 
@@ -564,12 +564,12 @@ process.stdout.write("\nsidebar：就地改名\n");
 	check("行帧到了，名字换上、后缀自己拼回", titlesOf(sidebar).map((t) => t.title).join(",") === "会话 s,新名字（1）", JSON.stringify(titlesOf(sidebar).map((t) => t.title)));
 
 	// Escape sends nothing at all — the typed text included.
-	const rootRow = all(sidebar, "session-item")[0]?.node;
+	const rootRow = all(sidebar, "session-item")[0]?.fakeNode;
 	rootRow?.dispatch("contextmenu", { clientX: 10, clientY: 10, preventDefault() {} });
-	const again = bodyChildren().find((child) => child.className === "menu");
-	const renameAgain = (again?.children ?? []).find((child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === "重命名");
+	const again = bodyChildren().find((fakeNode) => fakeNode.className === "menu");
+	const renameAgain = (again?.children ?? []).find((fakeNode) => fakeNode.className === "menu-item" && fakeNode.querySelector(".menu-label")?.textContent === "重命名");
 	renameAgain?.dispatch("click");
-	const editor = all(sidebar, "rename-input")[0]?.node;
+	const editor = all(sidebar, "rename-input")[0]?.fakeNode;
 	if (editor !== undefined) {
 		editor.value = "没有这一笔";
 		editor.dispatch("keydown", { key: "Escape", preventDefault() {} });
@@ -586,15 +586,15 @@ process.stdout.write("\nsidebar：目录按最近活跃在前\n");
 	// window's live path must agree with it — a message landing in a directory moves that directory
 	// to the top of the sidebar. The store, not the view, owns this sort, so the check drives
 	// `SessionRows` directly: two groups whose newest rows disagree in both directions.
-	const store = new SessionRows();
-	store.put(row("a", 100, { workDirAbsPath: "/old" }));
-	store.put(row("c", 300, { workDirAbsPath: "/new" }));
-	check("初始：最近活跃的在前", store.groups().map((group) => group.workDirAbsPath).join(",") === "/new,/old", JSON.stringify(store.groups().map((group) => group.workDirAbsPath)));
+	const sessionRows = new SessionRows();
+	sessionRows.put(row("a", 100, { workDirAbsPath: "/old" }));
+	sessionRows.put(row("c", 300, { workDirAbsPath: "/new" }));
+	check("初始：最近活跃的在前", sessionRows.groups().map((group) => group.workDirAbsPath).join(",") === "/new,/old", JSON.stringify(sessionRows.groups().map((group) => group.workDirAbsPath)));
 
 	// A message lands in the older directory: its row's `modified` moves forward and the group order
-	// follows — the one frame the projection sends for every appended message.
-	store.put(row("a", 400, { workDirAbsPath: "/old" }));
-	check("活跃后：老的反超到第一", store.groups().map((group) => group.workDirAbsPath).join(",") === "/old,/new", JSON.stringify(store.groups().map((group) => group.workDirAbsPath)));
+	// follows — the one frame the hub sends for every appended message.
+	sessionRows.put(row("a", 400, { workDirAbsPath: "/old" }));
+	check("活跃后：老的反超到第一", sessionRows.groups().map((group) => group.workDirAbsPath).join(",") === "/old,/new", JSON.stringify(sessionRows.groups().map((group) => group.workDirAbsPath)));
 }
 
 // -------- 13. paging: one more page per press, one back per collapse, side by side
@@ -609,12 +609,12 @@ process.stdout.write("\nsidebar：分页 ——「展开其余」一次加一页
 	const rows = Array.from({ length: 12 }, (_unused, index) => row(`s${index}`, 1200 - index * 100));
 	const render = (): void => sidebar.render(state(rows, { activeSessionId: "s0", paging }));
 
-	const more = (): FakeNode => all(sidebar, "session-more")[0]!.node;
-	const collapse = (): FakeNode => all(sidebar, "session-collapse")[0]!.node;
-	const pagingRow = (): FakeNode => all(sidebar, "session-paging")[0]!.node;
+	const more = (): FakeNode => all(sidebar, "session-more")[0]!.fakeNode;
+	const collapse = (): FakeNode => all(sidebar, "session-collapse")[0]!.fakeNode;
+	const pagingRow = (): FakeNode => all(sidebar, "session-paging")[0]!.fakeNode;
 	// The buttons are patched, not rebuilt: 「收起」 stays in the row and its *presence* is the
 	// `hidden` attribute, so "is it on screen" is a visibility question, not a count of nodes.
-	const collapseShown = (): boolean => all(sidebar, "session-collapse").some((entry) => !entry.node.hidden);
+	const collapseShown = (): boolean => all(sidebar, "session-collapse").some((entry) => !entry.fakeNode.hidden);
 
 	render();
 	check("默认一页：只有 5 个会话", titlesOf(sidebar).length === 5, String(titlesOf(sidebar).length));
@@ -626,8 +626,8 @@ process.stdout.write("\nsidebar：分页 ——「展开其余」一次加一页
 	check("点一次多 5 条", titlesOf(sidebar).length === 10, String(titlesOf(sidebar).length));
 	check("按钮数到剩下的 2 个", more().textContent === "展开其余 2 个会话", more().textContent);
 	check("展开之后「收起」出现了", collapseShown(), String(collapseShown()));
-	check("两个按钮在同一行里", pagingRow().children.length === 2, JSON.stringify(pagingRow().children.map((child) => child.className)));
-	check("「收起」在「展开其余」的右边", pagingRow().children[0]?.classList.contains("session-collapse") === false && pagingRow().children[1]?.classList.contains("session-collapse") === true, JSON.stringify(pagingRow().children.map((child) => child.className)));
+	check("两个按钮在同一行里", pagingRow().children.length === 2, JSON.stringify(pagingRow().children.map((fakeNode) => fakeNode.className)));
+	check("「收起」在「展开其余」的右边", pagingRow().children[0]?.classList.contains("session-collapse") === false && pagingRow().children[1]?.classList.contains("session-collapse") === true, JSON.stringify(pagingRow().children.map((fakeNode) => fakeNode.className)));
 
 	more().dispatch("click");
 	render();
@@ -663,10 +663,10 @@ process.stdout.write("\nsidebar：表头收起只剩表头，重开回到上次�
 	render();
 
 	// Read down to the second page, then fold the whole directory away with its head.
-	all(sidebar, "session-more")[0]!.node.dispatch("click");
+	all(sidebar, "session-more")[0]!.fakeNode.dispatch("click");
 	render();
 	check("第二页在屏上", titlesOf(sidebar).length === 10, String(titlesOf(sidebar).length));
-	const head = (): FakeNode => all(sidebar, "directory-head")[0]!.node;
+	const head = (): FakeNode => all(sidebar, "directory-head")[0]!.fakeNode;
 	check("表头是个真按钮", head().tagName === "BUTTON", head().tagName);
 	check("展开时 aria-expanded=true", head().getAttribute("aria-expanded") === "true", String(head().getAttribute("aria-expanded")));
 	head().dispatch("click");
@@ -702,8 +702,8 @@ process.stdout.write("\nsidebar：分页按会话数走 —— 根加它的派�
 	check("第一页是五个会话：九行里进来八行", titles.length === 8, JSON.stringify(titles));
 	check("第五个会话在", titles.includes("会话 r3"), JSON.stringify(titles));
 	check("第六个会话不在", !titles.includes("会话 r4"), JSON.stringify(titles));
-	const more = all(sidebar, "session-more")[0]?.node;
-	check("按钮数的是被挡住的行", more?.textContent === "展开其余 1 个会话", more?.textContent ?? "");
+	const fakeNode = all(sidebar, "session-more")[0]?.fakeNode;
+	check("按钮数的是被挡住的行", fakeNode?.textContent === "展开其余 1 个会话", fakeNode?.textContent ?? "");
 }
 
 // ------------------------------- 16. a filter shows every match, paging or not
@@ -719,11 +719,11 @@ process.stdout.write("\nsidebar：搜索翻出全部匹配，收起与分页都�
 	check("收起的目录不出行", titlesOf(sidebar).length === 0, String(titlesOf(sidebar).length));
 
 	all(sidebar, "icon-button")
-		.find((entry) => entry.node.getAttribute("title") === "搜索会话")
-		?.node.dispatch("click");
-	const input = all(sidebar, "search-input")[0]!.node;
-	input.value = "s1";
-	input.dispatch("input");
+		.find((entry) => entry.fakeNode.getAttribute("title") === "搜索会话")
+		?.fakeNode.dispatch("click");
+	const fakeNode = all(sidebar, "search-input")[0]!.fakeNode;
+	fakeNode.value = "s1";
+	fakeNode.dispatch("input");
 	const titles = titlesOf(sidebar).map((t) => t.title);
 	// s1, s10, s11 — every match, in a group whose own list was folded away.
 	check("收着的目录照样给出全部匹配", titles.length === 3, JSON.stringify(titles));
@@ -759,26 +759,26 @@ await (async (): Promise<void> => {
 	// the pointer would name the wrong directory and be caught here.
 	const heads = all(sidebar, "directory-head");
 	check("两个表头都画出来了", heads.length === 2, String(heads.length));
-	heads[1]?.node.dispatch("contextmenu", { clientX: 30, clientY: 40, preventDefault() {} });
+	heads[1]?.fakeNode.dispatch("contextmenu", { clientX: 30, clientY: 40, preventDefault() {} });
 
-	const menu = (): FakeNode | undefined => bodyChildren().find((child) => child.className === "menu");
+	const menu = (): FakeNode | undefined => bodyChildren().find((fakeNode) => fakeNode.className === "menu");
 	check("菜单打开了", menu() !== undefined);
 	const labels = (menu()?.children ?? [])
-		.filter((child) => child.className === "menu-item")
-		.map((child) => child.querySelector(".menu-label")?.textContent ?? "");
+		.filter((fakeNode) => fakeNode.className === "menu-item")
+		.map((fakeNode) => fakeNode.querySelector(".menu-label")?.textContent ?? "");
 	check("三项都在：新建会话、重命名…、删除", labels.join("|") === "新建会话|重命名…|删除", JSON.stringify(labels));
 
 	// 新建会话 carries the workDirAbsPath it was asked on, which is the acceptance criterion of 票 06 in one line:
 	// the new session lands in the directory that was right-clicked, not in whatever is current.
 	const item = (label: string): FakeNode | undefined =>
 		(menu()?.children ?? []).find(
-			(child) => child.className === "menu-item" && child.querySelector(".menu-label")?.textContent === label,
+			(fakeNode) => fakeNode.className === "menu-item" && fakeNode.querySelector(".menu-label")?.textContent === label,
 		);
 	item("新建会话")?.dispatch("click");
 	check("新建会话拿到的是右键那个目录的路径", started.join(",") === "/two", JSON.stringify(started));
 	check("选完菜单收起了", menu() === undefined);
 
-	heads[1]?.node.dispatch("contextmenu", { clientX: 30, clientY: 40, preventDefault() {} });
+	heads[1]?.fakeNode.dispatch("contextmenu", { clientX: 30, clientY: 40, preventDefault() {} });
 	item("删除")?.dispatch("click");
 	check("删除拿到的是同一个目录", deleted.join(",") === "/two", JSON.stringify(deleted));
 
@@ -786,9 +786,9 @@ await (async (): Promise<void> => {
 	// and the heading passes it on with the group it was asked on. Committing here is the card's own
 	// contract, driven through the DOM the way the menu's items are — and every commit is awaited,
 	// because the heading's handler runs on the promise the card resolves.
-	heads[1]?.node.dispatch("contextmenu", { clientX: 30, clientY: 40, preventDefault() {} });
+	heads[1]?.fakeNode.dispatch("contextmenu", { clientX: 30, clientY: 40, preventDefault() {} });
 	item("重命名…")?.dispatch("click");
-	const card = bodyChildren().find((child) => child.className === "text-dialog-overlay");
+	const card = bodyChildren().find((fakeNode) => fakeNode.className === "text-dialog-overlay");
 	check("卡片打开了", card !== undefined);
 	const input = card?.querySelector(".text-dialog-input");
 	check("输入框里是当前的文件夹名", input?.value === "two", String(input?.value));
@@ -800,12 +800,12 @@ await (async (): Promise<void> => {
 	}
 	await settle();
 	check("提交的是原路径加新名字", renamed.length === 1 && renamed[0]!.workDirAbsPath === "/two" && renamed[0]!.name === "renamed", JSON.stringify(renamed));
-	check("卡片关上了", bodyChildren().every((child) => child.className !== "text-dialog-overlay"));
+	check("卡片关上了", bodyChildren().every((fakeNode) => fakeNode.className !== "text-dialog-overlay"));
 
 	// Typing the name the folder already wears is not a change, and a separator is not a name: both are
 	// dropped rather than sent, because the header rewrite assumes only the last segment moved.
 	const reopenAndType = async (value: string): Promise<void> => {
-		heads[1]?.node.dispatch("contextmenu", { clientX: 30, clientY: 40, preventDefault() {} });
+		heads[1]?.fakeNode.dispatch("contextmenu", { clientX: 30, clientY: 40, preventDefault() {} });
 		item("重命名…")?.dispatch("click");
 		const field = bodyChildren().find((child) => child.className === "text-dialog-overlay")?.querySelector(".text-dialog-input");
 		if (field != null) {
@@ -836,10 +836,10 @@ process.stdout.write("\nsidebar：重命名后表头跟着新路径走\n");
 	});
 
 	sidebar.render(two("/work/old"));
-	const head = all(sidebar, "directory-head")[0]!.node;
+	const head = all(sidebar, "directory-head")[0]!.fakeNode;
 	// The *wrapper* is what the sweep drops, and `remove()` only detaches the node it was called on — so
 	// the node whose survival is being checked has to be the wrapper, not the heading inside it.
-	const wrapper = head.parent!;
+	const wrapper = head.fakeNode!;
 	check("表头写着旧名字", head.querySelector(".directory-name")?.textContent === "old", String(head.querySelector(".directory-name")?.textContent));
 
 	// The group comes back under its new path, which is what the channel's row frames produce after the
@@ -848,9 +848,9 @@ process.stdout.write("\nsidebar：重命名后表头跟着新路径走\n");
 	sidebar.render(two("/work/new"));
 	const heads = all(sidebar, "directory-head");
 	check("只剩一个表头", heads.length === 1, String(heads.length));
-	check("名字换成了新文件夹名", heads[0]?.node.querySelector(".directory-name")?.textContent === "new", String(heads[0]?.node.querySelector(".directory-name")?.textContent));
-	check("tooltip 也换成了新路径", heads[0]?.node.getAttribute("title") === "/work/new", String(heads[0]?.node.getAttribute("title")));
-	check("旧分组连同它的表头一起从文档里摘掉了", wrapper.detached && head.parent === wrapper, `detached=${wrapper.detached} headParentKept=${head.parent === wrapper}`);
+	check("名字换成了新文件夹名", heads[0]?.fakeNode.querySelector(".directory-name")?.textContent === "new", String(heads[0]?.fakeNode.querySelector(".directory-name")?.textContent));
+	check("tooltip 也换成了新路径", heads[0]?.fakeNode.getAttribute("title") === "/work/new", String(heads[0]?.fakeNode.getAttribute("title")));
+	check("旧分组连同它的表头一起从文档里摘掉了", wrapper.detached && head.fakeNode === wrapper, `detached=${wrapper.detached} headParentKept=${head.fakeNode === wrapper}`);
 }
 
 // ------------------------- 20. the two roads that answer "nothing was asked"
@@ -863,7 +863,7 @@ process.stdout.write("\nsidebar：取消与被顶掉都要给出答案\n");
 	// life. None of that is visible on screen, which is why it is asserted here on the promise itself
 	// rather than through the sidebar's handler.
 	const dialog = { title: "重命名目录", label: "新的文件夹名", value: "two", confirm: "重命名" };
-	const settled = (): FakeNode | undefined => bodyChildren().find((child) => child.className === "text-dialog-overlay");
+	const settled = (): FakeNode | undefined => bodyChildren().find((fakeNode) => fakeNode.className === "text-dialog-overlay");
 	const keydownsBefore = shim.document.listenerCount("keydown");
 	/**
 	 * The card's answer, encoded — and a leak has to read as a failure rather than as a hung smoke: a
@@ -887,7 +887,7 @@ process.stdout.write("\nsidebar：取消与被顶掉都要给出答案\n");
 	// same leak by another road, and the second question is the one whose answer is still wanted.
 	const superseded = askForText(dialog);
 	const current = askForText(dialog);
-	check("屏幕上只剩一张卡片", bodyChildren().filter((child) => child.className === "text-dialog-overlay").length === 1);
+	check("屏幕上只剩一张卡片", bodyChildren().filter((fakeNode) => fakeNode.className === "text-dialog-overlay").length === 1);
 	check("被顶掉的那张以「什么都没问」收场", (await answerOf(superseded)) === "null");
 	shim.document.dispatch("keydown", { key: "Escape", stopPropagation() {} });
 	check("留在屏幕上的那张也能收场", (await answerOf(current)) === "null");

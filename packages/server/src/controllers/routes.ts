@@ -20,8 +20,8 @@ import type { SessionController, SystemController } from "./sessions.ts";
  * - `DELETE` 永久移除资源。它只存在一次，在会话本身上，因为会话是这里唯一一个"移除本身是目的"而不是"对别的东西产生影响"的对象。
  */
 export interface Controllers {
-	system: SystemController;
-	sessions: SessionController;
+	systemController: SystemController;
+	sessionController: SessionController;
 }
 
 export function createRoutes(controllers: Controllers): ApiRoute[] {
@@ -30,45 +30,45 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 			method: "GET",
 			path: "/api/health",
 			params: {},
-			handle: (_params, _request, response) => sendJson(response, 200, controllers.system.health()),
+			handle: (_params, _request, response) => sendJson(response, 200, controllers.systemController.health()),
 		}),
 		route({
 			method: "GET",
 			path: "/api/models",
 			params: {},
-			handle: (_params, _request, response) => sendJson(response, 200, { models: controllers.system.models() }),
+			handle: (_params, _request, response) => sendJson(response, 200, { models: controllers.systemController.models() }),
 		}),
 		route({
 			method: "GET",
 			path: "/api/tools",
 			params: {},
-			handle: (_params, _request, response) => sendJson(response, 200, { tools: controllers.system.toolNames() }),
+			handle: (_params, _request, response) => sendJson(response, 200, { tools: controllers.systemController.toolNames() }),
 		}),
 		route({
 			method: "PUT",
 			path: "/api/models",
 			params: {},
 			handle: async (_params, request, response) =>
-				sendJson(response, 200, controllers.system.updateModels(await readObjectBody(request))),
+				sendJson(response, 200, controllers.systemController.updateModels(await readObjectBody(request))),
 		}),
 		route({
 			method: "GET",
 			path: "/api/settings",
 			params: {},
-			handle: (_params, _request, response) => sendJson(response, 200, controllers.system.settings()),
+			handle: (_params, _request, response) => sendJson(response, 200, controllers.systemController.settings()),
 		}),
 		route({
 			method: "PATCH",
 			path: "/api/settings",
 			params: {},
 			handle: async (_params, request, response) =>
-				sendJson(response, 200, controllers.system.updateSettings(await readObjectBody(request))),
+				sendJson(response, 200, controllers.systemController.updateSettings(await readObjectBody(request))),
 		}),
 		route({
 			method: "GET",
 			path: "/api/directories",
 			params: {},
-			handle: async (_params, _request, response) => sendJson(response, 200, await controllers.system.directories()),
+			handle: async (_params, _request, response) => sendJson(response, 200, await controllers.systemController.directories()),
 		}),
 		route({
 			method: "POST",
@@ -76,7 +76,7 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 			path: "/api/directories/rename",
 			params: {},
 			handle: async (_params, request, response) =>
-				sendJson(response, 200, await controllers.system.renameDirectory(await readObjectBody(request))),
+				sendJson(response, 200, await controllers.systemController.renameDirectory(await readObjectBody(request))),
 		}),
 		route({
 			method: "POST",
@@ -84,19 +84,19 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 			path: "/api/directories/hide",
 			params: {},
 			handle: async (_params, request, response) =>
-				sendJson(response, 200, await controllers.system.hideDirectory(await readObjectBody(request))),
+				sendJson(response, 200, await controllers.systemController.hideDirectory(await readObjectBody(request))),
 		}),
 		route({
 			method: "GET",
 			path: "/api/sessions",
 			params: {},
-			handle: async (_params, _request, response) => sendJson(response, 200, await controllers.system.sessions()),
+			handle: async (_params, _request, response) => sendJson(response, 200, await controllers.systemController.sessions()),
 		}),
 		route({
 			method: "GET",
 			path: "/api/sessions/current",
 			params: {},
-			handle: async (_params, _request, response) => sendJson(response, 200, await controllers.system.current()),
+			handle: async (_params, _request, response) => sendJson(response, 200, await controllers.systemController.current()),
 		}),
 		route({
 			method: "POST",
@@ -106,34 +106,34 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 			path: "/api/sessions",
 			params: {},
 			handle: async (_params, request, response) =>
-				sendJson(response, 201, await controllers.sessions.birth(await readObjectBody(request))),
+				sendJson(response, 201, await controllers.sessionController.birth(await readObjectBody(request))),
 		}),
 		route({
 			method: "GET",
 			path: "/api/sessions/:id",
 			params: { id: stringParam },
-			handle: async (params, _request, response) => sendJson(response, 200, await controllers.sessions.read(params.id)),
+			handle: async (params, _request, response) => sendJson(response, 200, await controllers.sessionController.read(params.id)),
 		}),
 		route({
 			method: "POST",
 			path: "/api/sessions/:id/messages",
 			params: { id: stringParam },
 			handle: async (params, request, response) =>
-				sendJson(response, 202, await controllers.sessions.prompt(params.id, await readObjectBody(request))),
+				sendJson(response, 202, await controllers.sessionController.prompt(params.id, await readObjectBody(request))),
 		}),
 		route({
 			method: "POST",
 			path: "/api/sessions/:id/abort",
 			params: { id: stringParam },
 			handle: async (params, _request, response) =>
-				sendJson(response, 200, await controllers.sessions.abort(params.id)),
+				sendJson(response, 200, await controllers.sessionController.abort(params.id)),
 		}),
 		route({
 			method: "PATCH",
 			path: "/api/sessions/:id",
 			params: { id: stringParam },
 			handle: async (params, request, response) =>
-				sendJson(response, 200, await controllers.sessions.updateConfig(params.id, await readObjectBody(request))),
+				sendJson(response, 200, await controllers.sessionController.updateConfig(params.id, await readObjectBody(request))),
 		}),
 		route({
 			method: "POST",
@@ -144,7 +144,7 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 				sendJson(
 					response,
 					200,
-					await controllers.sessions.approve(params.id, params.toolCallId, await readObjectBody(request)),
+					await controllers.sessionController.approve(params.id, params.toolCallId, await readObjectBody(request)),
 				),
 		}),
 		route({
@@ -152,7 +152,7 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 			path: "/api/sessions/:id/forks",
 			params: { id: stringParam },
 			handle: async (params, request, response) =>
-				sendJson(response, 201, await controllers.sessions.fork(params.id, await readObjectBody(request))),
+				sendJson(response, 201, await controllers.sessionController.fork(params.id, await readObjectBody(request))),
 		}),
 		route({
 			// 201 而不是 200：改名会重写快照——被接受的请求在会话文件里留下了一个新值可以指认，这正是这个 status 所说的。
@@ -160,7 +160,7 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 			path: "/api/sessions/:id/title",
 			params: { id: stringParam },
 			handle: async (params, request, response) =>
-				sendJson(response, 201, await controllers.sessions.rename(params.id, await readObjectBody(request))),
+				sendJson(response, 201, await controllers.sessionController.rename(params.id, await readObjectBody(request))),
 		}),
 		route({
 			// 202 而不是 200：删除改否决式（ADR-0023）后不再被「有人在用」拒绝——存在性校验同步通过
@@ -169,14 +169,14 @@ export function createRoutes(controllers: Controllers): ApiRoute[] {
 			method: "DELETE",
 			path: "/api/sessions/:id",
 			params: { id: stringParam },
-			handle: async (params, _request, response) => sendJson(response, 202, await controllers.sessions.remove(params.id)),
+			handle: async (params, _request, response) => sendJson(response, 202, await controllers.sessionController.remove(params.id)),
 		}),
 		route({
 			method: "POST",
 			path: "/api/sessions/:id/branch",
 			params: { id: stringParam },
 			handle: async (params, request, response) =>
-				sendJson(response, 200, await controllers.sessions.branch(params.id, await readObjectBody(request))),
+				sendJson(response, 200, await controllers.sessionController.branch(params.id, await readObjectBody(request))),
 		}),
 	];
 	return routes;

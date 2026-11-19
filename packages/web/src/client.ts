@@ -815,14 +815,14 @@ export function muxUrl(location: { protocol: string; host: string }): string {
 /** 建立在浏览器自带 `WebSocket` 之上的 socket 工厂。 */
 export function browserSocket(url: string): MuxSocketFactory {
 	return (handlers) => {
-		const socket = new WebSocket(url);
-		socket.addEventListener("open", () => handlers.onOpen());
-		socket.addEventListener("message", (event) => handlers.onMessage(String(event.data)));
-		socket.addEventListener("close", () => handlers.onClose());
-		socket.addEventListener("error", () => handlers.onError());
+		const webSocket = new WebSocket(url);
+		webSocket.addEventListener("open", () => handlers.onOpen());
+		webSocket.addEventListener("message", (event) => handlers.onMessage(String(event.data)));
+		webSocket.addEventListener("close", () => handlers.onClose());
+		webSocket.addEventListener("error", () => handlers.onError());
 		return {
-			send: (text) => socket.send(text),
-			close: (code, reason) => socket.close(code, reason),
+			send: (text) => webSocket.send(text),
+			close: (code, reason) => webSocket.close(code, reason),
 		};
 	};
 }

@@ -214,8 +214,8 @@ function withCapabilities(config: ModelConfig): ModelConfig {
  * `transport` 是这个模型的发送方式。省略时用本包唯一的传输层；会话传入自己的，重试策略与「这个
  * 模型背后没有行」的答案都住在那里。
  */
-export function createModel(config: ModelConfig, thinkingLevel?: string, transport?: ChatTransport): Model {
-	const model = new Model(withCapabilities(config), transport);
+export function createModel(config: ModelConfig, thinkingLevel?: string, chatTransport?: ChatTransport): Model {
+	const model = new Model(withCapabilities(config), chatTransport);
 	if (thinkingLevel !== undefined) model.thinkingLevel = normalizeThinkingLevel(thinkingLevel);
 	return model;
 }
@@ -228,8 +228,8 @@ export function createModel(config: ModelConfig, thinkingLevel?: string, transpo
  * 是一个真实存在但其行不存在的模型，替它作答的是 {@link unconfiguredStream}。它的名字是那个保留名，
  * {@link isUnconfigured} 测的就是它，任何存储行都不得占用。
  */
-export function placeholderModel(transport?: ChatTransport): Model {
-	return createModel(PLACEHOLDER_CONFIG, undefined, transport);
+export function placeholderModel(chatTransport?: ChatTransport): Model {
+	return createModel(PLACEHOLDER_CONFIG, undefined, chatTransport);
 }
 
 /** 一个模型是否是占位模型，而不是用户输入的东西。 */
@@ -287,8 +287,8 @@ export function rowOrPlaceholder(choice: ModelChoice, catalog: readonly ModelCon
  * 的原因：没有副本会变陈旧。档位在 `createModel` 里规范化，应用叫不出名字的字符串落在 "off"，
  * 而不是端点会拒绝的值上。
  */
-export function modelFor(choice: ModelChoice, catalog: readonly ModelConfig[], transport?: ChatTransport): Model {
-	return createModel(rowOrPlaceholder(choice, catalog), choice.thinkingLevel, transport);
+export function modelFor(choice: ModelChoice, catalog: readonly ModelConfig[], chatTransport?: ChatTransport): Model {
+	return createModel(rowOrPlaceholder(choice, catalog), choice.thinkingLevel, chatTransport);
 }
 
 const ZERO_USAGE: AssistantMessage["usage"] = {
@@ -307,7 +307,7 @@ const ZERO_USAGE: AssistantMessage["usage"] = {
  * 用户能照着行动的话失败。它的形状与任何传输层的流一致，引擎读它如同读一次真实的失败。
  */
 export function unconfiguredStream(model: Model<Api>): AssistantMessageEventStream {
-	const stream = createAssistantMessageEventStream();
+	const assistantMessageEventStream = createAssistantMessageEventStream();
 	const message: AssistantMessage = {
 		role: "assistant",
 		content: [],
@@ -320,10 +320,10 @@ export function unconfiguredStream(model: Model<Api>): AssistantMessageEventStre
 	};
 	// 异步推送，让在流结束之前就挂上来的调用方——引擎正是——能像看到传输层的失败那样看到它。
 	queueMicrotask(() => {
-		stream.push({ type: "error", reason: "error", error: message });
-		stream.end();
+		assistantMessageEventStream.push({ type: "error", reason: "error", error: message });
+		assistantMessageEventStream.end();
 	});
-	return stream;
+	return assistantMessageEventStream;
 }
 
 // ---------------------------------------------------------------------------- 查找
@@ -331,11 +331,11 @@ export function unconfiguredStream(model: Model<Api>): AssistantMessageEventStre
 /** 各行收窄成客户端可见的样子。密钥本身永不离开服务器。 */
 export function listModelOptions(models: readonly ModelConfig[]): ModelOption[] {
 	return models.map((config) => {
-		const built = createModel(config);
+		const model = createModel(config);
 		return {
 			id: config.id,
 			name: config.name,
-			api: built.api,
+			api: model.api,
 			baseUrl: config.baseUrl,
 			contextWindow: config.contextWindow,
 			maxTokens: config.maxTokens,

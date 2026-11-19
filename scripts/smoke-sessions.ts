@@ -196,17 +196,17 @@ const vetoRows: ModelConfig[] = [
  * 「运行还在飞」因此是事实而不是猜测。abort 信号也放行——真正的 transport 尊重自己的 signal；
  * 被放行后剧本照常流完，被停下的轮次在磁盘上是一轮完整的轮次。
  */
-function vetoGate(): { api: ChatTransport; held(): boolean; sawAbort(): boolean; release(): void } {
+function vetoGate(): { chatTransport: ChatTransport; held(): boolean; sawAbort(): boolean; release(): void } {
 	const fake = createFakeTransport();
 	fake.setResponses([fakeAssistantMessage("被删除打断前的最后一条回答")]);
-	const inner = fake.api.stream.bind(fake.api);
+	const inner = fake.chatTransport.stream.bind(fake.chatTransport);
 	let held = false;
 	let aborted = false;
 	let release!: () => void;
 	const released = new Promise<void>((done) => {
 		release = done;
 	});
-	const api: ChatTransport = {
+	const chatTransport: ChatTransport = {
 		stream: (model, context, options) => {
 			const outer = createAssistantMessageEventStream();
 			void (async () => {
@@ -232,7 +232,7 @@ function vetoGate(): { api: ChatTransport; held(): boolean; sawAbort(): boolean;
 		},
 	};
 	return {
-		api,
+		chatTransport,
 		held: () => held,
 		sawAbort: () => aborted,
 		// 供排错用：从外面强制放行，正常路径里只有 abort 信号会到。
@@ -509,7 +509,7 @@ try {
 	// temporary working directory is ever touched.
 	const settingsRoot = await mkdtemp(join(tmpdir(), "my-agent-settings-"));
 	try {
-		const settings = inMemorySettingManager(
+		const settingManager = inMemorySettingManager(
 			{ tools: ["read", "bash"], modes: [{ name: "reader", tools: ["read"], approval: {} }] },
 			[],
 		);
@@ -517,7 +517,7 @@ try {
 		const sessionId = session.sessionId;
 		const options = {
 			session,
-			settings,
+			settingManager,
 		};
 		const known = ["read", "write", "edit", "glob", "grep", "bash"];
 		// 活会话的袋在第一条消息后作废：有文件就读，还没有就返回出生时的那只（它仍是 live 半上唯一
@@ -526,12 +526,12 @@ try {
 			const path = SessionManager.findSessionFilePathById(sessionId);
 			return path === undefined ? session : fillSession(path);
 		};
-		const resolvedOf = (): string[] => resolveSettings(replayed(), settings.getSettings(), [], known).tools;
+		const resolvedOf = (): string[] => resolveSettings(replayed(), settingManager.getSettings(), [], known).tools;
 
 		const cold = await readSessionSnapshot(options);
 		check("a session with no entry reports the default seat", cold.mode === undefined, cold.mode);
 
-		const live = await openAgent(options);
+		const agent = await openAgent(options);
 		try {
 			// The one message the branch test below can rewind to with nothing recorded after it.
 			const firstEntry = store.appendMessage(session, userMessage("before any choice"));
@@ -542,35 +542,35 @@ try {
 				JSON.stringify(resolvedOf()),
 			);
 
-			live.applyConfig(sessionId, { mode: "reader" });
-			check("a recorded pointer wins over the default", live.snapshot(sessionId).mode === "reader", live.snapshot(sessionId).mode);
+			agent.applyConfig(sessionId, { mode: "reader" });
+			check("a recorded pointer wins over the default", agent.snapshot(sessionId).mode === "reader", agent.snapshot(sessionId).mode);
 			check("and the resolved set is the preset's", JSON.stringify(resolvedOf()) === JSON.stringify(["read"]), JSON.stringify(resolvedOf()));
 
-			live.applyConfig(sessionId, { approval: { bash: false } });
+			agent.applyConfig(sessionId, { approval: { bash: false } });
 			check("an approval delta records beside the pointer", JSON.stringify(store.getRecordedToolConfig(replayed()).approval) === JSON.stringify({ bash: false }), JSON.stringify(store.getRecordedToolConfig(replayed()).approval));
 
 			// The pointer is the seat, not a value: `null` is the「回到默认」gesture, and the recorded
 			// delta survives the return — the session's own choice is not the mode's to erase.
-			live.applyConfig(sessionId, { mode: null });
-			check("returning to the default clears the pointer", live.snapshot(sessionId).mode === undefined, String(live.snapshot(sessionId).mode));
+			agent.applyConfig(sessionId, { mode: null });
+			check("returning to the default clears the pointer", agent.snapshot(sessionId).mode === undefined, String(agent.snapshot(sessionId).mode));
 			check("and the delta survives the return", store.getRecordedToolConfig(replayed()).approval?.bash === false, JSON.stringify(store.getRecordedToolConfig(replayed()).approval));
 
 			// A branch move changes the leaf and nothing else: the recorded choices are the session's
 			// own now, so the pointer it recorded stays in force.
-			live.branchTo(sessionId, firstEntry, false);
-			check("a branch move leaves the recorded pointer in force", live.snapshot(sessionId).mode === undefined, String(live.snapshot(sessionId).mode));
+			agent.branchTo(sessionId, firstEntry, false);
+			check("a branch move leaves the recorded pointer in force", agent.snapshot(sessionId).mode === undefined, String(agent.snapshot(sessionId).mode));
 
-			live.applyConfig(sessionId, { mode: "reader" });
+			agent.applyConfig(sessionId, { mode: "reader" });
 			// The cold read takes a bag, and the one the assembly handed over stopped being current
 			// the moment the session was born: a cold read of a spoken session is a replay (ADR-0013).
 			const recold = await readSessionSnapshot({ ...options, session: fillSession(session.sessionFileAbsPath ?? "") });
 			check(
 				"the cold read answers the seat exactly as the live snapshot does",
-				recold.mode === live.snapshot(sessionId).mode,
-				`${recold.mode} vs ${live.snapshot(sessionId).mode}`,
+				recold.mode === agent.snapshot(sessionId).mode,
+				`${recold.mode} vs ${agent.snapshot(sessionId).mode}`,
 			);
 		} finally {
-			await live.close(sessionId);
+			await agent.close(sessionId);
 		}
 	} finally {
 		await rm(settingsRoot, { recursive: true, force: true });
@@ -582,9 +582,9 @@ try {
 	// their snapshot from the same parts.
 	const http = await bootServer({ workDirAbsPath: root, port: 0 });
 	try {
-		const readId = await http.hub.birth({ text: "read me" });
-		hubSessions(http.hub).appendMessage(bagOf(http.hub, readId), userMessage("and me"));
-		check("the session is idle before the read", !http.hub.isLive(readId), String(http.hub.isLive(readId)));
+		const readId = await http.sessionHub.birth({ text: "read me" });
+		hubSessions(http.sessionHub).appendMessage(bagOf(http.sessionHub, readId), userMessage("and me"));
+		check("the session is idle before the read", !http.sessionHub.isLive(readId), String(http.sessionHub.isLive(readId)));
 
 		const firstRead = await get(`${http.url}/api/sessions/${readId}`);
 		check("GET /api/sessions/{id} answers 200", firstRead.status === 200, `status=${firstRead.status}`);
@@ -607,7 +607,7 @@ try {
 
 		// What the cold read must agree with. The facade's own snapshot is the comparison point:
 		// everything the session file can answer has to come out the same.
-		const liveSnapshot = http.hub.agent.snapshot(readId);
+		const liveSnapshot = http.sessionHub.agent.snapshot(readId);
 
 		// Everything the session file can answer must be identical; only what a loop answers may differ.
 		const fromLog = [
@@ -806,7 +806,7 @@ try {
 		// entry and answers 201, a blank one is refused before anything is written, and a delete takes
 		// the file with it — answered 202 and accepted no matter who was using the session, veto-style.
 		{
-			const victim = await http.hub.birth({ text: "要删的会话" });
+			const victim = await http.sessionHub.birth({ text: "要删的会话" });
 			const blank = await call("POST", `${http.url}/api/sessions/${victim}/title`, { title: "   " });
 			check("a blank name is refused (400)", blank.status === 400, `status=${blank.status}`);
 			const wrongType = await call("POST", `${http.url}/api/sessions/${victim}/title`, { title: 42 });
@@ -826,7 +826,9 @@ try {
 			check("and then it is a 404", gone.status === 404, `status=${gone.status}`);
 			const second = await call("DELETE", `${http.url}/api/sessions/${victim}`);
 			check("a second delete is a 404 too", second.status === 404, `status=${second.status}`);
-			check("and the file is really gone", SessionManager.findSessionFilePathById(victim) === undefined);
+			// 文件对在闸内异步落盘：第二次删除已是 404（它不再撞闸等待），收尾的 rm 可能仍在途——
+			// 最终断言轮询到它落地为止，不赌调度器的时机。
+			check("and the file is really gone", await until(() => SessionManager.findSessionFilePathById(victim) === undefined));
 		}
 	} finally {
 		await http.close();
@@ -1102,7 +1104,7 @@ try {
 	// (idle states die with the run that carried them) and `deleteSessionBySessionId`, which does
 	// not ask. There is no clear — the table lives and dies with the orchestrator itself.
 	{
-		const agent = createSessionAgent({ settings: new SettingManager({ models: [] }) });
+		const agent = createSessionAgent({ settingManager: new SettingManager({ models: [] }) });
 		const session = createSession(tmpdir());
 		// The door is class-private (`hold` / `createAndPrompt` are the verbs a caller spells);
 		// this block exercises the table itself — first-come-wins, membership, the delete exit — so it
@@ -1130,8 +1132,8 @@ try {
 		const id = session.sessionId;
 		const agent = await openAgent({
 			session,
-			api: gate.api,
-			settings: inMemorySettingManager({}, vetoRows),
+			chatTransport: gate.chatTransport,
+			settingManager: inMemorySettingManager({}, vetoRows),
 		});
 
 		const running = agent.prompt(id, "删除动手时我还在流式", { selection: { model: "anthropic" } });

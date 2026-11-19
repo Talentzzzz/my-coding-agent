@@ -117,7 +117,7 @@ export interface FakeTransportOptions {
 
 export interface FakeTransport {
 	/** 交给 `openAgent({ api })`。 */
-	api: ChatTransport;
+	chatTransport: ChatTransport;
 	fakeState: FakeState;
 	setResponses(responses: FakeResponseStep[]): void;
 	appendResponses(responses: FakeResponseStep[]): void;
@@ -248,7 +248,7 @@ function scheduleChunk(chunk: string, tokensPerSecond: number | undefined): Prom
 
 /** 把一份回答按真实 transport 发送的 delta 事件播完，全程尊重 `signal`。 */
 async function streamWithDeltas(
-	stream: AssistantMessageEventStream,
+	assistantMessageEventStream: AssistantMessageEventStream,
 	message: AssistantMessage,
 	minTokenSize: number,
 	maxTokenSize: number,
@@ -258,18 +258,18 @@ async function streamWithDeltas(
 	const partial: AssistantMessage = { ...message, content: [], stopReason: "pending" };
 	if (signal?.aborted) {
 		const aborted = createAbortedMessage(partial);
-		stream.push({ type: "error", reason: "aborted", error: aborted });
-		stream.end(aborted);
+		assistantMessageEventStream.push({ type: "error", reason: "aborted", error: aborted });
+		assistantMessageEventStream.end(aborted);
 		return;
 	}
 
-	stream.push({ type: "start", partial: { ...partial } });
+	assistantMessageEventStream.push({ type: "start", partial: { ...partial } });
 
 	for (let index = 0; index < message.content.length; index++) {
 		if (signal?.aborted) {
 			const aborted = createAbortedMessage(partial);
-			stream.push({ type: "error", reason: "aborted", error: aborted });
-			stream.end(aborted);
+			assistantMessageEventStream.push({ type: "error", reason: "aborted", error: aborted });
+			assistantMessageEventStream.end(aborted);
 			return;
 		}
 
@@ -280,65 +280,65 @@ async function streamWithDeltas(
 
 		if (block.type === "thinking") {
 			partial.content = [...partial.content, { type: "thinking", thinking: "" }];
-			stream.push({ type: "thinking_start", contentIndex: index, partial: { ...partial } });
+			assistantMessageEventStream.push({ type: "thinking_start", contentIndex: index, partial: { ...partial } });
 			for (const chunk of splitStringByTokenSize(block.thinking, minTokenSize, maxTokenSize)) {
 				await scheduleChunk(chunk, tokensPerSecond);
 				if (signal?.aborted) {
 					const aborted = createAbortedMessage(partial);
-					stream.push({ type: "error", reason: "aborted", error: aborted });
-					stream.end(aborted);
+					assistantMessageEventStream.push({ type: "error", reason: "aborted", error: aborted });
+					assistantMessageEventStream.end(aborted);
 					return;
 				}
 				(partial.content[index] as ThinkingContent).thinking += chunk;
-				stream.push({ type: "thinking_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
+				assistantMessageEventStream.push({ type: "thinking_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
 			}
-			stream.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: { ...partial } });
+			assistantMessageEventStream.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: { ...partial } });
 			continue;
 		}
 
 		if (block.type === "text") {
 			partial.content = [...partial.content, { type: "text", text: "" }];
-			stream.push({ type: "text_start", contentIndex: index, partial: { ...partial } });
+			assistantMessageEventStream.push({ type: "text_start", contentIndex: index, partial: { ...partial } });
 			for (const chunk of splitStringByTokenSize(block.text, minTokenSize, maxTokenSize)) {
 				await scheduleChunk(chunk, tokensPerSecond);
 				if (signal?.aborted) {
 					const aborted = createAbortedMessage(partial);
-					stream.push({ type: "error", reason: "aborted", error: aborted });
-					stream.end(aborted);
+					assistantMessageEventStream.push({ type: "error", reason: "aborted", error: aborted });
+					assistantMessageEventStream.end(aborted);
 					return;
 				}
 				(partial.content[index] as TextContent).text += chunk;
-				stream.push({ type: "text_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
+				assistantMessageEventStream.push({ type: "text_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
 			}
-			stream.push({ type: "text_end", contentIndex: index, content: block.text, partial: { ...partial } });
+			assistantMessageEventStream.push({ type: "text_end", contentIndex: index, content: block.text, partial: { ...partial } });
 			continue;
 		}
 
 		partial.content = [...partial.content, { type: "toolCall", id: block.id, name: block.name, arguments: {} }];
-		stream.push({ type: "toolcall_start", contentIndex: index, partial: { ...partial } });
+		assistantMessageEventStream.push({ type: "toolcall_start", contentIndex: index, partial: { ...partial } });
 		for (const chunk of splitStringByTokenSize(JSON.stringify(block.arguments), minTokenSize, maxTokenSize)) {
 			await scheduleChunk(chunk, tokensPerSecond);
 			if (signal?.aborted) {
 				const aborted = createAbortedMessage(partial);
-				stream.push({ type: "error", reason: "aborted", error: aborted });
-				stream.end(aborted);
+				assistantMessageEventStream.push({ type: "error", reason: "aborted", error: aborted });
+				assistantMessageEventStream.end(aborted);
 				return;
 			}
-			stream.push({ type: "toolcall_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
+			assistantMessageEventStream.push({ type: "toolcall_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
 		}
 		(partial.content[index] as ToolCall).arguments = block.arguments;
-		stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: { ...partial } });
+		assistantMessageEventStream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: { ...partial } });
 	}
 
 	if (message.stopReason === "pending") throw new Error("Fake response ended without a stop reason");
 	if (message.stopReason === "error" || message.stopReason === "aborted") {
-		stream.push({ type: "error", reason: message.stopReason, error: message });
-		stream.end(message);
+		assistantMessageEventStream.push({ type: "error", reason: message.stopReason, error: message });
+		assistantMessageEventStream.end(message);
 		return;
 	}
 
-	stream.push({ type: "done", reason: message.stopReason, message });
-	stream.end(message);
+	assistantMessageEventStream.push({ type: "done", reason: message.stopReason, message });
+	assistantMessageEventStream.end(message);
 }
 
 /**
@@ -361,46 +361,46 @@ export function createFakeTransport(options: FakeTransportOptions = {}): FakeTra
 		step: FakeResponseStep,
 		context: Context,
 		streamOptions: SimpleStreamOptions | undefined,
-		requestModel: Model<string>,
+		model: Model<string>,
 	): Promise<AssistantMessage> => {
-		const resolved = typeof step === "function" ? await step(context, streamOptions, fakeState, requestModel) : step;
-		return withUsageEstimate(cloneMessage(resolved, requestModel), context);
+		const resolved = typeof step === "function" ? await step(context, streamOptions, fakeState, model) : step;
+		return withUsageEstimate(cloneMessage(resolved, model), context);
 	};
 
-	const stream = (requestModel: Model<string>, context: Context, streamOptions?: SimpleStreamOptions) => {
-		const outer = createAssistantMessageEventStream();
+	const stream = (model: Model<string>, context: Context, streamOptions?: SimpleStreamOptions) => {
+		const assistantMessageEventStream = createAssistantMessageEventStream();
 		const step = pendingResponses.shift();
 		fakeState.callCount++;
 		// 在这里记录而不是在调用点断言：key 与 thinking 等级骑在 host 为本次请求构建的模型上，
 		// 所以这是检查能看到"一个请求实际会发送什么"的唯一地方。
-		fakeState.apiKeys.push(requestModel.apiKey);
-		fakeState.thinkingLevels.push(requestModel.thinkingLevel ?? "off");
+		fakeState.apiKeys.push(model.apiKey);
+		fakeState.thinkingLevels.push(model.thinkingLevel ?? "off");
 
 		queueMicrotask(async () => {
 			try {
 				if (!step) {
 					const message = withUsageEstimate(
-						createErrorMessage(new Error("No more fake responses queued"), requestModel),
+						createErrorMessage(new Error("No more fake responses queued"), model),
 						context,
 					);
-					outer.push({ type: "error", reason: "error", error: message });
-					outer.end(message);
+					assistantMessageEventStream.push({ type: "error", reason: "error", error: message });
+					assistantMessageEventStream.end(message);
 					return;
 				}
-				const message = await resolveResponse(step, context, streamOptions, requestModel);
-				await streamWithDeltas(outer, message, minTokenSize, maxTokenSize, tokensPerSecond, streamOptions?.signal);
+				const message = await resolveResponse(step, context, streamOptions, model);
+				await streamWithDeltas(assistantMessageEventStream, message, minTokenSize, maxTokenSize, tokensPerSecond, streamOptions?.signal);
 			} catch (error) {
-				const message = createErrorMessage(error, requestModel);
-				outer.push({ type: "error", reason: "error", error: message });
-				outer.end(message);
+				const message = createErrorMessage(error, model);
+				assistantMessageEventStream.push({ type: "error", reason: "error", error: message });
+				assistantMessageEventStream.end(message);
 			}
 		});
 
-		return outer;
+		return assistantMessageEventStream;
 	};
 
 	return {
-		api: {
+		chatTransport: {
 			stream: (model, context, streamOptions) => stream(model, context, streamOptions),
 		},
 		fakeState,

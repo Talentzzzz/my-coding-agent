@@ -78,21 +78,21 @@ process.stdout.write("\nmodes：模式页画出内置默认卡与用户模式\n"
 
 {
 	installDom();
-	const panel = new SettingsPanel(handlers());
-	panel.render({
+	const settingsPanel = new SettingsPanel(handlers());
+	settingsPanel.render({
 		// 默认工具包含 `bash`，所以卡片的摘要有一个问题可数：标准审批映射标记 write/edit/bash，
 		// 而 bash 正是列表携带的那个。
 		settings: settingsOf([{ name: "只读", tools: ["read", "glob", "grep"], approval: { bash: false, write: false, edit: false, read: false, glob: false, grep: false } }], ["read", "glob", "bash"]),
 		models: [],
 		toolNames: ALL_TOOLS,
 	});
-	panel.show("modes");
+	settingsPanel.show("modes");
 
-	const badges = all(panel.element as unknown as FakeNode, "mode-badge");
+	const badges = all(settingsPanel.element as unknown as FakeNode, "mode-badge");
 	check("内置默认卡带着「内置」徽标", badges.length === 1 && badges[0]!.textContent === "内置");
-	const rows = all(panel.element as unknown as FakeNode, "model-row");
+	const rows = all(settingsPanel.element as unknown as FakeNode, "model-row");
 	check("默认卡加一个用户模式，共两张卡", rows.length === 2, String(rows.length));
-	const summaries = all(panel.element as unknown as FakeNode, "mode-summary");
+	const summaries = all(settingsPanel.element as unknown as FakeNode, "mode-summary");
 	check("默认卡的摘要来自全局默认值", summaries[0]?.textContent === "3 个工具 · 1 项询问", summaries[0]?.textContent);
 	check("用户模式的摘要整份算出", summaries[1]?.textContent === "3 个工具 · 0 项询问", summaries[1]?.textContent);
 
@@ -125,7 +125,7 @@ process.stdout.write("\nmodes：默认卡展开同一套表单并写全局默认
 	panel.show("modes");
 
 	const rows = all(panel.element as unknown as FakeNode, "model-row");
-	const head = rows[0]!.children.find((child) => child.classList.contains("model-row-head"))!;
+	const head = rows[0]!.children.find((fakeNode) => fakeNode.classList.contains("model-row-head"))!;
 	head.dispatch("click");
 	const form = all(panel.element as unknown as FakeNode, "model-form")[0];
 	check("点默认卡的头展开内联表单", form !== undefined);
@@ -154,7 +154,7 @@ process.stdout.write("\nmodes：默认卡展开同一套表单并写全局默认
 	select.dispatch("change");
 	check("审批修改也留在草稿里", approvalWrites.length === 0, JSON.stringify(approvalWrites));
 
-	const save = all(form!, "button").find((button) => button.textContent === "保存")!;
+	const save = all(form!, "button").find((fakeNode) => fakeNode.textContent === "保存")!;
 	save.dispatch("click");
 	await flush();
 	check("保存把整份工具集写下去", JSON.stringify(toolsWrites.at(-1)) === JSON.stringify(ALL_TOOLS.filter((name) => name !== "bash")), JSON.stringify(toolsWrites.at(-1)));
@@ -175,11 +175,11 @@ process.stdout.write("\nmodes：默认卡展开同一套表单并写全局默认
 	bare.render({ settings: settingsOf(undefined), models: [], toolNames: [] });
 	bare.show("modes");
 	const bareRows = all(bare.element as unknown as FakeNode, "model-row");
-	const bareHead = bareRows[0]!.children.find((child) => child.classList.contains("model-row-head"))!;
+	const bareHead = bareRows[0]!.children.find((fakeNode) => fakeNode.classList.contains("model-row-head"))!;
 	bareHead.dispatch("click");
 	const bareForm = all(bare.element as unknown as FakeNode, "model-form")[0]!;
 	check("名单未取到时表单以六个内置兜底", all(bareForm, "mode-tool").length === ALL_TOOLS.length, String(all(bareForm, "mode-tool").length));
-	const bareSave = all(bareForm, "button").find((button) => button.textContent === "保存")!;
+	const bareSave = all(bareForm, "button").find((fakeNode) => fakeNode.textContent === "保存")!;
 	check("名单未取到时保存仍然开着", bareSave.disabled === false, String(bareSave.disabled));
 	bareSave.dispatch("click");
 	await flush();
@@ -193,15 +193,15 @@ process.stdout.write("\nmodes：用户模式整表保存\n");
 {
 	installDom();
 	const saves: ModeSettings[][] = [];
-	const panel = new SettingsPanel(handlers({ onSaveModes: async (modes) => saves.push(modes) }));
-	panel.render({ settings: settingsOf([{ name: "只读", tools: ["read"], approval: { bash: false, write: false, edit: false, read: false, glob: false, grep: false } }]), models: [], toolNames: ALL_TOOLS });
-	panel.show("modes");
+	const settingsPanel = new SettingsPanel(handlers({ onSaveModes: async (modes) => saves.push(modes) }));
+	settingsPanel.render({ settings: settingsOf([{ name: "只读", tools: ["read"], approval: { bash: false, write: false, edit: false, read: false, glob: false, grep: false } }]), models: [], toolNames: ALL_TOOLS });
+	settingsPanel.show("modes");
 
-	const rows = all(panel.element as unknown as FakeNode, "model-row");
+	const rows = all(settingsPanel.element as unknown as FakeNode, "model-row");
 	// 头部是门：点击它原地展开表单。
-	const head = rows[1]!.children.find((child) => child.classList.contains("model-row-head"))!;
+	const head = rows[1]!.children.find((fakeNode) => fakeNode.classList.contains("model-row-head"))!;
 	head.dispatch("click");
-	let form = all(panel.element as unknown as FakeNode, "model-form")[0];
+	let form = all(settingsPanel.element as unknown as FakeNode, "model-form")[0];
 	check("点头部打开内联表单", form !== undefined);
 
 	const name = form!.querySelector("input");
@@ -210,7 +210,7 @@ process.stdout.write("\nmodes：用户模式整表保存\n");
 	// 在表单里勾上 `bash`；它的审批下拉随之出现，停在 自动允许。shim 需要在 change 派发之前
 	// 手工设置 click 的终态。
 	const toolRows = all(form!, "mode-tool");
-	const bashRow = toolRows.find((row) => row.querySelector("input")!.getAttribute("aria-label") === "启用 bash")!;
+	const bashRow = toolRows.find((fakeNode) => fakeNode.querySelector("input")!.getAttribute("aria-label") === "启用 bash")!;
 	const bashBox = bashRow.querySelector("input")!;
 	bashBox.checked = true;
 	bashBox.dispatch("change");
@@ -218,12 +218,12 @@ process.stdout.write("\nmodes：用户模式整表保存\n");
 	check("勾上的工具带出审批下拉", bashSelect.getAttribute("disabled") === null, String(bashSelect.getAttribute("disabled")));
 	check("新勾的工具默认自动允许", bashSelect.value === "allow", bashSelect.value);
 
-	const save = all(form!, "button").find((button) => button.textContent === "保存")!;
+	const save = all(form!, "button").find((fakeNode) => fakeNode.textContent === "保存")!;
 	save.dispatch("click");
 	await flush();
 	check("保存把整份清单发下去", saves.length === 1, JSON.stringify(saves));
 	check("改名与工具变更一起落地", saves[0]?.[0]?.name === "只读改的" && saves[0]?.[0]?.tools.includes("bash") === true, JSON.stringify(saves[0]));
-	form = all(panel.element as unknown as FakeNode, "model-form")[0];
+	form = all(settingsPanel.element as unknown as FakeNode, "model-form")[0];
 	check("成功后表单收起", form === undefined);
 }
 
@@ -234,28 +234,28 @@ process.stdout.write("\nmodes：名字冲突就地拒绝\n");
 {
 	installDom();
 	const saves: ModeSettings[][] = [];
-	const panel = new SettingsPanel(handlers({ onSaveModes: async (modes) => saves.push(modes) }));
-	panel.render({
+	const settingsPanel = new SettingsPanel(handlers({ onSaveModes: async (modes) => saves.push(modes) }));
+	settingsPanel.render({
 		settings: settingsOf([{ name: "只读", tools: ["read"], approval: { bash: false, write: false, edit: false, read: false, glob: false, grep: false } }]),
 		models: [],
 		toolNames: ALL_TOOLS,
 	});
-	panel.show("modes");
+	settingsPanel.show("modes");
 
 	// 添加表单就是展开的那一行本身；空白草稿的名字进输入框。
-	const add = all(panel.element as unknown as FakeNode, "model-add")[0]!;
+	const add = all(settingsPanel.element as unknown as FakeNode, "model-add")[0]!;
 	add.dispatch("click");
-	let form = all(panel.element as unknown as FakeNode, "model-form")[0];
+	let form = all(settingsPanel.element as unknown as FakeNode, "model-form")[0];
 	check("新建模式展开空表单", form !== undefined);
 
 	const reserved = form!.querySelector("input");
 	reserved!.value = "默认";
 	reserved!.dispatch("input");
-	const save = all(form!, "button").find((button) => button.textContent === "保存")!;
+	const save = all(form!, "button").find((fakeNode) => fakeNode.textContent === "保存")!;
 	save.dispatch("click");
 	await flush();
 	check("内置名被拒绝且不下发", saves.length === 0, JSON.stringify(saves));
-	const note = all(panel.element as unknown as FakeNode, "settings-note")[0]!;
+	const note = all(settingsPanel.element as unknown as FakeNode, "settings-note")[0]!;
 	check("拒绝写在面板的注记里", note.textContent.includes("默认"), note.textContent);
 
 	// 客户端在服务器看到列表之前就以同样方式拒绝重名。
@@ -271,7 +271,7 @@ process.stdout.write("\nmodes：名字冲突就地拒绝\n");
 	save.dispatch("click");
 	await flush();
 	check("空工具集的模式照常保存", saves.length === 1 && saves[0]?.[1]?.name === "全关" && saves[0]?.[1]?.tools.length === 0, JSON.stringify(saves));
-	form = all(panel.element as unknown as FakeNode, "model-form")[0];
+	form = all(settingsPanel.element as unknown as FakeNode, "model-form")[0];
 	check("保存后表单收起", form === undefined);
 }
 
@@ -282,17 +282,17 @@ process.stdout.write("\nmodes：删除先问一次\n");
 {
 	installDom();
 	const saves: ModeSettings[][] = [];
-	const panel = new SettingsPanel(handlers({ onSaveModes: async (modes) => saves.push(modes) }));
-	panel.render({ settings: settingsOf([{ name: "只读", tools: ["read"], approval: { bash: false, write: false, edit: false, read: false, glob: false, grep: false } }]), models: [], toolNames: ALL_TOOLS });
-	panel.show("modes");
+	const settingsPanel = new SettingsPanel(handlers({ onSaveModes: async (modes) => saves.push(modes) }));
+	settingsPanel.render({ settings: settingsOf([{ name: "只读", tools: ["read"], approval: { bash: false, write: false, edit: false, read: false, glob: false, grep: false } }]), models: [], toolNames: ALL_TOOLS });
+	settingsPanel.show("modes");
 
-	const rows = all(panel.element as unknown as FakeNode, "model-row");
+	const rows = all(settingsPanel.element as unknown as FakeNode, "model-row");
 	const trash = byTitle(rows[1] as FakeNode, "删除这个模式");
 	check("悬停的回收站在行上", trash !== undefined);
 	trash!.dispatch("click");
-	const bar = all(panel.element as unknown as FakeNode, "model-confirm")[0];
+	const bar = all(settingsPanel.element as unknown as FakeNode, "model-confirm")[0];
 	check("确认条站在行内", bar !== undefined && bar.textContent.includes("只读"), bar?.textContent);
-	const danger = all(bar!, "button").find((button) => button.textContent === "删除")!;
+	const danger = all(bar!, "button").find((fakeNode) => fakeNode.textContent === "删除")!;
 	danger.dispatch("click");
 	await flush();
 	check("确认后清单少了一份", saves.length === 1 && saves[0]?.length === 0, JSON.stringify(saves));
@@ -329,7 +329,7 @@ process.stdout.write("\nmodes：输入框的模式座位与菜单\n");
 		{ label: "只读", detail: "3 个工具 · 0 项询问", onSelect: () => picked.push("只读") },
 	]);
 	const details = all(document.body as unknown as FakeNode, "menu-detail");
-	check("菜单行带着摘要行", details.map((node) => node.textContent).join("|") === "6 个工具 · 3 项询问|3 个工具 · 0 项询问", JSON.stringify(details.map((node) => node.textContent)));
+	check("菜单行带着摘要行", details.map((fakeNode) => fakeNode.textContent).join("|") === "6 个工具 · 3 项询问|3 个工具 · 0 项询问", JSON.stringify(details.map((fakeNode) => fakeNode.textContent)));
 	const items = all(document.body as unknown as FakeNode, "menu-item");
 	items[1]!.dispatch("click");
 	await flush();

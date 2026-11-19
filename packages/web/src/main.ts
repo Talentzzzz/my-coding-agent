@@ -177,7 +177,7 @@ function main(): void {
 		channelProved = resolve;
 	});
 	/** 侧栏的行：通道可用时由它写，不可用时由 REST 写。 */
-	const rows = new SessionRows();
+	const sessionRows = new SessionRows();
 
 	/**
 	 * 窗口当前在一个会话的哪次导航上，每次点击递增。
@@ -313,11 +313,11 @@ function main(): void {
 	header.append(branchView.toolsBar);
 
 	const transcriptHost = element("main", "transcript");
-	const transcript = new TranscriptView(transcriptHost, {
+	const transcriptView = new TranscriptView(transcriptHost, {
 		onUserContext: (entryId, x, y) => openUserMenu(entryId, x, y),
 		onBranch: (entryId) => void branch(entryId, false),
 	});
-	transcript.trackScroll();
+	transcriptView.trackScroll();
 
 	/**
 	 * 阅读列左缘的拖动把手。
@@ -538,7 +538,7 @@ function main(): void {
 	const chipLabel = element("span", "directory-chip-label");
 	directoryChip.append(icon("folder"), chipLabel, icon("chevron"));
 	directoryChip.addEventListener("click", () => {
-		const groups = rows.groups();
+		const groups = sessionRows.groups();
 		// 还什么都不知道：一个只有"添加目录"一行的单行菜单，是在假装存在过选择，所以点击直接去
 		// 选择器，与参考实现一致。
 		if (groups.length === 0) {
@@ -718,8 +718,8 @@ function main(): void {
 
 	// ----------------------------------------------------------------- 设置
 
-	const settings = new SettingsPanel({
-		onClose: () => settings.hide(),
+	const settingsPanel = new SettingsPanel({
+		onClose: () => settingsPanel.hide(),
 		onTheme: (theme) => void saveSettings({ appearance: { theme } }),
 		onFontSize: (fontSize) => void saveSettings({ appearance: { fontSize } }),
 		onBashTimeouts: (bash) => void saveSettings({ bash }),
@@ -727,7 +727,7 @@ function main(): void {
 		// 选择的会话会保留它们。
 		onGlobalApproval: (tool, value) => saveSettings({ approval: { [tool]: value } }),
 		onSaveModels: async (rows) => {
-			const { models } = await api.updateModels(rows);
+			const { models } = await sessionApi.updateModels(rows);
 			apply({ ...viewState, models });
 		},
 		// 模式列表，整体 —— 端点是替换式的，所以这里改名、那里删除会一起落地。返回的快照重新播种
@@ -742,11 +742,11 @@ function main(): void {
 	// 52px 的 rail 不是任何人会选择去拖的宽度。带排第一：作为 #app 的第一个 grid item，它占据
 	// 窗口的顶行，也就是标题按钮覆盖的那一条，它按设计保持空 —— 页面拥有的每个可触摸的东西都从
 	// 第 2 行开始，按钮因此盖不住任何东西。
-	root.append(titleband, sidebar.element, sidebarResizer, conversation, settings.element);
+	root.append(titleband, sidebar.element, sidebarResizer, conversation, settingsPanel.element);
 
 	// ------------------------------------------------------------------- 接线
 
-	const api = new SessionApi();
+	const sessionApi = new SessionApi();
 
 	/**
 	 * 唯一的常驻通道，以及窗口对服务端存活状况的全部认知。
@@ -755,7 +755,7 @@ function main(): void {
 	 * 任何东西都不再检查载荷形状，所以任一 union 的新成员都是协议的一次添加，而不是对每个读它的
 	 * 客户端的修改。
 	 */
-	const mux = new MuxClient(
+	const muxClient = new MuxClient(
 		{
 			onChannel: (next) => {
 				channel = next;
@@ -825,7 +825,7 @@ function main(): void {
 	 */
 	function releaseSend(sessionId: string): void {
 		runSeen.delete(sessionId);
-		mux.release(sessionId, "send");
+		muxClient.release(sessionId, "send");
 	}
 
 	/**
@@ -837,12 +837,12 @@ function main(): void {
 	 */
 	function onConnectionItem(item: ConnectionItem): void {
 		if (item.type === "sessions") {
-			rows.replaceAll(item.sessions);
+			sessionRows.replaceAll(item.sessions);
 			renderSidebar();
 			return;
 		}
 		if (item.type === "session_row") {
-			rows.put(item.session);
+			sessionRows.put(item.session);
 			renderSidebar();
 			return;
 		}
@@ -851,7 +851,7 @@ function main(): void {
 			// 共享的那一个 —— 被别的窗口删除的会话，对本窗口的折叠与本地删除完全一样，因为无论谁说
 			// 的，没了就是没了。
 			foldFromDeleted(item.sessionId);
-			rows.remove(item.sessionId);
+			sessionRows.remove(item.sessionId);
 			renderSidebar();
 			return;
 		}
@@ -869,7 +869,7 @@ function main(): void {
 		// 名字在签名里的理由与分页映射相同：改名不动行表的任何东西，忽略标签的签名意味着这次点击
 		// 什么都不重画。
 		const names = viewState.settings?.directoryNames;
-		const drawn = `${rows.version}|${followed ?? ""}|${draft?.id ?? ""}|${draft?.workDirAbsPath ?? ""}|${draftRowMap.size}|${absPickedDirectory}|${collapsed ? 1 : 0}|${channel}|${JSON.stringify(paging)}|${JSON.stringify(names ?? {})}`;
+		const drawn = `${sessionRows.version}|${followed ?? ""}|${draft?.id ?? ""}|${draft?.workDirAbsPath ?? ""}|${draftRowMap.size}|${absPickedDirectory}|${collapsed ? 1 : 0}|${channel}|${JSON.stringify(paging)}|${JSON.stringify(names ?? {})}`;
 		if (drawn === sidebarDrawn) return;
 		sidebarDrawn = drawn;
 		const activeSessionId = followed ?? draft?.id;
@@ -892,7 +892,7 @@ function main(): void {
 	 * 刚写下的草稿排在本目录的最前、它的目录排到列表的最上。
 	 */
 	function directoriesWithDrafts(): DirectoryGroup[] {
-		const groups = [...rows.groups()];
+		const groups = [...sessionRows.groups()];
 		for (const draftSession of draftRowMap.values()) {
 			const row: SessionRow = {
 				id: draftSession.id,
@@ -986,7 +986,7 @@ function main(): void {
 	 * —— 中间状态没有在任何一帧里出现过。折叠本身仍逐事件运行（它是廉价的不可变更新），状态的
 	 * 任何东西都没被跳过；只有绘制被留给那一帧，绘制的是运行到达的最后一个状态。
 	 */
-	const deltaDraw = new OncePerFrame(() => {
+	const oncePerFrame = new OncePerFrame(() => {
 		const previous = drawnState;
 		drawnState = viewState;
 		drawState(viewState, previous);
@@ -1005,12 +1005,12 @@ function main(): void {
 	function apply(next: ViewState, options: ApplyOptions = {}): void {
 		viewState = next;
 		if (options.coalesce === true) {
-			deltaDraw.schedule();
+			oncePerFrame.schedule();
 			return;
 		}
 		// 一次立即绘制取代已排队的那个：它马上就要绘制这个状态，而已装填的帧会在一次刷新之后再
 		// 画它一遍。
-		deltaDraw.cancel();
+		oncePerFrame.cancel();
 		const previous = drawnState;
 		drawnState = next;
 		drawState(next, previous, options);
@@ -1030,8 +1030,8 @@ function main(): void {
 		if (next.items !== previous.items || next.streaming !== previous.streaming) {
 			// `deferred` 由唯一一个一次交出整段对话的调用者设置 —— 会话切换 —— 那里的绘制是切换的
 			// 成本，绝不能占住帧。其他每个帧携带的都是读者正在看着到达的 delta，整体落地。
-			if (options.deferred) transcript.renderDeferred(next.items, next.streaming);
-			else transcript.render(next.items, next.streaming);
+			if (options.deferred) transcriptView.renderDeferred(next.items, next.streaming);
+			else transcriptView.render(next.items, next.streaming);
 		}
 		if (next.reachable !== previous.reachable) composer.setDisabled(composerDisabled());
 		if (next.streaming !== previous.streaming) composer.setStreaming(next.streaming);
@@ -1096,8 +1096,8 @@ function main(): void {
 
 	/** 打开应用级设置面板，可选直接落到某个标签页。 */
 	function openSettings(tab?: "modes"): void {
-		settings.show(tab);
-		settings.render({
+		settingsPanel.show(tab);
+		settingsPanel.render({
 			models: viewState.models,
 			toolNames: viewState.toolNames ?? [],
 			...(viewState.settings ? { settings: viewState.settings } : {}),
@@ -1145,7 +1145,7 @@ function main(): void {
 			report(new Error("还没有挂上任何会话。"));
 			return;
 		}
-		void api.setConfig(followed, { mode: name === DEFAULT_MODE_NAME ? null : name }).catch(report);
+		void sessionApi.setConfig(followed, { mode: name === DEFAULT_MODE_NAME ? null : name }).catch(report);
 	}
 
 	function render(): void {
@@ -1191,7 +1191,7 @@ function main(): void {
 		composer.setDisabled(composerDisabled());
 
 		// 空态的问题跟着草稿的状态走：无目录草稿不能开始对话，问题换成先选目录的指引。
-		transcript.setWelcomeText(
+		transcriptView.setWelcomeText(
 			followed === undefined && draft !== undefined && draft.workDirAbsPath === undefined
 				? "先在下方选一个目录，再开始对话。"
 				: undefined,
@@ -1241,8 +1241,8 @@ function main(): void {
 		renderStatusBar();
 		renderApprovals();
 
-		if (settings.open) {
-			settings.render({
+		if (settingsPanel.open) {
+			settingsPanel.render({
 				models: viewState.models,
 				toolNames: viewState.toolNames ?? [],
 				...(viewState.settings ? { settings: viewState.settings } : {}),
@@ -1325,10 +1325,10 @@ function main(): void {
 		allow.textContent = "允许一次";
 		// 每个答案一次请求，发给提示所来自的那个会话。
 		deny.addEventListener("click", () => {
-			if (followed !== undefined) void api.approve(followed, approval.toolCallId, false).catch(report);
+			if (followed !== undefined) void sessionApi.approve(followed, approval.toolCallId, false).catch(report);
 		});
 		allow.addEventListener("click", () => {
-			if (followed !== undefined) void api.approve(followed, approval.toolCallId, true).catch(report);
+			if (followed !== undefined) void sessionApi.approve(followed, approval.toolCallId, true).catch(report);
 		});
 
 		const actions = element("div", "approval-actions");
@@ -1392,7 +1392,7 @@ function main(): void {
 		// 发出的 `cancel` 会排在它后面、什么也释放不了（ADR-0010）—— 所以释放发生在这里，晚一次
 		// 手势，当窗口选择了看别的东西。同一会话的重试跳过它，这正是让重试复用流而不是再要一次的
 		// 机制。
-		if (opening !== undefined && opening !== followed && opening !== sessionId) mux.release(opening, "pane");
+		if (opening !== undefined && opening !== followed && opening !== sessionId) muxClient.release(opening, "pane");
 		const series = (openSeries += 1);
 		opening = sessionId;
 		setPane("chat");
@@ -1400,7 +1400,7 @@ function main(): void {
 
 		let snapshot: SessionSnapshot;
 		try {
-			snapshot = await mux.retain(sessionId, "pane", series);
+			snapshot = await muxClient.retain(sessionId, "pane", series);
 		} catch (error) {
 			showLoading(series, false);
 			// 被取代导航的失败不是窗格的新闻：用户正在看一个打开成功的会话，关于他们离开的那个
@@ -1418,7 +1418,7 @@ function main(): void {
 		reachable();
 		// 上一个窗格的引用现在放开，新的已落地，这条连接就为一个窗格观看一个会话。绝不为了正在
 		// 打开的会话：同一行第二次点击时引用是同一个，释放它会把流从即将绘制的窗格下面抽走。
-		if (followed !== undefined && followed !== snapshot.id) mux.release(followed, "pane");
+		if (followed !== undefined && followed !== snapshot.id) muxClient.release(followed, "pane");
 		// 离开的那个若是草稿，它的席位一并交出：屏幕上即将出现的会话是真实的，`draft` 的互斥半
 		// 从这里开始成立。
 		if (draft?.id !== snapshot.id) draft = undefined;
@@ -1440,11 +1440,11 @@ function main(): void {
 
 	/** 经 REST 重读侧栏的行，但只在通道不是权威时。 */
 	async function refreshLists(): Promise<void> {
-		const { directories } = await api.listDirectories();
+		const { directories } = await sessionApi.listDirectories();
 		reachable();
 		// 通道 live 时被拒绝。一张表两个写入者正是要避免的竞态：从文件算出的列表会落在一次
 		// `running: true` 之后，把行拉回空闲，窗口就会把正在工作的会话显示成没在工作。
-		if (!rows.loadFrom(directories, channel === "live")) return;
+		if (!sessionRows.loadFrom(directories, channel === "live")) return;
 		renderSidebar();
 	}
 
@@ -1468,7 +1468,7 @@ function main(): void {
 	}
 
 	async function writeSettings(patch: Parameters<SessionApi["updateSettings"]>[0]): Promise<void> {
-		const { settings: saved } = await api.updateSettings(patch);
+		const { settings: saved } = await sessionApi.updateSettings(patch);
 		// 立即应用而不是等重渲染：字号和主题是两个其全部价值就在于看到它们变化的设置。分支页的
 		// 卡片以字阶度量，所以它是唯一必须被告知重新度量的视图。
 		applyAppearance(saved);
@@ -1501,7 +1501,7 @@ function main(): void {
 			const selection = selectionForSend();
 			let createdId: string;
 			try {
-				const created = await api.createSession({
+				const created = await sessionApi.createSession({
 					text,
 					workDirAbsPath: source.workDirAbsPath,
 					...(behavior === undefined ? {} : { behavior }),
@@ -1537,12 +1537,12 @@ function main(): void {
 			return;
 		}
 
-		mux.retain(target, "send");
+		muxClient.retain(target, "send");
 		// 席位的选择随消息走、且只随消息走：服务端在接受提示的同时应用选择，所以选择绝不是一条可以
 		// 单独施加的命令。
 		const selection = selectionForSend();
 		try {
-			await api.prompt(target, text, behavior, {
+			await sessionApi.prompt(target, text, behavior, {
 				model: selection.model,
 				thinkingLevel: selection.level,
 			});
@@ -1559,7 +1559,7 @@ function main(): void {
 	async function abort(): Promise<void> {
 		if (followed === undefined) return;
 		try {
-			await api.abort(followed);
+			await sessionApi.abort(followed);
 			reachable();
 		} catch (error) {
 			unreachable(error);
@@ -1595,14 +1595,14 @@ function main(): void {
 	function openDraft(sessionId: string): void {
 		const target = draftRowMap.get(sessionId);
 		if (target === undefined) return;
-		if (opening !== undefined && opening !== followed && opening !== sessionId) mux.release(opening, "pane");
+		if (opening !== undefined && opening !== followed && opening !== sessionId) muxClient.release(opening, "pane");
 		const series = (openSeries += 1);
 		opening = sessionId;
 		setPane("chat");
 		// 上一次导航可能还亮着加载提示 —— 草稿的打开是即时的，它的等待到这一刻就结束了。
 		showLoading(series, false);
 		if (followed !== undefined) {
-			mux.release(followed, "pane");
+			muxClient.release(followed, "pane");
 			followed = undefined;
 		}
 		draft = target;
@@ -1629,7 +1629,7 @@ function main(): void {
 	 */
 	async function renameDirectory(workDirAbsPath: string, name: string): Promise<void> {
 		try {
-			const answer = await api.renameDirectory(workDirAbsPath, name);
+			const answer = await sessionApi.renameDirectory(workDirAbsPath, name);
 			reachable();
 			apply({ ...viewState, settings: answer.settings });
 			// 设置快照动了，但门的签名里没有任何必须跟着动的东西：行还是那些行，否则戴着新标签的
@@ -1652,9 +1652,9 @@ function main(): void {
 	 */
 	async function deleteDirectory(workDirAbsPath: string): Promise<void> {
 		try {
-			const answer = await api.hideDirectory(workDirAbsPath);
+			const answer = await sessionApi.hideDirectory(workDirAbsPath);
 			reachable();
-			rows.loadFrom(answer.directories, channel === "live");
+			sessionRows.loadFrom(answer.directories, channel === "live");
 			applyAppearance(answer.settings);
 			branchView.remeasure();
 			apply({ ...viewState, settings: answer.settings });
@@ -1675,7 +1675,7 @@ function main(): void {
 	 */
 	async function forkSession(sessionId: string): Promise<void> {
 		try {
-			const created = await api.forkSession(sessionId, null);
+			const created = await sessionApi.forkSession(sessionId, null);
 			reachable();
 			await openSession(created.sessionId);
 		} catch (error) {
@@ -1692,7 +1692,7 @@ function main(): void {
 	 */
 	async function renameSession(sessionId: string, title: string): Promise<void> {
 		try {
-			const { title: stored } = await api.renameSession(sessionId, title);
+			const { title: stored } = await sessionApi.renameSession(sessionId, title);
 			reachable();
 			if (followed === sessionId && viewState.snapshot !== undefined) {
 				apply({ ...viewState, snapshot: { ...viewState.snapshot, title: stored } });
@@ -1727,7 +1727,7 @@ function main(): void {
 			return;
 		}
 		try {
-			await api.deleteSession(sessionId);
+			await sessionApi.deleteSession(sessionId);
 			reachable();
 		} catch (error) {
 			// 繁忙的会话 —— 运行进行中、审批等待中 —— 是服务端带着它的理由拒绝；错误条正是那些
@@ -1749,7 +1749,7 @@ function main(): void {
 	 */
 	function foldFromDeleted(sessionId: string): void {
 		if (followed !== sessionId) return;
-		mux.release(followed, "pane");
+		muxClient.release(followed, "pane");
 		followed = undefined;
 		apply({
 			...initialState(),
@@ -1770,7 +1770,7 @@ function main(): void {
 	async function branch(entryId: string, descend: boolean): Promise<void> {
 		if (followed === undefined) return;
 		try {
-			const { session } = await api.branchSession(followed, entryId, descend);
+			const { session } = await sessionApi.branchSession(followed, entryId, descend);
 			apply(reduce(viewState, { type: "baseline", session }));
 			// 一次回退 —— fork 按钮的情形 —— 只是半个手势：只有下一个提示输入后分支才是真的，
 			// 所以 composer 接过这次按压瞄准的焦点。
@@ -1825,19 +1825,19 @@ function main(): void {
 	window.addEventListener("keydown", (event) => {
 		if (event.key === "Escape") {
 			// 菜单在自己的捕获监听里关闭自己，事件到达这里之前就被拦下；面板按最可能的打开顺序关。
-			if (settings.open) {
-				settings.hide();
+			if (settingsPanel.open) {
+				settingsPanel.hide();
 				return;
 			}
 			if (viewState.approvals.length > 0 && followed !== undefined && !typingTarget()) {
-				void api.approve(followed, viewState.approvals[0]!.toolCallId, false).catch(report);
+				void sessionApi.approve(followed, viewState.approvals[0]!.toolCallId, false).catch(report);
 				return;
 			}
 		}
 		if (event.key === "Enter" && viewState.approvals.length > 0 && followed !== undefined && !typingTarget()) {
 			// Enter 允许，Escape 拒绝 —— 接管卡片提供的两个答案，用的正是它为输入框让出的那副
 			// 键盘。
-			void api.approve(followed, viewState.approvals[0]!.toolCallId, true).catch(report);
+			void sessionApi.approve(followed, viewState.approvals[0]!.toolCallId, true).catch(report);
 			return;
 		}
 		if (event.key === "n" && (event.ctrlKey || event.metaKey)) {
@@ -1867,12 +1867,12 @@ function main(): void {
 	 * 设置面板仍然是修法。
 	 */
 	async function importedModels(): Promise<ModelOption[]> {
-		const { models } = await api.listModels();
+		const { models } = await sessionApi.listModels();
 		try {
 			const planted = await seedDefaultModel({
 				models,
 				seeded: viewState.settings?.defaultModelSeeded === true,
-				save: async (rows) => (await api.updateModels(rows)).models,
+				save: async (rows) => (await sessionApi.updateModels(rows)).models,
 				markSeeded: () => saveSettings({ defaultModelSeeded: true }),
 			});
 			return planted ?? models;
@@ -1889,16 +1889,16 @@ function main(): void {
 		// 通道先起，这与它过去启动的顺序相反。落地现在是一次导航（ADR-0010）：页面打开的会话由
 		// 帧打开，所以读取之后才开始的连接，会让落地等一场根本没人开始的握手。在这里开始让那次
 		// 握手在读取之下运行，而不是在它们之后。
-		mux.start();
+		muxClient.start();
 		try {
-			const health = await api.health();
+			const health = await sessionApi.health();
 			absCurrentDirectory = health.workDirAbsPath;
 			reachable();
 		} catch (error) {
 			unreachable(error);
 		}
 		try {
-			const { settings: stored } = await api.getSettings();
+			const { settings: stored } = await sessionApi.getSettings();
 			applyAppearance(stored);
 			reachable();
 			apply({ ...viewState, settings: stored });
@@ -1906,7 +1906,7 @@ function main(): void {
 			report(error);
 		}
 		try {
-			const { tools } = await api.toolNames();
+			const { tools } = await sessionApi.toolNames();
 			reachable();
 			apply({ ...viewState, toolNames: tools });
 		} catch (error) {
@@ -1932,7 +1932,7 @@ function main(): void {
 		// ADR-0010 为页面加载记下的唯一一拍，对服务端永远上不来的窗口它也是诚实的答案：横幅这么说，
 		// 而不是一段永远不会更新的对话。
 		try {
-			const { sessionId } = await api.currentSession();
+			const { sessionId } = await sessionApi.currentSession();
 			reachable();
 			await channelLive;
 			// 除非一次点击先到了。落地是默认 —— 服务端记得的那个会话，给还没被碰过的窗口 —— 而已经

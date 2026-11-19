@@ -79,7 +79,7 @@ async function bootServer(workDirAbsPath) {
 }
 
 function createWindow() {
-	const window = new BrowserWindow({
+	const browserWindow = new BrowserWindow({
 		width: 1280,
 		height: 820,
 		minWidth: 720,
@@ -110,13 +110,13 @@ function createWindow() {
 	});
 
 	// transcript 里的链接在系统浏览器打开，用户的会话和书签都在那里；应用窗口留给对话本身。
-	window.webContents.setWindowOpenHandler(({ url }) => {
+	browserWindow.webContents.setWindowOpenHandler(({ url }) => {
 		if (url.startsWith("http:") || url.startsWith("https:")) void shell.openExternal(url);
 		return { action: "deny" };
 	});
 
-	window.once("ready-to-show", () => window.show());
-	return window;
+	browserWindow.once("ready-to-show", () => browserWindow.show());
+	return browserWindow;
 }
 
 /**
@@ -129,9 +129,9 @@ const observability = createObservability({
 });
 
 /** 让原生标题栏的颜色跟上页面实际使用的调色板。 */
-function syncChrome(window) {
+function syncChrome(browserWindow) {
 	if (process.platform !== "win32") return;
-	window.setTitleBarOverlay({
+	browserWindow.setTitleBarOverlay({
 		height: TITLEBAR_HEIGHT,
 		color: nativeTheme.shouldUseDarkColors ? CHROME_DARK : CHROME_LIGHT,
 		symbolColor: nativeTheme.shouldUseDarkColors ? "#f9fafb" : "#0f1115",
@@ -145,13 +145,13 @@ function registerWindowControls() {
 	});
 
 	ipcMain.on("desktop:window", (event, command) => {
-		const window = BrowserWindow.fromWebContents(event.sender);
-		if (!window) return;
-		if (command === "minimize") window.minimize();
+		const browserWindow = BrowserWindow.fromWebContents(event.sender);
+		if (!browserWindow) return;
+		if (command === "minimize") browserWindow.minimize();
 		else if (command === "toggle-maximize") {
-			if (window.isMaximized()) window.unmaximize();
-			else window.maximize();
-		} else if (command === "close") window.close();
+			if (browserWindow.isMaximized()) browserWindow.unmaximize();
+			else browserWindow.maximize();
+		} else if (command === "close") browserWindow.close();
 	});
 
 	ipcMain.handle("desktop:window:is-maximized", (event) => {
@@ -160,8 +160,8 @@ function registerWindowControls() {
 
 	// 系统的文件夹选择器，供目录选择器的"添加目录…"使用。浏览行为属于 OS 对话框、且仅属于它：页面只拿到选中的路径，不读任何文件系统。
 	ipcMain.handle("desktop:pick-folder", async (event) => {
-		const window = BrowserWindow.fromWebContents(event.sender);
-		const answer = await dialog.showOpenDialog(window, {
+		const browserWindow = BrowserWindow.fromWebContents(event.sender);
+		const answer = await dialog.showOpenDialog(browserWindow, {
 			properties: ["openDirectory"],
 		});
 		return answer.canceled || answer.filePaths.length === 0 ? undefined : answer.filePaths[0];

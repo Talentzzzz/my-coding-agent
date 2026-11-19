@@ -81,7 +81,7 @@ function assertEnvelope(frame: unknown): ServerFrame {
 /** 连上 `/mux`，握手判据同时挂在 `open`、`error`、`close` 与自己的超时上。 */
 export function connect(url: string): Promise<WireClient> {
 	return new Promise<WireClient>((resolve, reject) => {
-		const socket = new WebSocket(url);
+		const webSocket = new WebSocket(url);
 		let settled = false;
 
 		const timer = setTimeout(() => {
@@ -97,19 +97,19 @@ export function connect(url: string): Promise<WireClient> {
 			reject(new Error(`wire: ${why}`));
 		};
 
-		socket.addEventListener("error", () => fail("连接出错"));
-		socket.addEventListener("close", (event) => fail(`连接在握手前关上（code=${event.code}）`));
-		socket.addEventListener("open", () => {
+		webSocket.addEventListener("error", () => fail("连接出错"));
+		webSocket.addEventListener("close", (event) => fail(`连接在握手前关上（code=${event.code}）`));
+		webSocket.addEventListener("open", () => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
-			resolve(wireOver(socket));
+			resolve(wireOver(webSocket));
 		});
 	});
 }
 
 /** 把一个已握手的 socket 包成 WireClient。 */
-function wireOver(socket: WebSocket): WireClient {
+function wireOver(webSocket: WebSocket): WireClient {
 	/** 全部原始信封，按到达顺序。 */
 	const frames: ServerFrame[] = [];
 	/** 按流分道的 item。连接级帧（`streamId: null`）一帧都不进这里。 */
@@ -123,7 +123,7 @@ function wireOver(socket: WebSocket): WireClient {
 	let closeInfo: { code: number; reason: string } | null = null;
 	const closeWaiters: Array<(info: { code: number; reason: string }) => void> = [];
 
-	socket.addEventListener("message", (event) => {
+	webSocket.addEventListener("message", (event) => {
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(String(event.data));
@@ -153,7 +153,7 @@ function wireOver(socket: WebSocket): WireClient {
 		streams.set(frame.streamId, list);
 	});
 
-	socket.addEventListener("close", (event) => {
+	webSocket.addEventListener("close", (event) => {
 		closeInfo = { code: event.code, reason: event.reason ?? "" };
 		for (const waiter of closeWaiters.splice(0)) waiter(closeInfo);
 	});
@@ -176,10 +176,10 @@ function wireOver(socket: WebSocket): WireClient {
 
 	return {
 		send(frame: object): void {
-			socket.send(JSON.stringify(frame));
+			webSocket.send(JSON.stringify(frame));
 		},
 		sendRaw(text: string): void {
-			socket.send(text);
+			webSocket.send(text);
 		},
 		async open(sessionId: string): Promise<SessionSnapshot> {
 			// "第一帧是基线"判据从这次 open 之后开始数：一条流可以被取消再重开，此前收到的帧
@@ -239,10 +239,10 @@ function wireOver(socket: WebSocket): WireClient {
 			return new Promise((resolve) => closeWaiters.push(resolve));
 		},
 		get isClosed(): boolean {
-			return closeInfo !== null || socket.readyState === socket.CLOSED;
+			return closeInfo !== null || webSocket.readyState === webSocket.CLOSED;
 		},
 		close(): Promise<void> {
-			if (socket.readyState === socket.OPEN) socket.close();
+			if (webSocket.readyState === webSocket.OPEN) webSocket.close();
 			return this.closed().then(() => undefined);
 		},
 	};

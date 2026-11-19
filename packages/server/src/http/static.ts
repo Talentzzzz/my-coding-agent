@@ -42,8 +42,8 @@ export async function serveStatic(clientDir: string, pathname: string, response:
 	const absPath = resolve(absRoot, relPath);
 	// 要比的是分隔符，而不只是前缀：没有它，名为 `<clientDir>-backup` 的兄弟目录也能通过检查并被服务。
 	if (absPath !== absRoot && !absPath.startsWith(absRoot + sep)) {
-		const failure = httpStatus.notFound("Not found");
-		sendJson(response, failure.status, { error: failure.message });
+		const httpError = httpStatus.notFound("Not found");
+		sendJson(response, httpError.status, { error: httpError.message });
 		return;
 	}
 

@@ -26,18 +26,18 @@
  */
 let strict = process.env.DOM_SHIM_LAX !== "1";
 
-function fail(node: FakeNode, member: string): never {
+function fail(fakeNode: FakeNode, member: string): never {
 	throw new Error(
-		`dom-shim：代码访问了没实现的 DOM 成员 .${member}（<${node.tag}>）——`
+		`dom-shim：代码访问了没实现的 DOM 成员 .${member}（<${fakeNode.tag}>）——`
 		+ `补上它，或 DOM_SHIM_LAX=1 只警告。`,
 	);
 }
 
-function missing(node: FakeNode, member: string, value: unknown): unknown {
+function missing(fakeNode: FakeNode, member: string, value: unknown): unknown {
 	if (value !== undefined) return value;
 	// 那些"是个对象都会问一句"的成员：内建探测、调试器、Error 排版。它们不是产品代码在要 DOM。
 	if (IGNORED.has(member)) return value;
-	if (strict) fail(node, member);
+	if (strict) fail(fakeNode, member);
 	return value;
 }
 
@@ -72,7 +72,7 @@ export function camelToDash(name: string): string {
 
 class FakeNode {
 	children: FakeNode[] = [];
-	parent: FakeNode | undefined;
+	fakeNode: FakeNode | undefined;
 	className: string;
 	readonly tag: string;
 	readonly attributes = new Map<string, string>();
@@ -200,13 +200,13 @@ class FakeNode {
 	}
 
 	get textContent(): string {
-		if (this.children.length > 0) return this.children.map((child) => child.textContent).join("");
+		if (this.children.length > 0) return this.children.map((fakeNode) => fakeNode.textContent).join("");
 		return this._text ?? "";
 	}
 	set textContent(value: string) {
-		for (const child of this.children) {
-			child.parent = undefined;
-			child.detached = true;
+		for (const fakeNode of this.children) {
+			fakeNode.fakeNode = undefined;
+			fakeNode.detached = true;
 		}
 		this.children.length = 0;
 		this._text = value;
@@ -257,21 +257,21 @@ class FakeNode {
 		return this.children.length;
 	}
 	get nextSibling(): FakeNode | undefined {
-		if (this.parent === undefined) return undefined;
-		const at = this.parent.children.indexOf(this);
-		return this.parent.children[at + 1];
+		if (this.fakeNode === undefined) return undefined;
+		const at = this.fakeNode.children.indexOf(this);
+		return this.fakeNode.children[at + 1];
 	}
 	get previousSibling(): FakeNode | undefined {
-		if (this.parent === undefined) return undefined;
-		const at = this.parent.children.indexOf(this);
-		return at <= 0 ? undefined : this.parent.children[at - 1];
+		if (this.fakeNode === undefined) return undefined;
+		const at = this.fakeNode.children.indexOf(this);
+		return at <= 0 ? undefined : this.fakeNode.children[at - 1];
 	}
 	get options(): FakeNode[] {
-		return this.children.filter((child) => child.tag === "option");
+		return this.children.filter((fakeNode) => fakeNode.tag === "option");
 	}
 	/** `select.value` 在真 DOM 里读的是选中项，量具只需要"写进去什么读出来什么"。 */
 	get selectedOptions(): FakeNode[] {
-		return this.options.filter((option) => option.value === this.value);
+		return this.options.filter((fakeNode) => fakeNode.value === this.value);
 	}
 
 	append(...nodes: (FakeNode | string)[]): void {
@@ -279,8 +279,8 @@ class FakeNode {
 			// 真 DOM 的 `append("文字")` 会现造一个文本节点；`paintSummary` 这类"一句话中间夹一个 <b>"
 			// 的写法全靠它，只收节点会让这种写法在量具里当场崩。
 			const node = typeof value === "string" ? textNode(value) : value;
-			node.parent?.removeChild(node);
-			node.parent = this;
+			node.fakeNode?.removeChild(node);
+			node.fakeNode = this;
 			node.detached = false;
 			this._text = undefined;
 			this.children.push(node);
@@ -291,8 +291,8 @@ class FakeNode {
 	prepend(...nodes: (FakeNode | string)[]): void {
 		for (const value of [...nodes].reverse()) {
 			const node = typeof value === "string" ? textNode(value) : value;
-			node.parent?.removeChild(node);
-			node.parent = this;
+			node.fakeNode?.removeChild(node);
+			node.fakeNode = this;
 			node.detached = false;
 			this._text = undefined;
 			this.children.unshift(node);
@@ -300,27 +300,27 @@ class FakeNode {
 		}
 	}
 	replaceChildren(...nodes: (FakeNode | string)[]): void {
-		for (const child of this.children) {
-			child.detached = true;
-			child.parent = undefined;
+		for (const fakeNode of this.children) {
+			fakeNode.detached = true;
+			fakeNode.fakeNode = undefined;
 		}
 		this.children.length = 0;
 		this._text = undefined;
 		this.append(...nodes);
 	}
-	removeChild(node: FakeNode): void {
-		const at = this.children.indexOf(node);
+	removeChild(fakeNode: FakeNode): void {
+		const at = this.children.indexOf(fakeNode);
 		if (at >= 0) {
 			this.children.splice(at, 1);
-			node.detached = true;
-			node.parent = undefined;
+			fakeNode.detached = true;
+			fakeNode.fakeNode = undefined;
 			// 空了就得把旧的 `_text` 忘掉：真 DOM 里 `textContent` 是"当下这些孩子拼起来的字"，
 			// 留着一个早就被孩子盖掉、又被摘空的旧串，是这套 shim 自己造出来的第三态。
 			if (this.children.length === 0) this._text = undefined;
 		}
 	}
 	remove(): void {
-		this.parent?.removeChild(this);
+		this.fakeNode?.removeChild(this);
 	}
 	/**
 	 * 真 DOM 的插入语义：已在树上的节点是**移动**，不是先摘再放。
@@ -329,12 +329,12 @@ class FakeNode {
 	 * 重建，断言量的就成了 shim 而不是产品代码。
 	 */
 	insertBefore(node: FakeNode, reference: FakeNode | null | undefined): void {
-		const from = node.parent;
-		if (from !== undefined) {
-			const at = from.children.indexOf(node);
-			if (at >= 0) from.children.splice(at, 1);
+		const fakeNode = node.fakeNode;
+		if (fakeNode !== undefined) {
+			const at = fakeNode.children.indexOf(node);
+			if (at >= 0) fakeNode.children.splice(at, 1);
 		}
-		node.parent = this;
+		node.fakeNode = this;
 		node.detached = false;
 		const at = reference === null || reference === undefined ? this.children.length : this.children.indexOf(reference);
 		this.children.splice(at < 0 ? this.children.length : at, 0, node);
@@ -342,14 +342,14 @@ class FakeNode {
 	}
 	/** 就地换人，`sidebar` 的改名编辑器用它把标题换成输入框再换回来。 */
 	replaceWith(...nodes: FakeNode[]): void {
-		const parent = this.parent;
+		const parent = this.fakeNode;
 		if (parent === undefined) return;
 		const at = parent.children.indexOf(this);
 		parent.removeChild(this);
 		parent.children.splice(at, 0, ...nodes);
 		for (const node of nodes) {
-			node.parent?.removeChild(node);
-			node.parent = parent;
+			node.fakeNode?.removeChild(node);
+			node.fakeNode = parent;
 			node.detached = false;
 		}
 	}
@@ -422,10 +422,10 @@ class FakeNode {
 	}
 	/** `closest`：沿父链找选择器命中的第一个祖先（含自己）。 */
 	closest(selector: string): FakeNode | null {
-		let node: FakeNode | undefined = this;
-		while (node !== undefined) {
-			if (matches(node, selector)) return node;
-			node = node.parent;
+		let fakeNode: FakeNode | undefined = this;
+		while (fakeNode !== undefined) {
+			if (matches(fakeNode, selector)) return fakeNode;
+			fakeNode = fakeNode.fakeNode;
 		}
 		return null;
 	}
@@ -462,12 +462,12 @@ class FakeNode {
 	 */
 	set innerHTML(_value: string) {
 		for (const child of this.children) {
-			child.parent = undefined;
+			child.fakeNode = undefined;
 			child.detached = true;
 		}
 		this.children.length = 0;
 		const parsed = new FakeNode("svg");
-		parsed.parent = this;
+		parsed.fakeNode = this;
 		this.children.push(parsed);
 		work.nodes += 1;
 	}
@@ -499,7 +499,7 @@ class FakeNode {
 }
 
 /** 一条选择器：`.a.b`、`[attr]`、`[attr="v"]`、`tag`，以及它们的组合。 */
-function matches(node: FakeNode, selector: string): boolean {
+function matches(fakeNode: FakeNode, selector: string): boolean {
 	const trimmed = selector.trim();
 	if (trimmed.length === 0) return false;
 	const attributes = [...trimmed.matchAll(/\[([a-zA-Z-]+)(?:=["']([^"']*)["'])?\]/g)];
@@ -510,10 +510,10 @@ function matches(node: FakeNode, selector: string): boolean {
 	if (/[\s>+~]/.test(trimmed.replace(/\[[^\]]*\]/g, ""))) {
 		throw new Error(`dom-shim：querySelector 不支持组合选择器 ${selector}`);
 	}
-	if (tag !== undefined && node.tag !== tag.toLowerCase()) return false;
-	for (const name of classes) if (!node.classList.contains(name)) return false;
+	if (tag !== undefined && fakeNode.tag !== tag.toLowerCase()) return false;
+	for (const name of classes) if (!fakeNode.classList.contains(name)) return false;
 	for (const attribute of attributes) {
-		const value = node.getAttribute(attribute[1]!);
+		const value = fakeNode.getAttribute(attribute[1]!);
 		if (value === null) return false;
 		if (attribute[2] !== undefined && value !== attribute[2]) return false;
 	}
@@ -821,8 +821,8 @@ export function installDom(options: InstallOptions = {}): DomShim {
  * actually call. Every caller is a harness, so the gap between the two types is never what is under
  * test; keeping the cast here means there is one place to look when it finally bites.
  */
-export function asElement(node: FakeNode): HTMLElement {
-	return node as unknown as HTMLElement;
+export function asElement(fakeNode: FakeNode): HTMLElement {
+	return fakeNode as unknown as HTMLElement;
 }
 
 /**

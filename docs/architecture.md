@@ -18,7 +18,7 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 
 **core** 是无头的：工作目录、导入的模型、工具、会话管理器、系统提示词、审批闸门，对 HTTP 和 DOM 一无所知。它是 **ADR-0006 的无属性服务**——账本、模型行、工具三个域平级互不依赖，`Agent` 是编排层、只做跨域编排（持常驻表的两处例外：`ToolManager` 的一张实例表，[ADR-0011](adr/0011-tool-manager-instance-table.md)；`SessionManager` 的一张文件持有簿记——按文件对键控、易失，[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)）；一个会话在内存里只有**一件东西** `AgentState`：`{ sessionId, live }`——`live` 是两条队列、在飞运行、partial、重试与挂起位，由 `Agent` 按 id 键控持有；会话记录不在里面，它就是那两个文件，每次操作现读（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。账本、设置与模型行、工具表三只服务由 `createSessionAgent()` 在构造时造出、只被编排层消费，公开面在命令与引擎之外另有会话生命周期、纯数据窄读与设置/模型目录三类方法（[ADR-0012](adr/0012-agent-facade.md)）。它发出 `AgentSessionEvent` 值 —— `types.ts` 的 `AgentEvent`，加上它自己的成员：队列深度、压缩、entry 落地、配置变更、重试。运行引擎是 `Agent` 的私有方法（[ADR-0016](adr/0016-loop-is-orchestration.md)）：一次运行的引擎、每轮填充链、压缩、重试泵、两个工具闸门都写在编排层里，三个运行入口各自把三件值（`RunInput`：`agentState` / `session` / `start`）递给 `Agent.run`，一次运行只走一条链 `Agent.prompt → startPromptedRun → run → runEngine → prepareRequest → emit`（`emit` 是唯一的事件出口：落盘、清队列、投影的组合政策是编排层与窗口契约的另一半，实现 `dispatchEvent` 留在编排层）；运行与命令面读同一批服务；事件与投影走 `Agent` 的私有发布方法（[ADR-0017](adr/0017-fanout-folded-into-agent.md)）。模型那一侧的传输层也在这份源码树里（`llm/`，[ADR-0010](adr/0010-llm-folded-into-core.md)），但它是 core 的一个目录而不是一个包：core 对 HTTP 与 DOM 一无所知，`llm/` 对会话与账本一无所知。
 
-**server** 拥有传输层和活跃会话：`SessionHub` 持有**一个**编排层 `Agent`，此外什么都没有——账本、设置与模型行、工具表三只服务由 `createSessionAgent()` 在编排层构造时造出、只被编排层消费，hub 只认编排层的公开面（[ADR-0012](adr/0012-agent-facade.md)；`npm run check` 里的 `check-server-facade` 守卫让「server 不知道 Manager」成为机器检查的不变量）；会话状态的那张表也由编排层自己持有：每 id 一份 `AgentState` 的 live 半（两条队列、在飞运行、partial、重试与挂起位），进程里唯一的跨栈内存会话态，由运行自己的结束路径与 `Agent.deleteSessionBySessionId` 删除（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。除此之外 hub 只记两个容器：一张按会话的订阅表（`Map<sessionId, Set<SessionSubscription>>`）与一个全局通道（`Set<GlobalSubscription>`，这台机器上的列表）；它也是订阅原语的宿主，`subscribe` 与 `snapshotFor` 在这里把注册、活冷分岔与 baseline 交付一体完成（见*谁拥有一个会话*；分层与理由见 [ADR-0024](adr/0024-mux-only-frames.md)）——改变会话的并发保护不住在这里，它住在 `SessionManager` 自己的文件闸里，传输层一概不感知（[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)）；`Router` 把请求变成对某个控制器的一次调用；`mux.ts` 只持连接集合（存活探测与关停），每连接的业务侧是 `stream.ts` 的一份 `SessionStream`，订阅表（连接 × 会话）在它手里，**订阅不占闸**；`projection.ts` 把"每个会话在做什么"聚成侧边栏的行。模型是**每次请求**都从 `models.json` 读，而不是缓存成一份目录；会话在每次请求前从它命名的那一行重新推导自己的模型，所以设置面板的一次编辑——密钥、端点、窗口、wire id——能抵达**每一个已经打开的会话**。
+**server** 拥有传输层和活跃会话：`SessionHub` 持有**一个**编排层 `Agent`，此外什么都没有——账本、设置与模型行、工具表三只服务由 `createSessionAgent()` 在编排层构造时造出、只被编排层消费，hub 只认编排层的公开面（[ADR-0012](adr/0012-agent-facade.md)；`npm run check` 里的 `check-server-facade` 守卫让「server 不知道 Manager」成为机器检查的不变量）；会话状态的那张表也由编排层自己持有：每 id 一份 `AgentState` 的 live 半（两条队列、在飞运行、partial、重试与挂起位），进程里唯一的跨栈内存会话态，由运行自己的结束路径与 `Agent.deleteSessionBySessionId` 删除（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。除此之外 hub 只记两样簿记：一张按会话的订阅表（`Map<sessionId, Set<SessionSubscription>>`）与一个全局通道（`Set<GlobalSubscription>`，这台机器上的列表）；侧栏的行**不在内存里**——它与 `SessionSnapshot` 同一个模式：读取时从磁盘现算（冷半扫描、活半从袋里叠），之后随事件推增量（[ADR-0027](adr/0027-rows-computed-not-stored.md)）；它也是订阅原语的宿主，`subscribe` 与 `snapshotFor` 在这里把注册、活冷分岔与 baseline 交付一体完成（见*谁拥有一个会话*；分层与理由见 [ADR-0024](adr/0024-mux-only-frames.md)）——改变会话的并发保护不住在这里，它住在 `SessionManager` 自己的文件闸里，传输层一概不感知（[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)）；`Router` 把请求变成对某个控制器的一次调用；`mux.ts` 就是 WS 那一侧的对应物——`MuxServer` 只持连接集合（存活探测与关停），每条连接是一个 `MuxConnection`：观看表（连接 × 会话）、baseline 前的扣帧队列与审批读者计数都在它手里，帧长什么样交给 `frames.ts` 的纯函数，**订阅不占闸**（[ADR-0025](adr/0025-mux-is-the-connection-controller.md)、[ADR-0026](adr/0026-projection-folded-into-hub.md)）。模型是**每次请求**都从 `models.json` 读，而不是缓存成一份目录；会话在每次请求前从它命名的那一行重新推导自己的模型，所以设置面板的一次编辑——密钥、端点、窗口、wire id——能抵达**每一个已经打开的会话**。
 
 **web** 拥有呈现：协议消息进，视图模型，DOM 出。它持有一条常驻连接（`client.ts` 的 `MuxClient`），把每条逻辑流的帧喂给对应的一栏，把连接级载荷喂给侧边栏的行表。它永远看不到供应商 SDK、会话文件、或服务器没发过来的任何路径。
 
@@ -57,10 +57,10 @@ my-coding-agent/
     │                 #   api/、model.ts、models.ts、types.ts（Context 与 Tool 住这里）、utils/；@ts-nocheck）
     ├── server/src/   # @my-agent/server - 传输层：boot.ts、main.ts、http.ts、http/（routing.ts 是
     │                 #   唯一读 URL 的地方，websocket.ts 是手写的 RFC6455，client-frame.ts 解析上行帧）、
-    │                 #   mux.ts（常驻连接、存活探测与关停）、wire.ts（一条连接的帧队列与心跳）、
-    │                 #   stream.ts（每连接的会话语义：订阅表、baseline 前的扣帧队列）、
-    │                 #   projection.ts（侧边栏行）、
-    │                 #   controllers/（routes.ts 是 API 表）、hub.ts（一个编排层 + 一张按会话的
+    │                 #   mux.ts（常驻连接、存活探测与关停；每条连接的 controller：观看表、扣帧队列、
+    │                 #   审批读者计数）、frames.ts（帧构造、审批差量、失败措辞——纯函数）、
+    │                 #   wire.ts（一条连接的帧队列与心跳）、
+        │                 #   controllers/（routes.ts 是 API 表）、hub.ts（一个编排层 + 一张按会话的
     │                 #   订阅表 + 一个全局通道）
     ├── desktop/      # @my-agent/desktop - Electron 外壳：main.cjs、preload.cjs、scripts/launch.mjs、
     │                 #   scripts/inspect.cjs
@@ -266,15 +266,15 @@ type AgentSessionEvent =
 
 ## 谁拥有一个会话
 
-`SessionHub`（`server/src/hub.ts`）持有一个编排层，此外什么都没有：编排层是本进程唯一的一份，方法一律以会话 id 调用；账本、配置（`SettingManager`）、工具表（`ToolManager`，[ADR-0011](adr/0011-tool-manager-instance-table.md)）三只服务由 `createSessionAgent()` 造、只被编排层消费，hub 只认编排层的公开面（[ADR-0012](adr/0012-agent-facade.md)；模型行走同一只门，见*装配与设置*）；会话状态的那张表在编排层手里——每 id 一份 `AgentState` 的 live 半（两条队列、在飞运行），进程重启即从零重建（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。除此之外 hub 只记两个容器：一张按会话的订阅表（`Map<sessionId, Set<SessionSubscription>>`，编排层经构造注入的 sink 查这张表分发）与一个全局通道（`Set<GlobalSubscription>`，这台机器上的列表）；分层与理由见 [ADR-0024](adr/0024-mux-only-frames.md)。改变会话的并发保护不住在这里——它住在 `SessionManager` 自己的**文件闸**里（[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)）：一张按会话文件对键控的持有计数表（键是 `.jsonl` 的规范文件键，锁的单位与它保护的 `.json` + `.jsonl` 重合），Manager 触碰文件对的公开方法各自进出闸，`remove` 是唯一跨 await 的持有者、闸罩它全程；撞上闸内的一次删除即以 `UnknownSessionError` 拒绝——读作「没有这个会话」。**闸不拼装任何东西**——袋由运行自己装配、空闲自散（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。**订阅不拥有会话**：一条逻辑流是 `session stream` 订阅表里的一行（连接 × 会话），它不占闸、也不让会话跑起来。所以一个会话可以在没人在看的情况下运行，而一个开着却闲置的窗口连一份状态都不必替它留着——它要的每一帧都来自一次读或一次运行。
+`SessionHub`（`server/src/hub.ts`）持有一个编排层，此外什么都没有：编排层是本进程唯一的一份，方法一律以会话 id 调用；账本、配置（`SettingManager`）、工具表（`ToolManager`，[ADR-0011](adr/0011-tool-manager-instance-table.md)）三只服务由 `createSessionAgent()` 造、只被编排层消费，hub 只认编排层的公开面（[ADR-0012](adr/0012-agent-facade.md)；模型行走同一只门，见*装配与设置*）；会话状态的那张表在编排层手里——每 id 一份 `AgentState` 的 live 半（两条队列、在飞运行），进程重启即从零重建（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。除此之外 hub 只记两个容器：一张按会话的订阅表（`Map<sessionId, Set<SessionSubscription>>`，编排层经构造注入的 sink 查这张表分发）与一个全局通道（`Set<GlobalSubscription>`，这台机器上的列表）；分层与理由见 [ADR-0024](adr/0024-mux-only-frames.md)。改变会话的并发保护不住在这里——它住在 `SessionManager` 自己的**文件闸**里（[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)）：一张按会话文件对键控的持有计数表（键是 `.jsonl` 的规范文件键，锁的单位与它保护的 `.json` + `.jsonl` 重合），Manager 触碰文件对的公开方法各自进出闸，`remove` 是唯一跨 await 的持有者、闸罩它全程；撞上闸内的一次删除即以 `UnknownSessionError` 拒绝——读作「没有这个会话」。**闸不拼装任何东西**——袋由运行自己装配、空闲自散（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。**订阅不拥有会话**：一条逻辑流是 `MuxConnection` 观看表里的一行（连接 × 会话），它不占闸、也不让会话跑起来。所以一个会话可以在没人在看的情况下运行，而一个开着却闲置的窗口连一份状态都不必替它留着——它要的每一帧都来自一次读或一次运行。
 
-读会话不算在内，而且**读不装配任何东西、也不留下任何东西**（[ADR-0013](adr/0013-table-holds-live-half-only.md)）：`SessionController.read()` 不占闸，hub 的 `snapshotOf()` 转发编排层同名公开面，后者现开一只袋、从两个文件重放、回答、丢掉——表里的成员资格既不增加也不减少。没有驱逐边，也没有哪次读取替谁收尾：袋的离开是它自己的事——运行自己的结束路径散袋、`abort` 的弃置清扫末尾自己散、停驻在审批闸门上的袋拒绝散。**窗口打开一个会话也不走这条路**：打开与切换都是一次订阅，`open` 帧以一份基线作答（[ADR-0009](adr/0009-open-session-over-mux.md)），导航路径上没有一次读取；`read()` 是命令面的读一半，脚本与诊断用它。页面加载是唯一的例外，而且是"开哪一个"的例外：先问一次 `GET /api/sessions/current`，再由同一帧 `open` 把它打开（见*API*一节）。订阅也一样：`SessionHub.subscribe(sessionId, 订阅)` 把元素挂进那张按会话的表，兴趣由「实现了哪几个可选方法」表达——窗口声明 `event` / `state` / `baseline` / `baselineFailed` / `gone` / `failure` 里它要的那几个，侧栏（projection）只声明 `event` / `state`，没有 `baseline` 就不为每一行读盘。注册的**同一拍**就交付 baseline（在声明了 `baseline` 时）：活半同步交回袋里的在飞状态，冷半读盘后异步交回，恰好一次；冷读失败交 `baselineFailed`，此后这个订阅不再有交付。`gone` 只在会话被删除或进程收摊时到达，观看中的流以 `end` 作别。退订宽容且幂等，且只清「这一次订阅拿到的那一格」——迟到的退订不得替同 id 上后来的订阅清表。它不拼装、不持有任何东西，观看不占闸、也不让会话跑。
+读会话不算在内，而且**读不装配任何东西、也不留下任何东西**（[ADR-0013](adr/0013-table-holds-live-half-only.md)）：`SessionController.read()` 不占闸，hub 的 `snapshotOf()` 转发编排层同名公开面，后者现开一只袋、从两个文件重放、回答、丢掉——表里的成员资格既不增加也不减少。没有驱逐边，也没有哪次读取替谁收尾：袋的离开是它自己的事——运行自己的结束路径散袋、`abort` 的弃置清扫末尾自己散、停驻在审批闸门上的袋拒绝散。**窗口打开一个会话也不走这条路**：打开与切换都是一次订阅，`open` 帧以一份基线作答（[ADR-0009](adr/0009-open-session-over-mux.md)），导航路径上没有一次读取；`read()` 是命令面的读一半，脚本与诊断用它。页面加载是唯一的例外，而且是"开哪一个"的例外：先问一次 `GET /api/sessions/current`，再由同一帧 `open` 把它打开（见*API*一节）。订阅也一样：`SessionHub.subscribe(sessionId, 订阅)` 把元素挂进那张按会话的表，兴趣由「实现了哪几个可选方法」表达——窗口声明 `event` / `state` / `baseline` / `baselineFailed` / `gone` / `failure` 里它要的那几个，侧栏的行没有自己的订阅——增量直接站在编排层的 sink 里折算成 `SessionRowPatch` 推给全局通道（[ADR-0027](adr/0027-rows-computed-not-stored.md)），服务端不为行养任何内存。注册的**同一拍**就交付 baseline（在声明了 `baseline` 时）：活半同步交回袋里的在飞状态，冷半读盘后异步交回，恰好一次；冷读失败交 `baselineFailed`，此后这个订阅不再有交付。`gone` 只在会话被删除或进程收摊时到达，观看中的流以 `end` 作别。退订宽容且幂等，且只清「这一次订阅拿到的那一格」——迟到的退订不得替同 id 上后来的订阅清表。它不拼装、不持有任何东西，观看不占闸、也不让会话跑。
 
 no-gap——先看到状态，再看到其后的每个变更，按发生顺序——是一份**两半保证**，两半各有各的家。**hub 半是机制**：`subscribe` 在 hub 内部一体完成注册、活冷分岔与 baseline 交付——活半在返回之前的同一个同步块里 `snapshotNow` 并同步交回快照（`baseline(snapshot)` 也在这一拍，注册后、快照前没有任何 `await`、没有任何事件循环拍）；冷半读盘（`snapshotOf`）后异步交回**恰好一次**；冷读取失败交回原始 error，**恰好一次**，此后除 `gone` 的告别外不再有交付。于是旧写法里「注册之后必须在同一同步块内写 baseline」那条**约定**退场了：分岔在 hub 内部完成，调用方只收结果——没有拿到"一半决策权"的写法，想违反都没有违反的写法。重发路径（已订阅流上的第二个 `open`、分支移动）不重新订阅，走 `snapshotFor`：同一个分岔的第二个交付时机，判定与读取仍只在 hub 内部的那一处。
 
-**session stream 半是帧序**：baseline 帧先于本订阅 backlog 里的任何帧写出。`subscribe` 返回前 `baseline` 已同步回调、回调里同步写帧，而任何 emit 只能落在下一个事件循环拍，所以该帧天然排在前面——JS 单线程下由同步写成立，不是靠排队论证。
+**连接半是帧序**：baseline 帧先于本观看 backlog 里的任何帧写出。`subscribe` 返回前 `baseline` 已同步回调、回调里同步写帧，而任何 emit 只能落在下一个事件循环拍，所以该帧天然排在前面——JS 单线程下由同步写成立，不是靠排队论证。
 
-**缝在交付结果与帧序之间**：hub 只交结果（快照或原始 error），`session stream` 决定帧序与失败的措辞。冷读取期间到达的帧先进 backlog、baseline 写出后按序冲刷，这是单条流上的帧秩序，留在 `session stream`——hub 不认识帧。判据是分层那一条：离开 HTTP/WS 还成立的问题归 hub，所以读盘归 hub、错误归因的文案留帧层。
+**缝在交付结果与帧序之间**：hub 只交结果（快照或原始 error），`MuxConnection` 决定帧序与失败的措辞。冷读取期间到达的帧先进 backlog、baseline 写出后按序冲刷，这是单条流上的帧秩序，留在连接层——hub 不认识帧。判据是分层那一条：离开 HTTP/WS 还成立的问题归 hub，所以读盘归 hub、错误归因的文案留帧层（`frames.ts` 的 `baselineFailureText`）。
 
 ```
 一条常驻连接 ─┐ 订阅表（连接 × 会话，不占闸）
@@ -323,7 +323,7 @@ entry 自格式变更起就携带 `id` / `parentId`，所以一个会话的文�
 
 **只有 entry id 在传。** `BranchOption` 携带子节点的 id 和一个标签——**从不**携带那个选择所通向的 tip。一条分支在它的 tip 上生长，所以一个被记住的 tip 在那条分支被继续的那一刻就成了过期指针，而一个持有它的窗口会回退到对话早已离开的地方；服务器在做选择时从 id 往下走。`SessionSnapshot.branchPoints` 就是这条 wire 的全部，所以一个无视它的客户端画的仍然只是它一直在画的那一条链。
 
-在 HTTP 上，一次移动是 `POST /api/sessions/{id}/branch`，带 `{ entryId, descend? }`，用会话的新状态作答。一棵变了的树不只是发问客户端的私事，所以 `Agent` 发出 `branch_changed`，而每条订阅用一帧新的 `baseline` 来回应它——`session stream` 的 `pushBaseline` 走 hub 的 `snapshotFor`（不重新订阅，活冷分岔仍只在 hub 内部），自己只布防 backlog，让读盘期间到达的帧排在 baseline 之后。有两样东西发出它，而它们是同一件事从两侧看：一个移动了的 leaf（一个窗口选了另一条走法——否则显示旧链的第二个标签页会把它的下一条 prompt 发往一条它并未在展示的分支），以及在一条**已有继续**的消息**之后**追加（回退再问一次就是这样把那条消息变成一个分支点的）。没有第二种情况，窗口会一直留着它从旧快照读到的分支点，而它刚写下的那条走法的切换器要等到重载才出现。
+在 HTTP 上，一次移动是 `POST /api/sessions/{id}/branch`，带 `{ entryId, descend? }`，用会话的新状态作答。一棵变了的树不只是发问客户端的私事，所以 `Agent` 发出 `branch_changed`，而每条订阅用一帧新的 `baseline` 来回应它——`MuxConnection` 的 `pushBaseline` 走 hub 的 `snapshotFor`（不重新订阅，活冷分岔仍只在 hub 内部），自己只布防 backlog，让读盘期间到达的帧排在 baseline 之后。有两样东西发出它，而它们是同一件事从两侧看：一个移动了的 leaf（一个窗口选了另一条走法——否则显示旧链的第二个标签页会把它的下一条 prompt 发往一条它并未在展示的分支），以及在一条**已有继续**的消息**之后**追加（回退再问一次就是这样把那条消息变成一个分支点的）。没有第二种情况，窗口会一直留着它从旧快照读到的分支点，而它刚写下的那条走法的切换器要等到重载才出现。
 
 leaf 自己也在文件里。一次**真的移动了位置**的移动——`branch()` / `resetLeaf()`，也就是 `Agent.branchTo` 落到存储层的那个动作——写出一条 `leaf` 状态 entry：`leafId` 字段记对话**去了哪里**（一个 entry id，或 null 意为"第一条 entry 之前"），而 entry 自己以移动前那个 leaf 为父节点追加、且这次追加**不推进** leafId——树的位置记"这次追加发生在哪"，`leafId` 字段记"对话去了哪"，两个事实各占一个字段。移动到当前所在之处不写（`recordSelection` 同款守卫），所以连续的空移动不增长文件；普通的追加推着 leaf 走，不需要记录——文件最后一条 entry 就是位置。`buildIndex()` 按文件序重放：`leaf` entry 把 leafId 设成它记录的位置，其余每种 entry 把 leafId 设成自己——后写的是最后的话，一条旧记录像一条旧的 `compaction` 一样自然过期；记录的目标不在文件里时（只有手改的文件能造出来）回落到 entry 自己的树位置。`leaf` 记录的加入不需要换版本号——kind 集合本来就是开放的，这个构建不认识的 kind 原样带过；换版本号的是文件的**代**，上一次换它的是两文件格式（[ADR-0008](adr/0008-session-two-file-format.md)）。
 
@@ -376,7 +376,7 @@ SessionManager.forkFrom(sourcePathInput, entryId, storeDirInput?)   # 写出一�
 | `DELETE` | `/api/sessions/{id}` | — | `202 { removed: true }`——否决式删除（[ADR-0023](adr/0023-holds-into-session-manager-veto-delete.md)）：存在性校验同步通过后应答先到，中止与收尾在后台跑完；无所指的 id 是 404，第二次删除也是 404 |
 | `POST` | `/api/sessions/{id}/branch` | `{ entryId: string, descend?: boolean }` | `{ session }` |
 
-这里没有一行是会话事件的端点——唯一的流式通道是 `/mux`（不在 `/api` 之下，因为它不是一个 REST 资源）；`abort` 也留在 REST 上，不帧化。`/api/directories` 的行是这个进程知道的每一行，而**无人在看时一个会话的行也照样更新**（它由 `projection.ts` 喂，不由某条恰好开着的流喂）；通道不可用时，客户端把 `GET /api/directories` 当作侧边栏行表的 REST 兜底。**被搁置的目录是这里唯一的例外，而它只有一条规则**（`SessionHub.listsDirectory`）：REST 列表与通道概览都按它过滤，所以两条路永远说同一件事——只过滤概览会让一个被删掉的分组在它某个会话下次变动时自己长回来。搁置或取回不改变任何一行，所以它由**重发一份概览**（hub 的 `publishResync()`，每条流以一份新的 `sessions` 帧作答）通知，而不是靠 `session_row`。
+这里没有一行是会话事件的端点——唯一的流式通道是 `/mux`（不在 `/api` 之下，因为它不是一个 REST 资源）；`abort` 也留在 REST 上，不帧化。`/api/directories` 的行是这个进程知道的每一行，而**无人在看时一个会话的行也照样更新**（它由事件折算的增量喂，不由某条恰好开着的流喂）；通道不可用时，客户端把 `GET /api/directories` 当作侧边栏行表的 REST 兜底。**被搁置的目录是这里唯一的例外，而它只有一条规则**（`SessionHub.listsDirectory`）：REST 列表与通道概览都按它过滤，所以两条路永远说同一件事——只过滤概览会让一个被删掉的分组在它某个会话下次变动时自己长回来。搁置或取回不改变任何一行，所以它由**重发一份概览**（hub 的 `publishResync()`，每条流以一份新的 `sessions` 帧作答）通知，而不是靠 `session_row`。
 
 `ModelOption` 是用户导入的一行、**去掉密钥**——`hasApiKey` 说明是否存了一个，而密钥从不离开服务器。`PUT /api/models` 替换整份清单，因为设置面板编辑的是一份清单，而一份被半途施加的清单是没人能推理的状态；一行不带 `apiKey` 送来时，保留存在它名下的那个，这正是让面板能够往返一行"它从未被展示过密钥"的数据的原因。名字是一行的**身份**——会话记录它、配置补丁命名它——所以重复会被 `400` 拒绝（`The name "X" is already in use`），而不是在用户背后把它改成唯一的：一个加了后缀的名字会改变**每一条**命名它的会话记录的含义，而显示这次冲突的那个面板才是修复该发生的地方。变更能抵达活会话而不必重新打开它们，因为编排层每次请求都经 `SettingManager.modelCatalog()` 现读存储而不是复制一行、并每次都从活行重新推导自己的模型——所以端点、窗口和 wire id 都随密钥一起移动。
 
@@ -384,7 +384,7 @@ SessionManager.forkFrom(sourcePathInput, entryId, storeDirInput?)   # 写出一�
 
 表里两行与会话的打开有关，而**打开**都不是它们做的。`GET /api/sessions/{id}` 是一次**读取**——脚本、诊断、以及任何不是窗口的客户端用得上它，窗口从不发它（打开会话就是一次 `open` 帧，基线是那个问题的全部答案，[ADR-0009](adr/0009-open-session-over-mux.md)）。`GET /api/sessions/current` 回答的是"该落在哪一个会话上"——答案只有两种：`--session` 钉住的那个，或 `null`：**未指名的连接永远不落在任何会话上**，服务器不去记"最后创建的会话"来填答案、也不造一个会话来填，窗口停在欢迎态（输入框随之隐藏），历史归侧边栏——窗口在页面加载时问它一次，只拿它当**起点**：该开哪一个。打开仍是那一帧 `open`，它自己什么都不画；一个照着它去猜并且照着画的客户端才会静默显示与服务器正在服务的**不同**的对话。所以它不违背"导航不读"这条：读的是"开哪个"，画的从来只有基线。
 
-路径参数在控制器看到它们之前按段做百分号解码，所以一个不透明的 id——工具调用 id 可能含冒号——能安然走完这段路而不会被二次编码。失败是 JSON——`{ error }`——配上说明发生了什么的 status：`404` 表示 id 不是会话，`400` 表示请求体不是 JSON 或字段类型不对，`409` 表示会话拒绝的一次变更（未知工具名、没有任何行提供的模型），或一个不是待回答审批的 `toolCallId`——会话存在、请求合法，但此刻收不下这个答案，`405` 带 `Allow` 表示该路径在另一个动词下存在。审批端点只在答案真的被收下时才记入答案表（只读检查在 `onApproval` 之前），所以一次被 409 拒掉的请求不会污染任何一条订阅还在展示的审批的差值。
+路径参数在控制器看到它们之前按段做百分号解码，所以一个不透明的 id——工具调用 id 可能含冒号——能安然走完这段路而不会被二次编码。失败是 JSON——`{ error }`——配上说明发生了什么的 status：`404` 表示 id 不是会话，`400` 表示请求体不是 JSON 或字段类型不对，`409` 表示会话拒绝的一次变更（未知工具名、没有任何行提供的模型），或一个不是待回答审批的 `toolCallId`——会话存在、请求合法，但此刻收不下这个答案，`405` 带 `Allow` 表示该路径在另一个动词下存在。审批端点在收下答案之前先做只读检查，所以一次被 409 拒掉的请求不给任何会话留下痕迹，也不会在流上生成任何帧。
 
 ## wire
 
@@ -398,7 +398,7 @@ type ServerFrame =
 
 于是"把连接级载荷塞进某条会话的流"和反过来都成了**不可表示**的状态，而不只是"不推荐"。信封刻意在 `ServerMessage` 之外、而不是塞进它每个成员的字段里：好几个调用方构造协议消息时背后根本没有流（一次 REST 读取、一次 fork），内联 id 会逼它们去发明一个。
 
-服务器侧把帧送上线的路径分三层，与本节的线上三层不是一回事：`mux` 只接 socket 与存活定时器，`wire` 只把帧写进那条连接的有界队列，`session stream` 决定发哪些帧、按什么顺序（baseline 前扣住的 backlog）。分层表与理由见 [ADR-0024](adr/0024-mux-only-frames.md)。
+服务器侧把帧送上线的路径分三层，与本节的线上三层不是一回事：`wire` 只把帧写进那条连接的有界队列，`mux` 的连接 controller（`MuxConnection`）决定发哪些帧、按什么顺序（baseline 前扣住的 backlog），`frames.ts` 只回答"同一件事在线上长什么样"。分层表与理由见 [ADR-0025](adr/0025-mux-is-the-connection-controller.md)。
 
 一条逻辑流有三种形状（`StreamFrame`），用字段名而不是判别式区分：`item` 装一条 `ServerMessage`，`end: true` 说这条流结束了，`error` 说这条流上出了事。`end` **不带原因**：该分的是"这条逻辑流上有没有过 `baseline`"，不是"服务端为什么结束它"。`error` 也**不是**终帧——流还开着，客户端接下来怎么做取决于它有没有见过 `baseline`。
 
@@ -408,12 +408,12 @@ type ServerMessage =
   | { type: "event"; event: AgentSessionEvent }
   | { type: "entry"; entryId: string; messageTimestamp?: number }   // entry_appended 背后的那条消息，供 "fork from here" 使用
   | { type: "approval_request"; request: PendingApproval }
-  | { type: "approval_settled"; toolCallId: string; approved: boolean }
+  | { type: "approval_settled"; toolCallId: string }
   | { type: "status"; usage: UsageTotals; running: boolean; queued: QueuedPrompt[]; isRetrying: boolean; retryAttempt: number }
   | { type: "error"; message: string };
 ```
 
-`baseline` 是一次订阅的**全部起点**：`open` 之后的第一帧就是它。这条保证分两半落地：hub 的 `subscribe` 在返回前的同一个同步块里完成注册、活冷分岔与 baseline 交付（活半同步交快照，冷半读盘后异步恰好一次，见*谁拥有一个会话*），`session stream` 只负责帧序——baseline 帧先于本订阅 backlog 里的任何帧写出。活半的注册与基线落在同一个没有 `await` 的同步块里，冷半的读盘窗口由 backlog 扣住，所以"基线与增量之间没有缺口"是构造出来的、不是论证出来的。重开一条逻辑流拿到的是一份**新的** `baseline`（替换，不是追加），恢复因此收敛到"现在长什么样"，而不是"我错过了哪几帧"。**`open` 是幂等的**（[ADR-0009](adr/0009-open-session-over-mux.md) 决定 1）：重复订阅不被拒绝，而是再送一份基线，所以"send 还持有引用时切走又切回"这种不产生新订阅的落点，拿到的也是当下的快照——正在跑的会话那份带 `partial`。因此一条逻辑流上的 `baseline` **不止一份**（分支移动的 `pushBaseline` 同样如此），"第一帧"是事实，"只有一份"不是；窗口按基线到达时自己的点击序号（`openSeries`）决定画不画，迟到的整帧丢弃。
+`baseline` 是一次订阅的**全部起点**：`open` 之后的第一帧就是它。这条保证分两半落地：hub 的 `subscribe` 在返回前的同一个同步块里完成注册、活冷分岔与 baseline 交付（活半同步交快照，冷半读盘后异步恰好一次，见*谁拥有一个会话*），连接层只负责帧序——baseline 帧先于本观看 backlog 里的任何帧写出。活半的注册与基线落在同一个没有 `await` 的同步块里，冷半的读盘窗口由 backlog 扣住，所以"基线与增量之间没有缺口"是构造出来的、不是论证出来的。重开一条逻辑流拿到的是一份**新的** `baseline`（替换，不是追加），恢复因此收敛到"现在长什么样"，而不是"我错过了哪几帧"。**`open` 是幂等的**（[ADR-0009](adr/0009-open-session-over-mux.md) 决定 1）：重复订阅不被拒绝，而是再送一份基线，所以"send 还持有引用时切走又切回"这种不产生新订阅的落点，拿到的也是当下的快照——正在跑的会话那份带 `partial`。因此一条逻辑流上的 `baseline` **不止一份**（分支移动的 `pushBaseline` 同样如此），"第一帧"是事实，"只有一份"不是；窗口按基线到达时自己的点击序号（`openSeries`）决定画不画，迟到的整帧丢弃。
 
 连接级的那条道（`ConnectionFrame`）也是 `item` / `error` 两种形状，但 `item` 装的是 `ConnectionItem`——**不属于任何会话**的载荷：
 
@@ -440,7 +440,7 @@ type ClientFrame =
 
 `models`、`sessions`、`directories`、`settings` 从前是这条流上的帧；它们现在是端点，因为一个无法订阅任何会话的页面仍然需要填充它的侧边栏、设置面板和窗口 chrome。连接级载荷里唯一替代了旧行为的是 `sessions` / `session_row`：一个窗口的行表由投影喂，不再由它恰好在看的那条流喂——**没人在看时一个会话的行也照样更新**。
 
-`approval_request` 和 `approval_settled` 是**订阅自己的**活儿，不是会话的：会话把一次待回答的审批作为一次普通变更发布，所以 `session stream` 把 `snapshot.pendingApprovals` 与这条订阅已经告诉过窗口的东西相比较，只发差值——没有这一步，横幅只会出现在"prompt 上去之后才重载"的页面上。答案表整张住在业务侧（`approvals.ts`），由 boot 创建一份、注入每条流、跨连接共享；它按**会话**键控（`Map<sessionId, Map<toolCallId, ShownApproval>>`），因为几个 Anthropic 兼容端点会把不同会话的 `toolCallId` 编成同一个；一条准予绝不能因此抵达另一个会话的窗口。
+`approval_request` 和 `approval_settled` 是**订阅自己的**活儿，不是会话的：会话把一次待回答的审批作为一次普通变更发布，所以 `MuxConnection` 把 `snapshot.pendingApprovals` 与这条订阅已经告诉过窗口的东西相比较（差量算法在 `frames.ts` 的 `approvalDiff`），只发差值——没有这一步，横幅只会出现在"prompt 上去之后才重载"的页面上。`approval_settled` 只说"定案了"，不带答案：**结果是那次关闭自己的执行事件说的**——grant 是恢复运行重发调用的真实执行，deny 是恢复遍或批量拒绝写下的合成结果，两者的 `tool_execution_end` 都会流到每一个订阅者。答案无处持久化，因为结果自有其落点；settled 帧的职责只是让不再有答案可等的等待收场。
 
 ## 请求流程
 
@@ -455,7 +455,7 @@ type ClientFrame =
   -> core/hooks.ts                             context、审批闸门、工具输出兜底
   -> core/tools/*                              经 ToolManager 取实例，在服务器文件系统上执行
   -> core/agent.ts                             追加每条消息和每个工具结果（appendMessageEntry 是写入口）
-  -> server/stream.ts                          这条会话的订阅，把每条 ServerMessage 装进信封，经 wire 写出
+  -> server/mux.ts                             这条连接的 controller：订阅、baseline、扣帧队列，把每条 ServerMessage 装进信封，经 wire 写出
   -> web/client.ts, web/state.ts               按 streamId 分道，解析、折叠，交给渲染器
   -> web/render/*                              增量更新 DOM
 ```

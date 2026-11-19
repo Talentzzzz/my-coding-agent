@@ -3,12 +3,15 @@ import { resolve } from "node:path";
 import {
 	type Agent,
 	type AgentSessionEvent,
+	groupSessionsByDirectory,
 	type ChatTransport,
 	createSessionAgent,
+	type DirectoryGroup,
 	type ModelConfig,
 	type ModelSelection,
 	resolvePath,
 	type SessionRow,
+	type SessionRowPatch,
 	type SessionSnapshot,
 	UnknownSessionError,
 } from "@my-agent/core";
@@ -35,7 +38,7 @@ export interface HubOptions {
 	 *
 	 * 真实进程里省略，意味着 Anthropic Messages。smoke 传入脚本化 transport，让活会话的行在没有 provider key 的情况下也能被驱动——没有它，会话能发布的唯一事件就是那些根本不需要模型的事件。
 	 */
-	api?: ChatTransport;
+	chatTransport?: ChatTransport;
 }
 
 /**
@@ -60,7 +63,8 @@ export interface SessionSubscription {
 
 /** 这台机器上的列表：无键，所以不是按会话的订阅。 */
 export interface GlobalSubscription {
-	rows?(row: SessionRow): void;
+	/** 一行变了：通常是增量（`SessionRowPatch`），完整行出现在出生与存储型改名上。 */
+	rows?(row: SessionRowPatch): void;
 	gone?(sessionId: string): void;
 	/** 整表变了（目录进出列表）——没有载荷，客户端要的是一整份新的列表。 */
 	resync?(): void;
@@ -81,11 +85,12 @@ export interface SubscriptionSink {
 }
 
 /**
- * 本进程的会话枢纽。
+ * 本进程的会话枢纽——REST 与 WS 共同的唯一 service。
  *
  * 会话本身是磁盘上的两个文件（ADR-0008），进程里没有副本：编排层（ADR-0012）按 id 服务所有会话，
- * 袋由运行自己装配、空闲自散（ADR-0013）。本 hub 记的只有自己那两个簿记：每个会话有哪些订阅者
- * （一张按会话的表），以及这台机器上的列表有哪些订阅者（一个全局通道）。改变会话
+ * 袋由运行自己装配、空闲自散（ADR-0013）。本 hub 记的簿记只有两样：每个会话有哪些订阅者（一张按
+ * 会话的表），以及这台机器上的列表有哪些订阅者（一个全局通道）。行**不**在内存里——侧栏的行与
+ * {@link SessionSnapshot} 同一个模式：读取时从磁盘现算，之后随事件推增量（ADR-0027）。改变会话
  * 的并发保护住在 SessionManager 自己的文件闸里，传输层一概不感知（ADR-0023）。
  */
 export class SessionHub {
@@ -119,7 +124,7 @@ export class SessionHub {
 	/**
 	 * 这台机器上的列表的订阅者：无键，因为列表没有会话 id。
 	 *
-	 * 它只转发载荷，不看内容——隐藏目录之类的规则归订阅方，hub 不认识行。
+	 * 它收到的是现算的整表与随事件而来的行增量——hub 不为行养任何内存。
 	 */
 	private readonly globalSubscribers = new Set<GlobalSubscription>();
 
@@ -130,14 +135,17 @@ export class SessionHub {
 		this.agent = createSessionAgent({
 			...(options.settingsHome === undefined ? {} : { settingsHome: options.settingsHome }),
 			...(options.modelsHome === undefined ? {} : { modelsHome: options.modelsHome }),
-			...(options.api === undefined ? {} : { api: options.api }),
+			...(options.chatTransport === undefined ? {} : { chatTransport: options.chatTransport }),
 			// 本 hub 就是编排层的订阅宿主：事件与快照交给这个 sink，它按 sessionId 查这一张表分发
-			// ——订阅只从这一个出口流出，编排层只认它。
+			// ——订阅只从这一个出口流出，编排层只认它。行折算站在分发之前：侧栏的行必须先于任何
+			// 窗口的观看而更新（无人在看时一个会话的行也照样更新）。
 			sink: {
 				onEvent: (sessionId, event) => {
+					this.onRowEvent(sessionId, event);
 					for (const sub of this.subscribers.get(sessionId) ?? []) sub.event?.(event);
 				},
 				onState: (sessionId, snapshot) => {
+					this.onRowState(sessionId, snapshot);
 					for (const sub of this.subscribers.get(sessionId) ?? []) sub.state?.(snapshot);
 				},
 			},
@@ -196,7 +204,7 @@ export class SessionHub {
 	 *
 	 * {@link snapshotOf} 的同步孪生，它存在的原因是 {@link subscribe} 活半的内部依据：baseline 的
 	 * 活半来源必须是袋里的在飞状态（包括正在写出的 partial），而快照的活半来源只有同步读取——
-	 * 在注册与交付之间的同步块里问一次，no-gap 由构造成立。projection 的读法也站在这里：它只在
+	 * 在注册与交付之间的同步块里问一次，no-gap 由构造成立。行存储的读法也站在这里：它只在
 	 * 活半在场时读袋，两条路（活半同步、冷半重放）都归 {@link snapshotOf} 与本方法，所以不可能
 	 * 漂移。
 	 *
@@ -352,13 +360,115 @@ export class SessionHub {
 		};
 	}
 
-	/** 一行变了：扇给全局订阅。hub 只转发载荷，不看内容。 */
-	publishRows(row: SessionRow): void {
+	// ── 行：读取面（现算，无存储） ──────────────────────────────────────────────
+
+	/**
+	 * 每一行，按目录分组、按侧栏绘制的顺序排列。
+	 *
+	 * 每次调用都从磁盘现算（{@link SessionHub.rows}），没有任何播种或缓存：本进程是这些文件的唯一
+	 * 写入者（ADR-0012），重复的读者之间不存在不一致。
+	 */
+	async groups(): Promise<DirectoryGroup[]> {
+		// 按 facade 扫描遵循的同一核心规则分组，而不是复制一份：侧栏画一种顺序，以不同顺序排序的读者会与列表来源相矛盾。
+		return groupSessionsByDirectory(await this.rows());
+	}
+
+	/**
+	 * 每一行，无序，供自己分组的调用者。
+	 *
+	 * 与 {@link SessionSnapshot} 同一个模式（ADR-0027）：一次目录扫描给出冷的那一半（身份、title、
+	 * modified、pending 的 suspended 标记），活的那一半为每个活会话从袋里现叠——这正是让一行能说
+	 * "运行中"的原因，这个事实只存在于流内，磁盘上没有。
+	 */
+	async rows(): Promise<SessionRow[]> {
+		const groups = await this.agent.listDirectories();
+		return groups.flatMap((group) => group.sessions).map((sessionRow) => this.withLiveFields(sessionRow));
+	}
+
+	/** 按 id 取一行，盘上没有这个会话返回 `undefined`。冷半探测、活半现叠。 */
+	async row(sessionId: string): Promise<SessionRow | undefined> {
+		const scanned = await this.agent.findSessionRowById(sessionId);
+		if (scanned === undefined) return undefined;
+		return this.withLiveFields(scanned);
+	}
+
+	/**
+	 * 从磁盘重读一行并重新发布。
+	 *
+	 * 这是存储型改名与出生抵达侧栏的路：行的 title 与身份住在文件里，事件不携带它们，所以行被读
+	 * 一次、整行发布——这是服务端唯一为单行读盘的时刻。运行中的会话保留其活字段——扫描像所有冷读
+	 * 一样说 `running: false`，叠加它们正是让改名不至于把一行工作着的会话显示成空闲的东西。
+	 */
+	async refreshRow(sessionId: string): Promise<void> {
+		const scanned = await this.agent.findSessionRowById(sessionId);
+		if (scanned === undefined) return;
+		this.publishRows(this.withLiveFields(scanned));
+	}
+
+	/**
+	 * 宣告一行消失：背后的会话已被删除。
+	 *
+	 * 无存储，所以没有"丢行"这个动作——id 就是全部要说的事，"消失"只对曾经持有这一行的客户端是
+	 * 新闻，没听过的 id 是它们的无操作。
+	 */
+	forgetRow(sessionId: string): void {
+		this.publishGone(sessionId);
+	}
+
+	// ── 行：折算（无记忆的增量） ────────────────────────────────────────────────
+
+	/**
+	 * 推进单个事件能移动的字段，以增量的形状。
+	 *
+	 * 一条消息落地推 `modified`（事件自带时间戳，不用回读账本，ADR-0013），user 消息随带 `title`；
+	 * 分支移动推 `title`——它是手势不是帧，且可能改变派生 title 从哪条消息读，一次重放值得。事件
+	 * 携带的其他任何东西都没有属于自己的行字段。
+	 *
+	 * 增量刻意不去重：hub 不持有行的旧值，无从比较，冗余由客户端的幂等合并吸收（缺席字段读作
+	 * "没动"）。`publishState` 只在消息边界与手势上触发，不逐 token，所以这里没有流量的洪峰。
+	 */
+	private onRowEvent(sessionId: string, event: AgentSessionEvent): void {
+		if (event.type === "branch_changed") {
+			this.publishRows({ id: sessionId, title: this.agent.titleOf(sessionId) });
+			return;
+		}
+		if (event.type !== "entry_appended" || event.kind !== "message") return;
+		this.publishRows({
+			id: sessionId,
+			...(event.at === undefined ? {} : { modified: event.at }),
+			// title 只在*用户*消息落到分支上时移动，因为那是唯一读 title 的消息——assistant 的回复不能给对话改名。
+			...(event.role === "user" && event.title !== undefined ? { title: event.title } : {}),
+		});
+	}
+
+	/**
+	 * 一次快照发布叠出那两个活字段的增量。
+	 *
+	 * running 与 pending 只有运行中的 loop 才是来源，快照里现成有，不用回读任何东西。
+	 */
+	private onRowState(sessionId: string, snapshot: SessionSnapshot): void {
+		this.publishRows({ id: sessionId, running: snapshot.running, pending: snapshot.pendingApprovals.length });
+	}
+
+	/**
+	 * 给一个冷行叠上活字段：活半在场的会话从袋里现读，不在的冷行自己就是答案。
+	 *
+	 * 这是行与 {@link SessionHub.snapshotOf} 共用同一个活冷分岔的地方——两条路经过同一处判定，
+	 * 不可能漂移。
+	 */
+	private withLiveFields(sessionRow: SessionRow): SessionRow {
+		if (!this.isLive(sessionRow.id)) return sessionRow;
+		const snapshot = this.snapshotNow(sessionRow.id);
+		return { ...sessionRow, running: snapshot.running, pending: snapshot.pendingApprovals.length };
+	}
+
+	/** 一行变了（通常是增量）：扇给全局订阅。hub 只转发载荷，不看内容。 */
+	private publishRows(row: SessionRowPatch): void {
 		for (const sub of this.globalSubscribers) sub.rows?.(row);
 	}
 
 	/** 一行消失了：id 就是全部要说的事。 */
-	publishGone(sessionId: string): void {
+	private publishGone(sessionId: string): void {
 		for (const sub of this.globalSubscribers) sub.gone?.(sessionId);
 	}
 
@@ -380,7 +490,7 @@ export class SessionHub {
 	 * 让一个会话与它的第一条消息原子出生（ADR-0021）。
 	 *
 	 * 返回 id 而不是任何会话对象：会话是两个文件，进程里没有副本（ADR-0013），出生的运行自己装配
-	 * 自己的袋；行事实（侧栏）经由 controller 的 listener 到达 projection。
+	 * 自己的袋；行事实（侧栏）经由 controller 的 listener 到达本 hub 的行存储。
 	 *
 	 * `workDirAbsPath` 决定会话落在哪。未定义就是服务器自己的 root；路径只要存在且是目录就接受，没有更多条件——在一个没人工作过的目录里创建第一个会话，正是新目录进入已知列表的唯一正道，而 header 的 workDir 是工具的默认值而不是进程的，所以这里不属于做已知目录检查的地方。
 	 *
@@ -458,19 +568,24 @@ export class SessionHub {
 	 * {@link UnknownSessionError} 拒绝（→ 404，与「第二次删除是 404」一致——删除进行中或完成后
 	 * 文件已消失），这是删除端点同步做的唯一检查。
 	 *
-	 * 校验之后向订阅者告别（`gone()` 交给每个订阅元素自己收尾；`SessionStream` 在其中结束
+	 * 校验之后向订阅者告别（`gone()` 交给每个订阅元素自己收尾；`MuxConnection` 在其中结束
 	 * 自己观看的那条流），然后
 	 * **不 await** 删除：否决序分离在后台跑完，202 应答先到（spec Testing Decisions：运行中删除
 	 * → 应答先于收尾）。分离的 promise 上挂错误日志——删除的失败只剩真正的病态（文件已损、id
 	 * 非法），沿用仓库的中文诊断日志约定。
 	 *
 	 * 删除顺序是不变量：**流先 `end`、行后 `session_gone`**。这里的 `gone()` 是流的那一半——
-	 * `SessionStream` 在其中结束流；行的那一半发生在 controller 的 `onRemoved` → projection `forget` →
+	 * `MuxConnection` 在其中结束流；行的那一半发生在 controller 的 `onRemoved` → {@link SessionHub.forgetRow} →
 	 * `publishGone` 之后，所以窗口不会先丢掉行、再收到一条来自已不存在会话的帧。
 	 */
 	remove(sessionId: string): void {
-		if (this.agent.fileAbsPathOf(sessionId) === undefined) throw new UnknownSessionError(sessionId);
-		// 快照一份再遍历：`gone()` 里的 `SessionStream` 会退订，边遍历边删同一个 Set 会漏掉后面的订阅者。
+		// 存在性检查问两个事实：盘上没有（`fileAbsPathOf`），或删除正跨着闸（`isDeletingSession`
+		// ——meta 可能还在盘上而 unlink 尚未落地）。两者任一都是「没有这个会话」：第二次删除是
+		// 404，靠判定而不是靠赌 unlink 的时机。
+		if (this.agent.fileAbsPathOf(sessionId) === undefined || this.agent.isDeletingSession(sessionId)) {
+			throw new UnknownSessionError(sessionId);
+		}
+		// 快照一份再遍历：`gone()` 里的 `MuxConnection` 会退订，边遍历边删同一个 Set 会漏掉后面的订阅者。
 		for (const sub of [...(this.subscribers.get(sessionId) ?? [])]) sub.gone?.();
 		void this.agent.deleteSessionBySessionId(sessionId).catch((error: unknown) => {
 			console.error(`会话 ${sessionId} 的删除失败：${error instanceof Error ? error.message : String(error)}`);
@@ -480,8 +595,9 @@ export class SessionHub {
 	/**
 	 * 进程退出前停止每次运行并落定每个会话。
 	 *
-	 * 谁在跑只有编排层的表知道（运行比发起它的请求活得久，202 应答早已返回），所以停止是
-	 * orchestrator 自己的复数动词（`closeAll`）；订阅者在此刻收到告别，两张表随之清空。
+	 * 行跟随最先放下（它只监听，持有的任何东西都不能拖住后面的事），然后谁在跑只有编排层的表知道
+	 * （运行比发起它的请求活得久，202 应答早已返回），停止是 orchestrator 自己的复数动词
+	 * （`closeAll`）；订阅者在此刻收到告别，各张表随之清空。
 	 */
 	async close(): Promise<void> {
 		await this.agent.closeAll();

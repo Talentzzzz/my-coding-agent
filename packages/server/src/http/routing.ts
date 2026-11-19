@@ -103,9 +103,9 @@ export class Router {
 
 		// 路径存在但动词不对：返回 405 并附上允许的动词，而不是一个会让调用者去找路径拼写错误的 404。
 		if (allowed.length > 0) {
-			const failure = new HttpError(405, `Method ${method} is not allowed for ${pathname}`);
-			failure.headers = { allow: [...new Set(allowed)].join(", ") };
-			this.fail(failure, response);
+			const httpError = new HttpError(405, `Method ${method} is not allowed for ${pathname}`);
+			httpError.headers = { allow: [...new Set(allowed)].join(", ") };
+			this.fail(httpError, response);
 			return true;
 		}
 		return false;

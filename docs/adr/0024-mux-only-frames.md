@@ -5,6 +5,9 @@
 取代：[0001](0001-transport-websocket-mux.md)（部分——「基线与增量之间没有缺口」那段的**住所**：
 结论不变，机制半仍在 hub 的 `subscribe`，帧序半从 mux 搬到 `session stream`；传输形态本身不被取代）、
 `AGENTS.md` 里「hub 以一张分发表应答订阅」的说法整体退场
+取代者：[0025](0025-mux-is-the-connection-controller.md)（部分——**决定 4**「mux 只剩接线与存活
+探测」与分层表的 `mux` 行；`session stream` 并入 `mux`，帧形状独立成 `frames.ts`。决定 1/2/3、
+不变量与「没有被取代的」全部仍然成立）
 
 它同时满足 `docs/adr/README.md` 的三条：改回去要动 server 的 `wire` / `stream` / `mux` / `hub` /
 `projection` / `boot` 与四个 smoke（mux / stream / subscribe / approval）；下一个人读

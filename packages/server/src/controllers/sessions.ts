@@ -56,20 +56,19 @@ function settingsOf(settings: GlobalSettings): GlobalSettingsSnapshot {
 /**
  * controller 向 transport 报告的事项，因为流归 transport 所有。
  *
- * 两者都是"请求与流分离"的结果：一次运行的失败已经没有响应可以上报，而审批的答案必须到达观看该会话的每条流，不只是给出答案的那个客户端。因此两者都指名自己所属的会话：答案键控到给出它的会话上，另一个会话恰好也在等的 `toolCallId` 是那个会话的问题，不是这个答案的。
+ * 这是"请求与流分离"的结果：一次运行的失败已经没有响应可以上报，所以它指名自己所属的会话，在会话自己的流上说出。
  */
 export interface SessionListener {
 	onRunFailure?(sessionId: string, message: string): void;
-	onApproval?(sessionId: string, toolCallId: string, approved: boolean): void;
 	/**
-	 * 一个会话出生或 fork 落地：projection 重读它，让侧栏的行在会话存在的那一拍出现。
+	 * 一个会话出生或 fork 落地：hub 重读它，让侧栏的行在会话存在的那一拍出现。
 	 */
 	onCreated?(sessionId: string): void;
 	/**
-	 * 一次存储型改名落地，行的 title 在文件被再读一次之前是过期的。projection 重读该行，普通的 `session_row` 帧把新名字带给每个窗口——与其他任何行变更同一条路，客户端不必为侧栏学第二种消息形状。
+	 * 一次存储型改名落地，行的 title 在文件被再读一次之前是过期的。hub 重读该行，普通的 `session_row` 帧把新名字带给每个窗口——与其他任何行变更同一条路，客户端不必为侧栏学第二种消息形状。
 	 */
 	onRenamed?(sessionId: string): void;
-	/** 一个会话被删除。projection 丢掉它的行，transport 告知其客户端。 */
+	/** 一个会话被删除。hub 丢掉它的行，transport 告知其客户端。 */
 	onRemoved?(sessionId: string): void;
 	/**
 	 * 一个目录进入或离开机器的列表：被放到一边，或被领回。
@@ -85,30 +84,30 @@ export interface SessionListener {
  * 三者都是 orchestrator 拥有之物的只读视图——hub 转发给它的 facade、自己不拥有任何一项（ADR-0012）——而且三者都曾是 socket 推送的帧。改走 HTTP 后由客户端来要，这才让一个没有会话的页面刷新仍然能填满侧栏、设置面板和模型列表。
  */
 export class SystemController {
-	private readonly hub: SessionHub;
+	private readonly sessionHub: SessionHub;
 	/**
 	 * 命令的后果在其应答之外的去处。
 	 *
-	 * 目录改名是这里唯一一个后果超出自身响应的东西：组的每一行同时移动，而 projection 是行的唯一写入者，所以要告知调用者而不是让它猜。可选的理由与 {@link SessionController} 上相同：只要 HTTP surface 的 smoke 根本不接 transport。
+	 * 目录改名是这里唯一一个后果超出自身响应的东西：组的每一行同时移动，而 hub 的行存储是行的唯一写入者，所以要告知调用者而不是让它猜。
 	 */
 	private readonly listeners: SessionListener;
 
-	constructor(hub: SessionHub, listeners: SessionListener = {}) {
-		this.hub = hub;
+	constructor(sessionHub: SessionHub, listeners: SessionListener = {}) {
+		this.sessionHub = sessionHub;
 		this.listeners = listeners;
 	}
 
 	health(): { ok: boolean; workDirAbsPath: string } {
-		return { ok: true, workDirAbsPath: this.hub.workDirAbsPath };
+		return { ok: true, workDirAbsPath: this.sessionHub.workDirAbsPath };
 	}
 
 	models(): ModelOption[] {
-		return listModelOptions(this.hub.userModels);
+		return listModelOptions(this.sessionHub.userModels);
 	}
 
 	/** 本构建注册的每个工具名（ADR-0020）：编排层上的窄读，进程活着就不过期。 */
 	toolNames(): string[] {
-		return this.hub.agent.toolNames();
+		return this.sessionHub.agent.toolNames();
 	}
 
 	/**
@@ -124,7 +123,7 @@ export class SystemController {
 		const input = body.models;
 		if (!Array.isArray(input)) throw httpStatus.badRequest("`models` must be an array");
 
-		const stored = new Map(this.hub.userModels.map((model) => [model.name, model.apiKey]));
+		const stored = new Map(this.sessionHub.userModels.map((model) => [model.name, model.apiKey]));
 		const rows: ModelConfig[] = [];
 		for (const entry of input) {
 			if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
@@ -145,13 +144,13 @@ export class SystemController {
 			rows.push(model);
 		}
 
-		this.hub.setModelConfigs(rows);
+		this.sessionHub.setModelConfigs(rows);
 		return { models: listModelOptions(rows) };
 	}
 
-	/** 本机器有会话的每个目录，各带自己的列表，最近在前。 */
+	/** 本机器有会话的每个目录，各带自己的列表，最近在前。行现算（含活字段），不经任何内存。 */
 	async directories(): Promise<{ directories: DirectoryGroup[] }> {
-		return { directories: (await this.hub.agent.listDirectories()).filter((group) => this.hub.listsDirectory(group.workDirAbsPath)) };
+		return { directories: (await this.sessionHub.groups()).filter((group) => this.sessionHub.listsDirectory(group.workDirAbsPath)) };
 	}
 
 	/**
@@ -171,13 +170,13 @@ export class SystemController {
 
 		const absSource = resolve(workDirAbsPath);
 		// 与列表相同的检查：本机器没有会话的路径不是目录，给它起名只会存下一个永远不会被画出来的标签。
-		const groups = await this.hub.agent.listDirectories();
+		const groups = await this.sessionHub.agent.listDirectories();
 		if (!groups.some((group) => samePath(group.workDirAbsPath, absSource))) {
 			throw httpStatus.notFound(`Unknown directory: ${absSource}`);
 		}
 
-		this.hub.agent.applySettings({ directoryNames: { [absSource]: name.trim() } });
-		return { workDirAbsPath: absSource, name: name.trim(), settings: settingsOf(this.hub.agent.settings()) };
+		this.sessionHub.agent.applySettings({ directoryNames: { [absSource]: name.trim() } });
+		return { workDirAbsPath: absSource, name: name.trim(), settings: settingsOf(this.sessionHub.agent.settings()) };
 	}
 
 	/**
@@ -193,9 +192,9 @@ export class SystemController {
 			throw httpStatus.badRequest("`workDirAbsPath` must be a directory path");
 		}
 
-		const hidden = this.hub.agent.hiddenDirectories();
+		const hidden = this.sessionHub.agent.hiddenDirectories();
 		if (!hidden.some((path) => samePath(path, workDirAbsPath))) {
-			this.hub.agent.applySettings({ hiddenDirectories: [...hidden, resolve(workDirAbsPath)] });
+			this.sessionHub.agent.applySettings({ hiddenDirectories: [...hidden, resolve(workDirAbsPath)] });
 			this.listeners.onDirectoryListingChanged?.();
 		}
 
@@ -206,13 +205,13 @@ export class SystemController {
 	/** 可见的列表，按 hub 的规则过滤后的样子。 */
 	private async listing(): Promise<{ settings: GlobalSettingsSnapshot; directories: DirectoryGroup[] }> {
 		return {
-			settings: settingsOf(this.hub.agent.settings()),
-			directories: (await this.hub.agent.listDirectories()).filter((group) => this.hub.listsDirectory(group.workDirAbsPath)),
+			settings: settingsOf(this.sessionHub.agent.settings()),
+			directories: (await this.sessionHub.groups()).filter((group) => this.sessionHub.listsDirectory(group.workDirAbsPath)),
 		};
 	}
 
 	settings(): { settings: GlobalSettingsSnapshot } {
-		return { settings: settingsOf(this.hub.agent.settings()) };
+		return { settings: settingsOf(this.sessionHub.agent.settings()) };
 	}
 
 	/**
@@ -227,7 +226,7 @@ export class SystemController {
 		}
 		const fields = patch as Record<string, unknown>;
 
-		const workDirAbsPath = this.hub.workDirAbsPath;
+		const workDirAbsPath = this.sessionHub.workDirAbsPath;
 		const next: SettingsPatch = {};
 
 		if (fields.tools !== undefined) {
@@ -297,7 +296,7 @@ export class SystemController {
 		if (fields.model !== undefined) {
 			if (typeof fields.model !== "string") throw httpStatus.badRequest("`model` must be a string");
 			// 不指名任何行的默认值被拒绝而不是存储：`selectModel` 会回退到第一行，这里的拼写错误会表现为一个悄悄不起作用的偏好。行是 orchestrator 的、经 facade 新鲜读取，所以面板加载之后被删掉的行也会被抓到。
-			if (this.hub.agent.modelCatalog().find((userModel) => userModel.name === fields.model) === undefined) {
+			if (this.sessionHub.agent.modelCatalog().find((userModel) => userModel.name === fields.model) === undefined) {
 				throw httpStatus.conflict(`Unknown model: ${fields.model}`);
 			}
 			next.model = fields.model;
@@ -365,12 +364,12 @@ export class SystemController {
 			next.bash = bash;
 		}
 
-		this.hub.agent.applySettings(next);
-		return { settings: settingsOf(this.hub.agent.settings()) };
+		this.sessionHub.agent.applySettings(next);
+		return { settings: settingsOf(this.sessionHub.agent.settings()) };
 	}
 
 	async sessions(): Promise<{ sessions: SessionRef[] }> {
-		return { sessions: await listSessions(this.hub.agent, this.hub.workDirAbsPath) };
+		return { sessions: await listSessions(this.sessionHub.agent, this.sessionHub.workDirAbsPath) };
 	}
 
 	/**
@@ -379,7 +378,7 @@ export class SystemController {
 	 * 两者一起返回，因为客户端启动时总是同时要两者，而向服务器要 id 正是让 `--session` 在 UI 中可观察的东西：客户端跟随服务器的应答，而不是从存储文件里猜。答案只有两种：钉住的那个，或 `null`——未指名的连接永远不落在任何会话上，启动不选中任何东西，这里也没有任何东西创建会话以供选择。
 	 */
 	async current(): Promise<{ sessionId: string | null; sessions: SessionRef[] }> {
-		const [sessionId, sessions] = await Promise.all([this.hub.currentSessionId(), listSessions(this.hub.agent, this.hub.workDirAbsPath)]);
+		const [sessionId, sessions] = await Promise.all([this.sessionHub.currentSessionId(), listSessions(this.sessionHub.agent, this.sessionHub.workDirAbsPath)]);
 		return { sessionId, sessions };
 	}
 }
@@ -390,11 +389,11 @@ export class SystemController {
  * 每个方法都是对 orchestrator 的一次薄调用。只有两个决定住在这里：一个失败作为什么 status，以及命令在会话接受后立即返回——运行本身在事件流上报告，永远不在这个响应上。
  */
 export class SessionController {
-	private readonly hub: SessionHub;
+	private readonly sessionHub: SessionHub;
 	private readonly listeners: SessionListener;
 
-	constructor(hub: SessionHub, listeners: SessionListener = {}) {
-		this.hub = hub;
+	constructor(sessionHub: SessionHub, listeners: SessionListener = {}) {
+		this.sessionHub = sessionHub;
 		this.listeners = listeners;
 	}
 
@@ -404,7 +403,7 @@ export class SessionController {
 	 * 本 controller 上唯一*不*改变会话的读取：读会话记录不得拼装会话或淘汰它，所以向 hub 要快照而不是活对象。存在性也不在这里检查：读取指名会话，orchestrator 在无人应答时以 {@link UnknownSessionError} 拒绝——transport 把它变成与命令路径相同的 404。
 	 */
 	async read(sessionId: string): Promise<{ session: SessionSnapshot }> {
-		return { session: await this.hub.snapshotOf(sessionId) };
+		return { session: await this.sessionHub.snapshotOf(sessionId) };
 	}
 
 	/**
@@ -452,14 +451,14 @@ export class SessionController {
 		if (absRoot !== undefined) {
 			try {
 				// 本机器已经存有会话的目录在消失时被放回来：用户在我们背后重命名了文件夹，而他们看到的组仍是那个路径。
-				await workDirAbsPathForCreate(this.hub.agent, absRoot);
+				await workDirAbsPathForCreate(this.sessionHub.agent, absRoot);
 			} catch (error) {
 				throw httpStatus.badRequest(messageOf(error));
 			}
 		}
 		let sessionId: string;
 		try {
-			sessionId = await this.hub.birth({
+			sessionId = await this.sessionHub.birth({
 				text,
 				...(absRoot === undefined ? {} : { workDirAbsPath: absRoot }),
 				...(behavior === undefined ? {} : { behavior }),
@@ -472,9 +471,9 @@ export class SessionController {
 			// 被理解了，会话不接受这个值。
 			throw httpStatus.conflict(messageOf(error));
 		}
-		this.restoreDirectory(absRoot ?? this.hub.workDirAbsPath);
+		this.restoreDirectory(absRoot ?? this.sessionHub.workDirAbsPath);
 		this.listeners.onCreated?.(sessionId);
-		return { sessionId, sessions: await listSessions(this.hub.agent, absRoot ?? this.hub.workDirAbsPath) };
+		return { sessionId, sessions: await listSessions(this.sessionHub.agent, absRoot ?? this.sessionHub.workDirAbsPath) };
 	}
 
 	/**
@@ -483,10 +482,10 @@ export class SessionController {
 	 * 与 `SystemController.hideDirectory` 成对，是对「删除」这个单向门的回答：会话记录和目录从未被碰过，它还在那里可用——而回到它那里正是用户想要它重新出现在列表上的表示。写入 hub 可见性规则经 facade 读取的 settings 状态，下一次列表与下一帧 overview 因此已经一致。
 	 */
 	private restoreDirectory(workDirAbsPath: string): void {
-		const hidden = this.hub.agent.hiddenDirectories();
+		const hidden = this.sessionHub.agent.hiddenDirectories();
 		const kept = hidden.filter((path) => !samePath(path, workDirAbsPath));
 		if (kept.length === hidden.length) return;
-		this.hub.agent.applySettings({ hiddenDirectories: kept });
+		this.sessionHub.agent.applySettings({ hiddenDirectories: kept });
 		this.listeners.onDirectoryListingChanged?.();
 	}
 
@@ -500,9 +499,9 @@ export class SessionController {
 		if (entryId !== undefined && entryId !== null && typeof entryId !== "string") {
 			throw httpStatus.badRequest("`entryId` must be a string or null");
 		}
-		const sessionId = await this.hub.fork(sourceId, typeof entryId === "string" ? entryId : null);
+		const sessionId = await this.sessionHub.fork(sourceId, typeof entryId === "string" ? entryId : null);
 		this.listeners.onCreated?.(sessionId);
-		return { sessionId, sessions: await listSessions(this.hub.agent, this.hub.workDirAbsPath) };
+		return { sessionId, sessions: await listSessions(this.sessionHub.agent, this.sessionHub.workDirAbsPath) };
 	}
 
 	/**
@@ -517,7 +516,7 @@ export class SessionController {
 		if (typeof title !== "string") throw httpStatus.badRequest("`title` must be a string");
 		const stored = shortenTitle(title);
 		if (stored.length === 0) throw httpStatus.badRequest("`title` must be a non-empty string");
-		await this.hub.rename(sessionId, stored);
+		await this.sessionHub.rename(sessionId, stored);
 		this.listeners.onRenamed?.(sessionId);
 		return { sessionId, title: stored };
 	}
@@ -531,7 +530,7 @@ export class SessionController {
 	 * 用户的意图一致（spec User Story 3），而不是等一个用户已经不关心的收尾。
 	 */
 	async remove(sessionId: string): Promise<{ removed: true }> {
-		this.hub.remove(sessionId);
+		this.sessionHub.remove(sessionId);
 		this.listeners.onRemoved?.(sessionId);
 		return { removed: true };
 	}
@@ -553,7 +552,7 @@ export class SessionController {
 			throw httpStatus.badRequest("`descend` must be a boolean");
 		}
 
-		const agent = this.hub.agent;
+		const agent = this.sessionHub.agent;
 		try {
 			agent.branchTo(sessionId, entryId, descend ?? true);
 		} catch (error) {
@@ -592,7 +591,7 @@ export class SessionController {
 			throw httpStatus.badRequest("`thinkingLevel` must be a string");
 		}
 
-		const agent = this.hub.agent;
+		const agent = this.sessionHub.agent;
 		const selection: ModelSelection = {
 			...(model === undefined ? {} : { model }),
 			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
@@ -632,7 +631,7 @@ export class SessionController {
 	 * 停止一个不存在的东西是一个 404，不再是一次静默的 no-op。
 	 */
 	async abort(sessionId: string): Promise<{ stopped: true }> {
-		await this.hub.agent.abort(sessionId);
+		await this.sessionHub.agent.abort(sessionId);
 		return { stopped: true };
 	}
 
@@ -650,7 +649,7 @@ export class SessionController {
 		}
 		const fields = patch as ConfigPatch;
 
-		const agent = this.hub.agent;
+		const agent = this.sessionHub.agent;
 		try {
 			agent.applyConfig(sessionId, fields);
 		} catch (error) {
@@ -667,8 +666,6 @@ export class SessionController {
 	 *
 	 * 不再 pending 的提示——已应答、被 abort 拒绝、或服务器重启而消失——是冲突而不是 no-op：请求被理解并被拒绝，这正是 409 所说的。客户端会看到那个错误，这正是要点——一个什么都不回答、也什么都不说的按钮，正是本实现所替代的失败。客户端需要的关于调用*实际*遭遇了什么的答案，来自 baseline 和工具结果，而不是这个 status code，后者只声称"现在没有人在等这个答案"。
 	 *
-	 * 下面的顺序是承重的。只读检查在前，因为只有可应答的请求才能被记录；`onApproval` 在 `respondApproval` 之前，因为答案必须在恢复运行关闭调用之前被记住——上报定案的那一帧，是在调用离开快照时由会话自己的变更通知构建的。
-	 *
 	 * `respondApproval` 启动的运行不被 await，与 prompt 的运行不被 await 完全一致：202 语义——答案被接受，它启动的运行在流上报告自己。
 	 */
 	async approve(
@@ -679,14 +676,13 @@ export class SessionController {
 		const approved = body.approved;
 		if (typeof approved !== "boolean") throw httpStatus.badRequest("`approved` must be a boolean");
 
-		const agent = this.hub.agent;
-		// 在任何东西被记录之前拒绝：本会话没有在等的一个 id 得到 409，answers 表和会话都不会听到这个尝试。
+		const agent = this.sessionHub.agent;
+		// 在任何东西被启动之前拒绝：本会话没有在等的一个 id 得到 409，会话听不到这次尝试。
 		// 无所指的 id 沿 hasPendingApproval 自己的路径（getSessionBySessionId → open）抛
 		// {@link UnknownSessionError}，transport 把它变成 404。
 		if (!agent.hasPendingApproval(sessionId, toolCallId)) {
 			throw httpStatus.conflict(`${toolCallId} is not a pending approval`);
 		}
-		this.listeners.onApproval?.(sessionId, toolCallId, approved);
 		void agent.respondApproval(sessionId, toolCallId, approved).catch((error: unknown) => {
 			this.onRunFailure(sessionId, messageOf(error));
 		});

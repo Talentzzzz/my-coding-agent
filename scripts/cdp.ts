@@ -153,17 +153,17 @@ export async function openPage(
 	const target = targets.find((entry) => entry.type === "page" && entry.webSocketDebuggerUrl !== undefined);
 	if (target?.webSocketDebuggerUrl === undefined) throw new Error("Chromium 没有给出可连接的页面");
 
-	const socket = new WebSocket(target.webSocketDebuggerUrl);
+	const webSocket = new WebSocket(target.webSocketDebuggerUrl);
 	await new Promise<void>((resolve, reject) => {
-		socket.addEventListener("open", () => resolve(), { once: true });
-		socket.addEventListener("error", () => reject(new Error("连不上 DevTools WebSocket")), { once: true });
+		webSocket.addEventListener("open", () => resolve(), { once: true });
+		webSocket.addEventListener("error", () => reject(new Error("连不上 DevTools WebSocket")), { once: true });
 	});
 
 	let next = 0;
 	const pending = new Map<number, Pending>();
 	const listeners = new Map<string, Set<(params: Record<string, unknown>) => void>>();
 
-	socket.addEventListener("message", (event) => {
+	webSocket.addEventListener("message", (event) => {
 		const message = JSON.parse(String(event.data)) as {
 			id?: number;
 			method?: string;
@@ -187,7 +187,7 @@ export async function openPage(
 			next += 1;
 			const id = next;
 			pending.set(id, { resolve, reject });
-			socket.send(JSON.stringify({ id, method, params }));
+			webSocket.send(JSON.stringify({ id, method, params }));
 		});
 
 	const evaluate = async <T>(expression: string): Promise<T> => {
@@ -244,7 +244,7 @@ export async function openPage(
 			writeFileSync(file, Buffer.from(shot.data, "base64"));
 		},
 		close: async () => {
-			socket.close();
+			webSocket.close();
 		},
 	};
 

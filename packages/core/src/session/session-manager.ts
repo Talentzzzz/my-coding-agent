@@ -2117,6 +2117,19 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * 这个会话的删除是否正跨着闸：闸条目上立着 `closing` 的那一拍。
+	 *
+	 * 删除的同步存在性检查要问的正是它——meta 可能还在盘上（unlink 尚未落地）而删除已在闸内
+	 * 进行，「第二次删除也是 404」靠这里成立，而不是靠赌 unlink 的时机：202 应答先到的否决式
+	 * 删除，从进闸的那一拍起就该把一切后续的存在性检查答成「没有这个会话」（ADR-0023）。
+	 */
+	isClosing(id: string): boolean {
+		const absPath = SessionManager.findSessionFilePathById(id);
+		if (absPath === undefined) return false;
+		return this.holds.get(absPathKey(absPath))?.closing !== undefined;
+	}
+
 }
 
 /** 一个组里最近的活动，供侧栏目录排序。 */

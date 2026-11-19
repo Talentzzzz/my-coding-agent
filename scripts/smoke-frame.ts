@@ -23,55 +23,55 @@ process.stdout.write("\nframe：一帧只画一次\n");
 	let state = 0;
 	let runs = 0;
 	let painted = -1;
-	const once = new OncePerFrame(() => {
+	const oncePerFrame = new OncePerFrame(() => {
 		runs += 1;
 		painted = state;
 	});
 
 	// 一次刷新里的多个 delta：第一个把帧装上，其余都是同一次绘制。
 	state = 1;
-	once.schedule();
+	oncePerFrame.schedule();
 	state = 2;
-	once.schedule();
+	oncePerFrame.schedule();
 	state = 3;
-	once.schedule();
+	oncePerFrame.schedule();
 	check("一帧之前什么都没跑", runs === 0, `${runs}`);
-	check("队列里有一帧", once.pending);
+	check("队列里有一帧", oncePerFrame.pending);
 	check("这一帧跑了一次", shim.frames() > 0 && runs === 1, `${runs}`);
 	check("跑的是最后的状态", painted === 3, `${painted}`);
-	check("跑完就不再有待跑的帧", !once.pending);
+	check("跑完就不再有待跑的帧", !oncePerFrame.pending);
 
 	// 之后的 delta 装上新帧；合并器可复用，而不是一次性的。
 	state = 4;
-	once.schedule();
-	check("新的 delta 排了新帧", once.pending);
+	oncePerFrame.schedule();
+	check("新的 delta 排了新帧", oncePerFrame.pending);
 	shim.frames();
 	check("新帧跑的是新状态", runs === 2 && painted === 4, `${runs}/${painted}`);
 
 	// 取消正是立即绘制所依赖的机制：它现在就画同一份状态，而一个留着装好的帧会在下次刷新再画一遍。
 	state = 5;
-	once.schedule();
-	once.cancel();
-	check("取消后没有排队", !once.pending);
+	oncePerFrame.schedule();
+	oncePerFrame.cancel();
+	check("取消后没有排队", !oncePerFrame.pending);
 	check("取消的帧没有跑", shim.frames() === 0 && runs === 2, `${runs}`);
-	once.cancel();
+	oncePerFrame.cancel();
 }
 
 {
 	// 回调里请求自己是在请求*下一*帧：装帧发生在它本会碰撞的那次 handle 被清除之后，一帧里把
 	// 回调跑两遍就成了一个没有让出点的死循环。
 	let runs = 0;
-	const again = new OncePerFrame(() => {
+	const oncePerFrame = new OncePerFrame(() => {
 		runs += 1;
-		if (runs < 3) again.schedule();
+		if (runs < 3) oncePerFrame.schedule();
 	});
-	again.schedule();
+	oncePerFrame.schedule();
 	shim.frames();
-	check("回调里再排的是下一帧", runs === 1 && again.pending, `${runs}`);
+	check("回调里再排的是下一帧", runs === 1 && oncePerFrame.pending, `${runs}`);
 	shim.frames();
-	check("再下一帧继续跑", runs === 2 && again.pending, `${runs}`);
+	check("再下一帧继续跑", runs === 2 && oncePerFrame.pending, `${runs}`);
 	shim.frames();
-	check("跑满之后停下", runs === 3 && !again.pending, `${runs}`);
+	check("跑满之后停下", runs === 3 && !oncePerFrame.pending, `${runs}`);
 }
 
 {
@@ -79,24 +79,24 @@ process.stdout.write("\nframe：一帧只画一次\n");
 	// 产生的形状，两次刷新落在读者感知的一次里。请求不丢失：顺延的帧带着它，在第一个满足间隔
 	// 的帧上运行。
 	let runs = 0;
-	const gated = new OncePerFrame(() => {
+	const oncePerFrame = new OncePerFrame(() => {
 		runs += 1;
 	});
-	gated.schedule();
+	oncePerFrame.schedule();
 	shim.frames();
 	check("第一帧照常跑", runs === 1, `${runs}`);
-	gated.schedule();
+	oncePerFrame.schedule();
 	shim.frames(8);
-	check("间隔不足就顺延", runs === 1 && gated.pending, `${runs}/${gated.pending}`);
+	check("间隔不足就顺延", runs === 1 && oncePerFrame.pending, `${runs}/${oncePerFrame.pending}`);
 	shim.frames(8.7);
-	check("间隔够了补跑", runs === 2 && !gated.pending, `${runs}/${gated.pending}`);
+	check("间隔够了补跑", runs === 2 && !oncePerFrame.pending, `${runs}/${oncePerFrame.pending}`);
 
 	// 取消同样能到达顺延中的帧：立即绘制抢先它，与抢先一个普通装好的帧走同一条路。
-	gated.schedule();
+	oncePerFrame.schedule();
 	shim.frames(8);
-	check("顺延的帧还在队列里", gated.pending);
-	gated.cancel();
-	check("顺延中可以取消", !gated.pending);
+	check("顺延的帧还在队列里", oncePerFrame.pending);
+	oncePerFrame.cancel();
+	check("顺延中可以取消", !oncePerFrame.pending);
 	shim.frames(8.7);
 	check("取消的顺延帧没有跑", runs === 2, `${runs}`);
 	check("补跑之后没有多出来的帧", shim.frames() === 0 && runs === 2, `${runs}`);

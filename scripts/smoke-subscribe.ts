@@ -2,7 +2,7 @@
 // 它不读 hub 的任何内部表（没有按会话的订阅表、没有全局通道），所以这套断言在订阅
 // 实现被拆成 wire 与 session stream 前后应当一字不改地通过。
 //
-// 断言与装配分离：造 hub / projection / mux、造假 FrameSink、把上行帧喂进连接，全部收在
+// 断言与装配分离：造 hub / mux、造假 FrameSink、把上行帧喂进连接，全部收在
 // openRig() 里；openRig 返回的 View 只提供「开、关、取消、看帧」这几个驱动动作，断言区不出现
 // 任何构造调用。后续拆分只允许改 openRig。
 //
@@ -14,12 +14,10 @@ import { join } from "node:path";
 import { setSessionsDir, type ModelConfig, type ServerFrame } from "@my-agent/core";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import { createMuxServer, type MuxConnection } from "../packages/server/src/mux.ts";
-import { createSessionProjection } from "../packages/server/src/projection.ts";
-import { createSessionStream } from "../packages/server/src/stream.ts";
-import { createApprovalAnswers } from "../packages/server/src/approvals.ts";
 import { SessionController } from "../packages/server/src/controllers/sessions.ts";
 import { sessionListeners } from "../packages/server/src/boot.ts";
 import type { FrameSink } from "../packages/server/src/wire.ts";
+import { SessionRows } from "../packages/web/src/rows.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall, type FakeTransport } from "./fake-transport.ts";
 
 let failures = 0;
@@ -73,10 +71,10 @@ interface View {
 /** 装置给出的驱动面——断言区只碰这些，不碰任何构造。 */
 interface Rig {
 	/** 造会话、跑一轮、读快照用；不用来断言。 */
-	hub: SessionHub;
+	sessionHub: SessionHub;
 	/** 剧本化 transport：给下一轮排回答。 */
 	transport: FakeTransport;
-	/** 生一个会话，并做生产里 controller 那一拍：让 projection 重读它的行。 */
+	/** 生一个会话，并做生产里 controller 那一拍：让 hub 重读它的行。 */
 	birth(input: { text: string; workDirAbsPath?: string }): Promise<string>;
 	/** 建一条新连接并等它收到开场帧。 */
 	connect(): Promise<View>;
@@ -86,7 +84,7 @@ interface Rig {
 	showDirectory(): Promise<void>;
 	/**
 	 * 删除一个会话，走生产链：`hub.remove` 让订阅者告别（流 end），controller 的 `onRemoved`
-	 * 随后让 projection 丢掉这一行（`session_gone`）。
+	 * 随后让 hub 丢掉这一行（`session_gone`）。
 	 */
 	deleteSession(sessionId: string): Promise<void>;
 	/** 作答一个审批：记下答案（供 settled 帧）并恢复运行。 */
@@ -97,7 +95,7 @@ interface Rig {
 /**
  * 本 smoke 的唯一装配处。
  *
- * 后续四张票会替换这里的内部件（wire、session stream、hub 的合表、projection 的推法），而外面
+ * 后续四张票会替换这里的内部件（wire、session stream、hub 的合表、行的推法），而外面
  * 每一行断言都必须原样通过——所以任何「怎么做」都锁在这个函数里。
  */
 async function openRig(): Promise<Rig> {
@@ -106,27 +104,25 @@ async function openRig(): Promise<Rig> {
 	setSessionsDir(storeRoot);
 
 	const transport = createFakeTransport();
-	const hub = new SessionHub({ workDirAbsPath: root, api: transport.api, modelsHome: join(root, "agent-home") });
-	hub.setModelConfigs([ROW]);
-	const projection = createSessionProjection(hub);
-	const answers = createApprovalAnswers();
-	const mux = createMuxServer((wire) => createSessionStream(wire, { hub, projection, answers }), {});
-	// 与 boot.ts 同一套接线：controller 的删除经 sessionListeners 落到 projection 的行上。
-	const sessions = new SessionController(hub, sessionListeners({ hub, answers }, projection));
+	const sessionHub = new SessionHub({ workDirAbsPath: root, chatTransport: transport.chatTransport, modelsHome: join(root, "agent-home") });
+	sessionHub.setModelConfigs([ROW]);
+	const muxServer = createMuxServer({ sessionHub }, {});
+	// 与 boot.ts 同一套接线：controller 的删除经 sessionListeners 落到 hub 的行存储上。
+	const sessionController = new SessionController(sessionHub, sessionListeners({ sessionHub }));
 
 	return {
-		hub,
+		sessionHub,
 		transport,
 		async birth(input): Promise<string> {
-			const id = await hub.birth(input);
+			const id = await sessionHub.birth(input);
 			// 生产中这由 controller 的 onCreated 触发；没有它，出生之后的会话永远进不了行表。
-			await projection.refresh(id);
+			await sessionHub.refreshRow(id);
 			return id;
 		},
 		async connect(): Promise<View> {
 			const frames: ServerFrame[] = [];
 			let closed = false;
-			const sink: FrameSink = {
+			const frameSink: FrameSink = {
 				send(frame) {
 					frames.push(frame);
 					// 恒为 true：本 smoke 不演练写侧背压，帧总是被收下。
@@ -143,36 +139,34 @@ async function openRig(): Promise<Rig> {
 					return closed;
 				},
 			};
-			const connection: MuxConnection = await mux.accept(sink);
+			const muxConnection: MuxConnection = await muxServer.accept(frameSink);
 			return {
 				frames: (streamId) => frames.filter((frame) => frame.streamId === streamId),
 				sequence: () => [...frames],
-				open: (sessionId) => mux.handle(connection, JSON.stringify({ type: "open", sessionId })),
-				cancel: (sessionId) => mux.handle(connection, JSON.stringify({ type: "cancel", sessionId })),
-				closeConnection: () => mux.forget(connection),
+				open: (sessionId) => muxServer.handle(muxConnection, JSON.stringify({ type: "open", sessionId })),
+				cancel: (sessionId) => muxServer.handle(muxConnection, JSON.stringify({ type: "cancel", sessionId })),
+				closeConnection: () => muxServer.forget(muxConnection),
 				frameCount: () => frames.length,
 			};
 		},
 		async hideDirectory(path: string): Promise<void> {
-			hub.agent.applySettings({ hiddenDirectories: [path] });
-			hub.publishResync();
+			sessionHub.agent.applySettings({ hiddenDirectories: [path] });
+			sessionHub.publishResync();
 		},
 		async showDirectory(): Promise<void> {
-			hub.agent.applySettings({ hiddenDirectories: [] });
-			hub.publishResync();
+			sessionHub.agent.applySettings({ hiddenDirectories: [] });
+			sessionHub.publishResync();
 		},
 		async deleteSession(sessionId: string): Promise<void> {
-			await sessions.remove(sessionId);
+			await sessionController.remove(sessionId);
 		},
 		approve(sessionId, toolCallId, approved) {
-			// 与审批端点同一顺序：先记答案（settled 帧读它），再恢复运行（它会让待审批集合变空）。
-			answers.remember(sessionId, toolCallId, approved);
-			void hub.agent.respondApproval(sessionId, toolCallId, approved);
+			// 与审批端点同一顺序：恢复运行（它会让待审批集合变空，settled 帧与结果事件随之而来）。
+			void sessionHub.agent.respondApproval(sessionId, toolCallId, approved);
 		},
 		async close(): Promise<void> {
-			mux.close();
-			projection.close();
-			await hub.close();
+			muxServer.close();
+			await sessionHub.close();
 			await rm(storeRoot, { recursive: true, force: true });
 			await rm(root, { recursive: true, force: true });
 		},
@@ -187,7 +181,7 @@ const releases: (() => void | Promise<void>)[] = [];
 async function born(text: string, workDirAbsPath?: string): Promise<string> {
 	rig.transport.setResponses([fakeAssistantMessage(`answered: ${text}`)]);
 	const id = await rig.birth({ text, ...(workDirAbsPath === undefined ? {} : { workDirAbsPath }) });
-	await until(() => !rig.hub.isLive(id));
+	await until(() => !rig.sessionHub.isLive(id));
 	return id;
 }
 
@@ -211,10 +205,10 @@ try {
 			return fakeAssistantMessage("放行之后的回答");
 		},
 	]);
-	const run = rig.hub.agent.prompt(inFlightId, "门口的下一轮");
+	const run = rig.sessionHub.agent.prompt(inFlightId, "门口的下一轮");
 	void run;
 	releases.push(release);
-	await until(() => rig.hub.isLive(inFlightId) && rig.hub.agent.snapshot(inFlightId).running);
+	await until(() => rig.sessionHub.isLive(inFlightId) && rig.sessionHub.agent.snapshot(inFlightId).running);
 	view.open(inFlightId);
 	// 活半的订阅与快照在同一个同步块里，open 返回时帧已经在 sink 上。
 	const liveFirst = view.frames(inFlightId)[0];
@@ -230,7 +224,7 @@ try {
 	view.open(coldId);
 	check("冷会话的 open 返回时还没有 baseline（读盘是异步的）", view.frames(coldId).length === 0, `${view.frames(coldId).length} frames`);
 	rig.transport.setResponses([fakeAssistantMessage("读盘期间落地的回答")]);
-	await rig.hub.agent.prompt(coldId, "读盘期间发出的消息");
+	await rig.sessionHub.agent.prompt(coldId, "读盘期间发出的消息");
 	check("冷半的 baseline 恰好一份", await until(() => view.frames(coldId).filter((frame) => "item" in frame && frame.item.type === "baseline").length === 1), JSON.stringify(view.frames(coldId)));
 	const coldFrames = view.frames(coldId);
 	const coldFirst = coldFrames[0];
@@ -259,7 +253,7 @@ try {
 		JSON.stringify(duplicateFrames),
 	);
 	rig.transport.setResponses([fakeAssistantMessage("重复 open 之后仍然照常到达")]);
-	await rig.hub.agent.prompt(coldId, "重复 open 之后再发一条");
+	await rig.sessionHub.agent.prompt(coldId, "重复 open 之后再发一条");
 	check(
 		"原有的流继续可用：其后的事件照常到达",
 		await until(() => view.frames(coldId).filter((frame) => "item" in frame && frame.item.type === "event").length > eventsBeforeDuplicate),
@@ -324,11 +318,11 @@ try {
 	const branchId = await born("一条会被挪分支的会话");
 	view.open(branchId);
 	await until(() => view.frames(branchId).some((frame) => "item" in frame && frame.item.type === "baseline"));
-	const branchSnapshot = await rig.hub.snapshotOf(branchId);
+	const branchSnapshot = await rig.sessionHub.snapshotOf(branchId);
 	const branchEntryId = branchSnapshot.messageEntryIds.find((id): id is string => typeof id === "string");
 	check("前置：会话里有一个 entry 可以挪到", branchEntryId !== undefined, JSON.stringify(branchSnapshot.messageEntryIds));
 	const branchBaselinesBefore = view.frames(branchId).filter((frame) => "item" in frame && frame.item.type === "baseline").length;
-	const newLeaf = rig.hub.agent.branchTo(branchId, branchEntryId as string, false);
+	const newLeaf = rig.sessionHub.agent.branchTo(branchId, branchEntryId as string, false);
 	check(
 		"branch 之后该流再收到一份 baseline，内容是新叶子所指向的状态",
 		await until(() => {
@@ -353,12 +347,12 @@ try {
 	viewC.open(otherId);
 	await until(() => viewC.frames(otherId).some((frame) => "item" in frame && frame.item.type === "baseline"));
 
-	rig.hub.agent.applyConfig(approvalId, { approval: { read: true } });
+	rig.sessionHub.agent.applyConfig(approvalId, { approval: { read: true } });
 	rig.transport.setResponses([
 		fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 		fakeAssistantMessage("审批之后完成"),
 	]);
-	await rig.hub.agent.prompt(approvalId, "读一下 notes.txt");
+	await rig.sessionHub.agent.prompt(approvalId, "读一下 notes.txt");
 
 	const approvalFrames = (target: View): ServerFrame[] =>
 		target.frames(approvalId).filter((frame) => "item" in frame && (frame.item.type === "approval_request" || frame.item.type === "approval_settled"));
@@ -367,13 +361,23 @@ try {
 	const toolCallId = requestFrame !== undefined && "item" in requestFrame && requestFrame.item.type === "approval_request" ? requestFrame.item.request.toolCallId : "";
 	rig.approve(approvalId, toolCallId, true);
 	check(
-		"作答之后两边都收到 approval_settled 且 approved: true",
+		"作答之后两边都收到 approval_settled，且各自都看到恢复运行关闭这个调用的执行结束事件",
 		await until(() => {
 			const settled = (target: View): boolean =>
 				approvalFrames(target).some(
-					(frame) => "item" in frame && frame.item.type === "approval_settled" && frame.item.toolCallId === toolCallId && frame.item.approved === true,
+					(frame) => "item" in frame && frame.item.type === "approval_settled" && frame.item.toolCallId === toolCallId,
 				);
-			return settled(viewA) && settled(viewB);
+			// verdict 不在 settled 帧上：结果由那次关闭自己的执行事件说——grant 是恢复运行重发
+			// 调用的执行，它的 tool_execution_end 就是两边共同听到的那句"批准了、跑完了"。
+			const ran = (target: View): boolean =>
+				target.frames(approvalId).some(
+					(frame) =>
+						"item" in frame &&
+						frame.item.type === "event" &&
+						frame.item.event.type === "tool_execution_end" &&
+						frame.item.event.toolCallId === toolCallId,
+				);
+			return settled(viewA) && settled(viewB) && ran(viewA) && ran(viewB);
 		}),
 		JSON.stringify({ a: approvalFrames(viewA), b: approvalFrames(viewB) }),
 	);
@@ -383,7 +387,7 @@ try {
 		JSON.stringify(viewC.frames(otherId)),
 	);
 	// 恢复的那一轮跑完后会话离开活半，收尾时不会留下一个还在写文件的袋。
-	await until(() => !rig.hub.isLive(approvalId));
+	await until(() => !rig.sessionHub.isLive(approvalId));
 
 	process.stdout.write("断线：此后跑一轮、再删除，假 sink 上不再出现新帧\n");
 	const goneId = await born("一条断线之后还在跑的会话");
@@ -393,7 +397,7 @@ try {
 	const framesAtDisconnect = viewD.frameCount();
 	viewD.closeConnection();
 	rig.transport.setResponses([fakeAssistantMessage("断线之后仍然跑完的一轮")]);
-	await rig.hub.agent.prompt(goneId, "断线之后再发一条");
+	await rig.sessionHub.agent.prompt(goneId, "断线之后再发一条");
 	await rig.deleteSession(goneId);
 	await settle();
 	check("断线之后不再造帧", viewD.frameCount() === framesAtDisconnect, `${framesAtDisconnect} -> ${viewD.frameCount()}`);
@@ -416,14 +420,28 @@ try {
 	const visibleId = await born("一个住在可见目录里的会话");
 	viewE.open(visibleId);
 	rig.transport.setResponses([fakeAssistantMessage("可见会话的一轮")]);
-	const visibleRun = rig.hub.agent.prompt(visibleId, "让可见会话跑一轮");
+	const visibleRun = rig.sessionHub.agent.prompt(visibleId, "让可见会话跑一轮");
 	rig.transport.appendResponses([fakeAssistantMessage("隐藏会话的一轮")]);
-	const hiddenRun = rig.hub.agent.prompt(hiddenId, "让隐藏会话也跑一轮");
+	const hiddenRun = rig.sessionHub.agent.prompt(hiddenId, "让隐藏会话也跑一轮");
 	await Promise.all([visibleRun, hiddenRun]);
 	const rowsOf = (id: string): ServerFrame[] => viewE.frames(null).filter((frame) => "item" in frame && frame.item.type === "session_row" && frame.item.session.id === id);
 	check("可见会话的行照常到达", await until(() => rowsOf(visibleId).length > 0), JSON.stringify(viewE.frames(null)));
 	await settle();
-	check("被隐藏目录里的会话变更收不到它的 session_row", rowsOf(hiddenId).length === 0, JSON.stringify(rowsOf(hiddenId)));
+	// 服务端不再能按目录压制增量：hub 无行存储，增量不带 workDir 可过滤（ADR-0027）。压制移到
+	// 客户端——行表只让完整行自表身份，隐藏目录的行从未进表（overview 过滤过一次），它的增量
+	// 在合并里落空。断言改在真客户端的行表上，而不是连接的帧上。
+	const hiddenPatches = rowsOf(hiddenId).flatMap((frame) => ("item" in frame && frame.item.type === "session_row" ? [frame.item.session] : []));
+	check("隐藏会话的增量不带 workDir——客户端无从把它画出来", hiddenPatches.every((patch) => patch !== undefined && patch.workDirAbsPath === undefined), JSON.stringify(hiddenPatches));
+	const clientRows = new SessionRows();
+	// 按到达顺序重放：sessions 帧是整表替换，必须落在它到达的那一拍，不能先放增量再补整表——
+	// 否则一份出生前的 overview 会把增量放进去的行整表抹掉。
+	for (const frame of viewE.frames(null)) {
+		const item = "item" in frame && frame.item.type === "session_row" ? frame.item : "item" in frame && frame.item.type === "sessions" ? frame.item : undefined;
+		if (item?.type === "session_row") clientRows.put(item.session);
+		else if (item?.type === "sessions") clientRows.replaceAll(item.sessions);
+	}
+	check("客户端行表里没有隐藏会话的行", clientRows.get(hiddenId) === undefined, JSON.stringify(clientRows.get(hiddenId)));
+	check("可见会话的行在客户端表里，且随增量活着", clientRows.get(visibleId)?.running === false, JSON.stringify(clientRows.get(visibleId)));
 
 	process.stdout.write("整表重发：目录进出列表时，每条连接收到一整份新的 sessions 帧\n");
 	const viewF = await rig.connect();

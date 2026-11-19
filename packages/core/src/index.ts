@@ -141,6 +141,7 @@ export {
 	type ServerMessage,
 	type SessionRef,
 	type SessionRow,
+	type SessionRowPatch,
 	type SessionSnapshot,
 	type GlobalSettingsSnapshot,
 	type StreamFailure,

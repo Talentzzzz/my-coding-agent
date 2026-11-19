@@ -34,14 +34,14 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  */
 function nodeSocket(url: string): MuxSocketFactory {
 	return (handlers: MuxSocketHandlers): MuxSocket => {
-		const socket = new WebSocket(url);
-		socket.addEventListener("open", () => handlers.onOpen());
-		socket.addEventListener("message", (event) => handlers.onMessage(String(event.data)));
-		socket.addEventListener("close", () => handlers.onClose());
-		socket.addEventListener("error", () => handlers.onError());
+		const webSocket = new WebSocket(url);
+		webSocket.addEventListener("open", () => handlers.onOpen());
+		webSocket.addEventListener("message", (event) => handlers.onMessage(String(event.data)));
+		webSocket.addEventListener("close", () => handlers.onClose());
+		webSocket.addEventListener("error", () => handlers.onError());
 		return {
-			send: (text) => socket.send(text),
-			close: (code, reason) => socket.close(code, reason),
+			send: (text) => webSocket.send(text),
+			close: (code, reason) => webSocket.close(code, reason),
 		};
 	};
 }
@@ -83,15 +83,15 @@ async function running(base: string, sessionId: string): Promise<boolean> {
 // 心跳间隔是本 smoke 的整个时钟：服务器每 50 ms 说一次话，客户端容忍其中三次（它自己的规则，
 // 由 `everyMs` 推得），两个数字都远小于下方的断言窗口。
 const transport = createFakeTransport();
-const server: BootedServer = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: 50 }, api: transport.api, settingsHome: home });
+const server: BootedServer = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: 50 }, chatTransport: transport.chatTransport, settingsHome: home });
 // 出生请求需要一行模型（ADR-0021：它自带第一条消息，于是那一轮当场开跑）。
-server.hub.setModelConfigs(modelRows);
+server.sessionHub.setModelConfigs(modelRows);
 const proxy: FaultyProxy = await faultyProxy(new URL(server.url));
 
 const observed: Observed = { channels: [], heartbeats: 0, baselines: [], ended: [], errors: [] };
 /** 窗格监视的 session，服务器指名它的落地 session 后设置。 */
 let watchId = "";
-const client = new MuxClient(
+const muxClient = new MuxClient(
 	{
 		onChannel: (state) => observed.channels.push({ state, at: Date.now() }),
 		onConnectionItem: (item) => {
@@ -136,9 +136,9 @@ try {
 	// -----------------------------------------------------------------------------
 	process.stdout.write("the channel proves itself with the server's first frame\n");
 
-	client.start();
-	client.retain(watchId, "pane");
-	check("the channel reached live", await until(() => client.channel === "live", 3_000), JSON.stringify(observed.channels));
+	muxClient.start();
+	muxClient.retain(watchId, "pane");
+	check("the channel reached live", await until(() => muxClient.channel === "live", 3_000), JSON.stringify(observed.channels));
 	check("and heartbeats were already arriving", observed.heartbeats > 0, String(observed.heartbeats));
 	check("the watched session's baseline arrived", await until(() => observed.baselines.length === 1, 3_000), String(observed.baselines.length));
 
@@ -150,7 +150,7 @@ try {
 
 	const liveAt = observed.channels.find((entry) => entry.state === "live")?.at ?? Date.now();
 	proxy.blackout(true);
-	const died = await until(() => client.channel === "down", 2_000);
+	const died = await until(() => muxClient.channel === "down", 2_000);
 	const downAt = observed.channels.find((entry) => entry.state === "down")?.at ?? 0;
 	check("the channel was declared down", died, JSON.stringify(observed.channels));
 	check(
@@ -173,14 +173,14 @@ try {
 
 	proxy.blackout(false);
 	check("a second connection arrived at the relay", await until(() => proxy.connections === 2, 5_000), String(proxy.connections));
-	check("and the channel proved itself live again", await until(() => client.channel === "live", 3_000), JSON.stringify(observed.channels));
+	check("and the channel proved itself live again", await until(() => muxClient.channel === "live", 3_000), JSON.stringify(observed.channels));
 
 	// 订阅表是有意要在断连中存活的，于是重连重开了窗格的 session，服务器以第二份基线作答
 	// ——视图被整体替换，既不是追加，也不是留着它记住的任何东西。
 	check("the session's stream was re-opened with a fresh baseline", await until(() => observed.baselines.length === 2, 3_000), String(observed.baselines.length));
 	check("the re-opened stream was not ended behind the window's back", observed.ended.length === 0, JSON.stringify(observed.ended));
 
-	client.close();
+	muxClient.close();
 } finally {
 	await proxy.close();
 	await server.close();

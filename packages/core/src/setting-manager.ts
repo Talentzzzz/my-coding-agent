@@ -30,7 +30,7 @@ import type { QueueMode } from "./protocol.ts";
  */
 export class SettingManager {
 	private readonly home: string;
-	private readonly modelStore: ModelConfigStore | undefined;
+	private readonly modelConfigStore: ModelConfigStore | undefined;
 	private modelRows: readonly ModelConfig[] | undefined;
 	private readonly storage: SettingsStorage | undefined;
 
@@ -41,7 +41,7 @@ export class SettingManager {
 		// 写回行列表本身——这正是驱动自己模型行的 smoke 想要的：任何人的 `models.json` 都不会有东西
 		// 落进去。
 		this.modelRows = options.models === undefined ? undefined : [...options.models];
-		this.modelStore = options.models === undefined ? ModelConfigStore.create(options.modelsHome ?? this.home) : undefined;
+		this.modelConfigStore = options.models === undefined ? ModelConfigStore.create(options.modelsHome ?? this.home) : undefined;
 	}
 
 	/**
@@ -74,7 +74,7 @@ export class SettingManager {
 	 * 修正了密钥的人，下一次请求就得到答案，无需重启。
 	 */
 	modelCatalog(): readonly ModelConfig[] {
-		return this.modelRows ?? this.modelStore!.list();
+		return this.modelRows ?? this.modelConfigStore!.list();
 	}
 
 	/** 替换全部行。整表写入正是名字与文件不漂移的原因。 */
@@ -83,7 +83,7 @@ export class SettingManager {
 			this.modelRows = [...models];
 			return;
 		}
-		this.modelStore!.replace(models);
+		this.modelConfigStore!.replace(models);
 	}
 
 	/**
@@ -134,9 +134,9 @@ export function inMemorySettingManager(
 	settings: Partial<GlobalSettings> = {},
 	models?: readonly ModelConfig[],
 ): SettingManager {
-	const storage = new InMemorySettingsStorage();
-	storage.write(`${JSON.stringify(settings, null, "\t")}\n`);
-	return new SettingManager({ storage, models });
+	const inMemorySettingsStorage = new InMemorySettingsStorage();
+	inMemorySettingsStorage.write(`${JSON.stringify(settings, null, "\t")}\n`);
+	return new SettingManager({ storage: inMemorySettingsStorage, models });
 }
 
 /** 设置的部分变更，形状与浏览器发来的 config 补丁一致。 */

@@ -113,22 +113,30 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   默认端口 8080。abort 是 REST 命令不帧化、不引入 ack/requestId，mux 上行 `cancel` 只用于取消订阅
   （[ADR-0001](docs/adr/0001-transport-websocket-mux.md)、`.scratch/mux-landing/`）。**两半保证的
   落点各在一侧**：`open` 走 hub 的 `subscribe`（注册、活冷分岔与 baseline 交付在 hub 内部一体完成），
-  重发走 `snapshotFor`；帧序（baseline 先于本订阅 backlog 的任何帧）与失败的措辞归 `session stream`
-  那一层，mux 只剩帧与 socket 存活（[ADR-0024](docs/adr/0024-mux-only-frames.md)，分层表在那一份
-  里）。hub 自己只剩两个容器：一张按会话的订阅表（`Map<sessionId, Set<SessionSubscription>>`，窗口与侧栏同住一个
+  重发走 `snapshotFor`；帧序（baseline 先于本订阅 backlog 的任何帧）与失败的措辞归连接级
+  controller `MuxConnection`（`mux.ts`），帧长什么样归 `frames.ts` 的纯函数
+  （[ADR-0025](docs/adr/0025-mux-is-the-connection-controller.md)，分层表在那一份里）。hub 自己只剩两个容器：一张按会话的订阅表（`Map<sessionId, Set<SessionSubscription>>`，窗口与侧栏同住一个
   Set）与一个全局通道（`Set<GlobalSubscription>`，这台机器上的列表——行与整表重发都从这里扇出）；原先按 id
   分的两张表已合成前面那一张。**一条常驻连接是一个 `Writable`，所以写侧必须有界**（归 `wire`）：
   `write()` 返回 `false` 之后停写，帧进有界队列（4 MiB / 10 秒），超限用 `1013` 关掉整条连接。
   模型那一侧另有一个同名的 `ChatTransport`（`llm/types.ts`），
   只管一次请求的流式，与这里说的命令面不是一回事（ADR-0010）。
+- **mux（连接级 controller）** —— 常驻连接这一侧的 controller，与 REST 侧的 `Router → controller
+  → hub` 同形（[ADR-0025](docs/adr/0025-mux-is-the-connection-controller.md)、
+  [ADR-0026](docs/adr/0026-projection-folded-into-hub.md)、[ADR-0027](docs/adr/0027-rows-computed-not-stored.md)）：`MuxServer` 收
+  `{ hub, answers }`，只留连接集合、两个定时器与关停；`MuxConnection` 是每条连接自己
+  的那一份——`begin`（心跳 → overview → 全局订阅）/ `handle`（一个上行帧：`open` / `cancel`）/
+  `dispose` 三个动词，外加它自持的观看表 `Map<sessionId, Watcher>`（既是我在订什么，也是断线时
+  唯一的反向索引）、baseline 前的扣帧队列与本连接的审批读者计数。它懂会话、不认识 socket：所有
+  帧经 `wire.send` 写出。帧序的另一半在这里：baseline 先于本观看 backlog 的任何帧。**它认识
+  `sessionId`，但不认识会话的持久化与引擎**——后者仍归 hub 的编排层。
+- **frames** —— 会话语义到帧的**纯函数**：帧构造、审批差量（`pendingOf` / `approvalDiff`）、失败
+  措辞（`baselineFailureText`）。只有函数，没有类型、没有状态、没有生命周期；"这条连接已经看到
+  哪儿"一律归 `MuxConnection`（ADR-0025）。
 - **wire** —— 只会发帧的一层：`ServerFrame` 进、socket 出；有界队列（4 MiB / 10 秒）、停滞与
   `1013`、协议层 ping（2 秒一次，容忍两次未应答）与应用心跳（5 秒）、关停。不认识会话、baseline、
   审批、目录；`send` 是它对上层的唯一接口，`FrameSink` 的五个成员是它对 socket 的唯一接口。
   帧序不变量的第一半住在这里：一条连接上的所有帧只经同一个队列写出（ADR-0024）。
-- **session stream** —— 每连接一个，懂会话不懂 socket：订阅 hub、装配 overview（过滤隐藏目录）、
-  把事件与快照翻译成帧、持有 baseline 前的扣帧队列与本连接的审批读者计数、决定失败的措辞；全部经
-  `wire.send` 写出。它自持一张 `Map<sessionId, 订阅>`，既是「我在订什么」，也是断线时唯一的反向
-  索引。帧序的另一半在这里：baseline 先于本订阅 backlog 的任何帧（ADR-0024）。
 - **hold（持有）** —— SessionManager 的**文件级**簿记
   （[ADR-0023](docs/adr/0023-holds-into-session-manager-veto-delete.md)）："此刻谁在改变这个会话
   文件对"的签到表——`Map<fileKey, { holds, closing? }>`，键是 `.jsonl` 绝对路径的规范文件键
@@ -197,7 +205,7 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   重放一次（一次运行读一次、带着走；一条命令读一次、用完就丢）。订阅者也不在袋上：编排层构造时
   注入唯一一个 `SessionSink`（`onEvent` / `onState` 两个回调），fanout 在 emit 点直调、按 sessionId
   点名；per-session 的分发归宿主——hub 收到回调后查那张按会话的订阅表，把事件与状态交给实现了
-  对应可选方法的 `SessionSubscription` 元素（见 `transport` 与 `session stream` 两条）。
+  对应可选方法的 `SessionSubscription` 元素（见 `transport` 与 `mux` 两条）。
   `live` 里只有两条队列、在飞运行、
   partial、重试位与挂起位——运行期瞬态，盘上没有的东西（ADR-0021 删掉了曾住在这里的
   未落盘袋与打开行）。由 `Agent` 按 id 键控持有，

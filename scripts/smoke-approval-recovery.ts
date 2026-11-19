@@ -91,12 +91,12 @@ function requestRoles(context: { messages: readonly Message[] }): string[] {
  * 会结束 hold：signal 正是真 transport 尊重的东西，让剧本回答随它放行正是让 run 以被中止消息
  * 落定、如同经由真网络一样的办法。
  */
-function gatedApi(holds: number[]): { api: ChatTransport; release(index: number): void; held(index: number): boolean } {
-	const inner = fake.api.stream.bind(fake.api);
+function gatedApi(holds: number[]): { chatTransport: ChatTransport; release(index: number): void; held(index: number): boolean } {
+	const inner = fake.chatTransport.stream.bind(fake.chatTransport);
 	let calls = 0;
 	const pending = new Map<number, () => void>();
 	const released = new Set<number>();
-	const api: ChatTransport = {
+	const chatTransport: ChatTransport = {
 		stream: (model, context, options) => {
 			calls += 1;
 			const nth = calls;
@@ -118,7 +118,7 @@ function gatedApi(holds: number[]): { api: ChatTransport; release(index: number)
 		},
 	};
 	return {
-		api,
+		chatTransport,
 		release: (index) => {
 			released.add(index);
 			pending.get(index)?.();
@@ -147,12 +147,12 @@ function sidOf(agent: Agent): string {
 /** ADR-0021：出生消息。openSession 先落它，之后的 prompt / snapshot 才有文件可开。 */
 const BIRTH_TEXT = "the smoke's birth message";
 
-async function openSession(overrides: { approval?: Record<string, boolean>; api?: ChatTransport } = {}): Promise<Agent> {
+async function openSession(overrides: { approval?: Record<string, boolean>; chatTransport?: ChatTransport } = {}): Promise<Agent> {
 	const session = createSession(root);
 	const agent = await openAgent({
 		session,
-		api: overrides.api ?? fake.api,
-		settings: inMemorySettingManager({ approval: overrides.approval ?? {} }, rows),
+		chatTransport: overrides.chatTransport ?? fake.chatTransport,
+		settingManager: inMemorySettingManager({ approval: overrides.approval ?? {} }, rows),
 	});
 	// 会话随第一条消息出生（ADR-0021），而编排层按 id 现开文件：这里直接对袋追加一条 user
 	// 消息让文件落地——不跑引擎、不耗剧本。模型选择随每条 prompt 的 selection 抵达，与生产一致。
@@ -274,8 +274,8 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 			return { content: [{ type: "text", text: "ran" }], details: {} };
 		},
 	};
-	const manager = createToolManager();
-	manager.register(readTool);
+	const toolManager = createToolManager();
+	toolManager.register(readTool);
 	// 一次 run 会声明的工具面：这里只有那个 fixture，它也正是整张表——链条问的两个问题（"这次
 	// run 可以调它吗"、"这个名字存在吗"）如今是同一个问题：解析对着本请求声明过的数组按名查
 	// （ADR-0016），调用只能落到声明过的名字上。所以每个用例供给自己的声明面，而不是一张表加
@@ -296,7 +296,7 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 		run: ToolRunContext,
 		signal: AbortSignal | undefined,
 		onUpdate: ToolUpdateCallback<any> | undefined,
-	) => manager.execute(name, toolCallId, params, run, signal, onUpdate);
+	) => toolManager.execute(name, toolCallId, params, run, signal, onUpdate);
 
 	/** 放行一切的门：与旧的"递入空 hooks 对象"同一语义。 */
 	const passGates = {
@@ -403,7 +403,7 @@ process.stdout.write("\naborting a recovery run leaves the recovered call with i
 {
 	// 持住恢复 run 的请求——第二次调用，在被提示的 run 自己那次之后。
 	const gate = gatedApi([2]);
-	const agent = await openSession({ approval: { read: true }, api: gate.api });
+	const agent = await openSession({ approval: { read: true }, chatTransport: gate.chatTransport });
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("after the grant")]);
 	await agent.prompt(sidOf(agent), "read the notes", { selection });
 	await agent.settle(sidOf(agent));
@@ -440,7 +440,7 @@ process.stdout.write("\na message steered into a recovery run is taken at the ta
 {
 	// 持住恢复 run 的请求——第二次调用，在被提示的 run 自己那次之后。
 	const gate = gatedApi([2]);
-	const agent = await openSession({ approval: { read: true }, api: gate.api });
+	const agent = await openSession({ approval: { read: true }, chatTransport: gate.chatTransport });
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("answered both")]);
 	await agent.prompt(sidOf(agent), "read the notes", { selection });
 	await agent.settle(sidOf(agent));

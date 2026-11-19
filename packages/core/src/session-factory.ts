@@ -34,11 +34,11 @@ export interface CreateSessionAgentOptions {
 	 */
 	modelsHome?: string;
 	/** 该编排层发出的每个请求走的传输层。默认 Anthropic Messages。 */
-	api?: ChatTransport;
+	chatTransport?: ChatTransport;
 	/** 仅测试的接缝：调用方自己的设置门，取代各 home 背后的文件。 */
-	settings?: SettingManager;
+	settingManager?: SettingManager;
 	/** 仅测试的接缝：调用方自己的工具表，取代六个内置工具。 */
-	tools?: ToolManager;
+	toolManager?: ToolManager;
 	/**
 	 * 事件与快照离开编排层的出口。缺省是 no-op。
 	 *
@@ -68,15 +68,15 @@ export function createSessionAgent(options: CreateSessionAgentOptions = {}): Age
 	const hooks = createHooks();
 	// 只解析一次并交给编排层，它是读取一次运行可执行集合的唯一表，也是命令收窄的唯一表：在这里做
 	// 第二次解析，会让调用方自己的工具到达其中一者而到不了另一者。
-	const tools = options.tools ?? createToolManager();
+	const toolManager = options.toolManager ?? createToolManager();
 	const agent = new Agent({
 		sessionManager: new SessionManager(),
-		settings: options.settings ?? new SettingManager({ home: options.settingsHome, modelsHome: options.modelsHome }),
-		tools,
+		settingManager: options.settingManager ?? new SettingManager({ home: options.settingsHome, modelsHome: options.modelsHome }),
+		toolManager,
 		hooks,
 		// 进程唯一的装配处：传输层在这里解析而不是在编排层内部给默认值，让一次运行能离开进程的每条
 		// 路都由一个文件决定。
-		api: options.api ?? anthropicMessages,
+		chatTransport: options.chatTransport ?? anthropicMessages,
 		// 分发的唯一出口：宿主的实现在它的分发表上应答，no-op 缺省就是空表遍历零次的语义——没人
 		// 听就什么也不发生。
 		sink: options.sink ?? noOpSink,
@@ -111,9 +111,9 @@ export function createSessionAgent(options: CreateSessionAgentOptions = {}): Age
  * 在那里接住没人约束过的结果而不必花一个 hook；想自己约束结果的 hook 用 `archiveToolResult` 归档
  * 全文并把路径放进返回的 content。
  */
-function installDefaultHooks(hooks: Hooks, session: Agent): void {
+function installDefaultHooks(hooks: Hooks, agent: Agent): void {
 	hooks.on("before_tool", async ({ sessionId, toolCallId, toolName, args }) => {
-		const needsApproval = await session.authorize(sessionId, toolName, toolCallId, args);
+		const needsApproval = await agent.authorize(sessionId, toolName, toolCallId, args);
 		return needsApproval ? { suspend: true } : undefined;
 	});
 }
@@ -130,9 +130,9 @@ function installDefaultHooks(hooks: Hooks, session: Agent): void {
  */
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 	const agent = createSessionAgent({
-		...(options.settings === undefined ? {} : { settings: options.settings }),
-		...(options.tools === undefined ? {} : { tools: options.tools }),
-		...(options.api === undefined ? {} : { api: options.api }),
+		...(options.settingManager === undefined ? {} : { settingManager: options.settingManager }),
+		...(options.toolManager === undefined ? {} : { toolManager: options.toolManager }),
+		...(options.chatTransport === undefined ? {} : { chatTransport: options.chatTransport }),
 		...(options.sink === undefined ? {} : { sink: options.sink }),
 	});
 	// 状态在这里进入编排层的表，走的是 hub 用的同一扇门——它如今是类私有的

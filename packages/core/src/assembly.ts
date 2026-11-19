@@ -37,7 +37,7 @@ export interface OpenAgentOptions {
 	 * 内存版，让机器自己的文件永远不被碰。manager 什么都不持有：每次读取都是对其背后文件的一次
 	 * 新读，这正是让一次编辑抵达一个从未重开的会话的原因。
 	 */
-	settings?: SettingManager;
+	settingManager?: SettingManager;
 	/**
 	 * 本会话每个请求走的传输层。
 	 *
@@ -45,7 +45,7 @@ export interface OpenAgentOptions {
 	 * 的情况下被驱动。只有编排层的构造读它——装配从不发送任何东西，这正是它不在
 	 * {@link AssembleAgentStateOptions} 里的原因。
 	 */
-	api?: ChatTransport;
+	chatTransport?: ChatTransport;
 		/**
 		 * 本次装配用来解析工具的表。
 		 *
@@ -53,7 +53,7 @@ export interface OpenAgentOptions {
 		 * hub 为进程保一张表，所以它运行的会话与它只读快照的会话应答同样的工具名、持有同样的实例
 		 * （ADR-0011）。测试在注册了自己的工具之后递入一张。
 		 */
-		tools?: ToolManager;
+		toolManager?: ToolManager;
 		/**
 		 * 事件与快照离开编排层的出口，透传给工厂。
 		 *
@@ -92,11 +92,11 @@ interface Assembled {
 	/** 工作目录，绝对路径。 */
 	workDirAbsPath: string;
 	/** 本会话每次设置与模型读取所经的 manager。 */
-	settings: SettingManager;
+	settingManager: SettingManager;
 	/** 两半组合出的有效视图：活跃工具集、有效审批、模式座位与完整模型行（ADR-0019）。 */
 	resolved: Settings;
 	/** 本构建认识的工具：每进程一张表，这里只为读它的名字。 */
-	tools: ToolManager;
+	toolManager: ToolManager;
 	/** 会话服务，在这里只解析一次，让一次装配的每个消费者共享它。 */
 	sessionManager: SessionManager;
 }
@@ -113,7 +113,7 @@ interface Assembled {
  * `Agent.assembleAgentStateBySession` 是它在激活侧唯一的调用者，反向导入会闭上
  * `agent.ts` → `assembly.ts` → `agent.ts` 这个循环。
  */
-async function assemble(sessionManager: SessionManager, settings: SettingManager, tools: ToolManager, options: AssembleAgentStateOptions): Promise<Assembled> {
+async function assemble(sessionManager: SessionManager, settingManager: SettingManager, toolManager: ToolManager, options: AssembleAgentStateOptions): Promise<Assembled> {
 	// workDirAbsPath 变成绝对路径的唯一一处，让之后每次对该 entry `workDirAbsPath` 的读取——工具的
 	// run context、prompt、快照——都是同一个值。目录是 会话记录 自己的：`createSession` 种下时已
 	// 解析、重放时恢复，所以这里没有覆盖——会话自己决定住在哪里，没有调用方递入第二个答案。
@@ -122,10 +122,10 @@ async function assemble(sessionManager: SessionManager, settings: SettingManager
 	// 袋自己。它是派生的而不是被存下的（ADR-0013），因为会话之后每次读取都得从刚重放的那只袋回答
 	// 同一个问题。没有行的会话照样打开，`Agent` 用一句「该加什么」替它作答：占位行在完全无名的状态
 	// 下承担事实，拒绝发送的是传输层。
-	const resolved = resolveSettings(options.session, settings.getSettings(), settings.modelCatalog(), tools.names());
+	const resolved = resolveSettings(options.session, settingManager.getSettings(), settingManager.modelCatalog(), toolManager.names());
 	// 表的内容是行为而不是目录，所以一张表服务所有会话。这里同样不做任何选择：活跃集与审批已经
 	// 组合在 `resolved` 里，之后的每次读取都重算一次。
-	return { workDirAbsPath, settings, resolved, tools, sessionManager };
+	return { workDirAbsPath, settingManager, resolved, toolManager, sessionManager };
 }
 
 /**
@@ -143,9 +143,9 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 	// manager 什么都不持有（ADR-0006 §2），所以调用方自己的实例改变的只是读*哪些*
 	// 文件与存储——hub 递入自己那份正是为此。
 	const sessionManager = options.sessionManager ?? new SessionManager();
-	const settings = options.settings ?? new SettingManager();
-	const tools = options.tools ?? createToolManager();
-	const { workDirAbsPath, resolved } = await assemble(sessionManager, settings, tools, options);
+	const settingManager = options.settingManager ?? new SettingManager();
+	const toolManager = options.toolManager ?? createToolManager();
+	const { workDirAbsPath, resolved } = await assemble(sessionManager, settingManager, toolManager, options);
 	return sessionSnapshot({
 		sessionManager,
 		session: options.session,
@@ -186,12 +186,12 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
  * 什么都不记录：打开后从未说话的会话不长 entry，打开在另一行或另一档的会话也不写——落笔发生在
  * 真正做出选择时（`applyModelSelection`）或第一个请求被构建时（`recordSelection`）。
  */
-export async function assembleSession(sessionManager: SessionManager, settings: SettingManager, tools: ToolManager, options: AssembleAgentStateOptions): Promise<AgentState> {
-	const { workDirAbsPath } = await assemble(sessionManager, settings, tools, options);
+export async function assembleSession(sessionManager: SessionManager, settingManager: SettingManager, toolManager: ToolManager, options: AssembleAgentStateOptions): Promise<AgentState> {
+	const { workDirAbsPath } = await assemble(sessionManager, settingManager, toolManager, options);
 	const session = options.session;
 	// 首次触碰创建状态：live 半是空的——它的队列模式是设置此刻的答案，经 manager 实时读取；之后的
 	// config 补丁原地挪动队列上的模式——会话记录 *不是*它的一部分（ADR-0013）。
-	const global = settings.getSettings();
+	const global = settingManager.getSettings();
 	const live = createLive(global.steeringMode, global.followUpMode);
 	return createAgentState(session.sessionId, live);
 }

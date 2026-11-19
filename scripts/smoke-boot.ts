@@ -91,25 +91,25 @@ const workDir = await mkdtemp(join(tmpdir(), "my-agent-boot-"));
 const fake = createFakeTransport();
 fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" }))]);
 // 最坏情况自己的 prompt，且仅它，会挂起：其他各节的调用都照常通过。
-const neverAnswers: ChatTransport = {
+const chatTransport: ChatTransport = {
 	stream: (model, context, options) => {
 		if (!JSON.stringify(context.messages).includes("read the notes")) {
-			return fake.api.stream(model, context, options);
+			return fake.chatTransport.stream(model, context, options);
 		}
 		return new Promise((resolve) => {
-			const timer = setTimeout(() => resolve(fake.api.stream(model, context, options)), 60_000);
+			const timer = setTimeout(() => resolve(fake.chatTransport.stream(model, context, options)), 60_000);
 			options?.signal?.addEventListener(
 				"abort",
 				() => {
 					clearTimeout(timer);
-					resolve(fake.api.stream(model, context, options));
+					resolve(fake.chatTransport.stream(model, context, options));
 				},
 				{ once: true },
 			);
 		});
 	},
 };
-const server: BootedServer = await bootServer({ workDirAbsPath: workDir, port: 0, api: neverAnswers });
+const server: BootedServer = await bootServer({ workDirAbsPath: workDir, port: 0, chatTransport: chatTransport });
 
 try {
 	process.stdout.write(`booted on ${server.url} (port ${server.port})\n`);
@@ -132,7 +132,7 @@ try {
 	// pin 的那节。本节驱动的 session 是显式创建返回的那个。
 	const landing = await fetch(`${server.url}/api/sessions/current`);
 	const landingBody = (await landing.json()) as { sessionId: string | null };
-	const hubId = await server.hub.currentSessionId();
+	const hubId = await server.sessionHub.currentSessionId();
 	console.log(`current ${landing.status} sessionId=${landingBody.sessionId} hub=${hubId}`);
 	check("startup selects nothing", landingBody.sessionId === null && hubId === null, `sessionId=${landingBody.sessionId}`);
 
@@ -140,7 +140,7 @@ try {
 	check("the creation landed", created.status === 201, String(created.status));
 	const sessionId = ((created.payload ?? {}) as { sessionId?: string }).sessionId ?? "";
 	// 创建改变不了落点：未指名的连接永远不落在任何会话上，显式创建只把 id 交还给请求者自己。
-	check("the landing stays null after an explicit creation", (await server.hub.currentSessionId()) === null);
+	check("the landing stays null after an explicit creation", (await server.sessionHub.currentSessionId()) === null);
 
 	// modes 面（ADR-0004）：patch 整表替换列表，snapshot 整份带回，与内置默认名——或与另一行
 	// ——撞名的请求被拒绝而不是被改得唯一。这里的一切都骑在临时 home 上，不会泄进机器的设置。
@@ -195,7 +195,7 @@ try {
 	await server.close();
 	check("close() returned with the worst case in residence", Date.now() - started < 5_000, `${Date.now() - started} ms`);
 	// 那个无人能应答的 run 在下落途中被 abort：没有东西留在等待里。
-	check("nothing is left running", !server.hub.isLive(sessionId), String(server.hub.isLive(sessionId)));
+	check("nothing is left running", !server.sessionHub.isLive(sessionId), String(server.sessionHub.isLive(sessionId)));
 
 	// 关闭的 listener 必须拒绝连接，否则外壳每次重启都会泄漏一台服务器。
 	try {
@@ -212,7 +212,7 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a pinned boot lands on the pinned id\n");
 	const pinnedWorkDir = await mkdtemp(join(tmpdir(), "my-agent-boot-pin-"));
-	const pinned = await bootServer({ workDirAbsPath: pinnedWorkDir, port: 0, api: fake.api, sessionId: "pinned-session" });
+	const pinned = await bootServer({ workDirAbsPath: pinnedWorkDir, port: 0, chatTransport: fake.chatTransport, sessionId: "pinned-session" });
 	try {
 		const answer = (await (await fetch(`${pinned.url}/api/sessions/current`)).json()) as { sessionId: string | null };
 		check("the pin is the landing", answer.sessionId === "pinned-session", String(answer.sessionId));
@@ -261,12 +261,12 @@ try {
 	}
 	check("the child answered /api/health", healthy);
 
-	let childSocket: WebSocket | undefined;
+	let webSocket: WebSocket | undefined;
 	if (healthy) {
-		childSocket = new WebSocket(`${childBase.replace("http", "ws")}/mux`);
+		webSocket = new WebSocket(`${childBase.replace("http", "ws")}/mux`);
 		const opened = await new Promise<boolean>((resolve) => {
-			childSocket?.addEventListener("open", () => resolve(true));
-			childSocket?.addEventListener("error", () => resolve(false));
+			webSocket?.addEventListener("open", () => resolve(true));
+			webSocket?.addEventListener("error", () => resolve(false));
 			setTimeout(() => resolve(false), 5_000);
 		});
 		check("a resident connection was opened against the child", opened);
@@ -278,7 +278,7 @@ try {
 			// ——无论哪种，exit 都必须到达，这正是外壳依赖的部分。
 		child.kill("SIGTERM");
 		check("the child exited with a connection attached", await Promise.race([exited, sleep(5_000).then(() => false)]));
-		childSocket.close();
+		webSocket.close();
 	}
 	await removeQuiet(childWorkDir);
 } finally {

@@ -51,7 +51,7 @@ async function inspect() {
 	});
 	console.log(`server ${server.url}  pinned ${process.env.MY_AGENT_SESSION ?? "(unset)"}`);
 
-	const window = new BrowserWindow({
+	const browserWindow = new BrowserWindow({
 		width: 1280,
 		height: 820,
 		show: false,
@@ -63,13 +63,13 @@ async function inspect() {
 		},
 	});
 
-	await window.loadURL(server.url);
+	await browserWindow.loadURL(server.url);
 	await new Promise((done) => setTimeout(done, 3000));
 
-	console.log("dom: " + JSON.stringify(await window.webContents.executeJavaScript(DOM_REPORT), null, 2));
+	console.log("dom: " + JSON.stringify(await browserWindow.webContents.executeJavaScript(DOM_REPORT), null, 2));
 
 	// 切换会话是侧栏的全部职责，所以演练它，确认对话与高亮一起移动。
-	const switched = await window.webContents.executeJavaScript(`(async () => {
+	const switched = await browserWindow.webContents.executeJavaScript(`(async () => {
 		const items = [...document.querySelectorAll(".session-item")];
 		const target = items.find((n) => n.getAttribute("aria-current") !== "true");
 		if (!target) return "only one session";

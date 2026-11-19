@@ -1,4 +1,4 @@
-// Projection smoke test：证明侧栏行存储无需任何人在看就能回答"每个 session 正在做什么"，
+// 行存储 smoke test：证明侧栏行存储（住在 hub 里）无需任何人在看就能回答"每个 session 正在做什么"，
 // 一行只有在关于它的东西变化时才移动，停在门口的 session 的冷行从快照标记上点亮（没有袋、
 // 没有 replay），以及新的信封类型描述了一条复用连接携带的帧。
 // 这里不接触任何模型，无需 provider key。
@@ -16,12 +16,12 @@ import {
 	type ServerFrame,
 	type ServerMessage,
 	type SessionRow,
+	type SessionRowPatch,
 	type Session,
 	type SessionMeta,
 	type ModelConfig,
 } from "@my-agent/core";
 import { SessionHub } from "../packages/server/src/hub.ts";
-import { createSessionProjection } from "../packages/server/src/projection.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-projection-"));
@@ -78,44 +78,51 @@ const ROW: ModelConfig = {
 };
 
 const fake = createFakeTransport();
-const hub = new SessionHub({ workDirAbsPath: root, api: fake.api, modelsHome: join(root, "agent-home") });
+const sessionHub = new SessionHub({ workDirAbsPath: root, chatTransport: fake.chatTransport, modelsHome: join(root, "agent-home") });
 /** 进程唯一的 orchestrator：本 smoke 驱动的每个 session 都按 id 经由它。 */
-const agent = hub.agent;
-hub.setModelConfigs([ROW]);
+const agent = sessionHub.agent;
+sessionHub.setModelConfigs([ROW]);
 
 try {
 	process.stdout.write("birth is what puts the session in the store\n");
 	// ADR-0021：会话随第一条消息出生，所以「先创建、后开口」的两段式没有了——birth 落地的瞬间
 	// 文件就在，行的冷读立刻答得出它，组也随之而来。store 与本机其他每次运行共享，所以本 smoke
 	// 从不假设自己是唯一存在的 session——它只问自己创建的那些。
-	const first = await hub.birth({ text: "the conversation starts here" });
-	const projection = createSessionProjection(hub);
+	const first = await sessionHub.birth({ text: "the conversation starts here" });
 
-	// 从此以后每一处行变化，按监听器看到的样子——行的唯一出口是 hub 的全局通道。
-	const seen: SessionRow[] = [];
-	const stopListening = hub.subscribeGlobal({ rows: (row) => seen.push(row) });
+	// 从此以后每一处行变化，按监听器看到的样子——行的唯一出口是 hub 的全局通道。hub 推的是
+	// 增量（事件自带什么就带什么，ADR-0027），所以断言区自己按客户端的合并语义养一份合并表。
+	const seen: SessionRowPatch[] = [];
+	const merged = new Map<string, SessionRow>();
+	const stopListening = sessionHub.subscribeGlobal({
+		rows: (patch) => {
+			seen.push(patch);
+			const current = merged.get(patch.id);
+			merged.set(patch.id, current === undefined ? ({ ...patch } as SessionRow) : { ...current, ...patch });
+		},
+	});
 
-	const spokenRow = await projection.row(first);
+	const spokenRow = await sessionHub.row(first);
 	check("a born session has a row", spokenRow !== undefined, String(spokenRow));
 	check("with the working directory as its workDirAbsPath", spokenRow?.workDirAbsPath === root, spokenRow?.workDirAbsPath);
 	check("a row carries modified, not only createdAt", typeof spokenRow?.modified === "number" && spokenRow.modified > 0, String(spokenRow?.modified));
 	check("and the title is the message the branch starts with", spokenRow?.title === "the conversation starts here", spokenRow?.title);
-	const groupsAtBirth = await projection.groups();
+	const groupsAtBirth = await sessionHub.groups();
 	check(
 		"and a group names its directory at once",
 		groupsAtBirth.some((group) => group.workDirAbsPath === root),
 		JSON.stringify(groupsAtBirth.map((group) => group.workDirAbsPath)),
 	);
 
-	process.stdout.write("one scan, however many callers\n");
+	process.stdout.write("reads are computed, never stored\n");
 	await settle();
 	const quiet = seen.length;
 	await settle();
-	check("a row that did not move is not published", seen.length === quiet, `${seen.length - quiet} extra`);
-	const [rows, groups] = await Promise.all([projection.rows(), projection.groups()]);
-	const again = await projection.rows();
+	check("an idle session publishes nothing on a read", seen.length === quiet, `${seen.length - quiet} extra`);
+	const [rows, groups] = await Promise.all([sessionHub.rows(), sessionHub.groups()]);
+	const again = await sessionHub.rows();
 	check("both callers see the same rows", JSON.stringify(rows) === JSON.stringify(again));
-	check("the rows are the ones the seed found", rows.some((row) => row.id === first));
+	check("the rows are the ones the scan found", rows.some((row) => row.id === first));
 	const mine = groups.find((group) => group.workDirAbsPath === root);
 	check("this directory's group holds this session's row", mine?.sessions.some((row) => row.id === first) === true, JSON.stringify(mine?.workDirAbsPath));
 	check(
@@ -130,34 +137,33 @@ try {
 	);
 
 	process.stdout.write("a birth reaches the store through the creation signal\n");
-	// birth 是第一条消息（ADR-0021）。生产中 controller 的 listener 把出生告诉 projection；本 smoke
+	// birth 是第一条消息（ADR-0021）。生产中 controller 的 listener 触发 hub 的整行重推；本 smoke
 	// 没有接 controller，所以由它自己扮演那一拍：refresh 探测文件、发布行、开始跟随。
-	const second = await hub.birth({ text: "now the row has something to say" });
-	await projection.refresh(second);
+	const second = await sessionHub.birth({ text: "now the row has something to say" });
+	await sessionHub.refreshRow(second);
 	check("a birth reaches a row through the creation signal", await until(() => seen.some((row) => row.id === second)), JSON.stringify(seen.map((row) => row.id)));
 
 	process.stdout.write("a run moves the row even though nothing is watching it\n");
-	// store 的全部意义：一个 session 运行，它的行在没有任何订阅者的地方说着这件事。之前只有
-	// *内容*流会携带这件事，而这里没有订阅者。行已在出生时进了 store（ADR-0021），所以这次
-	// run 移动的是一行已存在的东西——在途时 `running`，落定时以 idle 重新发布。
+	// 无存储设计的全部意义：一个 session 运行，它的行随事件推进，在没有任何订阅者看内容流的
+	// 地方说着这件事。在途时 `running` 的增量，落定时以 idle 的增量收尾。
 	fake.setResponses([fakeAssistantMessage("answered")]);
-	const run = hub.agent.prompt(second, "the row is watching itself now");
+	const run = sessionHub.agent.prompt(second, "the row is watching itself now");
 	check("the row said running while the run was in flight", await until(() => seen.some((row) => row.id === second && row.running === true)));
 	await run;
-	const landed = await projection.row(second);
+	const landed = await sessionHub.row(second);
 	check("and the run ended idle", landed?.running === false && landed.pending === 0, JSON.stringify(landed));
 	check("the title is read from the branch, not the file", landed?.title === "now the row has something to say", landed?.title);
 
 	// 再来一次，这次盯住发布计数：一次 run 至少移动两次行。
 	const beforeSecondRun = seen.length;
 	fake.setResponses([fakeAssistantMessage("answered again")]);
-	const secondRun = hub.agent.prompt(second, "the row is watching itself again");
+	const secondRun = sessionHub.agent.prompt(second, "the row is watching itself again");
 	check("the row said running again while the run was in flight", await until(() => seen.some((row) => row.id === second && row.running === true)));
 	await secondRun;
-	check("and the second run ended", (await projection.row(second))?.running === false, JSON.stringify(await projection.row(second)));
+	check("and the second run ended", (await sessionHub.row(second))?.running === false, JSON.stringify(await sessionHub.row(second)));
 	check("the row moved more than once for one run", seen.length > beforeSecondRun + 1, `${seen.length - beforeSecondRun} updates`);
 
-	const moved = seen.filter((row) => row.id === second).at(-1);
+	const moved = merged.get(second);
 	check(
 		"a message landing pushed modified forward",
 		(moved?.modified ?? 0) > (landed?.modified ?? 0),
@@ -171,7 +177,7 @@ try {
 	check("an idle session publishes nothing on its own", seen.length === settled, `${seen.length - settled} extra`);
 
 	process.stdout.write("the row outlives the run\n");
-	const reaped = await projection.row(second);
+	const reaped = await sessionHub.row(second);
 	check("its row is still there", reaped !== undefined && reaped.id === second, String(reaped?.id));
 	check("and says idle rather than claiming to run", reaped?.running === false, JSON.stringify(reaped));
 	check("with the title it had while running", reaped?.title === moved?.title, `${reaped?.title} vs ${moved?.title}`);
@@ -179,14 +185,14 @@ try {
 	process.stdout.write("a row's title follows the branch, not the file\n");
 	// placeholder 规则现在住在 session 层——无人开口的 session 根本没有行，开头那节检查过。
 	// 这里行必须做的是携带分支给它的标题，直到分支移动。
-	const beforeBranch = await projection.row(first);
+	const beforeBranch = await sessionHub.row(first);
 	check("the row kept the title its branch gave it", beforeBranch?.title === "the conversation starts here", beforeBranch?.title);
 	fake.setResponses([fakeAssistantMessage("one"), fakeAssistantMessage("two")]);
-	await hub.agent.prompt(first, "first turn");
+	await sessionHub.agent.prompt(first, "first turn");
 	await settle();
 	// 同一分支上的第二个回合不能重命名 session：回退标题是分支的第一条用户消息，而那条消息
 	// 没有移动。
-	check("a message landing does not rename the row", (await projection.row(first))?.title === "the conversation starts here", (await projection.row(first))?.title);
+	check("a message landing does not rename the row", (await sessionHub.row(first))?.title === "the conversation starts here", (await sessionHub.row(first))?.title);
 	check(
 		"and a cold probe agrees with the live row",
 		(await SessionManager.findSessionRowById(first))?.title === "the conversation starts here",
@@ -198,51 +204,51 @@ try {
 	// 替换的对话与新对话并排保留。这个重置是门面没有理由拼写的测试专用手术，所以 bag 从下面的
 	// 私有表探针来。
 	agent.sessionManager.resetLeaf(heldBagOf(agent, first));
-	await hub.agent.prompt(first, "a different opening");
+	await sessionHub.agent.prompt(first, "a different opening");
 	await settle();
-	const reopened = await projection.row(first);
+	const reopened = await sessionHub.row(first);
 	check("a new root is named from the message it started with", reopened?.title === "a different opening", reopened?.title);
 	check(
 		"and the cold probe agrees with the live row, which is the whole point of one derivation",
 		(await SessionManager.findSessionRowById(first))?.title === reopened?.title,
 		`${(await SessionManager.findSessionRowById(first))?.title} vs ${reopened?.title}`,
 	);
-	check("the row is still there after the runs", (await projection.row(first)) !== undefined);
+	check("the row is still there after the runs", (await sessionHub.row(first)) !== undefined);
 
 	process.stdout.write("a fork knows its parent without a listing beside it\n");
 	// 出生消息就是 fork 挂点（ADR-0021）：birth 落地时账本里已有第一条 user entry，
 	// 从它的 leaf fork 即可，无需再说什么。
-	const source = await hub.birth({ text: "the conversation being forked" });
+	const source = await sessionHub.birth({ text: "the conversation being forked" });
 	await settle();
-	const forked = await hub.fork(source, agent.snapshot(source).leafId);
-	await projection.refresh(forked);
+	const forked = await sessionHub.fork(source, agent.snapshot(source).leafId);
+	await sessionHub.refreshRow(forked);
 	await until(() => seen.some((row) => row.id === forked));
-	const forkRow = await projection.row(forked);
+	const forkRow = await sessionHub.row(forked);
 	check("the fork reaches the store on its own", forkRow !== undefined, forked);
 	check(
 		"and names the session it came from",
 		forkRow?.parentId === source,
 		`${forkRow?.parentId} vs ${source}`,
 	);
-	check("while the session it came from names nobody", (await projection.row(source))?.parentId === undefined, (await projection.row(source))?.parentId);
+	check("while the session it came from names nobody", (await sessionHub.row(source))?.parentId === undefined, (await sessionHub.row(source))?.parentId);
 
 	process.stdout.write("watching a session is not the same as running it\n");
-	const afterStop = await hub.birth({ text: "an unobserved birth" });
-	await projection.refresh(afterStop);
+	const afterStop = await sessionHub.birth({ text: "an unobserved birth" });
+	await sessionHub.refreshRow(afterStop);
 	let events = 0;
 	// 在 session 运行之前订阅：订阅元素在注册的同一拍就在表里，之后随运行自流入，无需任何重绑。
 	// 装配走 hub 的公开订阅原语 subscribe——这个 smoke 不关心 baseline，所以不声明它；它观看的
 	// 只是事件流与「观看不拼装任何东西」本身。
-	const stopWatching = hub.subscribe(afterStop, {
+	const stopWatching = sessionHub.subscribe(afterStop, {
 		event: () => {
 			events += 1;
 		},
 	});
-	check("watching it did not assemble anything", !hub.isLive(afterStop), String(hub.isLive(afterStop)));
+	check("watching it did not assemble anything", !sessionHub.isLive(afterStop), String(sessionHub.isLive(afterStop)));
 	fake.setResponses([fakeAssistantMessage("seen")]);
-	await hub.agent.prompt(afterStop, "does the watcher hear this");
+	await sessionHub.agent.prompt(afterStop, "does the watcher hear this");
 	check("the watcher heard the run's events without any rebinding", events > 0, `${events} events`);
-	check("nothing stays live after the run", !hub.isLive(afterStop), String(hub.isLive(afterStop)));
+	check("nothing stays live after the run", !sessionHub.isLive(afterStop), String(sessionHub.isLive(afterStop)));
 	// 行的诞生发布与 idle 重新发布都是异步读；等 idle 那次，而不是猜测运行结束时哪次已落地。
 	check("and the row says idle", await until(() => seen.some((row) => row.id === afterStop && row.running === false)), JSON.stringify(seen.filter((row) => row.id === afterStop)));
 	stopWatching();
@@ -252,14 +258,14 @@ try {
 	// 两个被驱动到门口然后停下的 session：袋停驻审批时就住在编排层的表里，问题悬在原地——这正是
 	// end-restart 语义下会话留在门口的样子。门是每个 session 自己的选择，机器的设置与此无关。
 	const park = async (promptText: string): Promise<string> => {
-		const id = await hub.birth({ text: promptText });
-		hub.agent.applyConfig(id, { approval: { read: true } });
+		const id = await sessionHub.birth({ text: promptText });
+		sessionHub.agent.applyConfig(id, { approval: { read: true } });
 		fake.setResponses([
 			fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 			fakeAssistantMessage("done"),
 		]);
-		await hub.agent.prompt(id, promptText);
-		if (hub.agent.snapshot(id).pendingApprovals.length === 0) throw new Error("the session did not park, so the marker checks cannot run");
+		await sessionHub.agent.prompt(id, promptText);
+		if (sessionHub.agent.snapshot(id).pendingApprovals.length === 0) throw new Error("the session did not park, so the marker checks cannot run");
 		return id;
 	};
 	const parkedId = await park("read the notes");
@@ -276,11 +282,10 @@ try {
 	delete strippedMeta.suspended;
 	await writeFile(metaPathOf(strippedId), `${JSON.stringify(strippedMeta, null, "\t")}\n`, "utf8");
 
-	// 一个全新的 hub + projection：编排层的表随 hub 而空——这正是重启的样子——停在门口的行的
+	// 一个全新的 hub：编排层的表随 hub 而空——这正是重启的样子——停在门口的行的
 	// pending 只能来自快照的标记。
-	const coldHub = new SessionHub({ workDirAbsPath: root, api: fake.api, modelsHome: join(root, "agent-home") });
-	const cold = createSessionProjection(coldHub);
-	const coldRows = await cold.rows();
+	const coldHub = new SessionHub({ workDirAbsPath: root, chatTransport: fake.chatTransport, modelsHome: join(root, "agent-home") });
+	const coldRows = await coldHub.rows();
 	const coldParked = coldRows.find((row) => row.id === parkedId);
 	check("the parked session's cold row is pending 1", coldParked?.pending === 1, JSON.stringify(coldParked));
 	check("and not running: no host survived to claim it", coldParked?.running === false, JSON.stringify(coldParked));
@@ -289,12 +294,11 @@ try {
 
 	// 重命名闭包：一个没有 host、停在门口的 session 被改名，刷新重新发布探针行——标记必须在
 	// 重读中存活，否则小圆点会在一次改名时熄灭。
-	await hub.rename(parkedId, "parked and renamed");
-	await cold.refresh(parkedId);
-	const renamed = await cold.row(parkedId);
+	await sessionHub.rename(parkedId, "parked and renamed");
+	await coldHub.refreshRow(parkedId);
+	const renamed = await coldHub.row(parkedId);
 	check("the rename reached the cold row", renamed?.title === "parked and renamed", JSON.stringify(renamed));
 	check("and the dot stayed lit", renamed?.pending === 1, JSON.stringify(renamed));
-	cold.close();
 
 	process.stdout.write("the envelope types describe a multiplexed connection\n");
 	const item: ServerMessage = { type: "status", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2, contextWindow: 100 }, running: true, queued: [], isRetrying: false, retryAttempt: 0 };
@@ -321,10 +325,8 @@ try {
 	check("no frame carries a request id", !("requestId" in open) && !("subscriptionId" in open));
 
 	stopListening();
-	projection.close();
-	cold.close();
 	await coldHub.close();
-	await hub.close();
+	await sessionHub.close();
 	check("nothing is left running", [first, second, parkedId, strippedId].every((id) => !agent.isRunning(id)));
 } finally {
 	// session 住在 agent home 之下、按工作目录路径作键，所以只删临时目录不够：没有这一步，

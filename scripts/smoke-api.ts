@@ -85,18 +85,18 @@ interface Envelope {
 }
 
 const frames: Envelope[] = [];
-const ws = new WebSocket(`${base.replace(/^http/, "ws")}/mux`);
+const webSocket = new WebSocket(`${base.replace(/^http/, "ws")}/mux`);
 const channelOpen = new Promise<void>((resolve, reject) => {
-	ws.addEventListener("open", () => resolve());
-	ws.addEventListener("error", () => reject(new Error("the mux connection failed")));
+	webSocket.addEventListener("open", () => resolve());
+	webSocket.addEventListener("error", () => reject(new Error("the mux connection failed")));
 });
-ws.addEventListener("message", (event) => {
+webSocket.addEventListener("message", (event) => {
 	frames.push(JSON.parse(String(event.data)) as Envelope);
 });
 
 /** 发一个上行帧。命令留在 REST 上；这里仅有的两个动作是 subscribe 与 cancel。 */
 function send(frame: { type: string; [key: string]: unknown }): void {
-	ws.send(JSON.stringify(frame));
+	webSocket.send(JSON.stringify(frame));
 }
 
 /** 已被下面顺序读取器消费的帧。 */
@@ -196,7 +196,7 @@ async function readSession(base: string, id: string): Promise<GatedRead> {
  * 「应答先于收尾」是事实而不是猜测。
  */
 function holdGate(): {
-	api: ChatTransport;
+	chatTransport: ChatTransport;
 	arm(): void;
 	held(): boolean;
 	sawAbort(): boolean;
@@ -204,7 +204,7 @@ function holdGate(): {
 } {
 	const fake = createFakeTransport();
 	fake.setResponses([fakeAssistantMessage("出生那轮的普通回答"), fakeAssistantMessage("被删除打断前的最后一条回答")]);
-	const inner = fake.api.stream.bind(fake.api);
+	const inner = fake.chatTransport.stream.bind(fake.chatTransport);
 	let armed = false;
 	let holding = false;
 	let aborted = false;
@@ -212,7 +212,7 @@ function holdGate(): {
 	const released = new Promise<void>((done) => {
 		release = done;
 	});
-	const api: ChatTransport = {
+	const chatTransport: ChatTransport = {
 		stream: (model, context, options) => {
 			const outer = createAssistantMessageEventStream();
 			options?.signal?.addEventListener(
@@ -235,7 +235,7 @@ function holdGate(): {
 		},
 	};
 	return {
-		api,
+		chatTransport,
 		arm: () => {
 			armed = true;
 		},
@@ -414,7 +414,7 @@ async function gatedDeletes(): Promise<void> {
 			const gate = holdGate();
 			const home = await mkdtemp(join(tmpdir(), "my-agent-api-home-"));
 			await seedModelRow(home);
-			const http = await bootServer({ workDirAbsPath: workDir, port: 0, settingsHome: home, api: gate.api });
+			const http = await bootServer({ workDirAbsPath: workDir, port: 0, settingsHome: home, chatTransport: gate.chatTransport });
 			try {
 				const born = await localCall("POST", `${http.url}/api/sessions`, { text: "出生的那条消息" });
 				const id = String(born.payload.sessionId ?? "");
@@ -469,7 +469,7 @@ async function gatedDeletes(): Promise<void> {
 			fake.setResponses([fakeAssistantMessage("出生那轮的普通回答"), fakeAssistantMessage(fakeToolCall("bash", { command: "echo parked" }))]);
 			const home = await mkdtemp(join(tmpdir(), "my-agent-api-home-"));
 			await seedModelRow(home);
-			const http = await bootServer({ workDirAbsPath: workDir, port: 0, settingsHome: home, api: fake.api });
+			const http = await bootServer({ workDirAbsPath: workDir, port: 0, settingsHome: home, chatTransport: fake.chatTransport });
 			try {
 				const quieted = await localCall("PATCH", `${http.url}/api/settings`, { patch: { approval: { bash: true } } });
 				if (quieted.status !== 200) fail(`patching the approval baseline answered ${quieted.status}, expected 200`);
@@ -778,7 +778,7 @@ async function main(): Promise<void> {
 		await watch(replacementId);
 	}
 
-	ws.close();
+	webSocket.close();
 
 	// 外部流程之后是进程内的一组：确定性时序的删除用例，不依赖 MY_AGENT_URL 的那台服务器。
 	await gatedDeletes();

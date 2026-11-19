@@ -37,7 +37,7 @@ import {
 } from "@my-agent/core";
 
 /** The ledger's operations are the service's methods, so a script holds one to call them on. */
-const store = new SessionManager();
+const sessionManager = new SessionManager();
 
 // `@my-agent/core` is a workspace package, linked into the repository root's
 // node_modules so scripts resolve it the same way `packages/core` does.
@@ -118,8 +118,8 @@ interface Gate {
  * gate is applied before the session is built, because `Agent` captures the transport when it is
  * constructed.
  */
-function gatedTransport(hold = 1): { api: ChatTransport; gate: Gate } {
-	const call = fake.api.stream.bind(fake.api);
+function gatedTransport(hold = 1): { chatTransport: ChatTransport; gate: Gate } {
+	const call = fake.chatTransport.stream.bind(fake.chatTransport);
 	let held = 0;
 	let calls = 0;
 	const releases: (() => void)[] = [];
@@ -138,7 +138,7 @@ function gatedTransport(hold = 1): { api: ChatTransport; gate: Gate } {
 	}) as unknown as ChatTransport["stream"];
 
 	return {
-		api: { stream },
+		chatTransport: { stream },
 		gate: {
 			release: () => {
 				for (const resolve of releases.splice(0)) resolve();
@@ -224,7 +224,7 @@ const NO_GATES: Record<string, boolean> = { read: false, write: false, edit: fal
 /** What one run is driven through: which rows a session reads, and which transport it sends over. */
 interface RunOptions {
 	models?: readonly ModelConfig[];
-	api?: ChatTransport;
+	chatTransport?: ChatTransport;
 }
 
 /**
@@ -246,7 +246,7 @@ function userMessage(text: string): Message {
  * opening helpers record what they created here and every check reads the pair back through
  * {@link sidOf} and {@link bagOf}.
  */
-const opened = new WeakMap<Agent, { id: string; session: Session; settings: SettingManager; birthEntryId: string }>();
+const opened = new WeakMap<Agent, { id: string; session: Session; settingManager: SettingManager; birthEntryId: string }>();
 
 function sidOf(agent: Agent): string {
 	return opened.get(agent)!.id;
@@ -260,7 +260,7 @@ function bagOf(agent: Agent): Session {
 }
 
 function settingsOf(agent: Agent): SettingManager {
-	return opened.get(agent)!.settings;
+	return opened.get(agent)!.settingManager;
 }
 
 /**
@@ -312,22 +312,22 @@ function onSessionEvent(agent: Agent, listener: SessionEventListener): () => voi
 async function openSession(
 	overrides: Partial<GlobalSettings> = {},
 	run: RunOptions = {},
-	tools?: ToolManager,
+	toolManager?: ToolManager,
 ): Promise<Agent> {
 	const session = createSession(root);
 	// 出生（ADR-0021）：一条 user 消息落盘，文件与快照同时诞生。经本脚本自己的 store 追加——
 	// 文件是共享状态，编排层随后按 id 重放的就是它。不跑引擎、不耗剧本回答。
-	const birthEntryId = store.appendMessage(session, userMessage(BIRTH_TEXT));
-	const sessionSettings = inMemorySettingManager(settings(overrides), run.models ?? rows);
+	const birthEntryId = sessionManager.appendMessage(session, userMessage(BIRTH_TEXT));
+	const settingManager = inMemorySettingManager(settings(overrides), run.models ?? rows);
 	const tap = captureSink();
 	const agent = await openAgent({
 		session,
-		api: run.api ?? fake.api,
-		settings: sessionSettings,
-		tools,
+		chatTransport: run.chatTransport ?? fake.chatTransport,
+		settingManager: settingManager,
+		toolManager,
 		sink: tap.sink,
 	});
-	opened.set(agent, { id: session.sessionId, session, settings: sessionSettings, birthEntryId });
+	opened.set(agent, { id: session.sessionId, session, settingManager: settingManager, birthEntryId });
 	taps.set(agent, tap);
 	return agent;
 }
@@ -460,8 +460,8 @@ function toolResultTexts(agent: Agent): string[] {
 async function exerciseFollowUp(): Promise<void> {
 	process.stdout.write("followUp\n");
 	fake.setResponses([fakeAssistantMessage("first answer"), fakeAssistantMessage("second answer")]);
-	const { api: gatedApi, gate } = gatedTransport();
-	const agent = await openSession({}, { api: gatedApi });
+	const { chatTransport: chatTransport, gate } = gatedTransport();
+	const agent = await openSession({}, { chatTransport: chatTransport });
 	// Counted from here rather than asserted absolutely: the queue is shared by every exercise, so
 	// what this check is about is the calls this run made.
 	const base = fake.fakeState.callCount;
@@ -515,8 +515,8 @@ async function exerciseSteerVersusFollowUp(): Promise<void> {
 
 	for (const scenario of scenarios) {
 		fake.setResponses([fakeAssistantMessage("first answer"), fakeAssistantMessage("second answer")]);
-		const { api: gatedApi, gate } = gatedTransport();
-		const agent = await openSession({}, { api: gatedApi });
+		const { chatTransport: chatTransport, gate } = gatedTransport();
+		const agent = await openSession({}, { chatTransport: chatTransport });
 
 		const running = agent.prompt(sidOf(agent), "question one");
 		await whenStreaming(agent, gate);
@@ -565,8 +565,8 @@ async function exerciseAcceptedOrder(): Promise<void> {
 	process.stdout.write("accepted message order\n");
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [fakeAssistantMessage("first answer"), fakeAssistantMessage("second answer")]);
-	const { api: gatedApi, gate } = gatedTransport();
-	const agent = await openSession({}, { api: gatedApi });
+	const { chatTransport: chatTransport, gate } = gatedTransport();
+	const agent = await openSession({}, { chatTransport: chatTransport });
 
 	const running = agent.prompt(sidOf(agent), "question one");
 	await whenStreaming(agent, gate);
@@ -619,8 +619,8 @@ async function exerciseAcceptedOrder(): Promise<void> {
 async function exerciseAbortDropsUnconsumed(): Promise<void> {
 	process.stdout.write("abort drops the unconsumed queue\n");
 	fake.setResponses([fakeAssistantMessage("an answer that never lands")]);
-	const { api: gatedApi, gate } = gatedTransport();
-	const agent = await openSession({}, { api: gatedApi });
+	const { chatTransport: chatTransport, gate } = gatedTransport();
+	const agent = await openSession({}, { chatTransport: chatTransport });
 
 	const running = agent.prompt(sidOf(agent), "question before the abort");
 	await whenStreaming(agent, gate);
@@ -647,8 +647,8 @@ async function exerciseQueueMode(): Promise<void> {
 	process.stdout.write("one-at-a-time\n");
 	const base = fake.fakeState.callCount;
 	fake.setResponses([fakeAssistantMessage("answer one"), fakeAssistantMessage("answer two"), fakeAssistantMessage("answer three")]);
-	const { api: gatedApi, gate } = gatedTransport(2);
-	const agent = await openSession({ followUpMode: "one-at-a-time" }, { api: gatedApi });
+	const { chatTransport: chatTransport, gate } = gatedTransport(2);
+	const agent = await openSession({ followUpMode: "one-at-a-time" }, { chatTransport: chatTransport });
 
 	const running = agent.prompt(sidOf(agent), "turn one");
 	await whenStreaming(agent, gate);
@@ -695,8 +695,8 @@ async function gateHeld(gate: Gate, held = 2, ms = 5_000): Promise<void> {
 async function exerciseLiveStates(): Promise<void> {
 	process.stdout.write("live states\n");
 	fake.setResponses([fakeAssistantMessage("only answer"), fakeAssistantMessage("queued answer")]);
-	const { api: gatedApi, gate } = gatedTransport();
-	const agent = await openSession({}, { api: gatedApi });
+	const { chatTransport: chatTransport, gate } = gatedTransport();
+	const agent = await openSession({}, { chatTransport: chatTransport });
 
 	const queuedSeen: number[] = [];
 	const streamingSeen: boolean[] = [];
@@ -740,8 +740,8 @@ function labelOf(event: AgentSessionEvent): string {
 async function exerciseEventStream(): Promise<void> {
 	process.stdout.write("session events\n");
 	fake.setResponses([fakeAssistantMessage("first answer"), fakeAssistantMessage("second answer")]);
-	const { api: gatedApi, gate } = gatedTransport();
-	const agent = await openSession({}, { api: gatedApi });
+	const { chatTransport: chatTransport, gate } = gatedTransport();
+	const agent = await openSession({}, { chatTransport: chatTransport });
 
 	const seen: AgentSessionEvent[] = [];
 	onSessionEvent(agent, (event) => seen.push(event));
@@ -1036,7 +1036,7 @@ async function exerciseAfterToolHook(): Promise<void> {
 
 	process.stdout.write("after_tool hook — the rewrite survives the file\n");
 	const reopenedFile = fillSession(sessionFile!);
-	const fileEntries = store.getEntries(reopenedFile);
+	const fileEntries = sessionManager.getEntries(reopenedFile);
 	const rewrittenEntry = fileEntries.find(
 		(entry): entry is MessageEntry =>
 			entry.type === "message" && entry.message.role === "toolResult" && textOf(entry.message).includes("REPLACED BY THE TEST HOOK"),
@@ -1050,7 +1050,7 @@ async function exerciseAfterToolHook(): Promise<void> {
 			JSON.stringify(["clear_tool_result", "compaction", "leaf", "message", "trim_tool_call_arg", "usage"].filter((kind) => kinds.has(kind))),
 		JSON.stringify([...kinds]),
 	);
-	const sessionTexts = JSON.stringify(store.buildSessionContext(reopenedFile).messages);
+	const sessionTexts = JSON.stringify(sessionManager.buildSessionContext(reopenedFile).messages);
 	check(
 		"the session a window reads is the rewrite",
 		sessionTexts.includes("REPLACED BY THE TEST HOOK") && !sessionTexts.includes("the tool's own words"),
@@ -1059,15 +1059,15 @@ async function exerciseAfterToolHook(): Promise<void> {
 
 	const sentReplay: SentRequest[] = [];
 	recordRequests(sentReplay, [fakeAssistantMessage("replayed")]);
-	const replayedSettings = inMemorySettingManager(settings(), rows);
+	const settingManager = inMemorySettingManager(settings(), rows);
 	const replayed = await openAgent({
 		session: reopenedFile,
-		api: fake.api,
-		settings: replayedSettings,
+		chatTransport: fake.chatTransport,
+		settingManager: settingManager,
 	});
 	// 这个会话的文件由上面的练习亲手写就，没有经 `openSession` 的出生消息——没有可滤的出生条目，
 	// 空串让它原样通过。
-	opened.set(replayed, { id: reopenedFile.sessionId, session: reopenedFile, settings: replayedSettings, birthEntryId: "" });
+	opened.set(replayed, { id: reopenedFile.sessionId, session: reopenedFile, settingManager: settingManager, birthEntryId: "" });
 	try {
 		await within("the reopened run", 10_000, replayed.prompt(sidOf(replayed), "one more time"));
 		await within("settle()", 10_000, replayed.settle(sidOf(replayed)));
@@ -1096,8 +1096,8 @@ async function exerciseAfterToolHook(): Promise<void> {
 async function exerciseOutputBackstop(): Promise<void> {
 	process.stdout.write("output backstop\n");
 	const huge = `HEAD-${"A".repeat(MAX_TOOL_RESULT_BYTES)}-TAIL-MARKER`;
-	const manager = createToolManager();
-	manager.register({
+	const toolManager = createToolManager();
+	toolManager.register({
 		name: "unbounded",
 		label: "unbounded",
 		description: "Returns more than the session's budget; registered by the smoke test.",
@@ -1111,7 +1111,7 @@ async function exerciseOutputBackstop(): Promise<void> {
 		fakeAssistantMessage("clipped"),
 		fakeAssistantMessage("again"),
 	]);
-	const agent = await openSession({}, {}, manager);
+	const agent = await openSession({}, {}, toolManager);
 
 	await within("the run", 10_000, agent.prompt(sidOf(agent), "run the unbounded tool"));
 	await within("settle()", 10_000, agent.settle(sidOf(agent)));
@@ -1336,16 +1336,16 @@ async function exerciseToolChangeResend(): Promise<void> {
  */
 async function exerciseToolManager(): Promise<void> {
 	process.stdout.write("tool manager\n");
-	const manager = createToolManager();
+	const toolManager = createToolManager();
 	const builtIns = ["read", "write", "edit", "glob", "grep", "bash"];
 
-	check("names() holds the six built-ins in registration order", JSON.stringify(manager.names()) === JSON.stringify(builtIns), JSON.stringify(manager.names()));
-	check("get() returns the named tool", manager.get("bash")?.name === "bash");
-	check("get() returns undefined for a name nobody knows", manager.get("nope") === undefined);
-	check("executionMode is a field on the instance", manager.get("bash")?.executionMode === "sequential", String(manager.get("bash")?.executionMode));
-	check("get() answers the same instance every time", manager.get("bash") === manager.get("bash"));
-	check("while names() keeps every tool", manager.names().length === 6, String(manager.names().length));
-	check("and a name this build does not know is dropped by the read, not thrown at", JSON.stringify(narrowToKnown(["read", "nope"], manager.names())) === JSON.stringify(["read"]), JSON.stringify(narrowToKnown(["read", "nope"], manager.names())));
+	check("names() holds the six built-ins in registration order", JSON.stringify(toolManager.names()) === JSON.stringify(builtIns), JSON.stringify(toolManager.names()));
+	check("get() returns the named tool", toolManager.get("bash")?.name === "bash");
+	check("get() returns undefined for a name nobody knows", toolManager.get("nope") === undefined);
+	check("executionMode is a field on the instance", toolManager.get("bash")?.executionMode === "sequential", String(toolManager.get("bash")?.executionMode));
+	check("get() answers the same instance every time", toolManager.get("bash") === toolManager.get("bash"));
+	check("while names() keeps every tool", toolManager.names().length === 6, String(toolManager.names().length));
+	check("and a name this build does not know is dropped by the read, not thrown at", JSON.stringify(narrowToKnown(["read", "nope"], toolManager.names())) === JSON.stringify(["read"]), JSON.stringify(narrowToKnown(["read", "nope"], toolManager.names())));
 
 	const noop: Tool<any> = {
 		name: "noop",
@@ -1354,18 +1354,18 @@ async function exerciseToolManager(): Promise<void> {
 		parameters: { type: "object", properties: {} },
 		execute: async () => ({ content: [{ type: "text", text: "noop" }], details: undefined }),
 	};
-	manager.register(noop);
-	check("register() adds the tool to the table", manager.get("noop") === noop && manager.names().includes("noop"), JSON.stringify(manager.names()));
+	toolManager.register(noop);
+	check("register() adds the tool to the table", toolManager.get("noop") === noop && toolManager.names().includes("noop"), JSON.stringify(toolManager.names()));
 	let duplicate = "";
 	try {
-		manager.register(noop);
+		toolManager.register(noop);
 	} catch (error) {
 		duplicate = error instanceof Error ? error.message : String(error);
 	}
 	check("and a second registration of one name is refused", duplicate === "Tool already registered: noop", duplicate);
 	let collision = "";
 	try {
-		manager.register({ ...noop, name: "read" });
+		toolManager.register({ ...noop, name: "read" });
 	} catch (error) {
 		collision = error instanceof Error ? error.message : String(error);
 	}
@@ -1388,7 +1388,7 @@ async function exerciseToolManager(): Promise<void> {
 			return { content: [{ type: "text", text: "probed" }], details: undefined };
 		},
 	};
-	manager.register(probe);
+	toolManager.register(probe);
 
 	const sent: SentRequest[] = [];
 	recordRequests(sent, [
@@ -1397,7 +1397,7 @@ async function exerciseToolManager(): Promise<void> {
 		fakeAssistantMessage(fakeToolCall("probe", {})),
 		fakeAssistantMessage("second done"),
 	]);
-	const agent = await openSession({ modes: [{ name: "probe-only", tools: ["read", "probe"], approval: NO_GATES }] }, {}, manager);
+	const agent = await openSession({ modes: [{ name: "probe-only", tools: ["read", "probe"], approval: NO_GATES }] }, {}, toolManager);
 	await within("the run", 10_000, agent.prompt(sidOf(agent), "probe once"));
 	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 	// A narrowing between the two requests: `read` and `probe` stay, `noop` and the rest go.
@@ -1405,7 +1405,7 @@ async function exerciseToolManager(): Promise<void> {
 	await within("the run", 10_000, agent.prompt(sidOf(agent), "probe once more"));
 	await within("settle()", 10_000, agent.settle(sidOf(agent)));
 
-	check("the request ran the table's own instance", ran[0] === manager.get("probe"));
+	check("the request ran the table's own instance", ran[0] === toolManager.get("probe"));
 	check("and the next request ran that same one", ran[0] === ran[1]);
 	check("while the request's tool list itself is new per request", sent[0]?.instances !== sent[1]?.instances);
 	check(
@@ -1416,10 +1416,10 @@ async function exerciseToolManager(): Promise<void> {
 
 	const other: SentRequest[] = [];
 	recordRequests(other, [fakeAssistantMessage(fakeToolCall("probe", {})), fakeAssistantMessage("third done")]);
-	const secondSession = await openSession({}, {}, manager);
+	const secondSession = await openSession({}, {}, toolManager);
 	await within("the run", 10_000, secondSession.prompt(sidOf(secondSession), "probe from elsewhere"));
 	await within("settle()", 10_000, secondSession.settle(sidOf(secondSession)));
-	check("another session ran that same instance too", ran[2] === manager.get("probe"));
+	check("another session ran that same instance too", ran[2] === toolManager.get("probe"));
 
 	await agent.close(sidOf(agent));
 	await secondSession.close(sidOf(secondSession));
@@ -2041,7 +2041,7 @@ async function exerciseModelFromRow(): Promise<void> {
 	process.stdout.write("the model comes from the row\n");
 
 	const sent: { key: string | undefined; baseUrl: string; id: string; alsoInOptions: string | undefined }[] = [];
-	const recording: ChatTransport = {
+	const chatTransport: ChatTransport = {
 		stream: (model, context, options) => {
 			sent.push({
 				key: model.apiKey,
@@ -2049,13 +2049,13 @@ async function exerciseModelFromRow(): Promise<void> {
 				id: model.id,
 				alsoInOptions: options?.apiKey,
 			});
-			return fake.api.stream(model, context, options);
+			return fake.chatTransport.stream(model, context, options);
 		},
 	};
 
 	const keyedRows: ModelConfig[] = [{ ...ROW, name: "keyed", apiKey: "first-key", baseUrl: "http://127.0.0.1:1/v1" }];
 	fake.setResponses([fakeAssistantMessage("answered")]);
-	const agent = await openSession({}, { models: keyedRows, api: recording });
+	const agent = await openSession({}, { models: keyedRows, chatTransport: chatTransport });
 	await within("the run", 10_000, agent.prompt(sidOf(agent), "hello"));
 	check("the model carries the row's key", sent[0]?.key === "first-key", String(sent[0]?.key));
 	check(
@@ -2109,7 +2109,7 @@ async function exerciseModelSelection(): Promise<void> {
 	const thinkerRows: ModelConfig[] = [{ ...ROW, name: "thinker", id: "claude-sonnet-4-5" }];
 	const scripted = createFakeTransport();
 	scripted.setResponses([fakeAssistantMessage("first")]);
-	const agent = await openSession({}, { models: thinkerRows, api: scripted.api });
+	const agent = await openSession({}, { models: thinkerRows, chatTransport: scripted.chatTransport });
 
 	check("a session opens at off, because nothing has been asked for", agent.snapshot(sidOf(agent)).thinkingLevel === "off", agent.snapshot(sidOf(agent)).thinkingLevel);
 
@@ -2310,8 +2310,8 @@ async function exerciseBranching(): Promise<void> {
 	await agent.close(sidOf(agent));
 
 	// --- A move while a run is in flight would file the turn under the wrong branch ---------------
-	const { api: gatedApi, gate } = gatedTransport(1);
-	const busy = await openSession({}, { api: gatedApi });
+	const { chatTransport: chatTransport, gate } = gatedTransport(1);
+	const busy = await openSession({}, { chatTransport: chatTransport });
 	recordRequests([], [fakeAssistantMessage("slow answer")]);
 	const running = busy.prompt(sidOf(busy), "hold the turn");
 	await whenStreaming(busy, gate);
@@ -2400,8 +2400,8 @@ async function exerciseBranchToolConfig(): Promise<void> {
 
 	// --- The choice is on the snapshot, so the reopen answers with it ----------------------------
 	const reopened = fillSession(bagOf(agent).sessionFileAbsPath ?? "");
-	check("the reopen restores the session's mode pointer", store.getRecordedToolConfig(reopened).mode === "narrow", store.getRecordedToolConfig(reopened).mode);
-	check("and its approval delta with it", store.getRecordedToolConfig(reopened).approval?.bash === true, JSON.stringify(store.getRecordedToolConfig(reopened).approval));
+	check("the reopen restores the session's mode pointer", sessionManager.getRecordedToolConfig(reopened).mode === "narrow", sessionManager.getRecordedToolConfig(reopened).mode);
+	check("and its approval delta with it", sessionManager.getRecordedToolConfig(reopened).approval?.bash === true, JSON.stringify(sessionManager.getRecordedToolConfig(reopened).approval));
 }
 
 /**
@@ -2439,14 +2439,14 @@ async function exerciseLeafDurability(): Promise<void> {
 	check("the move survived close", reopened.leafId === firstId, `${reopened.leafId} vs ${firstId}`);
 	check(
 		"and the reopened context is the branch through it, the record reaching no message",
-		JSON.stringify(store.buildSessionContext(reopened).messages.map(textOf).filter((text) => text !== BIRTH_TEXT)) ===
+		JSON.stringify(sessionManager.buildSessionContext(reopened).messages.map(textOf).filter((text) => text !== BIRTH_TEXT)) ===
 			JSON.stringify(["durable question one"]),
-		JSON.stringify(store.buildSessionContext(reopened).messages.map(textOf)),
+		JSON.stringify(sessionManager.buildSessionContext(reopened).messages.map(textOf)),
 	);
 
 	// The next append is a child of the recorded position, which is what turns it into a branch point.
-	store.appendMessage(reopened, { role: "user", content: [{ type: "text", text: "carried on" }] } as Message);
-	const points = store.getBranchPoints(reopened);
+	sessionManager.appendMessage(reopened, { role: "user", content: [{ type: "text", text: "carried on" }] } as Message);
+	const points = sessionManager.getBranchPoints(reopened);
 	check(
 		"the next append continued from the moved leaf",
 		points.length === 1 && points[0]?.entryId === firstId && points[0]?.options.length === 2,
@@ -2454,7 +2454,7 @@ async function exerciseLeafDurability(): Promise<void> {
 	);
 
 	// --- "Before the first entry" is a position like any other ----------------------------------
-	store.resetLeaf(reopened);
+	sessionManager.resetLeaf(reopened);
 	check("resetLeaf moved the leaf before the first entry", reopened.leafId === null, String(reopened.leafId));
 	const rereopened = fillSession(file);
 	check("and that position survived the reopen too", rereopened.leafId === null, String(rereopened.leafId));
@@ -2476,8 +2476,8 @@ async function exerciseLeafDurability(): Promise<void> {
 	check("a file without a leaf record reads its last entry", legacy.leafId === "fx-u2", String(legacy.leafId));
 	check(
 		"and its tree is read whole, the second child a branch option",
-		store.getBranchPoints(legacy).length === 1 && store.getBranchPoints(legacy)[0]?.options.length === 2,
-		JSON.stringify(store.getBranchPoints(legacy)),
+		sessionManager.getBranchPoints(legacy).length === 1 && sessionManager.getBranchPoints(legacy)[0]?.options.length === 2,
+		JSON.stringify(sessionManager.getBranchPoints(legacy)),
 	);
 }
 

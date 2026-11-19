@@ -95,13 +95,13 @@ try {
 
 	heading("with no rows, the answer says what to add");
 	{
-		const placeholder = placeholderModel();
-		check("the placeholder has no row behind it", ([] as ModelConfig[]).find((userModel) => userModel.name === placeholder.name) === undefined);
-		check("and is recognised as the placeholder", isUnconfigured(placeholder));
-		check("by a name no stored row may claim", placeholder.name === "my-agent:unconfigured", placeholder.name);
-		check("and it carries no key at all", placeholder.apiKey === undefined, String(placeholder.apiKey));
+		const model = placeholderModel();
+		check("the placeholder has no row behind it", ([] as ModelConfig[]).find((userModel) => userModel.name === model.name) === undefined);
+		check("and is recognised as the placeholder", isUnconfigured(model));
+		check("by a name no stored row may claim", model.name === "my-agent:unconfigured", model.name);
+		check("and it carries no key at all", model.apiKey === undefined, String(model.apiKey));
 
-		const message = await unconfiguredStream(placeholder).result();
+		const message = await unconfiguredStream(model).result();
 		check("asking it for an answer fails", message.stopReason === "error", String(message.stopReason));
 		check(
 			"with something the user can act on",
@@ -122,8 +122,8 @@ try {
 		check("and its key is on the model a request would use", createModel(rows[0]!).apiKey === "first");
 
 		rows[0]!.apiKey = "corrected";
-		const rederived = createModel(rows.find((userModel) => userModel.name === "added")!);
-		check("a corrected key is read on the next lookup, with nothing rebuilt", rederived.apiKey === "corrected");
+		const model = createModel(rows.find((userModel) => userModel.name === "added")!);
+		check("a corrected key is read on the next lookup, with nothing rebuilt", model.apiKey === "corrected");
 
 		rows.length = 0;
 		check("a removed row stops resolving", rows.find((userModel) => userModel.name === "added") === undefined);
@@ -148,11 +148,11 @@ try {
 			}) as typeof fetch;
 			const messages = [{ role: "user" as const, content: [{ type: "text" as const, text: "hi" }], timestamp: Date.now() }];
 			try {
-				const stream = anthropicMessages.stream(model, { messages, tools: [] }, {
+				const assistantMessageEventStream = anthropicMessages.stream(model, { messages, tools: [] }, {
 					...options,
 					fetch: capture,
 				});
-				const answer = await stream.result();
+				const answer = await assistantMessageEventStream.result();
 				return { key, authorization, message: answer.errorMessage ?? "" };
 			} catch (error) {
 				return { key, authorization, message: error instanceof Error ? error.message : String(error) };
@@ -318,10 +318,10 @@ try {
 
 	heading("the store round-trips the file");
 	{
-		const store = ModelConfigStore.create(home);
-		check("a missing file is no models", store.list().length === 0);
+		const modelConfigStore = ModelConfigStore.create(home);
+		check("a missing file is no models", modelConfigStore.list().length === 0);
 
-		store.replace([row({ name: "one" }), row({ name: "two", id: "claude-opus-5" })]);
+		modelConfigStore.replace([row({ name: "one" }), row({ name: "two", id: "claude-opus-5" })]);
 		const reloaded = ModelConfigStore.create(home).list();
 		check("both rows come back", reloaded.length === 2, String(reloaded.length));
 		check("with their names", reloaded[0]?.name === "one" && reloaded[1]?.name === "two");

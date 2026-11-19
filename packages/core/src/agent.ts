@@ -105,7 +105,7 @@ export interface AgentConfig {
 	 * 给出的答案。按请求的填充从它在这里找到的目录重新派生会话的模型，所以密钥、端点、窗口、wire id
 	 * 都和行一样新鲜。
 	 */
-	settings: SettingManager;
+	settingManager: SettingManager;
 	/**
 	 * 本构建认识的工具，加上调用方在它上面注册的任何东西——测试的自定义工具。
 	 * 只有结构：选择不在这里。
@@ -114,7 +114,7 @@ export interface AgentConfig {
 	 * 视图作底），所以选择变动时没有任何东西被改写。表装的是行为、不是目录：请求声明它的名字解析到
 	 * 的实例，那些实例执行所用的按请求值经 `execute` 的 `run` 抵达（ADR-0011）。
 	 */
-	tools: ToolManager;
+	toolManager: ToolManager;
 	/**
 	 * 每次分发都经过的接缝：`context`、`before_tool`（审批闸门）、`after_tool`。
 	 *
@@ -142,7 +142,7 @@ export interface AgentConfig {
 	 * 每一个都从行重新派生。由工厂解析（`anthropicMessages`，本应用唯一会说的一种）而不是在这里给
 	 * 默认值，因为 smoke 会递入脚本化的。
 	 */
-	api: ChatTransport;
+	chatTransport: ChatTransport;
 	/**
 	 * 本编排层发布的每个事件与快照离开 core 的唯一出口。
 	 *
@@ -222,9 +222,9 @@ export class Agent {
 	 *
 	 * 门面读取存在之后已被藏起：宿主回答设置命令或列出模型行走 {@link Agent.modelCatalog}、
 	 * {@link Agent.settings} 及其邻居，任何地方都没有第二份文件副本需要保持同步。见
-	 * {@link AgentConfig.settings}。
+	 * {@link AgentConfig.settingManager}。
 	 */
-	private readonly settingsManager: SettingManager;
+	private readonly settingManager: SettingManager;
 	/**
 	 * 会话分发所经的接缝，包括 `openAgent` 安装的默认处理器。
 	 *
@@ -232,11 +232,11 @@ export class Agent {
 	 */
 	readonly hooks: Hooks;
 
-	private readonly tools: ToolManager;
+	private readonly toolManager: ToolManager;
 	/** 请求据此构建的 prompt builder；调用它的是按请求填充链（`prepareRequest`）。 */
 	private readonly systemPrompt: AgentConfig["systemPrompt"];
 	/** 请求真正离开的地方：传输层，重试策略包上它之前的那个。 */
-	private readonly api: ChatTransport;
+	private readonly chatTransport: ChatTransport;
 	/** 事件与快照离开编排层的地方：构造注入的 sink，fanout 在 emit 点直调它。 */
 	private readonly sink: SessionSink;
 	/**
@@ -252,11 +252,11 @@ export class Agent {
 
 	constructor(config: AgentConfig) {
 		this.sessionManager = config.sessionManager;
-		this.settingsManager = config.settings;
-		this.tools = config.tools;
+		this.settingManager = config.settingManager;
+		this.toolManager = config.toolManager;
 		this.hooks = config.hooks;
 		this.systemPrompt = config.systemPrompt;
-		this.api = config.api;
+		this.chatTransport = config.chatTransport;
 		this.sink = config.sink;
 		// 这里不构建任何 per-session 的东西：状态由 `open` 在这些服务之上装配，id 在每个方法的开头
 		// 对着下面的表现取。这里也不构建任何运行期对象：一次运行持有的一切都是它自己的局部变量。
@@ -273,9 +273,9 @@ export class Agent {
 	private resolvedSettings(session: Session): Settings {
 		return resolveSettings(
 			session,
-			this.settingsManager.getSettings(),
-			this.settingsManager.modelCatalog(),
-			this.tools.names(),
+			this.settingManager.getSettings(),
+			this.settingManager.modelCatalog(),
+			this.toolManager.names(),
 		);
 	}
 
@@ -473,7 +473,7 @@ export class Agent {
 		const id = options.session.sessionId;
 		const heldAgentState = this.agentStateMap.get(id);
 		if (heldAgentState !== undefined) return heldAgentState;
-		const agentState = await assembleSession(this.sessionManager, this.settingsManager, this.tools, options);
+		const agentState = await assembleSession(this.sessionManager, this.settingManager, this.toolManager, options);
 		this.insert(agentState);
 		return this.agentStateMap.get(id) ?? agentState;
 	}
@@ -493,7 +493,7 @@ export class Agent {
 	 */
 	private liveHalfOf(session: Session): AgentState {
 		// 队列模式是 global 侧此刻的答案，经设置门实时读取（ADR-0019）。
-		const global = this.settingsManager.getSettings();
+		const global = this.settingManager.getSettings();
 		return createAgentState(session.sessionId, createLive(global.steeringMode, global.followUpMode));
 	}
 
@@ -570,7 +570,7 @@ export class Agent {
 		// 出生请求里的选择在本类唯一的写法里落到会话记录上：模式指针直接校验落定（未知名字在这里抛出
 		// ——调用方把它应答成 409），模型选择走与 `applyModelSelection` 同一条袋级规则。
 		if (options.mode !== undefined) {
-			const modes = this.settingsManager.getSettings().modes ?? [];
+			const modes = this.settingManager.getSettings().modes ?? [];
 			if (!modes.some((preset) => preset.name === options.mode)) {
 				throw new Error(`Unknown mode: ${options.mode}`);
 			}
@@ -653,6 +653,16 @@ export class Agent {
 	}
 
 	/**
+	 * 这个会话的删除是否正跨着闸（ADR-0023 的否决式删除、`closing` 在场的那一拍）。
+	 *
+	 * meta 可能还在盘上而 unlink 尚未落地——存在性检查必须把这一拍也答成「没有这个会话」，否则
+	 * 202 应答先到之后落进窗口里的第二次删除会被答成 202 而不是规格承诺的 404。
+	 */
+	isDeletingSession(id: string): boolean {
+		return this.sessionManager.isClosing(id);
+	}
+
+	/**
 	 * 会话是否有在飞的运行——loop 正在跑，以 wire 报告的形状（`running`）。
 	 * 本进程不知道不等于不在跑：没人运行的会话不可能正在轮次中间。
 	 */
@@ -690,7 +700,7 @@ export class Agent {
 	 * 窗口从 `GET /api/tools` 启动时取一次。窄读，纯数据，与 `titleOf` 同类。
 	 */
 	toolNames(): string[] {
-		return this.tools.names();
+		return this.toolManager.names();
 	}
 
 	// ---------------------------------------------------------------------------- 设置门面
@@ -701,27 +711,27 @@ export class Agent {
 
 	/** 用户录入的模型，按设置面板里的顺序。 */
 	modelCatalog(): readonly ModelConfig[] {
-		return this.settingsManager.modelCatalog();
+		return this.settingManager.modelCatalog();
 	}
 
 	/** 替换全部存储行。整表写入让名字与文件不漂移。 */
 	replaceModels(models: readonly ModelConfig[]): void {
-		this.settingsManager.replaceModels(models);
+		this.settingManager.replaceModels(models);
 	}
 
 	/** 侧边栏搁置的目录，按绝对路径。永远是列表，从不是 `undefined`。 */
 	hiddenDirectories(): string[] {
-		return this.settingsManager.getSettings().hiddenDirectories ?? [];
+		return this.settingManager.getSettings().hiddenDirectories ?? [];
 	}
 
 	/** 对设置应用部分变更，返回前写回 global 侧唯一的文件。 */
 	applySettings(patch: SettingsPatch): void {
-		this.settingsManager.applySettings(patch);
+		this.settingManager.applySettings(patch);
 	}
 
 	/** 当前生效的全部设置，global 侧合并并补默认后的副本。 */
 	settings(): GlobalSettings {
-		return this.settingsManager.getSettings();
+		return this.settingManager.getSettings();
 	}
 
 	// ---------------------------------------------------------------------------- 存储扫描
@@ -939,20 +949,20 @@ export class Agent {
 		// 运行的发送策略骑在这一运行每个模型构造时所用的请求对象上。引擎从不知晓它：它向自己持有的
 		// 模型要一条流，模型经它应答——所以重试、以及「这个模型背后没有行」的答案，发生在一切可能
 		// 报告它们的东西之下。
-		const transport: ChatTransport = {
+		const chatTransport: ChatTransport = {
 			stream: (model, context, options) => {
-				const outer = createAssistantMessageEventStream();
+				const assistantMessageEventStream = createAssistantMessageEventStream();
 				// 有意不 await：运行拥有流的生命周期，无法重试的失败作为流上的 error 事件回来，而不是
 				// 作为流函数的 rejection（引擎的契约本来就禁止它）。
-				void this.pumpAttempts(agentState, session, outer, model as Model, context, options);
-				return outer;
+				void this.pumpAttempts(agentState, session, assistantMessageEventStream, model as Model, context, options);
+				return assistantMessageEventStream;
 			},
 		};
 
 		try {
 			// 会话记录 与工具按运行构建——引擎不保有自己的状态——而且实际发出的那个请求反正会被
 			// 填充链重建两者。引擎的取走点读的是本会话自己的队列，所以不需要任何接线。
-			await this.runEngine(runInput, transport);
+			await this.runEngine(runInput, chatTransport);
 		} finally {
 			// 在运行的最后一刻被接受的消息——引擎已经决定不再找了之后——躺在一条无人会取走的队列上，
 			// 所以在这里丢弃，而不是带进之后的某次运行。寻常的结束路径到这一步已经清空两条列表，这
@@ -1006,7 +1016,7 @@ export class Agent {
 	 * 轮次进入的位置——要么是恢复：它对着现状的 会话记录 打开，第一个动作是对上一次运行留下的
 	 * 悬空调用做恢复遍。返回运行产出的消息。
 	 */
-	private async runEngine(runInput: RunInput, transport: ChatTransport): Promise<Message[]> {
+	private async runEngine(runInput: RunInput, chatTransport: ChatTransport): Promise<Message[]> {
 		const { agentState, start, session } = runInput;
 		// 这次运行的值——目录与 bash 超时——收集一次、由运行发出的每次调用携带：它们是按请求的事实，
 		// 如今作为一个值旅行，而不是被某个工具实例闭包（ADR-0011）。
@@ -1030,7 +1040,7 @@ export class Agent {
 		// 即使运行死在第一个请求之前，合成的失败仍点着一个真实的模型。live 半上的槽位，是栈外快照读取
 		// 它的方式，而不是回头去目录。
 		const resolved = this.resolvedSettings(session);
-		let model: Model = createModel(resolved.model.config, resolved.model.thinkingLevel, transport);
+		let model: Model = createModel(resolved.model.config, resolved.model.thinkingLevel, chatTransport);
 		live.model = model;
 		const emit: AgentEventSink = (event) => this.dispatchEvent(agentState, session, event);
 
@@ -1114,7 +1124,7 @@ export class Agent {
 
 					// 按请求的填充链（ADR-0005 §2）：收养实时的行，记录选择，把账本重放成视图，超窗则
 					// 压缩，用实时的工具与审批答案构建 prompt，交回请求——在这里构建、用一次、丢弃。
-					const requestUpdate = await this.prepareRequest(transport, currentContext, signal, agentState, session);
+					const requestUpdate = await this.prepareRequest(chatTransport, currentContext, signal, agentState, session);
 					if (requestUpdate) {
 						currentContext = requestUpdate.context ?? currentContext;
 						model = requestUpdate.model ?? model;
@@ -1250,7 +1260,7 @@ export class Agent {
 		// （ADR-0011）。表只增，所以同一名字在两次请求间解析到同一实例。
 		const declared: Tool<any>[] = [];
 		for (const name of names) {
-			const tool = this.tools.get(name);
+			const tool = this.toolManager.get(name);
 			if (tool !== undefined) declared.push(tool);
 		}
 		return { names, declared };
@@ -1297,7 +1307,7 @@ export class Agent {
 		signal?: AbortSignal,
 		onUpdate?: ToolUpdateCallback<any>,
 	): Promise<ToolResult<any>> {
-		return this.tools.execute(name, toolCallId, params, run, signal, onUpdate);
+		return this.toolManager.execute(name, toolCallId, params, run, signal, onUpdate);
 	}
 
 	/** 改写给供应商的内容。无处理器时 apply 以 undefined 作答，归一成空决定——这条归一是语义。 */
@@ -1324,7 +1334,7 @@ export class Agent {
 	 * 任何东西活得比请求久。
 	 */
 	private async prepareRequest(
-		transport: ChatTransport,
+		chatTransport: ChatTransport,
 		context: Context,
 		signal: AbortSignal | undefined,
 		agentState: AgentState,
@@ -1335,7 +1345,7 @@ export class Agent {
 		// 生效」的全部：端点、wire id、窗口、密钥在这里、从目录读，从不在会话装配时捕获。消失的行
 		// ——被删的，或在正被使用时改名的——让选择保持原样，替它作答的是 `unconfiguredStream`。
 		const resolved = this.resolvedSettings(session);
-		const model = createModel(resolved.model.config, resolved.model.thinkingLevel, transport);
+		const model = createModel(resolved.model.config, resolved.model.thinkingLevel, chatTransport);
 		// 本次请求所用的选择在这里、在由它构建请求的时刻抵达 会话记录——出生即第一条消息的会话由
 		// 这次请求记录。它跑在下面的压缩决策之前，后者按本模型的窗口计量 prompt。
 		this.recordSelection(session, this.modelCatalog(), {
@@ -1399,7 +1409,7 @@ export class Agent {
 		return {
 			workDirAbsPath: session.settings.workDirAbsPath,
 			// 实时读取，与其他每次设置读取一样：用户挪过的超时抵达下一次运行的调用，无需重开任何东西。
-			bash: this.settingsManager.getSettings().bash,
+			bash: this.settingManager.getSettings().bash,
 		};
 	}
 
@@ -1428,7 +1438,7 @@ export class Agent {
 		context: Context,
 		options: SimpleStreamOptions | undefined,
 	): Promise<void> {
-		const api = this.api;
+		const chatTransport = this.chatTransport;
 		const live = agentState.live;
 		let started = false;
 		const produce = async (): Promise<AssistantMessage> => {
@@ -1436,7 +1446,7 @@ export class Agent {
 			const inner =
 				this.modelCatalog().find((userModel) => userModel.name === model.name) === undefined
 					? unconfiguredStream(model)
-					: await api.stream(model, context, options);
+					: await chatTransport.stream(model, context, options);
 			for await (const event of inner) {
 				if (event.type === "done" || event.type === "error") continue;
 				if (event.type === "start") {
@@ -1456,7 +1466,7 @@ export class Agent {
 		// 整个泵读一次：重试循环执行的策略与 `retry_start` 事件报告的 `maxAttempts` 是同一个答案，在
 		// 调用点取而不是存起来——退避中途的设置编辑随下一个请求落地，而不是这一次。计数方式与
 		// `retryAssistantCall` 自己的一致：数重试，不数调用。
-		const retrySettings = this.settingsManager.getSettings().retry;
+		const retrySettings = this.settingManager.getSettings().retry;
 		const maxAttempts = retrySettings.enabled ? retrySettings.maxRetries : 0;
 		let final: AssistantMessage;
 		try {
@@ -1695,10 +1705,10 @@ export class Agent {
 		entries: readonly SessionEntry[],
 		now: number,
 		signal?: AbortSignal,
-		transport?: ChatTransport,
+		chatTransport?: ChatTransport,
 	): Promise<readonly SessionEntry[]> {
 		const resolved = this.resolvedSettings(session);
-		const model = createModel(resolved.model.config, resolved.model.thinkingLevel, transport);
+		const model = createModel(resolved.model.config, resolved.model.thinkingLevel, chatTransport);
 		return this.compactFor(agentState, session, entries, now, signal, model);
 	}
 
@@ -1838,7 +1848,7 @@ export class Agent {
 		const previousLevel = normalizeThinkingLevel(setting.model?.thinkingLevel ?? inForce.model.thinkingLevel);
 
 		const name = selection.model ?? previousName;
-		const userModel = this.settingsManager.modelCatalog().find((userModel) => userModel.name === name);
+		const userModel = this.settingManager.modelCatalog().find((userModel) => userModel.name === name);
 		if (userModel === undefined) throw new Error(`Unknown model: ${name}`);
 
 		// 选择是客户端的选择，按到达时的原样写到会话自己的 setting 上：行的名字、该行此刻应答的
@@ -1886,7 +1896,7 @@ export class Agent {
 			// 预设——指向没人定义过的模式的补丁被说出来，而不是按全局默认悄悄跑。
 			const mode = patch.mode === null ? undefined : patch.mode;
 			if (mode !== undefined) {
-				const modes = this.settingsManager.getSettings().modes ?? [];
+				const modes = this.settingManager.getSettings().modes ?? [];
 				if (!modes.some((preset) => preset.name === mode)) {
 					throw new Error(`Unknown mode: ${mode}`);
 				}
@@ -1901,11 +1911,11 @@ export class Agent {
 		}
 		// 补丁的其余部分经 manager 交给设置，写入归它所有：变更落在 global 侧唯一的文件上，之后的每次
 		// 读取——本会话的与任何其他会话的——都从它们作答。模式指针与审批增量是会话自己的，不带过去。
-		this.settingsManager.applySettings({
+		this.settingManager.applySettings({
 			...(patch.steeringMode === undefined ? {} : { steeringMode: patch.steeringMode }),
 			...(patch.followUpMode === undefined ? {} : { followUpMode: patch.followUpMode }),
 		});
-		const global = this.settingsManager.getSettings();
+		const global = this.settingManager.getSettings();
 		// 队列在袋上活着：有袋才就地换模式；表上没有袋的会话什么都不用挪——下一次运行装配时，
 		// 队列带着此刻的模式出生。
 		if (held !== undefined) {
@@ -2017,7 +2027,7 @@ export class Agent {
 		this.publishState(agentState, session);
 	}
 
-	/** 写下关闭一个悬空调用的结果，并像其他消息一样通告该 entry。 */
+	/** 写下关闭一个悬空调用的结果，并像一次真实的执行那样说出它的开始与结束。 */
 	private appendDanglingResult(
 		agentState: AgentState,
 		session: Session,
@@ -2027,6 +2037,14 @@ export class Agent {
 		const text = answer.approved
 			? `The user approved running ${call.toolName}. Issue the call again to run it.`
 			: answer.reason ?? `The user denied permission to run ${call.toolName}.`;
+		// 关闭这件事必须自己说话：批量拒绝没有恢复运行跟着，而窗口的等待卡片由执行事件收尾——
+		// 没有这两个事件，那张卡片将无所等待地等下去。与恢复遍的合成结果同形：先开始，后结束。
+		this.emitEvent(agentState, {
+			type: "tool_execution_start",
+			toolCallId: call.toolCallId,
+			toolName: call.toolName,
+			args: call.args,
+		});
 		const message: Message = {
 			role: "toolResult",
 			toolCallId: call.toolCallId,
@@ -2037,6 +2055,13 @@ export class Agent {
 			timestamp: Date.now(),
 		};
 		this.appendMessageEntry(agentState, session, message);
+		this.emitEvent(agentState, {
+			type: "tool_execution_end",
+			toolCallId: call.toolCallId,
+			toolName: call.toolName,
+			result: createErrorToolResult(text),
+			isError: true,
+		});
 	}
 
 	/**
@@ -2137,11 +2162,11 @@ export class Agent {
 		entries: readonly SessionEntry[],
 		now: number,
 		signal?: AbortSignal,
-		transport?: ChatTransport,
+		chatTransport?: ChatTransport,
 	): Promise<readonly SessionEntry[]> {
 		const session = this.getSessionBySessionId(id);
 		// 压缩只经袋分发事件（id）——表内袋与表外弃置袋在此同形，外界不创建。
-		return this.compact(this.agentStateMap.get(id) ?? this.liveHalfOf(session), session, entries, now, signal, transport);
+		return this.compact(this.agentStateMap.get(id) ?? this.liveHalfOf(session), session, entries, now, signal, chatTransport);
 	}
 
 	// ---------------------------------------------------------------------------- 配置报告
@@ -2320,7 +2345,7 @@ async function streamAssistantResponse(
 		tools: context.tools.map((tool) => toToolDeclaration(tool)),
 	};
 
-	const response = await model.stream(requestContext, {
+	const assistantMessageEventStream = await model.stream(requestContext, {
 		apiKey: model.apiKey,
 		signal,
 	});
@@ -2328,12 +2353,12 @@ async function streamAssistantResponse(
 	// wire 从未携带过的强度。是 thunk 而不是值：流被抽干之后才有最终消息，下面两个出口都在循环见过
 	// 终局事件之后要它。
 	const settled = async () =>
-		Object.assign(await response.result(), { thinkingLevel: model.thinkingLevel ?? "off" });
+		Object.assign(await assistantMessageEventStream.result(), { thinkingLevel: model.thinkingLevel ?? "off" });
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
 
-	for await (const event of response) {
+	for await (const event of assistantMessageEventStream) {
 		switch (event.type) {
 			case "start":
 				partialMessage = event.partial;
@@ -3048,14 +3073,14 @@ function failureMessage(model: Model, error: unknown): AssistantMessage {
  * 消息，所以这个事件从重试策略敲定的那条消息重建，而不是从产出它的那次尝试复制——被重试过的尝试
  * 自己的终局事件早已被丢弃。
  */
-function pushTerminal(outer: AssistantMessageEventStream, message: AssistantMessage): void {
+function pushTerminal(assistantMessageEventStream: AssistantMessageEventStream, message: AssistantMessage): void {
 	const { stopReason } = message;
 	if (stopReason === "error" || stopReason === "aborted" || stopReason === "pending") {
 		// `pending` 意味着流根本没有终局事件就结束了；按它本来的失败报告，而不是当作一轮完成。
-		outer.push({ type: "error", reason: stopReason === "pending" ? "error" : stopReason, error: message });
+		assistantMessageEventStream.push({ type: "error", reason: stopReason === "pending" ? "error" : stopReason, error: message });
 		return;
 	}
-	outer.push({ type: "done", reason: stopReason, message });
+	assistantMessageEventStream.push({ type: "done", reason: stopReason, message });
 }
 
 /**

@@ -77,12 +77,12 @@ function indexOfText(agent: Agent, role: Message["role"], text: string): number 
  * 剧本化 transport 在引擎一问就答，run 不留任何在途窗口——而"run 流式中收下的消息"正是本文件
  * 唯一关心的形状。abort 会结束 hold，如同真正的 transport 尊重自己的 signal。
  */
-function gatedApi(holds: number[]): { api: ChatTransport; release(index: number): void; held(index: number): boolean } {
-	const inner = fake.api.stream.bind(fake.api);
+function gatedApi(holds: number[]): { chatTransport: ChatTransport; release(index: number): void; held(index: number): boolean } {
+	const inner = fake.chatTransport.stream.bind(fake.chatTransport);
 	let calls = 0;
 	const pending = new Map<number, () => void>();
 	const released = new Set<number>();
-	const api: ChatTransport = {
+	const chatTransport: ChatTransport = {
 		stream: (model, context, options) => {
 			calls += 1;
 			const nth = calls;
@@ -104,7 +104,7 @@ function gatedApi(holds: number[]): { api: ChatTransport; release(index: number)
 		},
 	};
 	return {
-		api,
+		chatTransport,
 		release: (index) => {
 			released.add(index);
 			pending.get(index)?.();
@@ -123,12 +123,12 @@ function sidOf(agent: Agent): string {
 /** ADR-0021：出生消息。openSession 先落它，之后的 prompt / snapshot 才有文件可开。 */
 const BIRTH_TEXT = "the smoke's birth message";
 
-async function openSession(overrides: { approval?: Record<string, boolean>; api?: ChatTransport } = {}): Promise<Agent> {
+async function openSession(overrides: { approval?: Record<string, boolean>; chatTransport?: ChatTransport } = {}): Promise<Agent> {
 	const session = createSession(root);
 	const agent = await openAgent({
 		session,
-		api: overrides.api ?? fake.api,
-		settings: inMemorySettingManager({ approval: overrides.approval ?? {} }, rows),
+		chatTransport: overrides.chatTransport ?? fake.chatTransport,
+		settingManager: inMemorySettingManager({ approval: overrides.approval ?? {} }, rows),
 	});
 	// 会话随第一条消息出生（ADR-0021），而编排层按 id 现开文件：这里直接对袋追加一条 user
 	// 消息让文件落地——不跑引擎、不耗剧本。模型选择随每条 prompt 的 selection 抵达，与生产一致。
@@ -156,7 +156,7 @@ process.stdout.write("\na message queued before the gate survives the park and i
 {
 	// 持住第 1 个请求：prompt 自己的那个。下面的一切都发生在该请求在途期间。
 	const gate = gatedApi([1]);
-	const agent = await openSession({ approval: { read: true }, api: gate.api });
+	const agent = await openSession({ approval: { read: true }, chatTransport: gate.chatTransport });
 	fake.setResponses([
 		fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })),
 		fakeAssistantMessage("after the grant"),
@@ -219,7 +219,7 @@ process.stdout.write("\nan abandoned approval drops what was queued, and settle 
 
 {
 	const gate = gatedApi([1]);
-	const agent = await openSession({ approval: { read: true }, api: gate.api });
+	const agent = await openSession({ approval: { read: true }, chatTransport: gate.chatTransport });
 	fake.setResponses([fakeAssistantMessage(fakeToolCall("read", { path: "notes.txt" })), fakeAssistantMessage("never reached")]);
 
 	void agent.prompt(sidOf(agent), "read the notes", { selection });

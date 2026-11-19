@@ -36,7 +36,7 @@ export interface HttpServerHandle {
  * 没有第二个 *listener*。命令是一个请求，会话事件是 client 打开的那条常驻连接上的 frame，服务器会做的一切，任何能写 HTTP 的东西——浏览器、脚本、`curl`——都能到达。
  */
 export async function createServer(options: HttpOptions): Promise<HttpServerHandle> {
-	const vite = options.useVite === true ? await createViteMiddleware(options.clientDir) : undefined;
+	const viteMiddleware = options.useVite === true ? await createViteMiddleware(options.clientDir) : undefined;
 	const upgradeSockets = new Set<Duplex>();
 
 	const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
@@ -52,10 +52,10 @@ export async function createServer(options: HttpOptions): Promise<HttpServerHand
 				return;
 			}
 
-			if (vite) {
+			if (viteMiddleware) {
 				// Vite 自己服务 client 并对自己不处理的请求调 `next`，所以 fallback 链在 Vite 自己的调用之后而不是与它并排：await 这个 Promise，两者之一真正完成响应时才会 settle。
 				await new Promise<void>((settle) => {
-					vite.middlewares(request, response, () => {
+					viteMiddleware.middlewares(request, response, () => {
 						void serveStatic(options.clientDir, pathname, response).finally(settle);
 					});
 				});
@@ -95,7 +95,7 @@ export async function createServer(options: HttpOptions): Promise<HttpServerHand
 		server,
 		upgradeSockets,
 		close: async () => {
-			await vite?.close();
+			await viteMiddleware?.close();
 			// 升级过的 socket 既不是响应也不是空闲连接：`server.close()` 等的是响应，`closeAllConnections()` 够得到空闲的 keep-alive 连接，两者都不管一个完成了握手并变成别的东西的 socket。两者都针对这个确切场景验证过，都让进程挂着不放、窗口还连着，所以上面这个集合是唯一能关闭它们的东西。
 			for (const socket of [...upgradeSockets]) socket.destroy();
 			upgradeSockets.clear();
@@ -131,16 +131,16 @@ interface ViteModule {
  */
 async function createViteMiddleware(clientDir: string): Promise<ViteMiddleware> {
 	const specifier = "vite";
-	const vite = (await import(specifier)) as unknown as ViteModule;
-	const instance = await vite.createServer({
+	const viteModule = (await import(specifier)) as unknown as ViteModule;
+	const viteInstance = await viteModule.createServer({
 		root: clientDir,
 		appType: "spa",
 		server: { middlewareMode: true },
 	});
 	return {
 		middlewares: (request, response, next) => {
-			instance.middlewares(request, response, next);
+			viteInstance.middlewares(request, response, next);
 		},
-		close: () => instance.close(),
+		close: () => viteInstance.close(),
 	};
 }

@@ -14,10 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { muxUpgrade, sessionListeners } from "../packages/server/src/boot.ts";
 import { createMuxServer } from "../packages/server/src/mux.ts";
-import { createSessionStream } from "../packages/server/src/stream.ts";
-import { createApprovalAnswers } from "../packages/server/src/approvals.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
-import { createSessionProjection } from "../packages/server/src/projection.ts";
 import { SessionController, SystemController } from "../packages/server/src/controllers/sessions.ts";
 import { createRoutes } from "../packages/server/src/controllers/routes.ts";
 import { Router } from "../packages/server/src/http/routing.ts";
@@ -90,7 +87,7 @@ const rows: ModelConfig[] = [
 
 interface Rig {
 	url: string;
-	hub: SessionHub;
+	sessionHub: SessionHub;
 	transport: FakeTransport;
 	close(): Promise<void>;
 }
@@ -98,29 +95,27 @@ interface Rig {
 async function openRig(): Promise<Rig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-stream-"));
 	const transport = createFakeTransport({ tokensPerSecond: TOKENS_PER_SECOND });
-	const hub = new SessionHub({ workDirAbsPath: root, api: transport.api, modelsHome: join(root, "agent-home") });
-	hub.setModelConfigs(rows);
+	const sessionHub = new SessionHub({ workDirAbsPath: root, chatTransport: transport.chatTransport, modelsHome: join(root, "agent-home") });
+	sessionHub.setModelConfigs(rows);
 
-	const projection = createSessionProjection(hub);
-	const answers = createApprovalAnswers();
-	const mux = createMuxServer((wire) => createSessionStream(wire, { hub, projection, answers }), { heartbeatIntervalMs: 150 });
+	const muxServer = createMuxServer({ sessionHub }, { heartbeatIntervalMs: 150 });
 	const router = new Router(
 		createRoutes({
-			system: new SystemController(hub),
-		sessions: new SessionController(hub, sessionListeners({ hub, answers })),
+			systemController: new SystemController(sessionHub),
+		sessionController: new SessionController(sessionHub, sessionListeners({ sessionHub })),
 		}),
 	);
-	const handle = await createServer({ router, clientDir: "packages/web/dist", onUpgrade: muxUpgrade(mux) });
-	await new Promise<void>((listen) => handle.server.listen(0, "127.0.0.1", listen));
-	const url = `http://127.0.0.1:${(handle.server.address() as { port: number }).port}`;
+	const httpServerHandle = await createServer({ router, clientDir: "packages/web/dist", onUpgrade: muxUpgrade(muxServer) });
+	await new Promise<void>((listen) => httpServerHandle.server.listen(0, "127.0.0.1", listen));
+	const url = `http://127.0.0.1:${(httpServerHandle.server.address() as { port: number }).port}`;
 
 	return {
 		url,
-		hub,
+		sessionHub,
 		transport,
 		close: async () => {
-			await hub.close();
-			await handle.close();
+			await sessionHub.close();
+			await httpServerHandle.close();
 			await rm(root, { recursive: true, force: true });
 		},
 	};
@@ -136,8 +131,8 @@ async function openRig(): Promise<Rig> {
  * 补丁落在 hub 的唯一 orchestrator 经由读取的那个 session 服务上，所以它不得活得比安装它的
  * 那一节久：返回的函数把真方法放回去，每个调用方在自己那趟失败的 run 结束后运行它。
  */
-function sabotagePersistence(hub: SessionHub): () => void {
-	const manager = hub.agent.sessionManager as unknown as {
+function sabotagePersistence(sessionHub: SessionHub): () => void {
+	const manager = sessionHub.agent.sessionManager as unknown as {
 		appendMessage: (state: unknown, message: { role?: string }) => string;
 	};
 	const original = manager.appendMessage.bind(manager);
@@ -161,7 +156,7 @@ const wire = await connect(`${rig.url.replace("http", "ws")}/mux`);
  * 到达门面不外发的半区的方式相同。
  */
 const inTable = (id: string): boolean =>
-	(rig.hub.agent as unknown as { agentStateMap: Map<string, unknown> }).agentStateMap.has(id);
+	(rig.sessionHub.agent as unknown as { agentStateMap: Map<string, unknown> }).agentStateMap.has(id);
 
 try {
 	// ---------------------------------------------------------------------------------------------
@@ -177,7 +172,7 @@ try {
 
 	await sleep(QUIET_MS);
 	check("the lane is still there — nothing ended it", !wire.endOf(idleId).ended, JSON.stringify(wire.endOf(idleId)));
-	check("and nothing keeps a live half for the session", !rig.hub.isLive(idleId), String(rig.hub.isLive(idleId)));
+	check("and nothing keeps a live half for the session", !rig.sessionHub.isLive(idleId), String(rig.sessionHub.isLive(idleId)));
 
 	// 读也不是一次运行——窗口的冷路径。不存在的 session 是 404，它的读什么都不装配。
 	const cold = await request(rig.url, "GET", `/api/sessions/${encodeURIComponent(idleId)}`);
@@ -222,7 +217,7 @@ try {
 
 	rig.transport.setResponses([fakeAssistantMessage("c".repeat(600))]);
 	check("the prompt was accepted", (await prompt(rig.url, idleId, "one more long answer")) === 202);
-	check("the run started", await until(() => rig.hub.isLive(idleId), 5_000), String(rig.hub.isLive(idleId)));
+	check("the run started", await until(() => rig.sessionHub.isLive(idleId), 5_000), String(rig.sessionHub.isLive(idleId)));
 
 	const midflight = await wire.open(idleId);
 	check("the mid-run baseline reports the run", midflight.running === true, String(midflight.running));
@@ -242,7 +237,7 @@ try {
 
 	const watched = await request(rig.url, "POST", "/api/sessions", { text: "the watched conversation" });
 	const watchedId = (watched.payload as { sessionId: string }).sessionId;
-	const restoreWatched = sabotagePersistence(rig.hub);
+	const restoreWatched = sabotagePersistence(rig.sessionHub);
 	const watchedLane = await wire.open(watchedId);
 	check("the lane opened on the session about to fail", watchedLane.id === watchedId);
 
@@ -266,7 +261,7 @@ try {
 	restoreWatched();
 
 	// 失败的运行自己散袋：没有停驻的审批，就没有留下活半的理由。
-	check("nothing stays live after the failed run", !rig.hub.isLive(watchedId), String(rig.hub.isLive(watchedId)));
+	check("nothing stays live after the failed run", !rig.sessionHub.isLive(watchedId), String(rig.sessionHub.isLive(watchedId)));
 
 	// ---------------------------------------------------------------------------------------------
 	// 5. 同样的失败、无人看着：日志是它唯一仍可听见的地方。
@@ -275,7 +270,7 @@ try {
 
 	const unwatched = await request(rig.url, "POST", "/api/sessions", { text: "the unwatched conversation" });
 	const unwatchedId = (unwatched.payload as { sessionId: string }).sessionId;
-	const restoreUnwatched = sabotagePersistence(rig.hub);
+	const restoreUnwatched = sabotagePersistence(rig.sessionHub);
 
 	const loggedAlone: string[] = [];
 	console.error = (...parts: unknown[]) => {
@@ -287,8 +282,8 @@ try {
 	// 而不是别的——簿记不掺和，运行自己散袋，session 无需任何收摊。
 	check(
 		"a run nobody watches still keeps its own live half",
-		rig.hub.isLive(unwatchedId),
-		String(rig.hub.isLive(unwatchedId)),
+		rig.sessionHub.isLive(unwatchedId),
+		String(rig.sessionHub.isLive(unwatchedId)),
 	);
 	// run 的结束不需要任何 lane 就可观察：循环结束后读路径答 `running: false`。只有那时才
 	// 关闭日志捕获——更早恢复会让失败跑出它要监视的窗口。（手写的轮询，因为 `until` 收的是
@@ -304,7 +299,7 @@ try {
 	restoreUnwatched();
 
 	check("no lane existed to announce on, and the log line went out anyway", loggedAlone.length > 0, JSON.stringify(loggedAlone));
-	check("and nothing leaked: the failed run's own end swept the state", await until(() => !rig.hub.isLive(unwatchedId), 10_000), String(rig.hub.isLive(unwatchedId)));
+	check("and nothing leaked: the failed run's own end swept the state", await until(() => !rig.sessionHub.isLive(unwatchedId), 10_000), String(rig.sessionHub.isLive(unwatchedId)));
 
 	// ---------------------------------------------------------------------------------------------
 	// 6. 流式回答以 delta 过 wire，run 中打开的车道被交予剩余部分。
@@ -371,7 +366,7 @@ try {
 	check("baseline plus the rest is the whole answer", lateText === deltaAnswer, `${lateText.length}/${deltaAnswer.length}`);
 
 	await late.close();
-	check("the delta session's state was swept by its own end", await until(() => !rig.hub.isLive(deltaId), 10_000), String(rig.hub.isLive(deltaId)));
+	check("the delta session's state was swept by its own end", await until(() => !rig.sessionHub.isLive(deltaId), 10_000), String(rig.sessionHub.isLive(deltaId)));
 
 	// ---------------------------------------------------------------------------------------------
 	// 7. shutdown 什么都不等。
@@ -380,12 +375,12 @@ try {
 
 	rig.transport.setResponses([fakeAssistantMessage("d".repeat(600))]);
 	check("the prompt was accepted", (await prompt(rig.url, idleId, "a run for shutdown to stop")) === 202);
-	check("the run started", await until(() => rig.hub.isLive(idleId), 5_000), String(rig.hub.isLive(idleId)));
+	check("the run started", await until(() => rig.sessionHub.isLive(idleId), 5_000), String(rig.sessionHub.isLive(idleId)));
 
 	const started = Date.now();
 	await rig.close();
 	check("closing with a run in flight and a lane attached returns", Date.now() - started < 5_000, `${Date.now() - started} ms`);
-	check("and no session is left running", !rig.hub.isLive(idleId), String(rig.hub.isLive(idleId)));
+	check("and no session is left running", !rig.sessionHub.isLive(idleId), String(rig.sessionHub.isLive(idleId)));
 } catch (error) {
 	failures += 1;
 	process.stdout.write(`\nFAIL ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);

@@ -497,15 +497,11 @@ export function reduce(viewState: ViewState, message: ServerMessage): ViewState 
 			};
 		}
 		case "approval_settled": {
-			// 答案已被记录，审批离开台账。允许会让卡片保持等待：恢复的运行重新发出该调用，它自己的
-			// `tool_execution_start` 把卡片翻回运行中。拒绝由恢复趟合成的结果关闭，其结束事件以它的
-			// 文本定论卡片 —— 但一次没有恢复跟随的拒绝（答案自身的重启不可能，或会话被批量拒绝）
-			// 会让卡片无所等待地等下去，所以 settled 帧本身就是让它停止等待的东西，以答案写入的
-			// 错误名义。合成结束事件到达时会整体覆盖它。
-			const items = message.approved
-				? viewState.items
-				: patchCard(viewState.items, message.toolCallId, { running: false, waiting: false, isError: true });
-			return { ...viewState, approvals: viewState.approvals.filter((approval) => approval.toolCallId !== message.toolCallId), items };
+			// 审批离开台账，横幅随之摘除。这帧只说"定案了"，不说定成了什么——卡片的命运由结果
+			// 自己讲：允许由恢复运行的 `tool_execution_start` 翻回运行中；拒绝由那次关闭自己的
+			// `tool_execution_end` 定论（恢复遍的合成结果，或批量拒绝写下的结束事件——两者都
+			// 以事件说出自己的文本）。settled 帧本身只是"不再有答案可等"的通告。
+			return { ...viewState, approvals: viewState.approvals.filter((approval) => approval.toolCallId !== message.toolCallId) };
 		}
 		case "event":
 			return applySessionEvent(viewState, message.event);

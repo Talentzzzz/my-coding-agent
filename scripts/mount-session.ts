@@ -31,11 +31,11 @@ export interface MountedSession {
  * session 处于 idle——正如 `hub.birth()` 只返回 id 而不持有它，需要会话被运行着的调用方
  * 以自己的运行把它带进表。
  */
-export async function mountSession(hub: SessionHub, options: MountOptions): Promise<MountedSession> {
+export async function mountSession(sessionHub: SessionHub, options: MountOptions): Promise<MountedSession> {
 	const session = createSession(options.root);
 	// 出生（ADR-0021）：一条 user 消息落盘，`.json` 与 `.jsonl` 同时诞生——编排层按 id 现开
 	// 文件，不经此步，挂载后的第一次 prompt / snapshot 都会被拒绝。
-	hub.agent.sessionManager.appendMessage(session, {
+	sessionHub.agent.sessionManager.appendMessage(session, {
 		role: "user",
 		content: [{ type: "text", text: "the mounted session's birth message" }],
 		timestamp: 1,
@@ -44,7 +44,7 @@ export async function mountSession(hub: SessionHub, options: MountOptions): Prom
 	// 种下 orchestrator 不知道的东西——其上组装的服务都是 hub 自己的，这正是 mount 不可见的原因。
 	// 这扇门是 class-private（`hold` / `createAndPrompt` 是 host 会拼写的动词），所以 mount 和其他
 	// 私有半区一样直达它。袋子自带工作目录，mount 的 `root` 就落在那里。
-	const door = hub.agent as unknown as {
+	const door = sessionHub.agent as unknown as {
 		assembleAgentStateBySession(options: { session: Session }): Promise<unknown>;
 	};
 	await door.assembleAgentStateBySession({ session });

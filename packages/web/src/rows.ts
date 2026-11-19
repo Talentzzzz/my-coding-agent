@@ -1,4 +1,4 @@
-import type { SessionRow, DirectoryGroup } from "@my-agent/core/protocol";
+import type { SessionRow, SessionRowPatch, DirectoryGroup } from "@my-agent/core/protocol";
 
 /**
  * 侧栏的行，保存在连接层。
@@ -8,9 +8,10 @@ import type { SessionRow, DirectoryGroup } from "@my-agent/core/protocol";
  * 时，这个字段是否仍然为真。`running` 和 `pending` 是；token 计数不是，所以 `usage` 永远不来到
  * 这里。
  *
- * 有两个写入者，且它们从不重叠。通道为 `live` 时，行只来自通道，完全不查 REST；通道断开时，REST
- * 列表是唯一的信息来源。同一时刻只有一个写入者，正是消除竞态的关键：否则，一个在 `running: true`
- * 到达之前发起的列表可能在之后落地，把行拉回 `false`，窗口就会把一个正在工作的会话显示成空闲。
+ * 服务端不为行养存储（ADR-0027）：行在这里落地，服务端随事件推增量。有两个写入者，且它们从不
+ * 重叠。通道为 `live` 时，行只来自通道，完全不查 REST；通道断开时，REST 列表是唯一的信息来源。
+ * 同一时刻只有一个写入者，正是消除竞态的关键：否则，一个在 `running: true` 到达之前发起的列表
+ * 可能在之后落地，把行拉回 `false`，窗口就会把一个正在工作的会话显示成空闲。
  */
 export class SessionRows {
 	private readonly sessionRowMap = new Map<string, SessionRow>();
@@ -36,13 +37,42 @@ export class SessionRows {
 	}
 
 	/**
-	 * 一行变了。
+	 * 一行变了：通常是增量，逐字段合并；完整行（出生、fork、存储型改名）覆盖成全新的一行。
 	 *
-	 * 服务端发送整行，因为行很小而整行是幂等的 —— 同一行到达两次或乱序到达，得到的都是同一张表。
-	 * 逐字段合并将是这里唯一可能产生"一半新一半旧"的行的做法。
+	 * 服务端推的是事件自带的那几个字段（ADR-0027），缺席的字段读作"没动"，所以同一行到达两次
+	 * 或乱序到达，得到的都是同一张表——幂等性与整行版本相同，只是字的数量更少。
+	 *
+	 * 对表中从未持有的 id，只有完整的行可以自我介绍：增量是关于"那一行现在怎样"的话，从没听过
+	 * 这一行就无从合并——丢弃它，行的第一次到达永远走 overview 或一份完整的探测行。这也正是
+	 * 隐藏目录的过滤在客户端的延续：被摘走的行的增量，在这里安静落地为零。
 	 */
-	put(sessionRow: SessionRow): void {
-		this.sessionRowMap.set(sessionRow.id, sessionRow);
+	put(sessionRow: SessionRowPatch): void {
+		const current = this.sessionRowMap.get(sessionRow.id);
+		if (current === undefined) {
+			if (!isCompleteRow(sessionRow)) return;
+			this.sessionRowMap.set(sessionRow.id, sessionRow as SessionRow);
+			this.version += 1;
+			return;
+		}
+		let changed = false;
+		const next: SessionRow = { ...current };
+		const target = next as unknown as Record<string, unknown>;
+		// modified 是唯一不直接覆盖的字段：它是"最近活动"，只前进。一次迟到的时间戳（剧本化的
+		// 应答、乱序的到达）不得把行拉回过去——这正是旧的存储端守卫（`at <= modified` 不发布）
+		// 在客户端的化身。
+		if (sessionRow.modified !== undefined && sessionRow.modified > next.modified) {
+			next.modified = sessionRow.modified;
+			changed = true;
+		}
+		for (const key of Object.keys(sessionRow) as (keyof SessionRowPatch)[]) {
+			if (key === "modified" || key === "id") continue;
+			const value = sessionRow[key];
+			if (value === undefined || target[key] === value) continue;
+			target[key] = value;
+			changed = true;
+		}
+		if (!changed) return;
+		this.sessionRowMap.set(sessionRow.id, next);
 		this.version += 1;
 	}
 
@@ -107,4 +137,21 @@ export class SessionRows {
 /** 一组最近的活动，正是组与组之间排序的依据。 */
 function newest(rows: readonly SessionRow[]): number {
 	return rows.reduce((latest, sessionRow) => Math.max(latest, sessionRow.modified), 0);
+}
+
+/**
+ * 一份增量是否携带了完整行：未知 id 的行只有以此自表身份才被收进表里。
+ *
+ * 完整的行来自服务端的探测（出生、fork、改名）与 overview——它们永远带着全部字段。判定按
+ * 必填字段逐个点名，`parentId` 缺席合法（根会话没有它）。
+ */
+function isCompleteRow(patch: SessionRowPatch): boolean {
+	return (
+		patch.workDirAbsPath !== undefined &&
+		patch.createdAt !== undefined &&
+		patch.title !== undefined &&
+		patch.modified !== undefined &&
+		patch.running !== undefined &&
+		patch.pending !== undefined
+	);
 }
