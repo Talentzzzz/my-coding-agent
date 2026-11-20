@@ -107,9 +107,9 @@ export class UiSettingsManager {
 	 * 应用一次部分变更，返回前写盘。
 	 *
 	 * 只有被点名的字段移动：appearance 做嵌套合并（改主题不碰字号），hiddenDirectories 整体替换，
-	 * directoryNames 按键合并（补丁携带它变更的条目，空字符串收回一个名字）——与
-	 * SettingManager.applySettings 今天的逐层合并行为一致。写前重读文件，把变更合并到磁盘此刻的
-	 * 内容之上，所以对同一文件的手编不被这里一次无关的变更回滚；未知键原样保留。
+	 * directoryNames 按键合并（补丁携带它变更的条目，空字符串收回一个名字）——写路径的三条纪律
+	 * 按 ADR-0028 在本持有者内联。变更合并到磁盘此刻的内容之上（读取含迁移语义），所以对同一文件
+	 * 的手编不被这里一次无关的变更回滚；未知键原样保留。
 	 */
 	applyUiSettings(patch: UiSettingsPatch): void {
 		const fields = Object.entries(patch)
@@ -124,7 +124,9 @@ export class UiSettingsManager {
 			const value = (patch as Record<string, unknown>)[field];
 			changes[field] = isRecord(inherited) && isRecord(value) ? mergeLayers(inherited, value) : value;
 		}
-		const merged = mergeLayers(this.readLayer() ?? {}, changes);
+		// {@link UiSettingsManager.layerOf} 已经把磁盘此刻的内容（含迁移语义）读到手，合并基线就是
+		// 它——一次读，不再重读文件。
+		const merged = mergeLayers(layer, changes);
 		writeAtomically(uiPath(this.home), `${JSON.stringify(merged, null, "\t")}\n`);
 	}
 
@@ -211,10 +213,11 @@ function readRecordOrUndefined(absPath: string): Record<string, unknown> | undef
 
 /**
  * 先写临时文件再改名：读者看到的要么是旧内容、要么是完整的新内容，没有写了一半的中间态。
+ * temp 名带 pid，防两个进程同时落盘时撞同一个临时名——与其余持有者的写路径同形。
  */
 function writeAtomically(absPath: string, content: string): void {
 	mkdirSync(dirname(absPath), { recursive: true });
-	const temporary = `${absPath}.tmp`;
+	const temporary = `${absPath}.${process.pid}.tmp`;
 	writeFileSync(temporary, content, "utf8");
 	renameSync(temporary, absPath);
 }

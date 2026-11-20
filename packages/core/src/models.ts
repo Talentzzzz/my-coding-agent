@@ -1,5 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import {
 	type Api,
 	type AssistantMessage,
@@ -64,61 +63,9 @@ export const NEW_MODEL_DEFAULTS = {
  */
 export const DEFAULT_MODEL_NAME = "deepseek-flash";
 
-/** 模型行所在之处。一个文件，与设置、会话放在一起。 */
+/** 模型行所在之处。一个文件，与设置、会话放在一起。读取与写入由 {@link ModelManager} 负责。 */
 export function modelsPath(agentDir: string = AGENT_HOME): string {
 	return join(agentDir, "models.json");
-}
-
-/**
- * 用户的模型，读写于一个 JSON 文件。
- *
- * 每次 {@link list} 都重读而不是缓存，因为文件又小又可手编：用编辑器加了一行的人不该为了看见它而
- * 重启应用，缓存会把显然的行为变成令人惊讶的行为。
- */
-export class ModelConfigStore {
-	private readonly absFile: string;
-
-	private constructor(absFile: string) {
-		this.absFile = absFile;
-	}
-
-	static create(agentDir: string = AGENT_HOME): ModelConfigStore {
-		return new ModelConfigStore(modelsPath(agentDir));
-	}
-
-	/** 已存的 config，按写入顺序。文件缺失或读不了就是没有行。 */
-	list(): ModelConfig[] {
-		let text: string;
-		try {
-			text = readFileSync(this.absFile, "utf8");
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-			throw error;
-		}
-
-		const trimmed = text.trim();
-		if (trimmed === "") return [];
-
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(trimmed);
-		} catch (error) {
-			throw new Error(`${this.absFile} is not valid JSON: ${(error as Error).message}`);
-		}
-		const entries = isRecord(parsed) && Array.isArray(parsed.models) ? parsed.models : [];
-		const rows: ModelConfig[] = [];
-		for (const entry of entries) {
-			const config = coerceModelConfig(entry);
-			if (config !== undefined) rows.push(config);
-		}
-		return rows;
-	}
-
-	/** 替换全部行。整表写入正是名字与文件不漂移的原因。 */
-	replace(models: readonly ModelConfig[]): void {
-		mkdirSync(dirname(this.absFile), { recursive: true });
-		writeFileSync(this.absFile, `${JSON.stringify({ models }, null, "\t")}\n`, "utf8");
-	}
 }
 
 /**

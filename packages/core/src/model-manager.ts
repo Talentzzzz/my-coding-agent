@@ -6,7 +6,7 @@ import { coerceModelConfig, modelsPath, type ModelConfig } from "./models.ts";
 /**
  * 模型簇的持有者：目录里的行、默认指向的行、以及「内置默认已种下」的标记。
  *
- * 设定归属（ADR 设置归属重构）把这三样从 `SettingManager` 拿回来交给模型自己：它们原本住在两份
+ * 设置归属重构（ADR-0028）把这三样交给模型自己：它们原本住在两份
  * 文件里——行在 `models.json`，另两样在旧 `settings.json`——现在同住 `models.json` 的两个可选键
  * （`defaultModel`、`defaultModelSeeded`），旧文件缺键即「未设置」，天然向后兼容。
  *
@@ -19,15 +19,16 @@ import { coerceModelConfig, modelsPath, type ModelConfig } from "./models.ts";
 export class ModelManager {
 	private readonly home: string;
 
-	constructor(home: string = AGENT_HOME) {
-		this.home = home;
+	/** `home` 是 `models.json` 所在的目录；递别的 home 是让测试指到无害的地方。 */
+	constructor(options: ModelManagerOptions = {}) {
+		this.home = options.home ?? AGENT_HOME;
 	}
 
 	/**
 	 * 本安装运行的模型行，每次调用都从文件读取。
 	 *
 	 * 行走 {@link coerceModelConfig} 规范化——来自文件或文本编辑器的条目还不是本应用愿意发送的
-	 * config，读不回来的行被丢。缺文件 = 空目录，与 `ModelConfigStore.list()` 的现行为一致。
+	 * config，读不回来的行被丢。缺文件 = 空目录。
 	 */
 	catalog(): readonly ModelConfig[] {
 		const disk = this.load();
@@ -154,6 +155,16 @@ export class ModelManager {
 	}
 }
 
+/** 调用方可指明模型簇住在哪个 home，把 {@link ModelManager} 指到机器自己的文件之外。 */
+export interface ModelManagerOptions {
+	/**
+	 * `models.json` 读取与写入所在的 agent home。默认用真实的那一个。
+	 *
+	 * 递入自己模型行的 smoke 不得把它们留在机器的 `models.json` 里。
+	 */
+	home?: string;
+}
+
 // ---------------------------------------------------------------------------- 文件读写（内联）
 
 /** 一份文件的 JSON 对象内容，按它写下的原样——未知键也在。缺的文件是一个空记录。 */
@@ -197,7 +208,7 @@ function writeDisk(absPath: string, disk: Record<string, unknown>): void {
  * 旧 `settings.json`，迁移的只读源头。
  *
  * 缺的文件、空文件、解析不了的文件、不是对象的文件，都返回 undefined——迁移跳过。旧文件被拒绝
- * 的那些建构今天就会以异常显形（`SettingManager` 的读取），不该在这里以每读必炸的形态复活；而
+ * 的那些建构在 ADR-0028 之前的统一门面读取上就会以异常显形，不该在这里以每读必炸的形态复活；而
  * 「永不删除」意味着一旦开始炸就永远炸下去。键值按消费方的规则各取所需：`model` 收非空字符串，
  * `defaultModelSeeded` 收布尔——两种取值都是值，`false` 不是缺席。
  */

@@ -157,7 +157,7 @@ async function openSession(overrides: { approval?: Record<string, boolean>; chat
 	const home = join(root, `agent-home-${homeSeq++}`);
 	const toolManager = createToolManager({ home });
 	if (overrides.approval !== undefined) toolManager.applyToolDefaults({ approval: overrides.approval });
-	const modelManager = new ModelManager(home);
+	const modelManager = new ModelManager({ home: home });
 	modelManager.replaceRows(rows);
 	const agent = await openAgent({
 		session,

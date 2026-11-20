@@ -71,8 +71,8 @@ export function createSessionAgent(options: CreateSessionAgentOptions = {}): Age
 	const agent = new Agent({
 		// 账本服务与各设置簇持有者（spec §8）：各持自己的 home，默认同源——模型簇可经 modelsHome
 		// 分居。它们什么都不持有，每次读取都是对其背后文件的一次新读。
-		sessionManager: new SessionManager(options.settingsHome),
-		modelManager: new ModelManager(options.modelsHome ?? options.settingsHome),
+		sessionManager: new SessionManager({ home: options.settingsHome }),
+		modelManager: new ModelManager({ home: options.modelsHome ?? options.settingsHome }),
 		uiSettings: new UiSettingsManager({ home: options.settingsHome }),
 		settingsHome: options.settingsHome,
 		toolManager,

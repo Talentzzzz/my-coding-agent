@@ -23,8 +23,8 @@ import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 import type { Message } from "../llm/index.ts";
 import { type Usage, uuidv7 } from "../llm/index.ts";
-// 环安全：AGENT_HOME/DEFAULT_GLOBAL_SETTINGS/settingsPath 只在函数体内使用、不在模块顶层——
-// config.ts 又 import 回本文件的 queueModeOr（也在调用期才执行），两个方向都碰不到未初始化的绑定。
+// config.ts 的常量（AGENT_HOME/DEFAULT_GLOBAL_SETTINGS/settingsPath）只在函数体内使用、不在模块
+// 顶层——config.ts 已不再 import 本文件的任何东西（ADR-0028 之后），不存在双向加载环。
 import { AGENT_HOME, APP_NAME, DEFAULT_GLOBAL_SETTINGS, settingsPath } from "../config.ts";
 import { trimToolCallArgs } from "../context/trim-tool-call-args.ts";
 import { clearToolResult } from "../context/clear-tool-results.ts";
@@ -1319,8 +1319,8 @@ export class SessionManager {
 	 */
 	private readonly home: string;
 
-	constructor(home: string = AGENT_HOME) {
-		this.home = home;
+	constructor(options: SessionManagerOptions = {}) {
+		this.home = options.home ?? AGENT_HOME;
 	}
 
 	/**
@@ -2161,12 +2161,12 @@ export class SessionManager {
 	}
 
 	/**
-	 * 应用一次对队列默认模式的变更，返回前写盘。写路径是 spec §4.3 的三条纪律（今天
-	 * `SettingManager.applySettings` 的行为，按持有者各自复制）：写前重读、只动被点名的字段
-	 * （两个键都是标量，整体替换）、未知键原样保留。
+	 * 应用一次对队列默认模式的变更，返回前写盘。写路径是 spec §4.3 的三条纪律（ADR-0028：按
+	 * 持有者各自内联实现）：写前重读、只动被点名的字段（两个键都是标量，整体替换）、未知键原样
+	 * 保留。
 	 *
-	 * 补丁值按原样落盘，值的规范化发生在读取半——文件是手可写的，读取者负责吸收坏值，与
-	 * `SettingManager` 的分层一致。
+	 * 补丁值按原样落盘，值的规范化发生在读取半——文件是手可写的，读取者负责吸收坏值，与其他
+	 * 持有者的分层一致。
 	 */
 	applySessionDefaults(patch: { steeringMode?: QueueMode; followUpMode?: QueueMode }): void {
 		const named = Object.entries(patch).filter(([, value]) => value !== undefined);
@@ -2179,7 +2179,7 @@ export class SessionManager {
 
 	/**
 	 * 会话簇设置所在的层：先保证迁移发生，再读自己的文件。缺失的文件是一个空层；读不出 JSON 的
-	 * 文件被拒绝、从不被覆盖——与 `SettingManager` 对旧文件的处理同一立场。
+	 * 文件被拒绝、从不被覆盖——与 ADR-0028 对各持有者文件的裁定同一立场。
 	 */
 	private sessionDefaultsLayer(): Record<string, unknown> {
 		this.migrateSessionDefaultsOnce();
@@ -2204,6 +2204,18 @@ export class SessionManager {
 		});
 	}
 
+}
+
+/**
+ * 调用方可指明会话簇设置住在哪个 home，把 {@link SessionManager} 指到机器自己的文件之外。
+ */
+export interface SessionManagerOptions {
+	/**
+	 * `sessions.json` 读取与写入所在的 agent home。默认用真实的那一个。
+	 *
+	 * 测试「会*写*会话簇设置」的命令的 smoke 不得写机器自己的文件。
+	 */
+	home?: string;
 }
 
 /**

@@ -40,7 +40,7 @@ export {
 	type SettingsPatch,
 } from "./config.ts";
 // RetrySettings 的导出源改为 engine-settings.ts（类型随引擎簇搬入），包对外的名字不变。
-export { EngineSettings, type RetrySettings } from "./engine-settings.ts";
+export { EngineSettings, type EngineSettingsOptions, type RetrySettings } from "./engine-settings.ts";
 // UI 簇自设置归属重构起住在这里：类型、规范化函数与持有者同文件（spec §5），包对外的名字不变。
 export {
 	clampContentWidth,
@@ -55,7 +55,7 @@ export {
 	type UiSettingsPatch,
 } from "./ui-settings.ts";
 export { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
-export { ModelManager } from "./model-manager.ts";
+export { ModelManager, type ModelManagerOptions } from "./model-manager.ts";
 export {
 	ARG_KEEP_CHARS,
 	ARG_TRIM_MARKER,
@@ -114,7 +114,6 @@ export {
 	NEW_MODEL_DEFAULTS,
 	normalizeThinkingLevel,
 	Model,
-	ModelConfigStore,
 	placeholderModel,
 	unconfiguredStream,
 	type ModelChoice,
@@ -198,6 +197,7 @@ export {
 	type SessionMeta,
 	type SessionInfo,
 	type SessionDefaults,
+	type SessionManagerOptions,
 	type Session,
 	type SessionSettings,
 	type MessageEntry,

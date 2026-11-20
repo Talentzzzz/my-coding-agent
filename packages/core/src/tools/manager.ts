@@ -5,10 +5,10 @@
 // 持有它们的代价是进程生命周期的常量，而不是一个 session 的状态。调用所需、且会随请求变化的一切
 // （工作目录、`bash` 超时）随 `execute` 的 `run` 到达，这正是让一个实例服务所有 session 的原因。
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Tool, ToolResult, ToolRunContext, ToolUpdateCallback } from "../llm/index.ts";
-// 环安全：config.ts 的 mergeSettings 也从这里 import bashOr/modesOr 回去（设置归属重构 §5），
+// 类型方向：config.ts 从这里 import BashSettings/ModeSettings 的类型名（设置归属重构 §5 随簇搬迁），
 // 两侧引用的运行时值都只在函数体与构造期执行，没有任何模块顶层求值，ESM 循环 import 安全。
 import { AGENT_HOME, DEFAULT_BASH_SETTINGS, DEFAULT_GLOBAL_SETTINGS, DEFAULT_MODE_NAME, settingsPath } from "../config.ts";
 import { createBashTool } from "./bash.ts";
@@ -472,10 +472,22 @@ function readLayer(absPath: string): ToolsLayer | undefined {
 	return parsed;
 }
 
-/** 一层写到它自己的文件上，目录不存在时创建它。 */
+/**
+ * 一层写到它自己的文件上，目录不存在时创建它。
+ *
+ * 经同目录 temp + rename 落盘（temp 名带 pid，防多进程撞名）：读者要么看到旧内容要么看到完整的
+ * 新内容，绝不会看到写到一半的——与其余四个持有者的写路径同形。
+ */
 function writeLayer(absPath: string, layer: ToolsLayer): void {
 	mkdirSync(dirname(absPath), { recursive: true });
-	writeFileSync(absPath, `${JSON.stringify(layer, null, "\t")}\n`, "utf8");
+	const absTemp = `${absPath}.${process.pid}.tmp`;
+	const fd = openSync(absTemp, "wx");
+	try {
+		writeFileSync(fd, `${JSON.stringify(layer, null, "\t")}\n`);
+	} finally {
+		closeSync(fd);
+	}
+	renameSync(absTemp, absPath);
 }
 
 /** 补丁的嵌套对象逐键合并进已有的值，其余字段整体替换。 */

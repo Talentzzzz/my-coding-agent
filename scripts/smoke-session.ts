@@ -335,9 +335,9 @@ async function openSession(
 		...(desired.modes === undefined ? {} : { modes: desired.modes }),
 		...(desired.bash === undefined ? {} : { bash: desired.bash }),
 	});
-	new SessionManager(home).applySessionDefaults({ steeringMode: desired.steeringMode, followUpMode: desired.followUpMode });
-	new EngineSettings(home).applyRetry(desired.retry);
-	const modelManager = new ModelManager(home);
+	new SessionManager({ home: home }).applySessionDefaults({ steeringMode: desired.steeringMode, followUpMode: desired.followUpMode });
+	new EngineSettings({ home: home }).applyRetry(desired.retry);
+	const modelManager = new ModelManager({ home: home });
 	modelManager.replaceRows(run.models ?? rows);
 	if (desired.model !== undefined || desired.defaultModelSeeded !== undefined) {
 		modelManager.applyModelSettings({
@@ -1091,8 +1091,8 @@ async function exerciseAfterToolHook(): Promise<void> {
 	await mkdir(replayHome, { recursive: true });
 	const replayToolManager = createToolManager({ home: replayHome });
 	replayToolManager.applyToolDefaults({ approval: settings().approval });
-	new EngineSettings(replayHome).applyRetry(settings().retry);
-	new ModelManager(replayHome).replaceRows(rows);
+	new EngineSettings({ home: replayHome }).applyRetry(settings().retry);
+	new ModelManager({ home: replayHome }).replaceRows(rows);
 	const replayed = await openAgent({
 		session: reopenedFile,
 		chatTransport: fake.chatTransport,
@@ -2109,7 +2109,7 @@ async function exerciseModelFromRow(): Promise<void> {
 	keyedRows[0]!.baseUrl = "http://127.0.0.1:2/v1";
 	// 行编辑落盘（设置归属重构 §5）：目录是 ModelManager 每次现读的文件，内存数组的改动不再被隔着
 	// 持有者看见——把改好的行整表写回，下一请求才读得到。
-	new ModelManager(homeOf(agent)).replaceRows(keyedRows);
+	new ModelManager({ home: homeOf(agent) }).replaceRows(keyedRows);
 	fake.setResponses([fakeAssistantMessage("answered again")]);
 	await within("the second run", 10_000, agent.prompt(sidOf(agent), "again"));
 	check("a corrected key is used by the next message", sent[1]?.key === "corrected-key", String(sent[1]?.key));
@@ -2120,7 +2120,7 @@ async function exerciseModelFromRow(): Promise<void> {
 
 	// A wire id that moves is a different model answering, and the session says so.
 	keyedRows[0]!.id = "faux-2";
-	new ModelManager(homeOf(agent)).replaceRows(keyedRows);
+	new ModelManager({ home: homeOf(agent) }).replaceRows(keyedRows);
 	fake.setResponses([fakeAssistantMessage("answered a third time")]);
 	await within("the third run", 10_000, agent.prompt(sidOf(agent), "and again"));
 	check("a renamed wire id reaches the request", sent[2]?.id === "faux-2", String(sent[2]?.id));

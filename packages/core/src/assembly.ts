@@ -152,9 +152,9 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
 	// 冷读没有编排层可取服务，回落的持有者在这里原地构造。新造的持有者行为完全一致：
 	// 各持有者什么都不持有（ADR-0006 §2），所以调用方自己的实例改变的只是读*哪些*
 	// 文件——hub 递入自己那份正是为此。homes 是各持有者唯一的接缝（spec §8）。
-	const sessionManager = options.sessionManager ?? new SessionManager(options.settingsHome);
+	const sessionManager = options.sessionManager ?? new SessionManager({ home: options.settingsHome });
 	const toolManager = options.toolManager ?? createToolManager({ home: options.settingsHome });
-	const modelManager = new ModelManager(options.modelsHome ?? options.settingsHome);
+	const modelManager = new ModelManager({ home: options.modelsHome ?? options.settingsHome });
 	const { workDirAbsPath, resolved } = await assemble(sessionManager, toolManager, modelManager, options);
 	return sessionSnapshot({
 		sessionManager,

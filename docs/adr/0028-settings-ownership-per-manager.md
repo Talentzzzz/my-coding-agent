@@ -84,6 +84,8 @@ ADR-0019 把设置收拢成三个类型名与一只四法门面（`SettingManage
      组装再拆，正是为了保住「每簇原子」；各持有者的写路径只动被点名的字段，所以空簇是零次落盘。
    - `Agent.modelCatalog()` / `Agent.replaceModels()` 转发 ModelManager；`Agent.hiddenDirectories()`
      转发 UiSettingsManager。
+   - 命名按代码既有形态：门面的读模型方法是 `Agent.settings()`——spec 文本写作的 `getSettings()`
+     是 wire/api 层的叫法，实现沿用 master 既有的 `settings()`，wire 与 REST 面不受名字差异影响。
    - 结果：wire（`protocol.ts`）与 REST 面形状不变，`packages/server`、`packages/web` 零改动
      （smoke 的 home 传递随接缝微调除外）。
 
@@ -116,6 +118,20 @@ ADR-0019 把设置收拢成三个类型名与一只四法门面（`SettingManage
 用它补预设的缺键。拆分后该默认与 `modes` 表**同住工具簇**（同一份 `tools.json`、同一个
 `tools/manager.ts`），规范化函数随数据同文件，语义不变。这是刻意为之的归属：把 `approval`
 挪出工具簇（比如归给引擎或独立的审批持有者）会踩断模式规范化——动它之前先重读 ADR-0004。
+
+**内联副本的已知分歧**：三条写纪律按持有者各自内联，副本之间有两处已知的真实分歧，记录在此，
+不改行为：
+
+- **空文件与缺文件的裁定各持有者不同。** `ModelManager` 对不是 JSON 对象的 `models.json`
+  拒绝读取、从不覆盖——继承退场的 `SettingManager` 对 settings.json 的立场；其余四个持有者对
+  **空文件**当空层读（trim 后为空串即空层）、对不是 JSON 对象的文件同样拒绝且从不覆盖。缺文件
+  的语义也不同：四个文件级持有者把缺文件读作迁移的触发器，`models.json` 把它读作空目录（迁移
+  按「键」走，没有东西可捡时一个字节都不写）。
+- **两份 `mergeLayers`，一份跳 `undefined`、一份不跳。** `tools/manager.ts` 与
+  `engine-settings.ts` 的副本在合并时跳过值为 `undefined` 的覆盖键——显式 undefined 不抹掉已有
+  键；`ui-settings.ts` 的副本不跳——它的补丁字段先经「只动被点名的字段」过滤才进入合并，嵌套
+  补丁里残留的 `undefined` 经 JSON 序列化自然消失、由读取半回落默认值。分歧在各自的调用点内
+  自洽，冒烟各自钉住各自的行为；统一它们不是本 ADR 的事，动之前先读两边的冒烟。
 
 **并发**：单进程内五个持有者各自迁移、互不碰对方的文件，无竞争；多进程同时跑（两个桌面实例）
 可能出现重复迁移——写自己是原子的，最坏结果是旧文件的簇被同值写两次，无害。

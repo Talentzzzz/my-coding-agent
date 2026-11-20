@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 // 环安全：本模块只在函数体内使用 config.ts 的运行时值（模块顶层不碰它们），而 config.ts 只从
 // 本模块取 `RetrySettings` 的类型——两条方向都是类型/调用期的引用，加载顺序无关紧要。
@@ -19,8 +19,8 @@ export class EngineSettings {
 	private readonly home: string;
 
 	/** `home` 是 `engine.json` 所在的目录；递别的 home 是让测试指到无害的地方。 */
-	constructor(home: string = AGENT_HOME) {
-		this.home = home;
+	constructor(options: EngineSettingsOptions = {}) {
+		this.home = options.home ?? AGENT_HOME;
 	}
 
 	/**
@@ -28,7 +28,8 @@ export class EngineSettings {
 	 *
 	 * 本持有者的首次读取顺带执行迁移（spec §4.2）：`engine.json` 不存在而旧 `settings.json`
 	 * 存在时，从旧文件捡走 retry 簇，把补默认后的视图原子落盘——「迁移过」从此是磁盘事实，旧文件
-	 * 之后被完全忽略、永不删除也永不写入。
+	 * 之后被完全忽略、永不删除也永不写入。旧文件不在场时什么都不写：读到的就是缺省视图，
+	 * `engine.json` 直到第一次真正的写入才出现。
 	 */
 	retrySettings(): RetrySettings {
 		return retryOr(this.layerWithMigration().retry);
@@ -37,7 +38,7 @@ export class EngineSettings {
 	/**
 	 * 应用一次 retry 的部分变更，返回前写盘。
 	 *
-	 * 与今天 `SettingManager.applySettings` 的语义逐条一致（spec §4.3）：写前重读文件（本类本就
+	 * 写路径是 spec §4.3 的三条纪律（ADR-0028：按持有者各自内联实现）：写前重读文件（本类本就
 	 * 不持常驻袋）、只动被点名的字段（retry 嵌套合并）、未知键原样保留。写入只落在
 	 * `engine.json` 上、别无他处。
 	 */
@@ -52,16 +53,19 @@ export class EngineSettings {
 	/**
 	 * 引擎簇文件的内容，按它写下的原样（未知的键也算），缺文件时执行迁移。
 	 *
-	 * 本构建无法解析的文件被拒绝，从不被覆盖——与 `SettingManager` 对 settings.json 的裁定同形。
+	 * 本构建无法解析的文件被拒绝，从不被覆盖——与 ADR-0028 对各持有者文件的裁定同形。
 	 */
 	private layerWithMigration(): Record<string, unknown> {
 		const existing = readLayer(this.enginePath());
 		if (existing !== undefined) return existing;
 
-		// 首读：从旧 settings.json 捡走自己的簇（旧文件不在场就是全缺省），补默认后的视图落盘——
-		// 字段全缺省也写出文件，把「迁移过」变成磁盘事实，避免旧文件复活。
+		// 首读：旧 settings.json 在场才从它捡走自己的簇（spec §4.2：迁移的前提是「自己的文件不存在
+		// **且**旧文件存在」——与 tools/sessions/ui 三个文件级持有者同形）。补默认后的视图落盘，
+		// 把「迁移过」变成磁盘事实，避免旧文件复活；旧文件不在场时什么都不写，一个字节都不落。
+		// 旧文件本身永不删除、永不写入。
 		const legacy = readLayer(settingsPath(this.home));
-		const view: Record<string, unknown> = { retry: retryOr(legacy?.retry) };
+		if (legacy === undefined) return {};
+		const view: Record<string, unknown> = { retry: retryOr(legacy.retry) };
 		this.write(view);
 		return view;
 	}
@@ -71,9 +75,26 @@ export class EngineSettings {
 	}
 
 	private write(layer: Record<string, unknown>): void {
-		mkdirSync(this.home, { recursive: true });
-		writeFileSync(this.enginePath(), `${JSON.stringify(layer, null, "\t")}\n`, "utf8");
+		mkdirSync(dirname(this.enginePath()), { recursive: true });
+		const absTemp = `${this.enginePath()}.${process.pid}.tmp`;
+		const fd = openSync(absTemp, "wx");
+		try {
+			writeFileSync(fd, `${JSON.stringify(layer, null, "\t")}\n`);
+		} finally {
+			closeSync(fd);
+		}
+		renameSync(absTemp, this.enginePath());
 	}
+}
+
+/** 调用方可指明引擎簇设置住在哪个 home，把 {@link EngineSettings} 指到机器自己的文件之外。 */
+export interface EngineSettingsOptions {
+	/**
+	 * `engine.json` 读取与写入所在的 agent home。默认用真实的那一个。
+	 *
+	 * 测试「会*写*引擎设置」的命令的 smoke 不得写机器自己的文件。
+	 */
+	home?: string;
 }
 
 /**
@@ -111,8 +132,8 @@ function countOr(value: unknown, fallback: number): number {
 	return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : fallback;
 }
 
-/** 有限正数，否则回落；export 只为 tools/manager.ts 的 bashOr 复用同一份解析。 */
-export function numberOr(value: unknown, fallback: number): number {
+/** 有限正数，否则回落。私有副本，刻意不与其他持有者共享抽象（ADR-0028：复制是买的保险）。 */
+function numberOr(value: unknown, fallback: number): number {
 	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
