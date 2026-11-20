@@ -38,8 +38,9 @@ export {
 	settingsPath,
 	type GlobalSettings,
 	type ModeSettings,
-	type RetrySettings,
 } from "./config.ts";
+// RetrySettings 的导出源改为 engine-settings.ts（类型随引擎簇搬入），包对外的名字不变。
+export { EngineSettings, type RetrySettings } from "./engine-settings.ts";
 // UI 簇自设置归属重构起住在这里：类型、规范化函数与持有者同文件（spec §5），包对外的名字不变。
 export {
 	clampContentWidth,

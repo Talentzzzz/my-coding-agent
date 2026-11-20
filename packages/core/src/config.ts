@@ -1,5 +1,12 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+// 引擎簇的类型与规范化函数随簇搬进 engine-settings.ts（spec §5）；默认值留守本文件的
+// DEFAULT_GLOBAL_SETTINGS。环安全：retryOr/numberOr 只在 mergeSettings/bashOr 的调用期执行，
+// 本文件不把它们用在模块顶层。
+import { numberOr, retryOr, type RetrySettings } from "./engine-settings.ts";
+// 类型随簇搬入后，旧读者（setting-manager.ts）仍从本文件点这个名字——type-only 再导出，源头不变地
+// 指向 engine-settings.ts。
+export type { RetrySettings };
 import type { QueueMode } from "./protocol.ts";
 // UI 簇的类型与规范化器已随簇搬进 ui-settings.ts（spec §5）。appearanceOr 与
 // stringRecordOrUndefined 只在 mergeSettings 调用期触达，而 ui-settings.ts 也只在函数体里引用
@@ -14,21 +21,6 @@ export const AGENT_HOME = resolve(process.env.MY_AGENT_HOME ?? join(homedir(), "
 
 /** 本应用在自己写出的文件与消息里如何自称。 */
 export const APP_NAME = "my-agent";
-
-/**
- * 供应商调用失败时的重试策略。
- *
- * 逐字段对应 pi-ai 的 `RetryPolicy`，对象无需转换即可交给 `retryAssistantCall`：`maxRetries` 数的是
- * 重试次数而非调用次数，`0` 表示「从不重试」。
- */
-export interface RetrySettings {
-	enabled: boolean;
-	maxRetries: number;
-	/** 每次尝试的延迟为 `baseDelayMs * 2^(attempt-1)`。 */
-	baseDelayMs: number;
-	/** 单次计算出的延迟的上限。 */
-	maxAgentDelayMs: number;
-}
 
 /**
  * 窗口如何绘制自己——类型与规范化器（`appearanceOr`、`clamp*`）已随簇搬进 ui-settings.ts；
@@ -226,30 +218,6 @@ export function mergeSettings(input: unknown): GlobalSettings {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function numberOr(value: unknown, fallback: number): number {
-	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-/**
- * 重试策略，逐字段落在默认值之上。
- *
- * `maxRetries` 是唯一可以为零的计数——「不重试」是一个设置，不是缺值——所以按非负整数解析，
- * 而不用 {@link numberOr}。
- */
-function retryOr(value: unknown): RetrySettings {
-	const record = isRecord(value) ? value : {};
-	return {
-		enabled: typeof record.enabled === "boolean" ? record.enabled : DEFAULT_GLOBAL_SETTINGS.retry.enabled,
-		maxRetries: countOr(record.maxRetries, DEFAULT_GLOBAL_SETTINGS.retry.maxRetries),
-		baseDelayMs: numberOr(record.baseDelayMs, DEFAULT_GLOBAL_SETTINGS.retry.baseDelayMs),
-		maxAgentDelayMs: numberOr(record.maxAgentDelayMs, DEFAULT_GLOBAL_SETTINGS.retry.maxAgentDelayMs),
-	};
-}
-
-function countOr(value: unknown, fallback: number): number {
-	return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : fallback;
 }
 
 /**
