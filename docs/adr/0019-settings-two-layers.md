@@ -1,6 +1,10 @@
 # 0019：设置三层——GlobalSettings、SessionSettings 与每次现算的 Settings
 
 日期：2026-11-15 · 状态：已接受，已落地
+取代者：[0028](0028-settings-ownership-per-manager.md) 取代了本 ADR 的**所有权半**——global 侧
+设置住进一只 `SettingManager`、一份 `settings.json` 的归属（决定 1 的 `GlobalSettings` 归属与
+决定 3 的四法收敛）；**组合视图半原样保留**——`resolveSettings` 仍是唯一答案、每次现算、
+不留副本，变的只是输入来源（两个持有者各一次现读）
 
 ## 背景
 
