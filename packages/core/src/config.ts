@@ -1,13 +1,21 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 // 引擎簇的类型与规范化函数随簇搬进 engine-settings.ts（spec §5）；默认值留守本文件的
-// DEFAULT_GLOBAL_SETTINGS。环安全：retryOr/numberOr 只在 mergeSettings/bashOr 的调用期执行，
-// 本文件不把它们用在模块顶层。
-import { numberOr, retryOr, type RetrySettings } from "./engine-settings.ts";
+// DEFAULT_GLOBAL_SETTINGS。环安全：retryOr 只在 mergeSettings 的调用期执行，本文件不把它用在
+// 模块顶层。
+import { retryOr, type RetrySettings } from "./engine-settings.ts";
 // 类型随簇搬入后，旧读者（setting-manager.ts）仍从本文件点这个名字——type-only 再导出，源头不变地
 // 指向 engine-settings.ts。
 export type { RetrySettings };
 import type { QueueMode } from "./protocol.ts";
+// 工具簇的类型与规范化函数随簇搬进了 tools/manager.ts（设置归属重构 §5）；mergeSettings 仍在
+// 调用期使用 bashOr/modesOr，这里 import 回来。环安全：manager.ts 也从本文件 import 默认值
+// （DEFAULT_MODE_NAME、DEFAULT_BASH_SETTINGS、DEFAULT_GLOBAL_SETTINGS），但两侧引用的运行时值都
+// 只在函数体与构造期执行，没有任何模块顶层求值，ESM 循环 import 安全。
+import { bashOr, modesOr, type BashSettings, type ModeSettings } from "./tools/manager.ts";
+
+// 类型随簇搬走后的 re-export：protocol.ts、setting-manager.ts、llm/ 的既有 import 路径不变。
+export type { BashSettings, ModeSettings };
 // queueModeOr 已随会话簇搬进 session-manager.ts（spec §5）；mergeSettings 过渡期仍需要它。
 // 调用期执行，环安全——session-manager.ts 对本文件的 import 也只在其函数体内使用。
 import { queueModeOr } from "./session/session-manager.ts";
@@ -51,18 +59,9 @@ export const SIDEBAR_WIDTH_RANGE = { min: 208, max: 360 } as const;
 export const CONTENT_WIDTH_RANGE = { min: 600, max: 1280 } as const;
 
 /**
- * `bash` 工具允许一条命令运行多久。
- *
- * 上限保留为设置而不是干脆取消，因为它防的是模型要求无界的运行——但这个数字由用户来改：一个要跑
- * 小时级构建的 checkout，会在自己的设置文件里写一个更高的值。
+ * `bash` 工具的默认超时。类型随簇住进了 tools/manager.ts（设置归属重构 §5）；默认值留守此处，
+ * `tools/bash.ts` 的工具行为与 `DEFAULT_GLOBAL_SETTINGS` 都从这份常量取默认。
  */
-export interface BashSettings {
-	/** 调用未自带 `timeout_ms` 时使用。 */
-	defaultTimeoutMs: number;
-	/** 任何一条命令的上限，无论调用要求多长。 */
-	maxTimeoutMs: number;
-}
-
 export const DEFAULT_BASH_SETTINGS: BashSettings = { defaultTimeoutMs: 120_000, maxTimeoutMs: 3_600_000 };
 
 /**
@@ -73,21 +72,6 @@ export const DEFAULT_BASH_SETTINGS: BashSettings = { defaultTimeoutMs: 120_000, 
  * 个答案。
  */
 export const DEFAULT_MODE_NAME = "默认";
-
-/**
- * 一个模式：工具与审批的命名预设，在应用级设置里编辑，整体应用到会话上。
- *
- * 两半都整体传输，与记录在会话快照上的选择遵循同一份契约（`.json` 快照的活跃集与审批映射）：
- * 模式是一个决定，所以应用它时不得与该会话之前持有的东西合并。名字是模式的身份——输入框靠把值与
- * 这份列表匹配来命名活跃模式，这就是重名被拒绝而不是被改成唯一名的原因。
- */
-export interface ModeSettings {
-	name: string;
-	/** 模式应用的整体活跃工具集。空列表也是一个选择：什么都不活跃。 */
-	tools: string[];
-	/** 按工具名的逐工具审批；会话将其作为一个补丁整体应用。 */
-	approval: Record<string, boolean>;
-}
 
 /**
  * global 侧：`<AGENT_HOME>/settings.json` 补默认后的视图（ADR-0019）。
@@ -223,23 +207,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * bash 超时，逐字段落在默认值之上。
- *
- * 高于上限的默认值会被压到上限而不是照办：否则每一次未自带 `timeout_ms` 的调用都注定超时。
- */
-function bashOr(value: unknown): BashSettings {
-	const record = isRecord(value) ? value : {};
-	const maxTimeoutMs = numberOr(record.maxTimeoutMs, DEFAULT_BASH_SETTINGS.maxTimeoutMs);
-	return {
-		defaultTimeoutMs: Math.min(
-			numberOr(record.defaultTimeoutMs, DEFAULT_BASH_SETTINGS.defaultTimeoutMs),
-			maxTimeoutMs,
-		),
-		maxTimeoutMs,
-	};
-}
-
 function stringOrUndefined(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
@@ -256,35 +223,4 @@ function stringOrUndefined(value: unknown): string | undefined {
 export function stringListOrUndefined(value: unknown): string[] | undefined {
 	if (!Array.isArray(value)) return undefined;
 	return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-}
-
-/**
- * 用户的模式，逐条目处理，undefined 表示「从未写过」。
- *
- * 文件是手编的，其他列表字段的宽容同样适用这里：不是 record、没有自己的名字、或把非字符串当作
- * 工具名的条目自己被丢弃——一个坏模式不该连累其他模式的位置。重名保留第一次出现的，因为名字是
- * 输入框匹配的身份，两行同答一个名字会让匹配变成掷硬币。空列表会被*保留*：删光所有模式的用户
- * 做了一个选择，缺失字段必须与它保持可区分。
- *
- * 模式的审批映射在标准默认值之上规范化而不是被采信：UI 总是写全每个键，缺键即手编，而它回落到的
- * 答案正是全新会话打开时的那张映射。
- */
-function modesOr(value: unknown): ModeSettings[] | undefined {
-	if (!Array.isArray(value)) return undefined;
-	const out: ModeSettings[] = [];
-	for (const entry of value) {
-		if (!isRecord(entry)) continue;
-		const name = stringOrUndefined(entry.name);
-		if (name === undefined) continue;
-		if (out.some((mode) => mode.name === name)) continue;
-		const tools = stringListOrUndefined(entry.tools);
-		if (tools === undefined) continue;
-		const approvalRecord = isRecord(entry.approval) ? entry.approval : {};
-		const approval = { ...DEFAULT_GLOBAL_SETTINGS.approval };
-		for (const [key, value] of Object.entries(approvalRecord)) {
-			if (typeof value === "boolean") approval[key] = value;
-		}
-		out.push({ name, tools, approval });
-	}
-	return out;
 }

@@ -37,7 +37,6 @@ export {
 	SIDEBAR_WIDTH_RANGE,
 	settingsPath,
 	type GlobalSettings,
-	type ModeSettings,
 } from "./config.ts";
 // RetrySettings 的导出源改为 engine-settings.ts（类型随引擎簇搬入），包对外的名字不变。
 export { EngineSettings, type RetrySettings } from "./engine-settings.ts";
@@ -223,11 +222,16 @@ export {
 	type SettingsStorage,
 } from "./setting-manager.ts";
 export {
+	type BashSettings,
 	createToolManager,
 	describeToolCall,
+	type ModeSettings,
 	fillTools,
 	narrowToKnown,
 	ToolManager,
+	type ToolDefaults,
+	type ToolDefaultsPatch,
+	type ToolManagerOptions,
 	type ToolRunContext,
 	type ToolState,
 } from "./tools/index.ts";
