@@ -18,7 +18,8 @@ import { createAssistantMessageEventStream, type ChatTransport, type Message } f
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import {
 	createSession,
-	inMemorySettingManager,
+	createToolManager,
+	ModelManager,
 	openAgent,
 	setSessionsDir,
 	type Agent,
@@ -123,12 +124,24 @@ function sidOf(agent: Agent): string {
 /** ADR-0021：出生消息。openSession 先落它，之后的 prompt / snapshot 才有文件可开。 */
 const BIRTH_TEXT = "the smoke's birth message";
 
+/** 每个 openSession 递自己的临时 home：各持有者的文件都落在这里，随 root 一起清理。 */
+let homeSeq = 0;
+
 async function openSession(overrides: { approval?: Record<string, boolean>; chatTransport?: ChatTransport } = {}): Promise<Agent> {
 	const session = createSession(root);
+	// 设置归属重构（spec §8）后内存后端退场：审批映射与模型行先种进临时 home 的真实文件
+	// （tools.json / models.json），homes 透传给 openAgent——与生产同一条构造路，只是文件指到了
+	// 无人问津的目录。
+	const home = join(root, `agent-home-${homeSeq++}`);
+	const toolManager = createToolManager({ home });
+	if (overrides.approval !== undefined) toolManager.applyToolDefaults({ approval: overrides.approval });
+	const modelManager = new ModelManager(home);
+	modelManager.replaceRows(rows);
 	const agent = await openAgent({
 		session,
 		chatTransport: overrides.chatTransport ?? fake.chatTransport,
-		settingManager: inMemorySettingManager({ approval: overrides.approval ?? {} }, rows),
+		settingsHome: home,
+		modelsHome: home,
 	});
 	// 会话随第一条消息出生（ADR-0021），而编排层按 id 现开文件：这里直接对袋追加一条 user
 	// 消息让文件落地——不跑引擎、不耗剧本。模型选择随每条 prompt 的 selection 抵达，与生产一致。

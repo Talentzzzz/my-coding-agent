@@ -1,6 +1,7 @@
 import { resolve as resolvePath } from "node:path";
 import type { ChatTransport } from "./llm/index.ts";
 import type { SessionSink } from "./agent.ts";
+import { ModelManager } from "./model-manager.ts";
 import { createModel } from "./models.ts";
 import type { SessionSnapshot } from "./protocol.ts";
 import { createAgentState, type AgentState, createLive } from "./session/agent-state.ts";
@@ -8,7 +9,6 @@ import { danglingApprovalsOf } from "./session/dangling.ts";
 import { type Session, SessionManager } from "./session/session-manager.ts";
 import { sessionSnapshot } from "./session/snapshot.ts";
 import { resolveSettings, type Settings } from "./settings.ts";
-import { SettingManager } from "./setting-manager.ts";
 import { type ToolManager, createToolManager } from "./tools/index.ts";
 
 /** 调用方构建一个会话必须提供的东西。其余都在这里查明。 */
@@ -18,7 +18,7 @@ export interface OpenAgentOptions {
 	 *
 	 * 只有 {@link readSessionSnapshot} 读它：冷读按被递入的会话点名自己的袋，新造的 manager 行为完全
 	 * 一致，因为服务不持有自己的袋（ADR-0006 §2）——调用方自己的实例只改变这次走读用的是*哪*一份
-	 * 存储知识。编排层不收它：{@link openAgent} 把 settings、tools 与 transport 接缝转发给工厂，把
+	 * 存储知识。编排层不收它：{@link openAgent} 把 homes、tools 与 transport 接缝转发给工厂，把
 	 * 账本留给它构建的 agent，后者拥有自己的那一份。
 	 */
 	sessionManager?: SessionManager;
@@ -30,14 +30,19 @@ export interface OpenAgentOptions {
 	 */
 	session: Session;
 	/**
-	 * 每次设置与模型读取所经的配置门。
+	 * 各设置簇的持有者文件（`tools.json`、`sessions.json`、`engine.json`）读取与写入所在的 agent
+	 * home。默认用机器自己的那一个。
 	 *
-	 * 省略表示在机器自己的文件之上新造一只 manager——与不带 options 的 hub 会构建的默认相同。在非
-	 * 默认 agent home 之下读取的宿主——即 hub——递入自己的，因为回落者无从知道那个 home；测试递入
-	 * 内存版，让机器自己的文件永远不被碰。manager 什么都不持有：每次读取都是对其背后文件的一次
-	 * 新读，这正是让一次编辑抵达一个从未重开的会话的原因。
+	 * 在非默认 agent home 之下读取的宿主——即 hub——递入自己的，因为回落者无从知道那个 home；测试
+	 * 递入临时目录，让机器自己的文件永远不被碰。
 	 */
-	settingManager?: SettingManager;
+	settingsHome?: string;
+	/**
+	 * 模型行读取与写入所在的 agent home。默认用 {@link OpenAgentOptions.settingsHome}。
+	 *
+	 * 另一个文件的同居 home：递入自己模型行的 smoke 不得把它们留在机器的 `models.json` 里。
+	 */
+	modelsHome?: string;
 	/**
 	 * 本会话每个请求走的传输层。
 	 *
@@ -68,7 +73,7 @@ export interface OpenAgentOptions {
  * {@link Agent.assembleAgentStateBySession} 需要什么：会话记录，仅此而已。
  *
  * 有意比 {@link OpenAgentOptions} 窄。差别是权威性：这扇门属于编排层，所以服务是*它自己的*
- * ——调用方无法递给它第二只 `SettingManager` 或自己的工具表，这正是 `adopt` 曾允许而无人检查的
+ * ——调用方无法递给它第二只 `ModelManager` 或自己的工具表，这正是 `adopt` 曾允许而无人检查的
  * 失配。留在这里的是编排层无法知道的那部分：**哪个** 会话记录（宿主的决定，session manager 的
  * 重放）——会话记录 在 `settings.workDirAbsPath` 上自带工作目录。
  *
@@ -91,8 +96,8 @@ export interface AssembleAgentStateOptions {
 interface Assembled {
 	/** 工作目录，绝对路径。 */
 	workDirAbsPath: string;
-	/** 本会话每次设置与模型读取所经的 manager。 */
-	settingManager: SettingManager;
+	/** 模型簇的持有者：装配的模型半从它现读目录与默认 ref。 */
+	modelManager: ModelManager;
 	/** 两半组合出的有效视图：活跃工具集、有效审批、模式座位与完整模型行（ADR-0019）。 */
 	resolved: Settings;
 	/** 本构建认识的工具：每进程一张表，这里只为读它的名字。 */
@@ -113,19 +118,24 @@ interface Assembled {
  * `Agent.assembleAgentStateBySession` 是它在激活侧唯一的调用者，反向导入会闭上
  * `agent.ts` → `assembly.ts` → `agent.ts` 这个循环。
  */
-async function assemble(sessionManager: SessionManager, settingManager: SettingManager, toolManager: ToolManager, options: AssembleAgentStateOptions): Promise<Assembled> {
+async function assemble(sessionManager: SessionManager, toolManager: ToolManager, modelManager: ModelManager, options: AssembleAgentStateOptions): Promise<Assembled> {
 	// workDirAbsPath 变成绝对路径的唯一一处，让之后每次对该 entry `workDirAbsPath` 的读取——工具的
 	// run context、prompt、快照——都是同一个值。目录是 会话记录 自己的：`createSession` 种下时已
 	// 解析、重放时恢复，所以这里没有覆盖——会话自己决定住在哪里，没有调用方递入第二个答案。
 	const workDirAbsPath = resolvePath(options.session.settings.workDirAbsPath);
-	// 两半组合出的有效视图（ADR-0019）：global 侧与目录的各行在这里各现读一次，会话侧的选择来自
+	// 两半组合出的有效视图（ADR-0019）：两个持有者的现读在这里各来一次，会话侧的选择来自
 	// 袋自己。它是派生的而不是被存下的（ADR-0013），因为会话之后每次读取都得从刚重放的那只袋回答
 	// 同一个问题。没有行的会话照样打开，`Agent` 用一句「该加什么」替它作答：占位行在完全无名的状态
 	// 下承担事实，拒绝发送的是传输层。
-	const resolved = resolveSettings(options.session, settingManager.getSettings(), settingManager.modelCatalog(), toolManager.names());
+	const resolved = resolveSettings(
+		options.session,
+		toolManager.toolDefaults(),
+		{ rows: modelManager.catalog(), defaultRef: modelManager.defaultRef() },
+		toolManager.names(),
+	);
 	// 表的内容是行为而不是目录，所以一张表服务所有会话。这里同样不做任何选择：活跃集与审批已经
 	// 组合在 `resolved` 里，之后的每次读取都重算一次。
-	return { workDirAbsPath, settingManager, resolved, toolManager, sessionManager };
+	return { workDirAbsPath, modelManager, resolved, toolManager, sessionManager };
 }
 
 /**
@@ -139,13 +149,13 @@ async function assemble(sessionManager: SessionManager, settingManager: SettingM
  * 历史就与使用它无从区分了。
  */
 export async function readSessionSnapshot(options: OpenAgentOptions): Promise<SessionSnapshot> {
-	// 冷读没有编排层可取服务，回落的三只在这里原地构造。新造的 manager 行为完全一致：
-	// manager 什么都不持有（ADR-0006 §2），所以调用方自己的实例改变的只是读*哪些*
-	// 文件与存储——hub 递入自己那份正是为此。
-	const sessionManager = options.sessionManager ?? new SessionManager();
-	const settingManager = options.settingManager ?? new SettingManager();
-	const toolManager = options.toolManager ?? createToolManager();
-	const { workDirAbsPath, resolved } = await assemble(sessionManager, settingManager, toolManager, options);
+	// 冷读没有编排层可取服务，回落的持有者在这里原地构造。新造的持有者行为完全一致：
+	// 各持有者什么都不持有（ADR-0006 §2），所以调用方自己的实例改变的只是读*哪些*
+	// 文件——hub 递入自己那份正是为此。homes 是各持有者唯一的接缝（spec §8）。
+	const sessionManager = options.sessionManager ?? new SessionManager(options.settingsHome);
+	const toolManager = options.toolManager ?? createToolManager({ home: options.settingsHome });
+	const modelManager = new ModelManager(options.modelsHome ?? options.settingsHome);
+	const { workDirAbsPath, resolved } = await assemble(sessionManager, toolManager, modelManager, options);
 	return sessionSnapshot({
 		sessionManager,
 		session: options.session,
@@ -172,26 +182,26 @@ export async function readSessionSnapshot(options: OpenAgentOptions): Promise<Se
  * 产出的是**live 半**——两条队列、它们的模式，仅此而已（ADR-0013）。递进来的 会话记录 是*入参*，
  * 不是成员：出生的袋在这里被丢掉，因为 `bag(id)` 会按需再重放一次——会话记录以文件为唯一形态，
  * 重放随时能再造它。工作目录留在那只袋上（之后每次调用都重放它），设置从来不是任何状态的一部分
- * ——它们经编排层持有的 {@link SettingManager} 实时读取。
+ * ——它们经编排层持有的各持有者实时读取。
  *
  * 模型选择既不保留也不播种：每次读取都派生它（`session/model-choice.ts`），这是袋被丢掉之后唯一
  * 能幸存的形状。
  *
  * 服务是必填实参而不是 options，这让窄门的保证成为结构性的：唯一调用者是
- * {@link Agent.assembleAgentStateBySession}，它递自己的三只，调用方无法够到这个函数去在第二只
- * `SettingManager` 之上装配状态——`adopt` 曾允许而无人检查的失配，在此无处发生。这里只构建、
+ * {@link Agent.assembleAgentStateBySession}，它递自己的几只，调用方无法够到这个函数去在第二只
+ * `ModelManager` 之上装配状态——`adopt` 曾允许而无人检查的失配，在此无处发生。这里只构建、
  * 不注册。注册是同一扇门的事：它调用本函数，把结果按先到先得放进表里，交回表实际持有的那个状态。
  * 不从包导出也是同一个理由：外部装配的状态进不了任何表，公开的装配就是一个没有读者的面。
  *
  * 什么都不记录：打开后从未说话的会话不长 entry，打开在另一行或另一档的会话也不写——落笔发生在
  * 真正做出选择时（`applyModelSelection`）或第一个请求被构建时（`recordSelection`）。
  */
-export async function assembleSession(sessionManager: SessionManager, settingManager: SettingManager, toolManager: ToolManager, options: AssembleAgentStateOptions): Promise<AgentState> {
-	const { workDirAbsPath } = await assemble(sessionManager, settingManager, toolManager, options);
+export async function assembleSession(sessionManager: SessionManager, toolManager: ToolManager, modelManager: ModelManager, options: AssembleAgentStateOptions): Promise<AgentState> {
+	const { workDirAbsPath } = await assemble(sessionManager, toolManager, modelManager, options);
 	const session = options.session;
-	// 首次触碰创建状态：live 半是空的——它的队列模式是设置此刻的答案，经 manager 实时读取；之后的
-	// config 补丁原地挪动队列上的模式——会话记录 *不是*它的一部分（ADR-0013）。
-	const global = settingManager.getSettings();
-	const live = createLive(global.steeringMode, global.followUpMode);
+	// 首次触碰创建状态：live 半是空的——它的队列模式是会话簇此刻的答案，从 session manager 实时
+	// 读取；之后的 config 补丁原地挪动队列上的模式——会话记录 *不是*它的一部分（ADR-0013）。
+	const defaults = sessionManager.sessionDefaults();
+	const live = createLive(defaults.steeringMode, defaults.followUpMode);
 	return createAgentState(session.sessionId, live);
 }

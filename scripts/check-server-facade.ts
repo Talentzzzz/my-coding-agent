@@ -7,13 +7,16 @@ import { relative, resolve } from "node:path";
 
 const root = process.argv[2] ?? "packages/server/src";
 
-// server 包不得拼写其 import 的名字：三个 Manager、它们的工厂、ledger 的构造与 replay 入口，
-// 以及随门面不再从 core 导出的纯数据形状（`SessionAgentServices`、`OpenAgentOptions`、
-// `AgentState`、`Session`）。
+// server 包不得拼写其 import 的名字：Manager 与设置簇持有者、它们的工厂、ledger 的构造与 replay
+// 入口，以及随门面不再从 core 导出的纯数据形状（`SessionAgentServices`、`OpenAgentOptions`、
+// `AgentState`、`Session`）。`SettingManager` 已随设置归属重构退场（spec §2），代之以禁它拆出的
+// 三个持有者——server 对设置的一切访问必须走 `Agent` 门面的按簇路由。
 const bannedImports = [
 	"SessionManager",
-	"SettingManager",
 	"ToolManager",
+	"ModelManager",
+	"UiSettingsManager",
+	"EngineSettings",
 	"createToolManager",
 	"createSession",
 	"readSessionSnapshot",

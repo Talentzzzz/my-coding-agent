@@ -17,7 +17,7 @@ import { createRoutes } from "../packages/server/src/controllers/routes.ts";
 import { Router } from "../packages/server/src/http/routing.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import { mountSession } from "./mount-session.ts";
-import { type ModelConfig, setSessionsDir, SettingManager } from "@my-agent/core";
+import { type ModelConfig, ModelManager, setSessionsDir, createToolManager } from "@my-agent/core";
 
 const PORT = 8094;
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-"));
@@ -54,11 +54,11 @@ fake.setResponses([
 	fakeAssistantMessage("done"),
 ]);
 // 审批门是 orchestrator 每个请求都会读一次的设置：这台 hub 服务的每个 session 里 `read` 都在
-// 门后。映射与模型行先种到临时 home 文件里，任何东西都不会落到机器自己的设置或模型文件上。
+// 门后。映射与模型行先种到临时 home 文件里（设置归属重构 spec §8：各持有者各持自己的文件），任何
+// 东西都不会落到机器自己的设置或模型文件上。
 const settingsHome = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-home-"));
-const settingManager = new SettingManager({ home: settingsHome, modelsHome: settingsHome });
-settingManager.applySettings({ approval: { read: true } });
-settingManager.replaceModels(rows);
+createToolManager({ home: settingsHome }).applyToolDefaults({ approval: { read: true } });
+new ModelManager(settingsHome).replaceRows(rows);
 const sessionHub = new SessionHub({
 	workDirAbsPath: root,
 	chatTransport: fake.chatTransport,

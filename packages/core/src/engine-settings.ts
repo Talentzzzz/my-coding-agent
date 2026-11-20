@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-// 环安全：本模块只在函数体内使用 config.ts 的运行时值（模块顶层不碰它们），而 config.ts 在
-// 调用期经 `mergeSettings` 走回本模块的 `retryOr`——两条方向都是调用期执行，加载顺序无关紧要。
+// 环安全：本模块只在函数体内使用 config.ts 的运行时值（模块顶层不碰它们），而 config.ts 只从
+// 本模块取 `RetrySettings` 的类型——两条方向都是类型/调用期的引用，加载顺序无关紧要。
 import { AGENT_HOME, DEFAULT_GLOBAL_SETTINGS, settingsPath } from "./config.ts";
 
 /**
@@ -111,7 +111,7 @@ function countOr(value: unknown, fallback: number): number {
 	return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : fallback;
 }
 
-/** 有限正数，否则回落；export 只为 `config.ts` 的 bashOr 复用同一份解析。 */
+/** 有限正数，否则回落；export 只为 tools/manager.ts 的 bashOr 复用同一份解析。 */
 export function numberOr(value: unknown, fallback: number): number {
 	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }

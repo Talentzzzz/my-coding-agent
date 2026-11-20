@@ -17,13 +17,13 @@ import {
 	type AgentState,
 	createSession,
 	createSessionAgent,
+	createToolManager,
 	fillSession,
+	ModelManager,
 	openAgent,
 	readSessionSnapshot,
 	SessionManager,
 	UnknownSessionError,
-	inMemorySettingManager,
-	SettingManager,
 	setRemoveGate,
 	setSessionsDir,
 	resolveSettings,
@@ -505,19 +505,24 @@ try {
 	// choice, so the seam is assembly itself: a session with no recorded pointer opens on the
 	// configured set through the default mode, and one that points at a preset keeps its own. A
 	// preset's tools are read live, so the snapshot's seat and the resolved set are checked where
-	// they live. Everything here runs on an in-memory settings manager, so no file outside the
+	// they live. Everything here runs on holders over a throwaway home, so no file outside the
 	// temporary working directory is ever touched.
 	const settingsRoot = await mkdtemp(join(tmpdir(), "my-agent-settings-"));
+	const settingsHome = join(settingsRoot, "agent-home");
+	await mkdir(settingsHome, { recursive: true });
 	try {
-		const settingManager = inMemorySettingManager(
-			{ tools: ["read", "bash"], modes: [{ name: "reader", tools: ["read"], approval: {} }] },
-			[],
-		);
+		const settingsTools = createToolManager({ home: settingsHome });
+		settingsTools.applyToolDefaults({
+			tools: ["read", "bash"],
+			modes: [{ name: "reader", tools: ["read"], approval: {} }],
+		});
+		new ModelManager(settingsHome).replaceRows([]);
 		const session = createSession(settingsRoot);
 		const sessionId = session.sessionId;
 		const options = {
 			session,
-			settingManager,
+			settingsHome,
+			modelsHome: settingsHome,
 		};
 		const known = ["read", "write", "edit", "glob", "grep", "bash"];
 		// 活会话的袋在第一条消息后作废：有文件就读，还没有就返回出生时的那只（它仍是 live 半上唯一
@@ -526,7 +531,8 @@ try {
 			const path = SessionManager.findSessionFilePathById(sessionId);
 			return path === undefined ? session : fillSession(path);
 		};
-		const resolvedOf = (): string[] => resolveSettings(replayed(), settingManager.getSettings(), [], known).tools;
+		const resolvedOf = (): string[] =>
+			resolveSettings(replayed(), settingsTools.toolDefaults(), { rows: new ModelManager(settingsHome).catalog() }, known).tools;
 
 		const cold = await readSessionSnapshot(options);
 		check("a session with no entry reports the default seat", cold.mode === undefined, cold.mode);
@@ -1104,7 +1110,10 @@ try {
 	// (idle states die with the run that carried them) and `deleteSessionBySessionId`, which does
 	// not ask. There is no clear — the table lives and dies with the orchestrator itself.
 	{
-		const agent = createSessionAgent({ settingManager: new SettingManager({ models: [] }) });
+		// 设置归属重构（spec §8）：门面接缝退场，模型目录指向一个空临时 home（缺 models.json 即空目录）。
+		const emptyHome = join(root, "agent-home-empty");
+		await mkdir(emptyHome, { recursive: true });
+		const agent = createSessionAgent({ modelsHome: emptyHome });
 		const session = createSession(tmpdir());
 		// The door is class-private (`hold` / `createAndPrompt` are the verbs a caller spells);
 		// this block exercises the table itself — first-come-wins, membership, the delete exit — so it
@@ -1130,10 +1139,15 @@ try {
 		// 会话随第一条消息出生（ADR-0021）：对袋直接追加让文件落地，不跑引擎、不耗剧本。
 		store.appendMessage(session, userMessage("删除动手时还在跑的会话"));
 		const id = session.sessionId;
+		// 设置归属重构（spec §8）：内存后端退场——行种进临时 home 的 models.json，homes 透传。
+		const vetoHome = join(root, "agent-home-veto");
+		await mkdir(vetoHome, { recursive: true });
+		new ModelManager(vetoHome).replaceRows(vetoRows);
 		const agent = await openAgent({
 			session,
 			chatTransport: gate.chatTransport,
-			settingManager: inMemorySettingManager({}, vetoRows),
+			settingsHome: vetoHome,
+			modelsHome: vetoHome,
 		});
 
 		const running = agent.prompt(id, "删除动手时我还在流式", { selection: { model: "anthropic" } });

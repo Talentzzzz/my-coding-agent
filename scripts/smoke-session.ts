@@ -1,7 +1,7 @@
 // Session-level smoke test: drives a real Agent against the scripted transport, so streaming,
 // queueing, and steering are testable without a provider key.
 // Run with: node scripts/smoke-session.ts
-import { mkdtemp, rm, access, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall, type FakeResponseStep } from "./fake-transport.ts";
@@ -9,12 +9,14 @@ import {
 	CURRENT_SESSION_VERSION,
 	createSession,
 	createToolManager,
+	EngineSettings,
 	fillSession,
 	MAX_TOOL_RESULT_BYTES,
+	ModelManager,
 	openAgent,
-	inMemorySettingManager,
 	SessionManager,
 	narrowToKnown,
+	settingsPath,
 	type Agent,
 	type AgentSessionEvent,
 	type SessionEventListener,
@@ -26,7 +28,6 @@ import {
 	type GlobalSettings,
 	type SessionEntry,
 	type Session,
-	type SettingManager,
 	type ToolManager,
 	type ModelConfig,
 	setSessionsDir,
@@ -246,7 +247,7 @@ function userMessage(text: string): Message {
  * opening helpers record what they created here and every check reads the pair back through
  * {@link sidOf} and {@link bagOf}.
  */
-const opened = new WeakMap<Agent, { id: string; session: Session; settingManager: SettingManager; birthEntryId: string }>();
+const opened = new WeakMap<Agent, { id: string; session: Session; home: string; birthEntryId: string }>();
 
 function sidOf(agent: Agent): string {
 	return opened.get(agent)!.id;
@@ -259,8 +260,9 @@ function bagOf(agent: Agent): Session {
 	return agent.sessionManager.open(opened.get(agent)!.id);
 }
 
-function settingsOf(agent: Agent): SettingManager {
-	return opened.get(agent)!.settingManager;
+/** The temp home each opened session's holders read, keyed by that agent. */
+function homeOf(agent: Agent): string {
+	return opened.get(agent)!.home;
 }
 
 /**
@@ -303,31 +305,56 @@ function onSessionEvent(agent: Agent, listener: SessionEventListener): () => voi
 }
 
 /**
- * One session over its own session record, with settings that live in memory.
+ * One session over its own session record, with settings that live in a throwaway home.
  *
- * `inMemorySettingManager` is the seam that keeps these runs off the developer's
- * `~/.my-agent/settings.json`: it has the same shape as the file-backed manager, so a config change
- * here is written and read back exactly as it would be for real —just nowhere.
+ * `inMemorySettingManager` 的内存后端已随设置归属重构退场（spec §8）：各持有者先在临时 home 里
+ * 预种自己的文件——工具簇（审批/模式）经 ToolManager，队列模式经 SessionManager，重试经
+ * EngineSettings，模型行经 ModelManager——homes 透传给 `openAgent`，走与生产同一条构造路。
+ * 机器自己的文件永远不被碰。
  */
+let homeSeq = 0;
+
 async function openSession(
 	overrides: Partial<GlobalSettings> = {},
 	run: RunOptions = {},
-	toolManager?: ToolManager,
+	customToolManager?: ToolManager,
 ): Promise<Agent> {
 	const session = createSession(root);
 	// 出生（ADR-0021）：一条 user 消息落盘，文件与快照同时诞生。经本脚本自己的 store 追加——
 	// 文件是共享状态，编排层随后按 id 重放的就是它。不跑引擎、不耗剧本回答。
 	const birthEntryId = sessionManager.appendMessage(session, userMessage(BIRTH_TEXT));
-	const settingManager = inMemorySettingManager(settings(overrides), run.models ?? rows);
+	const desired = settings(overrides);
+	const home = join(root, `agent-home-${homeSeq++}`);
+	await mkdir(home, { recursive: true });
+	// 调用方递入自己的表时，工具簇就种进那张表自己的文件；否则本脚本造一张，home 即各持有者同居
+	// 的默认。
+	const toolManager = customToolManager ?? createToolManager({ home });
+	toolManager.applyToolDefaults({
+		approval: desired.approval,
+		...(desired.tools === undefined ? {} : { tools: desired.tools }),
+		...(desired.modes === undefined ? {} : { modes: desired.modes }),
+		...(desired.bash === undefined ? {} : { bash: desired.bash }),
+	});
+	new SessionManager(home).applySessionDefaults({ steeringMode: desired.steeringMode, followUpMode: desired.followUpMode });
+	new EngineSettings(home).applyRetry(desired.retry);
+	const modelManager = new ModelManager(home);
+	modelManager.replaceRows(run.models ?? rows);
+	if (desired.model !== undefined || desired.defaultModelSeeded !== undefined) {
+		modelManager.applyModelSettings({
+			...(desired.model === undefined ? {} : { model: desired.model }),
+			...(desired.defaultModelSeeded === undefined ? {} : { defaultModelSeeded: desired.defaultModelSeeded }),
+		});
+	}
 	const tap = captureSink();
 	const agent = await openAgent({
 		session,
 		chatTransport: run.chatTransport ?? fake.chatTransport,
-		settingManager: settingManager,
+		settingsHome: home,
+		modelsHome: home,
 		toolManager,
 		sink: tap.sink,
 	});
-	opened.set(agent, { id: session.sessionId, session, settingManager: settingManager, birthEntryId });
+	opened.set(agent, { id: session.sessionId, session, home, birthEntryId });
 	taps.set(agent, tap);
 	return agent;
 }
@@ -1059,15 +1086,22 @@ async function exerciseAfterToolHook(): Promise<void> {
 
 	const sentReplay: SentRequest[] = [];
 	recordRequests(sentReplay, [fakeAssistantMessage("replayed")]);
-	const settingManager = inMemorySettingManager(settings(), rows);
+	// 重放会话与 openSession 同一套接缝：临时 home + 各持有者预种（spec §8）。
+	const replayHome = join(root, `agent-home-${homeSeq++}`);
+	await mkdir(replayHome, { recursive: true });
+	const replayToolManager = createToolManager({ home: replayHome });
+	replayToolManager.applyToolDefaults({ approval: settings().approval });
+	new EngineSettings(replayHome).applyRetry(settings().retry);
+	new ModelManager(replayHome).replaceRows(rows);
 	const replayed = await openAgent({
 		session: reopenedFile,
 		chatTransport: fake.chatTransport,
-		settingManager: settingManager,
+		settingsHome: replayHome,
+		modelsHome: replayHome,
 	});
 	// 这个会话的文件由上面的练习亲手写就，没有经 `openSession` 的出生消息——没有可滤的出生条目，
 	// 空串让它原样通过。
-	opened.set(replayed, { id: reopenedFile.sessionId, session: reopenedFile, settingManager: settingManager, birthEntryId: "" });
+	opened.set(replayed, { id: reopenedFile.sessionId, session: reopenedFile, home: replayHome, birthEntryId: "" });
 	try {
 		await within("the reopened run", 10_000, replayed.prompt(sidOf(replayed), "one more time"));
 		await within("settle()", 10_000, replayed.settle(sidOf(replayed)));
@@ -1096,7 +1130,8 @@ async function exerciseAfterToolHook(): Promise<void> {
 async function exerciseOutputBackstop(): Promise<void> {
 	process.stdout.write("output backstop\n");
 	const huge = `HEAD-${"A".repeat(MAX_TOOL_RESULT_BYTES)}-TAIL-MARKER`;
-	const toolManager = createToolManager();
+	// home 递临时目录：openSession 经这张表预种工具簇，不得落在机器的 tools.json 上。
+	const toolManager = createToolManager({ home: join(root, "agent-home-unbounded") });
 	toolManager.register({
 		name: "unbounded",
 		label: "unbounded",
@@ -1336,7 +1371,8 @@ async function exerciseToolChangeResend(): Promise<void> {
  */
 async function exerciseToolManager(): Promise<void> {
 	process.stdout.write("tool manager\n");
-	const toolManager = createToolManager();
+	// home 递临时目录：这张表也会被递给 openSession 预种工具簇，不得落在机器的 tools.json 上。
+	const toolManager = createToolManager({ home: join(root, "agent-home-table") });
 	const builtIns = ["read", "write", "edit", "glob", "grep", "bash"];
 
 	check("names() holds the six built-ins in registration order", JSON.stringify(toolManager.names()) === JSON.stringify(builtIns), JSON.stringify(toolManager.names()));
@@ -2071,6 +2107,9 @@ async function exerciseModelFromRow(): Promise<void> {
 	const recordedBefore = recordedOf();
 	keyedRows[0]!.apiKey = "corrected-key";
 	keyedRows[0]!.baseUrl = "http://127.0.0.1:2/v1";
+	// 行编辑落盘（设置归属重构 §5）：目录是 ModelManager 每次现读的文件，内存数组的改动不再被隔着
+	// 持有者看见——把改好的行整表写回，下一请求才读得到。
+	new ModelManager(homeOf(agent)).replaceRows(keyedRows);
 	fake.setResponses([fakeAssistantMessage("answered again")]);
 	await within("the second run", 10_000, agent.prompt(sidOf(agent), "again"));
 	check("a corrected key is used by the next message", sent[1]?.key === "corrected-key", String(sent[1]?.key));
@@ -2081,6 +2120,7 @@ async function exerciseModelFromRow(): Promise<void> {
 
 	// A wire id that moves is a different model answering, and the session says so.
 	keyedRows[0]!.id = "faux-2";
+	new ModelManager(homeOf(agent)).replaceRows(keyedRows);
 	fake.setResponses([fakeAssistantMessage("answered a third time")]);
 	await within("the third run", 10_000, agent.prompt(sidOf(agent), "and again"));
 	check("a renamed wire id reaches the request", sent[2]?.id === "faux-2", String(sent[2]?.id));
@@ -2365,7 +2405,11 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	check("the narrow mode is in force", agent.snapshot(sidOf(agent)).mode === "narrow", agent.snapshot(sidOf(agent)).mode);
 	check("with the approval the session chose", agent.getApprovals(sidOf(agent)).bash === true, JSON.stringify(agent.getApprovals(sidOf(agent))));
 	check("which is the map the gate reads", agent.getApprovals(sidOf(agent)).bash === true, JSON.stringify(agent.getApprovals(sidOf(agent))));
-	check("leaving the settings file alone", settingsOf(agent).getSettings().approval.bash === false, JSON.stringify(settingsOf(agent).getSettings().approval));
+	check(
+		"leaving the settings file alone",
+		createToolManager({ home: homeOf(agent) }).toolDefaults().approval.bash === false,
+		JSON.stringify(createToolManager({ home: homeOf(agent) }).toolDefaults().approval),
+	);
 
 	// --- Moving the leaf changes the branch, not the choices ------------------------------------
 	const before = events.length;

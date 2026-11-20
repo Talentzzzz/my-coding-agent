@@ -58,8 +58,23 @@ export class ModelManager {
 	 * 手编文件里的空白值读作「未设置」而不是一颗哑弹。
 	 */
 	defaultRef(): string | undefined {
-		const value = this.load().defaultModel;
-		return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+		return this.modelSettings().defaultModel;
+	}
+
+	/**
+	 * 默认模型侧补默认后的窄读视图：默认 ref 与种下标记。
+	 *
+	 * 门面的读模型（`Agent.settings()` 组装 `GlobalSettings` 形状的视图）从这里取这两样——与
+	 * {@link applyModelSettings} 的补丁字段同形，磁盘键（`defaultModel`）不外露。可选字段按「未设置」
+	 * 保持 undefined，与文件各自的缺席规则一致。
+	 */
+	modelSettings(): { defaultModel?: string; defaultModelSeeded?: boolean } {
+		const disk = this.load();
+		const view: { defaultModel?: string; defaultModelSeeded?: boolean } = {};
+		const ref = disk.defaultModel;
+		if (typeof ref === "string" && ref.trim().length > 0) view.defaultModel = ref.trim();
+		if (typeof disk.defaultModelSeeded === "boolean") view.defaultModelSeeded = disk.defaultModelSeeded;
+		return view;
 	}
 
 	/**

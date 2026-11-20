@@ -120,7 +120,7 @@ function stringListOrUndefined(value: unknown): string[] | undefined {
  * bash 超时，逐字段落在默认值之上。
  *
  * 高于上限的默认值会被压到上限而不是照办：否则每一次未自带 `timeout_ms` 的调用都注定超时。
- * config.ts 的 `mergeSettings` 在调用期 import 这个规范化器（设置归属重构 §5 的随簇搬迁）。
+ * 默认值留守 config.ts 的 DEFAULT_BASH_SETTINGS（设置归属重构 §5 的随簇搬迁）。
  */
 export function bashOr(value: unknown): BashSettings {
 	const record = isRecord(value) ? value : {};
@@ -148,7 +148,6 @@ export function bashOr(value: unknown): BashSettings {
  * **簇间耦合（spec §11.4）**：这里的缺键回落读的是 config.ts 的 `DEFAULT_GLOBAL_SETTINGS.approval`
  * ——全局审批默认住在同一份工具簇里（`tools.json` 的 `approval`），两个簇同住一个持有者正是为了让
  * 这条线可见。将来把 `approval` 挪出工具簇会踩断模式规范化，届时这一段必须跟着走。
- * config.ts 的 `mergeSettings` 在调用期 import 这个规范化器（设置归属重构 §5 的随簇搬迁）。
  */
 export function modesOr(value: unknown): ModeSettings[] | undefined {
 	if (!Array.isArray(value)) return undefined;
