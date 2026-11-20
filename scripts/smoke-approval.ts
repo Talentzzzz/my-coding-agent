@@ -140,7 +140,7 @@ async function seedApprovalGate(root: string, modelRows: readonly ModelConfig[])
 	// 设置归属重构（spec §8）后门面退场：审批映射种进 tools.json，行种进 models.json，各持自己的
 	// 文件——同一套持有者，hub 之后按同一套规则读回。
 	createToolManager({ home }).applyToolDefaults({ approval: { read: true } });
-	new ModelManager(home).replaceRows(modelRows);
+	new ModelManager({ home: home }).replaceRows(modelRows);
 	return home;
 }
 
@@ -704,7 +704,7 @@ const restartRoot = await mkdtemp(join(tmpdir(), "my-agent-approval-restart-"));
 const restartHome = await mkdtemp(join(tmpdir(), "my-agent-approval-restart-home-"));
 setSessionsDir(join(restartHome, "sessions"));
 // One home for both processes: the rows the parent's prompt resolves are the rows the child reads.
-new ModelManager(restartHome).replaceRows(rows);
+new ModelManager({ home: restartHome }).replaceRows(rows);
 const restartFake = createFakeTransport();
 const first = await bootServer({ workDirAbsPath: restartRoot, port: 0, chatTransport: restartFake.chatTransport, settingsHome: restartHome });
 let restartSessionId = "";

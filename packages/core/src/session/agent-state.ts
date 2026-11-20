@@ -66,8 +66,8 @@ export interface Live {
 /**
  * 构建一个空的 session 活的那一半。
  *
- * 队列模式由参数传入——是创建时设置的答案，由调用方通过自己的 {@link SettingManager} 读取；之后
- * 改动任一模式的配置补丁会就地写到队列上，所以这里没有东西被永久捕获。
+ * 队列模式由参数传入——是创建时设置的答案，由调用方经会话簇持有者（`SessionManager.sessionDefaults`，
+ * ADR-0028）现读；之后改动任一模式的配置补丁会就地写到队列上，所以这里没有东西被永久捕获。
  */
 export function createLive(steeringMode: QueueMode, followUpMode: QueueMode): Live {
 	return {

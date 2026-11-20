@@ -58,7 +58,7 @@ fake.setResponses([
 // 东西都不会落到机器自己的设置或模型文件上。
 const settingsHome = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-home-"));
 createToolManager({ home: settingsHome }).applyToolDefaults({ approval: { read: true } });
-new ModelManager(settingsHome).replaceRows(rows);
+new ModelManager({ home: settingsHome }).replaceRows(rows);
 const sessionHub = new SessionHub({
 	workDirAbsPath: root,
 	chatTransport: fake.chatTransport,

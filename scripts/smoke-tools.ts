@@ -653,7 +653,7 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	await mkdir(lifecycleHome, { recursive: true });
 	const lifecycleTools = createToolManager({ home: lifecycleHome });
 	lifecycleTools.applyToolDefaults({ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } });
-	new ModelManager(lifecycleHome).replaceRows([configured]);
+	new ModelManager({ home: lifecycleHome }).replaceRows([configured]);
 	const agent = await openAgent({
 		session: state,
 		settingsHome: lifecycleHome,
@@ -669,9 +669,9 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	// a config patch beyond the approval half is routed to the holders and read back by the next call,
 	// which is what the write-through below proves. The value is put back, because the exercises that
 	// follow read through the same holders.
-	const modeBefore = new SessionManager(lifecycleHome).sessionDefaults().steeringMode;
+	const modeBefore = new SessionManager({ home: lifecycleHome }).sessionDefaults().steeringMode;
 	agent.applyConfig(id, { steeringMode: "all" });
-	check("the session reads and writes the settings it was given", new SessionManager(lifecycleHome).sessionDefaults().steeringMode === "all", new SessionManager(lifecycleHome).sessionDefaults().steeringMode);
+	check("the session reads and writes the settings it was given", new SessionManager({ home: lifecycleHome }).sessionDefaults().steeringMode === "all", new SessionManager({ home: lifecycleHome }).sessionDefaults().steeringMode);
 	agent.applyConfig(id, { steeringMode: modeBefore });
 	// An approval chosen in a session is that session's own: it lives on the session's `.json`
 	// snapshot, and the holders' files — which every other session over this directory reads
@@ -1012,7 +1012,7 @@ async function exercisePruning(): Promise<void> {
 	await mkdir(compactionHome, { recursive: true });
 	const compactionTools = createToolManager({ home: compactionHome });
 	compactionTools.applyToolDefaults({ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } });
-	new ModelManager(compactionHome).replaceRows([configured]);
+	new ModelManager({ home: compactionHome }).replaceRows([configured]);
 	const agent = await openAgent({
 		session: store2,
 		settingsHome: compactionHome,

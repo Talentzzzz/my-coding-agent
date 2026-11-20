@@ -42,7 +42,7 @@ process.stdout.write("\nsettings：session 的选择与两个持有者的现读�
 			{ id: "a-1", name: "a", baseUrl: "http://x/v1", contextWindow: 128_000, maxTokens: 8_192 },
 		];
 		const toolManager = createToolManager({ home });
-		const modelManager = new ModelManager(home);
+		const modelManager = new ModelManager({ home: home });
 		modelManager.replaceRows(rows);
 		// 组合的输入是各持有者的一次现读，与 agent 装配时的取法同形。
 		const modelView = (): { rows: readonly ModelConfig[]; defaultRef?: string } => ({
@@ -68,7 +68,7 @@ process.stdout.write("\nsettings：session 的选择与两个持有者的现读�
 		// 另一个 home 的 ModelManager：目录里有行、但从未指名默认——回落链的后两级在这里走。
 		const plainHome = mkdtempSync(join(tmpdir(), "my-agent-settings-plain-"));
 		try {
-			const plainModels = new ModelManager(plainHome);
+			const plainModels = new ModelManager({ home: plainHome });
 			plainModels.replaceRows(rows);
 			const plainView = (): { rows: readonly ModelConfig[]; defaultRef?: string } => ({
 				rows: plainModels.catalog(),

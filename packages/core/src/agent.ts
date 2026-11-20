@@ -276,7 +276,7 @@ export class Agent {
 		this.sessionManager = config.sessionManager;
 		this.modelManager = config.modelManager;
 		this.uiSettings = config.uiSettings;
-		this.engineSettings = new EngineSettings(config.settingsHome);
+		this.engineSettings = new EngineSettings({ home: config.settingsHome });
 		this.toolManager = config.toolManager;
 		this.hooks = config.hooks;
 		this.systemPrompt = config.systemPrompt;
@@ -1938,8 +1938,8 @@ export class Agent {
 		const previousName = setting.model?.name ?? inForce.model.config.name;
 		const previousLevel = normalizeThinkingLevel(setting.model?.thinkingLevel ?? inForce.model.thinkingLevel);
 
-	const name = selection.model ?? previousName;
-	const userModel = this.modelManager.catalog().find((userModel) => userModel.name === name);
+		const name = selection.model ?? previousName;
+		const userModel = this.modelManager.catalog().find((userModel) => userModel.name === name);
 		if (userModel === undefined) throw new Error(`Unknown model: ${name}`);
 
 		// 选择是客户端的选择，按到达时的原样写到会话自己的 setting 上：行的名字、该行此刻应答的

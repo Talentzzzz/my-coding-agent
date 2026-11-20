@@ -4,7 +4,7 @@
 // 未知键原样保留，spec §4.3），以及「不重试」是一个设置而不是缺值——maxRetries=0 必须幸存。
 // 这里不触网，无需服务器和 provider key。
 // 运行：node scripts/smoke-engine-settings.ts
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_GLOBAL_SETTINGS, EngineSettings, settingsPath, type RetrySettings } from "@my-agent/core";
@@ -34,7 +34,7 @@ process.stdout.write("\nengine：首读迁移——旧 settings.json 的 retry �
 		// 旧文件带着用户手调过的 retry：enabled 关了、次数升到 5，其余字段缺省。
 		writeJson(settingsPath(home), { retry: { enabled: false, maxRetries: 5 } });
 
-		const engine = new EngineSettings(home);
+		const engine = new EngineSettings({ home });
 		const retry = engine.retrySettings();
 		check("旧文件的手调字段原样回来", retry.enabled === false && retry.maxRetries === 5, JSON.stringify(retry));
 		check("缺省字段补上默认", retry.baseDelayMs === DEFAULT_GLOBAL_SETTINGS.retry.baseDelayMs && retry.maxAgentDelayMs === DEFAULT_GLOBAL_SETTINGS.retry.maxAgentDelayMs, JSON.stringify(retry));
@@ -62,7 +62,7 @@ process.stdout.write("\nengine：engine.json 已存在时旧 settings.json 被�
 		writeJson(settingsPath(home), { retry: { enabled: false, maxRetries: 9 } });
 		writeJson(enginePathOf(home), { retry: { maxRetries: 1 } });
 
-		const engine = new EngineSettings(home);
+		const engine = new EngineSettings({ home });
 		const retry = engine.retrySettings();
 		check("读的是 engine.json 的行", retry.maxRetries === 1, JSON.stringify(retry));
 		check("enabled 来自默认而不是旧文件", retry.enabled === DEFAULT_GLOBAL_SETTINGS.retry.enabled, JSON.stringify(retry));
@@ -84,7 +84,7 @@ process.stdout.write("\nengine：applyRetry 只动点名字段，未知键原样
 			futureCluster: { note: "reserved" },
 		});
 
-		const engine = new EngineSettings(home);
+		const engine = new EngineSettings({ home });
 		engine.applyRetry({ enabled: false });
 
 		const retry = engine.retrySettings();
@@ -110,11 +110,11 @@ process.stdout.write("\nengine：maxRetries=0 是「不重试」的设置，不�
 	try {
 		// 迁移路上就该幸存：旧文件把次数调成 0，规范化不得把它读成「没设过」。
 		writeJson(settingsPath(home), { retry: { maxRetries: 0 } });
-		const migrated = new EngineSettings(home).retrySettings();
+		const migrated = new EngineSettings({ home }).retrySettings();
 		check("迁移后 maxRetries=0 幸存", migrated.maxRetries === 0, JSON.stringify(migrated));
 
 		// 写路径同理：面板把重试关成 0，读回来必须还是 0。
-		const engine = new EngineSettings(home);
+		const engine = new EngineSettings({ home });
 		engine.applyRetry({ maxRetries: 0 });
 		check("applyRetry 后 maxRetries=0 幸存", engine.retrySettings().maxRetries === 0, JSON.stringify(engine.retrySettings()));
 	} finally {
@@ -122,14 +122,35 @@ process.stdout.write("\nengine：maxRetries=0 是「不重试」的设置，不�
 	}
 }
 
-// ------------------------------------------------- 5. 写前重读：手编不被无关写入回滚
+// ------------------------------------------------- 5. 两边都缺：读完不落盘（spec §4.2）
+
+process.stdout.write("\nengine：engine.json 与旧 settings.json 都不存在时，读完不写任何文件\n");
+
+{
+	const home = mkdtempSync(join(tmpdir(), "my-agent-engine-"));
+	try {
+		const engine = new EngineSettings({ home });
+		const retry = engine.retrySettings();
+		check("读到的是补默认的视图", retry.enabled === DEFAULT_GLOBAL_SETTINGS.retry.enabled && retry.maxRetries === DEFAULT_GLOBAL_SETTINGS.retry.maxRetries, JSON.stringify(retry));
+		check("engine.json 没有被写出", !existsSync(enginePathOf(home)));
+		check("旧 settings.json 也没有被写出", !existsSync(settingsPath(home)));
+
+		// 只有第一次真正的写入才让 engine.json 出现。
+		engine.applyRetry({ maxRetries: 2 });
+		check("applyRetry 之后 engine.json 在场", existsSync(enginePathOf(home)));
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+}
+
+// ------------------------------------------------- 6. 写前重读：手编不被无关写入回滚
 
 process.stdout.write("\nengine：写前重读——进程之外的手编不被一次无关的 applyRetry 回滚\n");
 
 {
 	const home = mkdtempSync(join(tmpdir(), "my-agent-engine-"));
 	try {
-		const engine = new EngineSettings(home);
+		const engine = new EngineSettings({ home });
 		engine.applyRetry({ maxRetries: 4 });
 
 		// 构造之后、写入之前，有人用编辑器改了磁盘上的文件：加了一个未知键、调了一个值。

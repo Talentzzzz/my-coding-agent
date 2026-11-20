@@ -4,11 +4,9 @@ import { join, resolve } from "node:path";
 // 读模型使用。本文件不再有任何规范化函数——各簇的规范化器随簇住在各持有者文件里，DEFAULT_* 常量
 // 留守本文件供它们回落。
 import type { RetrySettings } from "./engine-settings.ts";
-// RetrySettings 的 re-export：type-only，源头不变地指向 engine-settings.ts。
-export type { RetrySettings };
 import type { QueueMode } from "./protocol.ts";
-// 工具簇的类型随簇搬进了 tools/manager.ts（设置归属重构 §5）；mergeSettings 已随 SettingManager
-// 退场，这里不再 import 任何规范化器。
+// 工具簇的类型随簇搬进了 tools/manager.ts（设置归属重构 §5），config.ts 只经 protocol.ts 的既有
+// 路径转发类型名——规范化器各随簇住在持有者文件里（ADR-0028）。
 import type { BashSettings, ModeSettings } from "./tools/manager.ts";
 // 类型随簇搬走后的 re-export：protocol.ts 与既有 import 路径不变。
 export type { BashSettings, ModeSettings };
@@ -140,7 +138,7 @@ export interface GlobalSettings {
 /**
  * 设置的部分变更，形状与浏览器发来的 config 补丁一致（wire 契约，spec §7）。
  *
- * `SettingManager` 退场后它从 `setting-manager.ts` 迁来本文件——形状一字未动：`Agent.applySettings`
+ * 设置归属重构（ADR-0028）后它从退场的 `setting-manager.ts` 迁来本文件——形状一字未动：`Agent.applySettings`
  * 按字段名把它路由到拥有该字段的持有者，每簇独立原子落盘。
  */
 export interface SettingsPatch {

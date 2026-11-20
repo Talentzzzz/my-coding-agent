@@ -43,7 +43,7 @@ process.stdout.write("\nsessions：settings.json 里的队列模式被一次性�
 		writeFileSync(settingsPath(home), `${JSON.stringify(legacy, null, "\t")}\n`, "utf8");
 		const legacyOnDisk = readFileSync(settingsPath(home), "utf8");
 
-		const manager = new SessionManager(home);
+		const manager = new SessionManager({ home: home });
 		const view = manager.sessionDefaults();
 		check("steeringMode 从旧文件回来", view.steeringMode === "all", JSON.stringify(view));
 		check("followUpMode 从旧文件回来", view.followUpMode === "one-at-a-time", JSON.stringify(view));
@@ -75,7 +75,7 @@ process.stdout.write("\nsessions：旧文件没有簇字段时也写出补默认
 		writeFileSync(settingsPath(home), `${JSON.stringify({ model: "a/b" }, null, "\t")}\n`, "utf8");
 		const legacyOnDisk = readFileSync(settingsPath(home), "utf8");
 
-		const manager = new SessionManager(home);
+		const manager = new SessionManager({ home: home });
 		const view = manager.sessionDefaults();
 		check("缺省的 steeringMode 补上默认", view.steeringMode === "one-at-a-time", JSON.stringify(view));
 		check("缺省的 followUpMode 补上默认", view.followUpMode === "one-at-a-time", JSON.stringify(view));
@@ -88,7 +88,7 @@ process.stdout.write("\nsessions：旧文件没有簇字段时也写出补默认
 		const bad = mkdtempSync(join(tmpdir(), "my-agent-session-defaults-"));
 		try {
 			writeFileSync(settingsPath(bad), `${JSON.stringify({ steeringMode: "garbage", followUpMode: 42 }, null, "\t")}\n`, "utf8");
-			const badView = new SessionManager(bad).sessionDefaults();
+			const badView = new SessionManager({ home: bad }).sessionDefaults();
 			check("坏值回落到默认", badView.steeringMode === "one-at-a-time" && badView.followUpMode === "one-at-a-time", JSON.stringify(badView));
 		} finally {
 			rmSync(bad, { recursive: true, force: true });
@@ -108,7 +108,7 @@ process.stdout.write("\nsessions：sessions.json 已存在时旧文件被完全�
 		// 两份文件并存且答案相反：自己的文件赢。
 		writeFileSync(sessionsPathOf(home), `${JSON.stringify({ steeringMode: "all" }, null, "\t")}\n`, "utf8");
 		writeFileSync(settingsPath(home), `${JSON.stringify({ steeringMode: "one-at-a-time" }, null, "\t")}\n`, "utf8");
-		const manager = new SessionManager(home);
+		const manager = new SessionManager({ home: home });
 		check("自己的文件赢过旧文件", manager.sessionDefaults().steeringMode === "all", manager.sessionDefaults().steeringMode);
 		// 缺的键补默认，而不是向旧文件求援。
 		check("缺的键补默认", manager.sessionDefaults().followUpMode === "one-at-a-time", manager.sessionDefaults().followUpMode);
@@ -125,7 +125,7 @@ process.stdout.write("\nsessions：补丁只动点名的键，文件里的其他
 	const home = mkdtempSync(join(tmpdir(), "my-agent-session-defaults-"));
 	try {
 		writeFileSync(sessionsPathOf(home), `${JSON.stringify({ steeringMode: "all", handWritten: { note: "手编" } }, null, "\t")}\n`, "utf8");
-		const manager = new SessionManager(home);
+		const manager = new SessionManager({ home: home });
 
 		manager.applySessionDefaults({ followUpMode: "all" });
 		const onDisk = diskSessions(home);
@@ -136,7 +136,7 @@ process.stdout.write("\nsessions：补丁只动点名的键，文件里的其他
 		// 空补丁什么都不做：连文件都不该被造出来。
 		const untouched = mkdtempSync(join(tmpdir(), "my-agent-session-defaults-"));
 		try {
-			new SessionManager(untouched).applySessionDefaults({});
+			new SessionManager({ home: untouched }).applySessionDefaults({});
 			check("空补丁不写盘", !existsSync(sessionsPathOf(untouched)));
 		} finally {
 			rmSync(untouched, { recursive: true, force: true });
@@ -144,7 +144,7 @@ process.stdout.write("\nsessions：补丁只动点名的键，文件里的其他
 
 		// 写下去当场可读，第二只 manager 也以盘上的文件作答。
 		check("写下去当场可读", manager.sessionDefaults().followUpMode === "all", manager.sessionDefaults().followUpMode);
-		check("另一只 manager 读到同一份", new SessionManager(home).sessionDefaults().followUpMode === "all");
+		check("另一只 manager 读到同一份", new SessionManager({ home: home }).sessionDefaults().followUpMode === "all");
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}
@@ -157,7 +157,7 @@ process.stdout.write("\nsessions：写入只落在文件此刻持有的内容之
 {
 	const home = mkdtempSync(join(tmpdir(), "my-agent-session-defaults-"));
 	try {
-		const manager = new SessionManager(home);
+		const manager = new SessionManager({ home: home });
 		manager.applySessionDefaults({ steeringMode: "all" });
 
 		// 进程运行期间，用户用编辑器改了盘上的文件。
@@ -191,8 +191,8 @@ process.stdout.write("\nsessions：零参 new SessionManager() 照旧可用，�
 
 		// home 是构造参数：建在另一个家上的 manager 读那个家的文件，永远不以这个家的作答。
 		writeFileSync(sessionsPathOf(homeA), `${JSON.stringify({ steeringMode: "all" }, null, "\t")}\n`, "utf8");
-		check("A 家读到自己文件里的值", new SessionManager(homeA).sessionDefaults().steeringMode === "all");
-		check("B 家读不到 A 家的文件", new SessionManager(homeB).sessionDefaults().steeringMode === "one-at-a-time");
+		check("A 家读到自己文件里的值", new SessionManager({ home: homeA }).sessionDefaults().steeringMode === "all");
+		check("B 家读不到 A 家的文件", new SessionManager({ home: homeB }).sessionDefaults().steeringMode === "one-at-a-time");
 	} finally {
 		rmSync(workRoot, { recursive: true, force: true });
 		rmSync(homeA, { recursive: true, force: true });

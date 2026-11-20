@@ -516,7 +516,7 @@ try {
 			tools: ["read", "bash"],
 			modes: [{ name: "reader", tools: ["read"], approval: {} }],
 		});
-		new ModelManager(settingsHome).replaceRows([]);
+		new ModelManager({ home: settingsHome }).replaceRows([]);
 		const session = createSession(settingsRoot);
 		const sessionId = session.sessionId;
 		const options = {
@@ -532,7 +532,7 @@ try {
 			return path === undefined ? session : fillSession(path);
 		};
 		const resolvedOf = (): string[] =>
-			resolveSettings(replayed(), settingsTools.toolDefaults(), { rows: new ModelManager(settingsHome).catalog() }, known).tools;
+			resolveSettings(replayed(), settingsTools.toolDefaults(), { rows: new ModelManager({ home: settingsHome }).catalog() }, known).tools;
 
 		const cold = await readSessionSnapshot(options);
 		check("a session with no entry reports the default seat", cold.mode === undefined, cold.mode);
@@ -1142,7 +1142,7 @@ try {
 		// 设置归属重构（spec §8）：内存后端退场——行种进临时 home 的 models.json，homes 透传。
 		const vetoHome = join(root, "agent-home-veto");
 		await mkdir(vetoHome, { recursive: true });
-		new ModelManager(vetoHome).replaceRows(vetoRows);
+		new ModelManager({ home: vetoHome }).replaceRows(vetoRows);
 		const agent = await openAgent({
 			session,
 			chatTransport: gate.chatTransport,
