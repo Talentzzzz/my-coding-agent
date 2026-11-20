@@ -43,7 +43,6 @@ export {
 	type AppearanceSettings,
 	type DirectoryPaging,
 	type GlobalSettings,
-	type ModeSettings,
 	type RetrySettings,
 } from "./config.ts";
 export { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
@@ -213,11 +212,16 @@ export {
 	type SettingsStorage,
 } from "./setting-manager.ts";
 export {
+	type BashSettings,
 	createToolManager,
 	describeToolCall,
+	type ModeSettings,
 	fillTools,
 	narrowToKnown,
 	ToolManager,
+	type ToolDefaults,
+	type ToolDefaultsPatch,
+	type ToolManagerOptions,
 	type ToolRunContext,
 	type ToolState,
 } from "./tools/index.ts";
