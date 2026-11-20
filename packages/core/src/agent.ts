@@ -62,10 +62,11 @@ import type { PendingMessageQueue } from "./session/queues.ts";
 import { sessionSnapshot } from "./session/snapshot.ts";
 import { resolveSettings, type Settings } from "./settings.ts";
 import { UnknownSessionError } from "./session/unknown-session.ts";
-import type { SettingsPatch } from "./setting-manager.ts";
-import type { SettingManager } from "./setting-manager.ts";
-import type { GlobalSettings } from "./config.ts";
-import type { ToolManager } from "./tools/index.ts";
+import type { GlobalSettings, SettingsPatch } from "./config.ts";
+import { EngineSettings, type RetrySettings } from "./engine-settings.ts";
+import { ModelManager } from "./model-manager.ts";
+import { UiSettingsManager, type UiSettingsPatch } from "./ui-settings.ts";
+import type { ToolManager, ToolDefaultsPatch } from "./tools/index.ts";
 import { type AgentEvent, type AgentRequestUpdate, type RunRecoveryOptions, type ToolCallAnswer, type ToolCallOutcome } from "./types.ts";
 
 // 事件面定义在发布它的 fanout 旁边（`session/events.ts`），在这里转发出去，因为 `index.ts` 一直
@@ -82,8 +83,8 @@ export type { AgentSessionEvent, MessageDelta, SessionEventListener, SessionList
  * 每份 会话记录 打开到它保有的那一个上。装配本身住在 `assembly.ts`，那是把「每个会话由什么形状
  * 描述」一次写下的地方。
  *
- * 这些字段没有一个是会话*状态*。本类协调的服务——账本、配置（设置与模型行合起来，一只
- * {@link SettingManager}）、工具表、接缝、prompt builder、传输层——各自持有自己的纯数据状态
+ * 这些字段没有一个是会话*状态*。本类协调的服务——账本、各设置簇的持有者（模型目录、UI 视图、
+ * 工具表、接缝、prompt builder、传输层）——各自持有自己的纯数据状态
  * （ADR-0005 §1–2）；曾经是 `Agent` 私有会话字段的东西已不在：运行期瞬态是运行自己的局部变量
  * （ADR-0005 §5），审批从账本派生，时间戳从文件派生，装配则骑在 open 收进本类所持那张表的状态上
  * （ADR-0013）。
@@ -98,14 +99,27 @@ export interface AgentConfig {
 	 */
 	sessionManager: SessionManager;
 	/**
-	 * 每次设置与模型读取所经的配置门。
+	 * 模型簇（`models.json` 的行、默认 ref 与种下标记）的持有者。
 	 *
-	 * 递进来而不是复制，因为配置是会话打开期间最可能变动的东西：manager 什么都不持有，每次读取都是
-	 * 对其背后文件的一次新读——面板里修正的密钥、切换的模式、编辑器里加的行——每一件都是下一个请求
-	 * 给出的答案。按请求的填充从它在这里找到的目录重新派生会话的模型，所以密钥、端点、窗口、wire id
+	 * 递进来而不是复制，因为目录是会话打开期间最可能变动的东西：manager 什么都不持有，每次读取都是
+	 * 对其背后文件的一次新读——面板里修正的密钥、切换的默认行、编辑器里加的行——每一件都是下一个请求
+	 * 给出的答案。按请求的填充从它在这里的目录重新派生会话的模型，所以密钥、端点、窗口、wire id
 	 * 都和行一样新鲜。
 	 */
-	settingManager: SettingManager;
+	modelManager: ModelManager;
+	/**
+	 * UI 簇（外观、隐藏目录、目录改名）的持有者。
+	 *
+	 * 门面的 appearance 相关转发与设置读模型从它现读；它与其他服务一样每次现读自己的文件
+	 * （`ui.json`），没有需要失效的副本。
+	 */
+	uiSettings: UiSettingsManager;
+	/**
+	 * 引擎簇（`engine.json`）所在的 home。缺省即 `AGENT_HOME`。
+	 *
+	 * 引擎簇（retry）不进公开门面（spec §3/§5），由编排层私有持有，构造时按这个 home 现建。
+	 */
+	settingsHome?: string;
 	/**
 	 * 本构建认识的工具，加上调用方在它上面注册的任何东西——测试的自定义工具。
 	 * 只有结构：选择不在这里。
@@ -218,13 +232,21 @@ export class Agent {
 	 */
 	readonly sessionManager: SessionManager;
 	/**
-	 * 每次设置与模型读取所经的配置门。
+	 * 模型簇的持有者：目录、默认 ref 与种下标记都在它身上（设置归属重构 §5）。
 	 *
-	 * 门面读取存在之后已被藏起：宿主回答设置命令或列出模型行走 {@link Agent.modelCatalog}、
-	 * {@link Agent.settings} 及其邻居，任何地方都没有第二份文件副本需要保持同步。见
-	 * {@link AgentConfig.settingManager}。
+	 * 门面转发存在之后已被藏起：宿主回答模型命令或列出模型行走 {@link Agent.modelCatalog}，
+	 * 任何地方都没有第二份文件副本需要保持同步。见 {@link AgentConfig.modelManager}。
 	 */
-	private readonly settingManager: SettingManager;
+	private readonly modelManager: ModelManager;
+	/** UI 簇的持有者：外观、隐藏目录与目录改名的读半在门面转发，写半走补丁路由。 */
+	private readonly uiSettings: UiSettingsManager;
+	/**
+	 * 引擎簇（retry）的持有者：编排层自己的设置不进任何公开门面，私有持有（spec §3/§5）。
+	 *
+	 * 与其他服务一样是每次现读的：{@link Agent.retrySettings} 与 {@link Agent.applyRetry} 之后的
+	 * 每一次调用都是对 `engine.json` 的一次新读，没有需要失效的副本。
+	 */
+	private readonly engineSettings: EngineSettings;
 	/**
 	 * 会话分发所经的接缝，包括 `openAgent` 安装的默认处理器。
 	 *
@@ -252,7 +274,9 @@ export class Agent {
 
 	constructor(config: AgentConfig) {
 		this.sessionManager = config.sessionManager;
-		this.settingManager = config.settingManager;
+		this.modelManager = config.modelManager;
+		this.uiSettings = config.uiSettings;
+		this.engineSettings = new EngineSettings({ home: config.settingsHome });
 		this.toolManager = config.toolManager;
 		this.hooks = config.hooks;
 		this.systemPrompt = config.systemPrompt;
@@ -273,8 +297,8 @@ export class Agent {
 	private resolvedSettings(session: Session): Settings {
 		return resolveSettings(
 			session,
-			this.settingManager.getSettings(),
-			this.settingManager.modelCatalog(),
+			this.toolManager.toolDefaults(),
+			{ rows: this.modelManager.catalog(), defaultRef: this.modelManager.defaultRef() },
 			this.toolManager.names(),
 		);
 	}
@@ -473,7 +497,7 @@ export class Agent {
 		const id = options.session.sessionId;
 		const heldAgentState = this.agentStateMap.get(id);
 		if (heldAgentState !== undefined) return heldAgentState;
-		const agentState = await assembleSession(this.sessionManager, this.settingManager, this.toolManager, options);
+		const agentState = await assembleSession(this.sessionManager, this.toolManager, this.modelManager, options);
 		this.insert(agentState);
 		return this.agentStateMap.get(id) ?? agentState;
 	}
@@ -492,9 +516,9 @@ export class Agent {
 	 * 应答投影与分发，用完即弃。
 	 */
 	private liveHalfOf(session: Session): AgentState {
-		// 队列模式是 global 侧此刻的答案，经设置门实时读取（ADR-0019）。
-		const global = this.settingManager.getSettings();
-		return createAgentState(session.sessionId, createLive(global.steeringMode, global.followUpMode));
+		// 队列模式是会话簇此刻的答案，从 SessionManager 实时读取（设置归属重构 §6）。
+		const defaults = this.sessionManager.sessionDefaults();
+		return createAgentState(session.sessionId, createLive(defaults.steeringMode, defaults.followUpMode));
 	}
 
 	// ---------------------------------------------------------------------------- 会话门面
@@ -570,7 +594,7 @@ export class Agent {
 		// 出生请求里的选择在本类唯一的写法里落到会话记录上：模式指针直接校验落定（未知名字在这里抛出
 		// ——调用方把它应答成 409），模型选择走与 `applyModelSelection` 同一条袋级规则。
 		if (options.mode !== undefined) {
-			const modes = this.settingManager.getSettings().modes ?? [];
+			const modes = this.toolManager.toolDefaults().modes ?? [];
 			if (!modes.some((preset) => preset.name === options.mode)) {
 				throw new Error(`Unknown mode: ${options.mode}`);
 			}
@@ -706,32 +730,79 @@ export class Agent {
 	// ---------------------------------------------------------------------------- 设置门面
 	//
 	// 配置转发，宿主曾直接在 manager 上做的每次调用对应一个。它们谁都不持有任何东西：每一个都是对
-	// {@link Agent.settings} 背后文件的一次新读或新写，所以一次变更就是下一次读取的答案，没有需要
-	// 失效的东西。
+	// 各持有者文件的一次新读或新写，所以一次变更就是下一次读取的答案，没有需要失效的东西。设置归属
+	// 重构（spec §6）后这里按簇路由——读是现读组装的一份视图，写是按字段名的逐簇分发，每簇独立
+	// 原子落盘。
 
 	/** 用户录入的模型，按设置面板里的顺序。 */
 	modelCatalog(): readonly ModelConfig[] {
-		return this.settingManager.modelCatalog();
+		return this.modelManager.catalog();
 	}
 
 	/** 替换全部存储行。整表写入让名字与文件不漂移。 */
 	replaceModels(models: readonly ModelConfig[]): void {
-		this.settingManager.replaceModels(models);
+		this.modelManager.replaceRows(models);
 	}
 
 	/** 侧边栏搁置的目录，按绝对路径。永远是列表，从不是 `undefined`。 */
 	hiddenDirectories(): string[] {
-		return this.settingManager.getSettings().hiddenDirectories ?? [];
+		return this.uiSettings.uiSettings().hiddenDirectories ?? [];
 	}
 
-	/** 对设置应用部分变更，返回前写回 global 侧唯一的文件。 */
+	/**
+	 * 对设置应用部分变更，返回前写回各持有者自己的文件。
+	 *
+	 * 先按字段分组再逐簇分发（spec §6）：一次跨簇的补丁不在任何单文件上整体生效，每一簇自己的写入
+	 * 是原子的。各持有者的写路径只动被点名的字段（值缺席的字段不是变更），所以空簇是零次落盘。
+	 */
 	applySettings(patch: SettingsPatch): void {
-		this.settingManager.applySettings(patch);
+		this.toolManager.applyToolDefaults({
+			...(patch.tools === undefined ? {} : { tools: patch.tools }),
+			...(patch.modes === undefined ? {} : { modes: patch.modes }),
+			...(patch.approval === undefined ? {} : { approval: patch.approval }),
+			...(patch.bash === undefined ? {} : { bash: patch.bash }),
+		} satisfies ToolDefaultsPatch);
+		this.uiSettings.applyUiSettings({
+			...(patch.appearance === undefined ? {} : { appearance: patch.appearance }),
+			...(patch.hiddenDirectories === undefined ? {} : { hiddenDirectories: patch.hiddenDirectories }),
+			...(patch.directoryNames === undefined ? {} : { directoryNames: patch.directoryNames }),
+		} satisfies UiSettingsPatch);
+		this.sessionManager.applySessionDefaults({
+			...(patch.steeringMode === undefined ? {} : { steeringMode: patch.steeringMode }),
+			...(patch.followUpMode === undefined ? {} : { followUpMode: patch.followUpMode }),
+		});
+		this.modelManager.applyModelSettings({
+			...(patch.model === undefined ? {} : { model: patch.model }),
+			...(patch.defaultModelSeeded === undefined ? {} : { defaultModelSeeded: patch.defaultModelSeeded }),
+		});
+		if (patch.retry !== undefined) this.applyRetry(patch.retry);
 	}
 
-	/** 当前生效的全部设置，global 侧合并并补默认后的副本。 */
+	/**
+	 * 当前生效的全部设置：从五个持有者现读、组装的一份 {@link GlobalSettings} 形状的视图。
+	 *
+	 * 这是设置面板的读模型，不是所有权壳——各簇真实的家在各自的持有者与文件里。可选字段按「未设置」
+	 * 保持 undefined，与五个文件各自的缺席规则一致。
+	 */
 	settings(): GlobalSettings {
-		return this.settingManager.getSettings();
+		const toolDefaults = this.toolManager.toolDefaults();
+		const ui = this.uiSettings.uiSettings();
+		const sessionDefaults = this.sessionManager.sessionDefaults();
+		const modelSettings = this.modelManager.modelSettings();
+		return {
+			...(modelSettings.defaultModel === undefined ? {} : { model: modelSettings.defaultModel }),
+			...(modelSettings.defaultModelSeeded === undefined ? {} : { defaultModelSeeded: modelSettings.defaultModelSeeded }),
+			...(toolDefaults.tools === undefined ? {} : { tools: toolDefaults.tools }),
+			...(toolDefaults.modes === undefined ? {} : { modes: toolDefaults.modes }),
+			appearance: ui.appearance,
+			approval: toolDefaults.approval,
+			...(ui.hiddenDirectories === undefined ? {} : { hiddenDirectories: ui.hiddenDirectories }),
+			...(ui.directoryNames === undefined ? {} : { directoryNames: ui.directoryNames }),
+			steeringMode: sessionDefaults.steeringMode,
+			followUpMode: sessionDefaults.followUpMode,
+			retry: this.retrySettings(),
+			bash: toolDefaults.bash,
+		};
 	}
 
 	// ---------------------------------------------------------------------------- 存储扫描
@@ -1400,6 +1471,26 @@ export class Agent {
 		};
 	}
 
+	// ---------------------------------------------------------------------------- 引擎簇（retry）
+
+	/**
+	 * 供应商调用失败时的重试策略，补默认后的副本——引擎簇（`engine.json`）的一次现读。
+	 *
+	 * 私有面，不进公开门面（spec §3/§5）：唯一消费者是编排层自己的重试泵（{@link Agent.pumpAttempts}
+	 * 读这里），以及门面读模型（{@link Agent.settings} 的 retry 字段）。`SettingsPatch.retry` 经门面
+	 * 路由进 {@link Agent.applyRetry}。
+	 */
+	private retrySettings(): RetrySettings {
+		return this.engineSettings.retrySettings();
+	}
+
+	/**
+	 * `SettingsPatch.retry` 经门面路由进这里（spec §6）：引擎簇不进公开门面，server 无需看见它。
+	 */
+	private applyRetry(patch: Partial<RetrySettings>): void {
+		this.engineSettings.applyRetry(patch);
+	}
+
 	/**
 	 * 这次运行的工具被调用时所用的值对象：从会话自己的 setting 上读的工作目录，以同样方式从设置上读
 	 * 的 bash 超时。每次运行收集一次、由它发出的每次调用携带——这里没有任何东西活得比读它的那次
@@ -1409,7 +1500,7 @@ export class Agent {
 		return {
 			workDirAbsPath: session.settings.workDirAbsPath,
 			// 实时读取，与其他每次设置读取一样：用户挪过的超时抵达下一次运行的调用，无需重开任何东西。
-			bash: this.settingManager.getSettings().bash,
+			bash: this.toolManager.toolDefaults().bash,
 		};
 	}
 
@@ -1466,7 +1557,7 @@ export class Agent {
 		// 整个泵读一次：重试循环执行的策略与 `retry_start` 事件报告的 `maxAttempts` 是同一个答案，在
 		// 调用点取而不是存起来——退避中途的设置编辑随下一个请求落地，而不是这一次。计数方式与
 		// `retryAssistantCall` 自己的一致：数重试，不数调用。
-		const retrySettings = this.settingManager.getSettings().retry;
+		const retrySettings = this.retrySettings();
 		const maxAttempts = retrySettings.enabled ? retrySettings.maxRetries : 0;
 		let final: AssistantMessage;
 		try {
@@ -1848,7 +1939,7 @@ export class Agent {
 		const previousLevel = normalizeThinkingLevel(setting.model?.thinkingLevel ?? inForce.model.thinkingLevel);
 
 		const name = selection.model ?? previousName;
-		const userModel = this.settingManager.modelCatalog().find((userModel) => userModel.name === name);
+		const userModel = this.modelManager.catalog().find((userModel) => userModel.name === name);
 		if (userModel === undefined) throw new Error(`Unknown model: ${name}`);
 
 		// 选择是客户端的选择，按到达时的原样写到会话自己的 setting 上：行的名字、该行此刻应答的
@@ -1881,8 +1972,8 @@ export class Agent {
 	 * 补丁住在三个地方。模式指针是会话级的：写的是名字（或 `null`——指回全局默认），激活集与审批
 	 * 基线随它活态解析，所以名字必须存在于该目录的 `modes` 表里，否则抛错（ADR-0018）。审批是
 	 * 会话级的增量：它合并进本会话自己的选择、记录在它的 `.json` 快照上，所以同一目录上的另一个
-	 * 会话不受影响。其余经 {@link SettingManager} 交给设置——它拥有那些文件——并落到运行时的队列
-	 * 上，队列在每次取走时读模式。
+	 * 会话不受影响。其余按字段名路由到拥有它的持有者（设置归属重构 §6）——队列模式归会话簇——并落到
+	 * 运行时的队列上，队列在每次取走时读模式。
 	 *
 	 * 模型与思考档位完全不属于补丁。它们在输入框里选、随属于它们的消息抵达（{@link ModelSelection}），
 	 * 所以这里没有可应用的：没有请求跟上的配置变更就不是配置变更。
@@ -1896,7 +1987,7 @@ export class Agent {
 			// 预设——指向没人定义过的模式的补丁被说出来，而不是按全局默认悄悄跑。
 			const mode = patch.mode === null ? undefined : patch.mode;
 			if (mode !== undefined) {
-				const modes = this.settingManager.getSettings().modes ?? [];
+				const modes = this.toolManager.toolDefaults().modes ?? [];
 				if (!modes.some((preset) => preset.name === mode)) {
 					throw new Error(`Unknown mode: ${mode}`);
 				}
@@ -1909,18 +2000,19 @@ export class Agent {
 			const recorded = this.sessionManager.getRecordedToolConfig(session);
 			this.sessionManager.setApprovalOverride(session, { ...(recorded.approval ?? {}), ...patch.approval });
 		}
-		// 补丁的其余部分经 manager 交给设置，写入归它所有：变更落在 global 侧唯一的文件上，之后的每次
-		// 读取——本会话的与任何其他会话的——都从它们作答。模式指针与审批增量是会话自己的，不带过去。
-		this.settingManager.applySettings({
+		// 补丁的队列模式部分归会话簇（设置归属重构 §6）：写入落在 SessionManager 的 sessions.json 上，
+		// 之后的每次读取——本会话的与任何其他会话的——都从它作答。模式指针与审批增量是会话自己的，
+		// 不带过去。
+		this.sessionManager.applySessionDefaults({
 			...(patch.steeringMode === undefined ? {} : { steeringMode: patch.steeringMode }),
 			...(patch.followUpMode === undefined ? {} : { followUpMode: patch.followUpMode }),
 		});
-		const global = this.settingManager.getSettings();
+		const sessionDefaults = this.sessionManager.sessionDefaults();
 		// 队列在袋上活着：有袋才就地换模式；表上没有袋的会话什么都不用挪——下一次运行装配时，
 		// 队列带着此刻的模式出生。
 		if (held !== undefined) {
-			held.live.steeringQueue.mode = global.steeringMode;
-			held.live.followUpQueue.mode = global.followUpMode;
+			held.live.steeringQueue.mode = sessionDefaults.steeringMode;
+			held.live.followUpQueue.mode = sessionDefaults.followUpMode;
 		}
 		const after = this.getSessionBySessionId(id);
 		const agentState = held ?? this.liveHalfOf(after);

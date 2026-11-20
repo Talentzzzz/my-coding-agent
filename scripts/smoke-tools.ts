@@ -18,10 +18,12 @@ import {
 	DIFF_MAX_ROWS,
 	DIFF_TEXT_MAX_ROWS,
 	diffText,
+	EngineSettings,
 	estimateTokens,
 	fillSession,
 	fileDiff,
 	isCacheProbablyExpired,
+	ModelManager,
 	prepareCompaction,
 	resolvePath,
 	sessionEntryToContextMessages,
@@ -29,7 +31,6 @@ import {
 	sessionMetaPath,
 	sessionPath,
 	sessionsDir,
-	inMemorySettingManager,
 	shouldCompact,
 	spillOversizedToolResult,
 	spillPathFor,
@@ -37,7 +38,6 @@ import {
 	fillTools,
 	openAgent,
 	setSessionsDir,
-	SettingManager,
 	type Tool,
 	type FileDiff,
 	type Message,
@@ -540,71 +540,88 @@ async function exerciseFileFormat(): Promise<void> {
 }
 
 /**
- * Settings come from the one global file and go back to it (ADR-0019).
+ * Settings route through the facade to the five holders (settings redistribution spec §6).
  *
- * The property worth pinning is the one that is easy to get wrong: a write must not carry the rest of
- * the in-memory view into the file, or a hand edit made while the process was running is reverted by
- * the next toggle — and only the field a patch names moves, nested entries merge in place.
+ * The property worth pinning is the one that is easy to get wrong: a patch is routed by field name,
+ * so each cluster lands in its own file and each holder's write stays atomic; the read model is
+ * assembled fresh from all five; and the legacy `settings.json` the holders migrate from is never
+ * written back.
  */
 async function exerciseSettings(): Promise<void> {
 	const agentDir = join(root, "settings-agent-home");
-	const globalFile = join(agentDir, "settings.json");
+	const legacyFile = join(agentDir, "settings.json");
 	await mkdir(agentDir, { recursive: true });
+	// 一份旧 settings.json：各持有者首读时从这里捡走自己的簇（spec §4.2），`keepRecentTokens` 是本
+	// 构建不再读的键——它代表任何新构建写下的东西，必须在迁移后原样留在旧文件里。
 	await writeFile(
-		globalFile,
-		// `keepRecentTokens` is a key this build no longer reads: it stands in for anything a newer
-		// build wrote, which has to survive a read and a write here untouched.
+		legacyFile,
 		JSON.stringify({ model: "faux/faux-1", approval: { bash: false }, keepRecentTokens: 5_000, customKey: "kept" }),
 		"utf8",
 	);
+	// ADR-0021：出生消息让会话落地，编排层按 id 现开文件。
+	const state = createSession(root);
+	sessionManager.appendMessage(state, { role: "user", content: [{ type: "text", text: "settings route birth" }], timestamp: 1 });
+	const agent = await openAgent({ session: state, settingsHome: agentDir, modelsHome: agentDir });
+	const id = state.sessionId;
 
-	const settingManager = new SettingManager({ home: agentDir });
-	check("reads the agent home's file", settingManager.getSettings().model === "faux/faux-1", String(settingManager.getSettings().model));
-	check("a field the file names keeps its value", settingManager.getSettings().approval.bash === false, JSON.stringify(settingManager.getSettings().approval));
-	check("while an unnamed field keeps its default", settingManager.getSettings().approval.edit === true, JSON.stringify(settingManager.getSettings().approval));
+	// 读模型：五个持有者的现读组装（spec §6）。迁移捡走的簇各就各位，文件没点名的字段保持缺席。
+	check("migration hands the model cluster to the read model", agent.settings().model === "faux/faux-1", String(agent.settings().model));
+	check("a field the file names keeps its value", agent.settings().approval.bash === false, JSON.stringify(agent.settings().approval));
+	check("while an unnamed field keeps its default", agent.settings().approval.edit === true, JSON.stringify(agent.settings().approval));
+	check("and no cluster invents a field the file never named", agent.settings().tools === undefined && agent.settings().modes === undefined && agent.settings().hiddenDirectories === undefined, JSON.stringify(agent.settings()));
 
-	// `approval` is named by the file, so only the key this patch names may move: writing the whole
-	// merged map would pin all six tools in the file.
-	settingManager.applySettings({ approval: { read: true } });
-	const onDisk = JSON.parse(await readFile(globalFile, "utf8")) as { approval?: Record<string, boolean> };
-	check("only the named key is written", onDisk.approval?.read === true, JSON.stringify(onDisk));
-	check("keeping the other entries the file had", onDisk.approval?.bash === false, JSON.stringify(onDisk));
-	check("and adding no key it never named", onDisk.approval?.write === undefined, JSON.stringify(onDisk));
-	check("the change is in effect", settingManager.getSettings().approval.read === true);
+	// 写路径按字段名路由（spec §6）：一个簇的补丁落在那个簇自己的文件上，别无他处。
+	agent.applySettings({ approval: { read: true } });
+	const toolsOnDisk = JSON.parse(await readFile(join(agentDir, "tools.json"), "utf8")) as Record<string, unknown>;
+	check("the approval patch lands in tools.json", (toolsOnDisk.approval as Record<string, boolean>)?.read === true && (toolsOnDisk.approval as Record<string, boolean>)?.bash === false, JSON.stringify(toolsOnDisk));
+	check("and the read model answers it", agent.settings().approval.read === true);
 
-	// No file names the queue mode, so it is a new setting and joins the same file.
-	settingManager.applySettings({ steeringMode: "all" });
-	const global = JSON.parse(await readFile(globalFile, "utf8")) as Record<string, unknown>;
-	check("a setting no file names goes to the global file", global.steeringMode === "all", JSON.stringify(global));
-	check(
-		"which keeps the keys it did not touch",
-		global.customKey === "kept" && global.model === "faux/faux-1" && global.keepRecentTokens === 5_000,
-		JSON.stringify(global),
-	);
-	check("and the mode is in effect", settingManager.getSettings().steeringMode === "all", settingManager.getSettings().steeringMode);
+	agent.applySettings({ steeringMode: "all" });
+	const sessionsOnDisk = JSON.parse(await readFile(join(agentDir, "sessions.json"), "utf8")) as Record<string, unknown>;
+	check("the queue patch lands in sessions.json", sessionsOnDisk.steeringMode === "all", JSON.stringify(sessionsOnDisk));
+	check("and the read model answers it", agent.settings().steeringMode === "all");
 
-	settingManager.applySettings({ bash: { maxTimeoutMs: 1_800_000 } });
-	check("the bash ceiling moves with the patch", settingManager.getSettings().bash.maxTimeoutMs === 1_800_000, JSON.stringify(settingManager.getSettings().bash));
-	check("leaving the default timeout beside it", settingManager.getSettings().bash.defaultTimeoutMs === 120_000, JSON.stringify(settingManager.getSettings().bash));
-	const lowered = inMemorySettingManager({ bash: { defaultTimeoutMs: 9_000_000, maxTimeoutMs: 600_000 } });
-	check("a default above the ceiling is pulled down to it", lowered.getSettings().bash.defaultTimeoutMs === 600_000, JSON.stringify(lowered.getSettings().bash));
+	agent.applySettings({ model: "hand/edited" });
+	const modelsOnDisk = JSON.parse(await readFile(join(agentDir, "models.json"), "utf8")) as Record<string, unknown>;
+	check("the default-model patch lands in models.json under its own key", modelsOnDisk.defaultModel === "hand/edited", JSON.stringify(modelsOnDisk));
+	check("and the read model answers it", agent.settings().model === "hand/edited");
 
-	// An edit made outside this process must survive the next write.
-	await writeFile(globalFile, JSON.stringify({ ...global, model: "hand/edited" }), "utf8");
-	settingManager.applySettings({ followUpMode: "all" });
-	const rewritten = JSON.parse(await readFile(globalFile, "utf8")) as Record<string, unknown>;
-	check("a hand edit is not reverted by the next write", rewritten.model === "hand/edited", JSON.stringify(rewritten));
-	check("which still lands its own change", rewritten.followUpMode === "all", JSON.stringify(rewritten));
+	agent.applySettings({ appearance: { theme: "light" } });
+	const uiOnDisk = JSON.parse(await readFile(join(agentDir, "ui.json"), "utf8")) as Record<string, unknown>;
+	check("the appearance patch lands in ui.json", (uiOnDisk.appearance as Record<string, unknown>)?.theme === "light", JSON.stringify(uiOnDisk));
+	check("while tools.json never sees another cluster's field", toolsOnDisk.steeringMode === undefined && toolsOnDisk.model === undefined, JSON.stringify(toolsOnDisk));
 
-	// A settings file that cannot be parsed is an error, not a silent fall back to the defaults.
-	await writeFile(globalFile, "{ not json", "utf8");
+	agent.applySettings({ retry: { maxRetries: 5 } });
+	const engineOnDisk = JSON.parse(await readFile(join(agentDir, "engine.json"), "utf8")) as Record<string, unknown>;
+	check("the retry patch lands in engine.json", (engineOnDisk.retry as Record<string, unknown>)?.maxRetries === 5, JSON.stringify(engineOnDisk));
+	check("and the read model answers it", agent.settings().retry.maxRetries === 5);
+
+	// 跨簇补丁：一次补丁跨簇时逐簇分发（spec §6），每一簇自己的写入原子落地。
+	agent.applySettings({ followUpMode: "all", bash: { maxTimeoutMs: 1_800_000 } });
+	const toolsAgain = JSON.parse(await readFile(join(agentDir, "tools.json"), "utf8")) as Record<string, unknown>;
+	check("a cross-cluster patch routes each field to its owner", (toolsAgain.bash as Record<string, number>)?.maxTimeoutMs === 1_800_000 && (JSON.parse(await readFile(join(agentDir, "sessions.json"), "utf8")) as Record<string, unknown>).followUpMode === "all", JSON.stringify(toolsAgain));
+	check("and the read model answers both", agent.settings().bash.maxTimeoutMs === 1_800_000 && agent.settings().followUpMode === "all", JSON.stringify(agent.settings().bash));
+
+	// 旧文件本身永不删除、永不写入：写路径只落各簇自己的文件。
+	const legacyAfter = JSON.parse(await readFile(legacyFile, "utf8")) as Record<string, unknown>;
+	check("the legacy file is never written back", legacyAfter.customKey === "kept" && legacyAfter.keepRecentTokens === 5_000 && legacyAfter.model === "faux/faux-1", JSON.stringify(legacyAfter));
+
+	// bash 默认钳制照旧：高于上限的默认值被压到上限（经 ToolManager 的写路径规范化）。
+	const loweredHome = join(root, "settings-lowered-home");
+	await mkdir(loweredHome, { recursive: true });
+	const lowered = createToolManager({ home: loweredHome });
+	lowered.applyToolDefaults({ bash: { defaultTimeoutMs: 9_000_000, maxTimeoutMs: 600_000 } });
+	check("a default above the ceiling is pulled down to it", lowered.toolDefaults().bash.defaultTimeoutMs === 600_000, JSON.stringify(lowered.toolDefaults().bash));
+
+	// 读不出的文件是错误，不是静默回落到默认——持有者拒绝坏 JSON，从不覆盖。
+	await writeFile(join(agentDir, "tools.json"), "{ not json", "utf8");
 	let failure = "";
 	try {
-		settingManager.getSettings();
+		agent.settings();
 	} catch (error) {
 		failure = (error as Error).message;
 	}
-	check("reports a settings file it cannot parse", failure.includes("settings.json"), failure);
+	check("reports a settings file it cannot parse", failure.includes("tools.json"), failure);
 }
 
 /**
@@ -619,9 +636,9 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	const question: Message = { role: "user", content: [{ type: "text", text: "lifecycle question" }], timestamp: 1 };
 	sessionManager.appendMessage(state, question);
 
-	// In memory: a config change must land where the session reads it back, and never in the
-	// developer's `~/.my-agent/settings.json`. Before settings became an injected manager, this test
-	// wrote that file.
+	// In memory no more: the settings seam is homes now (settings redistribution spec §8). A config
+	// change must land where the session reads it back, and never in the developer's
+	// `~/.my-agent/` files. The approval map and the row are seeded into a throwaway home first.
 	// A model has to be imported for assembly to have one to record: the catalog is the user's now, and
 	// an empty one yields the placeholder, which is deliberately never written to a session.
 	const configured: ModelConfig = {
@@ -632,13 +649,15 @@ async function exerciseSessionLifecycle(): Promise<void> {
 		contextWindow: 128_000,
 		maxTokens: 8_192,
 	};
-	const settingManager = inMemorySettingManager(
-		{ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } },
-		[configured],
-	);
+	const lifecycleHome = join(root, "settings-lifecycle-home");
+	await mkdir(lifecycleHome, { recursive: true });
+	const lifecycleTools = createToolManager({ home: lifecycleHome });
+	lifecycleTools.applyToolDefaults({ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } });
+	new ModelManager({ home: lifecycleHome }).replaceRows([configured]);
 	const agent = await openAgent({
 		session: state,
-		settingManager,
+		settingsHome: lifecycleHome,
+		modelsHome: lifecycleHome,
 	});
 	const id = state.sessionId;
 
@@ -646,21 +665,21 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	check("is idle before any prompt", agent.snapshot(id).running === false);
 
 	agent.applyConfig(id, { approval: { bash: true } });
-	// The session reads and writes the manager it was given — through the files (or the in-memory
-	// storage) behind it, not a copy: a config patch beyond the approval half is routed to the
-	// settings and read back by the next call, which is what the write-through below proves. The
-	// value is put back, because the exercises that follow read through the same manager.
-	const modeBefore = settingManager.getSettings().steeringMode;
+	// The session reads and writes the homes it was given — through the files behind them, not a copy:
+	// a config patch beyond the approval half is routed to the holders and read back by the next call,
+	// which is what the write-through below proves. The value is put back, because the exercises that
+	// follow read through the same holders.
+	const modeBefore = new SessionManager({ home: lifecycleHome }).sessionDefaults().steeringMode;
 	agent.applyConfig(id, { steeringMode: "all" });
-	check("the session reads and writes the settings it was given", settingManager.getSettings().steeringMode === "all", settingManager.getSettings().steeringMode);
+	check("the session reads and writes the settings it was given", new SessionManager({ home: lifecycleHome }).sessionDefaults().steeringMode === "all", new SessionManager({ home: lifecycleHome }).sessionDefaults().steeringMode);
 	agent.applyConfig(id, { steeringMode: modeBefore });
 	// An approval chosen in a session is that session's own: it lives on the session's `.json`
-	// snapshot, and the settings file — which every other session over this directory reads
-	// — is left exactly as it was.
+	// snapshot, and the holders' files — which every other session over this directory reads
+	// — are left exactly as they were.
 	check(
-		"applyConfig leaves the settings file alone",
-		settingManager.getSettings().approval.bash === false,
-		JSON.stringify(settingManager.getSettings().approval),
+		"applyConfig leaves the settings files alone",
+		lifecycleTools.toolDefaults().approval.bash === false,
+		JSON.stringify(lifecycleTools.toolDefaults().approval),
 	);
 	check("and the session reflects it", agent.getApprovals(id).bash === true, JSON.stringify(agent.getApprovals(id)));
 	// Read back from the file rather than from the bag this exercise opened: the write lands through a
@@ -709,7 +728,8 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	);
 	const reopened = await openAgent({
 		session: reloaded,
-		settingManager,
+		settingsHome: lifecycleHome,
+		modelsHome: lifecycleHome,
 	});
 	check("reopening restores the approval the session chose", reopened.getApprovals(reloaded.sessionId).bash === true, JSON.stringify(reopened.getApprovals(reloaded.sessionId)));
 	const otherState = createSession(root);
@@ -717,7 +737,8 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	sessionManager.appendMessage(otherState, { role: "user", content: [{ type: "text", text: "another session's first words" }], timestamp: 1 });
 	const other = await openAgent({
 		session: otherState,
-		settingManager,
+		settingsHome: lifecycleHome,
+		modelsHome: lifecycleHome,
 	});
 	check(
 		"while another session over the directory keeps the defaults",
@@ -986,12 +1007,16 @@ async function exercisePruning(): Promise<void> {
 		maxTokens: 8_192,
 	};
 	const announced: string[] = [];
+	// 设置归属重构（spec §8）：审批与模型行种进临时 home，homes 透传给 openAgent。
+	const compactionHome = join(root, "settings-compaction-home");
+	await mkdir(compactionHome, { recursive: true });
+	const compactionTools = createToolManager({ home: compactionHome });
+	compactionTools.applyToolDefaults({ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } });
+	new ModelManager({ home: compactionHome }).replaceRows([configured]);
 	const agent = await openAgent({
 		session: store2,
-		settingManager: inMemorySettingManager(
-			{ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } },
-			[configured],
-		),
+		settingsHome: compactionHome,
+		modelsHome: compactionHome,
 		// Dispatch leaves core through the sink handed in at construction (ADR-0013): the removed
 		// `Agent.onEvent` becomes the subscription this sink answers directly.
 		sink: {

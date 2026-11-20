@@ -28,25 +28,34 @@ export {
 export {
 	AGENT_HOME,
 	APP_NAME,
-	clampContentWidth,
-	clampDirectoryPaging,
-	clampFontSize,
-	clampSidebarWidth,
 	DEFAULT_APPEARANCE,
 	DEFAULT_MODE_NAME,
 	DEFAULT_GLOBAL_SETTINGS,
 	CONTENT_WIDTH_RANGE,
 	FONT_SIZE_RANGE,
-	mergeSettings,
 	SIDEBAR_WIDTH_RANGE,
 	settingsPath,
+	stringListOrUndefined,
+	type GlobalSettings,
+	type SettingsPatch,
+} from "./config.ts";
+// RetrySettings 的导出源改为 engine-settings.ts（类型随引擎簇搬入），包对外的名字不变。
+export { EngineSettings, type EngineSettingsOptions, type RetrySettings } from "./engine-settings.ts";
+// UI 簇自设置归属重构起住在这里：类型、规范化函数与持有者同文件（spec §5），包对外的名字不变。
+export {
+	clampContentWidth,
+	clampDirectoryPaging,
+	clampFontSize,
+	clampSidebarWidth,
+	UiSettingsManager,
 	type AppearanceSettings,
 	type DirectoryPaging,
-	type GlobalSettings,
-	type ModeSettings,
-	type RetrySettings,
-} from "./config.ts";
+	type UiSettings,
+	type UiSettingsOptions,
+	type UiSettingsPatch,
+} from "./ui-settings.ts";
 export { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
+export { ModelManager, type ModelManagerOptions } from "./model-manager.ts";
 export {
 	ARG_KEEP_CHARS,
 	ARG_TRIM_MARKER,
@@ -105,7 +114,6 @@ export {
 	NEW_MODEL_DEFAULTS,
 	normalizeThinkingLevel,
 	Model,
-	ModelConfigStore,
 	placeholderModel,
 	unconfiguredStream,
 	type ModelChoice,
@@ -188,6 +196,8 @@ export {
 	type SessionEntryMapById,
 	type SessionMeta,
 	type SessionInfo,
+	type SessionDefaults,
+	type SessionManagerOptions,
 	type Session,
 	type SessionSettings,
 	type MessageEntry,
@@ -206,18 +216,16 @@ export {
 	type Settings,
 } from "./settings.ts";
 export {
-	inMemorySettingManager,
-	SettingManager,
-	type SettingManagerOptions,
-	type SettingsPatch,
-	type SettingsStorage,
-} from "./setting-manager.ts";
-export {
+	type BashSettings,
 	createToolManager,
 	describeToolCall,
+	type ModeSettings,
 	fillTools,
 	narrowToKnown,
 	ToolManager,
+	type ToolDefaults,
+	type ToolDefaultsPatch,
+	type ToolManagerOptions,
 	type ToolRunContext,
 	type ToolState,
 } from "./tools/index.ts";

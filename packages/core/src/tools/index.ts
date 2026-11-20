@@ -1,5 +1,10 @@
 export {
+	type BashSettings,
+	type ModeSettings,
+	type ToolDefaults,
+	type ToolDefaultsPatch,
 	type ToolFillContext,
+	type ToolManagerOptions,
 	type ToolRunContext,
 	type ToolState,
 	createToolManager,

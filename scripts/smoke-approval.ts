@@ -41,7 +41,7 @@ import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-
 import { mountSession } from "./mount-session.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
 import type { PendingApproval, SessionRow } from "@my-agent/core/protocol";
-import { type Agent, type ModelConfig, type Session, SessionManager, sessionMetaPath, setSessionsDir, SettingManager, type SessionMeta } from "@my-agent/core";
+import { type Agent, createToolManager, type ModelConfig, ModelManager, type Session, SessionManager, sessionMetaPath, setSessionsDir, type SessionMeta } from "@my-agent/core";
 
 let failures = 0;
 
@@ -137,9 +137,10 @@ process.stdout.write(`model ${modelName} via the scripted transport\n`);
  */
 async function seedApprovalGate(root: string, modelRows: readonly ModelConfig[]): Promise<string> {
 	const home = await mkdtemp(join(tmpdir(), "my-agent-approval-home-"));
-	const settingManager = new SettingManager({ home, modelsHome: home });
-	settingManager.applySettings({ approval: { read: true } });
-	settingManager.replaceModels(modelRows);
+	// 设置归属重构（spec §8）后门面退场：审批映射种进 tools.json，行种进 models.json，各持自己的
+	// 文件——同一套持有者，hub 之后按同一套规则读回。
+	createToolManager({ home }).applyToolDefaults({ approval: { read: true } });
+	new ModelManager({ home: home }).replaceRows(modelRows);
 	return home;
 }
 
@@ -703,8 +704,7 @@ const restartRoot = await mkdtemp(join(tmpdir(), "my-agent-approval-restart-"));
 const restartHome = await mkdtemp(join(tmpdir(), "my-agent-approval-restart-home-"));
 setSessionsDir(join(restartHome, "sessions"));
 // One home for both processes: the rows the parent's prompt resolves are the rows the child reads.
-const settingManager = new SettingManager({ home: restartHome, modelsHome: restartHome });
-settingManager.replaceModels(rows);
+new ModelManager({ home: restartHome }).replaceRows(rows);
 const restartFake = createFakeTransport();
 const first = await bootServer({ workDirAbsPath: restartRoot, port: 0, chatTransport: restartFake.chatTransport, settingsHome: restartHome });
 let restartSessionId = "";

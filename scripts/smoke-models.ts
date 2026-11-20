@@ -20,7 +20,7 @@ import {
 	placeholderModel,
 	rowFor,
 	unconfiguredStream,
-	ModelConfigStore,
+	ModelManager,
 	type ModelChoice,
 	type ModelConfig,
 } from "@my-agent/core";
@@ -316,13 +316,13 @@ try {
 		check("an explicit off reads the same", JSON.stringify(explicitOff.thinking) === JSON.stringify(off.thinking));
 	}
 
-	heading("the store round-trips the file");
+	heading("the manager round-trips the file");
 	{
-		const modelConfigStore = ModelConfigStore.create(home);
-		check("a missing file is no models", modelConfigStore.list().length === 0);
+		const manager = new ModelManager({ home: home });
+		check("a missing file is no models", manager.catalog().length === 0);
 
-		modelConfigStore.replace([row({ name: "one" }), row({ name: "two", id: "claude-opus-5" })]);
-		const reloaded = ModelConfigStore.create(home).list();
+		manager.replaceRows([row({ name: "one" }), row({ name: "two", id: "claude-opus-5" })]);
+		const reloaded = new ModelManager({ home: home }).catalog();
 		check("both rows come back", reloaded.length === 2, String(reloaded.length));
 		check("with their names", reloaded[0]?.name === "one" && reloaded[1]?.name === "two");
 		check("their keys", reloaded[0]?.apiKey === "secret", String(reloaded[0]?.apiKey));
