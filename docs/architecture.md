@@ -56,9 +56,9 @@ my-coding-agent/
     │                 #   tools/（每工具一个文件）、llm/（pi-ai 的裁剪副本，一个传输层：
     │                 #   api/、model.ts、models.ts、types.ts（Context 与 Tool 住这里）、utils/；@ts-nocheck）
     ├── server/src/   # @my-agent/server - 传输层：boot.ts、main.ts、http.ts、http/（routing.ts 是
-    │                 #   唯一读 URL 的地方，websocket.ts 是手写的 RFC6455，client-frame.ts 解析上行帧）、
+    │                 #   唯一读 URL 的地方，websocket.ts 是手写的 RFC6455）、
     │                 #   mux.ts（常驻连接、存活探测与关停；每条连接的 controller：观看表、扣帧队列、
-    │                 #   审批读者计数）、frames.ts（帧构造、审批差量、失败措辞——纯函数）、
+    │                 #   审批读者计数）、frames.ts（帧构造、上行帧解析、审批差量、失败措辞——纯函数）、
     │                 #   wire.ts（一条连接的帧队列与心跳）、
         │                 #   controllers/（routes.ts 是 API 表）、hub.ts（一个编排层 + 一张按会话的
     │                 #   订阅表 + 一个全局通道）

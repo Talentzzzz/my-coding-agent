@@ -1,6 +1,5 @@
 import type { PendingApproval, ServerFrame, SessionRow, SessionRowPatch, SessionSnapshot } from "@my-agent/core/protocol";
 import * as frame from "./frames.ts";
-import { parseClientFrame } from "./http/client-frame.ts";
 import type { SessionHub, SubscriptionSink } from "./hub.ts";
 import {
 	CLOSE_GOING_AWAY,
@@ -154,7 +153,7 @@ export class MuxConnection {
 	 */
 	handle(text: string): void {
 		if (this.disposed) return;
-		const incoming = parseClientFrame(text);
+		const incoming = frame.parseClientFrame(text);
 		if (incoming === undefined) {
 			this.wire.log(`mux: 丢弃一帧看不懂的上行帧（${text.length} 字节）`);
 			return;
