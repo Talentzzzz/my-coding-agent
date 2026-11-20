@@ -27,12 +27,16 @@
 		"scripts/smoke-session.ts",
 		"scripts/smoke-settings.ts",
 		"scripts/smoke-tool-settings.ts",
+		"scripts/smoke-engine-settings.ts",
+		"scripts/smoke-session-settings.ts",
+		"scripts/smoke-ui-settings.ts",
 		"scripts/smoke-tools.ts",
 		"scripts/smoke-sessions.ts",
 		"scripts/smoke-approval.ts",
 		"scripts/smoke-approval-endpoint.ts",
 		"scripts/smoke-approval-queue.ts",
 		"scripts/smoke-approval-recovery.ts",
-		"scripts/smoke-models.ts"
+		"scripts/smoke-models.ts",
+		"scripts/smoke-model-manager.ts"
 	]
 }

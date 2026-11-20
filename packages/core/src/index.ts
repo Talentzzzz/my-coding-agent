@@ -28,10 +28,6 @@ export {
 export {
 	AGENT_HOME,
 	APP_NAME,
-	clampContentWidth,
-	clampDirectoryPaging,
-	clampFontSize,
-	clampSidebarWidth,
 	DEFAULT_APPEARANCE,
 	DEFAULT_MODE_NAME,
 	DEFAULT_GLOBAL_SETTINGS,
@@ -40,12 +36,25 @@ export {
 	mergeSettings,
 	SIDEBAR_WIDTH_RANGE,
 	settingsPath,
+	type GlobalSettings,
+} from "./config.ts";
+// RetrySettings 的导出源改为 engine-settings.ts（类型随引擎簇搬入），包对外的名字不变。
+export { EngineSettings, type RetrySettings } from "./engine-settings.ts";
+// UI 簇自设置归属重构起住在这里：类型、规范化函数与持有者同文件（spec §5），包对外的名字不变。
+export {
+	clampContentWidth,
+	clampDirectoryPaging,
+	clampFontSize,
+	clampSidebarWidth,
+	UiSettingsManager,
 	type AppearanceSettings,
 	type DirectoryPaging,
-	type GlobalSettings,
-	type RetrySettings,
-} from "./config.ts";
+	type UiSettings,
+	type UiSettingsOptions,
+	type UiSettingsPatch,
+} from "./ui-settings.ts";
 export { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
+export { ModelManager } from "./model-manager.ts";
 export {
 	ARG_KEEP_CHARS,
 	ARG_TRIM_MARKER,
@@ -187,6 +196,7 @@ export {
 	type SessionEntryMapById,
 	type SessionMeta,
 	type SessionInfo,
+	type SessionDefaults,
 	type Session,
 	type SessionSettings,
 	type MessageEntry,

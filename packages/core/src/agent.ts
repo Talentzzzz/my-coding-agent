@@ -65,6 +65,7 @@ import { UnknownSessionError } from "./session/unknown-session.ts";
 import type { SettingsPatch } from "./setting-manager.ts";
 import type { SettingManager } from "./setting-manager.ts";
 import type { GlobalSettings } from "./config.ts";
+import { EngineSettings, type RetrySettings } from "./engine-settings.ts";
 import type { ToolManager } from "./tools/index.ts";
 import { type AgentEvent, type AgentRequestUpdate, type RunRecoveryOptions, type ToolCallAnswer, type ToolCallOutcome } from "./types.ts";
 
@@ -106,6 +107,14 @@ export interface AgentConfig {
 	 * 都和行一样新鲜。
 	 */
 	settingManager: SettingManager;
+	/**
+	 * 引擎簇（`engine.json`）所在的 home。缺省即 `AGENT_HOME`。
+	 *
+	 * 设置归属拆分（spec §5）后各持有者各持自己的文件：这一项是引擎簇的，与
+	 * {@link AgentConfig.settingManager} 背后那份全局 settings.json 不再同住——迁移期间两者暂时
+	 * 并存，宿主可用它把引擎簇指到别处（测试递临时目录）。
+	 */
+	settingsHome?: string;
 	/**
 	 * 本构建认识的工具，加上调用方在它上面注册的任何东西——测试的自定义工具。
 	 * 只有结构：选择不在这里。
@@ -226,6 +235,13 @@ export class Agent {
 	 */
 	private readonly settingManager: SettingManager;
 	/**
+	 * 引擎簇（retry）的持有者：编排层自己的设置不进任何公开门面，私有持有（spec §3/§5）。
+	 *
+	 * 与其他服务一样是每次现读的：{@link Agent.retrySettings} 与 {@link Agent.applyRetry} 之后的
+	 * 每一次调用都是对 `engine.json` 的一次新读，没有需要失效的副本。
+	 */
+	private readonly engineSettings: EngineSettings;
+	/**
 	 * 会话分发所经的接缝，包括 `openAgent` 安装的默认处理器。
 	 *
 	 * 公开出来，让已经有会话的宿主能在其上加行为：在这里注册的处理器排在默认之后，精修它们的答案。
@@ -253,6 +269,7 @@ export class Agent {
 	constructor(config: AgentConfig) {
 		this.sessionManager = config.sessionManager;
 		this.settingManager = config.settingManager;
+		this.engineSettings = new EngineSettings(config.settingsHome);
 		this.toolManager = config.toolManager;
 		this.hooks = config.hooks;
 		this.systemPrompt = config.systemPrompt;
@@ -1398,6 +1415,27 @@ export class Agent {
 				tools: [...toolFace.declared],
 			},
 		};
+	}
+
+	// ---------------------------------------------------------------------------- 引擎簇（retry）
+
+	/**
+	 * 供应商调用失败时的重试策略，补默认后的副本——引擎簇（`engine.json`）的一次现读。
+	 *
+	 * 私有面，不进公开门面（spec §3/§5）：唯一消费者是编排层自己的重试泵。此刻
+	 * {@link Agent.pumpAttempts} 仍读 {@link Agent.settingManager}（T6 统一切换），届时改走这里。
+	 */
+	private retrySettings(): RetrySettings {
+		return this.engineSettings.retrySettings();
+	}
+
+	/**
+	 * T6 接线：`SettingsPatch.retry` 经门面路由进这里。
+	 *
+	 * 此刻没有调用方——引擎簇的写路径先于它的读路径切换落地，持有者先就位、接线随后。
+	 */
+	private applyRetry(patch: Partial<RetrySettings>): void {
+		this.engineSettings.applyRetry(patch);
 	}
 
 	/**
