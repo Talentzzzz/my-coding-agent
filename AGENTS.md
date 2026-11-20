@@ -24,23 +24,24 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 代码把这些词当作术语来用。
 
 - **service（无属性服务）** —— 无属性服务的形态（ADR-0006）：`Agent` 编排、会话账本（`SessionManager`）、
-  配置（`SettingManager`——设置与模型行共用的无状态门面）、工具表（`ToolManager`）。构造只收服务依赖，公开方法收 `(id, 请求自己的参数)`，每样数据在**用到它的那一行**向属主现取、
+  各设置簇的持有者（`ToolManager`、`ModelManager`、`UiSettingsManager`、`EngineSettings`——每簇一个持有者、
+  一份自己的文件，[ADR-0028](docs/adr/0028-settings-ownership-per-manager.md)）。构造只收服务依赖，公开方法收 `(id, 请求自己的参数)`，每样数据在**用到它的那一行**向属主现取、
   拿到的只是局部变量；不传、不养任何聚合袋。类壳保留（可构造注入），方法体就写在类里、没有一层同名的
   文件级函数可转发，拆掉的只是 per-session 实例字段；
   Manager 内部按 id / 目录键控的缓存随时可从磁盘重建、且藏在自己内部不被传递——这正是它与聚合袋的
   分界。**常驻表有两个例外**：`ToolManager` 持一张常驻实例表
   （[ADR-0011](docs/adr/0011-tool-manager-instance-table.md)）；`SessionManager` 持一张按会话文件对
   键控的持有簿记表（易失：重启即空、不落盘、不需重建，
-  [ADR-0023](docs/adr/0023-holds-into-session-manager-veto-delete.md)）。两者之外，`SettingManager`
+  [ADR-0023](docs/adr/0023-holds-into-session-manager-veto-delete.md)）。两者之外，各设置持有者
   与 `Agent` 编排仍是原来的形态：每样数据在用到它的那一行现取、
-  不养聚合袋，这条不变。理由与边界只在那两条 ADR，这里不复述。**消费边界是另一条**：三只 Manager 的
+  不养聚合袋，这条不变。理由与边界只在那两条 ADR，这里不复述。**消费边界是另一条**：各持有者的
   构造由 `createSessionAgent()` 吸收、在本进程的唯一消费者是 `Agent` 编排，server 包只认编排层的公开
   面——这条归 [ADR-0012](docs/adr/0012-agent-facade.md)，由 `npm run check` 的 `check-server-facade`
   守卫。
 - **engine（引擎）** —— `Agent.run`：一次运行的入口与出口，与 `runEngine`、`prepareRequest`、压缩
   阶梯、重试泵、两个闸门一起是 `Agent` 的私有方法（ADR-0016：loop 就是编排，没有回调面、没有
   白名单、没有守卫）。它读的每一处接缝要么是这次运行的局部变量（模型、abort controller、事件 sink，
-  以及**这次运行自己重放出的那只袋**），要么是 `this`——三只 Manager、hooks、transport、prompt
+  以及**这次运行自己重放出的那只袋**），要么是 `this`——各 Manager 与设置持有者、hooks、transport、prompt
   builder 都在编排层自己身上。`RunInput` 只有三件值（`agentState` / `session` / `start`）；那只袋是
   ADR-0013 的「一次运行读一次盘」，开跑时 `getSessionBySessionId(id)` 一次装进、运行全程写它。工具调用经
   `executeTool` 执行（转发 `ToolManager.execute`，
@@ -73,18 +74,24 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   `.json` 是 commit marker），没有第一条消息的会话不存在、不进侧边栏；标题是快照的 `title` 字段，没写过就从分支首条 user 消息派生；配对残缺
   或版本不对的会话直接删、不迁移。**这两个文件就是会话本身**：进程里没有一份副本，每次操作
   现开一只袋、用完就丢（`Agent.getSessionBySessionId(id)`，ADR-0013）。
-- **settings（设置）** —— 分三个类型名，各管一层（[ADR-0019](docs/adr/0019-settings-two-layers.md)）：
-  **`GlobalSettings`** 是 global 侧唯一一份 `<agent home>/settings.json` 补默认后的视图——`modes` 表
-  （模式 → 工具集 + 审批基线）、默认模型、外观、bash、重试与队列模式都在这里；**`SessionSettings`**
-  是会话 `.json` 快照的设置半（`Session` 上的 `settings` 字段），只持有**选择**：模式指针 `mode`、
-  审批增量 `approval`、模型 `{ name, modelId, thinkingLevel }`——不持有工具集、不持有完整模型行；
-  **`Settings`**（`core/src/settings.ts`）是两半**每次读取现算**的组合（`resolveSettings`）——活跃
-  工具集、有效审批、模式座位与从目录现查的完整模型行，闸门、prompt、请求构建与快照从这同一份作答，
-  产物只活在调用栈上、从不进任何袋。`SettingManager` 是设置与模型行**唯一**的门：无状态门面、不做
-  任何缓存，公开面四法（`getSettings()` / `applySettings(patch)` / `modelCatalog()` /
-  `replaceModels()`），一次写入对一切会话的下一次读取即生效，没有需要失效的副本。窗口里「设置」
-  这个词**分两级**：**会话级**（改动它只有「选一个模式」这一条路）与**应用级**（外观、模型清单、
-  默认模型、bash 超时，以及全局默认的工具集与审批）。
+- **settings（设置）** —— 设置分两级：**会话级**（改动它只有「选一个模式」这一条路）与**应用级**
+  （外观、模型清单、默认模型、bash 超时，以及全局默认的工具集与审批）。应用级的归属按关注点拆成
+  五个持有者，每簇一个、且只有一个，各有一份自己的文件（[ADR-0028](docs/adr/0028-settings-ownership-per-manager.md)，
+  取代 ADR-0019 的所有权半）：工具簇（`tools` / `modes` / `approval` / `bash`）归 **ToolManager**
+  （`tools.json`），会话簇（`steeringMode` / `followUpMode`）归 **SessionManager**（`sessions.json`），
+  模型簇（`models.json` 的行 + `defaultModel` + `defaultModelSeeded`）归 **ModelManager**，
+  UI 簇（`appearance` / `hiddenDirectories` / `directoryNames`）归 **UiSettingsManager**（`ui.json`），
+  引擎簇（`retry`）归编排层私有（`engine.json`，不进公开门面）。旧的 `settings.json` 只作迁移源：
+  各持有者首次读取时一次性捡走自己的簇，之后旧文件被忽略（不删除不写入）；
+  `SettingManager` 已退场，没有统一设置门面。持有者全部无状态、每次现读，不共享读写抽象；
+  **`SessionSettings`** 是会话 `.json` 快照的设置半（`Session` 上的 `settings` 字段），只持有
+  **选择**：模式指针 `mode`、审批增量 `approval`、模型 `{ name, modelId, thinkingLevel }`——不持有
+  工具集、不持有完整模型行；**`Settings`**（`core/src/settings.ts`）是会话侧与两个持有者
+  **每次读取现算**的组合（`resolveSettings(session, toolDefaults, modelView, known)`，输入是
+  ToolManager 与 ModelManager 各一次现读的窄来源）——活跃工具集、有效审批、模式座位与从目录
+  现查的完整模型行，闸门、prompt、请求构建与快照从这同一份作答，产物只活在调用栈上、从不进
+  任何袋。`Agent` 门面只剩路由与组装：`settings()` 从五个持有者现读、组装出 `GlobalSettings`
+  形状的读模型（不是所有权壳），`applySettings(patch)` 按字段名逐簇分发、每簇独立原子落盘。
 - **model（模型）** —— `models.json` 里的一行**就是**一个 `ModelConfig`：一个端点、一个密钥、以及模型
   自己的事实（`id` 是接口认识的名字，`name` 既是身份也是标签）。`llm/model.ts` 的 `Model` 类把它变成发
   请求用的对象（`apiKey`、`thinkingLevel` 都骑在这个对象上），`stream(context, options)` 收一个
@@ -180,8 +187,9 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   策略就装在里面，引擎只是对模型 `stream`；失败的尝试从不被记录。
 - **queue（队列）** —— 一次运行正在流式时被接受的消息：`steer` 在下一个取走点注入，`followUp` 等这一
   轮结束。
-- **assembly（装配）** —— `assembleSession(sessionManager, settings, tools, options)` 收**必填**
-  的三只 manager（显式实参，ADR-0017）+ 窄的
+- **assembly（装配）** —— `assembleSession(sessionManager, tools, modelManager, options)` 收**必填**
+  的三只 manager（显式实参，ADR-0017；设置持有者的现读在其内各来一次，
+  [ADR-0028](docs/adr/0028-settings-ownership-per-manager.md)）+ 窄的
   `AssembleAgentStateOptions`（原名 `OpenSessionOptions`；只有会话袋子，
   工作目录是袋子自己的 `settings.workDirAbsPath`，没有覆盖参数），按会话先、设置后的链
   （`fillSession` → 设置现读 → `createLive`）装配出一份
@@ -191,8 +199,8 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   这扇门本身已收成类私有：公开面上剩 `createAndPrompt`（造，[ADR-0021](docs/adr/0021-lazy-session-identity.md)）、
   `snapshotOf` / `readSessionSnapshot`（读）与删除动词（出表），何时装配、递哪只袋子进表不再是外界的动词。
   `createSessionAgent()` 是另一半：
-  收 `{ settingsHome?, modelsHome?, api? }`（外加 test-only 的 `settings` / `tools` 两缝）并**自己造三只
-  Manager**——Manager 不再是调用者的决定（[ADR-0012](docs/adr/0012-agent-facade.md)）——组成一个
+  收 `{ settingsHome?, modelsHome?, api? }`（外加 test-only 的 `toolManager` 一缝）并**自己造各
+  Manager 与设置持有者**——它们不再是调用者的决定（[ADR-0012](docs/adr/0012-agent-facade.md)）——组成一个
   **编排层**，进程只需要一份（hub 构造时建它，递的只是 homes 与 api；打开的模型默认不进公开面——
   它是设置里的事实，装配每次从磁盘现读），测试与
   只跑一个会话的调用者用 `openAgent()` 自组一份。`Agent` 按 id 键控

@@ -37,6 +37,7 @@
 | [0025](0025-mux-is-the-connection-controller.md) | mux 就是连接的 controller——注入 hub / projection / 答案表，`session stream` 退场，翻译退成 `frames.ts` 的纯函数 | 已接受，已落地（2026-11-18，`check` 绿、9 个 smoke 全绿；协议零变化）；取代 0024 的决定 4 与它的分层表 `mux` 行，0024 的决定 1/2/3 与全部不变量继续成立 |
 | [0026](0026-projection-folded-into-hub.md) | 行存储并入 hub——`projection.ts` 退场，controller 与 mux 只认一个 service，`publishRows` / `publishGone` 退成私有 | 已接受，已落地（2026-11-19，`check` 绿、9 个 smoke 全绿；语义零变化）；取代 0025 分层表的 `projection` 行，0025 的其余决定与不变量继续成立 |
 | [0027](0027-rows-computed-not-stored.md) | 行存储退场——行是现算的快照加增量推送，服务端不为行养内存；`session_row` 帧变 `SessionRowPatch`，客户端逐字段合并 | 已接受，已落地（2026-11-19，`check` 绿、24 个 smoke 全绿）；取代 0026 的决定 1/2，0026 的其余部分与 0025 的分工继续成立；顺带补上闸感知的第二次删除 404 |
+| [0028](0028-settings-ownership-per-manager.md) | 设置归属按持有者拆散——每簇一个持有者、一份自己的文件，`SettingManager` 退场；`resolveSettings` 的组合视图半原样保留 | 已接受，已落地（2026-11-20，settings-redistribution 代码票全部落地、07 号文档票同步；文档票不跑 `check`——代码由各实现票验证）；取代 0019 的所有权半（global 设置住一只 `SettingManager`、一份 `settings.json`），0019 的组合视图半（`resolveSettings` 唯一答案、每次现算）继续成立 |
 
 ## 门槛
 
