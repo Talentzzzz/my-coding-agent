@@ -8,6 +8,9 @@ import { numberOr, retryOr, type RetrySettings } from "./engine-settings.ts";
 // 指向 engine-settings.ts。
 export type { RetrySettings };
 import type { QueueMode } from "./protocol.ts";
+// queueModeOr 已随会话簇搬进 session-manager.ts（spec §5）；mergeSettings 过渡期仍需要它。
+// 调用期执行，环安全——session-manager.ts 对本文件的 import 也只在其函数体内使用。
+import { queueModeOr } from "./session/session-manager.ts";
 // UI 簇的类型与规范化器已随簇搬进 ui-settings.ts（spec §5）。appearanceOr 与
 // stringRecordOrUndefined 只在 mergeSettings 调用期触达，而 ui-settings.ts 也只在函数体里引用
 // 本文件的 DEFAULT_APPEARANCE 与三个 RANGE 常量——两侧都不在模块顶层取对方的值，环安全。
@@ -235,11 +238,6 @@ function bashOr(value: unknown): BashSettings {
 		),
 		maxTimeoutMs,
 	};
-}
-
-/** pi-agent-core 认识的两种队列模式；其他取值保留默认。 */
-function queueModeOr(value: unknown, fallback: QueueMode): QueueMode {
-	return value === "all" || value === "one-at-a-time" ? value : fallback;
 }
 
 function stringOrUndefined(value: unknown): string | undefined {
