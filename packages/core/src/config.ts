@@ -4,6 +4,13 @@ import type { QueueMode } from "./protocol.ts";
 // queueModeOr 已随会话簇搬进 session-manager.ts（spec §5）；mergeSettings 过渡期仍需要它。
 // 调用期执行，环安全——session-manager.ts 对本文件的 import 也只在其函数体内使用。
 import { queueModeOr } from "./session/session-manager.ts";
+// UI 簇的类型与规范化器已随簇搬进 ui-settings.ts（spec §5）。appearanceOr 与
+// stringRecordOrUndefined 只在 mergeSettings 调用期触达，而 ui-settings.ts 也只在函数体里引用
+// 本文件的 DEFAULT_APPEARANCE 与三个 RANGE 常量——两侧都不在模块顶层取对方的值，环安全。
+import { appearanceOr, stringRecordOrUndefined } from "./ui-settings.ts";
+import type { AppearanceSettings } from "./ui-settings.ts";
+// protocol.ts 与 setting-manager.ts（不随本票改动）仍从这里拿 UI 类型；真实定义在 ui-settings.ts。
+export type { AppearanceSettings, DirectoryPaging } from "./ui-settings.ts";
 
 /** 存放会话、设置与已存凭据的目录。 */
 export const AGENT_HOME = resolve(process.env.MY_AGENT_HOME ?? join(homedir(), ".my-agent"));
@@ -27,57 +34,9 @@ export interface RetrySettings {
 }
 
 /**
- * 窗口如何绘制自己。
- *
- * 与其他设置放在一起而不是存进浏览器自己的存储，因为桌面外壳每次启动都换一个新端口：
- * `localStorage` 按 origin 隔离，存在那里的偏好会在窗口换个端口重开的那一刻被忘掉。
+ * 窗口如何绘制自己——类型与规范化器（`appearanceOr`、`clamp*`）已随簇搬进 ui-settings.ts；
+ * `DEFAULT_APPEARANCE` 与三个 RANGE 常量按 spec §5 留守在这里。
  */
-export interface AppearanceSettings {
-	/** `system` 跟随操作系统。 */
-	theme: "system" | "light" | "dark";
-	/**
-	 * 正文字号的 px 值——字号阶梯里唯一允许移动的一档；外壳其余四档固定，不跟随它。
-	 */
-	fontSize: number;
-	/**
-	 * 侧边栏宽度的 px 值，即拖动手柄最后一次留下的位置。用户拖过一次之前不存在——默认宽度由样式表
-	 * 决定，从未表达过的偏好不该在这里被凭空造出来。
-	 */
-	sidebarWidth?: number;
-	/**
-	 * 阅读列宽度的 px 值，即其拖动手柄最后一次留下的位置。用户拖过一次之前不存在——默认值是会话列
-	 * 自身宽度减去两侧各一条 gutter，绘制时计算，从未表达过的偏好不该在这里被凭空造出来。
-	 *
-	 * 存下的数字是*偏好*，不是实际显示宽度：窗口在每次读取时把它钳制到当前布局允许的范围内，所以
-	 * 更小的窗口会压低显示而不毁掉选择，窗口变大时选择会自己回来。服务端只负责绝对范围
-	 * {@link CONTENT_WIDTH_RANGE}。
-	 */
-	contentWidth?: number;
-	/**
-	 * 侧边栏按目录的翻页状态，以目录绝对路径为键。
-	 *
-	 * 某个目录真的被翻页或收起过之前不存在——用户从未碰过的列表不留条目，与两个宽度字段遵循同一
-	 * 规则。用路径而不是 id 作键，因为路径是目录分组在线上唯一的身份。
-	 */
-	directories?: Record<string, DirectoryPaging>;
-}
-
-/**
- * 一个目录的翻页状态，即侧边栏最后一次留下的样子。
- *
- * 三个字段，因为其中两个已决定的行为需要第三者之上的记忆：「收起」按钮把 {@link page} 退回一页
- * ——撤销上一次「展开其余」加上的页——{@link savedPage} 随之移动，之后再次展开收起的标题组时，
- * 会落回用户真正读到的那一页。
- */
-export interface DirectoryPaging {
-	/** 目录是否只显示标题。 */
-	collapsed: boolean;
-	/** 当前展开了多少页会话；上限是 `page * 5`。 */
-	page: number;
-	/** 目录标题最后一次被收起时展开到的页。 */
-	savedPage: number;
-}
-
 export const DEFAULT_APPEARANCE: AppearanceSettings = { theme: "dark", fontSize: 15 };
 
 /** 字号控件提供的范围，解析器与客户端共用。 */
@@ -313,78 +272,6 @@ function bashOr(value: unknown): BashSettings {
 	};
 }
 
-/** 主题与字号，各自独立回落，让一个坏字段不会连带重置另一个。 */
-function appearanceOr(value: unknown): AppearanceSettings {
-	const record = isRecord(value) ? value : {};
-	const theme = record.theme;
-	const sidebarWidth = clampSidebarWidth(record.sidebarWidth);
-	const contentWidth = clampContentWidth(record.contentWidth);
-	const directories = clampDirectoryPaging(record.directories);
-	return {
-		theme: theme === "light" || theme === "dark" || theme === "system" ? theme : DEFAULT_APPEARANCE.theme,
-		fontSize: clampFontSize(record.fontSize),
-		// 可选，从未拖动过的外观不留字段：默认宽度由样式表决定，在这里写一个值会把「从未选择」变成
-		// 「选择了默认值」。
-		...(sidebarWidth === undefined ? {} : { sidebarWidth }),
-		...(contentWidth === undefined ? {} : { contentWidth }),
-		...(directories === undefined ? {} : { directories }),
-	};
-}
-
-/**
- * 字号落在控件提供的范围内。
- *
- * 钳制而不是拒绝：文件是手编的，超范围的字号是要吸收的笔误，不是拒绝给窗口设置的理由。
- */
-export function clampFontSize(value: unknown): number {
-	if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_APPEARANCE.fontSize;
-	return Math.min(FONT_SIZE_RANGE.max, Math.max(FONT_SIZE_RANGE.min, Math.round(value)));
-}
-
-/**
- * 侧边栏宽度落在手柄可及的范围内，undefined 表示「从未拖动」。
- *
- * 与字号同理，钳制而不是拒绝：手编的文件，或宽于当前范围的旧偏好，都是要拉回界内的数字——
- * 不是忘掉它的理由。
- */
-export function clampSidebarWidth(value: unknown): number | undefined {
-	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
-	return Math.min(SIDEBAR_WIDTH_RANGE.max, Math.max(SIDEBAR_WIDTH_RANGE.min, Math.round(value)));
-}
-
-/**
- * 阅读列宽度落在绝对范围内，undefined 表示「从未拖动」。
- *
- * 与侧边栏宽度同理，钳制而不是拒绝：手编的文件，或旧构建留下的超范围偏好，都是要拉回界内的
- * 数字——不是忘掉它的理由。
- */
-export function clampContentWidth(value: unknown): number | undefined {
-	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
-	return Math.min(CONTENT_WIDTH_RANGE.max, Math.max(CONTENT_WIDTH_RANGE.min, Math.round(value)));
-}
-
-/**
- * 各目录的翻页状态，逐条目处理，undefined 表示「从未碰过」。
- *
- * 与两个宽度同理，钳制而不是拒绝：文件是手编的，一个目录的坏条目自己被丢弃——不该连累其他目录
- * 的状态，也不该连累整个字段在 appearance 里的位置。不是正整数的页码回落到第一页，而不是被采信。
- */
-export function clampDirectoryPaging(value: unknown): Record<string, DirectoryPaging> | undefined {
-	if (!isRecord(value)) return undefined;
-	const out: Record<string, DirectoryPaging> = {};
-	for (const [workDirAbsPath, entry] of Object.entries(value)) {
-		if (workDirAbsPath.trim().length === 0 || !isRecord(entry)) continue;
-		const clampPage = (input: unknown): number =>
-			typeof input === "number" && Number.isInteger(input) && input >= 1 ? input : 1;
-		out[workDirAbsPath] = {
-			collapsed: entry.collapsed === true,
-			page: clampPage(entry.page),
-			savedPage: clampPage(entry.savedPage),
-		};
-	}
-	return Object.keys(out).length > 0 ? out : undefined;
-}
-
 function stringOrUndefined(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
@@ -395,24 +282,12 @@ function stringOrUndefined(value: unknown): string | undefined {
  * 文件是手编的，所以不是非空字符串的条目被丢弃而不是拒绝——一行坏数据不该连累整个字段。空列表
  * 会被*保留*：缺失的字段表示「全部工具」（旧文件的行为），而显式空列表是一个选择——「什么都不
  * 活跃」——把一个选择悄悄改写成它的反面，是设置读取者唯一不可做的事。
+ *
+ * 工具簇与模式表共用，UI 持有者的读时迁移（hiddenDirectories）也用它。
  */
-function stringListOrUndefined(value: unknown): string[] | undefined {
+export function stringListOrUndefined(value: unknown): string[] | undefined {
 	if (!Array.isArray(value)) return undefined;
 	return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-}
-
-/**
- * 以路径为键的名字映射，undefined 表示「从未写过」。
- *
- * 空字符串在这里幸存而不是被丢弃：空名字是「已清除条目」的存储形态，而渲染侧边栏的读取者是决定
- * 其含义的唯一地方。
- */
-function stringRecordOrUndefined(value: unknown): Record<string, string> | undefined {
-	if (!isRecord(value)) return undefined;
-	const entries = Object.entries(value).filter(
-		(entry): entry is [string, string] => typeof entry[1] === "string" && entry[0].trim().length > 0,
-	);
-	return entries.length === 0 ? undefined : Object.fromEntries(entries);
 }
 
 /**
