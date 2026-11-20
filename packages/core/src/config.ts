@@ -1,31 +1,21 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-// 引擎簇的类型与规范化函数随簇搬进 engine-settings.ts（spec §5）；默认值留守本文件的
-// DEFAULT_GLOBAL_SETTINGS。环安全：retryOr 只在 mergeSettings 的调用期执行，本文件不把它用在
-// 模块顶层。
-import { retryOr, type RetrySettings } from "./engine-settings.ts";
-// 类型随簇搬入后，旧读者（setting-manager.ts）仍从本文件点这个名字——type-only 再导出，源头不变地
-// 指向 engine-settings.ts。
+// 类型随簇搬进各持有者的文件（设置归属重构 spec §5），config.ts 只留守类型名供 wire 与门面的
+// 读模型使用。本文件不再有任何规范化函数——各簇的规范化器随簇住在各持有者文件里，DEFAULT_* 常量
+// 留守本文件供它们回落。
+import type { RetrySettings } from "./engine-settings.ts";
+// RetrySettings 的 re-export：type-only，源头不变地指向 engine-settings.ts。
 export type { RetrySettings };
 import type { QueueMode } from "./protocol.ts";
-// 工具簇的类型与规范化函数随簇搬进了 tools/manager.ts（设置归属重构 §5）；mergeSettings 仍在
-// 调用期使用 bashOr/modesOr，这里 import 回来。环安全：manager.ts 也从本文件 import 默认值
-// （DEFAULT_MODE_NAME、DEFAULT_BASH_SETTINGS、DEFAULT_GLOBAL_SETTINGS），但两侧引用的运行时值都
-// 只在函数体与构造期执行，没有任何模块顶层求值，ESM 循环 import 安全。
-import { bashOr, modesOr, type BashSettings, type ModeSettings } from "./tools/manager.ts";
-
-// 类型随簇搬走后的 re-export：protocol.ts、setting-manager.ts、llm/ 的既有 import 路径不变。
+// 工具簇的类型随簇搬进了 tools/manager.ts（设置归属重构 §5）；mergeSettings 已随 SettingManager
+// 退场，这里不再 import 任何规范化器。
+import type { BashSettings, ModeSettings } from "./tools/manager.ts";
+// 类型随簇搬走后的 re-export：protocol.ts 与既有 import 路径不变。
 export type { BashSettings, ModeSettings };
-// queueModeOr 已随会话簇搬进 session-manager.ts（spec §5）；mergeSettings 过渡期仍需要它。
-// 调用期执行，环安全——session-manager.ts 对本文件的 import 也只在其函数体内使用。
-import { queueModeOr } from "./session/session-manager.ts";
-// UI 簇的类型与规范化器已随簇搬进 ui-settings.ts（spec §5）。appearanceOr 与
-// stringRecordOrUndefined 只在 mergeSettings 调用期触达，而 ui-settings.ts 也只在函数体里引用
-// 本文件的 DEFAULT_APPEARANCE 与三个 RANGE 常量——两侧都不在模块顶层取对方的值，环安全。
-import { appearanceOr, stringRecordOrUndefined } from "./ui-settings.ts";
-import type { AppearanceSettings } from "./ui-settings.ts";
-// protocol.ts 与 setting-manager.ts（不随本票改动）仍从这里拿 UI 类型；真实定义在 ui-settings.ts。
+// UI 簇的类型与规范化器住进 ui-settings.ts（spec §5）。protocol.ts 仍从这里拿 UI 类型；真实定义
+// 在 ui-settings.ts。
 export type { AppearanceSettings, DirectoryPaging } from "./ui-settings.ts";
+import type { AppearanceSettings } from "./ui-settings.ts";
 
 /** 存放会话、设置与已存凭据的目录。 */
 export const AGENT_HOME = resolve(process.env.MY_AGENT_HOME ?? join(homedir(), ".my-agent"));
@@ -74,11 +64,13 @@ export const DEFAULT_BASH_SETTINGS: BashSettings = { defaultTimeoutMs: 120_000, 
 export const DEFAULT_MODE_NAME = "默认";
 
 /**
- * global 侧：`<AGENT_HOME>/settings.json` 补默认后的视图（ADR-0019）。
+ * global 侧设置面板的读模型：`Agent.settings()` 从五个持有者现读、组装出的这份形状。
  *
- * 它持有的是**默认值**与**命名预设**——`modes` 表（模式 → 工具集 + 审批基线）、默认模型、外观、
- * bash、重试——而一个会话自己的选择住在它 `.json` 快照的设置半（`SessionSettings`）上。两者在每次
- * 读取时组合成 `Settings`（`packages/core/src/settings.ts`），组合是派生值，这一侧从不被任何袋持有。
+ * 真实的家已按设置归属重构（spec §3）分给了五个持有者——行与默认模型在 `models.json`，工具簇在
+ * `tools.json`，队列模式在 `sessions.json`，外观与目录视图在 `ui.json`，重试在 `engine.json`——
+ * 这个类型只剩**形状**：设置面板的 wire 面（ADR-0012/0019）不因搬家而改口。而一个会话自己的选择
+ * 住在它 `.json` 快照的设置半（`SessionSettings`），两者在每次读取时组合成 `Settings`
+ * （`packages/core/src/settings.ts`），组合是派生值，这一侧从不被任何袋持有。
  */
 export interface GlobalSettings {
 	/**
@@ -145,6 +137,45 @@ export interface GlobalSettings {
 	bash: BashSettings;
 }
 
+/**
+ * 设置的部分变更，形状与浏览器发来的 config 补丁一致（wire 契约，spec §7）。
+ *
+ * `SettingManager` 退场后它从 `setting-manager.ts` 迁来本文件——形状一字未动：`Agent.applySettings`
+ * 按字段名把它路由到拥有该字段的持有者，每簇独立原子落盘。
+ */
+export interface SettingsPatch {
+	model?: string;
+	/** 窗口的「已种下内置默认」标记；见 `GlobalSettings.defaultModelSeeded`。 */
+	defaultModelSeeded?: boolean;
+	/** 全局默认活跃工具集。整份列表，如同会话上的工具集。 */
+	tools?: string[];
+	/**
+	 * 用户的模式，像 `tools` 一样整份发送（ADR-0004）：面板编辑的是一份列表，这里改名的模式与那里
+	 * 删除的模式必须同落，要么都不落。
+	 */
+	modes?: ModeSettings[];
+	/**
+	 * 侧边栏不列出的目录，按绝对路径。整份列表，像 `tools` 一样：这个设置就是隐藏目录的集合，多藏
+	 * 一个目录，就是之前的列表多一条。
+	 */
+	hiddenDirectories?: string[];
+	/**
+	 * 侧边栏为目录显示的名字，按绝对路径。
+	 *
+	 * 补丁携带它变更的条目，空字符串收回一个名字——按键合并的记录没有别的办法说「忘掉这一条」。
+	 */
+	directoryNames?: Record<string, string>;
+	/** 变动过的审批条目，按工具名为键；省略的键保持现行值。 */
+	approval?: Record<string, boolean>;
+	/** 主题与字号。作为补丁的一部分，让一个字段可以单独挪动。 */
+	appearance?: Partial<AppearanceSettings>;
+	steeringMode?: QueueMode;
+	followUpMode?: QueueMode;
+	retry?: Partial<RetrySettings>;
+	/** `bash` 工具允许一条命令运行多久。部分字段，让一个超时可以单独挪动。 */
+	bash?: Partial<BashSettings>;
+}
+
 export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
 	approval: { read: false, write: true, edit: true, glob: false, grep: false, bash: true },
 	appearance: { ...DEFAULT_APPEARANCE },
@@ -154,61 +185,14 @@ export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
 	bash: { ...DEFAULT_BASH_SETTINGS },
 };
 
-/** 机器级的设置文件，global 侧唯一的一份。`agentDir` 可配置，让测试能指到无害的地方。 */
+/**
+ * 机器级的旧设置文件，`<AGENT_HOME>/settings.json`。`agentDir` 可配置，让测试能指到无害的地方。
+ *
+ * 设置归属重构（spec §4.2）后它只作迁移源：各持有者首次读取时从这里捡走自己的簇，之后旧文件被
+ * 完全忽略——永不删除、永不写入。
+ */
 export function settingsPath(agentDir: string = AGENT_HOME): string {
 	return join(agentDir, "settings.json");
-}
-
-/**
- * 把一份部分设置对象合并到默认值之上。未知的键被忽略。
- *
- * 这里只做值的规范化；读写文件是 `SettingManager` 的职责（它读写的只有 global 侧这一份文件，
- * `applySettings` 把变更写回），这正是同一套规范化能同时服务文件与内存中变更的原因。
- */
-export function mergeSettings(input: unknown): GlobalSettings {
-	const record = isRecord(input) ? input : {};
-	const approval = isRecord(record.approval) ? record.approval : {};
-
-	const merged: GlobalSettings = {
-		approval: { ...DEFAULT_GLOBAL_SETTINGS.approval },
-		appearance: appearanceOr(record.appearance),
-		steeringMode: queueModeOr(record.steeringMode, DEFAULT_GLOBAL_SETTINGS.steeringMode),
-		followUpMode: queueModeOr(record.followUpMode, DEFAULT_GLOBAL_SETTINGS.followUpMode),
-		retry: retryOr(record.retry),
-		bash: bashOr(record.bash),
-	};
-
-	const model = stringOrUndefined(record.model);
-	if (model !== undefined) merged.model = model;
-
-	// 两种取值都原样保留：`false` 是手编文件要求重新种回内置行的写法，在这里把它变成缺失会让这个
-	// 请求无法表达。
-	if (typeof record.defaultModelSeeded === "boolean") merged.defaultModelSeeded = record.defaultModelSeeded;
-
-	const tools = stringListOrUndefined(record.tools);
-	if (tools !== undefined) merged.tools = tools;
-
-	const modes = modesOr(record.modes);
-	if (modes !== undefined) merged.modes = modes;
-
-	const hiddenDirectories = stringListOrUndefined(record.hiddenDirectories);
-	if (hiddenDirectories !== undefined) merged.hiddenDirectories = hiddenDirectories;
-
-	const directoryNames = stringRecordOrUndefined(record.directoryNames);
-	if (directoryNames !== undefined) merged.directoryNames = directoryNames;
-
-	for (const [key, value] of Object.entries(approval)) {
-		if (typeof value === "boolean") merged.approval[key] = value;
-	}
-	return merged;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function stringOrUndefined(value: unknown): string | undefined {
-	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
 /**

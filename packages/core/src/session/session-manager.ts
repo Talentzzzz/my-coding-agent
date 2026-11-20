@@ -2221,8 +2221,7 @@ export interface SessionDefaults {
 /**
  * pi-agent-core 认识的两种队列模式；其他取值回落 `fallback`。
  *
- * 随会话簇搬进本文件（spec §5：类型与规范化函数随簇搬迁）。导出是因为 `config.ts` 的
- * `mergeSettings` 在过渡期仍需要它——调用期执行，环安全。默认值本身留守
+ * 随会话簇搬进本文件（spec §5：类型与规范化函数随簇搬迁）。默认值本身留守
  * `config.ts` 的 `DEFAULT_GLOBAL_SETTINGS`。
  */
 export function queueModeOr(value: unknown, fallback: QueueMode): QueueMode {

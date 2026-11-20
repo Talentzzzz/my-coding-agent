@@ -3,30 +3,31 @@ import { Agent, type SessionSink } from "./agent.ts";
 import type { AssembleAgentStateOptions, OpenAgentOptions } from "./assembly.ts";
 import { buildSystemPrompt } from "./context/system-prompt.ts";
 import { createHooks, type Hooks } from "./hooks.ts";
+import { ModelManager } from "./model-manager.ts";
 import { SessionManager } from "./session/session-manager.ts";
 import { approvalToolsOf } from "./settings.ts";
-import { SettingManager } from "./setting-manager.ts";
+import { UiSettingsManager } from "./ui-settings.ts";
 import { type ToolManager, createToolManager } from "./tools/index.ts";
 
 /**
  * 调用方为构建一个进程唯一的编排层所提供的东西。
  *
- * 这里的一切都是进程级的：配置住在哪，以及每个请求从哪条传输层离开。三只 Manager 本身不在清单上
- * ——工厂自己造它们，正是这一点让「表里的每个状态都是在该编排层自己的服务之上装配的」成为构造
- * 的事实，而不是调用方必须遵守的约定。两个接受成品 Manager 的接缝只为测试存在：smoke 递一只内存
- * {@link SettingManager} 进来，让机器自己的文件靠边站，再在自己的工具表上注册自己的工具，让它
- * 注册的东西到不了测试之外的会话。生产代码两样都不设。
+ * 这里的一切都是进程级的：各设置簇的持有者文件住在哪，以及每个请求从哪条传输层离开。几只 Manager
+ * 本身不在清单上——工厂自己造它们，正是这一点让「表里的每个状态都是在该编排层自己的服务之上装配
+ * 的」成为构造的事实，而不是调用方必须遵守的约定。两个接缝只为测试存在：smoke 递各 home（临时
+ * 目录）进来，让机器自己的文件靠边站；工具表接缝让 smoke 在自己的表上注册自己的工具，让它注册的
+ * 东西到不了测试之外的会话。生产代码两样都不设。
  */
 export interface CreateSessionAgentOptions {
 	/**
-	 * 全局设置读取与写入所在的 agent home。默认用真实的那一个。
+	 * 各设置簇的持有者文件（`tools.json`、`sessions.json`、`ui.json`、`engine.json`）读取与写入
+	 * 所在的 agent home。默认用真实的那一个。
 	 *
-	 * 测试「会*写*设置」的命令的 smoke 不得写机器自己的 `settings.json`；桌面外壳与服务器透传它们
-	 * 启动时所带的。
+	 * 测试「会*写*设置」的命令的 smoke 不得写机器自己的文件；桌面外壳与服务器透传它们启动时所带的。
 	 */
 	settingsHome?: string;
 	/**
-	 * 导入的模型行读取与写入所在的 agent home。默认用
+	 * 模型行读取与写入所在的 agent home。默认用
 	 * {@link CreateSessionAgentOptions.settingsHome}。
 	 *
 	 * 另一个文件的同居 home：递入自己模型行的 smoke 不得把它们留在机器的 `models.json` 里，也不得
@@ -35,8 +36,6 @@ export interface CreateSessionAgentOptions {
 	modelsHome?: string;
 	/** 该编排层发出的每个请求走的传输层。默认 Anthropic Messages。 */
 	chatTransport?: ChatTransport;
-	/** 仅测试的接缝：调用方自己的设置门，取代各 home 背后的文件。 */
-	settingManager?: SettingManager;
 	/** 仅测试的接缝：调用方自己的工具表，取代六个内置工具。 */
 	toolManager?: ToolManager;
 	/**
@@ -55,7 +54,7 @@ const noOpSink: SessionSink = {
 };
 
 /**
- * 构建编排层：一个对象配它自己的几只 Manager，装好它分发所经的接缝。
+ * 构建编排层：一个对象配它自己的几只 Manager 与设置簇持有者，装好它分发所经的接缝。
  *
  * 跑一个进程所有会话的宿主调用它一次；想要一个不与任何人共享的会话的调用方——smoke、测试——
  * 每个会话调用一次，并把该会话打开到它上面。无论哪条路，会话设置的两半都是同样的两半，所以宿主
@@ -68,10 +67,14 @@ export function createSessionAgent(options: CreateSessionAgentOptions = {}): Age
 	const hooks = createHooks();
 	// 只解析一次并交给编排层，它是读取一次运行可执行集合的唯一表，也是命令收窄的唯一表：在这里做
 	// 第二次解析，会让调用方自己的工具到达其中一者而到不了另一者。
-	const toolManager = options.toolManager ?? createToolManager();
+	const toolManager = options.toolManager ?? createToolManager({ home: options.settingsHome });
 	const agent = new Agent({
-		sessionManager: new SessionManager(),
-		settingManager: options.settingManager ?? new SettingManager({ home: options.settingsHome, modelsHome: options.modelsHome }),
+		// 账本服务与各设置簇持有者（spec §8）：各持自己的 home，默认同源——模型簇可经 modelsHome
+		// 分居。它们什么都不持有，每次读取都是对其背后文件的一次新读。
+		sessionManager: new SessionManager(options.settingsHome),
+		modelManager: new ModelManager(options.modelsHome ?? options.settingsHome),
+		uiSettings: new UiSettingsManager({ home: options.settingsHome }),
+		settingsHome: options.settingsHome,
 		toolManager,
 		hooks,
 		// 进程唯一的装配处：传输层在这里解析而不是在编排层内部给默认值，让一次运行能离开进程的每条
@@ -125,12 +128,13 @@ function installDefaultHooks(hooks: Hooks, agent: Agent): void {
  * 目录的测试。跑很多会话的进程改为只构建一次编排层，并把每份会话记录打开到它上面——见 hub
  * ——保持诚实正是这个东西存在的理由：打开会话与恢复会话是同一个动作，无论走两条路中的哪一条。
  *
- * options 有意是一组测试接缝：settings 与 tools 接缝直通工厂，会话记录与模型 options 交给
+ * options 有意是一组测试接缝：homes 与 tools 接缝直通工厂，会话记录与模型 options 交给
  * `assembleAgentStateBySession`，这里不构建任何编排层不留住的 Manager。
  */
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 	const agent = createSessionAgent({
-		...(options.settingManager === undefined ? {} : { settingManager: options.settingManager }),
+		...(options.settingsHome === undefined ? {} : { settingsHome: options.settingsHome }),
+		...(options.modelsHome === undefined ? {} : { modelsHome: options.modelsHome }),
 		...(options.toolManager === undefined ? {} : { toolManager: options.toolManager }),
 		...(options.chatTransport === undefined ? {} : { chatTransport: options.chatTransport }),
 		...(options.sink === undefined ? {} : { sink: options.sink }),

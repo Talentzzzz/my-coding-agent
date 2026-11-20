@@ -233,7 +233,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** 主题与字号，各自独立回落，让一个坏字段不会连带重置另一个。config.ts 的 mergeSettings 共用。 */
+/** 主题与字号，各自独立回落，让一个坏字段不会连带重置另一个。 */
 export function appearanceOr(value: unknown): AppearanceSettings {
 	const record = isRecord(value) ? value : {};
 	const theme = record.theme;
@@ -310,7 +310,7 @@ export function clampDirectoryPaging(value: unknown): Record<string, DirectoryPa
  *
  * 空字符串在这里幸存而不是被丢弃：空名字是「已清除条目」的存储形态，而渲染侧边栏的读取者是决定
  * 其含义的唯一地方。目录改名是 UI 簇独有的字段，规范化器随簇住在这里；`stringListOrUndefined`
- * 仍留在 config.ts，因为工具簇与模式表共用它。config.ts 的 mergeSettings 共用本函数。
+ * 仍留在 config.ts，因为工具簇与模式表共用它。
  */
 export function stringRecordOrUndefined(value: unknown): Record<string, string> | undefined {
 	if (!isRecord(value)) return undefined;

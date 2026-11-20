@@ -33,10 +33,11 @@ export {
 	DEFAULT_GLOBAL_SETTINGS,
 	CONTENT_WIDTH_RANGE,
 	FONT_SIZE_RANGE,
-	mergeSettings,
 	SIDEBAR_WIDTH_RANGE,
 	settingsPath,
+	stringListOrUndefined,
 	type GlobalSettings,
+	type SettingsPatch,
 } from "./config.ts";
 // RetrySettings 的导出源改为 engine-settings.ts（类型随引擎簇搬入），包对外的名字不变。
 export { EngineSettings, type RetrySettings } from "./engine-settings.ts";
@@ -214,13 +215,6 @@ export {
 	selectModelRow,
 	type Settings,
 } from "./settings.ts";
-export {
-	inMemorySettingManager,
-	SettingManager,
-	type SettingManagerOptions,
-	type SettingsPatch,
-	type SettingsStorage,
-} from "./setting-manager.ts";
 export {
 	type BashSettings,
 	createToolManager,
