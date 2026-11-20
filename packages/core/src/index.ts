@@ -54,6 +54,7 @@ export {
 	type UiSettingsPatch,
 } from "./ui-settings.ts";
 export { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
+export { ModelManager } from "./model-manager.ts";
 export {
 	ARG_KEEP_CHARS,
 	ARG_TRIM_MARKER,
