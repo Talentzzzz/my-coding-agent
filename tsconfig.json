@@ -32,6 +32,7 @@
 		"scripts/smoke-approval-endpoint.ts",
 		"scripts/smoke-approval-queue.ts",
 		"scripts/smoke-approval-recovery.ts",
-		"scripts/smoke-models.ts"
+		"scripts/smoke-models.ts",
+		"scripts/smoke-model-manager.ts"
 	]
 }

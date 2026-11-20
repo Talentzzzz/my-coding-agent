@@ -47,6 +47,7 @@ export {
 	type RetrySettings,
 } from "./config.ts";
 export { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
+export { ModelManager } from "./model-manager.ts";
 export {
 	ARG_KEEP_CHARS,
 	ARG_TRIM_MARKER,
