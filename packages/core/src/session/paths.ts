@@ -17,12 +17,21 @@ import { AGENT_HOME } from "../config.ts";
  *
  * 这个布局放弃的是按时间命名的文件名：文件管理器现在按 id 序列出 store，而 uuidv7 的 id 序本来就是
  * 毫秒级的创建顺序。
+ *
+ * 根在首次使用时才落定，不在模块顶层求值 `AGENT_HOME`：config.ts 过渡期经
+ * session-manager.ts import 回 queueModeOr，形成 config → session-manager → paths → config 的
+ * 加载环，顶层求值会撞上未初始化的绑定（与「运行时值只在函数体内使用」是同一条环安全纪律）。
  */
-let sessionsRoot = join(AGENT_HOME, "sessions");
+let sessionsRoot: string | undefined;
+
+/** 环安全惰性初始化：谁先真的要用 store，谁触发这一步。 */
+function ensureSessionsRoot(): string {
+	return (sessionsRoot ??= join(AGENT_HOME, "sessions"));
+}
 
 /** 所有 session 文件所在的目录。 */
 export function sessionsDir(): string {
-	return sessionsRoot;
+	return ensureSessionsRoot();
 }
 
 /**
@@ -38,7 +47,7 @@ export function setSessionsDir(absDir: string): void {
  *
  * id→路径规则唯一的安放处：store 里其他所有地方都问这里，不自己拼名字。
  */
-export function sessionPath(sessionId: string, absDir: string = sessionsRoot): string {
+export function sessionPath(sessionId: string, absDir: string = ensureSessionsRoot()): string {
 	return join(absDir, `${sessionId}.jsonl`);
 }
 

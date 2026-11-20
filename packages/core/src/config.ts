@@ -1,6 +1,9 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { QueueMode } from "./protocol.ts";
+// queueModeOr 已随会话簇搬进 session-manager.ts（spec §5）；mergeSettings 过渡期仍需要它。
+// 调用期执行，环安全——session-manager.ts 对本文件的 import 也只在其函数体内使用。
+import { queueModeOr } from "./session/session-manager.ts";
 
 /** 存放会话、设置与已存凭据的目录。 */
 export const AGENT_HOME = resolve(process.env.MY_AGENT_HOME ?? join(homedir(), ".my-agent"));
@@ -380,11 +383,6 @@ export function clampDirectoryPaging(value: unknown): Record<string, DirectoryPa
 		};
 	}
 	return Object.keys(out).length > 0 ? out : undefined;
-}
-
-/** pi-agent-core 认识的两种队列模式；其他取值保留默认。 */
-function queueModeOr(value: unknown, fallback: QueueMode): QueueMode {
-	return value === "all" || value === "one-at-a-time" ? value : fallback;
 }
 
 function stringOrUndefined(value: unknown): string | undefined {

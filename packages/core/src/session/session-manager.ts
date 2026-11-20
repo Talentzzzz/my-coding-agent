@@ -23,10 +23,12 @@ import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 import type { Message } from "../llm/index.ts";
 import { type Usage, uuidv7 } from "../llm/index.ts";
-import { APP_NAME } from "../config.ts";
+// 环安全：AGENT_HOME/DEFAULT_GLOBAL_SETTINGS/settingsPath 只在函数体内使用、不在模块顶层——
+// config.ts 又 import 回本文件的 queueModeOr（也在调用期才执行），两个方向都碰不到未初始化的绑定。
+import { AGENT_HOME, APP_NAME, DEFAULT_GLOBAL_SETTINGS, settingsPath } from "../config.ts";
 import { trimToolCallArgs } from "../context/trim-tool-call-args.ts";
 import { clearToolResult } from "../context/clear-tool-results.ts";
-import type { SessionRef, SessionRow } from "../protocol.ts";
+import type { QueueMode, SessionRef, SessionRow } from "../protocol.ts";
 import { compactionSummaryOf } from "./messages.ts";
 import { normalizePath, resolvePath, sessionJsonlPath, sessionMetaPath, sessionPath, sessionsDir } from "./paths.ts";
 import { UnknownSessionError } from "./unknown-session.ts";
@@ -1311,6 +1313,17 @@ function appendLeafRecord(session: Session, leafId: string | null): void {
  */
 export class SessionManager {
 	/**
+	 * `home` 是会话簇设置文件（`sessions.json`，两条队列的全局默认模式）所在的目录，默认
+	 * {@link AGENT_HOME}；测试递临时目录，机器自己的文件靠边站。会话文件本身不在这里——它们跟随
+	 * 各自的工作目录。
+	 */
+	private readonly home: string;
+
+	constructor(home: string = AGENT_HOME) {
+		this.home = home;
+	}
+
+	/**
 	 * 此刻谁在改变哪个会话文件对：按**文件键**键控的持有计数表。触碰一对文件的公开方法（meta
 	 * setter、append 族、写 leaf 记录的两个、`open`、`forkFrom` 的写目标半）在自己的长度内持闸，
 	 * `remove` 是唯一跨 await 的持有者、闸罩它全程——持有者从 server 的 hold/release 括号收编为
@@ -2130,6 +2143,132 @@ export class SessionManager {
 		return this.holds.get(absPathKey(absPath))?.closing !== undefined;
 	}
 
+	// ---------------------------------------------------------------------------- 会话簇设置
+
+	/**
+	 * 两条队列的全局默认模式，`sessions.json` 补默认后的视图（设置归属重构 spec §5）。
+	 *
+	 * 无状态门面：每次调用都现读，调用之间什么都不保留。首次读取触发旧 `settings.json` 的一次性
+	 * 迁移（spec §4.2）；会话自己的队列选择不在这里——它们在会话 `.json` 快照的设置半
+	 * （`SessionSettings`）上，本票完全不动那份格式。
+	 */
+	sessionDefaults(): SessionDefaults {
+		const layer = this.sessionDefaultsLayer();
+		return {
+			steeringMode: queueModeOr(layer.steeringMode, DEFAULT_GLOBAL_SETTINGS.steeringMode),
+			followUpMode: queueModeOr(layer.followUpMode, DEFAULT_GLOBAL_SETTINGS.followUpMode),
+		};
+	}
+
+	/**
+	 * 应用一次对队列默认模式的变更，返回前写盘。写路径是 spec §4.3 的三条纪律（今天
+	 * `SettingManager.applySettings` 的行为，按持有者各自复制）：写前重读、只动被点名的字段
+	 * （两个键都是标量，整体替换）、未知键原样保留。
+	 *
+	 * 补丁值按原样落盘，值的规范化发生在读取半——文件是手可写的，读取者负责吸收坏值，与
+	 * `SettingManager` 的分层一致。
+	 */
+	applySessionDefaults(patch: { steeringMode?: QueueMode; followUpMode?: QueueMode }): void {
+		const named = Object.entries(patch).filter(([, value]) => value !== undefined);
+		if (named.length === 0) return;
+		// 写前重读（迁移语义含在读取里）：只点名一个键的补丁不得弄丢另一个键在盘上的值。
+		const updated: Record<string, unknown> = { ...this.sessionDefaultsLayer() };
+		for (const [field, value] of named) updated[field] = value;
+		writeSessionsLayer(sessionsPathOf(this.home), updated);
+	}
+
+	/**
+	 * 会话簇设置所在的层：先保证迁移发生，再读自己的文件。缺失的文件是一个空层；读不出 JSON 的
+	 * 文件被拒绝、从不被覆盖——与 `SettingManager` 对旧文件的处理同一立场。
+	 */
+	private sessionDefaultsLayer(): Record<string, unknown> {
+		this.migrateSessionDefaultsOnce();
+		return readJsonLayer(sessionsPathOf(this.home));
+	}
+
+	/**
+	 * 一次性读时迁移（spec §4.2）：`sessions.json` 尚不存在、旧 `settings.json` 存在时，从旧文件
+	 * 捡走自己的簇，把补默认后的视图原子落盘——字段全缺省也要写，把「迁移过」变成磁盘事实，避免
+	 * 旧文件日后复活。`sessions.json` 已在（迁移早已完成或用户手编）时旧文件被完全忽略；旧文件
+	 * 本身永不删除、永不写入。
+	 */
+	private migrateSessionDefaultsOnce(): void {
+		const absSessions = sessionsPathOf(this.home);
+		if (existsSync(absSessions)) return;
+		const absLegacy = settingsPath(this.home);
+		if (!existsSync(absLegacy)) return;
+		const legacy = readJsonLayer(absLegacy);
+		writeSessionsLayer(absSessions, {
+			steeringMode: queueModeOr(legacy.steeringMode, DEFAULT_GLOBAL_SETTINGS.steeringMode),
+			followUpMode: queueModeOr(legacy.followUpMode, DEFAULT_GLOBAL_SETTINGS.followUpMode),
+		});
+	}
+
+}
+
+/**
+ * 会话簇的设置：两条队列的全局默认模式，`<home>/sessions.json` 补默认后的视图（设置归属重构
+ * spec §5）。本票只加 global 侧的这一份；会话自己的选择仍住在它 `.json` 快照的设置半
+ * （`SessionSettings`），那份格式不动（ADR-0008/0018）。
+ */
+export interface SessionDefaults {
+	/** 一个取走点注入多少条 steer 消息。 */
+	steeringMode: QueueMode;
+	/** 一个取走点注入多少条 followUp 消息。 */
+	followUpMode: QueueMode;
+}
+
+/**
+ * pi-agent-core 认识的两种队列模式；其他取值回落 `fallback`。
+ *
+ * 随会话簇搬进本文件（spec §5：类型与规范化函数随簇搬迁）。导出是因为 `config.ts` 的
+ * `mergeSettings` 在过渡期仍需要它——调用期执行，环安全。默认值本身留守
+ * `config.ts` 的 `DEFAULT_GLOBAL_SETTINGS`。
+ */
+export function queueModeOr(value: unknown, fallback: QueueMode): QueueMode {
+	return value === "all" || value === "one-at-a-time" ? value : fallback;
+}
+
+/** 会话簇自己的设置文件：`SessionManager` 的 home 下唯一的一份。 */
+function sessionsPathOf(home: string): string {
+	return join(home, "sessions.json");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * `path` 的 JSON 对象按它写下的原样；不在的文件、空文件是空层。trim 顺带去掉 UTF-8 BOM——
+ * Windows 编辑器会写它，而 `JSON.parse` 拒绝它。读不出的文件被拒绝，从不被覆盖。
+ */
+function readJsonLayer(path: string): Record<string, unknown> {
+	if (!existsSync(path)) return {};
+	const text = readFileSync(path, "utf8").trim();
+	if (text === "") return {};
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch (error) {
+		throw new Error(`${path} is not valid JSON: ${(error as Error).message}`);
+	}
+	if (!isRecord(parsed)) throw new Error(`${path} must hold a JSON object`);
+	return parsed;
+}
+
+/**
+ * 原子落盘：写同目录的 temp 文件再 rename 盖上去——读者要么看到旧文件要么看到新文件，绝不会
+ * 看到写到一半的（与 `writeMetaFile` 买到的保证相同）。
+ */
+function writeSessionsLayer(path: string, layer: Record<string, unknown>): void {
+	const absTemp = `${path}.${process.pid}.tmp`;
+	const fd = openSync(absTemp, "wx");
+	try {
+		writeFileSync(fd, `${JSON.stringify(layer, null, "\t")}\n`);
+	} finally {
+		closeSync(fd);
+	}
+	renameSync(absTemp, path);
 }
 
 /** 一个组里最近的活动，供侧栏目录排序。 */

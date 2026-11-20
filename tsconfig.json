@@ -26,6 +26,7 @@
 		"scripts/smoke-desktop-observability.ts",
 		"scripts/smoke-session.ts",
 		"scripts/smoke-settings.ts",
+		"scripts/smoke-session-settings.ts",
 		"scripts/smoke-tools.ts",
 		"scripts/smoke-sessions.ts",
 		"scripts/smoke-approval.ts",

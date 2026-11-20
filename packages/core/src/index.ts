@@ -188,6 +188,7 @@ export {
 	type SessionEntryMapById,
 	type SessionMeta,
 	type SessionInfo,
+	type SessionDefaults,
 	type Session,
 	type SessionSettings,
 	type MessageEntry,
