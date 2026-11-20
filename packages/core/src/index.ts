@@ -44,8 +44,9 @@ export {
 	type DirectoryPaging,
 	type GlobalSettings,
 	type ModeSettings,
-	type RetrySettings,
 } from "./config.ts";
+// RetrySettings 的导出源改为 engine-settings.ts（类型随引擎簇搬入），包对外的名字不变。
+export { EngineSettings, type RetrySettings } from "./engine-settings.ts";
 export { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
 export {
 	ARG_KEEP_CHARS,
