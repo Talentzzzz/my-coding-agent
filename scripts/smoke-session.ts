@@ -15,7 +15,6 @@ import {
 	openAgent,
 	SessionManager,
 	narrowToKnown,
-	settingsPath,
 	type Agent,
 	type AgentSessionEvent,
 	type SessionEventListener,
@@ -29,22 +28,24 @@ import {
 	type Session,
 	type ToolManager,
 	type ModelConfig,
-	setSessionsDir,
 	type AssistantMessage,
 	type ChatTransport,
 	type Context,
 	type SimpleStreamOptions,
 } from "@my-agent/domain";
+import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 
-/** The ledger's operations are the service's methods, so a script holds one to call them on. */
-const sessionManager = new SessionManager();
-
-// `@my-agent/domain` is a workspace package, linked into the repository root's
-// node_modules so scripts resolve it the same way `packages/domain` does.
-
+// 端口化后的构造（spec §5.2）：账本操作经自造的 infra 实现指临时 store；设置端口只在种各会话的
+// 临时 home 时另造（本实例不读设置）。
 const root = await mkdtemp(join(tmpdir(), "my-agent-session-"));
 const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-session--store-"));
-setSessionsDir(storeRoot);
+const sessionStore = new SessionFileStore({ storeDir: storeRoot });
+const archive = new ToolResultsArchive();
+/** The ledger's operations are the service's methods, so a script holds one to call them on. */
+const sessionManager = new SessionManager({
+	sessionRepository: sessionStore,
+	sessionDefaultsRepository: new HomeJsonStore({ home: join(root, "agent-home-defaults") }),
+});
 let failures = 0;
 
 // A hung step must fail loudly rather than leave the script running: every exercise prints a heading,
@@ -318,7 +319,7 @@ async function openSession(
 	run: RunOptions = {},
 	customToolManager?: ToolManager,
 ): Promise<Agent> {
-	const session = createSession(root);
+	const session = createSession(root, storeRoot);
 	// 出生（ADR-0021）：一条 user 消息落盘，文件与快照同时诞生。经本脚本自己的 store 追加——
 	// 文件是共享状态，编排层随后按 id 重放的就是它。不跑引擎、不耗剧本回答。
 	const birthEntryId = sessionManager.appendMessage(session, userMessage(BIRTH_TEXT));
@@ -326,16 +327,17 @@ async function openSession(
 	const home = join(root, `agent-home-${homeSeq++}`);
 	await mkdir(home, { recursive: true });
 	// 调用方递入自己的表时，工具簇就种进那张表自己的文件；否则本脚本造一张，home 即各持有者同居
-	// 的默认。
-	const toolManager = customToolManager ?? createToolManager({ home });
+	// 的默认（HomeJsonStore 实现满足 ToolDefaults / SessionDefaults / Model 三份同形声明，spec §4.2）。
+	const homeJson = new HomeJsonStore({ home });
+	const toolManager = customToolManager ?? createToolManager({ toolDefaultsRepository: homeJson });
 	toolManager.applyToolDefaults({
 		approval: desired.approval,
 		...(desired.tools === undefined ? {} : { tools: desired.tools }),
 		...(desired.modes === undefined ? {} : { modes: desired.modes }),
 		...(desired.bash === undefined ? {} : { bash: desired.bash }),
 	});
-	new SessionManager({ home: home }).applySessionDefaults({ steeringMode: desired.steeringMode, followUpMode: desired.followUpMode });
-	const modelManager = new ModelManager({ home: home });
+	new SessionManager({ sessionRepository: sessionStore, sessionDefaultsRepository: homeJson }).applySessionDefaults({ steeringMode: desired.steeringMode, followUpMode: desired.followUpMode });
+	const modelManager = new ModelManager({ modelRepository: homeJson });
 	modelManager.applyRetry(desired.retry);
 	modelManager.replaceRows(run.models ?? rows);
 	if (desired.model !== undefined || desired.defaultModelSeeded !== undefined) {
@@ -348,8 +350,11 @@ async function openSession(
 	const agent = await openAgent({
 		session,
 		chatTransport: run.chatTransport ?? fake.chatTransport,
-		settingsHome: home,
-		modelsHome: home,
+		sessionRepository: sessionStore,
+		sessionDefaultsRepository: homeJson,
+		modelRepository: homeJson,
+		toolDefaultsRepository: homeJson,
+		toolResultsRepository: archive,
 		toolManager,
 		sink: tap.sink,
 	});
@@ -1061,7 +1066,7 @@ async function exerciseAfterToolHook(): Promise<void> {
 	await agent.close(sidOf(agent));
 
 	process.stdout.write("after_tool hook — the rewrite survives the file\n");
-	const reopenedFile = fillSession(sessionFile!);
+	const reopenedFile = fillSession(sessionFile!, sessionStore);
 	const fileEntries = sessionManager.getEntries(reopenedFile);
 	const rewrittenEntry = fileEntries.find(
 		(entry): entry is MessageEntry =>
@@ -1085,18 +1090,22 @@ async function exerciseAfterToolHook(): Promise<void> {
 
 	const sentReplay: SentRequest[] = [];
 	recordRequests(sentReplay, [fakeAssistantMessage("replayed")]);
-	// 重放会话与 openSession 同一套接缝：临时 home + 各持有者预种（spec §8）。
+	// 重放会话与 openSession 同一套接缝：临时 home + 各持有者预种（spec §8），端口注入（spec §5.2）。
 	const replayHome = join(root, `agent-home-${homeSeq++}`);
 	await mkdir(replayHome, { recursive: true });
-	const replayToolManager = createToolManager({ home: replayHome });
+	const replayHomeJson = new HomeJsonStore({ home: replayHome });
+	const replayToolManager = createToolManager({ toolDefaultsRepository: replayHomeJson });
 	replayToolManager.applyToolDefaults({ approval: settings().approval });
-	new ModelManager({ home: replayHome }).applyRetry(settings().retry);
-	new ModelManager({ home: replayHome }).replaceRows(rows);
+	new ModelManager({ modelRepository: replayHomeJson }).applyRetry(settings().retry);
+	new ModelManager({ modelRepository: replayHomeJson }).replaceRows(rows);
 	const replayed = await openAgent({
 		session: reopenedFile,
 		chatTransport: fake.chatTransport,
-		settingsHome: replayHome,
-		modelsHome: replayHome,
+		sessionRepository: sessionStore,
+		sessionDefaultsRepository: replayHomeJson,
+		modelRepository: replayHomeJson,
+		toolDefaultsRepository: replayHomeJson,
+		toolResultsRepository: archive,
 	});
 	// 这个会话的文件由上面的练习亲手写就，没有经 `openSession` 的出生消息——没有可滤的出生条目，
 	// 空串让它原样通过。
@@ -1130,7 +1139,7 @@ async function exerciseOutputBackstop(): Promise<void> {
 	process.stdout.write("output backstop\n");
 	const huge = `HEAD-${"A".repeat(MAX_TOOL_RESULT_BYTES)}-TAIL-MARKER`;
 	// home 递临时目录：openSession 经这张表预种工具簇，不得落在机器的 tools.json 上。
-	const toolManager = createToolManager({ home: join(root, "agent-home-unbounded") });
+	const toolManager = createToolManager({ toolDefaultsRepository: new HomeJsonStore({ home: join(root, "agent-home-unbounded") }) });
 	toolManager.register({
 		name: "unbounded",
 		label: "unbounded",
@@ -1371,7 +1380,7 @@ async function exerciseToolChangeResend(): Promise<void> {
 async function exerciseToolManager(): Promise<void> {
 	process.stdout.write("tool manager\n");
 	// home 递临时目录：这张表也会被递给 openSession 预种工具簇，不得落在机器的 tools.json 上。
-	const toolManager = createToolManager({ home: join(root, "agent-home-table") });
+	const toolManager = createToolManager({ toolDefaultsRepository: new HomeJsonStore({ home: join(root, "agent-home-table") }) });
 	const builtIns = ["read", "write", "edit", "glob", "grep", "bash"];
 
 	check("names() holds the six built-ins in registration order", JSON.stringify(toolManager.names()) === JSON.stringify(builtIns), JSON.stringify(toolManager.names()));
@@ -2108,7 +2117,7 @@ async function exerciseModelFromRow(): Promise<void> {
 	keyedRows[0]!.baseUrl = "http://127.0.0.1:2/v1";
 	// 行编辑落盘（设置归属重构 §5）：目录是 ModelManager 每次现读的文件，内存数组的改动不再被隔着
 	// 持有者看见——把改好的行整表写回，下一请求才读得到。
-	new ModelManager({ home: homeOf(agent) }).replaceRows(keyedRows);
+	new ModelManager({ modelRepository: new HomeJsonStore({ home: homeOf(agent) }) }).replaceRows(keyedRows);
 	fake.setResponses([fakeAssistantMessage("answered again")]);
 	await within("the second run", 10_000, agent.prompt(sidOf(agent), "again"));
 	check("a corrected key is used by the next message", sent[1]?.key === "corrected-key", String(sent[1]?.key));
@@ -2119,7 +2128,7 @@ async function exerciseModelFromRow(): Promise<void> {
 
 	// A wire id that moves is a different model answering, and the session says so.
 	keyedRows[0]!.id = "faux-2";
-	new ModelManager({ home: homeOf(agent) }).replaceRows(keyedRows);
+	new ModelManager({ modelRepository: new HomeJsonStore({ home: homeOf(agent) }) }).replaceRows(keyedRows);
 	fake.setResponses([fakeAssistantMessage("answered a third time")]);
 	await within("the third run", 10_000, agent.prompt(sidOf(agent), "and again"));
 	check("a renamed wire id reaches the request", sent[2]?.id === "faux-2", String(sent[2]?.id));
@@ -2406,8 +2415,8 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	check("which is the map the gate reads", agent.getApprovals(sidOf(agent)).bash === true, JSON.stringify(agent.getApprovals(sidOf(agent))));
 	check(
 		"leaving the settings file alone",
-		createToolManager({ home: homeOf(agent) }).toolDefaults().approval.bash === false,
-		JSON.stringify(createToolManager({ home: homeOf(agent) }).toolDefaults().approval),
+		createToolManager({ toolDefaultsRepository: new HomeJsonStore({ home: homeOf(agent) }) }).toolDefaults().approval.bash === false,
+		JSON.stringify(createToolManager({ toolDefaultsRepository: new HomeJsonStore({ home: homeOf(agent) }) }).toolDefaults().approval),
 	);
 
 	// --- Moving the leaf changes the branch, not the choices ------------------------------------
@@ -2442,7 +2451,7 @@ async function exerciseBranchToolConfig(): Promise<void> {
 	await agent.close(sidOf(agent));
 
 	// --- The choice is on the snapshot, so the reopen answers with it ----------------------------
-	const reopened = fillSession(bagOf(agent).sessionFileAbsPath ?? "");
+	const reopened = fillSession(bagOf(agent).sessionFileAbsPath ?? "", sessionStore);
 	check("the reopen restores the session's mode pointer", sessionManager.getRecordedToolConfig(reopened).mode === "narrow", sessionManager.getRecordedToolConfig(reopened).mode);
 	check("and its approval delta with it", sessionManager.getRecordedToolConfig(reopened).approval?.bash === true, JSON.stringify(sessionManager.getRecordedToolConfig(reopened).approval));
 }
@@ -2478,7 +2487,7 @@ async function exerciseLeafDurability(): Promise<void> {
 	await agent.close(sidOf(agent));
 
 	// --- The move is where the file says it is, not where the file ends --------------------------
-	const reopened = fillSession(file);
+	const reopened = fillSession(file, sessionStore);
 	check("the move survived close", reopened.leafId === firstId, `${reopened.leafId} vs ${firstId}`);
 	check(
 		"and the reopened context is the branch through it, the record reaching no message",
@@ -2499,7 +2508,7 @@ async function exerciseLeafDurability(): Promise<void> {
 	// --- "Before the first entry" is a position like any other ----------------------------------
 	sessionManager.resetLeaf(reopened);
 	check("resetLeaf moved the leaf before the first entry", reopened.leafId === null, String(reopened.leafId));
-	const rereopened = fillSession(file);
+	const rereopened = fillSession(file, sessionStore);
 	check("and that position survived the reopen too", rereopened.leafId === null, String(rereopened.leafId));
 
 	// --- A session with no leaf record reads as it always did: the last entry is the position -------
@@ -2515,7 +2524,7 @@ async function exerciseLeafDurability(): Promise<void> {
 	];
 	await writeFile(`${fixtureStem}.json`, `${JSON.stringify(fixtureMeta, null, "\t")}\n`);
 	await writeFile(`${fixtureStem}.jsonl`, fixtureLines.map((line) => `${JSON.stringify(line)}\n`).join(""));
-	const legacy = fillSession(`${fixtureStem}.jsonl`);
+	const legacy = fillSession(`${fixtureStem}.jsonl`, sessionStore);
 	check("a file without a leaf record reads its last entry", legacy.leafId === "fx-u2", String(legacy.leafId));
 	check(
 		"and its tree is read whole, the second child a branch option",

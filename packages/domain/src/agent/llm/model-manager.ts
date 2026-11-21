@@ -1,5 +1,3 @@
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import {
 	type Api,
 	type AssistantMessage,
@@ -10,7 +8,8 @@ import {
 	type ModelConfig,
 	type ThinkingLevel,
 } from "./index.ts";
-import { AGENT_HOME, DEFAULT_GLOBAL_SETTINGS, settingsPath, type RetrySettings } from "../types.ts";
+import type { ModelRepository } from "./model-repository.ts";
+import { DEFAULT_GLOBAL_SETTINGS, type RetrySettings } from "../types.ts";
 
 /** 类本身，让只想要「一个模型」的调用方不必伸手进传输层包。 */
 export { Model };
@@ -103,11 +102,10 @@ export function getSupportedThinkingLevels(): ThinkingLevel[] {
  * 改了什么的人下一次调用就得到答案，没有需要失效的东西。文件读写直接内联，不引入存储抽象。
  */
 export class ModelManager {
-	private readonly home: string;
+	private readonly modelRepository: ModelRepository;
 
-	/** `home` 是 `models.json` 所在的目录；递别的 home 是让测试指到无害的地方。 */
-	constructor(options: ModelManagerOptions = {}) {
-		this.home = options.home ?? AGENT_HOME;
+	constructor(options: ModelManagerOptions) {
+		this.modelRepository = options.modelRepository;
 	}
 
 	/**
@@ -222,9 +220,9 @@ export class ModelManager {
 	 * 原样。旧文件本身永不删除、永不写入。
 	 */
 	private load(): Record<string, unknown> {
-		const disk = readDisk(modelsPath(this.home));
+		const disk = this.modelRepository.read("models.json") ?? {};
 
-		const legacy = readLegacySettings(this.home);
+		const legacy = this.readLegacySettings();
 		let migrated = false;
 		if (legacy !== undefined) {
 			if (!("defaultModel" in disk)) {
@@ -247,7 +245,7 @@ export class ModelManager {
 		// retry 的迁移源按优先级：engine.json（退场持有者的文件）→ 旧 settings.json。值原样搬运，
 		// 规范化是读路径的事（retryOr）——「不重试」（maxRetries=0）这样的显式设置不得被读成缺席。
 		if (!("retry" in disk)) {
-			const engine = readDisk(enginePath(this.home));
+			const engine = this.modelRepository.read("engine.json") ?? {};
 			const source = isRecord(engine.retry) ? engine : legacy;
 			if (source !== undefined && isRecord(source.retry)) {
 				disk.retry = source.retry;
@@ -257,7 +255,7 @@ export class ModelManager {
 
 		if (migrated) {
 			if (!("models" in disk)) disk.models = [];
-			writeDisk(modelsPath(this.home), disk);
+			this.modelRepository.write("models.json", disk);
 		}
 
 		return disk;
@@ -274,92 +272,35 @@ export class ModelManager {
 	 */
 	private persist(disk: Record<string, unknown>): void {
 		if (!("models" in disk)) disk.models = [];
-		writeDisk(modelsPath(this.home), disk);
+		this.modelRepository.write("models.json", disk);
 	}
-}
 
-/** 调用方可指明模型簇住在哪个 home，把 {@link ModelManager} 指到机器自己的文件之外。 */
-export interface ModelManagerOptions {
 	/**
-	 * `models.json` 读取与写入所在的 agent home。默认用真实的那一个。
+	 * 旧 `settings.json`，迁移的只读源头。
 	 *
-	 * 递入自己模型行的 smoke 不得把它们留在机器的 `models.json` 里。
+	 * 缺的文件、空文件、解析不了的文件、不是对象的文件，都返回 undefined——迁移跳过。旧文件被拒绝
+	 * 的那些建构在 ADR-0028 之前的统一门面读取上就会以异常显形，不该在这里以每读必炸的形态复活；而
+	 * 「永不删除」意味着一旦开始炸就永远炸下去。键值按消费方的规则各取所需：`model` 收非空字符串，
+	 * `defaultModelSeeded` 收布尔——两种取值都是值，`false` 不是缺席。与主文件（坏 JSON 直接拒绝）
+	 * 不同的这份宽容，是迁移源自己的裁定（ADR-0028 的「内联副本的已知分歧」随实现走）。
 	 */
-	home?: string;
+	private readLegacySettings(): Record<string, unknown> | undefined {
+		try {
+			const layer = this.modelRepository.read("settings.json");
+			return isRecord(layer) ? layer : undefined;
+		} catch {
+			return undefined;
+		}
+	}
 }
 
-// ---------------------------------------------------------------------------- 文件读写（内联）
-
-/** 一份文件的 JSON 对象内容，按它写下的原样——未知键也在。缺的文件是一个空记录。 */
-function readDisk(absPath: string): Record<string, unknown> {
-	let text: string;
-	try {
-		text = readFileSync(absPath, "utf8");
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-		throw error;
-	}
-
-	// trim 顺带去掉 UTF-8 BOM——Windows 编辑器会写它，而 `JSON.parse` 拒绝它。
-	const trimmed = text.trim();
-	if (trimmed === "") return {};
-
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(trimmed);
-	} catch (error) {
-		throw new Error(`${absPath} is not valid JSON: ${(error as Error).message}`);
-	}
-	if (!isRecord(parsed)) throw new Error(`${absPath} must hold a JSON object`);
-	return parsed;
+/** {@link ModelManager} 的构造端口（分层重构 spec §5.2）：`models.json` 及其迁移源的读写。 */
+export interface ModelManagerOptions {
+	/** 模型行（`models.json`）与迁移源（`settings.json`、`engine.json`）的读写端口。 */
+	modelRepository: ModelRepository;
 }
 
-/** temp + rename 的一次性落盘，目录不存在时先创建。 */
-function writeDisk(absPath: string, disk: Record<string, unknown>): void {
-	mkdirSync(dirname(absPath), { recursive: true });
-	const absTemp = `${absPath}.${process.pid}.tmp`;
-	const fd = openSync(absTemp, "wx");
-	try {
-		writeFileSync(fd, `${JSON.stringify(disk, null, "\t")}\n`);
-	} finally {
-		closeSync(fd);
-	}
-	renameSync(absTemp, absPath);
-}
-
-/**
- * 旧 `settings.json`，迁移的只读源头。
- *
- * 缺的文件、空文件、解析不了的文件、不是对象的文件，都返回 undefined——迁移跳过。旧文件被拒绝
- * 的那些建构在 ADR-0028 之前的统一门面读取上就会以异常显形，不该在这里以每读必炸的形态复活；而
- * 「永不删除」意味着一旦开始炸就永远炸下去。键值按消费方的规则各取所需：`model` 收非空字符串，
- * `defaultModelSeeded` 收布尔——两种取值都是值，`false` 不是缺席。
- */
-function readLegacySettings(home: string): Record<string, unknown> | undefined {
-	let text: string;
-	try {
-		text = readFileSync(settingsPath(home), "utf8");
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-		throw error;
-	}
-
-	const trimmed = text.trim();
-	if (trimmed === "") return undefined;
-
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(trimmed);
-	} catch {
-		return undefined;
-	}
-	return isRecord(parsed) ? parsed : undefined;
-}
-
-/** `engine.json` 的位置——退场持有者的文件，只作 retry 的迁移源。 */
-function enginePath(home: string): string {
-	return join(home, "engine.json");
-}
+// ---------------------------------------------------------------------------- 规范化（随簇内联，一行不共享——ADR-0028）
 
 /**
  * 重试策略，逐字段落在默认值之上（ADR-0028 修正：规范化器随簇住在持有者文件里）。
@@ -440,11 +381,6 @@ export const NEW_MODEL_DEFAULTS = {
  * 那边重述一遍字面量，因为那个模块为浏览器打包，而这个跑在 Node 上。
  */
 export const DEFAULT_MODEL_NAME = "deepseek-flash";
-
-/** 模型行所在之处。一个文件，与设置、会话放在一起。读取与写入由 {@link ModelManager} 负责。 */
-export function modelsPath(agentDir: string = AGENT_HOME): string {
-	return join(agentDir, "models.json");
-}
 
 /**
  * 占位模型的名字，有意避开所有用户行。

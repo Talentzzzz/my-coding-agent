@@ -1,5 +1,6 @@
 import type { ChatTransport } from "@my-agent/domain";
 import { SessionHub } from "@my-agent/case";
+import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 import {
 	createServer,
 	createRoutes,
@@ -13,8 +14,10 @@ import {
 	type MuxServer,
 	type WireOptions,
 } from "@my-agent/trigger";
+import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
+import { AGENT_HOME } from "./agent-home.ts";
 
 /**
  * `vite` 模式下的 client 源码目录，其余情况是构建产物。两者都解析到 packages/web 内，所以本模块必须留在包根的下一级目录，这些路径才能继续指向它。
@@ -33,15 +36,21 @@ export interface StartOptions {
 	port?: number;
 	sessionId?: string;
 	/**
-	 * 读取和写入全局设置所用的 agent home。默认是真实的那一个。
+	 * 会话文件对、两份设置文件与默认模型所在的 agent home。缺省走 {@link AGENT_HOME} 的解析
+	 * （`MY_AGENT_HOME ?? ~/.my-agent`，分层重构 §5.1）。
 	 *
-	 * 提供这个透传只有一个原因：驱动写设置命令的 smoke——比如隐藏一个目录——否则会改到机器自己的 `settings.json`。生产中没有任何东西设置它。
+	 * homes 是**路径**不是端口——本组合根是唯一把 home 翻译成 infra 实现的地方：session store 指
+	 * `<settingsHome>/sessions`，home-json 第一份服务 `sessions.json` 与 `tools.json`。提供这个
+	 * 透传的原因：驱动写设置命令的 smoke 与隔离运行的 dev 脚本不得触碰机器自己的文件——一个 home
+	 * 指全隔离，不再有独立的 store 缝。
 	 */
 	settingsHome?: string;
 	/**
-	 * 读取和写入导入模型行所用的 agent home。默认跟 {@link StartOptions.settingsHome}。
+	 * 读取和写入导入模型行所用的 agent home。缺省跟 {@link StartOptions.settingsHome}。
 	 *
-	 * 与 {@link StartOptions.settingsHome} 相同的透传，对应另一个文件：把模型行交给服务器的 smoke 不得把它们留在机器的 `models.json` 里，也不得依赖运行它的人恰好在那里配置了什么。生产中没有任何东西设置它。
+	 * 与 {@link StartOptions.settingsHome} 相同的透传，对应另一份 home-json（ModelManager 用）：
+	 * 把模型行交给服务器的 smoke 不得把它们留在机器的 `models.json` 里，也不得依赖运行它的人恰好
+	 * 在那里配置了什么。生产中没有任何东西设置它。
 	 */
 	modelsHome?: string;
 	/**
@@ -95,12 +104,25 @@ export async function start(options: StartOptions): Promise<BootedServer> {
 		throw new Error(`Invalid port: ${port}`);
 	}
 
+	// home → infra 实现的翻译（分层重构 §5.1 的翻译表）：app 是唯一把 home 路径变成存储实现的地方。
+	// settingsHome 派生会话 store（`<settingsHome>/sessions`，`setSessionsDir` 消亡后的替代缝）与
+	// 第一份 home-json（sessions.json + tools.json）；modelsHome 缺省跟 settingsHome，另一份
+	// home-json 服务 models.json。tool-results 实现收绝对路径、无 home 概念。同一实现满足
+	// SessionDefaults 与 ToolDefaults 两份同形声明（结构化类型，spec §4.2）。
+	const settingsHome = options.settingsHome ?? AGENT_HOME;
+	const modelsHome = options.modelsHome ?? settingsHome;
+	const settingsStore = new HomeJsonStore({ home: settingsHome });
+	const sessionStore = new SessionFileStore({ storeDir: join(settingsHome, "sessions") });
+
 	const sessionHub = new SessionHub({
 		workDirAbsPath,
 		// 还没有项目选择器的 shell 除此之外无法被指向某个会话；环境变量是启动器或采集运行指明打开哪个会话的方式。
 		...(sessionId === undefined ? {} : { sessionId }),
-		...(options.settingsHome === undefined ? {} : { settingsHome: options.settingsHome }),
-		...(options.modelsHome === undefined ? {} : { modelsHome: options.modelsHome }),
+		sessionRepository: sessionStore,
+		sessionDefaultsRepository: settingsStore,
+		modelRepository: modelsHome === settingsHome ? settingsStore : new HomeJsonStore({ home: modelsHome }),
+		toolDefaultsRepository: settingsStore,
+		toolResultsRepository: new ToolResultsArchive(),
 		...(options.chatTransport === undefined ? {} : { chatTransport: options.chatTransport }),
 	});
 

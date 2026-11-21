@@ -8,11 +8,16 @@ import {
 	createSessionAgent,
 	type DirectoryGroup,
 	type ModelConfig,
+	type ModelRepository,
 	type ModelSelection,
 	resolvePath,
+	type SessionDefaultsRepository,
+	type SessionRepository,
 	type SessionRow,
 	type SessionRowPatch,
 	type SessionSnapshot,
+	type ToolDefaultsRepository,
+	type ToolResultsRepository,
 	UnknownSessionError,
 } from "@my-agent/domain";
 
@@ -22,17 +27,19 @@ export interface HubOptions {
 	/** 连接未指名时落到的会话。 */
 	sessionId?: string;
 	/**
-	 * 读取和写入全局设置所用的 agent home。默认是真实的那一个。
+	 * 会话文件对（`.json` 快照 + `.jsonl` 账本）的读写端口（分层重构 spec §5.2）。
 	 *
-	 * `StartOptions` 的透传，理由相同：演练*写*设置命令的 smoke 不得写机器自己的文件。生产中没有任何东西设置它；把设置存放在别处的宿主会提供存储后端而不是这个路径。
+	 * 端口必填——把 home 路径翻译成实现是组合根的差事；hub 对存储只认 domain 声明的端口。
 	 */
-	settingsHome?: string;
-	/**
-	 * 读取和写入导入模型行所用的 agent home。默认是真实的那一个。
-	 *
-	 * 与 {@link settingsHome} 相同的透传，对应另一个文件：把模型行交给 hub 的 smoke——脚本化 transport 应答它们，无需 provider key——不得把它们留在机器的 `models.json` 里，也不得依赖运行它的人恰好在那里配置了什么。
-	 */
-	modelsHome?: string;
+	sessionRepository: SessionRepository;
+	/** 会话簇设置文件（`sessions.json`，迁移源 `settings.json`）的读写端口。 */
+	sessionDefaultsRepository: SessionDefaultsRepository;
+	/** 模型行（`models.json` 及其迁移源）的读写端口。 */
+	modelRepository: ModelRepository;
+	/** 工具簇设置文件（`tools.json`，迁移源 `settings.json`）的读写端口。 */
+	toolDefaultsRepository: ToolDefaultsRepository;
+	/** tool-results 归档的只写端口：写边界的兜底归档永远有处可去。 */
+	toolResultsRepository: ToolResultsRepository;
 	/**
 	 * 本 hub 打开的每个会话所对话的 transport。
 	 *
@@ -129,10 +136,15 @@ export class SessionHub {
 	constructor(options: HubOptions) {
 		this.options = options;
 		this.absRoot = options.workDirAbsPath;
-		// 一行构造，各 manager 是 orchestrator 自己的（ADR-0012）：这个 hub 贡献的只有这些 home——smoke 的内存闸门或模型行在此运行之前就被播种到它们背后的文件里，对象图的其他一切都不归这个 hub 决定。
+		// 一行构造，各 manager 是 orchestrator 自己的（ADR-0012，分层重构步 5 起原料是注入的端口）：
+		// 这个 hub 贡献的只有组合根翻译好的存储实现——smoke 的模型行或工具集在此运行之前就被播种到
+		// 它们背后的文件里，对象图的其他一切都不归这个 hub 决定。
 		this.agent = createSessionAgent({
-			...(options.settingsHome === undefined ? {} : { settingsHome: options.settingsHome }),
-			...(options.modelsHome === undefined ? {} : { modelsHome: options.modelsHome }),
+			sessionRepository: options.sessionRepository,
+			sessionDefaultsRepository: options.sessionDefaultsRepository,
+			modelRepository: options.modelRepository,
+			toolDefaultsRepository: options.toolDefaultsRepository,
+			toolResultsRepository: options.toolResultsRepository,
 			...(options.chatTransport === undefined ? {} : { chatTransport: options.chatTransport }),
 			// 本 hub 就是编排层的订阅宿主：事件与快照交给这个 sink，它按 sessionId 查这一张表分发
 			// ——订阅只从这一个出口流出，编排层只认它。行折算站在分发之前：侧栏的行必须先于任何
@@ -619,7 +631,8 @@ export async function workDirAbsPathForCreate(agent: Agent, workDirInput: string
 	try {
 		return await workDirAbsPathOrThrow(absRoot);
 	} catch (error) {
-		if (!agent.hasSessionsFor(absRoot)) throw error;
+		// 扫描随端口的 scanPairs 异步化（分层重构 §4.1），REST 面不变——birth 端点本就异步。
+		if (!(await agent.hasSessionsFor(absRoot))) throw error;
 		await mkdir(absRoot, { recursive: true });
 		return absRoot;
 	}

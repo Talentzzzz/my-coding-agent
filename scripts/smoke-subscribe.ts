@@ -11,7 +11,8 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setSessionsDir, type ModelConfig } from "@my-agent/domain";
+import { type ModelConfig } from "@my-agent/domain";
+import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 import type { ServerFrame } from "@my-agent/case/protocol";
 import { SessionHub } from "@my-agent/case";
 import { createMuxServer, type MuxConnection } from "@my-agent/trigger";
@@ -98,10 +99,21 @@ interface Rig {
 async function openRig(): Promise<Rig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-subscribe-"));
 	const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-subscribe--store-"));
-	setSessionsDir(storeRoot);
+	// 自造 infra 实现指临时目录（分层重构 §7 步 5）：hub 只认端口，home → 实现的翻译在这里。
+	const agentHome = join(root, "agent-home");
+	const homeJson = new HomeJsonStore({ home: agentHome });
+	const store = new SessionFileStore({ storeDir: storeRoot });
 
 	const transport = createFakeTransport();
-	const sessionHub = new SessionHub({ workDirAbsPath: root, chatTransport: transport.chatTransport, modelsHome: join(root, "agent-home") });
+	const sessionHub = new SessionHub({
+		workDirAbsPath: root,
+		chatTransport: transport.chatTransport,
+		sessionRepository: store,
+		sessionDefaultsRepository: homeJson,
+		modelRepository: homeJson,
+		toolDefaultsRepository: homeJson,
+		toolResultsRepository: new ToolResultsArchive(),
+	});
 	sessionHub.setModelConfigs([ROW]);
 	const muxServer = createMuxServer({ sessionHub }, {});
 	// 与 start 的同一套接线：controller 的删除经 sessionListeners 落到 hub 的行存储上。

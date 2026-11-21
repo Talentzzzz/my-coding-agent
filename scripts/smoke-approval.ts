@@ -42,7 +42,8 @@ import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-
 import { mountSession } from "./mount-session.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
 import type { PendingApproval, SessionRow } from "@my-agent/case/protocol";
-import { type Agent, createToolManager, type ModelConfig, ModelManager, type Session, SessionManager, sessionMetaPath, setSessionsDir, type SessionMeta } from "@my-agent/domain";
+import { type Agent, createToolManager, type ModelConfig, ModelManager, type Session, type SessionMeta } from "@my-agent/domain";
+import { HomeJsonStore, SessionFileStore, sessionMetaPath, ToolResultsArchive } from "@my-agent/infra";
 
 let failures = 0;
 
@@ -108,7 +109,7 @@ async function waitParked(base: string, sessionId: string, ms = 15_000): Promise
 
 /** The `.json` snapshot a session id names, read straight off the store — the marker's disk half. */
 async function readMeta(id: string): Promise<SessionMeta> {
-	const jsonl = SessionManager.findSessionFilePathById(id);
+	const jsonl = sharedStore.locate(id);
 	if (jsonl === undefined) throw new Error(`no session file for ${id}`);
 	return JSON.parse(await readFile(sessionMetaPath(jsonl), "utf8")) as SessionMeta;
 }
@@ -140,8 +141,9 @@ async function seedApprovalGate(root: string, modelRows: readonly ModelConfig[])
 	const home = await mkdtemp(join(tmpdir(), "my-agent-approval-home-"));
 	// 设置归属重构（spec §8）后门面退场：审批映射种进 tools.json，行种进 models.json，各持自己的
 	// 文件——同一套持有者，hub 之后按同一套规则读回。
-	createToolManager({ home }).applyToolDefaults({ approval: { read: true } });
-	new ModelManager({ home: home }).replaceRows(modelRows);
+	const settingsStore = new HomeJsonStore({ home });
+	createToolManager({ toolDefaultsRepository: settingsStore }).applyToolDefaults({ approval: { read: true } });
+	new ModelManager({ modelRepository: settingsStore }).replaceRows(modelRows);
 	return home;
 }
 
@@ -155,7 +157,18 @@ const roundTripWatchdog = deadline("the approval round trip", 60_000);
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-"));
 const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-approval--store-"));
-setSessionsDir(storeRoot);
+// 自造 infra 实现指临时目录（分层重构 §7 步 5）：hub 只认端口，home → 实现的翻译在这里。
+const sharedStore = new SessionFileStore({ storeDir: storeRoot });
+const rigPorts = (settingsHome: string) => {
+	const settingsStore = new HomeJsonStore({ home: settingsHome });
+	return {
+		sessionRepository: sharedStore,
+		sessionDefaultsRepository: settingsStore,
+		modelRepository: settingsStore,
+		toolDefaultsRepository: settingsStore,
+		toolResultsRepository: new ToolResultsArchive(),
+	};
+};
 const fake = createFakeTransport();
 // One response per call: a tool call, then the text that ends the run. Both are assistant messages —
 // `fakeToolCall` is a content block, not a response on its own.
@@ -169,8 +182,7 @@ const settingsHome = await seedApprovalGate(root, rows);
 const sessionHub = new SessionHub({
 	workDirAbsPath: root,
 	chatTransport: fake.chatTransport,
-	settingsHome,
-	modelsHome: settingsHome,
+	...rigPorts(settingsHome),
 });
 // Mounted the way the smoke rigs mount one, so every request below goes through the real hub.
 const { id: sessionId } = await mountSession(sessionHub, {
@@ -691,10 +703,11 @@ try {
 // agent home and the same working directory, so it can only see what the first one left on disk.
 // (The answer itself is not exercised: the child speaks to real providers.)
 //
-// The rig's one subtlety is the store: `setSessionsDir` is an in-process override, while the child
-// only knows `MY_AGENT_HOME/sessions`. Both roads must name the same files, so this section owns a
-// scratch home of its own — the parent points the override at its `sessions`, the child's env points
-// at the home. The switch is safe because the sections above are done with the store they shared.
+// The rig's one subtlety is the store: the in-process halves used to point their own store root
+// while the child only knows `MY_AGENT_HOME/sessions`. With `setSessionsDir` gone the store derives
+// from `settingsHome` (`<settingsHome>/sessions`, 分层重构 §5.2), so one scratch home names the same
+// files for both roads: the parent passes it to `start`, the child's env points at the home. The
+// switch is safe because the sections above are done with the store they shared.
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\nan approval survives a restart as the question it still is\n");
@@ -703,9 +716,8 @@ const restartWatchdog = deadline("the restart checks", 90_000);
 
 const restartRoot = await mkdtemp(join(tmpdir(), "my-agent-approval-restart-"));
 const restartHome = await mkdtemp(join(tmpdir(), "my-agent-approval-restart-home-"));
-setSessionsDir(join(restartHome, "sessions"));
 // One home for both processes: the rows the parent's prompt resolves are the rows the child reads.
-new ModelManager({ home: restartHome }).replaceRows(rows);
+new ModelManager({ modelRepository: new HomeJsonStore({ home: restartHome }) }).replaceRows(rows);
 const restartFake = createFakeTransport();
 const first = await start({ workDirAbsPath: restartRoot, port: 0, chatTransport: restartFake.chatTransport, settingsHome: restartHome });
 let restartSessionId = "";
@@ -884,8 +896,7 @@ async function openRig(): Promise<Rig> {
 	const sessionHub = new SessionHub({
 		workDirAbsPath: root,
 		chatTransport: transport.chatTransport,
-		settingsHome,
-		modelsHome: settingsHome,
+		...rigPorts(settingsHome),
 	});
 	// The graph first, the mount second: the hub learns the mounted session the way the real
 	// process learns a birth — through the refresh the controller's listener would drive. A mount
@@ -953,8 +964,7 @@ async function openCrossRig(): Promise<CrossRig> {
 	const sessionHub = new SessionHub({
 		workDirAbsPath: root,
 		chatTransport: transport.chatTransport,
-		settingsHome,
-		modelsHome: settingsHome,
+		...rigPorts(settingsHome),
 	});
 	const sessions: Mounted[] = [];
 	for (let index = 0; index < 2; index += 1) {

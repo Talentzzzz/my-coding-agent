@@ -9,6 +9,15 @@ hold / release 动词」那半句**保持成立**，本 ADR 不推翻它）、
 [0006](0006-services-drop-instance-state.md)（部分——`SessionManager` 成为第二个持有常驻表的服务，
 与 `ToolManager`（[0011](0011-tool-manager-instance-table.md)）同类；无属性门面的其余一切不变）、
 [0022](0022-drop-send-reference.md)（部分——「守卫刻意只有三道」：守卫变成动作，409 退场）
+取代者：[0030](0030-five-module-layering.md)（部分，2026-11-21——分层重构步 5，spec §4.1/§8.4）：
+**决定 1/2 的簿记住址再迁一程**——holds 表（`Map<fileKey, { holds, closing? }>` 原样）自
+SessionManager 迁 infra 的 session-store 实现；Manager 的进闸出闸变成 **SessionRepository 端口
+方法的原子性承诺**（每个触碰文件对的方法对该文件对原子，闸、closing、复活守卫是实现内部细节），
+hold 契约三条写进端口接口文档；「core 的 Agent 不再有 hold / release 动词」原样成立且更深——
+**domain 连闸的存在都不知道**，只见 `UnknownSessionError` 与撞闸拒绝的语义。`removeGate` 测试缝
+随迁 infra、保持模块级导出（消费者 smoke-sessions / smoke-api 重指 `@my-agent/infra`）；
+「换成事务型存储的那天这张表跟着消失」的论断原样成立（表随实现走）。检查矩阵更新：原
+`check-server-facade` 的 bannedMembers 由 `check-layering` R1b 承接。
 
 ## 背景
 

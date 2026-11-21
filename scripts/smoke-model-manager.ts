@@ -8,7 +8,23 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isUnconfigured, ModelManager, modelsPath, settingsPath, type ModelConfig } from "@my-agent/domain";
+import { isUnconfigured, ModelManager, type ModelConfig } from "@my-agent/domain";
+import { HomeJsonStore } from "@my-agent/infra";
+
+/** models.json 的落盘位置——文件名知识随端口化归持有者（spec §4.2），smoke 自己拼布局契约的名字。 */
+function modelsJsonPath(home: string): string {
+	return join(home, "models.json");
+}
+
+/** legacy settings.json 的落盘位置（迁移源）。 */
+function legacySettingsPath(home: string): string {
+	return join(home, "settings.json");
+}
+
+/** 端口化后的 manager 构造：HomeJsonStore 实现满足 ModelRepository 声明。 */
+function modelsOf(home: string): ModelManager {
+	return new ModelManager({ modelRepository: new HomeJsonStore({ home }) });
+}
 
 let failures = 0;
 
@@ -31,16 +47,16 @@ function row(overrides: Partial<ModelConfig> = {}): ModelConfig {
 
 /** 在临时 home 里写下 models.json（手编的样子：未知键也带上）。 */
 function seedModelsFile(home: string, content: Record<string, unknown>): void {
-	writeFileSync(modelsPath(home), `${JSON.stringify(content, null, "\t")}\n`, "utf8");
+	writeFileSync(modelsJsonPath(home), `${JSON.stringify(content, null, "\t")}\n`, "utf8");
 }
 
 /** 在临时 home 里写下旧 settings.json（迁移源）。 */
 function seedLegacySettings(home: string, content: Record<string, unknown>): void {
-	writeFileSync(settingsPath(home), `${JSON.stringify(content, null, "\t")}\n`, "utf8");
+	writeFileSync(legacySettingsPath(home), `${JSON.stringify(content, null, "\t")}\n`, "utf8");
 }
 
 function modelsDisk(home: string): Record<string, unknown> {
-	return JSON.parse(readFileSync(modelsPath(home), "utf8")) as Record<string, unknown>;
+	return JSON.parse(readFileSync(modelsJsonPath(home), "utf8")) as Record<string, unknown>;
 }
 
 // ------------------------------------------------- 1. 首读迁移：缺键 + 旧文件带字段
@@ -51,7 +67,7 @@ process.stdout.write("\nmodels：首读把旧 settings.json 的两个键逐个�
 	const home = mkdtempSync(join(tmpdir(), "my-agent-model-manager-"));
 	try {
 		seedLegacySettings(home, { model: "deepseek-flash", defaultModelSeeded: false, tools: ["read"] });
-		const manager = new ModelManager({ home: home });
+		const manager = modelsOf(home);
 
 		// 缺文件 = 空目录，与今天的 list() 现行为一致——但迁移照做。
 		check("缺文件时目录为空", manager.catalog().length === 0, JSON.stringify(manager.catalog()));
@@ -66,12 +82,12 @@ process.stdout.write("\nmodels：首读把旧 settings.json 的两个键逐个�
 		check("models 包裹键就位", Array.isArray(disk.models), JSON.stringify(disk));
 
 		// 旧文件永不删除、永不写入：原样躺在原地。
-		const legacy = JSON.parse(readFileSync(settingsPath(home), "utf8")) as Record<string, unknown>;
+		const legacy = JSON.parse(readFileSync(legacySettingsPath(home), "utf8")) as Record<string, unknown>;
 		check("旧 settings.json 原样未动", legacy.model === "deepseek-flash" && legacy.defaultModelSeeded === false && Array.isArray(legacy.tools), JSON.stringify(legacy));
 
 		// 迁移过就是迁移过：删掉旧文件再建一只 manager，答案不回到 undefined。
-		rmSync(settingsPath(home), { force: true });
-		check("旧文件删了迁移结果还在", new ModelManager({ home: home }).defaultRef() === "deepseek-flash", String(new ModelManager({ home: home }).defaultRef()));
+		rmSync(legacySettingsPath(home), { force: true });
+		check("旧文件删了迁移结果还在", modelsOf(home).defaultRef() === "deepseek-flash", String(modelsOf(home).defaultRef()));
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}
@@ -87,7 +103,7 @@ process.stdout.write("\nmodels：models.json 已带的键压住旧文件，缺�
 		// defaultModel 已有主，defaultModelSeeded 缺席——迁移按键逐个裁决，不是按文件。
 		seedModelsFile(home, { models: [row()], defaultModel: "mine" });
 		seedLegacySettings(home, { model: "旧主人", defaultModelSeeded: true });
-		const manager = new ModelManager({ home: home });
+		const manager = modelsOf(home);
 
 		check("已带的 defaultModel 压住旧文件", manager.defaultRef() === "mine", String(manager.defaultRef()));
 		const disk = modelsDisk(home);
@@ -100,7 +116,7 @@ process.stdout.write("\nmodels：models.json 已带的键压住旧文件，缺�
 		try {
 			seedModelsFile(home2, { models: [], defaultModelSeeded: false });
 			seedLegacySettings(home2, { model: "捡我", defaultModelSeeded: true });
-			const other = new ModelManager({ home: home2 });
+			const other = modelsOf(home2);
 			check("false 压住旧文件的 true", modelsDisk(home2).defaultModelSeeded === false, JSON.stringify(modelsDisk(home2)));
 			check("缺的 defaultModel 仍被捡走", other.defaultRef() === "捡我", String(other.defaultRef()));
 		} finally {
@@ -124,7 +140,7 @@ process.stdout.write("\nmodels：applyModelSettings 只动点名键，未知键�
 			defaultModelSeeded: true,
 			手编的未知键: { nested: "别动我" },
 		});
-		const manager = new ModelManager({ home: home });
+		const manager = modelsOf(home);
 
 		// 补丁只点名 model：seeded 与未知键、行都不许挪。
 		manager.applyModelSettings({ model: "switched" });
@@ -141,11 +157,11 @@ process.stdout.write("\nmodels：applyModelSettings 只动点名键，未知键�
 		// 空补丁什么都不写：没有 models.json 的 home 上不得凭空造出文件。
 		const fresh = mkdtempSync(join(tmpdir(), "my-agent-model-manager-"));
 		try {
-			new ModelManager({ home: fresh }).applyModelSettings({});
-			new ModelManager({ home: fresh }).applyModelSettings({ model: undefined, defaultModelSeeded: undefined });
+			modelsOf(fresh).applyModelSettings({});
+			modelsOf(fresh).applyModelSettings({ model: undefined, defaultModelSeeded: undefined });
 			let exists = true;
 			try {
-				readFileSync(modelsPath(fresh), "utf8");
+				readFileSync(modelsJsonPath(fresh), "utf8");
 			} catch {
 				exists = false;
 			}
@@ -159,7 +175,7 @@ process.stdout.write("\nmodels：applyModelSettings 只动点名键，未知键�
 		const sloppy = mkdtempSync(join(tmpdir(), "my-agent-model-manager-"));
 		try {
 			seedModelsFile(sloppy, { models: [], defaultModel: "   " });
-			check("空白 ref 读作未设置", new ModelManager({ home: sloppy }).defaultRef() === undefined, String(new ModelManager({ home: sloppy }).defaultRef()));
+			check("空白 ref 读作未设置", modelsOf(sloppy).defaultRef() === undefined, String(modelsOf(sloppy).defaultRef()));
 		} finally {
 			rmSync(sloppy, { recursive: true, force: true });
 		}
@@ -181,7 +197,7 @@ process.stdout.write("\nmodels：replaceRows 整表替换行，defaultModel / se
 			defaultModelSeeded: false,
 			手编的未知键: 42,
 		});
-		const manager = new ModelManager({ home: home });
+		const manager = modelsOf(home);
 
 		const next = [row({ name: "第二台", id: "wire-2" }), row({ name: "第三台", id: "wire-3" })];
 		manager.replaceRows(next);
@@ -193,7 +209,7 @@ process.stdout.write("\nmodels：replaceRows 整表替换行，defaultModel / se
 
 		// 规范化的行走 coerceModelConfig：缺 baseUrl 的行读不回来——写坏的数据不抵达调用方。
 		seedModelsFile(home, { models: [row(), { id: "x", name: "没端点" }] });
-		const coerced = new ModelManager({ home: home }).catalog();
+		const coerced = modelsOf(home).catalog();
 		check("读不回来的行被丢", coerced.length === 1 && coerced[0]!.name === "mine", JSON.stringify(coerced));
 
 		// 无行目录读出占位行的事实由 rowOrPlaceholder 保证，这里只查目录本身不造假。
@@ -211,7 +227,7 @@ process.stdout.write("\nmodels：写前重读——进程运行期间的手编�
 	const home = mkdtempSync(join(tmpdir(), "my-agent-model-manager-"));
 	try {
 		seedModelsFile(home, { models: [row()], defaultModel: "mine" });
-		const manager = new ModelManager({ home: home });
+		const manager = modelsOf(home);
 
 		// manager 构造之后、写入之前，用户在编辑器里加了一行、改了默认 ref。
 		seedModelsFile(home, { models: [row(), row({ name: "手编的", id: "wire-hand" })], defaultModel: "手编的" });

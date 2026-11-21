@@ -19,6 +19,7 @@ import { createServer } from "@my-agent/trigger";
 import { createFakeTransport, fakeAssistantMessage, type FakeTransport } from "./fake-transport.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
 import type { SessionRow, SessionSnapshot, ModelConfig } from "@my-agent/domain";
+import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 
 let failures = 0;
 
@@ -111,8 +112,19 @@ const TOKENS_PER_SECOND = 400;
 
 async function openRig(): Promise<Rig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-mux-"));
+	// 自造 infra 实现指临时目录（分层重构 §7 步 5）：hub 只认端口，home → 实现的翻译在这里——
+	// 模型行与设置落进本 smoke 自己的临时 home，不再是机器自己的。
+	const homeJson = new HomeJsonStore({ home: join(root, "agent-home") });
 	const transport = createFakeTransport({ tokensPerSecond: TOKENS_PER_SECOND });
-	const sessionHub = new SessionHub({ workDirAbsPath: root, chatTransport: transport.chatTransport });
+	const sessionHub = new SessionHub({
+		workDirAbsPath: root,
+		chatTransport: transport.chatTransport,
+		sessionRepository: new SessionFileStore({ storeDir: join(root, "sessions") }),
+		sessionDefaultsRepository: homeJson,
+		modelRepository: homeJson,
+		toolDefaultsRepository: homeJson,
+		toolResultsRepository: new ToolResultsArchive(),
+	});
 	sessionHub.setModelConfigs(rows);
 
 	const muxServer = createMuxServer({ sessionHub }, { heartbeatIntervalMs: 150 });

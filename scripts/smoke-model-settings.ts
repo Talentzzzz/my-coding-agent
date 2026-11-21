@@ -10,17 +10,17 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_GLOBAL_SETTINGS, ModelManager, settingsPath, type RetrySettings } from "@my-agent/domain";
+import { DEFAULT_GLOBAL_SETTINGS, ModelManager, type RetrySettings } from "@my-agent/domain";
+import { HomeJsonStore } from "@my-agent/infra";
 
-let failures = 0;
-
-function check(label: string, condition: boolean, detail = ""): void {
-	process.stdout.write(`${condition ? "  ok  " : "  FAIL"} ${label}${condition ? "" : ` ${detail}`}\n`);
-	if (!condition) failures += 1;
-}
-
+/** models.json 的落盘位置——文件名知识随端口化归持有者（spec §4.2）。 */
 function modelsPathOf(home: string): string {
 	return join(home, "models.json");
+}
+
+/** legacy settings.json（迁移源）。 */
+function legacySettingsPath(home: string): string {
+	return join(home, "settings.json");
 }
 
 function enginePathOf(home: string): string {
@@ -29,6 +29,18 @@ function enginePathOf(home: string): string {
 
 function writeJson(path: string, value: unknown): void {
 	writeFileSync(path, `${JSON.stringify(value, null, "\t")}\n`, "utf8");
+}
+
+/** 端口化后的 manager 构造：HomeJsonStore 实现满足 ModelRepository 声明。 */
+function modelsOf(home: string): ModelManager {
+	return new ModelManager({ modelRepository: new HomeJsonStore({ home }) });
+}
+
+let failures = 0;
+
+function check(label: string, condition: boolean, detail = ""): void {
+	process.stdout.write(`${condition ? "  ok  " : "  FAIL"} ${label}${condition ? "" : ` ${detail}`}\n`);
+	if (!condition) failures += 1;
 }
 
 // ------------------------------------------------- 1. 迁移：退场持有者的 engine.json 优先被捡走
@@ -41,7 +53,7 @@ process.stdout.write("\nmodel：首读迁移——engine.json 的 retry 被捡�
 		// 旧持有者的文件带着用户手调过的 retry：enabled 关了、次数升到 5，其余字段缺省。
 		writeJson(enginePathOf(home), { retry: { enabled: false, maxRetries: 5 } });
 
-		const models = new ModelManager({ home });
+		const models = modelsOf(home);
 		const retry = models.retrySettings();
 		check("旧持有者文件的手调字段原样回来", retry.enabled === false && retry.maxRetries === 5, JSON.stringify(retry));
 		check("缺省字段补上默认", retry.baseDelayMs === DEFAULT_GLOBAL_SETTINGS.retry.baseDelayMs && retry.maxAgentDelayMs === DEFAULT_GLOBAL_SETTINGS.retry.maxAgentDelayMs, JSON.stringify(retry));
@@ -66,15 +78,15 @@ process.stdout.write("\nmodel：engine.json 缺席时 retry 从旧 settings.json
 {
 	const home = mkdtempSync(join(tmpdir(), "my-agent-model-"));
 	try {
-		writeJson(settingsPath(home), { retry: { enabled: false, maxRetries: 9 } });
+		writeJson(legacySettingsPath(home), { retry: { enabled: false, maxRetries: 9 } });
 
-		const models = new ModelManager({ home });
+		const models = modelsOf(home);
 		const retry = models.retrySettings();
 		check("旧 settings.json 的手调字段原样回来", retry.enabled === false && retry.maxRetries === 9, JSON.stringify(retry));
 
 		const onDisk = JSON.parse(readFileSync(modelsPathOf(home), "utf8")) as Record<string, unknown>;
 		check("models.json 已在磁盘上", onDisk.retry !== undefined, JSON.stringify(onDisk));
-		check("旧 settings.json 原样未动", readFileSync(settingsPath(home), "utf8") === `${JSON.stringify({ retry: { enabled: false, maxRetries: 9 }, }, null, "\t")}\n`);
+		check("旧 settings.json 原样未动", readFileSync(legacySettingsPath(home), "utf8") === `${JSON.stringify({ retry: { enabled: false, maxRetries: 9 }, }, null, "\t")}\n`);
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}
@@ -87,11 +99,11 @@ process.stdout.write("\nmodel：models.json 已有 retry 键时两份旧文件�
 {
 	const home = mkdtempSync(join(tmpdir(), "my-agent-model-"));
 	try {
-		writeJson(settingsPath(home), { retry: { enabled: false, maxRetries: 9 } });
+		writeJson(legacySettingsPath(home), { retry: { enabled: false, maxRetries: 9 } });
 		writeJson(enginePathOf(home), { retry: { maxRetries: 8 } });
 		writeJson(modelsPathOf(home), { retry: { maxRetries: 1 } });
 
-		const models = new ModelManager({ home });
+		const models = modelsOf(home);
 		const retry = models.retrySettings();
 		check("读的是 models.json 的键", retry.maxRetries === 1, JSON.stringify(retry));
 		check("enabled 来自默认而不是旧文件", retry.enabled === DEFAULT_GLOBAL_SETTINGS.retry.enabled, JSON.stringify(retry));
@@ -114,7 +126,7 @@ process.stdout.write("\nmodel：applyRetry 只动点名字段，未知键原样�
 			futureCluster: { note: "reserved" },
 		});
 
-		const models = new ModelManager({ home });
+		const models = modelsOf(home);
 		models.applyRetry({ enabled: false });
 
 		const retry = models.retrySettings();
@@ -140,11 +152,11 @@ process.stdout.write("\nmodel：maxRetries=0 是「不重试」的设置，不�
 	try {
 		// 迁移路上就该幸存：engine.json 把次数调成 0，规范化不得把它读成「没设过」。
 		writeJson(enginePathOf(home), { retry: { maxRetries: 0 } });
-		const migrated = new ModelManager({ home }).retrySettings();
+		const migrated = modelsOf(home).retrySettings();
 		check("迁移后 maxRetries=0 幸存", migrated.maxRetries === 0, JSON.stringify(migrated));
 
 		// 写路径同理：面板把重试关成 0，读回来必须还是 0。
-		const models = new ModelManager({ home: mkdtempSync(join(tmpdir(), "my-agent-model-")) });
+		const models = modelsOf(mkdtempSync(join(tmpdir(), "my-agent-model-")));
 		models.applyRetry({ maxRetries: 0 });
 		check("applyRetry 后 maxRetries=0 幸存", models.retrySettings().maxRetries === 0, JSON.stringify(models.retrySettings()));
 	} finally {
@@ -159,12 +171,12 @@ process.stdout.write("\nmodel：models.json、engine.json 与旧 settings.json �
 {
 	const home = mkdtempSync(join(tmpdir(), "my-agent-model-"));
 	try {
-		const models = new ModelManager({ home });
+		const models = modelsOf(home);
 		const retry = models.retrySettings();
 		check("读到的是补默认的视图", retry.enabled === DEFAULT_GLOBAL_SETTINGS.retry.enabled && retry.maxRetries === DEFAULT_GLOBAL_SETTINGS.retry.maxRetries, JSON.stringify(retry));
 		check("models.json 没有被写出", !existsSync(modelsPathOf(home)));
 		check("engine.json 没有被写出", !existsSync(enginePathOf(home)));
-		check("旧 settings.json 也没有被写出", !existsSync(settingsPath(home)));
+		check("旧 settings.json 也没有被写出", !existsSync(legacySettingsPath(home)));
 
 		// 只有第一次真正的写入才让 models.json 出现。
 		models.applyRetry({ maxRetries: 2 });
@@ -181,7 +193,7 @@ process.stdout.write("\nmodel：写前重读——进程之外的手编不被一
 {
 	const home = mkdtempSync(join(tmpdir(), "my-agent-model-"));
 	try {
-		const models = new ModelManager({ home });
+		const models = modelsOf(home);
 		models.applyRetry({ maxRetries: 4 });
 
 		// 构造之后、写入之前，有人用编辑器改了磁盘上的文件：加了一个未知键、调了一个值。

@@ -7,9 +7,6 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	SessionManager,
-	sessionMetaPath,
-	setSessionsDir,
 	type Agent,
 	type SessionRow,
 	type SessionRowPatch,
@@ -17,13 +14,24 @@ import {
 	type SessionMeta,
 	type ModelConfig,
 } from "@my-agent/domain";
+import { HomeJsonStore, SessionFileStore, sessionMetaPath, ToolResultsArchive } from "@my-agent/infra";
 import type { ClientFrame, ConnectionItem, ServerFrame, ServerMessage } from "@my-agent/case/protocol";
 import { SessionHub } from "@my-agent/case";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-projection-"));
 const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-projection--store-"));
-setSessionsDir(storeRoot);
+// 自造 infra 实现指临时目录（分层重构 §7 步 5）：hub 只认端口，home → 实现的翻译在这里。
+const agentHome = join(root, "agent-home");
+const homeJson = new HomeJsonStore({ home: agentHome });
+const store = new SessionFileStore({ storeDir: storeRoot });
+const hubPorts = {
+	sessionRepository: store,
+	sessionDefaultsRepository: homeJson,
+	modelRepository: homeJson,
+	toolDefaultsRepository: homeJson,
+	toolResultsRepository: new ToolResultsArchive(),
+};
 let failures = 0;
 
 function check(label: string, condition: boolean, detail = ""): void {
@@ -75,7 +83,7 @@ const ROW: ModelConfig = {
 };
 
 const fake = createFakeTransport();
-const sessionHub = new SessionHub({ workDirAbsPath: root, chatTransport: fake.chatTransport, modelsHome: join(root, "agent-home") });
+const sessionHub = new SessionHub({ workDirAbsPath: root, chatTransport: fake.chatTransport, ...hubPorts });
 /** 进程唯一的 orchestrator：本 smoke 驱动的每个 session 都按 id 经由它。 */
 const agent = sessionHub.agent;
 sessionHub.setModelConfigs([ROW]);
@@ -192,8 +200,8 @@ try {
 	check("a message landing does not rename the row", (await sessionHub.row(first))?.title === "the conversation starts here", (await sessionHub.row(first))?.title);
 	check(
 		"and a cold probe agrees with the live row",
-		(await SessionManager.findSessionRowById(first))?.title === "the conversation starts here",
-		(await SessionManager.findSessionRowById(first))?.title,
+		(await sessionHub.agent.findSessionRowById(first))?.title === "the conversation starts here",
+		(await sessionHub.agent.findSessionRowById(first))?.title,
 	);
 
 	// leaf 在内存里，得知分支移动了的唯一办法是听 session 自己说——而标题要移动的唯一办法是
@@ -207,8 +215,8 @@ try {
 	check("a new root is named from the message it started with", reopened?.title === "a different opening", reopened?.title);
 	check(
 		"and the cold probe agrees with the live row, which is the whole point of one derivation",
-		(await SessionManager.findSessionRowById(first))?.title === reopened?.title,
-		`${(await SessionManager.findSessionRowById(first))?.title} vs ${reopened?.title}`,
+		(await sessionHub.agent.findSessionRowById(first))?.title === reopened?.title,
+		`${(await sessionHub.agent.findSessionRowById(first))?.title} vs ${reopened?.title}`,
 	);
 	check("the row is still there after the runs", (await sessionHub.row(first)) !== undefined);
 
@@ -268,7 +276,7 @@ try {
 	const parkedId = await park("read the notes");
 	const strippedId = await park("read the notes too");
 	const metaPathOf = (id: string): string => {
-		const jsonl = SessionManager.findSessionFilePathById(id);
+		const jsonl = store.locate(id);
 		if (jsonl === undefined) throw new Error(`no session file for ${id}`);
 		return sessionMetaPath(jsonl);
 	};
@@ -281,7 +289,7 @@ try {
 
 	// 一个全新的 hub：编排层的表随 hub 而空——这正是重启的样子——停在门口的行的
 	// pending 只能来自快照的标记。
-	const coldHub = new SessionHub({ workDirAbsPath: root, chatTransport: fake.chatTransport, modelsHome: join(root, "agent-home") });
+	const coldHub = new SessionHub({ workDirAbsPath: root, chatTransport: fake.chatTransport, ...hubPorts });
 	const coldRows = await coldHub.rows();
 	const coldParked = coldRows.find((row) => row.id === parkedId);
 	check("the parked session's cold row is pending 1", coldParked?.pending === 1, JSON.stringify(coldParked));
