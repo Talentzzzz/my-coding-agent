@@ -6,12 +6,24 @@
 		"paths": {
 			"@my-agent/core": ["./packages/core/src/index.ts"],
 			"@my-agent/core/protocol": ["./packages/core/src/protocol.ts"],
-			"@my-agent/core/tools": ["./packages/core/src/tools/index.ts"]
+			"@my-agent/core/tools": ["./packages/core/src/tools/index.ts"],
+			"@my-agent/app": ["./packages/app/src/index.ts"],
+			"@my-agent/trigger": ["./packages/trigger/src/index.ts"],
+			"@my-agent/case": ["./packages/case/src/index.ts"],
+			"@my-agent/case/protocol": ["./packages/case/src/protocol.ts"],
+			"@my-agent/infra": ["./packages/infra/src/index.ts"],
+			"@my-agent/domain": ["./packages/domain/src/index.ts"],
+			"@my-agent/domain/tool": ["./packages/domain/src/agent/tool/index.ts"]
 		}
 	},
 	"include": [
 		"packages/core/src/**/*.ts",
 		"packages/server/src/**/*.ts",
+		"packages/app/src/**/*.ts",
+		"packages/trigger/src/**/*.ts",
+		"packages/case/src/**/*.ts",
+		"packages/domain/src/**/*.ts",
+		"packages/infra/src/**/*.ts",
 		"scripts/cdp.ts",
 		"scripts/smoke-projection.ts",
 		"scripts/smoke-subscribe.ts",
