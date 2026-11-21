@@ -11,9 +11,9 @@
 // 原 `Settings.global` 的透传字段退场——bash 直读工具簇、retry 读引擎簇、队列模式读会话簇，
 // 消费者各自直读持有者，组合视图不再代为携带。
 import { DEFAULT_MODE_NAME } from "./types.ts";
-import { DEFAULT_MODEL_NAME, type ModelChoice, type ModelConfig, rowOrPlaceholder } from "./model-manager.ts";
+import { DEFAULT_MODEL_NAME, type ModelChoice, type ModelConfig, rowOrPlaceholder } from "./llm/model-manager.ts";
 import { recordedSelectionOf, type Session } from "./session/session-manager.ts";
-import { narrowToKnown, type ToolDefaults } from "./tools/manager.ts";
+import { narrowToKnown, type ToolDefaults } from "./tool/manager.ts";
 
 /** 审批表闸住的工具：表里每个带 true 值的名字。 */
 export function approvalToolsOf(approval: Record<string, boolean>): string[] {

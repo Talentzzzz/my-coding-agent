@@ -1,5 +1,5 @@
 import type { Message, Model } from "../llm/index.ts";
-import type { QueueMode } from "../protocol.ts";
+import type { QueueMode } from "../types.ts";
 import { PendingMessageQueue } from "./queues.ts";
 
 /**

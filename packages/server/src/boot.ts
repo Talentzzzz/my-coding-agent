@@ -1,4 +1,4 @@
-import type { ChatTransport } from "@my-agent/core";
+import type { ChatTransport } from "@my-agent/domain";
 import { createServer, type HttpServerHandle } from "./http.ts";
 import { SessionHub } from "./hub.ts";
 import { SessionController, SystemController, type SessionListener } from "./controllers/sessions.ts";

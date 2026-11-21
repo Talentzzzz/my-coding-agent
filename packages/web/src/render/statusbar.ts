@@ -1,5 +1,5 @@
 import { element } from "../dom.ts";
-import type { UsageTotals } from "@my-agent/core/protocol";
+import type { UsageTotals } from "@my-agent/case/protocol";
 
 export interface StatusState {
 	usage: UsageTotals;

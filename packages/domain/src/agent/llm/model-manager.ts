@@ -9,15 +9,66 @@ import {
 	Model,
 	type ModelConfig,
 	type ThinkingLevel,
-} from "./llm/index.ts";
-import { AGENT_HOME, DEFAULT_GLOBAL_SETTINGS, settingsPath, type RetrySettings } from "./types.ts";
-import type { ModelOption } from "./protocol.ts";
+} from "./index.ts";
+import { AGENT_HOME, DEFAULT_GLOBAL_SETTINGS, settingsPath, type RetrySettings } from "../types.ts";
 
 /** 类本身，让只想要「一个模型」的调用方不必伸手进传输层包。 */
 export { Model };
 
 /** 一行写下来时的形状，转发出去让调用方不必点名它所在的包。 */
 export type { ModelConfig };
+
+/**
+ * 用户输入的一个模型，以客户端看到的样子。
+ *
+ * API 密钥有意缺席——客户端可以添加或替换一把，但永远不会被回发一把，所以密钥无法经由仅仅渲染
+ * 列表的页面泄露。表单显示的是 `hasApiKey`，让「存了密钥」与「这一行没有密钥」保持可区分。
+ *
+ * `name` 是行的身份，所以既是面板显示的，也是客户端指名这一行时回发的。`api` 是为会话记录而
+ * 报告的，且永远是同一个值：本应用只说一种传输层，所以它是关于构建的事实，不是表单编辑的字段。
+ */
+export interface ModelOption {
+	/** wire id，也是提交 config 时指名该模型所用的字段。 */
+	id: string;
+	name: string;
+	api: string;
+	baseUrl: string;
+	contextWindow: number;
+	maxTokens: number;
+	/**
+	 * 该行上的会话可能处于的每个档位，从低到高。
+	 *
+	 * 每行都是同样四个——effort 是 wire 携带的唯一强度——但报告出来而不是假定出来，这样无论行是
+	 * 存储的、本地种下的还是会话快照描述的，输入框读的都是同一个形状。
+	 */
+	thinkingLevels: string[];
+	hasApiKey: boolean;
+}
+
+/**
+ * 一行被客户端提交时的样子。
+ *
+ * 每个字段都可选，这正是它与 {@link ModelConfig} 的全部差别：省略的字段让已存的值原地不动，这才让
+ * 「补丁」（这一行的密钥是新的）成为可表达的东西——整份 config 得把行里已有的每条事实重述一遍。
+ * 形状是派生的而不是重述的，所以加进 config 的字段客户端就能发，不在这份列表里的（`api`、`input`、
+ * `cost`）就不能。
+ */
+export type ModelInput = Partial<
+	Pick<ModelConfig, "id" | "name" | "baseUrl" | "apiKey" | "contextWindow" | "maxTokens">
+>;
+
+/**
+ * 哪个模型回答一条消息，以及被要求多用力地思考。
+ *
+ * 它随消息一起走，而不是作为会话自己的命令，因为两半在被请求真正使用之前都不为真：从未被用过的
+ * 选择不是发生过的事，所以它不是会话记录的条目，也不是配置变更。缺失的字段让那一半保持会话
+ * 已有的样子。
+ */
+export interface ModelSelection {
+	/** 行的名字——设置面板显示、会话记录记录的身份。 */
+	model?: string;
+	thinkingLevel?: string;
+}
 
 /**
  * 本安装能驱动的每个模型被请求的 level，从低到高。

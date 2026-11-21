@@ -14,7 +14,7 @@ import {
 	type SessionRowPatch,
 	type SessionSnapshot,
 	UnknownSessionError,
-} from "@my-agent/core";
+} from "@my-agent/domain";
 
 export interface HubOptions {
 	/** 进程启动时所在的目录；新会话以它为工作目录。 */

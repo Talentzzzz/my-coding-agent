@@ -12,8 +12,8 @@ import { bootServer } from "../packages/server/src/boot.ts";
 import { MuxClient, browserSocket, type MuxHandlers } from "../packages/web/src/client.ts";
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
-import type { ConnectionItem, ServerMessage } from "@my-agent/core/protocol";
-import { setSessionsDir, type ModelConfig } from "@my-agent/core";
+import type { ConnectionItem, ServerMessage } from "@my-agent/case/protocol";
+import { setSessionsDir, type ModelConfig } from "@my-agent/domain";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-mux-live-"));
 /** 一个临时 agent home，本 smoke 写的设置不是机器自己的。 */

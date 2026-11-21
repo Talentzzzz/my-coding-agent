@@ -34,13 +34,13 @@ import {
 	type ChatTransport,
 	type Context,
 	type SimpleStreamOptions,
-} from "@my-agent/core";
+} from "@my-agent/domain";
 
 /** The ledger's operations are the service's methods, so a script holds one to call them on. */
 const sessionManager = new SessionManager();
 
-// `@my-agent/core` is a workspace package, linked into the repository root's
-// node_modules so scripts resolve it the same way `packages/core` does.
+// `@my-agent/domain` is a workspace package, linked into the repository root's
+// node_modules so scripts resolve it the same way `packages/domain` does.
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-session-"));
 const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-session--store-"));

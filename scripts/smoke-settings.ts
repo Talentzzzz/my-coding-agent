@@ -18,7 +18,7 @@ import {
 	SessionManager,
 	type ModelConfig,
 	type Session,
-} from "@my-agent/core";
+} from "@my-agent/domain";
 
 let failures = 0;
 

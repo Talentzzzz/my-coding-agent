@@ -1,6 +1,6 @@
 import { element, icon } from "./dom.ts";
 import { openMenu } from "./render/menu.ts";
-import type { ModelOption, PromptBehavior, QueuedPrompt } from "@my-agent/core/protocol";
+import type { ModelOption, PromptBehavior, QueuedPrompt } from "@my-agent/case/protocol";
 
 // 与 main.ts / render/settings.ts 各自重复的同一个内置名——core 跑在 Node 上，客户端不打包它。
 const DEFAULT_MODE_NAME = "默认";

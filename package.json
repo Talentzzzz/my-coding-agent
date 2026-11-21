@@ -5,7 +5,6 @@
 	"type": "module",
 	"description": "Coding agent with a desktop UI",
 	"workspaces": [
-		"packages/core",
 		"packages/server",
 		"packages/web",
 		"packages/desktop",

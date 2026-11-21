@@ -40,8 +40,8 @@ import { createServer } from "../packages/server/src/http.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import { mountSession } from "./mount-session.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
-import type { PendingApproval, SessionRow } from "@my-agent/core/protocol";
-import { type Agent, createToolManager, type ModelConfig, ModelManager, type Session, SessionManager, sessionMetaPath, setSessionsDir, type SessionMeta } from "@my-agent/core";
+import type { PendingApproval, SessionRow } from "@my-agent/case/protocol";
+import { type Agent, createToolManager, type ModelConfig, ModelManager, type Session, SessionManager, sessionMetaPath, setSessionsDir, type SessionMeta } from "@my-agent/domain";
 
 let failures = 0;
 

@@ -44,7 +44,7 @@ import {
 	type Session,
 	type SessionEntry,
 	compactionSummaryOf,
-} from "@my-agent/core";
+} from "@my-agent/domain";
 
 /** The ledger's operations are the service's methods, so a script holds one to call them on. */
 const sessionManager = new SessionManager();

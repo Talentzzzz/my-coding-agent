@@ -10,7 +10,8 @@
 		"start": "node src/main.ts"
 	},
 	"dependencies": {
-		"@my-agent/core": "workspace:*"
+		"@my-agent/case": "workspace:*",
+		"@my-agent/domain": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/node": "^22.19.0",

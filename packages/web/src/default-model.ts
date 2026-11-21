@@ -1,4 +1,4 @@
-import type { ModelInput, ModelOption } from "@my-agent/core/protocol";
+import type { ModelInput, ModelOption } from "@my-agent/case/protocol";
 
 /**
  * 本机尚未导入任何模型时，窗口种下的那一行。

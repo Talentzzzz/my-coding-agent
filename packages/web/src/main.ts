@@ -37,7 +37,7 @@ import type {
 	ServerMessage,
 	SessionSnapshot,
 	SessionRow,
-} from "@my-agent/core/protocol";
+} from "@my-agent/case/protocol";
 
 /**
  * 桌面外壳给页面增加的东西：操作系统自己的文件夹选择器，与 UI 设置的持久化桥。
@@ -58,7 +58,7 @@ declare global {
 }
 
 /**
- * 内置默认模式的名字，在这里复述而不是导入：它的家（`@my-agent/core` 的 `types.ts`）跑在 Node 上，
+ * 内置默认模式的名字，在这里复述而不是导入：它的家（`@my-agent/domain` 的 `types.ts`）跑在 Node 上，
  * 客户端绝不能把它拉进 bundle —— 设置面板出于同样的理由应用同一条复述规则。
  */
 const DEFAULT_MODE_NAME = "默认";
@@ -357,7 +357,7 @@ function main(): void {
 	 * 持久化遵循侧栏把手的两条规则，与参考实现一致：保存的偏好是拖动产生的那一个，从未移动的按压
 	 * 什么都不提交 —— 一次空点击绝不能用当前布局截断出的显示值覆盖更宽的偏好 —— 且存储的数字在
 	 * 每次读取时按当前布局截断，让更小的窗口压低显示而不销毁选择。服务端把存储的偏好截到绝对范围
-	 * （`@my-agent/core` 的 `types.ts`）；布局相关的两端是窗口独有的，因为
+	 * （`@my-agent/domain` 的 `types.ts`）；布局相关的两端是窗口独有的，因为
 	 * 只有它知道列的宽度。
 	 */
 	const contentResizer = element("div", "content-resizer", undefined, {
@@ -688,7 +688,7 @@ function main(): void {
 	/**
 	 * 拖动范围，从样式表声明的同一批 token 读回（`--dsw-sidebar-min/max`）。
 	 *
-	 * 这些数字的家在 `tokens.css`，由 `@my-agent/core` 的 `types.ts` 镜像，
+	 * 这些数字的家在 `tokens.css`，由 `@my-agent/domain` 的 `types.ts` 镜像，
 	 * 服务端在那里截断存储的偏好。它们不被导入客户端 —— config 模块跑在 Node 上，客户端绝不能
 	 * 把它拉进 bundle —— 所以 token 被读回，这里的字面量只是样式表加载失败时的兜底。
 	 */

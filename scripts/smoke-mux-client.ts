@@ -9,7 +9,7 @@
 import { MuxClient, type ChannelState, type MuxHandlers, type MuxOptions, type MuxSocket, type MuxSocketFactory, type MuxTimers } from "../packages/web/src/client.ts";
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { reduceEnd, initialState, reduce, type ViewState } from "../packages/web/src/state.ts";
-import type { ServerMessage, SessionRow, SessionSnapshot } from "@my-agent/core/protocol";
+import type { ServerMessage, SessionRow, SessionSnapshot } from "@my-agent/case/protocol";
 
 let failures = 0;
 

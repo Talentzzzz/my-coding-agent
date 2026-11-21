@@ -43,8 +43,9 @@ import {
 	rowFor,
 	type ThinkingLevel,
 	unconfiguredStream,
-} from "./model-manager.ts";
-import type { ConfigPatch, ModelSelection, PendingApproval, PromptBehavior, QueueMode, SessionRow, SessionSnapshot } from "./protocol.ts";
+	type ModelSelection,
+} from "./llm/model-manager.ts";
+import { ModelManager } from "./llm/model-manager.ts";
 import type { AgentState } from "./session/agent-state.ts";
 import { createAgentState, createLive } from "./session/agent-state.ts";
 import { danglingApprovalsOf } from "./session/dangling.ts";
@@ -57,14 +58,14 @@ import {
 	type SessionInfo,
 	SessionManager,
 	sessionEntryToContextMessages,
+	type SessionRow,
 } from "./session/session-manager.ts";
-import type { PendingMessageQueue } from "./session/queues.ts";
-import { sessionSnapshot } from "./session/snapshot.ts";
+import type { PendingMessageQueue, PromptBehavior } from "./session/queues.ts";
+import { sessionSnapshot, type PendingApproval, type SessionSnapshot } from "./session/snapshot.ts";
 import { resolveSettings, type Settings } from "./settings.ts";
 import { UnknownSessionError } from "./session/unknown-session.ts";
-import { ModelManager } from "./model-manager.ts";
-import { createToolManager, type ToolManager, type ToolDefaultsPatch } from "./tools/index.ts";
-import { type AgentEvent, type AgentRequestUpdate, type GlobalSettings, type RetrySettings, type RunRecoveryOptions, type SettingsPatch, type ToolCallAnswer, type ToolCallOutcome } from "./types.ts";
+import { createToolManager, type ToolManager, type ToolDefaultsPatch } from "./tool/index.ts";
+import { type AgentEvent, type AgentRequestUpdate, type ConfigPatch, type GlobalSettings, type QueueMode, type RetrySettings, type RunRecoveryOptions, type SettingsPatch, type ToolCallAnswer, type ToolCallOutcome } from "./types.ts";
 
 // 事件面定义在发布它的 fanout 旁边（`session/events.ts`），在这里转发出去，因为 `index.ts` 一直
 // 都是从本模块为此作答的。

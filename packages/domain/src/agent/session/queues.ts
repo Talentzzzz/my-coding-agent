@@ -1,6 +1,22 @@
 import type { QueueMode } from "../types.ts";
-import type { QueuedPrompt } from "../protocol.ts";
 import type { Message } from "../llm/index.ts";
+
+/**
+ * 一条已被接受但尚未取走的用户消息，以 wire 携带的样子。
+ *
+ * 队列只活在运行会话的进程里，没有任何持久形态，所以这个轻量视图——按发送原样的文本，和它领到的
+ * 时间戳——就是窗口能被告知的全部。它搭快照、`status` 帧与 `queue_update` 事件走，那是队列变更
+ * 抵达客户端的三条路。
+ */
+export interface QueuedPrompt {
+	/** 消息文本，按发送者写下的原样。 */
+	text: string;
+	/** 消息打戳的时间，epoch 毫秒。 */
+	timestamp: number;
+}
+
+/** agent 流式期间发送的消息对运行做什么。 */
+export type PromptBehavior = "steer" | "followUp";
 
 /**
  * 带有取走宽度的待处理消息队列。

@@ -1,5 +1,5 @@
-import type { PendingApproval } from "../protocol.ts";
-import { describeToolCall } from "../tools/index.ts";
+import type { PendingApproval } from "./snapshot.ts";
+import { describeToolCall } from "../tool/index.ts";
 import type { SessionEntry } from "./session-manager.ts";
 
 /**

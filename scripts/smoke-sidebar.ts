@@ -8,7 +8,7 @@ import { Sidebar, pagingOf, type SidebarHandlers, type SidebarState } from "../p
 import { askForText } from "../packages/web/src/render/text-dialog.ts";
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { installDom, type FakeNode } from "./dom-shim.ts";
-import type { SessionRow } from "@my-agent/core/protocol";
+import type { SessionRow } from "@my-agent/case/protocol";
 import type { DirectoryPaging } from "../packages/web/src/ui-settings.ts";
 
 let failures = 0;

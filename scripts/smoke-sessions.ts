@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { request } from "node:http";
-import { createAssistantMessageEventStream, type ChatTransport, type Message, type ModelConfig } from "@my-agent/core";
+import { createAssistantMessageEventStream, type ChatTransport, type Message, type ModelConfig } from "@my-agent/domain";
 import { bootServer } from "../packages/server/src/boot.ts";
 import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
 import { SessionHub } from "../packages/server/src/hub.ts";
@@ -29,7 +29,7 @@ import {
 	resolveSettings,
 	type SessionSnapshot,
 	type Session,
-} from "@my-agent/core";
+} from "@my-agent/domain";
 // 接缝经包的公开面取（仿 setSessionsDir）：源路径的相对 import 在 Windows 上解析出大小写不同的
 // 盘符 URL（file:///z:/ vs 包的 file:///Z:/），会造出第二个模块实例、缝挂不到 remove 读的那张表上。
 

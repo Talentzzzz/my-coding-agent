@@ -6,8 +6,8 @@ import type {
 	SessionRow,
 	SessionRowPatch,
 	SessionSnapshot,
-} from "@my-agent/core/protocol";
-import { UnknownSessionError } from "@my-agent/core";
+} from "@my-agent/case/protocol";
+import { UnknownSessionError } from "@my-agent/domain";
 
 /**
  * 会话语义 → 帧：**只有函数**，没有类型、没有状态、没有生命周期。

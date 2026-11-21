@@ -11,16 +11,13 @@ import {
 	sessionMetaPath,
 	setSessionsDir,
 	type Agent,
-	type ClientFrame,
-	type ConnectionItem,
-	type ServerFrame,
-	type ServerMessage,
 	type SessionRow,
 	type SessionRowPatch,
 	type Session,
 	type SessionMeta,
 	type ModelConfig,
-} from "@my-agent/core";
+} from "@my-agent/domain";
+import type { ClientFrame, ConnectionItem, ServerFrame, ServerMessage } from "@my-agent/case/protocol";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 

@@ -17,7 +17,8 @@ import { MuxClient, type ChannelState, type MuxSocket, type MuxSocketFactory, ty
 import { faultyProxy, type FaultyProxy } from "./wire/proxy.ts";
 import { until } from "./wire/client.ts";
 import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
-import { setSessionsDir, type ModelConfig, type ServerMessage } from "@my-agent/core";
+import { setSessionsDir, type ModelConfig } from "@my-agent/domain";
+import type { ServerMessage } from "@my-agent/case/protocol";
 
 let failures = 0;
 

@@ -7,7 +7,7 @@ import { SettingsPanel, modeSummaryOf, type SettingsHandlers } from "../packages
 import { Composer, type ComposerHandlers } from "../packages/web/src/composer.ts";
 import { openMenu } from "../packages/web/src/render/menu.ts";
 import { installDom, type FakeNode } from "./dom-shim.ts";
-import type { ModeSettings, GlobalSettingsSnapshot } from "@my-agent/core/protocol";
+import type { ModeSettings, GlobalSettingsSnapshot } from "@my-agent/case/protocol";
 
 let failures = 0;
 

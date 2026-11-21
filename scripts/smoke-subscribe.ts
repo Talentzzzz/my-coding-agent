@@ -11,7 +11,8 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setSessionsDir, type ModelConfig, type ServerFrame } from "@my-agent/core";
+import { setSessionsDir, type ModelConfig } from "@my-agent/domain";
+import type { ServerFrame } from "@my-agent/case/protocol";
 import { SessionHub } from "../packages/server/src/hub.ts";
 import { createMuxServer, type MuxConnection } from "../packages/server/src/mux.ts";
 import { SessionController } from "../packages/server/src/controllers/sessions.ts";

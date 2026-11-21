@@ -9,7 +9,7 @@ import type {
 	SessionSnapshot,
 	GlobalSettingsSnapshot,
 	DirectoryGroup,
-} from "@my-agent/core/protocol";
+} from "@my-agent/case/protocol";
 
 /** 设置面板能改的东西。比服务端自己的补丁窄，这正是目的。 */
 export interface PanelSettingsPatch {

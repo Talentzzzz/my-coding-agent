@@ -2,13 +2,13 @@
 // 运行：node scripts/smoke-models.ts
 //
 // 无需 provider key：这里的一切都是"用户键入的一行 → session 运行的 pi-ai 模型"的映射
-// （vendored 在 packages/core/src/llm 下），外加本应用最不想发出的那一个请求——没有模型可用的
+// （vendored 在 packages/domain/src/agent/llm 下），外加本应用最不想发出的那一个请求——没有模型可用的
 // 那个请求。有一个标题带 key 触达真实 transport，并在请求离开前把它截住，所以读到的是凭据而
 // 不是 provider 的回答。
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { anthropicMessages, type SimpleStreamOptions } from "@my-agent/core";
+import { anthropicMessages, type SimpleStreamOptions } from "@my-agent/domain";
 import {
 	coerceModelConfig,
 	isUnconfigured,
@@ -23,7 +23,7 @@ import {
 	ModelManager,
 	type ModelChoice,
 	type ModelConfig,
-} from "@my-agent/core";
+} from "@my-agent/domain";
 
 let failures = 0;
 

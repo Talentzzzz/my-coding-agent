@@ -23,7 +23,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bootServer } from "../packages/server/src/boot.ts";
-import { createAssistantMessageEventStream, setRemoveGate, setSessionsDir, type ChatTransport } from "@my-agent/core";
+import { createAssistantMessageEventStream, setRemoveGate, setSessionsDir, type ChatTransport } from "@my-agent/domain";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 
 const target = new URL(process.env.MY_AGENT_URL ?? "http://127.0.0.1:8080");

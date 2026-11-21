@@ -10,7 +10,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_GLOBAL_SETTINGS, ModelManager, settingsPath, type RetrySettings } from "@my-agent/core";
+import { DEFAULT_GLOBAL_SETTINGS, ModelManager, settingsPath, type RetrySettings } from "@my-agent/domain";
 
 let failures = 0;
 

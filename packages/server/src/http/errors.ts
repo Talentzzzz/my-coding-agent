@@ -1,4 +1,4 @@
-import { UnknownSessionError } from "@my-agent/core";
+import { UnknownSessionError } from "@my-agent/domain";
 import type { IncomingMessage } from "node:http";
 
 /**
