@@ -16,6 +16,7 @@ import {
 	type GlobalSettingsSnapshot,
 	type UsageTotals,
 } from "@my-agent/core/protocol";
+import type { AppearanceSettings } from "./ui-settings.ts";
 
 export interface ToolCard {
 	toolCallId: string;
@@ -397,23 +398,23 @@ export function initialState(): ViewState {
 }
 
 /**
- * 应用服务端上报的外观。
+ * 应用本窗口的外观设置。
  *
- * 每次设置变更都调用，而不只在启动时，因为面板在实时编辑这些值：字号是字阶的基 —— 滑块的值直接
+ * 每次外观变更都调用，而不只在启动时，因为面板在实时编辑这些值：字号是字阶的基 —— 滑块的值直接
  * 落在 `--dsw-fs-base` 上，每个层级从它推导（tokens.css），所以整个窗口随之缩放，无需逐层布线。
  * 主题是一个属性，两者都不需要重载才生效，任何一个需要重载，面板就会让人觉得坏了。
  *
- * 侧栏的宽度走同一条路，只有一处不对称：服务端存的是*偏好*，解析时已经按拖动范围截断，所以落到
+ * 侧栏的宽度走同一条路，只有一处不对称：存储的是*偏好*，读取时已经按拖动范围截断，所以落到
  * 这里的总是可绘制的。设置从未携带过宽度时是移除变量，而不是制造一个默认值 —— 样式表自己的值
  * 就是默认，"从未拖过"必须与"拖到了默认值"保持可区分。
  */
-export function applyAppearance(settings: GlobalSettingsSnapshot): void {
+export function applyAppearance(appearance: AppearanceSettings): void {
 	const root = document.documentElement;
-	const theme = settings.appearance.theme;
+	const theme = appearance.theme;
 	root.dataset.theme =
 		theme === "system" ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : theme;
-	root.style.setProperty("--dsw-fs-base", `${settings.appearance.fontSize}px`);
-	const sidebarWidth = settings.appearance.sidebarWidth;
+	root.style.setProperty("--dsw-fs-base", `${appearance.fontSize}px`);
+	const sidebarWidth = appearance.sidebarWidth;
 	if (sidebarWidth === undefined) root.style.removeProperty("--dsw-sidebar-width");
 	else root.style.setProperty("--dsw-sidebar-width", `${sidebarWidth}px`);
 }

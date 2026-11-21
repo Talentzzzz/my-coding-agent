@@ -3,6 +3,10 @@
 // 事件与答案就用 `HookMap` 的派生类型；工具与工具结果是 `Tool` 与 `ToolResult`，定义在传输层旁边
 // 的 `llm/types.ts`，由请求与运行共用。wire 类型是 `protocol.ts` 的事，留在那里；`QueueMode` 是共享
 // 的，`protocol.ts` 转发本模块这份定义，而不是再声明一份。
+//
+// 设置的形状与默认值也住在这里（文末一节，原是独立的 `config.ts`）。这对加载方向是件好事：本模块
+// 对外只递类型（唯一一处 import 也是 type import，编译期即抹掉），运行期是一个不依赖任何业务模块
+// 的叶子——各持有者从它回落常量，编排层装配各持有者，箭头仍然只朝一个方向流。
 import type {
 	AssistantMessageEvent,
 	Context,
@@ -96,3 +100,168 @@ export type AgentEvent =
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };
+
+// ============================================================================
+// 设置的形状与默认值
+//
+// 原是独立的 `config.ts`（设置归属重构 ADR-0028 的留守文件），曾短暂住过编排层（agent.ts），现
+// 归拢到本模块——放这里而不是编排层，正是为了不留加载环。所有权仍然分属三个持有者——行、默认
+// 模型与重试在 `models.json`，工具簇在 `tools.json`，队列模式在 `sessions.json`
+// ——这里只留守两样：各持有者回落用的默认值，与 wire 和门面读模型需要的类型名。各簇的规范化器
+// 仍随簇住在各持有者文件里，本节没有任何规范化函数。
+// ============================================================================
+
+import { homedir } from "node:os";
+import { join, resolve as resolvePath } from "node:path";
+import type { BashSettings, ModeSettings } from "./tools/manager.ts";
+
+/** 存放会话、设置与已存凭据的目录。 */
+export const AGENT_HOME = resolvePath(process.env.MY_AGENT_HOME ?? join(homedir(), ".my-agent"));
+
+/** 本应用在自己写出的文件与消息里如何自称。 */
+export const APP_NAME = "my-agent";
+
+/**
+ * `bash` 工具的默认超时。类型随簇住进了 tools/manager.ts（设置归属重构 §5）；工具行为与
+ * {@link DEFAULT_GLOBAL_SETTINGS} 都从这份常量取默认。
+ */
+export const DEFAULT_BASH_SETTINGS: BashSettings = { defaultTimeoutMs: 120_000, maxTimeoutMs: 3_600_000 };
+
+/**
+ * 供应商调用失败时的重试策略。
+ *
+ * 类型留守本模块（本仓库的运行期叶子——它对外只递类型，编译期即抹掉 import），所有权随模型簇
+ * 归 `ModelManager`（ADR-0028 修正，2026-11-20）：`models.json` 的 `retry` 键，持有者自己的
+ * 规范化器（`retryOr`）住在 `model-manager.ts` 里，本节没有逻辑。
+ */
+export interface RetrySettings {
+	enabled: boolean;
+	maxRetries: number;
+	/** 每次尝试的延迟为 `baseDelayMs * 2^(attempt-1)`。 */
+	baseDelayMs: number;
+	/** 单次计算出的延迟的上限。 */
+	maxAgentDelayMs: number;
+}
+
+/**
+ * 内置默认模式的名字，设置从不存储它。
+ *
+ * 默认模式*就是*全局默认——默认工具集与默认审批映射，实时读取——所以它没有自己的一行需要与它们
+ * 保持同步（ADR-0004）。这个名字是保留名：一个存储模式若占用它，会遮住输入框必须永远能找到的那
+ * 个答案。
+ */
+export const DEFAULT_MODE_NAME = "默认";
+
+/**
+ * global 侧设置面板的读模型：`Agent.settings()` 从五个持有者现读、组装出的这份形状。
+ *
+ * 真实的家已按设置归属重构（spec §3）分给三个持有者——行、默认模型与重试在 `models.json`，工具簇在
+ * `tools.json`，队列模式在 `sessions.json`；UI 簇（外观、目录视图）已迁往
+ * 客户端自己的存储（ADR-0029）——这个类型只剩**形状**：设置面板的 wire 面（ADR-0012/0019）不因
+ * 搬家而改口。而一个会话自己的选择
+ * 住在它 `.json` 快照的设置半（`SessionSettings`），两者在每次读取时组合成 `Settings`
+ * （`packages/core/src/settings.ts`），组合是派生值，这一侧从不被任何袋持有。
+ */
+export interface GlobalSettings {
+	/**
+	 * 新会话打开在哪一行：`name`，或会话记录记录的 `<name>/<model-id>` ref。
+	 *
+	 * 两种写法都接受，因为设置面板写第一种，修复脚本写第二种。undefined 不是「没有模型」：装配会
+	 * 回落到 `DEFAULT_MODEL_NAME`（`packages/core/src/models.ts`），只有连那一行都没有的机器才打开
+	 * 在第一行上。
+	 */
+	model?: string;
+	/**
+	 * 窗口是否已经种下内置的默认模型行。
+	 *
+	 * 没有导入任何模型时，客户端会种一行起始行（`packages/web/src/default-model.ts`），用户可以删掉
+	 * 它。这个标记让删除成为终局：没有它，下次启动看到空列表又会把行种回来。它是设置而不是浏览器
+	 * 自己的存储，因为桌面外壳每次启动都换新端口，而 `localStorage` 按 origin 隔离——这个标记恰恰会
+	 * 被它为之存在的重启忘掉。
+	 *
+	 * 缺失表示「从未种过」，这也是旧设置文件和从未启动过窗口的机器的状态。
+	 */
+	defaultModelSeeded?: boolean;
+	/**
+	 * 从未选择过的会话打开时的工具集，也是会话级面板重置到的全局默认。undefined 表示注册表的全集，
+	 * 即如今的会话打开时的样子——所以旧设置文件无需迁移，也无需自己的字段。
+	 */
+	tools?: string[];
+	/**
+	 * 用户的模式，整体存放，按选择器列出的顺序。缺失表示没有：内置默认模式从不存储，所以旧文件
+	 * 已经是一份合法的 modes 文件（ADR-0004）。
+	 */
+	modes?: ModeSettings[];
+	/** 运行前必须在 UI 里获得批准的工具，按工具名为键。 */
+	approval: Record<string, boolean>;
+	/** 一个取走点注入多少条 steer 消息。 */
+	steeringMode: QueueMode;
+	/** 一个取走点注入多少条 followUp 消息。 */
+	followUpMode: QueueMode;
+	/** 如何处理一次瞬时的供应商失败。 */
+	retry: RetrySettings;
+	/** `bash` 工具允许一条命令运行多久。 */
+	bash: BashSettings;
+}
+
+/**
+ * 设置的部分变更，形状与浏览器发来的 config 补丁一致（wire 契约，spec §7）。
+ *
+ * 设置归属重构（ADR-0028）后它从退场的 `setting-manager.ts` 迁来——形状一字未动：`Agent.applySettings`
+ * 按字段名把它路由到拥有该字段的持有者，每簇独立原子落盘。
+ */
+export interface SettingsPatch {
+	model?: string;
+	/** 窗口的「已种下内置默认」标记；见 {@link GlobalSettings.defaultModelSeeded}。 */
+	defaultModelSeeded?: boolean;
+	/** 全局默认活跃工具集。整份列表，如同会话上的工具集。 */
+	tools?: string[];
+	/**
+	 * 用户的模式，像 `tools` 一样整份发送（ADR-0004）：面板编辑的是一份列表，这里改名的模式与那里
+	 * 删除的模式必须同落，要么都不落。
+	 */
+	modes?: ModeSettings[];
+	/** 变动过的审批条目，按工具名为键；省略的键保持现行值。 */
+	approval?: Record<string, boolean>;
+	steeringMode?: QueueMode;
+	followUpMode?: QueueMode;
+	retry?: Partial<RetrySettings>;
+	/** `bash` 工具允许一条命令运行多久。部分字段，让一个超时可以单独挪动。 */
+	bash?: Partial<BashSettings>;
+}
+
+export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
+	approval: { read: false, write: true, edit: true, glob: false, grep: false, bash: true },
+	steeringMode: "one-at-a-time",
+	followUpMode: "one-at-a-time",
+	retry: { enabled: true, maxRetries: 3, baseDelayMs: 2_000, maxAgentDelayMs: 60_000 },
+	bash: { ...DEFAULT_BASH_SETTINGS },
+};
+
+/**
+ * 机器级的旧设置文件，`<AGENT_HOME>/settings.json`。`agentDir` 可配置，让测试能指到无害的地方。
+ *
+ * 设置归属重构（spec §4.2）后它只作迁移源：各持有者首次读取时从这里捡走自己的簇，之后旧文件被
+ * 完全忽略——永不删除、永不写入。
+ */
+export function settingsPath(agentDir: string = AGENT_HOME): string {
+	return join(agentDir, "settings.json");
+}
+
+/**
+ * 工具名列表，字段缺失或不是数组时为 undefined。
+ *
+ * 文件是手编的，所以不是非空字符串的条目被丢弃而不是拒绝——一行坏数据不该连累整个字段。空列表
+ * 会被*保留*：缺失的字段表示「全部工具」（旧文件的行为），而显式空列表是一个选择——「什么都不
+ * 活跃」——把一个选择悄悄改写成它的反面，是设置读取者唯一不可做的事。
+ *
+ * 工具簇与模式表共用。
+ */
+export function stringListOrUndefined(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+}
+
+// 工具簇的类型（`BashSettings` / `ModeSettings`）随簇住在 tools/manager.ts（设置归属重构 §5）；
+// 这里只转发类型名，让 protocol.ts 与既有 import 路径继续经本模块拿到它们。
+export type { BashSettings, ModeSettings } from "./tools/manager.ts";

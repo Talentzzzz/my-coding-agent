@@ -248,8 +248,6 @@ export function sessionListeners(deps: { sessionHub: SessionHub }): SessionListe
 		onRemoved: (sessionId) => {
 			sessionHub.forgetRow(sessionId);
 		},
-		// 一个目录组进入或离开列表——被放到一边，或被新会话领回——动的是列表本身而不是任何一行，所以应答它的 frame 是每条连接打开时就收到的 overview。发给所有连接：发问的窗口已经在自己的响应里拿到了答案，而没发问的窗口才是这条消息的服务对象。
-		onDirectoryListingChanged: () => sessionHub.publishResync(),
 	};
 }
 

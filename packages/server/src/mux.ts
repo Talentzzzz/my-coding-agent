@@ -126,7 +126,6 @@ export class MuxConnection {
 		// 帧序归这里——与观看流上的 baseline 半相同。
 		this.stopped = this.deps.sessionHub.subscribeGlobal({
 			rows: (sessionRow) => {
-				if (!this.listed(sessionRow)) return;
 				if (this.overviewBacklog !== null) {
 					this.overviewBacklog.push(sessionRow);
 					return;
@@ -134,9 +133,6 @@ export class MuxConnection {
 				this.wire.send(frame.row(sessionRow));
 			},
 			gone: (sessionId) => this.wire.send(frame.gone(sessionId)),
-			resync: () => {
-				void this.resync();
-			},
 		});
 		this.sendSessions(await this.overview());
 		if (this.disposed) return;
@@ -179,45 +175,14 @@ export class MuxConnection {
 		this.wire.close();
 	}
 
-	/**
-	 * 这条连接的窗口是否被允许看到一行。
-	 *
-	 * 规则是 hub 的（`SessionHub.listsDirectory`），过滤在这里施加，施加在一行到达窗口的两个点
-	 * 上：连接打开时的 overview，以及其后每一个变了的行。只过滤 overview，会让一个用户放到一边
-	 * 的目录在其某个会话一变的瞬间自己回来——自己回来的组比从未离开的更糟。
-	 *
-	 * 增量没有 `workDirAbsPath` 可问——hub 不为行养存储，事件自带什么就带什么（ADR-0027）。放行
-	 * 是安全的：增量只能改动客户端已有的行，而隐藏目录的行从不在客户端的表里——overview 过滤过
-	 * 一次，resync 又会摘走——对未知 id 的增量客户端自己丢弃。完整行（出生、改名）带 workDir，
-	 * 照常过滤。
-	 */
-	private listed(sessionRow: SessionRowPatch): boolean {
-		if (sessionRow.workDirAbsPath === undefined) return true;
-		return this.deps.sessionHub.listsDirectory(sessionRow.workDirAbsPath);
-	}
-
-	/** 本连接的开场 overview：本进程列出的每一行，各一次。 */
+	/** 本连接的开场 overview：本进程认识的每一行，各一次。 */
 	private async overview(): Promise<SessionRow[]> {
-		const rows = await this.deps.sessionHub.rows();
-		return rows.filter((sessionRow) => this.listed(sessionRow));
+		return this.deps.sessionHub.rows();
 	}
 
-	/** 本连接的开场 overview，或列表变动后的一份新的：它可能看到的那些行。 */
+	/** 本连接的开场 overview。 */
 	private sendSessions(rows: readonly SessionRow[]): void {
 		this.wire.send(frame.sessions(rows));
-	}
-
-	/**
-	 * 给这条连接发一份新的 overview。
-	 *
-	 * 一行承载不了的那件事：目录进出列表是列表本身的变更，组没有对应的 `session_row`。重发
-	 * overview，就是让那条本来就说"这是机器的列表"的帧顺带说"……它动了"——与连接打开时收到的
-	 * 是同一帧，客户端不必为侧栏学第二种消息形状。
-	 */
-	private async resync(): Promise<void> {
-		const rows = await this.overview();
-		if (this.disposed) return;
-		this.sendSessions(rows);
 	}
 
 	/**

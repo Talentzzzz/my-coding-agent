@@ -78,10 +78,6 @@ interface Rig {
 	birth(input: { text: string; workDirAbsPath?: string }): Promise<string>;
 	/** 建一条新连接并等它收到开场帧。 */
 	connect(): Promise<View>;
-	/** 目录被放到一边：设置 patch，再走列表变更的广播路径。 */
-	hideDirectory(path: string): Promise<void>;
-	/** 目录被领回列表：与隐藏同一条路径。 */
-	showDirectory(): Promise<void>;
 	/**
 	 * 删除一个会话，走生产链：`hub.remove` 让订阅者告别（流 end），controller 的 `onRemoved`
 	 * 随后让 hub 丢掉这一行（`session_gone`）。
@@ -148,14 +144,6 @@ async function openRig(): Promise<Rig> {
 				closeConnection: () => muxServer.forget(muxConnection),
 				frameCount: () => frames.length,
 			};
-		},
-		async hideDirectory(path: string): Promise<void> {
-			sessionHub.agent.applySettings({ hiddenDirectories: [path] });
-			sessionHub.publishResync();
-		},
-		async showDirectory(): Promise<void> {
-			sessionHub.agent.applySettings({ hiddenDirectories: [] });
-			sessionHub.publishResync();
 		},
 		async deleteSession(sessionId: string): Promise<void> {
 			await sessionController.remove(sessionId);
@@ -402,63 +390,9 @@ try {
 	await settle();
 	check("断线之后不再造帧", viewD.frameCount() === framesAtDisconnect, `${framesAtDisconnect} -> ${viewD.frameCount()}`);
 
-	process.stdout.write("隐藏目录：新连接的 overview 不含它，会话变了也收不到它的行\n");
-	// 一个独立的工作目录：放它到一边，规则由 hub 的设置回答，过滤发生在连接这一侧。
-	const hiddenDir = await mkdtemp(join(tmpdir(), "my-agent-subscribe--hidden-"));
-	releases.push(() => rm(hiddenDir, { recursive: true, force: true }));
-	const hiddenId = await born("一个住在被放到一边的目录里的会话", hiddenDir);
-	await rig.hideDirectory(hiddenDir);
-	const viewE = await rig.connect();
-	const overviewRows = (): ServerFrame[] => viewE.frames(null).filter((frame) => "item" in frame && frame.item.type === "sessions");
-	const latestOverview = overviewRows().at(-1);
-	check(
-		"新连接的 overview 不含被隐藏目录的行",
-		latestOverview !== undefined && "item" in latestOverview && latestOverview.item.type === "sessions" && latestOverview.item.sessions.every((row) => row.id !== hiddenId),
-		JSON.stringify(latestOverview),
-	);
-	// 同时推动一个可见会话与隐藏会话：可见的那行到达，证明行的管道本身在跑；隐藏的那行不得到达。
-	const visibleId = await born("一个住在可见目录里的会话");
-	viewE.open(visibleId);
-	rig.transport.setResponses([fakeAssistantMessage("可见会话的一轮")]);
-	const visibleRun = rig.sessionHub.agent.prompt(visibleId, "让可见会话跑一轮");
-	rig.transport.appendResponses([fakeAssistantMessage("隐藏会话的一轮")]);
-	const hiddenRun = rig.sessionHub.agent.prompt(hiddenId, "让隐藏会话也跑一轮");
-	await Promise.all([visibleRun, hiddenRun]);
-	const rowsOf = (id: string): ServerFrame[] => viewE.frames(null).filter((frame) => "item" in frame && frame.item.type === "session_row" && frame.item.session.id === id);
-	check("可见会话的行照常到达", await until(() => rowsOf(visibleId).length > 0), JSON.stringify(viewE.frames(null)));
-	await settle();
-	// 服务端不再能按目录压制增量：hub 无行存储，增量不带 workDir 可过滤（ADR-0027）。压制移到
-	// 客户端——行表只让完整行自表身份，隐藏目录的行从未进表（overview 过滤过一次），它的增量
-	// 在合并里落空。断言改在真客户端的行表上，而不是连接的帧上。
-	const hiddenPatches = rowsOf(hiddenId).flatMap((frame) => ("item" in frame && frame.item.type === "session_row" ? [frame.item.session] : []));
-	check("隐藏会话的增量不带 workDir——客户端无从把它画出来", hiddenPatches.every((patch) => patch !== undefined && patch.workDirAbsPath === undefined), JSON.stringify(hiddenPatches));
-	const clientRows = new SessionRows();
-	// 按到达顺序重放：sessions 帧是整表替换，必须落在它到达的那一拍，不能先放增量再补整表——
-	// 否则一份出生前的 overview 会把增量放进去的行整表抹掉。
-	for (const frame of viewE.frames(null)) {
-		const item = "item" in frame && frame.item.type === "session_row" ? frame.item : "item" in frame && frame.item.type === "sessions" ? frame.item : undefined;
-		if (item?.type === "session_row") clientRows.put(item.session);
-		else if (item?.type === "sessions") clientRows.replaceAll(item.sessions);
-	}
-	check("客户端行表里没有隐藏会话的行", clientRows.get(hiddenId) === undefined, JSON.stringify(clientRows.get(hiddenId)));
-	check("可见会话的行在客户端表里，且随增量活着", clientRows.get(visibleId)?.running === false, JSON.stringify(clientRows.get(visibleId)));
-
-	process.stdout.write("整表重发：目录进出列表时，每条连接收到一整份新的 sessions 帧\n");
-	const viewF = await rig.connect();
-	const sessionsCount = (target: View): number => target.frames(null).filter((frame) => "item" in frame && frame.item.type === "sessions").length;
-	const sessionsBefore = { e: sessionsCount(viewE), f: sessionsCount(viewF) };
-	await rig.showDirectory();
-	check(
-		"两条连接都各收到一整份新的 sessions 帧",
-		await until(() => sessionsCount(viewE) === sessionsBefore.e + 1 && sessionsCount(viewF) === sessionsBefore.f + 1),
-		JSON.stringify({ e: sessionsCount(viewE), f: sessionsCount(viewF) }),
-	);
-	const restored = viewE.frames(null).filter((frame) => "item" in frame && frame.item.type === "sessions").at(-1);
-	check(
-		"它是既有的 sessions 形状，且重新含上被领回的目录的行",
-		restored !== undefined && "item" in restored && restored.item.type === "sessions" && restored.item.sessions.some((row) => row.id === hiddenId),
-		JSON.stringify(restored),
-	);
+	// 目录的隐藏/领回随 UI 簇迁往客户端存储（ADR-0029）：服务端不再按设置过滤 overview，也不再
+	// 广播整表重发——两个场景随之退场。这里保留的最后一句话记录那条契约的归宿。
+	process.stdout.write("目录视图已归客户端：overview 不再按服务端设置过滤\n");
 } finally {
 	for (const release of releases) await release();
 	await rig.close();

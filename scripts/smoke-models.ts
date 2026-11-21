@@ -219,21 +219,14 @@ try {
 		check("and so does a nonsense token limit", sized?.maxTokens === 8_192, String(sized?.maxTokens));
 	}
 
-	// 手打的行不带任何能力元数据，所以决定它的模型接受什么的是 wire id。这些弄错一个是 API 的
-	// 400，不是外观差异：一个模型拒绝的 temperature 会让整个请求失败。等级不再来自这里——每行
-	// 都被问同样的四档——所以本块还能检查的是 compat 那一半。
-	heading("what a Claude model accepts is derived from its wire id");
+	// 手打的行不带任何能力元数据，行上也没有按 wire id 推导的东西：行写了什么 compat，构建就带
+	// 什么，没写就没有。等级也不来自任何表——每行都被问同样的四档。
+	heading("a row is taken as it is written");
 	{
 		const model = (id: string) => createModel(row({ id }));
 
 		const plain = model("claude-sonnet-4-5");
-		check("a 4.5 model needs no overrides", plain.compat === undefined, JSON.stringify(plain.compat));
-
-		const newer = model("claude-opus-4-7");
-		check("4.7 rejects a temperature", newer.compat?.supportsTemperature === false, JSON.stringify(newer.compat));
-
-		const gateway = model("anthropic/claude-opus-5");
-		check("a gateway id names the same model", gateway.compat?.supportsTemperature === false, JSON.stringify(gateway.compat));
+		check("a row builds with no compat of its own", plain.compat === undefined, JSON.stringify(plain.compat));
 
 		check("a level the app names is kept", normalizeThinkingLevel("max") === "max", normalizeThinkingLevel("max"));
 		check("a level nobody has falls back to off", normalizeThinkingLevel("turbo") === "off", normalizeThinkingLevel("turbo"));
@@ -366,12 +359,12 @@ try {
 		check("a corrected key is on the next build, with nothing refreshed", reread.apiKey === "corrected", String(reread.apiKey));
 		check("and a resized window is too", reread.contextWindow === 32_000, String(reread.contextWindow));
 
-		// 一次构建绝不从上一次继承字段，因为两者之间没有任何 state 存活：不带 compat override 的
-		// 行构建时不带，带着的行把它带来。
+		// 一次构建绝不从上一次继承字段，因为两者之间没有任何 state 存活：行上写了什么 compat，
+		// 构建就带什么；没写的行构建时不带。
 		rows.push(row({ name: "plain", id: "deepseek-v4.1-flash" }));
 		check("a row without a compat override builds without one", modelFor({ name: "plain" }, rows).compat === undefined, JSON.stringify(modelFor({ name: "plain" }, rows).compat));
-		rows.push(row({ name: "claude", id: "claude-opus-4-7" }));
-		check("and a row with one brings it", modelFor({ name: "claude" }, rows).compat?.supportsTemperature === false, JSON.stringify(modelFor({ name: "claude" }, rows).compat));
+		rows.push(row({ name: "claude", id: "claude-opus-4-7", compat: { supportsStrictTools: true } }));
+		check("and a row with one brings it", modelFor({ name: "claude" }, rows).compat?.supportsStrictTools === true, JSON.stringify(modelFor({ name: "claude" }, rows).compat));
 
 		// 等级在进入模型的路上被规范化：应用没有名字的字符串落在 "off"，什么等级都不给保持
 		// none，wire 把它读作"不要思考"。

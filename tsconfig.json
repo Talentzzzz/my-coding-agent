@@ -27,7 +27,7 @@
 		"scripts/smoke-session.ts",
 		"scripts/smoke-settings.ts",
 		"scripts/smoke-tool-settings.ts",
-		"scripts/smoke-engine-settings.ts",
+		"scripts/smoke-model-settings.ts",
 		"scripts/smoke-session-settings.ts",
 		"scripts/smoke-ui-settings.ts",
 		"scripts/smoke-tools.ts",

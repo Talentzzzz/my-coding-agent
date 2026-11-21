@@ -139,7 +139,6 @@ function getAnthropicCompat(model: Model<"anthropic-messages">) {
 		supportsEagerToolInputStreaming: model.compat?.supportsEagerToolInputStreaming ?? true,
 		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? true,
 		supportsCacheControlOnTools: model.compat?.supportsCacheControlOnTools ?? true,
-		supportsTemperature: model.compat?.supportsTemperature ?? true,
 		allowEmptySignature: model.compat?.allowEmptySignature ?? false,
 		supportsStrictTools: model.compat?.supportsStrictTools ?? false,
 	};
@@ -779,8 +778,8 @@ function buildParams(
 	// 模型被请求的 level。缺席与 "off" 是同一个请求：没有要求任何东西。
 	const level: ThinkingLevel = model.thinkingLevel ?? "off";
 
-	// temperature 与 extended thinking 不兼容，且 Claude Opus 4.7+ 不支持。
-	if (options?.temperature !== undefined && level === "off" && compat.supportsTemperature) {
+	// temperature 与 extended thinking 不兼容。
+	if (options?.temperature !== undefined && level === "off") {
 		params.temperature = options.temperature;
 	}
 

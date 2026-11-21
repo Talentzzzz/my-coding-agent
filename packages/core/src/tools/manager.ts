@@ -8,9 +8,9 @@
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Tool, ToolResult, ToolRunContext, ToolUpdateCallback } from "../llm/index.ts";
-// 类型方向：config.ts 从这里 import BashSettings/ModeSettings 的类型名（设置归属重构 §5 随簇搬迁），
-// 两侧引用的运行时值都只在函数体与构造期执行，没有任何模块顶层求值，ESM 循环 import 安全。
-import { AGENT_HOME, DEFAULT_BASH_SETTINGS, DEFAULT_GLOBAL_SETTINGS, DEFAULT_MODE_NAME, settingsPath } from "../config.ts";
+// 类型方向：types.ts 从这里 import BashSettings/ModeSettings 的类型名（设置归属重构 §5 随簇搬迁），
+// 但那一条是 type import，编译期即抹掉——运行期 types.ts 是不依赖业务模块的叶子，无加载环。
+import { AGENT_HOME, DEFAULT_BASH_SETTINGS, DEFAULT_GLOBAL_SETTINGS, DEFAULT_MODE_NAME, settingsPath } from "../types.ts";
 import { createBashTool } from "./bash.ts";
 import { createEditTool } from "./edit.ts";
 import { createGlobTool } from "./glob.ts";
@@ -33,7 +33,7 @@ export type { ToolRunContext };
  *
  * 上限保留为设置而不是干脆取消，因为它防的是模型要求无界的运行——但这个数字由用户来改：一个要跑
  * 小时级构建的 checkout，会在自己的设置文件里写一个更高的值。类型随簇住进持有者（设置归属重构 §3
- * 「bash 归工具」）；默认值 {@link DEFAULT_BASH_SETTINGS} 仍由 config.ts 持有。
+ * 「bash 归工具」）；默认值 {@link DEFAULT_BASH_SETTINGS} 由 types.ts 持有。
  */
 export interface BashSettings {
 	/** 调用未自带 `timeout_ms` 时使用。 */
@@ -120,7 +120,7 @@ function stringListOrUndefined(value: unknown): string[] | undefined {
  * bash 超时，逐字段落在默认值之上。
  *
  * 高于上限的默认值会被压到上限而不是照办：否则每一次未自带 `timeout_ms` 的调用都注定超时。
- * 默认值留守 config.ts 的 DEFAULT_BASH_SETTINGS（设置归属重构 §5 的随簇搬迁）。
+ * 默认值留守 types.ts 的 DEFAULT_BASH_SETTINGS（设置归属重构 §5 的随簇搬迁）。
  */
 export function bashOr(value: unknown): BashSettings {
 	const record = isRecord(value) ? value : {};
@@ -145,7 +145,7 @@ export function bashOr(value: unknown): BashSettings {
  * 模式的审批映射在标准默认值之上规范化而不是被采信：UI 总是写全每个键，缺键即手编，而它回落到的
  * 答案正是全新会话打开时的那张映射。
  *
- * **簇间耦合（spec §11.4）**：这里的缺键回落读的是 config.ts 的 `DEFAULT_GLOBAL_SETTINGS.approval`
+ * **簇间耦合（spec §11.4）**：这里的缺键回落读的是 `types.ts` 的 `DEFAULT_GLOBAL_SETTINGS.approval`
  * ——全局审批默认住在同一份工具簇里（`tools.json` 的 `approval`），两个簇同住一个持有者正是为了让
  * 这条线可见。将来把 `approval` 挪出工具簇会踩断模式规范化，届时这一段必须跟着走。
  */

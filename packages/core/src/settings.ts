@@ -10,8 +10,8 @@
 // （`tools.json` 补默认后的视图），`modelView` 是 ModelManager 的一次现读（目录各行与默认 ref）。
 // 原 `Settings.global` 的透传字段退场——bash 直读工具簇、retry 读引擎簇、队列模式读会话簇，
 // 消费者各自直读持有者，组合视图不再代为携带。
-import { DEFAULT_MODE_NAME } from "./config.ts";
-import { DEFAULT_MODEL_NAME, type ModelChoice, type ModelConfig, rowOrPlaceholder } from "./models.ts";
+import { DEFAULT_MODE_NAME } from "./types.ts";
+import { DEFAULT_MODEL_NAME, type ModelChoice, type ModelConfig, rowOrPlaceholder } from "./model-manager.ts";
 import { recordedSelectionOf, type Session } from "./session/session-manager.ts";
 import { narrowToKnown, type ToolDefaults } from "./tools/manager.ts";
 

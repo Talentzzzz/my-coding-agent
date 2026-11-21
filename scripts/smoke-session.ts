@@ -9,7 +9,6 @@ import {
 	CURRENT_SESSION_VERSION,
 	createSession,
 	createToolManager,
-	EngineSettings,
 	fillSession,
 	MAX_TOOL_RESULT_BYTES,
 	ModelManager,
@@ -308,8 +307,8 @@ function onSessionEvent(agent: Agent, listener: SessionEventListener): () => voi
  * One session over its own session record, with settings that live in a throwaway home.
  *
  * `inMemorySettingManager` 的内存后端已随设置归属重构退场（spec §8）：各持有者先在临时 home 里
- * 预种自己的文件——工具簇（审批/模式）经 ToolManager，队列模式经 SessionManager，重试经
- * EngineSettings，模型行经 ModelManager——homes 透传给 `openAgent`，走与生产同一条构造路。
+ * 预种自己的文件——工具簇（审批/模式）经 ToolManager，队列模式经 SessionManager，重试与模型行经
+ * ModelManager——homes 透传给 `openAgent`，走与生产同一条构造路。
  * 机器自己的文件永远不被碰。
  */
 let homeSeq = 0;
@@ -336,8 +335,8 @@ async function openSession(
 		...(desired.bash === undefined ? {} : { bash: desired.bash }),
 	});
 	new SessionManager({ home: home }).applySessionDefaults({ steeringMode: desired.steeringMode, followUpMode: desired.followUpMode });
-	new EngineSettings({ home: home }).applyRetry(desired.retry);
 	const modelManager = new ModelManager({ home: home });
+	modelManager.applyRetry(desired.retry);
 	modelManager.replaceRows(run.models ?? rows);
 	if (desired.model !== undefined || desired.defaultModelSeeded !== undefined) {
 		modelManager.applyModelSettings({
@@ -1091,7 +1090,7 @@ async function exerciseAfterToolHook(): Promise<void> {
 	await mkdir(replayHome, { recursive: true });
 	const replayToolManager = createToolManager({ home: replayHome });
 	replayToolManager.applyToolDefaults({ approval: settings().approval });
-	new EngineSettings({ home: replayHome }).applyRetry(settings().retry);
+	new ModelManager({ home: replayHome }).applyRetry(settings().retry);
 	new ModelManager({ home: replayHome }).replaceRows(rows);
 	const replayed = await openAgent({
 		session: reopenedFile,

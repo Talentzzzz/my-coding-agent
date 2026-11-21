@@ -2,7 +2,7 @@ import type { Message } from "./llm/index.ts";
 import type { Usage } from "./llm/index.ts";
 import type { ModelConfig } from "./llm/index.ts";
 import type { AgentSessionEvent } from "./agent.ts";
-import type { AppearanceSettings, BashSettings, ModeSettings } from "./config.ts";
+import type { BashSettings, ModeSettings } from "./types.ts";
 import type { BranchPoint } from "./session/session-manager.ts";
 import type { QueueMode } from "./types.ts";
 
@@ -10,7 +10,7 @@ export type { Message } from "./llm/index.ts";
 export type { AgentSessionEvent } from "./agent.ts";
 export type { MessageDelta } from "./agent.ts";
 export type { BranchOption, BranchPoint } from "./session/session-manager.ts";
-export type { BashSettings, DirectoryPaging, ModeSettings } from "./config.ts";
+export type { BashSettings, ModeSettings } from "./types.ts";
 // 压缩检查点作为包在这些标签里的 user 消息穿过快照 `messages` 走上 wire，所以标签是 wire 事实：
 // 客户端靠它们认出摘要。
 export {
@@ -129,7 +129,6 @@ export interface ModelSelection {
 
 /** 设置面板读与写的东西。 */
 export interface GlobalSettingsSnapshot {
-	appearance: AppearanceSettings;
 	/** 全局默认活跃工具集；缺失表示本构建认识的所有工具。 */
 	tools?: string[];
 	/**
@@ -139,20 +138,6 @@ export interface GlobalSettingsSnapshot {
 	 * 拼出它，而不是期望有一行。
 	 */
 	modes?: ModeSettings[];
-	/**
-	 * 侧边栏不列出的目录，按绝对路径；缺失表示没有搁置过任何目录。
-	 *
-	 * 带在这里而不是只留在服务器，因为这是窗口画它收到的列表必须知道的事：一个目录因谁也看不见的
-	 * 原因从 `GET /api/directories` 里消失，就是一个没有任何解释的凭空消失的分组。
-	 */
-	hiddenDirectories?: string[];
-	/**
-	 * 侧边栏为目录显示的名字，按绝对路径；缺失表示每个分组都用文件夹自己的名字。
-	 *
-	 * 与 `hiddenDirectories` 并排携带、且出于同样的理由：窗口画的是分组的标题，而它画的名字无法从
-	 * 快照持有的其他任何东西推导出来——它是用户敲下的视图，不是目录的属性。
-	 */
-	directoryNames?: Record<string, string>;
 	approval: Record<string, boolean>;
 	/** `bash` 工具允许一条命令运行多久。 */
 	bash: BashSettings;

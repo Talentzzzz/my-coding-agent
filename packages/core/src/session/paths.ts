@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve as nodeResolve } from "node:path";
-import { AGENT_HOME } from "../config.ts";
+import { AGENT_HOME } from "../types.ts";
 
 /**
  * session 存放的位置：
@@ -18,9 +18,9 @@ import { AGENT_HOME } from "../config.ts";
  * 这个布局放弃的是按时间命名的文件名：文件管理器现在按 id 序列出 store，而 uuidv7 的 id 序本来就是
  * 毫秒级的创建顺序。
  *
- * 根在模块顶层落定：config.ts 与本文件之间已无加载环（设置归属重构 ADR-0028 之后，config.ts 不再
- * import 会话簇的任何东西），顶层求值 `AGENT_HOME` 安全。`setSessionsDir` 仍可在进程早期改指别处，
- * 默认参数每次调用时求值，改指对所有后续读取生效。
+ * 根在模块顶层落定：`AGENT_HOME` 住在 `types.ts`（原 `config.ts`），那是运行期叶子模块——它对外
+ * 只递类型、唯一的 import 也是 type import，编译期即抹掉——顶层求值安全。`setSessionsDir` 仍可在
+ * 进程早期改指别处，默认参数每次调用时求值，改指对所有后续读取生效。
  */
 let sessionsRoot = join(AGENT_HOME, "sessions");
 

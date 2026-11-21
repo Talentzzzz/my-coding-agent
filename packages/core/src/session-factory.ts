@@ -1,12 +1,10 @@
 import { anthropicMessages, type ChatTransport } from "./llm/index.ts";
-import { Agent, type SessionSink } from "./agent.ts";
-import type { AssembleAgentStateOptions, OpenAgentOptions } from "./assembly.ts";
+import { Agent, type AssembleAgentStateOptions, type OpenAgentOptions, type SessionSink } from "./agent.ts";
 import { buildSystemPrompt } from "./context/system-prompt.ts";
 import { createHooks, type Hooks } from "./hooks.ts";
 import { ModelManager } from "./model-manager.ts";
 import { SessionManager } from "./session/session-manager.ts";
 import { approvalToolsOf } from "./settings.ts";
-import { UiSettingsManager } from "./ui-settings.ts";
 import { type ToolManager, createToolManager } from "./tools/index.ts";
 
 /**
@@ -20,8 +18,8 @@ import { type ToolManager, createToolManager } from "./tools/index.ts";
  */
 export interface CreateSessionAgentOptions {
 	/**
-	 * 各设置簇的持有者文件（`tools.json`、`sessions.json`、`ui.json`、`engine.json`）读取与写入
-	 * 所在的 agent home。默认用真实的那一个。
+	 * 各设置簇的持有者文件（`tools.json`、`sessions.json`；retry 随模型簇住 `models.json`）读取
+	 * 与写入所在的 agent home。默认用真实的那一个。
 	 *
 	 * 测试「会*写*设置」的命令的 smoke 不得写机器自己的文件；桌面外壳与服务器透传它们启动时所带的。
 	 */
@@ -73,8 +71,6 @@ export function createSessionAgent(options: CreateSessionAgentOptions = {}): Age
 		// 分居。它们什么都不持有，每次读取都是对其背后文件的一次新读。
 		sessionManager: new SessionManager({ home: options.settingsHome }),
 		modelManager: new ModelManager({ home: options.modelsHome ?? options.settingsHome }),
-		uiSettings: new UiSettingsManager({ home: options.settingsHome }),
-		settingsHome: options.settingsHome,
 		toolManager,
 		hooks,
 		// 进程唯一的装配处：传输层在这里解析而不是在编排层内部给默认值，让一次运行能离开进程的每条

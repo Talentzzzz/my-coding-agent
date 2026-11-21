@@ -23,9 +23,9 @@ import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 import type { Message } from "../llm/index.ts";
 import { type Usage, uuidv7 } from "../llm/index.ts";
-// config.ts 的常量（AGENT_HOME/DEFAULT_GLOBAL_SETTINGS/settingsPath）只在函数体内使用、不在模块
-// 顶层——config.ts 已不再 import 本文件的任何东西（ADR-0028 之后），不存在双向加载环。
-import { AGENT_HOME, APP_NAME, DEFAULT_GLOBAL_SETTINGS, settingsPath } from "../config.ts";
+// types.ts 的常量（AGENT_HOME/DEFAULT_GLOBAL_SETTINGS/settingsPath）在运行期叶子模块上（它对外
+// 只递类型），持有者回落常量、编排层装配持有者，箭头只朝一个方向流——顶层求值也安全。
+import { AGENT_HOME, APP_NAME, DEFAULT_GLOBAL_SETTINGS, settingsPath } from "../types.ts";
 import { trimToolCallArgs } from "../context/trim-tool-call-args.ts";
 import { clearToolResult } from "../context/clear-tool-results.ts";
 import type { QueueMode, SessionRef, SessionRow } from "../protocol.ts";
@@ -2234,7 +2234,7 @@ export interface SessionDefaults {
  * pi-agent-core 认识的两种队列模式；其他取值回落 `fallback`。
  *
  * 随会话簇搬进本文件（spec §5：类型与规范化函数随簇搬迁）。默认值本身留守
- * `config.ts` 的 `DEFAULT_GLOBAL_SETTINGS`。
+ * `types.ts` 的 `DEFAULT_GLOBAL_SETTINGS`。
  */
 export function queueModeOr(value: unknown, fallback: QueueMode): QueueMode {
 	return value === "all" || value === "one-at-a-time" ? value : fallback;

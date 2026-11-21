@@ -27,7 +27,6 @@ function all(root: FakeNode, className: string): FakeNode[] {
 
 function settingsOf(): GlobalSettingsSnapshot {
 	return {
-		appearance: { theme: "dark", fontSize: 15 },
 		approval: { read: false, write: true, edit: true, glob: false, grep: false, bash: true },
 		bash: { defaultTimeoutMs: 120_000, maxTimeoutMs: 3_600_000 },
 	};

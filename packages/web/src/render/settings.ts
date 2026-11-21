@@ -8,11 +8,12 @@ import {
 	type GlobalSettingsSnapshot,
 	type SessionSnapshot,
 } from "@my-agent/core/protocol";
+import type { AppearanceSettings } from "../ui-settings.ts";
 
 /**
  * 内置默认模式的名字，在这里复述而不是导入。
  *
- * 常量的家（`@my-agent/core/config.ts`）跑在 Node 上，客户端绝不能把它拉进 bundle —— 与字号
+ * 常量的家（`@my-agent/core` 的 `types.ts`）跑在 Node 上，客户端绝不能把它拉进 bundle —— 与字号
  * 范围出于同样理由遵循的同一条复述规则。
  */
 const DEFAULT_MODE_NAME = "默认";
@@ -54,6 +55,11 @@ export interface SettingsHandlers {
 
 export interface SettingsState {
 	settings?: GlobalSettingsSnapshot;
+	/**
+	 * 本窗口的 UI 设置的外观半（ADR-0029）：它住在客户端自己的存储，不骑服务端的设置快照。
+	 * 外观页从它读；主题与字号的变更经 handlers 立即写回。
+	 */
+	appearance?: AppearanceSettings;
 	models: readonly ModelOption[];
 	/**
 	 * 屏幕上的会话，若有。会话级的选择（模式座位、审批增量）从这里读。
@@ -231,10 +237,14 @@ export class SettingsPanel {
 		// 渲染再照常比较签名。
 		const signature = [
 			this.tab,
+			settingsState.appearance
+				? [
+						settingsState.appearance.theme,
+						settingsState.appearance.fontSize,
+					].join("/")
+				: "",
 			settingsState.settings
 				? [
-						settingsState.settings.appearance.theme,
-						settingsState.settings.appearance.fontSize,
 						settingsState.settings.bash.defaultTimeoutMs,
 						settingsState.settings.bash.maxTimeoutMs,
 						settingsState.settings.tools?.join(",") ?? "",
@@ -301,13 +311,13 @@ export class SettingsPanel {
 	// ------------------------------------------------------------------ appearance
 
 	private appearanceSection(): HTMLElement {
-		const settings = this.settingsState.settings;
+		const appearance = this.settingsState.appearance;
 		const section = element("section", "settings-section");
 
 		const themeRow = element("div", "settings-field");
 		themeRow.append(element("span", "settings-label", "主题"));
 		const group = element("div", "segmented");
-		const current = settings?.appearance.theme ?? "system";
+		const current = appearance?.theme ?? "system";
 		for (const [value, label, iconName] of [
 			["system", "跟随系统", "monitor"],
 			["light", "浅色", "sun"],
@@ -323,10 +333,9 @@ export class SettingsPanel {
 
 		const sizeRow = element("div", "settings-field");
 		sizeRow.append(element("span", "settings-label", "字号"));
-		// 兜底是 @my-agent/core/config.ts 的 DEFAULT_APPEARANCE.fontSize，在这里复述 —— 那个模块
-		// 跑在 Node 上，客户端绝不能把它拉进 bundle。滑块的 10–22 两端是同一种复述
-		// （FONT_SIZE_RANGE），理由相同。
-		const size = settings?.appearance.fontSize ?? 15;
+		// 兜底是 ./ui-settings.ts 的 DEFAULT_APPEARANCE.fontSize，在这里复述 —— 滑块的 10–22
+		// 两端是同一种复述（FONT_SIZE_RANGE），理由相同。
+		const size = appearance?.fontSize ?? 15;
 		const value = element("span", "settings-value", `${size}px`);
 		const slider = element("input", "slider", undefined, {
 			type: "range",

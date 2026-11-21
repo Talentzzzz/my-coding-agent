@@ -2,7 +2,8 @@ import { element, icon, iconButton } from "../dom.ts";
 import type { ChannelState } from "../client.ts";
 import { openMenuAt } from "./menu.ts";
 import { askForText } from "./text-dialog.ts";
-import type { SessionRow, DirectoryGroup, DirectoryPaging } from "@my-agent/core/protocol";
+import type { SessionRow, DirectoryGroup } from "@my-agent/core/protocol";
+import type { DirectoryPaging } from "../ui-settings.ts";
 
 export interface SidebarHandlers {
 	/**
@@ -65,19 +66,19 @@ export interface SidebarState {
 	drafts?: ReadonlySet<string>;
 	collapsed: boolean;
 	/**
-	 * 按目录路径分页的状态，appearance 设置持有的样子。
+	 * 按目录路径分页的状态，本窗口 UI 设置持有的样子（ADR-0029）。
 	 *
-	 * 这里只读：侧栏从它绘制、上报点击，而拥有设置写入的窗口以新映射作答。把它放在状态里而不是
-	 * 视图里，正是让它跨窗口存活的东西：它骑在 appearance 上，appearance 骑在服务端的设置文件上，
-	 * 而不是桌面外壳换端口就会搁浅的 origin 作用域 `localStorage`。
+	 * 这里只读：侧栏从它绘制、上报点击，而拥有设置写入的窗口以新映射作答。它骑在 UI 设置上——
+	 * 客户端自己的存储（外壳桥或 localStorage），而不是桌面外壳换端口就会搁浅的 origin 作用域
+	 * `localStorage` 的裸读。
 	 */
 	paging: Record<string, DirectoryPaging>;
 	/**
-	 * 用户给目录起的名字，按路径，设置持有的样子。
+	 * 用户给目录起的名字，按路径，本窗口 UI 设置持有的样子。
 	 *
 	 * 有 `directoryNames[workDirAbsPath]` 时标题戴着它，否则戴文件夹自己的名字。条目是一个
-	 * *视图*：磁盘上的文件夹从不改名，所以这就是一次改名改变的全部 —— 也是它骑设置而不是骑
-	 * 服务端列出的组的原因。
+	 * *视图*：磁盘上的文件夹从不改名，所以这就是一次改名改变的全部 —— 也是它骑客户端自己的
+	 * 设置而不是服务端列出的组的原因。
 	 */
 	directoryNames?: Record<string, string>;
 	/**

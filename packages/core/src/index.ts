@@ -25,35 +25,23 @@ export {
 	type ToolUpdateCallback,
 	type Usage,
 } from "./llm/index.ts";
+// 设置的形状与默认值已随原 `config.ts` 并入 `types.ts`（原独立文件，曾短暂住过 agent.ts），
+// 包对外的名字不变。
 export {
 	AGENT_HOME,
 	APP_NAME,
-	DEFAULT_APPEARANCE,
 	DEFAULT_MODE_NAME,
+	DEFAULT_BASH_SETTINGS,
 	DEFAULT_GLOBAL_SETTINGS,
-	CONTENT_WIDTH_RANGE,
-	FONT_SIZE_RANGE,
-	SIDEBAR_WIDTH_RANGE,
 	settingsPath,
 	stringListOrUndefined,
 	type GlobalSettings,
+	type RetrySettings,
 	type SettingsPatch,
-} from "./config.ts";
-// RetrySettings 的导出源改为 engine-settings.ts（类型随引擎簇搬入），包对外的名字不变。
-export { EngineSettings, type EngineSettingsOptions, type RetrySettings } from "./engine-settings.ts";
-// UI 簇自设置归属重构起住在这里：类型、规范化函数与持有者同文件（spec §5），包对外的名字不变。
-export {
-	clampContentWidth,
-	clampDirectoryPaging,
-	clampFontSize,
-	clampSidebarWidth,
-	UiSettingsManager,
-	type AppearanceSettings,
-	type DirectoryPaging,
-	type UiSettings,
-	type UiSettingsOptions,
-	type UiSettingsPatch,
-} from "./ui-settings.ts";
+} from "./types.ts";
+// RetrySettings 已随 retry 簇迁入 types.ts、所有权归 ModelManager（ADR-0028 修正），
+// `EngineSettings` 随 engine.json 退场，包对外的类型名不变。
+// UI 簇已迁往客户端存储（ADR-0029）：UiSettingsManager、UI 类型与规范化器随簇退场。
 export { loadAgentsMd, type AgentsMdFile } from "./context/agents-md.ts";
 export { ModelManager, type ModelManagerOptions } from "./model-manager.ts";
 export {
@@ -119,7 +107,7 @@ export {
 	type ModelChoice,
 	type ModelConfig,
 	type ThinkingLevel,
-} from "./models.ts";
+} from "./model-manager.ts";
 export {
 	createSessionAgent,
 	openAgent,
@@ -128,7 +116,7 @@ export {
 export {
 	readSessionSnapshot,
 	type OpenAgentOptions,
-} from "./assembly.ts";
+} from "./agent.ts";
 export {
 	addUsage,
 	EMPTY_USAGE,

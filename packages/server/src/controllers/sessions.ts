@@ -1,9 +1,5 @@
 import {
 	type Agent,
-	clampContentWidth,
-	clampFontSize,
-	clampSidebarWidth,
-	clampDirectoryPaging,
 	coerceModelConfig,
 	type ConfigPatch,
 	DEFAULT_MODE_NAME,
@@ -21,12 +17,11 @@ import {
 	toSessionRef,
 	type ModelConfig,
 	type DirectoryGroup,
-	type DirectoryPaging,
 	UnknownSessionError,
 } from "@my-agent/core";
 import { dirname, resolve, sep } from "node:path";
 import { httpStatus } from "../http/errors.ts";
-import { samePath, workDirAbsPathForCreate, workDirAbsPathOrThrow, type SessionHub } from "../hub.ts";
+import { workDirAbsPathForCreate, workDirAbsPathOrThrow, type SessionHub } from "../hub.ts";
 
 /** 一个目录下存储的会话，从会话文件收窄到 wire 上承载的字段。 */
 export async function listSessions(agent: Agent, workDirAbsPath: string): Promise<SessionRef[]> {
@@ -35,19 +30,11 @@ export async function listSessions(agent: Agent, workDirAbsPath: string): Promis
 
 /** 设置面板读取的东西：它可以编辑的值，和它只读展示的值。 */
 function settingsOf(settings: GlobalSettings): GlobalSettingsSnapshot {
-	const hidden = settings.hiddenDirectories ?? [];
-	const names: Record<string, string> = {};
-	for (const [dir, name] of Object.entries(settings.directoryNames ?? {})) {
-		if (name.trim().length > 0) names[dir] = name;
-	}
 	return {
-		appearance: settings.appearance,
 		approval: settings.approval,
 		bash: settings.bash,
 		...(settings.tools === undefined ? {} : { tools: settings.tools }),
 		...(settings.modes === undefined ? {} : { modes: settings.modes }),
-		...(hidden.length === 0 ? {} : { hiddenDirectories: hidden }),
-		...(Object.keys(names).length === 0 ? {} : { directoryNames: names }),
 		...(settings.model === undefined ? {} : { model: settings.model }),
 		...(settings.defaultModelSeeded === undefined ? {} : { defaultModelSeeded: settings.defaultModelSeeded }),
 	};
@@ -70,12 +57,6 @@ export interface SessionListener {
 	onRenamed?(sessionId: string): void;
 	/** 一个会话被删除。hub 丢掉它的行，transport 告知其客户端。 */
 	onRemoved?(sessionId: string): void;
-	/**
-	 * 一个目录进入或离开机器的列表：被放到一边，或被领回。
-	 *
-	 * 没有行变更，所以不存在能承载这件事的 `session_row` 帧：动的是组列表本身，transport 以重发行列表所来自的 overview 来应答。什么都不被告知的窗口会继续画一个服务器已经不列的组——这正是「删除」承诺绝不发生的事。
-	 */
-	onDirectoryListingChanged?(): void;
 }
 
 /**
@@ -87,8 +68,6 @@ export class SystemController {
 	private readonly sessionHub: SessionHub;
 	/**
 	 * 命令的后果在其应答之外的去处。
-	 *
-	 * 目录改名是这里唯一一个后果超出自身响应的东西：组的每一行同时移动，而 hub 的行存储是行的唯一写入者，所以要告知调用者而不是让它猜。
 	 */
 	private readonly listeners: SessionListener;
 
@@ -150,64 +129,7 @@ export class SystemController {
 
 	/** 本机器有会话的每个目录，各带自己的列表，最近在前。行现算（含活字段），不经任何内存。 */
 	async directories(): Promise<{ directories: DirectoryGroup[] }> {
-		return { directories: (await this.sessionHub.groups()).filter((group) => this.sessionHub.listsDirectory(group.workDirAbsPath)) };
-	}
-
-	/**
-	 * 给目录一个本窗口显示时替代文件夹名的名字。
-	 *
-	 * 一个视图决定，且刻意是本应用提供的唯一一种改名：目录由其会话记录记录的目录本身标识，所以"重命名那个目录"会是一次*移动*。它得重写每个 header，用户在我们背后重命名文件夹的那一刻就会坏掉，而且会把一个破坏性操作藏在一个看起来像标签的菜单项后面。用户在这里输入的东西只进 settings、别无去处；文件夹保留文件系统给它的名字，每个会话保留其 header 持有的 `workDirAbsPath`。
-	 *
-	 * 空名字收回自定义名字，标题重新戴上文件夹自己的名字。
-	 */
-	async renameDirectory(body: Record<string, unknown>): Promise<{ workDirAbsPath: string; name: string; settings: GlobalSettingsSnapshot }> {
-		const workDirAbsPath = body.workDirAbsPath;
-		const name = body.name;
-		if (typeof workDirAbsPath !== "string" || workDirAbsPath.trim().length === 0) {
-			throw httpStatus.badRequest("`workDirAbsPath` must be a directory path");
-		}
-		if (typeof name !== "string") throw httpStatus.badRequest("`name` must be a string");
-
-		const absSource = resolve(workDirAbsPath);
-		// 与列表相同的检查：本机器没有会话的路径不是目录，给它起名只会存下一个永远不会被画出来的标签。
-		const groups = await this.sessionHub.agent.listDirectories();
-		if (!groups.some((group) => samePath(group.workDirAbsPath, absSource))) {
-			throw httpStatus.notFound(`Unknown directory: ${absSource}`);
-		}
-
-		this.sessionHub.agent.applySettings({ directoryNames: { [absSource]: name.trim() } });
-		return { workDirAbsPath: absSource, name: name.trim(), settings: settingsOf(this.sessionHub.agent.settings()) };
-	}
-
-	/**
-	 * 把目录从列表移除，磁盘上什么都不碰。
-	 *
-	 * 存储的列表整份发送，与客户端自己的 `hidden` 列表读取方式一致，字段走普通的 settings 之路——所以「删除」是一个视图决定，重载后依然成立，会话记录与其命名的目录都没有被移动。
-	 *
-	 * 有两件事是告知而不是返回的，因为它们是第二个窗口没有在问的事实：列表本身随应答一起回去了，而其他每个窗口会以一份新 overview 听到同样的消息——见 {@link SessionListener.onDirectoryListingChanged}。重新加回目录是在其中创建一个新会话，那是 {@link SessionController.create} 那一半。
-	 */
-	hideDirectory(body: Record<string, unknown>): Promise<{ settings: GlobalSettingsSnapshot; directories: DirectoryGroup[] }> {
-		const workDirAbsPath = body.workDirAbsPath;
-		if (typeof workDirAbsPath !== "string" || workDirAbsPath.trim().length === 0) {
-			throw httpStatus.badRequest("`workDirAbsPath` must be a directory path");
-		}
-
-		const hidden = this.sessionHub.agent.hiddenDirectories();
-		if (!hidden.some((path) => samePath(path, workDirAbsPath))) {
-			this.sessionHub.agent.applySettings({ hiddenDirectories: [...hidden, resolve(workDirAbsPath)] });
-			this.listeners.onDirectoryListingChanged?.();
-		}
-
-		// 列表随应答一起回去，因为这个移除是一个*存储的*事实而不是一帧：本命令走 REST，而窗口画的行来自通道。自己应用猜测的客户端会成为服务器拥有的列表的第二个写者。
-		return this.listing();
-	}
-
-	/** 可见的列表，按 hub 的规则过滤后的样子。 */
-	private async listing(): Promise<{ settings: GlobalSettingsSnapshot; directories: DirectoryGroup[] }> {
-		return {
-			settings: settingsOf(this.sessionHub.agent.settings()),
-			directories: (await this.sessionHub.groups()).filter((group) => this.sessionHub.listsDirectory(group.workDirAbsPath)),
-		};
+		return { directories: await this.sessionHub.groups() };
 	}
 
 	settings(): { settings: GlobalSettingsSnapshot } {
@@ -215,9 +137,9 @@ export class SystemController {
 	}
 
 	/**
-	 * 修改默认模型、主题、字号、审批集、bash 超时，或用户的模式。
+	 * 修改默认模型、审批集、bash 超时，或用户的模式。
 	 *
-	 * 比 {@link SessionController.updateConfig} 更窄，刻意的：这些是窗口自身运行所依赖的默认值，在任何会话存在之前就要读取，所以不能住在会话上。这里的 `approval` 因此是**目录默认值**——从未选择过的会话打开时的基准——不是运行中会话自己的应答，后者作为 config patch 走那个会话。`model` 是*新*会话起步的行；活会话所在的模型是 composer 的，随消息到达服务器而不是走这里。`tools` 是全局默认激活集，整份发送，与会话级端点自己的契约相同——而会话记录的选择仍然压过它，所以这里任何东西都到不了已经选过的会话。`modes` 是预设列表整份发送（ADR-0004）：把它应用到会话上是那个会话自己的两条命令，不是这个 patch。
+	 * 比 {@link SessionController.updateConfig} 更窄，刻意的：这些是窗口自身运行所依赖的默认值，在任何会话存在之前就要读取，所以不能住在会话上。这里的 `approval` 因此是**目录默认值**——从未选择过的会话打开时的基准——不是运行中会话自己的应答，后者作为 config patch 走那个会话。`model` 是*新*会话起步的行；活会话所在的模型是 composer 的，随消息到达服务器而不是走这里。`tools` 是全局默认激活集，整份发送，与会话级端点自己的契约相同——而会话记录的选择仍然压过它，所以这里任何东西都到不了已经选过的会话。`modes` 是预设列表整份发送（ADR-0004）：把它应用到会话上是那个会话自己的两条命令，不是这个 patch。外观与目录视图不在这里——它们随 UI 簇迁往客户端存储（ADR-0029）。
 	 */
 	updateSettings(body: Record<string, unknown>): { settings: GlobalSettingsSnapshot } {
 		const patch = body.patch ?? body;
@@ -226,7 +148,6 @@ export class SystemController {
 		}
 		const fields = patch as Record<string, unknown>;
 
-		const workDirAbsPath = this.sessionHub.workDirAbsPath;
 		const next: SettingsPatch = {};
 
 		if (fields.tools !== undefined) {
@@ -271,28 +192,6 @@ export class SystemController {
 			next.modes = modes;
 		}
 
-		if (fields.hiddenDirectories !== undefined) {
-			if (!Array.isArray(fields.hiddenDirectories) || fields.hiddenDirectories.some((path) => typeof path !== "string")) {
-				throw httpStatus.badRequest("`hiddenDirectories` must be an array of directory paths");
-			}
-			// 空是一种选择而不是缺席——"什么都不隐藏"——所以按原样存储，与空工具集遵循同一条规则。
-			next.hiddenDirectories = fields.hiddenDirectories as string[];
-		}
-
-		if (fields.directoryNames !== undefined) {
-			const names = fields.directoryNames;
-			if (typeof names !== "object" || names === null || Array.isArray(names)) {
-				throw httpStatus.badRequest("`directoryNames` must be an object of directory paths to names");
-			}
-			for (const [workDirAbsPath, name] of Object.entries(names as Record<string, unknown>)) {
-				if (typeof name !== "string") {
-					throw httpStatus.badRequest(`\`directoryNames.${workDirAbsPath}\` must be a string`);
-				}
-			}
-			// 以变更了的 entry 发送，由设置写入者按键合并。空字符串是收回一个名字的方式，所以存储而不是在这里丢弃。
-			next.directoryNames = names as Record<string, string>;
-		}
-
 		if (fields.model !== undefined) {
 			if (typeof fields.model !== "string") throw httpStatus.badRequest("`model` must be a string");
 			// 不指名任何行的默认值被拒绝而不是存储：`selectModel` 会回退到第一行，这里的拼写错误会表现为一个悄悄不起作用的偏好。行是 orchestrator 的、经 facade 新鲜读取，所以面板加载之后被删掉的行也会被抓到。
@@ -308,32 +207,6 @@ export class SystemController {
 				throw httpStatus.badRequest("`defaultModelSeeded` must be a boolean");
 			}
 			next.defaultModelSeeded = fields.defaultModelSeeded;
-		}
-
-		if (fields.appearance !== undefined) {
-			if (typeof fields.appearance !== "object" || fields.appearance === null || Array.isArray(fields.appearance)) {
-				throw httpStatus.badRequest("`appearance` must be a JSON object");
-			}
-			const appearance = fields.appearance as Record<string, unknown>;
-			const theme = appearance.theme;
-			if (theme !== undefined && theme !== "system" && theme !== "light" && theme !== "dark") {
-				throw httpStatus.badRequest('`appearance.theme` must be "system", "light", or "dark"');
-			}
-			next.appearance = {
-				...(theme === undefined ? {} : { theme }),
-				...(appearance.fontSize === undefined ? {} : { fontSize: clampFontSize(appearance.fontSize) }),
-				// 两个拖拽把手的宽度。各自在进入时经过自己的 clamp，所以绝对范围在这里被强制执行，与手改文件的处理完全一致——不是数字的值 clamp 成 undefined，即丢弃字段而不是存储它。
-				...(appearance.sidebarWidth === undefined
-					? {}
-					: { sidebarWidth: clampSidebarWidth(appearance.sidebarWidth) }),
-				...(appearance.contentWidth === undefined
-					? {}
-					: { contentWidth: clampContentWidth(appearance.contentWidth) }),
-				// 侧栏按目录的翻页状态，同样逐 entry 归一化：entry 不是 record 的目录被丢弃而不是存储。整个字段不是 record——或 record 里已没有目录——就 clamp 成 undefined，把 `undefined` 展开进对象字面量正是让这个字段完全不出现在 patch 里的方式，于是什么都不存、什么都不造。
-				...(appearance.directories === undefined
-					? {}
-					: { directories: clampDirectoryPaging(appearance.directories) }),
-			};
 		}
 
 		if (fields.approval !== undefined) {
@@ -471,22 +344,8 @@ export class SessionController {
 			// 被理解了，会话不接受这个值。
 			throw httpStatus.conflict(messageOf(error));
 		}
-		this.restoreDirectory(absRoot ?? this.sessionHub.workDirAbsPath);
 		this.listeners.onCreated?.(sessionId);
 		return { sessionId, sessions: await listSessions(this.sessionHub.agent, absRoot ?? this.sessionHub.workDirAbsPath) };
-	}
-
-	/**
-	 * 在一个被放到一边的目录里创建的新会话把它领回列表。
-	 *
-	 * 与 `SystemController.hideDirectory` 成对，是对「删除」这个单向门的回答：会话记录和目录从未被碰过，它还在那里可用——而回到它那里正是用户想要它重新出现在列表上的表示。写入 hub 可见性规则经 facade 读取的 settings 状态，下一次列表与下一帧 overview 因此已经一致。
-	 */
-	private restoreDirectory(workDirAbsPath: string): void {
-		const hidden = this.sessionHub.agent.hiddenDirectories();
-		const kept = hidden.filter((path) => !samePath(path, workDirAbsPath));
-		if (kept.length === hidden.length) return;
-		this.sessionHub.agent.applySettings({ hiddenDirectories: kept });
-		this.listeners.onDirectoryListingChanged?.();
 	}
 
 	/**

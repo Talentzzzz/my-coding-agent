@@ -34,15 +34,15 @@ ADR-0019 把设置收拢成三个类型名与一只四法门面（`SettingManage
    | --- | --- | --- | --- | --- |
    | 工具 | `tools`（默认集）、`modes`、`approval`、`bash` | **ToolManager**（`tools/manager.ts`，在 ADR-0011 实例表之上增加） | `tools.json` | `toolDefaults()` / `applyToolDefaults(patch)` |
    | 会话 | `steeringMode`、`followUpMode` | **SessionManager**（`session/session-manager.ts`，在会话文件职责之上增加） | `sessions.json` | `sessionDefaults()` / `applySessionDefaults(patch)` |
-   | 模型 | `models.json` 的行、`defaultModel`（原 `GlobalSettings.model`）、`defaultModelSeeded` | **ModelManager**（新建 `model-manager.ts`，吸收 `ModelConfigStore`） | `models.json` | `catalog()` / `replaceRows(rows)` / `defaultRef()` / `modelSettings()` / `applyModelSettings(patch)` |
+   | 模型 | `models.json` 的行、`defaultModel`（原 `GlobalSettings.model`）、`defaultModelSeeded`、`retry`（2026-11-20 修正并入） | **ModelManager**（新建 `model-manager.ts`，吸收 `ModelConfigStore`） | `models.json` | `catalog()` / `replaceRows(rows)` / `defaultRef()` / `modelSettings()` / `applyModelSettings(patch)` / `retrySettings()` / `applyRetry(patch)` |
    | UI | `appearance`、`hiddenDirectories`、`directoryNames` | **UiSettingsManager**（新建 `ui-settings.ts`） | `ui.json` | `uiSettings()` / `applyUiSettings(patch)` |
-   | 引擎 | `retry` | **Agent 编排层**（`EngineSettings`，`engine-settings.ts`） | `engine.json` | 私有 `retrySettings()` / `applyRetry(patch)`——引擎簇不进公开门面，`SettingsPatch.retry` 经门面路由进这里 |
 
    旧 `settings.json` 只作迁移源（`config.ts` 的 `settingsPath` 为迁移保留），此后被忽略。
    四条归属要点：**bash 归工具**——超时配置的是 bash 工具的行为，`ToolRunContext` 已经把 bash
    超时递给工具执行，持有者合一后这条线更短；**默认模型归模型**——`defaultModelSeeded` 是模型
    目录的标记（窗口种起始行），与行同住 `models.json` 是它的本命；**retry 归引擎**——唯一消费
-   者是编排层自己的重试泵，未来引擎级设置（压缩阈值等）落同一个文件；**`modes` 表归工具**——
+   者是编排层自己的重试泵，未来引擎级设置（压缩阈值等）落同一个文件（2026-11-20 修正：retry
+   归回模型簇，见文末修正节）；**`modes` 表归工具**——
    模式是「工具集 + 审批基线」的命名预设（ADR-0004），两半都是工具关注点，会话快照上的 `mode`
    指针不动（ADR-0018）。
 
@@ -128,7 +128,8 @@ ADR-0019 把设置收拢成三个类型名与一只四法门面（`SettingManage
   的语义也不同：四个文件级持有者把缺文件读作迁移的触发器，`models.json` 把它读作空目录（迁移
   按「键」走，没有东西可捡时一个字节都不写）。
 - **两份 `mergeLayers`，一份跳 `undefined`、一份不跳。** `tools/manager.ts` 与
-  `engine-settings.ts` 的副本在合并时跳过值为 `undefined` 的覆盖键——显式 undefined 不抹掉已有
+  `model-manager.ts`（retry 簇随 2026-11-20 修正从退场的 `engine-settings.ts` 迁来，副本随之）
+  的副本在合并时跳过值为 `undefined` 的覆盖键——显式 undefined 不抹掉已有
   键；`ui-settings.ts` 的副本不跳——它的补丁字段先经「只动被点名的字段」过滤才进入合并，嵌套
   补丁里残留的 `undefined` 经 JSON 序列化自然消失、由读取半回落默认值。分歧在各自的调用点内
   自洽，冒烟各自钉住各自的行为；统一它们不是本 ADR 的事，动之前先读两边的冒烟。
@@ -157,3 +158,23 @@ ADR 决定 5）。其余一切：删掉项目层（旧项目文件不迁移不�
 （旧全局文件同样不删除不写入）；`model 解析到完整行`、占位行作答、apiKey 只骑在 `Model` 上
 ——原样；wire 类型改名（`GlobalSettingsSnapshot`）与 `ConfigPatch` / `SettingsPatch` /
 `ModelSelection` 的形状——本 ADR 决定 4 明确不动。
+
+## 修正（2026-11-20）：retry 簇归回模型簇
+
+原归属表把 `retry` 判给「引擎簇」——编排层私有的 `EngineSettings`（`engine-settings.ts`），
+落 `engine.json`。修正后 **retry 归 `ModelManager`，落 `models.json` 的 `retry` 键**，
+`EngineSettings` 与 `engine-settings.ts` 退场。理由：
+
+- retry 描述的是「模型供应商调用失败后怎么重试」——它是**模型的**调用重试，不是引擎自己的
+  行为参数；换任何一个模型，策略原样成立，它不随编排层的身份变。
+- 「唯一消费者是重试泵」的论证站在消费侧，但持有者按数据同住更诚实：策略与它重试的对象
+  （模型行）同文件，模型簇的持有者一次现读拿到全部。
+- 引擎级设置（压缩阈值等）真要来时，届时再立文件不迟——为一个成员预立簇名，是本 ADR 自己
+  批评过的提前泛化。
+
+不变的部分：`Agent` 的私有面（`retrySettings()` / `applyRetry` 只是对自己的 `ModelManager`
+现读转发，编排层仍不从公开门面外露 retry）；写路径三条纪律与嵌套合并语义逐条不变；门面路由
+（`SettingsPatch.retry` 经 `Agent.applySettings` 逐簇分发）不变。迁移按 `models.json` 的键级
+规则走：缺 `retry` 键时先从退场持有者的 `engine.json` 捡、再从旧 `settings.json` 捡，键已在则
+两份旧文件都被完全忽略、永不删除、永不写入。`RetrySettings` 类型留守 `types.ts`（运行期叶子），
+规范化器 `retryOr` 随簇住进 `model-manager.ts`。

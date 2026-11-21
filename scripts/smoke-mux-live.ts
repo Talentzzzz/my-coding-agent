@@ -240,26 +240,9 @@ try {
 	check("新目录的行到达了概览", await until(() => rowTable().get(first.sessionId) !== undefined), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
 	check("它也被 REST 列表列着", (await restDirectories()).includes(aside), JSON.stringify(await restDirectories()));
 
-	const beforeHide = overviews();
-	const hidden = await fetch(`${server.url}/api/directories/hide`, {
-		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ workDirAbsPath: aside }),
-	});
-	check("搁置一个目录被接受 (200)", hidden.status === 200, `status=${hidden.status}`);
-	check("服务端因此重发了一份概览", await until(() => overviews() > beforeHide), `overviews=${overviews()}`);
-	check("行表里不再有这个目录的任何一行", rowTable().list().every((row) => row.workDirAbsPath !== aside), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
-	check("REST 列表与概览说的是同一件事", !(await restDirectories()).includes(aside), JSON.stringify(await restDirectories()));
-
-	// 收回来：会话文件与文件夹从未被动过，所以在那个目录里新建一次 session 就是用户说想让它
-	// 再出现在列表里。
-	const beforeBack = overviews();
-	transport.setResponses([fakeAssistantMessage("back answer")]);
-	const reborn = await postSession(aside, "回到这个目录");
-	check("在搁置的目录里新建会话被接受 (201)", reborn.status === 201, `status=${reborn.status}`);
-	check("服务端又重发了一份概览", await until(() => overviews() > beforeBack), `overviews=${overviews()}`);
-	check("那个目录回到了行表里", rowTable().list().some((row) => row.workDirAbsPath === aside), JSON.stringify(rowTable().list().map((row) => row.workDirAbsPath)));
-	check("REST 列表也把它列回来了", (await restDirectories()).includes(aside), JSON.stringify(await restDirectories()));
+	// 目录的搁置与领回随 UI 簇迁往客户端存储（ADR-0029）：服务端不再有 hide 端点、不再按设置
+	// 过滤列表，也不再广播整表重发——那个场景随之退场。这里保留的是另一头的承诺：行表与 REST
+	// 列表说的是同一件事，无论客户端把哪些目录藏在它自己那边。
 
 	muxClient.close();
 	check("关掉之后不再有状态变化", channels.at(-1) !== undefined);

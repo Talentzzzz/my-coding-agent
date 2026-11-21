@@ -98,8 +98,8 @@
 	 * 侧栏的宽度，及其拖动把手能够到的范围。
 	 *
 	 * 宽度是默认值，也是窗口在运行时覆盖的唯一变量：拖动把手（main.ts）把拖出的值直接写上来，
-	 * 存储的偏好随每次设置加载经 applyAppearance 落到这里。min 和 max 与服务端截断存储偏好用的
-	 * 是同一对数字（core/config.ts 的 `SIDEBAR_WIDTH_RANGE`）；把手在拖动时从这里读回，所以截断
+	 * 存储的偏好随本窗口的 UI 设置装载（ADR-0029）经 applyAppearance 落到这里。min 和 max 与
+	 * ui-settings.ts 的 `SIDEBAR_WIDTH_RANGE` 是同一对数字；把手在拖动时从这里读回，所以截断
 	 * 住在本文件而不是 JS 常量里，改一处就同时改变两端。
 	 */
 	--dsw-sidebar-width: 232px;

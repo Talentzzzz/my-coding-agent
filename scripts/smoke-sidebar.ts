@@ -8,7 +8,8 @@ import { Sidebar, pagingOf, type SidebarHandlers, type SidebarState } from "../p
 import { askForText } from "../packages/web/src/render/text-dialog.ts";
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { installDom, type FakeNode } from "./dom-shim.ts";
-import type { SessionRow, DirectoryPaging } from "@my-agent/core/protocol";
+import type { SessionRow } from "@my-agent/core/protocol";
+import type { DirectoryPaging } from "../packages/web/src/ui-settings.ts";
 
 let failures = 0;
 
@@ -714,7 +715,7 @@ process.stdout.write("\nsidebar：搜索翻出全部匹配，收起与分页都�
 	const sidebar = new Sidebar(handlers());
 	const rows = Array.from({ length: 12 }, (_unused, index) => row(`s${index}`, 1200 - index * 100));
 	// Drawn collapsed straight from the state, without any click: the draw must honour whatever the
-	// appearance settings hold, including a directory that was folded away in another window.
+	// client's own UI settings hold, including a directory that was folded away in another window.
 	sidebar.render(state(rows, { activeSessionId: "s0", paging: { "/w": { collapsed: true, page: 1, savedPage: 1 } } }));
 	check("收起的目录不出行", titlesOf(sidebar).length === 0, String(titlesOf(sidebar).length));
 

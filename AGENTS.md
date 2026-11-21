@@ -13,7 +13,7 @@
 ## 布局
 
 ```
-packages/core      无头 agent：agent.ts（编排：会话表、命令、审批、投影与事件契约，以及一次运行的引擎 + 填充链 + 压缩 + 重试 + 闸门）、session/（账本、状态、事件）、types.ts（引擎契约，转发合并后的 Context/Tool 名字）、llm/（裁剪自 pi-ai 的传输层：api/、model.ts、models.ts、types.ts（Context 与 Tool 住这里）、utils/；@ts-nocheck）、模型、工具、系统提示词、上下文。没有 HTTP 传输层
+packages/core      无头 agent：agent.ts（编排：会话表、命令、审批、投影与事件契约，以及一次运行的引擎 + 填充链 + 压缩 + 重试 + 闸门）、session/（账本、状态、事件）、types.ts（引擎契约，转发合并后的 Context/Tool 名字）、llm/（裁剪自 pi-ai 的传输层：api/、model.ts、types.ts（Context 与 Tool 住这里）、utils/；@ts-nocheck）、模型、工具、系统提示词、上下文。没有 HTTP 传输层
 packages/server   node:http、REST 命令 + 一条常驻 WebSocket mux、活跃会话；boot.ts 是整个服务器，main.ts 只解析启动参数
 packages/desktop  Electron 外壳：进程内启动服务器，让一个窗口指向它
 packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的逻辑流
@@ -24,7 +24,7 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 代码把这些词当作术语来用。
 
 - **service（无属性服务）** —— 无属性服务的形态（ADR-0006）：`Agent` 编排、会话账本（`SessionManager`）、
-  各设置簇的持有者（`ToolManager`、`ModelManager`、`UiSettingsManager`、`EngineSettings`——每簇一个持有者、
+  各设置簇的持有者（`ToolManager`、`ModelManager`——每簇一个持有者、
   一份自己的文件，[ADR-0028](docs/adr/0028-settings-ownership-per-manager.md)）。构造只收服务依赖，公开方法收 `(id, 请求自己的参数)`，每样数据在**用到它的那一行**向属主现取、
   拿到的只是局部变量；不传、不养任何聚合袋。类壳保留（可构造注入），方法体就写在类里、没有一层同名的
   文件级函数可转发，拆掉的只是 per-session 实例字段；
@@ -75,13 +75,17 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   或版本不对的会话直接删、不迁移。**这两个文件就是会话本身**：进程里没有一份副本，每次操作
   现开一只袋、用完就丢（`Agent.getSessionBySessionId(id)`，ADR-0013）。
 - **settings（设置）** —— 设置分两级：**会话级**（改动它只有「选一个模式」这一条路）与**应用级**
-  （外观、模型清单、默认模型、bash 超时，以及全局默认的工具集与审批）。应用级的归属按关注点拆成
-  五个持有者，每簇一个、且只有一个，各有一份自己的文件（[ADR-0028](docs/adr/0028-settings-ownership-per-manager.md)，
+  （模型清单、默认模型、bash 超时，以及全局默认的工具集与审批）。应用级的归属按关注点拆成
+  三个持有者，每簇一个、且只有一个，各有一份自己的文件（[ADR-0028](docs/adr/0028-settings-ownership-per-manager.md)，
   取代 ADR-0019 的所有权半）：工具簇（`tools` / `modes` / `approval` / `bash`）归 **ToolManager**
   （`tools.json`），会话簇（`steeringMode` / `followUpMode`）归 **SessionManager**（`sessions.json`），
-  模型簇（`models.json` 的行 + `defaultModel` + `defaultModelSeeded`）归 **ModelManager**，
-  UI 簇（`appearance` / `hiddenDirectories` / `directoryNames`）归 **UiSettingsManager**（`ui.json`），
-  引擎簇（`retry`）归编排层私有（`engine.json`，不进公开门面）。旧的 `settings.json` 只作迁移源：
+  模型簇（`models.json` 的行 + `defaultModel` + `defaultModelSeeded` + **`retry`**）归 **ModelManager**——
+  retry 是模型调用的重试策略，随模型簇住 `models.json`（ADR-0028 修正：`EngineSettings` 与
+  `engine.json` 已退场，编排层只从自己的 `ModelManager` 私有转发，仍不进公开门面）。
+  UI 簇（外观、隐藏目录、目录改名）不归服务端：它是窗口自己的视图决定，随
+  [ADR-0029](docs/adr/0029-ui-settings-move-to-client.md) 迁往客户端自己的存储
+  （`packages/web/src/ui-settings.ts` 的双路适配器——桌面外壳经 preload 桥写 Electron userData，
+  浏览器回落 `localStorage`），服务端对目录列表也不再过滤。旧的 `settings.json` 只作迁移源：
   各持有者首次读取时一次性捡走自己的簇，之后旧文件被忽略（不删除不写入）；
   `SettingManager` 已退场，没有统一设置门面。持有者全部无状态、每次现读，不共享读写抽象；
   **`SessionSettings`** 是会话 `.json` 快照的设置半（`Session` 上的 `settings` 字段），只持有
@@ -90,7 +94,7 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   **每次读取现算**的组合（`resolveSettings(session, toolDefaults, modelView, known)`，输入是
   ToolManager 与 ModelManager 各一次现读的窄来源）——活跃工具集、有效审批、模式座位与从目录
   现查的完整模型行，闸门、prompt、请求构建与快照从这同一份作答，产物只活在调用栈上、从不进
-  任何袋。`Agent` 门面只剩路由与组装：`settings()` 从五个持有者现读、组装出 `GlobalSettings`
+  任何袋。`Agent` 门面只剩路由与组装：`settings()` 从四个持有者现读、组装出 `GlobalSettings`
   形状的读模型（不是所有权壳），`applySettings(patch)` 按字段名逐簇分发、每簇独立原子落盘。
 - **model（模型）** —— `models.json` 里的一行**就是**一个 `ModelConfig`：一个端点、一个密钥、以及模型
   自己的事实（`id` 是接口认识的名字，`name` 既是身份也是标签）。`llm/model.ts` 的 `Model` 类把它变成发
@@ -187,17 +191,19 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   策略就装在里面，引擎只是对模型 `stream`；失败的尝试从不被记录。
 - **queue（队列）** —— 一次运行正在流式时被接受的消息：`steer` 在下一个取走点注入，`followUp` 等这一
   轮结束。
-- **assembly（装配）** —— `assembleSession(sessionManager, tools, modelManager, options)` 收**必填**
+- **assembly（装配）** —— 住在 `agent.ts` 里（独立的 `assembly.ts` 已并入，2026-11-20）：
+  共享的解析规则 `assemble(sessionManager, tools, modelManager, options)` 收**必填**
   的三只 manager（显式实参，ADR-0017；设置持有者的现读在其内各来一次，
   [ADR-0028](docs/adr/0028-settings-ownership-per-manager.md)）+ 窄的
   `AssembleAgentStateOptions`（原名 `OpenSessionOptions`；只有会话袋子，
-  工作目录是袋子自己的 `settings.workDirAbsPath`，没有覆盖参数），按会话先、设置后的链
+  工作目录是袋子自己的 `settings.workDirAbsPath`，没有覆盖参数）；激活半（seed 半）内联在
+  `Agent.assembleAgentStateBySession` 里，按会话先、设置后的链
   （`fillSession` → 设置现读 → `createLive`）装配出一份
   `AgentState`——装配产物**就是**状态（ADR-0013），只装配、不激活。**装配的产物是 live 半，不是
   会话记录**（ADR-0013）：袋只是入参，出生的袋被丢掉——重放随时能再造它；唯一调用者是 `Agent.assembleAgentStateBySession`
   （原名 `open`，`adopt` 已删，装配并进门里，服务由此只能是编排层自己的，不再是包的公开面），而
   这扇门本身已收成类私有：公开面上剩 `createAndPrompt`（造，[ADR-0021](docs/adr/0021-lazy-session-identity.md)）、
-  `snapshotOf` / `readSessionSnapshot`（读）与删除动词（出表），何时装配、递哪只袋子进表不再是外界的动词。
+  `snapshotOf` / `readSessionSnapshot`（读，走同一个 `assemble`，没有编排层可取）与删除动词（出表），何时装配、递哪只袋子进表不再是外界的动词。
   `createSessionAgent()` 是另一半：
   收 `{ settingsHome?, modelsHome?, api? }`（外加 test-only 的 `toolManager` 一缝）并**自己造各
   Manager 与设置持有者**——它们不再是调用者的决定（[ADR-0012](docs/adr/0012-agent-facade.md)）——组成一个

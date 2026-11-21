@@ -9,7 +9,6 @@ export { Type } from "typebox";
 export type { AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay } from "./api/anthropic-messages.ts";
 export { anthropicMessages } from "./api/anthropic-messages.ts";
 export { Model, type ModelConfig } from "./model.ts";
-export * from "./models.ts";
 export * from "./types.ts";
 export * from "./utils/assistant-message-frame.ts";
 export * from "./utils/event-stream.ts";

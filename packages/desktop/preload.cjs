@@ -1,7 +1,14 @@
 /**
  * preload 接缝。
  *
- * 渲染进程就是普通的 web client：它通过 HTTP 与服务器对话，不需要任何特权访问。页面自己无法得知的三件事——外壳的原生主题、标题栏归页面所有时如何绘制窗口控件、以及 OS 自己的文件夹选择器（目录选择器的"添加目录…"把浏览交给系统对话框，因为应用自身不浏览文件系统）——在这里暴露，且仅此三件。没有文件系统读取、没有 shell、没有 IPC 透传。
+ * 渲染进程就是普通的 web client：它通过 HTTP 与服务器对话，不需要任何特权访问。页面自己无法得知
+ * 的四件事——外壳的原生主题、标题栏归页面所有时如何绘制窗口控件、OS 自己的文件夹选择器（目录
+ * 选择器的"添加目录…"把浏览交给系统对话框）、以及 UI 设置的持久化——在这里暴露，且仅此四件。
+ * 没有文件系统读取、没有 shell、没有 IPC 透传。
+ *
+ * UI 设置走外壳而不是页面的 `localStorage`，因为外壳每次启动都换端口：`localStorage` 按 origin
+ * 隔离，存在那里的偏好会在窗口换个端口重开的那一刻被忘掉。主进程把它们写进 Electron userData
+ * 下的自己的文件（`ui-settings.json`），读写各一个 handler，页面只见一个普通对象。
  */
 const { contextBridge, ipcRenderer } = require("electron");
 
@@ -24,4 +31,8 @@ contextBridge.exposeInMainWorld("desktop", {
 	 * 页面从不读文件系统；对话框就是全部的访问。
 	 */
 	pickFolder: () => ipcRenderer.invoke("desktop:pick-folder"),
+	/** 页面的 UI 设置，主进程从 userData 的文件里读。文件缺失时为 null。 */
+	readUiSettings: () => ipcRenderer.invoke("desktop:ui-settings:read"),
+	/** 整份写回页面的 UI 设置；主进程原子落盘。 */
+	writeUiSettings: (value) => ipcRenderer.invoke("desktop:ui-settings:write", value),
 });

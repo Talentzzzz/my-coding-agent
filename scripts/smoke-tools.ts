@@ -18,7 +18,6 @@ import {
 	DIFF_MAX_ROWS,
 	DIFF_TEXT_MAX_ROWS,
 	diffText,
-	EngineSettings,
 	estimateTokens,
 	fillSession,
 	fileDiff,
@@ -568,7 +567,7 @@ async function exerciseSettings(): Promise<void> {
 	check("migration hands the model cluster to the read model", agent.settings().model === "faux/faux-1", String(agent.settings().model));
 	check("a field the file names keeps its value", agent.settings().approval.bash === false, JSON.stringify(agent.settings().approval));
 	check("while an unnamed field keeps its default", agent.settings().approval.edit === true, JSON.stringify(agent.settings().approval));
-	check("and no cluster invents a field the file never named", agent.settings().tools === undefined && agent.settings().modes === undefined && agent.settings().hiddenDirectories === undefined, JSON.stringify(agent.settings()));
+	check("and no cluster invents a field the file never named", agent.settings().tools === undefined && agent.settings().modes === undefined, JSON.stringify(agent.settings()));
 
 	// 写路径按字段名路由（spec §6）：一个簇的补丁落在那个簇自己的文件上，别无他处。
 	agent.applySettings({ approval: { read: true } });
@@ -586,15 +585,12 @@ async function exerciseSettings(): Promise<void> {
 	check("the default-model patch lands in models.json under its own key", modelsOnDisk.defaultModel === "hand/edited", JSON.stringify(modelsOnDisk));
 	check("and the read model answers it", agent.settings().model === "hand/edited");
 
-	agent.applySettings({ appearance: { theme: "light" } });
-	const uiOnDisk = JSON.parse(await readFile(join(agentDir, "ui.json"), "utf8")) as Record<string, unknown>;
-	check("the appearance patch lands in ui.json", (uiOnDisk.appearance as Record<string, unknown>)?.theme === "light", JSON.stringify(uiOnDisk));
-	check("while tools.json never sees another cluster's field", toolsOnDisk.steeringMode === undefined && toolsOnDisk.model === undefined, JSON.stringify(toolsOnDisk));
-
+	// UI 簇已迁往客户端存储（ADR-0029）：appearance 的补丁不再是编排层的事，没有文件接它。
 	agent.applySettings({ retry: { maxRetries: 5 } });
-	const engineOnDisk = JSON.parse(await readFile(join(agentDir, "engine.json"), "utf8")) as Record<string, unknown>;
-	check("the retry patch lands in engine.json", (engineOnDisk.retry as Record<string, unknown>)?.maxRetries === 5, JSON.stringify(engineOnDisk));
+	const modelsOnDiskRetry = JSON.parse(await readFile(join(agentDir, "models.json"), "utf8")) as Record<string, unknown>;
+	check("the retry patch lands in models.json under its own key", (modelsOnDiskRetry.retry as Record<string, unknown>)?.maxRetries === 5, JSON.stringify(modelsOnDiskRetry));
 	check("and the read model answers it", agent.settings().retry.maxRetries === 5);
+	check("while tools.json never sees another cluster's field", toolsOnDisk.steeringMode === undefined && toolsOnDisk.model === undefined, JSON.stringify(toolsOnDisk));
 
 	// 跨簇补丁：一次补丁跨簇时逐簇分发（spec §6），每一簇自己的写入原子落地。
 	agent.applySettings({ followUpMode: "all", bash: { maxTimeoutMs: 1_800_000 } });

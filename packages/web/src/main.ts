@@ -19,6 +19,17 @@ import { openMenu, openMenuAt, type MenuItem } from "./render/menu.ts";
 import { StatusBar } from "./render/statusbar.ts";
 import { element, icon } from "./dom.ts";
 import { DEFAULT_THINKING_LEVEL, seedDefaultModel } from "./default-model.ts";
+import {
+	applyUiPatch,
+	DEFAULT_APPEARANCE,
+	loadUiSettings,
+	sameDirectory,
+	saveUiSettings,
+	type AppearanceSettings,
+	type DirectoryPaging,
+	type UiSettings,
+	type UiSettingsPatch,
+} from "./ui-settings.ts";
 import type {
 	ConnectionItem,
 	DirectoryGroup,
@@ -26,22 +37,28 @@ import type {
 	ServerMessage,
 	SessionSnapshot,
 	SessionRow,
-	DirectoryPaging,
 } from "@my-agent/core/protocol";
 
 /**
- * 桌面外壳给页面增加的唯一一件事：操作系统自己的文件夹选择器。应用本身不浏览文件系统 ——
- * "添加目录"把浏览交给系统对话框 —— 所以没有外壳的浏览器没有选择器，菜单项如实说明，而不是
- * 假装有。
+ * 桌面外壳给页面增加的东西：操作系统自己的文件夹选择器，与 UI 设置的持久化桥。
+ *
+ * 应用本身不浏览文件系统 —— "添加目录"把浏览交给系统对话框 —— 所以没有外壳的浏览器没有选择器，
+ * 菜单如实说明。UI 设置的桥同理：外壳每次启动都换端口，`localStorage` 按 origin 隔离留不住
+ * 偏好（ADR-0029），外壳把这份设置写进它自己的 userData 文件；两个成员都可选，浏览器里窗口
+ * 回落 localStorage。
  */
 declare global {
 	interface Window {
-		desktop?: { pickFolder?: () => Promise<string | undefined> };
+		desktop?: {
+			pickFolder?: () => Promise<string | undefined>;
+			readUiSettings?: () => Promise<unknown>;
+			writeUiSettings?: (value: unknown) => Promise<void>;
+		};
 	}
 }
 
 /**
- * 内置默认模式的名字，在这里复述而不是导入：它的家（`@my-agent/core/config.ts`）跑在 Node 上，
+ * 内置默认模式的名字，在这里复述而不是导入：它的家（`@my-agent/core` 的 `types.ts`）跑在 Node 上，
  * 客户端绝不能把它拉进 bundle —— 设置面板出于同样的理由应用同一条复述规则。
  */
 const DEFAULT_MODE_NAME = "默认";
@@ -149,11 +166,19 @@ function main(): void {
 	let draft: DraftSession | undefined;
 	let collapsed = false;
 	/**
+	 * 本窗口的 UI 设置：外观、侧栏按目录的翻页、目录改名与隐藏目录（ADR-0029）。
+	 *
+	 * 它住在客户端自己的存储——外壳桥或 localStorage——服务端对它一无所知。启动时从存储播种，
+	 * 每次变更经 {@link saveUi} 合并进去并写回；`viewState.settings`（服务端的设置快照）从今以后
+	 * 只回答模型、工具、模式与审批。
+	 */
+	let uiSettings: UiSettings = { appearance: { ...DEFAULT_APPEARANCE } };
+	/**
 	 * 侧栏按目录的分页状态，以目录路径为键。
 	 *
-	 * appearance 设置到达时播种，每次点击经它们写回 —— 09 号的决定：状态跟随 appearance，不跟
-	 * `localStorage`，桌面外壳每次启动换端口会让后者搁浅。用户从未碰过的目录不保留条目，所以在
-	 * 一次折叠或翻页发生之前映射一直为空。
+	 * UI 设置播种时从它带出，每次点击写回 —— 状态是 `uiSettings.appearance.directories` 的本地
+	 * 镜像，先动本地映射再重画，不必等一次写回落地。用户从未碰过的目录不保留条目，所以在一次
+	 * 折叠或翻页发生之前映射一直为空。
 	 */
 	let paging: Record<string, DirectoryPaging> = {};
 	/**
@@ -332,7 +357,7 @@ function main(): void {
 	 * 持久化遵循侧栏把手的两条规则，与参考实现一致：保存的偏好是拖动产生的那一个，从未移动的按压
 	 * 什么都不提交 —— 一次空点击绝不能用当前布局截断出的显示值覆盖更宽的偏好 —— 且存储的数字在
 	 * 每次读取时按当前布局截断，让更小的窗口压低显示而不销毁选择。服务端把存储的偏好截到绝对范围
-	 * （`@my-agent/core/config.ts` 的 `CONTENT_WIDTH_RANGE`）；布局相关的两端是窗口独有的，因为
+	 * （`@my-agent/core` 的 `types.ts`）；布局相关的两端是窗口独有的，因为
 	 * 只有它知道列的宽度。
 	 */
 	const contentResizer = element("div", "content-resizer", undefined, {
@@ -422,7 +447,7 @@ function main(): void {
 		endContentDrag();
 		if (moved) {
 			contentPref = contentWidthNow();
-			void saveSettings({ appearance: { contentWidth: contentPref } });
+			saveUi({ appearance: { contentWidth: contentPref } });
 		}
 	});
 	contentResizer.addEventListener("pointercancel", () => endContentDrag());
@@ -435,7 +460,7 @@ function main(): void {
 		// 只有窗口变大后才生效的更宽偏好。
 		applyContentWidth(contentWidthNow() + step);
 		contentPref = contentApplied;
-		void saveSettings({ appearance: { contentWidth: contentPref } });
+		saveUi({ appearance: { contentWidth: contentPref } });
 	});
 
 	/**
@@ -538,7 +563,7 @@ function main(): void {
 	const chipLabel = element("span", "directory-chip-label");
 	directoryChip.append(icon("folder"), chipLabel, icon("chevron"));
 	directoryChip.addEventListener("click", () => {
-		const groups = sessionRows.groups();
+		const groups = visibleGroups();
 		// 还什么都不知道：一个只有"添加目录"一行的单行菜单，是在假装存在过选择，所以点击直接去
 		// 选择器，与参考实现一致。
 		if (groups.length === 0) {
@@ -553,7 +578,7 @@ function main(): void {
 			[
 				...groups.map((group) => ({
 					icon: "folder" as const,
-					label: viewState.settings?.directoryNames?.[group.workDirAbsPath] ?? directoryName(group.workDirAbsPath),
+					label: uiSettings.directoryNames?.[group.workDirAbsPath] ?? directoryName(group.workDirAbsPath),
 					title: group.workDirAbsPath,
 					active: group.workDirAbsPath === absChosenDir,
 					onSelect: () => {
@@ -630,16 +655,16 @@ function main(): void {
 	});
 
 	/**
-	 * 折入一个目录的分页状态，重画，并经 appearance 持久化。
+	 * 折入一个目录的分页状态，重画，并经本窗口的 UI 设置持久化。
 	 *
-	 * 本地映射先动，重画就不必等一次往返；映射随后整体发送，与每个 appearance 字段一样。服务端的
-	 * 答案落在 `apply`，由它从保存的设置重新播种这张映射 —— 写入失败时，错误条是报告，视图保留
-	 * 这次点击，这是诚实的拆分：屏幕是用户做的，文件是幸存的。
+	 * 本地映射先动，重画就不必等一次写回；映射随后随整个设置写回客户端自己的存储（ADR-0029）。
+	 * {@link saveUi} 是那条路，屏幕是用户做的、文件是幸存的拆分在这里同样成立。
 	 */
 	function setPaging(workDirAbsPath: string, next: DirectoryPaging): void {
 		paging = { ...paging, [workDirAbsPath]: next };
+		uiSettings = applyUiPatch(uiSettings, { appearance: { directories: paging } });
 		renderSidebar();
-		void saveSettings({ appearance: { directories: paging } });
+		void saveUiSettings(uiSettings).catch(report);
 	}
 
 	/**
@@ -663,7 +688,7 @@ function main(): void {
 	/**
 	 * 拖动范围，从样式表声明的同一批 token 读回（`--dsw-sidebar-min/max`）。
 	 *
-	 * 这些数字的家在 `tokens.css`，由 `@my-agent/core/config.ts` 的 `SIDEBAR_WIDTH_RANGE` 镜像，
+	 * 这些数字的家在 `tokens.css`，由 `@my-agent/core` 的 `types.ts` 镜像，
 	 * 服务端在那里截断存储的偏好。它们不被导入客户端 —— config 模块跑在 Node 上，客户端绝不能
 	 * 把它拉进 bundle —— 所以 token 被读回，这里的字面量只是样式表加载失败时的兜底。
 	 */
@@ -705,7 +730,7 @@ function main(): void {
 		// 选定的值，而不是当前布局的截断会悄悄压上去的那个。
 		const moved = sidebarDrag !== undefined && event.clientX !== sidebarDrag.x;
 		endSidebarDrag();
-		if (moved) void saveSettings({ appearance: { sidebarWidth: sidebarWidthNow() } });
+		if (moved) saveUi({ appearance: { sidebarWidth: sidebarWidthNow() } });
 	});
 	sidebarResizer.addEventListener("pointercancel", () => endSidebarDrag());
 	sidebarResizer.addEventListener("keydown", (event) => {
@@ -713,15 +738,15 @@ function main(): void {
 		if (step === 0 || collapsed) return;
 		event.preventDefault();
 		setSidebarWidth(sidebarWidthNow() + step);
-		void saveSettings({ appearance: { sidebarWidth: sidebarWidthNow() } });
+		saveUi({ appearance: { sidebarWidth: sidebarWidthNow() } });
 	});
 
 	// ----------------------------------------------------------------- 设置
 
 	const settingsPanel = new SettingsPanel({
 		onClose: () => settingsPanel.hide(),
-		onTheme: (theme) => void saveSettings({ appearance: { theme } }),
-		onFontSize: (fontSize) => void saveSettings({ appearance: { fontSize } }),
+		onTheme: (theme) => saveUi({ appearance: { theme } }),
+		onFontSize: (fontSize) => saveUi({ appearance: { fontSize } }),
 		onBashTimeouts: (bash) => void saveSettings({ bash }),
 		// 全局默认审批表：从未选择过的会话以它开启。在这里写入就是写设置文件，而一个有自己的记录
 		// 选择的会话会保留它们。
@@ -868,7 +893,7 @@ function main(): void {
 		// 映射的字符串稳定。
 		// 名字在签名里的理由与分页映射相同：改名不动行表的任何东西，忽略标签的签名意味着这次点击
 		// 什么都不重画。
-		const names = viewState.settings?.directoryNames;
+		const names = uiSettings.directoryNames;
 		const drawn = `${sessionRows.version}|${followed ?? ""}|${draft?.id ?? ""}|${draft?.workDirAbsPath ?? ""}|${draftRowMap.size}|${absPickedDirectory}|${collapsed ? 1 : 0}|${channel}|${JSON.stringify(paging)}|${JSON.stringify(names ?? {})}`;
 		if (drawn === sidebarDrawn) return;
 		sidebarDrawn = drawn;
@@ -885,14 +910,27 @@ function main(): void {
 	}
 
 	/**
+	 * 行表里的可见分组：被用户藏起的目录不进侧栏。
+	 *
+	 * 过滤在这里而不是服务端——隐藏列表是本窗口的 UI 设置（ADR-0029），服务端不再知道它。
+	 * 两个读取者（侧栏与目录芯片）共用这一份，让同一个决定只有一个答案。
+	 */
+	function visibleGroups(): DirectoryGroup[] {
+		const groups = [...sessionRows.groups()];
+		const hidden = uiSettings.hiddenDirectories ?? [];
+		if (hidden.length === 0) return groups;
+		return groups.filter((group) => !hidden.some((path) => sameDirectory(path, group.workDirAbsPath)));
+	}
+
+	/**
 	 * 侧栏的分组：服务端的行，叠上草稿行。
 	 *
 	 * 草稿是窗口自己的事实，不进连接层的行表 —— 它插进自己目录的组（目录在草稿创建时就解析好了，
 	 * 所以组一定指得出），目录还没有组时草稿为它开一个。组的排序沿用最新活动在前的规则，所以一个
-	 * 刚写下的草稿排在本目录的最前、它的目录排到列表的最上。
+	 * 刚写下的草稿排在本目录的最前、它的目录排到列表的最上。被藏起的目录不进列表（ADR-0029）。
 	 */
 	function directoriesWithDrafts(): DirectoryGroup[] {
-		const groups = [...sessionRows.groups()];
+		const groups = visibleGroups();
 		for (const draftSession of draftRowMap.values()) {
 			const row: SessionRow = {
 				id: draftSession.id,
@@ -1018,15 +1056,8 @@ function main(): void {
 
 	/** 绘制 `next` 中与上一次绘制不同的部分 —— 调用者已经把它变成了 `viewState`。 */
 	function drawState(next: ViewState, previous: ViewState, options: ApplyOptions = {}): void {
-		// 新的设置快照可能携带阅读宽度偏好，而阅读列正是依据它绘制的那个。与侧栏宽度进入
-		// `applyAppearance` 的同一条路，只是这个是布局相关的，所以在这里绘制，紧挨着它所度量的列。
-		if (next.settings !== previous.settings) {
-			contentPref = next.settings?.appearance.contentWidth;
-			applyContentWidth(contentPref);
-			// 侧栏的分页状态骑在同一个快照上。重新播种而不是合并：设置是权威，服务端丢掉的目录条目
-			// —— 手工编辑文件里的一行坏数据 —— 回到它的默认，而不是这个窗口对它的记忆。
-			paging = next.settings?.appearance.directories ?? {};
-		}
+		// 阅读宽度与分页是本窗口 UI 设置（ADR-0029）的事实，不再骑服务端的设置快照——这里没有
+		// 东西要从中重读；它们的播种在启动装载与每次 saveUi 里。
 		if (next.items !== previous.items || next.streaming !== previous.streaming) {
 			// `deferred` 由唯一一个一次交出整段对话的调用者设置 —— 会话切换 —— 那里的绘制是切换的
 			// 成本，绝不能占住帧。其他每个帧携带的都是读者正在看着到达的 delta，整体落地。
@@ -1100,6 +1131,7 @@ function main(): void {
 		settingsPanel.render({
 			models: viewState.models,
 			toolNames: viewState.toolNames ?? [],
+			appearance: uiSettings.appearance,
 			...(viewState.settings ? { settings: viewState.settings } : {}),
 			...(viewState.snapshot ? { snapshot: viewState.snapshot } : {}),
 		});
@@ -1469,11 +1501,23 @@ function main(): void {
 
 	async function writeSettings(patch: Parameters<SessionApi["updateSettings"]>[0]): Promise<void> {
 		const { settings: saved } = await sessionApi.updateSettings(patch);
-		// 立即应用而不是等重渲染：字号和主题是两个其全部价值就在于看到它们变化的设置。分支页的
-		// 卡片以字阶度量，所以它是唯一必须被告知重新度量的视图。
-		applyAppearance(saved);
-		branchView.remeasure();
 		apply({ ...viewState, settings: saved });
+	}
+
+	/**
+	 * UI 设置的一次变更：合并进本窗口的设置、立即应用、并写回客户端自己的存储（ADR-0029）。
+	 *
+	 * 先动内存再落盘——主题与字号的价值就在看到它们变化，写入失败时错误条是报告、视图保留这次
+	 * 点击，与服务端补丁的拆分相同：屏幕是用户做的，文件是幸存的。外观每一拍都整体重应用，分支
+	 * 页的卡片以字阶度量，所以它随每次变更重新度量。
+	 */
+	function saveUi(patch: UiSettingsPatch): void {
+		uiSettings = applyUiPatch(uiSettings, patch);
+		applyAppearance(uiSettings.appearance);
+		branchView.remeasure();
+		paging = uiSettings.appearance.directories ?? {};
+		renderSidebar();
+		void saveUiSettings(uiSettings).catch(report);
 	}
 
 	/**
@@ -1510,6 +1554,9 @@ function main(): void {
 					thinkingLevel: selection.level,
 				});
 				reachable();
+				// 新会话把被藏起的目录领回侧栏——旧世界里这是出生请求服务端的那一拍，如今隐藏
+				// 列表归客户端（ADR-0029），领回也在这里。
+				unhideDirectory(source.workDirAbsPath);
 				createdId = created.sessionId;
 			} catch (error) {
 				unreachable(error);
@@ -1619,52 +1666,50 @@ function main(): void {
 	}
 
 	/**
-	 * 给目录一个侧栏显示的名字，磁盘不动。
+	 * 给目录一个侧栏显示的名字，磁盘不动（ADR-0029）。
 	 *
-	 * `name` 是标签，不是路径：这里什么都不构建，答案携带设置是因为标签住在那里。行不动 —— 目录
-	 * 由它的 transcript 记录的目录标识 —— 所以本窗口欠这次变更的只是一次重画，清掉的
-	 * `sidebarDrawn` 强制它越过下面的门。
+	 * `name` 是标签，不是路径：标签是本窗口 UI 设置记住的一个视图，写回客户端自己的存储并重画。
+	 * 行不动 —— 目录由它的 transcript 记录的目录标识 —— 所以本窗口欠这次变更的只是一次重画，
+	 * 清掉的 `sidebarDrawn` 强制它越过下面的门。
 	 *
 	 * 空名字收回自定义名，标题落回文件夹自己的名字。
 	 */
-	async function renameDirectory(workDirAbsPath: string, name: string): Promise<void> {
-		try {
-			const answer = await sessionApi.renameDirectory(workDirAbsPath, name);
-			reachable();
-			apply({ ...viewState, settings: answer.settings });
-			// 设置快照动了，但门的签名里没有任何必须跟着动的东西：行还是那些行，否则戴着新标签的
-			// 标题会保留旧文字。
-			sidebarDrawn = undefined;
-			renderSidebar();
-		} catch (error) {
-			// 这台机器没有会话的路径、服务端读不懂的 body：错误条正是那些原因已经显示的地方。
-			unreachable(error);
-		}
+	function renameDirectory(workDirAbsPath: string, name: string): void {
+		saveUi({ directoryNames: { [workDirAbsPath]: name } });
+		// 签名里没有随标签动的东西：行还是那些行，否则戴着新标签的标题会保留旧文字。
+		sidebarDrawn = undefined;
+		renderSidebar();
 	}
 
 	/**
-	 * 把一个目录从侧栏拿掉，磁盘上什么都不碰（票 06）。
+	 * 把一个目录从侧栏拿掉，磁盘上什么都不碰（ADR-0029）。
 	 *
-	 * 两条路，每个通道状态一条，差别不是细节：通道 live 时*服务端*靠重发概览移除组 —— 行表的
-	 * 唯一写入者是通道，它握着笔时 REST 列表被直接拒绝（`rows.loadFrom` 就是那个拒绝）。通道断开
-	 * 时没有帧，所以答案携带的列表是唯一的路，在这里应用。无论哪条，本窗口欠的都是它的设置快照：
-	 * 隐藏列表正是下一次重载把组排除在外的依据。
+	 * 隐藏列表是本窗口 UI 设置的事实：写进 `hiddenDirectories` 并存回客户端自己的存储，分组从
+	 * 侧栏消失，会话记录与其命名的目录原地不动——会话仍可按 id 打开，在同一个目录里创建新会话
+	 * 就是把它领回来。
 	 */
-	async function deleteDirectory(workDirAbsPath: string): Promise<void> {
-		try {
-			const answer = await sessionApi.hideDirectory(workDirAbsPath);
-			reachable();
-			sessionRows.loadFrom(answer.directories, channel === "live");
-			applyAppearance(answer.settings);
-			branchView.remeasure();
-			apply({ ...viewState, settings: answer.settings });
-			// 设置快照变了，但门读取的签名里没有任何必须变的：没有这个组任何行的窗口，否则会画出一
-			// 条和之前一模一样的字符串。
-			sidebarDrawn = undefined;
-			renderSidebar();
-		} catch (error) {
-			unreachable(error);
-		}
+	function deleteDirectory(workDirAbsPath: string): void {
+		const hidden = uiSettings.hiddenDirectories ?? [];
+		if (hidden.some((path) => sameDirectory(path, workDirAbsPath))) return;
+		saveUi({ hiddenDirectories: [...hidden, workDirAbsPath] });
+		// 门读取的签名里没有随隐藏动的东西：没有这个组任何行的窗口，否则会画出一条和之前一模一样
+		// 的字符串。
+		sidebarDrawn = undefined;
+		renderSidebar();
+	}
+
+	/**
+	 * 在一个目录里出生的新会话把它领回侧栏：被藏起的目录以一个新会话回到列表。
+	 *
+	 * 与 `deleteDirectory` 成对，是对「删除」这个单向门的回答——回到它那里正是用户想要它重新
+	 * 出现在列表上的表示。隐藏列表是客户端自己的，所以这一步也只在客户端做（ADR-0029）。
+	 */
+	function unhideDirectory(workDirAbsPath: string | undefined): void {
+		if (workDirAbsPath === undefined) return;
+		const hidden = uiSettings.hiddenDirectories ?? [];
+		const kept = hidden.filter((path) => !sameDirectory(path, workDirAbsPath));
+		if (kept.length === hidden.length) return;
+		saveUi({ hiddenDirectories: kept });
 	}
 
 	/**
@@ -1897,9 +1942,21 @@ function main(): void {
 		} catch (error) {
 			unreachable(error);
 		}
+		// UI 设置先于服务端设置装载：外观是窗口第一眼就要戴上的东西，它住在客户端自己的存储
+		// （ADR-0029），读它不经过网络。播种之后立即应用一次外观与阅读列宽——启动前样式表的
+		// 默认值一直撑着，装载的答案一到就替换它。
+		try {
+			uiSettings = await loadUiSettings();
+			applyAppearance(uiSettings.appearance);
+			paging = uiSettings.appearance.directories ?? {};
+			contentPref = uiSettings.appearance.contentWidth;
+			applyContentWidth(contentPref);
+			renderSidebar();
+		} catch (error) {
+			report(error);
+		}
 		try {
 			const { settings: stored } = await sessionApi.getSettings();
-			applyAppearance(stored);
 			reachable();
 			apply({ ...viewState, settings: stored });
 		} catch (error) {

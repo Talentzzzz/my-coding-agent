@@ -703,12 +703,13 @@ try {
 		const notNames = await call("PATCH", `${http.url}/api/settings`, { patch: { tools: [42] } });
 		check("every entry must be a string (400)", notNames.status === 400, `status=${notNames.status}`);
 
-		process.stdout.write("a directory can be renamed and put aside\n");
-		// 票 06's two directory commands, end to end. A directory is listed by making a session in it,
-		// which is the only road one enters the sidebar by — and the reason this section can run against
-		// a directory of its own instead of the server's root, whose name the sections after this one
-		// still refer to. The agent home is a scratch one so the settings this writes are not the
-		// machine's own.
+		process.stdout.write("directories are listed, and survive what the client does to its own view\n");
+		// Directory groups end to end. A directory is listed by making a session in it, which is the
+		// only road one enters the sidebar by — and the reason this section can run against a directory
+		// of its own instead of the server's root, whose name the sections after this one still refer
+		// to. Renaming and putting a directory aside are view decisions the client stores for itself
+		// now (ADR-0029); the server's part of the contract is only that listings stay honest and
+		// folders are never touched.
 		{
 			const home = await mkdtemp(join(tmpdir(), "my-agent-agent-home-"));
 			const host = await mkdtemp(join(tmpdir(), "my-agent-directories-"));
@@ -729,66 +730,14 @@ try {
 			// spoken, which is what earns the directory its group in the sidebar.
 			check("two new directories are listed as two groups", (await listed()).includes(resolve(before)) && (await listed()).includes(resolve(other)));
 
-				const malformed = await call("POST", `${http.url}/api/directories/hide`, { workDirAbsPath: 42 });
-				check("hiding with a non-string path is refused (400)", malformed.status === 400, `status=${malformed.status}`);
-
-				// A name is a label, so the refusals a move needed — a target already taken, a missing
-				// parent — have nothing to answer here. What is left is whether the path is one this
-				// machine lists, and whether a name arrived at all.
-				const unknown = await call("POST", `${http.url}/api/directories/rename`, { workDirAbsPath: join(host, "nowhere"), name: "x" });
-				check("naming a directory this machine does not list is a 404", unknown.status === 404, `status=${unknown.status}`);
-				const wrongName = await call("POST", `${http.url}/api/directories/rename`, { workDirAbsPath: before, name: 42 });
-				check("a non-string name is refused (400)", wrongName.status === 400, `status=${wrongName.status}`);
-
-				const named = await call("POST", `${http.url}/api/directories/rename`, { workDirAbsPath: before, name: "改过的名字" });
-				check("naming a directory is accepted (200)", named.status === 200, `status=${named.status}`);
-				check("the answer names the path it was asked about", resolve(String(named.payload.workDirAbsPath ?? "")) === resolve(before), JSON.stringify(named.payload));
-				const namedSet = (named.payload.settings as { directoryNames?: Record<string, string> })?.directoryNames ?? {};
-				check("and the settings carry the label", namedSet[resolve(before)] === "改过的名字", JSON.stringify(namedSet));
-				const storedNames = ((await call("GET", `${http.url}/api/settings`)).payload.settings as { directoryNames?: Record<string, string> })
-					?.directoryNames ?? {};
-				check("a later read sees it too", storedNames[resolve(before)] === "改过的名字", JSON.stringify(storedNames));
-
-				// Nothing on disk moves, which is the whole difference from the folder rename this
-				// replaced: the directory, the store keyed by it, and the header's workDirAbsPath all stay put.
+				// Nothing on disk moves, whichever way the client's own view turns: the directory, the
+				// store keyed by it, and the header's workDirAbsPath all stay put.
 				check("the folder is exactly where it was", existsSync(before));
 				const kept = await get(`${http.url}/api/sessions/${id}`);
 				check("the session still names its own directory", resolve(kept.session?.workDirAbsPath ?? "") === resolve(before), kept.session?.workDirAbsPath);
 				check("and its session is still under that key", (await SessionManager.list(before)).some((session) => session.id === id));
-				check("the listing draws the path, not the label", (await listed()).includes(resolve(before)));
-
-				const cleared = await call("POST", `${http.url}/api/directories/rename`, { workDirAbsPath: before, name: "  " });
-				const clearedSet = (cleared.payload.settings as { directoryNames?: Record<string, string> })?.directoryNames ?? {};
-				check("an empty name takes the label back (200)", cleared.status === 200 && (clearedSet[resolve(before)] ?? "") === "", JSON.stringify(cleared.payload));
-
-				const hidden = await call("POST", `${http.url}/api/directories/hide`, { workDirAbsPath: before });
-				check("hiding a directory is accepted (200)", hidden.status === 200, `status=${hidden.status}`);
-				check("the answer's listing no longer draws the group", !((hidden.payload.directories as { workDirAbsPath: string }[]) ?? []).some((group) => resolve(group.workDirAbsPath) === resolve(before)));
-				check(
-					"and the stored setting records it",
-					((hidden.payload.settings as { hiddenDirectories?: string[] })?.hiddenDirectories ?? []).some((path) => resolve(path) === resolve(before)),
-				);
-				check("the next listing leaves it out too", !(await listed()).includes(resolve(before)));
-				check("but the folder is exactly where it was", existsSync(before));
-				check("and the session is untouched", (await SessionManager.list(before)).some((session) => session.id === id));
+				check("the listing draws the path, not any label", (await listed()).includes(resolve(before)));
 				check("the other directory is still listed", (await listed()).includes(resolve(other)));
-
-				const restored = await call("PATCH", `${http.url}/api/settings`, { patch: { hiddenDirectories: [] } });
-				check("an empty hidden list is stored as a choice (200)", restored.status === 200, `status=${restored.status}`);
-				check("and the group comes back", (await listed()).includes(resolve(before)));
-
-				// 删除 is not a one-way door, and this is the door: the sessions and the folder were
-				// never touched, so a new session in that directory is the user saying they want it listed
-				// again. Nothing else in the window can un-hide one, which is why the road has to exist.
-				const hiddenAgain = await call("POST", `${http.url}/api/directories/hide`, { workDirAbsPath: before });
-				check("hiding it a second time is accepted (200)", hiddenAgain.status === 200, `status=${hiddenAgain.status}`);
-				check("and it leaves the listing again", !(await listed()).includes(resolve(before)));
-				const reborn = await call("POST", `${http.url}/api/sessions`, { text: "领回来", workDirAbsPath: before });
-				check("a new session in it is accepted (201)", reborn.status === 201, `status=${reborn.status}`);
-				check("a new session in a put-aside directory lists it again", (await listed()).includes(resolve(before)));
-				const storedHidden =
-					(((await call("GET", `${http.url}/api/settings`)).payload.settings as { hiddenDirectories?: string[] })?.hiddenDirectories ?? []);
-				check("and the stored list no longer names it", !storedHidden.some((path) => resolve(path) === resolve(before)), JSON.stringify(storedHidden));
 
 				// A user can rename a folder behind this process's back. The sessions stay in the store,
 				// so the group is still listed — and a new session there puts the directory back instead of

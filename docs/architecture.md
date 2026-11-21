@@ -25,8 +25,7 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 | 层 | 归属 | 细节 |
 |---|---|---|
 | 认证、流式、wire | core（`llm/`） | `llm/api/anthropic-messages.ts` —— 那份裁剪副本里留下的唯一一个 API 实现，导出为 `anthropicMessages` 传输层（[ADR-0010](adr/0010-llm-folded-into-core.md)；它与工具声明的关系见*工具契约*） |
-| 导入的模型 | 我们 | `core/src/models.ts`：用户手打的那些行，每行由**手写的一个名字**命名——这个名字既是该行的身份也是它的标签，因为会话记录、配置补丁、选择器三处必须指同一行——每一行都直接变成发请求时用的模型；旧行的 `label` 被读作它的 `name`，这保住了用户选定的名字，代价是一次性的：用旧 slug 构建的引用会失效。上游的 `builtinModels()`、它的每供应商工厂、以及在其中路由的 `Models`/`Provider` 注册表，是被**刻意删除**的 |
-| 每模型能力 | 我们 | `core/src/anthropic-models.ts`：某个 Claude 模型接受什么，从它的 wire id 推导——因为手打的一行没有别的东西可以作键 |
+| 导入的模型 | 我们 | `core/src/model-manager.ts`：用户手打的那些行，每行由**手写的一个名字**命名——这个名字既是该行的身份也是它的标签，因为会话记录、配置补丁、选择器三处必须指同一行——每一行都直接变成发请求时用的模型；旧行的 `label` 被读作它的 `name`，这保住了用户选定的名字，代价是一次性的：用旧 slug 构建的引用会失效。上游的 `builtinModels()`、它的每供应商工厂、以及在其中路由的 `Models`/`Provider` 注册表，是被**刻意删除**的 |
 | 运行引擎、steering、事件 | 我们 | `agent.ts` 的 `Agent.run`、工具调用、流事件——引擎是编排层的私有方法（[ADR-0016](adr/0016-loop-is-orchestration.md)） |
 | 工具 | 我们 | 基于 `node:fs` / `node:child_process` 的六个文件工具 |
 | 会话持久化 | 我们 | `SessionManager`：`.json` 快照（会话是什么）+ 同 stem 的只追加 JSONL 日志（说过什么），配对残缺即删（[ADR-0008](adr/0008-session-two-file-format.md)） |
@@ -37,7 +36,7 @@ agent 不在浏览器里，原因有两个：凭据绝不能进入渲染进程�
 
 运行时依赖里没有任何 workspace 内部包：core 的 package.json 只有 `@anthropic-ai/sdk`、`partial-json`、`typebox` 三行。那份 pi-ai 的裁剪子集现在是一个**目录**，不是一个包：`packages/core/src/llm/`（[ADR-0010](adr/0010-llm-folded-into-core.md)），只追踪到本项目真正触达的文件，逐文件 `@ts-nocheck`。包边界撤掉之后，与它一起撤掉的还有那条结构性护栏——从前它们是另一个包的源码，只有进入 core 的 import 被仓库根更严格的 tsconfig 检查；现在它们就在 core 的 `include` 里，`@ts-nocheck` 是唯一的屏障。上游对照已放弃（ADR-0007），它由本仓库自己维护。同源的循环（`packages/loop`，来自 `@earendil-works/pi-agent-core`）更早就不在了：引擎先在 ADR-0007 并入 core，如今是 `agent.ts` 里 `Agent` 的私有方法（[ADR-0016](adr/0016-loop-is-orchestration.md)），不再跟踪上游。`pi-tui`、`pi-mcp`、`pi-codemode`、`pi-durable` 和 pico3 harness 都没有取用。
 
-ai 子集比"应用触达的那些文件"还要窄：它是**一个传输层**触达的文件。上游 pi-ai 实现了五种 chat API，把每个实现的 import 都推迟到 `api/*.lazy.ts` 之后，好让宿主只为它实际发送的那一种付费；它还通过一个带 OAuth 和环境变量兜底的凭据存储来解析凭据，并让每个请求都经过一个供应商注册表。本应用这些一个都不做：它**永远**说 Anthropic Messages，用的是用户敲进 `models.json` 的密钥。于是 `api/anthropic-messages.ts` 是静态 import 的，另外四个实现和那些懒包装是**被删除**而不是"仅仅不可达"，注册表也跟着它们一起没了：wire 上再没有任何东西提及供应商——`Model` 和 `AssistantMessage` 都不带这个字段——所以被重放的 thinking level 不再与产生它的那一行做匹配。它也不需要匹配，因为 level 表是**单独从 wire id 推导**的（`anthropic-models.ts`）：两行命名同一个 wire id，只可能产出同一套 level，而按行匹配只会在这一个时候丢掉 level——用户把他一直在对话的那一行改了名或重新导入了。`llm/models.ts` 里留下的是"一次请求所依赖的、关于某个模型的事实"，而不是曾经拥有这些事实的那次查找。如此这一侧只剩下 `@anthropic-ai/sdk`（以及流式参数解析用的 `partial-json`）。
+ai 子集比"应用触达的那些文件"还要窄：它是**一个传输层**触达的文件。上游 pi-ai 实现了五种 chat API，把每个实现的 import 都推迟到 `api/*.lazy.ts` 之后，好让宿主只为它实际发送的那一种付费；它还通过一个带 OAuth 和环境变量兜底的凭据存储来解析凭据，并让每个请求都经过一个供应商注册表。本应用这些一个都不做：它**永远**说 Anthropic Messages，用的是用户敲进 `models.json` 的密钥。于是 `api/anthropic-messages.ts` 是静态 import 的，另外四个实现和那些懒包装是**被删除**而不是"仅仅不可达"，注册表也跟着它们一起没了：wire 上再没有任何东西提及供应商——`Model` 和 `AssistantMessage` 都不带这个字段——所以被重放的 thinking level 不再与产生它的那一行做匹配。它也不需要匹配，因为 level 表是**单独从 wire id 推导**的：两行命名同一个 wire id，只可能产出同一套 level，而按行匹配只会在这一个时候丢掉 level——用户把他一直在对话的那一行改了名或重新导入了。`llm/models.ts` 曾留下"一次请求所依赖的、关于某个模型的事实"，而不是曾经拥有这些事实的那次查找——后来连这一件也不剩：唯一的内容（思考档位表）搬进了 `model-manager.ts`，与模型行同住模型簇的持有者，文件随之删除。如此这一侧只剩下 `@anthropic-ai/sdk`（以及流式参数解析用的 `partial-json`）。
 
 ## 目录布局
 
@@ -50,11 +49,13 @@ my-coding-agent/
     │                 #   以及引擎、填充链、压缩、重试、闸门，ADR-0016）、
     │                 #   session-factory.ts（装配）、
     │                 #   types.ts（引擎与 hook 的契约，转发合并后的 Context/Tool 名字）、
-    │                 #   hooks.ts（三个接缝）、models.ts、model-manager.ts、ui-settings.ts、engine-settings.ts、workdir.ts、
+    │                 #   hooks.ts（三个接缝）、model-manager.ts（模型簇：models.json 的持有者 +
+    │                 #   一行成为的一切——行校验、模型构造、选择解析、占位，原 models.ts 已并入）、
+    │                 #   ui-settings.ts、workdir.ts、
     │                 #   protocol.ts、session/（会话管理器、状态、事件）、
     │                 #   context/（提示词、trim-tool-call-args、spill、clear-tool-results、compaction）、
     │                 #   tools/（每工具一个文件）、llm/（pi-ai 的裁剪副本，一个传输层：
-    │                 #   api/、model.ts、models.ts、types.ts（Context 与 Tool 住这里）、utils/；@ts-nocheck）
+    │                 #   api/、model.ts、types.ts（Context 与 Tool 住这里）、utils/；@ts-nocheck）
     ├── server/src/   # @my-agent/server - 传输层：boot.ts、main.ts、http.ts、http/（routing.ts 是
     │                 #   唯一读 URL 的地方，websocket.ts 是手写的 RFC6455）、
     │                 #   mux.ts（常驻连接、存活探测与关停；每条连接的 controller：观看表、扣帧队列、
@@ -71,7 +72,7 @@ my-coding-agent/
 
 ## 装配与设置
 
-`Agent` 只用被交给它的东西，别的什么也不用：构造只收**服务**——会话管理器、工具表（`ToolManager`）、各设置簇的持有者（`ModelManager`、`UiSettingsManager` 与私有的 `EngineSettings`——设置按关注点拆给五个持有者，每簇一份自己的文件，[ADR-0028](adr/0028-settings-ownership-per-manager.md)）、传输层、hook 表面与提示词构建器——它的每个公开方法都以会话 id 打头，每样数据在用到它的那一行向属主现取：**live 的一半**是 `agentState.live`（两条队列、在飞运行、partial、重试与挂起位）——一份状态是一件东西（[ADR-0013](adr/0013-table-holds-live-half-only.md) 的形状）；**durable 的一半不在这份状态里**：会话就是那两个文件，每次操作现开一只袋、用完就丢（一次运行读一次、带着走；一条命令读一次），所以进程里不存在一份会漂的副本（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。这六个构造字段由 `createSessionAgent()` 现造后递进（见下），递东西的手不是 hub。状态经 `Agent.assembleAgentStateBySession`（类私有，装配并进表）进表、由运行自己的结束路径与 `Agent.deleteSessionBySessionId` 出表——公开面上剩 `createAndPrompt`（造，[ADR-0021](adr/0021-lazy-session-identity.md)）、`snapshotOf` / `readSessionSnapshot`（读）与删除动词（出表），何时装配、递哪只会话袋子进表不是调用方的动词（[ADR-0012](adr/0012-agent-facade.md) 决定 2）；工作目录从会话自己的快照设置半读（`session.settings.workDirAbsPath`，`SessionSettings`），"这个会话在哪个模型上"是每次现算的组合（`resolveSettings` 的模型半：文件记录的选择 → 设置里的默认行，见*输入框的模型座位*）。它不读设置文件、不构建工具、也不挑模型（项目指令 `AGENTS.md` 是每次请求现读的提示词输入，本身不进状态），所以打开一个会话和恢复一个会话是同一条链（装配出 live 半、经那扇私有的门进表，[ADR-0005](adr/0005-stateless-session-architecture.md) §2；会话由 `fillSession` 每次现读，见*SessionManager 是真相之源*）。
+`Agent` 只用被交给它的东西，别的什么也不用：构造只收**服务**——会话管理器、工具表（`ToolManager`）、模型簇持有者（`ModelManager`，retry 随模型簇住在 `models.json`——设置按关注点拆给三个持有者，每簇一份自己的文件，[ADR-0028](adr/0028-settings-ownership-per-manager.md) 及其 2026-11-20 修正；UI 簇不归服务端，它随 [ADR-0029](adr/0029-ui-settings-move-to-client.md) 迁往客户端自己的存储）、传输层、hook 表面与提示词构建器——它的每个公开方法都以会话 id 打头，每样数据在用到它的那一行向属主现取：**live 的一半**是 `agentState.live`（两条队列、在飞运行、partial、重试与挂起位）——一份状态是一件东西（[ADR-0013](adr/0013-table-holds-live-half-only.md) 的形状）；**durable 的一半不在这份状态里**：会话就是那两个文件，每次操作现开一只袋、用完就丢（一次运行读一次、带着走；一条命令读一次），所以进程里不存在一份会漂的副本（[ADR-0013](adr/0013-table-holds-live-half-only.md)）。这六个构造字段由 `createSessionAgent()` 现造后递进（见下），递东西的手不是 hub。状态经 `Agent.assembleAgentStateBySession`（类私有，装配并进表）进表、由运行自己的结束路径与 `Agent.deleteSessionBySessionId` 出表——公开面上剩 `createAndPrompt`（造，[ADR-0021](adr/0021-lazy-session-identity.md)）、`snapshotOf` / `readSessionSnapshot`（读）与删除动词（出表），何时装配、递哪只会话袋子进表不是调用方的动词（[ADR-0012](adr/0012-agent-facade.md) 决定 2）；工作目录从会话自己的快照设置半读（`session.settings.workDirAbsPath`，`SessionSettings`），"这个会话在哪个模型上"是每次现算的组合（`resolveSettings` 的模型半：文件记录的选择 → 设置里的默认行，见*输入框的模型座位*）。它不读设置文件、不构建工具、也不挑模型（项目指令 `AGENTS.md` 是每次请求现读的提示词输入，本身不进状态），所以打开一个会话和恢复一个会话是同一条链（装配出 live 半、经那扇私有的门进表，[ADR-0005](adr/0005-stateless-session-architecture.md) §2；会话由 `fillSession` 每次现读，见*SessionManager 是真相之源*）。
 
 构造只收服务这件事有一条直接的后果：**一个进程只需要一个编排层**。hub 在构造时以一行 `createSessionAgent({ homes, api })` 建它一次，此后每个会话都经它、以 id 调用（[ADR-0012](adr/0012-agent-facade.md)：hooks、transport、提示词构建函数是进程级不可变配置，不是会话状态；工具表是同一类构造注入的进程级东西，只是它可增键，[ADR-0011](adr/0011-tool-manager-instance-table.md)）；而"想独占一个会话"的调用者——一个 smoke、或只跑一个会话的调用方——自己组一个，两条路走的是同一对函数：
 
@@ -83,9 +84,9 @@ createSessionAgent({ settingsHome?, modelsHome?, chatTransport?, toolManager?, s
 openAgent(options) == createSessionAgent(…) + agent.assembleAgentStateBySession(options)   # 一次性的那对，给测试与子会话
 ```
 
-`openAgent()` / `createSessionAgent()`（`core/src/session-factory.ts`）与 `assembleSession()`（`core/src/assembly.ts`）负责向外伸手。各 Manager 与设置持有者不再是调用者的决定（[ADR-0012](adr/0012-agent-facade.md)）：工厂照 homes 现造它们，test-only 的 `toolManager` 缝除外。"要打开**哪一个**会话"仍是宿主的问题，但答案现在是打给编排层公开面的一个方法：hub 用 `birth` 回答它，测试在 `openAgent` 的 `session` 上递一只内存里的会话袋。要自己的设置的冒烟在临时 homes 上播种（直接构造需要的持有者写各自的文件，例如 `createToolManager({ home }).applyToolDefaults(…)`），完全不碰机器自己的文件。模型及其 level 在任何地方都遵循同一套优先级：文件记录的选择 → 设置里的默认行 → `off`（没人要求过，就不要求）；这套顺序只有一个实现，就是 `resolveSettings`（[ADR-0019](adr/0019-settings-two-layers.md)、[ADR-0028](adr/0028-settings-ownership-per-manager.md)）的模型半。
+`openAgent()` / `createSessionAgent()`（`core/src/session-factory.ts`）与装配（`core/src/agent.ts` 里的 `assemble` / `readSessionSnapshot`）负责向外伸手。各 Manager 与设置持有者不再是调用者的决定（[ADR-0012](adr/0012-agent-facade.md)）：工厂照 homes 现造它们，test-only 的 `toolManager` 缝除外。"要打开**哪一个**会话"仍是宿主的问题，但答案现在是打给编排层公开面的一个方法：hub 用 `birth` 回答它，测试在 `openAgent` 的 `session` 上递一只内存里的会话袋。要自己的设置的冒烟在临时 homes 上播种（直接构造需要的持有者写各自的文件，例如 `createToolManager({ home }).applyToolDefaults(…)`），完全不碰机器自己的文件。模型及其 level 在任何地方都遵循同一套优先级：文件记录的选择 → 设置里的默认行 → `off`（没人要求过，就不要求）；这套顺序只有一个实现，就是 `resolveSettings`（[ADR-0019](adr/0019-settings-two-layers.md)、[ADR-0028](adr/0028-settings-ownership-per-manager.md)）的模型半。
 
-设置不再共用一只门——曾经共用一只 `SettingManager`（[ADR-0019](adr/0019-settings-two-layers.md)），设置归属重构把它拆散（[ADR-0028](adr/0028-settings-ownership-per-manager.md)）——而是按关注点分给五个持有者，每簇一个、且只有一个，各有一份自己的文件：工具簇（`tools` / `modes` / `approval` / `bash`）归 `ToolManager`（`tools.json`），会话簇（`steeringMode` / `followUpMode`）归 `SessionManager`（`sessions.json`），模型簇归 `ModelManager`（`models.json` 的行加 `defaultModel` / `defaultModelSeeded` 两个可选键），UI 簇（`appearance` / `hiddenDirectories` / `directoryNames`）归 `UiSettingsManager`（`ui.json`），引擎簇（`retry`）归编排层私有（`engine.json`）。持有者全部无状态、每次现读、构造只收 home，读写各内联十几行、不共享抽象。旧的 `<agent home>/settings.json` 只作迁移源：各持有者首次读取时若自己的文件不存在且旧文件存在，就捡走自己的簇、补默认落盘（簇字段全缺省也写——让「迁移过」成为磁盘事实）；`models.json` 例外，它今天就存在，按「键」迁移——缺 `defaultModel` / `defaultModelSeeded` 键且旧文件有对应字段才捡，`false` 的 seeded 标记是值不是缺席、原样搬运。旧文件此后被完全忽略，永不删除、永不写入。类型与规范化函数随簇搬进各持有者的文件；`GlobalSettings`（`config.ts`）留守作门面读模型与补丁的形状。`Settings`（`core/src/settings.ts`）是会话快照的设置半（`SessionSettings`：模式指针、审批增量、模型选择）与 `ToolManager` / `ModelManager` 各一次现读在**每次读取时现算**的组合（`resolveSettings(session, toolDefaults, modelView, known)`）——活跃工具集、有效审批、模式座位与完整模型行，闸门、prompt、请求构建与快照从这同一份作答，产物用完即丢，从不进任何袋。编排层读持有者，控制器经编排层公开面读它（[ADR-0012](adr/0012-agent-facade.md)）：`Agent.settings()` 从五个持有者现读、组装出 `GlobalSettings` 形状的读模型——设置面板的读模型，不是所有权壳；`Agent.applySettings(patch)` 按字段名逐簇分发，每簇独立原子落盘。要自己的设置的冒烟在临时 homes 上播种（见上）。`applyConfig` 搬运会话自己的东西——两条队列的模式（队列住在 `agentState.live` 里，循环只在取走点拉取）——而把值经 `SessionManager` 写回文件。模型和 thinking level 根本不在补丁里：两者都属于某一次对话，也都随使用它们的消息一起到达（见*输入框的模型座位*）。
+设置不再共用一只门——曾经共用一只 `SettingManager`（[ADR-0019](adr/0019-settings-two-layers.md)），设置归属重构把它拆散（[ADR-0028](adr/0028-settings-ownership-per-manager.md)）——而是按关注点分给三个持有者，每簇一个、且只有一个，各有一份自己的文件：工具簇（`tools` / `modes` / `approval` / `bash`）归 `ToolManager`（`tools.json`），会话簇（`steeringMode` / `followUpMode`）归 `SessionManager`（`sessions.json`），模型簇归 `ModelManager`（`models.json` 的行加 `defaultModel` / `defaultModelSeeded` / `retry` 三个可选键——retry 曾住编排层私有的 `engine.json`（`EngineSettings`），2026-11-20 的 ADR-0028 修正把它并入模型簇，旧持有者与文件退场）。持有者全部无状态、每次现读、构造只收 home，读写各内联十几行、不共享抽象。旧的 `<agent home>/settings.json` 只作迁移源：各持有者首次读取时若自己的文件不存在且旧文件存在，就捡走自己的簇、补默认落盘（簇字段全缺省也写——让「迁移过」成为磁盘事实）；`models.json` 例外，它今天就存在，按「键」迁移——缺 `defaultModel` / `defaultModelSeeded` / `retry` 键且旧文件有对应字段才捡（`retry` 的旧来源按优先级：退场持有者的 `engine.json` → 旧 `settings.json`），`false` 的 seeded 标记是值不是缺席、原样搬运。旧文件此后被完全忽略，永不删除、永不写入。UI 簇（外观、隐藏目录、目录改名）不在服务端的表上：它是窗口自己的视图决定，随 [ADR-0029](adr/0029-ui-settings-move-to-client.md) 迁往客户端自己的存储（`packages/web/src/ui-settings.ts` 的双路适配器——桌面外壳经 preload 桥写 Electron userData 下的文件，浏览器回落 origin 作用域的 `localStorage`），服务端对目录列表也不再过滤。类型与规范化函数随簇搬进各持有者的文件；`GlobalSettings`（`config.ts`）留守作门面读模型与补丁的形状。`Settings`（`core/src/settings.ts`）是会话快照的设置半（`SessionSettings`：模式指针、审批增量、模型选择）与 `ToolManager` / `ModelManager` 各一次现读在**每次读取时现算**的组合（`resolveSettings(session, toolDefaults, modelView, known)`）——活跃工具集、有效审批、模式座位与完整模型行，闸门、prompt、请求构建与快照从这同一份作答，产物用完即丢，从不进任何袋。编排层读持有者，控制器经编排层公开面读它（[ADR-0012](adr/0012-agent-facade.md)）：`Agent.settings()` 从三个持有者现读、组装出 `GlobalSettings` 形状的读模型——设置面板的读模型，不是所有权壳；`Agent.applySettings(patch)` 按字段名逐簇分发，每簇独立原子落盘。要自己的设置的冒烟在临时 homes 上播种（见上）。`applyConfig` 搬运会话自己的东西——两条队列的模式（队列住在 `agentState.live` 里，循环只在取走点拉取）——而把值经 `SessionManager` 写回文件。模型和 thinking level 根本不在补丁里：两者都属于某一次对话，也都随使用它们的消息一起到达（见*输入框的模型座位*）。
 
 变更一律写到被点名的簇自己的文件。嵌套对象做合并，所以一个只命名某个工具审批的补丁不会动到文件里的其他条目。文件按它写下的原样保留，未知键也在内，而补默认后的视图是单独归一化的；写之前会重读文件，所以进程运行期间的手工编辑能存活。写入是同步的，而一个无法解析的设置文件会**抛出并点名该文件**，而不是悄悄按默认值跑下去。（曾经的项目级 `<workDir>/.my-agent/settings.json` 层由 [ADR-0019](adr/0019-settings-two-layers.md) 删除——磁盘上的旧文件被忽略，不迁移不删除；旧的全局 `settings.json` 在 [ADR-0028](adr/0028-settings-ownership-per-manager.md) 的迁移之后同样被忽略。）
 
@@ -207,7 +208,7 @@ type AgentSessionEvent =
 
 一次瞬时失败的供应商调用——过载、被限流、连接掉线——过去会结束这一轮，让用户重新发一次 prompt。现在它**在引擎之下**重试，用的是传输层自己的工具箱（`llm/utils/retry.ts`）：`RetryPolicy`、`retryDelayMs`、`isRetryableAssistantError`、以及 `retryAssistantCall`，后者拥有尝试次数、延迟和取消。
 
-引擎簇的 `RetrySettings`（归编排层私有，落 `engine.json`，[ADR-0028](adr/0028-settings-ownership-per-manager.md)）就是这个策略逐字段的翻版：`enabled`（默认 `true`）、`maxRetries`（`3`）、`baseDelayMs`（`2000`）、`maxAgentDelayMs`（`60000`）。第 `k` 次尝试等待 `min(baseDelayMs * 2^(k-1), maxAgentDelayMs)`；`maxRetries` 数的是**重试**而不是调用，而 `0` 是一个设置值，不是一个缺失值。
+模型簇的 `RetrySettings`（归 `ModelManager`，落 `models.json` 的 `retry` 键，[ADR-0028](adr/0028-settings-ownership-per-manager.md) 及其 2026-11-20 修正）就是这个策略逐字段的翻版：`enabled`（默认 `true`）、`maxRetries`（`3`）、`baseDelayMs`（`2000`）、`maxAgentDelayMs`（`60000`）。第 `k` 次尝试等待 `min(baseDelayMs * 2^(k-1), maxAgentDelayMs)`；`maxRetries` 数的是**重试**而不是调用，而 `0` 是一个设置值，不是一个缺失值。
 
 **接缝在模型的 transport 上，在引擎之下。** 另一个候选是引擎在两轮之间留的钩子 `prepareNextTurn`，它行不通：错误响应是一次硬退出，引擎发出 `turn_end` 和 `agent_end` 就返回了，**根本走不到下一轮**。该钩子在 vendored 循环里从未被装配过，随合并一起删除；引擎如今是 `Agent` 的私有方法 `run`（[ADR-0016](adr/0016-loop-is-orchestration.md)），而它不再收到一个 `streamFn`：`run` 给这次运行包一层 transport，策略装在那一层里，所以它既拦得住引擎的每一次请求，也拦得住压缩摘要那次不经过引擎的请求。`pumpAttempts` 包裹每一次尝试，把它的 `AssistantMessageEventStream` 排进会话自己的流，并让 `retryAssistantCall` 来分类：
 
@@ -359,10 +360,8 @@ SessionManager.forkFrom(sourcePathInput, entryId, storeDirInput?)   # 写出一�
 | `GET` | `/api/models` | — | `{ models: ModelOption[] }` |
 | `PUT` | `/api/models` | `{ models: ModelInput[] }` | `{ models: ModelOption[] }` |
 | `GET` | `/api/settings` | — | `{ settings: SettingsSnapshot }` |
-| `PATCH` | `/api/settings` | `{ patch: { appearance?, approval?, tools?, modes?, bash? } }` | `{ settings }` —— 目录**默认值**，在任何会话存在之前读取；按会话的审批变更发往 `PATCH /api/sessions/{id}`；`modes` 整表替换（ADR-0004） |
-| `GET` | `/api/directories` | — | `{ directories: DirectoryGroup[] }`——每组的 `sessions` 是 `SessionRow[]`（含 `modified` / `running` / `pending`）；被搁置的目录不在其中 |
-| `POST` | `/api/directories/rename` | `{ workDirAbsPath, name }` | `{ workDirAbsPath, name, settings }`——只改这个列表里显示的名字，写进 `directoryNames`；磁盘上的文件夹与每份会话快照的 `workDir` 都不动 |
-| `POST` | `/api/directories/hide` | `{ workDirAbsPath }` | `{ settings, directories }`——只从列表移除，磁盘原样；把该路径从 `hiddenDirectories` 里去掉（`PATCH /api/settings`）即可放回，在该目录里新建会话也同样 |
+| `PATCH` | `/api/settings` | `{ patch: { approval?, tools?, modes?, bash? } }` | `{ settings }` —— 目录**默认值**，在任何会话存在之前读取；按会话的审批变更发往 `PATCH /api/sessions/{id}`；`modes` 整表替换（ADR-0004）。外观与目录视图不在补丁里：它们随 ADR-0029 归客户端自己的存储 |
+| `GET` | `/api/directories` | — | `{ directories: DirectoryGroup[] }`——每组的 `sessions` 是 `SessionRow[]`（含 `modified` / `running` / `pending`）；机器的全部目录都在其中，客户端按自己的隐藏列表过滤（ADR-0029） |
 | `GET` | `/api/sessions` | — | `{ sessions: SessionRef[] }` |
 | `GET` | `/api/sessions/current` | — | `{ sessionId, sessions }` |
 | `POST` | `/api/sessions` | `{ absWorkDir?: string }`（可为空体） | `201 { sessionId, sessions }`——带 `absWorkDir` 时会话落在那个目录，`sessions` 列**该目录**的会话 |

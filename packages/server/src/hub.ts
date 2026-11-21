@@ -66,8 +66,6 @@ export interface GlobalSubscription {
 	/** 一行变了：通常是增量（`SessionRowPatch`），完整行出现在出生与存储型改名上。 */
 	rows?(row: SessionRowPatch): void;
 	gone?(sessionId: string): void;
-	/** 整表变了（目录进出列表）——没有载荷，客户端要的是一整份新的列表。 */
-	resync?(): void;
 }
 
 /**
@@ -164,18 +162,6 @@ export class SessionHub {
 	 */
 	setModelConfigs(models: readonly ModelConfig[]): void {
 		this.agent.replaceModels(models);
-	}
-
-	/**
-	 * 本进程的列表是否仍指名这个目录：用户放到一边的目录被排除在外。
-	 *
-	 * 一个规则一个家，因为窗口了解机器目录的路有两条——REST 列表和通道的 overview——两个过滤器意味着任何一侧变化时第一次就会出现两个答案。列表本身是一个 settings 事实，通过与写它的命令相同的全新读取获得，所以一次 hide 在下一次查看时对两条路都可见。
-	 *
-	 * 没有 root 的 hub 回答"全部都在列"。这不是生产状态——`HubOptions` 要求 `workDirAbsPath`，`bootServer` 总是传它——但 `scripts/smoke-approval.ts` 刻意构建了一个没有它的（`docs/notes.md` §一 固定了这个构造，该节自挂会话、且不向目录问任何东西）。过滤器的全部职责是把组排除在外，而这里没有被排除的任何东西。
-	 */
-	listsDirectory(workDirAbsPath: string): boolean {
-		if (typeof this.absRoot !== "string") return true;
-		return !this.agent.hiddenDirectories().some((path) => samePath(path, workDirAbsPath));
 	}
 
 	/**
@@ -470,11 +456,6 @@ export class SessionHub {
 	/** 一行消失了：id 就是全部要说的事。 */
 	private publishGone(sessionId: string): void {
 		for (const sub of this.globalSubscribers) sub.gone?.(sessionId);
-	}
-
-	/** 整表变了：没有载荷，客户端要的是一整份新的列表。 */
-	publishResync(): void {
-		for (const sub of this.globalSubscribers) sub.resync?.();
 	}
 
 	/**

@@ -7,7 +7,7 @@
  */
 const { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell } = require("electron");
 const { existsSync } = require("node:fs");
-const { writeFile } = require("node:fs/promises");
+const { mkdir, readFile, rename, writeFile } = require("node:fs/promises");
 const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { createObservability, LOAD_FAILED_HEADLINE } = require("./observability.cjs");
@@ -166,6 +166,50 @@ function registerWindowControls() {
 		});
 		return answer.canceled || answer.filePaths.length === 0 ? undefined : answer.filePaths[0];
 	});
+
+	// 页面 UI 设置的两个 handler（ADR-0029）：读不到给 null 让页面按默认起步；写整份对象、原子落盘。
+	ipcMain.handle("desktop:ui-settings:read", () => readUiSettings());
+	ipcMain.handle("desktop:ui-settings:write", (_event, value) => writeUiSettings(value));
+}
+
+/**
+ * 页面 UI 设置在外壳自己的用户数据里的家。
+ *
+ * 与 `workdir.txt` 同一个 userData 目录：它们都是外壳自己的事实——服务器与 agent home 从不读
+ * 它们。外壳每次启动都换端口，所以页面的 `localStorage` 按 origin 隔离、留不住偏好；这份文件
+ * 正是为同一件事给出的答案（ADR-0029）。
+ */
+function uiSettingsPath() {
+	return join(app.getPath("userData"), "ui-settings.json");
+}
+
+/**
+ * 读页面的 UI 设置：文件缺失或坏掉时为 null，让页面按默认起步。
+ *
+ * 坏文件被当作缺席而不是错误：设置读不出来不该让窗口起不来，页面的下一次写入会重建它。
+ */
+async function readUiSettings() {
+	try {
+		const text = await readFile(uiSettingsPath(), "utf8");
+		const parsed = JSON.parse(text);
+		return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * 原子写回页面的 UI 设置：先写临时文件再改名，读者看到的要么是旧内容、要么是完整的新内容。
+ *
+ * 只收普通对象：不是对象的载荷被丢弃而不是落盘，坏形状绝不能从渲染进程抵达磁盘。
+ */
+async function writeUiSettings(value) {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return;
+	const target = uiSettingsPath();
+	await mkdir(app.getPath("userData"), { recursive: true });
+	const temporary = `${target}.${process.pid}.tmp`;
+	await writeFile(temporary, `${JSON.stringify(value, null, "\t")}\n`, "utf8");
+	await rename(temporary, target);
 }
 
 /** `--screenshot <file>` 的写入目标，普通启动时为 undefined。 */

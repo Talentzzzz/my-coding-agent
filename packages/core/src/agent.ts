@@ -1,4 +1,4 @@
-import { assembleSession, type AssembleAgentStateOptions } from "./assembly.ts";
+import { resolve as resolvePath } from "node:path";
 import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
@@ -43,8 +43,8 @@ import {
 	rowFor,
 	type ThinkingLevel,
 	unconfiguredStream,
-} from "./models.ts";
-import type { ConfigPatch, ModelSelection, PendingApproval, PromptBehavior, SessionRow, SessionSnapshot } from "./protocol.ts";
+} from "./model-manager.ts";
+import type { ConfigPatch, ModelSelection, PendingApproval, PromptBehavior, QueueMode, SessionRow, SessionSnapshot } from "./protocol.ts";
 import type { AgentState } from "./session/agent-state.ts";
 import { createAgentState, createLive } from "./session/agent-state.ts";
 import { danglingApprovalsOf } from "./session/dangling.ts";
@@ -62,12 +62,9 @@ import type { PendingMessageQueue } from "./session/queues.ts";
 import { sessionSnapshot } from "./session/snapshot.ts";
 import { resolveSettings, type Settings } from "./settings.ts";
 import { UnknownSessionError } from "./session/unknown-session.ts";
-import type { GlobalSettings, SettingsPatch } from "./config.ts";
-import { EngineSettings, type RetrySettings } from "./engine-settings.ts";
 import { ModelManager } from "./model-manager.ts";
-import { UiSettingsManager, type UiSettingsPatch } from "./ui-settings.ts";
-import type { ToolManager, ToolDefaultsPatch } from "./tools/index.ts";
-import { type AgentEvent, type AgentRequestUpdate, type RunRecoveryOptions, type ToolCallAnswer, type ToolCallOutcome } from "./types.ts";
+import { createToolManager, type ToolManager, type ToolDefaultsPatch } from "./tools/index.ts";
+import { type AgentEvent, type AgentRequestUpdate, type GlobalSettings, type RetrySettings, type RunRecoveryOptions, type SettingsPatch, type ToolCallAnswer, type ToolCallOutcome } from "./types.ts";
 
 // 事件面定义在发布它的 fanout 旁边（`session/events.ts`），在这里转发出去，因为 `index.ts` 一直
 // 都是从本模块为此作答的。
@@ -80,8 +77,9 @@ export type { AgentSessionEvent, MessageDelta, SessionEventListener, SessionList
  * 行、从拥有它的服务现取所需——会话记录 来自 session manager 的缓存，live 半来自会话自己的状态，
  * 模型来自账本与实时的行。这正是让这个类无状态的（ADR-0006）：除状态表本身外这里没有任何
  * per-session 字段，所以测试把自己的编排层打开一个会话来驱动它（`openAgent`），拥有服务的宿主把
- * 每份 会话记录 打开到它保有的那一个上。装配本身住在 `assembly.ts`，那是把「每个会话由什么形状
- * 描述」一次写下的地方。
+ * 每份 会话记录 打开到它保有的那一个上。装配的解析规则（`assemble`）与冷读（`readSessionSnapshot`）
+ * 住在本文件尾部同一节——「每个会话由什么形状描述」只写一次，激活半（seed 半）就是上面的
+ * {@link Agent.assembleAgentStateBySession}。
  *
  * 这些字段没有一个是会话*状态*。本类协调的服务——账本、各设置簇的持有者（模型目录、UI 视图、
  * 工具表、接缝、prompt builder、传输层）——各自持有自己的纯数据状态
@@ -107,19 +105,6 @@ export interface AgentConfig {
 	 * 都和行一样新鲜。
 	 */
 	modelManager: ModelManager;
-	/**
-	 * UI 簇（外观、隐藏目录、目录改名）的持有者。
-	 *
-	 * 门面的 appearance 相关转发与设置读模型从它现读；它与其他服务一样每次现读自己的文件
-	 * （`ui.json`），没有需要失效的副本。
-	 */
-	uiSettings: UiSettingsManager;
-	/**
-	 * 引擎簇（`engine.json`）所在的 home。缺省即 `AGENT_HOME`。
-	 *
-	 * 引擎簇（retry）不进公开门面（spec §3/§5），由编排层私有持有，构造时按这个 home 现建。
-	 */
-	settingsHome?: string;
 	/**
 	 * 本构建认识的工具，加上调用方在它上面注册的任何东西——测试的自定义工具。
 	 * 只有结构：选择不在这里。
@@ -238,15 +223,6 @@ export class Agent {
 	 * 任何地方都没有第二份文件副本需要保持同步。见 {@link AgentConfig.modelManager}。
 	 */
 	private readonly modelManager: ModelManager;
-	/** UI 簇的持有者：外观、隐藏目录与目录改名的读半在门面转发，写半走补丁路由。 */
-	private readonly uiSettings: UiSettingsManager;
-	/**
-	 * 引擎簇（retry）的持有者：编排层自己的设置不进任何公开门面，私有持有（spec §3/§5）。
-	 *
-	 * 与其他服务一样是每次现读的：{@link Agent.retrySettings} 与 {@link Agent.applyRetry} 之后的
-	 * 每一次调用都是对 `engine.json` 的一次新读，没有需要失效的副本。
-	 */
-	private readonly engineSettings: EngineSettings;
 	/**
 	 * 会话分发所经的接缝，包括 `openAgent` 安装的默认处理器。
 	 *
@@ -275,8 +251,6 @@ export class Agent {
 	constructor(config: AgentConfig) {
 		this.sessionManager = config.sessionManager;
 		this.modelManager = config.modelManager;
-		this.uiSettings = config.uiSettings;
-		this.engineSettings = new EngineSettings({ home: config.settingsHome });
 		this.toolManager = config.toolManager;
 		this.hooks = config.hooks;
 		this.systemPrompt = config.systemPrompt;
@@ -483,8 +457,8 @@ export class Agent {
 	}
 
 	/**
-	 * 构建一个会话的 live 半并放进表里。唯一的入口，也是唯一装配的门——`assembleSession` 加上那张
-	 * 表：装配与先到先得的插入是一步，下面的读回正是这两者不该拆开的原因。
+	 * 构建一个会话的 live 半并放进表里。唯一的入口，也是唯一装配的门——装配加上那张表：装配与
+	 * 先到先得的插入是一步，下面的读回正是这两者不该拆开的原因。
 	 *
 	 * 会话记录 是*入参*而不是产物（ADR-0013）：装配解析会话由设置而来的那一半（队列模式），出生的
 	 * 袋在这里被丢掉，因为重放随时能再造它。
@@ -497,7 +471,14 @@ export class Agent {
 		const id = options.session.sessionId;
 		const heldAgentState = this.agentStateMap.get(id);
 		if (heldAgentState !== undefined) return heldAgentState;
-		const agentState = await assembleSession(this.sessionManager, this.toolManager, this.modelManager, options);
+		// seed 半（ADR-0005 §2）：live 半是空的——它的队列模式是会话簇此刻的答案，从 session manager
+		// 实时读取；之后的 config 补丁原地挪动队列上的模式——会话记录 *不是*它的一部分（ADR-0013）。
+		// 模型选择既不保留也不播种：每次读取都派生它（`session/model-choice.ts`），这是袋被丢掉之后唯一
+		// 能幸存的形状。什么都不记录：打开后从未说话的会话不长 entry，打开在另一行或另一档的会话也不写
+		// ——落笔发生在真正做出选择时（`applyModelSelection`）或第一个请求被构建时（`recordSelection`）。
+		const defaults = this.sessionManager.sessionDefaults();
+		const live = createLive(defaults.steeringMode, defaults.followUpMode);
+		const agentState = createAgentState(id, live);
 		this.insert(agentState);
 		return this.agentStateMap.get(id) ?? agentState;
 	}
@@ -744,11 +725,6 @@ export class Agent {
 		this.modelManager.replaceRows(models);
 	}
 
-	/** 侧边栏搁置的目录，按绝对路径。永远是列表，从不是 `undefined`。 */
-	hiddenDirectories(): string[] {
-		return this.uiSettings.uiSettings().hiddenDirectories ?? [];
-	}
-
 	/**
 	 * 对设置应用部分变更，返回前写回各持有者自己的文件。
 	 *
@@ -762,11 +738,6 @@ export class Agent {
 			...(patch.approval === undefined ? {} : { approval: patch.approval }),
 			...(patch.bash === undefined ? {} : { bash: patch.bash }),
 		} satisfies ToolDefaultsPatch);
-		this.uiSettings.applyUiSettings({
-			...(patch.appearance === undefined ? {} : { appearance: patch.appearance }),
-			...(patch.hiddenDirectories === undefined ? {} : { hiddenDirectories: patch.hiddenDirectories }),
-			...(patch.directoryNames === undefined ? {} : { directoryNames: patch.directoryNames }),
-		} satisfies UiSettingsPatch);
 		this.sessionManager.applySessionDefaults({
 			...(patch.steeringMode === undefined ? {} : { steeringMode: patch.steeringMode }),
 			...(patch.followUpMode === undefined ? {} : { followUpMode: patch.followUpMode }),
@@ -779,14 +750,13 @@ export class Agent {
 	}
 
 	/**
-	 * 当前生效的全部设置：从五个持有者现读、组装的一份 {@link GlobalSettings} 形状的视图。
+	 * 当前生效的全部设置：从四个持有者现读、组装的一份 {@link GlobalSettings} 形状的视图。
 	 *
-	 * 这是设置面板的读模型，不是所有权壳——各簇真实的家在各自的持有者与文件里。可选字段按「未设置」
-	 * 保持 undefined，与五个文件各自的缺席规则一致。
+	 * 这是设置面板的读模型，不是所有权壳——各簇真实的家在各自的持有者与文件里（UI 簇在客户端，
+	 * ADR-0029）。可选字段按「未设置」保持 undefined，与各文件各自的缺席规则一致。
 	 */
 	settings(): GlobalSettings {
 		const toolDefaults = this.toolManager.toolDefaults();
-		const ui = this.uiSettings.uiSettings();
 		const sessionDefaults = this.sessionManager.sessionDefaults();
 		const modelSettings = this.modelManager.modelSettings();
 		return {
@@ -794,10 +764,7 @@ export class Agent {
 			...(modelSettings.defaultModelSeeded === undefined ? {} : { defaultModelSeeded: modelSettings.defaultModelSeeded }),
 			...(toolDefaults.tools === undefined ? {} : { tools: toolDefaults.tools }),
 			...(toolDefaults.modes === undefined ? {} : { modes: toolDefaults.modes }),
-			appearance: ui.appearance,
 			approval: toolDefaults.approval,
-			...(ui.hiddenDirectories === undefined ? {} : { hiddenDirectories: ui.hiddenDirectories }),
-			...(ui.directoryNames === undefined ? {} : { directoryNames: ui.directoryNames }),
 			steeringMode: sessionDefaults.steeringMode,
 			followUpMode: sessionDefaults.followUpMode,
 			retry: this.retrySettings(),
@@ -1474,21 +1441,21 @@ export class Agent {
 	// ---------------------------------------------------------------------------- 引擎簇（retry）
 
 	/**
-	 * 供应商调用失败时的重试策略，补默认后的副本——引擎簇（`engine.json`）的一次现读。
+	 * 供应商调用失败时的重试策略，补默认后的副本——模型簇（`models.json` 的 `retry` 键）的一次现读。
 	 *
 	 * 私有面，不进公开门面（spec §3/§5）：唯一消费者是编排层自己的重试泵（{@link Agent.pumpAttempts}
 	 * 读这里），以及门面读模型（{@link Agent.settings} 的 retry 字段）。`SettingsPatch.retry` 经门面
 	 * 路由进 {@link Agent.applyRetry}。
 	 */
 	private retrySettings(): RetrySettings {
-		return this.engineSettings.retrySettings();
+		return this.modelManager.retrySettings();
 	}
 
 	/**
 	 * `SettingsPatch.retry` 经门面路由进这里（spec §6）：引擎簇不进公开门面，server 无需看见它。
 	 */
 	private applyRetry(patch: Partial<RetrySettings>): void {
-		this.engineSettings.applyRetry(patch);
+		this.modelManager.applyRetry(patch);
 	}
 
 	/**
@@ -3240,4 +3207,170 @@ function pairLateToolResults(messages: readonly Message[]): Message[] {
  */
 function messagesOf(entries: readonly SessionEntry[]): Message[] {
 	return entries.flatMap((entry) => sessionEntryToContextMessages(entry));
+}
+
+// ---------------------------------------------------------------------------- 装配：会话是什么，与运行无关
+
+/** 调用方构建一个会话必须提供的东西。其余都在这里查明。 */
+export interface OpenAgentOptions {
+	/**
+	 * 冷读重放所依据的无状态会话服务。
+	 *
+	 * 只有 {@link readSessionSnapshot} 读它：冷读按被递入的会话点名自己的袋，新造的 manager 行为完全
+	 * 一致，因为服务不持有自己的袋（ADR-0006 §2）——调用方自己的实例只改变这次走读用的是*哪*一份
+	 * 存储知识。编排层不收它：{@link openAgent} 把 homes、tools 与 transport 接缝转发给工厂，把
+	 * 账本留给它构建的 agent，后者拥有自己的那一份。
+	 */
+	sessionManager?: SessionManager;
+	/**
+	 * 本会话将要读写的 会话记录，即每次调用点名的那只袋。
+	 *
+	 * 由调用方构建而不是在这里构建，因为决定打开*哪个*会话——新的、最新的、按 id 点名的——是宿主
+	 * 的差事，测试则改开内存里的。
+	 */
+	session: Session;
+	/**
+	 * 各设置簇的持有者文件（`tools.json`、`sessions.json`、`engine.json`）读取与写入所在的 agent
+	 * home。默认用机器自己的那一个。
+	 *
+	 * 在非默认 agent home 之下读取的宿主——即 hub——递入自己的，因为回落者无从知道那个 home；测试
+	 * 递入临时目录，让机器自己的文件永远不被碰。
+	 */
+	settingsHome?: string;
+	/**
+	 * 模型行读取与写入所在的 agent home。默认用 {@link OpenAgentOptions.settingsHome}。
+	 *
+	 * 另一个文件的同居 home：递入自己模型行的 smoke 不得把它们留在机器的 `models.json` 里。
+	 */
+	modelsHome?: string;
+	/**
+	 * 本会话每个请求走的传输层。
+	 *
+	 * 真实进程里省略，表示 Anthropic Messages。smoke 传脚本化的传输层，让运行可以在没有供应商密钥
+	 * 的情况下被驱动。只有编排层的构造读它——装配从不发送任何东西，这正是它不在
+	 * {@link AssembleAgentStateOptions} 里的原因。
+	 */
+	chatTransport?: ChatTransport;
+	/**
+	 * 本次装配用来解析工具的表。
+	 *
+	 * 省略表示装配自己的一张表，装着六个内置——打开一个会话的 smoke 要的就是这个。宿主递入自己的：
+	 * hub 为进程保一张表，所以它运行的会话与它只读快照的会话应答同样的工具名、持有同样的实例
+	 * （ADR-0011）。测试在注册了自己的工具之后递入一张。
+	 */
+	toolManager?: ToolManager;
+	/**
+	 * 事件与快照离开编排层的出口，透传给工厂。
+	 *
+	 * 只有订阅了自己打开的会话的调用方——驱动它的 smoke——需要它：hub 经 {@link CreateSessionAgentOptions.sink}
+	 * 递入自己的实现，这里只是让它能走与 `openAgent` 相同的组合之路。省略即 no-op，没人听就
+	 * 什么也不发生。
+	 */
+	sink?: SessionSink;
+}
+
+/**
+ * {@link Agent.assembleAgentStateBySession} 需要什么：会话记录，仅此而已。
+ *
+ * 有意比 {@link OpenAgentOptions} 窄。差别是权威性：这扇门属于编排层，所以服务是*它自己的*
+ * ——调用方无法递给它第二只 `ModelManager` 或自己的工具表，这正是 `adopt` 曾允许而无人检查的
+ * 失配。留在这里的是编排层无法知道的那部分：**哪个** 会话记录（宿主的决定，session manager 的
+ * 重放）——会话记录 在 `settings.workDirAbsPath` 上自带工作目录。
+ *
+ * 模型字段不是宿主控制默认值的把手。面向宿主的动词（`createAndPrompt`、`snapshotOf`）
+ * 都不收它：会话的模型是一个设置事实，装配在每次打开时从磁盘现读；出生时的选择由
+ * `createAndPrompt` 在装配之前落到会话记录自己的快照上。
+ */
+export interface AssembleAgentStateOptions {
+	/** 要装配并放进表里的 会话记录；它自带工作目录。 */
+	session: Session;
+}
+
+/**
+ * 一个会话*是*什么，已解析但尚未激活：工作目录、设置、模型，以及它运行用的工具。
+ *
+ * 此刻没有编排层被激活，也没有追加任何 entry。让冷读（`readSessionSnapshot`）与活跃装配用相同的
+ * 决定回答同一份 会话记录，而不是用一个可能各执一词的第二实现——这正是这两个出口共用
+ * {@link assemble} 的原因。
+ */
+interface Assembled {
+	/** 工作目录，绝对路径。 */
+	workDirAbsPath: string;
+	/** 模型簇的持有者：装配的模型半从它现读目录与默认 ref。 */
+	modelManager: ModelManager;
+	/** 两半组合出的有效视图：活跃工具集、有效审批、模式座位与完整模型行（ADR-0019）。 */
+	resolved: Settings;
+	/** 本构建认识的工具：每进程一张表，这里只为读它的名字。 */
+	toolManager: ToolManager;
+	/** 会话服务，在这里只解析一次，让一次装配的每个消费者共享它。 */
+	sessionManager: SessionManager;
+}
+
+/**
+ * 解析一个会话是什么，而不激活它。
+ *
+ * 会话需要的一切，与运行无关的东西一样没有：不激活编排层，不安装 hook，不往 会话记录 追加
+ * entry。编排层的打开（{@link Agent.assembleAgentStateBySession} 的 seed 半）与
+ * {@link readSessionSnapshot} 都经过这里，这才是要紧的性质——本进程未运行的会话，由与它本该被
+ * 装配时相同的决定、相同的顺序描述。
+ *
+ * 服务是必填实参，不是带回落的 options：打开的服务按构造即其编排层自己的，冷读没有编排层可取，
+ * 在下面解析一套新的。
+ */
+async function assemble(sessionManager: SessionManager, toolManager: ToolManager, modelManager: ModelManager, options: AssembleAgentStateOptions): Promise<Assembled> {
+	// workDirAbsPath 变成绝对路径的唯一一处，让之后每次对该 entry `workDirAbsPath` 的读取——工具的
+	// run context、prompt、快照——都是同一个值。目录是 会话记录 自己的：`createSession` 种下时已
+	// 解析、重放时恢复，所以这里没有覆盖——会话自己决定住在哪里，没有调用方递入第二个答案。
+	const workDirAbsPath = resolvePath(options.session.settings.workDirAbsPath);
+	// 两半组合出的有效视图（ADR-0019）：两个持有者的现读在这里各来一次，会话侧的选择来自
+	// 袋自己。它是派生的而不是被存下的（ADR-0013），因为会话之后每次读取都得从刚重放的那只袋回答
+	// 同一个问题。没有行的会话照样打开，`Agent` 用一句「该加什么」替它作答：占位行在完全无名的状态
+	// 下承担事实，拒绝发送的是传输层。
+	const resolved = resolveSettings(
+		options.session,
+		toolManager.toolDefaults(),
+		{ rows: modelManager.catalog(), defaultRef: modelManager.defaultRef() },
+		toolManager.names(),
+	);
+	// 表的内容是行为而不是目录，所以一张表服务所有会话。这里同样不做任何选择：活跃集与审批已经
+	// 组合在 `resolved` 里，之后的每次读取都重算一次。
+	return { workDirAbsPath, modelManager, resolved, toolManager, sessionManager };
+}
+
+/**
+ * 不激活就读取一个会话的状态。
+ *
+ * {@link openAgent} 的冷半：走同一个 {@link assemble}，所以工作目录、模型、思考档位、工具集与
+ * 审批映射，就是这份 会话记录 上的活跃会话本该有的——而且到此为止。没有 `Agent`，没有循环，
+ * 没有 hooks；循环本该回答的字段以它们本来的空闲值给出，因为没有运行可供报告。
+ *
+ * 与装配一样，它什么都不追加。读 会话记录 不得成为 会话记录 里的事件，否则打开一个会话的
+ * 历史就与使用它无从区分了。
+ */
+export async function readSessionSnapshot(options: OpenAgentOptions): Promise<SessionSnapshot> {
+	// 冷读没有编排层可取服务，回落的持有者在这里原地构造。新造的持有者行为完全一致：
+	// 各持有者什么都不持有（ADR-0006 §2），所以调用方自己的实例改变的只是读*哪些*
+	// 文件——hub 递入自己那份正是为此。homes 是各持有者唯一的接缝（spec §8）。
+	const sessionManager = options.sessionManager ?? new SessionManager({ home: options.settingsHome });
+	const toolManager = options.toolManager ?? createToolManager({ home: options.settingsHome });
+	const modelManager = new ModelManager({ home: options.modelsHome ?? options.settingsHome });
+	const { workDirAbsPath, resolved } = await assemble(sessionManager, toolManager, modelManager, options);
+	return sessionSnapshot({
+		sessionManager,
+		session: options.session,
+		workDirAbsPath,
+		// 快照只从模型上读名字、档位与窗口；请求对象在这里与在一次请求里一样是即抛的。用本次装配
+		// 组合出的行现建，所以一次冷读只花文件一次。
+		model: createModel(resolved.model.config, resolved.model.thinkingLevel),
+		// 与活跃会话运行的是同一套组合（`resolveSettings`）：冷读与活跃快照在这里必须一致，否则
+		// 会话一从打开变成仅读取，座位就会翻面。
+		mode: resolved.mode,
+		running: false,
+		queued: [],
+		isRetrying: false,
+		retryAttempt: 0,
+		// 与活跃会话完全一样地从账本派生：一次已结束的运行——闸门的或崩溃的——留下的悬空调用，冷读
+		// 也显示它，因为关闭它的答案经 REST 抵达，送给碰巧在运行该会话的那个进程。
+		pendingApprovals: danglingApprovalsOf(sessionManager.buildContextEntries(options.session)),
+	});
 }

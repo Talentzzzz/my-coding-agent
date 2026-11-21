@@ -9,7 +9,6 @@ import type {
 	SessionSnapshot,
 	GlobalSettingsSnapshot,
 	DirectoryGroup,
-	DirectoryPaging,
 } from "@my-agent/core/protocol";
 
 /** 设置面板能改的东西。比服务端自己的补丁窄，这正是目的。 */
@@ -25,21 +24,6 @@ export interface PanelSettingsPatch {
 	 * 是谁也无法推理的唯一状态。
 	 */
 	modes?: ModeSettings[];
-	/**
-	 * 侧栏不列出的目录，按绝对路径，像 `tools` 一样整体发送。
-	 *
-	 * 面板没有这个控件，多半永远不会有：它是目录标题上「删除」经过的形状，而把一个目录从设置列表
-	 * 里藏起来，将是那个"需要把组摆在你面前才有意义"的操作的第二扇门。
-	 */
-	hiddenDirectories?: string[];
-	appearance?: {
-		theme?: "system" | "light" | "dark";
-		fontSize?: number;
-		sidebarWidth?: number;
-		contentWidth?: number;
-		/** 侧栏按目录的分页状态，像其他每个 appearance 字段一样整体发送。 */
-		directories?: Record<string, DirectoryPaging>;
-	};
 	approval?: Record<string, boolean>;
 	/** Partial 是为了让一个超时可以单独提交而不必指名另一个。 */
 	bash?: Partial<BashSettings>;
@@ -179,30 +163,6 @@ export class SessionApi {
 	/** 这台机器有会话的每个目录，供侧栏的分组。 */
 	async listDirectories(): Promise<{ directories: DirectoryGroup[] }> {
 		return this.send("GET", "/api/directories", undefined);
-	}
-
-	/**
-	 * 给目录一个侧栏显示的名字，磁盘上什么都不碰。
-	 *
-	 * `workDirAbsPath` 指名组，`name` 是标签 —— 它们不是两条路径：文件夹保留文件系统给它的名字，
-	 * 这是设置记住的一个视图。空名字收回自定义名，标题落回文件夹自己的名字。
-	 *
-	 * 答案携带设置快照，因为标签住在那里：窗口应用它并重画标题，没有行移动，所以没有会与之分歧的
-	 * `session_row` 帧在路上。
-	 */
-	async renameDirectory(workDirAbsPath: string, name: string): Promise<{ workDirAbsPath: string; name: string; settings: GlobalSettingsSnapshot }> {
-		return this.send("POST", "/api/directories/rename", { workDirAbsPath, name });
-	}
-
-	/**
-	 * 把一个目录从列表里拿掉，磁盘上什么都不碰。
-	 *
-	 * 存储列表和可见列表都返回，因为这是唯一不走通道的目录命令：被隐藏目录的任何东西都不是行事实，
-	 * 所以端点以侧栏现在应该画什么作答 —— 客户端应用它而不是自己猜，猜会是服务端拥有的列表的
-	 * 第二个写入者。
-	 */
-	async hideDirectory(workDirAbsPath: string): Promise<{ settings: GlobalSettingsSnapshot; directories: DirectoryGroup[] }> {
-		return this.send("POST", "/api/directories/hide", { workDirAbsPath });
 	}
 
 	async listModels(): Promise<{ models: ModelOption[] }> {

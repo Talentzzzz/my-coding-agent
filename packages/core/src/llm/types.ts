@@ -3,7 +3,7 @@
 // @ts-nocheck
 /** 遥测的不透明父 context；遥测不在本裁剪构建的范围之内。 */
 export type TelemetryContext = Record<string, unknown>;
-import type { BashSettings } from "../config.ts";
+import type { BashSettings } from "../types.ts";
 import type { AnthropicOptions } from "./api/anthropic-messages.ts";
 import type { AssistantMessageEventStream } from "./utils/event-stream.ts";
 
@@ -570,12 +570,6 @@ export interface AnthropicMessagesCompat {
 	 * 默认：true。
 	 */
 	supportsCacheControlOnTools?: boolean;
-	/**
-	 * 模型是否接受 Anthropic 的 `temperature` 请求字段。
-	 * Claude Opus 4.7+ 拒绝非默认的 temperature 值。
-	 * 默认：true。
-	 */
-	supportsTemperature?: boolean;
 	/** 是否把空的 thinking 签名按 `signature: ""` 重放，而不是把 thinking 转成文本。默认：false。 */
 	allowEmptySignature?: boolean;
 	/** provider 是否支持 Anthropic 的严格工具 schema。默认：false；生成的 Anthropic 模型显式启用。 */
