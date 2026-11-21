@@ -1,3 +1,4 @@
+// 信封与域词汇同出自 case 的网关：trigger 对 domain 盲（R1）。
 import type {
 	AgentSessionEvent,
 	ClientFrame,
@@ -7,7 +8,7 @@ import type {
 	SessionRowPatch,
 	SessionSnapshot,
 } from "@my-agent/case/protocol";
-import { UnknownSessionError } from "@my-agent/domain";
+import { UnknownSessionError } from "@my-agent/case/protocol";
 
 /**
  * 会话语义 → 帧：**只有函数**，没有类型、没有状态、没有生命周期。

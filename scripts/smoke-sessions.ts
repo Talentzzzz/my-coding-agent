@@ -8,9 +8,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { request } from "node:http";
 import { createAssistantMessageEventStream, type ChatTransport, type Message, type ModelConfig } from "@my-agent/domain";
-import { bootServer } from "../packages/server/src/boot.ts";
+import { start } from "@my-agent/app";
 import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
-import { SessionHub } from "../packages/server/src/hub.ts";
+import { SessionHub } from "@my-agent/case";
 import {
 	CURRENT_SESSION_VERSION,
 	type Agent,
@@ -586,7 +586,7 @@ try {
 	// Phase 1 in one section: a read answers from the JSONL log, leaves the registry exactly as it was,
 	// and agrees field-for-field with what the facade answers directly — because both build
 	// their snapshot from the same parts.
-	const http = await bootServer({ workDirAbsPath: root, port: 0 });
+	const http = await start({ workDirAbsPath: root, port: 0 });
 	try {
 		const readId = await http.sessionHub.birth({ text: "read me" });
 		hubSessions(http.sessionHub).appendMessage(bagOf(http.sessionHub, readId), userMessage("and me"));
@@ -713,7 +713,7 @@ try {
 		{
 			const home = await mkdtemp(join(tmpdir(), "my-agent-agent-home-"));
 			const host = await mkdtemp(join(tmpdir(), "my-agent-directories-"));
-			const http = await bootServer({ workDirAbsPath: root, port: 0, settingsHome: home });
+			const http = await start({ workDirAbsPath: root, port: 0, settingsHome: home });
 			const listed = async (): Promise<string[]> =>
 				(((await call("GET", `${http.url}/api/directories`)).payload.directories as { workDirAbsPath: string }[]) ?? []).map(
 					(group) => resolve(group.workDirAbsPath),

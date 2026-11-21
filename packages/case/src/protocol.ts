@@ -66,6 +66,24 @@ export {
 // `http/errors.ts` 的 404 映射要 instanceof，所以 class 也经网关转发。
 export { UnknownSessionError } from "@my-agent/domain";
 
+// —— 触发面需要的其余域词汇（步 3 随 controllers 进 trigger 补齐）：R1 禁 trigger→domain，
+// 控制器用到的模型行 coerce、设置面与路径词汇同样只能从本网关到手——网关 role 的直接推论，
+// 不是新决策。
+export {
+	coerceModelConfig,
+	DEFAULT_MODE_NAME,
+	listModelOptions,
+	resolvePath,
+	shortenTitle,
+	toSessionRef,
+} from "@my-agent/domain";
+export type {
+	Agent,
+	GlobalSettings,
+	ModelConfig,
+	SettingsPatch,
+} from "@my-agent/domain";
+
 export type ServerMessage =
 	/**
 	 * 本会话此刻看起来的一切。

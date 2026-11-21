@@ -24,7 +24,7 @@ export interface HubOptions {
 	/**
 	 * 读取和写入全局设置所用的 agent home。默认是真实的那一个。
 	 *
-	 * `BootOptions` 的透传，理由相同：演练*写*设置命令的 smoke 不得写机器自己的文件。生产中没有任何东西设置它；把设置存放在别处的宿主会提供存储后端而不是这个路径。
+	 * `StartOptions` 的透传，理由相同：演练*写*设置命令的 smoke 不得写机器自己的文件。生产中没有任何东西设置它；把设置存放在别处的宿主会提供存储后端而不是这个路径。
 	 */
 	settingsHome?: string;
 	/**

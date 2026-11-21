@@ -15,14 +15,14 @@
 //   $env:MY_AGENT_HOME = "$env:TEMP\my-agent-smoke"; npm run start
 //
 // 上面的部分连外部进程。需要确定性时序的删除用例（票 04）由脚本自己在进程内起真服务器
-// （仿 smoke-sessions 的 bootServer 模式）：api 接缝递入可控 gate，把一次运行钉在流式半空，
+// （仿 smoke-sessions 的 start 模式）：api 接缝递入可控 gate，把一次运行钉在流式半空，
 // 「删除的 202 应答先于运行收尾」由此成为可断言的事实而不是对调度器的赌注。
 import { request as httpRequest } from "node:http";
 import { readdirSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bootServer } from "../packages/server/src/boot.ts";
+import { start } from "@my-agent/app";
 import { createAssistantMessageEventStream, setRemoveGate, setSessionsDir, type ChatTransport } from "@my-agent/domain";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 
@@ -414,7 +414,7 @@ async function gatedDeletes(): Promise<void> {
 			const gate = holdGate();
 			const home = await mkdtemp(join(tmpdir(), "my-agent-api-home-"));
 			await seedModelRow(home);
-			const http = await bootServer({ workDirAbsPath: workDir, port: 0, settingsHome: home, chatTransport: gate.chatTransport });
+			const http = await start({ workDirAbsPath: workDir, port: 0, settingsHome: home, chatTransport: gate.chatTransport });
 			try {
 				const born = await localCall("POST", `${http.url}/api/sessions`, { text: "出生的那条消息" });
 				const id = String(born.payload.sessionId ?? "");
@@ -469,7 +469,7 @@ async function gatedDeletes(): Promise<void> {
 			fake.setResponses([fakeAssistantMessage("出生那轮的普通回答"), fakeAssistantMessage(fakeToolCall("bash", { command: "echo parked" }))]);
 			const home = await mkdtemp(join(tmpdir(), "my-agent-api-home-"));
 			await seedModelRow(home);
-			const http = await bootServer({ workDirAbsPath: workDir, port: 0, settingsHome: home, chatTransport: fake.chatTransport });
+			const http = await start({ workDirAbsPath: workDir, port: 0, settingsHome: home, chatTransport: fake.chatTransport });
 			try {
 				const quieted = await localCall("PATCH", `${http.url}/api/settings`, { patch: { approval: { bash: true } } });
 				if (quieted.status !== 200) fail(`patching the approval baseline answered ${quieted.status}, expected 200`);
@@ -518,7 +518,7 @@ async function gatedDeletes(): Promise<void> {
 		// 「没有这个会话」。不靠 sleep：gate 挂起、轮询到进闸、放行、删除完成，各拍都是事实。
 		{
 			const home = await mkdtemp(join(tmpdir(), "my-agent-api-home-"));
-			const http = await bootServer({ workDirAbsPath: workDir, port: 0, settingsHome: home });
+			const http = await start({ workDirAbsPath: workDir, port: 0, settingsHome: home });
 			try {
 				const born = await localCall("POST", `${http.url}/api/sessions`, { text: "删除闸内的会话" });
 				const id = String(born.payload.sessionId ?? "");

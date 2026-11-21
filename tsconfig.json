@@ -14,7 +14,6 @@
 		}
 	},
 	"include": [
-		"packages/server/src/**/*.ts",
 		"packages/app/src/**/*.ts",
 		"packages/trigger/src/**/*.ts",
 		"packages/case/src/**/*.ts",
