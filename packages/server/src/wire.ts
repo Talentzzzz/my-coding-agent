@@ -1,4 +1,4 @@
-import type { ServerFrame } from "@my-agent/core/protocol";
+import type { ServerFrame } from "@my-agent/case/protocol";
 
 /**
  * 一条连接上"把帧写到 socket"的全部机制：有界队列、背压、停滞期限、ping、应用心跳、关闭。

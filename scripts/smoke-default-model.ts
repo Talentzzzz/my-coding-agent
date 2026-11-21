@@ -4,8 +4,8 @@
 // 外加一个持久标记，保证被删掉的行不会被种回来。这里不触网——store 就是一对回调——所以无需
 // 服务器和 provider key。服务器*本来会*保留什么，用端点同一个 `coerceModelConfig` 来核对。
 // 运行：node scripts/smoke-default-model.ts
-import { coerceModelConfig, listModelOptions } from "@my-agent/core";
-import type { ModelInput, ModelOption } from "@my-agent/core/protocol";
+import { coerceModelConfig, listModelOptions } from "@my-agent/domain";
+import type { ModelInput, ModelOption } from "@my-agent/case/protocol";
 import {
 	DEFAULT_MODEL,
 	DEFAULT_THINKING_LEVEL,

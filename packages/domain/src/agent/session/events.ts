@@ -5,7 +5,8 @@
 // 层，sink 的实现仍在那里。
 import type { AgentEvent } from "../types.ts";
 import type { Message } from "../llm/index.ts";
-import type { QueuedPrompt, SessionSnapshot } from "../protocol.ts";
+import type { QueuedPrompt } from "./queues.ts";
+import type { SessionSnapshot } from "./snapshot.ts";
 import type { SessionEntry } from "./session-manager.ts";
 
 /** 读者能看见的任何东西发生变动时，带着 session 状态被调用。 */

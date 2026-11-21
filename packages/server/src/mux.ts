@@ -1,4 +1,4 @@
-import type { PendingApproval, ServerFrame, SessionRow, SessionRowPatch, SessionSnapshot } from "@my-agent/core/protocol";
+import type { PendingApproval, ServerFrame, SessionRow, SessionRowPatch, SessionSnapshot } from "@my-agent/case/protocol";
 import * as frame from "./frames.ts";
 import type { SessionHub, SubscriptionSink } from "./hub.ts";
 import {

@@ -25,10 +25,9 @@ import type { Message } from "../llm/index.ts";
 import { type Usage, uuidv7 } from "../llm/index.ts";
 // types.ts 的常量（AGENT_HOME/DEFAULT_GLOBAL_SETTINGS/settingsPath）在运行期叶子模块上（它对外
 // 只递类型），持有者回落常量、编排层装配持有者，箭头只朝一个方向流——顶层求值也安全。
-import { AGENT_HOME, APP_NAME, DEFAULT_GLOBAL_SETTINGS, settingsPath } from "../types.ts";
+import { AGENT_HOME, APP_NAME, DEFAULT_GLOBAL_SETTINGS, settingsPath, type QueueMode } from "../types.ts";
 import { trimToolCallArgs } from "../context/trim-tool-call-args.ts";
 import { clearToolResult } from "../context/clear-tool-results.ts";
-import type { QueueMode, SessionRef, SessionRow } from "../protocol.ts";
 import { compactionSummaryOf } from "./messages.ts";
 import { normalizePath, resolvePath, sessionJsonlPath, sessionMetaPath, sessionPath, sessionsDir } from "./paths.ts";
 import { UnknownSessionError } from "./unknown-session.ts";
@@ -2285,6 +2284,62 @@ function writeSessionsLayer(path: string, layer: Record<string, unknown>): void 
 /** 一个组里最近的活动，供侧栏目录排序。 */
 function newestAt(group: DirectorySessions): number {
 	return group.sessions.reduce((newest, session) => Math.max(newest, session.modified), 0);
+}
+
+export interface SessionRef {
+	id: string;
+	/** 本会话工作的目录，绝对路径：头部记录的是解析后的路径。 */
+	workDirAbsPath: string;
+	createdAt: number;
+	title: string;
+	/**
+	 * 本会话从哪个会话 fork 而来，前提是那个会话就存在旁边。
+	 *
+	 * 根会话缺失，父会话不在同一份列表里的 fork 也缺失——另一个目录的存储，或被手工挪走的文件。
+	 * 客户端把缺失的父画成根，而不是替它编造一个位置。
+	 */
+	parentId?: string;
+}
+
+/**
+ * 侧边栏的一行：存储的身份，加上列表化时补充的活动事实。
+ *
+ * 最后三个字段是它与 {@link SessionRef} 的分界。`modified` 本就由存储为排序算好，只是从不发送。
+ * `running` 完全没有存储形态——它是*本*进程循环的事实，从来不是会话记录的。`pending` 是带存储
+ * 缓存的账本事实：快照的 `suspended` 标记把冷行点亮成 1（计数不存储），开着该会话的进程用从账本
+ * 派生的精确计数覆盖它。
+ *
+ * 一个字段能在这里占位，仅当没有任何东西订阅内容时它仍然为真：一旦无人注视就冻结的行，正是这个
+ * 类型要防的失败。token 计数有意不够格——它们属于会话自己的流，抬到这里就是给每个窗格发一整列
+ * 数字。
+ */
+export interface SessionRow extends SessionRef {
+	/** 最近活动：最新的带时间戳 user 或 assistant 消息，没有则是 `createdAt`。 */
+	modified: number;
+	/** 本进程此刻正在运行它。 */
+	running: boolean;
+	/** 正在等答案的审批数。 */
+	pending: number;
+}
+
+/**
+ * 一行的增量：id 加上随事件而来的那几个字段，其余缺席的字段读作"没动"。
+ *
+ * 服务端不为行养存储（ADR-0027），所以一次推送只携带事件自己说得出的字段——`entry_appended`
+ * 带 `modified`（与 user 消息的 `title`）、快照带 `running` 与 `pending`；完整行仍然存在，出现在
+ * 存储型改名、出生与 fork 的探测上。客户端逐字段合并，缺席的字段保持自己手里那一份。
+ */
+export type SessionRowPatch = { id: string } & Partial<Omit<SessionRow, "id">>;
+
+/**
+ * 一个目录的已存会话，用于侧边栏的分组。
+ *
+ * 分组来自存储而不是服务器自己的根：一个进程在一个目录里启动，但这台机器跑过的每个目录的会话都
+ * 在磁盘上各自待着。
+ */
+export interface DirectoryGroup {
+	workDirAbsPath: string;
+	sessions: SessionRow[];
 }
 
 /**

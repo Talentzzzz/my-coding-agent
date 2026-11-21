@@ -4,9 +4,6 @@
 		"noEmit": true,
 		"baseUrl": ".",
 		"paths": {
-			"@my-agent/core": ["./packages/core/src/index.ts"],
-			"@my-agent/core/protocol": ["./packages/core/src/protocol.ts"],
-			"@my-agent/core/tools": ["./packages/core/src/tools/index.ts"],
 			"@my-agent/app": ["./packages/app/src/index.ts"],
 			"@my-agent/trigger": ["./packages/trigger/src/index.ts"],
 			"@my-agent/case": ["./packages/case/src/index.ts"],
@@ -17,7 +14,6 @@
 		}
 	},
 	"include": [
-		"packages/core/src/**/*.ts",
 		"packages/server/src/**/*.ts",
 		"packages/app/src/**/*.ts",
 		"packages/trigger/src/**/*.ts",

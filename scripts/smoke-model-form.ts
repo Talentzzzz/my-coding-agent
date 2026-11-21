@@ -6,7 +6,7 @@
 // 运行：node scripts/smoke-model-form.ts
 import { SettingsPanel, type SettingsHandlers } from "../packages/web/src/render/settings.ts";
 import { installDom, type FakeNode } from "./dom-shim.ts";
-import type { GlobalSettingsSnapshot } from "@my-agent/core/protocol";
+import type { GlobalSettingsSnapshot } from "@my-agent/case/protocol";
 
 let failures = 0;
 

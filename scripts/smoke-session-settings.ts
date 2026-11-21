@@ -7,7 +7,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createSession, SessionManager, settingsPath, type Session } from "@my-agent/core";
+import { createSession, SessionManager, settingsPath, type Session } from "@my-agent/domain";
 
 let failures = 0;
 

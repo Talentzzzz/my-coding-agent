@@ -1,5 +1,3 @@
-import type { DiffLine, FileDiff } from "../protocol.ts";
-
 /**
  * 文件修改工具报告的行级 diff。
  *
@@ -10,6 +8,49 @@ import type { DiffLine, FileDiff } from "../protocol.ts";
  * 算法是常规做法：剥掉公共的头尾，然后对剩下的做 LCS。剥头尾是让常见情形保持便宜的原因——
  * 一万行文件里的一行改动给 LCS 只留下一行的中间段——下面的预算则约束其余情况。
  */
+
+/**
+ * 工具改动的文件中的一行。
+ *
+ * 行号是文件自己的：1 起算，旧文件与新文件各有一套，所以窗口不用回读任何东西就能显示改动落在哪里。
+ * 只有旧文件有的行不带新行号，反之亦然；`skip` 行代表报告省略的未改动行。
+ */
+export interface DiffLine {
+	kind: "add" | "remove" | "context" | "skip";
+	oldLine: number | null;
+	newLine: number | null;
+	text: string;
+	/**
+	 * `text` 中发生变化的那段半开区间，用于「一行删除加紧随其后的新增」其实是同一行被重写的情形。
+	 * 整行变更时缺失，那种情况下行本身的颜色已把标记想说的话说完了。
+	 */
+	changed?: [number, number];
+	/** 这条 `skip` 行所代表的未改动行数。 */
+	skipped?: number;
+}
+
+/**
+ * 一次工具调用对一个文件做了什么。
+ *
+ * 改动文件的工具在 `ToolResult.details` 里以此作答，与模型读的文本并列：文本写给模型，这份写给
+ * 窗口。两者是同一处改动，所以视图永远不必解析文本——工具的文本也得以保持简短，对整个文件的
+ * `write` 而言，这就是「点一下文件名」与「把内容再付一遍钱」的差别。
+ *
+ * 它搭引擎自己的 `tool_execution_end` 事件走，wire 无需为它加成员，而引擎记录的是整个结果
+ * ——会话记录便把这份报告存在工具文本旁边。任何供应商都看不到它：请求携带工具结果时只携带
+ * content。
+ */
+export interface FileDiff {
+	/** 文件按工作目录的显示方式——目录内相对，之外绝对。 */
+	relPath: string;
+	lines: DiffLine[];
+	added: number;
+	removed: number;
+	/** 文件此前不存在时为 true，每一行都是新增。 */
+	created: boolean;
+	/** 因改动超出报告上限而未进 `lines` 的行数。 */
+	omitted: number;
+}
 
 /** 变更两侧各保留多少未变行，让变更在其上下文中可读。 */
 export const DIFF_CONTEXT = 3;

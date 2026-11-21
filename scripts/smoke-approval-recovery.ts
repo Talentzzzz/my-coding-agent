@@ -18,7 +18,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAssistantMessageEventStream, type ChatTransport, type Message } from "@my-agent/core";
+import { createAssistantMessageEventStream, type ChatTransport, type Message } from "@my-agent/domain";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import {
 	createToolManager,
@@ -36,7 +36,7 @@ import {
 	type ToolRunContext,
 	type ToolUpdateCallback,
 	setSessionsDir,
-} from "@my-agent/core";
+} from "@my-agent/domain";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-recovery-"));
 const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-approval-recovery--store-"));

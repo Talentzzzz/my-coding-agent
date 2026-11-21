@@ -2,7 +2,7 @@ import { glob, stat } from "node:fs/promises";
 import type { Tool } from "../llm/index.ts";
 import { isAbsolute, resolve } from "node:path";
 import { Type, type Static } from "typebox";
-import { displayToolPath, resolveToolPath } from "../workdir.ts";
+import { displayToolPath, resolveToolPath } from "./workdir.ts";
 import { truncateList } from "./truncate.ts";
 import { textResult, throwIfAborted } from "./types.ts";
 

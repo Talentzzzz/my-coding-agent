@@ -1,4 +1,4 @@
-import type { SessionRow, SessionRowPatch, DirectoryGroup } from "@my-agent/core/protocol";
+import type { SessionRow, SessionRowPatch, DirectoryGroup } from "@my-agent/case/protocol";
 
 /**
  * 侧栏的行，保存在连接层。

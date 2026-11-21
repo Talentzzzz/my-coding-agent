@@ -15,7 +15,7 @@ import {
 	type SessionSnapshot,
 	type GlobalSettingsSnapshot,
 	type UsageTotals,
-} from "@my-agent/core/protocol";
+} from "@my-agent/case/protocol";
 import type { AppearanceSettings } from "./ui-settings.ts";
 
 export interface ToolCard {

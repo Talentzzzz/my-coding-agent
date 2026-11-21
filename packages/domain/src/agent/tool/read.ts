@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import type { Tool, ToolResult } from "../llm/index.ts";
 import { Type, type Static } from "typebox";
-import { displayToolPath, resolveToolPath } from "../workdir.ts";
+import { displayToolPath, resolveToolPath } from "./workdir.ts";
 import { textResult, throwIfAborted } from "./types.ts";
 
 const MAX_FILE_BYTES = 4 * 1024 * 1024;

@@ -11,7 +11,7 @@
 // 之前把配置种到 hub 的 settings 与 models 目录（`HubOptions.settingsHome` / `modelsHome`）
 // 背后的文件里，它挂载的每个 session 都会经由那里读取。模型行同理：会话打开在哪一行是
 // 「记录的选择 → 设置默认行 → 第一行」的现算答案，这里的出生消息不点名任何一行。
-import { type Session, createSession } from "@my-agent/core";
+import { type Session, createSession } from "@my-agent/domain";
 import { type SessionHub } from "../packages/server/src/hub.ts";
 
 export interface MountOptions {

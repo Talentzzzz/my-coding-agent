@@ -2,10 +2,10 @@ import { anthropicMessages, type ChatTransport } from "./llm/index.ts";
 import { Agent, type AssembleAgentStateOptions, type OpenAgentOptions, type SessionSink } from "./agent.ts";
 import { buildSystemPrompt } from "./context/system-prompt.ts";
 import { createHooks, type Hooks } from "./hooks.ts";
-import { ModelManager } from "./model-manager.ts";
+import { ModelManager } from "./llm/model-manager.ts";
 import { SessionManager } from "./session/session-manager.ts";
 import { approvalToolsOf } from "./settings.ts";
-import { type ToolManager, createToolManager } from "./tools/index.ts";
+import { type ToolManager, createToolManager } from "./tool/index.ts";
 
 /**
  * 调用方为构建一个进程唯一的编排层所提供的东西。

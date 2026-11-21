@@ -1,12 +1,13 @@
 // 引擎的契约：一次运行发布什么，以及恢复遍以什么形状作答。这些类型曾住在 `packages/loop`；引擎随
 // ADR-0016 并回编排层，而运行递给会话自己的订阅者的形状就住这里，归拢成一个模块。hooks 三动词的
 // 事件与答案就用 `HookMap` 的派生类型；工具与工具结果是 `Tool` 与 `ToolResult`，定义在传输层旁边
-// 的 `llm/types.ts`，由请求与运行共用。wire 类型是 `protocol.ts` 的事，留在那里；`QueueMode` 是共享
-// 的，`protocol.ts` 转发本模块这份定义，而不是再声明一份。
+// 的 `llm/types.ts`，由请求与运行共用。wire 信封是 `@my-agent/case` 的 `protocol.ts` 的事（原
+// `core/src/protocol.ts` 已解散）；`QueueMode` 是共享的，wire 面经网关转发本模块这份定义，而不是
+// 再声明一份。
 //
 // 设置的形状与默认值也住在这里（文末一节，原是独立的 `config.ts`）。这对加载方向是件好事：本模块
-// 对外只递类型（唯一一处 import 也是 type import，编译期即抹掉），运行期是一个不依赖任何业务模块
-// 的叶子——各持有者从它回落常量，编排层装配各持有者，箭头仍然只朝一个方向流。
+// 对外递类型与少量政策常量（`APPROVAL_TOOLS` 一类，业务模块零依赖），运行期是一个不依赖任何业务
+// 模块的叶子——各持有者从它回落常量，编排层装配各持有者，箭头仍然只朝一个方向流。
 import type {
 	AssistantMessageEvent,
 	Context,
@@ -113,7 +114,7 @@ export type AgentEvent =
 
 import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
-import type { BashSettings, ModeSettings } from "./tools/manager.ts";
+import type { BashSettings, ModeSettings } from "./tool/manager.ts";
 
 /** 存放会话、设置与已存凭据的目录。 */
 export const AGENT_HOME = resolvePath(process.env.MY_AGENT_HOME ?? join(homedir(), ".my-agent"));
@@ -230,6 +231,55 @@ export interface SettingsPatch {
 	bash?: Partial<BashSettings>;
 }
 
+/** 设置面板读与写的东西。 */
+export interface GlobalSettingsSnapshot {
+	/** 全局默认活跃工具集；缺失表示本构建认识的所有工具。 */
+	tools?: string[];
+	/**
+	 * 用户的模式，整体存放，按选择器列出的顺序；缺失表示没有定义过。
+	 *
+	 * 内置默认模式有意不在其中：它是实时读取的全局默认（ADR-0004），客户端用 `tools` 与 `approval`
+	 * 拼出它，而不是期望有一行。
+	 */
+	modes?: ModeSettings[];
+	approval: Record<string, boolean>;
+	/** `bash` 工具允许一条命令运行多久。 */
+	bash: BashSettings;
+	model?: string;
+	/** 窗口是否已种下内置默认行；见 `Settings.defaultModelSeeded`。 */
+	defaultModelSeeded?: boolean;
+}
+
+/**
+ * 不带消息地对会话所持之物做的变更：模式指针、会话的审批增量与两个队列模式。
+ *
+ * 模型与思考档位有意缺席。两者都在输入框里选择、都随属于它们的消息抵达（ModelSelection），
+ * 因为记录一个没有请求真正用过它的选择，等于在会话记录里放一条从未生效的决定。
+ */
+export type ConfigPatch = {
+	/**
+	 * 会话要指向的模式：settings `modes` 表里的一个名字；`null` 即指回内置「默认」（指针缺席）。
+	 * 省略的键保持现行值。指向不存在的预设会被拒绝——说出来，而不是按默认悄悄跑。
+	 */
+	mode?: string | null;
+	/**
+	 * 会话自己的审批增量，按工具名为键：会话在个别工具上的明确决定（grant 的「不再问」、补丁写下
+	 * 的键），叠在模式解析出的审批基线之上；省略的键保持现行值。
+	 */
+	approval?: Record<string, boolean>;
+	steeringMode?: QueueMode;
+	followUpMode?: QueueMode;
+};
+
+/**
+ * 窗口设置提供审批开关的工具，按提供的顺序。
+ *
+ * 审批映射本身以工具名为键，不绑定这份列表：设置文件或会话快照可以点名任何工具，报告哪些工具被
+ * 闸的读取者遍历的是映射而不是它。这份列表只是窗口的默认 offerings——本构建出厂的配置，不是
+ * 映射能装什么的限制。
+ */
+export const APPROVAL_TOOLS: readonly string[] = ["read", "write", "edit", "glob", "grep", "bash"];
+
 export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
 	approval: { read: false, write: true, edit: true, glob: false, grep: false, bash: true },
 	steeringMode: "one-at-a-time",
@@ -262,6 +312,6 @@ export function stringListOrUndefined(value: unknown): string[] | undefined {
 	return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
 }
 
-// 工具簇的类型（`BashSettings` / `ModeSettings`）随簇住在 tools/manager.ts（设置归属重构 §5）；
-// 这里只转发类型名，让 protocol.ts 与既有 import 路径继续经本模块拿到它们。
-export type { BashSettings, ModeSettings } from "./tools/manager.ts";
+// 工具簇的类型（`BashSettings` / `ModeSettings`）随簇住在 tool/manager.ts（设置归属重构 §5）；
+// 这里只转发类型名，让 wire 网关与既有 import 路径继续经本模块拿到它们。
+export type { BashSettings, ModeSettings } from "./tool/manager.ts";

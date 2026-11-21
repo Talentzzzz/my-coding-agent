@@ -18,7 +18,7 @@ import { Router } from "../packages/server/src/http/routing.ts";
 import { createServer } from "../packages/server/src/http.ts";
 import { createFakeTransport, fakeAssistantMessage, type FakeTransport } from "./fake-transport.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
-import type { SessionRow, SessionSnapshot, ModelConfig } from "@my-agent/core";
+import type { SessionRow, SessionSnapshot, ModelConfig } from "@my-agent/domain";
 
 let failures = 0;
 

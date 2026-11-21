@@ -1,4 +1,4 @@
-import type { ConnectionFrame, ConnectionItem, ServerMessage, SessionSnapshot, StreamFrame } from "@my-agent/core/protocol";
+import type { ConnectionFrame, ConnectionItem, ServerMessage, SessionSnapshot, StreamFrame } from "@my-agent/case/protocol";
 
 /**
  * 窗口对物理通道的认知。

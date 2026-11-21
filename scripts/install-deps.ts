@@ -20,7 +20,6 @@ const registry = process.env.NPM_REGISTRY ?? "https://registry.npmjs.org";
 const cache = join(root, ".npm-tarball-cache");
 
 const workspaces = [
-	"packages/core",
 	"packages/server",
 	"packages/web",
 	"packages/desktop",

@@ -17,7 +17,7 @@
 // 运行：node scripts/smoke-backpressure.ts
 import { Wire, resolveWireOptions, type FrameSink, type ResolvedWireOptions } from "../packages/server/src/wire.ts";
 import { until } from "./wire/client.ts";
-import type { ServerFrame } from "@my-agent/core";
+import type { ServerFrame } from "@my-agent/case/protocol";
 
 let failures = 0;
 

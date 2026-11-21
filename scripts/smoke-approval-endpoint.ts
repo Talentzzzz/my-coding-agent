@@ -17,7 +17,7 @@ import { createRoutes } from "../packages/server/src/controllers/routes.ts";
 import { Router } from "../packages/server/src/http/routing.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import { mountSession } from "./mount-session.ts";
-import { type ModelConfig, ModelManager, setSessionsDir, createToolManager } from "@my-agent/core";
+import { type ModelConfig, ModelManager, setSessionsDir, createToolManager } from "@my-agent/domain";
 
 const PORT = 8094;
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-"));

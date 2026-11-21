@@ -2,7 +2,7 @@ import { element, icon, iconButton } from "../dom.ts";
 import type { ChannelState } from "../client.ts";
 import { openMenuAt } from "./menu.ts";
 import { askForText } from "./text-dialog.ts";
-import type { SessionRow, DirectoryGroup } from "@my-agent/core/protocol";
+import type { SessionRow, DirectoryGroup } from "@my-agent/case/protocol";
 import type { DirectoryPaging } from "../ui-settings.ts";
 
 export interface SidebarHandlers {

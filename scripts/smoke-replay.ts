@@ -5,7 +5,7 @@
 // （`replay-tools.md`）在磁盘上核实过的那样。不接触任何模型，无需 provider key。
 // 运行：node scripts/smoke-replay.ts
 import { initialState, reduce, type Item, type ViewState } from "../packages/web/src/state.ts";
-import type { ServerMessage, SessionSnapshot, UsageTotals } from "@my-agent/core/protocol";
+import type { ServerMessage, SessionSnapshot, UsageTotals } from "@my-agent/case/protocol";
 
 let failures = 0;
 

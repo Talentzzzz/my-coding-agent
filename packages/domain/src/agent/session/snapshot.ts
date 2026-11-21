@@ -1,14 +1,100 @@
 import type { Message } from "../llm/index.ts";
 import type { Api, Model, Usage } from "../llm/index.ts";
-import {
-	addUsage,
-	EMPTY_USAGE,
-	type PendingApproval,
-	type QueuedPrompt,
-	type SessionSnapshot,
-	type UsageTotals,
-} from "../protocol.ts";
-import type { SessionEntry, SessionManager, Session } from "./session-manager.ts";
+import type { BranchPoint, SessionEntry, SessionManager, Session } from "./session-manager.ts";
+import type { QueuedPrompt } from "./queues.ts";
+
+export interface UsageTotals {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+	/** 最近一次请求的 prompt 的 token 数，供上下文表使用。 */
+	contextTokens: number;
+	contextWindow: number;
+}
+
+export interface PendingApproval {
+	toolCallId: string;
+	toolName: string;
+	args: unknown;
+	summary: string;
+}
+
+export interface SessionSnapshot {
+	id: string;
+	workDirAbsPath: string;
+	createdAt: number;
+	title: string;
+	/** 会话所在行的名字。 */
+	model: string;
+	thinkingLevel: string;
+	/** 会话所在的模式名，窗口直接显示的座位；undefined 即内置「默认」（跟随全局默认，或指针悬空）。 */
+	mode?: string;
+	messages: Message[];
+	/**
+	 * `messages` 里每条消息背后的 entry id，顺序一致。
+	 *
+	 * 没有亲眼看着消息写下的会话记录仍需要指名 fork 从哪条 entry 开始，所以会话从自己的 session
+	 * manager 填这一栏。压缩摘要没有属于自己的消息条目。
+	 */
+	messageEntryIds: (string | null)[];
+	/**
+	 * 本会话日志里每一个曾以不止一条路走下去的地方。
+	 *
+	 * entry 从来就是一棵树，链只是穿过它的其中一条路；这是窗口画出树的其余部分并在其中移动所需的
+	 * 全部信息。是整棵树，不只是链上的——挪动 leaf 不得改变窗口所画树的形状——`options[].active`
+	 * 是回答「这些里哪个是我所在的链」的唯一字段。走的只有各备选的 entry id，不是它们通向哪里：
+	 * 那些 id 只写一次，而分支在自己的尖端生长，记住一个尖端就是记住一个对话早已离开的地方。
+	 */
+	branchPoints: BranchPoint[];
+	/** 若是 fork：从哪个会话派生而来；根会话缺失。 */
+	parentSession?: string;
+	/** 会话所在的 entry：链的尖端，第一条 entry 之前为 null。 */
+	leafId: string | null;
+	/**
+	 * 此刻正在写下的 assistant 消息，当本进程正在运行时。
+	 *
+	 * 只有活跃会话能回答它——存储在消息结束时才得到它——它的存在是为了让运行中途挂上来的窗口不
+	 * 必等一句自己从未见过开头的句子：baseline 画这些字符，随后的 delta 接着追加。已落定的
+	 * 会话记录与一切冷读都缺失。
+	 */
+	partial?: Message;
+	/** 有在飞的运行——loop 正在跑；活半作答，冷读恒 false（文件只记录已完成的事）。 */
+	running: boolean;
+	/** 运行中途被接受、尚未被取走的用户消息，按窗口绘制它们的样子。 */
+	queued: QueuedPrompt[];
+	/** 瞬时供应商失败正在等退避走完时为 true。 */
+	isRetrying: boolean;
+	/** 在飞的重试是第几次（1 起算），没有待处理的重试时为 0。 */
+	retryAttempt: number;
+	usage: UsageTotals;
+	pendingApprovals: PendingApproval[];
+}
+
+export const EMPTY_USAGE: UsageTotals = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	cost: 0,
+	contextTokens: 0,
+	contextWindow: 0,
+};
+
+/** 把一条 assistant 消息的 usage 并进会话总计。 */
+export function addUsage(totals: UsageTotals, usage: Usage, contextWindow: number): UsageTotals {
+	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+	return {
+		input: totals.input + usage.input,
+		output: totals.output + usage.output,
+		cacheRead: totals.cacheRead + usage.cacheRead,
+		cacheWrite: totals.cacheWrite + usage.cacheWrite,
+		cost: totals.cost + usage.cost.total,
+		contextTokens: promptTokens + usage.output,
+		contextWindow,
+	};
+}
 
 /**
  * 一个快照的全部构建材料，已由调用方解析完毕。

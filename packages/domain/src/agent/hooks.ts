@@ -1,5 +1,5 @@
 import type { Message, ToolResult } from "./llm/index.ts";
-import { truncate } from "./tools/truncate.ts";
+import { truncate } from "./tool/truncate.ts";
 import { spillPathFor, spillText, spillView, writeSpillFile, SPILL_KEEP_CHARS } from "./context/spill.ts";
 
 /** 工具结果如何携带内容：按顺序排列的文本与图片块。 */

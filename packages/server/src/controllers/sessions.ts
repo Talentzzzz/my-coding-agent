@@ -18,7 +18,7 @@ import {
 	type ModelConfig,
 	type DirectoryGroup,
 	UnknownSessionError,
-} from "@my-agent/core";
+} from "@my-agent/domain";
 import { dirname, resolve, sep } from "node:path";
 import { httpStatus } from "../http/errors.ts";
 import { workDirAbsPathForCreate, workDirAbsPathOrThrow, type SessionHub } from "../hub.ts";
