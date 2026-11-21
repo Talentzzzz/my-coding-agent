@@ -18,7 +18,7 @@ import {
 	type ModelConfig,
 } from "@my-agent/domain";
 import type { ClientFrame, ConnectionItem, ServerFrame, ServerMessage } from "@my-agent/case/protocol";
-import { SessionHub } from "../packages/server/src/hub.ts";
+import { SessionHub } from "@my-agent/case";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-projection-"));

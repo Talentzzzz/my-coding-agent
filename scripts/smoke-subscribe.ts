@@ -13,11 +13,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setSessionsDir, type ModelConfig } from "@my-agent/domain";
 import type { ServerFrame } from "@my-agent/case/protocol";
-import { SessionHub } from "../packages/server/src/hub.ts";
-import { createMuxServer, type MuxConnection } from "../packages/server/src/mux.ts";
-import { SessionController } from "../packages/server/src/controllers/sessions.ts";
-import { sessionListeners } from "../packages/server/src/boot.ts";
-import type { FrameSink } from "../packages/server/src/wire.ts";
+import { SessionHub } from "@my-agent/case";
+import { createMuxServer, type MuxConnection } from "@my-agent/trigger";
+import { SessionController } from "@my-agent/trigger";
+import { sessionListeners } from "@my-agent/trigger";
+import type { FrameSink } from "@my-agent/trigger";
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall, type FakeTransport } from "./fake-transport.ts";
 
@@ -104,7 +104,7 @@ async function openRig(): Promise<Rig> {
 	const sessionHub = new SessionHub({ workDirAbsPath: root, chatTransport: transport.chatTransport, modelsHome: join(root, "agent-home") });
 	sessionHub.setModelConfigs([ROW]);
 	const muxServer = createMuxServer({ sessionHub }, {});
-	// 与 boot.ts 同一套接线：controller 的删除经 sessionListeners 落到 hub 的行存储上。
+	// 与 start 的同一套接线：controller 的删除经 sessionListeners 落到 hub 的行存储上。
 	const sessionController = new SessionController(sessionHub, sessionListeners({ sessionHub }));
 
 	return {

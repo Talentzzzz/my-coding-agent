@@ -30,13 +30,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer as createTcpServer } from "node:net";
 import { spawn } from "node:child_process";
-import { bootServer, muxUpgrade, sessionListeners } from "../packages/server/src/boot.ts";
-import { createMuxServer, type MuxServer } from "../packages/server/src/mux.ts";
-import { SessionHub } from "../packages/server/src/hub.ts";
-import { SessionController, SystemController } from "../packages/server/src/controllers/sessions.ts";
-import { createRoutes } from "../packages/server/src/controllers/routes.ts";
-import { Router } from "../packages/server/src/http/routing.ts";
-import { createServer } from "../packages/server/src/http.ts";
+import { start } from "@my-agent/app";
+import { muxUpgrade, sessionListeners } from "@my-agent/trigger";
+import { createMuxServer, type MuxServer } from "@my-agent/trigger";
+import { SessionHub } from "@my-agent/case";
+import { SessionController, SystemController } from "@my-agent/trigger";
+import { createRoutes } from "@my-agent/trigger";
+import { Router } from "@my-agent/trigger";
+import { createServer } from "@my-agent/trigger";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import { mountSession } from "./mount-session.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
@@ -686,7 +687,7 @@ try {
 // from the ledger the way the old one did, and the banner it shows is still answerable. The sidebar
 // does not pay that derivation on startup: the snapshot's `suspended` marker lights the row in the
 // cold overview, before anything opens the session. What must NOT survive is a memory-resident
-// promise: nothing here is "an entry remembers it", and the child is a real `main.ts` over the same
+// promise: nothing here is "an entry remembers it", and the child is a real `serve.ts` over the same
 // agent home and the same working directory, so it can only see what the first one left on disk.
 // (The answer itself is not exercised: the child speaks to real providers.)
 //
@@ -706,7 +707,7 @@ setSessionsDir(join(restartHome, "sessions"));
 // One home for both processes: the rows the parent's prompt resolves are the rows the child reads.
 new ModelManager({ home: restartHome }).replaceRows(rows);
 const restartFake = createFakeTransport();
-const first = await bootServer({ workDirAbsPath: restartRoot, port: 0, chatTransport: restartFake.chatTransport, settingsHome: restartHome });
+const first = await start({ workDirAbsPath: restartRoot, port: 0, chatTransport: restartFake.chatTransport, settingsHome: restartHome });
 let restartSessionId = "";
 try {
 	// Startup selects nothing now, so the session this half drives is the one an explicit creation
@@ -732,12 +733,12 @@ try {
 	await first.close();
 }
 
-// `main.ts` refuses `--port 0`, so the child needs a real one; readiness is polled off `/api/health`,
+// `serve.ts` refuses `--port 0`, so the child needs a real one; readiness is polled off `/api/health`,
 // never parsed out of a child's stdout (its shutdown handler owns that stream).
 const childPort = await freePort();
 const child = spawn(
 	process.execPath,
-	[join("packages", "server", "src", "main.ts"), "--workDir", restartRoot, "--port", String(childPort)],
+	[join("packages", "app", "scripts", "serve.ts"), "--workDir", restartRoot, "--port", String(childPort)],
 	{
 		stdio: "ignore",
 		env: {
@@ -801,7 +802,7 @@ try {
 	}
 } finally {
 	const exited = new Promise<boolean>((resolve) => child.once("exit", () => resolve(true)));
-	// On POSIX this rides into `main.ts`'s own SIGTERM handler; on Windows the request terminates the
+	// On POSIX this rides into `serve.ts`'s own SIGTERM handler; on Windows the request terminates the
 	// child outright. Either way the exit must arrive, which is the part a shell depends on.
 	child.kill("SIGTERM");
 	await Promise.race([exited, sleep(5_000)]);
@@ -817,7 +818,7 @@ process.exitCode = failures === 0 ? 0 : 1;
 // The apparatus: one graph per section, and the rigs built on it.
 // ---------------------------------------------------------------------------------------------------
 
-/** One server over a hub: the real routes and the mux in front of them, the way `bootServer` wires it. */
+/** One server over a hub: the real routes and the mux in front of them, the way `start` wires it. */
 interface Graph {
 	url: string;
 	muxServer: MuxServer;
@@ -1012,7 +1013,7 @@ function resultTextOf(message: { type: "event" } & { event: { type: string; resu
 	return content.map((block) => block.text ?? "").join("");
 }
 
-/** One free port, taken and released: `main.ts` refuses `--port 0`, so the child needs a real one. */
+/** One free port, taken and released: `serve.ts` refuses `--port 0`, so the child needs a real one. */
 async function freePort(): Promise<number> {
 	const probe = createTcpServer();
 	await new Promise<void>((listen) => probe.listen(0, "127.0.0.1", listen));

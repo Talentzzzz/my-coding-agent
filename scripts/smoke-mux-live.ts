@@ -8,7 +8,7 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bootServer } from "../packages/server/src/boot.ts";
+import { start } from "@my-agent/app";
 import { MuxClient, browserSocket, type MuxHandlers } from "../packages/web/src/client.ts";
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
@@ -84,7 +84,7 @@ const transport = createFakeTransport({ tokensPerSecond: 400 });
 /** 一秒：快到让 smoke 不冗长，慢到 Windows 的调度噪声饿不死客户端的 watchdog（它的容忍是
  * 这个间隔的三次）。 */
 const heartbeatEveryMs = 1_000;
-const server = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: heartbeatEveryMs }, chatTransport: transport.chatTransport, settingsHome: home });
+const server = await start({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: heartbeatEveryMs }, chatTransport: transport.chatTransport, settingsHome: home });
 // 启动后、任何 prompt 之前交给 hub：下面那一节 run 需要一个可供运行的模型。
 server.sessionHub.setModelConfigs(modelRows);
 

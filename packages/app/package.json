@@ -9,6 +9,10 @@
 	"exports": {
 		".": "./src/index.ts"
 	},
+	"scripts": {
+		"dev": "node scripts/serve.ts --vite",
+		"start": "node scripts/serve.ts"
+	},
 	"dependencies": {
 		"@my-agent/case": "workspace:*",
 		"@my-agent/domain": "workspace:*",

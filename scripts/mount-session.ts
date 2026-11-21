@@ -12,7 +12,7 @@
 // 背后的文件里，它挂载的每个 session 都会经由那里读取。模型行同理：会话打开在哪一行是
 // 「记录的选择 → 设置默认行 → 第一行」的现算答案，这里的出生消息不点名任何一行。
 import { type Session, createSession } from "@my-agent/domain";
-import { type SessionHub } from "../packages/server/src/hub.ts";
+import { type SessionHub } from "@my-agent/case";
 
 export interface MountOptions {
 	/** session 的工具在其中解析的工作目录，也是其头部声明它所在的位置。 */

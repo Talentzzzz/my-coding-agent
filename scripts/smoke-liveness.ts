@@ -12,7 +12,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bootServer, type BootedServer } from "../packages/server/src/boot.ts";
+import { start, type BootedServer } from "@my-agent/app";
 import { MuxClient, type ChannelState, type MuxSocket, type MuxSocketFactory, type MuxSocketHandlers } from "../packages/web/src/client.ts";
 import { faultyProxy, type FaultyProxy } from "./wire/proxy.ts";
 import { until } from "./wire/client.ts";
@@ -84,7 +84,7 @@ async function running(base: string, sessionId: string): Promise<boolean> {
 // 心跳间隔是本 smoke 的整个时钟：服务器每 50 ms 说一次话，客户端容忍其中三次（它自己的规则，
 // 由 `everyMs` 推得），两个数字都远小于下方的断言窗口。
 const transport = createFakeTransport();
-const server: BootedServer = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: 50 }, chatTransport: transport.chatTransport, settingsHome: home });
+const server: BootedServer = await start({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: 50 }, chatTransport: transport.chatTransport, settingsHome: home });
 // 出生请求需要一行模型（ADR-0021：它自带第一条消息，于是那一轮当场开跑）。
 server.sessionHub.setModelConfigs(modelRows);
 const proxy: FaultyProxy = await faultyProxy(new URL(server.url));

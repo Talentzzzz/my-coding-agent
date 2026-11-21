@@ -10,11 +10,9 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "../packages/server/src/http.ts";
-import { SessionHub } from "../packages/server/src/hub.ts";
-import { SessionController, SystemController } from "../packages/server/src/controllers/sessions.ts";
-import { createRoutes } from "../packages/server/src/controllers/routes.ts";
-import { Router } from "../packages/server/src/http/routing.ts";
+import { createServer, Router, SessionController, SystemController } from "@my-agent/trigger";
+import { createRoutes } from "@my-agent/trigger";
+import { SessionHub } from "@my-agent/case";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import { mountSession } from "./mount-session.ts";
 import { type ModelConfig, ModelManager, setSessionsDir, createToolManager } from "@my-agent/domain";

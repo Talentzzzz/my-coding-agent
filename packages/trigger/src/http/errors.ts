@@ -1,4 +1,5 @@
-import { UnknownSessionError } from "@my-agent/domain";
+// 404 映射要 instanceof，而 trigger 对 domain 盲：class 经 case 的网关转发（spec §2.4）。
+import { UnknownSessionError } from "@my-agent/case/protocol";
 import type { IncomingMessage } from "node:http";
 
 /**

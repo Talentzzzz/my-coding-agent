@@ -11,7 +11,7 @@
 		"screenshot": "node scripts/launch.mjs --screenshot ui.png"
 	},
 	"dependencies": {
-		"@my-agent/server": "workspace:*"
+		"@my-agent/app": "workspace:*"
 	},
 	"devDependencies": {
 		"electron": "^44.5.1"

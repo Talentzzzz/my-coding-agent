@@ -1,6 +1,6 @@
 import type { PendingApproval, ServerFrame, SessionRow, SessionRowPatch, SessionSnapshot } from "@my-agent/case/protocol";
 import * as frame from "./frames.ts";
-import type { SessionHub, SubscriptionSink } from "./hub.ts";
+import type { SessionHub, SubscriptionSink } from "@my-agent/case";
 import {
 	CLOSE_GOING_AWAY,
 	REASON_SHUTTING_DOWN,
@@ -10,6 +10,12 @@ import {
 	type ResolvedWireOptions,
 	type WireOptions,
 } from "./wire.ts";
+import { WebSocketConnection } from "./http/websocket.ts";
+import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
+
+/** mux 所在的路径。只有这一个，且不在 `/api` 之下：它不是 REST 资源。随 {@link muxUpgrade} 自 boot 迁入。 */
+const MUX_PATH = "/mux";
 
 /**
  * mux 作为连接级 controller 注入的服务。
@@ -516,4 +522,89 @@ export class MuxServer {
 /** 构建一个带默认值的服务器，或带上测试驱动它们加速所需的任何选项。 */
 export function createMuxServer(deps: MuxDeps, options: MuxOptions = {}): MuxServer {
 	return new MuxServer(deps, resolveWireOptions(options));
+}
+
+/** 请求 URL 的路径，不含 query。 */
+function pathOf(url: string | undefined): string {
+	const raw = url ?? "/";
+	const end = raw.indexOf("?");
+	return end < 0 ? raw : raw.slice(0, end);
+}
+
+/**
+ * mux 的 `upgrade` handler，作为它所服务服务器的一个函数。
+ *
+ * 这段 wiring 不是 boot 期的秘密：自建对象图的 smoke（用脚本化模型替代 provider、用自己的 hub）恰恰需要在自己的 mux 前面接上这段 wiring，复制它会让微妙的部分——在 `accept()` 返回之前到达的 frame、作为本侧唯一存活证据的 Pong——散落成三份各自漂移的拷贝。handler 对每个服务器都相同；不同的只是站在它背后的 mux。
+ */
+export function muxUpgrade(
+	muxServer: MuxServer,
+): (request: IncomingMessage, socket: Duplex, head: Buffer) => boolean {
+	return (request, socket, head) => {
+		if (pathOf(request.url) !== MUX_PATH) {
+			// 在这里销毁而不是拒绝，因为拒绝不是本服务器能做的事：只要存在任何 `upgrade` 监听器，Node 就已经把 socket 交出且永远不会再碰它。不销毁就返回会让它永远开着——而只要有一个开着，`server.close()` 就永远不回调，所以任何一个打到别的路径上的 `Upgrade:` 头都会把 shutdown 永久卡死。
+			socket.destroy();
+			return true;
+		}
+		const webSocketConnection = WebSocketConnection.accept(request, socket);
+		if (webSocketConnection === undefined) return true;
+
+		// WebSocket 之上的 `FrameSink`，让连接层的策略永远看不到 socket，frame 编解码永远看不到订阅。整个分层就系在这条缝上。
+		const frameSink: FrameSink = {
+			send: (frame) => webSocketConnection.send(JSON.stringify(frame)),
+			ping: () => webSocketConnection.ping(),
+			close: (code, reason) => webSocketConnection.close(code, reason),
+			terminate: () => webSocketConnection.terminate(),
+			get isClosed() {
+				return webSocketConnection.isClosed;
+			},
+		};
+
+		/**
+		 * 在连接对象存在之前到达的上行 frame。
+		 *
+		 * `accept()` 要 await hub 的首次行读取（overview 的播种），所以无法同步交回连接——而第一个动作就是 `open` 的客户端会把那个 frame 放在与握手同一个 TCP segment 里，它甚至在 `accept()` 被调用*之前*就被 replay。丢掉这些 frame 会让那个客户端永远等一个不会到来的 baseline，而心跳还在喂它的看门狗，令它毫无察觉。所以它们在这里按顺序等待，一旦有了可交付的对象立刻 replay。
+		 */
+		const waiting: string[] = [];
+
+		let muxConnection: MuxConnection | undefined;
+		webSocketConnection.start({
+			onMessage: (text) => {
+				if (muxConnection === undefined) {
+					if (!webSocketConnection.isClosed) waiting.push(text);
+					return;
+				}
+				muxServer.handle(muxConnection, text);
+			},
+			onClose: () => {
+				// 连接从未成为会话对象时没有东西要忘，但挂起的 frame 无论如何都要丢：已经没有可以把它们送达的对象了。
+				waiting.length = 0;
+				if (muxConnection !== undefined) muxServer.forget(muxConnection);
+			},
+			onProtocolError: (reason) => {
+				console.warn(`mux: 协议错误，关闭连接：${reason}`);
+			},
+			// 本侧能得到的唯一存活证据。没有它，连接层会把未应答的 Ping 记在一个应答完全正常的 peer 头上，并把它丢掉。
+			onPong: () => {
+				if (muxConnection !== undefined) muxServer.notePong(muxConnection);
+			},
+		});
+
+		void muxServer
+			.accept(frameSink)
+			.then((accepted) => {
+				muxConnection = accepted;
+				// 在（被 await 的）overview 读取期间结束的连接，不能留在服务器的集合里却没有留下任何能关闭它的东西。
+				if (webSocketConnection.isClosed) {
+					muxServer.forget(accepted);
+					return;
+				}
+				// 只有在确认连接活着之后才安全：它收到的第一帧是 overview，客户端反正无法把这些和自己的 frame 区分开。
+				for (const text of waiting.splice(0)) muxServer.handle(accepted, text);
+			})
+			.catch((error: unknown) => {
+				console.warn(`mux: 拒绝一个连接：${error instanceof Error ? error.message : String(error)}`);
+			});
+		if (head.length > 0) webSocketConnection.replay(head);
+		return true;
+	};
 }

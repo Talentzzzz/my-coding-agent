@@ -1,3 +1,4 @@
+// 域词汇经 case 的网关到手（R1：trigger 对 domain 盲），hub 与它的 birth 辅助经 case 的公开面。
 import {
 	type Agent,
 	coerceModelConfig,
@@ -18,10 +19,10 @@ import {
 	type ModelConfig,
 	type DirectoryGroup,
 	UnknownSessionError,
-} from "@my-agent/domain";
+} from "@my-agent/case/protocol";
 import { dirname, resolve, sep } from "node:path";
 import { httpStatus } from "../http/errors.ts";
-import { workDirAbsPathForCreate, workDirAbsPathOrThrow, type SessionHub } from "../hub.ts";
+import { workDirAbsPathForCreate, workDirAbsPathOrThrow, type SessionHub } from "@my-agent/case";
 
 /** 一个目录下存储的会话，从会话文件收窄到 wire 上承载的字段。 */
 export async function listSessions(agent: Agent, workDirAbsPath: string): Promise<SessionRef[]> {
@@ -57,6 +58,32 @@ export interface SessionListener {
 	onRenamed?(sessionId: string): void;
 	/** 一个会话被删除。hub 丢掉它的行，transport 告知其客户端。 */
 	onRemoved?(sessionId: string): void;
+}
+
+/**
+ * 会话 controller 向 transport 报告的事项，为每个服务会话的服务器接线一次。
+ *
+ * 这段 wiring 不是 boot 期的秘密，理由与 {@link muxUpgrade} 相同：自建对象图的 smoke 恰恰需要它。微妙的半截是那行日志——一次运行的失败会在观看该会话的连接上宣布，而空的订阅表意味着这个 frame 根本没有读者，所以日志是"没有人在看的失败"仍然可闻的唯一地方。复制这些日志行的 smoke 是在断言自己的拷贝；经由这里接线，它能证明的事情是：删掉这个 `console.error` 它就会变红。
+ *
+ * `hub` 是收件人：run 失败的措辞只经 hub 扇出，而 rename 和 delete 首先是*行*事实，其次才是 frame 事实——hub 的行先更新，各自发出的 frame 走的是普通的发布之路。
+ */
+export function sessionListeners(deps: { sessionHub: SessionHub }): SessionListener {
+	const { sessionHub } = deps;
+	return {
+		onRunFailure: (sessionId, message) => {
+			console.error(`会话 ${sessionId} 的运行失败：${message}`);
+			sessionHub.publishFailure(sessionId, message);
+		},
+		onCreated: (sessionId) => {
+			void sessionHub.refreshRow(sessionId);
+		},
+		onRenamed: (sessionId) => {
+			void sessionHub.refreshRow(sessionId);
+		},
+		onRemoved: (sessionId) => {
+			sessionHub.forgetRow(sessionId);
+		},
+	};
 }
 
 /**
