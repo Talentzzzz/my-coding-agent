@@ -99,7 +99,7 @@
 
 ---
 
-## 四、技术债：`packages/core/src/agent.ts` 是重建的，不是原文
+## 四、技术债：`packages/domain/src/agent/agent.ts` 是重建的，不是原文
 
 原文 §8.2 的记录，必须留着，否则未来会误以为手上的就是原始文本。
 

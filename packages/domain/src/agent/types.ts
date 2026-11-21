@@ -797,21 +797,21 @@ export interface RetrySettings {
 export const DEFAULT_MODE_NAME = "默认";
 
 /**
- * global 侧设置面板的读模型：`Agent.settings()` 从五个持有者现读、组装出的这份形状。
+ * global 侧设置面板的读模型：`Agent.settings()` 从三个持有者现读、组装出的这份形状。
  *
  * 真实的家已按设置归属重构（spec §3）分给三个持有者——行、默认模型与重试在 `models.json`，工具簇在
  * `tools.json`，队列模式在 `sessions.json`；UI 簇（外观、目录视图）已迁往
  * 客户端自己的存储（ADR-0029）——这个类型只剩**形状**：设置面板的 wire 面（ADR-0012/0019）不因
  * 搬家而改口。而一个会话自己的选择
  * 住在它 `.json` 快照的设置半（`SessionSettings`），两者在每次读取时组合成 `Settings`
- * （`packages/core/src/settings.ts`），组合是派生值，这一侧从不被任何袋持有。
+ * （`packages/domain/src/agent/settings.ts`），组合是派生值，这一侧从不被任何袋持有。
  */
 export interface GlobalSettings {
 	/**
 	 * 新会话打开在哪一行：`name`，或会话记录记录的 `<name>/<model-id>` ref。
 	 *
 	 * 两种写法都接受，因为设置面板写第一种，修复脚本写第二种。undefined 不是「没有模型」：装配会
-	 * 回落到 `DEFAULT_MODEL_NAME`（`packages/core/src/models.ts`），只有连那一行都没有的机器才打开
+	 * 回落到 `DEFAULT_MODEL_NAME`（`packages/domain/src/agent/llm/model-manager.ts`），只有连那一行都没有的机器才打开
 	 * 在第一行上。
 	 */
 	model?: string;
