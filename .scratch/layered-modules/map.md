@@ -58,13 +58,18 @@ Label: wayfinder:map
   全清单+文档收尾。基础门 = check + 四条自足 headline（tools/sessions/models/mux），smoke-api
   从步 3 入列；smoke 全留根 scripts/；守卫自写静态 import 扫描（不加 dependency-cruiser）；每步
   同步落笔该步已为真的 ADR 修订、大重写归步 6。
+- [撰写 spec 与 ADR 修订清单](issues/10-write-spec.md): **图走完**。交付
+  [spec.md](spec.md)：目标结构（§1，含包名/依赖声明/子路径导出/tsconfig 清单）、domain 内部
+  与共享内核精确名单（§2）、ContextManager（§3）、端口清单——11 方法逐条机械核对（§4）、
+  app 组合根（§5）、守卫定名 check-layering.ts（§6）、六步迁移的文件级清单与 import 重指面
+  （§7）、ADR 修订清单——新增 ADR-0030 + 修订 0006/0010/0012/0016/0023/0028 + 三份文档
+  重写点（§8）。本票机械定案：protocol 信封住 case（trigger 域盲的推论）、StartOptions /
+  start 改名、./tool 导出名、trigger 依赖声明只有 case。
 
 ## Not yet specified
 
-- 迁移每一步的具体文件清单——09 已定步序与每步的移动形状；文件级清单（哪些文件进哪步、
-  精确的 import 重指面与包名/子路径导出表）归票 10 撰写 spec 时列全。
-- 五个 workspace 的包名（`@my-agent/*`）与依赖声明清单、tsconfig / project references 调整——
-  机械活，倾向并入 spec 撰写（10）时顺手定，若发现牵扯决策再升 ticket。
+（无——票 10 交付的 spec.md 已把本节两项收编：迁移每步的文件级清单与 import 重指面归 spec
+§7，包名/依赖声明/tsconfig 调整归 spec §1.4–1.5。）
 
 ## Out of scope
 
