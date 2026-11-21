@@ -1,55 +1,67 @@
 // 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
 // packages/core 的每次 import 仍然被完整检查。
+//
+// 分层重构步 4（§2.3）之后本文件只装传输机械：`Context`、`ChatTransport`、流选项族、事件协议与
+// 模型分发形状。消息词汇、`Tool`、模型事实族被其他子包消费，已收编进 agent 根 `types.ts`（共享
+// 内核，守卫 R2）——下面的转发块让本包内部的既有 import 面（`./types.ts` / `../types.ts`）原样
+// 工作，名字与根内核是同一批符号。
 // @ts-nocheck
 /** 遥测的不透明父 context；遥测不在本裁剪构建的范围之内。 */
 export type TelemetryContext = Record<string, unknown>;
-import type { BashSettings } from "../types.ts";
+
+// —— 共享内核转发（定义独占在 ../types.ts，这里只递名字给传输机械的既有 import 面）——
+export type {
+	Api,
+	AssistantMessage,
+	CacheRetention,
+	ConstrainedSamplingConfig,
+	ImageContent,
+	ToolExecutionMode,
+	JsonValue,
+	KnownApi,
+	Message,
+	ModelCost,
+	ModelCostRates,
+	ModelCostTier,
+	ModelImageInputLimits,
+	ModelImageResizeOptions,
+	ModelInputLimits,
+	ModelPromptCache,
+	NestedToolCallRecord,
+	NestedToolCalls,
+	StopReason,
+	SystemMessage,
+	TextContent,
+	ThinkingContent,
+	ThinkingLevel,
+	Tool,
+	ToolCall,
+	ToolResult,
+	ToolResultMessage,
+	ToolRunContext,
+	ToolUpdateCallback,
+	Usage,
+	UserMessage,
+} from "../types.ts";
+
 import type { AnthropicOptions } from "./api/anthropic-messages.ts";
 import type { AssistantMessageEventStream } from "./utils/event-stream.ts";
+// 上面的转发块不把名字带进本模块作用域；本文件自己的类型（`Context` / `AssistantMessageEvent` /
+// `ImageModel` 一族）引用内核词汇，从这里显式取。
+import type {
+	Api,
+	AssistantMessage,
+	CacheRetention,
+	Message,
+	ModelCost,
+	ModelInputLimits,
+	StopReason,
+	SystemMessage,
+	Tool,
+	ToolCall,
+} from "../types.ts";
 
 export type { AssistantMessageEventStream } from "./utils/event-stream.ts";
-
-/**
- * 本构建说的唯一 chat 传输。
- *
- * 上游 pi-ai 把它能驱动的每个 API 都列在这里。这份副本只驱动 Anthropic Messages，所以列表只剩下
- * 它——而 `Api` 仍然接受任何字符串，因为模型带着一个 `api` 字段，本文件其余的泛型都是对着这个
- * 开放形状写的。
- */
-export type KnownApi = "anthropic-messages";
-
-export type Api = KnownApi | (string & {});
-
-/**
- * 本构建从不驱动的模型类型。
- *
- * 上游 pi-ai 还携带图像生成和结构化分类器的传输，这三对名字是它们幸存的全部：下面 `ModelTypeMap`
- * 所对着写的类型级骨架。没有实现、选项类型或结果类型被保留——本裁剪构建只说 Anthropic Messages。
- */
-export type KnownImageApi = "openrouter-images";
-export type ImageApi = KnownImageApi | (string & {});
-export type KnownClassifierApi = "typesafe-system-one" | "cloudflare-workers-ai-system-one" | "llama-cpp-classify";
-export type ClassifierApi = KnownClassifierApi | (string & {});
-
-export type ToolChoice = "auto" | "none";
-/**
- * 一次请求可以要求的强度。
- *
- * 四档，后三档是这条 wire 携带的 effort：以 `high` 被请求的模型想得更用力，请求里没有任何东西说明
- * 那值多少 token。用不同拼法表达 effort 的端点不是本应用建模的东西——level 按它自己的名字发送。
- *
- * `off` 是四档之一，而不是 level 的缺席：它是「什么都没要」的调用方的意思，它产生的请求说的是
- * 「不要思考」，而不是省略这个开关。
- */
-export type ThinkingLevel = "off" | "low" | "high" | "max";
-
-export type CacheRetention = "none" | "short" | "long";
-
-/**
- * 一次请求可以为每档 retention 要求的尽力而为的 prompt cache 寿命（秒）。
- * 缺失的档意味着寿命未知；pi 不会预热这样的缓存。
- */
-export type ModelPromptCache = Partial<Record<Exclude<CacheRetention, "none">, number>>;
 
 export type Transport = "sse" | "websocket" | "websocket-cached" | "auto";
 
@@ -92,7 +104,7 @@ export interface ProviderRequestOptions<TModel = Model<Api>> {
 	/**
 	 * 要包含在 API 请求中的可选自定义 HTTP header。
 	 * 与 provider 默认值合并；调用方的值覆盖默认 header。
-	 * 在 AWS Bedrock 上，这些经 Smithy `build` 步骤的 middleware 注入，因此被 SigV4 签名覆盖；
+	 * 在 AWS Bedrock 上，这些经 Smithy `build` 步骤的 middleware 注入，会被 SigV4 签名覆盖；
 	 * 保留 header（`x-amz-*`、`authorization`、`host`）被静默忽略，以保全 SigV4 / bearer 认证。
 	 * null 值压制 provider/API 中同名的默认 header。
 	 */
@@ -207,309 +219,7 @@ export type StreamFunction<TApi extends Api = Api, TOptions extends StreamOption
 	options?: TOptions,
 ) => AssistantMessageEventStream;
 
-export interface TextContent {
-	type: "text";
-	text: string;
-}
-
-export interface ThinkingContent {
-	type: "thinking";
-	thinking: string;
-	thinkingSignature?: string; // provider 专属的不透明或序列化的推理回放数据
-	/** 为 true 时，thinking 内容被安全过滤器涂黑。不透明的
-	 *  加密 payload 存在 `thinkingSignature` 里，以便回传给 API 实现多轮连续性。 */
-	redacted?: boolean;
-}
-
-export interface ImageContent {
-	type: "image";
-	data: string; // base64 编码的图片数据
-	mimeType: string; // 例如 "image/jpeg"、"image/png"
-}
-
-export interface ToolCall {
-	type: "toolCall";
-	id: string;
-	name: string;
-	arguments: JsonObject;
-	thoughtSignature?: string; // Google 专属：复用 thought context 的不透明签名
-}
-
-export interface Usage {
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	/** `cacheWrite` 中以 1h 保留写入的部分。只有 Anthropic 报告这个拆分。 */
-	cacheWrite1h?: number;
-	/**
-	 * 推理/thinking token，当 provider 报告它们时。这是 `output` 的子集：
-	 * `output` 已经包含这些 token。暴露推理拆分的 provider 会设为数字（可能为 0）；
-	 * 不暴露的 provider 留为 undefined。
-	 */
-	reasoning?: number;
-	totalTokens: number;
-	cost: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		total: number;
-	};
-}
-
-export type StopReason = "pending" | "stop" | "length" | "toolUse" | "error" | "aborted";
-
-export type JsonValue = null | boolean | number | string | readonly JsonValue[] | JsonObject;
-export type JsonObject = { [key: string]: JsonValue };
-
-type IsAny<T> = 0 extends 1 & T ? true : false;
-type IsExactlyJsonValue<T> = [T] extends [JsonValue] ? ([JsonValue] extends [T] ? true : false) : false;
-type IsJsonProperty<T> = IsAny<T> extends true
-	? false
-	: unknown extends T
-		? false
-		: [Exclude<T, undefined>] extends [never]
-			? true
-			: IsJsonCompatible<Exclude<T, undefined>>;
-type InvalidJsonKeys<T extends object> = {
-	[TKey in keyof T]-?: TKey extends string | number ? (IsJsonProperty<T[TKey]> extends true ? never : TKey) : TKey;
-}[keyof T];
-type IsJsonCompatible<T> = IsAny<T> extends true
-	? false
-	: unknown extends T
-		? false
-		: IsExactlyJsonValue<T> extends true
-			? true
-			: T extends null | boolean | number | string
-				? true
-				: T extends undefined
-					? false
-					: T extends readonly (infer TItem)[]
-						? IsJsonCompatible<TItem>
-						: T extends (...args: never[]) => unknown
-							? false
-							: T extends object
-								? [InvalidJsonKeys<T>] extends [never]
-									? true
-									: false
-								: false;
-
-/** 一个类型化内存值的 JSON 表示。可选的对象属性仍为可选。 */
-export type JsonRepresentation<T> = IsAny<T> extends true
-	? JsonValue
-	: unknown extends T
-		? JsonValue
-		: [T] extends [JsonValue]
-			? T
-			: T extends readonly unknown[]
-				? { [TKey in keyof T]: JsonRepresentation<Exclude<T[TKey], undefined>> }
-				: T extends object
-					? { [TKey in keyof T]: JsonRepresentation<Exclude<T[TKey], undefined>> }
-					: never;
-
-/**
- * system prompt，由请求的开头消息携带。
- *
- * 每个请求一条且始终在最前：本构建没有任何东西会把 system 消息追加到对话中间，传输会丢弃递给它的
- * 任何多余 system 消息。工具不是它的一部分——工具走请求（`Context.tools`），不装在消息里。
- */
-export interface SystemMessage {
-	role: "system";
-	/** prompt 文本。 */
-	content: string | TextContent[];
-	timestamp: number; // Unix 时间戳，毫秒
-}
-
-export interface UserMessage {
-	role: "user";
-	content: string | (TextContent | ImageContent)[];
-	timestamp: number; // Unix 时间戳，毫秒
-}
-
-export interface AssistantMessage {
-	role: "assistant";
-	content: (TextContent | ThinkingContent | ToolCall)[];
-	api: Api;
-	model: string;
-	responseModel?: string; // provider 报告的具体模型，与请求的 `model` 不同时
-	responseId?: string; // 上游 API 暴露时的 provider 专属响应/消息标识
-	/** agent loop 为这条响应请求的 Pi thinking level。loop 之外和遗留响应时缺席。 */
-	thinkingLevel?: ThinkingLevel;
-	usage: Usage;
-	stopReason: StopReason;
-	errorMessage?: string;
-	rawStopReason?: string;
-	/**
-	 * provider 对模型是否显式结束了 turn 的说明。
-	 * 保留用于调试，目前不影响 agent 控制流。
-	 */
-	endTurn?: boolean;
-	timestamp: number; // Unix 时间戳，毫秒
-}
-
-/** 一个工具在运行期间发出的另一个 tool call，例如来自 codemode 脚本。 */
-export interface NestedToolCallRecord {
-	id: string;
-	name: string;
-	/** 超出大小限制时省略；`argumentsBytes` 随即给出其大小。 */
-	arguments?: JsonObject;
-	/** 参数以 JSON 计的 UTF-8 大小，省略 `arguments` 时设置。 */
-	argumentsBytes?: number;
-	/** `unfinished`：调用它的工具结束时这个 call 还在运行。 */
-	status: "ok" | "error" | "unfinished";
-	durationMs?: number;
-	/** 错误文本，已截断。 */
-	error?: string;
-}
-
-/** 一个工具发出的嵌套 call 的有界记录。不记录 result。 */
-export interface NestedToolCalls {
-	calls: NestedToolCallRecord[];
-	/** 有 call 被丢弃、参数被省略或 call 未结束时为 false。 */
-	complete: boolean;
-}
-
-export type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails> extends true
-	? {
-			role: "toolResult";
-			toolCallId: string;
-			toolName: string;
-			content: (TextContent | ImageContent)[];
-			details?: JsonRepresentation<TDetails>;
-			/** 工具执行自身的 usage，若可用。不计入主 LLM context 账目。 */
-			usage?: Usage;
-			/** 这个工具对其他工具发起的 call。为 session 记录保留；不发给模型。 */
-			nestedCalls?: NestedToolCalls;
-			isError: boolean;
-			timestamp: number; // Unix 时间戳，毫秒
-		}
-	: never;
-
-export type Message = SystemMessage | UserMessage | AssistantMessage | ToolResultMessage;
-
-import type { Static, TSchema } from "typebox";
-
-/**
- * 一个工具可选的 provider 侧受限采样配置。
- *
- * `json_schema` 值大致对应于 API 中 `strict` 的概念，后者由各 API 以 json-schema 受限采样实现。
- */
-export interface ConstrainedSamplingConfig {
-	type: "json_schema";
-	strict: "prefer" | "require";
-}
-
-/**
- * 一个 run 可以怎样执行一条 assistant 消息的 tool call。
- *
- * - "sequential"：每个 tool call 先准备、执行、收尾，然后才开始下一个。
- * - "parallel"：tool call 依次准备，然后允许的工具并发执行。每个工具收尾后按完成顺序发出
- *   `tool_execution_end`，而 tool-result 消息的产物稍后按 assistant 源顺序发出。
- */
-export type ToolExecutionMode = "sequential" | "parallel";
-
-/**
- * 工具行动所用的 per-request 值。
- *
- * 工具不绑定目录：它作用于的东西是随调用到达的值，不是实例闭包的东西。{@link workDirAbsPath} 是
- * 相对路径解析的基准、命令启动的地方；`bash` 带着为同一次请求读取的超时。两者都随调用离开，所以
- * 一个实例服务所有 session 和所有目录（ADR-0011）。
- *
- * 它住在这里、在 {@link Tool} 旁边，因为它是 `execute` 签名的一部分：签名的类型不设第二个家，
- * 否则构建会有一个 `Tool` 却有两个来源。传输从不读它、从不构造它——它在自己收到的声明上看见
- * `execute`，却永远无法调用它，所以这个参数是它拿不到的。`tools/manager.ts` re-export 这个名字，
- * 所有既有的 import 路径不变。
- */
-export interface ToolRunContext {
-	/** 相对路径解析的基准目录，命令启动的地方。没有围栏。 */
-	workDirAbsPath: string;
-	/** `bash` 的超时；调用方未指名时用默认值。 */
-	bash?: BashSettings;
-}
-
-/**
- * 唯一的工具类型。
- *
- * 传输读取的声明——name、description、parameters 和可选的受限采样配置——与引擎调用的可执行对应物
- * ——label、参数垫片、输出 schema、`execute`、重放策略、执行模式——是同一个形状，所以一次请求和
- * 一次 run 不可能在「工具是什么」上漂移。传输读声明字段、从不调用 `execute`；引擎调用 `execute`、
- * 从不从 wire 读声明。
- */
-export interface Tool<TParameters extends TSchema = TSchema, TDetails = unknown> {
-	name: string;
-	description: string;
-	parameters: TParameters;
-	constrainedSampling?: false | ConstrainedSamplingConfig;
-	/** 供 UI 展示的人类可读标签。 */
-	label: string;
-	/**
-	 * schema 校验之前对原始 tool call 参数的可选兼容垫片。
-	 * 必须返回一个匹配 `TParameters` 的对象。
-	 */
-	prepareArguments?: (args: unknown) => Static<TParameters>;
-	/**
-	 * 成功 result 中 `structuredContent` 的 JSON Schema。声明了它的工具应当始终设置
-	 * `structuredContent`。
-	 */
-	outputSchema?: TSchema;
-	/**
-	 * 执行这个 tool call。失败时抛异常，或返回 `isError: true` 的 result；不要只在 `content` 里
-	 * 描述失败。
-	 *
-	 * `run` 刻意必填且在第三位：一旦可选或挪到最后，忘了传它的调用方会无声地在实例构建时所对的
-	 * 目录里行动——而实例构建时不对应任何目录。每个调用点都说明自己属于哪次 run。
-	 */
-	execute: (
-		toolCallId: string,
-		params: Static<TParameters>,
-		run: ToolRunContext,
-		signal?: AbortSignal,
-		onUpdate?: ToolUpdateCallback<TDetails>,
-	) => Promise<ToolResult<TDetails>>;
-	/** 持久意图已存在但结果未知的动作的重放策略。 */
-	replay?: "never" | "safe";
-	/**
-	 * 单工具的执行模式覆盖。
-	 * - "sequential"：本工具必须与其他 tool call 逐个执行。
-	 * - "parallel"：本工具可以与其他 tool call 并发执行。
-	 *
-	 * 省略时适用默认执行模式。
-	 */
-	executionMode?: ToolExecutionMode;
-}
-
-/** 工具产出的最终或部分 result。 */
-export interface ToolResult<T = JsonValue | undefined> {
-	/** 返回给模型的文本或图片内容。 */
-	content: (TextContent | ImageContent)[];
-	/** 供日志或 UI 渲染使用的任意结构化细节。 */
-	details: T;
-	/**
-	 * 匹配工具 `outputSchema` 的机器可读 result，供程序化调用方使用。不发给模型；
-	 * `content` 仍是面向模型的 result。
-	 */
-	structuredContent?: JsonValue;
-	/** 最后一次工具执行自身的 usage，若可用。不用于主 LLM context 账目。 */
-	usage?: Usage;
-	/**
-	 * 不抛异常地报告失败。模型看到的 `content` 是一个错误 result，如同抛出的错误，但 `details` 和
-	 * `structuredContent` 为 UI 和程序化调用方保留。
-	 */
-	isError?: boolean;
-	/**
-	 * 提示 agent 应在当前工具批次之后停止。
-	 * 只有批次中每个已收尾的 tool result 都设为 true 时才会提前终止。
-	 */
-	terminate?: boolean;
-}
-
-/**
- * 工具用来流式发送部分执行更新的回调。
- *
- * 回调的作用域是当前的 `execute()` 调用。工具 promise 落定之后的调用被忽略。
- */
-export type ToolUpdateCallback<T = unknown> = (partialResult: ToolResult<T>) => void;
+export type ToolChoice = "auto" | "none";
 
 /**
  * 一次请求所带的 context：对话消息、作为显式开头消息的 system prompt、以及请求携带的工具。
@@ -552,6 +262,17 @@ export type AssistantMessageEvent =
 	  }
 	| { type: "error"; reason: Extract<StopReason, "aborted" | "error">; error: AssistantMessage };
 
+/**
+ * 本构建从不驱动的模型类型。
+ *
+ * 上游 pi-ai 还携带图像生成和结构化分类器的传输，这三对名字是它们幸存的全部：下面 `ModelTypeMap`
+ * 所对着写的类型级骨架。没有实现、选项类型或结果类型被保留——本裁剪构建只说 Anthropic Messages。
+ */
+export type KnownImageApi = "openrouter-images";
+export type ImageApi = KnownImageApi | (string & {});
+export type KnownClassifierApi = "typesafe-system-one" | "cloudflare-workers-ai-system-one" | "llama-cpp-classify";
+export type ClassifierApi = KnownClassifierApi | (string & {});
+
 /** Anthropic Messages 兼容 API 的兼容性设置。 */
 export interface AnthropicMessagesCompat {
 	/**
@@ -575,54 +296,6 @@ export interface AnthropicMessagesCompat {
 	/** provider 是否支持 Anthropic 的严格工具 schema。默认：false；生成的 Anthropic 模型显式启用。 */
 	supportsStrictTools?: boolean;
 }
-
-export interface ModelCostRates {
-	input: number; // 美元/百万 token
-	output: number; // 美元/百万 token
-	cacheRead: number; // 美元/百万 token
-	cacheWrite: number; // 美元/百万 token
-}
-
-export interface ModelCostTier extends ModelCostRates {
-	/** 总输入 usage 超过这个 token 数的请求使用本档。 */
-	inputTokensAbove: number;
-}
-
-export interface ModelCost extends ModelCostRates {
-	/** 请求级的定价档。最高的匹配输入阈值适用于整个请求。 */
-	tiers?: ModelCostTier[];
-}
-
-export interface ModelImageResizeOptions {
-	maxWidth?: number;
-	maxHeight?: number;
-	/** 最大 base64 编码 payload 大小（字节）。 */
-	maxBytes?: number;
-	jpegQuality?: number;
-}
-
-export interface ModelImageInputLimits {
-	/** 新图片进入对话历史之前应用的缓存安全缩放配置。 */
-	resize?: ModelImageResizeOptions;
-	/** 一条 provider 消息接受的最大图片数。 */
-	maxPerMessage?: number;
-	/** 一次 provider 请求接受的最大图片数。 */
-	maxPerRequest?: number;
-}
-
-export interface ModelInputLimits {
-	/** 序列化后的 provider 请求最大大小（字节）。 */
-	maxRequestBytes?: number;
-	images?: ModelImageInputLimits;
-}
-
-/**
- * Chat 模型：可与 `stream()` 等一起使用。
- *
- * 上游把它声明为 interface。这里是一个 class（见 `./model.ts`），让模型能自己发送请求而不是被递给
- * 别的什么东西去发；形状相同，这正是下面每个签名对着它写而无需改动的原因。
- */
-import type { Model } from "./model.ts";
 
 /**
  * 图像生成模型：只能与 `generateImages()` 一起使用。
@@ -681,3 +354,11 @@ export type ModelType = keyof ModelTypeMap;
 
 /** 任何 catalog 能列出的东西。 */
 export type AnyModel = ModelTypeMap[ModelType];
+
+/**
+ * Chat 模型：可与 `stream()` 等一起使用。
+ *
+ * 上游把它声明为 interface。这里是一个 class（见 `./model.ts`），让模型能自己发送请求而不是被递给
+ * 别的什么东西去发；形状相同，这正是上面每个签名对着它写而无需改动的原因。
+ */
+import type { Model } from "./model.ts";

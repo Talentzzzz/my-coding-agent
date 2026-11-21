@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import type { Tool, ToolResult, ToolUpdateCallback } from "../llm/index.ts";
+import type { Tool, ToolResult, ToolUpdateCallback } from "../types.ts";
 import { Type, type Static } from "typebox";
 import { DEFAULT_BASH_SETTINGS, type BashSettings } from "../types.ts";
 import { defaultLauncher } from "./shell.ts";

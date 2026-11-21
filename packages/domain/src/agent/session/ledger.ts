@@ -3,117 +3,24 @@
 // （ADR-0016）之后留在此处——Manager 与
 // 文件机件仍住在 session-manager.ts（它从这里 import 并转出口，旧消费者零改动）；本文件不 import
 // 任何 Manager 模块。
-import type { Message, Usage } from "../llm/index.ts";
+//
+// 条目族本身（`SessionEntryBase` + 六种 kind + `SessionEntry` / `SessionEntryMapById`）自分层重构
+// 步 4 起住 agent 根 types.ts（共享内核 §2.3——context 的压缩算法要摸 entry 而不得 import
+// session）；这里转发出去，让经本模块取条目类型的既有 import 路径不变。
+import type { Message, SessionEntry, SessionEntryMapById } from "../types.ts";
 import { COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX } from "./messages.ts";
 
-export interface SessionEntryBase {
-	type: string;
-	id: string;
-	parentId: string | null;
-	timestamp: string;
-}
-
-export interface MessageEntry extends SessionEntryBase {
-	type: "message";
-	message: Message;
-}
-
-export interface CompactionEntry extends SessionEntryBase {
-	type: "compaction";
-	summary: string;
-	/** 模型仍然看得见的第一条条目；它之前的一切都折进了 `summary`。 */
-	firstKeptEntryId: string;
-	tokensBefore: number;
-	/** 生成摘要那次调用的 usage，若可知。 */
-	usage?: Usage;
-}
-
-/**
- * 本构建从视图中清出的 tool result 的记录。
- *
- * result 留在文件里——这个格式从不重写一行——所以记录只指名它们，由 `buildContextEntries`
- * （session-manager.ts）应用。形状与压缩相同：一条改变更早条目含义而不改变其本身的条目，这让文件保持完整记录、会话记录
- * 保持它的一个视图。
- */
-export interface ClearToolResultEntry extends SessionEntryBase {
-	type: "clear_tool_result";
-	/** 本记录清空其 result 的条目：仍在文件里，不再在视图里。 */
-	clearedEntryIds: string[];
-	/** 清空前的预估 prompt 大小，让记录说明自己值多少。 */
-	tokensBefore: number;
-}
-
-/**
- * 本构建在视图中截短 tool call 参数的记录。
- *
- * 与 clear 相同的决策形状：参数在文件里保持完整——这个格式从不重写一行——记录指名其记录参数被
- * 截短的消息条目，由 `buildContextEntries`（session-manager.ts）应用。`write` 或 `edit` 携带的重正文活在它们改的
- * 文件里；视图只保留足以说明写了什么、写到哪的部分。
- */
-export interface TrimToolCallArgEntry extends SessionEntryBase {
-	type: "trim_tool_call_arg";
-	/** 本记录截短其记录参数的消息条目。 */
-	trimmedEntryIds: string[];
-	/** 截短前的预估 prompt 大小，让记录说明自己值多少。 */
-	tokensBefore: number;
-}
-
-/**
- * 对话移动位置的记录：`SessionManager.branch` 或 `SessionManager.resetLeaf`（都在 session-manager.ts）
- * 把叶子留在
- * 哪里，位置真的移动时才写入。
- *
- * 追加本身就推进叶子、不需要记录——文件最后一条就是位置——所以这个条目是唯一的例外，它让一次
- * 移动活得比创建它的进程更久。和每条状态条目一样，它不是会话记录：它不产生任何消息，新读者
- * 重放它来把叶子放回对话去过的位置。
- */
-export interface LeafEntry extends SessionEntryBase {
-	type: "leaf";
-	/** 对话移动到的位置：一个条目 id，null 表示「第一条之前」。 */
-	leafId: string | null;
-}
-
-/**
- * 不拥有消息条目的模型开销记录：本会话记录里引擎从未挂到 assistant 消息上的 usage。
- *
- * 这个种类存在的意义，是让没有自己消息的开销有地方落脚——会话记录属于另一个文件的 run、为压缩
- * 写的摘要——`operation` 按读者会问的方式指名这笔开销。usage 条目是钱，不是对话：它不产生任何消息，
- * 并且按文件顺序跨所有分支计数，因为在被放弃的树路径上烧掉的 token 同样烧掉了。未知的 `operation`
- * 按普通 usage 读取而不是拒绝——与文件对未知种类的前向兼容规则相同。
- */
-export interface UsageEntry extends SessionEntryBase {
-	type: "usage";
-	/** 开销归因于什么，按写入方命名。 */
-	operation: string;
-	/** 开销运行的模型行，按其名字。 */
-	model: string;
-	usage: Usage;
-}
-
-/**
- * 一行条目可能的六种类型。
- *
- * session 曾记录的其余一切——名字、模型和 thinking level、工具选择——都是*当前值*，放在这条流
- * 旁边的 `.json` 快照里；遗留的 `tool_result_view` 种类整体废除，因为本构建不再写它，v≤4 文件被
- * 删除而不是重放。剩下的恰好是会话记录无法原地重写的种类：对话本身、两条视图收缩记录、
- * 检查点、叶子位置、无归属的开销。
- */
-export type SessionEntry =
-	| MessageEntry
-	| CompactionEntry
-	| ClearToolResultEntry
-	| TrimToolCallArgEntry
-	| LeafEntry
-	| UsageEntry;
-
-/**
- * 一份会话记录的全部条目，按各自的 id 建键。
- *
- * 条目只带 `parentId`，所以沿树的每次上溯——`buildSessionPath`（session-manager.ts）、分支预览、调用方指名的
- * id——都是按 id 查找。这个 map 就是那次查找，也是 `generateId` 无冲突的原因。迭代顺序即文件
- * 顺序：按序重放 JSONL 填充，再按同样顺序追加，所以「最后一行胜出」不需要排序。
- */
-export type SessionEntryMapById = Map<string, SessionEntry>;
+export type {
+	ClearToolResultEntry,
+	CompactionEntry,
+	LeafEntry,
+	MessageEntry,
+	SessionEntry,
+	SessionEntryBase,
+	SessionEntryMapById,
+	TrimToolCallArgEntry,
+	UsageEntry,
+} from "../types.ts";
 
 /**
  * 一个 session 自己的选择，从盘上快照的扁平字段重新组合。

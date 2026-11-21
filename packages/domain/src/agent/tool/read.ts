@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import type { Tool, ToolResult } from "../llm/index.ts";
+import type { Tool, ToolResult } from "../types.ts";
 import { Type, type Static } from "typebox";
 import { displayToolPath, resolveToolPath } from "./workdir.ts";
 import { textResult, throwIfAborted } from "./types.ts";

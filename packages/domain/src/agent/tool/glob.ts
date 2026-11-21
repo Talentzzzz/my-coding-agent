@@ -1,5 +1,5 @@
 import { glob, stat } from "node:fs/promises";
-import type { Tool } from "../llm/index.ts";
+import type { Tool } from "../types.ts";
 import { isAbsolute, resolve } from "node:path";
 import { Type, type Static } from "typebox";
 import { displayToolPath, resolveToolPath } from "./workdir.ts";

@@ -1,10 +1,9 @@
 import { anthropicMessages, type ChatTransport } from "./llm/index.ts";
 import { Agent, type AssembleAgentStateOptions, type OpenAgentOptions, type SessionSink } from "./agent.ts";
-import { buildSystemPrompt } from "./context/system-prompt.ts";
+import { ContextManager } from "./context/manager.ts";
 import { createHooks, type Hooks } from "./hooks.ts";
 import { ModelManager } from "./llm/model-manager.ts";
 import { SessionManager } from "./session/session-manager.ts";
-import { approvalToolsOf } from "./settings.ts";
 import { type ToolManager, createToolManager } from "./tool/index.ts";
 
 /**
@@ -76,21 +75,13 @@ export function createSessionAgent(options: CreateSessionAgentOptions = {}): Age
 		// 进程唯一的装配处：传输层在这里解析而不是在编排层内部给默认值，让一次运行能离开进程的每条
 		// 路都由一个文件决定。
 		chatTransport: options.chatTransport ?? anthropicMessages,
+		// 压缩与填充的算法半（分层重构 §3）：无状态、构造零依赖（ADR-0006 修订），一个实例服务本
+		// 编排层跑的所有会话。prompt 装配是它的方法；审批映射仍由编排层在调用前做（settings 知识归
+		// agent 根）。
+		contextManager: new ContextManager(),
 		// 分发的唯一出口：宿主的实现在它的分发表上应答，no-op 缺省就是空表遍历零次的语义——没人
 		// 听就什么也不发生。
 		sink: options.sink ?? noOpSink,
-		// 活跃集或审批集一变就重建，让 prompt 无法许诺会话已不再拥有的工具或审批。工作目录与项目指示
-		// 按请求递交、出于与不被捕获同样的理由：一个 builder 服务该编排层跑的所有会话，这两个事实属于
-		// 会话，不属于 builder。
-		systemPrompt: (workDirAbsPath, agentsMd, toolNames, approvals) =>
-			buildSystemPrompt({
-				workDirAbsPath,
-				toolNames,
-				// 映射闸住的每个工具，不只是活跃的那些：映射是会话完整的决定，被收窄掉的工具，prompt
-				// 仍该说它被闸着，而不是悄悄略去。
-				approvalTools: approvalToolsOf(approvals),
-				agentsMd,
-			}),
 	});
 	// 闸门安装在调用方拿回来的面上、在构造之后，因为它经它所属的编排层分发（`session.authorize`）
 	// ——内建在类里的处理器只能够到它所需的一半。
@@ -107,8 +98,8 @@ export function createSessionAgent(options: CreateSessionAgentOptions = {}): Age
  *
  * 没有默认的 `after_tool`：那里的改写是定稿——账本保存的正是 hooks 返回的内容——所以这条接缝
  * 属于有理由改写的人。曾经住在这里的输出兜底搬去了写边界（`agent.ts` 的 `finalizeToolResult`），
- * 在那里接住没人约束过的结果而不必花一个 hook；想自己约束结果的 hook 用 `archiveToolResult` 归档
- * 全文并把路径放进返回的 content。
+ * 在那里接住没人约束过的结果而不必花一个 hook；想自己约束结果的 hook 用 `archiveToolResult`（context
+ * 包，自 hooks.ts 迁入）归档全文并把路径放进返回的 content。
  */
 function installDefaultHooks(hooks: Hooks, agent: Agent): void {
 	hooks.on("before_tool", async ({ sessionId, toolCallId, toolName, args }) => {

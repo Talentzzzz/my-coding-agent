@@ -1,5 +1,5 @@
 import type { QueueMode } from "../types.ts";
-import type { Message } from "../llm/index.ts";
+import type { Message } from "../types.ts";
 
 /**
  * 一条已被接受但尚未取走的用户消息，以 wire 携带的样子。

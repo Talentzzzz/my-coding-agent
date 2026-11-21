@@ -7,7 +7,7 @@
 
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { Tool, ToolResult, ToolRunContext, ToolUpdateCallback } from "../llm/index.ts";
+import type { Tool, ToolResult, ToolRunContext, ToolUpdateCallback } from "../types.ts";
 // 类型方向：types.ts 从这里 import BashSettings/ModeSettings 的类型名（设置归属重构 §5 随簇搬迁），
 // 但那一条是 type import，编译期即抹掉——运行期 types.ts 是不依赖业务模块的叶子，无加载环。
 import { AGENT_HOME, DEFAULT_BASH_SETTINGS, DEFAULT_GLOBAL_SETTINGS, DEFAULT_MODE_NAME, settingsPath } from "../types.ts";

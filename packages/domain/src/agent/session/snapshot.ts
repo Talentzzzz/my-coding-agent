@@ -1,5 +1,4 @@
-import type { Message } from "../llm/index.ts";
-import type { Api, Model, Usage } from "../llm/index.ts";
+import type { Api, Message, Model, Usage } from "../types.ts";
 import type { BranchPoint, SessionEntry, SessionManager, Session } from "./session-manager.ts";
 import type { QueuedPrompt } from "./queues.ts";
 

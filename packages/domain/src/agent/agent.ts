@@ -21,17 +21,10 @@ import {
 	type Usage,
 	validateToolArguments,
 } from "./llm/index.ts";
-import type { ToolRunContext } from "./llm/types.ts";
-import { type AgentsMdFile, loadAgentsMd } from "./context/agents-md.ts";
-import {
-	compact as compactTranscript,
-	compactionThresholdFor,
-	estimateTokens,
-	shouldCompact,
-	type Summarize,
-} from "./context/compaction.ts";
+import type { ToolRunContext } from "./types.ts";
+import { type ContextManager } from "./context/manager.ts";
+import type { Summarize } from "./context/types.ts";
 import { clearableToolResultIds, isCacheProbablyExpired } from "./context/clear-tool-results.ts";
-import { spillOversizedToolResult } from "./context/spill.ts";
 import { trimmableToolArgEntryIds } from "./context/trim-tool-call-args.ts";
 import { boundToolContent, type HookEvent, type HookResult, type Hooks } from "./hooks.ts";
 import {
@@ -62,7 +55,7 @@ import {
 } from "./session/session-manager.ts";
 import type { PendingMessageQueue, PromptBehavior } from "./session/queues.ts";
 import { sessionSnapshot, type PendingApproval, type SessionSnapshot } from "./session/snapshot.ts";
-import { resolveSettings, type Settings } from "./settings.ts";
+import { approvalToolsOf, resolveSettings, type Settings } from "./settings.ts";
 import { UnknownSessionError } from "./session/unknown-session.ts";
 import { createToolManager, type ToolManager, type ToolDefaultsPatch } from "./tool/index.ts";
 import { type AgentEvent, type AgentRequestUpdate, type ConfigPatch, type GlobalSettings, type QueueMode, type RetrySettings, type RunRecoveryOptions, type SettingsPatch, type ToolCallAnswer, type ToolCallOutcome } from "./types.ts";
@@ -123,18 +116,11 @@ export interface AgentConfig {
 	 */
 	hooks: Hooks;
 	/**
-	 * 从会话的实时设置出发，为模型可以调用的工具构建 prompt。
-	 *
-	 * 是函数而不是字符串，因为它点名的两样东西会在会话中途变化：活跃工具集，以及其中哪些工具要审批。
-	 * 一条被捕获的 prompt 会向模型提供运行随后拒绝执行的工具，或许诺一个会话已不再要求的审批。工作
-	 * 目录与项目指示按请求递交，出于同样的理由。
+	 * 压缩与填充的算法半的持有者（分层重构 §3）：触发计算、token 估算、摘要产出、prompt 装配与
+	 * 结果归档是它的方法；触发序列、记账与发事件仍是本类的私有方法。由工厂构造递入——无状态、
+	 * 构造零依赖（ADR-0006 修订），一个实例服务本编排层跑的所有会话。
 	 */
-	systemPrompt: (
-		workDirAbsPath: string,
-		agentsMd: readonly AgentsMdFile[],
-		toolNames: readonly string[],
-		approvals: Record<string, boolean>,
-	) => string;
+	contextManager: ContextManager;
 	/**
 	 * 本会话每个请求走的传输层。
 	 *
@@ -232,8 +218,8 @@ export class Agent {
 	readonly hooks: Hooks;
 
 	private readonly toolManager: ToolManager;
-	/** 请求据此构建的 prompt builder；调用它的是按请求填充链（`prepareRequest`）。 */
-	private readonly systemPrompt: AgentConfig["systemPrompt"];
+	/** 压缩与填充的算法半（分层重构 §3）；`prepareRequest` 与压缩阶梯调用它的方法。 */
+	private readonly contextManager: ContextManager;
 	/** 请求真正离开的地方：传输层，重试策略包上它之前的那个。 */
 	private readonly chatTransport: ChatTransport;
 	/** 事件与快照离开编排层的地方：构造注入的 sink，fanout 在 emit 点直调它。 */
@@ -254,7 +240,7 @@ export class Agent {
 		this.modelManager = config.modelManager;
 		this.toolManager = config.toolManager;
 		this.hooks = config.hooks;
-		this.systemPrompt = config.systemPrompt;
+		this.contextManager = config.contextManager;
 		this.chatTransport = config.chatTransport;
 		this.sink = config.sink;
 		// 这里不构建任何 per-session 的东西：状态由 `open` 在这些服务之上装配，id 在每个方法的开头
@@ -431,7 +417,7 @@ export class Agent {
 	 */
 	private finalizeToolResult(session: Session, message: Message): Message {
 		if (message.role !== "toolResult") return message;
-		const spilled = spillOversizedToolResult(
+		const spilled = this.contextManager.spillOversizedToolResult(
 			session.settings.workDirAbsPath,
 			session.sessionId,
 			message.toolName,
@@ -1403,16 +1389,13 @@ export class Agent {
 		);
 		// prompt 在这里重建、不被记住：`applyConfig` 能挪审批集、模式能挪工具集，而模型必须在下一个
 		// 请求上被告知两者。两者都在此刻从同一份组合读取，所以刚落下的选择就是 prompt 描述的东西。
+		// 装配（项目指示的走读在内）归注入的 ContextManager（分层重构 §3）；审批工具的映射在这里做
+		// ——settings 知识归 agent 根。
 		const toolFace = this.activeToolsOf(resolved);
-		// 项目指示在这里、按请求读取，而不是从状态上取：磁盘文件的一次编辑应当抵达下一个请求，与
-		// 模型行的一次编辑相同，而这段走读只是几次 stat。它的代价是一段 prompt 可能在同一次运行的
-		// 两个请求之间变化——工具集出于同样的理由已经如此。
-		const agentsMd = await loadAgentsMd(session.settings.workDirAbsPath);
-		const prompt = this.systemPrompt(
+		const prompt = await this.contextManager.buildRequestPrompt(
 			session.settings.workDirAbsPath,
-			agentsMd,
 			toolFace.names,
-			resolved.approval,
+			approvalToolsOf(resolved.approval),
 		);
 		// 请求携带的工具结果按重放侧读取（`contextEntries` 已应用账本自己的视图记录），所以没有
 		// 按请求对它们的另一次遍历：账本里的工具结果已经是喂给模型的那个版本。
@@ -1625,14 +1608,14 @@ export class Agent {
 		signal: AbortSignal | undefined,
 		model: Model,
 	): Promise<readonly SessionEntry[]> {
-		const threshold = compactionThresholdFor(model.contextWindow);
-		if (!shouldCompact(messagesOf(entries), threshold)) return entries;
+		const threshold = this.contextManager.compactionThresholdFor(model.contextWindow);
+		if (!this.contextManager.shouldCompact(messagesOf(entries), threshold)) return entries;
 
 		const trimmed = this.trimRecordedArgs(agentState, session, entries);
-		if (!shouldCompact(messagesOf(trimmed), threshold)) return trimmed;
+		if (!this.contextManager.shouldCompact(messagesOf(trimmed), threshold)) return trimmed;
 
 		const cleared = this.clearStaleToolResults(agentState, session, trimmed, now);
-		if (!shouldCompact(messagesOf(cleared), threshold)) return cleared;
+		if (!this.contextManager.shouldCompact(messagesOf(cleared), threshold)) return cleared;
 
 		// 压缩唯一完成的一件事：与那一轮相同的模型，带着摘要指令。它是调用方的模型——本次请求构建所
 		// 用的那一个——所以摘要携带与它所概括的对话相同的密钥、端点与窗口，而不是另起一份配置。
@@ -1660,7 +1643,9 @@ export class Agent {
 
 		let outcome;
 		try {
-			outcome = await compactTranscript(cleared, model, summarize, signal);
+			// 投影函数在这里注入（分层重构 §3）：`sessionEntryToContextMessages` 留 session 包，算法半
+			// 对 session 零 import，由编排层把两者接到一起。
+			outcome = await this.contextManager.compact(cleared, sessionEntryToContextMessages, model, summarize, signal);
 		} catch (error) {
 			// abort 不是压缩失败：运行正在结束，会话记录 简单地保留它已有的历史。其余的值得大声说
 			// 出来，因为下一个请求可能就是溢出的那一个。
@@ -1690,7 +1675,7 @@ export class Agent {
 			firstKeptEntryId: outcome.firstKeptEntryId,
 			summarized: outcome.summarized,
 			tokensBefore: outcome.tokensBefore,
-			contextTokens: estimateTokens(messagesOf(compacted)),
+			contextTokens: this.contextManager.estimateTokens(messagesOf(compacted)),
 		});
 		return compacted;
 	}
@@ -1711,14 +1696,14 @@ export class Agent {
 		const trimmed = trimmableToolArgEntryIds(entries);
 		if (trimmed.length === 0) return entries;
 
-		const tokensBefore = estimateTokens(messagesOf(entries));
+		const tokensBefore = this.contextManager.estimateTokens(messagesOf(entries));
 		this.sessionManager.appendTrimToolCallArgs(session, trimmed, tokensBefore);
 		const view = this.contextEntries(session);
 		this.emitEvent(agentState, {
 			type: "tool_call_args_trimmed",
 			trimmed: trimmed.length,
 			tokensBefore,
-			contextTokens: estimateTokens(messagesOf(view)),
+			contextTokens: this.contextManager.estimateTokens(messagesOf(view)),
 		});
 		return view;
 	}
@@ -1740,14 +1725,14 @@ export class Agent {
 		const cleared = clearableToolResultIds(entries);
 		if (cleared.length === 0) return entries;
 
-		const tokensBefore = estimateTokens(messagesOf(entries));
+		const tokensBefore = this.contextManager.estimateTokens(messagesOf(entries));
 		this.sessionManager.appendClearToolResults(session, cleared, tokensBefore);
 		const view = this.contextEntries(session);
 		this.emitEvent(agentState, {
 			type: "tool_results_cleared",
 			cleared: cleared.length,
 			tokensBefore,
-			contextTokens: estimateTokens(messagesOf(view)),
+			contextTokens: this.contextManager.estimateTokens(messagesOf(view)),
 		});
 		return view;
 	}

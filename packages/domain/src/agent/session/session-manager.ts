@@ -21,13 +21,12 @@ import type { Dirent } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
-import type { Message } from "../llm/index.ts";
-import { type Usage, uuidv7 } from "../llm/index.ts";
+import type { Message, Usage } from "../types.ts";
+import { uuidv7 } from "../types.ts";
 // types.ts 的常量（AGENT_HOME/DEFAULT_GLOBAL_SETTINGS/settingsPath）在运行期叶子模块上（它对外
 // 只递类型），持有者回落常量、编排层装配持有者，箭头只朝一个方向流——顶层求值也安全。
 import { AGENT_HOME, APP_NAME, DEFAULT_GLOBAL_SETTINGS, settingsPath, type QueueMode } from "../types.ts";
-import { trimToolCallArgs } from "../context/trim-tool-call-args.ts";
-import { clearToolResult } from "../context/clear-tool-results.ts";
+import { clearToolResult, trimToolCallArgs } from "./view.ts";
 import { compactionSummaryOf } from "./messages.ts";
 import { normalizePath, resolvePath, sessionJsonlPath, sessionMetaPath, sessionPath, sessionsDir } from "./paths.ts";
 import { UnknownSessionError } from "./unknown-session.ts";

@@ -1,5 +1,11 @@
-import { type Api, type AssistantMessage, contentText, type Message, type Model, type Usage } from "../llm/index.ts";
-import { sessionEntryToContextMessages, type SessionEntry } from "../session/session-manager.ts";
+// 压缩的算法半（分层重构 §3）：触发计算、候选选择、token 估算与摘要产出。编排半（触发序列、记账、
+// 发事件）留在 `Agent.compactFor`（agent.ts）。对 session 子包零 import（R2）——条目投影经 `project`
+// 参数注入，由 Agent 递入 `sessionEntryToContextMessages`；条目与消息词汇住根 types.ts 共享内核。
+import { contentText, type Api, type AssistantMessage, type Message, type Model, type SessionEntry } from "../types.ts";
+import type { CompactionPreparation, CompactionResult, Summarize } from "./types.ts";
+
+/** 条目投影：一条条目 → 模型看到的消息。调用方注入（`sessionEntryToContextMessages`），包内不认 session。 */
+type Project = (entry: SessionEntry) => Message[];
 
 /**
  * 粗略 token 估算：约四个字符一个 token。
@@ -33,29 +39,10 @@ export function compactionThresholdFor(contextWindow: number): number {
 	return contextWindow - reserve;
 }
 
-/** 一次压缩的产物，随时可用 `appendCompaction` 写入。 */
-export interface CompactionResult {
-	summary: string;
-	firstKeptEntryId: string;
-	tokensBefore: number;
-	/** 摘要现在代表多少条消息。 */
-	summarized: number;
-	usage?: Usage;
-}
-
 /** 会话记录大到下一次请求有溢出窗口的风险时为 true。 */
 export function shouldCompact(messages: readonly Message[], threshold: number): boolean {
 	if (threshold <= 0) return false;
 	return estimateTokens(messages) > threshold;
-}
-
-export interface CompactionPreparation {
-	firstKeptEntryId: string;
-	/** 被摘要替换的消息，按顺序。 */
-	messagesToSummarize: Message[];
-	tokensBefore: number;
-	/** 上一次压缩写的摘要，当本次是在其上精修而不是从头再来。 */
-	previousSummary?: string;
 }
 
 /**
@@ -65,7 +52,7 @@ export interface CompactionPreparation {
  * 之后的一切——以消息形式存活，因为那才是下一次请求真正关于的内容。遍历从最新的压缩之后开始，
  * 它的摘要已经代表之前的一切。
  */
-export function prepareCompaction(contextEntries: readonly SessionEntry[]): CompactionPreparation | undefined {
+export function prepareCompaction(contextEntries: readonly SessionEntry[], project: Project): CompactionPreparation | undefined {
 	const last = contextEntries[contextEntries.length - 1];
 	// 压缩已经是 context 里最新的东西；它之后没有可以折入的。
 	if (last?.type === "compaction") return undefined;
@@ -74,17 +61,17 @@ export function prepareCompaction(contextEntries: readonly SessionEntry[]): Comp
 	const previous = boundaryStart === 1 ? contextEntries[0] : undefined;
 	const previousSummary = previous?.type === "compaction" ? previous.summary : undefined;
 
-	const cutIndex = findCutPoint(contextEntries, boundaryStart);
+	const cutIndex = findCutPoint(contextEntries, boundaryStart, project);
 	const firstKept = cutIndex === undefined ? undefined : contextEntries[cutIndex];
 	if (!firstKept) return undefined;
 
-	const messagesToSummarize = contextEntries.slice(boundaryStart, cutIndex).flatMap(entryMessagesForSummary);
+	const messagesToSummarize = contextEntries.slice(boundaryStart, cutIndex).flatMap((entry) => entryMessagesForSummary(entry, project));
 	if (messagesToSummarize.length === 0) return undefined;
 
 	return {
 		firstKeptEntryId: firstKept.id,
 		messagesToSummarize,
-		tokensBefore: estimateTokens(contextEntries.flatMap(sessionEntryToContextMessages)),
+		tokensBefore: estimateTokens(contextEntries.flatMap(project)),
 		...(previousSummary === undefined ? {} : { previousSummary }),
 	};
 }
@@ -96,30 +83,20 @@ export function prepareCompaction(contextEntries: readonly SessionEntry[]): Comp
  * 消息和回答它的 tool result 拆开——provider 会拒绝 call 缺失的 tool result。落在边界上的切点意味
  * 着之前的一切已经是摘要，与「不压缩」是同一个答案。
  */
-function findCutPoint(contextEntries: readonly SessionEntry[], startIndex: number): number | undefined {
+function findCutPoint(contextEntries: readonly SessionEntry[], startIndex: number, project: Project): number | undefined {
 	for (let index = contextEntries.length - 1; index > startIndex; index--) {
 		const entry = contextEntries[index]!;
 		if (entry.type === "compaction") continue;
-		if (sessionEntryToContextMessages(entry).some((message) => message.role === "user")) return index;
+		if (project(entry).some((message) => message.role === "user")) return index;
 	}
 	return undefined;
 }
 
 /** 一条条目为摘要贡献的内容：它的对话部分，prompt 状态和检查点除外。 */
-function entryMessagesForSummary(entry: SessionEntry): Message[] {
+function entryMessagesForSummary(entry: SessionEntry, project: Project): Message[] {
 	if (entry.type === "compaction") return [];
-	return sessionEntryToContextMessages(entry).filter((message) => message.role !== "system");
+	return project(entry).filter((message) => message.role !== "system");
 }
-
-/** session 知道怎么完成的一次补全；压缩提供 prompt，不管管道。 */
-export interface SummarizeRequest {
-	systemPrompt: string;
-	prompt: string;
-	maxTokens: number;
-	signal?: AbortSignal;
-}
-
-export type Summarize = (request: SummarizeRequest) => Promise<AssistantMessage>;
 
 /**
  * 压缩会话记录：摘要一切已结束的内容，报告要保留的 turn。
@@ -129,14 +106,15 @@ export type Summarize = (request: SummarizeRequest) => Promise<AssistantMessage>
  */
 export async function compact(
 	contextEntries: readonly SessionEntry[],
+	project: Project,
 	model: Model<Api>,
-	complete: Summarize,
+	summarize: Summarize,
 	signal?: AbortSignal,
 ): Promise<CompactionResult | undefined> {
-	const preparation = prepareCompaction(contextEntries);
+	const preparation = prepareCompaction(contextEntries, project);
 	if (!preparation) return undefined;
 
-	const response = await complete({
+	const response = await summarize({
 		systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
 		prompt: summarizationPrompt(preparation),
 		maxTokens: summarizationMaxTokens(model),

@@ -4,7 +4,7 @@
 // `agent.ts` re-export 对外的四个，所以没有任何调用方的 import 需要变——引擎随 ADR-0016 并回编排
 // 层，sink 的实现仍在那里。
 import type { AgentEvent } from "../types.ts";
-import type { Message } from "../llm/index.ts";
+import type { Message } from "../types.ts";
 import type { QueuedPrompt } from "./queues.ts";
 import type { SessionSnapshot } from "./snapshot.ts";
 import type { SessionEntry } from "./session-manager.ts";

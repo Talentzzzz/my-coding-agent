@@ -1,5 +1,5 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import type { Tool } from "../llm/index.ts";
+import type { Tool } from "../types.ts";
 import { dirname } from "node:path";
 import { Type, type Static } from "typebox";
 import { displayToolPath, resolveToolPath } from "./workdir.ts";

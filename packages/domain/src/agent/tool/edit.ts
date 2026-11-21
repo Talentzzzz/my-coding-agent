@@ -1,5 +1,5 @@
 import { readFile, stat, writeFile } from "node:fs/promises";
-import type { Tool } from "../llm/index.ts";
+import type { Tool } from "../types.ts";
 import { Type, type Static } from "typebox";
 import { displayToolPath, resolveToolPath } from "./workdir.ts";
 import { DIFF_MAX_ROWS, diffText, fileDiff } from "./diff.ts";
