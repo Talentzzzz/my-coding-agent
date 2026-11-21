@@ -8,7 +8,12 @@
 		"packages/core",
 		"packages/server",
 		"packages/web",
-		"packages/desktop"
+		"packages/desktop",
+		"packages/app",
+		"packages/trigger",
+		"packages/case",
+		"packages/domain",
+		"packages/infra"
 	],
 	"scripts": {
 		"check": "tsc -p tsconfig.json && tsc -p packages/web/tsconfig.json && node scripts/check-tokens.ts packages/web/src/tokens.css packages/web/src/style.css && node scripts/check-server-facade.ts",

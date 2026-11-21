@@ -1,0 +1,15 @@
+{
+	"name": "@my-agent/infra",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"description": "Storage implementations for the ports declared by domain: session file pairs, home JSON files, tool-results archive",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@my-agent/domain": "workspace:*"
+	}
+}
