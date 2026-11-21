@@ -1,4 +1,4 @@
-import type { Message } from "../llm/index.ts";
+import type { Message } from "../types.ts";
 
 /**
  * 一个压缩检查点，会话记录携带它的方式。

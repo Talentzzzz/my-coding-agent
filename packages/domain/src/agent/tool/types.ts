@@ -1,4 +1,4 @@
-import type { ToolResult } from "../llm/index.ts";
+import type { ToolResult } from "../types.ts";
 
 /** 把纯文本包装成 tool result。 */
 export function textResult(text: string, details?: unknown): ToolResult<unknown> {

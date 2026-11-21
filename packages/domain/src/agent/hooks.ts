@@ -1,9 +1,5 @@
-import type { Message, ToolResult } from "./llm/index.ts";
+import type { Message, ToolResult, ToolResultContent } from "./types.ts";
 import { truncate } from "./tool/truncate.ts";
-import { spillPathFor, spillText, spillView, writeSpillFile, SPILL_KEEP_CHARS } from "./context/spill.ts";
-
-/** 工具结果如何携带内容：按顺序排列的文本与图片块。 */
-export type ToolResultContent = ToolResult<unknown>["content"];
 
 /** 处理器的答案，或它的 promise：审批闸门在用户作答之前无法作答。 */
 type MaybePromise<T> = T | Promise<T>;
@@ -150,29 +146,4 @@ function charsForBytes(text: string, maxBytes: number): number {
 	const bytes = Buffer.byteLength(text);
 	if (bytes <= maxBytes) return text.length;
 	return Math.floor((text.length * maxBytes) / bytes);
-}
-
-/**
- * 把一个工具结果整体归档，并以 `after_tool` 处理器返回的内容作答。
- *
- * 这条接缝现在承载的写侧规则是：**改写即定稿**——账本保存的正是处理器返回的内容，所以要约束一个
- * 结果，全文必须先去别处。这里就是那个别处，一次调用完成：它把结果的文本整体写在工作目录之下
- * （`.my-agent/tool-results/`，与写边界自身兜底相同的路径推导），并以点名该文件的头尾视图作答，
- * 需要其余部分的模型自己去读回来。文件写不下的结果原样返回，而不是「截断+一个不存在的路径」
- * ——写边界仍会约束它。
- *
- * `workDirAbsPath` 由处理器自己提供：hook 事件只点名会话，归档到哪个目录是处理器闭包里的事。
- *
- * ```ts
- * hooks.on("after_tool", (event) => archiveToolResult(event, workDirAbsPath));
- * ```
- */
-export function archiveToolResult(
-	event: { sessionId: string; toolCallId: string; toolName: string; content: ToolResultContent },
-	workDirAbsPath: string,
-): { content: ToolResultContent } {
-	const text = spillText(event.content);
-	const { absPath, relPath } = spillPathFor(workDirAbsPath, event.sessionId, event.toolName, event.toolCallId);
-	if (!writeSpillFile(absPath, text)) return { content: event.content };
-	return { content: spillView(event.content, text, relPath, SPILL_KEEP_CHARS) };
 }

@@ -6,8 +6,12 @@
 //   R1b 成员禁令——case 与 trigger 不得拼写的成员访问：原 `check-server-facade` 的
 //       bannedMembers 面随 server 包退役迁到这里继续扫（spec §6；ADR-0012/0023 族——会话操作
 //       走 Agent 公开面，hold 簿记对传输层与应用层零感知）。
+//   R2  子包隔离——domain/src/agent/ 的四个子包（context / llm / session / tool）只准 import
+//       根 types.ts、自己包内的文件、node 内建与外部依赖；互不 import，哪怕单向（spec §6 R2、
+//       §2.2）。被别的子包消费的定义独占在根 types.ts（共享内核），所以子包向上的相对 import
+//       只许指到它。随步 4 激活。
 //
-// R2（domain 子包隔离）随步 4、R3（domain 禁 fs）随步 5 再接上——激活时在这里加规则。
+// R3（domain 禁 fs）随步 5 再接上——激活时在这里加规则。
 //
 // 与 check-tokens / check-server-facade 同一套先例：一个用正则的小脚本，接进 `npm run check`，
 // 让不变量被机器检查而不是靠一条会腐烂的注释；import 说明符 → 包名映射判方向（facade 守卫的
@@ -105,6 +109,20 @@ function normalize(path: string): string {
 	return path.replaceAll("\\", "/");
 }
 
+// R2 的扫描面：domain/src/agent/ 下的四个子包目录与共享内核（根 types.ts）的住址。
+const domainAgentDir = resolve(packagesRoot, "domain", "src", "agent");
+const subpackageDirs = ["context", "llm", "session", "tool"].map((name) => normalize(resolve(domainAgentDir, name)));
+const rootTypesFile = normalize(resolve(domainAgentDir, "types.ts"));
+
+/** 文件住在哪个子包里；不在任何子包（agent 根自身）时为 undefined——R2 只管子包。 */
+function subpackageOf(path: string): string | undefined {
+	const normalizedPath = normalize(path);
+	for (const dir of subpackageDirs) {
+		if (normalizedPath.startsWith(`${dir}/`)) return dir;
+	}
+	return undefined;
+}
+
 const findings: string[] = [];
 
 for (const module of MODULES) {
@@ -122,6 +140,14 @@ for (const module of MODULES) {
 				const into = MODULES.find((m) => m !== module && target.startsWith(`${normalize(resolve(packagesRoot, m))}/`));
 				if (into !== undefined) {
 					findings.push(`${where}:${lineOf(text, offset)} 相对 import 跨进 ${into} ——跨包一律走包名`);
+				}
+				// R2：子包的相对 import 只许落在自己包内或指到根 types.ts——其余一切（别的子包、
+				// agent 根的其他文件）都是被禁的边。
+				const owningSubpackage = subpackageOf(path);
+				if (owningSubpackage !== undefined && target !== rootTypesFile && !target.startsWith(`${owningSubpackage}/`)) {
+					findings.push(
+						`${where}:${lineOf(text, offset)} ${specifier} ——子包只准 import 根 types.ts、自己包内、node 内建与外部依赖（R2）`,
+					);
 				}
 				continue;
 			}

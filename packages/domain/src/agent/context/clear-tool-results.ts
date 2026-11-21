@@ -1,5 +1,8 @@
-import type { ToolResultMessage } from "../llm/index.ts";
-import type { SessionEntry } from "../session/session-manager.ts";
+// 清空的决策半（分层重构 §3）：哪些 result 可清、缓存是否已过期。施加半（一条条目清空之后长什么
+// 样）住 session 包的 view.ts——施加归账本视图；被清空的 result 的通知文案
+// （`clearedToolResultText`）两个半都要用，住根 types.ts 共享内核（§2.3），本包对 session 零
+// import（R2）。
+import { clearedToolResultText, type SessionEntry, type ToolResultMessage } from "../types.ts";
 
 /**
  * 重跑会产出相同输出的那些工具。
@@ -23,16 +26,6 @@ const CACHE_EXPIRY_MS = 60 * 60 * 1000;
 
 /** 一次清空后有多少条最新的可重取 result 存活，无论多旧。 */
 const KEPT_TOOL_RESULTS = 5;
-
-/**
- * 被清空的 result 用来替代工具输出的内容。
- *
- * 刻意简短：一次清空批量清掉 result，一条长篇大论自我解释的通知会花掉它刚腾出来的一大块。但它仍
- * 得说明*为什么*文字没了，因为读到一条没有解释的空 result 的模型会重跑工具去弄清发生了什么。
- */
-export function clearedToolResultText(toolName: string): string {
-	return `[cleared after an hour idle — run ${toolName} again if you need this]`;
-}
 
 /**
  * provider 是否很可能已经丢弃了这个会话记录的缓存。
@@ -97,13 +90,4 @@ export function isClearedToolResult(message: ToolResultMessage): boolean {
 function isCleared(entry: SessionEntry): boolean {
 	if (entry.type !== "message" || entry.message.role !== "toolResult") return false;
 	return isClearedToolResult(entry.message);
-}
-
-/** 同一条目但 result 正文被替换。图片和其他 block 一起被替换：它们同样是可重取的。 */
-export function clearToolResult(entry: SessionEntry): SessionEntry {
-	if (entry.type !== "message" || entry.message.role !== "toolResult") return entry;
-	return {
-		...entry,
-		message: { ...entry.message, content: [{ type: "text", text: clearedToolResultText(entry.message.toolName) }] },
-	};
 }

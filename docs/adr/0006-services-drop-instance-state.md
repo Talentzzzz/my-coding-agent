@@ -18,6 +18,10 @@ hub 只认编排层公开面；其余决定不变）
 持一张按会话文件对键控的持有簿记表（易失：重启即空、不落盘、不需重建），决定 1/2 的
 「无状态服务」半在会话域的持有簿记上不再成立，与 [0011](0011-tool-manager-instance-table.md)
 的工具域例外同类；无属性门面的其余一切不变）
+取代者：分层重构步 4（spec §3/§8.5，2026-11-21；ADR-0030 五模块分层随步 5 落笔）——部分：决定 6 的
+三件进程级构造注入删一件，systemPrompt 构建函数退出注入面、被注入的 `ContextManager` 吸收；hooks /
+transport 两件不动。同日新增一条正面记录：`ContextManager` 是无属性服务的**新例**——构造零依赖
+（空集）、一个实例服务所有会话、方法收显式参数。
 
 设计过程见 `.scratch/pure-services/`（形状在 2026-11-01 的设计对话敲定，本
 ADR 只记合拢后的契约）。
@@ -83,6 +87,11 @@ TypeScript 的 `private` 继续守账本不变式。
    **（2026-11-07 Superseded，[0012](0012-agent-facade.md)：仅消费面——这组进程级配置仍留在
    构造注入上，但由 `createSessionAgent()` 造好三只 Manager 再递进编排层，编排层是它们在本进程的
    唯一消费者；「hub 装配并协调这组服务」的旧叙述不再成立，hub 只认编排层公开面。）**
+
+   **（2026-11-21 Superseded，分层重构步 4，spec §3/§8.5：三件删一件——`AgentConfig.systemPrompt`
+   注入点删除。它是一条死缝：工厂无条件接线、无任何消费者覆盖过。system prompt 的装配被注入的
+   `ContextManager.buildRequestPrompt` 吸收（先 `loadAgentsMd` 再 `buildSystemPrompt`，一次组合）；
+   hooks 与 transport 两件不动。）**
 
 ## 后果
 
@@ -168,3 +177,18 @@ server 一直直接 import 同名函数），所以删的是方法，留下的�
 
 §2「类壳保留」不变：类还在、可构造注入、程序集里只有一份；变的只是壳里不再
 是转发。
+
+## 修订（2026-11-21，分层重构步 4：ContextManager 是无属性服务的新例）
+
+压缩与填充的算法半出编排层、归注入的 `ContextManager`（spec §3；ADR-0016 的判据对引擎不变，
+变的只是算法有了属主）。它是本 ADR 形状的**新例**，与四个 Manager 并列而更纯粹：
+
+- **构造零依赖**——构造函数收空集：无状态、一个实例服务所有会话，由工厂构造
+  （`createSessionAgent`），新世界由组合根注入工厂。
+- **方法收显式参数**——entries / contextWindow / workDirAbsPath / signal / `Summarize` 回调 /
+  `project` 投影函数。不要 ChatTransport（模型由调用方构造好传入）、不要 settings（阈值从
+  `model.contextWindow` 现算）、不要 SessionManager（记账不归它）。
+
+它没有像 `ToolManager` 那样的常驻表、也没有像 `SessionManager` 那样的持有簿记——两个既有例外
+都点不到它；它连「每次读取现算」的设置文件都没有。算法半的编排半（触发序列、记账、发事件）
+仍是 `Agent` 的私有方法，所以它也不是第二只编排层。

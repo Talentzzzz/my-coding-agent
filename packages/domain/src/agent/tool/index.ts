@@ -14,30 +14,6 @@ export {
 	ToolManager,
 } from "./manager.ts";
 
-/** tool call 的简短人类可读摘要，供审批 prompt 和会话记录用。 */
-export function describeToolCall(name: string, args: unknown): string {
-	const record = isRecord(args) ? args : {};
-	switch (name) {
-		case "read":
-		case "write":
-		case "edit":
-		case "glob":
-		case "grep":
-			return `${name} ${stringField(record, "path") ?? stringField(record, "pattern") ?? ""}`.trim();
-		case "bash": {
-			const command = stringField(record, "command") ?? "";
-			return command.length > 160 ? `${command.slice(0, 157)}...` : command;
-		}
-		default:
-			return name;
-	}
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function stringField(record: Record<string, unknown>, key: string): string | undefined {
-	const value = record[key];
-	return typeof value === "string" ? value : undefined;
-}
+// `describeToolCall` 自分层重构步 4 起住 agent 根 types.ts 共享内核（§2.3）：session/dangling.ts
+// 消费它，R2 下 session 不得 import 本包。经根模块取：import { describeToolCall } from "../types.ts"。
+export { describeToolCall } from "../types.ts";
