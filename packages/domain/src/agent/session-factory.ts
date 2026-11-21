@@ -1,36 +1,37 @@
 import { anthropicMessages, type ChatTransport } from "./llm/index.ts";
 import { Agent, type AssembleAgentStateOptions, type OpenAgentOptions, type SessionSink } from "./agent.ts";
 import { ContextManager } from "./context/manager.ts";
+import type { ToolResultsRepository } from "./context/tool-results-repository.ts";
 import { createHooks, type Hooks } from "./hooks.ts";
+import type { ModelRepository } from "./llm/model-repository.ts";
 import { ModelManager } from "./llm/model-manager.ts";
+import type { SessionDefaultsRepository } from "./session/session-defaults-repository.ts";
+import type { SessionRepository } from "./session/session-repository.ts";
 import { SessionManager } from "./session/session-manager.ts";
 import { type ToolManager, createToolManager } from "./tool/index.ts";
+import type { ToolDefaultsRepository } from "./tool/tool-defaults-repository.ts";
 
 /**
  * 调用方为构建一个进程唯一的编排层所提供的东西。
  *
- * 这里的一切都是进程级的：各设置簇的持有者文件住在哪，以及每个请求从哪条传输层离开。几只 Manager
- * 本身不在清单上——工厂自己造它们，正是这一点让「表里的每个状态都是在该编排层自己的服务之上装配
- * 的」成为构造的事实，而不是调用方必须遵守的约定。两个接缝只为测试存在：smoke 递各 home（临时
- * 目录）进来，让机器自己的文件靠边站；工具表接缝让 smoke 在自己的表上注册自己的工具，让它注册的
- * 东西到不了测试之外的会话。生产代码两样都不设。
+ * 这里的一切都是进程级的：五个存储端口（会话文件对、会话簇设置、模型行、工具簇设置、tool-results
+ * 归档）全部**必填**——domain 造不出 infra，「缺省真实 home」不再是 domain 的知识（分层重构
+ * spec §5.2）；把 home 路径翻译成这些实现是组合根（`@my-agent/app`）的差事。几只 Manager 本身不在
+ * 清单上——工厂自己造它们，正是这一点让「表里的每个状态都是在该编排层自己的服务之上装配的」成为
+ * 构造的事实，而不是调用方必须遵守的约定。两个接缝只为测试存在：工具表接缝让 smoke 在自己的表上
+ * 注册自己的工具，让它注册的东西到不了测试之外的会话；sink 让宿主接住分发。生产代码两样都不设。
  */
 export interface CreateSessionAgentOptions {
-	/**
-	 * 各设置簇的持有者文件（`tools.json`、`sessions.json`；retry 随模型簇住 `models.json`）读取
-	 * 与写入所在的 agent home。默认用真实的那一个。
-	 *
-	 * 测试「会*写*设置」的命令的 smoke 不得写机器自己的文件；桌面外壳与服务器透传它们启动时所带的。
-	 */
-	settingsHome?: string;
-	/**
-	 * 模型行读取与写入所在的 agent home。默认用
-	 * {@link CreateSessionAgentOptions.settingsHome}。
-	 *
-	 * 另一个文件的同居 home：递入自己模型行的 smoke 不得把它们留在机器的 `models.json` 里，也不得
-	 * 依赖运行它的人配置了什么。
-	 */
-	modelsHome?: string;
+	/** 会话文件对（`.json` 快照 + `.jsonl` 账本）的读写端口。 */
+	sessionRepository: SessionRepository;
+	/** 会话簇设置文件（`sessions.json`，迁移源 `settings.json`）的读写端口。 */
+	sessionDefaultsRepository: SessionDefaultsRepository;
+	/** 模型行（`models.json` 及其迁移源）的读写端口。 */
+	modelRepository: ModelRepository;
+	/** 工具簇设置文件（`tools.json`，迁移源 `settings.json`）的读写端口。 */
+	toolDefaultsRepository: ToolDefaultsRepository;
+	/** tool-results 归档的只写端口：写边界的兜底归档永远有处可去。 */
+	toolResultsRepository: ToolResultsRepository;
 	/** 该编排层发出的每个请求走的传输层。默认 Anthropic Messages。 */
 	chatTransport?: ChatTransport;
 	/** 仅测试的接缝：调用方自己的工具表，取代六个内置工具。 */
@@ -60,16 +61,19 @@ const noOpSink: SessionSink = {
  * 默认处理器安装在调用方拿回来的那个面上，而不是硬编码进类里，宿主得以在它们之后加处理器、在
  * 它们的决定上精修。见 {@link installDefaultHooks}。
  */
-export function createSessionAgent(options: CreateSessionAgentOptions = {}): Agent {
+export function createSessionAgent(options: CreateSessionAgentOptions): Agent {
 	const hooks = createHooks();
 	// 只解析一次并交给编排层，它是读取一次运行可执行集合的唯一表，也是命令收窄的唯一表：在这里做
 	// 第二次解析，会让调用方自己的工具到达其中一者而到不了另一者。
-	const toolManager = options.toolManager ?? createToolManager({ home: options.settingsHome });
+	const toolManager = options.toolManager ?? createToolManager({ toolDefaultsRepository: options.toolDefaultsRepository });
 	const agent = new Agent({
-		// 账本服务与各设置簇持有者（spec §8）：各持自己的 home，默认同源——模型簇可经 modelsHome
-		// 分居。它们什么都不持有，每次读取都是对其背后文件的一次新读。
-		sessionManager: new SessionManager({ home: options.settingsHome }),
-		modelManager: new ModelManager({ home: options.modelsHome ?? options.settingsHome }),
+		// 账本服务与各设置簇持有者（spec §8）：各持自己的端口，注入的组合根负责翻译——模型簇可经
+		// 另一份实现分居。它们什么都不持有，每次读取都是对端口背后存储的一次新读。
+		sessionManager: new SessionManager({
+			sessionRepository: options.sessionRepository,
+			sessionDefaultsRepository: options.sessionDefaultsRepository,
+		}),
+		modelManager: new ModelManager({ modelRepository: options.modelRepository }),
 		toolManager,
 		hooks,
 		// 进程唯一的装配处：传输层在这里解析而不是在编排层内部给默认值，让一次运行能离开进程的每条
@@ -77,8 +81,9 @@ export function createSessionAgent(options: CreateSessionAgentOptions = {}): Age
 		chatTransport: options.chatTransport ?? anthropicMessages,
 		// 压缩与填充的算法半（分层重构 §3）：无状态、构造零依赖（ADR-0006 修订），一个实例服务本
 		// 编排层跑的所有会话。prompt 装配是它的方法；审批映射仍由编排层在调用前做（settings 知识归
-		// agent 根）。
+		// agent 根）。归档端口归编排层持有（§4.3），写边界经参数表递给它。
 		contextManager: new ContextManager(),
+		toolResultsRepository: options.toolResultsRepository,
 		// 分发的唯一出口：宿主的实现在它的分发表上应答，no-op 缺省就是空表遍历零次的语义——没人
 		// 听就什么也不发生。
 		sink: options.sink ?? noOpSink,
@@ -115,13 +120,16 @@ function installDefaultHooks(hooks: Hooks, agent: Agent): void {
  * 目录的测试。跑很多会话的进程改为只构建一次编排层，并把每份会话记录打开到它上面——见 hub
  * ——保持诚实正是这个东西存在的理由：打开会话与恢复会话是同一个动作，无论走两条路中的哪一条。
  *
- * options 有意是一组测试接缝：homes 与 tools 接缝直通工厂，会话记录与模型 options 交给
+ * options 有意是一组必填端口加测试接缝：ports 直通工厂，会话记录与模型 options 交给
  * `assembleAgentStateBySession`，这里不构建任何编排层不留住的 Manager。
  */
 export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 	const agent = createSessionAgent({
-		...(options.settingsHome === undefined ? {} : { settingsHome: options.settingsHome }),
-		...(options.modelsHome === undefined ? {} : { modelsHome: options.modelsHome }),
+		sessionRepository: options.sessionRepository,
+		sessionDefaultsRepository: options.sessionDefaultsRepository,
+		modelRepository: options.modelRepository,
+		toolDefaultsRepository: options.toolDefaultsRepository,
+		toolResultsRepository: options.toolResultsRepository,
 		...(options.toolManager === undefined ? {} : { toolManager: options.toolManager }),
 		...(options.chatTransport === undefined ? {} : { chatTransport: options.chatTransport }),
 		...(options.sink === undefined ? {} : { sink: options.sink }),

@@ -23,7 +23,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { start } from "@my-agent/app";
-import { createAssistantMessageEventStream, setRemoveGate, setSessionsDir, type ChatTransport } from "@my-agent/domain";
+import { createAssistantMessageEventStream, type ChatTransport } from "@my-agent/domain";
+import { setRemoveGate } from "@my-agent/infra";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 
 const target = new URL(process.env.MY_AGENT_URL ?? "http://127.0.0.1:8080");
@@ -398,13 +399,13 @@ async function seedModelRow(home: string): Promise<void> {
 /**
  * 时序敏感的删除用例（票 04）：进程内起真服务器，删除的否决式语义在可控 gate 下逐条断言。
  *
- * 会话注册表被 `setSessionsDir` 指进临时目录（进程级 store，仿 smoke-sessions），所以盘上残留的
- * 检查读的就是这个目录；agent home 也指向临时目录，写设置命令碰不到机器自己的文件。
+ * 会话 store 随 settingsHome 派生（分层重构 §5.2，`setSessionsDir` 消亡后的替代缝）：agent home
+ * 指向临时目录，所以盘上残留的检查读 `<home>/sessions`，写设置命令也碰不到机器自己的文件。
  */
 async function gatedDeletes(): Promise<void> {
-	const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-api-store-"));
 	const workDir = await mkdtemp(join(tmpdir(), "my-agent-api-work-"));
-	setSessionsDir(storeRoot);
+	const home = await mkdtemp(join(tmpdir(), "my-agent-api-home-"));
+	const storeRoot = join(home, "sessions");
 	try {
 		// —— 运行中删除 → 202 应答先到 ——————————————————————————————————————————————
 		// 否决式（spec User Story 1、6）：删除不再要求先把运行安顿好——它自己中止运行、等收尾，
@@ -412,7 +413,6 @@ async function gatedDeletes(): Promise<void> {
 		// 运行必然仍未收尾——这条时序断言由构造保证，不由调度赏赐。
 		{
 			const gate = holdGate();
-			const home = await mkdtemp(join(tmpdir(), "my-agent-api-home-"));
 			await seedModelRow(home);
 			const http = await start({ workDirAbsPath: workDir, port: 0, settingsHome: home, chatTransport: gate.chatTransport });
 			try {
@@ -456,7 +456,6 @@ async function gatedDeletes(): Promise<void> {
 				}
 			} finally {
 				await http.close();
-				await rm(home, { recursive: true, force: true });
 			}
 		}
 
@@ -467,7 +466,6 @@ async function gatedDeletes(): Promise<void> {
 		{
 			const fake = createFakeTransport();
 			fake.setResponses([fakeAssistantMessage("出生那轮的普通回答"), fakeAssistantMessage(fakeToolCall("bash", { command: "echo parked" }))]);
-			const home = await mkdtemp(join(tmpdir(), "my-agent-api-home-"));
 			await seedModelRow(home);
 			const http = await start({ workDirAbsPath: workDir, port: 0, settingsHome: home, chatTransport: fake.chatTransport });
 			try {
@@ -507,7 +505,6 @@ async function gatedDeletes(): Promise<void> {
 				}
 			} finally {
 				await http.close();
-				await rm(home, { recursive: true, force: true });
 			}
 		}
 
@@ -517,7 +514,6 @@ async function gatedDeletes(): Promise<void> {
 		// 提交标记（`.json`）已走，一切查 meta 的新写入方——包括这条 PATCH 路径上的 open——都读到
 		// 「没有这个会话」。不靠 sleep：gate 挂起、轮询到进闸、放行、删除完成，各拍都是事实。
 		{
-			const home = await mkdtemp(join(tmpdir(), "my-agent-api-home-"));
 			const http = await start({ workDirAbsPath: workDir, port: 0, settingsHome: home });
 			try {
 				const born = await localCall("POST", `${http.url}/api/sessions`, { text: "删除闸内的会话" });
@@ -555,11 +551,11 @@ async function gatedDeletes(): Promise<void> {
 				}
 			} finally {
 				await http.close();
-				await rm(home, { recursive: true, force: true });
 			}
 		}
 	} finally {
-		await rm(storeRoot, { recursive: true, force: true });
+		// 三台 rig 共用一个临时 home（store 随 settingsHome 派生），由这一处统一清理。
+		await rm(home, { recursive: true, force: true });
 		await rm(workDir, { recursive: true, force: true });
 	}
 }

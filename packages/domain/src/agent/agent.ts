@@ -26,6 +26,7 @@ import { type ContextManager } from "./context/manager.ts";
 import type { Summarize } from "./context/types.ts";
 import { clearableToolResultIds, isCacheProbablyExpired } from "./context/clear-tool-results.ts";
 import { trimmableToolArgEntryIds } from "./context/trim-tool-call-args.ts";
+import type { ToolResultsRepository } from "./context/tool-results-repository.ts";
 import { boundToolContent, type HookEvent, type HookResult, type Hooks } from "./hooks.ts";
 import {
 	createModel,
@@ -39,6 +40,10 @@ import {
 	type ModelSelection,
 } from "./llm/model-manager.ts";
 import { ModelManager } from "./llm/model-manager.ts";
+import type { ModelRepository } from "./llm/model-repository.ts";
+import type { ToolDefaultsRepository } from "./tool/tool-defaults-repository.ts";
+import type { SessionDefaultsRepository } from "./session/session-defaults-repository.ts";
+import type { SessionRepository } from "./session/session-repository.ts";
 import type { AgentState } from "./session/agent-state.ts";
 import { createAgentState, createLive } from "./session/agent-state.ts";
 import { danglingApprovalsOf } from "./session/dangling.ts";
@@ -121,6 +126,13 @@ export interface AgentConfig {
 	 * 构造零依赖（ADR-0006 修订），一个实例服务本编排层跑的所有会话。
 	 */
 	contextManager: ContextManager;
+	/**
+	 * tool-results 归档的只写端口（分层重构 §4.3）：过大的 result 整体离开 context 时经它落盘。
+	 *
+	 * 实例归编排层持有（构造注入）——ContextManager 保持构造零依赖，写边界的每次 spill 经参数表
+	 * 把它递进去；归档永远有处可去（端口没有缺席态）。
+	 */
+	toolResultsRepository: ToolResultsRepository;
 	/**
 	 * 本会话每个请求走的传输层。
 	 *
@@ -220,6 +232,8 @@ export class Agent {
 	private readonly toolManager: ToolManager;
 	/** 压缩与填充的算法半（分层重构 §3）；`prepareRequest` 与压缩阶梯调用它的方法。 */
 	private readonly contextManager: ContextManager;
+	/** tool-results 归档的只写端口（分层重构 §4.3），写边界的兜底归档经它落盘。 */
+	private readonly toolResultsRepository: ToolResultsRepository;
 	/** 请求真正离开的地方：传输层，重试策略包上它之前的那个。 */
 	private readonly chatTransport: ChatTransport;
 	/** 事件与快照离开编排层的地方：构造注入的 sink，fanout 在 emit 点直调它。 */
@@ -241,6 +255,7 @@ export class Agent {
 		this.toolManager = config.toolManager;
 		this.hooks = config.hooks;
 		this.contextManager = config.contextManager;
+		this.toolResultsRepository = config.toolResultsRepository;
 		this.chatTransport = config.chatTransport;
 		this.sink = config.sink;
 		// 这里不构建任何 per-session 的东西：状态由 `open` 在这些服务之上装配，id 在每个方法的开头
@@ -423,6 +438,7 @@ export class Agent {
 			message.toolName,
 			message.toolCallId,
 			message.content,
+			this.toolResultsRepository,
 		);
 		const content = spilled ?? boundToolContent(message.content);
 		return content === undefined ? message : { ...message, content };
@@ -534,7 +550,7 @@ export class Agent {
 	 * 可留，它的第一次触碰会给自己一个。
 	 */
 	forkFrom(sourceId: string, entryId: string | null): string {
-		const absSourcePath = SessionManager.findSessionFilePathById(sourceId);
+		const absSourcePath = this.sessionManager.findSessionFilePathById(sourceId);
 		if (absSourcePath === undefined) throw new Error(`Unknown session: ${sourceId}`);
 		return this.sessionManager.forkFrom(absSourcePath, entryId).sessionId;
 	}
@@ -558,7 +574,7 @@ export class Agent {
 		const trimmed = text.trim();
 		if (trimmed.length === 0) throw new Error("`text` must be a non-empty string");
 
-		const session = createSession(workDirAbsPath);
+		const session = createSession(workDirAbsPath, this.sessionManager.storeDir);
 		// 出生请求里的选择在本类唯一的写法里落到会话记录上：模式指针直接校验落定（未知名字在这里抛出
 		// ——调用方把它应答成 409），模型选择走与 `applyModelSelection` 同一条袋级规则。
 		if (options.mode !== undefined) {
@@ -617,7 +633,7 @@ export class Agent {
 	 * 这是表唯一的无条件出口，唯一的另一个删除者是运行自己的结束路径（空闲袋随运行出表）。
 	 */
 	async deleteSessionBySessionId(id: string): Promise<void> {
-		const onDisk = SessionManager.findSessionFilePathById(id) !== undefined;
+		const onDisk = this.sessionManager.findSessionFilePathById(id) !== undefined;
 		if (!onDisk) {
 			if (this.agentStateMap.delete(id)) return;
 			throw new UnknownSessionError(id);
@@ -641,7 +657,7 @@ export class Agent {
 	 * 只是 store 自己的查找。纯数据，不重放；fork 自己找源，从不经过这里。
 	 */
 	fileAbsPathOf(id: string): string | undefined {
-		return SessionManager.findSessionFilePathById(id);
+		return this.sessionManager.findSessionFilePathById(id);
 	}
 
 	/**
@@ -765,27 +781,27 @@ export class Agent {
 	// 任何东西。
 
 	/** 为 `workDirAbsPath` 存储的每个会话，按最近活动排序。 */
-	listSessions(workDirAbsPath: string, sessionDirAbsPath?: string, signal?: AbortSignal): Promise<SessionInfo[]> {
-		return SessionManager.list(workDirAbsPath, sessionDirAbsPath, signal);
+	listSessions(workDirAbsPath: string, signal?: AbortSignal): Promise<SessionInfo[]> {
+		return this.sessionManager.list(workDirAbsPath, signal);
 	}
 
 	/**
 	 * 是否有任何已存会话把 `workDirAbsPath` 记为自己的——恢复一个文件系统已失去的工作目录时问的就是
 	 * 这个。与其他 store 级读取一样是一次转发：store 的内容是 manager 的知识，在这里点名，让没有
-	 * 调用方越过这门面去够它。
+	 * 调用方越过这门面去够它。随端口的 `scanPairs` 异步化（spec §4.1），REST 面不变——端点本就异步。
 	 */
-	hasSessionsFor(workDirAbsPath: string): boolean {
-		return SessionManager.hasSessionsFor(workDirAbsPath);
+	async hasSessionsFor(workDirAbsPath: string): Promise<boolean> {
+		return this.sessionManager.hasSessionsFor(workDirAbsPath);
 	}
 
 	/** 本机器为其存储过会话的每个目录，各带自己的列表。 */
 	listDirectories(signal?: AbortSignal): Promise<DirectorySessions[]> {
-		return SessionManager.listDirectories(signal);
+		return this.sessionManager.listDirectories(signal);
 	}
 
 	/** 会话 id 点名的唯一一行，来自持有它的那个目录，没有则为 `undefined`。 */
 	findSessionRowById(id: string, signal?: AbortSignal): Promise<SessionRow | undefined> {
-		return SessionManager.findSessionRowById(id, signal);
+		return this.sessionManager.findSessionRowById(id, signal);
 	}
 
 	// ---------------------------------------------------------------------------- 读取面
@@ -1793,7 +1809,7 @@ export class Agent {
 		// 账本里没有无人认领的悬空。
 		const agentState = this.agentStateMap.get(id);
 		if (agentState === undefined) {
-			if (SessionManager.findSessionFilePathById(id) === undefined) throw new UnknownSessionError(id);
+			if (this.sessionManager.findSessionFilePathById(id) === undefined) throw new UnknownSessionError(id);
 			return;
 		}
 		// 只读一次：运行在安顿时自己清掉自己的注册，而这个 promise 正是等待那次安顿的东西。
@@ -3200,14 +3216,28 @@ function messagesOf(entries: readonly SessionEntry[]): Message[] {
 /** 调用方构建一个会话必须提供的东西。其余都在这里查明。 */
 export interface OpenAgentOptions {
 	/**
-	 * 冷读重放所依据的无状态会话服务。
-	 *
-	 * 只有 {@link readSessionSnapshot} 读它：冷读按被递入的会话点名自己的袋，新造的 manager 行为完全
-	 * 一致，因为服务不持有自己的袋（ADR-0006 §2）——调用方自己的实例只改变这次走读用的是*哪*一份
-	 * 存储知识。编排层不收它：{@link openAgent} 把 homes、tools 与 transport 接缝转发给工厂，把
-	 * 账本留给它构建的 agent，后者拥有自己的那一份。
+	 * 会话文件对的读写端口（分层重构 spec §5.2）：冷读按被递入的会话点名自己的袋，读它的是新造的
+	 * manager——服务不持有自己的袋（ADR-0006 §2），调用方自己的实现只改变这次走读用的是*哪*一份
+	 * 存储。编排层不收它：{@link openAgent} 把端口、tools 与 transport 接缝转发给工厂，把账本留给
+	 * 它构建的 agent，后者拥有自己的那一份。
 	 */
-	sessionManager?: SessionManager;
+	sessionRepository: SessionRepository;
+	/**
+	 * 会话簇设置文件（`sessions.json`）的读写端口——两条队列的全局默认模式从它现读。
+	 */
+	sessionDefaultsRepository: SessionDefaultsRepository;
+	/**
+	 * 模型行（`models.json` 及其迁移源）的读写端口。
+	 */
+	modelRepository: ModelRepository;
+	/**
+	 * 工具簇设置文件（`tools.json` 及其迁移源）的读写端口。
+	 */
+	toolDefaultsRepository: ToolDefaultsRepository;
+	/**
+	 * tool-results 归档的只写端口：写边界的兜底归档永远有处可去。
+	 */
+	toolResultsRepository: ToolResultsRepository;
 	/**
 	 * 本会话将要读写的 会话记录，即每次调用点名的那只袋。
 	 *
@@ -3215,20 +3245,6 @@ export interface OpenAgentOptions {
 	 * 的差事，测试则改开内存里的。
 	 */
 	session: Session;
-	/**
-	 * 各设置簇的持有者文件（`tools.json`、`sessions.json`、`engine.json`）读取与写入所在的 agent
-	 * home。默认用机器自己的那一个。
-	 *
-	 * 在非默认 agent home 之下读取的宿主——即 hub——递入自己的，因为回落者无从知道那个 home；测试
-	 * 递入临时目录，让机器自己的文件永远不被碰。
-	 */
-	settingsHome?: string;
-	/**
-	 * 模型行读取与写入所在的 agent home。默认用 {@link OpenAgentOptions.settingsHome}。
-	 *
-	 * 另一个文件的同居 home：递入自己模型行的 smoke 不得把它们留在机器的 `models.json` 里。
-	 */
-	modelsHome?: string;
 	/**
 	 * 本会话每个请求走的传输层。
 	 *
@@ -3335,11 +3351,14 @@ async function assemble(sessionManager: SessionManager, toolManager: ToolManager
  */
 export async function readSessionSnapshot(options: OpenAgentOptions): Promise<SessionSnapshot> {
 	// 冷读没有编排层可取服务，回落的持有者在这里原地构造。新造的持有者行为完全一致：
-	// 各持有者什么都不持有（ADR-0006 §2），所以调用方自己的实例改变的只是读*哪些*
-	// 文件——hub 递入自己那份正是为此。homes 是各持有者唯一的接缝（spec §8）。
-	const sessionManager = options.sessionManager ?? new SessionManager({ home: options.settingsHome });
-	const toolManager = options.toolManager ?? createToolManager({ home: options.settingsHome });
-	const modelManager = new ModelManager({ home: options.modelsHome ?? options.settingsHome });
+	// 各持有者什么都不持有（ADR-0006 §2），所以调用方自己的端口改变的只是读*哪*份
+	// 存储——hub 递入自己那份正是为此。端口是各持有者唯一的接缝（分层重构 spec §5.2）。
+	const sessionManager = new SessionManager({
+		sessionRepository: options.sessionRepository,
+		sessionDefaultsRepository: options.sessionDefaultsRepository,
+	});
+	const toolManager = options.toolManager ?? createToolManager({ toolDefaultsRepository: options.toolDefaultsRepository });
+	const modelManager = new ModelManager({ modelRepository: options.modelRepository });
 	const { workDirAbsPath, resolved } = await assemble(sessionManager, toolManager, modelManager, options);
 	return sessionSnapshot({
 		sessionManager,

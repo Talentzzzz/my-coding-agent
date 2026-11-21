@@ -38,6 +38,7 @@
 | [0026](0026-projection-folded-into-hub.md) | 行存储并入 hub——`projection.ts` 退场，controller 与 mux 只认一个 service，`publishRows` / `publishGone` 退成私有 | 已接受，已落地（2026-11-19，`check` 绿、9 个 smoke 全绿；语义零变化）；取代 0025 分层表的 `projection` 行，0025 的其余决定与不变量继续成立 |
 | [0027](0027-rows-computed-not-stored.md) | 行存储退场——行是现算的快照加增量推送，服务端不为行养内存；`session_row` 帧变 `SessionRowPatch`，客户端逐字段合并 | 已接受，已落地（2026-11-19，`check` 绿、24 个 smoke 全绿）；取代 0026 的决定 1/2，0026 的其余部分与 0025 的分工继续成立；顺带补上闸感知的第二次删除 404 |
 | [0028](0028-settings-ownership-per-manager.md) | 设置归属按持有者拆散——每簇一个持有者、一份自己的文件，`SettingManager` 退场；`resolveSettings` 的组合视图半原样保留 | 已接受，已落地（2026-11-20，settings-redistribution 代码票全部落地、07 号文档票同步；文档票不跑 `check`——代码由各实现票验证）；取代 0019 的所有权半（global 设置住一只 `SettingManager`、一份 `settings.json`），0019 的组合视图半（`resolveSettings` 唯一答案、每次现算）继续成立 |
+| [0030](0030-five-module-layering.md) | 五模块分层——domain / case / trigger / infra / app，domain 对存储只认自己声明的端口，hold 闸下沉 infra | 已接受，已落地（2026-11-21，分层重构六步迁移步 5，spec 见 `.scratch/layered-modules/`；`npm run check` 含 check-layering R1/R1b/R2/R3、验收 smoke 与基线同色）；部分取代 0012 / 0023 / 0028（取代者注记见各篇），0016 / 0006 / 0010 的取代者注记由此兑现 |
 
 ## 门槛
 

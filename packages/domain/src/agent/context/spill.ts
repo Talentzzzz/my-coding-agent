@@ -1,7 +1,9 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 // 内容词汇住根 types.ts 共享内核（分层重构 §2.3）；本包对 hooks 与其他子包零 import（R2）。
+// 归档的落盘走注入的 ToolResultsRepository 端口（分层重构 §4.3——只写，实例由编排层持有、经参数表
+// 递入），本包不再触碰 node:fs。
 import type { ToolResultContent } from "../types.ts";
+import type { ToolResultsRepository } from "./tool-results-repository.ts";
 
 /**
  * 完整正文离开 context、移入文件的 tool result 大小门槛。
@@ -62,19 +64,6 @@ function oversizedText(content: ToolResultContent): string | undefined {
 	return spillText(content);
 }
 
-/** 整体写一个归档文件。写入失败返回 false，调用方能回落到硬截断。 */
-export function writeSpillFile(absPath: string, text: string): boolean {
-	try {
-		if (!existsSync(absPath)) {
-			mkdirSync(dirname(absPath), { recursive: true });
-			writeFileSync(absPath, text, "utf8");
-		}
-	} catch {
-		return false;
-	}
-	return true;
-}
-
 /**
  * 模型为一条已归档 result 读到的内容：头尾夹着一条指名文件的通知。
  *
@@ -100,7 +89,7 @@ export function spillView(content: ToolResultContent, text: string, relPath: str
  *
  * `undefined` 意味着「不过大」或文件写不出来——调用方回落到 `boundToolContent` 的硬截断，而不是
  * 展示一条指名了不存在文件的通知。路径由 session 和 call id 推导，这让归档在工作目录存在的期间
- * 始终找得到。
+ * 始终找得到。落盘走注入的 {@link ToolResultsRepository}（只写端口，分层重构 §4.3）。
  */
 export function spillOversizedToolResult(
 	workDirAbsPath: string,
@@ -108,12 +97,13 @@ export function spillOversizedToolResult(
 	toolName: string,
 	toolCallId: string,
 	content: ToolResultContent,
+	toolResults: ToolResultsRepository,
 ): ToolResultContent | undefined {
 	const text = oversizedText(content);
 	if (text === undefined) return undefined;
 
 	const { absPath, relPath } = spillPathFor(workDirAbsPath, sessionId, toolName, toolCallId);
-	if (!writeSpillFile(absPath, text)) return undefined;
+	if (!toolResults.writeIfAbsent(absPath, text)) return undefined;
 	return spillView(content, text, relPath, SPILL_KEEP_CHARS);
 }
 
@@ -127,17 +117,19 @@ export function spillOversizedToolResult(
  * ——写边界仍会约束它。
  *
  * `workDirAbsPath` 由处理器自己提供：hook 事件只点名会话，归档到哪个目录是处理器闭包里的事。
+ * 归档端口由编排层递入（构造注入，实例归它持有）。
  *
  * ```ts
- * hooks.on("after_tool", (event) => archiveToolResult(event, workDirAbsPath));
+ * hooks.on("after_tool", (event) => archiveToolResult(event, workDirAbsPath, toolResults));
  * ```
  */
 export function archiveToolResult(
 	event: { sessionId: string; toolCallId: string; toolName: string; content: ToolResultContent },
 	workDirAbsPath: string,
+	toolResults: ToolResultsRepository,
 ): { content: ToolResultContent } {
 	const text = spillText(event.content);
 	const { absPath, relPath } = spillPathFor(workDirAbsPath, event.sessionId, event.toolName, event.toolCallId);
-	if (!writeSpillFile(absPath, text)) return { content: event.content };
+	if (!toolResults.writeIfAbsent(absPath, text)) return { content: event.content };
 	return { content: spillView(event.content, text, relPath, SPILL_KEEP_CHARS) };
 }

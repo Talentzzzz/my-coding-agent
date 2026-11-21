@@ -5,12 +5,11 @@
 // 持有它们的代价是进程生命周期的常量，而不是一个 session 的状态。调用所需、且会随请求变化的一切
 // （工作目录、`bash` 超时）随 `execute` 的 `run` 到达，这正是让一个实例服务所有 session 的原因。
 
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import type { Tool, ToolResult, ToolRunContext, ToolUpdateCallback } from "../types.ts";
 // 类型方向：types.ts 从这里 import BashSettings/ModeSettings 的类型名（设置归属重构 §5 随簇搬迁），
 // 但那一条是 type import，编译期即抹掉——运行期 types.ts 是不依赖业务模块的叶子，无加载环。
-import { AGENT_HOME, DEFAULT_BASH_SETTINGS, DEFAULT_GLOBAL_SETTINGS, DEFAULT_MODE_NAME, settingsPath } from "../types.ts";
+import { DEFAULT_BASH_SETTINGS, DEFAULT_GLOBAL_SETTINGS, DEFAULT_MODE_NAME } from "../types.ts";
+import type { ToolDefaultsRepository } from "./tool-defaults-repository.ts";
 import { createBashTool } from "./bash.ts";
 import { createEditTool } from "./edit.ts";
 import { createGlobTool } from "./glob.ts";
@@ -263,11 +262,11 @@ export class ToolManager {
 	/** 本进程认识的每个工具，按提供给模型的顺序。从不替换。 */
 	private readonly all = new Map<string, Tool<any>>();
 
-	/** 工具簇设置文件所在的 agent home。 */
-	private readonly home: string;
+	/** 工具簇设置文件（`tools.json` 及 legacy `settings.json`）的读写端口。 */
+	private readonly toolDefaultsRepository: ToolDefaultsRepository;
 
-	constructor(options: ToolManagerOptions = {}) {
-		this.home = options.home ?? AGENT_HOME;
+	constructor(options: ToolManagerOptions) {
+		this.toolDefaultsRepository = options.toolDefaultsRepository;
 	}
 
 	/**
@@ -367,7 +366,6 @@ export class ToolManager {
 			.map(([field]) => field);
 		if (fields.length === 0) return;
 
-		const path = this.toolSettingsPath();
 		const { layer } = this.toolState();
 		const changes: ToolsLayer = {};
 		for (const field of fields) {
@@ -377,34 +375,29 @@ export class ToolManager {
 			changes[field] = layer[field];
 		}
 		// 写前重读：一次审批的变更不得弄丢用户在进程运行期间敲进文件的键。
-		writeLayer(path, mergeLayers(readLayer(path) ?? {}, changes));
-	}
-
-	/** 工具簇设置文件：`<agent home>/tools.json`。 */
-	private toolSettingsPath(): string {
-		return join(this.home, "tools.json");
+		this.toolDefaultsRepository.write("tools.json", mergeLayers(this.toolDefaultsRepository.read("tools.json") ?? {}, changes));
 	}
 
 	/**
 	 * `tools.json` 的一次现读：文件按写下的原样（层），加上补默认后的视图。
 	 *
 	 * 层是一次写入所操作的全部事实——未知键也在其中；视图是消费者拿到的答案。文件不在时先走一次
-	 * 迁移。
+	 * 迁移。文件名是簇知识（spec §4.2），经端口的文件名参数递给实现。
 	 */
 	private toolState(): { layer: ToolsLayer; view: ToolDefaults } {
-		const path = this.toolSettingsPath();
-		const layer = readLayer(path);
+		const layer = this.toolDefaultsRepository.read("tools.json");
 		if (layer !== undefined) return { layer, view: viewOf(layer) };
-		return this.migrateToolCluster(path);
+		return this.migrateToolCluster();
 	}
 
 	/**
 	 * 读时迁移（spec §4.2）：`tools.json` 不存在而旧 `settings.json` 存在时，用各自的规范化函数从
 	 * 旧文件捡走工具簇，把补默认后的视图原子落盘——**簇字段全缺省也写出文件**，把「迁移过」变成
 	 * 磁盘事实，避免旧文件在每次首读时复活。旧文件永不删除、永不写入；两边都缺时不落任何笔。
+	 * 迁移编排是簇知识，留在持有者里；实现不懂「settings.json 是 legacy」。
 	 */
-	private migrateToolCluster(path: string): { layer: ToolsLayer; view: ToolDefaults } {
-		const legacy = readLayer(settingsPath(this.home));
+	private migrateToolCluster(): { layer: ToolsLayer; view: ToolDefaults } {
+		const legacy = this.toolDefaultsRepository.read("settings.json");
 		if (legacy === undefined) return { layer: {}, view: viewOf({}) };
 
 		const layer: ToolsLayer = {
@@ -417,78 +410,26 @@ export class ToolManager {
 		if (modes !== undefined) layer.modes = modes;
 
 		const view = viewOf(layer);
-		writeLayer(path, layer);
+		this.toolDefaultsRepository.write("tools.json", layer);
 		return { layer, view };
 	}
 }
 
-/** 调用方可指明工具簇设置住在哪个 home，把 {@link ToolManager} 指到机器自己的文件之外。 */
+/** {@link ToolManager} 的构造端口（分层重构 spec §5.2）：`tools.json` 及其迁移源的读写。 */
 export interface ToolManagerOptions {
-	/**
-	 * 工具簇设置文件（`tools.json`）读取与写入所在的 agent home。默认用真实的那一个。
-	 *
-	 * 测试「会*写*设置」的命令的 smoke 不得写机器自己的文件。
-	 */
-	home?: string;
+	/** 工具簇设置文件（`tools.json`，迁移源 `settings.json`）的读写端口。 */
+	toolDefaultsRepository: ToolDefaultsRepository;
 }
 
-/** 一个进程认识的表。零参构建：内置工具就是本构建的常量；`options` 只指工具簇设置的 home。 */
-export function createToolManager(options: ToolManagerOptions = {}): ToolManager {
+/** 一个进程认识的表。内置工具就是本构建的常量；`options` 只递工具簇设置的端口。 */
+export function createToolManager(options: ToolManagerOptions): ToolManager {
 	return new ToolManager(options);
 }
 
-// ---------------------------------------------------------------------------- tools.json 读写
+// ---------------------------------------------------------------------------- tools.json 的层形状
 
 /** 一份文件的内容：它实际携带的键，未知的也算。 */
 type ToolsLayer = Record<string, unknown>;
-
-/**
- * 文件按它写下的原样读成一层；不在的文件为 undefined。
- *
- * 本构建无法解析的文件被拒绝，从不被覆盖。
- */
-function readLayer(absPath: string): ToolsLayer | undefined {
-	let content: string;
-	try {
-		content = readFileSync(absPath, "utf8");
-	} catch (error) {
-		// 文件缺失是正常的首次运行。其余任何情况——权限、挡在路上的目录——都是真实的失败，不得以
-		// 「未配置设置」的形态抵达调用方。
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-		throw error;
-	}
-
-	// trim 顺带去掉 UTF-8 BOM——Windows 编辑器会写它，而 `JSON.parse` 拒绝它。
-	const text = content.trim();
-	if (text === "") return {};
-
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(text);
-	} catch (error) {
-		throw new Error(`${absPath} is not valid JSON: ${(error as Error).message}`);
-	}
-	if (!isRecord(parsed)) throw new Error(`${absPath} must hold a JSON object`);
-	return parsed;
-}
-
-/**
- * 一层写到它自己的文件上，目录不存在时创建它。
- *
- * 经同目录 temp + rename 落盘（temp 名带 pid，防多进程撞名）：读者要么看到旧内容要么看到完整的
- * 新内容，绝不会看到写到一半的——与其余四个持有者的写路径同形。
- */
-function writeLayer(absPath: string, layer: ToolsLayer): void {
-	mkdirSync(dirname(absPath), { recursive: true });
-	const absTemp = `${absPath}.${process.pid}.tmp`;
-	const fd = openSync(absTemp, "wx");
-	try {
-		writeFileSync(fd, `${JSON.stringify(layer, null, "\t")}\n`);
-	} finally {
-		closeSync(fd);
-	}
-	renameSync(absTemp, absPath);
-}
 
 /** 补丁的嵌套对象逐键合并进已有的值，其余字段整体替换。 */
 function mergeLayers(base: ToolsLayer, overrides: ToolsLayer): ToolsLayer {

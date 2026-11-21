@@ -7,7 +7,21 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createSession, SessionManager, settingsPath, type Session } from "@my-agent/domain";
+import { createSession, SessionManager, type Session } from "@my-agent/domain";
+import { HomeJsonStore, SessionFileStore } from "@my-agent/infra";
+
+/** legacy settings.json（迁移源）。 */
+function legacyPathOf(home: string): string {
+	return join(home, "settings.json");
+}
+
+/** 端口化后的 manager 构造（spec §5.2）：两个必填端口，HomeJsonStore/SessionFileStore 指到各自的临时家。 */
+function sessionsOf(home: string): SessionManager {
+	return new SessionManager({
+		sessionRepository: new SessionFileStore({ storeDir: join(home, "sessions") }),
+		sessionDefaultsRepository: new HomeJsonStore({ home }),
+	});
+}
 
 let failures = 0;
 
@@ -40,10 +54,10 @@ process.stdout.write("\nsessions：settings.json 里的队列模式被一次性�
 			model: "a/b",
 			appearance: { theme: "dark", fontSize: 15 },
 		};
-		writeFileSync(settingsPath(home), `${JSON.stringify(legacy, null, "\t")}\n`, "utf8");
-		const legacyOnDisk = readFileSync(settingsPath(home), "utf8");
+		writeFileSync(legacyPathOf(home), `${JSON.stringify(legacy, null, "\t")}\n`, "utf8");
+		const legacyOnDisk = readFileSync(legacyPathOf(home), "utf8");
 
-		const manager = new SessionManager({ home: home });
+		const manager = sessionsOf(home);
 		const view = manager.sessionDefaults();
 		check("steeringMode 从旧文件回来", view.steeringMode === "all", JSON.stringify(view));
 		check("followUpMode 从旧文件回来", view.followUpMode === "one-at-a-time", JSON.stringify(view));
@@ -54,10 +68,10 @@ process.stdout.write("\nsessions：settings.json 里的队列模式被一次性�
 		check("别的簇没有跟着搬", !("model" in migrated) && !("appearance" in migrated), JSON.stringify(migrated));
 
 		// 旧文件只读不写：迁移前后一个字节都不动，删除更无从谈起。
-		check("旧 settings.json 原封不动", readFileSync(settingsPath(home), "utf8") === legacyOnDisk);
+		check("旧 settings.json 原封不动", readFileSync(legacyPathOf(home), "utf8") === legacyOnDisk);
 
 		// 一次性：sessions.json 已在之后，旧文件被完全忽略——对它的手编改变不了答案。
-		writeFileSync(settingsPath(home), `${JSON.stringify({ ...legacy, steeringMode: "one-at-a-time" }, null, "\t")}\n`, "utf8");
+		writeFileSync(legacyPathOf(home), `${JSON.stringify({ ...legacy, steeringMode: "one-at-a-time" }, null, "\t")}\n`, "utf8");
 		check("迁移完成后旧文件被忽略", manager.sessionDefaults().steeringMode === "all", manager.sessionDefaults().steeringMode);
 	} finally {
 		rmSync(home, { recursive: true, force: true });
@@ -72,23 +86,23 @@ process.stdout.write("\nsessions：旧文件没有簇字段时也写出补默认
 	const home = mkdtempSync(join(tmpdir(), "my-agent-session-defaults-"));
 	try {
 		// 旧文件存在但没有任何队列字段——迁移照样发生，视图补上两个默认值。
-		writeFileSync(settingsPath(home), `${JSON.stringify({ model: "a/b" }, null, "\t")}\n`, "utf8");
-		const legacyOnDisk = readFileSync(settingsPath(home), "utf8");
+		writeFileSync(legacyPathOf(home), `${JSON.stringify({ model: "a/b" }, null, "\t")}\n`, "utf8");
+		const legacyOnDisk = readFileSync(legacyPathOf(home), "utf8");
 
-		const manager = new SessionManager({ home: home });
+		const manager = sessionsOf(home);
 		const view = manager.sessionDefaults();
 		check("缺省的 steeringMode 补上默认", view.steeringMode === "one-at-a-time", JSON.stringify(view));
 		check("缺省的 followUpMode 补上默认", view.followUpMode === "one-at-a-time", JSON.stringify(view));
 		check("字段全缺省也写出了 sessions.json", existsSync(sessionsPathOf(home)));
 		const migrated = diskSessions(home);
 		check("落盘的就是补默认后的视图", migrated.steeringMode === "one-at-a-time" && migrated.followUpMode === "one-at-a-time", JSON.stringify(migrated));
-		check("旧文件依旧原封不动", readFileSync(settingsPath(home), "utf8") === legacyOnDisk);
+		check("旧文件依旧原封不动", readFileSync(legacyPathOf(home), "utf8") === legacyOnDisk);
 
 		// 手编的坏值被吸收而不是被采信：不是两种队列模式的取值回落默认。
 		const bad = mkdtempSync(join(tmpdir(), "my-agent-session-defaults-"));
 		try {
-			writeFileSync(settingsPath(bad), `${JSON.stringify({ steeringMode: "garbage", followUpMode: 42 }, null, "\t")}\n`, "utf8");
-			const badView = new SessionManager({ home: bad }).sessionDefaults();
+			writeFileSync(legacyPathOf(bad), `${JSON.stringify({ steeringMode: "garbage", followUpMode: 42 }, null, "\t")}\n`, "utf8");
+			const badView = sessionsOf(bad).sessionDefaults();
 			check("坏值回落到默认", badView.steeringMode === "one-at-a-time" && badView.followUpMode === "one-at-a-time", JSON.stringify(badView));
 		} finally {
 			rmSync(bad, { recursive: true, force: true });
@@ -107,8 +121,8 @@ process.stdout.write("\nsessions：sessions.json 已存在时旧文件被完全�
 	try {
 		// 两份文件并存且答案相反：自己的文件赢。
 		writeFileSync(sessionsPathOf(home), `${JSON.stringify({ steeringMode: "all" }, null, "\t")}\n`, "utf8");
-		writeFileSync(settingsPath(home), `${JSON.stringify({ steeringMode: "one-at-a-time" }, null, "\t")}\n`, "utf8");
-		const manager = new SessionManager({ home: home });
+		writeFileSync(legacyPathOf(home), `${JSON.stringify({ steeringMode: "one-at-a-time" }, null, "\t")}\n`, "utf8");
+		const manager = sessionsOf(home);
 		check("自己的文件赢过旧文件", manager.sessionDefaults().steeringMode === "all", manager.sessionDefaults().steeringMode);
 		// 缺的键补默认，而不是向旧文件求援。
 		check("缺的键补默认", manager.sessionDefaults().followUpMode === "one-at-a-time", manager.sessionDefaults().followUpMode);
@@ -125,7 +139,7 @@ process.stdout.write("\nsessions：补丁只动点名的键，文件里的其他
 	const home = mkdtempSync(join(tmpdir(), "my-agent-session-defaults-"));
 	try {
 		writeFileSync(sessionsPathOf(home), `${JSON.stringify({ steeringMode: "all", handWritten: { note: "手编" } }, null, "\t")}\n`, "utf8");
-		const manager = new SessionManager({ home: home });
+		const manager = sessionsOf(home);
 
 		manager.applySessionDefaults({ followUpMode: "all" });
 		const onDisk = diskSessions(home);
@@ -136,7 +150,7 @@ process.stdout.write("\nsessions：补丁只动点名的键，文件里的其他
 		// 空补丁什么都不做：连文件都不该被造出来。
 		const untouched = mkdtempSync(join(tmpdir(), "my-agent-session-defaults-"));
 		try {
-			new SessionManager({ home: untouched }).applySessionDefaults({});
+			sessionsOf(untouched).applySessionDefaults({});
 			check("空补丁不写盘", !existsSync(sessionsPathOf(untouched)));
 		} finally {
 			rmSync(untouched, { recursive: true, force: true });
@@ -144,7 +158,7 @@ process.stdout.write("\nsessions：补丁只动点名的键，文件里的其他
 
 		// 写下去当场可读，第二只 manager 也以盘上的文件作答。
 		check("写下去当场可读", manager.sessionDefaults().followUpMode === "all", manager.sessionDefaults().followUpMode);
-		check("另一只 manager 读到同一份", new SessionManager({ home: home }).sessionDefaults().followUpMode === "all");
+		check("另一只 manager 读到同一份", sessionsOf(home).sessionDefaults().followUpMode === "all");
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}
@@ -157,7 +171,7 @@ process.stdout.write("\nsessions：写入只落在文件此刻持有的内容之
 {
 	const home = mkdtempSync(join(tmpdir(), "my-agent-session-defaults-"));
 	try {
-		const manager = new SessionManager({ home: home });
+		const manager = sessionsOf(home);
 		manager.applySessionDefaults({ steeringMode: "all" });
 
 		// 进程运行期间，用户用编辑器改了盘上的文件。
@@ -183,16 +197,16 @@ process.stdout.write("\nsessions：零参 new SessionManager() 照旧可用，�
 	const homeA = mkdtempSync(join(tmpdir(), "my-agent-session-defaults-a-"));
 	const homeB = mkdtempSync(join(tmpdir(), "my-agent-session-defaults-b-"));
 	try {
-		// 现有调用点（assembly、session-factory、各 smoke）的零参构造一字不改，袋式方法照常工作。
-		const zeroArg = new SessionManager();
+		// 零参构造随端口必填消亡（spec §5.2）；袋式方法照常工作——未诞生的袋写快照不触端口。
+		const zeroArg = sessionsOf(workRoot);
 		const bag: Session = createSession(workRoot, join(workRoot, "store"));
 		zeroArg.setThinkingLevel(bag, "high");
-		check("零参构造的门面照常工作", zeroArg.getRecordedToolConfig(bag).mode === undefined);
+		check("端口构造的门面照常工作", zeroArg.getRecordedToolConfig(bag).mode === undefined);
 
 		// home 是构造参数：建在另一个家上的 manager 读那个家的文件，永远不以这个家的作答。
 		writeFileSync(sessionsPathOf(homeA), `${JSON.stringify({ steeringMode: "all" }, null, "\t")}\n`, "utf8");
-		check("A 家读到自己文件里的值", new SessionManager({ home: homeA }).sessionDefaults().steeringMode === "all");
-		check("B 家读不到 A 家的文件", new SessionManager({ home: homeB }).sessionDefaults().steeringMode === "one-at-a-time");
+		check("A 家读到自己文件里的值", sessionsOf(homeA).sessionDefaults().steeringMode === "all");
+		check("B 家读不到 A 家的文件", sessionsOf(homeB).sessionDefaults().steeringMode === "one-at-a-time");
 	} finally {
 		rmSync(workRoot, { recursive: true, force: true });
 		rmSync(homeA, { recursive: true, force: true });

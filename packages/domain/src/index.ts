@@ -32,14 +32,16 @@ export {
 // 包对外的名字不变。原 `protocol.ts` 已随分层重构步 2 解散：它的域词汇各归属主（行与快照归
 // session、模型选择归 llm、diff 归 tool、设置快照与审批政策归根 `types.ts`），wire 信封住
 // `@my-agent/case/protocol` 的网关——包对外的名字不变，只有信封七个名字改从 case 拿。
+// `AGENT_HOME` / `APP_NAME` / `settingsPath` / `modelsPath` 已随步 5 端口化迁出 domain
+// （§2.3）：home 的解析住组合根（@my-agent/app），文件名的 join 住 infra 的实现——domain
+// 从此不知道「真实的 home」。
 export {
-	AGENT_HOME,
-	APP_NAME,
 	APPROVAL_TOOLS,
 	DEFAULT_MODE_NAME,
 	DEFAULT_BASH_SETTINGS,
 	DEFAULT_GLOBAL_SETTINGS,
-	settingsPath,
+	normalizePath,
+	resolvePath,
 	stringListOrUndefined,
 	type ConfigPatch,
 	type GlobalSettings,
@@ -48,6 +50,12 @@ export {
 	type RetrySettings,
 	type SettingsPatch,
 } from "./agent/types.ts";
+// 端口声明（分层重构 spec §4）：domain 对存储只认自己声明的端口，infra 实现、组合根注入。
+export type { SessionLedgerFile, SessionRepository } from "./agent/session/session-repository.ts";
+export type { SessionDefaultsRepository } from "./agent/session/session-defaults-repository.ts";
+export type { ModelRepository } from "./agent/llm/model-repository.ts";
+export type { ToolDefaultsRepository } from "./agent/tool/tool-defaults-repository.ts";
+export type { ToolResultsRepository } from "./agent/context/tool-results-repository.ts";
 // RetrySettings 已随 retry 簇迁入 types.ts、所有权归 ModelManager（ADR-0028 修正），
 // `EngineSettings` 随 engine.json 退场，包对外的类型名不变。
 // UI 簇已迁往客户端存储（ADR-0029）：UiSettingsManager、UI 类型与规范化器随簇退场。
@@ -109,7 +117,6 @@ export {
 	modelFor,
 	rowFor,
 	DEFAULT_MODEL_NAME,
-	modelsPath,
 	NEW_MODEL_DEFAULTS,
 	normalizeThinkingLevel,
 	Model,
@@ -147,14 +154,9 @@ export {
 	COMPACTION_SUMMARY_SUFFIX,
 	compactionSummaryOf,
 } from "./agent/session/messages.ts";
-export {
-	normalizePath,
-	resolvePath,
-	sessionMetaPath,
-	sessionPath,
-	sessionsDir,
-	setSessionsDir,
-} from "./agent/session/paths.ts";
+// 路径语义自 paths.ts 迁入根 types.ts（§2.3）；`sessionPath` / `sessionMetaPath` /
+// `sessionJsonlPath` 迁 infra 的 session-store（文件对命名规则是存储布局知识），`sessionsDir` /
+// `setSessionsDir` 随端口注入消亡。
 export {
 	BRANCH_LABEL_MAX,
 	CURRENT_SESSION_VERSION,
@@ -167,7 +169,6 @@ export {
 	newSession,
 	persistEntry,
 	sessionEntryToContextMessages,
-	setRemoveGate,
 	shortenTitle,
 	toSessionRef,
 	type CompactionEntry,

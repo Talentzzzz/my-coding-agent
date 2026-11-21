@@ -22,6 +22,7 @@ import { createServer } from "@my-agent/trigger";
 import { createFakeTransport, fakeAssistantMessage, type FakeTransport } from "./fake-transport.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
 import type { ModelConfig } from "@my-agent/domain";
+import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 
 let failures = 0;
 
@@ -95,7 +96,18 @@ interface Rig {
 async function openRig(): Promise<Rig> {
 	const root = await mkdtemp(join(tmpdir(), "my-agent-stream-"));
 	const transport = createFakeTransport({ tokensPerSecond: TOKENS_PER_SECOND });
-	const sessionHub = new SessionHub({ workDirAbsPath: root, chatTransport: transport.chatTransport, modelsHome: join(root, "agent-home") });
+	// 自造 infra 实现指临时目录（分层重构 §7 步 5）：hub 只认端口，home → 实现的翻译在这里。
+	const agentHome = join(root, "agent-home");
+	const homeJson = new HomeJsonStore({ home: agentHome });
+	const sessionHub = new SessionHub({
+		workDirAbsPath: root,
+		chatTransport: transport.chatTransport,
+		sessionRepository: new SessionFileStore({ storeDir: join(root, "sessions") }),
+		sessionDefaultsRepository: homeJson,
+		modelRepository: homeJson,
+		toolDefaultsRepository: homeJson,
+		toolResultsRepository: new ToolResultsArchive(),
+	});
 	sessionHub.setModelConfigs(rows);
 
 	const muxServer = createMuxServer({ sessionHub }, { heartbeatIntervalMs: 150 });

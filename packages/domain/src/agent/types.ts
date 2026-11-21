@@ -725,14 +725,45 @@ export type AgentEvent =
 // ============================================================================
 
 import { homedir } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { isAbsolute, join, resolve as nodeResolve } from "node:path";
 import type { BashSettings, ModeSettings } from "./tool/manager.ts";
 
-/** 存放会话、设置与已存凭据的目录。 */
-export const AGENT_HOME = resolvePath(process.env.MY_AGENT_HOME ?? join(homedir(), ".my-agent"));
+// ----------------------------------------------------------------------------
+// 路径语义（自 session/paths.ts 迁入，分层重构 §2.3）
+//
+// session 包与 agent 根都消费的两件路径语义（session-manager 的文件键、袋构造的 workDir 解析），
+// 子包只准 import 根 types.ts（守卫 R2），所以只能住这里；`AGENT_HOME` 迁往组合根（app）之后，
+// 这两个函数是 types.ts 里仅存的路径语义。
+// ----------------------------------------------------------------------------
 
-/** 本应用在自己写出的文件与消息里如何自称。 */
-export const APP_NAME = "my-agent";
+/** 把 Git Bash、MSYS、Cygwin 和 WSL 的盘符路径转换成原生 Windows API 接受的形式。 */
+function normalizeWindowsShellPath(pathInput: string): string {
+	if (!pathInput.startsWith("/") || pathInput.startsWith("//") || pathInput.includes("\\")) return pathInput;
+	const match = pathInput.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i);
+	if (!match) return pathInput;
+	const suffix = match[2]?.replaceAll("/", "\\");
+	return `${match[1]!.toUpperCase()}:\\${suffix ?? ""}`;
+}
+
+/** 展开开头的 `~` 并规范化 shell 风格的盘符路径，其余不动。 */
+export function normalizePath(pathInput: string): string {
+	let normalized = pathInput;
+	if (process.platform === "win32") normalized = normalizeWindowsShellPath(normalized);
+
+	const home = homedir();
+	if (normalized === "~") return home;
+	if (normalized.startsWith("~/") || (process.platform === "win32" && normalized.startsWith("~\\"))) {
+		return join(home, normalized.slice(2));
+	}
+	return normalized;
+}
+
+/** 展开开头的 `~`、规范化 shell 风格的盘符路径，相对路径按 `baseDirInput` 解析为绝对路径。 */
+export function resolvePath(pathInput: string, baseDirInput: string = process.cwd()): string {
+	const normalized = normalizePath(pathInput);
+	const base = normalizePath(baseDirInput);
+	return isAbsolute(normalized) ? nodeResolve(normalized) : nodeResolve(base, normalized);
+}
 
 /**
  * `bash` 工具的默认超时。类型随簇住进了 tools/manager.ts（设置归属重构 §5）；工具行为与
@@ -899,16 +930,6 @@ export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
 	retry: { enabled: true, maxRetries: 3, baseDelayMs: 2_000, maxAgentDelayMs: 60_000 },
 	bash: { ...DEFAULT_BASH_SETTINGS },
 };
-
-/**
- * 机器级的旧设置文件，`<AGENT_HOME>/settings.json`。`agentDir` 可配置，让测试能指到无害的地方。
- *
- * 设置归属重构（spec §4.2）后它只作迁移源：各持有者首次读取时从这里捡走自己的簇，之后旧文件被
- * 完全忽略——永不删除、永不写入。
- */
-export function settingsPath(agentDir: string = AGENT_HOME): string {
-	return join(agentDir, "settings.json");
-}
 
 /**
  * 工具名列表，字段缺失或不是数组时为 undefined。

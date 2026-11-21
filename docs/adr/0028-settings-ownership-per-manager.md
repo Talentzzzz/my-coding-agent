@@ -4,6 +4,10 @@
 取代：[0019](0019-settings-two-layers.md) 的**所有权半**（global 侧设置住进一只 `SettingManager`、
 一份 `settings.json`）；0019 的**组合视图半**（`resolveSettings` 是唯一答案、每次现算、不留副本）
 原样保留——变的只是它的输入来源
+取代者：[0030](0030-five-module-layering.md)（部分，2026-11-21——分层重构步 5，spec §4.2/§8.7）：
+三个设置持有者的构造改收注入的端口（HomeJsonStore 一个 infra 实现满足三份同形声明）；决定 3 的
+「不共享抽象」得到字节级精确化——共享的是 I/O 原语，规范化与迁移编排仍各簇内联。归属决定
+（每簇一个持有者、一份自己的文件、`SettingManager` 不回来）原样成立。
 
 它满足 `docs/adr/README.md` 的三条：改回去要把五份文件合成一份 `settings.json`、把五个持有者
 的读写重新收进一只类和一层存储抽象；下一个人读 `packages/core/src/` 会问「为什么没有
@@ -73,6 +77,16 @@ ADR-0019 把设置收拢成三个类型名与一只四法门面（`SettingManage
    测试接缝从内存后端换成临时 home：`CreateSessionAgentOptions.settingManager` 接缝退场，
    `settingsHome` / `modelsHome` 透传给各持有者——机器自己的文件靠边站的保证不变，且比内存后端
    更接近真实行为；各持有者各自可独立 smoke，ToolManager 的文件行为不再牵连模型目录。
+
+   **（2026-11-21 精确化，分层重构步 5，spec §4.2/§8.7——「不共享抽象」的字节级口径）**：端口化后
+   三个设置持有者收**注入的端口**（`ToolDefaultsRepository` / `SessionDefaultsRepository` /
+   `ModelRepository`，消费方包内声明、infra 的 home-json 一个实现满足三份同形声明）。它们**共享的
+   是字节级文件 I/O 原语**——join home、缺文件语义、坏 JSON 拒绝、temp+rename 落盘；**规范化与
+   合并函数**（`viewOf` / `approvalOr` / `bashOr` / `modesOr` / `queueModeOr` / `retryOr` /
+   `mergeLayers`）与**迁移编排**（什么时候迁、捡哪些键、engine.json 优先）仍各簇内联、一行不共享。
+   「不共享抽象」防的是重新长出合租房东——byte 原语是它下面一层的机械，不是抽象；「内联副本的
+   已知分歧」一节原样有效（空文件裁定、mergeLayers 的 undefined 分歧随实现走）。文件名与迁移的
+   知识随簇归持有者（`read("tools.json")` 这类文件名实参），infra 不懂「settings.json 是 legacy」。
 
 4. **门面路由（ADR-0012 边界不动）：读模型按簇现读，补丁按簇分发。**
    - `Agent.settings()`：从五个持有者现读、组装一份 `GlobalSettings` 形状的视图——这是设置面板

@@ -17,7 +17,7 @@ import { MuxClient, type ChannelState, type MuxSocket, type MuxSocketFactory, ty
 import { faultyProxy, type FaultyProxy } from "./wire/proxy.ts";
 import { until } from "./wire/client.ts";
 import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
-import { setSessionsDir, type ModelConfig } from "@my-agent/domain";
+import { type ModelConfig } from "@my-agent/domain";
 import type { ServerMessage } from "@my-agent/case/protocol";
 
 let failures = 0;
@@ -57,11 +57,9 @@ interface Observed {
 }
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-liveness-"));
-/** 一个临时 agent home，本 smoke 写的设置不是机器自己的。 */
+/** 一个临时 agent home，本 smoke 写的设置不是机器自己的。会话 store 随 settingsHome 派生（分层重构 §5.2）。 */
 const home = await mkdtemp(join(tmpdir(), "my-agent-liveness-home-"));
-/** 一个临时 store，本 smoke 出生的会话不是机器自己的。 */
-const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-liveness-store-"));
-setSessionsDir(storeRoot);
+const storeRoot = join(home, "sessions");
 
 /** 出生那一轮驱动的剧本化模型。它的端点永远不会被拨通：transport 自己应答。 */
 const modelRows: ModelConfig[] = [
@@ -187,7 +185,6 @@ try {
 	await server.close();
 	await rm(root, { recursive: true, force: true });
 	await rm(home, { recursive: true, force: true });
-	await rm(storeRoot, { recursive: true, force: true });
 	process.stdout.write(failures === 0 ? "\nliveness ok\n" : `\n${failures} failure(s)\n`);
 	process.exitCode = failures === 0 ? 0 : 1;
 }

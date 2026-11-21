@@ -11,7 +11,11 @@
 //       §2.2）。被别的子包消费的定义独占在根 types.ts（共享内核），所以子包向上的相对 import
 //       只许指到它。随步 4 激活。
 //
-// R3（domain 禁 fs）随步 5 再接上——激活时在这里加规则。
+// R3  domain 禁 fs（随步 5 激活）——domain/src/agent/ 不 import node:fs / node:fs/promises，
+//      node:child_process 同题；例外 tool/ 包（用户工作目录事实，spec §4.5）与 context 包的
+//      agents-md.ts（AGENTS.md 收集，§4.5 明文不端口化）。存储走注入的端口：SessionRepository /
+//      三份 home-json / ToolResultsRepository，infra 实现、组合根注入——domain 从此不知道「真实的
+//      home」，触盘的只有 infra。
 //
 // 与 check-tokens / check-server-facade 同一套先例：一个用正则的小脚本，接进 `npm run check`，
 // 让不变量被机器检查而不是靠一条会腐烂的注释；import 说明符 → 包名映射判方向（facade 守卫的
@@ -114,6 +118,24 @@ const domainAgentDir = resolve(packagesRoot, "domain", "src", "agent");
 const subpackageDirs = ["context", "llm", "session", "tool"].map((name) => normalize(resolve(domainAgentDir, name)));
 const rootTypesFile = normalize(resolve(domainAgentDir, "types.ts"));
 
+// R3 的扫描面（随步 5 激活）：domain 禁 node:fs 一族 import（fs / fs/promises），node:child_process
+// 同题——存储走注入的端口（SessionRepository / 三份 home-json / ToolResultsRepository），infra 实现、
+// 组合根注入。**例外：tool/ 包**（spec §4.5 的不端口化清单——用户工作目录的固有本地事实：六工具的
+// 文件读写与 shell；child_process 属同一个例外）与 **context 包的 agents-md.ts**（AGENTS.md/CLAUDE.md
+// 收集，§4.5 明文不端口化，不搬出 context——子包隔离禁它 import tool）。
+const fsBannedSpecifiers = new Set(["node:fs", "node:fs/promises", "node:child_process"]);
+const toolDir = normalize(resolve(domainAgentDir, "tool"));
+const agentsMdFile = normalize(resolve(domainAgentDir, "context", "agents-md.ts"));
+
+/** R3：一个 domain 文件是否被豁免某条 fs 类 import。 */
+function fsExempt(path: string, specifier: string): boolean {
+	const normalizedPath = normalize(path);
+	if (normalizedPath.startsWith(`${toolDir}/`)) return true; // 用户工作目录事实（spec §4.5）
+	if (specifier === "node:child_process") return false; // shell 只有工具用
+	if (normalizedPath === agentsMdFile) return true; // AGENTS.md 收集（spec §4.5）
+	return false;
+}
+
 /** 文件住在哪个子包里；不在任何子包（agent 根自身）时为 undefined——R2 只管子包。 */
 function subpackageOf(path: string): string | undefined {
 	const normalizedPath = normalize(path);
@@ -162,6 +184,16 @@ for (const module of MODULES) {
 				for (const match of text.matchAll(new RegExp(pattern, "g"))) {
 					findings.push(`${where}:${lineOf(text, match.index ?? 0)} \`${label}\` ——会话操作走 Agent 公开面`);
 				}
+			}
+		}
+		if (module === "domain") {
+			for (const { statement, offset } of importStatements(text)) {
+				const specifier = specifierOf(statement);
+				if (specifier === undefined || !fsBannedSpecifiers.has(specifier)) continue;
+				if (fsExempt(path, specifier)) continue;
+				findings.push(
+					`${where}:${lineOf(text, offset)} ${specifier} ——domain 禁触盘：存储走注入的端口，fs 是 infra 的（R3，例外 tool/ 包与 agents-md 收集）`,
+				);
 			}
 		}
 	}

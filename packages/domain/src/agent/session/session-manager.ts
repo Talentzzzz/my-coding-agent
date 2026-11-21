@@ -1,34 +1,15 @@
 import { randomUUID } from "node:crypto";
-import {
-	appendFileSync,
-	closeSync,
-	createReadStream,
-	existsSync,
-	mkdirSync,
-	openSync,
-	readdirSync,
-	readFileSync,
-	readSync,
-	rmdirSync,
-	renameSync,
-	rmSync,
-	type Stats,
-	statSync,
-	writeFileSync,
-} from "node:fs";
-import { readdir, rm, stat } from "node:fs/promises";
-import type { Dirent } from "node:fs";
-import { basename, dirname, join, sep } from "node:path";
-import { createInterface } from "node:readline";
-import { StringDecoder } from "node:string_decoder";
+import { basename, dirname, join } from "node:path";
 import type { Message, Usage } from "../types.ts";
 import { uuidv7 } from "../types.ts";
-// types.ts 的常量（AGENT_HOME/DEFAULT_GLOBAL_SETTINGS/settingsPath）在运行期叶子模块上（它对外
-// 只递类型），持有者回落常量、编排层装配持有者，箭头只朝一个方向流——顶层求值也安全。
-import { AGENT_HOME, APP_NAME, DEFAULT_GLOBAL_SETTINGS, settingsPath, type QueueMode } from "../types.ts";
+// 路径语义与设置默认值在运行期叶子模块上（types.ts 对外只递类型与常量），持有者回落常量、编排层
+// 装配持有者，箭头只朝一个方向流——顶层求值也安全。`AGENT_HOME`/`settingsPath` 已随端口化迁出
+// domain（分层重构 §2.3）：存储走注入的 SessionRepository，设置文件走注入的 SessionDefaultsRepository。
+import { DEFAULT_GLOBAL_SETTINGS, normalizePath, resolvePath, type QueueMode } from "../types.ts";
 import { clearToolResult, trimToolCallArgs } from "./view.ts";
 import { compactionSummaryOf } from "./messages.ts";
-import { normalizePath, resolvePath, sessionJsonlPath, sessionMetaPath, sessionPath, sessionsDir } from "./paths.ts";
+import type { SessionRepository } from "./session-repository.ts";
+import type { SessionDefaultsRepository } from "./session-defaults-repository.ts";
 import { UnknownSessionError } from "./unknown-session.ts";
 import {
 	type ClearToolResultEntry,
@@ -74,7 +55,8 @@ export {
  *
  * 刻意不做迁移。文件读不出 v6 配对的 session 会被*删除*，而不是拒绝后留在原地：格式归本构建所有，
  * v≤5 的文件在没有本代码已不再具备的 header 重放的情况下无法收养，留着它会让每次列表都为一个永远
- * 无法再打开的 session 付代价。删除点在列表扫描和 {@link fillSession}——见 {@link settleSessionFiles}。
+ * 无法再打开的 session 付代价。删除点在列表扫描（端口的 `scanPairs`）和 `fill`——见
+ * {@link SessionRepository} 的 fill 契约。
  */
 export const CURRENT_SESSION_VERSION = 6;
 
@@ -402,243 +384,8 @@ function applyTrims(entries: SessionEntry[], trimmed: ReadonlySet<string>): Sess
 	return entries.map((entry) => (trimmed.has(entry.id) ? trimToolCallArgs(entry) : entry));
 }
 
-const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
-
-/** 解析一行 JSONL，失败返回 null：一行读不了不能让 session 其余部分也读不了。 */
-function parseJsonlLine(line: string): SessionEntry | null {
-	if (!line.trim()) return null;
-	try {
-		return JSON.parse(line) as SessionEntry;
-	} catch {
-		return null;
-	}
-}
-
-/** 整体读取一个 session 的条目流。`absFilePath` 已由调用方解析。 */
-function loadJsonlEntries(absFilePath: string): SessionEntry[] {
-	if (!existsSync(absFilePath)) return [];
-
-	const entries: SessionEntry[] = [];
-	let pending = "";
-	const fd = openSync(absFilePath, "r");
-	try {
-		const decoder = new StringDecoder("utf8");
-		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
-
-		for (;;) {
-			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
-			if (bytesRead === 0) break;
-
-			pending += decoder.write(buffer.subarray(0, bytesRead));
-			let lineStart = 0;
-			let newlineIndex = pending.indexOf("\n", lineStart);
-			while (newlineIndex !== -1) {
-				const entry = parseJsonlLine(pending.slice(lineStart, newlineIndex));
-				if (entry) entries.push(entry);
-				lineStart = newlineIndex + 1;
-				newlineIndex = pending.indexOf("\n", lineStart);
-			}
-			pending = pending.slice(lineStart);
-		}
-
-		pending += decoder.end();
-		const finalEntry = parseJsonlLine(pending);
-		if (finalEntry) entries.push(finalEntry);
-	} finally {
-		closeSync(fd);
-	}
-
-	// 没有结尾换行的最后一行会被下一次追加接上去。
-	if (pending) appendFileSync(absFilePath, "\n");
-	return entries;
-}
-
-/**
- * 读取 session 的 `.json` 快照，读不了就拒绝。
- *
- * 读不了的文件、缺身份字段的文件、版本不是本构建的文件，答案都一样：不是本构建的 session。拒绝
- * 意味着什么由调用方决定——{@link fillSession} 把它变成删掉再抛，发现环节变成跳过。
- */
-function readMetaFile(absJsonPath: string): SessionMeta {
-	const raw = JSON.parse(readFileSync(absJsonPath, "utf8")) as SessionMeta;
-	if (
-		typeof raw?.id !== "string" ||
-		typeof raw?.timestamp !== "string" ||
-		typeof raw?.workDir !== "string" ||
-		raw.workDir === ""
-	) {
-		throw new Error(`Session file is not a valid ${APP_NAME} session: ${absJsonPath}`);
-	}
-	if (raw.version !== CURRENT_SESSION_VERSION) {
-		throw new Error(`Session version ${String(raw.version)} is not this build's ${CURRENT_SESSION_VERSION}: ${absJsonPath}`);
-	}
-	return raw;
-}
-
-/**
- * 为发现环节读取 session 的 `.json` 快照：尽力而为，出错返回 null。
- *
- * `absPath` 可以指两半中的任何一个——手里拿着 `.jsonl` 的调用方由它推导快照路径，而不是重新扫
- * 目录。发现是尽力而为：一个读不了或版本不对的文件不能把其他 session 藏起来。
- */
-function readMetaForDiscovery(absPath: string): SessionMeta | null {
-	try {
-		return readMetaFile(absPath.endsWith(".json") ? absPath : sessionMetaPath(absPath));
-	} catch {
-		return null;
-	}
-}
-
 function sessionWorkDirMatches(metaWorkDir: string | undefined, workDirAbsPath: string): boolean {
 	return metaWorkDir !== undefined && metaWorkDir !== "" && resolvePath(metaWorkDir) === workDirAbsPath;
-}
-
-/**
- * 删除本构建无法打开的 session 的两半文件。
- *
- * v5 不保留迁移也不隔离：被本构建拒绝的配对是一个永远无法再打开的 session，留着它会让每次列表都
- * 为一个幽灵付代价。触发点是 store 扫描（{@link settleSessionFiles}）和 {@link fillSession}——每个
- * 证明配对打不开的读者都移除它，store 保持是一个 session 清单，而不是同时还是一片坟场。
- */
-function pruneSessionFiles(absJsonPath: string, absJsonlPath: string): void {
-	try {
-		rmSync(absJsonPath, { force: true });
-	} catch {
-		// 删除失败不能掩盖配对失败的原因；下一次扫描会再试。
-	}
-	try {
-		rmSync(absJsonlPath, { force: true });
-	} catch {
-		// 同理：反正配对已死，下一次扫描清理这一轮没清掉的。
-	}
-}
-
-/** 一个 stem 的两个文件，按 store 扫描所见。 */
-interface SessionFilePair {
-	absJson?: string;
-	absJsonl?: string;
-}
-
-/**
- * 按 stem 配对一个 store 的文件，并移除本构建打不开的一切。
- *
- * session 是共享一个 stem 的 `.json` + `.jsonl` 配对，`.json` 是提交标记：诞生时它最后写入，所以
- * 未配对的半边是半途夭折的诞生，版本不是本构建的文件是上一代写下的文件。两者都在这里删除——扫描
- * 是唯一走遍每个文件的地方，所以也是唯一一处能不跑第二遍就淘汰打不开的配对的地方。返回的是可读的
- * 剩余部分，meta 已在手。
- *
- * 清除抓不到进行中的诞生：整个函数是一个同步块，诞生（`persistEntry`）也是一个同步块，一个进程
- * 从不同时跑两者——并发写入的情形不在格式的章程之内。
- */
-function settleSessionFiles(absDir: string): { absJson: string; absJsonl: string; meta: SessionMeta }[] {
-	const pairs = new Map<string, SessionFilePair>();
-	for (const file of readdirSync(absDir)) {
-		const dot = file.lastIndexOf(".");
-		if (dot <= 0) continue;
-		const ext = file.slice(dot);
-		if (ext !== ".json" && ext !== ".jsonl") continue;
-		const pair = pairs.get(file.slice(0, dot)) ?? {};
-		if (ext === ".json") pair.absJson = join(absDir, file);
-		else pair.absJsonl = join(absDir, file);
-		pairs.set(file.slice(0, dot), pair);
-	}
-
-	const settled: { absJson: string; absJsonl: string; meta: SessionMeta }[] = [];
-	for (const pair of pairs.values()) {
-		if (pair.absJson === undefined || pair.absJsonl === undefined) {
-			pruneSessionFiles(pair.absJson ?? "", pair.absJsonl ?? "");
-			continue;
-		}
-		try {
-			const meta = readMetaFile(pair.absJson);
-			// 快照存在时流在法律上不可能是空的——诞生先写完整条日志再写快照——所以空流是半途夭折
-			// 的配对。
-			if (statSync(pair.absJsonl).size === 0) {
-				pruneSessionFiles(pair.absJson, pair.absJsonl);
-				continue;
-			}
-			settled.push({ absJson: pair.absJson, absJsonl: pair.absJsonl, meta });
-		} catch {
-			pruneSessionFiles(pair.absJson, pair.absJsonl);
-		}
-	}
-	return settled;
-}
-
-/**
- * 旧构建写入的遗留布局，跑过它的机器上仍然能找到：
- * `<sessionsDir>/--<dashed workDir>--/<ISO stamp>_<id>.jsonl`。扁平 store 读不了它——id 埋在文件名
- * 里、藏在时间戳后面——所以第一次触碰 store 时，把每个配对移进扁平根目录并忘掉那些文件夹。
- *
- * 什么都不删：本构建读不了的配对，或目标 id 已被已诞生 session 占用的配对，原地不动；文件夹只在
- * 什么都不剩时才移除。移动每个进程发生一次、惰性触发，在第一个否则会错过遗留配对的查找或列表时
- * 进行——之后，`findSessionFilePathById` 就是一次 stat。
- */
-let storeMigrated = false;
-
-function ensureStoreMigrated(): void {
-	if (storeMigrated) return;
-	storeMigrated = true;
-	migrateLegacyStore();
-}
-
-function migrateLegacyStore(): void {
-	let entries: Dirent[];
-	try {
-		entries = readdirSync(sessionsDir(), { withFileTypes: true });
-	} catch {
-		return; // 没有 sessions 目录就是正常的首次运行。
-	}
-	for (const entry of entries) {
-		if (!entry.isDirectory()) continue;
-		const absDir = join(sessionsDir(), entry.name);
-		if (!migrateLegacyDirectory(absDir)) continue;
-		try {
-			rmdirSync(absDir);
-		} catch {
-			// 拿不走的空文件夹无害，不值得为它让启动失败。
-		}
-	}
-}
-
-/** 把 `absDir` 里的每个完整配对移进扁平 store；该目录里配对的东西都不剩时返回 true。 */
-function migrateLegacyDirectory(absDir: string): boolean {
-	let names: string[];
-	try {
-		names = readdirSync(absDir);
-	} catch {
-		return false;
-	}
-	let empty = true;
-	for (const name of names) {
-		if (!name.endsWith(".json")) continue; // 每个配对按其快照（身份那一半）找到
-		const absJson = join(absDir, name);
-		const absJsonl = sessionJsonlPath(absJson);
-		if (!existsSync(absJsonl)) continue;
-		let id: string;
-		try {
-			id = readMetaFile(absJson).id;
-		} catch {
-			empty = false; // 读不了：store 扫描会清理它，这次移动不碰它
-			continue;
-		}
-		const target = sessionPath(id);
-		if (existsSync(sessionMetaPath(target))) {
-			empty = false; // 已诞生的 session 占用了这个 id：旧配对原地不动
-			continue;
-		}
-		try {
-			// 先移流，后移快照：两次 rename 之间目标处放着一个未配对的流，所有读者把它读成
-			// 「没有这个 session」——绝不会读成半个诞生的 session。被早前中断的一轮遗落在那的流
-			// 本来就是这个 id 自己的日志，所以 rename 之前清掉它不会让另一个 session 付出任何代价。
-			rmSync(target, { force: true });
-			renameSync(absJsonl, target);
-			renameSync(absJson, sessionMetaPath(target));
-		} catch {
-			empty = false;
-		}
-	}
-	return empty;
 }
 
 function isMessageWithContent(message: Message): boolean {
@@ -673,27 +420,28 @@ function getMessageActivityTime(entry: MessageEntry): number | undefined {
  * 一个 session 的摘要，供选择器用：它是谁、何时动过，以及足以搜索它的文本。
  *
  * 扫描按格式的两半拆开：身份字段——id、workDir、parent、created、记录的标题、suspended 标记——来自
- * `.json` 快照，消息统计来自对 `.jsonl` 逐行扫一遍，只有那一半需要逐条解析。扫描的调用方
- * （{@link settleSessionFiles}）已配好文件并清除了打不开的，所以这里拿到 meta 就意味着这是本构建
- * 能打开的 session。
+ * `.json` 快照，消息统计来自对 `.jsonl` 逐行扫一遍，只有那一半需要逐条解析。行泵是端口方法
+ * （`scanLedger`，infra 泵行 + 逐行解析），派生（messageCount / 文本 / parentOf / leafId）留在
+ * 这份回调里——内存特征与今天一致：流式，不整读。扫描的调用方（`scanPairs`）已配好文件并清除了
+ * 打不开的，所以这里拿到 meta 就意味着这是本构建能打开的 session。
  *
  * `modified` 优先取最后一条消息自己的时间戳而不是 meta 的，因为正在被追加的 session，其 birthtime
  * 对它的年龄什么也说不出来。
  */
 async function buildSessionInfo(
-	absJsonPath: string,
+	sessionRepository: SessionRepository,
 	absJsonlPath: string,
 	meta: SessionMeta,
 	signal?: AbortSignal,
 ): Promise<SessionInfo | null> {
 	try {
-		const stats = await stat(absJsonlPath);
+		let mtimeMs = 0;
 		let messageCount = 0;
 		let firstMessage = "";
 		const allMessages: string[] = [];
 		let lastActivityTime: number | undefined;
 		/**
-		 * 分支，以两张表的形式，在本来就在读每条条目的循环里顺带读出。
+		 * 分支，以两张表的形式，在本来就在读每条条目的回调里顺带读出。
 		 *
 		 * 记录的标题已随 `rename` 条目消失——快照现在持有它——所以标题还需要扫描给的只剩*派生的*
 		 * 回落：叶子所在分支上的第一条 user 消息。这需要读者沿用的同一套 parent 链接，在一条本就
@@ -704,32 +452,30 @@ async function buildSessionInfo(
 		/** 任何种类的最后一条条目，也就是从文件读分支时的起点。 */
 		let leafId: string | undefined;
 
-		const lines = createInterface({
-			input: createReadStream(absJsonlPath, { encoding: "utf8", signal }),
-			crlfDelay: Number.POSITIVE_INFINITY,
-		});
+		await sessionRepository.scanLedger(
+			absJsonlPath,
+			(entry, file) => {
+				mtimeMs = file.mtimeMs;
+				leafId = entry.id;
+				parentOf.set(entry.id, entry.parentId);
+				if (entry.type !== "message") return;
+				messageCount++;
 
-		for await (const line of lines) {
-			const entry = parseJsonlLine(line);
-			if (!entry) continue;
-			leafId = entry.id;
-			parentOf.set(entry.id, entry.parentId);
-			if (entry.type !== "message") continue;
-			messageCount++;
+				const activityTime = getMessageActivityTime(entry);
+				if (typeof activityTime === "number") lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
 
-			const activityTime = getMessageActivityTime(entry);
-			if (typeof activityTime === "number") lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
+				const message = entry.message;
+				if (!isMessageWithContent(message)) return;
+				if (message.role !== "user" && message.role !== "assistant") return;
 
-			const message = entry.message;
-			if (!isMessageWithContent(message)) continue;
-			if (message.role !== "user" && message.role !== "assistant") continue;
-
-			const text = extractTextContent(message);
-			if (!text) continue;
-			allMessages.push(text);
-			if (!firstMessage && message.role === "user") firstMessage = text;
-			if (message.role === "user" && !userTextOf.has(entry.id)) userTextOf.set(entry.id, text);
-		}
+				const text = extractTextContent(message);
+				if (!text) return;
+				allMessages.push(text);
+				if (!firstMessage && message.role === "user") firstMessage = text;
+				if (message.role === "user" && !userTextOf.has(entry.id)) userTextOf.set(entry.id, text);
+			},
+			signal,
+		);
 
 		const metaTime = new Date(meta.timestamp).getTime();
 		const modified =
@@ -737,7 +483,7 @@ async function buildSessionInfo(
 				? new Date(lastActivityTime)
 				: !Number.isNaN(metaTime)
 					? new Date(metaTime)
-					: stats.mtime;
+					: new Date(mtimeMs);
 
 		return {
 			absPath: absJsonlPath,
@@ -819,6 +565,12 @@ function sortSessionInfos(sessions: SessionInfo[]): SessionInfo[] {
  * 每一行都以 id 命名。本目录之外的 parent 保持未解析、fork 显示为根，这是诚实的读法：这里的东西
  * 同样打不开它。
  */
+/** 一次查找可以建 key 的路径：已解析，并在文件系统不区分大小写的地方同样折叠。 */
+function absPathKey(absPath: string): string {
+	const absResolved = resolvePath(absPath);
+	return process.platform === "win32" ? absResolved.toLowerCase() : absResolved;
+}
+
 function linkForkParents(sessions: SessionInfo[]): void {
 	const byAbsPath = new Map<string, string>();
 	for (const session of sessions) byAbsPath.set(absPathKey(session.absPath), session.id);
@@ -828,50 +580,6 @@ function linkForkParents(sessions: SessionInfo[]): void {
 		const parentId = byAbsPath.get(absPathKey(session.absParentSessionPath));
 		if (parentId === undefined || parentId === session.id) continue;
 		session.parentId = parentId;
-	}
-}
-
-/** 一次查找可以建 key 的路径：已解析，并在文件系统不区分大小写的地方同样折叠。 */
-function absPathKey(absPath: string): string {
-	const absResolved = resolvePath(absPath);
-	return process.platform === "win32" ? absResolved.toLowerCase() : absResolved;
-}
-
-/**
- * 仅测试的接缝（仿 `setSessionsDir` 的先例）：挂在 {@link SessionManager.remove} 的两步 rm 之间，
- * 让冒烟测试能把删除钉在中间态上——闸内的写被拒、闸放行后盘上无残留，这些只有一次可控的删除才能
- * 观察得到。生产代码永远不设置它。
- */
-let removeGate: (() => Promise<void>) | undefined;
-
-/** 设置或清除 {@link removeGate}；传 `undefined` 即清除。 */
-export function setRemoveGate(gate: (() => Promise<void>) | undefined): void {
-	removeGate = gate;
-}
-
-async function listSessionsFromDir(absDir: string, signal?: AbortSignal): Promise<SessionInfo[]> {
-	signal?.throwIfAborted();
-	if (!existsSync(absDir)) return [];
-
-	try {
-		// 扫描配好文件并清除打不开的（settleSessionFiles），所以留在这里的恰好是本构建能打开的
-		// session。
-		const pairs = settleSessionFiles(absDir);
-		const results = await mapWithConcurrency(
-			pairs,
-			MAX_CONCURRENT_SESSION_INFO_LOADS,
-			async (pair) => buildSessionInfo(pair.absJson, pair.absJsonl, pair.meta, signal),
-			signal,
-		);
-		// 一条消息都没有的文件是一次没人说过话的创建，不是一段对话：侧栏是对话清单，所以在这里
-		// 略掉它而不是画成「新会话」。v5 下盘上没有东西会是空的——两个文件随第一条消息诞生——
-		// 所以这是对损坏配对的防御，不是写入方需要的过滤器。
-		const sessions = results.filter((info): info is SessionInfo => info !== null && info.messageCount > 0);
-		linkForkParents(sessions);
-		return sessions;
-	} catch {
-		signal?.throwIfAborted();
-		return [];
 	}
 }
 
@@ -968,7 +676,7 @@ function recordedModelOf(
  * 一个 session 的内存状态写出的盘上快照：从重组的 {@link SessionSettings} 重建扁平的
  * {@link SessionMeta}。
  *
- * 盘↔内存翻译中写文件的那个方向——{@link writeMetaFile} 序列化它，`getMeta` 把同样的形状交给
+ * 盘↔内存翻译中写文件的那个方向——端口的 `writeSnapshot` 序列化它，`getMeta` 把同样的形状交给
  * 读者。身份字段来自袋自己：版本号始终是本构建的（读取侧拒绝其他一切），创建时间戳在袋上传递，
  * 因为文件名无法把它无损地还回来。
  */
@@ -991,26 +699,23 @@ function metaOf(session: Session): SessionMeta {
 /**
  * 一个新 session 的状态，等待第一次追加。
  *
- * store 目录可以在这里创建，但不会创建任何文件：文件随第一条值得保留的条目出现——
- * {@link persistEntry} 里的闸门（`hasConversation`）——所以没人说过的 session 不在盘上留下
- * 会话记录，也不在侧栏留下一行。这就是构建状态而不写快照的全部意义：store 是对话的记录，没有
- * 消息的对话还不是对话。
+ * 不会创建任何文件，也不再创建 store 目录：文件随第一条值得保留的条目出现——`persistEntry` 里的
+ * 闸门（`hasConversation`，留在 domain 的对话知识）——而目录由存储实现的诞生写入按需创建，所以
+ * 没人说过的 session 不在盘上留下任何东西，也不在侧栏留下一行。这就是构建状态而不写快照的全部
+ * 意义：store 是对话的记录，没有消息的对话还不是对话。
  *
- * 代价是在那条首条消息之前 id 无法按址找到：{@link findSessionFilePathById} 向 store 要一个配对，
- * 还没有配对的 id 在那里找不到。因此把 id 递出去、之后还要为它负责的调用方，会在那个窗口内持有
- * 状态（或包着它的 `SessionManager` 外壳）——`SessionHub` 就持有那么久。
+ * `storeDir` 是这次诞生要落进的 store（端口布局契约的 `storeDir` 半）；全参必填——「默认真实
+ * home」不再是 domain 的知识（分层重构 §5.2）。
+ *
+ * 代价是在那条首条消息之前 id 无法按址找到：`findSessionFilePathById` 向 store 要一个配对，还没有
+ * 配对的 id 在那里找不到。因此把 id 递出去、之后还要为它负责的调用方，会在那个窗口内持有状态
+ * （或包着它的 `SessionManager` 外壳）——`SessionHub` 就持有那么久。
  */
-export function createSession(
-	workDirInput: string,
-	storeDirInput?: string,
-	parentSessionFileInput?: string,
-): Session {
-	const absDir = storeDirInput ? normalizePath(storeDirInput) : sessionsDir();
-	if (!existsSync(absDir)) mkdirSync(absDir, { recursive: true });
+export function createSession(workDirInput: string, storeDir: string, parentSessionFileInput?: string): Session {
 	const session: Session = {
 		sessionId: "",
 		timestamp: "",
-		sessionDirAbsPath: absDir,
+		sessionDirAbsPath: normalizePath(storeDir),
 		persist: true,
 		fileCreated: false,
 		settings: { workDirAbsPath: resolvePath(workDirInput), suspended: false },
@@ -1040,37 +745,29 @@ export function inMemorySession(workDirInput: string = process.cwd(), parentSess
 }
 
 /**
+ * 诞生命名：`<storeDir>/<id>.jsonl`。
+ *
+ * 文件对布局契约（SessionRepository）的 domain 半——`storeDir` 从端口的 `storeDir` 现取，infra 的
+ * `sessionPath` 实现同一规则（spec §2.3 把命名规则指给存储布局知识，诞生的目标路径由 domain 拼
+ * 出是因为 `createPair` 收的就是它）。`.json` 快照在同一 stem 上。
+ */
+function newSessionPairPath(storeDir: string, sessionId: string): string {
+	return join(storeDir, `${sessionId}.jsonl`);
+}
+
+/**
  * 把一个 session 的两个文件重放成新的 {@link Session}：把盘上路径变成 session 操作所作用状态的唯一
  * 入口。
  *
- * `.json` 快照给出身份和当前选择；`.jsonl` 重放条目树；叶子从流上落位。本构建打不开的配对被
- * *删除*，而不是拒绝后留在原地——v≤4 文件、未配对的半边、错误的版本，都是永远无法再打开的
- * session，留着它们会让每次扫描都撞见幽灵——然后打开动作抛出异常。路径可以指两半中的任何一个：
- * 手里拿着 `.jsonl` 的调用方传它，快照在同一 stem 上找到。
+ * `.json` 快照给出身份和当前选择；`.jsonl` 重放条目树；叶子从流上落位。重放本身（配对检查、版本
+ * 拒绝、打不开配对的 prune）是端口方法 `fill` 的实现（infra），这里只做袋的构建——纯数据。
+ * 路径可以指两半中的任何一个：手里拿着 `.jsonl` 的调用方传它，快照在同一 stem 上找到。
  */
-export function fillSession(absFilePath: string): Session {
-	const absPath = resolvePath(absFilePath);
-	const absJsonl = absPath.endsWith(".json") ? sessionJsonlPath(absPath) : absPath;
-	const absJson = sessionMetaPath(absJsonl);
-	if (!existsSync(absJsonl)) {
-		// 无论如何都是未配对：清掉存在的半边，拒绝打开。
-		if (existsSync(absJson)) pruneSessionFiles(absJson, absJsonl);
-		throw new Error(`Session file does not exist: ${absJsonl}`);
-	}
-	let meta: SessionMeta;
-	try {
-		meta = readMetaFile(absJson);
-	} catch (error) {
-		pruneSessionFiles(absJson, absJsonl);
-		throw error;
-	}
-	const entries = loadJsonlEntries(absJsonl);
-	if (entries.length === 0) {
-		// 快照存在时条目流在法律上不能是空的：诞生是两边一起写的，空流就是半途夭折的配对。和其他
-		// 情况一样清掉。
-		pruneSessionFiles(absJson, absJsonl);
-		throw new Error(`Session file is not a valid ${APP_NAME} session: ${absJsonl}`);
-	}
+export function fillSession(absFilePath: string, sessionRepository: SessionRepository): Session {
+	const { meta, entries } = sessionRepository.fill(absFilePath);
+	// 袋要的是流路径：`.json` 形式的入参按 ADR-0008 的 stem 配对换算成 `.jsonl`（同一 stem 的另一半）。
+	const resolved = resolvePath(absFilePath);
+	const absJsonl = resolved.endsWith(".json") ? resolved.replace(/\.json$/, ".jsonl") : resolved;
 	const session: Session = {
 		sessionId: meta.id,
 		timestamp: meta.timestamp,
@@ -1110,7 +807,7 @@ export function newSession(session: Session, parentSessionFile?: string): string
 	session.fileCreated = false;
 
 	const dir = session.sessionDirAbsPath;
-	if (session.persist && dir !== null) session.sessionFileAbsPath = sessionPath(session.sessionId, dir);
+	if (session.persist && dir !== null) session.sessionFileAbsPath = newSessionPairPath(dir, session.sessionId);
 	return session.sessionFileAbsPath;
 }
 
@@ -1140,76 +837,49 @@ function hasConversation(session: Session): boolean {
 }
 
 /**
- * 整体重写 `.json` 快照：写一个同目录的 temp 文件，再 rename 盖到快照上。
- *
- * 快照要的是一次写入，不是追加——而且扫描 store 的读者绝不能撞见写到一半的它，这就是 rename 买到
- * 的东西：temp 被写入、关闭、一步移入位置，所以每个读者要么看到旧快照要么看到新快照，绝不会看到
- * 撕裂的。rename 发生在同一目录内，所以在本代码运行的文件系统上是原子的。
- */
-function writeMetaFile(session: Session): void {
-	const absJsonl = session.sessionFileAbsPath;
-	if (absJsonl === undefined) return;
-	const absJson = sessionMetaPath(absJsonl);
-	const absTemp = `${absJson}.${process.pid}.tmp`;
-	const fd = openSync(absTemp, "wx");
-	try {
-		writeFileSync(fd, `${JSON.stringify(metaOf(session), null, "\t")}\n`);
-	} finally {
-		closeSync(fd);
-	}
-	renameSync(absTemp, absJson);
-}
-
-/**
  * 把一条条目写到盘上，文件还不存在时先扣住它。
  *
- * 闸门是刻意的：session 的第一条消息才换来它的文件（`hasConversation`），所以没人说过的 session
- * 永不落盘。通过闸门后的第一次写入一次性创建两个文件——完整的条目流，然后是作为提交标记的 meta
- * 快照——因为此前盘上没有任何东西接收它们；快照**最后**写，半途夭折的诞生就会留下未配对的半边，
- * 由 store 扫描清除而不是保留。从那以后（`fileCreated`）每条条目自行追加，每次 meta 变更重写快照。
+ * 闸门是刻意的：session 的第一条消息才换来它的文件（`hasConversation`，留在 domain 的对话知识），
+ * 所以没人说过的 session 永不落盘——domain 判断之后才调端口的诞生写入。通过闸门后的第一次写入
+ * 是端口的 `createPair`：完整的条目流，然后是作为提交标记的 meta 快照，两文件 `wx`、快照**最后**
+ * 写——半途夭折的诞生留下未配对的半边，由 store 扫描清除而不是保留。从那以后（`fileCreated`）
+ * 每条条目自行追加（端口的 `appendEntry`），每次 meta 变更重写快照（端口的 `writeSnapshot`）。
+ * hold 闸住存储实现的内部：每个端口方法对文件对原子（ADR-0023 修订）。
  */
-export function persistEntry(session: Session, entry: SessionEntry): void {
+export function persistEntry(session: Session, sessionRepository: SessionRepository, entry: SessionEntry): void {
 	if (!session.persist || !session.sessionFileAbsPath) return;
 
 	if (!session.fileCreated) {
 		if (!hasConversation(session)) return;
-		const fd = openSync(session.sessionFileAbsPath, "wx");
-		try {
-			for (const existing of session.jsonlEntries) writeFileSync(fd, `${JSON.stringify(existing)}\n`);
-		} catch (error) {
-			// 没能落盘的流什么也不留下；下一次有闸门的写入从同一份内存日志重试诞生。
-			closeSync(fd);
-			rmSync(session.sessionFileAbsPath, { force: true });
-			throw error;
-		}
-		closeSync(fd);
-		writeMetaFile(session);
+		sessionRepository.createPair(session.sessionFileAbsPath, session.jsonlEntries, metaOf(session));
 		session.fileCreated = true;
 		return;
 	}
 
-	appendFileSync(session.sessionFileAbsPath, `${JSON.stringify(entry)}\n`);
+	sessionRepository.appendEntry(session.sessionFileAbsPath, entry);
 }
 
 /** 把 `entry` 加进日志成为新叶子，内存和盘上同时进行。 */
-function appendEntry(session: Session, entry: SessionEntry): void {
+function appendEntry(session: Session, sessionRepository: SessionRepository, entry: SessionEntry): void {
 	session.jsonlEntries.push(entry);
 	session.sessionEntryMapById.set(entry.id, entry);
 	session.leafId = entry.id;
-	persistEntry(session, entry);
+	persistEntry(session, sessionRepository, entry);
 }
 
 /**
  * 对快照应用一次变更，真的变了才重写文件。
  *
  * 变更先落在内存的 setting 上——那是每个读者回答的来源袋——盘上的副本只在 session 有文件可重写时
- * 才跟着写。文件还没诞生的 session 把变更单独留在内存里：{@link persistEntry} 在诞生时写快照，所以
- * 首条消息之前做出的选择得以存活，又不破坏「没有对话就没有文件」的规则。`change` 对 no-op 返回
+ * 才跟着写。文件还没诞生的 session 把变更单独留在内存里：诞生的 `createPair` 在首条消息时写快照，
+ * 所以首条消息之前做出的选择得以存活，又不破坏「没有对话就没有文件」的规则。`change` 对 no-op 返回
  * false，这让一串相同的写入不必每次都付一次重写。
  */
-function recordMeta(session: Session, change: (setting: SessionSettings) => boolean): void {
+function recordMeta(session: Session, sessionRepository: SessionRepository, change: (setting: SessionSettings) => boolean): void {
 	if (!change(session.settings)) return;
-	if (session.persist && session.fileCreated) writeMetaFile(session);
+	if (session.persist && session.fileCreated) {
+		sessionRepository.writeSnapshot(session.sessionFileAbsPath!, metaOf(session));
+	}
 }
 
 /** 两个审批表的字段相等，遍及任一侧指名的所有 key。 */
@@ -1283,7 +953,7 @@ function subtreeDescription(
  * 调用方随后自己设置 {@link Session.leafId}：一次追加会推进叶子，而这次不能——记录在树里的位置和
  * 它报告的位置是两个事实，各有各的字段。
  */
-function appendLeafRecord(session: Session, leafId: string | null): void {
+function appendLeafRecord(session: Session, sessionRepository: SessionRepository, leafId: string | null): void {
 	const entry: LeafEntry = {
 		type: "leaf",
 		id: generateId(session.sessionEntryMapById),
@@ -1293,111 +963,39 @@ function appendLeafRecord(session: Session, leafId: string | null): void {
 	};
 	session.jsonlEntries.push(entry);
 	session.sessionEntryMapById.set(entry.id, entry);
-	persistEntry(session, entry);
+	persistEntry(session, sessionRepository, entry);
 }
 
 /**
- * session 服务：账本的操作，以及操作之下的文件 I/O。
+ * session 服务：账本的操作，以及对注入存储的每一次读写。
  *
  * 每个 per-session 方法都以 {@link Session} 为第一参数、在这里完成工作——没有第二层同名文件级函数
  * 供转发，所以读这个文件的调用方读到的就是实现。这个类不持有任何 per-session 状态（ADR-0006 §2）
  * 也没有缓存：袋归填充或构建它的人所有，orchestrator 的表（`Agent`）是唯一在调用之间持有运行中
- * session 的袋的地方。唯一的例外是 {@link SessionManager.holds}——对无属性服务形态的一次有意识的
- * 修订，理由记在那张表的注释里。
+ * session 的袋的地方。
  *
- * 这个类拥有的是 store 的格式知识：id 如何变成文件路径
- * （{@link SessionManager.findSessionFilePathById}），文件如何变成袋（{@link fillSession}，连同它的
- * 清除和版本拒绝），写入如何到达盘上（`persistEntry`、`writeMetaFile`）。
+ * 这个类拥有的是账本的树操作与视图；触盘的一切走注入的 {@link SessionRepository}（分层重构 §4.1，
+ * infra 逐存储域实现），会话簇设置走注入的 {@link SessionDefaultsRepository}（spec §5.2）。曾经的
+ * hold 闸与文件 I/O 是实现自己的内部——端口方法各自对文件对原子（ADR-0023 修订），domain 连闸的
+ * 存在都不知道，只见 `UnknownSessionError` 的拒绝。
  */
 export class SessionManager {
-	/**
-	 * `home` 是会话簇设置文件（`sessions.json`，两条队列的全局默认模式）所在的目录，默认
-	 * {@link AGENT_HOME}；测试递临时目录，机器自己的文件靠边站。会话文件本身不在这里——它们跟随
-	 * 各自的工作目录。
-	 */
-	private readonly home: string;
+	/** 会话文件对的读写端口（唯一消费者是编排层自己的服务——本类）。 */
+	private readonly sessionRepository: SessionRepository;
 
-	constructor(options: SessionManagerOptions = {}) {
-		this.home = options.home ?? AGENT_HOME;
+	/** 会话簇设置文件（`sessions.json` 及 legacy `settings.json`）的读写端口。 */
+	private readonly sessionDefaultsRepository: SessionDefaultsRepository;
+
+	constructor(options: SessionManagerOptions) {
+		this.sessionRepository = options.sessionRepository;
+		this.sessionDefaultsRepository = options.sessionDefaultsRepository;
 	}
 
-	/**
-	 * 此刻谁在改变哪个会话文件对：按**文件键**键控的持有计数表。触碰一对文件的公开方法（meta
-	 * setter、append 族、写 leaf 记录的两个、`open`、`forkFrom` 的写目标半）在自己的长度内持闸，
-	 * `remove` 是唯一跨 await 的持有者、闸罩它全程——持有者从 server 的 hold/release 括号收编为
-	 * Manager 自己，编排层与传输层都不感知。
-	 *
-	 * 键是会话文件对的规范文件键：以 `.jsonl` 绝对路径经 {@link absPathKey}（resolvePath + win32
-	 * 大小写折叠）折叠。id → 文件的解析只在进闸前做一次，此后簿记的领域里没有 id——锁的单位与它
-	 * 保护的东西（同一 stem 的 `.json` + `.jsonl`）重合。进闸时发现 `closing` 在场（一次删除正跨着
-	 * await），以 `UnknownSessionError` 拒绝——读作「没有这个会话」，与「等过 closing 再发现文件
-	 * 没了」是同一答案、同一错误种类，只是不再等待。同步方法的进出是瞬时的：单线程进程里同步块
-	 * 不可被打断，它的意义不是互斥等待，而是与 `closing` 闸的相遇点。热读（袋在手）从不进闸；
-	 * `open` 是冷路径唯一的入口，做 I/O 且可能 prune，所以进闸——「读不拿锁」罩的是持有袋的
-	 * 读取，不是冷路径的打开动作。
-	 *
-	 * 这是对 ADR-0006 无属性服务形态的一次**有意识的修订**：这张表是易失簿记——重启即空、不落盘、
-	 * 不可重建也不需重建——与 `ToolManager` 的常驻实例表（ADR-0011）同类；无状态门面的其他一切
-	 * 不变。它同时也是**存储原语缺失税**：文件系统没有「存在才写」的原子原语（实证：
-	 * `.scratch/fs-race-test/test.mjs`），「两个写入方不同时碰一对文件」只能靠一张进程内的计数表
-	 * 补出来。换成事务型存储的那天——方法变事务、调用方一字不动——这张表该跟着消失，不是搬进新
-	 * 存储。
-	 */
-	private readonly holds = new Map<string, { holds: number; closing?: Promise<void> }>();
-
-	/**
-	 * 进闸：文件键计数 +1；闸正被一次删除占着时，以「没有这个会话」拒绝。返回它立起的条目，让
-	 * 唯一跨 await 的持有者（`remove`）在同一拍挂上 `closing`，而不必回头再查一次表。
-	 */
-	private enterHold(fileKey: string, sessionId: string): { holds: number; closing?: Promise<void> } {
-		const entry = this.holds.get(fileKey);
-		if (entry?.closing !== undefined) throw new UnknownSessionError(sessionId);
-		const fresh = { holds: (entry?.holds ?? 0) + 1 };
-		this.holds.set(fileKey, fresh);
-		return fresh;
+	/** 会话文件对所在的 store 目录（端口的布局契约半）：诞生命名与 fork 的写目标从这里拼出。 */
+	get storeDir(): string {
+		return this.sessionRepository.storeDir;
 	}
 
-	/** 出闸：宽容释放（无人持有的文件键无事发生）、归零删条目——hub 旧 `release()` 的语义原样。 */
-	private leaveHold(fileKey: string): void {
-		const entry = this.holds.get(fileKey);
-		if (entry === undefined) return;
-		const remaining = Math.max(0, entry.holds - 1);
-		if (remaining === 0) this.holds.delete(fileKey);
-		else this.holds.set(fileKey, { holds: remaining });
-	}
-
-	/**
-	 * 袋式写路径共用的闸括号：进闸、动作、出闸在同一个同步块里完成。公开方法持闸、内部互调不重复
-	 * 计账——锁只有这一个进出层（{@link holdingFileKey}），嵌套不存在。
-	 *
-	 * 已诞生的袋（fileCreated）在进闸前先复核提交标记仍在——**复活守卫**：删除完成后陈旧袋进闸时
-	 * 已撞不到 `closing`，闸条目随 `remove` 的 finally 整条退场；没有这道复核，它的 appendMessage
-	 * 会经 {@link persistEntry} 的 appendFileSync 把 `.jsonl` 造回来、meta setter 会把 `.json` 造
-	 * 回去，被删的会话无声诈尸成半个会话（spec User Story 4：「最后一个动作赢」）。标记不在即以
-	 * {@link UnknownSessionError} 拒绝，读作「没有这个会话」——与闸内拒绝同一答案、同一错误种类。
-	 * 尚未诞生的袋没有文件可保护也不可复活（它的变更留在内存里，由 {@link persistEntry} 的诞生写入
-	 * 整体带上盘），不进闸、不复核。
-	 */
-	private holding<T>(session: Session, action: () => T): T {
-		const absJsonl = session.fileCreated ? session.sessionFileAbsPath : undefined;
-		if (absJsonl === undefined) return action();
-		if (!existsSync(sessionMetaPath(absJsonl))) throw new UnknownSessionError(session.sessionId);
-		return this.holdingFileKey(absPathKey(absJsonl), session.sessionId, action);
-	}
-
-	/**
-	 * 以文件键进门的同一层闸括号：袋式方法经 {@link holding}（它补上袋 → 文件键的解析与复活守卫），
-	 * 不经袋的进闸——`open` 的冷路径、`forkFrom` 的写目标半——直接指名文件键。`remove` 是唯一的
-	 * 例外：它跨 await，以自己的路径持有、立 `closing`、finally 整条退场。
-	 */
-	private holdingFileKey<T>(fileKey: string, sessionId: string, action: () => T): T {
-		this.enterHold(fileKey, sessionId);
-		try {
-			return action();
-		} finally {
-			this.leaveHold(fileKey);
-		}
-	}
 	/**
 	 * 追加一条消息作为叶子的孩子并推进叶子。返回新条目的 id。
 	 *
@@ -1405,33 +1003,29 @@ export class SessionManager {
 	 * 它，这正是 {@link appendCompaction} 存在的原因。
 	 */
 	appendMessage(session: Session, message: Message): string {
-		return this.holding(session, () => {
-			const entry: MessageEntry = {
-				type: "message",
-				id: generateId(session.sessionEntryMapById),
-				parentId: session.leafId,
-				timestamp: new Date().toISOString(),
-				message,
-			};
-			appendEntry(session, entry);
-			return entry.id;
-		});
+		const entry: MessageEntry = {
+			type: "message",
+			id: generateId(session.sessionEntryMapById),
+			parentId: session.leafId,
+			timestamp: new Date().toISOString(),
+			message,
+		};
+		appendEntry(session, this.sessionRepository, entry);
+		return entry.id;
 	}
 
 	/**
 	 * 记录这个 session 最后一次请求的 thinking level，作为快照的当前值。
 	 *
 	 * 不是条目：level 是*当前值*，所以 `.json` 快照持有它，它之前是什么的历史刻意消失——从没人读过。
-	 * 文件还没诞生的 session 把变更留在内存里；{@link persistEntry} 在诞生时写快照，所以选择得以
+	 * 文件还没诞生的 session 把变更留在内存里；诞生的 `createPair` 在首条消息时写快照，所以选择得以
 	 * 存活，又不破坏「没有对话就没有文件」的规则。
 	 */
 	setThinkingLevel(session: Session, thinkingLevel: string): void {
-		this.holding(session, () => {
-			recordMeta(session, (setting) => {
-				if (setting.model?.thinkingLevel === thinkingLevel) return false;
-				setting.model = { ...(setting.model ?? {}), thinkingLevel };
-				return true;
-			});
+		recordMeta(session, this.sessionRepository, (setting) => {
+			if (setting.model?.thinkingLevel === thinkingLevel) return false;
+			setting.model = { ...(setting.model ?? {}), thinkingLevel };
+			return true;
 		});
 	}
 
@@ -1443,12 +1037,10 @@ export class SessionManager {
 	 * 个名字，由旧名构建的 ref 已经有了着落。
 	 */
 	setModel(session: Session, name: string, modelId: string): void {
-		this.holding(session, () => {
-			recordMeta(session, (setting) => {
-				if (setting.model?.name === name && setting.model.modelId === modelId) return false;
-				setting.model = { ...(setting.model ?? {}), name, modelId };
-				return true;
-			});
+		recordMeta(session, this.sessionRepository, (setting) => {
+			if (setting.model?.name === name && setting.model.modelId === modelId) return false;
+			setting.model = { ...(setting.model ?? {}), name, modelId };
+			return true;
 		});
 	}
 
@@ -1460,9 +1052,9 @@ export class SessionManager {
 	 * 袋在一次原子重写里进快照。文件还没诞生的 session 保持袋原样；诞生写入会整体带上它。
 	 */
 	flushMeta(session: Session): void {
-		this.holding(session, () => {
-			if (session.persist && session.fileCreated) writeMetaFile(session);
-		});
+		if (session.persist && session.fileCreated && session.sessionFileAbsPath !== undefined) {
+			this.sessionRepository.writeSnapshot(session.sessionFileAbsPath, metaOf(session));
+		}
 	}
 
 	/**
@@ -1473,12 +1065,10 @@ export class SessionManager {
 	 * 选择」和「选了默认」在盘上不可区分，这正是两者语义相同的诚实写法。
 	 */
 	setMode(session: Session, mode: string | undefined): void {
-		this.holding(session, () => {
-			recordMeta(session, (setting) => {
-				if (setting.mode === mode) return false;
-				setting.mode = mode;
-				return true;
-			});
+		recordMeta(session, this.sessionRepository, (setting) => {
+			if (setting.mode === mode) return false;
+			setting.mode = mode;
+			return true;
 		});
 	}
 
@@ -1489,17 +1079,15 @@ export class SessionManager {
 	 * 空表也按选择记录——它表达「会话撤销了自己的全部增量」，与「从未选择」在语义上无别。
 	 */
 	setApprovalOverride(session: Session, approval: Record<string, boolean>): void {
-		this.holding(session, () => {
-			recordMeta(session, (setting) => {
-				if (
-					setting.approval !== undefined &&
-					metasApprovalEqual(setting.approval, approval)
-				) {
-					return false;
-				}
-				setting.approval = { ...approval };
-				return true;
-			});
+		recordMeta(session, this.sessionRepository, (setting) => {
+			if (
+				setting.approval !== undefined &&
+				metasApprovalEqual(setting.approval, approval)
+			) {
+				return false;
+			}
+			setting.approval = { ...approval };
+			return true;
 		});
 	}
 
@@ -1511,12 +1099,10 @@ export class SessionManager {
 	 * 才付一次重写，且只有 true 才会到盘上（{@link metaOf}）。
 	 */
 	setSuspended(session: Session, suspended: boolean): void {
-		this.holding(session, () => {
-			recordMeta(session, (setting) => {
-				if (setting.suspended === suspended) return false;
-				setting.suspended = suspended;
-				return true;
-			});
+		recordMeta(session, this.sessionRepository, (setting) => {
+			if (setting.suspended === suspended) return false;
+			setting.suspended = suspended;
+			return true;
 		});
 	}
 
@@ -1528,12 +1114,10 @@ export class SessionManager {
 	 * 从文件顺序论证出的读法），快照直接陈述它。
 	 */
 	setTitle(session: Session, title: string): void {
-		this.holding(session, () => {
-			recordMeta(session, (setting) => {
-				if (setting.title === title) return false;
-				setting.title = title;
-				return true;
-			});
+		recordMeta(session, this.sessionRepository, (setting) => {
+			if (setting.title === title) return false;
+			setting.title = title;
+			return true;
 		});
 	}
 
@@ -1545,19 +1129,17 @@ export class SessionManager {
 	 * 不值得占一行。
 	 */
 	appendUsage(session: Session, operation: string, model: string, usage: Usage): string {
-		return this.holding(session, () => {
-			const entry: UsageEntry = {
-				type: "usage",
-				id: generateId(session.sessionEntryMapById),
-				parentId: session.leafId,
-				timestamp: new Date().toISOString(),
-				operation,
-				model,
-				usage,
-			};
-			appendEntry(session, entry);
-			return entry.id;
-		});
+		const entry: UsageEntry = {
+			type: "usage",
+			id: generateId(session.sessionEntryMapById),
+			parentId: session.leafId,
+			timestamp: new Date().toISOString(),
+			operation,
+			model,
+			usage,
+		};
+		appendEntry(session, this.sessionRepository, entry);
+		return entry.id;
 	}
 
 	/**
@@ -1573,22 +1155,20 @@ export class SessionManager {
 		tokensBefore: number,
 		usage?: Usage,
 	): string {
-		return this.holding(session, () => {
-			const timestamp = new Date().toISOString();
-			const id = generateId(session.sessionEntryMapById);
-			const entry: CompactionEntry = {
-				type: "compaction",
-				id,
-				parentId: session.leafId,
-				timestamp,
-				summary,
-				firstKeptEntryId: firstKeptEntryId ?? id,
-				tokensBefore,
-				...(usage === undefined ? {} : { usage }),
-			};
-			appendEntry(session, entry);
-			return entry.id;
-		});
+		const timestamp = new Date().toISOString();
+		const id = generateId(session.sessionEntryMapById);
+		const entry: CompactionEntry = {
+			type: "compaction",
+			id,
+			parentId: session.leafId,
+			timestamp,
+			summary,
+			firstKeptEntryId: firstKeptEntryId ?? id,
+			tokensBefore,
+			...(usage === undefined ? {} : { usage }),
+		};
+		appendEntry(session, this.sessionRepository, entry);
+		return id;
 	}
 
 	/**
@@ -1598,18 +1178,16 @@ export class SessionManager {
 	 * 记录只有 id 和这次清空值多少。
 	 */
 	appendClearToolResults(session: Session, clearedEntryIds: readonly string[], tokensBefore: number): string {
-		return this.holding(session, () => {
-			const entry: ClearToolResultEntry = {
-				type: "clear_tool_result",
-				id: generateId(session.sessionEntryMapById),
-				parentId: session.leafId,
-				timestamp: new Date().toISOString(),
-				clearedEntryIds: [...clearedEntryIds],
-				tokensBefore,
-			};
-			appendEntry(session, entry);
-			return entry.id;
-		});
+		const entry: ClearToolResultEntry = {
+			type: "clear_tool_result",
+			id: generateId(session.sessionEntryMapById),
+			parentId: session.leafId,
+			timestamp: new Date().toISOString(),
+			clearedEntryIds: [...clearedEntryIds],
+			tokensBefore,
+		};
+		appendEntry(session, this.sessionRepository, entry);
+		return entry.id;
 	}
 
 	/**
@@ -1619,18 +1197,16 @@ export class SessionManager {
 	 * 这次截短值多少。
 	 */
 	appendTrimToolCallArgs(session: Session, trimmedEntryIds: readonly string[], tokensBefore: number): string {
-		return this.holding(session, () => {
-			const entry: TrimToolCallArgEntry = {
-				type: "trim_tool_call_arg",
-				id: generateId(session.sessionEntryMapById),
-				parentId: session.leafId,
-				timestamp: new Date().toISOString(),
-				trimmedEntryIds: [...trimmedEntryIds],
-				tokensBefore,
-			};
-			appendEntry(session, entry);
-			return entry.id;
-		});
+		const entry: TrimToolCallArgEntry = {
+			type: "trim_tool_call_arg",
+			id: generateId(session.sessionEntryMapById),
+			parentId: session.leafId,
+			timestamp: new Date().toISOString(),
+			trimmedEntryIds: [...trimmedEntryIds],
+			tokensBefore,
+		};
+		appendEntry(session, this.sessionRepository, entry);
+		return entry.id;
 	}
 
 	/** `parentId` 之后的每条条目，按文件顺序。 */
@@ -1797,7 +1373,7 @@ export class SessionManager {
 	 */
 	recordedOnDisk(session: Session): { model?: { name: string; modelId: string }; thinkingLevel?: string } {
 		if (!session.fileCreated || session.sessionFileAbsPath === undefined) return {};
-		return recordedModelOf(sessionSettingOf(readMetaFile(sessionMetaPath(session.sessionFileAbsPath))).model);
+		return recordedModelOf(sessionSettingOf(this.sessionRepository.readSnapshot(session.sessionFileAbsPath)).model);
 	}
 
 	/**
@@ -1873,21 +1449,17 @@ export class SessionManager {
 	 * no-op 移动不花任何文件。
 	 */
 	branch(session: Session, branchFromId: string): void {
-		this.holding(session, () => {
-			if (!session.sessionEntryMapById.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
-			if (session.leafId === branchFromId) return;
-			appendLeafRecord(session, branchFromId);
-			session.leafId = branchFromId;
-		});
+		if (!session.sessionEntryMapById.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
+		if (session.leafId === branchFromId) return;
+		appendLeafRecord(session, this.sessionRepository, branchFromId);
+		session.leafId = branchFromId;
 	}
 
 	/** 把叶子移到第一条之前，下一次追加就成为新的根。 */
 	resetLeaf(session: Session): void {
-		this.holding(session, () => {
-			if (session.leafId === null) return;
-			appendLeafRecord(session, null);
-			session.leafId = null;
-		});
+		if (session.leafId === null) return;
+		appendLeafRecord(session, this.sessionRepository, null);
+		session.leafId = null;
 	}
 
 	/**
@@ -1897,17 +1469,16 @@ export class SessionManager {
 	 * 的表），绝不通过重放它的文件——快照是整体重写的，一个过期的袋会把那个 session 的 turn 刚记下
 	 * 的东西回滚掉。它回答的是一次已经完成的诞生：`.json` 快照是诞生的提交标记，所以与它匹配的 id
 	 * 意味着旁边有一条 `.jsonl`，两个文件都不认的 id 会被本 store 的每个读者共用的那句话拒绝。存在
-	 * 却打不开的配对由 {@link fillSession} 自己清除，所以这是一次可能会删除文件的读取。
+	 * 却打不开的配对由端口的 `fill` 自己清除（先 prune 再以 {@link UnknownSessionError} 拒绝），所以
+	 * 这是一次可能会删除文件的读取——闸与 revive 语义住实现内部，冷路径对它的相遇原样。
 	 *
 	 * 冷写入是两步不是三步——先这里拿袋，再一个 setter，setter 自己写文件（`setTitle` 记录 meta，
-	 * 记录即持久化）。没有第三个要记住的 persist 动词，也没有要冲刷的脏状态。冷路径也过文件闸：
-	 * id → 文件的解析本身就是进闸前的一次地址解析，进闸是一次与 `closing` 的相遇——打开撞上一个
-	 * 正在进行的删除，以「没有这个会话」拒绝，而不是读到一个半途被删的文件对。
+	 * 记录即持久化）。没有第三个要记住的 persist 动词，也没有要冲刷的脏状态。
 	 */
 	open(id: string): Session {
-		const absPath = SessionManager.findSessionFilePathById(id);
+		const absPath = this.sessionRepository.locate(id);
 		if (absPath === undefined) throw new UnknownSessionError(id);
-		return this.holdingFileKey(absPathKey(absPath), id, () => fillSession(absPath));
+		return fillSession(absPath, this.sessionRepository);
 	}
 
 	// =========================================================================
@@ -1923,21 +1494,16 @@ export class SessionManager {
 	 * 悬空 call——因为那些现在是 session 自己的值，不是分支重放能恢复的条目。工作目录取源 header
 	 * 自己的：fork 写在它的源住的地方，也不要求调用方重放文件去了解那里是哪。
 	 *
-	 * 源只被读取：fork 是新的一对文件，它来源的 session 从不被重写——对源的读不进闸，「读不拿锁」
-	 * 的边界原样；闸罩的是写目标半，新文件对在自己的长度内持闸。fork 不填充任何东西也不注册
-	 * 任何东西——文件就是它返回的全部，新 session 的第一个袋来自它的第一次 {@link open}，后者读取
-	 * 刚写下的配对。两个文件都在返回前同步写完，快照最后写（`wx`，诞生的提交标记），所以这里递出去
-	 * 的 id 在调用方拿到时已经可以打开。
+	 * 源半是**哑读**（`readSnapshot` + `loadEntries`，不走 `fill` 的 prune 编排——今天 fork 不 prune，
+	 * 复用它会是行为变化）；写目标半是端口的 `createPair`（两文件 `wx`、快照最后写，闸住实现内部）。
+	 * fork 不填充任何东西也不注册任何东西——文件就是它返回的全部，新 session 的第一个袋来自它的
+	 * 第一次 {@link open}，后者读取刚写下的配对。两个文件都在返回前同步写完，所以这里递出去的 id
+	 * 在调用方拿到时已经可以打开。
 	 */
-	forkFrom(
-		sourcePathInput: string,
-		entryId: string | null,
-		storeDirInput?: string,
-	): { sessionId: string; sessionFileAbsPath: string } {
-		const absSourcePath = resolvePath(sourcePathInput);
-		const absSourceJsonl = absSourcePath.endsWith(".json") ? sessionJsonlPath(absSourcePath) : absSourcePath;
-		const sourceMeta = readMetaFile(sessionMetaPath(absSourceJsonl));
-		const sourceEntries = loadJsonlEntries(absSourceJsonl);
+	forkFrom(sourcePathInput: string, entryId: string | null): { sessionId: string; sessionFileAbsPath: string } {
+		const absSourceJsonl = resolvePath(sourcePathInput);
+		const sourceMeta = this.sessionRepository.readSnapshot(absSourceJsonl);
+		const sourceEntries = this.sessionRepository.loadEntries(absSourceJsonl);
 		if (sourceEntries.length === 0) {
 			throw new Error(`Cannot fork: source session file is empty or invalid: ${absSourceJsonl}`);
 		}
@@ -1952,12 +1518,11 @@ export class SessionManager {
 		const absTargetWorkDir = resolvePath(sourceMeta.workDir);
 		// store 是扁平的，所以 fork 落在所有其他 session 旁边；它属于哪个项目随它复制的快照走，
 		// 不随它所在的目录走。
-		const absDir = storeDirInput ? normalizePath(storeDirInput) : sessionsDir();
-		if (!existsSync(absDir)) mkdirSync(absDir, { recursive: true });
+		const absDir = this.sessionRepository.storeDir;
 
 		const newSessionId = createSessionId();
 		const timestamp = new Date().toISOString();
-		const absNewSessionFile = sessionPath(newSessionId, absDir);
+		const absNewSessionFile = newSessionPairPath(absDir, newSessionId);
 		const meta: SessionMeta = {
 			version: CURRENT_SESSION_VERSION,
 			id: newSessionId,
@@ -1971,13 +1536,37 @@ export class SessionManager {
 			...(sourceMeta.approval === undefined ? {} : { approval: sourceMeta.approval }),
 			...(sourceMeta.suspended === undefined ? {} : { suspended: sourceMeta.suspended }),
 		};
-		// 只罩写目标半：两个文件同步写完才放闸，源半全程在闸外。
-		this.holdingFileKey(absPathKey(absNewSessionFile), newSessionId, () => {
-			writeFileSync(absNewSessionFile, branch.map((entry) => `${JSON.stringify(entry)}\n`).join(""), { flag: "wx" });
-			writeFileSync(sessionMetaPath(absNewSessionFile), `${JSON.stringify(meta, null, "\t")}\n`, { flag: "wx" });
-		});
+		this.sessionRepository.createPair(absNewSessionFile, branch, meta);
 
 		return { sessionId: newSessionId, sessionFileAbsPath: absNewSessionFile };
+	}
+
+	/**
+	 * store 的发现半：一次扫描配好全部文件，再为每个会话构建摘要。
+	 *
+	 * 冷半是端口的 `scanPairs`（readdir + 配对 + prune + 空流检测，infra），行泵是端口的
+	 * `scanLedger`——派生留在 {@link buildSessionInfo} 的回调里。
+	 */
+	private async listFromStore(signal?: AbortSignal): Promise<SessionInfo[]> {
+		signal?.throwIfAborted();
+		try {
+			const pairs = await this.sessionRepository.scanPairs();
+			const results = await mapWithConcurrency(
+				pairs,
+				MAX_CONCURRENT_SESSION_INFO_LOADS,
+				async (pair) => buildSessionInfo(this.sessionRepository, pair.absJsonl, pair.meta, signal),
+				signal,
+			);
+			// 一条消息都没有的文件是一次没人说过话的创建，不是一段对话：侧栏是对话清单，所以在这里
+			// 略掉它而不是画成「新会话」。盘上没有东西会是空的——两个文件随第一条消息诞生——所以这是
+			// 对损坏配对的防御，不是写入方需要的过滤器。
+			const sessions = results.filter((info): info is SessionInfo => info !== null && info.messageCount > 0);
+			linkForkParents(sessions);
+			return sessions;
+		} catch {
+			signal?.throwIfAborted();
+			return [];
+		}
 	}
 
 	/**
@@ -1986,11 +1575,9 @@ export class SessionManager {
 	 * store 持有所有项目的 session，所以目录是一个过滤器而不是一个位置：每个候选自己的快照说它属于
 	 * 哪个目录，比较的就是那个值——不是它碰巧坐落的文件夹，后者已不再指名一个项目。
 	 */
-	static async list(workDirInput: string, storeDirInput?: string, signal?: AbortSignal): Promise<SessionInfo[]> {
-		ensureStoreMigrated();
-		const absDir = storeDirInput ? normalizePath(storeDirInput) : sessionsDir();
+	async list(workDirInput: string, signal?: AbortSignal): Promise<SessionInfo[]> {
 		const workDirAbsPath = resolvePath(workDirInput);
-		const sessions = (await listSessionsFromDir(absDir, signal)).filter((session) =>
+		const sessions = (await this.listFromStore(signal)).filter((session) =>
 			sessionWorkDirMatches(session.workDirAbsPath, workDirAbsPath),
 		);
 		return sortSessionInfos(sessions);
@@ -2005,9 +1592,8 @@ export class SessionManager {
 	 *
 	 * 组按最近活动优先返回，header 没指名目录的 session 被丢弃，而不是显示成一个无头的组。
 	 */
-	static async listDirectories(signal?: AbortSignal): Promise<DirectorySessions[]> {
-		ensureStoreMigrated();
-		const sessions = (await listSessionsFromDir(sessionsDir(), signal)).filter(
+	async listDirectories(signal?: AbortSignal): Promise<DirectorySessions[]> {
+		const sessions = (await this.listFromStore(signal)).filter(
 			(session) => session.workDirAbsPath !== "",
 		);
 
@@ -2034,13 +1620,13 @@ export class SessionManager {
 	 *
 	 * 创建路径在复活一个文件系统已丢失的工作目录之前先问这里：store 认识的项目被恢复为空目录，
 	 * 打错的路径被拒绝。一次扫描，并且从快照回答而不是从任何文件夹名回答，因为 store 已经不再
-	 * 保存后者。
+	 * 保存后者。随 `scanPairs` 异步化（spec §4.1 的同步/异步划分），REST 面不变——端点本就异步。
 	 */
-	static hasSessionsFor(workDirAbsPath: string): boolean {
-		ensureStoreMigrated();
+	async hasSessionsFor(workDirAbsPath: string): Promise<boolean> {
 		const absWorkDir = resolvePath(workDirAbsPath);
 		try {
-			return settleSessionFiles(sessionsDir()).some((pair) => sessionWorkDirMatches(pair.meta.workDir, absWorkDir));
+			const pairs = await this.sessionRepository.scanPairs();
+			return pairs.some((pair) => sessionWorkDirMatches(pair.meta.workDir, absWorkDir));
 		} catch {
 			return false;
 		}
@@ -2054,17 +1640,28 @@ export class SessionManager {
 	 * 出现的代价是一次解析，而不是对整台机器的一次扫描。定位那一半是快照读取，不是会话记录读取；
 	 * 只有匹配到的 session 才解析 `.jsonl`。
 	 */
-	static async findSessionRowById(id: string, signal?: AbortSignal): Promise<SessionRow | undefined> {
-		const absPath = SessionManager.findSessionFilePathById(id);
+	async findSessionRowById(id: string, signal?: AbortSignal): Promise<SessionRow | undefined> {
+		const absPath = this.sessionRepository.locate(id);
 		if (absPath === undefined) return undefined;
-		const meta = readMetaForDiscovery(absPath);
-		if (meta === null) return undefined;
-		const info = await buildSessionInfo(sessionMetaPath(absPath), absPath, meta, signal);
+		// 定位那一半是快照读取，尽力而为：读不了或版本不对的文件不把其他 session 藏起来，也只让
+		// 这一行缺席。
+		let meta: SessionMeta;
+		try {
+			meta = this.sessionRepository.readSnapshot(absPath);
+		} catch {
+			return undefined;
+		}
+		const info = await buildSessionInfo(this.sessionRepository, absPath, meta, signal);
 		if (info === null) return undefined;
 		// fork 的 parent 在快照里按*路径*指名，所以一旦该路径解析成 id，单凭一个 session 就可知
 		// ——这很重要，因为 fork 一次一行地到达 store，本可以链接它的列表不在场。
 		if (info.parentId === undefined && info.absParentSessionPath !== undefined) {
-			const parent = readMetaForDiscovery(info.absParentSessionPath);
+			let parent: SessionMeta | undefined;
+			try {
+				parent = this.sessionRepository.readSnapshot(info.absParentSessionPath);
+			} catch {
+				parent = undefined;
+			}
 			const parentId = parent?.id;
 			if (parentId !== undefined && parentId !== info.id) info.parentId = parentId;
 		}
@@ -2072,17 +1669,15 @@ export class SessionManager {
 	}
 
 	/**
-	 * 一个 session id 指名的条目流路径——一次 stat，不是一次搜索。
+	 * 一个 session id 指名的条目流路径——一次存在性检查，不是一次搜索。
 	 *
-	 * store 是扁平的、id 就是地址（`<id>.jsonl`），所以这是一次存在性检查：流旁边的 `.json` 快照是
-	 * 诞生的提交标记，它的存在才是「配对存在」的那一半。快照没了的名字回答 `undefined`，每个调用方
-	 * 读作「没有这个 session」；流没了的快照是一次半途夭折的诞生，{@link fillSession} 被要求打开它
-	 * 时会清除。
+	 * store 是扁平的、id 就是地址（`<id>.jsonl`）：流旁边的 `.json` 快照是诞生的提交标记，它的存在
+	 * 才是「配对存在」的那一半。快照没了的名字回答 `undefined`，每个调用方读作「没有这个 session」；
+	 * 流没了的快照是一次半途夭折的诞生，端口的 `fill` 被要求打开它时会清除。查找走端口
+	 * （`locate`，含实现自己的旧布局迁移）。
 	 */
-	static findSessionFilePathById(id: string): string | undefined {
-		ensureStoreMigrated();
-		const absJsonl = sessionPath(id);
-		return existsSync(sessionMetaPath(absJsonl)) ? absJsonl : undefined;
+	findSessionFilePathById(id: string): string | undefined {
+		return this.sessionRepository.locate(id);
 	}
 
 	/**
@@ -2092,40 +1687,12 @@ export class SessionManager {
 	 * 任何东西都是另一段对话的会话记录。对未知 id 抛异常而不是回答「早已不在」，把两种失败分开
 	 * ——调用方决定第二次删除意味着什么，hub 把它变成客户端能展示的状态码。
 	 *
-	 * 纯文件 I/O：为这个 id 持有活袋的表是谁的就是谁的，决定 session 已消失的调用方自己忘掉那一半
-	 * （`Agent.deleteSessionBySessionId`）。
-	 *
-	 * remove 是唯一跨 await 的持有者，闸罩它全程：进闸后立刻立起 `closing`，rm 的 await 窗口里一切
-	 * 进闸尝试撞上它、以「没有这个会话」拒绝；finally 的出闸整条删掉条目——窗口里的计数只含 remove
-	 * 自己，其他进闸已被 `closing` 挡在门外。
-	 *
-	 * 两步 rm 的顺序是刻意的：**先删 `.json`（诞生的提交标记），后删 `.jsonl`（流）**。`.json` 先走，
-	 * 两步 rm 之间到达的一切新写入方（prompt 前置校验、grant、冷路径）都查 meta、都读到「不存在」
-	 * ——中间态读作半途夭折的诞生，由既有扫描（`settleSessionFiles` / `fillSession` 的 prune）自愈，
-	 * 而不是发明新的原子性（文件系统没有「存在才写」的原子原语，实证：
-	 * `.scratch/fs-race-test/test.mjs`）。反过来的顺序会留下一个 meta 还在、流却没了的中间态，读作
-	 * 「会话在但记录残缺」，每个读者都要另作解释。
-	 *
-	 * 两步 rm 都带 `force`：扫描自愈（`fillSession` 的 prune、`settleSessionFiles`）可能在 rm 的
-	 * await 窗口里读到「meta 已走」的中间态、抢先清掉另一半——文件已被删掉就是删除已经达成，
-	 * 是「早已不在」的成功而不是病态；反过来，rm 因文件损毁以外的原因失败才值得上报。
+	 * 纯端口转发：两步 rm 的顺序（先删提交标记、后删流）、闸罩全程与 `closing` 的立起、removeGate
+	 * 测试缝，都是存储实现的内部（ADR-0023 修订：hold 下沉 infra）；domain 只见「未知 id 以
+	 * {@link UnknownSessionError} 拒绝」的承诺。
 	 */
 	async remove(id: string): Promise<void> {
-		const absPath = SessionManager.findSessionFilePathById(id);
-		if (absPath === undefined) throw new UnknownSessionError(id);
-		const fileKey = absPathKey(absPath);
-		const entry = this.enterHold(fileKey, id);
-		const closing = (async () => {
-			await rm(sessionMetaPath(absPath), { force: true });
-			if (removeGate !== undefined) await removeGate();
-			await rm(absPath, { force: true });
-		})();
-		entry.closing = closing;
-		try {
-			await closing;
-		} finally {
-			this.holds.delete(fileKey);
-		}
+		await this.sessionRepository.remove(id);
 	}
 
 	/**
@@ -2136,9 +1703,7 @@ export class SessionManager {
 	 * 删除，从进闸的那一拍起就该把一切后续的存在性检查答成「没有这个会话」（ADR-0023）。
 	 */
 	isClosing(id: string): boolean {
-		const absPath = SessionManager.findSessionFilePathById(id);
-		if (absPath === undefined) return false;
-		return this.holds.get(absPathKey(absPath))?.closing !== undefined;
+		return this.sessionRepository.isDeleting(id);
 	}
 
 	// ---------------------------------------------------------------------------- 会话簇设置
@@ -2172,31 +1737,32 @@ export class SessionManager {
 		// 写前重读（迁移语义含在读取里）：只点名一个键的补丁不得弄丢另一个键在盘上的值。
 		const updated: Record<string, unknown> = { ...this.sessionDefaultsLayer() };
 		for (const [field, value] of named) updated[field] = value;
-		writeSessionsLayer(sessionsPathOf(this.home), updated);
+		this.sessionDefaultsRepository.write("sessions.json", updated);
 	}
 
 	/**
 	 * 会话簇设置所在的层：先保证迁移发生，再读自己的文件。缺失的文件是一个空层；读不出 JSON 的
-	 * 文件被拒绝、从不被覆盖——与 ADR-0028 对各持有者文件的裁定同一立场。
+	 * 文件被拒绝、从不被覆盖——与 ADR-0028 对各持有者文件的裁定同一立场。文件名是簇知识
+	 * （`sessions.json`，经端口的文件名参数递给实现，spec §4.2）。
 	 */
 	private sessionDefaultsLayer(): Record<string, unknown> {
 		this.migrateSessionDefaultsOnce();
-		return readJsonLayer(sessionsPathOf(this.home));
+		return this.sessionDefaultsRepository.read("sessions.json") ?? {};
 	}
 
 	/**
 	 * 一次性读时迁移（spec §4.2）：`sessions.json` 尚不存在、旧 `settings.json` 存在时，从旧文件
 	 * 捡走自己的簇，把补默认后的视图原子落盘——字段全缺省也要写，把「迁移过」变成磁盘事实，避免
 	 * 旧文件日后复活。`sessions.json` 已在（迁移早已完成或用户手编）时旧文件被完全忽略；旧文件
-	 * 本身永不删除、永不写入。
+	 * 本身永不删除、永不写入。迁移编排（什么时候迁、捡哪些键）是簇知识，留在持有者里；实现不懂
+	 * 「settings.json 是 legacy」。
 	 */
 	private migrateSessionDefaultsOnce(): void {
-		const absSessions = sessionsPathOf(this.home);
-		if (existsSync(absSessions)) return;
-		const absLegacy = settingsPath(this.home);
-		if (!existsSync(absLegacy)) return;
-		const legacy = readJsonLayer(absLegacy);
-		writeSessionsLayer(absSessions, {
+		if (this.sessionDefaultsRepository.read("sessions.json") !== undefined) return;
+		// 旧文件读不出 JSON 时同样拒绝——与今天 readJsonLayer 对两份文件的裁定一致。
+		const legacy = this.sessionDefaultsRepository.read("settings.json");
+		if (legacy === undefined) return;
+		this.sessionDefaultsRepository.write("sessions.json", {
 			steeringMode: queueModeOr(legacy.steeringMode, DEFAULT_GLOBAL_SETTINGS.steeringMode),
 			followUpMode: queueModeOr(legacy.followUpMode, DEFAULT_GLOBAL_SETTINGS.followUpMode),
 		});
@@ -2205,15 +1771,14 @@ export class SessionManager {
 }
 
 /**
- * 调用方可指明会话簇设置住在哪个 home，把 {@link SessionManager} 指到机器自己的文件之外。
+ * {@link SessionManager} 的构造端口（分层重构 spec §5.2）：会话文件对的读写与 会话簇设置文件的
+ * 读写，全部必填——domain 造不出 infra，「缺省真实 home」不再是 domain 的知识。
  */
 export interface SessionManagerOptions {
-	/**
-	 * `sessions.json` 读取与写入所在的 agent home。默认用真实的那一个。
-	 *
-	 * 测试「会*写*会话簇设置」的命令的 smoke 不得写机器自己的文件。
-	 */
-	home?: string;
+	/** 会话文件对（`.json` 快照 + `.jsonl` 账本）的读写端口。 */
+	sessionRepository: SessionRepository;
+	/** 会话簇设置文件（`sessions.json`，迁移源 `settings.json`）的读写端口。 */
+	sessionDefaultsRepository: SessionDefaultsRepository;
 }
 
 /**
@@ -2236,48 +1801,6 @@ export interface SessionDefaults {
  */
 export function queueModeOr(value: unknown, fallback: QueueMode): QueueMode {
 	return value === "all" || value === "one-at-a-time" ? value : fallback;
-}
-
-/** 会话簇自己的设置文件：`SessionManager` 的 home 下唯一的一份。 */
-function sessionsPathOf(home: string): string {
-	return join(home, "sessions.json");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/**
- * `path` 的 JSON 对象按它写下的原样；不在的文件、空文件是空层。trim 顺带去掉 UTF-8 BOM——
- * Windows 编辑器会写它，而 `JSON.parse` 拒绝它。读不出的文件被拒绝，从不被覆盖。
- */
-function readJsonLayer(path: string): Record<string, unknown> {
-	if (!existsSync(path)) return {};
-	const text = readFileSync(path, "utf8").trim();
-	if (text === "") return {};
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(text);
-	} catch (error) {
-		throw new Error(`${path} is not valid JSON: ${(error as Error).message}`);
-	}
-	if (!isRecord(parsed)) throw new Error(`${path} must hold a JSON object`);
-	return parsed;
-}
-
-/**
- * 原子落盘：写同目录的 temp 文件再 rename 盖上去——读者要么看到旧文件要么看到新文件，绝不会
- * 看到写到一半的（与 `writeMetaFile` 买到的保证相同）。
- */
-function writeSessionsLayer(path: string, layer: Record<string, unknown>): void {
-	const absTemp = `${path}.${process.pid}.tmp`;
-	const fd = openSync(absTemp, "wx");
-	try {
-		writeFileSync(fd, `${JSON.stringify(layer, null, "\t")}\n`);
-	} finally {
-		closeSync(fd);
-	}
-	renameSync(absTemp, path);
 }
 
 /** 一个组里最近的活动，供侧栏目录排序。 */

@@ -11,6 +11,13 @@
 它们在本进程的唯一消费者是 core 的编排层，hub 从协调者退为只认公开面的调用者）、
 [0011](0011-tool-manager-instance-table.md)（部分，2026-11-07——决定 7 的「hub 冷热两条路
 共用**自己那只**」那一半：工具表仍全进程只装配一只，但它住编排层手里，hub 不再持任何表）
+取代者：[0030](0030-five-module-layering.md)（部分，2026-11-21——分层重构步 5，spec §5.2/§8.2）：
+**决定 3 的「构造吸收」保留**——工厂活下来、仍吸收 manager 构造（诚实构造不动），但**原料从
+homes 换成注入的端口**（`CreateSessionAgentOptions` 收五个必填端口：sessionRepository /
+sessionDefaultsRepository / modelRepository / toolDefaultsRepository / toolResultsRepository）；
+存储端口全必填，「缺省真实 home」不再是 domain 的知识，`AGENT_HOME` 常量出 domain 归组合根
+（`@my-agent/app` 的 `agent-home.ts`）。扫描对象随 server 包退役迁 `check-layering`（R1b 承接
+原 facade 守卫的成员禁令）。公开面三类方法、窄读一族、守卫思想全部不动。
 
 设计过程见 `.scratch/hub-agent-facade/`（map + 01–08 号票；01–03 号票是裁决、04–07 号票是
 执行，本 ADR 是 08 号票的收账）。

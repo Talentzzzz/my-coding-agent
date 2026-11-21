@@ -14,6 +14,7 @@ import { compact as compactEntries, compactionThresholdFor, estimateTokens, shou
 import { spillOversizedToolResult } from "./spill.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import type { CompactionResult, Summarize } from "./types.ts";
+import type { ToolResultsRepository } from "./tool-results-repository.ts";
 import type { Api, Message, Model, SessionEntry, ToolResultContent } from "../types.ts";
 
 export class ContextManager {
@@ -65,6 +66,7 @@ export class ContextManager {
 	 * 归档一条过大的 tool result，返回模型应看到的视图，否则返回 `undefined`（写边界调，§3）。
 	 *
 	 * `undefined` 意味着「不过大」或文件写不出来——调用方回落到 `boundToolContent` 的硬截断。
+	 * 归档端口由调用方（编排层）递入——构造保持零依赖（ADR-0006 修订），端口实例归编排层持有。
 	 */
 	spillOversizedToolResult(
 		workDirAbsPath: string,
@@ -72,7 +74,8 @@ export class ContextManager {
 		toolName: string,
 		toolCallId: string,
 		content: ToolResultContent,
+		toolResults: ToolResultsRepository,
 	): ToolResultContent | undefined {
-		return spillOversizedToolResult(workDirAbsPath, sessionId, toolName, toolCallId, content);
+		return spillOversizedToolResult(workDirAbsPath, sessionId, toolName, toolCallId, content, toolResults);
 	}
 }
