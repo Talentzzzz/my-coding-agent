@@ -1,4 +1,4 @@
-import type { DiffLine, FileDiff } from "@my-agent/core/protocol";
+import type { DiffLine, FileDiff } from "@my-agent/case/protocol";
 import { element } from "../dom.ts";
 
 /**

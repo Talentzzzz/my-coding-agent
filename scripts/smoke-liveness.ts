@@ -12,12 +12,13 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bootServer, type BootedServer } from "../packages/server/src/boot.ts";
+import { start, type BootedServer } from "@my-agent/app";
 import { MuxClient, type ChannelState, type MuxSocket, type MuxSocketFactory, type MuxSocketHandlers } from "../packages/web/src/client.ts";
 import { faultyProxy, type FaultyProxy } from "./wire/proxy.ts";
 import { until } from "./wire/client.ts";
 import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
-import { setSessionsDir, type ModelConfig, type ServerMessage } from "@my-agent/core";
+import { type ModelConfig } from "@my-agent/domain";
+import type { ServerMessage } from "@my-agent/case/protocol";
 
 let failures = 0;
 
@@ -56,11 +57,9 @@ interface Observed {
 }
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-liveness-"));
-/** 一个临时 agent home，本 smoke 写的设置不是机器自己的。 */
+/** 一个临时 agent home，本 smoke 写的设置不是机器自己的。会话 store 随 settingsHome 派生（分层重构 §5.2）。 */
 const home = await mkdtemp(join(tmpdir(), "my-agent-liveness-home-"));
-/** 一个临时 store，本 smoke 出生的会话不是机器自己的。 */
-const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-liveness-store-"));
-setSessionsDir(storeRoot);
+const storeRoot = join(home, "sessions");
 
 /** 出生那一轮驱动的剧本化模型。它的端点永远不会被拨通：transport 自己应答。 */
 const modelRows: ModelConfig[] = [
@@ -83,7 +82,7 @@ async function running(base: string, sessionId: string): Promise<boolean> {
 // 心跳间隔是本 smoke 的整个时钟：服务器每 50 ms 说一次话，客户端容忍其中三次（它自己的规则，
 // 由 `everyMs` 推得），两个数字都远小于下方的断言窗口。
 const transport = createFakeTransport();
-const server: BootedServer = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: 50 }, chatTransport: transport.chatTransport, settingsHome: home });
+const server: BootedServer = await start({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: 50 }, chatTransport: transport.chatTransport, settingsHome: home });
 // 出生请求需要一行模型（ADR-0021：它自带第一条消息，于是那一轮当场开跑）。
 server.sessionHub.setModelConfigs(modelRows);
 const proxy: FaultyProxy = await faultyProxy(new URL(server.url));
@@ -186,7 +185,6 @@ try {
 	await server.close();
 	await rm(root, { recursive: true, force: true });
 	await rm(home, { recursive: true, force: true });
-	await rm(storeRoot, { recursive: true, force: true });
 	process.stdout.write(failures === 0 ? "\nliveness ok\n" : `\n${failures} failure(s)\n`);
 	process.exitCode = failures === 0 ? 0 : 1;
 }

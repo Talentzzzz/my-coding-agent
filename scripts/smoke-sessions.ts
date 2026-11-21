@@ -7,10 +7,10 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { request } from "node:http";
-import { createAssistantMessageEventStream, type ChatTransport, type Message, type ModelConfig } from "@my-agent/core";
-import { bootServer } from "../packages/server/src/boot.ts";
+import { createAssistantMessageEventStream, type ChatTransport, type Message, type ModelConfig } from "@my-agent/domain";
+import { start } from "@my-agent/app";
 import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
-import { SessionHub } from "../packages/server/src/hub.ts";
+import { SessionHub } from "@my-agent/case";
 import {
 	CURRENT_SESSION_VERSION,
 	type Agent,
@@ -24,21 +24,22 @@ import {
 	readSessionSnapshot,
 	SessionManager,
 	UnknownSessionError,
-	setRemoveGate,
-	setSessionsDir,
 	resolveSettings,
 	type SessionSnapshot,
 	type Session,
-} from "@my-agent/core";
-// 接缝经包的公开面取（仿 setSessionsDir）：源路径的相对 import 在 Windows 上解析出大小写不同的
-// 盘符 URL（file:///z:/ vs 包的 file:///Z:/），会造出第二个模块实例、缝挂不到 remove 读的那张表上。
-
-/** The ledger's operations are the service's methods, so a script holds one to call them on. */
-const store = new SessionManager();
+} from "@my-agent/domain";
+import { HomeJsonStore, SessionFileStore, ToolResultsArchive, setRemoveGate } from "@my-agent/infra";
+// removeGate 测试缝随 hold 闸迁 infra（ADR-0023 修订），从 @my-agent/infra 取——同一句包名 import
+// 在 Windows 上解析出大小写不同的盘符 URL 也不会造出第二个模块实例（infra 的缝挂实现自己的表上）。
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-sessions-"));
 const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-sessions-store-"));
-setSessionsDir(storeRoot);
+// 自造 infra 实现指临时 store（分层重构 §7 步 5）：账本操作与发现半走端口。
+const sessionStore = new SessionFileStore({ storeDir: storeRoot });
+const settingsDefaults = new HomeJsonStore({ home: join(root, "agent-home-defaults") });
+const archive = new ToolResultsArchive();
+/** The ledger's operations are the service's methods, so a script holds one to call them on. */
+const store = new SessionManager({ sessionRepository: sessionStore, sessionDefaultsRepository: settingsDefaults });
 let failures = 0;
 
 function check(label: string, condition: boolean, detail = ""): void {
@@ -118,9 +119,9 @@ function messagesOf(session: Session): Message[] {
 
 /** Replay the stored file for a session id, the way a later process would. */
 function openFile(id: string): Session {
-	const path = SessionManager.findSessionFilePathById(id);
+	const path = store.findSessionFilePathById(id);
 	if (path === undefined) throw new Error(`no session file for ${id}`);
-	return fillSession(path);
+	return fillSession(path, sessionStore);
 }
 
 /** The snapshot path of a session: same stem as the `.jsonl` stream, `.json` for the `.json` file. */
@@ -240,7 +241,15 @@ function vetoGate(): { chatTransport: ChatTransport; held(): boolean; sawAbort()
 	};
 }
 
-const hub = new SessionHub({ workDirAbsPath: root });
+// 自造 infra 实现指临时目录（分层重构 §7 步 5）：hub 只认端口，home → 实现的翻译在这里。
+const hubPorts = {
+	sessionRepository: sessionStore,
+	sessionDefaultsRepository: settingsDefaults,
+	modelRepository: settingsDefaults,
+	toolDefaultsRepository: settingsDefaults,
+	toolResultsRepository: archive,
+};
+const hub = new SessionHub({ workDirAbsPath: root, ...hubPorts });
 
 try {
 	process.stdout.write("one session per id\n");
@@ -309,7 +318,7 @@ try {
 	check("and it reports the file it came from", hubSessions(hub).getMeta(bagOf(hub, forkedId))?.parentSession === parentFile);
 
 	process.stdout.write("forking without an entry copies the whole log\n");
-	const whole = fillSession(new SessionManager().forkFrom(parentFile, null).sessionFileAbsPath);
+	const whole = fillSession(store.forkFrom(parentFile, null).sessionFileAbsPath, sessionStore);
 	check("every entry came with it", ids(store.getEntries(whole)) === ids(hubSessions(hub).getEntries(bagOf(hub, parentId))));
 	check("and the session matches", messagesOf(whole).length === messagesOf(bagOf(hub, parentId)).length);
 	check("its leaf is the source's leaf", whole.leafId === bagOf(hub, parentId).leafId);
@@ -357,13 +366,13 @@ try {
 	check("it is not running until someone holds it", !hub.isLive(cold), String(hub.isLive(cold)));
 	const coldFile = openFile(cold);
 	check("its branch ends where it was told to", coldFile.leafId === onDisk.leafId);
-	check("and it points at the session it came from", store.getMeta(coldFile)?.parentSession === SessionManager.findSessionFilePathById(forkedId));
+	check("and it points at the session it came from", store.getMeta(coldFile)?.parentSession === store.findSessionFilePathById(forkedId));
 	check("the other fork is a session of its own", secondFork.sessionId !== forkedId && secondFork.sessionId !== cold);
 
 	process.stdout.write("a listing resolves a fork's parent\n");
 	// The header names the source's *file path*, because that is what a reader of one file has in hand;
 	// the sidebar draws a tree, so the listing is where that path becomes the id of the session it names.
-	const list = await SessionManager.list(root);
+	const list = await store.list(root);
 	const listed = new Map(list.map((info) => [info.id, info]));
 	check("the fork points at the session it came from", listed.get(forkedId)?.parentId === parentId, String(listed.get(forkedId)?.parentId));
 	check("and a fork of a fork points at its own source", listed.get(cold)?.parentId === forkedId, String(listed.get(cold)?.parentId));
@@ -376,7 +385,7 @@ try {
 
 	// The sidebar reads the directory groups rather than one directory, so the same link has to survive
 	// that path: a fork listed under a directory has to name a parent that is listed with it.
-	const groups = await SessionManager.listDirectories();
+	const groups = await store.listDirectories();
 	const group = groups.find((candidate) => candidate.sessions.some((session) => session.id === forkedId));
 	check("the directory listing carries the same parent", group?.sessions.find((session) => session.id === forkedId)?.parentId === parentId, JSON.stringify(group?.sessions.map((session) => [session.id, session.parentId])));
 	check(
@@ -395,19 +404,19 @@ try {
 		await hub.rename(renamedId, "新名字");
 		check("a live session reports the stored name", hub.agent.snapshot(renamedId).title === "新名字", hub.agent.snapshot(renamedId).title);
 
-		const rescanned = await SessionManager.findSessionRowById(renamedId);
+		const rescanned = await store.findSessionRowById(renamedId);
 		check("the file's row carries the stored name", rescanned?.title === "新名字", rescanned?.title);
 		check("a reopen reports it too", hub.agent.snapshot(renamedId).title === "新名字", hub.agent.snapshot(renamedId).title);
 
 		const renameFork = await hub.fork(renamedId, null);
-		const forkRow = await SessionManager.findSessionRowById(renameFork);
+		const forkRow = await store.findSessionRowById(renameFork);
 		check("a fork lands with the source's stored name", forkRow?.title === "新名字", forkRow?.title);
 		await hub.rename(renameFork, "另一条");
 		check(
 			"renaming the fork leaves the source alone",
-			(await SessionManager.findSessionRowById(renamedId))?.title === "新名字" &&
-				(await SessionManager.findSessionRowById(renameFork))?.title === "另一条",
-			`${(await SessionManager.findSessionRowById(renamedId))?.title} / ${(await SessionManager.findSessionRowById(renameFork))?.title}`,
+			(await store.findSessionRowById(renamedId))?.title === "新名字" &&
+				(await store.findSessionRowById(renameFork))?.title === "另一条",
+			`${(await store.findSessionRowById(renamedId))?.title} / ${(await store.findSessionRowById(renameFork))?.title}`,
 		);
 	}
 
@@ -460,7 +469,7 @@ try {
 
 		// The restore seam: a reopen is fillSession, and the recorded answers come back whole — the
 		// same parts the snapshot path a window reads is built from.
-		const restored = fillSession(jsonlPath);
+		const restored = fillSession(jsonlPath, sessionStore);
 		check(
 			"a reopen restores the model and level",
 			JSON.stringify(store.getRecordedSettings(restored)) ===
@@ -511,28 +520,33 @@ try {
 	const settingsHome = join(settingsRoot, "agent-home");
 	await mkdir(settingsHome, { recursive: true });
 	try {
-		const settingsTools = createToolManager({ home: settingsHome });
+		const settingsTools = createToolManager({ toolDefaultsRepository: new HomeJsonStore({ home: settingsHome }) });
 		settingsTools.applyToolDefaults({
 			tools: ["read", "bash"],
 			modes: [{ name: "reader", tools: ["read"], approval: {} }],
 		});
-		new ModelManager({ home: settingsHome }).replaceRows([]);
-		const session = createSession(settingsRoot);
+		const settingsStore = new HomeJsonStore({ home: settingsHome });
+		new ModelManager({ modelRepository: settingsStore }).replaceRows([]);
+		const settingsSessions = new SessionFileStore({ storeDir: join(settingsRoot, "sessions") });
+		const session = createSession(settingsRoot, join(settingsRoot, "sessions"));
 		const sessionId = session.sessionId;
 		const options = {
 			session,
-			settingsHome,
-			modelsHome: settingsHome,
+			sessionRepository: settingsSessions,
+			sessionDefaultsRepository: settingsStore,
+			modelRepository: settingsStore,
+			toolDefaultsRepository: settingsStore,
+			toolResultsRepository: new ToolResultsArchive(),
 		};
 		const known = ["read", "write", "edit", "glob", "grep", "bash"];
 		// 活会话的袋在第一条消息后作废：有文件就读，还没有就返回出生时的那只（它仍是 live 半上唯一
-		// 的一份，ADR-0013）。
+		// 的一份，ADR-0013）。重放走本 rig 自己的 store——会话落在这里，不在全局 store。
 		const replayed = (): Session => {
-			const path = SessionManager.findSessionFilePathById(sessionId);
-			return path === undefined ? session : fillSession(path);
+			const path = settingsSessions.locate(sessionId);
+			return path === undefined ? session : fillSession(path, settingsSessions);
 		};
 		const resolvedOf = (): string[] =>
-			resolveSettings(replayed(), settingsTools.toolDefaults(), { rows: new ModelManager({ home: settingsHome }).catalog() }, known).tools;
+			resolveSettings(replayed(), settingsTools.toolDefaults(), { rows: new ModelManager({ modelRepository: settingsStore }).catalog() }, known).tools;
 
 		const cold = await readSessionSnapshot(options);
 		check("a session with no entry reports the default seat", cold.mode === undefined, cold.mode);
@@ -569,7 +583,7 @@ try {
 			agent.applyConfig(sessionId, { mode: "reader" });
 			// The cold read takes a bag, and the one the assembly handed over stopped being current
 			// the moment the session was born: a cold read of a spoken session is a replay (ADR-0013).
-			const recold = await readSessionSnapshot({ ...options, session: fillSession(session.sessionFileAbsPath ?? "") });
+			const recold = await readSessionSnapshot({ ...options, session: fillSession(session.sessionFileAbsPath ?? "", sessionStore) });
 			check(
 				"the cold read answers the seat exactly as the live snapshot does",
 				recold.mode === agent.snapshot(sessionId).mode,
@@ -586,7 +600,9 @@ try {
 	// Phase 1 in one section: a read answers from the JSONL log, leaves the registry exactly as it was,
 	// and agrees field-for-field with what the facade answers directly — because both build
 	// their snapshot from the same parts.
-	const http = await bootServer({ workDirAbsPath: root, port: 0 });
+	// 起 server 的半改传 settingsHome（分层重构 §7 步 5 的改形表）：store 随它派生，落进本 smoke
+	// 自己的临时目录，不再碰机器真实的 home。
+	const http = await start({ workDirAbsPath: root, port: 0, settingsHome: join(root, "agent-home-server") });
 	try {
 		const readId = await http.sessionHub.birth({ text: "read me" });
 		hubSessions(http.sessionHub).appendMessage(bagOf(http.sessionHub, readId), userMessage("and me"));
@@ -713,7 +729,13 @@ try {
 		{
 			const home = await mkdtemp(join(tmpdir(), "my-agent-agent-home-"));
 			const host = await mkdtemp(join(tmpdir(), "my-agent-directories-"));
-			const http = await bootServer({ workDirAbsPath: root, port: 0, settingsHome: home });
+			const http = await start({ workDirAbsPath: root, port: 0, settingsHome: home });
+			// 服务器自己的 store（随 settingsHome 派生）：store 侧的断言读它，不再读全局 store——
+			// 端口化后 store 与 settingsHome 一一对应（分层重构 §5.2）。
+			const rigSessions = new SessionManager({
+				sessionRepository: new SessionFileStore({ storeDir: join(home, "sessions") }),
+				sessionDefaultsRepository: new HomeJsonStore({ home }),
+			});
 			const listed = async (): Promise<string[]> =>
 				(((await call("GET", `${http.url}/api/directories`)).payload.directories as { workDirAbsPath: string }[]) ?? []).map(
 					(group) => resolve(group.workDirAbsPath),
@@ -735,7 +757,7 @@ try {
 				check("the folder is exactly where it was", existsSync(before));
 				const kept = await get(`${http.url}/api/sessions/${id}`);
 				check("the session still names its own directory", resolve(kept.session?.workDirAbsPath ?? "") === resolve(before), kept.session?.workDirAbsPath);
-				check("and its session is still under that key", (await SessionManager.list(before)).some((session) => session.id === id));
+				check("and its session is still under that key", (await rigSessions.list(before)).some((session) => session.id === id));
 				check("the listing draws the path, not any label", (await listed()).includes(resolve(before)));
 				check("the other directory is still listed", (await listed()).includes(resolve(other)));
 
@@ -783,7 +805,7 @@ try {
 			check("a second delete is a 404 too", second.status === 404, `status=${second.status}`);
 			// 文件对在闸内异步落盘：第二次删除已是 404（它不再撞闸等待），收尾的 rm 可能仍在途——
 			// 最终断言轮询到它落地为止，不赌调度器的时机。
-			check("and the file is really gone", await until(() => SessionManager.findSessionFilePathById(victim) === undefined));
+			check("and the file is really gone", await until(() => store.findSessionFilePathById(victim) === undefined));
 		}
 	} finally {
 		await http.close();
@@ -796,14 +818,14 @@ try {
 	{
 		const statelessRoot = await mkdtemp(join(tmpdir(), "my-agent-stateless-"));
 		try {
-			const s = createSession(statelessRoot);
+			const s = createSession(statelessRoot, storeRoot);
 			check("a fresh state has a path but no file yet", s.sessionFileAbsPath !== undefined && !existsSync(s.sessionFileAbsPath));
 			const one = store.appendMessage(s, userMessage("stateless first"));
 			store.appendMessage(s, userMessage("stateless second"));
 			check("the first message created the file", s.sessionFileAbsPath !== undefined && existsSync(s.sessionFileAbsPath));
 			check("and the context follows the leaf", store.buildSessionContext(s).messages.length === 2);
 
-			const replayed = fillSession(s.sessionFileAbsPath!);
+			const replayed = fillSession(s.sessionFileAbsPath!, sessionStore);
 			check(
 				"a replay lands on the same leaf",
 				replayed.leafId === s.leafId,
@@ -818,20 +840,20 @@ try {
 			store.branch(replayed, one);
 			check("a stateless branch moves the leaf", replayed.leafId === one, String(replayed.leafId));
 			check("while the state appended to stays put", s.leafId !== one, String(s.leafId));
-			const rebranched = fillSession(s.sessionFileAbsPath!);
+			const rebranched = fillSession(s.sessionFileAbsPath!, sessionStore);
 			check("the branch move is replayed from the file", rebranched.leafId === one, String(rebranched.leafId));
 
 			// The service's open: one replay per call, no registration, the caller drops the bag. Two
 			// opens answer two bags on purpose — there is no cache to reuse, and anything that needed
 			// "the same bag twice" is a held session's business, the orchestrator table's.
-			const service = new SessionManager();
+			const service = new SessionManager({ sessionRepository: sessionStore, sessionDefaultsRepository: settingsDefaults });
 			const cold = service.open(s.sessionId);
 			check(
 				"the service and the stateless form agree",
 				JSON.stringify(store.buildSessionContext(cold).messages) === JSON.stringify(store.buildSessionContext(replayed).messages),
 			);
 			store.appendMessage(cold, userMessage("written through the cold session"));
-			const throughCold = fillSession(s.sessionFileAbsPath!);
+			const throughCold = fillSession(s.sessionFileAbsPath!, sessionStore);
 			check(
 				"a write through the cold session reaches the file",
 				throughCold.leafId === cold.leafId &&
@@ -839,7 +861,7 @@ try {
 			);
 			let refused = false;
 			try {
-				new SessionManager().open("no session has this id");
+				service.open("no session has this id");
 			} catch {
 				refused = true;
 			}
@@ -854,7 +876,7 @@ try {
 	// await 的持有者。断言全部走外部可观察面——开出来的袋、盘上的文件——不偷看 Manager 内部的计数
 	// 表。会话直接经 bare service（store）驱动，文件落在 storeRoot，不起 HTTP。
 	{
-		const gateSession = createSession(root);
+		const gateSession = createSession(root, storeRoot);
 		store.appendMessage(gateSession, userMessage("born under the gate"));
 		const gateId = gateSession.sessionId;
 
@@ -909,7 +931,7 @@ try {
 					"the commit marker goes first, the stream waits in the middle",
 					!existsSync(snapshotPathOf(midJsonl)) && existsSync(midJsonl),
 				);
-				check("and the id reads as missing mid-removal", SessionManager.findSessionFilePathById(gateId) === undefined);
+				check("and the id reads as missing mid-removal", store.findSessionFilePathById(gateId) === undefined);
 				let titleRefusal: unknown;
 				try {
 					store.setTitle(victim, "闸内的名字");
@@ -936,7 +958,7 @@ try {
 				await removing;
 				setRemoveGate(undefined);
 			}
-			check("the removal finished once the gate let go", SessionManager.findSessionFilePathById(gateId) === undefined);
+			check("the removal finished once the gate let go", store.findSessionFilePathById(gateId) === undefined);
 			check(
 				"and no file of the session survived",
 				readdirSync(storeRoot).every((name) => !name.startsWith(gateId)),
@@ -950,7 +972,7 @@ try {
 		// setTitle 会把 `.json` 造回去，被删的会话无声诈尸成半个会话。放行后删除完成——无孤儿文件，
 		// 扫描也清不出任何诈尸的行。
 		{
-			const collideSession = createSession(root);
+			const collideSession = createSession(root, storeRoot);
 			store.appendMessage(collideSession, userMessage("撞车的会话"));
 			const collideId = collideSession.sessionId;
 			const stale = store.open(collideId);
@@ -985,7 +1007,7 @@ try {
 				await removing;
 				setRemoveGate(undefined);
 			}
-			check("the deletion finished once the gate let go", SessionManager.findSessionFilePathById(collideId) === undefined);
+			check("the deletion finished once the gate let go", store.findSessionFilePathById(collideId) === undefined);
 			// 复活守卫（主发现）：闸条目退场后撞不到 closing，写入被标记复核挡住——两个写法各验一次，
 			// 因为它们复活的是不同的半边（appendFileSync 造流，meta 重写造快照）。
 			let lateAppendRefusal: unknown;
@@ -1009,7 +1031,7 @@ try {
 			);
 			check(
 				"and no scan resurrects the deleted session",
-				!(await SessionManager.list(root)).some((info) => info.id === collideId),
+				!(await store.list(root)).some((info) => info.id === collideId),
 			);
 		}
 
@@ -1024,7 +1046,7 @@ try {
 				"utf8",
 			);
 			check("the half-born pair looks exactly like the mid-removal state", existsSync(`${halfBornStem}.jsonl`) && !existsSync(`${halfBornStem}.json`));
-			const listed = await SessionManager.list(root);
+			const listed = await store.list(root);
 			check("the scan lists none of it", !listed.some((info) => info.id === "halfborn"), JSON.stringify(listed.map((info) => info.id)));
 			check("and the scan swept the half-born stream", !existsSync(`${halfBornStem}.jsonl`));
 		}
@@ -1032,7 +1054,7 @@ try {
 		// 宽容释放不随搬家消失：同一 id 先以未诞生的袋多次在闸外做选择（表上无条目、无进出），再以
 		// 诞生袋连续多轮进/出闸，交错之后一切照常——没有泄漏的计数让任何一步失败。
 		{
-			const lenient = createSession(root);
+			const lenient = createSession(root, storeRoot);
 			store.setTitle(lenient, "闸外的名字");
 			store.setModel(lenient, "row-a", "model-a");
 			check("an unborn bag takes choices with no file to protect", !existsSync(lenient.sessionFileAbsPath!));
@@ -1062,8 +1084,8 @@ try {
 		// 设置归属重构（spec §8）：门面接缝退场，模型目录指向一个空临时 home（缺 models.json 即空目录）。
 		const emptyHome = join(root, "agent-home-empty");
 		await mkdir(emptyHome, { recursive: true });
-		const agent = createSessionAgent({ modelsHome: emptyHome });
-		const session = createSession(tmpdir());
+		const agent = createSessionAgent({ sessionRepository: sessionStore, sessionDefaultsRepository: settingsDefaults, modelRepository: new HomeJsonStore({ home: emptyHome }), toolDefaultsRepository: settingsDefaults, toolResultsRepository: archive });
+		const session = createSession(tmpdir(), storeRoot);
 		// The door is class-private (`hold` / `createAndPrompt` are the verbs a caller spells);
 		// this block exercises the table itself — first-come-wins, membership, the delete exit — so it
 		// reaches in the same way `entryOf` does, the cast the one road across.
@@ -1084,24 +1106,28 @@ try {
 	// 半空，直接调 deleteSessionBySessionId，看删除赢。
 	{
 		const gate = vetoGate();
-		const session = createSession(root);
+		const session = createSession(root, storeRoot);
 		// 会话随第一条消息出生（ADR-0021）：对袋直接追加让文件落地，不跑引擎、不耗剧本。
 		store.appendMessage(session, userMessage("删除动手时还在跑的会话"));
 		const id = session.sessionId;
 		// 设置归属重构（spec §8）：内存后端退场——行种进临时 home 的 models.json，homes 透传。
 		const vetoHome = join(root, "agent-home-veto");
 		await mkdir(vetoHome, { recursive: true });
-		new ModelManager({ home: vetoHome }).replaceRows(vetoRows);
+		const vetoStore = new HomeJsonStore({ home: vetoHome });
+		new ModelManager({ modelRepository: vetoStore }).replaceRows(vetoRows);
 		const agent = await openAgent({
 			session,
 			chatTransport: gate.chatTransport,
-			settingsHome: vetoHome,
-			modelsHome: vetoHome,
+			sessionRepository: sessionStore,
+			sessionDefaultsRepository: vetoStore,
+			modelRepository: vetoStore,
+			toolDefaultsRepository: vetoStore,
+			toolResultsRepository: archive,
 		});
 
 		const running = agent.prompt(id, "删除动手时我还在流式", { selection: { model: "anthropic" } });
 		check("the run reaches the transport gate", await until(() => gate.held()));
-		check("and the file pair exists while it streams", SessionManager.findSessionFilePathById(id) !== undefined);
+		check("and the file pair exists while it streams", store.findSessionFilePathById(id) !== undefined);
 
 		const removed = await agent.deleteSessionBySessionId(id).then(
 			() => true,
@@ -1116,7 +1142,7 @@ try {
 		check("the aborted run has settled", await until(() => !agent.isRunning(id)));
 		void running.catch(() => undefined);
 		check("the table no longer holds the live half", entryOf(agent, id) === undefined);
-		check("the file pair is gone", SessionManager.findSessionFilePathById(id) === undefined);
+		check("the file pair is gone", store.findSessionFilePathById(id) === undefined);
 		check(
 			"and no file of the session survived on disk",
 			readdirSync(storeRoot).every((name) => !name.startsWith(id)),
@@ -1153,7 +1179,7 @@ try {
 			await writeFile(`${wrongStem}.json`, JSON.stringify({ version: CURRENT_SESSION_VERSION + 1, id: "wrong", timestamp: stamp, workDir: legacyRoot }), "utf8");
 			await writeFile(`${wrongStem}.jsonl`, `${entries.join("\n")}\n`, "utf8");
 
-			const listed = await SessionManager.list(legacyRoot);
+			const listed = await store.list(legacyRoot);
 			check("the listing returns none of them", listed.length === 0, JSON.stringify(listed.map((info) => info.id)));
 			check("the v4 file is gone", !existsSync(v4File));
 			check("the unpaired snapshot is gone", !existsSync(orphanJson));
@@ -1164,7 +1190,7 @@ try {
 			await writeFile(`${aloneStem}.jsonl`, `${entries.join("\n")}\n`, "utf8");
 			let refused = false;
 			try {
-				fillSession(`${aloneStem}.jsonl`);
+				fillSession(`${aloneStem}.jsonl`, sessionStore);
 			} catch {
 				refused = true;
 			}

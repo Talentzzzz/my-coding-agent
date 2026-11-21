@@ -30,18 +30,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer as createTcpServer } from "node:net";
 import { spawn } from "node:child_process";
-import { bootServer, muxUpgrade, sessionListeners } from "../packages/server/src/boot.ts";
-import { createMuxServer, type MuxServer } from "../packages/server/src/mux.ts";
-import { SessionHub } from "../packages/server/src/hub.ts";
-import { SessionController, SystemController } from "../packages/server/src/controllers/sessions.ts";
-import { createRoutes } from "../packages/server/src/controllers/routes.ts";
-import { Router } from "../packages/server/src/http/routing.ts";
-import { createServer } from "../packages/server/src/http.ts";
+import { start } from "@my-agent/app";
+import { muxUpgrade, sessionListeners } from "@my-agent/trigger";
+import { createMuxServer, type MuxServer } from "@my-agent/trigger";
+import { SessionHub } from "@my-agent/case";
+import { SessionController, SystemController } from "@my-agent/trigger";
+import { createRoutes } from "@my-agent/trigger";
+import { Router } from "@my-agent/trigger";
+import { createServer } from "@my-agent/trigger";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import { mountSession } from "./mount-session.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
-import type { PendingApproval, SessionRow } from "@my-agent/core/protocol";
-import { type Agent, createToolManager, type ModelConfig, ModelManager, type Session, SessionManager, sessionMetaPath, setSessionsDir, type SessionMeta } from "@my-agent/core";
+import type { PendingApproval, SessionRow } from "@my-agent/case/protocol";
+import { type Agent, createToolManager, type ModelConfig, ModelManager, type Session, type SessionMeta } from "@my-agent/domain";
+import { HomeJsonStore, SessionFileStore, sessionMetaPath, ToolResultsArchive } from "@my-agent/infra";
 
 let failures = 0;
 
@@ -107,7 +109,7 @@ async function waitParked(base: string, sessionId: string, ms = 15_000): Promise
 
 /** The `.json` snapshot a session id names, read straight off the store — the marker's disk half. */
 async function readMeta(id: string): Promise<SessionMeta> {
-	const jsonl = SessionManager.findSessionFilePathById(id);
+	const jsonl = sharedStore.locate(id);
 	if (jsonl === undefined) throw new Error(`no session file for ${id}`);
 	return JSON.parse(await readFile(sessionMetaPath(jsonl), "utf8")) as SessionMeta;
 }
@@ -139,8 +141,9 @@ async function seedApprovalGate(root: string, modelRows: readonly ModelConfig[])
 	const home = await mkdtemp(join(tmpdir(), "my-agent-approval-home-"));
 	// 设置归属重构（spec §8）后门面退场：审批映射种进 tools.json，行种进 models.json，各持自己的
 	// 文件——同一套持有者，hub 之后按同一套规则读回。
-	createToolManager({ home }).applyToolDefaults({ approval: { read: true } });
-	new ModelManager({ home: home }).replaceRows(modelRows);
+	const settingsStore = new HomeJsonStore({ home });
+	createToolManager({ toolDefaultsRepository: settingsStore }).applyToolDefaults({ approval: { read: true } });
+	new ModelManager({ modelRepository: settingsStore }).replaceRows(modelRows);
 	return home;
 }
 
@@ -154,7 +157,18 @@ const roundTripWatchdog = deadline("the approval round trip", 60_000);
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-"));
 const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-approval--store-"));
-setSessionsDir(storeRoot);
+// 自造 infra 实现指临时目录（分层重构 §7 步 5）：hub 只认端口，home → 实现的翻译在这里。
+const sharedStore = new SessionFileStore({ storeDir: storeRoot });
+const rigPorts = (settingsHome: string) => {
+	const settingsStore = new HomeJsonStore({ home: settingsHome });
+	return {
+		sessionRepository: sharedStore,
+		sessionDefaultsRepository: settingsStore,
+		modelRepository: settingsStore,
+		toolDefaultsRepository: settingsStore,
+		toolResultsRepository: new ToolResultsArchive(),
+	};
+};
 const fake = createFakeTransport();
 // One response per call: a tool call, then the text that ends the run. Both are assistant messages —
 // `fakeToolCall` is a content block, not a response on its own.
@@ -168,8 +182,7 @@ const settingsHome = await seedApprovalGate(root, rows);
 const sessionHub = new SessionHub({
 	workDirAbsPath: root,
 	chatTransport: fake.chatTransport,
-	settingsHome,
-	modelsHome: settingsHome,
+	...rigPorts(settingsHome),
 });
 // Mounted the way the smoke rigs mount one, so every request below goes through the real hub.
 const { id: sessionId } = await mountSession(sessionHub, {
@@ -686,14 +699,15 @@ try {
 // from the ledger the way the old one did, and the banner it shows is still answerable. The sidebar
 // does not pay that derivation on startup: the snapshot's `suspended` marker lights the row in the
 // cold overview, before anything opens the session. What must NOT survive is a memory-resident
-// promise: nothing here is "an entry remembers it", and the child is a real `main.ts` over the same
+// promise: nothing here is "an entry remembers it", and the child is a real `serve.ts` over the same
 // agent home and the same working directory, so it can only see what the first one left on disk.
 // (The answer itself is not exercised: the child speaks to real providers.)
 //
-// The rig's one subtlety is the store: `setSessionsDir` is an in-process override, while the child
-// only knows `MY_AGENT_HOME/sessions`. Both roads must name the same files, so this section owns a
-// scratch home of its own — the parent points the override at its `sessions`, the child's env points
-// at the home. The switch is safe because the sections above are done with the store they shared.
+// The rig's one subtlety is the store: the in-process halves used to point their own store root
+// while the child only knows `MY_AGENT_HOME/sessions`. With `setSessionsDir` gone the store derives
+// from `settingsHome` (`<settingsHome>/sessions`, 分层重构 §5.2), so one scratch home names the same
+// files for both roads: the parent passes it to `start`, the child's env points at the home. The
+// switch is safe because the sections above are done with the store they shared.
 // ---------------------------------------------------------------------------------------------------
 
 process.stdout.write("\nan approval survives a restart as the question it still is\n");
@@ -702,11 +716,10 @@ const restartWatchdog = deadline("the restart checks", 90_000);
 
 const restartRoot = await mkdtemp(join(tmpdir(), "my-agent-approval-restart-"));
 const restartHome = await mkdtemp(join(tmpdir(), "my-agent-approval-restart-home-"));
-setSessionsDir(join(restartHome, "sessions"));
 // One home for both processes: the rows the parent's prompt resolves are the rows the child reads.
-new ModelManager({ home: restartHome }).replaceRows(rows);
+new ModelManager({ modelRepository: new HomeJsonStore({ home: restartHome }) }).replaceRows(rows);
 const restartFake = createFakeTransport();
-const first = await bootServer({ workDirAbsPath: restartRoot, port: 0, chatTransport: restartFake.chatTransport, settingsHome: restartHome });
+const first = await start({ workDirAbsPath: restartRoot, port: 0, chatTransport: restartFake.chatTransport, settingsHome: restartHome });
 let restartSessionId = "";
 try {
 	// Startup selects nothing now, so the session this half drives is the one an explicit creation
@@ -732,12 +745,12 @@ try {
 	await first.close();
 }
 
-// `main.ts` refuses `--port 0`, so the child needs a real one; readiness is polled off `/api/health`,
+// `serve.ts` refuses `--port 0`, so the child needs a real one; readiness is polled off `/api/health`,
 // never parsed out of a child's stdout (its shutdown handler owns that stream).
 const childPort = await freePort();
 const child = spawn(
 	process.execPath,
-	[join("packages", "server", "src", "main.ts"), "--workDir", restartRoot, "--port", String(childPort)],
+	[join("packages", "app", "scripts", "serve.ts"), "--workDir", restartRoot, "--port", String(childPort)],
 	{
 		stdio: "ignore",
 		env: {
@@ -801,7 +814,7 @@ try {
 	}
 } finally {
 	const exited = new Promise<boolean>((resolve) => child.once("exit", () => resolve(true)));
-	// On POSIX this rides into `main.ts`'s own SIGTERM handler; on Windows the request terminates the
+	// On POSIX this rides into `serve.ts`'s own SIGTERM handler; on Windows the request terminates the
 	// child outright. Either way the exit must arrive, which is the part a shell depends on.
 	child.kill("SIGTERM");
 	await Promise.race([exited, sleep(5_000)]);
@@ -817,7 +830,7 @@ process.exitCode = failures === 0 ? 0 : 1;
 // The apparatus: one graph per section, and the rigs built on it.
 // ---------------------------------------------------------------------------------------------------
 
-/** One server over a hub: the real routes and the mux in front of them, the way `bootServer` wires it. */
+/** One server over a hub: the real routes and the mux in front of them, the way `start` wires it. */
 interface Graph {
 	url: string;
 	muxServer: MuxServer;
@@ -883,8 +896,7 @@ async function openRig(): Promise<Rig> {
 	const sessionHub = new SessionHub({
 		workDirAbsPath: root,
 		chatTransport: transport.chatTransport,
-		settingsHome,
-		modelsHome: settingsHome,
+		...rigPorts(settingsHome),
 	});
 	// The graph first, the mount second: the hub learns the mounted session the way the real
 	// process learns a birth — through the refresh the controller's listener would drive. A mount
@@ -952,8 +964,7 @@ async function openCrossRig(): Promise<CrossRig> {
 	const sessionHub = new SessionHub({
 		workDirAbsPath: root,
 		chatTransport: transport.chatTransport,
-		settingsHome,
-		modelsHome: settingsHome,
+		...rigPorts(settingsHome),
 	});
 	const sessions: Mounted[] = [];
 	for (let index = 0; index < 2; index += 1) {
@@ -1012,7 +1023,7 @@ function resultTextOf(message: { type: "event" } & { event: { type: string; resu
 	return content.map((block) => block.text ?? "").join("");
 }
 
-/** One free port, taken and released: `main.ts` refuses `--port 0`, so the child needs a real one. */
+/** One free port, taken and released: `serve.ts` refuses `--port 0`, so the child needs a real one. */
 async function freePort(): Promise<number> {
 	const probe = createTcpServer();
 	await new Promise<void>((listen) => probe.listen(0, "127.0.0.1", listen));

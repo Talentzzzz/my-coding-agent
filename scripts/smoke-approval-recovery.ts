@@ -18,7 +18,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAssistantMessageEventStream, type ChatTransport, type Message } from "@my-agent/core";
+import { createAssistantMessageEventStream, type ChatTransport, type Message } from "@my-agent/domain";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import {
 	createToolManager,
@@ -35,12 +35,14 @@ import {
 	type ModelSelection,
 	type ToolRunContext,
 	type ToolUpdateCallback,
-	setSessionsDir,
-} from "@my-agent/core";
+} from "@my-agent/domain";
+import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-recovery-"));
 const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-approval-recovery--store-"));
-setSessionsDir(storeRoot);
+// 自造 infra 实现指临时目录（分层重构 §7 步 5）：domain/case 级的构造只认端口，home → 实现的翻译在这里。
+const store = new SessionFileStore({ storeDir: storeRoot });
+const archive = new ToolResultsArchive();
 let failures = 0;
 
 function check(label: string, ok: boolean, detail = ""): void {
@@ -151,19 +153,24 @@ const BIRTH_TEXT = "the smoke's birth message";
 let homeSeq = 0;
 
 async function openSession(overrides: { approval?: Record<string, boolean>; chatTransport?: ChatTransport } = {}): Promise<Agent> {
-	const session = createSession(root);
-	// 设置归属重构（spec §8）后内存后端退场：审批映射与模型行先种进临时 home 的真实文件，homes
-	// 透传给 openAgent——与生产同一条构造路，只是文件指到了无人问津的目录。
+	// 设置归属重构（spec §8）后内存后端退场，分层重构步 5 后 home 也不在 domain 的知识里：审批映射
+	// 与模型行先种进临时 home 的真实文件，端口注入给 openAgent——与生产同一条构造路，只是实现指到
+	// 了无人问津的目录。
+	const session = createSession(root, storeRoot);
 	const home = join(root, `agent-home-${homeSeq++}`);
-	const toolManager = createToolManager({ home });
+	const settingsStore = new HomeJsonStore({ home });
+	const toolManager = createToolManager({ toolDefaultsRepository: settingsStore });
 	if (overrides.approval !== undefined) toolManager.applyToolDefaults({ approval: overrides.approval });
-	const modelManager = new ModelManager({ home: home });
+	const modelManager = new ModelManager({ modelRepository: settingsStore });
 	modelManager.replaceRows(rows);
 	const agent = await openAgent({
 		session,
 		chatTransport: overrides.chatTransport ?? fake.chatTransport,
-		settingsHome: home,
-		modelsHome: home,
+		sessionRepository: store,
+		sessionDefaultsRepository: settingsStore,
+		modelRepository: settingsStore,
+		toolDefaultsRepository: settingsStore,
+		toolResultsRepository: archive,
 	});
 	// 会话随第一条消息出生（ADR-0021），而编排层按 id 现开文件：这里直接对袋追加一条 user
 	// 消息让文件落地——不跑引擎、不耗剧本。模型选择随每条 prompt 的 selection 抵达，与生产一致。
@@ -285,7 +292,7 @@ process.stdout.write("\nthe recovery toggle leaves the orphans to the host\n");
 			return { content: [{ type: "text", text: "ran" }], details: {} };
 		},
 	};
-	const toolManager = createToolManager();
+	const toolManager = createToolManager({ toolDefaultsRepository: new HomeJsonStore({ home: join(root, "agent-home-fixture") }) });
 	toolManager.register(readTool);
 	// 一次 run 会声明的工具面：这里只有那个 fixture，它也正是整张表——链条问的两个问题（"这次
 	// run 可以调它吗"、"这个名字存在吗"）如今是同一个问题：解析对着本请求声明过的数组按名查

@@ -15,9 +15,9 @@
 //
 // 这里不触碰任何 session 或模型，无需 provider key。
 // 运行：node scripts/smoke-backpressure.ts
-import { Wire, resolveWireOptions, type FrameSink, type ResolvedWireOptions } from "../packages/server/src/wire.ts";
+import { Wire, resolveWireOptions, type FrameSink, type ResolvedWireOptions } from "@my-agent/trigger";
 import { until } from "./wire/client.ts";
-import type { ServerFrame } from "@my-agent/core";
+import type { ServerFrame } from "@my-agent/case/protocol";
 
 let failures = 0;
 

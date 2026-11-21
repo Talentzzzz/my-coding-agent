@@ -7,7 +7,13 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createToolManager, settingsPath } from "@my-agent/core";
+import { createToolManager } from "@my-agent/domain";
+import { HomeJsonStore } from "@my-agent/infra";
+
+/** 端口化后的 manager 构造：HomeJsonStore 实现满足 ToolDefaultsRepository 声明（spec §4.2）。 */
+function toolsOf(home: string): ReturnType<typeof createToolManager> {
+	return createToolManager({ toolDefaultsRepository: new HomeJsonStore({ home }) });
+}
 
 let failures = 0;
 
@@ -32,7 +38,7 @@ process.stdout.write("\ntools.json：首次读取从旧 settings.json 捡走工�
 {
 	const home = mkHome();
 	try {
-		const legacyPath = settingsPath(home);
+		const legacyPath = join(home, "settings.json");
 		writeFileSync(
 			legacyPath,
 			`${JSON.stringify(
@@ -51,7 +57,7 @@ process.stdout.write("\ntools.json：首次读取从旧 settings.json 捡走工�
 		);
 		const legacyBefore = readFileSync(legacyPath, "utf8");
 
-		const view = createToolManager({ home }).toolDefaults();
+		const view = toolsOf(home).toolDefaults();
 		check("迁移捡走默认工具集", JSON.stringify(view.tools) === JSON.stringify(["read", "bash"]), JSON.stringify(view));
 		check("迁移捡走模式表", view.modes?.length === 1 && view.modes[0]?.name === "只读", JSON.stringify(view.modes));
 		check(
@@ -85,7 +91,7 @@ process.stdout.write("\ntools.json：首次读取从旧 settings.json 捡走工�
 			`${JSON.stringify({ tools: ["grep"], bash: { defaultTimeoutMs: 999_999 } }, null, "\t")}\n`,
 			"utf8",
 		);
-		const second = createToolManager({ home }).toolDefaults();
+		const second = toolsOf(home).toolDefaults();
 		check(
 			"迁移后旧文件被完全忽略",
 			JSON.stringify(second.tools) === JSON.stringify(["read", "bash"]) && second.bash.defaultTimeoutMs === 5_000,
@@ -103,8 +109,8 @@ process.stdout.write("\ntools.json：簇字段全缺省也落盘；没有迁移�
 	try {
 		// 边界情形（spec §4.2）：旧文件存在但工具簇一个字段都没有——也必须写出 tools.json，
 		// 把「迁移过」变成磁盘事实，避免旧文件在每次首读时复活。
-		writeFileSync(settingsPath(home), `${JSON.stringify({ model: "a/b" }, null, "\t")}\n`, "utf8");
-		const view = createToolManager({ home }).toolDefaults();
+		writeFileSync(join(home, "settings.json"), `${JSON.stringify({ model: "a/b" }, null, "\t")}\n`, "utf8");
+		const view = toolsOf(home).toolDefaults();
 		check(
 			"簇全缺省时视图是标准默认",
 			view.tools === undefined && view.modes === undefined && view.bash.defaultTimeoutMs === 120_000 && view.approval.bash === STANDARD_APPROVAL.bash,
@@ -125,7 +131,7 @@ process.stdout.write("\ntools.json：簇字段全缺省也落盘；没有迁移�
 {
 	const home = mkHome();
 	try {
-		const view = createToolManager({ home }).toolDefaults();
+		const view = toolsOf(home).toolDefaults();
 		check("空白 home 读出标准默认", view.approval.bash === STANDARD_APPROVAL.bash && view.bash.defaultTimeoutMs === 120_000, JSON.stringify(view));
 		check("没有迁移源就不落盘", !existsSync(toolsJsonOf(home)));
 	} finally {
@@ -146,11 +152,11 @@ process.stdout.write("\ntools.json：已存在时旧 settings.json 被完全忽�
 			"utf8",
 		);
 		writeFileSync(
-			settingsPath(home),
+			join(home, "settings.json"),
 			`${JSON.stringify({ tools: ["write"], bash: { defaultTimeoutMs: 999_999 } }, null, "\t")}\n`,
 			"utf8",
 		);
-		const view = createToolManager({ home }).toolDefaults();
+		const view = toolsOf(home).toolDefaults();
 		check(
 			"簇字段以 tools.json 为准",
 			JSON.stringify(view.tools) === JSON.stringify(["grep"]) && view.bash.defaultTimeoutMs === 1_000,
@@ -169,7 +175,7 @@ process.stdout.write("\ntools.json：applyToolDefaults 四字段各自只动点�
 {
 	const home = mkHome();
 	try {
-		const manager = createToolManager({ home });
+		const manager = toolsOf(home);
 		// 预置一份带未知键与既有审批条目的文件：补丁不认识的东西必须原样幸存。
 		writeFileSync(
 			toolsJsonOf(home),
@@ -218,7 +224,7 @@ process.stdout.write("\ntools.json：写前重读，进程外的手编不被下�
 {
 	const home = mkHome();
 	try {
-		const manager = createToolManager({ home });
+		const manager = toolsOf(home);
 		manager.applyToolDefaults({ approval: { bash: false } });
 
 		// 进程外的一只手：模拟用户在两次补丁之间用编辑器改了文件。
@@ -246,7 +252,7 @@ process.stdout.write("\ntools.json：零参 createToolManager 在默认 home 照
 
 {
 	// names()/get() 只触常驻实例表，不读 tools.json——机器自己的文件因此不被碰。
-	const manager = createToolManager();
+	const manager = toolsOf(mkdtempSync(join(tmpdir(), "my-agent-tool-settings-zero-")));
 	check("零参工厂照常建表", manager.names().length === 6 && manager.get("bash") !== undefined, JSON.stringify(manager.names()));
 }
 

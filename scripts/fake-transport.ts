@@ -2,7 +2,7 @@
 // 队列、steering、重试与 compaction 都能在没有 provider key 的前提下测到。各 smoke 使用：
 // `node scripts/smoke-session.ts`。
 //
-// 它住在 scripts/ 而不是 `packages/core/src/llm` 下那份 vendored transport 里，因为它是本应用
+// 它住在 scripts/ 而不是 `packages/domain/src/agent/llm` 下那份 vendored transport 里，因为它是本应用
 // 的测试替身，不是别人的。
 // pi-ai 自带一个 faux provider，但它建立在本应用已不再有的 provider registry 之上——它把自己
 // 注册进一个 `Models` 集合，而那正是被移除的那层间接。剩下要 fake 的是一台 transport，所以
@@ -24,7 +24,7 @@ import {
 	type ToolCall,
 	type ToolResultMessage,
 	type Usage,
-} from "@my-agent/core";
+} from "@my-agent/domain";
 
 const DEFAULT_USAGE: Usage = {
 	input: 0,

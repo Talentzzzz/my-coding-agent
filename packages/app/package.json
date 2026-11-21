@@ -1,0 +1,25 @@
+{
+	"name": "@my-agent/app",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"description": "Composition root: maps agent home onto infra implementations, injects them into domain, assembles case and trigger, start(options)",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"dev": "node scripts/serve.ts --vite",
+		"start": "node scripts/serve.ts"
+	},
+	"dependencies": {
+		"@my-agent/case": "workspace:*",
+		"@my-agent/domain": "workspace:*",
+		"@my-agent/infra": "workspace:*",
+		"@my-agent/trigger": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/node": "^22.19.0"
+	}
+}

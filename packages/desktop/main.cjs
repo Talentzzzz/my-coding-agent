@@ -6,7 +6,6 @@
  * 用普通 CommonJS，因为这是任何工具链运行之前 Electron 加载的格式：下面的 server 是本仓库的 TypeScript，由 Node 自己的类型剥离执行。
  */
 const { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell } = require("electron");
-const { existsSync } = require("node:fs");
 const { mkdir, readFile, rename, writeFile } = require("node:fs/promises");
 const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
@@ -58,18 +57,24 @@ function defaultWorkDir() {
 }
 
 /**
- * 经 Node 的类型剥离加载服务器的 TypeScript 入口。
+ * 经 Node 的类型剥离加载组合根并启动服务器（`@my-agent/app` 的 `start`）。
  *
- * 子进程需要自己的一套崩溃和 shutdown 监管；在进程内 import 意味着只有一个生命周期要管理，而且 `close()` 与 CLI 的信号处理调用的是同一个。
+ * 子进程需要自己的一套崩溃和 shutdown 监管；在进程内 import 意味着只有一个生命周期要管理，而且 `close()` 与 dev 薄脚本（`serve.ts`）的信号处理调用的是同一个。
  */
 async function bootServer(workDirAbsPath) {
-	const entry = join(packageRoot, "packages", "server", "src", "boot.ts");
-	if (!existsSync(entry)) {
-		throw new Error(`The server entry is missing at ${entry}. This shell must run from the repository.`);
+	// 动态 import 走包名正门（CJS 壳 + TypeScript 类型剥离）。import 失败——多半不是从仓库跑，
+	// 或依赖没装——译成一句能行动的话抛出去，由 observability 的既有上报路径接住
+	// （`bootWithinBudget` 的拒绝半会画出报告窗口）；`start()` 自己的失败原样上抛，不在这里改写。
+	let app;
+	try {
+		app = await import("@my-agent/app");
+	} catch (error) {
+		throw new Error(
+			`The server package failed to load (${error instanceof Error ? error.message : String(error)}). This shell must run from the repository.`,
+		);
 	}
-	const module = await import(pathToFileURL(entry).href);
-	return module.bootServer({
-		// 选项名是 `workDirAbsPath`（BootOptions）：新会话起步的目录，绝对路径。
+	return app.start({
+		// 选项名是 `workDirAbsPath`（StartOptions）：新会话起步的目录，绝对路径。
 		workDirAbsPath,
 		host: "127.0.0.1",
 		// 端口 0：由操作系统挑一个空闲的，第二次启动永远不会撞上第一次，也不用预先保留一个固定数字。

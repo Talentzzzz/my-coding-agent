@@ -10,7 +10,7 @@
 		"preview": "vite preview"
 	},
 	"dependencies": {
-		"@my-agent/core": "workspace:*"
+		"@my-agent/case": "workspace:*"
 	},
 	"devDependencies": {
 		"typescript": "^7.0.2",

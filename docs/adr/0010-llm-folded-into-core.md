@@ -9,6 +9,10 @@
 取代者：[0011](0011-tool-manager-instance-table.md)（部分，2026-11-06——*后果* 里「一次请求只有一个
 `Context` 穿过边界」那条中「`prepareRequest` 建它（`tools` 就是活跃的可执行集合）、引擎用它」这句
 现状陈述；决定 2/3/7 全部成立）
+取代者：分层重构步 4（spec §2.3/§8.6，2026-11-21；ADR-0030 五模块分层随步 5 落笔）——部分：决定 2 的
+住址半与决定 4 的出口半（见各条下的注记）。`Context` 留 llm（传输机械）不变；`Tool` 与消息词汇自
+`llm/types.ts` 迁 agent 根 `types.ts` 共享内核（`ToolRunContext` 随行），「core 顶层只转发名字」的
+出口改由 domain index 承担。决定的实质——一个概念一个类型、传输只读声明——原样成立。
 
 设计过程见 `.scratch/context-tool-unification/`（形状在 2026-11-05 的绘图会话里盘问定案，四张票是执行票，
 逐条不得推翻）。
@@ -51,6 +55,12 @@ package.json 与 tsconfig、根 tsconfig 里两条 `@my-agent/llm` 路径别名�
    llm 的两个第三方依赖（`@anthropic-ai/sdk`、`partial-json`）并入 core 的依赖表。
 2. **`Tool` 合一，住在 `llm/types.ts`**：声明字段与可执行字段是同一个类型，双泛型
    `<TParameters, TDetails>` 原样保留。`ToolExecutionMode` 随 `executionMode` 字段一起搬进去。
+
+   **（2026-11-21 Superseded，分层重构步 4，spec §2.3/§8.6：仅住址——`Tool`、`ToolRunContext` 与
+   消息词汇（`Message` 一族、`Usage` / `StopReason` / JSON 词汇、模型事实族）被 session / context
+   等子包消费，自 `llm/types.ts` 迁 agent 根 `types.ts` 独占（共享内核，守卫 R2：子包只准 import
+   根 types.ts）。`Context` 留 `llm/types.ts`——它是传输机械。合一的实质不变：仍是同一个类型，
+   传输读声明半、引擎用执行半。）**
 3. **`Context` 合一**：`messages` + `system` + **必填**的 `tools: Tool[]`（空数组合法，省掉这个字段
    不合法）。`LlmContext` 删除，`ChatTransport.stream` / `StreamFunction` / `Model.stream` 直接收它。
    必填的直接后果是三处无工具请求补 `tools: []`——压缩摘要那次请求，以及 smoke 的两处 wire 捕获。
@@ -61,6 +71,10 @@ package.json 与 tsconfig、根 tsconfig 里两条 `@my-agent/llm` 路径别名�
    `types.ts`**，而绘图会话当时的名单把它列进了 `llm/types.ts`。落地时它只有 `Agent` 一个读者，
    搬进传输契约会与下面那条保留下来的分界（0007 决定 6：引擎契约住 `types.ts`）打架；04 号票复核
    确认这个位置成立，所以记在这里而不是改代码。
+
+   **（2026-11-21 Superseded，分层重构步 4，spec §8.6：仅出口半——「core 顶层只转发名字」的出口改由
+   domain 的 `index.ts` 承担；根 `types.ts` 自身成为共享内核的定义处（`Tool` 等在此定义），不再只
+   转发。撞名清零的决定原样成立。）**
 5. **`@my-agent/llm` 全仓清零**：core 顶层 `index.ts` 补一段传输面出口（`anthropicMessages`、`Model`、
    `createAssistantMessageEventStream`、`ChatTransport` 等），server（`boot.ts` / `hub.ts`）与当时导入
    它的 7 个 script 改从 `@my-agent/core` 取。不设「别名指回内部路径」的假包名。
@@ -68,6 +82,10 @@ package.json 与 tsconfig、根 tsconfig 里两条 `@my-agent/llm` 路径别名�
 7. **传输层看得见 `execute`，但不调用它。** 合并之后两者在同一边，接口面上没有任何东西阻止一次请求
    去执行一个工具；「请求只读 `name` / `description` / `parameters` / `constrainedSampling`」写在
    `llm/types.ts` 的注释、`api/anthropic-messages.ts` 的读法与这份 ADR 里。
+
+   **（2026-11-21 修订，分层重构步 4，spec §8.6：注释住址随 `Tool` 搬家——那条「传输只读声明」的
+   注释现住在 agent 根 `types.ts` 里 `Tool` 的文档上；`llm/types.ts` 与 `api/anthropic-messages.ts`
+   的读法不变。）**
 
 ## 后果
 

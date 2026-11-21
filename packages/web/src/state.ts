@@ -15,7 +15,7 @@ import {
 	type SessionSnapshot,
 	type GlobalSettingsSnapshot,
 	type UsageTotals,
-} from "@my-agent/core/protocol";
+} from "@my-agent/case/protocol";
 import type { AppearanceSettings } from "./ui-settings.ts";
 
 export interface ToolCard {
@@ -49,7 +49,7 @@ export interface ToolCard {
  *
  * 推理块和其后的文本在同一条消息上到达，但读取方式不同 —— 答案是要点，推理在它后面 —— 所以
  * transcript 把它们画成两行，且只有推理那行可折叠。`text` 是 provider 原样的 Markdown
- * （`packages/core/src/llm/api/anthropic-messages.ts` 逐字拼接 delta），同一条消息里的多个推理块
+ * （`packages/domain/src/agent/llm/api/anthropic-messages.ts` 逐字拼接 delta），同一条消息里的多个推理块
  * 以空行连接，那正是段落断行的位置。
  */
 export interface MessageThinking {

@@ -9,9 +9,9 @@
 // **自己收尾**：文件里唯一的 `process.exit` 藏在一个 unref 的 watchdog 后面，只有某处泄漏了
 // 句柄、把事件循环留在活着的状态时它才触发。显式 exit 恰好会掩盖那种泄漏，所以没有。
 //
-// 子进程那一半跑真的 `main.ts`，并在一条常驻连接开着的情况下终止它。它的诚实边界写在这里：
-// `main.ts` 自己的 shutdown handler 以 `process.exit(0)` 结束，所以这只证明外壳能放下服务器
-// ——不证明事件循环会自己排干。只有上面的进程内那一半证明这个。
+// 子进程那一半跑真的 `serve.ts`（app 的 dev 薄脚本），并在一条常驻连接开着的情况下终止它。它的
+// 诚实边界写在这里：脚本自己的 shutdown handler 以 `process.exit(0)` 结束，所以这只证明外壳能
+// 放下服务器——不证明事件循环会自己排干。只有上面的进程内那一半证明这个。
 //
 // agent home 是脚本自己的临时目录，在第一个 app 模块被 import 之前创建：`AGENT_HOME` 在 import
 // 时从 `MY_AGENT_HOME` 一次性解析，这就是下面每个 app import 都是动态的原因。对着机器真实的
@@ -27,8 +27,8 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { createServer as createTcpServer } from "node:net";
 import { spawn } from "node:child_process";
-import type { ChatTransport } from "@my-agent/core";
-import type { BootedServer } from "../packages/server/src/boot.ts";
+import type { ChatTransport } from "@my-agent/domain";
+import type { BootedServer } from "@my-agent/app";
 import type { WireClient } from "./wire/client.ts";
 
 // 先是临时 home，然后是它承载的环境变量，再——且仅在那之后——是 app 模块。这一行不需要 key：
@@ -41,7 +41,7 @@ writeFileSync(
 );
 process.env.MY_AGENT_HOME = agentHome;
 
-const { bootServer } = await import("../packages/server/src/boot.ts");
+const { start } = await import("@my-agent/app");
 const { connect, until } = await import("./wire/client.ts");
 const { createFakeTransport, fakeAssistantMessage, fakeToolCall } = await import("./fake-transport.ts");
 
@@ -71,7 +71,7 @@ async function request(base: string, method: string, path: string, body?: unknow
 	return { status: response.status, payload: text.length === 0 ? undefined : (JSON.parse(text) as unknown) };
 }
 
-/** 一个空闲端口，取到再放回：`main.ts` 拒绝 `--port 0`，所以子进程需要一个真端口。 */
+/** 一个空闲端口，取到再放回：`serve.ts` 拒绝 `--port 0`，所以子进程需要一个真端口。 */
 async function freePort(): Promise<number> {
 	const probe = createTcpServer();
 	await new Promise<void>((listen) => probe.listen(0, "127.0.0.1", listen));
@@ -109,7 +109,7 @@ const chatTransport: ChatTransport = {
 		});
 	},
 };
-const server: BootedServer = await bootServer({ workDirAbsPath: workDir, port: 0, chatTransport: chatTransport });
+const server: BootedServer = await start({ workDirAbsPath: workDir, port: 0, chatTransport: chatTransport });
 
 try {
 	process.stdout.write(`booted on ${server.url} (port ${server.port})\n`);
@@ -212,7 +212,7 @@ try {
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a pinned boot lands on the pinned id\n");
 	const pinnedWorkDir = await mkdtemp(join(tmpdir(), "my-agent-boot-pin-"));
-	const pinned = await bootServer({ workDirAbsPath: pinnedWorkDir, port: 0, chatTransport: fake.chatTransport, sessionId: "pinned-session" });
+	const pinned = await start({ workDirAbsPath: pinnedWorkDir, port: 0, chatTransport: fake.chatTransport, sessionId: "pinned-session" });
 	try {
 		const answer = (await (await fetch(`${pinned.url}/api/sessions/current`)).json()) as { sessionId: string | null };
 		check("the pin is the landing", answer.sessionId === "pinned-session", String(answer.sessionId));
@@ -222,7 +222,7 @@ try {
 	}
 
 	// ---------------------------------------------------------------------------------------------
-	// 子进程那一半：真的 `main.ts`、一条对它开着的常驻连接、一次必须到达的终止。这一半证明什么、
+	// 子进程那一半：真的 `serve.ts`、一条对它开着的常驻连接、一次必须到达的终止。这一半证明什么、
 	// 不证明什么，见文件头部。
 	// ---------------------------------------------------------------------------------------------
 	process.stdout.write("a real server process goes down with a connection attached\n");
@@ -231,7 +231,7 @@ try {
 	const port = await freePort();
 	const child = spawn(
 		process.execPath,
-		[join("packages", "server", "src", "main.ts"), "--workDir", childWorkDir, "--port", String(port)],
+		[join("packages", "app", "scripts", "serve.ts"), "--workDir", childWorkDir, "--port", String(port)],
 		{
 			stdio: "ignore",
 			env: {
@@ -274,7 +274,7 @@ try {
 		const exited = new Promise<boolean>((resolve) => {
 			child.once("exit", () => resolve(true));
 		});
-			// 在 POSIX 上这进 main.ts 自己的 SIGTERM handler；在 Windows 上这个请求直接终止子进程
+			// 在 POSIX 上这进 serve.ts 自己的 SIGTERM handler；在 Windows 上这个请求直接终止子进程
 			// ——无论哪种，exit 都必须到达，这正是外壳依赖的部分。
 		child.kill("SIGTERM");
 		check("the child exited with a connection attached", await Promise.race([exited, sleep(5_000).then(() => false)]));

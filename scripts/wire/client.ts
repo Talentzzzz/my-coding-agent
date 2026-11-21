@@ -17,7 +17,7 @@ import type {
 	ServerFrame,
 	ServerMessage,
 	SessionSnapshot,
-} from "@my-agent/core/protocol";
+} from "@my-agent/case/protocol";
 
 /** 连接级载荷（`streamId: null`）的信封，去掉外层的座位字段。 */
 export type ConnectionEnvelope = { item?: { type: string; [key: string]: unknown }; error?: { message: string } };

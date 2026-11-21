@@ -18,7 +18,8 @@ import {
 	SessionManager,
 	type ModelConfig,
 	type Session,
-} from "@my-agent/core";
+} from "@my-agent/domain";
+import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 
 let failures = 0;
 
@@ -35,21 +36,25 @@ process.stdout.write("\nsettings：session 的选择与两个持有者的现读�
 	const workRoot = mkdtempSync(join(tmpdir(), "my-agent-settings-resolve-"));
 	const home = mkdtempSync(join(tmpdir(), "my-agent-settings-home-"));
 	try {
-		const sessionManager = new SessionManager();
+		// 端口化后的构造（spec §5.2）：临时 home 上的 infra 实现，谁都不碰机器自己的文件。
+		const sessionManager = new SessionManager({
+			sessionRepository: new SessionFileStore({ storeDir: join(workRoot, "sessions") }),
+			sessionDefaultsRepository: new HomeJsonStore({ home }),
+		});
 		const known = ["read", "write", "edit", "glob", "grep", "bash"];
 		const rows: ModelConfig[] = [
 			{ id: "b-1", name: "b", baseUrl: "http://x/v1", contextWindow: 128_000, maxTokens: 8_192 },
 			{ id: "a-1", name: "a", baseUrl: "http://x/v1", contextWindow: 128_000, maxTokens: 8_192 },
 		];
-		const toolManager = createToolManager({ home });
-		const modelManager = new ModelManager({ home: home });
+		const toolManager = createToolManager({ toolDefaultsRepository: new HomeJsonStore({ home }) });
+		const modelManager = new ModelManager({ modelRepository: new HomeJsonStore({ home }) });
 		modelManager.replaceRows(rows);
 		// 组合的输入是各持有者的一次现读，与 agent 装配时的取法同形。
 		const modelView = (): { rows: readonly ModelConfig[]; defaultRef?: string } => ({
 			rows: modelManager.catalog(),
 			defaultRef: modelManager.defaultRef(),
 		});
-		const bag = (): Session => createSession(workRoot);
+		const bag = (): Session => createSession(workRoot, join(workRoot, "sessions"));
 
 		// 会话记录了 b/high：组合出的模型行就是 b 那一行的完整事实——端点、窗口都随行而来，
 		// 会话快照上仍然只有选择的名字与档位。
@@ -68,7 +73,7 @@ process.stdout.write("\nsettings：session 的选择与两个持有者的现读�
 		// 另一个 home 的 ModelManager：目录里有行、但从未指名默认——回落链的后两级在这里走。
 		const plainHome = mkdtempSync(join(tmpdir(), "my-agent-settings-plain-"));
 		try {
-			const plainModels = new ModelManager({ home: plainHome });
+			const plainModels = new ModelManager({ modelRepository: new HomeJsonStore({ home: plainHome }) });
 			plainModels.replaceRows(rows);
 			const plainView = (): { rows: readonly ModelConfig[]; defaultRef?: string } => ({
 				rows: plainModels.catalog(),

@@ -10,19 +10,17 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "../packages/server/src/http.ts";
-import { SessionHub } from "../packages/server/src/hub.ts";
-import { SessionController, SystemController } from "../packages/server/src/controllers/sessions.ts";
-import { createRoutes } from "../packages/server/src/controllers/routes.ts";
-import { Router } from "../packages/server/src/http/routing.ts";
+import { createServer, Router, SessionController, SystemController } from "@my-agent/trigger";
+import { createRoutes } from "@my-agent/trigger";
+import { SessionHub } from "@my-agent/case";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import { mountSession } from "./mount-session.ts";
-import { type ModelConfig, ModelManager, setSessionsDir, createToolManager } from "@my-agent/core";
+import { type ModelConfig, ModelManager, createToolManager } from "@my-agent/domain";
+import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 
 const PORT = 8094;
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-"));
 const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint--store-"));
-setSessionsDir(storeRoot);
 let failures = 0;
 
 function check(label: string, ok: boolean, detail = ""): void {
@@ -57,13 +55,19 @@ fake.setResponses([
 // 门后。映射与模型行先种到临时 home 文件里（设置归属重构 spec §8：各持有者各持自己的文件），任何
 // 东西都不会落到机器自己的设置或模型文件上。
 const settingsHome = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-home-"));
-createToolManager({ home: settingsHome }).applyToolDefaults({ approval: { read: true } });
-new ModelManager({ home: settingsHome }).replaceRows(rows);
+// 自造 infra 实现指临时目录（分层重构 §7 步 5）：hub 只认端口，home → 实现的翻译在这里——同一份
+// HomeJsonStore 满足 SessionDefaults 与 ToolDefaults 两份同形声明。
+const settingsStore = new HomeJsonStore({ home: settingsHome });
+createToolManager({ toolDefaultsRepository: settingsStore }).applyToolDefaults({ approval: { read: true } });
+new ModelManager({ modelRepository: settingsStore }).replaceRows(rows);
 const sessionHub = new SessionHub({
 	workDirAbsPath: root,
 	chatTransport: fake.chatTransport,
-	settingsHome,
-	modelsHome: settingsHome,
+	sessionRepository: new SessionFileStore({ storeDir: storeRoot }),
+	sessionDefaultsRepository: settingsStore,
+	modelRepository: settingsStore,
+	toolDefaultsRepository: settingsStore,
+	toolResultsRepository: new ToolResultsArchive(),
 });
 
 // 按 `SessionHub.open()` 挂载 session 的方式来挂——停在门口的入口就是下面这些检查要驱动的

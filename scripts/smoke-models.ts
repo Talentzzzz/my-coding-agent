@@ -2,20 +2,20 @@
 // 运行：node scripts/smoke-models.ts
 //
 // 无需 provider key：这里的一切都是"用户键入的一行 → session 运行的 pi-ai 模型"的映射
-// （vendored 在 packages/core/src/llm 下），外加本应用最不想发出的那一个请求——没有模型可用的
+// （vendored 在 packages/domain/src/agent/llm 下），外加本应用最不想发出的那一个请求——没有模型可用的
 // 那个请求。有一个标题带 key 触达真实 transport，并在请求离开前把它截住，所以读到的是凭据而
 // 不是 provider 的回答。
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { anthropicMessages, type SimpleStreamOptions } from "@my-agent/core";
+import { anthropicMessages, type SimpleStreamOptions } from "@my-agent/domain";
+import { HomeJsonStore } from "@my-agent/infra";
 import {
 	coerceModelConfig,
 	isUnconfigured,
 	listModelOptions,
 	createModel,
 	modelFor,
-	modelsPath,
 	normalizeThinkingLevel,
 	placeholderModel,
 	rowFor,
@@ -23,7 +23,7 @@ import {
 	ModelManager,
 	type ModelChoice,
 	type ModelConfig,
-} from "@my-agent/core";
+} from "@my-agent/domain";
 
 let failures = 0;
 
@@ -311,16 +311,17 @@ try {
 
 	heading("the manager round-trips the file");
 	{
-		const manager = new ModelManager({ home: home });
+		const manager = new ModelManager({ modelRepository: new HomeJsonStore({ home }) });
 		check("a missing file is no models", manager.catalog().length === 0);
 
 		manager.replaceRows([row({ name: "one" }), row({ name: "two", id: "claude-opus-5" })]);
-		const reloaded = new ModelManager({ home: home }).catalog();
+		const reloaded = new ModelManager({ modelRepository: new HomeJsonStore({ home }) }).catalog();
 		check("both rows come back", reloaded.length === 2, String(reloaded.length));
 		check("with their names", reloaded[0]?.name === "one" && reloaded[1]?.name === "two");
 		check("their keys", reloaded[0]?.apiKey === "secret", String(reloaded[0]?.apiKey));
 		check("and their endpoints", reloaded[1]?.baseUrl === "http://127.0.0.1:1/v1", String(reloaded[1]?.baseUrl));
-		check("the file is where it is documented to be", modelsPath(home).endsWith("models.json"));
+		// models.json 的文件名知识随端口化归持有者（spec §4.2）；smoke 断言布局契约里的文件名。
+		check("the file is where it is documented to be", join(home, "models.json").endsWith("models.json"));
 	}
 
 	heading("the client is never sent a key");

@@ -27,16 +27,12 @@ import {
 	resolvePath,
 	sessionEntryToContextMessages,
 	SessionManager,
-	sessionMetaPath,
-	sessionPath,
-	sessionsDir,
 	shouldCompact,
 	spillOversizedToolResult,
 	spillPathFor,
 	trimmableToolArgEntryIds,
 	fillTools,
 	openAgent,
-	setSessionsDir,
 	type Tool,
 	type FileDiff,
 	type Message,
@@ -44,17 +40,34 @@ import {
 	type Session,
 	type SessionEntry,
 	compactionSummaryOf,
-} from "@my-agent/core";
+} from "@my-agent/domain";
+import { HomeJsonStore, SessionFileStore, ToolResultsArchive, sessionMetaPath, sessionPath } from "@my-agent/infra";
 
-/** The ledger's operations are the service's methods, so a script holds one to call them on. */
-const sessionManager = new SessionManager();
-
+// 端口化后的构造（spec §5.2）：账本操作与发现半经自造的 infra 实现指临时 store；设置端口按需
+// 另造（本实例的会话簇设置无人读）。
 const root = await mkdtemp(join(tmpdir(), "my-agent-tools-"));
 const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-tools--store-"));
-setSessionsDir(storeRoot);
+const sessionStore = new SessionFileStore({ storeDir: storeRoot });
+const archive = new ToolResultsArchive();
+/** The ledger's operations are the service's methods, so a script holds one to call them on. */
+const sessionManager = new SessionManager({
+	sessionRepository: sessionStore,
+	sessionDefaultsRepository: new HomeJsonStore({ home: join(root, "agent-home-defaults") }),
+});
 // One table for the whole script: the six built-ins are instances now, and a fresh table per lookup
 // would be a different six every time (ADR-0011).
-const toolManager = createToolManager();
+const toolManager = createToolManager({ toolDefaultsRepository: new HomeJsonStore({ home: join(root, "agent-home-tools") }) });
+/** 一份临时 home 的设置端口：HomeJsonStore 一份实现满足 SessionDefaults / Model / Tool 三份同形声明（spec §4.2）。 */
+function portsOf(home: string) {
+	const settingsStore = new HomeJsonStore({ home });
+	return {
+		sessionDefaultsRepository: settingsStore,
+		modelRepository: settingsStore,
+		toolDefaultsRepository: settingsStore,
+		toolResultsRepository: archive,
+	};
+}
+
 let failures = 0;
 
 /**
@@ -310,7 +323,7 @@ process.exit(failures === 0 ? 0 : 1);
 
 /** A session must survive a restart with the same session record, and compaction must not delete lines. */
 async function exerciseSessionManager(): Promise<void> {
-	const session = createSession(root);
+	const session = createSession(root, storeRoot);
 	const first: Message = { role: "user", content: [{ type: "text", text: "first question" }], timestamp: 1 };
 	const reply: Message = {
 		role: "assistant",
@@ -337,7 +350,7 @@ async function exerciseSessionManager(): Promise<void> {
 	check("the leaf is the last entry", session.leafId === sessionManager.getEntries(session).at(-1)?.id, String(session.leafId));
 
 	const sessionFileAbsPath = session.sessionFileAbsPath ?? "";
-	const reopened = fillSession(sessionFileAbsPath);
+	const reopened = fillSession(sessionFileAbsPath, sessionStore);
 	check("reloads both messages", sessionManager.buildSessionContext(reopened).messages.length === 2, String(sessionManager.buildSessionContext(reopened).messages.length));
 	check(
 		"reads the same entry ids back",
@@ -345,9 +358,9 @@ async function exerciseSessionManager(): Promise<void> {
 	);
 	check("reads the same leaf back", reopened.leafId === session.leafId, String(reopened.leafId));
 	check("reads the title back", sessionManager.getTitle(reopened) === "first question", sessionManager.getTitle(reopened));
-	check("finds the file by id", SessionManager.findSessionFilePathById(session.sessionId) === sessionFileAbsPath);
+	check("finds the file by id", sessionManager.findSessionFilePathById(session.sessionId) === sessionFileAbsPath);
 
-	const listed = (await SessionManager.list(root)).find((entry) => entry.id === session.sessionId);
+	const listed = (await sessionManager.list(root)).find((entry) => entry.id === session.sessionId);
 	check("lists the session for the directory", listed !== undefined);
 	check("the list shows the derived title", listed?.firstMessage === "first question", listed?.firstMessage);
 	check("and counts the session", listed?.messageCount === 2, String(listed?.messageCount));
@@ -363,7 +376,7 @@ async function exerciseSessionManager(): Promise<void> {
 	check("and what it replaced is not", !JSON.stringify(context.messages).includes("first question"), JSON.stringify(context.messages));
 	check("while the file keeps every message", sessionManager.getEntries(session).filter((entry) => entry.type === "message").length === 2);
 
-	const compacted = fillSession(sessionFileAbsPath);
+	const compacted = fillSession(sessionFileAbsPath, sessionStore);
 	check("and a reload reads the same checkpoint", sessionManager.buildSessionContext(compacted).messages[0]?.role === "user" && compactionSummaryText(sessionManager.buildSessionContext(compacted).messages[0]) !== undefined);
 	check("with the same entries", sessionManager.getEntries(compacted).length === sessionManager.getEntries(session).length, String(sessionManager.getEntries(compacted).length));
 
@@ -377,7 +390,7 @@ async function exerciseSessionManager(): Promise<void> {
  * messages the conversation carried on from more than one way, and where one of those ways ends.
  */
 function exerciseBranchPoints(): void {
-	const session = createSession(root);
+	const session = createSession(root, storeRoot);
 	const question = (text: string, at: number): Message => ({ role: "user", content: [{ type: "text", text }], timestamp: at });
 
 	const firstId = sessionManager.appendMessage(session, question("first", 1));
@@ -428,7 +441,7 @@ function exerciseBranchPoints(): void {
 
 	// The gesture this window now offers: rewind to an *assistant answer* and ask again. The point is
 	// that answer, and the card that names it has to say which question it answered.
-	const assistantSession = createSession(root);
+	const assistantSession = createSession(root, storeRoot);
 	sessionManager.appendMessage(assistantSession, question("q1", 10));
 	const firstAnswer = sessionManager.appendMessage(assistantSession, answerMessage("a1", 11));
 	sessionManager.appendMessage(assistantSession, question("q2", 12));
@@ -454,7 +467,7 @@ function exerciseBranchPoints(): void {
  * future tightening of that bound from silently shortening every card in the branch graph.
  */
 function exerciseBranchLabelPreview(): void {
-	const session = createSession(root);
+	const session = createSession(root, storeRoot);
 	const question = (text: string, at: number): Message => ({ role: "user", content: [{ type: "text", text }], timestamp: at });
 
 	const firstId = sessionManager.appendMessage(session, question("first", 1));
@@ -505,7 +518,7 @@ async function exerciseFileFormat(): Promise<void> {
 		"utf8",
 	);
 
-	const session = fillSession(path);
+	const session = fillSession(path, sessionStore);
 	check("reads both messages", sessionManager.buildSessionContext(session).messages.length === 2, String(sessionManager.buildSessionContext(session).messages.length));
 	check("chains the entries it was given", sessionManager.getEntries(session)[1]?.parentId === "aaaa0001", String(sessionManager.getEntries(session)[1]?.parentId));
 	check("the leaf is the last entry", session.leafId === "aaaa0003", String(session.leafId));
@@ -529,13 +542,13 @@ async function exerciseFileFormat(): Promise<void> {
 	check("a meta change lands on the snapshot", JSON.parse(metaText).title === "a name of its own", metaText.slice(0, 80));
 	check("and the stream is untouched by it", (await readFile(path, "utf8")) === text, "");
 
-	const reopened = fillSession(path);
+	const reopened = fillSession(path, sessionStore);
 	check("reopens with the same session record", sessionManager.buildSessionContext(reopened).messages.length === 3, String(sessionManager.buildSessionContext(reopened).messages.length));
 	check("and the same leaf", reopened.leafId === appended, String(reopened.leafId));
 	check("and the recorded title", sessionManager.getTitle(reopened) === "a name of its own", sessionManager.getTitle(reopened));
 
-	check("sessions live under the store this process was pointed at", dir.startsWith(sessionsDir()), dir);
-	check("and the id names the file directly", dir === sessionsDir(), dir);
+	check("sessions live under the store this process was pointed at", dir.startsWith(sessionStore.storeDir), dir);
+	check("and the id names the file directly", dir === sessionStore.storeDir, dir);
 }
 
 /**
@@ -558,9 +571,13 @@ async function exerciseSettings(): Promise<void> {
 		"utf8",
 	);
 	// ADR-0021：出生消息让会话落地，编排层按 id 现开文件。
-	const state = createSession(root);
+	const state = createSession(root, storeRoot);
 	sessionManager.appendMessage(state, { role: "user", content: [{ type: "text", text: "settings route birth" }], timestamp: 1 });
-	const agent = await openAgent({ session: state, settingsHome: agentDir, modelsHome: agentDir });
+	const agent = await openAgent({
+		session: state,
+		sessionRepository: sessionStore,
+		...portsOf(agentDir),
+	});
 	const id = state.sessionId;
 
 	// 读模型：五个持有者的现读组装（spec §6）。迁移捡走的簇各就各位，文件没点名的字段保持缺席。
@@ -605,7 +622,7 @@ async function exerciseSettings(): Promise<void> {
 	// bash 默认钳制照旧：高于上限的默认值被压到上限（经 ToolManager 的写路径规范化）。
 	const loweredHome = join(root, "settings-lowered-home");
 	await mkdir(loweredHome, { recursive: true });
-	const lowered = createToolManager({ home: loweredHome });
+	const lowered = createToolManager({ toolDefaultsRepository: new HomeJsonStore({ home: loweredHome }) });
 	lowered.applyToolDefaults({ bash: { defaultTimeoutMs: 9_000_000, maxTimeoutMs: 600_000 } });
 	check("a default above the ceiling is pulled down to it", lowered.toolDefaults().bash.defaultTimeoutMs === 600_000, JSON.stringify(lowered.toolDefaults().bash));
 
@@ -628,7 +645,7 @@ async function exerciseSettings(): Promise<void> {
  * from the old one. These assertions pin the "settles rather than hangs" half of it.
  */
 async function exerciseSessionLifecycle(): Promise<void> {
-	const state = createSession(root);
+	const state = createSession(root, storeRoot);
 	const question: Message = { role: "user", content: [{ type: "text", text: "lifecycle question" }], timestamp: 1 };
 	sessionManager.appendMessage(state, question);
 
@@ -647,13 +664,13 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	};
 	const lifecycleHome = join(root, "settings-lifecycle-home");
 	await mkdir(lifecycleHome, { recursive: true });
-	const lifecycleTools = createToolManager({ home: lifecycleHome });
+	const lifecycleTools = createToolManager({ toolDefaultsRepository: new HomeJsonStore({ home: lifecycleHome }) });
 	lifecycleTools.applyToolDefaults({ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } });
-	new ModelManager({ home: lifecycleHome }).replaceRows([configured]);
+	new ModelManager({ modelRepository: new HomeJsonStore({ home: lifecycleHome }) }).replaceRows([configured]);
 	const agent = await openAgent({
 		session: state,
-		settingsHome: lifecycleHome,
-		modelsHome: lifecycleHome,
+		sessionRepository: sessionStore,
+		...portsOf(lifecycleHome),
 	});
 	const id = state.sessionId;
 
@@ -665,9 +682,9 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	// a config patch beyond the approval half is routed to the holders and read back by the next call,
 	// which is what the write-through below proves. The value is put back, because the exercises that
 	// follow read through the same holders.
-	const modeBefore = new SessionManager({ home: lifecycleHome }).sessionDefaults().steeringMode;
+	const modeBefore = new SessionManager({ sessionRepository: sessionStore, sessionDefaultsRepository: new HomeJsonStore({ home: lifecycleHome }) }).sessionDefaults().steeringMode;
 	agent.applyConfig(id, { steeringMode: "all" });
-	check("the session reads and writes the settings it was given", new SessionManager({ home: lifecycleHome }).sessionDefaults().steeringMode === "all", new SessionManager({ home: lifecycleHome }).sessionDefaults().steeringMode);
+	check("the session reads and writes the settings it was given", new SessionManager({ sessionRepository: sessionStore, sessionDefaultsRepository: new HomeJsonStore({ home: lifecycleHome }) }).sessionDefaults().steeringMode === "all", new SessionManager({ sessionRepository: sessionStore, sessionDefaultsRepository: new HomeJsonStore({ home: lifecycleHome }) }).sessionDefaults().steeringMode);
 	agent.applyConfig(id, { steeringMode: modeBefore });
 	// An approval chosen in a session is that session's own: it lives on the session's `.json`
 	// snapshot, and the holders' files — which every other session over this directory reads
@@ -681,7 +698,7 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	// Read back from the file rather than from the bag this exercise opened: the write lands through a
 	// replay the orchestrator took and dropped (ADR-0013), so the copy handed to `openAgent` is the one
 	// thing that cannot show it.
-	const onDisk = (): Session => fillSession(agent.fileAbsPathOf(id) ?? "");
+	const onDisk = (): Session => fillSession(agent.fileAbsPathOf(id) ?? "", sessionStore);
 	check(
 		"recording the choice on the snapshot",
 		sessionManager.getRecordedToolConfig(onDisk()).approval?.bash === true,
@@ -700,7 +717,7 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	check("close() settles", closed.ok);
 	check("lifecycle calls keep the session record", agent.snapshot(id).messages.length === 1, String(agent.snapshot(id).messages.length));
 
-	const reloaded = fillSession(agent.fileAbsPathOf(id) ?? "");
+	const reloaded = fillSession(agent.fileAbsPathOf(id) ?? "", sessionStore);
 		check(
 			"the session record is still on disk",
 		sessionManager.getEntries(reloaded).filter((entry) => entry.type === "message").length === 1,
@@ -724,17 +741,17 @@ async function exerciseSessionLifecycle(): Promise<void> {
 	);
 	const reopened = await openAgent({
 		session: reloaded,
-		settingsHome: lifecycleHome,
-		modelsHome: lifecycleHome,
+		sessionRepository: sessionStore,
+		...portsOf(lifecycleHome),
 	});
 	check("reopening restores the approval the session chose", reopened.getApprovals(reloaded.sessionId).bash === true, JSON.stringify(reopened.getApprovals(reloaded.sessionId)));
-	const otherState = createSession(root);
+	const otherState = createSession(root, storeRoot);
 	// ADR-0021：会话随第一条消息出生，编排层的读取按 id 现开文件——先落一条首消息再打开。
 	sessionManager.appendMessage(otherState, { role: "user", content: [{ type: "text", text: "another session's first words" }], timestamp: 1 });
 	const other = await openAgent({
 		session: otherState,
-		settingsHome: lifecycleHome,
-		modelsHome: lifecycleHome,
+		sessionRepository: sessionStore,
+		...portsOf(lifecycleHome),
 	});
 	check(
 		"while another session over the directory keeps the defaults",
@@ -798,7 +815,7 @@ function exerciseFillTools(): void {
 
 function exerciseCompaction(): void {
 	// ADR-0021 后不再用内存会话：追加循环本身就会让文件随第一条消息出生，其余操作与从前相同。
-	const session = createSession(root);
+	const session = createSession(root, storeRoot);
 	for (let index = 0; index < 10; index += 1) {
 		sessionManager.appendMessage(session, { role: "user", content: [{ type: "text", text: `question ${index} ${"x".repeat(50)}` }], timestamp: index * 2 + 1 });
 		sessionManager.appendMessage(session, {
@@ -938,7 +955,7 @@ async function exercisePruning(): Promise<void> {
 	// five newest are small and survive, which is the "keep the newest five" half of the rule.
 	const bodyOf = (index: number): string => (index < 3 ? `body ${index} ${"x".repeat(20_000)}` : `body ${index}`);
 
-	const session = createSession(root);
+	const session = createSession(root, storeRoot);
 	sessionManager.appendMessage(session, { role: "user", content: [{ type: "text", text: "look through the package" }], timestamp: longAgo });
 	const resultEntryIds: string[] = [];
 	for (let index = 0; index < 8; index += 1) {
@@ -952,7 +969,7 @@ async function exercisePruning(): Promise<void> {
 	// The entries are appended with today's stamps, so the store is rewound to the idle conversation the
 	// clock test is about: this is the only way to hand a session a record that sat for two hours.
 	const fixture = await writeIdleSession(storeRoot, root, sessionManager.getEntries(session), longAgo);
-	const store2 = fillSession(fixture);
+	const store2 = fillSession(fixture, sessionStore);
 	const entries = sessionManager.getEntries(store2);
 
 	const text = (view: readonly SessionEntry[]): string => JSON.stringify(project(view));
@@ -1006,13 +1023,13 @@ async function exercisePruning(): Promise<void> {
 	// 设置归属重构（spec §8）：审批与模型行种进临时 home，homes 透传给 openAgent。
 	const compactionHome = join(root, "settings-compaction-home");
 	await mkdir(compactionHome, { recursive: true });
-	const compactionTools = createToolManager({ home: compactionHome });
+	const compactionTools = createToolManager({ toolDefaultsRepository: new HomeJsonStore({ home: compactionHome }) });
 	compactionTools.applyToolDefaults({ approval: { read: false, write: false, edit: false, glob: false, grep: false, bash: false } });
-	new ModelManager({ home: compactionHome }).replaceRows([configured]);
+	new ModelManager({ modelRepository: new HomeJsonStore({ home: compactionHome }) }).replaceRows([configured]);
 	const agent = await openAgent({
 		session: store2,
-		settingsHome: compactionHome,
-		modelsHome: compactionHome,
+		sessionRepository: sessionStore,
+		...portsOf(compactionHome),
 		// Dispatch leaves core through the sink handed in at construction (ADR-0013): the removed
 		// `Agent.onEvent` becomes the subscription this sink answers directly.
 		sink: {
@@ -1040,24 +1057,24 @@ async function exercisePruning(): Promise<void> {
 		// Read back from the file, not from the bag this exercise opened: the clear is recorded by a
 		// replay the orchestrator took and dropped (ADR-0013), so the copy opened here is the one thing
 		// that cannot see it.
-		sessionManager.getEntries(fillSession(fixture)).filter((entry) => entry.type === "clear_tool_result").length === 1,
-		JSON.stringify(sessionManager.getEntries(fillSession(fixture)).map((entry) => entry.type)),
+		sessionManager.getEntries(fillSession(fixture, sessionStore)).filter((entry) => entry.type === "clear_tool_result").length === 1,
+		JSON.stringify(sessionManager.getEntries(fillSession(fixture, sessionStore)).map((entry) => entry.type)),
 	);
 
 	// A second pass has nothing left to clear and the trigger no longer fires, so nothing is written.
 	// It is handed the file's own view, the one the next request is built from: a record the first pass
 	// wrote is only visible to a replay, so the copy this exercise opened would look un-cleared and buy
 	// a second record for work already done.
-	await agent.maybeCompact(store2.sessionId, sessionManager.buildContextEntries(fillSession(fixture)), now);
+	await agent.maybeCompact(store2.sessionId, sessionManager.buildContextEntries(fillSession(fixture, sessionStore)), now);
 	check(
 		"a second pass writes no second record",
-		sessionManager.getEntries(fillSession(fixture)).filter((entry) => entry.type === "clear_tool_result").length === 1,
+		sessionManager.getEntries(fillSession(fixture, sessionStore)).filter((entry) => entry.type === "clear_tool_result").length === 1,
 	);
 	await agent.close(store2.sessionId);
 
 	// The point of recording it: a process that reads the file again sees the cleared view without
 	// re-deciding anything, and the file still holds every result the view dropped.
-	const reread = fillSession(fixture);
+	const reread = fillSession(fixture, sessionStore);
 	const rereadText = text(sessionManager.buildContextEntries(reread));
 	check("a reload reads the cleared view", rereadText.includes(clearedToolResultText("read")) && !rereadText.includes("body 0 "));
 	check("with the newest results still there", rereadText.includes("body 7") && rereadText.includes("REPORT: rewrote the parser"));
@@ -1077,7 +1094,7 @@ async function exercisePruning(): Promise<void> {
  * recorded view, so the file keeps the full body while every reader of the context sees the marker.
  */
 function exerciseTrimToolCallArgs(): void {
-	const session = createSession(root);
+	const session = createSession(root, storeRoot);
 	const body = Array.from({ length: 500 }, (_, index) => `line-${index} ${"x".repeat(10)}`).join("\n");
 	sessionManager.appendMessage(session, { role: "user", content: [{ type: "text", text: "write a big file" }], timestamp: 1 });
 	const answeredWrite = sessionManager.appendMessage(session, {
@@ -1123,7 +1140,7 @@ function exerciseTrimToolCallArgs(): void {
 	check("the file keeps the full argument", sessionManager.getEntries(session).some((entry) => JSON.stringify(entry).includes("line-250")));
 	check(
 		"a reload reads the same trimmed view",
-		!JSON.stringify(project(sessionManager.buildContextEntries(fillSession(session.sessionFileAbsPath ?? ""))).find((message) => JSON.stringify(message).includes("big-write"))).includes("line-250"),
+		!JSON.stringify(project(sessionManager.buildContextEntries(fillSession(session.sessionFileAbsPath ?? "", sessionStore))).find((message) => JSON.stringify(message).includes("big-write"))).includes("line-250"),
 	);
 	check("and nothing is left for a second trim", trimmableToolArgEntryIds(view).length === 0);
 }
@@ -1212,10 +1229,10 @@ function exerciseSpilling(): void {
 	const middle = Array.from({ length: 10_000 }, (_, index) => `line-${index} ${"y".repeat(8)}`).join("\n");
 	const content = [{ type: "text" as const, text: `BEGIN-OF-OUTPUT\n${middle}\nEND-OF-OUTPUT` }];
 
-	const small = spillOversizedToolResult(workDirAbsPath, "spill-session", "bash", "small-call", [{ type: "text", text: "small" }]);
+	const small = spillOversizedToolResult(workDirAbsPath, "spill-session", "bash", "small-call", [{ type: "text", text: "small" }], archive);
 	check("a small result is not touched", small === undefined);
 
-	const view = spillOversizedToolResult(workDirAbsPath, "spill-session", "bash", "spill/call:1", content);
+	const view = spillOversizedToolResult(workDirAbsPath, "spill-session", "bash", "spill/call:1", content, archive);
 	check("an oversized result comes back as a view", view !== undefined);
 	if (!view) return;
 	const shown = view.find((block) => block.type === "text");
@@ -1228,7 +1245,7 @@ function exerciseSpilling(): void {
 	check("and drops the middle", shown?.type === "text" && !shown.text.includes("line-5000"));
 	check("and says how to read the rest", shown?.type === "text" && shown.text.includes("use the read tool"));
 
-	const again = spillOversizedToolResult(workDirAbsPath, "spill-session", "bash", "spill/call:1", content);
+	const again = spillOversizedToolResult(workDirAbsPath, "spill-session", "bash", "spill/call:1", content, archive);
 	check("a second pass reuses the archive without rewriting it", again !== undefined && existsSync(absPath));
 }
 

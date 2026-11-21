@@ -1,4 +1,4 @@
-import type { ModelInput, ModelOption } from "@my-agent/core/protocol";
+import type { ModelInput, ModelOption } from "@my-agent/case/protocol";
 
 /**
  * 本机尚未导入任何模型时，窗口种下的那一行。
@@ -15,7 +15,7 @@ import type { ModelInput, ModelOption } from "@my-agent/core/protocol";
  * `apiKey` 有意缺席，两重含义都在：应用绝不内置凭据，而缺失的字段正是端点读取为"保留已存值"的
  * 信号。这一行因此在用户粘贴密钥之前一直没有密钥 —— 这是唯一只有用户本人能做的事。
  *
- * `name` 复述了 `packages/core/src/models.ts` 里的 `DEFAULT_MODEL_NAME`，服务端的同一决定住在
+ * `name` 复述了 `packages/domain/src/agent/llm/model-manager.ts` 里的 `DEFAULT_MODEL_NAME`，服务端的同一决定住在
  * 那里：那个模块跑在 Node 上，而这个文件要打包进浏览器，所以字面量写了两遍。两者必须一致 ——
  * 这里的名字是这一行种下时的名字，那里的名字是装配时打开会话用的名字。
  */

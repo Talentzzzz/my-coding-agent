@@ -11,8 +11,8 @@
 // 之前把配置种到 hub 的 settings 与 models 目录（`HubOptions.settingsHome` / `modelsHome`）
 // 背后的文件里，它挂载的每个 session 都会经由那里读取。模型行同理：会话打开在哪一行是
 // 「记录的选择 → 设置默认行 → 第一行」的现算答案，这里的出生消息不点名任何一行。
-import { type Session, createSession } from "@my-agent/core";
-import { type SessionHub } from "../packages/server/src/hub.ts";
+import { type Session, createSession } from "@my-agent/domain";
+import { type SessionHub } from "@my-agent/case";
 
 export interface MountOptions {
 	/** session 的工具在其中解析的工作目录，也是其头部声明它所在的位置。 */
@@ -32,7 +32,9 @@ export interface MountedSession {
  * 以自己的运行把它带进表。
  */
 export async function mountSession(sessionHub: SessionHub, options: MountOptions): Promise<MountedSession> {
-	const session = createSession(options.root);
+	// store 目录是 hub 注入的 sessionRepository 自己的（分层重构 §4.1 的布局契约半）——挂载落进
+	// 与 hub 其他会话同一个 store，袋的诞生命名从那里拼出。
+	const session = createSession(options.root, sessionHub.agent.sessionManager.storeDir);
 	// 出生（ADR-0021）：一条 user 消息落盘，`.json` 与 `.jsonl` 同时诞生——编排层按 id 现开
 	// 文件，不经此步，挂载后的第一次 prompt / snapshot 都会被拒绝。
 	sessionHub.agent.sessionManager.appendMessage(session, {

@@ -8,19 +8,17 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bootServer } from "../packages/server/src/boot.ts";
+import { start } from "@my-agent/app";
 import { MuxClient, browserSocket, type MuxHandlers } from "../packages/web/src/client.ts";
 import { SessionRows } from "../packages/web/src/rows.ts";
 import { createFakeTransport, fakeAssistantMessage } from "./fake-transport.ts";
-import type { ConnectionItem, ServerMessage } from "@my-agent/core/protocol";
-import { setSessionsDir, type ModelConfig } from "@my-agent/core";
+import type { ConnectionItem, ServerMessage } from "@my-agent/case/protocol";
+import type { ModelConfig } from "@my-agent/domain";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-mux-live-"));
-/** 一个临时 agent home，本 smoke 写的设置不是机器自己的。 */
+/** 一个临时 agent home，本 smoke 写的设置不是机器自己的。会话 store 随 settingsHome 派生（分层重构 §5.2）。 */
 const home = await mkdtemp(join(tmpdir(), "my-agent-mux-live-home-"));
-/** 一个临时 store，本 smoke 写的 session 不是机器自己的。 */
-const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-mux-live-store-"));
-setSessionsDir(storeRoot);
+const storeRoot = join(home, "sessions");
 let failures = 0;
 
 function check(label: string, condition: boolean, detail = ""): void {
@@ -84,7 +82,7 @@ const transport = createFakeTransport({ tokensPerSecond: 400 });
 /** 一秒：快到让 smoke 不冗长，慢到 Windows 的调度噪声饿不死客户端的 watchdog（它的容忍是
  * 这个间隔的三次）。 */
 const heartbeatEveryMs = 1_000;
-const server = await bootServer({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: heartbeatEveryMs }, chatTransport: transport.chatTransport, settingsHome: home });
+const server = await start({ workDirAbsPath: root, port: 0, mux: { heartbeatIntervalMs: heartbeatEveryMs }, chatTransport: transport.chatTransport, settingsHome: home });
 // 启动后、任何 prompt 之前交给 hub：下面那一节 run 需要一个可供运行的模型。
 server.sessionHub.setModelConfigs(modelRows);
 
@@ -248,9 +246,9 @@ try {
 	check("关掉之后不再有状态变化", channels.at(-1) !== undefined);
 } finally {
 	await server.close();
-	// 工作目录与临时 store：一个被创建却从不清理的 session 否则会每次运行都落进真实的 agent home。
+	// 工作目录与临时 home（store 随 settingsHome 派生）：一个被创建却从不清理的 session 否则会每次
+	// 运行都落进真实的 agent home。
 	await rm(root, { recursive: true, force: true });
-	await rm(storeRoot, { recursive: true, force: true });
 	await rm(home, { recursive: true, force: true });
 }
 

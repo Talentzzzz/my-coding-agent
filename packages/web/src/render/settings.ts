@@ -7,13 +7,13 @@ import {
 	type ModelOption,
 	type GlobalSettingsSnapshot,
 	type SessionSnapshot,
-} from "@my-agent/core/protocol";
+} from "@my-agent/case/protocol";
 import type { AppearanceSettings } from "../ui-settings.ts";
 
 /**
  * 内置默认模式的名字，在这里复述而不是导入。
  *
- * 常量的家（`@my-agent/core` 的 `types.ts`）跑在 Node 上，客户端绝不能把它拉进 bundle —— 与字号
+ * 常量的家（`@my-agent/domain` 的 `types.ts`）跑在 Node 上，客户端绝不能把它拉进 bundle —— 与字号
  * 范围出于同样理由遵循的同一条复述规则。
  */
 const DEFAULT_MODE_NAME = "默认";

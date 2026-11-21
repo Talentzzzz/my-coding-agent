@@ -99,11 +99,11 @@
 
 ---
 
-## 四、技术债：`packages/core/src/agent.ts` 是重建的，不是原文
+## 四、技术债：`packages/domain/src/agent/agent.ts` 是重建的，不是原文
 
 原文 §8.2 的记录，必须留着，否则未来会误以为手上的就是原始文本。
 
-在做变异测试时，有两个源文件经过了 PowerShell 的 **ANSI 代码页往返**，导致换行被删除、非 ASCII 字符被破坏。`packages/core/src/agent.ts` 是**重建**而非恢复的。
+在做变异测试时，有两个源文件经过了 PowerShell 的 **ANSI 代码页往返**，导致换行被删除、非 ASCII 字符被破坏。`packages/core/src/agent.ts`（事发时的路径；该文件今住 `packages/domain/src/agent/agent.ts`，五模块分层搬迁不改内容）是**重建**而非恢复的。
 
 - 重建删掉的是换行而不是内容：事后测量，重建文件的扁平化文本与受损版除 **93 个字符**（在文档注释边界补的 `*`）之外完全相同，逐 token 比对显示**代码零差异**。
 - 真正的损伤在**形状**：import、union 成员、成员边界、文档注释段落被挤在一起，约一百条文档注释丢失了段落分隔。
