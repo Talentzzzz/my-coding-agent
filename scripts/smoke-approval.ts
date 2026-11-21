@@ -43,7 +43,7 @@ import { mountSession } from "./mount-session.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
 import type { PendingApproval, SessionRow } from "@my-agent/case/protocol";
 import { type Agent, createToolManager, type ModelConfig, ModelManager, type Session, type SessionMeta } from "@my-agent/domain";
-import { HomeJsonStore, SessionFileStore, sessionMetaPath, ToolResultsArchive } from "@my-agent/infra";
+import { AgentsMdStore, HomeJsonStore, SessionFileStore, sessionMetaPath, ToolResultsArchive } from "@my-agent/infra";
 
 let failures = 0;
 
@@ -167,6 +167,7 @@ const rigPorts = (settingsHome: string) => {
 		modelRepository: settingsStore,
 		toolDefaultsRepository: settingsStore,
 		toolResultsRepository: new ToolResultsArchive(),
+		agentsMdRepository: new AgentsMdStore(),
 	};
 };
 const fake = createFakeTransport();

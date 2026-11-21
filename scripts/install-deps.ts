@@ -27,6 +27,7 @@ const workspaces = [
 	"packages/case",
 	"packages/domain",
 	"packages/infra",
+	"packages/prompt",
 	".",
 ];
 

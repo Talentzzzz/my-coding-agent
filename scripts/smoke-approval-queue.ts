@@ -26,7 +26,7 @@ import {
 	type ModelSelection,
 	type Session,
 } from "@my-agent/domain";
-import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
+import { AgentsMdStore, HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-queue-"));
 const storeRoot = await mkdtemp(join(tmpdir(), "my-agent-approval-queue--store-"));
@@ -148,6 +148,7 @@ async function openSession(overrides: { approval?: Record<string, boolean>; chat
 		modelRepository: settingsStore,
 		toolDefaultsRepository: settingsStore,
 		toolResultsRepository: archive,
+		agentsMdRepository: new AgentsMdStore(),
 	});
 	// 会话随第一条消息出生（ADR-0021），而编排层按 id 现开文件：这里直接对袋追加一条 user
 	// 消息让文件落地——不跑引擎、不耗剧本。模型选择随每条 prompt 的 selection 抵达，与生产一致。

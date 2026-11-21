@@ -10,7 +10,8 @@
 			"@my-agent/case/protocol": ["./packages/case/src/protocol.ts"],
 			"@my-agent/infra": ["./packages/infra/src/index.ts"],
 			"@my-agent/domain": ["./packages/domain/src/index.ts"],
-			"@my-agent/domain/tool": ["./packages/domain/src/agent/tool/index.ts"]
+			"@my-agent/domain/tool": ["./packages/domain/src/agent/tool/index.ts"],
+			"@my-agent/prompt": ["./packages/prompt/src/index.ts"]
 		}
 	},
 	"include": [
@@ -19,6 +20,7 @@
 		"packages/case/src/**/*.ts",
 		"packages/domain/src/**/*.ts",
 		"packages/infra/src/**/*.ts",
+		"packages/prompt/src/**/*.ts",
 		"scripts/cdp.ts",
 		"scripts/smoke-projection.ts",
 		"scripts/smoke-subscribe.ts",

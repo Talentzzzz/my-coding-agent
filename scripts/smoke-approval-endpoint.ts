@@ -16,7 +16,7 @@ import { SessionHub } from "@my-agent/case";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
 import { mountSession } from "./mount-session.ts";
 import { type ModelConfig, ModelManager, createToolManager } from "@my-agent/domain";
-import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
+import { AgentsMdStore, HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 
 const PORT = 8094;
 const root = await mkdtemp(join(tmpdir(), "my-agent-approval-endpoint-"));
@@ -68,6 +68,7 @@ const sessionHub = new SessionHub({
 	modelRepository: settingsStore,
 	toolDefaultsRepository: settingsStore,
 	toolResultsRepository: new ToolResultsArchive(),
+	agentsMdRepository: new AgentsMdStore(),
 });
 
 // 按 `SessionHub.open()` 挂载 session 的方式来挂——停在门口的入口就是下面这些检查要驱动的

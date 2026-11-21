@@ -3,7 +3,7 @@
 	"version": "0.0.1",
 	"private": true,
 	"type": "module",
-	"description": "Headless agent core: Agent orchestration, context/llm/session/tool subpackages, managers behind declared ports",
+	"description": "Headless agent core: Agent orchestration, llm/session/tool subpackages, managers behind declared ports",
 	"main": "./src/index.ts",
 	"types": "./src/index.ts",
 	"exports": {
@@ -12,6 +12,7 @@
 	},
 	"dependencies": {
 		"@anthropic-ai/sdk": "0.124.0",
+		"@my-agent/prompt": "workspace:*",
 		"partial-json": "0.1.7",
 		"typebox": "^1.3.27"
 	}

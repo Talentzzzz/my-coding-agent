@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import {
 	type Agent,
 	type AgentSessionEvent,
+	type AgentsMdRepository,
 	groupSessionsByDirectory,
 	type ChatTransport,
 	createSessionAgent,
@@ -40,6 +41,8 @@ export interface HubOptions {
 	toolDefaultsRepository: ToolDefaultsRepository;
 	/** tool-results 归档的只写端口：写边界的兜底归档永远有处可去。 */
 	toolResultsRepository: ToolResultsRepository;
+	/** 项目指示收集的端口（@my-agent/prompt 声明，ADR-0031）：system prompt 按请求经它收 AGENTS.md。 */
+	agentsMdRepository: AgentsMdRepository;
 	/**
 	 * 本 hub 打开的每个会话所对话的 transport。
 	 *
@@ -145,6 +148,7 @@ export class SessionHub {
 			modelRepository: options.modelRepository,
 			toolDefaultsRepository: options.toolDefaultsRepository,
 			toolResultsRepository: options.toolResultsRepository,
+			agentsMdRepository: options.agentsMdRepository,
 			...(options.chatTransport === undefined ? {} : { chatTransport: options.chatTransport }),
 			// 本 hub 就是编排层的订阅宿主：事件与快照交给这个 sink，它按 sessionId 查这一张表分发
 			// ——订阅只从这一个出口流出，编排层只认它。行折算站在分发之前：侧栏的行必须先于任何

@@ -1,21 +1,24 @@
-// 分层依赖方向的机械守卫（分层重构 spec §6，步 3 随 server 三分诞生）：
+// 分层依赖方向的机械守卫（分层重构 spec §6，步 3 随 server 三分诞生；2026-11-21 起六模块，ADR-0031）：
 //
-//   R1  依赖方向——五个模块（app / case / trigger / domain / infra）的 import 边不许越过允许
-//       的方向：app → 全部；trigger → { case, infra }；case → domain；infra → domain；
-//       domain → 零本仓依赖（只认 node 内建、外部依赖与自己的端口声明）。违规即失败。
+//   R1  依赖方向——六个模块（app / case / trigger / domain / infra / prompt）的 import 边不许越过
+//       允许的方向：app → 全部；trigger → { case, infra }；case → domain；infra → { domain, prompt }；
+//       domain → { prompt }（唯一的一条本仓边：prompt 是一片对本仓零依赖的叶子库，ADR-0031）；
+//       prompt → 零本仓依赖。违规即失败。
 //   R1b 成员禁令——case 与 trigger 不得拼写的成员访问：原 `check-server-facade` 的
 //       bannedMembers 面随 server 包退役迁到这里继续扫（spec §6；ADR-0012/0023 族——会话操作
 //       走 Agent 公开面，hold 簿记对传输层与应用层零感知）。
-//   R2  子包隔离——domain/src/agent/ 的四个子包（context / llm / session / tool）只准 import
+//   R2  子包隔离——domain/src/agent/ 的三个子包（llm / session / tool）只准 import
 //       根 types.ts、自己包内的文件、node 内建与外部依赖；互不 import，哪怕单向（spec §6 R2、
-//       §2.2）。被别的子包消费的定义独占在根 types.ts（共享内核），所以子包向上的相对 import
+//       §2.2；context 子包已并入 session、AgentsMdRepository 端口迁 @my-agent/prompt，
+//       ADR-0031）。被别的子包消费的定义独占在根 types.ts（共享内核），所以子包向上的相对 import
 //       只许指到它。随步 4 激活。
 //
 // R3  domain 禁 fs（随步 5 激活）——domain/src/agent/ 不 import node:fs / node:fs/promises，
-//      node:child_process 同题；例外 tool/ 包（用户工作目录事实，spec §4.5）与 context 包的
-//      agents-md.ts（AGENTS.md 收集，§4.5 明文不端口化）。存储走注入的端口：SessionRepository /
-//      三份 home-json / ToolResultsRepository，infra 实现、组合根注入——domain 从此不知道「真实的
-//      home」，触盘的只有 infra。
+//      node:child_process 同题；例外 tool/ 包（用户工作目录事实，spec §4.5）。存储走注入的端口：
+//      SessionRepository / 三份 home-json / ToolResultsRepository / AgentsMdRepository，infra 实现、
+//      组合根注入——domain 从此不知道「真实的 home」，触盘的只有 infra。（AGENTS.md 收集曾住
+//      context 包的 agents-md.ts，§4.5 当时明文不端口化；ADR-0031 随 prompt 包端口化迁 infra——
+//      fs 是 infra 的，豁免随之删除。）
 //
 // 与 check-tokens / check-server-facade 同一套先例：一个用正则的小脚本，接进 `npm run check`，
 // 让不变量被机器检查而不是靠一条会腐烂的注释；import 说明符 → 包名映射判方向（facade 守卫的
@@ -26,16 +29,17 @@ import { relative, resolve } from "node:path";
 
 const packagesRoot = process.argv[2] ?? "packages";
 
-const MODULES = ["app", "case", "trigger", "domain", "infra"] as const;
+const MODULES = ["app", "case", "trigger", "domain", "infra", "prompt"] as const;
 type Module = (typeof MODULES)[number];
 
-/** R1：每个模块允许 import 的本仓包。domain 的清单是空的——它对任何本仓包都盲。 */
+/** R1：每个模块允许 import 的本仓包。prompt 的清单是空的——叶子库对任何本仓包都盲；domain 只认 prompt。 */
 const allowedImports: Record<Module, readonly Module[]> = {
-	app: ["domain", "infra", "case", "trigger"],
+	app: ["domain", "infra", "case", "trigger", "prompt"],
 	trigger: ["case", "infra"],
 	case: ["domain"],
-	infra: ["domain"],
-	domain: [],
+	infra: ["domain", "prompt"],
+	domain: ["prompt"],
+	prompt: [],
 };
 
 /** 模块 → 包名：import 说明符按它映射到方向。子路径导出（`@my-agent/case/protocol`）按包名前缀归。 */
@@ -45,6 +49,7 @@ const packageNames: Record<Module, string> = {
 	case: "@my-agent/case",
 	infra: "@my-agent/infra",
 	domain: "@my-agent/domain",
+	prompt: "@my-agent/prompt",
 };
 
 function moduleOfSpecifier(name: string): Module | undefined {
@@ -113,26 +118,23 @@ function normalize(path: string): string {
 	return path.replaceAll("\\", "/");
 }
 
-// R2 的扫描面：domain/src/agent/ 下的四个子包目录与共享内核（根 types.ts）的住址。
+// R2 的扫描面：domain/src/agent/ 下的三个子包目录与共享内核（根 types.ts）的住址。
 const domainAgentDir = resolve(packagesRoot, "domain", "src", "agent");
-const subpackageDirs = ["context", "llm", "session", "tool"].map((name) => normalize(resolve(domainAgentDir, name)));
+const subpackageDirs = ["llm", "session", "tool"].map((name) => normalize(resolve(domainAgentDir, name)));
 const rootTypesFile = normalize(resolve(domainAgentDir, "types.ts"));
 
 // R3 的扫描面（随步 5 激活）：domain 禁 node:fs 一族 import（fs / fs/promises），node:child_process
-// 同题——存储走注入的端口（SessionRepository / 三份 home-json / ToolResultsRepository），infra 实现、
-// 组合根注入。**例外：tool/ 包**（spec §4.5 的不端口化清单——用户工作目录的固有本地事实：六工具的
-// 文件读写与 shell；child_process 属同一个例外）与 **context 包的 agents-md.ts**（AGENTS.md/CLAUDE.md
-// 收集，§4.5 明文不端口化，不搬出 context——子包隔离禁它 import tool）。
+// 同题——存储走注入的端口（SessionRepository / 三份 home-json / ToolResultsRepository /
+// AgentsMdRepository），infra 实现、组合根注入。**例外：tool/ 包**（spec §4.5 的不端口化清单——
+// 用户工作目录的固有本地事实：六工具的文件读写与 shell；child_process 属同一个例外）。
 const fsBannedSpecifiers = new Set(["node:fs", "node:fs/promises", "node:child_process"]);
 const toolDir = normalize(resolve(domainAgentDir, "tool"));
-const agentsMdFile = normalize(resolve(domainAgentDir, "context", "agents-md.ts"));
 
 /** R3：一个 domain 文件是否被豁免某条 fs 类 import。 */
 function fsExempt(path: string, specifier: string): boolean {
 	const normalizedPath = normalize(path);
 	if (normalizedPath.startsWith(`${toolDir}/`)) return true; // 用户工作目录事实（spec §4.5）
 	if (specifier === "node:child_process") return false; // shell 只有工具用
-	if (normalizedPath === agentsMdFile) return true; // AGENTS.md 收集（spec §4.5）
 	return false;
 }
 
@@ -192,7 +194,7 @@ for (const module of MODULES) {
 				if (specifier === undefined || !fsBannedSpecifiers.has(specifier)) continue;
 				if (fsExempt(path, specifier)) continue;
 				findings.push(
-					`${where}:${lineOf(text, offset)} ${specifier} ——domain 禁触盘：存储走注入的端口，fs 是 infra 的（R3，例外 tool/ 包与 agents-md 收集）`,
+					`${where}:${lineOf(text, offset)} ${specifier} ——domain 禁触盘：存储走注入的端口，fs 是 infra 的（R3，例外 tool/ 包）`,
 				);
 			}
 		}

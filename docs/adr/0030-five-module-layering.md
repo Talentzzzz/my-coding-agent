@@ -13,6 +13,12 @@ SessionManager 迁 infra 的 session-store 实现，hold 契约三条进 Session
 的取代者注记）、[0016](0016-loop-is-orchestration.md) 的取代者注记里「ADR-0030 随步 5 落笔」的
 预期、[0006](0006-services-drop-instance-state.md) 与
 [0010](0010-llm-folded-into-core.md) 的同款预期
+取代者：[0031](0031-context-folded-into-session.md)（部分，2026-11-21——决定 5 的「domain 四子包
+互不依赖」改为三子包：context 并入 session，R2 子包清单收窄为 llm / session / tool；R1 升为六模块，
+`domain → { prompt }`、`infra → { domain, prompt }` 两条新边，prompt 是对本仓零依赖的叶子库；
+§4.5 不端口化清单里的「AGENTS.md/CLAUDE.md 收集」随端口化推翻——`AgentsMdRepository` 端口住
+prompt 包、infra 实现、组合根注入，R3 的 agents-md 路径豁免删除。端口纪律与五模块分层其余全部
+决定不变）
 
 设计过程见 `.scratch/layered-modules/`（map + 01–09 号票 + spec；spec.md 把全部决策汇成执行者
 不再需要做任何决定的记录，本文只收编其中跨模块的骨架）。

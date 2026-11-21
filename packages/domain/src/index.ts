@@ -51,27 +51,27 @@ export {
 	type SettingsPatch,
 } from "./agent/types.ts";
 // 端口声明（分层重构 spec §4）：domain 对存储只认自己声明的端口，infra 实现、组合根注入。
-export type { SessionLedgerFile, SessionRepository } from "./agent/session/session-repository.ts";
+export { UnknownSessionError, type SessionLedgerFile, type SessionRepository } from "./agent/session/session-repository.ts";
 export type { SessionDefaultsRepository } from "./agent/session/session-defaults-repository.ts";
 export type { ModelRepository } from "./agent/llm/model-repository.ts";
 export type { ToolDefaultsRepository } from "./agent/tool/tool-defaults-repository.ts";
-export type { ToolResultsRepository } from "./agent/context/tool-results-repository.ts";
+export type { ToolResultsRepository } from "./agent/session/tool-results-repository.ts";
 // RetrySettings 已随 retry 簇迁入 types.ts、所有权归 ModelManager（ADR-0028 修正），
 // `EngineSettings` 随 engine.json 退场，包对外的类型名不变。
 // UI 簇已迁往客户端存储（ADR-0029）：UiSettingsManager、UI 类型与规范化器随簇退场。
 export { ModelManager, type ModelManagerOptions } from "./agent/llm/model-manager.ts";
-// 压缩与填充的算法半自分层重构步 4 起住 context 包的 ContextManager（§3）：公开脸是 manager.ts，
-// 六个实现文件是里子。模块级函数与类型保留既有出口——smoke 的演练缝不经 ContextManager 实例。
-// `prepareCompaction` 与 `spillOversizedToolResult` / `spillPathFor` 等是包内原语，供编排层外的
-// 演练直接驱动；`buildSystemPrompt` / `loadAgentsMd` 已降为包内（由 `buildRequestPrompt` 组合）。
-export { ContextManager } from "./agent/context/manager.ts";
+// 压缩的算法半自 2026-11-21 起并入 session 包（ADR-0031）：编排层直调模块级函数，没有 ContextManager
+// 实例。`prepareCompaction` 与 `spillOversizedToolResult` / `spillPathFor` 等是包内原语，供编排层外
+// 的演练直接驱动；`buildRequestPrompt` 与 system prompt 拼装住 `@my-agent/prompt`（叶子库，ADR-0031）
+// ——项目指示收集的端口在那里声明，经这里向 case 转出口。
+export { type AgentsMdRepository } from "@my-agent/prompt";
 export {
 	compact,
 	compactionThresholdFor,
 	estimateTokens,
 	shouldCompact,
-} from "./agent/context/compaction.ts";
-export { type CompactionPreparation, type CompactionResult, type Summarize, type SummarizeRequest } from "./agent/context/types.ts";
+} from "./agent/session/compaction.ts";
+export { type CompactionPreparation, type CompactionResult, type Summarize, type SummarizeRequest } from "./agent/session/types.ts";
 export {
 	ARG_KEEP_CHARS,
 	ARG_TRIM_MARKER,
@@ -84,20 +84,20 @@ export {
 	clearedToolResultText,
 	describeToolCall,
 } from "./agent/types.ts";
-export { trimmableToolArgEntryIds } from "./agent/context/trim-tool-call-args.ts";
+export { trimmableToolArgEntryIds } from "./agent/session/trim-tool-call-args.ts";
 export {
 	clearableToolResultIds,
 	isCacheProbablyExpired,
 	isClearedToolResult,
 	REFETCHABLE_TOOLS,
-} from "./agent/context/clear-tool-results.ts";
+} from "./agent/session/clear-tool-results.ts";
 export {
 	archiveToolResult,
 	spillOversizedToolResult,
 	spillPathFor,
 	SPILL_KEEP_CHARS,
 	SPILL_RESULT_CHARS,
-} from "./agent/context/spill.ts";
+} from "./agent/session/spill.ts";
 export {
 	boundToolContent,
 	createHooks,
@@ -144,16 +144,16 @@ export {
 	type PendingApproval,
 	type SessionSnapshot,
 	type UsageTotals,
-} from "./agent/session/snapshot.ts";
+} from "./agent/snapshot.ts";
 export {
 	type PromptBehavior,
 	type QueuedPrompt,
-} from "./agent/session/queues.ts";
+} from "./agent/queues.ts";
 export {
 	COMPACTION_SUMMARY_PREFIX,
 	COMPACTION_SUMMARY_SUFFIX,
 	compactionSummaryOf,
-} from "./agent/session/messages.ts";
+} from "./agent/session/session.ts";
 // 路径语义自 paths.ts 迁入根 types.ts（§2.3）；`sessionPath` / `sessionMetaPath` /
 // `sessionJsonlPath` 迁 infra 的 session-store（文件对命名规则是存储布局知识），`sessionsDir` /
 // `setSessionsDir` 随端口注入消亡。
@@ -186,7 +186,6 @@ export {
 	type SessionDefaults,
 	type SessionManagerOptions,
 	type Session,
-	type SessionSettings,
 	type SessionRef,
 	type SessionRow,
 	type SessionRowPatch,
@@ -195,8 +194,7 @@ export {
 	type UsageEntry,
 	type DirectorySessions,
 } from "./agent/session/session-manager.ts";
-export { UnknownSessionError } from "./agent/session/unknown-session.ts";
-export { createAgentState, createLive, type ActiveRun, type AgentState, type Live } from "./agent/session/agent-state.ts";
+export { createAgentState, createLive, type ActiveRun, type AgentState, type Live } from "./agent/agent-state.ts";
 export { recordedSelectionOf } from "./agent/session/session-manager.ts";
 export {
 	approvalToolsOf,
@@ -230,13 +228,7 @@ export {
 } from "./agent/tool/diff.ts";
 export { defaultLauncher, type Launcher } from "./agent/tool/shell.ts";
 
-// `prepareCompaction` 的算法半收显式的投影函数参数（分层重构 §3——context 对 session 零 import）。
-// 这里的既有出口按单参形状保留：根可以直取 session 包，所以在出口上绑定编排层递给算法的同一投影，
-// 演练缝（smoke-tools）的调用形状不变。
-import { prepareCompaction as prepareCompactionInContext } from "./agent/context/compaction.ts";
-import { sessionEntryToContextMessages } from "./agent/session/session-manager.ts";
-import type { CompactionPreparation } from "./agent/context/types.ts";
-import type { SessionEntry } from "./agent/session/session-manager.ts";
-export function prepareCompaction(contextEntries: readonly SessionEntry[]): CompactionPreparation | undefined {
-	return prepareCompactionInContext(contextEntries, sessionEntryToContextMessages);
-}
+// `prepareCompaction` 的投影缝（分层重构 §3——context 对 session 零 import）随合并消失（ADR-0031）：
+// 算法半在 session 包内直取 `sessionEntryToContextMessages`，出口按单参形状直出，演练缝
+// （smoke-tools）的调用形状不变。
+export { prepareCompaction } from "./agent/session/compaction.ts";

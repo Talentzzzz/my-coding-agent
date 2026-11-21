@@ -5,7 +5,7 @@ import { defineConfig, type Plugin } from "vite";
 // 的本体，barrel 的静态 import 把工具、账本与模型文件一并拉进模块图，其中一些以**具名**形式
 // import node:* 内建；vite 给浏览器的 node 内建替身不带具名导出，rollup 的绑定检查让构建（与
 // dev 的模块加载）直接失败。这里给 node:* 一份带具名导出的空实现替身：树摇后真正留在 bundle
-// 里的三个纯模块（snapshot / messages / agent 根 types 的常量）不引用任何 node 调用，替身从不
+// 里的三个纯模块（snapshot / session / agent 根 types 的常量）不引用任何 node 调用，替身从不
 // 执行——node 代码照旧进不了浏览器 bundle。domain 新增内建 import 时把名字补进下表即可，缺了
 // 构建会以缺名导出错误明说。
 const NODE_STUB_EXPORTS: Record<string, string[]> = {

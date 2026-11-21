@@ -107,7 +107,7 @@ function defined(patch: Record<string, unknown>): Record<string, unknown> {
  * 单个工具结果的会话级上限，以 UTF-8 字节计。
  *
  * 工具约束自己的输出（`tools/truncate.ts`，60,000 字符），所以守规矩的工具永远到不了这里。它是
- * spill（`context/spill.ts`）之下的底线——spill 会把超过 80,000 字符的结果归档进会话的工作目录而
+ * spill（`session/spill.ts`）之下的底线——spill 会把超过 80,000 字符的结果归档进会话的工作目录而
  * 不是截断：当那份归档写不出来时，靠这个上限仍能保住上下文不被一个结果撑爆。有意远高于单工具
  * 预算，所以工具已经约束过的结果不会被二次截断。
  */

@@ -33,7 +33,7 @@ import {
 	type Context,
 	type SimpleStreamOptions,
 } from "@my-agent/domain";
-import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
+import { AgentsMdStore, HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 
 // 端口化后的构造（spec §5.2）：账本操作经自造的 infra 实现指临时 store；设置端口只在种各会话的
 // 临时 home 时另造（本实例不读设置）。
@@ -355,6 +355,7 @@ async function openSession(
 		modelRepository: homeJson,
 		toolDefaultsRepository: homeJson,
 		toolResultsRepository: archive,
+		agentsMdRepository: new AgentsMdStore(),
 		toolManager,
 		sink: tap.sink,
 	});
@@ -1106,6 +1107,7 @@ async function exerciseAfterToolHook(): Promise<void> {
 		modelRepository: replayHomeJson,
 		toolDefaultsRepository: replayHomeJson,
 		toolResultsRepository: archive,
+		agentsMdRepository: new AgentsMdStore(),
 	});
 	// 这个会话的文件由上面的练习亲手写就，没有经 `openSession` 的出生消息——没有可滤的出生条目，
 	// 空串让它原样通过。

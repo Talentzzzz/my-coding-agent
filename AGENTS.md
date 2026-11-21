@@ -16,8 +16,9 @@
 packages/app       组合根：把 agent home 翻译成 infra 实现注入 domain、组装 case 与 trigger；start(options) 是唯一程序化入口（没有 CLI），scripts/serve.ts 是浏览器 dev 薄脚本
 packages/trigger   传输面：node:http、REST 命令 + 一条常驻 WebSocket mux、静态文件——domain 盲，域词汇一律经 case 到手
 packages/case      会话应用层：SessionHub（订阅表、baseline 交付、行折算、birth / fork / rename / remove）+ protocol.ts（协议信封 + 客户端/触发面共用的域词汇网关）
-packages/domain    无头 agent：agent.ts（编排：会话表、命令、审批、投影与事件契约，以及一次运行的引擎 + 压缩编排半 + 重试 + 闸门）、四子包 context/（ContextManager：填充链与压缩的算法半）、llm/（裁剪自 pi-ai 的传输层：api/、model.ts、utils/；@ts-nocheck）、session/（账本、状态、事件）、tool/（六个内置工具）；types.ts 是四子包的共享内核与政策常量。对存储只认自己声明的端口，没有 HTTP 传输层
-packages/infra     存储实现：实现 domain 声明的全部端口（会话文件对、home JSON 文件族、tool-results 归档），hold 闸住在这里
+packages/domain    无头 agent：agent.ts（编排：会话表、命令、审批、投影与事件契约，以及一次运行的引擎 + 压缩编排半 + 重试 + 闸门）与同级的 live 半与发布契约（agent-state.ts / queues.ts / snapshot.ts / events.ts / dangling.ts）、三子包 llm/（裁剪自 pi-ai 的传输层：api/、model.ts、utils/；@ts-nocheck）、session/（账本：SessionManager + Session 值类型 + 两个端口 + 压缩的算法半）、tool/（六个内置工具）；types.ts 是三子包的共享内核与政策常量。对存储只认自己声明的端口，没有 HTTP 传输层
+packages/prompt    发给模型的指令文本（ADR-0031 的叶子库）：system prompt 拼装 + AGENTS.md 收集的门面 buildRequestPrompt，自带端口 AgentsMdRepository——对本仓零依赖，fs 是 infra 的
+packages/infra     存储实现：实现 domain 与 prompt 声明的全部端口（会话文件对、home JSON 文件族、tool-results 归档、项目指示收集），hold 闸住在这里
 packages/desktop  Electron 外壳：进程内启动服务器，让一个窗口指向它
 packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的逻辑流
 ```
@@ -45,28 +46,34 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 - **port（端口）** —— domain 对存储只认**自己声明**的接口（[ADR-0030](docs/adr/0030-five-module-layering.md)）：
   每个端口住消费方包内的专用 `xxx-repository.ts`（`SessionRepository`、三份同形的
   `SessionDefaultsRepository` / `ModelRepository` / `ToolDefaultsRepository`、只写的
-  `ToolResultsRepository`），**没有 ports 包**；infra 逐存储域一个实现（`session-store.ts` /
-  `home-json.ts` / `tool-results.ts`），组合根构造后注入——domain 造不出 infra，端口全必填。
+  `ToolResultsRepository`、[ADR-0031](docs/adr/0031-context-folded-into-session.md) 起住
+  `@my-agent/prompt` 的 `AgentsMdRepository`），**没有 ports 包**；infra 逐存储域一个实现
+  （`session-store.ts` / `home-json.ts` / `tool-results.ts` / `agents-md.ts`），组合根构造后注入
+  ——domain 与 prompt 都造不出 infra，端口全必填。
   端口面 = 触盘动词；袋子上的树操作不进端口。hold 契约三条（原子性、错误语义、fill 的副作用）写进
   `SessionRepository` 的接口文档。
 - **engine（引擎）** —— `Agent.run`：一次运行的入口与出口，与 `runEngine`、`prepareRequest`、压缩
   阶梯、重试泵、两个闸门一起是 `Agent` 的私有方法（ADR-0016：loop 就是编排，没有回调面、没有
   白名单、没有守卫）。它读的每一处接缝要么是这次运行的局部变量（模型、abort controller、事件 sink，
   以及**这次运行自己重放出的那只袋**），要么是 `this`——各 Manager 与设置持有者、hooks、transport
-  都在编排层自己身上，prompt 装配则委托注入的 `ContextManager`（算法半的属主，见下一条）。
+  都在编排层自己身上，prompt 装配则委托 `@my-agent/prompt` 的 `buildRequestPrompt`
+  （[ADR-0031](docs/adr/0031-context-folded-into-session.md)，项目指示经注入的端口按请求现收）。
   `RunInput` 只有三件值（`agentState` / `session` / `start`）；那只袋是
   ADR-0013 的「一次运行读一次盘」，开跑时 `getSessionBySessionId(id)` 一次装进、运行全程写它。工具调用经
   `executeTool` 执行（转发 `ToolManager.execute`，
   [ADR-0011](docs/adr/0011-tool-manager-instance-table.md)），解析只对着本请求声明过的数组按名查
   ——「模型被告知什么与它可以运行什么」从同一个对象作答；发给模型的是带 `tools` 的 `Context`
   ——同一个 `Tool` 的两半都经它手，而传输层只读另一半（ADR-0010）。「循环」只是那些轮次的日常说法。
-- **ContextManager** —— 压缩与填充的**算法半**的持有者（ADR-0006 修订、分层重构步 4）：
-  触发计算、候选选择、token 估算、摘要产出、prompt 装配与结果归档住 context 包；构造**零依赖**（空集）、
-  无状态、一个实例服务所有会话，方法收显式参数（entries / contextWindow / workDirAbsPath / signal /
-  `Summarize` 回调 / `project` 投影函数）——不要 ChatTransport（模型由调用方构造好传入）、不要 settings
-  （阈值从 `model.contextWindow` 现算）、不要 SessionManager（记账不归它）。触发序列、记账
-  （`appendTrimToolCallArgs` / `appendClearToolResults` / `appendCompaction`）与发事件（编排半）仍是
-  `Agent` 的私有方法（ADR-0016）；工厂构造它并注入 `Agent`。
+- **压缩的算法半（compaction 的算法半）** —— 触发计算、候选选择、token 估算与摘要产出，是
+  session 包内的**模块级函数**（`compaction.ts`；原 `ContextManager`，2026-11-21 随
+  [ADR-0031](docs/adr/0031-context-folded-into-session.md) 类解散、context 子包并入 session 包）。
+  函数收显式参数（entries / contextWindow / model / signal / `Summarize` 回调）——不要 ChatTransport
+  （模型由调用方构造好传入）、不要 settings（阈值从 `model.contextWindow` 现算）、不要 SessionManager
+  （记账不归它）；条目投影在包内直取 `sessionEntryToContextMessages`（跨包的 `project` 注入缝随
+  合并消失）。决策半（`trim-tool-call-args.ts` / `clear-tool-results.ts`）与施加半（`view.ts`）
+  同住一个包。编排半（触发序列、记账 `appendTrimToolCallArgs` / `appendClearToolResults` /
+  `appendCompaction`、发事件）仍是 `Agent` 的私有方法（ADR-0016）。system prompt 拼装与
+  AGENTS.md 收集不在这里——它们住 `@my-agent/prompt`（叶子库，自带 `AgentsMdRepository` 端口）。
 - **fanout（扇出）** —— 发布与投影的方法族，ADR-0017 起是 `Agent` 编排的**私有方法**（曾为
   `session/fanout.ts` 的文件级函数，`SessionServices` 参数袋随共享的消失一并删除）：
   `emitEvent`、`publishState`、`appendMessageEntry`、`dropQueued`、`emitQueueUpdate`、`nextStamp`、
@@ -110,7 +117,8 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   （`ToolDefaultsRepository` / `SessionDefaultsRepository` / `ModelRepository`——infra 的
   `HomeJsonStore` 一个实现满足三份同形声明，[ADR-0030](docs/adr/0030-five-module-layering.md)），
   不共享读写抽象；
-  **`SessionSettings`** 是会话 `.json` 快照的设置半（`Session` 上的 `settings` 字段），只持有
+  **`Session.settings`** 是会话 `.json` 快照的设置半（`Session` 上的 `settings` 字段，形状内联在
+  `Session` 里），只持有
   **选择**：模式指针 `mode`、审批增量 `approval`、模型 `{ name, modelId, thinkingLevel }`——不持有
   工具集、不持有完整模型行；**`Settings`**（domain 的 `agent/settings.ts`）是会话侧与两个持有者
   **每次读取现算**的组合（`resolveSettings(session, toolDefaults, modelView, known)`，输入是
@@ -207,9 +215,10 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
   带一个 `anchor`，指窗口该把它的卡片挂在谁下面）。
 - **compaction（压缩）** —— 会话收缩而不是被替换，最便宜的步骤先走：**trim_tool_call_arg**（截短
   工具调用参数）、**clear_tool_result**（清空可重取工具的结果），再到模型写的摘要；每一步是一条
-  entry，日志永远保留全文。算法半（触发、候选、估算、摘要、切口）住 context 包、归
-  `ContextManager`；决策常量（`ARG_TRIM_TOOLS` / `REFETCHABLE_TOOLS`）是根 `types.ts` 的政策词汇；
-  记录的施加半（`trimToolCallArgs` / `clearToolResult`）住 session 包、由 `buildContextEntries` 施加。
+  entry，日志永远保留全文。算法半（触发、候选、估算、摘要、切口）与记录的施加半
+  （`trimToolCallArgs` / `clearToolResult`，由 `buildContextEntries` 施加）同住 session 包
+  （[ADR-0031](docs/adr/0031-context-folded-into-session.md) 自 context 包并入）；决策常量
+  （`ARG_TRIM_TOOLS` / `REFETCHABLE_TOOLS`）是根 `types.ts` 的政策词汇。
 - **hook（接缝）** —— 三个进程级接缝：`context`、`before_tool`（审批闸门）、`after_tool`（改写即定稿：
   账本存的就是返回的那个版本；要截断先用 `archiveToolResult()` 归档全文，没约束的超大结果由写边界
   兜底归档到 `.my-agent/tool-results/`）。一个 `Hooks` 服务本进程跑的所有会话，所以每个事件
@@ -267,7 +276,7 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 
 ## 约定
 
-- Node >= 22.19，仅 ESM，TypeScript 由 Node 的类型擦除直接运行；五模块（app / trigger / case / domain /
+- Node >= 22.19，仅 ESM，TypeScript 由 Node 的类型擦除直接运行；六模块（app / trigger / case / domain /
   infra）没有构建步骤，只有 web 客户端被打包。
 - 相对 import 带 `.ts` 扩展名；只用可擦除语法（没有 `enum`、`namespace`、参数属性），tsconfig 强制。
 - 缩进用 tab，双引号，分号；除非第三方类型所迫，不用 `any`。
@@ -284,7 +293,7 @@ packages/web      Vite + TypeScript 窗口客户端。渲染常驻通道上的�
 
 ```bash
 node scripts/install-deps.ts .   # 解析并解包依赖（为什么不用 npm install 见 README）
-npm run check                    # 对五模块与 web 跑 tsc，加 token 审计与分层守卫
+npm run check                    # 对六模块与 web 跑 tsc，加 token 审计与分层守卫
 npm run dev                      # http://127.0.0.1:8080，Vite 服务客户端
 npm run build:web && npm run start   # 改为服务预构建的客户端
 npm run desktop                  # 构建客户端，然后打开桌面窗口

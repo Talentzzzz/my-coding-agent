@@ -14,7 +14,7 @@ import {
 	type SessionMeta,
 	type ModelConfig,
 } from "@my-agent/domain";
-import { HomeJsonStore, SessionFileStore, sessionMetaPath, ToolResultsArchive } from "@my-agent/infra";
+import { AgentsMdStore, HomeJsonStore, SessionFileStore, sessionMetaPath, ToolResultsArchive } from "@my-agent/infra";
 import type { ClientFrame, ConnectionItem, ServerFrame, ServerMessage } from "@my-agent/case/protocol";
 import { SessionHub } from "@my-agent/case";
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./fake-transport.ts";
@@ -31,6 +31,7 @@ const hubPorts = {
 	modelRepository: homeJson,
 	toolDefaultsRepository: homeJson,
 	toolResultsRepository: new ToolResultsArchive(),
+	agentsMdRepository: new AgentsMdStore(),
 };
 let failures = 0;
 

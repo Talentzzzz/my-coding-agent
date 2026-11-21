@@ -8,14 +8,15 @@
 ### 编排与运行
 
 **Agent（编排层）**：
-持有会话表、命令面、审批账本与投影的服务；运行的宿主。填充与压缩的算法半委托给注入的
-`ContextManager`，存储经自己声明的端口触达。
+持有会话表、命令面、审批账本与投影的服务；运行的宿主。压缩的算法半是 session 包内的模块级函数、
+由编排层直调（ADR-0031），system prompt 拼装委托 `@my-agent/prompt`，存储经自己声明的端口触达。
 _Avoid_: orchestrator、编排器
 
-**ContextManager**：
-填充链与压缩的**算法半**的持有者（触发计算、候选选择、token 估算、摘要产出、prompt 装配、结果归档）；
-构造零依赖、无状态、一个实例服务所有会话。编排半（触发序列、记账、发事件）仍是 `Agent` 的私有方法。
-_Avoid_: prompt builder、压缩管理器
+**压缩的算法半（compaction）**：
+触发计算、候选选择、token 估算与摘要产出，住 domain 的 session 包（`compaction.ts`，原
+`ContextManager`，2026-11-21 随 ADR-0031 类解散）。函数收显式参数、零持有；编排半（触发序列、
+记账、发事件）仍是 `Agent` 的私有方法。
+_Avoid_: ContextManager、prompt builder、压缩管理器
 
 **RunInput**：
 一次运行的三件值（`agentState` / `session` / `start`），没有依赖面；运行要用的服务是 `Agent` 自己。
@@ -29,8 +30,9 @@ _Avoid_: 会话缓存、session 副本
 ### 分层与存储
 
 **端口（repository）**：
-domain 对存储只认**消费方自己声明**的存储接口（`xxx-repository.ts` 住消费方包内，infra 逐存储域
-实现、组合根注入）；端口面 = 触盘动词，hold 契约写在 `SessionRepository` 的接口文档里（ADR-0030）。
+domain（与 prompt 包）对存储只认**消费方自己声明**的存储接口（`xxx-repository.ts` 住消费方包内，
+infra 逐存储域实现、组合根注入）；端口面 = 触盘动词，hold 契约写在 `SessionRepository` 的接口文档里
+（ADR-0030、ADR-0031）。
 _Avoid_: ports 包、storage layer
 
 **组合根（app / start）**：

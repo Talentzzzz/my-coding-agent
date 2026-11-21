@@ -19,7 +19,7 @@ import { createServer } from "@my-agent/trigger";
 import { createFakeTransport, fakeAssistantMessage, type FakeTransport } from "./fake-transport.ts";
 import { connect, until, type WireClient } from "./wire/client.ts";
 import type { SessionRow, SessionSnapshot, ModelConfig } from "@my-agent/domain";
-import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
+import { AgentsMdStore, HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 
 let failures = 0;
 
@@ -124,6 +124,7 @@ async function openRig(): Promise<Rig> {
 		modelRepository: homeJson,
 		toolDefaultsRepository: homeJson,
 		toolResultsRepository: new ToolResultsArchive(),
+		agentsMdRepository: new AgentsMdStore(),
 	});
 	sessionHub.setModelConfigs(rows);
 

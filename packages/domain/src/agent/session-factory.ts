@@ -1,7 +1,7 @@
 import { anthropicMessages, type ChatTransport } from "./llm/index.ts";
 import { Agent, type AssembleAgentStateOptions, type OpenAgentOptions, type SessionSink } from "./agent.ts";
-import { ContextManager } from "./context/manager.ts";
-import type { ToolResultsRepository } from "./context/tool-results-repository.ts";
+import type { AgentsMdRepository } from "@my-agent/prompt";
+import type { ToolResultsRepository } from "./session/tool-results-repository.ts";
 import { createHooks, type Hooks } from "./hooks.ts";
 import type { ModelRepository } from "./llm/model-repository.ts";
 import { ModelManager } from "./llm/model-manager.ts";
@@ -14,9 +14,10 @@ import type { ToolDefaultsRepository } from "./tool/tool-defaults-repository.ts"
 /**
  * 调用方为构建一个进程唯一的编排层所提供的东西。
  *
- * 这里的一切都是进程级的：五个存储端口（会话文件对、会话簇设置、模型行、工具簇设置、tool-results
- * 归档）全部**必填**——domain 造不出 infra，「缺省真实 home」不再是 domain 的知识（分层重构
- * spec §5.2）；把 home 路径翻译成这些实现是组合根（`@my-agent/app`）的差事。几只 Manager 本身不在
+ * 这里的一切都是进程级的：六个存储端口（会话文件对、会话簇设置、模型行、工具簇设置、tool-results
+ * 归档、项目指示收集）全部**必填**——domain 与 prompt 包都造不出 infra，「缺省真实 home」不再是
+ * domain 的知识（分层重构 spec §5.2）；把 home 路径翻译成这些实现是组合根（`@my-agent/app`）的
+ * 差事。几只 Manager 本身不在
  * 清单上——工厂自己造它们，正是这一点让「表里的每个状态都是在该编排层自己的服务之上装配的」成为
  * 构造的事实，而不是调用方必须遵守的约定。两个接缝只为测试存在：工具表接缝让 smoke 在自己的表上
  * 注册自己的工具，让它注册的东西到不了测试之外的会话；sink 让宿主接住分发。生产代码两样都不设。
@@ -32,6 +33,8 @@ export interface CreateSessionAgentOptions {
 	toolDefaultsRepository: ToolDefaultsRepository;
 	/** tool-results 归档的只写端口：写边界的兜底归档永远有处可去。 */
 	toolResultsRepository: ToolResultsRepository;
+	/** 项目指示收集的端口（@my-agent/prompt 声明，ADR-0031）：system prompt 按请求经它收 AGENTS.md。 */
+	agentsMdRepository: AgentsMdRepository;
 	/** 该编排层发出的每个请求走的传输层。默认 Anthropic Messages。 */
 	chatTransport?: ChatTransport;
 	/** 仅测试的接缝：调用方自己的工具表，取代六个内置工具。 */
@@ -79,11 +82,12 @@ export function createSessionAgent(options: CreateSessionAgentOptions): Agent {
 		// 进程唯一的装配处：传输层在这里解析而不是在编排层内部给默认值，让一次运行能离开进程的每条
 		// 路都由一个文件决定。
 		chatTransport: options.chatTransport ?? anthropicMessages,
-		// 压缩与填充的算法半（分层重构 §3）：无状态、构造零依赖（ADR-0006 修订），一个实例服务本
-		// 编排层跑的所有会话。prompt 装配是它的方法；审批映射仍由编排层在调用前做（settings 知识归
-		// agent 根）。归档端口归编排层持有（§4.3），写边界经参数表递给它。
-		contextManager: new ContextManager(),
+		// 压缩与填充的算法半是 session 包内的模块级函数（ADR-0031）：编排层直调，没有持有者要构造。
+		// prompt 装配走 @my-agent/prompt 的 buildRequestPrompt；审批映射仍由编排层在调用前做
+		// （settings 知识归 agent 根）。归档与项目指示两个端口归编排层持有（§4.3、ADR-0031），分别
+		// 经写边界与 prompt 门面递入。
 		toolResultsRepository: options.toolResultsRepository,
+		agentsMdRepository: options.agentsMdRepository,
 		// 分发的唯一出口：宿主的实现在它的分发表上应答，no-op 缺省就是空表遍历零次的语义——没人
 		// 听就什么也不发生。
 		sink: options.sink ?? noOpSink,
@@ -103,8 +107,8 @@ export function createSessionAgent(options: CreateSessionAgentOptions): Agent {
  *
  * 没有默认的 `after_tool`：那里的改写是定稿——账本保存的正是 hooks 返回的内容——所以这条接缝
  * 属于有理由改写的人。曾经住在这里的输出兜底搬去了写边界（`agent.ts` 的 `finalizeToolResult`），
- * 在那里接住没人约束过的结果而不必花一个 hook；想自己约束结果的 hook 用 `archiveToolResult`（context
- * 包，自 hooks.ts 迁入）归档全文并把路径放进返回的 content。
+ * 在那里接住没人约束过的结果而不必花一个 hook；想自己约束结果的 hook 用 `archiveToolResult`（session
+ * 包，ADR-0031 自 context 包并入）归档全文并把路径放进返回的 content。
  */
 function installDefaultHooks(hooks: Hooks, agent: Agent): void {
 	hooks.on("before_tool", async ({ sessionId, toolCallId, toolName, args }) => {
@@ -130,6 +134,7 @@ export async function openAgent(options: OpenAgentOptions): Promise<Agent> {
 		modelRepository: options.modelRepository,
 		toolDefaultsRepository: options.toolDefaultsRepository,
 		toolResultsRepository: options.toolResultsRepository,
+		agentsMdRepository: options.agentsMdRepository,
 		...(options.toolManager === undefined ? {} : { toolManager: options.toolManager }),
 		...(options.chatTransport === undefined ? {} : { chatTransport: options.chatTransport }),
 		...(options.sink === undefined ? {} : { sink: options.sink }),

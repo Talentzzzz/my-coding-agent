@@ -7,26 +7,24 @@ import { uuidv7 } from "../types.ts";
 // domain（分层重构 §2.3）：存储走注入的 SessionRepository，设置文件走注入的 SessionDefaultsRepository。
 import { DEFAULT_GLOBAL_SETTINGS, normalizePath, resolvePath, type QueueMode } from "../types.ts";
 import { clearToolResult, trimToolCallArgs } from "./view.ts";
-import { compactionSummaryOf } from "./messages.ts";
-import type { SessionRepository } from "./session-repository.ts";
+import { UnknownSessionError, type SessionRepository } from "./session-repository.ts";
 import type { SessionDefaultsRepository } from "./session-defaults-repository.ts";
-import { UnknownSessionError } from "./unknown-session.ts";
 import {
 	type ClearToolResultEntry,
 	type CompactionEntry,
 	type LeafEntry,
 	type MessageEntry,
+	compactionSummaryOf,
 	sessionEntryToContextMessages,
 	type Session,
 	type SessionEntry,
 	type SessionEntryBase,
 	type SessionEntryMapById,
-	type SessionSettings,
 	type TrimToolCallArgEntry,
 	type UsageEntry,
-} from "./ledger.ts";
+} from "./session.ts";
 
-// 账本条目与会话纯数据状态的值类型的家在 ledger.ts（票 005 的守卫口径：loop 按模块禁 Manager，
+// 会话条目与会话纯数据状态的值类型的家在 session.ts（票 005 的守卫口径：loop 按模块禁 Manager，
 // 值类型先安新家才不误伤）；这里转出口，旧消费者照旧从 session-manager.ts 取。
 export {
 	type ClearToolResultEntry,
@@ -38,10 +36,9 @@ export {
 	type SessionEntry,
 	type SessionEntryBase,
 	type SessionEntryMapById,
-	type SessionSettings,
 	type TrimToolCallArgEntry,
 	type UsageEntry,
-} from "./ledger.ts";
+} from "./session.ts";
 
 /**
  * 本构建写入的盘上格式版本。
@@ -72,7 +69,7 @@ export const CURRENT_SESSION_VERSION = 6;
  * 每次变更都整体重写文件（temp + rename），因为它是快照不是日志——旁边的 JSONL 才是日志，两者按
  * stem 配对：两个文件都在，session 才存在。
  *
- * 这是**磁盘**形状。内存中 session 把选择字段重组为 {@link SessionSettings}——thinking level 折进
+ * 这是**磁盘**形状。内存中 session 把选择字段重组为 `settings` 字段——thinking level 折进
  * `model`——两者之间的翻译只存在于两处：fill 路径在进入时合并，{@link metaOf} 在输出时拆开。盘上
  * 再无其他变化：版本号不动，旧 session 照旧读取。
  */
@@ -305,7 +302,7 @@ function buildSessionPath(sessionEntryMapById: SessionEntryMapById, leafId?: str
  * 它们。
  */
 function getSessionContextSettings(
-	setting: SessionSettings,
+	setting: Session["settings"],
 	chain: SessionEntry[],
 ): Pick<SessionContext, "thinkingLevel" | "model"> {
 	const merged = setting.model;
@@ -617,7 +614,7 @@ function previewOfMessage(message: Message): string {
  * 缺席——从未选择的 session 不在对象上放任何字段，于是「从未选择」和「选了默认」保持可区分。
  * `suspended` 缓存是唯一始终存在的字段：盘上缺席按 false 读。
  */
-function sessionSettingOf(meta: SessionMeta): SessionSettings {
+function sessionSettingOf(meta: SessionMeta): Session["settings"] {
 	return {
 		workDirAbsPath: meta.workDir,
 		...(meta.parentSession === undefined ? {} : { parentSessionId: meta.parentSession }),
@@ -662,7 +659,7 @@ export function recordedSelectionOf(
  * 拆分是无损的。
  */
 function recordedModelOf(
-	model: SessionSettings["model"],
+	model: Session["settings"]["model"],
 ): Pick<SessionMeta, "model" | "thinkingLevel"> {
 	if (model === undefined) return {};
 	const { name, modelId, thinkingLevel } = model;
@@ -673,7 +670,7 @@ function recordedModelOf(
 }
 
 /**
- * 一个 session 的内存状态写出的盘上快照：从重组的 {@link SessionSettings} 重建扁平的
+ * 一个 session 的内存状态写出的盘上快照：从重组的 `settings` 字段重建扁平的
  * {@link SessionMeta}。
  *
  * 盘↔内存翻译中写文件的那个方向——端口的 `writeSnapshot` 序列化它，`getMeta` 把同样的形状交给
@@ -875,7 +872,7 @@ function appendEntry(session: Session, sessionRepository: SessionRepository, ent
  * 所以首条消息之前做出的选择得以存活，又不破坏「没有对话就没有文件」的规则。`change` 对 no-op 返回
  * false，这让一串相同的写入不必每次都付一次重写。
  */
-function recordMeta(session: Session, sessionRepository: SessionRepository, change: (setting: SessionSettings) => boolean): void {
+function recordMeta(session: Session, sessionRepository: SessionRepository, change: (setting: Session["settings"]) => boolean): void {
 	if (!change(session.settings)) return;
 	if (session.persist && session.fileCreated) {
 		sessionRepository.writeSnapshot(session.sessionFileAbsPath!, metaOf(session));
@@ -1713,7 +1710,7 @@ export class SessionManager {
 	 *
 	 * 无状态门面：每次调用都现读，调用之间什么都不保留。首次读取触发旧 `settings.json` 的一次性
 	 * 迁移（spec §4.2）；会话自己的队列选择不在这里——它们在会话 `.json` 快照的设置半
-	 * （`SessionSettings`）上，本票完全不动那份格式。
+	 * （`Session.settings`）上，本票完全不动那份格式。
 	 */
 	sessionDefaults(): SessionDefaults {
 		const layer = this.sessionDefaultsLayer();
@@ -1784,7 +1781,7 @@ export interface SessionManagerOptions {
 /**
  * 会话簇的设置：两条队列的全局默认模式，`<home>/sessions.json` 补默认后的视图（设置归属重构
  * spec §5）。本票只加 global 侧的这一份；会话自己的选择仍住在它 `.json` 快照的设置半
- * （`SessionSettings`），那份格式不动（ADR-0008/0018）。
+ * （`Session.settings`），那份格式不动（ADR-0008/0018）。
  */
 export interface SessionDefaults {
 	/** 一个取走点注入多少条 steer 消息。 */

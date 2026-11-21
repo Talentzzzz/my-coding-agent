@@ -41,7 +41,7 @@ import {
 	type SessionEntry,
 	compactionSummaryOf,
 } from "@my-agent/domain";
-import { HomeJsonStore, SessionFileStore, ToolResultsArchive, sessionMetaPath, sessionPath } from "@my-agent/infra";
+import { AgentsMdStore, HomeJsonStore, SessionFileStore, ToolResultsArchive, sessionMetaPath, sessionPath } from "@my-agent/infra";
 
 // 端口化后的构造（spec §5.2）：账本操作与发现半经自造的 infra 实现指临时 store；设置端口按需
 // 另造（本实例的会话簇设置无人读）。
@@ -65,6 +65,7 @@ function portsOf(home: string) {
 		modelRepository: settingsStore,
 		toolDefaultsRepository: settingsStore,
 		toolResultsRepository: archive,
+		agentsMdRepository: new AgentsMdStore(),
 	};
 }
 

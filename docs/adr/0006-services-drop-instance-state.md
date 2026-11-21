@@ -22,6 +22,9 @@ hub 只认编排层公开面；其余决定不变）
 三件进程级构造注入删一件，systemPrompt 构建函数退出注入面、被注入的 `ContextManager` 吸收；hooks /
 transport 两件不动。同日新增一条正面记录：`ContextManager` 是无属性服务的**新例**——构造零依赖
 （空集）、一个实例服务所有会话、方法收显式参数。
+取代者：[0031](0031-context-folded-into-session.md)（部分，2026-11-21——上一条注记的正面记录整条
+退场：`ContextManager` 类解散，压缩算法半改住 session 包的模块级函数，system prompt 拼装迁
+`@my-agent/prompt` 的 `buildRequestPrompt`；无属性服务的形态判据与两个常驻表例外不变）
 
 设计过程见 `.scratch/pure-services/`（形状在 2026-11-01 的设计对话敲定，本
 ADR 只记合拢后的契约）。

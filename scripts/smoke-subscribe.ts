@@ -12,7 +12,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ModelConfig } from "@my-agent/domain";
-import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
+import { AgentsMdStore, HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 import type { ServerFrame } from "@my-agent/case/protocol";
 import { SessionHub } from "@my-agent/case";
 import { createMuxServer, type MuxConnection } from "@my-agent/trigger";
@@ -113,6 +113,7 @@ async function openRig(): Promise<Rig> {
 		modelRepository: homeJson,
 		toolDefaultsRepository: homeJson,
 		toolResultsRepository: new ToolResultsArchive(),
+		agentsMdRepository: new AgentsMdStore(),
 	});
 	sessionHub.setModelConfigs([ROW]);
 	const muxServer = createMuxServer({ sessionHub }, {});

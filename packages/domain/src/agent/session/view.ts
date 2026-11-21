@@ -1,7 +1,8 @@
-// 账本视图的施加半（分层重构 §3，自 context 两文件拆来）：截短与清空是「记录的施加」——记录指名
-// 条目，`buildContextEntries`（session-manager.ts）在这里施加它们，恢复的进程由此读到同一个视图。
-// 决策半（哪些条目合格）住 context 包；本文件只回答「一条条目施加之后长什么样」。政策常量
-// （`ARG_TRIM_TOOLS` 等）与通知文案住根 types.ts 共享内核（§2.3），两个半都从它取。
+// 账本视图的施加半（分层重构 §3，自 context 两文件拆来；2026-11-21 决策半自 context 包并入同包，
+// ADR-0031）：截短与清空是「记录的施加」——记录指名条目，`buildContextEntries`（session-manager.ts）
+// 在这里施加它们，恢复的进程由此读到同一个视图。本文件只回答「一条条目施加之后长什么样」；决策半
+// （哪些条目合格）住同包的 trim-tool-call-args.ts / clear-tool-results.ts，两者经账本里的记录说话。
+// 政策常量（`ARG_TRIM_TOOLS` 等）与通知文案住根 types.ts 共享内核（§2.3），两个半都从它取。
 import { ARG_TRIM_THRESHOLD_CHARS, ARG_TRIM_TOOLS, clearedToolResultText, type SessionEntry } from "../types.ts";
 
 /** 被截短的参数在开头保留多少：足以说明写了什么、写到哪。 */

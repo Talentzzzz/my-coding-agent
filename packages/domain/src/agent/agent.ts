@@ -22,11 +22,13 @@ import {
 	validateToolArguments,
 } from "./llm/index.ts";
 import type { ToolRunContext } from "./types.ts";
-import { type ContextManager } from "./context/manager.ts";
-import type { Summarize } from "./context/types.ts";
-import { clearableToolResultIds, isCacheProbablyExpired } from "./context/clear-tool-results.ts";
-import { trimmableToolArgEntryIds } from "./context/trim-tool-call-args.ts";
-import type { ToolResultsRepository } from "./context/tool-results-repository.ts";
+import type { Summarize } from "./session/types.ts";
+import { clearableToolResultIds, isCacheProbablyExpired } from "./session/clear-tool-results.ts";
+import { trimmableToolArgEntryIds } from "./session/trim-tool-call-args.ts";
+import type { ToolResultsRepository } from "./session/tool-results-repository.ts";
+import { compact, compactionThresholdFor, estimateTokens, shouldCompact } from "./session/compaction.ts";
+import { spillOversizedToolResult } from "./session/spill.ts";
+import { buildRequestPrompt, type AgentsMdRepository } from "@my-agent/prompt";
 import { boundToolContent, type HookEvent, type HookResult, type Hooks } from "./hooks.ts";
 import {
 	createModel,
@@ -43,11 +45,11 @@ import { ModelManager } from "./llm/model-manager.ts";
 import type { ModelRepository } from "./llm/model-repository.ts";
 import type { ToolDefaultsRepository } from "./tool/tool-defaults-repository.ts";
 import type { SessionDefaultsRepository } from "./session/session-defaults-repository.ts";
-import type { SessionRepository } from "./session/session-repository.ts";
-import type { AgentState } from "./session/agent-state.ts";
-import { createAgentState, createLive } from "./session/agent-state.ts";
-import { danglingApprovalsOf } from "./session/dangling.ts";
-import { messageDeltaOf, type AgentSessionEvent, type SessionSink } from "./session/events.ts";
+import { UnknownSessionError, type SessionRepository } from "./session/session-repository.ts";
+import type { AgentState } from "./agent-state.ts";
+import { createAgentState, createLive } from "./agent-state.ts";
+import { danglingApprovalsOf } from "./dangling.ts";
+import { messageDeltaOf, type AgentSessionEvent, type SessionSink } from "./events.ts";
 import {
 	createSession,
 	type DirectorySessions,
@@ -58,16 +60,15 @@ import {
 	sessionEntryToContextMessages,
 	type SessionRow,
 } from "./session/session-manager.ts";
-import type { PendingMessageQueue, PromptBehavior } from "./session/queues.ts";
-import { sessionSnapshot, type PendingApproval, type SessionSnapshot } from "./session/snapshot.ts";
+import type { PendingMessageQueue, PromptBehavior } from "./queues.ts";
+import { sessionSnapshot, type PendingApproval, type SessionSnapshot } from "./snapshot.ts";
 import { approvalToolsOf, resolveSettings, type Settings } from "./settings.ts";
-import { UnknownSessionError } from "./session/unknown-session.ts";
 import { createToolManager, type ToolManager, type ToolDefaultsPatch } from "./tool/index.ts";
 import { type AgentEvent, type AgentRequestUpdate, type ConfigPatch, type GlobalSettings, type QueueMode, type RetrySettings, type RunRecoveryOptions, type SettingsPatch, type ToolCallAnswer, type ToolCallOutcome } from "./types.ts";
 
-// 事件面定义在发布它的 fanout 旁边（`session/events.ts`），在这里转发出去，因为 `index.ts` 一直
+// 事件面定义在发布它的 fanout 旁边（`events.ts`），在这里转发出去，因为 `index.ts` 一直
 // 都是从本模块为此作答的。
-export type { AgentSessionEvent, MessageDelta, SessionEventListener, SessionListener, SessionSink } from "./session/events.ts";
+export type { AgentSessionEvent, MessageDelta, SessionEventListener, SessionListener, SessionSink } from "./events.ts";
 
 /**
  * 一个编排层所协调的服务，由调用方先行构建。
@@ -121,16 +122,17 @@ export interface AgentConfig {
 	 */
 	hooks: Hooks;
 	/**
-	 * 压缩与填充的算法半的持有者（分层重构 §3）：触发计算、token 估算、摘要产出、prompt 装配与
-	 * 结果归档是它的方法；触发序列、记账与发事件仍是本类的私有方法。由工厂构造递入——无状态、
-	 * 构造零依赖（ADR-0006 修订），一个实例服务本编排层跑的所有会话。
+	 * 项目指示收集的端口（@my-agent/prompt 声明，ADR-0031）：system prompt 按请求经它收 AGENTS.md。
+	 *
+	 * 端口全必填——prompt 包造不出 infra，把 home 事实翻译成实现是组合根的差事；实例归编排层持有
+	 * （构造注入），装配的每次走读经参数递进 buildRequestPrompt。
 	 */
-	contextManager: ContextManager;
+	agentsMdRepository: AgentsMdRepository;
 	/**
 	 * tool-results 归档的只写端口（分层重构 §4.3）：过大的 result 整体离开 context 时经它落盘。
 	 *
-	 * 实例归编排层持有（构造注入）——ContextManager 保持构造零依赖，写边界的每次 spill 经参数表
-	 * 把它递进去；归档永远有处可去（端口没有缺席态）。
+	 * 实例归编排层持有（构造注入），写边界的每次 spill 经参数表把它递进去；归档永远有处可去（端口
+	 * 没有缺席态）。
 	 */
 	toolResultsRepository: ToolResultsRepository;
 	/**
@@ -230,8 +232,8 @@ export class Agent {
 	readonly hooks: Hooks;
 
 	private readonly toolManager: ToolManager;
-	/** 压缩与填充的算法半（分层重构 §3）；`prepareRequest` 与压缩阶梯调用它的方法。 */
-	private readonly contextManager: ContextManager;
+	/** 项目指示收集的端口（@my-agent/prompt 声明，ADR-0031）；`prepareRequest` 经它收 AGENTS.md。 */
+	private readonly agentsMdRepository: AgentsMdRepository;
 	/** tool-results 归档的只写端口（分层重构 §4.3），写边界的兜底归档经它落盘。 */
 	private readonly toolResultsRepository: ToolResultsRepository;
 	/** 请求真正离开的地方：传输层，重试策略包上它之前的那个。 */
@@ -254,7 +256,7 @@ export class Agent {
 		this.modelManager = config.modelManager;
 		this.toolManager = config.toolManager;
 		this.hooks = config.hooks;
-		this.contextManager = config.contextManager;
+		this.agentsMdRepository = config.agentsMdRepository;
 		this.toolResultsRepository = config.toolResultsRepository;
 		this.chatTransport = config.chatTransport;
 		this.sink = config.sink;
@@ -423,7 +425,7 @@ export class Agent {
 	 *
 	 * 这是入口处没有任何东西限流的 result 的兜底——每个内置工具都给自己输出限流，`after_tool` 改写到
 	 * 这里时已是最终版，剩下的只有忘记限流的工具。对 context 来说过大的 result 会在工作目录下整体
-	 * 归档（`context/spill.ts`），存储为头尾加归档路径，丢不掉任何读不回来的东西；归档写不出来时，
+	 * 归档（`session/spill.ts`），存储为头尾加归档路径，丢不掉任何读不回来的东西；归档写不出来时，
 	 * `boundToolContent` 的硬截断就是底线。其余情况原样通过：对限流良好的 result，整个检查只是一次
 	 * 长度求和。
 	 *
@@ -432,7 +434,7 @@ export class Agent {
 	 */
 	private finalizeToolResult(session: Session, message: Message): Message {
 		if (message.role !== "toolResult") return message;
-		const spilled = this.contextManager.spillOversizedToolResult(
+		const spilled = spillOversizedToolResult(
 			session.settings.workDirAbsPath,
 			session.sessionId,
 			message.toolName,
@@ -1405,10 +1407,11 @@ export class Agent {
 		);
 		// prompt 在这里重建、不被记住：`applyConfig` 能挪审批集、模式能挪工具集，而模型必须在下一个
 		// 请求上被告知两者。两者都在此刻从同一份组合读取，所以刚落下的选择就是 prompt 描述的东西。
-		// 装配（项目指示的走读在内）归注入的 ContextManager（分层重构 §3）；审批工具的映射在这里做
-		// ——settings 知识归 agent 根。
+		// 装配（项目指示的走读在内）归 @my-agent/prompt 的 buildRequestPrompt（ADR-0031）；审批工具
+		// 的映射在这里做——settings 知识归 agent 根。
 		const toolFace = this.activeToolsOf(resolved);
-		const prompt = await this.contextManager.buildRequestPrompt(
+		const prompt = await buildRequestPrompt(
+			this.agentsMdRepository,
 			session.settings.workDirAbsPath,
 			toolFace.names,
 			approvalToolsOf(resolved.approval),
@@ -1624,14 +1627,14 @@ export class Agent {
 		signal: AbortSignal | undefined,
 		model: Model,
 	): Promise<readonly SessionEntry[]> {
-		const threshold = this.contextManager.compactionThresholdFor(model.contextWindow);
-		if (!this.contextManager.shouldCompact(messagesOf(entries), threshold)) return entries;
+		const threshold = compactionThresholdFor(model.contextWindow);
+		if (!shouldCompact(messagesOf(entries), threshold)) return entries;
 
 		const trimmed = this.trimRecordedArgs(agentState, session, entries);
-		if (!this.contextManager.shouldCompact(messagesOf(trimmed), threshold)) return trimmed;
+		if (!shouldCompact(messagesOf(trimmed), threshold)) return trimmed;
 
 		const cleared = this.clearStaleToolResults(agentState, session, trimmed, now);
-		if (!this.contextManager.shouldCompact(messagesOf(cleared), threshold)) return cleared;
+		if (!shouldCompact(messagesOf(cleared), threshold)) return cleared;
 
 		// 压缩唯一完成的一件事：与那一轮相同的模型，带着摘要指令。它是调用方的模型——本次请求构建所
 		// 用的那一个——所以摘要携带与它所概括的对话相同的密钥、端点与窗口，而不是另起一份配置。
@@ -1659,9 +1662,9 @@ export class Agent {
 
 		let outcome;
 		try {
-			// 投影函数在这里注入（分层重构 §3）：`sessionEntryToContextMessages` 留 session 包，算法半
-			// 对 session 零 import，由编排层把两者接到一起。
-			outcome = await this.contextManager.compact(cleared, sessionEntryToContextMessages, model, summarize, signal);
+			// 投影缝（分层重构 §3——算法半对 session 零 import）随合并消失（ADR-0031）：算法半在
+			// session 包内直取 sessionEntryToContextMessages，编排层只递模型与摘要回调。
+			outcome = await compact(cleared, model, summarize, signal);
 		} catch (error) {
 			// abort 不是压缩失败：运行正在结束，会话记录 简单地保留它已有的历史。其余的值得大声说
 			// 出来，因为下一个请求可能就是溢出的那一个。
@@ -1691,7 +1694,7 @@ export class Agent {
 			firstKeptEntryId: outcome.firstKeptEntryId,
 			summarized: outcome.summarized,
 			tokensBefore: outcome.tokensBefore,
-			contextTokens: this.contextManager.estimateTokens(messagesOf(compacted)),
+			contextTokens: estimateTokens(messagesOf(compacted)),
 		});
 		return compacted;
 	}
@@ -1712,14 +1715,14 @@ export class Agent {
 		const trimmed = trimmableToolArgEntryIds(entries);
 		if (trimmed.length === 0) return entries;
 
-		const tokensBefore = this.contextManager.estimateTokens(messagesOf(entries));
+		const tokensBefore = estimateTokens(messagesOf(entries));
 		this.sessionManager.appendTrimToolCallArgs(session, trimmed, tokensBefore);
 		const view = this.contextEntries(session);
 		this.emitEvent(agentState, {
 			type: "tool_call_args_trimmed",
 			trimmed: trimmed.length,
 			tokensBefore,
-			contextTokens: this.contextManager.estimateTokens(messagesOf(view)),
+			contextTokens: estimateTokens(messagesOf(view)),
 		});
 		return view;
 	}
@@ -1741,14 +1744,14 @@ export class Agent {
 		const cleared = clearableToolResultIds(entries);
 		if (cleared.length === 0) return entries;
 
-		const tokensBefore = this.contextManager.estimateTokens(messagesOf(entries));
+		const tokensBefore = estimateTokens(messagesOf(entries));
 		this.sessionManager.appendClearToolResults(session, cleared, tokensBefore);
 		const view = this.contextEntries(session);
 		this.emitEvent(agentState, {
 			type: "tool_results_cleared",
 			cleared: cleared.length,
 			tokensBefore,
-			contextTokens: this.contextManager.estimateTokens(messagesOf(view)),
+			contextTokens: estimateTokens(messagesOf(view)),
 		});
 		return view;
 	}
@@ -3015,7 +3018,7 @@ async function executePreparedToolCall(
  * 写下——改写是对这个结果唯一会存在的版本的一次裁决，在结果诞生的那一刻作出。
  *
  * 闸门的答案是回调、不是包装方法，所以这里只剩它真正能改的那一件事：content。想约束结果的 hook
- * 自己归档全文（`archiveToolResult`、`context/spill.ts`）并把路径放进它返回的东西；写边界的兜底
+ * 自己归档全文（`archiveToolResult`、`session/spill.ts`）并把路径放进它返回的东西；写边界的兜底
  * （fanout 的 `finalizeToolResult`）仍会接住没人约束过的结果。
  */
 async function finalizeExecutedToolCall(
@@ -3238,6 +3241,10 @@ export interface OpenAgentOptions {
 	 * tool-results 归档的只写端口：写边界的兜底归档永远有处可去。
 	 */
 	toolResultsRepository: ToolResultsRepository;
+	/**
+	 * 项目指示收集的端口（@my-agent/prompt 声明，ADR-0031）：system prompt 按请求经它收 AGENTS.md。
+	 */
+	agentsMdRepository: AgentsMdRepository;
 	/**
 	 * 本会话将要读写的 会话记录，即每次调用点名的那只袋。
 	 *

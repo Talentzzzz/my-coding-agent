@@ -518,7 +518,7 @@ export function uuidv7(timestampMs?: number): string {
 }
 
 // ============================================================================
-// 会话条目族（自 session/ledger.ts 收编——context 的压缩算法要摸 entry 而不得 import session，§2.3）
+// 会话条目族（自 session/session.ts 收编——context 的压缩算法要摸 entry 而不得 import session，§2.3）
 // ============================================================================
 
 export interface SessionEntryBase {
@@ -803,7 +803,7 @@ export const DEFAULT_MODE_NAME = "默认";
  * `tools.json`，队列模式在 `sessions.json`；UI 簇（外观、目录视图）已迁往
  * 客户端自己的存储（ADR-0029）——这个类型只剩**形状**：设置面板的 wire 面（ADR-0012/0019）不因
  * 搬家而改口。而一个会话自己的选择
- * 住在它 `.json` 快照的设置半（`SessionSettings`），两者在每次读取时组合成 `Settings`
+ * 住在它 `.json` 快照的设置半（`Session.settings`），两者在每次读取时组合成 `Settings`
  * （`packages/domain/src/agent/settings.ts`），组合是派生值，这一侧从不被任何袋持有。
  */
 export interface GlobalSettings {

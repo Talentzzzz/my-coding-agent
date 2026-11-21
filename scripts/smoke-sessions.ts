@@ -28,7 +28,7 @@ import {
 	type SessionSnapshot,
 	type Session,
 } from "@my-agent/domain";
-import { HomeJsonStore, SessionFileStore, ToolResultsArchive, setRemoveGate } from "@my-agent/infra";
+import { AgentsMdStore, HomeJsonStore, SessionFileStore, ToolResultsArchive, setRemoveGate } from "@my-agent/infra";
 // removeGate 测试缝随 hold 闸迁 infra（ADR-0023 修订），从 @my-agent/infra 取——同一句包名 import
 // 在 Windows 上解析出大小写不同的盘符 URL 也不会造出第二个模块实例（infra 的缝挂实现自己的表上）。
 
@@ -248,6 +248,7 @@ const hubPorts = {
 	modelRepository: settingsDefaults,
 	toolDefaultsRepository: settingsDefaults,
 	toolResultsRepository: archive,
+	agentsMdRepository: new AgentsMdStore(),
 };
 const hub = new SessionHub({ workDirAbsPath: root, ...hubPorts });
 
@@ -537,6 +538,7 @@ try {
 			modelRepository: settingsStore,
 			toolDefaultsRepository: settingsStore,
 			toolResultsRepository: new ToolResultsArchive(),
+			agentsMdRepository: new AgentsMdStore(),
 		};
 		const known = ["read", "write", "edit", "glob", "grep", "bash"];
 		// 活会话的袋在第一条消息后作废：有文件就读，还没有就返回出生时的那只（它仍是 live 半上唯一
@@ -1084,7 +1086,7 @@ try {
 		// 设置归属重构（spec §8）：门面接缝退场，模型目录指向一个空临时 home（缺 models.json 即空目录）。
 		const emptyHome = join(root, "agent-home-empty");
 		await mkdir(emptyHome, { recursive: true });
-		const agent = createSessionAgent({ sessionRepository: sessionStore, sessionDefaultsRepository: settingsDefaults, modelRepository: new HomeJsonStore({ home: emptyHome }), toolDefaultsRepository: settingsDefaults, toolResultsRepository: archive });
+		const agent = createSessionAgent({ sessionRepository: sessionStore, sessionDefaultsRepository: settingsDefaults, modelRepository: new HomeJsonStore({ home: emptyHome }), toolDefaultsRepository: settingsDefaults, toolResultsRepository: archive, agentsMdRepository: new AgentsMdStore() });
 		const session = createSession(tmpdir(), storeRoot);
 		// The door is class-private (`hold` / `createAndPrompt` are the verbs a caller spells);
 		// this block exercises the table itself — first-come-wins, membership, the delete exit — so it
@@ -1123,6 +1125,7 @@ try {
 			modelRepository: vetoStore,
 			toolDefaultsRepository: vetoStore,
 			toolResultsRepository: archive,
+			agentsMdRepository: new AgentsMdStore(),
 		});
 
 		const running = agent.prompt(id, "删除动手时我还在流式", { selection: { model: "anthropic" } });

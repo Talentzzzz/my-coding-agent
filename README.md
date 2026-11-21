@@ -3,7 +3,7 @@
 一个在你本机、自己的桌面窗口里运行的编码 agent。pi 的一段代码作为裁剪副本收进本仓库：`packages/domain/src/agent/llm/`（来自
 [`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层——只取本项目真正调用的部分，而且它已经不是一个独立的包，先并进 core、随五模块分层迁入 domain（[ADR-0010](docs/adr/0010-llm-folded-into-core.md)、[ADR-0030](docs/adr/0030-five-module-layering.md)）。运行引擎是我们的代码：它原先是 pi 循环的副本，如今是 `packages/domain/src/agent/agent.ts` 里 `Agent` 的私有方法（先并入 core，[ADR-0007](docs/adr/0007-loop-merged-into-agent.md)；几经往返后由 [ADR-0016](docs/adr/0016-loop-is-orchestration.md) 定为编排层的私有方法），不再跟踪上游。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳也都是我们自己的。
 
-服务器按五模块分层：`app`（组合根）把 agent home 翻译成 `infra`（存储实现）注入给 `domain`（无头 agent 本体），`case`（会话应用层：`SessionHub` 与协议信封）与 `trigger`（REST + WebSocket mux 传输面）把它架到线上——见 [ADR-0030](docs/adr/0030-five-module-layering.md) 与 [docs/architecture.md](docs/architecture.md)。
+服务器按模块分层：`app`（组合根）把 agent home 翻译成 `infra`（存储实现）注入给 `domain`（无头 agent 本体）与 `prompt`（system prompt 拼装与项目指示收集，对本仓零依赖的叶子库），`case`（会话应用层：`SessionHub` 与协议信封）与 `trigger`（REST + WebSocket mux 传输面）把它架到线上——见 [ADR-0030](docs/adr/0030-five-module-layering.md)、[ADR-0031](docs/adr/0031-context-folded-into-session.md) 与 [docs/architecture.md](docs/architecture.md)。
 
 agent 跑在一个 Node 进程里，而不是渲染进程里：它持有你的 API 密钥，而它的本职就是读写文件。窗口是一个客户端——它用 REST 发送 prompt，并从一条常驻 WebSocket 通道上读取 agent 的输出，这也是为什么每一条命令同样能用 `curl` 或脚本发。[docs/architecture.md](docs/architecture.md) 是设计文档：请求流程、API 表、会话格式，以及每一块为什么在那个位置。
 
@@ -136,7 +136,7 @@ UI 里做出的变更回到各自簇的文件。每个持有者是**无属性服
 仓库声明 Node >= 22.19（类型擦除随版本稳定）；在更早的 22.x 上，任何 `node *.ts`（下面全部 smoke、`serve.ts`）都要先带上 `NODE_OPTIONS=--experimental-strip-types`。
 
 ```bash
-npm run check                  # 对五模块与 web 客户端跑 tsc，加设计 token 审计与分层守卫
+npm run check                  # 对六模块与 web 客户端跑 tsc，加设计 token 审计与分层守卫
 node scripts/smoke-tools.ts    # 工具、会话存储、压缩，不需要供应商密钥
 node scripts/smoke-sessions.ts # 会话注册表，不需要供应商密钥
 node scripts/smoke-models.ts   # 导入的模型与无模型占位，不需要密钥

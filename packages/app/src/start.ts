@@ -1,6 +1,6 @@
 import type { ChatTransport } from "@my-agent/domain";
 import { SessionHub } from "@my-agent/case";
-import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
+import { AgentsMdStore, HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 import {
 	createServer,
 	createRoutes,
@@ -123,6 +123,7 @@ export async function start(options: StartOptions): Promise<BootedServer> {
 		modelRepository: modelsHome === settingsHome ? settingsStore : new HomeJsonStore({ home: modelsHome }),
 		toolDefaultsRepository: settingsStore,
 		toolResultsRepository: new ToolResultsArchive(),
+		agentsMdRepository: new AgentsMdStore(),
 		...(options.chatTransport === undefined ? {} : { chatTransport: options.chatTransport }),
 	});
 

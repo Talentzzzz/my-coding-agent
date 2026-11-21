@@ -1,6 +1,6 @@
 // tool-results 归档的只写实现（分层重构 spec §4.4）：ToolResultsRepository 端口的唯一方法。
 // 收绝对路径、无 home 概念——归档挨着 result 所谈论的文件（工作目录之下的
-// `.my-agent/tool-results/<session id>/`），路径推导（spillPathFor）留在 context 包，这里只管
+// `.my-agent/tool-results/<session id>/`），路径推导（spillPathFor）留在 domain 的 session 包，这里只管
 // 「不存在才写 + mkdir，失败 false 回落硬截断」的机械。
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
