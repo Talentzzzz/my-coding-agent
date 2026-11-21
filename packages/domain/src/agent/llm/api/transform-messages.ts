@@ -1,6 +1,6 @@
 // 从 pi-ai（0.99.2）vendor 而来，按本仓库裁剪——裁掉了什么、为什么见 `transformMessages`。
 // 从上游重新 vendor 意味着重新应用这些裁剪。
-// @ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入 packages/core 的每次 import 仍然被
+// @ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入 packages/domain 的每次 import 仍然被
 // 完整检查。
 // @ts-nocheck
 import type { Model } from "../model.ts";

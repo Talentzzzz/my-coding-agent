@@ -3,9 +3,9 @@
 //
 // 信封住 case 而不是 domain 的理由：trigger 对 domain 盲（域词汇一律经 case 到手），而 frames.ts
 // 今天就要信封与 `UnknownSessionError`——信封必须住在 trigger 可达的最近一层。case 在此 role 下
-// 是 trigger 与 web 共用的类型网关：web 的 import 面保持单一来源（今天 `@my-agent/core/protocol`，
-// 新世界 `@my-agent/case/protocol`）。域词汇本体各归属主（session / llm / tool / agent 根），
-// 这里只转发。
+// 是 trigger 与 web 共用的类型网关：web 的 import 面保持单一来源（`@my-agent/case/protocol`，
+// 信封自 `@my-agent/core/protocol` 的旧址随步 2 迁来）。域词汇本体各归属主（session / llm / tool /
+// agent 根），这里只转发。
 import type {
 	AgentSessionEvent,
 	PendingApproval,

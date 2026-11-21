@@ -1,7 +1,9 @@
 # my-coding-agent
 
-一个在你本机、自己的桌面窗口里运行的编码 agent。pi 的一段代码作为裁剪副本收进本仓库：`packages/core/src/llm/`（来自
-[`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层——只取本项目真正调用的部分，而且它已经不是一个独立的包，并进了 core（[ADR-0010](docs/adr/0010-llm-folded-into-core.md)）。运行引擎是我们的代码：它原先是 pi 循环的副本，如今是 `packages/core/src/agent.ts` 里 `Agent` 的私有方法（先并入 core，[ADR-0007](docs/adr/0007-loop-merged-into-agent.md)；几经往返后由 [ADR-0016](docs/adr/0016-loop-is-orchestration.md) 定为编排层的私有方法），不再跟踪上游。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳也都是我们自己的。
+一个在你本机、自己的桌面窗口里运行的编码 agent。pi 的一段代码作为裁剪副本收进本仓库：`packages/domain/src/agent/llm/`（来自
+[`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai)）负责模型层——只取本项目真正调用的部分，而且它已经不是一个独立的包，先并进 core、随五模块分层迁入 domain（[ADR-0010](docs/adr/0010-llm-folded-into-core.md)、[ADR-0030](docs/adr/0030-five-module-layering.md)）。运行引擎是我们的代码：它原先是 pi 循环的副本，如今是 `packages/domain/src/agent/agent.ts` 里 `Agent` 的私有方法（先并入 core，[ADR-0007](docs/adr/0007-loop-merged-into-agent.md)；几经往返后由 [ADR-0016](docs/adr/0016-loop-is-orchestration.md) 定为编排层的私有方法），不再跟踪上游。工具、会话存储、HTTP API、窗口 UI 和 Electron 外壳也都是我们自己的。
+
+服务器按五模块分层：`app`（组合根）把 agent home 翻译成 `infra`（存储实现）注入给 `domain`（无头 agent 本体），`case`（会话应用层：`SessionHub` 与协议信封）与 `trigger`（REST + WebSocket mux 传输面）把它架到线上——见 [ADR-0030](docs/adr/0030-five-module-layering.md) 与 [docs/architecture.md](docs/architecture.md)。
 
 agent 跑在一个 Node 进程里，而不是渲染进程里：它持有你的 API 密钥，而它的本职就是读写文件。窗口是一个客户端——它用 REST 发送 prompt，并从一条常驻 WebSocket 通道上读取 agent 的输出，这也是为什么每一条命令同样能用 `curl` 或脚本发。[docs/architecture.md](docs/architecture.md) 是设计文档：请求流程、API 表、会话格式，以及每一块为什么在那个位置。
 
@@ -22,7 +24,7 @@ npm run desktop                      # 构建客户端，然后打开窗口
 
 ### 从 shell 驱动它
 
-`POST /api/sessions/{id}/messages` 在 prompt 被持久化的那一刻就回答 `202`；答案从一条常驻 WebSocket 通道上到达，而命令全都还是 REST。`node packages/server/src/main.ts --help` 会打印每一个端点，[docs/architecture.md](docs/architecture.md#api) 有那张表。
+`POST /api/sessions/{id}/messages` 在 prompt 被持久化的那一刻就回答 `202`；答案从一条常驻 WebSocket 通道上到达，而命令全都还是 REST。服务器没有 CLI：`packages/app/scripts/serve.ts` 是浏览器 dev 的薄脚本（只收 `--workDir` / `--port` / `--vite` 三个 flag），完整的端点表在 [docs/architecture.md](docs/architecture.md#api)。
 
 ```bash
 curl -X POST localhost:8080/api/sessions/$ID/messages \
@@ -35,11 +37,13 @@ node -e 'const ws=new WebSocket("ws://localhost:8080/mux");ws.onmessage=e=>conso
 
 ### 为什么用 `install-deps.ts` 而不是 `npm install`
 
-这台机器上的 npm 在取几个非常大的 registry packument（`vite`、`@types/node`）时会以 `zlib: incorrect data check` 失败。Node 自己的 HTTP 客户端处理同样的 URL 却没问题，所以 `scripts/install-deps.ts` 自己解析并解包整棵依赖树，并写出 `npm run` 需要的 `node_modules/.bin` 垫片。它会跳过 workspace 链接，所以 `node_modules/@my-agent/core` 是一个指向 `packages/core` 的 junction；如果你哪天删掉了 `node_modules`，就重建它：
+这台机器上的 npm 在取几个非常大的 registry packument（`vite`、`@types/node`）时会以 `zlib: incorrect data check` 失败。Node 自己的 HTTP 客户端处理同样的 URL 却没问题，所以 `scripts/install-deps.ts` 自己解析并解包整棵依赖树，并写出 `npm run` 需要的 `node_modules/.bin` 垫片。它会跳过 workspace 链接，所以 `node_modules/@my-agent/` 下的每个成员都是一个指向对应 `packages/<name>` 的 junction；如果你哪天删掉了 `node_modules`，就重建它们：
 
 ```powershell
 New-Item -ItemType Directory -Force -Path node_modules\@my-agent
-cmd /c mklink /J node_modules\@my-agent\core packages\core
+foreach ($p in "app","case","desktop","domain","infra","trigger","web") {
+  cmd /c mklink /J "node_modules\@my-agent\$p" "packages\$p"
+}
 ```
 
 等 npm 恢复正常后，`npm install --ignore-scripts` 就能替换这个脚本。
@@ -67,29 +71,28 @@ ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/ node packages/
 
 ## 设置
 
-设置来自**一个**文件（[ADR-0019](docs/adr/0019-settings-two-layers.md)；曾经的项目级
-`<workDir>/.my-agent/settings.json` 层已删除，磁盘上的旧文件被忽略）：
+设置按关注点分属三个文件，每簇一个、且只有一个（[ADR-0028](docs/adr/0028-settings-ownership-per-manager.md)；曾经单一的
+`~/.my-agent/settings.json` 只作迁移源：各持有者首次读取时一次性捡走自己的簇，之后旧文件被忽略，不删除不写入）：
 
-- `~/.my-agent/settings.json` —— 你在本机上的那份。
+- `~/.my-agent/tools.json` —— 工具簇：全局默认的工具集与审批映射、模式（`modes`）、bash 超时。
+- `~/.my-agent/models.json` —— 模型簇：导入的模型行、新会话打开时的默认模型（`defaultModel`）、
+  种行标记（`defaultModelSeeded`）与重试策略（`retry`）。
+- `~/.my-agent/sessions.json` —— 会话簇：steering 与 follow-up 两条队列的全局默认模式。
 
-它接受这套键：
+外观（主题、字号）不在服务端：它随 [ADR-0029](docs/adr/0029-ui-settings-move-to-client.md) 归窗口客户端自己的存储——桌面外壳经 preload 桥写 Electron userData，浏览器回落 `localStorage`——所以它跨端口、跨重开存活。`fontSize` 是整窗字号的基准，量程 10–22、默认 15：滑杆改的是基准，标题、侧栏、代码、状态行等各档从它按各自的步差派生，整窗一起动。
+
+工具簇接受这套键（`tools.json`）：
 
 ```json
 {
-  "model": "Opus/claude-opus-5",
-  "appearance": { "theme": "dark", "fontSize": 15 },
   "approval": { "write": false, "edit": true, "bash": true },
   "bash": { "defaultTimeoutMs": 120000, "maxTimeoutMs": 3600000 }
 }
 ```
 
-`model` 是一个**新**会话打开时所在的行；一段已经在进行中的对话用哪个模型，是在输入框上选的、就在消息框下面那一行，并且属于那段对话。把 `model` 留空会打开你导入的第一行。
-
 `bash` 是一条 shell 命令可以跑多久：`defaultTimeoutMs` 在该调用自己没有指定 `timeout_ms` 时生效，`maxTimeoutMs` 是任何调用的**上限**——要求更久的命令会被压到它，而这个压顶会在工具结果里说明。构建跑得久的项目，就把上限调高。
 
-UI 里做出的变更回到这份文件。`SettingManager`（`packages/core/src/setting-manager.ts`）是它唯一的读写者；它是**无属性服务**，进程里只有一份（hub 构造时建它），每次读取都是文件的一次新读——所以一次变更对每个会话的下一次读取即生效，而会话自己什么都不持有。会话此刻的有效配置（活跃工具集、有效审批、完整模型行）是 `resolveSettings` 把这份文件与该会话快照上的选择**每次现算**出来的组合，从不驻留（[ADR-0019](docs/adr/0019-settings-two-layers.md)）。
-
-`appearance` 是一项设置而不是浏览器存储，这是有意的：桌面外壳每次启动都会挑一个新端口，而 `localStorage` 是按 origin 隔离的，所以存在那里的偏好会在窗口重新打开的那一刻被忘掉。`fontSize` 是整窗字号的基准，量程 10–22、默认 15（服务端会把它夹回这个区间）：滑杆改的是基准，标题、侧栏、代码、状态行等各档从它按各自的步差派生，整窗一起动。
+UI 里做出的变更回到各自簇的文件。每个持有者是**无属性服务**、每次读取都现读自己的文件（构造收注入的存储端口——domain 只认自己声明的端口，`infra` 的 `HomeJsonStore` 一个实现满足三份同形声明，[ADR-0030](docs/adr/0030-five-module-layering.md)）——所以一次变更对每个会话的下一次读取即生效，而会话自己什么都不持有。会话此刻的有效配置（活跃工具集、有效审批、完整模型行）是 `resolveSettings` 把这些文件与该会话快照上的选择**每次现算**出来的组合，从不驻留（[ADR-0019](docs/adr/0019-settings-two-layers.md)）。
 
 ## 模型
 
@@ -118,69 +121,79 @@ UI 里做出的变更回到这份文件。`SettingManager`（`packages/core/src/
 - `contextWindow` 不是装饰：它驱动上下文计量表和压缩何时运行，所以一个错误的值就是一个关于"何时该摘要"的错误决定。
 - 密钥以**明文**存在这个文件里、在你机器上，并且永远不会被发回浏览器：`GET /api/models` 把它替换成 `hasApiKey`。一行在**每次请求**时都被重新读取，所以对其中任何字段的编辑——密钥、端点、wire id、窗口——就是下一条消息所用的东西，没有任何东西需要重新打开。
 
-设置面板的模型表单就是同一组字段——名字、模型 id、端点、密钥、上下文窗口、输出上限。设置面板的 Models 页列出存储了什么，新会话打开时的默认模型也来自那里（`settings.json` 的 `model`），服务器不再收 `--model` 一类的启动覆盖。
+设置面板的模型表单就是同一组字段——名字、模型 id、端点、密钥、上下文窗口、输出上限。设置面板的 Models 页列出存储了什么，新会话打开时的默认模型也来自那里（`models.json` 的 `defaultModel`），服务器不再收 `--model` 一类的启动覆盖。
 
-**模型列表为空时，窗口会替你种下一行起点**：`deepseek-flash`，DeepSeek 的 Anthropic 兼容端点，上下文 1,000,000、输出 384,000、**密钥留空**——应用从不附带凭据，填 key 是只有你能做的事。窗口的默认思考强度是 `high`，那是**客户端**的默认值而不是这一行的字段。它走的是普通的 `PUT /api/models`，所以这一行和你手打的一模一样，每个字段都能改；它也不是目录，只是一行。种成功之后 `settings.json` 会记下 `defaultModelSeeded: true`，**此后删掉这一行就是最终决定**：下次启动列表仍然是空的。想让它再出现一次，把这个字段改成 `false`（或删掉它）再启动。
+**模型列表为空时，窗口会替你种下一行起点**：`deepseek-flash`，DeepSeek 的 Anthropic 兼容端点，上下文 1,000,000、输出 384,000、**密钥留空**——应用从不附带凭据，填 key 是只有你能做的事。窗口的默认思考强度是 `high`，那是**客户端**的默认值而不是这一行的字段。它走的是普通的 `PUT /api/models`，所以这一行和你手打的一模一样，每个字段都能改；它也不是目录，只是一行。种成功之后 `models.json` 会记下 `defaultModelSeeded: true`，**此后删掉这一行就是最终决定**：下次启动列表仍然是空的。想让它再出现一次，把这个字段改成 `false`（或删掉它）再启动。
 
 **一行都没有时应用照样能打开**：种不下那行起点（或你把它删了）之后，会话跑在一个占位模型上，它唯一的职责就是以一句提示你去添加一个模型的话失败，而它的名字 `my-agent:unconfigured` 是**保留**的——任何行都不得占用它，因为名字就是一行身份的全部。
 
 一段对话用哪个模型，是在输入框上选的、就在消息框旁边，连同它的 thinking level：两者是**一个座位**，因为 level 属于模型，而移到另一行会落在那一行自己的默认值上。关于这个座位的一切在**带着它发出消息之前**都不会抵达服务器——一个被人指向过、却从未用它发出过消息的模型什么也没回答，所以它不在会话里——而这个选择由使用它的那次请求记录。
 
-旧的 `models.json` 按它写下的样子被读取：一行的 `label` 成为它的 `name`，所以升级保住的是**你选的名字**，而不是你从没见过的 slug。用那些 slug 构建的引用**不能存活**——`settings.json` 里存储的默认值、以及会话记录过的任何模型——所以一个记录过此类模型的会话打开时没有模型，会话里提示去挑一个，和删除一行产生的句子一样。这正是"一个字符串兼两职"的刻意代价：对于那些用过某一行的会话，**改名和删除它是一件事**；换来的，是模型清单永远不会显示一个没人打过的 slug。
+旧的 `models.json` 按它写下的样子被读取：一行的 `label` 成为它的 `name`，所以升级保住的是**你选的名字**，而不是你从没见过的 slug。用那些 slug 构建的引用**不能存活**——`models.json` 里存储的默认模型、以及会话记录过的任何模型——所以一个记录过此类模型的会话打开时没有模型，会话里提示去挑一个，和删除一行产生的句子一样。这正是"一个字符串兼两职"的刻意代价：对于那些用过某一行的会话，**改名和删除它是一件事**；换来的，是模型清单永远不会显示一个没人打过的 slug。
 
 ## 验证一次构建
 
+仓库声明 Node >= 22.19（类型擦除随版本稳定）；在更早的 22.x 上，任何 `node *.ts`（下面全部 smoke、`serve.ts`）都要先带上 `NODE_OPTIONS=--experimental-strip-types`。
+
 ```bash
-npm run check                  # 对 core、server 和客户端跑 tsc，加设计 token 审计
-npm run smoke:boot             # 进程内服务器启动、落地会话、以及关闭；自带封闭的 agent home，不读机器上的用户配置
-node scripts/smoke-desktop-close.ts # 外壳退出顺序：先关服务器再走，含预算与二次退出；不需要密钥
-node scripts/smoke-desktop-observability.ts # 外壳的失败面：子进程与渲染进程死亡、未捕获异常、启动超时；不需要密钥
+npm run check                  # 对五模块与 web 客户端跑 tsc，加设计 token 审计与分层守卫
 node scripts/smoke-tools.ts    # 工具、会话存储、压缩，不需要供应商密钥
 node scripts/smoke-sessions.ts # 会话注册表，不需要供应商密钥
+node scripts/smoke-models.ts   # 导入的模型与无模型占位，不需要密钥
+node scripts/smoke-model-manager.ts # 模型目录对真实 models.json 的往返：读时迁移、写前重读、未知键保留；不需要密钥
+node scripts/smoke-model-settings.ts # 模型簇（行、默认模型、retry）的读写与按键迁移；不需要密钥
+node scripts/smoke-default-model.ts # 内置默认模型：常量、服务端收下的形状、先存行后落标记；不需要密钥
+node scripts/smoke-settings.ts # resolveSettings 组合视图：模式指针 → 工具集与审批、记录的选择 → 默认行；不需要密钥
+node scripts/smoke-tool-settings.ts # 工具簇（tools.json）：读时迁移、写前重读、只动点名字段；不需要密钥
+node scripts/smoke-session-settings.ts # 会话簇（sessions.json）：两条队列的全局默认模式与读时迁移；不需要密钥
+node scripts/smoke-session.ts  # 流式、排队、重试、压缩、委派；不需要密钥
+node scripts/smoke-replay.ts   # 从快照重开的会话仍显示完整的工具过程：调用与结果，不只是消息；不需要密钥
 node scripts/smoke-projection.ts # 概况投影与协议信封，不需要供应商密钥
 node scripts/smoke-subscribe.ts # 订阅的帧面：baseline 与增量、恰好一次的失败、end 的次序、断线后不再造帧；不需要密钥
+node scripts/smoke-stream.ts   # 流的生命周期：观看决定哪些帧流到窗口、谁在改变会话被谁记下；不需要密钥
+node scripts/smoke-mux.ts      # wire 表面：信封、分道、上行容错、连接级载荷；不需要密钥
 node scripts/smoke-mux-client.ts # 客户端通道：退避、判活、按引用重放、end 与基线；不需要密钥
 node scripts/smoke-mux-live.ts  # 真服务器 + 真 WebSocket 跑生产的 MuxClient；不需要密钥
-node scripts/smoke-mux.ts       # wire 表面：信封、分道、上行容错、连接级载荷；不需要密钥
 node scripts/smoke-liveness.ts  # 客户端判死与重连：生产 MuxClient + 一条可故障中继；不需要密钥
 node scripts/smoke-backpressure.ts # 写侧停滞策略：注入假 socket，队列预算与截止时间；不需要密钥
+node scripts/smoke-frame.ts    # 一帧只画一次：多次请求合并成一帧、回调里再排的是下一帧、取消的帧不跑；不需要密钥
 node scripts/smoke-sidebar.ts   # 侧边栏原地改行、按 modified 重排、分页与表头收起；不需要密钥
-node scripts/smoke-settings.ts  # 设置真实落盘再重读：收展状态跟着 appearance 序列化恢复；不需要密钥
 node scripts/smoke-modes.ts    # 设置面板的模式页、输入框的模式座位与菜单；不需要密钥
 node scripts/smoke-session-view.ts # 会话视图的分批绘制与流式代价：两条路画出同一个、流式一帧只碰尾部、脚注跟着轮与运行走、中途来的帧说了算；不需要密钥
-node scripts/smoke-frame.ts    # 一帧只画一次：多次请求合并成一帧、回调里再排的是下一帧、取消的帧不跑；不需要密钥
 node scripts/smoke-branch.ts   # 分支页：一条线上一张卡（任意长的消息都是同一固定高度、单行截断、没有悬停提示）、走法挂在下面一行、走法自己的岔照样画、画布能拖能缩、两个出口两种落地；不需要密钥
-node scripts/smoke-session.ts  # 流式、排队、重试、压缩、委派；不需要密钥
-node scripts/smoke-models.ts   # 导入的模型与无模型占位，不需要密钥
-node scripts/smoke-default-model.ts # 内置默认模型：常量、服务端收下的形状、先存行后落标记；不需要密钥
 node scripts/smoke-model-form.ts # 设置 → 模型表单的八个标签；不需要密钥
 node scripts/smoke-approval.ts # 经 API 与 wire 的审批往返、宽限与重启继承，不需要密钥
 node scripts/smoke-approval-endpoint.ts # 审批端点契约：409、答案表与恢复运行，不需要密钥
+node scripts/smoke-approval-queue.ts # 停在审批上的运行横跨的队列：恢复 run 在取走点排干、遗弃清扫丢弃；不需要密钥
 node scripts/smoke-approval-recovery.ts # 恢复机器：grant 续跑、deny 合成、孤儿收尾、恢复中 abort，不需要密钥
-npm run start &                # API smoke 测试需要一个正在跑的服务器
-MY_AGENT_URL=http://127.0.0.1:8080 node scripts/smoke-api.ts
+npm run smoke:boot             # 进程内服务器启动、落地会话、以及关闭；自带封闭的 agent home，不读机器上的用户配置
+node scripts/smoke-desktop-close.ts # 外壳退出顺序：先关服务器再走，含预算与二次退出；不需要密钥
+node scripts/smoke-desktop-observability.ts # 外壳的失败面：子进程与渲染进程死亡、未捕获异常、启动超时；不需要密钥
 ```
 
-那条 API smoke 是唯一**不自带服务器**的一条：它对着已经在跑的那台说话，所以它会写 `models.json`
-与它出生的会话——想让它别碰机器自己的 agent home，就先把那台服务器的 `MY_AGENT_HOME` 指向临时
-目录（脚本头部记着同一件事）。
+`smoke-api` 是唯一**不自带服务器**的一条：先在临时 agent home 上起一台活服务器，`MY_AGENT_URL` 指过去，跑完杀掉。`MY_AGENT_HOME` 指向临时目录，所以它会写的 `models.json` 与它出生的会话都落在那里，不碰机器自己的 agent home：
+
+```bash
+MY_AGENT_HOME=$(mktemp -d) node packages/app/scripts/serve.ts --workDir . --port 8080 &
+MY_AGENT_URL=http://127.0.0.1:8080 node scripts/smoke-api.ts
+kill %1
+```
 
 要在没有任何供应商密钥的情况下测试一个会话，用 `scripts/fake-transport.ts` 里的脚本化传输层驱动它：
 
 ```ts
 import { createFakeTransport, fakeAssistantMessage, fakeToolCall } from "./scripts/fake-transport.ts";
-import { createSession, inMemorySettingManager } from "@my-agent/core";
-import type { ChatTransport, ModelConfig } from "@my-agent/core";
+import { createSession, openAgent, createToolManager, SessionManager, type ChatTransport, type ModelConfig } from "@my-agent/domain";
+import { HomeJsonStore, SessionFileStore, ToolResultsArchive } from "@my-agent/infra";
 
 const fake = createFakeTransport();
 fake.setResponses([fakeAssistantMessage("hello"), fakeToolCall("read", { path: "a.txt" }), fakeAssistantMessage("done")]);
+const api: ChatTransport = fake.chatTransport;
 
 const rows: ModelConfig[] = [{ name: "test", baseUrl: "http://127.0.0.1:1/v1", apiKey: "unused", id: "test-model", contextWindow: 200_000, maxTokens: 8_192 }];
-const settings = inMemorySettingManager({ approval: { read: true } }, rows);
-const api: ChatTransport = fake.api;
 ```
 
-每次供应商调用一个响应、按顺序，所以一次运行可以按需流式、调工具、失败或卡住。在一个临时目录上、用 `openAgent({ workDirAbsPath, session, settings, api? })` 构建会话——`session` 由 `createSession(root)` 交出，`settings` 是一只内存 manager（设置与模型行共用的门，`inMemorySettingManager(settings, rows)`），就像 `scripts/smoke-tools.ts` 那样，并抄走它的**两个坑**：先 `setSessionsDir(storeRoot)` 把会话 store 指到一个临时目录、`finally` 里把临时目录和 store 一起删掉，否则每次运行都会把会话文件写进本机真正的 store；以及除非这个测试就是在测持久化，否则别用缺省的文件版 manager。
+每次供应商调用一个响应、按顺序，所以一次运行可以按需流式、调工具、失败或卡住。在一个临时目录上构建会话——`session` 由 `createSession(workDir, storeDir)` 交出，存储走自造的 infra 实现注入给 `openAgent`：`sessionRepository` 是一只指向临时 store 的 `SessionFileStore`，三份设置端口由同一只 `HomeJsonStore({ home: 临时 home })` 满足（模型行先经 `ModelManager.replaceRows(rows)` 种上）——就像 `scripts/smoke-session.ts` 的 `openSession()` 那样，并抄走它的**坑**：`finally` 里把临时目录和 store 一起删掉，端口永远指向临时 home，否则每次运行都会把会话文件写进本机真正的 agent home。
 
 看一眼真窗口里客户端到底构建了什么（而不是只看一张图），跑 `packages/desktop/scripts/inspect-app`：它进程内启动服务器、加载真客户端，dump 出侧栏、标题、状态行与设置面板的文本，并演练一次会话切换。`--screenshot` 那条路截不到它——见上面的说明。
 

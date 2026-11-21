@@ -1,5 +1,5 @@
 // 从 pi-ai（0.99.2）vendor 而来。@ts-nocheck 让仓库根目录更严格的配置放过本文件，而进入
-// packages/core 的每次 import 仍然被完整检查。
+// packages/domain 的每次 import 仍然被完整检查。
 //
 // 分层重构步 4（§2.3）之后本文件只装传输机械：`Context`、`ChatTransport`、流选项族、事件协议与
 // 模型分发形状。消息词汇、`Tool`、模型事实族被其他子包消费，已收编进 agent 根 `types.ts`（共享
